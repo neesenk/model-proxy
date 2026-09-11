@@ -20,12 +20,16 @@ import {
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
   verdictBadge, modelCapMatrix, providerFrozen, providerNames, cacheHitRate,
   settingsDiff, settingsRestartKeys, TOKEN_RANGES, tokensRangeQuery, tokenRangeLabel,
-  tokenRangeTriggerLabel, parseLocalDate, WEEKDAYS, monthTitle, calendarMonthGrid,
-  twoMonthWindow, shiftMonth, ymd, isFutureDay, rangePick,
-  parseSSE, isSSE, prettyJSON, highlightJSON, splitLinesByBudget, linkedModels,
-  analyticsChartSeries, liveSessionSummary,
+  tokenRangeTriggerLabel, parseLocalDate, tokenRangeBounds, tokenCustomBounds,
+  WEEKDAYS, monthTitle, calendarMonthGrid, twoMonthWindow, shiftMonth, ymd, isFutureDay, rangePick,
+  parseSSE, isSSE, prettyJSON, formatJSONLoose, highlightJSON, splitLinesByBudget, linkedModels,
+  sessionsForAgent, linkedAgents,
+  analyticsChartSeries, analyticsTableRows, ANALYTICS_METRICS, pctDelta,
+  analyticsGranularity, analyticsGranOptions, analyticsValueText, modelHealthFromSeries, fmtCompact, liveSessionSummary,
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
-  detailFetchState,
+  detailFetchState, quotaErrKind, accountUsageState,
+  pathStrengthFromAction, securityLegendHTML, securityExplainHTML,
+  POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
 } from './pure.js';
 
 function el(tag, opts = {}) {
@@ -340,9 +344,10 @@ function activateTabSilent(name) {
 
 // ---------- Requests tab (request-log query UI) ----------
 
-// Per-tab filter state (model/provider substring + errors-only + shadow tri-state).
+// Per-tab filter state (model/provider substring, exact agent/session, plus
+// errors-only and the shadow tri-state).
 // Persists across re-renders within a session so a refresh keeps the view.
-let requestsFilter = { session: '', model: '', provider: '', errors: false, shadow: '' };
+let requestsFilter = { session: '', agent: '', model: '', provider: '', errors: false, shadow: '' };
 
 // renderRequestsTab builds the request-log query view: a filter row + a table of
 // metadata-only summaries fetched from /api/requests, with click-to-expand rows
@@ -354,6 +359,7 @@ async function renderRequestsTab() {
   resetCombos();
   panel.innerHTML = `<div class="card"><div class="card-body">
     <div class="req-controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+      <select id="req-agent" class="req-input" title="filter by client agent"><option value="">all agents</option></select>
       <select id="req-session" class="req-input" title="filter by client session"><option value="">all sessions</option></select>
       <span class="combo"><input id="req-provider" placeholder="all providers" value="${esc(requestsFilter.provider)}" class="req-input"/></span>
       <span class="combo"><input id="req-model" placeholder="all models" value="${esc(requestsFilter.model)}" class="req-input"/></span>
@@ -373,16 +379,36 @@ async function renderRequestsTab() {
   // (so the session summary can render once the aggregate arrives).
   const combos = {
     providerOptions: [], modelOptions: [],
-    facetState: { providerModels: {} },
+    facetState: { providerModels: {}, agents: [] },
     sessions: [], lastRecords: [],
   };
   const refresh = () => {
+    requestsFilter.agent = document.getElementById('req-agent').value;
     requestsFilter.session = document.getElementById('req-session').value;
     requestsFilter.provider = document.getElementById('req-provider').value.trim();
     requestsFilter.model = document.getElementById('req-model').value.trim();
     requestsFilter.errors = document.getElementById('req-errors').checked;
     requestsFilter.shadow = document.getElementById('req-shadow').value;
     loadRequests(combos);
+  };
+  // Agent and session are linked both ways: picking an agent narrows the
+  // session list to that agent's sessions, and picking a session narrows the
+  // agent list to the agents seen on it (normally pinning a single one). A
+  // selection the other dimension no longer offers is cleared rather than
+  // silently ANDed into an empty result.
+  const onAgentSelect = () => {
+    requestsFilter.agent = document.getElementById('req-agent').value;
+    const allowed = sessionsForAgent(requestsFilter.agent, combos.sessions).map((s) => s.session_id);
+    if (requestsFilter.session && !allowed.includes(requestsFilter.session)) requestsFilter.session = '';
+    renderRequestSelectors(combos);
+    refresh();
+  };
+  const onSessionSelect = () => {
+    requestsFilter.session = document.getElementById('req-session').value;
+    const allowed = linkedAgents(requestsFilter.session, combos.sessions, combos.facetState.agents);
+    if (requestsFilter.agent && !allowed.includes(requestsFilter.agent)) requestsFilter.agent = '';
+    renderRequestSelectors(combos);
+    refresh();
   };
   const onProviderSelect = () => {
     const provider = document.getElementById('req-provider').value.trim();
@@ -394,28 +420,55 @@ async function renderRequestsTab() {
   };
   document.getElementById('req-refresh').onclick = refresh;
   document.getElementById('req-shadow').onchange = refresh;
-  document.getElementById('req-session').onchange = refresh;
+  document.getElementById('req-agent').onchange = onAgentSelect;
+  document.getElementById('req-session').onchange = onSessionSelect;
   // The checkbox applies immediately too — every filter control (session,
   // combos, shadow select, errors only) has the same on-change behavior.
   document.getElementById('req-errors').onchange = refresh;
   attachCombo(document.getElementById('req-provider'), combos.providerOptions, onProviderSelect);
   attachCombo(document.getElementById('req-model'), combos.modelOptions, refresh);
+  // Paint the retained agent/session selections into the freshly rendered
+  // (option-less) selects BEFORE the first fetch: refresh() reads the filter
+  // back out of the DOM, so an empty select would otherwise clear a filter
+  // that survived the re-render.
+  renderRequestSelectors(combos);
   loadRequests(combos);
-  // Session dropdown options come from the persisted aggregate (request logging
-  // may be off → empty list, select stays "all sessions"). Fetched after the
-  // first load so the table renders immediately; the summary re-renders once
-  // the aggregate for a persisted selection is available.
+  // Agent/session dropdown options come from the log facets and the persisted
+  // aggregate (request logging may be off → empty lists, selects stay "all
+  // agents"/"all sessions"). Fetched after the first load so the table renders
+  // immediately; the summary re-renders once the aggregate for a persisted
+  // selection is available.
   apiGet('/api/sessions?limit=200').then((resp) => {
     combos.sessions = (resp && resp.sessions) || [];
-    const sel = document.getElementById('req-session');
-    if (!sel) return;
-    const ids = combos.sessions.map((s) => s.session_id).filter(Boolean);
-    if (requestsFilter.session && !ids.includes(requestsFilter.session)) ids.unshift(requestsFilter.session);
-    sel.innerHTML = '<option value="">all sessions</option>' +
-      ids.map((id) => `<option value="${esc(id)}">${esc(liveSessionLabel(id))}</option>`).join('');
-    sel.value = requestsFilter.session;
+    renderRequestSelectors(combos);
     renderRequestsSessionSummary(combos);
   }).catch(() => { /* request logging off / unavailable */ });
+}
+
+// renderRequestSelectors repaints the linked agent and session dropdowns from
+// the current selection: the agent options come from the log-wide agent facet
+// narrowed by the selected session, the session options from the aggregate
+// narrowed by the selected agent. A still-selected value that the aggregate
+// does not know (a session aged out of /api/sessions, an agent whose records
+// aged out of the facet window) is kept as an option so the active filter
+// stays visible and reversible.
+function renderRequestSelectors(combos) {
+  const agentSel = document.getElementById('req-agent');
+  const sessionSel = document.getElementById('req-session');
+  if (agentSel) {
+    const agents = linkedAgents(requestsFilter.session, combos.sessions, combos.facetState.agents);
+    if (requestsFilter.agent && !agents.includes(requestsFilter.agent)) agents.unshift(requestsFilter.agent);
+    agentSel.innerHTML = '<option value="">all agents</option>' +
+      agents.map((name) => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
+    agentSel.value = requestsFilter.agent;
+  }
+  if (sessionSel) {
+    const ids = sessionsForAgent(requestsFilter.agent, combos.sessions).map((s) => s.session_id).filter(Boolean);
+    if (requestsFilter.session && !ids.includes(requestsFilter.session)) ids.unshift(requestsFilter.session);
+    sessionSel.innerHTML = '<option value="">all sessions</option>' +
+      ids.map((id) => `<option value="${esc(id)}">${esc(liveSessionLabel(id))}</option>`).join('');
+    sessionSel.value = requestsFilter.session;
+  }
 }
 
 // comboInstances tracks live comboboxes so one set of global listeners can
@@ -460,6 +513,7 @@ function attachCombo(input, options, onSelect) {
   const menu = document.createElement('div');
   menu.className = 'combo-menu';
   menu.setAttribute('role', 'listbox');
+  menu.setAttribute('data-popup', ''); // the auto-refresh gate looks for this
   menu.hidden = true;
   document.body.appendChild(menu);
   let active = -1;
@@ -544,20 +598,149 @@ function positionCombo(input, menu) {
   menu.style.minWidth = `${rect.width}px`;
 }
 
-// syncRequestFacets updates the two dropdowns from the response's data-driven
-// facets (distinct providers/models observed in the log window, NOT the config
-// catalog). The model list narrows to the selected provider via the facet's
-// provider→models map.
+// ===========================================================================
+// AUTO-REFRESH INTERACTION GATE (framework)
+// ===========================================================================
+//
+// Any timer- or event-driven re-render that wipes a panel's DOM must first
+// consult the gate: if the user is interacting inside that panel — an open
+// popover/dropdown/calendar (POPUP_OPEN_SEL: anything carrying `data-popup`
+// that isn't `hidden`, plus combobox menus attached to document.body), focus
+// on an editable control (typing, an open native <select> popup, a datalist
+// suggestion popup — the control keeps focus while those are open), or an
+// active text selection (copying log lines) — the refresh is deferred, not
+// dropped: a hold watcher re-checks ~400ms after every interaction change
+// and fires the pending refresh as soon as the user is done.
+//
+// Two checkpoints share this gate so a fetch that was already in flight
+// when the interaction started cannot clobber it either:
+//   1. tick time  — the interval callback skips (and arms the watcher);
+//   2. commit time — a background render re-checks right before mutating
+//      DOM and defers itself if an interaction began mid-fetch.
+// User-initiated renders (filter clicks, mutations, section switches)
+// bypass the gate: those close the popups themselves before re-rendering.
+// Adding a new auto-refresh surface = route its tick AND its background
+// render through deferAutoRefresh; adding a new popup = give it `data-popup`
+// + the `hidden` attribute. Nothing else.
+
+// focusInInteractive reports whether focus sits on an editable control
+// inside rootEl. Buttons and links are deliberately excluded: clicking them
+// commits instantly and must not stall background refreshes.
+function focusInInteractive(rootEl) {
+  const ae = document.activeElement;
+  if (!rootEl || !ae || ae === document.body || ae === document.documentElement) return false;
+  if (!rootEl.contains(ae)) return false;
+  return ae.matches(INTERACTIVE_CONTROL_SEL) || !!ae.closest(INTERACTIVE_CONTROL_SEL);
+}
+
+// textSelectionIn reports whether a non-collapsed selection (drag-selected
+// text, e.g. log lines being copied) starts inside rootEl.
+function textSelectionIn(rootEl) {
+  const sel = window.getSelection && window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.anchorNode) return false;
+  return rootEl.contains(sel.anchorNode);
+}
+
+// comboMenuOpenIn reports whether one of the body-attached combobox menus
+// (their inputs live inside rootEl, the floating menu does not) is open.
+function comboMenuOpenIn(rootEl) {
+  for (const combo of comboInstances) {
+    if (!combo.menu.hidden && rootEl.contains(combo.input)) return true;
+  }
+  return false;
+}
+
+// autoRefreshBlocked returns WHY a background re-render of rootEl must wait
+// ('popup' | 'focus' | 'selection'), or null when it may proceed.
+function autoRefreshBlocked(rootEl) {
+  if (!rootEl || !rootEl.isConnected) return null;
+  return refreshHoldReason({
+    openPopup: !!rootEl.querySelector(POPUP_OPEN_SEL) || comboMenuOpenIn(rootEl),
+    focusInteractive: focusInInteractive(rootEl),
+    selection: textSelectionIn(rootEl),
+  });
+}
+
+// holdWatchers maps a panel element to its pending refresh (one per panel —
+// repeated ticks during one hold just replace the pending callback).
+const holdWatchers = new Map();
+const HOLD_POLL_MS = 400;
+
+// deferAutoRefresh is the gate entry point: when rootEl is interaction-held
+// it parks `fire` on the panel's hold watcher (polling until the hold
+// releases, then firing once) and returns true. Returns false when the
+// refresh may run now. A detached panel cancels its watcher without firing.
+function deferAutoRefresh(rootEl, fire) {
+  if (!autoRefreshBlocked(rootEl)) return false;
+  const existing = holdWatchers.get(rootEl);
+  if (existing) {
+    existing.fire = fire;
+    return true;
+  }
+  const watcher = { fire, timer: 0 };
+  watcher.timer = setInterval(() => {
+    if (!rootEl.isConnected) {
+      clearInterval(watcher.timer);
+      holdWatchers.delete(rootEl);
+      return;
+    }
+    if (autoRefreshBlocked(rootEl)) return;
+    clearInterval(watcher.timer);
+    holdWatchers.delete(rootEl);
+    watcher.fire();
+  }, HOLD_POLL_MS);
+  holdWatchers.set(rootEl, watcher);
+  return true;
+}
+
+// cancelAutoRefreshHold drops a panel's pending refresh (tab switch, timer
+// teardown) without firing it.
+function cancelAutoRefreshHold(rootEl) {
+  const watcher = holdWatchers.get(rootEl);
+  if (watcher) {
+    clearInterval(watcher.timer);
+    holdWatchers.delete(rootEl);
+  }
+}
+
+// setRefreshError is the shared "background refresh failed, old data kept"
+// banner: a failed auto-refresh must never overwrite the last successfully
+// rendered content — it reports through this banner (a direct child of the
+// panel, above the layout) and the next successful refresh clears it
+// (text=null removes it). Banner text comes from pure.js staleDataText.
+function setRefreshError(panel, text) {
+  if (!panel) return;
+  let el = panel.querySelector(':scope > .refresh-err');
+  if (text == null) {
+    if (el) el.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'msg err refresh-err';
+    panel.prepend(el);
+  }
+  el.textContent = text;
+}
+
+// syncRequestFacets updates the filter dropdowns from the response's
+// data-driven facets (distinct providers/models/agents observed in the log
+// window, NOT the config catalog — agents are never configured, so the log is
+// their only source). The model list narrows to the selected provider via the
+// facet's provider→models map, and the agent list is repainted (linked to the
+// selected session) because the facets arrive after the first render.
 function syncRequestFacets(facets, combos) {
   if (!combos) return;
   const data = facets || {};
   combos.facetState.providerModels = data.provider_models || {};
+  combos.facetState.agents = data.agents || [];
   const providers = data.providers || [];
   combos.providerOptions.splice(0, combos.providerOptions.length, ...providers);
   const providerInput = document.getElementById('req-provider');
   const provider = providerInput ? providerInput.value.trim() : '';
   const models = linkedModels(provider, combos.facetState.providerModels, {});
   combos.modelOptions.splice(0, combos.modelOptions.length, ...models);
+  renderRequestSelectors(combos);
 }
 
 // hideRequestsSessionSummary clears the session aggregate strip (request
@@ -591,6 +774,7 @@ async function loadRequests(combos) {
   }
   const q = new URLSearchParams();
   if (requestsFilter.session) q.set('session', requestsFilter.session);
+  if (requestsFilter.agent) q.set('agent', requestsFilter.agent);
   if (requestsFilter.model) q.set('model', requestsFilter.model);
   if (requestsFilter.provider) q.set('provider', requestsFilter.provider);
   if (requestsFilter.errors) q.set('errors', '1');
@@ -625,6 +809,7 @@ async function loadRequests(combos) {
   for (const r of recs) {
     rows += `<tr class="req-row" data-id="${esc(r.request_id)}">
       <td class="mono">${esc(fmtTime(r.ts))}</td>
+      <td class="mono">${esc(r.agent || '—')}</td>
       <td class="num ${r.status >= 400 ? 'err' : ''}">${r.status}</td>
       <td>${esc(r.exposed || r.called_model)}</td>
       <td class="mono">${esc(r.provider)}${r.shadow ? ' <span class="badge muted">shadow</span>' : ''}</td>
@@ -634,7 +819,7 @@ async function loadRequests(combos) {
     </tr>`;
   }
   if (tbl) tbl.innerHTML = `<table class="table">
-    <thead><tr><th>time</th><th>status</th><th>model</th><th>provider</th>
+    <thead><tr><th>time</th><th>agent</th><th>status</th><th>model</th><th>provider</th>
     <th class="num">ms</th><th class="num">req bytes</th><th class="num">resp bytes</th></tr></thead>
     <tbody>${rows}</tbody></table>`;
   document.querySelectorAll('.req-row').forEach((tr) => {
@@ -688,7 +873,7 @@ async function toggleRequestDetail(tr) {
   tr.classList.add('req-open');
   const row = document.createElement('tr');
   row.className = 'req-detail-row';
-  row.innerHTML = '<td colspan="7"><span class="hint">loading…</span></td>';
+  row.innerHTML = '<td colspan="8"><span class="hint">loading…</span></td>';
   tr.insertAdjacentElement('afterend', row);
   const cached = requestsDetailCache.get(id);
   if (cached) {
@@ -862,6 +1047,12 @@ function capturedBodyView(text, contentType, kind) {
     const highlight = pretty.length <= BODY_HIGHLIGHT_MAX;
     return { label: 'JSON', html: chunkedBodyHTML(pretty, highlight ? jsonLinesHTML : plainLinesHTML, highlight ? 'code-json' : '') };
   }
+  // Bodies cut mid-capture (request_log max_body_bytes) fail strict JSON.parse;
+  // re-indent the valid prefix structurally so they stay readable.
+  const loose = formatJSONLoose(text);
+  if (loose !== null) {
+    return { label: 'JSON · partial', html: chunkedBodyHTML(loose, plainLinesHTML, '') };
+  }
   return { label: 'text', html: bodyLinesHTML(text) };
 }
 
@@ -909,6 +1100,7 @@ async function renderSecurityTab() {
       </select>
       <button id="sec-refresh" class="btn">Refresh</button>
     </div>
+    ${securityLegendHTML()}
     <div id="sec-table"></div>
   </div></div>`;
   const refresh = () => {
@@ -949,21 +1141,63 @@ async function loadSecurity() {
   }
   const kindBadge = { secret: 'warn', path: '', drift: 'muted' };
   let rows = '';
-  for (const r of recs) {
+  for (let i = 0; i < recs.length; i++) {
+    const r = recs[i];
+    const strength = r.kind === 'path' ? pathStrengthFromAction(r.action) : '';
+    const strengthBadge = strength ? ` <span class="badge ${strength === 'strong' ? 'warn' : 'muted'}">${strength}</span>` : '';
+    const analyzable = r.request_id && (r.kind === 'secret' || r.kind === 'path');
     rows += `<tr>
       <td class="mono">${esc(fmtMs(r.ts))}</td>
       <td><span class="badge ${kindBadge[r.kind] || ''}">${esc(r.kind)}</span></td>
       <td class="mono">${esc(r.agent || '—')}</td>
       <td class="mono">${esc(r.exposed || '—')}</td>
       <td class="mono">${esc((r.names || []).join(', ') || '—')}</td>
-      <td>${esc(r.action || '—')}</td>
+      <td>${esc(r.action || '—')}${strengthBadge}</td>
       <td class="subdue">${esc(r.detail || '')}</td>
+      <td>${analyzable ? `<button class="btn sec-analyze" data-sec-i="${i}">analyze</button>` : '—'}</td>
     </tr>`;
   }
-  if (tbl) tbl.innerHTML = skipped + `<table class="table">
+  if (tbl) {
+    tbl.innerHTML = skipped + `<table class="table">
     <thead><tr><th>time</th><th>kind</th><th>agent</th><th>route</th>
-    <th>names</th><th>action</th><th>detail</th></tr></thead>
+    <th>names</th><th>action</th><th>detail</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table>`;
+    tbl.querySelectorAll('.sec-analyze').forEach((btn) => {
+      btn.onclick = () => analyzeSecurityHit(btn, recs[Number(btn.dataset.secI)]);
+    });
+  }
+}
+
+// analyzeSecurityHit toggles the inline analysis row under an audit record:
+// on expand it fetches /api/security/explain ON DEMAND (never prefetched) and
+// renders located, highlighted match snippets; a second click collapses.
+async function analyzeSecurityHit(btn, rec) {
+  const tr = btn.closest('tr');
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains('sec-detail')) {
+    next.remove();
+    return;
+  }
+  const detailTr = document.createElement('tr');
+  detailTr.className = 'sec-detail';
+  const td = document.createElement('td');
+  td.colSpan = 8;
+  td.innerHTML = '<span class="hint">analyzing…</span>';
+  detailTr.appendChild(td);
+  tr.after(detailTr);
+  const q = new URLSearchParams({
+    request_id: rec.request_id,
+    kind: rec.kind,
+    name: (rec.names || []).join(','),
+  });
+  try {
+    const resp = await apiGet('/api/security/explain?' + q.toString());
+    // The row may have been re-rendered (Refresh) while the fetch flew.
+    if (!td.isConnected) return;
+    td.innerHTML = securityExplainHTML(resp);
+  } catch (e) {
+    if (td.isConnected) td.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+  }
 }
 
 // ---------- Live monitor (Status → Live section, SSE /api/events) ----------
@@ -972,7 +1206,6 @@ let liveES = null;       // the EventSource for /api/events (null when not conne
 let liveActive = false;  // the section's card is mounted and connected
 let liveRows = [];       // newest-first ring of merged request rows (capped)
 let liveByReq = {};      // request_id -> row object (while in the ring)
-let liveOpenIds = new Set();     // request_ids whose detail row is expanded
 let liveDetailState = new Map(); // request_id -> {loading, error} (records live in requestsDetailCache)
 let livePendingGuards = new Map(); // request_id -> [{ts, type, detail}] for hits that arrived before start
 let liveEventSeq = 0;    // synthetic key counter for standalone event-only rows
@@ -987,24 +1220,23 @@ let liveSessionAgg = null;    // persisted SessionSummary for the selected sessi
 let liveSessionList = [];     // recent SessionSummary list (dropdown options)
 let liveSessionLoading = false;
 let liveSessionError = '';
-const liveSessionOpenIds = new Set();
 let liveSessionOptionsKey = '';
 
 // renderLiveCard mounts the live request monitor into the Status Live section
 // and opens the SSE connection (closed by stopLiveEvents when the section or
 // tab is left). Rows are merged per request: a start event opens a dimmed
-// in-flight row; guard hits attach a ⚑ badge and accumulate in the row so the
-// expanded detail can list every hit; the end event fills in
-// provider/status/latency/tokens. Clicking a request row toggles the full detail
-// (fetched from /api/requests/<id> once the request ends). Non-request events
-// without a known request id (budget & friends) still render as standalone
-// one-line rows. The All/live table is updated incrementally on each SSE event;
-// the session panel keeps its full re-render.
+// in-flight row; guard hits attach a ⚑ badge and accumulate in the row; the
+// end event fills in provider/status/latency/tokens. Clicking a request row
+// opens the full detail in a modal popover (fetched from /api/requests/<id>
+// once the request ends) — the popover lives in the top layer, so list
+// refreshes never disturb it. Non-request events without a known request id
+// (budget & friends) still render as standalone one-line rows. The All/live
+// table is updated incrementally on each SSE event; the session panel keeps
+// its full re-render (scroll anchor preserved).
 function renderLiveCard(target) {
   stopLiveEvents();
   liveRows = [];
   liveByReq = {};
-  liveOpenIds.clear();
   liveDetailState.clear();
   livePendingGuards.clear();
   liveEventSeq = 0;
@@ -1014,7 +1246,6 @@ function renderLiveCard(target) {
   liveSessionList = [];
   liveSessionLoading = false;
   liveSessionError = '';
-  liveSessionOpenIds.clear();
   liveSessionOptionsKey = '';
   target.insertAdjacentHTML('beforeend', buildCard('Live requests', '',
     `<div class="live-toolbar">
@@ -1024,7 +1255,13 @@ function renderLiveCard(target) {
      <div id="live-table"><span class="msg hint">connecting…</span></div>
      <div id="live-session-panel" hidden></div>`, 'tight'));
   const sel = document.getElementById('live-session');
-  if (sel) sel.onchange = () => onLiveSessionChange(sel.value);
+  if (sel) {
+    sel.onchange = () => onLiveSessionChange(sel.value);
+    // Retry an options rebuild deferred by the focused-guard above: the next
+    // SSE event may be far away, and a closed dropdown must not leave the
+    // session list stale until it arrives.
+    sel.onblur = () => refreshLiveSessionOptions();
+  }
   // Preload recent persisted sessions so the dropdown lists them even before
   // the first live event (best-effort: request logging may be off).
   apiGet('/api/sessions?limit=200').then((resp) => {
@@ -1053,15 +1290,22 @@ function renderLiveCard(target) {
     try { e = JSON.parse(m.data); } catch (_) { return; }
     applyLiveEvent(e);
     applyLiveEventDOM(e);
+    // An event for the request whose detail popover is open updates the
+    // popover in place (stream progress, end status, guard hits).
+    if (liveDetailPopId && e.request_id === liveDetailPopId) updateLiveDetailPop();
   };
 }
 
 // refreshLiveSessionOptions rebuilds the session dropdown from live rows plus
 // the persisted session list. Rebuilds only when the option set changes so a
-// busy stream does not reset the control on every event.
+// busy stream does not reset the control on every event. While the select
+// holds focus (its native dropdown may be open, or the user is keyboard-
+// navigating it) the options are NEVER swapped — replacing them closes the
+// OS-drawn popup; the blur handler below retries once the user is done.
 function refreshLiveSessionOptions() {
   const sel = document.getElementById('live-session');
   if (!sel) return;
+  if (sel === document.activeElement) return;
   const ids = new Set();
   for (const r of liveRows) if (r.session) ids.add(r.session);
   for (const s of liveSessionList) if (s.session_id) ids.add(s.session_id);
@@ -1087,7 +1331,6 @@ function onLiveSessionChange(value) {
   liveSessionRecords = [];
   liveSessionAgg = null;
   liveSessionError = '';
-  liveSessionOpenIds.clear();
   const tbl = document.getElementById('live-table');
   const panel = document.getElementById('live-session-panel');
   if (!value) {
@@ -1196,8 +1439,8 @@ function sessionSummaryHTML(s, opts) {
 }
 
 // renderLiveSessionPanel renders the selected session's analysis: summary
-// chips + distinct models/providers, then the merged request table with the
-// existing click-to-expand detail.
+// chips + distinct models/providers, then the merged request table. Clicking a
+// row opens the request detail in the modal popover.
 function renderLiveSessionPanel() {
   const panel = document.getElementById('live-session-panel');
   if (!panel || !liveSessionFilter) return;
@@ -1205,16 +1448,18 @@ function renderLiveSessionPanel() {
   if (liveSessionError) { panel.innerHTML = `<div class="msg err">${esc(liveSessionError)}</div>`; return; }
   const rows = liveSessionRows();
   const s = liveSessionSummary(rows, liveSessionAgg);
+  // The panel re-renders on every session event; snapshot the scroll anchor
+  // first so a rebuild does not shift what the user is reading.
+  const viewState = captureLiveViewState(panel);
   const body = rows.length
     ? `<table class="table"><thead><tr>
          <th>time</th><th>agent</th><th>model</th><th>provider</th>
          <th>status</th><th class="num">latency</th><th class="num">tokens in / out</th>
        </tr></thead><tbody>${rows.map((r) => {
-         const open = liveSessionOpenIds.has(r.requestId);
+         const open = liveDetailPopId === r.requestId;
          const sc = r.status >= 400 ? 'err' : '';
          const lt = r.latencyMs != null ? r.latencyMs + 'ms' : '';
          const tk = (r.input || r.output) ? `${fmtNum(r.input)} / ${fmtNum(r.output)}` : '';
-         const detail = open ? renderLiveDetailRow(r) : '';
          return `<tr class="live-row${open ? ' live-open' : ''}" data-id="${esc(r.requestId)}" data-live-key="${esc(r.requestId)}">
            <td class="mono">${esc(fmtTimeSafe(r.ts))}</td>
            <td class="mono">${esc(r.agent || '—')}</td>
@@ -1223,51 +1468,18 @@ function renderLiveSessionPanel() {
            <td class="num ${sc}">${esc(String(r.status || '—'))}</td>
            <td class="num">${esc(lt)}</td>
            <td class="num">${esc(tk)}</td>
-         </tr>${detail}`;
+         </tr>`;
        }).join('')}</tbody></table>`
     : '<div class="msg hint">no requests recorded for this session yet</div>';
   panel.innerHTML = `${sessionSummaryHTML(s)}${body}`;
   panel.querySelectorAll('.live-row').forEach((tr) => {
-    tr.onclick = () => toggleLiveSessionRow(tr.dataset.id);
+    tr.onclick = () => openLiveDetailPop(tr.dataset.id);
   });
-  for (const id of liveSessionOpenIds) ensureLiveSessionDetail(id);
-}
-
-// toggleLiveSessionRow expands/collapses one request's detail in the session
-// panel.
-function toggleLiveSessionRow(id) {
-  if (liveSessionOpenIds.has(id)) {
-    liveSessionOpenIds.delete(id);
-  } else {
-    liveSessionOpenIds.add(id);
-    // Explicit re-open clears a recorded fetch error so it can be retried.
-    const state = liveDetailState.get(id) || {};
-    if (state.error || state.notLogged) liveDetailState.set(id, { ...state, error: '', notLogged: false });
-    ensureLiveSessionDetail(id);
-  }
-  renderLiveSessionPanel();
-}
-
-// ensureLiveSessionDetail loads /api/requests/<id> once per open row.
-function ensureLiveSessionDetail(id) {
-  if (!shouldFetchDetail(requestsDetailCache.has(id), liveDetailState.get(id), false)) return;
-  const state = liveDetailState.get(id) || {};
-  liveDetailState.set(id, { ...state, loading: true, error: '' });
-  fetchLiveSessionDetail(id);
-}
-
-async function fetchLiveSessionDetail(id) {
-  try {
-    const resp = await apiGet('/api/requests/' + encodeURIComponent(id));
-    cacheRequestDetail(id, resp.records || []);
-    liveDetailState.set(id, { loading: false, error: '' });
-  } catch (e) {
-    liveDetailState.set(id, detailFetchState(e.status, e.message));
-  }
-  if (liveSessionOpenIds.has(id)) renderLiveSessionPanel();
+  restoreLiveViewState(panel, viewState);
 }
 
 function stopLiveEvents() {
+  closeLiveDetailPop();
   if (liveES) {
     liveES.close();
     liveES = null;
@@ -1366,8 +1578,7 @@ function trimLiveRows() {
     if (r.requestId) liveByReq[r.requestId] = r;
   }
   // Remove surplus DOM rows from the end of the tbody. Oldest rows live at the
-  // end because new rows are prepended; each summary may be followed by its
-  // detail row.
+  // end because new rows are prepended.
   const tbl = document.getElementById('live-table');
   const tbody = tbl && tbl.querySelector('tbody');
   if (!tbody) return;
@@ -1375,26 +1586,15 @@ function trimLiveRows() {
   let node = tbody.lastElementChild;
   while (node && removed < excess) {
     const prev = node.previousElementSibling;
-    if (node.classList.contains('live-detail-row')) {
-      node.remove();
-    } else {
-      const id = node.dataset.id;
-      if (id && liveOpenIds.has(id)) {
-        liveOpenIds.delete(id);
-        liveDetailState.delete(id);
-      }
-      const detail = node.nextElementSibling;
-      if (detail && detail.classList.contains('live-detail-row')) detail.remove();
-      node.remove();
-      removed++;
-    }
+    if (node.dataset.id) liveDetailState.delete(node.dataset.id);
+    node.remove();
+    removed++;
     node = prev;
   }
 }
 
 // liveSummaryRowHTML returns the summary <tr> for one live request row. `open`
-// is whether the detail is currently expanded; the caller decides based on
-// liveOpenIds.
+// marks the row whose detail popover is currently open.
 function liveSummaryRowHTML(r, open) {
   const dim = r.inFlight ? ' subdue' : '';
   const openCls = open ? ' live-open' : '';
@@ -1429,18 +1629,11 @@ function liveEventRowHTML(r) {
   </tr>`;
 }
 
-// liveRowHTML returns {summary, detail} HTML for one live row. The detail string
-// is empty when the row is collapsed. Used by full renders and by incremental
-// updates that replace a single row in place.
+// liveRowHTML returns the summary HTML for one live row (event-only rows have
+// no detail popover). Used by full renders and by incremental prepends.
 function liveRowHTML(r) {
-  if (r.eventOnly) {
-    return { summary: liveEventRowHTML(r), detail: '' };
-  }
-  const open = liveOpenIds.has(r.requestId);
-  return {
-    summary: liveSummaryRowHTML(r, open),
-    detail: open ? renderLiveDetailRow(r) : '',
-  };
+  if (r.eventOnly) return liveEventRowHTML(r);
+  return liveSummaryRowHTML(r, liveDetailPopId === r.requestId);
 }
 
 // renderLiveTable redraws the merged rows: one line per request. In-flight
@@ -1448,9 +1641,8 @@ function liveRowHTML(r) {
 // This is the full-rebuild path used on tab switches and as a fallback; the
 // hot SSE path uses applyLiveEventDOM for targeted surgery. Because new rows
 // are PREPENDED, the rebuild preserves the viewport (captureLiveViewState /
-// restoreLiveViewState): a visible expanded row is pinned in place, and when
-// the page is scrolled away from the top the visible region does not shift;
-// open request/response body <details> are re-opened after the rebuild.
+// restoreLiveViewState): when the page is scrolled away from the top the
+// visible region does not shift.
 function renderLiveTable() {
   refreshLiveSessionOptions();
   if (liveSessionFilter) {
@@ -1466,53 +1658,25 @@ function renderLiveTable() {
   const rows = liveRows;
   if (!rows.length) {
     tbl.innerHTML = '<span class="msg hint">Waiting for requests…</span>';
-    maybeRemoveLiveSpacer(tbl);
     return;
   }
   const viewState = captureLiveViewState(tbl);
-  // Drop chunk state for body views that are about to be replaced.
-  tbl.querySelectorAll('.req-detail-row [data-chunk]').forEach((host) => {
-    bodyChunkRegistry.delete(host.dataset.chunk);
-  });
   tbl.innerHTML = `<table class="table"><thead><tr>
     <th>time</th><th>agent</th><th>model</th><th>provider</th>
     <th>status</th><th class="num">latency</th><th class="num">tokens in / out</th></tr></thead>
-    <tbody>${rows.map((r) => { const h = liveRowHTML(r); return h.summary + h.detail; }).join('')}</tbody></table>`;
+    <tbody>${rows.map((r) => liveRowHTML(r)).join('')}</tbody></table>`;
   document.querySelectorAll('#live-table .live-row').forEach((tr) => {
-    tr.onclick = () => toggleLiveRowDetail(tr.dataset.id);
+    tr.onclick = () => openLiveDetailPop(tr.dataset.id);
   });
-  for (const r of rows) {
-    if (r.requestId && liveOpenIds.has(r.requestId) && !r.inFlight) {
-      ensureLiveDetailFetched(r.requestId);
-    }
-  }
-  if (liveOpenIds.size > 0) maybeAddLiveSpacer(tbl);
-  else maybeRemoveLiveSpacer(tbl);
   restoreLiveViewState(tbl, viewState);
 }
 
-// captureLiveViewState snapshots, before a full-table rebuild: (1) which
-// <details> are open inside expanded rows (keyed "requestId:recIndex:ordinal"
-// where ordinal is the element's index among ALL details in its .req-rec —
-// the record HTML is deterministic across rebuilds and body chunks only
-// append, so ordinals are stable; this covers the request/response body
-// containers AND the nested over-long-line blocks), and (2) the scroll
-// anchor — a visible expanded row wins (the user is reading it); otherwise
-// the first visible row when the page is scrolled away from the top.
-// scrollY ≈ 0 keeps the natural "pinned to newest" behavior.
+// captureLiveViewState snapshots, before a full-table rebuild, the scroll
+// anchor: a visible row highlighted by the open detail popover wins (the user
+// is reading it); otherwise the first visible row when the page is scrolled
+// away from the top. scrollY ≈ 0 keeps the natural "pinned to newest"
+// behavior.
 function captureLiveViewState(tbl) {
-  const openBodies = new Set();
-  tbl.querySelectorAll('.live-detail-row').forEach((row) => {
-    let owner = row.previousElementSibling;
-    while (owner && !owner.classList.contains('live-row')) owner = owner.previousElementSibling;
-    const id = owner && owner.dataset.id;
-    if (!id) return;
-    row.querySelectorAll('.req-rec').forEach((rec, recIdx) => {
-      rec.querySelectorAll('details').forEach((d, dIdx) => {
-        if (d.open) openBodies.add(id + ':' + recIdx + ':' + dIdx);
-      });
-    });
-  });
   const vh = window.innerHeight || document.documentElement.clientHeight;
   let anchor = null;
   let firstVisible = null;
@@ -1526,27 +1690,13 @@ function captureLiveViewState(tbl) {
     if (!firstVisible) firstVisible = { key: tr.dataset.liveKey, top: rect.top };
   }
   if (!anchor && firstVisible && window.scrollY > 2) anchor = firstVisible;
-  return { anchor, openBodies };
+  return { anchor };
 }
 
 // restoreLiveViewState re-applies captureLiveViewState after the rebuild:
-// re-open the body <details> first (they change heights), then scroll so the
-// anchor row sits exactly where it was. A trimmed-out anchor (ring overflow)
-// degrades to no adjustment.
+// scroll so the anchor row sits exactly where it was. A trimmed-out anchor
+// (ring overflow) degrades to no adjustment.
 function restoreLiveViewState(tbl, state) {
-  if (state.openBodies.size) {
-    tbl.querySelectorAll('.live-detail-row').forEach((row) => {
-      let owner = row.previousElementSibling;
-      while (owner && !owner.classList.contains('live-row')) owner = owner.previousElementSibling;
-      const id = owner && owner.dataset.id;
-      if (!id) return;
-      row.querySelectorAll('.req-rec').forEach((rec, recIdx) => {
-        rec.querySelectorAll('details').forEach((d, dIdx) => {
-          if (state.openBodies.has(id + ':' + recIdx + ':' + dIdx)) d.open = true;
-        });
-      });
-    });
-  }
   if (!state.anchor) return;
   for (const tr of tbl.querySelectorAll('tr[data-live-key]')) {
     if (tr.dataset.liveKey !== state.anchor.key) continue;
@@ -1564,19 +1714,22 @@ function findLiveSummaryRow(tbody, id) {
 // updateLiveSummaryRow replaces one summary <tr> in place with its current
 // rendering and re-attaches the click handler.
 function updateLiveSummaryRow(tr, r) {
-  const open = liveOpenIds.has(r.requestId);
-  tr.insertAdjacentHTML('beforebegin', liveSummaryRowHTML(r, open));
+  tr.insertAdjacentHTML('beforebegin', liveSummaryRowHTML(r, liveDetailPopId === r.requestId));
   const next = tr.previousElementSibling;
   tr.remove();
-  next.onclick = () => toggleLiveRowDetail(next.dataset.id);
+  next.onclick = () => openLiveDetailPop(next.dataset.id);
   return next;
 }
 
 // captureLiveDetailOpenBodies snapshots which <details> are open inside one
-// detail row, scoped to that row so incremental replacements can preserve them.
-function captureLiveDetailOpenBodies(detailRow) {
+// detail container (the popover body), keyed "recIndex:ordinal" so incremental
+// content replacements can preserve them. The record HTML is deterministic
+// across re-renders and body chunks only append, so ordinals are stable; this
+// covers the request/response body containers AND the nested over-long-line
+// blocks.
+function captureLiveDetailOpenBodies(container) {
   const openBodies = new Set();
-  detailRow.querySelectorAll('.req-rec').forEach((rec, recIdx) => {
+  container.querySelectorAll('.req-rec').forEach((rec, recIdx) => {
     rec.querySelectorAll('details').forEach((d, dIdx) => {
       if (d.open) openBodies.add(recIdx + ':' + dIdx);
     });
@@ -1585,52 +1738,14 @@ function captureLiveDetailOpenBodies(detailRow) {
 }
 
 // restoreLiveDetailOpenBodies re-opens the details captured by
-// captureLiveDetailOpenBodies after an in-place detail replacement.
-function restoreLiveDetailOpenBodies(detailRow, openBodies) {
+// captureLiveDetailOpenBodies after an in-place content replacement.
+function restoreLiveDetailOpenBodies(container, openBodies) {
   if (!openBodies.size) return;
-  detailRow.querySelectorAll('.req-rec').forEach((rec, recIdx) => {
+  container.querySelectorAll('.req-rec').forEach((rec, recIdx) => {
     rec.querySelectorAll('details').forEach((d, dIdx) => {
       if (openBodies.has(recIdx + ':' + dIdx)) d.open = true;
     });
   });
-}
-
-// replaceLiveDetailInPlace swaps the content of an existing detail <tr> without
-// disturbing its adjacent summary row, preserving open body <details> state.
-function replaceLiveDetailInPlace(detailRow, r) {
-  detailRow.querySelectorAll('[data-chunk]').forEach((host) => {
-    bodyChunkRegistry.delete(host.dataset.chunk);
-  });
-  const openBodies = captureLiveDetailOpenBodies(detailRow);
-  const cell = detailRow.querySelector('td');
-  if (cell) cell.innerHTML = liveDetailHTML(r);
-  restoreLiveDetailOpenBodies(detailRow, openBodies);
-}
-
-// updateLiveDetailForRow inserts, updates, or removes the detail <tr> that
-// follows a summary row to match liveOpenIds and the current row state.
-function updateLiveDetailForRow(tr, r) {
-  const wantDetail = liveOpenIds.has(r.requestId);
-  let detail = tr.nextElementSibling;
-  const hasDetail = detail && detail.classList.contains('live-detail-row');
-  if (!wantDetail) {
-    if (hasDetail) detail.remove();
-    return;
-  }
-  if (hasDetail) {
-    replaceLiveDetailInPlace(detail, r);
-  } else {
-    tr.insertAdjacentHTML('afterend', renderLiveDetailRow(r));
-  }
-  if (!r.inFlight) ensureLiveDetailFetched(r.requestId);
-}
-
-// updateLiveResponseSection swaps just the in-flight response area inside an
-// expanded detail row, used by progress events that do not touch the summary.
-function updateLiveResponseSection(detailCell, r) {
-  if (!detailCell) return;
-  const section = detailCell.querySelector('.live-response-section');
-  if (section) section.outerHTML = liveResponseHTML(r);
 }
 
 // captureLiveScrollAnchor picks a visible row to pin during a prepend. An
@@ -1666,48 +1781,39 @@ function compensateLiveScroll(anchor) {
   }
 }
 
-// maybeAddLiveSpacer ensures a tall trailing spacer exists inside #live-table
-// whenever a row is expanded. The spacer gives the sub-screen (page not
-// scrollable) case enough room for prepend scroll compensation to work.
-function maybeAddLiveSpacer(tbl) {
-  if (!tbl || liveOpenIds.size === 0) return;
-  let spacer = tbl.querySelector('#live-spacer');
-  if (!spacer) {
-    spacer = document.createElement('div');
-    spacer.id = 'live-spacer';
-    tbl.appendChild(spacer);
-  }
-}
-
-// maybeRemoveLiveSpacer drops the spacer once no live rows are expanded.
-function maybeRemoveLiveSpacer(tbl) {
-  if (!tbl) return;
-  const spacer = tbl.querySelector('#live-spacer');
-  if (spacer && liveOpenIds.size === 0) spacer.remove();
-}
-
 // prependLiveRows inserts new rows at the top of the live tbody with scroll
 // compensation so the visible viewport does not jump.
 function prependLiveRows(tbl, tbody, rows) {
-  maybeAddLiveSpacer(tbl);
   const anchor = captureLiveScrollAnchor(tbl);
-  const html = rows.map((r) => { const h = liveRowHTML(r); return h.summary + h.detail; }).join('');
+  const html = rows.map((r) => liveRowHTML(r)).join('');
   tbody.insertAdjacentHTML('afterbegin', html);
   for (const r of rows) {
     if (r.requestId) {
       const tr = findLiveSummaryRow(tbody, r.requestId);
-      if (tr) tr.onclick = () => toggleLiveRowDetail(tr.dataset.id);
+      if (tr) tr.onclick = () => openLiveDetailPop(tr.dataset.id);
     }
   }
   compensateLiveScroll(anchor);
 }
 
 // applyLiveEventDOM performs targeted DOM surgery for All/live mode after
-// applyLiveEvent has updated liveRows/liveByReq. Session mode still falls back
-// to the existing full re-render. start and eventOnly rows are prepended;
-// end/progress/guard events update the existing row in place.
+// applyLiveEvent has updated liveRows/liveByReq. Session mode falls back to
+// the full (scroll-preserving) panel re-render, and only for the selected
+// session's events. start and eventOnly rows are prepended; end/guard events
+// update the existing row in place; progress events only feed the detail
+// popover (via the onmessage hook), the summary row does not change.
 function applyLiveEventDOM(e) {
   if (liveSessionFilter) {
+    // Session mode: only the selected session's events change the panel;
+    // unrelated events must not rebuild it. The dropdown still picks up new
+    // sessions cheaply.
+    const owner = e.request_id && liveByReq[e.request_id];
+    const relevant = e.session_id === liveSessionFilter ||
+      (owner && owner.session === liveSessionFilter);
+    if (!relevant) {
+      refreshLiveSessionOptions();
+      return;
+    }
     renderLiveTable();
     return;
   }
@@ -1736,20 +1842,13 @@ function applyLiveEventDOM(e) {
       prependLiveRows(tbl, tbody, [row]);
       return;
     }
-    const next = updateLiveSummaryRow(tr, row);
-    updateLiveDetailForRow(next, row);
+    updateLiveSummaryRow(tr, row);
     return;
   }
 
   if (e.type === 'progress') {
-    const row = liveByReq[e.request_id];
-    if (!row) return;
-    const tr = findLiveSummaryRow(tbody, row.requestId);
-    if (!tr) return;
-    const detail = tr.nextElementSibling;
-    if (detail && detail.classList.contains('live-detail-row')) {
-      updateLiveResponseSection(detail.querySelector('td'), row);
-    }
+    // Summary rows carry no progress; the open detail popover is refreshed by
+    // the onmessage hook.
     return;
   }
 
@@ -1758,8 +1857,7 @@ function applyLiveEventDOM(e) {
     const row = liveByReq[e.request_id];
     const tr = findLiveSummaryRow(tbody, row.requestId);
     if (!tr) return;
-    const next = updateLiveSummaryRow(tr, row);
-    updateLiveDetailForRow(next, row);
+    updateLiveSummaryRow(tr, row);
     return;
   }
 
@@ -1768,13 +1866,8 @@ function applyLiveEventDOM(e) {
   if (row && row.eventOnly) prependLiveRows(tbl, tbody, [row]);
 }
 
-// renderLiveDetailRow builds the <tr> shown beneath an expanded live row.
-function renderLiveDetailRow(r) {
-  return `<tr class="req-detail-row live-detail-row"><td colspan="7">${liveDetailHTML(r)}</td></tr>`;
-}
-
 // liveGuardSectionHTML renders the accumulated guard hits for a live detail
-// cell. Extracted so incremental updates can replace just this section.
+// view. Extracted so popover updates can replace just this section.
 function liveGuardSectionHTML(r) {
   if (!r.guardHits || !r.guardHits.length) return '';
   let html = `<div class="live-guard-section"><div class="section-title">guard hits</div>`;
@@ -1788,7 +1881,7 @@ function liveGuardSectionHTML(r) {
   return html;
 }
 
-// liveDetailHTML renders the expanded content for one live row: accumulated
+// liveDetailHTML renders the popover content for one request row: accumulated
 // guard hits first, then the requestlog body records (or a hint while in flight
 // or before the first fetch).
 function liveDetailHTML(r) {
@@ -1820,7 +1913,7 @@ function liveDetailHTML(r) {
     html += '<div class="msg hint">no record</div>';
     return html;
   }
-  // Ended but records not fetched yet; the post-render pass will start the fetch.
+  // Ended but records not fetched yet; openLiveDetailPop starts the fetch.
   html += '<span class="hint">loading…</span>';
   return html;
 }
@@ -1845,59 +1938,135 @@ function liveResponseHTML(r) {
   return html;
 }
 
-// toggleLiveRowDetail expands/collapses the detail for a live request row.
-// In All/live mode this performs in-place DOM surgery; the session panel keeps
-// its full re-render.
-function toggleLiveRowDetail(id) {
-  if (liveSessionFilter) {
-    // Session panel is not yet incremental; reuse its existing toggle path.
-    toggleLiveSessionRow(id);
-    return;
-  }
-  const tbl = document.getElementById('live-table');
-  const tr = tbl && tbl.querySelector(`tbody tr.live-row[data-id="${esc(id)}"]`);
-  const row = liveByReq[id];
-  if (!tr || !row) {
-    // DOM not built yet or out of sync: fall back to a full render.
-    if (liveOpenIds.has(id)) liveOpenIds.delete(id);
-    else liveOpenIds.add(id);
-    renderLiveTable();
-    return;
-  }
+// ---------- live request detail popover ----------
+//
+// Clicking a request row (All/live table or session panel) opens the request's
+// full record in a modal <dialog>. The dialog lives in the top layer, outside
+// #live-table / #live-session-panel, so any list refresh (SSE events, panel
+// re-renders, ring trims) never touches it. Events for the open request update
+// the dialog in place (stream progress, end status, guard hits), preserving
+// open body <details> and the body scroll position.
+let liveDetailPopId = null;  // request_id shown in the popover (null = closed)
+let liveDetailPop = null;    // the lazily-created shared <dialog>
 
-  if (liveOpenIds.has(id)) {
-    liveOpenIds.delete(id);
-    const detail = tr.nextElementSibling;
-    if (detail && detail.classList.contains('live-detail-row')) detail.remove();
-    tr.classList.remove('live-open');
-    maybeRemoveLiveSpacer(tbl);
-  } else {
-    liveOpenIds.add(id);
-    if (!row.inFlight) {
-      const state = liveDetailState.get(id) || {};
-      if (state.error || state.notLogged) liveDetailState.set(id, { ...state, error: '', notLogged: false });
-    }
-    tr.insertAdjacentHTML('afterend', renderLiveDetailRow(row));
-    tr.classList.add('live-open');
-    maybeAddLiveSpacer(tbl);
-    if (!row.inFlight) ensureLiveDetailFetched(id);
+// liveRowById resolves the row object for a request id from the live ring or,
+// in session mode, the merged persisted + live rows.
+function liveRowById(id) {
+  const live = liveByReq[id];
+  if (live) return live;
+  if (!liveSessionFilter) return null;
+  return liveSessionRows().find((r) => r.requestId === id) || null;
+}
+
+function ensureLiveDetailPop() {
+  if (liveDetailPop) return liveDetailPop;
+  const dialog = document.createElement('dialog');
+  dialog.className = 'live-detail-pop';
+  dialog.innerHTML = `
+    <div class="modal-head">
+      <h2>request detail</h2>
+      <span class="meta live-pop-meta"></span>
+      <button type="button" class="btn small live-pop-close">Close</button>
+    </div>
+    <div class="modal-body live-pop-body"></div>`;
+  dialog.querySelector('.live-pop-close').addEventListener('click', () => dialog.close());
+  // A click landing on the dialog element itself is a backdrop click (the
+  // content box is smaller than the top-layer dialog area).
+  dialog.addEventListener('click', (e) => { if (e.target === dialog) dialog.close(); });
+  dialog.addEventListener('close', () => {
+    liveDetailPopId = null;
+    document.querySelectorAll('#live-table tr.live-open, #live-session-panel tr.live-open')
+      .forEach((tr) => tr.classList.remove('live-open'));
+  });
+  document.body.appendChild(dialog);
+  liveDetailPop = dialog;
+  return dialog;
+}
+
+// fillLiveDetailPop renders the meta line + body content for a row. With
+// defaultOpen (initial open, or the first render that actually has records
+// after a "loading…" fill) the request/response body <details> and their
+// nested over-long-line blocks are opened — two levels — so the data is
+// visible without clicking; later refreshes preserve the user's own
+// open/closed state instead (updateLiveDetailPop).
+function fillLiveDetailPop(dialog, row, defaultOpen) {
+  const meta = [
+    fmtTimeSafe(row.ts),
+    row.agent || '',
+    row.model || '',
+    row.provider || '',
+    row.inFlight ? 'in flight' : (row.status || ''),
+    (!row.inFlight && row.latencyMs != null) ? row.latencyMs + 'ms' : '',
+    (row.input || row.output) ? `${fmtNum(row.input)} in / ${fmtNum(row.output)} out` : '',
+    row.session ? 'session ' + row.session : '',
+  ].filter((x) => x !== '').join(' · ');
+  dialog.querySelector('.live-pop-meta').textContent = meta;
+  const body = dialog.querySelector('.live-pop-body');
+  // Drop chunk state for body views that are about to be replaced.
+  body.querySelectorAll('[data-chunk]').forEach((host) => {
+    bodyChunkRegistry.delete(host.dataset.chunk);
+  });
+  body.innerHTML = liveDetailHTML(row);
+  if (defaultOpen) {
+    body.querySelectorAll('.req-rec details').forEach((d) => { d.open = true; });
   }
+}
+
+// openLiveDetailPop opens the popover for one request row and starts the
+// record fetch once the request has ended.
+function openLiveDetailPop(id) {
+  const row = liveRowById(id);
+  if (!row) return;
+  liveDetailPopId = id;
+  // Re-opening after a fetch error clears it so the fetch is retried.
+  const state = liveDetailState.get(id) || {};
+  if (state.error || state.notLogged) liveDetailState.set(id, { ...state, error: '', notLogged: false });
+  const dialog = ensureLiveDetailPop();
+  fillLiveDetailPop(dialog, row, true);
+  if (!dialog.open) dialog.showModal();
+  const tr = document.querySelector(
+    `#live-table tr.live-row[data-id="${esc(id)}"], #live-session-panel tr.live-row[data-id="${esc(id)}"]`);
+  if (tr) tr.classList.add('live-open');
+  if (!row.inFlight) ensureLiveDetailFetched(id, row);
+}
+
+function closeLiveDetailPop() {
+  if (liveDetailPop && liveDetailPop.open) liveDetailPop.close();
+  liveDetailPopId = null;
+}
+
+// updateLiveDetailPop refreshes the open popover after an event or record
+// fetch for the same request, preserving open body <details> and scroll.
+function updateLiveDetailPop() {
+  if (!liveDetailPopId || !liveDetailPop || !liveDetailPop.open) return;
+  const row = liveRowById(liveDetailPopId);
+  if (!row) return;
+  const body = liveDetailPop.querySelector('.live-pop-body');
+  const openBodies = captureLiveDetailOpenBodies(body);
+  const scrollTop = body.scrollTop;
+  // A body that has not shown records yet (loading…/in-flight hint) default-
+  // expands once they arrive; afterwards the user's open/closed state rules.
+  const hadRecords = body.querySelector('.req-rec') !== null;
+  fillLiveDetailPop(liveDetailPop, row, !hadRecords);
+  restoreLiveDetailOpenBodies(body, openBodies);
+  body.scrollTop = scrollTop;
+  // The row may have just ended (popover opened while in flight): start the
+  // record fetch now.
+  if (!row.inFlight) ensureLiveDetailFetched(liveDetailPopId, row);
 }
 
 // ensureLiveDetailFetched starts a fetch for the requestlog records if the row
 // has ended and the records are not already cached, in flight, or failed. A
 // recorded error is terminal here (see shouldFetchDetail) so a 404 cannot loop.
-function ensureLiveDetailFetched(id) {
-  const row = liveByReq[id];
+function ensureLiveDetailFetched(id, row) {
   if (!shouldFetchDetail(requestsDetailCache.has(id), liveDetailState.get(id), !row || row.inFlight)) return;
   const state = liveDetailState.get(id) || {};
   liveDetailState.set(id, { ...state, loading: true, error: '' });
   fetchLiveDetail(id);
 }
 
-// fetchLiveDetail loads /api/requests/<id>, caches the records, and updates
-// the detail row in place if the row is still open. Session mode still falls
-// back to the session panel's full re-render.
+// fetchLiveDetail loads /api/requests/<id>, caches the records, and refreshes
+// the popover if it is showing this request.
 async function fetchLiveDetail(id) {
   let recs = [];
   try {
@@ -1905,27 +2074,12 @@ async function fetchLiveDetail(id) {
     recs = resp.records || [];
   } catch (e) {
     liveDetailState.set(id, detailFetchState(e.status, e.message));
-    updateLiveDetailRow(id);
+    if (liveDetailPopId === id) updateLiveDetailPop();
     return;
   }
   cacheRequestDetail(id, recs);
   liveDetailState.set(id, { loading: false, error: '' });
-  updateLiveDetailRow(id);
-}
-
-// updateLiveDetailRow finds the open live detail row and refreshes its content.
-function updateLiveDetailRow(id) {
-  if (liveSessionFilter) {
-    renderLiveSessionPanel();
-    return;
-  }
-  if (!liveOpenIds.has(id)) return;
-  const row = liveByReq[id];
-  if (!row) return;
-  const tbl = document.getElementById('live-table');
-  const tr = tbl && tbl.querySelector(`tbody tr.live-row[data-id="${esc(id)}"]`);
-  if (!tr) return;
-  updateLiveDetailForRow(tr, row);
+  if (liveDetailPopId === id) updateLiveDetailPop();
 }
 
 // ---------- inline message helpers ----------
@@ -1960,9 +2114,10 @@ let logsPrevScrollTop = 0;
 const LOG_SNAP_THRESHOLD = 4; // px — "at the bottom" within sub-pixel rounding
 
 // Status sub-sections, in sidebar order. `key` is the hash segment + the
-// statusSelected value; `label` is the nav button text. First (schedule) is the
-// default selection.
+// statusSelected value; `label` is the nav button text. The default selection
+// is statusSelected's initial value ('schedule'), not the first entry.
 const STATUS_SECTIONS = [
+  { key: 'dashboard', label: 'Dashboard' },
   { key: 'schedule', label: 'Schedule' },
   { key: 'providers', label: 'Providers' },
   { key: 'models', label: 'Models' },
@@ -1980,6 +2135,7 @@ let statusSelected = 'schedule';
 
 function stopStatusRefresh() {
   if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+  cancelAutoRefreshHold(panels.status);
 }
 
 // refreshConnIndicator does a lightweight /api/status fetch solely to update
@@ -2002,10 +2158,13 @@ async function refreshConnIndicator() {
 // when warnings exist) + a sidebar+detail layout. Only the active section's
 // pane re-renders on each 5s tick; section switches render from the cache with
 // no extra fetch. Auto-refreshes every 5s while the Status tab is active; the
-// timer is cleared when the user leaves the tab, and a tick is skipped while
-// a popup (e.g. the pin menu) is open inside the panel so the background
-// refresh never closes it.
-async function renderStatusTab() {
+// timer is cleared when the user leaves the tab. Background ticks and their
+// renders pass through the interaction gate (autoRefreshBlocked): an open
+// popover/menu, a focused control, or an active text selection defers the
+// render — including one whose fetch was already in flight when the
+// interaction started (the commit-time re-check below) — so a background
+// refresh can never close a dropdown or eat uncommitted input.
+async function renderStatusTab(background = false) {
   if (statusInflight) return;
   statusInflight = true;
   try {
@@ -2013,37 +2172,82 @@ async function renderStatusTab() {
     // request the server would 400 — the cards keep their previous data
     // while the date-input hint shows.
     const rangeQuery = tokensRangeQuery(tokensRange, Date.now());
+    // Each part settles independently ({ok, data?}): a failed part must
+    // keep the last successful value in statusCache (never an empty array
+    // that renders as "no data") and surface via the .refresh-err banner.
     const tokensFetch = rangeQuery === null
-      ? Promise.resolve({ usage: statusCache.tok || [], agents: statusCache.agents || [] })
-      : apiGet('/api/tokens' + rangeQuery).catch(() => ({ usage: [], agents: [] }));
-    const [st, tok, logs, acc, modelsDoc] = await Promise.all([
-      apiGet('/api/status'),
+      ? Promise.resolve({ ok: true, data: { usage: statusCache.tok || [], agents: statusCache.agents || [], since: statusCache.since } })
+      : apiGet('/api/tokens' + rangeQuery).then((data) => ({ ok: true, data }), () => ({ ok: false }));
+    const [stR, tokR, logsR, accR, modelsR] = await Promise.all([
+      apiGet('/api/status').then((data) => ({ ok: true, data }), (e) => ({ ok: false, error: e && e.message })),
       tokensFetch,
-      apiGet('/api/logs?tail=200').catch(() => ({ lines: [] })),
-      apiGet('/api/accounts').catch(() => ({ providers: [] })),
-      apiGet('/api/models').catch(() => ({ providers: {} })),
+      apiGet('/api/logs?tail=200').then((data) => ({ ok: true, data }), () => ({ ok: false })),
+      apiGet('/api/accounts').then((data) => ({ ok: true, data }), () => ({ ok: false })),
+      apiGet('/api/models').then((data) => ({ ok: true, data }), () => ({ ok: false })),
     ]);
-    setConn('ok', `v${st.version || '?'} · ${st.uptime || '—'} · ${st.listen || ''}`);
-    statusCache = { st, tok: tok.usage || [], logs: logs.lines || [], accounts: acc.providers || [], agents: tok.agents || [], since: tok.since || 0 };
-    modelsCache = modelsDoc;
-    renderStatusPanel();
+    if (!stR.ok && !statusCache.st) {
+      // Nothing rendered yet — the full error card is the only honest view.
+      throw new Error(stR.error || 'connection lost');
+    }
+    setConn(stR.ok ? 'ok' : 'err', stR.ok
+      ? `v${stR.data.version || '?'} · ${stR.data.uptime || '—'} · ${stR.data.listen || ''}`
+      : 'connection lost');
+    // Keep the last good value for every failed part — a transient backend
+    // error must not blank the cards.
+    const prev = statusCache;
+    statusCache = {
+      st: stR.ok ? stR.data : prev.st,
+      tok: tokR.ok ? (tokR.data.usage || []) : prev.tok,
+      logs: logsR.ok ? (logsR.data.lines || []) : prev.logs,
+      accounts: accR.ok ? (accR.data.providers || []) : prev.accounts,
+      agents: tokR.ok ? (tokR.data.agents || []) : prev.agents,
+      since: tokR.ok ? (tokR.data.since || 0) : prev.since,
+    };
+    if (modelsR.ok) modelsCache = modelsR.data;
+    if (!stR.ok) {
+      // Core snapshot failed with data already on screen: keep the render,
+      // report via the banner (no re-render churn needed).
+      setRefreshError(panels.status, staleDataText('refresh failed', ['status']));
+      return;
+    }
+    const failed = [
+      tokR.ok ? null : 'tokens',
+      logsR.ok ? null : 'logs',
+      accR.ok ? null : 'accounts',
+      modelsR.ok ? null : 'models',
+    ].filter(Boolean);
+    // Commit-time gate: an interaction that started while this fetch was in
+    // flight (e.g. the pin menu opened milliseconds after the tick) defers
+    // the DOM write — the hold watcher re-runs a fresh background render as
+    // soon as the interaction ends. The cached data above is simply
+    // superseded by that re-fetch.
+    if (background && deferAutoRefresh(panels.status, () => renderStatusTab(true))) {
+      return;
+    }
+    renderStatusPanel(failed);
   } catch (e) {
     setConn('err', 'connection lost');
-    if (panels.status) {
-      panels.status.innerHTML =
-        `<div class="card"><div class="card-body"><div class="msg err">${esc(e.message)}</div></div></div>`;
+    if (!statusCache.st) {
+      // First load: nothing to preserve — the full error card is correct.
+      if (panels.status) {
+        panels.status.innerHTML =
+          `<div class="card"><div class="card-body"><div class="msg err">${esc(e.message)}</div></div></div>`;
+      }
+    } else {
+      // Defensive path (unexpected throw mid-render): keep what's on screen.
+      setRefreshError(panels.status, staleDataText('refresh failed', ['status']));
     }
   } finally {
     statusInflight = false;
   }
   if (activeTab === 'status' && !statusTimer) {
     statusTimer = setInterval(() => {
-      // A background tick must not wipe an open popup (the pin menu lives
-      // inside the re-rendered pane) — skip this tick; the next one after
-      // the menu closes picks the data up. Explicit renders (mutations,
-      // section switches) bypass this guard and refresh immediately.
-      if (panels.status && panels.status.querySelector('.route-pin-menu:not([hidden]), .tr-popover:not([hidden])')) return;
-      renderStatusTab();
+      // Tick-time gate: skip while the user interacts inside the panel; the
+      // hold watcher refreshes (fresh fetch, not stale cache) shortly after
+      // the interaction ends. Explicit renders (mutations, section
+      // switches) are direct renderStatusTab() calls and bypass this.
+      if (deferAutoRefresh(panels.status, () => renderStatusTab(true))) return;
+      renderStatusTab(true);
     }, 5000);
   }
 }
@@ -2053,7 +2257,12 @@ async function renderStatusTab() {
 // is built only when it isn't already present, so a 5s tick that finds the
 // layout in place just refreshes the warnings + re-renders the active section,
 // preserving scroll position (e.g. Logs scrolled up) in the pane.
-function renderStatusPanel() {
+// refreshFailures lists the parts whose fetch failed this round (['tokens',
+// 'logs', …]): non-empty shows the shared stale-data banner (the cards keep
+// the last successful data); empty/undefined clears it. Callers that
+// re-render on user actions pass nothing — the next background tick
+// re-reports if the failure persists.
+function renderStatusPanel(refreshFailures) {
   const panel = panels.status;
   if (!panel || !statusCache.st) return;
   const st = statusCache.st;
@@ -2104,6 +2313,12 @@ function renderStatusPanel() {
       b.classList.toggle('active', b.dataset.section === statusSelected);
     });
   }
+  // Stale-data banner — managed AFTER the layout block above, whose rebuild
+  // branch wipes the panel: a failed background refresh reports here while
+  // the last successful data stays on screen; a clean refresh clears it.
+  setRefreshError(panel, refreshFailures && refreshFailures.length
+    ? staleDataText('refresh failed', refreshFailures)
+    : null);
   renderStatusSection(statusSelected);
 }
 
@@ -2115,11 +2330,21 @@ function renderStatusSection(key) {
   const main = document.querySelector('.status-main');
   if (!main) return;
   const st = statusCache.st;
+  // Leaving the Dashboard section tears its uPlot instance down (the cases
+  // below wipe .status-main, detaching the chart host); re-entry rebuilds
+  // it fresh.
+  if (key !== 'dashboard') destroyDashChart();
   // status-logs-active makes the Logs pane fill the viewport height (the log
   // <pre> flex-grows). Only set for the logs section; other sections are short
   // and should size to content.
   main.classList.toggle('status-logs-active', key === 'logs');
   switch (key) {
+    case 'dashboard':
+      // The dashboard keeps its skeleton between ticks: the chart updates in
+      // place (u.setData) and content refreshes at most every ~30s from
+      // /api/analytics (see refreshDashboardData).
+      renderDashboardSection(main);
+      break;
     case 'schedule':
       main.innerHTML = '';
       if (st) renderScheduleCard(main, st);
@@ -2188,6 +2413,277 @@ function selectStatusSectionSilent(name) {
   logsPre = null;
   logsPrevKey = '';
   renderStatusSection(name);
+}
+
+// ===========================================================================
+// STATUS → DASHBOARD (analytics-style live view)
+// ===========================================================================
+//
+// The dashboard reuses the Analytics tab's rendering — KPI chips with
+// period-over-period deltas, one metric-switchable per-model trend chart and
+// the leaderboard table — pinned to a fixed window: last 1 hour, per-minute
+// buckets, by model. Data comes from /api/analytics (which already drops the
+// guard/attempts/routing/fusion virtual counter namespaces server-side), so
+// every series is a real upstream model. The former Model Health section is
+// merged into the leaderboard: each row carries its health grade
+// (latency/ttft/tok-s scoring, pure.js modelHealthFromSeries) and the graded
+// value cells keep their dimension's ok/warn/err color. Refreshes ride the
+// status tab's 5s tick but fetch at most every ~30s (a minute-granularity
+// window changes slowly); the chart updates in place (u.setData) so a
+// refresh neither flickers nor resets hover.
+
+// DASH_WINDOW_SEC is the dashboard's fixed trailing window: the last hour.
+const DASH_WINDOW_SEC = 3600;
+
+// DASH_REFRESH_MS is the minimum age of the cached /api/analytics response
+// before the 5s status tick refetches it.
+const DASH_REFRESH_MS = 30000;
+
+// Dashboard state: the active chart metric (metric-switcher selection,
+// session scope), the last response + its fetch time, the inflight flag, the
+// live uPlot instance, and the per-session set of legend-toggled series
+// labels (persists across in-place chart updates).
+let dashMetric = 'tokens';
+let dashData = null;
+let dashFetchedAt = 0;
+let dashInflight = false;
+let dashChart = null; // {u, sig, width, labels}
+const dashLegendHidden = new Set();
+
+// destroyDashChart tears the dashboard chart down (the section switch wipes
+// its hosts) and detaches the legend dropdown's document-level listener.
+function destroyDashChart() {
+  if (anLegendOutside) {
+    document.removeEventListener('click', anLegendOutside);
+    anLegendOutside = null;
+  }
+  if (dashChart) {
+    try { dashChart.u.destroy(); } catch (_) { /* already detached */ }
+    dashChart = null;
+  }
+}
+
+// renderDashboardSection builds the skeleton once (KPI row + metric-
+// switchable chart + leaderboard), then keeps it fed: every 5s status tick
+// lands here, but refreshDashboardData only refetches when the cached window
+// is stale. Section re-entry (the pane was wiped by another section) rebuilds
+// the skeleton and repaints from the cache instantly.
+function renderDashboardSection(main) {
+  if (!main.querySelector('.dash-wrap')) {
+    destroyDashChart();
+    main.innerHTML = `<div class="dash-wrap">
+      <div id="dash-error" class="msg err" hidden></div>
+      <div id="dash-kpis" class="an-kpis"></div>
+      <div class="an-chart-card">
+        <div class="an-chart-head">
+          <div class="an-seg" id="dash-metric" role="group" aria-label="Metric"></div>
+        </div>
+        <div class="an-chart-wrap"><div id="dash-chart" class="an-chart"></div></div>
+        <div id="dash-legend"></div>
+      </div>
+      <div id="dash-table" class="an-table-card"></div>
+    </div>`;
+    // First paint from the cache (if any) so section re-entry is instant;
+    // refreshDashboardData below brings in fresh numbers. The metric
+    // switcher itself is (re)rendered by renderDashboardContent — a switch
+    // must update its own active highlight.
+    renderDashboardContent();
+  }
+  refreshDashboardData();
+}
+
+// refreshDashboardData fetches the fixed 1h/minute/model window into dashData
+// and repaints the section's content. Cheap guards: one fetch at a time and
+// no refetch while the cached response is younger than DASH_REFRESH_MS. The
+// interaction protection rides the auto-refresh gate at both checkpoints:
+// a fetch is not started while any popup is open in the section (the
+// legend's "+N more" dropdown carries data-popup), and a fetch that was
+// already in flight when the interaction began defers its repaint until the
+// hold watcher reports the section idle — an in-flight landing must not
+// close a dropdown the user just opened.
+async function refreshDashboardData() {
+  const main = document.querySelector('.status-main');
+  if (!main || !main.querySelector('.dash-wrap')) return;
+  if (dashInflight) return;
+  if (dashData && Date.now() - dashFetchedAt < DASH_REFRESH_MS) return;
+  if (main.querySelector(POPUP_OPEN_SEL)) return;
+  dashInflight = true;
+  const errEl = main.querySelector('#dash-error');
+  try {
+    const to = Math.floor(Date.now() / 1000);
+    const resp = await apiGet('/api/analytics?from=' + (to - DASH_WINDOW_SEC) + '&to=' + to + '&granularity=minute&by=model');
+    dashData = resp;
+    dashFetchedAt = Date.now();
+    if (errEl) errEl.hidden = true;
+    // Commit-time gate (root = .status-main, deliberately separate from the
+    // status tab's panels.status watcher so the two pending refreshes never
+    // overwrite each other's fire callbacks). dashData is already fresh —
+    // the deferred fire paints from the cache without a refetch.
+    if (deferAutoRefresh(main, () => renderDashboardContent())) return;
+    renderDashboardContent();
+  } catch (e) {
+    if (errEl) {
+      errEl.hidden = false;
+      // A failed refresh keeps the last successful data on screen — the banner
+    // (not a wipe) is how the failure surfaces.
+    errEl.textContent = 'dashboard unavailable: ' + e.message + (dashData ? ' — showing last successful data' : '');
+    }
+  } finally {
+    dashInflight = false;
+  }
+}
+
+// renderDashboardContent paints KPIs, chart and leaderboard from dashData.
+// Before the first response lands it shows a neutral loading state instead of
+// misleading zeroed KPIs.
+function renderDashboardContent() {
+  const main = document.querySelector('.status-main');
+  if (!main || !main.querySelector('.dash-wrap')) return;
+  if (!dashData) {
+    main.querySelector('#dash-kpis').innerHTML = '';
+    main.querySelector('#dash-chart').innerHTML = '<div class="empty-state">loading…</div>';
+    main.querySelector('#dash-legend').innerHTML = '';
+    main.querySelector('#dash-table').innerHTML = '';
+    return;
+  }
+  analyticsRenderKpis(main.querySelector('#dash-kpis'), dashData);
+  // Metric switch: repaint chart + leaderboard from the cached response —
+  // the window itself never changes, so no refetch is needed. The seg is
+  // redrawn here so its active highlight follows the selection.
+  analyticsSeg(main.querySelector('#dash-metric'), ANALYTICS_METRICS.map((m) => ({ value: m.id, label: m.label })),
+    dashMetric, (v) => {
+      dashMetric = v;
+      renderDashboardContent();
+    });
+  dashRenderChart(main.querySelector('#dash-chart'), main.querySelector('#dash-legend'));
+  dashRenderTable(main.querySelector('#dash-table'));
+}
+
+// uplotAxisStyle reads the theme colors for uPlot's canvas-drawn axis text,
+// ticks and grid. Canvas pixels don't inherit CSS, so without this the
+// default dark strokes are unreadable in dark mode. Colors still originate
+// from the :root variables (single source); this only forwards them.
+function uplotAxisStyle() {
+  const cs = getComputedStyle(document.documentElement);
+  const text = cs.getPropertyValue('--muted').trim() || '#656d76';
+  const line = cs.getPropertyValue('--border').trim() || '#d0d7de';
+  return { stroke: text, grid: { stroke: line, width: 1 }, ticks: { stroke: line, width: 1 } };
+}
+
+// dashRenderChart draws the dashboard's metric trend chart with uPlot — the
+// same translucent per-bucket columns, tooltip and legend chips as the
+// Analytics tab (shared helpers), but with the x window pinned to the
+// trailing hour and no drag-zoom: this is an at-a-glance live view, the
+// Analytics tab remains the deep-dive tool. The y scale keeps the 0 baseline
+// (all metrics are non-negative; auto-zoom would magnify noise). Updates the
+// existing instance in place (u.setData + sliding x window) when the series
+// set is unchanged so a refresh neither flickers nor resets hover.
+function dashRenderChart(host, legendHost) {
+  if (!host || !legendHost) return;
+  if (typeof uPlot === 'undefined') { // vendored script failed to load
+    host.innerHTML = '<div class="empty-state">charts unavailable</div>';
+    return;
+  }
+  const resp = dashData;
+  // The window grid comes from the response's echoed from/to (not the local
+  // clock) so the axis covers exactly what was queried.
+  const grid = analyticsWindowGrid(resp && resp.from, resp && resp.to, 'minute');
+  const data = analyticsChartSeries(resp && resp.series, dashMetric, grid);
+  if (!data.x.length || !data.labels.length) {
+    destroyDashChart();
+    host.innerHTML = '<div class="empty-state">No traffic in the last hour.</div>';
+    legendHost.innerHTML = '';
+    return;
+  }
+  const colors = analyticsChartColors();
+  const width = Math.max(host.clientWidth || 600, 320);
+  // The signature covers the metric too: a metric switch must rebuild the
+  // chart (new y axis label + tooltip formatter), not just swap the data.
+  const sig = dashMetric + '|' + data.labels.join('|');
+  if (dashChart && dashChart.sig === sig) {
+    // In-place update: same models on screen, new window slice. setData
+    // re-derives the x window from the live data (the scale's range fn
+    // below), so the axis slides with the fetch window.
+    dashChart.u.setData([data.x, ...data.ys]);
+    if (Math.abs(dashChart.width - width) > 1) {
+      dashChart.u.setSize({ width, height: 260 });
+      dashChart.width = width;
+    }
+    return;
+  }
+  destroyDashChart();
+  host.innerHTML = '';
+  const metric = ANALYTICS_METRICS.find((m) => m.id === dashMetric) || ANALYTICS_METRICS[0];
+  const uSeries = [{ label: 'time' }];
+  data.labels.forEach((label, i) => {
+    const stroke = colors[i % colors.length];
+    uSeries.push({ label, stroke, width: 1, fill: withAlpha(stroke, 0.55), paths: analyticsBarPaths(), points: { show: false } });
+  });
+  const axis = uplotAxisStyle();
+  try {
+    const u = new uPlot({
+      title: metric.label + ' (' + metric.axis + ')',
+      width,
+      height: 260,
+      series: uSeries,
+      scales: {
+        // The x window is derived from the live data on every (re)autscale,
+        // so it slides with each fetch's trailing-hour slice; the padded
+        // range keeps edge columns unclipped (see analyticsXRange). y keeps
+        // the 0 baseline (all metrics are non-negative).
+        x: { time: true, range: (u, min, max) => (u.data[0] && u.data[0].length ? analyticsXRange(u.data[0]) : [min, max]) },
+        y: { range: (_u, min, max) => [0, Math.max(max, min || 0, 1)] },
+      },
+      plugins: [analyticsTooltip(dashMetric, 'minute')],
+      axes: [
+        { ...axis, values: analyticsXAxisValues },
+        { label: metric.axis, size: 60, ...axis, values: (_u, splits) => splits.map((v) => (v == null ? '' : fmtCompact(v))) },
+      ],
+      legend: { show: false },
+    }, [data.x, ...data.ys], host);
+    dashChart = { u, sig, width, labels: data.labels };
+    analyticsRenderLegend(legendHost, u, data.labels, colors, dashLegendHidden);
+  } catch (_) { /* malformed data */ }
+}
+
+// dashRenderTable renders the dashboard leaderboard: the Analytics table's
+// window rows plus the merged Model Health view — a health status badge per
+// model (ok/warn/err from modelHealthFromSeries) and the graded value cells
+// (avg lat / ttft / tok/s carry their dimension's grade color, so a slow
+// dimension is visible at a glance next to the overall badge). Rows sort by
+// the active chart metric, same as the Analytics leaderboard.
+function dashRenderTable(host) {
+  if (!host) return;
+  const resp = dashData;
+  const rows = analyticsTableRows(resp && resp.series);
+  const health = new Map(modelHealthFromSeries(resp && resp.series).map((r) => [r.label, r]));
+  const totalCost = rows.reduce((sum, r) => sum + (r.cost || 0), 0);
+  rows.sort((a, b) => analyticsRowSortKey(b, dashMetric) - analyticsRowSortKey(a, dashMetric));
+  const gradeBadge = (g) => g == null ? '<span class="badge muted">n/a</span>'
+    : `<span class="badge ${g}">${g === 'ok' ? 'healthy' : g === 'warn' ? 'degraded' : 'poor'}</span>`;
+  const graded = (dim, text) => `<td class="num${dim && dim.grade ? ' ' + dim.grade : ''}">${text}</td>`;
+  const body = rows.map((r) => {
+    const h = health.get(r.label) || {};
+    const dims = h.dims || {};
+    const share = r.cost != null && totalCost > 0 ? r.cost / totalCost * 100 : null;
+    return `<tr>
+      <td class="mono">${esc(r.label)}</td>
+      <td>${gradeBadge(h.grade)}</td>
+      <td class="num">${fmtNum(r.requests)}</td>
+      <td class="num" title="${esc(fmtNum(r.tokens))} tokens">${fmtCompact(r.tokens)}</td>
+      <td class="num">${r.errPct == null ? '—' : r.errPct.toFixed(1) + '%'}</td>
+      ${graded(dims.latency, r.latencyMs == null ? '—' : fmtNum(Math.round(r.latencyMs)) + 'ms')}
+      ${graded(dims.ttft, r.ttftMs == null ? '—' : fmtNum(Math.round(r.ttftMs)) + 'ms')}
+      ${graded(dims.toksec, r.tokSec == null ? '—' : r.tokSec.toFixed(1))}
+      <td class="num">${r.cost == null ? 'n/a' : '$' + r.cost.toFixed(4)}</td>
+      <td class="num">${r.costPerMTok == null ? '—' : '$' + r.costPerMTok.toFixed(2)}</td>
+      <td class="an-share"><div class="an-bar" title="${share == null ? '' : share.toFixed(1) + '% of priced cost'}"><i style="width:${share == null ? 0 : Math.min(share, 100)}%"></i></div><span>${share == null ? '—' : share.toFixed(1) + '%'}</span></td>
+    </tr>`;
+  }).join('');
+  host.innerHTML = `<table class="table">
+      <thead><tr><th>series</th><th>status</th><th class="num">requests</th><th class="num">tokens</th><th class="num">err</th><th class="num">avg lat</th><th class="num">ttft</th><th class="num">tok/s</th><th class="num">cost</th><th class="num">$/1M tok</th><th class="num">cost share</th></tr></thead>
+      <tbody>${body || '<tr><td colspan="11" class="hint">no series in range</td></tr>'}</tbody>
+    </table>`;
 }
 
 // buildCard wraps a title + body in the .card/.card-head/.card-body shell.
@@ -2516,7 +3012,7 @@ function renderScheduleCard(target, st) {
       ).join('');
       chain += `<span class="route-pin-wrap">` +
         `<button class="btn small" data-pin-toggle="${esc(route)}" title="pin ${esc(route)} to one provider (no failover)">📌 pin</button>` +
-        `<div class="route-pin-menu" data-pin-menu="${esc(route)}" hidden>${items}</div>` +
+        `<div class="route-pin-menu" data-popup data-pin-menu="${esc(route)}" hidden>${items}</div>` +
         `</span>`;
     }
     if (!chain) chain = `<span class="route-meta">no providers available</span>`;
@@ -2778,7 +3274,7 @@ function renderTokensRangeControls(target) {
           <span class="tr-value">${esc(tokenRangeTriggerLabel(tokensRange))}</span>
           <span class="tr-chevron">▾</span>
         </button>
-        <div class="tr-popover" ${picker.open ? '' : 'hidden'}>
+        <div class="tr-popover" data-popup ${picker.open ? '' : 'hidden'}>
           <div class="tr-presets">${presets}</div>
           ${calendar}
         </div>
@@ -2989,6 +3485,11 @@ function bindLogSelection(pre) {
 //   capture scrollTop before re-render and restore it after — newly appended
 //   lines land below the fold and the visible content stays put. Snapping
 //   resumes only when the user scrolls back to the bottom.
+// logsOpenDetails remembers which over-long log lines the user expanded
+// (keyed by the line's <summary> prefix text) so a re-render that appends
+// new lines re-opens exactly those <details> instead of collapsing them.
+let logsOpenDetails = new Set();
+
 function renderLogsInto(target, lines) {
   const arr = lines || [];
   const key = arr.join('\n');
@@ -3003,8 +3504,26 @@ function renderLogsInto(target, lines) {
     wasAtBottom = bottomDist <= LOG_SNAP_THRESHOLD;
     if (!wasAtBottom) logsPrevScrollTop = logsPre.scrollTop;
   }
+  // Snapshot expanded long-line <details> before the rebuild and re-open
+  // the survivors after (lines that scrolled out of the 200-line tail drop
+  // out of the set naturally).
+  const openNow = new Set();
+  target.querySelectorAll('details.json-long[open]').forEach((d) => {
+    const s = d.querySelector('summary');
+    if (s) openNow.add(s.textContent);
+  });
+  logsOpenDetails = openNow;
   target.innerHTML = '';
   renderLogsCard(target, arr);
+  const found = new Set();
+  target.querySelectorAll('details.json-long').forEach((d) => {
+    const s = d.querySelector('summary');
+    if (s && logsOpenDetails.has(s.textContent)) {
+      d.open = true;
+      found.add(s.textContent);
+    }
+  });
+  logsOpenDetails = found;
   logsPrevKey = key;
   logsPre = target.querySelector('.log-pre');
   if (!logsPre) return;
@@ -4361,10 +4880,11 @@ function accountCard(p, a, quota, tokens) {
   const mail = a.email ? `<div class="acct-mail">${esc(a.email)}</div>` : '';
   const snap = quota ? quota[key] : null;
   const tokRows = (tokens || []).filter((t) => t.provider === key);
-  // pay-as-you-go providers have no Quota() to poll, so the Refresh-usage button
-  // (which re-polls quota) is meaningless for them — hide it. Plan/quota
-  // providers keep it.
-  const refreshBtn = p.billing === 'pay-as-you-go' ? ''
+  // Providers without a usage endpoint have no Quota() to poll, so the
+  // Refresh-usage button (which re-polls quota) is meaningless for them — hide
+  // it. Pay-as-you-go alone doesn't decide: deepseek is pay-as-you-go WITH a
+  // usage_url (/user/balance) and is polled like a plan provider.
+  const refreshBtn = (p.billing === 'pay-as-you-go' && !p.usage_endpoint) ? ''
     : `<button class="btn small" data-refresh="${esc(key)}" title="Re-poll this account's quota now">Refresh usage</button>`;
   return `<section class="card acct-card">
     <div class="account-row acct-card-head">
@@ -4390,29 +4910,11 @@ function accountCard(p, a, quota, tokens) {
 
 // accountUsageDetails wraps the per-account quota snapshot in a collapsible
 // section. The summary hint previews the state (remaining %, plan, or "no data")
-// so the user can scan without expanding.
+// so the user can scan without expanding. Pure hint/open logic lives in
+// accountUsageState (pure.js) so it can be unit-tested.
 function accountUsageDetails(p, snap, acctKey) {
-  let hint = 'no data';
-  if (snap && snap.Err) {
-    const k = quotaErrKind(snap);
-    hint = k === 'session-expired' ? 'session expired'
-      : k === 'not-logged-in' ? 'not logged in' : 'error';
-  } else if (snap) {
-    const ult = (snap.Windows || []).find((w) => w.Ultimate);
-    if (ult && ult.RemainingPct != null && ult.RemainingPct >= 0) {
-      // Same 1-decimal precision as the expanded window's pct (renderAccountUsage)
-      // so the collapsed hint and the expanded bar agree (e.g. both "48.6%", not
-      // "49%" vs "48.6%").
-      hint = (ult.RemainingPct * 100).toFixed(1) + '% left';
-    } else if (snap.Plan) {
-      hint = snap.Plan;
-    } else {
-      hint = 'available';
-    }
-  }
-  // Default the section to collapsed when there is no snapshot at all ("no
-  // data") - an error snapshot stays open so the Re-login action is visible.
-  const openAttr = snap ? ' open' : '';
+  const { hint, open } = accountUsageState(snap);
+  const openAttr = open ? ' open' : '';
   return `<details class="acct-section" data-acct="${esc(acctKey)}" data-sec="usage"${openAttr}>
     <summary>Usage<span class="acct-hint">${esc(hint)}</span></summary>
     <div class="acct-section-body">${renderAccountUsage(p, snap)}</div>
@@ -4447,14 +4949,6 @@ function accountTokensDetails(rows, acctKey) {
 // browser). p may be null when the provider context is unavailable (Status tab
 // reuses the bar rendering without an account context) - then the bare error is
 // shown.
-function quotaErrKind(snap) {
-  if (!snap || !snap.Err) return '';
-  const e = snap.Err.toLowerCase();
-  if (e.includes('session expired')) return 'session-expired';
-  if (e.includes('not logged in')) return 'not-logged-in';
-  return 'error';
-}
-
 function renderAccountUsage(p, snap) {
   if (!snap) return `<div class="acct-empty">no usage data</div>`;
   if (snap.Err) {
@@ -4793,124 +5287,462 @@ function pollLogin(sessionId) {
 // ANALYTICS TAB
 // ===========================================================================
 //
-// Renders the Analytics tab: range/granularity/provider/model controls, then
-// fetches /api/analytics and draws two uPlot trend charts (tokens + equivalent
-// cost), a cost-only summary table, and an unpriced-models hint when some
-// series have no configured price. Per-request/token totals live on the Status
-// page (Token usage), so this tab is deliberately trends + cost only. The chart
-// data binding matches the /api/analytics JSON shape:
-//   series[].points[].{bucket,requests,input,output,cache_creation,cache_read,cost,priced}
+// Renders the Analytics tab: one compact toolbar (range / granularity /
+// provider / model / dimension), a KPI row with period-over-period deltas,
+// ONE trend chart with a metric switcher (tokens / cost / requests / errors /
+// latency / ttft / cache), and a leaderboard table sorted by the active
+// metric. The API binding (see /api/analytics in docs/web-api.md):
+//   series[].points[].{bucket,requests,failovers,rate_limited_429,failures,
+//     input,output,cache_creation,cache_read,avg_latency_ms,avg_ttft_ms,cost,priced}
+//   totals.{requests,failures,input,output,cache_creation,cache_read,cost}
+//   compare.{from,to,requests,failures,input,output,cost}  (equal-length previous window)
 //   price_coverage.{priced,unpriced}
+// Per-request/token tables live on the Status page (Token usage/Agents); this
+// tab owns trends, reliability and cost analysis. by=agent switches the
+// series dimension to agent_buckets ("which client is burning tokens").
 // Control selections persist to localStorage so a refresh keeps the view.
 
 // analyticsState reads the tab's control selections from localStorage (with
-// sane defaults). Returns {range, gran, provider, model}.
+// sane defaults). Returns {range, gran, provider, model, by, metric}.
+// analyticsState reads the tab's control selections from localStorage (with
+// sane defaults). Returns {range, gran, provider, model, by, metric}; range
+// is the same {preset, customStart, customEnd} shape as the Status→Token
+// usage picker (persisted as JSON under 'an-range2').
 function analyticsState() {
+  let range = { preset: '1h', customStart: '', customEnd: '' };
+  try {
+    const raw = localStorage.getItem('an-range2');
+    if (raw) {
+      const v = JSON.parse(raw);
+      if (v && typeof v.preset === 'string') range = { customStart: '', customEnd: '', ...v };
+    }
+  } catch (_) { /* ignore */ }
   return {
-    range: localStorage.getItem('an-range') || '30',
-    gran: localStorage.getItem('an-gran') || 'day',
+    range,
+    gran: localStorage.getItem('an-gran') || 'auto',
     provider: localStorage.getItem('an-provider') || '',
     model: localStorage.getItem('an-model') || '',
+    by: localStorage.getItem('an-by') || 'model',
+    metric: localStorage.getItem('an-metric') || 'tokens',
   };
 }
 
-// analyticsSave persists one control value. Wrap in try/catch so private-mode
-// browsers (where localStorage throws) don't break the tab.
+// analyticsSave persists one control value (strings verbatim, objects as
+// JSON). Wrap in try/catch so private-mode browsers (where localStorage
+// throws) don't break the tab.
 function analyticsSave(name, val) {
-  try { localStorage.setItem('an-' + name, val); } catch (_) { /* ignore */ }
+  try { localStorage.setItem('an-' + name, typeof val === 'string' ? val : JSON.stringify(val)); } catch (_) { /* ignore */ }
 }
 
-// renderAnalyticsTab fetches /api/analytics and renders token + equivalent-cost
-// trend charts (uPlot), a summary table, and an unpriced-models hint.
-async function renderAnalyticsTab() {
-  const panel = panels.analytics;
-  if (!panel) return;
-  destroyAnalyticsCharts(); // the innerHTML reset below drops the chart DOM
-  const state = analyticsState();
-  panel.innerHTML = `
-    <div class="analytics-controls">
-      <label>Range
-        <select id="an-range">
-          <option value="7">7d</option><option value="30">30d</option>
-          <option value="90">90d</option><option value="365">all</option>
-        </select>
-      </label>
-      <label>Granularity
-        <select id="an-gran">
-          <option value="day">Day</option><option value="month">Month</option>
-        </select>
-      </label>
-      <label>Provider
-        <input id="an-provider" placeholder="provider" list="an-provider-list" />
-      </label>
+// analyticsRangeBounds resolves the picker state to {from, to} unix seconds:
+// presets via tokenRangeBounds (local-time aligned), custom via
+// tokenCustomBounds (closed full local days), 'all' → from 0 (whole history).
+// An invalid custom range returns null (the caller falls back to all-time).
+function analyticsRangeBounds(range) {
+  if (range.preset === 'custom') return tokenCustomBounds(range.customStart, range.customEnd);
+  if (range.preset === 'all') return { from: 0, to: Math.floor(Date.now() / 1000) };
+  return tokenRangeBounds(range.preset);
+}
+
+// anRangePicker is the analytics date picker's own UI state (same shape as
+// the Status tab's tokensRangePicker): open flag, the two-month calendar
+// view anchor, an in-progress custom start-day pick. Module-level so it
+// survives the picker's own re-renders (which deliberately do NOT refetch).
+let anRangePicker = { open: false, view: null, pick: null, selecting: false };
+
+// analyticsPickerClose closes the popover and discards any in-progress pick
+// — Esc and outside clicks never change the applied range.
+function analyticsPickerClose() {
+  anRangePicker = { open: false, view: null, pick: null, selecting: false };
+  document.removeEventListener('keydown', analyticsPickerOnKey);
+  document.removeEventListener('click', analyticsPickerOnOutside, true);
+}
+
+function analyticsPickerOnKey(e) {
+  if (e.key === 'Escape') {
+    const panel = panels.analytics;
+    analyticsPickerClose();
+    if (panel) analyticsPickerRender(panel);
+  }
+}
+
+function analyticsPickerOnOutside(e) {
+  if (!e.target.closest('.tr-wrap')) {
+    const panel = panels.analytics;
+    analyticsPickerClose();
+    if (panel) analyticsPickerRender(panel);
+  }
+}
+
+// analyticsPickerHTML renders the date-range trigger + popover using the same
+// .tr-* markup and pure.js calendar helpers as the Status→Token usage picker
+// (identical look and interaction), bound to the analytics range state.
+function analyticsPickerHTML() {
+  const range = analyticsState().range;
+  const picker = anRangePicker;
+  const presets = TOKEN_RANGES.map((w) => {
+    const active = w.value === 'custom'
+      ? (range.preset === 'custom' || picker.selecting)
+      : range.preset === w.value;
+    return `<button class="tr-preset${active ? ' active' : ''}" data-an-preset="${esc(w.value)}">
+      <span class="tr-check">${active ? '✓' : ''}</span>${esc(w.label)}
+    </button>`;
+  }).join('');
+
+  let calendar = '';
+  if (picker.open) {
+    const now = Date.now();
+    const months = twoMonthWindow(picker.view.year, picker.view.month).map(({ year, month }) => {
+      const weeks = calendarMonthGrid(year, month).map((week) => `<tr>${week.map((day) => {
+        if (day === null) return '<td class="tr-blank"></td>';
+        const dayYmd = ymd(year, month, day);
+        const future = isFutureDay(year, month, day, now);
+        const applied = range.preset === 'custom' && !picker.pick ? range : null;
+        const isStart = dayYmd === picker.pick || (applied && dayYmd === applied.customStart);
+        const isEnd = applied && dayYmd === applied.customEnd;
+        const inRange = applied && !isStart && !isEnd &&
+          dayYmd > applied.customStart && dayYmd < applied.customEnd;
+        const cls = ['tr-day'];
+        if (isStart || isEnd) cls.push('tr-day-selected');
+        else if (inRange) cls.push('tr-day-inrange');
+        return `<td><button class="${cls.join(' ')}" data-an-day="${dayYmd}" ${future ? 'disabled' : ''}>${day}</button></td>`;
+      }).join('')}</tr>`).join('');
+      const header = WEEKDAYS.map((w) => `<th>${w}</th>`).join('');
+      return `<div class="tr-month">
+        <div class="tr-month-title">${esc(monthTitle(year, month))}</div>
+        <table class="tr-grid"><thead><tr>${header}</tr></thead><tbody>${weeks}</tbody></table>
+      </div>`;
+    }).join('');
+    const thisMonth = (() => { const d = new Date(now); return d.getFullYear() * 12 + d.getMonth(); })();
+    const viewRight = picker.view.year * 12 + picker.view.month + 1;
+    calendar = `<div class="tr-cal">
+      <button class="tr-nav tr-prev" data-an-nav="-1" aria-label="previous month">‹</button>
+      <div class="tr-months">${months}</div>
+      <button class="tr-nav tr-next" data-an-nav="1" aria-label="next month" ${viewRight >= thisMonth ? 'disabled' : ''}>›</button>
+    </div>`;
+  }
+
+  return `<div class="tr-wrap">
+    <button class="btn small tr-trigger" type="button" aria-haspopup="true" aria-expanded="${picker.open}">
+      <span class="tr-caption">Time Range</span>
+      <span class="tr-value">${esc(tokenRangeTriggerLabel(range))}</span>
+      <span class="tr-chevron">▾</span>
+    </button>
+    <div class="tr-popover" data-popup ${picker.open ? '' : 'hidden'}>
+      <div class="tr-presets">${presets}</div>
+      ${calendar}
+    </div>
+  </div>`;
+}
+
+// analyticsPickerRender (re)draws the picker into its toolbar host and wires
+// the interactions. Picker-internal updates (open/close, month navigation,
+// day picking) re-render ONLY this markup — no refetch, no chart rebuild;
+// applying a range persists it and re-renders the whole tab.
+function analyticsPickerRender(panel) {
+  const host = panel.querySelector('#an-range-host');
+  if (!host) return;
+  host.innerHTML = analyticsPickerHTML();
+  host.querySelector('.tr-trigger').onclick = () => {
+    if (anRangePicker.open) {
+      analyticsPickerClose();
+    } else {
+      const anchor = (analyticsState().range.preset === 'custom' && parseLocalDate(analyticsState().range.customStart)) || new Date();
+      anRangePicker = { open: true, view: { year: anchor.getFullYear(), month: anchor.getMonth() }, pick: null, selecting: false };
+      document.addEventListener('keydown', analyticsPickerOnKey);
+      document.addEventListener('click', analyticsPickerOnOutside, true);
+    }
+    analyticsPickerRender(panel);
+  };
+  host.querySelectorAll('[data-an-preset]').forEach((btn) => {
+    btn.onclick = () => {
+      const value = btn.dataset.anPreset;
+      if (value === 'custom') {
+        anRangePicker.selecting = true;
+        anRangePicker.pick = null;
+        analyticsPickerRender(panel);
+        return;
+      }
+      analyticsSave('range2', { preset: value, customStart: '', customEnd: '' });
+      // A new window invalidates an explicit granularity pick (minute over a
+      // month is nonsense) — reset to auto, which re-derives from the span;
+      // a new window also drops any drag-zoom selection.
+      analyticsSave('gran', 'auto');
+      anZoom = null;
+      analyticsPickerClose();
+      renderAnalyticsTab();
+    };
+  });
+  host.querySelectorAll('[data-an-day]').forEach((btn) => {
+    btn.onclick = () => {
+      if (!anRangePicker.selecting && analyticsState().range.preset !== 'custom') {
+        anRangePicker.selecting = true;
+      }
+      const result = rangePick(anRangePicker.pick, btn.dataset.anDay);
+      if (!result.complete) {
+        anRangePicker.pick = result.pick;
+        analyticsPickerRender(panel);
+        return;
+      }
+      analyticsSave('range2', { preset: 'custom', customStart: result.start, customEnd: result.end });
+      analyticsSave('gran', 'auto'); // same reset as preset switches
+      anZoom = null;
+      analyticsPickerClose();
+      renderAnalyticsTab();
+    };
+  });
+  host.querySelectorAll('[data-an-nav]').forEach((btn) => {
+    btn.onclick = () => {
+      anRangePicker.view = shiftMonth(anRangePicker.view.year, anRangePicker.view.month, Number(btn.dataset.anNav));
+      analyticsPickerRender(panel);
+    };
+  });
+}
+
+// analyticsSeg renders one segmented control into `host` ([value,label,
+// disabled?] options + the active value) and wires onclick. Everything on
+// the toolbar applies immediately — there is no separate Apply/Refresh step.
+// Disabled options stay visible (stable layout) but are unclickable. Shared
+// by the Analytics tab's toolbar and the Status→Dashboard metric switcher.
+function analyticsSeg(host, options, active, onChange) {
+  if (!host) return;
+  host.innerHTML = options.map((o) =>
+    `<button type="button" data-v="${esc(o.value)}"${o.value === active ? ' class="active"' : ''}${o.disabled ? ' disabled' : ''}>${esc(o.label)}</button>`).join('');
+  host.onclick = (e) => {
+    const btn = e.target.closest('button[data-v]');
+    if (btn && !btn.disabled && btn.dataset.v !== active) onChange(btn.dataset.v);
+  };
+}
+
+// renderAnalyticsTab fetches /api/analytics and renders the toolbar, KPI row
+// (with deltas vs the previous equal-length window), the metric-switchable
+// trend chart and the leaderboard table. background=true marks the 30s
+// live-window tick: entry (and therefore the panel wipe below) is gated on
+// user interaction inside the panel — an open picker popover, typing in the
+// provider/model filters — so the auto-refresh can never close a dropdown or
+// eat uncommitted filter text. Explicit renders (control changes, tab entry)
+// are user-initiated: those close the popups themselves and run directly.
+// analyticsLayoutHTML is the Analytics tab's full skeleton (toolbar + KPI
+// host + chart card + leaderboard host), shared by the success render and
+// the first-load failure render so both build the identical DOM.
+function analyticsLayoutHTML() {
+  return `
+    <div class="an-toolbar">
+      <span id="an-range-host"></span>
+      <div class="an-seg" id="an-gran" role="group" aria-label="Granularity"></div>
+      <input id="an-provider" class="req-input" placeholder="provider" list="an-provider-list" autocomplete="off" spellcheck="false" />
       <datalist id="an-provider-list"></datalist>
-      <label>Model
-        <input id="an-model" placeholder="model" list="an-model-list" />
-      </label>
+      <input id="an-model" class="req-input" placeholder="model" list="an-model-list" autocomplete="off" spellcheck="false" />
       <datalist id="an-model-list"></datalist>
-      <button id="an-refresh" class="btn small" type="button">Refresh</button>
+      <div class="an-seg" id="an-by" role="group" aria-label="Dimension"></div>
     </div>
     <div id="an-error" class="msg err" hidden></div>
-    <div id="an-unpriced" class="an-hint" hidden></div>
-    <div class="an-charts">
-      <div id="an-token-chart" class="an-chart"></div>
-      <div id="an-cost-chart" class="an-chart"></div>
+    <div id="an-kpis" class="an-kpis"></div>
+    <div class="an-chart-card">
+      <div class="an-chart-head">
+        <div class="an-seg" id="an-metric" role="group" aria-label="Metric"></div>
+      </div>
+      <div class="an-chart-wrap">
+        <div id="an-chart" class="an-chart"></div>
+        <button type="button" id="an-zoom-reset" class="an-zoom-reset" hidden>↔ reset zoom</button>
+      </div>
+      <div id="an-legend"></div>
     </div>
-    <div id="an-cost-table" class="an-cost-table"></div>`;
-  const elRange = panel.querySelector('#an-range');
-  const elGran = panel.querySelector('#an-gran');
-  const elProvider = panel.querySelector('#an-provider');
-  const elModel = panel.querySelector('#an-model');
-  elRange.value = state.range;
-  elGran.value = state.gran;
-  elProvider.value = state.provider;
-  elModel.value = state.model;
-  // Persist on change + re-render so the new selection takes effect immediately.
-  elRange.onchange = () => { analyticsSave('range', elRange.value); renderAnalyticsTab(); };
-  elGran.onchange = () => { analyticsSave('gran', elGran.value); renderAnalyticsTab(); };
-  elProvider.onchange = () => { analyticsSave('provider', elProvider.value); renderAnalyticsTab(); };
-  elModel.onchange = () => { analyticsSave('model', elModel.value); renderAnalyticsTab(); };
-  panel.querySelector('#an-refresh').onclick = () => { renderAnalyticsTab(); };
-
-  const from = Math.floor((Date.now() - Number(state.range) * 86400 * 1000) / 1000);
-  const to = Math.floor(Date.now() / 1000);
-  const q = new URLSearchParams({ from: String(from), to: String(to), granularity: state.gran });
-  if (state.provider) q.set('provider', state.provider);
-  if (state.model) q.set('model', state.model);
-  let resp;
-  const errEl = panel.querySelector('#an-error');
-  try {
-    resp = await apiGet('/api/analytics?' + q.toString());
-    if (errEl) errEl.hidden = true;
-  } catch (e) {
-    if (errEl) {
-      errEl.hidden = false;
-      errEl.textContent = 'analytics unavailable: ' + e.message;
-    }
-    return;
-  }
-  analyticsFillDatalists(panel, resp, state.provider);
-  analyticsRenderHints(panel, resp);
-  analyticsRenderCharts(panel, resp);
-  analyticsRenderCostTable(panel, resp);
+    <div id="an-table" class="an-table-card"></div>`;
 }
 
-// analyticsRenderHints surfaces the unpriced-models hint when /api/analytics
-// reports models with no configured price. The hint nudges the operator toward
-// adding a `prices:` entry, since equivalent-cost totals silently exclude
-// unpriced series.
-function analyticsRenderHints(panel, resp) {
-  const el = panel.querySelector('#an-unpriced');
-  if (!el) return;
-  const un = (resp && resp.price_coverage && resp.price_coverage.unpriced) || [];
-  if (un.length) {
-    el.hidden = false;
-    el.textContent = un.length + ' model(s) unpriced (no equivalent cost): ' + un.join(', ') +
-      '. Add a `prices:` entry in config to price them.';
-  } else {
-    el.hidden = true;
-    el.textContent = '';
+// buildAnalyticsLayout (re)builds the toolbar + skeleton and wires every
+// control. Shared by every render path (success and first-load failure) so
+// the two never drift.
+function buildAnalyticsLayout(panel, state, granOptions, granActive) {
+  destroyAnalyticsCharts(); // the innerHTML reset below drops the chart DOM
+  panel.innerHTML = analyticsLayoutHTML();
+  // Date-range picker (same trigger/popover/calendar as Status→Token usage).
+  analyticsPickerRender(panel);
+  analyticsSeg(panel.querySelector('#an-gran'), granOptions.map((o) => ({
+    value: o.id, label: o.label, disabled: !o.allowed,
+  })), granActive, (v) => { analyticsSave('gran', v); anZoom = null; renderAnalyticsTab(); });
+  analyticsSeg(panel.querySelector('#an-by'), [
+    { value: 'model', label: 'by model' }, { value: 'agent', label: 'by agent' },
+  ], state.by, (v) => { analyticsSave('by', v); renderAnalyticsTab(); });
+  analyticsSeg(panel.querySelector('#an-metric'), ANALYTICS_METRICS.map((m) => ({ value: m.id, label: m.label })),
+    state.metric, (v) => { analyticsSave('metric', v); renderAnalyticsTab(); });
+  const elProvider = panel.querySelector('#an-provider');
+  const elModel = panel.querySelector('#an-model');
+  elProvider.value = state.provider;
+  elModel.value = state.model;
+  // Free-text filters: commit on Enter or blur (change), not per keystroke.
+  for (const [input, key] of [[elProvider, 'provider'], [elModel, 'model']]) {
+    input.onchange = () => {
+      const v = input.value.trim();
+      if (v === analyticsState()[key]) return; // unchanged — no refetch
+      analyticsSave(key, v);
+      renderAnalyticsTab();
+    };
+    input.onkeydown = (e) => { if (e.key === 'Enter') input.blur(); };
   }
+}
+
+async function renderAnalyticsTab(background = false) {
+  const panel = panels.analytics;
+  if (!panel) return;
+  if (background && deferAutoRefresh(panel, () => renderAnalyticsTab(true))) return;
+  analyticsStopAutoRefresh();
+  const state = analyticsState();
+  // Window bounds drive both the query and the granularity gating — computed
+  // from state (localStorage) BEFORE any DOM write so a failed background
+  // refresh can keep the previous view untouched.
+  const bounds = analyticsRangeBounds(state.range) || { from: 0, to: Math.floor(Date.now() / 1000) };
+  const spanSec = Math.max(bounds.to - bounds.from, 1);
+  const granOptions = analyticsGranOptions(spanSec);
+  // A stored explicit granularity the new range disallows shows 'auto'
+  // active (the effective pick falls back inside analyticsGranularity).
+  const granPrefAllowed = state.gran === 'auto' || (granOptions.find((o) => o.id === state.gran) || {}).allowed;
+  const granActive = granPrefAllowed ? state.gran : 'auto';
+  const gran = analyticsGranularity(spanSec, granActive);
+  const q = new URLSearchParams({ from: String(bounds.from), to: String(bounds.to), granularity: gran, by: state.by });
+  if (state.provider) q.set('provider', state.provider);
+  if (state.model) q.set('model', state.model);
+  let resp = null;
+  let fetchErr = null;
+  try {
+    resp = await apiGet('/api/analytics?' + q.toString());
+  } catch (e) {
+    fetchErr = e;
+  }
+  // A failed refresh with a rendered view must not destroy it: keep the
+  // charts/KPIs on screen and report through the shared stale-data banner.
+  // (The auto-refresh timer is re-armed below so a later tick retries.)
+  if (fetchErr && panel.querySelector('#an-kpis')) {
+    setRefreshError(panel, staleDataText('analytics unavailable: ' + fetchErr.message));
+    analyticsMaybeAutoRefresh();
+    return;
+  }
+  // Commit-time gate: an interaction that started while this fetch was in
+  // flight (picker opened, filter focused) defers the landing writes — the
+  // hold watcher re-runs a fresh background render once the user is done.
+  if (background && deferAutoRefresh(panel, () => renderAnalyticsTab(true))) return;
+  buildAnalyticsLayout(panel, state, granOptions, granActive);
+  const errEl = panel.querySelector('#an-error');
+  if (fetchErr) {
+    // First render with nothing to preserve: skeleton + inline error (the
+    // toolbar stays wired so the user can change filters and retry).
+    if (errEl) {
+      errEl.hidden = false;
+      errEl.textContent = 'analytics unavailable: ' + fetchErr.message;
+    }
+    analyticsMaybeAutoRefresh();
+    return;
+  }
+  if (errEl) errEl.hidden = true;
+  analyticsFillDatalists(panel, resp, state.provider);
+  analyticsRenderKpis(panel.querySelector('#an-kpis'), resp);
+  analyticsRenderCharts(panel, resp, state.metric, gran);
+  analyticsRenderTable(panel, resp, state.metric);
+  analyticsMaybeAutoRefresh();
+}
+
+// anRefreshTimer periodically re-renders the tab for the LIVE windows (Last
+// 1h / Today) whose trailing edge moves with the clock — a stale "last hour"
+// chart is a lie by omission. Everything else refreshes on demand. Ticks pass
+// through the interaction gate: an open picker or focused filter defers the
+// re-render until the interaction ends (the hold watcher fires a fresh
+// background render). The interval is re-armed by every render; switching
+// tabs leaves a ticking no-op until the next analytics render stops it.
+let anRefreshTimer = null;
+
+function analyticsStopAutoRefresh() {
+  if (anRefreshTimer) {
+    clearInterval(anRefreshTimer);
+    anRefreshTimer = null;
+  }
+  cancelAutoRefreshHold(panels.analytics);
+}
+
+// analyticsMaybeAutoRefresh arms the live-window refresh: every 30s while
+// the Analytics tab is the ACTIVE view, deferred while the user interacts
+// with the toolbar (open date picker, focused filter input) via the shared
+// auto-refresh gate.
+function analyticsMaybeAutoRefresh() {
+  analyticsStopAutoRefresh();
+  const st = analyticsState();
+  if (st.range.preset !== '1h' && st.range.preset !== 'today') return;
+  anRefreshTimer = setInterval(() => {
+    const panel = panels.analytics;
+    if (!panel || !panel.classList.contains('active')) return;
+    if (deferAutoRefresh(panel, () => renderAnalyticsTab(true))) return;
+    renderAnalyticsTab(true);
+  }, 30000);
+}
+
+// fmtDelta renders a pctDelta as the chip's delta line: "▲ +12.3%". null
+// (undefined comparison: no previous window, or previous was zero) renders
+// an em dash so the chip stays aligned. warn=true colors a rise as a warning
+// (failures); otherwise deltas stay neutral — more requests or cost is not
+// inherently bad.
+function fmtDelta(delta, warn) {
+  if (delta == null) return '<span class="d">—</span>';
+  const arrow = delta > 0 ? '▲' : delta < 0 ? '▼' : '';
+  const cls = warn && delta > 0 ? 'd warn' : 'd';
+  const sign = delta > 0 ? '+' : '';
+  return `<span class="${cls}">${arrow} ${sign}${delta}%</span>`;
+}
+
+// analyticsRenderKpis renders the summary chips: tokens / tok-s / cache
+// hit / requests / failures / cost, each with the delta vs the equal-length
+// window before the selected one (resp.compare). Shared by the Analytics
+// tab and the Status→Dashboard (fixed 1h window). The tokens chip is the
+// four-bucket total (input+output+cache_creation+cache_read — the same
+// total as Status→Token usage): cache reads dominate real prompt workloads,
+// so an in+out-only count reads as an undercount; the tooltip carries the
+// per-bucket breakdown. The hit rate is cache_read over the full prompt
+// workload (input + cache_creation + cache_read — the buckets keep input
+// EXCLUDING cached tokens). The unpriced-models note rides the cost chip:
+// equivalent cost silently excludes unpriced series, so the note keeps that
+// visible without a separate banner.
+function analyticsRenderKpis(host, resp) {
+  if (!host) return;
+  const t = (resp && resp.totals) || {};
+  const c = (resp && resp.compare) || null;
+  const un = (resp && resp.price_coverage && resp.price_coverage.unpriced) || [];
+  // Derived metrics (tokens total, tok/s, cache hit) are read straight from
+  // the server's unified block — the same definitions as every other view.
+  const hit = t.cache_hit_pct == null ? null : Number(t.cache_hit_pct);
+  const prevHit = c && c.cache_hit_pct != null ? Number(c.cache_hit_pct) : null;
+  // Token counts render K/M-compacted (fmtCompact, 2 decimals); the exact
+  // per-bucket breakdown stays one hover away via the title tooltip.
+  const tokensChip = {
+    k: 'tokens',
+    v: fmtCompact(t.tokens || 0, 2),
+    tip: `in ${fmtNum(t.input || 0)} · out ${fmtNum(t.output || 0)} · cache read ${fmtNum(t.cache_read || 0)} · cache write ${fmtNum(t.cache_creation || 0)}`,
+    d: pctDelta(t.tokens || 0, c ? c.tokens : null),
+  };
+  const chips = [
+    tokensChip,
+    (() => {
+      // Window tok/s: the server's OUTPUT-decode-speed field (output ÷ full
+      // call seconds — matches what clients display; fresh input is prefix
+      // speed, not decode).
+      const v = t.tok_sec == null ? null : Number(t.tok_sec);
+      const pv = c && c.tok_sec != null ? Number(c.tok_sec) : null;
+      return { k: 'tok/s', v: v == null ? '—' : v.toFixed(1), tip: v == null ? '' : v.toFixed(2) + ' output tokens per call-second', d: pctDelta(v, pv) };
+    })(),
+    { k: 'cache hit', v: hit == null ? '—' : hit.toFixed(1) + '%', d: pctDelta(hit, prevHit) },
+    { k: 'requests', v: fmtNum(t.requests || 0), d: pctDelta(t.requests || 0, c && c.requests) },
+    { k: 'failures', v: fmtNum(t.failures || 0), d: pctDelta(t.failures || 0, c && c.failures), warn: true },
+    {
+      k: 'cost (USD)',
+      v: t.cost == null ? 'n/a' : '$' + t.cost.toFixed(2),
+      d: pctDelta(t.cost == null ? null : t.cost, c ? c.cost : null),
+      note: un.length ? `${un.length} unpriced: ${un.join(', ')}` : '',
+    },
+  ];
+  host.innerHTML = chips.map((chip) => `
+    <div class="an-kpi">
+      <div class="k">${esc(chip.k)}</div>
+      <div class="v"${chip.tip ? ` title="${esc(chip.tip)}"` : ''}>${esc(chip.v)}</div>
+      <div>${fmtDelta(chip.d, chip.warn)}${chip.note ? `<div class="note" title="${esc(chip.note)}">${esc(chip.note)}</div>` : ''}</div>
+    </div>`).join('');
 }
 
 // analyticsChartColors reads the categorical chart palette from the :root CSS
@@ -4930,8 +5762,14 @@ function analyticsChartColors() {
 // previous ones instead of leaking them.
 let analyticsCharts = [];
 
-// destroyAnalyticsCharts tears down the charts rendered for the previous view.
+// destroyAnalyticsCharts tears down the charts rendered for the previous view
+// and detaches the legend dropdown's document-level listener (the innerHTML
+// reset below would otherwise orphan it).
 function destroyAnalyticsCharts() {
+  if (anLegendOutside) {
+    document.removeEventListener('click', anLegendOutside);
+    anLegendOutside = null;
+  }
   for (const u of analyticsCharts) {
     try { u.destroy(); } catch (_) { /* already detached */ }
   }
@@ -4958,72 +5796,427 @@ function analyticsFillDatalists(panel, resp, provider) {
   if (mList) mList.innerHTML = models.map((m) => `<option value="${esc(m)}"></option>`).join('');
 }
 
-// analyticsRenderCharts draws the token + equivalent-cost trend charts with
-// uPlot. Each (provider,model) series becomes one line, sharing a color across
-// both charts. x is in unix seconds — uPlot's time unit — and every series gets
-// an explicit stroke because uPlot 1.6.x does not auto-assign colors (a missing
-// stroke renders the axes and legend but no line).
-function analyticsRenderCharts(panel, resp) {
-  if (typeof uPlot === 'undefined') return; // vendored script failed to load
-  const tokenHost = panel.querySelector('#an-token-chart');
-  const costHost = panel.querySelector('#an-cost-chart');
-  if (!tokenHost || !costHost) return;
-  destroyAnalyticsCharts();
-  tokenHost.innerHTML = '';
-  costHost.innerHTML = '';
-  const token = analyticsChartSeries(resp && resp.series, 'tokens');
-  const cost = analyticsChartSeries(resp && resp.series, 'cost');
-  if (!token.x.length) return;
-  const colors = analyticsChartColors();
-  const tokenSeries = [{ label: 'time' }];
-  const costSeries = [{ label: 'time' }];
-  token.labels.forEach((label, i) => {
-    const stroke = colors[i % colors.length];
-    tokenSeries.push({ label, stroke, width: 1.5, points: { show: false } });
-    costSeries.push({ label, stroke, width: 1.5, points: { show: false } });
-  });
-  const baseOpts = (host, title, yLabel) => ({
-    title,
-    width: Math.max(host.clientWidth || 600, 320),
-    height: 220,
-    series: [],
-    scales: { x: { time: true } },
-    axes: [{}, { label: yLabel, size: 60 }],
-    legend: { show: true, live: false },
-  });
-  const tokenOpts = baseOpts(tokenHost, 'Tokens (input + output)', 'tokens');
-  tokenOpts.series = tokenSeries;
-  try { analyticsCharts.push(new uPlot(tokenOpts, [token.x, ...token.ys], tokenHost)); } catch (_) { /* malformed data */ }
-  const costOpts = baseOpts(costHost, 'Equivalent cost (USD)', 'USD');
-  costOpts.series = costSeries;
-  try { analyticsCharts.push(new uPlot(costOpts, [cost.x, ...cost.ys], costHost)); } catch (_) { /* malformed data */ }
+// analyticsBucketLabel formats one bucket timestamp (unix seconds) for the
+// tooltip header, matching the granularity's natural resolution in the local
+// timezone.
+function analyticsBucketLabel(t, gran) {
+  const d = new Date(t * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  if (gran === 'month') return `${d.getFullYear()}-${p(d.getMonth() + 1)}`;
+  if (gran === 'week' || gran === 'day') return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  if (gran === 'minute') return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:00`;
 }
 
-// analyticsRenderCostTable renders the cost view Token Usage does not have: one
-// row per (provider,model) with the window's equivalent cost and its share of
-// the priced total. Token/request totals deliberately stay on the Status page,
-// so the two views do not duplicate each other.
-function analyticsRenderCostTable(panel, resp) {
-  const host = panel.querySelector('#an-cost-table');
-  if (!host) return;
-  const rows = ((resp && resp.series) || []).map((s) => {
-    let cost = null;
-    for (const p of s.points) {
-      if (p.cost != null) cost = (cost || 0) + p.cost;
+// analyticsWindowGrid builds the complete bucket-timestamp grid covering the
+// queried window at the chosen granularity (local-timezone day/month starts,
+// matching the server's calendar bucketing). The chart x axis uses this grid
+// so sparse traffic renders honestly: empty buckets become zero (count
+// metrics) or gaps (rate metrics) instead of long diagonal lines connecting
+// distant points. Capped defensively; an oversized/degenerate grid falls back
+// to empty (the chart then spans only the data buckets).
+function analyticsWindowGrid(from, to, gran) {
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return [];
+  const out = [];
+  if (gran === 'minute' || gran === 'hour') {
+    // Fixed-second steps; anchor at the boundary (timezone offsets are
+    // constant except across DST, a cosmetic edge).
+    const step = gran === 'minute' ? 60 : 3600;
+    for (let t = Math.floor(from / step) * step; t <= to && out.length < 10000; t += step) out.push(t);
+    return out;
+  }
+  const end = new Date(to * 1000);
+  let d = new Date(from * 1000);
+  if (gran === 'month') {
+    d = new Date(d.getFullYear(), d.getMonth(), 1);
+    while (d <= end && out.length < 10000) {
+      out.push(Math.floor(d.getTime() / 1000));
+      d.setMonth(d.getMonth() + 1);
     }
-    return { provider: s.provider, model: s.model, cost };
+  } else if (gran === 'week') {
+    // Local weeks start Monday (same as the server's bucketing).
+    d = new Date(d.getFullYear(), d.getMonth(), d.getDate() - ((d.getDay() + 6) % 7));
+    while (d <= end && out.length < 10000) {
+      out.push(Math.floor(d.getTime() / 1000));
+      d.setDate(d.getDate() + 7);
+    }
+  } else {
+    d = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    while (d <= end && out.length < 10000) {
+      out.push(Math.floor(d.getTime() / 1000));
+      d.setDate(d.getDate() + 1);
+    }
+  }
+  return out;
+}
+
+// withAlpha turns a #rrggbb chart color into an rgba() string at alpha a
+// (overlapping translucent bars stay distinguishable). Non-hex inputs pass
+// through unchanged (the palette is hex; the fallback keeps the stroke).
+function withAlpha(color, a) {
+  if (/^#[0-9a-f]{6}$/i.test(color)) {
+    const n = parseInt(color.slice(1), 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+  }
+  return color;
+}
+
+// analyticsBarPaths returns a per-series uPlot path builder that draws one
+// column per bucket instead of a connecting line — the honest rendering for
+// the additive metrics (tokens/cost/requests): an empty bucket has NO bar
+// (not a zero-line), and a lone bucket is a single column (not a long
+// interpolating diagonal). Columns span 70% of the smallest gap between
+// adjacent x ticks (the window grid is complete, so the gap is the bucket
+// step) and overlap translucently across series; the legend's
+// click-to-toggle isolates a noisy series.
+function analyticsBarPaths() {
+  return (u, sidx, i0, i1) => {
+    const p = new Path2D();
+    const xs = u.data[0];
+    const ys = u.data[sidx];
+    let step = Infinity;
+    for (let k = 1; k < xs.length; k++) {
+      const d = xs[k] - xs[k - 1];
+      if (d > 0 && d < step) step = d;
+    }
+    if (!isFinite(step)) step = 3600; // single bucket: hour-wide default
+    const wSec = step * 0.35; // half-width → 70% total span
+    const yBase = u.valToPos(0, 'y', true);
+    for (let i = i0; i <= i1; i++) {
+      const v = ys[i];
+      if (v == null) continue;
+      const yV = u.valToPos(v, 'y', true);
+      if (yBase - yV < 0.5) continue; // zero-height column = no usage
+      const x0 = u.valToPos(xs[i] - wSec, 'x', true);
+      const x1 = u.valToPos(xs[i] + wSec, 'x', true);
+      p.rect(x0, yV, x1 - x0, yBase - yV);
+    }
+    return { stroke: p, fill: p };
+  };
+}
+
+// analyticsTooltip builds a uPlot plugin rendering a floating tooltip at the
+// cursor: the bucket's local time plus one row per VISIBLE series (color dot,
+// label, metric-formatted value — legend-toggled series are skipped). The tip
+// lives inside u.over so it clips with the plot; pointer-events: none keeps
+// it from swallowing the cursor. Flips to the left of the cursor near the
+// right edge.
+function analyticsTooltip(metricId, gran) {
+  return {
+    hooks: {
+      init: (u) => {
+        const tip = document.createElement('div');
+        tip.className = 'an-tip';
+        tip.hidden = true;
+        u.over.appendChild(tip);
+        u.anTip = tip;
+      },
+      setCursor: (u) => {
+        const tip = u.anTip;
+        if (!tip) return;
+        const idx = u.cursor.idx;
+        if (idx == null || u.cursor.left < 0 || !u.data[0] || !u.data[0].length) {
+          tip.hidden = true;
+          return;
+        }
+        const t = u.data[0][idx];
+        let rows = '';
+        for (let i = 1; i < u.series.length; i++) {
+          if (u.series[i].show === false) continue; // legend-toggled off
+          const v = u.data[i][idx];
+          const stroke = u.series[i].stroke;
+          const dot = typeof stroke === 'string' ? ` style="background:${stroke}"` : '';
+          rows += `<div class="row"><i class="dot"${dot}></i><span class="lab">${esc(u.series[i].label)}</span><span>${esc(analyticsValueText(metricId, v))}</span></div>`;
+        }
+        tip.innerHTML = `<div class="t">${esc(analyticsBucketLabel(t, gran))}</div>${rows}`;
+        tip.hidden = false;
+        // Position next to the cursor, flipping near the right edge.
+        const w = tip.offsetWidth, h = tip.offsetHeight;
+        let x = u.cursor.left + 14;
+        if (x + w > u.over.clientWidth - 4) x = Math.max(u.cursor.left - w - 14, 4);
+        let y = u.cursor.top + 14;
+        if (y + h > u.over.clientHeight - 4) y = Math.max(u.cursor.top - h - 14, 4);
+        tip.style.left = x + 'px';
+        tip.style.top = y + 'px';
+      },
+    },
+  };
+}
+
+// analyticsRenderCharts draws the selected metric's trend chart with uPlot.
+// Each series becomes one line sharing the palette across metric switches. x
+// is in unix seconds — uPlot's time unit — and every series gets an explicit
+// stroke because uPlot 1.6.x does not auto-assign colors (a missing stroke
+// renders the axes and legend but no line). Points stay visible: a series
+// with a single bucket (sparse traffic) would otherwise render nothing at
+// all — an isolated point draws no line segment.
+function analyticsRenderCharts(panel, resp, metricId, gran) {
+  if (typeof uPlot === 'undefined') return; // vendored script failed to load
+  const host = panel.querySelector('#an-chart');
+  if (!host) return;
+  destroyAnalyticsCharts();
+  host.innerHTML = '';
+  const metric = ANALYTICS_METRICS.find((m) => m.id === metricId) || ANALYTICS_METRICS[0];
+  // The window grid comes from the response's echoed from/to (not the local
+  // clock) so the axis covers exactly what was queried.
+  const grid = analyticsWindowGrid(resp && resp.from, resp && resp.to, gran);
+  const data = analyticsChartSeries(resp && resp.series, metric.id, grid);
+  if (!data.x.length || !data.labels.length) {
+    host.innerHTML = '<div class="empty-state">no series in range</div>';
+    return;
+  }
+  const colors = analyticsChartColors();
+  const fullRange = analyticsXRange(data.x);
+  const series = [{ label: 'time' }];
+  data.labels.forEach((label, i) => {
+    // Every metric renders as translucent columns (one aggregate per
+    // bucket): a connecting line would imply traffic between sparse
+    // buckets, and isolated points read as scatter, not as levels.
+    const stroke = colors[i % colors.length];
+    series.push({ label, stroke, width: 1, fill: withAlpha(stroke, 0.55), paths: analyticsBarPaths(), points: { show: false } });
   });
-  const total = rows.reduce((sum, r) => sum + (r.cost || 0), 0);
-  rows.sort((a, b) => (b.cost || 0) - (a.cost || 0));
-  const body = rows.map((r) => `<tr>
-      <td class="mono">${esc(r.provider)}</td>
-      <td class="mono">${esc(r.model)}</td>
+  // Canvas-drawn axis text/ticks/grid don't inherit CSS: forward the theme
+  // colors (same helper as the Status→Dashboard charts) so the axes stay
+  // readable in dark mode. Tick values use K/M compaction — token counts
+  // dwarf the default width. The x axis formats in LOCAL 24-hour time.
+  const axis = uplotAxisStyle();
+  const opts = {
+    title: metric.label + ' (' + metric.axis + ')',
+    width: Math.max(host.clientWidth || 600, 320),
+    height: 260,
+    series,
+    // Every metric here is a non-negative quantity, so the y scale is pinned
+    // to a 0 baseline: uPlot's auto-zoom would magnify noise (a 5%→8% error
+    // rate as a full-height cliff) and drop the bar columns' shared floor.
+    // The x scale pads both edges (see analyticsXRange) so edge columns
+    // render at full width with breathing room at the right — and defers to
+    // an active drag-zoom selection, which auto-refresh re-renders must
+    // preserve instead of resetting.
+    scales: {
+      x: { time: true, range: () => (anZoom ? [anZoom.from, anZoom.to] : fullRange) },
+      y: { range: (_u, min, max) => [0, Math.max(max, min || 0, 1)] },
+    },
+    cursor: { drag: { x: true, y: false, setScale: true } },
+    hooks: {
+      // Record the finished drag-selection's data range so re-renders
+      // (auto-refresh, metric switch) restore the zoomed window.
+      setSelect: [(u) => {
+        const from = u.posToVal(u.select.left, 'x');
+        const to = u.posToVal(u.select.left + u.select.width, 'x');
+        if (to - from > 1) {
+          anZoom = { from, to };
+          analyticsZoomControls(panel);
+        }
+      }],
+    },
+    plugins: [analyticsTooltip(metric.id, gran)],
+    axes: [
+      { ...axis, values: analyticsXAxisValues },
+      { label: metric.axis, size: 60, ...axis, values: (_u, splits) => splits.map((v) => (v == null ? '' : fmtCompact(v))) },
+    ],
+    // The built-in legend is replaced by analyticsRenderLegend (row-limited
+    // chips + a "+N more" dropdown when the series list is long).
+    legend: { show: false },
+  };
+  try {
+    const u = new uPlot(opts, [data.x, ...data.ys], host);
+    analyticsCharts.push(u);
+    analyticsRenderLegend(panel.querySelector('#an-legend'), u, data.labels, colors, anLegendHidden);
+    analyticsZoomControls(panel);
+  } catch (_) { /* malformed data */ }
+}
+
+// anZoom holds the operator's drag-zoom selection ({from, to} unix seconds)
+// across re-renders — the 30s live-window refresh and metric switches must
+// not reset the view the user deliberately zoomed into. Cleared by the reset
+// button and whenever the queried window itself changes (range/granularity).
+let anZoom = null;
+
+// analyticsXRange computes the full padded x range for the bucket grid: each
+// column spans ~70% of the bucket step CENTERED on its timestamp, so the
+// first/last columns stick out past the data extent — pad both edges by at
+// least half a column (plus a visual margin on the right) or uPlot clips the
+// edge columns narrow.
+function analyticsXRange(xs) {
+  const first = xs[0], last = xs[xs.length - 1];
+  let stepSec = last - first;
+  for (let k = 1; k < xs.length; k++) {
+    const d = xs[k] - xs[k - 1];
+    if (d > 0 && d < stepSec) stepSec = d;
+  }
+  const padSec = Math.max(stepSec * 0.45, (last - first) * 0.01);
+  return [first - padSec, last + Math.max((last - first) * 0.05, padSec)];
+}
+
+// analyticsZoomControls toggles the chart corner's "reset zoom" button from
+// anZoom and wires its click: clear the selection and restore the full
+// padded window on the live chart.
+function analyticsZoomControls(panel) {
+  const btn = panel.querySelector('#an-zoom-reset');
+  if (!btn) return;
+  btn.hidden = !anZoom;
+  if (btn.onclick) return; // wired once per render
+  btn.onclick = () => {
+    anZoom = null;
+    const u = analyticsCharts[analyticsCharts.length - 1];
+    if (u && u.data[0] && u.data[0].length) {
+      try { u.setScale('x', { min: analyticsXRange(u.data[0])[0], max: analyticsXRange(u.data[0])[1] }); } catch (_) { /* malformed */ }
+    }
+    btn.hidden = true;
+  };
+}
+
+// analyticsTickLabel formats one x-axis tick in LOCAL time, 24-hour clock,
+// adapting to the tick's natural resolution: month starts show the month,
+// midnights show the date, anything else shows date + HH:mm. `tickSpanSec`
+// (the gap between adjacent ticks, when known) demotes dense minute-level
+// ticks to HH:mm only: uPlot sizes tick density for its own short time
+// labels, and a full MM-DD HH:mm at that density overlaps (measured: 67px
+// labels on 63px spacing).
+function analyticsTickLabel(v, tickSpanSec) {
+  const d = new Date(v * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  const midnight = d.getHours() === 0 && d.getMinutes() === 0;
+  if (midnight && d.getDate() === 1) return `${d.getFullYear()}-${p(d.getMonth() + 1)}`;
+  if (midnight) return `${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  if (tickSpanSec != null && tickSpanSec > 0 && tickSpanSec <= 15 * 60) {
+    return `${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// analyticsXAxisValues is the shared x-axis `values` callback for the trend
+// charts: it derives the tick spacing from the split list so every label is
+// formatted at a width that fits the density uPlot chose.
+function analyticsXAxisValues(_u, splits) {
+  const span = splits.length > 1 ? splits[1] - splits[0] : null;
+  return splits.map((v) => (v == null ? '' : analyticsTickLabel(v, span)));
+}
+
+// anLegendHidden holds series labels toggled off via the legend chips — it
+// persists across re-renders within the session (like the dashboard's
+// dashHidden) so a metric switch or refetch doesn't silently re-show a series
+// the operator dimmed.
+const anLegendHidden = new Set();
+
+// anLegendOutside is the document-level click handler that closes the
+// overflow dropdown; module-level so destroyAnalyticsCharts can detach it
+// when the tab re-renders (no listener leaks across innerHTML resets).
+let anLegendOutside = null;
+
+// analyticsRenderLegend draws the custom legend under the chart: one chip
+// per series (color dot + label; click toggles the series' columns via
+// setSeries) into `host`. `hiddenSet` is the caller's session-persistent set
+// of toggled-off labels (the Analytics tab and the Status→Dashboard each own
+// one) so a metric switch or refetch doesn't silently re-show a series the
+// operator dimmed. When the chips would wrap past two rows, the rest move
+// into a "+N more" dropdown instead of sprawling down the card.
+function analyticsRenderLegend(host, u, labels, colors, hiddenSet) {
+  if (!host) return;
+  // Re-apply the caller's hidden set to the fresh chart.
+  labels.forEach((label, i) => {
+    if (hiddenSet.has(label)) u.setSeries(i + 1, { show: false });
+  });
+  const chips = labels.map((label, i) => {
+    const off = hiddenSet.has(label);
+    return `<button type="button" class="an-chip${off ? ' off' : ''}" data-legend="${esc(label)}"><i style="background:${colors[i % colors.length]}"></i>${esc(label)}</button>`;
+  }).join('');
+  host.innerHTML = `<div class="an-legend">${chips}</div><div class="an-legend-wrap"></div>`;
+  host.querySelectorAll('[data-legend]').forEach((btn) => {
+    btn.onclick = () => {
+      const label = btn.dataset.legend;
+      if (hiddenSet.has(label)) hiddenSet.delete(label); else hiddenSet.add(label);
+      const idx = labels.indexOf(label);
+      if (u && idx >= 0) u.setSeries(idx + 1, { show: !hiddenSet.has(label) });
+      btn.classList.toggle('off', hiddenSet.has(label));
+    };
+  });
+  analyticsLegendCollapse(host);
+}
+
+// analyticsLegendCollapse measures the rendered chips' rows (offsetTop) and,
+// when they exceed two, moves the overflow into a dropdown opened by a
+// "+N more" chip. Outside clicks close the dropdown.
+function analyticsLegendCollapse(host) {
+  const chipsEl = host.querySelector('.an-legend');
+  const wrap = host.querySelector('.an-legend-wrap');
+  if (!chipsEl || !wrap) return;
+  const chips = [...chipsEl.querySelectorAll('.an-chip')];
+  if (chips.length < 3) return; // two rows of chips needs at least 3 entries
+  const rowTops = [...new Set(chips.map((c) => c.offsetTop))].sort((a, b) => a - b);
+  if (rowTops.length <= 2) return;
+  const overflow = chips.filter((c) => c.offsetTop > rowTops[1]);
+  if (!overflow.length) return;
+  const drop = document.createElement('div');
+  drop.className = 'an-legend-drop';
+  drop.setAttribute('data-popup', ''); // the auto-refresh gate looks for this
+  drop.hidden = true;
+  overflow.forEach((c) => drop.appendChild(c)); // move, not clone — wiring stays
+  const more = document.createElement('button');
+  more.type = 'button';
+  more.className = 'an-chip an-more';
+  more.textContent = `+${overflow.length} more ▾`;
+  chipsEl.appendChild(more);
+  wrap.appendChild(drop);
+  const close = () => { drop.hidden = true; document.removeEventListener('click', anLegendOutside); anLegendOutside = null; };
+  more.onclick = (e) => {
+    e.stopPropagation();
+    if (drop.hidden) {
+      drop.hidden = false;
+      anLegendOutside = (ev) => { if (!ev.target.closest('.an-legend-wrap')) close(); };
+      document.addEventListener('click', anLegendOutside, true);
+    } else {
+      close();
+    }
+  };
+}
+
+// analyticsRowSortKey maps one leaderboard row to the sort key of the active
+// chart metric (tokens/cost by volume, errors/latency by rate, requests by
+// count) so the table and the chart tell the same story. Shared by the
+// Analytics tab's and the Status→Dashboard's leaderboards.
+function analyticsRowSortKey(r, metricId) {
+  switch (metricId) {
+    case 'requests': return r.requests;
+    case 'errors': return r.errPct == null ? -1 : r.errPct;
+    case 'latency': return r.latencyMs == null ? -1 : r.latencyMs;
+    case 'ttft': return r.ttftMs == null ? -1 : r.ttftMs;
+    case 'toksec': return r.tokSec == null ? -1 : r.tokSec;
+    case 'cache': return r.cachePct == null ? -1 : r.cachePct;
+    case 'cost': return r.cost == null ? -1 : r.cost;
+    default: return r.tokens; // tokens + anything unlisted
+  }
+}
+
+// analyticsRenderTable renders the leaderboard: one row per series (provider/
+// model, or agent/model in the agent dimension) with the window's requests,
+// tokens, failure rate, average latency, equivalent cost, blended $/1M tokens
+// and a cost share bar. Rows sort by the active chart metric (tokens/cost by
+// volume, errors/latency by rate, requests by count) so the table and the
+// chart tell the same story.
+function analyticsRenderTable(panel, resp, metricId) {
+  const host = panel.querySelector('#an-table');
+  if (!host) return;
+  const rows = analyticsTableRows(resp && resp.series);
+  const totalCost = rows.reduce((sum, r) => sum + (r.cost || 0), 0);
+  rows.sort((a, b) => analyticsRowSortKey(b, metricId) - analyticsRowSortKey(a, metricId));
+  const body = rows.map((r) => {
+    const share = r.cost != null && totalCost > 0 ? r.cost / totalCost * 100 : null;
+    return `<tr>
+      <td class="mono">${esc(r.label)}</td>
+      <td class="num">${fmtNum(r.requests)}</td>
+      <td class="num" title="${esc(fmtNum(r.tokens))} tokens">${fmtCompact(r.tokens)}</td>
+      <td class="num">${r.errPct == null ? '—' : r.errPct.toFixed(1) + '%'}</td>
+      <td class="num">${r.latencyMs == null ? '—' : fmtNum(Math.round(r.latencyMs)) + 'ms'}</td>
+      <td class="num" title="${r.tokSec == null ? '' : esc(r.tokSec.toFixed(2) + ' tokens per call-second')}">${r.tokSec == null ? '—' : r.tokSec.toFixed(1)}</td>
       <td class="num">${r.cost == null ? 'n/a' : '$' + r.cost.toFixed(4)}</td>
-      <td class="num">${r.cost == null || total <= 0 ? '—' : (r.cost / total * 100).toFixed(1) + '%'}</td>
-    </tr>`).join('');
+      <td class="num">${r.costPerMTok == null ? '—' : '$' + r.costPerMTok.toFixed(2)}</td>
+      <td class="an-share"><div class="an-bar" title="${share == null ? '' : share.toFixed(1) + '% of priced cost'}"><i style="width:${share == null ? 0 : Math.min(share, 100)}%"></i></div><span>${share == null ? '—' : share.toFixed(1) + '%'}</span></td>
+    </tr>`;
+  }).join('');
   host.innerHTML = `<table class="table">
-      <thead><tr><th>provider</th><th>model</th><th class="num">equivalent cost</th><th class="num">share</th></tr></thead>
-      <tbody>${body || '<tr><td colspan="4" class="hint">no series in range</td></tr>'}</tbody>
+      <thead><tr><th>series</th><th class="num">requests</th><th class="num">tokens</th><th class="num">err</th><th class="num">avg lat</th><th class="num">tok/s</th><th class="num">cost</th><th class="num">$/1M tok</th><th class="num">cost share</th></tr></thead>
+      <tbody>${body || '<tr><td colspan="9" class="hint">no series in range</td></tr>'}</tbody>
     </table>`;
 }
 

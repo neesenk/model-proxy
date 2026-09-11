@@ -291,12 +291,47 @@ main {
 #live-session-panel { margin-top: 2px; }
 #live-session-panel .hint + .hint { margin-top: 2px; }
 #live-session-panel table.table { margin-top: 10px; }
-.live-detail-row > td { background: var(--surface-2); padding: 10px 12px; }
-#live-spacer { height: 80vh; }
 .live-guard-section { margin-bottom: 10px; }
 .live-guard-hit { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 4px; }
 .live-guard-hit .mono { color: var(--muted); }
 .live-guard-hit .badge { flex: none; }
+
+/* Security tab: kind/action legend, inline explain rows and match snippets. */
+.sec-legend { margin-bottom: 10px; font-size: 12px; color: var(--muted); }
+.sec-legend summary { cursor: pointer; }
+.sec-legend ul { margin: 6px 0; padding-left: 18px; color: var(--text); }
+tr.sec-detail > td { background: var(--surface-2); }
+.sec-explain-match { margin: 8px 0; }
+.sec-snippet { max-height: 160px; margin-top: 6px; }
+.sec-snippet mark {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+  color: var(--text);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* Live request detail popover: a top-layer <dialog> so list refreshes never
+   touch it. The body scrolls internally (large bodies stay readable). */
+dialog.live-detail-pop {
+  max-width: 960px;
+  width: calc(100% - 48px);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+}
+dialog.live-detail-pop:not([open]) { display: none; }
+dialog.live-detail-pop .modal-head { flex: none; gap: 12px; }
+dialog.live-detail-pop .modal-head .meta {
+  flex: 1;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+dialog.live-detail-pop .modal-body { overflow: auto; }
 
 .live-response-section { margin-bottom: 10px; }
 .live-response-pre {
@@ -903,7 +938,11 @@ input[type="checkbox"] { accent-color: var(--accent); }
   text-align: center;
 }
 .badge.muted { opacity: .6; }
+/* Semantic variants for the Status→Dashboard health column (same palette as
+   .pill — colors encode ok/warn/err only). */
+.badge.ok { color: var(--ok-fg); background: var(--ok-bg); border-color: var(--ok-bg); }
 .badge.warn { color: var(--warn-fg); background: var(--warn-bg); border-color: var(--warn-bg); }
+.badge.err { color: var(--err-fg); background: var(--err-bg); border-color: var(--err-bg); }
 
 /* right pane: toolbar + account list */
 .acct-main { min-width: 0; }
@@ -1274,65 +1313,97 @@ dialog::backdrop { background: rgba(0,0,0,.45); backdrop-filter: blur(2px); }
 }
 
 /* ---------- analytics tab ---------- */
-.analytics-controls {
+/* One-line toolbar + KPI chips + one metric-switchable chart + leaderboard.
+   Segmented controls (.an-seg) follow the toolbar control language (surface-2
+   fill, hairline border, accent-tinted active state); colors only via :root
+   variables so the dark theme redefinition stays authoritative. */
+.an-toolbar {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  align-items: end;
+  align-items: center;
   padding: 10px 14px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 6px;
   margin-bottom: 12px;
 }
-.analytics-controls label {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
+.an-toolbar .req-input { min-width: 110px; }
+.an-seg {
+  display: inline-flex;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  overflow: hidden;
+}
+.an-seg button {
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.an-seg button + button { border-left: 1px solid var(--border); }
+.an-seg button:hover { color: var(--text); }
+.an-seg button.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--text);
+}
+.an-seg button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  outline-offset: -2px;
+}
+.an-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.an-kpi {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+.an-kpi .k {
   font-size: 11px;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: .04em;
 }
-.analytics-controls select,
-.analytics-controls input {
-  font: inherit;
-  padding: 4px 8px;
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  min-width: 120px;
-  text-transform: none;
-  letter-spacing: normal;
-}
-.analytics-controls .btn { align-self: end; }
-.an-hint {
-  font-size: 12px;
+.an-kpi .v { font-family: var(--mono); font-size: 18px; margin-top: 2px; }
+.an-kpi .d { font-size: 11px; font-family: var(--mono); color: var(--muted); margin-top: 2px; }
+.an-kpi .d.warn { color: var(--warn-fg); }
+/* Unpriced-models note rides the cost chip (equivalent cost silently excludes
+   unpriced series); ellipsized — the full list is the title tooltip. */
+.an-kpi .note {
+  font-size: 11px;
   font-family: var(--mono);
   color: var(--warn-fg);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-  border-radius: 4px;
-  padding: 8px 10px;
-  margin-bottom: 12px;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.an-charts {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-@media (max-width: 960px) {
-  .an-charts { grid-template-columns: 1fr; }
-}
-.an-chart {
+.an-chart-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 8px;
-  min-width: 0;
+  padding: 10px 14px 8px;
+  margin-bottom: 12px;
 }
+.an-chart-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.an-chart { min-width: 0; }
 /* uPlot inherits font + colors from the host; nudge to match the app. */
 .an-chart .uplot {
   font-family: var(--mono);
@@ -1341,10 +1412,166 @@ dialog::backdrop { background: rgba(0,0,0,.45); backdrop-filter: blur(2px); }
 }
 .an-chart .uplot .u-title { font-size: 12px; color: var(--text); }
 .an-chart .uplot .u-legend { font-size: 11px; }
-.an-cost-table {
+.an-table-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 10px 14px;
   overflow-x: auto;
 }
+/* Cost share cell: hairline bar + percentage. */
+.an-share {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+  min-width: 110px;
+}
+.an-share span {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.an-bar {
+  height: 4px;
+  width: 64px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+  flex: none;
+}
+.an-bar i { display: block; height: 100%; background: var(--accent); }
+/* Custom chart legend (uPlot's built-in legend is off): color-dot chips,
+   click toggles the series. When the chips would wrap past two rows the
+   overflow moves into a dropdown (see analyticsLegendCollapse). */
+.an-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin-top: 8px;
+}
+.an-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  padding: 2px 9px;
+  cursor: pointer;
+  max-width: 220px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.an-chip i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.an-chip.off { opacity: 0.45; }
+.an-chip:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
+}
+.an-chip.an-more { color: var(--muted); }
+.an-legend-wrap { position: relative; }
+.an-legend-drop {
+  position: absolute;
+  top: 4px;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  padding: 8px;
+  min-width: 180px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.an-legend-drop[hidden] { display: none; }
+.an-legend-drop .an-chip { max-width: 280px; }
+/* The date picker's .tr-wrap carries a bottom margin tuned for the Status
+   toolbar; inside the analytics toolbar it must not push the row apart. */
+.an-toolbar .tr-wrap { margin-bottom: 0; }
+/* Drag-zoom: the reset button sits in the chart's top-right corner while a
+   selection is active (see anZoom / analyticsZoomControls). */
+.an-chart-wrap { position: relative; }
+.an-zoom-reset {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 15;
+  font: inherit;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  padding: 2px 9px;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+}
+.an-zoom-reset:hover { border-color: var(--accent); }
+.an-zoom-reset:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
+}
+/* Chart hover tooltip (appended to uPlot's overlay by the analyticsTooltip
+   plugin). Theme via variables only, so dark mode redefines itself. */
+.an-tip {
+  position: absolute;
+  z-index: 10;
+  pointer-events: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  padding: 6px 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  white-space: nowrap;
+  max-width: 280px;
+}
+/* Status→Dashboard leaderboard: graded value cells carry their dimension's
+   ok/warn/err health grade (semantic color only). */
+.table td.num.ok { color: var(--ok-fg); }
+.table td.num.warn { color: var(--warn-fg); }
+.table td.num.err { color: var(--err-fg); }
+.an-tip .t { color: var(--muted); margin-bottom: 2px; }
+.an-tip .row { display: flex; align-items: center; gap: 6px; line-height: 1.6; }
+.an-tip .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.an-tip .lab {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+}
+.an-tip .row span:last-child { margin-left: auto; padding-left: 12px; }
+
+/* Status→Dashboard: the Analytics tab's KPI chips, metric-switchable trend
+   chart and leaderboard re-rendered inside the status pane (fixed
+   last-1h · per-minute · by-model window). All layout comes from the shared
+   .an-* classes above; colors only via :root variables. */
+/* The status pane is narrower than the Analytics tab (it sits beside the
+   section sidebar), where the shared auto-fit minmax(150px) wraps the six
+   chips onto two rows (~5 columns fit). The dashboard pins all six onto one
+   row; the short values/labels tolerate the narrower columns. */
+.dash-wrap .an-kpis { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+
+/* .refresh-err is the shared "background refresh failed, old data kept"
+ * banner (setRefreshError in app.js): sits above a panel's layout like the
+ * status warnings banner, so it needs bottom spacing (its .msg base only
+ * carries margin-top). Colors come from .msg.err — no new color values. */
+.refresh-err { margin-bottom: 12px; }

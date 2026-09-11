@@ -10,6 +10,24 @@
 - 日志、Raw YAML 和大 JSON 保持页面可滚动，不能通过压缩容器隐藏内容。
 - 敏感 request/response body 只在 detail 视图按需加载，列表只使用 metadata。
 
+## 自动刷新与用户交互门（框架特性）
+
+- 任何 timer/SSE 驱动的局部重渲染必须经过 `deferAutoRefresh`（入口/commit 两处都要）：
+  面板内有弹层（`[data-popup]` 且非 `hidden`）、焦点在可编辑控件（input/select/textarea/
+  contenteditable/combobox —— 原生 `<select>` 或 datalist 弹层打开时控件持焦点，同一机制覆盖）、
+  或存在文本选区时，刷新延后，交互结束约 400ms 后由 hold watcher 补一次新刷新。
+- 新增弹层（popover/日历/下拉菜单）一律加 `data-popup` 属性 + 关闭时用 `hidden` 属性；
+  挂在 `document.body` 的浮层走 `comboInstances` 注册（见 combobox）。
+- 不得在 `document.activeElement === select` 时重建该 `<select>` 的 `<option>`（会关掉
+  OS 绘制的下拉框）；延后并在 blur 时重试。
+- 重渲染会折叠用户展开的 `<details>` 时必须先快照后恢复（见 renderLogsInto 的
+  `logsOpenDetails`）。
+- 用户主动触发的渲染（筛选点击、mutation、切 section）绕过门：它们自己会先关闭弹层。
+- **后台刷新失败不得覆盖旧数据**：每个部分独立 settle，失败部分保留上次成功值
+  （绝不写成空数组/空骨架），通过 `setRefreshError`（`.refresh-err` 横幅，文案用
+  pure.js `staleDataText`）提示，下一次成功清除横幅；只有首次加载（无任何数据）才
+  允许整页错误卡片。失败路径必须重新武装自动刷新 timer。
+
 ## 契约变更
 
 新增或修改 `/api/*` 字段时先更新 `docs/web-api.md`，再更新前端。前端不得依赖未文档化字段。

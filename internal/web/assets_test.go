@@ -142,23 +142,110 @@ func TestWebAssetsAnalyticsTabContract(t *testing.T) {
 		t.Error("index.html: uPlot script must come before the deferred app.js module")
 	}
 	for _, want := range []string{
-		"async function renderAnalyticsTab()",
+		"async function renderAnalyticsTab(background = false)",
 		"function analyticsState()",
 		"function analyticsSave(name, val)",
-		"function analyticsRenderHints(panel, resp)",
-		"function analyticsRenderCharts(panel, resp)",
-		"function analyticsRenderCostTable(panel, resp)",
+		"function analyticsRenderKpis(host, resp)",
+		"function analyticsRenderCharts(panel, resp, metricId, gran)",
+		"function analyticsRenderTable(panel, resp, metricId)",
+		"function fmtDelta(delta, warn)",
 		"analyticsChartSeries(",
 		"analyticsChartColors()",
-		"stroke, width: 1.5",
-		"id=\"an-cost-table\"",
+		"ANALYTICS_METRICS",
+		"pctDelta(",
+		"analyticsGranularity(",
+		"analyticsTableRows(",
+		"uplotAxisStyle()",
+		"function analyticsTooltip(metricId, gran)",
+		"function analyticsWindowGrid(from, to, gran)",
+		"paths: analyticsBarPaths()",
+		"analyticsValueText(",
+		"function analyticsPickerHTML()",
+		"function analyticsPickerRender(panel)",
+		"analyticsRangeBounds(",
+		"analyticsGranOptions(",
+		"function analyticsRenderLegend(host, u, labels, colors, hiddenSet)",
+		"function analyticsLegendCollapse(host)",
+		"function analyticsTickLabel(v, tickSpanSec)",
+		"function analyticsXAxisValues(_u, splits)",
+		"function analyticsMaybeAutoRefresh()",
+		"analyticsSave('gran', 'auto')",
+		"function analyticsXRange(xs)",
+		"function analyticsZoomControls(panel)",
+		"id=\"an-zoom-reset\"",
+		"id=\"an-table\"",
+		"id=\"an-kpis\"",
+		"id=\"an-metric\"",
+		"granularity: gran, by: state.by",
 		"if (name === 'analytics') renderAnalyticsTab();",
 		"apiGet('/api/analytics?'",
 		"price_coverage",
+		"resp.compare",
 		"new uPlot(",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js missing %q", want)
+		}
+	}
+}
+
+// TestWebAssetsDashboardContract pins the Status→Dashboard wiring: the
+// section reuses the Analytics rendering (KPI chips + metric-switchable
+// chart + leaderboard) pinned to the fixed 1h/minute/model window, with the
+// former Model Health view merged into the leaderboard.
+func TestWebAssetsDashboardContract(t *testing.T) {
+	js := mustWebAsset(t, "app.js")
+	pure := mustWebAsset(t, "pure.js")
+	for _, want := range []string{
+		"{ key: 'dashboard', label: 'Dashboard' },",
+		"case 'dashboard':",
+		"function renderDashboardSection(main)",
+		"async function refreshDashboardData()",
+		"function renderDashboardContent()",
+		"function dashRenderChart(host, legendHost)",
+		"function dashRenderTable(host)",
+		"function destroyDashChart()",
+		"modelHealthFromSeries(",
+		// The legend wiring is easy to typo silently (a wrong name throws
+		// inside dashRenderChart's catch and the chart still draws): pin the
+		// exact call.
+		"analyticsRenderLegend(legendHost, u, data.labels, colors, dashLegendHidden)",
+		"apiGet('/api/analytics?from=' + (to - DASH_WINDOW_SEC)",
+		"granularity=minute&by=model", // fixed window: 1h · minute · by model
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q", want)
+		}
+	}
+	// The standalone Model Health section is gone (merged into Dashboard).
+	for _, gone := range []string{
+		"{ key: 'health', label: 'Model Health' }",
+		"case 'health':",
+		"renderModelHealthCard",
+		"apiGet('/api/stats?",
+	} {
+		if strings.Contains(js, gone) {
+			t.Errorf("app.js still references removed dashboard wiring %q", gone)
+		}
+	}
+	for _, want := range []string{
+		"export function modelHealthFromSeries(series)",
+		"export function modelHealthGrade(score)",
+		"MODEL_HEALTH_DIMS",
+	} {
+		if !strings.Contains(pure, want) {
+			t.Errorf("pure.js missing %q", want)
+		}
+	}
+	for _, gone := range []string{
+		"export function modelHealth(buckets)",
+		"export function dashboardChartSeries",
+		"export function dashboardLatest",
+		"export function dashBucketValue",
+		"DASH_WINDOW_MIN",
+	} {
+		if strings.Contains(pure, gone) {
+			t.Errorf("pure.js still exports removed helper %q", gone)
 		}
 	}
 }
@@ -250,9 +337,11 @@ func TestWebAssetsRequestsSessionContract(t *testing.T) {
 }
 
 // TestWebAssetsLiveDetailErrorTerminal protects the 404 fetch-loop fix: the
-// Live post-render pass must consult shouldFetchDetail (which treats a recorded
-// error or a 404 as terminal) instead of unconditionally re-fetching open rows,
-// and a 404/notLogged must render as a neutral hint, not a red error.
+// Live detail popover must consult shouldFetchDetail (which treats a recorded
+// error or a 404 as terminal) instead of unconditionally re-fetching the open
+// request, and a 404/notLogged must render as a neutral hint, not a red error.
+// The popover has a single ensure/fetch path shared by the All/live table and
+// the session panel.
 func TestWebAssetsLiveDetailErrorTerminal(t *testing.T) {
 	js := mustWebAsset(t, "app.js")
 	for _, want := range []string{
@@ -260,15 +349,17 @@ func TestWebAssetsLiveDetailErrorTerminal(t *testing.T) {
 		"detailFetchState,",
 		"if (state.notLogged)",
 		"not logged — the request did not commit",
+		"function openLiveDetailPop(",
+		"function updateLiveDetailPop(",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js missing %q", want)
 		}
 	}
-	if got := strings.Count(js, "if (!shouldFetchDetail("); got != 2 {
-		t.Errorf("app.js should gate both live detail ensure paths with shouldFetchDetail, got %d", got)
+	if got := strings.Count(js, "if (!shouldFetchDetail("); got != 1 {
+		t.Errorf("app.js should gate the live detail ensure path with shouldFetchDetail, got %d", got)
 	}
-	if got := strings.Count(js, "detailFetchState(e.status, e.message)"); got != 2 {
-		t.Errorf("app.js should normalize both live detail fetch failures with detailFetchState, got %d", got)
+	if got := strings.Count(js, "detailFetchState(e.status, e.message)"); got != 1 {
+		t.Errorf("app.js should normalize live detail fetch failures with detailFetchState, got %d", got)
 	}
 }

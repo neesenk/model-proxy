@@ -100,6 +100,49 @@ export function providerNames(models, health) {
   return Array.from(names).sort();
 }
 
+// quotaErrKind classifies a quota snapshot error into a short token for UI
+// presentation. Exported so app.js and accountUsageState share one definition.
+export function quotaErrKind(snap) {
+  if (!snap || !snap.Err) return '';
+  const e = snap.Err.toLowerCase();
+  if (e.includes('session expired')) return 'session-expired';
+  if (e.includes('not logged in')) return 'not-logged-in';
+  return 'error';
+}
+
+// accountUsageState decides the collapsed summary hint and default open state
+// for an account's Usage <details> section. The logic is pure and DOM-free so
+// it can be unit-tested; app.js calls it and renders the resulting attributes.
+//
+// Branches:
+//   - snap == null          -> hint 'no data',     collapsed
+//   - snap.Err              -> hint by error kind, open (login/error visible)
+//   - empty Windows, no Err -> hint 'unmeasured',  collapsed
+//   - non-empty Windows     -> hint by window/plan, open
+export function accountUsageState(snap) {
+  if (!snap) {
+    return { hint: 'no data', open: false };
+  }
+  if (snap.Err) {
+    const k = quotaErrKind(snap);
+    const hint = k === 'session-expired' ? 'session expired'
+      : k === 'not-logged-in' ? 'not logged in' : 'error';
+    return { hint, open: true };
+  }
+  const windows = snap.Windows || [];
+  if (windows.length === 0) {
+    return { hint: 'unmeasured', open: false };
+  }
+  const ult = windows.find((w) => w.Ultimate);
+  if (ult && ult.RemainingPct != null && ult.RemainingPct >= 0) {
+    return { hint: (ult.RemainingPct * 100).toFixed(1) + '% left', open: true };
+  }
+  if (snap.Plan) {
+    return { hint: snap.Plan, open: true };
+  }
+  return { hint: 'available', open: true };
+}
+
 // settingsDiff computes the minimal POST /api/config/edit payload for the
 // Config tab's settings form. `loaded` is the GET /api/config `settings`
 // projection (nested by kind), `current` is the form's readback in the same
@@ -420,6 +463,74 @@ export function prettyJSON(text) {
   }
 }
 
+// formatJSONLoose re-indents JSON-looking text WITHOUT validating it: a
+// string-aware structural pass that indents on { [ , and dedents on } ].
+// It exists for bodies truncated mid-capture (request_log max_body_bytes),
+// where strict JSON.parse fails and prettyJSON returns null — the valid prefix
+// still deserves structure instead of one multi-MB unreadable line. Returns
+// null when the text does not start with { or [ (not JSON-shaped at all).
+// Truncation mid-string simply ends the output there.
+export function formatJSONLoose(text) {
+  if (typeof text !== 'string') return null;
+  const trimmed = text.trim();
+  if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) return null;
+  const lines = [];
+  let cur = '';
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  const push = () => {
+    if (cur.trim() === '') { cur = ''; return; }
+    lines.push('  '.repeat(Math.max(depth, 0)) + cur.trimEnd());
+    cur = '';
+  };
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const ch = trimmed[i];
+    if (inString) {
+      cur += ch;
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    switch (ch) {
+      case '"':
+        inString = true;
+        cur += ch;
+        break;
+      case '{':
+      case '[':
+        cur += ch;
+        push();
+        depth += 1;
+        break;
+      case '}':
+      case ']':
+        push();
+        depth -= 1;
+        cur = ch;
+        break;
+      case ',':
+        cur += ch;
+        push();
+        break;
+      case ':':
+        cur += ': ';
+        break;
+      case ' ':
+      case '\t':
+      case '\n':
+      case '\r':
+        if (cur.trim() !== '') cur += ch;
+        break;
+      default:
+        cur += ch;
+    }
+  }
+  push();
+  return lines.join('\n');
+}
+
 // jsonToHTML pretty-prints `text` and tokenizes it into escaped HTML with
 // span classes (j-key / j-str / j-num / j-lit). Returns null for non-JSON, so
 // callers fall back to a plain <pre>. Every slice — token or separator — is
@@ -587,28 +698,340 @@ export function linkedModels(provider, providerModels, routes) {
   return [...set].sort();
 }
 
+// sessionsForAgent narrows the Requests session dropdown to the sessions that
+// actually served the selected agent, using each /api/sessions summary's
+// `agents` list. Input order (most recently active first) is preserved. With
+// no agent selected every session is offered; a session whose `agents` is
+// empty (records written before the agent dimension, or an agent-less client)
+// is kept only in that unfiltered case — it cannot be claimed for a specific
+// agent without inventing an attribution.
+export function sessionsForAgent(agent, sessions) {
+  const list = sessions || [];
+  if (!agent) return [...list];
+  return list.filter((session) => ((session && session.agents) || []).includes(agent));
+}
+
+// linkedAgents returns the agent-filter options for a selected session: the
+// agents observed on that session (normally exactly one, so picking a session
+// pins the agent). With no session selected it falls back to the log-wide
+// agent facet. An unknown session id (selected but aged out of the aggregate)
+// keeps the full facet list rather than collapsing to none, so the dropdown
+// never becomes a dead end.
+export function linkedAgents(session, sessions, agentFacets) {
+  const all = agentFacets || [];
+  if (!session) return [...all];
+  const found = (sessions || []).find((entry) => entry && entry.session_id === session);
+  if (!found || !(found.agents || []).length) return [...all];
+  return [...found.agents].sort();
+}
+
+// ANALYTICS_METRICS defines the Analytics tab's chart metrics. id feeds
+// analyticsPointValue; label/axis drive the segmented control and the uPlot
+// y-axis. gap=true means "no data" renders as a missing bar (a bucket with
+// no requests has no error rate or latency, and an unpriced series has no
+// cost). Every metric renders as translucent columns (analyticsBarPaths):
+// each is one aggregate per bucket, where a line would imply traffic
+// between sparse buckets. tokens is the four-bucket total (the server's
+// unified `tokens` field — the same definition everywhere).
+export const ANALYTICS_METRICS = [
+  { id: 'tokens', label: 'Tokens', axis: 'tokens', gap: false },
+  { id: 'toksec', label: 'Tok/s', axis: 'tok/s', gap: true },
+  { id: 'cache', label: 'Cache', axis: 'cache hit %', gap: true },
+  { id: 'latency', label: 'Latency', axis: 'avg ms', gap: true },
+  { id: 'ttft', label: 'TTFT', axis: 'avg ms', gap: true },
+  { id: 'requests', label: 'Requests', axis: 'requests', gap: false },
+  { id: 'errors', label: 'Errors', axis: 'error %', gap: true },
+  { id: 'cost', label: 'Cost', axis: 'USD', gap: true },
+];
+
+// analyticsPointValue reads one metric from an /api/analytics point. The
+// derived metrics (tokens total, tok/s, cache hit %, error %) are computed
+// by the SERVER (the unified interface — one definition, see the handler's
+// foldTotals/derivedPoint); this is a thin reader, not a second formula:
+// - tokens: four-bucket total (server field; zero-fills as a count metric)
+// - cost: null for unpriced points (no configured price — never fabricated)
+// - errors/toksec/cache: server err_pct/tok_sec/cache_hit_pct, null = no
+//   data (gap metrics draw a uPlot gap)
+// - latency/ttft: bucket averages (requests-weighted server-side), null
+//   without requests
+export function analyticsPointValue(p, kind) {
+  if (!p) return null;
+  switch (kind) {
+    case 'tokens': return Number(p.tokens || 0);
+    case 'cost': return p.cost != null ? p.cost : null;
+    case 'requests': return Number(p.requests || 0);
+    case 'errors': return p.err_pct == null ? null : Number(p.err_pct);
+    case 'latency': return p.requests ? Number(p.avg_latency_ms || 0) : null;
+    case 'ttft': return p.requests ? Number(p.avg_ttft_ms || 0) : null;
+    case 'toksec': return p.tok_sec == null ? null : Number(p.tok_sec);
+    case 'cache': return p.cache_hit_pct == null ? null : Number(p.cache_hit_pct);
+    default: return null;
+  }
+}
+
 // analyticsChartSeries turns /api/analytics `series` into the arrays uPlot
 // needs: x is the sorted union of bucket timestamps in unix SECONDS (uPlot's
-// time scale unit — passing milliseconds renders year 58655), and ys[i] is one
-// value per bucket for series[i]. kind='cost' keeps null for unpriced points
-// (uPlot draws a gap); kind='tokens' sums input+output (the cache buckets stay
-// on the Status page). Returns {x, ys, labels}.
-export function analyticsChartSeries(series, kind) {
+// time scale unit — passing milliseconds renders year 58655) — or, when the
+// caller passes xGrid, the union of that grid with the data buckets, so the
+// axis spans the whole queried window. Grid coverage changes sparse-data
+// rendering: instead of a long diagonal line connecting two distant buckets
+// (which implies traffic in between), count metrics (requests/tokens)
+// zero-fill the empty buckets and gap metrics draw uPlot gaps — absence
+// reads as "no usage", not interpolation. ys[i] is one value per bucket for
+// series[i], labels[i] names it (agent-dimension series label by agent).
+// Gap metrics keep null for missing/undefined buckets; requests/tokens
+// zero-fill an absent bucket. Returns {x, ys, labels}.
+export function analyticsChartSeries(series, kind, xGrid) {
   const list = Array.isArray(series) ? series : [];
-  const x = [...new Set(list.flatMap((s) => (s.points || []).map((p) => p.bucket)))].sort((a, b) => a - b);
+  const dataX = list.flatMap((s) => (s.points || []).map((p) => p.bucket));
+  const x = [...new Set((Array.isArray(xGrid) && xGrid.length ? xGrid : []).concat(dataX))].sort((a, b) => a - b);
   const labels = [];
   const ys = [];
+  const metric = ANALYTICS_METRICS.find((m) => m.id === kind);
+  const zeroFill = metric ? !metric.gap : false;
   for (const s of list) {
-    labels.push(`${s.provider}/${s.model}`);
+    labels.push(s.agent ? `${s.agent}/${s.model}` : `${s.provider}/${s.model}`);
     const by = Object.fromEntries((s.points || []).map((p) => [p.bucket, p]));
     ys.push(x.map((t) => {
-      const p = by[t];
-      if (!p) return kind === 'cost' ? null : 0;
-      if (kind === 'cost') return p.cost != null ? p.cost : null;
-      return (p.input || 0) + (p.output || 0);
+      const v = analyticsPointValue(by[t], kind);
+      return v == null && zeroFill ? 0 : v;
     }));
   }
   return { x, ys, labels };
+}
+
+// analyticsTableRows maps each /api/analytics series to one leaderboard row.
+// A thin reader over the server's unified series.totals block (same
+// definitions as the window totals / compare / KPI cards — the frontend
+// never re-derives a metric). costPerMTok is the blended payg unit price
+// over the four-bucket billable volume (cost ÷ tokens × 1M).
+export function analyticsTableRows(series) {
+  const rows = [];
+  for (const s of (Array.isArray(series) ? series : [])) {
+    const t = (s && s.totals) || {};
+    const cost = t.cost == null ? null : Number(t.cost);
+    const tokens = Number(t.tokens || 0);
+    rows.push({
+      label: s.agent ? `${s.agent}/${s.model}` : `${s.provider}/${s.model}`,
+      provider: s.provider,
+      model: s.model,
+      requests: Number(t.requests || 0),
+      tokens,
+      errPct: t.err_pct == null ? null : Number(t.err_pct),
+      latencyMs: t.avg_latency_ms == null ? null : Number(t.avg_latency_ms),
+      ttftMs: t.avg_ttft_ms == null ? null : Number(t.avg_ttft_ms),
+      // Output decode speed (server tok_sec): output over full call time.
+      tokSec: t.tok_sec == null ? null : Number(t.tok_sec),
+      cachePct: t.cache_hit_pct == null ? null : Number(t.cache_hit_pct),
+      cost,
+      costPerMTok: cost != null && tokens > 0 ? cost / tokens * 1e6 : null,
+    });
+  }
+  return rows;
+}
+
+// analyticsValueText renders one metric value for display (chart tooltip,
+// live legend): metric-aware units, null/NaN → em dash. tokens/requests use
+// fmtCompact; cost keeps 4 decimals (per-bucket sums are small); rates keep
+// one decimal; latency rounds to ms.
+export function analyticsValueText(metricId, v) {
+  if (v == null || !isFinite(v)) return '—';
+  switch (metricId) {
+    case 'cost': return '$' + v.toFixed(4);
+    case 'errors':
+    case 'cache': return v.toFixed(1) + '%';
+    case 'latency':
+    case 'ttft': return Math.round(v) + 'ms';
+    case 'toksec': return v.toFixed(1) + ' t/s';
+    default: return fmtCompact(v);
+  }
+}
+
+// pctDelta returns the percent change from prev to cur ((cur-prev)/prev*100,
+// one decimal), or null when the comparison is undefined: no previous window,
+// or a zero previous value ("+∞%" is noise, not signal).
+export function pctDelta(cur, prev) {
+  if (cur == null || prev == null || !Number(prev)) return null;
+  return Math.round(((cur - prev) / prev) * 1000) / 10;
+}
+
+// analyticsGranularity maps the window span + granularity preference onto
+// the API granularity. 'auto' (the default) picks the finest granularity
+// that stays under roughly a few hundred buckets: ≤6h → minute, ≤7d → hour,
+// ≤90d → day, else week. An explicit choice wins when the span allows it
+// (see analyticsGranOptions); otherwise the span forces auto's pick — a
+// preference can never request an absurd point count.
+export function analyticsGranularity(spanSec, pref) {
+  const auto = spanSec <= 6 * 3600 ? 'minute'
+    : spanSec <= 7 * 86400 ? 'hour'
+      : spanSec <= 90 * 86400 ? 'day'
+        : 'week';
+  if (pref && pref !== 'auto' && analyticsGranAllowed(spanSec, pref)) return pref;
+  return auto;
+}
+
+// analyticsGranAllowed reports whether one granularity fits a window span:
+// each needs enough buckets to be meaningful (a 1h window has no "hour"
+// view) and must not explode the point count (minute over a week is ~10k
+// columns). Thresholds in seconds; week/month have no upper bound.
+const GRAN_LIMITS = {
+  minute: { min: 0, max: 2 * 86400 },
+  hour: { min: 1 * 3600, max: 31 * 86400 }, // min exclusive (see analyticsGranAllowed)
+  day: { min: 2 * 86400, max: 400 * 86400 },
+  week: { min: 7 * 86400, max: Infinity },
+  month: { min: 14 * 86400, max: Infinity },
+};
+
+function analyticsGranAllowed(spanSec, gran) {
+  const lim = GRAN_LIMITS[gran];
+  if (!lim) return false;
+  // Lower bounds are exclusive: a window exactly N granularities wide has
+  // just one bucket (nothing to compare against).
+  return spanSec > lim.min && spanSec <= lim.max;
+}
+
+// analyticsGranOptions returns the granularity segment's option list for a
+// window span: every option is present (the control's layout stays stable)
+// with an `allowed` flag — disallowed ones render disabled, and 'auto' is
+// always available.
+export function analyticsGranOptions(spanSec) {
+  return [
+    { id: 'auto', label: 'auto', allowed: true },
+    ...['minute', 'hour', 'day', 'week', 'month'].map((id) => ({
+      id, label: id, allowed: analyticsGranAllowed(spanSec, id),
+    })),
+  ];
+}
+
+// MODEL_HEALTH_DIMS defines the Status→Dashboard health scoring dimensions
+// (the merged Model Health view).
+// kind 'lower' scores 1 at/below goodBelow decaying to 0 at/past poorAbove;
+// kind 'higher' is the mirror. Thresholds are sane LLM-proxy defaults (not
+// config): a streaming call should answer within ~1.5s, finish a typical
+// request within a few seconds, and decode well above 10 tok/s. A dimension
+// with no data (e.g. duration not yet recorded) is excluded and the weights
+// renormalize instead of dragging the score down.
+export const MODEL_HEALTH_DIMS = [
+  { id: 'latency', label: 'latency', kind: 'lower', goodBelow: 2000, poorAbove: 8000, weight: 0.3 },
+  { id: 'ttft', label: 'ttft', kind: 'lower', goodBelow: 1500, poorAbove: 6000, weight: 0.4 },
+  { id: 'toksec', label: 'tok/s', kind: 'higher', goodAbove: 40, poorBelow: 10, weight: 0.3 },
+];
+
+// modelHealthGrade buckets a 0..1 score into the semantic ok/warn/err classes
+// (the same thresholds per dimension and overall).
+export function modelHealthGrade(score) {
+  if (score == null) return null;
+  if (score >= 0.7) return 'ok';
+  if (score >= 0.4) return 'warn';
+  return 'err';
+}
+
+// healthDimScore maps one measurement onto 0..1 along its dimension's
+// good/poor thresholds (linear between them, clamped outside).
+function healthDimScore(dim, v) {
+  if (v == null) return null;
+  if (dim.kind === 'lower') {
+    if (v <= dim.goodBelow) return 1;
+    if (v >= dim.poorAbove) return 0;
+    return (dim.poorAbove - v) / (dim.poorAbove - dim.goodBelow);
+  }
+  if (v >= dim.goodAbove) return 1;
+  if (v <= dim.poorBelow) return 0;
+  return (v - dim.poorBelow) / (dim.goodAbove - dim.poorBelow);
+}
+
+// modelHealthFromSeries scores each /api/analytics series (one provider/model
+// over the queried window — the Status→Dashboard's fixed last-1h · by-model
+// view) from three dimensions — call latency (full duration when recorded,
+// else the header-time latency as a fallback), TTFT, and tok/s (tokens over
+// full call duration, falling back like latency) — plus the raw error rate
+// for display. Same thresholds and weighting as MODEL_HEALTH_DIMS. Returns
+// one row per series with requests>0, worst grade first (ties by requests
+// desc). "Worst first" is the actionable order: the degraded model an
+// operator must look at is at the top. Rows key by `label`
+// ("provider/model") so the leaderboard can join them onto
+// analyticsTableRows output.
+export function modelHealthFromSeries(series) {
+  const agg = [];
+  for (const s of (Array.isArray(series) ? series : [])) {
+    if (!s || !s.provider || !s.model) continue;
+    const a = { provider: s.provider, model: s.model, label: `${s.provider}/${s.model}`, requests: 0, failures: 0, input: 0, output: 0, latencySum: 0, ttftSum: 0, durationSum: 0 };
+    for (const p of (s.points || [])) {
+      const reqs = Number(p.requests || 0);
+      a.requests += reqs;
+      a.failures += Number(p.failures || 0);
+      a.input += Number(p.input || 0);
+      a.output += Number(p.output || 0);
+      // The analytics averages are requests-weighted server-side: avg ×
+      // requests rebuilds the bucket's summed latency/ttft/duration.
+      a.latencySum += Number(p.avg_latency_ms || 0) * reqs;
+      a.ttftSum += Number(p.avg_ttft_ms || 0) * reqs;
+      a.durationSum += Number(p.avg_duration_ms || 0) * reqs;
+    }
+    agg.push(a);
+  }
+  const rank = { err: 0, warn: 1, ok: 2 };
+  const rows = [];
+  for (const a of agg) {
+    if (!a.requests) continue;
+    // duration is the honest call time; before it has accumulated (fresh
+    // migration) the header-time latency is the fallback. tok/s counts
+    // OUTPUT tokens only — the decoder's speed (fresh input arrives at
+    // prefix speed and would inflate it).
+    const timeSum = a.durationSum > 0 ? a.durationSum : a.latencySum;
+    const values = {
+      latency: timeSum > 0 ? timeSum / a.requests : null,
+      ttft: a.ttftSum > 0 ? a.ttftSum / a.requests : null,
+      toksec: timeSum > 0 ? a.output / (timeSum / 1000) : null,
+    };
+    const dims = {};
+    let wsum = 0, score = 0;
+    for (const dim of MODEL_HEALTH_DIMS) {
+      const sc = healthDimScore(dim, values[dim.id]);
+      dims[dim.id] = { v: values[dim.id], score: sc, grade: modelHealthGrade(sc) };
+      if (sc != null) {
+        score += dim.weight * sc;
+        wsum += dim.weight;
+      }
+    }
+    const overall = wsum > 0 ? score / wsum : null;
+    rows.push({
+      provider: a.provider,
+      model: a.model,
+      label: a.label,
+      requests: a.requests,
+      errPct: a.failures ? (a.failures / a.requests * 100) : 0,
+      latencyMs: values.latency,
+      ttftMs: values.ttft,
+      tokSec: values.toksec,
+      dims,
+      score: overall == null ? null : Math.round(overall * 1000) / 1000,
+      grade: modelHealthGrade(overall),
+    });
+  }
+  rows.sort((x, y) => {
+    const rx = rank[x.grade] ?? 3, ry = rank[y.grade] ?? 3;
+    if (rx !== ry) return rx - ry;
+    return y.requests - x.requests;
+  });
+  return rows;
+}
+
+// fmtCompact renders a count in K/M units (30268 → "30.3K",
+// 1200000 → "1.2M"), up to `decimals` fractional digits (default 1;
+// trailing zeros are dropped, values below 1000 stay as-is). Used for
+// chart-axis ticks and the Analytics token surfaces — the KPI chip passes 2
+// for extra precision (exact value stays in the title tooltip).
+export function fmtCompact(n, decimals = 1) {
+  const v = Number(n);
+  if (!isFinite(v)) return '0';
+  const places = Math.min(3, Math.max(0, Number(decimals) || 0));
+  const p = 10 ** places;
+  const trim = (x) => String(Math.round(x * p) / p);
+  const a = Math.abs(v);
+  if (a < 1000) return trim(v);
+  if (a < 1e6) return trim(v / 1e3) + 'K';
+  return trim(v / 1e6) + 'M';
 }
 
 // shouldFetchDetail decides whether the Live view's automatic post-render pass
@@ -698,4 +1121,125 @@ export function liveSessionSummary(rows, agg) {
     cost: a.cost_usd != null ? num(a.cost_usd) : null,
     liveRows: list.length,
   };
+}
+
+// ---------- Security tab (guard audit log) ----------
+
+// pathStrengthFromAction maps a path-kind audit action to the strong/weak
+// structural classification (decision 23): the configured action fires only
+// on strong hits (path inside a tool INVOCATION — tool_use.input / function
+// arguments, an agent asking to access the file). Weak mentions (prose and
+// tool result content) are no longer persisted; log-weak rows survive only
+// in logs written before that change. Secret-kind rows have no strength
+// dimension (callers pass their action but ignore a "" result).
+export function pathStrengthFromAction(action) {
+  if (action === 'log-weak') return 'weak';
+  if (!action) return '';
+  return 'strong';
+}
+
+// SECURITY_KIND_HELP / SECURITY_ACTION_HELP back the legend on the Security
+// tab — the audit table shows terse names only, so the meanings live here.
+export const SECURITY_KIND_HELP = [
+  { name: 'secret', text: 'A secret pattern matched the request body: a built-in rule (e.g. openai_api_key), a guard.extra_patterns custom rule, or a credential configured on this proxy (known_secret*).' },
+  { name: 'path', text: 'The request referenced a sensitive, credential-bearing location (e.g. ~/.ssh, ~/.aws/credentials, ~/.kube/config, .env) in a tool INVOCATION (tool_use.input / function arguments) — an agent asking to access the file. Address mentions in prose or tool RESULT content (docs, source, error text) are not security issues by themselves: they are ignored entirely, never recorded.' },
+  { name: 'drift', text: 'doctor/takeover detected a client config pointer drift — the client no longer points at this proxy.' },
+];
+
+export const SECURITY_ACTION_HELP = [
+  { name: 'log', text: 'recorded; the request was forwarded unchanged' },
+  { name: 'redact', text: 'forwarded with every match replaced by [REDACTED]' },
+  { name: 'block', text: 'rejected with 400 — nothing was sent upstream' },
+  { name: 'log-weak', text: 'weak path signal (plain-text mention); no longer persisted — only older logs carry these' },
+];
+
+// securityLegendHTML renders the collapsible kind/action legend.
+export function securityLegendHTML() {
+  const kinds = SECURITY_KIND_HELP.map((k) => `<li><span class="badge">${esc(k.name)}</span> ${esc(k.text)}</li>`).join('');
+  const actions = SECURITY_ACTION_HELP.map((a) => `<li><code>${esc(a.name)}</code> — ${esc(a.text)}</li>`).join('');
+  return `<details class="sec-legend"><summary>What do these records mean?</summary>` +
+    `<ul>${kinds}</ul><div class="hint">action:</div><ul>${actions}</ul>` +
+    `<div class="hint">Matched content is never stored in the audit log (deliberate). Use analyze on a row to re-scan the original request and locate each hit.</div></details>`;
+}
+
+// SECURITY_EXPLAIN_STATUS_NOTES maps /api/security/explain statuses to the
+// hint shown when the hits cannot be re-located.
+export const SECURITY_EXPLAIN_STATUS_NOTES = {
+  no_request_log: 'Request log is disabled — the original request body is not available to analyze.',
+  not_found: 'The original request is no longer in the request log (retention window passed).',
+  redacted: 'This request was logged after redaction (guard.secrets=redact): the matched bytes were replaced by [REDACTED] before persistence and cannot be recovered.',
+  cross_request: 'Cross-request detection (split-exfiltration): the credential was fragmented across several requests of one session, so no single request body contains it.',
+  scanner_unavailable: 'The current generation has no guard scanner (guard disabled or scanner build failed).',
+};
+
+// securityExplainHTML renders one /api/security/explain result: per located
+// match a header (name + strength badge + explanation + regex/source) and a
+// context window with the hit highlighted. The window arrives pre-split
+// (pre/hit/post strings) — never byte offsets, which would not survive the
+// Go-bytes → JS-UTF-16 boundary. Every interpolated value is escaped.
+export function securityExplainHTML(result) {
+  if (!result || typeof result !== 'object') return '';
+  const note = SECURITY_EXPLAIN_STATUS_NOTES[result.status];
+  let out = note ? `<div class="msg hint">${esc(note)}</div>` : '';
+  const matches = Array.isArray(result.matches) ? result.matches : [];
+  if (!matches.length && !note) return '<div class="msg hint">Nothing to show.</div>';
+  for (const m of matches) {
+    const strength = m.strength ? ` <span class="badge ${m.strength === 'strong' ? 'warn' : 'muted'}">${esc(m.strength)}</span>` : '';
+    const rule = m.regex ? `<div class="hint">regex <code>${esc(m.regex)}</code>${m.source ? ` · source: ${esc(m.source)}` : ''}</div>` : '';
+    const explanation = m.explanation ? `<div class="hint">${esc(m.explanation)}</div>` : '';
+    let body = '';
+    if (m.located && (m.pre !== undefined || m.hit !== undefined)) {
+      body = `<pre class="log-pre body-pre sec-snippet">${esc(m.pre)}<mark>${esc(m.hit)}</mark>${esc(m.post)}</pre>`;
+    } else if (!m.located) {
+      body = '<div class="hint">not re-located in the stored request body</div>';
+    }
+    out += `<div class="sec-explain-match"><div><code>${esc(m.name)}</code>${strength}</div>${explanation}${rule}${body}</div>`;
+  }
+  return out;
+}
+
+// ===========================================================================
+// AUTO-REFRESH INTERACTION GATE (pure selectors + hold decision)
+// ===========================================================================
+//
+// Every timer/SSE-driven re-render must consult the interaction gate (see
+// autoRefreshBlocked in app.js) before wiping DOM the user is interacting
+// with. The gate is framework-level so new pages get the protection for free:
+//
+//   POPUP_OPEN_SEL        — open popovers/dropdowns/calendars/menus. Any
+//                           transient layer that auto-refresh would clobber
+//                           MUST carry `data-popup` and use the `hidden`
+//                           attribute when closed (both .tr-popover pickers,
+//                           .route-pin-menu, combobox menus).
+//   INTERACTIVE_CONTROL_SEL — controls holding uncommitted user input or an
+//                           open native popup: a focused <input>/<select>/
+//                           <textarea> covers typing, an open native <select>
+//                           dropdown (the select keeps focus while its popup
+//                           is open), datalist popups, and contenteditable.
+
+export const POPUP_OPEN_SEL = '[data-popup]:not([hidden])';
+
+export const INTERACTIVE_CONTROL_SEL = 'input, select, textarea, [contenteditable="true"], [contenteditable=""], [role="combobox"]';
+
+// refreshHoldReason folds the gate's DOM observations into one decision:
+// which interaction (if any) holds a background re-render back. Popup wins
+// over focus (a calendar popover contains focused buttons — either reason
+// blocks, but 'popup' is the more specific diagnosis), focus wins over
+// selection. null means "refresh freely".
+export function refreshHoldReason(obs) {
+  if (!obs) return null;
+  if (obs.openPopup) return 'popup';
+  if (obs.focusInteractive) return 'focus';
+  if (obs.selection) return 'selection';
+  return null;
+}
+
+// staleDataText renders the banner text for a failed background refresh that
+// kept the last successful data on screen: the error/what-failed prefix plus
+// the shared stale-data suffix. failedParts (optional) lists the endpoints
+// that failed ('status', 'tokens', …) — null/[] when the caller prefers a
+// single message without the parenthetical.
+export function staleDataText(errText, failedParts) {
+  const parts = failedParts && failedParts.length ? ` (${failedParts.join(', ')})` : '';
+  return `${errText}${parts} — showing last successful data`;
 }
