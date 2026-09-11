@@ -102,7 +102,7 @@ Options:
 
 Clients:
   claude | opencode | pi | codex | kimi | gemini-cli | all
-  (variants: opencode-openai | pi-openai | pi-responses)`,
+  (variants: opencode-openai | opencode-responses | pi-openai | pi-responses)`,
 
 	"restore": `restore <client> [--config PATH]
 

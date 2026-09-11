@@ -1,15 +1,15 @@
-description: opencode — @ai-sdk/openai-compatible provider(OpenAI Chat Completions,base_url 带 /v1)+ 全量暴露模型
+description: opencode — @ai-sdk/openai provider(/v1/responses)+ 全量暴露模型
 file: ~/.config/opencode/opencode.json
 format: json
 client: opencode
-protocol: openai
+protocol: responses
 base_url: v1
-provider_id: model-proxy-openai
+provider_id: model-proxy-responses
 json:
   set:
     provider.{{provider_id}}:
-      name: "{{display_name}} (openai-compatible)"
-      npm: "@ai-sdk/openai-compatible"
+      name: "{{display_name}} (responses)"
+      npm: "@ai-sdk/openai"
       options:
         apiKey: "{{token}}"
         baseURL: "{{base_url}}"

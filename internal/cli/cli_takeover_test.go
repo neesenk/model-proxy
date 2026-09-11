@@ -62,6 +62,44 @@ models:
   json_path: provider.{{provider_id}}.models
 `
 		},
+		"opencode-openai": func(f string) string {
+			return "file: " + f + `
+format: json
+client: opencode
+protocol: openai
+base_url: v1
+provider_id: model-proxy-openai
+json:
+  set:
+    provider.{{provider_id}}:
+      name: "model-proxy (openai-compatible)"
+      npm: "@ai-sdk/openai-compatible"
+      options: {apiKey: "{{token}}", baseURL: "{{base_url}}"}
+  drift_path: provider.{{provider_id}}.options.baseURL
+models:
+  shape: opencode
+  json_path: provider.{{provider_id}}.models
+`
+		},
+		"opencode-responses": func(f string) string {
+			return "file: " + f + `
+format: json
+client: opencode
+protocol: responses
+base_url: v1
+provider_id: model-proxy-responses
+json:
+  set:
+    provider.{{provider_id}}:
+      name: "model-proxy (responses)"
+      npm: "@ai-sdk/openai"
+      options: {apiKey: "{{token}}", baseURL: "{{base_url}}"}
+  drift_path: provider.{{provider_id}}.options.baseURL
+models:
+  shape: opencode
+  json_path: provider.{{provider_id}}.models
+`
+		},
 		"codex": func(f string) string {
 			return "file: " + f + `
 format: toml
@@ -298,7 +336,7 @@ func TestCLI_TakeoverOpencode_WarnsDefault(t *testing.T) {
 	cfgPath := clitest.WriteTempConfig(t, cfgBody)
 
 	home := t.TempDir()
-	writeTakeoverTemplates(t, home, map[string]string{"opencode": ocPath})
+	writeTakeoverTemplates(t, home, map[string]string{"opencode-responses": ocPath})
 	credDir := filepath.Join(home, ".model-proxy")
 	os.MkdirAll(credDir, 0o700)
 	// fresh EMPTY cache (no models) → gpt-5.5 unmatched → default

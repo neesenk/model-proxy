@@ -130,7 +130,7 @@ func TestResolveClients_AllCollapsesToOnePerFamily(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveClients(all): %v", err)
 	}
-	// 9 preset templates collapse to 6 families: claude, codex, gemini-cli,
+	// 10 preset templates collapse to 6 families: claude, codex, gemini-cli,
 	// kimi, opencode, pi.
 	if len(clients) != 6 {
 		t.Fatalf("ResolveClients(all) = %v, want one per family (6)", namesOf(clients))
@@ -277,6 +277,41 @@ func TestResolveClients_SplitPartitionsByNativeProtocol(t *testing.T) {
 	}
 	if !takeover.SplitWouldChange(mixedNativeCfg(), "pi", t.TempDir()) {
 		t.Error("mixed native protocols: SplitWouldChange must be true (CLI prompts)")
+	}
+}
+
+func TestResolveClients_SplitPartitionsOpencodeByNativeProtocol(t *testing.T) {
+	clients, err := takeover.ResolveClientsMode(mixedNativeCfg(), "opencode", t.TempDir(), takeover.ModeSplit)
+	if err != nil {
+		t.Fatalf("ResolveClientsMode(opencode, split): %v", err)
+	}
+	want := []string{"opencode", "opencode-openai", "opencode-responses"}
+	if got := namesOf(clients); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("split resolved %v, want %v (one entry per native protocol)", got, want)
+	}
+	if !takeover.SplitWouldChange(mixedNativeCfg(), "opencode", t.TempDir()) {
+		t.Error("mixed native protocols: SplitWouldChange must be true for opencode (CLI prompts)")
+	}
+}
+
+func TestResolveClients_OpencodePicksResponsesWhenMajority(t *testing.T) {
+	// Two codex responses-native models vs one openai-native → responses variant,
+	// and the note must name the model that will ride the converter.
+	cfg := cfgWith(
+		map[string]configdomain.Provider{
+			"codex": {OpenAIBaseURL: "https://x/v1", Provider: "codex", Models: []string{"gpt-5.4-mini", "gpt-5.5"}},
+			"zhipu": {OpenAIBaseURL: "https://z/v1", Models: []string{"glm-5.3"}},
+		},
+		nil)
+	clients, err := takeover.ResolveClients(cfg, "opencode", t.TempDir())
+	if err != nil {
+		t.Fatalf("ResolveClients(opencode): %v", err)
+	}
+	if len(clients) != 1 || clients[0].Name != "opencode-responses" {
+		t.Fatalf("ResolveClients(opencode) = %v, want [opencode-responses]", namesOf(clients))
+	}
+	if !strings.Contains(clients[0].Note, "2/3") || !strings.Contains(clients[0].Note, "glm-5.3") {
+		t.Errorf("note must report coverage 2/3 and conversion for glm-5.3: %q", clients[0].Note)
 	}
 }
 

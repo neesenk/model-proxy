@@ -53,12 +53,10 @@ providers:
     # peak_hours:                       # multi-segment, per-segment multiplier
     #   - {window: "14:00-18:00", multiplier: 2}
     models:
-      - claude-opus-4-8
       - claude-opus-5
       - claude-sonnet-5
       - deepseek-v4-flash
       - deepseek-v4-pro
-      - glm-5.2
       - glm-5.3
       - glm-5.3-flash
       - gpt-5.6-luna
@@ -91,8 +89,6 @@ providers:
                                        # authoritative — models.dev metadata is ignored for it.
     usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit  # usage zhipu: 5h/weekly/monthly quota + token consumption
     models:
-      - glm-5-turbo
-      - glm-5.2
       - glm-5.3
       - glm-5.3-flash
   # DeepSeek (API key via 'login deepseek'). One key serves both protocols; the
@@ -109,10 +105,7 @@ providers:
     billing: pay-as-you-go
     usage_url: https://api.deepseek.com/user/balance
     models:
-      - deepseek-v4-pro
-      - deepseek-v4-flash
-      - deepseek-v4-flash-vision-exp
-      - deepseek-v4.1-flash-expires-on-0910
+      - deepseek-flash
 
   # Volcengine Ark (火山方舟, including 'Agent Plan'). API key via 'login volcengine'.
   # Two protocol bases: openai_base_url = Ark OpenAI base, anthropic_base_url =
@@ -128,12 +121,10 @@ providers:
       - deepseek-v4-flash
       - deepseek-v4-pro
       - doubao-seed-evolving
-      - glm-5.2
       - glm-5.3
       - glm-5.3-flash
       - kimi-k2.7-code
       - kimi-k3
-      - minimax-m3
 
   # Kimi Code (Moonshot membership coding plan). API key via 'login kimi-code'
   # (from https://www.kimi.com/code/console). Two protocol bases under one
@@ -220,7 +211,7 @@ providers:
 #   quality_ttft_weight: 20     # (default 20)  penalty per unit normalized TTFT EWMA (10s reference); 0 disables
 
 # takeover: client targets come from templates — embedded presets
-# (see 'model-proxy takeover list': claude/opencode/opencode-openai/pi/pi-openai/
+# (see 'model-proxy takeover list': claude/opencode/opencode-openai/opencode-responses/pi/pi-openai/
 # pi-responses/codex/kimi/gemini-cli) or your own YAML in
 # ~/.model-proxy/takeover-templates/<name>.yaml (same name overrides a preset).
 # Template fields: file (client config path), format (json|toml|env),

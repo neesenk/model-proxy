@@ -434,6 +434,34 @@ func TestTemplateProviderID(t *testing.T) {
 			t.Errorf("%s must override provider_id to coexist with pi", name)
 		}
 	}
+	for _, name := range []string{"opencode", "opencode-openai", "opencode-responses"} {
+		other := presetFor(t, name, filepath.Join(t.TempDir(), "x.json"))
+		if name != "opencode" && other.ProviderIDValue() == "model-proxy" {
+			t.Errorf("%s must override provider_id to coexist with opencode", name)
+		}
+	}
+}
+
+// TestPresetOpencodeVariantNpm pins the opencode package-to-protocol mapping:
+// opencode-openai must use @ai-sdk/openai-compatible (Chat Completions), and
+// opencode-responses must use @ai-sdk/openai (Responses API).
+func TestPresetOpencodeVariantNpm(t *testing.T) {
+	wantNpm := map[string]string{
+		"opencode":           "@ai-sdk/anthropic",
+		"opencode-openai":    "@ai-sdk/openai-compatible",
+		"opencode-responses": "@ai-sdk/openai",
+	}
+	for name, want := range wantNpm {
+		tpl := presetFor(t, name, filepath.Join(t.TempDir(), "x.json"))
+		set, ok := tpl.JSON.Set["provider.{{provider_id}}"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: expected provider set block", name)
+		}
+		got, _ := set["npm"].(string)
+		if got != want {
+			t.Errorf("%s npm=%q, want %q", name, got, want)
+		}
+	}
 }
 
 // --- kimi template: ~/.kimi/config.toml provider + model blocks ---

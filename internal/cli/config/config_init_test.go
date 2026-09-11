@@ -60,6 +60,51 @@ func wizardProviderAnswers(t *testing.T, want map[string]bool) string {
 	return sb.String()
 }
 
+// wizardTestHint extracts the model name from the wizard's closing
+// `model-proxy test <model>` next-step line.
+func wizardTestHint(t *testing.T, out string) string {
+	t.Helper()
+	const marker = "model-proxy test "
+	idx := strings.LastIndex(out, marker)
+	if idx < 0 {
+		t.Fatalf("output has no %q next-step line:\n%s", marker, out)
+	}
+	rest := out[idx+len(marker):]
+	if end := strings.IndexAny(rest, "\r\n"); end >= 0 {
+		rest = rest[:end]
+	}
+	hint := strings.TrimSpace(rest)
+	if hint == "" {
+		t.Fatalf("empty model in the test next-step line:\n%s", out)
+	}
+	return hint
+}
+
+// wizardWantTestModel computes the expected `model-proxy test` hint for the
+// selected providers straight from the template: the first model of the
+// alphabetically-first selected provider, with its alias applied (the rule
+// renderInitConfig documents).
+func wizardWantTestModel(t *testing.T, selected ...string) string {
+	t.Helper()
+	tpl, err := configdomain.LoadConfigFromBytes("config.yaml", []byte(configdomain.DefaultConfigYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := append([]string(nil), selected...)
+	sort.Strings(names)
+	for _, name := range names {
+		p, ok := tpl.Providers[name]
+		if !ok {
+			t.Fatalf("template has no provider %q", name)
+		}
+		if len(p.Models) > 0 {
+			return p.ExposedModelName(p.Models[0])
+		}
+	}
+	t.Fatalf("no selected template provider has models: %v", names)
+	return ""
+}
+
 func TestConfigInitWizard_SelectProviders(t *testing.T) {
 	dir := t.TempDir()
 	out, err := runWizard(t, dir, t.TempDir(), wizardProviderAnswers(t, map[string]bool{"deepseek": true, "zhipu": true}))
@@ -90,10 +135,24 @@ func TestConfigInitWizard_SelectProviders(t *testing.T) {
 		t.Errorf("gpt-6-astra derived although codex was not selected")
 	}
 
-	for _, want := range []string{"model-proxy login deepseek", "model-proxy login zhipu", "model-proxy serve", "model-proxy test deepseek-v4-pro"} {
+	for _, want := range []string{"model-proxy login deepseek", "model-proxy login zhipu", "model-proxy serve"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing next-step %q:\n%s", want, out)
 		}
+	}
+	// The closing `model-proxy test <model>` hint must be ACTIONABLE against
+	// the config just written (a derived exposed name), and deterministic:
+	// renderInitConfig documents it as the first model of the
+	// alphabetically-first selected provider, exposed name (alias applied).
+	// Derived from the template — the same authoritative source the wizard
+	// uses — so this does not hardcode a second model list that goes stale
+	// whenever config.yaml's models change.
+	hint := wizardTestHint(t, out)
+	if !derived[hint] {
+		t.Errorf("test hint %q is not a derived exposed name of the written config (derived: %v)", hint, derived)
+	}
+	if want := wizardWantTestModel(t, "deepseek", "zhipu"); hint != want {
+		t.Errorf("test hint = %q, want %q (first model of the alphabetically-first selected provider)", hint, want)
 	}
 	if strings.Contains(out, "takeover") {
 		t.Errorf("no clients detected, yet output mentions takeover:\n%s", out)
