@@ -7,6 +7,7 @@ package admin
 // wipe) and reload-failure backup restore.
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
@@ -27,8 +29,9 @@ import (
 // scripted; the probe shape is the OpenAI default (matching baseProbe) so
 // probe.ProbeModelProtocols exercises the real request-build path.
 type refreshFakeProv struct {
-	fetched  []string
-	fetchErr error
+	fetched      []string
+	fetchErr     error
+	fetchContext func(context.Context) ([]string, error)
 }
 
 func (f *refreshFakeProv) AuthHeaders(req *http.Request) error {
@@ -43,7 +46,13 @@ func (f *refreshFakeProv) Logout() error                           { return nil 
 func (f *refreshFakeProv) Usage() error                            { return nil }
 func (f *refreshFakeProv) Quota() (*provider.QuotaSnapshot, error) { return nil, nil }
 func (f *refreshFakeProv) FetchModels() ([]string, error)          { return f.fetched, f.fetchErr }
-func (f *refreshFakeProv) ExtraHeaders(*http.Request, string)      {}
+func (f *refreshFakeProv) FetchModelsContext(ctx context.Context) ([]string, error) {
+	if f.fetchContext != nil {
+		return f.fetchContext(ctx)
+	}
+	return f.FetchModels()
+}
+func (f *refreshFakeProv) ExtraHeaders(*http.Request, string) {}
 func (f *refreshFakeProv) FilterModelIDs(ids []string) ([]string, []string) {
 	return ids, nil
 }
@@ -72,15 +81,19 @@ func newRefreshHarness(t *testing.T, cfg *configdomain.Config, configFile string
 	h.service = New(Ports{
 		ConfigFile: func() string { return configFile },
 		Config:     func() *configdomain.Config { return cfg },
-		ProviderImpl: func(string) provider.Provider {
-			return impl
+		ModelRefreshRuntime: func(string) ModelRefreshRuntime {
+			return ModelRefreshRuntime{Config: cfg, Provider: impl, Fingerprint: "captured", Client: http.DefaultClient}
 		},
 		Reload: h.reload.fn(),
-		ModelCapsReplace: func(_ string, models map[string]runtimewire.ModelProtocols) {
+		ModelCapsReplace: func(_ string, fingerprint string, models map[string]runtimewire.ModelProtocols) bool {
+			if fingerprint != "captured" {
+				t.Errorf("refresh lost captured fingerprint: %q", fingerprint)
+			}
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			h.replaceN++
 			h.replaced = models
+			return true
 		},
 	})
 	return h
@@ -153,7 +166,7 @@ func TestRefreshModelsFetchesProbesWrites(t *testing.T) {
 	impl := &refreshFakeProv{fetched: []string{"glm-old", "glm-new"}}
 	h := newRefreshHarness(t, cfg, configFile, impl)
 
-	result, err := h.service.RefreshModels("zp")
+	result, err := h.service.RefreshModels(context.Background(), "zp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +209,7 @@ func TestRefreshModelsNoChangeSkipsWrite(t *testing.T) {
 	before, _ := os.ReadFile(configFile)
 	h := newRefreshHarness(t, cfg, configFile, &refreshFakeProv{fetched: []string{"glm"}})
 
-	result, err := h.service.RefreshModels("zp")
+	result, err := h.service.RefreshModels(context.Background(), "zp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +239,7 @@ func TestRefreshModelsAllProbeFailedKeepsUnvalidated(t *testing.T) {
 	cfg := refreshTestConfig(up.URL, []string{"glm-old"})
 	h := newRefreshHarness(t, cfg, configFile, &refreshFakeProv{fetched: []string{"glm-old", "glm-new"}})
 
-	result, err := h.service.RefreshModels("zp")
+	result, err := h.service.RefreshModels(context.Background(), "zp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +268,7 @@ func TestRefreshModelsImplUnavailable(t *testing.T) {
 	}
 	h := newRefreshHarness(t, cfg, configFile, nil)
 
-	result, err := h.service.RefreshModels("zp")
+	result, err := h.service.RefreshModels(context.Background(), "zp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +290,7 @@ func TestRefreshModelsImplUnavailable(t *testing.T) {
 // side effects.
 func TestRefreshModelsUnknownProvider(t *testing.T) {
 	h := newRefreshHarness(t, refreshTestConfig("http://x", nil), "", nil)
-	_, err := h.service.RefreshModels("ghost")
+	_, err := h.service.RefreshModels(context.Background(), "ghost")
 	if err == nil {
 		t.Fatal("unknown provider returned nil error")
 	}
@@ -296,10 +309,106 @@ func TestRefreshModelsReloadFailureRestoresConfig(t *testing.T) {
 	h := newRefreshHarness(t, cfg, configFile, &refreshFakeProv{fetched: []string{"glm-new"}})
 	h.reload.err = errors.New("boom")
 
-	if _, err := h.service.RefreshModels("zp"); err == nil {
+	if _, err := h.service.RefreshModels(context.Background(), "zp"); err == nil {
 		t.Fatal("reload failure returned nil error")
 	}
 	if got := configModels(t, configFile); !reflect.DeepEqual(got, []string{"glm-old"}) {
 		t.Errorf("config models after failed reload = %v, want restored [glm-old]", got)
+	}
+}
+
+func TestRefreshModelsCancellationHasNoSideEffects(t *testing.T) {
+	for _, phase := range []string{"fetch", "probe"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			started := make(chan struct{}, 16)
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				started <- struct{}{}
+				<-r.Context().Done()
+			}))
+			defer up.Close()
+			impl := &refreshFakeProv{fetched: []string{"old", "new"}}
+			if phase == "fetch" {
+				impl.fetchContext = func(ctx context.Context) ([]string, error) {
+					started <- struct{}{}
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+			}
+			file := writeRefreshConfig(t, up.URL, "old")
+			before, _ := os.ReadFile(file)
+			h := newRefreshHarness(t, refreshTestConfig(up.URL, []string{"old"}), file, impl)
+			done := make(chan error, 1)
+			go func() { _, err := h.service.RefreshModels(ctx, "zp"); done <- err }()
+			select {
+			case <-started:
+			case <-ctx.Done():
+				t.Fatal("refresh did not start")
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("refresh error = %v, want canceled", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("canceled refresh did not exit")
+			}
+			after, _ := os.ReadFile(file)
+			if string(after) != string(before) || len(h.reload.calls) != 0 {
+				t.Fatal("cancellation wrote config or reloaded")
+			}
+			if _, n := h.replacedMatrix(); n != 0 {
+				t.Fatal("cancellation replaced verdicts")
+			}
+		})
+	}
+}
+
+func TestRefreshModelsRejectsConcurrentProviderEdit(t *testing.T) {
+	up := bodyRulesUpstream(t, "new")
+	file := writeRefreshConfig(t, up.URL, "old")
+	cfg := refreshTestConfig(up.URL, []string{"old"})
+	var edited []byte
+	impl := &refreshFakeProv{fetchContext: func(context.Context) ([]string, error) {
+		// Models-only edits matter too: fingerprints intentionally omit models.
+		edited = []byte("listen: 127.0.0.1:8080\nproviders:\n  zp: {provider_id: zhipu, openai_base_url: " + up.URL + ", models: [operator-model]}\n")
+		return []string{"new"}, os.WriteFile(file, edited, 0o600)
+	}}
+	h := newRefreshHarness(t, cfg, file, impl)
+	_, err := h.service.RefreshModels(context.Background(), "zp")
+	if err == nil || httpErrorStatus(t, err) != http.StatusConflict {
+		t.Fatalf("concurrent edit error = %v", err)
+	}
+	after, _ := os.ReadFile(file)
+	if string(after) != string(edited) || len(h.reload.calls) != 0 {
+		t.Fatal("refresh overwrote concurrent config edit")
+	}
+	if _, n := h.replacedMatrix(); n != 0 {
+		t.Fatal("conflict replaced verdicts")
+	}
+}
+
+func TestRefreshModelsCancellationAfterCommitFinishesReload(t *testing.T) {
+	up := bodyRulesUpstream(t, "new")
+	file := writeRefreshConfig(t, up.URL, "old")
+	h := newRefreshHarness(t, refreshTestConfig(up.URL, []string{"old"}), file, &refreshFakeProv{fetched: []string{"new"}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.service.ports.Reload = func(path string) error {
+		cancel()
+		if got := configModels(t, path); !reflect.DeepEqual(got, []string{"new"}) {
+			t.Fatalf("commit models = %v", got)
+		}
+		return nil
+	}
+	result, err := h.service.RefreshModels(ctx, "zp")
+	if err != nil || !result.ConfigUpdated {
+		t.Fatalf("committed refresh = %+v, %v", result, err)
+	}
+	if _, n := h.replacedMatrix(); n != 1 {
+		t.Fatal("committed refresh did not finish cache update")
 	}
 }

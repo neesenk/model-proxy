@@ -150,15 +150,19 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		// Sensitive-path signal (S2): an intent-level alert fired before any
 		// secret value appears. Paths are never redacted (rewriting a path
 		// would corrupt legitimate coding work). Hits are context-split
-		// (guard.ScanPathsContext): a path inside a tool-call/tool-result
-		// position is STRONG — the structural signature of an agent reading a
-		// sensitive file through a tool (MCP Tool Poisoning shape) — and gets
-		// the configured guard.paths action: live event, ("guard", cat)
-		// counter, audit record, and it is the only kind block can 400. A path
-		// in ordinary prose is WEAK (coding agents legitimately discuss .env
-		// & friends all the time): it only increments ("guard", cat+"_text")
-		// and writes an audit record with action "log-weak" — no live event
-		// (would spam the monitor), never blocked (正文提及敏感路径不阻断).
+		// (guard.ScanPathsContext): a path inside a tool-INVOCATION position
+		// (tool_use.input / function arguments) is STRONG — the structural
+		// signature of an agent asking to access a sensitive file (MCP Tool
+		// Poisoning shape) — and gets the configured guard.paths action:
+		// live event, ("guard", cat) counter, audit record, and it is the
+		// only kind block can 400. Result-side content (tool_result /
+		// role:tool / function_call_output) and ordinary prose are WEAK —
+		// tool output that mentions a path is an address mention, not an
+		// access attempt (actual secret content in the output is caught by
+		// the secret channels): weak hits are IGNORED entirely — no live
+		// event, never blocked, no audit record, not even a counter (a
+		// benign-mention count is noise the operator should not have to
+		// look at either).
 		// This scan runs even when the secrets pass already hit — including
 		// secrets=block — so one request carrying both signals gets both
 		// counters/events/audit records; only the response action is decided
@@ -184,14 +188,9 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 				})
 				AuditGuardHit(runtime.SecLog, seclog.KindPath, pathCats, pa, requestID, agent, proto, exposed)
 			}
-			if len(guardDecision.WeakPath) > 0 {
-				if p.svc.Metrics != nil {
-					for _, cat := range guardDecision.WeakPath {
-						p.svc.Metrics.Inc("guard", cat+"_text", counters.EvGuardHits)
-					}
-				}
-				AuditGuardHit(runtime.SecLog, seclog.KindPath, guardDecision.WeakPath, "log-weak", requestID, agent, proto, exposed)
-			}
+			// WeakPath is deliberately not consulted: weak hits (prose /
+			// tool-result address mentions) are ignored entirely — no
+			// counter, no event, no audit record.
 		}
 		// Split-exfiltration signal (fragmented known secret): a credential
 		// smuggled out in pieces — one fragment per request — never hits the

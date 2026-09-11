@@ -35,7 +35,7 @@ func (s *Server) handleModelsRefresh(w http.ResponseWriter, r *http.Request) {
 		writeJSONErr(w, http.StatusBadRequest, "provider is required")
 		return
 	}
-	result, err := s.commands.RefreshModels(req.Provider)
+	result, err := s.commands.RefreshModels(r.Context(), req.Provider)
 	if err != nil {
 		writePortErr(w, http.StatusBadRequest, err)
 		return

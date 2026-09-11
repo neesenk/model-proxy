@@ -6,6 +6,7 @@
 package providerbuild
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -78,7 +79,7 @@ type BuildOptions struct {
 	HomeDir                  string
 	CodexCLIVersion          func() string
 	CodexCacheVersion        func() string
-	ListArkAgentPlanModelIDs func(provName string) ([]string, error)
+	ListArkAgentPlanModelIDs func(ctx context.Context, provName string) ([]string, error)
 }
 
 // BuildProviders creates provider.Provider instances from config, unrolling
@@ -277,7 +278,7 @@ func BuildOne(cfg *configdomain.Config, opts BuildOptions, name string, prov con
 	case "codex":
 		pcfg.ClientVersion = ResolveCodexClientVersion(prov.ClientVersion, opts.CodexCLIVersion, opts.CodexCacheVersion)
 	case "volcengine":
-		pcfg.FetchModelsFn = func() ([]string, error) { return opts.ListArkAgentPlanModelIDs(name) }
+		pcfg.FetchModelsFn = func(ctx context.Context) ([]string, error) { return opts.ListArkAgentPlanModelIDs(ctx, name) }
 		// GetAFPUsage is V4-signed with the virtual's own AK/SK (bound here so
 		// each pooled account queries its own Agent Plan quota); falls back to
 		// the legacy <name>_apikey.json when unbound (single-account path).
@@ -345,7 +346,10 @@ func BuildOpts() BuildOptions {
 
 // ListArkAgentPlanModelIDs calls the Volcengine signed OpenAPI ListArkAgentPlanModel
 // via the provider's stored AK/SK and returns the Agent Plan's supported model IDs.
-func ListArkAgentPlanModelIDs(provName string) ([]string, error) {
+func ListArkAgentPlanModelIDs(ctx context.Context, provName string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	creds, err := LoadVolcengineCreds(accounts.HomeDir(), provName)
 	if err != nil || creds.AccessKey == "" || creds.SecretKey == "" {
 		return nil, fmt.Errorf("Agent Plan model list needs AK/SK — run `model-proxy login %s`", provName)
@@ -354,7 +358,7 @@ func ListArkAgentPlanModelIDs(provName string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req.WithContext(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("ListArkAgentPlanModel: %w", err)
 	}

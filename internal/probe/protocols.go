@@ -207,11 +207,19 @@ func ProbeModels(ctx context.Context, client *http.Client, prov configdomain.Pro
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	for i, id := range ids {
+		out[i].ID = id
 		wg.Add(1)
 		go func(i int, id string) {
 			defer wg.Done()
-			sem <- struct{}{}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
 			defer func() { <-sem }()
+			if ctx.Err() != nil {
+				return
+			}
 			out[i] = ModelLegs{ID: id, Legs: ProbeModelProtocols(ctx, client, prov, impl, id)}
 		}(i, id)
 	}

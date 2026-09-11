@@ -44,6 +44,7 @@ type fakeReads struct{}
 func (fakeReads) Dashboard(time.Time) Dashboard             { return Dashboard{} }
 func (fakeReads) LogFile() string                           { return "" }
 func (fakeReads) RequestLogDirectory() string               { return "" }
+func (fakeReads) RequestLogQueries() RequestLogQueries      { return nil }
 func (fakeReads) Accounts() []ProviderAccounts              { return nil }
 func (fakeReads) Tokens(int64, int64) ([]TokenUsage, error) { return nil, nil }
 func (fakeReads) Agents(int64, int64) ([]AgentUsage, error) { return nil, nil }
@@ -64,6 +65,9 @@ func (fakeReads) Fusion(string, time.Time) (map[string]fusion.WorkflowStats, []f
 func (fakeReads) Pins() []Pin { return nil }
 func (fakeReads) Security(SecurityQuery) (SecurityResult, error) {
 	return SecurityResult{}, nil
+}
+func (fakeReads) SecurityExplain(string, string, []string) (SecurityExplainResult, error) {
+	return SecurityExplainResult{}, nil
 }
 func (fakeReads) ConfigDocument() (ConfigDocument, error) {
 	return ConfigDocument{}, nil
@@ -103,6 +107,6 @@ func (fakeCommands) BeginLogin(context.Context, string) (LoginStart, error) {
 func (fakeReads) Presets() []presets.Preset { return nil }
 
 func (fakeCommands) AddPreset(string) ([]string, string, error) { return nil, "", nil }
-func (fakeCommands) RefreshModels(string) (ModelsRefreshResult, error) {
+func (fakeCommands) RefreshModels(context.Context, string) (ModelsRefreshResult, error) {
 	return ModelsRefreshResult{}, nil
 }

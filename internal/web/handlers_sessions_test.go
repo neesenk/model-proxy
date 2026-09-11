@@ -15,14 +15,16 @@ import (
 	"model-proxy/internal/pricing"
 )
 
-// sessionsReadAPI overrides just the log directory; everything else stays the
-// zero stub.
+// sessionsReadAPI overrides just the request-log query port; everything else
+// stays the zero stub.
 type sessionsReadAPI struct {
 	testReadAPI
 	dir string
 }
 
-func (a sessionsReadAPI) RequestLogDirectory() string { return a.dir }
+func (a sessionsReadAPI) RequestLogQueries() appapi.RequestLogQueries {
+	return dirRequestLogQueries{a.dir}
+}
 func (a sessionsReadAPI) Pricing() appapi.PricingSnapshot {
 	return appapi.PricingSnapshot{
 		Overrides: map[string]pricing.Override{

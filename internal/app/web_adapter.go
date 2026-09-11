@@ -9,6 +9,7 @@ import (
 	"model-proxy/internal/login"
 	obscounters "model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
+	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/provider"
@@ -183,6 +184,11 @@ func (p *Proxy) adminPorts(
 		RequestLogDirectory: func() string {
 			return p.reqLog.Directory()
 		},
+		RequestLogIndex: func() *requestlog.Indexer {
+			// Process-lifetime and never swapped (set once in initRequestLog
+			// before serving starts), so no lock — same discipline as reqLog.
+			return p.reqLogIndex
+		},
 		TokenUsage: func() map[obscounters.TokenKey]obscounters.TokenUsage {
 			if p.tokens == nil {
 				return nil
@@ -230,6 +236,12 @@ func (p *Proxy) adminPorts(
 				return []observestats.AnalyticsBucket{}, nil
 			}
 			return p.stats.QueryAnalytics(from, to, provider, model, granularity)
+		},
+		AnalyticsAgents: func(from, to int64, agent, provider, model, granularity string) ([]observestats.AnalyticsBucket, error) {
+			if p.stats == nil {
+				return []observestats.AnalyticsBucket{}, nil
+			}
+			return p.stats.QueryAnalyticsAgents(from, to, agent, provider, model, granularity)
 		},
 		FusionSnapshot: func(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
 			return p.fusionReg.Snapshot(workflow, now)
@@ -290,34 +302,36 @@ func (p *Proxy) adminPorts(
 			runtime := p.SnapshotRuntime()
 			return runtime.Cfg, runtime.Providers
 		},
-		ProviderImpl: func(name string) provider.Provider {
+		LocateGuardHits: p.locateGuardHits,
+		ModelRefreshRuntime: func(name string) admin.ModelRefreshRuntime {
 			// Same parent-or-first-pooled-virtual resolution as the model-caps
 			// probe pass: the model list is per-upstream, not per-account.
 			p.mu.RLock()
-			defer p.mu.RUnlock()
+			cfg := p.cfg
 			impl := p.providers[name]
 			if impl == nil {
 				if vids := p.poolIndex[name]; len(vids) > 0 {
 					impl = p.providers[vids[0]]
 				}
 			}
-			return impl
+			p.mu.RUnlock()
+			return admin.ModelRefreshRuntime{
+				Config: cfg, Provider: impl,
+				Fingerprint: providerbuild.ProtocolConfigFingerprint(cfg.Providers[name]),
+				Client:      &http.Client{Timeout: cfg.Scheduling.Timeout(), Transport: upstreamproxy.AutoTransport()},
+			}
 		},
-		ModelCapsReplace: func(name string, models map[string]runtimewire.ModelProtocols) {
+		ModelCapsReplace: func(name, fingerprint string, models map[string]runtimewire.ModelProtocols) bool {
 			p.mu.RLock()
 			provCfg, ok := p.cfg.Providers[name]
-			p.mu.RUnlock()
-			if !ok {
-				return
+			if !ok || providerbuild.ProtocolConfigFingerprint(provCfg) != fingerprint {
+				p.mu.RUnlock()
+				return false
 			}
-			p.modelCaps.ReplaceProviderModels(name, providerbuild.ProtocolConfigFingerprint(provCfg), models, time.Now())
-			p.persistModelCaps()
-		},
-		ProbeHTTPClient: func() *http.Client {
-			p.mu.RLock()
-			timeout := p.cfg.Scheduling.Timeout()
+			p.modelCaps.ReplaceProviderModels(name, fingerprint, models, time.Now())
 			p.mu.RUnlock()
-			return &http.Client{Timeout: timeout, Transport: upstreamproxy.AutoTransport()}
+			p.persistModelCaps()
+			return true
 		},
 		NewAqpClient:    newAqpClient,
 		NewCodexOptions: newCodexOptions,

@@ -16,17 +16,20 @@ var (
 	procUnlockFileEx = kernel32.NewProc("UnlockFileEx")
 )
 
-const lockfileExclusiveLock = 0x2 // blocking: no LOCKFILE_FAIL_IMMEDIATELY
+const lockfileExclusiveLock = 0x2
 
-func lockFile(f *os.File) error {
+func tryLockFile(f *os.File) (bool, error) {
 	var overlapped syscall.Overlapped
 	r1, _, err := procLockFileEx.Call(
-		uintptr(f.Fd()), lockfileExclusiveLock, 0, 1, 0,
+		uintptr(f.Fd()), lockfileExclusiveLock|0x1, 0, 1, 0,
 		uintptr(unsafe.Pointer(&overlapped)))
 	if r1 == 0 {
-		return err
+		if err == syscall.Errno(33) {
+			return false, nil
+		} // ERROR_LOCK_VIOLATION
+		return false, err
 	}
-	return nil
+	return true, nil
 }
 
 func unlockFile(f *os.File) error {

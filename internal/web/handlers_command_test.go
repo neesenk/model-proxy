@@ -30,7 +30,7 @@ type commandFake struct {
 	probe        func(context.Context, string, string) (appapi.ProbeResult, error)
 	remove       func(string, string) (appapi.MutationResult, error)
 	begin        func(context.Context, string) (appapi.LoginStart, error)
-	refreshMdls  func(string) (appapi.ModelsRefreshResult, error)
+	refreshMdls  func(context.Context, string) (appapi.ModelsRefreshResult, error)
 }
 
 func (fake *commandFake) ResetStats() error {
@@ -193,7 +193,7 @@ func TestCommandTokensResetContract(t *testing.T) {
 func TestCommandModelsRefreshContract(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		var gotProvider string
-		server := newCommandTestServer(t, &commandFake{refreshMdls: func(provider string) (appapi.ModelsRefreshResult, error) {
+		server := newCommandTestServer(t, &commandFake{refreshMdls: func(_ context.Context, provider string) (appapi.ModelsRefreshResult, error) {
 			gotProvider = provider
 			return appapi.ModelsRefreshResult{
 				Provider:      provider,
@@ -230,7 +230,7 @@ func TestCommandModelsRefreshContract(t *testing.T) {
 		}
 	})
 	t.Run("command error maps to port status", func(t *testing.T) {
-		server := newCommandTestServer(t, &commandFake{refreshMdls: func(string) (appapi.ModelsRefreshResult, error) {
+		server := newCommandTestServer(t, &commandFake{refreshMdls: func(context.Context, string) (appapi.ModelsRefreshResult, error) {
 			return appapi.ModelsRefreshResult{}, appapi.NewHTTPError(http.StatusNotFound, "unknown provider: ghost")
 		}})
 		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/models/refresh", `{"provider":"ghost"}`), http.StatusNotFound, map[string]any{"error": "unknown provider: ghost"})
@@ -258,6 +258,13 @@ func TestCommandQuotaRefreshContract(t *testing.T) {
 	if got, want := strings.Join(providers, ","), ",aqp#one,missing"; got != want {
 		t.Fatalf("RefreshQuota providers=%q want %q", got, want)
 	}
+	t.Run("pay-as-you-go provider is not quota-tracked", func(t *testing.T) {
+		server := newCommandTestServer(t, &commandFake{refresh: func(provider string) bool {
+			return provider != "shopee"
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", `{}`), http.StatusOK, map[string]any{"status": "refreshed"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", `{"provider":"shopee"}`), http.StatusNotFound, map[string]any{"error": "unknown provider: shopee"})
+	})
 }
 
 func TestCommandHealthResetContract(t *testing.T) {
@@ -627,9 +634,32 @@ func TestCommandLoginContract(t *testing.T) {
 
 func (*commandFake) AddPreset(string) ([]string, string, error) { return nil, "", nil }
 
-func (fake *commandFake) RefreshModels(provider string) (appapi.ModelsRefreshResult, error) {
+func (fake *commandFake) RefreshModels(ctx context.Context, provider string) (appapi.ModelsRefreshResult, error) {
 	if fake.refreshMdls != nil {
-		return fake.refreshMdls(provider)
+		return fake.refreshMdls(ctx, provider)
 	}
 	return appapi.ModelsRefreshResult{Provider: provider}, nil
+}
+
+func TestModelsRefreshReceivesRequestCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	called := false
+	server := newCommandTestServer(t, &commandFake{refreshMdls: func(got context.Context, name string) (appapi.ModelsRefreshResult, error) {
+		called = true
+		if name != "up" || got != ctx {
+			t.Error("refresh did not receive exact request context and provider")
+		}
+		cancel()
+		if !errors.Is(got.Err(), context.Canceled) {
+			t.Error("request cancellation did not propagate")
+		}
+		return appapi.ModelsRefreshResult{}, got.Err()
+	}})
+	r := httptest.NewRequest(http.MethodPost, "/api/models/refresh", strings.NewReader(`{"provider":"up"}`)).WithContext(ctx)
+	w := httptest.NewRecorder()
+	server.handleModelsRefresh(w, r)
+	if !called || w.Code != http.StatusBadRequest {
+		t.Fatalf("refresh called=%v status=%d", called, w.Code)
+	}
 }

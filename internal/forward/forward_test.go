@@ -584,7 +584,7 @@ func TestServeGuardSecretsBlock(t *testing.T) {
 
 // TestServeGuardPathsStrongBlockWeakLog: a sensitive path in a tool-call
 // position is STRONG (block can 400 it); the same path in prose is WEAK
-// (counted as *_text, never blocked).
+// (ignored entirely — no counter, never blocked).
 func TestServeGuardPathsStrongBlockWeakLog(t *testing.T) {
 	up := newFakeUpstream(t, openaiOKResponder("ok"))
 	h := newHarness()
@@ -602,8 +602,8 @@ func TestServeGuardPathsStrongBlockWeakLog(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("weak path status = %d, want 200 (weak never blocks)", w.Code)
 	}
-	if got := h.svc.Metrics.Snapshot()[counters.PMKey{Provider: "guard", Model: "custom_path_text"}].Requests; got == 0 {
-		t.Error("weak path must increment (guard, custom_path_text)")
+	if got := h.svc.Metrics.Snapshot()[counters.PMKey{Provider: "guard", Model: "custom_path_text"}].Requests; got != 0 {
+		t.Errorf("weak path (guard, custom_path_text) = %d, want 0 (weak hits are ignored entirely)", got)
 	}
 }
 

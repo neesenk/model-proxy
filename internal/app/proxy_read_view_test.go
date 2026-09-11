@@ -2,6 +2,11 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -156,10 +161,8 @@ func TestAdminModelCapsPortProjectsDetachedSnapshot(t *testing.T) {
 	}
 }
 
-// TestAdminModelCapsReplacePortStampsCurrentFingerprint: the ModelCapsReplace
-// port (models refresh) overwrites the provider's matrix wholesale, stamped
-// with the CURRENT generation's protocol fingerprint so the entry survives
-// the next boot's restore gate.
+// ModelCapsReplace accepts the captured fingerprint while it still matches,
+// replaces the matrix wholesale and preserves the fingerprint for boot restore.
 func TestAdminModelCapsReplacePortStampsCurrentFingerprint(t *testing.T) {
 	p := newTestProxy(t, &Config{
 		Providers: map[string]Provider{
@@ -170,7 +173,7 @@ func TestAdminModelCapsReplacePortStampsCurrentFingerprint(t *testing.T) {
 		runtimewire.ModelProtocols{Chat: triYes, Anthropic: triNo, Responses: triNo}, time.Now())
 
 	ports := p.adminPorts(func() string { return "" }, nil, nil)
-	ports.ModelCapsReplace("up", map[string]runtimewire.ModelProtocols{
+	ports.ModelCapsReplace("up", ports.ModelRefreshRuntime("up").Fingerprint, map[string]runtimewire.ModelProtocols{
 		"m1": {Chat: triYes, Anthropic: triNo, Responses: triYes},
 	})
 
@@ -185,15 +188,14 @@ func TestAdminModelCapsReplacePortStampsCurrentFingerprint(t *testing.T) {
 		t.Errorf("fingerprint = %q, want the current generation's %q", fp, wantFP)
 	}
 	// Unknown providers are dropped, not created.
-	ports.ModelCapsReplace("ghost", map[string]runtimewire.ModelProtocols{"m": {Chat: triYes}})
+	ports.ModelCapsReplace("ghost", "unused", map[string]runtimewire.ModelProtocols{"m": {Chat: triYes}})
 	if _, ok := p.modelCaps.Get("ghost", "m"); ok {
 		t.Error("ModelCapsReplace created an entry for an unconfigured provider")
 	}
 }
 
-// TestAdminProviderImplPortResolvesPoolFallback: ProviderImpl returns the
-// named provider's impl, falling back to the credential pool's first virtual
-// for pooled parents (the probe/fetch path mirrors the model-caps pass).
+// ModelRefreshRuntime captures the named provider's impl, falling back to the
+// credential pool's first virtual for pooled parents.
 func TestAdminProviderImplPortResolvesPoolFallback(t *testing.T) {
 	p := newTestProxy(t, &Config{
 		Providers: map[string]Provider{
@@ -208,13 +210,57 @@ func TestAdminProviderImplPortResolvesPoolFallback(t *testing.T) {
 	p.poolIndex["pooled"] = []string{"pooled#a1"}
 
 	ports := p.adminPorts(func() string { return "" }, nil, nil)
-	if got := ports.ProviderImpl("solo"); got != direct {
+	if got := ports.ModelRefreshRuntime("solo").Provider; got != direct {
 		t.Errorf("ProviderImpl(solo) = %v, want the direct impl", got)
 	}
-	if got := ports.ProviderImpl("pooled"); got != virtual {
+	if got := ports.ModelRefreshRuntime("pooled").Provider; got != virtual {
 		t.Errorf("ProviderImpl(pooled) = %v, want the pool's first virtual", got)
 	}
-	if got := ports.ProviderImpl("ghost"); got != nil {
+	if got := ports.ModelRefreshRuntime("ghost").Provider; got != nil {
 		t.Errorf("ProviderImpl(ghost) = %v, want nil", got)
+	}
+}
+
+func TestAdminModelRefreshRejectsPreReloadFingerprint(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(`{}`)) }))
+	defer up.Close()
+	t.Setenv("MP_MODELSDEV_URL", up.URL)
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	write := func(base string) *Config {
+		t.Helper()
+		text := fmt.Sprintf("listen: 127.0.0.1:0\nproviders:\n  up: {provider_id: zhipu, openai_base_url: %s, models: [m]}\n", base)
+		if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadConfig(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+	p := newTestProxy(t, write(up.URL+"/old"))
+	ports := p.adminPorts(func() string { return file }, nil, nil)
+	captured := ports.ModelRefreshRuntime("up")
+	write(up.URL + "/new")
+	if err := p.Reload(file); err != nil {
+		t.Fatal(err)
+	}
+	if captured.Config.Providers["up"].OpenAIBaseURL != up.URL+"/old" {
+		t.Fatal("captured config mutated on reload")
+	}
+	matrix := map[string]runtimewire.ModelProtocols{"m": {Chat: triYes, Responses: triNo}}
+	if ports.ModelCapsReplace("up", captured.Fingerprint, matrix) {
+		t.Fatal("accepted old endpoint verdicts")
+	}
+	if _, ok := p.modelCaps.Get("up", "m"); ok {
+		t.Fatal("old matrix reached current store")
+	}
+	fresh := ports.ModelRefreshRuntime("up")
+	if fresh.Fingerprint == captured.Fingerprint || !ports.ModelCapsReplace("up", fresh.Fingerprint, matrix) {
+		t.Fatal("fresh endpoint verdicts rejected")
+	}
+	got, ok := p.modelCaps.Get("up", "m")
+	if !ok || got != matrix["m"] {
+		t.Fatalf("fresh matrix = %+v, present=%v", got, ok)
 	}
 }

@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,8 +16,12 @@ import (
 // zhipu, deepseek — any provider whose AuthHeaders injects a Bearer token and
 // whose openai_base_url serves /models.
 func fetchModelsBearer(cfg *Config, auth func(*http.Request) error) ([]string, error) {
+	return fetchModelsBearerContext(context.Background(), cfg, auth)
+}
+
+func fetchModelsBearerContext(ctx context.Context, cfg *Config, auth func(*http.Request) error) ([]string, error) {
 	url := strings.TrimRight(cfg.OpenAIBaseURL, "/") + "/models"
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}

@@ -167,8 +167,8 @@ func TestGuardPaths_LogThenBlock(t *testing.T) {
 
 // (c2) Weak path hits (ordinary prose mentioning a sensitive path) are the
 // noisy-but-benign case: they forward under every action — block included
-// (正文提及敏感路径不阻断) — publish NO live event (would spam the monitor),
-// and only increment the ("guard", cat+"_text") counter.
+// (正文提及敏感路径不阻断) — publish NO live event, and are ignored
+// entirely (no ("guard", cat+"_text") counter, no audit record).
 func TestGuardPaths_WeakTextNeverBlocks(t *testing.T) {
 	body := `{"model":"glm","messages":[{"role":"user","content":"please cat ~/.ssh/id_rsa"}]}`
 
@@ -185,8 +185,8 @@ func TestGuardPaths_WeakTextNeverBlocks(t *testing.T) {
 	if n := snap[counters.PMKey{Provider: "guard", Model: "ssh"}].Requests; n != 0 {
 		t.Errorf("weak hit bumped the strong ssh counter = %d, want 0", n)
 	}
-	if n := snap[counters.PMKey{Provider: "guard", Model: "ssh_text"}].Requests; n != 1 {
-		t.Errorf("weak hit counter ssh_text = %d, want 1", n)
+	if n := snap[counters.PMKey{Provider: "guard", Model: "ssh_text"}].Requests; n != 0 {
+		t.Errorf("weak hit counter ssh_text = %d, want 0 (weak hits are ignored entirely)", n)
 	}
 
 	p2, proxyURL2, bodies2 := newGuardPoolProxy(t,
@@ -199,8 +199,8 @@ func TestGuardPaths_WeakTextNeverBlocks(t *testing.T) {
 		t.Errorf("weak hit under block published live events = %v, want none", details)
 	}
 	snap2 := p2.metrics.Snapshot()
-	if n := snap2[counters.PMKey{Provider: "guard", Model: "ssh_text"}].Requests; n != 1 {
-		t.Errorf("weak hit counter ssh_text under block = %d, want 1", n)
+	if n := snap2[counters.PMKey{Provider: "guard", Model: "ssh_text"}].Requests; n != 0 {
+		t.Errorf("weak hit counter ssh_text under block = %d, want 0", n)
 	}
 }
 
@@ -273,7 +273,9 @@ func TestGuardRedactKeepsPathBlockChain(t *testing.T) {
 // (d) Guard hits persist security audit records (kind=secret / kind=path) via
 // the seclog lifecycle; the audit file must never carry secret material. Path
 // records split by confidence: a STRONG hit (tool position) audits with the
-// configured action, a WEAK hit (prose) audits with action "log-weak".
+// configured action; a WEAK hit (prose address mention — not a security issue
+// by itself) increments the ("guard", cat+"_text") counter only and must NOT
+// produce an audit record.
 func TestGuardAudit_PersistsSecretAndPathRecords(t *testing.T) {
 	p, proxyURL, _ := newGuardPoolProxy(t,
 		GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true, Paths: "log", Audit: true},
@@ -298,7 +300,7 @@ func TestGuardAudit_PersistsSecretAndPathRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sawSecret, sawPathStrong, sawPathWeak bool
+	var sawSecret, sawPathStrong bool
 	for _, rec := range result.Records {
 		switch rec.Kind {
 		case seclog.KindSecret:
@@ -310,19 +312,20 @@ func TestGuardAudit_PersistsSecretAndPathRecords(t *testing.T) {
 				t.Errorf("secret record missing request attribution: %+v", rec)
 			}
 		case seclog.KindPath:
-			switch {
-			case len(rec.Names) == 1 && rec.Names[0] == "aws_creds" && rec.Action == "log":
-				sawPathStrong = true
-			case len(rec.Names) == 1 && rec.Names[0] == "ssh" && rec.Action == "log-weak":
-				sawPathWeak = true
-			default:
-				t.Errorf("path record = %+v, want strong [aws_creds] action=log or weak [ssh] action=log-weak", rec)
+			if len(rec.Names) != 1 || rec.Names[0] != "aws_creds" || rec.Action != "log" {
+				t.Errorf("path record = %+v, want strong [aws_creds] action=log (weak prose hits are not audited)", rec)
 			}
+			sawPathStrong = true
 		}
 	}
-	if !sawSecret || !sawPathStrong || !sawPathWeak {
-		t.Fatalf("audit records: secret=%v path-strong=%v path-weak=%v, want all (records=%v)",
-			sawSecret, sawPathStrong, sawPathWeak, result.Records)
+	if !sawSecret || !sawPathStrong {
+		t.Fatalf("audit records: secret=%v path-strong=%v, want both (records=%v)",
+			sawSecret, sawPathStrong, result.Records)
+	}
+	// The weak ssh mention (user prose) must leave no trace at all: no audit
+	// record (asserted above), no counter.
+	if n := p.metrics.Snapshot()[counters.PMKey{Provider: "guard", Model: "ssh_text"}].Requests; n != 0 {
+		t.Errorf("weak hit counter ssh_text = %d, want 0 (weak hits are ignored entirely)", n)
 	}
 	// Raw file bytes must not contain the pool key in any field.
 	entries, err := os.ReadDir(dir)

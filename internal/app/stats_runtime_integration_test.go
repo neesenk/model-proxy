@@ -495,7 +495,7 @@ func TestTokensResetClearsDurableRuntimeAndCacheState(t *testing.T) {
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
-	cache := NewResponseCache(CacheConfig{Enabled: true, TTL: "1h"})
+	cache := NewResponseCache(CacheConfig{Enabled: true, TTL: "1h"}, nil)
 	flusher := observestats.NewFlusher(store, metrics, tokens, agents, nil, nil)
 	proxy := &Proxy{
 		generationState: generationState{
@@ -550,7 +550,7 @@ func TestTokensResetFailurePreservesLiveState(t *testing.T) {
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
-	cache := NewResponseCache(CacheConfig{Enabled: true, TTL: "1h"})
+	cache := NewResponseCache(CacheConfig{Enabled: true, TTL: "1h"}, nil)
 	flusher := observestats.NewFlusher(
 		&resetErrorSink{Store: store}, metrics, tokens, agents, nil, nil)
 	proxy := &Proxy{

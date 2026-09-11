@@ -31,6 +31,7 @@ type testReadAPI struct{}
 func (testReadAPI) Dashboard(time.Time) appapi.Dashboard                   { return appapi.Dashboard{} }
 func (testReadAPI) LogFile() string                                        { return "" }
 func (testReadAPI) RequestLogDirectory() string                            { return "" }
+func (testReadAPI) RequestLogQueries() appapi.RequestLogQueries            { return nil }
 func (testReadAPI) Accounts() []appapi.ProviderAccounts                    { return nil }
 func (testReadAPI) Tokens(int64, int64) ([]appapi.TokenUsage, error)       { return nil, nil }
 func (testReadAPI) Agents(int64, int64) ([]appapi.AgentUsage, error)       { return nil, nil }
@@ -51,6 +52,9 @@ func (testReadAPI) Fusion(string, time.Time) (map[string]fusion.WorkflowStats, [
 func (testReadAPI) Pins() []appapi.Pin { return nil }
 func (testReadAPI) Security(appapi.SecurityQuery) (appapi.SecurityResult, error) {
 	return appapi.SecurityResult{}, nil
+}
+func (testReadAPI) SecurityExplain(string, string, []string) (appapi.SecurityExplainResult, error) {
+	return appapi.SecurityExplainResult{}, nil
 }
 func (testReadAPI) ConfigDocument() (appapi.ConfigDocument, error) {
 	return appapi.ConfigDocument{}, nil
@@ -178,7 +182,7 @@ func TestServerLoginTransport(t *testing.T) {
 
 func (testCommandAPI) AddPreset(string) ([]string, string, error) { return nil, "", nil }
 
-func (testCommandAPI) RefreshModels(string) (appapi.ModelsRefreshResult, error) {
+func (testCommandAPI) RefreshModels(context.Context, string) (appapi.ModelsRefreshResult, error) {
 	return appapi.ModelsRefreshResult{}, nil
 }
 

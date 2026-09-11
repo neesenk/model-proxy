@@ -2,9 +2,12 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"model-proxy/internal/accounts"
@@ -13,6 +16,7 @@ import (
 	"model-proxy/internal/credstore"
 	"model-proxy/internal/fusion"
 	obscounters "model-proxy/internal/observe/counters"
+	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/observe/seclog"
 	observestats "model-proxy/internal/observe/stats"
 	domainpresets "model-proxy/internal/presets"
@@ -125,15 +129,65 @@ func (s *Service) RequestLogDirectory() string {
 	return s.ports.RequestLogDirectory()
 }
 
+// RequestLogQueries returns the request-log query port: the tailing SQLite
+// index when the composition root started one, the directory scan otherwise
+// (index open failure degrades, never fails closed). A nil result means the
+// request log is disabled — the handlers answer their {enabled:false} shape.
+func (s *Service) RequestLogQueries() appapi.RequestLogQueries {
+	if s.ports.RequestLogDirectory == nil {
+		return nil
+	}
+	dir := s.ports.RequestLogDirectory()
+	if dir == "" {
+		return nil
+	}
+	var index *requestlog.Indexer
+	if s.ports.RequestLogIndex != nil {
+		index = s.ports.RequestLogIndex()
+	}
+	return requestLogQueries{dir: dir, index: index}
+}
+
+// requestLogQueries adapts the index (or the scan fallback) to
+// appapi.RequestLogQueries. *requestlog.Indexer satisfies that interface
+// structurally; this adapter only adds the nil-index degradation.
+type requestLogQueries struct {
+	dir   string
+	index *requestlog.Indexer
+}
+
+func (q requestLogQueries) SummariesWithFacets(filter requestlog.Filter) ([]requestlog.Summary, requestlog.Facets, error) {
+	if q.index != nil {
+		return q.index.SummariesWithFacets(filter)
+	}
+	return requestlog.QuerySummariesWithFacets(q.dir, filter)
+}
+
+func (q requestLogQueries) Detail(requestID string) ([]requestlog.Record, error) {
+	if q.index != nil {
+		// The index seek already falls back to the scan on a miss.
+		return q.index.Detail(requestID)
+	}
+	return requestlog.QueryRecords(q.dir, requestlog.Filter{RequestID: requestID, Limit: 50})
+}
+
+func (q requestLogQueries) SessionSummaries(scanLimit, limit int, costOf func(model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error) {
+	if q.index != nil {
+		return q.index.SessionSummaries(scanLimit, limit, costOf)
+	}
+	return requestlog.SessionSummaries(q.dir, scanLimit, limit, costOf)
+}
+
 func (s *Service) Accounts() []appapi.ProviderAccounts {
 	configs := s.ports.ProviderConfigs()
 	out := make([]appapi.ProviderAccounts, 0, len(configs))
 	for name, config := range configs {
 		item := appapi.ProviderAccounts{
-			Name:       name,
-			ProviderID: config.Provider,
-			Billing:    config.Billing,
-			Accounts:   []appapi.Account{},
+			Name:          name,
+			ProviderID:    config.Provider,
+			Billing:       config.Billing,
+			UsageEndpoint: config.UsageURL != "",
+			Accounts:      []appapi.Account{},
 		}
 		switch config.Provider {
 		case "aqp":
@@ -301,6 +355,7 @@ func (s *Service) StatsSince() int64 {
 	return s.ports.StatsSince()
 }
 
+// Stats projects the stored minute buckets.
 func (s *Service) Stats(query appapi.StatsQuery) ([]observestats.Bucket, error) {
 	return s.ports.StatsRange(
 		query.From,
@@ -322,18 +377,38 @@ func (s *Service) AgentStats(query appapi.AgentStatsQuery) ([]observestats.Agent
 	)
 }
 
-// Analytics projects the calendar-day/month buckets and drops the virtual
+// Analytics projects the calendar-hour/day/month buckets and drops the virtual
 // counter namespaces (guard/attempts/routing/fusion): they are request
 // counters, not upstream usage, so they would otherwise surface as billable
-// models with zero tokens and an "unpriced" hint.
+// models with zero tokens and an "unpriced" hint. By="agent" switches to the
+// agent_buckets dimension (grouped by agent/provider/model); a missing
+// AnalyticsAgents port behaves like a disabled store (empty result).
 func (s *Service) Analytics(query appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
-	buckets, err := s.ports.Analytics(
-		query.From,
-		query.To,
-		query.Provider,
-		query.Model,
-		query.Granularity,
+	var (
+		buckets []observestats.AnalyticsBucket
+		err     error
 	)
+	if query.By == "agent" {
+		if s.ports.AnalyticsAgents == nil {
+			return []observestats.AnalyticsBucket{}, nil
+		}
+		buckets, err = s.ports.AnalyticsAgents(
+			query.From,
+			query.To,
+			query.Agent,
+			query.Provider,
+			query.Model,
+			query.Granularity,
+		)
+	} else {
+		buckets, err = s.ports.Analytics(
+			query.From,
+			query.To,
+			query.Provider,
+			query.Model,
+			query.Granularity,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -443,6 +518,104 @@ func (s *Service) Security(query appapi.SecurityQuery) (appapi.SecurityResult, e
 		})
 	}
 	return out, nil
+}
+
+// redactPlaceholder mirrors guard.RedactPlaceholder ("[REDACTED]") — the
+// literal is embedded in persisted request logs, so it is a stable wire
+// constant. It is duplicated here because internal/admin must not import
+// internal/guard (archtest DAG); the explain port reports through it.
+const redactPlaceholder = "[REDACTED]"
+
+// SecurityExplain implements the on-demand guard-hit analysis behind
+// GET /api/security/explain: the audit record's request body is fetched from
+// the request log and re-scanned through the LocateGuardHits port (the
+// composition root owns the current-generation scanner). Nothing is
+// persisted; the surface derives from data the admin can already read via
+// the request-detail endpoint. Status semantics:
+//
+//   - no_request_log: request log disabled — nothing to re-scan.
+//   - not_found: no record with a request body for this request id (retention
+//     pruned it, or the audit predates logging).
+//   - redacted: the log holds the post-redact body (guard.secrets=redact), so
+//     the matched bytes were destroyed before persistence.
+//   - cross_request: the hit is known_secret_fragmented, a session-window
+//     detection no single stored body can reproduce.
+//   - ok: matches carry per-name Located flags (false = the current scanner
+//     no longer finds it — a removed rule or rotated known secret).
+func (s *Service) SecurityExplain(requestID, kind string, names []string) (appapi.SecurityExplainResult, error) {
+	result := appapi.SecurityExplainResult{
+		Status:    appapi.SecurityExplainOK,
+		RequestID: requestID,
+		Kind:      kind,
+		Matches:   []appapi.SecurityMatch{},
+	}
+	if kind != seclog.KindSecret && kind != seclog.KindPath {
+		return result, fmt.Errorf("kind must be %s or %s", seclog.KindSecret, seclog.KindPath)
+	}
+	if requestID == "" || len(names) == 0 {
+		return result, errors.New("request_id and at least one name are required")
+	}
+	if s.ports.LocateGuardHits == nil {
+		// Fail closed: without the scanner port no explain surface at all,
+		// rather than a silently empty analysis.
+		return result, errors.New("security explain is not wired")
+	}
+	queries := s.RequestLogQueries()
+	if queries == nil {
+		result.Status = appapi.SecurityExplainNoRequestLog
+		return result, nil
+	}
+	records, err := queries.Detail(requestID)
+	if err != nil {
+		return appapi.SecurityExplainResult{}, err
+	}
+	var body string
+	for _, record := range records {
+		if record.RequestBody != "" {
+			body = record.RequestBody
+			break
+		}
+	}
+	if body == "" {
+		result.Status = appapi.SecurityExplainNotFound
+		return result, nil
+	}
+	matches, err := s.ports.LocateGuardHits([]byte(body), kind, names)
+	if err != nil {
+		if errors.Is(err, appapi.ErrGuardScannerUnavailable) {
+			result.Status = appapi.SecurityExplainScannerUnavailable
+			return result, nil
+		}
+		return appapi.SecurityExplainResult{}, err
+	}
+	result.Matches = matches
+	located := false
+	for _, m := range matches {
+		if m.Located {
+			located = true
+			break
+		}
+	}
+	if !located {
+		switch {
+		case onlyFragmentedHits(names):
+			result.Status = appapi.SecurityExplainCrossRequest
+		case strings.Contains(body, redactPlaceholder):
+			result.Status = appapi.SecurityExplainRedacted
+		}
+	}
+	return result, nil
+}
+
+// onlyFragmentedHits reports whether every requested name is the
+// cross-request fragmented-known-secret channel.
+func onlyFragmentedHits(names []string) bool {
+	for _, n := range names {
+		if n != "known_secret_fragmented" {
+			return false
+		}
+	}
+	return len(names) > 0
 }
 
 func (s *Service) ConfigDocument() (appapi.ConfigDocument, error) {

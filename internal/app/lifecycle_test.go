@@ -56,6 +56,72 @@ func TestProxyCloseWaitsForOwnedTasksAndRejectsNewWork(t *testing.T) {
 	p.Close()
 }
 
+// TestProxyRequestLogIndexLifecycle wires the request log the way
+// StartRuntimeServices does: initRequestLog must create the tailing index
+// alongside the logger, the lifecycle-admitted loop must tail a committed
+// record into the index while running, and Close must shut the indexer down
+// (final reconcile + db close) after the logger drains.
+func TestProxyRequestLogIndexLifecycle(t *testing.T) {
+	p := newTestProxy(t, &Config{})
+	logDir := t.TempDir()
+	p.initRequestLog(RequestLogConfig{Enabled: true, Dir: logDir})
+	if p.reqLog == nil {
+		t.Fatal("initRequestLog did not create the logger")
+	}
+	if p.reqLogIndex == nil {
+		t.Fatal("initRequestLog did not create the tailing index")
+	}
+	p.reqLogStarted = p.lifecycle.Run(func(<-chan struct{}) {
+		p.reqLog.Run()
+	})
+	p.reqLogIndexStarted = p.lifecycle.Run(func(<-chan struct{}) {
+		p.reqLogIndex.Run()
+	})
+	if !p.reqLogStarted || !p.reqLogIndexStarted {
+		t.Fatal("request log loops were not started")
+	}
+
+	p.reqLog.Enqueue(p.reqLog.BuildRecord(requestlog.Input{
+		Timestamp: time.Date(2026, 7, 28, 1, 0, 0, 0, time.UTC),
+		RequestID: "indexed-live", ResponseBody: []byte(`{"usage":{"input_tokens":2,"output_tokens":1}}`),
+	}))
+	// Poll (bounded): the running indexer reconciles on its own tick.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		summaries, _, err := p.reqLogIndex.SummariesWithFacets(requestlog.Filter{Limit: 10, UsageOnly: true})
+		if err != nil {
+			t.Fatalf("index query: %v", err)
+		}
+		if len(summaries) == 1 && summaries[0].RequestID == "indexed-live" && summaries[0].Input == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("indexer never tailed the committed record: %+v", summaries)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	p.Close()
+	if _, err := os.Stat(filepath.Join(logDir, "index.db")); err != nil {
+		t.Fatalf("index.db missing after Close: %v", err)
+	}
+	// The database is closed with the indexer: queries now fail instead of
+	// serving stale reads.
+	if _, _, err := p.reqLogIndex.SummariesWithFacets(requestlog.Filter{Limit: 1}); err == nil {
+		t.Error("index query after Close unexpectedly succeeded (db should be closed)")
+	}
+}
+
+// TestProxyRequestLogDisabledHasNoIndex: initRequestLog with the request log
+// off creates neither the logger nor the index.
+func TestProxyRequestLogDisabledHasNoIndex(t *testing.T) {
+	p := newTestProxy(t, &Config{})
+	p.initRequestLog(RequestLogConfig{Enabled: false, Dir: t.TempDir()})
+	if p.reqLog != nil || p.reqLogIndex != nil {
+		t.Fatalf("disabled request log wired logger=%v index=%v", p.reqLog, p.reqLogIndex)
+	}
+}
+
 func TestProxyCloseDrainsOwnedRequestLogger(t *testing.T) {
 	p := newTestProxy(t, &Config{})
 	logDir := t.TempDir()

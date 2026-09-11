@@ -28,6 +28,7 @@ type readAPIStub struct {
 	dashboard  appapi.Dashboard
 	logFile    string
 	logDir     string
+	queries    appapi.RequestLogQueries
 	accounts   []appapi.ProviderAccounts
 	tokens     []appapi.TokenUsage
 	agentRows  []appapi.AgentUsage
@@ -41,6 +42,7 @@ type readAPIStub struct {
 	fusion     func(string, time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
 	pins       []appapi.Pin
 	security   func(appapi.SecurityQuery) (appapi.SecurityResult, error)
+	explain    func(string, string, []string) (appapi.SecurityExplainResult, error)
 	config     func() (appapi.ConfigDocument, error)
 	presets    []presets.Preset
 	models     appapi.ModelsDocument
@@ -49,7 +51,25 @@ type readAPIStub struct {
 func (r *readAPIStub) Dashboard(time.Time) appapi.Dashboard { return r.dashboard }
 func (r *readAPIStub) LogFile() string                      { return r.logFile }
 func (r *readAPIStub) RequestLogDirectory() string          { return r.logDir }
-func (r *readAPIStub) Accounts() []appapi.ProviderAccounts  { return r.accounts }
+func (r *readAPIStub) RequestLogQueries() appapi.RequestLogQueries {
+	return r.queries
+}
+
+// dirRequestLogQueries adapts a raw request-log directory to the query port
+// through the scan functions — the handler tests pin JSON shapes, the
+// index-backed equivalence lives in internal/observe/requestlog.
+type dirRequestLogQueries struct{ dir string }
+
+func (d dirRequestLogQueries) SummariesWithFacets(f requestlog.Filter) ([]requestlog.Summary, requestlog.Facets, error) {
+	return requestlog.QuerySummariesWithFacets(d.dir, f)
+}
+func (d dirRequestLogQueries) Detail(id string) ([]requestlog.Record, error) {
+	return requestlog.QueryRecords(d.dir, requestlog.Filter{RequestID: id, Limit: 50})
+}
+func (d dirRequestLogQueries) SessionSummaries(scanLimit, limit int, costOf func(string, requestlog.Usage) float64) ([]requestlog.SessionSummary, error) {
+	return requestlog.SessionSummaries(d.dir, scanLimit, limit, costOf)
+}
+func (r *readAPIStub) Accounts() []appapi.ProviderAccounts { return r.accounts }
 func (r *readAPIStub) Tokens(from, to int64) ([]appapi.TokenUsage, error) {
 	r.tokensFrom = from
 	return r.tokens, nil
@@ -90,6 +110,12 @@ func (r *readAPIStub) Security(q appapi.SecurityQuery) (appapi.SecurityResult, e
 		return appapi.SecurityResult{}, nil
 	}
 	return r.security(q)
+}
+func (r *readAPIStub) SecurityExplain(requestID, kind string, names []string) (appapi.SecurityExplainResult, error) {
+	if r.explain == nil {
+		return appapi.SecurityExplainResult{}, nil
+	}
+	return r.explain(requestID, kind, names)
 }
 func (r *readAPIStub) ConfigDocument() (appapi.ConfigDocument, error) {
 	if r.config == nil {
@@ -459,7 +485,7 @@ func TestReadLogsAndRequestLogEndpoints(t *testing.T) {
 	if err := os.WriteFile(logPath, []byte("one\ntwo\nthree\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	reads := &readAPIStub{logFile: "ignored", logDir: tmp}
+	reads := &readAPIStub{logFile: "ignored", queries: dirRequestLogQueries{tmp}}
 	s := newReadServer(t, reads, func(o *Options) { o.LogFile = func() string { return logPath } })
 	logs := serveRead(t, s, http.MethodGet, "/api/logs?tail=2")
 	var gotLogs struct {
@@ -513,8 +539,26 @@ func TestReadLogsAndRequestLogEndpoints(t *testing.T) {
 	if len(gotList.Facets.ProviderModels["Provider-X"]) != 1 || gotList.Facets.ProviderModels["Provider-X"][0] != "Model-X" {
 		t.Fatalf("provider_models facet = %#v", gotList.Facets.ProviderModels)
 	}
+	if len(gotList.Facets.Agents) != 1 || gotList.Facets.Agents[0] != "claude-code" {
+		t.Fatalf("agents facet = %#v, want the one observed label (the agent-less record contributes none)", gotList.Facets.Agents)
+	}
 	if strings.Contains(list.Body.String(), "secret") || strings.Contains(list.Body.String(), "reply") || strings.Contains(list.Body.String(), "x-request-id") {
 		t.Fatalf("request list leaked detail data: %s", list.Body.String())
+	}
+
+	// agent= is an exact-match filter wired through to requestlog.Filter.
+	byAgent := serveRead(t, s, http.MethodGet, "/api/requests?agent=claude-code")
+	var gotAgent struct {
+		Records []requestlog.Summary `json:"records"`
+	}
+	decodeReadJSON(t, byAgent, &gotAgent)
+	if byAgent.Code != http.StatusOK || len(gotAgent.Records) != 1 || gotAgent.Records[0].RequestID != "wanted" {
+		t.Fatalf("agent filter = (%d, %#v)", byAgent.Code, gotAgent.Records)
+	}
+	partialAgent := serveRead(t, s, http.MethodGet, "/api/requests?agent=claude")
+	decodeReadJSON(t, partialAgent, &gotAgent)
+	if partialAgent.Code != http.StatusOK || len(gotAgent.Records) != 0 {
+		t.Fatalf("partial agent filter = (%d, %#v), want no rows (exact match)", partialAgent.Code, gotAgent.Records)
 	}
 
 	detail := serveRead(t, s, http.MethodGet, "/api/requests/wanted")
@@ -537,7 +581,7 @@ func TestReadLogsAndRequestLogEndpoints(t *testing.T) {
 		t.Fatalf("missing detail = (%d, %#v)", missing.Code, routeError)
 	}
 
-	reads.logDir = ""
+	reads.queries = nil
 	disabled := serveRead(t, s, http.MethodGet, "/api/requests")
 	var gotDisabled struct {
 		Enabled bool              `json:"enabled"`
@@ -550,7 +594,7 @@ func TestReadLogsAndRequestLogEndpoints(t *testing.T) {
 	if disabled.Code != http.StatusOK || gotDisabled.Enabled || gotDisabled.Records == nil {
 		t.Fatalf("disabled request logging = %#v (records must be a non-null empty array)", gotDisabled)
 	}
-	if body := disabled.Body.String(); !strings.Contains(body, `"records":[]`) || !strings.Contains(body, `"providers":[]`) {
+	if body := disabled.Body.String(); !strings.Contains(body, `"records":[]`) || !strings.Contains(body, `"providers":[]`) || !strings.Contains(body, `"agents":[]`) {
 		t.Fatalf("disabled request logging body must serialize records/facets as []: %s", body)
 	}
 	noDetail := serveRead(t, s, http.MethodGet, "/api/requests/")
@@ -558,7 +602,7 @@ func TestReadLogsAndRequestLogEndpoints(t *testing.T) {
 	if noDetail.Code != http.StatusNotFound || routeError.Error != "request logging is off or no id given" {
 		t.Fatalf("disabled detail = (%d, %#v)", noDetail.Code, routeError)
 	}
-	reads.logDir = filepath.Join(t.TempDir(), "missing")
+	reads.queries = dirRequestLogQueries{filepath.Join(t.TempDir(), "missing")}
 	listFailure := serveRead(t, s, http.MethodGet, "/api/requests")
 	decodeReadJSON(t, listFailure, &routeError)
 	if listFailure.Code != http.StatusInternalServerError || !strings.HasPrefix(routeError.Error, "request query: ") {
@@ -579,7 +623,7 @@ func TestReadRequestsSessionFilter(t *testing.T) {
 		requestlog.Record{Ts: "2026-07-29T12:00:00Z", RequestID: "a", SessionID: "sess-a", CalledModel: "m", Provider: "p", Status: 200},
 		requestlog.Record{Ts: "2026-07-29T12:01:00Z", RequestID: "b", SessionID: "sess-b", CalledModel: "m", Provider: "p", Status: 200},
 	)
-	s := newReadServer(t, &readAPIStub{logDir: tmp})
+	s := newReadServer(t, &readAPIStub{queries: dirRequestLogQueries{tmp}})
 	list := serveRead(t, s, http.MethodGet, "/api/requests?session=sess-b")
 	var got struct {
 		Records []requestlog.Summary `json:"records"`
@@ -636,7 +680,7 @@ func TestReadShadowReportAndErrors(t *testing.T) {
 func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 	var statsQuery appapi.StatsQuery
 	var agentQuery appapi.AgentStatsQuery
-	var analyticsQuery appapi.AnalyticsQuery
+	var analyticsQueries []appapi.AnalyticsQuery
 	reads := &readAPIStub{
 		stats: func(q appapi.StatsQuery) ([]observestats.Bucket, error) {
 			statsQuery = q
@@ -647,9 +691,11 @@ func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 			return []observestats.AgentBucket{{Agent: "a", Provider: "p", Model: "m", Minute: 120, Requests: 3}}, nil
 		},
 		analytics: func(q appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
-			analyticsQuery = q
+			analyticsQueries = append(analyticsQueries, q)
 			return []observestats.AnalyticsBucket{
-				{Provider: "p", Model: "priced", Bucket: 100, Requests: 2, Input: 10, Output: 5, CacheRead: 2, CacheCreation: 1},
+				// AvgDurationMs is store-derived (duration_sum/requests); the fake
+				// fills both fields the way the real projection does.
+				{Provider: "p", Model: "priced", Bucket: 100, Requests: 2, Input: 10, Output: 5, CacheRead: 2, CacheCreation: 1, DurationSum: 4000, AvgDurationMs: 2000},
 				{Provider: "p", Model: "unknown", Bucket: 200, Requests: 1, Input: 7, Output: 3},
 			}, nil
 		},
@@ -667,6 +713,9 @@ func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 	if stats.Code != http.StatusOK || statsQuery != (appapi.StatsQuery{From: 100, To: 200, Provider: "p", Model: "m", BucketSecs: 120}) || statsResponse.Bucket != 120 || len(statsResponse.Buckets) != 1 || statsResponse.Buckets[0].Requests != 2 {
 		t.Fatalf("stats query=%#v response=%#v", statsQuery, statsResponse)
 	}
+
+	// real was a Status→Dashboard-only filter and was removed with that view;
+	// the endpoint keeps its CLI contract unchanged.
 	agents := serveRead(t, s, http.MethodGet, "/api/agents?from=100&to=200&agent=a&provider=p&model=m&bucket=bad")
 	var agentsResponse struct {
 		Bucket  int64                      `json:"bucket"`
@@ -678,37 +727,100 @@ func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 	}
 
 	analytics := serveRead(t, s, http.MethodGet, "/api/analytics?from=100&to=200&provider=p&model=all&granularity=month")
+	// The unified derived-metric block (same shape on totals, compare and
+	// each series) is the single authority for tokens/tok-s/cache-hit/err%.
 	var analyticsResponse struct {
 		Granularity string `json:"granularity"`
+		By          string `json:"by"`
 		Totals      struct {
-			Input  uint64   `json:"input"`
-			Output uint64   `json:"output"`
-			Cost   *float64 `json:"cost"`
+			Input       uint64   `json:"input"`
+			Output      uint64   `json:"output"`
+			Tokens      uint64   `json:"tokens"`
+			TokSec      *float64 `json:"tok_sec"`
+			CacheHitPct *float64 `json:"cache_hit_pct"`
+			ErrPct      *float64 `json:"err_pct"`
+			Cost        *float64 `json:"cost"`
 		} `json:"totals"`
+		Compare struct {
+			From     int64    `json:"from"`
+			To       int64    `json:"to"`
+			Requests uint64   `json:"requests"`
+			Tokens   uint64   `json:"tokens"`
+			TokSec   *float64 `json:"tok_sec"`
+			Cost     *float64 `json:"cost"`
+		} `json:"compare"`
 		Coverage struct {
 			Priced   []string `json:"priced"`
 			Unpriced []string `json:"unpriced"`
 		} `json:"price_coverage"`
 		Series []struct {
 			Model  string `json:"model"`
+			Totals struct {
+				Requests uint64   `json:"requests"`
+				Tokens   uint64   `json:"tokens"`
+				TokSec   *float64 `json:"tok_sec"`
+				ErrPct   *float64 `json:"err_pct"`
+			} `json:"totals"`
 			Points []struct {
-				Cost   *float64 `json:"cost"`
-				Priced bool     `json:"priced"`
+				Tokens        uint64   `json:"tokens"`
+				AvgDurationMs float64  `json:"avg_duration_ms"`
+				TokSec        *float64 `json:"tok_sec"`
+				CacheHitPct   *float64 `json:"cache_hit_pct"`
+				ErrPct        *float64 `json:"err_pct"`
+				Cost          *float64 `json:"cost"`
+				Priced        bool     `json:"priced"`
 			} `json:"points"`
 		} `json:"series"`
 	}
 	decodeReadJSON(t, analytics, &analyticsResponse)
-	if analytics.Code != http.StatusOK || analyticsQuery != (appapi.AnalyticsQuery{From: 100, To: 200, Provider: "p", Model: "all", Granularity: "month"}) || analyticsResponse.Granularity != "month" || analyticsResponse.Totals.Input != 17 || analyticsResponse.Totals.Output != 8 || analyticsResponse.Totals.Cost == nil || math.Abs(*analyticsResponse.Totals.Cost-.03) > 1e-12 || strings.Join(analyticsResponse.Coverage.Priced, ",") != "priced" || strings.Join(analyticsResponse.Coverage.Unpriced, ",") != "unknown" || len(analyticsResponse.Series) != 2 || !analyticsResponse.Series[0].Points[0].Priced || analyticsResponse.Series[1].Points[0].Cost != nil {
-		t.Fatalf("analytics query=%#v response=%#v", analyticsQuery, analyticsResponse)
+	// The handler issues TWO port calls: the requested window, then the
+	// equal-length comparison window immediately before it (one minute earlier
+	// so the inclusive minute bounds never overlap).
+	wantQueries := []appapi.AnalyticsQuery{
+		{From: 100, To: 200, Provider: "p", Model: "all", Granularity: "month", By: "model"},
+		{From: -60, To: 40, Provider: "p", Model: "all", Granularity: "month", By: "model"},
+	}
+	// Window totals fold BOTH buckets: tokens = 17+8+1+2 = 28 (four-bucket),
+	// tok/s = 8 output / 4s call time = 2, cache hit = 2/20 reads = 10%,
+	// err% = 0 with requests (non-null), cost = $0.03 (priced bucket only).
+	if analytics.Code != http.StatusOK || !reflect.DeepEqual(analyticsQueries, wantQueries) ||
+		analyticsResponse.Granularity != "month" || analyticsResponse.By != "model" ||
+		analyticsResponse.Totals.Input != 17 || analyticsResponse.Totals.Output != 8 || analyticsResponse.Totals.Tokens != 28 ||
+		analyticsResponse.Totals.TokSec == nil || math.Abs(*analyticsResponse.Totals.TokSec-2) > 1e-9 ||
+		analyticsResponse.Totals.CacheHitPct == nil || math.Abs(*analyticsResponse.Totals.CacheHitPct-10) > 1e-9 ||
+		analyticsResponse.Totals.ErrPct == nil || *analyticsResponse.Totals.ErrPct != 0 ||
+		analyticsResponse.Totals.Cost == nil || math.Abs(*analyticsResponse.Totals.Cost-.03) > 1e-12 ||
+		analyticsResponse.Compare.From != -60 || analyticsResponse.Compare.To != 40 || analyticsResponse.Compare.Requests != 3 || analyticsResponse.Compare.Tokens != 28 ||
+		analyticsResponse.Compare.TokSec == nil || math.Abs(*analyticsResponse.Compare.TokSec-2) > 1e-9 ||
+		strings.Join(analyticsResponse.Coverage.Priced, ",") != "priced" || strings.Join(analyticsResponse.Coverage.Unpriced, ",") != "unknown" || len(analyticsResponse.Series) != 2 || !analyticsResponse.Series[0].Points[0].Priced || analyticsResponse.Series[1].Points[0].Cost != nil {
+		t.Fatalf("analytics queries=%#v response=%#v", analyticsQueries, analyticsResponse)
+	}
+	// Per-series unified block: the priced series folds only its own bucket
+	// (requests 2, tokens 18, tok/s = 5 out / 4s = 1.25).
+	if analyticsResponse.Series[0].Totals.Requests != 2 || analyticsResponse.Series[0].Totals.Tokens != 18 ||
+		analyticsResponse.Series[0].Totals.TokSec == nil || math.Abs(*analyticsResponse.Series[0].Totals.TokSec-1.25) > 1e-9 {
+		t.Fatalf("series totals = %#v", analyticsResponse.Series[0].Totals)
+	}
+	// Per-point derived fields + the full-call duration (the tok/s source)
+	// must survive the transport projection: 4000ms over 2 requests → 2000ms
+	// avg; tokens 18; tok/s 1.25; err% 0 (non-null with requests).
+	pt := analyticsResponse.Series[0].Points[0]
+	if pt.AvgDurationMs != 2000 || pt.Tokens != 18 || pt.TokSec == nil || math.Abs(*pt.TokSec-1.25) > 1e-9 || pt.ErrPct == nil || *pt.ErrPct != 0 {
+		t.Fatalf("point derived fields = %#v", pt)
 	}
 
-	invalid := serveRead(t, s, http.MethodGet, "/api/analytics?granularity=hour")
+	invalid := serveRead(t, s, http.MethodGet, "/api/analytics?granularity=year")
 	var routeError struct {
 		Error string `json:"error"`
 	}
 	decodeReadJSON(t, invalid, &routeError)
-	if invalid.Code != http.StatusBadRequest || routeError.Error != "granularity must be day or month" {
+	if invalid.Code != http.StatusBadRequest || routeError.Error != "granularity must be minute, hour, day, week or month" {
 		t.Fatalf("invalid analytics = (%d, %#v)", invalid.Code, routeError)
+	}
+	invalidBy := serveRead(t, s, http.MethodGet, "/api/analytics?by=route")
+	decodeReadJSON(t, invalidBy, &routeError)
+	if invalidBy.Code != http.StatusBadRequest || routeError.Error != "by must be model or agent" {
+		t.Fatalf("invalid by = (%d, %#v)", invalidBy.Code, routeError)
 	}
 
 	reads.stats = func(appapi.StatsQuery) ([]observestats.Bucket, error) { return nil, errors.New("store down") }
@@ -898,6 +1010,65 @@ func TestReadSecurityEndpoint(t *testing.T) {
 	// client — only the generic message is exposed.
 	if failure.Code != http.StatusInternalServerError || routeError.Error != "failed to query security log" {
 		t.Fatalf("security failure = (%d, %#v)", failure.Code, routeError)
+	}
+}
+
+func TestReadSecurityExplain(t *testing.T) {
+	var gotID, gotKind string
+	var gotNames []string
+	reads := &readAPIStub{
+		explain: func(requestID, kind string, names []string) (appapi.SecurityExplainResult, error) {
+			gotID, gotKind, gotNames = requestID, kind, names
+			return appapi.SecurityExplainResult{
+				Status:    appapi.SecurityExplainOK,
+				RequestID: requestID,
+				Kind:      kind,
+				Matches: []appapi.SecurityMatch{{
+					Name: "aws_creds", Strength: "strong", Located: true,
+					Pre: "cat ", Hit: "~/.aws/credentials", Post: "",
+					Explanation: "Reference to ~/.aws/credentials.",
+				}},
+			}, nil
+		},
+	}
+	s := newReadServer(t, reads)
+
+	ok := serveRead(t, s, http.MethodGet, "/api/security/explain?request_id=r1&kind=path&name=aws_creds,%20ssh%20")
+	var response appapi.SecurityExplainResult
+	decodeReadJSON(t, ok, &response)
+	if ok.Code != http.StatusOK || gotID != "r1" || gotKind != "path" ||
+		len(gotNames) != 2 || gotNames[0] != "aws_creds" || gotNames[1] != "ssh" {
+		t.Fatalf("explain = (%d, id=%q kind=%q names=%v)", ok.Code, gotID, gotKind, gotNames)
+	}
+	if response.Status != "ok" || len(response.Matches) != 1 ||
+		response.Matches[0].Strength != "strong" || !response.Matches[0].Located {
+		t.Fatalf("explain response = %#v", response)
+	}
+
+	var routeError struct {
+		Error string `json:"error"`
+	}
+	for _, url := range []string{
+		"/api/security/explain?request_id=r1&kind=drift&name=x",
+		"/api/security/explain?request_id=r1&kind=bogus&name=x",
+		"/api/security/explain?kind=secret&name=x",
+		"/api/security/explain?request_id=r1&kind=secret",
+	} {
+		resp := serveRead(t, s, http.MethodGet, url)
+		decodeReadJSON(t, resp, &routeError)
+		if resp.Code != http.StatusBadRequest || routeError.Error == "" {
+			t.Fatalf("%s = (%d, %#v), want 400 with a message", url, resp.Code, routeError)
+		}
+	}
+
+	reads.explain = func(string, string, []string) (appapi.SecurityExplainResult, error) {
+		return appapi.SecurityExplainResult{}, errors.New("request log unreadable")
+	}
+	failure := serveRead(t, s, http.MethodGet, "/api/security/explain?request_id=r1&kind=secret&name=openai_api_key")
+	decodeReadJSON(t, failure, &routeError)
+	// Same convention as /api/security: no underlying error detail leaks.
+	if failure.Code != http.StatusInternalServerError || routeError.Error != "failed to analyze security record" {
+		t.Fatalf("explain failure = (%d, %#v)", failure.Code, routeError)
 	}
 }
 

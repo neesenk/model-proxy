@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -60,8 +61,12 @@ func (p *VolcengineProvider) RewriteRequest(targetURL string, body []byte, path 
 
 func (p *VolcengineProvider) Logout() error { return p.DeleteKey() }
 func (p *VolcengineProvider) FetchModels() ([]string, error) {
+	return p.FetchModelsContext(context.Background())
+}
+
+func (p *VolcengineProvider) FetchModelsContext(ctx context.Context) ([]string, error) {
 	if p.cfg.FetchModelsFn != nil {
-		return p.cfg.FetchModelsFn()
+		return p.cfg.FetchModelsFn(ctx)
 	}
 	return nil, fmt.Errorf("FetchModelsFn not configured")
 }

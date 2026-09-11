@@ -24,6 +24,16 @@ func (p *Proxy) initRequestLog(config RequestLogConfig) {
 		MaxBodyBytes: config.MaxBodyBytesValue(),
 		Retention:    config.RetentionDuration(),
 	})
+	// The tailing index is a derived view of the same directory: an open
+	// failure degrades the web read path to directory scans (warned once
+	// here) instead of failing startup. Started/stopped with the logger in
+	// StartRuntimeServices/closeRuntimeServices; restart-only like reqLog.
+	indexer, err := requestlog.NewIndexer(config.ResolvedDir())
+	if err != nil {
+		logx.Warnf("[request_log] index unavailable: %v — /api/requests falls back to directory scans", err)
+	} else {
+		p.reqLogIndex = indexer
+	}
 	logx.Infof(
 		"[request_log] enabled -> %s (max_file_size %d bytes, max_body %d bytes, retention %s)",
 		config.ResolvedDir(),

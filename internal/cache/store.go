@@ -10,6 +10,8 @@ import (
 
 // Options contains already-resolved cache policy values.
 type Options struct {
+	// Counters may be shared across generations; response entries never are.
+	Counters     *Counters
 	TTL          time.Duration
 	MaxEntries   int
 	MaxBodyBytes int
@@ -56,13 +58,20 @@ func (e *Entry) Status() int {
 
 // Store is a bounded, concurrency-safe exact-response cache.
 type Store struct {
-	mu           sync.Mutex
+	counters     *Counters
 	entries      map[string]*Entry
 	ttl          time.Duration
 	maxEntries   int
 	maxBodyBytes int
-	hits         uint64
-	misses       uint64
+}
+
+// Counters owns cumulative statistics across Store generations. Its mutex also
+// protects the entries of attached stores, so Stats remains an atomic view.
+// The zero value is ready to use, including while caching is disabled.
+type Counters struct {
+	mu     sync.Mutex
+	hits   uint64
+	misses uint64
 	// perModel breaks hits/misses down by called model name; the empty name
 	// (an unattributed lookup) counts only in the global totals.
 	perModel map[string]*modelCounters
@@ -76,12 +85,16 @@ type modelCounters struct {
 // New returns a Store for already-resolved options. Validation and defaults
 // belong to the application adapter.
 func New(options Options) *Store {
+	counters := options.Counters
+	if counters == nil {
+		counters = &Counters{}
+	}
 	return &Store{
+		counters:     counters,
 		entries:      map[string]*Entry{},
 		ttl:          options.TTL,
 		maxEntries:   options.MaxEntries,
 		maxBodyBytes: options.MaxBodyBytes,
-		perModel:     map[string]*modelCounters{},
 	}
 }
 
@@ -93,28 +106,31 @@ func (s *Store) Lookup(key, model string, now time.Time) (*Entry, bool) {
 	if s == nil {
 		return nil, false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.counters.mu.Lock()
+	defer s.counters.mu.Unlock()
 	entry, ok := s.entries[key]
 	if !ok {
-		s.misses++
-		s.model(model).misses++
+		s.counters.misses++
+		s.counters.model(model).misses++
 		return nil, false
 	}
 	if now.After(entry.expiresAt) {
 		delete(s.entries, key)
-		s.misses++
-		s.model(model).misses++
+		s.counters.misses++
+		s.counters.model(model).misses++
 		return nil, false
 	}
-	s.hits++
-	s.model(model).hits++
+	s.counters.hits++
+	s.counters.model(model).hits++
 	return entry, true
 }
 
 // model returns (creating on demand) the per-model counters under the store
 // lock; the caller must hold s.mu.
-func (s *Store) model(name string) *modelCounters {
+func (s *Counters) model(name string) *modelCounters {
+	if s.perModel == nil {
+		s.perModel = map[string]*modelCounters{}
+	}
 	c, ok := s.perModel[name]
 	if !ok {
 		c = &modelCounters{}
@@ -132,8 +148,8 @@ func (s *Store) Peek(key string, now time.Time) bool {
 	if s == nil {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.counters.mu.Lock()
+	defer s.counters.mu.Unlock()
 	entry, ok := s.entries[key]
 	return ok && !now.After(entry.expiresAt)
 }
@@ -153,8 +169,8 @@ func (s *Store) Put(key, model string, status int, header http.Header, body []by
 		body:      append([]byte(nil), body...),
 		expiresAt: now.Add(s.ttl),
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.counters.mu.Lock()
+	defer s.counters.mu.Unlock()
 	if len(s.entries) >= s.maxEntries {
 		for existing := range s.entries {
 			delete(s.entries, existing)
@@ -169,23 +185,36 @@ func (s *Store) Reset() {
 	if s == nil {
 		return
 	}
+	s.counters.mu.Lock()
+	defer s.counters.mu.Unlock()
+	s.entries = map[string]*Entry{}
+	s.counters.resetLocked()
+}
+
+func (s *Counters) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.entries = map[string]*Entry{}
+	s.resetLocked()
+}
+
+func (s *Counters) resetLocked() {
 	s.perModel = map[string]*modelCounters{}
 	s.hits = 0
 	s.misses = 0
 }
 
-// Seed accumulates persisted counters into the store (restart/reload seeds a
-// fresh store from the state file). Entries are deliberately not seedable:
-// cached bodies live only in process memory. Accumulative so repeated seeds
-// can never lose counts. The empty model name is ignored (unattributed
-// lookups count only in the global totals).
+// Seed accumulates persisted counters. Call only at startup, never once per
+// generation when counters are shared. Entries are deliberately not seedable.
+// The empty model name is ignored (unattributed lookups count only globally).
 func (s *Store) Seed(hits, misses uint64, models []ModelStat) {
 	if s == nil {
 		return
 	}
+	s.counters.Seed(hits, misses, models)
+}
+
+// Seed is used once at startup, before stores begin accepting requests.
+func (s *Counters) Seed(hits, misses uint64, models []ModelStat) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hits += hits
@@ -206,12 +235,25 @@ func (s *Store) Stats() Stats {
 	if s == nil {
 		return Stats{}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	liveEntries := make(map[string]uint64, len(s.perModel))
+	s.counters.mu.Lock()
+	defer s.counters.mu.Unlock()
+	liveEntries := make(map[string]uint64)
 	for _, entry := range s.entries {
 		liveEntries[entry.model]++
 	}
+	out := s.counters.statsLocked(liveEntries)
+	out.Entries = uint64(len(s.entries))
+	return out
+}
+
+// Stats returns cumulative counters without any generation's entry gauge.
+func (s *Counters) Stats() Stats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.statsLocked(nil)
+}
+
+func (s *Counters) statsLocked(liveEntries map[string]uint64) Stats {
 	models := make([]ModelStat, 0, len(s.perModel))
 	for name, counters := range s.perModel {
 		if name == "" {
@@ -232,10 +274,9 @@ func (s *Store) Stats() Stats {
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].Name < models[j].Name })
 	return Stats{
-		Hits:    s.hits,
-		Misses:  s.misses,
-		Entries: uint64(len(s.entries)),
-		Models:  models,
+		Hits:   s.hits,
+		Misses: s.misses,
+		Models: models,
 	}
 }
 

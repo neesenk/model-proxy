@@ -61,9 +61,9 @@ func (p *Proxy) Reload(configPath string) error {
 	p.routeWarnings = hw
 	// Rebuild the cache from the new config (pure in-memory, no goroutine/file
 	// lifecycle to drain — safe to swap). cache.enabled toggled via reload now
-	// takes effect immediately. Seeded from cache_state.json so the reload —
-	// which would otherwise zero the counters — continues the hit/miss history.
-	p.cache = p.seedResponseCache(cfg.Cache)
+	// takes effect immediately. Stores share process-lifetime counters, including
+	// late lookups by old snapshots; only response entries are generation-owned.
+	p.cache = p.newResponseCache(cfg.Cache)
 	// Swap the guard scanner with the same generation: in-flight requests keep
 	// their snapshot's scanner; new requests see the new credential set
 	// (login adds protection, logout drops it, immediately at reload). The

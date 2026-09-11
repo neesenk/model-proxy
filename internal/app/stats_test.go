@@ -446,7 +446,7 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 	minute := time.Now().Unix() / 60 * 60
 	if err := p.stats.Flush(minute, map[observestats.Key]observestats.Counters{
 		{Provider: "deepseek", Model: "deepseek-v4-pro"}: {
-			Requests: 3, Input: 1000, Output: 200,
+			Requests: 3, Input: 1000, Output: 200, Failures: 1, LatencySum: 900, TTFTSum: 90,
 		},
 		{Provider: "other", Model: "other"}: {Requests: 99},
 		// Virtual counter namespaces share the (provider, model) key space but
@@ -454,6 +454,19 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 		{Provider: "guard", Model: "ssh"}:        {Requests: 9},
 		{Provider: "attempts", Model: "ok"}:      {Requests: 9},
 		{Provider: "routing", Model: "decision"}: {Requests: 9},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A bucket one comparison-window back drives the compare totals.
+	prevMinute := minute - 36*3600
+	if err := p.stats.Flush(prevMinute, map[observestats.Key]observestats.Counters{
+		{Provider: "deepseek", Model: "deepseek-v4-pro"}: {Requests: 5, Input: 500, Output: 100},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The agent dimension aggregates agent_buckets the same way.
+	if err := p.stats.FlushAgents(minute, map[observestats.AgentKey]observestats.AgentCounters{
+		{Agent: "codex", Provider: "deepseek", Model: "deepseek-v4-pro"}: {Requests: 2, Input: 600, Output: 120, LatencySum: 400},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -476,15 +489,28 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 	}
 	var got struct {
 		Granularity string `json:"granularity"`
-		Series      []struct {
+		Totals      struct {
+			Tokens       uint64   `json:"tokens"`
+			AvgLatencyMs *float64 `json:"avg_latency_ms"`
+			TokSec       *float64 `json:"tok_sec"`
+		} `json:"totals"`
+		Series []struct {
 			Provider string `json:"provider"`
 			Model    string `json:"model"`
-			Points   []struct {
-				Requests uint64   `json:"requests"`
-				Input    uint64   `json:"input"`
-				Output   uint64   `json:"output"`
-				Cost     *float64 `json:"cost"`
-				Priced   bool     `json:"priced"`
+			Totals   struct {
+				Requests uint64 `json:"requests"`
+				Tokens   uint64 `json:"tokens"`
+			} `json:"totals"`
+			Points []struct {
+				Requests     uint64   `json:"requests"`
+				Input        uint64   `json:"input"`
+				Output       uint64   `json:"output"`
+				Failures     uint64   `json:"failures"`
+				Tokens       uint64   `json:"tokens"`
+				AvgLatencyMs float64  `json:"avg_latency_ms"`
+				AvgTtftMs    float64  `json:"avg_ttft_ms"`
+				Cost         *float64 `json:"cost"`
+				Priced       bool     `json:"priced"`
 			} `json:"points"`
 		} `json:"series"`
 		PriceCoverage struct {
@@ -498,10 +524,17 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 	if got.Granularity != "day" {
 		t.Errorf("granularity = %q, want day", got.Granularity)
 	}
+	// The unified totals block carries the derived metrics: tokens =
+	// 1000+200 (four-bucket), avg latency = 900ms/3 = 300 (requests-
+	// weighted), tok/s = null (no duration recorded in the fixture).
+	if got.Totals.Tokens != 1200 || got.Totals.AvgLatencyMs == nil || *got.Totals.AvgLatencyMs != 300 || got.Totals.TokSec != nil {
+		t.Errorf("totals = %+v, want tokens=1200 avg_latency=300 tok_sec=null", got.Totals)
+	}
 	if len(got.Series) != 1 ||
 		got.Series[0].Provider != "deepseek" ||
-		got.Series[0].Model != "deepseek-v4-pro" {
-		t.Fatalf("series = %+v, want one deepseek/deepseek-v4-pro", got.Series)
+		got.Series[0].Model != "deepseek-v4-pro" ||
+		got.Series[0].Totals.Requests != 3 || got.Series[0].Totals.Tokens != 1200 {
+		t.Fatalf("series = %+v, want one deepseek/deepseek-v4-pro with totals reqs=3 tokens=1200", got.Series)
 	}
 	points := got.Series[0].Points
 	if len(points) != 1 ||
@@ -509,6 +542,10 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 		points[0].Input != 1000 ||
 		points[0].Output != 200 {
 		t.Errorf("point = %+v, want reqs=3 input=1000 output=200", points)
+	}
+	// Widened counters: failures + requests-weighted latency/ttft averages.
+	if points[0].Failures != 1 || points[0].AvgLatencyMs != 300 || points[0].AvgTtftMs != 30 {
+		t.Errorf("widened point = %+v, want failures=1 avg_latency=300 avg_ttft=30", points[0])
 	}
 	// Never-fabricate: no catalog + no override on the test Proxy → unpriced.
 	if points[0].Priced {
@@ -563,9 +600,86 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 	}
 
 	bad := httptest.NewRecorder()
-	mux.ServeHTTP(bad, httptest.NewRequest("GET", "/api/analytics?granularity=hour", nil))
+	mux.ServeHTTP(bad, httptest.NewRequest("GET", "/api/analytics?granularity=year", nil))
 	if bad.Code != http.StatusBadRequest {
 		t.Errorf("bad granularity status=%d want 400", bad.Code)
+	}
+	badBy := httptest.NewRecorder()
+	mux.ServeHTTP(badBy, httptest.NewRequest("GET", "/api/analytics?by=route", nil))
+	if badBy.Code != http.StatusBadRequest {
+		t.Errorf("bad by status=%d want 400", badBy.Code)
+	}
+
+	// hour granularity + by=agent + comparison window: one end-to-end query
+	// exercising the widened store path through the admin projection.
+	wide := httptest.NewRecorder()
+	mux.ServeHTTP(wide, httptest.NewRequest(http.MethodGet, fmt.Sprintf(
+		"/api/analytics?from=%d&to=%d&granularity=hour&by=agent",
+		minute-48*3600, minute,
+	), nil))
+	if wide.Code != http.StatusOK {
+		t.Fatalf("agent/hour status=%d want 200; body=%s", wide.Code, wide.Body.String())
+	}
+	var wideResp struct {
+		Granularity string `json:"granularity"`
+		By          string `json:"by"`
+		Compare     struct {
+			From     int64  `json:"from"`
+			To       int64  `json:"to"`
+			Requests uint64 `json:"requests"`
+		} `json:"compare"`
+		Series []struct {
+			Agent    string `json:"agent"`
+			Provider string `json:"provider"`
+			Points   []struct {
+				Requests     uint64  `json:"requests"`
+				AvgLatencyMs float64 `json:"avg_latency_ms"`
+			} `json:"points"`
+		} `json:"series"`
+	}
+	if err := json.Unmarshal(wide.Body.Bytes(), &wideResp); err != nil {
+		t.Fatalf("unmarshal agent/hour analytics: %v\n%s", err, wide.Body.String())
+	}
+	if wideResp.Granularity != "hour" || wideResp.By != "agent" {
+		t.Errorf("agent/hour echo = %q/%q, want hour/agent", wideResp.Granularity, wideResp.By)
+	}
+	if len(wideResp.Series) != 1 || wideResp.Series[0].Agent != "codex" ||
+		wideResp.Series[0].Provider != "deepseek" ||
+		len(wideResp.Series[0].Points) != 1 || wideResp.Series[0].Points[0].Requests != 2 ||
+		wideResp.Series[0].Points[0].AvgLatencyMs != 200 {
+		t.Fatalf("agent/hour series = %+v", wideResp.Series)
+	}
+	// The comparison window is the equal-length span before `from`; the
+	// prevMinute bucket (36h back) falls inside [from-48h-60, from-60] and the
+	// agent table has no rows there, so compare.requests is 0 but present.
+	if wideResp.Compare.From != minute-96*3600-60 || wideResp.Compare.To != minute-48*3600-60 {
+		t.Errorf("agent/hour compare window = [%d,%d]", wideResp.Compare.From, wideResp.Compare.To)
+	}
+
+	// Provider-dimension compare: the 36h-old bucket lands in the previous
+	// window and shows up in compare.requests/input.
+	cmp := httptest.NewRecorder()
+	mux.ServeHTTP(cmp, httptest.NewRequest(http.MethodGet, fmt.Sprintf(
+		"/api/analytics?from=%d&to=%d&granularity=day",
+		minute-24*3600, minute,
+	), nil))
+	if cmp.Code != http.StatusOK {
+		t.Fatalf("compare status=%d want 200; body=%s", cmp.Code, cmp.Body.String())
+	}
+	var cmpResp struct {
+		Compare struct {
+			From     int64  `json:"from"`
+			To       int64  `json:"to"`
+			Requests uint64 `json:"requests"`
+			Input    uint64 `json:"input"`
+		} `json:"compare"`
+	}
+	if err := json.Unmarshal(cmp.Body.Bytes(), &cmpResp); err != nil {
+		t.Fatalf("unmarshal compare analytics: %v\n%s", err, cmp.Body.String())
+	}
+	if cmpResp.Compare.From != minute-48*3600-60 || cmpResp.Compare.To != minute-24*3600-60 ||
+		cmpResp.Compare.Requests != 5 || cmpResp.Compare.Input != 500 {
+		t.Errorf("compare = %+v, want prev-window requests=5 input=500", cmpResp.Compare)
 	}
 
 	nilMux := http.NewServeMux()

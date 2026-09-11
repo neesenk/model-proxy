@@ -8,10 +8,12 @@ package appapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"model-proxy/internal/fusion"
+	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/presets"
 	"model-proxy/internal/pricing"
@@ -54,10 +56,15 @@ type Account struct {
 
 // ProviderAccounts is one configured provider and its public account metadata.
 type ProviderAccounts struct {
-	Name       string    `json:"name"`
-	ProviderID string    `json:"provider_id"`
-	Billing    string    `json:"billing"`
-	Accounts   []Account `json:"accounts"`
+	Name       string `json:"name"`
+	ProviderID string `json:"provider_id"`
+	Billing    string `json:"billing"`
+	// UsageEndpoint reports whether the provider configures a usage_url — the
+	// quota tracker polls pay-as-you-go providers only when one exists
+	// (deepseek's /user/balance), so the UI's per-account "Refresh usage"
+	// button keys off this, not billing alone.
+	UsageEndpoint bool      `json:"usage_endpoint"`
+	Accounts      []Account `json:"accounts"`
 }
 
 // TokenUsage is one flattened provider/model usage counter. Total is the
@@ -275,13 +282,18 @@ type AgentStatsQuery struct {
 	BucketSecs int64
 }
 
-// AnalyticsQuery describes one calendar aggregation read.
+// AnalyticsQuery describes one calendar aggregation read. By selects the
+// grouping dimension: ""/"model" reads minute_buckets grouped by
+// (provider, model); "agent" reads agent_buckets grouped by
+// (agent, provider, model) — Agent narrows that view to one agent.
 type AnalyticsQuery struct {
 	From        int64
 	To          int64
 	Provider    string
 	Model       string
+	Agent       string
 	Granularity string
+	By          string
 }
 
 // SecurityQuery is the normalized audit-log query passed through the read
@@ -316,6 +328,54 @@ type SecurityResult struct {
 	Records []SecurityRecord `json:"records"`
 	Skipped int              `json:"skipped"`
 }
+
+// Security-explain statuses (SecurityExplainResult.Status).
+const (
+	SecurityExplainOK                 = "ok"
+	SecurityExplainNoRequestLog       = "no_request_log"
+	SecurityExplainNotFound           = "not_found"
+	SecurityExplainRedacted           = "redacted"
+	SecurityExplainCrossRequest       = "cross_request"
+	SecurityExplainScannerUnavailable = "scanner_unavailable"
+)
+
+// SecurityMatch is one re-located occurrence of a recorded guard-hit name
+// inside the persisted request body. The context window around the match is
+// pre-split into Pre/Hit/Post (never byte offsets — the web UI slices JS
+// UTF-16 strings); secret-kind hits and ANY other secret overlapping the
+// window are masked (prefix + … + suffix), path hits are shown verbatim (a
+// path is not a credential). Located is false when the name could not be
+// re-located on the stored body (rule removed since, body stored
+// post-redact, or a cross-request channel like known_secret_fragmented) —
+// Regex/Source/Explanation still describe it.
+type SecurityMatch struct {
+	Name        string `json:"name"`
+	Strength    string `json:"strength,omitempty"`
+	Regex       string `json:"regex,omitempty"`
+	Source      string `json:"source,omitempty"`
+	Explanation string `json:"explanation,omitempty"`
+	Pre         string `json:"pre,omitempty"`
+	Hit         string `json:"hit,omitempty"`
+	Post        string `json:"post,omitempty"`
+	Located     bool   `json:"located"`
+}
+
+// SecurityExplainResult is the on-demand analysis of one audit record: the
+// original request body is fetched from the request log and re-scanned with
+// the current guard scanner. Nothing is persisted — the explain surface
+// derives from data the admin can already read via /api/requests/<id>.
+type SecurityExplainResult struct {
+	Status    string          `json:"status"`
+	RequestID string          `json:"request_id"`
+	Kind      string          `json:"kind"`
+	Matches   []SecurityMatch `json:"matches"`
+}
+
+// ErrGuardScannerUnavailable is returned through the admin LocateGuardHits
+// port when the current generation has no guard scanner (guard disabled or
+// its construction failed). SecurityExplain maps it to the
+// scanner_unavailable status instead of a generic error.
+var ErrGuardScannerUnavailable = errors.New("guard scanner unavailable in the current generation")
 
 // ValidationIssue is one config lint finding returned by POST
 // /api/config/validate. Line is 1-based; 0 means the problem cannot be pinned
@@ -401,11 +461,26 @@ func NewHTTPError(status int, message string) error {
 	return &HTTPError{Status: status, Message: message}
 }
 
+// RequestLogQueries is the read port over the request-log store consumed by
+// the /api/requests and /api/sessions handlers. The production implementation
+// is the tailing SQLite index (*requestlog.Indexer) with a directory-scan
+// fallback inside admin; every method carries the exact semantics of the
+// requestlog scan function of the same name (filter mapping, newest-first
+// top-K, facets collected before the filter, detail including bodies).
+type RequestLogQueries interface {
+	SummariesWithFacets(requestlog.Filter) ([]requestlog.Summary, requestlog.Facets, error)
+	Detail(requestID string) ([]requestlog.Record, error)
+	SessionSummaries(scanLimit, limit int, costOf func(model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error)
+}
+
 // ReadAPI is the complete read-only capability consumed by the Web transport.
 type ReadAPI interface {
 	Dashboard(time.Time) Dashboard
 	LogFile() string
 	RequestLogDirectory() string
+	// RequestLogQueries returns the request-log query port; nil means the
+	// request log is disabled and handlers answer their {enabled:false} shape.
+	RequestLogQueries() RequestLogQueries
 	Accounts() []ProviderAccounts
 	// Tokens/Agents project the usage counters. from <= 0 && to <= 0 is the
 	// all-time cumulative view (hot counters); any bound > 0 aggregates
@@ -421,6 +496,10 @@ type ReadAPI interface {
 	Fusion(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
 	Pins() []Pin
 	Security(SecurityQuery) (SecurityResult, error)
+	// SecurityExplain re-locates one audit record's hits inside the persisted
+	// request body (on-demand, nothing persisted). kind must be secret or
+	// path; names are the audit record's pattern/category names.
+	SecurityExplain(requestID, kind string, names []string) (SecurityExplainResult, error)
 	ConfigDocument() (ConfigDocument, error)
 	// ModelsDocument projects the startup protocol probe's per-provider model
 	// capability matrix (internal/runtime/wirecap ModelStore snapshot).
@@ -466,7 +545,7 @@ type CommandAPI interface {
 	// with the fresh matrix. Safety nets mirror the CLI — a fetch/probe
 	// outage never wipes models:, the list is written unvalidated with a
 	// warning instead.
-	RefreshModels(provider string) (ModelsRefreshResult, error)
+	RefreshModels(ctx context.Context, provider string) (ModelsRefreshResult, error)
 }
 
 // RequirePorts validates that both application ports are present. It is

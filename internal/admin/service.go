@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"time"
 
+	"model-proxy/internal/appapi"
 	responsecache "model-proxy/internal/cache"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/fusion"
 	"model-proxy/internal/login"
 	obscounters "model-proxy/internal/observe/counters"
+	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/provider"
@@ -55,6 +57,12 @@ type Ports struct {
 	// RequestLogDirectory reports the request-log directory ("" when the
 	// request log is disabled).
 	RequestLogDirectory func() string
+	// RequestLogIndex returns the process-lifetime tailing SQLite index over
+	// the request-log directory (nil when the request log is disabled or the
+	// index failed to open). The index is set once at startup and never
+	// swapped, so the closure needs no lock. Read paths fall back to directory
+	// scans when it is nil.
+	RequestLogIndex func() *requestlog.Indexer
 	// TokenUsage returns the token counter snapshot (nil when disabled).
 	TokenUsage func() map[obscounters.TokenKey]obscounters.TokenUsage
 	// AgentUsage returns the agent counter snapshot (nil when disabled) —
@@ -71,10 +79,13 @@ type Ports struct {
 	// usage "Since" label.
 	StatsSince func() int64
 	// StatsRange/AgentStats/Analytics query the stats store; the closures
-	// return empty (non-nil) slices when the store is disabled.
-	StatsRange func(from, to int64, provider, model string, bucketSecs int64) ([]observestats.Bucket, error)
-	AgentStats func(from, to int64, agent, provider, model string, bucketSecs int64) ([]observestats.AgentBucket, error)
-	Analytics  func(from, to int64, provider, model, granularity string) ([]observestats.AnalyticsBucket, error)
+	// return empty (non-nil) slices when the store is disabled. Analytics
+	// reads the (provider, model) calendar buckets; AnalyticsAgents is the
+	// agent-dimension form over agent_buckets.
+	StatsRange      func(from, to int64, provider, model string, bucketSecs int64) ([]observestats.Bucket, error)
+	AgentStats      func(from, to int64, agent, provider, model string, bucketSecs int64) ([]observestats.AgentBucket, error)
+	Analytics       func(from, to int64, provider, model, granularity string) ([]observestats.AnalyticsBucket, error)
+	AnalyticsAgents func(from, to int64, agent, provider, model, granularity string) ([]observestats.AnalyticsBucket, error)
 	// FusionSnapshot returns the fusion registry projection for one workflow.
 	FusionSnapshot func(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
 	// Pins returns the active pins (expired ones already dropped).
@@ -120,25 +131,29 @@ type Ports struct {
 	// one runtime snapshot, so an account probe can never pair one config
 	// generation with another generation's impl.
 	ProbeRuntime func() (cfg *configdomain.Config, providers map[string]provider.Provider)
-	// ProviderImpl resolves one provider's implementation for models
-	// fetch/probe: the named provider, or its credential pool's first virtual
-	// when pooled (the model list is per-upstream, not per-account). Nil when
-	// the provider is not built (not logged in).
-	ProviderImpl func(name string) provider.Provider
-	// ModelCapsReplace overwrites one provider's model-level verdict matrix
-	// with freshly probed results and persists model_caps.json (async). The
-	// closure computes the current generation's protocol fingerprint itself;
-	// stale-generation writes are dropped by the store.
-	ModelCapsReplace func(name string, models map[string]runtimewire.ModelProtocols)
-	// ProbeHTTPClient builds the HTTP client used for upstream model probes
-	// (proxy-chain transport + scheduling timeout). Transport policy stays
-	// composition-owned so admin never imports it.
-	ProbeHTTPClient func() *http.Client
+	// LocateGuardHits re-runs guard detection over one persisted request body
+	// and returns located, display-ready matches (masked snippets, never raw
+	// secret bytes) for the security-explain surface. Implemented by the
+	// composition root, which owns the current-generation guard scanner;
+	// internal/admin must not import internal/guard (archtest DAG).
+	LocateGuardHits func(body []byte, kind string, names []string) ([]appapi.SecurityMatch, error)
+	// ModelRefreshRuntime captures config, pooled implementation and probe policy
+	// together. ModelCapsReplace only accepts the captured endpoint fingerprint.
+	ModelRefreshRuntime func(name string) ModelRefreshRuntime
+	ModelCapsReplace    func(name, fingerprint string, models map[string]runtimewire.ModelProtocols) bool
 
 	// Login constructor seams. Production wires the login package defaults;
 	// tests point them at stub endpoints after construction.
 	NewAqpClient    func(storePath string) *login.AqpClient
 	NewCodexOptions func() *login.CodexLoginServerOptions
+}
+
+// ModelRefreshRuntime is an immutable, single-generation model refresh input.
+type ModelRefreshRuntime struct {
+	Config      *configdomain.Config
+	Provider    provider.Provider
+	Fingerprint string
+	Client      *http.Client
 }
 
 // DashboardState is one generation-consistent capture behind Dashboard. Every

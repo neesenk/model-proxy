@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -208,7 +209,7 @@ type Config struct {
 	// the SSO-cookie store + POSTs directly, like the other providers). The
 	// interactive login flow is NOT a callback - cmdLogin calls the run* flows
 	// directly. Logout is provider-owned (file removal) since Phase 5.
-	FetchModelsFn func() ([]string, error) // for FetchModels (volcengine: V4-signed OpenAPI)
+	FetchModelsFn func(context.Context) ([]string, error) // for FetchModels (volcengine: V4-signed OpenAPI)
 
 	// Auth is an optional auth-injector override (TEST SEAM): when set, the aqp/
 	// codex constructors use it instead of building their real AqpKeyProvider /

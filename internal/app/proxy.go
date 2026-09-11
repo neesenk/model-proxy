@@ -74,23 +74,25 @@ type generationState struct {
 // Embedded in Proxy so promoted selectors (p.metrics, p.reqLog, ...) stay
 // unchanged.
 type processServices struct {
-	lifecycle      *runtimestate.Lifecycle
-	runtimeState   runtimestate.Manager
-	client         *http.Client
-	quota          *runtimestate.QuotaTracker    // background quota poller; nil only in degenerate tests
-	metrics        *obscounters.MetricsStore     // request counters (atomic); nil only in degenerate tests
-	tokens         *obscounters.TokenCounter     // SSE-scanned token usage; nil only in degenerate tests
-	agents         *obscounters.AgentCounter     // per-agent (UA) request/token counters; nil only in degenerate tests
-	stats          *observestats.Store           // SQLite persistence for per-minute buckets; nil in tests (runtime services open it)
-	flusher        *observestats.Flusher         // per-minute diff loop; nil in tests (runProxy starts it)
-	reqLog         *requestlog.Logger            // per-request access log (full bodies); nil = disabled (default) or init failure
-	reqLogStarted  bool                          // lifecycle owns loop/shutdown only when started by startRuntimeServices
-	sessionScan    *guardsession.Store           // split-exfiltration session windows; process-lifetime (survives reload like metrics), never serialized or logged
-	responsesState *protocol.ResponsesStateStore // previous_response_id replay for Responses clients bridged to stateless backends
-	events         *observeevents.Hub            // live request monitor fan-out hub (SSE /api/events); always non-nil
-	fusionReg      *fusion.Registry              // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
-	catalog        *catalog.Catalog              // models.dev metadata (context window + modalities) for request-aware routing; survives reload; refreshed async best-effort; nil = unavailable, degrade gracefully
-	budget         *budget.Watcher               // monthly cost alert loop; nil unless budgets: configures a threshold
+	lifecycle          *runtimestate.Lifecycle
+	runtimeState       runtimestate.Manager
+	client             *http.Client
+	quota              *runtimestate.QuotaTracker    // background quota poller; nil only in degenerate tests
+	metrics            *obscounters.MetricsStore     // request counters (atomic); nil only in degenerate tests
+	tokens             *obscounters.TokenCounter     // SSE-scanned token usage; nil only in degenerate tests
+	agents             *obscounters.AgentCounter     // per-agent (UA) request/token counters; nil only in degenerate tests
+	stats              *observestats.Store           // SQLite persistence for per-minute buckets; nil in tests (runtime services open it)
+	flusher            *observestats.Flusher         // per-minute diff loop; nil in tests (runProxy starts it)
+	reqLog             *requestlog.Logger            // per-request access log (full bodies); nil = disabled (default) or init failure
+	reqLogStarted      bool                          // lifecycle owns loop/shutdown only when started by startRuntimeServices
+	reqLogIndex        *requestlog.Indexer           // tailing SQLite index over the request log (web read path); nil = request log disabled or index open failed (reads fall back to directory scans)
+	reqLogIndexStarted bool                          // lifecycle owns the indexer loop/shutdown only when started alongside reqLog
+	sessionScan        *guardsession.Store           // split-exfiltration session windows; process-lifetime (survives reload like metrics), never serialized or logged
+	responsesState     *protocol.ResponsesStateStore // previous_response_id replay for Responses clients bridged to stateless backends
+	events             *observeevents.Hub            // live request monitor fan-out hub (SSE /api/events); always non-nil
+	fusionReg          *fusion.Registry              // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
+	catalog            *catalog.Catalog              // models.dev metadata (context window + modalities) for request-aware routing; survives reload; refreshed async best-effort; nil = unavailable, degrade gracefully
+	budget             *budget.Watcher               // monthly cost alert loop; nil unless budgets: configures a threshold
 
 	// Upstream proxy resolution (internal/upstreamproxy): the resolver caches
 	// OS system-proxy detection once per process; the transport pool is keyed
@@ -108,10 +110,11 @@ type processServices struct {
 	// state path). Same leaf-lock + survives-reload discipline as wireCaps.
 	modelCaps     runtimewire.ModelStore
 	modelCapsPath string
-	// cacheStatePath is the cache-counters state file (~/.model-proxy/
-	// cache_state.json): load-seeds a fresh store, per-minute loop + shutdown
-	// + reset persist it. Empty = never persist (degenerate constructors).
+	// Cache entries are generation-owned. Counters and their serialized disk
+	// writer survive reload, including disabled generations.
 	cacheStatePath string
+	cacheCounters  *responsecache.Counters
+	cachePersistMu sync.Mutex // serializes cache snapshot/write and durable reset
 }
 
 // Proxy holds the compiled provider instances + the config.
@@ -267,7 +270,14 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// the default (off) path and direct-NewProxy tests pay zero overhead.
 	// Seeded from cache_state.json so restarts continue the hit/miss history.
 	p.cacheStatePath = CacheStatePath(qpath)
-	p.cache = p.seedResponseCache(cfg.Cache)
+	p.cacheCounters = &responsecache.Counters{}
+	state := loadCacheState(p.cacheStatePath)
+	models := make([]responsecache.ModelStat, 0, len(state.Models))
+	for _, m := range state.Models {
+		models = append(models, responsecache.ModelStat{Name: m.Model, Hits: m.Hits, Misses: m.Misses})
+	}
+	p.cacheCounters.Seed(state.Hits, state.Misses, models)
+	p.cache = p.newResponseCache(cfg.Cache)
 	p.responsesState = protocol.NewResponsesStateStore(protocol.ResponsesStatePath(qpath))
 	p.modelCapsPath = runtimewire.ModelCapsPath(qpath)
 	// Live request monitor hub (SSE /api/events). Always on — empty unless a Web
@@ -379,45 +389,23 @@ func (p *Proxy) resetStats() error {
 	}
 	// Response cache participates in the user-facing "reset counters" command,
 	// but is not stats persistence and therefore stays outside statsFlusher.
-	// p.cache is swapped by Reload under p.mu — read it under the same RLock
-	// every other reader takes (POST /api/tokens/reset may race a reload).
-	p.mu.RLock()
-	cache := p.cache
-	p.mu.RUnlock()
-	if cache != nil {
-		cache.Reset()
-	}
-	// Persist the zeroed counters immediately: otherwise the next per-minute
-	// save (or a crash) would resurrect a history the user just reset.
-	p.saveCacheState()
-	return nil
+	return p.resetResponseCache()
 }
 
-// seedResponseCache adapts resolved application configuration into the
-// repository-leaf cache component — the single NewResponseCache call site —
-// and seeds it from cache_state.json so restarts and reloads continue the
-// cumulative hit/miss history (see cache_state.go for the file contract).
-func (p *Proxy) seedResponseCache(config CacheConfig) *responsecache.Store {
-	store := NewResponseCache(config)
-	if store == nil {
-		return nil
-	}
-	state := loadCacheState(p.cacheStatePath)
-	models := make([]responsecache.ModelStat, 0, len(state.Models))
-	for _, m := range state.Models {
-		models = append(models, responsecache.ModelStat{Name: m.Model, Hits: m.Hits, Misses: m.Misses})
-	}
-	store.Seed(state.Hits, state.Misses, models)
-	return store
+// newResponseCache rebuilds generation-owned entries around the process-wide
+// counter owner. No disk I/O is performed during reload's generation swap.
+func (p *Proxy) newResponseCache(config CacheConfig) *responsecache.Store {
+	return NewResponseCache(config, p.cacheCounters)
 }
 
 // NewResponseCache adapts resolved application configuration into the
 // repository-leaf cache component.
-func NewResponseCache(config CacheConfig) *responsecache.Store {
+func NewResponseCache(config CacheConfig, counters *responsecache.Counters) *responsecache.Store {
 	if !config.IsEnabled() {
 		return nil
 	}
 	return responsecache.New(responsecache.Options{
+		Counters:     counters,
 		TTL:          config.TTLDuration(),
 		MaxEntries:   config.MaxEntriesValue(),
 		MaxBodyBytes: config.MaxBodyBytesValue(),

@@ -27,7 +27,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 			"model-proxy/internal/configedit": true, "model-proxy/internal/credstore": true,
 			"model-proxy/internal/fusion": true, "model-proxy/internal/login": true,
 			"model-proxy/internal/observe/counters": true, "model-proxy/internal/observe/logx": true,
-			"model-proxy/internal/observe/seclog": true, "model-proxy/internal/observe/stats": true,
+			"model-proxy/internal/observe/requestlog": true, "model-proxy/internal/observe/seclog": true, "model-proxy/internal/observe/stats": true,
 			"model-proxy/internal/presets": true, "model-proxy/internal/pricing": true,
 			"model-proxy/internal/probe": true, "model-proxy/internal/provider": true,
 			"model-proxy/internal/routing": true, "model-proxy/internal/runtime": true,
@@ -83,6 +83,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/guard/session":         {"model-proxy/internal/guard": true},
 		"model-proxy/internal/login":                 {"model-proxy/internal/display": true, "model-proxy/internal/accounts": true, "model-proxy/internal/config": true, "model-proxy/internal/provider": true, "model-proxy/internal/observe/logx": true, "model-proxy/internal/upstreamproxy": true},
 		"model-proxy/internal/observe/budget":        {"model-proxy/internal/config": true, "model-proxy/internal/observe/events": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/observe/logx": true, "model-proxy/internal/pricing": true},
+		"model-proxy/internal/observe/analytics":     {"model-proxy/internal/observe/stats": true, "model-proxy/internal/pricing": true},
 		"model-proxy/internal/observe/counters":      nil,
 		"model-proxy/internal/observe/events":        nil,
 		"model-proxy/internal/observe/logfile":       {"model-proxy/internal/observe/logx": true},
@@ -122,9 +123,9 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 			"model-proxy/internal/transport/bodycapture": true, "model-proxy/internal/upstreamproxy": true, "model-proxy/internal/web": true, "model-proxy/internal/webauth": true,
 			"model-proxy/internal/credstore": true, "model-proxy/internal/display": true, "model-proxy/internal/provider": true, "model-proxy/internal/providerbuild": true,
 		},
-		"model-proxy/internal/appapi":  {"model-proxy/internal/fusion": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/presets": true, "model-proxy/internal/pricing": true},
+		"model-proxy/internal/appapi":  {"model-proxy/internal/fusion": true, "model-proxy/internal/observe/requestlog": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/presets": true, "model-proxy/internal/pricing": true},
 		"model-proxy/internal/httpx":   nil,
-		"model-proxy/internal/web":     {"model-proxy/internal/appapi": true, "model-proxy/internal/observe/logx": true, "model-proxy/internal/observe/requestlog": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/pricing": true, "model-proxy/internal/webauth": true},
+		"model-proxy/internal/web":     {"model-proxy/internal/appapi": true, "model-proxy/internal/observe/analytics": true, "model-proxy/internal/observe/logx": true, "model-proxy/internal/observe/requestlog": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/pricing": true, "model-proxy/internal/webauth": true},
 		"model-proxy/internal/webauth": nil,
 	}
 }

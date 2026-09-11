@@ -30,12 +30,17 @@ func (p *Proxy) StartRuntimeServices(cfg *Config) {
 		p.reqLogStarted = p.lifecycle.Run(func(<-chan struct{}) {
 			p.reqLog.Run()
 		})
+		if p.reqLogIndex != nil {
+			p.reqLogIndexStarted = p.lifecycle.Run(func(<-chan struct{}) {
+				p.reqLogIndex.Run()
+			})
+		}
 	}
 
 	// Cache-counter persistence (cache_state.json): owned by the lifecycle;
-	// per-minute saves plus one final save in closeRuntimeServices. Skipped
-	// entirely when the cache is disabled.
-	if p.cache != nil && p.cacheStatePath != "" {
+	// per-minute saves plus one final save in closeRuntimeServices. Register
+	// even when disabled at boot: reload can enable caching later.
+	if p.cacheStatePath != "" {
 		p.lifecycle.Run(func(stop <-chan struct{}) {
 			p.cacheSaveLoop(stop)
 		})
@@ -76,6 +81,12 @@ func (p *Proxy) closeRuntimeServices() {
 	}
 	if p.reqLogStarted {
 		p.reqLog.Shutdown()
+	}
+	// Drain order matters: the indexer's Shutdown runs one final reconcile
+	// after the log writer drained, so the last committed records are indexed
+	// before the database closes.
+	if p.reqLogIndexStarted {
+		p.reqLogIndex.Shutdown()
 	}
 	p.lifecycle.Wait()
 

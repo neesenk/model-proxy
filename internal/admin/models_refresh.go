@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -41,18 +42,19 @@ const refreshProbeConcurrency = 5
 
 // RefreshModels runs the full fetch → filter → probe → write → reload cycle
 // for one provider against the live daemon state.
-func (s *Service) RefreshModels(name string) (appapi.ModelsRefreshResult, error) {
-	cfg := s.ports.Config()
+func (s *Service) RefreshModels(ctx context.Context, name string) (appapi.ModelsRefreshResult, error) {
+	if err := ctx.Err(); err != nil {
+		return appapi.ModelsRefreshResult{}, err
+	}
+	runtime := s.ports.ModelRefreshRuntime(name)
+	cfg := runtime.Config
 	provCfg, ok := cfg.Providers[name]
 	if !ok {
 		return appapi.ModelsRefreshResult{}, appapi.NewHTTPError(http.StatusNotFound, "unknown provider: "+name)
 	}
 	result := appapi.ModelsRefreshResult{Provider: name}
 	existing := provCfg.Models
-	var impl provider.Provider
-	if s.ports.ProviderImpl != nil {
-		impl = s.ports.ProviderImpl(name)
-	}
+	impl := runtime.Provider
 
 	// Candidate set: existing config models merged with the live fetch. When
 	// the impl or its /models endpoint is unavailable, fall back to the
@@ -64,7 +66,10 @@ func (s *Service) RefreshModels(name string) (appapi.ModelsRefreshResult, error)
 		merged = mergeIDs(existing, routing.RouteModelsForProvider(cfg, name))
 		result.Warning = name + " is not available (not logged in?); model list written unvalidated"
 	default:
-		fetched, err := impl.FetchModels()
+		fetched, err := provider.FetchModelsContext(ctx, impl)
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
 		if err != nil {
 			merged = mergeIDs(existing, routing.RouteModelsForProvider(cfg, name))
 			result.Warning = fmt.Sprintf("models endpoint unavailable (%v); probed route-configured models instead", err)
@@ -90,14 +95,15 @@ func (s *Service) RefreshModels(name string) (appapi.ModelsRefreshResult, error)
 	var matrix map[string]runtimewire.ModelProtocols
 	probeHealthy := false
 	if impl != nil {
-		client := http.DefaultClient
-		if s.ports.ProbeHTTPClient != nil {
-			if built := s.ports.ProbeHTTPClient(); built != nil {
-				client = built
-			}
+		client := runtime.Client
+		if client == nil {
+			return result, fmt.Errorf("model refresh probe client is unavailable")
 		}
 		var drops []appapi.ModelsRefreshDrop
-		kept, drops, matrix = probeRefreshModels(client, provCfg, impl, policyKept)
+		kept, drops, matrix = probeRefreshModels(ctx, client, provCfg, impl, policyKept)
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
 		result.ProbeDropped = drops
 		if len(policyKept) > 0 && len(kept) == 0 {
 			// Every probe failed — likely auth/network, not genuinely
@@ -137,7 +143,7 @@ func (s *Service) RefreshModels(name string) (appapi.ModelsRefreshResult, error)
 		if configFile == "" {
 			return result, fmt.Errorf("config file path is unavailable; cannot write the refreshed model list")
 		}
-		reloadWarning, err := s.writeProviderModelsAndReload(configFile, name, kept)
+		reloadWarning, err := s.writeProviderModelsAndReload(ctx, configFile, name, provCfg, kept)
 		if err != nil {
 			return result, err
 		}
@@ -146,8 +152,13 @@ func (s *Service) RefreshModels(name string) (appapi.ModelsRefreshResult, error)
 		}
 		result.ConfigUpdated = true
 	}
+	if !result.ConfigUpdated && ctx.Err() != nil {
+		return result, ctx.Err()
+	}
 	if probeHealthy && s.ports.ModelCapsReplace != nil {
-		s.ports.ModelCapsReplace(name, matrix)
+		if !s.ports.ModelCapsReplace(name, runtime.Fingerprint, matrix) {
+			return result, appapi.NewHTTPError(http.StatusConflict, "provider changed during model refresh; retry")
+		}
 	}
 	return result, nil
 }
@@ -158,8 +169,8 @@ func (s *Service) RefreshModels(name string) (appapi.ModelsRefreshResult, error)
 // subset (input order), the dropped ids with per-leg reasons, and the full
 // fresh matrix. The bounded fan-out lives in probe.ProbeModels; this function
 // owns only verdict classification and the keep/drop policy.
-func probeRefreshModels(client *http.Client, provCfg configdomain.Provider, impl provider.Provider, ids []string) (kept []string, dropped []appapi.ModelsRefreshDrop, matrix map[string]runtimewire.ModelProtocols) {
-	outcomes := probe.ProbeModels(context.Background(), client, provCfg, impl, ids, refreshProbeConcurrency)
+func probeRefreshModels(ctx context.Context, client *http.Client, provCfg configdomain.Provider, impl provider.Provider, ids []string) (kept []string, dropped []appapi.ModelsRefreshDrop, matrix map[string]runtimewire.ModelProtocols) {
+	outcomes := probe.ProbeModels(ctx, client, provCfg, impl, ids, refreshProbeConcurrency)
 	matrix = make(map[string]runtimewire.ModelProtocols, len(outcomes))
 	for _, o := range outcomes {
 		mp := runtimewire.ModelProtocols{}
@@ -241,8 +252,18 @@ func refreshLegErrorReason(body []byte) string {
 // atomic write), then hot-reloads. A reload that failed to apply restores the
 // backup; an applied-with-warning reload keeps the new file and reports the
 // warning — the saveAndReloadUnderLock contract.
-func (s *Service) writeProviderModelsAndReload(configFile, name string, models []string) (reloadWarning string, err error) {
-	err = configedit.WithConfigLock(configFile, func() error {
+func (s *Service) writeProviderModelsAndReload(ctx context.Context, configFile, name string, expected configdomain.Provider, models []string) (reloadWarning string, err error) {
+	err = configedit.WithConfigLockContext(ctx, configFile, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		current, err := configdomain.LoadConfig(configFile)
+		if err != nil {
+			return err
+		}
+		if actual, ok := current.Providers[name]; !ok || !reflect.DeepEqual(actual, expected) {
+			return appapi.NewHTTPError(http.StatusConflict, "provider changed during model refresh; retry")
+		}
 		root, err := configedit.LoadNode(configFile)
 		if err != nil {
 			return err
@@ -259,6 +280,11 @@ func (s *Service) writeProviderModelsAndReload(configFile, name string, models [
 			return err
 		}
 		enc.Close()
+		// Cancellation is honored up to this commit boundary. Once writing starts,
+		// finish save + reload (or rollback), even if the client disconnects.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		backup, err := configedit.WriteConfigValidated(configFile, buf.String(), func(path string, raw []byte) error {
 			_, err := configdomain.LoadConfigFromBytes(path, raw)
 			return err

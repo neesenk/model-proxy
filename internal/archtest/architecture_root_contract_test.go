@@ -39,6 +39,18 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 		}
 	})
 
+	t.Run("model refresh captures one runtime generation", func(t *testing.T) {
+		refresh, _ := parseGoFile(t, "internal/admin/models_refresh.go")
+		if got := methodCallCount(refresh, "RefreshModels", "ModelRefreshRuntime"); got != 1 {
+			t.Errorf("RefreshModels runtime captures = %d, want exactly 1", got)
+		}
+		for _, method := range []string{"Config", "ProviderImpl", "ProbeHTTPClient"} {
+			if got := methodCallCount(refresh, "RefreshModels", method); got != 0 {
+				t.Errorf("RefreshModels separately reads %s (%d calls)", method, got)
+			}
+		}
+	})
+
 	t.Run("forward fusion.go reuses targetexec Plan helpers instead of duplicating them", func(t *testing.T) {
 		f, fset := parseGoFile(t, "internal/forward/fusion.go")
 		for _, spec := range f.Imports {
@@ -144,11 +156,13 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			"lifecycle": true, "runtimeState": true, "client": true,
 			"quota": true, "metrics": true, "tokens": true, "agents": true,
 			"stats": true, "flusher": true, "reqLog": true, "reqLogStarted": true,
+			"reqLogIndex": true, "reqLogIndexStarted": true,
 			"sessionScan": true, "responsesState": true, "events": true,
 			"fusionReg": true, "catalog": true, "budget": true,
 			"proxyResolver": true, "transports": true, "transportsMu": true,
 			"wireCaps": true, "wireProbe": true,
 			"modelCaps": true, "modelCapsPath": true, "cacheStatePath": true,
+			"cacheCounters": true, "cachePersistMu": true,
 		}
 		if got := structContractViolations(
 			namedStructFields(t, rootPackage, "processServices"), wantServices, nil,

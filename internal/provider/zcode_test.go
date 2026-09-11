@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"runtime"
 	"testing"
 	"time"
@@ -29,10 +30,11 @@ func TestZCode_ExtraHeaders_Fingerprint(t *testing.T) {
 	p.ExtraHeaders(req, "/v1/messages")
 
 	cases := map[string]string{
-		"User-Agent":          "ZCode/3.3.6",
+		"User-Agent":          "ZCode/3.11.2 ai-sdk/provider-utils/4.0.27 runtime/node.js/24",
 		"HTTP-Referer":        "https://zcode.z.ai",
 		"X-Title":             "Z Code@electron",
-		"X-ZCode-App-Version": "3.3.6",
+		"X-ZCode-App-Version": "3.11.2",
+		"X-ZCode-Agent":       "glm",
 		"X-Release-Channel":   "production",
 		"anthropic-version":   "2023-06-01",
 	}
@@ -54,6 +56,54 @@ func TestZCode_ExtraHeaders_Fingerprint(t *testing.T) {
 	}
 	if req.Header.Get("X-Client-Timezone") == "" {
 		t.Error("X-Client-Timezone empty")
+	}
+	// X-Os-Version mirrors Node os.release(): non-empty and printable on
+	// darwin/linux, omitted on windows (best-effort, ZCode omits when absent).
+	if got := req.Header.Get("X-Os-Version"); runtime.GOOS != "windows" {
+		if got == "" {
+			t.Errorf("X-Os-Version empty on %s (want Node os.release() equivalent)", runtime.GOOS)
+		}
+	} else if got != "" {
+		t.Errorf("X-Os-Version = %q on windows, want omitted", got)
+	}
+	// Packet-captured 2026-09-11: desktop sends per-request X-Request-Id and
+	// per-session X-Session-Id v4 UUIDs.
+	for _, h := range []string{"X-Request-Id", "X-Session-Id"} {
+		if !zcodeUUIDv4Re.MatchString(req.Header.Get(h)) {
+			t.Errorf("%s = %q, want v4 UUID", h, req.Header.Get(h))
+		}
+	}
+	// Request id must differ per call; session id must stay stable.
+	req2, _ := http.NewRequest("POST", "https://x/v1/messages", nil)
+	p.ExtraHeaders(req2, "/v1/messages")
+	if req.Header.Get("X-Request-Id") == req2.Header.Get("X-Request-Id") {
+		t.Error("X-Request-Id identical across requests, want fresh per request")
+	}
+	if req.Header.Get("X-Session-Id") != req2.Header.Get("X-Session-Id") {
+		t.Error("X-Session-Id changed across requests, want stable per process")
+	}
+}
+
+var zcodeUUIDv4Re = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+func TestZCode_OsVersion_MatchesNodeOsRelease(t *testing.T) {
+	v := osVersion()
+	if v != printableASCII(v) {
+		t.Errorf("osVersion() = %q not printable-normalized", v)
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		// Node os.release() == kern.osrelease (kernel version), e.g. "25.6.0".
+		if v == "" {
+			t.Fatal("osVersion() empty on darwin")
+		}
+		if v[0] < '0' || v[0] > '9' {
+			t.Errorf("osVersion() = %q, want kernel release starting with a digit", v)
+		}
+	case "linux":
+		if v == "" {
+			t.Fatal("osVersion() empty on linux")
+		}
 	}
 }
 

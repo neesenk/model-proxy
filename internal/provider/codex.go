@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -107,8 +108,12 @@ func (p *CodexProvider) ProbeRequest(modelID string) ProbeRequest {
 // fetchModelsBearer. client_version is resolved by the main package (config >
 // codex CLI > ~/.codex cache > baked constant) and passed in via cfg.ClientVersion.
 func (p *CodexProvider) FetchModels() ([]string, error) {
+	return p.FetchModelsContext(context.Background())
+}
+
+func (p *CodexProvider) FetchModelsContext(ctx context.Context) ([]string, error) {
 	url := strings.TrimRight(p.cfg.OpenAIBaseURL, "/") + "/models"
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}

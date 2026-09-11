@@ -1,6 +1,7 @@
 package providerbuild
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -336,7 +337,7 @@ func TestListArkAgentPlanModelIDs_Unreachable(t *testing.T) {
 	dead.Close()
 	t.Setenv("HTTPS_PROXY", "http://"+addr)
 	t.Setenv("HTTP_PROXY", "http://"+addr)
-	if _, err := ListArkAgentPlanModelIDs("volcengine"); err == nil {
+	if _, err := ListArkAgentPlanModelIDs(context.Background(), "volcengine"); err == nil {
 		t.Error("unreachable upstream: want error, got nil")
 	}
 }

@@ -2,9 +2,12 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -27,6 +30,7 @@ cache: {enabled: true, ttl: 1h}
 		t.Fatal(err)
 	}
 	first := NewProxyWithStatePath(cfg, qpath)
+	t.Cleanup(first.Close)
 	if first.cache == nil {
 		t.Fatal("cache not created despite cache.enabled")
 	}
@@ -57,7 +61,9 @@ cache: {enabled: true, ttl: 1h}
 
 	// A "restarted" proxy seeds from the file: totals and per-model survive,
 	// the entry does not.
+	first.Close()
 	second := NewProxyWithStatePath(cfg, qpath)
+	t.Cleanup(second.Close)
 	stats := second.cache.Stats()
 	if stats.Hits != 1 || stats.Misses != 1 {
 		t.Errorf("restarted counters = hits %d misses %d, want 1/1", stats.Hits, stats.Misses)
@@ -107,6 +113,7 @@ cache: {enabled: true, ttl: 1h}
 		t.Fatal(err)
 	}
 	p := NewProxyWithStatePath(cfg, qpath)
+	t.Cleanup(p.Close)
 	now := time.Now()
 	p.cache.Put("k", "glm-5.2", http.StatusOK, nil, []byte("x"), now)
 	p.cache.Lookup("k", "glm-5.2", now)
@@ -118,7 +125,9 @@ cache: {enabled: true, ttl: 1h}
 	}
 
 	// A restarted proxy must see the reset, not the pre-reset history.
+	p.Close()
 	fresh := NewProxyWithStatePath(cfg, qpath)
+	t.Cleanup(fresh.Close)
 	if got := fresh.cache.Stats(); got.Hits != 0 || got.Misses != 0 || len(got.Models) != 0 {
 		t.Errorf("stats after reset+restart = %+v, want zero counters and empty breakdown", got)
 	}
@@ -144,5 +153,126 @@ func TestLoadCacheStateRejectsGarbage(t *testing.T) {
 	}
 	if got := loadCacheState(filepath.Join(dir, "missing.json")); got.Hits != 0 || got.Misses != 0 {
 		t.Errorf("missing file parsed as %+v, want zero state", got)
+	}
+}
+
+func cacheReloadFixture(t *testing.T) (*Proxy, func(bool)) {
+	t.Helper()
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(`{}`)) }))
+	t.Cleanup(up.Close)
+	t.Setenv("MP_MODELSDEV_URL", up.URL)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	write := func(enabled bool) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("listen: 127.0.0.1:0\nproviders:\n  up: {provider_id: zhipu, openai_base_url: %s}\ncache: {enabled: %t, ttl: 1h}\n", up.URL, enabled)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(true)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newTestProxy(t, cfg)
+	return p, func(enabled bool) {
+		t.Helper()
+		write(enabled)
+		if err := p.Reload(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestCacheStateReloadPreservesLiveCounters(t *testing.T) {
+	p, reload := cacheReloadFixture(t)
+	now := time.Now()
+	old := p.SnapshotRuntime().Cache
+	old.Lookup("first", "m", now)
+	p.saveCacheState()
+	old.Lookup("second", "m", now)
+	old.Put("old-entry", "m", 200, nil, []byte("cached"), now)
+	reload(true)
+	current := p.SnapshotRuntime().Cache
+	if current == old || current.Peek("old-entry", now) {
+		t.Fatal("reload reused old response entries")
+	}
+	if stats := current.Stats(); stats.Misses != 2 || stats.Entries != 0 {
+		t.Fatalf("reload stats = %+v", stats)
+	}
+	// A request which captured the old generation has not reached Lookup yet.
+	old.Lookup("late", "m", now)
+	old.Put("late-entry", "m", 200, nil, []byte("late"), now)
+	stats := current.Stats()
+	if stats.Misses != 3 || len(stats.Models) != 1 || stats.Models[0].Misses != 3 || stats.Entries != 0 {
+		t.Fatalf("late lookup stats = %+v", stats)
+	}
+	p.Close()
+	fresh := newTestProxyAt(t, p.cfg, p.quota.Path)
+	if got := fresh.cache.Stats(); got.Misses != 3 || got.Entries != 0 {
+		t.Fatalf("restart stats = %+v", got)
+	}
+}
+
+func TestCacheStateResetWhileDisabled(t *testing.T) {
+	p, reload := cacheReloadFixture(t)
+	p.cache.Lookup("miss", "m", time.Now())
+	p.saveCacheState()
+	reload(false)
+	if p.cache != nil {
+		t.Fatal("cache not disabled")
+	}
+	if err := p.resetStats(); err != nil {
+		t.Fatal(err)
+	}
+	state := loadCacheState(p.cacheStatePath)
+	if state.Misses != 0 || state.Hits != 0 || len(state.Models) != 0 {
+		t.Fatalf("disk reset = %+v", state)
+	}
+	reload(true)
+	if got := p.cache.Stats(); got.Misses != 0 || len(got.Models) != 0 {
+		t.Fatalf("re-enabled cache resurrected history: %+v", got)
+	}
+}
+
+func TestCacheStateResetSerializesConcurrentSaves(t *testing.T) {
+	p, _ := cacheReloadFixture(t)
+	p.cache.Lookup("miss", "m", time.Now())
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); <-start; p.saveCacheState() }()
+	}
+	close(start)
+	if err := p.resetStats(); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	if state := loadCacheState(p.cacheStatePath); state.Misses != 0 || len(state.Models) != 0 {
+		t.Fatalf("save resurrected pre-reset stats: %+v", state)
+	}
+}
+
+func TestCacheStateResetWriteFailureKeepsCounters(t *testing.T) {
+	p := newTestProxy(t, &Config{Cache: CacheConfig{Enabled: true}})
+	p.cache.Lookup("miss", "m", time.Now())
+	// A directory at the destination makes the atomic rename fail on all OSes.
+	if err := os.Mkdir(p.cacheStatePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.resetStats(); err == nil {
+		t.Fatal("durable reset failure acknowledged as success")
+	}
+	if got := p.cache.Stats().Misses; got != 1 {
+		t.Fatalf("failed reset lost live misses: %d", got)
+	}
+	if err := os.Remove(p.cacheStatePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.resetStats(); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.cache.Stats().Misses; got != 0 {
+		t.Fatalf("retry did not reset misses: %d", got)
 	}
 }

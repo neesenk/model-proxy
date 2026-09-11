@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -507,7 +508,7 @@ func TestDeepSeekProvider_Delegates(t *testing.T) {
 func TestVolcengineProvider_Delegates(t *testing.T) {
 	fetchCalled := false
 	cfg := &Config{
-		FetchModelsFn: func() ([]string, error) { fetchCalled = true; return []string{"m"}, nil },
+		FetchModelsFn: func(context.Context) ([]string, error) { fetchCalled = true; return []string{"m"}, nil },
 	}
 	dir := t.TempDir()
 	authFile := filepath.Join(dir, "v.json")

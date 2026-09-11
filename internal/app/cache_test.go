@@ -35,12 +35,12 @@ func (w *cacheTestFailingWriter) Write([]byte) (int, error) {
 }
 
 func TestNewResponseCacheAdaptsResolvedConfig(t *testing.T) {
-	if store := NewResponseCache(CacheConfig{}); store != nil {
+	if store := NewResponseCache(CacheConfig{}, nil); store != nil {
 		t.Fatalf("disabled cache created Store %#v", store)
 	}
 	store := NewResponseCache(CacheConfig{
 		Enabled: true, TTL: "1m", MaxEntries: 2, MaxBodyBytes: 123,
-	})
+	}, nil)
 	if store == nil {
 		t.Fatal("enabled cache did not create Store")
 	}

@@ -1,11 +1,14 @@
 package configedit
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestWithConfigLockSerializesRMW: concurrent read-modify-write cycles under
@@ -44,6 +47,30 @@ func TestWithConfigLockSerializesRMW(t *testing.T) {
 	}
 	if got := string(raw); got != strconv.Itoa(writers) {
 		t.Fatalf("lost update: counter = %s, want %d", got, writers)
+	}
+}
+
+func TestWithConfigLockContextCancelsBlockedAcquisition(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	err := WithConfigLock(path, func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		// The first writer still owns the lock throughout this call. The only
+		// legal way for the second writer to finish is cancellation.
+		err := WithConfigLockContext(ctx, path, func() error {
+			t.Error("canceled writer entered commit")
+			return nil
+		})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("blocked acquire = %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WithConfigLock(path, func() error { return nil }); err != nil {
+		t.Fatalf("lock leaked after cancellation: %v", err)
 	}
 }
 

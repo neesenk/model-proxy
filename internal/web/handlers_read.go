@@ -9,6 +9,7 @@ import (
 
 	"model-proxy/internal/appapi"
 
+	observeanalytics "model-proxy/internal/observe/analytics"
 	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
@@ -23,8 +24,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // requests/errors, providers/models, token totals, equivalent USD cost) from
 // the request log's newest records. Requires request_log to be enabled.
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
-	dir := s.reads.RequestLogDirectory()
-	if dir == "" {
+	queries := s.reads.RequestLogQueries()
+	if queries == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "sessions": []any{}})
 		return
 	}
@@ -47,7 +48,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		return pricing.ComputeCost(usage.Input, usage.Output, usage.CacheRead, usage.CacheCreation, entry)
 	}
-	sessions, err := requestlog.SessionSummaries(dir, 2000, limit, costOf)
+	sessions, err := queries.SessionSummaries(2000, limit, costOf)
 	if err != nil {
 		// The underlying error may embed local paths; log it server-side and
 		// return only a generic message to the client.
@@ -88,13 +89,13 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRequestsList(w http.ResponseWriter, r *http.Request) {
-	dir := s.reads.RequestLogDirectory()
-	if dir == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "records": []any{}, "facets": requestlog.Facets{Providers: []string{}, Models: []string{}, ProviderModels: map[string][]string{}}})
+	queries := s.reads.RequestLogQueries()
+	if queries == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "records": []any{}, "facets": requestlog.Facets{Providers: []string{}, Models: []string{}, Agents: []string{}, ProviderModels: map[string][]string{}}})
 		return
 	}
 	q := r.URL.Query()
-	f := requestlog.Filter{Model: q.Get("model"), Provider: q.Get("provider"), Session: q.Get("session"), ErrorsOnly: q.Get("errors") != "", Limit: 100}
+	f := requestlog.Filter{Model: q.Get("model"), Provider: q.Get("provider"), Agent: q.Get("agent"), Session: q.Get("session"), ErrorsOnly: q.Get("errors") != "", Limit: 100}
 	if v := q.Get("shadow"); v == "only" || v == "exclude" {
 		f.Shadow = v
 	}
@@ -122,7 +123,7 @@ func (s *Server) handleRequestsList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	f.UsageOnly = true
-	records, facets, err := requestlog.QuerySummariesWithFacets(dir, f)
+	records, facets, err := queries.SummariesWithFacets(f)
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "request query: "+err.Error())
 		return
@@ -132,12 +133,12 @@ func (s *Server) handleRequestsList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
 	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/requests/"), "/")
-	dir := s.reads.RequestLogDirectory()
-	if dir == "" || id == "" {
+	queries := s.reads.RequestLogQueries()
+	if queries == nil || id == "" {
 		writeJSONErr(w, http.StatusNotFound, "request logging is off or no id given")
 		return
 	}
-	records, err := requestlog.QueryRecords(dir, requestlog.Filter{RequestID: id, Limit: 50})
+	records, err := queries.Detail(id)
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "request query: "+err.Error())
 		return
@@ -324,6 +325,44 @@ func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// handleSecurityExplain serves GET /api/security/explain: the on-demand
+// re-location of one audit record's hits inside the persisted request body.
+// kind is validated here so drift (no request body) and unknown values are
+// client errors; name is comma-separated (the audit record's names field).
+// Business outcomes (no_request_log / not_found / redacted / cross_request /
+// scanner_unavailable) travel in the result's status field, not HTTP codes.
+func (s *Server) handleSecurityExplain(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	kind := q.Get("kind")
+	if kind != "secret" && kind != "path" {
+		writeJSONErr(w, http.StatusBadRequest, "kind must be secret or path (drift records have no request body)")
+		return
+	}
+	requestID := q.Get("request_id")
+	if requestID == "" {
+		writeJSONErr(w, http.StatusBadRequest, "request_id is required")
+		return
+	}
+	var names []string
+	for _, n := range strings.Split(q.Get("name"), ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 {
+		writeJSONErr(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	result, err := s.reads.SecurityExplain(requestID, kind, names)
+	if err != nil {
+		// Same convention as handleSecurity: the error may embed local paths.
+		log.Printf("web: security explain failed: %v", err)
+		writeJSONErr(w, http.StatusInternalServerError, "failed to analyze security record")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) handleShadowReport(w http.ResponseWriter, r *http.Request) {
 	dir := s.reads.RequestLogDirectory()
 	if dir == "" {
@@ -386,66 +425,68 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	if g == "" {
 		g = "day"
 	}
-	if g != "day" && g != "month" {
-		writeJSONErr(w, http.StatusBadRequest, "granularity must be day or month")
+	switch g {
+	case "minute", "hour", "day", "week", "month":
+	default:
+		writeJSONErr(w, http.StatusBadRequest, "granularity must be minute, hour, day, week or month")
 		return
 	}
-	bs, err := s.reads.Analytics(appapi.AnalyticsQuery{From: from, To: to, Provider: q.Get("provider"), Model: q.Get("model"), Granularity: g})
+	by := q.Get("by")
+	if by == "" {
+		by = "model"
+	}
+	if by != "model" && by != "agent" {
+		writeJSONErr(w, http.StatusBadRequest, "by must be model or agent")
+		return
+	}
+	query := appapi.AnalyticsQuery{From: from, To: to, Provider: q.Get("provider"), Model: q.Get("model"), Agent: q.Get("agent"), Granularity: g, By: by}
+	bs, err := s.reads.Analytics(query)
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "analytics query: "+err.Error())
 		return
 	}
-	type point struct {
-		Bucket        int64    `json:"bucket"`
-		Requests      uint64   `json:"requests"`
-		Input         uint64   `json:"input"`
-		Output        uint64   `json:"output"`
-		CacheCreation uint64   `json:"cache_creation"`
-		CacheRead     uint64   `json:"cache_read"`
-		Cost          *float64 `json:"cost"`
-		Priced        bool     `json:"priced"`
-	}
-	type series struct {
-		Provider string  `json:"provider"`
-		Model    string  `json:"model"`
-		Points   []point `json:"points"`
-	}
+	// The derived metrics (tokens totals, tok/s, cache hit, err%, weighted
+	// averages, equivalent cost) come from internal/observe/analytics — the
+	// single server-side definition, folded identically for the window
+	// totals, the compare window and each series.
 	prices := s.reads.Pricing()
-	by := map[string]*series{}
-	keys := []string{}
+	seriesOut := observeanalytics.Group(bs, by, prices.Overrides, prices.Catalog)
+	totals := observeanalytics.FoldTotals(bs, prices.Overrides, prices.Catalog)
 	priced, unpriced := map[string]bool{}, map[string]bool{}
-	var input, output uint64
-	var total *float64
 	for _, b := range bs {
-		k := b.Provider + "\x00" + b.Model
-		v := by[k]
-		if v == nil {
-			v = &series{Provider: b.Provider, Model: b.Model}
-			by[k] = v
-			keys = append(keys, k)
-		}
-		entry, ok := pricing.Resolve(prices.Overrides, prices.Catalog, b.Model)
-		var cost *float64
-		if ok {
-			x := pricing.ComputeCost(b.Input, b.Output, b.CacheRead, b.CacheCreation, entry)
-			cost = &x
+		if _, ok := pricing.Resolve(prices.Overrides, prices.Catalog, b.Model); ok {
 			priced[b.Model] = true
-			if total == nil {
-				total = new(float64)
-			}
-			*total += x
 		} else {
 			unpriced[b.Model] = true
 		}
-		v.Points = append(v.Points, point{Bucket: b.Bucket, Requests: b.Requests, Input: b.Input, Output: b.Output, CacheCreation: b.CacheCreation, CacheRead: b.CacheRead, Cost: cost, Priced: ok})
-		input += b.Input
-		output += b.Output
 	}
-	out := make([]series, 0, len(keys))
-	for _, k := range keys {
-		out = append(out, *by[k])
+	// Comparison window: the equal-length span immediately before `from`
+	// (one minute earlier so the inclusive minute bounds never overlap). A
+	// degenerate window (to <= from) has no previous span — compare is null
+	// and the UI hides the deltas. It carries the same unified derived block
+	// (embedded; the UI's Δ% chips read the identical fields) plus the
+	// window bounds.
+	// Comparison window: the equal-length span immediately before `from`
+	// (one minute earlier so the inclusive minute bounds never overlap). A
+	// degenerate window (to <= from) has no previous span — compare is null
+	// and the UI hides the deltas. It carries the same unified derived block
+	// (embedded) plus the window bounds.
+	type compareWindow struct {
+		From int64 `json:"from"`
+		To   int64 `json:"to"`
+		observeanalytics.Totals
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"granularity": g, "from": from, "to": to, "series": out, "totals": map[string]any{"input": input, "output": output, "cost": total}, "price_coverage": map[string]any{"priced": mapKeys(priced), "unpriced": mapKeys(unpriced)}})
+	var compare *compareWindow
+	if span := to - from; span > 0 {
+		prevFrom, prevTo := from-span-60, from-60
+		prev, err := s.reads.Analytics(appapi.AnalyticsQuery{From: prevFrom, To: prevTo, Provider: query.Provider, Model: query.Model, Agent: query.Agent, Granularity: g, By: by})
+		if err != nil {
+			writeJSONErr(w, http.StatusInternalServerError, "analytics compare: "+err.Error())
+			return
+		}
+		compare = &compareWindow{From: prevFrom, To: prevTo, Totals: observeanalytics.FoldTotals(prev, prices.Overrides, prices.Catalog)}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"granularity": g, "by": by, "from": from, "to": to, "series": seriesOut, "totals": totals, "compare": compare, "price_coverage": map[string]any{"priced": mapKeys(priced), "unpriced": mapKeys(unpriced)}})
 }
 
 func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {

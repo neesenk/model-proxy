@@ -1,12 +1,13 @@
 // cache_state.go — persistence for the exact-response cache counters. The
 // cache leaf (internal/cache) stays pure in-memory; this file owns the state
-// file: ~/.model-proxy/cache_state.json, loaded to seed a fresh store at
-// startup AND at reload (both rebuild the store), saved on a per-minute
+// file: ~/.model-proxy/cache_state.json, loaded once at startup to seed the
+// process-lifetime counters shared by all stores, saved on a per-minute
 // lifecycle loop, once more on shutdown, and cleared by reset-stats.
 package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"model-proxy/internal/observe/logx"
 	"os"
 	"path/filepath"
@@ -62,23 +63,16 @@ func loadCacheState(path string) persistedCacheState {
 	return state
 }
 
-// seedResponseCache（proxy.go，唯——NewResponseCache 调用点）用本文件的 load 结果 seed 新建 store：
-// 启动与 reload 都经它重建，累计计数得以跨重启、跨 reload 延续。
-
-// saveCacheState persists the store's current counters atomically
+// saveCacheState persists the process's current counters atomically
 // (per-write temp file + fsync + rename, same pattern as the quota state).
 // Best-effort: a failed save only logs — the next tick retries.
 func (p *Proxy) saveCacheState() {
-	if p.cacheStatePath == "" {
+	p.cachePersistMu.Lock()
+	defer p.cachePersistMu.Unlock()
+	if p.cacheCounters == nil {
 		return
 	}
-	p.mu.RLock()
-	cache := p.cache
-	p.mu.RUnlock()
-	if cache == nil {
-		return
-	}
-	stats := cache.Stats()
+	stats := p.cacheCounters.Stats()
 	state := persistedCacheState{
 		Version: cacheStateVersion,
 		Hits:    stats.Hits,
@@ -87,49 +81,72 @@ func (p *Proxy) saveCacheState() {
 	for _, m := range stats.Models {
 		state.Models = append(state.Models, persistedCacheModel{Model: m.Name, Hits: m.Hits, Misses: m.Misses})
 	}
+	if err := writeCacheState(p.cacheStatePath, state); err != nil {
+		logx.Warnf("[cache_state] persist: %v", err)
+	}
+}
+
+// resetResponseCache serializes with periodic saves. Persist zero first, even
+// when caching is disabled; a failed write cannot acknowledge a durable reset.
+// No Proxy lock is held across I/O. Reload shares the same counter owner.
+func (p *Proxy) resetResponseCache() error {
+	p.cachePersistMu.Lock()
+	defer p.cachePersistMu.Unlock()
+	if err := writeCacheState(p.cacheStatePath, persistedCacheState{Version: cacheStateVersion}); err != nil {
+		return fmt.Errorf("reset persisted cache stats: %w", err)
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.cache != nil {
+		p.cache.Reset()
+	} else if p.cacheCounters != nil {
+		p.cacheCounters.Reset()
+	}
+	return nil
+}
+
+// writeCacheState is called only under cachePersistMu (snapshot through rename).
+func writeCacheState(path string, state persistedCacheState) error {
+	if path == "" {
+		return nil
+	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		logx.Warnf("[cache_state] encode: %v", err)
-		return
+		return err
 	}
-	dir := filepath.Dir(p.cacheStatePath)
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		logx.Warnf("[cache_state] mkdir %s: %v", dir, err)
-		return
+		return err
 	}
-	// Unique temp file PER WRITE (same dir, so the rename is atomic on every
-	// platform): a save racing the shutdown save no longer fights over a fixed
-	// ".tmp" name. Rename is atomic → the file is never half-written.
+	// Unique same-directory temp files avoid conflicts with other processes;
+	// cachePersistMu separately prevents stale writes within this process.
 	f, err := os.CreateTemp(dir, ".cache_state-*.tmp")
 	if err != nil {
-		logx.Warnf("[cache_state] temp file: %v", err)
-		return
+		return err
 	}
 	tmp := f.Name()
 	remove := func() { os.Remove(tmp) }
 	if _, err := f.Write(data); err != nil {
 		f.Close()
 		remove()
-		logx.Warnf("[cache_state] write: %v", err)
-		return
+		return err
 	}
 	// fsync before rename: a crash+reboot must not leave the rename durable
 	// while the data isn't.
 	if err := f.Sync(); err != nil {
 		f.Close()
 		remove()
-		logx.Warnf("[cache_state] fsync: %v", err)
-		return
+		return err
 	}
 	if err := f.Close(); err != nil {
 		remove()
-		logx.Warnf("[cache_state] close: %v", err)
-		return
+		return err
 	}
-	if err := os.Rename(tmp, p.cacheStatePath); err != nil {
-		logx.Warnf("[cache_state] rename: %v", err)
+	if err := os.Rename(tmp, path); err != nil {
 		remove()
+		return err
 	}
+	return nil
 }
 
 // cacheSaveLoop persists the counters once per minute until stop closes. Owned

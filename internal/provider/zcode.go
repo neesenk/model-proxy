@@ -1,6 +1,7 @@
 package provider
 
 import (
+	crand "crypto/rand"
 	"fmt"
 	"io"
 	"model-proxy/internal/display"
@@ -9,22 +10,35 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
 // zcodeAppVersion is the ZCode desktop version whose client fingerprint this
-// provider reproduces. Probed from /Applications/ZCode.app v3.3.6.
-const zcodeAppVersion = "3.3.6"
+// provider reproduces. Re-probed from /Applications/ZCode.app v3.11.2
+// (2026-09-04 update; the 2026-07-20 spec probed 3.3.6 — same fingerprint
+// schema, plus the new X-ZCode-Agent header).
+const zcodeAppVersion = "3.11.2"
+
+// zcodeUserAgentSuffix is what the ZCode agent engine (glm/zcode.cjs, Vercel
+// AI SDK provider-utils) appends to User-Agent on chat-path requests.
+// Packet captures (2026-09-11): the DESKTOP engine sends
+// "ZCode/3.11.2 ai-sdk/provider-utils/4.0.27 runtime/node.js/24" (Electron 41
+// → node 24); the standalone CLI bundle sends the same prefix with
+// "runtime/node.js/22". We impersonate the desktop, hence node.js/24.
+const zcodeUserAgentSuffix = "ai-sdk/provider-utils/4.0.27 runtime/node.js/24"
 
 // ZCodeProvider forwards to Zhipu BigModel's Anthropic endpoint presenting the
 // ZCode desktop client fingerprint, so a Coding Plan API key gets the plan's
 // quota treatment (0.67 consumption coefficient + official-client priority).
 //
 // It mirrors ZhipuProvider — same BigModel backend, same quota envelope — but
-// differs in two ways grounded in a live probe of ZCode 3.3.6:
+// differs in two ways grounded in live probes of ZCode 3.3.6 and 3.11.2:
 //   - AuthHeaders sends BOTH Authorization: Bearer and x-api-key (ZCode sends
-//     both; zhipu sends Bearer and deletes x-api-key).
-//   - ExtraHeaders sets anthropic-version + the 10-header ZCode fingerprint.
+//     both in both versions; zhipu sends Bearer and deletes x-api-key).
+//   - ExtraHeaders sets anthropic-version + the ZCode fingerprint, including
+//     3.11.2's new X-ZCode-Agent: glm header (sent unconditionally on the
+//     main chat path; see buildZCodeSourceHeadersFromContext callers).
 //
 // See docs/superpowers/specs/2026-07-20-zcode-provider-design.md.
 type ZCodeProvider struct {
@@ -32,6 +46,9 @@ type ZCodeProvider struct {
 	baseProbe
 	cfg          *Config
 	providerName string
+
+	sessionMu sync.Mutex
+	sessionID string // stable per-process UUID for X-Session-Id (lazy init)
 }
 
 func init() {
@@ -45,8 +62,9 @@ func init() {
 }
 
 // AuthHeaders injects the Coding Plan API key as BOTH Authorization: Bearer and
-// x-api-key — ZCode 3.3.6 sends both (buildAnthropicConnectivityAuthHeaders,
-// probed from the desktop binary). This diverges from zhipu, which sends Bearer
+// x-api-key — ZCode sends both in 3.3.6 and 3.11.2
+// (buildAnthropicConnectivityAuthHeaders, probed from the desktop binary; both
+// branches return the same pair). This diverges from zhipu, which sends Bearer
 // and deletes x-api-key.
 func (p *ZCodeProvider) AuthHeaders(req *http.Request) error {
 	key, err := p.LoadKey()
@@ -86,16 +104,35 @@ func (p *ZCodeProvider) ProbeRequest(modelID string) ProbeRequest {
 }
 
 // ExtraHeaders sets anthropic-version + the ZCode client fingerprint (probed
-// from ZCode 3.3.6 buildZCodeSourceHeaders). It runs last in the forward path
+// from ZCode 3.11.2 buildZCodeSourceHeadersFromContext + the main chat path,
+// which always appends X-ZCode-Agent: glm, and packet-captured 2026-09-11 —
+// see docs/backend-contracts.md "zcode 契约"). It runs last in the forward path
 // (after the client-UA whitelist copy and prov.Headers), so it overrides the
-// client's forwarded User-Agent. X-Device-Mid is omitted (ZCode omits it when
-// unset; see spec §3.2 / §9).
+// client's forwarded User-Agent. X-Title uses sourceTitle "electron" (ZCode's
+// desktop processes; its CLI sends "Z Code@cli" instead). X-Device-Mid is
+// omitted (ZCode only sends it when telemetry-state.json has a deviceMid; see
+// spec §3.2 / §9).
 func (p *ZCodeProvider) ExtraHeaders(req *http.Request, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
-	req.Header.Set("User-Agent", "ZCode/"+zcodeAppVersion)
+	// Packet capture 2026-09-11: the chat path's UA is the ZCode UA plus the AI
+	// SDK's runtime suffix (provider-utils appends " ai-sdk/… runtime/…"), NOT
+	// the bare "ZCode/<ver>" of the connectivity probe. runtime/node.js/24
+	// matches ZCode 3.11.2's Electron 41 node runtime (desktop capture; the
+	// standalone CLI bundle sends node.js/22).
+	req.Header.Set("User-Agent", "ZCode/"+zcodeAppVersion+" "+zcodeUserAgentSuffix)
 	req.Header.Set("HTTP-Referer", "https://zcode.z.ai")
 	req.Header.Set("X-Title", "Z Code@electron")
 	req.Header.Set("X-ZCode-App-Version", zcodeAppVersion)
+	// New in 3.11.2: the main chat path appends this unconditionally
+	// (zcode.cjs x4i: GPt({...csn(...), "X-ZCode-Agent":"glm"}, r)).
+	req.Header.Set("X-ZCode-Agent", "glm")
+	// Packet capture 2026-09-11: every desktop request carries a per-request
+	// X-Request-Id and a per-session X-Session-Id UUID (withRequestIdHeader +
+	// session scope). Synthetic v4 UUIDs reproduce the shape; the values are
+	// ours. X-Session-Id is stable per proxy process (closest analogue of the
+	// app's per-session id); it is NOT reset on key Refresh.
+	req.Header.Set("X-Request-Id", newZCodeUUID())
+	req.Header.Set("X-Session-Id", p.zcodeSessionID())
 	req.Header.Set("X-Platform", nodePlatform(runtime.GOOS)+"-"+nodeArch(runtime.GOARCH))
 	req.Header.Set("X-Release-Channel", "production")
 	req.Header.Set("X-Client-Language", resolveClientLanguage())
@@ -170,6 +207,28 @@ func (p *ZCodeProvider) Usage() error {
 }
 
 // ---- fingerprint helpers (Node-name mappings + printable guards) ----
+
+// newZCodeUUID returns an RFC 4122 v4 UUID string (crypto/rand). Hand-rolled:
+// google/uuid is only an indirect dep and promoting it for two headers is not
+// worth it. On the (unreachable in practice) rand error the bytes stay zeroed
+// but the string remains well-formed.
+func newZCodeUUID() string {
+	var b [16]byte
+	_, _ = crand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// zcodeSessionID lazily mints the stable per-process X-Session-Id value.
+func (p *ZCodeProvider) zcodeSessionID() string {
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	if p.sessionID == "" {
+		p.sessionID = newZCodeUUID()
+	}
+	return p.sessionID
+}
 
 // nodePlatform maps Go GOOS to Node's process.platform naming (windows→win32).
 func nodePlatform(goos string) string {

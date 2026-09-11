@@ -16,6 +16,7 @@ import (
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/fusion"
 	obscounters "model-proxy/internal/observe/counters"
+	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/observe/seclog"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
@@ -172,6 +173,87 @@ func TestLogFileAndRequestLogDirectory(t *testing.T) {
 	if got := service.RequestLogDirectory(); got != "" {
 		t.Errorf("RequestLogDirectory = %q, want empty when disabled", got)
 	}
+	// Request log disabled (or the port unwired) → nil query port, so the web
+	// handlers answer their {enabled:false} shape.
+	if got := service.RequestLogQueries(); got != nil {
+		t.Errorf("RequestLogQueries = %v, want nil when disabled", got)
+	}
+	if got := New(Ports{}).RequestLogQueries(); got != nil {
+		t.Errorf("RequestLogQueries with nil directory port = %v, want nil", got)
+	}
+}
+
+// TestRequestLogQueriesFallback: with the request log enabled but no index
+// (open failure degrades instead of failing startup), the query port answers
+// through the directory scan with identical semantics.
+func TestRequestLogQueriesFallback(t *testing.T) {
+	dir := t.TempDir()
+	line := `{"ts":"2026-07-29T12:00:00Z","request_id":"r1","session_id":"s1","called_model":"m","provider":"p","status":200,"request_body":"body","response_body":"{\"usage\":{\"input_tokens\":3,\"output_tokens\":4}}"}`
+	if err := os.WriteFile(filepath.Join(dir, "requests-20260729.log"), []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := New(Ports{RequestLogDirectory: func() string { return dir }})
+	queries := service.RequestLogQueries()
+	if queries == nil {
+		t.Fatal("RequestLogQueries = nil with the request log enabled")
+	}
+	summaries, facets, err := queries.SummariesWithFacets(requestlog.Filter{Limit: 10, UsageOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 || summaries[0].RequestID != "r1" || summaries[0].Input != 3 || summaries[0].Output != 4 {
+		t.Fatalf("fallback summaries = %+v", summaries)
+	}
+	if len(facets.Providers) != 1 || facets.Providers[0] != "p" {
+		t.Fatalf("fallback facets = %+v", facets)
+	}
+	records, err := queries.Detail("r1")
+	if err != nil || len(records) != 1 || records[0].RequestBody != "body" {
+		t.Fatalf("fallback detail = (%+v, %v)", records, err)
+	}
+	sessions, err := queries.SessionSummaries(2000, 50, nil)
+	if err != nil || len(sessions) != 1 || sessions[0].SessionID != "s1" || sessions[0].Usage.Input != 3 {
+		t.Fatalf("fallback sessions = (%+v, %v)", sessions, err)
+	}
+}
+
+// TestRequestLogQueriesIndexDelegation: with a running index wired, the query
+// port delegates to it (the reconciled index answers, not the raw directory).
+func TestRequestLogQueriesIndexDelegation(t *testing.T) {
+	dir := t.TempDir()
+	line := `{"ts":"2026-07-29T12:00:00Z","request_id":"r1","called_model":"m","provider":"p","status":200}`
+	if err := os.WriteFile(filepath.Join(dir, "requests-20260729.log"), []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	indexer, err := requestlog.NewIndexer(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go indexer.Run()
+	t.Cleanup(indexer.Shutdown)
+	service := New(Ports{
+		RequestLogDirectory: func() string { return dir },
+		RequestLogIndex:     func() *requestlog.Indexer { return indexer },
+	})
+	queries := service.RequestLogQueries()
+	if queries == nil {
+		t.Fatal("RequestLogQueries = nil with index wired")
+	}
+	// The index reconciles on its own tick; poll until the record appears.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		summaries, _, err := queries.SummariesWithFacets(requestlog.Filter{Limit: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(summaries) == 1 && summaries[0].RequestID == "r1" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("index-delegated query never saw the record")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func TestAccountsProjection(t *testing.T) {
@@ -203,6 +285,9 @@ func TestAccountsProjection(t *testing.T) {
 				"codex": {Provider: "codex"},
 				"zhipu": {Provider: "zhipu", Billing: "plan"},
 				"empty": {Provider: "deepseek"},
+				// pay-as-you-go WITH a usage endpoint: polled like a plan
+				// provider, so the UI must expose Refresh usage for it.
+				"deepseek": {Provider: "deepseek", Billing: "pay-as-you-go", UsageURL: "http://x/user/balance"},
 			}
 		},
 	})
@@ -211,7 +296,7 @@ func TestAccountsProjection(t *testing.T) {
 	for _, item := range out {
 		byName[item.Name] = item
 	}
-	if len(byName) != 4 {
+	if len(byName) != 5 {
 		t.Fatalf("accounts = %v", out)
 	}
 	aqp := byName["aqp"]
@@ -232,6 +317,12 @@ func TestAccountsProjection(t *testing.T) {
 	empty := byName["empty"]
 	if empty.Accounts == nil || len(empty.Accounts) != 0 {
 		t.Errorf("provider without accounts must project an empty (non-nil) list: %+v", empty.Accounts)
+	}
+	if empty.UsageEndpoint {
+		t.Errorf("provider without usage_url must project usage_endpoint=false: %+v", empty)
+	}
+	if ds := byName["deepseek"]; !ds.UsageEndpoint {
+		t.Errorf("pay-as-you-go provider with usage_url must project usage_endpoint=true: %+v", ds)
 	}
 }
 
@@ -823,5 +914,142 @@ func TestAnalyticsExcludesVirtualProviders(t *testing.T) {
 	}
 	if len(out) != 1 || out[0].Provider != "up" {
 		t.Errorf("analytics = %+v, want only up/m", out)
+	}
+}
+
+// writeExplainRequestLog persists one request-log JSONL record for
+// SecurityExplain tests (the scan fallback path — index-backed equivalence
+// lives in internal/observe/requestlog).
+func writeExplainRequestLog(t *testing.T, dir string, record requestlog.Record) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "requests-2026-09-11.log"), append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSecurityExplainValidation(t *testing.T) {
+	service := New(Ports{LocateGuardHits: func([]byte, string, []string) ([]appapi.SecurityMatch, error) {
+		return nil, nil
+	}})
+	if _, err := service.SecurityExplain("req-1", "drift", []string{"x"}); err == nil {
+		t.Error("kind drift: want error")
+	}
+	if _, err := service.SecurityExplain("", "secret", []string{"x"}); err == nil {
+		t.Error("empty request id: want error")
+	}
+	if _, err := service.SecurityExplain("req-1", "secret", nil); err == nil {
+		t.Error("empty names: want error")
+	}
+}
+
+func TestSecurityExplainUnwiredPortFailsClosed(t *testing.T) {
+	if _, err := New(Ports{}).SecurityExplain("req-1", "secret", []string{"openai_api_key"}); err == nil {
+		t.Error("nil LocateGuardHits port: want error, not a silently empty analysis")
+	}
+}
+
+func TestSecurityExplainNoRequestLog(t *testing.T) {
+	service := New(Ports{LocateGuardHits: func([]byte, string, []string) ([]appapi.SecurityMatch, error) {
+		return nil, nil
+	}})
+	result, err := service.SecurityExplain("req-1", "secret", []string{"openai_api_key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != appapi.SecurityExplainNoRequestLog {
+		t.Errorf("status = %q, want no_request_log", result.Status)
+	}
+}
+
+func TestSecurityExplainNotFound(t *testing.T) {
+	dir := t.TempDir()
+	service := New(Ports{
+		RequestLogDirectory: func() string { return dir },
+		LocateGuardHits: func([]byte, string, []string) ([]appapi.SecurityMatch, error) {
+			return nil, nil
+		},
+	})
+	result, err := service.SecurityExplain("req-missing", "secret", []string{"openai_api_key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != appapi.SecurityExplainNotFound {
+		t.Errorf("status = %q, want not_found", result.Status)
+	}
+}
+
+func TestSecurityExplainLocatedMatch(t *testing.T) {
+	dir := t.TempDir()
+	writeExplainRequestLog(t, dir, requestlog.Record{
+		RequestID:   "req-1",
+		RequestBody: `{"key":"sk-fixture"}`,
+	})
+	var gotBody, gotKind string
+	var gotNames []string
+	service := New(Ports{
+		RequestLogDirectory: func() string { return dir },
+		LocateGuardHits: func(body []byte, kind string, names []string) ([]appapi.SecurityMatch, error) {
+			gotBody, gotKind, gotNames = string(body), kind, names
+			return []appapi.SecurityMatch{{Name: "openai_api_key", Located: true, Hit: "sk-…"}}, nil
+		},
+	})
+	result, err := service.SecurityExplain("req-1", "secret", []string{"openai_api_key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != appapi.SecurityExplainOK || len(result.Matches) != 1 || !result.Matches[0].Located {
+		t.Errorf("result = %+v, want ok with 1 located match", result)
+	}
+	if gotBody != `{"key":"sk-fixture"}` || gotKind != "secret" || len(gotNames) != 1 || gotNames[0] != "openai_api_key" {
+		t.Errorf("port args = body %q kind %q names %v", gotBody, gotKind, gotNames)
+	}
+}
+
+func TestSecurityExplainRedactedBody(t *testing.T) {
+	dir := t.TempDir()
+	writeExplainRequestLog(t, dir, requestlog.Record{
+		RequestID:   "req-1",
+		RequestBody: `{"key":"[REDACTED]"}`,
+	})
+	service := New(Ports{
+		RequestLogDirectory: func() string { return dir },
+		LocateGuardHits: func(body []byte, kind string, names []string) ([]appapi.SecurityMatch, error) {
+			return []appapi.SecurityMatch{{Name: "openai_api_key", Located: false}}, nil
+		},
+	})
+	result, err := service.SecurityExplain("req-1", "secret", []string{"openai_api_key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != appapi.SecurityExplainRedacted {
+		t.Errorf("status = %q, want redacted", result.Status)
+	}
+}
+
+func TestSecurityExplainCrossRequest(t *testing.T) {
+	dir := t.TempDir()
+	writeExplainRequestLog(t, dir, requestlog.Record{
+		RequestID:   "req-1",
+		RequestBody: `{"text":"nothing here"}`,
+	})
+	service := New(Ports{
+		RequestLogDirectory: func() string { return dir },
+		LocateGuardHits: func(body []byte, kind string, names []string) ([]appapi.SecurityMatch, error) {
+			return []appapi.SecurityMatch{{Name: "known_secret_fragmented", Located: false}}, nil
+		},
+	})
+	result, err := service.SecurityExplain("req-1", "secret", []string{"known_secret_fragmented"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != appapi.SecurityExplainCrossRequest {
+		t.Errorf("status = %q, want cross_request", result.Status)
 	}
 }
