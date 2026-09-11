@@ -13,23 +13,26 @@ import (
 // sensitive-path table, but every hit is classified by WHERE in the request
 // body the path appears.
 //
-//   - strong (high confidence): the path sits in a tool-call / tool-result
-//     value position — the structural signature of an agent READING a file
-//     through a tool, which is the MCP Tool Poisoning attack shape. Recognized
-//     positions, matched by key name only (no full protocol schema; the three
-//     chat protocols share this one key set): an object's "input" value when
-//     the object has type="tool_use" (anthropic); a "content" value when the
-//     object has type="tool_result" (anthropic) or role="tool" (openai tool
-//     message); an "arguments" value unconditionally (openai
+//   - strong (high confidence): the path sits in a tool-INVOCATION value
+//     position — an agent asking to access the file, the MCP Tool Poisoning
+//     attack shape. Recognized positions, matched by key name only (no full
+//     protocol schema; the three chat protocols share this one key set): an
+//     object's "input" value when the object has type="tool_use"
+//     (anthropic); an "arguments" value unconditionally (openai
 //     tool_calls[].function.arguments nests it under a typeless function
 //     object, responses function_call.arguments puts it directly on the
-//     typed object — both use that exact key); an "output" value when the
-//     object has type="function_call_output" (responses). The openai
-//     arguments string is escaped JSON; the whole string token is the strong
-//     span, so a path inside the embedded JSON is strong without parsing a
-//     second JSON level.
-//   - weak (low confidence): everywhere else — ordinary prose, user messages.
-//     Coding agents legitimately discuss .env & friends in text all the time.
+//     typed object — both use that exact key). The openai arguments string
+//     is escaped JSON; the whole string token is the strong span, so a path
+//     inside the embedded JSON is strong without parsing a second JSON
+//     level. Result-side positions (tool_result.content, role:"tool"
+//     content, function_call_output.output) are deliberately NOT strong:
+//     tool output that merely mentions a path (docs, source code, error
+//     text) is an address mention, not an access attempt — and any actual
+//     secret content in the output is caught by the secret channels.
+//   - weak (low confidence): everywhere else — ordinary prose, user
+//     messages, and tool RESULT content. Coding agents legitimately discuss
+//     .env & friends in text all the time, and file contents mention paths
+//     even more.
 //
 // A body that is not one walkable JSON value classifies EVERY hit weak
 // (宁低勿高 — a structure-recognition failure must never upgrade a hit to
@@ -162,10 +165,7 @@ var (
 	keyType      = []byte("type")
 	keyRole      = []byte("role")
 
-	markerToolUse            = []byte("tool_use")
-	markerToolResult         = []byte("tool_result")
-	markerTool               = []byte("tool")
-	markerFunctionCallOutput = []byte("function_call_output")
+	markerToolUse = []byte("tool_use")
 )
 
 func ctxKeyClass(key []byte) int {
@@ -201,7 +201,10 @@ type ctxObjFrame struct {
 }
 
 // decide resolves a candidate against the markers known so far; decided=false
-// keeps it pending until more pairs arrive.
+// keeps it pending until more pairs arrive. Only INVOCATION positions
+// classify strong (arguments unconditionally, input under type=tool_use);
+// result-side content/output always classifies weak — tool output mentioning
+// a path is an address mention, not an access attempt.
 func (f *ctxObjFrame) decide(cls int) (decided, strong bool) {
 	switch cls {
 	case ctxArguments:
@@ -211,18 +214,12 @@ func (f *ctxObjFrame) decide(cls int) (decided, strong bool) {
 			return true, bytes.Equal(f.typ, markerToolUse)
 		}
 	case ctxContent:
-		if f.hasTyp && bytes.Equal(f.typ, markerToolResult) {
-			return true, true
-		}
-		if f.hasRole && bytes.Equal(f.role, markerTool) {
-			return true, true
-		}
-		if f.hasTyp && f.hasRole {
+		if f.hasTyp || f.hasRole {
 			return true, false
 		}
 	case ctxOutput:
 		if f.hasTyp {
-			return true, bytes.Equal(f.typ, markerFunctionCallOutput)
+			return true, false
 		}
 	}
 	return false, false

@@ -38,7 +38,12 @@ var builtinPaths = []pathRule{
 	// "my_id_rsa" do not fire while "id_rsa.pub" still does.
 	{"ssh", pathLiterals("id_rsa", "id_ed25519"), true},
 	{"aws_creds", pathLiterals("~/.aws/credentials"), false},
-	{"proxy_creds", pathLiterals("~/.model-proxy"), false},
+	// NOTE: no "~/.model-proxy" category — the credentials this directory
+	// holds are exactly the proxy's managed secrets, which the known-secret
+	// channel matches by exact value (raw + encoded). A path literal here
+	// only fired on benign references (config/log/doc mentions during normal
+	// operation and development of the proxy itself), heuristic noise on top
+	// of the exact channel (decision 35).
 	{"gnupg", pathLiterals("~/.gnupg"), false},
 	{"kube", pathLiterals("~/.kube/config"), false},
 	{"docker", pathLiterals("~/.docker/config.json"), false},

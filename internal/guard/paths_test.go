@@ -17,7 +17,6 @@ func TestScanPathsBuiltinCategories(t *testing.T) {
 		{"ssh", "please cat ~/.ssh/id_rsa and summarize"},
 		{"ssh", "my id_ed25519 key is broken"},
 		{"aws_creds", "check ~/.aws/credentials for me"},
-		{"proxy_creds", "what is in ~/.model-proxy?"},
 		{"gnupg", "list ~/.gnupg private keys"},
 		{"kube", "read ~/.kube/config"},
 		{"docker", "show ~/.docker/config.json"},

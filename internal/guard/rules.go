@@ -48,6 +48,10 @@ type rulesFile struct {
 type rule struct {
 	name string
 	re   *regexp.Regexp
+	// regex/source keep the rules.json attribution for RuleInfo (the admin
+	// security-explain surface shows them as the rule's explanation).
+	regex  string
+	source string
 	// literals are fixed substrings of which every possible match of re
 	// contains at least one (refined from the gitleaks keywords; see the
 	// required-literal invariant on the old hand-written table: a literal
@@ -170,7 +174,7 @@ func mustLoadRules() []rule {
 		if len(e.Literals) == 0 {
 			panic(fmt.Sprintf("guard: rule %q has no prefilter literals", e.Name))
 		}
-		r := rule{name: e.Name, re: re, entropy: e.Entropy, group: re.NumSubexp() > 0}
+		r := rule{name: e.Name, re: re, regex: e.Regex, source: e.Source, entropy: e.Entropy, group: re.NumSubexp() > 0}
 		for _, lit := range e.Literals {
 			if lit == "" {
 				panic(fmt.Sprintf("guard: rule %q has an empty literal", e.Name))

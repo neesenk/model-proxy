@@ -38,14 +38,16 @@ func TestScanPathsContextClassification(t *testing.T) {
 			[]string{"ssh"}, nil,
 		},
 		{
+			// Result-side content is NOT strong (decision 23): tool output
+			// mentioning a path is an address mention, not an access attempt.
 			"anthropic tool_result content",
 			`{"model":"m","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"permission denied opening ~/.aws/credentials"}]}]}`,
-			[]string{"aws_creds"}, nil,
+			nil, []string{"aws_creds"},
 		},
 		{
 			"openai role=tool message content",
 			`{"model":"m","messages":[{"role":"tool","tool_call_id":"c1","content":"error: ~/.kube/config not found"}]}`,
-			[]string{"kube"}, nil,
+			nil, []string{"kube"},
 		},
 		{
 			// arguments is a STRING of escaped JSON; the whole string token is
@@ -63,7 +65,7 @@ func TestScanPathsContextClassification(t *testing.T) {
 		{
 			"responses function_call_output output",
 			`{"model":"m","input":[{"type":"function_call_output","call_id":"c1","output":"cannot open ~/.config/gcloud"}]}`,
-			[]string{"gcloud"}, nil,
+			nil, []string{"gcloud"},
 		},
 		{
 			"user prose mentioning a path is weak",
@@ -77,8 +79,8 @@ func TestScanPathsContextClassification(t *testing.T) {
 		},
 		{
 			"system prompt is weak",
-			`{"model":"m","messages":[{"role":"system","content":"never read ~/.model-proxy"}]}`,
-			nil, []string{"proxy_creds"},
+			`{"model":"m","messages":[{"role":"system","content":"never read ~/.aws/credentials"}]}`,
+			nil, []string{"aws_creds"},
 		},
 		{
 			"non-JSON body is weak",
@@ -98,10 +100,11 @@ func TestScanPathsContextClassification(t *testing.T) {
 			[]string{"ssh"}, nil,
 		},
 		{
-			// role arrives after content; the pending candidate resolves strong.
+			// role arrives after content; the pending candidate resolves —
+			// decided, but result-side content stays weak.
 			"key order: content before role",
 			`{"messages":[{"content":"~/.kube/config missing","role":"tool"}]}`,
-			[]string{"kube"}, nil,
+			nil, []string{"kube"},
 		},
 		{
 			// A JSON-looking snippet inside a prose string is NOT structure:
