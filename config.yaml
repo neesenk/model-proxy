@@ -52,12 +52,10 @@ providers:
     headers: # sent on every aqp upstream request (forward + probe), after auth
       x-ccswitch-client: "0.2.5" # mirror AIS Switch's client header (bare app version, verified vs 0.2.1 binary + live log); bump when AIS Switch updates
     models:
-      - claude-opus-4-8
       - claude-opus-5
       - claude-sonnet-5
       - deepseek-v4-flash
       - deepseek-v4-pro
-      - glm-5.2
       - glm-5.3
       - glm-5.3-flash
       - gpt-5.6-luna
@@ -91,8 +89,6 @@ providers:
       - {window: "14:00-18:00", multiplier: 4}
     usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit # `usage zhipu`: 5h/weekly/monthly quota + token consumption
     models:
-      - glm-5-turbo
-      - glm-5.2
       - glm-5.3
       - glm-5.3-flash
   # DeepSeek (API key via `login deepseek`). One key serves both protocols; the
@@ -112,10 +108,7 @@ providers:
       - {window: "9:00-12:00", multiplier: 4}
       - {window: "14:00-18:00", multiplier: 4}
     models:
-      - deepseek-v4-pro
-      - deepseek-v4-flash
-      - deepseek-v4-flash-vision-exp
-      - deepseek-v4.1-flash-expires-on-0910
+      - deepseek-flash
 
   # Volcengine Ark (火山方舟, including "Agent Plan"). API key via `login volcengine`.
   # Two protocol bases: openai_base_url = Ark OpenAI base, anthropic_base_url =
@@ -135,12 +128,10 @@ providers:
       - deepseek-v4-flash
       - deepseek-v4-pro
       - doubao-seed-evolving
-      - glm-5.2
       - glm-5.3
       - glm-5.3-flash
       - kimi-k2.7-code
       - kimi-k3
-      - minimax-m3
 
   shopee:
     provider_id: static
@@ -149,12 +140,10 @@ providers:
     anthropic_base_url: https://compass.llm.shopee.io/compass-api
     billing: pay-as-you-go
     models:
-      - claude-opus-4-8
       - claude-opus-5
       - claude-sonnet-5
       - deepseek-v4-flash
       - deepseek-v4-pro
-      - glm-5.2
       - glm-5.3
       - glm-5.3-flash
       - gpt-5.6-luna
@@ -234,6 +223,9 @@ providers:
 #  opus: [zhipu/glm-5.3, aqp/glm-5.3, volcengine/glm-5.3, shopee/glm-5.3]
 #  claude-sonnet-4-6: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-v4-pro]
 #  sonnet: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-v4-pro]
+routes:
+  deepseek-v4-pro: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-flash]
+  deepseek-v4-flash: [aqp/deepseek-v4-flash, volcengine/deepseek-v4-flash, shopee/deepseek-v4-flash, deepseek/deepseek-flash]
 
 # Scheduling: every field has a code default (config.go accessors), so this
 # block can be omitted entirely. Uncomment a line to override.
@@ -259,7 +251,12 @@ providers:
 # committed upstream call as one JSONL line to a rotating file under dir, for
 # offline analysis (prompt replay, failure debugging, agent behavior). Disabled
 # by default (zero hot-path overhead). Restart the daemon after changing these
-# (reload is not enough). Uncomment to enable:
+# (reload is not enough). While enabled, the daemon also tails the JSONL files
+# into <dir>/index.db (SQLite: per-record metadata + token usage + line
+# coordinates, metadata-sized compared to the logs) so the Web UI Requests /
+# Sessions pages query the index instead of full-scanning the logs; the index
+# is a derived view — deleting it just triggers a full rebuild on next start.
+# Uncomment to enable:
 request_log:
   enabled: true                       # default false
   dir: ~/.model-proxy/log/requests    # default
@@ -312,6 +309,7 @@ stats:
 #     zhipu: 5                            # replaces the global threshold for the zhipu scope
 #   webhook_url: https://hooks.example.com/budget  # optional; unset = live event only
 
+# Counters survive reload/restart; reset clears history even while disabled.
 # Exact response cache: SHA-256(method+path+body) byte-exact match replays the
 # recorded response (x-mp-cache: hit). Disabled by default. Shields retries and
 # duplicate single-shot requests; multi-turn chats change the body every turn,
