@@ -125,7 +125,8 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 #   decode: true            # 默认 true：检测编码形态的秘密（base64/hex 前缀变体，解码后过原规则）
 #   paths: log              # 敏感路径信号：log（默认）| block | off（不支持 redact）。命中按位置分
 #                           # 两级：工具调用/工具结果位（strong）按此动作处理；正文提及（weak）
-#                           # 只计数+审计（log-weak），不发 live event、永不 block
+#                           # 只是"发出一个地址"、本身不是安全问题——只计数，不发 live event、永不
+#                           # block、不落审计记录
 #   audit: true             # 默认 true：命中持久化到安全审计日志（`model-proxy audit` 查询）
 #   session_scan: true      # 默认 true：分片泄露检测——同一 session（x-claude-code-session-id）多条请求
 #                           # 拼出一个 known-secret 即命中 known_secret_fragmented（redact 对此降级为 log）
@@ -203,7 +204,7 @@ model-proxy test glm-5.2           # 探测路由每个 target（路由 → 凭�
 
 # 接管客户端配置
 model-proxy takeover list            # 可用模板（内置预设 + ~/.model-proxy/takeover-templates 自定义覆盖；* 标记各族按 provider 原生协议自动选中的变体）
-model-proxy takeover opencode      # 族名 claude|opencode|pi|codex|kimi|gemini-cli|all：多协议 agent 按 provider 原生协议写配置；精确模板名（pi-openai、opencode-openai、pi-responses）钉住变体
+model-proxy takeover opencode      # 族名 claude|opencode|pi|codex|kimi|gemini-cli|all：多协议 agent 按 provider 原生协议写配置；精确模板名（pi-openai、opencode-openai、pi-responses、opencode-responses）钉住变体
 # --mode unified(默认)=每族一个协议项(覆盖最多,其余走转换) | split=每种原生协议一个配置项(模型按协议划分,全部透传) | anthropic|openai|responses=归一到指定协议(族里没有该变体则回退自动选择)；TTY 下横跨多协议时会交互询问
 model-proxy restore opencode
 
@@ -254,10 +255,10 @@ model-proxy cache                  # 条目数 / 命中 / 未命中 / 命中率�
 
 代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。UI 为 v2 设计系统版（语义状态徽章、SVG 图标、亮暗双主题、可缩放字阶）。**默认开启；回环 `listen` 下无鉴权（本地可信，非回环需 `web.auth`，见「网络部署鉴权」）**。七个标签页（Config 页含 Add provider preset 向导：选内置预设 → 合并+热重载 → Accounts 加凭据）：
 
-- **Status** — 实时面板：uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择、请求计数器（含平均延迟）、观测到的 token 用量（按 provider×model）、按 agent 的用量卡片、响应缓存命中率、日志尾部。Models 小节展示启动期协议探测的每 provider×model 三协议能力矩阵（chat/anthropic/responses 的 yes/no/unknown，数据源 `GET /api/models`）。
+- **Status** — 实时面板：Dashboard 小节复用 Analytics 页的卡片与图表，窗口钉死**最近 1 小时 · 按分钟 · 按模型**（KPI chip 行含环比 Δ%，tokens 为四桶直合 in+out+cache 写读、tok/s 为**输出解码速度**（output÷完整调用时长）；+ metric 可切换的半透明柱趋势图 + 排行榜；数据源 `GET /api/analytics?granularity=minute&by=model`，随 Status 页 tick 刷新但至少间隔 30s，图表原地更新）；原 **Model Health** 小节已合并进排行榜——每行带 status 徽标（latency/ttft/tok-s 三维阈值打分 ok/warn/err），最差维度的颜色也标在对应数值单元格上；另有 uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择、请求计数器（含平均延迟）、观测到的 token 用量（按 provider×model）、按 agent 的用量卡片、响应缓存命中率、日志尾部。Models 小节展示启动期协议探测的每 provider×model 三协议能力矩阵（chat/anthropic/responses 的 yes/no/unknown，数据源 `GET /api/models`）。
 - **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(<configDir>/.model-proxy/back/<base>.<时间戳>.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route`，通过 yaml.Node API **保留注释与键序**）。
 - **Accounts** — 列出每个 provider 的账号（`id` / `label` / `added_at`，aqp/codex 额外显示 email；**响应结构里根本没有 key 字段，secret 不可能被序列化出去**）；apikey 类 provider 可在 UI 添加/删除账号；**每个账号卡片有 Test 按钮**（真实最小请求测活，显示 HTTP 状态 + 延迟）；aqp/codex 走**异步登录**（浏览器完成 SSO / OAuth device flow → UI 轮询直到 `done`/`error`）。
-- **Analytics** — token + 等价成本**趋势图**与成本汇总表（日历日/月聚合；价格来自 OpenRouter 目录或 config `prices:`，未定价显示 `n/a`）。per-(provider,model) 的 token/请求总量在 Status 页 Token Usage，两页不重复。
+- **Analytics** — 分析视图：KPI 行（requests/tokens/cost/failures，各带等长前窗环比 Δ%）+ **单张 metric 可切换趋势图**（tokens/cost/requests/errors/latency/ttft/cache，全部半透明柱状；悬停 tooltip；图例超两行收进 "+N more"；x 轴本地 24h 制、右侧留白）+ 排行榜表格（err%/avg lat/$ 每 1M tok/cost share，按当前 metric 排序）。时间选择器与 Status→Token usage 同款（预设+双月日历），粒度 auto/minute/hour/day/week/month 与窗口跨度联动（小时窗口只剩分钟）；`by model|agent` 切维度；价格来自 OpenRouter 目录或 config `prices:`，未定价显示 `n/a` 并在 cost chip 标记。per-(provider,model) 的 token/请求总量在 Status 页 Token Usage，两页不重复。
 - **Requests** — 请求日志查询（需 `request_log.enabled`）：按 session/model/provider/状态/时间/影子过滤，点击行展开完整 request/response body；影子评测的记录带 `shadow` 徽标。顶部 **session 下拉**（选项来自 `/api/sessions`）选中后，表格上方显示该会话汇总（请求数 / input+output / 缓存读写 / 平均延迟 / 错误 / 等价成本 / model、provider），表格按 `session=` 过滤，仍可与 model/provider/shadow/errors 叠加。
 - **Security** — 安全审计查询（需 `guard.audit`）：guard 命中（秘密/路径类型）与 takeover 漂移记录，按 kind/时间过滤；只展示类型名与路由元数据，匹配内容永不进入 UI。每个客户端会话的 token 等价成本汇总在 `/api/sessions`（Requests 页同源数据）。
 - **Live** — 实时请求监视（SSE 推送）：哪个 agent 正在发请求、路由到哪个上游、状态/token/耗时——抓「疯狂重试的 agent」就靠它。顶部 **session 选择器**可选一个客户端会话，看该会话的请求分析（请求数 / input+output / 缓存读写 / 平均延迟 / 错误 / 等价成本 / model、provider），实时行与持久化行合并、逐行可展开 body。会话 id 来自 `request_log.session_headers` 允许列表（Claude Code/OpenCode 默认带；pi 需 takeover 模板写入的 `compat.sendSessionAffinityHeaders`）。
@@ -395,6 +396,8 @@ routes:
 
 **定位是「重试/重复请求盾牌」**：多轮对话 body 逐轮变长，正常会话命中率≈0；前缀复用的经济性由上游 prompt caching 覆盖，精确缓存接住的是客户端原地重试、CI/脚本里的重复单发。
 
+命中/未命中统计跨 reload 和重启保留，reload 仅清空响应条目。Reset counters 即使在缓存关闭时也清理持久化历史；完整语义见 [缓存统计契约](docs/architecture/fusion-shadow-cache.md#精确响应缓存)。Web 模型 Refresh 支持请求取消，并在并发修改 provider 时返回冲突供重试，见 [模型刷新提交边界](docs/web-api.md#模型刷新提交边界)。
+
 ## 出站安全扫描与审计（guard）
 
 针对提示注入（prompt injection）偷凭据的场景：恶意内容诱使 agent 读取 `~/.ssh/id_rsa`、`.env`、API key 后，最常见的漏出通道是把秘密塞进发给 LLM 的请求——这道流量必经 model-proxy，因此代理在**转发前对请求 body 做一次出站扫描**，是凭据出域前的最后一道内容级闸门。（agent 直接 curl/DNS 出网的通道不经过代理，那是客户端沙箱的职责，见各家 CLI 的 sandbox/网络白名单设置。）
@@ -404,10 +407,10 @@ routes:
 - **内置规则表**：53 条高置信秘密模式，其中 46 条精选自 gitleaks v8.28.0 规则集（MIT，溯源见 `internal/guard/rules.json`）——LLM 厂商 key、AWS/GCP/Azure、GitHub/GitLab/Slack/npm/PyPI token、JWT、PEM 私钥头等；上游带熵阈值的规则保留 Shannon 熵后置过滤压误报。
 - **known-secret（默认开）**：把代理自己管理的凭据（账号池 API key/AK/SK、codex/aqp OAuth 文件里的 token）加入扫描集，请求体出现这些值的**原文或 base64/hex/url 编码形态**即命中 `known_secret`——零误报，防注入偷代理自身凭据。匹配集只存在于内存，随 login/logout/reload 自动更新，无需任何规则维护；OAuth token 进程内轮转（codex/aqp 原地刷新写回 auth 文件）后由后台节拍（`scheduling.quota_poll_interval`，默认 5m）自动重扫进集，最迟一个周期生效，无需 reload。
 - **编码逃逸检测（默认开）**：规则前缀的 base64 三对齐/hex 变体命中后，解码外围 token 再过原规则（含熵过滤），不解码任意 span（不碰 base64 图片等正常负载）。
-- **敏感路径信号（默认 log）**：`~/.ssh`、`~/.aws/credentials`、`~/.model-proxy`、`~/.gnupg`、`~/.kube/config`、`~/.docker/config.json`、`~/.config/gcloud`、`.env` 出现在请求体里即按类别告警（`ssh`/`aws_creds`/`proxy_creds`/…）——在秘密出现之前给出"意图级"信号。命中按出现位置分两级：**strong**（路径在工具调用/工具结果位——anthropic `tool_use.input`/`tool_result.content`、openai `tool_calls[].function.arguments` 与 `role:"tool"` 消息 content、responses `function_call.arguments`/`function_call_output.output`，即"agent 通过工具读敏感文件"的 MCP Tool Poisoning 特征动作）按 `guard.paths` 配置处理：live event + `("guard", <类别>)` 计数器 + 审计，block 只对 strong 生效；**weak**（正文/user 消息里提及——coding agent 讨论 `.env` 是常态）只计 `("guard", <类别>_text)` 计数器并写 action=`log-weak` 的审计记录，不发 live event（避免刷屏）、永不 block（正文提及敏感路径不阻断）。结构识别是字面量预过滤之后才做的一遍流式 JSON 扫描（干净 body 零成本）；body 非合法 JSON 或结构识别失败时全部按 weak 处理（宁低勿高）。只支持 log/block/off，不支持 redact（改路径会破坏正常编码工作）。
+- **敏感路径信号（默认 log）**：`~/.ssh`、`~/.aws/credentials`、`~/.gnupg`、`~/.kube/config`、`~/.docker/config.json`、`~/.config/gcloud`、`.env` 出现在请求体里即按类别告警（`ssh`/`aws_creds`/…）——在秘密出现之前给出"意图级"信号。命中按出现位置分两级：**strong**（路径在工具**调用侧**——anthropic `tool_use.input`、openai `tool_calls[].function.arguments`、responses `function_call.arguments`，即"agent 发起读敏感文件的动作"的 MCP Tool Poisoning 特征）按 `guard.paths` 配置处理：live event + `("guard", <类别>)` 计数器 + 审计，block 只对 strong 生效；**weak**（正文/user 消息、以及工具**结果侧**内容里提及——tool_result/`role:"tool"`/function_call_output 里的文档、源码、报错文本提到路径只是"发出一个地址"，本身不是安全问题；结果里的真实秘密内容仍由 secret 通道精确兜底）完全忽略——不计数、不发 live event、永不 block、不落审计记录（良性"地址提及"的任何观测面都是噪音）。结构识别是字面量预过滤之后才做的一遍流式 JSON 扫描（干净 body 零成本）；body 非合法 JSON 或结构识别失败时全部按 weak 处理（宁低勿高）。只支持 log/block/off，不支持 redact（改路径会破坏正常编码工作）。
 - **分片泄露检测（`guard.session_scan`，默认开）**：单请求扫描挡不住把秘密拆成多段、每次请求带一段的偷法。代理按 `x-claude-code-session-id` 会话头维护有界内存窗口（每会话保留最近请求 body 尾部 32KiB，LRU 上限 256 会话、总量 ≤8MiB，reload 不清、永不落盘/日志），跟踪每个 known-secret 在该会话中**按序出现的最长前缀**（每段 ≥8 字节）；后续请求补齐剩余部分即命中 `known_secret_fragmented`（计数器/live event/审计与单请求命中同通路）。只覆盖 known-secret（池凭据/OAuth token）原文形态；段间隔超过 32KiB 窗口或会话被淘汰后不追溯（有界启发式，非会话录像）；无会话头的请求不聚合（单请求扫描已覆盖）。**redact 对分片命中降级为 log**——秘密横跨多个请求，任何一个 body 都无法改写；block 拒绝补齐段所在请求（400），此前的分段已放行（它们各自是干净请求）。
 
-动作与观测：`guard.secrets` 控制秘密类命中（log/redact/block/off），`guard.paths` 控制路径命中（log/block/off；strong 按配置、weak 恒为计数+审计，见上）。命中只上报**模式类型名/路径类别名**（live event + `("guard", <名>)` 计数器，weak 路径命中例外：不发 live event，计数器名带 `_text` 后缀），匹配内容永不落日志、事件或测试输出。同一请求同时命中两类时两类都计数/审计（secrets=block 不短路 paths 扫描），响应动作 secrets 优先、paths=block 只阻断 strong 命中。命中持久化到安全审计日志（默认 `~/.model-proxy/log/security/security*.log`，0600，与请求日志同一持久化模式：活动文件按天命名、同日重启追加同一文件，超大小归档轮转，30 天保留），用 `model-proxy audit [--kind secret|path|drift] [--from 1h] [--json]` 离线查询；`doctor --live` 检出 takeover 漂移（客户端 BASE_URL 被改离代理——API key 劫持手法）时也会写一条 `drift` 审计记录。
+动作与观测：`guard.secrets` 控制秘密类命中（log/redact/block/off），`guard.paths` 控制路径命中（log/block/off；只作用于 strong，weak 完全忽略，见上）。命中只上报**模式类型名/路径类别名**（live event + `("guard", <名>)` 计数器），匹配内容永不落日志、事件或测试输出。同一请求同时命中两类时两类都计数/审计（secrets=block 不短路 paths 扫描），响应动作 secrets 优先、paths=block 只阻断 strong 命中。命中持久化到安全审计日志（默认 `~/.model-proxy/log/security/security*.log`，0600，与请求日志同一持久化模式：活动文件按天命名、同日重启追加同一文件，超大小归档轮转，30 天保留），用 `model-proxy audit [--kind secret|path|drift] [--from 1h] [--json]` 离线查询；`doctor --live` 检出 takeover 漂移（客户端 BASE_URL 被改离代理——API key 劫持手法）时也会写一条 `drift` 审计记录。
 
 规则维护：你的凭据免维护（自动派生）；新 key 格式用 `guard.extra_patterns`（config 热 reload 即时生效）或向上游同步内置表（升 `rules.json` 的 upstream pin → 重抽 → review）；敏感路径用 `guard.extra_paths`。
 

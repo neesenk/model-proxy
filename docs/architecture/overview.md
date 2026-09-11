@@ -224,8 +224,12 @@ retention/owner-only 权限由共享 `observe/logfile` sink 拥有（文件按�
 `requests-YYYYMMDD.log`，同日重启追加同一文件，size 轮转改名
 `requests-YYYYMMDD--HHMMSS-<seq>.log`，首次写入才懒建文件）；流式 top-K 查询（带文件级提前终止：peek 文件末尾记录
 Ts 为上界，堆满或越 From 下界的文件整文件跳过，peek 异常回退全量流扫）、list-safe
-Summary 和 Shadow 聚合仍归本包。应用层 `internal/app/observe_adapters.go` 只把 `RequestLogConfig` 生效值
-适配为纯值输入；`forward.LogCtx`/HTTP/RouteTarget 到 Record 的映射归
+Summary 和 Shadow 聚合仍归本包。尾随 SQLite 索引同样归本包（`index.go` 的
+`Indexer`：<dir>/index.db 派生视图、250ms reconcile、失效自愈、(file,offset,length)
+seek 与索引侧查询；详见 `docs/architecture/fusion-shadow-cache.md` Request log 节）；
+web 读路径经 `appapi.RequestLogQueries` 端口消费，索引不可用由 admin 适配层回落
+目录扫描。应用层 `internal/app/observe_adapters.go` 只把 `RequestLogConfig` 生效值
+适配为纯值输入（并创建 Indexer——进程级、restart-only、随 logger 启停）；`forward.LogCtx`/HTTP/RouteTarget 到 Record 的映射归
 `internal/forward.BuildRequestLogInput`；capture 在转换器外层的位置、
 `internal/runtime.Lifecycle` 的 Shadow-before-drain 顺序、Web 参数、CLI replay policy 和
 Fusion/Shadow eligibility 继续由应用层编排。列表与 Shadow 必须调用强制丢弃
@@ -255,7 +259,7 @@ logger、on→off 置 nil、`audit_path` 变更换新目录），构建与 gorou
 `internal/app/proxy_lifecycle.go` 适配器。
 
 `internal/cache` 是无仓库内依赖的精确响应缓存叶子包，拥有请求 key、
-TTL/容量 store、客户端可见响应的 bounded recorder、header normalization 与
+TTL/容量 store、跨代共享的 `Counters`、客户端可见响应的 bounded recorder、header normalization 与
 逐块 flush replay。应用层 `internal/app/proxy.go` 的 `NewResponseCache`
 只把 `CacheConfig` accessor 的生效值转换为 `cache.Options`；force/pin bypass、`<300` eligibility、转换器外层捕获
 位置、cache-hit live event、reload generation swap 与 stats reset 仍由应用编排。
@@ -287,6 +291,12 @@ cache 查询与所有 forward 分支之前对共享 body 扫描一次，按 `gua
 （secrets=block 不短路 paths 的计数/事件/审计，响应动作 secrets 优先），命中只以
 模式类型名/路径类别名进入 live event、
 `("guard", <名>)` 计数器与 seclog 审计记录，命中内容永不落日志或事件。
+Scanner 另导出 `Locate`/`RuleInfo`（`internal/guard/locate.go`）供 admin
+security-explain 表面按需重扫已持久化的请求 body 定位命中（span +
+path strong/weak + 规则 regex/source）；admin 不 import guard，经
+`admin.Ports.LocateGuardHits` 端口由 `internal/app/security_explain.go`
+注入（密钥 snippet 掩码、路径原文；例外边界与红线见
+`docs/decisions/intentional-behaviors.md` 条目 17/34）。
 
 `internal/guard/session`（只依赖 `internal/guard`）拥有分片外传检测的会话窗口
 Store：按 `x-claude-code-session-id` 的有界 LRU（256 会话 × 32KiB 尾窗），保存
@@ -507,9 +517,9 @@ application → serveAssembly → applicationRuntime → Proxy
   pricing, probe, protocol, provider, providerbuild, routing, runtime, runtime/wirecap, shadow,
   targetexec, transport/bodycapture, upstreamproxy, web, webauth`；
 - `admin → accounts, appapi, cache, config, configedit, credstore, fusion, login,
-  observe/counters, observe/logx, observe/seclog, observe/stats, presets, pricing, probe,
+  observe/counters, observe/logx, observe/requestlog, observe/seclog, observe/stats, presets, pricing, probe,
   provider, routing, runtime, runtime/wirecap`（Web admin 应用服务；不得回依赖 app/web/cli）；
-- `appapi → fusion, observe/stats, presets, pricing`；
+- `appapi → fusion, observe/requestlog, observe/stats, presets, pricing`；
 - `cli → cli/account, cli/admin, cli/audit, cli/config, cli/diag, cli/doctor,
   cli/framework, cli/login, cli/models, cli/presets, cli/stats, cli/status, config, display, takeover,
   observe/logx`（registry + 进程级 shell：调度循环、help、takeover/restore）；
@@ -540,6 +550,8 @@ application → serveAssembly → applicationRuntime → Proxy
   plan/executor 装配；不得回依赖 app/web/cli）；
 - `observe/budget → config, observe/events, observe/logx, observe/stats, pricing`（config 是
   budgets 生效值所需的值类型，stats 是 analytics bucket 值类型与分钟对齐 seam）；
+- `observe/analytics → observe/stats, pricing`（统一派生指标包：tokens 四桶直合 / tok-s 解码速度 /
+  cache 命中率 / err% / 加权延迟 / 等价成本，单一定义供 /api/analytics 的 totals/compare/series/point 折叠）；
 - `observe/requestlog → config, observe/logfile, observe/logx`（config 是生效值 accessor 所需的值类型；logfile 是共享持久化 sink）；
 - `observe/seclog → observe/logfile, observe/logx`；
 - `observe/logfile → observe/logx`（共享轮转 JSONL sink 叶子包）；
@@ -556,7 +568,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `takeover → catalog, config, routing, observe/logx, providerbuild, runtime/wirecap`；
 - `shadow → targetexec, transport/bodycapture`；
 - `targetexec → cache, config, protocol, transport/bodycapture, provider, observe/logx`；
-- `web → appapi, observe/logx, observe/requestlog, observe/stats, pricing, webauth`。
+- `web → appapi, observe/analytics, observe/logx, observe/requestlog, observe/stats, pricing, webauth`。
 
 `internal/display` 拥有终端 stdout/stderr 着色状态与文本格式化工具（`C`/`Green` 等
 颜色 helper、`ProgressBar`、`Money`、`Format*`、`Pad`、`Or`、`Truncate`、

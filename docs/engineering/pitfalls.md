@@ -67,6 +67,13 @@
     `internal/cli/serve/supervisor.go`，平台 companion（`internal/cli/serve/detach_unix.go` /
     `internal/cli/serve/detach_windows.go`）只提供 child detach 属性，HTTP drain primitive
     留在 `internal/cli/serve/shutdown.go`；不要恢复第二个顶层分发器。
+24b. 重启运行中的 `model-proxy serve` 时，停与启必须在**同一条 shell 命令内原子完成**
+    （SIGINT 旧进程 → 轮询等端口释放 → nohup 拉起 → 轮询等端口重新监听；完整命令
+    模板见 `CLI.md`「手动重启」）。把 kill 和 start 拆到两次工具调用/两个终端步饗，
+    中间的下线窗口会断掉一切依赖该代理的下游——典型是把它当 LLM 网关用的 coding
+    agent 本身：agent 的下一次模型调用直接 `Connection error`，连"生成下一条重启
+    命令"都做不到，形成自锁。换新二进制时先单独 `go build`（构建不动运行中的
+    进程），再用单命令切换。
 
 ## 日志和持久化
 

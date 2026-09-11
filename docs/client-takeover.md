@@ -67,8 +67,8 @@ models:                            # 可选:按暴露模型逐个输出元数据
 
 单协议 agent（claude、codex、gemini-cli）只有一种写法，按它支持的协议写。
 多协议 agent（pi、opencode）每种协议一个模板变体，用 `client:` 归族、
-`protocol:` 标注（如 pi 族：pi=anthropic / pi-openai=openai /
-pi-responses=responses）。**takeover 的目标是让 agent 用 provider 原生
+`protocol:` 标注（pi 族：pi=anthropic / pi-openai=openai / pi-responses=responses；
+opencode 族：opencode=anthropic / opencode-openai=openai / opencode-responses=responses）。**takeover 的目标是让 agent 用 provider 原生
 协议直连模型**——协议与上游一致时是字节级透传，不一致才走
 `internal/protocol` 转换（开销与兼容性边界见
 `docs/architecture/protocol-conversion.md`）。`--mode` 决定多协议族怎么写：
@@ -104,7 +104,8 @@ pi-responses=responses）。**takeover 的目标是让 agent 用 provider 原生
 |---|---|---|---|
 | claude | `~/.claude/settings.json` | json | env 注入 `ANTHROPIC_BASE_URL`(bare)+ `ANTHROPIC_AUTH_TOKEN`；Claude Code 自拼 `/v1/messages` |
 | opencode | `~/.config/opencode/opencode.json` | json | `@ai-sdk/anthropic`(自拼 `/messages`,base_url 带 /v1)+ 全量模型(opencode 形状) |
-| opencode-openai | 同上 | json | `@ai-sdk/openai` 变体,provider_id `model-proxy-openai` |
+| opencode-openai | 同上 | json | `@ai-sdk/openai-compatible` 变体(OpenAI Chat Completions),provider_id `model-proxy-openai` |
+| opencode-responses | 同上 | json | `@ai-sdk/openai` 变体(OpenAI Responses `/v1/responses`),provider_id `model-proxy-responses` |
 | pi | `~/.pi/agent/models.json` | json | `anthropic-messages`,base_url 裸(pi 自拼 `/v1/messages`)+ 全量模型(pi 形状) |
 | pi-openai / pi-responses | 同上 | json | `openai-completions` / `openai-responses` 变体(base_url 带 /v1,独立 provider_id) |
 | codex | `~/.codex/config.toml` | toml | `[model_providers."<id>"]`(wire_api=responses)+ 顶层 `model_provider` 选择器 |

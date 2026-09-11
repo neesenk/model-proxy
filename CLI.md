@@ -149,6 +149,26 @@ reload 结果在 daemon 的 **log 文件**里（`[reload] config reloaded succes
   quota，正常退出。8 秒内未 drain 时强制取消活动连接，并记录
   `[shutdown] HTTP drain exceeded 8s (...)`; handler 完成退栈后继续 final flush。
 
+### 手动重启（换二进制后）：停+启必须原子完成
+
+开发机上 `model-proxy serve` 常同时是 coding agent 自己的 LLM 网关。把 kill 和
+start 拆到两次工具调用/两个终端步饗，中间的下线窗口会让依赖它的 agent 下一次
+模型调用直接 `Connection error`——连生成下一条重启命令都做不到，形成自锁
+（陷阱条目见 `docs/engineering/pitfalls.md` #24）。正确做法是**单条命令**完成切换：
+
+```sh
+# 1) 先构建（不动运行中的进程）：
+go build -o model-proxy.new . && mv model-proxy.new model-proxy
+# 2) 原子切换（停+等+启一体，下线窗口 <1s）：
+PIDS=$(lsof -tiTCP:<PORT> -sTCP:LISTEN); [ -n "$PIDS" ] && kill -INT $PIDS; \
+  while lsof -tiTCP:<PORT> -sTCP:LISTEN >/dev/null 2>&1; do sleep 0.1; done; \
+  nohup ./model-proxy serve >> serve.log 2>&1 & \
+  for i in $(seq 1 60); do lsof -tiTCP:<PORT> -sTCP:LISTEN >/dev/null 2>&1 && break; sleep 0.1; done
+```
+
+SIGINT 触发上述优雅退出（drain + final flush）；端口按 config.yaml 的 `listen:` 替换
+（本仓开发机为 15722）。
+
 ### 性能剖析（可选）
 
 - 环境变量 `MP_PPROF=1` 启动(前台或 daemon 均继承)后,proxy handler 暴露

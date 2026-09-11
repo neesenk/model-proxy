@@ -13,6 +13,14 @@
 
 路径从 provider name（config 一级 key）派生，支持多实例（如 `zhipu-personal` / `codex-work`）。多账号见 `docs/architecture/provider-pools.md`。所有路径（CLI `login`、`BuildOne`、web 异步登录、`logout`）一律用 config name，**包括 aqp/codex**（`RunLogin`/`runCodexLoginFlow` 接收 `provName` → login 内部 `oauthAuthFilePath(HomeDir(), provName)`，与 `internal/accounts` 的 `AuthFilePath(provName, "oauth_auth")` 同一路径）；曾有的「CLI login 硬编码 provider_id → 非同名实例读写错位」bug 已修，`TestAqpCodexLogin_UsesConfigNameForAuthFile` 守护。OAuth 文件不得由 Web/CLI 直接 `os.WriteFile`/`os.Remove`：codex 统一经 `provider.WriteCodexAuthFile` / `provider.ClearCodexAccount`，aqp 经对应 provider helper，最终由 `credstore.Ref` 执行 file/keychain 选择、原子权限、来源标记与跨模式删除。
 
+## 可取消模型列表读取
+
+daemon 模型刷新通过 `provider.FetchModelsContext` 调用各 HTTP provider 的
+`FetchModelsContext(context.Context)` 能力；Bearer `/models`、Codex 定制列表和
+Volcengine V4 callback 均把 context 传到 HTTP 请求。原有 CLI `FetchModels()` 仍复用同一
+读取逻辑。缺少可取消能力的实现返回 unsupported，不能启动脱离生命周期的后台 fetch。
+刷新事务与取消后的副作用契约见 [Web/API](web-api.md#模型刷新提交边界)。
+
 ## compass 网关契约（实测）
 
 > model-proxy 内部称 `aqp`（config `provider_id`、`aqp_oauth_auth.json`、`aqp_mint_url`）；上游是 `compass.llm.shopee.io`，故保留 compass/CQP 称谓。
@@ -62,12 +70,15 @@ OAuth device flow（从 codex-rs 源码确认）：issuer `https://auth.openai.c
 
 ## zcode 契约（BigModel Coding Plan + ZCode 指纹）
 
-`zcode` 是 BigModel 的 Coding Plan 变体（同一后端、同一配额信封），转发时附带 ZCode 桌面客户端指纹，使 Coding Plan API key 享受套餐配额（0.67 消耗系数 ≈ 1.5×）且不被当作通用 agent 降级。指纹值实测自 ZCode 3.3.6（`/Applications/ZCode.app` 的 ASAR + `model-providers/models_catalog_china_llm_zcode_*.json`），详见 `docs/superpowers/specs/2026-07-20-zcode-provider-design.md`。
+`zcode` 是 BigModel 的 Coding Plan 变体（同一后端、同一配额信封），转发时附带 ZCode 桌面客户端指纹，使 Coding Plan API key 享受套餐配额（0.67 消耗系数 ≈ 1.5×）且不被当作通用 agent 降级。指纹值实测自 ZCode 3.3.6 并于 2026-09 重探 3.11.2（`/Applications/ZCode.app` 的 ASAR + `glm/zcode.cjs` + `model-providers/models_catalog_china_llm_zcode_*.json`；catalog 未变），详见 `docs/superpowers/specs/2026-07-20-zcode-provider-design.md`。
 
 - 端点同 zhipu：OpenAI `https://open.bigmodel.cn/api/paas/v4`；Anthropic `https://open.bigmodel.cn/api/anthropic`（**不带 /v1**）。catalog 里 `bigmodel-coding-plan` 与普通 `bigmodel` 共用同一 baseURL + `paths.anthropic` —— Coding Plan 折扣由 key+端点决定，**无单独 coding base**。
-- 鉴权**双写**：每请求同时发 `Authorization: Bearer <key>` + `x-api-key: <key>`（ZCode 3.3.6 `buildAnthropicConnectivityAuthHeaders`；与 zhipu 只发 Bearer 不同）。
-- `ExtraHeaders` 注入 `anthropic-version: 2023-06-01` + ZCode 指纹（`buildZCodeSourceHeaders`）：`User-Agent: ZCode/3.3.6`、`HTTP-Referer: https://zcode.z.ai`、`X-Title: Z Code@electron`、`X-ZCode-App-Version: 3.3.6`、`X-Platform`（Node 名 `darwin|win32|linux`-`arm64|x64`）、`X-Release-Channel: production`、`X-Client-Language`/`X-Client-Timezone`（ASCII printable 否则 `unknown`）、`X-Os-Category`（`macos|windows|linux`）、`X-Os-Version`（best-effort，可缺省）。3.3.6 另有 `X-Device-Mid`（条件性，当前省略）。
-- `provider_id: zcode`；`login zcode` 开 `bigmodel.cn/login` + apikey 池（多账号）。配额/usage 复用 zhipu 的 `quota/limit` 解析（`ParseZhipuQuota`）。**未实现 OAuth/JWT 登录**（`zcode://oauth/callback` 自定义 scheme CLI 无法截获，且 apikey 路径已足够；OAuth 端点/双 client_id 经实测存在但不用）。
+- 鉴权**双写**：每请求同时发 `Authorization: Bearer <key>` + `x-api-key: <key>`（ZCode 3.3.6/3.11.2 `buildAnthropicConnectivityAuthHeaders` 两分支相同；与 zhipu 只发 Bearer 不同）。**2026-09-11 真实抓包确认**：两头同值（`Bearer ` 前缀 + 同一凭据），CLI 用同值 apikey、桌面端 Ultra 用同值 JWT 均双写。
+- **2026-09-11 桌面端系统级抓包（mitmproxy + 真实 GUI 调用）额外事实**：① 桌面端 Ultra 订阅的模型请求走 **`https://zcode.z.ai/api/v1/ultra/anthropic/v1/messages`**（JWT 双写，非 open.bigmodel.cn），body 含 `output_config`+`thinking`，model id 为大写 `GLM-5.3`；② UA = `ZCode/3.11.2 ai-sdk/provider-utils/4.0.27 runtime/node.js/24`（桌面 Electron 41 = node 24；CLI 独立引擎同 UA 但 node.js/22）；③ **签名在桌面端是开启的**：先 `POST open.bigmodel.cn/api/paas/c1f3a7e2/v2/client` 握手（body `{apiKey, nonce, sig, ts}`），再在 zcode.z.ai 请求上附 `x-client-sig`/`x-client-pow`/`x-client-ts`/`x-client-nonce`/`x-client-version: 3.11.2`/`x-app-id: zcode`；④ 桌面端每请求均带 `X-Request-Id`/`X-Session-Id` UUID；⑤ 完整指纹逐头确认：`HTTP-Referer: https://zcode.z.ai`、`X-Title: Z Code@electron`、`X-ZCode-Agent: glm`、`X-ZCode-App-Version: 3.11.2`、`X-Platform: darwin-arm64`、`X-Os-Category: macos`、`X-Os-Version: 25.6.0`（== `kern.osrelease`）、`X-Release-Channel: production`、`X-Client-Language`/`X-Client-Timezone`。
+- `ExtraHeaders` 注入 `anthropic-version: 2023-06-01` + ZCode 指纹（3.11.2 `buildZCodeSourceHeadersFromContext` + 主聊天路径）：`User-Agent: ZCode/3.11.2 ai-sdk/provider-utils/4.0.27 runtime/node.js/24`（抓包确认：主聊天路径 UA 由 AI SDK 追加运行时后缀，探针路径才是裸 `ZCode/<ver>`）、`HTTP-Referer: https://zcode.z.ai`（默认 origin，desktop 进程固定此值）、`X-Title: Z Code@electron`（桌面进程 sourceTitle；CLI 进程发 `Z Code@cli`，抓包确认）、`X-ZCode-App-Version: 3.11.2`、**`X-ZCode-Agent: glm`（3.11.2 新增，主聊天路径无条件附加；抓包确认）**、`X-Platform`（Node 名 `darwin|win32|linux`-`arm64|x64`，抓包 `darwin-arm64`）、`X-Release-Channel: production`、`X-Client-Language`/`X-Client-Timezone`（真实实现取 `Intl.DateTimeFormat().resolvedOptions()`；CLI 会把 `--locale` 塞进 language；代理用 env 近似；ASCII printable 否则 `unknown`）、`X-Os-Category`（`macos|windows|linux`，抓包 `macos`）、`X-Os-Version`（**Node `os.release()` = 内核版本**：darwin `kern.osrelease`、linux `/proc/sys/kernel/osrelease`、windows 省略；抓包 `25.6.0` == 本机 `kern.osrelease`，与实现一致）。`X-Device-Mid` 条件性（telemetry-state.json 有值才发，当前省略；本机三处路径均无该文件，桌面端实测也未发）。代理同发每请求/每会话的 `X-Request-Id`/`X-Session-Id`（抓包确认桌面端每请求必带；代理用合成 v4 UUID：request 每请求新生成，session 每进程稳定），非指纹但提升形状保真。探针差异：3.11.2 对普通 `bigmodel-coding-plan`（apikey）的 connectivity probe 只发 3 个基础头（UA `ZCode/unknown` + referer + `X-Title`），完整指纹仅 start-plan provider 专属；代理对探针与转发统一发完整指纹（转发与真实 app 一致，探针高配无害）。
+- **签名风险（2026-09-11 桌面端抓包升级：客户端侧已开启）**：桌面端 3.11.2 的签名 feature gate **对 *.z.ai 与 *.bigmodel.cn 域都已激活**（先向 `open.bigmodel.cn/api/paas/c1f3a7e2/v2/client` 握手换签名密钥，再附 `x-client-sig/-pow/-ts/-nonce/-version` + `x-app-id`）。独立 CLI 引擎未见签名（gate 不可达时 fallback 关）。**model-proxy 无法复现签名**（V4 签名器 + 握手，专有算法）：本代理模拟的是 apikey coding-plan 路径，抓包窗口内未观测到「apikey + open.bigmodel.cn/api/anthropic」路径被服务端强制验签（现有部署仍工作）；若 BigModel 对该路径开启强制验签，纯指纹模拟失效——升级 ZCode 或出现异常 403/401 时优先重抓此路径。
+- **端点补充事实**：桌面端 Ultra（OAuth JWT）模型请求走 `zcode.z.ai/api/v1/ultra/anthropic`；apikey Coding Plan 走 `open.bigmodel.cn/api/anthropic`（本代理目标，无单独 coding base）。两条路径共用同一指纹构建器。
+- `provider_id: zcode`；`login zcode` 开 `bigmodel.cn/login` + apikey 池（多账号）。配额/usage 复用 zhipu 的 `quota/limit` 解析（`ParseZhipuQuota`）。**未实现 OAuth/JWT 登录**（`zcode://oauth/callback` 自定义 scheme CLI 无法截获，且 apikey 路径已足够；OAuth 端点/双 client_id 经实测存在但不用）。3.11.2 另有 start-plan provider（`builtin:bigmodel-start-plan`/`builtin:zai-start-plan`）与 off-peak 子系统（`X-Coding-Plan-Api-Key` + `X-Off-Peak-Ticket-ID` + JWT），均不触碰本代理的 apikey 路径。
 
 ## DeepSeek 契约（双协议，一个 key）
 

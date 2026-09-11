@@ -37,6 +37,7 @@ model-proxy 是单进程模块化单体：根 `package main` 只负责进程入�
 
 - 先读取上表中的相关专题及目标目录最近的 `AGENTS.md`，不要把领域契约复制回根文件。
 - 保留用户和其他任务的现有改动；未经要求不 commit、push、reset 或清理工作区。
+- 重启运行中的 `serve` 必须在同一条 shell 命令内原子完成停+启（构建先行；SIGINT→等端口→拉起），拆开执行会断连把它当 LLM 网关的工具链；陷阱与命令模板见 `docs/engineering/pitfalls.md` 与 `CLI.md`。
 - 请求体、响应体、cookie、token、API key 等敏感数据只在必要范围内读取，不得写入日志、测试输出或文档示例。
 - 一个事实只保留一个权威定义：实现契约进对应 `docs/architecture/` 专题，跨模块陷阱进 `docs/engineering/pitfalls.md`，有意行为进 `docs/decisions/intentional-behaviors.md`。
 

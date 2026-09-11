@@ -25,10 +25,13 @@ request log、`internal/cache`、
 - reload 重建缓存并清空条目（缓存 body 不落盘）；
 - **命中/未命中计数器持久化**：`~/.model-proxy/cache_state.json`（`internal/app/cache_state.go`）按
   called model 名记录累计 hits/misses（含 per-model 明细；entries 是 live gauge 不落盘）。app 拥有
-  文件 I/O，cache 叶子保持零 I/O：启动与 reload 建 store 时 load-seed（`Store.Seed`，累加式），
-  lifecycle 拥有的每分钟循环 + shutdown final save 原子写（temp+fsync+rename，同 quota_state 模式），
-  reset-stats 即时落盘零状态（防下次 tick 或 crash 复活已重置的历史）；corrupt/未来 version 文件按零状态
-  起步，绝不阻塞启动。
+  文件 I/O，cache 叶子保持零 I/O：启动时只 load-seed 一次 `cache.Counters`，各代 Store 经
+  `Options.Counters` 共享同一个进程级计数 owner；reload 仅重建响应条目，不读盘、不重复 seed，
+  旧 snapshot 的迟到 Lookup 仍累计在同一 owner。缓存关闭时 owner 继续存在。
+  lifecycle 拥有的每分钟循环（含启动时关闭、之后 reload 开启的情况）+ shutdown final save
+  原子写（temp+fsync+rename）；`cachePersistMu` 串行化 snapshot→write 与 reset，避免旧保存覆盖 reset。
+  reset-stats 即使缓存关闭也先落盘零状态再清内存，失败返回错误并保留缓存计数供重试；I/O 不持
+  `Proxy.mu`。corrupt/未来 version 文件按零状态起步，绝不阻塞启动。
 
 缓存机制由 `internal/cache` 叶子包拥有：request key、TTL/容量 store、
 bounded recorder、转换后 header normalization 与逐块 flush replay。
@@ -113,6 +116,26 @@ Close-once 回调，日志 schema、入队与 replay 判断不进入 transport �
   shadow report 上限 10000 均只保留 metadata，调用方没有可忘记设置的开关。
 - detail/replay 才调用 `requestlog.QueryRecords` 保留完整 body。
 
+**尾随索引（`/api/requests`、`/api/sessions` 的默认读路径）**：
+`requestlog.Indexer`（`index.go`）把 `requests-*.log` 增量尾随进
+`<request_log.dir>/index.db`（SQLite，DSN/WAL/单连接与 stats store 同纪律）——
+每行记录的元数据、`ExtractUsage` 投影（索引时解析一次）与原始行的
+(file, offset, length) 坐标入库，body 仍只留在 JSONL 文件。索引是**派生视图**：
+文件消失（retention sweep）对应行删除；文件 size 回退（截断/轮转重建）该文件
+行清零并从 0 重索引；index.db 丢失或损坏时删库重建、全量重尾随自愈。reconcile
+每 ~250ms 一轮，单事务批量插入（每批 500 行），尾部不完整行留到下一轮；
+Shutdown 在 log writer drain 之后跑一次 final reconcile（final flush）。
+写热路径（forward commit → Enqueue）不碰 SQLite。查询与扫描版语义逐字段一致：
+`SummariesWithFacets`（WHERE 映射 Filter，facets 在 filter 之前对全部已索引行
+采集；usage 字段只在 `UsageOnly` 下填充）、`Detail`（按 (file, offset, length)
+seek 读回完整行，索引未命中或 seek 失败回落 `QueryRecords` 目录扫描——刚 commit、
+indexer 尚未追上的记录不会误报 not logged）、`SessionSummaries`（索引列供给
+usage，聚合复用扫描版同一 Go 代码）。`/api/shadow-report` 需要 body 配对，保持
+文件扫描不进索引。indexer 由 `internal/app/observe_adapters.go initRequestLog`
+创建、与 logger 同为 restart-only 进程级服务（reload 不重建）；打开失败只 warn，
+web 读路径经 `appapi.RequestLogQueries` 端口回落目录扫描（admin 适配层负责
+nil-index 退化）。
+
 扫描 `requests-*.log` 时不假设文件名顺序等于 record timestamp 严格顺序（孤儿 active 文件或时钟纠正可能让旧名文件持有新记录），单行用 `bufio.Reader.ReadBytes`（不用 Scanner，避免默认 token cap 丢尾）。查询带**文件级提前终止**：单 writer 向同一文件按 Ts 非降序追加，因此文件最后一条可采纳记录是全文件上界——top-K 堆满后，最新记录仍严格老于堆底的文件不可能改变结果，直接跳过不流式读取；最新记录老于 From 下界（含边界，matches 只丢严格小于 From 的记录）的文件同理无命中。该顺序前提**逐文件验证而非假设**：每个文件独立 peek 首条（头部 128KiB）与末条（尾部 128KiB）记录，首条晚于末条（手工构造/损坏文件）或任何异常（打不开、行超长、JSON 解析失败）都回退为完整流式扫描；跨文件乱序仍被容忍。按 `request_id`/`session_id` 查询另有**行级提前终止**：`rawPrefilter` 先做字节包含检查，行内不含该值就跳过 `json.Unmarshal`（避免为多 MB body 反复分配/解析），命中唯一 request_id 后立即停止扫描——多 GB 活动日志下打开一条记录从秒级降到几十毫秒，唯一性保证早停不改变结果（body 里恰好出现该字符串的假命中仍由 `Filter.matches` 精确校验）。
 
 JSONL schema、Record 编码、查询 heap、Summary 与 Shadow 聚合由
@@ -120,7 +143,8 @@ JSONL schema、Record 编码、查询 heap、Summary 与 Shadow 聚合由
 owner-only 权限等持久化机制由共享 sink `internal/observe/logfile` 拥有（seclog 同一模式；
 活动文件按天命名，同日重启追加同一文件，size 轮转改名，首次写入才懒建文件）；
 `internal/app/observe_adapters.go` 只完成 config
-和执行上下文到纯值 Input 的映射。通用 stream capture 留在
+和执行上下文到纯值 Input 的映射（外加 Indexer 的创建——索引 schema、reconcile 与
+索引侧查询仍归 requestlog）。通用 stream capture 留在
 `internal/transport/bodycapture`，两者不反向依赖。
 
 ## Fusion 工作流
@@ -206,6 +230,8 @@ fan-out 之后的降级（insufficient_proposers、body_build_failed）仍计入
 - shadow detached transport 路径的 reload generation、Close 时 logger drain 顺序、
   协议与 base URL 校验、并发 cap、sample_rate=0。
 - request log 大 body 的 metadata 内存边界和跨文件乱序。
+- request log 尾随索引：与扫描逐字段等价、rotation/retention/截断/半行补全、
+  索引损坏重建、detail seek 与未命中回落、并发 race-clean（`index_test.go`）。
 - Fusion pooled resolver、共享 target plan、model lock、paramBlock 即时重试、
   429、empty 200。
 - Fusion leg 的 wire-verdict 404 翻转（不锁模型）与失败 metrics 口径、

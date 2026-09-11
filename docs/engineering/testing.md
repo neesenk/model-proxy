@@ -207,10 +207,15 @@ CLI 侧的矩阵探测保留/丢弃判定、PROTOCOLS 列渲染与 model_caps.js
 投影（fingerprint 门控、畸形文件静默降级）测试归
 `internal/cli/models/*_test.go`。daemon 孪生 `POST /api/models/refresh`
 的编排（fetch+探测+写 config+reload+缓存替换、全失败/impl 缺失的
-unvalidated 安全网、reload 失败恢复 .bak）测试归
-`internal/admin/models_refresh_test.go`，transport 契约归
-`internal/web/handlers_command_test.go`，ProviderImpl/ModelCapsReplace
-端口装配归 `internal/app/proxy_read_view_test.go`。
+unvalidated 安全网、reload 失败恢复 .bak、fetch/probe 取消不写入、并发 provider 编辑冲突、
+提交后取消仍完成 reload）测试归 `internal/admin/models_refresh_test.go`，transport context
+接线归 `internal/web/handlers_command_test.go`，ModelRefreshRuntime/ModelCapsReplace
+端口装配与 reload 前 fingerprint 拒绝归 `internal/app/proxy_read_view_test.go`。
+
+缓存统计跨 reload（含旧 snapshot 迟到 Lookup）、关闭后 reset、并发 save/reset 和写盘失败
+保留计数归 `internal/app/cache_state_test.go`；共享计数与各代响应条目隔离归
+`internal/cache/counters_test.go`。配置锁等待取消归 `internal/configedit/lock_test.go`，
+Provider 模型列表 HTTP 取消归 `internal/provider/models_context_test.go`。
 
 generation-scoped health、sticky、pin、model lock、paramBlock、spread、quota、
 schedule、persist/dashboard snapshot 的纯状态机测试归

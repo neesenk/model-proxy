@@ -39,6 +39,12 @@ Web DTO 映射和 lifecycle 都留在应用层（`internal/app`）；Manager 持
 refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` 的文件
 编排。quota snapshot 的内存权威值属于 Manager，tracker 不持有第二份 quota map。
 
+轮询范围**不包含**配置为 `billing: pay-as-you-go` 且**没有 `usage_url`** 的 provider（含其池化虚拟账号
+`name#<accountID>`）：这类 provider 没有可测量的 quota 窗口，`PollAll`/`PollOne`/`RefreshOne`
+都会跳过它们，并把已有的旧快照从 Manager 中清除。带 `usage_url` 的 pay-as-you-go provider
+（deepseek 的 `/user/balance`，余额即其 quota 窗口）与 plan provider 一样轮询、恢复和手动刷新；
+调度侧仍按 config 的 billing 字段把它们排在 `payg` 档位。
+
 状态文件包含：
 
 - provider quota snapshot；
@@ -49,6 +55,9 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
 - config fingerprint；
 - 顶层 `wire_caps`：provider 级 wire 探测 verdict（`{base_url, chat, responses, probed_at, probe_version}`，三态以 `"yes"/"no"/"unknown"` 字符串落盘；旧版 `anthropic` 字段已随「anthropic 支持改由 config `anthropic_base_url` 声明」移除，旧文件里的该字段读取时忽略），按 parent provider 名 keyed。与 health 不同：**不受 config fingerprint 门控、reload 不清空**（能力是端点属性而非凭据/配额状态）；恢复时同时要求 parent 仍存在、记录的 `base_url` 与当前 config 一致**且 `probe_version` 为当前探测语义版本**（`runtimewire.ProbeVersion`，当前 2 = 工具注入的 agent 级探测；v1 裸 ping 条目按不匹配处理、全量重探），不匹配即作废重探。探测完成与 404 纠正时经 async persist 写盘（请求路径不得同步 persist——forward 不持 `p.mu` 转发，但 persist 经 fullSnapshot 取 `p.mu.RLock`，同步调用会排在 pending reload writer 之后阻塞请求路径，故一律异步）。verdict、选择策略与并发 map 统一归 `internal/runtime/wirecap.Store`；其 mutex 是 leaf lock，持锁时不回调 Proxy，也不进入 `Proxy.mu → runtime.Manager` 锁序。
 - 独立文件 `model_caps.json`（quota_state.json 的 sibling，路径经 `runtimewire.ModelCapsPath(qpath)` 派生）：模型级三协议矩阵（`{version:4, providers:{<name>:{fingerprint, probed_at, models:{<id>:{chat, anthropic, responses}}}}}`，三态同 `wire_caps` 字符串）。与 `wire_caps` 同文件共存不同，模型级能力有自己的文件生命周期；原子写沿用 quota 模式（同目录唯一临时文件 + fsync + rename，目录 0700、文件 0644）。**失效按 fingerprint（无 TTL）与文件 version**：：fingerprint = `providerbuild.ProtocolConfigFingerprint`（provider_id|openai_base_url|anthropic_base_url|sorted(headers) 的 sha256 前 16 hex），boot 只恢复 fingerprint 仍匹配当前 config 的条目，provider 从 config 删除即丢；fingerprint 不覆盖 models 列表，故每个探测 pass 另行把当前 config（models: ∪ 显式/派生路由 target）不再服务的 model 条目从 store 剔除（`ModelStore.PruneModels`，prune 触发 async persist）——从 config 删掉的 model 不会滞留在矩阵和 /api/models 投影里；version 不匹配（探测语义变更，如 v2 起探测腿注入 function tool 声明、v3 起计入腿级拒绝措辞("model not supported"/"not supported by this endpoint"),v4 起裸 "not supported for" 收窄为 "not supported for <model> in <path>" 正则(排除套餐层措辞误伤)）整份文件按缺失处理、全量重探；结论为 unknown 的腿下一轮探测 pass 重探，且 unknown 是唯一不落盘原因的结论——探测 pass 对 inconclusive 腿打一条 warn（`[modelcaps] <p>/<m> leg <leg> inconclusive: status=N err=...`，只含 status/err 不含 body），否则事后无法区分上游 429/5xx 与 proxy 侧拨号/超时。探测完成与模型级 404 纠正时 async persist（quota-tracked goroutine，死锁理由同上）；`POST /api/models/refresh`（`models refresh` CLI 的 daemon 孪生）探测健康时经 `ModelStore.ReplaceProviderModels` 整体替换该 provider 的条目并 async persist（全失败/impl 缺失不替换，fail-closed）。并发 map 归 `internal/runtime/wirecap.ModelStore`（leaf RWMutex、nil-safe，与 Store 同纪律；跨 reload 存活，不进 `Proxy.mu → runtime.Manager` 锁序）。`Restore` 在 boot **和每次 reload** 都执行（reload 在 `p.mu` 写锁内对 snapshot 自校验，fingerprint 变化的条目立即丢弃），并把 fingerprint map 安装为 store 的 expected fingerprints：`Put` 携带与 expected 不一致的 fingerprint（reload 前捕获 cfg 的旧探测 pass 在 swap 后才写回）会被静默丢弃，stale verdict 不能覆盖新 generation 的状态。CLI `models` 列表/refresh 表对它做**只读**投影（fingerprint 必须匹配当前 config；文件缺失/畸形静默降级为无数据，PROTOCOLS 列显示 `-`）。takeover 的协议变体选择同样**只读**消费它（`internal/takeover/probecaps.go`，同一 fingerprint 校验；探测 no 会推翻端点声明、yes 可补出静态判定拿不到的 responses 腿，缺失/陈旧一律回退静态声明）。
+
+模型刷新端口的单次快照、旧 fingerprint 拒绝、取消与 config 提交边界见
+[`Web/API — 模型刷新提交边界`](../web-api.md#模型刷新提交边界)。
 
 陈旧超过 `3 × quota_poll_interval` 或带错误的 quota snapshot 视为 `BillingUnknown`，不得误当 pay-as-you-go。
 
