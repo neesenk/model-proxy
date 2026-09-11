@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -113,6 +114,134 @@ func TestPollOneCommits(t *testing.T) {
 	}
 	if s := tr.Snapshot("x"); s == nil || s.RemainingPct != 0.9 {
 		t.Fatalf("PollOne snapshot = %+v", s)
+	}
+}
+
+func TestPollAllSkipsPayAsYouGo(t *testing.T) {
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"shopee": {Billing: "pay-as-you-go"},
+			"zhipu":  {},
+			// Pay-as-you-go WITH a usage endpoint (deepseek's /user/balance):
+			// the balance IS its quota window, so it is polled like a plan
+			// provider.
+			"deepseek": {Billing: "pay-as-you-go", UsageURL: "http://x/user/balance"},
+		},
+	}
+	mgr := newTestManager(0)
+	tr := NewQuotaTracker("", func() *configdomain.Config { return cfg },
+		func() map[string]provider.Provider {
+			return map[string]provider.Provider{
+				"shopee":   &snapshotProv{rem: 0.5},
+				"zhipu":    &snapshotProv{rem: 0.8},
+				"deepseek": &snapshotProv{rem: -1},
+			}
+		}, mgr)
+	// Seed a stale pay-as-you-go snapshot to verify it gets dropped.
+	tr.SetSnapshot("shopee", &provider.QuotaSnapshot{Billing: provider.BillingUnknown})
+	tr.PollAll(time.Now())
+	if s := tr.Snapshot("shopee"); s != nil {
+		t.Fatalf("pay-as-you-go snapshot must be dropped, got %+v", s)
+	}
+	if s := tr.Snapshot("zhipu"); s == nil || s.RemainingPct != 0.8 {
+		t.Fatalf("plan provider snapshot = %+v, want RemainingPct 0.8", s)
+	}
+	if s := tr.Snapshot("deepseek"); s == nil {
+		t.Fatal("pay-as-you-go provider with usage_url must be polled, got nil snapshot")
+	}
+}
+
+func TestPollAllSkipsPayAsYouGoPoolVirtual(t *testing.T) {
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"shopee": {Billing: "pay-as-you-go"},
+			"zhipu":  {},
+		},
+	}
+	tr := NewQuotaTracker("", func() *configdomain.Config { return cfg },
+		func() map[string]provider.Provider {
+			return map[string]provider.Provider{
+				"shopee#acc1": &snapshotProv{rem: 0.5},
+				"zhipu#acc1":  &snapshotProv{rem: 0.6},
+			}
+		}, newTestManager(0))
+	tr.PollAll(time.Now())
+	if s := tr.Snapshot("shopee#acc1"); s != nil {
+		t.Fatalf("pay-as-you-go pool virtual snapshot must be dropped, got %+v", s)
+	}
+	if s := tr.Snapshot("zhipu#acc1"); s == nil || s.RemainingPct != 0.6 {
+		t.Fatalf("plan pool virtual snapshot = %+v, want RemainingPct 0.6", s)
+	}
+}
+
+func TestPollOneRejectsPayAsYouGo(t *testing.T) {
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"shopee":   {Billing: "pay-as-you-go"},
+			"deepseek": {Billing: "pay-as-you-go", UsageURL: "http://x/user/balance"},
+		},
+	}
+	tr := NewQuotaTracker("", func() *configdomain.Config { return cfg },
+		func() map[string]provider.Provider {
+			return map[string]provider.Provider{
+				"shopee":   &snapshotProv{rem: 0.5},
+				"deepseek": &snapshotProv{rem: -1},
+			}
+		}, newTestManager(0))
+	if tr.PollOne("shopee") {
+		t.Fatal("PollOne must return false for pay-as-you-go provider without usage_url")
+	}
+	if s := tr.Snapshot("shopee"); s != nil {
+		t.Fatalf("pay-as-you-go PollOne snapshot = %+v, want nil", s)
+	}
+	if !tr.PollOne("deepseek") {
+		t.Fatal("PollOne must accept a pay-as-you-go provider with usage_url")
+	}
+	if s := tr.Snapshot("deepseek"); s == nil {
+		t.Fatal("PollOne(deepseek) committed no snapshot")
+	}
+}
+
+func TestLoadSkipsPayAsYouGoSnapshot(t *testing.T) {
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"shopee":   {Billing: "pay-as-you-go"},
+			"zhipu":    {},
+			"deepseek": {Billing: "pay-as-you-go", UsageURL: "http://x/user/balance"},
+		},
+	}
+	path := filepath.Join(t.TempDir(), "q.json")
+	wrap := map[string]any{
+		"providers": map[string]PersistedQuotaSnapshot{
+			"shopee":   {Billing: provider.BillingUnknown},
+			"zhipu":    {Billing: provider.BillingPlan, RemainingPct: 0.7},
+			"deepseek": {Billing: provider.BillingPayG, RemainingPct: -1},
+		},
+	}
+	data, err := json.Marshal(wrap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewQuotaTracker(path, func() *configdomain.Config { return cfg },
+		func() map[string]provider.Provider {
+			return map[string]provider.Provider{
+				"shopee":   &snapshotProv{rem: 0.5},
+				"zhipu":    &snapshotProv{rem: 0.7},
+				"deepseek": &snapshotProv{rem: -1},
+			}
+		}, newTestManager(0))
+	tr.Load()
+	if s := tr.Snapshot("shopee"); s != nil {
+		t.Fatalf("loaded pay-as-you-go snapshot = %+v, want nil", s)
+	}
+	if s := tr.Snapshot("zhipu"); s == nil || s.RemainingPct != 0.7 {
+		t.Fatalf("loaded plan snapshot = %+v, want RemainingPct 0.7", s)
+	}
+	if s := tr.Snapshot("deepseek"); s == nil {
+		t.Fatal("loaded pay-as-you-go snapshot with usage_url must be kept, got nil")
 	}
 }
 

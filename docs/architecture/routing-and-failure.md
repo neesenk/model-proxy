@@ -145,6 +145,10 @@ body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`
 
 同一 provider 收到多个 429 时，只采用更晚的 horizon；`rateLimitKind` 必须跟随胜出的 horizon，短冷却不能覆盖既有长冷却的 kind。
 
+### 冷却被配额测量推翻
+
+429 冷却是预算恢复时间的**预测**（reset hint / Retry-After / 分类默认），周期配额 poll 是**测量**；测量与预测矛盾时预测必须让位。`Manager.QuotaRecoveredClearCooldown`（由周期 `PollAll` 与手动 `PollOne`（Web UI 的 Refresh usage）提交快照后调用）：快照满足正面预算证据（`Err` 为空、`BillingPlan`、在新鲜度窗口内、**每个**窗口 `RemainingPct > 0`）时，清除该 provider 的 `rateLimitedUntil`（任意 kind——zhipu 的 429 文案「并发限制/余额不足」无法可靠分类，实际配额耗尽也会归为 transient；transient 默认 backoff 很短，真 RPS 限速被清后代价只是一次重新学习的 429）。不碰 `frozen`（operator 冻结）与 `circuitOpenUntil`（失败计数熔断）——它们是与预算无关的独立信号。缺失证明不是恢复证明：stale/errored/非 plan 快照一律不清。429 触发的 `RefreshOne` **不**参与清除，避免 RPS 限速与配额刷新互搏。
+
 ## 模型级失败
 
 `modelLocks` 的 key 是 `(provider, model)`，避免一个模型的问题污染同账号的其他模型。
