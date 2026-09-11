@@ -1243,3 +1243,140 @@ export function staleDataText(errText, failedParts) {
   const parts = failedParts && failedParts.length ? ` (${failedParts.join(', ')})` : '';
   return `${errText}${parts} — showing last successful data`;
 }
+
+// ===========================================================================
+// Presentation helpers for the v2 design system (SVG icons, HTTP status
+// badges, KPI delta classes, log-line tokenizing). Zero-DOM like everything
+// else in this file; behavior-tested in jstests/pure.test.mjs.
+// ===========================================================================
+
+// --- SVG icon set ---------------------------------------------------------
+// Tiny inline icons replacing v1's text glyphs (📌 emoji, "SHOW" link
+// labels). currentColor + stroke 1.5 keeps them themeable through the same
+// CSS variables as text; sizing comes from CSS (.icon). No icon library —
+// the UI stays fully offline/vendored.
+
+const SVG_ATTRS = 'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
+
+// iconPin — schedule route pinning (replaces the 📌 emoji). Lucide "pin".
+export function iconPin() {
+  return `<svg class="icon" ${SVG_ATTRS}><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1z"/></svg>`;
+}
+
+// iconRefresh — toolbar Refresh buttons (Lucide "refresh-cw" outline).
+export function iconRefresh() {
+  return `<svg class="icon" ${SVG_ATTRS}><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/></svg>`;
+}
+
+// iconChevron — disclosure summaries (details.editor, acct-section, legend).
+export function iconChevron() {
+  return `<svg class="icon icon-chevron" ${SVG_ATTRS}><path d="m9 18 6-6-6-6"/></svg>`;
+}
+
+// --- HTTP status badges ---------------------------------------------------
+
+// statusBadgeClass maps an HTTP status to a semantic badge class:
+// 2xx → ok, 3xx/4xx → warn, 5xx → err, missing/in-flight → muted. Color
+// encodes meaning only — the same ok/warn/err palette as every badge.
+export function statusBadgeClass(status) {
+  const n = Number(status);
+  if (!Number.isFinite(n) || n <= 0) return 'muted';
+  if (n < 300) return 'ok';
+  if (n < 500) return 'warn';
+  return 'err';
+}
+
+// statusBadgeHTML renders an HTTP status as a semantic pill. `pending` swaps
+// in the in-flight marker (···) used by the Live monitor. The label is
+// always escaped — raw statuses never reach innerHTML.
+export function statusBadgeHTML(status, pending) {
+  if (pending) return '<span class="badge muted">···</span>';
+  const n = Number(status);
+  const label = Number.isFinite(n) && n > 0 ? String(n) : '—';
+  return `<span class="badge ${statusBadgeClass(n)}">${esc(label)}</span>`;
+}
+
+// --- KPI delta classes ----------------------------------------------------
+
+// kpiDeltaClass picks the delta color semantics for one KPI chip. `warn`
+// marks a metric whose INCREASE is bad (failures): its up-delta is err-red
+// while a decrease stays muted. For normal metrics up is ok-green and down
+// muted (a drop is quieter, not an error). null/0 renders the flat class.
+export function kpiDeltaClass(delta, warn) {
+  if (delta == null || delta === 0) return 'flat';
+  if (warn) return delta > 0 ? 'up bad' : 'down';
+  return delta > 0 ? 'up' : 'down';
+}
+
+// --- log line tokenizing (Status → Logs) -----------------------------------
+
+// Keys whose value gets semantic coloring in the runtime log viewer.
+// status= splits by HTTP class (2xx ok / 4xx warn / 5xx err, mirroring
+// statusBadgeClass); *error*/*fail*/*circuit* values are err;
+// *retry*/*limited*/*cooldown* values are warn. Matched on lowercase keys.
+const LOG_VALUE_ERR_RE = /(^|_)(err|fail|circuit|denied|timeout)/;
+const LOG_VALUE_WARN_RE = /(^|_)(retry|limited|cooldown|throttl|degrad)/;
+
+function logValueClass(key, val) {
+  const lower = key.toLowerCase();
+  if (lower === 'status') {
+    const n = Number(val);
+    if (Number.isFinite(n) && n > 0) return statusBadgeClass(n);
+  }
+  if (LOG_VALUE_ERR_RE.test(lower)) return 'err';
+  if (LOG_VALUE_WARN_RE.test(lower)) return 'warn';
+  return '';
+}
+
+// logLineHTML renders one raw runtime-log line as colored HTML: the leading
+// "YYYY/MM/DD HH:MM:SS" prefix (if present) is one muted span, a Go-style
+// severity token (INFO/WARN/ERROR/DEBUG) colors by severity, and `key=value`
+// tokens render as key=muted value=text with semantic values colored. All
+// input is escaped here — callers pass the raw line, never pre-escaped HTML.
+export function logLineHTML(line) {
+  const raw = String(line);
+  const m = raw.match(/^(\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}) ?([\s\S]*)$/);
+  const ts = m ? m[1] : '';
+  const rest = m ? m[2] : raw;
+  let out = ts ? `<span class="log-ts">${esc(ts)}</span> ` : '';
+  const lvl = rest.match(/^([A-Za-z]+) /);
+  if (lvl && /^(INFO|WARN|ERROR|DEBUG)$/i.test(lvl[1])) {
+    const sev = lvl[1].toUpperCase();
+    const cls = sev === 'ERROR' ? 'err' : sev === 'WARN' ? 'warn' : 'lvl';
+    out += `<span class="log-lvl ${cls}">${esc(sev)}</span> `;
+    out += logTokensHTML(rest.slice(lvl[1].length + 1));
+    return out;
+  }
+  out += logTokensHTML(rest);
+  return out;
+}
+
+// logTokensHTML splits a log message into `key=value` tokens and free text:
+// each pair (value runs to the next space) becomes key/value spans, semantic
+// keys color their value, and everything between stays escaped plain text.
+function logTokensHTML(text) {
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    const eq = text.indexOf('=', i);
+    if (eq === -1) { out += esc(text.slice(i)); break; }
+    let keyStart = eq;
+    while (keyStart > i && text[keyStart - 1] !== ' ') keyStart--;
+    if (keyStart === eq) {
+      // '=' with no key before it: plain text through the '='.
+      out += esc(text.slice(i, eq + 1));
+      i = eq + 1;
+      continue;
+    }
+    const key = text.slice(keyStart, eq);
+    const valEnd = text.indexOf(' ', eq + 1);
+    const val = valEnd === -1 ? text.slice(eq + 1) : text.slice(eq + 1, valEnd);
+    const vcls = logValueClass(key, val);
+    out += esc(text.slice(i, keyStart));
+    out += `<span class="log-k">${esc(key)}</span>=<span class="log-v${vcls ? ' ' + vcls : ''}">${esc(val)}</span>`;
+    if (valEnd === -1) break;
+    out += ' ';
+    i = valEnd + 1;
+  }
+  return out;
+}

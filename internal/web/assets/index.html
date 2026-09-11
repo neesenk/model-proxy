@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b0f14" media="(prefers-color-scheme: dark)">
   <title>model-proxy</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
@@ -73,16 +75,14 @@
     </form>
   </dialog>
 
-  <!-- CodeMirror 5 (UMD globals) for the Raw YAML editor. Plain scripts, loaded
-       before the deferred app.js module so window.CodeMirror is defined when the
-       module runs. Vendored offline (no CDN) under assets/vendor/. -->
+  <!-- CodeMirror 5 (UMD globals) for the Raw YAML editor and uPlot (IIFE
+       global) for the trend charts. Vendored offline (no CDN). Plain
+       scripts load before the deferred app.js module so the globals exist
+       when it runs. -->
   <script src="vendor/codemirror.min.js"></script>
   <script src="vendor/yaml.min.js"></script>
   <script src="vendor/matchbrackets.min.js"></script>
   <script src="vendor/closebrackets.min.js"></script>
-  <!-- uPlot (IIFE global) for the Analytics tab's trend charts. Same pattern:
-       plain script, loaded before the deferred app.js module so the uPlot
-       global is defined when the module runs. Vendored offline (no CDN). -->
   <script src="vendor/uPlot.min.js"></script>
   <script type="module" src="app.js"></script>
 </body>

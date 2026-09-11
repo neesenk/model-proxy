@@ -23,6 +23,8 @@ import {
   quotaErrKind, accountUsageState,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
+  iconPin, iconRefresh, iconChevron, statusBadgeClass, statusBadgeHTML,
+  kpiDeltaClass, logLineHTML,
 } from '../assets/pure.js';
 
 test('esc escapes all five HTML-significant chars', () => {
@@ -1246,4 +1248,82 @@ test('staleDataText renders the keep-old-data banner text', () => {
     'analytics unavailable: http 503 — showing last successful data');
   assert.equal(staleDataText('x', []), 'x — showing last successful data');
   assert.equal(staleDataText('x', null), 'x — showing last successful data');
+});
+
+// ---------- v2 presentation helpers ----------
+
+test('icon builders emit themed inline SVG with currentColor stroke', () => {
+  for (const svg of [iconPin(), iconRefresh(), iconChevron()]) {
+    assert.ok(svg.startsWith('<svg class="icon'), svg);
+    assert.match(svg, /viewBox="0 0 24 24"/);
+    assert.match(svg, /stroke="currentColor"/);
+    assert.match(svg, /aria-hidden="true"/);
+  }
+  assert.match(iconPin(), /M12 17v5/);
+  assert.match(iconChevron(), /class="icon icon-chevron"/);
+});
+
+test('statusBadgeClass splits HTTP classes semantically', () => {
+  assert.equal(statusBadgeClass(200), 'ok');
+  assert.equal(statusBadgeClass(204), 'ok');
+  assert.equal(statusBadgeClass(301), 'warn');
+  assert.equal(statusBadgeClass(404), 'warn');
+  assert.equal(statusBadgeClass(429), 'warn');
+  assert.equal(statusBadgeClass(500), 'err');
+  assert.equal(statusBadgeClass(503), 'err');
+  assert.equal(statusBadgeClass(null), 'muted');
+  assert.equal(statusBadgeClass(undefined), 'muted');
+  assert.equal(statusBadgeClass(0), 'muted');
+  assert.equal(statusBadgeClass('x'), 'muted');
+});
+
+test('statusBadgeHTML escapes and marks pending rows', () => {
+  assert.equal(statusBadgeHTML(200), '<span class="badge ok">200</span>');
+  assert.equal(statusBadgeHTML(500), '<span class="badge err">500</span>');
+  assert.equal(statusBadgeHTML(null), '<span class="badge muted">\u2014</span>');
+  assert.equal(statusBadgeHTML('<x>', true), '<span class="badge muted">\u00b7\u00b7\u00b7</span>');
+  assert.equal(statusBadgeHTML('<script>'), '<span class="badge muted">\u2014</span>');
+});
+
+test('kpiDeltaClass colors up as ok, bad-increase metrics as err', () => {
+  assert.equal(kpiDeltaClass(12.5), 'up');
+  assert.equal(kpiDeltaClass(-3), 'down');
+  assert.equal(kpiDeltaClass(0), 'flat');
+  assert.equal(kpiDeltaClass(null), 'flat');
+  assert.equal(kpiDeltaClass(5, true), 'up bad');
+  assert.equal(kpiDeltaClass(-5, true), 'down');
+});
+
+test('logLineHTML colors timestamp, severity and key=value tokens', () => {
+  const html = logLineHTML('2026/09/11 20:07:41 INFO proxy status=200 provider=zhipu model=glm-5.3');
+  assert.match(html, /^<span class="log-ts">2026\/09\/11 20:07:41<\/span> /);
+  assert.match(html, /<span class="log-lvl lvl">INFO<\/span>/);
+  assert.match(html, /<span class="log-k">status<\/span>=<span class="log-v ok">200<\/span>/);
+  assert.match(html, /<span class="log-k">provider<\/span>=<span class="log-v">zhipu<\/span>/);
+});
+
+test('logLineHTML colors WARN/ERROR severity and semantic error values', () => {
+  const warn = logLineHTML('2026/09/11 20:07:41 WARN upstream retry_in=10s error_msg=boom status=503');
+  assert.match(warn, /<span class="log-lvl warn">WARN<\/span>/);
+  assert.match(warn, /<span class="log-k">retry_in<\/span>=<span class="log-v warn">10s<\/span>/);
+  assert.match(warn, /<span class="log-k">error_msg<\/span>=<span class="log-v err">boom<\/span>/);
+  assert.match(warn, /<span class="log-k">status<\/span>=<span class="log-v err">503<\/span>/);
+  const err = logLineHTML('2026/09/11 20:07:41 ERROR failover failed');
+  assert.match(err, /<span class="log-lvl err">ERROR<\/span>/);
+  assert.ok(err.endsWith(' failover failed'), err);
+});
+
+test('logLineHTML escapes hostile log content', () => {
+  const html = logLineHTML('2026/09/11 20:07:41 INFO msg=<img src=x onerror=alert(1)> a=b');
+  assert.ok(!html.includes('<img'), html);
+  assert.ok(!html.includes('onerror='), html);
+  assert.match(html, /<span class="log-v">&lt;img<\/span>/);
+  assert.match(html, /<span class="log-v">alert\(1\)&gt;<\/span>/);
+  assert.match(html, /<span class="log-k">a<\/span>=<span class="log-v">b<\/span>/);
+});
+
+test('logLineHTML handles lines without timestamp, severity or pairs', () => {
+  assert.equal(logLineHTML('plain text only'), 'plain text only');
+  assert.equal(logLineHTML('no-ts status=200'), 'no-ts <span class="log-k">status</span>=<span class="log-v ok">200</span>');
+  assert.equal(logLineHTML('a =b stray = x c=1'), 'a =b stray = x <span class="log-k">c</span>=<span class="log-v">1</span>');
 });

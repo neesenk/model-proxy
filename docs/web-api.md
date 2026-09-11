@@ -2,7 +2,7 @@
 
 > 从 AGENTS.md 拆出。**改 web/API/stats 前必读**。
 
-`web.enabled`（默认 true）时 daemon 同一 mux 挂 `/ui/`（embed 静态资源）、`/api/`（JSON）和 `/metrics`（Prometheus exposition）。鉴权是**可选的 S2 层**（`web.auth`，见下节）：默认（loopback 部署）两个面都无鉴权，`internal/config` 的 `requireLoopbackListen` 拒绝非回环 `listen`（`0.0.0.0`、空 host `:PORT`、`[::]`、内网 IP、域名），只放行 `127.x`/`[::1]`/`localhost`；**配齐两个 auth 文件后非回环 listen 被允许**（`requireAuthForNonLoopback`：validate 先跑 loopback 检查，失败再看 S2 gate），面向 LAN/团队部署。
+`web.enabled`（默认 true）时 daemon 同一 mux 挂 `/ui/`（embed 静态资源，v2 设计系统版）、`/api/`（JSON）和 `/metrics`（Prometheus exposition）。鉴权是**可选的 S2 层**（`web.auth`，见下节）：默认（loopback 部署）两个面都无鉴权，`internal/config` 的 `requireLoopbackListen` 拒绝非回环 `listen`（`0.0.0.0`、空 host `:PORT`、`[::]`、内网 IP、域名），只放行 `127.x`/`[::1]`/`localhost`；**配齐两个 auth 文件后非回环 listen 被允许**（`requireAuthForNonLoopback`：validate 先跑 loopback 检查，失败再看 S2 gate），面向 LAN/团队部署。
 
 ## `web.auth`（S2 可选鉴权，`internal/webauth`）
 

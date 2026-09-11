@@ -72,7 +72,7 @@ func TestWebAssetsLogGutterAndSelectionContract(t *testing.T) {
 		"grid-template-columns: var(--log-gutter-width) minmax(0, 1fr)",
 		"column-gap: 10px;",
 		"padding: 0 2px 0 14px;",
-		".log-line:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }",
+		".log-line:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }",
 		".log-line.selected::before",
 	} {
 		if !strings.Contains(css, want) {

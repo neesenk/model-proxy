@@ -1,4 +1,9 @@
-// model-proxy admin SPA. Vanilla JS module — no framework, no CDN.
+// model-proxy admin SPA (v2 design system). Vanilla JS module — no
+// framework, no CDN. Behavior core (SSE, deferAutoRefresh interaction gate,
+// comboboxes, YAML editor, charts) plus the v2 presentation layer — semantic
+// status badges, SVG icons, KPI delta coloring, tokenized log coloring.
+// Pure helpers live in pure.js (single source, behavior-tested by
+// jstests/pure.test.mjs).
 //
 // Drives the admin tabs and three modals (#admin-auth-modal for the browser
 // session, #login-modal for async aqp/codex login, #add-modal for apikey add)
@@ -30,6 +35,7 @@ import {
   detailFetchState, quotaErrKind, accountUsageState,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
+  iconPin, iconRefresh, iconChevron, statusBadgeHTML, kpiDeltaClass, logLineHTML,
 } from './pure.js';
 
 function el(tag, opts = {}) {
@@ -369,7 +375,7 @@ async function renderRequestsTab() {
         <option value="exclude" ${requestsFilter.shadow === 'exclude' ? 'selected' : ''}>no shadow</option>
       </select>
       <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="req-errors" ${requestsFilter.errors ? 'checked' : ''}/> errors only</label>
-      <button id="req-refresh" class="btn danger-solid">Refresh</button>
+      <button id="req-refresh" class="btn">${iconRefresh()}Refresh</button>
     </div>
     <div id="req-session-summary" style="margin-bottom:12px" hidden></div>
     <div id="req-table"></div>
@@ -465,8 +471,11 @@ function renderRequestSelectors(combos) {
   if (sessionSel) {
     const ids = sessionsForAgent(requestsFilter.agent, combos.sessions).map((s) => s.session_id).filter(Boolean);
     if (requestsFilter.session && !ids.includes(requestsFilter.session)) ids.unshift(requestsFilter.session);
+    // v2: full session ids in the options (the select is fixed 16rem wide;
+    // the closed box ellipsizes, the OS popup shows the whole id). Matches
+    // the Live page's full-id dropdown.
     sessionSel.innerHTML = '<option value="">all sessions</option>' +
-      ids.map((id) => `<option value="${esc(id)}">${esc(liveSessionLabel(id))}</option>`).join('');
+      ids.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
     sessionSel.value = requestsFilter.session;
   }
 }
@@ -807,13 +816,18 @@ async function loadRequests(combos) {
   }
   let rows = '';
   for (const r of recs) {
-    rows += `<tr class="req-row" data-id="${esc(r.request_id)}">
+    // v2: status renders as a semantic badge (2xx ok / 4xx warn / 5xx err),
+    // failed rows get a faint err tint, and >10s latencies flag warn so slow
+    // calls stand out in the dense table.
+    const rowCls = r.status >= 400 ? ' req-row-err' : '';
+    const latCls = r.latency_ms > 10000 ? 'num warn' : 'num';
+    rows += `<tr class="req-row${rowCls}" data-id="${esc(r.request_id)}">
       <td class="mono">${esc(fmtTime(r.ts))}</td>
       <td class="mono">${esc(r.agent || '—')}</td>
-      <td class="num ${r.status >= 400 ? 'err' : ''}">${r.status}</td>
+      <td class="st">${statusBadgeHTML(r.status)}</td>
       <td>${esc(r.exposed || r.called_model)}</td>
       <td class="mono">${esc(r.provider)}${r.shadow ? ' <span class="badge muted">shadow</span>' : ''}</td>
-      <td class="num">${fmtNum(r.latency_ms)}</td>
+      <td class="${latCls}">${fmtNum(r.latency_ms)}</td>
       <td class="num">${fmtNum(r.request_size)}</td>
       <td class="num">${fmtNum(r.response_size)}</td>
     </tr>`;
@@ -1153,14 +1167,13 @@ async function loadSecurity() {
       <td class="mono">${esc(r.exposed || '—')}</td>
       <td class="mono">${esc((r.names || []).join(', ') || '—')}</td>
       <td>${esc(r.action || '—')}${strengthBadge}</td>
-      <td class="subdue">${esc(r.detail || '')}</td>
       <td>${analyzable ? `<button class="btn sec-analyze" data-sec-i="${i}">analyze</button>` : '—'}</td>
     </tr>`;
   }
   if (tbl) {
     tbl.innerHTML = skipped + `<table class="table">
     <thead><tr><th>time</th><th>kind</th><th>agent</th><th>route</th>
-    <th>names</th><th>action</th><th>detail</th><th></th></tr></thead>
+    <th>names</th><th>action</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table>`;
     tbl.querySelectorAll('.sec-analyze').forEach((btn) => {
       btn.onclick = () => analyzeSecurityHit(btn, recs[Number(btn.dataset.secI)]);
@@ -1313,16 +1326,17 @@ function refreshLiveSessionOptions() {
   const key = sorted.join('\n');
   if (key === liveSessionOptionsKey) return;
   liveSessionOptionsKey = key;
+  // v2: the Live session dropdown shows the FULL id — this toolbar holds a
+  // single control with the rest of the row empty, so unlike the dense
+  // Requests filter row there is no reason to abbreviate (and the select is
+  // widened via .live-toolbar select to match; see styles.css).
   sel.innerHTML = '<option value="">all (live)</option>' +
-    sorted.map((id) => `<option value="${esc(id)}">${esc(liveSessionLabel(id))}</option>`).join('');
+    sorted.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
   sel.value = liveSessionFilter;
 }
 
-// liveSessionLabel shortens a session UUID for the dropdown; the option value
-// keeps the full id.
-function liveSessionLabel(id) {
-  return id.length > 14 ? id.slice(0, 8) + '…' + id.slice(-4) : id;
-}
+// (v2: liveSessionLabel — the 8…4 session-id abbreviation — was removed;
+// both the Live and Requests dropdowns now show full ids.)
 
 // onLiveSessionChange switches between the live table and one session's
 // analysis, loading the persisted request list + aggregate for the selection.
@@ -1605,8 +1619,7 @@ function liveSummaryRowHTML(r, open) {
   const guard = guardCount
     ? ` <span class="badge warn" title="${guardTitle}">⚑ guard${guardCount > 1 ? ' ×' + guardCount : ''}</span>`
     : '';
-  const sc = r.status >= 400 ? 'err' : (r.inFlight ? 'subdue' : '');
-  const status = r.inFlight ? '···' : (r.status || '—');
+  const slow = !r.inFlight && r.latencyMs != null && r.latencyMs > 10000;
   const lt = (!r.inFlight && r.latencyMs != null) ? r.latencyMs + 'ms' : '';
   const tk = (!r.inFlight && (r.input || r.output)) ? `${fmtNum(r.input)} / ${fmtNum(r.output)}` : '';
   return `<tr class="live-row${openCls}" data-id="${esc(r.requestId)}" data-live-key="${esc(r.requestId)}">
@@ -1614,8 +1627,8 @@ function liveSummaryRowHTML(r, open) {
     <td class="mono${dim}">${esc(r.agent || '—')}</td>
     <td class="${dim ? 'subdue' : ''}">${esc(r.model)}${guard}</td>
     <td class="mono${dim}">${esc(r.inFlight ? '…' : (r.provider || '—'))}</td>
-    <td class="num ${sc}">${esc(String(status))}</td>
-    <td class="num">${lt}</td>
+    <td class="st">${statusBadgeHTML(r.inFlight ? null : r.status, r.inFlight)}</td>
+    <td class="num${slow ? ' warn' : ''}">${lt}</td>
     <td class="num">${tk}</td>
   </tr>`;
 }
@@ -2666,6 +2679,11 @@ function dashRenderTable(host) {
     const h = health.get(r.label) || {};
     const dims = h.dims || {};
     const share = r.cost != null && totalCost > 0 ? r.cost / totalCost * 100 : null;
+    // v2: $/1M tok lives on the cost cell as a hover note (the dashboard pane
+    // is narrower than the Analytics tab — the extra column crowded it), and
+    // cost share is a plain number (no inline bar).
+    const costTip = r.costPerMTok == null ? '' : ` title="$${r.costPerMTok.toFixed(2)} per 1M tokens"`;
+    const shareTip = share == null ? '' : ` title="${share.toFixed(1)}% of priced cost"`;
     return `<tr>
       <td class="mono">${esc(r.label)}</td>
       <td>${gradeBadge(h.grade)}</td>
@@ -2675,14 +2693,13 @@ function dashRenderTable(host) {
       ${graded(dims.latency, r.latencyMs == null ? '—' : fmtNum(Math.round(r.latencyMs)) + 'ms')}
       ${graded(dims.ttft, r.ttftMs == null ? '—' : fmtNum(Math.round(r.ttftMs)) + 'ms')}
       ${graded(dims.toksec, r.tokSec == null ? '—' : r.tokSec.toFixed(1))}
-      <td class="num">${r.cost == null ? 'n/a' : '$' + r.cost.toFixed(4)}</td>
-      <td class="num">${r.costPerMTok == null ? '—' : '$' + r.costPerMTok.toFixed(2)}</td>
-      <td class="an-share"><div class="an-bar" title="${share == null ? '' : share.toFixed(1) + '% of priced cost'}"><i style="width:${share == null ? 0 : Math.min(share, 100)}%"></i></div><span>${share == null ? '—' : share.toFixed(1) + '%'}</span></td>
+      <td class="num"${costTip}>${r.cost == null ? 'n/a' : '$' + r.cost.toFixed(4)}</td>
+      <td class="num"${shareTip}>${share == null ? '—' : share.toFixed(1) + '%'}</td>
     </tr>`;
   }).join('');
   host.innerHTML = `<table class="table">
-      <thead><tr><th>series</th><th>status</th><th class="num">requests</th><th class="num">tokens</th><th class="num">err</th><th class="num">avg lat</th><th class="num">ttft</th><th class="num">tok/s</th><th class="num">cost</th><th class="num">$/1M tok</th><th class="num">cost share</th></tr></thead>
-      <tbody>${body || '<tr><td colspan="11" class="hint">no series in range</td></tr>'}</tbody>
+      <thead><tr><th>series</th><th>status</th><th class="num">requests</th><th class="num">tokens</th><th class="num">err</th><th class="num">avg lat</th><th class="num">ttft</th><th class="num">tok/s</th><th class="num">cost</th><th class="num">cost share</th></tr></thead>
+      <tbody>${body || '<tr><td colspan="10" class="hint">no series in range</td></tr>'}</tbody>
     </table>`;
 }
 
@@ -2690,12 +2707,16 @@ function dashRenderTable(host) {
 // headActionsHTML, when given, pins extra controls (buttons) to the right end
 // of the header, grouped with the meta text.
 function buildCard(title, meta, bodyHTML, extraBodyClass = '', headActionsHTML = '') {
+  // v2: the meta count ("16 routes", "200 lines", …) rides INLINE right
+  // after the title instead of floating to the card's far-right edge — with
+  // space-between and no actions the lone meta read as a detached far-right
+  // fragment. Head actions (Refresh buttons) still pin to the right.
   const metaHTML = meta ? `<span class="meta">${esc(meta)}</span>` : '';
   const headRight = headActionsHTML
-    ? `<span class="card-head-side">${metaHTML}${headActionsHTML}</span>`
-    : metaHTML;
+    ? `<span class="card-head-side">${headActionsHTML}</span>`
+    : '';
   return `<section class="card">
-    <header class="card-head"><h2>${esc(title)}</h2>${headRight}</header>
+    <header class="card-head"><span class="card-head-title"><h2>${esc(title)}</h2>${metaHTML}</span>${headRight}</header>
     <div class="card-body ${extraBodyClass}">${bodyHTML}</div>
   </section>`;
 }
@@ -2802,8 +2823,8 @@ function renderProvidersCard(target, st) {
       <td>${healthPill(health[name])}</td>
       <td class="num">${fmtNum(c.requests)}</td>
       <td class="num">${fmtNum(c.failovers)}</td>
-      <td class="num">${fmtNum(c.rate_limited_429)}</td>
-      <td class="num">${fmtNum(c.failures)}</td>
+      <td class="num${c.rate_limited_429 > 0 ? ' err' : ''}">${fmtNum(c.rate_limited_429)}</td>
+      <td class="num${c.failures > 0 ? ' err' : ''}">${fmtNum(c.failures)}</td>
       <td class="num">${fmtNum(avgLatencyMs(c))}</td>
       <td class="num subdue">${esc(fmtUnix(c.last_request_at))}</td>
     </tr>`;
@@ -2998,7 +3019,7 @@ function renderScheduleCard(target, st) {
       const tier = p.tier ? ` · ${esc(p.tier)}` : '';
       const parent = p.pool_parent ? ` (${esc(p.pool_parent)})` : '';
       const title = `priority ${p.priority} · tier ${esc(p.tier || '?')} · surplus ${(p.surplus || 0).toFixed(2)}${peak}${pinned ? ' · pinned (no failover)' : ''}`;
-      chain += `<span class="${classes.join(' ')}" title="${esc(title)}">${pinned ? '📌 ' : ''}${esc(p.provider)}${esc(parent)}${tier}</span>`;
+      chain += `<span class="${classes.join(' ')}" title="${esc(title)}">${pinned ? iconPin() : ''}${esc(p.provider)}${esc(parent)}${tier}</span>`;
       if (i < ordered.length - 1) chain += `<span class="route-sep">→</span>`;
     });
     // Unpinned routes get a pin button opening a small popover menu of the
@@ -3011,7 +3032,7 @@ function renderScheduleCard(target, st) {
         `<button class="route-pin-item" data-pin-route="${esc(route)}" data-pin-provider="${esc(p.provider)}">${esc(p.provider)}${p.pool_parent ? ` <span class="route-meta">(${esc(p.pool_parent)})</span>` : ''}</button>`,
       ).join('');
       chain += `<span class="route-pin-wrap">` +
-        `<button class="btn small" data-pin-toggle="${esc(route)}" title="pin ${esc(route)} to one provider (no failover)">📌 pin</button>` +
+        `<button class="btn small" data-pin-toggle="${esc(route)}" title="pin ${esc(route)} to one provider (no failover)">${iconPin()}pin</button>` +
         `<div class="route-pin-menu" data-popup data-pin-menu="${esc(route)}" hidden>${items}</div>` +
         `</span>`;
     }
@@ -3140,21 +3161,21 @@ function renderTokensCard(target, usage) {
     rows += `<tr>
       <td class="mono">${esc(u.provider)}</td>
       <td class="mono">${esc(u.model)}</td>
+      <td class="num">${fmtNum(u.requests)}</td>
       <td class="num">${fmtNum(u.input)}</td>
       <td class="num">${fmtNum(u.output)}</td>
       <td class="num">${fmtNum(u.cache_creation)}</td>
       <td class="num">${fmtNum(u.cache_read)}</td>
       <td class="num">${fmtNum(u.total)}</td>
-      <td class="num">${fmtNum(u.requests)}</td>
     </tr>`;
   }
   const html = buildCard('Token usage', `${totalReqs} requests · ${tokensRangeMeta()}`, `
       <table class="table">
         <thead><tr>
-          <th>provider</th><th>model</th>
+          <th>provider</th><th>model</th><th class="num">requests</th>
           <th class="num">input</th><th class="num">output</th>
           <th class="num">cache create</th><th class="num">cache read</th>
-          <th class="num">total</th><th class="num">requests</th>
+          <th class="num">total</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`, 'flush');
@@ -3392,10 +3413,24 @@ function renderAgentsCard(target, agents) {
 // confirmDialog shows the themed #confirm-modal in place of window.confirm.
 // Resolves true only when the confirm button is clicked; Esc, Close and
 // Cancel all resolve false.
-function confirmDialog(title, message, confirmLabel) {
+// confirmDialog renders the shared themed confirm modal. opts.challenge adds
+// a fool-proof step for destructive actions: a random code is shown and the
+// confirm button stays disabled until the user types it back exactly (Enter
+// submits once it matches). All other call sites keep the plain two-button
+// form.
+function confirmDialog(title, message, confirmLabel, opts = {}) {
   const modal = document.getElementById('confirm-modal');
   if (!modal) return Promise.resolve(false);
+  const challenge = !!(opts && opts.challenge);
+  const code = challenge ? String(1000 + Math.floor(Math.random() * 9000)) : '';
   return new Promise((resolve) => {
+    const challengeHTML = challenge ? `
+          <div class="field" style="margin-top:12px">
+            <label for="confirm-challenge">Type <span class="mono" style="font-weight:600">${esc(code)}</span> to confirm</label>
+            <input id="confirm-challenge" autocomplete="off" spellcheck="false" inputmode="numeric"
+                   placeholder="${esc(code)}" style="font-family:var(--mono)">
+            <span class="hint">The code proves the reset is intentional.</span>
+          </div>` : '';
     modal.innerHTML =
       `<form method="dialog">
         <header class="modal-head">
@@ -3403,10 +3438,10 @@ function confirmDialog(title, message, confirmLabel) {
           <button type="button" class="link-btn" id="confirm-cancel" aria-label="Close">Close</button>
         </header>
         <div class="modal-body">
-          <p>${esc(message)}</p>
+          <p>${esc(message)}</p>${challengeHTML}
           <div class="modal-actions">
             <button type="button" class="btn small" id="confirm-no">Cancel</button>
-            <button type="button" class="btn small danger-solid" id="confirm-yes">${esc(confirmLabel)}</button>
+            <button type="button" class="btn small danger-solid" id="confirm-yes"${challenge ? ' disabled' : ''}>${esc(confirmLabel)}</button>
           </div>
         </div>
       </form>`;
@@ -3421,13 +3456,24 @@ function confirmDialog(title, message, confirmLabel) {
     document.getElementById('confirm-no').addEventListener('click', () => done(false));
     document.getElementById('confirm-yes').addEventListener('click', () => done(true));
     modal.showModal();
+    if (challenge) {
+      const input = document.getElementById('confirm-challenge');
+      const yes = document.getElementById('confirm-yes');
+      input.addEventListener('input', () => { yes.disabled = input.value.trim() !== code; });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && input.value.trim() === code) { e.preventDefault(); done(true); }
+      });
+      input.focus();
+    }
   });
 }
 
 async function resetTokens() {
+  // v2: the reset is irreversible and zeroes the live counters, so the
+  // confirm modal requires typing the displayed challenge code first.
   const ok = await confirmDialog('Reset token usage counters',
     'This zeroes the per-(provider, model) token usage stats. The action cannot be undone.',
-    'Reset counters');
+    'Reset counters', { challenge: true });
   if (!ok) return;
   const btn = document.getElementById('btn-tokens-reset');
   if (btn) { btn.disabled = true; btn.textContent = 'resetting…'; }
@@ -3450,7 +3496,12 @@ function renderLogsCard(target, lines) {
   if (!lines || lines.length === 0) {
     body = `<pre class="log-pre"><span class="log-empty">log is empty or unavailable</span></pre>`;
   } else {
-    const rendered = lines.map((l) => `<span class="log-line">${esc(l)}</span>`).join('');
+    // v2: logLineHTML (pure.js) tokenizes each raw line — timestamp prefix,
+    // severity token and key=value pairs get semantic coloring; every value
+    // is escaped inside the tokenizer. The colored spans must sit inside ONE
+    // wrapper: .log-line is a grid (gutter | content), so loose spans would
+    // each become their own grid item and scatter across both columns.
+    const rendered = lines.map((l) => `<span class="log-line"><span class="log-msg">${logLineHTML(l)}</span></span>`).join('');
     body = `<pre class="log-pre">${rendered}</pre>`;
   }
   const html = buildCard('Logs', lines ? `${lines.length} lines` : '', body, 'flush');
@@ -3803,9 +3854,9 @@ async function renderConfigTab() {
          <div id="preset-msg" aria-live="polite"></div>
        </div>
      </div>
-     <details class="editor" id="ed-provider"><summary>Provider scalars</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
-     <details class="editor" id="ed-route"><summary>Routes</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
-     <details class="editor" id="ed-settings"><summary>Settings (log / scheduling / request log / stats / cache)</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
+     <details class="editor" id="ed-provider"><summary>${iconChevron()}Provider scalars</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
+     <details class="editor" id="ed-route"><summary>${iconChevron()}Routes</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
+     <details class="editor" id="ed-settings"><summary>${iconChevron()}Settings (log / scheduling / request log / stats / cache)</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <div class="card" id="yaml-card">
        <header class="card-head"><h2>Raw YAML</h2><span class="meta" id="yaml-meta"></span></header>
        <div class="card-body">
@@ -4916,7 +4967,7 @@ function accountUsageDetails(p, snap, acctKey) {
   const { hint, open } = accountUsageState(snap);
   const openAttr = open ? ' open' : '';
   return `<details class="acct-section" data-acct="${esc(acctKey)}" data-sec="usage"${openAttr}>
-    <summary>Usage<span class="acct-hint">${esc(hint)}</span></summary>
+    <summary>${iconChevron()}Usage<span class="acct-hint">${esc(hint)}</span></summary>
     <div class="acct-section-body">${renderAccountUsage(p, snap)}</div>
   </details>`;
 }
@@ -4932,7 +4983,7 @@ function accountTokensDetails(rows, acctKey) {
   // Default the section to collapsed when there are no token rows ("no usage").
   const openAttr = rows.length ? ' open' : '';
   return `<details class="acct-section" data-acct="${esc(acctKey)}" data-sec="tokens"${openAttr}>
-    <summary>Token usage<span class="acct-hint">${esc(hint)}</span></summary>
+    <summary>${iconChevron()}Token usage<span class="acct-hint">${esc(hint)}</span></summary>
     <div class="acct-section-body">${renderAccountTokens(rows)}</div>
   </details>`;
 }
@@ -5681,11 +5732,13 @@ function analyticsMaybeAutoRefresh() {
 // (failures); otherwise deltas stay neutral — more requests or cost is not
 // inherently bad.
 function fmtDelta(delta, warn) {
-  if (delta == null) return '<span class="d">—</span>';
+  // v2: delta direction is colored by semantics (kpiDeltaClass): up is ok
+  // for normal metrics, err for warn metrics (failures rising); down/flat
+  // stays muted — quieter than red, since a drop is not an error.
+  if (delta == null) return '<span class="d flat">—</span>';
   const arrow = delta > 0 ? '▲' : delta < 0 ? '▼' : '';
-  const cls = warn && delta > 0 ? 'd warn' : 'd';
   const sign = delta > 0 ? '+' : '';
-  return `<span class="${cls}">${arrow} ${sign}${delta}%</span>`;
+  return `<span class="d ${kpiDeltaClass(delta, warn)}">${arrow} ${sign}${delta}%</span>`;
 }
 
 // analyticsRenderKpis renders the summary chips: tokens / tok-s / cache
@@ -5740,7 +5793,7 @@ function analyticsRenderKpis(host, resp) {
   host.innerHTML = chips.map((chip) => `
     <div class="an-kpi">
       <div class="k">${esc(chip.k)}</div>
-      <div class="v"${chip.tip ? ` title="${esc(chip.tip)}"` : ''}>${esc(chip.v)}</div>
+      <div class="v${chip.k === 'failures' && Number(chip.v) > 0 ? ' err' : ''}"${chip.tip ? ` title="${esc(chip.tip)}"` : ''}>${esc(chip.v)}</div>
       <div>${fmtDelta(chip.d, chip.warn)}${chip.note ? `<div class="note" title="${esc(chip.note)}">${esc(chip.note)}</div>` : ''}</div>
     </div>`).join('');
 }
@@ -6198,25 +6251,38 @@ function analyticsRenderTable(panel, resp, metricId) {
   const host = panel.querySelector('#an-table');
   if (!host) return;
   const rows = analyticsTableRows(resp && resp.series);
+  // v2: identical table shape to Status→Dashboard — health status badge,
+  // ttft column, graded latency/ttft/tok-s cells, $/1M tok as a cost-cell
+  // hover note, cost share as a plain number. The two views differ only in
+  // their window (Analytics = selected range, Dashboard = fixed 1h).
+  const health = new Map(modelHealthFromSeries(resp && resp.series).map((r) => [r.label, r]));
   const totalCost = rows.reduce((sum, r) => sum + (r.cost || 0), 0);
   rows.sort((a, b) => analyticsRowSortKey(b, metricId) - analyticsRowSortKey(a, metricId));
+  const gradeBadge = (g) => g == null ? '<span class="badge muted">n/a</span>'
+    : `<span class="badge ${g}">${g === 'ok' ? 'healthy' : g === 'warn' ? 'degraded' : 'poor'}</span>`;
+  const graded = (dim, text) => `<td class="num${dim && dim.grade ? ' ' + dim.grade : ''}">${text}</td>`;
   const body = rows.map((r) => {
+    const h = health.get(r.label) || {};
+    const dims = h.dims || {};
     const share = r.cost != null && totalCost > 0 ? r.cost / totalCost * 100 : null;
+    const costTip = r.costPerMTok == null ? '' : ` title="$${r.costPerMTok.toFixed(2)} per 1M tokens"`;
+    const shareTip = share == null ? '' : ` title="${share.toFixed(1)}% of priced cost"`;
     return `<tr>
       <td class="mono">${esc(r.label)}</td>
+      <td>${gradeBadge(h.grade)}</td>
       <td class="num">${fmtNum(r.requests)}</td>
       <td class="num" title="${esc(fmtNum(r.tokens))} tokens">${fmtCompact(r.tokens)}</td>
       <td class="num">${r.errPct == null ? '—' : r.errPct.toFixed(1) + '%'}</td>
-      <td class="num">${r.latencyMs == null ? '—' : fmtNum(Math.round(r.latencyMs)) + 'ms'}</td>
-      <td class="num" title="${r.tokSec == null ? '' : esc(r.tokSec.toFixed(2) + ' tokens per call-second')}">${r.tokSec == null ? '—' : r.tokSec.toFixed(1)}</td>
-      <td class="num">${r.cost == null ? 'n/a' : '$' + r.cost.toFixed(4)}</td>
-      <td class="num">${r.costPerMTok == null ? '—' : '$' + r.costPerMTok.toFixed(2)}</td>
-      <td class="an-share"><div class="an-bar" title="${share == null ? '' : share.toFixed(1) + '% of priced cost'}"><i style="width:${share == null ? 0 : Math.min(share, 100)}%"></i></div><span>${share == null ? '—' : share.toFixed(1) + '%'}</span></td>
+      ${graded(dims.latency, r.latencyMs == null ? '—' : fmtNum(Math.round(r.latencyMs)) + 'ms')}
+      ${graded(dims.ttft, r.ttftMs == null ? '—' : fmtNum(Math.round(r.ttftMs)) + 'ms')}
+      ${graded(dims.toksec, r.tokSec == null ? '—' : r.tokSec.toFixed(1))}
+      <td class="num"${costTip}>${r.cost == null ? 'n/a' : '$' + r.cost.toFixed(4)}</td>
+      <td class="num"${shareTip}>${share == null ? '—' : share.toFixed(1) + '%'}</td>
     </tr>`;
   }).join('');
   host.innerHTML = `<table class="table">
-      <thead><tr><th>series</th><th class="num">requests</th><th class="num">tokens</th><th class="num">err</th><th class="num">avg lat</th><th class="num">tok/s</th><th class="num">cost</th><th class="num">$/1M tok</th><th class="num">cost share</th></tr></thead>
-      <tbody>${body || '<tr><td colspan="9" class="hint">no series in range</td></tr>'}</tbody>
+      <thead><tr><th>series</th><th>status</th><th class="num">requests</th><th class="num">tokens</th><th class="num">err</th><th class="num">avg lat</th><th class="num">ttft</th><th class="num">tok/s</th><th class="num">cost</th><th class="num">cost share</th></tr></thead>
+      <tbody>${body || '<tr><td colspan="10" class="hint">no series in range</td></tr>'}</tbody>
     </table>`;
 }
 

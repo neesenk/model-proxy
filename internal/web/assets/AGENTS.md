@@ -2,6 +2,13 @@
 
 修改本目录前读取 `../../../../docs/web-api.md`。API shape、状态字段和 mutation 语义以该文档为准。
 
+## 设计系统（v2）
+
+当前 UI 是 v2 设计系统（历史上曾与 v1 在 `/v2/` 并行共存，现已原位替换、v1 已删除；`/v2/` 仅 301 到 `/ui/`）。`styles.css` 文件头注释是设计契约：rem 字阶（根字号是唯一字号旋钮）、圆角分级、海拔分层、选中态统一为指示条/凸起滑块（实心琥珀只留给 `.btn.primary`）、状态一律 badge、颜色只编码语义。
+
+- 纯函数单一事实源在 `pure.js`（含 v2 展示辅助：iconPin/iconRefresh/iconChevron/statusBadge*/kpiDeltaClass/logLineHTML），全部归 `jstests/pure.test.mjs` 行为覆盖；新增纯逻辑先进 pure.js 并补用例。
+- `node --check` 语法门禁与 `docs/frontend` 契约测试（assets_test.go）覆盖 `app.js`/`pure.js`。
+
 ## 边界
 
 - UI 展示后端返回的状态，不在前端重新推导熔断、quota 或 schedule 结论。
@@ -34,10 +41,10 @@
 
 ## 样式约定
 
-- 设计基调见 `styles.css` 文件头注释：仪表盘美学、细线边框、等宽展示数据、单一琥珀强调色；颜色只编码语义（ok/warn/err），不做装饰。
 - 颜色一律引用 `:root` 的 CSS 变量（`--surface-2`、`--border`、`--text`、`--muted`、`--accent` 等），禁止写死色值——dark 主题靠 `prefers-color-scheme` 重定义同一组变量成立，写死色值会在深色下破损。
+- 字号一律 rem（根字号 `html { font-size }` 是全局缩放旋钮）；间距/固定 chrome 高度用 px。
 - 表单控件必须套用既有的控件样式组之一：整宽表单用 `.field`（input/textarea/select），工具行内联控件用 `.req-input`，路由编辑行用 `.route-target-row`。**裸 `<input>`/`<select>` 会渲染成浏览器原生样式，与主题不符**——新增控件时先归组，不要写一次性 ID 样式。
-- 控件视觉语言统一为：`var(--surface-2)` 底 + `1px solid var(--border)` + `var(--r-card)` 圆角 + 13px，focus 态 `outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent)`；新控件样式沿用这组值。
+- 控件视觉语言统一为：`var(--surface-2)` 底 + `1px solid var(--border)` + `var(--r-control)` 圆角，focus 态 `outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent)`；新控件样式沿用这组值。
 - 原生控件优先保留语义：能用 `accent-color`（checkbox/radio）就不用 `appearance: none` 全自定义；确需自定义时必须补全勾选标记、focus 环、disabled 态。
 
 ## 验证

@@ -252,7 +252,7 @@ model-proxy cache                  # 条目数 / 命中 / 未命中 / 命中率�
 
 ## Web UI
 
-代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。**默认开启；回环 `listen` 下无鉴权（本地可信，非回环需 `web.auth`，见「网络部署鉴权」）**。七个标签页（Config 页含 Add provider preset 向导：选内置预设 → 合并+热重载 → Accounts 加凭据）：
+代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。UI 为 v2 设计系统版（语义状态徽章、SVG 图标、亮暗双主题、可缩放字阶）。**默认开启；回环 `listen` 下无鉴权（本地可信，非回环需 `web.auth`，见「网络部署鉴权」）**。七个标签页（Config 页含 Add provider preset 向导：选内置预设 → 合并+热重载 → Accounts 加凭据）：
 
 - **Status** — 实时面板：uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择、请求计数器（含平均延迟）、观测到的 token 用量（按 provider×model）、按 agent 的用量卡片、响应缓存命中率、日志尾部。Models 小节展示启动期协议探测的每 provider×model 三协议能力矩阵（chat/anthropic/responses 的 yes/no/unknown，数据源 `GET /api/models`）。
 - **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(<configDir>/.model-proxy/back/<base>.<时间戳>.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route`，通过 yaml.Node API **保留注释与键序**）。

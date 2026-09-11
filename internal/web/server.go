@@ -198,14 +198,19 @@ func originHostPort(origin string) string {
 }
 
 func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
-	// Embedded assets contain no runtime data or credential. Under admin auth
-	// they form the bootstrap page that collects a token and creates an
-	// HttpOnly API session; data endpoints remain fail-closed below.
+	s.serveEmbeddedUI(w, r, "/ui/", s.assetRoot)
+}
+
+// serveEmbeddedUI serves one static asset subtree. Embedded assets contain no
+// runtime data or credential. Under admin auth they form the bootstrap page
+// that collects a token and creates an HttpOnly API session; data endpoints
+// remain fail-closed below.
+func (s *Server) serveEmbeddedUI(w http.ResponseWriter, r *http.Request, prefix, root string) {
 	auth := s.captureAdminAuth()
 	if !guardBrowserOrigin(w, r, auth.enabled, s.browserListen) {
 		return
 	}
-	name := strings.TrimPrefix(r.URL.Path, "/ui/")
+	name := strings.TrimPrefix(r.URL.Path, prefix)
 	if name == "" || strings.HasSuffix(name, "/") {
 		name = "index.html"
 	}
@@ -217,7 +222,7 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	data, err := fs.ReadFile(s.assets, s.assetRoot+"/"+name)
+	data, err := fs.ReadFile(s.assets, root+"/"+name)
 	if err != nil {
 		http.NotFound(w, r)
 		return
