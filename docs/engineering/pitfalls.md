@@ -102,10 +102,19 @@
     daemon；已有 watcher 时阈值数值热改生效（每次 check 经端口读当前 cfg 快照
     拷贝）。去重
     记录是进程内的，重启后同一 (scope, 月份, 阈值) 会重新告警一次。
+32. **会话身份双轨**：观测面（request log / live events / `/api/sessions`）的
+    `session_id` 来自 `request_log.session_headers` 允许列表（`requestlog.SessionID`，
+    有序取第一个非空头），而 guard 域（session_scan 分片检测、
+    `guard.adjudicate` 会话拉黑，见 `internal/forward/forward.go`）硬编码
+    `x-claude-code-session-id`。operator 把允许列表配成其它头时，两套会话维度
+    对不上：拉黑/分片检测拿不到会话键（不拉黑、不跨请求重组），但 Live/Requests
+    页照常按会话聚合——排查"为什么没拉黑"先查客户端发的是不是 claude-code 头。
+    统一成单一解析点是长期方向；短期改动 guard 域会话键时必须同步
+    decision 20/36 的"无头不拉黑"约束。
 
 ## 测试与 CI
 
-32. 客户端读完响应 ≠ 服务端 commit 效应落账：带 Content-Length 的响应，客户端
+33. 客户端读完响应 ≠ 服务端 commit 效应落账：带 Content-Length 的响应，客户端
     收满字节即返回，handler goroutine 此时可能还没执行 `flushCopy` 之后的效应
     （`Effects.Committed` 的 Requests/latency/attempts-ok、agent 计数、
     body.Close 触发的 request log 入队、fusion 的 run 计数）。本机核多负载低
@@ -115,13 +124,13 @@
     断言 commit 前效应（failures/failovers/guard 命中）或用
     `httptest.ResponseRecorder` 同步驱动 handler 的测试不受影响。注意 fake
     upstream 一次性 `Write` 的 "SSE" 同样带 Content-Length，不享流式豁免。
-33. 覆盖率口径以 CI 工具链为准：CI 经 `go-version-file: go.mod` 用 go1.26.4，
+34. 覆盖率口径以 CI 工具链为准：CI 经 `go-version-file: go.mod` 用 go1.26.4，
     本机更高版本的语句计数不同（实测 `internal/cli/models` 本地 63.4% vs CI
     60.3%，足以跌破 floor）。floor/baseline 验证用
     `GOTOOLCHAIN=go1.26.4 scripts/cover.sh`；`go test` 结果缓存会掩盖重测，
     本地压测与复跑一律 `-count=1`。cover.sh 在本地工具链与 go.mod 不一致时
     会打印漂移警告（不 fail，CI 口径仍是权威）。
-34. `post()` 返回 ≠ post-commit dispatch 已执行：shadow 的
+35. `post()` 返回 ≠ post-commit dispatch 已执行：shadow 的
     `dispatchShadowAfterCommit`（`internal/forward/forward.go`）在响应写给
     客户端之后才在请求 goroutine 里同步跑，客户端返回时它可能还没执行。对
     「dispatch 恰好发生在某窗口内」（如并发 gate 饱和期）的断言，用计数

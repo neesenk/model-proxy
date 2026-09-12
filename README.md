@@ -244,6 +244,8 @@ model-proxy replay <request_id> --to kimi-code   # 用另一个后端重答历�
 
 # 安全审计（离线直读审计日志，不需 daemon）
 model-proxy audit                  # 最近的 guard 命中（秘密/路径）与 takeover 漂移记录
+model-proxy guard blocks           # AI 二次判定拉黑的会话列表（guard.adjudicate）
+model-proxy guard unblock <sid>    # 解除一个被拉黑的会话
 model-proxy audit --kind drift --from 7d --json   # 过滤 + 原始 JSON
 model-proxy audit --stats --from 7d  # 聚合视图：by kind/命中名 top10/agent top10/action（--json 出结构化聚合）
 
@@ -260,7 +262,7 @@ model-proxy cache                  # 条目数 / 命中 / 未命中 / 命中率�
 - **Accounts** — 列出每个 provider 的账号（`id` / `label` / `added_at`，aqp/codex 额外显示 email；**响应结构里根本没有 key 字段，secret 不可能被序列化出去**）；apikey 类 provider 可在 UI 添加/删除账号；**每个账号卡片有 Test 按钮**（真实最小请求测活，显示 HTTP 状态 + 延迟）；aqp/codex 走**异步登录**（浏览器完成 SSO / OAuth device flow → UI 轮询直到 `done`/`error`）。
 - **Analytics** — 分析视图：KPI 行（requests/tokens/cost/failures，各带等长前窗环比 Δ%）+ **单张 metric 可切换趋势图**（tokens/cost/requests/errors/latency/ttft/cache，全部半透明柱状；悬停 tooltip；图例超两行收进 "+N more"；x 轴本地 24h 制、右侧留白）+ 排行榜表格（err%/avg lat/$ 每 1M tok/cost share，按当前 metric 排序）。时间选择器与 Status→Token usage 同款（预设+双月日历），粒度 auto/minute/hour/day/week/month 与窗口跨度联动（小时窗口只剩分钟）；`by model|agent` 切维度；价格来自 OpenRouter 目录或 config `prices:`，未定价显示 `n/a` 并在 cost chip 标记。per-(provider,model) 的 token/请求总量在 Status 页 Token Usage，两页不重复。
 - **Requests** — 请求日志查询（需 `request_log.enabled`）：按 session/model/provider/状态/时间/影子过滤，点击行展开完整 request/response body；影子评测的记录带 `shadow` 徽标。顶部 **session 下拉**（选项来自 `/api/sessions`）选中后，表格上方显示该会话汇总（请求数 / input+output / 缓存读写 / 平均延迟 / 错误 / 等价成本 / model、provider），表格按 `session=` 过滤，仍可与 model/provider/shadow/errors 叠加。
-- **Security** — 安全审计查询（需 `guard.audit`）：guard 命中（秘密/路径类型）与 takeover 漂移记录，按 kind/时间过滤；只展示类型名与路由元数据，匹配内容永不进入 UI。每个客户端会话的 token 等价成本汇总在 `/api/sessions`（Requests 页同源数据）。
+- **Security** — 安全视图（审计记录需 `guard.audit`）：顶部 KPI 行（guard 命中 / 拉黑会话 / 判定通道 LLM 用量——真实模型调用次数与 in/out token，缓存命中与在途去重不计费）；**Blocked sessions** 卡列出 `guard.adjudicate` 高 verdict 拉黑的会话，逐行解除或一键全部解除（持久化跨重启）；**Activity** 合并时间线把审计记录（秘密/路径类型、takeover 漂移）与 AI 判定 verdict 放进同一 feed 新到旧展示，可按 kind 过滤——被屏蔽的 low verdict 只在这里可见。全部只展示类型名与路由元数据，匹配内容永不进入 UI。每个客户端会话的 token 等价成本汇总在 `/api/sessions`（Requests 页同源数据）。
 - **Live** — 实时请求监视（SSE 推送）：哪个 agent 正在发请求、路由到哪个上游、状态/token/耗时——抓「疯狂重试的 agent」就靠它。顶部 **session 选择器**可选一个客户端会话，看该会话的请求分析（请求数 / input+output / 缓存读写 / 平均延迟 / 错误 / 等价成本 / model、provider），实时行与持久化行合并、逐行可展开 body。会话 id 来自 `request_log.session_headers` 允许列表（Claude Code/OpenCode 默认带；pi 需 takeover 模板写入的 `compat.sendSessionAffinityHeaders`）。
 
 **所有写操作都会即时热重载运行中的 serve（进程内 `p.reload`，无需重启）**：改 config、增删账号、aqp/codex 登录完成 —— 改动立即生效。账号增删虽不改 `config.yaml`，但 reload 会重建 providers（重新读池文件），新加/删除的账号随即（取消）展开成虚拟 provider；reload 还会顺手清空熔断/限频/粘性状态并重建响应缓存，所以 UI 改动也是"给卡住的 provider 复位"的手段。
@@ -411,6 +413,8 @@ routes:
 - **分片泄露检测（`guard.session_scan`，默认开）**：单请求扫描挡不住把秘密拆成多段、每次请求带一段的偷法。代理按 `x-claude-code-session-id` 会话头维护有界内存窗口（每会话保留最近请求 body 尾部 32KiB，LRU 上限 256 会话、总量 ≤8MiB，reload 不清、永不落盘/日志），跟踪每个 known-secret 在该会话中**按序出现的最长前缀**（每段 ≥8 字节）；后续请求补齐剩余部分即命中 `known_secret_fragmented`（计数器/live event/审计与单请求命中同通路）。只覆盖 known-secret（池凭据/OAuth token）原文形态；段间隔超过 32KiB 窗口或会话被淘汰后不追溯（有界启发式，非会话录像）；无会话头的请求不聚合（单请求扫描已覆盖）。**redact 对分片命中降级为 log**——秘密横跨多个请求，任何一个 body 都无法改写；block 拒绝补齐段所在请求（400），此前的分段已放行（它们各自是干净请求）。
 
 动作与观测：`guard.secrets` 控制秘密类命中（log/redact/block/off），`guard.paths` 控制路径命中（log/block/off；只作用于 strong，weak 完全忽略，见上）。命中只上报**模式类型名/路径类别名**（live event + `("guard", <名>)` 计数器），匹配内容永不落日志、事件或测试输出。同一请求同时命中两类时两类都计数/审计（secrets=block 不短路 paths 扫描），响应动作 secrets 优先、paths=block 只阻断 strong 命中。命中持久化到安全审计日志（默认 `~/.model-proxy/log/security/security*.log`，0600，与请求日志同一持久化模式：活动文件按天命名、同日重启追加同一文件，超大小归档轮转，30 天保留），用 `model-proxy audit [--kind secret|path|drift] [--from 1h] [--json]` 离线查询；`doctor --live` 检出 takeover 漂移（客户端 BASE_URL 被改离代理——API key 劫持手法）时也会写一条 `drift` 审计记录。
+
+**AI 二次判定（`guard.adjudicate`，默认关；本仓库随附的 `config.yaml` 是显式开启的示例）**：规则表/custom 秘密命中与 strong 路径命中在 `secrets/paths = log` 档下不再立即记录——命中片段（±256B 上下文，窗口内**其它**秘密命中先掩码）异步发给指定模型（`guard.adjudicate.model`，provider 直连 `/v1/messages`，不进转发管线：不重扫 guard、不进 cache/request log/forward 统计）判定：**high**＝真实泄露 → 审计记录（`verdict` 字段）+ 可选拉黑该会话；**low**＝fixture/示例/文档等良性内容 → 屏蔽（只留 `adjudicated_low` 计数器与 WebUI 最近判定 feed，不落审计）。结果按内容 hash 缓存并持久化（`~/.model-proxy/guard_verdicts.json`，只存 hash→verdict）——会话历史回显同一片段只计费一次；判定通道自带 LLM 用量记账（真实调用次数与 in/out token，缓存命中不计费），见 WebUI Security 页 KPI 与 `/api/security/adjudications` 的 `stats` 字段。会话拉黑持久化（`guard_blocks.json`）直到显式解除：`model-proxy guard unblock <session-id>` 或 WebUI Security 页。队列满、单请求判定数超上限（4 个 job）、跨规则同内容去重、模型错误、超时一律 **fail-open** 回到经典立即记录（verdict=error/skipped），绝不因判定器不可用而静音 guard。known-secret 精确通道与 secrets/paths=block 同步拦截不参与判定。注意：开启即表示接受把命中片段发给指定模型（这是"凭据不出机器"红线的显式 opt-in 例外，可用本地模型）。
 
 规则维护：你的凭据免维护（自动派生）；新 key 格式用 `guard.extra_patterns`（config 热 reload 即时生效）或向上游同步内置表（升 `rules.json` 的 upstream pin → 重抽 → review）；敏感路径用 `guard.extra_paths`。
 

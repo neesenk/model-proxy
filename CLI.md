@@ -1023,7 +1023,7 @@ time           kind    agent         route             names                 act
 <MM-DD HH:MM:SS(14)> <kind(7)> <agent(12)> <exposed(16)> <逗号连接(20)> <action(7)> <detail>
 ```
 
-记录按时间倒序（最新在前）。空结果 -> `(no security audit records in <DIR>)`；目录不存在 -> `(no security audit records yet — <DIR> does not exist)`（均 exit 0）。扫描中跳过的不可解析行数（含无法打开的日志文件，每个计 1）追加一行 `  (<N> unreadable line(s) skipped)`；文件末尾无换行符的半行是 daemon 写入中的撕裂尾行，直接忽略、不计入 skipped。detail 列渲染前过滤控制字符（`\n`/`\t`/ANSI 转义等 -> 空格），防生产者破坏表格。
+记录按时间倒序（最新在前）。表格列：`time kind agent route names action verdict detail`——`verdict` 仅 AI 二次判定（`guard.adjudicate`）来源的记录有值（`high`＝模型判真实泄露；`error`/`skipped`＝判定调用失败/队列满，fail-open 回到经典立即记录），经典立即记录为空；`detail` 对 high/error 记录携带 scrub 后的模型解释（≤120 字符，命中内容已掩码）。空结果 -> `(no security audit records in <DIR>)`；目录不存在 -> `(no security audit records yet — <DIR> does not exist)`（均 exit 0）。扫描中跳过的不可解析行数（含无法打开的日志文件，每个计 1）追加一行 `  (<N> unreadable line(s) skipped)`；文件末尾无换行符的半行是 daemon 写入中的撕裂尾行，直接忽略、不计入 skipped。detail 列渲染前过滤控制字符（`\n`/`\t`/ANSI 转义等 -> 空格），防生产者破坏表格。
 
 ### stdout（`--stats` 聚合，`FormatAuditStats`）
 
@@ -1044,7 +1044,23 @@ by action
 
 ---
 
-## 20. `cache` — 精确响应缓存统计（需 daemon + web.enabled）
+## 20. `guard` — AI 二次判定会话拦截管理（需 daemon）
+
+```
+guard blocks [--json] [--config PATH]
+guard unblock <session-id> [--config PATH]
+```
+
+`guard.adjudicate` 开启且 `block_session: true` 时，pattern 命中被指定模型判为 **high** 的会话会被拉黑（400 拒绝该会话后续请求，直至显式解除）；拉黑状态持久化（`~/.model-proxy/guard_blocks.json`）跨重启保留。本命令是解除面之一（另一面是 WebUI Security 页的 Blocked sessions 表）。
+
+- `guard blocks`：GET `/api/security/blocks`，按时间新到旧列出（session、rule、kind、ts、reason、request、model、解除命令提示）；空表输出 `• no adjudicated-blocked sessions`。`--json` 原样输出数组。
+- `guard unblock <session-id>`：DELETE `/api/security/blocks/<id>`，成功输出 `✓ unblocked session <id> — requests are admitted again`；未知会话 404（exit 1）。
+- 错误路径：daemon 不可达 / HTTP 非 200 → `✗ <message>` exit 1；无子命令或未知子命令 → usage exit 1。
+- 实现与锁定测试：`internal/cli/guard/guard.go`、`guard_cli_test.go`；判定链路本体见 `internal/adjudicate` 与 README「出站安全扫描与审计」。
+
+---
+
+## 21. `cache` — 精确响应缓存统计（需 daemon + web.enabled）
 
 `CmdCache`（`internal/cli/status/cache_cmd.go`）GET 运行中 daemon 的 `/api/status`，只取其中的 `cache` 对象（`{enabled,hits,misses,entries,models}`，与 Web UI Status 的 Cache 页卡同一字段）渲染：先四行全局表 `entries (live)` / `hits` / `misses` / `hit rate`，再按 model 的明细表（每行 `MODEL / ENTRIES / HITS / MISSES / HIT RATE`，按 model 名排序；无明细时省略）。
 

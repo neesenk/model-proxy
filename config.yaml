@@ -350,6 +350,40 @@ cache:
 #                         # guaranteed substring of every regex match (pre-filter)
 #   extra_paths:          # user sensitive paths, literal body match (~ kept literal)
 #     - ~/.company/secrets
+#   adjudicate:           # AI second opinion for pattern hits (default off).
+#                         # When on, rule-table/custom secret hits and strong
+#                         # path hits are NOT recorded immediately: the matched
+#                         # span plus masked context is sent (async, cached by
+#                         # content hash) to the designated model, which returns
+#                         # high (real leak: audit record + optional session
+#                         # block) or low (benign fixture/doc/example:
+#                         # suppressed). Queue overflow, the per-request cap
+#                         # (4 jobs), same-content dedup across rules, model
+#                         # errors and timeouts fail OPEN to the classic
+#                         # immediate record (verdict error/skipped in the
+#                         # audit log). Enabling opts in to sending the matched
+#                         # snippet to the designated model.
+#     enabled: false
+#     model: ""           # required when enabled: exposed route name of the
+#                         # judging model; its provider needs anthropic_base_url
+#     block_session: true # high verdict blocks the session (persists across
+#                         # restarts) until 'model-proxy guard unblock' or the
+#                         # WebUI Security page clears it
+#     timeout: 20s        # per-call budget
+#     workers: 2          # worker count (1..8; restart to change)
+#     max_queue: 256      # pending bound; overflow fails open
+#     context_bytes: 256  # context each side of the hit sent for judgment
+#     cache_max: 4096     # persisted verdict cache size (~/.model-proxy/
+#                         # guard_verdicts.json, hash keys only)
+
+# Opt-in explicit enable (the field default above is off): enabling means the
+# matched snippet plus masked context is sent to this model for judgment.
+guard:
+  adjudicate:
+    enabled: true
+    model: glm-5.3-flash   # judging model (derived route; zhipu/volcengine/
+                           # shopee/aqp all carry anthropic_base_url)
+    block_session: true
 
 # Shadow evaluation: after the primary response commits, re-send the same request
 # to a shadow backend, record-only — never affects the client, circuit breakers,

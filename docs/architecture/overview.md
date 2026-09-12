@@ -304,6 +304,14 @@ redact 前请求体尾部与跨请求分片进度。窗口可能含凭据，只�
 序列化/落盘/API；它是进程生命期的跨代观察态（不进 RuntimeSnapshot，reload 不清空），
 红线与启发式边界见 `docs/decisions/intentional-behaviors.md` 条目 20/21。
 
+`internal/adjudicate` 是无仓库内依赖的 AI 二次判定叶子包（guard.adjudicate），
+拥有：判定 Job/Result 模型、Caller/Sink/RuntimeConfig 端口、有界任务队列 +
+worker + 在途去重、verdict LRU 缓存（持久化 `guard_verdicts.json`，只存 hash→verdict）、
+高verdict 会话拦截表（持久化 `guard_blocks.json`，直至显式解除）与最近判定 ring。
+匹配内容（Job.Hit）只在内存中流转，永不持久化/序列化/进 DTO；模型调用与观测
+副作用分别经 Caller/Sink 端口由 `internal/app` 注入（判定调用走 probe 直连配方，
+不进 forward 管线，见 `internal/app/guard_adjudication.go`）。
+
 `internal/forward` 是请求转发管线包：从「snapshot + HTTP 请求」到「响应 commit 或终态错误」
 的全部编排归它——body 读取与上限、route 解析、pin/force-provider 硬选择
 （含 cache bypass）、outbound guard 扫描与统一动作评估、精确响应 cache、schedule →
@@ -458,7 +466,7 @@ daemon/supervisor 的 signal 与 pid/probe 编排。child process detach 属性�
 不得回依赖根 `cli`（DAG guard 强制）：`cli/login`（login/import）、
 `cli/models`（models/test）、`cli/doctor`（doctor）、`cli/presets`（add/presets）、
 `cli/stats`（stats/usage）、`cli/audit`（audit）、`cli/status`（serve
-status/schedule/routes）、`cli/admin`（pin/unpin/unfreeze/freeze）、`cli/diag`
+status/schedule/routes）、`cli/admin`（pin/unpin/unfreeze/freeze）、`cli/guard`（guard blocks/unblock）、`cli/diag`
 （wire/replay/shadow）、`cli/config`（config init|print|check）、
 `cli/account`（logout）、`cli/serve`（daemon/stop/reload 编排）。
 `cli/clitest` 是纯测试支撑包：拥有子进程 harness（TestHelperProcess 分发）与共享
@@ -505,13 +513,13 @@ application → serveAssembly → applicationRuntime → Proxy
 该清单与 `internal/archtest/architecture_dependency_dag_contract_test.go` 的
 `internalRepositoryImportPolicy` 互为镜像——两处必须同步修改：
 
-- 叶子包（不得依赖其他 `model-proxy/*` 包）：`archtest`（纯测试包）、`cache`、
+- 叶子包（不得依赖其他 `model-proxy/*` 包）：`adjudicate`、`archtest`（纯测试包）、`cache`、
   `configedit`、`credstore`、`daemonctl`、`display`、`guard`、`httpx`、
   `observe/counters`、`observe/events`、`observe/logx`、`upstreamproxy`、
   `transport/bodycapture`、`webauth`；
 - `accounts → credstore`；
 - `guard/session → guard`；
-- `app → accounts, admin, appapi, cache, catalog,
+- `app → accounts, adjudicate, admin, appapi, cache, catalog,
   config, configedit, credstore, display, forward, fusion, guard, guard/session, httpx, login, observe/budget,
   observe/counters, observe/events, observe/logx, observe/requestlog, observe/seclog, observe/stats, presets,
   pricing, probe, protocol, provider, providerbuild, routing, runtime, runtime/wirecap, shadow,
@@ -519,13 +527,15 @@ application → serveAssembly → applicationRuntime → Proxy
 - `admin → accounts, appapi, cache, config, configedit, credstore, fusion, login,
   observe/counters, observe/logx, observe/requestlog, observe/seclog, observe/stats, presets, pricing, probe,
   provider, routing, runtime, runtime/wirecap`（Web admin 应用服务；不得回依赖 app/web/cli）；
-- `appapi → fusion, observe/requestlog, observe/stats, presets, pricing`；
+- `appapi → adjudicate, fusion, observe/requestlog, observe/stats, presets, pricing`
+  （adjudicate 仅为其 BlockEntry/Result 快照类型提供 DTO 别名，见 appapi/types.go）；
 - `cli → cli/account, cli/admin, cli/audit, cli/config, cli/diag, cli/doctor,
-  cli/framework, cli/login, cli/models, cli/presets, cli/stats, cli/status, config, display, takeover,
+  cli/framework, cli/guard, cli/login, cli/models, cli/presets, cli/stats, cli/status, config, display, takeover,
   observe/logx`（registry + 进程级 shell：调度循环、help、takeover/restore）；
 - `catalog → upstreamproxy`；
 - `cli/account → accounts, cli/framework, cli/serve, config, display, login, providerbuild`（`logout`）；
 - `cli/admin → cli/framework, config, daemonctl, display`（`pin`/`unpin`/`unfreeze`/`freeze`）；
+- `cli/guard → appapi, cli/framework, config, daemonctl, display`（`guard blocks`/`guard unblock`）；
 - `cli/audit → cli/framework, config, observe/seclog`（`audit`）；
 - `cli/clicommon → appapi, daemonctl, display, provider`；
 - `cli/clitest → accounts`（纯测试支撑：子进程 harness 与共享 fixture，生产代码不得依赖）；
