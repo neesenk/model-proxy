@@ -247,6 +247,61 @@ export function cacheHitRate(hits, misses) {
   return (100 * h / total).toFixed(1) + '%';
 }
 
+// providerCapsSummary folds one modelCapMatrix entry into the counts the
+// Accounts test-matrix header shows: how many models the startup probe
+// recorded, and how many serve each protocol leg (chat/anthropic/responses
+// "yes" verdicts — the same data source as the Status Models card, so
+// account liveness and protocol capability read side by side). An entry
+// without probe data normalizes to zeros.
+export function providerCapsSummary(entry) {
+  const models = (entry && entry.models) || [];
+  const yes = (v) => (v === 'yes' ? 1 : 0);
+  let chat = 0;
+  let anthropic = 0;
+  let responses = 0;
+  for (const m of models) {
+    chat += yes(m.chat);
+    anthropic += yes(m.anthropic);
+    responses += yes(m.responses);
+  }
+  return { models: models.length, chat, anthropic, responses };
+}
+
+// ruleHitsLeaderboard folds the Security feed into per-rule hit counts for
+// the rule-ops card: every audit record counts once per name it carries, and
+// the adjudication ring's LOW verdicts count too — suppressed lows leave no
+// audit record, yet they are exactly the benign noise the leaderboard's
+// "enable adjudicate" hint is about. Rows come back hits-desc (ties: newer
+// last hit, then name asc). adjudicable marks the channels the AI second
+// opinion can defer (pattern rules and path categories; the known_secret*
+// exact channels never defer — zero false positives by construction).
+export function ruleHitsLeaderboard(records, adjudications) {
+  const rows = new Map();
+  const bump = (name, kind, ts) => {
+    if (!name) return;
+    const key = kind + '\u0000' + name;
+    const row = rows.get(key) || {
+      name, kind,
+      hits: 0,
+      lastTs: 0,
+      adjudicable: !name.startsWith('known_secret'),
+    };
+    row.hits++;
+    const t = Number(ts || 0);
+    if (t > row.lastTs) row.lastTs = t;
+    rows.set(key, row);
+  };
+  for (const r of records || []) {
+    if (!r) continue;
+    for (const n of r.names || []) bump(n, r.kind, r.ts);
+  }
+  for (const a of adjudications || []) {
+    if (a && a.verdict === 'low') bump(a.rule, a.kind, a.ts);
+  }
+  return [...rows.values()].sort((x, y) =>
+    y.hits - x.hits || y.lastTs - x.lastTs || x.name.localeCompare(y.name));
+}
+
 // TOKEN_RANGES: the preset dimensions of the Status tab's token-usage time
 // selector (the 时间维度 pattern: rolling presets, day/month-aligned presets,
 // a custom range, and all-time). 'all' is the server default (cumulative
@@ -1160,6 +1215,65 @@ export function liveSessionSummary(rows, agg) {
   };
 }
 
+// sessionHealthSummary derives the "is this session healthy" signals from
+// the merged rows only (no aggregate dependency): span vs ACTIVE time (idle
+// gaps over 2 min drop — the same segmentation the timeline uses), latency
+// percentiles (avg hides tails), failover count, cache hit rate, throughput,
+// model distribution and shadow count. Missing signals stay null/0/[] and
+// drop out at render time. Shared by both session views.
+export function sessionHealthSummary(rows) {
+  const list = (Array.isArray(rows) ? rows : [])
+    .map((r) => r || {})
+    .map((r) => {
+      const ts = typeof r.ts === 'number' ? r.ts : (Number.isFinite(Date.parse(r.ts)) ? Date.parse(r.ts) : null);
+      return {
+        ts,
+        latencyMs: Number(r.latencyMs),
+        ttftMs: Number(r.ttftMs),
+        attempt: Number(r.attempt) || 0,
+        input: Number(r.input) || 0,
+        output: Number(r.output) || 0,
+        cacheRead: Number(r.cacheRead) || 0,
+        model: String(r.model || '').trim(),
+        shadow: !!r.shadow,
+      };
+    })
+    .filter((r) => r.ts != null)
+    .sort((a, b) => a.ts - b.ts);
+  const out = { spanMs: 0, activeMs: 0, p50Ms: null, p95Ms: null, ttftP50Ms: null, failovers: 0, cacheHitPct: null, tokPerSec: null, models: [], shadow: 0 };
+  if (!list.length) return out;
+  out.spanMs = Math.max(list[list.length - 1].ts - list[0].ts, 0);
+  // Active time counts only inter-request gaps under the idle threshold —
+  // a 6h lunch break must not read as "worked 6h".
+  let active = 0;
+  for (let i = 1; i < list.length; i++) {
+    const gap = list[i].ts - list[i - 1].ts;
+    if (gap > 0 && gap <= 120000) active += gap;
+  }
+  out.activeMs = list.length > 1 ? active : 0;
+  const lats = list.map((r) => r.latencyMs).filter((v) => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
+  if (lats.length) {
+    const pick = (p) => lats[Math.min(lats.length - 1, Math.floor(p * lats.length))];
+    out.p50Ms = pick(0.5);
+    out.p95Ms = pick(0.95);
+  }
+  const ttfts = list.map((r) => r.ttftMs).filter((v) => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
+  if (ttfts.length) out.ttftP50Ms = ttfts[Math.min(ttfts.length - 1, Math.floor(0.5 * ttfts.length))];
+  out.failovers = list.filter((r) => r.attempt > 0).length;
+  const cacheRead = list.reduce((s, r) => s + r.cacheRead, 0);
+  const input = list.reduce((s, r) => s + r.input, 0);
+  const denom = cacheRead + input;
+  if (denom > 0) out.cacheHitPct = Math.round((cacheRead / denom) * 100);
+  const output = list.reduce((s, r) => s + r.output, 0);
+  const latSum = lats.reduce((s, v) => s + v, 0);
+  if (latSum > 0 && output > 0) out.tokPerSec = Math.round((output / (latSum / 1000)) * 10) / 10;
+  const counts = new Map();
+  for (const r of list) if (r.model) counts.set(r.model, (counts.get(r.model) || 0) + 1);
+  out.models = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([model, n]) => ({ model, n }));
+  out.shadow = list.filter((r) => r.shadow).length;
+  return out;
+}
+
 // ---------- Security tab (guard audit log) ----------
 
 // pathStrengthFromAction maps a path-kind audit action to the strong/weak
@@ -1488,4 +1602,886 @@ function logTokensHTML(text) {
     i = valEnd + 1;
   }
   return out;
+}
+
+// ---------- session trace timeline ----------
+//
+// sessionBarSummary renders the hover/aria summary lines for one session-view
+// row — the merged camelCase shape shared by persisted rows
+// (persistedSummaryRow) and live event rows. Fields drop out when absent;
+// returns [] only for a null row. Lines:
+//   <time> · <agent>
+//   <model> → <provider>
+//   <status> · <latency> · in <n> / out <n> tok · cache <n>
+//   in flight · attempt n+1 (failover)
+export function sessionBarSummary(row, fmt) {
+  if (!row) return [];
+  const lines = [];
+  const toMs = (v) => {
+    const n = typeof v === 'number' ? v : Date.parse(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const t = toMs(row.ts);
+  const when = t != null && fmt ? fmt(t) : (row.ts != null ? String(row.ts) : '');
+  const head = [when, row.agent].filter(Boolean).join(' · ');
+  if (head) lines.push(head);
+  const mp = [row.model, row.provider].filter(Boolean).join(' → ');
+  if (mp) lines.push(mp);
+  const bits = [];
+  if (row.status) bits.push(String(row.status));
+  const lat = Number(row.latencyMs);
+  if (Number.isFinite(lat) && lat >= 0) bits.push(lat >= 1000 ? (lat / 1000).toFixed(1) + 's' : Math.round(lat) + 'ms');
+  const ttft = Number(row.ttftMs);
+  if (Number.isFinite(ttft) && ttft > 0) bits.push('ttft ' + (ttft >= 1000 ? (ttft / 1000).toFixed(1) + 's' : Math.round(ttft) + 'ms'));
+  const tk = [];
+  if (Number(row.input) > 0 || Number(row.output) > 0) {
+    tk.push(`in ${Number(row.input) || 0} / out ${Number(row.output) || 0} tok`);
+  }
+  const cr = Number(row.cacheRead);
+  if (cr > 0) tk.push(`cache ${cr > 999 ? (cr / 1000).toFixed(1) + 'k' : cr}`);
+  if (tk.length) bits.push(tk.join(' · '));
+  if (bits.length) lines.push(bits.join(' · '));
+  const notes = [];
+  if (row.inFlight) notes.push('in flight');
+  if (Number(row.attempt) > 0) notes.push(`attempt ${Number(row.attempt) + 1} (failover)`);
+  if (notes.length) lines.push(notes.join(' · '));
+  return lines;
+}
+
+// collectText pulls readable assistant text pieces out of one parsed response
+// event/message, covering the three protocol shapes the proxy emits:
+//   anthropic  message {content:[{text}]}  + stream {content_block_delta}
+//   openai     chat {choices:[{message|delta:{content}}]}
+//   responses  {output:[{content:[{text}]}]}
+// Thinking/partial-json deltas are skipped as text deliberately (the excerpt
+// is a content preview, not a reasoning dump), but tool calls and thinking
+// blocks are noted on ctx so the caller can fall back to a marker when a
+// turn produced no text at all (coding-agent turns are usually tool-only).
+// Error bodies ({error:{message}}) surface as text — that IS the response.
+function collectText(ev, ctx) {
+  const push = (s) => { if (typeof s === 'string' && s) ctx.pieces.push(s); };
+  if (!ev || typeof ev !== 'object') return;
+  if (Array.isArray(ev.content)) {
+    for (const c of ev.content) {
+      if (!c || typeof c !== 'object') continue;
+      if (typeof c.text === 'string') push(c.text);
+      if (c.type === 'tool_use' && c.name) ctx.tool(c.name);
+      if (c.type === 'thinking') ctx.thinking = true;
+    }
+  }
+  if (ev.type === 'content_block_start' && ev.content_block && typeof ev.content_block === 'object') {
+    if (ev.content_block.type === 'tool_use' && ev.content_block.name) ctx.tool(ev.content_block.name);
+    if (ev.content_block.type === 'thinking') ctx.thinking = true;
+  }
+  if (ev.type === 'content_block_delta' && ev.delta && typeof ev.delta.text === 'string') {
+    push(ev.delta.text);
+  }
+  if (Array.isArray(ev.choices)) {
+    for (const ch of ev.choices) {
+      const holder = ch && (ch.message || ch.delta);
+      if (!holder) continue;
+      const c = holder.content;
+      if (typeof c === 'string') push(c);
+      else if (Array.isArray(c)) {
+        for (const p of c) if (p && typeof p.text === 'string') push(p.text);
+      }
+      if (Array.isArray(holder.tool_calls)) {
+        for (const tc of holder.tool_calls) {
+          if (tc && tc.function && tc.function.name) ctx.tool(tc.function.name);
+        }
+      }
+    }
+  }
+  if (Array.isArray(ev.output)) {
+    for (const o of ev.output) {
+      if (!o || typeof o !== 'object') continue;
+      if (o.type === 'function_call' && o.name) ctx.tool(o.name);
+      if (Array.isArray(o.content)) {
+        for (const p of o.content) if (p && typeof p.text === 'string') push(p.text);
+      }
+    }
+  }
+  if (ev.error && typeof ev.error.message === 'string') push(ev.error.message);
+}
+
+// requestExcerpt extracts THIS TURN's user input — the newest human text —
+// from a logged request body string. Handles anthropic/openai `messages[]`
+// and responses `input` (string or message array). Tool-result-only user
+// messages are skipped (they carry tool output, not the prompt), so a coding
+// agent's turn still surfaces its newest human instruction. Same caps and
+// bail-outs as responseExcerpt; '' when nothing textual is found.
+export function requestExcerpt(text, maxChars) {
+  const cap = Number.isFinite(maxChars) && maxChars > 0 ? Math.floor(maxChars) : 200;
+  if (!text || typeof text !== 'string' || text.length > 1500000) return '';
+  let body = null;
+  try { body = JSON.parse(text); } catch (_) { return ''; }
+  if (!body || typeof body !== 'object') return '';
+  if (typeof body.input === 'string' && body.input.trim()) return clip(body.input, cap);
+  const msgs = Array.isArray(body.messages) ? body.messages
+    : (Array.isArray(body.input) ? body.input : null);
+  if (!msgs) return '';
+  // Scan backward: the newest user message that actually carries text.
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (!m || m.role !== 'user') continue;
+    const c = m.content;
+    if (typeof c === 'string' && c.trim()) return clip(c, cap);
+    if (Array.isArray(c)) {
+      const texts = [];
+      for (const p of c) {
+        if (p && typeof p === 'object' && typeof p.text === 'string') texts.push(p.text);
+      }
+      if (texts.length) return clip(texts.join(' '), cap);
+    }
+  }
+  return '';
+}
+
+// clip collapses whitespace and caps a preview string with an ellipsis.
+function clip(s, cap) {
+  const flat = String(s).replace(/\s+/g, ' ').trim();
+  if (!flat) return '';
+  return flat.length > cap ? flat.slice(0, cap).trimEnd() + '…' : flat;
+}
+
+// responseExcerpt extracts a short assistant-text preview from a logged
+// response body STRING — a JSON message, an SSE stream of data: lines, or
+// (fallback) plain non-JSON text such as an upstream error page. Bodies over
+// 1.5 MB are skipped (hover must stay cheap); returns '' when nothing
+// textual can be extracted. Whitespace collapses, result caps at maxChars
+// (default 200) with an ellipsis.
+export function responseExcerpt(text, maxChars) {
+  const cap = Number.isFinite(maxChars) && maxChars > 0 ? Math.floor(maxChars) : 200;
+  if (!text || typeof text !== 'string' || text.length > 1500000) return '';
+  const ctx = {
+    pieces: [],
+    tools: [],
+    thinking: false,
+    tool(name) { if (!this.tools.includes(name)) this.tools.push(name); },
+  };
+  let stream = false;
+  if (/^data:/m.test(text)) {
+    stream = true; // stream fragments concatenate; message blocks join with ' '
+    for (const line of text.split('\n')) {
+      const m = /^data:\s?(.*)$/.exec(line);
+      if (!m) continue;
+      const payload = m[1].trim();
+      if (!payload || payload === '[DONE]') continue;
+      let ev = null;
+      try { ev = JSON.parse(payload); } catch (_) { continue; }
+      collectText(ev, ctx);
+    }
+  } else if (/^\s*[{[]/.test(text)) {
+    let ev = null;
+    try { ev = JSON.parse(text); } catch (_) { ev = null; }
+    if (ev) collectText(ev, ctx);
+  } else {
+    ctx.pieces.push(text); // plain error text and friends
+  }
+  const joined = stream ? ctx.pieces.join('') : ctx.pieces.join(' ');
+  if (joined.trim()) return clip(joined, cap);
+  // No text at all: a tool-only turn still says what it did; a thinking-only
+  // turn says why there is nothing to preview.
+  if (ctx.tools.length) return clip('[tool_use: ' + ctx.tools.join(', ') + ']', cap);
+  if (ctx.thinking) return '[thinking]';
+  return '';
+}
+
+// sessionTimeline lays one session's requests out as a swimlane Gantt: each
+// request is a bar from its start (ts) to its end (ts + latency), assigned to
+// the first lane where it fits (greedy, chronological — deterministic), with
+// a cumulative-token polyline over the top and per-request marks (error
+// red, retry/failover amber dot, in-flight accent). Pure geometry/markup:
+// colors ride CSS variables, timestamps are formatted by the caller's fmt
+// callback (locale stays in app.js), and click targets carry data-id so the
+// caller can wire the detail popover. Each bar also carries an aria-label
+// from sessionBarSummary (hover chrome belongs to app.js's shared tooltip).
+//
+// The time axis is SEGMENTED: an idle gap longer than gapMs (default 2 min)
+// between consecutive requests breaks the axis, and each activity segment
+// gets width ∝ sqrt(duration) — long stretches still dominate, short bursts
+// stay readable. Without this a 10-minute burst inside a 7-hour session
+// collapses into a 2%-wide fence of bars. A zoom {from,to} window (drag-select
+// in app.js) filters the rows to those overlapping it and makes it the axis
+// domain; a window that catches nothing falls back to the full view so a
+// stray drag never blanks the card.
+//
+// Rows accept the session panel's merged shape: {requestId, ts (unix ms or
+// RFC3339), latencyMs, status, input, output, attempt, inFlight}. Rows
+// without a parseable ts are skipped (counted in .skipped). Returns
+// {svg, lanes, skipped, segments} — empty svg when fewer than 2 rows remain
+// (1 when a zoom window is active); segments is [{t0, t1, x0, x1}] in viewBox
+// px so the caller can invert a drag back into time.
+export function sessionTimeline(rows, opts) {
+  const o = opts || {};
+  const W = o.width || 900;
+  const padL = 8;
+  const padR = 8;
+  const axisH = 18;
+  const topH = 8;
+  const GAP_MS = Number.isFinite(o.gapMs) && o.gapMs > 0 ? o.gapMs : 120000;
+  const BREAK_W = 18; // viewBox px reserved per compressed-gap marker
+  const toMs = (v) => {
+    const n = typeof v === 'number' ? v : Date.parse(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const norm = [];
+  let skipped = 0;
+  const byId = new Map(); // original rows, for the bars' aria summaries
+  for (const r of rows || []) {
+    if (!r) continue;
+    if (r.requestId != null) byId.set(String(r.requestId), r);
+    const ts = toMs(r.ts);
+    if (ts == null) { skipped++; continue; }
+    const lat = Number.isFinite(Number(r.latencyMs)) && r.latencyMs > 0 ? Number(r.latencyMs) : 0;
+    norm.push({
+      id: String(r.requestId || ''),
+      ts,
+      end: r.inFlight ? null : ts + lat, // null end = still running
+      status: Number(r.status) || 0,
+      tokens: (Number(r.input) || 0) + (Number(r.output) || 0),
+      attempt: Number(r.attempt) || 0,
+      inFlight: !!r.inFlight,
+    });
+  }
+  norm.sort((a, b) => a.ts - b.ts);
+  if (norm.length < 2) return { svg: '', lanes: 0, skipped, segments: [] };
+
+  let win = null;
+  if (o.window && Number.isFinite(o.window.from) && Number.isFinite(o.window.to) && o.window.to > o.window.from) {
+    win = { from: Number(o.window.from), to: Number(o.window.to) };
+  }
+  let vis = norm;
+  if (win) {
+    vis = norm.filter((n) => (n.end != null ? n.end : n.ts) >= win.from && n.ts <= win.to);
+    if (vis.length === 0) { vis = norm; win = null; }
+  }
+  if (vis.length < (win ? 1 : 2)) return { svg: '', lanes: 0, skipped, segments: [] };
+
+  // Segment the visible rows at long idle gaps; each segment keeps its own
+  // time→x mapping (piecewise-linear overall, monotonic).
+  const segs = [];
+  let cur = null;
+  for (const n of vis) {
+    const nEnd = n.end != null ? n.end : n.ts;
+    if (!cur || n.ts - cur.t1 > GAP_MS) {
+      cur = { t0: n.ts, t1: nEnd, items: [] };
+      segs.push(cur);
+    } else if (nEnd > cur.t1) {
+      cur.t1 = nEnd;
+    }
+    cur.items.push(n);
+    n.seg = cur;
+  }
+  const usable = W - padL - padR;
+  const plotW = Math.max(usable - (segs.length - 1) * BREAK_W, 50);
+  // sqrt weighting + a floor so single-request bursts keep a readable width;
+  // the floor only applies while few segments exist (it must never overflow).
+  const floorW = segs.length <= 12 ? 24 : 0;
+  const weights = segs.map((s) => Math.sqrt(Math.max(s.t1 - s.t0, 1000)));
+  const wsum = weights.reduce((a, b) => a + b, 0);
+  let cursor = padL;
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    s.x0 = cursor;
+    s.w = Math.max((plotW * weights[i]) / wsum, floorW);
+    cursor += s.w + BREAK_W;
+  }
+  const x = (t) => {
+    for (const s of segs) {
+      if (t <= s.t1 || s === segs[segs.length - 1]) {
+        return s.x0 + ((t - s.t0) / Math.max(s.t1 - s.t0, 1)) * s.w;
+      }
+    }
+    return W - padR;
+  };
+
+  // Greedy lane assignment: first lane whose last bar ends at/before start.
+  const laneEnds = [];
+  for (const n of vis) {
+    const nEnd = n.end != null ? n.end : n.ts;
+    let lane = laneEnds.findIndex((e) => e <= n.ts);
+    if (lane === -1) {
+      laneEnds.push(nEnd);
+      lane = laneEnds.length - 1;
+    } else {
+      laneEnds[lane] = nEnd;
+    }
+    n.lane = lane;
+    n.x0 = Math.max(x(n.ts), padL);
+    // An in-flight bar runs to the right edge of its segment visually.
+    n.x1 = n.end != null ? Math.max(Math.min(x(n.end), W - padR), n.x0 + 2) : n.seg.x0 + n.seg.w;
+  }
+  const lanes = laneEnds.length;
+  // Busy parallel bursts stack many lanes; compress row height past 14 so the
+  // card's total height stays bounded instead of dwarfing the table.
+  const compact = lanes > 14;
+  const laneH = compact ? 12 : 20;
+  const barH = compact ? 6 : 11;
+  const H = topH + lanes * laneH + axisH;
+
+  // Cumulative tokens polyline (left-bottom → right-top over the bars);
+  // omitted entirely when the session recorded no tokens.
+  const total = vis.reduce((t, n) => t + n.tokens, 0);
+  const points = [];
+  let cum = 0;
+  for (const n of vis) {
+    cum += n.tokens;
+    points.push(`${(n.x1).toFixed(1)},${(H - axisH - (total > 0 ? (cum / total) : 0) * (H - axisH - topH)).toFixed(1)}`);
+  }
+
+  const bars = vis.map((n) => {
+    const cls = ['tl-bar'];
+    if (n.status >= 400) cls.push('tl-err');
+    else if (n.inFlight) cls.push('tl-run');
+    else cls.push('tl-ok');
+    const w = Math.max(n.x1 - n.x0, 2);
+    const y = topH + n.lane * laneH + (laneH - barH) / 2;
+    let mark = '';
+    if (n.attempt > 0) {
+      mark = `<circle class="tl-retry" cx="${Math.max(n.x0 - 3, 1.5).toFixed(1)}" cy="${(y + barH / 2).toFixed(1)}" r="2.5"><title>attempt ${n.attempt + 1} (failover)</title></circle>`;
+    }
+    // No native <title> on the bar: app.js's shared hover tooltip owns the
+    // visual layer (and adds a lazily fetched response excerpt); the aria
+    // label keeps the summary reachable for screen readers.
+    const aria = sessionBarSummary(byId.get(n.id), o.fmt).join(' · ') || n.id;
+    return `${mark}<rect class="${cls.join(' ')}" data-id="${esc(n.id)}" aria-label="${esc(aria)}" x="${n.x0.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${barH}" rx="2"></rect>`;
+  }).join('');
+
+  const fmt = o.fmt || ((t) => String(Math.round((t - (win ? win.from : vis[0].ts)) / 1000)) + 's');
+  // Ticks label each segment's start (plus the overall end) so compressed
+  // gaps cannot make one label stand for a 6-hour stretch; a single segment
+  // keeps the classic start/middle/end trio. Narrow segments skip their
+  // start label rather than collide with the neighbours.
+  const tEnd = segs[segs.length - 1].t1;
+  let ticks;
+  if (segs.length === 1) {
+    const t0 = segs[0].t0;
+    ticks = [
+      { t: t0, anchor: 'start' },
+      { t: t0 + (tEnd - t0) / 2, anchor: 'middle' },
+      { t: tEnd, anchor: 'end' },
+    ];
+  } else {
+    ticks = segs
+      .filter((s, i) => i === 0 || s.w >= 90)
+      .map((s) => ({ t: s.t0, anchor: 'start' }));
+    ticks.push({ t: tEnd, anchor: 'end' });
+  }
+  const tickSvg = ticks.map((tk) => `<text class="tl-tick" x="${x(tk.t).toFixed(1)}" y="${H - 5}" text-anchor="${tk.anchor}">${esc(fmt(tk.t))}</text>`).join('');
+  // One dashed divider per compressed gap, centered in its reserved strip.
+  const breaks = segs.slice(1).map((s) => {
+    const bx = s.x0 - BREAK_W / 2;
+    return `<line class="tl-break" x1="${bx.toFixed(1)}" y1="${topH}" x2="${bx.toFixed(1)}" y2="${H - axisH}"><title>idle gap compressed</title></line>`;
+  }).join('');
+
+  const line = points.length >= 2 && cum > 0
+    ? `<polyline class="tl-tokens" points="${points.join(' ')}"><title>cumulative tokens</title></polyline>`
+    : '';
+  return {
+    svg: `<svg class="tl-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="session request timeline">${bars}${line}${breaks}${tickSvg}</svg>`,
+    lanes,
+    skipped,
+    segments: segs.map((s) => ({ t0: s.t0, t1: s.t1, x0: s.x0, x1: s.x0 + s.w })),
+  };
+}
+
+// ---------- unified request table ----------
+//
+// ONE head + ONE row renderer serve all three request tables — the Requests
+// tab, the Live all-live ring, and the Live session view — so the pages stay
+// functionally and visually identical; Live just feeds real-time rows.
+// Columns: time · agent · session · status · model · provider · ms · tokens.
+// The tokens cell appends `· cache N` when a cache read was recorded
+// (persisted records carry it; pure live rows show what the end event had).
+// opts: rowClass (req-row/live-row + modifiers), liveKey (adds data-live-key),
+// modelNote (guard badge), fmtTime (locale stays in app.js).
+export function requestTableHeadHTML() {
+  return `<thead><tr><th>time</th><th>agent</th><th>session</th><th>status</th><th>model</th><th>provider</th><th class="num">ms</th><th class="num">tokens in / out</th></tr></thead>`;
+}
+
+export function requestRowHTML(row, opts) {
+  const o = opts || {};
+  const r = row || {};
+  const dim = r.inFlight ? ' subdue' : '';
+  const lat = (r.inFlight || r.latencyMs == null) ? '' : fmtNum(r.latencyMs);
+  const slow = !r.inFlight && r.latencyMs != null && r.latencyMs > 10000;
+  let tk = '';
+  if (!r.inFlight && (Number(r.input) || Number(r.output))) {
+    tk = `${fmtNum(r.input)} / ${fmtNum(r.output)}`;
+    const cr = Number(r.cacheRead);
+    if (cr > 0) {
+      // Cache read rides the token cell with its hit share; ≥80% highlights
+      // (Portkey-style cache-HIT signal).
+      const denom = cr + (Number(r.input) || 0);
+      const pct = denom > 0 ? Math.round((cr / denom) * 100) : null;
+      tk += ` <span class="tok-cache${pct != null && pct >= 80 ? ' hot' : ''}">· cache ${fmtNum(cr)}${pct != null ? ` (${pct}%)` : ''}</span>`;
+    }
+  }
+  const sess = r.session
+    ? `<td class="mono${dim} session-link" data-session="${esc(r.session)}" title="${esc(r.session)} — view this session">${esc(shortSessionId(r.session))}</td>`
+    : `<td class="mono${dim}">—</td>`;
+  const t = o.fmtTime ? o.fmtTime(r.ts) : String(r.ts != null ? r.ts : '');
+  return `<tr class="${esc(o.rowClass || '')}" data-id="${esc(r.requestId)}"${o.liveKey ? ` data-live-key="${esc(r.requestId)}"` : ''}>
+    <td class="mono${dim}">${esc(t)}</td>
+    <td class="mono${dim}">${esc(r.agent || '—')}</td>
+    ${sess}
+    <td class="st">${statusBadgeHTML(r.inFlight ? null : r.status, r.inFlight)}</td>
+    <td>${esc(r.model || '—')}${o.modelNote || ''}</td>
+    <td class="mono${dim}">${esc(r.inFlight ? '…' : (r.provider || '—'))}${r.shadow ? ' <span class="badge muted">shadow</span>' : ''}</td>
+    <td class="num${slow ? ' warn' : ''}">${lat}</td>
+    <td class="num">${tk}</td>
+  </tr>`;
+}
+
+// ---------- request detail chat view ----------
+//
+// The raw JSON / SSE dumps the detail rows used to lead with are unreadable
+// for conversation traffic. chatViewHTML parses a logged request/response
+// pair into MESSAGE BLOCKS and renders an agent-UI-style transcript:
+// role-labeled turns, plain text as text, thinking blocks / tool results /
+// long tool arguments collapsed into <details>, usage as a hint line. The
+// raw bodies stay available below (the caller keeps its own collapsed
+// <details> views). Pure: all text goes through esc(); caps keep one huge
+// history from flooding the DOM. Returns '' when nothing presentable can be
+// parsed — the caller then shows only the raw views.
+
+// CHAT_TEXT_CAP bounds one rendered text/thinking block; CHAT_ARGS_CAP one
+// tool-argument / tool-result payload; CHAT_RECENT is how many trailing
+// request turns render expanded (earlier turns live in the lazy history).
+const CHAT_TEXT_CAP = 4000;
+const CHAT_ARGS_CAP = 2000;
+export const CHAT_RECENT = 4;
+const CHAT_PARSE_MAX = 1500000;
+
+function parseJSONBounded(text) {
+  if (!text || typeof text !== 'string' || text.length > CHAT_PARSE_MAX) return null;
+  try { return JSON.parse(text); } catch (_) { return null; }
+}
+
+// contentToBlocks normalizes one message content value (string, block array,
+// or openai content-part array) into flat block descriptors.
+function contentToBlocks(content) {
+  const blocks = [];
+  if (typeof content === 'string') {
+    if (content.trim()) blocks.push({ type: 'text', text: content });
+    return blocks;
+  }
+  if (!Array.isArray(content)) return blocks;
+  for (const c of content) {
+    if (!c || typeof c !== 'object') continue;
+    if (typeof c.text === 'string' && c.text) {
+      blocks.push(c.type === 'thinking' ? { type: 'thinking', text: c.text } : { type: 'text', text: c.text });
+    } else if (c.type === 'thinking' && typeof c.thinking === 'string') {
+      blocks.push({ type: 'thinking', text: c.thinking });
+    } else if (c.type === 'tool_use' && c.name) {
+      blocks.push({ type: 'tool_use', name: c.name, input: c.input });
+    } else if (c.type === 'tool_result') {
+      blocks.push({ type: 'tool_result', text: flattenText(c.content) });
+    } else if (c.type === 'image' || c.type === 'input_image' || c.type === 'document') {
+      blocks.push({ type: 'media', kind: c.type });
+    }
+  }
+  return blocks;
+}
+
+// flattenText pulls the text out of nested content values (tool_result
+// content, responses parts) into one string.
+function flattenText(v) {
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v)) return v.map(flattenText).filter(Boolean).join('\n');
+  if (v && typeof v === 'object') {
+    if (typeof v.text === 'string') return v.text;
+    if (typeof v.content !== 'undefined') return flattenText(v.content);
+  }
+  return '';
+}
+
+// parseRequestChat walks anthropic/openai `messages[]` (plus `system`) and
+// the responses `input` shape into {system, messages:[{role, blocks}]}.
+function parseRequestChat(body) {
+  if (!body || typeof body !== 'object') return null;
+  const system = [];
+  const messages = [];
+  let sysSrc = null;
+  if (typeof body.system === 'string' && body.system.trim()) sysSrc = body.system;
+  else if (Array.isArray(body.system)) sysSrc = flattenText(body.system);
+  if (sysSrc && sysSrc.trim()) system.push({ type: 'text', text: sysSrc });
+  const msgs = Array.isArray(body.messages) ? body.messages
+    : (Array.isArray(body.input) ? body.input : null);
+  if (!msgs) {
+    if (typeof body.input === 'string' && body.input.trim()) {
+      messages.push({ role: 'user', blocks: [{ type: 'text', text: body.input }] });
+    }
+  } else {
+    for (const m of msgs) {
+      if (!m || typeof m !== 'object') continue;
+      const role = m.role === 'system' || m.role === 'developer' ? 'system' : (m.role || 'user');
+      const blocks = contentToBlocks(m.content);
+      // openai tool results ride as role:"tool" messages with a name field.
+      if (role === 'tool') {
+        messages.push({ role: 'tool', name: m.name || m.tool_call_id || '', blocks: [{ type: 'tool_result', text: flattenText(m.content) }] });
+        continue;
+      }
+      if (Array.isArray(m.tool_calls)) {
+        for (const tc of m.tool_calls) {
+          if (tc && tc.function && tc.function.name) {
+            let input = null;
+            try { input = tc.function.arguments ? JSON.parse(tc.function.arguments) : {}; } catch (_) { input = null; }
+            blocks.push({ type: 'tool_use', name: tc.function.name, input });
+          }
+        }
+      }
+      if (role === 'system') { for (const b of blocks) system.push(b); continue; }
+      if (blocks.length) messages.push({ role, blocks });
+    }
+  }
+  if (!system.length && !messages.length) return null;
+  return { system, messages };
+}
+
+// foldSSEBlocks folds a logged SSE stream into blocks: anthropic
+// content_block events by block index, openai chunk deltas (text +
+// tool_calls by index), and the minimal responses-API delta events.
+// Returns {blocks, usage} or null when the stream carries nothing usable.
+function foldSSEBlocks(text) {
+  const blocks = [];       // ordered render list
+  const byIdx = new Map(); // per-index accumulators
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+  let saw = false;
+  const idx = (i, init) => {
+    if (!byIdx.has(i)) byIdx.set(i, init());
+    return byIdx.get(i);
+  };
+  for (const line of text.split('\n')) {
+    const m = /^data:\s?(.*)$/.exec(line);
+    if (!m) continue;
+    const payload = m[1].trim();
+    if (!payload || payload === '[DONE]') continue;
+    let ev = null;
+    try { ev = JSON.parse(payload); } catch (_) { continue; }
+    if (!ev || typeof ev !== 'object') continue;
+    saw = true;
+    // anthropic stream
+    if (ev.type === 'message_start' && ev.message && ev.message.usage) {
+      const u = ev.message.usage;
+      usage.input = u.input_tokens || usage.input;
+      usage.cacheRead = u.cache_read_input_tokens || usage.cacheRead;
+      usage.cacheCreation = u.cache_creation_input_tokens || usage.cacheCreation;
+    } else if (ev.type === 'content_block_start' && ev.content_block) {
+      const cb = ev.content_block;
+      const slot = idx(ev.index, () => ({ block: null }));
+      if (cb.type === 'tool_use') slot.block = { type: 'tool_use', name: cb.name || 'tool', json: '' };
+      else if (cb.type === 'thinking') slot.block = { type: 'thinking', text: '' };
+      else slot.block = { type: 'text', text: '' };
+    } else if (ev.type === 'content_block_delta' && ev.delta) {
+      const slot = idx(ev.index, () => ({ block: { type: 'text', text: '' } }));
+      if (!slot.block) slot.block = { type: 'text', text: '' };
+      if (typeof ev.delta.text === 'string') slot.block.text += ev.delta.text;
+      else if (typeof ev.delta.thinking === 'string') {
+        slot.block.type = 'thinking';
+        slot.block.text += ev.delta.thinking;
+      } else if (typeof ev.delta.partial_json === 'string') {
+        slot.block.type = 'tool_use';
+        slot.block.json = (slot.block.json || '') + ev.delta.partial_json;
+      }
+    } else if (ev.type === 'message_delta' && ev.usage) {
+      usage.output = ev.usage.output_tokens || usage.output;
+    } else if (ev.error && typeof ev.error.message === 'string') {
+      blocks.push({ type: 'error', text: ev.error.message });
+    } else if (Array.isArray(ev.choices)) {
+      // openai chat chunks
+      const ch = ev.choices[0];
+      if (ch && ch.delta && typeof ch.delta.content === 'string') {
+        const slot = idx(0, () => ({ block: { type: 'text', text: '' } }));
+        slot.block.text += ch.delta.content;
+      }
+      if (ch && ch.delta && Array.isArray(ch.delta.tool_calls)) {
+        for (const tc of ch.delta.tool_calls) {
+          const slot = idx(1000 + (tc.index || 0), () => ({ block: { type: 'tool_use', name: '', json: '' } }));
+          if (tc.function && tc.function.name) slot.block.name += tc.function.name;
+          if (tc.function && typeof tc.function.arguments === 'string') slot.block.json += tc.function.arguments;
+        }
+      }
+      if (ev.usage) {
+        usage.input = ev.usage.prompt_tokens || usage.input;
+        usage.output = ev.usage.completion_tokens || usage.output;
+        const pd = ev.usage.prompt_tokens_details || {};
+        usage.cacheRead = pd.cached_tokens || usage.cacheRead;
+      }
+    } else if (ev.type === 'response.output_text.delta' && typeof ev.delta === 'string') {
+      const slot = idx(0, () => ({ block: { type: 'text', text: '' } }));
+      slot.block.text += ev.delta;
+    } else if (ev.type === 'response.output_item.done' && ev.item && ev.item.type === 'function_call' && ev.item.name) {
+      blocks.push({ type: 'tool_use', name: ev.item.name, json: ev.item.arguments || '' });
+    }
+  }
+  if (!saw) return null;
+  for (const [, slot] of [...byIdx.entries()].sort((a, b) => a[0] - b[0])) {
+    const b = slot.block;
+    if (!b) continue;
+    if (b.type === 'tool_use') blocks.push({ type: 'tool_use', name: b.name || 'tool', json: b.json || '' });
+    else if ((b.type === 'text' || b.type === 'thinking') && b.text) blocks.push({ type: b.type, text: b.text });
+  }
+  return { blocks, usage };
+}
+
+// parseResponseChat parses one response body (JSON message, SSE stream, or
+// error object) into {blocks, usage}.
+function parseResponseChat(text, contentType) {
+  if (!text || typeof text !== 'string' || text.length > CHAT_PARSE_MAX) return null;
+  if (/^data:/m.test(text) || /event-stream/i.test(String(contentType || ''))) {
+    const folded = foldSSEBlocks(text);
+    if (folded && folded.blocks.length) return folded;
+    return null;
+  }
+  const body = parseJSONBounded(text);
+  if (!body || typeof body !== 'object') return null;
+  if (body.error && typeof body.error.message === 'string') {
+    return { blocks: [{ type: 'error', text: body.error.message }], usage: null };
+  }
+  const blocks = [];
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+  if (Array.isArray(body.content)) {
+    for (const b of contentToBlocks(body.content)) blocks.push(b);
+    usage.input = body.usage && body.usage.input_tokens || 0;
+    usage.output = body.usage && body.usage.output_tokens || 0;
+    usage.cacheRead = body.usage && body.usage.cache_read_input_tokens || 0;
+    usage.cacheCreation = body.usage && body.usage.cache_creation_input_tokens || 0;
+  } else if (Array.isArray(body.choices)) {
+    const ch = body.choices[0] || {};
+    const holder = ch.message || {};
+    if (typeof holder.content === 'string' && holder.content) blocks.push({ type: 'text', text: holder.content });
+    else if (Array.isArray(holder.content)) for (const b of contentToBlocks(holder.content)) blocks.push(b);
+    if (Array.isArray(holder.tool_calls)) {
+      for (const tc of holder.tool_calls) {
+        if (tc && tc.function && tc.function.name) {
+          let input = null;
+          try { input = tc.function.arguments ? JSON.parse(tc.function.arguments) : {}; } catch (_) { input = null; }
+          blocks.push({ type: 'tool_use', name: tc.function.name, input });
+        }
+      }
+    }
+    usage.input = body.usage && body.usage.prompt_tokens || 0;
+    usage.output = body.usage && body.usage.completion_tokens || 0;
+  } else if (Array.isArray(body.output)) {
+    for (const o of body.output) {
+      if (!o || typeof o !== 'object') continue;
+      if (o.type === 'function_call' && o.name) blocks.push({ type: 'tool_use', name: o.name, json: o.arguments || '' });
+      if (Array.isArray(o.content)) for (const b of contentToBlocks(o.content)) blocks.push(b);
+    }
+    usage.input = body.usage && body.usage.input_tokens || 0;
+    usage.output = body.usage && body.usage.output_tokens || 0;
+  }
+  if (!blocks.length) return null;
+  return { blocks, usage };
+}
+
+// readableValue renders a JSON value as human text instead of JSON syntax:
+// strings unquoted, objects as `key: value` lines (nested containers
+// indented two spaces per level), arrays as bullet lines — or comma-joined
+// when tiny and all-scalar. Tool arguments and JSON tool results go through
+// this so the transcript reads like prose, not escaped syntax.
+export function readableValue(v, depth = 0) {
+  return rvLines(v, depth).map((l) => '  '.repeat(depth) + l).join('\n');
+}
+
+// rvLines renders a value as render lines whose FIRST line is unpadded;
+// nested lines carry their own indent so callers can prefix the first line
+// (`key: `, `- `) without double indentation.
+function rvLines(v, depth) {
+  if (v === null || v === undefined) return ['null'];
+  if (typeof v === 'string') return [v];
+  if (typeof v === 'number' || typeof v === 'boolean') return [String(v)];
+  if (Array.isArray(v)) {
+    if (!v.length) return ['[]'];
+    const allScalar = v.every((x) => x === null || typeof x !== 'object');
+    if (allScalar) {
+      const joined = v.map((x) => (x === null ? 'null' : String(x))).join(', ');
+      if (joined.length <= 60) return [joined];
+    }
+    const lines = [];
+    for (const item of v) {
+      const child = rvLines(item, depth);
+      lines.push('- ' + child[0], ...child.slice(1).map((l) => '  ' + l));
+    }
+    return lines;
+  }
+  if (typeof v === 'object') {
+    const keys = Object.keys(v);
+    if (!keys.length) return ['{}'];
+    const lines = [];
+    for (const k of keys) {
+      const child = rvLines(v[k], depth + 1);
+      if (child.length === 1) lines.push(`${k}: ${child[0]}`);
+      else lines.push(`${k}:`, ...child.map((l) => '  ' + l));
+    }
+    return lines;
+  }
+  return [String(v)];
+}
+
+// argsToReadable converts a tool-call argument payload (parsed object or a
+// raw JSON string from stream fragments) to readable text.
+function argsToReadable(input, json) {
+  let parsed = null;
+  if (input !== undefined && input !== null) parsed = input;
+  else if (json) {
+    try { parsed = JSON.parse(json); } catch (_) { return json; }
+  }
+  if (parsed === null || parsed === undefined) return '';
+  return readableValue(parsed, 0);
+}
+
+// maybeReadableText renders a tool-result body: JSON goes through
+// readableValue, anything else passes through unchanged.
+function maybeReadableText(s) {
+  const p = parseJSONBounded(s);
+  if (p && typeof p === 'object') return readableValue(p, 0);
+  return s;
+}
+
+// chatBlockHTML renders one block; capText truncates with a visible note.
+function capText(s, cap) {
+  const t = String(s);
+  if (t.length <= cap) return esc(t);
+  return esc(t.slice(0, cap)) + `\n… (+${fmtCap(t.length - cap)} chars, see raw body)`;
+}
+function fmtCap(n) { return n >= 1000 ? Math.round(n / 100) / 10 + 'k' : String(n); }
+
+function chatBlockHTML(b) {
+  if (b.type === 'text') {
+    return `<div class="cv-text">${capText(b.text, CHAT_TEXT_CAP)}</div>`;
+  }
+  if (b.type === 'thinking') {
+    return `<details class="cv-fold"><summary>thinking</summary><div class="cv-text cv-muted">${capText(b.text, CHAT_TEXT_CAP)}</div></details>`;
+  }
+  if (b.type === 'tool_use') {
+    const args = argsToReadable(b.input, b.json);
+    return `<div class="cv-tool"><span class="cv-tool-name">${esc(b.name)}</span><pre class="cv-args">${args ? capText(args, CHAT_ARGS_CAP) : '<i>(no arguments)</i>'}</pre></div>`;
+  }
+  if (b.type === 'tool_result') {
+    const text = b.text ? maybeReadableText(b.text) : '';
+    return `<details class="cv-fold"><summary>tool result</summary><pre class="cv-args">${text ? capText(text, CHAT_ARGS_CAP) : '<i>(empty)</i>'}</pre></details>`;
+  }
+  if (b.type === 'media') {
+    return `<div class="cv-chip">[${esc(b.kind)}]</div>`;
+  }
+  if (b.type === 'error') {
+    return `<div class="msg err">${capText(b.text, CHAT_TEXT_CAP)}</div>`;
+  }
+  return '';
+}
+
+function chatMsgHTML(msg) {
+  const role = msg.role === 'assistant' ? 'assistant' : (msg.role === 'tool' ? 'tool' : 'user');
+  const label = msg.name ? `${role} · ${msg.name}` : role;
+  return `<div class="cv-msg cv-${role}"><span class="cv-role">${esc(label)}</span>${msg.blocks.map(chatBlockHTML).join('')}</div>`;
+}
+
+// parseChatRequest is the exported parse entry for the history expander:
+// app.js parses once per expand and caches the messages array, then renders
+// ranges through chatTurnsSliceHTML as the user scrolls.
+export function parseChatRequest(requestText) {
+  return parseRequestChat(parseJSONBounded(requestText));
+}
+
+// chatTurnsSliceHTML renders messages[from, to) with the same rendering as
+// the recent window. Bounds clamp; empty range → ''.
+export function chatTurnsSliceHTML(messages, from, to) {
+  if (!Array.isArray(messages) || !messages.length) return '';
+  const a = Math.max(0, Math.floor(from) || 0);
+  const b = Math.min(messages.length, Math.floor(to) || 0);
+  if (b <= a) return '';
+  let html = '';
+  for (let i = a; i < b; i++) html += chatMsgHTML(messages[i]);
+  return html;
+}
+
+// chatViewHTML renders the full transcript for one record: system collapsed,
+// the last CHAT_RECENT request turns expanded, earlier turns behind a LAZY
+// history fold (opts.histKey names the app-side registry id carrying the
+// request text; without it the fold still renders, just with no lazy hook),
+// then the response turn and its usage line. Everything text-bearing is
+// capped, and the history never enters the DOM until expanded — a
+// thousand-turn session opens as fast as a two-turn one.
+export function chatViewHTML(requestText, responseText, responseContentType, opts) {
+  const o = opts || {};
+  const req = parseRequestChat(parseJSONBounded(requestText));
+  const res = parseResponseChat(responseText, responseContentType);
+  if (!req && !res) return '';
+  let html = '<div class="cv">';
+  if (req) {
+    if (req.system.length) {
+      html += `<details class="cv-fold cv-system"><summary>system</summary><div class="cv-text cv-muted">${capText(req.system.map((b) => b.text).join('\n\n'), CHAT_TEXT_CAP)}</div></details>`;
+    }
+    const n = req.messages.length;
+    const cut = Math.max(0, n - CHAT_RECENT);
+    if (cut > 0) {
+      const attr = o.histKey ? ` data-raw="${esc(o.histKey)}"` : '';
+      html += `<details class="cv-fold cv-history"${attr}><summary>${cut} earlier turn${cut === 1 ? '' : 's'}</summary><div class="cv-hist-host"><span class="hint">renders on first expand</span></div></details>`;
+    }
+    html += req.messages.slice(cut).map(chatMsgHTML).join('');
+  }
+  if (res) {
+    html += `<div class="cv-msg cv-assistant"><span class="cv-role">assistant</span>${res.blocks.map(chatBlockHTML).join('')}`;
+    const u = res.usage;
+    if (u && (u.input || u.output || u.cacheRead || u.cacheCreation)) {
+      const parts = [];
+      if (u.input) parts.push(`in ${u.input}`);
+      if (u.output) parts.push(`out ${u.output}`);
+      if (u.cacheRead) parts.push(`cache read ${u.cacheRead}`);
+      if (u.cacheCreation) parts.push(`cache write ${u.cacheCreation}`);
+      html += `<div class="cv-usage">${esc(parts.join(' · '))}</div>`;
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+// ---------- Requests filter URL-hash state ----------
+//
+// The Requests tab's filter rides the URL hash (#requests?session=…&agent=…)
+// so a refresh or shared link lands on the same view instead of the full
+// list. hashQueryParams parses the query portion into a plain object;
+// requestsFilterQuery projects the filter onto params (only non-default
+// values — an unfiltered tab stays a clean #requests); requestsFilterFromQuery
+// reads them back, returning null when the hash carries no filter keys (a
+// bare #requests must not clobber an in-memory filter) and dropping junk
+// values (shadow keeps its tri-state enum).
+
+export function hashQueryParams(q) {
+  const out = {};
+  if (!q) return out;
+  for (const [k, v] of new URLSearchParams(String(q))) out[k] = v;
+  return out;
+}
+
+export function requestsFilterQuery(f) {
+  if (!f) return '';
+  const q = new URLSearchParams();
+  if (f.session) q.set('session', f.session);
+  if (f.agent) q.set('agent', f.agent);
+  if (f.model) q.set('model', f.model);
+  if (f.provider) q.set('provider', f.provider);
+  if (f.errors) q.set('errors', '1');
+  if (f.shadow) q.set('shadow', f.shadow);
+  return q.toString();
+}
+
+export function requestsFilterFromQuery(params) {
+  if (!params) return null;
+  const has =
+    params.session || params.agent || params.model ||
+    params.provider || params.errors || params.shadow;
+  if (!has) return null;
+  return {
+    session: params.session || '',
+    agent: params.agent || '',
+    model: params.model || '',
+    provider: params.provider || '',
+    errors: params.errors === '1' || params.errors === 'true',
+    shadow: params.shadow === 'only' || params.shadow === 'exclude' ? params.shadow : '',
+  };
 }

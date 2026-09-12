@@ -84,7 +84,7 @@ test('settings form spec matches documented edit kinds and settings keys', () =>
   const spec = appJs.slice(start, end);
 
   const kinds = [...new Set([...spec.matchAll(/kind: '([a-z_]+)'/g)].map((m) => m[1]))].sort();
-  assert.deepEqual(kinds, ['cache', 'general', 'request_log', 'scheduling', 'stats']);
+  assert.deepEqual(kinds, ['cache', 'general', 'guard', 'request_log', 'scheduling', 'stats']);
   const keys = [...new Set([...spec.matchAll(/key: '([a-z0-9_]+)'/g)].map((m) => m[1]))];
   assert.ok(keys.length > 0, 'SETTINGS_GROUPS declares no field keys — contract is blind');
 

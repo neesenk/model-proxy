@@ -318,6 +318,124 @@ func TestWebAssetsBodyViewerContract(t *testing.T) {
 // the shared summary renderer (also used by the Live session panel).
 func TestWebAssetsRequestsSessionContract(t *testing.T) {
 	js := mustWebAsset(t, "app.js")
+	// .card carries overflow: hidden (radius clipping), which makes it the
+	// scroll container for sticky descendants — a card that never scrolls
+	// kills page-level stickiness. The two session-view host cards must opt
+	// out via card-open, and the opt-out rule must exist in styles.css.
+	css := mustWebAsset(t, "styles.css")
+	if !strings.Contains(css, ".card.card-open { overflow: visible; }") {
+		t.Errorf("styles.css missing card-open overflow opt-out")
+	}
+	// Table headers must pin BELOW the session view, not hide under it: the
+	// pinned view's measured height rides --sess-h into the th top calc.
+	if !strings.Contains(css, "var(--sess-h, 0px)") {
+		t.Errorf("styles.css missing --sess-h in sticky th top")
+	}
+	// Bar hover: metadata summary comes from pure sessionBarSummary; the
+	// response excerpt (responseExcerpt over /api/requests/<id>, cached and
+	// shared with detail rows) fills the shared .tl-tip tooltip.
+	pure := mustWebAsset(t, "pure.js")
+	for _, want := range []string{
+		"export function sessionBarSummary(",
+		"export function responseExcerpt(",
+		"export function requestExcerpt(",
+		"[tool_use: ",
+		"export function chatViewHTML(",
+		"export function readableValue(",
+		"export function parseChatRequest(",
+		"export function requestRowHTML(",
+		"export function requestTableHeadHTML(",
+		"export function sessionHealthSummary(",
+		"export function chatTurnsSliceHTML(",
+		"export const CHAT_RECENT = 4;",
+	} {
+		if !strings.Contains(pure, want) {
+			t.Errorf("pure.js missing %q", want)
+		}
+	}
+	// #status/live?session=… must survive a refresh: boot stashes the pin in
+	// bootLiveSession and renderLiveCard consumes it right after the mount
+	// that resets the selection (a direct boot apply raced that mount).
+	for _, want := range []string{
+		"let bootLiveSession = '';",
+		"bootLiveSession = bootQuery.session;",
+		"if (bootLiveSession) {",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing live-session boot pin marker %q", want)
+		}
+	}
+	for _, want := range []string{
+		"function showTlTip(",
+		"hideTlTip();",
+		// Record details lead with the readable chat transcript; the raw
+		// bodies stay below in collapsed <details> that render lazily on
+		// first expand (registry + capture-phase toggle listener).
+		"raw request body (",
+		// All three request tables (Requests tab, Live ring, Live session
+		// view) render through the one shared row renderer; bytes columns
+		// are gone in favor of the token cell with cache read.
+		"rows += requestRowHTML(persistedSummaryRow(r), {",
+		// Health chips row + relative-time context on the detail hint.
+		"sessionSummaryHTML(s, o, sessionHealthSummary(rows))",
+		"function requestRelTimeOpts(id)",
+		// TTFT: rows map ttft_ms; the detail hint shows it.
+		"ttftMs: rec.ttft_ms != null ? rec.ttft_ms : null,",
+		"' · ttft ' + fmtDurMs(r.ttft_ms)",
+		"' · ttft ' + fmtDurMs(r.ttft_ms)",
+		"return requestRowHTML(r, {",
+		"raw response body (",
+		"const rawBodyRegistry = new Map();",
+		"renders on first expand",
+		"dropRawBodies(tbl);",
+		// The chat history expands to a FLAT chunked transcript (parse once,
+		// 25-turn slices appended by the shared scroll loader) — measured
+		// 35KB/340 nodes for the first chunk of an 862-turn session.
+		"chatViewHTML(r.request_body, r.response_body, ct, { histKey: histId })",
+		"d.classList.contains('cv-history')",
+		// Regression: the popover rebuild guard once referenced r.* inside
+		// fillLiveDetailPop (parameter is row) and threw on every open —
+		// caught by real-browser E2E, pinned so it cannot return silently.
+		"requestsDetailCache.get(row.requestId)",
+		"chatTurnsSliceHTML(entry.msgs, r.from, r.to)",
+		"const id = 'cv-hist-' + (++bodyChunkSeq)",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing detail chat-view marker %q", want)
+		}
+	}
+	for _, want := range []string{
+		".cv-msg",
+		// Sticky coverage must span the card gutters (negative margins) and
+		// sit flush under the topbar — no transparent seams.
+		"margin-left: -16px;",
+		"#live-session-panel .table th",
+		".sess-health",
+		".tok-cache",
+		".sess-meta-k",
+		".tl-legend",
+		".cv-tool-name",
+		// History turns must stay natively virtualized: without this the
+		// scroll cost grows with loaded depth (user-felt jank on long
+		// sessions) even though chunking bounds the initial DOM.
+		"content-visibility: auto",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("styles.css missing chat-view marker %q", want)
+		}
+	}
+	// Two unlabeled excerpt paragraphs (input muted, response normal) and the
+	// load-bearing pointer-events:none that keeps the tooltip transparent to
+	// the cursor.
+	for _, want := range []string{
+		".tl-tip-in",
+		".tl-tip-out",
+		"pointer-events: none;",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("styles.css missing tooltip marker %q", want)
+		}
+	}
 	for _, want := range []string{
 		`id="req-session"`,
 		`id="req-session-summary"`,
@@ -330,9 +448,38 @@ func TestWebAssetsRequestsSessionContract(t *testing.T) {
 			t.Errorf("app.js missing %q", want)
 		}
 	}
-	// The Live panel must reuse the shared summary renderer, not a second copy.
-	if !strings.Contains(js, "sessionSummaryHTML(s)") {
-		t.Errorf("app.js: Live session panel should reuse sessionSummaryHTML")
+	// The Live panel and the Requests session summary must share ONE session
+	// view — sessionViewHTML (summary chips + trace timeline) — instead of
+	// each assembling its own copy; only the detail opener differs
+	// (popover vs inline row expand), wired through wireSessionTimeline. Both
+	// call sites key the timeline zoom by their session id (drag-select state
+	// survives the Live panel's SSE re-renders), and both hosts sit in the
+	// sticky .sess-sticky container so the view stays visible while the
+	// session's table scrolls.
+	for _, want := range []string{
+		"function sessionViewHTML(",
+		"function wireSessionTimeline(",
+		"sessionViewHTML(rows, liveSessionAgg, { session: liveSessionFilter })",
+		"sessionViewHTML(rows, agg, { live: false, session: requestsFilter.session })",
+		`<div class="sess-sticky">${sessionViewHTML(rows, liveSessionAgg`,
+		"class=\"sess-sticky\" style=\"margin-bottom:12px\" hidden",
+		"tr.scrollIntoView({ behavior: 'smooth', block: 'center' })",
+		// Both host cards must drop the .card overflow clipping (card-open):
+		// an overflow ancestor becomes the scroll container for sticky
+		// descendants and a never-scrolling card kills the pin entirely.
+		`<div class="card card-open"><div class="card-body">`,
+		", 'tight', '', 'card-open'))",
+		// Zoom drag must not capture the pointer on pointerdown: capture
+		// retargets the release + derived click to the SVG root and kills
+		// every plain bar click. Capture belongs to the drag branch only.
+		"do NOT capture here",
+		"svg.setPointerCapture(start.id)",
+		"function syncSessThOffset(",
+		"syncSessThOffset(host);",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing shared session-view marker %q", want)
+		}
 	}
 }
 

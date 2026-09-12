@@ -264,6 +264,13 @@ main {
   box-shadow: var(--shadow-1);
   overflow: hidden;
 }
+/* card-open opts a card OUT of the overflow clipping. Any ancestor with
+   overflow other than visible becomes the scroll container for descendants'
+   position: sticky — a card that never scrolls kills page-level stickiness
+   (the sticky session view AND the sticky table headers). Only cards whose
+   children never touch the card edges (no .flush content needing radius
+   clipping) may take this: Requests and Live. */
+.card.card-open { overflow: visible; }
 .card > .card-head {
   padding: 12px 16px;
   border-bottom: 1px solid var(--border-2);
@@ -347,12 +354,16 @@ main {
 }
 /* Sticky headers only for page-scrolled long tables (Requests / Live and
    flush full-width tables). A sticky th inside an overflow-x:auto container
-   (e.g. .an-table-card) would overlap the first row instead. */
+   (e.g. .an-table-card) would overlap the first row instead. When a sticky
+   session view is mounted, app.js measures it and exports --sess-h on the
+   host card, so the header pins BELOW the pinned view instead of hiding
+   underneath it (0 on cards without a session view). */
 .card-body.flush .table th,
 #req-table .table th,
-#live-table .table th {
+#live-table .table th,
+#live-session-panel .table th {
   position: sticky;
-  top: var(--sticky-top);
+  top: calc(var(--sticky-top) + var(--sess-h, 0px));
   z-index: 5;
   box-shadow: inset 0 -1px 0 var(--border-2);
 }
@@ -422,6 +433,42 @@ main {
   border-radius: var(--r-pill);
   padding: 2px 9px;
 }
+/* Session health chips (second row of the shared session summary):
+   span/active, latency percentiles, failovers (warn), cache hit rate,
+   throughput, model distribution. Slightly tighter than the totals row. */
+.sess-health { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.sess-health .live-chip { font-size: 0.68rem; padding: 1px 8px; }
+.sess-health .live-chip.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+
+/* Session identity footer: uppercase micro-label + mono value pairs, one
+   visual tier below the metric chips (no boxes — the chips own that
+   language). Generous gaps so the line breathes between the health chips
+   and the trace card. */
+.sess-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+  margin-top: 8px;
+  margin-bottom: 12px;
+}
+.sess-meta-k {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-right: 6px;
+}
+.sess-meta-v {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--text);
+}
+
+/* Cache-read share inside the unified token cell: muted by default, ok-green
+   once it crosses 80% (a real cache-HIT signal). */
+.tok-cache { color: var(--muted); }
+.tok-cache.hot { color: var(--ok); }
+
 #live-session-panel { margin-top: 2px; }
 #live-session-panel .hint + .hint { margin-top: 2px; }
 #live-session-panel table.table { margin-top: 10px; }
@@ -1185,6 +1232,9 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .acct-toolbar-title h2 { font-size: 0.9375rem; }
 .acct-toolbar-title .meta { font-size: 0.75rem; color: var(--muted); font-family: var(--mono); }
 .acct-list { display: grid; gap: 14px; }
+/* Batch test-all matrix: sits between the toolbar and the account cards; the
+   caps line in the title links liveness to the startup protocol probe. */
+.acct-matrix { margin-bottom: 14px; }
 
 /* account card */
 .acct-card { padding: 0; }
@@ -1416,9 +1466,26 @@ dialog::backdrop { background: rgba(8,12,20,.5); backdrop-filter: blur(3px); }
   /* Sticky table headers ride under the fixed topbar on desktop; on narrow
      viewports the topbar may wrap taller, so headers stop sticking instead of
      floating mid-screen. Card bodies scroll wide tables horizontally instead
-     (sticky is off here, so the scroll container cannot break it). */
+     (sticky is off here, so the scroll container cannot break it). The sticky
+     session view stops sticking for the same two reasons (wrapped topbar,
+     overflow-x card-body ancestor). */
   .table th { position: static; box-shadow: none; border-bottom: 1px solid var(--border-2); }
   .card-body { overflow-x: auto; }
+  .sess-sticky { position: static; margin: 0; padding: 0; border-bottom: none; }
+  /* The dashboard KPI row pins 6 columns on desktop; at phone widths each
+     cell would collapse to ~55px. Two columns keep the numbers readable. */
+  .dash-wrap .an-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 560px) {
+  /* Tighter chrome at phone widths: account cards and toolbars carry two to
+     three buttons each — let the action rows wrap instead of overflowing,
+     and shrink the page gutters. */
+  .row-actions { flex-wrap: wrap; justify-content: flex-start; }
+  main { padding: 10px; }
+  .acct-toolbar { flex-direction: column; align-items: stretch; }
+  .acct-toolbar .row-actions { justify-content: flex-start; }
+  .an-toolbar .req-input { min-width: 0; flex: 1 1 120px; }
 }
 
 /* ---------- analytics tab ---------- */
@@ -1653,3 +1720,217 @@ dialog::backdrop { background: rgba(8,12,20,.5); backdrop-filter: blur(3px); }
 .dash-head .meta { font-size: 0.75rem; color: var(--muted); font-family: var(--mono); }
 
 .refresh-err { margin-bottom: 12px; }
+
+/* Session trace timeline (pure.js sessionTimeline): bars are request spans
+   in swimlanes, the polyline is cumulative tokens, marks are failover
+   retries. The axis breaks at long idle gaps (tl-break dividers) and a
+   horizontal drag zooms (tl-sel is the drag preview; tl-reset clears it).
+   Colors ride the theme variables so dark mode needs no overrides;
+   the SVG scales uniformly (text and marks never distort). */
+.sess-tl { margin-bottom: 12px; }
+.sess-tl .tl-svg { display: block; width: 100%; height: auto; cursor: ew-resize; touch-action: none; }
+.tl-bar { fill: color-mix(in srgb, var(--accent) 55%, transparent); }
+.tl-bar.tl-ok { fill: color-mix(in srgb, var(--accent) 55%, transparent); }
+.tl-bar.tl-run { fill: color-mix(in srgb, var(--accent) 25%, transparent); stroke: var(--accent); stroke-dasharray: 3 2; }
+.tl-bar.tl-err { fill: color-mix(in srgb, var(--err) 60%, transparent); }
+.tl-bar { cursor: pointer; }
+.tl-bar:hover { fill: color-mix(in srgb, var(--accent) 85%, transparent); }
+.tl-bar.tl-err:hover { fill: color-mix(in srgb, var(--err) 90%, transparent); }
+.tl-retry { fill: var(--warn); }
+.tl-tokens { fill: none; stroke: var(--ok); stroke-width: 1.5; opacity: 0.8; }
+.tl-tick { fill: var(--muted); font-size: 10px; font-family: var(--mono); }
+.tl-legend-retry { color: var(--warn); }
+.tl-legend-gap { color: var(--muted); }
+
+/* Trace title: name + count on the left, chart-style legend (color swatch +
+   short label) to the right — replaces the old prose hint line. */
+.tl-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  margin-bottom: 8px;
+}
+.tl-title-name { font-weight: 600; }
+.tl-count { font-family: var(--mono); font-size: 0.7rem; color: var(--muted); }
+.tl-legend { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-left: auto; }
+.tl-lg {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+.tl-swatch { display: inline-block; width: 14px; height: 8px; border-radius: 2px; }
+.tl-sw-bar { background: color-mix(in srgb, var(--accent) 55%, transparent); }
+.tl-sw-line { height: 2px; background: var(--ok); }
+.tl-sw-retry { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
+.tl-sw-err { background: color-mix(in srgb, var(--err) 60%, transparent); }
+.tl-break { stroke: var(--border); stroke-width: 2; stroke-dasharray: 3 3; }
+.tl-sel { fill: color-mix(in srgb, var(--accent) 15%, transparent); stroke: var(--accent); stroke-width: 1; }
+.tl-reset {
+  background: none; border: 1px solid var(--border); border-radius: var(--r-inner);
+  color: var(--accent); font: inherit; font-size: 0.72rem; padding: 0 6px;
+  cursor: pointer; margin-left: 2px;
+}
+.tl-reset:hover { border-color: var(--accent); }
+
+/* Sticky session view: the shared chips + trace stay pinned under the topbar
+   while the session's table scrolls under them (a busy session runs hundreds
+   of rows deep, and timeline bar clicks locate rows far below). Opaque
+   surface + border so scrolled rows vanish behind it instead of bleeding
+   through — including the CARD's horizontal gutters: negative margins span
+   the full card-body width (16px padding on both sides) so rows cannot peek
+   past the panel's edges, and the panel sits FLUSH under the topbar (no gap
+   strip where moving rows would show). */
+.sess-sticky {
+  position: sticky;
+  top: var(--topbar-h);
+  /* Above the sticky table headers (z 5) so a pinned session view covers
+     them, below the fixed topbar. */
+  z-index: 6;
+  background: var(--surface);
+  margin-left: -16px;
+  margin-right: -16px;
+  padding: 4px 16px 10px;
+  border-bottom: 1px solid var(--border);
+  /* A monster session (dozens of lanes) must not let the pinned view grow
+     past the viewport and swallow the page; it scrolls within instead. */
+  max-height: calc(100vh - var(--topbar-h) - 24px);
+  overflow: auto;
+}
+
+/* Timeline bar click → located table row: a slow fade-out flash so the eye
+   can find the row the scroll landed on. */
+@keyframes row-flash {
+  0% { background: color-mix(in srgb, var(--accent) 24%, transparent); }
+  100% { background: transparent; }
+}
+.row-flash td { animation: row-flash 1.6s ease-out 1; }
+
+/* Hover tooltip for timeline bars (app.js showTlTip): metadata lines plus a
+   lazily fetched response excerpt. pointer-events:none is load-bearing — it
+   can never trap the cursor, steal a click, or flicker on/out of the bar.
+   Not a data-popup by design: it must not gate auto-refresh re-renders. */
+.tl-tip {
+  position: fixed;
+  z-index: 45; /* above sticky session view (6) and table headers (5), below popovers (60+) */
+  max-width: 380px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-inner);
+  box-shadow: var(--shadow-1);
+  padding: 8px 10px;
+  font-size: 0.75rem;
+  pointer-events: none;
+}
+.tl-tip-meta { font-family: var(--mono); display: grid; gap: 2px; }
+/* Excerpt paragraphs, unlabeled by design: this turn's user input renders
+   muted, the model's response in normal text — reading order does the rest. */
+.tl-tip-ex {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 5.2em; /* ~3 lines each: a preview, not a reader */
+  overflow: hidden;
+}
+.tl-tip-ex + .tl-tip-ex {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: none;
+}
+.tl-tip-in { color: var(--muted); }
+.tl-tip-out { color: var(--text); }
+
+/* Request-detail chat view (pure.js chatViewHTML): the human-readable
+   transcript that leads each record detail — role-labeled turns with a
+   colored spine, plain text as text, thinking/tool-result/raw payloads in
+   collapsed details, tool calls as named mini-cards. */
+.cv { display: grid; gap: 8px; margin: 10px 0; }
+.cv-msg {
+  border-left: 3px solid var(--border);
+  padding: 2px 0 2px 10px;
+  display: grid;
+  gap: 6px;
+}
+.cv-msg.cv-user { border-left-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+.cv-msg.cv-assistant { border-left-color: color-mix(in srgb, var(--ok) 55%, transparent); }
+.cv-msg.cv-tool { border-left-color: var(--border-2); }
+.cv-role {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.cv-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.cv-muted { color: var(--muted); }
+.cv-tool {
+  border: 1px solid var(--border);
+  border-radius: var(--r-inner);
+  background: var(--surface-2);
+  padding: 6px 8px;
+}
+.cv-tool-name {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 0.72rem;
+  color: var(--accent);
+}
+.cv-args {
+  margin: 4px 0 0;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 220px;
+  overflow: auto;
+}
+.cv-chip {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: var(--r-inner);
+  padding: 1px 6px;
+}
+.cv-usage { font-family: var(--mono); font-size: 0.7rem; color: var(--muted); }
+/* Expanded history: the full earlier transcript in a flat scroll box —
+   chunked 25 turns at a time by the shared scroll loader. Being the scroll
+   container is load-bearing: the data-chunk append hook targets it. */
+.cv-hist-scroll {
+  max-height: 480px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-inner);
+  padding: 8px 10px;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+/* Native virtualization: turns already loaded but offscreen are skipped for
+   layout AND paint, so scroll smoothness and chunk-insertion cost stay
+   independent of how deep the user has scrolled (858-turn sessions keep
+   janking otherwise). contain-intrinsic-size keeps the scrollbar stable
+   with a per-turn estimate until real rendered sizes are known; find-in-page
+   still forces renders on hit. */
+.cv-hist-scroll .cv-msg {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 140px;
+}
+.cv-fold { margin: 0; }
+.cv-fold > summary {
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--muted);
+  list-style: none;
+  padding: 2px 0;
+}
+.cv-fold > summary::before { content: '▸ '; }
+.cv-fold[open] > summary::before { content: '▾ '; }
+.cv-fold > summary:hover { color: var(--accent); }
+.cv-fold > .cv-text, .cv-fold > .cv-args { margin-top: 4px; }

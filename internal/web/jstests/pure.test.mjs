@@ -7,7 +7,10 @@ import assert from 'node:assert/strict';
 import {
   esc, fmtNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
-  verdictBadge, modelCapMatrix, providerFrozen, providerNames,
+  verdictBadge, modelCapMatrix, providerCapsSummary, providerFrozen, providerNames,
+  ruleHitsLeaderboard,
+  sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary,
+  hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   cacheHitRate, settingsDiff, settingsRestartKeys,
   TOKEN_RANGES, tokenRangeBounds, tokenRangeLabel, tokensRangeQuery,
   tokenCustomBounds, parseLocalDate,
@@ -177,6 +180,21 @@ test('modelCapMatrix tolerates empty and malformed providers maps', () => {
   // verdictBadge renders as unknown.
   const [p] = modelCapMatrix({ up: { models: { m: null } } });
   assert.deepEqual(p.models, [{ id: 'm', chat: undefined, anthropic: undefined, responses: undefined }]);
+});
+
+test('providerCapsSummary counts yes-verdict legs per protocol', () => {
+  const [zeta] = modelCapMatrix({
+    zeta: { models: {
+      'm-b': { chat: 'yes', anthropic: 'no', responses: 'unknown' },
+      'm-a': { chat: 'yes', anthropic: 'yes', responses: 'no' },
+      'm-c': { chat: 'no', anthropic: 'yes', responses: 'yes' },
+    } },
+  });
+  assert.deepEqual(providerCapsSummary(zeta), { models: 3, chat: 2, anthropic: 2, responses: 1 });
+  // Unknown is NOT yes: a probe-pending leg counts nowhere.
+  const [empty] = modelCapMatrix({ alpha: { models: {} } });
+  assert.deepEqual(providerCapsSummary(empty), { models: 0, chat: 0, anthropic: 0, responses: 0 });
+  assert.deepEqual(providerCapsSummary(null), { models: 0, chat: 0, anthropic: 0, responses: 0 });
 });
 
 test('providerNames keeps frozen/unavailable providers listed via the health union', () => {
@@ -1432,4 +1450,521 @@ test('logLineHTML handles lines without timestamp, severity or pairs', () => {
   assert.equal(logLineHTML('plain text only'), 'plain text only');
   assert.equal(logLineHTML('no-ts status=200'), 'no-ts <span class="log-k">status</span>=<span class="log-v ok">200</span>');
   assert.equal(logLineHTML('a =b stray = x c=1'), 'a =b stray = x <span class="log-k">c</span>=<span class="log-v">1</span>');
+});
+
+test('ruleHitsLeaderboard counts audit names plus suppressed lows, sorts by hits', () => {
+  const records = [
+    { ts: 100, kind: 'secret', names: ['openai_api_key', 'jwt'] },
+    { ts: 200, kind: 'secret', names: ['openai_api_key'] },
+    { ts: 300, kind: 'path', names: ['ssh'] },
+    { ts: 0, kind: 'secret', names: ['known_secret'] },
+  ];
+  const adjudications = [
+    { ts: 400, kind: 'secret', rule: 'openai_api_key', verdict: 'low' },   // suppressed: counts, no audit twin
+    { ts: 500, kind: 'secret', rule: 'custom_pat', verdict: 'high' },      // high HAS an audit record — must not double-count its absence here
+  ];
+  const rows = ruleHitsLeaderboard(records, adjudications);
+  assert.equal(rows[0].name, 'openai_api_key');
+  assert.equal(rows[0].hits, 3); // 2 audit + 1 suppressed low
+  assert.equal(rows[0].lastTs, 400);
+  assert.equal(rows[0].adjudicable, true);
+  // The known-secret exact channel never defers.
+  const known = rows.find((r) => r.name === 'known_secret');
+  assert.equal(known.adjudicable, false);
+  // 'custom_pat' has no audit record and its verdict is high, not low — the
+  // leaderboard counts only suppressed lows from the ring.
+  assert.equal(rows.some((r) => r.name === 'custom_pat'), false);
+  // Ties fall back to newest last hit; empty input normalizes.
+  assert.deepEqual(ruleHitsLeaderboard(null, null), []);
+  assert.deepEqual(ruleHitsLeaderboard([{ names: null }], []), []);
+});
+
+test('sessionTimeline stacks overlapping spans into new lanes, sequential into one', () => {
+  const rows = [
+    // Two overlapping requests (0-100, 50-150) → two lanes; the third starts
+    // after the first frees its lane (200 > 100) → reuses lane 0.
+    { requestId: 'a', ts: 1000, latencyMs: 100, status: 200, input: 10, output: 5 },
+    { requestId: 'b', ts: 1050, latencyMs: 100, status: 200, input: 0, output: 0 },
+    { requestId: 'c', ts: 1200, latencyMs: 50, status: 200, input: 0, output: 5 },
+  ];
+  const tl = sessionTimeline(rows, { fmt: (t) => String(t) });
+  assert.equal(tl.lanes, 2);
+  assert.equal(tl.skipped, 0);
+  // Bar order is chronological regardless of input order; each bar carries
+  // its request id as the click target.
+  const ids = [...tl.svg.matchAll(/data-id="([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(ids, ['a', 'b', 'c']);
+  // Error rows carry the error class; retried rows carry the amber mark.
+  const err = sessionTimeline([
+    { requestId: 'x', ts: 0, latencyMs: 10, status: 502 },
+    { requestId: 'y', ts: 5000, latencyMs: 10, status: 200, attempt: 2 },
+  ], { fmt: (t) => String(t) });
+  assert.ok(/tl-err/.test(err.svg));
+  assert.ok(/tl-retry/.test(err.svg));
+  assert.ok(/attempt 3/.test(err.svg));
+});
+
+test('sessionTimeline cumulative tokens line spans bottom-left to top-right', () => {
+  const rows = [
+    { requestId: 'a', ts: 0, latencyMs: 100, input: 10, output: 0 },
+    { requestId: 'b', ts: 1000, latencyMs: 100, input: 0, output: 30 },
+  ];
+  const tl = sessionTimeline(rows, { fmt: (t) => String(t) });
+  const pts = /<polyline class="tl-tokens" points="([^"]+)"/.exec(tl.svg);
+  assert.ok(pts, 'tokens polyline missing');
+  const coords = pts[1].split(' ').map((p) => p.split(',').map(Number));
+  assert.equal(coords.length, 2);
+  // First point at 10/40 of the height; second at the full height.
+  assert.ok(coords[0][1] > coords[1][1], 'cumulative line must rise');
+  // A session with no token usage omits the line entirely.
+  const none = sessionTimeline([
+    { requestId: 'a', ts: 0, latencyMs: 10, status: 200 },
+    { requestId: 'b', ts: 999, latencyMs: 10, status: 200 },
+  ], { fmt: (t) => String(t) });
+  assert.ok(!/tl-tokens/.test(none.svg));
+});
+
+test('sessionTimeline tolerates unparseable rows and single-row sessions', () => {
+  assert.deepEqual(sessionTimeline([], {}).svg, '');
+  const one = sessionTimeline([{ requestId: 'a', ts: 5, latencyMs: 5 }], {});
+  assert.equal(one.svg, '');
+  const mixed = sessionTimeline([
+    { requestId: 'a', ts: 'garbage', latencyMs: 5 },
+    { requestId: 'b', ts: 1000, latencyMs: 5 },
+    { requestId: 'c', ts: 2000, latencyMs: 5 },
+  ], { fmt: (t) => String(t) });
+  assert.equal(mixed.skipped, 1);
+  assert.equal(mixed.lanes, 1);
+  // In-flight rows (no latency yet) run to the right edge visually.
+  const run = sessionTimeline([
+    { requestId: 'a', ts: 0, latencyMs: 5 },
+    { requestId: 'b', ts: 1000, inFlight: true },
+  ], { fmt: (t) => String(t) });
+  assert.ok(/tl-run/.test(run.svg));
+});
+
+test('sessionTimeline compresses long idle gaps into a segmented axis', () => {
+  // A 30s burst followed by a 6h idle stretch and one more request: without
+  // segmentation the burst would squeeze into ~0.1% of the axis width.
+  const rows = [
+    { requestId: 'a', ts: 0, latencyMs: 10000, status: 200 },
+    { requestId: 'b', ts: 15000, latencyMs: 10000, status: 200 },
+    { requestId: 'c', ts: 6 * 3600 * 1000, latencyMs: 10000, status: 200 },
+  ];
+  const tl = sessionTimeline(rows, { fmt: (t) => String(t) });
+  assert.equal(tl.segments.length, 2, 'the 6h gap must break the axis');
+  assert.ok(/tl-break/.test(tl.svg), 'a divider marks the compressed gap');
+  // Segment order is chronological, x ranges are monotonic with a break
+  // strip between them, and the burst keeps a readable share of the width.
+  const [s0, s1] = tl.segments;
+  assert.ok(s1.x0 > s0.x1 + 10, 'a reserved strip separates the segments');
+  assert.ok(s0.x1 - s0.x0 > 250, `burst segment must stay readable, got ${s0.x1 - s0.x0}px`);
+  assert.ok(s0.t0 <= 0 && s0.t1 >= 20000, 'segment 0 spans the burst');
+  assert.equal(s1.t0, 6 * 3600 * 1000);
+  // A tight session (all gaps under the 2-minute default) stays one segment
+  // with no divider.
+  const tight = sessionTimeline([
+    { requestId: 'a', ts: 0, latencyMs: 1000 },
+    { requestId: 'b', ts: 5000, latencyMs: 1000 },
+  ], { fmt: (t) => String(t) });
+  assert.equal(tight.segments.length, 1);
+  assert.ok(!/tl-break/.test(tight.svg));
+  // gapMs overrides the threshold: a 5s gap splits at 1s, not at 2 minutes.
+  const fussy = sessionTimeline([
+    { requestId: 'a', ts: 0, latencyMs: 500 },
+    { requestId: 'b', ts: 5000, latencyMs: 500 },
+  ], { fmt: (t) => String(t), gapMs: 1000 });
+  assert.equal(fussy.segments.length, 2);
+});
+
+test('sessionTimeline zoom window filters rows and owns the axis domain', () => {
+  const rows = [
+    { requestId: 'a', ts: 0, latencyMs: 100, status: 200 },
+    { requestId: 'b', ts: 1000, latencyMs: 100, status: 200 },
+    { requestId: 'c', ts: 3600 * 1000, latencyMs: 100, status: 200 },
+  ];
+  const ids = (svg) => [...svg.matchAll(/data-id="([^"]+)"/g)].map((m) => m[1]);
+  // Zooming into the first two requests drops the hour-later row and re-bases
+  // the axis on what remains; a single visible row still renders (the reset
+  // chip must stay reachable).
+  const zoomed = sessionTimeline(rows, { fmt: (t) => String(t), window: { from: -100, to: 2000 } });
+  assert.deepEqual(ids(zoomed.svg), ['a', 'b']);
+  assert.ok(zoomed.segments.length >= 1);
+  const lone = sessionTimeline(rows, { fmt: (t) => String(t), window: { from: -100, to: 500 } });
+  assert.deepEqual(ids(lone.svg), ['a']);
+  // A window that catches nothing falls back to the full view instead of
+  // blanking the card (a stray drag must never orphan the reset control).
+  const missed = sessionTimeline(rows, { fmt: (t) => String(t), window: { from: 100 * 3600 * 1000, to: 101 * 3600 * 1000 } });
+  assert.deepEqual(ids(missed.svg), ['a', 'b', 'c']);
+  // A degenerate window (to <= from) is ignored outright.
+  const junk = sessionTimeline(rows, { fmt: (t) => String(t), window: { from: 500, to: 500 } });
+  assert.deepEqual(ids(junk.svg), ['a', 'b', 'c']);
+});
+
+test('sessionTimeline compresses lane height for busy parallel sessions', () => {
+  // 30 fully-overlapping requests stack 30 lanes; past 14 lanes the row
+  // height steps down so the card cannot dwarf the table below it.
+  const rows = Array.from({ length: 30 }, (_, i) => ({
+    requestId: 'r' + i, ts: 0, latencyMs: 5000, status: 200,
+  }));
+  const tl = sessionTimeline(rows, { fmt: (t) => String(t) });
+  assert.equal(tl.lanes, 30);
+  const h = Number(/viewBox="0 0 900 (\d+(?:\.\d+)?)"/.exec(tl.svg)[1]);
+  assert.equal(h, 8 + 30 * 12 + 18, 'compact metrics: laneH 12 not 20');
+});
+
+test('sessionBarSummary renders full and sparse rows, dropping absent fields', () => {
+  const fmt = (t) => 'T' + t;
+  const full = sessionBarSummary({
+    ts: 5000, agent: 'claude-code', model: 'glm-5.3', provider: 'zhipu',
+    status: 200, latencyMs: 4172, input: 310, output: 132, cacheRead: 2400,
+    attempt: 2, inFlight: false,
+  }, fmt);
+  assert.deepEqual(full, [
+    'T5000 · claude-code',
+    'glm-5.3 → zhipu',
+    '200 · 4.2s · in 310 / out 132 tok · cache 2.4k',
+    'attempt 3 (failover)',
+  ]);
+  // Missing fields drop out line by line; latency under 1s stays in ms.
+  const sparse = sessionBarSummary({ ts: 0, status: 502, latencyMs: 300 }, fmt);
+  assert.deepEqual(sparse, ['T0', '502 · 300ms']);
+  // In-flight note; null row says nothing.
+  assert.deepEqual(sessionBarSummary({ ts: 1, inFlight: true }, fmt), ['T1', 'in flight']);
+  assert.deepEqual(sessionBarSummary(null, fmt), []);
+  // RFC3339 timestamps go through the caller's fmt like numbers do.
+  assert.equal(sessionBarSummary({ ts: '2026-09-12T01:02:03Z' }, (t) => new Date(t).toISOString()).length, 1);
+});
+
+test('responseExcerpt extracts assistant text from all three protocol shapes', () => {
+  // anthropic JSON message (thinking blocks skipped, text joined)
+  const anthropic = JSON.stringify({
+    content: [
+      { type: 'thinking', thinking: 'internal reasoning must not leak' },
+      { type: 'text', text: '  Hello   there. ' },
+      { type: 'text', text: 'Second block.' },
+    ],
+  });
+  assert.equal(responseExcerpt(anthropic, 100), 'Hello there. Second block.');
+  // openai chat, string content
+  const openai = JSON.stringify({ choices: [{ message: { content: 'Hi from openai' } }] });
+  assert.equal(responseExcerpt(openai, 50), 'Hi from openai');
+  // openai chat, array content pieces
+  const openaiArr = JSON.stringify({ choices: [{ message: { content: [{ type: 'text', text: 'part A ' }, { type: 'text', text: 'part B' }] } }] });
+  assert.equal(responseExcerpt(openaiArr, 50), 'part A part B');
+  // responses API shape
+  const responses = JSON.stringify({ output: [{ content: [{ type: 'output_text', text: 'responses shape' }] }] });
+  assert.equal(responseExcerpt(responses, 50), 'responses shape');
+});
+
+test('responseExcerpt folds SSE deltas, caps length, and bails safely', () => {
+  const sse = [
+    'data: ' + JSON.stringify({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'Stre' } }),
+    '',
+    'data: ' + JSON.stringify({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'amed!' } }),
+    'data: [DONE]',
+  ].join('\n');
+  assert.equal(responseExcerpt(sse, 50), 'Streamed!');
+  // Cap with ellipsis; whitespace collapses.
+  const long = JSON.stringify({ choices: [{ message: { content: 'x'.repeat(50) + '   tail' } }] });
+  assert.equal(responseExcerpt(long, 10), 'xxxxxxxxxx…');
+  // Non-JSON plain text (upstream error page) falls back to the raw string.
+  assert.equal(responseExcerpt('upstream connect error', 40), 'upstream connect error');
+  // Garbage JSON, empty, and oversize bodies yield '' — never throw.
+  assert.equal(responseExcerpt('{"broken": ', 10), '');
+  assert.equal(responseExcerpt('', 10), '');
+  assert.equal(responseExcerpt('x'.repeat(1500001), 10), '');
+  assert.equal(responseExcerpt(null, 10), '');
+});
+
+test('requestExcerpt surfaces the newest human text across shapes and agents', () => {
+  // anthropic: string content; newest user message wins.
+  const str = JSON.stringify({ messages: [
+    { role: 'user', content: 'older turn' },
+    { role: 'assistant', content: 'reply' },
+    { role: 'user', content: 'fix the login bug' },
+  ] });
+  assert.equal(requestExcerpt(str, 50), 'fix the login bug');
+  // Coding-agent turn: the LAST user message is tool_result-only — the
+  // newest human text sits in an earlier user message and must surface.
+  const agentTurn = JSON.stringify({ messages: [
+    { role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 't1', content: 'file contents' },
+      { type: 'text', text: 'keep going' },
+    ] },
+    { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+    { role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 't2', content: 'more output' },
+    ] },
+  ] });
+  assert.equal(requestExcerpt(agentTurn, 50), 'keep going');
+  // openai array content pieces.
+  const openai = JSON.stringify({ messages: [
+    { role: 'user', content: [{ type: 'text', text: 'part A ' }, { type: 'text', text: 'part B' }] },
+  ] });
+  assert.equal(requestExcerpt(openai, 50), 'part A part B');
+  // responses shape: plain string input and message array.
+  assert.equal(requestExcerpt(JSON.stringify({ input: 'string input' }), 50), 'string input');
+  assert.equal(requestExcerpt(JSON.stringify({ input: [
+    { role: 'user', content: 'array input' },
+  ] }), 50), 'array input');
+  // Cap with ellipsis; non-user tails never leak.
+  const capped = JSON.stringify({ messages: [{ role: 'user', content: 'y'.repeat(30) }] });
+  assert.equal(requestExcerpt(capped, 10), 'yyyyyyyyyy…');
+  // No user text / garbage / oversize → ''.
+  assert.equal(requestExcerpt(JSON.stringify({ messages: [{ role: 'assistant', content: 'no' }] }), 10), '');
+  assert.equal(requestExcerpt('not json', 10), '');
+  assert.equal(requestExcerpt('x'.repeat(1500001), 10), '');
+});
+
+test('responseExcerpt falls back to tool/thinking/error markers on text-less turns', () => {
+  // SSE coding-agent turn: thinking block + tool_use block, no text deltas.
+  const sse = [
+    'data: ' + JSON.stringify({ type: 'content_block_start', content_block: { type: 'thinking' } }),
+    'data: ' + JSON.stringify({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'must not leak' } }),
+    'data: ' + JSON.stringify({ type: 'content_block_start', content_block: { type: 'tool_use', id: 't1', name: 'Bash', input: {} } }),
+    'data: ' + JSON.stringify({ type: 'content_block_delta', delta: { type: 'input_json_delta', partial_json: '{"cmd":' } }),
+    'data: ' + JSON.stringify({ type: 'message_stop' }),
+  ].join('\n');
+  assert.equal(responseExcerpt(sse, 60), '[tool_use: Bash]');
+  // Thinking-only turn.
+  const think = 'data: ' + JSON.stringify({ type: 'content_block_start', content_block: { type: 'thinking' } });
+  assert.equal(responseExcerpt(think, 30), '[thinking]');
+  // JSON message with tool_use blocks (deduped names) — anthropic + openai
+  // tool_calls + responses function_call all note their tool names.
+  const anthropicTools = JSON.stringify({ content: [
+    { type: 'tool_use', id: 't1', name: 'Bash', input: {} },
+    { type: 'tool_use', id: 't2', name: 'Edit', input: {} },
+    { type: 'tool_use', id: 't3', name: 'Bash', input: {} },
+  ] });
+  assert.equal(responseExcerpt(anthropicTools, 60), '[tool_use: Bash, Edit]');
+  const openaiTools = JSON.stringify({ choices: [{ message: { content: null, tool_calls: [
+    { function: { name: 'get_weather' } },
+  ] } }] });
+  assert.equal(responseExcerpt(openaiTools, 60), '[tool_use: get_weather]');
+  const responsesTool = JSON.stringify({ output: [{ type: 'function_call', name: 'search' }] });
+  assert.equal(responseExcerpt(responsesTool, 60), '[tool_use: search]');
+  // Error JSON surfaces its message as the text itself.
+  assert.equal(responseExcerpt(JSON.stringify({ error: { message: 'quota exceeded' } }), 60), 'quota exceeded');
+  // Text still wins over markers when present.
+  const mixed = JSON.stringify({ content: [
+    { type: 'tool_use', id: 't1', name: 'Bash', input: {} },
+    { type: 'text', text: 'ran it' },
+  ] });
+  assert.equal(responseExcerpt(mixed, 60), 'ran it');
+});
+
+test('chatViewHTML renders a readable transcript with collapsed aux blocks', () => {
+  const req = JSON.stringify({
+    system: 'You are helpful.',
+    messages: [
+      { role: 'user', content: 'first turn' },
+      { role: 'assistant', content: [{ type: 'text', text: 'first answer' }] },
+      { role: 'user', content: 'mid turn' },
+      { role: 'assistant', content: [{ type: 'text', text: 'mid answer' }] },
+      { role: 'user', content: [{ type: 'tool_result', content: 'ls output' }, { type: 'text', text: 'keep going' }] },
+    ],
+  });
+  const res = JSON.stringify({
+    content: [
+      { type: 'thinking', thinking: 'plan it' },
+      { type: 'tool_use', name: 'Bash', input: { command: 'ls -la' } },
+      { type: 'text', text: 'all <done>' },
+    ],
+    usage: { input_tokens: 10, output_tokens: 5 },
+  });
+  const html = chatViewHTML(req, res, 'application/json', { histKey: 'raw-77' });
+  // Structure: system + LAZY history fold, roles labeled, escaping intact.
+  assert.ok(html.includes('cv-system'), 'system collapses');
+  assert.ok(html.includes('1 earlier turn'), 'history collapses beyond the recent window');
+  assert.ok(html.includes('data-raw="raw-77"'), 'history fold carries the lazy registry key');
+  // The earlier turns do NOT ride the initial HTML — only a placeholder does.
+  assert.ok(html.includes('renders on first expand'));
+  assert.ok(!html.includes('<div class="cv-text">first turn</div>'), 'earlier turn content stays out of the DOM');
+  assert.ok(html.includes('<div class="cv-text">keep going</div>'), 'recent turns render');
+  assert.ok(html.includes('all &lt;done&gt;'), 'text is escaped');
+  assert.ok(html.includes('<details class="cv-fold"><summary>thinking</summary>'), 'thinking collapses');
+  assert.ok(html.includes('<summary>tool result</summary>'), 'tool results collapse');
+  assert.ok(html.includes('<span class="cv-tool-name">Bash</span>'), 'tool call named');
+  assert.ok(html.includes('command: ls -la'), 'tool args render as readable text, not JSON');
+  assert.ok(html.includes('in 10 · out 5'), 'usage line');
+  assert.ok(html.includes('>user</span><div class="cv-text">mid turn</div>'), 'recent window keeps its turns');
+  // Lazy expansion feeds a flat chunked transcript: parse once, render
+  // arbitrary ranges (the scroll loader appends 25-turn chunks).
+  const parsed = parseChatRequest(req);
+  assert.equal(parsed.messages.length, 5);
+  const end = parsed.messages.length - CHAT_RECENT;
+  const firstChunk = chatTurnsSliceHTML(parsed.messages, 0, 1);
+  assert.ok(firstChunk.includes('<div class="cv-text">first turn</div>'), 'chunk renders full turns');
+  assert.ok(!firstChunk.includes('mid turn'), 'range respects its bounds');
+  assert.equal(chatTurnsSliceHTML(parsed.messages, 0, end).split('cv-msg').length - 1, end, 'full history renders every turn');
+  assert.equal(chatTurnsSliceHTML(parsed.messages, 3, 99).split('cv-msg').length - 1, 2, 'upper bound clamps');
+  assert.equal(chatTurnsSliceHTML(null, 0, 5), '');
+  assert.equal(chatTurnsSliceHTML(parsed.messages, 2, 2), '');
+  assert.equal(parseChatRequest('not json'), null);
+});
+
+test('chatViewHTML folds SSE streams (anthropic + openai) with usage', () => {
+  const anthropicSSE = [
+    'data: ' + JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 7, cache_read_input_tokens: 40 } } }),
+    'data: ' + JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', name: 'Edit', input: {} } }),
+    'data: ' + JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":"a.ts' } }),
+    'data: ' + JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '"}' } }),
+    'data: ' + JSON.stringify({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'He' } }),
+    'data: ' + JSON.stringify({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'y' } }),
+    'data: ' + JSON.stringify({ type: 'message_delta', usage: { output_tokens: 3 } }),
+  ].join('\n');
+  const req = JSON.stringify({ messages: [{ role: 'user', content: 'do it' }] });
+  const html = chatViewHTML(req, anthropicSSE, 'text/event-stream');
+  assert.ok(html.includes('<span class="cv-tool-name">Edit</span>'), 'streamed tool call named');
+  assert.ok(html.includes('path: a.ts'), 'partial_json fragments parse back to readable args');
+  assert.ok(html.includes('>user</span><div class="cv-text">do it</div>'));
+  assert.ok(/assistant[\s\S]*<div class="cv-text">Hey<\/div>/.test(html), 'text deltas join');
+  assert.ok(html.includes('in 7 · out 3 · cache read 40'), 'usage folded from stream events');
+  // openai chunks: content pieces + tool_calls accumulation.
+  const openaiSSE = [
+    'data: ' + JSON.stringify({ choices: [{ delta: { content: 'Hi ' } }] }),
+    'data: ' + JSON.stringify({ choices: [{ delta: { content: 'there', tool_calls: [{ index: 0, function: { name: 'sea', arguments: '{"q":' } }] } }] }),
+    'data: ' + JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '1}' } }] } }] }),
+    'data: ' + JSON.stringify({ choices: [], usage: { prompt_tokens: 4, completion_tokens: 2 } }),
+  ].join('\n');
+  const html2 = chatViewHTML('', openaiSSE, '');
+  assert.ok(html2.includes('<div class="cv-text">Hi there</div>'), 'openai content joins');
+  assert.ok(html2.includes('<span class="cv-tool-name">sea</span>'), 'openai tool call named');
+  assert.ok(html2.includes('q: 1'), 'openai tool args accumulate readable');
+  assert.ok(html2.includes('in 4 · out 2'), 'openai usage');
+});
+
+test('chatViewHTML bails out safely on unusable bodies', () => {
+  // Errors render as an error block; everything unparseable yields ''.
+  const errBody = JSON.stringify({ error: { message: 'rate limited <fast>' } });
+  assert.ok(chatViewHTML('', errBody, '').includes('msg err'));
+  assert.ok(chatViewHTML('', errBody, '').includes('rate limited &lt;fast&gt;'));
+  assert.equal(chatViewHTML('not json', 'also not json', ''), '');
+  assert.equal(chatViewHTML('', '', ''), '');
+  assert.equal(chatViewHTML('x'.repeat(1500001), '', ''), '');
+  // Oversize single blocks cap with a visible note instead of flooding DOM.
+  const big = JSON.stringify({ messages: [{ role: 'user', content: 'z'.repeat(5000) }] });
+  assert.ok(chatViewHTML(big, '', '').includes('+1k chars, see raw body'));
+});
+
+test('readableValue flattens JSON into human text', () => {
+  assert.equal(readableValue('plain'), 'plain');
+  assert.equal(readableValue(42), '42');
+  assert.equal(readableValue(null), 'null');
+  assert.equal(readableValue({ command: 'ls -la', timeout: 5000 }), 'command: ls -la\ntimeout: 5000');
+  // Nested containers indent; small scalar arrays comma-join.
+  assert.equal(readableValue({ file: 'a.ts', edits: [{ old: 'x', new: 'y' }] }),
+    'file: a.ts\nedits:\n  - old: x\n    new: y');
+  assert.equal(readableValue({ models: ['a', 'b', 'c'] }), 'models: a, b, c');
+  assert.equal(readableValue({ empty: {}, none: [] }), 'empty: {}\nnone: []');
+  // A JSON tool result renders through it (chat tool_result path).
+  const res = JSON.stringify({ content: [{ type: 'tool_use', name: 'jq', input: { filter: '.name' } }] });
+  assert.ok(chatViewHTML('', res, '').includes('filter: .name'));
+});
+
+test('requests filter hash round-trips, omitting defaults and dropping junk', () => {
+  // Only non-default values ride along; an all-default filter yields no query.
+  assert.equal(requestsFilterQuery({ session: '', agent: '', model: '', provider: '', errors: false, shadow: '' }), '');
+  const q = requestsFilterQuery({ session: 'sess demo/1', agent: 'pi', model: '', provider: 'zhipu', errors: true, shadow: 'only' });
+  assert.equal(q, 'session=sess+demo%2F1&agent=pi&provider=zhipu&errors=1&shadow=only');
+  // Round-trip through hashQueryParams + fromQuery.
+  const back = requestsFilterFromQuery(hashQueryParams(q));
+  assert.deepEqual(back, { session: 'sess demo/1', agent: 'pi', model: '', provider: 'zhipu', errors: true, shadow: 'only' });
+  // Junk shadow falls back to the tri-state default; truthy errors spellings
+  // other than 1/true normalize to false.
+  const junk = requestsFilterFromQuery({ session: 's', shadow: 'bogus', errors: 'yes' });
+  assert.deepEqual(junk, { session: 's', agent: '', model: '', provider: '', errors: false, shadow: '' });
+  // No filter keys → null (a bare #requests must not clobber live state);
+  // null/undefined params normalize to null.
+  assert.equal(requestsFilterFromQuery({}), null);
+  assert.equal(requestsFilterFromQuery(null), null);
+  assert.equal(requestsFilterFromQuery(hashQueryParams('')), null);
+  assert.deepEqual(hashQueryParams(null), {});
+});
+
+test('unified request table: one head and row renderer for all three tables', () => {
+  const head = requestTableHeadHTML();
+  assert.equal((head.match(/<th[ >]/g) || []).length, 8, '8 columns');
+  assert.ok(head.includes('tokens in / out'), 'token column replaces bytes');
+  assert.ok(!/req bytes|resp bytes/.test(head), 'bytes columns are gone');
+  // A full row: session link, status badge, tokens with cache read.
+  const row = requestRowHTML({
+    requestId: 'r1', ts: 5000, session: 'sess-abcd1234', agent: 'claude-code',
+    model: 'glm-5.3', provider: 'zhipu', status: 200, latencyMs: 15000,
+    input: 310, output: 132, cacheRead: 2400, shadow: false,
+  }, { rowClass: 'req-row', fmtTime: (t) => 'T' + t });
+  assert.ok(row.includes('data-id="r1"'));
+  assert.ok(row.includes('session-link'), 'session cell is a link');
+  assert.ok(row.includes('badge ok'), 'status renders as a badge');
+  assert.ok(row.includes('class="num warn"'), '>10s latency flags warn');
+  assert.ok(row.includes('310 / 132'), 'tokens in / out');
+  assert.ok(row.includes('· cache 2,400'), 'cache read rides the token cell');
+  // In-flight live row: dimmed, pending badge, empty tokens, live-key.
+  const live = requestRowHTML({
+    requestId: 'r2', ts: 1, model: 'm', inFlight: true, guardHits: [],
+  }, { rowClass: 'live-row', liveKey: true, fmtTime: (t) => 'T' + t });
+  assert.ok(live.includes('data-live-key="r2"'));
+  assert.ok(live.includes('subdue') && live.includes('···'), 'in-flight dim + pending badge');
+  assert.ok(!/cache/.test(live), 'no token cell while in flight');
+  // Shadow badge and modelNote (guard) land in their cells.
+  const shadow = requestRowHTML({ requestId: 'r3', ts: 1, shadow: true, status: 200 }, { rowClass: 'req-row' });
+  assert.ok(shadow.includes('shadow'), 'shadow badge');
+  const guard = requestRowHTML({ requestId: 'r4', ts: 1, status: 200 }, { rowClass: 'live-row', modelNote: ' <span class="badge warn">⚑ guard</span>' });
+  assert.ok(/⚑ guard<\/span><\/td>/.test(guard), 'guard note sits in the model cell');
+});
+
+test('sessionHealthSummary derives health signals with gap/percentile guards', () => {
+  const rows = [
+    { ts: 0, latencyMs: 1000, input: 100, output: 10, model: 'm1', attempt: 0 },
+    { ts: 5000, latencyMs: 3000, input: 200, output: 30, model: 'm1', cacheRead: 800, attempt: 0 },
+    { ts: 30000, latencyMs: 9000, input: 0, output: 60, model: 'm2', attempt: 2 },
+    { ts: 9 * 3600 * 1000, latencyMs: 2000, input: 50, output: 20, model: 'm2', shadow: true },
+  ];
+  const h = sessionHealthSummary(rows);
+  assert.equal(h.spanMs, 9 * 3600 * 1000, 'span is first→last');
+  assert.equal(h.activeMs, 30000, 'the 9h idle gap drops; sub-2m gaps count (5s + 25s)');
+  assert.equal(h.p50Ms, 3000, 'nearest-rank p50 over sorted [1000,2000,3000,9000]');
+  assert.equal(h.p95Ms, 9000, 'p95 clamps to the max');
+  assert.equal(h.failovers, 1);
+  assert.equal(h.cacheHitPct, 70, 'cache read share of read+input (800/1150)');
+  assert.equal(h.tokPerSec, Math.round((120 / 15) * 10) / 10, 'output tokens over summed latency');
+  assert.deepEqual(h.models.map((m) => m.model + '×' + m.n), ['m1×2', 'm2×2'], 'model distribution sorted by count');
+  assert.equal(h.shadow, 1);
+  // Degenerate inputs: empty, single row (no interval), zero denominators.
+  assert.deepEqual(sessionHealthSummary([]), { spanMs: 0, activeMs: 0, p50Ms: null, p95Ms: null, ttftP50Ms: null, failovers: 0, cacheHitPct: null, tokPerSec: null, models: [], shadow: 0 });
+  const one = sessionHealthSummary([{ ts: '2026-09-12T00:00:00Z', latencyMs: 500 }]);
+  assert.equal(one.activeMs, 0, 'single request has no interval');
+  assert.equal(one.p50Ms, 500);
+  const noLat = sessionHealthSummary([{ ts: 0 }, { ts: 1000 }]);
+  assert.equal(noLat.p50Ms, null);
+  assert.equal(noLat.cacheHitPct, null, 'zero denominator guarded');
+  assert.equal(noLat.tokPerSec, null);
+});
+
+test('requestRowHTML cache badge shows the hit share and highlights at 80%', () => {
+  const hot = requestRowHTML({ requestId: 'a', ts: 1, status: 200, input: 100, output: 5, cacheRead: 900 }, { rowClass: 'req-row' });
+  assert.ok(hot.includes('cache 900 (90%)'), 'percentage rides the cache note');
+  assert.ok(hot.includes('tok-cache hot'), '≥80% highlights');
+  const cool = requestRowHTML({ requestId: 'b', ts: 1, status: 200, input: 900, output: 5, cacheRead: 100 }, { rowClass: 'req-row' });
+  assert.ok(cool.includes('cache 100 (10%)'));
+  assert.ok(!cool.includes('tok-cache hot'), 'low share stays muted');
+  const none = requestRowHTML({ requestId: 'c', ts: 1, status: 200, input: 10, output: 5 }, { rowClass: 'req-row' });
+  assert.ok(!/cache/.test(none), 'no cache read → no note');
+});
+
+test('ttft rides the bar summary and session health p50', () => {
+  const lines = sessionBarSummary({ ts: 0, status: 200, latencyMs: 4200, ttftMs: 320, input: 10, output: 5 }, (t) => 'T' + t);
+  assert.ok(lines.some((l) => l.includes('200 · 4.2s · ttft 320ms')), `line: ${JSON.stringify(lines)}`);
+  // absent ttft stays silent
+  const noT = sessionBarSummary({ ts: 0, status: 200, latencyMs: 100 }, () => 'T');
+  assert.ok(noT.every((l) => !/ttft/.test(l)));
+  // health p50 over ttfts
+  const h = sessionHealthSummary([
+    { ts: 0, latencyMs: 1000, ttftMs: 100 },
+    { ts: 1000, latencyMs: 1000, ttftMs: 300 },
+    { ts: 2000, latencyMs: 1000, ttftMs: 900 },
+  ]);
+  assert.equal(h.ttftP50Ms, 300, 'nearest-rank p50 over [100,300,900]');
+  assert.equal(sessionHealthSummary([{ ts: 0 }]).ttftP50Ms, null);
 });

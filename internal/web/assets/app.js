@@ -23,14 +23,15 @@
 import {
   esc, fmtNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
-  verdictBadge, modelCapMatrix, providerFrozen, providerNames, cacheHitRate,
+  verdictBadge, modelCapMatrix, providerCapsSummary, providerFrozen, providerNames, cacheHitRate,
   settingsDiff, settingsRestartKeys, TOKEN_RANGES, tokensRangeQuery, tokenRangeLabel,
   tokenRangeTriggerLabel, parseLocalDate, tokenRangeBounds, tokenCustomBounds,
   WEEKDAYS, monthTitle, calendarMonthGrid, twoMonthWindow, shiftMonth, ymd, isFutureDay, rangePick,
   parseSSE, isSSE, prettyJSON, formatJSONLoose, highlightJSON, splitLinesByBudget, linkedModels,
   sessionsForAgent, linkedAgents,
   analyticsChartSeries, analyticsTableRows, ANALYTICS_METRICS, pctDelta,
-  analyticsGranularity, analyticsGranOptions, analyticsValueText, modelHealthFromSeries, fmtCompact, liveSessionSummary, liveSessionOrder, shortSessionId,
+  analyticsGranularity, analyticsGranOptions, analyticsValueText, modelHealthFromSeries, fmtCompact, liveSessionSummary, liveSessionOrder, shortSessionId, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary,
+  hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
   detailFetchState, quotaErrKind, accountUsageState,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, securityKpisHTML, mergeSecurityFeed,
@@ -233,6 +234,11 @@ let activeTab = 'status';
 //   #config
 //   #accounts
 //   #accounts/<provider>   (Accounts tab with a provider selected)
+//   #requests?session=…&agent=…   (Requests tab filter — refresh/shared link
+//                                  lands on the same view; only non-default
+//                                  filter values ride along)
+//   #status/live?session=…        (Status → Live section with one session
+//                                  selected — same refresh/restore story)
 //
 // activateTab/selectProvider push the hash; a hashchange listener (browser
 // back/forward) re-activates without pushing, so the two stay in sync without a
@@ -240,17 +246,62 @@ let activeTab = 'status';
 
 function parseHash() {
   const raw = (location.hash || '').replace(/^#\/?/, ''); // drop leading "#"/"#/"
-  const [tab, ...rest] = raw.split('/');
+  const [path, queryRaw] = raw.split('?');
+  const [tab, ...rest] = path.split('/');
   if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics' || tab === 'requests' || tab === 'security') {
     // decodeURIComponent so provider/section names with special chars
     // round-trip; a malformed sequence decodes to "" (treated as "no sub" ->
     // first provider / default section). For #status/<section>, sub is the
-    // section key read by selectStatusSectionSilent.
+    // section key read by selectStatusSectionSilent. The query portion feeds
+    // the Requests filter (hashQueryParams).
     let sub = '';
     try { sub = decodeURIComponent(rest.join('/')); } catch (_) { sub = ''; }
-    return { tab, sub };
+    return { tab, sub, query: hashQueryParams(queryRaw) };
   }
-  return { tab: 'status', sub: '' };
+  return { tab: 'status', sub: '', query: {} };
+}
+
+// statusHash builds the Status URL hash: the active section plus — when the
+// Live section has a session selected — that session as a query param, so a
+// refresh or shared link lands on the same live session view. Callers render
+// BEFORE hashing: mounting the Live card resets the selection, and the hash
+// must reflect the post-render truth.
+function statusHash() {
+  let h = '#status/' + statusSelected;
+  if (statusSelected === 'live' && liveSessionFilter) {
+    h += '?session=' + encodeURIComponent(liveSessionFilter);
+  }
+  return h;
+}
+
+// requestsHash builds the Requests URL hash from the live filter; only
+// non-default values ride along so an unfiltered tab stays a clean #requests.
+function requestsHash() {
+  const q = requestsFilterQuery(requestsFilter);
+  return '#requests' + (q ? '?' + q : '');
+}
+
+// updateRequestsHash mirrors filter changes into the URL (replaceState, like
+// the Accounts provider pin — in-tab refinement must not spam history).
+function updateRequestsHash() {
+  if (activeTab === 'requests') setHash(requestsHash(), false);
+}
+
+// syncRequestsFreeControls pushes the filter state into the free-form
+// controls (provider/model inputs, errors checkbox, shadow select). The
+// linked selects are repainted by renderRequestSelectors, but these four
+// hold their DOM value across re-renders — after a hash-driven filter change
+// (back/forward) they must follow, or the next Refresh would read the stale
+// values back into the filter.
+function syncRequestsFreeControls() {
+  const p = document.getElementById('req-provider');
+  if (p) p.value = requestsFilter.provider;
+  const m = document.getElementById('req-model');
+  if (m) m.value = requestsFilter.model;
+  const e = document.getElementById('req-errors');
+  if (e) e.checked = !!requestsFilter.errors;
+  const sh = document.getElementById('req-shadow');
+  if (sh) sh.value = requestsFilter.shadow;
 }
 
 // pushHash sets the hash without re-triggering the hashchange listener (the
@@ -301,7 +352,8 @@ function activateTab(name) {
   // to Back out of, so push a history entry. Accounts adds its provider segment
   // in selectProvider (replaceState - same tab, finer-grained). Status includes
   // its active section so a refresh lands on the same view.
-  if (name === 'status') setHash('#status/' + statusSelected, true);
+  if (name === 'status') setHash(statusHash(), true);
+  else if (name === 'requests') setHash(requestsHash(), true);
   else if (name !== 'accounts') setHash(tabHash(name), true);
 }
 
@@ -312,8 +364,13 @@ for (const b of tabBtns) {
 // hashchange: browser back/forward (or manual hash edit) drives the view. Apply
 // the hash's tab + (Accounts) provider WITHOUT pushing back, avoiding a loop.
 window.addEventListener('hashchange', () => {
-  const { tab, sub } = parseHash();
-  if (tab !== activeTab) {
+  const { tab, sub, query } = parseHash();
+  // Seed the Requests filter BEFORE activation: the first mount templates the
+  // free inputs from it and the re-entry path loads through it.
+  const nextFilter = tab === 'requests' ? requestsFilterFromQuery(query) : null;
+  if (nextFilter) requestsFilter = nextFilter;
+  const switched = tab !== activeTab;
+  if (switched) {
     activateTabSilent(tab);
   }
   if (tab === 'accounts' && sub) {
@@ -321,6 +378,30 @@ window.addEventListener('hashchange', () => {
   }
   if (tab === 'status' && sub) {
     selectStatusSectionSilent(sub);
+  }
+  if (tab === 'status' && sub === 'live') {
+    // Apply the hash's session (empty clears to all-live). When the live
+    // card is already mounted a direct apply is safe; when it is not (first
+    // entry to Status — the tab renders async through its fetches), apply
+    // via the bootLiveSession pending that renderLiveCard consumes on
+    // mount, or the mount's selection reset would wipe the hash session —
+    // the same race boot fixed.
+    const liveSess = query.session || '';
+    if (document.getElementById('live-session')) {
+      if (liveSessionFilter !== liveSess) onLiveSessionChange(liveSess);
+    } else {
+      bootLiveSession = liveSess;
+    }
+  }
+  if (tab === 'requests' && nextFilter) {
+    // After a tab switch renderRequestsTab already rendered through the
+    // seeded filter; the free controls still need the sync (the re-entry
+    // path does not rebuild them). Without a switch this IS the reload.
+    syncRequestsFreeControls();
+    if (!switched && requestsCombos && document.getElementById('req-table')) {
+      renderRequestSelectors(requestsCombos);
+      loadRequests(requestsCombos);
+    }
   }
 });
 
@@ -391,8 +472,15 @@ async function renderRequestsTab() {
   const panel = panels.requests;
   if (!panel) return;
   if (await retainTab(panel, '#req-table', () => refreshRequestsData(requestsCombos))) return;
+  // Seed the filter from the URL hash (#requests?session=…): a refresh or a
+  // shared link must land on the same view, not the unfiltered list. The
+  // skeleton below templates the free inputs from the filter; the linked
+  // selects pick it up in renderRequestSelectors (an unknown id is kept as
+  // an option so the selection stays visible and reversible).
+  const seeded = requestsFilterFromQuery(parseHash().query);
+  if (seeded) requestsFilter = seeded;
   resetCombos();
-  panel.innerHTML = `<div class="card"><div class="card-body">
+  panel.innerHTML = `<div class="card card-open"><div class="card-body">
     <div class="req-controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
       <select id="req-agent" class="req-input" title="filter by client agent"><option value="">all agents</option></select>
       <select id="req-session" class="req-input" title="filter by client session"><option value="">all sessions</option></select>
@@ -406,7 +494,7 @@ async function renderRequestsTab() {
       <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="req-errors" ${requestsFilter.errors ? 'checked' : ''}/> errors only</label>
       <button id="req-refresh" class="btn">${iconRefresh()}Refresh</button>
     </div>
-    <div id="req-session-summary" style="margin-bottom:12px" hidden></div>
+    <div id="req-session-summary" class="sess-sticky" style="margin-bottom:12px" hidden></div>
     <div id="req-table"></div>
   </div></div>`;
   const combos = requestsCombos = {
@@ -421,6 +509,7 @@ async function renderRequestsTab() {
     requestsFilter.model = document.getElementById('req-model').value.trim();
     requestsFilter.errors = document.getElementById('req-errors').checked;
     requestsFilter.shadow = document.getElementById('req-shadow').value;
+    updateRequestsHash();
     loadRequests(combos);
   };
   // Agent and session are linked both ways: picking an agent narrows the
@@ -792,21 +881,41 @@ function syncRequestFacets(facets, combos) {
 // logging off or a failed query must not leave a stale summary behind).
 function hideRequestsSessionSummary() {
   const host = document.getElementById('req-session-summary');
-  if (host) { host.hidden = true; host.innerHTML = ''; }
+  if (host) { host.hidden = true; host.innerHTML = ''; syncSessThOffset(host); }
 }
 
 // renderRequestsSessionSummary shows the selected session's aggregate above the
-// request table (same chips as the Live session panel). Hidden when no session
-// is selected; the aggregate comes from /api/sessions (combos.sessions) and the
-// displayed rows fill in when the aggregate is missing (aged-out session).
+// request table (same chips as the Live session panel), in a sticky container
+// so it stays in view while the (often long) session's table scrolls. Hidden
+// when no session is selected; the aggregate comes from /api/sessions
+// (combos.sessions) and the displayed rows fill in when the aggregate is
+// missing (aged-out session).
 function renderRequestsSessionSummary(combos) {
   const host = document.getElementById('req-session-summary');
   if (!host) return;
   if (!requestsFilter.session) { host.hidden = true; host.innerHTML = ''; return; }
   const agg = (combos.sessions || []).find((s) => s.session_id === requestsFilter.session) || null;
-  const s = liveSessionSummary((combos.lastRecords || []).map(persistedSummaryRow), agg);
+  const rows = (combos.lastRecords || []).map(persistedSummaryRow);
+  // The SAME session view the Live panel renders (chips + trace timeline —
+  // one implementation, shared); bars toggle the table's inline detail row
+  // AND locate it: the row scrolls into view and flashes, because a busy
+  // session's table can be hundreds of rows deep.
   host.hidden = false;
-  host.innerHTML = sessionSummaryHTML(s, { live: false });
+  hideTlTip();
+  host.innerHTML = sessionViewHTML(rows, agg, { live: false, session: requestsFilter.session });
+  wireSessionTimeline(host, (id) => {
+    const tr = document.querySelector('.req-row[data-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]');
+    if (!tr) return;
+    toggleRequestDetail(tr);
+    tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    tr.classList.add('row-flash');
+    setTimeout(() => tr.classList.remove('row-flash'), 1800);
+  }, {
+    session: requestsFilter.session,
+    rerender: () => renderRequestsSessionSummary(combos),
+    rows,
+  });
+  syncSessThOffset(host);
 }
 
 async function loadRequests(combos) {
@@ -818,6 +927,7 @@ async function loadRequests(combos) {
   const paint = (html) => {
     if (!tbl) return;
     tbl.querySelectorAll('[data-chunk]').forEach((host) => bodyChunkRegistry.delete(host.dataset.chunk));
+    dropRawBodies(tbl);
     tbl.innerHTML = html;
   };
   if (tbl && !tbl.firstElementChild) paint('<span class="hint">loading…</span>');
@@ -856,33 +966,16 @@ async function loadRequests(combos) {
   }
   let rows = '';
   for (const r of recs) {
-    // v2: status renders as a semantic badge (2xx ok / 4xx warn / 5xx err),
-    // failed rows get a faint err tint, and >10s latencies flag warn so slow
-    // calls stand out in the dense table.
-    const rowCls = r.status >= 400 ? ' req-row-err' : '';
-    const latCls = r.latency_ms > 10000 ? 'num warn' : 'num';
-    // Session cell mirrors the Live table: abbreviated id, full id in the
-    // tooltip, one click filters the tab down to that session (the row
-    // click router below intercepts it before the detail toggle).
-    const sess = r.session_id
-      ? `<td class="mono session-link" data-session="${esc(r.session_id)}" title="${esc(r.session_id)} — view this session">${esc(shortSessionId(r.session_id))}</td>`
-      : '<td class="mono">—</td>';
-    rows += `<tr class="req-row${rowCls}" data-id="${esc(r.request_id)}">
-      <td class="mono">${esc(fmtTime(r.ts))}</td>
-      <td class="mono">${esc(r.agent || '—')}</td>
-      ${sess}
-      <td class="st">${statusBadgeHTML(r.status)}</td>
-      <td>${esc(r.exposed || r.called_model)}</td>
-      <td class="mono">${esc(r.provider)}${r.shadow ? ' <span class="badge muted">shadow</span>' : ''}</td>
-      <td class="${latCls}">${fmtNum(r.latency_ms)}</td>
-      <td class="num">${fmtNum(r.request_size)}</td>
-      <td class="num">${fmtNum(r.response_size)}</td>
-    </tr>`;
+    // Same row renderer as the Live tables (one implementation): snake_case
+    // records project through persistedSummaryRow into the merged camelCase
+    // row shape. Bytes columns are gone — the token cell (in/out + cache
+    // read) is the useful signal, matching Live.
+    rows += requestRowHTML(persistedSummaryRow(r), {
+      rowClass: 'req-row' + (r.status >= 400 ? ' req-row-err' : ''),
+      fmtTime,
+    });
   }
-  paint(`<table class="table">
-    <thead><tr><th>time</th><th>agent</th><th>session</th><th>status</th><th>model</th><th>provider</th>
-    <th class="num">ms</th><th class="num">req bytes</th><th class="num">resp bytes</th></tr></thead>
-    <tbody>${rows}</tbody></table>`);
+  paint(`<table class="table">${requestTableHeadHTML()}<tbody>${rows}</tbody></table>`);
   document.querySelectorAll('.req-row').forEach((tr) => {
     // Session cell → filter this tab to that session (same linkage as picking
     // it in the dropdown: the agent filter narrows to that session's agents);
@@ -896,6 +989,7 @@ async function loadRequests(combos) {
         requestsFilter.session = session;
         const allowed = linkedAgents(requestsFilter.session, combos.sessions, combos.facetState.agents);
         if (requestsFilter.agent && !allowed.includes(requestsFilter.agent)) requestsFilter.agent = '';
+        updateRequestsHash();
         renderRequestSelectors(combos);
         loadRequests(combos);
         return;
@@ -919,22 +1013,165 @@ function cacheRequestDetail(id, recs) {
   }
 }
 
-// detailRecordsHTML renders the expanded detail for one request's records. Each
-// body is built lazily/bounded by capturedBodyView, so a multi-MB record does
-// not dump megabytes of DOM at once.
-function detailRecordsHTML(recs) {
+// ---------- raw body lazy render ----------
+//
+// Raw request/response bodies render ONLY on first expand: the pretty/SSE
+// views are the expensive part of a detail (multi-MB JSON highlight), and
+// the chat transcript above already covers reading. The body text rides a
+// registry keyed by generated id — never a data attribute, bodies are huge —
+// and the document-level toggle listener (capture: details' toggle does not
+// bubble) builds the view once, on open. Programmatic restores (the live
+// popover's open-state capture) assign .open, which fires toggle too, so
+// they lazy-render the same way. Entries are dropped wherever the chunked
+// body views' state is dropped (same teardown sites).
+const rawBodyRegistry = new Map();
+let rawBodySeq = 0;
+let rawBodiesWired = false;
+
+function wireRawBodies() {
+  if (rawBodiesWired) return;
+  rawBodiesWired = true;
+  document.addEventListener('toggle', (e) => {
+    const d = e.target;
+    if (!d || !d.classList || !d.open || d.dataset.rawDone) return;
+    // Raw request/response bodies: render the (chunked) view on first open.
+    if (d.classList.contains('raw-body')) {
+      d.dataset.rawDone = '1';
+      const entry = rawBodyRegistry.get(d.dataset.raw);
+      if (!entry) return;
+      const host = d.querySelector('.raw-body-host');
+      if (host) host.innerHTML = capturedBodyView(entry.text, entry.contentType, entry.kind).html;
+      return;
+    }
+    // Chat history fold: swap the placeholder for the FULL earlier turns as
+    // a flat, scroll-chunked transcript (25 turns per chunk, appended by the
+    // shared bodyChunkRegistry scroll loader). The request body parses ONCE
+    // per expand and the parsed messages ride the registry entry — a
+    // thousand-turn session expands fast and reads linearly, no per-turn
+    // clicking, and later chunks cost only string rendering.
+    if (d.classList.contains('cv-history')) {
+      d.dataset.rawDone = '1';
+      const entry = rawBodyRegistry.get(d.dataset.raw);
+      const host = d.querySelector('.cv-hist-host');
+      if (!entry || !host) return;
+      if (!entry.msgs) {
+        const parsed = parseChatRequest(entry.text);
+        entry.msgs = parsed ? parsed.messages : [];
+      }
+      const end = Math.max(0, entry.msgs.length - CHAT_RECENT);
+      if (!end) { host.innerHTML = '<div class="hint">(no earlier turns)</div>'; return; }
+      const ranges = [];
+      for (let i = 0; i < end; i += 25) ranges.push({ from: i, to: Math.min(i + 25, end) });
+      const id = 'cv-hist-' + (++bodyChunkSeq);
+      bodyChunkRegistry.set(id, { chunks: ranges, index: 0, render: (r) => chatTurnsSliceHTML(entry.msgs, r.from, r.to) });
+      host.innerHTML = `<div class="cv-hist-scroll" data-chunk="${id}">${chatTurnsSliceHTML(entry.msgs, 0, ranges[0].to)}</div>`;
+      wireBodyChunks();
+      // The first chunk may not fill the scroll box — top it up so the
+      // scrollbar engages (same reason appendNextChunk loops internally).
+      const scroller = host.querySelector('.cv-hist-scroll');
+      if (scroller && scroller.scrollHeight <= scroller.clientHeight + 80) appendNextChunk(scroller);
+      return;
+    }
+  }, true);
+}
+
+function registerRawBody(text, contentType, kind) {
+  const id = 'raw-' + (++rawBodySeq);
+  rawBodyRegistry.set(id, { text: text || '', contentType, kind });
+  return id;
+}
+
+// dropRawBodies frees the registry entries of lazily-rendered details inside
+// (or equal to) container — raw bodies and chat history folds both carry
+// data-raw. Call wherever the corresponding DOM goes away.
+function dropRawBodies(container) {
+  if (!container || !container.querySelectorAll) return;
+  container.querySelectorAll('[data-raw]').forEach((d) => {
+    rawBodyRegistry.delete(d.dataset.raw);
+  });
+}
+
+// rawBodyLabel is the cheap summary label for a collapsed raw body (no view
+// built until open): the old label needed the full parse, this one only
+// classifies.
+function rawBodyLabel(text, contentType, kind) {
+  if (!text) return 'empty';
+  if (text.length > BODY_RENDER_MAX) return 'raw';
+  if (kind === 'response' && isSSE(text, contentType)) return 'SSE';
+  return kind === 'request' ? 'json' : 'text';
+}
+
+// detailRecordsHTML renders the expanded detail for one request's records.
+// The human-readable chat transcript (pure.js chatViewHTML — role-labeled
+// turns, collapsed thinking/tool blocks with readable arguments, usage line)
+// leads; the raw JSON/SSE bodies stay below in collapsed <details> that only
+// render their (bounded, lazily chunked) view on first expand.
+// fmtBytes humanizes a captured body size for the detail hint line.
+function fmtBytes(n) {
+  const v = Number(n) || 0;
+  if (v >= 1048576) return (v / 1048576).toFixed(1) + 'MB';
+  if (v >= 1024) return Math.round(v / 1024) + 'KB';
+  return v + 'B';
+}
+
+// detailRecordsHTML renders the expanded detail for one request's records.
+// opts.prevTs / opts.sessionStartTs (unix ms) add the relative-time context
+// (T+ since session start, Δ after the previous request) when the caller
+// knows the neighbors — the Requests table paint path does; the popover and
+// re-open paths render absolute time only.
+function detailRecordsHTML(recs, opts) {
+  const o = opts || {};
   wireBodyChunks();
+  wireRawBodies();
   let html = '';
   for (const r of recs) {
-    const req = capturedBodyView(r.request_body, '', 'request');
-    const res = capturedBodyView(r.response_body, responseContentType(r), 'response');
+    const ct = responseContentType(r);
+    const histId = registerRawBody(r.request_body, '', 'chat-history');
+    const chat = chatViewHTML(r.request_body, r.response_body, ct, { histKey: histId });
+    // Pre-warm the history parse during idle time after the detail paints:
+    // the expand click then only renders. A multi-MB JSON.parse on the click
+    // path is the one remaining heavy step — on slow machines it walks into
+    // hundreds of ms between click and first paint of the turns.
+    const histEntry = rawBodyRegistry.get(histId);
+    if (histEntry) {
+      const warm = () => {
+        if (!histEntry.msgs) histEntry.msgs = (parseChatRequest(histEntry.text) || { messages: [] }).messages;
+      };
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(warm, { timeout: 1500 });
+      else setTimeout(warm, 400);
+    }
+    const reqId = registerRawBody(r.request_body, '', 'request');
+    const resId = registerRawBody(r.response_body, ct, 'response');
+    const recTs = Number.isFinite(Date.parse(r.ts)) ? Date.parse(r.ts) : null;
+    const rel = [];
+    if (recTs != null && o.sessionStartTs != null && recTs >= o.sessionStartTs) rel.push('T+' + fmtDurMs(recTs - o.sessionStartTs));
+    if (recTs != null && o.prevTs != null && recTs >= o.prevTs) rel.push('Δ' + fmtDurMs(recTs - o.prevTs) + ' after prev');
     html += `<div class="req-rec">
-      <div class="hint">${esc(r.ts)} · ${esc(r.method)} ${esc(r.path)} · attempt ${r.attempt} · ${r.status} · ${r.latency_ms}ms · ${esc(r.provider)}/${esc(r.upstream_model)}</div>
-      <details><summary>request body (${fmtNum(r.request_size)} bytes · ${esc(req.label)})</summary>${req.html}</details>
-      <details><summary>response body (${fmtNum(r.response_size)} bytes · ${esc(res.label)})</summary>${res.html}</details>
+      <div class="hint">${esc(r.ts)}${rel.length ? ' · ' + esc(rel.join(' · ')) : ''} · ${esc(r.method)} ${esc(r.path)} · attempt ${r.attempt} · ${r.status} · ${r.latency_ms}ms${r.ttft_ms ? ' · ttft ' + fmtDurMs(r.ttft_ms) : ''} · req ${fmtBytes(r.request_size)} · resp ${fmtBytes(r.response_size)} · ${esc(r.provider)}/${esc(r.upstream_model)}</div>
+      ${chat}
+      <details class="raw-body" data-raw="${esc(reqId)}"><summary>raw request body (${fmtNum(r.request_size)} bytes · ${esc(rawBodyLabel(r.request_body, '', 'request'))})</summary><div class="raw-body-host"><span class="hint">renders on first expand</span></div></details>
+      <details class="raw-body" data-raw="${esc(resId)}"><summary>raw response body (${fmtNum(r.response_size)} bytes · ${esc(rawBodyLabel(r.response_body, ct, 'response'))})</summary><div class="raw-body-host"><span class="hint">renders on first expand</span></div></details>
     </div>`;
   }
   return html;
+}
+
+// requestRelTimeOpts derives the relative-time context for one request from
+// the loaded list: session start = min ts, prev = the closest earlier ts.
+// Null opts when the list (or ts) is unavailable — the hint then shows
+// absolute time only.
+function requestRelTimeOpts(id) {
+  const all = (requestsCombos && requestsCombos.lastRecords) || [];
+  const mine = all.find((x) => x && x.request_id === id);
+  const mineTs = mine ? Date.parse(mine.ts) : NaN;
+  if (!Number.isFinite(mineTs)) return {};
+  const tsList = all.map((x) => (x && x.ts != null ? Date.parse(x.ts) : NaN)).filter(Number.isFinite);
+  if (!tsList.length) return {};
+  const earlier = tsList.filter((t) => t < mineTs);
+  return {
+    sessionStartTs: Math.min(...tsList),
+    prevTs: earlier.length ? Math.max(...earlier) : null,
+  };
 }
 
 // toggleRequestDetail expands/collapses the full record under a summary row.
@@ -951,11 +1188,15 @@ async function toggleRequestDetail(tr) {
   tr.classList.add('req-open');
   const row = document.createElement('tr');
   row.className = 'req-detail-row';
-  row.innerHTML = '<td colspan="9"><span class="hint">loading…</span></td>';
+  row.innerHTML = '<td colspan="8"><span class="hint">loading…</span></td>';
   tr.insertAdjacentElement('afterend', row);
+  // Relative-time context: T+ since the session window's first request and
+  // Δ after the chronologically previous one — both derived from the loaded
+  // list (table sort order does not matter).
+  const relOpts = requestRelTimeOpts(id);
   const cached = requestsDetailCache.get(id);
   if (cached) {
-    row.firstElementChild.innerHTML = detailRecordsHTML(cached);
+    row.firstElementChild.innerHTML = detailRecordsHTML(cached, relOpts);
     return;
   }
   let resp;
@@ -974,7 +1215,7 @@ async function toggleRequestDetail(tr) {
     row.firstElementChild.innerHTML = '<div class="msg hint">no record</div>';
     return;
   }
-  row.firstElementChild.innerHTML = detailRecordsHTML(recs);
+  row.firstElementChild.innerHTML = detailRecordsHTML(recs, requestRelTimeOpts(id));
   cacheRequestDetail(id, recs);
 }
 
@@ -985,6 +1226,7 @@ function closeDetailFor(tr) {
   const row = tr.nextElementSibling;
   if (!row || !row.classList.contains('req-detail-row')) return;
   row.querySelectorAll('[data-chunk]').forEach((host) => bodyChunkRegistry.delete(host.dataset.chunk));
+  dropRawBodies(row);
   row.remove();
 }
 
@@ -1002,6 +1244,10 @@ let bodyChunkWired = false;
 
 // wireBodyChunks installs one capture-phase scroll listener (scroll does not
 // bubble) that appends the next chunk when a chunked body reaches its bottom.
+// The append is coalesced into requestAnimationFrame per host: inserting DOM
+// synchronously inside the scroll handler janks the very frame the user is
+// trying to scroll (the history turns are heavy enough to feel).
+const chunkAppendScheduled = new WeakSet();
 function wireBodyChunks() {
   if (bodyChunkWired) return;
   bodyChunkWired = true;
@@ -1009,7 +1255,12 @@ function wireBodyChunks() {
     const host = event.target;
     if (!host || !host.dataset || !host.dataset.chunk) return;
     if (host.scrollTop + host.clientHeight < host.scrollHeight - 80) return;
-    appendNextChunk(host);
+    if (chunkAppendScheduled.has(host)) return;
+    chunkAppendScheduled.add(host);
+    requestAnimationFrame(() => {
+      chunkAppendScheduled.delete(host);
+      if (host.isConnected && host.dataset.chunk) appendNextChunk(host);
+    });
   }, true);
 }
 
@@ -1105,9 +1356,11 @@ function responseContentType(record) {
 function capturedBodyView(text, contentType, kind) {
   if (!text) return { label: 'empty', html: '<div class="hint">(empty body)</div>' };
   if (text.length > BODY_RENDER_MAX) {
+    // Over the cap the body still renders, but CHUNKED (64KB slices appended
+    // on scroll): a multi-MB single <pre> text node froze the tab on expand.
     return {
       label: 'raw',
-      html: `<div class="hint">body over ${fmtNum(BODY_RENDER_MAX)} bytes — showing raw</div><pre class="log-pre body-pre">${esc(text)}</pre>`,
+      html: `<div class="hint">body over ${fmtNum(BODY_RENDER_MAX)} bytes — showing raw, chunked</div>` + chunkedBodyHTML(text, plainLinesHTML, ''),
     };
   }
   if (kind === 'response') {
@@ -1140,7 +1393,9 @@ function capturedBodyView(text, contentType, kind) {
 // very long bodies fall back to the chunked viewer.
 function bodyLinesHTML(text) {
   const lines = text.split('\n');
-  if (lines.length > BODY_LINE_MAX) return chunkedBodyHTML(text, plainLinesHTML, '');
+  // Chunk on either dimension: many lines OR simply a large body — SSE lines
+  // with fat deltas can hold hundreds of KB in only a few hundred lines.
+  if (lines.length > BODY_LINE_MAX || text.length > BODY_HIGHLIGHT_MAX) return chunkedBodyHTML(text, plainLinesHTML, '');
   return `<div class="log-pre">${lines.map((line) => longLineHTML(line) || `<span class="log-line">${esc(line)}</span>`).join('')}</div>`;
 }
 
@@ -1156,6 +1411,9 @@ let securityReqSeq = 0;
 // the picture (stale halves are never blanked).
 let securityKpiData = { blocks: null, adjudications: null, stats: null };
 let securityFeedData = { records: null, adjudications: null };
+// The adjudication channel's current on/off switch (feed.enabled) — the
+// rule-leaderboard's noise hint keys off it, telling off from merely quiet.
+let securityAdjudicationEnabled = false;
 
 function renderSecurityKpis() {
   const el = document.getElementById('sec-kpis');
@@ -1212,6 +1470,7 @@ function renderSecurityFeed() {
   tbl.querySelectorAll('.sec-analyze').forEach((btn) => {
     btn.onclick = () => analyzeSecurityHit(btn, rows[Number(btn.dataset.secI)]);
   });
+  renderRuleLeaderboard();
 }
 
 // fmtMs renders a unix-millisecond audit timestamp as "MM-DD HH:MM:SS" —
@@ -1237,6 +1496,7 @@ async function renderSecurityTab() {
   // Information hierarchy: summary tiles first, then the actionable blocked
   // list with its unblock controls, and one merged chronological feed last.
   panel.innerHTML = `<div id="sec-kpis"></div>
+  <div id="sec-rules"></div>
   <div class="card">
     <header class="card-head"><span class="card-head-title"><h2>Blocked sessions</h2><span class="meta">high verdicts · persist until unblocked</span></span><span class="card-head-side"><button id="sec-unblock-all" class="btn danger" hidden>unblock all</button></span></header>
     <div class="card-body">
@@ -1318,11 +1578,50 @@ async function loadSecurityAdjudications() {
     return;
   }
   const recs = (resp && resp.adjudications) || [];
+  securityAdjudicationEnabled = !!(resp && resp.enabled);
   securityKpiData.adjudications = recs;
   securityKpiData.stats = (resp && resp.stats) || {};
   securityFeedData.adjudications = recs;
   renderSecurityKpis();
   renderSecurityFeed();
+  renderRuleLeaderboard();
+}
+
+// renderRuleLeaderboard paints the rule-ops card: per-rule hit counts over
+// the current feed window (audit records + suppressed low verdicts, which
+// carry no audit record). Pattern rules piling up hits while the AI second
+// opinion is OFF get the "enable adjudicate" hint — high-frequency
+// false-positive rules are exactly the channel's use case (the threshold
+// avoids hinting on one-off hits).
+function renderRuleLeaderboard() {
+  const el = document.getElementById('sec-rules');
+  if (!el) return;
+  const rows = ruleHitsLeaderboard(securityFeedData.records, securityFeedData.adjudications);
+  if (!rows.length) {
+    el.innerHTML = '';
+    return;
+  }
+  const top = rows.slice(0, 8);
+  const kindBadge = { secret: 'warn', path: '', drift: 'muted' };
+  const body = top.map((r) => {
+    const hint = r.adjudicable && r.hits >= 3 && !securityAdjudicationEnabled
+      ? ' <span class="badge warn" title="Pattern hits at this frequency are usually benign fixtures/docs — the AI second opinion can suppress them (guard.adjudicate)">noisy — adjudicate can suppress</span>'
+      : '';
+    return `<tr>
+      <td class="mono">${esc(r.name)}</td>
+      <td><span class="badge ${kindBadge[r.kind] || ''}">${esc(r.kind)}</span></td>
+      <td class="num">${fmtNum(r.hits)}</td>
+      <td class="mono">${esc(r.lastTs ? fmtMs(r.lastTs) : '—')}${hint}</td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = `<div class="card">
+    <header class="card-head"><span class="card-head-title"><h2>Rule hits</h2><span class="meta">current feed window · audit records + suppressed lows</span></span></header>
+    <div class="card-body">
+    <table class="table">
+      <thead><tr><th>rule</th><th>kind</th><th class="num">hits</th><th>last seen</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  </div></div>`;
 }
 
 // loadSecurityBlocks renders the persisted session-block table with
@@ -1460,6 +1759,9 @@ let liveSessionList = [];     // recent SessionSummary list (dropdown options)
 let liveSessionLoading = false;
 let liveSessionError = '';
 let liveSessionOptionsKey = '';
+// Boot-time #status/live?session=… pin, consumed by renderLiveCard right
+// after the mount that resets the selection (see there for the race).
+let bootLiveSession = '';
 
 // renderLiveCard mounts the live request monitor into the Status Live section
 // and opens the SSE connection (closed by stopLiveEvents when the section or
@@ -1492,7 +1794,7 @@ function renderLiveCard(target) {
        <select id="live-session" class="req-input"><option value="">all (live)</option></select>
      </div>
      <div id="live-table"><span class="msg hint">connecting…</span></div>
-     <div id="live-session-panel" hidden></div>`, 'tight'));
+     <div id="live-session-panel" hidden></div>`, 'tight', '', 'card-open'));
   const sel = document.getElementById('live-session');
   if (sel) {
     sel.onchange = () => onLiveSessionChange(sel.value);
@@ -1500,6 +1802,15 @@ function renderLiveCard(target) {
     // SSE event may be far away, and a closed dropdown must not leave the
     // session list stale until it arrives.
     sel.onblur = () => refreshLiveSessionOptions();
+  }
+  // Consume a boot-time #status/live?session=… pin here: this mount is the
+  // point that resets liveSessionFilter, and boot's direct apply raced it
+  // (the status tab renders async, so the card mounted AFTER boot applied
+  // and wiped the selection — refresh lost the ?session= param).
+  if (bootLiveSession) {
+    const v = bootLiveSession;
+    bootLiveSession = '';
+    onLiveSessionChange(v);
   }
   // Preload recent persisted sessions so the dropdown lists them even before
   // the first live event (best-effort: request logging may be off).
@@ -1547,7 +1858,14 @@ function refreshLiveSessionOptions() {
   const sel = document.getElementById('live-session');
   if (!sel) return;
   if (sel === document.activeElement) return;
-  const sorted = liveSessionOrder(liveSessionList, liveRows);
+  let sorted = liveSessionOrder(liveSessionList, liveRows);
+  // Keep the active selection as an option even when neither source knows it
+  // (a hash-restored session whose live rows aged out of the ring / whose
+  // /api/sessions entry is still loading) — same guarantee as the Requests
+  // dropdown, so the visible selection never silently reverts to all-live.
+  if (liveSessionFilter && !sorted.includes(liveSessionFilter)) {
+    sorted = [liveSessionFilter, ...sorted];
+  }
   const key = sorted.join('\n');
   if (key === liveSessionOptionsKey) return;
   liveSessionOptionsKey = key;
@@ -1567,6 +1885,11 @@ function refreshLiveSessionOptions() {
 // analysis, loading the persisted request list + aggregate for the selection.
 function onLiveSessionChange(value) {
   liveSessionFilter = value;
+  // Mirror the selection into the URL (#status/live?session=…) so refresh/
+  // shared links restore this view; replaceState keeps dropdown refinement
+  // out of the back-history. setHash is a no-op when the hash already
+  // matches (boot/hashchange apply paths), so no loop.
+  if (activeTab === 'status') setHash(statusHash(), false);
   liveSessionRecords = [];
   liveSessionAgg = null;
   liveSessionError = '';
@@ -1580,7 +1903,7 @@ function onLiveSessionChange(value) {
   if (!value) {
     // All (live) mode: the pure live ring, no persisted backfill.
     if (tbl) tbl.hidden = false;
-    if (panel) { panel.hidden = true; panel.innerHTML = ''; }
+    if (panel) { panel.hidden = true; panel.innerHTML = ''; syncSessThOffset(panel); }
     liveSessionLoading = false;
     renderLiveTable();
     return;
@@ -1647,10 +1970,13 @@ function persistedSummaryRow(rec) {
     provider: rec.provider || '',
     status: rec.status || 0,
     latencyMs: rec.latency_ms != null ? rec.latency_ms : null,
+    ttftMs: rec.ttft_ms != null ? rec.ttft_ms : null,
+    attempt: rec.attempt || 0,
     input: rec.input || 0,
     output: rec.output || 0,
     cacheRead: rec.cache_read || 0,
     cacheCreation: rec.cache_creation || 0,
+    shadow: !!rec.shadow,
     inFlight: false,
     guardHits: [],
     progressText: '', progressBytes: 0,
@@ -1691,7 +2017,7 @@ function liveTsMs(ts) {
 // sessionSummaryHTML renders the shared session chips + providers/models lines
 // used by the Live session panel and the Requests session filter. `opts.live`
 // false omits the trailing live-row count (Requests rows are all persisted).
-function sessionSummaryHTML(s, opts) {
+function sessionSummaryHTML(s, opts, health) {
   const showLive = !opts || opts.live !== false;
   const chips = [
     `${fmtNum(s.requests)} requests`,
@@ -1702,51 +2028,382 @@ function sessionSummaryHTML(s, opts) {
     s.cost != null ? '$' + s.cost.toFixed(4) : '',
     showLive ? `${fmtNum(s.liveRows)} live` : '',
   ].filter(Boolean).map((c) => `<span class="live-chip">${esc(c)}</span>`).join('');
-  const meta = [
-    s.providers.length ? 'providers: ' + s.providers.join(', ') : '',
-    s.models.length ? 'models: ' + s.models.join(', ') : '',
-  ].filter(Boolean).map((line) => `<div class="hint">${esc(line)}</div>`).join('');
-  return `<div class="live-session-summary">${chips}</div>${meta}`;
+  // Identity footer: small uppercase key + mono value pairs, a deliberate
+  // step down from the metric chips above (metrics = chips, identity =
+  // key/value line). Comma-joined when a session spans several.
+  const item = (k, vals) => (vals && vals.length)
+    ? `<span class="sess-meta-item"><span class="sess-meta-k">${esc(k)}</span><span class="sess-meta-v">${esc(vals.join(', '))}</span></span>`
+    : '';
+  const meta = item('provider', s.providers) + item('model', s.models);
+  return `<div class="live-session-summary">${chips}</div>${sessionHealthChipsHTML(health)}${meta ? `<div class="sess-meta">${meta}</div>` : ''}`;
 }
 
-// renderLiveSessionPanel renders the selected session's analysis: summary
-// chips + distinct models/providers, then the merged request table. Clicking a
-// row opens the request detail in the modal popover.
+// fmtDurMs is the chip-tier duration format (ms → s → m → h).
+function fmtDurMs(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return '0ms';
+  if (ms < 1000) return Math.round(ms) + 'ms';
+  if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+  if (ms < 3600000) return Math.round(ms / 60000) + 'm';
+  return (ms / 3600000).toFixed(1) + 'h';
+}
+
+// sessionHealthChipsHTML renders the second chip row (health signals from
+// pure.js sessionHealthSummary). Every chip drops out when its signal is
+// absent; failovers carry the warn tone — a retrying session is the thing
+// this row exists to surface.
+function sessionHealthChipsHTML(h) {
+  if (!h) return '';
+  const dur = fmtDurMs;
+  const chips = [];
+  if (h.spanMs > 0) chips.push({ text: `span ${dur(h.spanMs)}${h.activeMs > 0 ? ` · active ${dur(h.activeMs)}` : ''}` });
+  if (h.p50Ms != null) chips.push({ text: `p50 ${dur(h.p50Ms)} · p95 ${dur(h.p95Ms)}` });
+  if (h.ttftP50Ms != null) chips.push({ text: `ttft p50 ${dur(h.ttftP50Ms)}` });
+  if (h.failovers > 0) chips.push({ text: `${h.failovers} failover${h.failovers === 1 ? '' : 's'}`, cls: 'warn' });
+  if (h.cacheHitPct != null && h.cacheHitPct > 0) chips.push({ text: `cache ${h.cacheHitPct}%` });
+  if (h.tokPerSec) chips.push({ text: `${h.tokPerSec} tok/s` });
+  if (h.models.length > 1) {
+    const top = h.models.slice(0, 2).map((m) => `${m.model} ×${m.n}`).join(' · ');
+    const more = h.models.length - 2;
+    chips.push({ text: more > 0 ? `${top} +${more}` : top });
+  }
+  if (h.shadow > 0) chips.push({ text: `${h.shadow} shadow` });
+  if (!chips.length) return '';
+  return `<div class="sess-health">${chips.map((c) => `<span class="live-chip${c.cls ? ' ' + c.cls : ''}">${esc(c.text)}</span>`).join('')}</div>`;
+}
+
+// sessionViewHTML renders the shared SESSION VIEW — summary chips plus the
+// trace timeline — consumed by BOTH the Live session panel and the Requests
+// session summary. The pages own only the table below it (Live merges
+// in-flight rows and opens the detail popover; Requests expands inline) and
+// wire the timeline bars through wireSessionTimeline with their own detail
+// opener. opts.session keys the timeline zoom (drag-select) state; pass it
+// whenever the owning page also passes a zoom rerender. One implementation:
+// a chip or timeline change lands on both pages.
+function sessionViewHTML(rows, agg, opts) {
+  const o = opts || {};
+  const s = liveSessionSummary(rows, agg);
+  return sessionSummaryHTML(s, o, sessionHealthSummary(rows)) + sessionTimelineCard(rows, o);
+}
+
+// Timeline zoom lives OUTSIDE the render cycle: the Live panel re-renders on
+// every SSE session event and the Requests table repaints on refresh, so a
+// zoom held in local state would reset on the next event. Keyed by session
+// id — switching sessions drops the stale window (session ids are unique).
+const sessionZoomState = { key: '', from: 0, to: 0 };
+function sessionZoomFor(session) {
+  return session && sessionZoomState.key === session
+    ? { from: sessionZoomState.from, to: sessionZoomState.to }
+    : null;
+}
+
+// wireSessionTimeline binds one session view's timeline: bars open the owning
+// page's detail (Live: popover; Requests: inline row expand + locate) and on
+// hover show the shared tooltip (metadata + lazily fetched response excerpt);
+// the reset chip clears the zoom, and a horizontal drag on the SVG selects a
+// time window to zoom into. opts = {session, rerender, rows} — rows backs the
+// hover summary; without opts only the bar clicks are bound.
+function wireSessionTimeline(host, openDetail, opts) {
+  const rows = (opts && opts.rows) || [];
+  host.querySelectorAll('.tl-bar').forEach((bar) => {
+    bar.addEventListener('click', () => openDetail(bar.dataset.id));
+    if (!rows.length) return;
+    bar.addEventListener('mouseenter', (e) => {
+      if (tlTipTimer) clearTimeout(tlTipTimer);
+      tlTipTimer = setTimeout(() => {
+        tlTipTimer = 0;
+        tlTipPos = { x: e.clientX, y: e.clientY };
+        const row = rows.find((r) => r && String(r.requestId) === bar.dataset.id) || null;
+        showTlTip(bar, row);
+      }, 90);
+    });
+    bar.addEventListener('mouseleave', hideTlTip);
+    bar.addEventListener('pointerdown', hideTlTip);
+  });
+  const zoom = opts && opts.session ? opts : null;
+  if (!zoom || !zoom.rerender) return;
+  const reset = host.querySelector('.tl-reset');
+  if (reset) {
+    reset.addEventListener('click', () => {
+      sessionZoomState.key = '';
+      zoom.rerender();
+    });
+  }
+  const svg = host.querySelector('.tl-svg');
+  if (svg && svg.dataset.segs) wireTimelineZoom(svg, zoom);
+}
+
+// syncSessThOffset makes the session table's headers stick right BELOW the
+// pinned session view. A sticky offset cannot see a sibling's height, so the
+// pinned view is measured here and exported as --sess-h on the host card;
+// the th top calc adds it (0 whenever no session view is mounted — hidden
+// hosts measure 0). host is the sticky element itself or a container that
+// holds one (.sess-sticky). Re-run after every session-view render, after
+// hiding it, and on window resize (the trace SVG's height rides its aspect
+// ratio, so the panel height changes with the viewport width).
+function syncSessThOffset(host) {
+  const card = host && host.closest ? host.closest('.card') : null;
+  if (!card) return;
+  const sticky = host.classList && host.classList.contains('sess-sticky')
+    ? host
+    : (host.querySelector ? host.querySelector('.sess-sticky') : null);
+  const h = sticky && sticky.isConnected ? sticky.offsetHeight : 0;
+  // Flush geometry: the panel pins directly under the topbar and the th
+  // directly under the panel — no gap strips where scrolled rows would show.
+  card.style.setProperty('--sess-h', (h || 0) + 'px');
+}
+
+// ---------- timeline hover tooltip (shared session view) ----------
+//
+// Hovering a trace bar shows a metadata summary (pure.js sessionBarSummary)
+// immediately, then lazily appends a short RESPONSE EXCERPT fetched from
+// /api/requests/<id> — the list projection is UsageOnly, bodies only exist
+// per record. The excerpt result is cached per request id (bounded) and the
+// fetch shares cacheRequestDetail with the Requests detail rows, so a hover
+// pre-warms the row expand.
+//
+// Deliberately NOT marked data-popup: the auto-refresh gate defers panel
+// re-renders while a data-popup is open, and a transient hover hint must
+// never stall the Live SSE re-renders — the re-render itself hides the
+// tooltip (both session renderers call hideTlTip). pointer-events:none so it
+// can never trap the cursor or steal a click.
+const TL_TIP_EXCERPT_MAX = 220;
+const TL_EXCERPT_CACHE_MAX = 60;
+const tlExcerptCache = new Map(); // request id -> excerpt ('' = no text found)
+let tlTipEl = null;
+let tlTipTimer = 0;
+let tlTipSeq = 0; // bump on hide: invalidates in-flight excerpt fills
+let tlTipPos = { x: 0, y: 0 };
+
+function tlTip() {
+  if (!tlTipEl) {
+    tlTipEl = document.createElement('div');
+    tlTipEl.className = 'tl-tip';
+    tlTipEl.hidden = true;
+    document.body.appendChild(tlTipEl);
+    window.addEventListener('scroll', hideTlTip, true);
+    window.addEventListener('pointerdown', hideTlTip, true);
+  }
+  return tlTipEl;
+}
+
+function hideTlTip() {
+  if (tlTipTimer) { clearTimeout(tlTipTimer); tlTipTimer = 0; }
+  tlTipSeq++;
+  if (tlTipEl) tlTipEl.hidden = true;
+}
+
+function placeTlTip(el) {
+  el.style.left = '0px';
+  el.style.top = '0px'; // reset before measuring so the clamp math is exact
+  const r = el.getBoundingClientRect();
+  let left = tlTipPos.x + 14;
+  let top = tlTipPos.y + 16;
+  if (left + r.width > window.innerWidth - 8) left = Math.max(8, tlTipPos.x - r.width - 14);
+  if (top + r.height > window.innerHeight - 8) top = Math.max(8, tlTipPos.y - r.height - 14);
+  el.style.left = left + 'px';
+  el.style.top = top + 'px';
+}
+
+function fillTlExcerpt(el, ex, seq) {
+  if (seq !== tlTipSeq || el.hidden) return;
+  const inHost = el.querySelector('.tl-tip-in');
+  const outHost = el.querySelector('.tl-tip-out');
+  if (!inHost || !outHost) return;
+  if (ex && ex.in) {
+    inHost.textContent = ex.in;
+    inHost.hidden = false;
+  }
+  if (ex && ex.out) {
+    outHost.textContent = ex.out;
+    outHost.hidden = false;
+  }
+  placeTlTip(el); // the tooltip grew: re-clamp against the viewport
+}
+
+function showTlTip(bar, row) {
+  const id = bar.dataset.id || '';
+  tlTipSeq++;
+  const seq = tlTipSeq;
+  const lines = sessionBarSummary(row, (t) => fmtTimeSafe(t));
+  const el = tlTip();
+  el.innerHTML = `<div class="tl-tip-meta">${lines.length ? lines.map((l) => `<div>${esc(l)}</div>`).join('') : esc(id)}</div><div class="tl-tip-ex tl-tip-in" hidden></div><div class="tl-tip-ex tl-tip-out" hidden></div>`;
+  el.hidden = false;
+  placeTlTip(el);
+  const cached = tlExcerptCache.get(id);
+  if (cached !== undefined) {
+    fillTlExcerpt(el, cached, seq);
+    return;
+  }
+  apiGet('/api/requests/' + encodeURIComponent(id)).then((resp) => {
+    const recs = (resp && resp.records) || [];
+    if (!recs.length) return;
+    cacheRequestDetail(id, recs);
+    // Two unlabeled preview paragraphs: this turn's user input first, then
+    // the assistant's response — styling (muted vs normal) tells them apart.
+    const ex = {
+      in: requestExcerpt(recs[0].request_body, TL_TIP_EXCERPT_MAX),
+      out: responseExcerpt(recs[0].response_body, TL_TIP_EXCERPT_MAX),
+    };
+    if (tlExcerptCache.size >= TL_EXCERPT_CACHE_MAX) tlExcerptCache.delete(tlExcerptCache.keys().next().value);
+    tlExcerptCache.set(id, ex);
+    fillTlExcerpt(el, ex, seq);
+  }).catch(() => { /* in flight / not logged: skip — no negative caching */ });
+}
+
+// wireTimelineZoom drag-selects a time range on the timeline SVG. The pure
+// renderer stamps its segment map (time ↔ viewBox px) as data-segs; inverting
+// a drag through it yields the [from, to] window, stored in sessionZoomState
+// and applied by the next render. Drags shorter than a few px fall through
+// to the bar's own click (detail popover / inline expand).
+function wireTimelineZoom(svg, zoom) {
+  let segs = [];
+  try { segs = JSON.parse(svg.dataset.segs || '[]'); } catch (_) { segs = []; }
+  if (!segs.length) return;
+  const pxToT = (clientX) => {
+    const r = svg.getBoundingClientRect();
+    const vw = svg.viewBox && svg.viewBox.baseVal ? svg.viewBox.baseVal.width : 900;
+    const vx = ((clientX - r.left) / Math.max(r.width, 1)) * vw;
+    for (const s of segs) {
+      if (vx <= s.x1 || s === segs[segs.length - 1]) {
+        return s.t0 + ((vx - s.x0) / Math.max(s.x1 - s.x0, 1)) * Math.max(s.t1 - s.t0, 1);
+      }
+    }
+    return segs[segs.length - 1].t1;
+  };
+  let start = null;
+  let selRect = null;
+  let suppressed = false;
+  svg.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    // Record only — do NOT capture here: pointer capture retargets the
+    // release (and its derived click) to the SVG element, which silently
+    // swallows every plain bar click. Capture is taken only once a drag
+    // actually starts, below. A fresh press also clears the trailing-click
+    // suppress flag — a drag that ended outside the SVG never produces that
+    // click, and a stale flag would eat the next real bar click.
+    suppressed = false;
+    start = { x: e.clientX, id: e.pointerId };
+  });
+  svg.addEventListener('pointermove', (e) => {
+    if (!start) return;
+    if (!selRect && Math.abs(e.clientX - start.x) < 8) return;
+    if (!selRect) {
+      // The press became a drag: from here on capture the pointer so the
+      // selection keeps tracking even outside the SVG, and the trailing
+      // click (if the release lands on a bar) is suppressed separately.
+      try { svg.setPointerCapture(start.id); } catch (_) { /* detached mid-drag */ }
+      selRect = document.createElementNS(svg.namespaceURI, 'rect');
+      selRect.setAttribute('class', 'tl-sel');
+      svg.appendChild(selRect);
+    }
+    const r = svg.getBoundingClientRect();
+    const vw = svg.viewBox && svg.viewBox.baseVal ? svg.viewBox.baseVal.width : 900;
+    const clamp = (cx) => Math.min(Math.max(((cx - r.left) / Math.max(r.width, 1)) * vw, 0), vw);
+    const x0 = clamp(start.x);
+    const x1 = clamp(e.clientX);
+    selRect.setAttribute('x', Math.min(x0, x1).toFixed(1));
+    selRect.setAttribute('width', Math.max(Math.abs(x1 - x0), 1).toFixed(1));
+    selRect.setAttribute('y', '0');
+    selRect.setAttribute('height', '100%');
+  });
+  const cleanup = () => {
+    if (selRect) { selRect.remove(); selRect = null; }
+    if (start != null) {
+      try { svg.releasePointerCapture(start.id); } catch (_) { /* already gone */ }
+    }
+    start = null;
+  };
+  svg.addEventListener('pointerup', (e) => {
+    if (start == null) return;
+    const sx = start.x;
+    const hadRect = !!selRect;
+    cleanup();
+    if (!hadRect || Math.abs(e.clientX - sx) < 12) return; // a click, not a drag
+    const from = Math.min(pxToT(sx), pxToT(e.clientX));
+    const to = Math.max(pxToT(sx), pxToT(e.clientX));
+    if (to - from < 1000) return; // <1s window: noise
+    sessionZoomState.key = zoom.session;
+    sessionZoomState.from = from;
+    sessionZoomState.to = to;
+    suppressed = true;
+    zoom.rerender();
+  });
+  svg.addEventListener('pointercancel', cleanup);
+  // The browser still fires a click after a drag that ended on a bar; swallow
+  // it for one tick so zooming does not also pop the detail open.
+  svg.addEventListener('click', (e) => {
+    if (suppressed) {
+      suppressed = false;
+      e.stopPropagation();
+    }
+  }, true);
+}
+
+// renderLiveSessionPanel renders the selected session's analysis: the shared
+// session view (summary chips + trace timeline), then the merged request
+// table. The session view sits in a sticky container so it stays visible
+// while the table scrolls (disabled on narrow screens — the wrapped topbar
+// makes a fixed offset wrong there). Clicking a row opens the request detail
+// in the modal popover.
 function renderLiveSessionPanel() {
   const panel = document.getElementById('live-session-panel');
   if (!panel || !liveSessionFilter) return;
-  if (liveSessionLoading) { panel.innerHTML = '<span class="hint">loading session…</span>'; return; }
-  if (liveSessionError) { panel.innerHTML = `<div class="msg err">${esc(liveSessionError)}</div>`; return; }
+  if (liveSessionLoading) { panel.innerHTML = '<span class="hint">loading session…</span>'; syncSessThOffset(panel); return; }
+  if (liveSessionError) { panel.innerHTML = `<div class="msg err">${esc(liveSessionError)}</div>`; syncSessThOffset(panel); return; }
   const rows = liveSessionRows();
-  const s = liveSessionSummary(rows, liveSessionAgg);
   // The panel re-renders on every session event; snapshot the scroll anchor
-  // first so a rebuild does not shift what the user is reading.
+  // first so a rebuild does not shift what the user is reading, and drop the
+  // hover tooltip — its anchor bar is about to be replaced.
   const viewState = captureLiveViewState(panel);
+  hideTlTip();
   const body = rows.length
-    ? `<table class="table"><thead><tr>
-         <th>time</th><th>agent</th><th>model</th><th>provider</th>
-         <th>status</th><th class="num">latency</th><th class="num">tokens in / out</th>
-       </tr></thead><tbody>${rows.map((r) => {
-         const open = liveDetailPopId === r.requestId;
-         const sc = r.status >= 400 ? 'err' : '';
-         const lt = r.latencyMs != null ? r.latencyMs + 'ms' : '';
-         const tk = (r.input || r.output) ? `${fmtNum(r.input)} / ${fmtNum(r.output)}` : '';
-         return `<tr class="live-row${open ? ' live-open' : ''}" data-id="${esc(r.requestId)}" data-live-key="${esc(r.requestId)}">
-           <td class="mono">${esc(fmtTimeSafe(r.ts))}</td>
-           <td class="mono">${esc(r.agent || '—')}</td>
-           <td>${esc(r.model || '—')}</td>
-           <td class="mono">${esc(r.provider || '—')}</td>
-           <td class="num ${sc}">${esc(String(r.status || '—'))}</td>
-           <td class="num">${esc(lt)}</td>
-           <td class="num">${esc(tk)}</td>
-         </tr>`;
-       }).join('')}</tbody></table>`
+    ? `<table class="table">${requestTableHeadHTML()}<tbody>${rows.map((r) => liveSummaryRowHTML(r, liveDetailPopId === r.requestId)).join('')}</tbody></table>`
     : '<div class="msg hint">no requests recorded for this session yet</div>';
-  panel.innerHTML = `${sessionSummaryHTML(s)}${body}`;
+  panel.innerHTML = `<div class="sess-sticky">${sessionViewHTML(rows, liveSessionAgg, { session: liveSessionFilter })}</div>${body}`;
   panel.querySelectorAll('.live-row').forEach((tr) => {
     wireLiveRow(tr);
   });
+  wireSessionTimeline(panel, openLiveDetailPop, {
+    session: liveSessionFilter,
+    rerender: renderLiveSessionPanel,
+    rows,
+  });
   restoreLiveViewState(panel, viewState);
+  syncSessThOffset(panel);
+}
+
+// sessionTimelineCard wraps the pure sessionTimeline SVG in the session
+// panel's trace card: bars are the requests' spans (stacked swimlanes), the
+// polyline is cumulative tokens (cost stays a session-level chip in the
+// summary — pricing is server-owned), the amber dot marks a request that
+// failover-retried (attempt > 0 from the request log) and red bars are
+// error responses. In-flight requests run to their segment's right edge.
+// Long idle gaps are compressed (dashed divider) so a short burst inside a
+// multi-hour session stays readable; a drag on the SVG zooms into a time
+// window (segment map rides data-segs for the px→time inversion), and the
+// reset chip appears while a zoom is active.
+function sessionTimelineCard(rows, opts) {
+  const o = opts || {};
+  const zoom = o.session ? sessionZoomFor(o.session) : null;
+  const tl = sessionTimeline(rows, { fmt: (t) => fmtTimeSafe(t), window: zoom });
+  if (!tl.svg) return '';
+  // Chart-style legend: color swatches + short labels (a prose "bar = …"
+  // line reads as a wall of text). The zoom control keeps its class and
+  // wiring; drag-to-zoom stays as a quiet trailing hint when not zoomed.
+  const legend = [
+    `<span class="tl-lg"><i class="tl-swatch tl-sw-bar"></i>span</span>`,
+    `<span class="tl-lg"><i class="tl-swatch tl-sw-line"></i>tokens</span>`,
+    `<span class="tl-lg"><i class="tl-swatch tl-sw-retry"></i>retry</span>`,
+    `<span class="tl-lg"><i class="tl-swatch tl-sw-err"></i>error</span>`,
+  ];
+  if (tl.segments.length > 1) legend.push(`<span class="tl-lg"><span class="tl-legend-gap">⫽</span> gap</span>`);
+  const zoomChip = zoom
+    ? `<button class="tl-reset" type="button" title="clear zoom window">zoomed ${esc(fmtTimeSafe(zoom.from))}–${esc(fmtTimeSafe(zoom.to))} · reset</button>`
+    : `<span class="tl-lg">drag to zoom</span>`;
+  return `<div class="card sess-tl"><div class="card-body">
+    <div class="tl-title"><span class="tl-title-name">Trace</span><span class="tl-count">${rows.length} requests · ${tl.lanes} lane${tl.lanes === 1 ? '' : 's'}</span><span class="tl-legend">${legend.join('')}${zoomChip}</span></div>
+    ${tl.svg.replace('<svg ', `<svg data-segs="${esc(JSON.stringify(tl.segments))}" `)}
+  </div></div>`;
 }
 
 function stopLiveEvents() {
@@ -1864,11 +2521,10 @@ function trimLiveRows() {
   }
 }
 
-// liveSummaryRowHTML returns the summary <tr> for one live request row. `open`
-// marks the row whose detail popover is currently open.
+// liveSummaryRowHTML returns the summary <tr> for one live request row — the
+// SHARED requestRowHTML with the live specifics (guard badge, live-key, the
+// popover-open highlight). `open` marks the row whose detail popover is open.
 function liveSummaryRowHTML(r, open) {
-  const dim = r.inFlight ? ' subdue' : '';
-  const openCls = open ? ' live-open' : '';
   const guardCount = r.guardHits.length;
   const guardTitle = guardCount
     ? esc(r.guardHits.map((h) => fmtGuardDetail(h.detail)).join('\n'))
@@ -1876,25 +2532,12 @@ function liveSummaryRowHTML(r, open) {
   const guard = guardCount
     ? ` <span class="badge warn" title="${guardTitle}">⚑ guard${guardCount > 1 ? ' ×' + guardCount : ''}</span>`
     : '';
-  const slow = !r.inFlight && r.latencyMs != null && r.latencyMs > 10000;
-  const lt = (!r.inFlight && r.latencyMs != null) ? r.latencyMs + 'ms' : '';
-  const tk = (!r.inFlight && (r.input || r.output)) ? `${fmtNum(r.input)} / ${fmtNum(r.output)}` : '';
-  // Session cell (All/live mode only): abbreviated id, full id + intent in
-  // the tooltip. It is the row's entry point into the session view, so it
-  // reads as a link; the row click router (wireLiveRow) intercepts it.
-  const sess = r.session
-    ? `<td class="mono${dim} session-link" data-session="${esc(r.session)}" title="${esc(r.session)} — view this session">${esc(shortSessionId(r.session))}</td>`
-    : `<td class="mono${dim}">—</td>`;
-  return `<tr class="live-row${openCls}" data-id="${esc(r.requestId)}" data-live-key="${esc(r.requestId)}">
-    <td class="mono${dim}">${esc(fmtTimeSafe(r.ts))}</td>
-    <td class="mono${dim}">${esc(r.agent || '—')}</td>
-    ${sess}
-    <td class="${dim ? 'subdue' : ''}">${esc(r.model)}${guard}</td>
-    <td class="mono${dim}">${esc(r.inFlight ? '…' : (r.provider || '—'))}</td>
-    <td class="st">${statusBadgeHTML(r.inFlight ? null : r.status, r.inFlight)}</td>
-    <td class="num${slow ? ' warn' : ''}">${lt}</td>
-    <td class="num">${tk}</td>
-  </tr>`;
+  return requestRowHTML(r, {
+    rowClass: 'live-row' + (open ? ' live-open' : ''),
+    liveKey: true,
+    modelNote: guard,
+    fmtTime: fmtTimeSafe,
+  });
 }
 
 // liveEventRowHTML returns a one-line standalone row for non-request events.
@@ -1938,10 +2581,7 @@ function renderLiveTable() {
     return;
   }
   const viewState = captureLiveViewState(tbl);
-  tbl.innerHTML = `<table class="table"><thead><tr>
-    <th>time</th><th>agent</th><th>session</th><th>model</th><th>provider</th>
-    <th>status</th><th class="num">latency</th><th class="num">tokens in / out</th></tr></thead>
-    <tbody>${rows.map((r) => liveRowHTML(r)).join('')}</tbody></table>`;
+  tbl.innerHTML = `<table class="table">${requestTableHeadHTML()}<tbody>${rows.map((r) => liveRowHTML(r)).join('')}</tbody></table>`;
   document.querySelectorAll('#live-table .live-row').forEach((tr) => wireLiveRow(tr));
   restoreLiveViewState(tbl, viewState);
 }
@@ -2258,13 +2898,12 @@ function ensureLiveDetailPop() {
   return dialog;
 }
 
-// fillLiveDetailPop renders the meta line + body content for a row. With
-// defaultOpen (initial open, or the first render that actually has records
-// after a "loading…" fill) the request/response body <details> and their
-// nested over-long-line blocks are opened — two levels — so the data is
-// visible without clicking; later refreshes preserve the user's own
-// open/closed state instead (updateLiveDetailPop).
-function fillLiveDetailPop(dialog, row, defaultOpen) {
+// fillLiveDetailPop renders the meta line + body content for a row. The
+// record detail leads with the chat transcript; the raw-body <details> stay
+// collapsed by default (the user expands them when the exact bytes matter),
+// and updateLiveDetailPop preserves the user's own open/closed state across
+// refreshes.
+function fillLiveDetailPop(dialog, row) {
   const meta = [
     fmtTimeSafe(row.ts),
     row.agent || '',
@@ -2290,15 +2929,31 @@ function fillLiveDetailPop(dialog, row, defaultOpen) {
     metaEl.appendChild(btn);
   }
   const body = dialog.querySelector('.live-pop-body');
-  // Drop chunk state for body views that are about to be replaced.
-  body.querySelectorAll('[data-chunk]').forEach((host) => {
-    bodyChunkRegistry.delete(host.dataset.chunk);
-  });
-  body.innerHTML = liveDetailHTML(row);
-  if (defaultOpen) {
-    body.querySelectorAll('.req-rec details').forEach((d) => { d.open = true; });
+  // Rebuild the BODY only when its inputs changed. updateLiveDetailPop fires
+  // on every SSE event for the open row (progress ticks ~4Hz), and a rebuild
+  // re-runs detailRecordsHTML — whose chat view re-parses a possibly
+  // multi-MB request body each time. The body depends on: the request, its
+  // records (reference-stable until refetched), guard hits, and the
+  // loading/error/not-logged state. Meta above always updates.
+  const recs = requestsDetailCache.get(row.requestId);
+  const state = liveDetailState.get(row.requestId) || {};
+  const key = [
+    row.requestId,
+    row.inFlight ? 'inflight' : recs ? 'recs' : state.loading ? 'load' : state.notLogged ? 'nl' : state.error ? 'err:' + state.error : 'wait',
+    (row.guardHits ? row.guardHits.length : 0),
+  ].join('|');
+  if (key !== livePopBodyKey) {
+    livePopBodyKey = key;
+    // Drop chunk state for body views that are about to be replaced.
+    body.querySelectorAll('[data-chunk]').forEach((host) => {
+      bodyChunkRegistry.delete(host.dataset.chunk);
+    });
+    dropRawBodies(body);
+    body.innerHTML = liveDetailHTML(row);
   }
 }
+// livePopBodyKey memoizes fillLiveDetailPop's last body render (see there).
+let livePopBodyKey = '';
 
 // openLiveDetailPop opens the popover for one request row and starts the
 // record fetch once the request has ended.
@@ -2310,7 +2965,7 @@ function openLiveDetailPop(id) {
   const state = liveDetailState.get(id) || {};
   if (state.error || state.notLogged) liveDetailState.set(id, { ...state, error: '', notLogged: false });
   const dialog = ensureLiveDetailPop();
-  fillLiveDetailPop(dialog, row, true);
+  fillLiveDetailPop(dialog, row);
   if (!dialog.open) dialog.showModal();
   const tr = document.querySelector(
     `#live-table tr.live-row[data-id="${esc(id)}"], #live-session-panel tr.live-row[data-id="${esc(id)}"]`);
@@ -2332,10 +2987,7 @@ function updateLiveDetailPop() {
   const body = liveDetailPop.querySelector('.live-pop-body');
   const openBodies = captureLiveDetailOpenBodies(body);
   const scrollTop = body.scrollTop;
-  // A body that has not shown records yet (loading…/in-flight hint) default-
-  // expands once they arrive; afterwards the user's open/closed state rules.
-  const hadRecords = body.querySelector('.req-rec') !== null;
-  fillLiveDetailPop(liveDetailPop, row, !hadRecords);
+  fillLiveDetailPop(liveDetailPop, row);
   restoreLiveDetailOpenBodies(body, openBodies);
   body.scrollTop = scrollTop;
   // The row may have just ended (popover opened while in flight): start the
@@ -2681,7 +3333,7 @@ function renderStatusSection(key) {
 function selectStatusSection(name, push = true) {
   if (!STATUS_SECTIONS.some((s) => s.key === name)) name = 'schedule';
   selectStatusSectionSilent(name);
-  if (push) setHash('#status/' + name, true);
+  if (push) setHash(statusHash(), true);
 }
 
 // selectStatusSectionSilent renders without touching the hash (used by the
@@ -2985,16 +3637,18 @@ function dashRenderTable(host) {
 // buildCard wraps a title + body in the .card/.card-head/.card-body shell.
 // headActionsHTML, when given, pins extra controls (buttons) to the right end
 // of the header, grouped with the meta text.
-function buildCard(title, meta, bodyHTML, extraBodyClass = '', headActionsHTML = '') {
+function buildCard(title, meta, bodyHTML, extraBodyClass = '', headActionsHTML = '', extraCardClass = '') {
   // v2: the meta count ("16 routes", "200 lines", …) rides INLINE right
   // after the title instead of floating to the card's far-right edge — with
   // space-between and no actions the lone meta read as a detached far-right
   // fragment. Head actions (Refresh buttons) still pin to the right.
+  // extraCardClass decorates the <section class="card"> itself (e.g.
+  // card-open drops the overflow clipping that would kill inner sticky).
   const metaHTML = meta ? `<span class="meta">${esc(meta)}</span>` : '';
   const headRight = headActionsHTML
     ? `<span class="card-head-side">${headActionsHTML}</span>`
     : '';
-  return `<section class="card">
+  return `<section class="card${extraCardClass ? ' ' + extraCardClass : ''}">
     <header class="card-head"><span class="card-head-title"><h2>${esc(title)}</h2>${metaHTML}</span>${headRight}</header>
     <div class="card-body ${extraBodyClass}">${bodyHTML}</div>
   </section>`;
@@ -4165,7 +4819,8 @@ async function renderConfigTab() {
      </div>
      <details class="editor" id="ed-provider"><summary>${iconChevron()}Provider scalars</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <details class="editor" id="ed-route"><summary>${iconChevron()}Routes</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
-     <details class="editor" id="ed-settings"><summary>${iconChevron()}Settings (log / scheduling / request log / stats / cache)</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
+     <details class="editor" id="ed-guard-rules"><summary>${iconChevron()}Guard rules (extra patterns / paths)</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
+     <details class="editor" id="ed-settings"><summary>${iconChevron()}Settings (log / scheduling / request log / stats / cache / guard)</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <div class="card" id="yaml-card">
        <header class="card-head"><h2>Raw YAML</h2><span class="meta" id="yaml-meta"></span></header>
        <div class="card-body">
@@ -4307,9 +4962,126 @@ async function loadConfigAll() {
   // Route form
   buildRouteForm('ed-route');
 
-  // Scalar settings form (log level, scheduling, request_log, stats, cache)
+  // Guard rule lists (extra_patterns / extra_paths) form
+  buildGuardRulesForm('ed-guard-rules');
+
+  // Scalar settings form (log level, scheduling, request_log, stats, cache, guard)
   buildSettingsForm();
   scheduleYamlEditorResize();
+}
+
+// buildGuardRulesForm renders the guard rule-list editor: extra_patterns
+// rows (name / regex / optional literal pre-filter) and extra_paths rows
+// (literal strings). It edits the same /api/config/edit kind the scalar
+// Guard settings group uses; the lists are always sent wholesale (present
+// replaces, empty lists send null to delete the key). Validation is
+// backend-owned (name charset, literal-must-substring); the backend message
+// surfaces verbatim.
+function buildGuardRulesForm(editorId) {
+  const ed = document.getElementById(editorId);
+  if (!ed) return;
+  const body = ed.querySelector('.editor-body');
+  if (!body) return;
+  const g = ((configCache && configCache.settings) || {}).guard || {};
+  const patternsEmpty = '<tr><td colspan="4" class="subdue">no custom patterns</td></tr>';
+  const pathsEmpty = '<tr><td colspan="2" class="subdue">no custom paths</td></tr>';
+  const patterns = (g.extra_patterns || []).map((p) => `<tr>
+      <td><input class="req-input gr-name" value="${esc(p.name || '')}" placeholder="myvendor_key" aria-label="pattern name"></td>
+      <td><input class="req-input gr-regex" value="${esc(p.regex || '')}" placeholder="\\bmv-[A-Za-z0-9]{32,}" aria-label="pattern regex"></td>
+      <td><input class="req-input gr-literal" value="${esc(p.literal || '')}" placeholder="mv- (optional)" aria-label="pattern literal"></td>
+      <td><button class="btn small danger gr-del" title="Remove this pattern">✕</button></td>
+    </tr>`).join('');
+  const paths = (g.extra_paths || []).map((p) => `<tr>
+      <td><input class="req-input gp-lit" value="${esc(p)}" placeholder="~/.company/secrets" aria-label="sensitive path"></td>
+      <td><button class="btn small danger gp-del" title="Remove this path">✕</button></td>
+    </tr>`).join('');
+  body.innerHTML = `
+    <div class="section-title">extra_patterns <span class="hint">(custom secret rules; name ^[a-z0-9_]{1,32}$, literal must be a guaranteed substring of every regex match)</span></div>
+    <table class="table guard-rules-table"><thead><tr><th>name</th><th>regex</th><th>literal</th><th></th></tr></thead>
+      <tbody id="gr-rows">${patterns || patternsEmpty}</tbody></table>
+    <div class="row-actions"><button class="btn small" id="gr-add">+ pattern</button></div>
+    <div class="section-title" style="margin-top:14px">extra_paths <span class="hint">(literal sensitive-path strings matched against the request body; "~" is matched literally)</span></div>
+    <table class="table guard-rules-table"><thead><tr><th>path</th><th></th></tr></thead>
+      <tbody id="gp-rows">${paths || pathsEmpty}</tbody></table>
+    <div class="row-actions"><button class="btn small" id="gp-add">+ path</button></div>
+    <div class="row-actions" style="margin-top:14px">
+      <span class="spacer"></span>
+      <button class="btn primary small" id="gr-save">Save guard rules</button>
+    </div>
+    <div class="msg" id="gr-msg"></div>`;
+  const wireRemove = (btn, emptyHtml) => {
+    btn.addEventListener('click', () => {
+      const row = btn.closest('tr');
+      const rows = btn.closest('tbody');
+      row.remove();
+      if (rows && !rows.querySelector('input')) rows.innerHTML = emptyHtml;
+    });
+  };
+  body.querySelectorAll('.gr-del').forEach((b) => wireRemove(b, patternsEmpty));
+  body.querySelectorAll('.gp-del').forEach((b) => wireRemove(b, pathsEmpty));
+  document.getElementById('gr-add').addEventListener('click', () => {
+    const rows = document.getElementById('gr-rows');
+    const empty = rows.querySelector('.subdue');
+    if (empty) empty.remove();
+    rows.insertAdjacentHTML('beforeend', `<tr>
+      <td><input class="req-input gr-name" placeholder="myvendor_key"></td>
+      <td><input class="req-input gr-regex" placeholder="\\bmv-[A-Za-z0-9]{32,}"></td>
+      <td><input class="req-input gr-literal" placeholder="mv- (optional)"></td>
+      <td><button class="btn small danger gr-del" title="Remove this pattern">✕</button></td>
+    </tr>`);
+    wireRemove(rows.lastElementChild.querySelector('.gr-del'), patternsEmpty);
+    rows.lastElementChild.querySelector('.gr-name').focus();
+  });
+  document.getElementById('gp-add').addEventListener('click', () => {
+    const rows = document.getElementById('gp-rows');
+    const empty = rows.querySelector('.subdue');
+    if (empty) empty.remove();
+    rows.insertAdjacentHTML('beforeend', `<tr>
+      <td><input class="req-input gp-lit" placeholder="~/.company/secrets"></td>
+      <td><button class="btn small danger gp-del" title="Remove this path">✕</button></td>
+    </tr>`);
+    wireRemove(rows.lastElementChild.querySelector('.gp-del'), pathsEmpty);
+    rows.lastElementChild.querySelector('.gp-lit').focus();
+  });
+  document.getElementById('gr-save').addEventListener('click', saveGuardRules);
+}
+
+// saveGuardRules collects the edited lists and posts them as one guard edit.
+// Empty lists send null (delete the key → revert to none), matching the
+// scalar form's revert-to-default signal; rows with a blank name AND regex
+// are skipped as artifacts of the add-row UI.
+async function saveGuardRules() {
+  const msg = document.getElementById('gr-msg');
+  const btn = document.getElementById('gr-save');
+  const read = (sel) => Array.from(document.querySelectorAll(sel)).map((i) => i.value);
+  const names = read('#gr-rows .gr-name');
+  const regexes = read('#gr-rows .gr-regex');
+  const literals = read('#gr-rows .gr-literal');
+  const patterns = [];
+  for (let i = 0; i < names.length; i++) {
+    const name = (names[i] || '').trim();
+    const regex = (regexes[i] || '').trim();
+    if (!name && !regex) continue;
+    patterns.push({ name, regex, literal: (literals[i] || '').trim() });
+  }
+  const paths = read('#gp-rows .gp-lit').map((v) => v.trim()).filter(Boolean);
+  btn.disabled = true;
+  showMsg(msg, 'ok', 'saving…');
+  try {
+    await apiPost('/api/config/edit', {
+      kind: 'guard',
+      data: {
+        extra_patterns: patterns.length ? patterns : null,
+        extra_paths: paths.length ? paths : null,
+      },
+    });
+    await loadConfigAll();
+    showMsg(msg, 'ok', 'saved & reloaded');
+  } catch (e) {
+    showMsg(msg, 'err', e.message);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // buildProviderForm: choose a provider → edit base URLs / usage_url / billing, or delete.
@@ -4764,6 +5536,40 @@ const SETTINGS_GROUPS = [
       },
     ],
   },
+  {
+    kind: 'guard', title: 'Guard',
+    note: 'Rule lists live in the Guard rules editor above; guard.adjudicate stays YAML-only (explicit opt-in to send matched snippets to a model).',
+    fields: [
+      {
+        key: 'secrets', label: 'secrets', type: 'select', options: ['log', 'redact', 'block', 'off'], def: 'log',
+        help: 'Action on secret-channel hits: log (counter + event + audit), redact (rewrite the body, then log), block (reject with 400), off.',
+      },
+      {
+        key: 'paths', label: 'paths', type: 'select', options: ['log', 'block', 'off'], def: 'log',
+        help: 'Action on STRONG sensitive-path hits (tool-invocation side). Weak mentions are always ignored.',
+      },
+      {
+        key: 'known_secrets', label: 'known_secrets', type: 'checkbox', def: 'true',
+        help: 'Also match the proxy\'s own managed credentials (pool keys, OAuth tokens) exactly.',
+      },
+      {
+        key: 'decode', label: 'decode', type: 'checkbox', def: 'true',
+        help: 'Catch base64/hex/url-encoded forms of known secrets.',
+      },
+      {
+        key: 'audit', label: 'audit', type: 'checkbox', def: 'true',
+        help: 'Persist security events to the audit log (guard.audit_path, 30d retention).',
+      },
+      {
+        key: 'session_scan', label: 'session_scan', type: 'checkbox', def: 'true',
+        help: 'Detect a known credential split into fragments across one session\'s requests (reported as known_secret_fragmented).',
+      },
+      {
+        key: 'audit_path', label: 'audit_path', type: 'text', def: '~/.model-proxy/log/security/security.log',
+        help: 'Optional absolute path for the security audit log. Empty = the default location.',
+      },
+    ],
+  },
 ];
 
 // HELP_ICON_SVG is the inline info glyph used by every settings help button.
@@ -5125,6 +5931,77 @@ async function testAccount(btn, p) {
   }
 }
 
+// testAllAccounts probes every account of the provider sequentially (the
+// same POST /api/accounts/<p>/<id>/test the per-card Test button uses) and
+// renders the results as a matrix: one row per account plus the provider's
+// tri-protocol capability counts (GET /api/models — the same probe data the
+// Status Models card renders), so liveness and protocol capability read side
+// by side. Sequential on purpose: each probe is a REAL upstream request;
+// firing the whole pool at once would race upstream rate limits. Results
+// paint incrementally so a slow account does not hide the earlier verdicts.
+async function testAllAccounts(btn, p) {
+  const accounts = p.accounts || [];
+  const host = document.getElementById('acct-test-matrix');
+  if (!host || !accounts.length) return;
+  // Capability header is best-effort: no probe data → the matrix still
+  // renders, just without the caps line.
+  let caps = null;
+  try {
+    const md = await apiGet('/api/models');
+    const entry = modelCapMatrix((md && md.providers) || {}).find((e) => e.name === p.name);
+    if (entry) caps = providerCapsSummary(entry);
+  } catch { /* no probe data — liveness matrix alone */ }
+  const orig = btn.textContent;
+  btn.disabled = true;
+  const results = [];
+  try {
+    for (let i = 0; i < accounts.length; i++) {
+      const a = accounts[i];
+      btn.textContent = `testing ${i + 1}/${accounts.length}…`;
+      let r;
+      try {
+        r = await apiPost(`/api/accounts/${encodeURIComponent(p.name)}/${encodeURIComponent(a.id)}/test`);
+      } catch (e) {
+        r = { status: 'err', http_status: 0, reason: e.message };
+      }
+      results.push({ label: a.label || a.id, ...r });
+      renderAccountTestMatrix(host, p, results, accounts.length, false, caps);
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+  renderAccountTestMatrix(host, p, results, accounts.length, true, caps);
+}
+
+// renderAccountTestMatrix paints the test-all progress/result table. Verdicts
+// are backend-owned (status ok / error); http_status 0 means no upstream
+// answer (build/auth/network error) and renders the reason instead.
+function renderAccountTestMatrix(host, p, results, total, done, caps) {
+  const capsLine = caps
+    ? `${caps.models} model${caps.models === 1 ? '' : 's'} · chat ${caps.chat} · anthropic ${caps.anthropic} · responses ${caps.responses}`
+    : '';
+  const pending = total - results.length;
+  const rows = results.map((r) => {
+    const ok = r.status === 'ok';
+    const head = r.http_status ? `HTTP ${r.http_status}` : (r.reason || 'probe failed');
+    return `<tr>
+      <td>${esc(r.label || '—')}</td>
+      <td><span class="badge ${ok ? 'ok' : 'err'}">${ok ? 'ok' : 'fail'}</span></td>
+      <td class="mono">${esc(head)}</td>
+      <td class="num">${r.latency_ms != null ? esc(String(r.latency_ms)) + 'ms' : '—'}</td>
+      <td class="mono">${esc(r.model || '—')}</td>
+    </tr>`;
+  }).join('');
+  host.innerHTML = `<section class="card acct-matrix"><div class="card-body">
+    <div class="card-title">Test all <span class="hint">${esc(p.name)}${capsLine ? ' · ' + esc(capsLine) : ''}${done ? '' : ' · ' + pending + ' pending'}</span></div>
+    <table class="table">
+      <thead><tr><th>account</th><th>verdict</th><th>http</th><th class="num">latency</th><th>model</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div></section>`;
+}
+
 // renderAccountsNav builds the left sidebar (sorted providers + account-count
 // badges) and wires selection. If the previously selected provider is gone
 // (e.g. removed), falls back to the first.
@@ -5211,6 +6088,9 @@ function selectProviderSilent(name) {
   main.querySelectorAll('[data-test]').forEach((b) => {
     b.addEventListener('click', () => testAccount(b, p));
   });
+  // Batch "Test all" - sequential probe over every account, matrix results.
+  const testAll = main.querySelector('[data-test-all]');
+  if (testAll) testAll.addEventListener('click', () => testAllAccounts(testAll, p));
   // Re-login buttons appear on session-expired / not-logged-in aqp/codex
   // accounts - they reuse the same async login flow as Add account (aqp is
   // single-credential, so re-login overwrites the stale SSO cookie in place).
@@ -5220,10 +6100,16 @@ function selectProviderSilent(name) {
 }
 
 // renderProviderDetail builds the right pane: a toolbar (provider name + meta +
-// Add button) and the list of account cards (or an empty-state prompt).
+// Add button) and the list of account cards (or an empty-state prompt). With
+// two or more accounts the toolbar also carries "Test all" — the batch probe
+// whose matrix lands in #acct-test-matrix between toolbar and cards.
 function renderProviderDetail(p, quota, tokens) {
   const meta = `${esc(p.provider_id || '?')}${p.billing ? ' · ' + esc(p.billing) : ''}`;
   const accounts = p.accounts || [];
+  const testAll = accounts.length >= 2
+    ? `<button class="btn small" data-test-all
+               title="Probe every account sequentially (real upstream requests)">Test all (${accounts.length})</button>`
+    : '';
   const body = accounts.length === 0
     ? `<div class="empty-state">No account configured. Click <strong>Add</strong> to sign in.</div>`
     : accounts.map((a) => accountCard(p, a, quota, tokens)).join('');
@@ -5232,8 +6118,12 @@ function renderProviderDetail(p, quota, tokens) {
         <h2>${esc(p.name)}</h2>
         <span class="meta">${meta}</span>
       </div>
-      <button class="btn small" data-add data-provider="${esc(p.name)}">+ Add account</button>
+      <div class="row-actions">
+        ${testAll}
+        <button class="btn small" data-add data-provider="${esc(p.name)}">+ Add account</button>
+      </div>
     </div>
+    <div id="acct-test-matrix"></div>
     <div class="acct-list">${body}</div>`;
 }
 
@@ -6144,6 +7034,34 @@ function analyticsChartColors() {
 // previous ones instead of leaking them.
 let analyticsCharts = [];
 
+// Debounced window-resize re-size for the live uPlot canvases: both the
+// Dashboard and Analytics charts size to their host at render time, and
+// without this hook a window resize leaves them stale until the next data
+// tick (30s on the live window). Only charts still mounted in the DOM
+// resize — hidden tabs rebuild on entry. Height is constant (260).
+let chartResizeTimer = null;
+window.addEventListener('resize', () => {
+  if (chartResizeTimer) clearTimeout(chartResizeTimer);
+  chartResizeTimer = setTimeout(() => {
+    chartResizeTimer = null;
+    const rewidth = (u, tracked) => {
+      try {
+        if (!u || !u.root || !document.contains(u.root)) return tracked;
+        const host = u.root.parentElement;
+        if (!host) return tracked;
+        const w = Math.max(host.clientWidth || 600, 320);
+        if (tracked == null || Math.abs(tracked - w) > 1) u.setSize({ width: w, height: 260 });
+        return w;
+      } catch (_) { return tracked; }
+    };
+    if (dashChart && dashChart.u) dashChart.width = rewidth(dashChart.u, dashChart.width) ?? dashChart.width;
+    for (const u of analyticsCharts) rewidth(u, null);
+    // The sticky session views' heights ride the trace SVG's aspect ratio,
+    // so the table-header offset they feed (--sess-h) goes stale on resize.
+    document.querySelectorAll('.sess-sticky').forEach((el) => syncSessThOffset(el));
+  }, 150);
+});
+
 // destroyAnalyticsCharts tears down the charts rendered for the previous view
 // and detaches the legend dropdown's document-level listener (the innerHTML
 // reset below would otherwise orphan it).
@@ -6635,7 +7553,7 @@ async function boot() {
   // Initial render: activate the tab the URL hash names (so a refresh or shared
   // link lands on the same view), defaulting to Status. For
   // #accounts/<provider>, preset the selection before the fetch.
-  const { tab: bootTab, sub: bootSub } = parseHash();
+  const { tab: bootTab, sub: bootSub, query: bootQuery } = parseHash();
   if (bootTab === 'accounts' && bootSub) {
     accountsSelectedProvider = bootSub;
   }
@@ -6654,6 +7572,20 @@ async function boot() {
     activateTabSilent('security');
   } else {
     activateTabSilent('status');
+  }
+  // #status/live?session=… — stash as pending instead of applying here: the
+  // status tab renders ASYNC (5 fetches), so applying now races the Live
+  // card mount, whose reset would wipe the selection. renderLiveCard
+  // consumes the pin right after mounting (the deterministic point).
+  if (bootTab === 'status' && bootSub === 'live' && bootQuery.session && statusSelected === 'live') {
+    bootLiveSession = bootQuery.session;
+    if (document.getElementById('live-session')) {
+      // Defensive: the live card is already mounted (not the normal boot
+      // path) — consume the pin now instead of waiting for a mount.
+      const v = bootLiveSession;
+      bootLiveSession = '';
+      onLiveSessionChange(v);
+    }
   }
   // Update the header connection indicator regardless of the landing tab.
   refreshConnIndicator();
