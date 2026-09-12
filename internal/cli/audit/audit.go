@@ -263,12 +263,12 @@ func FormatAuditTable(records []*observeseclog.Record, dir string) string {
 	if len(records) == 0 {
 		return fmt.Sprintf("(no security audit records in %s)\n", dir)
 	}
-	out := fmt.Sprintf("%-14s %-7s %-12s %-16s %-20s %-7s %s\n",
-		"time", "kind", "agent", "route", "names", "action", "detail")
+	out := fmt.Sprintf("%-14s %-7s %-12s %-16s %-20s %-7s %-7s %s\n",
+		"time", "kind", "agent", "route", "names", "action", "verdict", "detail")
 	for _, r := range records {
-		out += fmt.Sprintf("%-14s %-7.7s %-12.12s %-16.16s %-20.20s %-7.7s %s\n",
+		out += fmt.Sprintf("%-14s %-7.7s %-12.12s %-16.16s %-20.20s %-7.7s %-7.7s %s\n",
 			time.UnixMilli(r.Ts).Format("01-02 15:04:05"),
-			r.Kind, r.Agent, r.Exposed, strings.Join(r.Names, ","), r.Action, sanitizeAuditDetail(r.Detail))
+			r.Kind, r.Agent, r.Exposed, strings.Join(r.Names, ","), r.Action, r.Verdict, sanitizeAuditDetail(r.Detail))
 	}
 	return out
 }

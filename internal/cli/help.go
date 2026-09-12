@@ -43,6 +43,7 @@ Commands:
   cache                Show exact-response cache hit stats (queries the daemon)
   doctor               Offline scheduling diagnostic (config only, no daemon)
   audit                Show the security audit log (offline, no daemon)
+  guard                List/unblock AI-adjudicated session blocks
   test <model>         End-to-end probe of a model's route targets (real upstream calls)
   replay <id> --to P   Re-answer a logged request with a different backend
   shadow report       Shadow-evaluation aggregation (primary vs shadow compare)
@@ -263,6 +264,19 @@ Flags:
                 top 10 hit names / agents, counts by action, over the whole
                 filtered set (--limit ignored; internal cap 10000 records)
   --json        raw records JSON for jq; with --stats, the aggregate as JSON`,
+
+	"guard": `guard <blocks|unblock> [--json] [--config PATH]
+
+  Manage the AI second-opinion session blocks (guard.adjudicate): pattern
+  guard hits a high verdict from the designated model under block_session
+  block that client session's requests until explicitly unblocked here or in
+  the WebUI Security page. Blocks persist across daemon restarts. Requires
+  the running daemon (admin API).
+
+Subcommands:
+  blocks                 list blocked sessions (newest first)
+  blocks --json          raw JSON for jq
+  unblock <session-id>   re-admit a blocked session immediately`,
 
 	"test": `test <model> [--config PATH]
 
