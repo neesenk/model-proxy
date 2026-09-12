@@ -5,7 +5,6 @@ package clicommon
 
 import (
 	"fmt"
-	"io"
 	"model-proxy/internal/display"
 	"sort"
 	"strings"
@@ -17,13 +16,7 @@ import (
 // StatusGet fetches base+path via the shared daemon client. A non-2xx status
 // is NOT an error here — the caller inspects it.
 func StatusGet(base, path string) (body []byte, status int, err error) {
-	resp, err := daemonctl.Client.Get(base + path)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	body, _ = io.ReadAll(resp.Body)
-	return body, resp.StatusCode, nil
+	return daemonctl.Get(base, path)
 }
 
 // AppendSection writes a non-empty section followed by one blank separator.

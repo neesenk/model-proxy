@@ -15,7 +15,18 @@ var Client = &http.Client{Timeout: 10 * time.Second}
 
 // Get fetches base+path and returns the raw body and status code.
 func Get(base, path string) (body []byte, status int, err error) {
-	resp, err := Client.Get(base + path)
+	return Do(http.MethodGet, base, path)
+}
+
+// Do performs one request against base+path and returns the raw body and
+// status code. A non-2xx status is NOT an error here — the caller inspects
+// it. Callers needing headers or a body use Client directly.
+func Do(method, base, path string) (body []byte, status int, err error) {
+	req, err := http.NewRequest(method, base+path, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := Client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
