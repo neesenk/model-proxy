@@ -284,3 +284,86 @@ func TestEditConfigNilDeletesKey(t *testing.T) {
 		t.Errorf("unchanged key must survive:\n%s", content)
 	}
 }
+
+// TestEditConfigGuard covers the guard form kind: scalar switches, the two
+// rule lists (present replaces wholesale, nil deletes, absent untouched), and
+// that the projection round-trips through configSettings for the form.
+func TestEditConfigGuard(t *testing.T) {
+	path := writeTestConfig(t)
+	if err := os.WriteFile(path, []byte(`listen: 127.0.0.1:8080
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://example.test, models: [glm]}
+guard:
+  secrets: log
+  extra_paths: [~/.company/secrets]
+  extra_patterns:
+    - {name: old_rule, regex: 'old-[0-9]+'}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spy := &reloadSpy{}
+	service := editService(t, path, spy)
+	err := service.EditConfig(appapi.EditRequest{
+		Kind: "guard",
+		Data: map[string]any{
+			"paths": "off",
+			"extra_patterns": []any{
+				map[string]any{"name": "myvendor_key", "regex": `\bmv-[A-Za-z0-9]{32,}`, "literal": "mv-"},
+			},
+			// extra_paths absent → the existing list must survive.
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := readConfig(t, path)
+	for _, want := range []string{
+		"guard:", "secrets: log", "paths: off",
+		"name: myvendor_key", `regex: \bmv-[A-Za-z0-9]{32,}`, "literal: mv-",
+		"~/.company/secrets",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("edited config missing %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "old_rule") {
+		t.Errorf("a present extra_patterns must replace the list wholesale:\n%s", content)
+	}
+
+	// The projection the form reads round-trips the edited state.
+	doc, err := service.ConfigDocument()
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := doc.Settings.Guard
+	if g.Paths != "off" || g.Secrets != "log" {
+		t.Errorf("settings.guard actions = %s/%s", g.Secrets, g.Paths)
+	}
+	if len(g.ExtraPatterns) != 1 || g.ExtraPatterns[0].Name != "myvendor_key" || g.ExtraPatterns[0].Literal != "mv-" {
+		t.Errorf("settings.guard.extra_patterns = %+v", g.ExtraPatterns)
+	}
+	if len(g.ExtraPaths) != 1 || g.ExtraPaths[0] != "~/.company/secrets" {
+		t.Errorf("settings.guard.extra_paths = %v", g.ExtraPaths)
+	}
+
+	// nil deletes a rule list entirely (revert-to-none signal).
+	if err := service.EditConfig(appapi.EditRequest{
+		Kind: "guard",
+		Data: map[string]any{"extra_paths": nil},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if content := readConfig(t, path); strings.Contains(content, "extra_paths") {
+		t.Errorf("nil extra_paths must delete the key:\n%s", content)
+	}
+	// A malformed row value leaves the key alone instead of corrupting it.
+	if err := service.EditConfig(appapi.EditRequest{
+		Kind: "guard",
+		Data: map[string]any{"extra_patterns": "not-a-list"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if content := readConfig(t, path); !strings.Contains(content, "myvendor_key") {
+		t.Errorf("malformed list value must leave the key untouched:\n%s", content)
+	}
+}

@@ -100,6 +100,38 @@ func (s *Service) editStats(data map[string]any) error {
 	})
 }
 
+// editGuard mutates the guard block: the scalar switches through the same
+// applyScalar path as every other form, plus the two user-declared rule
+// lists. A present list replaces the sequence wholesale (the UI always sends
+// the full edited list); nil deletes the key (revert to none); an absent key
+// is left untouched. guard.adjudicate is deliberately NOT editable here —
+// it is an explicit opt-in exception (decision 36) and stays YAML-only.
+func (s *Service) editGuard(data map[string]any) error {
+	return s.editConfigNode(func(root *yaml.Node) {
+		guard := configedit.ChildMap(root, "guard")
+		for _, key := range []string{"secrets", "paths", "known_secrets", "decode", "audit", "session_scan", "audit_path"} {
+			if value, ok := data[key]; ok {
+				applyScalar(guard, key, value)
+			}
+		}
+		for _, key := range []string{"extra_patterns", "extra_paths"} {
+			value, ok := data[key]
+			if !ok {
+				continue
+			}
+			if value == nil {
+				configedit.DeleteKey(guard, key)
+				continue
+			}
+			list, ok := value.([]any)
+			if !ok {
+				continue // malformed row from the form — leave the key alone
+			}
+			configedit.SetChildNode(guard, key, configedit.MustEncode(list))
+		}
+	})
+}
+
 func (s *Service) editCache(data map[string]any) error {
 	return s.editConfigNode(func(root *yaml.Node) {
 		cache := configedit.ChildMap(root, "cache")

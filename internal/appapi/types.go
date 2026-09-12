@@ -176,6 +176,32 @@ type ConfigSettings struct {
 	RequestLog ConfigRequestLog `json:"request_log"`
 	Stats      ConfigStats      `json:"stats"`
 	Cache      ConfigCache      `json:"cache"`
+	Guard      ConfigGuard      `json:"guard"`
+}
+
+// ConfigGuard mirrors guard.* for the Config tab's Guard form: the scalar
+// switches plus the user-declared rule lists the Guard rules editor edits
+// (extra_patterns / extra_paths). adjudicate stays YAML-only — it is an
+// explicit opt-in exception (decision 36), not a form toggle.
+type ConfigGuard struct {
+	Secrets       string               `json:"secrets"`
+	Paths         string               `json:"paths"`
+	KnownSecrets  bool                 `json:"known_secrets"`
+	Decode        bool                 `json:"decode"`
+	Audit         bool                 `json:"audit"`
+	SessionScan   bool                 `json:"session_scan"`
+	AuditPath     string               `json:"audit_path"`
+	ExtraPatterns []ConfigGuardPattern `json:"extra_patterns,omitempty"`
+	ExtraPaths    []string             `json:"extra_paths,omitempty"`
+}
+
+// ConfigGuardPattern is one user-declared secret pattern (gitleaks
+// extend-style): Regex plus an optional Literal pre-filter that must be a
+// guaranteed substring of every regex match.
+type ConfigGuardPattern struct {
+	Name    string `json:"name"`
+	Regex   string `json:"regex"`
+	Literal string `json:"literal,omitempty"`
 }
 
 // ConfigScheduling mirrors scheduling.* — every field defaults in code, so an

@@ -741,7 +741,7 @@ func (s *Service) ConfigDocument() (appapi.ConfigDocument, error) {
 // Raw file values win; only log_level/log_file carry the loader's defaults (the
 // form diffs against the loaded value, so an untouched field is never written).
 func configSettings(config *configdomain.Config) appapi.ConfigSettings {
-	return appapi.ConfigSettings{
+	settings := appapi.ConfigSettings{
 		LogLevel: config.LogLevel,
 		LogFile:  config.LogFile,
 		Scheduling: appapi.ConfigScheduling{
@@ -776,6 +776,27 @@ func configSettings(config *configdomain.Config) appapi.ConfigSettings {
 			MaxBodyBytes: config.Cache.MaxBodyBytes,
 		},
 	}
+	settings.Guard = appapi.ConfigGuard{
+		Secrets:      config.Guard.Secrets,
+		Paths:        config.Guard.Paths,
+		KnownSecrets: config.Guard.KnownSecrets,
+		Decode:       config.Guard.Decode,
+		Audit:        config.Guard.Audit,
+		SessionScan:  config.Guard.SessionScan,
+		AuditPath:    config.Guard.AuditPath,
+	}
+	if len(config.Guard.ExtraPatterns) > 0 {
+		settings.Guard.ExtraPatterns = make([]appapi.ConfigGuardPattern, 0, len(config.Guard.ExtraPatterns))
+		for _, p := range config.Guard.ExtraPatterns {
+			settings.Guard.ExtraPatterns = append(settings.Guard.ExtraPatterns, appapi.ConfigGuardPattern{
+				Name: p.Name, Regex: p.Regex, Literal: p.Literal,
+			})
+		}
+	}
+	if len(config.Guard.ExtraPaths) > 0 {
+		settings.Guard.ExtraPaths = append([]string(nil), config.Guard.ExtraPaths...)
+	}
+	return settings
 }
 
 // optionalInt maps the zero value ("key absent") to a nil JSON pointer.

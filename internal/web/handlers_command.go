@@ -181,7 +181,7 @@ func (s *Server) handleConfigValidate(w http.ResponseWriter, r *http.Request) {
 // provider/route are name-scoped; the rest mutate a fixed scalar block.
 var configEditKinds = map[string]bool{
 	"general": true, "scheduling": true, "request_log": true,
-	"stats": true, "cache": true, "provider": true, "route": true,
+	"stats": true, "cache": true, "guard": true, "provider": true, "route": true,
 }
 
 func (s *Server) handleConfigEdit(w http.ResponseWriter, r *http.Request) {

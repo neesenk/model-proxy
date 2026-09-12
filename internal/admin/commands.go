@@ -103,6 +103,8 @@ func (s *Service) EditConfig(request appapi.EditRequest) error {
 		return s.editStats(request.Data)
 	case "cache":
 		return s.editCache(request.Data)
+	case "guard":
+		return s.editGuard(request.Data)
 	case "provider", "route":
 		return s.editStructured(request.Kind, request.Name, request.Data)
 	default:
