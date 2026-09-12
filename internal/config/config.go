@@ -161,7 +161,91 @@ type GuardConfig struct {
 	// request body (NOT filesystem paths — "~" is matched literally, never
 	// expanded).
 	ExtraPaths []string `yaml:"extra_paths"`
+	// Adjudicate configures the async AI second-opinion channel for guard
+	// pattern hits (rule-table/custom secret patterns and strong
+	// sensitive-path hits). Default off; see AdjudicateConfig.
+	Adjudicate AdjudicateConfig `yaml:"adjudicate"`
 }
+
+// AdjudicateConfig is the guard.adjudicate block: instead of recording a
+// pattern-table hit immediately, a designated model judges asynchronously
+// whether it is a real leak (verdict high: recorded, optionally blocks the
+// session) or benign code/docs content (verdict low: suppressed). The
+// matched span plus bounded context leaves the machine toward the configured
+// model ONLY — an explicit, default-off exception to the credential red
+// line (docs/decisions/intentional-behaviors.md).
+type AdjudicateConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Model is the exposed route name of the adjudication model; required
+	// when enabled. Calls go provider-direct (the probe exchange recipe),
+	// never through the forward pipeline: no guard re-scan (the judged span
+	// would self-trigger), no cache, no request log, no stats.
+	Model string `yaml:"model"`
+	// BlockSession (default true, applied at load): a high verdict blocks
+	// subsequent requests of the same client session (x-claude-code-session-id)
+	// until unblocked via CLI/WebUI. Persisted across restarts.
+	BlockSession bool `yaml:"block_session"`
+	// Timeout is the per-call budget as a duration string (default "20s").
+	Timeout string `yaml:"timeout"`
+	// Workers is the adjudication worker count (default 2, clamped 1..8);
+	// fixed at process start — changing it needs a restart.
+	Workers int `yaml:"workers"`
+	// MaxQueue bounds pending jobs (default 256); overflow fails open to the
+	// immediate-record behavior (verdict "skipped").
+	MaxQueue int `yaml:"max_queue"`
+	// ContextBytes is the context window each side of the hit sent for
+	// judgment (default 256); other secret hits inside the window are masked.
+	ContextBytes int `yaml:"context_bytes"`
+	// CacheMax is the persisted verdict LRU capacity (default 4096).
+	CacheMax int `yaml:"cache_max"`
+}
+
+// TimeoutDuration parses Timeout (default 20s; malformed values are a
+// validate-time error, this accessor never fails).
+func (a AdjudicateConfig) TimeoutDuration() time.Duration {
+	if d, err := time.ParseDuration(a.Timeout); err == nil && d > 0 {
+		return d
+	}
+	return 20 * time.Second
+}
+
+// WorkerCount returns the clamped worker count (default 2, 1..8).
+func (a AdjudicateConfig) WorkerCount() int {
+	if a.Workers <= 0 {
+		return 2
+	}
+	if a.Workers > 8 {
+		return 8
+	}
+	return a.Workers
+}
+
+// QueueCap returns the pending-job bound (default 256).
+func (a AdjudicateConfig) QueueCap() int {
+	if a.MaxQueue <= 0 {
+		return 256
+	}
+	return a.MaxQueue
+}
+
+// ContextWindow returns the per-side context bytes (default 256).
+func (a AdjudicateConfig) ContextWindow() int {
+	if a.ContextBytes <= 0 {
+		return 256
+	}
+	return a.ContextBytes
+}
+
+// CacheCapacity returns the verdict-cache LRU capacity (default 4096).
+func (a AdjudicateConfig) CacheCapacity() int {
+	if a.CacheMax <= 0 {
+		return 4096
+	}
+	return a.CacheMax
+}
+
+// AdjudicateEnabled reports whether the AI second-opinion channel is on.
+func (g GuardConfig) AdjudicateEnabled() bool { return g.Adjudicate.Enabled }
 
 // ExtraPattern is one user-declared secret pattern (gitleaks extend-style).
 // Literal is an optional pre-filter: when set it must be a guaranteed
@@ -972,8 +1056,11 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		Pricing:  PricingConfig{Enabled: true},
 		// Guard bools default to true; yaml only overwrites fields present in
 		// the file, so an unset field keeps the default while an explicit
-		// false is honored (same pattern as Web.Enabled above).
-		Guard: GuardConfig{KnownSecrets: true, Decode: true, Audit: true, SessionScan: true},
+		// false is honored (same pattern as Web.Enabled above). Adjudicate
+		// carries its own sub-defaults (BlockSession true; the numeric/duration
+		// defaults live in the AdjudicateConfig accessors).
+		Guard: GuardConfig{KnownSecrets: true, Decode: true, Audit: true, SessionScan: true,
+			Adjudicate: AdjudicateConfig{BlockSession: true}},
 	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		// The most common breakage: a providers' `models:` block still in the
@@ -1359,6 +1446,22 @@ func (c *Config) validate() error {
 		if p.Literal != "" && !literalConsistentWithRegex(re, p.Literal) {
 			return fmt.Errorf("%s (%s): literal %q can never appear in a match of the regex — the literal must be a guaranteed substring of every possible match, otherwise the pre-filter silently disables the rule (check for typos)", where, p.Name, p.Literal)
 		}
+	}
+	// guard.adjudicate: the designated model is required when the channel is
+	// on, the timeout string must parse, and the worker count must stay in
+	// the clamped range (workers are fixed at process start).
+	if c.Guard.Adjudicate.Enabled {
+		if strings.TrimSpace(c.Guard.Adjudicate.Model) == "" {
+			return fmt.Errorf("guard.adjudicate.model must be set when guard.adjudicate.enabled is true — the exposed route name of the model that judges guard hits")
+		}
+	}
+	if c.Guard.Adjudicate.Timeout != "" {
+		if d, err := time.ParseDuration(c.Guard.Adjudicate.Timeout); err != nil || d <= 0 {
+			return fmt.Errorf("guard.adjudicate.timeout %q invalid — use a positive duration like \"20s\"", c.Guard.Adjudicate.Timeout)
+		}
+	}
+	if c.Guard.Adjudicate.Workers < 0 || c.Guard.Adjudicate.Workers > 8 {
+		return fmt.Errorf("guard.adjudicate.workers %d out of range — use 1..8 (default 2)", c.Guard.Adjudicate.Workers)
 	}
 	// guard.extra_paths: literal body-match strings; blank entries are config
 	// errors (duplicates are already deduped at load).

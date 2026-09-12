@@ -328,6 +328,20 @@ providers:
 #                         # guaranteed substring of every regex match (pre-filter)
 #   extra_paths:          # user sensitive paths, literal body match (~ kept literal)
 #     - ~/.company/secrets
+#   adjudicate:           # AI second opinion for pattern hits (default off).
+#                         # When on, the matched span plus masked context is
+#                         # sent (async, cached by content hash) to a model you
+#                         # designate, which returns high (real leak: audit
+#                         # record + optional session block) or low (benign
+#                         # fixture/doc/example: suppressed). Queue overflow,
+#                         # the per-request cap, model errors and timeouts fail
+#                         # OPEN to the classic immediate record. Enabling opts
+#                         # in to sending the matched snippet to that model.
+#     enabled: false
+#     model: ""           # required when enabled: exposed route name of the
+#                         # judging model; its provider needs anthropic_base_url
+#     block_session: true # high verdict blocks the session until unblocked
+#                         # ('model-proxy guard unblock' or the WebUI)
 
 # Shadow evaluation: after the primary response commits, re-send the same request
 # to a shadow backend, record-only — never affects the client, circuit breakers,

@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 const guardTestBaseYAML = `listen: 127.0.0.1:0
@@ -237,5 +238,63 @@ func TestGuardExtraPaths(t *testing.T) {
 		if cfg.Guard.ExtraPaths[i] != want[i] {
 			t.Errorf("ExtraPaths[%d] = %q, want %q", i, cfg.Guard.ExtraPaths[i], want[i])
 		}
+	}
+}
+
+// TestAdjudicateConfigValidation pins guard.adjudicate validation: the
+// designated model is mandatory when the channel is on, the timeout string
+// must parse, and the worker count stays in the clamped range.
+func TestAdjudicateConfigValidation(t *testing.T) {
+	valid := func(mutate func(*AdjudicateConfig)) error {
+		cfg := &Config{Listen: "127.0.0.1:0",
+			Providers: map[string]Provider{"zhipu": {Provider: "zhipu", OpenAIBaseURL: "https://x"}}}
+		cfg.Guard.Adjudicate = AdjudicateConfig{Enabled: true, Model: "judge"}
+		mutate(&cfg.Guard.Adjudicate)
+		return cfg.validate()
+	}
+	if err := valid(func(*AdjudicateConfig) {}); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+	if err := valid(func(a *AdjudicateConfig) { a.Model = "" }); err == nil ||
+		!strings.Contains(err.Error(), "guard.adjudicate.model") {
+		t.Errorf("missing model error = %v", err)
+	}
+	if err := valid(func(a *AdjudicateConfig) { a.Model = "  " }); err == nil {
+		t.Error("blank model must be rejected")
+	}
+	if err := valid(func(a *AdjudicateConfig) { a.Timeout = "nope" }); err == nil ||
+		!strings.Contains(err.Error(), "guard.adjudicate.timeout") {
+		t.Errorf("bad timeout error = %v", err)
+	}
+	if err := valid(func(a *AdjudicateConfig) { a.Timeout = "0s" }); err == nil {
+		t.Error("zero timeout must be rejected")
+	}
+	if err := valid(func(a *AdjudicateConfig) { a.Workers = 9 }); err == nil ||
+		!strings.Contains(err.Error(), "guard.adjudicate.workers") {
+		t.Errorf("workers out of range error = %v", err)
+	}
+	if err := valid(func(a *AdjudicateConfig) { a.Workers = -1 }); err == nil {
+		t.Error("negative workers must be rejected")
+	}
+}
+
+// TestAdjudicateConfigDefaults pins the accessor defaults (empty fields
+// select the documented values).
+func TestAdjudicateConfigDefaults(t *testing.T) {
+	var a AdjudicateConfig
+	if a.TimeoutDuration() != 20*time.Second {
+		t.Errorf("timeout default = %v", a.TimeoutDuration())
+	}
+	if a.WorkerCount() != 2 {
+		t.Errorf("workers default = %d", a.WorkerCount())
+	}
+	for w, want := range map[int]int{-1: 2, 0: 2, 1: 1, 8: 8, 9: 8} {
+		a.Workers = w
+		if got := a.WorkerCount(); got != want {
+			t.Errorf("WorkerCount(%d) = %d, want %d", w, got, want)
+		}
+	}
+	if a.QueueCap() != 256 || a.ContextWindow() != 256 || a.CacheCapacity() != 4096 {
+		t.Errorf("queue/context/cache defaults = %d/%d/%d", a.QueueCap(), a.ContextWindow(), a.CacheCapacity())
 	}
 }
