@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"time"
 
+	"model-proxy/internal/adjudicate"
 	"model-proxy/internal/fusion"
 	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
@@ -317,7 +318,10 @@ type SecurityRecord struct {
 	Exposed   string   `json:"exposed,omitempty"`
 	Names     []string `json:"names,omitempty"`
 	Action    string   `json:"action,omitempty"`
-	Detail    string   `json:"detail,omitempty"`
+	// Verdict is non-empty on records from (or fail-opened out of) the AI
+	// second-opinion channel: high | low | error | skipped.
+	Verdict string `json:"verdict,omitempty"`
+	Detail  string `json:"detail,omitempty"`
 }
 
 // SecurityResult is one audit-log query outcome: Enabled reports whether the
@@ -369,7 +373,51 @@ type SecurityExplainResult struct {
 	RequestID string          `json:"request_id"`
 	Kind      string          `json:"kind"`
 	Matches   []SecurityMatch `json:"matches"`
+	// Adjudications are the AI second-opinion verdicts recorded for THIS
+	// request (audit-log verdict records, enriched from the live ring when
+	// still resident): the LLM judgment rides the analyze view.
+	Adjudications []SecurityExplainAdjudication `json:"adjudications,omitempty"`
 }
+
+// SecurityExplainAdjudication is one recorded LLM judgment attached to an
+// explain result.
+type SecurityExplainAdjudication struct {
+	Rule    string `json:"rule"`
+	Verdict string `json:"verdict"`
+	Reason  string `json:"reason,omitempty"`
+	Model   string `json:"model,omitempty"`
+	Ts      int64  `json:"ts,omitempty"`
+	Cached  bool   `json:"cached,omitempty"`
+}
+
+// SecurityBlock is one persisted guard-adjudication session block: a high
+// verdict under guard.adjudicate.block_session. It survives restarts and
+// clears only through the explicit unblock surface (CLI / WebUI). Aliased to
+// the adjudicate package's snapshot type (flat JSON via embedding) so the
+// field set has one owner.
+type SecurityBlock = adjudicate.BlockEntry
+
+// SecurityAdjudicationStats is the LLM usage accounting of the adjudication
+// channel: real model calls and their token totals. Cache hits cost nothing
+// and are not counted.
+type SecurityAdjudicationStats struct {
+	Calls        int64 `json:"calls"`
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+}
+
+// SecurityAdjudicationFeed is the payload of GET /api/security/adjudications:
+// the recent-verdict ring plus the channel's LLM usage stats.
+type SecurityAdjudicationFeed struct {
+	Adjudications []SecurityAdjudication    `json:"adjudications"`
+	Stats         SecurityAdjudicationStats `json:"stats"`
+}
+
+// SecurityAdjudication is one recent AI second-opinion verdict from the
+// bounded in-memory ring (newest first). Verdict is high | low | error |
+// skipped; Reason is the scrubbed, length-capped model explanation. Aliased
+// to the adjudicate package's Result — same owner, same JSON shape.
+type SecurityAdjudication = adjudicate.Result
 
 // ErrGuardScannerUnavailable is returned through the admin LocateGuardHits
 // port when the current generation has no guard scanner (guard disabled or
@@ -500,6 +548,8 @@ type ReadAPI interface {
 	// request body (on-demand, nothing persisted). kind must be secret or
 	// path; names are the audit record's pattern/category names.
 	SecurityExplain(requestID, kind string, names []string) (SecurityExplainResult, error)
+	SecurityBlocks() []SecurityBlock
+	SecurityAdjudications() SecurityAdjudicationFeed
 	ConfigDocument() (ConfigDocument, error)
 	// ModelsDocument projects the startup protocol probe's per-provider model
 	// capability matrix (internal/runtime/wirecap ModelStore snapshot).
@@ -522,6 +572,8 @@ type CommandAPI interface {
 	FreezeHealth(provider string) ([]string, error)
 	SetPin(route, provider string, ttl time.Duration) (Pin, bool)
 	ClearPin(route string) bool
+	// SecurityUnblock removes one persisted guard-adjudication session block.
+	SecurityUnblock(sessionID string) error
 	SaveConfig([]byte) error
 	// ValidateConfig lints candidate config bytes without persisting anything;
 	// an empty result means valid.

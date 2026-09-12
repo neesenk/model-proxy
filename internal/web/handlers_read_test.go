@@ -25,27 +25,30 @@ import (
 )
 
 type readAPIStub struct {
-	dashboard  appapi.Dashboard
-	logFile    string
-	logDir     string
-	queries    appapi.RequestLogQueries
-	accounts   []appapi.ProviderAccounts
-	tokens     []appapi.TokenUsage
-	agentRows  []appapi.AgentUsage
-	tokensFrom int64
-	agentsFrom int64
-	statsSince int64
-	stats      func(appapi.StatsQuery) ([]observestats.Bucket, error)
-	agents     func(appapi.AgentStatsQuery) ([]observestats.AgentBucket, error)
-	analytics  func(appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error)
-	pricing    appapi.PricingSnapshot
-	fusion     func(string, time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
-	pins       []appapi.Pin
-	security   func(appapi.SecurityQuery) (appapi.SecurityResult, error)
-	explain    func(string, string, []string) (appapi.SecurityExplainResult, error)
-	config     func() (appapi.ConfigDocument, error)
-	presets    []presets.Preset
-	models     appapi.ModelsDocument
+	dashboard         appapi.Dashboard
+	logFile           string
+	logDir            string
+	queries           appapi.RequestLogQueries
+	accounts          []appapi.ProviderAccounts
+	tokens            []appapi.TokenUsage
+	agentRows         []appapi.AgentUsage
+	tokensFrom        int64
+	agentsFrom        int64
+	statsSince        int64
+	stats             func(appapi.StatsQuery) ([]observestats.Bucket, error)
+	agents            func(appapi.AgentStatsQuery) ([]observestats.AgentBucket, error)
+	analytics         func(appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error)
+	pricing           appapi.PricingSnapshot
+	fusion            func(string, time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
+	pins              []appapi.Pin
+	security          func(appapi.SecurityQuery) (appapi.SecurityResult, error)
+	explain           func(string, string, []string) (appapi.SecurityExplainResult, error)
+	blocks            []appapi.SecurityBlock
+	recent            []appapi.SecurityAdjudication
+	adjudicationStats appapi.SecurityAdjudicationStats
+	config            func() (appapi.ConfigDocument, error)
+	presets           []presets.Preset
+	models            appapi.ModelsDocument
 }
 
 func (r *readAPIStub) Dashboard(time.Time) appapi.Dashboard { return r.dashboard }
@@ -117,11 +120,29 @@ func (r *readAPIStub) SecurityExplain(requestID, kind string, names []string) (a
 	}
 	return r.explain(requestID, kind, names)
 }
+func (r *readAPIStub) SecurityBlocks() []appapi.SecurityBlock {
+	if r.blocks == nil {
+		return []appapi.SecurityBlock{}
+	}
+	return r.blocks
+}
+func (r *readAPIStub) SecurityAdjudications() appapi.SecurityAdjudicationFeed {
+	recent := r.recent
+	if recent == nil {
+		recent = []appapi.SecurityAdjudication{}
+	}
+	return appapi.SecurityAdjudicationFeed{Adjudications: recent, Stats: r.adjudicationStats}
+}
 func (r *readAPIStub) ConfigDocument() (appapi.ConfigDocument, error) {
 	if r.config == nil {
 		return appapi.ConfigDocument{}, nil
 	}
 	return r.config()
+}
+
+func newReadServerWithCommands(t *testing.T, reads *readAPIStub, commands *commandFake) *Server {
+	t.Helper()
+	return newReadServer(t, reads, func(o *Options) { o.Commands = commands })
 }
 
 func newReadServer(t *testing.T, reads *readAPIStub, opts ...func(*Options)) *Server {
@@ -1423,4 +1444,80 @@ func (r *readAPIStub) ModelsDocument() appapi.ModelsDocument {
 		return appapi.ModelsDocument{Providers: map[string]appapi.ProviderModelCaps{}}
 	}
 	return r.models
+}
+
+// TestSecurityBlocksAndAdjudications covers the guard AI-adjudication
+// surfaces: the blocks list, the recent-verdict ring, and the DELETE unblock
+// route (404 for an unknown session, 200 + cleared state for a blocked one).
+func TestSecurityBlocksAndAdjudications(t *testing.T) {
+	reads := &readAPIStub{}
+	commands := &commandFake{}
+	s := newReadServerWithCommands(t, reads, commands)
+
+	ok := serveRead(t, s, http.MethodGet, "/api/security/adjudications")
+	var adj struct {
+		Adjudications []appapi.SecurityAdjudication    `json:"adjudications"`
+		Stats         appapi.SecurityAdjudicationStats `json:"stats"`
+	}
+	decodeReadJSON(t, ok, &adj)
+	if ok.Code != http.StatusOK || len(adj.Adjudications) != 0 {
+		t.Fatalf("adjudications = (%d, %+v), want 200 + empty list", ok.Code, adj.Adjudications)
+	}
+	if adj.Stats.Calls != 0 {
+		t.Fatalf("stats = %+v, want zero-valued when no port data", adj.Stats)
+	}
+	// The LLM usage stats ride the same payload.
+	reads.adjudicationStats = appapi.SecurityAdjudicationStats{Calls: 9, InputTokens: 100, OutputTokens: 5}
+	ok = serveRead(t, s, http.MethodGet, "/api/security/adjudications")
+	decodeReadJSON(t, ok, &adj)
+	if ok.Code != http.StatusOK || adj.Stats.Calls != 9 || adj.Stats.InputTokens != 100 || adj.Stats.OutputTokens != 5 {
+		t.Fatalf("stats passthrough = (%d, %+v)", ok.Code, adj.Stats)
+	}
+
+	// DELETE on a session the fake does not know → the admin 404 error maps
+	// through writePortErr (HTTPError status).
+	commands.unblock = func(sid string) error {
+		return &appapi.HTTPError{Status: http.StatusNotFound, Message: "session " + sid + " is not blocked"}
+	}
+	missing := serveRead(t, s, http.MethodDelete, "/api/security/blocks/nope")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("unknown unblock status = %d, want 404", missing.Code)
+	}
+
+	// A blocked session lists and unblocks. (Field assignment instead of a
+	// composite literal: SecurityBlock embeds adjudicate.Block, and promoted
+	// fields are not allowed in literals.)
+	blocked := appapi.SecurityBlock{SessionID: "s-1"}
+	blocked.Kind, blocked.Rule, blocked.Ts = "secret", "jwt", 7
+	reads.blocks = []appapi.SecurityBlock{blocked}
+	commands.unblock = func(sid string) error {
+		if sid != "s-1" {
+			t.Errorf("unblock session = %q, want s-1", sid)
+		}
+		reads.blocks = nil
+		return nil
+	}
+	ok = serveRead(t, s, http.MethodGet, "/api/security/blocks")
+	var list struct {
+		Blocks []appapi.SecurityBlock `json:"blocks"`
+	}
+	decodeReadJSON(t, ok, &list)
+	if ok.Code != http.StatusOK || len(list.Blocks) != 1 || list.Blocks[0].SessionID != "s-1" {
+		t.Fatalf("blocks = (%d, %+v)", ok.Code, list.Blocks)
+	}
+	ok = serveRead(t, s, http.MethodDelete, "/api/security/blocks/s-1")
+	var unblocked struct {
+		Status string `json:"status"`
+	}
+	decodeReadJSON(t, ok, &unblocked)
+	if ok.Code != http.StatusOK || unblocked.Status != "unblocked" {
+		t.Fatalf("unblock = (%d, %q)", ok.Code, unblocked.Status)
+	}
+	if len(reads.blocks) != 0 {
+		t.Fatalf("unblock did not clear the table: %+v", reads.blocks)
+	}
+	// Empty session id in the path is a client error, not a port call.
+	if bad := serveRead(t, s, http.MethodDelete, "/api/security/blocks/"); bad.Code != http.StatusBadRequest {
+		t.Fatalf("empty-id unblock status = %d, want 400", bad.Code)
+	}
 }

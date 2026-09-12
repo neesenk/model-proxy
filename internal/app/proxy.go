@@ -4,6 +4,7 @@ package app
 import (
 	"fmt"
 	"model-proxy/internal/accounts"
+	"model-proxy/internal/adjudicate"
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
 	"model-proxy/internal/fusion"
@@ -88,6 +89,7 @@ type processServices struct {
 	reqLogIndex        *requestlog.Indexer           // tailing SQLite index over the request log (web read path); nil = request log disabled or index open failed (reads fall back to directory scans)
 	reqLogIndexStarted bool                          // lifecycle owns the indexer loop/shutdown only when started alongside reqLog
 	sessionScan        *guardsession.Store           // split-exfiltration session windows; process-lifetime (survives reload like metrics), never serialized or logged
+	adjudication       *adjudicate.Service           // AI second-opinion channel for guard pattern hits; process-lifetime, persisted verdict cache + session blocks
 	responsesState     *protocol.ResponsesStateStore // previous_response_id replay for Responses clients bridged to stateless backends
 	events             *observeevents.Hub            // live request monitor fan-out hub (SSE /api/events); always non-nil
 	fusionReg          *fusion.Registry              // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
@@ -224,6 +226,12 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// (like p.metrics below), NOT reload-owned — reload must not wipe in-flight
 	// session context. Never logged or persisted (see internal/guard/session).
 	p.sessionScan = guardsession.NewStore()
+	// AI second-opinion channel for guard pattern hits: process-lifetime
+	// (workers idle while guard.adjudicate is off; persisted session blocks
+	// stay enforced regardless). State derives from the injected state path
+	// (same directory as quota/cache state) so every Proxy owns isolated
+	// adjudication files. Drained in Close before the audit log.
+	p.startAdjudication(adjudicationStateDir(qpath))
 	// The OAuth subset is tracked separately so the refresh loop can re-sync it
 	// (OAuth tokens rotate in place during serve) without re-running a full
 	// BuildProviders pass; the pool subset is the stable base of every rebuild.

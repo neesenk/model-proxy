@@ -409,7 +409,13 @@ func (p *recordingProv) Refresh() error {
 // newProxyWithStatic builds a Proxy whose providers are all testProv with the
 // given keys, so tests don't hit real auth files.
 func newProxyWithStatic(t testing.TB, cfg *Config, keys map[string]string) *Proxy {
-	p := newTestProxy(t, cfg)
+	return newProxyWithStaticAt(t, cfg, filepath.Join(t.TempDir(), "quota_state.json"), keys)
+}
+
+// newProxyWithStaticAt is newProxyWithStatic with an explicit state path, for
+// tests that assert on state persisted next to quota_state.json.
+func newProxyWithStaticAt(t testing.TB, cfg *Config, qpath string, keys map[string]string) *Proxy {
+	p := newTestProxyAt(t, cfg, qpath)
 	for name, key := range keys {
 		p.providers[name] = &testProv{key: key}
 	}

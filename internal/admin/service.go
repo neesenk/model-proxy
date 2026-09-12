@@ -137,6 +137,15 @@ type Ports struct {
 	// composition root, which owns the current-generation guard scanner;
 	// internal/admin must not import internal/guard (archtest DAG).
 	LocateGuardHits func(body []byte, kind string, names []string) ([]appapi.SecurityMatch, error)
+	// AdjudicationBlocks snapshots the persisted guard-adjudication session
+	// blocks (nil = channel absent; the service reports an empty list).
+	AdjudicationBlocks func() []appapi.SecurityBlock
+	// AdjudicationUnblock removes one session block (false = not blocked).
+	AdjudicationUnblock func(sessionID string) bool
+	// AdjudicationRecent snapshots the recent-verdict ring, newest first.
+	AdjudicationRecent func() []appapi.SecurityAdjudication
+	// AdjudicationStats reports the channel's LLM usage (calls + tokens).
+	AdjudicationStats func() appapi.SecurityAdjudicationStats
 	// ModelRefreshRuntime captures config, pooled implementation and probe policy
 	// together. ModelCapsReplace only accepts the captured endpoint fingerprint.
 	ModelRefreshRuntime func(name string) ModelRefreshRuntime

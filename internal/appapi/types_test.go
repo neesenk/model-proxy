@@ -104,7 +104,12 @@ func (fakeCommands) BeginLogin(context.Context, string) (LoginStart, error) {
 	return LoginStart{}, nil
 }
 
-func (fakeReads) Presets() []presets.Preset { return nil }
+func (fakeReads) Presets() []presets.Preset       { return nil }
+func (fakeReads) SecurityBlocks() []SecurityBlock { return nil }
+func (fakeReads) SecurityAdjudications() SecurityAdjudicationFeed {
+	return SecurityAdjudicationFeed{Adjudications: []SecurityAdjudication{}}
+}
+func (fakeCommands) SecurityUnblock(string) error { return nil }
 
 func (fakeCommands) AddPreset(string) ([]string, string, error) { return nil, "", nil }
 func (fakeCommands) RefreshModels(context.Context, string) (ModelsRefreshResult, error) {

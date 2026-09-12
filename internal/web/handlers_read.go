@@ -497,3 +497,32 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"yaml": d.YAML, "summary": d.Summary, "provider_models": d.ProviderModels, "provider_meta": d.ProviderMeta, "routes": d.Routes, "settings": d.Settings})
 }
+
+// handleSecurityBlocks serves GET /api/security/blocks: the persisted
+// guard-adjudication session blocks (high verdicts), newest first.
+func (s *Server) handleSecurityBlocks(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"blocks": s.reads.SecurityBlocks()})
+}
+
+// handleSecurityAdjudications serves GET /api/security/adjudications: the
+// recent AI second-opinion verdicts (bounded ring, newest first, including
+// suppressed low verdicts) plus the channel's LLM usage stats.
+func (s *Server) handleSecurityAdjudications(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.reads.SecurityAdjudications())
+}
+
+// handleSecurityUnblock serves DELETE /api/security/blocks/<session>: clears
+// one persisted session block; the session's requests are admitted again
+// immediately.
+func (s *Server) handleSecurityUnblock(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimPrefix(r.URL.Path, "/api/security/blocks/")
+	if sessionID == "" || strings.Contains(sessionID, "/") {
+		writeJSONErr(w, http.StatusBadRequest, "session id is required")
+		return
+	}
+	if err := s.commands.SecurityUnblock(sessionID); err != nil {
+		writePortErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "unblocked", "session_id": sessionID})
+}

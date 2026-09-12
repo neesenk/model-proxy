@@ -44,7 +44,12 @@ type Record struct {
 	Exposed   string   `json:"exposed,omitempty"`
 	Names     []string `json:"names,omitempty"`
 	Action    string   `json:"action,omitempty"`
-	Detail    string   `json:"detail,omitempty"`
+	// Verdict is the AI second-opinion outcome for records from (or
+	// fail-opened out of) guard.adjudicate: "high" | "error" | "skipped".
+	// Empty = the classic immediate record. Like every Record field it
+	// carries classification labels only, never matched content.
+	Verdict string `json:"verdict,omitempty"`
+	Detail  string `json:"detail,omitempty"`
 }
 
 // Options carries resolved persistence policy. MaxBytes <= 0 selects

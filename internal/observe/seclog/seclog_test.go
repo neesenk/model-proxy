@@ -423,7 +423,7 @@ func TestRecordSchemaHasNoSecretFields(t *testing.T) {
 		names = append(names, strings.Split(tag, ",")[0])
 	}
 	sort.Strings(names)
-	want := []string{"action", "agent", "detail", "exposed", "kind", "names", "protocol", "request_id", "ts"}
+	want := []string{"action", "agent", "detail", "exposed", "kind", "names", "protocol", "request_id", "ts", "verdict"}
 	if !reflect.DeepEqual(names, want) {
 		t.Errorf("record json fields = %v, want exactly %v", names, want)
 	}

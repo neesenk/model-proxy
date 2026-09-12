@@ -1,0 +1,409 @@
+package forward
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/observe/seclog"
+)
+
+// fakeAdjudicator captures enqueued jobs and scripts the session-block
+// answers (the app-side adapter is covered in internal/app).
+type fakeAdjudicator struct {
+	mu      sync.Mutex
+	jobs    []GuardAdjudication
+	enqueue func() bool // script: nil = accept
+	blocked map[string][2]string
+}
+
+func newFakeAdjudicator() *fakeAdjudicator {
+	return &fakeAdjudicator{blocked: map[string][2]string{}, enqueue: func() bool { return true }}
+}
+
+func (f *fakeAdjudicator) Enqueue(a GuardAdjudication) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.enqueue() {
+		return false
+	}
+	f.jobs = append(f.jobs, a)
+	return true
+}
+
+func (f *fakeAdjudicator) SessionBlocked(sessionID string) (string, string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.blocked[sessionID]
+	return v[0], v[1], ok
+}
+
+func (f *fakeAdjudicator) captured() []GuardAdjudication {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]GuardAdjudication(nil), f.jobs...)
+}
+
+// TestSplitPatternSecrets pins the known-secret/pattern partition that
+// decides which hits defer to adjudication.
+func TestSplitPatternSecrets(t *testing.T) {
+	pattern, known := splitPatternSecrets([]string{"known_secret", "openai_api_key", "known_secret_encoded", "jwt"})
+	if len(known) != 2 || known[0] != "known_secret" || known[1] != "known_secret_encoded" {
+		t.Errorf("known = %v", known)
+	}
+	if len(pattern) != 2 || pattern[0] != "openai_api_key" || pattern[1] != "jwt" {
+		t.Errorf("pattern = %v", pattern)
+	}
+}
+
+// TestBuildAdjudications_SecretSpans: one job per DISTINCT matched span,
+// capped; the hit stays raw while a known secret inside the context window
+// is masked.
+func TestBuildAdjudications_SecretSpans(t *testing.T) {
+	sc := guardScanner(t, nil) // carries guardTestSecret as a known secret
+	dummy := "sk-capture-dummy-not-a-real-key"
+	body := []byte(secretBody(dummy + " plus " + dummy + " and known " + guardTestSecret))
+	meta := GuardAdjudication{RequestID: "r1", SessionID: "s1", Action: "log"}
+	jobs, leftover := buildAdjudications(sc, body, []string{"openai_api_key"}, AdjudicationKindSecret, false, 64, meta)
+	if len(jobs) != 1 {
+		t.Fatalf("jobs = %d, want 1 (identical spans dedup)", len(jobs))
+	}
+	if len(leftover) != 0 {
+		t.Errorf("leftover = %v, want none (the name produced a job)", leftover)
+	}
+	j := jobs[0]
+	if j.Rule != "openai_api_key" || j.Kind != AdjudicationKindSecret {
+		t.Errorf("job rule/kind = %s/%s", j.Rule, j.Kind)
+	}
+	if j.Hit != dummy {
+		t.Errorf("hit = %q, want the raw span", j.Hit)
+	}
+	window := j.Pre + j.Hit + j.Post
+	if strings.Contains(window, guardTestSecret) {
+		t.Errorf("context window leaked the known secret: %q", window)
+	}
+	if !strings.Contains(window, "…") && j.Pre+j.Post != "" {
+		t.Errorf("expected a mask marker in the context window: %q", window)
+	}
+	if j.RequestID != "r1" || j.SessionID != "s1" || j.Action != "log" {
+		t.Errorf("meta not carried: %+v", j)
+	}
+}
+
+// TestBuildAdjudications_StrongPathsOnly: weak path occurrences never build
+// a job; strong (tool-call side) ones do.
+func TestBuildAdjudications_StrongPathsOnly(t *testing.T) {
+	sc := guardScanner(t, nil)
+	strong := `{"model":"m","messages":[{"role":"user","content":"read"},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"bash","input":{"command":"cat ~/.ssh/id_rsa"}}]}]}`
+	weak := secretBody("the docs mention ~/.ssh in prose")
+	meta := GuardAdjudication{RequestID: "r1"}
+	if jobs, leftover := buildAdjudications(sc, []byte(weak), []string{"ssh"}, AdjudicationKindPath, true, 64, meta); len(jobs) != 0 {
+		t.Errorf("weak body built %d jobs, want 0", len(jobs))
+	} else if len(leftover) != 0 {
+		t.Errorf("weak body produced leftover %v, want none (weak hits are ignored, not fail-opened)", leftover)
+	}
+	jobs, leftover := buildAdjudications(sc, []byte(strong), []string{"ssh"}, AdjudicationKindPath, true, 64, meta)
+	// "~/.ssh" and "id_rsa" are two distinct literals of the same category.
+	if len(jobs) != 2 {
+		t.Fatalf("strong body jobs = %d, want 2 (one per distinct literal)", len(jobs))
+	}
+	if len(leftover) != 0 {
+		t.Errorf("strong body leftover = %v, want none", leftover)
+	}
+	for _, j := range jobs {
+		if j.Rule != "ssh" || j.Kind != AdjudicationKindPath {
+			t.Errorf("job = %+v, want ssh path job", j)
+		}
+		if !strings.Contains(j.Pre+j.Hit+j.Post, "/.ssh") && !strings.Contains(j.Pre+j.Hit+j.Post, "id_rsa") {
+			t.Errorf("strong job context lost the path: %+v", j)
+		}
+	}
+}
+
+// TestServeGuardAdjudicationDefersPatternHits: with the channel on, a
+// pattern-table secret hit produces NO immediate guard event/audit — it is
+// enqueued; the known-secret hit on the same request still emits
+// immediately.
+func TestServeGuardAdjudicationDefersPatternHits(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("ok"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	h.svc.Adjudicator = adj
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off",
+		Adjudicate: guardAdjudicateOn()}))
+	snap.Guard = guardScanner(t, nil)
+
+	dummy := "sk-capture-dummy-not-a-real-key"
+	w := h.serve(snap, "openai", "/v1/chat/completions", secretBody(dummy+" known "+guardTestSecret), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (deferred channel never blocks synchronously)", w.Code)
+	}
+	jobs := adj.captured()
+	if len(jobs) != 1 || jobs[0].Rule != "openai_api_key" {
+		t.Fatalf("jobs = %+v, want one deferred openai_api_key", jobs)
+	}
+	patternDeferred := false
+	knownEmitted := false
+	for _, e := range h.events.Snapshot() {
+		if e.Type != "guard" {
+			continue
+		}
+		if strings.Contains(e.Detail, "openai_api_key") {
+			patternDeferred = true
+		}
+		if strings.Contains(e.Detail, "known_secret") {
+			knownEmitted = true
+		}
+	}
+	if patternDeferred {
+		t.Error("pattern hit emitted an immediate event under adjudication")
+	}
+	if !knownEmitted {
+		t.Error("known-secret hit must keep the classic immediate emit")
+	}
+}
+
+// TestServeGuardAdjudicationFailOpen: enqueue refusal (queue full) falls
+// back to the classic immediate emit.
+func TestServeGuardAdjudicationFailOpen(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("ok"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	adj.enqueue = func() bool { return false }
+	h.svc.Adjudicator = adj
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off",
+		Adjudicate: guardAdjudicateOn()}))
+	snap.Guard = guardScanner(t, nil)
+
+	w := h.serve(snap, "openai", "/v1/chat/completions", secretBody("sk-capture-dummy-not-a-real-key"), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	for _, e := range h.events.Snapshot() {
+		if e.Type == "guard" && strings.Contains(e.Detail, "openai_api_key") {
+			return // classic emit happened
+		}
+	}
+	t.Fatal("fail-open did not emit the classic immediate record")
+}
+
+// TestServeGuardAdjudicationBlockedSession: a blocked session 400s before
+// scanning, with the unblock hint.
+func TestServeGuardAdjudicationBlockedSession(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("ok"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	adj.blocked["s-77"] = [2]string{"jwt", "req-9"}
+	h.svc.Adjudicator = adj
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off"}))
+	snap.Guard = guardScanner(t, nil)
+
+	w := h.serve(snap, "openai", "/v1/chat/completions", secretBody("clean"), map[string]string{"x-claude-code-session-id": "s-77"})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "guard unblock s-77") || !strings.Contains(w.Body.String(), "rule=jwt") {
+		t.Errorf("block message = %q, want rule + unblock hint", w.Body.String())
+	}
+	// The upstream must never see the request.
+	if up.hits() != 0 {
+		t.Errorf("upstream saw %d requests, want 0", up.hits())
+	}
+}
+
+// TestServeGuardAdjudicationPathsDeferred: strong path hits defer too (the
+// user-confirmed scope), weak ones stay ignored.
+func TestServeGuardAdjudicationPathsDeferred(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("ok"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	h.svc.Adjudicator = adj
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "off", Paths: "log",
+		Adjudicate: guardAdjudicateOn()}))
+	snap.Guard = guardScanner(t, nil)
+
+	body := `{"model":"m","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"bash","input":{"command":"cat ~/.ssh/id_rsa"}}]}]}`
+	w := h.serve(snap, "openai", "/v1/chat/completions", body, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	jobs := adj.captured()
+	if len(jobs) < 1 {
+		t.Fatalf("jobs = %+v, want deferred ssh path job(s)", jobs)
+	}
+	for _, j := range jobs {
+		if j.Rule != "ssh" || j.Kind != AdjudicationKindPath {
+			t.Fatalf("jobs = %+v, want only ssh path jobs", jobs)
+		}
+	}
+	for _, e := range h.events.Snapshot() {
+		if e.Type == "guard" && strings.Contains(e.Detail, "ssh") {
+			t.Error("strong path hit emitted an immediate event under adjudication")
+		}
+	}
+}
+
+// guardAdjudicateOn builds the minimal enabled AdjudicateConfig for tests.
+func guardAdjudicateOn() configdomain.AdjudicateConfig {
+	return configdomain.AdjudicateConfig{Enabled: true, Model: "judge", BlockSession: true}
+}
+
+// distinctDummyKeys builds n distinct rule-table-shaped keys (no key is a
+// prefix of another, so Locate reports n separate spans of one name).
+func distinctDummyKeys(n int) []string {
+	keys := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		keys = append(keys, fmt.Sprintf("sk-capture-dummy-not-a-real-key-%02d", i))
+	}
+	return keys
+}
+
+// TestBuildAdjudications_CapOverflowFailsOpen pins the documented contract:
+// spans past maxAdjudicationsPerRequest must NOT vanish — their names come
+// back as leftover so the caller gives them the classic immediate record.
+func TestBuildAdjudications_CapOverflowFailsOpen(t *testing.T) {
+	sc := guardScanner(t, nil)
+	keys := distinctDummyKeys(maxAdjudicationsPerRequest + 2)
+	body := []byte(secretBody(strings.Join(keys, " ")))
+	jobs, leftover := buildAdjudications(sc, body, []string{"openai_api_key"}, AdjudicationKindSecret, false, 64, GuardAdjudication{})
+	if len(jobs) != maxAdjudicationsPerRequest {
+		t.Fatalf("jobs = %d, want %d (per-request cap)", len(jobs), maxAdjudicationsPerRequest)
+	}
+	if len(leftover) != 1 || leftover[0] != "openai_api_key" {
+		t.Fatalf("leftover = %v, want [openai_api_key] (overflow fails open)", leftover)
+	}
+	// Same BYTES under two path categories (builtin ssh literal "id_rsa" and
+	// a custom path with the same literal): the second occurrence set dedups
+	// onto the first name's job, and the deduped name still fails open —
+	// its content was never adjudicated under that rule.
+	dupSc := guardScanner(t, []string{"id_rsa"})
+	dupBody := []byte(`{"model":"m","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"bash","input":{"command":"cat id_rsa id_rsa"}}]}]}`)
+	jobs, leftover = buildAdjudications(dupSc, dupBody, []string{"ssh", "custom_path"}, AdjudicationKindPath, true, 64, GuardAdjudication{})
+	if len(jobs) != 1 {
+		t.Fatalf("jobs = %+v, want exactly one (identical bytes dedup across names)", jobs)
+	}
+	if len(leftover) != 1 || leftover[0] == jobs[0].Rule || (leftover[0] != "ssh" && leftover[0] != "custom_path") {
+		t.Fatalf("leftover = %v, want the other name (deduped name fails open)", leftover)
+	}
+}
+
+// TestServeGuardAdjudicationCapOverflowFailsOpen: a body stuffed past the
+// cap keeps the classic immediate emit for the overflowing name — nothing
+// disappears from the operator surfaces.
+func TestServeGuardAdjudicationCapOverflowFailsOpen(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("ok"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	h.svc.Adjudicator = adj
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off",
+		Adjudicate: guardAdjudicateOn()}))
+	snap.Guard = guardScanner(t, nil)
+
+	body := secretBody(strings.Join(distinctDummyKeys(maxAdjudicationsPerRequest+2), " "))
+	audit := serveCollectingAudit(t, h, &snap, body, nil)
+	if len(adj.captured()) != maxAdjudicationsPerRequest {
+		t.Fatalf("deferred jobs = %d, want %d", len(adj.captured()), maxAdjudicationsPerRequest)
+	}
+	found := false
+	for _, r := range audit {
+		if r.Kind == seclog.KindSecret && containsName(r.Names, "openai_api_key") {
+			if r.Verdict != "skipped" {
+				t.Errorf("overflow record verdict = %q, want skipped", r.Verdict)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("overflow past the cap wrote no classic audit record (silent drop)")
+	}
+}
+
+// TestServeGuardAdjudicationKnownOnlyKeepsClassicVerdict pins the verdict
+// labeling: known-secret exact-channel hits are never adjudicated, so their
+// classic immediate record must carry an EMPTY verdict — not "skipped".
+func TestServeGuardAdjudicationKnownOnlyKeepsClassicVerdict(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("ok"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	h.svc.Adjudicator = adj
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off",
+		Adjudicate: guardAdjudicateOn()}))
+	snap.Guard = guardScanner(t, nil)
+
+	audit := serveCollectingAudit(t, h, &snap, secretBody("token "+guardTestSecret), nil)
+	if n := len(adj.captured()); n != 0 {
+		t.Fatalf("known-secret-only body enqueued %d jobs, want 0", n)
+	}
+	found := false
+	for _, r := range audit {
+		if containsName(r.Names, "known_secret") {
+			if r.Verdict != "" {
+				t.Errorf("classic known-secret record verdict = %q, want empty", r.Verdict)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("known-secret hit wrote no audit record")
+	}
+}
+
+// serveCollectingAudit runs one request through the harness with a real
+// (temp-dir) seclog logger on the snapshot and returns the flushed records.
+func serveCollectingAudit(t *testing.T, h *harness, snap *Snapshot, body string, headers map[string]string) []seclog.Record {
+	t.Helper()
+	logger, err := seclog.New(t.TempDir(), seclog.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap.SecLog = logger
+	go logger.Run()
+	w := h.serve(*snap, "openai", "/v1/chat/completions", body, headers)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	logger.Shutdown()
+	return readAuditRecords(t, logger.Directory())
+}
+
+// readAuditRecords parses every JSONL record the logger flushed to dir.
+func readAuditRecords(t *testing.T, dir string) []seclog.Record {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []seclog.Record
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if line == "" {
+				continue
+			}
+			var r seclog.Record
+			if json.Unmarshal([]byte(line), &r) != nil {
+				continue // torn tail line
+			}
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func containsName(names []string, want string) bool {
+	for _, n := range names {
+		if n == want {
+			return true
+		}
+	}
+	return false
+}

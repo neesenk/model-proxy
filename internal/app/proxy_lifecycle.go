@@ -9,6 +9,7 @@ import (
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
 	"net/http"
+	"time"
 )
 
 // startRuntimeServices initializes and starts process-owned optional services.
@@ -69,6 +70,13 @@ func (p *Proxy) refreshCatalogAsync() {
 func (p *Proxy) closeRuntimeServices() {
 	p.lifecycle.BeginStop()
 	p.lifecycle.WaitBeforeLogDrain()
+	// Stop the AI adjudication workers BEFORE the audit logger drains:
+	// verdict-side audit records must not enqueue into a drained logger
+	// (jobs past the drain deadline are the documented shutdown-loss window,
+	// same direction as the seclog swap window).
+	if p.adjudication != nil {
+		p.adjudication.Close(5 * time.Second)
+	}
 	// Drain the security audit log before the request log: both must finish
 	// writing before Close returns, and no producer may outlive either. Only
 	// the CURRENT generation's logger is drained here — reconcileSecLog already

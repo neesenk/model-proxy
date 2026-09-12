@@ -31,6 +31,11 @@ type Services struct {
 	ResponsesState *protocol.ResponsesStateStore // previous_response_id replay; nil = off
 	FusionReg      *fusion.Registry              // fusion orchestration observability
 	ReqLog         *requestlog.Logger            // per-request access log; nil = disabled
+	// Adjudicator is the process-lifetime AI second-opinion port for guard
+	// pattern hits (nil = channel absent; the config gate lives in the
+	// request snapshot's GuardConfig). Also enforces persisted high-verdict
+	// session blocks.
+	Adjudicator Adjudicator
 	// SessionHeaders is the ordered client session-header allowlist
 	// (request_log.session_headers) used for the request log and live events.
 	SessionHeaders []string

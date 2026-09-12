@@ -302,7 +302,11 @@ func (p *Proxy) adminPorts(
 			runtime := p.SnapshotRuntime()
 			return runtime.Cfg, runtime.Providers
 		},
-		LocateGuardHits: p.locateGuardHits,
+		LocateGuardHits:     p.locateGuardHits,
+		AdjudicationBlocks:  p.adjudicationBlocks,
+		AdjudicationUnblock: p.adjudicationUnblock,
+		AdjudicationRecent:  p.adjudicationRecent,
+		AdjudicationStats:   p.adjudicationStats,
 		ModelRefreshRuntime: func(name string) admin.ModelRefreshRuntime {
 			// Same parent-or-first-pooled-virtual resolution as the model-caps
 			// probe pass: the model list is per-upstream, not per-account.

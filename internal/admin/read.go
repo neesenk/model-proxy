@@ -514,6 +514,7 @@ func (s *Service) Security(query appapi.SecurityQuery) (appapi.SecurityResult, e
 			Exposed:   record.Exposed,
 			Names:     append([]string(nil), record.Names...),
 			Action:    record.Action,
+			Verdict:   record.Verdict,
 			Detail:    record.Detail,
 		})
 	}
@@ -604,7 +605,79 @@ func (s *Service) SecurityExplain(requestID, kind string, names []string) (appap
 			result.Status = appapi.SecurityExplainRedacted
 		}
 	}
+	result.Adjudications = s.adjudicationsFor(requestID, kind, names)
 	return result, nil
+}
+
+// adjudicationsFor collects the recorded AI second-opinion verdicts for one
+// explained request: the audit log's verdict records are the durable source
+// (high/low/error/skipped all land there, once per unique content), and the
+// live ring — when still resident — enriches them with model and cached
+// attribution. The analyze view renders the LLM judgment next to the located
+// matches.
+func (s *Service) adjudicationsFor(requestID, kind string, names []string) []appapi.SecurityExplainAdjudication {
+	if requestID == "" || len(names) == 0 {
+		return nil
+	}
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	type key struct{ rule, verdict, reason string }
+	seen := map[key]int{}
+	var out []appapi.SecurityExplainAdjudication
+	add := func(a appapi.SecurityExplainAdjudication) {
+		k := key{a.Rule, a.Verdict, a.Reason}
+		if i, ok := seen[k]; ok {
+			// Prefer the ring-enriched entry (model/cached attribution).
+			if a.Model != "" {
+				out[i] = a
+			}
+			return
+		}
+		seen[k] = len(out)
+		out = append(out, a)
+	}
+	if s.ports.AdjudicationRecent != nil {
+		for _, r := range s.ports.AdjudicationRecent() {
+			if r.RequestID != requestID || r.Kind != kind || !want[r.Rule] {
+				continue
+			}
+			add(appapi.SecurityExplainAdjudication{
+				Rule: r.Rule, Verdict: r.Verdict, Reason: r.Reason,
+				Model: r.Model, Ts: r.Ts, Cached: r.Cached,
+			})
+		}
+	}
+	// The audit-log enrichment is best-effort: SecurityExplain is also
+	// served with a partial port set (no Config), in which case the ring —
+	// when wired — is the only source (fail-soft, same convention as the
+	// other adjudication read surfaces).
+	if s.ports.Config != nil {
+		cfg := s.ports.Config()
+		if cfg != nil && cfg.Guard.AuditEnabled() {
+			dir := filepath.Dir(cfg.Guard.AuditPathValue(accounts.HomeDir()))
+			result, err := seclog.Query(dir, seclog.Filter{Kind: kind, Limit: 500})
+			if err == nil {
+				for _, rec := range result.Records {
+					if rec.RequestID != requestID || rec.Verdict == "" {
+						continue
+					}
+					for _, n := range rec.Names {
+						if !want[n] {
+							continue
+						}
+						add(appapi.SecurityExplainAdjudication{
+							Rule: n, Verdict: rec.Verdict, Reason: rec.Detail, Ts: rec.Ts,
+						})
+						break
+					}
+				}
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Ts > out[j].Ts })
+	return out
 }
 
 // onlyFragmentedHits reports whether every requested name is the

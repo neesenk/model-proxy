@@ -56,6 +56,10 @@ func (testReadAPI) Security(appapi.SecurityQuery) (appapi.SecurityResult, error)
 func (testReadAPI) SecurityExplain(string, string, []string) (appapi.SecurityExplainResult, error) {
 	return appapi.SecurityExplainResult{}, nil
 }
+func (testReadAPI) SecurityBlocks() []appapi.SecurityBlock { return nil }
+func (testReadAPI) SecurityAdjudications() appapi.SecurityAdjudicationFeed {
+	return appapi.SecurityAdjudicationFeed{Adjudications: []appapi.SecurityAdjudication{}}
+}
 func (testReadAPI) ConfigDocument() (appapi.ConfigDocument, error) {
 	return appapi.ConfigDocument{}, nil
 }
@@ -72,8 +76,9 @@ func (testCommandAPI) FreezeHealth(string) ([]string, error)     { return nil, n
 func (testCommandAPI) SetPin(string, string, time.Duration) (appapi.Pin, bool) {
 	return appapi.Pin{}, true
 }
-func (testCommandAPI) ClearPin(string) bool    { return true }
-func (testCommandAPI) SaveConfig([]byte) error { return nil }
+func (testCommandAPI) ClearPin(string) bool         { return true }
+func (testCommandAPI) SecurityUnblock(string) error { return nil }
+func (testCommandAPI) SaveConfig([]byte) error      { return nil }
 func (testCommandAPI) ValidateConfig([]byte) []appapi.ValidationIssue {
 	return nil
 }

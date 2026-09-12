@@ -668,5 +668,5 @@ func TestEvaluateRequestGuard(t *testing.T) {
 // TestAuditGuardHitNilLogger: nil logger (audit off for the generation) is a
 // no-op, never a panic.
 func TestAuditGuardHitNilLogger(t *testing.T) {
-	AuditGuardHit(nil, "secret", []string{"known_secret"}, "log", "r", "a", "openai", "m")
+	AuditGuardHit(nil, "secret", []string{"known_secret"}, "log", "r", "a", "openai", "m", "", "")
 }

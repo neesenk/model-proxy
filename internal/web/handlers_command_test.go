@@ -22,6 +22,7 @@ type commandFake struct {
 	resetHealth  func(string) ([]string, int, error)
 	freezeHealth func(string) ([]string, error)
 	setPin       func(string, string, time.Duration) (appapi.Pin, bool)
+	unblock      func(string) error
 	clearPin     func(string) bool
 	save         func([]byte) error
 	validate     func([]byte) []appapi.ValidationIssue
@@ -68,6 +69,12 @@ func (fake *commandFake) SetPin(route, provider string, ttl time.Duration) (appa
 	return appapi.Pin{}, true
 }
 
+func (fake *commandFake) SecurityUnblock(sessionID string) error {
+	if fake.unblock != nil {
+		return fake.unblock(sessionID)
+	}
+	return nil
+}
 func (fake *commandFake) ClearPin(route string) bool {
 	if fake.clearPin != nil {
 		return fake.clearPin(route)

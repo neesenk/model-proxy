@@ -278,6 +278,12 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleSecurity(w, r)
 	case p == "/api/security/explain" && r.Method == http.MethodGet:
 		s.handleSecurityExplain(w, r)
+	case p == "/api/security/blocks" && r.Method == http.MethodGet:
+		s.handleSecurityBlocks(w, r)
+	case p == "/api/security/adjudications" && r.Method == http.MethodGet:
+		s.handleSecurityAdjudications(w, r)
+	case strings.HasPrefix(p, "/api/security/blocks/") && r.Method == http.MethodDelete:
+		s.handleSecurityUnblock(w, r)
 	case strings.HasPrefix(p, "/api/requests/") && r.Method == http.MethodGet:
 		s.handleRequestDetail(w, r)
 	case p == "/api/shadow-report" && r.Method == http.MethodGet:

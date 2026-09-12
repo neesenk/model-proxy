@@ -36,6 +36,7 @@ func (p *Proxy) forwardServices() forward.Services {
 		Agents:         p.agents,
 		Events:         p.events,
 		SessionScan:    p.sessionScan,
+		Adjudicator:    p.adjudicatorPort(),
 		ResponsesState: p.responsesState,
 		FusionReg:      p.fusionReg,
 		ReqLog:         p.reqLog,

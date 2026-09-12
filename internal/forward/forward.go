@@ -126,11 +126,51 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		// the redacted form would destroy the very fragments that pass exists
 		// to reassemble). In-memory only, bounded — see internal/guard/session.
 		preGuardBody := origBody
+		// High-verdict session block (AI adjudication channel): enforced
+		// BEFORE any scanning — a blocked session pays no scan cost, and the
+		// block outlives the config that produced it (it persists until
+		// explicitly unblocked via CLI/WebUI, by design).
+		if p.svc.Adjudicator != nil {
+			if sid := r.Header.Get("x-claude-code-session-id"); sid != "" {
+				if rule, rid, blocked := p.svc.Adjudicator.SessionBlocked(sid); blocked {
+					p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
+					http.Error(w, fmt.Sprintf("blocked: session %s was adjudicated high-risk by guard (rule=%s, request=%s) — unblock via 'model-proxy guard unblock %s' or the WebUI Security page", sid, rule, rid, sid), http.StatusBadRequest)
+					return
+				}
+			}
+		}
 		guardDecision := EvaluateRequestGuard(cfg.Guard, sc, origBody)
 		secretNames := guardDecision.Secrets
-		if len(secretNames) > 0 {
+		// AI second-opinion channel (guard.adjudicate): pattern-table secret
+		// hits (everything except the known-secret exact channels) are DEFERRED
+		// to async adjudication instead of the classic immediate record — a
+		// high verdict records + blocks the session, a low verdict is
+		// suppressed. Known-secret names keep the immediate record (exact
+		// match, zero false positives). Off/block actions keep the classic
+		// path (block is a synchronous terminal decision). Enqueue refusal,
+		// the per-request cap and span dedup fail OPEN: the leftover names
+		// take the classic immediate record with verdict "skipped".
+		emitSecrets := secretNames
+		adjMeta := GuardAdjudication{
+			RequestID: requestID,
+			SessionID: r.Header.Get("x-claude-code-session-id"),
+			Agent:     agent,
+			Proto:     proto,
+			Exposed:   exposed,
+			Action:    action,
+			Ts:        time.Now().UnixMilli(),
+		}
+		adjSecretsOn := p.svc.Adjudicator != nil && cfg.Guard.AdjudicateEnabled() && action != "off" && action != "block"
+		var secretFailOpen []string
+		if adjSecretsOn {
+			pattern, known := splitPatternSecrets(secretNames)
+			jobs, leftover := buildAdjudications(sc, preGuardBody, pattern, AdjudicationKindSecret, false, cfg.Guard.Adjudicate.ContextWindow(), adjMeta)
+			secretFailOpen = append(leftover, p.enqueueAdjudications(jobs)...)
+			emitSecrets = append(known, secretFailOpen...)
+		}
+		if len(emitSecrets) > 0 {
 			if p.svc.Metrics != nil {
-				for _, name := range secretNames {
+				for _, name := range emitSecrets {
 					p.svc.Metrics.Inc("guard", name, counters.EvGuardHits)
 				}
 			}
@@ -142,9 +182,13 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 				Agent:     agent,
 				Protocol:  proto,
 				Exposed:   exposed,
-				Detail:    "secrets=" + strings.Join(secretNames, ",") + " action=" + action,
+				Detail:    "secrets=" + strings.Join(emitSecrets, ",") + " action=" + action,
 			})
-			AuditGuardHit(runtime.SecLog, seclog.KindSecret, secretNames, action, requestID, agent, proto, exposed)
+			verdict := ""
+			if len(secretFailOpen) > 0 {
+				verdict = "skipped" // names that could not be adjudicated (cap/dedup/queue overflow)
+			}
+			AuditGuardHit(runtime.SecLog, seclog.KindSecret, emitSecrets, action, requestID, agent, proto, exposed, verdict, "")
 		}
 		origBody = guardDecision.ForwardBody
 		// Sensitive-path signal (S2): an intent-level alert fired before any
@@ -170,9 +214,24 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		pa := cfg.Guard.PathsAction()
 		pathCats := guardDecision.StrongPath
 		if pa != "off" {
-			if len(pathCats) > 0 {
+			// AI second-opinion channel for strong path hits: with
+			// guard.adjudicate on and paths=log (not the synchronous block
+			// decision), strong occurrences are deferred exactly like pattern
+			// secret hits — high verdict records (+ session block), low verdict
+			// is suppressed. Fail-open leftovers keep the classic record.
+			emitPaths := pathCats
+			adjPathsOn := p.svc.Adjudicator != nil && cfg.Guard.AdjudicateEnabled() && pa == "log"
+			var pathFailOpen []string
+			if adjPathsOn && len(pathCats) > 0 {
+				pathMeta := adjMeta
+				pathMeta.Action = pa
+				jobs, leftover := buildAdjudications(sc, preGuardBody, pathCats, AdjudicationKindPath, true, cfg.Guard.Adjudicate.ContextWindow(), pathMeta)
+				pathFailOpen = append(leftover, p.enqueueAdjudications(jobs)...)
+				emitPaths = pathFailOpen
+			}
+			if len(emitPaths) > 0 {
 				if p.svc.Metrics != nil {
-					for _, cat := range pathCats {
+					for _, cat := range emitPaths {
 						p.svc.Metrics.Inc("guard", cat, counters.EvGuardHits)
 					}
 				}
@@ -184,9 +243,13 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 					Agent:     agent,
 					Protocol:  proto,
 					Exposed:   exposed,
-					Detail:    "paths=" + strings.Join(pathCats, ",") + " action=" + pa,
+					Detail:    "paths=" + strings.Join(emitPaths, ",") + " action=" + pa,
 				})
-				AuditGuardHit(runtime.SecLog, seclog.KindPath, pathCats, pa, requestID, agent, proto, exposed)
+				verdict := ""
+				if len(pathFailOpen) > 0 {
+					verdict = "skipped"
+				}
+				AuditGuardHit(runtime.SecLog, seclog.KindPath, emitPaths, pa, requestID, agent, proto, exposed, verdict, "")
 			}
 			// WeakPath is deliberately not consulted: weak hits (prose /
 			// tool-result address mentions) are ignored entirely — no
@@ -271,7 +334,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 					Exposed:   exposed,
 					Detail:    "secrets=known_secret_fragmented action=" + fragAction,
 				})
-				AuditGuardHit(runtime.SecLog, seclog.KindSecret, []string{"known_secret_fragmented"}, fragAction, requestID, agent, proto, exposed)
+				AuditGuardHit(runtime.SecLog, seclog.KindSecret, []string{"known_secret_fragmented"}, fragAction, requestID, agent, proto, exposed, "", "")
 			}
 			// Merge the current body into the session window whether or not
 			// anything hit — later fragments depend on earlier ones being
@@ -544,6 +607,19 @@ type serveState struct {
 	attempt           int  // monotonic target-attempt index for the request log (ti resets on a context retry)
 	profiled          bool // request profile computed (see requestProfile)
 	profile           routing.Profile
+}
+
+// enqueueAdjudications is the pipeline convenience for the guard section: a
+// nil adjudicator (channel absent) fails every job open.
+func (p pipeline) enqueueAdjudications(jobs []GuardAdjudication) []string {
+	if p.svc.Adjudicator == nil {
+		var names []string
+		for _, j := range jobs {
+			names = append(names, j.Rule)
+		}
+		return names
+	}
+	return enqueueAdjudications(p.svc.Adjudicator, jobs)
 }
 
 // requestProfile returns the request's routing profile, computed at most once
