@@ -18,10 +18,12 @@ import {
   fmtGuardDetail, fmtProgressBytes, analyticsChartSeries, analyticsPointValue, analyticsTableRows,
   ANALYTICS_METRICS, pctDelta, analyticsGranularity, analyticsGranOptions, analyticsValueText,
   modelHealthFromSeries, modelHealthGrade, MODEL_HEALTH_DIMS, liveSessionSummary,
+  liveSessionOrder, shortSessionId,
   fmtCompact,
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
   quotaErrKind, accountUsageState,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
+  securityKpisHTML, securityVerdictSummary, mergeSecurityFeed,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
   iconPin, iconRefresh, iconChevron, statusBadgeClass, statusBadgeHTML,
   kpiDeltaClass, logLineHTML,
@@ -1030,6 +1032,40 @@ test('liveSessionSummary tolerates empty input', () => {
   });
 });
 
+test('liveSessionOrder sorts by recency (live beats stale persisted), ties by id', () => {
+  const sessions = [
+    { session_id: 'old-session', last_ts: '2026-09-11T00:00:00Z' },   // persisted, quiet
+    { session_id: 'aaa', last_ts: '2026-09-11T00:00:00Z' },            // ties with bbb
+    { session_id: 'bbb', last_ts: '2026-09-11T00:00:00Z' },
+    { session_id: 'no-ts' },                                           // unparseable → end
+  ];
+  const liveRows = [
+    { session: 'old-session', ts: Date.parse('2026-09-11T12:00:00Z') }, // live newer than persisted
+    { session: 'live-only', ts: Date.parse('2026-09-11T09:00:00Z') },
+  ];
+  const out = liveSessionOrder(sessions, liveRows);
+  assert.deepEqual(out, ['old-session', 'live-only', 'aaa', 'bbb', 'no-ts']);
+});
+
+test('liveSessionOrder keeps live-only sessions with missing timestamps and dedupes', () => {
+  const liveRows = [
+    { session: 'x', ts: 0 },        // unparseable ts still listed
+    { session: 'x', ts: 500 },      // duplicate row folds into max → newest
+    { session: 'y', ts: 100 },
+  ];
+  assert.deepEqual(liveSessionOrder([], liveRows), ['x', 'y']);
+  assert.deepEqual(liveSessionOrder(null, null), []);
+});
+
+test('shortSessionId abbreviates long ids, passes short labels through', () => {
+  assert.equal(shortSessionId('1234567890abcdef9012'), '12345678…9012');
+  assert.equal(shortSessionId('main'), 'main');
+  assert.equal(shortSessionId('1234567890123456'), '1234567890123456'); // 16 chars: unchanged
+  assert.equal(shortSessionId('12345678901234567'), '12345678…4567');  // 17 chars: abbreviated
+  assert.equal(shortSessionId(''), '');
+  assert.equal(shortSessionId(null), '');
+});
+
 test('shouldFetchDetail treats a recorded error as terminal (no 404 loop)', () => {
   // Fresh ended row: fetch.
   assert.equal(shouldFetchDetail(false, undefined, false), true);
@@ -1150,6 +1186,76 @@ test('pathStrengthFromAction maps log-weak to weak, configured actions to strong
   assert.equal(pathStrengthFromAction('block'), 'strong');
   assert.equal(pathStrengthFromAction(''), '');
   assert.equal(pathStrengthFromAction(undefined), '');
+});
+
+test('securityKpisHTML summarizes blocks, verdict counts and LLM usage', () => {
+  const adj = [
+    { verdict: 'high' }, { verdict: 'high' }, { verdict: 'low' },
+    { verdict: 'low' }, { verdict: 'low' }, { verdict: 'error' }, { verdict: 'skipped' },
+  ];
+  const stats = { calls: 7, input_tokens: 12345, output_tokens: 678 };
+  const html = securityKpisHTML([{ session_id: 's' }], adj, stats);
+  if (!html.includes('blocked sessions') || !html.includes('>1<')) throw new Error('blocked tile');
+  if (!html.includes('high verdicts') || !html.includes('>2<')) throw new Error('high tile');
+  if (!html.includes('low (suppressed)') || !html.includes('>3<')) throw new Error('low tile');
+  if (!html.includes('errors') || !html.includes('>2<')) throw new Error('errors tile (error+skipped)');
+  if (!html.includes('llm calls') || !html.includes('>7<')) throw new Error('llm calls tile');
+  if (!html.includes('llm tokens')) throw new Error('llm tokens tile');
+  if (!html.includes('13K')) throw new Error('token total uses compact format (12345+678=13023)');
+  if (!html.includes('in 12.3K') || !html.includes('out 678')) throw new Error('token split detail line');
+  if (!html.includes('class="v err"')) throw new Error('non-zero blocked/high must use the err accent');
+  // zero-state: no err accents anywhere, tokens tile renders 0
+  const clean = securityKpisHTML([], [], {});
+  if (clean.includes('class="v err"')) throw new Error('zero state must not use err accent');
+  if (!clean.includes('>0<')) throw new Error('zero calls tile');
+});
+
+test('securityVerdictSummary renders non-zero counts, empty-aware', () => {
+  const s1 = securityVerdictSummary([{ verdict: 'high' }, { verdict: 'low' }, { verdict: 'low' }, { verdict: 'bogus' }]);
+  if (s1 !== '1 high · 2 low') throw new Error(s1);
+  if (securityVerdictSummary([]) !== 'no verdicts yet') throw new Error('empty');
+  if (securityVerdictSummary(null) !== 'no verdicts yet') throw new Error('null');
+});
+
+test('mergeSecurityFeed interleaves audit and AI rows, newest first, normalized', () => {
+  const rows = mergeSecurityFeed(
+    [
+      { ts: 300, kind: 'secret', names: ['openai_api_key'], action: 'log', agent: 'pi', exposed: 'glm', request_id: 'r1', verdict: 'high', detail: 'live key' },
+      { ts: 100, kind: 'path', names: ['ssh'], action: 'log' },
+    ],
+    [
+      { ts: 200, kind: 'secret', rule: 'openai_api_key', verdict: 'low', reason: 'fixture', model: 'glm-5.3-flash', request_id: 'r9', session_id: 's1', cached: true },
+    ],
+  );
+  if (rows.length !== 3) throw new Error('length');
+  if (rows.map((r) => r.ts).join(',') !== '300,200,100') throw new Error('ordering');
+  const audit = rows[0];
+  if (audit.src !== 'audit' || audit.requestId !== 'r1' || audit.agent !== 'pi') throw new Error('audit projection');
+  const ai = rows[1];
+  if (ai.src !== 'ai' || ai.names[0] !== 'openai_api_key' || ai.exposed !== 'glm-5.3-flash' || !ai.cached) throw new Error('ai projection');
+  const path = rows[2];
+  if (path.strength !== 'strong') throw new Error('recorded path hits default to strong (weak is never recorded)');
+  // legacy pre-decision-23 rows carried action=log-weak
+  const legacy = mergeSecurityFeed([{ ts: 1, kind: 'path', names: ['ssh'], action: 'log-weak' }], []);
+  if (legacy[0].strength !== 'weak') throw new Error('legacy log-weak derives weak');
+});
+
+test('securityExplainHTML renders the LLM adjudication block', () => {
+  const html = securityExplainHTML({
+    status: 'ok',
+    matches: [{ name: 'ssh', located: true, pre: 'a', hit: '~/.ssh', post: 'b' }],
+    adjudications: [
+      { rule: 'ssh', verdict: 'high', reason: 'exfil command', model: 'glm-5.3-flash' },
+      { rule: 'openai_api_key', verdict: 'low', reason: 'fixture', cached: true },
+    ],
+  });
+  if (!html.includes('LLM adjudication:')) throw new Error('header missing');
+  if (!html.includes('badge err">high') || !html.includes('exfil command')) throw new Error('high entry');
+  if (!html.includes('badge ok">low') || !html.includes('cached')) throw new Error('low entry + cached badge');
+  if (!html.includes('glm-5.3-flash')) throw new Error('model attribution');
+  // absent verdicts render nothing extra
+  const bare = securityExplainHTML({ status: 'ok', matches: [{ name: 'x', located: false }] });
+  if (bare.includes('LLM adjudication')) throw new Error('no adjudications must not render the block');
 });
 
 test('securityLegendHTML explains every kind and action, escaped', () => {

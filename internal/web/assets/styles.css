@@ -285,6 +285,8 @@ main {
 
 /* Config tab: vertical rhythm between stacked cards. */
 #tab-config > .card { margin-bottom: 16px; }
+#tab-security > .card { margin-bottom: 16px; }
+#tab-security > .an-kpis { margin-bottom: 16px; }
 
 /* ---------- status pills (v1 API kept: ok/warn/err/muted) ---------- */
 .pill {
@@ -385,6 +387,22 @@ main {
 .live-row { cursor: pointer; }
 .live-row:hover > td { background: color-mix(in srgb, var(--accent) 5%, transparent); }
 .live-row.live-open > td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+/* Session entry points: the abbreviated session cell in Live/Requests rows
+   and the detail popover's session link all jump to that session's view. */
+.session-link {
+  color: var(--accent);
+  cursor: pointer;
+}
+.session-link:hover { text-decoration: underline; }
+.live-pop-session {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.live-pop-session:hover { text-decoration: underline; }
 
 /* Live session mode: toolbar + summary chips above the per-session table.
    v2: the session select shows FULL ids (no 8…4 abbreviation) — a native
@@ -862,6 +880,13 @@ textarea.yaml {
 .msg.ok   { color: var(--ok-fg); }
 .msg.err  { color: var(--err-fg); }
 .msg.warn { color: var(--warn-fg); }
+/* Confirm-modal challenge: a wrong code is reported only on the confirm
+   attempt — the input flags red (mirrors the focus-ring treatment) while the
+   inline .msg err line above carries the text. Typing again clears both. */
+#confirm-challenge[aria-invalid='true'] {
+  border-color: var(--err);
+  outline: 2px solid color-mix(in srgb, var(--err) 45%, transparent);
+}
 
 /* Disclosure editors: chevron icon (from the v2 SVG set) rotates open. */
 details.editor {
@@ -1614,5 +1639,17 @@ dialog::backdrop { background: rgba(8,12,20,.5); backdrop-filter: blur(3px); }
 .an-tip .row span:last-child { margin-left: auto; padding-left: 12px; }
 
 .dash-wrap .an-kpis { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+/* Dashboard pane header: names the fixed window so the numbers are readable
+   at a glance (KPI deltas compare against the hour before it). Same title +
+   inline meta pairing as .card-head-title, without the card chrome. */
+.dash-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.dash-head h2 { font-size: 0.8125rem; white-space: nowrap; }
+.dash-head .meta { font-size: 0.75rem; color: var(--muted); font-family: var(--mono); }
 
 .refresh-err { margin-bottom: 12px; }

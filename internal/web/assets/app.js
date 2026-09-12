@@ -30,10 +30,10 @@ import {
   parseSSE, isSSE, prettyJSON, formatJSONLoose, highlightJSON, splitLinesByBudget, linkedModels,
   sessionsForAgent, linkedAgents,
   analyticsChartSeries, analyticsTableRows, ANALYTICS_METRICS, pctDelta,
-  analyticsGranularity, analyticsGranOptions, analyticsValueText, modelHealthFromSeries, fmtCompact, liveSessionSummary,
+  analyticsGranularity, analyticsGranOptions, analyticsValueText, modelHealthFromSeries, fmtCompact, liveSessionSummary, liveSessionOrder, shortSessionId,
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
   detailFetchState, quotaErrKind, accountUsageState,
-  pathStrengthFromAction, securityLegendHTML, securityExplainHTML,
+  pathStrengthFromAction, securityLegendHTML, securityExplainHTML, securityKpisHTML, mergeSecurityFeed,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
   iconPin, iconRefresh, iconChevron, statusBadgeHTML, kpiDeltaClass, logLineHTML,
 } from './pure.js';
@@ -359,9 +359,38 @@ let requestsFilter = { session: '', agent: '', model: '', provider: '', errors: 
 // metadata-only summaries fetched from /api/requests, with click-to-expand rows
 // that load the full request/response bodies from /api/requests/<id>. On-demand
 // (no 5s poll) — fetch happens on tab entry and on Refresh.
+// requestsCombos carries the data-driven provider/model facet state, the
+// recent session list (dropdown + per-session aggregate), and the last
+// fetched rows (so the session summary can render once the aggregate
+// arrives). Module scope: tab re-entry skips the skeleton rebuild below and
+// must refresh through the same object the wired controls use.
+let requestsCombos = null;
+
+// retainTab implements the stale-while-revalidate tab re-entry guard (the
+// "切 tab 不得闪骨架屏" rule): when the first-activation skeleton has already
+// been built (the marker exists in the panel), the rendered DOM stays on
+// screen and only the data refreshes. Returns false on first activation so
+// the caller falls through to the skeleton mount; awaits refresh() so async
+// renderers keep their completion semantics.
+async function retainTab(panel, marker, refresh) {
+  if (!panel || !panel.querySelector(marker)) return false;
+  await refresh();
+  return true;
+}
+
+// sessionLinkClick returns the session id when a row click landed on the
+// row's session-link cell (the entry point into that session's view), null
+// anywhere else — the shared prologue of the row click routers (Requests and
+// Live), so the affordance cannot drift between them.
+function sessionLinkClick(e) {
+  const link = e.target && e.target.closest ? e.target.closest('.session-link') : null;
+  return link && link.dataset.session ? link.dataset.session : null;
+}
+
 async function renderRequestsTab() {
   const panel = panels.requests;
   if (!panel) return;
+  if (await retainTab(panel, '#req-table', () => refreshRequestsData(requestsCombos))) return;
   resetCombos();
   panel.innerHTML = `<div class="card"><div class="card-body">
     <div class="req-controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
@@ -380,10 +409,7 @@ async function renderRequestsTab() {
     <div id="req-session-summary" style="margin-bottom:12px" hidden></div>
     <div id="req-table"></div>
   </div></div>`;
-  // combos carries the data-driven provider/model facet state, the recent
-  // session list (dropdown + per-session aggregate), and the last fetched rows
-  // (so the session summary can render once the aggregate arrives).
-  const combos = {
+  const combos = requestsCombos = {
     providerOptions: [], modelOptions: [],
     facetState: { providerModels: {}, agents: [] },
     sessions: [], lastRecords: [],
@@ -437,6 +463,13 @@ async function renderRequestsTab() {
   // (option-less) selects BEFORE the first fetch: refresh() reads the filter
   // back out of the DOM, so an empty select would otherwise clear a filter
   // that survived the re-render.
+  refreshRequestsData(combos);
+}
+
+// refreshRequestsData repaints the retained filter selections, reloads the
+// table in place, and re-pulls the session aggregate behind it. Shared by the
+// first mount and every tab re-entry.
+function refreshRequestsData(combos) {
   renderRequestSelectors(combos);
   loadRequests(combos);
   // Agent/session dropdown options come from the log facets and the persisted
@@ -469,8 +502,11 @@ function renderRequestSelectors(combos) {
     agentSel.value = requestsFilter.agent;
   }
   if (sessionSel) {
-    const ids = sessionsForAgent(requestsFilter.agent, combos.sessions).map((s) => s.session_id).filter(Boolean);
-    if (requestsFilter.session && !ids.includes(requestsFilter.session)) ids.unshift(requestsFilter.session);
+    // Same ordering as the Live dropdown: most recently active first, ties
+    // by session id (pure.js liveSessionOrder over the agent-filtered
+    // summaries; no live rows to merge here).
+    let ids = liveSessionOrder(sessionsForAgent(requestsFilter.agent, combos.sessions), []);
+    if (requestsFilter.session && !ids.includes(requestsFilter.session)) ids = [requestsFilter.session, ...ids];
     // v2: full session ids in the options (the select is fixed 16rem wide;
     // the closed box ellipsizes, the OS popup shows the whole id). Matches
     // the Live page's full-id dropdown.
@@ -775,12 +811,16 @@ function renderRequestsSessionSummary(combos) {
 
 async function loadRequests(combos) {
   const tbl = document.getElementById('req-table');
-  // Rebuilding the table drops every open detail row (an in-flight fetch
-  // checks row.isConnected before filling); drop their chunk state too.
-  if (tbl) {
+  // Painting a fresh table drops every open detail row (an in-flight fetch
+  // checks row.isConnected before filling); their chunk state drops with the
+  // rows. The previous table stays visible while the fetch runs — only an
+  // empty table shows the loading hint — so a refresh never flashes blank.
+  const paint = (html) => {
+    if (!tbl) return;
     tbl.querySelectorAll('[data-chunk]').forEach((host) => bodyChunkRegistry.delete(host.dataset.chunk));
-    tbl.innerHTML = '<span class="hint">loading…</span>';
-  }
+    tbl.innerHTML = html;
+  };
+  if (tbl && !tbl.firstElementChild) paint('<span class="hint">loading…</span>');
   const q = new URLSearchParams();
   if (requestsFilter.session) q.set('session', requestsFilter.session);
   if (requestsFilter.agent) q.set('agent', requestsFilter.agent);
@@ -795,12 +835,12 @@ async function loadRequests(combos) {
   try {
     resp = await apiGet('/api/requests?' + q.toString());
   } catch (e) {
-    if (tbl) tbl.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+    paint(`<div class="msg err">${esc(e.message)}</div>`);
     hideRequestsSessionSummary();
     return;
   }
   if (!resp.enabled) {
-    if (tbl) tbl.innerHTML = '<div class="msg hint">Request logging is off. Enable <code>request_log.enabled</code> in config to capture request/response bodies for replay and debugging.</div>';
+    paint('<div class="msg hint">Request logging is off. Enable <code>request_log.enabled</code> in config to capture request/response bodies for replay and debugging.</div>');
     hideRequestsSessionSummary();
     return;
   }
@@ -811,7 +851,7 @@ async function loadRequests(combos) {
   combos.lastRecords = recs;
   renderRequestsSessionSummary(combos);
   if (!recs.length) {
-    if (tbl) tbl.innerHTML = '<div class="msg hint">No matching requests.</div>';
+    paint('<div class="msg hint">No matching requests.</div>');
     return;
   }
   let rows = '';
@@ -821,9 +861,16 @@ async function loadRequests(combos) {
     // calls stand out in the dense table.
     const rowCls = r.status >= 400 ? ' req-row-err' : '';
     const latCls = r.latency_ms > 10000 ? 'num warn' : 'num';
+    // Session cell mirrors the Live table: abbreviated id, full id in the
+    // tooltip, one click filters the tab down to that session (the row
+    // click router below intercepts it before the detail toggle).
+    const sess = r.session_id
+      ? `<td class="mono session-link" data-session="${esc(r.session_id)}" title="${esc(r.session_id)} — view this session">${esc(shortSessionId(r.session_id))}</td>`
+      : '<td class="mono">—</td>';
     rows += `<tr class="req-row${rowCls}" data-id="${esc(r.request_id)}">
       <td class="mono">${esc(fmtTime(r.ts))}</td>
       <td class="mono">${esc(r.agent || '—')}</td>
+      ${sess}
       <td class="st">${statusBadgeHTML(r.status)}</td>
       <td>${esc(r.exposed || r.called_model)}</td>
       <td class="mono">${esc(r.provider)}${r.shadow ? ' <span class="badge muted">shadow</span>' : ''}</td>
@@ -832,12 +879,29 @@ async function loadRequests(combos) {
       <td class="num">${fmtNum(r.response_size)}</td>
     </tr>`;
   }
-  if (tbl) tbl.innerHTML = `<table class="table">
-    <thead><tr><th>time</th><th>agent</th><th>status</th><th>model</th><th>provider</th>
+  paint(`<table class="table">
+    <thead><tr><th>time</th><th>agent</th><th>session</th><th>status</th><th>model</th><th>provider</th>
     <th class="num">ms</th><th class="num">req bytes</th><th class="num">resp bytes</th></tr></thead>
-    <tbody>${rows}</tbody></table>`;
+    <tbody>${rows}</tbody></table>`);
   document.querySelectorAll('.req-row').forEach((tr) => {
-    tr.onclick = () => toggleRequestDetail(tr);
+    // Session cell → filter this tab to that session (same linkage as picking
+    // it in the dropdown: the agent filter narrows to that session's agents);
+    // anywhere else on the row toggles the inline detail.
+    tr.onclick = (e) => {
+      // Session cell → filter this tab to that session (same linkage as picking
+      // it in the dropdown: the agent filter narrows to that session's agents);
+      // anywhere else on the row toggles the inline detail.
+      const session = sessionLinkClick(e);
+      if (session) {
+        requestsFilter.session = session;
+        const allowed = linkedAgents(requestsFilter.session, combos.sessions, combos.facetState.agents);
+        if (requestsFilter.agent && !allowed.includes(requestsFilter.agent)) requestsFilter.agent = '';
+        renderRequestSelectors(combos);
+        loadRequests(combos);
+        return;
+      }
+      toggleRequestDetail(tr);
+    };
   });
 }
 
@@ -887,7 +951,7 @@ async function toggleRequestDetail(tr) {
   tr.classList.add('req-open');
   const row = document.createElement('tr');
   row.className = 'req-detail-row';
-  row.innerHTML = '<td colspan="8"><span class="hint">loading…</span></td>';
+  row.innerHTML = '<td colspan="9"><span class="hint">loading…</span></td>';
   tr.insertAdjacentElement('afterend', row);
   const cached = requestsDetailCache.get(id);
   if (cached) {
@@ -1086,6 +1150,69 @@ function bodyLinesHTML(text) {
 // session so a refresh keeps the view.
 let securityFilter = { kind: '' };
 let securityReqSeq = 0;
+// Summary/feed-layer cache: the audit and adjudication loaders each own one
+// half of both the KPI row and the MERGED chronological feed, so whichever
+// lands first paints with the data it has and the second refresh completes
+// the picture (stale halves are never blanked).
+let securityKpiData = { blocks: null, adjudications: null, stats: null };
+let securityFeedData = { records: null, adjudications: null };
+
+function renderSecurityKpis() {
+  const el = document.getElementById('sec-kpis');
+  if (!el) return;
+  el.innerHTML = securityKpisHTML(securityKpiData.blocks, securityKpiData.adjudications, securityKpiData.stats);
+}
+
+// renderSecurityFeed renders the merged audit + AI-verdict feed: one
+// chronological table (newest first). Audit rows keep the analyze button;
+// AI rows show the verdict badge — suppressed low verdicts are visible HERE
+// and nowhere else.
+function renderSecurityFeed() {
+  const tbl = document.getElementById('sec-table');
+  if (!tbl) return;
+  const rows = mergeSecurityFeed(securityFeedData.records, securityFeedData.adjudications)
+    .filter((r) => !securityFilter.kind || r.kind === securityFilter.kind);
+  if (!rows.length) {
+    tbl.innerHTML = '<div class="msg hint">No matching records.</div>';
+    return;
+  }
+  const kindBadge = { secret: 'warn', path: '', drift: 'muted' };
+  const vBadge = { high: 'err', low: 'ok', error: 'warn', skipped: 'muted' };
+  const body = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (r.src === 'ai') {
+      body.push(`<tr>
+      <td class="mono">${esc(fmtMs(r.ts))}</td>
+      <td><span class="badge ${vBadge[r.verdict] || ''}">${esc(r.verdict)}</span>${r.cached ? ' <span class="badge muted">cached</span>' : ''}</td>
+      <td><span class="badge ${r.kind === 'path' ? '' : 'warn'}">ai·${esc(r.kind)}</span></td>
+      <td class="mono">${esc(r.names.join(', ') || '—')}</td>
+      <td class="mono">${esc(r.exposed || '—')}</td>
+      <td class="mono">${esc(r.detail || '—')}</td>
+      <td>—</td>
+    </tr>`);
+      continue;
+    }
+    const strength = r.kind === 'path' ? r.strength : '';
+    const strengthBadge = strength ? ` <span class="badge ${strength === 'strong' ? 'warn' : 'muted'}">${strength}</span>` : '';
+    const analyzable = r.requestId && (r.kind === 'secret' || r.kind === 'path');
+    body.push(`<tr>
+      <td class="mono">${esc(fmtMs(r.ts))}</td>
+      <td>${r.verdict ? `<span class="badge ${vBadge[r.verdict] || ''}">${esc(r.verdict)}</span>` : '—'}</td>
+      <td><span class="badge ${kindBadge[r.kind] || ''}">${esc(r.kind)}</span></td>
+      <td class="mono">${esc(r.names.join(', ') || '—')}</td>
+      <td class="mono">${esc(r.agent ? r.agent + (r.exposed ? ' @ ' + r.exposed : '') : '—')}</td>
+      <td class="mono">action=${esc(r.action || '—')}${strengthBadge}</td>
+      <td>${analyzable ? `<button class="btn sec-analyze" data-sec-i="${i}">analyze</button>` : '—'}</td>
+    </tr>`);
+  }
+  tbl.innerHTML = `<table class="table">
+  <thead><tr><th>time</th><th>verdict</th><th>kind</th><th>rule / names</th><th>who</th><th>detail</th><th></th></tr></thead>
+  <tbody>${body.join('')}</tbody></table>`;
+  tbl.querySelectorAll('.sec-analyze').forEach((btn) => {
+    btn.onclick = () => analyzeSecurityHit(btn, rows[Number(btn.dataset.secI)]);
+  });
+}
 
 // fmtMs renders a unix-millisecond audit timestamp as "MM-DD HH:MM:SS" —
 // the audit log spans days (30d retention), so a time-only format is wrong.
@@ -1104,7 +1231,20 @@ function fmtMs(ms) {
 async function renderSecurityTab() {
   const panel = panels.security;
   if (!panel) return;
-  panel.innerHTML = `<div class="card"><div class="card-body">
+  if (await retainTab(panel, '#sec-table', refreshSecurityData)) return;
+  securityKpiData = { blocks: null, adjudications: null, stats: null };
+  securityFeedData = { records: null, adjudications: null };
+  // Information hierarchy: summary tiles first, then the actionable blocked
+  // list with its unblock controls, and one merged chronological feed last.
+  panel.innerHTML = `<div id="sec-kpis"></div>
+  <div class="card">
+    <header class="card-head"><span class="card-head-title"><h2>Blocked sessions</h2><span class="meta">high verdicts · persist until unblocked</span></span><span class="card-head-side"><button id="sec-unblock-all" class="btn danger" hidden>unblock all</button></span></header>
+    <div class="card-body">
+    <div id="sec-blocks"><span class="hint">loading…</span></div>
+  </div></div>
+  <div class="card">
+    <header class="card-head"><span class="card-head-title"><h2>Activity</h2><span class="meta">audit + AI verdicts · newest first · suppressed lows appear only here</span></span></header>
+    <div class="card-body">
     <div class="req-controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
       <select id="sec-kind" class="req-input">
         <option value="" ${securityFilter.kind === '' ? 'selected' : ''}>all kinds</option>
@@ -1119,66 +1259,152 @@ async function renderSecurityTab() {
   </div></div>`;
   const refresh = () => {
     securityFilter.kind = document.getElementById('sec-kind').value;
-    loadSecurity();
+    renderSecurityFeed(); // client-side filter over the merged feed
   };
-  document.getElementById('sec-refresh').onclick = refresh;
+  document.getElementById('sec-refresh').onclick = () => refreshSecurityData();
   document.getElementById('sec-kind').onchange = refresh;
+  const unblockAll = document.getElementById('sec-unblock-all');
+  if (unblockAll) unblockAll.onclick = () => unblockAllSessions();
+  refreshSecurityData();
+}
+
+// unblockAllSessions clears every persisted block (the blocked list is short
+// and the action is reversible by re-judgment).
+async function unblockAllSessions() {
+  const btn = document.getElementById('sec-unblock-all');
+  if (btn) btn.disabled = true;
+  try {
+    for (const b of securityKpiData.blocks || []) {
+      try {
+        await apiDel('/api/security/blocks/' + encodeURIComponent(b.session_id));
+      } catch (e) {
+        // Surface the first failure and stop; the table refresh shows what
+        // actually cleared.
+        const el = document.getElementById('sec-blocks');
+        if (el) el.insertAdjacentHTML('afterbegin', `<div class="msg err">${esc(e.message)}</div>`);
+        return;
+      }
+    }
+    loadSecurityBlocks();
+    loadSecurity();
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// refreshSecurityData reloads the audit table and both guard cards. Shared by
+// the first mount and every tab re-entry (which keeps the rendered cards on
+// screen instead of re-flashing the loading skeleton).
+function refreshSecurityData() {
   loadSecurity();
+  loadSecurityAdjudications();
+  loadSecurityBlocks();
+}
+
+// loadSecurityAdjudications renders the recent AI-verdict ring
+// (/api/security/adjudications). Failures keep the last successful content
+// (never blank the card) and surface the error inline.
+// loadSecurityAdjudications feeds the AI-verdict half of the KPI row and
+// the merged activity feed (there is no separate card anymore — suppressed
+// low verdicts are visible in the feed and nowhere else). Failures keep the
+// last successful data (never blank the halves already rendered).
+async function loadSecurityAdjudications() {
+  let resp;
+  try {
+    resp = await apiGet('/api/security/adjudications');
+  } catch (e) {
+    const tbl = document.getElementById('sec-table');
+    if (tbl && !tbl.firstElementChild) tbl.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+    return;
+  }
+  const recs = (resp && resp.adjudications) || [];
+  securityKpiData.adjudications = recs;
+  securityKpiData.stats = (resp && resp.stats) || {};
+  securityFeedData.adjudications = recs;
+  renderSecurityKpis();
+  renderSecurityFeed();
+}
+
+// loadSecurityBlocks renders the persisted session-block table with
+// per-row unblock (DELETE /api/security/blocks/<id>); errors surface the
+// backend message, success refreshes both guard cards.
+async function loadSecurityBlocks() {
+  const el = document.getElementById('sec-blocks');
+  if (!el) return;
+  let resp;
+  try {
+    resp = await apiGet('/api/security/blocks');
+  } catch (e) {
+    el.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+    return;
+  }
+  const blocks = (resp && resp.blocks) || [];
+  securityKpiData.blocks = blocks;
+  renderSecurityKpis();
+  const all = document.getElementById('sec-unblock-all');
+  if (all) all.hidden = blocks.length === 0;
+  if (!blocks.length) {
+    el.innerHTML = '<div class="msg hint">No blocked sessions.</div>';
+    return;
+  }
+  const rows = blocks.map((b) => `<tr>
+    <td class="mono">${esc(b.session_id)}</td>
+    <td><span class="badge ${b.kind === 'path' ? '' : 'warn'}">${esc(b.kind)}</span></td>
+    <td class="mono">${esc(b.rule)}</td>
+    <td class="mono">${esc(b.reason || '—')}</td>
+    <td class="mono">${esc(fmtMs(b.ts))}</td>
+    <td class="mono">${esc(b.request_id || '—')}</td>
+    <td><button class="btn sec-unblock" data-sid="${esc(b.session_id)}">unblock</button></td>
+  </tr>`).join('');
+  el.innerHTML = `<table class="table">
+  <thead><tr><th>session</th><th>kind</th><th>rule</th><th>reason</th><th>since</th><th>request</th><th></th></tr></thead>
+  <tbody>${rows}</tbody></table>`;
+  el.querySelectorAll('.sec-unblock').forEach((btn) => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        await apiDel('/api/security/blocks/' + encodeURIComponent(btn.dataset.sid));
+        loadSecurityBlocks();
+        loadSecurity();
+      } catch (e) {
+        btn.disabled = false;
+        el.insertAdjacentHTML('afterbegin', `<div class="msg err">${esc(e.message)}</div>`);
+      }
+    };
+  });
 }
 
 async function loadSecurity() {
   const tbl = document.getElementById('sec-table');
-  if (tbl) tbl.innerHTML = '<span class="hint">loading…</span>';
+  // Keep the previous table visible while the fetch runs; only an empty
+  // table shows the loading hint (a refresh must not flash blank).
+  if (tbl && !tbl.firstElementChild) tbl.innerHTML = '<span class="hint">loading…</span>';
   const q = new URLSearchParams();
-  if (securityFilter.kind) q.set('kind', securityFilter.kind);
-  q.set('limit', '200');
-  // Sequence guard: switching kind mid-flight races two fetches; a slow
-  // older response must not overwrite the newer one's rendering.
+  // 50, not 200: low verdicts are suppressed upstream now, so the audit half
+  // is the dense historical tail — the summary tiles carry the totals.
+  q.set('limit', '50');
+  // Sequence guard: a slow older response must not overwrite the newer one's
+  // rendering.
   const seq = ++securityReqSeq;
   let resp;
   try {
     resp = await apiGet('/api/security?' + q.toString());
   } catch (e) {
-    if (seq === securityReqSeq && tbl) tbl.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+    if (seq === securityReqSeq && tbl && !tbl.firstElementChild) tbl.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
     return;
   }
   if (seq !== securityReqSeq) return;
   if (!resp.enabled) {
-    if (tbl) tbl.innerHTML = '<div class="msg hint">Security audit is off. Enable <code>guard.audit</code> in config to persist guard hits (secret / path / drift) to the audit log.</div>';
+    if (tbl && !securityFeedData.adjudications) {
+      tbl.innerHTML = '<div class="msg hint">Security audit is off. Enable <code>guard.audit</code> in config to persist guard hits (secret / path / drift) to the audit log.</div>';
+    }
     return;
   }
-  const recs = resp.records || [];
-  const skipped = resp.skipped > 0 ? `<div class="hint" style="margin-bottom:8px;">skipped ${fmtNum(resp.skipped)} unreadable line(s) while scanning</div>` : '';
-  if (!recs.length) {
-    if (tbl) tbl.innerHTML = skipped + '<div class="msg hint">No matching audit records.</div>';
-    return;
+  if (resp.skipped > 0 && tbl) {
+    tbl.insertAdjacentHTML('afterbegin', `<div class="hint" style="margin-bottom:8px;">skipped ${fmtNum(resp.skipped)} unreadable line(s) while scanning</div>`);
   }
-  const kindBadge = { secret: 'warn', path: '', drift: 'muted' };
-  let rows = '';
-  for (let i = 0; i < recs.length; i++) {
-    const r = recs[i];
-    const strength = r.kind === 'path' ? pathStrengthFromAction(r.action) : '';
-    const strengthBadge = strength ? ` <span class="badge ${strength === 'strong' ? 'warn' : 'muted'}">${strength}</span>` : '';
-    const analyzable = r.request_id && (r.kind === 'secret' || r.kind === 'path');
-    rows += `<tr>
-      <td class="mono">${esc(fmtMs(r.ts))}</td>
-      <td><span class="badge ${kindBadge[r.kind] || ''}">${esc(r.kind)}</span></td>
-      <td class="mono">${esc(r.agent || '—')}</td>
-      <td class="mono">${esc(r.exposed || '—')}</td>
-      <td class="mono">${esc((r.names || []).join(', ') || '—')}</td>
-      <td>${esc(r.action || '—')}${strengthBadge}</td>
-      <td>${analyzable ? `<button class="btn sec-analyze" data-sec-i="${i}">analyze</button>` : '—'}</td>
-    </tr>`;
-  }
-  if (tbl) {
-    tbl.innerHTML = skipped + `<table class="table">
-    <thead><tr><th>time</th><th>kind</th><th>agent</th><th>route</th>
-    <th>names</th><th>action</th><th></th></tr></thead>
-    <tbody>${rows}</tbody></table>`;
-    tbl.querySelectorAll('.sec-analyze').forEach((btn) => {
-      btn.onclick = () => analyzeSecurityHit(btn, recs[Number(btn.dataset.secI)]);
-    });
-  }
+  securityFeedData.records = resp.records || [];
+  renderSecurityFeed();
 }
 
 // analyzeSecurityHit toggles the inline analysis row under an audit record:
@@ -1199,7 +1425,7 @@ async function analyzeSecurityHit(btn, rec) {
   detailTr.appendChild(td);
   tr.after(detailTr);
   const q = new URLSearchParams({
-    request_id: rec.request_id,
+    request_id: rec.requestId,
     kind: rec.kind,
     name: (rec.names || []).join(','),
   });
@@ -1310,19 +1536,18 @@ function renderLiveCard(target) {
 }
 
 // refreshLiveSessionOptions rebuilds the session dropdown from live rows plus
-// the persisted session list. Rebuilds only when the option set changes so a
-// busy stream does not reset the control on every event. While the select
-// holds focus (its native dropdown may be open, or the user is keyboard-
-// navigating it) the options are NEVER swapped — replacing them closes the
-// OS-drawn popup; the blur handler below retries once the user is done.
+// the persisted session list, ordered most-recently-active first (session id
+// ascending as the tie-break; pure.js liveSessionOrder). Rebuilds only when
+// the ordered set changes so a quiet stream does not reset the control. While
+// the select holds focus (its native dropdown may be open, or the user is
+// keyboard-navigating it) the options are NEVER swapped — replacing them
+// closes the OS-drawn popup; the blur handler below retries once the user is
+// done.
 function refreshLiveSessionOptions() {
   const sel = document.getElementById('live-session');
   if (!sel) return;
   if (sel === document.activeElement) return;
-  const ids = new Set();
-  for (const r of liveRows) if (r.session) ids.add(r.session);
-  for (const s of liveSessionList) if (s.session_id) ids.add(s.session_id);
-  const sorted = [...ids].sort();
+  const sorted = liveSessionOrder(liveSessionList, liveRows);
   const key = sorted.join('\n');
   if (key === liveSessionOptionsKey) return;
   liveSessionOptionsKey = key;
@@ -1345,6 +1570,11 @@ function onLiveSessionChange(value) {
   liveSessionRecords = [];
   liveSessionAgg = null;
   liveSessionError = '';
+  // Entering a session from a record (row cell / detail popover) must move
+  // the dropdown selection too; setting value programmatically fires no
+  // change event, so no loop.
+  const sel = document.getElementById('live-session');
+  if (sel) sel.value = value;
   const tbl = document.getElementById('live-table');
   const panel = document.getElementById('live-session-panel');
   if (!value) {
@@ -1374,6 +1604,33 @@ function onLiveSessionChange(value) {
     refreshLiveSessionOptions();
     renderLiveSessionPanel();
   });
+}
+
+// enterLiveSession switches the Live card into one session's view from a
+// single record — the summary row's session cell or the detail popover's
+// session link — selecting it in the dropdown and loading the session panel.
+function enterLiveSession(id) {
+  if (!id) return;
+  closeLiveDetailPop();
+  // The click that landed here blurred the select, so a rebuild deferred by
+  // the focused-guard can run now and the option exists before selection.
+  refreshLiveSessionOptions();
+  onLiveSessionChange(id);
+}
+
+// wireLiveRow binds one summary row's click behavior: the session cell jumps
+// to that session's view, anywhere else on the row opens the detail popover.
+// Shared by every render path (full table, incremental prepend, in-place row
+// update, session panel) so the affordance cannot drift between them.
+function wireLiveRow(tr) {
+  tr.onclick = (e) => {
+    const session = sessionLinkClick(e);
+    if (session) {
+      enterLiveSession(session);
+      return;
+    }
+    openLiveDetailPop(tr.dataset.id);
+  };
 }
 
 // persistedSummaryRow projects a /api/requests Summary (snake_case) into the
@@ -1487,7 +1744,7 @@ function renderLiveSessionPanel() {
     : '<div class="msg hint">no requests recorded for this session yet</div>';
   panel.innerHTML = `${sessionSummaryHTML(s)}${body}`;
   panel.querySelectorAll('.live-row').forEach((tr) => {
-    tr.onclick = () => openLiveDetailPop(tr.dataset.id);
+    wireLiveRow(tr);
   });
   restoreLiveViewState(panel, viewState);
 }
@@ -1622,9 +1879,16 @@ function liveSummaryRowHTML(r, open) {
   const slow = !r.inFlight && r.latencyMs != null && r.latencyMs > 10000;
   const lt = (!r.inFlight && r.latencyMs != null) ? r.latencyMs + 'ms' : '';
   const tk = (!r.inFlight && (r.input || r.output)) ? `${fmtNum(r.input)} / ${fmtNum(r.output)}` : '';
+  // Session cell (All/live mode only): abbreviated id, full id + intent in
+  // the tooltip. It is the row's entry point into the session view, so it
+  // reads as a link; the row click router (wireLiveRow) intercepts it.
+  const sess = r.session
+    ? `<td class="mono${dim} session-link" data-session="${esc(r.session)}" title="${esc(r.session)} — view this session">${esc(shortSessionId(r.session))}</td>`
+    : `<td class="mono${dim}">—</td>`;
   return `<tr class="live-row${openCls}" data-id="${esc(r.requestId)}" data-live-key="${esc(r.requestId)}">
     <td class="mono${dim}">${esc(fmtTimeSafe(r.ts))}</td>
     <td class="mono${dim}">${esc(r.agent || '—')}</td>
+    ${sess}
     <td class="${dim ? 'subdue' : ''}">${esc(r.model)}${guard}</td>
     <td class="mono${dim}">${esc(r.inFlight ? '…' : (r.provider || '—'))}</td>
     <td class="st">${statusBadgeHTML(r.inFlight ? null : r.status, r.inFlight)}</td>
@@ -1638,7 +1902,7 @@ function liveEventRowHTML(r) {
   return `<tr data-live-key="${esc(r.key)}">
     <td class="mono">${esc(fmtTimeSafe(r.ts))}</td>
     <td class="mono">${esc(r.agent || '—')}</td>
-    <td colspan="5"><span class="badge warn" title="${esc(fmtGuardDetail(r.guardDetail))}">⚑ ${esc(fmtGuardDetail(r.guardDetail) || 'event')}</span></td>
+    <td colspan="6"><span class="badge warn" title="${esc(fmtGuardDetail(r.guardDetail))}">⚑ ${esc(fmtGuardDetail(r.guardDetail) || 'event')}</span></td>
   </tr>`;
 }
 
@@ -1675,12 +1939,10 @@ function renderLiveTable() {
   }
   const viewState = captureLiveViewState(tbl);
   tbl.innerHTML = `<table class="table"><thead><tr>
-    <th>time</th><th>agent</th><th>model</th><th>provider</th>
+    <th>time</th><th>agent</th><th>session</th><th>model</th><th>provider</th>
     <th>status</th><th class="num">latency</th><th class="num">tokens in / out</th></tr></thead>
     <tbody>${rows.map((r) => liveRowHTML(r)).join('')}</tbody></table>`;
-  document.querySelectorAll('#live-table .live-row').forEach((tr) => {
-    tr.onclick = () => openLiveDetailPop(tr.dataset.id);
-  });
+  document.querySelectorAll('#live-table .live-row').forEach((tr) => wireLiveRow(tr));
   restoreLiveViewState(tbl, viewState);
 }
 
@@ -1730,7 +1992,7 @@ function updateLiveSummaryRow(tr, r) {
   tr.insertAdjacentHTML('beforebegin', liveSummaryRowHTML(r, liveDetailPopId === r.requestId));
   const next = tr.previousElementSibling;
   tr.remove();
-  next.onclick = () => openLiveDetailPop(next.dataset.id);
+  wireLiveRow(next);
   return next;
 }
 
@@ -1803,7 +2065,7 @@ function prependLiveRows(tbl, tbody, rows) {
   for (const r of rows) {
     if (r.requestId) {
       const tr = findLiveSummaryRow(tbody, r.requestId);
-      if (tr) tr.onclick = () => openLiveDetailPop(tr.dataset.id);
+      if (tr) wireLiveRow(tr);
     }
   }
   compensateLiveScroll(anchor);
@@ -2011,9 +2273,22 @@ function fillLiveDetailPop(dialog, row, defaultOpen) {
     row.inFlight ? 'in flight' : (row.status || ''),
     (!row.inFlight && row.latencyMs != null) ? row.latencyMs + 'ms' : '',
     (row.input || row.output) ? `${fmtNum(row.input)} in / ${fmtNum(row.output)} out` : '',
-    row.session ? 'session ' + row.session : '',
   ].filter((x) => x !== '').join(' · ');
-  dialog.querySelector('.live-pop-meta').textContent = meta;
+  const metaEl = dialog.querySelector('.live-pop-meta');
+  metaEl.textContent = meta;
+  // The session rides as a link instead of meta text: one click leaves the
+  // single record and enters that session's view. Re-appended on every fill
+  // (updateLiveDetailPop re-runs this), so no listener leaks.
+  metaEl.querySelectorAll('.live-pop-session').forEach((b) => b.remove());
+  if (row.session) {
+    const btn = el('button', {
+      cls: 'live-pop-session mono',
+      text: 'session ' + shortSessionId(row.session),
+      attrs: { type: 'button', title: row.session + ' — view this session' },
+    });
+    btn.addEventListener('click', () => enterLiveSession(row.session));
+    metaEl.appendChild(btn);
+  }
   const body = dialog.querySelector('.live-pop-body');
   // Drop chunk state for body views that are about to be replaced.
   body.querySelectorAll('[data-chunk]').forEach((host) => {
@@ -2476,15 +2751,19 @@ function destroyDashChart() {
   }
 }
 
-// renderDashboardSection builds the skeleton once (KPI row + metric-
-// switchable chart + leaderboard), then keeps it fed: every 5s status tick
-// lands here, but refreshDashboardData only refetches when the cached window
-// is stale. Section re-entry (the pane was wiped by another section) rebuilds
-// the skeleton and repaints from the cache instantly.
+// renderDashboardSection builds the skeleton once (window header + KPI row +
+// metric-switchable chart + leaderboard), then keeps it fed: every 5s status
+// tick lands here, but refreshDashboardData only refetches when the cached
+// window is stale. Section re-entry (the pane was wiped by another section)
+// rebuilds the skeleton and repaints from the cache instantly.
 function renderDashboardSection(main) {
   if (!main.querySelector('.dash-wrap')) {
     destroyDashChart();
     main.innerHTML = `<div class="dash-wrap">
+      <header class="dash-head">
+        <h2>Last hour</h2>
+        <span class="meta">trailing 60-minute window · per-minute buckets by model · deltas vs the hour before</span>
+      </header>
       <div id="dash-error" class="msg err" hidden></div>
       <div id="dash-kpis" class="an-kpis"></div>
       <div class="an-chart-card">
@@ -3414,10 +3693,12 @@ function renderAgentsCard(target, agents) {
 // Resolves true only when the confirm button is clicked; Esc, Close and
 // Cancel all resolve false.
 // confirmDialog renders the shared themed confirm modal. opts.challenge adds
-// a fool-proof step for destructive actions: a random code is shown and the
-// confirm button stays disabled until the user types it back exactly (Enter
-// submits once it matches). All other call sites keep the plain two-button
-// form.
+// a fool-proof step for destructive actions: a random code is shown and must
+// be typed back exactly. The confirm button is always clickable — a wrong
+// code is reported on the confirm attempt (inline error + red input), never
+// mid-typing; typing again clears the previous attempt's error. Enter routes
+// through the same confirm path. All other call sites keep the plain
+// two-button form.
 function confirmDialog(title, message, confirmLabel, opts = {}) {
   const modal = document.getElementById('confirm-modal');
   if (!modal) return Promise.resolve(false);
@@ -3427,9 +3708,10 @@ function confirmDialog(title, message, confirmLabel, opts = {}) {
     const challengeHTML = challenge ? `
           <div class="field" style="margin-top:12px">
             <label for="confirm-challenge">Type <span class="mono" style="font-weight:600">${esc(code)}</span> to confirm</label>
-            <input id="confirm-challenge" autocomplete="off" spellcheck="false" inputmode="numeric"
+            <input id="confirm-challenge" autocomplete="off" spellcheck="false" inputmode="numeric" aria-describedby="confirm-challenge-hint"
                    placeholder="${esc(code)}" style="font-family:var(--mono)">
-            <span class="hint">The code proves the reset is intentional.</span>
+            <span class="hint" id="confirm-challenge-hint">The code proves the reset is intentional.</span>
+            <div class="msg err" id="confirm-challenge-err" hidden>wrong code — type the 4 digits shown above</div>
           </div>` : '';
     modal.innerHTML =
       `<form method="dialog">
@@ -3441,7 +3723,7 @@ function confirmDialog(title, message, confirmLabel, opts = {}) {
           <p>${esc(message)}</p>${challengeHTML}
           <div class="modal-actions">
             <button type="button" class="btn small" id="confirm-no">Cancel</button>
-            <button type="button" class="btn small danger-solid" id="confirm-yes"${challenge ? ' disabled' : ''}>${esc(confirmLabel)}</button>
+            <button type="button" class="btn small danger-solid" id="confirm-yes">${esc(confirmLabel)}</button>
           </div>
         </div>
       </form>`;
@@ -3454,14 +3736,34 @@ function confirmDialog(title, message, confirmLabel, opts = {}) {
     modal.addEventListener('cancel', onCancel, { once: true });
     document.getElementById('confirm-cancel').addEventListener('click', () => done(false));
     document.getElementById('confirm-no').addEventListener('click', () => done(false));
-    document.getElementById('confirm-yes').addEventListener('click', () => done(true));
+    // Challenge dialogs verify here, on the confirm attempt — the single
+    // place a wrong code is reported.
+    document.getElementById('confirm-yes').addEventListener('click', () => {
+      if (!challenge) { done(true); return; }
+      const input = document.getElementById('confirm-challenge');
+      const err = document.getElementById('confirm-challenge-err');
+      if (input.value.trim() === code) { done(true); return; }
+      input.setAttribute('aria-invalid', 'true');
+      if (err) err.hidden = false;
+      input.select();
+    });
     modal.showModal();
     if (challenge) {
       const input = document.getElementById('confirm-challenge');
-      const yes = document.getElementById('confirm-yes');
-      input.addEventListener('input', () => { yes.disabled = input.value.trim() !== code; });
+      const err = document.getElementById('confirm-challenge-err');
+      // Typing gives no verdict; it only clears the previous attempt's
+      // error so the next confirm attempt reports afresh.
+      input.addEventListener('input', () => {
+        input.setAttribute('aria-invalid', 'false');
+        if (err) err.hidden = true;
+      });
       input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && input.value.trim() === code) { e.preventDefault(); done(true); }
+        if (e.key !== 'Enter') return;
+        // Enter always preventDefault: with method=dialog a native submit
+        // would close the modal without resolving (Cancel never fires on a
+        // form submit), leaving the await hung. Enter = confirm attempt.
+        e.preventDefault();
+        document.getElementById('confirm-yes').click();
       });
       input.focus();
     }
@@ -3842,6 +4144,13 @@ function updateYamlSaveState() {
 
 async function renderConfigTab() {
   const panel = panels.config;
+  // Re-entry keeps the mounted tab in place (stale-while-revalidate, same
+  // policy as the Status cache): the skeleton below is a first-activation
+  // mount, later switches keep the rendered forms + YAML editor visible and
+  // loadConfigAll refreshes them in place — no loading… flash between
+  // switches. The Summary card head only exists after a successful fill, so
+  // a failed first activation re-mounts the skeleton and retries.
+  if (await retainTab(panel, '#config-summary .card-head', loadConfigData)) return;
   panel.innerHTML =
     `<div id="config-summary" class="card"><div class="card-body"><span class="msg">loading…</span></div></div>
      <div class="card" id="preset-card">
@@ -3889,6 +4198,13 @@ async function renderConfigTab() {
   document.getElementById('btn-yaml-save').addEventListener('click', saveConfigYAML);
   document.getElementById('btn-preset-add').addEventListener('click', addPresetFromWizard);
 
+  await loadConfigData();
+}
+
+// loadConfigData fetches the config snapshot into the mounted tab; a failure
+// surfaces in the Summary card while the rest of the tab keeps its last
+// rendered state.
+async function loadConfigData() {
   try {
     await loadConfigAll();
   } catch (e) {
@@ -4718,11 +5034,24 @@ let accountsSelectedProvider = null;
 // than breaking the whole tab.
 async function renderAccountsTab() {
   const panel = panels.accounts;
+  // Re-entry keeps the rendered nav/detail on screen and refreshes in place
+  // (the nav title the marker checks only exists after a successful fill, so
+  // a failed first activation re-mounts the skeleton and retries).
+  if (await retainTab(panel, '.acct-nav-title', loadAccountsData)) return;
   panel.innerHTML = `<div class="acct-tab-head"><div id="acc-msg"></div></div>
     <div class="accounts-layout">
     <nav class="acct-nav" aria-label="Providers"><span class="msg">loading…</span></nav>
     <div class="acct-main"></div>
   </div>`;
+  await loadAccountsData();
+}
+
+// loadAccountsData fetches the accounts view state and re-renders the nav +
+// the selected provider's detail. On tab re-entry a failed fetch keeps the
+// old data and reports via #acc-msg. The nav title the re-entry guard checks
+// only exists after a successful fill, so a failed first activation
+// re-mounts the skeleton and retries.
+async function loadAccountsData() {
   try {
     const [acc, st, tok] = await Promise.all([
       apiGet('/api/accounts'),
@@ -6319,6 +6648,8 @@ async function boot() {
     activateTabSilent('accounts');
   } else if (bootTab === 'analytics') {
     activateTabSilent('analytics');
+  } else if (bootTab === 'requests') {
+    activateTabSilent('requests');
   } else if (bootTab === 'security') {
     activateTabSilent('security');
   } else {

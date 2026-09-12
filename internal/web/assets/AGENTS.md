@@ -30,6 +30,7 @@
 - 重渲染会折叠用户展开的 `<details>` 时必须先快照后恢复（见 renderLogsInto 的
   `logsOpenDetails`）。
 - 用户主动触发的渲染（筛选点击、mutation、切 section）绕过门：它们自己会先关闭弹层。
+- **切 tab 不得闪骨架屏**：每个 tab 的骨架/loading 只在首次激活构建；再次进入保留已渲染 DOM，原地刷新数据（stale-while-revalidate，与 Status cache 同策略）。重入守卫用共享的 `retainTab(panel, marker, refresh)`，行内 session 链接点击拦截用 `sessionLinkClick`（app.js）。表格类刷新（loadRequests/loadSecurity）fetch 期间保留旧表，仅空表才显示 loading 提示。
 - **后台刷新失败不得覆盖旧数据**：每个部分独立 settle，失败部分保留上次成功值
   （绝不写成空数组/空骨架），通过 `setRefreshError`（`.refresh-err` 横幅，文案用
   pure.js `staleDataText`）提示，下一次成功清除横幅；只有首次加载（无任何数据）才

@@ -1090,6 +1090,43 @@ export function mergeLiveAndPersistedRow(live, persisted) {
   return base;
 }
 
+// liveSessionOrder merges the persisted session summaries (/api/sessions)
+// with the live event rows into the Live dropdown's ordering: most recently
+// active first (a live row's newest event beats a stale persisted last_ts),
+// ties broken by session id ascending so the list stays deterministic.
+// Timestamps accept unix milliseconds or RFC3339 strings; sessions without a
+// parseable timestamp keep their slot at the end, still ordered by id.
+// Returns the ordered session ids.
+export function liveSessionOrder(sessions, liveRows) {
+  const tsMs = (v) => {
+    const n = typeof v === 'number' ? v : Date.parse(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const lastMs = new Map();
+  for (const s of sessions || []) {
+    if (!s || !s.session_id) continue;
+    lastMs.set(s.session_id, tsMs(s.last_ts));
+  }
+  for (const r of liveRows || []) {
+    if (!r || !r.session) continue;
+    if (!lastMs.has(r.session)) lastMs.set(r.session, 0);
+    const ms = tsMs(r.ts);
+    if (ms > lastMs.get(r.session)) lastMs.set(r.session, ms);
+  }
+  return [...lastMs.keys()].sort((a, b) => {
+    const d = (lastMs.get(b) || 0) - (lastMs.get(a) || 0);
+    return d !== 0 ? d : a.localeCompare(b);
+  });
+}
+
+// shortSessionId abbreviates a session id for dense table cells: first 8 +
+// '…' + last 4. Ids of 16 chars or fewer pass through unchanged (labels like
+// "main" stay readable); the full id rides in the cell's title tooltip.
+export function shortSessionId(id) {
+  const s = String(id || '');
+  return s.length > 16 ? s.slice(0, 8) + '…' + s.slice(-4) : s;
+}
+
 // liveSessionSummary folds one session's request rows (live events + persisted
 // request-log summaries) and the optional /api/sessions aggregate into the Live
 // session panel's numbers. Rows carry {status,latencyMs,model,provider,agent,
@@ -1153,6 +1190,70 @@ export const SECURITY_ACTION_HELP = [
   { name: 'log-weak', text: 'weak path signal (plain-text mention); no longer persisted — only older logs carry these' },
 ];
 
+// mergeSecurityFeed merges audit records and AI adjudication results into
+// one chronological feed (newest first). The projection normalizes both
+// sources onto one row shape: audit rows carry agent/exposed/action/strength,
+// AI rows carry verdict/model/reason/session. kind filtering is the caller's
+// business (audit kinds secret|path|drift; AI rows are secret|path).
+export function mergeSecurityFeed(records, adjudications) {
+  const rows = [];
+  for (const r of records || []) {
+    rows.push({
+      ts: r.ts, src: 'audit', kind: r.kind, names: r.names || [],
+      action: r.action || '', verdict: r.verdict || '',
+      agent: r.agent || '', exposed: r.exposed || '',
+      detail: r.detail || '', requestId: r.request_id || '',
+      strength: r.kind === 'path' ? pathStrengthFromAction(r.action) : '',
+    });
+  }
+  for (const a of adjudications || []) {
+    rows.push({
+      ts: a.ts, src: 'ai', kind: a.kind, names: [a.rule].filter(Boolean),
+      action: a.action || '', verdict: a.verdict || '',
+      agent: '', exposed: a.model || '',
+      detail: a.reason || '', requestId: a.request_id || '',
+      sessionId: a.session_id || '', cached: !!a.cached, strength: '',
+    });
+  }
+  rows.sort((x, y) => (y.ts || 0) - (x.ts || 0));
+  return rows;
+}
+
+// securityKpisHTML renders the Security page's summary tile row (the
+// an-kpis design-system grid): blocked-session count plus the verdict
+// digest. It is the hierarchy's top layer — details live in the cards below.
+export function securityKpisHTML(blocks, adjudications, stats) {
+  const bl = blocks || [];
+  const c = { high: 0, low: 0, error: 0, skipped: 0 };
+  for (const r of adjudications || []) {
+    if (c[r.verdict] !== undefined) c[r.verdict]++;
+  }
+  const st = stats || {};
+  const inTok = Number(st.input_tokens) || 0;
+  const outTok = Number(st.output_tokens) || 0;
+  const tile = (k, v, err, d) =>
+    `<div class="an-kpi"><div class="k">${esc(k)}</div><div class="v${err ? ' err' : ''}">${v}</div>${d ? `<div class="d">${d}</div>` : ''}</div>`;
+  return `<div class="an-kpis">` +
+    tile('blocked sessions', fmtNum(bl.length), bl.length > 0) +
+    tile('high verdicts', fmtNum(c.high), c.high > 0) +
+    tile('low (suppressed)', fmtNum(c.low), false) +
+    tile('errors', fmtNum(c.error + c.skipped), c.error + c.skipped > 0) +
+    tile('llm calls', fmtNum(st.calls || 0), false, 'judge invocations (cache hits free)') +
+    tile('llm tokens', fmtCompact(inTok + outTok), false, `in ${fmtCompact(inTok)} · out ${fmtCompact(outTok)}`) +
+    `</div>`;
+}
+
+// securityVerdictSummary renders the compact one-line tally for the AI
+// adjudication card title: non-zero verdict counts, newest-set only.
+export function securityVerdictSummary(recs) {
+  const c = { high: 0, low: 0, error: 0, skipped: 0 };
+  for (const r of recs || []) {
+    if (c[r.verdict] !== undefined) c[r.verdict]++;
+  }
+  const parts = Object.entries(c).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}`);
+  return parts.length ? parts.join(' · ') : 'no verdicts yet';
+}
+
 // securityLegendHTML renders the collapsible kind/action legend.
 export function securityLegendHTML() {
   const kinds = SECURITY_KIND_HELP.map((k) => `<li><span class="badge">${esc(k.name)}</span> ${esc(k.text)}</li>`).join('');
@@ -1181,6 +1282,14 @@ export function securityExplainHTML(result) {
   if (!result || typeof result !== 'object') return '';
   const note = SECURITY_EXPLAIN_STATUS_NOTES[result.status];
   let out = note ? `<div class="msg hint">${esc(note)}</div>` : '';
+  const adj = Array.isArray(result.adjudications) ? result.adjudications : [];
+  if (adj.length) {
+    const vBadge = { high: 'err', low: 'ok', error: 'warn', skipped: 'muted' };
+    out += `<div class="sec-explain-adj"><div class="hint">LLM adjudication:</div>` + adj.map((a) =>
+      `<div><code>${esc(a.rule)}</code> <span class="badge ${vBadge[a.verdict] || ''}">${esc(a.verdict)}</span>` +
+      `${a.cached ? ' <span class="badge muted">cached</span>' : ''}${a.model ? ` <span class="hint">${esc(a.model)}</span>` : ''}` +
+      `${a.reason ? ` — ${esc(a.reason)}` : ''}</div>`).join('') + `</div>`;
+  }
   const matches = Array.isArray(result.matches) ? result.matches : [];
   if (!matches.length && !note) return '<div class="msg hint">Nothing to show.</div>';
   for (const m of matches) {
