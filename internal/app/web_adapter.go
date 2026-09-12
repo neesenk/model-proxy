@@ -307,6 +307,7 @@ func (p *Proxy) adminPorts(
 		AdjudicationUnblock: p.adjudicationUnblock,
 		AdjudicationRecent:  p.adjudicationRecent,
 		AdjudicationStats:   p.adjudicationStats,
+		AdjudicationEnabled: p.adjudicationEnabled,
 		ModelRefreshRuntime: func(name string) admin.ModelRefreshRuntime {
 			// Same parent-or-first-pooled-virtual resolution as the model-caps
 			// probe pass: the model list is per-upstream, not per-account.

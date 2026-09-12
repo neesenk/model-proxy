@@ -146,6 +146,9 @@ type Ports struct {
 	AdjudicationRecent func() []appapi.SecurityAdjudication
 	// AdjudicationStats reports the channel's LLM usage (calls + tokens).
 	AdjudicationStats func() appapi.SecurityAdjudicationStats
+	// AdjudicationEnabled reports whether guard.adjudicate is currently on
+	// (the current generation's switch; nil = off).
+	AdjudicationEnabled func() bool
 	// ModelRefreshRuntime captures config, pooled implementation and probe policy
 	// together. ModelCapsReplace only accepts the captured endpoint fingerprint.
 	ModelRefreshRuntime func(name string) ModelRefreshRuntime

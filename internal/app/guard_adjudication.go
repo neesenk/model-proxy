@@ -387,6 +387,13 @@ func (p *Proxy) adjudicationStats() appapi.SecurityAdjudicationStats {
 	return appapi.SecurityAdjudicationStats{Calls: calls, InputTokens: in, OutputTokens: out}
 }
 
+// adjudicationEnabled implements admin.Ports.AdjudicationEnabled: the CURRENT
+// generation's guard.adjudicate switch.
+func (p *Proxy) adjudicationEnabled() bool {
+	_, _, _, enabled := p.AdjudicationConfig()
+	return enabled
+}
+
 // adjudicationRecent implements admin.Ports.AdjudicationRecent. Same alias
 // story as adjudicationBlocks: Result IS the DTO.
 func (p *Proxy) adjudicationRecent() []appapi.SecurityAdjudication {

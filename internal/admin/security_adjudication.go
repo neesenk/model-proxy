@@ -40,7 +40,8 @@ func (s *Service) SecurityUnblock(sessionID string) error {
 }
 
 // SecurityAdjudications implements GET /api/security/adjudications: the
-// recent-verdict ring plus the channel's LLM usage stats.
+// recent-verdict ring plus the channel's LLM usage stats and the channel's
+// current on/off switch (the leaderboard's noise-reduction hint keys off it).
 func (s *Service) SecurityAdjudications() appapi.SecurityAdjudicationFeed {
 	if s.ports.AdjudicationRecent == nil {
 		return appapi.SecurityAdjudicationFeed{Adjudications: []appapi.SecurityAdjudication{}}
@@ -53,5 +54,6 @@ func (s *Service) SecurityAdjudications() appapi.SecurityAdjudicationFeed {
 	if s.ports.AdjudicationStats != nil {
 		stats = s.ports.AdjudicationStats()
 	}
-	return appapi.SecurityAdjudicationFeed{Adjudications: recent, Stats: stats}
+	enabled := s.ports.AdjudicationEnabled != nil && s.ports.AdjudicationEnabled()
+	return appapi.SecurityAdjudicationFeed{Adjudications: recent, Stats: stats, Enabled: enabled}
 }

@@ -437,6 +437,10 @@ type SecurityAdjudicationStats struct {
 type SecurityAdjudicationFeed struct {
 	Adjudications []SecurityAdjudication    `json:"adjudications"`
 	Stats         SecurityAdjudicationStats `json:"stats"`
+	// Enabled reports whether guard.adjudicate is currently on (the current
+	// generation's switch) — the leaderboard's "enable to suppress noise"
+	// hint keys off it, distinguishing off from merely quiet.
+	Enabled bool `json:"enabled"`
 }
 
 // SecurityAdjudication is one recent AI second-opinion verdict from the
