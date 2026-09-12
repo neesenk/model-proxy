@@ -163,7 +163,43 @@ func (x *Indexer) migrate() error {
 		size_indexed INTEGER NOT NULL,
 		mtime        INTEGER NOT NULL
 	);`)
-	return err
+	if err != nil {
+		return err
+	}
+	return x.ensureColumns()
+}
+
+// ensureColumns adds late index columns additively (PRAGMA table_info
+// guarded ALTER — the stats ensureColumns pattern; never change a column's
+// meaning in place). ttft_ms joined after latency_ms existed; rows written
+// before it keep 0 = unknown.
+func (x *Indexer) ensureColumns() error {
+	rows, err := x.db.Query(`PRAGMA table_info(records)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasTTFT := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "ttft_ms" {
+			hasTTFT = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !hasTTFT {
+		if _, err := x.db.Exec(`ALTER TABLE records ADD COLUMN ttft_ms INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Run reconciles immediately and then on the tailing tick until Shutdown. The
@@ -435,9 +471,9 @@ func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int6
 	stmt, err := tx.Prepare(`INSERT INTO records
 		(request_id, ts, ts_ms, session_id, agent, protocol, method, path,
 		 called_model, upstream_model, exposed, provider, attempt, status,
-		 latency_ms, request_size, response_size, shadow,
+		 latency_ms, ttft_ms, request_size, response_size, shadow,
 		 input, output, cache_read, cache_creation, file, "offset", length)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -452,7 +488,7 @@ func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int6
 			row.record.Agent, row.record.Protocol, row.record.Method, row.record.Path,
 			row.record.CalledModel, row.record.UpstreamModel, row.record.Exposed,
 			row.record.Provider, row.record.Attempt, row.record.Status,
-			row.record.LatencyMs, row.record.RequestSize, row.record.ResponseSize,
+			row.record.LatencyMs, row.record.TTFTMs, row.record.RequestSize, row.record.ResponseSize,
 			shadow, row.usage.Input, row.usage.Output, row.usage.CacheRead,
 			row.usage.CacheCreation, row.file, row.offset, row.length,
 		); err != nil {
@@ -541,7 +577,7 @@ func filterSQL(filter Filter) (string, []any) {
 func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) {
 	where, args := filterSQL(filter)
 	query := `SELECT ts, request_id, session_id, protocol, method, path, exposed,
-		called_model, upstream_model, provider, agent, attempt, status, latency_ms,
+		called_model, upstream_model, provider, agent, attempt, status, latency_ms, ttft_ms,
 		request_size, response_size, input, output, cache_read, cache_creation, shadow
 		FROM records` + where + ` ORDER BY ts DESC, rowid DESC`
 	if filter.Limit > 0 {
@@ -562,7 +598,7 @@ func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) 
 			&summary.Ts, &summary.RequestID, &summary.SessionID, &summary.Protocol,
 			&summary.Method, &summary.Path, &summary.Exposed, &summary.CalledModel,
 			&summary.UpstreamModel, &summary.Provider, &summary.Agent, &summary.Attempt,
-			&summary.Status, &summary.LatencyMs, &summary.RequestSize, &summary.ResponseSize,
+			&summary.Status, &summary.LatencyMs, &summary.TTFTMs, &summary.RequestSize, &summary.ResponseSize,
 			&summary.Input, &summary.Output, &summary.CacheRead, &summary.CacheCreation,
 			&shadow,
 		); err != nil {

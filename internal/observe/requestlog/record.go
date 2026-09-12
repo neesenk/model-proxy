@@ -11,21 +11,25 @@ import (
 
 // Record is one line in the JSONL request log.
 type Record struct {
-	Ts              string `json:"ts"`
-	Shadow          bool   `json:"shadow,omitempty"`
-	RequestID       string `json:"request_id"`
-	SessionID       string `json:"session_id"`
-	Protocol        string `json:"protocol"`
-	Method          string `json:"method"`
-	Path            string `json:"path"`
-	CalledModel     string `json:"called_model"`
-	UpstreamModel   string `json:"upstream_model"`
-	Exposed         string `json:"exposed"`
-	Provider        string `json:"provider"`
-	Agent           string `json:"agent"`
-	Attempt         int    `json:"attempt"`
-	Status          int    `json:"status"`
-	LatencyMs       int64  `json:"latency_ms"`
+	Ts            string `json:"ts"`
+	Shadow        bool   `json:"shadow,omitempty"`
+	RequestID     string `json:"request_id"`
+	SessionID     string `json:"session_id"`
+	Protocol      string `json:"protocol"`
+	Method        string `json:"method"`
+	Path          string `json:"path"`
+	CalledModel   string `json:"called_model"`
+	UpstreamModel string `json:"upstream_model"`
+	Exposed       string `json:"exposed"`
+	Provider      string `json:"provider"`
+	Agent         string `json:"agent"`
+	Attempt       int    `json:"attempt"`
+	Status        int    `json:"status"`
+	LatencyMs     int64  `json:"latency_ms"`
+	// TTFTMs is time-to-first-byte of the committed response body (proxy
+	// pipeline's first read). Streams ≈ first token; buffered conversions ≈
+	// total. 0 = unknown (records written before the field existed).
+	TTFTMs          int64  `json:"ttft_ms,omitempty"`
 	RequestSize     int    `json:"request_size"`
 	ResponseSize    int64  `json:"response_size"`
 	RequestBody     string `json:"request_body"`
@@ -63,6 +67,7 @@ type Input struct {
 	Agent             string
 	Attempt           int
 	Status            int
+	TTFTMilliseconds  int64
 	RequestBody       []byte
 	ResponseBody      []byte
 	ResponseSize      int64
@@ -106,6 +111,7 @@ func (l *Logger) BuildRecord(in Input) *Record {
 		Attempt:         in.Attempt,
 		Status:          in.Status,
 		LatencyMs:       latency,
+		TTFTMs:          in.TTFTMilliseconds,
 		ResponseSize:    in.ResponseSize,
 		ResponseHeaders: responseHeaders(in.ResponseHeader),
 	}
@@ -180,6 +186,10 @@ func appendRecordLine(dst []byte, rec *Record) []byte {
 	dst = strconv.AppendInt(dst, int64(rec.Status), 10)
 	dst = append(dst, `,"latency_ms":`...)
 	dst = strconv.AppendInt(dst, rec.LatencyMs, 10)
+	if rec.TTFTMs > 0 {
+		dst = append(dst, `,"ttft_ms":`...)
+		dst = strconv.AppendInt(dst, rec.TTFTMs, 10)
+	}
 	dst = append(dst, `,"request_size":`...)
 	dst = strconv.AppendInt(dst, int64(rec.RequestSize), 10)
 	dst = append(dst, `,"response_size":`...)

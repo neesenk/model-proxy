@@ -146,3 +146,30 @@ func TestBuildRecordOmitsResponseHeadersWithoutAllowedFields(t *testing.T) {
 		t.Errorf("ResponseHeaders = %q, want empty when no allowlisted fields exist", record.ResponseHeaders)
 	}
 }
+
+// TestRecordTTFTRoundTrip pins the ttft_ms contract: written between
+// latency_ms and request_size when set, absent for the pre-field records
+// (0), and decoded back — the index and scan projections read the same tag.
+func TestRecordTTFTRoundTrip(t *testing.T) {
+	with := &Record{Ts: "2026-09-13T00:00:00Z", RequestID: "r1", Status: 200, LatencyMs: 1500, TTFTMs: 320, RequestSize: 10, ResponseSize: 5}
+	line := string(appendRecordLine(nil, with))
+	if needle := `"latency_ms":1500,"ttft_ms":320,"request_size":10`; !strings.Contains(line, needle) {
+		t.Fatalf("ttft_ms must ride between latency_ms and request_size, got line %s", line)
+	}
+	var back Record
+	if err := json.Unmarshal([]byte(line), &back); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if back.TTFTMs != 320 {
+		t.Fatalf("ttft round-trip = %d, want 320", back.TTFTMs)
+	}
+	legacy := &Record{Ts: "2026-09-12T00:00:00Z", RequestID: "r2", Status: 200, LatencyMs: 100}
+	line2 := string(appendRecordLine(nil, legacy))
+	if strings.Contains(line2, "ttft_ms") {
+		t.Fatalf("zero ttft must stay absent for pre-field records, got %s", line2)
+	}
+	// The list projection carries it through.
+	if s := Summarize(*with); s.TTFTMs != 320 {
+		t.Fatalf("Summarize ttft = %d, want 320", s.TTFTMs)
+	}
+}

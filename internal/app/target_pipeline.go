@@ -139,8 +139,16 @@ func (effects targetExecutionEffects) CaptureResponse(
 			attempt.Started,
 			attempt.Body,
 		)
+		// TTFT for the log = the pipeline's first read of the committed
+		// body (stamped before the capture callback fires inside Close, so
+		// the record built there already carries it). Same goroutine reads
+		// then completes — no synchronization needed.
+		firstReadMs := int64(0)
+		body = &ttftReadCloser{ReadCloser: body, started: attempt.Started, onFirst: func(t int64) { firstReadMs = t }}
 		body = bodycapture.New(body, logger.MaxBodyBytes(), func(captured []byte, total int64, truncated bool) {
-			requestlog.Complete(logger, input, captured, total, truncated)
+			in := input
+			in.TTFTMilliseconds = firstReadMs
+			requestlog.Complete(logger, in, captured, total, truncated)
 		})
 	}
 
@@ -173,6 +181,24 @@ func (effects targetExecutionEffects) CaptureResponse(
 	}
 
 	return body
+}
+
+// ttftReadCloser stamps the elapsed-since-start time of the first Read on
+// its delegate — the request-log TTFT source (see CaptureResponse).
+type ttftReadCloser struct {
+	io.ReadCloser
+	started time.Time
+	onFirst func(ms int64)
+	seen    bool
+}
+
+func (t *ttftReadCloser) Read(p []byte) (int, error) {
+	n, err := t.ReadCloser.Read(p)
+	if !t.seen && n > 0 {
+		t.seen = true
+		t.onFirst(time.Since(t.started).Milliseconds())
+	}
+	return n, err
 }
 
 func (effects targetExecutionEffects) CaptureUsage(

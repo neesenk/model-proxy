@@ -18,6 +18,7 @@ type Summary struct {
 	Attempt       int    `json:"attempt"`
 	Status        int    `json:"status"`
 	LatencyMs     int64  `json:"latency_ms"`
+	TTFTMs        int64  `json:"ttft_ms,omitempty"`
 	RequestSize   int    `json:"request_size"`
 	ResponseSize  int64  `json:"response_size"`
 	Input         uint64 `json:"input,omitempty"`
@@ -35,7 +36,7 @@ func Summarize(record Record) Summary {
 		Exposed: record.Exposed, CalledModel: record.CalledModel,
 		UpstreamModel: record.UpstreamModel, Provider: record.Provider,
 		Agent: record.Agent, Attempt: record.Attempt, Status: record.Status, LatencyMs: record.LatencyMs,
-		RequestSize: record.RequestSize, ResponseSize: record.ResponseSize,
+		TTFTMs: record.TTFTMs, RequestSize: record.RequestSize, ResponseSize: record.ResponseSize,
 		Input: record.ParsedUsage.Input, Output: record.ParsedUsage.Output,
 		CacheRead: record.ParsedUsage.CacheRead, CacheCreation: record.ParsedUsage.CacheCreation,
 		Shadow: record.Shadow,
