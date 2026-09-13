@@ -3323,14 +3323,41 @@ function stopStatusRefresh() {
 // active. Called at boot so a refresh landing on #config or #accounts still
 // shows the daemon's reachability (otherwise the header stays stuck on the
 // initial "connecting…" - setConn('ok') otherwise only runs inside
-// renderStatusTab, which the non-Status boot path skips).
+// renderStatusTab, which the non-Status boot path skips). The inflight guard
+// mirrors statusInflight: a stalled request must not let ticks pile up.
+let connInflight = false;
 async function refreshConnIndicator() {
+  if (connInflight) return;
+  connInflight = true;
   try {
     const st = await apiGet('/api/status');
     setConn('ok', `v${st.version || '?'} · ${st.uptime || '-'} · ${st.listen || ''}`);
   } catch (e) {
     setConn('err', 'connection lost');
+  } finally {
+    connInflight = false;
   }
+}
+
+// maybeConnRefresh arms the header-meta tick that keeps the brand-meta
+// (version · uptime · listen) live on EVERY tab: renderStatusTab's 5s tick
+// writes the header only while the Status tab is active, so without this
+// timer the uptime froze at its boot value forever on
+// Config/Accounts/Analytics/Requests/Security. The tick skips while the
+// Status tab is active — its own /api/status fetch already refreshed the
+// header, so no duplicate request. This tick is exempt from the
+// auto-refresh interaction gate (documented exemption, pinned in
+// jstests/autorefresh.test.mjs): setConn only swaps the dot class and one
+// text node in the topbar chrome — no panel DOM is rebuilt, so no popup,
+// selection, or in-progress input can be disrupted. Like the header itself
+// it lives for the page's lifetime and has no per-tab teardown.
+let connTimer = null;
+function maybeConnRefresh() {
+  if (connTimer) { clearInterval(connTimer); connTimer = null; }
+  connTimer = setInterval(() => {
+    if (activeTab === 'status') return;
+    refreshConnIndicator();
+  }, 5000);
 }
 
 // renderStatusTab fetches the dashboard snapshot (status + tokens + logs +
@@ -8093,8 +8120,10 @@ async function boot() {
       onLiveSessionChange(v);
     }
   }
-  // Update the header connection indicator regardless of the landing tab.
+  // Update the header connection indicator regardless of the landing tab,
+  // then keep it ticking on every tab (see maybeConnRefresh).
   refreshConnIndicator();
+  maybeConnRefresh();
 }
 
 boot();

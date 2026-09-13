@@ -126,6 +126,30 @@ test('every transient popup layer carries data-popup', () => {
     'the legend "+N more" dropdown must declare data-popup for the gate');
 });
 
+test('the header 5s tick keeps the brand-meta live off the Status tab (gate-exempt)', () => {
+  // The brand-meta uptime froze on non-Status tabs: only renderStatusTab's
+  // 5s tick wrote it. The header tick re-fetches /api/status every 5s on
+  // every OTHER tab and skips while the Status tab drives the header itself
+  // (same /api/status response — no duplicate fetch).
+  const bootBody = fnBody(appJs, 'boot');
+  assert.ok(bootBody.includes('maybeConnRefresh();'),
+    'boot must arm the header-meta tick after the initial refresh');
+  const tick = fnBody(appJs, 'maybeConnRefresh');
+  assert.ok(tick.includes('setInterval'), 'the header tick must be interval-driven');
+  assert.ok(tick.includes("activeTab === 'status'"),
+    'the header tick must skip while the Status tab refreshes the header itself');
+  assert.ok(tick.includes('refreshConnIndicator();'),
+    'the header tick must go through the shared header refresh helper');
+  // Documented exemption: setConn swaps only the dot class + one text node in
+  // the topbar chrome — no panel DOM is rebuilt, so no popup, selection, or
+  // input can be disrupted and the interaction gate must NOT be wired here.
+  const fn = fnBody(appJs, 'refreshConnIndicator');
+  assert.ok(fn.includes('setConn('),
+    'the header refresh must write only through setConn');
+  assert.ok(!fn.includes('deferAutoRefresh'),
+    'a text-only header update rebuilds no panel DOM — the gate does not apply');
+});
+
 test('the Status→Dashboard 30s analytics refresh gates at fetch and commit', () => {
   const body = fnBody(appJs, 'refreshDashboardData');
   // Fetch-time skip: no new fetch while a popup is open in the section.
