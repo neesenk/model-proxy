@@ -58,7 +58,8 @@ func (fakeReads) AgentStats(AgentStatsQuery) ([]observestats.AgentBucket, error)
 func (fakeReads) Analytics(AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
 	return nil, nil
 }
-func (fakeReads) Pricing() PricingSnapshot { return PricingSnapshot{} }
+func (fakeReads) AnalyticsAgentNames(AnalyticsQuery) []string { return nil }
+func (fakeReads) Pricing() PricingSnapshot                    { return PricingSnapshot{} }
 func (fakeReads) Fusion(string, time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
 	return nil, nil
 }

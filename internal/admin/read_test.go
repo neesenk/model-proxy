@@ -1053,3 +1053,62 @@ func TestSecurityExplainCrossRequest(t *testing.T) {
 		t.Errorf("status = %q, want cross_request", result.Status)
 	}
 }
+
+// TestAnalyticsAgentFilterReroutesModelDimension: by=model with a non-empty
+// agent must still narrow (through agent_buckets — the only table carrying
+// the agent dimension), with Agent cleared so the series keys stay
+// provider+model; by=agent keeps the agent label.
+func TestAnalyticsAgentFilterReroutesModelDimension(t *testing.T) {
+	var agentArg string
+	service := New(Ports{
+		AnalyticsAgents: func(from, to int64, agent, provider, model, granularity string) ([]observestats.AnalyticsBucket, error) {
+			agentArg = agent
+			return []observestats.AnalyticsBucket{
+				{Agent: agent, Provider: "p", Model: "m", Bucket: 1, Requests: 2},
+			}, nil
+		},
+		Analytics: func(from, to int64, provider, model, granularity string) ([]observestats.AnalyticsBucket, error) {
+			t.Error("by=model+agent must not read minute_buckets")
+			return nil, nil
+		},
+	})
+	out, err := service.Analytics(appapi.AnalyticsQuery{Granularity: "day", By: "model", Agent: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agentArg != "codex" {
+		t.Errorf("agent forwarded = %q, want codex", agentArg)
+	}
+	if len(out) != 1 || out[0].Agent != "" || out[0].Requests != 2 {
+		t.Fatalf("model-dimension buckets = %+v, want agent cleared", out)
+	}
+
+	byAgent, err := service.Analytics(appapi.AnalyticsQuery{Granularity: "day", By: "agent", Agent: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byAgent) != 1 || byAgent[0].Agent != "codex" {
+		t.Fatalf("agent-dimension buckets = %+v, want agent kept", byAgent)
+	}
+}
+
+// TestAnalyticsAgentNamesPassThrough: the facet passes provider/model only
+// (the agent filter is deliberately ignored) and a missing port behaves
+// like a disabled store (empty, non-nil).
+func TestAnalyticsAgentNamesPassThrough(t *testing.T) {
+	var nameArgs [4]int64
+	service := New(Ports{
+		AnalyticsAgentNames: func(from, to int64, provider, model string) []string {
+			nameArgs = [4]int64{from, to, int64(len(provider)), int64(len(model))}
+			return []string{"codex"}
+		},
+	})
+	names := service.AnalyticsAgentNames(appapi.AnalyticsQuery{From: 1, To: 2, Provider: "p", Model: "m"})
+	if len(names) != 1 || names[0] != "codex" || nameArgs != [4]int64{1, 2, 1, 1} {
+		t.Fatalf("agent names = %v (args %v)", names, nameArgs)
+	}
+	bare := New(Ports{})
+	if names := bare.AnalyticsAgentNames(appapi.AnalyticsQuery{}); names == nil || len(names) != 0 {
+		t.Errorf("nil-port agent names = %v; want empty non-nil", names)
+	}
+}

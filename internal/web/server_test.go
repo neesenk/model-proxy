@@ -43,6 +43,7 @@ func (testReadAPI) AgentStats(appapi.AgentStatsQuery) ([]observestats.AgentBucke
 func (testReadAPI) Analytics(appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
 	return nil, nil
 }
+func (testReadAPI) AnalyticsAgentNames(appapi.AnalyticsQuery) []string { return nil }
 func (testReadAPI) Pricing() appapi.PricingSnapshot {
 	return appapi.PricingSnapshot{Catalog: &pricing.Catalog{}}
 }

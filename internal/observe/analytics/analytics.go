@@ -10,6 +10,7 @@ package analytics
 
 import (
 	"math"
+	"sort"
 
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
@@ -17,21 +18,25 @@ import (
 
 // Totals is the unified derived-metric block. Nullable fields use pointers:
 // null means "no data" (no requests / no call time / nothing read / nothing
-// priced), never a fabricated zero.
+// priced), never a fabricated zero. Failovers/RateLimited429 are additive
+// attempt counters (minute_buckets carries them; the agent dimension reads
+// agent_buckets, which has no such columns — they stay zero there).
 type Totals struct {
-	Requests      uint64   `json:"requests"`
-	Failures      uint64   `json:"failures"`
-	ErrPct        *float64 `json:"err_pct"` // null when no requests
-	Input         uint64   `json:"input"`
-	Output        uint64   `json:"output"`
-	CacheCreation uint64   `json:"cache_creation"`
-	CacheRead     uint64   `json:"cache_read"`
-	Tokens        uint64   `json:"tokens"`         // four-bucket total
-	AvgLatencyMs  *float64 `json:"avg_latency_ms"` // null when no requests
-	AvgTtftMs     *float64 `json:"avg_ttft_ms"`    // null when no requests
-	TokSec        *float64 `json:"tok_sec"`        // output / full call seconds; null without call time
-	CacheHitPct   *float64 `json:"cache_hit_pct"`  // reads / full prompt workload; null without reads
-	Cost          *float64 `json:"cost"`           // nil when nothing in the window is priced
+	Requests       uint64   `json:"requests"`
+	Failovers      uint64   `json:"failovers"`
+	RateLimited429 uint64   `json:"rate_limited_429"`
+	Failures       uint64   `json:"failures"`
+	ErrPct         *float64 `json:"err_pct"` // null when no requests
+	Input          uint64   `json:"input"`
+	Output         uint64   `json:"output"`
+	CacheCreation  uint64   `json:"cache_creation"`
+	CacheRead      uint64   `json:"cache_read"`
+	Tokens         uint64   `json:"tokens"`         // four-bucket total
+	AvgLatencyMs   *float64 `json:"avg_latency_ms"` // null when no requests
+	AvgTtftMs      *float64 `json:"avg_ttft_ms"`    // null when no requests
+	TokSec         *float64 `json:"tok_sec"`        // output / full call seconds; null without call time
+	CacheHitPct    *float64 `json:"cache_hit_pct"`  // reads / full prompt workload; null without reads
+	Cost           *float64 `json:"cost"`           // nil when nothing in the window is priced
 }
 
 // Point is one bucket's raw counters plus the same derived metrics, so the
@@ -108,6 +113,8 @@ func FoldTotals(buckets []observestats.AnalyticsBucket, overrides map[string]pri
 	var latencySum, ttftSum, durationSum uint64
 	for _, b := range buckets {
 		t.Requests += b.Requests
+		t.Failovers += b.Failovers
+		t.RateLimited429 += b.RateLimited429
 		t.Failures += b.Failures
 		t.Input += b.Input
 		t.Output += b.Output
@@ -172,6 +179,35 @@ func Group(buckets []observestats.AnalyticsBucket, by string, overrides map[stri
 		s := *byKey[k]
 		s.Totals = FoldTotals(slices[k], overrides, catalog)
 		out = append(out, s)
+	}
+	return out
+}
+
+// YearCell is one local-calendar day of the usage heatmap: the same unified
+// Totals block folded over that day's buckets, so the day view and the
+// series/window views can never disagree on a metric.
+type YearCell struct {
+	Day int64 `json:"day"` // unix seconds of the local-calendar midnight
+	Totals
+}
+
+// YearCells folds day-granularity buckets (the store's calendar "day"
+// bucketing — Bucket is the local midnight) into per-day cells, ascending,
+// only days with buckets. The heatmap's fixed trailing-year window is the
+// caller's concern; the fold itself works on any day-granularity set.
+func YearCells(buckets []observestats.AnalyticsBucket, overrides map[string]pricing.Override, catalog *pricing.Catalog) []YearCell {
+	groups := map[int64][]observestats.AnalyticsBucket{}
+	for _, b := range buckets {
+		groups[b.Bucket] = append(groups[b.Bucket], b)
+	}
+	days := make([]int64, 0, len(groups))
+	for d := range groups {
+		days = append(days, d)
+	}
+	sort.Slice(days, func(i, j int) bool { return days[i] < days[j] })
+	out := make([]YearCell, 0, len(days))
+	for _, d := range days {
+		out = append(out, YearCell{Day: d, Totals: FoldTotals(groups[d], overrides, catalog)})
 	}
 	return out
 }

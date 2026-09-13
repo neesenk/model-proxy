@@ -570,6 +570,10 @@ type ReadAPI interface {
 	Stats(StatsQuery) ([]observestats.Bucket, error)
 	AgentStats(AgentStatsQuery) ([]observestats.AgentBucket, error)
 	Analytics(AnalyticsQuery) ([]observestats.AnalyticsBucket, error)
+	// AnalyticsAgentNames lists the distinct agents with traffic in the
+	// query's window (provider/model filtered; the agent filter itself is
+	// ignored so the suggestion list keeps offering alternatives). Never nil.
+	AnalyticsAgentNames(AnalyticsQuery) []string
 	Pricing() PricingSnapshot
 	Fusion(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
 	Pins() []Pin

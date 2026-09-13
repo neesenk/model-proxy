@@ -486,7 +486,25 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		}
 		compare = &compareWindow{From: prevFrom, To: prevTo, Totals: observeanalytics.FoldTotals(prev, prices.Overrides, prices.Catalog)}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"granularity": g, "by": by, "from": from, "to": to, "series": seriesOut, "totals": totals, "compare": compare, "price_coverage": map[string]any{"priced": mapKeys(priced), "unpriced": mapKeys(unpriced)}})
+	// Usage heatmap: a FIXED window of the last twelve WHOLE months plus the
+	// current month-to-date (the 1st of the month 12 months back through
+	// now — independent of the toolbar's from/to; it's the GitHub-style
+	// contribution overview), read through the same Analytics port at day
+	// granularity so provider/model/agent filtering and virtual-provider
+	// exclusion behave identically. The cells fold through the same unified
+	// Totals block; the agent facet feeds the toolbar's suggestions.
+	yearY, yearM, _ := now.Date()
+	yearFrom := time.Date(yearY, yearM, 1, 0, 0, 0, 0, time.Local).AddDate(0, -12, 0).Unix()
+	heatBuckets, err := s.reads.Analytics(appapi.AnalyticsQuery{From: yearFrom, To: now.Unix(), Provider: query.Provider, Model: query.Model, Agent: query.Agent, Granularity: "day", By: "model"})
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, "analytics heatmap: "+err.Error())
+		return
+	}
+	agents := s.reads.AnalyticsAgentNames(query)
+	if agents == nil {
+		agents = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"granularity": g, "by": by, "from": from, "to": to, "series": seriesOut, "totals": totals, "compare": compare, "price_coverage": map[string]any{"priced": mapKeys(priced), "unpriced": mapKeys(unpriced)}, "heatmap": map[string]any{"from": yearFrom, "to": now.Unix(), "cells": observeanalytics.YearCells(heatBuckets, prices.Overrides, prices.Catalog)}, "agents": agents})
 }
 
 func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {

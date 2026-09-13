@@ -38,6 +38,7 @@ type readAPIStub struct {
 	stats             func(appapi.StatsQuery) ([]observestats.Bucket, error)
 	agents            func(appapi.AgentStatsQuery) ([]observestats.AgentBucket, error)
 	analytics         func(appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error)
+	analyticsAgents   func(appapi.AnalyticsQuery) []string
 	pricing           appapi.PricingSnapshot
 	fusion            func(string, time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
 	pins              []appapi.Pin
@@ -99,6 +100,12 @@ func (r *readAPIStub) Analytics(q appapi.AnalyticsQuery) ([]observestats.Analyti
 		return nil, nil
 	}
 	return r.analytics(q)
+}
+func (r *readAPIStub) AnalyticsAgentNames(q appapi.AnalyticsQuery) []string {
+	if r.analyticsAgents == nil {
+		return nil
+	}
+	return r.analyticsAgents(q)
 }
 func (r *readAPIStub) Pricing() appapi.PricingSnapshot { return r.pricing }
 func (r *readAPIStub) Fusion(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
@@ -698,6 +705,17 @@ func TestReadShadowReportAndErrors(t *testing.T) {
 	}
 }
 
+// yearWindowBounds mirrors the handler's heatmap window (the 1st of the
+// month 12 months back, local) with one day of slop on each side.
+type yearWindow struct{ lo, hi int64 }
+
+func (y yearWindow) contains(v int64) bool { return v >= y.lo && v <= y.hi }
+
+func yearWindowBounds(now time.Time) yearWindow {
+	first := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.Local).AddDate(0, -12, 0)
+	return yearWindow{lo: first.Add(-24 * time.Hour).Unix(), hi: first.Add(24 * time.Hour).Unix()}
+}
+
 func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 	var statsQuery appapi.StatsQuery
 	var agentQuery appapi.AgentStatsQuery
@@ -716,8 +734,8 @@ func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 			return []observestats.AnalyticsBucket{
 				// AvgDurationMs is store-derived (duration_sum/requests); the fake
 				// fills both fields the way the real projection does.
-				{Provider: "p", Model: "priced", Bucket: 100, Requests: 2, Input: 10, Output: 5, CacheRead: 2, CacheCreation: 1, DurationSum: 4000, AvgDurationMs: 2000},
-				{Provider: "p", Model: "unknown", Bucket: 200, Requests: 1, Input: 7, Output: 3},
+				{Provider: "p", Model: "priced", Bucket: 100, Requests: 2, Failovers: 1, RateLimited429: 2, Input: 10, Output: 5, CacheRead: 2, CacheCreation: 1, DurationSum: 4000, AvgDurationMs: 2000},
+				{Provider: "p", Model: "unknown", Bucket: 200, Requests: 1, Failovers: 3, Input: 7, Output: 3},
 			}, nil
 		},
 		pricing: appapi.PricingSnapshot{Catalog: &pricing.Catalog{ByModel: map[string]pricing.Entry{"priced": {Prompt: .001, Completion: .002, CacheRead: .003, CacheWrite: .004}}}},
@@ -754,13 +772,15 @@ func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 		Granularity string `json:"granularity"`
 		By          string `json:"by"`
 		Totals      struct {
-			Input       uint64   `json:"input"`
-			Output      uint64   `json:"output"`
-			Tokens      uint64   `json:"tokens"`
-			TokSec      *float64 `json:"tok_sec"`
-			CacheHitPct *float64 `json:"cache_hit_pct"`
-			ErrPct      *float64 `json:"err_pct"`
-			Cost        *float64 `json:"cost"`
+			Input         uint64   `json:"input"`
+			Output        uint64   `json:"output"`
+			Tokens        uint64   `json:"tokens"`
+			Failovers     uint64   `json:"failovers"`
+			RateLimited42 uint64   `json:"rate_limited_429"`
+			TokSec        *float64 `json:"tok_sec"`
+			CacheHitPct   *float64 `json:"cache_hit_pct"`
+			ErrPct        *float64 `json:"err_pct"`
+			Cost          *float64 `json:"cost"`
 		} `json:"totals"`
 		Compare struct {
 			From     int64    `json:"from"`
@@ -794,21 +814,37 @@ func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 		} `json:"series"`
 	}
 	decodeReadJSON(t, analytics, &analyticsResponse)
-	// The handler issues TWO port calls: the requested window, then the
-	// equal-length comparison window immediately before it (one minute earlier
-	// so the inclusive minute bounds never overlap).
+	// The handler issues THREE port calls: the requested window, the
+	// equal-length comparison window immediately before it (one minute
+	// earlier so the inclusive minute bounds never overlap), and the FIXED
+	// trailing-year heatmap window at day granularity (from ≈ now-365d).
 	wantQueries := []appapi.AnalyticsQuery{
 		{From: 100, To: 200, Provider: "p", Model: "all", Granularity: "month", By: "model"},
 		{From: -60, To: 40, Provider: "p", Model: "all", Granularity: "month", By: "model"},
 	}
+	var yearQuery *appapi.AnalyticsQuery
+	windowed := []appapi.AnalyticsQuery{}
+	for _, q := range analyticsQueries {
+		if q.Granularity == "day" {
+			yearQuery = &q
+			continue
+		}
+		windowed = append(windowed, q)
+	}
+	if yearQuery == nil {
+		t.Fatalf("no trailing-year heatmap read among queries: %#v", analyticsQueries)
+	}
 	// Window totals fold BOTH buckets: tokens = 17+8+1+2 = 28 (four-bucket),
 	// tok/s = 8 output / 4s call time = 2, cache hit = 2/20 reads = 10%,
 	// err% = 0 with requests (non-null), cost = $0.03 (priced bucket only).
-	if analytics.Code != http.StatusOK || !reflect.DeepEqual(analyticsQueries, wantQueries) ||
+	if analytics.Code != http.StatusOK || !reflect.DeepEqual(windowed, wantQueries) ||
+		yearQuery.Provider != "p" || yearQuery.Model != "all" || yearQuery.By != "model" ||
+		!yearWindowBounds(time.Now()).contains(yearQuery.From) ||
 		analyticsResponse.Granularity != "month" || analyticsResponse.By != "model" ||
 		analyticsResponse.Totals.Input != 17 || analyticsResponse.Totals.Output != 8 || analyticsResponse.Totals.Tokens != 28 ||
 		analyticsResponse.Totals.TokSec == nil || math.Abs(*analyticsResponse.Totals.TokSec-2) > 1e-9 ||
 		analyticsResponse.Totals.CacheHitPct == nil || math.Abs(*analyticsResponse.Totals.CacheHitPct-10) > 1e-9 ||
+		analyticsResponse.Totals.Failovers != 4 || analyticsResponse.Totals.RateLimited42 != 2 ||
 		analyticsResponse.Totals.ErrPct == nil || *analyticsResponse.Totals.ErrPct != 0 ||
 		analyticsResponse.Totals.Cost == nil || math.Abs(*analyticsResponse.Totals.Cost-.03) > 1e-12 ||
 		analyticsResponse.Compare.From != -60 || analyticsResponse.Compare.To != 40 || analyticsResponse.Compare.Requests != 3 || analyticsResponse.Compare.Tokens != 28 ||
@@ -1519,5 +1555,96 @@ func TestSecurityBlocksAndAdjudications(t *testing.T) {
 	// Empty session id in the path is a client error, not a port call.
 	if bad := serveRead(t, s, http.MethodDelete, "/api/security/blocks/"); bad.Code != http.StatusBadRequest {
 		t.Fatalf("empty-id unblock status = %d, want 400", bad.Code)
+	}
+}
+
+// TestReadAnalyticsYearHeatmapAndAgentFacet pins the /api/analytics
+// response's fixed trailing-year heatmap + agent-facet projections: the
+// heatmap rides the same Analytics port at day granularity (same filters,
+// including agent), cells fold through the unified Totals block with
+// per-model pricing, and a heatmap read failure fails the whole request.
+func TestReadAnalyticsYearHeatmapAndAgentFacet(t *testing.T) {
+	const day = int64(1700000000)
+	var yearQuery appapi.AnalyticsQuery
+	reads := &readAPIStub{
+		analytics: func(q appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
+			if q.Granularity == "day" {
+				yearQuery = q
+				return []observestats.AnalyticsBucket{
+					{Provider: "p", Model: "priced", Bucket: day, Requests: 2, Input: 10, Output: 5, DurationSum: 4000},
+					{Provider: "p", Model: "unknown", Bucket: day, Requests: 1, Input: 7},
+				}, nil
+			}
+			return []observestats.AnalyticsBucket{}, nil
+		},
+		analyticsAgents: func(appapi.AnalyticsQuery) []string { return []string{"codex", "pi"} },
+		pricing:         appapi.PricingSnapshot{Catalog: &pricing.Catalog{ByModel: map[string]pricing.Entry{"priced": {Prompt: .001, Completion: .002}}}},
+	}
+	s := newReadServer(t, reads)
+	before := time.Now()
+	resp := serveRead(t, s, http.MethodGet, "/api/analytics?from=100&to=260&agent=codex")
+	// The cell JSON is flat (YearCell embeds Totals), so the decode struct
+	// embeds its totals block the same way.
+	type yearTotals struct {
+		Requests uint64   `json:"requests"`
+		Tokens   uint64   `json:"tokens"`
+		TokSec   *float64 `json:"tok_sec"`
+		Cost     *float64 `json:"cost"`
+	}
+	type yearCell struct {
+		Day int64 `json:"day"`
+		yearTotals
+	}
+	var out struct {
+		Heatmap struct {
+			From  int64      `json:"from"`
+			To    int64      `json:"to"`
+			Cells []yearCell `json:"cells"`
+		} `json:"heatmap"`
+		Agents []string `json:"agents"`
+	}
+	decodeReadJSON(t, resp, &out)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("code = %d", resp.Code)
+	}
+	if len(out.Agents) != 2 || out.Agents[0] != "codex" || out.Agents[1] != "pi" {
+		t.Fatalf("agents = %v", out.Agents)
+	}
+	// The heatmap window is the FIXED trailing year (server-local midnight
+	// 364 days back through now), independent of the toolbar's from/to.
+	if !yearWindowBounds(before).contains(out.Heatmap.From) {
+		t.Fatalf("heatmap from = %d, want the 1st of the month 12 months back", out.Heatmap.From)
+	}
+	if out.Heatmap.To < before.Unix() || out.Heatmap.To > time.Now().Unix() {
+		t.Fatalf("heatmap to = %d, want ~now", out.Heatmap.To)
+	}
+	if yearQuery.Agent != "codex" || yearQuery.By != "model" || yearQuery.Granularity != "day" {
+		t.Fatalf("year query = %#v, want agent forwarded at day/model", yearQuery)
+	}
+	if len(out.Heatmap.Cells) != 1 {
+		t.Fatalf("cells = %+v, want the two models folded into one day", out.Heatmap.Cells)
+	}
+	c := out.Heatmap.Cells[0]
+	if c.Day != day || c.Requests != 3 || c.Tokens != 22 ||
+		c.TokSec == nil || math.Abs(*c.TokSec-1.25) > 1e-9 ||
+		c.Cost == nil || math.Abs(*c.Cost-(10*.001+5*.002)) > 1e-12 {
+		t.Fatalf("cell = %+v", c)
+	}
+
+	reads.analytics = func(q appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
+		if q.Granularity == "day" {
+			return nil, errors.New("heatmap down")
+		}
+		return []observestats.AnalyticsBucket{}, nil
+	}
+	// week granularity keeps the series/compare reads off the failing
+	// day-granularity branch (day is also the default granularity).
+	failed := serveRead(t, s, http.MethodGet, "/api/analytics?from=1&to=2&granularity=week")
+	var routeError struct {
+		Error string `json:"error"`
+	}
+	decodeReadJSON(t, failed, &routeError)
+	if failed.Code != http.StatusInternalServerError || routeError.Error != "analytics heatmap: heatmap down" {
+		t.Fatalf("heatmap failure = (%d, %#v)", failed.Code, routeError)
 	}
 }

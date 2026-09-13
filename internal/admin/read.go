@@ -382,13 +382,17 @@ func (s *Service) AgentStats(query appapi.AgentStatsQuery) ([]observestats.Agent
 // counters, not upstream usage, so they would otherwise surface as billable
 // models with zero tokens and an "unpriced" hint. By="agent" switches to the
 // agent_buckets dimension (grouped by agent/provider/model); a missing
-// AnalyticsAgents port behaves like a disabled store (empty result).
+// AnalyticsAgents port behaves like a disabled store (empty result). By=model
+// with a non-empty Agent ALSO reads agent_buckets (the only table carrying
+// the agent dimension — the equality filter makes its agent grouping a
+// no-op); the projection clears Agent so the series still key by
+// provider+model, and that table's absent failover/429 counters stay zero.
 func (s *Service) Analytics(query appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
 	var (
 		buckets []observestats.AnalyticsBucket
 		err     error
 	)
-	if query.By == "agent" {
+	if query.By == "agent" || query.Agent != "" {
 		if s.ports.AnalyticsAgents == nil {
 			return []observestats.AnalyticsBucket{}, nil
 		}
@@ -417,9 +421,23 @@ func (s *Service) Analytics(query appapi.AnalyticsQuery) ([]observestats.Analyti
 		if obscounters.IsVirtualProvider(b.Provider) {
 			continue
 		}
+		if query.By != "agent" {
+			b.Agent = ""
+		}
 		out = append(out, b)
 	}
 	return out, nil
+}
+
+// AnalyticsAgentNames lists the distinct agents with traffic in the window
+// (provider/model filtered; the agent filter itself is deliberately ignored
+// by the store so the suggestion list keeps offering alternatives). A
+// missing port behaves like a disabled store.
+func (s *Service) AnalyticsAgentNames(query appapi.AnalyticsQuery) []string {
+	if s.ports.AnalyticsAgentNames == nil {
+		return []string{}
+	}
+	return s.ports.AnalyticsAgentNames(query.From, query.To, query.Provider, query.Model)
 }
 
 func (s *Service) Pricing() appapi.PricingSnapshot {

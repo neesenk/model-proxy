@@ -243,6 +243,16 @@ func (p *Proxy) adminPorts(
 			}
 			return p.stats.QueryAnalyticsAgents(from, to, agent, provider, model, granularity)
 		},
+		AnalyticsAgentNames: func(from, to int64, provider, model string) []string {
+			if p.stats == nil {
+				return []string{}
+			}
+			names, err := p.stats.QueryAgentNames(from, to, provider, model)
+			if err != nil {
+				return []string{}
+			}
+			return names
+		},
 		FusionSnapshot: func(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
 			return p.fusionReg.Snapshot(workflow, now)
 		},

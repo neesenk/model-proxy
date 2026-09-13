@@ -367,6 +367,41 @@ func (s *Store) QueryAnalyticsAgents(from, to int64, agent, provider, model, gra
 	return buckets, rows.Err()
 }
 
+// QueryAgentNames lists the distinct agents with traffic in the window
+// (provider/model filtered). It deliberately ignores any agent filter — the
+// caller uses it as a suggestion list, which must not collapse to the
+// already-selected value.
+func (s *Store) QueryAgentNames(from, to int64, provider, model string) ([]string, error) {
+	query := `SELECT DISTINCT agent FROM agent_buckets WHERE minute >= ? AND minute <= ?`
+	var args []any
+	if provider != "" {
+		query += ` AND provider = ?`
+		args = append(args, provider)
+	}
+	if model != "" {
+		query += ` AND model = ?`
+		args = append(args, model)
+	}
+	query += ` ORDER BY agent`
+	args = append([]any{from, to}, args...)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
 // localCalendarStart turns a SQLite local-time label into the unix instant of
 // the calendar bucket start in time.Local. layout comes from
 // analyticsBucketing; month labels keep their legacy "2006-01" truncation.

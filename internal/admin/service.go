@@ -81,11 +81,13 @@ type Ports struct {
 	// StatsRange/AgentStats/Analytics query the stats store; the closures
 	// return empty (non-nil) slices when the store is disabled. Analytics
 	// reads the (provider, model) calendar buckets; AnalyticsAgents is the
-	// agent-dimension form over agent_buckets.
-	StatsRange      func(from, to int64, provider, model string, bucketSecs int64) ([]observestats.Bucket, error)
-	AgentStats      func(from, to int64, agent, provider, model string, bucketSecs int64) ([]observestats.AgentBucket, error)
-	Analytics       func(from, to int64, provider, model, granularity string) ([]observestats.AnalyticsBucket, error)
-	AnalyticsAgents func(from, to int64, agent, provider, model, granularity string) ([]observestats.AnalyticsBucket, error)
+	// agent-dimension form over agent_buckets. AnalyticsAgentNames lists
+	// the window's distinct agents (the /api/analytics suggestion facet).
+	StatsRange          func(from, to int64, provider, model string, bucketSecs int64) ([]observestats.Bucket, error)
+	AgentStats          func(from, to int64, agent, provider, model string, bucketSecs int64) ([]observestats.AgentBucket, error)
+	Analytics           func(from, to int64, provider, model, granularity string) ([]observestats.AnalyticsBucket, error)
+	AnalyticsAgents     func(from, to int64, agent, provider, model, granularity string) ([]observestats.AnalyticsBucket, error)
+	AnalyticsAgentNames func(from, to int64, provider, model string) []string
 	// FusionSnapshot returns the fusion registry projection for one workflow.
 	FusionSnapshot func(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
 	// Pins returns the active pins (expired ones already dropped).

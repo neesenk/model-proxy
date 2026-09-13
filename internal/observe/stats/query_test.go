@@ -582,3 +582,37 @@ func TestAverageMillisecondsAndLocalCalendarStartFailures(t *testing.T) {
 		t.Errorf("short invalid month = %d, want 0", got)
 	}
 }
+
+func TestQueryAgentNamesWindowAndFilters(t *testing.T) {
+	store := newTestStore(t, 0)
+	mon := time.Date(2026, 1, 5, 9, 30, 0, 0, time.Local)
+	min := func(ts time.Time) int64 { return ts.Unix() / 60 * 60 }
+	if err := store.FlushAgents(min(mon), map[AgentKey]AgentCounters{
+		{Agent: "codex", Provider: "p", Model: "m"}:  {Requests: 2, Input: 10, Output: 5},
+		{Agent: "pi", Provider: "other", Model: "m"}: {Requests: 3, Input: 7},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	names, err := store.QueryAgentNames(min(mon)-60, min(mon)+60, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 2 || names[0] != "codex" || names[1] != "pi" {
+		t.Fatalf("agent names = %+v, want [codex pi]", names)
+	}
+	filtered, err := store.QueryAgentNames(min(mon)-60, min(mon)+60, "p", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 1 || filtered[0] != "codex" {
+		t.Fatalf("provider-filtered names = %+v", filtered)
+	}
+	outOfRange, err := store.QueryAgentNames(min(mon)+120, min(mon)+180, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outOfRange) != 0 {
+		t.Fatalf("out-of-range names = %+v", outOfRange)
+	}
+}

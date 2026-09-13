@@ -19,11 +19,15 @@ var pricedCatalog = &pricing.Catalog{ByModel: map[string]pricing.Entry{
 func TestFoldTotalsDerivesUnifiedMetrics(t *testing.T) {
 	buckets := []observestats.AnalyticsBucket{
 		// 2 requests, 4s call time, 10 in / 5 out / 2 read / 1 written.
-		{Provider: "p", Model: "priced", Bucket: 100, Requests: 2, Input: 10, Output: 5, CacheRead: 2, CacheCreation: 1, LatencySum: 600, TTFTSum: 60, DurationSum: 4000},
-		// 1 request, no duration, no tokens.
-		{Provider: "p", Model: "unpriced", Bucket: 200, Requests: 1},
+		{Provider: "p", Model: "priced", Bucket: 100, Requests: 2, Failovers: 1, RateLimited429: 2, Input: 10, Output: 5, CacheRead: 2, CacheCreation: 1, LatencySum: 600, TTFTSum: 60, DurationSum: 4000},
+		// 1 request, no duration, no tokens, 3 retried failovers.
+		{Provider: "p", Model: "unpriced", Bucket: 200, Requests: 1, Failovers: 3, RateLimited429: 1},
 	}
 	got := FoldTotals(buckets, nil, pricedCatalog)
+	// Attempt counters fold additively alongside the terminal failures.
+	if got.Failovers != 4 || got.RateLimited429 != 3 {
+		t.Errorf("attempt counters = %d/%d, want 4/3", got.Failovers, got.RateLimited429)
+	}
 	// Four-bucket tokens: 10+5+1+2 (priced) + 0 (unpriced).
 	if got.Tokens != 18 {
 		t.Errorf("Tokens = %d, want 18", got.Tokens)
@@ -124,5 +128,41 @@ func TestGroupSeriesKeysAndFoldsOwnBuckets(t *testing.T) {
 	byAgent := Group(agentBuckets, "agent", nil, pricedCatalog)
 	if len(byAgent) != 2 || byAgent[0].Agent != "codex" || byAgent[0].Totals.Requests != 1 || byAgent[1].Totals.Requests != 2 {
 		t.Fatalf("by=agent series = %+v", byAgent)
+	}
+}
+
+func TestYearCellsFoldsDaysThroughTotals(t *testing.T) {
+	// Two models on the same day (fold + per-model pricing) plus a second
+	// day; cells come back ascending by day.
+	buckets := []observestats.AnalyticsBucket{
+		{Provider: "p", Model: "priced", Bucket: 200, Requests: 2, Failovers: 1, RateLimited429: 2, Failures: 1, Input: 10, Output: 5, CacheRead: 5, LatencySum: 1000, DurationSum: 5000},
+		{Provider: "p", Model: "unknown", Bucket: 200, Requests: 1, Input: 20},
+		{Provider: "p", Model: "priced", Bucket: 100, Requests: 3, Failovers: 2, Output: 30, DurationSum: 3000},
+	}
+	cells := YearCells(buckets, nil, pricedCatalog)
+	if len(cells) != 2 {
+		t.Fatalf("cells = %d, want 2: %+v", len(cells), cells)
+	}
+	if cells[0].Day != 100 || cells[1].Day != 200 {
+		t.Fatalf("days = %d/%d, want ascending 100/200", cells[0].Day, cells[1].Day)
+	}
+	c := cells[1]
+	// Fold across models and the day's buckets: requests 3, tokens =
+	// 30 in + 5 out + 5 read = 40, tok/s = 5 output over 5s, err% = 1/3,
+	// cost only from the priced model's 10 in + 5 out + 5 read.
+	if c.Requests != 3 || c.Input != 30 || c.Output != 5 || c.Tokens != 40 {
+		t.Errorf("cell counters = %+v", c.Totals)
+	}
+	if c.Failovers != 1 || c.RateLimited429 != 2 {
+		t.Errorf("cell attempt counters = %d/%d, want 1/2 (other day stays out)", c.Failovers, c.RateLimited429)
+	}
+	if c.TokSec == nil || !almostEqual(*c.TokSec, 1) {
+		t.Errorf("cell tok/s = %v", c.TokSec)
+	}
+	if c.ErrPct == nil || !almostEqual(*c.ErrPct, 100.0/3) {
+		t.Errorf("cell err%% = %v", c.ErrPct)
+	}
+	if c.Cost == nil || !almostEqual(*c.Cost, 10*.001+5*.002+5*.003) {
+		t.Errorf("cell cost = %v (unpriced model must not contribute)", c.Cost)
 	}
 }
