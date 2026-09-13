@@ -29,14 +29,14 @@ func TestRefreshProviderModelsOnceForPool(t *testing.T) {
 	defer srv.Close()
 	cfg := &configdomain.Config{Listen: "127.0.0.1:1",
 		Providers: map[string]configdomain.Provider{"zhipu": {OpenAIBaseURL: srv.URL + "/v1", Provider: "zhipu"}}}
-	entries, err := RefreshProviderModels(cfg, "zhipu")
+	entries, err := RefreshProviderModelInfos(cfg, "zhipu")
 	if err != nil {
 		t.Fatalf("refreshProviderModels: %v", err)
 	}
 	if got := hits.Load(); got != 1 {
 		t.Fatalf("/models hit %d times, want 1 (pool must not fan out)", got)
 	}
-	if len(entries) == 0 || entries[0] != "glm-5" {
+	if len(entries) == 0 || entries[0].ID != "glm-5" {
 		t.Fatalf("entries = %v, want [glm-5]", entries)
 	}
 }
@@ -64,14 +64,14 @@ func TestRefreshProviderModels_SingleAccount(t *testing.T) {
 	defer srv.Close()
 	cfg := &configdomain.Config{Listen: "127.0.0.1:1",
 		Providers: map[string]configdomain.Provider{"zhipu": {OpenAIBaseURL: srv.URL + "/v1", Provider: "zhipu"}}}
-	entries, err := RefreshProviderModels(cfg, "zhipu")
+	entries, err := RefreshProviderModelInfos(cfg, "zhipu")
 	if err != nil {
 		t.Fatalf("refreshProviderModels: %v", err)
 	}
 	if got := hits.Load(); got != 1 {
 		t.Fatalf("/models hit %d times, want 1", got)
 	}
-	if len(entries) != 1 || entries[0] != "glm-5.2" {
+	if len(entries) != 1 || entries[0].ID != "glm-5.2" {
 		t.Fatalf("entries = %v, want [glm-5.2]", entries)
 	}
 }
@@ -81,7 +81,7 @@ func TestRefreshProviderModels_Unknown(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"a": {Provider: "static"}}}
-	_, err := RefreshProviderModels(cfg, "nope")
+	_, err := RefreshProviderModelInfos(cfg, "nope")
 	if err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Errorf("unknown provider: err=%v want 'unknown provider'", err)
 	}

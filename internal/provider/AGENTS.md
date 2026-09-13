@@ -8,6 +8,7 @@
   `AuthHeaders`、`Refresh`、`RewriteRequest`、`Logout`、`Usage`、`FetchModels`、`Quota`、`ProbeRequest`、`ExtraHeaders`、`FilterModelIDs`。
 - `Login` 不属于接口，交互登录由 `internal/cli/login` 编排（组合根在 `internal/app`）。
 - 共享默认行为通过 `ApiKeyBase` 和 `baseProbe` 组合：默认 probe 是 OpenAI `POST /chat/completions`，默认 ExtraHeaders no-op，默认 model filter 透传。
+- `ModelInfoLister`（可选接口，`FetchModelInfos`）：/models 自报展示名（`display_name`）的 provider 升级实现（当前 kimi-code），供 `models refresh` 展现“稳定 id 背后换模型”的信号；共享实现在 `fetchModelInfosBearer`，未实现的 provider 自动退化为纯 id。
 - provider 专属 auth、endpoint、request rewrite、quota/usage parser、probe header 和 model filter 全部留在本包。
 - 禁止要求 main 包根据 provider id 分支处理这些知识。
 - `ProbeRequest`、`ExtraHeaders`、`FilterModelIDs` 的默认实现集中在 `baseProbe`。

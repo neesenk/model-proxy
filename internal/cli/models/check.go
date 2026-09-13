@@ -316,7 +316,12 @@ func MergeStringIDs(a, b []string) []string {
 // `model-proxy models` display. Shown BEFORE the filter summary.
 // `meta`/`sources` come from hydrateModels (keyed by provider -> model id);
 // `protocols` is provider -> model -> the 3-protocol verdict matrix (nil → "-").
-func PrintKeptModels(provName string, kept []string, meta map[string]map[string]catalog.Model, sources map[string]map[string]routing.ModelSource, protocols map[string]map[string]runtimewire.ModelProtocols) {
+// `upstreamNames` (may be nil) carries live display names from the provider's
+// /models (provider.ModelInfoLister): the NAME column prefers them — an
+// upstream can swap the model behind a stable id (Kimi Code serves "K2.8
+// Preview" as `kimi-for-coding`), and the upstream's own name is the only
+// signal that surfaces the swap. Falls back to the id otherwise.
+func PrintKeptModels(provName string, kept []string, meta map[string]map[string]catalog.Model, sources map[string]map[string]routing.ModelSource, protocols map[string]map[string]runtimewire.ModelProtocols, upstreamNames map[string]string) {
 	if len(kept) == 0 {
 		fmt.Println(display.Yellow("(no models)"))
 		return
@@ -332,6 +337,9 @@ func PrintKeptModels(provName string, kept []string, meta map[string]map[string]
 			m = meta[provName][id]
 		}
 		name := id
+		if upstreamNames != nil && upstreamNames[id] != "" {
+			name = upstreamNames[id]
+		}
 		ctx := "-"
 		if m.Context > 0 {
 			ctx = fmt.Sprintf("%d", m.Context)

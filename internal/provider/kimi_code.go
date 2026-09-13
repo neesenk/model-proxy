@@ -73,6 +73,15 @@ func (p *KimiCodeProvider) FetchModels() ([]string, error) {
 	return fetchModelsBearer(p.cfg, p.AuthHeaders)
 }
 
+// FetchModelInfos is the display-name-aware FetchModels upgrade (see
+// provider.ModelInfoLister): Kimi Code's /models reports `display_name`
+// ("K2.8 Preview", "K3", …) next to the API ids, and the ids are stable while
+// the model behind them is not — `models refresh` surfaces the names so the
+// swap is visible without the vendor CLI.
+func (p *KimiCodeProvider) FetchModelInfos() ([]ModelInfo, error) {
+	return fetchModelInfosBearer(p.cfg, p.AuthHeaders)
+}
+
 // ProbeRequest overrides the OpenAI default: Kimi Code's anthropic_base_url speaks
 // the Anthropic messages API, so the probe goes to /v1/messages (base does NOT
 // include /v1; the SDK appends it) with an anthropic body. Mirrors forward's

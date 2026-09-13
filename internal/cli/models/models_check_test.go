@@ -540,8 +540,13 @@ func TestPrintKeptModels(t *testing.T) {
 			// kimi-k2.6 has no entry -> "-"
 		},
 	}
+	// Upstream display names: the NAME column prefers the live upstream name —
+	// an upstream can swap the model behind a stable id (Kimi Code serves
+	// "K2.8 Preview" as `kimi-for-coding`), and the upstream's own name is the
+	// only signal that surfaces the swap.
+	upstream := map[string]string{"kimi-k2.6": "K2.8 Preview"}
 	out := grabStdout(t, func() {
-		PrintKeptModels("volcengine", []string{"glm-5.2", "kimi-k2.6"}, meta, sources, protocols)
+		PrintKeptModels("volcengine", []string{"glm-5.2", "kimi-k2.6"}, meta, sources, protocols, upstream)
 	})
 	if !strings.Contains(out, "glm-5.2") || !strings.Contains(out, "kimi-k2.6") {
 		t.Errorf("printKeptModels missing models: %q", out)
@@ -570,10 +575,14 @@ func TestPrintKeptModels(t *testing.T) {
 	if !strings.Contains(out, "chat/resp") {
 		t.Errorf("printKeptModels missing PROTOCOLS=chat/resp for glm-5.2: %q", out)
 	}
+	// NAME column: upstream display name wins over the id fallback.
+	if !strings.Contains(out, "K2.8 Preview") {
+		t.Errorf("printKeptModels missing upstream display name: %q", out)
+	}
 }
 
 func TestPrintKeptModels_Empty(t *testing.T) {
-	out := grabStdout(t, func() { PrintKeptModels("x", nil, nil, nil, nil) })
+	out := grabStdout(t, func() { PrintKeptModels("x", nil, nil, nil, nil, nil) })
 	if !strings.Contains(out, "(no models)") {
 		t.Errorf("empty printKeptModels=%q want (no models)", out)
 	}

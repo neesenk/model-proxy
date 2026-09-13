@@ -143,9 +143,13 @@ providers:
     # naming the same model differently aggregate into one route. Requests are
     # rewritten to the upstream name "k3"; the response's model field is
     # normalized back to the called name, so clients only ever see "kimi-k3".
+    # kimi-for-coding: Moonshot serves "K2.8 Preview" under this STABLE id (the
+    # upstream swaps the model behind the id — 'models refresh' prints the
+    # upstream display names so the swap is visible); exposed as
+    # kimi-k2.8-preview to match what the model actually is.
     alias:
       k3: kimi-k3
-      kimi-for-coding: kimi-k2.7-code
+      kimi-for-coding: kimi-k2.8-preview
     models:
       - k3
       - k3-256k

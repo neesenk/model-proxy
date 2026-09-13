@@ -378,3 +378,49 @@ func TestCLI_ModelsDisplay_ProtocolsColumn(t *testing.T) {
 		}
 	}
 }
+
+// --- models refresh <kimi-code>: upstream display names are surfaced ---
+
+// TestCLI_ModelsRefreshKimiCodeDisplayNames pins the id-stable/model-swapped
+// signal end to end: Kimi Code serves "K2.8 Preview" under the unchanged id
+// `kimi-for-coding`, so refresh's id diff stays empty — the upstream display
+// name is the only visible cue. It must appear both as a stderr per-model line
+// and in the kept table's NAME column.
+func TestCLI_ModelsRefreshKimiCodeDisplayNames(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/models" {
+			w.Write([]byte(`{"object":"list","data":[
+				{"id":"kimi-for-coding","object":"model","display_name":"K2.8 Preview"},
+				{"id":"k3","object":"model","display_name":"K3"}
+			]}`))
+			return
+		}
+		// Probe legs (chat/responses): 200 with an empty body classifies Yes.
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfgBody := "listen: 127.0.0.1:15721\nproviders:\n  kimi-code:\n    openai_base_url: " + srv.URL + "\n    provider_id: kimi-code\n    models:\n      - kimi-for-coding\n      - k3\n"
+	cfgPath := clitest.WriteTempConfig(t, cfgBody)
+
+	home := t.TempDir()
+	credDir := filepath.Join(home, ".model-proxy")
+	os.MkdirAll(credDir, 0o700)
+	os.WriteFile(filepath.Join(credDir, "kimi-code_apikey.json"), []byte(`{"api_key":"test-key"}`), 0o600)
+
+	stdout, stderr, code := clitest.RunCLIWithHome(t, home, "models", cfgPath, "refresh", "kimi-code")
+	if code != 0 {
+		t.Fatalf("models refresh kimi-code: exit=%d want 0\nstderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "upstream model name: kimi-for-coding -> K2.8 Preview") {
+		t.Errorf("stderr missing the display-name line:\n%s", stderr)
+	}
+	if !strings.Contains(stdout, "K2.8 Preview") {
+		t.Errorf("kept table NAME column missing K2.8 Preview:\n%s", stdout)
+	}
+	// Ids unchanged -> no config diff, no rewrite noise.
+	if strings.Contains(stderr, "config: added") || strings.Contains(stderr, "config: removed") {
+		t.Errorf("unexpected config diff for an unchanged id set:\n%s", stderr)
+	}
+}

@@ -14,17 +14,22 @@ import (
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/configedit"
+	"model-proxy/internal/provider"
 	"model-proxy/internal/providerbuild"
 	"model-proxy/internal/routing"
 	runtimewire "model-proxy/internal/runtime/wirecap"
 )
 
 // Model entry as returned by the gateway's /models endpoint (OpenAI-style).
+// DisplayName carries the upstream's presentation name when it reports one
+// (provider.ModelInfoLister — e.g. Kimi Code's "K2.8 Preview" on the stable id
+// `kimi-for-coding`); empty when the upstream only lists ids.
 type ModelEntry struct {
 	ID            string `json:"id"`
 	Object        string `json:"object"`
 	OwnedBy       string `json:"owned_by"`
 	ContextWindow int64  `json:"context_window"`
+	DisplayName   string `json:"display_name"`
 }
 
 // cmdModels handles:
@@ -85,8 +90,24 @@ func CmdModels(args []string, cfg *configdomain.Config, configFile string) {
 			// removes ids no protocol leg classifies Yes (e.g. non-chat models
 			// the upstream's /models lists but its endpoints reject).
 			merged = MergeModelIDs(existing, entries)
+			// Upstream display names, printed at fetch time (all paths see them;
+			// the kept table's NAME column repeats them). An upstream can swap
+			// the model behind a stable id — Kimi Code serves "K2.8 Preview" as
+			// `kimi-for-coding` — and the id set alone would never reveal it.
+			for _, e := range entries {
+				if e.DisplayName != "" && e.DisplayName != e.ID {
+					fmt.Fprintf(os.Stderr, "upstream model name: %s -> %s\n", e.ID, e.DisplayName)
+				}
+			}
 		}
-		ProbeAndWriteModels(cfg, provName, merged, existing, args, configFile)
+		// Upstream names also feed the kept table's NAME column.
+		names := map[string]string{}
+		for _, e := range entries {
+			if e.DisplayName != "" {
+				names[e.ID] = e.DisplayName
+			}
+		}
+		ProbeAndWriteModels(cfg, provName, merged, existing, names, args, configFile)
 		return
 	}
 	// models [provider] — config + models.dev supplement
@@ -177,15 +198,16 @@ func PrintAllModels(cfg *configdomain.Config, provFilter string, meta map[string
 }
 
 // fetchProviderModels fetches the live model list from a provider. Delegates to
-// the provider's FetchModels() implementation (which lives in the provider/ layer).
+// the provider's FetchModels() implementation (which lives in the provider/ layer),
+// upgrading to FetchModelInfos (display names) when the provider reports them.
 func FetchProviderModels(cfg *configdomain.Config, provName string) ([]ModelEntry, error) {
-	ids, err := RefreshProviderModels(cfg, provName)
+	infos, err := RefreshProviderModelInfos(cfg, provName)
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]ModelEntry, 0, len(ids))
-	for _, id := range ids {
-		entries = append(entries, ModelEntry{ID: id, Object: "model", OwnedBy: provName})
+	entries := make([]ModelEntry, 0, len(infos))
+	for _, m := range infos {
+		entries = append(entries, ModelEntry{ID: m.ID, Object: "model", OwnedBy: provName, DisplayName: m.DisplayName})
 	}
 	return entries, nil
 }
@@ -205,8 +227,8 @@ func FetchProviderModels(cfg *configdomain.Config, provName string) ([]ModelEntr
 // failed (allProbeFailed - likely not-logged-in / network), the candidate set is
 // kept unvalidated rather than wiping `models:`; the latter still surfaces the
 // failures as a warning via printFilterSummary.
-func ProbeAndWriteModels(cfg *configdomain.Config, provName string, merged, existing []string, args []string, configFile string) {
-	if err := probeAndWriteModels(cfg, provName, merged, existing, args, configFile, productionProbeAndWriteModelsOps()); err != nil {
+func ProbeAndWriteModels(cfg *configdomain.Config, provName string, merged, existing []string, upstreamNames map[string]string, args []string, configFile string) {
+	if err := probeAndWriteModels(cfg, provName, merged, existing, upstreamNames, args, configFile, productionProbeAndWriteModelsOps()); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -215,9 +237,12 @@ func ProbeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 // machine can be tested with deterministic policy/probe/write collaborators
 // without exposing mutable production hooks or reaching a real provider.
 type probeAndWriteModelsOps struct {
-	filter  func(*configdomain.Config, string, []string) ([]string, []string)
-	probe   func(*configdomain.Config, string, []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, error)
-	display func(*configdomain.Config, string, []string, []DropReason, map[string]runtimewire.ModelProtocols, error, bool)
+	filter func(*configdomain.Config, string, []string) ([]string, []string)
+	probe  func(*configdomain.Config, string, []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, error)
+	// upstreamNames (may be nil): live display names from the provider's
+	// /models (provider.ModelInfoLister), shown in the kept table's NAME
+	// column ahead of the id fallback.
+	display func(*configdomain.Config, string, []string, []DropReason, map[string]runtimewire.ModelProtocols, map[string]string, error, bool)
 	write   func(string, string, []string) error
 	reload  func([]string, *configdomain.Config)
 }
@@ -226,13 +251,13 @@ func productionProbeAndWriteModelsOps() probeAndWriteModelsOps {
 	return probeAndWriteModelsOps{
 		filter: ApplyProviderModelFilter,
 		probe:  CheckProviderModels,
-		display: func(cfg *configdomain.Config, provName string, policyDropped []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, perr error, allProbeFailed bool) {
+		display: func(cfg *configdomain.Config, provName string, policyDropped []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, upstreamNames map[string]string, perr error, allProbeFailed bool) {
 			cat, _ := configdomain.LoadModelsCatalog(homeDir(), false)
 			meta, sources := routing.HydrateModels(cfg, cat)
 			// Refresh just computed the matrix — pass it directly (no file
 			// round-trip; the PROTOCOLS column shows the fresh verdicts).
 			byProvider := map[string]map[string]runtimewire.ModelProtocols{provName: protocols}
-			PrintKeptModels(provName, cfg.Providers[provName].Models, meta, sources, byProvider)
+			PrintKeptModels(provName, cfg.Providers[provName].Models, meta, sources, byProvider, upstreamNames)
 			PrintFilterSummary(policyDropped, dropped, perr, allProbeFailed)
 		},
 		write:  WriteProviderModels,
@@ -240,7 +265,7 @@ func productionProbeAndWriteModelsOps() probeAndWriteModelsOps {
 	}
 }
 
-func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, existing []string, args []string, configFile string, ops probeAndWriteModelsOps) error {
+func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, existing []string, upstreamNames map[string]string, args []string, configFile string, ops probeAndWriteModelsOps) error {
 	// Policy filter (provider-specific static rules via the provider impl's
 	// FilterModelIDs, applied to BOTH pre-existing config ids and freshly-fetched
 	// ones so a stale config is cleaned up too). Currently volcengine drops
@@ -274,7 +299,7 @@ func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 	cfg.Providers[provName] = provCfg
 
 	// Output order: final list FIRST, then the filter summary with reasons.
-	ops.display(cfg, provName, policyDropped, dropped, protocols, perr, allProbeFailed)
+	ops.display(cfg, provName, policyDropped, dropped, protocols, upstreamNames, perr, allProbeFailed)
 
 	// Write the validated list (overwrite, not append-only). writeProviderModels
 	// re-encodes the whole models: sequence, so ids absent from `kept` (both
@@ -331,16 +356,17 @@ func WriteProviderModels(configFile, provName string, names []string) error {
 	})
 }
 
-// refreshProviderModels fetches the live model list for a provider exactly once.
-// If `provName` is a pooled parent (≥2 accounts in its credential pool) it uses
-// the pool's first virtual by account-id order; else it uses the plain provider
-// name. The model list is per-upstream, not per-account, so one fetch is correct
-// and sufficient — fanning out across the pool would multiply upstream calls
-// without changing the result.
+// refreshProviderModels fetches the live model list for a provider exactly once,
+// with presentation names when the upstream reports them. If `provName` is a
+// pooled parent (≥2 accounts in its credential pool) it uses the pool's first
+// virtual by account-id order; else it uses the plain provider name. The model
+// list is per-upstream, not per-account, so one fetch is correct and sufficient
+// — fanning out across the pool would multiply upstream calls without changing
+// the result.
 //
-// Returns the raw model IDs; callers that need ModelEntry wrapping (e.g. the
-// `models refresh` CLI display) use fetchProviderModels, which delegates here.
-func RefreshProviderModels(cfg *configdomain.Config, provName string) ([]string, error) {
+// Providers implementing provider.ModelInfoLister return display names
+// (Kimi Code: "K2.8 Preview"); the rest degrade to plain ids with empty names.
+func RefreshProviderModelInfos(cfg *configdomain.Config, provName string) ([]provider.ModelInfo, error) {
 	if _, ok := cfg.Providers[provName]; !ok {
 		return nil, fmt.Errorf("unknown provider %q", provName)
 	}
@@ -353,7 +379,18 @@ func RefreshProviderModels(cfg *configdomain.Config, provName string) ([]string,
 	if !ok || impl == nil {
 		return nil, fmt.Errorf("provider %q not available (not logged in?)", provName)
 	}
-	return impl.FetchModels()
+	if lister, ok := impl.(provider.ModelInfoLister); ok {
+		return lister.FetchModelInfos()
+	}
+	ids, err := impl.FetchModels()
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]provider.ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		infos = append(infos, provider.ModelInfo{ID: id})
+	}
+	return infos, nil
 }
 
 // poolVirtuals returns the sorted virtual ids ("name#<accountID>") for a pooled

@@ -452,6 +452,12 @@ stdout：`models.dev catalog refreshed: <N> unique models, etag <ETAG>`。网络
 
 候选集：`FetchModels()` 成功 -> `mergeModelIDs(existing, fetched)`；**`FetchModels` 失败（无 `/models` 端点 / 未登录 / 网络错）-> fallback**：stderr 通知 + `mergeStringIDs(existing, routeModelsForProvider(cfg, prov))`。然后统一走 `probeAndWriteModels`。
 
+**上游 display name（`provider.ModelInfoLister`，fetch 成功时）**：实现了该可选接口的 provider（kimi-code）会把上游自报的展示名逐行打到 stderr：
+```
+upstream model name: <ID> -> <DISPLAY_NAME>
+```
+仅当 display name 存在且 ≠ id 时打印。背景：上游可能在**稳定 id 背后换模型**（Kimi Code 把 "K2.8 Preview" 塞进 `kimi-for-coding`，id 不变、模型已换）——id 集合永远显不了形，上游自报名是唯一信号（也是厂商 CLI 展示给用户的名字）。
+
 **stderr 通知（fallback 时）**：
 ```
 Refreshing models from <PROVNAME>...
@@ -468,7 +474,7 @@ MODEL ID                       NAME                  CTX         OUTPUT    INPUT
 <kept rows>
 provider: <PROVNAME>: <N> models
 ```
-列宽：MODEL ID 26 / NAME 20 / CTX 10 / OUTPUT 8 / INPUT MODALITIES 18 / SRC 10 / PROTOCOLS 12。空集 -> stdout `(no models)`（黄）。`PROTOCOLS` 直接取本次探测刚算出的矩阵（不经文件往返），渲染规则同 `models` 列表。
+列宽：MODEL ID 26 / NAME 20 / CTX 10 / OUTPUT 8 / INPUT MODALITIES 18 / SRC 10 / PROTOCOLS 12。空集 -> stdout `(no models)`（黄）。`PROTOCOLS` 直接取本次探测刚算出的矩阵（不经文件往返），渲染规则同 `models` 列表。**NAME 列优先显示上游自报的 display name**（本次 fetch 的 live 数据，仅 ModelInfoLister provider 有），回落到 id——上游在稳定 id 背后换模型时，这里是唯一可见信号。
 
 **探测与 model_caps.json**：`checkProviderModels` 对每个候选 id 跑 3 协议矩阵探测（`probe.ProbeModelProtocols`：chat / anthropic / responses 腿，anthropic 腿仅在配置 `anthropic_base_url` 时探测），每腿经 `wirecap.ClassifyModelStatus` 归类 Yes/No/Unknown。**任一腿 Yes 即保留**，否则 drop。探测成功后把该 provider 的新鲜矩阵**整体替换式**写入 `~/.model-proxy/model_caps.json`（fingerprint = `providerbuild.ProtocolConfigFingerprint`，best-effort：失败仅 stderr 告警，不影响 refresh；`perr` 时不写）。
 

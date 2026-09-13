@@ -32,7 +32,7 @@ func TestProbeAndWriteModelsProbeErrorKeepsAndWritesCandidates(t *testing.T) {
 			}
 			return nil, []DropReason{{Model: "must-be-cleared", Status: 401}}, nil, probeErr
 		},
-		display: func(gotCfg *configdomain.Config, provider string, policyDropped []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, perr error, allFailed bool) {
+		display: func(gotCfg *configdomain.Config, provider string, policyDropped []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, upstreamNames map[string]string, perr error, allFailed bool) {
 			displayCalls++
 			if gotCfg != cfg || provider != "aqp" {
 				t.Fatalf("display target = (%p, %q)", gotCfg, provider)
@@ -63,7 +63,7 @@ func TestProbeAndWriteModelsProbeErrorKeepsAndWritesCandidates(t *testing.T) {
 		},
 	}
 
-	err := probeAndWriteModels(cfg, "aqp", []string{"old-model", "candidate-b", "candidate-a"}, []string{"old-model"}, nil, "config.yaml", ops)
+	err := probeAndWriteModels(cfg, "aqp", []string{"old-model", "candidate-b", "candidate-a"}, []string{"old-model"}, nil, nil, "config.yaml", ops)
 	if err != nil {
 		t.Fatalf("probeAndWriteModels: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestProbeAndWriteModelsAllProbeFailedDoesNotWipe(t *testing.T) {
 		probe: func(*configdomain.Config, string, []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, error) {
 			return nil, probeDrops, probeMatrix, nil
 		},
-		display: func(gotCfg *configdomain.Config, provider string, _ []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, perr error, allFailed bool) {
+		display: func(gotCfg *configdomain.Config, provider string, _ []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, _ map[string]string, perr error, allFailed bool) {
 			if perr != nil || !allFailed {
 				t.Fatalf("display state = perr %v allFailed %v", perr, allFailed)
 			}
@@ -125,7 +125,7 @@ func TestProbeAndWriteModelsAllProbeFailedDoesNotWipe(t *testing.T) {
 		reload: func([]string, *configdomain.Config) { reloadCalls++ },
 	}
 
-	err := probeAndWriteModels(cfg, "aqp", []string{"old-model", "candidate-a", "candidate-b"}, []string{"old-model"}, nil, "config.yaml", ops)
+	err := probeAndWriteModels(cfg, "aqp", []string{"old-model", "candidate-a", "candidate-b"}, []string{"old-model"}, nil, nil, "config.yaml", ops)
 	if err != nil {
 		t.Fatalf("probeAndWriteModels: %v", err)
 	}
@@ -150,13 +150,13 @@ func TestProbeAndWriteModelsWriteFailureDoesNotReload(t *testing.T) {
 		probe: func(*configdomain.Config, string, []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, error) {
 			return []string{"new-model"}, nil, nil, nil
 		},
-		display: func(*configdomain.Config, string, []string, []DropReason, map[string]runtimewire.ModelProtocols, error, bool) {
+		display: func(*configdomain.Config, string, []string, []DropReason, map[string]runtimewire.ModelProtocols, map[string]string, error, bool) {
 		},
 		write:  func(string, string, []string) error { return writeErr },
 		reload: func([]string, *configdomain.Config) { reloadCalls++ },
 	}
 
-	err := probeAndWriteModels(cfg, "aqp", []string{"new-model"}, []string{"old-model"}, nil, "config.yaml", ops)
+	err := probeAndWriteModels(cfg, "aqp", []string{"new-model"}, []string{"old-model"}, nil, nil, "config.yaml", ops)
 	if !errors.Is(err, writeErr) {
 		t.Fatalf("probeAndWriteModels error = %v, want %v", err, writeErr)
 	}

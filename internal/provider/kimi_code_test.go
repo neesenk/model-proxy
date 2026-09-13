@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -505,4 +506,52 @@ func findWindowByLabel(t *testing.T, ws []QuotaWindow, label string) QuotaWindow
 	}
 	t.Fatalf("window %q not found in %d windows", label, len(ws))
 	return QuotaWindow{}
+}
+
+// TestKimiCodeFetchModelInfos_DisplayNames pins the ModelInfoLister contract:
+// /models entries carry display_name next to the (stable) API ids — Kimi Code
+// serves "K2.8 Preview" under the id `kimi-for-coding`, and the id set alone
+// can never reveal that swap. FetchModels keeps returning plain ids.
+func TestKimiCodeFetchModelInfos_DisplayNames(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Errorf("path=%q want /models", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer sk-kimi-123" {
+			t.Errorf("auth=%q want Bearer sk-kimi-123", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"object":"list","data":[
+			{"id":"kimi-for-coding","object":"model","display_name":"K2.8 Preview"},
+			{"id":"k3","object":"model","display_name":"K3"},
+			{"id":"k3-256k","object":"model"}
+		]}`))
+	}))
+	defer srv.Close()
+	p := newTestKimiCode(t)
+	p.cfg.OpenAIBaseURL = srv.URL
+	if err := p.SaveKey("sk-kimi-123"); err != nil {
+		t.Fatal(err)
+	}
+
+	infos, err := p.FetchModelInfos()
+	if err != nil {
+		t.Fatalf("FetchModelInfos: %v", err)
+	}
+	want := []ModelInfo{
+		{ID: "kimi-for-coding", DisplayName: "K2.8 Preview"},
+		{ID: "k3", DisplayName: "K3"},
+		{ID: "k3-256k"}, // display_name is optional
+	}
+	if !reflect.DeepEqual(infos, want) {
+		t.Fatalf("FetchModelInfos()=%v\nwant %v", infos, want)
+	}
+
+	ids, err := p.FetchModels()
+	if err != nil {
+		t.Fatalf("FetchModels: %v", err)
+	}
+	if !reflect.DeepEqual(ids, []string{"kimi-for-coding", "k3", "k3-256k"}) {
+		t.Fatalf("FetchModels()=%v", ids)
+	}
 }
