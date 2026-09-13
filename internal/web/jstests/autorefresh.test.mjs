@@ -78,6 +78,42 @@ test('the Analytics 30s tick gates at entry and at commit time', () => {
   assert.ok(stop.includes('cancelAutoRefreshHold'), 'stopping analytics auto-refresh must drop the pending hold refresh');
 });
 
+test('the Security and Accounts 30s ticks gate, guard and stop cleanly', () => {
+  // Security: interval tick passes through the gate and only while active.
+  const sec = fnBody(appJs, 'securityMaybeAutoRefresh');
+  assert.ok(sec.includes("classList.contains('active')"), 'the security tick must no-op off-tab');
+  assert.ok(count(sec, 'deferAutoRefresh(panel') >= 1, 'the security tick must pass through the gate');
+  const secStop = fnBody(appJs, 'securityStopAutoRefresh');
+  assert.ok(secStop.includes('cancelAutoRefreshHold'), 'stopping security auto-refresh must drop the pending hold refresh');
+  // Accounts: same gate/active discipline plus the mid-operation guard —
+  // probes/quota polls/Test All disable their buttons, and a background
+  // re-render would wipe their progress.
+  const acc = fnBody(appJs, 'accountsMaybeAutoRefresh');
+  assert.ok(acc.includes("classList.contains('active')"), 'the accounts tick must no-op off-tab');
+  assert.ok(acc.includes('button:disabled'), 'the accounts tick must skip while an operation is in flight');
+  assert.ok(count(acc, 'deferAutoRefresh(panel') >= 1, 'the accounts tick must pass through the gate');
+  const accStop = fnBody(appJs, 'accountsStopAutoRefresh');
+  assert.ok(accStop.includes('cancelAutoRefreshHold'), 'stopping accounts auto-refresh must drop the pending hold refresh');
+  // loadAccountsData carries the commit-time gate for background loads.
+  const load = fnBody(appJs, 'loadAccountsData');
+  assert.ok(load.includes('deferAutoRefresh(panel, () => loadAccountsData(true))'),
+    'background account loads must gate the landing render');
+  assert.ok(load.includes("staleDataText('refresh failed'"),
+    'background account failures must keep old data and use the stale banner');
+  // Leaving either tab (either activator) stops both tickers — and the
+  // stop names must MATCH the definitions (a wrong name is a runtime
+  // ReferenceError the syntax check cannot catch).
+  assert.ok(appJs.includes('function securityStopAutoRefresh()'), 'securityStopAutoRefresh must be defined');
+  assert.ok(appJs.includes('function accountsStopAutoRefresh()'), 'accountsStopAutoRefresh must be defined');
+  for (const activator of ['activateTab', 'activateTabSilent']) {
+    const body = fnBody(appJs, activator);
+    assert.ok(body.includes('securityStopAutoRefresh();'),
+      activator + ' must stop the security ticker when leaving the tab');
+    assert.ok(body.includes('accountsStopAutoRefresh();'),
+      activator + ' must stop the accounts ticker when leaving the tab');
+  }
+});
+
 test('every transient popup layer carries data-popup', () => {
   // .tr-popover: tokens picker + analytics picker (two template sites).
   assert.equal(count(appJs, 'class="tr-popover" data-popup'), 2,

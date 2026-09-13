@@ -30,11 +30,16 @@ import {
   parseSSE, isSSE, prettyJSON, formatJSONLoose, highlightJSON, splitLinesByBudget, linkedModels,
   sessionsForAgent, linkedAgents,
   analyticsChartSeries, analyticsTableRows, ANALYTICS_METRICS, pctDelta,
-  analyticsGranularity, analyticsGranOptions, analyticsValueText, modelHealthFromSeries, fmtCompact, liveSessionSummary, liveSessionOrder, shortSessionId, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary,
+  analyticsGranularity, analyticsGranOptions, analyticsValueText, modelHealthFromSeries, fmtCompact,
+  HEAT_DAYS, analyticsHeatLevel, analyticsYearGrid, analyticsYearMonthSpans, analyticsHeatCellSize, analyticsHeatTipLines,
+  analyticsRowSortKey, ANALYTICS_TABLE_SORT, analyticsSortRows,
+  analyticsMetricOptions, analyticsMetricAllowed,
+  liveSessionSummary, liveSessionOrder, shortSessionId, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
   detailFetchState, quotaErrKind, accountUsageState,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, securityKpisHTML, mergeSecurityFeed,
+  SECURITY_RANGES, securityRangeFromSecs, securityFilterQuery, securityFilterFromQuery,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
   iconPin, iconRefresh, iconChevron, statusBadgeHTML, kpiDeltaClass, logLineHTML,
 } from './pure.js';
@@ -239,6 +244,10 @@ let activeTab = 'status';
 //                                  filter values ride along)
 //   #status/live?session=…        (Status → Live section with one session
 //                                  selected — same refresh/restore story)
+//   #security?kind=…&verdict=…&range=…&rule=…
+//                                 (Security tab filter — same story: kind is
+//                                  the server-side audit query filter, the
+//                                  rest narrow the merged feed client-side)
 //
 // activateTab/selectProvider push the hash; a hashchange listener (browser
 // back/forward) re-activates without pushing, so the two stay in sync without a
@@ -279,6 +288,19 @@ function statusHash() {
 function requestsHash() {
   const q = requestsFilterQuery(requestsFilter);
   return '#requests' + (q ? '?' + q : '');
+}
+
+// securityHash builds the Security URL hash from the live filter (same
+// only-non-defaults rule — an unfiltered tab stays a clean #security).
+function securityHash() {
+  const q = securityFilterQuery(securityFilter);
+  return '#security' + (q ? '?' + q : '');
+}
+
+// updateSecurityHash mirrors filter changes into the URL (replaceState, like
+// updateRequestsHash — in-tab refinement must not spam history).
+function updateSecurityHash() {
+  if (activeTab === 'security') setHash(securityHash(), false);
 }
 
 // updateRequestsHash mirrors filter changes into the URL (replaceState, like
@@ -338,10 +360,14 @@ function activateTab(name) {
     if (p) p.classList.toggle('active', k === name);
   }
   if (name === 'status') {
+    securityStopAutoRefresh();
+    accountsStopAutoRefresh();
     renderStatusTab();
   } else {
     stopStatusRefresh();
     stopLiveEvents();
+    securityStopAutoRefresh();
+    accountsStopAutoRefresh();
   }
   if (name === 'config') renderConfigTab();
   if (name === 'accounts') renderAccountsTab();
@@ -354,6 +380,7 @@ function activateTab(name) {
   // its active section so a refresh lands on the same view.
   if (name === 'status') setHash(statusHash(), true);
   else if (name === 'requests') setHash(requestsHash(), true);
+  else if (name === 'security') setHash(securityHash(), true);
   else if (name !== 'accounts') setHash(tabHash(name), true);
 }
 
@@ -366,9 +393,12 @@ for (const b of tabBtns) {
 window.addEventListener('hashchange', () => {
   const { tab, sub, query } = parseHash();
   // Seed the Requests filter BEFORE activation: the first mount templates the
-  // free inputs from it and the re-entry path loads through it.
+  // free inputs from it and the re-entry path loads through it. Same for the
+  // Security filter (its first mount templates the selects from it).
   const nextFilter = tab === 'requests' ? requestsFilterFromQuery(query) : null;
   if (nextFilter) requestsFilter = nextFilter;
+  const secSeed = tab === 'security' ? securityFilterFromQuery(query) : null;
+  if (secSeed) securityFilter = secSeed;
   const switched = tab !== activeTab;
   if (switched) {
     activateTabSilent(tab);
@@ -403,6 +433,16 @@ window.addEventListener('hashchange', () => {
       loadRequests(requestsCombos);
     }
   }
+  if (tab === 'security' && secSeed) {
+    // Mirror image of the requests branch: after a switch the tab render
+    // already ran through the seeded filter; without one (an in-tab hash
+    // edit / leaderboard drill) sync the controls and reload in place.
+    syncSecurityControls();
+    if (!switched && document.getElementById('sec-table')) {
+      loadSecurity();
+      renderSecurityFeed();
+    }
+  }
 });
 
 // activateTab without the hash push (called from hashchange).
@@ -417,10 +457,14 @@ function activateTabSilent(name) {
     if (p) p.classList.toggle('active', k === name);
   }
   if (name === 'status') {
+    securityStopAutoRefresh();
+    accountsStopAutoRefresh();
     renderStatusTab();
   } else {
     stopStatusRefresh();
     stopLiveEvents();
+    securityStopAutoRefresh();
+    accountsStopAutoRefresh();
   }
   if (name === 'config') renderConfigTab();
   if (name === 'accounts') renderAccountsTab();
@@ -482,16 +526,16 @@ async function renderRequestsTab() {
   resetCombos();
   panel.innerHTML = `<div class="card card-open"><div class="card-body">
     <div class="req-controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
-      <select id="req-agent" class="req-input" title="filter by client agent"><option value="">all agents</option></select>
-      <select id="req-session" class="req-input" title="filter by client session"><option value="">all sessions</option></select>
-      <span class="combo"><input id="req-provider" placeholder="all providers" value="${esc(requestsFilter.provider)}" class="req-input"/></span>
-      <span class="combo"><input id="req-model" placeholder="all models" value="${esc(requestsFilter.model)}" class="req-input"/></span>
+      <select id="req-agent" class="req-input" title="filter by client agent"><option value="">All Agents</option></select>
+      <select id="req-session" class="req-input" title="filter by client session"><option value="">All Sessions</option></select>
+      <span class="combo"><input id="req-provider" placeholder="All Providers" value="${esc(requestsFilter.provider)}" class="req-input"/></span>
+      <span class="combo"><input id="req-model" placeholder="All Models" value="${esc(requestsFilter.model)}" class="req-input"/></span>
       <select id="req-shadow" class="req-input">
-        <option value="" ${requestsFilter.shadow === '' ? 'selected' : ''}>all</option>
-        <option value="only" ${requestsFilter.shadow === 'only' ? 'selected' : ''}>shadow only</option>
-        <option value="exclude" ${requestsFilter.shadow === 'exclude' ? 'selected' : ''}>no shadow</option>
+        <option value="" ${requestsFilter.shadow === '' ? 'selected' : ''}>All</option>
+        <option value="only" ${requestsFilter.shadow === 'only' ? 'selected' : ''}>Shadow Only</option>
+        <option value="exclude" ${requestsFilter.shadow === 'exclude' ? 'selected' : ''}>No Shadow</option>
       </select>
-      <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="req-errors" ${requestsFilter.errors ? 'checked' : ''}/> errors only</label>
+      <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="req-errors" ${requestsFilter.errors ? 'checked' : ''}/> Errors Only</label>
       <button id="req-refresh" class="btn">${iconRefresh()}Refresh</button>
     </div>
     <div id="req-session-summary" class="sess-sticky" style="margin-bottom:12px" hidden></div>
@@ -586,7 +630,7 @@ function renderRequestSelectors(combos) {
   if (agentSel) {
     const agents = linkedAgents(requestsFilter.session, combos.sessions, combos.facetState.agents);
     if (requestsFilter.agent && !agents.includes(requestsFilter.agent)) agents.unshift(requestsFilter.agent);
-    agentSel.innerHTML = '<option value="">all agents</option>' +
+    agentSel.innerHTML = '<option value="">All Agents</option>' +
       agents.map((name) => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
     agentSel.value = requestsFilter.agent;
   }
@@ -599,7 +643,7 @@ function renderRequestSelectors(combos) {
     // v2: full session ids in the options (the select is fixed 16rem wide;
     // the closed box ellipsizes, the OS popup shows the whole id). Matches
     // the Live page's full-id dropdown.
-    sessionSel.innerHTML = '<option value="">all sessions</option>' +
+    sessionSel.innerHTML = '<option value="">All Sessions</option>' +
       ids.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
     sessionSel.value = requestsFilter.session;
   }
@@ -1401,37 +1445,119 @@ function bodyLinesHTML(text) {
 
 // ---------- Security tab (guard audit log) ----------
 
-// Per-tab filter state (kind only). Persists across re-renders within a
-// session so a refresh keeps the view.
-let securityFilter = { kind: '' };
+// Per-tab filter state. kind narrows the AUDIT half server-side (the ring is
+// client-filtered to match); verdict/rule narrow the merged feed client-side;
+// range bounds the audit query (from=<now-secs>). Persists across re-renders
+// within a session and rides the URL hash (#security?kind=…, see
+// securityFilterQuery).
+let securityFilter = { kind: '', verdict: '', range: 'all', rule: '' };
 let securityReqSeq = 0;
+// Row budget of the audit half — "show more" grows it to the backend's 1000
+// cap; a kind/range change resets it (a new window is a new query).
+let securityLimit = 100;
+// Flags of the last audit query, rendered by renderSecurityFeed (inserting
+// them ad-hoc after a table build would be wiped by the next rebuild — the
+// old skipped-lines hint died exactly that way): skipped-lines count, and
+// whether the audit log is enabled at all (drives the off-hints).
+let securityFeedSkipped = 0;
+let securityAuditOn = true;
 // Summary/feed-layer cache: the audit and adjudication loaders each own one
 // half of both the KPI row and the MERGED chronological feed, so whichever
 // lands first paints with the data it has and the second refresh completes
 // the picture (stale halves are never blanked).
-let securityKpiData = { blocks: null, adjudications: null, stats: null };
+let securityKpiData = { blocks: null, stats: null };
 let securityFeedData = { records: null, adjudications: null };
-// The adjudication channel's current on/off switch (feed.enabled) — the
-// rule-leaderboard's noise hint keys off it, telling off from merely quiet.
+// The adjudication channel's current on/off switch (feed.enabled) — the KPI
+// row's LLM tiles and the rule-leaderboard's noise hint key off it, telling
+// off from merely quiet.
 let securityAdjudicationEnabled = false;
+// Which refresh halves failed since their last success — the parts list of
+// the shared stale-data banner (setRefreshError).
+const securityFailParts = new Set();
+
+// securityRefreshOk clears one half's failure mark, dropping the banner once
+// every half is healthy again (or narrowing it while others still fail).
+function securityRefreshOk(part) {
+  securityFailParts.delete(part);
+  if (!securityFailParts.size) setRefreshError(panels.security, null);
+  else setRefreshError(panels.security, staleDataText('refresh failed', [...securityFailParts]));
+}
+
+// securityRefreshFail records one half's failure. A failed half keeps the
+// last successful data on screen and names itself in the banner; only a
+// first-load failure (no data anywhere yet) returns true so the caller can
+// fall back to its inline error card.
+function securityRefreshFail(part) {
+  securityFailParts.add(part);
+  const hasData = securityFeedData.records || securityFeedData.adjudications || securityKpiData.blocks;
+  if (hasData) setRefreshError(panels.security, staleDataText('refresh failed', [...securityFailParts]));
+  return !hasData;
+}
+
+// securityMergedRows merges the two feed halves narrowed to the current kind
+// window (the audit half is already server-filtered by kind; the ring half
+// is filtered here so the two agree). Verdict/rule narrowing stays with the
+// callers that honor it: the KPI row counts the whole kind window, the
+// activity table narrows further.
+function securityMergedRows() {
+  return mergeSecurityFeed(securityFeedData.records, securityFeedData.adjudications)
+    .filter((r) => !securityFilter.kind || r.kind === securityFilter.kind);
+}
 
 function renderSecurityKpis() {
   const el = document.getElementById('sec-kpis');
   if (!el) return;
-  el.innerHTML = securityKpisHTML(securityKpiData.blocks, securityKpiData.adjudications, securityKpiData.stats);
+  el.innerHTML = securityKpisHTML(securityKpiData.blocks, securityMergedRows(), securityKpiData.stats, securityAdjudicationEnabled);
+}
+
+// syncSecurityRuleChip paints the removable rule-filter chip into the
+// Activity controls row (the leaderboard click and the chip's ✕ are the two
+// ways to toggle it — both go through setSecurityRule).
+function syncSecurityRuleChip() {
+  const chip = document.getElementById('sec-rule-chip');
+  if (!chip) return;
+  chip.innerHTML = securityFilter.rule
+    ? `<button id="sec-rule-clear" class="btn" title="clear rule filter">rule: ${esc(securityFilter.rule)} ✕</button>`
+    : '';
+  const btn = document.getElementById('sec-rule-clear');
+  if (btn) btn.onclick = () => setSecurityRule('');
+}
+
+// setSecurityRule toggles the feed's rule filter (client-side over the
+// merged rows) and mirrors it into the URL hash.
+function setSecurityRule(rule) {
+  securityFilter.rule = rule || '';
+  updateSecurityHash();
+  renderSecurityFeed();
 }
 
 // renderSecurityFeed renders the merged audit + AI-verdict feed: one
-// chronological table (newest first). Audit rows keep the analyze button;
-// AI rows show the verdict badge — suppressed low verdicts are visible HERE
-// and nowhere else.
+// chronological table (newest first). Fresh verdicts are deduped upstream
+// (mergeSecurityFeed folds the ring entry into its audit record, surfacing
+// the judge model/cached inline); ring-only rows (cached occurrences,
+// pre-restart leftovers) keep the ai· badge — suppressed low verdicts are
+// visible HERE and nowhere else.
 function renderSecurityFeed() {
   const tbl = document.getElementById('sec-table');
   if (!tbl) return;
-  const rows = mergeSecurityFeed(securityFeedData.records, securityFeedData.adjudications)
-    .filter((r) => !securityFilter.kind || r.kind === securityFilter.kind);
+  syncSecurityRuleChip();
+  const ring = securityFeedData.adjudications;
+  if (!securityAuditOn && (!ring || !ring.length)) {
+    tbl.innerHTML = '<div class="msg hint">Security audit is off. Enable <code>guard.audit</code> in config to persist guard hits (secret / path / drift) to the audit log.</div>';
+    return;
+  }
+  const rows = securityMergedRows()
+    .filter((r) => !securityFilter.verdict || r.verdict === securityFilter.verdict)
+    .filter((r) => !securityFilter.rule || r.names.includes(securityFilter.rule));
+  const hints = [];
+  if (!securityAuditOn && ring && ring.length) {
+    hints.push('<div class="msg hint">guard.audit is off — history is not persisted; only the in-memory recent AI verdicts are shown.</div>');
+  }
+  if (securityFeedSkipped > 0) {
+    hints.push(`<div class="hint" style="margin-bottom:8px;">skipped ${fmtNum(securityFeedSkipped)} unreadable line(s) while scanning</div>`);
+  }
   if (!rows.length) {
-    tbl.innerHTML = '<div class="msg hint">No matching records.</div>';
+    tbl.innerHTML = hints.join('') + '<div class="msg hint">No matching records.</div>';
     return;
   }
   const kindBadge = { secret: 'warn', path: '', drift: 'muted' };
@@ -1453,6 +1579,9 @@ function renderSecurityFeed() {
     }
     const strength = r.kind === 'path' ? r.strength : '';
     const strengthBadge = strength ? ` <span class="badge ${strength === 'strong' ? 'warn' : 'muted'}">${strength}</span>` : '';
+    // Merged rows carry the judge attribution the ring added on top of the
+    // persistent audit record.
+    const judge = r.judge ? ` <span class="hint">judge ${esc(r.judge)}${r.cached ? ' · cached' : ''}</span>` : '';
     const analyzable = r.requestId && (r.kind === 'secret' || r.kind === 'path');
     body.push(`<tr>
       <td class="mono">${esc(fmtMs(r.ts))}</td>
@@ -1460,13 +1589,26 @@ function renderSecurityFeed() {
       <td><span class="badge ${kindBadge[r.kind] || ''}">${esc(r.kind)}</span></td>
       <td class="mono">${esc(r.names.join(', ') || '—')}</td>
       <td class="mono">${esc(r.agent ? r.agent + (r.exposed ? ' @ ' + r.exposed : '') : '—')}</td>
-      <td class="mono">action=${esc(r.action || '—')}${strengthBadge}</td>
+      <td class="mono">action=${esc(r.action || '—')}${strengthBadge}${judge}</td>
       <td>${analyzable ? `<button class="btn sec-analyze" data-sec-i="${i}">analyze</button>` : '—'}</td>
     </tr>`);
   }
-  tbl.innerHTML = `<table class="table">
+  // The audit half may have more rows than the current budget (the ring
+  // half is always fully loaded) — offer to deepen the query window.
+  const recs = securityFeedData.records || [];
+  const more = securityAuditOn && recs.length >= securityLimit && securityLimit < 1000
+    ? `<div style="margin-top:8px;"><button id="sec-more" class="btn" title="deepen the audit window (up to 1,000 rows)">Show More</button></div>`
+    : '';
+  tbl.innerHTML = hints.join('') + `<table class="table">
   <thead><tr><th>time</th><th>verdict</th><th>kind</th><th>rule / names</th><th>who</th><th>detail</th><th></th></tr></thead>
-  <tbody>${body.join('')}</tbody></table>`;
+  <tbody>${body.join('')}</tbody></table>` + more;
+  const moreBtn = document.getElementById('sec-more');
+  if (moreBtn) {
+    moreBtn.onclick = () => {
+      securityLimit = Math.min(1000, securityLimit >= 500 ? 1000 : securityLimit >= 250 ? 500 : 250);
+      loadSecurity();
+    };
+  }
   tbl.querySelectorAll('.sec-analyze').forEach((btn) => {
     btn.onclick = () => analyzeSecurityHit(btn, rows[Number(btn.dataset.secI)]);
   });
@@ -1482,16 +1624,53 @@ function fmtMs(ms) {
   return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${d.toLocaleTimeString('en-US', { hour12: false })}`;
 }
 
-// renderSecurityTab builds the guard audit-log view: a kind filter + Refresh
-// button and a table of audit records fetched from /api/security. On-demand
-// (no poll) — fetch happens on tab entry and on Refresh, like Requests.
-// Records carry pattern/path NAMES and the action only; matched content never
-// reaches the API, so every field is safe to render verbatim.
+// renderSecurityTab builds the guard audit-log view: KPI tiles, the rule
+// leaderboard, the blocked-session card, and the merged Activity feed with
+// its filter row. On-demand (no poll) — fetch happens on tab entry and on
+// Refresh, like Requests. Records carry pattern/path NAMES and the action
+// only; matched content never reaches the API, so every field is safe to
+// render verbatim.
+// Security auto-refresh: a 30s background tick while the tab is the ACTIVE
+// view. The tick passes through the interaction gate (open select/popover,
+// focused control, text selection defers it; the hold watcher re-runs the
+// refresh when the interaction ends). The loaders render only their own
+// data hosts — the toolbar selects are never rebuilt — so a tick can never
+// close a dropdown; failures keep the last successful halves on screen via
+// securityRefreshFail's stale banner (first-load failures still fall back
+// to the inline error card).
+let securityRefreshTimer = null;
+
+function securityStopAutoRefresh() {
+  if (securityRefreshTimer) {
+    clearInterval(securityRefreshTimer);
+    securityRefreshTimer = null;
+  }
+  cancelAutoRefreshHold(panels.security);
+}
+
+function securityMaybeAutoRefresh() {
+  securityStopAutoRefresh();
+  securityRefreshTimer = setInterval(() => {
+    const panel = panels.security;
+    if (!panel || !panel.classList.contains('active')) return;
+    if (deferAutoRefresh(panel, () => refreshSecurityData())) return;
+    refreshSecurityData();
+  }, 30000);
+}
+
 async function renderSecurityTab() {
   const panel = panels.security;
   if (!panel) return;
-  if (await retainTab(panel, '#sec-table', refreshSecurityData)) return;
-  securityKpiData = { blocks: null, adjudications: null, stats: null };
+  if (await retainTab(panel, '#sec-table', () => { refreshSecurityData(); securityMaybeAutoRefresh(); })) {
+    securityMaybeAutoRefresh();
+    return;
+  }
+  securityStopAutoRefresh();
+  // Seed the filter from the URL hash (#security?kind=…): a refresh or a
+  // shared link must land on the same view, not the unfiltered list.
+  const seeded = securityFilterFromQuery(parseHash().query);
+  if (seeded) securityFilter = seeded;
+  securityKpiData = { blocks: null, stats: null };
   securityFeedData = { records: null, adjudications: null };
   // Information hierarchy: summary tiles first, then the actionable blocked
   // list with its unblock controls, and one merged chronological feed last.
@@ -1506,30 +1685,69 @@ async function renderSecurityTab() {
     <header class="card-head"><span class="card-head-title"><h2>Activity</h2><span class="meta">audit + AI verdicts · newest first · suppressed lows appear only here</span></span></header>
     <div class="card-body">
     <div class="req-controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
-      <select id="sec-kind" class="req-input">
-        <option value="" ${securityFilter.kind === '' ? 'selected' : ''}>all kinds</option>
-        <option value="secret" ${securityFilter.kind === 'secret' ? 'selected' : ''}>secret</option>
-        <option value="path" ${securityFilter.kind === 'path' ? 'selected' : ''}>path</option>
-        <option value="drift" ${securityFilter.kind === 'drift' ? 'selected' : ''}>drift</option>
+      <select id="sec-kind" class="req-input" title="filter by guard hit kind (server-side)">
+        <option value="" ${securityFilter.kind === '' ? 'selected' : ''}>All Kinds</option>
+        <option value="secret" ${securityFilter.kind === 'secret' ? 'selected' : ''}>Secret</option>
+        <option value="path" ${securityFilter.kind === 'path' ? 'selected' : ''}>Path</option>
+        <option value="drift" ${securityFilter.kind === 'drift' ? 'selected' : ''}>Drift</option>
       </select>
-      <button id="sec-refresh" class="btn">Refresh</button>
+      <select id="sec-verdict" class="req-input" title="filter by adjudication verdict">
+        <option value="" ${securityFilter.verdict === '' ? 'selected' : ''}>All Verdicts</option>
+        <option value="high" ${securityFilter.verdict === 'high' ? 'selected' : ''}>High</option>
+        <option value="low" ${securityFilter.verdict === 'low' ? 'selected' : ''}>Low</option>
+        <option value="error" ${securityFilter.verdict === 'error' ? 'selected' : ''}>Error</option>
+        <option value="skipped" ${securityFilter.verdict === 'skipped' ? 'selected' : ''}>Skipped</option>
+      </select>
+      <select id="sec-range" class="req-input" title="audit query window">
+        ${SECURITY_RANGES.map((r) => `<option value="${r.value}" ${securityFilter.range === r.value ? 'selected' : ''}>${r.label}</option>`).join('')}
+      </select>
+      <span id="sec-rule-chip"></span>
+      <button id="sec-refresh" class="btn">${iconRefresh()}Refresh</button>
     </div>
     ${securityLegendHTML()}
     <div id="sec-table"></div>
   </div></div>`;
-  const refresh = () => {
+  // kind and range change the SERVER query (a new window is a new query:
+  // the row budget resets); verdict narrows the merged feed client-side.
+  const reloadAudit = () => {
     securityFilter.kind = document.getElementById('sec-kind').value;
-    renderSecurityFeed(); // client-side filter over the merged feed
+    securityFilter.range = document.getElementById('sec-range').value;
+    securityLimit = 100;
+    updateSecurityHash();
+    loadSecurity();
   };
   document.getElementById('sec-refresh').onclick = () => refreshSecurityData();
-  document.getElementById('sec-kind').onchange = refresh;
+  document.getElementById('sec-kind').onchange = reloadAudit;
+  document.getElementById('sec-range').onchange = reloadAudit;
+  document.getElementById('sec-verdict').onchange = () => {
+    securityFilter.verdict = document.getElementById('sec-verdict').value;
+    updateSecurityHash();
+    renderSecurityFeed();
+  };
   const unblockAll = document.getElementById('sec-unblock-all');
   if (unblockAll) unblockAll.onclick = () => unblockAllSessions();
   refreshSecurityData();
+  securityMaybeAutoRefresh();
+}
+
+// syncSecurityControls pushes the filter state back into the tab's selects
+// (a hash-driven filter change must reach them, or the next Refresh would
+// read the stale DOM values back into the filter — same story as the
+// Requests tab's syncRequestsFreeControls).
+
+function syncSecurityControls() {
+  const k = document.getElementById('sec-kind');
+  if (k) k.value = securityFilter.kind;
+  const v = document.getElementById('sec-verdict');
+  if (v) v.value = securityFilter.verdict;
+  const r = document.getElementById('sec-range');
+  if (r) r.value = securityFilter.range;
 }
 
 // unblockAllSessions clears every persisted block (the blocked list is short
-// and the action is reversible by re-judgment).
+// and the action is reversible by re-judgment). Sequential DELETEs keep the
+// failure semantics simple: stop on the first error, the refresh shows what
+// actually cleared.
 async function unblockAllSessions() {
   const btn = document.getElementById('sec-unblock-all');
   if (btn) btn.disabled = true;
@@ -1561,25 +1779,24 @@ function refreshSecurityData() {
   loadSecurityBlocks();
 }
 
-// loadSecurityAdjudications renders the recent AI-verdict ring
-// (/api/security/adjudications). Failures keep the last successful content
-// (never blank the card) and surface the error inline.
 // loadSecurityAdjudications feeds the AI-verdict half of the KPI row and
-// the merged activity feed (there is no separate card anymore — suppressed
-// low verdicts are visible in the feed and nowhere else). Failures keep the
-// last successful data (never blank the halves already rendered).
+// the merged activity feed (suppressed low verdicts are visible in the feed
+// and nowhere else). Failures keep the last successful data (never blank the
+// halves already rendered) and surface through the shared banner.
 async function loadSecurityAdjudications() {
+  const tbl = document.getElementById('sec-table');
   let resp;
   try {
     resp = await apiGet('/api/security/adjudications');
   } catch (e) {
-    const tbl = document.getElementById('sec-table');
-    if (tbl && !tbl.firstElementChild) tbl.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+    if (securityRefreshFail('adjudications') && tbl && !tbl.firstElementChild) {
+      tbl.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+    }
     return;
   }
+  securityRefreshOk('adjudications');
   const recs = (resp && resp.adjudications) || [];
   securityAdjudicationEnabled = !!(resp && resp.enabled);
-  securityKpiData.adjudications = recs;
   securityKpiData.stats = (resp && resp.stats) || {};
   securityFeedData.adjudications = recs;
   renderSecurityKpis();
@@ -1592,7 +1809,8 @@ async function loadSecurityAdjudications() {
 // carry no audit record). Pattern rules piling up hits while the AI second
 // opinion is OFF get the "enable adjudicate" hint — high-frequency
 // false-positive rules are exactly the channel's use case (the threshold
-// avoids hinting on one-off hits).
+// avoids hinting on one-off hits). Rows are drill targets: clicking one
+// narrows the Activity feed to that rule (click again / the chip ✕ clears).
 function renderRuleLeaderboard() {
   const el = document.getElementById('sec-rules');
   if (!el) return;
@@ -1607,7 +1825,8 @@ function renderRuleLeaderboard() {
     const hint = r.adjudicable && r.hits >= 3 && !securityAdjudicationEnabled
       ? ' <span class="badge warn" title="Pattern hits at this frequency are usually benign fixtures/docs — the AI second opinion can suppress them (guard.adjudicate)">noisy — adjudicate can suppress</span>'
       : '';
-    return `<tr>
+    const sel = securityFilter.rule === r.name ? ' sel' : '';
+    return `<tr class="sec-rule${sel}" data-rule="${esc(r.name)}" title="filter the Activity feed by this rule">
       <td class="mono">${esc(r.name)}</td>
       <td><span class="badge ${kindBadge[r.kind] || ''}">${esc(r.kind)}</span></td>
       <td class="num">${fmtNum(r.hits)}</td>
@@ -1622,11 +1841,17 @@ function renderRuleLeaderboard() {
       <tbody>${body}</tbody>
     </table>
   </div></div>`;
+  el.querySelectorAll('tr.sec-rule').forEach((tr) => {
+    tr.onclick = () => setSecurityRule(securityFilter.rule === tr.dataset.rule ? '' : tr.dataset.rule);
+  });
 }
 
 // loadSecurityBlocks renders the persisted session-block table with
 // per-row unblock (DELETE /api/security/blocks/<id>); errors surface the
-// backend message, success refreshes both guard cards.
+// backend message, success refreshes both guard cards. The session cell is
+// a session-link: blocked-session → "what did it send" is the natural
+// investigation path, and the hash drill lands on the Requests tab with
+// that session pinned (Back returns to Security).
 async function loadSecurityBlocks() {
   const el = document.getElementById('sec-blocks');
   if (!el) return;
@@ -1634,9 +1859,14 @@ async function loadSecurityBlocks() {
   try {
     resp = await apiGet('/api/security/blocks');
   } catch (e) {
-    el.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+    // Keep the last successful table on screen; only a first-load failure
+    // (nothing rendered yet) shows the inline error card.
+    if (securityRefreshFail('blocks') && !el.querySelector('table')) {
+      el.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+    }
     return;
   }
+  securityRefreshOk('blocks');
   const blocks = (resp && resp.blocks) || [];
   securityKpiData.blocks = blocks;
   renderSecurityKpis();
@@ -1647,7 +1877,7 @@ async function loadSecurityBlocks() {
     return;
   }
   const rows = blocks.map((b) => `<tr>
-    <td class="mono">${esc(b.session_id)}</td>
+    <td class="mono session-link" data-session="${esc(b.session_id)}" title="${esc(b.session_id)} — view this session's requests">${esc(b.session_id)}</td>
     <td><span class="badge ${b.kind === 'path' ? '' : 'warn'}">${esc(b.kind)}</span></td>
     <td class="mono">${esc(b.rule)}</td>
     <td class="mono">${esc(b.reason || '—')}</td>
@@ -1658,16 +1888,23 @@ async function loadSecurityBlocks() {
   el.innerHTML = `<table class="table">
   <thead><tr><th>session</th><th>kind</th><th>rule</th><th>reason</th><th>since</th><th>request</th><th></th></tr></thead>
   <tbody>${rows}</tbody></table>`;
+  el.querySelectorAll('tr').forEach((tr) => {
+    tr.onclick = (e) => {
+      const session = sessionLinkClick(e);
+      if (session) location.hash = '#requests?' + requestsFilterQuery({ session });
+    };
+  });
   el.querySelectorAll('.sec-unblock').forEach((btn) => {
-    btn.onclick = async () => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
       btn.disabled = true;
       try {
         await apiDel('/api/security/blocks/' + encodeURIComponent(btn.dataset.sid));
         loadSecurityBlocks();
         loadSecurity();
-      } catch (e) {
+      } catch (err) {
         btn.disabled = false;
-        el.insertAdjacentHTML('afterbegin', `<div class="msg err">${esc(e.message)}</div>`);
+        el.insertAdjacentHTML('afterbegin', `<div class="msg err">${esc(err.message)}</div>`);
       }
     };
   });
@@ -1679,9 +1916,14 @@ async function loadSecurity() {
   // table shows the loading hint (a refresh must not flash blank).
   if (tbl && !tbl.firstElementChild) tbl.innerHTML = '<span class="hint">loading…</span>';
   const q = new URLSearchParams();
-  // 50, not 200: low verdicts are suppressed upstream now, so the audit half
-  // is the dense historical tail — the summary tiles carry the totals.
-  q.set('limit', '50');
+  // The audit half is the dense historical tail; the KPI tiles carry the
+  // digest. "show more" deepens this to the backend's 1000 cap.
+  q.set('limit', String(securityLimit));
+  // kind and the range preset go server-side — a client-side filter would
+  // only narrow the newest N rows and hide older history forever.
+  if (securityFilter.kind) q.set('kind', securityFilter.kind);
+  const from = securityRangeFromSecs(securityFilter.range);
+  if (from) q.set('from', String(from));
   // Sequence guard: a slow older response must not overwrite the newer one's
   // rendering.
   const seq = ++securityReqSeq;
@@ -1689,21 +1931,19 @@ async function loadSecurity() {
   try {
     resp = await apiGet('/api/security?' + q.toString());
   } catch (e) {
-    if (seq === securityReqSeq && tbl && !tbl.firstElementChild) tbl.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
-    return;
-  }
-  if (seq !== securityReqSeq) return;
-  if (!resp.enabled) {
-    if (tbl && !securityFeedData.adjudications) {
-      tbl.innerHTML = '<div class="msg hint">Security audit is off. Enable <code>guard.audit</code> in config to persist guard hits (secret / path / drift) to the audit log.</div>';
+    if (seq !== securityReqSeq) return;
+    if (securityRefreshFail('security') && tbl && !tbl.firstElementChild) {
+      tbl.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
     }
     return;
   }
-  if (resp.skipped > 0 && tbl) {
-    tbl.insertAdjacentHTML('afterbegin', `<div class="hint" style="margin-bottom:8px;">skipped ${fmtNum(resp.skipped)} unreadable line(s) while scanning</div>`);
-  }
+  if (seq !== securityReqSeq) return;
+  securityAuditOn = !!resp.enabled;
+  securityFeedSkipped = resp.skipped || 0;
   securityFeedData.records = resp.records || [];
+  securityRefreshOk('security');
   renderSecurityFeed();
+  renderSecurityKpis();
 }
 
 // analyzeSecurityHit toggles the inline analysis row under an audit record:
@@ -1790,8 +2030,8 @@ function renderLiveCard(target) {
   liveSessionOptionsKey = '';
   target.insertAdjacentHTML('beforeend', buildCard('Live requests', '',
     `<div class="live-toolbar">
-       <label class="hint" for="live-session">session</label>
-       <select id="live-session" class="req-input"><option value="">all (live)</option></select>
+       <label class="hint" for="live-session">Session</label>
+       <select id="live-session" class="req-input"><option value="">All (live)</option></select>
      </div>
      <div id="live-table"><span class="msg hint">connecting…</span></div>
      <div id="live-session-panel" hidden></div>`, 'tight', '', 'card-open'));
@@ -1873,7 +2113,7 @@ function refreshLiveSessionOptions() {
   // single control with the rest of the row empty, so unlike the dense
   // Requests filter row there is no reason to abbreviate (and the select is
   // widened via .live-toolbar select to match; see styles.css).
-  sel.innerHTML = '<option value="">all (live)</option>' +
+  sel.innerHTML = '<option value="">All (live)</option>' +
     sorted.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
   sel.value = liveSessionFilter;
 }
@@ -3470,7 +3710,7 @@ async function refreshDashboardData() {
       errEl.hidden = false;
       // A failed refresh keeps the last successful data on screen — the banner
     // (not a wipe) is how the failure surfaces.
-    errEl.textContent = 'dashboard unavailable: ' + e.message + (dashData ? ' — showing last successful data' : '');
+    errEl.textContent = 'Dashboard unavailable: ' + e.message + (dashData ? ' — showing last successful data' : '');
     }
   } finally {
     dashInflight = false;
@@ -3525,7 +3765,7 @@ function uplotAxisStyle() {
 function dashRenderChart(host, legendHost) {
   if (!host || !legendHost) return;
   if (typeof uPlot === 'undefined') { // vendored script failed to load
-    host.innerHTML = '<div class="empty-state">charts unavailable</div>';
+    host.innerHTML = '<div class="empty-state">Charts unavailable</div>';
     return;
   }
   const resp = dashData;
@@ -3629,8 +3869,8 @@ function dashRenderTable(host) {
     </tr>`;
   }).join('');
   host.innerHTML = `<table class="table">
-      <thead><tr><th>series</th><th>status</th><th class="num">requests</th><th class="num">tokens</th><th class="num">err</th><th class="num">avg lat</th><th class="num">ttft</th><th class="num">tok/s</th><th class="num">cost</th><th class="num">cost share</th></tr></thead>
-      <tbody>${body || '<tr><td colspan="10" class="hint">no series in range</td></tr>'}</tbody>
+      <thead><tr><th>Series</th><th>Status</th><th class="num">Requests</th><th class="num">Tokens</th><th class="num">Err</th><th class="num">Avg Lat</th><th class="num">TTFT</th><th class="num">Tok/s</th><th class="num">Cost</th><th class="num">Cost Share</th></tr></thead>
+      <tbody>${body || '<tr><td colspan="10" class="hint">No series in range</td></tr>'}</tbody>
     </table>`;
 }
 
@@ -3672,20 +3912,20 @@ function healthPill(h) {
   const now = Date.now();
   const rlUntil = h.rate_limited_until ? new Date(h.rate_limited_until).getTime() : 0;
   if (h.frozen) {
-    return `<span class="pill warn" title="manually frozen by operator — excluded from scheduling until unfreeze">frozen</span>`;
+    return `<span class="pill warn" title="Manually frozen by operator — excluded from scheduling until unfreeze">Frozen</span>`;
   }
   if (h.circuit_state === 'open' || h.circuit_state === 'half_open') {
     const tail = h.circuit_state === 'half_open' ? ' (probing)' : untilHuman(h.circuit_until, now);
-    return `<span class="pill err" title="circuit ${esc(h.circuit_state)}">circuit ${esc(h.circuit_state)}${esc(tail)}</span>`;
+    return `<span class="pill err" title="Circuit ${esc(h.circuit_state)}">Circuit ${esc(h.circuit_state)}${esc(tail)}</span>`;
   }
   if (rlUntil && rlUntil > now) {
     const kind = h.rate_limit_kind && h.rate_limit_kind !== 'transient' ? ` (${h.rate_limit_kind})` : '';
-    return `<span class="pill warn" title="rate-limited (${esc(h.rate_limit_kind || 'transient')}) until ${esc(h.rate_limited_until)}">rate-limited${esc(kind)}${esc(untilHuman(h.rate_limited_until, now))}</span>`;
+    return `<span class="pill warn" title="Rate-limited (${esc(h.rate_limit_kind || 'transient')}) until ${esc(h.rate_limited_until)}">Rate-limited${esc(kind)}${esc(untilHuman(h.rate_limited_until, now))}</span>`;
   }
   if (h.available) {
-    return `<span class="pill ok">available</span>`;
+    return `<span class="pill ok">Available</span>`;
   }
-  return `<span class="pill muted">unavailable</span>`;
+  return `<span class="pill muted">Unavailable</span>`;
 }
 
 // accountRemainingPill renders a compact pill summarizing one account's quota
@@ -3697,11 +3937,11 @@ function healthPill(h) {
 // `snap` is a raw provider.QuotaSnapshot (PascalCase) from /api/status.quota,
 // keyed by accountProviderKey(p, a); null when the account has no snapshot yet.
 function accountRemainingPill(snap) {
-  if (!snap) return `<span class="pill muted">no data</span>`;
+  if (!snap) return `<span class="pill muted">No data</span>`;
   if (snap.Err) {
     const k = quotaErrKind(snap);
-    const lbl = k === 'session-expired' ? 'session expired'
-      : k === 'not-logged-in' ? 'not logged in' : 'error';
+    const lbl = k === 'session-expired' ? 'Session expired'
+      : k === 'not-logged-in' ? 'Not logged in' : 'Error';
     return `<span class="pill err">${esc(lbl)}</span>`;
   }
   const ult = (snap.Windows || []).find((w) => w.Ultimate);
@@ -3711,7 +3951,7 @@ function accountRemainingPill(snap) {
     return `<span class="pill ${cls}">${(p * 100).toFixed(1)}% left</span>`;
   }
   if (snap.Plan) return `<span class="pill muted">${esc(snap.Plan)}</span>`;
-  return `<span class="pill ok">available</span>`;
+  return `<span class="pill ok">Available</span>`;
 }
 
 // renderProvidersCard draws the per-provider health + request-counter table,
@@ -3749,8 +3989,8 @@ function renderProvidersCard(target, st) {
     const h = health[name];
     const frozen = providerFrozen(h, nowMs);
     const action = frozen
-      ? ` <button class="btn small danger-solid" data-unfreeze="${esc(name)}" title="clear circuit/rate-limit cooldowns + model locks">unfreeze</button>`
-      : ` <button class="btn small" data-freeze="${esc(name)}" title="exclude from scheduling until unfreeze">freeze</button>`;
+      ? ` <button class="btn small danger-solid" data-unfreeze="${esc(name)}" title="Clear circuit/rate-limit cooldowns + model locks">Unfreeze</button>`
+      : ` <button class="btn small" data-freeze="${esc(name)}" title="Exclude from scheduling until unfreeze">Freeze</button>`;
     rows += `<tr>
       <td class="mono">${esc(name)}${action}</td>
       <td>${healthPill(health[name])}</td>
@@ -3815,12 +4055,12 @@ async function unfreezeProvider(name, btn) {
     `Clear circuit-breaker, rate-limit cooldown and model-lock state for ${name}? The provider is retried immediately.`,
     'Unfreeze');
   if (!ok) return;
-  if (btn) { btn.disabled = true; btn.textContent = 'unfreezing…'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Unfreezing…'; }
   try {
     await apiPost('/api/health/reset', { provider: name });
     await renderStatusTab();
   } catch (e) {
-    if (btn) { btn.disabled = false; btn.textContent = 'unfreeze'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Unfreeze'; }
     window.alert('unfreeze failed: ' + e.message);
   }
 }
@@ -3835,12 +4075,12 @@ async function freezeProvider(name, btn) {
     `Freeze ${name}? The provider is excluded from scheduling — no requests are routed to it — until you unfreeze it. The freeze persists across restarts.`,
     'Freeze');
   if (!ok) return;
-  if (btn) { btn.disabled = true; btn.textContent = 'freezing…'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Freezing…'; }
   try {
     await apiPost('/api/health/freeze', { provider: name });
     await renderStatusTab();
   } catch (e) {
-    if (btn) { btn.disabled = false; btn.textContent = 'freeze'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Freeze'; }
     window.alert('freeze failed: ' + e.message);
   }
 }
@@ -3969,7 +4209,7 @@ function renderScheduleCard(target, st) {
         `<div class="route-pin-menu" data-popup data-pin-menu="${esc(route)}" hidden>${items}</div>` +
         `</span>`;
     }
-    if (!chain) chain = `<span class="route-meta">no providers available</span>`;
+    if (!chain) chain = `<span class="route-meta">No providers available</span>`;
     let meta = '';
     if (info.pin) {
       const exp = info.pin_expires ? ` · expires ${esc(info.pin_expires)}` : ' · no expiry';
@@ -3990,7 +4230,7 @@ function renderScheduleCard(target, st) {
     if (info.pools && info.pools.length) {
       pools = '<span class="route-meta">';
       for (const pl of info.pools) {
-        pools += `pool ${esc(pl.parent)}: ${pl.available}/${pl.accounts} available · `;
+        pools += `Pool ${esc(pl.parent)}: ${pl.available}/${pl.accounts} available · `;
       }
       pools = pools.replace(/ · $/, '') + '</span>';
     }
@@ -4105,10 +4345,10 @@ function renderTokensCard(target, usage) {
   const html = buildCard('Token usage', `${totalReqs} requests · ${tokensRangeMeta()}`, `
       <table class="table">
         <thead><tr>
-          <th>provider</th><th>model</th><th class="num">requests</th>
-          <th class="num">input</th><th class="num">output</th>
-          <th class="num">cache create</th><th class="num">cache read</th>
-          <th class="num">total</th>
+          <th>Provider</th><th>Model</th><th class="num">Requests</th>
+          <th class="num">Input</th><th class="num">Output</th>
+          <th class="num">Cache Create</th><th class="num">Cache Read</th>
+          <th class="num">Total</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`, 'flush');
@@ -4333,10 +4573,10 @@ function renderAgentsCard(target, agents) {
   const html = buildCard('Agents', `${agents.length} active · ${tokensRangeMeta()}`, `
       <table class="table">
         <thead><tr>
-          <th>agent / model</th><th class="num">requests</th>
-          <th class="num">input</th><th class="num">output</th>
-          <th class="num">cache create</th><th class="num">cache read</th>
-          <th class="num">total</th>
+          <th>Agent / Model</th><th class="num">Requests</th>
+          <th class="num">Input</th><th class="num">Output</th>
+          <th class="num">Cache Create</th><th class="num">Cache Read</th>
+          <th class="num">Total</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`, 'flush');
@@ -5838,18 +6078,52 @@ let accountsSelectedProvider = null;
 // /api/status and /api/tokens are best-effort (a young daemon may have neither):
 // a failure degrades to "no usage data" / "no token usage" per account rather
 // than breaking the whole tab.
+// Accounts auto-refresh: a 30s background tick while the tab is the ACTIVE
+// view, through the interaction gate (Add/login modals are [data-popup],
+// open selects hold focus — both defer). Mid-operation guard: probes,
+// quota polls and the Test All run disable their buttons and render
+// progress into the pane — a background re-render would wipe that, so the
+// tick skips while any pane control is disabled. Background failures keep
+// the rendered view and report through the stale banner; only the first
+// load (no nav yet) falls back to the inline error.
+let accountsRefreshTimer = null;
+
+function accountsStopAutoRefresh() {
+  if (accountsRefreshTimer) {
+    clearInterval(accountsRefreshTimer);
+    accountsRefreshTimer = null;
+  }
+  cancelAutoRefreshHold(panels.accounts);
+}
+
+function accountsMaybeAutoRefresh() {
+  accountsStopAutoRefresh();
+  accountsRefreshTimer = setInterval(() => {
+    const panel = panels.accounts;
+    if (!panel || !panel.classList.contains('active')) return;
+    if (panel.querySelector('.acct-main button:disabled, .acct-nav button:disabled')) return;
+    if (deferAutoRefresh(panel, () => loadAccountsData(true))) return;
+    loadAccountsData(true);
+  }, 30000);
+}
+
 async function renderAccountsTab() {
   const panel = panels.accounts;
   // Re-entry keeps the rendered nav/detail on screen and refreshes in place
   // (the nav title the marker checks only exists after a successful fill, so
   // a failed first activation re-mounts the skeleton and retries).
-  if (await retainTab(panel, '.acct-nav-title', loadAccountsData)) return;
+  if (await retainTab(panel, '.acct-nav-title', () => { loadAccountsData(); accountsMaybeAutoRefresh(); })) {
+    accountsMaybeAutoRefresh();
+    return;
+  }
+  accountsStopAutoRefresh();
   panel.innerHTML = `<div class="acct-tab-head"><div id="acc-msg"></div></div>
     <div class="accounts-layout">
     <nav class="acct-nav" aria-label="Providers"><span class="msg">loading…</span></nav>
     <div class="acct-main"></div>
   </div>`;
   await loadAccountsData();
+  accountsMaybeAutoRefresh();
 }
 
 // loadAccountsData fetches the accounts view state and re-renders the nav +
@@ -5857,19 +6131,30 @@ async function renderAccountsTab() {
 // old data and reports via #acc-msg. The nav title the re-entry guard checks
 // only exists after a successful fill, so a failed first activation
 // re-mounts the skeleton and retries.
-async function loadAccountsData() {
+async function loadAccountsData(background = false) {
+  const panel = panels.accounts;
   try {
     const [acc, st, tok] = await Promise.all([
       apiGet('/api/accounts'),
       apiGet('/api/status').catch(() => null),
       apiGet('/api/tokens').catch(() => ({ usage: [] })),
     ]);
+    // Commit-time gate: an interaction that started while the fetches were
+    // in flight defers the landing render (the hold watcher re-runs a fresh
+    // background load once the user is done).
+    if (background && deferAutoRefresh(panel, () => loadAccountsData(true))) return;
     accountsCache = acc;
     accountsQuota = (st && st.quota) || {};
     accountsTokens = (tok && tok.usage) || [];
     renderAccountsNav(acc.providers || []);
+    if (background) setRefreshError(panel, null);
   } catch (e) {
     setConn('err');
+    if (background && panel && panel.querySelector('.acct-nav-title')) {
+      // Keep the rendered view; the stale banner carries the failure.
+      setRefreshError(panel, staleDataText('refresh failed', ['accounts']));
+      return;
+    }
     showMsg(document.getElementById('acc-msg'), 'err', e.message);
   }
 }
@@ -5912,7 +6197,7 @@ async function testAccount(btn, p) {
   if (!id) return;
   const orig = btn.textContent;
   btn.disabled = true;
-  btn.textContent = 'testing…';
+  btn.textContent = 'Testing…';
   const msg = document.getElementById('acc-msg');
   try {
     const r = await apiPost(`/api/accounts/${encodeURIComponent(p.name)}/${encodeURIComponent(id)}/test`);
@@ -5994,7 +6279,7 @@ function renderAccountTestMatrix(host, p, results, total, done, caps) {
     </tr>`;
   }).join('');
   host.innerHTML = `<section class="card acct-matrix"><div class="card-body">
-    <div class="card-title">Test all <span class="hint">${esc(p.name)}${capsLine ? ' · ' + esc(capsLine) : ''}${done ? '' : ' · ' + pending + ' pending'}</span></div>
+    <div class="card-title">Test All <span class="hint">${esc(p.name)}${capsLine ? ' · ' + esc(capsLine) : ''}${done ? '' : ' · ' + pending + ' pending'}</span></div>
     <table class="table">
       <thead><tr><th>account</th><th>verdict</th><th>http</th><th class="num">latency</th><th>model</th></tr></thead>
       <tbody>${rows}</tbody>
@@ -6108,7 +6393,7 @@ function renderProviderDetail(p, quota, tokens) {
   const accounts = p.accounts || [];
   const testAll = accounts.length >= 2
     ? `<button class="btn small" data-test-all
-               title="Probe every account sequentially (real upstream requests)">Test all (${accounts.length})</button>`
+               title="Probe every account sequentially (real upstream requests)">Test All (${accounts.length})</button>`
     : '';
   const body = accounts.length === 0
     ? `<div class="empty-state">No account configured. Click <strong>Add</strong> to sign in.</div>`
@@ -6198,7 +6483,7 @@ function accountTokensDetails(rows, acctKey) {
   for (const r of rows) totalReqs += Number(r.requests || 0);
   const hint = rows.length
     ? `${rows.length} model${rows.length > 1 ? 's' : ''} · ${fmtNum(totalReqs)} req`
-    : 'no usage';
+    : 'No usage';
   // Default the section to collapsed when there are no token rows ("no usage").
   const openAttr = rows.length ? ' open' : '';
   return `<details class="acct-section" data-acct="${esc(acctKey)}" data-sec="tokens"${openAttr}>
@@ -6220,7 +6505,7 @@ function accountTokensDetails(rows, acctKey) {
 // reuses the bar rendering without an account context) - then the bare error is
 // shown.
 function renderAccountUsage(p, snap) {
-  if (!snap) return `<div class="acct-empty">no usage data</div>`;
+  if (!snap) return `<div class="acct-empty">No usage data</div>`;
   if (snap.Err) {
     const canRelogin = p && (p.provider_id === 'aqp' || p.provider_id === 'codex');
     const k = quotaErrKind(snap);
@@ -6275,7 +6560,7 @@ function renderAccountUsage(p, snap) {
 // renderAccountTokens renders the per-account token table (sorted by model)
 // with a totals row. Empty -> inline message.
 function renderAccountTokens(rows) {
-  if (!rows || rows.length === 0) return `<div class="acct-empty">no token usage observed</div>`;
+  if (!rows || rows.length === 0) return `<div class="acct-empty">No token usage observed</div>`;
   const sorted = rows.slice().sort((a, b) => (a.model || '').localeCompare(b.model || ''));
   let tIn = 0, tOut = 0, tCC = 0, tCR = 0, tReq = 0;
   let trs = '';
@@ -6302,8 +6587,8 @@ function renderAccountTokens(rows) {
   </tr>`;
   return `<table class="table acct-tokens">
     <thead><tr>
-      <th>model</th><th class="num">input</th><th class="num">output</th>
-      <th class="num">cache create</th><th class="num">cache read</th><th class="num">requests</th>
+      <th>Model</th><th class="num">Input</th><th class="num">Output</th>
+      <th class="num">Cache Create</th><th class="num">Cache Read</th><th class="num">Requests</th>
     </tr></thead>
     <tbody>${trs}</tbody>
   </table>`;
@@ -6558,18 +6843,26 @@ function pollLogin(sessionId) {
 // ===========================================================================
 //
 // Renders the Analytics tab: one compact toolbar (range / granularity /
-// provider / model / dimension), a KPI row with period-over-period deltas,
-// ONE trend chart with a metric switcher (tokens / cost / requests / errors /
-// latency / ttft / cache), and a leaderboard table sorted by the active
-// metric. The API binding (see /api/analytics in docs/web-api.md):
+// provider / model / agent / dimension), a KPI row with period-over-period
+// deltas, ONE trend chart with a metric switcher (tokens / cost / requests /
+// failovers / 429s / errors / latency / ttft / cache — failovers/429s are
+// minute_buckets-only and disable in agent-dimension reads), a weekday×hour
+// token-usage heatmap (fixed semantic — when the proxy actually gets used,
+// independent of the metric switcher), and a leaderboard table sorted
+// by the active metric. The
+// API binding (see /api/analytics in docs/web-api.md):
 //   series[].points[].{bucket,requests,failovers,rate_limited_429,failures,
 //     input,output,cache_creation,cache_read,avg_latency_ms,avg_ttft_ms,cost,priced}
 //   totals.{requests,failures,input,output,cache_creation,cache_read,cost}
 //   compare.{from,to,requests,failures,input,output,cost}  (equal-length previous window)
 //   price_coverage.{priced,unpriced}
+//   heatmap.cells[].{weekday(0=Mon),hour,…same derived block as totals}
+//   agents.[]  (in-range facet, feeds the agent filter's datalist)
 // Per-request/token tables live on the Status page (Token usage/Agents); this
 // tab owns trends, reliability and cost analysis. by=agent switches the
-// series dimension to agent_buckets ("which client is burning tokens").
+// series dimension to agent_buckets ("which client is burning tokens"); the
+// agent filter narrows BOTH dimensions (by=model reroutes through
+// agent_buckets server-side).
 // Control selections persist to localStorage so a refresh keeps the view.
 
 // analyticsState reads the tab's control selections from localStorage (with
@@ -6592,6 +6885,7 @@ function analyticsState() {
     gran: localStorage.getItem('an-gran') || 'auto',
     provider: localStorage.getItem('an-provider') || '',
     model: localStorage.getItem('an-model') || '',
+    agent: localStorage.getItem('an-agent') || '',
     by: localStorage.getItem('an-by') || 'model',
     metric: localStorage.getItem('an-metric') || 'tokens',
   };
@@ -6800,13 +7094,16 @@ function analyticsLayoutHTML() {
     <div class="an-toolbar">
       <span id="an-range-host"></span>
       <div class="an-seg" id="an-gran" role="group" aria-label="Granularity"></div>
-      <input id="an-provider" class="req-input" placeholder="provider" list="an-provider-list" autocomplete="off" spellcheck="false" />
+      <input id="an-provider" class="req-input" placeholder="Provider" list="an-provider-list" autocomplete="off" spellcheck="false" />
       <datalist id="an-provider-list"></datalist>
-      <input id="an-model" class="req-input" placeholder="model" list="an-model-list" autocomplete="off" spellcheck="false" />
+      <input id="an-model" class="req-input" placeholder="Model" list="an-model-list" autocomplete="off" spellcheck="false" />
       <datalist id="an-model-list"></datalist>
+      <input id="an-agent" class="req-input" placeholder="Agent" list="an-agent-list" autocomplete="off" spellcheck="false" />
+      <datalist id="an-agent-list"></datalist>
       <div class="an-seg" id="an-by" role="group" aria-label="Dimension"></div>
     </div>
     <div id="an-error" class="msg err" hidden></div>
+    <div id="an-filter-hint" class="an-filter-hint" hidden></div>
     <div id="an-kpis" class="an-kpis"></div>
     <div class="an-chart-card">
       <div class="an-chart-head">
@@ -6814,11 +7111,18 @@ function analyticsLayoutHTML() {
       </div>
       <div class="an-chart-wrap">
         <div id="an-chart" class="an-chart"></div>
-        <button type="button" id="an-zoom-reset" class="an-zoom-reset" hidden>↔ reset zoom</button>
+        <button type="button" id="an-zoom-reset" class="an-zoom-reset" hidden>↔ Reset Zoom</button>
       </div>
       <div id="an-legend"></div>
     </div>
-    <div id="an-table" class="an-table-card"></div>`;
+    <div id="an-table" class="an-table-card"></div>
+    <div class="an-heat-card" hidden>
+      <div class="an-heat-head">
+        <span id="an-heat-title" class="an-heat-title"></span>
+        <span class="an-heat-scale" aria-hidden="true">Less<i class="hm hm-l1"></i><i class="hm hm-l2"></i><i class="hm hm-l3"></i><i class="hm hm-l4"></i>More</span>
+      </div>
+      <div id="an-heat" class="an-heat-scroll"></div>
+    </div>`;
 }
 
 // buildAnalyticsLayout (re)builds the toolbar + skeleton and wires every
@@ -6833,16 +7137,23 @@ function buildAnalyticsLayout(panel, state, granOptions, granActive) {
     value: o.id, label: o.label, disabled: !o.allowed,
   })), granActive, (v) => { analyticsSave('gran', v); anZoom = null; renderAnalyticsTab(); });
   analyticsSeg(panel.querySelector('#an-by'), [
-    { value: 'model', label: 'by model' }, { value: 'agent', label: 'by agent' },
+    { value: 'model', label: 'By Model' }, { value: 'agent', label: 'By Agent' },
   ], state.by, (v) => { analyticsSave('by', v); renderAnalyticsTab(); });
-  analyticsSeg(panel.querySelector('#an-metric'), ANALYTICS_METRICS.map((m) => ({ value: m.id, label: m.label })),
-    state.metric, (v) => { analyticsSave('metric', v); renderAnalyticsTab(); });
+  // Failovers/429s exist only in minute_buckets: every agent-dimension read
+  // (by=agent or an agent filter — both reroute to agent_buckets server-side)
+  // disables them; a stored pick that becomes unavailable falls back to
+  // tokens (the granularity control's span-gating pattern).
+  analyticsSeg(panel.querySelector('#an-metric'), analyticsMetricOptions(state.by, state.agent),
+    analyticsMetricAllowed(state.metric, state.by, state.agent) ? state.metric : 'tokens',
+    (v) => { analyticsSave('metric', v); renderAnalyticsTab(); });
   const elProvider = panel.querySelector('#an-provider');
   const elModel = panel.querySelector('#an-model');
+  const elAgent = panel.querySelector('#an-agent');
   elProvider.value = state.provider;
   elModel.value = state.model;
+  elAgent.value = state.agent;
   // Free-text filters: commit on Enter or blur (change), not per keystroke.
-  for (const [input, key] of [[elProvider, 'provider'], [elModel, 'model']]) {
+  for (const [input, key] of [[elProvider, 'provider'], [elModel, 'model'], [elAgent, 'agent']]) {
     input.onchange = () => {
       const v = input.value.trim();
       if (v === analyticsState()[key]) return; // unchanged — no refetch
@@ -6870,9 +7181,14 @@ async function renderAnalyticsTab(background = false) {
   const granPrefAllowed = state.gran === 'auto' || (granOptions.find((o) => o.id === state.gran) || {}).allowed;
   const granActive = granPrefAllowed ? state.gran : 'auto';
   const gran = analyticsGranularity(spanSec, granActive);
+  // The effective metric can differ from the stored pick in agent-dimension
+  // reads (failovers/429s are minute_buckets-only); every renderer below and
+  // the toolbar's segment must agree on it.
+  const metric = analyticsMetricAllowed(state.metric, state.by, state.agent) ? state.metric : 'tokens';
   const q = new URLSearchParams({ from: String(bounds.from), to: String(bounds.to), granularity: gran, by: state.by });
   if (state.provider) q.set('provider', state.provider);
   if (state.model) q.set('model', state.model);
+  if (state.agent) q.set('agent', state.agent);
   let resp = null;
   let fetchErr = null;
   try {
@@ -6884,7 +7200,7 @@ async function renderAnalyticsTab(background = false) {
   // charts/KPIs on screen and report through the shared stale-data banner.
   // (The auto-refresh timer is re-armed below so a later tick retries.)
   if (fetchErr && panel.querySelector('#an-kpis')) {
-    setRefreshError(panel, staleDataText('analytics unavailable: ' + fetchErr.message));
+    setRefreshError(panel, staleDataText('Analytics unavailable: ' + fetchErr.message));
     analyticsMaybeAutoRefresh();
     return;
   }
@@ -6899,16 +7215,18 @@ async function renderAnalyticsTab(background = false) {
     // toolbar stays wired so the user can change filters and retry).
     if (errEl) {
       errEl.hidden = false;
-      errEl.textContent = 'analytics unavailable: ' + fetchErr.message;
+      errEl.textContent = 'Analytics unavailable: ' + fetchErr.message;
     }
     analyticsMaybeAutoRefresh();
     return;
   }
   if (errEl) errEl.hidden = true;
   analyticsFillDatalists(panel, resp, state.provider);
+  analyticsFilterHint(panel, resp, state);
   analyticsRenderKpis(panel.querySelector('#an-kpis'), resp);
-  analyticsRenderCharts(panel, resp, state.metric, gran);
-  analyticsRenderTable(panel, resp, state.metric);
+  analyticsRenderCharts(panel, resp, metric, gran);
+  analyticsRenderHeatmap(panel, resp);
+  analyticsRenderTable(panel, resp, metric);
   analyticsMaybeAutoRefresh();
 }
 
@@ -6960,6 +7278,36 @@ function fmtDelta(delta, warn) {
   return `<span class="d ${kpiDeltaClass(delta, warn)}">${arrow} ${sign}${delta}%</span>`;
 }
 
+// analyticsFilterHint surfaces the silent-empty trap: an active free-text
+// filter that matches nothing zeroes every view on the page (the agent
+// filter is an EXACT server-side match — one typo and KPIs, chart, heatmap
+// and table all read "no data"), which looks like the data is gone. When
+// the response has no series but filters are set, name the active filters
+// (and, for a misspelled agent, the agents that DO have traffic) and offer
+// a one-click clear.
+function analyticsFilterHint(panel, resp, state) {
+  const hint = panel.querySelector('#an-filter-hint');
+  if (!hint) return;
+  const series = (resp && resp.series) || [];
+  const active = [];
+  if (state.provider) active.push(`provider:${state.provider}`);
+  if (state.model) active.push(`model:${state.model}`);
+  if (state.agent) active.push(`agent:${state.agent}`);
+  const agents = (resp && resp.agents) || [];
+  if (!series.length && active.length) {
+    const miss = state.agent && agents.length && !agents.includes(state.agent)
+      ? ` — agents with traffic: ${agents.join(', ')}` : '';
+    hint.innerHTML = `No data for ${active.map((a) => `<code>${esc(a)}</code>`).join(' · ')}${esc(miss)} <button type="button" class="btn small" id="an-filter-clear">Clear Filters</button>`;
+    hint.hidden = false;
+    hint.querySelector('#an-filter-clear').onclick = () => {
+      for (const key of ['provider', 'model', 'agent']) analyticsSave(key, '');
+      renderAnalyticsTab();
+    };
+    return;
+  }
+  hint.hidden = true;
+}
+
 // analyticsRenderKpis renders the summary chips: tokens / tok-s / cache
 // hit / requests / failures / cost, each with the delta vs the equal-length
 // window before the selected one (resp.compare). Shared by the Analytics
@@ -6984,7 +7332,7 @@ function analyticsRenderKpis(host, resp) {
   // Token counts render K/M-compacted (fmtCompact, 2 decimals); the exact
   // per-bucket breakdown stays one hover away via the title tooltip.
   const tokensChip = {
-    k: 'tokens',
+    k: 'Tokens',
     v: fmtCompact(t.tokens || 0, 2),
     tip: `in ${fmtNum(t.input || 0)} · out ${fmtNum(t.output || 0)} · cache read ${fmtNum(t.cache_read || 0)} · cache write ${fmtNum(t.cache_creation || 0)}`,
     d: pctDelta(t.tokens || 0, c ? c.tokens : null),
@@ -6997,13 +7345,24 @@ function analyticsRenderKpis(host, resp) {
       // speed, not decode).
       const v = t.tok_sec == null ? null : Number(t.tok_sec);
       const pv = c && c.tok_sec != null ? Number(c.tok_sec) : null;
-      return { k: 'tok/s', v: v == null ? '—' : v.toFixed(1), tip: v == null ? '' : v.toFixed(2) + ' output tokens per call-second', d: pctDelta(v, pv) };
+      return { k: 'Tok/s', v: v == null ? '—' : v.toFixed(1), tip: v == null ? '' : v.toFixed(2) + ' output tokens per call-second', d: pctDelta(v, pv) };
     })(),
-    { k: 'cache hit', v: hit == null ? '—' : hit.toFixed(1) + '%', d: pctDelta(hit, prevHit) },
-    { k: 'requests', v: fmtNum(t.requests || 0), d: pctDelta(t.requests || 0, c && c.requests) },
-    { k: 'failures', v: fmtNum(t.failures || 0), d: pctDelta(t.failures || 0, c && c.failures), warn: true },
+    { k: 'Cache Hit', v: hit == null ? '—' : hit.toFixed(1) + '%', d: pctDelta(hit, prevHit) },
+    { k: 'Requests', v: fmtNum(t.requests || 0), d: pctDelta(t.requests || 0, c && c.requests) },
     {
-      k: 'cost (USD)',
+      k: 'Failures',
+      v: fmtNum(t.failures || 0),
+      d: pctDelta(t.failures || 0, c && c.failures),
+      warn: true,
+      // Attempt-level pressure hides behind the terminal-failure count:
+      // retried failovers and upstream rate limits both burn quota without
+      // failing the request — keep them one hover away.
+      tip: (t.failovers || t.rate_limited_429)
+        ? `${fmtNum(t.failovers || 0)} failover attempts · ${fmtNum(t.rate_limited_429 || 0)} rate-limited (429)`
+        : '',
+    },
+    {
+      k: 'Cost (USD)',
       v: t.cost == null ? 'n/a' : '$' + t.cost.toFixed(2),
       d: pctDelta(t.cost == null ? null : t.cost, c ? c.cost : null),
       note: un.length ? `${un.length} unpriced: ${un.join(', ')}` : '',
@@ -7012,7 +7371,7 @@ function analyticsRenderKpis(host, resp) {
   host.innerHTML = chips.map((chip) => `
     <div class="an-kpi">
       <div class="k">${esc(chip.k)}</div>
-      <div class="v${chip.k === 'failures' && Number(chip.v) > 0 ? ' err' : ''}"${chip.tip ? ` title="${esc(chip.tip)}"` : ''}>${esc(chip.v)}</div>
+      <div class="v${chip.k === 'Failures' && Number(chip.v) > 0 ? ' err' : ''}"${chip.tip ? ` title="${esc(chip.tip)}"` : ''}>${esc(chip.v)}</div>
       <div>${fmtDelta(chip.d, chip.warn)}${chip.note ? `<div class="note" title="${esc(chip.note)}">${esc(chip.note)}</div>` : ''}</div>
     </div>`).join('');
 }
@@ -7076,24 +7435,32 @@ function destroyAnalyticsCharts() {
   analyticsCharts = [];
 }
 
-// analyticsFillDatalists populates the provider/model suggestion lists from the
-// response so the free-text filters are usable. The provider→models map only
-// grows within a session: a narrowed response must not erase options the user
-// can switch back to.
+// analyticsFillDatalists populates the provider/model/agent suggestion lists
+// from the response so the free-text filters are usable. The provider→models
+// map (and the agent set) only grow within a session: a narrowed response
+// must not erase options the user can switch back to. Agent suggestions come
+// from the server's in-range facet (ignoring the agent filter itself) unioned
+// with agents seen in by=agent series.
 const analyticsFacetModels = new Map();
+const analyticsFacetAgents = new Set();
 function analyticsFillDatalists(panel, resp, provider) {
   for (const s of ((resp && resp.series) || [])) {
     if (!s || !s.provider) continue;
     let set = analyticsFacetModels.get(s.provider);
     if (!set) { set = new Set(); analyticsFacetModels.set(s.provider, set); }
     set.add(s.model);
+    if (s.agent) analyticsFacetAgents.add(s.agent);
   }
+  for (const a of ((resp && resp.agents) || [])) analyticsFacetAgents.add(a);
   const providers = [...analyticsFacetModels.keys()].sort();
   const models = linkedModels(provider || '', Object.fromEntries([...analyticsFacetModels].map(([p, set]) => [p, [...set]])), {});
+  const agents = [...analyticsFacetAgents].sort();
   const pList = panel.querySelector('#an-provider-list');
   const mList = panel.querySelector('#an-model-list');
+  const aList = panel.querySelector('#an-agent-list');
   if (pList) pList.innerHTML = providers.map((p) => `<option value="${esc(p)}"></option>`).join('');
   if (mList) mList.innerHTML = models.map((m) => `<option value="${esc(m)}"></option>`).join('');
+  if (aList) aList.innerHTML = agents.map((a) => `<option value="${esc(a)}"></option>`).join('');
 }
 
 // analyticsBucketLabel formats one bucket timestamp (unix seconds) for the
@@ -7262,7 +7629,7 @@ function analyticsRenderCharts(panel, resp, metricId, gran) {
   const grid = analyticsWindowGrid(resp && resp.from, resp && resp.to, gran);
   const data = analyticsChartSeries(resp && resp.series, metric.id, grid);
   if (!data.x.length || !data.labels.length) {
-    host.innerHTML = '<div class="empty-state">no series in range</div>';
+    host.innerHTML = '<div class="empty-state">No series in range</div>';
     return;
   }
   const colors = analyticsChartColors();
@@ -7471,29 +7838,130 @@ function analyticsLegendCollapse(host) {
   };
 }
 
-// analyticsRowSortKey maps one leaderboard row to the sort key of the active
-// chart metric (tokens/cost by volume, errors/latency by rate, requests by
-// count) so the table and the chart tell the same story. Shared by the
-// Analytics tab's and the Status→Dashboard's leaderboards.
-function analyticsRowSortKey(r, metricId) {
-  switch (metricId) {
-    case 'requests': return r.requests;
-    case 'errors': return r.errPct == null ? -1 : r.errPct;
-    case 'latency': return r.latencyMs == null ? -1 : r.latencyMs;
-    case 'ttft': return r.ttftMs == null ? -1 : r.ttftMs;
-    case 'toksec': return r.tokSec == null ? -1 : r.tokSec;
-    case 'cache': return r.cachePct == null ? -1 : r.cachePct;
-    case 'cost': return r.cost == null ? -1 : r.cost;
-    default: return r.tokens; // tokens + anything unlisted
+// showHeatTip fills the shared floating tooltip (the same body-level,
+// pointer-events-none .tl-tip the session timeline uses — deliberately
+// without data-popup so hover can never defer the auto-refresh) with one
+// day cell's lines; the renderer stamps data-day on every in-window cell
+// so empty days still name their date.
+function showHeatTip(cellEl) {
+  const dayUnix = Number(cellEl.dataset.day);
+  if (!Number.isFinite(dayUnix)) return;
+  let cell = null;
+  if (cellEl.dataset.cell) {
+    try { cell = JSON.parse(cellEl.dataset.cell); } catch (_) { cell = null; }
   }
+  const lines = analyticsHeatTipLines(dayUnix, cell);
+  const el = tlTip();
+  el.innerHTML = `<div class="tl-tip-meta">${lines.map((l) => `<div>${esc(l)}</div>`).join('')}</div>`;
+  el.hidden = false;
+  placeTlTip(el);
+}
+
+// analyticsRenderHeatmap draws the GitHub-style token-usage heatmap: one
+// column per Monday-first week over the server's FIXED window (the last
+// twelve whole months plus the current month-to-date — independent of the
+// toolbar's range/granularity/metric), rows Mon..Sun, month labels CENTERED
+// over each month's span (reference only — week columns never align exactly
+// to calendar months), SQUARE cells that stretch to FILL the card width.
+// Cells shade by the day's four-bucket token total in the 5-level ordinal
+// scale; out-of-window slots render invisible, in-window days without
+// traffic stay bare. The card hides entirely when the year has no cells.
+function analyticsRenderHeatmap(panel, resp) {
+  const host = panel.querySelector('#an-heat');
+  const card = panel.querySelector('.an-heat-card');
+  hideTlTip(); // the innerHTML reset below drops the hovered cell
+  if (!host || !card) return;
+  const heat = (resp && resp.heatmap) || {};
+  const cells = heat.cells || [];
+  if (!cells.length) {
+    card.hidden = true;
+    return;
+  }
+  const { weeks, max } = analyticsYearGrid(cells, heat.from, heat.to);
+  card.hidden = false;
+  const title = panel.querySelector('#an-heat-title');
+  if (title) title.textContent = 'Token Usage';
+  // Square edge from the MEASURED available width (the card is unhidden, so
+  // the scroll host has a real clientWidth) — explicit tracks and sizes,
+  // no engine-dependent aspect-ratio-in-grid sizing.
+  const cell = analyticsHeatCellSize(host.clientWidth, weeks.length);
+  const template = `grid-template-columns:2.6em repeat(${weeks.length}, ${cell}px)`;
+  let html = `<div class="an-heat an-heat-year" style="--hm:${cell}px" role="img" aria-label="token usage over the past year">`;
+  html += `<div class="an-heat-mon" style="${template}"><div class="hm-corner"></div>`;
+  for (const s of analyticsYearMonthSpans(weeks)) {
+    html += `<div class="hm-mon" style="grid-column:${s.col + 2} / span ${s.span}">${esc(s.label)}</div>`;
+  }
+  html += `</div><div class="an-heat-days" style="${template}">`;
+  // Row labels alternate Mon/Wed/Fri only — one per two rows keeps the
+  // gutter narrow without losing week orientation. Every in-window cell
+  // carries its day (data-day; data-cell for traffic) to back the hover
+  // tooltip — out-of-window slots stay anonymous.
+  for (let wd = 0; wd < 7; wd++) {
+    html += `<div class="hm-day">${wd % 2 === 0 ? HEAT_DAYS[wd] : ''}</div>`;
+    for (const w of weeks) {
+      const c = w.days[wd];
+      if (c === false) {
+        html += '<div class="hm hm-off"></div>';
+        continue;
+      }
+      const [y, m, d] = w.lead.split('-').map(Number);
+      const dayUnix = Math.floor(new Date(y, m - 1, d + wd).getTime() / 1000);
+      const lvl = analyticsHeatLevel(c ? Number(c.tokens || 0) : 0, max);
+      html += `<div class="hm hm-l${lvl}" data-day="${dayUnix}"${c ? ` data-cell="${esc(JSON.stringify(c))}"` : ''}></div>`;
+    }
+  }
+  html += '</div></div>';
+  host.innerHTML = html;
+  // Hover tooltip via delegation (hundreds of cells × per-cell listeners
+  // would be noise): the 90ms settle delay mirrors the session-timeline
+  // bars, and leaving the grid or the shared hide paths (scroll,
+  // pointerdown, re-render) close it.
+  const grid = host.querySelector('.an-heat-days');
+  if (grid) {
+    let last = null;
+    grid.addEventListener('mouseover', (e) => {
+      const cell = e.target.closest('.hm');
+      if (!cell || !cell.dataset.day || cell === last) return;
+      last = cell;
+      if (tlTipTimer) clearTimeout(tlTipTimer);
+      tlTipTimer = setTimeout(() => {
+        tlTipTimer = 0;
+        tlTipPos = { x: e.clientX, y: e.clientY };
+        showHeatTip(cell);
+      }, 90);
+    });
+    grid.addEventListener('mouseleave', () => { last = null; hideTlTip(); });
+  }
+}
+
+// analyticsSortState reads the leaderboard's pinned sort ({col, dir}; col
+// null = follow the active chart metric — the default) from localStorage.
+// Unknown columns or malformed values fall back to unpinned, so a stale key
+// from an older markup never breaks rendering.
+function analyticsSortState() {
+  try {
+    const raw = localStorage.getItem('an-sort');
+    if (raw) {
+      const v = JSON.parse(raw);
+      if (v && typeof v === 'object') {
+        const col = v.col && ANALYTICS_TABLE_SORT[v.col] ? v.col : null;
+        const dir = col && v.dir === 'asc' ? 'asc' : 'desc';
+        return { col, dir };
+      }
+    }
+  } catch (_) { /* ignore */ }
+  return { col: null, dir: 'desc' };
 }
 
 // analyticsRenderTable renders the leaderboard: one row per series (provider/
 // model, or agent/model in the agent dimension) with the window's requests,
 // tokens, failure rate, average latency, equivalent cost, blended $/1M tokens
-// and a cost share bar. Rows sort by the active chart metric (tokens/cost by
-// volume, errors/latency by rate, requests by count) so the table and the
-// chart tell the same story.
+// and a cost share. Rows order by the pinned column sort (header click) or,
+// unpinned, the active chart metric — table and chart tell the same story
+// until the operator picks a column. Clicking a row drills into the Requests
+// tab seeded with that series' filters (by=model → provider+model; agent
+// rows add the agent) through the hash pipeline, which applies the filter
+// before the tab renders.
 function analyticsRenderTable(panel, resp, metricId) {
   const host = panel.querySelector('#an-table');
   if (!host) return;
@@ -7504,22 +7972,32 @@ function analyticsRenderTable(panel, resp, metricId) {
   // their window (Analytics = selected range, Dashboard = fixed 1h).
   const health = new Map(modelHealthFromSeries(resp && resp.series).map((r) => [r.label, r]));
   const totalCost = rows.reduce((sum, r) => sum + (r.cost || 0), 0);
-  rows.sort((a, b) => analyticsRowSortKey(b, metricId) - analyticsRowSortKey(a, metricId));
+  // Join the sort-only fields onto each row (analyticsSortRows reads them):
+  // the health score keys by the same label as the badge join, and the cost
+  // share is cost over the window's priced total.
+  for (const r of rows) {
+    r.healthScore = (health.get(r.label) || {}).score ?? null;
+    r.costShare = r.cost != null && totalCost > 0 ? r.cost / totalCost : null;
+  }
+  const sort = analyticsSortState();
+  const ordered = analyticsSortRows(rows, metricId, sort);
   const gradeBadge = (g) => g == null ? '<span class="badge muted">n/a</span>'
     : `<span class="badge ${g}">${g === 'ok' ? 'healthy' : g === 'warn' ? 'degraded' : 'poor'}</span>`;
   const graded = (dim, text) => `<td class="num${dim && dim.grade ? ' ' + dim.grade : ''}">${text}</td>`;
-  const body = rows.map((r) => {
+  const body = ordered.map((r) => {
     const h = health.get(r.label) || {};
     const dims = h.dims || {};
-    const share = r.cost != null && totalCost > 0 ? r.cost / totalCost * 100 : null;
+    const share = r.costShare != null ? r.costShare * 100 : null;
     const costTip = r.costPerMTok == null ? '' : ` title="$${r.costPerMTok.toFixed(2)} per 1M tokens"`;
     const shareTip = share == null ? '' : ` title="${share.toFixed(1)}% of priced cost"`;
-    return `<tr>
+    const drill = '#requests?' + requestsFilterQuery({ provider: r.provider, model: r.model, agent: r.agent });
+    const errTip = r.errPct == null ? '' : ` title="${esc(`${fmtNum(r.failures)} failures · ${fmtNum(r.failovers)} failover attempts · ${fmtNum(r.rateLimited)} rate-limited (429)`)}"`;
+    return `<tr data-drill="${esc(drill)}" title="view requests · ${esc(r.label)}">
       <td class="mono">${esc(r.label)}</td>
       <td>${gradeBadge(h.grade)}</td>
       <td class="num">${fmtNum(r.requests)}</td>
       <td class="num" title="${esc(fmtNum(r.tokens))} tokens">${fmtCompact(r.tokens)}</td>
-      <td class="num">${r.errPct == null ? '—' : r.errPct.toFixed(1) + '%'}</td>
+      <td class="num"${errTip}>${r.errPct == null ? '—' : r.errPct.toFixed(1) + '%'}</td>
       ${graded(dims.latency, r.latencyMs == null ? '—' : fmtNum(Math.round(r.latencyMs)) + 'ms')}
       ${graded(dims.ttft, r.ttftMs == null ? '—' : fmtNum(Math.round(r.ttftMs)) + 'ms')}
       ${graded(dims.toksec, r.tokSec == null ? '—' : r.tokSec.toFixed(1))}
@@ -7527,10 +8005,38 @@ function analyticsRenderTable(panel, resp, metricId) {
       <td class="num"${shareTip}>${share == null ? '—' : share.toFixed(1) + '%'}</td>
     </tr>`;
   }).join('');
+  // Every column is sortable: the header carries the column id, the active
+  // pin shows its direction arrow (and aria-sort), first click uses the
+  // column's default direction, the next click toggles.
+  const th = (col, label, cls = '') => {
+    const active = sort.col === col;
+    const arrow = active ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    const aria = active ? ` aria-sort="${sort.dir === 'asc' ? 'ascending' : 'descending'}"` : '';
+    return `<th${cls ? ` class="${cls}"` : ''}${aria} data-sort="${col}" title="sort by ${esc(label.toLowerCase())}">${label}${arrow}</th>`;
+  };
   host.innerHTML = `<table class="table">
-      <thead><tr><th>series</th><th>status</th><th class="num">requests</th><th class="num">tokens</th><th class="num">err</th><th class="num">avg lat</th><th class="num">ttft</th><th class="num">tok/s</th><th class="num">cost</th><th class="num">cost share</th></tr></thead>
-      <tbody>${body || '<tr><td colspan="10" class="hint">no series in range</td></tr>'}</tbody>
+      <thead><tr>${th('series', 'Series')}${th('status', 'Status')}${th('requests', 'Requests', 'num')}${th('tokens', 'Tokens', 'num')}${th('err', 'Err', 'num')}${th('latency', 'Avg Lat', 'num')}${th('ttft', 'TTFT', 'num')}${th('toksec', 'Tok/s', 'num')}${th('cost', 'Cost', 'num')}${th('share', 'Cost Share', 'num')}</tr></thead>
+      <tbody>${body || '<tr><td colspan="10" class="hint">No series in range</td></tr>'}</tbody>
     </table>`;
+  // Header click: pin the column (default direction) or toggle the pinned
+  // one; re-render ONLY this table from the same response — sorting is
+  // client-side, no refetch.
+  host.querySelector('thead').onclick = (e) => {
+    const cell = e.target && e.target.closest ? e.target.closest('th[data-sort]') : null;
+    if (!cell) return;
+    const col = cell.dataset.sort;
+    const next = sort.col === col
+      ? { col, dir: sort.dir === 'asc' ? 'desc' : 'asc' }
+      : { col, dir: ANALYTICS_TABLE_SORT[col] || 'desc' };
+    analyticsSave('sort', next);
+    analyticsRenderTable(panel, resp, metricId);
+  };
+  // Row click → Requests tab with this series' filters. The hash navigation
+  // drives the full pipeline (seed filter → activate tab), and a history
+  // entry lands so Back returns to the Analytics view.
+  host.querySelectorAll('tr[data-drill]').forEach((tr) => {
+    tr.onclick = () => { location.hash = tr.dataset.drill; };
+  });
 }
 
 // ===========================================================================

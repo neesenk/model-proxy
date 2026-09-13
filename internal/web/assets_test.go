@@ -124,9 +124,36 @@ func TestWebAssetsYAMLVisibleHeightContract(t *testing.T) {
 	}
 }
 
+// TestWebAssetsHeatLevelCascade pins the heatmap level-rule cascade: the
+// level rules must tie the scoped base (.an-heat .hm) on specificity and
+// follow it in source order, while staying UNSCOPED so the legend swatches
+// (.an-heat-scale lives outside .an-heat) keep their backgrounds. Either
+// regression renders every square as an empty base cell.
+func TestWebAssetsHeatLevelCascade(t *testing.T) {
+	css := mustWebAsset(t, "styles.css")
+	base := strings.Index(css, ".an-heat .hm {")
+	if base < 0 {
+		t.Fatal("styles.css missing the scoped .an-heat .hm base rule")
+	}
+	for _, lvl := range []string{".hm.hm-l1", ".hm.hm-l2", ".hm.hm-l3", ".hm.hm-l4"} {
+		at := strings.Index(css, lvl+" {")
+		if at < 0 {
+			t.Errorf("styles.css missing level rule %s (keep it unscoped: the legend swatches are outside .an-heat)", lvl)
+			continue
+		}
+		if at < base {
+			t.Errorf("level rule %s precedes the .an-heat .hm base rule — source order must favor the levels", lvl)
+		}
+		if strings.Contains(css, ".an-heat "+lvl+" {") {
+			t.Errorf("re-scoped level rule %s detected — use the unscoped form so the legend swatches keep their background", lvl)
+		}
+	}
+}
+
 func TestWebAssetsAnalyticsTabContract(t *testing.T) {
 	indexHTML := mustWebAsset(t, "index.html")
 	js := mustWebAsset(t, "app.js")
+	pure := mustWebAsset(t, "pure.js")
 	for _, want := range []string{
 		`data-tab="analytics"`,
 		`id="tab-analytics"`,
@@ -182,9 +209,53 @@ func TestWebAssetsAnalyticsTabContract(t *testing.T) {
 		"price_coverage",
 		"resp.compare",
 		"new uPlot(",
+		// Agent filter: toolbar input + datalist, forwarded as agent=.
+		`id="an-agent"`,
+		`id="an-agent-list"`,
+		"q.set('agent', state.agent)",
+		// Trailing-year token-usage heatmap card (contribution-graph style).
+		`id="an-heat"`,
+		"function analyticsRenderHeatmap(panel, resp)",
+		"analyticsYearGrid(",
+		"analyticsYearMonthSpans(",
+		"analyticsHeatLevel(",
+		"resp.heatmap",
+		"'Token Usage'",
+		"function showHeatTip(cellEl)",
+		// Leaderboard: sortable headers + row drilldown into Requests.
+		"function analyticsSortState()",
+		"analyticsSortRows(",
+		"data-sort=",
+		"data-drill=",
+		"requestsFilterQuery({ provider: r.provider, model: r.model, agent: r.agent })",
+		// No-match filter hint (one-click clear).
+		`id="an-filter-hint"`,
+		"function analyticsFilterHint(panel, resp, state)",
+		// Failover/429 attempt metrics + agent-dimension gating.
+		"analyticsMetricOptions(state.by, state.agent)",
+		"analyticsMetricAllowed(state.metric, state.by, state.agent) ? state.metric : 'tokens'",
+		"failover attempts",
+		"rate-limited (429)",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"export function analyticsYearGrid(",
+		"export function analyticsYearMonthSpans(",
+		"export function analyticsHeatTipLines(",
+		"export function analyticsHeatCellSize(",
+		"export function analyticsHeatLevel(",
+		"export const HEAT_DAYS",
+		"export function analyticsRowSortKey(",
+		"export function analyticsSortRows(",
+		"export function analyticsTableSortValue(",
+		"export function analyticsMetricOptions(",
+		"export function analyticsMetricAllowed(",
+	} {
+		if !strings.Contains(pure, want) {
+			t.Errorf("pure.js missing %q", want)
 		}
 	}
 }

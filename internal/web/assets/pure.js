@@ -121,17 +121,17 @@ export function quotaErrKind(snap) {
 //   - non-empty Windows     -> hint by window/plan, open
 export function accountUsageState(snap) {
   if (!snap) {
-    return { hint: 'no data', open: false };
+    return { hint: 'No data', open: false };
   }
   if (snap.Err) {
     const k = quotaErrKind(snap);
-    const hint = k === 'session-expired' ? 'session expired'
-      : k === 'not-logged-in' ? 'not logged in' : 'error';
+    const hint = k === 'session-expired' ? 'Session expired'
+      : k === 'not-logged-in' ? 'Not logged in' : 'Error';
     return { hint, open: true };
   }
   const windows = snap.Windows || [];
   if (windows.length === 0) {
-    return { hint: 'unmeasured', open: false };
+    return { hint: 'Unmeasured', open: false };
   }
   const ult = windows.find((w) => w.Ultimate);
   if (ult && ult.RemainingPct != null && ult.RemainingPct >= 0) {
@@ -140,7 +140,7 @@ export function accountUsageState(snap) {
   if (snap.Plan) {
     return { hint: snap.Plan, open: true };
   }
-  return { hint: 'available', open: true };
+  return { hint: 'Available', open: true };
 }
 
 // settingsDiff computes the minimal POST /api/config/edit payload for the
@@ -795,9 +795,33 @@ export const ANALYTICS_METRICS = [
   { id: 'latency', label: 'Latency', axis: 'avg ms', gap: true },
   { id: 'ttft', label: 'TTFT', axis: 'avg ms', gap: true },
   { id: 'requests', label: 'Requests', axis: 'requests', gap: false },
+  { id: 'failovers', label: 'Failovers', axis: 'failovers', gap: false },
+  { id: 'rate429', label: '429s', axis: '429s', gap: false },
   { id: 'errors', label: 'Errors', axis: 'error %', gap: true },
   { id: 'cost', label: 'Cost', axis: 'USD', gap: true },
 ];
+
+// analyticsMetricOptions returns the metric segment's option list for the
+// query shape. The failover/429 attempt counters exist only in
+// minute_buckets, so every agent-dimension read (by=agent, or any agent
+// filter — both route to agent_buckets server-side) disables those two
+// metrics: the columns are structurally absent there, not merely zero.
+export function analyticsMetricOptions(by, agent) {
+  const agentRead = by === 'agent' || !!agent;
+  return ANALYTICS_METRICS.map((m) => ({
+    value: m.id,
+    label: m.label,
+    disabled: agentRead && (m.id === 'failovers' || m.id === 'rate429'),
+  }));
+}
+
+// analyticsMetricAllowed reports whether a (possibly stored) metric pick is
+// selectable for the query shape; an unavailable pick falls back to tokens —
+// the same pattern as the granularity control's span gating.
+export function analyticsMetricAllowed(metricId, by, agent) {
+  const opt = analyticsMetricOptions(by, agent).find((m) => m.value === metricId);
+  return !!opt && !opt.disabled;
+}
 
 // analyticsPointValue reads one metric from an /api/analytics point. The
 // derived metrics (tokens total, tok/s, cache hit %, error %) are computed
@@ -813,8 +837,10 @@ export function analyticsPointValue(p, kind) {
   if (!p) return null;
   switch (kind) {
     case 'tokens': return Number(p.tokens || 0);
-    case 'cost': return p.cost != null ? p.cost : null;
+    case 'cost': return p.cost != null ? Number(p.cost) : null;
     case 'requests': return Number(p.requests || 0);
+    case 'failovers': return Number(p.failovers || 0);
+    case 'rate429': return Number(p.rate_limited_429 || 0);
     case 'errors': return p.err_pct == null ? null : Number(p.err_pct);
     case 'latency': return p.requests ? Number(p.avg_latency_ms || 0) : null;
     case 'ttft': return p.requests ? Number(p.avg_ttft_ms || 0) : null;
@@ -868,10 +894,14 @@ export function analyticsTableRows(series) {
     const tokens = Number(t.tokens || 0);
     rows.push({
       label: s.agent ? `${s.agent}/${s.model}` : `${s.provider}/${s.model}`,
+      agent: s.agent || '',
       provider: s.provider,
       model: s.model,
       requests: Number(t.requests || 0),
       tokens,
+      failures: Number(t.failures || 0),
+      failovers: Number(t.failovers || 0),
+      rateLimited: Number(t.rate_limited_429 || 0),
       errPct: t.err_pct == null ? null : Number(t.err_pct),
       latencyMs: t.avg_latency_ms == null ? null : Number(t.avg_latency_ms),
       ttftMs: t.avg_ttft_ms == null ? null : Number(t.avg_ttft_ms),
@@ -883,6 +913,91 @@ export function analyticsTableRows(series) {
     });
   }
   return rows;
+}
+
+// analyticsRowSortKey maps one leaderboard row to the sort key of the active
+// chart metric (tokens/cost by volume, errors/latency by rate, requests by
+// count) so the table and the chart tell the same story. Shared by the
+// Analytics tab's and the Status→Dashboard's leaderboards (null keys sort
+// last via the -1 sentinel).
+export function analyticsRowSortKey(r, metricId) {
+  switch (metricId) {
+    case 'requests': return r.requests;
+    case 'failovers': return r.failovers;
+    case 'rate429': return r.rateLimited;
+    case 'errors': return r.errPct == null ? -1 : r.errPct;
+    case 'latency': return r.latencyMs == null ? -1 : r.latencyMs;
+    case 'ttft': return r.ttftMs == null ? -1 : r.ttftMs;
+    case 'toksec': return r.tokSec == null ? -1 : r.tokSec;
+    case 'cache': return r.cachePct == null ? -1 : r.cachePct;
+    case 'cost': return r.cost == null ? -1 : r.cost;
+    default: return r.tokens; // tokens + anything unlisted
+  }
+}
+
+// ANALYTICS_TABLE_SORT maps the leaderboard's sortable column ids (the
+// data-sort attribute on each header cell) to their first-click direction:
+// volume/rate/cost columns read biggest-first; the series label reads A→Z;
+// status reads score ascending — worst model first, the actionable order.
+export const ANALYTICS_TABLE_SORT = {
+  series: 'asc',
+  status: 'asc',
+  requests: 'desc',
+  tokens: 'desc',
+  err: 'desc',
+  latency: 'desc',
+  ttft: 'desc',
+  toksec: 'desc',
+  cost: 'desc',
+  share: 'desc',
+};
+
+// analyticsTableSortValue reads one leaderboard column's sort value from a
+// row. Rows carry healthScore/costShare only after the render joined them
+// (modelHealthFromSeries by label, share = cost/totalCost); null anywhere
+// means "no data" and sorts last regardless of direction.
+export function analyticsTableSortValue(r, col) {
+  if (!r) return null;
+  switch (col) {
+    case 'series': return r.label == null ? null : String(r.label);
+    case 'status': return r.healthScore == null ? null : Number(r.healthScore);
+    case 'requests': return Number(r.requests || 0);
+    case 'tokens': return Number(r.tokens || 0);
+    case 'err': return r.errPct == null ? null : Number(r.errPct);
+    case 'latency': return r.latencyMs == null ? null : Number(r.latencyMs);
+    case 'ttft': return r.ttftMs == null ? null : Number(r.ttftMs);
+    case 'toksec': return r.tokSec == null ? null : Number(r.tokSec);
+    case 'cost': return r.cost == null ? null : Number(r.cost);
+    case 'share': return r.costShare == null ? null : Number(r.costShare);
+    default: return null;
+  }
+}
+
+// analyticsSortRows returns the leaderboard's display order: a pinned column
+// (analyticsTableSortValue; "no data" rows always last, both directions) or,
+// unpinned, the active chart metric via analyticsRowSortKey descending — the
+// historical default, so the table still tells the chart's story until the
+// operator picks a column. `sort` is {col, dir}; col null means unpinned.
+export function analyticsSortRows(rows, metricId, sort) {
+  const list = Array.isArray(rows) ? [...rows] : [];
+  const col = sort && sort.col ? sort.col : null;
+  if (!col || !(col in ANALYTICS_TABLE_SORT)) {
+    list.sort((a, b) => analyticsRowSortKey(b, metricId) - analyticsRowSortKey(a, metricId));
+    return list;
+  }
+  const dir = sort.dir === 'asc' ? 1 : -1;
+  list.sort((a, b) => {
+    const va = analyticsTableSortValue(a, col);
+    const vb = analyticsTableSortValue(b, col);
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1; // nulls last in both directions
+    if (vb == null) return -1;
+    if (typeof va === 'string' || typeof vb === 'string') {
+      return dir * String(va).localeCompare(String(vb));
+    }
+    return dir * (va - vb);
+  });
+  return list;
 }
 
 // analyticsValueText renders one metric value for display (chart tooltip,
@@ -950,12 +1065,129 @@ function analyticsGranAllowed(spanSec, gran) {
 // with an `allowed` flag — disallowed ones render disabled, and 'auto' is
 // always available.
 export function analyticsGranOptions(spanSec) {
+  // Title-case display labels (the lowercase ids are the API values).
+  const labels = { auto: 'Auto', minute: 'Minute', hour: 'Hour', day: 'Day', week: 'Week', month: 'Month' };
   return [
-    { id: 'auto', label: 'auto', allowed: true },
+    { id: 'auto', label: labels.auto, allowed: true },
     ...['minute', 'hour', 'day', 'week', 'month'].map((id) => ({
-      id, label: id, allowed: analyticsGranAllowed(spanSec, id),
+      id, label: labels[id], allowed: analyticsGranAllowed(spanSec, id),
     })),
   ];
+}
+
+// HEAT_DAYS labels the year heatmap's rows, Monday-first — the server's
+// day buckets are laid out GitHub-contribution style.
+export const HEAT_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+// yearDayKey formats one Date's local calendar day as YYYY-MM-DD (the grid
+// key — same shape the picker's ymd() builds from parts).
+function yearDayKey(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
+// analyticsYearGrid lays the server's day cells out contribution-graph
+// style: columns are Monday-first weeks, rows are Mon..Sun. from/to are the
+// heatmap window's unix seconds, rendered in the browser's local calendar
+// (self-consistent with the cell day instants). Each week carries `lead`
+// (its Monday's YYYY-MM-DD) and days[wd]: the cell (traffic that day),
+// null (in range, no traffic) or false (outside the window — rendered
+// invisible). max is the largest token count across cells — the heatmap's
+// FIXED usage metric, independent of the trend chart's switcher.
+export function analyticsYearGrid(cells, from, to) {
+  const byDay = new Map();
+  for (const c of (Array.isArray(cells) ? cells : [])) {
+    if (!c || !Number.isFinite(Number(c.day))) continue;
+    byDay.set(yearDayKey(new Date(c.day * 1000)), c);
+  }
+  const fromDate = new Date(from * 1000);
+  const toDate = new Date(to * 1000);
+  const firstDay = new Date(fromDate.getFullYear(), fromDate.getMonth(), fromDate.getDate());
+  const lastDay = new Date(toDate.getFullYear(), toDate.getMonth(), toDate.getDate());
+  const gridStart = new Date(firstDay.getFullYear(), firstDay.getMonth(), firstDay.getDate() - ((firstDay.getDay() + 6) % 7));
+  const weeks = [];
+  let max = 0;
+  for (let w = new Date(gridStart); w <= lastDay; w.setDate(w.getDate() + 7)) {
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(w.getFullYear(), w.getMonth(), w.getDate() + i);
+      if (d < firstDay || d > lastDay) { days.push(false); continue; }
+      const cell = byDay.get(yearDayKey(d)) || null;
+      days.push(cell);
+      if (cell) {
+        const v = Number(cell.tokens || 0);
+        if (v > max) max = v;
+      }
+    }
+    weeks.push({ lead: yearDayKey(w), days });
+  }
+  return { weeks, max };
+}
+
+// analyticsYearMonthSpans partitions the week columns into month runs
+// (consecutive columns whose Monday falls in the same calendar month) and
+// returns one entry per run: {month, col (first column index), span, label}.
+// The label CENTERS over the run's span — a reference only, the columns
+// are weeks and never align exactly to calendar months. Runs shorter than
+// two columns (window edges, a straddled February) stay unlabeled to avoid
+// collisions. The runs partition every column, labeled or not.
+export function analyticsYearMonthSpans(weeks) {
+  const list = Array.isArray(weeks) ? weeks : [];
+  const spans = [];
+  let run = null;
+  list.forEach((w, i) => {
+    const m = Number(String((w && w.lead) || '').slice(5, 7)) - 1;
+    const month = Number.isInteger(m) && m >= 0 && m < 12 ? m : -1;
+    if (run && run.month === month) {
+      run.span++;
+      return;
+    }
+    if (run) spans.push(run)
+    run = { month, col: i, span: 1 };
+  });
+  if (run) spans.push(run);
+  return spans.map((s) => ({ ...s, label: s.span >= 2 && s.month >= 0 ? MONTHS_SHORT[s.month] : '' }));
+}
+
+// analyticsHeatCellSize picks the square cell edge for the year grid's
+// week columns: fill the measured available width (minus the weekday gutter
+// and inter-column gaps) with an integer edge, floored at 8px (narrower
+// windows fall back to the scroll wrapper) and capped at 18px (ultra-wide
+// windows keep the graph dense instead of growing giant cells). Explicit
+// sizes — not aspect-ratio-in-grid — keep every engine's layout identical.
+export function analyticsHeatCellSize(availablePx, weeks, gutterPx = 42, gapPx = 3) {
+  const n = Math.max(1, Number(weeks) || 1);
+  const usable = (Number(availablePx) || 0) - gutterPx - gapPx * (n - 1);
+  return Math.max(8, Math.min(18, Math.floor(usable / n)));
+}
+
+// analyticsHeatTipLines composes the hover-tooltip lines for one day cell:
+// the local date + weekday first, then the key totals — null derived
+// fields are omitted, never fabricated. Empty in-window days still answer
+// "what day is this square": the date plus a "no usage" line.
+export function analyticsHeatTipLines(dayUnix, cell) {
+  const d = new Date(dayUnix * 1000);
+  const p2 = (n) => String(n).padStart(2, '0');
+  const date = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${HEAT_DAYS[(d.getDay() + 6) % 7]}`;
+  if (!cell) return [date, 'no usage'];
+  const lines = [date, `requests ${fmtNum(cell.requests || 0)}`, `tokens ${fmtNum(cell.tokens || 0)}`];
+  if (cell.cost != null) lines.push(`$${Number(cell.cost).toFixed(4)}`);
+  if (cell.err_pct != null) lines.push(`err ${Number(cell.err_pct).toFixed(1)}%`);
+  if (cell.avg_latency_ms != null && cell.requests) lines.push(`avg lat ${Math.round(Number(cell.avg_latency_ms))}ms`);
+  return lines;
+}
+
+// analyticsHeatLevel buckets one metric value into five ordinal intensity
+// levels (0=empty/unmetric'd, 4=top quarter of the max). Ordinal buckets
+// instead of a linear alpha ramp: usage distributions are peak-skewed, and
+// linear shading renders every off-peak cell invisibly pale.
+export function analyticsHeatLevel(v, max) {
+  if (v == null || !isFinite(v) || v <= 0 || !max || max <= 0) return 0;
+  const r = v / max;
+  if (r >= 0.75) return 4;
+  if (r >= 0.5) return 3;
+  if (r >= 0.25) return 2;
+  return 1;
 }
 
 // MODEL_HEALTH_DIMS defines the Status→Dashboard health scoring dimensions
@@ -1304,29 +1536,103 @@ export const SECURITY_ACTION_HELP = [
   { name: 'log-weak', text: 'weak path signal (plain-text mention); no longer persisted — only older logs carry these' },
 ];
 
+// SECURITY_RANGES: the Security Activity feed's audit-window presets. 'all'
+// sends no from bound (the whole 30d retention); every other preset maps to
+// a from=<unix-seconds> rolling window computed at query time (client and
+// daemon are the same machine — see TOKEN_RANGES for the same convention).
+export const SECURITY_RANGES = [
+  { value: 'all', label: 'All Time', secs: 0 },
+  { value: '24h', label: 'Last 24h', secs: 86400 },
+  { value: '7d', label: 'Last 7d', secs: 7 * 86400 },
+  { value: '30d', label: 'Last 30d', secs: 30 * 86400 },
+];
+
+// securityRangeFromSecs resolves a preset to the unix-seconds `from` query
+// value (null = no bound). now is unix milliseconds, injectable for tests.
+export function securityRangeFromSecs(value, nowMs = Date.now()) {
+  const r = SECURITY_RANGES.find((x) => x.value === value);
+  if (!r || !r.secs) return null;
+  return Math.floor(nowMs / 1000) - r.secs;
+}
+
+// securityFilterQuery projects the Security tab's filter onto URL-hash params
+// (only non-default values — an unfiltered tab stays a clean #security).
+// securityFilterFromQuery reads them back: null when the hash carries no
+// filter keys (a bare #security must not clobber an in-memory filter), junk
+// enum values dropping back to their defaults.
+export function securityFilterQuery(f) {
+  if (!f) return '';
+  const q = new URLSearchParams();
+  if (f.kind) q.set('kind', f.kind);
+  if (f.verdict) q.set('verdict', f.verdict);
+  if (f.range && f.range !== 'all') q.set('range', f.range);
+  if (f.rule) q.set('rule', f.rule);
+  return q.toString();
+}
+
+export function securityFilterFromQuery(params) {
+  if (!params) return null;
+  const has = params.kind || params.verdict || params.rule ||
+    (params.range && params.range !== 'all');
+  if (!has) return null;
+  return {
+    kind: ['secret', 'path', 'drift'].includes(params.kind) ? params.kind : '',
+    verdict: ['high', 'low', 'error', 'skipped'].includes(params.verdict) ? params.verdict : '',
+    range: ['24h', '7d', '30d'].includes(params.range) ? params.range : 'all',
+    rule: params.rule || '',
+  };
+}
+
 // mergeSecurityFeed merges audit records and AI adjudication results into
 // one chronological feed (newest first). The projection normalizes both
 // sources onto one row shape: audit rows carry agent/exposed/action/strength,
 // AI rows carry verdict/model/reason/session. kind filtering is the caller's
 // business (audit kinds secret|path|drift; AI rows are secret|path).
+//
+// A fresh (uncached) verdict lands in BOTH sources — the adjudication sink
+// writes the persistent audit record (with verdict+reason) and the ring holds
+// the per-occurrence entry — so a ring entry that matches an audit row by
+// request_id + kind + verdict + rule is folded INTO that audit row (judge
+// model / cached / session id ride along) instead of rendering a second
+// near-identical row. Ring-only rows (cached occurrences, pre-restart ring
+// leftovers) keep their ai· row — suppressed low verdicts are visible in the
+// feed and nowhere else.
 export function mergeSecurityFeed(records, adjudications) {
   const rows = [];
+  const byVerdictKey = new Map();
   for (const r of records || []) {
-    rows.push({
+    const row = {
       ts: r.ts, src: 'audit', kind: r.kind, names: r.names || [],
       action: r.action || '', verdict: r.verdict || '',
       agent: r.agent || '', exposed: r.exposed || '',
       detail: r.detail || '', requestId: r.request_id || '',
       strength: r.kind === 'path' ? pathStrengthFromAction(r.action) : '',
-    });
+      judge: '', cached: false, sessionId: '',
+    };
+    rows.push(row);
+    if (row.verdict && row.requestId) {
+      for (const n of row.names) {
+        byVerdictKey.set(`${row.requestId}\u0000${row.kind}\u0000${row.verdict}\u0000${n}`, row);
+      }
+    }
   }
   for (const a of adjudications || []) {
+    const dup = a.rule && a.request_id
+      ? byVerdictKey.get(`${a.request_id}\u0000${a.kind}\u0000${a.verdict}\u0000${a.rule}`)
+      : null;
+    if (dup) {
+      dup.judge = a.model || dup.judge;
+      dup.cached = dup.cached || !!a.cached;
+      dup.sessionId = dup.sessionId || a.session_id || '';
+      continue;
+    }
     rows.push({
       ts: a.ts, src: 'ai', kind: a.kind, names: [a.rule].filter(Boolean),
       action: a.action || '', verdict: a.verdict || '',
       agent: '', exposed: a.model || '',
       detail: a.reason || '', requestId: a.request_id || '',
       sessionId: a.session_id || '', cached: !!a.cached, strength: '',
+      judge: a.model || '',
     });
   }
   rows.sort((x, y) => (y.ts || 0) - (x.ts || 0));
@@ -1335,37 +1641,34 @@ export function mergeSecurityFeed(records, adjudications) {
 
 // securityKpisHTML renders the Security page's summary tile row (the
 // an-kpis design-system grid): blocked-session count plus the verdict
-// digest. It is the hierarchy's top layer — details live in the cards below.
-export function securityKpisHTML(blocks, adjudications, stats) {
+// digest. Verdict counts come from the MERGED feed (deduped by
+// mergeSecurityFeed), never the in-memory ring alone — audit records with a
+// verdict survive restarts while the 256-entry ring does not, and the tiles
+// must agree with the feed rendered right below them. The LLM-usage tiles
+// render only when the adjudication channel is (or was) active; a disabled
+// channel shows one "off" tile instead of two permanent zeros.
+export function securityKpisHTML(blocks, feed, stats, adjudicationOn) {
   const bl = blocks || [];
   const c = { high: 0, low: 0, error: 0, skipped: 0 };
-  for (const r of adjudications || []) {
-    if (c[r.verdict] !== undefined) c[r.verdict]++;
+  for (const r of feed || []) {
+    if (r && c[r.verdict] !== undefined) c[r.verdict]++;
   }
   const st = stats || {};
   const inTok = Number(st.input_tokens) || 0;
   const outTok = Number(st.output_tokens) || 0;
   const tile = (k, v, err, d) =>
     `<div class="an-kpi"><div class="k">${esc(k)}</div><div class="v${err ? ' err' : ''}">${v}</div>${d ? `<div class="d">${d}</div>` : ''}</div>`;
+  const llm = adjudicationOn || (Number(st.calls) || 0) > 0
+    ? tile('llm calls', fmtNum(st.calls || 0), false, 'judge invocations (cache hits free)') +
+      tile('llm tokens', fmtCompact(inTok + outTok), false, `in ${fmtCompact(inTok)} · out ${fmtCompact(outTok)}`)
+    : tile('llm adjudication', 'off', false, 'guard.adjudicate not configured');
   return `<div class="an-kpis">` +
     tile('blocked sessions', fmtNum(bl.length), bl.length > 0) +
     tile('high verdicts', fmtNum(c.high), c.high > 0) +
     tile('low (suppressed)', fmtNum(c.low), false) +
     tile('errors', fmtNum(c.error + c.skipped), c.error + c.skipped > 0) +
-    tile('llm calls', fmtNum(st.calls || 0), false, 'judge invocations (cache hits free)') +
-    tile('llm tokens', fmtCompact(inTok + outTok), false, `in ${fmtCompact(inTok)} · out ${fmtCompact(outTok)}`) +
+    llm +
     `</div>`;
-}
-
-// securityVerdictSummary renders the compact one-line tally for the AI
-// adjudication card title: non-zero verdict counts, newest-set only.
-export function securityVerdictSummary(recs) {
-  const c = { high: 0, low: 0, error: 0, skipped: 0 };
-  for (const r of recs || []) {
-    if (c[r.verdict] !== undefined) c[r.verdict]++;
-  }
-  const parts = Object.entries(c).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}`);
-  return parts.length ? parts.join(' · ') : 'no verdicts yet';
 }
 
 // securityLegendHTML renders the collapsible kind/action legend.
@@ -1997,7 +2300,7 @@ export function sessionTimeline(rows, opts) {
 // opts: rowClass (req-row/live-row + modifiers), liveKey (adds data-live-key),
 // modelNote (guard badge), fmtTime (locale stays in app.js).
 export function requestTableHeadHTML() {
-  return `<thead><tr><th>time</th><th>agent</th><th>session</th><th>status</th><th>model</th><th>provider</th><th class="num">ms</th><th class="num">tokens in / out</th></tr></thead>`;
+  return `<thead><tr><th>Time</th><th>Agent</th><th>Session</th><th>Status</th><th>Model</th><th>Provider</th><th class="num">ms</th><th class="num">Tokens In / Out</th></tr></thead>`;
 }
 
 export function requestRowHTML(row, opts) {

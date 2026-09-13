@@ -20,13 +20,17 @@ import {
   sessionsForAgent, linkedAgents,
   fmtGuardDetail, fmtProgressBytes, analyticsChartSeries, analyticsPointValue, analyticsTableRows,
   ANALYTICS_METRICS, pctDelta, analyticsGranularity, analyticsGranOptions, analyticsValueText,
+  HEAT_DAYS, analyticsHeatLevel, analyticsYearGrid, analyticsYearMonthSpans, analyticsHeatCellSize, analyticsHeatTipLines,
+  analyticsRowSortKey, ANALYTICS_TABLE_SORT, analyticsTableSortValue, analyticsSortRows,
+  analyticsMetricOptions, analyticsMetricAllowed,
   modelHealthFromSeries, modelHealthGrade, MODEL_HEALTH_DIMS, liveSessionSummary,
   liveSessionOrder, shortSessionId,
   fmtCompact,
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
   quotaErrKind, accountUsageState,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
-  securityKpisHTML, securityVerdictSummary, mergeSecurityFeed,
+  securityKpisHTML, mergeSecurityFeed, SECURITY_RANGES, securityRangeFromSecs,
+  securityFilterQuery, securityFilterFromQuery,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
   iconPin, iconRefresh, iconChevron, statusBadgeClass, statusBadgeHTML,
   kpiDeltaClass, logLineHTML,
@@ -805,11 +809,53 @@ test('analyticsPointValue reads server fields and never fabricates', () => {
 
 test('ANALYTICS_METRICS covers exactly the chart metric ids', () => {
   assert.deepEqual(ANALYTICS_METRICS.map((m) => m.id),
-    ['tokens', 'toksec', 'cache', 'latency', 'ttft', 'requests', 'errors', 'cost']);
+    ['tokens', 'toksec', 'cache', 'latency', 'ttft', 'requests', 'failovers', 'rate429', 'errors', 'cost']);
   for (const m of ANALYTICS_METRICS) {
     assert.ok(m.label && m.axis, `metric ${m.id} needs label+axis`);
     assert.equal(typeof m.gap, 'boolean', `metric ${m.id} needs a gap flag`);
   }
+  // failovers/429s are additive attempt counts: zero-fill like requests,
+  // never uPlot gaps.
+  assert.equal(ANALYTICS_METRICS.find((m) => m.id === 'failovers').gap, false);
+  assert.equal(ANALYTICS_METRICS.find((m) => m.id === 'rate429').gap, false);
+});
+
+test('failover/429 metrics disable on agent-dimension reads', () => {
+  // by=agent and any agent filter both reroute to agent_buckets, which has
+  // no failover/429 columns — the metrics are structurally absent, not zero.
+  const model = analyticsMetricOptions('model', '');
+  assert.ok(model.every((o) => !o.disabled), 'model dimension: all metrics enabled');
+  const byAgent = analyticsMetricOptions('agent', '');
+  assert.equal(byAgent.find((o) => o.value === 'failovers').disabled, true);
+  assert.equal(byAgent.find((o) => o.value === 'rate429').disabled, true);
+  assert.equal(byAgent.find((o) => o.value === 'tokens').disabled, false);
+  const agentFilter = analyticsMetricOptions('model', 'codex');
+  assert.equal(agentFilter.find((o) => o.value === 'failovers').disabled, true);
+  // The allowed-pick gate: an unavailable stored pick falls back (caller
+  // renders tokens), a valid one passes through.
+  assert.equal(analyticsMetricAllowed('failovers', 'model', ''), true);
+  assert.equal(analyticsMetricAllowed('failovers', 'agent', ''), false);
+  assert.equal(analyticsMetricAllowed('rate429', 'model', 'codex'), false);
+  assert.equal(analyticsMetricAllowed('tokens', 'agent', 'codex'), true);
+});
+
+test('failover/429 read as count metrics from points and totals', () => {
+  // Point reader (trend chart).
+  assert.equal(analyticsPointValue({ failovers: 3, rate_limited_429: 2 }, 'failovers'), 3);
+  assert.equal(analyticsPointValue({ failovers: 3, rate_limited_429: 2 }, 'rate429'), 2);
+  assert.equal(analyticsPointValue({}, 'failovers'), 0); // zero-fill, not null
+  assert.equal(analyticsPointValue(null, 'rate429'), null);
+  // Series totals reader (leaderboard rows: sort keys + err-cell tooltip).
+  const rows = analyticsTableRows([{ provider: 'p', model: 'm', totals: {
+    requests: 5, failures: 1, failovers: 4, rate_limited_429: 2, tokens: 9,
+  } }]);
+  assert.equal(rows[0].failovers, 4);
+  assert.equal(rows[0].rateLimited, 2);
+  assert.equal(rows[0].failures, 1);
+  // Row sort keys follow the active metric (shared with the Dashboard).
+  assert.equal(analyticsRowSortKey(rows[0], 'failovers'), 4);
+  assert.equal(analyticsRowSortKey(rows[0], 'rate429'), 2);
+  assert.equal(analyticsRowSortKey({ failovers: 0 }, 'failovers'), 0);
 });
 
 test('analyticsTableRows reads the server series totals block', () => {
@@ -840,6 +886,8 @@ test('analyticsTableRows reads the server series totals block', () => {
   assert.equal(aqp.costPerMTok, 3);
   const codex = rows[1];
   assert.equal(codex.label, 'codex/glm'); // agent dimension labels by agent
+  assert.equal(codex.agent, 'codex'); // kept for the drilldown filter
+  assert.equal(aqp.agent, '');
   assert.equal(codex.cost, null);
   assert.equal(codex.costPerMTok, null);
   assert.equal(codex.tokSec, 62.5);
@@ -1165,19 +1213,19 @@ test('quotaErrKind classifies quota snapshot errors', () => {
 });
 
 test('accountUsageState: null snapshot is collapsed "no data"', () => {
-  assert.deepEqual(accountUsageState(null), { hint: 'no data', open: false });
-  assert.deepEqual(accountUsageState(undefined), { hint: 'no data', open: false });
+  assert.deepEqual(accountUsageState(null), { hint: 'No data', open: false });
+  assert.deepEqual(accountUsageState(undefined), { hint: 'No data', open: false });
 });
 
 test('accountUsageState: error snapshots stay open', () => {
-  assert.deepEqual(accountUsageState({ Err: 'Session expired' }), { hint: 'session expired', open: true });
-  assert.deepEqual(accountUsageState({ Err: 'not logged in' }), { hint: 'not logged in', open: true });
-  assert.deepEqual(accountUsageState({ Err: 'HTTP 500' }), { hint: 'error', open: true });
+  assert.deepEqual(accountUsageState({ Err: 'Session expired' }), { hint: 'Session expired', open: true });
+  assert.deepEqual(accountUsageState({ Err: 'not logged in' }), { hint: 'Not logged in', open: true });
+  assert.deepEqual(accountUsageState({ Err: 'HTTP 500' }), { hint: 'Error', open: true });
 });
 
 test('accountUsageState: empty windows without error is collapsed unmeasured', () => {
-  assert.deepEqual(accountUsageState({ Windows: [] }), { hint: 'unmeasured', open: false });
-  assert.deepEqual(accountUsageState({ Plan: 'Pro', Windows: [] }), { hint: 'unmeasured', open: false });
+  assert.deepEqual(accountUsageState({ Windows: [] }), { hint: 'Unmeasured', open: false });
+  assert.deepEqual(accountUsageState({ Plan: 'Pro', Windows: [] }), { hint: 'Unmeasured', open: false });
 });
 
 test('accountUsageState: snapshots with windows default open', () => {
@@ -1195,7 +1243,7 @@ test('accountUsageState: snapshots with windows default open', () => {
   const noPlan = {
     Windows: [{ Label: 'Daily', RemainingPct: 0.5 }],
   };
-  assert.deepEqual(accountUsageState(noPlan), { hint: 'available', open: true });
+  assert.deepEqual(accountUsageState(noPlan), { hint: 'Available', open: true });
 });
 
 test('pathStrengthFromAction maps log-weak to weak, configured actions to strong', () => {
@@ -1207,12 +1255,15 @@ test('pathStrengthFromAction maps log-weak to weak, configured actions to strong
 });
 
 test('securityKpisHTML summarizes blocks, verdict counts and LLM usage', () => {
-  const adj = [
+  // Verdict counts come from the MERGED feed rows (not the ring alone) —
+  // this is exactly the restart story: audit records with a verdict persist
+  // while the ring empties.
+  const feed = [
     { verdict: 'high' }, { verdict: 'high' }, { verdict: 'low' },
     { verdict: 'low' }, { verdict: 'low' }, { verdict: 'error' }, { verdict: 'skipped' },
   ];
   const stats = { calls: 7, input_tokens: 12345, output_tokens: 678 };
-  const html = securityKpisHTML([{ session_id: 's' }], adj, stats);
+  const html = securityKpisHTML([{ session_id: 's' }], feed, stats, true);
   if (!html.includes('blocked sessions') || !html.includes('>1<')) throw new Error('blocked tile');
   if (!html.includes('high verdicts') || !html.includes('>2<')) throw new Error('high tile');
   if (!html.includes('low (suppressed)') || !html.includes('>3<')) throw new Error('low tile');
@@ -1223,16 +1274,16 @@ test('securityKpisHTML summarizes blocks, verdict counts and LLM usage', () => {
   if (!html.includes('in 12.3K') || !html.includes('out 678')) throw new Error('token split detail line');
   if (!html.includes('class="v err"')) throw new Error('non-zero blocked/high must use the err accent');
   // zero-state: no err accents anywhere, tokens tile renders 0
-  const clean = securityKpisHTML([], [], {});
+  const clean = securityKpisHTML([], [], {}, true);
   if (clean.includes('class="v err"')) throw new Error('zero state must not use err accent');
   if (!clean.includes('>0<')) throw new Error('zero calls tile');
-});
-
-test('securityVerdictSummary renders non-zero counts, empty-aware', () => {
-  const s1 = securityVerdictSummary([{ verdict: 'high' }, { verdict: 'low' }, { verdict: 'low' }, { verdict: 'bogus' }]);
-  if (s1 !== '1 high · 2 low') throw new Error(s1);
-  if (securityVerdictSummary([]) !== 'no verdicts yet') throw new Error('empty');
-  if (securityVerdictSummary(null) !== 'no verdicts yet') throw new Error('null');
+  // adjudication channel off and never used: one "off" tile instead of two
+  // permanent zeros (past usage still shows the real tiles)
+  const off = securityKpisHTML([], [], {}, false);
+  if (!off.includes('llm adjudication') || !off.includes('>off<')) throw new Error('off tile');
+  if (off.includes('llm calls') || off.includes('llm tokens')) throw new Error('off state must drop the usage tiles');
+  const past = securityKpisHTML([], [], { calls: 3, input_tokens: 10, output_tokens: 5 }, false);
+  if (!past.includes('llm calls') || !past.includes('>3<')) throw new Error('past usage keeps the real tiles');
 });
 
 test('mergeSecurityFeed interleaves audit and AI rows, newest first, normalized', () => {
@@ -1256,6 +1307,65 @@ test('mergeSecurityFeed interleaves audit and AI rows, newest first, normalized'
   // legacy pre-decision-23 rows carried action=log-weak
   const legacy = mergeSecurityFeed([{ ts: 1, kind: 'path', names: ['ssh'], action: 'log-weak' }], []);
   if (legacy[0].strength !== 'weak') throw new Error('legacy log-weak derives weak');
+});
+
+test('mergeSecurityFeed folds a fresh verdict ring entry into its audit record', () => {
+  // A fresh (uncached) verdict is written to BOTH the audit log (persistent,
+  // with verdict+reason) and the ring — the same event must render once.
+  const rows = mergeSecurityFeed(
+    [
+      { ts: 300, kind: 'secret', names: ['openai_api_key'], action: 'log', agent: 'pi', exposed: 'glm', request_id: 'r1', verdict: 'high', detail: 'live key' },
+      { ts: 290, kind: 'path', names: ['ssh', 'aws_creds'], action: 'log', request_id: 'r1', verdict: 'skipped' },
+    ],
+    [
+      { ts: 305, kind: 'secret', rule: 'openai_api_key', verdict: 'high', reason: 'live key', model: 'glm-5.3-flash', request_id: 'r1', session_id: 's1', cached: false },
+      // cached occurrence: no second audit record — ring-only row stays
+      { ts: 200, kind: 'secret', rule: 'openai_api_key', verdict: 'low', reason: 'fixture', model: 'glm-5.3-flash', request_id: 'r8', session_id: 's2', cached: true },
+      // same request+rule but a DIFFERENT verdict: a distinct event, both rows
+      { ts: 150, kind: 'secret', rule: 'github_token', verdict: 'error', reason: 'judge down', model: 'glm-5.3-flash', request_id: 'r2' },
+    ],
+  );
+  if (rows.length !== 4) throw new Error('length ' + rows.length);
+  const merged = rows.find((r) => r.src === 'audit' && r.verdict === 'high');
+  if (!merged) throw new Error('merged audit row missing');
+  if (merged.judge !== 'glm-5.3-flash' || merged.cached !== false || merged.sessionId !== 's1') throw new Error('judge attribution must ride along');
+  if (merged.agent !== 'pi' || merged.names[0] !== 'openai_api_key') throw new Error('audit fields must survive the merge');
+  if (rows.some((r) => r.src === 'ai' && r.requestId === 'r1' && r.verdict === 'high')) throw new Error('ring half of the deduped event must not render');
+  const multi = rows.find((r) => r.requestId === 'r1' && r.verdict === 'skipped');
+  if (!multi || multi.names.length !== 2) throw new Error('multi-name fail-open record stays its own row');
+  const cached = rows.find((r) => r.src === 'ai' && r.cached);
+  if (!cached) throw new Error('cached ring-only row keeps its ai row');
+  const err = rows.filter((r) => r.requestId === 'r2');
+  if (err.length !== 1 || err[0].src !== 'ai') throw new Error('verdict mismatch does not dedup');
+  // classic (verdict-less) audit records never match: the ring entry for a
+  // different request id stays a standalone ai row
+  const classic = mergeSecurityFeed([{ ts: 10, kind: 'secret', names: ['x'], action: 'log', request_id: 'r3' }], [
+    { ts: 11, kind: 'secret', rule: 'x', verdict: 'low', request_id: 'r4' },
+  ]);
+  if (classic.length !== 2) throw new Error('classic records do not participate in dedup');
+});
+
+test('security filter query round-trips through the URL hash', () => {
+  if (securityFilterQuery(null) !== '') throw new Error('null');
+  if (securityFilterQuery({ kind: '', verdict: '', range: 'all', rule: '' }) !== '') throw new Error('defaults stay a clean hash');
+  const q = securityFilterQuery({ kind: 'secret', verdict: 'high', range: '7d', rule: 'openai_api_key' });
+  if (q !== 'kind=secret&verdict=high&range=7d&rule=openai_api_key') throw new Error(q);
+  const back = securityFilterFromQuery(hashQueryParams(q));
+  if (!back || back.kind !== 'secret' || back.verdict !== 'high' || back.range !== '7d' || back.rule !== 'openai_api_key') throw new Error('round-trip');
+  if (securityFilterFromQuery({}) !== null) throw new Error('no keys → null (bare hash must not clobber the filter)');
+  if (securityFilterFromQuery(null) !== null) throw new Error('null params');
+  // junk enum values drop back to defaults, free-text rule survives
+  const junk = securityFilterFromQuery({ kind: 'bogus', verdict: 'nope', range: '99d', rule: 'my_rule' });
+  if (!junk || junk.kind !== '' || junk.verdict !== '' || junk.range !== 'all' || junk.rule !== 'my_rule') throw new Error('junk handling');
+});
+
+test('securityRangeFromSecs maps window presets to unix-second bounds', () => {
+  const now = 1700000000000;
+  if (securityRangeFromSecs('all', now) !== null) throw new Error('all → no bound');
+  if (securityRangeFromSecs('unknown', now) !== null) throw new Error('unknown → no bound');
+  if (securityRangeFromSecs('24h', now) !== 1700000000 - 86400) throw new Error('24h');
+  if (securityRangeFromSecs('30d', now) !== 1700000000 - 30 * 86400) throw new Error('30d');
+  if (SECURITY_RANGES.length !== 4 || SECURITY_RANGES[0].value !== 'all') throw new Error('preset table');
 });
 
 test('securityExplainHTML renders the LLM adjudication block', () => {
@@ -1886,7 +1996,7 @@ test('requests filter hash round-trips, omitting defaults and dropping junk', ()
 test('unified request table: one head and row renderer for all three tables', () => {
   const head = requestTableHeadHTML();
   assert.equal((head.match(/<th[ >]/g) || []).length, 8, '8 columns');
-  assert.ok(head.includes('tokens in / out'), 'token column replaces bytes');
+  assert.ok(head.includes('Tokens In / Out'), 'token column replaces bytes');
   assert.ok(!/req bytes|resp bytes/.test(head), 'bytes columns are gone');
   // A full row: session link, status badge, tokens with cache read.
   const row = requestRowHTML({
@@ -1967,4 +2077,174 @@ test('ttft rides the bar summary and session health p50', () => {
   ]);
   assert.equal(h.ttftP50Ms, 300, 'nearest-rank p50 over [100,300,900]');
   assert.equal(sessionHealthSummary([{ ts: 0 }]).ttftP50Ms, null);
+});
+
+
+test('analyticsYearGrid lays days out in Monday-first week columns', () => {
+  // Window 2026-01-05 (Mon) .. 2026-01-11 (Sun): exactly one full week; a
+  // window starting mid-week gets a partial leading column with false
+  // outside-window slots.
+  const mk = (ymdKey, tokens) => {
+    const [y, m, d] = ymdKey.split('-').map(Number);
+    return { day: new Date(y, m - 1, d, 12).getTime() / 1000, tokens };
+  };
+  const cells = [mk('2026-01-05', 10), mk('2026-01-07', 30), mk('2026-01-11', 20)];
+  const from = new Date(2026, 0, 5).getTime() / 1000;
+  const to = new Date(2026, 0, 11, 23).getTime() / 1000;
+  const { weeks, max } = analyticsYearGrid(cells, from, to);
+  assert.equal(weeks.length, 1);
+  assert.equal(weeks[0].lead, '2026-01-05');
+  assert.equal(weeks[0].days[0].tokens, 10);       // Mon
+  assert.equal(weeks[0].days[2].tokens, 30);       // Wed
+  assert.equal(weeks[0].days[6].tokens, 20);       // Sun
+  assert.equal(weeks[0].days[1], null);            // Tue in range, no traffic
+  assert.equal(max, 30);
+
+  // Mid-week window start: leading column holds false before the first day.
+  const from2 = new Date(2026, 0, 7).getTime() / 1000; // Wed
+  const to2 = new Date(2026, 0, 11, 23).getTime() / 1000; // Sun
+  const g2 = analyticsYearGrid(cells, from2, to2);
+  assert.equal(g2.weeks.length, 1);
+  assert.equal(g2.weeks[0].lead, '2026-01-05'); // column anchored at Monday
+  assert.deepEqual(g2.weeks[0].days.slice(0, 2), [false, false]); // Mon/Tue out
+  assert.equal(g2.weeks[0].days[2].tokens, 30);
+  assert.equal(g2.max, 30);
+
+  // Multi-week span and max over the FIXED token metric (requests ignored).
+  const from3 = new Date(2026, 0, 5).getTime() / 1000;
+  const to3 = new Date(2026, 0, 18, 23).getTime() / 1000; // spans 2 weeks
+  const g3 = analyticsYearGrid([...cells, { ...mk('2026-01-12', 5), requests: 999 }], from3, to3);
+  assert.equal(g3.weeks.length, 2);
+  assert.equal(g3.max, 30);
+
+  // Defensive: a null/invalid cell list still builds the window scaffold
+  // (all-null days, max 0); a cell without a day field is dropped.
+  const gEmpty = analyticsYearGrid(null, from, to);
+  assert.equal(gEmpty.weeks.length, 1);
+  assert.ok(gEmpty.weeks[0].days.every((d) => d === null));
+  assert.equal(gEmpty.max, 0);
+  const g4 = analyticsYearGrid([{ tokens: 1 }], from, to); // no day field
+  assert.equal(g4.weeks[0].days[0], null);
+});
+
+test('analyticsYearMonthSpans partitions columns into centered month runs', () => {
+  const w = (ymdKey) => ({ lead: ymdKey, days: [null, null, null, null, null, null, null] });
+  const weeks = [
+    w('2025-12-29'), // Dec run: 1 column → unlabeled (edge run)
+    w('2026-01-05'), w('2026-01-12'), w('2026-01-19'), w('2026-01-26'), // Jan ×4
+    w('2026-02-02'), w('2026-02-09'), // Feb run: 2 columns → labeled
+  ];
+  const spans = analyticsYearMonthSpans(weeks);
+  // Runs partition every column: 1 + 4 + 2 = 7.
+  assert.deepEqual(spans.map((s) => [s.col, s.span]), [[0, 1], [1, 4], [5, 2]]);
+  assert.deepEqual(spans.map((s) => s.label), ['', 'Jan', 'Feb']);
+  // Malformed input stays silent rather than throwing.
+  assert.deepEqual(analyticsYearMonthSpans([]), []);
+  assert.deepEqual(analyticsYearMonthSpans(null), []);
+});
+
+test('analyticsHeatLevel buckets into five ordinal levels', () => {
+  assert.equal(analyticsHeatLevel(null, 100), 0);
+  assert.equal(analyticsHeatLevel(0, 100), 0);
+  assert.equal(analyticsHeatLevel(5, 0), 0);
+  assert.equal(analyticsHeatLevel(10, 100), 1);
+  assert.equal(analyticsHeatLevel(25, 100), 2);
+  assert.equal(analyticsHeatLevel(50, 100), 3);
+  assert.equal(analyticsHeatLevel(75, 100), 4);
+  assert.equal(analyticsHeatLevel(100, 100), 4);
+});
+
+test('analyticsHeatCellSize fills the measured width within the 8..18px band', () => {
+  // 1102px available, 54 columns: (1102 - 42 - 3*53) / 54 = 16.5 → 16px squares.
+  assert.equal(analyticsHeatCellSize(1102, 54), 16);
+  // Ultra-wide stays capped; tiny widths floor at 8px (scroll takes over).
+  assert.equal(analyticsHeatCellSize(3000, 54), 18);
+  assert.equal(analyticsHeatCellSize(300, 54), 8);
+  assert.equal(analyticsHeatCellSize(0, 54), 8);
+  assert.equal(analyticsHeatCellSize(1102, 0), 18); // degenerate column count
+});
+
+test('analyticsHeatTipLines dates every cell, data or not', () => {
+  const day = new Date(2026, 0, 5, 12).getTime() / 1000; // a Monday
+  const lines = analyticsHeatTipLines(day, { requests: 1234, tokens: 56789, cost: 1.5, err_pct: 0.5, avg_latency_ms: 812.4 });
+  assert.equal(lines[0], '2026-01-05 Mon');
+  assert.ok(lines.includes('requests 1,234'), lines);
+  assert.ok(lines.includes('tokens 56,789'), lines);
+  assert.ok(lines.includes('$1.5000'), lines);
+  assert.ok(lines.includes('err 0.5%'), lines);
+  assert.ok(lines.includes('avg lat 812ms'), lines);
+  // Empty in-window day: still names the date, then says why it is bare.
+  assert.deepEqual(analyticsHeatTipLines(new Date(2026, 0, 31, 12).getTime() / 1000, null), ['2026-01-31 Sat', 'no usage']);
+  // Null derived fields are omitted; weekday rolls with the date.
+  const bare = analyticsHeatTipLines(day, { requests: 1, tokens: 2 });
+  assert.deepEqual(bare, ['2026-01-05 Mon', 'requests 1', 'tokens 2']);
+});
+
+test('analyticsSortRows follows the active metric until a column is pinned', () => {
+  const rows = [
+    { label: 'a/glm', tokens: 100, requests: 1, errPct: 5 },
+    { label: 'b/glm', tokens: 300, requests: 9, errPct: 1 },
+    { label: 'c/glm', tokens: 200, requests: 5, errPct: 3 },
+  ];
+  // Unpinned (and unknown columns) = the historical behavior: metric key desc.
+  const byTokens = analyticsSortRows(rows, 'tokens', { col: null, dir: 'desc' });
+  assert.deepEqual(byTokens.map((r) => r.label), ['b/glm', 'c/glm', 'a/glm']);
+  const bogus = analyticsSortRows(rows, 'tokens', { col: 'nope', dir: 'asc' });
+  assert.deepEqual(bogus.map((r) => r.label), byTokens.map((r) => r.label));
+  // Pinned requests desc.
+  const byReqs = analyticsSortRows(rows, 'tokens', { col: 'requests', dir: 'desc' });
+  assert.deepEqual(byReqs.map((r) => r.label), ['b/glm', 'c/glm', 'a/glm']);
+  // Asc flips.
+  const byReqsAsc = analyticsSortRows(rows, 'tokens', { col: 'requests', dir: 'asc' });
+  assert.deepEqual(byReqsAsc.map((r) => r.label), ['a/glm', 'c/glm', 'b/glm']);
+  // Input order untouched (fresh list).
+  assert.deepEqual(rows.map((r) => r.label), ['a/glm', 'b/glm', 'c/glm']);
+});
+
+test('analyticsSortRows keeps no-data rows last in both directions', () => {
+  const rows = [
+    { label: 'a', cost: 0.5 },
+    { label: 'b', cost: null },
+    { label: 'c', cost: 2 },
+    { label: 'd', cost: 1 },
+  ];
+  const desc = analyticsSortRows(rows, 'tokens', { col: 'cost', dir: 'desc' });
+  assert.deepEqual(desc.map((r) => r.label), ['c', 'd', 'a', 'b']);
+  const asc = analyticsSortRows(rows, 'tokens', { col: 'cost', dir: 'asc' });
+  assert.deepEqual(asc.map((r) => r.label), ['a', 'd', 'c', 'b']);
+});
+
+test('analyticsSortRows sorts the series label as a string and status worst-first', () => {
+  const rows = [
+    { label: 'zeta/glm', healthScore: 0.9 },
+    { label: 'alpha/glm', healthScore: 0.2 },
+    { label: 'mid/glm', healthScore: null },
+  ];
+  const byLabel = analyticsSortRows(rows, 'tokens', { col: 'series', dir: 'asc' });
+  assert.deepEqual(byLabel.map((r) => r.label), ['alpha/glm', 'mid/glm', 'zeta/glm']);
+  // status default dir is asc (worst model first, nulls last).
+  assert.equal(ANALYTICS_TABLE_SORT.status, 'asc');
+  const byHealth = analyticsSortRows(rows, 'tokens', { col: 'status', dir: ANALYTICS_TABLE_SORT.status });
+  assert.deepEqual(byHealth.map((r) => r.label), ['alpha/glm', 'zeta/glm', 'mid/glm']);
+});
+
+test('analyticsTableSortValue reads columns and null-safes', () => {
+  const r = { label: 'p/m', healthScore: 0.5, requests: 3, tokens: 9, errPct: 0, latencyMs: 100, ttftMs: 10, tokSec: 20, cost: 1, costShare: 0.25 };
+  assert.equal(analyticsTableSortValue(r, 'series'), 'p/m');
+  assert.equal(analyticsTableSortValue(r, 'status'), 0.5);
+  assert.equal(analyticsTableSortValue(r, 'share'), 0.25);
+  assert.equal(analyticsTableSortValue(r, 'unknown'), null);
+  assert.equal(analyticsTableSortValue(null, 'cost'), null);
+  const bare = { label: 'q/m' };
+  assert.equal(analyticsTableSortValue(bare, 'cost'), null);
+  assert.equal(analyticsTableSortValue(bare, 'requests'), 0); // count metrics zero, not null
+});
+
+test('analyticsRowSortKey survives the move to pure.js unchanged', () => {
+  // Shared with the Status→Dashboard leaderboard: metric-key mapping with
+  // null sentinels.
+  assert.equal(analyticsRowSortKey({ requests: 2 }, 'requests'), 2);
+  assert.equal(analyticsRowSortKey({ tokens: 7 }, 'tokens'), 7);
+  assert.equal(analyticsRowSortKey({ errPct: null }, 'errors'), -1);
+  assert.equal(analyticsRowSortKey({ cost: null }, 'cost'), -1);
 });

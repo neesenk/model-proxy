@@ -481,6 +481,14 @@ main {
 .sec-legend { margin-bottom: 10px; font-size: 0.75rem; color: var(--muted); }
 .sec-legend summary { cursor: pointer; }
 .sec-legend ul { margin: 6px 0; padding-left: 18px; color: var(--text); }
+/* Rule-hits leaderboard rows are drill targets (click → filter the Activity
+   feed by that rule); the active rule carries the indicator-bar selection
+   language, like every selected state in v2. */
+tr.sec-rule { cursor: pointer; }
+tr.sec-rule.sel > td {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
 tr.sec-detail > td { background: var(--surface-2); }
 .sec-explain-match { margin: 8px 0; }
 .sec-snippet { max-height: 160px; margin-top: 6px; }
@@ -1489,19 +1497,33 @@ dialog::backdrop { background: rgba(8,12,20,.5); backdrop-filter: blur(3px); }
 }
 
 /* ---------- analytics tab ---------- */
+/* The toolbar packs six controls (range picker / granularity / three
+   free-text filters / dimension switch) and must stay one line at regular
+   resolutions. The granularity buttons tighten to the compact text size;
+   the three free-text filters flex to fill whatever width remains (a
+   88px floor keeps placeholders visible), so the row always spans the full
+   toolbar. These rules are scoped to this toolbar only; the shared
+   .an-seg/.req-input/.tr-trigger styles elsewhere keep their roomier
+   metrics. Narrower windows still wrap gracefully (flex-wrap). */
 .an-toolbar {
+  --an-ctl-h: 34px; /* one control height for the whole row (the Requests
+     toolbar's .req-controls convention): inputs, segmented tracks and the
+     range trigger all align instead of the UA-default ragged edges. */
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
-  padding: 12px 16px;
+  padding: 10px 12px;
   background: var(--surface);
   border: 1px solid var(--border-2);
   border-radius: var(--r-card);
   box-shadow: var(--shadow-1);
   margin-bottom: 14px;
 }
-.an-toolbar .req-input { min-width: 110px; }
+.an-toolbar .req-input { flex: 1 1 0; min-width: 88px; height: var(--an-ctl-h); }
+.an-toolbar .an-seg { height: var(--an-ctl-h); }
+.an-toolbar .an-seg button { padding: 4px 6px; font-size: 0.6875rem; height: 100%; }
+.an-toolbar .tr-trigger { padding: 3px 8px; gap: 4px; height: var(--an-ctl-h); }
 /* v2 segmented control: sunken track + raised active thumb. The solid accent
    fill stays reserved for .btn.primary. */
 .an-seg {
@@ -1542,6 +1564,26 @@ dialog::backdrop { background: rgba(8,12,20,.5); backdrop-filter: blur(3px); }
   outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
   outline-offset: -2px;
 }
+.an-filter-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.an-filter-hint[hidden] { display: none; }
+.an-filter-hint code {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
 .an-kpis {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -1609,7 +1651,105 @@ dialog::backdrop { background: rgba(8,12,20,.5); backdrop-filter: blur(3px); }
   box-shadow: var(--shadow-1);
   padding: 12px 16px;
   overflow-x: auto;
+  margin-bottom: 14px; /* sits between the chart card and the bottom heatmap card */
 }
+/* Year token-usage heatmap (GitHub-contribution style): same card chrome
+   as the chart/table cards. Cells shade --chart-0 over --surface-2 in 5
+   ordinal levels (analyticsHeatLevel); square cells sized by --hm, one
+   column per Monday-first week, month labels riding the header row and
+   overflowing their narrow columns (nowrap + visible). The grid scrolls
+   horizontally on narrow screens. */
+.an-heat-card {
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-1);
+  padding: 12px 16px;
+  margin-bottom: 14px;
+}
+.an-heat-card[hidden] { display: none; }
+.an-heat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.an-heat-title { font-size: 0.75rem; color: var(--text); }
+.an-heat-scale {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.6875rem;
+  color: var(--muted);
+}
+.an-heat-scale .hm { width: 12px; height: 12px; flex: none; }
+.an-heat-scroll { overflow-x: auto; }
+/* Header/body are two grids sharing one template (set inline per render):
+   fixed square tracks sized by analyticsHeatCellSize from the measured
+   card width — the graph fills the card without engine-dependent
+   aspect-ratio-in-grid sizing; below the 8px floor the scroll wrapper
+   takes over. */
+.an-heat-year {
+  --hm: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.an-heat-mon,
+.an-heat-days {
+  display: grid;
+  gap: 3px;
+  align-items: center;
+}
+.an-heat .hm-corner { height: 14px; }
+.an-heat .hm-mon {
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  color: var(--muted);
+  height: 14px;
+  line-height: 14px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: visible;
+}
+.an-heat .hm-day {
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  color: var(--muted);
+  text-align: right;
+  white-space: nowrap;
+}
+.an-heat .hm {
+  width: var(--hm, 13px);
+  height: var(--hm, 13px);
+  border-radius: 3px;
+  background: var(--surface-2);
+}
+.an-heat .hm-off { background: transparent; }
+/* Level rules must TIE the scoped base (.an-heat .hm sets surface-2 at
+   0-2-0) and come AFTER it in this file, so source order decides: a bare
+   .hm-lN class rule (0-1-0) would lose the cascade and every grid cell
+   would render as an empty square, while re-scoping to .an-heat .hm.hm-lN
+   strands the legend swatches (.an-heat-scale is outside .an-heat). The
+   unscoped two-class form covers both the grid and the legend. */
+.hm.hm-l1 { background: color-mix(in srgb, var(--chart-0) 28%, var(--surface-2)); }
+.hm.hm-l2 { background: color-mix(in srgb, var(--chart-0) 50%, var(--surface-2)); }
+.hm.hm-l3 { background: color-mix(in srgb, var(--chart-0) 72%, var(--surface-2)); }
+.hm.hm-l4 { background: color-mix(in srgb, var(--chart-0) 92%, var(--surface-2)); }
+.an-heat .hm:hover { outline: 1px solid var(--border); }
+/* Leaderboard interactions: sortable headers (data-sort) and drilldown rows
+   (data-drill → #requests with the series' filters). Row hover background
+   comes from the shared .table rule; these add the affordances. */
+.an-table-card th[data-sort] {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.an-table-card th[data-sort]:hover { color: var(--text); }
+.an-table-card tbody tr[data-drill] { cursor: pointer; }
 .an-legend {
   display: flex;
   flex-wrap: wrap;
