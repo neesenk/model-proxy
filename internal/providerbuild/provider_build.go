@@ -206,16 +206,6 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 	}
 }
 
-// appendNonEmpty appends the non-empty values of vals to dst.
-func appendNonEmpty(dst []string, vals ...string) []string {
-	for _, v := range vals {
-		if v != "" {
-			dst = append(dst, v)
-		}
-	}
-	return dst
-}
-
 // CollectOAuthSecrets re-reads every codex/aqp provider's OAuth auth file and
 // returns the current token/cookie values. It is the refreshable counterpart
 // of the OAuth pass inside BuildProviders: OAuth providers rotate their tokens

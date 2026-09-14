@@ -110,12 +110,19 @@ func (s *Server) Start() bool {
 
 func (s *Server) Close() { s.tasks.Close() }
 
-// GuardBrowserOrigin enforces the loopback trust boundary for the
-// unauthenticated admin surface. Exported so the composition root can guard
-// browser-reachable endpoints that ride the proxy handler instead of this
-// transport (e.g. /debug/schedule, /api/events in web-disabled mode).
-// Local CLI/curl clients send no Origin/Sec-Fetch-Site and pass untouched;
-// requests that carry BROWSER identity headers must:
+// GuardAdminBrowserOrigin applies the authenticated LAN variant to admin
+// endpoints owned outside this transport (for example proxy-owned /debug/*).
+// The caller must pass authEnabled and trustedHostPort from one captured config
+// boundary; this function only evaluates browser identity headers.
+func GuardAdminBrowserOrigin(w http.ResponseWriter, r *http.Request, authEnabled bool, trustedHostPort string) bool {
+	return guardBrowserOrigin(w, r, authEnabled, trustedHostPort)
+}
+
+// guardBrowserOrigin enforces the loopback trust boundary for the browser-
+// reachable admin surface (this transport's routes plus the proxy-owned
+// endpoints reached via GuardAdminBrowserOrigin). Local CLI/curl clients send
+// no Origin/Sec-Fetch-Site and pass untouched; requests that carry BROWSER
+// identity headers must:
 //
 //   - carry a LOOPBACK Host (DNS rebinding serves attacker domains that resolve
 //     here — same-origin from the browser's view, so only the Host check stops
@@ -125,19 +132,9 @@ func (s *Server) Close() { s.tasks.Close() }
 //     POST handlers — cannot forge this).
 //
 // GET /api/config answers with the verbatim YAML (static provider keys live in
-// it), so reads need the same protection as mutations.
-func GuardBrowserOrigin(w http.ResponseWriter, r *http.Request) bool {
-	return guardBrowserOrigin(w, r, false, "")
-}
-
-// GuardAdminBrowserOrigin applies the authenticated LAN variant to admin
-// endpoints owned outside this transport (for example proxy-owned /debug/*).
-// The caller must pass authEnabled and trustedHostPort from one captured config
-// boundary; this function only evaluates browser identity headers.
-func GuardAdminBrowserOrigin(w http.ResponseWriter, r *http.Request, authEnabled bool, trustedHostPort string) bool {
-	return guardBrowserOrigin(w, r, authEnabled, trustedHostPort)
-}
-
+// it), so reads need the same protection as mutations. allowAuthenticatedHost
+// additionally accepts the configured listen host or a LAN IP for the
+// authenticated variant.
 func guardBrowserOrigin(w http.ResponseWriter, r *http.Request, allowAuthenticatedHost bool, trustedHostPort string) bool {
 	origin := r.Header.Get("Origin")
 	fetchSite := r.Header.Get("Sec-Fetch-Site")

@@ -15,7 +15,7 @@ import (
 // the same detached Dashboard snapshot as /api/status (no new lock surface;
 // the read view owns Proxy lock discipline). Virtual counter keys (guard,
 // attempts, fusion, routing) surface as ordinary providers, matching their
-// /api/stats semantics. GuardBrowserOrigin applies: scrapers send no browser
+// /api/stats semantics. guardBrowserOrigin applies: scrapers send no browser
 // identity headers and pass untouched.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	auth := s.captureAdminAuth()
