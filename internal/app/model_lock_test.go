@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -26,13 +27,13 @@ func postStatus(t *testing.T, url, body string) int {
 	return resp.StatusCode
 }
 
-func modelLockCfg(primary, fallback *httptest.Server) *Config {
-	return &Config{
-		Providers: map[string]Provider{
+func modelLockCfg(primary, fallback *httptest.Server) *configdomain.Config {
+	return &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "primary", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
@@ -41,14 +42,14 @@ func modelLockCfg(primary, fallback *httptest.Server) *Config {
 				{Provider: "primary", Model: "m2", Priority: 1},
 			},
 		},
-		Scheduling: Scheduling{
+		Scheduling: configdomain.Scheduling{
 			CircuitThreshold: 3, CircuitCooldown: "50ms", RateLimitBackoff: "10s",
 			UpstreamTimeout: "5s", StickyDwell: "0s", ModelLockout: "10m",
 		},
 	}
 }
 
-func newModelLockProxy(t *testing.T, cfg *Config) (*Proxy, *httptest.Server) {
+func newModelLockProxy(t *testing.T, cfg *configdomain.Config) (*Proxy, *httptest.Server) {
 	t.Helper()
 	p := newTestProxy(t, cfg)
 	p.providers["primary"] = &testProv{key: "p"}

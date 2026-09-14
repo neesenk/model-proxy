@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/logx"
 	"net/http"
 	"time"
@@ -26,7 +27,7 @@ func (p *Proxy) dispatchShadowAfterCommit(
 	backendProto string,
 	calledModel string,
 	exposed string,
-	primary RouteTarget,
+	primary configdomain.RouteTarget,
 	primaryRequestID string,
 	commit *targetexec.Commit,
 ) {
@@ -90,7 +91,7 @@ const shadowShutdownGrace = 2 * time.Second
 // reqBody may already be converted from the client's proto). The shadow backend's
 // own protocol is shadowTarget.Protocol (defaulting to bodyProto); runShadow selects the
 // shadow base URL + path for THAT protocol and converts the body if it differs.
-func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Runtime, stop <-chan struct{}, proto, bodyProto, calledModel, exposed string, shadowTarget ShadowTarget, reqBody []byte, primaryReqID string) {
+func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Runtime, stop <-chan struct{}, proto, bodyProto, calledModel, exposed string, shadowTarget configdomain.ShadowTarget, reqBody []byte, primaryReqID string) {
 	if runtime.Cfg == nil {
 		// Defensive: RuntimeSnapshot is handed around as a plain value — a
 		// future call site that forgets to populate it must not nil-deref
@@ -107,7 +108,7 @@ func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Run
 	// shadow is fire-and-forget). A pooled parent name has no runtime instance, so
 	// without this shadow silently stopped sampling the moment a second account was
 	// added.
-	target := RouteTarget{Provider: shadowTarget.Provider, Model: shadowTarget.Model, Protocol: shadowTarget.Protocol}
+	target := configdomain.RouteTarget{Provider: shadowTarget.Provider, Model: shadowTarget.Model, Protocol: shadowTarget.Protocol}
 	picked, ok := newResolver(
 		p,
 		runtime.Providers,
@@ -165,9 +166,7 @@ func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Run
 		forward.LogCtx{RequestID: "shadow-" + primaryReqID, SessionID: requestlog.SessionID(result.Request, p.sessionHeaders()), Exposed: exposed, Agent: counters.DetectAgent(result.Request)},
 		result.Request,
 		proto,
-		calledModel,
-		RouteTarget{Provider: target.Provider, Model: target.Model},
-		result.Response,
+		calledModel, configdomain.RouteTarget{Provider: target.Provider, Model: target.Model}, result.Response,
 		result.Started,
 		result.RequestBody,
 	)

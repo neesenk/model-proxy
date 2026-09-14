@@ -1,32 +1,18 @@
 package doctor
 
 import (
-	"os"
-	"sync"
-
 	"model-proxy/internal/accounts"
+	cliframework "model-proxy/internal/cli/framework"
 )
 
 // accountStore resolves the credential-pool store lazily so tests can isolate
-// HOME (t.Setenv) before first use.
-var (
-	accountStoreMu  sync.Mutex
-	accountStoreKey string
-	accountStoreV   accounts.Store
-)
+// HOME (t.Setenv) before first use. The shared seam lives in cli/framework.
+var accountStoreLazy cliframework.LazyAccountStore
 
 func accountStore() accounts.Store {
-	home := homeDir()
-	accountStoreMu.Lock()
-	defer accountStoreMu.Unlock()
-	if home != accountStoreKey {
-		accountStoreV = accounts.NewStore(home)
-		accountStoreKey = home
-	}
-	return accountStoreV
+	return accountStoreLazy.Get()
 }
 
 func homeDir() string {
-	h, _ := os.UserHomeDir()
-	return h
+	return cliframework.HomeDir()
 }

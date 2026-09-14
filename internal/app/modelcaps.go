@@ -19,6 +19,7 @@ package app
 
 import (
 	"context"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"sync"
 	"time"
@@ -33,7 +34,7 @@ import (
 
 // protocolFingerprints computes every configured provider's protocol-relevant
 // config fingerprint (the cache-invalidation key of model_caps.json).
-func protocolFingerprints(cfg *Config) map[string]string {
+func protocolFingerprints(cfg *configdomain.Config) map[string]string {
 	fps := make(map[string]string, len(cfg.Providers))
 	for name, prov := range cfg.Providers {
 		fps[name] = providerbuild.ProtocolConfigFingerprint(prov)
@@ -43,7 +44,7 @@ func protocolFingerprints(cfg *Config) map[string]string {
 
 // modelCapsModels returns the model set probed for one provider: config
 // models ∪ explicit route targets ∪ derived route targets.
-func modelCapsModels(cfg *Config, derived map[string][]RouteTarget, provName string) []string {
+func modelCapsModels(cfg *configdomain.Config, derived map[string][]configdomain.RouteTarget, provName string) []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(m string) {
@@ -151,7 +152,7 @@ func (p *Proxy) probeAllModelCaps() {
 		dirty = true
 		for _, model := range models {
 			wg.Add(1)
-			go func(name string, provCfg Provider, impl provider.Provider, fp, model string) {
+			go func(name string, provCfg configdomain.Provider, impl provider.Provider, fp, model string) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()

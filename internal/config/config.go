@@ -14,7 +14,7 @@ import (
 	"unicode/utf8"
 
 	"model-proxy/internal/pricing"
-	"model-proxy/internal/protocol"
+	"model-proxy/internal/protocol/wire"
 	"model-proxy/internal/upstreamproxy"
 
 	"gopkg.in/yaml.v3"
@@ -1565,8 +1565,9 @@ func (c *Config) checkFusionTarget(recipe, where string, t RouteTarget) error {
 }
 
 // checkTargetProtocol validates a target's declared backend protocol against
-// the closed wire-protocol set — protocol.Parse is
-// the single source of truth for the legal values — and against the provider's
+// the closed wire-protocol set — wire.Parse (internal/protocol/wire, a leaf
+// re-exported by internal/protocol) is the single source of truth for the
+// legal values — and against the provider's
 // base URLs: protocol:anthropic needs anthropic_base_url, openai/responses
 // need openai_base_url (responses reuses the OpenAI base, e.g. codex's
 // openai_base_url is its /responses endpoint). `what` is the caller's error
@@ -1575,16 +1576,16 @@ func checkTargetProtocol(what string, t RouteTarget, prov Provider) error {
 	if t.Protocol == "" {
 		return nil
 	}
-	wireProtocol, ok := protocol.Parse(t.Protocol)
+	wireProtocol, ok := wire.Parse(t.Protocol)
 	if !ok {
 		return fmt.Errorf("%s: protocol %q is not \"anthropic\", \"openai\", or \"responses\"", what, t.Protocol)
 	}
 	switch wireProtocol {
-	case protocol.Anthropic:
+	case wire.Anthropic:
 		if prov.AnthropicBaseURL == "" {
 			return fmt.Errorf("%s: protocol:anthropic but provider %q has no anthropic_base_url — conversion needs it", what, t.Provider)
 		}
-	case protocol.OpenAI, protocol.Responses:
+	case wire.OpenAI, wire.Responses:
 		if prov.OpenAIBaseURL == "" {
 			return fmt.Errorf("%s: protocol:%s but provider %q has no openai_base_url — conversion needs it", what, t.Protocol, t.Provider)
 		}

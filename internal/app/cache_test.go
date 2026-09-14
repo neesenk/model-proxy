@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -35,10 +36,10 @@ func (w *cacheTestFailingWriter) Write([]byte) (int, error) {
 }
 
 func TestNewResponseCacheAdaptsResolvedConfig(t *testing.T) {
-	if store := NewResponseCache(CacheConfig{}, nil); store != nil {
+	if store := NewResponseCache(configdomain.CacheConfig{}, nil); store != nil {
 		t.Fatalf("disabled cache created Store %#v", store)
 	}
-	store := NewResponseCache(CacheConfig{
+	store := NewResponseCache(configdomain.CacheConfig{
 		Enabled: true, TTL: "1m", MaxEntries: 2, MaxBodyBytes: 123,
 	}, nil)
 	if store == nil {
@@ -66,10 +67,10 @@ func TestForward_CacheHit(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
-		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
+		Cache:     configdomain.CacheConfig{Enabled: true, TTL: "1h"},
 	}
 	p := newTestProxy(t, cfg)
 	if p.cache == nil {
@@ -128,10 +129,10 @@ func TestForward_CacheHitHeader(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
-		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
+		Cache:     configdomain.CacheConfig{Enabled: true, TTL: "1h"},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["z"] = &testProv{key: "k"}
@@ -179,7 +180,7 @@ func TestReload_RebuildsCache(t *testing.T) {
 		}
 	}
 	write("cache:\n  enabled: true\n")
-	cfg, err := LoadConfig(cfgPath)
+	cfg, err := configdomain.LoadConfig(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +235,7 @@ func TestReload_DoesNotAdoptOldGenerationCacheWrites(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(configBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	config, err := LoadConfig(configPath)
+	config, err := configdomain.LoadConfig(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,10 +313,10 @@ func TestForward_CacheModeMismatch_ContentType(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt", Protocol: "openai"}}},
-		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt", Protocol: "openai"}}},
+		Cache:     configdomain.CacheConfig{Enabled: true, TTL: "1h"},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
@@ -365,10 +366,10 @@ func TestForward_CacheConvert_ReplayIntact(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt", Protocol: "openai"}}},
-		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt", Protocol: "openai"}}},
+		Cache:     configdomain.CacheConfig{Enabled: true, TTL: "1h"},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
@@ -415,10 +416,10 @@ func TestForward_CancelledConvertedSSEIsNotCached(t *testing.T) {
 	}))
 	defer up.Close()
 
-	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"backend": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"client-model": {{Provider: "backend", Model: "backend-model", Protocol: "responses"}}},
-		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"backend": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"client-model": {{Provider: "backend", Model: "backend-model", Protocol: "responses"}}},
+		Cache:     configdomain.CacheConfig{Enabled: true, TTL: "1h"},
 	})
 	p.providers["backend"] = &testProv{key: "test-key"}
 
@@ -507,16 +508,16 @@ func TestForward_ForcedPooledProviderBypassesCache(t *testing.T) {
 	}))
 	defer pooledUp.Close()
 
-	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary": {OpenAIBaseURL: primaryUp.URL, Provider: testProviderID},
 			"pooled":  {OpenAIBaseURL: pooledUp.URL, Provider: "zhipu"},
 		},
-		Routes: map[string][]RouteTarget{"client-model": {
+		Routes: map[string][]configdomain.RouteTarget{"client-model": {
 			{Provider: "primary", Model: "primary-model", Priority: 1},
 			{Provider: "pooled", Model: "pooled-model", Priority: 2},
 		}},
-		Cache: CacheConfig{Enabled: true, TTL: "1h"},
+		Cache: configdomain.CacheConfig{Enabled: true, TTL: "1h"},
 	})
 	p.providers["primary"] = &testProv{key: "primary-key"}
 	if got := len(p.poolIndex["pooled"]); got != 2 {
@@ -626,16 +627,16 @@ func TestForward_CacheBypassedByForceProvider(t *testing.T) {
 	}))
 	defer bUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"a": {OpenAIBaseURL: aUp.URL, Provider: testProviderID},
 			"b": {OpenAIBaseURL: bUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{"glm": {
+		Routes: map[string][]configdomain.RouteTarget{"glm": {
 			{Provider: "a", Model: "glm", Priority: 1},
 			{Provider: "b", Model: "glm", Priority: 2},
 		}},
-		Cache: CacheConfig{Enabled: true, TTL: "1h"},
+		Cache: configdomain.CacheConfig{Enabled: true, TTL: "1h"},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["a"] = &testProv{key: "a"}
@@ -698,12 +699,12 @@ func TestForward_ForceProvider_TypoHardFails(t *testing.T) {
 	}))
 	defer bUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"a": {OpenAIBaseURL: aUp.URL, Provider: testProviderID},
 			"b": {OpenAIBaseURL: bUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{"glm": {
+		Routes: map[string][]configdomain.RouteTarget{"glm": {
 			{Provider: "a", Model: "glm", Priority: 1},
 			{Provider: "b", Model: "glm", Priority: 2},
 		}},

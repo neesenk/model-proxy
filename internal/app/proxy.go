@@ -7,6 +7,7 @@ import (
 	"model-proxy/internal/adjudicate"
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/fusion"
 	"model-proxy/internal/guard"
 	guardsession "model-proxy/internal/guard/session"
@@ -39,7 +40,7 @@ import (
 // (proxy_reload.go's locked section is the swap definition). Embedded in Proxy
 // so promoted selectors (p.cfg, p.providers, ...) stay unchanged.
 type generationState struct {
-	cfg       *Config
+	cfg       *configdomain.Config
 	providers map[string]provider.Provider // provider name → Provider (shared)
 
 	cache             *responsecache.Store   // exact-match response cache (prompt-hash + TTL); nil = disabled
@@ -55,12 +56,14 @@ type generationState struct {
 	// map (their id == the plain name). Guards: same as generationState —
 	// poolIndex and parentOf are rebuilt on reload under p.mu; pool spread is
 	// owned by runtimeState.
-	poolIndex      map[string][]string      // parent name → sorted virtual ids (only multi-account parents)
-	parentOf       map[string]string        // virtual id → parent name
-	expandedRoutes map[string][]RouteTarget // exposed model → expanded targets (explicit + derived)
-	routeKeys      map[string]bool          // key set of expandedRoutes; generation-owned, shared by the scheduling hot path
-	derivedRoutes  map[string][]RouteTarget // exposed model → targets auto-aggregated from provider model lists (for names not in cfg.Routes)
-	routeWarnings  []string                 // routing hazard warnings; surfaced in `models` CLI + /api/status
+	poolIndex      map[string][]string        // parent name → sorted virtual ids (only multi-account parents)
+	parentOf       map[string]string          // virtual id → parent name
+	expandedRoutes map[string][]configdomain. // exposed model → expanded targets (explicit + derived)
+			RouteTarget
+	routeKeys     map[string]bool            // key set of expandedRoutes; generation-owned, shared by the scheduling hot path
+	derivedRoutes map[string][]configdomain. // exposed model → targets auto-aggregated from provider model lists (for names not in cfg.Routes)
+			RouteTarget
+	routeWarnings []string // routing hazard warnings; surfaced in `models` CLI + /api/status
 
 	shadow atomic.Pointer[shadow.Runtime] // reload-swappable detached Shadow runtime; captured with each request generation
 
@@ -137,12 +140,12 @@ type Proxy struct {
 // Sources cache their token files internally (webauth cacheTTL), so swapping
 // here only re-points at (possibly changed) paths. Caller holds p.mu on
 // reload; the constructor calls it before serving.
-func (p *Proxy) applyAuthSources(cfg *Config) {
+func (p *Proxy) applyAuthSources(cfg *configdomain.Config) {
 	p.adminAuth.Store(webauth.NewSource(cfg.Web.Auth.AdminTokenFile))
 	p.apiKeys.Store(webauth.NewSource(cfg.Web.Auth.APIKeysFile))
 }
 
-func NewProxy(cfg *Config) *Proxy {
+func NewProxy(cfg *configdomain.Config) *Proxy {
 	home, _ := os.UserHomeDir()
 	p := NewProxyWithStatePath(cfg, filepath.Join(home, ".model-proxy", "quota_state.json"))
 	// Production only: probe wire capabilities asynchronously at boot (the
@@ -154,7 +157,7 @@ func NewProxy(cfg *Config) *Proxy {
 
 // NewProxyWithStatePath is the injectable constructor used by tests so every
 // Proxy owns an isolated state file before the tracker loads or starts.
-func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
+func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 	// Apply the configured credentials mode (`credentials:`) before any pool
 	// I/O: the account store and the web/login save paths resolve stores through
 	// the accounts process default, and OAuth blob storage follows credstore's
@@ -255,7 +258,7 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// The tracker reads cfg/providers asynchronously via the snapshot closures
 	// (each takes p.mu.RLock), so reloads are picked up without recreating it.
 	p.quota = runtimestate.NewQuotaTracker(qpath,
-		func() *Config { return p.cfgSnapshot() },
+		func() *configdomain.Config { return p.cfgSnapshot() },
 		func() map[string]provider.Provider { return p.providerSnapshot() },
 		&p.runtimeState)
 	p.quota.Generation = p.configGeneration.Load
@@ -404,13 +407,13 @@ func (p *Proxy) resetStats() error {
 
 // newResponseCache rebuilds generation-owned entries around the process-wide
 // counter owner. No disk I/O is performed during reload's generation swap.
-func (p *Proxy) newResponseCache(config CacheConfig) *responsecache.Store {
+func (p *Proxy) newResponseCache(config configdomain.CacheConfig) *responsecache.Store {
 	return NewResponseCache(config, p.cacheCounters)
 }
 
 // NewResponseCache adapts resolved application configuration into the
 // repository-leaf cache component.
-func NewResponseCache(config CacheConfig, counters *responsecache.Counters) *responsecache.Store {
+func NewResponseCache(config configdomain.CacheConfig, counters *responsecache.Counters) *responsecache.Store {
 	if !config.IsEnabled() {
 		return nil
 	}

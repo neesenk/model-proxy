@@ -16,7 +16,7 @@ import (
 
 // cfgSnapshot returns the current config under a brief read lock. Used by the
 // quota tracker (which reads cfg asynchronously from its poll goroutine).
-func (p *Proxy) cfgSnapshot() *Config {
+func (p *Proxy) cfgSnapshot() *configdomain.Config {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.cfg
@@ -50,7 +50,7 @@ func (p *Proxy) pricingSnapshot() *pricing.Catalog {
 }
 
 // priceOverrides returns the current config `prices:` overrides for the handler.
-func (p *Proxy) priceOverrides() map[string]PriceConfig {
+func (p *Proxy) priceOverrides() map[string]configdomain.PriceConfig {
 	cfg := p.cfgSnapshot()
 	if cfg == nil {
 		return nil
@@ -88,7 +88,7 @@ func (p *Proxy) detachedPricing() (map[string]pricing.Override, *pricing.Catalog
 // The Providers/Routes maps are shared with the live cfg (shallow copy) — that's
 // safe because the cores only READ them; a concurrent reload swaps p.cfg to a
 // brand-new *Config, it never mutates the maps in place.
-func (p *Proxy) snapshotConfig() *Config {
+func (p *Proxy) snapshotConfig() *configdomain.Config {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	c := *p.cfg
@@ -131,8 +131,8 @@ func (p *Proxy) providerSnapshot() map[string]provider.Provider {
 }
 
 func runtimeRouteKeys(
-	routes map[string][]RouteTarget,
-	derived map[string][]RouteTarget,
+	routes map[string][]configdomain.RouteTarget,
+	derived map[string][]configdomain.RouteTarget,
 ) map[string]bool {
 	keys := make(map[string]bool, len(routes)+len(derived))
 	for route := range routes {
@@ -145,7 +145,7 @@ func runtimeRouteKeys(
 }
 
 // healthConfigFingerprint delegates to providerbuild.HealthConfigFingerprint.
-func healthConfigFingerprint(cfg *Config) string {
+func healthConfigFingerprint(cfg *configdomain.Config) string {
 	return providerbuild.HealthConfigFingerprint(cfg)
 }
 

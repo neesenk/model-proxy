@@ -4,6 +4,7 @@ package app
 import (
 	"context"
 	"model-proxy/internal/accounts"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/observe/seclog"
@@ -14,7 +15,7 @@ import (
 
 // initRequestLog adapts resolved configuration values into the process-owned
 // logger. The goroutine itself remains owned by proxyLifecycle.
-func (p *Proxy) initRequestLog(config RequestLogConfig) {
+func (p *Proxy) initRequestLog(config configdomain.RequestLogConfig) {
 	if !config.Enabled {
 		return
 	}
@@ -62,7 +63,7 @@ func (p *Proxy) initRequestLog(config RequestLogConfig) {
 // double-swapping, and keeps a reload that admitted a goroutine just before
 // Close's BeginStop from installing a logger Close would never drain (the
 // aborted logger is shut down here instead).
-func (p *Proxy) reconcileSecLog(cfg *Config) {
+func (p *Proxy) reconcileSecLog(cfg *configdomain.Config) {
 	desiredDir := ""
 	if cfg.Guard.AuditEnabled() {
 		desiredDir = filepath.Dir(cfg.Guard.AuditPathValue(accounts.HomeDir()))
@@ -153,7 +154,7 @@ func (p *Proxy) statsFlushLoop(stop <-chan struct{}) {
 
 // initStats binds startup-only config to the long-lived Store via
 // internal/observe/stats.Bootstrap.
-func (p *Proxy) initStats(config StatsConfig) {
+func (p *Proxy) initStats(config configdomain.StatsConfig) {
 	result := observestats.Bootstrap(
 		config.ResolvedDBPath(),
 		config.RetentionDuration(),

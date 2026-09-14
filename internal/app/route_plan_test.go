@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	responsecache "model-proxy/internal/cache"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/routing"
 	"model-proxy/internal/takeover"
@@ -23,7 +24,7 @@ import (
 // right now — route resolution, ordered targets, per-target fit — without an
 // upstream call and without mutating scheduler state (sticky must not latch).
 func TestDebugRoute_Preview(t *testing.T) {
-	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
   deepseek: {provider_id: deepseek, openai_base_url: https://y}
@@ -128,7 +129,7 @@ routes:
 // misses into the operational hit-rate stats (Peek, not Lookup) — a poller
 // watching the preview would otherwise grind the metrics down.
 func TestDebugRoute_PreviewCacheProbeIsReadOnly(t *testing.T) {
-	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 routes:
@@ -187,7 +188,7 @@ guard: {secrets: %s, audit: false}
 	body := []byte(guardRequestBody())
 	preview := func(t *testing.T, action string, primeBody []byte) map[string]any {
 		t.Helper()
-		cfg, err := LoadConfigFromBytes("test", []byte(fmt.Sprintf(base, action)))
+		cfg, err := configdomain.LoadConfigFromBytes("test", []byte(fmt.Sprintf(base, action)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -209,7 +210,7 @@ guard: {secrets: %s, audit: false}
 	}
 
 	t.Run("redact hashes forwarded body", func(t *testing.T) {
-		cfg, err := LoadConfigFromBytes("test", []byte(fmt.Sprintf(base, "redact")))
+		cfg, err := configdomain.LoadConfigFromBytes("test", []byte(fmt.Sprintf(base, "redact")))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -241,7 +242,7 @@ guard: {secrets: %s, audit: false}
 
 	t.Run("strong path block bypasses cache", func(t *testing.T) {
 		pathBody := []byte(`{"model":"glm","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"~/.ssh/id_rsa"}}]}]}`)
-		cfg, err := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+		cfg, err := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 routes:
@@ -301,9 +302,9 @@ func TestDerivedRoute_ForwardsAliasedModel(t *testing.T) {
 	os.WriteFile(filepath.Join(credDir, "zhipu_apikey.json"), []byte(`{"api_key":"k"}`), 0o600)
 	t.Setenv("HOME", home)
 
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:0",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"zhipu": {Provider: "zhipu", OpenAIBaseURL: up.URL, Models: []string{"k3"}, Priority: 1, Alias: map[string]string{"k3": "kimi-k3"}},
 		},
 	}
@@ -336,9 +337,9 @@ func TestDerivedRoute_ForwardsAliasedModel(t *testing.T) {
 // must appear in the opencode takeover config (parity with /v1/models).
 func TestTakeover_IncludesDerivedRoutes(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:15721",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "http://x", Models: []string{"glm-4.6"}},
 		},
 	}
@@ -371,12 +372,12 @@ func TestDerivedRoute_ListedInV1Models(t *testing.T) {
 	os.WriteFile(filepath.Join(credDir, "zhipu_apikey.json"), []byte(`{"api_key":"k"}`), 0o600)
 	t.Setenv("HOME", home)
 
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:0",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "http://x", Models: []string{"glm-5.2", "glm-4.6"}, Alias: map[string]string{"glm-5.2": "glm-main"}},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm-explicit": {{Provider: "zhipu", Model: "glm-5.2"}},
 		},
 	}
@@ -408,9 +409,9 @@ func TestResolver_ExpandAndPick(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
 	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B")
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"},
 		},
 	}
@@ -418,7 +419,7 @@ func TestResolver_ExpandAndPick(t *testing.T) {
 	r := newResolver(p, p.providers, p.poolIndex)
 
 	// Expand: pooled parent → both virtuals, Model/Priority/Protocol preserved.
-	got := r.Expand(RouteTarget{Provider: "zhipu", Model: "glm", Priority: 2, Protocol: "openai"})
+	got := r.Expand(configdomain.RouteTarget{Provider: "zhipu", Model: "glm", Priority: 2, Protocol: "openai"})
 	if len(got) != 2 {
 		t.Fatalf("Expand pooled = %d targets, want 2", len(got))
 	}
@@ -436,7 +437,7 @@ func TestResolver_ExpandAndPick(t *testing.T) {
 
 	// Pick with a session key is STICKY: the same key always lands on the same
 	// virtual (cache-warm for a conversation).
-	sessA, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, "session-A")
+	sessA, ok := r.Pick(configdomain.RouteTarget{Provider: "zhipu", Model: "glm"}, "session-A")
 	if !ok {
 		t.Fatal("Pick pooled !ok")
 	}
@@ -444,7 +445,7 @@ func TestResolver_ExpandAndPick(t *testing.T) {
 		t.Error("Pick did not return a zhipu virtual")
 	}
 	for i := 0; i < 5; i++ {
-		pick, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, "session-A")
+		pick, ok := r.Pick(configdomain.RouteTarget{Provider: "zhipu", Model: "glm"}, "session-A")
 		if !ok || pick.Provider != sessA.Provider {
 			t.Errorf("Pick session-A iter %d = %q, want stable %q (session-sticky)", i, pick.Provider, sessA.Provider)
 		}
@@ -454,7 +455,7 @@ func TestResolver_ExpandAndPick(t *testing.T) {
 	// appear across a handful of distinct keys.
 	seen := map[string]bool{sessA.Provider: true}
 	for _, key := range []string{"s1", "s2", "s3", "s4", "s5", "s6"} {
-		pick, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, key)
+		pick, ok := r.Pick(configdomain.RouteTarget{Provider: "zhipu", Model: "glm"}, key)
 		if !ok {
 			t.Fatalf("Pick %s !ok", key)
 		}
@@ -466,27 +467,27 @@ func TestResolver_ExpandAndPick(t *testing.T) {
 
 	// Non-pooled provider: Expand passes through; Pick on a built non-pooled name
 	// returns it, on a not-built name returns !ok.
-	p2 := newTestProxy(t, &Config{
+	p2 := newTestProxy(t, &configdomain.Config{
 		Listen:    "127.0.0.1:1",
-		Providers: map[string]Provider{"single": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
+		Providers: map[string]configdomain.Provider{"single": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
 	})
 	r2 := newResolver(p2, p2.providers, p2.poolIndex)
-	if e := r2.Expand(RouteTarget{Provider: "single", Model: "m"}); len(e) != 1 || e[0].Provider != "single" {
+	if e := r2.Expand(configdomain.RouteTarget{Provider: "single", Model: "m"}); len(e) != 1 || e[0].Provider != "single" {
 		t.Errorf("Expand non-pooled = %+v, want [{single}]", e)
 	}
 	// "single" is a file-backed static provider (built even when not logged in) →
 	// Pick returns it. A name with NO built impl (not in cfg.Providers at all) → !ok.
-	if pick, ok := r2.Pick(RouteTarget{Provider: "single"}, ""); !ok || pick.Provider != "single" {
+	if pick, ok := r2.Pick(configdomain.RouteTarget{Provider: "single"}, ""); !ok || pick.Provider != "single" {
 		t.Errorf("Pick built non-pooled = %+v ok=%v, want {single}/ok", pick, ok)
 	}
-	if _, ok := r2.Pick(RouteTarget{Provider: "does-not-exist"}, ""); ok {
+	if _, ok := r2.Pick(configdomain.RouteTarget{Provider: "does-not-exist"}, ""); ok {
 		t.Error("Pick on a name with no built impl should be !ok")
 	}
 
 	// Health-aware failover: circuit-open the sticky account → Pick fails over to
 	// the healthy sibling instead of returning the dead one.
 	seedRuntimeCircuit(t, p, sessA.Provider, time.Now().Add(time.Hour))
-	fallback, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, "session-A")
+	fallback, ok := r.Pick(configdomain.RouteTarget{Provider: "zhipu", Model: "glm"}, "session-A")
 	if !ok {
 		t.Fatal("Pick session-A with sticky account circuit-open should fail over, got !ok")
 	}
@@ -500,7 +501,7 @@ func TestResolver_ExpandAndPick(t *testing.T) {
 	// All accounts circuit-open → Pick !ok (no healthy virtual).
 	other := fallback.Provider
 	seedRuntimeCircuit(t, p, other, time.Now().Add(time.Hour))
-	if _, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, "session-A"); ok {
+	if _, ok := r.Pick(configdomain.RouteTarget{Provider: "zhipu", Model: "glm"}, "session-A"); ok {
 		t.Error("Pick with ALL accounts circuit-open should be !ok")
 	}
 }
@@ -515,27 +516,27 @@ func TestResolver_PickSkipsModelLockedVirtual(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
 	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B")
-	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{
+	cfg := &configdomain.Config{Listen: "127.0.0.1:1", Providers: map[string]configdomain.Provider{
 		"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"},
 	}}
 	p := newTestProxy(t, cfg)
 	r := newResolver(p, p.providers, p.poolIndex)
 
 	// Pre-lock: the model resolves to a healthy virtual.
-	if _, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, "session-1"); !ok {
+	if _, ok := r.Pick(configdomain.RouteTarget{Provider: "zhipu", Model: "glm"}, "session-1"); !ok {
 		t.Fatal("pre-lock Pick returned !ok; want a healthy virtual")
 	}
 
 	// Lock the model on EVERY virtual (the main routing path would skip them all).
 	for _, vid := range p.poolIndex["zhipu"] {
-		p.recordModelFailure(vid, "glm", Scheduling{ModelLockout: "1h"})
+		p.recordModelFailure(vid, "glm", configdomain.Scheduling{ModelLockout: "1h"})
 	}
-	if _, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, "session-1"); ok {
+	if _, ok := r.Pick(configdomain.RouteTarget{Provider: "zhipu", Model: "glm"}, "session-1"); ok {
 		t.Errorf("post-lock Pick returned ok for a fully model-locked pool; resolver must skip locked (provider,model)")
 	}
 
 	// A DIFFERENT model on the same pool is unaffected — the lock is model-specific.
-	if _, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm-other"}, "session-1"); !ok {
+	if _, ok := r.Pick(configdomain.RouteTarget{Provider: "zhipu", Model: "glm-other"}, "session-1"); !ok {
 		t.Errorf("unlocked model on same pool should still resolve")
 	}
 }

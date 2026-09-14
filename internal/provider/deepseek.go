@@ -2,10 +2,7 @@ package provider
 
 import (
 	"encoding/json"
-	"fmt"
-	"io"
 	"model-proxy/internal/display"
-	"model-proxy/internal/upstreamproxy"
 	"net/http"
 	"strconv"
 	"time"
@@ -70,18 +67,9 @@ func (p *DeepSeekProvider) FetchModels() ([]string, error) {
 // DeepSeek is pay-as-you-go: no windowed budget (RemainingPct=-1). On any
 // failure returns a BillingUnknown snapshot carrying the error.
 func (p *DeepSeekProvider) Quota() (*QuotaSnapshot, error) {
-	req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
-	if err := p.AuthHeaders(req); err != nil {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
-	if err != nil {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
+	body, fail, ok := usageGet(p.cfg.UsageURL, p.AuthHeaders, nil, nil)
+	if !ok {
+		return fail, nil
 	}
 	return ParseDeepseekQuota(body), nil
 }

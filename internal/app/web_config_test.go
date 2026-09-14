@@ -6,6 +6,7 @@ import (
 	"io"
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/appapi"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
 	"net/http"
 	"net/http/httptest"
@@ -472,7 +473,7 @@ func TestWebPresetsListAndAdd(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte("listen: 127.0.0.1:0\nproviders:\n  deepseek: {provider_id: deepseek, openai_base_url: https://d}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadConfigFromBytes(cfgPath, mustReadFile(t, cfgPath))
+	cfg, err := configdomain.LoadConfigFromBytes(cfgPath, mustReadFile(t, cfgPath))
 	if err != nil {
 		t.Fatalf("base config invalid: %v", err)
 	}
@@ -541,7 +542,7 @@ func TestWebAddPresetSurfacesAmbiguity(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(base), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadConfigFromBytes(cfgPath, mustReadFile(t, cfgPath))
+	cfg, err := configdomain.LoadConfigFromBytes(cfgPath, mustReadFile(t, cfgPath))
 	if err != nil {
 		t.Fatalf("base config invalid: %v", err)
 	}
@@ -703,8 +704,8 @@ func TestWebAccountProbeUsesAdminCapabilityAndPreservesResponseShape(t *testing.
 	}))
 	defer upstream.Close()
 
-	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"up": {
 				Provider:      testProviderID,
 				OpenAIBaseURL: upstream.URL,
@@ -757,7 +758,7 @@ routes:
   glm: [{provider: zhipu, model: glm}]
 `
 	newProxy := func(extra string) *Proxy {
-		cfg, err := LoadConfigFromBytes("test", []byte(base+extra))
+		cfg, err := configdomain.LoadConfigFromBytes("test", []byte(base+extra))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -795,13 +796,13 @@ routes:
 // TestServeModels_ListsExposedModels verifies /v1/models lists exposed model
 // names: explicit route keys (including claude-* alias routes) ∪ derived names.
 func TestServeModels_ListsExposedModels(t *testing.T) {
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:0",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp",
 				Models: []string{"glm-5.2"}},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm-5.2":          {{Provider: "aqp", Model: "glm-5.2"}},
 			"claude-opus-4-7":  {{Provider: "aqp", Model: "glm-5.2"}},
 			"claude-haiku-4-5": {{Provider: "aqp", Model: "glm-5.2"}},
@@ -844,12 +845,12 @@ func TestServeModels_ListsExposedModels(t *testing.T) {
 // TestServeModels_NoRoutesReturnsEmpty verifies /v1/models returns an empty list
 // when there are no routes.
 func TestServeModels_NoRoutesReturnsEmpty(t *testing.T) {
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:0",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"other": {OpenAIBaseURL: "http://x", Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{},
+		Routes: map[string][]configdomain.RouteTarget{},
 	}
 	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
@@ -881,7 +882,7 @@ func TestServeModels_NoRoutesReturnsEmpty(t *testing.T) {
 // default (falls through to the unknown-path 502) and served when the proxy
 // was constructed with MP_PPROF=1.
 func TestHandler_PprofEndpointIsOptIn(t *testing.T) {
-	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 `))

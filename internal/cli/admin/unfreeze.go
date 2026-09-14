@@ -1,16 +1,13 @@
 package admin
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
-	cliframework "model-proxy/internal/cli/framework"
-	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/daemonctl"
-	"model-proxy/internal/display"
 	"os"
 	"strings"
+
+	cliframework "model-proxy/internal/cli/framework"
+	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/display"
 )
 
 // unfreeze_cmd.go implements `model-proxy unfreeze [provider]` — clears frozen
@@ -37,21 +34,13 @@ func CmdUnfreeze(args []string, cfg *configdomain.Config) {
 // doUnfreeze posts /api/health/reset and renders the result line. provider == ""
 // resets all providers. Extracted for tests (mirrors doPin).
 func DoUnfreeze(base, provider string) (string, error) {
-	raw, _ := json.Marshal(map[string]string{"provider": provider})
-	resp, err := daemonctl.Client.Post(base+"/api/health/reset", "application/json", bytes.NewReader(raw))
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	rb, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("%s", display.Truncate(strings.TrimSpace(string(rb)), 200))
-	}
 	var out struct {
 		Cleared           []string `json:"cleared"`
 		ModelLocksCleared int      `json:"model_locks_cleared"`
 	}
-	json.Unmarshal(rb, &out)
+	if err := postProviderOp(base, "/api/health/reset", provider, &out); err != nil {
+		return "", err
+	}
 	scope := "all providers"
 	if provider != "" {
 		scope = provider

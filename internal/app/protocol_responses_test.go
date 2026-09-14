@@ -35,9 +35,9 @@ func TestForward_AnthropicToResponses_NonStream(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "cdx", Model: "gpt-x", Protocol: "responses"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "cdx", Model: "gpt-x", Protocol: "responses"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["cdx"] = &testProv{key: "k"}
@@ -87,10 +87,12 @@ func TestForward_AnthropicToResponses_AutoResolve(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
+	cfg := &configdomain.
 		// Provider id "codex" ⇒ ProtocolHint returns "responses" (auto-resolve).
-		Providers: map[string]Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: "codex"}},
-		Routes:    map[string][]RouteTarget{"gpt-x": {{Provider: "cdx", Model: "gpt-x"}}}, // no Protocol
+		Config{
+
+		Providers: map[string]configdomain.Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: "codex"}},
+		Routes:    map[string][]configdomain.RouteTarget{"gpt-x": {{Provider: "cdx", Model: "gpt-x"}}}, // no Protocol
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["cdx"] = &testProv{key: "k"}
@@ -132,9 +134,9 @@ func TestForward_OpenAIToResponses_NonStream(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"gpt-x": {{Provider: "cdx", Model: "gpt-x", Protocol: "responses"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"gpt-x": {{Provider: "cdx", Model: "gpt-x", Protocol: "responses"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["cdx"] = &testProv{key: "k"}
@@ -190,12 +192,12 @@ func TestForward_PooledResponsesConversionStreamsTerminalUsage(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"zhipu": {OpenAIBaseURL: up.URL, Provider: "zhipu"},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"public-model": {{Provider: "zhipu", Model: "upstream-model", Protocol: "responses"}},
 		},
 	}
@@ -330,9 +332,9 @@ func TestForward_ResponsesToAnthropic_NonStream(t *testing.T) {
 		io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hello back"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}`)
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{"ant": {AnthropicBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"r-x": {{Provider: "ant", Model: "claude-x", Protocol: "anthropic"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"ant": {AnthropicBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"r-x": {{Provider: "ant", Model: "claude-x", Protocol: "anthropic"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["ant"] = &testProv{key: "k"}
@@ -412,9 +414,9 @@ func TestForward_ResponsesPreviousIDRestoresChatToolHistory(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"g": {{Provider: "p", Model: "g", Protocol: "openai"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"g": {{Provider: "p", Model: "g", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["p"] = &testProv{key: "k"}
@@ -492,9 +494,9 @@ func TestForward_ResponsesStreamPreviousIDRestoresChatToolHistory(t *testing.T) 
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"g": {{Provider: "p", Model: "g", Protocol: "openai"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"g": {{Provider: "p", Model: "g", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["p"] = &testProv{key: "k"}
@@ -567,9 +569,9 @@ func TestForward_ResponsesTruncatedStreamDoesNotRecordContinuationState(t *testi
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"g": {{Provider: "p", Model: "g", Protocol: "openai"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"g": {{Provider: "p", Model: "g", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["p"] = &testProv{key: "k"}
@@ -638,9 +640,9 @@ func TestForward_ResponsesPreviousIDRestoresAcrossRestart(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"g": {{Provider: "p", Model: "g", Protocol: "openai"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"g": {{Provider: "p", Model: "g", Protocol: "openai"}}},
 	}
 	// One shared state path for both instances — the persisted
 	// previous_response_id bridge must survive the swap.
@@ -693,9 +695,9 @@ func TestForward_Converted4xxUsesClientErrorEnvelope(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
@@ -726,8 +728,8 @@ func TestForward_Converted4xxUsesClientErrorEnvelope(t *testing.T) {
 // Pool virtual names (name#id) normalize to the parent's provider id before
 // the dialect lookup (providerConfig resolves via parentOf).
 func TestParity_ReasoningDialectPooledProvider(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{"zhipu": {Provider: "zhipu", OpenAIBaseURL: "https://x"}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"zhipu": {Provider: "zhipu", OpenAIBaseURL: "https://x"}},
 	}
 	parentOf := map[string]string{"zhipu#ab12": "zhipu"}
 	prov, ok := configdomain.ProviderConfig(cfg, parentOf, "zhipu#ab12")

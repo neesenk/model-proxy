@@ -1,32 +1,19 @@
 package account
 
 import (
-	"os"
-	"sync"
-
 	"model-proxy/internal/accounts"
+	cliframework "model-proxy/internal/cli/framework"
 	"model-proxy/internal/providerbuild"
 )
 
 // env.go holds the account package's environment seams (same shape as the
 // other CLI command packages): the credential store and the provider-build
 // options, resolved from the per-call HOME so tests can isolate them.
-
-var (
-	accountStoreMu  sync.Mutex
-	accountStoreKey string
-	accountStoreVal accounts.Store
-)
+// The lazy store seam is shared in cli/framework.
+var accountStoreLazy cliframework.LazyAccountStore
 
 func accountStore() accounts.Store {
-	home := homeDir()
-	accountStoreMu.Lock()
-	defer accountStoreMu.Unlock()
-	if home != accountStoreKey {
-		accountStoreVal = accounts.NewStore(home)
-		accountStoreKey = home
-	}
-	return accountStoreVal
+	return accountStoreLazy.Get()
 }
 
 func buildOpts() providerbuild.BuildOptions {
@@ -39,6 +26,5 @@ func buildOpts() providerbuild.BuildOptions {
 }
 
 func homeDir() string {
-	h, _ := os.UserHomeDir()
-	return h
+	return cliframework.HomeDir()
 }

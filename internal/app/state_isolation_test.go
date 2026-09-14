@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	configdomain "model-proxy/internal/config"
 	"os"
 	"path/filepath"
 	"sync"
@@ -32,12 +33,12 @@ func TestMain(m *testing.M) {
 // newTestProxy is the default constructor for functional tests. It guarantees
 // every quota poller is stopped before its test TempDir/HOME is removed. The
 // production NewProxy wrapper has one explicit path-wiring contract test below.
-func newTestProxy(t testing.TB, cfg *Config) *Proxy {
+func newTestProxy(t testing.TB, cfg *configdomain.Config) *Proxy {
 	t.Helper()
 	return newTestProxyAt(t, cfg, filepath.Join(t.TempDir(), "quota_state.json"))
 }
 
-func newTestProxyAt(t testing.TB, cfg *Config, statePath string) *Proxy {
+func newTestProxyAt(t testing.TB, cfg *configdomain.Config, statePath string) *Proxy {
 	t.Helper()
 	p := NewProxyWithStatePath(cfg, statePath)
 	t.Cleanup(p.Close)
@@ -50,7 +51,7 @@ func newTestProxyAt(t testing.TB, cfg *Config, statePath string) *Proxy {
 func TestNewProxy_DefaultStatePath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	cfg := &Config{Providers: map[string]Provider{}}
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{}}
 	p := NewProxy(cfg)
 	t.Cleanup(p.Close)
 	want := filepath.Join(home, ".model-proxy", "quota_state.json")
@@ -69,7 +70,7 @@ func TestNewProxy_DefaultStatePath(t *testing.T) {
 func TestQuotaPersist_ConcurrentTrackersNoRenameRace(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/quota_state.json"
-	cfg := func() *Config { return &Config{} }
+	cfg := func() *configdomain.Config { return &configdomain.Config{} }
 	provs := func() map[string]provider.Provider { return nil }
 	var wg sync.WaitGroup
 	const trackers, persists = 3, 30
@@ -100,7 +101,7 @@ func TestQuotaPersist_ConcurrentTrackersNoRenameRace(t *testing.T) {
 // persist after the test (and its config generation) is gone. Close is
 // idempotent — a second call must not deadlock.
 func TestProxy_CloseStopsTracker(t *testing.T) {
-	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 `))

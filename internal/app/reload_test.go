@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/forward"
 	"model-proxy/internal/observe/seclog"
 	"model-proxy/internal/provider"
@@ -31,9 +32,9 @@ func writeConfigFile(t *testing.T, body string) string {
 	return p
 }
 
-func mustLoadConfigFile(t *testing.T, path string) *Config {
+func mustLoadConfigFile(t *testing.T, path string) *configdomain.Config {
 	t.Helper()
-	cfg, err := LoadConfig(path)
+	cfg, err := configdomain.LoadConfig(path)
 	if err != nil {
 		t.Fatalf("load config %s: %v", path, err)
 	}
@@ -438,14 +439,14 @@ func TestReload_RejectsAllDirectOldGenerationMutations(t *testing.T) {
 	p.providers["p"] = &quotaCountProv{name: "p", refreshed: refreshCalled}
 	p.quota = runtimestate.NewQuotaTracker(
 		t.TempDir()+"/quota_state.json",
-		func() *Config { return p.cfg },
+		func() *configdomain.Config { return p.cfg },
 		func() map[string]provider.Provider { return p.providers },
 		&p.runtimeState,
 	)
 	p.quota.Generation = p.configGeneration.Load
 
-	p.recordFailure("p", Scheduling{}, oldGeneration)
-	p.recordModelFailure("p", "m", Scheduling{}, oldGeneration)
+	p.recordFailure("p", configdomain.Scheduling{}, oldGeneration)
+	p.recordModelFailure("p", "m", configdomain.Scheduling{}, oldGeneration)
 	p.recordRateLimit("p", time.Now().Add(3*time.Hour), rlQuota, oldGeneration)
 	p.recordSuccess("p", "m", oldGeneration)
 	p.releaseHalfOpenSlot("p", oldGeneration)

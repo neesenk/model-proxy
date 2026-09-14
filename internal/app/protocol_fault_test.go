@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"image/png"
 	"io"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,9 +33,9 @@ func TestConvertFault_SameProtocolPassthrough(t *testing.T) {
 		w.Write([]byte(antResp))
 	}))
 	defer upA.Close()
-	pA := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"ant": {AnthropicBaseURL: upA.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "ant", Model: "claude-x"}}},
+	pA := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"ant": {AnthropicBaseURL: upA.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "ant", Model: "claude-x"}}},
 	})
 	pA.providers["ant"] = &testProv{key: "k"}
 	pxA := httptest.NewServer(http.HandlerFunc(pA.Handler))
@@ -65,9 +66,9 @@ func TestConvertFault_SameProtocolPassthrough(t *testing.T) {
 		w.Write([]byte(rspResp))
 	}))
 	defer upR.Close()
-	pR := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"cdx": {OpenAIBaseURL: upR.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"gpt-x": {{Provider: "cdx", Model: "gpt-x"}}},
+	pR := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"cdx": {OpenAIBaseURL: upR.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"gpt-x": {{Provider: "cdx", Model: "gpt-x"}}},
 	})
 	pR.providers["cdx"] = &testProv{key: "k"}
 	pxR := httptest.NewServer(http.HandlerFunc(pR.Handler))
@@ -102,9 +103,9 @@ func TestConvertFault_NonStream64MiBCap(t *testing.T) {
 		io.CopyN(w, zeroReader{b: 'x'}, 65<<20)
 	}))
 	defer up.Close()
-	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	})
 	p.providers["oai"] = &testProv{key: "k"}
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
@@ -143,9 +144,9 @@ func TestConvertFault_DisconnectStopsUpstream(t *testing.T) {
 		}
 	}))
 	defer up.Close()
-	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	})
 	p.providers["oai"] = &testProv{key: "k"}
 	rec := &disconnectWriter{ResponseRecorder: httptest.NewRecorder()}
@@ -169,9 +170,9 @@ func TestConvertFault_SniffSSEMissingContentType(t *testing.T) {
 			`data: {"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`+"\n\n")
 	}))
 	defer up.Close()
-	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "cdx", Model: "gpt-x", Protocol: "responses"}}},
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "cdx", Model: "gpt-x", Protocol: "responses"}}},
 	})
 	p.providers["cdx"] = &testProv{key: "k"}
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
@@ -229,9 +230,9 @@ func TestForwardRetries413AfterImageCompression(t *testing.T) {
 		io.WriteString(w, `{"id":"ok","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}`)
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}

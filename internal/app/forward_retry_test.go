@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/targetexec"
 	"net/http"
@@ -45,12 +46,12 @@ func TestUC_ClientCancelDuringHeadersStopsFailoverAndKeepsCircuitClosed(t *testi
 	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
 	defer fallback.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"blocked":  {OpenAIBaseURL: blocked.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "blocked", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
@@ -60,7 +61,7 @@ func TestUC_ClientCancelDuringHeadersStopsFailoverAndKeepsCircuitClosed(t *testi
 		// Threshold 3: pre-fix, three cancelled requests recorded 3 failures
 		// per provider → both circuits open. retry_wait 0 keeps the terminal
 		// contrast immediate (no cooldown-wait rounds).
-		Scheduling: Scheduling{CircuitThreshold: 3, RetryWait: "0"},
+		Scheduling: configdomain.Scheduling{CircuitThreshold: 3, RetryWait: "0"},
 	}
 	p := newProxyWithStatic(t, cfg, map[string]string{"blocked": "b", "fallback": "f"})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
@@ -192,12 +193,12 @@ func TestForward_ContextOverflowRetry(t *testing.T) {
 	}))
 	defer bigUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
 			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm":      {{Provider: "small-prov", Model: "small"}},
 			"glm-long": {{Provider: "big-prov", Model: "big"}},
 		},
@@ -250,12 +251,12 @@ func TestForward_ContextOverflowRetry_RespectsCapability(t *testing.T) {
 	}))
 	defer bigTextUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
 			"big-text":   {OpenAIBaseURL: bigTextUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"vision": {{Provider: "small-prov", Model: "small-vision"}},
 			"text":   {{Provider: "big-text", Model: "big-text"}},
 		},
@@ -309,13 +310,13 @@ func TestForward_ContextOverflowRetry_OnlyOnce(t *testing.T) {
 	}))
 	defer hugeUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
 			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: testProviderID},
 			"huge-prov":  {OpenAIBaseURL: hugeUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm":       {{Provider: "small-prov", Model: "small"}},
 			"glm-long":  {{Provider: "big-prov", Model: "big", Priority: 1}},
 			"glm-xlong": {{Provider: "huge-prov", Model: "huge", Priority: 2}},
@@ -366,12 +367,12 @@ func TestForward_ContextOverflowRetry_Ordinary400(t *testing.T) {
 	}))
 	defer bigUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
 			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm":      {{Provider: "small-prov", Model: "small"}},
 			"glm-long": {{Provider: "big-prov", Model: "big"}},
 		},
@@ -416,11 +417,11 @@ func TestForward_ContextOverflowRetry_NoBiggerTarget(t *testing.T) {
 	smallUp := overflowServer(body, &smallHits)
 	defer smallUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {{Provider: "small-prov", Model: "small"}},
 		},
 	}
@@ -468,12 +469,12 @@ func TestForward_ContextOverflowRetry_F3_UntriedTargets(t *testing.T) {
 	}))
 	defer bigUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
 			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			// SAME route: small (priority 1, tried first) + big (priority 2).
 			"glm": {
 				{Provider: "small-prov", Model: "small", Priority: 1},
@@ -516,11 +517,11 @@ func TestForward_ContextOverflowRetry_NoCatalog(t *testing.T) {
 	smallUp := overflowServer(body, &smallHits)
 	defer smallUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {{Provider: "small-prov", Model: "small"}},
 		},
 	}
@@ -560,12 +561,12 @@ func TestForward_AttemptOutcomeCounters(t *testing.T) {
 	}))
 	defer okUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"bad-prov":  {OpenAIBaseURL: failingUp.URL, Provider: testProviderID},
 			"good-prov": {OpenAIBaseURL: okUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {{Provider: "bad-prov", Model: "m"}, {Provider: "good-prov", Model: "m"}},
 		},
 	}
@@ -626,12 +627,12 @@ func TestForward_StrictLossyRefusesAndAnswers400(t *testing.T) {
 	defer up.Close()
 
 	newProxy := func(strict bool) *httptest.Server {
-		cfg := &Config{
-			Providers: map[string]Provider{"backend": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-			Routes: map[string][]RouteTarget{
+		cfg := &configdomain.Config{
+			Providers: map[string]configdomain.Provider{"backend": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+			Routes: map[string][]configdomain.RouteTarget{
 				"glm": {{Provider: "backend", Model: "backend-model", Protocol: "responses"}},
 			},
-			Conversion: ConversionConfig{StrictLossy: strict},
+			Conversion: configdomain.ConversionConfig{StrictLossy: strict},
 		}
 		p := newTestProxy(t, cfg)
 		p.providers["backend"] = &testProv{key: "k"}
@@ -692,9 +693,9 @@ func TestForward_LearnsDeveloperRoleRename(t *testing.T) {
 		w.Header().Set("content-type", "application/json")
 		io.WriteString(w, `{"id":"c1","choices":[{"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
 	})
-	cfg := &Config{
-		Providers: map[string]Provider{"v": {OpenAIBaseURL: up.srv.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"m1": {{Provider: "v", Model: "m1"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"v": {OpenAIBaseURL: up.srv.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"m1": {{Provider: "v", Model: "m1"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["v"] = &testProv{key: "k"}
@@ -763,9 +764,9 @@ func TestForward_LearnsThinkingAdaptiveE2E(t *testing.T) {
 		w.Header().Set("content-type", "application/json")
 		io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
 	})
-	cfg := &Config{
-		Providers: map[string]Provider{"s": {AnthropicBaseURL: up.srv.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"m": {{Provider: "s", Model: "m", Protocol: "anthropic"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"s": {AnthropicBaseURL: up.srv.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"m": {{Provider: "s", Model: "m", Protocol: "anthropic"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["s"] = &testProv{key: "k"}
@@ -831,9 +832,9 @@ func TestForward_ErrorDegradationVisibleE2E(t *testing.T) {
 				w.WriteHeader(tc.status)
 				io.WriteString(w, tc.upstream)
 			})
-			cfg := &Config{
-				Providers: map[string]Provider{"c": {OpenAIBaseURL: up.srv.URL, Provider: testProviderID}},
-				Routes:    map[string][]RouteTarget{"m": {{Provider: "c", Model: "m", Protocol: "responses"}}},
+			cfg := &configdomain.Config{
+				Providers: map[string]configdomain.Provider{"c": {OpenAIBaseURL: up.srv.URL, Provider: testProviderID}},
+				Routes:    map[string][]configdomain.RouteTarget{"m": {{Provider: "c", Model: "m", Protocol: "responses"}}},
 			}
 			p := newTestProxy(t, cfg)
 			p.providers["c"] = &testProv{key: "k"}
@@ -870,9 +871,9 @@ func TestForward_ModelDeniedNewWordingE2E(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			io.WriteString(w, upstreamBody)
 		})
-		cfg := &Config{
-			Providers: map[string]Provider{"s": {OpenAIBaseURL: up.srv.URL, Provider: testProviderID}},
-			Routes:    map[string][]RouteTarget{"m": {{Provider: "s", Model: "m"}}},
+		cfg := &configdomain.Config{
+			Providers: map[string]configdomain.Provider{"s": {OpenAIBaseURL: up.srv.URL, Provider: testProviderID}},
+			Routes:    map[string][]configdomain.RouteTarget{"m": {{Provider: "s", Model: "m"}}},
 		}
 		p := newTestProxy(t, cfg)
 		p.providers["s"] = &testProv{key: "k"}

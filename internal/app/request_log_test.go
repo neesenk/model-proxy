@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/requestlog"
 	"net/http"
@@ -46,11 +47,11 @@ func writeReqLog(t *testing.T, dir, name string, records []requestlog.Record) {
 
 func requestLogMux(t *testing.T, dir string) *http.ServeMux {
 	t.Helper()
-	proxy := newTestProxy(t, &Config{
-		Providers: map[string]Provider{
+	proxy := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"backend": {OpenAIBaseURL: "https://example.invalid", Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"client-model": {{Provider: "backend", Model: "backend-model"}},
 		},
 	})
@@ -250,7 +251,7 @@ func TestHandleRequests_ShadowFilter(t *testing.T) {
 // newReqLogProxy wires a real requestlog.Logger into a test Proxy. Call the
 // returned shutdown function before reading the JSONL files so every accepted
 // record has been drained to disk.
-func newReqLogProxy(t *testing.T, cfg *Config) (*Proxy, string, func()) {
+func newReqLogProxy(t *testing.T, cfg *configdomain.Config) (*Proxy, string, func()) {
 	t.Helper()
 	proxy := newTestProxy(t, cfg)
 	dir := t.TempDir()
@@ -302,11 +303,11 @@ func TestForward_RequestLog_CapturesBodies_NonSSE(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"backend": {OpenAIBaseURL: upstream.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			exposedModel: {{
 				Provider: "backend",
 				Model:    upstreamModel,
@@ -420,11 +421,11 @@ func TestForward_RequestLog_CapturesBodies_SSE(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"backend": {OpenAIBaseURL: upstream.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"client-visible-model": {{
 				Provider: "backend",
 				Model:    "backend-model",
@@ -525,11 +526,11 @@ func TestForward_RequestLog_NilLoggerPassThrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"backend": {OpenAIBaseURL: upstream.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"client-model": {{Provider: "backend", Model: "client-model", Protocol: "responses"}},
 		},
 	}
@@ -572,11 +573,11 @@ func TestForward_RequestLog_CapturesAgent(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"backend": {OpenAIBaseURL: upstream.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"client-model": {{Provider: "backend", Model: "client-model", Protocol: "responses"}},
 		},
 	}
@@ -663,7 +664,7 @@ func TestReload_WarnsWhenRequestLogEnabledButInactive(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(configYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadConfig(configPath)
+	cfg, err := configdomain.LoadConfig(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -703,7 +704,7 @@ func TestReload_NoWarnWhenRequestLogDisabled(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(configYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadConfig(configPath)
+	cfg, err := configdomain.LoadConfig(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -728,9 +729,9 @@ func TestRequestLog_SmallCapTruncatesBodiesEndToEnd(t *testing.T) {
 		w.Write([]byte(`{"full":"` + strings.Repeat("y", 4096) + `"}`))
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"m": {{Provider: "p", Model: "m"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"m": {{Provider: "p", Model: "m"}}},
 	}
 	proxy := newTestProxy(t, cfg)
 	proxy.providers["p"] = &testProv{key: "k"}

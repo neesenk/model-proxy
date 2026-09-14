@@ -3,15 +3,12 @@ package provider
 import (
 	crand "crypto/rand"
 	"fmt"
-	"io"
 	"model-proxy/internal/display"
-	"model-proxy/internal/upstreamproxy"
 	"net/http"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
-	"time"
 )
 
 // zcodeAppVersion is the ZCode desktop version whose client fingerprint this
@@ -148,50 +145,15 @@ func (p *ZCodeProvider) ExtraHeaders(req *http.Request, path string) {
 // BillingUnknown snapshot carrying the error (never a non-nil error), mirroring
 // ZhipuProvider.Quota so the scheduler poll stays alive.
 func (p *ZCodeProvider) Quota() (*QuotaSnapshot, error) {
-	req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
-	if err := p.AuthHeaders(req); err != nil {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
-	}
-	for k, v := range p.cfg.Headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
-	if err != nil {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
-	}
-	s, _ := ParseZhipuQuota(body, "")
-	if s == nil {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: "not zhipu quota format"}, nil
-	}
-	return s, nil
+	return bigmodelQuota(p.cfg.UsageURL, p.AuthHeaders, p.cfg.Headers)
 }
 
 // Usage prints "Provider:  zcode" first (interface contract), then the parsed
 // quota snapshot. Byte-for-byte the zhipu display logic (same BigModel backend).
 func (p *ZCodeProvider) Usage() error {
 	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(p.providerName)))
-	req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
-	if err := p.AuthHeaders(req); err != nil {
-		fmt.Println(display.Yellow("Not logged in.") + " Run: " + display.Cyan("model-proxy login "+p.providerName))
-		return nil
-	}
-	for k, v := range p.cfg.Headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
-	if err != nil {
-		fmt.Println(display.Red("Error: usage request: " + err.Error()))
-		return nil
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		fmt.Printf("%s HTTP %d: %s\n", display.Red("Error:"), resp.StatusCode, display.Truncate(string(body), 200))
+	body, ok := usageGetForDisplay(p.cfg.UsageURL, p.providerName, p.AuthHeaders, p.cfg.Headers)
+	if !ok {
 		return nil
 	}
 	if s, _ := ParseZhipuQuota(body, ""); s != nil {

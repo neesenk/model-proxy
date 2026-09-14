@@ -60,18 +60,9 @@ func (p *CodexProvider) Logout() error { return removeAuthFile(p.cfg.OAuthAuthFi
 // unmeasured rather than crashing the poll.
 func (p *CodexProvider) Quota() (*QuotaSnapshot, error) {
 	usageURL := strings.TrimSuffix(p.cfg.OpenAIBaseURL, "/codex") + "/wham/usage"
-	req, _ := http.NewRequest("GET", usageURL, nil)
-	if err := p.AuthHeaders(req); err != nil {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
-	if err != nil {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
+	body, fail, ok := usageGet(usageURL, p.AuthHeaders, nil, nil)
+	if !ok {
+		return fail, nil
 	}
 	s, parseErr := ParseCodexQuota(body, "", "")
 	if parseErr != nil || s == nil {

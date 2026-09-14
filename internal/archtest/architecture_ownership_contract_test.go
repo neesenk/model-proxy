@@ -28,11 +28,13 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat config_alias_test.go: %v", err)
 		}
-		// The surviving facade is internal/app/config_alias.go: it must stay a
-		// narrow alias+delegate seam and never grow configuration logic.
-		facade, _ := parseGoFile(t, "internal/app/config_alias.go")
-		for _, violation := range configCompatViolationsForAliases(facade, requiredConfigCompatAliases()) {
-			t.Errorf("internal/app/config_alias.go: %s", violation)
+		// The internal/app config facade (config_alias.go) is dissolved: package
+		// app references configdomain types directly. It must never reappear —
+		// same contract as the legacy root facades above.
+		if _, err := os.Stat(repoRooted(t, "internal/app/config_alias.go")); err == nil {
+			t.Error("internal/app/config_alias.go facade must not exist; package app uses configdomain (internal/config) directly")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat internal/app/config_alias.go: %v", err)
 		}
 	})
 

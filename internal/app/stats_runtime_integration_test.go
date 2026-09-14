@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	configdomain "model-proxy/internal/config"
 	obscounters "model-proxy/internal/observe/counters"
 	runtimestate "model-proxy/internal/runtime"
 	"net/http"
@@ -127,7 +128,7 @@ func TestInitStatsRestoresAllRuntimeFieldsWithoutDuplicateFlush(t *testing.T) {
 			agents:  obscounters.NewAgentCounter(),
 		},
 	}
-	proxy.initStats(StatsConfig{DBPath: path, Retention: "0"})
+	proxy.initStats(configdomain.StatsConfig{DBPath: path, Retention: "0"})
 	if proxy.stats == nil || proxy.flusher == nil {
 		t.Fatal("initStats did not bind the durable store and runtime flusher")
 	}
@@ -495,7 +496,7 @@ func TestTokensResetClearsDurableRuntimeAndCacheState(t *testing.T) {
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
-	cache := NewResponseCache(CacheConfig{Enabled: true, TTL: "1h"}, nil)
+	cache := NewResponseCache(configdomain.CacheConfig{Enabled: true, TTL: "1h"}, nil)
 	flusher := observestats.NewFlusher(store, metrics, tokens, agents, nil, nil)
 	proxy := &Proxy{
 		generationState: generationState{
@@ -550,7 +551,7 @@ func TestTokensResetFailurePreservesLiveState(t *testing.T) {
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
-	cache := NewResponseCache(CacheConfig{Enabled: true, TTL: "1h"}, nil)
+	cache := NewResponseCache(configdomain.CacheConfig{Enabled: true, TTL: "1h"}, nil)
 	flusher := observestats.NewFlusher(
 		&resetErrorSink{Store: store}, metrics, tokens, agents, nil, nil)
 	proxy := &Proxy{

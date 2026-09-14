@@ -67,7 +67,7 @@ coverage_floor_for() {
     model-proxy/internal/cli/framework) echo "74.6" ;;
     model-proxy/internal/cli/login) echo "62.7" ;;
     model-proxy/internal/cli/models) echo "67.2" ;;
-    model-proxy/internal/cli/serve) echo "29.7" ;;
+    model-proxy/internal/cli/serve) echo "82.0" ;;
     model-proxy/internal/httpx) echo "75.0" ;;
     model-proxy/internal/targetexec) echo "79.1" ;;
     # CLI harness: main/flag parsing are interactive-only; the scenario

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/seclog"
 	"model-proxy/internal/providerbuild"
@@ -48,14 +49,14 @@ func newGuardTestProxy(t *testing.T, secretsAction string) (p *Proxy, proxyURL s
 		w.Write([]byte(`{"id":"x","choices":[{"message":{"content":"ok"}}]}`))
 	}))
 	t.Cleanup(up.Close)
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"static": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {{Provider: "static", Model: "glm"}},
 		},
-		Guard: GuardConfig{Secrets: secretsAction},
+		Guard: configdomain.GuardConfig{Secrets: secretsAction},
 	}
 	p = newProxyWithStatic(t, cfg, map[string]string{"static": "k"})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
@@ -238,7 +239,7 @@ func guardKnownSecretHits(p *Proxy, token string) bool {
 
 // newOAuthGuardProxy builds a proxy with a pool-backed static provider (pool
 // secret base) and a codex provider (rotating OAuth secret), both routed.
-func newOAuthGuardProxy(t *testing.T, home string, scheduling Scheduling) *Proxy {
+func newOAuthGuardProxy(t *testing.T, home string, scheduling configdomain.Scheduling) *Proxy {
 	t.Helper()
 	writePoolFile(t, "static", testProviderID, guardPoolKey)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -247,16 +248,16 @@ func newOAuthGuardProxy(t *testing.T, home string, scheduling Scheduling) *Proxy
 		w.Write([]byte(`{"id":"x","choices":[{"message":{"content":"ok"}}]}`))
 	}))
 	t.Cleanup(up.Close)
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"static": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 			"codex":  {OpenAIBaseURL: up.URL, Provider: "codex", ClientVersion: "1.0.0"},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {{Provider: "static", Model: "glm"}},
 			"gpt": {{Provider: "codex", Model: "gpt"}},
 		},
-		Guard:      GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true},
+		Guard:      configdomain.GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true},
 		Scheduling: scheduling,
 	}
 	return newTestProxy(t, cfg)
@@ -269,7 +270,7 @@ func TestGuardOAuthRefresh_RotatedTokenRescans(t *testing.T) {
 	home := t.TempDir()
 	setPoolHome(t, home)
 	writeCodexAuthFile(t, home, oauthTokV1)
-	p := newOAuthGuardProxy(t, home, Scheduling{})
+	p := newOAuthGuardProxy(t, home, configdomain.Scheduling{})
 
 	if !guardKnownSecretHits(p, oauthTokV1) {
 		t.Fatal("boot scanner must match the v1 OAuth token")
@@ -306,7 +307,7 @@ func TestGuardOAuthRefresh_LoopFollowsPollBeat(t *testing.T) {
 	home := t.TempDir()
 	setPoolHome(t, home)
 	writeCodexAuthFile(t, home, oauthTokV1)
-	p := newOAuthGuardProxy(t, home, Scheduling{QuotaPollInterval: "20ms"})
+	p := newOAuthGuardProxy(t, home, configdomain.Scheduling{QuotaPollInterval: "20ms"})
 
 	writeCodexAuthFile(t, home, oauthTokV2)
 	waitUntil(t, "guard scanner picks up the rotated OAuth token on the poll beat", func() bool {
@@ -444,14 +445,14 @@ func newAqpGuardProxy(t *testing.T, home, mintURL string) *Proxy {
 		w.Write([]byte(`{"id":"x","choices":[{"message":{"content":"ok"}}]}`))
 	}))
 	t.Cleanup(up.Close)
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"aqp": {OpenAIBaseURL: up.URL, Provider: "aqp", AqpMintURL: mintURL},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"aqp-m": {{Provider: "aqp", Model: "aqp-m"}},
 		},
-		Guard: GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true},
+		Guard: configdomain.GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true},
 	}
 	return newTestProxy(t, cfg)
 }
@@ -625,8 +626,8 @@ func fragmentedCount(p *Proxy) uint64 {
 	return p.metrics.Snapshot()[counters.PMKey{Provider: "guard", Model: "known_secret_fragmented"}].Requests
 }
 
-func sessionGuardCfg(action string) GuardConfig {
-	return GuardConfig{Secrets: action, KnownSecrets: true, Decode: true, SessionScan: true}
+func sessionGuardCfg(action string) configdomain.GuardConfig {
+	return configdomain.GuardConfig{Secrets: action, KnownSecrets: true, Decode: true, SessionScan: true}
 }
 
 // (a) Two-request split: the second request completes the key → one
@@ -737,8 +738,7 @@ func TestSessionScan_WindowTruncationLosesFragments(t *testing.T) {
 
 // (f) session_scan: false disables the whole pass (no events, no windows).
 func TestSessionScan_ConfigFalseDisables(t *testing.T) {
-	p, proxyURL, _ := newGuardPoolProxy(t,
-		GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true, SessionScan: false}, fragPoolKey)
+	p, proxyURL, _ := newGuardPoolProxy(t, configdomain.GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true, SessionScan: false}, fragPoolKey)
 
 	postSession(t, proxyURL+"/v1/chat/completions", fragBody(fragPoolKey[:20]), "s1")
 	postSession(t, proxyURL+"/v1/chat/completions", fragBody(fragPoolKey[20:]), "s1")
@@ -898,9 +898,9 @@ func TestForwardThreadsSessionID(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()
-	cfg := &Config{Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: srv.URL, Provider: "zhipu"}},
-		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
+	cfg := &configdomain.Config{Listen: "127.0.0.1:1",
+		Providers: map[string]configdomain.Provider{"zhipu": {OpenAIBaseURL: srv.URL, Provider: "zhipu"}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
 	p := newTestProxy(t, cfg)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"glm-5"}`)))

@@ -10,6 +10,7 @@ package app
 
 import (
 	"io"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -56,12 +57,12 @@ func TestWireCap_ProbeProviders(t *testing.T) {
 	}))
 	defer codexUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"p":   {OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m-probe"}},
 			"cdx": {OpenAIBaseURL: codexUp.URL, Provider: "codex"},
 		},
-		Routes: map[string][]RouteTarget{},
+		Routes: map[string][]configdomain.RouteTarget{},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["p"] = &testProv{key: "k"}
@@ -128,11 +129,11 @@ func TestWireCap_ProbeNeverFabricatesAnthropicOnOpenAIBase(t *testing.T) {
 		w.Write([]byte(`{"id":"r1","status":"completed","output":[]}`))
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"p": {OpenAIBaseURL: up.URL, AnthropicBaseURL: "http://anthropic-unused", Provider: testProviderID, Models: []string{"m"}},
 		},
-		Routes: map[string][]RouteTarget{},
+		Routes: map[string][]configdomain.RouteTarget{},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["p"] = &testProv{key: "k"}
@@ -175,11 +176,11 @@ func TestWireCap_StaleNegativeVerdictIsReprobed(t *testing.T) {
 		w.Write([]byte(`{"id":"r1","status":"completed","output":[]}`))
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"p": {OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m"}},
 		},
-		Routes: map[string][]RouteTarget{},
+		Routes: map[string][]configdomain.RouteTarget{},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["p"] = &testProv{key: "k"}
@@ -211,14 +212,14 @@ func TestWireCap_ProbeModelSelection(t *testing.T) {
 		w.Write([]byte(`{}`))
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"m1": {{Provider: "p", Model: "m1"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"m1": {{Provider: "p", Model: "m1"}}},
 	}
 	if got := probe.PickModel(cfg, nil, "p"); got != "m1" {
 		t.Errorf("PickModel = %q, want m1 (route target)", got)
 	}
-	cfg.Providers["p"] = Provider{OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m0"}}
+	cfg.Providers["p"] = configdomain.Provider{OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m0"}}
 	if got := probe.PickModel(cfg, nil, "p"); got != "m0" {
 		t.Errorf("PickModel = %q, want m0 (provider.Models[0] wins)", got)
 	}
@@ -240,9 +241,9 @@ func TestWireCap_Forward_AnthropicToResponses(t *testing.T) {
 		w.Write([]byte(`{"id":"resp_1","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":1,"output_tokens":1}}`))
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
@@ -288,9 +289,9 @@ func TestWireCap_Forward_ResponsesToChatWhenNo(t *testing.T) {
 		w.Write([]byte(`{"id":"c1","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"gpt-x": {{Provider: "oai", Model: "gpt-x"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"gpt-x": {{Provider: "oai", Model: "gpt-x"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
@@ -340,9 +341,9 @@ func TestWireCap_Forward_AnthropicConvertsToChatWithoutAnthropicBase(t *testing.
 		w.Write([]byte(`{"id":"c1","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "claude-x"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "oai", Model: "claude-x"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
@@ -394,9 +395,9 @@ func TestWireCap_Forward_404Correction(t *testing.T) {
 		w.Write([]byte(`{"id":"c1","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
@@ -459,12 +460,12 @@ func TestWireCap_Forward_404Correction(t *testing.T) {
 // the verdict under the NEW generation's parent name (single-snapshot red
 // line violation).
 func TestWireCap_MissVerdictUsesRequestSnapshotParent(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"parent-old": {OpenAIBaseURL: "http://example.invalid", Provider: testProviderID},
 			"parent-new": {OpenAIBaseURL: "http://example.invalid", Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{},
+		Routes: map[string][]configdomain.RouteTarget{},
 	}
 	p := newTestProxy(t, cfg)
 
@@ -508,10 +509,10 @@ func TestWireCap_PersistRoundTrip(t *testing.T) {
 	statePath := dir + "/quota_state.json"
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{}`)) }))
 	defer up.Close()
-	mkCfg := func(baseURL string) *Config {
-		return &Config{
-			Providers: map[string]Provider{"p": {OpenAIBaseURL: baseURL, Provider: testProviderID}},
-			Routes:    map[string][]RouteTarget{},
+	mkCfg := func(baseURL string) *configdomain.Config {
+		return &configdomain.Config{
+			Providers: map[string]configdomain.Provider{"p": {OpenAIBaseURL: baseURL, Provider: testProviderID}},
+			Routes:    map[string][]configdomain.RouteTarget{},
 		}
 	}
 
@@ -580,9 +581,9 @@ func TestWireCap_ProbeTimeoutUnknown(t *testing.T) {
 		w.Write([]byte(`{}`))
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m1"}}},
-		Routes:    map[string][]RouteTarget{},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m1"}}},
+		Routes:    map[string][]configdomain.RouteTarget{},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["p"] = &testProv{key: "k"}
@@ -612,9 +613,9 @@ func TestWireCap_ProbeAgentGradeRejectionToNo(t *testing.T) {
 		w.Write([]byte(`{}`))
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m-probe"}}},
-		Routes:    map[string][]RouteTarget{},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m-probe"}}},
+		Routes:    map[string][]configdomain.RouteTarget{},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["p"] = &testProv{key: "k"}

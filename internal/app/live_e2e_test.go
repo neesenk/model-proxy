@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -120,7 +121,7 @@ func liveUseRealHome(t *testing.T) {
 // live gate is explicitly enabled, a missing or unreadable configuration is a
 // test failure rather than a skip: otherwise the whole E2E suite can go green
 // without exercising an upstream.
-func liveConfig(t *testing.T) *Config {
+func liveConfig(t *testing.T) *configdomain.Config {
 	t.Helper()
 	if os.Getenv("MODEL_PROXY_LIVE") != "1" {
 		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
@@ -130,7 +131,7 @@ func liveConfig(t *testing.T) *Config {
 	if err != nil {
 		t.Fatalf("live: resolve config path: %v", err)
 	}
-	cfg, err := LoadConfig(path)
+	cfg, err := configdomain.LoadConfig(path)
 	if err != nil {
 		t.Fatalf("live: load config %q: %v", path, err)
 	}
@@ -141,7 +142,7 @@ func liveConfig(t *testing.T) *Config {
 // by the given single-target routes (no failover noise, explicit protocol:
 // for determinism — no wirecap verdict involved). Skips when the provider is
 // absent or no credential can build its impl.
-func liveProxy(t *testing.T, cfg *Config, routes map[string][]RouteTarget, needProviders ...string) (*httptest.Server, *Proxy) {
+func liveProxy(t *testing.T, cfg *configdomain.Config, routes map[string][]configdomain.RouteTarget, needProviders ...string) (*httptest.Server, *Proxy) {
 	t.Helper()
 	liveUseRealHome(t)
 	for _, name := range needProviders {
@@ -163,7 +164,7 @@ func liveProxy(t *testing.T, cfg *Config, routes map[string][]RouteTarget, needP
 // liveModel picks a model for a provider: preferred if the provider serves
 // it, else the LAST entry in provider.Models (newer entries last — zhipu's
 // resource-pack-restricted older models 429/1113 on chat), else skip.
-func liveModel(t *testing.T, cfg *Config, provider, preferred string) string {
+func liveModel(t *testing.T, cfg *configdomain.Config, provider, preferred string) string {
 	t.Helper()
 	models := cfg.Providers[provider].Models
 	for _, m := range models {
@@ -303,7 +304,7 @@ func TestLive_ResponsesToChat_ToolRoundTrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := liveConfig(t)
 			model := liveModel(t, cfg, tc.name, tc.prefer)
-			srv, _ := liveProxy(t, cfg, map[string][]RouteTarget{
+			srv, _ := liveProxy(t, cfg, map[string][]configdomain.RouteTarget{
 				"live-m": {{Provider: tc.name, Model: model, Protocol: "openai"}},
 			}, tc.name)
 			defer srv.Close()
@@ -430,7 +431,7 @@ func liveExtractCustomToolCall(t *testing.T, raw string) (callID, name, input st
 func TestLive_ResponsesToChat_CustomTool(t *testing.T) {
 	cfg := liveConfig(t)
 	model := liveModel(t, cfg, "deepseek", "deepseek-v4-pro")
-	srv, _ := liveProxy(t, cfg, map[string][]RouteTarget{
+	srv, _ := liveProxy(t, cfg, map[string][]configdomain.RouteTarget{
 		"live-m": {{Provider: "deepseek", Model: model, Protocol: "openai"}},
 	}, "deepseek")
 	defer srv.Close()
@@ -464,7 +465,7 @@ func TestLive_ResponsesToChat_CustomTool(t *testing.T) {
 func TestLive_AnthropicToChat_MediaVisionGate(t *testing.T) {
 	cfg := liveConfig(t)
 	model := liveModel(t, cfg, "deepseek", "deepseek-v4-pro")
-	srv, p := liveProxy(t, cfg, map[string][]RouteTarget{
+	srv, p := liveProxy(t, cfg, map[string][]configdomain.RouteTarget{
 		"live-m": {{Provider: "deepseek", Model: model, Protocol: "openai"}},
 	}, "deepseek")
 	defer srv.Close()
@@ -519,7 +520,7 @@ func TestLive_AnthropicPassthrough(t *testing.T) {
 		t.Skip("live: zhipu has no anthropic_base_url")
 	}
 	model := liveModel(t, cfg, "zhipu", "glm-4.7")
-	srv, _ := liveProxy(t, cfg, map[string][]RouteTarget{
+	srv, _ := liveProxy(t, cfg, map[string][]configdomain.RouteTarget{
 		"live-m": {{Provider: "zhipu", Model: model, Protocol: "anthropic"}},
 	}, "zhipu")
 	defer srv.Close()
@@ -542,7 +543,7 @@ func TestLive_AliasResponseModelNormalization(t *testing.T) {
 	t.Run("OpenAITarget", func(t *testing.T) {
 		cfg := liveConfig(t)
 		liveRequireKimiK3(t, cfg)
-		srv, p := liveProxy(t, cfg, map[string][]RouteTarget{
+		srv, p := liveProxy(t, cfg, map[string][]configdomain.RouteTarget{
 			"kimi-k3": {{Provider: "kimi-code", Model: "k3", Protocol: "openai"}},
 		}, "kimi-code")
 		defer srv.Close()
@@ -602,7 +603,7 @@ func TestLive_AliasResponseModelNormalization(t *testing.T) {
 		if cfg.Providers["kimi-code"].AnthropicBaseURL == "" {
 			t.Skip("live: kimi-code has no anthropic_base_url")
 		}
-		srv, _ := liveProxy(t, cfg, map[string][]RouteTarget{
+		srv, _ := liveProxy(t, cfg, map[string][]configdomain.RouteTarget{
 			"kimi-k3": {{Provider: "kimi-code", Model: "k3", Protocol: "anthropic"}},
 		}, "kimi-code")
 		defer srv.Close()
@@ -631,7 +632,7 @@ func TestLive_AliasResponseModelNormalization(t *testing.T) {
 
 // liveRequireKimiK3 skips unless the kimi-code provider still declares k3 —
 // the alias scenario this suite pins no longer exists without it.
-func liveRequireKimiK3(t *testing.T, cfg *Config) {
+func liveRequireKimiK3(t *testing.T, cfg *configdomain.Config) {
 	t.Helper()
 	prov, ok := cfg.Providers["kimi-code"]
 	if !ok {

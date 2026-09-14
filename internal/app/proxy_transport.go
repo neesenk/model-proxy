@@ -18,13 +18,13 @@ import (
 // clientFor resolves the upstream HTTP client for one route target: the
 // provider's proxy_url overrides the top-level proxy, and with neither set
 // the chain falls back to env → system → direct (see internal/upstreamproxy).
-func (p *Proxy) clientFor(cfg *Config, parentOf map[string]string, provider string) targetexec.Doer {
+func (p *Proxy) clientFor(cfg *configdomain.Config, parentOf map[string]string, provider string) targetexec.Doer {
 	return &http.Client{Timeout: 0, Transport: p.transportFor(cfg, parentOf, provider)}
 }
 
 // transportFor is clientFor's transport half, exposed for callers that need
 // their own timeout budget (shadow).
-func (p *Proxy) transportFor(cfg *Config, parentOf map[string]string, provider string) *http.Transport {
+func (p *Proxy) transportFor(cfg *configdomain.Config, parentOf map[string]string, provider string) *http.Transport {
 	global, perProvider := "", ""
 	if cfg != nil {
 		global = cfg.Proxy

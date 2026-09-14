@@ -4,6 +4,7 @@ package app
 import (
 	"fmt"
 	"model-proxy/internal/accounts"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/providerbuild"
 	"model-proxy/internal/routing"
@@ -21,7 +22,7 @@ func (e *ReloadAppliedWarning) Error() string { return "reload applied with warn
 func (e *ReloadAppliedWarning) Unwrap() error { return e.Err }
 
 func (p *Proxy) Reload(configPath string) error {
-	cfg, err := LoadConfig(configPath)
+	cfg, err := configdomain.LoadConfig(configPath)
 	if err != nil {
 		return err
 	}
@@ -138,13 +139,13 @@ func (p *Proxy) Reload(configPath string) error {
 // buildExpandedRoutes delegates to routing.BuildExpandedRoutes with the
 // pool fan-out from the unified routing resolver. Caller holds p.mu (write) —
 // in NewProxy / reload, after buildProviders has populated poolIndex.
-func (p *Proxy) buildExpandedRoutes() map[string][]RouteTarget {
+func (p *Proxy) buildExpandedRoutes() map[string][]configdomain.RouteTarget {
 	return routing.BuildExpandedRoutes(p.cfg, p.derivedRoutes, p.expandTarget)
 }
 
 // routeKeySet derives the schedule view's route-name key set from the expanded
 // route map. Built once per generation so the request hot path can share it.
-func routeKeySet(expanded map[string][]RouteTarget) map[string]bool {
+func routeKeySet(expanded map[string][]configdomain.RouteTarget) map[string]bool {
 	keys := make(map[string]bool, len(expanded))
 	for k := range expanded {
 		keys[k] = true
@@ -154,6 +155,6 @@ func routeKeySet(expanded map[string][]RouteTarget) map[string]bool {
 
 // expandTarget fans a single route target out across a pooled provider's
 // virtuals via the unified routing resolver front door.
-func (p *Proxy) expandTarget(t RouteTarget) []RouteTarget {
+func (p *Proxy) expandTarget(t configdomain.RouteTarget) []configdomain.RouteTarget {
 	return newResolver(p, p.providers, p.poolIndex).Expand(t)
 }

@@ -47,7 +47,7 @@ func (p *Proxy) forwardServices() forward.Services {
 		NewEffects: func(generation uint64) targetexec.Effects {
 			return targetExecutionEffects{proxy: p, generation: generation}
 		},
-		Schedule: func(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, generation uint64) []RouteTarget {
+		Schedule: func(cfg *configdomain.Config, parentOf map[string]string, exposed, sessionKey string, targets []configdomain.RouteTarget, routeKeys map[string]bool, generation uint64) []configdomain.RouteTarget {
 			return p.schedule(cfg, parentOf, exposed, sessionKey, targets, routeKeys, generation)
 		},
 		ShadowDispatch:      p.dispatchShadowAfterCommit,
@@ -73,18 +73,18 @@ type proxyRouteState struct {
 	proxy *Proxy
 }
 
-func (s proxyRouteState) PinForces(exposed string, ordered []RouteTarget, parentOf map[string]string) bool {
+func (s proxyRouteState) PinForces(exposed string, ordered []configdomain.RouteTarget, parentOf map[string]string) bool {
 	return s.proxy.pinForces(exposed, ordered, parentOf)
 }
 
-func (s proxyRouteState) CooldownState(targets []RouteTarget, now time.Time, quotaMaxAge time.Duration) (allDown, allRateLimited bool, earliest time.Time) {
+func (s proxyRouteState) CooldownState(targets []configdomain.RouteTarget, now time.Time, quotaMaxAge time.Duration) (allDown, allRateLimited bool, earliest time.Time) {
 	return s.proxy.cooldownState(targets, now, quotaMaxAge)
 }
 
-func (s proxyRouteState) HasRecoveredUntried(targets []RouteTarget, tried map[string]bool, now time.Time, quotaMaxAge time.Duration) bool {
+func (s proxyRouteState) HasRecoveredUntried(targets []configdomain.RouteTarget, tried map[string]bool, now time.Time, quotaMaxAge time.Duration) bool {
 	return s.proxy.hasRecoveredUntried(targets, tried, now, quotaMaxAge)
 }
 
-func (s proxyRouteState) QuotaFreshnessMaxAge(cfg *Config) time.Duration {
+func (s proxyRouteState) QuotaFreshnessMaxAge(cfg *configdomain.Config) time.Duration {
 	return s.proxy.quotaFreshnessMaxAge(cfg)
 }

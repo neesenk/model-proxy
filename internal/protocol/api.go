@@ -4,21 +4,25 @@ import (
 	"encoding/json"
 	"io"
 	"strings"
+
+	"model-proxy/internal/protocol/wire"
 )
 
-// Protocol identifies one supported wire protocol.
-type Protocol string
+// Protocol identifies one supported wire protocol. The canonical definition
+// lives in the leaf package internal/protocol/wire so configuration
+// validation shares the closed set without importing the conversion
+// machinery; the aliases below keep the historical protocol.* API stable.
+type Protocol = wire.Protocol
 
 const (
-	Anthropic Protocol = "anthropic"
-	OpenAI    Protocol = "openai"
-	Responses Protocol = "responses"
+	Anthropic = wire.Anthropic
+	OpenAI    = wire.OpenAI
+	Responses = wire.Responses
 )
 
 // Parse validates a wire protocol name.
 func Parse(value string) (Protocol, bool) {
-	proto, ok := parseWireProtocol(value)
-	return Protocol(proto), ok
+	return wire.Parse(value)
 }
 
 // ForPath identifies the protocol implied by an inbound API path.

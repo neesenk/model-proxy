@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	cliserve "model-proxy/internal/cli/serve"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/protocol"
 	runtimestate "model-proxy/internal/runtime"
@@ -21,7 +22,7 @@ import (
 // ---- proxy_lifecycle_test.go ----
 
 func TestProxyCloseWaitsForOwnedTasksAndRejectsNewWork(t *testing.T) {
-	p := newTestProxy(t, &Config{})
+	p := newTestProxy(t, &configdomain.Config{})
 	started := make(chan struct{})
 	release := make(chan struct{})
 	if !p.lifecycle.Run(func(<-chan struct{}) {
@@ -62,9 +63,9 @@ func TestProxyCloseWaitsForOwnedTasksAndRejectsNewWork(t *testing.T) {
 // record into the index while running, and Close must shut the indexer down
 // (final reconcile + db close) after the logger drains.
 func TestProxyRequestLogIndexLifecycle(t *testing.T) {
-	p := newTestProxy(t, &Config{})
+	p := newTestProxy(t, &configdomain.Config{})
 	logDir := t.TempDir()
-	p.initRequestLog(RequestLogConfig{Enabled: true, Dir: logDir})
+	p.initRequestLog(configdomain.RequestLogConfig{Enabled: true, Dir: logDir})
 	if p.reqLog == nil {
 		t.Fatal("initRequestLog did not create the logger")
 	}
@@ -115,15 +116,15 @@ func TestProxyRequestLogIndexLifecycle(t *testing.T) {
 // TestProxyRequestLogDisabledHasNoIndex: initRequestLog with the request log
 // off creates neither the logger nor the index.
 func TestProxyRequestLogDisabledHasNoIndex(t *testing.T) {
-	p := newTestProxy(t, &Config{})
-	p.initRequestLog(RequestLogConfig{Enabled: false, Dir: t.TempDir()})
+	p := newTestProxy(t, &configdomain.Config{})
+	p.initRequestLog(configdomain.RequestLogConfig{Enabled: false, Dir: t.TempDir()})
 	if p.reqLog != nil || p.reqLogIndex != nil {
 		t.Fatalf("disabled request log wired logger=%v index=%v", p.reqLog, p.reqLogIndex)
 	}
 }
 
 func TestProxyCloseDrainsOwnedRequestLogger(t *testing.T) {
-	p := newTestProxy(t, &Config{})
+	p := newTestProxy(t, &configdomain.Config{})
 	logDir := t.TempDir()
 	p.reqLog = requestlog.New(requestlog.Options{
 		Directory: logDir, MaxFileSize: 1 << 20, MaxBodyBytes: 1 << 10,
@@ -150,7 +151,7 @@ func TestProxyCloseDrainsOwnedRequestLogger(t *testing.T) {
 }
 
 func TestProxyCloseWaitsForShadowBeforeDrainingRequestLogger(t *testing.T) {
-	p := newTestProxy(t, &Config{})
+	p := newTestProxy(t, &configdomain.Config{})
 	logDir := t.TempDir()
 	p.reqLog = requestlog.New(requestlog.Options{
 		Directory: logDir, MaxFileSize: 1 << 20, MaxBodyBytes: 1 << 10,

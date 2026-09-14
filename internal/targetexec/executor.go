@@ -481,7 +481,16 @@ func (executor Executor) commit(
 			plan.ClientProtocol(), dto.Target.Provider)
 	}
 	if recorder != nil && recorder.Complete() && len(recorder.Body()) > 0 {
-		cache.Put(scope.CacheKey, scope.CalledModel, response.StatusCode, responsecache.HeaderForCapturedBody(response.Header, transformed, modeMismatch, clientWantsStream), recorder.Body(), time.Now())
+		// A clean EOF alone does not make a stream complete: upstreams can
+		// abandon a generation and close with a bare terminator (e.g. anthropic
+		// message_stop without message_delta/stop_reason). Caching such a
+		// truncated stream poisons every retry of the same request for the TTL.
+		if clientStream && !protocol.StreamTerminalComplete(plan.ClientProtocol(), recorder.Body()) {
+			logx.Warnf("[proto=%s provider=%s] stream closed without a terminal %s sequence — not caching",
+				plan.ClientProtocol(), dto.Target.Provider, plan.ClientProtocol())
+		} else {
+			cache.Put(scope.CacheKey, scope.CalledModel, response.StatusCode, responsecache.HeaderForCapturedBody(response.Header, transformed, modeMismatch, clientWantsStream), recorder.Body(), time.Now())
+		}
 	}
 	dto.TotalMilliseconds = time.Since(dto.Started).Milliseconds()
 	dto.TTFTMilliseconds = dto.TotalMilliseconds

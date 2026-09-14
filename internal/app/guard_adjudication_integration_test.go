@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -85,17 +86,17 @@ func newAdjudicationProxy(t *testing.T, judge *judgeUpstream, paths string) (p *
 	}))
 	t.Cleanup(up.Close)
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"static": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 			"judge":  {AnthropicBaseURL: judge.srv.URL, Provider: "test-static"},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm":   {{Provider: "static", Model: "glm"}},
 			"judge": {{Provider: "judge", Model: "judge-model"}},
 		},
-		Guard: GuardConfig{Secrets: "log", Paths: paths, Audit: true,
-			Adjudicate: GuardAdjudicateConfig{Enabled: true, Model: "judge", BlockSession: true}},
+		Guard: configdomain.GuardConfig{Secrets: "log", Paths: paths, Audit: true,
+			Adjudicate: configdomain.AdjudicateConfig{Enabled: true, Model: "judge", BlockSession: true}},
 	}
 	// The guard state files (verdict cache, blocks) live next to the injected
 	// quota state path (CacheStatePath recipe), NOT under HOME.
@@ -405,21 +406,21 @@ func TestGuardAdjudication_FailoverPastHangingJudge(t *testing.T) {
 	}))
 	t.Cleanup(up.Close)
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"static":     {OpenAIBaseURL: up.URL, Provider: testProviderID},
 			"judge-hang": {AnthropicBaseURL: hang.URL, Provider: "test-static"},
 			"judge-good": {AnthropicBaseURL: good.srv.URL, Provider: "test-static"},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {{Provider: "static", Model: "glm"}},
 			"judge": {
 				{Provider: "judge-hang", Model: "judge-model", Priority: 1},
 				{Provider: "judge-good", Model: "judge-model", Priority: 2},
 			},
 		},
-		Guard: GuardConfig{Secrets: "log", Paths: "off", Audit: true,
-			Adjudicate: GuardAdjudicateConfig{Enabled: true, Model: "judge", Timeout: "900ms", BlockSession: true}},
+		Guard: configdomain.GuardConfig{Secrets: "log", Paths: "off", Audit: true,
+			Adjudicate: configdomain.AdjudicateConfig{Enabled: true, Model: "judge", Timeout: "900ms", BlockSession: true}},
 	}
 	stateDir := t.TempDir()
 	p := newProxyWithStaticAt(t, cfg, filepath.Join(stateDir, "quota_state.json"),

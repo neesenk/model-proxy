@@ -1,16 +1,13 @@
 package admin
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
-	cliframework "model-proxy/internal/cli/framework"
-	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/daemonctl"
-	"model-proxy/internal/display"
 	"os"
 	"strings"
+
+	cliframework "model-proxy/internal/cli/framework"
+	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/display"
 )
 
 // freeze_cmd.go implements `model-proxy freeze <provider>` — the manual
@@ -40,20 +37,12 @@ func CmdFreeze(args []string, cfg *configdomain.Config) {
 // be non-empty (the daemon rejects an empty provider with 400). Extracted for
 // tests (mirrors DoUnfreeze).
 func DoFreeze(base, provider string) (string, error) {
-	raw, _ := json.Marshal(map[string]string{"provider": provider})
-	resp, err := daemonctl.Client.Post(base+"/api/health/freeze", "application/json", bytes.NewReader(raw))
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	rb, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("%s", display.Truncate(strings.TrimSpace(string(rb)), 200))
-	}
 	var out struct {
 		Frozen []string `json:"frozen"`
 	}
-	json.Unmarshal(rb, &out)
+	if err := postProviderOp(base, "/api/health/freeze", provider, &out); err != nil {
+		return "", err
+	}
 	if len(out.Frozen) == 0 {
 		return fmt.Sprintf("%s no matching provider for %s\n", display.Dim("•"), provider), nil
 	}

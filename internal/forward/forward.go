@@ -113,407 +113,13 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	// Outbound secret guard (DLP-lite): scan the SHARED request body once, here
 	// — after route resolution (so hits are attributable) and before the cache
 	// lookup and every forward branch. Cache, Fusion and Shadow all consume the
-	// (possibly redacted) origBody from this point on; no branch rescans. Only
-	// pattern TYPE NAMES / path CATEGORY NAMES are counted/emitted — matched
-	// bytes never leave the body (credential red line). The scanner is this
-	// generation's snapshot (runtime.Guard): it carries the embedded rule
-	// table, config custom patterns/paths, and the known-secret values of the
-	// credential pool. nil only in degenerate hand-built proxies — skip then.
-	if sc := runtime.Guard; sc != nil {
-		action := cfg.Guard.SecretsAction()
-		// preGuardBody is the body as received, before any redact rewrite
-		// below; the split-exfiltration window must store THIS form (storing
-		// the redacted form would destroy the very fragments that pass exists
-		// to reassemble). In-memory only, bounded — see internal/guard/session.
-		preGuardBody := origBody
-		// High-verdict session block (AI adjudication channel): enforced
-		// BEFORE any scanning — a blocked session pays no scan cost, and the
-		// block outlives the config that produced it (it persists until
-		// explicitly unblocked via CLI/WebUI, by design).
-		if p.svc.Adjudicator != nil {
-			if sid := r.Header.Get("x-claude-code-session-id"); sid != "" {
-				if rule, rid, blocked := p.svc.Adjudicator.SessionBlocked(sid); blocked {
-					p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
-					http.Error(w, fmt.Sprintf("blocked: session %s was adjudicated high-risk by guard (rule=%s, request=%s) — unblock via 'model-proxy guard unblock %s' or the WebUI Security page", sid, rule, rid, sid), http.StatusBadRequest)
-					return
-				}
-			}
-		}
-		guardDecision := EvaluateRequestGuard(cfg.Guard, sc, origBody)
-		secretNames := guardDecision.Secrets
-		adjMeta := GuardAdjudication{
-			RequestID: requestID,
-			SessionID: r.Header.Get("x-claude-code-session-id"),
-			Agent:     agent,
-			Proto:     proto,
-			Exposed:   exposed,
-			Action:    action,
-			Ts:        time.Now().UnixMilli(),
-		}
-		// Exact-match interception (known-secret channels): a configured
-		// credential appeared verbatim — zero false positives by construction,
-		// so no LLM second opinion and no config action can soften it. The
-		// hit is recorded (action block) and the session joins the block table
-		// (the same table high verdicts use, cleared only by an explicit
-		// unblock) HERE; the request is rejected at the unified evaluation
-		// below so the paths pass of the same request still gets its own
-		// counters/events/audit records. "无头不拉黑": without a session
-		// header only the request is rejected.
-		var exactKnown []string
-		if action != "off" {
-			exactKnown = exactSecretNames(secretNames)
-			if len(exactKnown) > 0 {
-				// Source attribution: WHICH credential matched (pool/account/
-				// OAuth-file label) plus a masked key display — the operator
-				// sees the identity, the value never persists (label + first4…
-				// last2 mask only).
-				srcLabel, maskedKey, _ := sc.KnownIdentity(preGuardBody)
-				exactDetail := "key: " + maskedKey
-				if srcLabel != "" {
-					exactDetail = srcLabel + " · " + exactDetail
-				}
-				if p.svc.Metrics != nil {
-					for _, name := range exactKnown {
-						p.svc.Metrics.Inc("guard", name, counters.EvGuardHits)
-					}
-				}
-				p.svc.Events.Publish(observeevents.Event{
-					Type:      "guard",
-					Ts:        time.Now().UnixMilli(),
-					RequestID: requestID,
-					SessionID: clientSession,
-					Agent:     agent,
-					Protocol:  proto,
-					Exposed:   exposed,
-					Detail:    "secrets=" + strings.Join(exactKnown, ",") + " action=block (exact match) " + exactDetail,
-				})
-				AuditGuardHit(runtime.SecLog, GuardAuditHit{
-					Kind: seclog.KindSecret, Names: exactKnown, Action: "block",
-					RequestID: requestID, SessionID: adjMeta.SessionID,
-					Agent: agent, Proto: proto, Exposed: exposed,
-					Detail: exactDetail,
-				})
-				if p.svc.Adjudicator != nil && adjMeta.SessionID != "" {
-					p.svc.Adjudicator.BlockSession(adjMeta.SessionID, exactKnown[0], requestID, exactDetail)
-				}
-			}
-		}
-		// AI second-opinion channel (guard.adjudicate): pattern-table secret
-		// hits are DEFERRED to async adjudication instead of the classic
-		// immediate record — a high verdict records + blocks the session, a
-		// medium verdict records, a low verdict is the ignored tier. Exact
-		// channels never defer (handled above). Off/block actions keep the
-		// classic path when the channel is off; with the channel ON even
-		// secrets=block defers (the LLM verdict, not the config, decides
-		// interception). Enqueue refusal, the per-request cap and span dedup
-		// fail OPEN: the leftover names take the classic immediate record
-		// with verdict "skipped".
-		emitSecrets := patternSecretNames(secretNames)
-		adjSecretsOn := p.svc.Adjudicator != nil && cfg.Guard.AdjudicateEnabled() && action != "off"
-		var secretFailOpen []string
-		// Repeat interception: hit bytes already adjudicated HIGH on an
-		// earlier request (persisted sha256 index in the adjudication
-		// service) are rejected verbatim HERE — same treatment as the
-		// known-secret exact channel: no second LLM round-trip, the original
-		// verdict's attribution rides the record, the session joins the
-		// block table, and the request is rejected at the unified evaluation
-		// below. Secret hits only (path literals stay per-occurrence).
-		var repeatBlocked struct {
-			rule, reason, evidence, model string
-			names                         []string
-		}
-		if adjSecretsOn {
-			jobs, leftover := buildAdjudications(sc, preGuardBody, emitSecrets, AdjudicationKindSecret, false, cfg.Guard.Adjudicate.ContextWindow(), adjMeta)
-			var adjJobs []GuardAdjudication
-			for _, j := range jobs {
-				if kind, rule, reason, evidence, model, blocked := p.svc.Adjudicator.ContentBlocked(j.Hit); blocked {
-					if repeatBlocked.rule == "" {
-						repeatBlocked.rule, repeatBlocked.reason = rule, reason
-						repeatBlocked.evidence, repeatBlocked.model = evidence, model
-						_ = kind // always the secret channel by construction
-					}
-					repeatBlocked.names = append(repeatBlocked.names, j.Rule)
-					continue
-				}
-				adjJobs = append(adjJobs, j)
-			}
-			secretFailOpen = append(leftover, p.enqueueAdjudications(adjJobs)...)
-			if len(repeatBlocked.names) > 0 {
-				if p.svc.Metrics != nil {
-					for _, name := range repeatBlocked.names {
-						p.svc.Metrics.Inc("guard", name, counters.EvGuardHits)
-					}
-				}
-				p.svc.Events.Publish(observeevents.Event{
-					Type:      "guard",
-					Ts:        time.Now().UnixMilli(),
-					RequestID: requestID,
-					SessionID: clientSession,
-					Agent:     agent,
-					Protocol:  proto,
-					Exposed:   exposed,
-					Detail:    "secrets=" + strings.Join(repeatBlocked.names, ",") + " action=block (repeat of previously adjudicated high content)",
-				})
-				AuditGuardHit(runtime.SecLog, GuardAuditHit{
-					Kind: seclog.KindSecret, Names: repeatBlocked.names, Action: "block",
-					RequestID: requestID, SessionID: adjMeta.SessionID,
-					Agent: agent, Proto: proto, Exposed: exposed,
-					Verdict: "high", Reason: repeatBlocked.reason, Evidence: repeatBlocked.evidence,
-					Model: repeatBlocked.model,
-				})
-				if adjMeta.SessionID != "" {
-					p.svc.Adjudicator.BlockSession(adjMeta.SessionID, repeatBlocked.rule, requestID, repeatBlocked.reason)
-				}
-				// The intercepted names are handled by the record above — they
-				// must not also take the classic fail-open record.
-				blockedSet := map[string]bool{}
-				for _, n := range repeatBlocked.names {
-					blockedSet[n] = true
-				}
-				emit := secretFailOpen[:0]
-				for _, n := range secretFailOpen {
-					if !blockedSet[n] {
-						emit = append(emit, n)
-					}
-				}
-				secretFailOpen = emit
-			}
-			emitSecrets = secretFailOpen
-		}
-		if len(emitSecrets) > 0 {
-			if p.svc.Metrics != nil {
-				for _, name := range emitSecrets {
-					p.svc.Metrics.Inc("guard", name, counters.EvGuardHits)
-				}
-			}
-			p.svc.Events.Publish(observeevents.Event{
-				Type:      "guard",
-				Ts:        time.Now().UnixMilli(),
-				RequestID: requestID,
-				SessionID: clientSession,
-				Agent:     agent,
-				Protocol:  proto,
-				Exposed:   exposed,
-				Detail:    "secrets=" + strings.Join(emitSecrets, ",") + " action=" + action,
-			})
-			verdict := ""
-			if len(secretFailOpen) > 0 {
-				verdict = "skipped" // names that could not be adjudicated (cap/dedup/queue overflow)
-			}
-			AuditGuardHit(runtime.SecLog, GuardAuditHit{
-				Kind: seclog.KindSecret, Names: emitSecrets, Action: action,
-				RequestID: requestID, SessionID: adjMeta.SessionID,
-				Agent: agent, Proto: proto, Exposed: exposed, Verdict: verdict,
-			})
-		}
-		origBody = guardDecision.ForwardBody
-		// Sensitive-path signal (S2): an intent-level alert fired before any
-		// secret value appears. Paths are never redacted (rewriting a path
-		// would corrupt legitimate coding work). Hits are context-split
-		// (guard.ScanPathsContext): a path inside a tool-INVOCATION position
-		// (tool_use.input / function arguments) is STRONG — the structural
-		// signature of an agent asking to access a sensitive file (MCP Tool
-		// Poisoning shape) — and gets the configured guard.paths action:
-		// live event, ("guard", cat) counter, audit record, and it is the
-		// only kind block can 400. Result-side content (tool_result /
-		// role:tool / function_call_output) and ordinary prose are WEAK —
-		// tool output that mentions a path is an address mention, not an
-		// access attempt (actual secret content in the output is caught by
-		// the secret channels): weak hits are IGNORED entirely — no live
-		// event, never blocked, no audit record, not even a counter (a
-		// benign-mention count is noise the operator should not have to
-		// look at either).
-		// This scan runs even when the secrets pass already hit — including
-		// secrets=block — so one request carrying both signals gets both
-		// counters/events/audit records; only the response action is decided
-		// afterwards (below).
-		pa := cfg.Guard.PathsAction()
-		pathCats := guardDecision.StrongPath
-		if pa != "off" {
-			// AI second-opinion channel for strong path hits: with
-			// guard.adjudicate on and paths=log (not the synchronous block
-			// decision), strong occurrences are deferred exactly like pattern
-			// secret hits — high verdict records (+ session block), low verdict
-			// is suppressed. Fail-open leftovers keep the classic record.
-			emitPaths := pathCats
-			adjPathsOn := p.svc.Adjudicator != nil && cfg.Guard.AdjudicateEnabled() && pa == "log"
-			var pathFailOpen []string
-			if adjPathsOn && len(pathCats) > 0 {
-				pathMeta := adjMeta
-				pathMeta.Action = pa
-				jobs, leftover := buildAdjudications(sc, preGuardBody, pathCats, AdjudicationKindPath, true, cfg.Guard.Adjudicate.ContextWindow(), pathMeta)
-				pathFailOpen = append(leftover, p.enqueueAdjudications(jobs)...)
-				emitPaths = pathFailOpen
-			}
-			if len(emitPaths) > 0 {
-				if p.svc.Metrics != nil {
-					for _, cat := range emitPaths {
-						p.svc.Metrics.Inc("guard", cat, counters.EvGuardHits)
-					}
-				}
-				p.svc.Events.Publish(observeevents.Event{
-					Type:      "guard",
-					Ts:        time.Now().UnixMilli(),
-					RequestID: requestID,
-					SessionID: clientSession,
-					Agent:     agent,
-					Protocol:  proto,
-					Exposed:   exposed,
-					Detail:    "paths=" + strings.Join(emitPaths, ",") + " action=" + pa,
-				})
-				verdict := ""
-				if len(pathFailOpen) > 0 {
-					verdict = "skipped"
-				}
-				AuditGuardHit(runtime.SecLog, GuardAuditHit{
-					Kind: seclog.KindPath, Names: emitPaths, Action: pa,
-					RequestID: requestID, SessionID: adjMeta.SessionID,
-					Agent: agent, Proto: proto, Exposed: exposed, Verdict: verdict,
-				})
-			}
-			// WeakPath is deliberately not consulted: weak hits (prose /
-			// tool-result address mentions) are ignored entirely — no
-			// counter, no event, no audit record.
-		}
-		// Split-exfiltration signal (fragmented known secret): a credential
-		// smuggled out in pieces — one fragment per request — never hits the
-		// per-request scan above. When session_scan is on, this generation's
-		// scanner carries known secrets, and the request declares a session
-		// (x-claude-code-session-id), two channels run over the session's
-		// bounded state (known-secret channel only — rule-table/custom hits
-		// were already reported per request):
-		//  1. exact reassembly: an occurrence present in tail+body but in
-		//     NEITHER alone must span the junction, so only the junction
-		//     region (the last MaxKnownNeedleLen-1 bytes of the tail plus the
-		//     first MaxKnownNeedleLen-1 bytes of the current PRE-REDACT body)
-		//     is scanned through ScanKnown — same verdict as scanning the
-		//     whole concatenation without copying up to 64MiB+32KiB per
-		//     request. The tail-alone verdict comes from the session entry's
-		//     cache (refreshed at Add time; a miss rescans the tail) and
-		//     excludes a key fully seen in an earlier request from re-firing
-		//     "fragmented" on every later one; the current-body-alone verdict
-		//     is the already-computed secretNames (known secrets are claimed
-		//     first in the scanner, so a current-body occurrence always lands
-		//     there).
-		//  2. fragment progress: realistic bodies all start with '{' (see
-		//     ExtractModel), so fragments can never sit byte-contiguously at
-		//     the junction — guard.ScanKnownFragment instead tracks each
-		//     secret's longest prefix seen in order across the session.
-		// secrets=off disables this pass together with the secrets channel.
-		var fragmented bool
-		sessionID := r.Header.Get("x-claude-code-session-id")
-		if action != "off" && cfg.Guard.SessionScanEnabled() && sc.HasKnownSecrets() &&
-			sessionID != "" && p.svc.SessionScan != nil {
-			tail, progress, tailKnown, tailKnownOK := p.svc.SessionScan.Snapshot(sessionID, sc)
-			knownInCurrent := false
-			for _, n := range secretNames {
-				if n == "known_secret" || n == "known_secret_encoded" {
-					knownInCurrent = true
-					break
-				}
-			}
-			var nextProgress []int
-			var progressReset []bool
-			if len(tail) > 0 && !knownInCurrent {
-				if !tailKnownOK {
-					tailKnown = len(sc.ScanKnown(tail)) > 0
-				}
-				if !tailKnown {
-					span := sc.MaxKnownNeedleLen() - 1
-					start := max(len(tail)-span, 0)
-					end := min(span, len(preGuardBody))
-					junction := make([]byte, 0, len(tail)-start+end)
-					junction = append(junction, tail[start:]...)
-					junction = append(junction, preGuardBody[:end]...)
-					if len(sc.ScanKnown(junction)) > 0 {
-						fragmented = true
-					}
-				}
-			}
-			if !fragmented && !knownInCurrent {
-				fragmented, nextProgress, progressReset = sc.ScanKnownFragment(preGuardBody, progress)
-			}
-			if fragmented {
-				// A completed split-exfiltration is an exact-match event by
-				// construction: record it, block the session and reject the
-				// completing request below — independent of the configured
-				// action (redact cannot rewrite a cross-request secret anyway,
-				// decision 21's degrade note now lands on interception).
-				if p.svc.Metrics != nil {
-					p.svc.Metrics.Inc("guard", "known_secret_fragmented", counters.EvGuardHits)
-				}
-				p.svc.Events.Publish(observeevents.Event{
-					Type:      "guard",
-					Ts:        time.Now().UnixMilli(),
-					RequestID: requestID,
-					SessionID: clientSession,
-					Agent:     agent,
-					Protocol:  proto,
-					Exposed:   exposed,
-					Detail:    "secrets=known_secret_fragmented action=block (exact match)",
-				})
-				AuditGuardHit(runtime.SecLog, GuardAuditHit{
-					Kind: seclog.KindSecret, Names: []string{"known_secret_fragmented"}, Action: "block",
-					RequestID: requestID, SessionID: sessionID,
-					Agent: agent, Proto: proto, Exposed: exposed,
-				})
-				if p.svc.Adjudicator != nil {
-					p.svc.Adjudicator.BlockSession(sessionID, "known_secret_fragmented", requestID, "credential reassembled across requests (split exfiltration)")
-				}
-			}
-			// Merge the current body into the session window whether or not
-			// anything hit — later fragments depend on earlier ones being
-			// retained. The window stores the PRE-REDACT form and lives in
-			// memory only (bounded: 256 sessions × 32KiB tail; see
-			// internal/guard/session for the red lines).
-			p.svc.SessionScan.Add(sessionID, preGuardBody, sc, nextProgress, progressReset, knownInCurrent)
-		}
-		// Unified action evaluation after BOTH scans (so one request carrying
-		// several signals gets all its counters/events/audit records; only
-		// the response action is decided here). Exact-match interception
-		// outranks everything; then a config secrets=block (only when the
-		// pattern hits were NOT deferred to adjudication), then the
-		// fragmented completion, then a config paths=block.
-		if len(exactKnown) > 0 {
-			msg := fmt.Sprintf("blocked: request body contains a credential configured on this proxy (%s) — session blocked until unblocked via 'model-proxy guard unblock %s' or the WebUI Security page", strings.Join(exactKnown, ", "), adjMeta.SessionID)
-			p.guardTerminal(w, r, guardTerminalRecord{
-				requestID: requestID, sessionID: clientSession, proto: proto, exposed: exposed,
-				calledModel: calledModel, agent: agent, body: preGuardBody, msg: msg,
-			})
-			return
-		}
-		if len(repeatBlocked.names) > 0 {
-			msg := fmt.Sprintf("blocked: request body repeats content already adjudicated high-risk by guard (%s) — session blocked until unblocked via 'model-proxy guard unblock %s' or the WebUI Security page", strings.Join(repeatBlocked.names, ","), adjMeta.SessionID)
-			p.guardTerminal(w, r, guardTerminalRecord{
-				requestID: requestID, sessionID: clientSession, proto: proto, exposed: exposed,
-				calledModel: calledModel, agent: agent, body: preGuardBody, msg: msg,
-			})
-			return
-		}
-		if len(secretNames) > 0 && action == "block" && !adjSecretsOn {
-			msg := fmt.Sprintf("blocked: request body contains a secret matching %s (guard.secrets=block)", strings.Join(secretNames, ", "))
-			p.guardTerminal(w, r, guardTerminalRecord{
-				requestID: requestID, sessionID: clientSession, proto: proto, exposed: exposed,
-				calledModel: calledModel, agent: agent, body: preGuardBody, msg: msg,
-			})
-			return
-		}
-		if fragmented {
-			msg := "blocked: request completes a secret fragmented across requests matching known_secret_fragmented — session blocked until unblocked via 'model-proxy guard unblock' or the WebUI Security page"
-			p.guardTerminal(w, r, guardTerminalRecord{
-				requestID: requestID, sessionID: clientSession, proto: proto, exposed: exposed,
-				calledModel: calledModel, agent: agent, body: preGuardBody, msg: msg,
-			})
-			return
-		}
-		if len(pathCats) > 0 && pa == "block" {
-			msg := fmt.Sprintf("blocked: request body references sensitive path %s (guard.paths=block)", strings.Join(pathCats, ", "))
-			p.guardTerminal(w, r, guardTerminalRecord{
-				requestID: requestID, sessionID: clientSession, proto: proto, exposed: exposed,
-				calledModel: calledModel, agent: agent, body: preGuardBody, msg: msg,
-			})
-			return
-		}
+	// (possibly redacted) origBody from this point on; no branch rescans.
+	// The stage is extracted to runOutboundGuard (same generation's snapshot
+	// scanner; nil only in degenerate hand-built proxies — skipped then).
+	var guardBlocked bool
+	origBody, guardBlocked = p.runOutboundGuard(runtime, proto, w, r, requestID, agent, clientSession, exposed, calledModel, origBody)
+	if guardBlocked {
+		return
 	}
 
 	// Exact-match response cache (#10): a request byte-identical to a recently
@@ -522,30 +128,9 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	// store on a fresh 2xx commit. SKIPPED entirely when a force-provider
 	// override OR a pin is in effect — both mean "send to THIS backend", not a
 	// stale cached answer.
-	var cacheKey string
-	if cache != nil && forcedProvider == "" && !force {
-		cacheKey = responsecache.Key(r, origBody)
-		if e, ok := cache.Lookup(cacheKey, calledModel, time.Now()); ok {
-			// Live monitor (#6): a cache hit skips the normal start/end flow, so
-			// emit an end event explicitly — otherwise the live view is blind to
-			// these (e.g. a retry-looping agent served from cache stays invisible).
-			p.svc.Events.Publish(observeevents.Event{
-				Type:      "end",
-				Ts:        time.Now().UnixMilli(),
-				RequestID: requestID,
-				Agent:     agent,
-				Protocol:  proto,
-				// Same exposed name as the start event above: the live view
-				// must show ONE exposed name per request, not different
-				// names on start and end.
-				Exposed:  exposed,
-				Provider: "(cache)",
-				Status:   e.Status(),
-			})
-			w.Header().Set("x-mp-cache", "hit")
-			_ = responsecache.Replay(w, e)
-			return
-		}
+	cacheKey, cacheHit := p.lookupResponseCache(cache, r, origBody, calledModel, proto, exposed, agent, requestID, w, forcedProvider != "" || force)
+	if cacheHit {
+		return
 	}
 
 	// One-shot force-provider override (x-mp-force-provider header / force_provider
@@ -1179,4 +764,449 @@ func (p pipeline) expandFusionResponses(fc fusionCtx, backendProto string, body 
 		logx.Infof("[fusion] %s: previous_response_id cache miss; repaired orphaned continuation items", fc.flc.Exposed)
 	}
 	return expanded, history
+}
+
+// runOutboundGuard is the outbound secret guard (DLP-lite) stage of forward,
+// extracted verbatim (no control-flow change): scan the SHARED request body
+// once — after route resolution (so hits are attributable) and before the
+// cache lookup and every forward branch. Only pattern TYPE NAMES / path
+// CATEGORY NAMES are counted/emitted — matched bytes never leave the body
+// (credential red line). Returns the (possibly redacted) body every later
+// branch consumes; blocked == true means a terminal response was already
+// written and the caller must return.
+func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.ResponseWriter, r *http.Request, requestID, agent, clientSession, exposed, calledModel string, origBody []byte) (body []byte, blocked bool) {
+	cfg := runtime.Cfg
+	if sc := runtime.Guard; sc != nil {
+		action := cfg.Guard.SecretsAction()
+		// preGuardBody is the body as received, before any redact rewrite
+		// below; the split-exfiltration window must store THIS form (storing
+		// the redacted form would destroy the very fragments that pass exists
+		// to reassemble). In-memory only, bounded — see internal/guard/session.
+		preGuardBody := origBody
+		// High-verdict session block (AI adjudication channel): enforced
+		// BEFORE any scanning — a blocked session pays no scan cost, and the
+		// block outlives the config that produced it (it persists until
+		// explicitly unblocked via CLI/WebUI, by design).
+		if p.svc.Adjudicator != nil {
+			if sid := r.Header.Get("x-claude-code-session-id"); sid != "" {
+				if rule, rid, blocked := p.svc.Adjudicator.SessionBlocked(sid); blocked {
+					p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
+					http.Error(w, fmt.Sprintf("blocked: session %s was adjudicated high-risk by guard (rule=%s, request=%s) — unblock via 'model-proxy guard unblock %s' or the WebUI Security page", sid, rule, rid, sid), http.StatusBadRequest)
+					return origBody, true
+				}
+			}
+		}
+		guardDecision := EvaluateRequestGuard(cfg.Guard, sc, origBody)
+		secretNames := guardDecision.Secrets
+		adjMeta := GuardAdjudication{
+			RequestID: requestID,
+			SessionID: r.Header.Get("x-claude-code-session-id"),
+			Agent:     agent,
+			Proto:     proto,
+			Exposed:   exposed,
+			Action:    action,
+			Ts:        time.Now().UnixMilli(),
+		}
+		// Exact-match interception (known-secret channels): a configured
+		// credential appeared verbatim — zero false positives by construction,
+		// so no LLM second opinion and no config action can soften it. The
+		// hit is recorded (action block) and the session joins the block table
+		// (the same table high verdicts use, cleared only by an explicit
+		// unblock) HERE; the request is rejected at the unified evaluation
+		// below so the paths pass of the same request still gets its own
+		// counters/events/audit records. "无头不拉黑": without a session
+		// header only the request is rejected.
+		var exactKnown []string
+		if action != "off" {
+			exactKnown = exactSecretNames(secretNames)
+			if len(exactKnown) > 0 {
+				// Source attribution: WHICH credential matched (pool/account/
+				// OAuth-file label) plus a masked key display — the operator
+				// sees the identity, the value never persists (label + first4…
+				// last2 mask only).
+				srcLabel, maskedKey, _ := sc.KnownIdentity(preGuardBody)
+				exactDetail := "key: " + maskedKey
+				if srcLabel != "" {
+					exactDetail = srcLabel + " · " + exactDetail
+				}
+				if p.svc.Metrics != nil {
+					for _, name := range exactKnown {
+						p.svc.Metrics.Inc("guard", name, counters.EvGuardHits)
+					}
+				}
+				p.svc.Events.Publish(observeevents.Event{
+					Type:      "guard",
+					Ts:        time.Now().UnixMilli(),
+					RequestID: requestID,
+					SessionID: clientSession,
+					Agent:     agent,
+					Protocol:  proto,
+					Exposed:   exposed,
+					Detail:    "secrets=" + strings.Join(exactKnown, ",") + " action=block (exact match) " + exactDetail,
+				})
+				AuditGuardHit(runtime.SecLog, GuardAuditHit{
+					Kind: seclog.KindSecret, Names: exactKnown, Action: "block",
+					RequestID: requestID, SessionID: adjMeta.SessionID,
+					Agent: agent, Proto: proto, Exposed: exposed,
+					Detail: exactDetail,
+				})
+				if p.svc.Adjudicator != nil && adjMeta.SessionID != "" {
+					p.svc.Adjudicator.BlockSession(adjMeta.SessionID, exactKnown[0], requestID, exactDetail)
+				}
+			}
+		}
+		// AI second-opinion channel (guard.adjudicate): pattern-table secret
+		// hits are DEFERRED to async adjudication instead of the classic
+		// immediate record — a high verdict records + blocks the session, a
+		// medium verdict records, a low verdict is the ignored tier. Exact
+		// channels never defer (handled above). Off/block actions keep the
+		// classic path when the channel is off; with the channel ON even
+		// secrets=block defers (the LLM verdict, not the config, decides
+		// interception). Enqueue refusal, the per-request cap and span dedup
+		// fail OPEN: the leftover names take the classic immediate record
+		// with verdict "skipped".
+		emitSecrets := patternSecretNames(secretNames)
+		adjSecretsOn := p.svc.Adjudicator != nil && cfg.Guard.AdjudicateEnabled() && action != "off"
+		var secretFailOpen []string
+		// Repeat interception: hit bytes already adjudicated HIGH on an
+		// earlier request (persisted sha256 index in the adjudication
+		// service) are rejected verbatim HERE — same treatment as the
+		// known-secret exact channel: no second LLM round-trip, the original
+		// verdict's attribution rides the record, the session joins the
+		// block table, and the request is rejected at the unified evaluation
+		// below. Secret hits only (path literals stay per-occurrence).
+		var repeatBlocked struct {
+			rule, reason, evidence, model string
+			names                         []string
+		}
+		if adjSecretsOn {
+			jobs, leftover := buildAdjudications(sc, preGuardBody, emitSecrets, AdjudicationKindSecret, false, cfg.Guard.Adjudicate.ContextWindow(), adjMeta)
+			var adjJobs []GuardAdjudication
+			for _, j := range jobs {
+				if kind, rule, reason, evidence, model, blocked := p.svc.Adjudicator.ContentBlocked(j.Hit); blocked {
+					if repeatBlocked.rule == "" {
+						repeatBlocked.rule, repeatBlocked.reason = rule, reason
+						repeatBlocked.evidence, repeatBlocked.model = evidence, model
+						_ = kind // always the secret channel by construction
+					}
+					repeatBlocked.names = append(repeatBlocked.names, j.Rule)
+					continue
+				}
+				adjJobs = append(adjJobs, j)
+			}
+			secretFailOpen = append(leftover, p.enqueueAdjudications(adjJobs)...)
+			if len(repeatBlocked.names) > 0 {
+				if p.svc.Metrics != nil {
+					for _, name := range repeatBlocked.names {
+						p.svc.Metrics.Inc("guard", name, counters.EvGuardHits)
+					}
+				}
+				p.svc.Events.Publish(observeevents.Event{
+					Type:      "guard",
+					Ts:        time.Now().UnixMilli(),
+					RequestID: requestID,
+					SessionID: clientSession,
+					Agent:     agent,
+					Protocol:  proto,
+					Exposed:   exposed,
+					Detail:    "secrets=" + strings.Join(repeatBlocked.names, ",") + " action=block (repeat of previously adjudicated high content)",
+				})
+				AuditGuardHit(runtime.SecLog, GuardAuditHit{
+					Kind: seclog.KindSecret, Names: repeatBlocked.names, Action: "block",
+					RequestID: requestID, SessionID: adjMeta.SessionID,
+					Agent: agent, Proto: proto, Exposed: exposed,
+					Verdict: "high", Reason: repeatBlocked.reason, Evidence: repeatBlocked.evidence,
+					Model: repeatBlocked.model,
+				})
+				if adjMeta.SessionID != "" {
+					p.svc.Adjudicator.BlockSession(adjMeta.SessionID, repeatBlocked.rule, requestID, repeatBlocked.reason)
+				}
+				// The intercepted names are handled by the record above — they
+				// must not also take the classic fail-open record.
+				blockedSet := map[string]bool{}
+				for _, n := range repeatBlocked.names {
+					blockedSet[n] = true
+				}
+				emit := secretFailOpen[:0]
+				for _, n := range secretFailOpen {
+					if !blockedSet[n] {
+						emit = append(emit, n)
+					}
+				}
+				secretFailOpen = emit
+			}
+			emitSecrets = secretFailOpen
+		}
+		if len(emitSecrets) > 0 {
+			if p.svc.Metrics != nil {
+				for _, name := range emitSecrets {
+					p.svc.Metrics.Inc("guard", name, counters.EvGuardHits)
+				}
+			}
+			p.svc.Events.Publish(observeevents.Event{
+				Type:      "guard",
+				Ts:        time.Now().UnixMilli(),
+				RequestID: requestID,
+				SessionID: clientSession,
+				Agent:     agent,
+				Protocol:  proto,
+				Exposed:   exposed,
+				Detail:    "secrets=" + strings.Join(emitSecrets, ",") + " action=" + action,
+			})
+			verdict := ""
+			if len(secretFailOpen) > 0 {
+				verdict = "skipped" // names that could not be adjudicated (cap/dedup/queue overflow)
+			}
+			AuditGuardHit(runtime.SecLog, GuardAuditHit{
+				Kind: seclog.KindSecret, Names: emitSecrets, Action: action,
+				RequestID: requestID, SessionID: adjMeta.SessionID,
+				Agent: agent, Proto: proto, Exposed: exposed, Verdict: verdict,
+			})
+		}
+		origBody = guardDecision.ForwardBody
+		// Sensitive-path signal (S2): an intent-level alert fired before any
+		// secret value appears. Paths are never redacted (rewriting a path
+		// would corrupt legitimate coding work). Hits are context-split
+		// (guard.ScanPathsContext): a path inside a tool-INVOCATION position
+		// (tool_use.input / function arguments) is STRONG — the structural
+		// signature of an agent asking to access a sensitive file (MCP Tool
+		// Poisoning shape) — and gets the configured guard.paths action:
+		// live event, ("guard", cat) counter, audit record, and it is the
+		// only kind block can 400. Result-side content (tool_result /
+		// role:tool / function_call_output) and ordinary prose are WEAK —
+		// tool output that mentions a path is an address mention, not an
+		// access attempt (actual secret content in the output is caught by
+		// the secret channels): weak hits are IGNORED entirely — no live
+		// event, never blocked, no audit record, not even a counter (a
+		// benign-mention count is noise the operator should not have to
+		// look at either).
+		// This scan runs even when the secrets pass already hit — including
+		// secrets=block — so one request carrying both signals gets both
+		// counters/events/audit records; only the response action is decided
+		// afterwards (below).
+		pa := cfg.Guard.PathsAction()
+		pathCats := guardDecision.StrongPath
+		if pa != "off" {
+			// AI second-opinion channel for strong path hits: with
+			// guard.adjudicate on and paths=log (not the synchronous block
+			// decision), strong occurrences are deferred exactly like pattern
+			// secret hits — high verdict records (+ session block), low verdict
+			// is suppressed. Fail-open leftovers keep the classic record.
+			emitPaths := pathCats
+			adjPathsOn := p.svc.Adjudicator != nil && cfg.Guard.AdjudicateEnabled() && pa == "log"
+			var pathFailOpen []string
+			if adjPathsOn && len(pathCats) > 0 {
+				pathMeta := adjMeta
+				pathMeta.Action = pa
+				jobs, leftover := buildAdjudications(sc, preGuardBody, pathCats, AdjudicationKindPath, true, cfg.Guard.Adjudicate.ContextWindow(), pathMeta)
+				pathFailOpen = append(leftover, p.enqueueAdjudications(jobs)...)
+				emitPaths = pathFailOpen
+			}
+			if len(emitPaths) > 0 {
+				if p.svc.Metrics != nil {
+					for _, cat := range emitPaths {
+						p.svc.Metrics.Inc("guard", cat, counters.EvGuardHits)
+					}
+				}
+				p.svc.Events.Publish(observeevents.Event{
+					Type:      "guard",
+					Ts:        time.Now().UnixMilli(),
+					RequestID: requestID,
+					SessionID: clientSession,
+					Agent:     agent,
+					Protocol:  proto,
+					Exposed:   exposed,
+					Detail:    "paths=" + strings.Join(emitPaths, ",") + " action=" + pa,
+				})
+				verdict := ""
+				if len(pathFailOpen) > 0 {
+					verdict = "skipped"
+				}
+				AuditGuardHit(runtime.SecLog, GuardAuditHit{
+					Kind: seclog.KindPath, Names: emitPaths, Action: pa,
+					RequestID: requestID, SessionID: adjMeta.SessionID,
+					Agent: agent, Proto: proto, Exposed: exposed, Verdict: verdict,
+				})
+			}
+			// WeakPath is deliberately not consulted: weak hits (prose /
+			// tool-result address mentions) are ignored entirely — no
+			// counter, no event, no audit record.
+		}
+		// Split-exfiltration signal (fragmented known secret): a credential
+		// smuggled out in pieces — one fragment per request — never hits the
+		// per-request scan above. When session_scan is on, this generation's
+		// scanner carries known secrets, and the request declares a session
+		// (x-claude-code-session-id), two channels run over the session's
+		// bounded state (known-secret channel only — rule-table/custom hits
+		// were already reported per request):
+		//  1. exact reassembly: an occurrence present in tail+body but in
+		//     NEITHER alone must span the junction, so only the junction
+		//     region (the last MaxKnownNeedleLen-1 bytes of the tail plus the
+		//     first MaxKnownNeedleLen-1 bytes of the current PRE-REDACT body)
+		//     is scanned through ScanKnown — same verdict as scanning the
+		//     whole concatenation without copying up to 64MiB+32KiB per
+		//     request. The tail-alone verdict comes from the session entry's
+		//     cache (refreshed at Add time; a miss rescans the tail) and
+		//     excludes a key fully seen in an earlier request from re-firing
+		//     "fragmented" on every later one; the current-body-alone verdict
+		//     is the already-computed secretNames (known secrets are claimed
+		//     first in the scanner, so a current-body occurrence always lands
+		//     there).
+		//  2. fragment progress: realistic bodies all start with '{' (see
+		//     ExtractModel), so fragments can never sit byte-contiguously at
+		//     the junction — guard.ScanKnownFragment instead tracks each
+		//     secret's longest prefix seen in order across the session.
+		// secrets=off disables this pass together with the secrets channel.
+		var fragmented bool
+		sessionID := r.Header.Get("x-claude-code-session-id")
+		if action != "off" && cfg.Guard.SessionScanEnabled() && sc.HasKnownSecrets() &&
+			sessionID != "" && p.svc.SessionScan != nil {
+			tail, progress, tailKnown, tailKnownOK := p.svc.SessionScan.Snapshot(sessionID, sc)
+			knownInCurrent := false
+			for _, n := range secretNames {
+				if n == "known_secret" || n == "known_secret_encoded" {
+					knownInCurrent = true
+					break
+				}
+			}
+			var nextProgress []int
+			var progressReset []bool
+			if len(tail) > 0 && !knownInCurrent {
+				if !tailKnownOK {
+					tailKnown = len(sc.ScanKnown(tail)) > 0
+				}
+				if !tailKnown {
+					span := sc.MaxKnownNeedleLen() - 1
+					start := max(len(tail)-span, 0)
+					end := min(span, len(preGuardBody))
+					junction := make([]byte, 0, len(tail)-start+end)
+					junction = append(junction, tail[start:]...)
+					junction = append(junction, preGuardBody[:end]...)
+					if len(sc.ScanKnown(junction)) > 0 {
+						fragmented = true
+					}
+				}
+			}
+			if !fragmented && !knownInCurrent {
+				fragmented, nextProgress, progressReset = sc.ScanKnownFragment(preGuardBody, progress)
+			}
+			if fragmented {
+				// A completed split-exfiltration is an exact-match event by
+				// construction: record it, block the session and reject the
+				// completing request below — independent of the configured
+				// action (redact cannot rewrite a cross-request secret anyway,
+				// decision 21's degrade note now lands on interception).
+				if p.svc.Metrics != nil {
+					p.svc.Metrics.Inc("guard", "known_secret_fragmented", counters.EvGuardHits)
+				}
+				p.svc.Events.Publish(observeevents.Event{
+					Type:      "guard",
+					Ts:        time.Now().UnixMilli(),
+					RequestID: requestID,
+					SessionID: clientSession,
+					Agent:     agent,
+					Protocol:  proto,
+					Exposed:   exposed,
+					Detail:    "secrets=known_secret_fragmented action=block (exact match)",
+				})
+				AuditGuardHit(runtime.SecLog, GuardAuditHit{
+					Kind: seclog.KindSecret, Names: []string{"known_secret_fragmented"}, Action: "block",
+					RequestID: requestID, SessionID: sessionID,
+					Agent: agent, Proto: proto, Exposed: exposed,
+				})
+				if p.svc.Adjudicator != nil {
+					p.svc.Adjudicator.BlockSession(sessionID, "known_secret_fragmented", requestID, "credential reassembled across requests (split exfiltration)")
+				}
+			}
+			// Merge the current body into the session window whether or not
+			// anything hit — later fragments depend on earlier ones being
+			// retained. The window stores the PRE-REDACT form and lives in
+			// memory only (bounded: 256 sessions × 32KiB tail; see
+			// internal/guard/session for the red lines).
+			p.svc.SessionScan.Add(sessionID, preGuardBody, sc, nextProgress, progressReset, knownInCurrent)
+		}
+		// Unified action evaluation after BOTH scans (so one request carrying
+		// several signals gets all its counters/events/audit records; only
+		// the response action is decided here). Exact-match interception
+		// outranks everything; then a config secrets=block (only when the
+		// pattern hits were NOT deferred to adjudication), then the
+		// fragmented completion, then a config paths=block.
+		if len(exactKnown) > 0 {
+			msg := fmt.Sprintf("blocked: request body contains a credential configured on this proxy (%s) — session blocked until unblocked via 'model-proxy guard unblock %s' or the WebUI Security page", strings.Join(exactKnown, ", "), adjMeta.SessionID)
+			p.guardTerminal(w, r, guardTerminalRecord{
+				requestID: requestID, sessionID: clientSession, proto: proto, exposed: exposed,
+				calledModel: calledModel, agent: agent, body: preGuardBody, msg: msg,
+			})
+			return origBody, true
+		}
+		if len(repeatBlocked.names) > 0 {
+			msg := fmt.Sprintf("blocked: request body repeats content already adjudicated high-risk by guard (%s) — session blocked until unblocked via 'model-proxy guard unblock %s' or the WebUI Security page", strings.Join(repeatBlocked.names, ","), adjMeta.SessionID)
+			p.guardTerminal(w, r, guardTerminalRecord{
+				requestID: requestID, sessionID: clientSession, proto: proto, exposed: exposed,
+				calledModel: calledModel, agent: agent, body: preGuardBody, msg: msg,
+			})
+			return origBody, true
+		}
+		if len(secretNames) > 0 && action == "block" && !adjSecretsOn {
+			msg := fmt.Sprintf("blocked: request body contains a secret matching %s (guard.secrets=block)", strings.Join(secretNames, ", "))
+			p.guardTerminal(w, r, guardTerminalRecord{
+				requestID: requestID, sessionID: clientSession, proto: proto, exposed: exposed,
+				calledModel: calledModel, agent: agent, body: preGuardBody, msg: msg,
+			})
+			return origBody, true
+		}
+		if fragmented {
+			msg := "blocked: request completes a secret fragmented across requests matching known_secret_fragmented — session blocked until unblocked via 'model-proxy guard unblock' or the WebUI Security page"
+			p.guardTerminal(w, r, guardTerminalRecord{
+				requestID: requestID, sessionID: clientSession, proto: proto, exposed: exposed,
+				calledModel: calledModel, agent: agent, body: preGuardBody, msg: msg,
+			})
+			return origBody, true
+		}
+		if len(pathCats) > 0 && pa == "block" {
+			msg := fmt.Sprintf("blocked: request body references sensitive path %s (guard.paths=block)", strings.Join(pathCats, ", "))
+			p.guardTerminal(w, r, guardTerminalRecord{
+				requestID: requestID, sessionID: clientSession, proto: proto, exposed: exposed,
+				calledModel: calledModel, agent: agent, body: preGuardBody, msg: msg,
+			})
+			return origBody, true
+		}
+	}
+	return origBody, false
+}
+
+// lookupResponseCache is the exact-match response cache stage (#10) of
+// forward, extracted verbatim: a request byte-identical to a recently
+// served one is replayed from cache with no upstream call. Computed before
+// routing (the key is the raw request); the returned key is threaded into
+// the target attempt to store on a fresh 2xx commit. bypass skips the cache
+// entirely when a force-provider override OR a pin is in effect — both mean
+// "send to THIS backend", not a stale cached answer. hit == true means a
+// cached response was replayed and the caller must return.
+func (p pipeline) lookupResponseCache(cache *responsecache.Store, r *http.Request, origBody []byte, calledModel, proto, exposed, agent, requestID string, w http.ResponseWriter, bypass bool) (cacheKey string, hit bool) {
+	if cache != nil && !bypass {
+		cacheKey = responsecache.Key(r, origBody)
+		if e, ok := cache.Lookup(cacheKey, calledModel, time.Now()); ok {
+			// Live monitor (#6): a cache hit skips the normal start/end flow, so
+			// emit an end event explicitly — otherwise the live view is blind to
+			// these (e.g. a retry-looping agent served from cache stays invisible).
+			p.svc.Events.Publish(observeevents.Event{
+				Type:      "end",
+				Ts:        time.Now().UnixMilli(),
+				RequestID: requestID,
+				Agent:     agent,
+				Protocol:  proto,
+				// Same exposed name as the start event above: the live view
+				// must show ONE exposed name per request, not different
+				// names on start and end.
+				Exposed:  exposed,
+				Provider: "(cache)",
+				Status:   e.Status(),
+			})
+			w.Header().Set("x-mp-cache", "hit")
+			_ = responsecache.Replay(w, e)
+			return cacheKey, true
+		}
+	}
+	return cacheKey, false
 }

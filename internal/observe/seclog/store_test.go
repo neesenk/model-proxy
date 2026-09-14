@@ -4,7 +4,6 @@ import (
 	"testing"
 )
 
-
 // Counts aggregates verdict totals over the query predicate (kind/from/to),
 // independent of the page limit — the KPI tiles' durable source.
 func TestStoreCountsAggregation(t *testing.T) {

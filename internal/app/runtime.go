@@ -3,6 +3,7 @@ package app
 
 import (
 	"errors"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/logx"
 	"net/http"
 )
@@ -11,8 +12,9 @@ import (
 // generation. It owns the Proxy lifecycle boundary, HTTP mux/Web wiring,
 // reload projection, and transport tasks handed to the process server.
 type Runtime struct {
-	ConfigPath     string
-	StartupConfig  *Config // immutable listen/startup-log view; reload state lives in Proxy
+	ConfigPath    string
+	StartupConfig *configdomain. // immutable listen/startup-log view; reload state lives in Proxy
+			Config
 	Proxy          *Proxy
 	Handler        http.Handler
 	TransportTasks []func(stop <-chan struct{})
@@ -22,7 +24,7 @@ type Runtime struct {
 // the HTTP mux with the Web admin when enabled. configPath/logFile are
 // resolved by the process layer (cli/serve) before assembly so the composition
 // root never imports the CLI packages.
-func NewRuntime(cfg *Config, configPath, logFile string) *Runtime {
+func NewRuntime(cfg *configdomain.Config, configPath, logFile string) *Runtime {
 	proxy := NewProxy(cfg)
 	// Start all process-owned optional services through the Proxy lifecycle
 	// owner (stats flusher, request logger, startup catalog load).

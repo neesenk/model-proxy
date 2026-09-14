@@ -46,8 +46,8 @@ route derivation 输入（见 request-routing 文档），不持有 Proxy/runtim
 `internal/app/proxy.go` 负责 Proxy 内部组件装配、状态恢复、Close 委派和 stats reset；
 `internal/app/proxy_lifecycle.go` 承载 `StartRuntimeServices`/`closeRuntimeServices` 的进程级后台服务
 启停编排（`Close` 经 `closeOnce` 委派至此）；
-`internal/app/config_alias.go` 是 archtest 认可的唯一存活配置 facade（`internal/config` 类型别名与
-加载 wrapper，根 `package main` 不得重建）；
+`internal/app/config_alias.go` 已拆除：package app 直接引用 `configdomain` 类型，
+ownership 契约钉死该 facade 不得重建（根 `package main` 同样不得重建）；
 `internal/app/proxy_snapshot.go` 集中 config/provider/catalog/pricing 读取与 generation 一致的
 持久化快照；
 `internal/app/proxy_reload.go` 只编译 explicit/derived route 与 pool fan-out；
@@ -118,8 +118,9 @@ force/last-target/context-retry。
 `newTargetAttempt` 不负责 model rewrite、Responses history expansion 或协议转换，
 这些准备语义仍由普通/Fusion 各自编排后再进入执行器。
 
-同协议保持字节透传。`internal/protocol` 是无仓库内依赖的叶子包，统一拥有协议
-identity、六组 pairwise codec、request/response/SSE registry、SSE↔JSON 模式
+同协议保持字节透传。`internal/protocol` 统一拥有协议
+identity（经叶子包 `internal/protocol/wire` 与 config 校验共享）、六组 pairwise codec、
+request/response/SSE registry、SSE↔JSON 模式
 桥接、跨协议图片约束，以及 Responses `previous_response_id` 的有界状态。
 每个 client→backend pair 必须同时提供 request、反向 response、反向 SSE codec；
 专用 pair codec 保留 hosted tools、reasoning 方言和 namespace 等协议特有语义。
@@ -517,7 +518,7 @@ probe 执行（daemon 探测 pass / CLI / Web 测活）→ internal/probe → co
 wire verdict / target plan → internal/runtime/wirecap → config / provider（值类型）
 schedule / health / resolver / quota adapter → internal/runtime
 target plan / target executor → internal/protocol
-composition root → internal/config → internal/pricing / internal/protocol
+composition root → internal/config → internal/pricing / internal/protocol/wire
 composition root → internal/targetexec → internal/protocol / internal/provider
 application → serveAssembly → applicationRuntime → Proxy
 ```
@@ -528,7 +529,7 @@ application → serveAssembly → applicationRuntime → Proxy
 
 - 叶子包（不得依赖其他 `model-proxy/*` 包）：`adjudicate`、`archtest`（纯测试包）、`cache`、
   `configedit`、`credstore`、`daemonctl`、`display`、`guard`、`httpx`、
-  `observe/counters`、`observe/events`、`observe/logx`、`upstreamproxy`、
+  `observe/counters`、`observe/events`、`observe/logx`、`protocol/wire`、`upstreamproxy`、
   `transport/bodycapture`、`webauth`；
 - `accounts → credstore`；
 - `guard/session → guard`；
@@ -565,7 +566,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/models → cli/serve, cli/framework, accounts, catalog, config,
   configedit, display, probe, provider, providerbuild, routing, runtime/wirecap, upstreamproxy`；
 - `login → accounts, config, display, provider, observe/logx, upstreamproxy`；
-- `config → catalog, pricing, protocol, upstreamproxy`；
+- `config → catalog, pricing, protocol/wire, upstreamproxy`；
 - `fusion → config, observe/logx`；
 - `forward → cache, catalog, config, fusion, guard, guard/session, observe/counters,
   observe/events, observe/logx, observe/requestlog, observe/seclog, protocol, provider, routing,
@@ -581,7 +582,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `observe/stats → observe/counters, observe/logx`；
 - `presets → config, configedit, provider`；
 - `probe → config, provider`；
-- `protocol → observe/logx`；
+- `protocol → observe/logx, protocol/wire`；
 - `pricing → upstreamproxy`；
 - `provider → credstore, display, upstreamproxy`（display 是终端着色/文本格式化叶子工具包）；
 - `providerbuild → accounts, config, display, provider, observe/logx, upstreamproxy`；
@@ -667,8 +668,8 @@ type alias 和 method expression 都会被守卫计为新的引用点并判定�
   分发器；
 - 将根 `package main` 的 application/serve runtime 伪装成可 import 的
   callback bag；真实边界是薄 main + `internal/cli` / `internal/app`；
-- `internal/config` import `internal/pricing`、`internal/protocol` 以外的
-  `model-proxy/*` 包，或在根包恢复配置类型别名、加载 wrapper 等任何配置实现；
+- `internal/config` import `internal/pricing`、`internal/protocol/wire` 以外的
+  `model-proxy/*` 包（catalog/upstreamproxy 除外），或在根包恢复配置类型别名、加载 wrapper 等任何配置实现；
 - `internal/catalog` 反向依赖 Config、Proxy、Provider、Web/CLI 或任意
   `model-proxy/*` 包；
 - `internal/routing` 反向依赖 Proxy、runtime Manager、target executor、Web/CLI
@@ -696,7 +697,8 @@ type alias 和 method expression 都会被守卫计为新的引用点并判定�
   Proxy、HTTP/Web/CLI 或持久化实现；应用层恢复 health/sticky/pin/model-lock/paramBlock/spread/quota
   的第二份 map 或互斥锁；
 - `internal/pricing` 反向依赖 `main` 的 YAML 配置、Proxy、Web 或通用 helper；
-- `internal/protocol` import 任意 `model-proxy/*`，或反向读取 Config、Provider、
+- `internal/protocol` import `observe/logx`、`protocol/wire` 以外的
+  `model-proxy/*` 包，或反向读取 Config、Provider、
   Proxy、Web/CLI；Fusion 直接 import protocol 绕过 `targetexec.Plan`；
 - 将 config generation 内的 map 原地修改。
 

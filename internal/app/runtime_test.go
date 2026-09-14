@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"model-proxy/internal/accounts"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
 	"model-proxy/internal/providerbuild"
 	runtimestate "model-proxy/internal/runtime"
@@ -36,11 +37,11 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
 			writeFreshApplicationCatalog(t, home)
-			cfg := &Config{
+			cfg := &configdomain.Config{
 				Listen:    "127.0.0.1:0",
-				Providers: map[string]Provider{},
-				Stats:     StatsConfig{DBPath: filepath.Join(home, "stats.db")},
-				Web:       WebConfig{Enabled: test.web},
+				Providers: map[string]configdomain.Provider{},
+				Stats:     configdomain.StatsConfig{DBPath: filepath.Join(home, "stats.db")},
+				Web:       configdomain.WebConfig{Enabled: test.web},
 			}
 			runtime := NewRuntime(cfg, "test-config.yaml", "")
 			t.Cleanup(runtime.Close)
@@ -139,10 +140,10 @@ providers:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen:    "127.0.0.1:17833",
-		Providers: map[string]Provider{},
-		Stats:     StatsConfig{DBPath: filepath.Join(home, "stats.db")},
+		Providers: map[string]configdomain.Provider{},
+		Stats:     configdomain.StatsConfig{DBPath: filepath.Join(home, "stats.db")},
 	}
 	runtime := NewRuntime(cfg, configPath, "")
 	t.Cleanup(runtime.Close)
@@ -355,9 +356,9 @@ func TestBuildProvidersUnrollsPool(t *testing.T) {
 	setPoolHome(t, dir)
 	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B", "KEY-C")
 
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"},
 		},
 	}
@@ -417,9 +418,9 @@ func TestBuildProvidersSingleAccountKeepsPlainName(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, ".model-proxy", "zhipu_apikey.json"),
 		[]byte(`{"api_key":"SOLO"}`), 0o600)
 
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"},
 		},
 	}
@@ -455,9 +456,9 @@ func TestBuildProvidersUnrollsDeepseekDualAuth(t *testing.T) {
 	setPoolHome(t, dir)
 	writePoolFile(t, "deepseek", "deepseek", "DS-1", "DS-2")
 
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"deepseek": {OpenAIBaseURL: "https://ds", Provider: "deepseek"},
 		},
 	}
@@ -525,12 +526,12 @@ func TestBuildProvidersSingleEntryPluralPoolBindsKey(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"zhipu": {OpenAIBaseURL: up.URL, Provider: "zhipu"},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm-4.6": {{Provider: "zhipu", Model: "glm-4.6"}},
 		},
 	}
@@ -587,17 +588,17 @@ func newCredentialBoundaryUpstream(t *testing.T) *credentialBoundaryUpstream {
 	return upstream
 }
 
-func credentialBoundaryConfig(providerName, providerID, upstreamURL string) *Config {
-	return &Config{
+func credentialBoundaryConfig(providerName, providerID, upstreamURL string) *configdomain.Config {
+	return &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			providerName: {
 				Provider:      providerID,
 				OpenAIBaseURL: upstreamURL,
 				Models:        []string{"target-model"},
 			},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"alias": {{Provider: providerName, Model: "target-model"}},
 		},
 	}
@@ -804,9 +805,9 @@ func TestBuildProviders_OAuthProviderIgnoresAccountPoolFiles(t *testing.T) {
 	setPoolHome(t, t.TempDir())
 	const name = "codex-work"
 	writePoolFile(t, name, "codex", "UNRELATED-API-KEY")
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			name: {Provider: "codex", OpenAIBaseURL: "https://example.invalid"},
 		},
 	}
@@ -849,9 +850,9 @@ func TestVolcenginePoolPerAccountAK(t *testing.T) {
 		accounts.Account{ID: "AK1", Label: "a", APIKey: "k1", AccessKey: "AK1", SecretKey: "SK1", AddedAt: "x"},
 		accounts.Account{ID: "AK2", Label: "b", APIKey: "k2", AccessKey: "AK2", SecretKey: "SK2", AddedAt: "x"},
 	)
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"volcengine": {OpenAIBaseURL: "https://v", Provider: "volcengine"},
 		},
 	}

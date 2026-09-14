@@ -148,7 +148,7 @@ func newBlockTracker(t *testing.T, prov *blockQuotaProv) *runtimestate.QuotaTrac
 		prov.entered = make(chan struct{})
 	}
 	tr := newStandaloneQuotaTracker(t.TempDir()+"/q.json",
-		func() *Config { return &Config{} },
+		func() *configdomain.Config { return &configdomain.Config{} },
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
 	t.Cleanup(tr.Stop)
 	return tr
@@ -283,12 +283,12 @@ func TestForwardAllTargetsQuotaExhaustedReturns429(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"p1": {OpenAIBaseURL: upstream.URL, Provider: testProviderID},
 			"p2": {OpenAIBaseURL: upstream.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{"m": {
+		Routes: map[string][]configdomain.RouteTarget{"m": {
 			{Provider: "p1", Model: "m", Priority: 1},
 			{Provider: "p2", Model: "m", Priority: 2},
 		}},
@@ -335,12 +335,12 @@ func TestForwardMixedExhaustionPrefersLiveTarget(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"plan": {OpenAIBaseURL: upstream.URL, Provider: testProviderID},
 			"live": {OpenAIBaseURL: upstream.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{"m": {
+		Routes: map[string][]configdomain.RouteTarget{"m": {
 			{Provider: "plan", Model: "m", Priority: 1},
 			{Provider: "live", Model: "m", Priority: 2},
 		}},
@@ -380,12 +380,12 @@ func TestProxy_QuotaRefreshOnRateLimit(t *testing.T) {
 		return 200, `{"ok":true}`, nil, 0
 	})
 	defer fallback.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{"m1": {
+		Routes: map[string][]configdomain.RouteTarget{"m1": {
 			{Provider: "primary", Model: "m1", Priority: 1},
 			{Provider: "fallback", Model: "m1", Priority: 2},
 		}},
@@ -398,7 +398,7 @@ func TestProxy_QuotaRefreshOnRateLimit(t *testing.T) {
 	p.quota.Stop()
 	p.quota = runtimestate.NewQuotaTracker(
 		"",
-		func() *Config { return cfg },
+		func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider { return p.providers },
 		&p.runtimeState,
 	)
@@ -462,12 +462,12 @@ func staticSurplus(p *Proxy, name string, remaining, fLeft float64) {
 // Proxy directly (not via NewProxy) so no real poller goroutine starts — which
 // avoids a data race between that goroutine reading cfg.Scheduling and these
 // tests mutating it (e.g. StickyDwell) after construction.
-func newQuotaProxy(t *testing.T, provs map[string]Provider, routes map[string][]RouteTarget) *Proxy {
+func newQuotaProxy(t *testing.T, provs map[string]configdomain.Provider, routes map[string][]configdomain.RouteTarget) *Proxy {
 	t.Helper()
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Providers:  provs,
 		Routes:     routes,
-		Scheduling: Scheduling{QuotaSwitchMargin: 15},
+		Scheduling: configdomain.Scheduling{QuotaSwitchMargin: 15},
 	}
 	p := &Proxy{
 		generationState: generationState{
@@ -483,7 +483,7 @@ func newQuotaProxy(t *testing.T, provs map[string]Provider, routes map[string][]
 	p.expandedRoutes = p.buildExpandedRoutes()
 	p.quota = runtimestate.NewQuotaTracker(
 		"",
-		func() *Config { return cfg },
+		func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider { return p.providers },
 		&p.runtimeState,
 	)
@@ -517,14 +517,14 @@ func firstProvider(p *Proxy, model string) string {
 // non-peak peer (same ultimate remaining + time-left) ranks ahead.
 func TestScheduleAdapter_AppliesPeakMultiplier(t *testing.T) {
 	p := newQuotaProxy(t,
-		map[string]Provider{
+		map[string]configdomain.Provider{
 			"plain": {},
-			"peak":  {PeakHours: PeakConfig{{Window: "00:00-23:59", Multiplier: 2}}},
+			"peak":  {PeakHours: configdomain.PeakConfig{{Window: "00:00-23:59", Multiplier: 2}}},
 		},
 		// peak listed first: a lost peak-burn deduction leaves both surpluses at
 		// 0, and sort.SliceStable would keep config order — the expected winner
 		// must not be first.
-		map[string][]RouteTarget{"m": {{Provider: "peak"}, {Provider: "plain"}}})
+		map[string][]configdomain.RouteTarget{"m": {{Provider: "peak"}, {Provider: "plain"}}})
 	now := time.Now()
 	const dur = 7 * 24 * time.Hour
 	ult := provider.QuotaWindow{Ultimate: true, Kind: "tokens", RemainingPct: 0.5, Total: 200,
@@ -548,8 +548,8 @@ func TestScheduleAdapter_AppliesPeakMultiplier(t *testing.T) {
 func TestScheduleAdapter_AppliesQualityWeights(t *testing.T) {
 	build := func(disableWeight bool) *Proxy {
 		p := newQuotaProxy(t,
-			map[string]Provider{"flaky": {}, "steady": {}},
-			map[string][]RouteTarget{"m": {{Provider: "flaky"}, {Provider: "steady"}}})
+			map[string]configdomain.Provider{"flaky": {}, "steady": {}},
+			map[string][]configdomain.RouteTarget{"m": {{Provider: "flaky"}, {Provider: "steady"}}})
 		if disableWeight {
 			zero := 0
 			p.cfg.Scheduling.QualityErrorWeight = &zero
@@ -577,16 +577,16 @@ func TestScheduleAdapter_AppliesQualityWeights(t *testing.T) {
 
 func TestScheduleAdapter_ProjectsParentBillingAndMapsTargets(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
-	targets := []RouteTarget{
+	targets := []configdomain.RouteTarget{
 		{Provider: "pool#acct", Model: "pool-model", Priority: 1},
 		{Provider: "plan", Model: "plan-model", Priority: 9},
 	}
 	p := newQuotaProxy(t,
-		map[string]Provider{
+		map[string]configdomain.Provider{
 			"pool": {Billing: "pay-as-you-go"},
 			"plan": {},
 		},
-		map[string][]RouteTarget{"m": targets})
+		map[string][]configdomain.RouteTarget{"m": targets})
 	p.parentOf = map[string]string{"pool#acct": "pool"}
 	p.quota.SetSnapshot("pool#acct", &provider.QuotaSnapshot{
 		Billing: provider.BillingPlan,
@@ -627,13 +627,13 @@ func TestScheduleAdapter_ProjectsParentBillingAndMapsTargets(t *testing.T) {
 
 func TestScheduleAdapter_DerivesQuotaMaxAgeFromPollInterval(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
-	targets := []RouteTarget{
+	targets := []configdomain.RouteTarget{
 		{Provider: "unknown", Model: "unknown-model", Priority: 1},
 		{Provider: "candidate", Model: "candidate-model", Priority: 1},
 	}
 	p := newQuotaProxy(t,
-		map[string]Provider{"unknown": {}, "candidate": {}},
-		map[string][]RouteTarget{"m": targets})
+		map[string]configdomain.Provider{"unknown": {}, "candidate": {}},
+		map[string][]configdomain.RouteTarget{"m": targets})
 	p.quota.SetSnapshot("candidate", &provider.QuotaSnapshot{
 		Billing: provider.BillingPlan,
 		AsOf:    now.Add(-5 * time.Minute),
@@ -660,8 +660,8 @@ func TestScheduleAdapter_DerivesQuotaMaxAgeFromPollInterval(t *testing.T) {
 // provider + ordered list with tiers, read-only (no sticky mutation).
 func TestScheduleStatus(t *testing.T) {
 	p := newQuotaProxy(t,
-		map[string]Provider{"a": {}, "b": {}},
-		map[string][]RouteTarget{"m": {{Provider: "a", Priority: 1}, {Provider: "b", Priority: 2}}})
+		map[string]configdomain.Provider{"a": {}, "b": {}},
+		map[string][]configdomain.RouteTarget{"m": {{Provider: "a", Priority: 1}, {Provider: "b", Priority: 2}}})
 	staticSurplus(p, "a", 0.5, 0)   // surplus +0.5 (waste risk)
 	staticSurplus(p, "b", 0.5, 0.5) // surplus 0
 	var st struct {
@@ -706,10 +706,10 @@ type budgetAlertDetail struct {
 // offline pricing (catalog disabled; prices: overrides still apply).
 func newBudgetTestProxy(t *testing.T, budgets configdomain.BudgetsConfig) *Proxy {
 	t.Helper()
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Budgets: budgets,
-		Pricing: PricingConfig{Enabled: false},
-		Prices: map[string]PriceConfig{
+		Pricing: configdomain.PricingConfig{Enabled: false},
+		Prices: map[string]configdomain.PriceConfig{
 			"glm-5.2": {Input: 1.0, Output: 2.0}, // USD per 1M tokens
 		},
 	}
@@ -736,7 +736,7 @@ func flushBudgetUsage(t *testing.T, p *Proxy, provider string) {
 }
 
 func TestBudgetWatcher_NotStartedWhenUnconfigured(t *testing.T) {
-	p := newTestProxy(t, &Config{})
+	p := newTestProxy(t, &configdomain.Config{})
 	p.startBudgetWatcher()
 	if p.budget != nil {
 		t.Fatal("budget watcher started without any configured threshold")
@@ -746,7 +746,7 @@ func TestBudgetWatcher_NotStartedWhenUnconfigured(t *testing.T) {
 func TestBudgetWatcher_StartedWhenConfigured(t *testing.T) {
 	// stats is nil here: the loop's startup check must tolerate it and simply
 	// wait for the next tick (Close stops and waits the loop goroutine).
-	p := newTestProxy(t, &Config{Budgets: configdomain.BudgetsConfig{MonthlyUSD: 10}})
+	p := newTestProxy(t, &configdomain.Config{Budgets: configdomain.BudgetsConfig{MonthlyUSD: 10}})
 	p.startBudgetWatcher()
 	if p.budget == nil {
 		t.Fatal("budget watcher did not start with a configured threshold")
@@ -791,12 +791,12 @@ func TestBudgetPorts_BudgetStateReturnsPerCallCopies(t *testing.T) {
 // TestBudgetPorts_BudgetStateUnavailable: nil stats store or disabled budgets
 // must report ok=false so the watcher skips the tick.
 func TestBudgetPorts_BudgetStateUnavailable(t *testing.T) {
-	p := newTestProxy(t, &Config{Budgets: configdomain.BudgetsConfig{MonthlyUSD: 10}})
+	p := newTestProxy(t, &configdomain.Config{Budgets: configdomain.BudgetsConfig{MonthlyUSD: 10}})
 	if _, _, ok := p.budgetPorts().BudgetState(); ok {
 		t.Fatal("BudgetState ok = true with nil stats store, want false")
 	}
 
-	p = newTestProxy(t, &Config{})
+	p = newTestProxy(t, &configdomain.Config{})
 	p.stats = newTestStatsStore(t)
 	if _, _, ok := p.budgetPorts().BudgetState(); ok {
 		t.Fatal("BudgetState ok = true with budgets disabled, want false")

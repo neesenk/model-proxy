@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"model-proxy/internal/appapi"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/seclog"
 	"net/http"
 	"net/http/httptest"
@@ -88,7 +89,7 @@ func TestAPISecurityDisabledOrEmpty(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 guard: {audit: false}
@@ -133,10 +134,10 @@ func newAuthForwardProxy(t *testing.T) *Proxy {
 	if err := os.WriteFile(adminFile, []byte("adm-1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen:    "192.0.2.10:8123",
-		Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: "a", Models: []string{"m"}}},
-		Web:       WebConfig{Auth: WebAuthConfig{AdminTokenFile: adminFile, APIKeysFile: keysFile}},
+		Providers: map[string]configdomain.Provider{"a": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: "a", Models: []string{"m"}}},
+		Web:       configdomain.WebConfig{Auth: configdomain.WebAuthConfig{AdminTokenFile: adminFile, APIKeysFile: keysFile}},
 	}
 	p := newTestProxy(t, cfg)
 	return p
@@ -278,8 +279,8 @@ func TestForwardAuthAdminDebugEndpointsAllowLANAndRejectRebinding(t *testing.T) 
 }
 
 func TestForwardAuthDisabledKeepsLoopbackTrust(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: "a", Models: []string{"m"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"a": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: "a", Models: []string{"m"}}},
 	}
 	p := newTestProxy(t, cfg)
 	srv := httptest.NewServer(http.HandlerFunc(p.Handler))

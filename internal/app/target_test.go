@@ -2,6 +2,7 @@ package app
 
 import (
 	"model-proxy/internal/catalog"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/forward"
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/provider"
@@ -16,8 +17,8 @@ import (
 // ---- target_plan_test.go ----
 
 func TestTargetPlanOwnsWirePreparation(t *testing.T) {
-	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"up": {
 				Provider:         testProviderID,
 				OpenAIBaseURL:    "https://chat.example/v1",
@@ -27,7 +28,7 @@ func TestTargetPlanOwnsWirePreparation(t *testing.T) {
 	})
 	plan, err := forward.PlanTarget(p.forwardServices(), forward.PlanInput{
 		Runtime:     p.SnapshotRuntime(),
-		Target:      RouteTarget{Provider: "up", Model: "claude", Protocol: "anthropic"},
+		Target:      configdomain.RouteTarget{Provider: "up", Model: "claude", Protocol: "anthropic"},
 		ClientProto: "openai",
 		ClientPath:  "/chat/completions",
 	})
@@ -41,17 +42,17 @@ func TestTargetPlanOwnsWirePreparation(t *testing.T) {
 		t.Fatalf("unexpected target plan: %+v", plan)
 	}
 
-	if plan.Target() != (RouteTarget{Provider: "up", Model: "claude", Protocol: "anthropic"}) ||
+	if plan.Target() != (configdomain.RouteTarget{Provider: "up", Model: "claude", Protocol: "anthropic"}) ||
 		plan.ProviderID() != testProviderID {
 		t.Fatalf("root target facts not frozen in plan: %+v", plan)
 	}
 }
 
 func TestTargetPlanRejectsUnknownProvider(t *testing.T) {
-	p := newTestProxy(t, &Config{})
+	p := newTestProxy(t, &configdomain.Config{})
 	if _, err := forward.PlanTarget(p.forwardServices(), forward.PlanInput{
 		Runtime: p.SnapshotRuntime(),
-		Target:  RouteTarget{Provider: "missing", Model: "m"},
+		Target:  configdomain.RouteTarget{Provider: "missing", Model: "m"},
 	}); err == nil {
 		t.Fatal("unknown provider unexpectedly produced a target plan")
 	}
@@ -75,26 +76,26 @@ func TestFusionSynthesizerDoesNotDispatchShadow(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"panel-a": {Provider: testProviderID, AnthropicBaseURL: panelA.srv.URL},
 			"panel-b": {Provider: testProviderID, AnthropicBaseURL: panelB.srv.URL},
 			"synth":   {Provider: testProviderID, AnthropicBaseURL: synth.srv.URL},
 			"shadow":  {Provider: testProviderID, AnthropicBaseURL: shadow.srv.URL},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"hard": {{Provider: "fusion", Model: "recipe"}},
 		},
-		Fusion: map[string]FusionConfig{
+		Fusion: map[string]configdomain.FusionConfig{
 			"recipe": {
-				Panel: []RouteTarget{
+				Panel: []configdomain.RouteTarget{
 					{Provider: "panel-a", Model: "draft-a"},
 					{Provider: "panel-b", Model: "draft-b"},
 				},
-				Synthesizer: RouteTarget{Provider: "synth", Model: "final"},
+				Synthesizer: configdomain.RouteTarget{Provider: "synth", Model: "final"},
 			},
 		},
-		Shadow: map[string]ShadowTarget{
+		Shadow: map[string]configdomain.ShadowTarget{
 			"hard": {Provider: "shadow", Model: "candidate"},
 		},
 	}
@@ -134,13 +135,13 @@ func TestFusionSynthesizerDoesNotDispatchShadow(t *testing.T) {
 // stale TTFT samples polluted the post-reload quality map (the error-rate
 // samples were already gated — only this path leaked).
 func TestCommittedTTFTStaleGenerationDropped(t *testing.T) {
-	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{},
-		Routes:    map[string][]RouteTarget{},
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{},
+		Routes:    map[string][]configdomain.RouteTarget{},
 	})
 
 	committed := targetexec.AttemptDTO{
-		Target:           RouteTarget{Provider: "p", Model: "m"},
+		Target:           configdomain.RouteTarget{Provider: "p", Model: "m"},
 		Response:         &http.Response{StatusCode: http.StatusOK},
 		TTFTMilliseconds: 500,
 	}
@@ -166,9 +167,9 @@ func TestCommittedTTFTStaleGenerationDropped(t *testing.T) {
 // ---- dispatch_context_test.go ----
 
 func TestRuntimeSnapshotKeepsOneReloadGeneration(t *testing.T) {
-	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"old": {Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"m": {{Provider: "old", Model: "old-model"}}},
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"old": {Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"m": {{Provider: "old", Model: "old-model"}}},
 	})
 	p.catalog = catalog.New(nil)
 
@@ -182,9 +183,9 @@ func TestRuntimeSnapshotKeepsOneReloadGeneration(t *testing.T) {
 		t.Fatalf("incomplete runtime snapshot: %+v", snapshot)
 	}
 
-	newCfg := &Config{
-		Providers: map[string]Provider{"new": {Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"m": {{Provider: "new", Model: "new-model"}}},
+	newCfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"new": {Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"m": {{Provider: "new", Model: "new-model"}}},
 	}
 	p.mu.Lock()
 	p.cfg = newCfg

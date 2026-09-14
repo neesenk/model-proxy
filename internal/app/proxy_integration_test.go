@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"model-proxy/internal/accounts"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/provider"
 	"net/http"
@@ -31,18 +32,18 @@ func TestUC_FailoverAndCircuitSkipsOpenProvider(t *testing.T) {
 	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
 	defer fallback.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "primary", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
 			},
 		},
-		Scheduling: Scheduling{CircuitThreshold: 3},
+		Scheduling: configdomain.Scheduling{CircuitThreshold: 3},
 	}
 	p := newProxyWithStatic(t, cfg, map[string]string{"primary": "p", "fallback": "f"})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
@@ -85,11 +86,11 @@ func TestUC_401RefreshRetrySucceeds(t *testing.T) {
 	)
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"codex": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},
 		},
 	}
@@ -125,12 +126,12 @@ func TestUC_401RefreshFailsFailover(t *testing.T) {
 	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
 	defer fallback.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "primary", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
@@ -175,12 +176,12 @@ func TestUC_429RetryAfterSkipsProvider(t *testing.T) {
 	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
 	defer fallback.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: up.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "primary", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
@@ -222,18 +223,18 @@ func TestUC_UpstreamTimeoutFailover(t *testing.T) {
 	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
 	defer fallback.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"slow":     {OpenAIBaseURL: slow.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "slow", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
 			},
 		},
-		Scheduling: Scheduling{UpstreamTimeout: "200ms"},
+		Scheduling: configdomain.Scheduling{UpstreamTimeout: "200ms"},
 	}
 	p := newProxyWithStatic(t, cfg, map[string]string{"slow": "s", "fallback": "f"})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
@@ -283,11 +284,11 @@ func TestUC_ClientDisconnectStopsUpstream(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"codex": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},
 		},
 	}
@@ -325,12 +326,12 @@ func TestUC_AllTargetsFailReturns502(t *testing.T) {
 	defer a.Close()
 	b, _ := newCaptureUpstream(500, `{}`)
 	defer b.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"a": {OpenAIBaseURL: a.URL, Provider: testProviderID},
 			"b": {OpenAIBaseURL: b.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "a", Model: "m1", Priority: 1},
 				{Provider: "b", Model: "m1", Priority: 2},
@@ -408,13 +409,13 @@ func (p *recordingProv) Refresh() error {
 
 // newProxyWithStatic builds a Proxy whose providers are all testProv with the
 // given keys, so tests don't hit real auth files.
-func newProxyWithStatic(t testing.TB, cfg *Config, keys map[string]string) *Proxy {
+func newProxyWithStatic(t testing.TB, cfg *configdomain.Config, keys map[string]string) *Proxy {
 	return newProxyWithStaticAt(t, cfg, filepath.Join(t.TempDir(), "quota_state.json"), keys)
 }
 
 // newProxyWithStaticAt is newProxyWithStatic with an explicit state path, for
 // tests that assert on state persisted next to quota_state.json.
-func newProxyWithStaticAt(t testing.TB, cfg *Config, qpath string, keys map[string]string) *Proxy {
+func newProxyWithStaticAt(t testing.TB, cfg *configdomain.Config, qpath string, keys map[string]string) *Proxy {
 	p := newTestProxyAt(t, cfg, qpath)
 	for name, key := range keys {
 		p.providers[name] = &testProv{key: key}

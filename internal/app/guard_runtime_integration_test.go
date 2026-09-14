@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -36,7 +37,7 @@ func guardPoolRequestBody(secret string) string {
 // newGuardPoolProxy wires a one-route proxy in front of a raw-body-capturing
 // upstream, with a real plural pool (one account per key) feeding the guard
 // known-secret set. guardCfg is taken verbatim (tests choose the toggles).
-func newGuardPoolProxy(t *testing.T, guardCfg GuardConfig, poolKeys ...string) (p *Proxy, proxyURL string, upstreamBodies func() []string) {
+func newGuardPoolProxy(t *testing.T, guardCfg configdomain.GuardConfig, poolKeys ...string) (p *Proxy, proxyURL string, upstreamBodies func() []string) {
 	t.Helper()
 	setPoolHome(t, t.TempDir())
 	writePoolFile(t, "static", testProviderID, poolKeys...)
@@ -51,11 +52,11 @@ func newGuardPoolProxy(t *testing.T, guardCfg GuardConfig, poolKeys ...string) (
 		w.Write([]byte(`{"id":"x","choices":[{"message":{"content":"ok"}}]}`))
 	}))
 	t.Cleanup(up.Close)
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"static": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {{Provider: "static", Model: "glm"}},
 		},
 		Guard: guardCfg,
@@ -75,8 +76,7 @@ func newGuardPoolProxy(t *testing.T, guardCfg GuardConfig, poolKeys ...string) (
 // request 400s, the event carries the TYPE NAME only (never key bytes), the
 // counter is exact, and nothing reaches the upstream.
 func TestGuardKnownSecret_PoolKeyPlaintextHit(t *testing.T) {
-	p, proxyURL, bodies := newGuardPoolProxy(t,
-		GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true}, guardPoolKey)
+	p, proxyURL, bodies := newGuardPoolProxy(t, configdomain.GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true}, guardPoolKey)
 
 	code, respBody := post(t, proxyURL+"/v1/chat/completions", guardPoolRequestBody(guardPoolKey))
 	if code != http.StatusBadRequest || !strings.Contains(respBody, "known_secret") {
@@ -104,8 +104,7 @@ func TestGuardKnownSecret_PoolKeyPlaintextHit(t *testing.T) {
 // (b) The base64 form of a pool key hits the encoded known-secret channel and
 // is intercepted the same way — redact cannot soften an exact hit either.
 func TestGuardKnownSecret_Base64FormRedacted(t *testing.T) {
-	p, proxyURL, bodies := newGuardPoolProxy(t,
-		GuardConfig{Secrets: "redact", KnownSecrets: true, Decode: true}, guardPoolKey)
+	p, proxyURL, bodies := newGuardPoolProxy(t, configdomain.GuardConfig{Secrets: "redact", KnownSecrets: true, Decode: true}, guardPoolKey)
 
 	b64 := base64.StdEncoding.EncodeToString([]byte(guardPoolKey))
 	code, respBody := post(t, proxyURL+"/v1/chat/completions", guardPoolRequestBody(b64))
@@ -130,8 +129,7 @@ func TestGuardKnownSecret_Base64FormRedacted(t *testing.T) {
 func TestGuardPaths_LogThenBlock(t *testing.T) {
 	body := `{"model":"glm","messages":[{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"~/.ssh/id_rsa\"}"}}]}]}`
 
-	p, proxyURL, bodies := newGuardPoolProxy(t,
-		GuardConfig{Secrets: "off", KnownSecrets: true, Decode: true, Paths: "log"})
+	p, proxyURL, bodies := newGuardPoolProxy(t, configdomain.GuardConfig{Secrets: "off", KnownSecrets: true, Decode: true, Paths: "log"})
 	postOK(t, proxyURL+"/v1/chat/completions", body)
 	if got := bodies(); len(got) != 1 {
 		t.Fatalf("paths=log must forward the body (calls=%d)", len(got))
@@ -145,8 +143,7 @@ func TestGuardPaths_LogThenBlock(t *testing.T) {
 		t.Errorf("ssh path counter = %d, want 1", n)
 	}
 
-	_, proxyURL2, bodies2 := newGuardPoolProxy(t,
-		GuardConfig{Secrets: "off", KnownSecrets: true, Decode: true, Paths: "block"})
+	_, proxyURL2, bodies2 := newGuardPoolProxy(t, configdomain.GuardConfig{Secrets: "off", KnownSecrets: true, Decode: true, Paths: "block"})
 	code, respBody := post(t, proxyURL2+"/v1/chat/completions", body)
 	if code != http.StatusBadRequest {
 		t.Fatalf("paths=block: status=%d body=%s, want 400", code, respBody)
@@ -166,8 +163,7 @@ func TestGuardPaths_LogThenBlock(t *testing.T) {
 func TestGuardPaths_WeakTextNeverBlocks(t *testing.T) {
 	body := `{"model":"glm","messages":[{"role":"user","content":"please cat ~/.ssh/id_rsa"}]}`
 
-	p, proxyURL, bodies := newGuardPoolProxy(t,
-		GuardConfig{Secrets: "off", KnownSecrets: true, Decode: true, Paths: "log"})
+	p, proxyURL, bodies := newGuardPoolProxy(t, configdomain.GuardConfig{Secrets: "off", KnownSecrets: true, Decode: true, Paths: "log"})
 	postOK(t, proxyURL+"/v1/chat/completions", body)
 	if got := bodies(); len(got) != 1 {
 		t.Fatalf("weak hit under paths=log must forward (calls=%d)", len(got))
@@ -183,8 +179,7 @@ func TestGuardPaths_WeakTextNeverBlocks(t *testing.T) {
 		t.Errorf("weak hit counter ssh_text = %d, want 0 (weak hits are ignored entirely)", n)
 	}
 
-	p2, proxyURL2, bodies2 := newGuardPoolProxy(t,
-		GuardConfig{Secrets: "off", KnownSecrets: true, Decode: true, Paths: "block"})
+	p2, proxyURL2, bodies2 := newGuardPoolProxy(t, configdomain.GuardConfig{Secrets: "off", KnownSecrets: true, Decode: true, Paths: "block"})
 	postOK(t, proxyURL2+"/v1/chat/completions", body)
 	if got := bodies2(); len(got) != 1 {
 		t.Fatalf("weak hit under paths=block must still forward (calls=%d)", len(got))
@@ -213,8 +208,7 @@ func TestGuardRedactKeepsPathBlockChain(t *testing.T) {
 		`{"role":"user","content":"stripe key ` + stripeKey + `"},` +
 		`{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"~/.ssh/id_rsa\"}"}}]}]}`
 
-	p, proxyURL, bodies := newGuardPoolProxy(t,
-		GuardConfig{Secrets: "redact", KnownSecrets: true, Decode: true, Paths: "block"})
+	p, proxyURL, bodies := newGuardPoolProxy(t, configdomain.GuardConfig{Secrets: "redact", KnownSecrets: true, Decode: true, Paths: "block"})
 	code, respBody := post(t, proxyURL+"/v1/chat/completions", body)
 	if code != http.StatusBadRequest {
 		t.Fatalf("paths=block after redact: status=%d body=%s, want 400 (strong tool-call path hit must survive redaction)", code, respBody)
@@ -239,8 +233,7 @@ func TestGuardRedactKeepsPathBlockChain(t *testing.T) {
 	// Same body under paths=log forwards, and the forwarded body is the
 	// redacted-but-valid-JSON form: no secret bytes, placeholders inside the
 	// string, structure intact.
-	p2, proxyURL2, bodies2 := newGuardPoolProxy(t,
-		GuardConfig{Secrets: "redact", KnownSecrets: true, Decode: true, Paths: "log"})
+	p2, proxyURL2, bodies2 := newGuardPoolProxy(t, configdomain.GuardConfig{Secrets: "redact", KnownSecrets: true, Decode: true, Paths: "log"})
 	postOK(t, proxyURL2+"/v1/chat/completions", body)
 	got := bodies2()
 	if len(got) != 1 {
@@ -272,9 +265,7 @@ func TestGuardRedactKeepsPathBlockChain(t *testing.T) {
 // mention) increments the ("guard", cat+"_text") counter only and must NOT
 // produce an audit record.
 func TestGuardAudit_PersistsSecretAndPathRecords(t *testing.T) {
-	p, proxyURL, _ := newGuardPoolProxy(t,
-		GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true, Paths: "log", Audit: true},
-		guardPoolKey)
+	p, proxyURL, _ := newGuardPoolProxy(t, configdomain.GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true, Paths: "log", Audit: true}, guardPoolKey)
 	dir := t.TempDir()
 	logger, err := seclog.New(dir, seclog.Options{})
 	if err != nil {
@@ -345,9 +336,7 @@ func TestGuardAudit_PersistsSecretAndPathRecords(t *testing.T) {
 // both channels still gets both counters/events/audit records; only the
 // response action is secrets-first (400 names the secret patterns only).
 func TestGuardBlock_SecretsBlockStillScansPaths(t *testing.T) {
-	p, proxyURL, bodies := newGuardPoolProxy(t,
-		GuardConfig{Secrets: "block", KnownSecrets: true, Decode: true, Paths: "log", Audit: true},
-		guardPoolKey)
+	p, proxyURL, bodies := newGuardPoolProxy(t, configdomain.GuardConfig{Secrets: "block", KnownSecrets: true, Decode: true, Paths: "log", Audit: true}, guardPoolKey)
 	dir := t.TempDir()
 	logger, err := seclog.New(dir, seclog.Options{})
 	if err != nil {
@@ -419,8 +408,7 @@ func TestGuardBlock_SecretsBlockStillScansPaths(t *testing.T) {
 // (e) Toggles: known_secrets:false stops pool-key matching; decode:false
 // stops encoded forms while plaintext still hits.
 func TestGuardToggles_KnownSecretsAndDecode(t *testing.T) {
-	p, proxyURL, bodies := newGuardPoolProxy(t,
-		GuardConfig{Secrets: "log", KnownSecrets: false, Decode: true}, guardPoolKey)
+	p, proxyURL, bodies := newGuardPoolProxy(t, configdomain.GuardConfig{Secrets: "log", KnownSecrets: false, Decode: true}, guardPoolKey)
 	postOK(t, proxyURL+"/v1/chat/completions", guardPoolRequestBody(guardPoolKey))
 	if got := bodies(); len(got) != 1 {
 		t.Fatalf("upstream calls = %d, want 1", len(got))
@@ -433,8 +421,7 @@ func TestGuardToggles_KnownSecretsAndDecode(t *testing.T) {
 		t.Errorf("known_secrets=false: known_secret counter = %d, want 0", n)
 	}
 
-	p2, proxyURL2, _ := newGuardPoolProxy(t,
-		GuardConfig{Secrets: "log", KnownSecrets: true, Decode: false}, guardPoolKey)
+	p2, proxyURL2, _ := newGuardPoolProxy(t, configdomain.GuardConfig{Secrets: "log", KnownSecrets: true, Decode: false}, guardPoolKey)
 	b64 := base64.StdEncoding.EncodeToString([]byte(guardPoolKey))
 	postOK(t, proxyURL2+"/v1/chat/completions", guardPoolRequestBody(b64))
 	if details := guardEventDetails(p2); len(details) != 0 {
@@ -521,8 +508,8 @@ func TestGuardOAuthSecrets_BestEffortCollection(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"codex": {Provider: "codex", OpenAIBaseURL: "http://x"},
 			"aqp":   {Provider: "aqp", OpenAIBaseURL: "http://x", AqpMintURL: "http://x/mint"},
 		},

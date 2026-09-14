@@ -3,9 +3,6 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"model-proxy/internal/upstreamproxy"
-	"net/http"
 	"time"
 )
 
@@ -54,27 +51,7 @@ func (p *ZhipuProvider) FetchModels() ([]string, error) {
 // failure (auth, HTTP, non-zhipu body) returns a BillingUnknown snapshot
 // carrying the error (never a non-nil error) so the poll stays alive.
 func (p *ZhipuProvider) Quota() (*QuotaSnapshot, error) {
-	req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
-	if err := p.AuthHeaders(req); err != nil {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
-	}
-	for k, v := range p.cfg.Headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
-	if err != nil {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
-	}
-	s, _ := ParseZhipuQuota(body, "")
-	if s == nil {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: "not zhipu quota format"}, nil
-	}
-	return s, nil
+	return bigmodelQuota(p.cfg.UsageURL, p.AuthHeaders, p.cfg.Headers)
 }
 
 // ParseZhipuQuota parses Zhipu BigModel's /api/monitor/usage/quota/limit body into

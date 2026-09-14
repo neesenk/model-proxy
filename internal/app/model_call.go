@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"time"
 
@@ -77,7 +78,7 @@ func (x scheduledExchange) exchange(ctx context.Context, snap forward.Snapshot, 
 		exchangeSessionKey("guard-adjudicate", model), targets, snap.RouteKeys, snap.Generation)
 	// The exchange speaks the anthropic leg only: keep targets whose provider
 	// has an anthropic_base_url and a live impl, in scheduled order.
-	capable := make([]RouteTarget, 0, len(ordered))
+	capable := make([]configdomain.RouteTarget, 0, len(ordered))
 	for _, t := range ordered {
 		provCfg, okCfg := snap.Cfg.Providers[t.Provider]
 		if !okCfg || provCfg.AnthropicBaseURL == "" {

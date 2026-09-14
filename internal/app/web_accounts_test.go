@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/zalando/go-keyring"
 	"model-proxy/internal/accounts"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/credstore"
 	"model-proxy/internal/login"
 	"model-proxy/internal/provider"
@@ -96,7 +97,7 @@ func TestAccountsListCodex(t *testing.T) {
 
 	w, p := newTestWeb(t)
 	p.mu.Lock()
-	p.cfg.Providers["codex"] = Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
+	p.cfg.Providers["codex"] = configdomain.Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
 
 	rec := httptest.NewRecorder()
@@ -180,9 +181,9 @@ func TestAccountsAddRemove(t *testing.T) {
 	w, p := newTestWeb(t)
 	w.configFile = "test" // reload will fail (no such file); add must still succeed
 	p.mu.Lock()
-	p.cfg.Providers["zhipu"] = Provider{Provider: "zhipu", OpenAIBaseURL: "https://x", UsageURL: up.URL}
-	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
-	p.cfg.Providers["codex"] = Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
+	p.cfg.Providers["zhipu"] = configdomain.Provider{Provider: "zhipu", OpenAIBaseURL: "https://x", UsageURL: up.URL}
+	p.cfg.Providers["aqp"] = configdomain.Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
+	p.cfg.Providers["codex"] = configdomain.Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
 
 	// aqp/codex add must 400 — they use the async login flow (POST /api/login/<n>/start),
@@ -266,7 +267,7 @@ func TestAccountsAddRemove(t *testing.T) {
 	}))
 	defer badUp.Close()
 	p.mu.Lock()
-	p.cfg.Providers["zhipu"] = Provider{Provider: "zhipu", OpenAIBaseURL: "https://x", UsageURL: badUp.URL}
+	p.cfg.Providers["zhipu"] = configdomain.Provider{Provider: "zhipu", OpenAIBaseURL: "https://x", UsageURL: badUp.URL}
 	p.mu.Unlock()
 	recVal := httptest.NewRecorder()
 	serveWeb(w, recVal, httptest.NewRequest("POST", "/api/accounts/zhipu",
@@ -287,7 +288,7 @@ func TestAccountsRouting(t *testing.T) {
 	w, p := newTestWeb(t)
 	w.configFile = "test"
 	p.mu.Lock()
-	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
+	p.cfg.Providers["aqp"] = configdomain.Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
 	mux := http.NewServeMux()
 	w.Register(mux)
@@ -351,7 +352,7 @@ func TestAqpLoginFlow(t *testing.T) {
 
 	w, p := newTestWeb(t)
 	p.mu.Lock()
-	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
+	p.cfg.Providers["aqp"] = configdomain.Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
 	// Seam: point the AQP client at the mock base so BootstrapLoginURL /
 	// PollSession / fetchAPIKey hit the httptest.Server instead of the real
@@ -418,7 +419,7 @@ func TestAqpLoginFlow_Error(t *testing.T) {
 
 	w, p := newTestWeb(t)
 	p.mu.Lock()
-	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
+	p.cfg.Providers["aqp"] = configdomain.Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
 	w.newAqpClientFn = func(store string) *login.AqpClient {
 		client := login.NewAqpClient(store)
@@ -460,7 +461,7 @@ func TestAqpLoginFlow_JobErrorResolvesSession(t *testing.T) {
 
 	w, p := newTestWeb(t)
 	p.mu.Lock()
-	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
+	p.cfg.Providers["aqp"] = configdomain.Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
 	w.newAqpClientFn = func(store string) *login.AqpClient {
 		client := login.NewAqpClient(store)
@@ -495,8 +496,8 @@ func TestAqpLoginFlow_JobErrorResolvesSession(t *testing.T) {
 func TestLoginRouting(t *testing.T) {
 	w, p := newTestWeb(t)
 	p.mu.Lock()
-	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
-	p.cfg.Providers["codex"] = Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
+	p.cfg.Providers["aqp"] = configdomain.Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
+	p.cfg.Providers["codex"] = configdomain.Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
 	mux := http.NewServeMux()
 	w.Register(mux)
@@ -564,7 +565,7 @@ func TestCodexLoginFlow(t *testing.T) {
 
 	w, p := newTestWeb(t)
 	p.mu.Lock()
-	p.cfg.Providers["codex"] = Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
+	p.cfg.Providers["codex"] = configdomain.Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
 	// Seam: point codex options at the mock so requestUserCode / pollForToken /
 	// exchangeCodeForTokens hit the httptest.Server instead of the real OpenAI
@@ -641,7 +642,7 @@ func TestCodexLoginFlowKeychainCommitAndDelete(t *testing.T) {
 
 	w, p := newTestWeb(t)
 	p.mu.Lock()
-	p.cfg.Providers["codex"] = Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
+	p.cfg.Providers["codex"] = configdomain.Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
 	w.newCodexOptions = func() *login.CodexLoginServerOptions {
 		o := &login.CodexLoginServerOptions{}
@@ -800,7 +801,7 @@ func TestLoginStartByProviderID(t *testing.T) {
 	// Custom-named provider whose provider_id is aqp. Before the fix this name
 	// was switched on directly and fell through to default (400).
 	p.mu.Lock()
-	p.cfg.Providers["aqp-alt"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
+	p.cfg.Providers["aqp-alt"] = configdomain.Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
 	w.newAqpClientFn = func(store string) *login.AqpClient {
 		client := login.NewAqpClient(store)

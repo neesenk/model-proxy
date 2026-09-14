@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
 	"net/http"
 	"net/http/httptest"
@@ -33,13 +34,13 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 	}))
 	defer gwUp.Close()
 
-	cfg := &Config{
+	cfg := &configdomain.Config{
 
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"codex": {OpenAIBaseURL: codexUp.URL, Provider: testProviderID},
 			"aqp":   {OpenAIBaseURL: gwUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},
 			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
 		},
@@ -93,12 +94,12 @@ func TestForward_UnknownModel(t *testing.T) {
 		w.Write([]byte(`{}`))
 	}))
 	defer gwUp.Close()
-	cfg := &Config{
+	cfg := &configdomain.Config{
 
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"aqp": {OpenAIBaseURL: gwUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"gpt-5.5": {{Provider: "aqp", Model: "gpt-5.5"}},
 		},
 	}
@@ -223,10 +224,10 @@ func TestRouteExpansionFansOutPool(t *testing.T) {
 	setPoolHome(t, dir)
 	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B")
 
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen:    "127.0.0.1:1",
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
-		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5", Priority: 7}}},
+		Providers: map[string]configdomain.Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5", Priority: 7}}},
 	}
 	p := newTestProxy(t, cfg)
 	got := p.expandedRoutes["glm-5"]
@@ -262,10 +263,10 @@ func TestRouteExpansionFansOutPool(t *testing.T) {
 
 	// Non-pooled provider passes through unchanged (single-account / not-logged-in
 	// → loadPool returns 0 accounts → not in poolIndex → passthrough).
-	cfg2 := &Config{
+	cfg2 := &configdomain.Config{
 		Listen:    "127.0.0.1:1",
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
-		Routes:    map[string][]RouteTarget{"m": {{Provider: "z", Model: "m"}}},
+		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
+		Routes:    map[string][]configdomain.RouteTarget{"m": {{Provider: "z", Model: "m"}}},
 	}
 	p2 := newTestProxy(t, cfg2)
 	got2 := p2.expandedRoutes["m"]
@@ -302,9 +303,9 @@ func TestSessionStickySpreadsSessions(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
 	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B", "KEY-C")
-	cfg := &Config{Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
-		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
+	cfg := &configdomain.Config{Listen: "127.0.0.1:1",
+		Providers: map[string]configdomain.Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
 	p := newTestProxy(t, cfg)
 	sortedVids := append([]string(nil), p.poolIndex["zhipu"]...)
 	sort.Strings(sortedVids)
@@ -328,9 +329,9 @@ func TestSessionStickyReusesWithinDwell(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
 	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B")
-	cfg := &Config{Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
-		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
+	cfg := &configdomain.Config{Listen: "127.0.0.1:1",
+		Providers: map[string]configdomain.Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
 	p := newTestProxy(t, cfg)
 	first := scheduleFirst(p, "glm-5", "s1")
 	if first == "" {
@@ -350,9 +351,9 @@ func TestSessionStickyFallsBackWithoutHeader(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
 	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B", "KEY-C")
-	cfg := &Config{Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
-		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
+	cfg := &configdomain.Config{Listen: "127.0.0.1:1",
+		Providers: map[string]configdomain.Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
 	p := newTestProxy(t, cfg)
 	got := map[string]bool{}
 	for i := 0; i < 5; i++ {
@@ -375,9 +376,9 @@ func TestSessionStickySkipsCircuitOpen(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
 	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B", "KEY-C")
-	cfg := &Config{Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
-		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
+	cfg := &configdomain.Config{Listen: "127.0.0.1:1",
+		Providers: map[string]configdomain.Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
 	p := newTestProxy(t, cfg)
 	// Block the id-sorted first virtual for an hour.
 	sortedVids := append([]string(nil), p.poolIndex["zhipu"]...)
@@ -427,12 +428,12 @@ func TestForward_ExpandedPooledRouteHitsVirtual(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"zhipu": {OpenAIBaseURL: up.URL, Provider: "zhipu"},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm-5": {{Provider: "zhipu", Model: "glm-5"}},
 		},
 	}
@@ -476,12 +477,12 @@ func TestExpandTarget_PreservesProtocol(t *testing.T) {
 	setPoolHome(t, dir)
 	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B")
 
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			// Anthropic-exposed name routed to an OpenAI backend: needs conversion.
 			"claude": {{Provider: "zhipu", Model: "glm-5", Priority: 2, Protocol: "openai"}},
 		},
@@ -513,11 +514,11 @@ func TestExpandTarget_PreservesProtocol(t *testing.T) {
 // --- UC10: GET /v1/models returns exposed names (explicit routes ∪ derived) ---
 
 func TestUC_ModelsEndpointUnion(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"aqp": {OpenAIBaseURL: "http://x", Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm-5.2":         {{Provider: "aqp", Model: "glm-5.2"}},
 			"deepseek-v4-pro": {{Provider: "aqp", Model: "deepseek-v4-pro"}},
 			// claude-* aliases are plain explicit routes now — listable like any
@@ -572,12 +573,12 @@ func TestUC_ModelsEndpointUnion(t *testing.T) {
 func TestUC_DebugScheduleReportsSticky(t *testing.T) {
 	up, _ := newCaptureUpstream(200, `{}`)
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"a": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 			"b": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "a", Model: "m1", Priority: 1},
 				{Provider: "b", Model: "m1", Priority: 2},
@@ -639,12 +640,12 @@ func TestUC_StickySameProvider(t *testing.T) {
 		w.Write([]byte(`{}`))
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"a": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 			"b": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "a", Model: "m1", Priority: 1},
 				{Provider: "b", Model: "m1", Priority: 2},
@@ -681,11 +682,11 @@ func TestUC_AqpBetaAndHeaders(t *testing.T) {
 		w.Write([]byte(`{}`))
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"aqp": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: "aqp"},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
 		},
 	}
@@ -723,11 +724,11 @@ func TestUC_CodexStoreFalseInjected(t *testing.T) {
 		w.Write([]byte(`{}`))
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"codex": {OpenAIBaseURL: up.URL, Provider: "codex"},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},
 		},
 	}
@@ -770,15 +771,15 @@ func TestUC_DeepSeekDualProtocolBaseURL(t *testing.T) {
 	}))
 	defer oaiUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"deepseek": {
 				OpenAIBaseURL:    oaiUp.URL,
 				AnthropicBaseURL: anthUp.URL,
 				Provider:         "deepseek",
 			},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"deepseek-v4-pro": {{Provider: "deepseek", Model: "deepseek-v4-pro"}},
 		},
 	}
@@ -805,9 +806,9 @@ func TestUC_DeepSeekDualProtocolBaseURL(t *testing.T) {
 // --- UC16: unknown path → 502; /health → 200 ---
 
 func TestUC_UnknownPathAndHealth(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
 	}
 	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
@@ -838,9 +839,9 @@ func TestUC_UnknownPathAndHealth(t *testing.T) {
 // --- UC17: missing model field → 400 ---
 
 func TestUC_MissingModelField400(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
 	}
 	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
@@ -856,9 +857,9 @@ func TestUC_MissingModelField400(t *testing.T) {
 // --- UC18: unparseable JSON body → 400 ---
 
 func TestUC_UnparseableBody400(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
 	}
 	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
@@ -881,9 +882,9 @@ func TestUC_ClientAuthNotForwarded(t *testing.T) {
 		w.Write([]byte(`{}`))
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{"a": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"a": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
 	}
 	p := newProxyWithStatic(t, cfg, map[string]string{"a": "proxy-key"})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))

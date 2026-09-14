@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"model-proxy/internal/display"
-	"model-proxy/internal/upstreamproxy"
 	"net/http"
 	"strings"
 	"time"
@@ -128,28 +126,21 @@ func (p *KimiCodeProvider) Quota() (*QuotaSnapshot, error) {
 	if url == "" {
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: "openai_base_url not set"}, nil
 	}
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Accept", "application/json")
-	if err := p.AuthHeaders(req); err != nil {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
-	}
+	headers := map[string]string{"Accept": "application/json"}
 	for k, v := range p.cfg.Headers {
-		req.Header.Set(k, v)
+		headers[k] = v
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
-	if err != nil {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		hint := fmt.Sprintf("HTTP %d", resp.StatusCode)
-		if resp.StatusCode == 404 {
-			hint = "HTTP 404 — usage endpoint unavailable (no Kimi Code membership?)"
-		} else if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			hint = fmt.Sprintf("HTTP %d — check API key", resp.StatusCode)
+	body, fail, ok := usageGet(url, p.AuthHeaders, headers, func(code int) string {
+		switch code {
+		case 404:
+			return "HTTP 404 — usage endpoint unavailable (no Kimi Code membership?)"
+		case 401, 403:
+			return fmt.Sprintf("HTTP %d — check API key", code)
 		}
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: hint}, nil
+		return fmt.Sprintf("HTTP %d", code)
+	})
+	if !ok {
+		return fail, nil
 	}
 	s, _ := ParseKimiCodeQuota(body, "")
 	if s == nil {

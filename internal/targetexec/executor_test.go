@@ -316,6 +316,80 @@ func TestExecutorCachesOnlyCleanEOF(t *testing.T) {
 	}
 }
 
+func TestExecutorSkipsCacheForTerminalIncompleteStream(t *testing.T) {
+	streamResponse := func(body string) *http.Response {
+		response := testResponse(http.StatusOK, body)
+		response.Header.Set("Content-Type", "text/event-stream")
+		return response
+	}
+	head := "event: message_start\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"k3\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n" +
+		"event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"partial\"}}\n\n"
+	tail := "event: content_block_stop\n" +
+		"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+		"event: message_delta\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":3}}\n\n" +
+		"event: message_stop\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+	tests := []struct {
+		name        string
+		body        string
+		wantEntries uint64
+	}{
+		// Live failure shape (kimi-code 2026-09-14): the upstream abandoned the
+		// generation mid-thinking and closed with a bare message_stop — no
+		// content_block_stop, no message_delta/stop_reason. Caching it replayed
+		// the truncated stream to every client retry within the TTL.
+		{name: "bare message_stop not cached", body: head + "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"},
+		{name: "complete stream cached", body: head + tail, wantEntries: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &executorTestProvider{}
+			writer := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/messages", nil)
+			plan := NewPlan(PlanInput{
+				Target:         configdomain.RouteTarget{Provider: "upstream", Model: "k3"},
+				ProviderConfig: configdomain.Provider{Provider: "test", AnthropicBaseURL: "https://upstream.test"},
+				Provider:       provider,
+				ClientProtocol: protocol.Anthropic,
+				ClientPath:     "/v1/messages",
+			})
+			cache := responsecache.New(responsecache.Options{
+				TTL: time.Minute, MaxEntries: 4, MaxBodyBytes: 1024,
+			})
+			runtime := Runtime{Cache: cache}
+			attempt := NewAttempt(
+				runtime,
+				plan,
+				Exchange{
+					Request: request,
+					Writer:  writer,
+					Body:    []byte(`{"model":"k3","stream":true,"max_tokens":64,"messages":[]}`),
+				},
+				Scope{CacheKey: "cache-key", CalledModel: "k3"},
+				Policy{LastTarget: true},
+			)
+			result := (Executor{
+				Client: &sequenceDoer{responses: []*http.Response{streamResponse(test.body)}},
+				State:  &executorState{},
+			}).Execute(attempt)
+			if !result.Committed {
+				t.Fatalf("result = %+v", result)
+			}
+			if writer.Body.String() != test.body {
+				t.Fatalf("client body = %q, want passthrough of %q", writer.Body.String(), test.body)
+			}
+			if got := cache.Stats().Entries; got != test.wantEntries {
+				t.Fatalf("cache entries = %d, want %d", got, test.wantEntries)
+			}
+		})
+	}
+}
+
 func TestExecutorRecordsModeAdaptedResponsesStateOnce(t *testing.T) {
 	provider := &executorTestProvider{}
 	writer := httptest.NewRecorder()

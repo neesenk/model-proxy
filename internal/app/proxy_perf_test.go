@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/providerbuild"
 	"net/http"
 	"net/http/httptest"
@@ -49,17 +50,17 @@ func newProxyServer(t testing.TB, upstreamURL, auth string, modelMap map[string]
 func newProxyServerP(t testing.TB, upstreamURL, auth string, modelMap map[string]string) (*Proxy, *httptest.Server) {
 	seen := map[string]bool{}
 	var provModels []string
-	routes := map[string][]RouteTarget{}
+	routes := map[string][]configdomain.RouteTarget{}
 	for alias, real := range modelMap {
 		if !seen[real] {
 			seen[real] = true
 			provModels = append(provModels, real)
 		}
-		routes[alias] = []RouteTarget{{Provider: "t", Model: real}}
+		routes[alias] = []configdomain.RouteTarget{{Provider: "t", Model: real}}
 	}
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:0",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"t": {OpenAIBaseURL: upstreamURL, Provider: testProviderID, Models: provModels},
 		},
 		Routes: routes,
@@ -67,7 +68,7 @@ func newProxyServerP(t testing.TB, upstreamURL, auth string, modelMap map[string
 		// guard scans the full body on every request (its own cost belongs to
 		// its own guard benchmarks). A zero-value Guard config defaults to
 		// "log" (scan on), which would silently dominate the LargeBody case.
-		Guard: GuardConfig{Secrets: "off"},
+		Guard: configdomain.GuardConfig{Secrets: "off"},
 	}
 	p := newTestProxy(t, cfg)
 	return p, httptest.NewServer(http.HandlerFunc(p.Handler))
@@ -372,13 +373,13 @@ func BenchmarkProxy_Forward_Guard_LargeBody(b *testing.B) {
 	silenceLog(b)
 	up := newUpstream(jsonOK)
 	defer up.Close()
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:0",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"t": {OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"claude-opus-4-7"}},
 		},
-		Routes: map[string][]RouteTarget{"claude-opus-4-7": {{Provider: "t", Model: "claude-opus-4-7"}}},
-		Guard:  GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true, Paths: "log"},
+		Routes: map[string][]configdomain.RouteTarget{"claude-opus-4-7": {{Provider: "t", Model: "claude-opus-4-7"}}},
+		Guard:  configdomain.GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true, Paths: "log"},
 	}
 	p := newTestProxy(b, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
@@ -408,7 +409,7 @@ func BenchmarkProxy_Forward_Guard_LargeBody(b *testing.B) {
 // race_budget_*_test.go) keeps >10x headroom so a loaded CI machine cannot
 // flake.
 func TestProxy_Guard_CleanBodyScanBudget(t *testing.T) {
-	sc, err := buildGuardScanner(&Config{Guard: GuardConfig{KnownSecrets: true, Decode: true}},
+	sc, err := buildGuardScanner(&configdomain.Config{Guard: configdomain.GuardConfig{KnownSecrets: true, Decode: true}},
 		[]providerbuild.Secret{{Value: "poolkey-" + strings.Repeat("wX9q", 8), Label: "pool:test#1/api_key"}})
 	if err != nil {
 		t.Fatal(err)

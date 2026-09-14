@@ -15,7 +15,13 @@ request log、`internal/cache`、
   `accept-language`）与原始请求 body 的 SHA-256，各字段长度前缀编码
   （body 是任意字节，裸分隔符拼接存在理论碰撞）；
 - 只缓存 `<300`、完整读到 EOF、未超过 body cap 的响应；
-- 客户端断开或半截响应不得入缓存；
+- 客户端断开或半截响应不得入缓存。流式响应的"半截"按协议终态序列判定
+  （`protocol.StreamTerminalComplete`，在 `targetexec` commit 的 cache Put 前执行）：
+  anthropic 需带非空 `stop_reason` 的 `message_delta` + `message_stop`，openai 需
+  非空 `finish_reason` 或 `[DONE]`，responses 需 `response.completed`/`response.incomplete`；
+  终态错误帧（anthropic `error`、openai error chunk、`response.failed`）一律视为不完整。
+  干净 EOF 但终态缺失（实测：kimi-code 上游弃单后只发裸 `message_stop`）照旧透传给
+  客户端，但不入缓存——否则同一请求的重试会在 TTL 内反复吃到截断副本；
 - 转换后的响应删除旧 Content-Length/Transfer-Encoding 后保存；mode mismatch
   重写响应时保存的是 live 路径实际发送的 content-type（客户端最终收到的
   协议体与 content-type 一致）；
@@ -226,7 +232,8 @@ fan-out 之后的降级（insufficient_proposers、body_build_failed）仍计入
 
 ## 回归测试
 
-- cache 完整 EOF、client cancel、转换响应 header。
+- cache 完整 EOF、client cancel、转换响应 header、流式终态序列准入
+  （裸 `message_stop` 截断不入缓存，`executor_test.go`/`stream_complete_test.go`）。
 - shadow detached transport 路径的 reload generation、Close 时 logger drain 顺序、
   协议与 base URL 校验、并发 cap、sample_rate=0。
 - request log 大 body 的 metadata 内存边界和跨文件乱序。

@@ -2,6 +2,7 @@ package app
 
 import (
 	"io"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -44,10 +45,10 @@ func newRecordingHTTPProxy(t *testing.T) *recordingHTTPProxy {
 	return proxy
 }
 
-func proxyTestConfig(upstreamURL string) *Config {
-	return &Config{
+func proxyTestConfig(upstreamURL string) *configdomain.Config {
+	return &configdomain.Config{
 		Listen: "127.0.0.1:0",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"proxied": {Provider: "static", OpenAIBaseURL: upstreamURL, Models: []string{"m"}},
 			"plain":   {Provider: "static", OpenAIBaseURL: upstreamURL, Models: []string{"m"}},
 		},
@@ -62,7 +63,7 @@ func TestClientForPerProviderProxy(t *testing.T) {
 	proxy := newRecordingHTTPProxy(t)
 
 	cfg := proxyTestConfig(upstream.URL)
-	cfg.Providers["proxied"] = Provider{
+	cfg.Providers["proxied"] = configdomain.Provider{
 		Provider: "static", OpenAIBaseURL: upstream.URL, Models: []string{"m"},
 		ProxyURL: proxy.server.URL,
 	}
@@ -106,7 +107,7 @@ func TestClientForGlobalProxyAndOffOverride(t *testing.T) {
 
 	cfg := proxyTestConfig(upstream.URL)
 	cfg.Proxy = proxy.server.URL
-	cfg.Providers["plain"] = Provider{
+	cfg.Providers["plain"] = configdomain.Provider{
 		Provider: "static", OpenAIBaseURL: upstream.URL, Models: []string{"m"},
 		ProxyURL: "off",
 	}

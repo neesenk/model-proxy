@@ -1,16 +1,22 @@
 package protocol
 
-import "io"
+import (
+	"io"
+
+	"model-proxy/internal/protocol/wire"
+)
 
 // wireProtocol is the closed set of client/upstream wire contracts understood
-// by the proxy. Keeping protocol identity typed prevents direction strings from
-// being rebuilt independently by request, response, and streaming entrypoints.
-type wireProtocol string
+// by the proxy. The canonical definition lives in the leaf package
+// internal/protocol/wire (shared with config validation); the alias keeps
+// protocol identity typed so direction strings are not rebuilt independently
+// by request, response, and streaming entrypoints.
+type wireProtocol = wire.Protocol
 
 const (
-	protocolAnthropic wireProtocol = "anthropic"
-	protocolOpenAI    wireProtocol = "openai"
-	protocolResponses wireProtocol = "responses"
+	protocolAnthropic = wire.Anthropic
+	protocolOpenAI    = wire.OpenAI
+	protocolResponses = wire.Responses
 )
 
 var supportedWireProtocols = [...]wireProtocol{
@@ -20,13 +26,7 @@ var supportedWireProtocols = [...]wireProtocol{
 }
 
 func parseWireProtocol(value string) (wireProtocol, bool) {
-	protocol := wireProtocol(value)
-	switch protocol {
-	case protocolAnthropic, protocolOpenAI, protocolResponses:
-		return protocol, true
-	default:
-		return "", false
-	}
+	return wire.Parse(value)
 }
 
 type conversionPair struct {

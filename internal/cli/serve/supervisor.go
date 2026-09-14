@@ -323,34 +323,35 @@ const (
 	stopKillExitWait = 5 * time.Second
 )
 
-// CmdStop stops a running `serve daemon` by reading the pid file (derived from
-// the same log path the supervisor used) and sending SIGTERM. The supervisor
-// forwards SIGTERM to its worker, waits for it, removes the pid file, and
-// exits. Waits up to 15s for the process to disappear; falls back to SIGKILL
-// and then verifies the exit before claiming success.
-func CmdStop(env DaemonEnv, sa Args, yellow, gray, green func(string) string) {
+// resolveDaemonPid resolves the live daemon supervisor's process from the
+// pid file derived from the configured log path — the shared prelude of
+// CmdStop and CmdReload. ok == false means a user-facing message was already
+// printed (no daemon running, or a stale pid file removed) and the caller
+// must return. Terminal errors (bad config, unreadable/invalid pid file,
+// unfindable process) stay log.Fatal, matching the historical contract.
+func resolveDaemonPid(env DaemonEnv, sa Args, yellow, gray func(string) string) (proc *os.Process, pid int, pidPath string, ok bool) {
 	cfg, err := env.LoadConfig(sa.Config)
 	if err != nil {
 		log.Fatal(err)
 	}
 	logFile := ResolveLogFile(sa, cfg)
-	pidPath := PidFilePath(logFile)
+	pidPath = PidFilePath(logFile)
 
 	pidStr, err := os.ReadFile(pidPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			fmt.Println(yellow("No daemon running.") + " (pid file not found: " + gray(pidPath) + ")")
-			return
+			return nil, 0, pidPath, false
 		}
 		log.Fatal(err)
 	}
-	pid := parsePidFileContents(pidStr)
+	pid = parsePidFileContents(pidStr)
 	if pid <= 0 {
 		log.Fatalf("invalid pid in %s: %q", pidPath, string(pidStr))
 	}
 
 	// Check the process exists and is signalable.
-	proc, err := os.FindProcess(pid)
+	proc, err = os.FindProcess(pid)
 	if err != nil {
 		log.Fatalf("find process %d: %v", pid, err)
 	}
@@ -358,6 +359,19 @@ func CmdStop(env DaemonEnv, sa Args, yellow, gray, green func(string) string) {
 		// Process is gone — clean up the stale pid file.
 		os.Remove(pidPath)
 		fmt.Println(yellow("Daemon not running.") + " (removed stale pid file " + gray(pidPath) + ")")
+		return nil, 0, pidPath, false
+	}
+	return proc, pid, pidPath, true
+}
+
+// CmdStop stops a running `serve daemon` by reading the pid file (derived from
+// the same log path the supervisor used) and sending SIGTERM. The supervisor
+// forwards SIGTERM to its worker, waits for it, removes the pid file, and
+// exits. Waits up to 15s for the process to disappear; falls back to SIGKILL
+// and then verifies the exit before claiming success.
+func CmdStop(env DaemonEnv, sa Args, yellow, gray, green func(string) string) {
+	proc, pid, pidPath, ok := resolveDaemonPid(env, sa, yellow, gray)
+	if !ok {
 		return
 	}
 
@@ -407,29 +421,8 @@ func waitForProcessExit(proc *os.Process, timeout time.Duration) bool {
 // CmdReload sends SIGHUP to a running daemon's supervisor, which forwards it
 // to the worker for hot config reload.
 func CmdReload(env DaemonEnv, sa Args, yellow, gray, green func(string) string) {
-	cfg, err := env.LoadConfig(sa.Config)
-	if err != nil {
-		log.Fatal(err)
-	}
-	logFile := ResolveLogFile(sa, cfg)
-	pidPath := PidFilePath(logFile)
-
-	pidStr, err := os.ReadFile(pidPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Println(yellow("No daemon running.") + " (pid file not found: " + gray(pidPath) + ")")
-			return
-		}
-		log.Fatal(err)
-	}
-	pid := parsePidFileContents(pidStr)
-	if pid <= 0 {
-		log.Fatalf("invalid pid in %s: %q", pidPath, string(pidStr))
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil || proc.Signal(syscall.Signal(0)) != nil {
-		os.Remove(pidPath)
-		fmt.Println(yellow("Daemon not running.") + " (removed stale pid file)")
+	proc, pid, _, ok := resolveDaemonPid(env, sa, yellow, gray)
+	if !ok {
 		return
 	}
 	fmt.Printf("Reloading model-proxy daemon (pid=%d)...\n", pid)

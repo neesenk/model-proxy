@@ -23,7 +23,7 @@ import (
 // the quota poll ticker captured at Start — a hot quota_poll_interval change
 // must not split the window from the actual polling cadence (pitfalls #29).
 // The fallback covers degenerate trackers in tests.
-func (p *Proxy) quotaFreshnessMaxAge(fallback *Config) time.Duration {
+func (p *Proxy) quotaFreshnessMaxAge(fallback *configdomain.Config) time.Duration {
 	if p.quota != nil {
 		return p.quota.FreshnessMaxAge()
 	}
@@ -65,7 +65,7 @@ func (p *Proxy) recordAttemptQuality(name string, ttft time.Duration, generation
 
 // recordFailure increments a provider's consecutive failures and opens the
 // circuit (for cooldown) once the threshold is reached. Clears any half-open slot.
-func (p *Proxy) recordFailure(name string, sched Scheduling, generations ...uint64) {
+func (p *Proxy) recordFailure(name string, sched configdomain.Scheduling, generations ...uint64) {
 	p.runtimeState.RecordFailure(
 		name,
 		sched.Threshold(),
@@ -82,7 +82,7 @@ func (p *Proxy) modelLocked(provider, model string, now time.Time) bool {
 // recordModelFailure locks (provider, model) for model_lockout. Model-level
 // failures (404 / model-denied / empty 200) never touch the account's circuit
 // breaker — the account may serve its other models fine.
-func (p *Proxy) recordModelFailure(provider, model string, sched Scheduling, generations ...uint64) {
+func (p *Proxy) recordModelFailure(provider, model string, sched configdomain.Scheduling, generations ...uint64) {
 	p.runtimeState.RecordModelFailure(
 		provider,
 		model,
@@ -133,7 +133,7 @@ func (p *Proxy) freezeHealth(name string, known []string) (frozen []string) {
 // decision: allDown = EVERY target is currently unavailable; allRateLimited =
 // every down reason is rate-limit/quota class (the honest terminal status is
 // then 429, not 502); earliest = soonest recovery across targets.
-func (p *Proxy) cooldownState(targets []RouteTarget, now time.Time, quotaMaxAge time.Duration) (allDown, allRateLimited bool, earliest time.Time) {
+func (p *Proxy) cooldownState(targets []configdomain.RouteTarget, now time.Time, quotaMaxAge time.Duration) (allDown, allRateLimited bool, earliest time.Time) {
 	runtimeTargets := make([]runtimestate.Target, len(targets))
 	for index, target := range targets {
 		runtimeTargets[index] = runtimestate.Target{
@@ -152,7 +152,7 @@ func (p *Proxy) cooldownState(targets []RouteTarget, now time.Time, quotaMaxAge 
 // made the all-recover-simultaneously case terminally fail. The round budget in
 // forward (≤2 retries) bounds the loop. Quota-exhausted (skipped) targets never
 // count as recovered.
-func (p *Proxy) hasRecoveredUntried(targets []RouteTarget, tried map[string]bool, now time.Time, quotaMaxAge time.Duration) bool {
+func (p *Proxy) hasRecoveredUntried(targets []configdomain.RouteTarget, tried map[string]bool, now time.Time, quotaMaxAge time.Duration) bool {
 	runtimeTargets := make([]runtimestate.Target, len(targets))
 	for index, target := range targets {
 		runtimeTargets[index] = runtimestate.Target{

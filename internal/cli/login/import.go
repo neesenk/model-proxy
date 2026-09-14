@@ -1,10 +1,8 @@
 package login
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
-	"model-proxy/internal/display"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,31 +174,16 @@ func runFromEnvLogin(cfg *configdomain.Config, provName string, prov configdomai
 // dedup, save and confirmation print are identical to the interactive flow.
 func runVolcengineLoginFromEnv(cfg *configdomain.Config, provName string, prov configdomain.Provider, apiKey, ak, sk, label string, replace bool) error {
 	id := accounts.AccountID(prov.Provider, accounts.Credentials{APIKey: apiKey, AccessKey: ak})
-	if !replace {
-		existing, err := logincore.LoadPool(provName, prov.Provider)
-		if err != nil {
-			return fmt.Errorf("load pool: %w", err)
-		}
-		for _, a := range existing.Accounts {
-			if a.ID == id {
-				fmt.Printf("Account %q is already logged in. Replace its key? [y/N] ", a.Label)
-				reader := bufio.NewReader(os.Stdin)
-				ans, _ := reader.ReadString('\n')
-				if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ans)), "y") {
-					return fmt.Errorf("login cancelled")
-				}
-				break
-			}
-		}
-		replace = true // user confirmed; tell the core to overwrite
+	if err := confirmReplace(provName, prov.Provider, id, replace); err != nil {
+		return err
 	}
+	replace = true // user confirmed (or no duplicate); tell the core to overwrite
 	if prov.UsageURL != "" || (ak != "" && sk != "") {
 		fmt.Fprintf(os.Stderr, "Validating credentials...\n")
 	}
 	if _, err := logincore.AddVolcengineAccount(cfg, provName, prov, accounts.Credentials{APIKey: apiKey, AccessKey: ak, SecretKey: sk}, label, replace); err != nil {
 		return err
 	}
-	pool, _ := logincore.LoadPool(provName, prov.Provider)
-	fmt.Println(display.Green("✓ Saved account ") + display.Gray(accounts.Mask(id)+" ("+logincore.AccountLabel(pool, id)+")"))
+	printSaved(provName, prov.Provider, id)
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"model-proxy/internal/appapi"
+	configdomain "model-proxy/internal/config"
 	obscounters "model-proxy/internal/observe/counters"
 	observestats "model-proxy/internal/observe/stats"
 	"net/http"
@@ -743,7 +744,7 @@ func TestAPIAnalyticsUsesCatalogThenDetachedOverride(t *testing.T) {
 
 	p := &Proxy{
 		generationState: generationState{
-			cfg: &Config{Pricing: PricingConfig{
+			cfg: &configdomain.Config{Pricing: configdomain.PricingConfig{
 				Enabled:   true,
 				TTL:       "24h",
 				SourceURL: priceServer.URL,
@@ -819,7 +820,7 @@ func TestAPIAnalyticsUsesCatalogThenDetachedOverride(t *testing.T) {
 
 	p.mu.Lock()
 	nextConfig := *p.cfg
-	nextConfig.Prices = map[string]PriceConfig{
+	nextConfig.Prices = map[string]configdomain.PriceConfig{
 		"glm-4.6": {Input: 2, Output: 4, CacheRead: 0.5, CacheWrite: 1},
 	}
 	p.cfg = &nextConfig

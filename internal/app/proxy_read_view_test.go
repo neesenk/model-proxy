@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,21 +19,21 @@ import (
 )
 
 func TestAdminServiceReturnsDetachedSnapshots(t *testing.T) {
-	p := newTestProxy(t, &Config{
+	p := newTestProxy(t, &configdomain.Config{
 		Listen: "127.0.0.1:1234",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"up": {Provider: testProviderID, OpenAIBaseURL: "https://example.test"},
 		},
 	})
 	p.routeWarnings = []string{"warning-one"}
-	p.recordModelFailure("up", "m", Scheduling{ModelLockout: "1h"})
+	p.recordModelFailure("up", "m", configdomain.Scheduling{ModelLockout: "1h"})
 
 	ports := p.adminPorts(func() string { return "" }, nil, nil)
 	service := admin.New(ports)
 	dashboard := service.Dashboard(time.Now())
 	providers := ports.ProviderConfigs()
 	dashboard.Warnings[0] = "changed"
-	providers["up"] = Provider{Provider: "changed"}
+	providers["up"] = configdomain.Provider{Provider: "changed"}
 
 	p.mu.RLock()
 	warning := p.routeWarnings[0]
@@ -49,12 +50,12 @@ func TestAdminServiceReturnsDetachedSnapshots(t *testing.T) {
 
 func TestAdminDashboardScheduleUsesCapturedRuntimeSnapshot(t *testing.T) {
 	now := time.Date(2026, 7, 29, 18, 0, 0, 0, time.UTC)
-	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"a": {Provider: testProviderID},
 			"b": {Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{"m": {
+		Routes: map[string][]configdomain.RouteTarget{"m": {
 			{Provider: "a", Model: "m", Priority: 1},
 			{Provider: "b", Model: "m", Priority: 1},
 		}},
@@ -121,8 +122,8 @@ func TestAdminDashboardScheduleUsesCapturedRuntimeSnapshot(t *testing.T) {
 // returns a detached deep copy the admin projection can map freely.
 func TestAdminModelCapsPortProjectsDetachedSnapshot(t *testing.T) {
 	probed := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
-	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"up": {Provider: testProviderID, OpenAIBaseURL: "https://example.test", Models: []string{"m1"}},
 		},
 	})
@@ -164,8 +165,8 @@ func TestAdminModelCapsPortProjectsDetachedSnapshot(t *testing.T) {
 // ModelCapsReplace accepts the captured fingerprint while it still matches,
 // replaces the matrix wholesale and preserves the fingerprint for boot restore.
 func TestAdminModelCapsReplacePortStampsCurrentFingerprint(t *testing.T) {
-	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"up": {Provider: testProviderID, OpenAIBaseURL: "https://example.test", Models: []string{"m1"}},
 		},
 	})
@@ -197,8 +198,8 @@ func TestAdminModelCapsReplacePortStampsCurrentFingerprint(t *testing.T) {
 // ModelRefreshRuntime captures the named provider's impl, falling back to the
 // credential pool's first virtual for pooled parents.
 func TestAdminProviderImplPortResolvesPoolFallback(t *testing.T) {
-	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"up": {Provider: testProviderID, OpenAIBaseURL: "https://example.test", Models: []string{"m1"}},
 		},
 	})
@@ -226,13 +227,13 @@ func TestAdminModelRefreshRejectsPreReloadFingerprint(t *testing.T) {
 	defer up.Close()
 	t.Setenv("MP_MODELSDEV_URL", up.URL)
 	file := filepath.Join(t.TempDir(), "config.yaml")
-	write := func(base string) *Config {
+	write := func(base string) *configdomain.Config {
 		t.Helper()
 		text := fmt.Sprintf("listen: 127.0.0.1:0\nproviders:\n  up: {provider_id: zhipu, openai_base_url: %s, models: [m]}\n", base)
 		if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		cfg, err := LoadConfig(file)
+		cfg, err := configdomain.LoadConfig(file)
 		if err != nil {
 			t.Fatal(err)
 		}

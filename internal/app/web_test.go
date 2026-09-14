@@ -7,6 +7,7 @@ import (
 	"io"
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/appapi"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/login"
 	"model-proxy/internal/observe/counters"
 	runtimewire "model-proxy/internal/runtime/wirecap"
@@ -117,7 +118,7 @@ func TestAPIStatusCacheField(t *testing.T) {
 	}
 
 	// Enabled path with one recorded hit + one stored entry.
-	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 cache: {enabled: true, ttl: 1h}
@@ -174,7 +175,7 @@ func TestAPIStatusModelLocks(t *testing.T) {
 	w, p := newTestWeb(t)
 	mux := http.NewServeMux()
 	w.Register(mux)
-	p.recordModelFailure("zhipu", "glm-x", Scheduling{ModelLockout: "1h"})
+	p.recordModelFailure("zhipu", "glm-x", configdomain.Scheduling{ModelLockout: "1h"})
 	p.runtimeState.RecordModelFailure("zhipu", "old", -time.Minute, 0)
 
 	rec := httptest.NewRecorder()
@@ -399,7 +400,7 @@ func TestWebCloseCancelsAqpLoginBeforeCredentialCommit(t *testing.T) {
 
 	w, p := newTestWeb(t)
 	p.mu.Lock()
-	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://unused.invalid"}
+	p.cfg.Providers["aqp"] = configdomain.Provider{Provider: "aqp", OpenAIBaseURL: "https://unused.invalid"}
 	p.mu.Unlock()
 	w.newAqpClientFn = func(storePath string) *login.AqpClient {
 		client := login.NewAqpClient(storePath)
@@ -447,7 +448,7 @@ func TestWebCloseCancelsCodexLoginBeforeCredentialCommit(t *testing.T) {
 
 	w, p := newTestWeb(t)
 	p.mu.Lock()
-	p.cfg.Providers["codex"] = Provider{Provider: "codex", OpenAIBaseURL: "https://unused.invalid"}
+	p.cfg.Providers["codex"] = configdomain.Provider{Provider: "codex", OpenAIBaseURL: "https://unused.invalid"}
 	p.mu.Unlock()
 	w.newCodexOptions = func() *login.CodexLoginServerOptions {
 		return &login.CodexLoginServerOptions{
@@ -575,9 +576,9 @@ func newWebMux(t *testing.T, proxy *Proxy) *http.ServeMux {
 // branch inside proxy.Handler is only reachable with web disabled — the Live
 // tab was dead in every default deployment (EventSource stuck reconnecting).
 func TestMuxServesAPIEventsWithWebEnabled(t *testing.T) {
-	proxy := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
+	proxy := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	})
 	mux := newWebMux(t, proxy)
 
@@ -626,9 +627,9 @@ func TestMuxServesAPIEventsWithWebEnabled(t *testing.T) {
 // the live stream carries agent/model/provider metadata, so it joins the same
 // loopback trust boundary as the rest of the admin API.
 func TestMuxAPIEventsGuardedAgainstRebinding(t *testing.T) {
-	proxy := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
+	proxy := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	})
 	mux := newWebMux(t, proxy)
 
@@ -649,9 +650,9 @@ func TestMuxAPIEventsGuardedAgainstRebinding(t *testing.T) {
 // (non-loopback Host) must be rejected exactly like the admin API — it rides
 // the same proxy handler but must not escape the loopback trust boundary.
 func TestDebugScheduleGuardedAgainstRebinding(t *testing.T) {
-	proxy := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
+	proxy := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	})
 	req := httptest.NewRequest(http.MethodGet, "/debug/schedule", nil)
 	req.Header.Set("Origin", "http://evil.example")
@@ -687,7 +688,7 @@ func TestHandleAccountAdd_ReloadFailureWarning(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer valSrv.Close()
-	cfg, _ := LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: "+valSrv.URL+"}\n"))
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: "+valSrv.URL+"}\n"))
 	p := newTestProxy(t, cfg)
 	// configFile points at a non-existent path → reload's LoadConfig read fails.
 	w := NewWebServer(p, "/no/such/config.yaml")
@@ -749,7 +750,7 @@ func TestWebServesUI(t *testing.T) {
 
 func newTestWeb(t *testing.T) (*WebServer, *Proxy) {
 	t.Helper()
-	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 `))

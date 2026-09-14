@@ -98,32 +98,11 @@ func unexpectedRepositoryImports(f *ast.File, allowed map[string]bool) []string 
 	return sortedNames(out)
 }
 
-// requiredConfigCompatAliases is the exact alias set the internal/app config
-// facade (internal/app/config_alias.go) may declare — nothing more, nothing
-// less.
-func requiredConfigCompatAliases() map[string]string {
-	return map[string]string{
-		"CacheConfig":           "CacheConfig",
-		"Config":                "Config",
-		"ConversionConfig":      "ConversionConfig",
-		"FusionConfig":          "FusionConfig",
-		"GuardAdjudicateConfig": "AdjudicateConfig",
-		"GuardConfig":           "GuardConfig",
-		"PeakConfig":            "PeakConfig",
-		"PeakSegment":           "PeakSegment",
-		"PriceConfig":           "PriceConfig",
-		"PricingConfig":         "PricingConfig",
-		"Provider":              "Provider",
-		"RequestLogConfig":      "RequestLogConfig",
-		"RouteTarget":           "RouteTarget",
-		"Scheduling":            "Scheduling",
-		"ShadowTarget":          "ShadowTarget",
-		"StatsConfig":           "StatsConfig",
-		"WebAuthConfig":         "WebAuthConfig",
-		"WebConfig":             "WebConfig",
-	}
-}
-
+// configCompatViolationsForAliases checks a config-facade file (a narrow
+// alias+delegate seam over internal/config) against its expected alias set.
+// No facade currently survives in the repo — the internal/app config_alias.go
+// seam is dissolved and the ownership contract pins its absence — but the
+// checker stays covered by the self-tests below.
 func configCompatViolationsForAliases(f *ast.File, expectedAliases map[string]string) []string {
 	var out []string
 	configPackage := ""

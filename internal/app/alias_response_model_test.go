@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,10 +40,10 @@ func TestForward_AliasResponseModelNormalizationE2E(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"kimi-k3": {{Provider: "z", Model: "k3"}}},
-		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"kimi-k3": {{Provider: "z", Model: "k3"}}},
+		Cache:     configdomain.CacheConfig{Enabled: true, TTL: "1h"},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["z"] = &testProv{key: "k"}

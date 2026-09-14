@@ -2,6 +2,7 @@ package app
 
 import (
 	"io"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -47,7 +48,7 @@ func TestForward_CfgReadNoRaceWithReload(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadConfig(cfgPath)
+	cfg, err := configdomain.LoadConfig(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +140,7 @@ func TestResetStatsNoRaceWithReload(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadConfig(cfgPath)
+	cfg, err := configdomain.LoadConfig(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}

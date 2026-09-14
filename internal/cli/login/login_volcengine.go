@@ -1,10 +1,8 @@
 package login
 
 import (
-	"bufio"
 	"fmt"
 	"model-proxy/internal/accounts"
-	"model-proxy/internal/display"
 	logincore "model-proxy/internal/login"
 	"os"
 	"strings"
@@ -57,24 +55,10 @@ func RunVolcengineLoginWithInput(cfg *configdomain.Config, provName string, prov
 
 	// Resolve replace confirmation BEFORE the lock (stdin must never block the
 	// cross-process lock).
-	if !replace {
-		existing, err := logincore.LoadPool(provName, prov.Provider)
-		if err != nil {
-			return fmt.Errorf("load pool: %w", err)
-		}
-		for _, a := range existing.Accounts {
-			if a.ID == id {
-				fmt.Printf("Account %q is already logged in. Replace its key? [y/N] ", a.Label)
-				reader := bufio.NewReader(os.Stdin)
-				ans, _ := reader.ReadString('\n')
-				if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ans)), "y") {
-					return fmt.Errorf("login cancelled")
-				}
-				break
-			}
-		}
-		replace = true // user confirmed; tell the core to overwrite
+	if err := confirmReplace(provName, prov.Provider, id, replace); err != nil {
+		return err
 	}
+	replace = true // user confirmed (or no duplicate); tell the core to overwrite
 
 	// Announce validation (UX parity with the apikey login's "Validating API
 	// key..." line). One line covering whatever AddVolcengineAccount will probe
@@ -89,7 +73,6 @@ func RunVolcengineLoginWithInput(cfg *configdomain.Config, provName string, prov
 	}
 	// Print the confirmation line (label resolved from the freshly-saved pool,
 	// which may have been re-sorted by the pool save).
-	pool, _ := logincore.LoadPool(provName, prov.Provider)
-	fmt.Println(display.Green("✓ Saved account ") + display.Gray(accounts.Mask(id)+" ("+logincore.AccountLabel(pool, id)+")"))
+	printSaved(provName, prov.Provider, id)
 	return nil
 }

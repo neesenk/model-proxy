@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
 	"net/http"
 	"net/http/httptest"
@@ -36,12 +37,12 @@ func TestScheduleStatus_PoolGrouping(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
 	writePoolFile(t, "zhipu", "zhipu", "K1", "K2", "K3")
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:0",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"zhipu": {OpenAIBaseURL: "http://x", Provider: "zhipu"},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm-5.2": {{Provider: "zhipu", Model: "glm-5.2", Priority: 1}},
 		},
 	}
@@ -91,8 +92,8 @@ func TestScheduleStatus_PoolGrouping(t *testing.T) {
 // for non-pooled providers).
 func TestScheduleStatus_NoPoolWhenSingle(t *testing.T) {
 	p := newQuotaProxy(t,
-		map[string]Provider{"a": {}},
-		map[string][]RouteTarget{"m": {{Provider: "a", Priority: 1}}})
+		map[string]configdomain.Provider{"a": {}},
+		map[string][]configdomain.RouteTarget{"m": {{Provider: "a", Priority: 1}}})
 	staticSurplus(p, "a", 0.5, 0.5)
 	var st struct {
 		Models map[string]struct {
@@ -130,19 +131,19 @@ func TestScheduleStatus_NoPoolWhenSingle(t *testing.T) {
 // cooldownCfg builds a two-target route over the given upstreams with the
 // wait-retry knobs set for fast tests (retry_wait 10s = real default; short
 // backoffs elsewhere).
-func cooldownCfg(primary, fallback *httptest.Server, retryWait string) *Config {
-	return &Config{
-		Providers: map[string]Provider{
+func cooldownCfg(primary, fallback *httptest.Server, retryWait string) *configdomain.Config {
+	return &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "primary", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
 			},
 		},
-		Scheduling: Scheduling{
+		Scheduling: configdomain.Scheduling{
 			CircuitThreshold: 3, CircuitCooldown: "5m", RateLimitBackoff: "10s",
 			UpstreamTimeout: "5s", StickyDwell: "0s", RetryWait: retryWait,
 		},

@@ -2,6 +2,7 @@ package app
 
 import (
 	"io"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,18 +40,18 @@ func TestForward_CommittedSSEStreamMidFailureIsNotRecalled(t *testing.T) {
 	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
 	defer fallback.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "primary", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
 			},
 		},
-		Scheduling: Scheduling{CircuitThreshold: 3},
+		Scheduling: configdomain.Scheduling{CircuitThreshold: 3},
 	}
 	p, dir, shutdown := newReqLogProxy(t, cfg)
 	defer shutdown()
@@ -134,18 +135,18 @@ func TestForward_DialRefusedFailsOver(t *testing.T) {
 	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
 	defer fallback.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: deadURL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "primary", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
 			},
 		},
-		Scheduling: Scheduling{CircuitThreshold: 3, RetryWait: "0"},
+		Scheduling: configdomain.Scheduling{CircuitThreshold: 3, RetryWait: "0"},
 	}
 	p := newProxyWithStatic(t, cfg, map[string]string{"primary": "p", "fallback": "f"})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
@@ -178,7 +179,7 @@ func TestForward_DialRefusedFailsOver(t *testing.T) {
 // Non-LLM paths (proto=="") are the exception: they 502 without a live event,
 // so browser probes cannot pollute the Live view.
 func TestForward_EarlyEventsHaveRequestID(t *testing.T) {
-	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 routes:
@@ -257,9 +258,9 @@ func TestForwardAdaptsUpstreamSSEToClientJSON(t *testing.T) {
 		io.WriteString(w, "data: [DONE]\n\n")
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
@@ -291,9 +292,9 @@ func TestForwardAdaptsUpstreamJSONToClientSSE(t *testing.T) {
 		io.WriteString(w, `{"id":"c1","object":"chat.completion","model":"gpt-x","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`)
 	}))
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"codex-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"codex-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
@@ -335,9 +336,9 @@ func TestForwardConvertsSSEAfterCommentHeartbeat(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
@@ -382,11 +383,11 @@ func newDeepSeekTestProxy(t *testing.T, openaiURL, anthropicURL string) *httptes
 	if err := os.WriteFile(keyFile, []byte(`{"api_key":"sk-test-ds"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"deepseek": {OpenAIBaseURL: openaiURL, AnthropicBaseURL: anthropicURL, Provider: "deepseek"},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"deepseek-v4-pro": {{Provider: "deepseek", Model: "deepseek-v4-pro"}},
 		},
 	}

@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,7 +22,7 @@ func TestCacheStateRoundTrip(t *testing.T) {
 	qpath := filepath.Join(home, ".model-proxy", "quota_state.json")
 	t.Setenv("HOME", home)
 
-	cfg, err := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+	cfg, err := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 cache: {enabled: true, ttl: 1h}
@@ -104,7 +105,7 @@ func TestCacheStateResetPersistsZero(t *testing.T) {
 	qpath := filepath.Join(home, ".model-proxy", "quota_state.json")
 	t.Setenv("HOME", home)
 
-	cfg, err := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+	cfg, err := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 cache: {enabled: true, ttl: 1h}
@@ -169,7 +170,7 @@ func cacheReloadFixture(t *testing.T) (*Proxy, func(bool)) {
 		}
 	}
 	write(true)
-	cfg, err := LoadConfig(path)
+	cfg, err := configdomain.LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +255,7 @@ func TestCacheStateResetSerializesConcurrentSaves(t *testing.T) {
 }
 
 func TestCacheStateResetWriteFailureKeepsCounters(t *testing.T) {
-	p := newTestProxy(t, &Config{Cache: CacheConfig{Enabled: true}})
+	p := newTestProxy(t, &configdomain.Config{Cache: configdomain.CacheConfig{Enabled: true}})
 	p.cache.Lookup("miss", "m", time.Now())
 	// A directory at the destination makes the atomic rename fail on all OSes.
 	if err := os.Mkdir(p.cacheStatePath, 0o700); err != nil {

@@ -14,7 +14,7 @@ import (
 
 // startRuntimeServices initializes and starts process-owned optional services.
 // Direct NewProxy callers stay lightweight until this method is called.
-func (p *Proxy) StartRuntimeServices(cfg *Config) {
+func (p *Proxy) StartRuntimeServices(cfg *configdomain.Config) {
 	p.initStats(cfg.Stats)
 	p.lifecycle.Run(func(stop <-chan struct{}) {
 		p.statsFlushLoop(stop)

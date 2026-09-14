@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"io"
+	configdomain "model-proxy/internal/config"
 	runtimestate "model-proxy/internal/runtime"
 	"net/http"
 	"net/http/httptest"
@@ -48,8 +49,8 @@ func intHdr(k, v string) http.Header {
 }
 
 // schedCfg returns a Scheduling with short durations for fast tests.
-func schedCfg(threshold int, cooldown, rateBackoff, timeout, dwell string) Scheduling {
-	return Scheduling{
+func schedCfg(threshold int, cooldown, rateBackoff, timeout, dwell string) configdomain.Scheduling {
+	return configdomain.Scheduling{
 		CircuitThreshold: threshold,
 		CircuitCooldown:  cooldown,
 		RateLimitBackoff: rateBackoff,
@@ -69,12 +70,12 @@ func TestCircuit_OpensAfter3Failures(t *testing.T) {
 		return 200, `{"ok":true}`, nil, 0
 	})
 	defer fallback.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "primary", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
@@ -114,12 +115,12 @@ func TestCircuit_HalfOpenClosesOnSuccess(t *testing.T) {
 		return 200, `{"ok":true}`, nil, 0
 	})
 	defer fallback.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "primary", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
@@ -164,12 +165,12 @@ func TestRateLimit_SkipsProvider(t *testing.T) {
 		return 200, `{"ok":true}`, nil, 0
 	})
 	defer fallback.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "primary", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
@@ -209,12 +210,12 @@ func TestStickyDwell_HoldsThenReEvaluates(t *testing.T) {
 		return 200, `{"ok":true}`, nil, 0
 	})
 	defer fallback.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "primary", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
@@ -272,12 +273,12 @@ func TestUpstreamTimeout_Failover(t *testing.T) {
 		return 200, `{"ok":true}`, nil, 0
 	})
 	defer fallback.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "primary", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
@@ -330,12 +331,12 @@ func TestHalfOpen_4xxReleasesSlot(t *testing.T) {
 		return 200, `{"ok":true}`, nil, 0
 	})
 	defer fallback.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "primary", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
@@ -400,12 +401,12 @@ func TestHalfOpen_FailedProbeReopensCircuit(t *testing.T) {
 		return 200, `{"ok":true}`, nil, 0
 	})
 	defer fallback.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "primary", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
@@ -468,7 +469,7 @@ func TestHalfOpen_FailedProbeReopensCircuit(t *testing.T) {
 // by a fresh Proxy; expired cooldowns are dropped.
 func TestHealthPersist_RoundTrip(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	statePath := filepath.Join(t.TempDir(), "quota_state.json")
 
 	p1 := newTestProxyAt(t, cfg, statePath)
@@ -476,7 +477,7 @@ func TestHealthPersist_RoundTrip(t *testing.T) {
 	rateLimitUntil := now.Add(2 * time.Hour)
 	p1.recordRateLimit("a", rateLimitUntil, rlQuota)
 	modelLockBefore := time.Now().Add(time.Hour)
-	p1.recordModelFailure("a", "m1", Scheduling{ModelLockout: "1h"})
+	p1.recordModelFailure("a", "m1", configdomain.Scheduling{ModelLockout: "1h"})
 	modelLockAfter := time.Now().Add(time.Hour)
 	p1.learnParamBlock("a", "m1", "max_tokens")
 	// Circuit on a second provider + an already-expired rate limit (must drop).
@@ -534,7 +535,7 @@ func TestHealthPersist_RoundTrip(t *testing.T) {
 // (test binaries share the state file; daemons restart with edited configs).
 func TestHealthPersist_FingerprintMismatch(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	cfgA := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
+	cfgA := &configdomain.Config{Providers: map[string]configdomain.Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	statePath := filepath.Join(t.TempDir(), "quota_state.json")
 	p1 := newTestProxyAt(t, cfgA, statePath)
 	p1.recordRateLimit("a", time.Now().Add(2*time.Hour), rlQuota)
@@ -544,7 +545,7 @@ func TestHealthPersist_FingerprintMismatch(t *testing.T) {
 	p1.Close()
 
 	// Same provider NAME, different upstream URL → different fingerprint.
-	cfgB := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://y", Provider: testProviderID}}}
+	cfgB := &configdomain.Config{Providers: map[string]configdomain.Provider{"a": {OpenAIBaseURL: "http://y", Provider: testProviderID}}}
 	p2 := newTestProxyAt(t, cfgB, statePath)
 	_, frozen := p2.runtimeState.Dashboard(time.Now()).Providers["a"]
 	if frozen {
@@ -556,7 +557,7 @@ func TestHealthPersist_FingerprintMismatch(t *testing.T) {
 // (never failed → no health entry) must still persist + restore its blocklist.
 func TestHealthPersist_ParamBlockOnlyProvider(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	statePath := filepath.Join(t.TempDir(), "quota_state.json")
 	p1 := newTestProxyAt(t, cfg, statePath)
 	p1.learnParamBlock("a", "m1", "max_tokens")
@@ -582,7 +583,7 @@ func TestHealthPersist_ParamBlockOnlyProvider(t *testing.T) {
 // locks for the named provider (pooled parent = all its virtual accounts), or
 // everything when empty — and never touches param blocklists, sticky, or pins.
 func TestResetHealth(t *testing.T) {
-	cfg := &Config{Providers: map[string]Provider{
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
 		"a": {OpenAIBaseURL: "http://x", Provider: testProviderID},
 		"b": {OpenAIBaseURL: "http://y", Provider: testProviderID},
 	}}
@@ -594,8 +595,8 @@ func TestResetHealth(t *testing.T) {
 	p.recordRateLimit("a#v1", now.Add(time.Hour), rlQuota)
 	p.recordRateLimit("a#v2", now.Add(time.Hour), rlTransient)
 	p.recordRateLimit("b", now.Add(time.Hour), rlDaily)
-	p.recordModelFailure("a#v1", "m1", Scheduling{ModelLockout: "1h"})
-	p.recordModelFailure("b", "m2", Scheduling{ModelLockout: "1h"})
+	p.recordModelFailure("a#v1", "m1", configdomain.Scheduling{ModelLockout: "1h"})
+	p.recordModelFailure("b", "m2", configdomain.Scheduling{ModelLockout: "1h"})
 	p.learnParamBlock("a#v1", "m1", "max_tokens")
 	seedRuntimeSticky(t, p, "route1", "a#v1", now)
 	p.runtimeState.SetPin("route2", runtimestate.Pin{Provider: "a#v1"})
@@ -636,7 +637,7 @@ func TestHealthResetAPI(t *testing.T) {
 	mux := http.NewServeMux()
 	w.Register(mux)
 	p.recordRateLimit("zhipu", time.Now().Add(time.Hour), rlQuota)
-	p.recordModelFailure("zhipu", "glm-x", Scheduling{ModelLockout: "1h"})
+	p.recordModelFailure("zhipu", "glm-x", configdomain.Scheduling{ModelLockout: "1h"})
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/health/reset", strings.NewReader(`{"provider":"zhipu"}`)))
@@ -728,7 +729,7 @@ func TestHealthResetAPI_PersistsClearedState(t *testing.T) {
 // freeze-all, unlike resetHealth) — and never touches rate-limit cooldowns,
 // model locks, param blocklists, sticky, or pins.
 func TestFreezeHealth(t *testing.T) {
-	cfg := &Config{Providers: map[string]Provider{
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
 		"a": {OpenAIBaseURL: "http://x", Provider: testProviderID},
 		"b": {OpenAIBaseURL: "http://y", Provider: testProviderID},
 	}}
@@ -741,7 +742,7 @@ func TestFreezeHealth(t *testing.T) {
 	p.mu.Unlock()
 	now := time.Now()
 	p.recordRateLimit("a#v1", now.Add(time.Hour), rlQuota)
-	p.recordModelFailure("a#v1", "m1", Scheduling{ModelLockout: "1h"})
+	p.recordModelFailure("a#v1", "m1", configdomain.Scheduling{ModelLockout: "1h"})
 	p.learnParamBlock("a#v1", "m1", "max_tokens")
 	seedRuntimeSticky(t, p, "route1", "a#v1", now)
 	p.runtimeState.SetPin("route2", runtimestate.Pin{Provider: "a#v1"})
@@ -914,7 +915,7 @@ func TestHealthFreezeAPI_PersistsFrozenState(t *testing.T) {
 	}
 
 	// Restart on the same state file + config: the freeze restores.
-	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 `))
@@ -937,7 +938,7 @@ providers:
 // the provider with frozen:true + available:false, while schedule ordered
 // legitimately no longer lists it (it is excluded from scheduling).
 func TestHealthFreezeAPI_ProviderStaysInStatusPayload(t *testing.T) {
-	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 routes:

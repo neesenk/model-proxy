@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"model-proxy/internal/catalog"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
 	"net/http"
 	"net/http/httptest"
@@ -51,12 +52,12 @@ func TestForward_ContextCrossRoute(t *testing.T) {
 	}))
 	defer bigUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
 			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm":      {{Provider: "small-prov", Model: "small"}},
 			"glm-long": {{Provider: "big-prov", Model: "big"}},
 		},
@@ -118,12 +119,12 @@ func TestForward_CapabilityCrossRoute(t *testing.T) {
 	}))
 	defer visionUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"text-p":   {OpenAIBaseURL: textUp.URL, Provider: testProviderID},
 			"vision-p": {OpenAIBaseURL: visionUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm":        {{Provider: "text-p", Model: "text"}},
 			"glm-vision": {{Provider: "vision-p", Model: "vision"}},
 		},
@@ -191,12 +192,12 @@ func TestForward_CapabilityFilter_E2E(t *testing.T) {
 	}))
 	defer visionUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"text-p":   {OpenAIBaseURL: textUp.URL, Provider: testProviderID},
 			"vision-p": {OpenAIBaseURL: visionUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {
 				{Provider: "text-p", Model: "text", Priority: 1},
 				{Provider: "vision-p", Model: "vision", Priority: 2},
@@ -267,8 +268,8 @@ func TestForward_CapabilitiesOverride_E2E(t *testing.T) {
 	}))
 	defer blindUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"text-p": {OpenAIBaseURL: textUp.URL, Provider: testProviderID},
 			// Blind-spot provider: "gpt-blind" is NOT in the models.dev catalog;
 			// without the capabilities declaration an image request would never
@@ -277,7 +278,7 @@ func TestForward_CapabilitiesOverride_E2E(t *testing.T) {
 				"gpt-blind": {"image"},
 			}},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {
 				{Provider: "text-p", Model: "text", Priority: 1},
 				{Provider: "blind-p", Model: "gpt-blind", Priority: 2},
@@ -359,8 +360,8 @@ func TestForward_ForceProviderIncompatibleTargetDoesNotCrossRoute(t *testing.T) 
 	}))
 	defer compatibleUpstream.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"forced-text": {
 				OpenAIBaseURL: forcedUpstream.URL,
 				Provider:      testProviderID,
@@ -370,7 +371,7 @@ func TestForward_ForceProviderIncompatibleTargetDoesNotCrossRoute(t *testing.T) 
 				Provider:      testProviderID,
 			},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"public": {
 				{Provider: "forced-text", Model: "text-model"},
 			},
@@ -465,11 +466,11 @@ func newCaptureUpstream(status int, body string) (*httptest.Server, *[]string) {
 func TestForward_ClaudeAliasRoute(t *testing.T) {
 	up, seen := newCaptureUpstream(200, `{}`)
 	defer up.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"aqp": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm-5.2":           {{Provider: "aqp", Model: "glm-5.2"}},
 			"claude-sonnet-4-6": {{Provider: "aqp", Model: "glm-5.2"}},
 		},
@@ -518,12 +519,12 @@ func TestForward_Failover(t *testing.T) {
 	defer primary.Close()
 	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
 	defer fallback.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
 			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "primary", Model: "m1", Priority: 1},
 				{Provider: "fallback", Model: "m1", Priority: 2},
@@ -584,9 +585,9 @@ func TestProtocolHint(t *testing.T) {
 // TestNewProxy_RouteWarningsAppended: boot-time wiring — hazard warnings land
 // on p.routeWarnings (surfaced via /api/status + `models` CLI).
 func TestNewProxy_RouteWarningsAppended(t *testing.T) {
-	cfg := &Config{Providers: map[string]Provider{
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
 		"aqp": {Provider: "aqp", OpenAIBaseURL: "https://y"},
-	}, Routes: map[string][]RouteTarget{
+	}, Routes: map[string][]configdomain.RouteTarget{
 		"k2": {{Provider: "aqp", Model: "kimi-k2-thinking", Protocol: "openai"}},
 	}}
 	p := newTestProxy(t, cfg)

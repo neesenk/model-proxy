@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"model-proxy/internal/appapi"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,12 +38,12 @@ func TestPin_ForcesProvider(t *testing.T) {
 	}))
 	defer deepUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"zhipu":    {OpenAIBaseURL: zhipuUp.URL, Provider: testProviderID},
 			"deepseek": {OpenAIBaseURL: deepUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {
 				{Provider: "zhipu", Model: "glm", Priority: 1},
 				{Provider: "deepseek", Model: "glm", Priority: 2},
@@ -82,12 +83,12 @@ func TestPin_NoFailoverWhenPinned(t *testing.T) {
 	}))
 	defer deepUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"zhipu":    {OpenAIBaseURL: zhipuUp.URL, Provider: testProviderID},
 			"deepseek": {OpenAIBaseURL: deepUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {
 				{Provider: "zhipu", Model: "glm", Priority: 1},
 				{Provider: "deepseek", Model: "glm", Priority: 2},
@@ -117,9 +118,9 @@ func TestPin_NoFailoverWhenPinned(t *testing.T) {
 // TestSetPin_Validation: setPin rejects an unknown route and a provider the route
 // can't reach (a pin that would silently do nothing).
 func TestSetPin_Validation(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"glm": {{Provider: "zhipu", Model: "glm"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm": {{Provider: "zhipu", Model: "glm"}}},
 	}
 	p := newTestProxy(t, cfg)
 	if setPinForTest(p, "ghost-route", "zhipu", 0) {
@@ -138,12 +139,12 @@ func TestSetPin_Validation(t *testing.T) {
 // `ordered` keeps the unpinned chain (what unpinning restores) while `first`
 // stays the effective pin-applied choice.
 func TestScheduleStatus_ShowsPin(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"zhipu":    {OpenAIBaseURL: "https://x", Provider: testProviderID},
 			"deepseek": {OpenAIBaseURL: "https://y", Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {
 				{Provider: "zhipu", Model: "glm", Priority: 1},
 				{Provider: "deepseek", Model: "glm", Priority: 2},
@@ -180,9 +181,9 @@ func TestScheduleStatus_ShowsPin(t *testing.T) {
 // TestHandlePinAPI: POST /api/pin installs, GET /api/pin lists, DELETE removes;
 // POST to a bad provider is 400 with a clear message.
 func TestHandlePinAPI(t *testing.T) {
-	w := NewWebServer(newTestProxy(t, &Config{
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"glm": {{Provider: "zhipu", Model: "glm"}}},
+	w := NewWebServer(newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm": {{Provider: "zhipu", Model: "glm"}}},
 	}), "test-config.yaml")
 	mux := http.NewServeMux()
 	w.Register(mux)
@@ -258,16 +259,16 @@ func TestPin_BypassesCache(t *testing.T) {
 	}))
 	defer bUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"a": {OpenAIBaseURL: aUp.URL, Provider: testProviderID},
 			"b": {OpenAIBaseURL: bUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{"glm": {
+		Routes: map[string][]configdomain.RouteTarget{"glm": {
 			{Provider: "a", Model: "glm", Priority: 1},
 			{Provider: "b", Model: "glm", Priority: 2},
 		}},
-		Cache: CacheConfig{Enabled: true, TTL: "1h"},
+		Cache: configdomain.CacheConfig{Enabled: true, TTL: "1h"},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["a"] = &testProv{key: "a"}
@@ -323,12 +324,12 @@ func TestPin_ForcesThroughCircuit(t *testing.T) {
 	}))
 	defer bUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"a": {OpenAIBaseURL: aUp.URL, Provider: testProviderID},
 			"b": {OpenAIBaseURL: bUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {
 				{Provider: "a", Model: "glm", Priority: 1},
 				{Provider: "b", Model: "glm", Priority: 2},
@@ -342,7 +343,7 @@ func TestPin_ForcesThroughCircuit(t *testing.T) {
 		t.Fatal("setPin b failed")
 	}
 	// Open b's circuit (3 consecutive failures → circuit_threshold default 3).
-	sched := Scheduling{} // threshold()=3, cooldown()=10m
+	sched := configdomain.Scheduling{} // threshold()=3, cooldown()=10m
 	for i := 0; i < 3; i++ {
 		p.recordFailure("b", sched)
 	}
@@ -380,18 +381,18 @@ func TestPin_TTLExpiryRestoresScheduling(t *testing.T) {
 	})
 	defer bUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"a": {OpenAIBaseURL: aUp.URL, Provider: testProviderID},
 			"b": {OpenAIBaseURL: bUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {
 				{Provider: "a", Model: "glm", Priority: 1},
 				{Provider: "b", Model: "glm", Priority: 2},
 			},
 		},
-		Scheduling: Scheduling{CircuitThreshold: 3, RetryWait: "0"},
+		Scheduling: configdomain.Scheduling{CircuitThreshold: 3, RetryWait: "0"},
 	}
 	p := newProxyWithStatic(t, cfg, map[string]string{"a": "ka", "b": "kb"})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))

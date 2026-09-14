@@ -3,6 +3,7 @@ package app
 
 import (
 	"fmt"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/guard"
 	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/provider"
@@ -21,7 +22,7 @@ import (
 // decode: false disables the encoded-form channels (base64/hex/url). Bad
 // extra_patterns are rejected at config validate, so an error here means an
 // unvalidated Config — fail-closed (reload keeps the old generation).
-func buildGuardScanner(cfg *Config, secrets []providerbuild.Secret) (*guard.Scanner, error) {
+func buildGuardScanner(cfg *configdomain.Config, secrets []providerbuild.Secret) (*guard.Scanner, error) {
 	g := cfg.Guard
 	var custom []guard.CustomPattern
 	for _, ep := range g.ExtraPatterns {

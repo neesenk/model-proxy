@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	configdomain "model-proxy/internal/config"
 	observeevents "model-proxy/internal/observe/events"
 	"net/http"
 	"net/http/httptest"
@@ -46,7 +47,7 @@ func liveCodexProxy(t *testing.T) *httptest.Server {
 	t.Helper()
 	cfg := liveConfig(t)
 	model := liveModel(t, cfg, "codex", "gpt-5.5")
-	srv, _ := liveProxy(t, cfg, map[string][]RouteTarget{
+	srv, _ := liveProxy(t, cfg, map[string][]configdomain.RouteTarget{
 		"live-cx": {{Provider: "codex", Model: model, Protocol: "responses"}},
 	}, "codex")
 	return srv
@@ -251,7 +252,7 @@ func TestLive_ResponsesToChat_Reasoning(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := liveConfig(t)
 			model := liveModel(t, cfg, tc.name, tc.prefer)
-			srv, _ := liveProxy(t, cfg, map[string][]RouteTarget{
+			srv, _ := liveProxy(t, cfg, map[string][]configdomain.RouteTarget{
 				"live-m": {{Provider: tc.name, Model: model, Protocol: "openai"}},
 			}, tc.name)
 			defer srv.Close()
@@ -279,7 +280,7 @@ func TestLive_ResponsesToChat_Reasoning(t *testing.T) {
 func TestLive_ResponsesToChat_MultiTurnText(t *testing.T) {
 	cfg := liveConfig(t)
 	model := liveModel(t, cfg, "deepseek", "deepseek-v4-pro")
-	srv, _ := liveProxy(t, cfg, map[string][]RouteTarget{
+	srv, _ := liveProxy(t, cfg, map[string][]configdomain.RouteTarget{
 		"live-m": {{Provider: "deepseek", Model: model, Protocol: "openai"}},
 	}, "deepseek")
 	defer srv.Close()
@@ -496,9 +497,9 @@ func TestForward_EmitsLiveEvents(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["z"] = &testProv{key: "k"}
@@ -563,9 +564,9 @@ func TestForward_LiveEndEventCarriesStreamUsage(t *testing.T) {
 	}))
 	defer up.Close()
 
-	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "gpt-x", Protocol: "openai"}}},
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm": {{Provider: "z", Model: "gpt-x", Protocol: "openai"}}},
 	})
 	p.providers["z"] = &testProv{key: "k"}
 	ch, _, cancel := p.events.Subscribe()
@@ -622,9 +623,9 @@ func TestForward_LiveEndEventCarriesStreamUsage(t *testing.T) {
 // TestServeEvents_SSE: the /api/events endpoint streams events as SSE `data:`
 // lines; a published event reaches an HTTP subscriber.
 func TestServeEvents_SSE(t *testing.T) {
-	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { observeevents.ServeEvents(p.events, w, r) }))
 	defer srv.Close()
@@ -679,9 +680,9 @@ func TestServeEvents_SSE(t *testing.T) {
 // terminal "end" event, so an agent retry-looping on a malformed/removed model
 // is visible (the core "catch a retry loop" use case).
 func TestLiveEvents_EarlyFailures(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["z"] = &testProv{key: "k"}
@@ -724,13 +725,13 @@ func TestLiveEvents_CacheHitAndAllFailed(t *testing.T) {
 	}))
 	defer up.Close()
 
-	mk := func(routes map[string][]RouteTarget, cache bool) *Proxy {
-		cfg := &Config{
-			Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+	mk := func(routes map[string][]configdomain.RouteTarget, cache bool) *Proxy {
+		cfg := &configdomain.Config{
+			Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 			Routes:    routes,
 		}
 		if cache {
-			cfg.Cache = CacheConfig{Enabled: true, TTL: "1h"}
+			cfg.Cache = configdomain.CacheConfig{Enabled: true, TTL: "1h"}
 		}
 		p := newTestProxy(t, cfg)
 		p.providers["z"] = &testProv{key: "k"}
@@ -738,7 +739,7 @@ func TestLiveEvents_CacheHitAndAllFailed(t *testing.T) {
 	}
 
 	// Cache hit → end event with Provider "(cache)".
-	pc := mk(map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}}, true)
+	pc := mk(map[string][]configdomain.RouteTarget{"glm": {{Provider: "z", Model: "glm"}}}, true)
 	ch, _, cancel := pc.events.Subscribe()
 	defer cancel()
 	pxc := httptest.NewServer(http.HandlerFunc(pc.Handler))
@@ -759,9 +760,9 @@ func TestLiveEvents_CacheHitAndAllFailed(t *testing.T) {
 	}
 
 	// All-failed 502 → end event with Status 502.
-	cfg := &Config{
-		Providers: map[string]Provider{"dead": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"glm": {{Provider: "dead", Model: "glm"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"dead": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm": {{Provider: "dead", Model: "glm"}}},
 	}
 	pf2 := newTestProxy(t, cfg)
 	pf2.providers["dead"] = &testProv{key: "k"}

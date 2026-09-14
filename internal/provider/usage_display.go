@@ -3,10 +3,7 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"model-proxy/internal/display"
-	"model-proxy/internal/upstreamproxy"
-	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -169,20 +166,8 @@ func (p *AqpProvider) Usage() error {
 func (p *CodexProvider) Usage() error {
 	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue("codex")))
 	usageURL := strings.TrimSuffix(p.cfg.OpenAIBaseURL, "/codex") + "/wham/usage"
-	req, _ := http.NewRequest("GET", usageURL, nil)
-	if err := p.AuthHeaders(req); err != nil {
-		fmt.Println(display.Yellow("Not logged in.") + " Run: " + display.Cyan("model-proxy login codex"))
-		return nil
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
-	if err != nil {
-		fmt.Println(display.Red("Error: usage request: " + err.Error()))
-		return nil
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		fmt.Printf("%s HTTP %d: %s\n", display.Red("Error:"), resp.StatusCode, display.Truncate(string(body), 200))
+	body, ok := usageGetForDisplay(usageURL, "codex", p.AuthHeaders, nil)
+	if !ok {
 		return nil
 	}
 	var u struct {
@@ -277,23 +262,8 @@ func (p *CodexProvider) Usage() error {
 
 func (p *ZhipuProvider) Usage() error {
 	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(p.providerName)))
-	req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
-	if err := p.AuthHeaders(req); err != nil {
-		fmt.Println(display.Yellow("Not logged in.") + " Run: " + display.Cyan("model-proxy login "+p.providerName))
-		return nil
-	}
-	for k, v := range p.cfg.Headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
-	if err != nil {
-		fmt.Println(display.Red("Error: usage request: " + err.Error()))
-		return nil
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		fmt.Printf("%s HTTP %d: %s\n", display.Red("Error:"), resp.StatusCode, display.Truncate(string(body), 200))
+	body, ok := usageGetForDisplay(p.cfg.UsageURL, p.providerName, p.AuthHeaders, p.cfg.Headers)
+	if !ok {
 		return nil
 	}
 	if s, _ := ParseZhipuQuota(body, ""); s != nil {
@@ -333,20 +303,8 @@ func (p *ZhipuProvider) Usage() error {
 
 func (p *DeepSeekProvider) Usage() error {
 	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(p.cfg.ProviderName)))
-	req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
-	if err := p.AuthHeaders(req); err != nil {
-		fmt.Println(display.Yellow("Not logged in.") + " Run: " + display.Cyan("model-proxy login "+p.cfg.ProviderName))
-		return nil
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
-	if err != nil {
-		fmt.Println(display.Red("Error: usage request: " + err.Error()))
-		return nil
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		fmt.Printf("%s HTTP %d: %s\n", display.Red("Error:"), resp.StatusCode, display.Truncate(string(body), 200))
+	body, ok := usageGetForDisplay(p.cfg.UsageURL, p.cfg.ProviderName, p.AuthHeaders, nil)
+	if !ok {
 		return nil
 	}
 	var u struct {

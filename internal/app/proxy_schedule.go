@@ -33,7 +33,7 @@ func configuredBillingOverride(value string) provider.BillingClass {
 // Sticky routing keeps the current provider for sticky_dwell (cache-friendly),
 // then re-selects the best unless the best's only edge is a sub-margin surplus gain
 // (priority beats surplus; surplus only matters at equal priority).
-func (p *Proxy) schedule(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, generations ...uint64) []RouteTarget {
+func (p *Proxy) schedule(cfg *configdomain.Config, parentOf map[string]string, exposed, sessionKey string, targets []configdomain.RouteTarget, routeKeys map[string]bool, generations ...uint64) []configdomain.RouteTarget {
 	now := time.Now()
 	ordered, stickyToSet := p.decideOrder(cfg, parentOf, exposed, sessionKey, targets, now, true, routeKeys, generations...)
 	if stickyToSet != "" {
@@ -108,7 +108,7 @@ func (p *Proxy) listPins() map[string]pinEntry {
 // given ordered targets (i.e. decideOrder narrowed to the pinned provider). When
 // true, forward treats the route as pinned-exclusive: request-aware routing is
 // skipped (no reroute away from the pin) and tryTarget bypasses the circuit.
-func (p *Proxy) pinForces(exposed string, ordered []RouteTarget, parentOf map[string]string) bool {
+func (p *Proxy) pinForces(exposed string, ordered []configdomain.RouteTarget, parentOf map[string]string) bool {
 	targets := make([]runtimestate.Target, len(ordered))
 	for index, target := range ordered {
 		targets[index] = runtimestate.Target{
@@ -128,7 +128,7 @@ func (p *Proxy) pinForces(exposed string, ordered []RouteTarget, parentOf map[st
 // a read-only peek. parentOf resolves pooled virtual ids to their parent's config
 // (billing/peak are parent-level, not per-account) AND drives per-parent
 // round-robin assignment of new sessions.
-func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, now time.Time, commit bool, routeKeys map[string]bool, generations ...uint64) (ordered []RouteTarget, stickyToSet string) {
+func (p *Proxy) decideOrder(cfg *configdomain.Config, parentOf map[string]string, exposed, sessionKey string, targets []configdomain.RouteTarget, now time.Time, commit bool, routeKeys map[string]bool, generations ...uint64) (ordered []configdomain.RouteTarget, stickyToSet string) {
 	runtimeTargets := make([]runtimestate.Target, len(targets))
 	for index, target := range targets {
 		pconf, _ := configdomain.ProviderConfig(cfg, parentOf, target.Provider)
@@ -155,7 +155,7 @@ func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, se
 		Commit:            commit,
 		Generation:        runtimestate.GenerationArg(generations),
 	})
-	ordered = make([]RouteTarget, 0, len(result.Order))
+	ordered = make([]configdomain.RouteTarget, 0, len(result.Order))
 	for _, index := range result.Order {
 		ordered = append(ordered, targets[index])
 	}
@@ -198,8 +198,8 @@ func (p *Proxy) scheduleStatus() []byte {
 // health, quota facts, pin, sticky, and spread position therefore cannot mix
 // independent runtime reads.
 func scheduleStatusFromSnapshot(
-	cfg *Config,
-	expanded map[string][]RouteTarget,
+	cfg *configdomain.Config,
+	expanded map[string][]configdomain.RouteTarget,
 	parentOf map[string]string,
 	poolIndex map[string][]string,
 	RuntimeSnapshot runtimestate.DashboardSnapshot,
@@ -284,7 +284,7 @@ func scheduleStatusFromSnapshot(
 			baseInput.IgnorePins = true
 		}
 		decision := RuntimeSnapshot.PreviewOrder(baseInput)
-		ordered := make([]RouteTarget, 0, len(decision.Order))
+		ordered := make([]configdomain.RouteTarget, 0, len(decision.Order))
 		for _, index := range decision.Order {
 			ordered = append(ordered, targets[index])
 		}

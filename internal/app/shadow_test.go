@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"model-proxy/internal/accounts"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/requestlog"
 	shadowexec "model-proxy/internal/shadow"
 	"net/http"
@@ -37,12 +38,12 @@ func TestForceProvider_OverridesRouting(t *testing.T) {
 	}))
 	defer bUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"a": {OpenAIBaseURL: aUp.URL, Provider: testProviderID},
 			"b": {OpenAIBaseURL: bUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {
 				{Provider: "a", Model: "glm", Priority: 1},
 				{Provider: "b", Model: "glm", Priority: 2},
@@ -88,15 +89,15 @@ func TestShadowDispatchKeepsCapturedReloadGeneration(t *testing.T) {
 	}))
 	defer shadowUpstream.Close()
 
-	oldConfig := &Config{
-		Providers: map[string]Provider{
+	oldConfig := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":   {Provider: testProviderID, OpenAIBaseURL: primaryUpstream.URL},
 			"candidate": {Provider: testProviderID, OpenAIBaseURL: shadowUpstream.URL},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"alias": {{Provider: "primary", Model: "primary-model", Protocol: "openai"}},
 		},
-		Shadow: map[string]ShadowTarget{
+		Shadow: map[string]configdomain.ShadowTarget{
 			"alias": {Provider: "candidate", Model: "shadow-model", Protocol: "openai"},
 		},
 	}
@@ -135,8 +136,8 @@ func TestShadowDispatchKeepsCapturedReloadGeneration(t *testing.T) {
 	}
 
 	zero := 0.0
-	newConfig := &Config{
-		Providers: map[string]Provider{
+	newConfig := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":   {Provider: testProviderID, OpenAIBaseURL: primaryUpstream.URL},
 			"candidate": {Provider: testProviderID, OpenAIBaseURL: shadowUpstream.URL},
 		},
@@ -183,8 +184,8 @@ func TestShadowDispatchEmptyModelPassesThrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"candidate": {Provider: testProviderID, OpenAIBaseURL: upstream.URL},
 		},
 	}
@@ -206,9 +207,7 @@ func TestShadowDispatchEmptyModelPassesThrough(t *testing.T) {
 		"responses",
 		"responses",
 		"alias",
-		"alias",
-		ShadowTarget{Provider: "candidate"},
-		[]byte(`{"model":"alias","input":[]}`),
+		"alias", configdomain.ShadowTarget{Provider: "candidate"}, []byte(`{"model":"alias","input":[]}`),
 		"request-1",
 	)
 	body, _ := gotBody.Load().(string)
@@ -244,13 +243,13 @@ func TestShadow_LogsResult(t *testing.T) {
 	}))
 	defer shadowUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary": {OpenAIBaseURL: primaryUp.URL, Provider: testProviderID},
 			"shadowp": {OpenAIBaseURL: shadowUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{"glm": {{Provider: "primary", Model: "glm"}}},
-		Shadow: map[string]ShadowTarget{"glm": {Provider: "shadowp", Model: "glm-shadow"}},
+		Routes: map[string][]configdomain.RouteTarget{"glm": {{Provider: "primary", Model: "glm"}}},
+		Shadow: map[string]configdomain.ShadowTarget{"glm": {Provider: "shadowp", Model: "glm-shadow"}},
 	}
 	p, dir, shutdown := newReqLogProxy(t, cfg)
 	p.providers["primary"] = &testProv{key: "p"}
@@ -330,8 +329,8 @@ func TestRunShadowPartialResponseIsLogged(t *testing.T) {
 	}))
 	defer shadowUpstream.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"candidate": {Provider: testProviderID, OpenAIBaseURL: shadowUpstream.URL},
 		},
 	}
@@ -344,9 +343,7 @@ func TestRunShadowPartialResponseIsLogged(t *testing.T) {
 		"openai",
 		"openai",
 		"alias",
-		"alias",
-		ShadowTarget{Provider: "candidate", Model: "shadow-model", Protocol: "openai"},
-		[]byte(`{"model":"alias","messages":[]}`),
+		"alias", configdomain.ShadowTarget{Provider: "candidate", Model: "shadow-model", Protocol: "openai"}, []byte(`{"model":"alias","messages":[]}`),
 		"partial-1",
 	)
 	shutdownLogger()
@@ -412,15 +409,15 @@ func TestShadow_PooledCrossProtocolPreservesVirtualIdentity(t *testing.T) {
 	}))
 	defer primaryUpstream.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":     {OpenAIBaseURL: primaryUpstream.URL, Provider: testProviderID},
 			"shadow-pool": {AnthropicBaseURL: shadowUpstream.URL, Provider: "zhipu"},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"alias": {{Provider: "primary", Model: "primary-model", Protocol: "openai"}},
 		},
-		Shadow: map[string]ShadowTarget{
+		Shadow: map[string]configdomain.ShadowTarget{
 			"alias": {Provider: "shadow-pool", Model: "shadow-model", Protocol: "anthropic"},
 		},
 	}
@@ -550,13 +547,13 @@ func TestShadow_ConcurrencyGateSaturatesAndDrops(t *testing.T) {
 	}))
 	defer shadowUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary": {OpenAIBaseURL: primaryUp.URL, Provider: testProviderID},
 			"shadowp": {OpenAIBaseURL: shadowUp.URL, Provider: testProviderID},
 		},
-		Routes:              map[string][]RouteTarget{"glm": {{Provider: "primary", Model: "glm"}}},
-		Shadow:              map[string]ShadowTarget{"glm": {Provider: "shadowp", Model: "glm-shadow"}},
+		Routes:              map[string][]configdomain.RouteTarget{"glm": {{Provider: "primary", Model: "glm"}}},
+		Shadow:              map[string]configdomain.ShadowTarget{"glm": {Provider: "shadowp", Model: "glm-shadow"}},
 		ShadowSampleRate:    ptrFloat(1.0),
 		ShadowMaxConcurrent: 1,
 	}
@@ -626,9 +623,9 @@ func ptrFloat(v float64) *float64 { return &v }
 
 // TestShouldShadow: rate=0 → false, rate>=1 → true, rate between → probabilistic.
 func TestShouldShadow(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"m": {{Provider: "z", Model: "m"}}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"m": {{Provider: "z", Model: "m"}}},
 	}
 	// rate >= 1 → always true.
 	p := newTestProxy(t, cfg)
@@ -684,7 +681,7 @@ func TestReload_ShadowDisabledStopsFiring(t *testing.T) {
 	}
 
 	write("shadow_sample_rate: 1.0\n")
-	cfg, err := LoadConfig(cfgPath)
+	cfg, err := configdomain.LoadConfig(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -748,17 +745,17 @@ func TestShadow_PooledProvider(t *testing.T) {
 	}))
 	defer shadowUp.Close()
 
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"main":         {OpenAIBaseURL: mainUp.URL, Provider: testProviderID},
 			"zhipu-shadow": {OpenAIBaseURL: shadowUp.URL, Provider: "zhipu"},
 		},
-		Routes: map[string][]RouteTarget{"m": {{Provider: "main", Model: "m"}}},
-		Shadow: map[string]ShadowTarget{"m": {Provider: "zhipu-shadow", Model: "glm"}},
+		Routes: map[string][]configdomain.RouteTarget{"m": {{Provider: "main", Model: "m"}}},
+		Shadow: map[string]configdomain.ShadowTarget{"m": {Provider: "zhipu-shadow", Model: "glm"}},
 	}
 	p := newTestProxy(t, cfg)
-	p.initRequestLog(RequestLogConfig{Enabled: true, Dir: filepath.Join(t.TempDir(), "requests")})
+	p.initRequestLog(configdomain.RequestLogConfig{Enabled: true, Dir: filepath.Join(t.TempDir(), "requests")})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
@@ -795,19 +792,19 @@ func TestShadow_ConvertFail_Closed(t *testing.T) {
 	}))
 	defer shadowUp.Close()
 
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"main":        {OpenAIBaseURL: mainUp.URL, Provider: testProviderID},
 			"shadow-prov": {AnthropicBaseURL: shadowUp.URL, Provider: testProviderID}, // cross-proto (anthropic) shadow
 		},
-		Routes: map[string][]RouteTarget{"m": {{Provider: "main", Model: "m"}}},
-		Shadow: map[string]ShadowTarget{"m": {Provider: "shadow-prov", Model: "sm", Protocol: "anthropic"}},
+		Routes: map[string][]configdomain.RouteTarget{"m": {{Provider: "main", Model: "m"}}},
+		Shadow: map[string]configdomain.ShadowTarget{"m": {Provider: "shadow-prov", Model: "sm", Protocol: "anthropic"}},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["main"] = &testProv{key: "main"}
 	p.providers["shadow-prov"] = &testProv{key: "shadow-prov"}
-	p.initRequestLog(RequestLogConfig{Enabled: true, Dir: filepath.Join(t.TempDir(), "requests")})
+	p.initRequestLog(configdomain.RequestLogConfig{Enabled: true, Dir: filepath.Join(t.TempDir(), "requests")})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
@@ -833,12 +830,11 @@ func TestShadow_ConvertFail_Closed(t *testing.T) {
 // site forgetting to populate targetexec.Attempt.Runtime) must log + return instead
 // of panicking on runtime.cfg deep in runShadow.
 func TestRunShadow_NilRuntimeConfig(t *testing.T) {
-	p := newTestProxy(t, &Config{Providers: map[string]Provider{}})
+	p := newTestProxy(t, &configdomain.Config{Providers: map[string]configdomain.Provider{}})
 	var buf syncLogBuffer
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
-	p.runShadow(RuntimeSnapshot{}, nil, nil, "anthropic", "anthropic", "m", "g",
-		ShadowTarget{Provider: "p", Model: "m"}, []byte(`{}`), "rid")
+	p.runShadow(RuntimeSnapshot{}, nil, nil, "anthropic", "anthropic", "m", "g", configdomain.ShadowTarget{Provider: "p", Model: "m"}, []byte(`{}`), "rid")
 	if !strings.Contains(buf.String(), "runtime snapshot has no config") {
 		t.Fatalf("expected the nil-cfg guard log, got %q", buf.String())
 	}
@@ -850,9 +846,9 @@ func TestRunShadow_NilRuntimeConfig(t *testing.T) {
 // the production renderer.
 func TestHandleShadowReport_API(t *testing.T) {
 	// Off → enabled=false.
-	w := NewWebServer(newTestProxy(t, &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
-		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
+	w := NewWebServer(newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	}), "test-config.yaml")
 	mux := http.NewServeMux()
 	w.Register(mux)
@@ -892,20 +888,20 @@ func TestCloseCancelsInFlightShadowRequest(t *testing.T) {
 	}))
 	defer primaryUp.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"primary":   {OpenAIBaseURL: primaryUp.URL, Provider: testProviderID},
 			"candidate": {OpenAIBaseURL: shadowUp.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"alias": {{Provider: "primary", Model: "primary-model", Protocol: "openai"}},
 		},
-		Shadow: map[string]ShadowTarget{
+		Shadow: map[string]configdomain.ShadowTarget{
 			"alias": {Provider: "candidate", Model: "shadow-model", Protocol: "openai"},
 		},
 		// The shadow client's only bound absent cancellation: Close must not
 		// wait anywhere near this out.
-		Scheduling: Scheduling{UpstreamTimeout: "30s"},
+		Scheduling: configdomain.Scheduling{UpstreamTimeout: "30s"},
 	}
 	p := newTestProxy(t, cfg)
 	p.reqLog = requestlog.New(requestlog.Options{

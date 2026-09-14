@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -70,14 +71,14 @@ const exchangeOKReply = `{"content":[{"type":"text","text":"{\"risk\":\"low\",\"
 // newExchangeProxy wires judge providers onto one route, lowest
 // route-target priority first, plus a circuit threshold of 1 so one failure
 // opens the circuit (deterministic cooldown assertions).
-func newExchangeProxy(t *testing.T, providers map[string]Provider, targets []RouteTarget) (*Proxy, func() Dashboard) {
+func newExchangeProxy(t *testing.T, providers map[string]configdomain.Provider, targets []configdomain.RouteTarget) (*Proxy, func() Dashboard) {
 	t.Helper()
 	home := t.TempDir()
 	setPoolHome(t, home)
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Providers:  providers,
-		Routes:     map[string][]RouteTarget{"judge": targets},
-		Scheduling: Scheduling{CircuitThreshold: 1, CircuitCooldown: "10m"},
+		Routes:     map[string][]configdomain.RouteTarget{"judge": targets},
+		Scheduling: configdomain.Scheduling{CircuitThreshold: 1, CircuitCooldown: "10m"},
 	}
 	keys := make(map[string]string, len(providers))
 	for name, prov := range providers {
@@ -100,11 +101,11 @@ func TestScheduledExchange_HangingFirstTargetFailsOverWithinBudget(t *testing.T)
 	hang, hangCalls := hangServer(t)
 	good, goodCalls := replyServer(t, 200, exchangeOKReply)
 	p, dash := newExchangeProxy(t,
-		map[string]Provider{
+		map[string]configdomain.Provider{
 			"judge-hang": {AnthropicBaseURL: hang.URL},
 			"judge-good": {AnthropicBaseURL: good.URL},
 		},
-		[]RouteTarget{
+		[]configdomain.RouteTarget{
 			{Provider: "judge-hang", Model: "m", Priority: 1},
 			{Provider: "judge-good", Model: "m", Priority: 2},
 		})
@@ -145,11 +146,11 @@ func TestScheduledExchange_CooldownSkipsCircuitOpenTarget(t *testing.T) {
 	hang, hangCalls := hangServer(t)
 	good, goodCalls := replyServer(t, 200, exchangeOKReply)
 	p, _ := newExchangeProxy(t,
-		map[string]Provider{
+		map[string]configdomain.Provider{
 			"judge-hang": {AnthropicBaseURL: hang.URL},
 			"judge-good": {AnthropicBaseURL: good.URL},
 		},
-		[]RouteTarget{
+		[]configdomain.RouteTarget{
 			{Provider: "judge-hang", Model: "m", Priority: 1},
 			{Provider: "judge-good", Model: "m", Priority: 2},
 		})
@@ -191,11 +192,11 @@ func TestScheduledExchange_RateLimitCoolsProvider(t *testing.T) {
 	bad, badCalls := replyServer(t, http.StatusTooManyRequests, `{"error":"rate limited"}`)
 	good, goodCalls := replyServer(t, 200, exchangeOKReply)
 	p, dash := newExchangeProxy(t,
-		map[string]Provider{
+		map[string]configdomain.Provider{
 			"judge-429":  {AnthropicBaseURL: bad.URL},
 			"judge-good": {AnthropicBaseURL: good.URL},
 		},
-		[]RouteTarget{
+		[]configdomain.RouteTarget{
 			{Provider: "judge-429", Model: "m", Priority: 1},
 			{Provider: "judge-good", Model: "m", Priority: 2},
 		})
@@ -236,8 +237,8 @@ func TestScheduledExchange_RateLimitCoolsProvider(t *testing.T) {
 func TestScheduledExchange_AllTargetsCoolingFailsFast(t *testing.T) {
 	bad, badCalls := replyServer(t, http.StatusInternalServerError, `{"error":"down"}`)
 	p, _ := newExchangeProxy(t,
-		map[string]Provider{"judge-bad": {AnthropicBaseURL: bad.URL}},
-		[]RouteTarget{{Provider: "judge-bad", Model: "m"}})
+		map[string]configdomain.Provider{"judge-bad": {AnthropicBaseURL: bad.URL}},
+		[]configdomain.RouteTarget{{Provider: "judge-bad", Model: "m"}})
 	snap := p.SnapshotRuntime()
 	x := scheduledExchange{p: p}
 
@@ -270,11 +271,11 @@ func TestScheduledExchange_OuterBudgetExpiryRecordsNothingForStraddledTarget(t *
 	hangA, aCalls := hangServer(t)
 	hangB, bCalls := hangServer(t)
 	p, dash := newExchangeProxy(t,
-		map[string]Provider{
+		map[string]configdomain.Provider{
 			"judge-a": {AnthropicBaseURL: hangA.URL},
 			"judge-b": {AnthropicBaseURL: hangB.URL},
 		},
-		[]RouteTarget{
+		[]configdomain.RouteTarget{
 			{Provider: "judge-a", Model: "m", Priority: 1},
 			{Provider: "judge-b", Model: "m", Priority: 2},
 		})

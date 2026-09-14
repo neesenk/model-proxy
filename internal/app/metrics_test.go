@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"model-proxy/internal/accounts"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/counters"
 	obscounters "model-proxy/internal/observe/counters"
 	observestats "model-proxy/internal/observe/stats"
@@ -93,7 +94,7 @@ routes:
   m: [{provider: zhipu, model: glm-5}]
 `
 	makeProxy := func(upURL string) *Proxy {
-		cfg, err := LoadConfigFromBytes("test", []byte(strings.Replace(cfgYAML, "%s", upURL, 1)))
+		cfg, err := configdomain.LoadConfigFromBytes("test", []byte(strings.Replace(cfgYAML, "%s", upURL, 1)))
 		if err != nil {
 			t.Fatalf("LoadConfigFromBytes: %v", err)
 		}
@@ -227,11 +228,11 @@ func TestForward_RecordsLatency(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"z": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {{Provider: "z", Model: "glm-rt"}},
 		},
 	}
@@ -548,7 +549,7 @@ func TestForwardCountsTokens(t *testing.T) {
 		w.Write(stream)
 	}))
 	defer up.Close()
-	cfg, err := LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: "+up.URL+"\nroutes:\n  m: [{provider: zhipu, model: glm-5}]\n"))
+	cfg, err := configdomain.LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: "+up.URL+"\nroutes:\n  m: [{provider: zhipu, model: glm-5}]\n"))
 	if err != nil {
 		t.Fatalf("LoadConfigFromBytes: %v", err)
 	}
@@ -583,7 +584,7 @@ func TestForwardDoesNotScanNonSSE(t *testing.T) {
 		w.Write([]byte(`{"ok":true}`))
 	}))
 	defer up.Close()
-	cfg, _ := LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: "+up.URL+"\nroutes:\n  m: [{provider: zhipu, model: glm-5}]\n"))
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: "+up.URL+"\nroutes:\n  m: [{provider: zhipu, model: glm-5}]\n"))
 	p := newTestProxy(t, cfg)
 	rec := httptest.NewRecorder()
 	p.Handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m"}`)))
@@ -648,7 +649,7 @@ func TestForwardCommitsOnDisconnect(t *testing.T) {
 	// The route's target model equals the called model ("m") so the stream
 	// stays on the zero-copy passthrough this test was written for: both usage
 	// frames coalesce into the proxy's first Read before the disconnect.
-	cfg, err := LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: "+up.URL+"\nroutes:\n  m: [{provider: zhipu, model: m}]\n"))
+	cfg, err := configdomain.LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: "+up.URL+"\nroutes:\n  m: [{provider: zhipu, model: m}]\n"))
 	if err != nil {
 		t.Fatalf("LoadConfigFromBytes: %v", err)
 	}
@@ -689,9 +690,9 @@ func TestPricingCachePathUsesApplicationHome(t *testing.T) {
 }
 
 func TestDetachedPricingDetachesAndConvertsOverrides(t *testing.T) {
-	proxy := &Proxy{generationState: generationState{cfg: &Config{
-		Pricing: PricingConfig{Enabled: false},
-		Prices: map[string]PriceConfig{
+	proxy := &Proxy{generationState: generationState{cfg: &configdomain.Config{
+		Pricing: configdomain.PricingConfig{Enabled: false},
+		Prices: map[string]configdomain.PriceConfig{
 			"glm-4.6": {Input: 9, Output: 18, CacheRead: 1, CacheWrite: 2},
 		},
 	}}}
@@ -716,7 +717,7 @@ func TestDetachedPricingDetachesAndConvertsOverrides(t *testing.T) {
 }
 
 func TestPricingSnapshotDisabled(t *testing.T) {
-	proxy := &Proxy{generationState: generationState{cfg: &Config{Pricing: PricingConfig{Enabled: false}}}}
+	proxy := &Proxy{generationState: generationState{cfg: &configdomain.Config{Pricing: configdomain.PricingConfig{Enabled: false}}}}
 	if got := proxy.pricingSnapshot(); got != nil {
 		t.Errorf("disabled pricing snapshot = %+v, want nil", got)
 	}
@@ -724,7 +725,7 @@ func TestPricingSnapshotDisabled(t *testing.T) {
 
 func TestPricingSnapshotInitialFailureReturnsEmpty(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	proxy := &Proxy{generationState: generationState{cfg: &Config{Pricing: PricingConfig{
+	proxy := &Proxy{generationState: generationState{cfg: &configdomain.Config{Pricing: configdomain.PricingConfig{
 		Enabled:   true,
 		TTL:       "24h",
 		SourceURL: "://invalid-pricing-url",
@@ -754,7 +755,7 @@ func TestPricingSnapshotSerializesConcurrentRefresh(t *testing.T) {
 	var releaseOnce sync.Once
 	defer releaseOnce.Do(func() { close(releaseFirst) })
 
-	proxy := &Proxy{generationState: generationState{cfg: &Config{Pricing: PricingConfig{
+	proxy := &Proxy{generationState: generationState{cfg: &configdomain.Config{Pricing: configdomain.PricingConfig{
 		Enabled:   true,
 		TTL:       "24h",
 		SourceURL: server.URL,
@@ -877,11 +878,11 @@ func TestForward_RecordsAgent(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"aqp": {AnthropicBaseURL: up.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"claude-sonnet-4": {{Provider: "aqp", Model: "claude-sonnet-4"}},
 		},
 	}

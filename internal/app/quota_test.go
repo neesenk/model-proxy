@@ -1,6 +1,7 @@
 package app
 
 import (
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
 	"model-proxy/internal/runtime"
 	runtimestate "model-proxy/internal/runtime"
@@ -22,9 +23,13 @@ import (
 func TestQuotaTracker_PersistAndLoad(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "quota_state.json")
-	cfg := func() *Config { return &Config{} }
-	// Production order is BuildProviders → Start → Load, so the provider set
-	// is populated when Load filters persisted keys; model that here.
+	cfg := func() *configdomain.Config {
+		return &configdomain.
+			// Production order is BuildProviders → Start → Load, so the provider set
+			// is populated when Load filters persisted keys; model that here.
+			Config{}
+	}
+
 	provs := func() map[string]provider.Provider {
 		return map[string]provider.Provider{"zhipu": &snapshotProv{rem: 0}}
 	}
@@ -44,7 +49,9 @@ func TestQuotaTracker_PersistAndLoad(t *testing.T) {
 func TestQuotaTracker_PollAllCallsQuota(t *testing.T) {
 	dir := t.TempDir()
 	tr := newStandaloneQuotaTracker(filepath.Join(dir, "q.json"),
-		func() *Config { return &Config{Providers: map[string]Provider{"x": {Provider: "zhipu"}}} },
+		func() *configdomain.Config {
+			return &configdomain.Config{Providers: map[string]configdomain.Provider{"x": {Provider: "zhipu"}}}
+		},
 		func() map[string]provider.Provider {
 			return map[string]provider.Provider{"x": &snapshotProv{rem: 0.77}}
 		},
@@ -128,9 +135,9 @@ func (f *flakyProv) Quota() (*provider.QuotaSnapshot, error) {
 // calls for one provider collapse to a single Quota() call (in-flight guard).
 func TestQuotaTracker_RefreshOneCoalescesConcurrent(t *testing.T) {
 	prov := &blockingQuotaProv{started: make(chan struct{}), release: make(chan struct{})}
-	cfg := &Config{Providers: map[string]Provider{"x": {Provider: "zhipu"}}}
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"x": {Provider: "zhipu"}}}
 	tr := newStandaloneQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
-		func() *Config { return cfg },
+		func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
 	var first sync.WaitGroup
 	first.Add(1)
@@ -158,9 +165,9 @@ func TestQuotaTracker_RefreshOneCoalescesConcurrent(t *testing.T) {
 func TestQuotaTracker_RefreshOneDebouncesSequential(t *testing.T) {
 	var calls atomic.Int32
 	prov := &quotaCallProv{calls: &calls} // pollInterval default 5m -> half 2.5m
-	cfg := &Config{Providers: map[string]Provider{"x": {Provider: "zhipu"}}}
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"x": {Provider: "zhipu"}}}
 	tr := newStandaloneQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
-		func() *Config { return cfg },
+		func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
 	tr.RefreshOne("x") // calls=1, sets last
 	tr.RefreshOne("x") // within 2.5m -> debounced
@@ -174,7 +181,7 @@ func TestQuotaTracker_RefreshOneDebouncesSequential(t *testing.T) {
 // parking on the same providers after a restart.
 func TestQuotaTracker_StickyPersistLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "quota_state.json")
-	tr := newStandaloneQuotaTracker(path, func() *Config { return &Config{} }, func() map[string]provider.Provider { return nil })
+	tr := newStandaloneQuotaTracker(path, func() *configdomain.Config { return &configdomain.Config{} }, func() map[string]provider.Provider { return nil })
 	since := time.Unix(123, 0)
 	tr.FullSnapshot = func() runtimestate.PersistedFullSnapshot {
 		return runtimestate.PersistedFullSnapshot{
@@ -187,7 +194,7 @@ func TestQuotaTracker_StickyPersistLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tr2 := newStandaloneQuotaTracker(path, func() *Config { return &Config{} }, func() map[string]provider.Provider { return nil })
+	tr2 := newStandaloneQuotaTracker(path, func() *configdomain.Config { return &configdomain.Config{} }, func() map[string]provider.Provider { return nil })
 	tr2.Load()
 	got := tr2.LoadedSticky["glm-5.2"]
 	if got.Provider != "zhipu" || !got.Since.Equal(since) {
@@ -240,7 +247,9 @@ func TestQuotaTracker_FetchQuotaRetriesTransient(t *testing.T) {
 		calls: &calls,
 	}
 	tr := newStandaloneQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
-		func() *Config { return &Config{Providers: map[string]Provider{"x": {Provider: "zhipu"}}} },
+		func() *configdomain.Config {
+			return &configdomain.Config{Providers: map[string]configdomain.Provider{"x": {Provider: "zhipu"}}}
+		},
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
 	tr.SetRetryBackoff(time.Millisecond) // fast
 	s := tr.FetchQuota(prov, time.Now())
@@ -266,7 +275,9 @@ func TestQuotaTracker_FetchQuotaNoRetryPermanent(t *testing.T) {
 		calls: &calls,
 	}
 	tr := newStandaloneQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
-		func() *Config { return &Config{Providers: map[string]Provider{"x": {Provider: "aqp"}}} },
+		func() *configdomain.Config {
+			return &configdomain.Config{Providers: map[string]configdomain.Provider{"x": {Provider: "aqp"}}}
+		},
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
 	tr.SetRetryBackoff(time.Millisecond)
 	s := tr.FetchQuota(prov, time.Now())
@@ -292,7 +303,9 @@ func TestQuotaTracker_PollAllRetriesTransientError(t *testing.T) {
 		calls: &calls,
 	}
 	tr := newStandaloneQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
-		func() *Config { return &Config{Providers: map[string]Provider{"x": {Provider: "zhipu"}}} },
+		func() *configdomain.Config {
+			return &configdomain.Config{Providers: map[string]configdomain.Provider{"x": {Provider: "zhipu"}}}
+		},
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
 	tr.SetRetryBackoff(time.Millisecond)
 	tr.PollAll(time.Now())
@@ -319,7 +332,9 @@ func TestQuotaTracker_PollOneSingleAccount(t *testing.T) {
 		"zhipu#account-id": bProv, // pooled-account virtual id
 	}
 	tr := newStandaloneQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
-		func() *Config { return &Config{Providers: map[string]Provider{"zhipu": {Provider: "zhipu"}}} },
+		func() *configdomain.Config {
+			return &configdomain.Config{Providers: map[string]configdomain.Provider{"zhipu": {Provider: "zhipu"}}}
+		},
 		func() map[string]provider.Provider { return provs })
 
 	// Poll just the virtual-id account.
@@ -353,7 +368,7 @@ func TestQuotaTracker_PollOneSingleAccount(t *testing.T) {
 // tests (no Proxy lifecycle).
 func newStandaloneQuotaTracker(
 	path string,
-	cfg func() *Config,
+	cfg func() *configdomain.Config,
 	provs func() map[string]provider.Provider,
 ) *runtime.QuotaTracker {
 	manager := &runtime.Manager{}
@@ -372,12 +387,12 @@ func newStandaloneQuotaTracker(
 func TestPollAll_PollsPooledVirtuals(t *testing.T) {
 	// cfg.Providers carries only the PARENT name, exactly as a pooled provider
 	// appears in config; the runtime map carries the unrolled virtuals.
-	cfg := &Config{Providers: map[string]Provider{"zhipu": {Provider: "zhipu"}}}
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"zhipu": {Provider: "zhipu"}}}
 	provs := map[string]provider.Provider{
 		"zhipu#a": &testProv{key: "zhipu#a"},
 		"zhipu#b": &testProv{key: "zhipu#b"},
 	}
-	tr := newStandaloneQuotaTracker("", func() *Config { return cfg }, func() map[string]provider.Provider { return provs })
+	tr := newStandaloneQuotaTracker("", func() *configdomain.Config { return cfg }, func() map[string]provider.Provider { return provs })
 	tr.PollAll(time.Now())
 	for _, vid := range []string{"zhipu#a", "zhipu#b"} {
 		if tr.Snapshot(vid) == nil {
@@ -396,7 +411,7 @@ func TestPollAll_PollsPooledVirtuals(t *testing.T) {
 
 func TestQuotaTracker_Stop(t *testing.T) {
 	dir := t.TempDir()
-	cfg := func() *Config { return &Config{} }
+	cfg := func() *configdomain.Config { return &configdomain.Config{} }
 	provs := func() map[string]provider.Provider { return nil }
 	tr := newStandaloneQuotaTracker(dir+"/q.json", cfg, provs)
 	tr.Start()
@@ -407,7 +422,7 @@ func TestQuotaTracker_Stop(t *testing.T) {
 
 func TestQuotaTracker_PollAfter(t *testing.T) {
 	dir := t.TempDir()
-	cfg := func() *Config { return &Config{} }
+	cfg := func() *configdomain.Config { return &configdomain.Config{} }
 	var called atomic.Int32
 	provs := func() map[string]provider.Provider {
 		called.Add(1)

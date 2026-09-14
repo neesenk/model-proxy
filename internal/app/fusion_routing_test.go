@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"io"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/forward"
 	"model-proxy/internal/observe/counters"
 	"net/http"
@@ -33,16 +34,16 @@ func TestFusion_PooledParentMembers(t *testing.T) {
 	draftUp := newFakeUpstream(t, anthropicDraftResponder("draft-ok"))
 	synthUp := newFakeUpstream(t, anthropicSSEResponder("pooled synthesis ok"))
 
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"zhipu-draft": {AnthropicBaseURL: draftUp.srv.URL, Provider: "zhipu"},
 			"zhipu-synth": {AnthropicBaseURL: synthUp.srv.URL, Provider: "zhipu"},
 		},
-		Routes: map[string][]RouteTarget{"hard": {{Provider: "fusion", Model: "recipe"}}},
-		Fusion: map[string]FusionConfig{"recipe": {
-			Panel:       []RouteTarget{{Provider: "zhipu-draft", Model: "zdraft"}},
-			Synthesizer: RouteTarget{Provider: "zhipu-synth", Model: "gsynth"},
+		Routes: map[string][]configdomain.RouteTarget{"hard": {{Provider: "fusion", Model: "recipe"}}},
+		Fusion: map[string]configdomain.FusionConfig{"recipe": {
+			Panel:       []configdomain.RouteTarget{{Provider: "zhipu-draft", Model: "zdraft"}},
+			Synthesizer: configdomain.RouteTarget{Provider: "zhipu-synth", Model: "gsynth"},
 		}},
 	}
 	p := newTestProxy(t, cfg)
@@ -68,13 +69,13 @@ func TestFusion_CircuitRecordFailure(t *testing.T) {
 	pb := newFakeUpstream(t, statusResponder(500))
 	pc := newFakeUpstream(t, anthropicDraftResponder("draft-C"))
 	ps := newFakeUpstream(t, anthropicSSEResponder("final answer"))
-	recipe := FusionConfig{
-		Panel: []RouteTarget{
+	recipe := configdomain.FusionConfig{
+		Panel: []configdomain.RouteTarget{
 			{Provider: "pa", Model: "ma"},
 			{Provider: "pb", Model: "mb"},
 			{Provider: "pc", Model: "mc"},
 		},
-		Synthesizer: RouteTarget{Provider: "ps", Model: "ms"},
+		Synthesizer: configdomain.RouteTarget{Provider: "ps", Model: "ms"},
 	}
 	proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "pc": pc, "ps": ps})
 	out := postAnthropic(t, px, fusionClientBody)
@@ -111,9 +112,9 @@ func TestFusionLegSharesTargetPolicies(t *testing.T) {
 		})
 		pb := newFakeUpstream(t, anthropicDraftResponder("draft-B"))
 		ps := newFakeUpstream(t, anthropicSSEResponder("final"))
-		recipe := FusionConfig{
-			Panel:       []RouteTarget{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}},
-			Synthesizer: RouteTarget{Provider: "ps", Model: "ms"},
+		recipe := configdomain.FusionConfig{
+			Panel:       []configdomain.RouteTarget{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}},
+			Synthesizer: configdomain.RouteTarget{Provider: "ps", Model: "ms"},
 		}
 		proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "ps": ps})
 		body := `{"model":"hard","max_tokens":100,"temperature":0.2,"stream":true,"messages":[{"role":"user","content":"solve X"}]}`
@@ -151,13 +152,13 @@ func TestFusionLegSharesTargetPolicies(t *testing.T) {
 			pb := newFakeUpstream(t, anthropicDraftResponder("draft-B"))
 			pc := newFakeUpstream(t, anthropicDraftResponder("draft-C"))
 			ps := newFakeUpstream(t, anthropicSSEResponder("final"))
-			recipe := FusionConfig{
-				Panel: []RouteTarget{
+			recipe := configdomain.FusionConfig{
+				Panel: []configdomain.RouteTarget{
 					{Provider: "pa", Model: "ma"},
 					{Provider: "pb", Model: "mb"},
 					{Provider: "pc", Model: "mc"},
 				},
-				Synthesizer: RouteTarget{Provider: "ps", Model: "ms"},
+				Synthesizer: configdomain.RouteTarget{Provider: "ps", Model: "ms"},
 				MinPanel:    2,
 			}
 			proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{
@@ -191,20 +192,20 @@ func TestFusion_SynthesizerPoolExhaustedFailsClosed(t *testing.T) {
 	synthUp := newFakeUpstream(t, anthropicSSEResponder("should never be sent"))
 	directUp := newFakeUpstream(t, anthropicSSEResponder("direct fallback ok"))
 
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			"zhipu-draft": {AnthropicBaseURL: draftUp.srv.URL, Provider: "zhipu"},
 			"zhipu-synth": {AnthropicBaseURL: synthUp.srv.URL, Provider: "zhipu"},
 			"direct":      {AnthropicBaseURL: directUp.srv.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{"hard": {
+		Routes: map[string][]configdomain.RouteTarget{"hard": {
 			{Provider: "fusion", Model: "recipe", Priority: 1},
 			{Provider: "direct", Model: "dfull", Priority: 2},
 		}},
-		Fusion: map[string]FusionConfig{"recipe": {
-			Panel:       []RouteTarget{{Provider: "zhipu-draft", Model: "zdraft"}},
-			Synthesizer: RouteTarget{Provider: "zhipu-synth", Model: "gsynth"},
+		Fusion: map[string]configdomain.FusionConfig{"recipe": {
+			Panel:       []configdomain.RouteTarget{{Provider: "zhipu-draft", Model: "zdraft"}},
+			Synthesizer: configdomain.RouteTarget{Provider: "zhipu-synth", Model: "gsynth"},
 		}},
 	}
 	p := newTestProxy(t, cfg)
@@ -234,9 +235,9 @@ func TestFusionLeg_FailureMetricsAlignTryTarget(t *testing.T) {
 	build := func(t *testing.T, pa *fakeUpstream) (*Proxy, *httptest.Server) {
 		pb := newFakeUpstream(t, anthropicDraftResponder("draft-B"))
 		ps := newFakeUpstream(t, anthropicSSEResponder("final"))
-		recipe := FusionConfig{
-			Panel:       []RouteTarget{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}},
-			Synthesizer: RouteTarget{Provider: "ps", Model: "ms"},
+		recipe := configdomain.FusionConfig{
+			Panel:       []configdomain.RouteTarget{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}},
+			Synthesizer: configdomain.RouteTarget{Provider: "ps", Model: "ms"},
 			MinPanel:    1,
 		}
 		return newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "ps": ps})
@@ -297,9 +298,9 @@ func TestFusionLeg_RateLimitMatchesTargetExecutor(t *testing.T) {
 	})
 	pb := newFakeUpstream(t, anthropicDraftResponder("draft-B"))
 	ps := newFakeUpstream(t, anthropicSSEResponder("final"))
-	recipe := FusionConfig{
-		Panel:       []RouteTarget{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}},
-		Synthesizer: RouteTarget{Provider: "ps", Model: "ms"},
+	recipe := configdomain.FusionConfig{
+		Panel:       []configdomain.RouteTarget{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}},
+		Synthesizer: configdomain.RouteTarget{Provider: "ps", Model: "ms"},
 		MinPanel:    1,
 	}
 	proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "ps": ps})
@@ -346,9 +347,9 @@ func TestFusionToolsUnsupportedDegradesDirectly(t *testing.T) {
 	pa := newFakeUpstream(t, anthropicDraftResponder("must not run"))
 	pb := newFakeUpstream(t, anthropicDraftResponder("must not run"))
 	ps := newFakeUpstream(t, anthropicToolUseSSEResponder())
-	recipe := FusionConfig{
-		Panel:       []RouteTarget{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}},
-		Synthesizer: RouteTarget{Provider: "ps", Model: "ms"},
+	recipe := configdomain.FusionConfig{
+		Panel:       []configdomain.RouteTarget{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}},
+		Synthesizer: configdomain.RouteTarget{Provider: "ps", Model: "ms"},
 	}
 	proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "ps": ps})
 	proxy.mu.Lock()
@@ -397,12 +398,12 @@ func TestFusionLeg_CancelDuringBodyReadIsNotProviderFailure(t *testing.T) {
 	})
 	fast := newFakeUpstream(t, anthropicDraftResponder("draft-fast"))
 	synth := newFakeUpstream(t, anthropicSSEResponder("final"))
-	recipe := FusionConfig{
-		Panel: []RouteTarget{
+	recipe := configdomain.FusionConfig{
+		Panel: []configdomain.RouteTarget{
 			{Provider: "slow", Model: "mslow"},
 			{Provider: "fast", Model: "mfast"},
 		},
-		Synthesizer: RouteTarget{Provider: "synth", Model: "msynth"},
+		Synthesizer: configdomain.RouteTarget{Provider: "synth", Model: "msynth"},
 		MinPanel:    1, // fast leg alone satisfies quorum, then grace cuts slow
 	}
 	proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"slow": slowBody, "fast": fast, "synth": synth})
@@ -432,12 +433,12 @@ func TestFusion_CrossProtocolPanel(t *testing.T) {
 	pa := newFakeUpstream(t, anthropicDraftResponder("draft-A"))
 	pb := newFakeUpstream(t, openaiDraftResponder("draft-B"))
 	ps := newFakeUpstream(t, anthropicSSEResponder("final answer"))
-	recipe := FusionConfig{
-		Panel: []RouteTarget{
+	recipe := configdomain.FusionConfig{
+		Panel: []configdomain.RouteTarget{
 			{Provider: "pa", Model: "ma"},
 			{Provider: "pb", Model: "mb", Protocol: "openai"},
 		},
-		Synthesizer: RouteTarget{Provider: "ps", Model: "ms"},
+		Synthesizer: configdomain.RouteTarget{Provider: "ps", Model: "ms"},
 	}
 	proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "ps": ps})
 	body := `{"model":"hard","max_tokens":100,"stream":true,"system":"be brief","messages":[{"role":"user","content":"solve X"}]}`
@@ -501,19 +502,19 @@ func TestFusionLeg_WireVerdict404Correction(t *testing.T) {
 	})
 	pb := newFakeUpstream(t, anthropicDraftResponder("draft-B"))
 	ps := newFakeUpstream(t, anthropicSSEResponder("final"))
-	cfg := &Config{
+	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{
+		Providers: map[string]configdomain.Provider{
 			// pa has ONLY an openai base: with no declared protocol and a
 			// responses=yes verdict the leg is verdict-driven to /responses.
 			"pa": {OpenAIBaseURL: pa.srv.URL, Provider: testProviderID},
 			"pb": {AnthropicBaseURL: pb.srv.URL, Provider: testProviderID},
 			"ps": {AnthropicBaseURL: ps.srv.URL, Provider: testProviderID},
 		},
-		Routes: map[string][]RouteTarget{"hard": {{Provider: "fusion", Model: "recipe"}}},
-		Fusion: map[string]FusionConfig{"recipe": {
-			Panel:       []RouteTarget{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}},
-			Synthesizer: RouteTarget{Provider: "ps", Model: "ms"},
+		Routes: map[string][]configdomain.RouteTarget{"hard": {{Provider: "fusion", Model: "recipe"}}},
+		Fusion: map[string]configdomain.FusionConfig{"recipe": {
+			Panel:       []configdomain.RouteTarget{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}},
+			Synthesizer: configdomain.RouteTarget{Provider: "ps", Model: "ms"},
 			MinPanel:    1,
 		}},
 	}
@@ -574,12 +575,12 @@ func TestFusionLeg_NativeResponsesBackendDraft(t *testing.T) {
 	pa := newFakeUpstream(t, responsesDraftResponder("draft-R"))
 	pb := newFakeUpstream(t, anthropicDraftResponder("draft-B"))
 	ps := newFakeUpstream(t, anthropicSSEResponder("final"))
-	recipe := FusionConfig{
-		Panel: []RouteTarget{
+	recipe := configdomain.FusionConfig{
+		Panel: []configdomain.RouteTarget{
 			{Provider: "pa", Model: "ma", Protocol: "responses"},
 			{Provider: "pb", Model: "mb"},
 		},
-		Synthesizer: RouteTarget{Provider: "ps", Model: "ms"},
+		Synthesizer: configdomain.RouteTarget{Provider: "ps", Model: "ms"},
 		MinPanel:    1,
 	}
 	proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "ps": ps})
@@ -646,12 +647,12 @@ func TestFusion_ResponsesChainRestored(t *testing.T) {
 		w.Header().Set("content-type", "application/json")
 		io.WriteString(w, `{"id":"chat_s1","choices":[{"index":0,"message":{"role":"assistant","content":"a1"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}`)
 	})
-	recipe := FusionConfig{
-		Panel: []RouteTarget{
+	recipe := configdomain.FusionConfig{
+		Panel: []configdomain.RouteTarget{
 			{Provider: "pa", Model: "ma", Protocol: "openai"},
 			{Provider: "pb", Model: "mb", Protocol: "openai"},
 		},
-		Synthesizer: RouteTarget{Provider: "ps", Model: "ms", Protocol: "openai"},
+		Synthesizer: configdomain.RouteTarget{Provider: "ps", Model: "ms", Protocol: "openai"},
 	}
 	_, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "ps": ps})
 

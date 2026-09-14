@@ -35,6 +35,7 @@ package app
 
 import (
 	"context"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/logx"
 	"net/http"
 	"sync"
@@ -146,7 +147,7 @@ func (p *Proxy) probeAllWireCaps() {
 		model := probe.PickModel(cfg, derived, name)
 		probed = true
 		wg.Add(1)
-		go func(name string, provCfg Provider, impl provider.Provider) {
+		go func(name string, provCfg configdomain.Provider, impl provider.Provider) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -265,7 +266,7 @@ func resolveByWire(clientProto string, hasAnthropicBase bool, caps wireCaps, ok 
 // (grabbed under p.mu earlier; passing it in avoids taking p.mu here, which
 // callers may or may not hold). model is the UPSTREAM model id; an empty model
 // (passthrough target) skips the model-level lookup.
-func (p *Proxy) resolvedBackendProto(declared, provName string, provCfg Provider, model, clientProto string, parentOf map[string]string) (proto string, viaResponsesVerdict bool) {
+func (p *Proxy) resolvedBackendProto(declared, provName string, provCfg configdomain.Provider, model, clientProto string, parentOf map[string]string) (proto string, viaResponsesVerdict bool) {
 	if declared != "" {
 		return declared, false
 	}
