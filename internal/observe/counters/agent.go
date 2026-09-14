@@ -160,42 +160,41 @@ func (a *AgentCounter) Seed(k AgentKey, c AgentCount) {
 	a.m[k] = &v
 }
 
-// incRequests bumps the request count for one (agent, provider, model) — called
-// once per committed (served) target on the forward hot path.
-func (a *AgentCounter) IncRequests(agent, provider, model string) {
+// mutate looks up — creating on first use — the counter cell for one
+// (agent, provider, model) and applies fn under the lock. AgentCount fields
+// are plain integers (unlike MetricsStore's atomics), so the accumulations
+// must stay inside the critical section.
+func (a *AgentCounter) mutate(agent, provider, model string, fn func(*AgentCount)) {
 	if a == nil || agent == "" {
 		return
 	}
-	k := AgentKey{Agent: agent, Provider: provider, Model: model}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	k := AgentKey{Agent: agent, Provider: provider, Model: model}
 	c := a.m[k]
 	if c == nil {
 		c = &AgentCount{}
 		a.m[k] = c
 	}
-	c.Requests++
+	fn(c)
+}
+
+// incRequests bumps the request count for one (agent, provider, model) — called
+// once per committed (served) target on the forward hot path.
+func (a *AgentCounter) IncRequests(agent, provider, model string) {
+	a.mutate(agent, provider, model, func(c *AgentCount) { c.Requests++ })
 }
 
 // addTokens accrues observed usage to (agent, provider, model). Called from the
 // SSE usageScanner's commit path (the same bytes that feed the (provider, model)
 // token counter), so agent token attribution matches the per-model totals.
 func (a *AgentCounter) AddTokens(agent, provider, model string, u TokenUsage) {
-	if a == nil || agent == "" {
-		return
-	}
-	k := AgentKey{Agent: agent, Provider: provider, Model: model}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	c := a.m[k]
-	if c == nil {
-		c = &AgentCount{}
-		a.m[k] = c
-	}
-	c.Input += u.Input
-	c.Output += u.Output
-	c.CacheCreation += u.CacheCreation
-	c.CacheRead += u.CacheRead
+	a.mutate(agent, provider, model, func(c *AgentCount) {
+		c.Input += u.Input
+		c.Output += u.Output
+		c.CacheCreation += u.CacheCreation
+		c.CacheRead += u.CacheRead
+	})
 }
 
 // snapshot returns a detached copy of all agent cells. Callers may read it
@@ -215,53 +214,22 @@ func (a *AgentCounter) Snapshot() map[AgentKey]AgentCount {
 // the metrics AddLatency (same commit-only semantics; ttft is 0 for
 // non-streaming responses).
 func (a *AgentCounter) AddLatency(agent, provider, model string, ms, ttftMs uint64) {
-	if a == nil || agent == "" {
-		return
-	}
-	k := AgentKey{Agent: agent, Provider: provider, Model: model}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	c := a.m[k]
-	if c == nil {
-		c = &AgentCount{}
-		a.m[k] = c
-	}
-	c.LatencySum += ms
-	c.TTFTSum += ttftMs
+	a.mutate(agent, provider, model, func(c *AgentCount) {
+		c.LatencySum += ms
+		c.TTFTSum += ttftMs
+	})
 }
 
 // addDuration records the FULL call wall-clock (send → end of the streamed
 // body) for one (agent, provider, model) — the tok/s denominator (see
 // MetricsStore.AddDuration).
 func (a *AgentCounter) AddDuration(agent, provider, model string, totalMs uint64) {
-	if a == nil || agent == "" {
-		return
-	}
-	k := AgentKey{Agent: agent, Provider: provider, Model: model}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	c := a.m[k]
-	if c == nil {
-		c = &AgentCount{}
-		a.m[k] = c
-	}
-	c.DurationSum += totalMs
+	a.mutate(agent, provider, model, func(c *AgentCount) { c.DurationSum += totalMs })
 }
 
 // incFailure bumps the failure count (all-targets-failed 502) for an agent.
 func (a *AgentCounter) IncFailure(agent, provider, model string) {
-	if a == nil || agent == "" {
-		return
-	}
-	k := AgentKey{Agent: agent, Provider: provider, Model: model}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	c := a.m[k]
-	if c == nil {
-		c = &AgentCount{}
-		a.m[k] = c
-	}
-	c.Failures++
+	a.mutate(agent, provider, model, func(c *AgentCount) { c.Failures++ })
 }
 
 func (a *AgentCounter) Reset() {
