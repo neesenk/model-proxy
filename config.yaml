@@ -130,7 +130,6 @@ providers:
       - doubao-seed-evolving
       - glm-5.3
       - glm-5.3-flash
-      - kimi-k2.7-code
       - kimi-k3
 
   shopee:
@@ -335,6 +334,10 @@ cache:
 #   secrets: log      # log (default: allow + live event + counter) | redact
 #                     # (forward with matches replaced by [REDACTED]) | block
 #                     # (reject with 400) | off (no scan)
+#                     # These actions apply to PATTERN hits only — exact
+#                     # matches on this proxy's own credentials are always
+#                     # recorded + rejected + session-blocked (see
+#                     # adjudicate below).
 #   known_secrets: true   # default true; also match the proxy's own credentials
 #   decode: true          # default true; catch base64/hex-encoded forms
 #   paths: log            # log (default) | block | off — sensitive-path signal;
@@ -359,14 +362,38 @@ cache:
 #                         # path hits are NOT recorded immediately: the matched
 #                         # span plus masked context is sent (async, cached by
 #                         # content hash) to the designated model, which returns
-#                         # high (real leak: audit record + optional session
-#                         # block) or low (benign fixture/doc/example:
-#                         # suppressed). Queue overflow, the per-request cap
-#                         # (4 jobs), same-content dedup across rules, model
-#                         # errors and timeouts fail OPEN to the classic
-#                         # immediate record (verdict error/skipped in the
-#                         # audit log). Enabling opts in to sending the matched
-#                         # snippet to the designated model.
+#                         # a THREE-level verdict: high (real leak: audit record
+#                         # + session block), medium (risk-shaped but
+#                         # unconfirmable: audit record only), low (benign
+#                         # fixture/doc/example: ignored — full JSONL trail
+#                         # only, never in the queryable store). The model also
+#                         # returns its judgment logic and the factual basis it
+#                         # cited (scrubbed + length-capped before storage).
+#                         # Queue overflow, the per-request cap (4 jobs),
+#                         # same-content dedup across rules, model errors and
+#                         # timeouts fail OPEN to the classic immediate record
+#                         # (verdict error/skipped). With the channel on even
+#                         # secrets=block defers pattern hits to the LLM.
+#                         # Enabling opts in to sending the matched snippet to
+#                         # the designated model.
+#                         # REPEAT INTERCEPTION: secret-kind hits judged
+#                         # high are remembered (sha256-only index,
+#                         # guard_blocked.json — never the bytes) and any
+#                         # later request carrying the same bytes is
+#                         # rejected outright (400 + session block, no
+#                         # second judge call), exactly like known-secret
+#                         # exact matches. Path hits are never indexed.
+#                         # The judge call goes through the shared scheduling
+#                         # seam: same ordering + cooldown skip + pin as
+#                         # forward traffic, per-attempt budget slices (a
+#                         # hanging provider burns only its own share), and
+#                         # its successes/failures/429s feed the shared
+#                         # circuit breaker. Usage counters (calls/tokens)
+#                         # persist in guard_stats.json across restarts.
+#                         # Exact-match hits (this proxy's own credentials,
+#                         # known_secret*/fragmented) are always intercepted:
+#                         # record + reject + session block until explicit
+#                         # unblock — no config action softens them.
 #     enabled: false
 #     model: ""           # required when enabled: exposed route name of the
 #                         # judging model; its provider needs anthropic_base_url

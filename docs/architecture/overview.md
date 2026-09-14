@@ -235,12 +235,18 @@ web 读路径经 `appapi.RequestLogQueries` 端口消费，索引不可用由 ad
 Fusion/Shadow eligibility 继续由应用层编排。列表与 Shadow 必须调用强制丢弃
 body/header 的 metadata API，detail/replay 才能查询完整 Record。
 
-`internal/observe/seclog` 是只依赖 `observe/logfile` 与 `observe/logx`（均为叶子）的安全审计日志叶子包，拥有审计事件
-Record schema（kind: secret/path/drift）与编码；非阻塞队列、按大小+按天轮转、retention
-sweep、owner-only 权限（文件 0600/目录 0700）与单 writer 由共享 `observe/logfile` sink 拥有（与 request log 同一模式；文件按天命名，同日重启追加同一文件）；离线 top-K
-查询（与 requestlog 同形的文件级提前终止：peek 最后一条完整记录——torn tail 不算——
-作为全文件 Ts 上界；被跳过文件内的 corrupt 行不再计入 Skipped，打不开的文件仍计入），
-以及供 CLI 绕开 daemon 直接追加的 `AppendSync`（写同命名规则的天文件，O_APPEND 单行追加与运行中的 Logger 共存）。红线：`Record.Names` 只含
+`internal/observe/seclog` 是安全审计日志叶子包（仓库内只依赖 `observe/logfile` 与
+`observe/logx`，另以 modernc 纯 Go 驱动写 SQLite——与 stats store / requestlog 索引同款
+WAL+busy_timeout+单连接配方），拥有审计事件 Record schema（kind: secret/path/drift）与
+**双层存储**：全量 JSONL 留痕（非阻塞队列、按大小+按天轮转、retention sweep、
+owner-only 权限与单 writer 由共享 `observe/logfile` sink 拥有；每条记录都落盘，包括被
+忽略档的 low verdict，但不再被任何查询面读取，仅供 tail）与可查询 SQLite 库
+（`security.db`，与 JSONL 同目录；精确匹配、drift、medium/high verdict 与 fail-open 的
+error/skipped 落库，low 按设计排除——"忽略"意味着无查询面，不是无痕迹）。写入路径在
+logfile 的 writer goroutine 内双写（队列满统一丢弃计数；store 打不开降级为 JSONL-only 并
+告警）；查询是纯 SQL（newest-first、kind/from/to/limit/request_id，Truncated 由同谓词
+COUNT 精确判定）；`AppendSync` 供 CLI 绕开 daemon 同步双写（doctor drift 去重依赖库里的
+行）。旧 JSONL 历史不迁移（文件原地保留）。红线：`Record.Names` 只含
 模式类型名/路径类别名，秘密值永不进入 Record；drift 记录的 detail 只含客户端名与
 指针 host。应用层只注入纯值（命中名、动作、路由元数据），扫描、阈值与派发决策
 不进本包。Logger 是 reload-owned：`internal/app/observe_adapters.go` 的
@@ -305,12 +311,19 @@ redact 前请求体尾部与跨请求分片进度。窗口可能含凭据，只�
 红线与启发式边界见 `docs/decisions/intentional-behaviors.md` 条目 20/21。
 
 `internal/adjudicate` 是无仓库内依赖的 AI 二次判定叶子包（guard.adjudicate），
-拥有：判定 Job/Result 模型、Caller/Sink/RuntimeConfig 端口、有界任务队列 +
-worker + 在途去重、verdict LRU 缓存（持久化 `guard_verdicts.json`，只存 hash→verdict）、
-高verdict 会话拦截表（持久化 `guard_blocks.json`，直至显式解除）与最近判定 ring。
+拥有：判定 Job/Result 模型（三级 verdict：high=记录+拉黑会话、medium=只记录、
+low=忽略档——仅 JSONL 留痕，reason=判定逻辑 + evidence=事实依据均经 scrub+限长）、
+Caller/Sink/RuntimeConfig 端口、有界任务队列 + worker + 在途去重、verdict LRU 缓存
+（持久化 `guard_verdicts.json`，只存 hash→verdict；缓存重放不重复触发 sink，high 仍刷新
+拦截表）、会话拦截表（持久化 `guard_blocks.json`，high verdict 与精确匹配拦截共用，
+直至显式解除）与最近判定 ring。
 匹配内容（Job.Hit）只在内存中流转，永不持久化/序列化/进 DTO；模型调用与观测
-副作用分别经 Caller/Sink 端口由 `internal/app` 注入（判定调用走 probe 直连配方，
-不进 forward 管线，见 `internal/app/guard_adjudication.go`）。
+副作用分别经 Caller/Sink 端口由 `internal/app` 注入：模型调用经共享调度 seam
+`modelExchange`（`internal/app/model_call.go`——与 forward 同一条 Manager.DecideOrder
+排序 + 冷却/熔断跳过 + pin 生效，per-attempt 预算切片，成败/429 回写共享健康状态；
+传输仍 probe.Do），不进 forward transport 层（guard 自递归 / request log、cache、
+forward 统计污染，见 `internal/app/guard_adjudication.go`）；判定用量累计持久化
+（`guard_stats.json`，重启不清零）。
 
 `internal/forward` 是请求转发管线包：从「snapshot + HTTP 请求」到「响应 commit 或终态错误」
 的全部编排归它——body 读取与上限、route 解析、pin/force-provider 硬选择

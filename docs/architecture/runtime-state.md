@@ -68,7 +68,10 @@ tracker 在每次 commit 新快照（pollAll/pollOne/429 refresh）时，以**�
 ### config generation 一致性
 
 Proxy 为每次成功 reload 分配单调递增的 config generation。forward、Fusion、
-resolver spread 和 quota poll 都携带开始时的 generation；health、sticky、
+resolver spread、quota poll 和 guard 判定调用（`internal/app/model_call.go` 的
+调度 seam：读 Manager.DecideOrder 排序与冷却可用性、用独立 sticky 槽
+`guard-adjudicate:<model>`，把判定腿的成败/429 回写 health——与 forward 共享
+同一健康视图）都携带开始时的 generation；health、sticky、
 modelLock、paramBlock、spread、quota 和 quality（错误率与 TTFT 样本同 gate）
 mutation 由 Manager 在同一锁内校验
 generation，旧请求和慢 poll 的结果直接丢弃。

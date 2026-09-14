@@ -139,7 +139,8 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
 body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`（`days?|d|hours?|minutes?|seconds?` 等单位）和 reset/retry 关键词邻近的 RFC3339。上限 7 天；duration 在乘法前必须 clamp，防止溢出。
 
 分类与 horizon 只由 `internal/targetexec.ParseRateLimit` 计算；普通
-`targetexec.Executor` 与 Fusion leg 必须调用同一入口，再把预计算的
+`targetexec.Executor`、Fusion leg 与 guard 判定的调度 seam
+（`internal/app/model_call.go`）必须调用同一入口，再把预计算的
 `RateLimitDecision` 交给 runtime adapter。根包不得恢复 `classify429`、
 `parseResetHint`、`hintDuration` 或 `parseRateLimit` 副本。
 

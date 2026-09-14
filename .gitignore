@@ -21,6 +21,7 @@ yarn-error.log*
 /model-proxy-linux
 /model-proxy-linux-*
 /model-proxy.exe
+internal/web/model-proxy
 
 # Test binaries dropped in the working dir by `go test -cpuprofile/-memprofile`
 # (named after the profiled package, e.g. app.test).
