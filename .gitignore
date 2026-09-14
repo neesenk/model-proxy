@@ -44,3 +44,5 @@ config.yaml.lock
 
 # Local daemon runtime state (credential/token backups) — never commit
 .model-proxy/
+
+.worktree/
