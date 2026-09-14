@@ -39,10 +39,11 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		limit = 200
 	}
 	// Same cost path as analytics and the budget watcher: config overrides
-	// first, then the cached catalog; unpriced models contribute nothing.
+	// first, then the cached catalog, then the provider alias; unpriced
+	// models contribute nothing.
 	snapshot := s.reads.Pricing()
-	costOf := func(model string, usage requestlog.Usage) float64 {
-		entry, ok := pricing.Resolve(snapshot.Overrides, snapshot.Catalog, model)
+	costOf := func(provider, model string, usage requestlog.Usage) float64 {
+		entry, ok := pricing.ResolveAliased(snapshot.Overrides, snapshot.Catalog, snapshot.Aliases, provider, model)
 		if !ok {
 			return 0
 		}
@@ -421,6 +422,16 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 			to = n
 		}
 	}
+	// from=0 is the "all time" sentinel: clamp the window to the oldest
+	// persisted bucket so the echoed from (the chart's grid anchor) covers
+	// real history instead of epoch→now — decades of empty past also poison
+	// the client's span-based granularity gating. No stats store (or an empty
+	// one) keeps 0: the response simply has no series.
+	if from == 0 {
+		if earliest := s.reads.StatsSince(); earliest > 0 {
+			from = earliest
+		}
+	}
 	g := q.Get("granularity")
 	if g == "" {
 		g = "day"
@@ -450,11 +461,11 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	// single server-side definition, folded identically for the window
 	// totals, the compare window and each series.
 	prices := s.reads.Pricing()
-	seriesOut := observeanalytics.Group(bs, by, prices.Overrides, prices.Catalog)
-	totals := observeanalytics.FoldTotals(bs, prices.Overrides, prices.Catalog)
+	seriesOut := observeanalytics.Group(bs, by, prices.Overrides, prices.Catalog, prices.Aliases)
+	totals := observeanalytics.FoldTotals(bs, prices.Overrides, prices.Catalog, prices.Aliases)
 	priced, unpriced := map[string]bool{}, map[string]bool{}
 	for _, b := range bs {
-		if _, ok := pricing.Resolve(prices.Overrides, prices.Catalog, b.Model); ok {
+		if _, ok := pricing.ResolveAliased(prices.Overrides, prices.Catalog, prices.Aliases, b.Provider, b.Model); ok {
 			priced[b.Model] = true
 		} else {
 			unpriced[b.Model] = true
@@ -484,7 +495,7 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 			writeJSONErr(w, http.StatusInternalServerError, "analytics compare: "+err.Error())
 			return
 		}
-		compare = &compareWindow{From: prevFrom, To: prevTo, Totals: observeanalytics.FoldTotals(prev, prices.Overrides, prices.Catalog)}
+		compare = &compareWindow{From: prevFrom, To: prevTo, Totals: observeanalytics.FoldTotals(prev, prices.Overrides, prices.Catalog, prices.Aliases)}
 	}
 	// Usage heatmap: a FIXED window of the last twelve WHOLE months plus the
 	// current month-to-date (the 1st of the month 12 months back through
@@ -504,7 +515,7 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	if agents == nil {
 		agents = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"granularity": g, "by": by, "from": from, "to": to, "series": seriesOut, "totals": totals, "compare": compare, "price_coverage": map[string]any{"priced": mapKeys(priced), "unpriced": mapKeys(unpriced)}, "heatmap": map[string]any{"from": yearFrom, "to": now.Unix(), "cells": observeanalytics.YearCells(heatBuckets, prices.Overrides, prices.Catalog)}, "agents": agents})
+	writeJSON(w, http.StatusOK, map[string]any{"granularity": g, "by": by, "from": from, "to": to, "series": seriesOut, "totals": totals, "compare": compare, "price_coverage": map[string]any{"priced": mapKeys(priced), "unpriced": mapKeys(unpriced)}, "heatmap": map[string]any{"from": yearFrom, "to": now.Unix(), "cells": observeanalytics.YearCells(heatBuckets, prices.Overrides, prices.Catalog, prices.Aliases)}, "agents": agents})
 }
 
 func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {

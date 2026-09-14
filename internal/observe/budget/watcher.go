@@ -31,7 +31,7 @@ import (
 type Ports struct {
 	BudgetState     func() (budgets configdomain.BudgetsConfig, parentOf map[string]string, ok bool)
 	QueryAnalytics  func(from, to int64) ([]observestats.AnalyticsBucket, error)
-	PricingSnapshot func() (overrides map[string]pricing.Override, catalog *pricing.Catalog)
+	PricingSnapshot func() (overrides map[string]pricing.Override, catalog *pricing.Catalog, aliases map[string]string)
 	Publish         func(observeevents.Event)
 }
 
@@ -117,13 +117,14 @@ func (w *Watcher) check(now time.Time, stop <-chan struct{}) {
 		return
 	}
 	// Same pricing snapshot as the analytics read view: config overrides
-	// first, then the cached catalog (nil/disabled = only overrides price).
-	overrides, catalog := w.ports.PricingSnapshot()
+	// first, then the cached catalog, then the provider alias (nil/disabled =
+	// only overrides price).
+	overrides, catalog, aliases := w.ports.PricingSnapshot()
 
 	total := 0.0
 	perProvider := map[string]float64{}
 	for _, bucket := range buckets {
-		entry, ok := pricing.Resolve(overrides, catalog, bucket.Model)
+		entry, ok := pricing.ResolveAliased(overrides, catalog, aliases, bucket.Provider, bucket.Model)
 		if !ok {
 			continue // unpriced models contribute no known cost (n/a, as in /api/analytics)
 		}

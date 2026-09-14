@@ -191,9 +191,10 @@ type SessionSummary struct {
 
 // SessionSummaries groups the newest scanLimit records by session id and
 // keeps the limit most-recently-active sessions. costOf (nil = CostUSD stays
-// zero) receives the upstream model and per-session usage; mirrors the
-// analytics cost path (pricing.Resolve + ComputeCost at the caller).
-func SessionSummaries(dir string, scanLimit, limit int, costOf func(model string, usage Usage) float64) ([]SessionSummary, error) {
+// zero) receives the provider, the upstream model and per-session usage;
+// mirrors the analytics cost path (pricing.ResolveAliased + ComputeCost at
+// the caller).
+func SessionSummaries(dir string, scanLimit, limit int, costOf func(provider, model string, usage Usage) float64) ([]SessionSummary, error) {
 	// UsageOnly: usage is parsed as each line is read and the bodies are
 	// dropped before the top-K heap retains the record — scanning 2000
 	// records must not pin 2000 full (up-to-5MiB-each) bodies in memory.
@@ -209,10 +210,13 @@ func SessionSummaries(dir string, scanLimit, limit int, costOf func(model string
 // arrive newest-first with ParsedUsage populated, and the index path must
 // apply the same top-K window (newest scanLimit rows, session-less rows
 // included) before calling this.
-func aggregateSessions(records []Record, limit int, costOf func(model string, usage Usage) float64) []SessionSummary {
+func aggregateSessions(records []Record, limit int, costOf func(provider, model string, usage Usage) float64) []SessionSummary {
+	type modelKey struct {
+		provider, model string
+	}
 	type agg struct {
 		summary   SessionSummary
-		byModel   map[string]Usage
+		byModel   map[modelKey]Usage
 		provSeen  map[string]bool
 		agentSeen map[string]bool
 	}
@@ -227,7 +231,7 @@ func aggregateSessions(records []Record, limit int, costOf func(model string, us
 		if a == nil {
 			a = &agg{
 				summary:   SessionSummary{SessionID: r.SessionID, LastTs: r.Ts},
-				byModel:   map[string]Usage{},
+				byModel:   map[modelKey]Usage{},
 				provSeen:  map[string]bool{},
 				agentSeen: map[string]bool{},
 			}
@@ -257,16 +261,19 @@ func aggregateSessions(records []Record, limit int, costOf func(model string, us
 		if model == "" {
 			model = r.CalledModel
 		}
-		if _, ok := a.byModel[model]; !ok {
-			a.byModel[model] = Usage{}
+		// Cost resolution is alias-aware per provider, so usage aggregates
+		// per (provider, model) even though the summary lists bare models.
+		mk := modelKey{provider: r.Provider, model: model}
+		if _, ok := a.byModel[mk]; !ok {
+			a.byModel[mk] = Usage{}
 		}
 		u := r.ParsedUsage
-		m := a.byModel[model]
+		m := a.byModel[mk]
 		m.Input += u.Input
 		m.Output += u.Output
 		m.CacheRead += u.CacheRead
 		m.CacheCreation += u.CacheCreation
-		a.byModel[model] = m
+		a.byModel[mk] = m
 		a.summary.Usage.Input += u.Input
 		a.summary.Usage.Output += u.Output
 		a.summary.Usage.CacheRead += u.CacheRead
@@ -274,10 +281,14 @@ func aggregateSessions(records []Record, limit int, costOf func(model string, us
 	}
 	out := make([]SessionSummary, 0, len(bySession))
 	for _, a := range bySession {
-		for model, u := range a.byModel {
-			a.summary.Models = append(a.summary.Models, model)
+		modelSeen := map[string]bool{}
+		for mk, u := range a.byModel {
+			if !modelSeen[mk.model] {
+				modelSeen[mk.model] = true
+				a.summary.Models = append(a.summary.Models, mk.model)
+			}
 			if costOf != nil {
-				a.summary.CostUSD += costOf(model, u)
+				a.summary.CostUSD += costOf(mk.provider, mk.model, u)
 			}
 		}
 		sort.Strings(a.summary.Models)

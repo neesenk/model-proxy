@@ -23,7 +23,7 @@ func TestFoldTotalsDerivesUnifiedMetrics(t *testing.T) {
 		// 1 request, no duration, no tokens, 3 retried failovers.
 		{Provider: "p", Model: "unpriced", Bucket: 200, Requests: 1, Failovers: 3, RateLimited429: 1},
 	}
-	got := FoldTotals(buckets, nil, pricedCatalog)
+	got := FoldTotals(buckets, nil, pricedCatalog, nil)
 	// Attempt counters fold additively alongside the terminal failures.
 	if got.Failovers != 4 || got.RateLimited429 != 3 {
 		t.Errorf("attempt counters = %d/%d, want 4/3", got.Failovers, got.RateLimited429)
@@ -54,7 +54,7 @@ func TestFoldTotalsDerivesUnifiedMetrics(t *testing.T) {
 }
 
 func TestFoldTotalsNullsMeanNoData(t *testing.T) {
-	empty := FoldTotals(nil, nil, pricedCatalog)
+	empty := FoldTotals(nil, nil, pricedCatalog, nil)
 	if empty.Tokens != 0 || empty.Requests != 0 {
 		t.Fatalf("empty fold = %+v", empty)
 	}
@@ -64,7 +64,7 @@ func TestFoldTotalsNullsMeanNoData(t *testing.T) {
 		}
 	}
 	// Requests without call time: tok/s null but err%/averages present.
-	noDur := FoldTotals([]observestats.AnalyticsBucket{{Requests: 2, Failures: 1, LatencySum: 800, TTFTSum: 200}}, nil, pricedCatalog)
+	noDur := FoldTotals([]observestats.AnalyticsBucket{{Requests: 2, Failures: 1, LatencySum: 800, TTFTSum: 200}}, nil, pricedCatalog, nil)
 	if noDur.TokSec != nil {
 		t.Errorf("TokSec = %v, want nil without duration", *noDur.TokSec)
 	}
@@ -72,7 +72,7 @@ func TestFoldTotalsNullsMeanNoData(t *testing.T) {
 		t.Errorf("no-duration fold = %+v", noDur)
 	}
 	// Prompt workload with no reads: hit rate is 0%, not null (data exists).
-	noRead := FoldTotals([]observestats.AnalyticsBucket{{Input: 100}}, nil, pricedCatalog)
+	noRead := FoldTotals([]observestats.AnalyticsBucket{{Input: 100}}, nil, pricedCatalog, nil)
 	if noRead.CacheHitPct == nil || *noRead.CacheHitPct != 0 {
 		t.Errorf("CacheHitPct = %v, want non-null 0", noRead.CacheHitPct)
 	}
@@ -80,7 +80,7 @@ func TestFoldTotalsNullsMeanNoData(t *testing.T) {
 
 func TestNewPointCarriesDerivedFields(t *testing.T) {
 	b := observestats.AnalyticsBucket{Provider: "p", Model: "priced", Bucket: 60, Requests: 2, Input: 10, Output: 5, CacheRead: 2, CacheCreation: 1, LatencySum: 600, TTFTSum: 60, DurationSum: 4000, AvgLatencyMs: 300, AvgTtftMs: 30, AvgDurationMs: 2000}
-	p := NewPoint(b, nil, pricedCatalog)
+	p := NewPoint(b, nil, pricedCatalog, nil)
 	if p.Tokens != 18 || p.TokSec == nil || !almostEqual(*p.TokSec, 1.25) ||
 		p.CacheHitPct == nil || !almostEqual(*p.CacheHitPct, 200.0/13) || p.ErrPct == nil || *p.ErrPct != 0 {
 		t.Fatalf("derived point = %+v", p)
@@ -89,15 +89,37 @@ func TestNewPointCarriesDerivedFields(t *testing.T) {
 		t.Errorf("point pricing = %+v", p)
 	}
 	// Unpriced model: cost nil, never fabricated.
-	unpriced := NewPoint(observestats.AnalyticsBucket{Model: "unknown", Requests: 1}, nil, pricedCatalog)
+	unpriced := NewPoint(observestats.AnalyticsBucket{Model: "unknown", Requests: 1}, nil, pricedCatalog, nil)
 	if unpriced.Priced || unpriced.Cost != nil {
 		t.Errorf("unpriced point = %+v", unpriced)
 	}
 	// Overrides win over the catalog (config prices: path) — only the
 	// input price is overridden here: 10 input tokens × $1/token.
-	over := NewPoint(b, map[string]pricing.Override{"priced": {Input: 1e6}}, pricedCatalog)
+	over := NewPoint(b, map[string]pricing.Override{"priced": {Input: 1e6}}, pricedCatalog, nil)
 	if !almostEqual(*over.Cost, 10) {
 		t.Errorf("override cost = %v, want 10", *over.Cost)
+	}
+}
+
+func TestNewPointPricesThroughProviderAlias(t *testing.T) {
+	// kimi-code's metered upstream name is "k3"; only the exposed alias
+	// "kimi-k3" has a catalog entry. Pricing must follow the provider alias.
+	catalog := pricing.Empty()
+	catalog.ByModel["kimi-k3"] = pricing.Entry{Prompt: 1e-6, Completion: 1e-6}
+	aliases := map[string]string{pricing.AliasKey("kimi-code", "k3"): "kimi-k3"}
+	b := observestats.AnalyticsBucket{Provider: "kimi-code", Model: "k3", Requests: 1, Input: 10, Output: 5}
+	p := NewPoint(b, nil, catalog, aliases)
+	if !p.Priced || p.Cost == nil || !almostEqual(*p.Cost, .000015) {
+		t.Fatalf("alias-priced point = %+v", p)
+	}
+	// Without the alias map the same bucket stays unpriced.
+	if un := NewPoint(b, nil, catalog, nil); un.Priced || un.Cost != nil {
+		t.Fatalf("alias-less point = %+v, want unpriced", un)
+	}
+	// Totals fold the alias-priced cost identically.
+	totals := FoldTotals([]observestats.AnalyticsBucket{b}, nil, catalog, aliases)
+	if totals.Cost == nil || !almostEqual(*totals.Cost, .000015) {
+		t.Fatalf("alias-priced totals = %+v", totals)
 	}
 }
 
@@ -107,7 +129,7 @@ func TestGroupSeriesKeysAndFoldsOwnBuckets(t *testing.T) {
 		{Agent: "", Provider: "p", Model: "m", Bucket: 160, Requests: 1, Output: 2, DurationSum: 1000},
 		{Agent: "", Provider: "q", Model: "m", Bucket: 100, Requests: 5, Output: 10, DurationSum: 5000},
 	}
-	byModel := Group(buckets, "model", nil, pricedCatalog)
+	byModel := Group(buckets, "model", nil, pricedCatalog, nil)
 	if len(byModel) != 2 {
 		t.Fatalf("by=model series = %d, want 2", len(byModel))
 	}
@@ -125,7 +147,7 @@ func TestGroupSeriesKeysAndFoldsOwnBuckets(t *testing.T) {
 		{Agent: "codex", Provider: "p", Model: "m", Requests: 1},
 		{Agent: "pi", Provider: "p", Model: "m", Requests: 2},
 	}
-	byAgent := Group(agentBuckets, "agent", nil, pricedCatalog)
+	byAgent := Group(agentBuckets, "agent", nil, pricedCatalog, nil)
 	if len(byAgent) != 2 || byAgent[0].Agent != "codex" || byAgent[0].Totals.Requests != 1 || byAgent[1].Totals.Requests != 2 {
 		t.Fatalf("by=agent series = %+v", byAgent)
 	}
@@ -139,7 +161,7 @@ func TestYearCellsFoldsDaysThroughTotals(t *testing.T) {
 		{Provider: "p", Model: "unknown", Bucket: 200, Requests: 1, Input: 20},
 		{Provider: "p", Model: "priced", Bucket: 100, Requests: 3, Failovers: 2, Output: 30, DurationSum: 3000},
 	}
-	cells := YearCells(buckets, nil, pricedCatalog)
+	cells := YearCells(buckets, nil, pricedCatalog, nil)
 	if len(cells) != 2 {
 		t.Fatalf("cells = %d, want 2: %+v", len(cells), cells)
 	}

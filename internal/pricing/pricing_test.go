@@ -122,6 +122,50 @@ func TestResolveOverridePrecedenceAndUnits(t *testing.T) {
 	}
 }
 
+func TestResolveAliasedFallsBackToExposedName(t *testing.T) {
+	catalog, err := parseOpenRouter([]byte(openRouterFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliases := map[string]string{AliasKey("kimi-code", "k3"): "kimi-k3"}
+	cat := Empty()
+	cat.ByModel["kimi-k3"] = Entry{Prompt: 3e-6, Completion: 9e-6}
+
+	// The upstream name ("k3") misses the catalog; the exposed alias prices it.
+	entry, ok := ResolveAliased(nil, cat, aliases, "kimi-code", "k3")
+	if !ok || entry != (Entry{Prompt: 3e-6, Completion: 9e-6}) {
+		t.Errorf("alias fallback: entry=%+v ok=%v", entry, ok)
+	}
+	// Pooled virtual provider ids look up the base provider's aliases.
+	if _, ok := ResolveAliased(nil, cat, aliases, "kimi-code#acct2", "k3"); !ok {
+		t.Error("pooled provider id should resolve through the base provider alias")
+	}
+	// A direct hit on the upstream name wins over the alias.
+	overrides := map[string]Override{"k3": {Input: 7}}
+	if entry, ok := ResolveAliased(overrides, cat, aliases, "kimi-code", "k3"); !ok || entry.Prompt != 7e-6 {
+		t.Errorf("direct override must beat alias: entry=%+v ok=%v", entry, ok)
+	}
+	// An override on the alias name applies when the upstream name misses.
+	if entry, ok := ResolveAliased(map[string]Override{"kimi-k3": {Input: 5}}, nil, aliases, "kimi-code", "k3"); !ok || entry.Prompt != 5e-6 {
+		t.Errorf("alias override: entry=%+v ok=%v", entry, ok)
+	}
+	// No alias configured, alias equal to the model, and unknown alias targets
+	// all stay unpriced.
+	if _, ok := ResolveAliased(nil, catalog, nil, "kimi-code", "k3"); ok {
+		t.Error("no alias map should stay unpriced")
+	}
+	if _, ok := ResolveAliased(nil, catalog, map[string]string{AliasKey("kimi-code", "k3"): "k3"}, "kimi-code", "k3"); ok {
+		t.Error("identity alias must not resolve")
+	}
+	if _, ok := ResolveAliased(nil, catalog, map[string]string{AliasKey("kimi-code", "k3"): "unknown"}, "kimi-code", "k3"); ok {
+		t.Error("alias target missing from the catalog stays unpriced")
+	}
+	// A provider without the alias entry never borrows another provider's.
+	if _, ok := ResolveAliased(nil, cat, aliases, "zhipu", "k3"); ok {
+		t.Error("aliases are per-provider")
+	}
+}
+
 func TestComputeCostIncludesEveryTokenClass(t *testing.T) {
 	entry := Entry{Prompt: 1.1e-6, Completion: 2.8e-6, CacheRead: 0.1e-6, CacheWrite: 0.2e-6}
 	got := ComputeCost(1_000_000, 500_000, 200_000, 100_000, entry)

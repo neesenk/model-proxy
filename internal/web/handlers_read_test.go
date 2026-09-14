@@ -70,7 +70,7 @@ func (d dirRequestLogQueries) SummariesWithFacets(f requestlog.Filter) ([]reques
 func (d dirRequestLogQueries) Detail(id string) ([]requestlog.Record, error) {
 	return requestlog.QueryRecords(d.dir, requestlog.Filter{RequestID: id, Limit: 50})
 }
-func (d dirRequestLogQueries) SessionSummaries(scanLimit, limit int, costOf func(string, requestlog.Usage) float64) ([]requestlog.SessionSummary, error) {
+func (d dirRequestLogQueries) SessionSummaries(scanLimit, limit int, costOf func(string, string, requestlog.Usage) float64) ([]requestlog.SessionSummary, error) {
 	return requestlog.SessionSummaries(d.dir, scanLimit, limit, costOf)
 }
 func (r *readAPIStub) Accounts() []appapi.ProviderAccounts { return r.accounts }
@@ -1646,5 +1646,42 @@ func TestReadAnalyticsYearHeatmapAndAgentFacet(t *testing.T) {
 	decodeReadJSON(t, failed, &routeError)
 	if failed.Code != http.StatusInternalServerError || routeError.Error != "analytics heatmap: heatmap down" {
 		t.Fatalf("heatmap failure = (%d, %#v)", failed.Code, routeError)
+	}
+}
+
+// TestReadAnalyticsAllTimeClampsToEarliestBucket pins the from=0 all-time
+// sentinel: the window (and the echoed from — the client's grid anchor and
+// granularity-gating span) starts at the oldest persisted bucket, never at
+// the epoch. An empty/disabled store keeps 0 and simply yields no series.
+func TestReadAnalyticsAllTimeClampsToEarliestBucket(t *testing.T) {
+	const earliest = int64(1788874500)
+	var windows []int64
+	reads := &readAPIStub{
+		statsSince: earliest,
+		analytics: func(q appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
+			windows = append(windows, q.From)
+			return []observestats.AnalyticsBucket{}, nil
+		},
+	}
+	s := newReadServer(t, reads)
+	resp := serveRead(t, s, http.MethodGet, "/api/analytics?from=0&granularity=week")
+	var out struct {
+		From int64 `json:"from"`
+	}
+	decodeReadJSON(t, resp, &out)
+	if resp.Code != http.StatusOK || out.From != earliest {
+		t.Fatalf("all-time echo = (%d, from %d), want from=%d", resp.Code, out.From, earliest)
+	}
+	if len(windows) == 0 || windows[0] != earliest {
+		t.Fatalf("series query windows = %v, want clamped from=%d", windows, earliest)
+	}
+
+	// Empty store: no anchor, the sentinel passes through unchanged.
+	reads.statsSince = 0
+	windows = nil
+	resp = serveRead(t, s, http.MethodGet, "/api/analytics?from=0&granularity=week")
+	decodeReadJSON(t, resp, &out)
+	if resp.Code != http.StatusOK || out.From != 0 || len(windows) == 0 || windows[0] != 0 {
+		t.Fatalf("empty-store all-time = (%d, from %d, queries %v)", resp.Code, out.From, windows)
 	}
 }

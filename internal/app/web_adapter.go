@@ -270,9 +270,9 @@ func (p *Proxy) adminPorts(
 			// it cannot observe a mixed config generation.
 			return p.modelCaps.Snapshot()
 		},
-		Pricing: func() (*pricing.Catalog, map[string]pricing.Override) {
-			overrides, catalog := p.detachedPricing()
-			return catalog, overrides
+		Pricing: func() (*pricing.Catalog, map[string]pricing.Override, map[string]string) {
+			overrides, catalog, aliases := p.detachedPricing()
+			return catalog, overrides, aliases
 		},
 		ResetStats:   p.resetStats,
 		ResetHealth:  p.resetHealth,

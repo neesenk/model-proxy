@@ -716,7 +716,7 @@ func (x *Indexer) readRecordAt(file string, offset, length int64) (Record, error
 // scanLimit rows (session-less rows included, matching the scan's top-K
 // window) with usage read from the index columns, aggregated by the same Go
 // code the file-scan version uses.
-func (x *Indexer) SessionSummaries(scanLimit, limit int, costOf func(model string, usage Usage) float64) ([]SessionSummary, error) {
+func (x *Indexer) SessionSummaries(scanLimit, limit int, costOf func(provider, model string, usage Usage) float64) ([]SessionSummary, error) {
 	query := `SELECT ts, session_id, shadow, status, provider, upstream_model,
 		called_model, agent, input, output, cache_read, cache_creation
 		FROM records ORDER BY ts DESC, rowid DESC`

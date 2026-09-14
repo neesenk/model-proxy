@@ -97,9 +97,10 @@ type Ports struct {
 	// was probed yet). The ModelStore owns its own leaf lock, so the closure
 	// does not take p.mu.
 	ModelCapsSnapshot func() map[string]runtimewire.ProviderModelCaps
-	// Pricing returns the pricing catalog (immutable after publication) plus
-	// a detached copy of the configured overrides.
-	Pricing func() (catalog *pricing.Catalog, overrides map[string]pricing.Override)
+	// Pricing returns the pricing catalog (immutable after publication), a
+	// detached copy of the configured overrides, and the provider alias map
+	// (pricing.AliasKey(provider, upstreamModel) → exposed name).
+	Pricing func() (catalog *pricing.Catalog, overrides map[string]pricing.Override, aliases map[string]string)
 
 	// ResetStats clears request counters and persisted stats.
 	ResetStats func() error

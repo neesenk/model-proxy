@@ -150,6 +150,32 @@ func Resolve(overrides map[string]Override, catalog *Catalog, model string) (Ent
 	return catalog.Lookup(model)
 }
 
+// AliasKey indexes an Aliases map: provider + "\x00" + upstream model name.
+// Aliases map a provider's real upstream model to the exposed name clients
+// call (config `alias:`) — the metering key is the upstream name, but the
+// price catalog knows the exposed one.
+func AliasKey(provider, model string) string {
+	return provider + "\x00" + model
+}
+
+// ResolveAliased prices one metered (provider, model) pair: the upstream
+// model name first, then its configured routing alias (e.g. kimi-code
+// upstream "k3" falls back to the exposed "kimi-k3" price). Pooled virtual
+// provider ids ("name#account") look up the base provider's aliases.
+func ResolveAliased(overrides map[string]Override, catalog *Catalog, aliases map[string]string, provider, model string) (Entry, bool) {
+	if entry, ok := Resolve(overrides, catalog, model); ok {
+		return entry, true
+	}
+	base := provider
+	if i := strings.IndexByte(base, '#'); i >= 0 {
+		base = base[:i]
+	}
+	if alias := aliases[AliasKey(base, model)]; alias != "" && alias != model {
+		return Resolve(overrides, catalog, alias)
+	}
+	return Entry{}, false
+}
+
 // ComputeCost prices one analytics bucket in USD.
 func ComputeCost(input, output, cacheRead, cacheCreation uint64, entry Entry) float64 {
 	return float64(input)*entry.Prompt +

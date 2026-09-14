@@ -171,7 +171,7 @@ func (q requestLogQueries) Detail(requestID string) ([]requestlog.Record, error)
 	return requestlog.QueryRecords(q.dir, requestlog.Filter{RequestID: requestID, Limit: 50})
 }
 
-func (q requestLogQueries) SessionSummaries(scanLimit, limit int, costOf func(model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error) {
+func (q requestLogQueries) SessionSummaries(scanLimit, limit int, costOf func(provider, model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error) {
 	if q.index != nil {
 		return q.index.SessionSummaries(scanLimit, limit, costOf)
 	}
@@ -441,10 +441,11 @@ func (s *Service) AnalyticsAgentNames(query appapi.AnalyticsQuery) []string {
 }
 
 func (s *Service) Pricing() appapi.PricingSnapshot {
-	catalog, overrides := s.ports.Pricing()
+	catalog, overrides, aliases := s.ports.Pricing()
 	return appapi.PricingSnapshot{
 		Catalog:   catalog,
 		Overrides: overrides,
+		Aliases:   aliases,
 	}
 }
 

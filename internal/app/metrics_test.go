@@ -697,7 +697,7 @@ func TestDetachedPricingDetachesAndConvertsOverrides(t *testing.T) {
 		},
 	}}}
 
-	overrides, catalog := proxy.detachedPricing()
+	overrides, catalog, _ := proxy.detachedPricing()
 	if catalog != nil {
 		t.Fatalf("disabled pricing catalog = %+v, want nil", catalog)
 	}

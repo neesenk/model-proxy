@@ -77,7 +77,7 @@ type Series struct {
 // NewPoint projects one store bucket into a Point, pricing it with the same
 // per-bucket path as FoldTotals (unknown price → Cost nil, Priced false —
 // never fabricated).
-func NewPoint(b observestats.AnalyticsBucket, overrides map[string]pricing.Override, catalog *pricing.Catalog) Point {
+func NewPoint(b observestats.AnalyticsBucket, overrides map[string]pricing.Override, catalog *pricing.Catalog, aliases map[string]string) Point {
 	p := Point{
 		Bucket: b.Bucket, Requests: b.Requests, Failovers: b.Failovers,
 		RateLimited429: b.RateLimited429, Failures: b.Failures,
@@ -98,7 +98,7 @@ func NewPoint(b observestats.AnalyticsBucket, overrides map[string]pricing.Overr
 		errPct := float64(b.Failures) / float64(b.Requests) * 100
 		p.ErrPct = &errPct
 	}
-	if entry, ok := pricing.Resolve(overrides, catalog, b.Model); ok {
+	if entry, ok := pricing.ResolveAliased(overrides, catalog, aliases, b.Provider, b.Model); ok {
 		cost := pricing.ComputeCost(b.Input, b.Output, b.CacheRead, b.CacheCreation, entry)
 		p.Cost, p.Priced = &cost, true
 	}
@@ -108,7 +108,7 @@ func NewPoint(b observestats.AnalyticsBucket, overrides map[string]pricing.Overr
 // FoldTotals folds one window of buckets into the unified derived-metric
 // block. Requests-weighted averages round to one decimal (the same
 // averageMilliseconds convention as the store's per-bucket projection).
-func FoldTotals(buckets []observestats.AnalyticsBucket, overrides map[string]pricing.Override, catalog *pricing.Catalog) Totals {
+func FoldTotals(buckets []observestats.AnalyticsBucket, overrides map[string]pricing.Override, catalog *pricing.Catalog, aliases map[string]string) Totals {
 	var t Totals
 	var latencySum, ttftSum, durationSum uint64
 	for _, b := range buckets {
@@ -123,7 +123,7 @@ func FoldTotals(buckets []observestats.AnalyticsBucket, overrides map[string]pri
 		latencySum += b.LatencySum
 		ttftSum += b.TTFTSum
 		durationSum += b.DurationSum
-		if entry, ok := pricing.Resolve(overrides, catalog, b.Model); ok {
+		if entry, ok := pricing.ResolveAliased(overrides, catalog, aliases, b.Provider, b.Model); ok {
 			x := pricing.ComputeCost(b.Input, b.Output, b.CacheRead, b.CacheCreation, entry)
 			if t.Cost == nil {
 				t.Cost = new(float64)
@@ -153,7 +153,7 @@ func FoldTotals(buckets []observestats.AnalyticsBucket, overrides map[string]pri
 // keys by agent; anything else keys by provider+model), preserving the
 // buckets' order of first appearance. Each series carries its own Totals
 // block folded over exactly its buckets.
-func Group(buckets []observestats.AnalyticsBucket, by string, overrides map[string]pricing.Override, catalog *pricing.Catalog) []Series {
+func Group(buckets []observestats.AnalyticsBucket, by string, overrides map[string]pricing.Override, catalog *pricing.Catalog, aliases map[string]string) []Series {
 	type key struct {
 		agent, provider, model string
 	}
@@ -171,13 +171,13 @@ func Group(buckets []observestats.AnalyticsBucket, by string, overrides map[stri
 			byKey[k] = v
 			order = append(order, k)
 		}
-		v.Points = append(v.Points, NewPoint(b, overrides, catalog))
+		v.Points = append(v.Points, NewPoint(b, overrides, catalog, aliases))
 		slices[k] = append(slices[k], b)
 	}
 	out := make([]Series, 0, len(order))
 	for _, k := range order {
 		s := *byKey[k]
-		s.Totals = FoldTotals(slices[k], overrides, catalog)
+		s.Totals = FoldTotals(slices[k], overrides, catalog, aliases)
 		out = append(out, s)
 	}
 	return out
@@ -195,7 +195,7 @@ type YearCell struct {
 // bucketing — Bucket is the local midnight) into per-day cells, ascending,
 // only days with buckets. The heatmap's fixed trailing-year window is the
 // caller's concern; the fold itself works on any day-granularity set.
-func YearCells(buckets []observestats.AnalyticsBucket, overrides map[string]pricing.Override, catalog *pricing.Catalog) []YearCell {
+func YearCells(buckets []observestats.AnalyticsBucket, overrides map[string]pricing.Override, catalog *pricing.Catalog, aliases map[string]string) []YearCell {
 	groups := map[int64][]observestats.AnalyticsBucket{}
 	for _, b := range buckets {
 		groups[b.Bucket] = append(groups[b.Bucket], b)
@@ -207,7 +207,7 @@ func YearCells(buckets []observestats.AnalyticsBucket, overrides map[string]pric
 	sort.Slice(days, func(i, j int) bool { return days[i] < days[j] })
 	out := make([]YearCell, 0, len(days))
 	for _, d := range days {
-		out = append(out, YearCell{Day: d, Totals: FoldTotals(groups[d], overrides, catalog)})
+		out = append(out, YearCell{Day: d, Totals: FoldTotals(groups[d], overrides, catalog, aliases)})
 	}
 	return out
 }

@@ -150,7 +150,7 @@ func (p *Proxy) budgetPorts() budget.Ports {
 		QueryAnalytics: func(from, to int64) ([]observestats.AnalyticsBucket, error) {
 			return p.stats.QueryAnalytics(from, to, "", "", "month")
 		},
-		PricingSnapshot: func() (map[string]pricing.Override, *pricing.Catalog) {
+		PricingSnapshot: func() (map[string]pricing.Override, *pricing.Catalog, map[string]string) {
 			return p.detachedPricing()
 		},
 		Publish: func(event observeevents.Event) {

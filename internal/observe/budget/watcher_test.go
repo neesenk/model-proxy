@@ -29,6 +29,7 @@ type fakePorts struct {
 	queryErr  error
 	overrides map[string]pricing.Override
 	catalog   *pricing.Catalog
+	aliases   map[string]string
 	events    []observeevents.Event
 }
 
@@ -65,10 +66,10 @@ func (f *fakePorts) ports() Ports {
 			defer f.mu.Unlock()
 			return f.buckets, f.queryErr
 		},
-		PricingSnapshot: func() (map[string]pricing.Override, *pricing.Catalog) {
+		PricingSnapshot: func() (map[string]pricing.Override, *pricing.Catalog, map[string]string) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
-			return f.overrides, f.catalog
+			return f.overrides, f.catalog, f.aliases
 		},
 		Publish: func(event observeevents.Event) {
 			f.mu.Lock()
@@ -188,6 +189,22 @@ func TestWatcher_UnpricedModelsContributeNothing(t *testing.T) {
 	w.check(w.now(), nil)
 	if got := budgetEvents(t, f); len(got) != 0 {
 		t.Fatalf("budget events = %d, want 0 (unpriced usage has no known cost)", len(got))
+	}
+}
+
+func TestWatcher_AliasPricedModelContributes(t *testing.T) {
+	// kimi-code meters upstream "k3"; the price lives on the exposed alias
+	// "kimi-k3" ($1/$2 per 1M → 1M in + 0.5M out = $2.00) and must count
+	// toward the budget exactly like a directly-priced model.
+	f := newFakePorts(configdomain.BudgetsConfig{MonthlyUSD: 1.0},
+		observestats.AnalyticsBucket{Provider: "kimi-code", Model: "k3", Requests: 1, Input: 1_000_000, Output: 500_000})
+	f.overrides = map[string]pricing.Override{"kimi-k3": {Input: 1.0, Output: 2.0}}
+	f.aliases = map[string]string{pricing.AliasKey("kimi-code", "k3"): "kimi-k3"}
+	w := newTestWatcher(f)
+
+	w.check(w.now(), nil)
+	if got := budgetEvents(t, f); len(got) != 1 || got[0].ActualUSD != 2.0 {
+		t.Fatalf("budget events = %+v, want one alert at $2 via the alias price", got)
 	}
 }
 

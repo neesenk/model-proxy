@@ -521,8 +521,8 @@ func TestPricingPassThrough(t *testing.T) {
 	catalog := pricing.Empty()
 	overrides := map[string]pricing.Override{"m": {Input: 9}}
 	service := New(Ports{
-		Pricing: func() (*pricing.Catalog, map[string]pricing.Override) {
-			return catalog, overrides
+		Pricing: func() (*pricing.Catalog, map[string]pricing.Override, map[string]string) {
+			return catalog, overrides, nil
 		},
 	})
 	got := service.Pricing()

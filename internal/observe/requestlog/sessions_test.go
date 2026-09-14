@@ -24,7 +24,7 @@ func TestSessionSummariesAggregatesAndCosts(t *testing.T) {
 			ResponseBody: `{"usage":{"input_tokens":9999,"output_tokens":9999}}`},
 	})
 
-	sessions, err := SessionSummaries(dir, 100, 10, func(model string, u Usage) float64 {
+	sessions, err := SessionSummaries(dir, 100, 10, func(provider, model string, u Usage) float64 {
 		// Deterministic stub: $1 per input token, $2 per output token.
 		return float64(u.Input) + 2*float64(u.Output)
 	})

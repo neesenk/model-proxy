@@ -426,8 +426,8 @@ func TestIndexSessionSummariesEquivalence(t *testing.T) {
 	indexer := newTestIndexer(t, dir)
 	mustReconcile(t, indexer)
 
-	costOf := func(model string, usage Usage) float64 {
-		return float64(len(model)) + float64(usage.Input+usage.Output)/1000
+	costOf := func(provider, model string, usage Usage) float64 {
+		return float64(len(provider)+len(model)) + float64(usage.Input+usage.Output)/1000
 	}
 	want, err := SessionSummaries(dir, 2000, 50, costOf)
 	if err != nil {

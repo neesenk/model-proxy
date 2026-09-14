@@ -58,12 +58,36 @@ func (p *Proxy) priceOverrides() map[string]configdomain.PriceConfig {
 	return cfg.Prices
 }
 
+// pricingAliases returns the provider alias index for price fallback:
+// pricing.AliasKey(provider, upstreamModel) → exposed name, from each
+// provider's config `alias:` map. Same cfgSnapshot discipline as
+// priceOverrides (brief RLock, no live-map escape: the result is rebuilt).
+func (p *Proxy) pricingAliases() map[string]string {
+	cfg := p.cfgSnapshot()
+	if cfg == nil {
+		return nil
+	}
+	var out map[string]string
+	for name, prov := range cfg.Providers {
+		for model, alias := range prov.Alias {
+			if alias == "" || alias == model {
+				continue
+			}
+			if out == nil {
+				out = map[string]string{}
+			}
+			out[pricing.AliasKey(name, model)] = alias
+		}
+	}
+	return out
+}
+
 // detachedPricing returns the current pricing catalog plus a detached COPY of
 // the configured price overrides (config `prices:` values are generation-
 // immutable, but callers must never receive the live map). Shared by the
 // admin ports and the budget watcher so the PriceConfig → pricing.Override
 // conversion has exactly one owner.
-func (p *Proxy) detachedPricing() (map[string]pricing.Override, *pricing.Catalog) {
+func (p *Proxy) detachedPricing() (map[string]pricing.Override, *pricing.Catalog, map[string]string) {
 	catalog := p.pricingSnapshot()
 	overrides := p.priceOverrides()
 	var detached map[string]pricing.Override
@@ -78,7 +102,7 @@ func (p *Proxy) detachedPricing() (map[string]pricing.Override, *pricing.Catalog
 			}
 		}
 	}
-	return detached, catalog
+	return detached, catalog, p.pricingAliases()
 }
 
 // snapshotConfig returns a shallow copy of the current config under a brief

@@ -122,10 +122,14 @@ type Pin struct {
 }
 
 // PricingSnapshot contains detached pricing inputs used for analytics
-// presentation. Catalog is immutable after publication.
+// presentation. Catalog is immutable after publication. Aliases maps
+// pricing.AliasKey(provider, upstreamModel) → exposed alias name, so a
+// metered upstream name with no catalog entry (kimi-code's "k3") falls back
+// to its exposed name's price ("kimi-k3").
 type PricingSnapshot struct {
 	Catalog   *pricing.Catalog
 	Overrides map[string]pricing.Override
+	Aliases   map[string]string
 }
 
 // ConfigRouteTarget is the JSON shape returned by GET /api/config.
@@ -577,7 +581,7 @@ func NewHTTPError(status int, message string) error {
 type RequestLogQueries interface {
 	SummariesWithFacets(requestlog.Filter) ([]requestlog.Summary, requestlog.Facets, error)
 	Detail(requestID string) ([]requestlog.Record, error)
-	SessionSummaries(scanLimit, limit int, costOf func(model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error)
+	SessionSummaries(scanLimit, limit int, costOf func(provider, model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error)
 }
 
 // ReadAPI is the complete read-only capability consumed by the Web transport.
