@@ -18,7 +18,7 @@ var fragPoolKey = "poolkey-" + strings.Repeat("zK7v", 8)
 // call returns a distinct pointer (a fresh "generation").
 func mustGuardScanner(t *testing.T) *guard.Scanner {
 	t.Helper()
-	sc, err := guard.NewScannerWithOptions(nil, []string{fragPoolKey}, nil, guard.Options{Decode: true})
+	sc, err := guard.NewScannerWithOptions(nil, guard.Known([]string{fragPoolKey}...), nil, guard.Options{Decode: true})
 	if err != nil {
 		t.Fatal(err)
 	}

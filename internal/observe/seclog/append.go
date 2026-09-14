@@ -2,6 +2,7 @@ package seclog
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"model-proxy/internal/observe/logfile"
 	"time"
@@ -9,11 +10,13 @@ import (
 
 // AppendSync appends one record directly to dir without a Logger, for CLI
 // paths that run outside the daemon lifecycle (e.g. doctor drift findings).
-// It writes a single O_APPEND line into the per-day <prefix>YYYYMMDD.log file
-// (the same naming a running Logger uses), creating the directory 0700 and
-// the file 0600, and narrows permissions on pre-existing storage. Coexistence
-// with a running Logger in the same directory is safe: both append single
-// lines with O_APPEND, so one Query scans them all.
+// It writes the JSONL trail line (same per-day naming a running Logger uses,
+// creating the directory 0700 and the file 0600, narrowing permissions on
+// pre-existing storage) and inserts the record into the queryable SQLite
+// store. Coexistence with a running Logger is safe: WAL + busy_timeout
+// serializes the writers. Both halves are attempted; a failure on either
+// surface is returned (joined) — callers like doctor's drift dedup query the
+// store, so a dropped insert must not look like a success.
 func AppendSync(dir string, rec *Record) error {
 	if rec == nil {
 		return fmt.Errorf("seclog: nil record")
@@ -29,8 +32,18 @@ func AppendSync(dir string, rec *Record) error {
 	if err != nil {
 		return fmt.Errorf("seclog: encode record: %w", err)
 	}
+	var lineErr, storeErr error
 	if err := logfile.AppendLine(dir, filePrefix, line, now); err != nil {
-		return fmt.Errorf("seclog: %w", err)
+		lineErr = fmt.Errorf("seclog: %w", err)
 	}
-	return nil
+	st, err := openStore(dir)
+	if err == nil {
+		storeErr = st.insert(rec)
+		if cerr := st.Close(); storeErr == nil {
+			storeErr = cerr
+		}
+	} else {
+		storeErr = err
+	}
+	return errors.Join(lineErr, storeErr)
 }

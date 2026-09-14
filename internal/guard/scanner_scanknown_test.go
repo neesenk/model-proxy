@@ -29,7 +29,7 @@ func TestScanKnown_OnlyKnownSecretChannel(t *testing.T) {
 	body := "token: " + secret
 	got := s.ScanKnown([]byte(body))
 	if len(got) != 1 || got[0] != knownSecret {
-		t.Errorf("ScanKnown(plaintext) = %v, want [%s]", got, knownSecret)
+		t.Errorf("ScanKnown(plaintext...) = %v, want [%s]", got, knownSecret)
 	}
 	if strings.Contains(got[0], secret) {
 		t.Errorf("ScanKnown report contains secret material")
@@ -75,7 +75,7 @@ func TestScanKnown_FragmentedReassembly(t *testing.T) {
 	// only in the concatenation.
 	joined := `...","content":"` + frag1 + frag2 + `"}...`
 	if got := s.ScanKnown([]byte(joined)); len(got) != 1 || got[0] != knownSecret {
-		t.Errorf("ScanKnown(concatenation) = %v, want [%s]", got, knownSecret)
+		t.Errorf("ScanKnown(concatenation...) = %v, want [%s]", got, knownSecret)
 	}
 }
 

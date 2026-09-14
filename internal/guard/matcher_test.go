@@ -79,7 +79,7 @@ func TestACEndOrderAndOverlap(t *testing.T) {
 // in a body — guards against automaton construction bugs silently disabling
 // a rule's prefilter.
 func TestPrefilterCoversAllNeedles(t *testing.T) {
-	s, err := NewScanner(nil, []string{"synthetic-pool-secret-1234"}, nil)
+	s, err := NewScanner(nil, Known([]string{"synthetic-pool-secret-1234"}...), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

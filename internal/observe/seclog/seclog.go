@@ -1,19 +1,24 @@
 // Package seclog is the security audit log leaf package. It owns the audit
-// Record schema and offline top-K queries; JSONL persistence (queue, size/day
-// rotation, retention sweeps, owner-only permissions) is delegated to the
-// shared observe/logfile sink — the same pattern as the request log. Its only
+// Record schema and the queryable SQLite store (security.db — exact-match
+// hits, drift, medium/high verdicts and fail-open records; low verdicts are
+// the ignored tier and stay out of the query surface); the full-fidelity
+// JSONL trail (queue, size/day rotation, retention sweeps, owner-only
+// permissions, EVERY record including lows) is delegated to the shared
+// observe/logfile sink — the same pattern as the request log. Its only
 // model-proxy imports are the logx level-filtering leaf and observe/logfile;
 // it depends on nothing else in the repo.
 //
 // Red line: Record.Names carries pattern-type or path-category names only.
 // Secret values never enter a Record — this package never inspects payloads,
-// and producers must not smuggle matched content into Detail either.
+// and producers must not smuggle matched content into Reason/Evidence/Detail
+// either (the adjudication channel scrubs those before they land here).
 package seclog
 
 import (
 	"encoding/json"
 	"fmt"
 	"model-proxy/internal/observe/logfile"
+	"model-proxy/internal/observe/logx"
 	"time"
 )
 
@@ -33,23 +38,35 @@ const (
 	KindDrift  = "drift"
 )
 
-// Record is one line in the JSONL security audit log. Ts is unix
-// milliseconds; a zero Ts is stamped by the writer at persistence time.
+// Record is one audit event. It is written to the full JSONL trail (every
+// record) and, unless it is an ignored-tier low verdict, to the queryable
+// SQLite store. Ts is unix milliseconds; a zero Ts is stamped by the writer
+// at persistence time.
 type Record struct {
 	Ts        int64    `json:"ts"`
 	Kind      string   `json:"kind"`
 	RequestID string   `json:"request_id,omitempty"`
+	SessionID string   `json:"session_id,omitempty"`
 	Agent     string   `json:"agent,omitempty"`
 	Protocol  string   `json:"protocol,omitempty"`
 	Exposed   string   `json:"exposed,omitempty"`
 	Names     []string `json:"names,omitempty"`
 	Action    string   `json:"action,omitempty"`
 	// Verdict is the AI second-opinion outcome for records from (or
-	// fail-opened out of) guard.adjudicate: "high" | "error" | "skipped".
-	// Empty = the classic immediate record. Like every Record field it
-	// carries classification labels only, never matched content.
+	// fail-opened out of) guard.adjudicate: "high" | "medium" | "error" |
+	// "skipped" ("low" exists in the JSONL trail only). Empty = the classic
+	// immediate record, including exact-match interception hits. Like every
+	// Record field it carries classification labels and scrubbed model text
+	// only, never matched content.
 	Verdict string `json:"verdict,omitempty"`
-	Detail  string `json:"detail,omitempty"`
+	// Reason is the scrubbed judgment logic of an LLM verdict; Evidence the
+	// scrubbed factual basis the model cited. Both are capped by the
+	// adjudication channel before they reach a Record.
+	Reason   string `json:"reason,omitempty"`
+	Evidence string `json:"evidence,omitempty"`
+	// Model is the judging model id of an LLM verdict.
+	Model  string `json:"model,omitempty"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // Options carries resolved persistence policy. MaxBytes <= 0 selects
@@ -70,11 +87,17 @@ func (o Options) normalized() Options {
 	return o
 }
 
-// Logger owns the non-blocking queue and its single JSONL writer goroutine,
-// backed by the shared logfile sink. The application lifecycle must stop
-// producers before calling Shutdown.
+// Logger owns the non-blocking queue, its single writer goroutine and the
+// SQLite store handle. Every enqueued record lands in the JSONL trail; the
+// same write also inserts into security.db unless the record is an
+// ignored-tier low verdict (the insert runs on the logfile writer goroutine,
+// so one connection serializes all writes). A store that fails to open
+// degrades to JSONL-only — the guard and its raw trail must not stop because
+// the queryable half is unavailable — with a warning log. The application
+// lifecycle must stop producers before calling Shutdown.
 type Logger struct {
-	sink *logfile.Logger
+	sink  *logfile.Logger
+	store *store
 }
 
 // New returns a logger for dir. Run must be started exactly once before
@@ -84,7 +107,7 @@ func New(dir string, opts Options) (*Logger, error) {
 		return nil, fmt.Errorf("seclog: empty directory")
 	}
 	opts = opts.normalized()
-	return &Logger{
+	l := &Logger{
 		sink: logfile.New(logfile.Options{
 			Directory:  dir,
 			FilePrefix: filePrefix,
@@ -92,11 +115,21 @@ func New(dir string, opts Options) (*Logger, error) {
 			Retention:  opts.Retention,
 			Tag:        "seclog",
 		}),
-	}, nil
+	}
+	if st, err := openStore(dir); err != nil {
+		logx.Warnf("seclog: queryable store unavailable, JSONL trail only: %v", err)
+	} else {
+		l.store = st
+	}
+	return l, nil
 }
 
 // Enqueue offers a record without blocking the request path; a full queue
-// drops the record and counts it in Dropped.
+// drops the record (both halves) and counts it in Dropped. The SQLite insert
+// happens inside the encode hook on the writer goroutine, after the record's
+// Ts is stamped and before the JSONL line is written; an insert failure is
+// logged and leaves the JSONL line intact — the full trail is the source of
+// record, the store is a queryable projection.
 func (l *Logger) Enqueue(record *Record) {
 	if l == nil || record == nil {
 		return
@@ -105,7 +138,14 @@ func (l *Logger) Enqueue(record *Record) {
 		if record.Ts == 0 {
 			record.Ts = now.UnixMilli()
 		}
-		return json.Marshal(record)
+		line, err := json.Marshal(record)
+		if err != nil {
+			return nil, err
+		}
+		if err := l.store.insert(record); err != nil {
+			logx.Warnf("%v", err)
+		}
+		return line, nil
 	})
 }
 
@@ -133,10 +173,15 @@ func (l *Logger) Run() {
 	l.sink.Run()
 }
 
-// Shutdown drains accepted records and waits for Run to close the file.
+// Shutdown drains accepted records and waits for Run to close the file and
+// the store handle (inserts happen on the writer goroutine, so closing after
+// the sink drained is race-free).
 func (l *Logger) Shutdown() {
 	if l == nil {
 		return
 	}
 	l.sink.Shutdown()
+	if err := l.store.Close(); err != nil {
+		logx.Warnf("seclog: close store: %v", err)
+	}
 }

@@ -71,24 +71,26 @@ func newGuardPoolProxy(t *testing.T, guardCfg GuardConfig, poolKeys ...string) (
 }
 
 // (a) A pool key appearing verbatim in the request body hits the known-secret
-// channel: log action forwards unchanged, the event carries the TYPE NAME only
-// (never key bytes), and the counter is exact.
+// exact channel and is INTERCEPTED regardless of the configured action: the
+// request 400s, the event carries the TYPE NAME only (never key bytes), the
+// counter is exact, and nothing reaches the upstream.
 func TestGuardKnownSecret_PoolKeyPlaintextHit(t *testing.T) {
 	p, proxyURL, bodies := newGuardPoolProxy(t,
 		GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true}, guardPoolKey)
 
-	postOK(t, proxyURL+"/v1/chat/completions", guardPoolRequestBody(guardPoolKey))
-
-	got := bodies()
-	if len(got) != 1 || !strings.Contains(got[0], guardPoolKey) {
-		t.Fatalf("log action must forward the unmodified body once (calls=%d)", len(got))
+	code, respBody := post(t, proxyURL+"/v1/chat/completions", guardPoolRequestBody(guardPoolKey))
+	if code != http.StatusBadRequest || !strings.Contains(respBody, "known_secret") {
+		t.Fatalf("exact-match interception: status=%d body=%s, want 400 naming known_secret", code, respBody)
+	}
+	if got := bodies(); len(got) != 0 {
+		t.Fatalf("intercepted request reached the upstream %d times, want 0", len(got))
 	}
 	details := guardEventDetails(p)
 	if len(details) != 1 {
 		t.Fatalf("guard events = %v, want exactly 1", details)
 	}
-	if !strings.Contains(details[0], "known_secret") || !strings.Contains(details[0], "action=log") {
-		t.Errorf("guard event detail = %q, want known_secret + action=log", details[0])
+	if !strings.Contains(details[0], "known_secret") || !strings.Contains(details[0], "action=block") {
+		t.Errorf("guard event detail = %q, want known_secret + action=block", details[0])
 	}
 	if strings.Contains(details[0], guardPoolKey) {
 		t.Errorf("guard event leaked the pool key")
@@ -99,27 +101,19 @@ func TestGuardKnownSecret_PoolKeyPlaintextHit(t *testing.T) {
 	}
 }
 
-// (b) The base64 form of a pool key hits the encoded known-secret channel;
-// with secrets=redact the upstream must not receive the encoded span.
+// (b) The base64 form of a pool key hits the encoded known-secret channel and
+// is intercepted the same way — redact cannot soften an exact hit either.
 func TestGuardKnownSecret_Base64FormRedacted(t *testing.T) {
 	p, proxyURL, bodies := newGuardPoolProxy(t,
 		GuardConfig{Secrets: "redact", KnownSecrets: true, Decode: true}, guardPoolKey)
 
 	b64 := base64.StdEncoding.EncodeToString([]byte(guardPoolKey))
-	postOK(t, proxyURL+"/v1/chat/completions", guardPoolRequestBody(b64))
-
-	got := bodies()
-	if len(got) != 1 {
-		t.Fatalf("upstream calls = %d, want 1", len(got))
+	code, respBody := post(t, proxyURL+"/v1/chat/completions", guardPoolRequestBody(b64))
+	if code != http.StatusBadRequest {
+		t.Fatalf("encoded exact-match interception: status=%d body=%s, want 400", code, respBody)
 	}
-	if strings.Contains(got[0], b64) || strings.Contains(got[0], guardPoolKey) {
-		t.Errorf("redacted body still carries the encoded/plain pool key")
-	}
-	if !strings.Contains(got[0], "[REDACTED]") {
-		t.Errorf("redacted body lacks the [REDACTED] placeholder")
-	}
-	if !strings.Contains(got[0], `"model":"glm"`) {
-		t.Errorf("redacted body lost surrounding JSON content")
+	if got := bodies(); len(got) != 0 {
+		t.Fatalf("intercepted request reached the upstream %d times, want 0", len(got))
 	}
 	details := guardEventDetails(p)
 	if len(details) != 1 || !strings.Contains(details[0], "known_secret_encoded") {
@@ -271,10 +265,11 @@ func TestGuardRedactKeepsPathBlockChain(t *testing.T) {
 }
 
 // (d) Guard hits persist security audit records (kind=secret / kind=path) via
-// the seclog lifecycle; the audit file must never carry secret material. Path
-// records split by confidence: a STRONG hit (tool position) audits with the
-// configured action; a WEAK hit (prose address mention — not a security issue
-// by itself) increments the ("guard", cat+"_text") counter only and must NOT
+// the seclog lifecycle; the audit store must never carry secret material.
+// The exact known-secret hit of the same body records action=block; the
+// STRONG path hit (tool position) still audits with the configured action
+// (interception is decided after both scans). A WEAK hit (prose address
+// mention) increments the ("guard", cat+"_text") counter only and must NOT
 // produce an audit record.
 func TestGuardAudit_PersistsSecretAndPathRecords(t *testing.T) {
 	p, proxyURL, _ := newGuardPoolProxy(t,
@@ -288,10 +283,13 @@ func TestGuardAudit_PersistsSecretAndPathRecords(t *testing.T) {
 	go logger.Run()
 	p.secLog = logger
 
-	postOK(t, proxyURL+"/v1/chat/completions",
+	code, respBody := post(t, proxyURL+"/v1/chat/completions",
 		`{"model":"glm","messages":[`+
 			`{"role":"user","content":"key `+guardPoolKey+` then read ~/.ssh/config"},`+
 			`{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"~/.aws/credentials\"}"}}]}]}`)
+	if code != http.StatusBadRequest || !strings.Contains(respBody, "known_secret") {
+		t.Fatalf("exact hit: status=%d body=%s, want the interception 400", code, respBody)
+	}
 
 	// Shutdown drains every accepted record before returning.
 	logger.Shutdown()
@@ -305,8 +303,8 @@ func TestGuardAudit_PersistsSecretAndPathRecords(t *testing.T) {
 		switch rec.Kind {
 		case seclog.KindSecret:
 			sawSecret = true
-			if len(rec.Names) != 1 || rec.Names[0] != "known_secret" || rec.Action != "log" {
-				t.Errorf("secret record = %+v, want names=[known_secret] action=log", rec)
+			if len(rec.Names) != 1 || rec.Names[0] != "known_secret" || rec.Action != "block" {
+				t.Errorf("secret record = %+v, want names=[known_secret] action=block", rec)
 			}
 			if rec.RequestID == "" || rec.Exposed != "glm" {
 				t.Errorf("secret record missing request attribution: %+v", rec)
@@ -365,8 +363,11 @@ func TestGuardBlock_SecretsBlockStillScansPaths(t *testing.T) {
 	if code != http.StatusBadRequest {
 		t.Fatalf("secrets=block: status=%d body=%s, want 400", code, respBody)
 	}
-	if !strings.Contains(respBody, "guard.secrets=block") || strings.Contains(respBody, "guard.paths=block") {
-		t.Errorf("block response = %q, want the secrets reason only (paths action stays secrets-first)", respBody)
+	// The exact-match interception outranks the config secrets=block: the
+	// response names the credential and the unblock path, not the config
+	// action (paths action stays subordinate).
+	if !strings.Contains(respBody, "credential configured on this proxy") || strings.Contains(respBody, "guard.paths=block") {
+		t.Errorf("block response = %q, want the exact-match reason only", respBody)
 	}
 	if strings.Contains(respBody, guardPoolKey) {
 		t.Errorf("block response leaked matched content")
@@ -375,7 +376,8 @@ func TestGuardBlock_SecretsBlockStillScansPaths(t *testing.T) {
 		t.Errorf("blocked request reached the upstream %d times, want 0", len(got))
 	}
 
-	// Both channels counted + published, even though secrets=block.
+	// Both channels counted + published, even though the request is
+	// intercepted (interception is decided after both scans).
 	snap := p.metrics.Snapshot()
 	if n := snap[counters.PMKey{Provider: "guard", Model: "known_secret"}].Requests; n != 1 {
 		t.Errorf("known_secret counter = %d, want 1", n)
@@ -438,7 +440,10 @@ func TestGuardToggles_KnownSecretsAndDecode(t *testing.T) {
 	if details := guardEventDetails(p2); len(details) != 0 {
 		t.Errorf("decode=false: base64 form must not hit, events = %v", details)
 	}
-	postOK(t, proxyURL2+"/v1/chat/completions", guardPoolRequestBody(guardPoolKey))
+	// Plaintext still hits — and is intercepted (exact-match channel).
+	if code, respBody := post(t, proxyURL2+"/v1/chat/completions", guardPoolRequestBody(guardPoolKey)); code != http.StatusBadRequest {
+		t.Fatalf("decode=false plaintext: status=%d body=%s, want the interception 400", code, respBody)
+	}
 	details := guardEventDetails(p2)
 	if len(details) != 1 || !strings.Contains(details[0], "known_secret") {
 		t.Errorf("decode=false: plaintext must still hit, events = %v", details)
@@ -485,7 +490,10 @@ func TestGuardKnownSecret_ReloadProtectsNewPoolKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	postOK(t, px.URL+"/v1/chat/completions", guardPoolRequestBody(keyV2))
+	// keyV2 now hits the exact channel — the request is intercepted.
+	if code, respBody := post(t, px.URL+"/v1/chat/completions", guardPoolRequestBody(keyV2)); code != http.StatusBadRequest {
+		t.Fatalf("post-reload: status=%d body=%s, want the interception 400", code, respBody)
+	}
 	details := guardEventDetails(p)
 	if len(details) != 1 || !strings.Contains(details[0], "known_secret") {
 		t.Fatalf("post-reload: keyV2 must hit known_secret, events = %v", details)
@@ -519,7 +527,7 @@ func TestGuardOAuthSecrets_BestEffortCollection(t *testing.T) {
 			"aqp":   {Provider: "aqp", OpenAIBaseURL: "http://x", AqpMintURL: "http://x/mint"},
 		},
 	}
-	collect := func() []string {
+	collect := func() []providerbuild.Secret {
 		t.Helper()
 		return providerbuild.BuildProviders(cfg, accounts.NewStore(accounts.HomeDir()), testBuildOpts()).Secrets
 	}
@@ -546,7 +554,7 @@ func TestGuardOAuthSecrets_BestEffortCollection(t *testing.T) {
 	}
 	set := map[string]bool{}
 	for _, s := range got {
-		set[s] = true
+		set[s.Value] = true
 	}
 	for _, w := range want {
 		if !set[w] {

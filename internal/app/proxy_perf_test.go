@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"model-proxy/internal/providerbuild"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -408,7 +409,7 @@ func BenchmarkProxy_Forward_Guard_LargeBody(b *testing.B) {
 // flake.
 func TestProxy_Guard_CleanBodyScanBudget(t *testing.T) {
 	sc, err := buildGuardScanner(&Config{Guard: GuardConfig{KnownSecrets: true, Decode: true}},
-		[]string{"poolkey-" + strings.Repeat("wX9q", 8)})
+		[]providerbuild.Secret{{Value: "poolkey-" + strings.Repeat("wX9q", 8), Label: "pool:test#1/api_key"}})
 	if err != nil {
 		t.Fatal(err)
 	}

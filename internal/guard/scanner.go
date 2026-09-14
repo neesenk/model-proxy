@@ -80,6 +80,26 @@ type customRule struct {
 	literal []byte
 }
 
+// KnownSecret is one configured credential value plus its operator-facing
+// source label (which pool/account/auth file it came from — identity only,
+// never secret material). Labels ride the interception record so the UI can
+// say WHICH credential matched; they are safe to persist for the same reason
+// account ids are. Label may be empty.
+type KnownSecret struct {
+	Value string
+	Label string
+}
+
+// Known lifts plain values into unlabeled KnownSecrets — the historical
+// call shape (tests, scanners without source attribution).
+func Known(values ...string) []KnownSecret {
+	out := make([]KnownSecret, 0, len(values))
+	for _, v := range values {
+		out = append(out, KnownSecret{Value: v})
+	}
+	return out
+}
+
 // knownSecretSet holds one known secret and its precomputed encoded variants
 // (base64 std/raw/url forms, lowercase hex, url.QueryEscape) together with
 // their needle ids in the Scanner's prefilter automaton. Values live in
@@ -136,6 +156,7 @@ type Scanner struct {
 	probes     []encodedProbe
 	custom     []customRule
 	secrets    []knownSecretSet
+	labels     []string // source label per secrets entry ("" when unknown)
 	extraPaths [][]byte
 	// maxKnownNeedle is the length of the longest needle the known-secret
 	// channel can match (longest raw value or encoded variant; 0 without
@@ -157,13 +178,13 @@ type Options struct {
 // NewScanner compiles custom patterns, known secrets and extra paths into an
 // immutable Scanner on top of the embedded rule table. The embedded table is
 // always active; the returned Scanner is never nil when err is nil.
-func NewScanner(custom []CustomPattern, secrets, extraPaths []string) (*Scanner, error) {
+func NewScanner(custom []CustomPattern, secrets []KnownSecret, extraPaths []string) (*Scanner, error) {
 	return NewScannerWithOptions(custom, secrets, extraPaths, Options{Decode: true})
 }
 
 // NewScannerWithOptions is NewScanner with explicit channel switches
 // (config guard.decode maps to Options.Decode).
-func NewScannerWithOptions(custom []CustomPattern, secrets, extraPaths []string, opts Options) (*Scanner, error) {
+func NewScannerWithOptions(custom []CustomPattern, secrets []KnownSecret, extraPaths []string, opts Options) (*Scanner, error) {
 	s := &Scanner{rules: embeddedRules}
 	if opts.Decode {
 		s.probes = embeddedProbes
@@ -184,11 +205,11 @@ func NewScannerWithOptions(custom []CustomPattern, secrets, extraPaths []string,
 	}
 	seenSecrets := map[string]bool{}
 	for _, sec := range secrets {
-		if len(sec) < minSecretLen || seenSecrets[sec] {
+		if len(sec.Value) < minSecretLen || seenSecrets[sec.Value] {
 			continue
 		}
-		seenSecrets[sec] = true
-		set := buildSecretSet(sec, opts.Decode)
+		seenSecrets[sec.Value] = true
+		set := buildSecretSet(sec.Value, opts.Decode)
 		if len(set.raw) > s.maxKnownNeedle {
 			s.maxKnownNeedle = len(set.raw)
 		}
@@ -198,6 +219,7 @@ func NewScannerWithOptions(custom []CustomPattern, secrets, extraPaths []string,
 			}
 		}
 		s.secrets = append(s.secrets, set)
+		s.labels = append(s.labels, sec.Label)
 	}
 	seenPaths := map[string]bool{}
 	for _, p := range extraPaths {
@@ -705,6 +727,43 @@ func (s *Scanner) MaxKnownNeedleLen() int { return s.maxKnownNeedle }
 func (s *Scanner) ScanKnown(body []byte) []string {
 	names, _ := s.scanKnownCounted(body)
 	return names
+}
+
+// KnownIdentity reports the first known-secret occurrence in body: the
+// matched credential's source label (which pool/account/auth file it came
+// from; "" when unlabeled) and a MASKED display of the matched span —
+// first4…last2, under 8 bytes fully masked (maskSecretBytes parity). It
+// powers the exact-match interception record and block reason: the operator
+// sees WHICH key hit without the value persisting anywhere. One bounded pass
+// over the known needles; ok=false when the body carries no known secret.
+func (s *Scanner) KnownIdentity(body []byte) (label, masked string, ok bool) {
+	if s == nil || len(s.secrets) == 0 {
+		return "", "", false
+	}
+	found := false
+	s.ac.search(body, func(id, end int) {
+		if found {
+			return
+		}
+		ref := s.refs[id]
+		var needle []byte
+		switch ref.kind {
+		case needleSecretRaw:
+			needle = s.secrets[ref.idx].raw
+		case needleSecretEncoded:
+			needle = s.secrets[ref.idx].encoded[ref.vidx]
+		default:
+			return
+		}
+		start := end - len(needle)
+		if start < 0 {
+			start = 0
+		}
+		label = s.labels[ref.idx]
+		masked = maskSecretBytes(body[start:end])
+		found = true
+	})
+	return label, masked, found
 }
 
 // knownScanStats exposes the amount of phase-1 state retained by ScanKnown to

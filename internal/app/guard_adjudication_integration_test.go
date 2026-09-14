@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -376,4 +377,153 @@ func readFileIfExists(path string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// The production failover regression (the volcengine incident): the judge
+// route's first target hangs and never answers. The scheduled exchange gives
+// it only its own budget slice, fails over to the second judge provider, and
+// the high verdict still blocks the session end to end — instead of the
+// whole call budget starving on the hang and degrading to verdict=error.
+func TestGuardAdjudication_FailoverPastHangingJudge(t *testing.T) {
+	good := newJudgeUpstream(t, "high", "live key material")
+	release := make(chan struct{})
+	var hangCalls atomic.Int32
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hangCalls.Add(1)
+		io.Copy(io.Discard, r.Body)
+		<-release
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(hang.Close)
+	t.Cleanup(func() { close(release) })
+
+	home := t.TempDir()
+	setPoolHome(t, home)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"id":"x","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	t.Cleanup(up.Close)
+
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"static":     {OpenAIBaseURL: up.URL, Provider: testProviderID},
+			"judge-hang": {AnthropicBaseURL: hang.URL, Provider: "test-static"},
+			"judge-good": {AnthropicBaseURL: good.srv.URL, Provider: "test-static"},
+		},
+		Routes: map[string][]RouteTarget{
+			"glm": {{Provider: "static", Model: "glm"}},
+			"judge": {
+				{Provider: "judge-hang", Model: "judge-model", Priority: 1},
+				{Provider: "judge-good", Model: "judge-model", Priority: 2},
+			},
+		},
+		Guard: GuardConfig{Secrets: "log", Paths: "off", Audit: true,
+			Adjudicate: GuardAdjudicateConfig{Enabled: true, Model: "judge", Timeout: "900ms", BlockSession: true}},
+	}
+	stateDir := t.TempDir()
+	p := newProxyWithStaticAt(t, cfg, filepath.Join(stateDir, "quota_state.json"),
+		map[string]string{"static": "k", "judge-hang": "kh", "judge-good": "kg"})
+	p.reconcileSecLog(cfg)
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	t.Cleanup(px.Close)
+
+	start := time.Now()
+	if resp := postWithSession(t, px.URL, guardPoolRequestBody(adjudDummyKey), "sess-fo"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (async channel)", resp.StatusCode)
+	}
+	waitForAdjudication(t, good, 1)
+	waitForBlock(t, p, "sess-fo")
+
+	if good.calls() != 1 {
+		t.Errorf("good judge calls = %d, want 1", good.calls())
+	}
+	// The judge prompt disables extended thinking: the reply is terse JSON,
+	// and a thinking judge can outrun its attempt budget (15s vs 2s measured).
+	if len(good.prompts) == 0 || !strings.Contains(good.prompts[0], `"thinking":{"type":"disabled"}`) {
+		t.Error("judge prompt does not disable thinking")
+	}
+	if n := hangCalls.Load(); n != 1 {
+		t.Errorf("hanging judge attempts = %d, want 1 (only its own budget slice)", n)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("verdict took %v — the hanging target must not consume the call budget", elapsed)
+	}
+	// The hang fed the shared breaker: the forward pipeline sees the same
+	// provider-health view as the judge leg.
+	st := p.runtimeState.Dashboard(time.Now()).Providers["judge-hang"]
+	if st.ConsecutiveFailures == 0 {
+		t.Error("hanging judge target left no failure trace in shared health state")
+	}
+}
+
+// Repeat interception (decision: same mechanism as the exact-match channel):
+// once content is adjudicated HIGH, any LATER request carrying the same hit
+// bytes is rejected verbatim — synchronously, with no second judge call —
+// and that request's session joins the block table. The index persists
+// (guard_blocked.json, sha256 keys only), so a service rebuild still
+// intercepts. This is the path a retrying or session-hopping client takes.
+func TestGuardAdjudication_RepeatHighContentIntercepted(t *testing.T) {
+	judge := newJudgeUpstream(t, "high", "live key material")
+	p, proxyURL, bodies, home, stateDir := newAdjudicationProxy(t, judge, "off")
+
+	// Seed: session A sends the leaked key once — forwarded (async channel),
+	// judged high, A blocked, content indexed.
+	if resp := postWithSession(t, proxyURL, guardPoolRequestBody(adjudDummyKey), "sess-src"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("seed status = %d, want 200", resp.StatusCode)
+	}
+	waitForAdjudication(t, judge, 1)
+	waitForBlock(t, p, "sess-src")
+	if len(bodies()) != 1 {
+		t.Fatalf("upstream calls = %d, want 1", len(bodies()))
+	}
+
+	// Repeat: session B re-sends the SAME key — rejected with 400 immediately,
+	// upstream never sees it, the judge is NOT called again, B is blocked.
+	resp := postWithSession(t, proxyURL, guardPoolRequestBody(adjudDummyKey), "sess-b")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("repeat status = %d, want 400 (repeat of adjudicated-high content)", resp.StatusCode)
+	}
+	if len(bodies()) != 1 {
+		t.Errorf("upstream calls after repeat = %d, want still 1 (intercepted before forward)", len(bodies()))
+	}
+	if judge.calls() != 1 {
+		t.Errorf("judge calls after repeat = %d, want 1 (no second adjudication)", judge.calls())
+	}
+	waitForBlock(t, p, "sess-b")
+
+	// The interception is attributed: an audit record with verdict=high and
+	// action=block exists for the repeat (beyond the seeded verdict record).
+	highBlock := 0
+	for _, r := range readSeclogRecords(t, home) {
+		if r.Verdict == "high" && r.Action == "block" {
+			highBlock++
+			if strings.Contains(r.Detail, adjudDummyKey) {
+				t.Error("interception record leaked the matched bytes")
+			}
+		}
+	}
+	if highBlock == 0 {
+		t.Error("no action=block verdict=high record for the intercepted repeat")
+	}
+
+	// The index persists hash-only: rebuild the service over the same state
+	// dir and the repeat still intercepts (fresh proxy = restart semantics).
+	data, err := readFileIfExists(filepath.Join(stateDir, "guard_blocked.json"))
+	if err != nil {
+		t.Fatalf("guard_blocked.json not written: %v", err)
+	}
+	if strings.Contains(data, adjudDummyKey) {
+		t.Error("blocked-content index persisted the raw hit bytes")
+	}
+
+	// Session C, after a rebuild: still intercepted, still no judge call.
+	resp = postWithSession(t, proxyURL, guardPoolRequestBody(adjudDummyKey), "sess-c")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("post-rebuild repeat status = %d, want 400", resp.StatusCode)
+	}
+	if judge.calls() != 1 {
+		t.Errorf("judge calls after rebuild repeat = %d, want 1", judge.calls())
+	}
+	waitForBlock(t, p, "sess-c")
 }

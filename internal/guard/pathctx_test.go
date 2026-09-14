@@ -229,7 +229,7 @@ func TestScanPathsContextConcurrent(t *testing.T) {
 // must short-circuit before any JSON decoding (compare BenchmarkScanPaths
 // cost).
 func BenchmarkScanPathsContext_CleanBody(b *testing.B) {
-	s, err := NewScanner(nil, nil, nil)
+	s, err := NewScanner(nil, Known(), nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func BenchmarkScanPathsContext_CleanBody(b *testing.B) {
 // BenchmarkScanPathsContext_StrongHit sizes the one-time structure walk paid
 // only by bodies that DO carry a path hit (here at the very end).
 func BenchmarkScanPathsContext_StrongHit(b *testing.B) {
-	s, err := NewScanner(nil, nil, nil)
+	s, err := NewScanner(nil, Known(), nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func BenchmarkScanPathsContext_StrongHit(b *testing.B) {
 // BenchmarkScanPathsContext_LargeBodyStrongHit: same as above at ~4MiB — the
 // ratio against the 64KiB benchmark demonstrates linear scaling.
 func BenchmarkScanPathsContext_LargeBodyStrongHit(b *testing.B) {
-	s, err := NewScanner(nil, nil, nil)
+	s, err := NewScanner(nil, Known(), nil)
 	if err != nil {
 		b.Fatal(err)
 	}

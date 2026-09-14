@@ -19,7 +19,7 @@ func explainTestProxy(t *testing.T, scanner *guard.Scanner) *Proxy {
 }
 
 func TestLocateGuardHitsSecretMasked(t *testing.T) {
-	scanner, err := guard.NewScanner(nil, nil, nil)
+	scanner, err := guard.NewScanner(nil, guard.Known(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestLocateGuardHitsSecretMasked(t *testing.T) {
 }
 
 func TestLocateGuardHitsPathVerbatim(t *testing.T) {
-	scanner, err := guard.NewScanner(nil, nil, nil)
+	scanner, err := guard.NewScanner(nil, guard.Known(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestLocateGuardHitsPathVerbatim(t *testing.T) {
 }
 
 func TestLocateGuardHitsUnlocatedNames(t *testing.T) {
-	scanner, err := guard.NewScanner(nil, nil, nil)
+	scanner, err := guard.NewScanner(nil, guard.Known(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestLocateGuardHitsUnlocatedNames(t *testing.T) {
 }
 
 func TestLocateGuardHitsPerNameCap(t *testing.T) {
-	scanner, err := guard.NewScanner(nil, nil, nil)
+	scanner, err := guard.NewScanner(nil, guard.Known(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

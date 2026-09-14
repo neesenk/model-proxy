@@ -496,8 +496,9 @@ func (s *Service) ModelsDocument() appapi.ModelsDocument {
 // Security projects the guard audit log (seclog) into transport DTOs. The
 // audit directory derives from the current generation's guard config; audit
 // off or a missing directory yields an empty, disabled result (same
-// convention as the request log). The projection copies names/actions only —
-// seclog records never carry matched content.
+// convention as the request log). The projection copies names/actions and
+// the scrubbed verdict fields only — seclog records never carry matched
+// content.
 func (s *Service) Security(query appapi.SecurityQuery) (appapi.SecurityResult, error) {
 	disabled := appapi.SecurityResult{Records: []appapi.SecurityRecord{}}
 	cfg := s.ports.Config()
@@ -505,11 +506,18 @@ func (s *Service) Security(query appapi.SecurityQuery) (appapi.SecurityResult, e
 		return disabled, nil
 	}
 	dir := filepath.Dir(cfg.Guard.AuditPathValue(accounts.HomeDir()))
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return disabled, nil
+		}
+		return appapi.SecurityResult{}, err
+	}
 	result, err := seclog.Query(dir, seclog.Filter{
-		Kind:  query.Kind,
-		From:  query.From,
-		To:    query.To,
-		Limit: query.Limit,
+		Kind:      query.Kind,
+		From:      query.From,
+		To:        query.To,
+		Limit:     query.Limit,
+		RequestID: query.RequestID,
 	})
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -522,17 +530,39 @@ func (s *Service) Security(query appapi.SecurityQuery) (appapi.SecurityResult, e
 		Records: make([]appapi.SecurityRecord, 0, len(result.Records)),
 		Skipped: result.Skipped,
 	}
+	// Server-side verdict aggregation over the same window: the KPI tiles read
+	// this instead of counting the client-merged feed (which drifted with the
+	// in-memory ring). Low never enters the store — its cumulative counter
+	// rides the adjudication stats port.
+	if vc, err := seclog.Counts(dir, seclog.Filter{
+		Kind: query.Kind, From: query.From, To: query.To,
+	}); err == nil {
+		counts := &appapi.SecurityVerdictCounts{
+			High:    vc["high"],
+			Medium:  vc["medium"],
+			Error:   vc["error"],
+			Skipped: vc["skipped"],
+		}
+		if s.ports.AdjudicationStats != nil {
+			counts.Low = s.ports.AdjudicationStats().LowVerdicts
+		}
+		out.Counts = counts
+	}
 	for _, record := range result.Records {
 		out.Records = append(out.Records, appapi.SecurityRecord{
 			Ts:        record.Ts,
 			Kind:      record.Kind,
 			RequestID: record.RequestID,
+			SessionID: record.SessionID,
 			Agent:     record.Agent,
 			Protocol:  record.Protocol,
 			Exposed:   record.Exposed,
 			Names:     append([]string(nil), record.Names...),
 			Action:    record.Action,
 			Verdict:   record.Verdict,
+			Reason:    record.Reason,
+			Evidence:  record.Evidence,
+			Model:     record.Model,
 			Detail:    record.Detail,
 		})
 	}
@@ -628,11 +658,11 @@ func (s *Service) SecurityExplain(requestID, kind string, names []string) (appap
 }
 
 // adjudicationsFor collects the recorded AI second-opinion verdicts for one
-// explained request: the audit log's verdict records are the durable source
-// (high/low/error/skipped all land there, once per unique content), and the
-// live ring — when still resident — enriches them with model and cached
-// attribution. The analyze view renders the LLM judgment next to the located
-// matches.
+// explained request: the audit store's verdict records are the durable source
+// (high/medium/error/skipped land there, once per unique content; the
+// ignored-tier low rows live in the ring only), and the live ring — when
+// still resident — enriches them with model and cached attribution. The
+// analyze view renders the LLM judgment next to the located matches.
 func (s *Service) adjudicationsFor(requestID, kind string, names []string) []appapi.SecurityExplainAdjudication {
 	if requestID == "" || len(names) == 0 {
 		return nil
@@ -662,12 +692,12 @@ func (s *Service) adjudicationsFor(requestID, kind string, names []string) []app
 				continue
 			}
 			add(appapi.SecurityExplainAdjudication{
-				Rule: r.Rule, Verdict: r.Verdict, Reason: r.Reason,
+				Rule: r.Rule, Verdict: r.Verdict, Reason: r.Reason, Evidence: r.Evidence,
 				Model: r.Model, Ts: r.Ts, Cached: r.Cached,
 			})
 		}
 	}
-	// The audit-log enrichment is best-effort: SecurityExplain is also
+	// The audit-store enrichment is best-effort: SecurityExplain is also
 	// served with a partial port set (no Config), in which case the ring —
 	// when wired — is the only source (fail-soft, same convention as the
 	// other adjudication read surfaces).
@@ -675,10 +705,10 @@ func (s *Service) adjudicationsFor(requestID, kind string, names []string) []app
 		cfg := s.ports.Config()
 		if cfg != nil && cfg.Guard.AuditEnabled() {
 			dir := filepath.Dir(cfg.Guard.AuditPathValue(accounts.HomeDir()))
-			result, err := seclog.Query(dir, seclog.Filter{Kind: kind, Limit: 500})
+			result, err := seclog.Query(dir, seclog.Filter{Kind: kind, RequestID: requestID, Limit: 500})
 			if err == nil {
 				for _, rec := range result.Records {
-					if rec.RequestID != requestID || rec.Verdict == "" {
+					if rec.Verdict == "" {
 						continue
 					}
 					for _, n := range rec.Names {
@@ -686,7 +716,8 @@ func (s *Service) adjudicationsFor(requestID, kind string, names []string) []app
 							continue
 						}
 						add(appapi.SecurityExplainAdjudication{
-							Rule: n, Verdict: rec.Verdict, Reason: rec.Detail, Ts: rec.Ts,
+							Rule: n, Verdict: rec.Verdict, Reason: rec.Reason,
+							Evidence: rec.Evidence, Model: rec.Model, Ts: rec.Ts,
 						})
 						break
 					}

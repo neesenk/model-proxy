@@ -46,9 +46,24 @@ type Adjudicator interface {
 	// Enqueue offers one deferred hit; false = queue full/closed and the
 	// caller must fail open (classic immediate record, verdict "skipped").
 	Enqueue(a GuardAdjudication) bool
-	// SessionBlocked reports a high-verdict session block (persists until
-	// unblocked via CLI/WebUI).
+	// SessionBlocked reports a session block (high verdict or exact-match
+	// interception; persists until unblocked via CLI/WebUI).
 	SessionBlocked(sessionID string) (rule, requestID string, blocked bool)
+	// BlockSession adds one session block directly — the exact-match
+	// interception path (a configured credential appeared verbatim; zero
+	// false positives by construction, no LLM round-trip). reason carries the
+	// operator-facing attribution (credential source label + masked key
+	// display — identity, never the value). Like high-verdict blocks it
+	// persists until explicitly unblocked.
+	BlockSession(sessionID, rule, requestID, reason string)
+	// ContentBlocked reports that these raw SECRET-hit bytes were already
+	// adjudicated high on an earlier request (persisted sha256 index, hash
+	// only — the bytes never persist). The pipeline intercepts repeats
+	// verbatim, the same treatment as the known-secret exact channel: record
+	// (action block, the original verdict's reason/evidence), block the
+	// session when present, reject with 400. Secret-kind hits only — path
+	// literals repeat legitimately across contexts and stay per-occurrence.
+	ContentBlocked(hit string) (kind, rule, reason, evidence, model string, blocked bool)
 }
 
 // RequestGuardDecision is the pure, per-request portion of the outbound guard
@@ -106,45 +121,83 @@ func (d RequestGuardDecision) Blocks(cfg GuardConfig) (kind string, names []stri
 	return "", nil
 }
 
+// GuardAuditHit is the audit projection of one guard hit. It carries
+// identity and classification labels only — matched content never enters any
+// field (credential red line); Reason/Evidence arrive pre-scrubbed from the
+// adjudication channel.
+type GuardAuditHit struct {
+	Kind      string
+	Names     []string
+	Action    string
+	RequestID string
+	SessionID string
+	Agent     string
+	Proto     string
+	Exposed   string
+	Verdict   string
+	Reason    string
+	Evidence  string
+	Model     string
+	// Detail is free-form operator context (drift records, exact-match
+	// attribution) — labels and masked displays only, never matched content.
+	Detail string
+}
+
 // AuditGuardHit enqueues one security audit record for a guard hit on the
-// request's snapshot logger (nil when the request's generation has audit off).
-// The record carries pattern/path NAMES and the action only — matched content
-// never enters any field (credential red line). verdict is empty for the
-// classic immediate record, or the adjudication verdict ("high"/"error"/
-// "skipped") when the record comes from (or fail-opens out of) the AI
-// second-opinion channel; reason (also empty for classic records) is the
-// scrubbed, length-capped model explanation carried in Detail.
-func AuditGuardHit(logger *seclog.Logger, kind string, names []string, action, requestID, agent, proto, exposed, verdict, reason string) {
+// request's snapshot logger (nil when the request's generation has audit
+// off). The record carries pattern/path NAMES and the action only — matched
+// content never enters any field (credential red line). verdict is empty for
+// the classic immediate record, or the adjudication verdict ("high"/
+// "medium"/"error"/"skipped") when the record comes from (or fail-opens out
+// of) the AI second-opinion channel; reason/evidence are the scrubbed,
+// length-capped model judgment logic and factual basis.
+func AuditGuardHit(logger *seclog.Logger, h GuardAuditHit) {
 	if logger == nil {
 		return
 	}
 	logger.Enqueue(&seclog.Record{
-		Kind:      kind,
 		Ts:        time.Now().UnixMilli(),
-		RequestID: requestID,
-		Agent:     agent,
-		Protocol:  proto,
-		Exposed:   exposed,
-		Names:     names,
-		Action:    action,
-		Verdict:   verdict,
-		Detail:    reason,
+		Kind:      h.Kind,
+		RequestID: h.RequestID,
+		SessionID: h.SessionID,
+		Agent:     h.Agent,
+		Protocol:  h.Proto,
+		Exposed:   h.Exposed,
+		Names:     h.Names,
+		Action:    h.Action,
+		Verdict:   h.Verdict,
+		Reason:    h.Reason,
+		Evidence:  h.Evidence,
+		Model:     h.Model,
+		Detail:    h.Detail,
 	})
 }
 
-// splitPatternSecrets partitions secret channel names into pattern-table
-// hits (rule names, custom pattern names — the false-positive-prone channel
-// eligible for AI adjudication) and known-secret exact-channel hits (kept on
-// the classic immediate record; zero false positives by construction).
-func splitPatternSecrets(names []string) (pattern, known []string) {
+// exactSecretNames selects the known-secret exact channels from a secret-hit
+// name list (the zero-false-positive family the pipeline intercepts
+// synchronously — raw and encoded configured credentials; the cross-request
+// fragmented completion is reported under its own name).
+func exactSecretNames(names []string) []string {
+	var known []string
 	for _, n := range names {
 		if n == "known_secret" || n == "known_secret_encoded" {
 			known = append(known, n)
-			continue
 		}
-		pattern = append(pattern, n)
 	}
-	return pattern, known
+	return known
+}
+
+// patternSecretNames drops the exact channels: what remains is the
+// false-positive-prone rule-table/custom channel eligible for AI
+// adjudication.
+func patternSecretNames(names []string) []string {
+	var pattern []string
+	for _, n := range names {
+		if n != "known_secret" && n != "known_secret_encoded" {
+			pattern = append(pattern, n)
+		}
+	}
+	return pattern
 }
 
 // buildAdjudications locates the spans of the given hit names in body and

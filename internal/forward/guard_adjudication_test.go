@@ -17,14 +17,27 @@ import (
 // fakeAdjudicator captures enqueued jobs and scripts the session-block
 // answers (the app-side adapter is covered in internal/app).
 type fakeAdjudicator struct {
-	mu      sync.Mutex
-	jobs    []GuardAdjudication
-	enqueue func() bool // script: nil = accept
-	blocked map[string][2]string
+	mu           sync.Mutex
+	jobs         []GuardAdjudication
+	enqueue      func() bool // script: nil = accept
+	blocked      map[string][2]string
+	blocks       []string // session ids added through BlockSession
+	blockReasons []string
 }
 
 func newFakeAdjudicator() *fakeAdjudicator {
 	return &fakeAdjudicator{blocked: map[string][2]string{}, enqueue: func() bool { return true }}
+}
+
+// contentBlockedHit scripts ContentBlocked: when non-empty, exactly these hit
+// bytes are reported as previously-adjudicated-high.
+var contentBlockedHit string
+
+func (f *fakeAdjudicator) ContentBlocked(hit string) (kind, rule, reason, evidence, model string, blocked bool) {
+	if hit != contentBlockedHit {
+		return "", "", "", "", "", false
+	}
+	return "secret", "openai_api_key", "repeat of earlier high verdict", "", "judge-model", true
 }
 
 func (f *fakeAdjudicator) Enqueue(a GuardAdjudication) bool {
@@ -44,21 +57,29 @@ func (f *fakeAdjudicator) SessionBlocked(sessionID string) (string, string, bool
 	return v[0], v[1], ok
 }
 
+func (f *fakeAdjudicator) BlockSession(sessionID, rule, requestID, reason string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blocked[sessionID] = [2]string{rule, requestID}
+	f.blockReasons = append(f.blockReasons, reason)
+	f.blocks = append(f.blocks, sessionID)
+}
+
 func (f *fakeAdjudicator) captured() []GuardAdjudication {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]GuardAdjudication(nil), f.jobs...)
 }
 
-// TestSplitPatternSecrets pins the known-secret/pattern partition that
-// decides which hits defer to adjudication.
-func TestSplitPatternSecrets(t *testing.T) {
-	pattern, known := splitPatternSecrets([]string{"known_secret", "openai_api_key", "known_secret_encoded", "jwt"})
+// TestExactSecretNames pins the exact-channel selection that the pipeline
+// intercepts synchronously (everything else defers to adjudication).
+func TestExactSecretNames(t *testing.T) {
+	known := exactSecretNames([]string{"known_secret", "openai_api_key", "known_secret_encoded", "jwt"})
 	if len(known) != 2 || known[0] != "known_secret" || known[1] != "known_secret_encoded" {
 		t.Errorf("known = %v", known)
 	}
-	if len(pattern) != 2 || pattern[0] != "openai_api_key" || pattern[1] != "jwt" {
-		t.Errorf("pattern = %v", pattern)
+	if known := exactSecretNames([]string{"openai_api_key", "jwt"}); known != nil {
+		t.Errorf("pattern-only names = %v, want nil", known)
 	}
 }
 
@@ -128,8 +149,8 @@ func TestBuildAdjudications_StrongPathsOnly(t *testing.T) {
 
 // TestServeGuardAdjudicationDefersPatternHits: with the channel on, a
 // pattern-table secret hit produces NO immediate guard event/audit — it is
-// enqueued; the known-secret hit on the same request still emits
-// immediately.
+// enqueued (the known-secret family is intercepted upstream of this test —
+// see TestServeGuardExactMatchIntercepts).
 func TestServeGuardAdjudicationDefersPatternHits(t *testing.T) {
 	up := newFakeUpstream(t, openaiOKResponder("ok"))
 	h := newHarness()
@@ -140,7 +161,7 @@ func TestServeGuardAdjudicationDefersPatternHits(t *testing.T) {
 	snap.Guard = guardScanner(t, nil)
 
 	dummy := "sk-capture-dummy-not-a-real-key"
-	w := h.serve(snap, "openai", "/v1/chat/completions", secretBody(dummy+" known "+guardTestSecret), nil)
+	w := h.serve(snap, "openai", "/v1/chat/completions", secretBody(dummy), nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (deferred channel never blocks synchronously)", w.Code)
 	}
@@ -148,24 +169,10 @@ func TestServeGuardAdjudicationDefersPatternHits(t *testing.T) {
 	if len(jobs) != 1 || jobs[0].Rule != "openai_api_key" {
 		t.Fatalf("jobs = %+v, want one deferred openai_api_key", jobs)
 	}
-	patternDeferred := false
-	knownEmitted := false
 	for _, e := range h.events.Snapshot() {
-		if e.Type != "guard" {
-			continue
+		if e.Type == "guard" && strings.Contains(e.Detail, "openai_api_key") {
+			t.Error("pattern hit emitted an immediate event under adjudication")
 		}
-		if strings.Contains(e.Detail, "openai_api_key") {
-			patternDeferred = true
-		}
-		if strings.Contains(e.Detail, "known_secret") {
-			knownEmitted = true
-		}
-	}
-	if patternDeferred {
-		t.Error("pattern hit emitted an immediate event under adjudication")
-	}
-	if !knownEmitted {
-		t.Error("known-secret hit must keep the classic immediate emit")
 	}
 }
 
@@ -306,7 +313,7 @@ func TestServeGuardAdjudicationCapOverflowFailsOpen(t *testing.T) {
 	snap.Guard = guardScanner(t, nil)
 
 	body := secretBody(strings.Join(distinctDummyKeys(maxAdjudicationsPerRequest+2), " "))
-	audit := serveCollectingAudit(t, h, &snap, body, nil)
+	audit, _ := serveCollectingAudit(t, h, &snap, body, nil, http.StatusOK)
 	if len(adj.captured()) != maxAdjudicationsPerRequest {
 		t.Fatalf("deferred jobs = %d, want %d", len(adj.captured()), maxAdjudicationsPerRequest)
 	}
@@ -324,10 +331,11 @@ func TestServeGuardAdjudicationCapOverflowFailsOpen(t *testing.T) {
 	}
 }
 
-// TestServeGuardAdjudicationKnownOnlyKeepsClassicVerdict pins the verdict
-// labeling: known-secret exact-channel hits are never adjudicated, so their
-// classic immediate record must carry an EMPTY verdict — not "skipped".
-func TestServeGuardAdjudicationKnownOnlyKeepsClassicVerdict(t *testing.T) {
+// TestServeGuardAdjudicationKnownOnlyIsIntercepted pins the exact-match
+// labeling: known-secret hits never defer to adjudication — the request is
+// intercepted with an action=block record whose verdict is EMPTY (a classic
+// record, not a fail-open "skipped").
+func TestServeGuardAdjudicationKnownOnlyIsIntercepted(t *testing.T) {
 	up := newFakeUpstream(t, openaiOKResponder("ok"))
 	h := newHarness()
 	adj := newFakeAdjudicator()
@@ -336,7 +344,10 @@ func TestServeGuardAdjudicationKnownOnlyKeepsClassicVerdict(t *testing.T) {
 		Adjudicate: guardAdjudicateOn()}))
 	snap.Guard = guardScanner(t, nil)
 
-	audit := serveCollectingAudit(t, h, &snap, secretBody("token "+guardTestSecret), nil)
+	audit, code := serveCollectingAudit(t, h, &snap, secretBody("token "+guardTestSecret), nil, http.StatusBadRequest)
+	if code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want the exact-match interception 400", code)
+	}
 	if n := len(adj.captured()); n != 0 {
 		t.Fatalf("known-secret-only body enqueued %d jobs, want 0", n)
 	}
@@ -344,7 +355,10 @@ func TestServeGuardAdjudicationKnownOnlyKeepsClassicVerdict(t *testing.T) {
 	for _, r := range audit {
 		if containsName(r.Names, "known_secret") {
 			if r.Verdict != "" {
-				t.Errorf("classic known-secret record verdict = %q, want empty", r.Verdict)
+				t.Errorf("interception record verdict = %q, want empty", r.Verdict)
+			}
+			if r.Action != "block" {
+				t.Errorf("interception record action = %q, want block", r.Action)
 			}
 			found = true
 		}
@@ -355,8 +369,9 @@ func TestServeGuardAdjudicationKnownOnlyKeepsClassicVerdict(t *testing.T) {
 }
 
 // serveCollectingAudit runs one request through the harness with a real
-// (temp-dir) seclog logger on the snapshot and returns the flushed records.
-func serveCollectingAudit(t *testing.T, h *harness, snap *Snapshot, body string, headers map[string]string) []seclog.Record {
+// (temp-dir) seclog logger on the snapshot and returns the flushed records
+// plus the response status (wantCode asserts it).
+func serveCollectingAudit(t *testing.T, h *harness, snap *Snapshot, body string, headers map[string]string, wantCode int) ([]seclog.Record, int) {
 	t.Helper()
 	logger, err := seclog.New(t.TempDir(), seclog.Options{})
 	if err != nil {
@@ -365,11 +380,11 @@ func serveCollectingAudit(t *testing.T, h *harness, snap *Snapshot, body string,
 	snap.SecLog = logger
 	go logger.Run()
 	w := h.serve(*snap, "openai", "/v1/chat/completions", body, headers)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
+	if w.Code != wantCode {
+		t.Fatalf("status = %d, want %d", w.Code, wantCode)
 	}
 	logger.Shutdown()
-	return readAuditRecords(t, logger.Directory())
+	return readAuditRecords(t, logger.Directory()), w.Code
 }
 
 // readAuditRecords parses every JSONL record the logger flushed to dir.

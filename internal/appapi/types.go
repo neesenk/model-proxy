@@ -326,28 +326,36 @@ type AnalyticsQuery struct {
 // SecurityQuery is the normalized audit-log query passed through the read
 // port. From/To are unix milliseconds, inclusive; zero means unbounded.
 type SecurityQuery struct {
-	Kind  string
-	From  int64
-	To    int64
-	Limit int
+	Kind      string
+	From, To  int64
+	Limit     int
+	RequestID string
 }
 
-// SecurityRecord is the JSON-safe projection of one security audit record.
-// Names carries pattern/path-category names only — matched content never
-// enters this DTO (the seclog red line applies to the projection too).
+// SecurityRecord is the JSON-safe projection of one security audit record
+// (served from the queryable SQLite store; the ignored-tier low verdicts
+// never enter the store). Names carries pattern/path-category names only —
+// matched content never enters this DTO (the seclog red line applies to the
+// projection too); Reason/Evidence/Model are the scrubbed LLM verdict
+// attribution.
 type SecurityRecord struct {
 	Ts        int64    `json:"ts"`
 	Kind      string   `json:"kind"`
 	RequestID string   `json:"request_id,omitempty"`
+	SessionID string   `json:"session_id,omitempty"`
 	Agent     string   `json:"agent,omitempty"`
 	Protocol  string   `json:"protocol,omitempty"`
 	Exposed   string   `json:"exposed,omitempty"`
 	Names     []string `json:"names,omitempty"`
 	Action    string   `json:"action,omitempty"`
 	// Verdict is non-empty on records from (or fail-opened out of) the AI
-	// second-opinion channel: high | low | error | skipped.
-	Verdict string `json:"verdict,omitempty"`
-	Detail  string `json:"detail,omitempty"`
+	// second-opinion channel: high | medium | error | skipped. Empty for
+	// classic immediate records, including exact-match interceptions.
+	Verdict  string `json:"verdict,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	Evidence string `json:"evidence,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Detail   string `json:"detail,omitempty"`
 }
 
 // SecurityResult is one audit-log query outcome: Enabled reports whether the
@@ -357,6 +365,21 @@ type SecurityResult struct {
 	Enabled bool             `json:"enabled"`
 	Records []SecurityRecord `json:"records"`
 	Skipped int              `json:"skipped"`
+	// Counts is the SERVER-side verdict aggregation over the same window as
+	// Records (kind/from/to; the KPI tiles read this instead of counting the
+	// client-merged feed — that counted the in-memory ring and drifted on
+	// restart). Low comes from the adjudication service's cumulative counter
+	// (lows never enter the queryable store by design).
+	Counts *SecurityVerdictCounts `json:"counts,omitempty"`
+}
+
+// SecurityVerdictCounts is the verdict digest of one audit window.
+type SecurityVerdictCounts struct {
+	High    int64 `json:"high"`
+	Medium  int64 `json:"medium"`
+	Error   int64 `json:"error"`
+	Skipped int64 `json:"skipped"`
+	Low     int64 `json:"low"`
 }
 
 // Security-explain statuses (SecurityExplainResult.Status).
@@ -406,14 +429,16 @@ type SecurityExplainResult struct {
 }
 
 // SecurityExplainAdjudication is one recorded LLM judgment attached to an
-// explain result.
+// explain result. Reason is the judgment logic and Evidence the factual basis
+// the model cited (both scrubbed before storage).
 type SecurityExplainAdjudication struct {
-	Rule    string `json:"rule"`
-	Verdict string `json:"verdict"`
-	Reason  string `json:"reason,omitempty"`
-	Model   string `json:"model,omitempty"`
-	Ts      int64  `json:"ts,omitempty"`
-	Cached  bool   `json:"cached,omitempty"`
+	Rule     string `json:"rule"`
+	Verdict  string `json:"verdict"`
+	Reason   string `json:"reason,omitempty"`
+	Evidence string `json:"evidence,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Ts       int64  `json:"ts,omitempty"`
+	Cached   bool   `json:"cached,omitempty"`
 }
 
 // SecurityBlock is one persisted guard-adjudication session block: a high
@@ -430,6 +455,9 @@ type SecurityAdjudicationStats struct {
 	Calls        int64 `json:"calls"`
 	InputTokens  int64 `json:"input_tokens"`
 	OutputTokens int64 `json:"output_tokens"`
+	// LowVerdicts is the cumulative suppressed-low count (persisted in
+	// guard_stats.json, covers cached echoes): rows stay ring-only.
+	LowVerdicts int64 `json:"low_verdicts"`
 }
 
 // SecurityAdjudicationFeed is the payload of GET /api/security/adjudications:
@@ -444,9 +472,10 @@ type SecurityAdjudicationFeed struct {
 }
 
 // SecurityAdjudication is one recent AI second-opinion verdict from the
-// bounded in-memory ring (newest first). Verdict is high | low | error |
-// skipped; Reason is the scrubbed, length-capped model explanation. Aliased
-// to the adjudicate package's Result — same owner, same JSON shape.
+// bounded in-memory ring (newest first). Verdict is high | medium | low |
+// error | skipped; Reason/Evidence are the scrubbed, length-capped model
+// judgment logic and factual basis. Aliased to the adjudicate package's
+// Result — same owner, same JSON shape.
 type SecurityAdjudication = adjudicate.Result
 
 // ErrGuardScannerUnavailable is returned through the admin LocateGuardHits

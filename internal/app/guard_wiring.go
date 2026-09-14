@@ -21,7 +21,7 @@ import (
 // decode: false disables the encoded-form channels (base64/hex/url). Bad
 // extra_patterns are rejected at config validate, so an error here means an
 // unvalidated Config — fail-closed (reload keeps the old generation).
-func buildGuardScanner(cfg *Config, secrets []string) (*guard.Scanner, error) {
+func buildGuardScanner(cfg *Config, secrets []providerbuild.Secret) (*guard.Scanner, error) {
 	g := cfg.Guard
 	var custom []guard.CustomPattern
 	for _, ep := range g.ExtraPatterns {
@@ -35,10 +35,13 @@ func buildGuardScanner(cfg *Config, secrets []string) (*guard.Scanner, error) {
 		}
 		custom = append(custom, guard.CustomPattern{Name: ep.Name, RE: re, Literal: literal})
 	}
-	if !g.KnownSecretsEnabled() {
-		secrets = nil
+	known := make([]guard.KnownSecret, 0, len(secrets))
+	if g.KnownSecretsEnabled() {
+		for _, sec := range secrets {
+			known = append(known, guard.KnownSecret{Value: sec.Value, Label: sec.Label})
+		}
 	}
-	return guard.NewScannerWithOptions(custom, secrets, g.ExtraPaths, guard.Options{Decode: g.DecodeEnabled()})
+	return guard.NewScannerWithOptions(custom, known, g.ExtraPaths, guard.Options{Decode: g.DecodeEnabled()})
 }
 
 // guardSecretRefreshLoop periodically re-syncs the guard known-secret set with
@@ -109,7 +112,7 @@ func (p *Proxy) refreshGuardKnownSecrets() {
 	}
 	// Fresh concatenation: poolSecrets is reload-owned state shared with the
 	// current scanner's build inputs — never append into its backing array.
-	scanner, err := buildGuardScanner(cfg, append(append([]string(nil), poolSecrets...), freshOAuth...))
+	scanner, err := buildGuardScanner(cfg, append(append([]providerbuild.Secret(nil), poolSecrets...), freshOAuth...))
 	if err != nil {
 		// Only reachable with an unvalidated Config; keep the previous scanner.
 		logx.Warnf("[guard] OAuth secret re-sync: rebuild failed: %v (keeping previous scanner)", err)
@@ -132,11 +135,17 @@ func (p *Proxy) refreshGuardKnownSecrets() {
 // minted key exists in no file) or sees only stale (a fresher in-memory
 // token). The map must be a generation-owned snapshot captured under p.mu by
 // the caller. Reported values stay in process memory, guard scanning only.
-func collectMemorySecrets(providers map[string]provider.Provider) []string {
-	var out []string
-	for _, prov := range providers {
-		if r, ok := prov.(provider.SecretReporter); ok {
-			out = append(out, r.ReportSecrets()...)
+func collectMemorySecrets(providers map[string]provider.Provider) []providerbuild.Secret {
+	var out []providerbuild.Secret
+	for name, prov := range providers {
+		r, ok := prov.(provider.SecretReporter)
+		if !ok {
+			continue
+		}
+		for _, v := range r.ReportSecrets() {
+			if v != "" {
+				out = append(out, providerbuild.Secret{Value: v, Label: "memory:" + name})
+			}
 		}
 	}
 	return out
@@ -145,12 +154,16 @@ func collectMemorySecrets(providers map[string]provider.Provider) []string {
 // equalSecretSets compares two secret sets order-insensitively (collection
 // iterates a map, so order is nondeterministic). Values never leave process
 // memory; nothing here logs them.
-func equalSecretSets(a, b []string) bool {
+func equalSecretSets(a, b []providerbuild.Secret) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	as := append([]string(nil), a...)
-	bs := append([]string(nil), b...)
+	key := func(s providerbuild.Secret) string { return s.Value + "\x00" + s.Label }
+	as := make([]string, len(a))
+	bs := make([]string, len(b))
+	for i := range a {
+		as[i], bs[i] = key(a[i]), key(b[i])
+	}
 	sort.Strings(as)
 	sort.Strings(bs)
 	for i := range as {

@@ -1,12 +1,13 @@
 // Package adjudicate owns the async AI second-opinion channel for guard
 // pattern hits: instead of recording a rule-table/custom-pattern secret hit
 // (or a strong sensitive-path hit) immediately, a designated model judges
-// whether the matched content is a real leak (verdict high) or benign
-// code/docs content (verdict low). High verdicts are recorded through the
-// sink and may block the client session; low verdicts are suppressed (ring
-// visibility only). Verdicts are cached by (kind, rule, model, hit-bytes) so
-// conversation-history echo of one occurrence costs one model call, and both
-// the verdict cache and the session block table persist across restarts.
+// whether the matched content is a real leak (verdict high: recorded through
+// the sink and may block the client session), an ambiguous risk (verdict
+// medium: recorded, no block) or benign code/docs content (verdict low: the
+// ignored tier — full JSONL trail only). Verdicts are cached by (kind, rule,
+// model, hit-bytes) so conversation-history echo of one occurrence costs one
+// model call, and both the verdict cache and the session block table persist
+// across restarts.
 //
 // The package is deliberately pure: model calls go through the Caller port
 // and observation side effects through the Sink port (both implemented by
@@ -24,11 +25,13 @@ import (
 	"time"
 )
 
-// Verdict values. High/Low are model verdicts; Error (call failed) and
-// Skipped (queue full) are fail-open outcomes the sink records like a
-// classic immediate hit.
+// Verdict values. High/Medium/Low are model verdicts — high blocks the
+// session, medium is record-only, low is the ignored tier (full JSONL trail,
+// no queryable record). Error (call failed) and Skipped (queue full) are
+// fail-open outcomes the sink records like a classic immediate hit.
 const (
 	VerdictHigh    = "high"
+	VerdictMedium  = "medium"
 	VerdictLow     = "low"
 	VerdictError   = "error"
 	VerdictSkipped = "skipped"
@@ -40,10 +43,14 @@ const (
 	KindPath   = "path"
 )
 
-// maxReasonLen bounds the model-provided reason before it reaches the sink
-// (audit records, events, the ring): a short classification sentence, never
-// a channel for payload content.
-const maxReasonLen = 120
+// maxReasonLen bounds the model-provided judgment logic before it reaches the
+// sink; maxEvidenceLen bounds the factual basis the model cited. Both are
+// short classification texts, never a channel for payload content (both are
+// scrubbed: control characters stripped, hit bytes masked).
+const (
+	maxReasonLen   = 200
+	maxEvidenceLen = 300
+)
 
 // Job is one guard hit awaiting adjudication. Hit is the matched bytes;
 // Pre/Post are the masked context windows around it (other secret hits
@@ -64,14 +71,16 @@ type Job struct {
 }
 
 // Result is one completed (or failed) adjudication — ring visibility for the
-// WebUI/CLI surfaces. Reason is scrubbed (control chars stripped, hit bytes
-// masked) before it enters a Result.
+// WebUI/CLI surfaces. Reason is the judgment logic and Evidence the factual
+// basis the model cited; both are scrubbed (control chars stripped, hit
+// bytes masked) before they enter a Result.
 type Result struct {
 	Ts        int64  `json:"ts"`
 	Kind      string `json:"kind"`
 	Rule      string `json:"rule"`
 	Verdict   string `json:"verdict"`
 	Reason    string `json:"reason,omitempty"`
+	Evidence  string `json:"evidence,omitempty"`
 	Model     string `json:"model,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
@@ -87,24 +96,28 @@ type Usage struct {
 	OutputTokens int64
 }
 
-// Caller performs one model adjudication. verdict must be VerdictHigh or
-// VerdictLow; any error fails open to the classic immediate record. usage
-// reports the call's token cost for the service's LLM-usage metrics (cache
-// hits never reach a Caller and are not billed).
+// Caller performs one model adjudication. verdict must be VerdictHigh,
+// VerdictMedium or VerdictLow; any error fails open to the classic immediate
+// record. reason is the judgment logic and evidence the factual basis, both
+// already parsed from the model reply. usage reports the call's token cost
+// for the service's LLM-usage metrics (cache hits never reach a Caller and
+// are not billed).
 type Caller interface {
-	Adjudicate(ctx context.Context, model string, j Job) (verdict, reason string, usage Usage, err error)
+	Adjudicate(ctx context.Context, model string, j Job) (verdict, reason, evidence string, usage Usage, err error)
 }
 
 // Sink receives the observation side effects, implemented by the app layer:
 // High emits audit record + live event + counters (and is called AFTER the
-// session block below is applied, so unblock surfaces already see it); Low
-// carries the cached flag so the app records the verdict ONCE per unique
-// content (first judgment) instead of on every history-echo occurrence;
-// Failed re-emits the classic immediate record with the fail-open verdict
-// ("error"/"skipped").
+// session block below is applied, so unblock surfaces already see it);
+// Medium is the record-only tier; Low is the ignored tier (the app writes
+// the JSONL-only trace). Every sink method fires ONCE per unique content —
+// cached history-echo occurrences never re-emit, the ring entry is their
+// per-occurrence visibility; Failed re-emits the classic immediate record
+// with the fail-open verdict ("error"/"skipped").
 type Sink interface {
-	High(j Job, reason, model string)
-	Low(j Job, reason, model string, cached bool)
+	High(j Job, reason, evidence, model string)
+	Medium(j Job, reason, evidence, model string)
+	Low(j Job, reason, evidence, model string)
 	Failed(j Job, verdict, detail string)
 }
 
@@ -124,8 +137,8 @@ type Options struct {
 	CacheMax int
 	RingSize int
 	// StateDir locates the persisted state files
-	// (<dir>/guard_verdicts.json, guard_blocks.json); empty keeps state in
-	// memory (isolated tests).
+	// (<dir>/guard_verdicts.json, guard_blocks.json, guard_stats.json);
+	// empty keeps state in memory (isolated tests).
 	StateDir string
 	// Now overrides the clock in tests.
 	Now func() time.Time
@@ -151,11 +164,18 @@ type Service struct {
 
 	// llm usage accounting: real model calls only (cache hits and in-flight
 	// dedup never reach a Caller). Guarded by statsMu so the metrics read
-	// never contends with the queue hot path.
+	// never contends with the queue hot path. The counters are persisted
+	// (guard_stats.json) so the usage surface survives restarts.
 	statsMu     sync.Mutex
+	statsPath   string
 	statsCalls  int64
 	statsInTok  int64
 	statsOutTok int64
+	statsLows   int64
+
+	// blockedContent is the repeat-interception index of HIGH-verdict hit
+	// bytes (sha256-keyed, persisted hash-only in guard_blocked.json).
+	blockedContent *blockedContentStore
 
 	stop chan struct{}
 	done chan struct{}
@@ -189,6 +209,9 @@ func New(opts Options) *Service {
 	}
 	s.cache = loadVerdictCache(statePath(opts.StateDir, "guard_verdicts.json"), opts.CacheMax)
 	s.blocks = loadBlockStore(statePath(opts.StateDir, "guard_blocks.json"))
+	s.blockedContent = loadBlockedContentStore(statePath(opts.StateDir, "guard_blocked.json"), opts.CacheMax)
+	s.statsPath = statePath(opts.StateDir, "guard_stats.json")
+	s.statsCalls, s.statsInTok, s.statsOutTok, s.statsLows = loadUsageStats(s.statsPath)
 	s.ring = newResultRing(opts.RingSize)
 	return s
 }
@@ -257,7 +280,7 @@ func (s *Service) Enqueue(j Job) bool {
 		s.mu.Unlock()
 		// Cached verdict: apply synchronously through the same path a worker
 		// would (no queue latency for the common history-echo case).
-		go s.apply(j, v.Verdict, v.Reason, model, blockSession, true)
+		go s.apply(j, v.Verdict, v.Reason, v.Evidence, model, blockSession, true)
 		return true
 	}
 	s.inflight[key] = true
@@ -286,18 +309,25 @@ func (s *Service) process(j Job) {
 		return // reload turned the channel off: drop
 	}
 	if v, ok := s.cache.get(key); ok {
-		s.apply(j, v.Verdict, v.Reason, model, blockSession, true)
+		s.apply(j, v.Verdict, v.Reason, v.Evidence, model, blockSession, true)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	verdict, reason, usage, err := s.caller.Adjudicate(ctx, model, j)
+	verdict, reason, evidence, usage, err := s.caller.Adjudicate(ctx, model, j)
 	cancel()
 	s.statsMu.Lock()
 	s.statsCalls++
 	s.statsInTok += usage.InputTokens
 	s.statsOutTok += usage.OutputTokens
+	// Persist under the same lock: the write stays ordered with the counter
+	// increments, so a slower earlier write can never regress the file behind
+	// a newer one (the file is ~100 bytes and judge calls are rare — the
+	// fsync under statsMu is not a hot-path concern).
+	if s.statsPath != "" {
+		writeUsageStats(s.statsPath, s.statsCalls, s.statsInTok, s.statsOutTok, s.statsLows)
+	}
 	s.statsMu.Unlock()
-	if err != nil || (verdict != VerdictHigh && verdict != VerdictLow) {
+	if err != nil || (verdict != VerdictHigh && verdict != VerdictMedium && verdict != VerdictLow) {
 		detail := err.Error()
 		if err == nil {
 			detail = "model returned unrecognized verdict " + verdict
@@ -309,16 +339,17 @@ func (s *Service) process(j Job) {
 		return
 	}
 	reason = truncate(scrub(j.Hit, reason), maxReasonLen)
-	s.cache.put(key, verdictEntry{Verdict: verdict, Reason: reason, Model: model, Ts: s.opts.Now().UnixMilli()})
-	s.apply(j, verdict, reason, model, blockSession, false)
+	evidence = truncate(scrub(j.Hit, evidence), maxEvidenceLen)
+	s.cache.put(key, verdictEntry{Verdict: verdict, Reason: reason, Evidence: evidence, Model: model, Ts: s.opts.Now().UnixMilli()})
+	s.apply(j, verdict, reason, evidence, model, blockSession, false)
 }
 
 // apply fans one verdict out to the ring, the sink, and (high + blockSession
 // + session present) the block table. blockSession is resolved by the caller
 // from the current config generation.
-func (s *Service) apply(j Job, verdict, reason, model string, blockSession bool, cached bool) {
+func (s *Service) apply(j Job, verdict, reason, evidence, model string, blockSession bool, cached bool) {
 	res := Result{Ts: s.opts.Now().UnixMilli(), Kind: j.Kind, Rule: j.Rule, Verdict: verdict,
-		Reason: reason, Model: model, RequestID: j.RequestID, SessionID: j.SessionID,
+		Reason: reason, Evidence: evidence, Model: model, RequestID: j.RequestID, SessionID: j.SessionID,
 		Action: j.Action, Cached: cached}
 	s.ring.add(res)
 	switch verdict {
@@ -336,11 +367,38 @@ func (s *Service) apply(j Job, verdict, reason, model string, blockSession bool,
 				RequestID: j.RequestID, Ts: res.Ts,
 			})
 		}
+		// Every SECRET-kind high (fresh or cached replay) joins the
+		// repeat-interception index: the same credential bytes in a later
+		// request are intercepted verbatim by the forward path, exactly like
+		// the known-secret exact channel. Path literals are deliberately
+		// excluded — a short literal (~/.ssh) repeats legitimately across
+		// contexts, and path verdicts stay per-occurrence.
+		if j.Kind == KindSecret {
+			s.blockedContent.Record(j.Hit, BlockedContent{
+				Kind: j.Kind, Rule: j.Rule, Reason: reason, Evidence: evidence,
+				Model: model, Ts: res.Ts,
+			})
+		}
 		if !cached {
-			s.sink.High(j, reason, model)
+			s.sink.High(j, reason, evidence, model)
+		}
+	case VerdictMedium:
+		if !cached {
+			s.sink.Medium(j, reason, evidence, model)
 		}
 	case VerdictLow:
-		s.sink.Low(j, reason, model, cached)
+		// The cumulative suppressed count covers EVERY occurrence (cached
+		// echoes too): it is the suppression-rate numerator, not a per-content
+		// record — rows stay ring-only by design.
+		s.statsMu.Lock()
+		s.statsLows++
+		if s.statsPath != "" {
+			writeUsageStats(s.statsPath, s.statsCalls, s.statsInTok, s.statsOutTok, s.statsLows)
+		}
+		s.statsMu.Unlock()
+		if !cached {
+			s.sink.Low(j, reason, evidence, model)
+		}
 	}
 }
 
@@ -395,13 +453,21 @@ func (s *Service) Blocks() []BlockEntry { return s.blocks.Snapshot() }
 // Recent snapshots the result ring, newest first.
 func (s *Service) Recent() []Result { return s.ring.Snapshot() }
 
-// Stats reports the LLM adjudication usage: real model calls and their
+// ContentBlocked reports whether these raw hit bytes were already adjudicated
+// high (secret-kind hits only — see apply). The forward path uses it to
+// intercept repeats verbatim.
+func (s *Service) ContentBlocked(hit string) (BlockedContent, bool) {
+	return s.blockedContent.Blocked(hit)
+}
+
+// Stats reports the LLM adjudication usage and the cumulative suppressed-low
+// count: real model calls and their
 // token totals (input+output). Cache hits are deliberately absent — the
 // point of the cache is that they cost nothing.
-func (s *Service) Stats() (calls, inputTokens, outputTokens int64) {
+func (s *Service) Stats() (calls, inputTokens, outputTokens, lowVerdicts int64) {
 	s.statsMu.Lock()
 	defer s.statsMu.Unlock()
-	return s.statsCalls, s.statsInTok, s.statsOutTok
+	return s.statsCalls, s.statsInTok, s.statsOutTok, s.statsLows
 }
 
 // CacheLen reports the verdict-cache size (diagnostics/tests).

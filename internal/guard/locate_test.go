@@ -11,7 +11,7 @@ import (
 const locateAnthropicKey = "sk-ant-api03-X9fQ2vB7nM4kL8pR1tW6yU3iO0aS5dF7gH9jK2lZ4"
 
 func TestLocateSecretSpans(t *testing.T) {
-	s, err := NewScanner(nil, nil, nil)
+	s, err := NewScanner(nil, Known(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestLocateSecretSpans(t *testing.T) {
 }
 
 func TestLocateNameFilterAndOrder(t *testing.T) {
-	s, err := NewScanner(nil, nil, nil)
+	s, err := NewScanner(nil, Known(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestLocateNameFilterAndOrder(t *testing.T) {
 
 func TestLocateKnownSecret(t *testing.T) {
 	known := "known-secret-fixture-7d6c5b4a3"
-	s, err := NewScanner(nil, []string{known}, nil)
+	s, err := NewScanner(nil, Known([]string{known}...), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestLocateKnownSecret(t *testing.T) {
 }
 
 func TestLocatePathStrength(t *testing.T) {
-	s, err := NewScanner(nil, nil, nil)
+	s, err := NewScanner(nil, Known(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestLocatePathStrength(t *testing.T) {
 }
 
 func TestLocatePathBoundary(t *testing.T) {
-	s, err := NewScanner(nil, nil, nil)
+	s, err := NewScanner(nil, Known(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestLocateNilAndEmpty(t *testing.T) {
 	if got := nilScanner.Locate([]byte("x"), []string{"ssh"}); got != nil {
 		t.Errorf("nil scanner Locate = %v, want nil", got)
 	}
-	s, err := NewScanner(nil, nil, nil)
+	s, err := NewScanner(nil, Known(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestRuleInfo(t *testing.T) {
 		RE:      regexp.MustCompile(`\bmv-[A-Za-z0-9]{32,}`),
 		Literal: []byte("mv-"),
 	}}
-	s, err := NewScanner(custom, nil, nil)
+	s, err := NewScanner(custom, Known(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestRuleInfo(t *testing.T) {
 }
 
 func TestMaskSnippetSecretHit(t *testing.T) {
-	s, err := NewScanner(nil, nil, nil)
+	s, err := NewScanner(nil, Known(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestMaskSnippetSecretHit(t *testing.T) {
 }
 
 func TestMaskSnippetPathHitMasksAdjacentSecret(t *testing.T) {
-	s, err := NewScanner(nil, nil, nil)
+	s, err := NewScanner(nil, Known(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestMaskSnippetPathHitMasksAdjacentSecret(t *testing.T) {
 }
 
 func TestMaskSnippetOffsetsWithMaskBeforeHit(t *testing.T) {
-	s, err := NewScanner(nil, nil, nil)
+	s, err := NewScanner(nil, Known(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestMaskSnippetOffsetsWithMaskBeforeHit(t *testing.T) {
 }
 
 func TestMaskSnippetShortSecret(t *testing.T) {
-	s, err := NewScanner(nil, nil, nil)
+	s, err := NewScanner(nil, Known(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

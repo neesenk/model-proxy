@@ -172,6 +172,12 @@ func RenderAudit(dir string, opts AuditOpts, now time.Time) (string, error) {
 	if filter.From != 0 && filter.To != 0 && filter.From > filter.To {
 		return "", fmt.Errorf("--from is after --to (empty window)")
 	}
+	// A directory that was never created reads as "not started yet" (the
+	// SQLite store creates itself on the daemon's first audit write); an
+	// existing but empty store is the plain empty-table note below.
+	if _, statErr := os.Stat(dir); statErr != nil && errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Sprintf("(no security audit records yet — %s does not exist)\n", dir), nil
+	}
 	result, err := observeseclog.Query(dir, filter)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

@@ -1,14 +1,18 @@
 // state.go — the persisted pieces of the adjudication service: the verdict
 // cache (hash → verdict, LRU, survives restarts), the session block table
-// (persists until explicitly unblocked), and the in-memory result ring.
+// (persists until explicitly unblocked), the cumulative LLM usage counters,
+// and the in-memory result ring.
 package adjudicate
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 )
 
 // statePath derives <stateDir>/<name>; an empty dir keeps the state in
@@ -70,10 +74,11 @@ func writeStateFile(path string, v any) error {
 
 // verdictEntry is one cached verdict.
 type verdictEntry struct {
-	Verdict string `json:"verdict"`
-	Reason  string `json:"reason,omitempty"`
-	Model   string `json:"model,omitempty"`
-	Ts      int64  `json:"ts"`
+	Verdict  string `json:"verdict"`
+	Reason   string `json:"reason,omitempty"`
+	Evidence string `json:"evidence,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Ts       int64  `json:"ts"`
 }
 
 // verdictFile is the on-disk form of guard_verdicts.json.
@@ -108,7 +113,7 @@ func loadVerdictCache(path string, max int) *verdictCache {
 		return c
 	}
 	for k, v := range f.Entries {
-		if v.Verdict != VerdictHigh && v.Verdict != VerdictLow {
+		if v.Verdict != VerdictHigh && v.Verdict != VerdictMedium && v.Verdict != VerdictLow {
 			continue
 		}
 		c.ents[k] = v
@@ -199,13 +204,23 @@ type blockStore struct {
 	mu     sync.Mutex
 	path   string
 	blocks map[string]Block
+	// loadedAt/lastDisk fence the restart drain race: a SIGINT'd process
+	// stops its listener (the port frees and a successor may boot and load
+	// the file) BEFORE its workers drain, so a late high verdict can hit the
+	// file after this store already loaded it. persistLocked adopts disk
+	// entries that appeared SINCE the last state we knew (absent here AND
+	// absent from lastDisk, Ts newer than our load) instead of clobbering
+	// them. Entries that were in lastDisk but not in memory are OUR OWN
+	// removals (Unblock) and must stay removed.
+	loadedAt time.Time
+	lastDisk map[string]Block
 }
 
 // loadBlockStore reads the persisted blocks; missing/corrupt files start
 // empty (fail-open: a lost block table degrades to no interception, never
 // to a permanent lockout).
 func loadBlockStore(path string) *blockStore {
-	b := &blockStore{path: path, blocks: map[string]Block{}}
+	b := &blockStore{path: path, blocks: map[string]Block{}, loadedAt: time.Now(), lastDisk: map[string]Block{}}
 	if path == "" {
 		return b
 	}
@@ -218,7 +233,42 @@ func loadBlockStore(path string) *blockStore {
 		return b
 	}
 	b.blocks = f.Blocks
+	b.lastDisk = make(map[string]Block, len(f.Blocks))
+	for k, v := range f.Blocks {
+		b.lastDisk[k] = v
+	}
 	return b
+}
+
+// persistLocked writes the table, first adopting disk entries that appeared
+// since the last state we knew (the drain-race writes of a SIGINT'd
+// predecessor — see the struct comment). Caller holds b.mu.
+func (b *blockStore) persistLocked() {
+	if b.path != "" {
+		if data, err := os.ReadFile(b.path); err == nil {
+			var f blockFile
+			if json.Unmarshal(data, &f) == nil && f.Version == 1 {
+				loadedMs := b.loadedAt.UnixMilli()
+				for sid, bl := range f.Blocks {
+					if _, ours := b.blocks[sid]; ours {
+						continue
+					}
+					if _, known := b.lastDisk[sid]; known {
+						continue // we removed it ourselves (Unblock)
+					}
+					if bl.Ts > loadedMs {
+						b.blocks[sid] = bl // late predecessor write: adopt
+					}
+				}
+			}
+		}
+	}
+	if err := writeStateFile(b.path, blockFile{Version: 1, Blocks: b.blocks}); err == nil {
+		b.lastDisk = make(map[string]Block, len(b.blocks))
+		for k, v := range b.blocks {
+			b.lastDisk[k] = v
+		}
+	}
 }
 
 func (b *blockStore) Blocked(sessionID string) (Block, bool) {
@@ -232,7 +282,7 @@ func (b *blockStore) Block(sessionID string, bl Block) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.blocks[sessionID] = bl
-	_ = writeStateFile(b.path, blockFile{Version: 1, Blocks: b.blocks})
+	b.persistLocked()
 }
 
 func (b *blockStore) Unblock(sessionID string) bool {
@@ -242,7 +292,7 @@ func (b *blockStore) Unblock(sessionID string) bool {
 		return false
 	}
 	delete(b.blocks, sessionID)
-	_ = writeStateFile(b.path, blockFile{Version: 1, Blocks: b.blocks})
+	b.persistLocked()
 	return true
 }
 
@@ -269,6 +319,148 @@ func (b *blockStore) Snapshot() []BlockEntry {
 		return out[i].SessionID < out[j].SessionID
 	})
 	return out
+}
+
+// ---- llm usage stats ----------------------------------------------------
+
+// usageStatsFile is the on-disk form of guard_stats.json: the judge channel's
+// cumulative LLM usage plus the cumulative suppressed-low count. Loaded at
+// start, extended after every real model call / low verdict — the counters
+// are operational accounting (the Security page's llm and low tiles), not a
+// cache, so losing the file loses history but never behavior.
+type usageStatsFile struct {
+	Version      int   `json:"version"`
+	Calls        int64 `json:"calls"`
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+	LowVerdicts  int64 `json:"low_verdicts"`
+}
+
+// loadUsageStats reads the persisted counters; missing/corrupt files start
+// at zero.
+func loadUsageStats(path string) (calls, inputTokens, outputTokens, lowVerdicts int64) {
+	if path == "" {
+		return 0, 0, 0, 0
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, 0, 0
+	}
+	var f usageStatsFile
+	if json.Unmarshal(data, &f) != nil || f.Version != 1 {
+		return 0, 0, 0, 0
+	}
+	return f.Calls, f.InputTokens, f.OutputTokens, f.LowVerdicts
+}
+
+// writeUsageStats persists the counters. Called under the owner's statsMu so
+// concurrent workers' writes stay ordered with their increments (an unlocked
+// write could let a slower earlier snapshot overwrite a newer one).
+func writeUsageStats(path string, calls, inputTokens, outputTokens, lowVerdicts int64) {
+	_ = writeStateFile(path, usageStatsFile{
+		Version:      1,
+		Calls:        calls,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		LowVerdicts:  lowVerdicts,
+	})
+}
+
+// ---- blocked content ----------------------------------------------------
+
+// BlockedContent is the attribution of hit bytes that were adjudicated HIGH:
+// enough for the forward path to intercept repeats verbatim (same treatment
+// as the known-secret exact channel) and for the audit record to carry the
+// original judgment. It never contains the hit bytes themselves — the store
+// is keyed by their sha256 (credential red line: matched bytes never persist).
+type BlockedContent struct {
+	Kind     string `json:"kind"`
+	Rule     string `json:"rule"`
+	Reason   string `json:"reason,omitempty"`
+	Evidence string `json:"evidence,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Ts       int64  `json:"ts"`
+}
+
+// blockedContentFile is the on-disk form of guard_blocked.json.
+type blockedContentFile struct {
+	Version int                       `json:"version"`
+	Entries map[string]BlockedContent `json:"entries"`
+}
+
+// blockedContentStore is the persisted repeat-interception index. Entries are
+// added on every high verdict (fresh or cached replay) and survive restarts;
+// the oldest entries evict past max.
+type blockedContentStore struct {
+	mu   sync.Mutex
+	path string
+	max  int
+	ents map[string]BlockedContent
+}
+
+func loadBlockedContentStore(path string, max int) *blockedContentStore {
+	s := &blockedContentStore{path: path, max: max, ents: map[string]BlockedContent{}}
+	if path == "" || max <= 0 {
+		return s
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return s
+	}
+	var f blockedContentFile
+	if json.Unmarshal(data, &f) != nil || f.Version != 1 {
+		return s
+	}
+	for k, v := range f.Entries {
+		s.ents[k] = v
+	}
+	s.evictLocked()
+	return s
+}
+
+func (s *blockedContentStore) evictLocked() {
+	if len(s.ents) <= s.max {
+		return
+	}
+	type kt struct {
+		k  string
+		ts int64
+	}
+	order := make([]kt, 0, len(s.ents))
+	for k, v := range s.ents {
+		order = append(order, kt{k, v.Ts})
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i].ts < order[j].ts })
+	for len(s.ents) > s.max {
+		delete(s.ents, order[0].k)
+		order = order[1:]
+	}
+}
+
+// hashHit derives the store key: sha256 of the raw hit bytes only — the same
+// bytes in any future request must intercept regardless of which rule or
+// judge model produced the verdict.
+func hashHit(hit string) string {
+	sum := sha256.Sum256([]byte(hit))
+	return hex.EncodeToString(sum[:])
+}
+
+// Record adds (or refreshes) one entry and persists.
+func (s *blockedContentStore) Record(hit string, v BlockedContent) {
+	key := hashHit(hit)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ents[key] = v
+	s.evictLocked()
+	_ = writeStateFile(s.path, blockedContentFile{Version: 1, Entries: s.ents})
+}
+
+// Blocked looks the raw hit bytes up.
+func (s *blockedContentStore) Blocked(hit string) (BlockedContent, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.ents[hashHit(hit)]
+	return v, ok
 }
 
 // ---- result ring --------------------------------------------------------

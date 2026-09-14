@@ -57,19 +57,22 @@ type Build struct {
 	Eligible  map[string]bool
 	// Secrets are the proxy-managed credential values collected in the SAME
 	// pass (pool APIKey/AccessKey/SecretKey + codex/aqp OAuth tokens), handed
-	// to the guard known-secret scanner. Memory only: never logged, persisted,
-	// or serialized (credential red line).
-	Secrets []string
+	// to the guard known-secret scanner. Each carries a source LABEL — the
+	// operator-facing identity (pool/account/file) the exact-match
+	// interception surfaces; labels are identity strings, never secret
+	// material. Values stay memory only: never logged, persisted, or
+	// serialized (credential red line).
+	Secrets []Secret
 	// PoolSecrets is the API-key-pool subset of Secrets. It is stable within a
 	// config generation (pool files are only re-read by BuildProviders), so the
 	// guard OAuth refresh loop reuses it as the base when re-collecting the
 	// rotating OAuth subset.
-	PoolSecrets []string
+	PoolSecrets []Secret
 	// OAuthSecrets is the codex/aqp subset of Secrets. OAuth providers rotate
 	// their tokens in place during serve (rewriting <name>_oauth_auth.json),
 	// so this is the only part of Secrets that can change WITHOUT a reload —
 	// the guard refresh loop re-collects it on the quota-poll beat.
-	OAuthSecrets []string
+	OAuthSecrets []Secret
 }
 
 // BuildOptions carries the process-environment seams BuildProviders needs:
@@ -89,7 +92,7 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 	poolIndex := map[string][]string{}
 	parentOf := map[string]string{}
 	eligible := map[string]bool{}
-	var poolSecrets, oauthSecrets []string
+	var poolSecrets, oauthSecrets []Secret
 	for name, prov := range cfg.Providers {
 		if prov.Provider == "aqp" || prov.Provider == "codex" {
 			// OAuth/SSO providers own separate auth stores and never consult the
@@ -126,7 +129,15 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 		// covers both sources without a second storage read.
 		for _, a := range pool.Accounts {
 			cred := a.Credentials()
-			poolSecrets = appendNonEmpty(poolSecrets, cred.APIKey, cred.AccessKey, cred.SecretKey)
+			if cred.APIKey != "" {
+				poolSecrets = append(poolSecrets, Secret{Value: cred.APIKey, Label: fmt.Sprintf("pool:%s#%s/api_key", name, a.ID)})
+			}
+			if cred.AccessKey != "" {
+				poolSecrets = append(poolSecrets, Secret{Value: cred.AccessKey, Label: fmt.Sprintf("pool:%s#%s/access_key", name, a.ID)})
+			}
+			if cred.SecretKey != "" {
+				poolSecrets = append(poolSecrets, Secret{Value: cred.SecretKey, Label: fmt.Sprintf("pool:%s#%s/secret_key", name, a.ID)})
+			}
 		}
 		if snapshot.Source != accounts.SourcePlural {
 			// Missing or legacy: API-key providers keep their historical
@@ -189,7 +200,7 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 		// Fresh slices: the caller stores PoolSecrets/OAuthSecrets as
 		// reload-owned state and later concatenates them for scanner rebuilds,
 		// so Secrets must not share a backing array with either subset.
-		Secrets:      append(append([]string(nil), poolSecrets...), oauthSecrets...),
+		Secrets:      append(append([]Secret(nil), poolSecrets...), oauthSecrets...),
 		PoolSecrets:  poolSecrets,
 		OAuthSecrets: oauthSecrets,
 	}
@@ -211,14 +222,22 @@ func appendNonEmpty(dst []string, vals ...string) []string {
 // in place during serve, so the guard refresh loop calls this on a beat to
 // re-sync the known-secret set without a full provider rebuild. Best-effort
 // like collectOAuthSecrets — missing/corrupt files contribute nothing.
-func CollectOAuthSecrets(cfg *configdomain.Config, opts BuildOptions) []string {
-	var out []string
+func CollectOAuthSecrets(cfg *configdomain.Config, opts BuildOptions) []Secret {
+	var out []Secret
 	for name, prov := range cfg.Providers {
 		if prov.Provider == "aqp" || prov.Provider == "codex" {
 			out = append(out, collectOAuthSecrets(opts, name, prov.Provider)...)
 		}
 	}
 	return out
+}
+
+// Secret is one collected credential value with its operator-facing source
+// label (pool/account/OAuth-file identity). Labels may be persisted on a
+// guard interception; values may not.
+type Secret struct {
+	Value string
+	Label string
 }
 
 // collectOAuthSecrets best-effort reads one codex/aqp provider's OAuth/SSO
@@ -230,7 +249,7 @@ func CollectOAuthSecrets(cfg *configdomain.Config, opts BuildOptions) []string {
 // os.ReadFile would silently drop guard coverage the moment storage moves
 // off disk. A missing or unreadable store means "not logged in" — silently
 // skip (there is no credential to protect). Values stay in memory only.
-func collectOAuthSecrets(opts BuildOptions, name, providerID string) []string {
+func collectOAuthSecrets(opts BuildOptions, name, providerID string) []Secret {
 	path := filepath.Join(opts.HomeDir, ".model-proxy", name+"_oauth_auth.json")
 	switch providerID {
 	case "codex":
@@ -238,13 +257,22 @@ func collectOAuthSecrets(opts BuildOptions, name, providerID string) []string {
 		if err != nil {
 			return nil
 		}
-		return appendNonEmpty(nil, af.Tokens.AccessToken, af.Tokens.RefreshToken, af.Tokens.IDToken)
+		var out []Secret
+		for _, tok := range []string{af.Tokens.AccessToken, af.Tokens.RefreshToken, af.Tokens.IDToken} {
+			if tok != "" {
+				out = append(out, Secret{Value: tok, Label: "oauth:" + name})
+			}
+		}
+		return out
 	case "aqp":
 		a, err := provider.LoadAqpAccount(path)
 		if err != nil || a == nil {
 			return nil
 		}
-		return appendNonEmpty(nil, a.SSOSessionCookie)
+		if a.SSOSessionCookie == "" {
+			return nil
+		}
+		return []Secret{{Value: a.SSOSessionCookie, Label: "oauth:" + name}}
 	}
 	return nil
 }

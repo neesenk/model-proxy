@@ -13,7 +13,7 @@ import (
 
 func mustScanner(t *testing.T, custom []CustomPattern, secrets, extraPaths []string) *Scanner {
 	t.Helper()
-	s, err := NewScanner(custom, secrets, extraPaths)
+	s, err := NewScanner(custom, Known(secrets...), extraPaths)
 	if err != nil {
 		t.Fatalf("NewScanner: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestNewScannerRejectsBadCustomPatterns(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := NewScanner(tc.custom, nil, nil)
+			s, err := NewScanner(tc.custom, Known(), nil)
 			if err == nil {
 				t.Fatalf("NewScanner = nil error, want %q", tc.wantErr)
 			}
@@ -65,6 +65,52 @@ func TestNewScannerRejectsBadCustomPatterns(t *testing.T) {
 				t.Errorf("NewScanner returned non-nil scanner on error")
 			}
 		})
+	}
+}
+
+// KnownIdentity reports the matched credential's source label and a masked
+// display of the span (first4...last2), for both raw and encoded forms.
+func TestKnownIdentity(t *testing.T) {
+	value := "poolkey-" + strings.Repeat("wX9q", 8)
+	sc, err := NewScanner(nil, []KnownSecret{{Value: value, Label: "pool:zhipu#acc1/api_key"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	label, masked, ok := sc.KnownIdentity([]byte("token " + value + " tail"))
+	if !ok {
+		t.Fatal("raw known secret not identified")
+	}
+	if label != "pool:zhipu#acc1/api_key" {
+		t.Errorf("label = %q", label)
+	}
+	want := value[:4] + "…" + value[len(value)-2:]
+	if masked != want {
+		t.Errorf("masked = %q, want %q", masked, want)
+	}
+
+	b64 := base64.StdEncoding.EncodeToString([]byte(value))
+	scDec, err := NewScannerWithOptions(nil, []KnownSecret{{Value: value, Label: "pool:zhipu#acc1/api_key"}}, nil, Options{Decode: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	label, masked, ok = scDec.KnownIdentity([]byte("enc " + b64 + " end"))
+	if !ok {
+		t.Fatal("encoded known secret not identified")
+	}
+	if label != "pool:zhipu#acc1/api_key" {
+		t.Errorf("encoded label = %q", label)
+	}
+	if strings.Contains(masked, value) || masked == b64 {
+		t.Errorf("encoded masked display leaks the value: %q", masked)
+	}
+
+	// No known secret: not ok. Unlabeled secrets still identify (empty label).
+	if _, _, ok := sc.KnownIdentity([]byte("clean body")); ok {
+		t.Error("clean body must not identify")
+	}
+	scNoLabel, _ := NewScanner(nil, Known(value), nil)
+	if label, masked, ok := scNoLabel.KnownIdentity([]byte(value)); !ok || label != "" || masked == "" {
+		t.Errorf("unlabeled = (%q, %q, %v), want identified with empty label", label, masked, ok)
 	}
 }
 
@@ -327,7 +373,7 @@ func TestRedactNoSecretLeak(t *testing.T) {
 // NOT hit, but its plaintext form still does.
 func TestScannerDecodeOffDisablesEncodedChannels(t *testing.T) {
 	secret := syntheticSecret("poolkey-", 32)
-	s, err := NewScannerWithOptions(nil, []string{secret}, nil, Options{Decode: false})
+	s, err := NewScannerWithOptions(nil, Known([]string{secret}...), nil, Options{Decode: false})
 	if err != nil {
 		t.Fatalf("NewScannerWithOptions: %v", err)
 	}

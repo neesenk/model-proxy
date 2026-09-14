@@ -177,9 +177,11 @@ type GuardConfig struct {
 type AdjudicateConfig struct {
 	Enabled bool `yaml:"enabled"`
 	// Model is the exposed route name of the adjudication model; required
-	// when enabled. Calls go provider-direct (the probe exchange recipe),
-	// never through the forward pipeline: no guard re-scan (the judged span
-	// would self-trigger), no cache, no request log, no stats.
+	// when enabled. Calls go provider-direct through the shared scheduling
+	// seam (same Manager ordering + cooldown skip + health recording as
+	// forward traffic, per-attempt budget slices; transport probe.Do), never
+	// through the forward transport layer: no guard re-scan (the judged span
+	// would self-trigger), no cache, no request log, no forward stats.
 	Model string `yaml:"model"`
 	// BlockSession (default true, applied at load): a high verdict blocks
 	// subsequent requests of the same client session (x-claude-code-session-id)

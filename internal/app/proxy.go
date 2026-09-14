@@ -42,12 +42,12 @@ type generationState struct {
 	cfg       *Config
 	providers map[string]provider.Provider // provider name → Provider (shared)
 
-	cache             *responsecache.Store // exact-match response cache (prompt-hash + TTL); nil = disabled
-	guardScanner      *guard.Scanner       // reload-owned immutable outbound secret/path scanner; never serialized or logged
-	guardPoolSecrets  []string             // reload-owned: current generation's Build.PoolSecrets (base for OAuth re-syncs)
-	guardOAuthSecrets []string             // reload-owned: OAuth + provider memory-reported known-secret values in guardScanner; refreshed in place on the poll beat
-	secLog            *seclog.Logger       // security audit log (guard hit records); reload-owned, swapped by reconcileSecLog; nil = audit off for this generation
-	secLogRunning     bool                 // current generation's secLog Run goroutine is live (lifecycle-admitted); guards Close's drain
+	cache             *responsecache.Store   // exact-match response cache (prompt-hash + TTL); nil = disabled
+	guardScanner      *guard.Scanner         // reload-owned immutable outbound secret/path scanner; never serialized or logged
+	guardPoolSecrets  []providerbuild.Secret // reload-owned: current generation's Build.PoolSecrets (base for OAuth re-syncs)
+	guardOAuthSecrets []providerbuild.Secret // reload-owned: OAuth + provider memory-reported known-secret values in guardScanner; refreshed in place on the poll beat
+	secLog            *seclog.Logger         // security audit log (guard hit records); reload-owned, swapped by reconcileSecLog; nil = audit off for this generation
+	secLogRunning     bool                   // current generation's secLog Run goroutine is live (lifecycle-admitted); guards Close's drain
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
 	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
@@ -176,15 +176,17 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	guardScanner, err := buildGuardScanner(cfg, built.Secrets)
 	if err != nil {
 		logx.Warnf("[startup] guard scanner: %v; falling back to built-in rules + known secrets", err)
-		secrets := built.Secrets
-		if !cfg.Guard.KnownSecretsEnabled() {
-			secrets = nil
-		}
 		// The fallback can only fail if the embedded rule table itself is
 		// broken (custom patterns are nil here, so config cannot be the cause).
 		// Degrade to nil — forward skips the guard entirely — rather than run
 		// a scanner we no longer trust; the warning makes the loss loud.
-		guardScanner, err = guard.NewScannerWithOptions(nil, secrets, cfg.Guard.ExtraPaths, guard.Options{Decode: cfg.Guard.DecodeEnabled()})
+		fallback := make([]guard.KnownSecret, 0, len(built.Secrets))
+		if cfg.Guard.KnownSecretsEnabled() {
+			for _, sec := range built.Secrets {
+				fallback = append(fallback, guard.KnownSecret{Value: sec.Value, Label: sec.Label})
+			}
+		}
+		guardScanner, err = guard.NewScannerWithOptions(nil, fallback, cfg.Guard.ExtraPaths, guard.Options{Decode: cfg.Guard.DecodeEnabled()})
 		if err != nil {
 			// Errorf, not Warnf: this announces a security control is OFF, so
 			// it must survive even log_level: error (level filtering, 063b2f9).

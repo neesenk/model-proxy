@@ -15,6 +15,8 @@ import (
 	"model-proxy/internal/guard"
 	guardsession "model-proxy/internal/guard/session"
 	"model-proxy/internal/observe/counters"
+	"model-proxy/internal/observe/requestlog"
+	"model-proxy/internal/observe/seclog"
 )
 
 func openaiOKResponder(text string) http.HandlerFunc {
@@ -506,7 +508,15 @@ const guardTestSecret = "sk-fragmented-secret-value-1234567890"
 
 func guardScanner(t *testing.T, extraPaths []string) *guard.Scanner {
 	t.Helper()
-	sc, err := guard.NewScannerWithOptions(nil, []string{guardTestSecret}, extraPaths, guard.Options{Decode: true})
+	return guardLabeledScanner(t, extraPaths, "")
+}
+
+// guardLabeledScanner builds the test scanner with one labeled known secret
+// (the label exercises the exact-match attribution path).
+func guardLabeledScanner(t *testing.T, extraPaths []string, label string) *guard.Scanner {
+	t.Helper()
+	sc, err := guard.NewScannerWithOptions(nil,
+		[]guard.KnownSecret{{Value: guardTestSecret, Label: label}}, extraPaths, guard.Options{Decode: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,41 +535,43 @@ func secretBody(s string) string {
 	return `{"model":"m","messages":[{"role":"user","content":"` + s + `"}]}`
 }
 
-// TestServeGuardSecretsLogAndRedact: log counts/emits and forwards; redact
-// rewrites the body before any branch sees it (the upstream never receives
-// the secret).
+// TestServeGuardSecretsLogAndRedact: for PATTERN hits, log counts/emits and
+// forwards; redact rewrites the body before any branch sees it (the upstream
+// never receives the secret). Exact known-secret hits are intercepted
+// unconditionally instead (TestServeGuardExactMatchIntercepts).
 func TestServeGuardSecretsLogAndRedact(t *testing.T) {
 	up := newFakeUpstream(t, openaiOKResponder("ok"))
 	h := newHarness()
 	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off"}))
 	snap.Guard = guardScanner(t, nil)
 
-	w := h.serve(snap, "openai", "/v1/chat/completions", secretBody("token "+guardTestSecret), nil)
+	dummy := "sk-capture-dummy-not-a-real-key"
+	w := h.serve(snap, "openai", "/v1/chat/completions", secretBody("token "+dummy), nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("log action status = %d, want 200", w.Code)
 	}
 	guardEvent := false
 	for _, e := range h.events.Snapshot() {
-		if e.Type == "guard" && strings.Contains(e.Detail, "known_secret") {
+		if e.Type == "guard" && strings.Contains(e.Detail, "openai_api_key") {
 			guardEvent = true
 		}
 	}
 	if !guardEvent {
 		t.Error("secrets=log must publish a guard live event")
 	}
-	if got := h.svc.Metrics.Snapshot()[counters.PMKey{Provider: "guard", Model: "known_secret"}].Requests; got == 0 {
-		t.Error("secrets=log must increment the (guard, known_secret) counter")
+	if got := h.svc.Metrics.Snapshot()[counters.PMKey{Provider: "guard", Model: "openai_api_key"}].Requests; got == 0 {
+		t.Error("secrets=log must increment the (guard, openai_api_key) counter")
 	}
 
 	up2 := newFakeUpstream(t, openaiOKResponder("ok"))
 	h2 := newHarness()
 	snap2 := h2.snapshot(guardBaseConfig(up2, GuardConfig{Secrets: "redact", Paths: "off"}))
 	snap2.Guard = guardScanner(t, nil)
-	w = h2.serve(snap2, "openai", "/v1/chat/completions", secretBody("token "+guardTestSecret), nil)
+	w = h2.serve(snap2, "openai", "/v1/chat/completions", secretBody("token "+dummy), nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("redact action status = %d, want 200", w.Code)
 	}
-	if strings.Contains(up2.lastBody(), guardTestSecret) {
+	if strings.Contains(up2.lastBody(), dummy) {
 		t.Errorf("upstream received the unredacted secret: %s", up2.lastBody())
 	}
 	if !strings.Contains(up2.lastBody(), "[REDACTED]") {
@@ -567,13 +579,95 @@ func TestServeGuardSecretsLogAndRedact(t *testing.T) {
 	}
 }
 
-// TestServeGuardSecretsBlock: a blocked secret 400s before any upstream call.
+// TestServeGuardExactMatchIntercepts: a configured credential appearing
+// verbatim is intercepted regardless of the configured action (log here —
+// the softest one), the session is blocked when it declared one, and a
+// session-less request is rejected without a block.
+func TestServeGuardExactMatchIntercepts(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("never"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	h.svc.Adjudicator = adj
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off"}))
+	snap.Guard = guardScanner(t, nil)
+
+	// Labeled scanner: the audit record and the block reason must name the
+	// credential source and a masked key display, and the rejected request
+	// must land in the request log (the Security page drills into it).
+	dir := t.TempDir()
+	reqLog := requestlog.New(requestlog.Options{Directory: dir, MaxBodyBytes: 1 << 20})
+	go reqLog.Run()
+	t.Cleanup(reqLog.Shutdown)
+	h.svc.ReqLog = reqLog
+	auditDir := t.TempDir()
+	secLog, err := seclog.New(auditDir, seclog.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go secLog.Run()
+	t.Cleanup(secLog.Shutdown)
+	snap.SecLog = secLog
+	snap.Guard = guardLabeledScanner(t, nil, "pool:zhipu#acc1/api_key")
+
+	w := h.serve(snap, "openai", "/v1/chat/completions", secretBody("token "+guardTestSecret), map[string]string{"x-claude-code-session-id": "s-1"})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want the exact-match interception 400 even under secrets=log", w.Code)
+	}
+	secLog.Shutdown()
+	audit, err := seclog.Query(auditDir, seclog.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audit.Records) != 1 {
+		t.Fatalf("audit records = %d, want the interception record", len(audit.Records))
+	}
+	rec := audit.Records[0]
+	if !strings.Contains(rec.Detail, "pool:zhipu#acc1/api_key") || !strings.Contains(rec.Detail, "sk-f…90") {
+		t.Errorf("interception record detail = %q, want source label + masked key", rec.Detail)
+	}
+	reqLog.Shutdown()
+	logged, err := requestlog.QueryRecords(dir, requestlog.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logged) != 1 || logged[0].Status != http.StatusBadRequest {
+		t.Fatalf("request-log records = %d, want the rejected 400 request", len(logged))
+	}
+	if !strings.Contains(logged[0].RequestBody, guardTestSecret) {
+		t.Error("the rejected request's body must be preserved as the drill-down evidence")
+	}
+	if !strings.Contains(w.Body.String(), "guard unblock s-1") {
+		t.Errorf("interception message = %q, want the unblock hint", w.Body.String())
+	}
+	if up.hits() != 0 {
+		t.Errorf("upstream hits = %d, want 0", up.hits())
+	}
+	if _, _, blocked := adj.SessionBlocked("s-1"); !blocked {
+		t.Error("the session must be blocked by the exact-match hit")
+	}
+	if n := len(adj.captured()); n != 0 {
+		t.Errorf("exact hits must not defer to adjudication, jobs = %d", n)
+	}
+
+	// Without a session header the request is still rejected, but no block
+	// is added ("无头不拉黑").
+	w = h.serve(snap, "openai", "/v1/chat/completions", secretBody("token "+guardTestSecret), nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("session-less status = %d, want 400", w.Code)
+	}
+	if _, _, blocked := adj.SessionBlocked(""); blocked {
+		t.Error("a session-less request must not create a block")
+	}
+}
+
+// TestServeGuardSecretsBlock: with the adjudication channel off, a blocked
+// PATTERN secret 400s before any upstream call.
 func TestServeGuardSecretsBlock(t *testing.T) {
 	up := newFakeUpstream(t, openaiOKResponder("never"))
 	h := newHarness()
 	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "block", Paths: "off"}))
 	snap.Guard = guardScanner(t, nil)
-	w := h.serve(snap, "openai", "/v1/chat/completions", secretBody("token "+guardTestSecret), nil)
+	w := h.serve(snap, "openai", "/v1/chat/completions", secretBody("token sk-capture-dummy-not-a-real-key"), nil)
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "guard.secrets=block") {
 		t.Fatalf("status = %d body = %s, want the secrets block 400", w.Code, w.Body.String())
 	}
@@ -608,12 +702,14 @@ func TestServeGuardPathsStrongBlockWeakLog(t *testing.T) {
 }
 
 // TestServeGuardFragmentedSecretBlock: a known secret smuggled in two
-// fragments across one session completes on the second request and is blocked
-// as known_secret_fragmented.
+// fragments across one session completes on the second request — the
+// completion is intercepted (exact-match family) and the session is blocked.
 func TestServeGuardFragmentedSecretBlock(t *testing.T) {
 	up := newFakeUpstream(t, openaiOKResponder("ok"))
 	h := newHarness()
 	h.svc.SessionScan = guardsession.NewStore()
+	adj := newFakeAdjudicator()
+	h.svc.Adjudicator = adj
 	g := GuardConfig{Secrets: "block", Paths: "off", SessionScan: true, KnownSecrets: true}
 	snap := h.snapshot(guardBaseConfig(up, g))
 	snap.Guard = guardScanner(t, nil)
@@ -630,6 +726,9 @@ func TestServeGuardFragmentedSecretBlock(t *testing.T) {
 	}
 	if got := h.svc.Metrics.Snapshot()[counters.PMKey{Provider: "guard", Model: "known_secret_fragmented"}].Requests; got == 0 {
 		t.Error("fragmented completion must increment (guard, known_secret_fragmented)")
+	}
+	if rule, _, blocked := adj.SessionBlocked("sess-1"); !blocked || rule != "known_secret_fragmented" {
+		t.Errorf("fragmented completion must block the session, got blocked=%v rule=%q", blocked, rule)
 	}
 }
 
@@ -668,5 +767,5 @@ func TestEvaluateRequestGuard(t *testing.T) {
 // TestAuditGuardHitNilLogger: nil logger (audit off for the generation) is a
 // no-op, never a panic.
 func TestAuditGuardHitNilLogger(t *testing.T) {
-	AuditGuardHit(nil, "secret", []string{"known_secret"}, "log", "r", "a", "openai", "m", "", "")
+	AuditGuardHit(nil, GuardAuditHit{Kind: "secret", Names: []string{"known_secret"}, Action: "log", RequestID: "r", Agent: "a", Proto: "openai", Exposed: "m"})
 }

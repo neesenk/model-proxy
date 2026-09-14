@@ -10,7 +10,7 @@ import (
 // panics the flushes (regression: slice bounds out of range in MaskSnippet,
 // which killed the /api/security/explain handler mid-response).
 func TestMaskSnippetSecretOverlapsWindowEdge(t *testing.T) {
-	s, err := NewScanner(nil, nil, nil)
+	s, err := NewScanner(nil, Known(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

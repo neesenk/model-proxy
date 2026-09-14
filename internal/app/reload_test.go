@@ -550,10 +550,12 @@ func (r *seclogRig) reload(t *testing.T, audit bool, auditPath string) {
 	}
 }
 
-// guardHit posts one body that hits the known-secret channel.
+// guardHit posts one body that hits the pattern secret channel (a
+// known-secret body would be intercepted with 400 — the audit lifecycle is
+// what these tests verify, so the hit must forward normally).
 func (r *seclogRig) guardHit(t *testing.T) {
 	t.Helper()
-	postOK(t, r.url+"/v1/chat/completions", guardPoolRequestBody(guardPoolKey))
+	postOK(t, r.url+"/v1/chat/completions", guardPoolRequestBody("sk-capture-dummy-not-a-real-key"))
 }
 
 // reloadErr and guardHitErr are the goroutine-safe variants of reload/guardHit:
@@ -567,7 +569,7 @@ func (r *seclogRig) reloadErr(audit bool, auditPath string) error {
 }
 
 func (r *seclogRig) guardHitErr() error {
-	resp, err := http.Post(r.url+"/v1/chat/completions", "application/json", stringReader(guardPoolRequestBody(guardPoolKey)))
+	resp, err := http.Post(r.url+"/v1/chat/completions", "application/json", stringReader(guardPoolRequestBody("sk-capture-dummy-not-a-real-key")))
 	if err != nil {
 		return err
 	}
@@ -778,7 +780,7 @@ func TestSecLogReload_CloseDrainsCurrentGeneration(t *testing.T) {
 		t.Fatalf("records after Close = %d, want %d (Close must drain)", got, hits)
 	}
 	// A late enqueue against the drained logger is dropped, never written.
-	forward.AuditGuardHit(logger, seclog.KindSecret, []string{"known_secret"}, "log", "late", "agent", "openai", "glm", "", "")
+	forward.AuditGuardHit(logger, forward.GuardAuditHit{Kind: seclog.KindSecret, Names: []string{"known_secret"}, Action: "log", RequestID: "late", Agent: "agent", Proto: "openai", Exposed: "glm"})
 	if got := seclogRecordCount(t, dir); got != hits {
 		t.Errorf("records after late enqueue = %d, want %d (no writes after Close)", got, hits)
 	}

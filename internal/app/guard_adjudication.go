@@ -22,7 +22,6 @@ import (
 	"model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/observe/seclog"
-	"model-proxy/internal/probe"
 )
 
 // startAdjudication builds and starts the process-lifetime adjudication
@@ -40,7 +39,7 @@ func (p *Proxy) startAdjudication(stateDir string) {
 		CacheMax: a.CacheCapacity(),
 		StateDir: stateDir,
 	})
-	p.adjudication.Start(p, adjudicationCaller{p: p}, adjudicationSink{p: p})
+	p.adjudication.Start(p, adjudicationCaller{p: p, xchg: scheduledExchange{p: p}}, adjudicationSink{p: p})
 }
 
 // adjudicationStateDir derives the adjudication state directory from the
@@ -80,6 +79,31 @@ func (a adjudicatorAdapter) SessionBlocked(sessionID string) (rule, requestID st
 	return bl.Rule, bl.RequestID, ok
 }
 
+// ContentBlocked projects the persisted repeat-interception index (sha256 of
+// hit bytes → the original high verdict's attribution). Secret-kind hits
+// only — the service never records path literals into it.
+func (a adjudicatorAdapter) ContentBlocked(hit string) (kind, rule, reason, evidence, model string, blocked bool) {
+	bc, ok := a.svc.ContentBlocked(hit)
+	if !ok {
+		return "", "", "", "", "", false
+	}
+	return bc.Kind, bc.Rule, bc.Reason, bc.Evidence, bc.Model, true
+}
+
+// BlockSession implements the exact-match interception path: the block table
+// is the same one high verdicts use (persists until an explicit unblock).
+// reason carries the operator attribution (credential source label + masked
+// key display) recorded on the block for the Security page.
+func (a adjudicatorAdapter) BlockSession(sessionID, rule, requestID, reason string) {
+	a.svc.Block(sessionID, adjudicate.Block{
+		Kind:      adjudicate.KindSecret,
+		Rule:      rule,
+		Reason:    reason,
+		RequestID: requestID,
+		Ts:        time.Now().UnixMilli(),
+	})
+}
+
 // AdjudicationConfig implements adjudicate.RuntimeConfig: the CURRENT
 // generation's model, per-call timeout and session-block switch, resolved
 // under a brief read lock (never held across the model call itself).
@@ -94,36 +118,41 @@ func (p *Proxy) AdjudicationConfig() (model string, timeout time.Duration, block
 	return a.Model, a.TimeoutDuration(), a.BlockSession, true
 }
 
-// adjudicationCaller performs one provider-direct model call (the probe
-// exchange recipe: impl.RewriteRequest → auth → send). It deliberately never
-// goes through the forward pipeline: the judged snippet contains the matched
+// adjudicationCaller performs one judge model call through the shared
+// scheduling seam (modelExchange → Manager ordering + cooldown skip + health
+// recording → probe.Do transport). It deliberately never goes through the
+// forward transport pipeline: the judged snippet contains the matched
 // pattern and would re-trigger the guard (self-recursion), and internal
 // adjudication traffic must not pollute the request log, cache or stats.
-type adjudicationCaller struct{ p *Proxy }
+// This struct owns the judge domain only: prompt shape and verdict parsing.
+type adjudicationCaller struct {
+	p    *Proxy
+	xchg modelExchange
+}
 
-// judgeSystem is the fixed classifier prompt.
-const judgeSystem = `You are the security classifier of an LLM gateway. A secret-detection rule matched a snippet of an outbound request body. Decide whether the snippet shows a REAL credential security risk, or benign content (test fixture, dummy/placeholder key, documentation example, regex source code, benign file-path reference).
+// judgeSystem is the fixed three-level classifier prompt. high = block the
+// session, medium = record only, low = the ignored tier; the model must also
+// cite the factual basis for the call (scrubbed + capped before storage).
+const judgeSystem = `You are the security classifier of an LLM gateway. A secret-detection rule matched a snippet of an outbound request body. Classify the risk and justify it from what the snippet actually shows.
 
 Answer STRICTLY as JSON, nothing else:
-{"risk":"high"|"low","reason":"short justification, max 40 characters"}
+{"risk":"high"|"medium"|"low","reason":"judgment logic, max 200 characters","evidence":"factual basis in the snippet, max 300 characters"}
 
-"high" = a real, usable credential is being sent out (live API key or token, real private-key material, or a tool call genuinely reading credential files for exfiltration).
-"low" = placeholder/example/fixture/documentation/variable name, a masked or redacted value, or a benign path mention in legitimate coding work.`
+"high" = a real, usable credential is being sent out: a live API key or token, real private-key material, or a tool call genuinely reading/exfiltrating credential files (e.g. cat/cp/tar of ~/.ssh or keychain paths).
+"medium" = risk-shaped but not confirmable from the snippet: a tool call or command touching credential paths/files without verifiable live material, operational context where a real secret may be involved, or partial/ambiguous key material.
+"low" = benign content: placeholder/example/fixture/dummy key, documentation or regex source code, variable name, masked or redacted value, plain path mention in legitimate coding work.`
 
 // adjudicationVerdictJSON pulls the first {...} object out of a model reply.
 var adjudicationVerdictJSON = regexp.MustCompile(`\{[^{}]*\}`)
 
 type adjudicationReply struct {
-	Risk   string `json:"risk"`
-	Reason string `json:"reason"`
+	Risk     string `json:"risk"`
+	Reason   string `json:"reason"`
+	Evidence string `json:"evidence"`
 }
 
-func (c adjudicationCaller) Adjudicate(ctx context.Context, model string, j adjudicate.Job) (verdict, reason string, usage adjudicate.Usage, err error) {
+func (c adjudicationCaller) Adjudicate(ctx context.Context, model string, j adjudicate.Job) (verdict, reason, evidence string, usage adjudicate.Usage, err error) {
 	snap := c.p.SnapshotRuntime()
-	targets := snap.ExpandedRoutes[model]
-	if len(targets) == 0 {
-		return "", "", adjudicate.Usage{}, fmt.Errorf("adjudicate model %q has no route", model)
-	}
 	var kindLine string
 	switch j.Kind {
 	case forward.AdjudicationKindPath:
@@ -138,89 +167,54 @@ func (c adjudicationCaller) Adjudicate(ctx context.Context, model string, j adju
 		// thinking models whose visible text arrives only after a thinking
 		// block — a tight cap truncates to thinking-only replies.
 		"max_tokens": 1024,
-		"system":     judgeSystem,
-		"messages":   []map[string]string{{"role": "user", "content": user}},
+		// The judge's reply is terse JSON: extended thinking is pure latency
+		// (measured 15s vs 2s on the flash tier) and burns the call budget.
+		// Spec-standard field — honoring endpoints skip thinking, others
+		// ignore it or reject the request and the failover chain moves on.
+		"thinking": map[string]string{"type": "disabled"},
+		"system":   judgeSystem,
+		"messages": []map[string]string{{"role": "user", "content": user}},
 	})
 	if err != nil {
-		return "", "", adjudicate.Usage{}, err
+		return "", "", "", adjudicate.Usage{}, err
 	}
-	// Target failover, mirroring the forward pipeline's route semantics at
-	// smaller scale: try up to 3 route targets in order, skipping providers
-	// without an anthropic_base_url (the call uses the /v1/messages leg); the
-	// first decisive reply wins. One slow provider must not sink the verdict.
-	const maxAttempts = 3
-	var lastErr error
-	attempted := 0
-	for _, t := range targets {
-		if attempted >= maxAttempts {
-			break
-		}
-		provCfg, okCfg := snap.Cfg.Providers[t.Provider]
-		impl, okImpl := snap.Providers[t.Provider]
-		if !okCfg || !okImpl {
-			continue
-		}
-		base := provCfg.AnthropicBaseURL
-		if base == "" {
-			continue
-		}
-		body, err := withModelField(prompt, t.Model)
-		if err != nil {
-			return "", "", adjudicate.Usage{}, err
-		}
-		attempted++
-		rep, err := probe.Do(ctx, c.p.client, provCfg, impl, probe.Request{
-			BaseURL: base,
-			Path:    "/v1/messages",
-			Body:    body,
-		})
-		if err != nil {
-			lastErr = fmt.Errorf("adjudication call (%s): %w", t.Provider, err)
-			continue
-		}
-		if rep.Status < 200 || rep.Status >= 300 {
-			lastErr = fmt.Errorf("adjudication call (%s): status %d: %s", t.Provider, rep.Status, truncateAdjudication(string(rep.Body), 200))
-			continue
-		}
-		usage = extractAnthropicUsage(rep.Body)
+	// The reply contract is judge domain: an empty reply, a missing/unparseable
+	// verdict JSON or an out-of-enum risk fails the target (the exchange then
+	// fails over to the next one, exactly like a transport failure).
+	var parsed adjudicationReply
+	validate := func(rep exchangeResult) error {
 		text := extractAnthropicText(rep.Body)
 		if text == "" {
-			lastErr = fmt.Errorf("adjudication call (%s): empty model reply", t.Provider)
-			continue
+			return fmt.Errorf("empty model reply")
 		}
 		m := adjudicationVerdictJSON.FindString(text)
 		if m == "" {
-			lastErr = fmt.Errorf("adjudication reply (%s) has no JSON verdict: %s", t.Provider, truncateAdjudication(text, 120))
-			continue
+			return fmt.Errorf("no JSON verdict: %s", truncateAdjudication(text, 120))
 		}
 		var r adjudicationReply
 		if err := json.Unmarshal([]byte(m), &r); err != nil {
-			lastErr = fmt.Errorf("adjudication verdict JSON (%s): %w", t.Provider, err)
-			continue
+			return fmt.Errorf("verdict JSON: %w", err)
 		}
 		switch strings.ToLower(strings.TrimSpace(r.Risk)) {
-		case "high":
-			return adjudicate.VerdictHigh, r.Reason, usage, nil
-		case "low":
-			return adjudicate.VerdictLow, r.Reason, usage, nil
+		case "high", "medium", "low":
+			parsed = r
+			return nil
 		}
-		lastErr = fmt.Errorf("adjudication verdict (%s) %q not high/low", t.Provider, r.Risk)
+		return fmt.Errorf("verdict %q not high/medium/low", r.Risk)
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("adjudicate model %q: no route target with an anthropic_base_url", model)
+	rep, err := c.xchg.exchange(ctx, snap, model, prompt, validate)
+	if err != nil {
+		return "", "", "", adjudicate.Usage{}, err
 	}
-	return "", "", usage, lastErr
-}
-
-// withModelField rewrites the marshaled prompt body's model field onto one
-// target's upstream model id (the route's per-target names differ).
-func withModelField(prompt []byte, model string) ([]byte, error) {
-	var m map[string]any
-	if err := json.Unmarshal(prompt, &m); err != nil {
-		return nil, err
+	usage = extractAnthropicUsage(rep.Body)
+	switch strings.ToLower(strings.TrimSpace(parsed.Risk)) {
+	case "high":
+		return adjudicate.VerdictHigh, parsed.Reason, parsed.Evidence, usage, nil
+	case "medium":
+		return adjudicate.VerdictMedium, parsed.Reason, parsed.Evidence, usage, nil
+	default:
+		return adjudicate.VerdictLow, parsed.Reason, parsed.Evidence, usage, nil
 	}
-	m["model"] = model
-	return json.Marshal(m)
 }
 
 // extractAnthropicText joins the text blocks of a non-streaming
@@ -280,7 +274,7 @@ func clip(s string) string {
 // record the forward path emits (plus the verdict fields).
 type adjudicationSink struct{ p *Proxy }
 
-func (s adjudicationSink) emit(j adjudicate.Job, kind string, verdict, reason string) {
+func (s adjudicationSink) emit(j adjudicate.Job, kind string, verdict, reason, evidence, model string) {
 	p := s.p
 	field := "secrets="
 	if kind == seclog.KindPath {
@@ -305,41 +299,58 @@ func (s adjudicationSink) emit(j adjudicate.Job, kind string, verdict, reason st
 		Detail:    detail,
 	})
 	snap := p.SnapshotRuntime()
-	forward.AuditGuardHit(snap.SecLog, kind, []string{j.Rule}, j.Action, j.RequestID, j.Agent, j.Proto, j.Exposed, verdict, reason)
+	forward.AuditGuardHit(snap.SecLog, forward.GuardAuditHit{
+		Kind: kind, Names: []string{j.Rule}, Action: j.Action,
+		RequestID: j.RequestID, SessionID: j.SessionID,
+		Agent: j.Agent, Proto: j.Proto, Exposed: j.Exposed,
+		Verdict: verdict, Reason: reason, Evidence: evidence, Model: model,
+	})
 }
 
 // High records the hit like the classic immediate record plus verdict=high.
 // The kind must mirror the hit channel (secret/path) — seclog.KindSecret on a
 // path hit would misfile the audit record.
-func (s adjudicationSink) High(j adjudicate.Job, reason, model string) {
-	s.emit(j, adjudicationSeclogKind(j.Kind), adjudicate.VerdictHigh, reason)
+func (s adjudicationSink) High(j adjudicate.Job, reason, evidence, model string) {
+	s.emit(j, adjudicationSeclogKind(j.Kind), adjudicate.VerdictHigh, reason, evidence, model)
 }
 
-// Low records the suppressed verdict to the audit log ONCE per unique
-// content (cached occurrences only bump the counter): the Activity feed and
-// `audit` CLI keep a durable record of what was judged benign — the verdict
-// field is the suppression marker — while history echo cannot reflood the
-// log. No live event: the operator-facing event stream stays quiet for
-// benign content, which is the point of the channel.
-func (s adjudicationSink) Low(j adjudicate.Job, reason, model string, cached bool) {
+// Medium is the record-only tier: an audit record with verdict=medium (no
+// session block), ONCE per unique content — cached occurrences only bump the
+// counter (the ring entry is the per-occurrence visibility).
+func (s adjudicationSink) Medium(j adjudicate.Job, reason, evidence, model string) {
+	if s.p.metrics != nil {
+		s.p.metrics.Inc("guard", "adjudicated_medium", counters.EvGuardHits)
+	}
+	snap := s.p.SnapshotRuntime()
+	forward.AuditGuardHit(snap.SecLog, forward.GuardAuditHit{
+		Kind: adjudicationSeclogKind(j.Kind), Names: []string{j.Rule}, Action: j.Action,
+		RequestID: j.RequestID, SessionID: j.SessionID,
+		Agent: j.Agent, Proto: j.Proto, Exposed: j.Exposed,
+		Verdict: adjudicate.VerdictMedium, Reason: reason, Evidence: evidence, Model: model,
+	})
+}
+
+// Low is the ignored tier: the JSONL trail carries one trace per unique
+// content (the store excludes low verdicts by design), with no live event —
+// the operator-facing event stream stays quiet for benign content, which is
+// the point of the channel. Cached occurrences write nothing at all.
+func (s adjudicationSink) Low(j adjudicate.Job, reason, evidence, model string) {
 	if s.p.metrics != nil {
 		s.p.metrics.Inc("guard", "adjudicated_low", counters.EvGuardHits)
 	}
-	if cached {
-		return
-	}
-	kind := seclog.KindSecret
-	if j.Kind == forward.AdjudicationKindPath {
-		kind = seclog.KindPath
-	}
 	snap := s.p.SnapshotRuntime()
-	forward.AuditGuardHit(snap.SecLog, kind, []string{j.Rule}, j.Action, j.RequestID, j.Agent, j.Proto, j.Exposed, adjudicate.VerdictLow, reason)
+	forward.AuditGuardHit(snap.SecLog, forward.GuardAuditHit{
+		Kind: adjudicationSeclogKind(j.Kind), Names: []string{j.Rule}, Action: j.Action,
+		RequestID: j.RequestID, SessionID: j.SessionID,
+		Agent: j.Agent, Proto: j.Proto, Exposed: j.Exposed,
+		Verdict: adjudicate.VerdictLow, Reason: reason, Evidence: evidence, Model: model,
+	})
 }
 
 // Failed re-emits the classic immediate record for error/skipped verdicts
 // (fail-open: an unavailable judge must never silence the guard).
 func (s adjudicationSink) Failed(j adjudicate.Job, verdict, detail string) {
-	s.emit(j, adjudicationSeclogKind(j.Kind), verdict, detail)
+	s.emit(j, adjudicationSeclogKind(j.Kind), verdict, detail, "", "")
 }
 
 // adjudicationSeclogKind maps an adjudication hit kind onto the audit-log
@@ -383,8 +394,8 @@ func (p *Proxy) adjudicationStats() appapi.SecurityAdjudicationStats {
 	if p.adjudication == nil {
 		return appapi.SecurityAdjudicationStats{}
 	}
-	calls, in, out := p.adjudication.Stats()
-	return appapi.SecurityAdjudicationStats{Calls: calls, InputTokens: in, OutputTokens: out}
+	calls, in, out, lows := p.adjudication.Stats()
+	return appapi.SecurityAdjudicationStats{Calls: calls, InputTokens: in, OutputTokens: out, LowVerdicts: lows}
 }
 
 // adjudicationEnabled implements admin.Ports.AdjudicationEnabled: the CURRENT

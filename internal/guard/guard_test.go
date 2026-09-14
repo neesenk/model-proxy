@@ -12,7 +12,7 @@ import (
 var defaultRulesScanner = mustDefaultScanner()
 
 func mustDefaultScanner() *Scanner {
-	s, err := NewScanner(nil, nil, nil)
+	s, err := NewScanner(nil, Known(), nil)
 	if err != nil {
 		panic(err) // impossible: no custom input to reject
 	}

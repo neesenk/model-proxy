@@ -123,7 +123,6 @@ providers:
       - doubao-seed-evolving
       - glm-5.3
       - glm-5.3-flash
-      - kimi-k2.7-code
       - kimi-k3
 
   # Kimi Code (Moonshot membership coding plan). API key via 'login kimi-code'

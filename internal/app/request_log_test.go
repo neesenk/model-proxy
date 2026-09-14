@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -615,10 +616,30 @@ func TestForward_RequestLog_CapturesAgent(t *testing.T) {
 	}
 }
 
+// syncLogBuffer is a mutex-guarded log capture: Reload admits async
+// goroutines (catalog refresh) that may still be writing warnings while the
+// test reads the buffer — a bare bytes.Buffer is a data race there.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func TestReload_WarnsWhenRequestLogEnabledButInactive(t *testing.T) {
 	t.Setenv("MP_MODELSDEV_URL", "http://127.0.0.1:1")
 	useStaticProviderPools(t, "backend")
-	var output bytes.Buffer
+	var output syncLogBuffer
 	originalWriter := log.Writer()
 	originalFlags := log.Flags()
 	log.SetOutput(&output)
@@ -660,7 +681,7 @@ func TestReload_WarnsWhenRequestLogEnabledButInactive(t *testing.T) {
 func TestReload_NoWarnWhenRequestLogDisabled(t *testing.T) {
 	t.Setenv("MP_MODELSDEV_URL", "http://127.0.0.1:1")
 	useStaticProviderPools(t, "backend")
-	var output bytes.Buffer
+	var output syncLogBuffer
 	originalWriter := log.Writer()
 	originalFlags := log.Flags()
 	log.SetOutput(&output)

@@ -33,6 +33,32 @@ func queryKinds(t *testing.T, dir string, filter Filter) *Result {
 	return result
 }
 
+// jsonlLines reads every JSONL trail line in dir (the full-fidelity half).
+func jsonlLines(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, filePrefix) || !strings.HasSuffix(name, ".log") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if line != "" {
+				lines = append(lines, line)
+			}
+		}
+	}
+	return lines
+}
+
 func TestWriteQueryRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	logger := startLogger(t, dir, Options{})
@@ -43,6 +69,7 @@ func TestWriteQueryRoundTrip(t *testing.T) {
 			Ts:        base + int64(i)*1000,
 			Kind:      kind,
 			RequestID: fmt.Sprintf("req-%d", i),
+			SessionID: fmt.Sprintf("sess-%d", i%2),
 			Agent:     "claude",
 			Protocol:  "anthropic",
 			Exposed:   "claude-sonnet-4",
@@ -67,6 +94,7 @@ func TestWriteQueryRoundTrip(t *testing.T) {
 	// Round-trip preserves fields; newest record is the last enqueued.
 	newest := all.Records[0]
 	if newest.Kind != KindPath || newest.RequestID != "req-4" || newest.Exposed != "claude-sonnet-4" ||
+		newest.SessionID != "sess-0" ||
 		len(newest.Names) != 1 || newest.Names[0] != "aws-access-token" || newest.Action != "log" {
 		t.Errorf("newest record = %+v, fields did not round-trip", newest)
 	}
@@ -101,6 +129,55 @@ func TestWriteQueryRoundTrip(t *testing.T) {
 	}
 }
 
+// Verdict fields (reason/evidence/model) ride along the store round-trip —
+// they are what the analyze view reads back.
+func TestVerdictFieldsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	logger := startLogger(t, dir, Options{})
+	logger.Enqueue(&Record{
+		Ts: 1000, Kind: KindSecret, RequestID: "r1", Names: []string{"jwt"},
+		Verdict: "medium", Reason: "path reference without live material", Evidence: "tool input mentions ~/.ssh/id_rsa", Model: "glm-5.3-flash",
+	})
+	logger.Shutdown()
+
+	result := queryKinds(t, dir, Filter{})
+	if len(result.Records) != 1 {
+		t.Fatalf("records = %d, want 1", len(result.Records))
+	}
+	rec := result.Records[0]
+	if rec.Verdict != "medium" || rec.Reason != "path reference without live material" ||
+		rec.Evidence != "tool input mentions ~/.ssh/id_rsa" || rec.Model != "glm-5.3-flash" {
+		t.Errorf("verdict fields did not round-trip: %+v", rec)
+	}
+}
+
+// The ignored tier: low verdicts land in the full JSONL trail but never in
+// the queryable store.
+func TestLowVerdictStaysOutOfQueryableStore(t *testing.T) {
+	dir := t.TempDir()
+	logger := startLogger(t, dir, Options{})
+	logger.Enqueue(&Record{Ts: 1000, Kind: KindSecret, Names: []string{"ssh"}, Verdict: "low", Reason: "test fixture"})
+	logger.Enqueue(&Record{Ts: 2000, Kind: KindSecret, Names: []string{"jwt"}, Verdict: "medium", Reason: "ambiguous"})
+	logger.Enqueue(&Record{Ts: 3000, Kind: KindSecret, Names: []string{"pem_private_key"}})
+	logger.Shutdown()
+
+	if lines := jsonlLines(t, dir); len(lines) != 3 {
+		t.Fatalf("JSONL trail lines = %d, want 3 (trail is full-fidelity)", len(lines))
+	}
+	if !strings.Contains(strings.Join(jsonlLines(t, dir), "\n"), `"verdict":"low"`) {
+		t.Error("JSONL trail must carry the low verdict record")
+	}
+	result := queryKinds(t, dir, Filter{})
+	if len(result.Records) != 2 {
+		t.Fatalf("queryable records = %d, want 2 (low excluded)", len(result.Records))
+	}
+	for _, rec := range result.Records {
+		if rec.Verdict == "low" {
+			t.Errorf("low verdict leaked into the queryable store: %+v", rec)
+		}
+	}
+}
+
 func TestRotationAcrossFiles(t *testing.T) {
 	dir := t.TempDir()
 	logger := startLogger(t, dir, Options{MaxBytes: 512})
@@ -122,7 +199,7 @@ func TestRotationAcrossFiles(t *testing.T) {
 	}
 	var files int
 	for _, entry := range entries {
-		if isAuditFile(entry.Name()) {
+		if strings.HasPrefix(entry.Name(), filePrefix) && strings.HasSuffix(entry.Name(), ".log") {
 			files++
 		}
 	}
@@ -153,7 +230,11 @@ func TestRetentionSweepRemovesAgedFiles(t *testing.T) {
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf("stale file still present after sweep (stat err = %v)", err)
 	}
-	// The live record survives: the active file is never swept.
+	// The live record survives: the active file is never swept, and the sweep
+	// never touches the store (its name does not match the audit-file scheme).
+	if _, err := os.Stat(storePath(dir)); err != nil {
+		t.Errorf("security.db must survive a retention sweep, stat err = %v", err)
+	}
 	result := queryKinds(t, dir, Filter{Kind: KindSecret})
 	if len(result.Records) != 1 {
 		t.Fatalf("records after sweep = %d, want 1", len(result.Records))
@@ -200,7 +281,7 @@ func TestAppendSyncCoexistsWithLogger(t *testing.T) {
 
 	result := queryKinds(t, dir, Filter{})
 	if len(result.Records) != 3 {
-		t.Fatalf("records = %d, want 3 from AppendSync and Logger files", len(result.Records))
+		t.Fatalf("records = %d, want 3 from AppendSync and Logger writers", len(result.Records))
 	}
 	drifts := queryKinds(t, dir, Filter{Kind: KindDrift})
 	if len(drifts.Records) != 2 {
@@ -303,13 +384,22 @@ func TestFileAndDirectoryPermissions(t *testing.T) {
 	if got := info.Mode().Perm(); got != dirMode {
 		t.Errorf("dir mode = %o, want %o", got, dirMode)
 	}
+	// The store file is owner-only like the JSONL trail.
+	dbInfo, err := os.Stat(storePath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dbInfo.Mode().Perm(); got != logFileMode {
+		t.Errorf("security.db mode = %o, want %o", got, logFileMode)
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var files int
 	for _, entry := range entries {
-		if !isAuditFile(entry.Name()) {
+		name := entry.Name()
+		if !strings.HasPrefix(name, filePrefix) || !strings.HasSuffix(name, ".log") {
 			continue
 		}
 		files++
@@ -318,290 +408,45 @@ func TestFileAndDirectoryPermissions(t *testing.T) {
 			t.Fatal(err)
 		}
 		if got := info.Mode().Perm(); got != logFileMode {
-			t.Errorf("file %s mode = %o, want %o", entry.Name(), got, logFileMode)
+			t.Errorf("file %s mode = %o, want %o", name, got, logFileMode)
 		}
 	}
 	if files < 1 {
 		t.Fatalf("log files = %d, want at least the shared per-day AppendSync/Logger file", files)
 	}
-	// AppendSync and the Logger share the per-day file, so both records must
-	// land in it.
 	if result := queryKinds(t, dir, Filter{}); len(result.Records) != 2 {
-		t.Fatalf("records in shared per-day file = %d, want 2", len(result.Records))
+		t.Fatalf("records in shared store = %d, want 2", len(result.Records))
 	}
 }
 
-func TestQuerySkipsCorruptLines(t *testing.T) {
+// Query reads the SQLite store only: legacy JSONL files (or any hand-dropped
+// audit file) are invisible to the query surface by design.
+func TestQueryIgnoresPlainJSONLFiles(t *testing.T) {
 	dir := t.TempDir()
-	content := `{"ts":2,"kind":"secret","action":"log"}` + "\n" +
-		`{"ts":1,"kind":` + "\n" +
-		`{"ts":3,"kind":"drift"}` + "\n"
+	content := `{"ts":2,"kind":"secret","action":"log"}` + "\n" + `{"ts":3,"kind":"drift"}` + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "security-20260101-000000.log"), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	result := queryKinds(t, dir, Filter{})
-	if result.Skipped != 1 {
-		t.Errorf("skipped = %d, want 1 corrupt line", result.Skipped)
+	if len(result.Records) != 0 || result.Truncated || result.Skipped != 0 {
+		t.Errorf("records = %+v, want an empty result over a JSONL-only directory", result.Records)
 	}
-	if len(result.Records) != 2 || result.Records[0].Ts != 3 || result.Records[1].Ts != 2 {
-		t.Errorf("records = %+v, want valid lines newest-first", result.Records)
+	if _, err := os.Stat(storePath(dir)); !os.IsNotExist(err) {
+		t.Errorf("query must not create a store, stat err = %v", err)
 	}
 }
 
-// TestQueryIgnoresTornTail: the daemon appends to the active file, so the
-// last line can be half-written when a query races it. That torn tail must
-// not count as an unreadable line — but a corrupt line in the middle still
-// does.
-func TestQueryIgnoresTornTail(t *testing.T) {
+// A directory with no storage at all is an empty store, not an error.
+func TestQueryMissingStoreIsEmpty(t *testing.T) {
 	dir := t.TempDir()
-	// Good line + torn tail (no trailing newline): nothing skipped.
-	content := `{"ts":1,"kind":"secret"}` + "\n" + `{"ts":2,"kind":`
-	if err := os.WriteFile(filepath.Join(dir, "security-20260101-000000.log"), []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	result := queryKinds(t, dir, Filter{})
-	if result.Skipped != 0 {
-		t.Errorf("skipped = %d, want 0 for a torn tail (daemon mid-write)", result.Skipped)
-	}
-	if len(result.Records) != 1 || result.Records[0].Ts != 1 {
-		t.Errorf("records = %+v, want the one complete line", result.Records)
-	}
-
-	// Corrupt line in the middle + torn tail: only the middle line counts.
-	content = `{"ts":1,"kind":"secret"}` + "\n" +
-		`{"ts":9,"kind":` + "\n" +
-		`{"ts":2,"kind":`
-	if err := os.WriteFile(filepath.Join(dir, "security-20260102-000000.log"), []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	result = queryKinds(t, dir, Filter{Kind: KindSecret})
-	if result.Skipped != 1 {
-		t.Errorf("skipped = %d, want 1 (middle corrupt line; torn tail ignored)", result.Skipped)
-	}
-	if len(result.Records) != 2 {
-		t.Errorf("records = %d, want the two complete secret lines across both files", len(result.Records))
-	}
-}
-
-// TestQueryCountsUnopenableFile: a log file that cannot be opened (e.g.
-// damaged permissions on a rotated file) must surface in Skipped, not vanish.
-func TestQueryCountsUnopenableFile(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can open chmod-000 files; permission failure is not observable")
-	}
-	dir := t.TempDir()
-	blocked := filepath.Join(dir, "security-20260101-000000.log")
-	if err := os.WriteFile(blocked, []byte(`{"ts":1,"kind":"secret"}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(blocked, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "security-20260102-000000.log"),
-		[]byte(`{"ts":2,"kind":"drift"}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	result := queryKinds(t, dir, Filter{})
-	if result.Skipped != 1 {
-		t.Errorf("skipped = %d, want 1 for the unopenable file", result.Skipped)
-	}
-	if len(result.Records) != 1 || result.Records[0].Ts != 2 {
-		t.Errorf("records = %+v, want only the readable file's record", result.Records)
-	}
-}
-
-// TestRecordSchemaHasNoSecretFields pins the audit schema: pattern-type and
-// path-category names only, never a field that could carry secret material.
-func TestRecordSchemaHasNoSecretFields(t *testing.T) {
-	typ := reflect.TypeOf(Record{})
-	names := make([]string, 0, typ.NumField())
-	for i := 0; i < typ.NumField(); i++ {
-		tag := typ.Field(i).Tag.Get("json")
-		if tag == "" || tag == "-" {
-			t.Fatalf("field %s must have a json name", typ.Field(i).Name)
-		}
-		names = append(names, strings.Split(tag, ",")[0])
-	}
-	sort.Strings(names)
-	want := []string{"action", "agent", "detail", "exposed", "kind", "names", "protocol", "request_id", "ts", "verdict"}
-	if !reflect.DeepEqual(names, want) {
-		t.Errorf("record json fields = %v, want exactly %v", names, want)
-	}
-	for _, name := range names {
-		for _, banned := range []string{"secret", "value", "token", "password", "credential", "body", "payload"} {
-			if strings.Contains(name, banned) {
-				t.Errorf("field %q looks like it could carry secret material", name)
-			}
-		}
-	}
-}
-
-func TestNewRejectsEmptyDirectory(t *testing.T) {
-	if _, err := New("", Options{}); err == nil {
-		t.Error("New with empty dir must fail")
-	}
-}
-
-func TestNilLoggerIsSafe(t *testing.T) {
-	var logger *Logger
-	logger.Enqueue(&Record{Kind: KindSecret})
-	logger.Shutdown()
-	if logger.Dropped() != 0 || logger.Directory() != "" {
-		t.Error("nil logger must be a no-op")
-	}
-}
-
-// peekLastCompleteTs bounds a file by its last COMPLETE record: a torn tail
-// must not count, and every anomaly must report ok=false so the caller falls
-// back to streaming.
-func TestPeekLastCompleteTs(t *testing.T) {
-	dir := t.TempDir()
-	write := func(name, content string) string {
-		t.Helper()
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		return path
-	}
-
-	path := write("terminated.log", `{"ts":11,"kind":"secret"}`+"\n"+`{"ts":12,"kind":"drift"}`+"\n")
-	if ts, ok := peekLastCompleteTs(path); !ok || ts != 12 {
-		t.Errorf("terminated file = (%d, %v), want (12, true)", ts, ok)
-	}
-	// A torn tail is not a record yet: the last COMPLETE line bounds the file.
-	path = write("torn.log", `{"ts":11,"kind":"secret"}`+"\n"+`{"ts":99,"kind":`)
-	if ts, ok := peekLastCompleteTs(path); !ok || ts != 11 {
-		t.Errorf("torn tail = (%d, %v), want (11, true)", ts, ok)
-	}
-	// Blank trailing lines are skipped backwards to the last record.
-	path = write("blanktail.log", `{"ts":11,"kind":"secret"}`+"\n\n\n")
-	if ts, ok := peekLastCompleteTs(path); !ok || ts != 11 {
-		t.Errorf("blank tail = (%d, %v), want (11, true)", ts, ok)
-	}
-	// Anomalies → not ok: missing file, empty file, blank-only file, corrupt
-	// last complete line, and a final record longer than the peek chunk.
-	if _, ok := peekLastCompleteTs(filepath.Join(dir, "missing.log")); ok {
-		t.Error("missing file must not peek ok")
-	}
-	if _, ok := peekLastCompleteTs(write("empty.log", "")); ok {
-		t.Error("empty file must not peek ok")
-	}
-	if _, ok := peekLastCompleteTs(write("blank.log", "\n\n")); ok {
-		t.Error("blank-only file must not peek ok")
-	}
-	if _, ok := peekLastCompleteTs(write("corrupt.log", `{"ts":11,"kind":`+"\n")); ok {
-		t.Error("corrupt last complete line must not peek ok")
-	}
-	bigLine := `{"ts":11,"kind":"secret","detail":"` + strings.Repeat("x", 100<<10) + `"}` + "\n"
-	if _, ok := peekLastCompleteTs(write("bigline.log", bigLine)); ok {
-		t.Error("final record longer than the peek chunk must not peek ok")
-	}
-}
-
-// Early termination across rotated files must return exactly the top-K / time
-// window the full scan would — whether the heap fills inside the newest file
-// or only across files.
-func TestQueryEarlyTerminationAcrossRotatedFiles(t *testing.T) {
-	dir := t.TempDir()
-	write := func(name string, from, to int64) {
-		t.Helper()
-		var buffer strings.Builder
-		for ts := from; ts <= to; ts++ {
-			fmt.Fprintf(&buffer, `{"ts":%d,"kind":"secret","action":"log"}`+"\n", ts)
-		}
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(buffer.String()), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("security-20260101-000000.log", 1, 10)
-	write("security-20260102-000000.log", 11, 20)
-	write("security-20260103-000000.log", 21, 30)
-
-	// Heap fills inside the newest file: both older files are skippable.
-	result := queryKinds(t, dir, Filter{Limit: 15})
-	if len(result.Records) != 15 {
-		t.Fatalf("records = %d, want 15", len(result.Records))
-	}
-	if result.Records[0].Ts != 30 || result.Records[len(result.Records)-1].Ts != 16 {
-		t.Errorf("top-15 span = %d..%d, want 30..16",
-			result.Records[0].Ts, result.Records[len(result.Records)-1].Ts)
-	}
-
-	// Heap does NOT fill within the newest file (10 < 25): the older files'
-	// records still make the cut and must not be skipped away.
-	result = queryKinds(t, dir, Filter{Limit: 25})
-	if len(result.Records) != 25 {
-		t.Fatalf("records = %d, want 25", len(result.Records))
-	}
-	if result.Records[0].Ts != 30 || result.Records[len(result.Records)-1].Ts != 6 {
-		t.Errorf("top-25 span = %d..%d, want 30..6",
-			result.Records[0].Ts, result.Records[len(result.Records)-1].Ts)
-	}
-
-	// A From bound past the older files' newest records excludes them
-	// entirely (From is inclusive: ts=25 survives).
-	result = queryKinds(t, dir, Filter{From: 25, Limit: 100})
-	if len(result.Records) != 6 {
-		t.Fatalf("From query records = %d, want 6 (ts 25..30)", len(result.Records))
-	}
-	for _, record := range result.Records {
-		if record.Ts < 25 {
-			t.Errorf("From query returned ts %d, older than the bound", record.Ts)
-		}
-	}
-}
-
-// A corrupt line inside a file skipped by early termination is not counted in
-// Skipped (the file provably could not change the result); the same file IS
-// scanned — and its corrupt line counted — when the heap never fills.
-func TestQueryEarlyTerminationSkippedFileDoesNotCountCorruptLines(t *testing.T) {
-	dir := t.TempDir()
-	var newest strings.Builder
-	for ts := int64(21); ts <= 30; ts++ {
-		fmt.Fprintf(&newest, `{"ts":%d,"kind":"secret"}`+"\n", ts)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "security-20260102-000000.log"), []byte(newest.String()), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	older := `{"ts":11,"kind":"secret"}` + "\n" +
-		`{"ts":12,"kind":` + "\n" + // corrupt line
-		`{"ts":13,"kind":"secret"}` + "\n"
-	if err := os.WriteFile(filepath.Join(dir, "security-20260101-000000.log"), []byte(older), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Full heap (floor 21) + older file's newest record (13) below it: the
-	// file is skipped, its corrupt line uncounted.
-	result := queryKinds(t, dir, Filter{Limit: 10})
-	if len(result.Records) != 10 || result.Records[len(result.Records)-1].Ts != 21 {
-		t.Fatalf("records = %d, want the 10 newest (ts 21..30)", len(result.Records))
-	}
-	if result.Skipped != 0 {
-		t.Errorf("skipped = %d, want 0 — the corrupt line sits in a provably irrelevant file", result.Skipped)
-	}
-
-	// Without a limit the same file streams: records appear, corrupt line counts.
-	result = queryKinds(t, dir, Filter{})
-	if len(result.Records) != 12 {
-		t.Fatalf("unlimited records = %d, want 12", len(result.Records))
-	}
-	if result.Skipped != 1 {
-		t.Errorf("skipped = %d, want 1 corrupt line counted when the file is scanned", result.Skipped)
-	}
-
-	// A From bound below the file's newest record also streams it.
-	result = queryKinds(t, dir, Filter{From: 13})
-	if len(result.Records) != 11 {
-		t.Fatalf("From=13 records = %d, want 11 (ts 13 and 21..30)", len(result.Records))
-	}
-	if result.Skipped != 1 {
-		t.Errorf("skipped = %d, want 1 — From admits the file, so it is scanned", result.Skipped)
+	if len(result.Records) != 0 || result.Truncated {
+		t.Errorf("records = %+v, want empty", result.Records)
 	}
 }
 
 // TestQueryReportsTruncation pins the Truncated contract: it is true exactly
-// when a positive Limit evicted at least one matching record, false when the
+// when a positive Limit dropped at least one matching record, false when the
 // limit is not reached or there is no limit at all. This is what `audit
 // --stats` relies on to flag that its counts are a newest-first prefix, not
 // the whole filtered set.
@@ -652,38 +497,99 @@ func TestQueryReportsTruncation(t *testing.T) {
 	}
 }
 
-// TestQueryReportsTruncationForEarlyTerminatedRotatedFile covers the case
-// where the newest file alone fills the heap and an older file is skipped.
-// Its records do not change the retained top-K, but they are still matching
-// records dropped by Limit and therefore must set Truncated.
-func TestQueryReportsTruncationForEarlyTerminatedRotatedFile(t *testing.T) {
+// Truncated stays exact under a kind filter (the count predicate must match
+// the select predicate).
+func TestQueryTruncationUnderKindFilter(t *testing.T) {
 	dir := t.TempDir()
-	write := func(name, kind string, first, last int64) {
-		t.Helper()
-		var buffer strings.Builder
-		for ts := first; ts <= last; ts++ {
-			fmt.Fprintf(&buffer, `{"ts":%d,"kind":%q}`+"\n", ts, kind)
+	for ts := int64(1); ts <= 10; ts++ {
+		kind := KindSecret
+		if ts <= 3 {
+			kind = KindDrift
 		}
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(buffer.String()), 0o600); err != nil {
-			t.Fatal(err)
+		if err := AppendSync(dir, &Record{Ts: ts, Kind: kind}); err != nil {
+			t.Fatalf("AppendSync ts=%d: %v", ts, err)
 		}
 	}
-	write("security-20260101-000000.log", KindSecret, 1, 10)
-	write("security-20260102-000000.log", KindDrift, 11, 20)
-
-	result := queryKinds(t, dir, Filter{Limit: 10})
-	if len(result.Records) != 10 || result.Records[0].Ts != 20 || result.Records[9].Ts != 11 {
-		t.Fatalf("records = %#v, want newest ts 20..11", result.Records)
+	result := queryKinds(t, dir, Filter{Kind: KindDrift, Limit: 10})
+	if len(result.Records) != 3 || result.Truncated {
+		t.Fatalf("drift records = %d, Truncated = %v; want 3, false", len(result.Records), result.Truncated)
 	}
-	if !result.Truncated {
-		t.Fatal("Truncated = false after an older matching file was skipped")
+	result = queryKinds(t, dir, Filter{Kind: KindSecret, Limit: 3})
+	if len(result.Records) != 3 || !result.Truncated {
+		t.Fatalf("secret records = %d, Truncated = %v; want 3, true", len(result.Records), result.Truncated)
 	}
+}
 
-	// A kind-filtered query scans the older file when its kind cannot be
-	// inferred from timestamp peeks. Since that file contains no drift rows,
-	// exactly ten matches exist and Truncated must remain false.
-	result = queryKinds(t, dir, Filter{Kind: KindDrift, Limit: 10})
-	if len(result.Records) != 10 || result.Truncated {
-		t.Fatalf("kind-filtered records = %d, Truncated = %v; want 10, false", len(result.Records), result.Truncated)
+// The store tolerates an offline writer (CLI-style AppendSync) hammering it
+// while the daemon Logger is running — WAL + busy_timeout is the whole story.
+func TestOfflineWriterCoexistsWithRunningLogger(t *testing.T) {
+	dir := t.TempDir()
+	logger := startLogger(t, dir, Options{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 25; i++ {
+			logger.Enqueue(&Record{Ts: int64(1000 + i), Kind: KindSecret, Action: "log"})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 25; i++ {
+			if err := AppendSync(dir, &Record{Ts: int64(2000 + i), Kind: KindDrift}); err != nil {
+				t.Errorf("offline AppendSync %d: %v", i, err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	logger.Shutdown()
+
+	result := queryKinds(t, dir, Filter{})
+	if len(result.Records) != 50 {
+		t.Fatalf("records = %d, want 50 from both writers", len(result.Records))
+	}
+}
+
+// TestRecordSchemaHasNoSecretFields pins the audit schema: pattern-type and
+// path-category names only, never a field that could carry secret material.
+// Reason/Evidence are scrubbed model text by contract (the adjudication
+// channel masks hit bytes before they land here).
+func TestRecordSchemaHasNoSecretFields(t *testing.T) {
+	typ := reflect.TypeOf(Record{})
+	names := make([]string, 0, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		tag := typ.Field(i).Tag.Get("json")
+		if tag == "" || tag == "-" {
+			t.Fatalf("field %s must have a json name", typ.Field(i).Name)
+		}
+		names = append(names, strings.Split(tag, ",")[0])
+	}
+	sort.Strings(names)
+	want := []string{"action", "agent", "detail", "evidence", "exposed", "kind", "model", "names", "protocol", "reason", "request_id", "session_id", "ts", "verdict"}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("record json fields = %v, want exactly %v", names, want)
+	}
+	for _, name := range names {
+		for _, banned := range []string{"secret", "value", "token", "password", "credential", "body", "payload"} {
+			if strings.Contains(name, banned) {
+				t.Errorf("field %q looks like it could carry secret material", name)
+			}
+		}
+	}
+}
+
+func TestNewRejectsEmptyDirectory(t *testing.T) {
+	if _, err := New("", Options{}); err == nil {
+		t.Error("New with empty dir must fail")
+	}
+}
+
+func TestNilLoggerIsSafe(t *testing.T) {
+	var logger *Logger
+	logger.Enqueue(&Record{Kind: KindSecret})
+	logger.Shutdown()
+	if logger.Dropped() != 0 || logger.Directory() != "" {
+		t.Error("nil logger must be a no-op")
 	}
 }

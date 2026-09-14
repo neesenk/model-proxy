@@ -15,31 +15,14 @@ import (
 
 // ---- security_web_api_test.go ----
 
-// writeSecLogFile seeds one audit-log file (plus any raw extra lines) in dir.
-func writeSecLogFile(t *testing.T, dir string, extraLines []string, records ...seclog.Record) {
+// seedAuditStore persists records through the offline write path (AppendSync
+// writes the JSONL trail and the queryable SQLite store alike).
+func seedAuditStore(t *testing.T, dir string, records ...seclog.Record) {
 	t.Helper()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	file, err := os.Create(filepath.Join(dir, "security-20260101-000000.log"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoder := json.NewEncoder(file)
-	for _, record := range records {
-		if err := encoder.Encode(record); err != nil {
-			_ = file.Close()
+	for i := range records {
+		if err := seclog.AppendSync(dir, &records[i]); err != nil {
 			t.Fatal(err)
 		}
-	}
-	for _, line := range extraLines {
-		if _, err := file.WriteString(line + "\n"); err != nil {
-			_ = file.Close()
-			t.Fatal(err)
-		}
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -56,13 +39,13 @@ func serveSecurity(t *testing.T, w *WebServer, path string) (int, appapi.Securit
 	return rec.Code, result
 }
 
-// TestAPISecurityProjection: /api/security projects seclog records into DTOs
-// (newest first, unreadable lines counted in skipped) and passes the kind
-// filter through to the audit query.
+// TestAPISecurityProjection: /api/security projects audit records into DTOs
+// (newest first, from the queryable SQLite store) and passes the kind filter
+// through to the audit query.
 func TestAPISecurityProjection(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	writeSecLogFile(t, filepath.Join(home, ".model-proxy", "log", "security"), []string{"not-json"},
+	seedAuditStore(t, filepath.Join(home, ".model-proxy", "log", "security"),
 		seclog.Record{Ts: 1700000000000, Kind: "secret", RequestID: "r1", Agent: "codex", Protocol: "anthropic", Exposed: "gpt-x", Names: []string{"aws-access-key"}, Action: "blocked"},
 		seclog.Record{Ts: 1700000001000, Kind: "path", Agent: "pi", Exposed: "gpt-x", Names: []string{"home-outside-root"}, Action: "warn", Detail: "outside allowed roots"},
 		seclog.Record{Ts: 1700000002000, Kind: "drift", Agent: "codex", Exposed: "gpt-x", Names: []string{"credential-shape"}, Action: "warn"},
@@ -70,7 +53,7 @@ func TestAPISecurityProjection(t *testing.T) {
 	w, _ := newTestWeb(t)
 
 	code, all := serveSecurity(t, w, "/api/security")
-	if code != http.StatusOK || !all.Enabled || all.Skipped != 1 || len(all.Records) != 3 {
+	if code != http.StatusOK || !all.Enabled || all.Skipped != 0 || len(all.Records) != 3 {
 		t.Fatalf("all = (%d, %#v)", code, all)
 	}
 	// Newest first, and every DTO field projects from the record.
@@ -98,10 +81,10 @@ func TestAPISecurityProjection(t *testing.T) {
 	}
 }
 
-// TestAPISecurityDisabledOrMissing: guard.audit off — or the audit directory
-// simply absent — yields the request-log-style disabled response instead of
-// an error.
-func TestAPISecurityDisabledOrMissing(t *testing.T) {
+// TestAPISecurityDisabledOrEmpty: guard.audit off yields the disabled
+// response; with audit on, an empty store (the daemon creates security.db
+// eagerly at startup) reads as enabled-but-empty, never an error.
+func TestAPISecurityDisabledOrEmpty(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -116,11 +99,15 @@ guard: {audit: false}
 		t.Fatalf("audit off = (%d, %#v)", code, off)
 	}
 
-	// Audit on (default) but the directory was never created.
-	w2, _ := newTestWeb(t)
-	code, missing := serveSecurity(t, w2, "/api/security")
-	if code != http.StatusOK || missing.Enabled || missing.Records == nil || len(missing.Records) != 0 {
-		t.Fatalf("missing dir = (%d, %#v)", code, missing)
+	// Audit on with an empty store: enabled, empty, no error. The store is
+	// created by the boot reconcile the daemon runs at startup (tests must
+	// do it explicitly — newTestProxy skips the lifecycle).
+	w2, p2 := newTestWeb(t)
+	p2.reconcileSecLog(p2.cfgSnapshot())
+	t.Cleanup(func() { p2.SnapshotRuntime().SecLog.Shutdown() })
+	code, empty := serveSecurity(t, w2, "/api/security")
+	if code != http.StatusOK || !empty.Enabled || empty.Records == nil || len(empty.Records) != 0 {
+		t.Fatalf("empty store = (%d, %#v)", code, empty)
 	}
 }
 

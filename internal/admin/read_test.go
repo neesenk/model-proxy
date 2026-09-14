@@ -1112,3 +1112,61 @@ func TestAnalyticsAgentNamesPassThrough(t *testing.T) {
 		t.Errorf("nil-port agent names = %v; want empty non-nil", names)
 	}
 }
+
+// The Security result carries the SERVER-side verdict aggregation (the KPI
+// tiles' source): counts follow the query window, cover the whole store (not
+// the returned page), and low rides the adjudication stats port because
+// lows never enter the queryable store.
+func TestSecurityCountsAggregation(t *testing.T) {
+	home := setTestHome(t)
+	auditPath := filepath.Join(home, "logs", "security.log")
+	if err := os.MkdirAll(filepath.Dir(auditPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seed := []seclog.Record{
+		{Ts: 1000, Kind: "secret", Names: []string{"api-key"}, Action: "log", Verdict: "high"},
+		{Ts: 2000, Kind: "secret", Names: []string{"api-key"}, Action: "log", Verdict: "high"},
+		{Ts: 3000, Kind: "path", Names: []string{"ssh"}, Action: "log", Verdict: "medium"},
+		{Ts: 4000, Kind: "secret", Names: []string{"api-key"}, Action: "log", Verdict: "error"},
+		{Ts: 5000, Kind: "secret", Names: []string{"api-key"}, Action: "log"}, // classic, no verdict
+	}
+	for i := range seed {
+		if err := seclog.AppendSync(filepath.Dir(auditPath), &seed[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stats := appapi.SecurityAdjudicationStats{LowVerdicts: 42}
+	service := New(Ports{
+		Config: func() *configdomain.Config {
+			return &configdomain.Config{Guard: configdomain.GuardConfig{Audit: true, AuditPath: auditPath}}
+		},
+		AdjudicationStats: func() appapi.SecurityAdjudicationStats { return stats },
+	})
+
+	// Full window: high=2, medium=1, error=1, skipped=0, low from the port.
+	// The page limit (1) must NOT truncate the aggregation.
+	result, err := service.Security(appapi.SecurityQuery{Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Counts == nil {
+		t.Fatal("no counts in result")
+	}
+	c := result.Counts
+	if c.High != 2 || c.Medium != 1 || c.Error != 1 || c.Skipped != 0 || c.Low != 42 {
+		t.Errorf("counts = %+v, want high=2 medium=1 error=1 skipped=0 low=42", c)
+	}
+	if len(result.Records) != 1 {
+		t.Errorf("records = %d, want the limited page", len(result.Records))
+	}
+
+	// The window narrows server-side: From=3500 drops the two highs.
+	narrow, err := service.Security(appapi.SecurityQuery{From: 3500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nc := narrow.Counts; nc.High != 0 || nc.Error != 1 {
+		t.Errorf("narrow counts = %+v, want high=0 error=1", nc)
+	}
+}

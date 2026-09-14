@@ -397,7 +397,7 @@ func TestGuardOAuthRefresh_ConcurrentReloadRace(t *testing.T) {
 	if len(current) != 1 {
 		t.Fatalf("current OAuth secret set = %d values, want 1", len(current))
 	}
-	if !guardKnownSecretHits(p, current[0]) {
+	if !guardKnownSecretHits(p, current[0].Value) {
 		t.Error("post-race: scanner must match the current auth file's token")
 	}
 	if guardKnownSecretHits(p, oauthTokV1) {
@@ -630,8 +630,9 @@ func sessionGuardCfg(action string) GuardConfig {
 }
 
 // (a) Two-request split: the second request completes the key → one
-// fragmented event + counter, both bodies forwarded (log action), no secret
-// material in the event.
+// fragmented event + counter; the completion is intercepted (exact-match
+// family: 400 + session block), only the first fragment is forwarded, and no
+// secret material appears in the event.
 func TestSessionScan_TwoFragmentSplitFires(t *testing.T) {
 	p, proxyURL, bodies := newGuardPoolProxy(t, sessionGuardCfg("log"), fragPoolKey)
 
@@ -639,14 +640,17 @@ func TestSessionScan_TwoFragmentSplitFires(t *testing.T) {
 	if got := fragmentedEvents(p); len(got) != 0 {
 		t.Fatalf("first fragment must not fire, events = %v", got)
 	}
-	postSession(t, proxyURL+"/v1/chat/completions", fragBody(fragPoolKey[20:]), "s1")
+	code, respBody := postSession(t, proxyURL+"/v1/chat/completions", fragBody(fragPoolKey[20:]), "s1")
+	if code != http.StatusBadRequest || !strings.Contains(respBody, "known_secret_fragmented") {
+		t.Fatalf("completion: status=%d body=%s, want the interception 400", code, respBody)
+	}
 
 	details := fragmentedEvents(p)
 	if len(details) != 1 {
 		t.Fatalf("fragmented events = %v, want exactly 1", details)
 	}
-	if !strings.Contains(details[0], "action=log") {
-		t.Errorf("fragmented event detail = %q, want action=log", details[0])
+	if !strings.Contains(details[0], "action=block") {
+		t.Errorf("fragmented event detail = %q, want action=block", details[0])
 	}
 	if strings.Contains(details[0], fragPoolKey[:16]) {
 		t.Errorf("fragmented event leaked key material")
@@ -654,8 +658,11 @@ func TestSessionScan_TwoFragmentSplitFires(t *testing.T) {
 	if n := fragmentedCount(p); n != 1 {
 		t.Errorf("fragmented counter = %d, want 1", n)
 	}
-	if got := bodies(); len(got) != 2 {
-		t.Errorf("log action must forward both requests (calls=%d)", len(got))
+	if got := bodies(); len(got) != 1 {
+		t.Errorf("only the first fragment may be forwarded (calls=%d)", len(got))
+	}
+	if _, ok := p.adjudication.Blocked("s1"); !ok {
+		t.Error("the completing session must be blocked")
 	}
 }
 
@@ -743,22 +750,28 @@ func TestSessionScan_ConfigFalseDisables(t *testing.T) {
 	}
 }
 
-// (g) redact cannot rewrite a secret spanning requests: a fragmented hit
-// degrades to log semantics (event says action=log; the fragment reaches the
-// upstream unredacted).
-func TestSessionScan_RedactDegradesToLog(t *testing.T) {
+// (g) redact cannot rewrite a secret spanning requests — and no longer needs
+// to: a fragmented completion is intercepted like every exact-match hit
+// (400 + session block) regardless of the configured action; only the first
+// fragment (clean on its own) is forwarded.
+func TestSessionScan_RedactCompletionStillIntercepts(t *testing.T) {
 	p, proxyURL, bodies := newGuardPoolProxy(t, sessionGuardCfg("redact"), fragPoolKey)
 
 	postSession(t, proxyURL+"/v1/chat/completions", fragBody(fragPoolKey[:20]), "s1")
-	postSession(t, proxyURL+"/v1/chat/completions", fragBody(fragPoolKey[20:]), "s1")
-
+	code, respBody := postSession(t, proxyURL+"/v1/chat/completions", fragBody(fragPoolKey[20:]), "s1")
+	if code != http.StatusBadRequest {
+		t.Fatalf("completion under redact: status=%d body=%s, want the interception 400", code, respBody)
+	}
 	details := fragmentedEvents(p)
-	if len(details) != 1 || !strings.Contains(details[0], "action=log") {
-		t.Fatalf("redact must degrade to log for fragmented hits, events = %v", details)
+	if len(details) != 1 || !strings.Contains(details[0], "action=block") {
+		t.Fatalf("fragmented events = %v, want 1 with action=block", details)
 	}
 	got := bodies()
-	if len(got) != 2 || !strings.Contains(got[1], fragPoolKey[20:]) {
-		t.Errorf("fragmented request under redact must forward unchanged (cannot rewrite across requests)")
+	if len(got) != 1 {
+		t.Errorf("only the first fragment may be forwarded (calls=%d)", len(got))
+	}
+	if _, ok := p.adjudication.Blocked("s1"); !ok {
+		t.Error("the completing session must be blocked")
 	}
 }
 
@@ -784,7 +797,7 @@ func TestSessionScan_BlockRejectsCompletingRequest(t *testing.T) {
 }
 
 // (i) Fragmented hits persist a seclog record (kind=secret,
-// names=[known_secret_fragmented]) with the effective action.
+// names=[known_secret_fragmented]) with the interception action.
 func TestSessionScan_AuditRecord(t *testing.T) {
 	p, proxyURL, _ := newGuardPoolProxy(t, sessionGuardCfg("log"), fragPoolKey)
 	dir := t.TempDir()
@@ -807,8 +820,8 @@ func TestSessionScan_AuditRecord(t *testing.T) {
 		t.Fatalf("secret records = %d, want 1", len(result.Records))
 	}
 	rec := result.Records[0]
-	if len(rec.Names) != 1 || rec.Names[0] != "known_secret_fragmented" || rec.Action != "log" {
-		t.Errorf("record = %+v, want names=[known_secret_fragmented] action=log", rec)
+	if len(rec.Names) != 1 || rec.Names[0] != "known_secret_fragmented" || rec.Action != "block" {
+		t.Errorf("record = %+v, want names=[known_secret_fragmented] action=block", rec)
 	}
 	if rec.RequestID == "" || rec.Exposed != "glm" {
 		t.Errorf("record missing request attribution: %+v", rec)

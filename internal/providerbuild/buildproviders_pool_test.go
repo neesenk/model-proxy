@@ -210,7 +210,7 @@ func TestBuildProviders_OAuthSecretsBestEffort(t *testing.T) {
 		"codex": {Provider: "codex", OpenAIBaseURL: "http://x"},
 		"aqp":   {Provider: "aqp", OpenAIBaseURL: "http://x", AqpMintURL: "http://x/mint"},
 	}}
-	collect := func() []string {
+	collect := func() []Secret {
 		t.Helper()
 		return BuildProviders(cfg, poolStore(t), testBuildOpts()).OAuthSecrets
 	}
@@ -236,10 +236,10 @@ func TestBuildProviders_OAuthSecretsBestEffort(t *testing.T) {
 		t.Fatalf("valid OAuth files: OAuthSecrets = %d values, want %d (%v)", len(got), len(want), got)
 	}
 	for _, s := range got {
-		if !want[s] {
+		if !want[s.Value] {
 			t.Errorf("unexpected OAuth secret collected")
 		}
-		delete(want, s)
+		delete(want, s.Value)
 	}
 	if len(want) != 0 {
 		t.Errorf("OAuth secret values missing from the collected set")
@@ -260,7 +260,7 @@ func TestCollectOAuthSecrets(t *testing.T) {
 		"zhipu": {Provider: "zhipu", OpenAIBaseURL: "http://x"},
 	}}
 	got := CollectOAuthSecrets(cfg, testBuildOpts())
-	if len(got) != 1 || got[0] != "syn-at" {
+	if len(got) != 1 || got[0].Value != "syn-at" {
 		t.Errorf("CollectOAuthSecrets = %d values, want [syn-at]", len(got))
 	}
 }
