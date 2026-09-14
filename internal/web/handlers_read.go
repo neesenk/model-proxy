@@ -239,18 +239,7 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	now := time.Now()
-	from, to := now.Add(-time.Hour).Unix(), now.Unix()
-	if v := r.URL.Query().Get("from"); v != "" {
-		if n, ok := parseStatsTime(v); ok {
-			from = n
-		}
-	}
-	if v := r.URL.Query().Get("to"); v != "" {
-		if n, ok := parseStatsTime(v); ok {
-			to = n
-		}
-	}
+	from, to := statsWindow(r.URL.Query(), time.Hour)
 	bucket := observestats.NormalizeBucket(r.URL.Query().Get("bucket"))
 	bs, err := s.reads.Stats(appapi.StatsQuery{From: from, To: to, Provider: r.URL.Query().Get("provider"), Model: r.URL.Query().Get("model"), BucketSecs: bucket})
 	if err != nil {
@@ -261,18 +250,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
-	now := time.Now()
-	from, to := now.Add(-time.Hour).Unix(), now.Unix()
-	if v := r.URL.Query().Get("from"); v != "" {
-		if n, ok := parseStatsTime(v); ok {
-			from = n
-		}
-	}
-	if v := r.URL.Query().Get("to"); v != "" {
-		if n, ok := parseStatsTime(v); ok {
-			to = n
-		}
-	}
+	from, to := statsWindow(r.URL.Query(), time.Hour)
 	bucket := observestats.NormalizeBucket(r.URL.Query().Get("bucket"))
 	bs, err := s.reads.AgentStats(appapi.AgentStatsQuery{From: from, To: to, Agent: r.URL.Query().Get("agent"), Provider: r.URL.Query().Get("provider"), Model: r.URL.Query().Get("model"), BucketSecs: bucket})
 	if err != nil {
@@ -370,18 +348,7 @@ func (s *Server) handleShadowReport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "entries": []any{}})
 		return
 	}
-	now := time.Now()
-	from, to := now.Add(-24*time.Hour).Unix(), now.Unix()
-	if v := r.URL.Query().Get("from"); v != "" {
-		if n, ok := parseStatsTime(v); ok {
-			from = n
-		}
-	}
-	if v := r.URL.Query().Get("to"); v != "" {
-		if n, ok := parseStatsTime(v); ok {
-			to = n
-		}
-	}
+	from, to := statsWindow(r.URL.Query(), 24*time.Hour)
 	entries, err := requestlog.ShadowReport(dir, requestlog.Filter{From: time.Unix(from, 0), To: time.Unix(to, 0), Limit: 10000})
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "shadow report: "+err.Error())
@@ -409,19 +376,8 @@ func (s *Server) handlePinList(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
-	now := time.Now()
-	from, to := now.Add(-30*24*time.Hour).Unix(), now.Unix()
 	q := r.URL.Query()
-	if v := q.Get("from"); v != "" {
-		if n, ok := parseStatsTime(v); ok {
-			from = n
-		}
-	}
-	if v := q.Get("to"); v != "" {
-		if n, ok := parseStatsTime(v); ok {
-			to = n
-		}
-	}
+	from, to := statsWindow(q, 30*24*time.Hour)
 	// from=0 is the "all time" sentinel: clamp the window to the oldest
 	// persisted bucket so the echoed from (the chart's grid anchor) covers
 	// real history instead of epoch→now — decades of empty past also poison
@@ -504,6 +460,7 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	// granularity so provider/model/agent filtering and virtual-provider
 	// exclusion behave identically. The cells fold through the same unified
 	// Totals block; the agent facet feeds the toolbar's suggestions.
+	now := time.Now()
 	yearY, yearM, _ := now.Date()
 	yearFrom := time.Date(yearY, yearM, 1, 0, 0, 0, 0, time.Local).AddDate(0, -12, 0).Unix()
 	heatBuckets, err := s.reads.Analytics(appapi.AnalyticsQuery{From: yearFrom, To: now.Unix(), Provider: query.Provider, Model: query.Model, Agent: query.Agent, Granularity: "day", By: "model"})

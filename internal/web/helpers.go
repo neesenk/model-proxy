@@ -8,6 +8,7 @@ import (
 	"model-proxy/internal/appapi"
 	"model-proxy/internal/observe/logx"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -131,6 +132,27 @@ func parseStatsTime(v string) (int64, bool) {
 		return t.Unix(), true
 	}
 	return 0, false
+}
+
+// statsWindow resolves the from/to unix-second bounds shared by the stats,
+// agents, shadow-report and analytics handlers: the window defaults to
+// [now-window, now] and each side is overridden by the ?from/?to query
+// params (unix seconds or RFC3339 via parseStatsTime; unparseable values
+// keep the default).
+func statsWindow(q url.Values, window time.Duration) (from, to int64) {
+	now := time.Now()
+	from, to = now.Add(-window).Unix(), now.Unix()
+	if v := q.Get("from"); v != "" {
+		if n, ok := parseStatsTime(v); ok {
+			from = n
+		}
+	}
+	if v := q.Get("to"); v != "" {
+		if n, ok := parseStatsTime(v); ok {
+			to = n
+		}
+	}
+	return from, to
 }
 
 func mapKeys(m map[string]bool) []string {
