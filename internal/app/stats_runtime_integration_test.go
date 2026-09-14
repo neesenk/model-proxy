@@ -491,7 +491,7 @@ func TestStatsShutdownFlushHonorsContextDeadline(t *testing.T) {
 	}
 }
 
-func TestTokensResetClearsDurableRuntimeAndCacheState(t *testing.T) {
+func TestTokensResetClearsDurableStatsButNotResponseCache(t *testing.T) {
 	store := openRuntimeStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
@@ -532,9 +532,14 @@ func TestTokensResetClearsDurableRuntimeAndCacheState(t *testing.T) {
 	agentRows, _ := store.QueryAgents(0, 300, "", "", "", 60)
 	if len(rows) != 0 || len(agentRows) != 0 ||
 		len(metrics.Snapshot()) != 0 || len(tokens.Snapshot()) != 0 ||
-		len(agents.Snapshot()) != 0 || cache.Stats().Entries != 0 {
-		t.Fatalf("reset incomplete: rows=%+v agents=%+v metrics=%+v tokens=%+v agentCounters=%+v cache=%+v",
-			rows, agentRows, metrics.Snapshot(), tokens.Snapshot(), agents.Snapshot(), cache.Stats())
+		len(agents.Snapshot()) != 0 {
+		t.Fatalf("reset incomplete: rows=%+v agents=%+v metrics=%+v tokens=%+v agentCounters=%+v",
+			rows, agentRows, metrics.Snapshot(), tokens.Snapshot(), agents.Snapshot())
+	}
+	// The response cache is operational accounting, deliberately decoupled
+	// from "reset counters": its entries (and hit/miss history) survive.
+	if cache.Stats().Entries != 1 {
+		t.Fatalf("reset cleared response-cache entries: %+v", cache.Stats())
 	}
 }
 

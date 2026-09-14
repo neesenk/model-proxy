@@ -400,9 +400,11 @@ func (p *Proxy) resetStats() error {
 			p.agents.Reset()
 		}
 	}
-	// Response cache participates in the user-facing "reset counters" command,
-	// but is not stats persistence and therefore stays outside statsFlusher.
-	return p.resetResponseCache()
+	// The response-cache counters are deliberately NOT reset here: the cache
+	// hit rate is an operational metric (like the guard usage counters), not
+	// call-statistics — coupling it into "reset counters" silently destroyed
+	// the accumulated history.
+	return nil
 }
 
 // newResponseCache rebuilds generation-owned entries around the process-wide

@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 )
@@ -97,10 +96,13 @@ cache: {enabled: true, ttl: 1h}
 	}
 }
 
-// TestCacheStateResetPersistsZero: reset-stats clears the in-memory counters
-// AND immediately persists the zero state, so the next minute tick (or a
-// crash) cannot resurrect a history the user just reset.
-func TestCacheStateResetPersistsZero(t *testing.T) {
+// TestResetStatsKeepsResponseCacheCounters: "reset counters" zeroes the call
+// statistics (metrics/tokens/stats/agents) but deliberately does NOT touch
+// the response-cache counters — the cache hit rate is an operational metric,
+// not usage accounting. Coupling them silently destroyed the accumulated
+// history (the incident this pins: a tokens reset wiped days of hit/miss
+// data). The counters must survive the reset in memory AND on disk.
+func TestResetStatsKeepsResponseCacheCounters(t *testing.T) {
 	home := t.TempDir()
 	qpath := filepath.Join(home, ".model-proxy", "quota_state.json")
 	t.Setenv("HOME", home)
@@ -118,19 +120,22 @@ cache: {enabled: true, ttl: 1h}
 	now := time.Now()
 	p.cache.Put("k", "glm-5.2", http.StatusOK, nil, []byte("x"), now)
 	p.cache.Lookup("k", "glm-5.2", now)
+	p.cache.Lookup("miss", "kimi-k3", now)
+	p.saveCacheState()
+
 	if err := p.resetStats(); err != nil {
 		t.Fatalf("resetStats: %v", err)
 	}
-	if got := p.cache.Stats(); got.Hits != 0 || got.Entries != 0 {
-		t.Fatalf("stats after reset = %+v, want zero", got)
+	if got := p.cache.Stats(); got.Hits != 1 || got.Misses != 1 || got.Entries != 1 {
+		t.Fatalf("cache stats after reset = %+v, want untouched hits=1 misses=1 entries=1", got)
 	}
 
-	// A restarted proxy must see the reset, not the pre-reset history.
-	p.Close()
-	fresh := NewProxyWithStatePath(cfg, qpath)
-	t.Cleanup(fresh.Close)
-	if got := fresh.cache.Stats(); got.Hits != 0 || got.Misses != 0 || len(got.Models) != 0 {
-		t.Errorf("stats after reset+restart = %+v, want zero counters and empty breakdown", got)
+	// The persisted state keeps the history too: a restart after a reset
+	// must continue the counters, not start over.
+	p.saveCacheState()
+	state := loadCacheState(p.cacheStatePath)
+	if state.Hits != 1 || state.Misses != 1 || len(state.Models) != 2 {
+		t.Fatalf("persisted state after reset = %+v, want the pre-reset history", state)
 	}
 }
 
@@ -211,69 +216,5 @@ func TestCacheStateReloadPreservesLiveCounters(t *testing.T) {
 	fresh := newTestProxyAt(t, p.cfg, p.quota.Path)
 	if got := fresh.cache.Stats(); got.Misses != 3 || got.Entries != 0 {
 		t.Fatalf("restart stats = %+v", got)
-	}
-}
-
-func TestCacheStateResetWhileDisabled(t *testing.T) {
-	p, reload := cacheReloadFixture(t)
-	p.cache.Lookup("miss", "m", time.Now())
-	p.saveCacheState()
-	reload(false)
-	if p.cache != nil {
-		t.Fatal("cache not disabled")
-	}
-	if err := p.resetStats(); err != nil {
-		t.Fatal(err)
-	}
-	state := loadCacheState(p.cacheStatePath)
-	if state.Misses != 0 || state.Hits != 0 || len(state.Models) != 0 {
-		t.Fatalf("disk reset = %+v", state)
-	}
-	reload(true)
-	if got := p.cache.Stats(); got.Misses != 0 || len(got.Models) != 0 {
-		t.Fatalf("re-enabled cache resurrected history: %+v", got)
-	}
-}
-
-func TestCacheStateResetSerializesConcurrentSaves(t *testing.T) {
-	p, _ := cacheReloadFixture(t)
-	p.cache.Lookup("miss", "m", time.Now())
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() { defer wg.Done(); <-start; p.saveCacheState() }()
-	}
-	close(start)
-	if err := p.resetStats(); err != nil {
-		t.Fatal(err)
-	}
-	wg.Wait()
-	if state := loadCacheState(p.cacheStatePath); state.Misses != 0 || len(state.Models) != 0 {
-		t.Fatalf("save resurrected pre-reset stats: %+v", state)
-	}
-}
-
-func TestCacheStateResetWriteFailureKeepsCounters(t *testing.T) {
-	p := newTestProxy(t, &configdomain.Config{Cache: configdomain.CacheConfig{Enabled: true}})
-	p.cache.Lookup("miss", "m", time.Now())
-	// A directory at the destination makes the atomic rename fail on all OSes.
-	if err := os.Mkdir(p.cacheStatePath, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.resetStats(); err == nil {
-		t.Fatal("durable reset failure acknowledged as success")
-	}
-	if got := p.cache.Stats().Misses; got != 1 {
-		t.Fatalf("failed reset lost live misses: %d", got)
-	}
-	if err := os.Remove(p.cacheStatePath); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.resetStats(); err != nil {
-		t.Fatal(err)
-	}
-	if got := p.cache.Stats().Misses; got != 0 {
-		t.Fatalf("retry did not reset misses: %d", got)
 	}
 }

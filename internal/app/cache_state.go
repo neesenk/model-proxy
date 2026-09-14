@@ -7,7 +7,6 @@ package app
 
 import (
 	"encoding/json"
-	"fmt"
 	"model-proxy/internal/observe/logx"
 	"os"
 	"path/filepath"
@@ -84,25 +83,6 @@ func (p *Proxy) saveCacheState() {
 	if err := writeCacheState(p.cacheStatePath, state); err != nil {
 		logx.Warnf("[cache_state] persist: %v", err)
 	}
-}
-
-// resetResponseCache serializes with periodic saves. Persist zero first, even
-// when caching is disabled; a failed write cannot acknowledge a durable reset.
-// No Proxy lock is held across I/O. Reload shares the same counter owner.
-func (p *Proxy) resetResponseCache() error {
-	p.cachePersistMu.Lock()
-	defer p.cachePersistMu.Unlock()
-	if err := writeCacheState(p.cacheStatePath, persistedCacheState{Version: cacheStateVersion}); err != nil {
-		return fmt.Errorf("reset persisted cache stats: %w", err)
-	}
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if p.cache != nil {
-		p.cache.Reset()
-	} else if p.cacheCounters != nil {
-		p.cacheCounters.Reset()
-	}
-	return nil
 }
 
 // writeCacheState is called only under cachePersistMu (snapshot through rename).

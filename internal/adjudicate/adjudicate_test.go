@@ -404,8 +404,17 @@ func TestLLMUsageStats_CountsCallsNotCacheHits(t *testing.T) {
 		t.Errorf("token accounting empty: in=%d out=%d (fake reports 100/20)", in, out)
 	}
 	// Low verdicts accumulate per occurrence (the first pass ran 4 unique
-	// lows + 1 cached echo = 5 suppressed occurrences by now).
-	waitFor(t, func() bool { _, _, _, lows := s.Stats(); return lows >= 5 })
+	// lows + 1 cached echo = 5 suppressed occurrences by now). The shared
+	// 2s waitFor once flaked under a fully parallel ./... run — poll with a
+	// roomier local deadline instead.
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, _, _, lows := s.Stats(); lows >= 5 {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("cumulative lows did not reach 5")
 }
 
 func TestVerdictCacheLRU_EvictsOldest(t *testing.T) {
