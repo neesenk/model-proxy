@@ -881,6 +881,31 @@ export function analyticsChartSeries(series, kind, xGrid) {
   return { x, ys, labels };
 }
 
+// analyticsTickLabel formats one x-axis tick in LOCAL time, 24-hour clock,
+// adapting to the tick's natural resolution: month starts show the month,
+// midnights show the date, anything else shows date + HH:mm. `tickSpanSec`
+// (the gap between adjacent ticks, when known) demotes dense minute-level
+// ticks to HH:mm only: uPlot sizes tick density for its own short time
+// labels, and a full MM-DD HH:mm at that density overlaps (measured: 67px
+// labels on 63px spacing). `tickPx` (the measured px gap between adjacent
+// ticks, when the caller can read it off the chart) applies the same demotion
+// to coarser spans uPlot packed tighter than the full label's ~67px — e.g.
+// hourly ticks on a narrow chart. Midnight ticks still anchor the date.
+export function analyticsTickLabel(v, tickSpanSec, tickPx) {
+  const d = new Date(v * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  const midnight = d.getHours() === 0 && d.getMinutes() === 0;
+  if (midnight && d.getDate() === 1) return `${d.getFullYear()}-${p(d.getMonth() + 1)}`;
+  if (midnight) return `${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  if (tickSpanSec != null && tickSpanSec > 0 && tickSpanSec <= 15 * 60) {
+    return `${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  if (tickPx != null && tickPx > 0 && tickPx < 72) {
+    return `${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 // analyticsTableRows maps each /api/analytics series to one leaderboard row.
 // A thin reader over the server's unified series.totals block (same
 // definitions as the window totals / compare / KPI cards — the frontend
@@ -1043,11 +1068,14 @@ export function analyticsGranularity(spanSec, pref) {
 // analyticsGranAllowed reports whether one granularity fits a window span:
 // each needs enough buckets to be meaningful (a 1h window has no "hour"
 // view) and must not explode the point count (minute over a week is ~10k
-// columns). Thresholds in seconds; week/month have no upper bound.
+// columns). Thresholds in seconds; week/month have no upper bound. Day
+// reaches 2000d so an all-time window over a multi-year history stays
+// day-viewable (the all-time span is the server's data-anchored window, not
+// epoch→now, so this bound is the real guard against runaway columns).
 const GRAN_LIMITS = {
   minute: { min: 0, max: 2 * 86400 },
   hour: { min: 1 * 3600, max: 31 * 86400 }, // min exclusive (see analyticsGranAllowed)
-  day: { min: 2 * 86400, max: 400 * 86400 },
+  day: { min: 2 * 86400, max: 2000 * 86400 },
   week: { min: 7 * 86400, max: Infinity },
   month: { min: 14 * 86400, max: Infinity },
 };
@@ -1161,20 +1189,26 @@ export function analyticsHeatCellSize(availablePx, weeks, gutterPx = 42, gapPx =
   return Math.max(8, Math.min(18, Math.floor(usable / n)));
 }
 
-// analyticsHeatTipLines composes the hover-tooltip lines for one day cell:
-// the local date + weekday first, then the key totals — null derived
-// fields are omitted, never fabricated. Empty in-window days still answer
-// "what day is this square": the date plus a "no usage" line.
-export function analyticsHeatTipLines(dayUnix, cell) {
+// analyticsHeatTip composes the hover tooltip for one day cell as a
+// structured title + label/value rows (the renderer right-aligns values and
+// mutes labels, so the numbers scan at a glance). Null derived fields are
+// omitted, never fabricated. Empty in-window days still answer "what day is
+// this square": the title plus a muted "No usage" note.
+export function analyticsHeatTip(dayUnix, cell) {
   const d = new Date(dayUnix * 1000);
-  const p2 = (n) => String(n).padStart(2, '0');
-  const date = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${HEAT_DAYS[(d.getDay() + 6) % 7]}`;
-  if (!cell) return [date, 'no usage'];
-  const lines = [date, `requests ${fmtNum(cell.requests || 0)}`, `tokens ${fmtNum(cell.tokens || 0)}`];
-  if (cell.cost != null) lines.push(`$${Number(cell.cost).toFixed(4)}`);
-  if (cell.err_pct != null) lines.push(`err ${Number(cell.err_pct).toFixed(1)}%`);
-  if (cell.avg_latency_ms != null && cell.requests) lines.push(`avg lat ${Math.round(Number(cell.avg_latency_ms))}ms`);
-  return lines;
+  const title = `${HEAT_DAYS[(d.getDay() + 6) % 7]}, ${MONTHS_SHORT[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+  if (!cell) return { title, rows: [], note: 'No usage' };
+  const rows = [
+    { label: 'Requests', value: fmtNum(cell.requests || 0) },
+    { label: 'Tokens', value: fmtCompact(Number(cell.tokens || 0)) },
+  ];
+  if (cell.cost != null) rows.push({ label: 'Cost', value: `$${Number(cell.cost).toFixed(4)}` });
+  if (cell.err_pct != null) rows.push({ label: 'Errors', value: `${Number(cell.err_pct).toFixed(1)}%` });
+  if (cell.avg_latency_ms != null && cell.requests) {
+    const ms = Number(cell.avg_latency_ms);
+    rows.push({ label: 'Avg Latency', value: ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms` });
+  }
+  return { title, rows };
 }
 
 // analyticsHeatLevel buckets one metric value into five ordinal intensity
@@ -2353,9 +2387,11 @@ export function requestRowHTML(row, opts) {
     const cr = Number(r.cacheRead);
     if (cr > 0) {
       // Cache read rides the token cell with its hit share; ≥80% highlights
-      // (Portkey-style cache-HIT signal).
+      // (Portkey-style cache-HIT signal). Two-decimal precision (trailing
+      // zeros trimmed by Number): integer rounding shows near-total hits as
+      // a misleading "100%".
       const denom = cr + (Number(r.input) || 0);
-      const pct = denom > 0 ? Math.round((cr / denom) * 100) : null;
+      const pct = denom > 0 ? Math.round((cr / denom) * 10000) / 100 : null;
       tk += ` <span class="tok-cache${pct != null && pct >= 80 ? ' hot' : ''}">· cache ${fmtNum(cr)}${pct != null ? ` (${pct}%)` : ''}</span>`;
     }
   }

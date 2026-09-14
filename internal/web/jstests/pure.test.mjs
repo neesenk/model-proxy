@@ -19,9 +19,9 @@ import {
   isFutureDay, rangePick, customRangeLabel, tokenRangeTriggerLabel,
   prettyJSON, formatJSONLoose, jsonToHTML, parseSSE, isSSE, highlightJSON, splitLinesByBudget, linkedModels,
   sessionsForAgent, linkedAgents,
-  fmtGuardDetail, fmtProgressBytes, analyticsChartSeries, analyticsPointValue, analyticsTableRows,
+  fmtGuardDetail, fmtProgressBytes, analyticsChartSeries, analyticsPointValue, analyticsTableRows, analyticsTickLabel,
   ANALYTICS_METRICS, pctDelta, analyticsGranularity, analyticsGranOptions, analyticsValueText,
-  HEAT_DAYS, analyticsHeatLevel, analyticsYearGrid, analyticsYearMonthSpans, analyticsHeatCellSize, analyticsHeatTipLines,
+  HEAT_DAYS, analyticsHeatLevel, analyticsYearGrid, analyticsYearMonthSpans, analyticsHeatCellSize, analyticsHeatTip,
   analyticsRowSortKey, ANALYTICS_TABLE_SORT, analyticsTableSortValue, analyticsSortRows,
   analyticsMetricOptions, analyticsMetricAllowed,
   modelHealthFromSeries, modelHealthGrade, MODEL_HEALTH_DIMS, liveSessionSummary,
@@ -765,6 +765,29 @@ test('analyticsChartSeries tolerates empty/missing series', () => {
   assert.deepEqual(analyticsChartSeries([{ provider: 'a', model: 'b' }], 'tokens'), { x: [], ys: [[]], labels: ['a/b'] });
 });
 
+test('analyticsTickLabel demotes to HH:mm when ticks are denser than the full label', () => {
+  const v = new Date(2026, 8, 14, 9, 0, 0).getTime() / 1000; // local 09-14 09:00
+  // Wide hourly ticks keep the full MM-DD HH:mm label.
+  assert.equal(analyticsTickLabel(v, 3600, 200), '09-14 09:00');
+  // Hourly ticks packed under the ~67px full-label width (the reported
+  // overlap) demote to HH:mm.
+  assert.equal(analyticsTickLabel(v, 3600, 66), '09:00');
+  assert.equal(analyticsTickLabel(v, 3600, 71.9), '09:00');
+  assert.equal(analyticsTickLabel(v, 3600, 72), '09-14 09:00');
+  // Minute spans demote on span alone, regardless of measured px.
+  assert.equal(analyticsTickLabel(v, 900, 500), '09:00');
+  // Unknown spacing keeps the full label.
+  assert.equal(analyticsTickLabel(v, null, null), '09-14 09:00');
+  assert.equal(analyticsTickLabel(v, 3600, null), '09-14 09:00');
+});
+
+test('analyticsTickLabel anchors dates at midnight and month starts', () => {
+  const midnight = new Date(2026, 8, 14, 0, 0, 0).getTime() / 1000;
+  assert.equal(analyticsTickLabel(midnight, 3600, 40), '09-14');
+  const monthStart = new Date(2026, 8, 1, 0, 0, 0).getTime() / 1000;
+  assert.equal(analyticsTickLabel(monthStart, 86400, 40), '2026-09');
+});
+
 test('analyticsChartSeries derives the gap/count metrics and agent labels', () => {
   const series = [
     { agent: 'codex', provider: 'aqp', model: 'glm', points: [
@@ -1012,6 +1035,10 @@ test('analyticsGranularity maps auto by span and gates explicit choices', () => 
   // Explicit choices win when the span allows them…
   assert.equal(analyticsGranularity(30 * D, 'week'), 'week');
   assert.equal(analyticsGranularity(10 * H, 'minute'), 'minute');
+  // Day stays selectable over multi-year windows (all-time is anchored to the
+  // oldest data, so the span reflects real history).
+  assert.equal(analyticsGranularity(800 * D, 'day'), 'day');
+  assert.equal(analyticsGranularity(2000 * D, 'day'), 'day');
   // …and are overridden by auto's pick when they don't (a 1h window has no
   // hour view; minute over a month would explode the point count).
   assert.equal(analyticsGranularity(H, 'hour'), 'minute');
@@ -1027,6 +1054,8 @@ test('analyticsGranOptions gates each granularity by window span', () => {
   assert.deepEqual(ids(7 * D), ['auto', 'hour', 'day']);
   assert.deepEqual(ids(30 * D), ['auto', 'hour', 'day', 'week', 'month']);
   assert.deepEqual(ids(365 * D), ['auto', 'day', 'week', 'month']);
+  assert.deepEqual(ids(1500 * D), ['auto', 'day', 'week', 'month']);
+  assert.deepEqual(ids(3000 * D), ['auto', 'week', 'month']); // day caps at 2000d
   // Every option stays present (stable layout), just disabled.
   assert.equal(analyticsGranOptions(H).length, 6);
   assert.ok(analyticsGranOptions(H).some((o) => o.id === 'month' && !o.allowed));
@@ -2142,6 +2171,11 @@ test('requestRowHTML cache badge shows the hit share and highlights at 80%', () 
   assert.ok(!cool.includes('tok-cache hot'), 'low share stays muted');
   const none = requestRowHTML({ requestId: 'c', ts: 1, status: 200, input: 10, output: 5 }, { rowClass: 'req-row' });
   assert.ok(!/cache/.test(none), 'no cache read → no note');
+  // Two-decimal precision: near-total hits must not read as "100%".
+  const near = requestRowHTML({ requestId: 'd', ts: 1, status: 200, input: 4, output: 5, cacheRead: 9996 }, { rowClass: 'req-row' });
+  assert.ok(near.includes('cache 9,996 (99.96%)'), near);
+  const full = requestRowHTML({ requestId: 'e', ts: 1, status: 200, input: 0, output: 5, cacheRead: 5000 }, { rowClass: 'req-row' });
+  assert.ok(full.includes('cache 5,000 (100%)'), 'exact 100% stays integer');
 });
 
 test('virtual table windowing: cumulative offsets and the visible range', () => {
@@ -2297,20 +2331,29 @@ test('analyticsHeatCellSize fills the measured width within the 8..18px band', (
   assert.equal(analyticsHeatCellSize(1102, 0), 18); // degenerate column count
 });
 
-test('analyticsHeatTipLines dates every cell, data or not', () => {
+test('analyticsHeatTip structures the day summary as title + label/value rows', () => {
   const day = new Date(2026, 0, 5, 12).getTime() / 1000; // a Monday
-  const lines = analyticsHeatTipLines(day, { requests: 1234, tokens: 56789, cost: 1.5, err_pct: 0.5, avg_latency_ms: 812.4 });
-  assert.equal(lines[0], '2026-01-05 Mon');
-  assert.ok(lines.includes('requests 1,234'), lines);
-  assert.ok(lines.includes('tokens 56,789'), lines);
-  assert.ok(lines.includes('$1.5000'), lines);
-  assert.ok(lines.includes('err 0.5%'), lines);
-  assert.ok(lines.includes('avg lat 812ms'), lines);
+  const tip = analyticsHeatTip(day, { requests: 1234, tokens: 45333734, cost: 1.5, err_pct: 0.5, avg_latency_ms: 812.4 });
+  assert.equal(tip.title, 'Mon, Jan 5, 2026');
+  assert.deepEqual(tip.rows, [
+    { label: 'Requests', value: '1,234' },
+    { label: 'Tokens', value: '45.3M' },
+    { label: 'Cost', value: '$1.5000' },
+    { label: 'Errors', value: '0.5%' },
+    { label: 'Avg Latency', value: '812ms' },
+  ]);
+  // Long latencies humanize to seconds.
+  const slow = analyticsHeatTip(day, { requests: 2, tokens: 3, avg_latency_ms: 9335 });
+  assert.deepEqual(slow.rows[2], { label: 'Avg Latency', value: '9.3s' });
   // Empty in-window day: still names the date, then says why it is bare.
-  assert.deepEqual(analyticsHeatTipLines(new Date(2026, 0, 31, 12).getTime() / 1000, null), ['2026-01-31 Sat', 'no usage']);
+  assert.deepEqual(analyticsHeatTip(new Date(2026, 0, 31, 12).getTime() / 1000, null),
+    { title: 'Sat, Jan 31, 2026', rows: [], note: 'No usage' });
   // Null derived fields are omitted; weekday rolls with the date.
-  const bare = analyticsHeatTipLines(day, { requests: 1, tokens: 2 });
-  assert.deepEqual(bare, ['2026-01-05 Mon', 'requests 1', 'tokens 2']);
+  const bare = analyticsHeatTip(day, { requests: 1, tokens: 2 });
+  assert.deepEqual(bare, {
+    title: 'Mon, Jan 5, 2026',
+    rows: [{ label: 'Requests', value: '1' }, { label: 'Tokens', value: '2' }],
+  });
 });
 
 test('analyticsSortRows follows the active metric until a column is pinned', () => {

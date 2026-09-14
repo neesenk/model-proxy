@@ -1955,7 +1955,6 @@ dialog::backdrop { background: rgba(8,12,20,.55); }
 .tl-tokens { fill: none; stroke: var(--ok); stroke-width: 1.5; opacity: 0.8; }
 .tl-tick { fill: var(--muted); font-size: 10px; font-family: var(--mono); }
 .tl-legend-retry { color: var(--warn); }
-.tl-legend-gap { color: var(--muted); }
 
 /* Trace title: name + count on the left, chart-style legend (color swatch +
    short label) to the right — replaces the old prose hint line. */
@@ -2058,6 +2057,15 @@ dialog::backdrop { background: rgba(8,12,20,.55); }
 }
 .tl-tip-in { color: var(--muted); }
 .tl-tip-out { color: var(--text); }
+
+/* Heatmap day tooltip (pure.js analyticsHeatTip): title + right-aligned
+   value rows — labels muted, values mono so digits line up across rows. */
+.heat-tip { min-width: 160px; display: grid; gap: 2px; }
+.heat-tip-title { font-weight: 650; padding-bottom: 4px; margin-bottom: 2px; border-bottom: 1px solid var(--border); }
+.heat-tip-row { display: flex; justify-content: space-between; gap: 16px; }
+.heat-tip-k { color: var(--muted); }
+.heat-tip-v { font-family: var(--mono); color: var(--text); }
+.heat-tip-note { color: var(--muted); }
 
 /* Request-detail chat view (pure.js chatViewHTML): the human-readable
    transcript that leads each record detail — role-labeled turns with a

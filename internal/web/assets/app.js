@@ -29,9 +29,9 @@ import {
   WEEKDAYS, monthTitle, calendarMonthGrid, twoMonthWindow, shiftMonth, ymd, isFutureDay, rangePick,
   parseSSE, isSSE, prettyJSON, formatJSONLoose, highlightJSON, splitLinesByBudget, linkedModels,
   sessionsForAgent, linkedAgents,
-  analyticsChartSeries, analyticsTableRows, ANALYTICS_METRICS, pctDelta,
+  analyticsChartSeries, analyticsTableRows, ANALYTICS_METRICS, pctDelta, analyticsTickLabel,
   analyticsGranularity, analyticsGranOptions, analyticsValueText, modelHealthFromSeries, fmtCompact,
-  HEAT_DAYS, analyticsHeatLevel, analyticsYearGrid, analyticsYearMonthSpans, analyticsHeatCellSize, analyticsHeatTipLines,
+  HEAT_DAYS, analyticsHeatLevel, analyticsYearGrid, analyticsYearMonthSpans, analyticsHeatCellSize, analyticsHeatTip,
   analyticsRowSortKey, ANALYTICS_TABLE_SORT, analyticsSortRows,
   analyticsMetricOptions, analyticsMetricAllowed,
   liveSessionSummary, liveSessionOrder, shortSessionId, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary,
@@ -1036,14 +1036,29 @@ function renderRequestsSessionSummary(combos) {
   hideTlTip();
   host.innerHTML = sessionViewHTML(rows, agg, { live: false, session: requestsFilter.session });
   wireSessionTimeline(host, (id) => {
-    // The row may be virtualized out of the DOM — mount it first, then
-    // expand + flash as before.
-    const tr = reqRowForId(id);
-    if (!tr) return;
-    toggleRequestDetail(tr);
-    tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    tr.classList.add('row-flash');
-    setTimeout(() => tr.classList.remove('row-flash'), 1800);
+    void (async () => {
+      // The row may be virtualized out of the DOM — mount it first, then
+      // expand + flash as before. Only EXPANDING an off-screen row moves the
+      // page: collapsing, or expanding a row already in view, must not scroll
+      // (the jump yanks the sticky Trace card under the user's cursor — the
+      // clicked bar appears to move). The jump is an INSTANT leap to the
+      // row's live rect (measured after the fill, when the pinned row is
+      // mounted): smooth scrolling dies on the first mid-flight
+      // replaceChildren, rAF waits hang in background tabs, and offset-based
+      // targets drift by the estimate error of unmeasured rows above.
+      const tr = reqRowForId(id);
+      if (!tr) return;
+      const opening = !tr.classList.contains('req-open');
+      await toggleRequestDetail(tr);
+      if (!tr.isConnected || !opening) return;
+      const rect = tr.getBoundingClientRect();
+      const sticky = document.querySelector('.sess-sticky');
+      const topClear = sticky ? sticky.getBoundingClientRect().bottom : 0;
+      if (rect.top >= topClear && rect.bottom <= window.innerHeight) return; // already visible
+      window.scrollTo({ top: window.scrollY + rect.top - topClear - Math.max(8, (window.innerHeight - topClear - rect.height) / 2), behavior: 'auto' });
+      tr.classList.add('row-flash');
+      setTimeout(() => tr.classList.remove('row-flash'), 1800);
+    })();
   }, {
     session: requestsFilter.session,
     rerender: () => renderRequestsSessionSummary(combos),
@@ -1295,13 +1310,18 @@ function reqReconcile(v, extraIndex) {
   v.tbody.replaceChildren(frag);
   // Measure the mounted units (row + its open detail) so the next offsets —
   // and with them the spacer heights — use real heights, not the average.
-  let sum = 0;
+  // The average estimates UNMEASURED rows, so it must come from summary-row
+  // heights only: folding open details into it inflates every estimate (and
+  // the tail spacer) far beyond any real row.
+  let sum = 0, cnt = 0;
   for (const m of mounted) {
-    let h = m.tr.getBoundingClientRect().height;
+    const rowH = m.tr.getBoundingClientRect().height;
+    let h = rowH;
     if (m.det) h += m.det.getBoundingClientRect().height;
-    if (h > 0) { v.heights.set(v.recs[m.i].request_id, h); sum += h; }
+    if (h > 0) v.heights.set(v.recs[m.i].request_id, h);
+    if (rowH > 0) { sum += rowH; cnt += 1; }
   }
-  if (mounted.length) v.avg = Math.max(12, sum / mounted.length);
+  if (cnt) v.avg = Math.max(12, sum / cnt);
 }
 
 // reqFrame is the scroll/resize entry: refresh the window, then fetch the
@@ -1393,19 +1413,22 @@ function reqHint(v) {
   }
 }
 
-// reqDetailChanged re-measures a row's unit after its inline detail opens,
-// fills or closes: the detail's height belongs to the row's footprint, so
-// the offsets (and the spacers below) go stale the moment it changes.
+// reqDetailChanged re-measures mounted rows after an inline detail opens,
+// fills or closes: the detail's height belongs to the row's footprint while
+// open, so the offsets (and the spacers below) go stale the moment it
+// changes. CLOSED rows are measured too (row-only height) — skipping them
+// would keep the stale expanded height in v.heights and inflate every
+// offset below the collapsed row (blank tail).
 function reqDetailChanged() {
   const v = reqVirt;
   if (!v) return;
   requestAnimationFrame(() => {
     if (reqVirt !== v || !v.tbody || !v.tbl.isConnected) return;
     v.pool.forEach((tr) => {
-      if (!tr.classList.contains('req-open') || !tr.isConnected) return;
+      if (!tr.isConnected) return;
       const det = tr.nextElementSibling;
       let h = tr.getBoundingClientRect().height;
-      if (det && det.classList.contains('req-detail-row')) h += det.getBoundingClientRect().height;
+      if (tr.classList.contains('req-open') && det && det.classList.contains('req-detail-row')) h += det.getBoundingClientRect().height;
       if (h > 0) v.heights.set(tr.dataset.id, h);
     });
     v.key = '';
@@ -1428,9 +1451,9 @@ function reqRowForId(id) {
     reqRebuildOffsets(v);
     reqReconcile(v, i);
     return v.pool.get(id) || null;
-  }  return null;
+  }
+  return null;
 }
-
 
 // requestsDetailCache holds the fetched records by request_id so re-opening a
 // record skips the (slow) log rescan. Records are immutable once written; the
@@ -3324,7 +3347,6 @@ function sessionTimelineCard(rows, opts) {
     `<span class="tl-lg"><i class="tl-swatch tl-sw-retry"></i>retry</span>`,
     `<span class="tl-lg"><i class="tl-swatch tl-sw-err"></i>error</span>`,
   ];
-  if (tl.segments.length > 1) legend.push(`<span class="tl-lg"><span class="tl-legend-gap">⫽</span> gap</span>`);
   const zoomChip = zoom
     ? `<button class="tl-reset" type="button" title="clear zoom window">zoomed ${esc(fmtTimeSafe(zoom.from))}–${esc(fmtTimeSafe(zoom.to))} · reset</button>`
     : `<span class="tl-lg">drag to zoom</span>`;
@@ -7615,13 +7637,21 @@ function analyticsSave(name, val) {
 
 // analyticsRangeBounds resolves the picker state to {from, to} unix seconds:
 // presets via tokenRangeBounds (local-time aligned), custom via
-// tokenCustomBounds (closed full local days), 'all' → from 0 (whole history).
+// tokenCustomBounds (closed full local days), 'all' → from 0 (the all-time
+// sentinel — the server clamps it to the oldest persisted bucket and echoes
+// the real window, learned below as anAllTimeSince).
 // An invalid custom range returns null (the caller falls back to all-time).
 function analyticsRangeBounds(range) {
   if (range.preset === 'custom') return tokenCustomBounds(range.customStart, range.customEnd);
   if (range.preset === 'all') return { from: 0, to: Math.floor(Date.now() / 1000) };
   return tokenRangeBounds(range.preset);
 }
+
+// anAllTimeSince is the server-echoed start of the all-time window (the
+// oldest stats bucket), learned from the first all-time response. The
+// granularity gating needs the REAL span: from=0 would mean ~56 years, which
+// disables Day and forces week buckets over decades of empty past.
+let anAllTimeSince = 0;
 
 // anRangePicker is the analytics date picker's own UI state (same shape as
 // the Status tab's tokensRangePicker): open flag, the two-month calendar
@@ -7889,7 +7919,10 @@ async function renderAnalyticsTab(background = false) {
   // from state (localStorage) BEFORE any DOM write so a failed background
   // refresh can keep the previous view untouched.
   const bounds = analyticsRangeBounds(state.range) || { from: 0, to: Math.floor(Date.now() / 1000) };
-  const spanSec = Math.max(bounds.to - bounds.from, 1);
+  // All-time granularity gating uses the learned real window start; before
+  // the first response it is unknown and the effective granularity gets
+  // re-issued once the echoed from lands (below).
+  const spanSec = Math.max(bounds.to - (state.range.preset === 'all' && anAllTimeSince > 0 ? anAllTimeSince : bounds.from), 1);
   const granOptions = analyticsGranOptions(spanSec);
   // A stored explicit granularity the new range disallows shows 'auto'
   // active (the effective pick falls back inside analyticsGranularity).
@@ -7910,6 +7943,21 @@ async function renderAnalyticsTab(background = false) {
     resp = await apiGet('/api/analytics?' + q.toString());
   } catch (e) {
     fetchErr = e;
+  }
+  // Learn the real all-time window start from the echoed from (the server
+  // clamps the from=0 sentinel to the oldest persisted bucket). When the
+  // anchor changes the effective granularity, re-issue once with the true
+  // span — otherwise the first all-time view stays week-bucketed with Day
+  // disabled. The second pass observes the same anchor and proceeds.
+  if (!fetchErr && resp && state.range.preset === 'all') {
+    const echoed = Number(resp.from) || 0;
+    if (echoed > 0 && echoed !== anAllTimeSince) {
+      anAllTimeSince = echoed;
+      const trueSpan = Math.max(bounds.to - echoed, 1);
+      if (analyticsGranularity(trueSpan, granActive) !== gran) {
+        return renderAnalyticsTab(background);
+      }
+    }
   }
   // A failed refresh with a rendered view must not destroy it: keep the
   // charts/KPIs on screen and report through the shared stale-data banner.
@@ -8450,31 +8498,20 @@ function analyticsZoomControls(panel) {
   };
 }
 
-// analyticsTickLabel formats one x-axis tick in LOCAL time, 24-hour clock,
-// adapting to the tick's natural resolution: month starts show the month,
-// midnights show the date, anything else shows date + HH:mm. `tickSpanSec`
-// (the gap between adjacent ticks, when known) demotes dense minute-level
-// ticks to HH:mm only: uPlot sizes tick density for its own short time
-// labels, and a full MM-DD HH:mm at that density overlaps (measured: 67px
-// labels on 63px spacing).
-function analyticsTickLabel(v, tickSpanSec) {
-  const d = new Date(v * 1000);
-  const p = (n) => String(n).padStart(2, '0');
-  const midnight = d.getHours() === 0 && d.getMinutes() === 0;
-  if (midnight && d.getDate() === 1) return `${d.getFullYear()}-${p(d.getMonth() + 1)}`;
-  if (midnight) return `${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-  if (tickSpanSec != null && tickSpanSec > 0 && tickSpanSec <= 15 * 60) {
-    return `${p(d.getHours())}:${p(d.getMinutes())}`;
-  }
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
 // analyticsXAxisValues is the shared x-axis `values` callback for the trend
-// charts: it derives the tick spacing from the split list so every label is
-// formatted at a width that fits the density uPlot chose.
-function analyticsXAxisValues(_u, splits) {
+// charts: it derives the tick spacing (seconds AND pixels, read off the live
+// chart) so every label is formatted at a width that fits the density uPlot
+// chose — a full MM-DD HH:mm label on hourly ticks overlaps whenever the
+// chart is narrower than ~72px per tick.
+function analyticsXAxisValues(u, splits) {
   const span = splits.length > 1 ? splits[1] - splits[0] : null;
-  return splits.map((v) => (v == null ? '' : analyticsTickLabel(v, span)));
+  let tickPx = null;
+  if (span != null && span > 0) {
+    try {
+      tickPx = Math.abs(u.valToPos(splits[1], 'x') - u.valToPos(splits[0], 'x'));
+    } catch (_) { tickPx = null; }
+  }
+  return splits.map((v) => (v == null ? '' : analyticsTickLabel(v, span, tickPx)));
 }
 
 // anLegendHidden holds series labels toggled off via the legend chips — it
@@ -8558,8 +8595,9 @@ function analyticsLegendCollapse(host) {
 // showHeatTip fills the shared floating tooltip (the same body-level,
 // pointer-events-none .tl-tip the session timeline uses — deliberately
 // without data-popup so hover can never defer the auto-refresh) with one
-// day cell's lines; the renderer stamps data-day on every in-window cell
-// so empty days still name their date.
+// day cell's structured summary (title + label/value rows); the renderer
+// stamps data-day on every in-window cell so empty days still name their
+// date.
 function showHeatTip(cellEl) {
   const dayUnix = Number(cellEl.dataset.day);
   if (!Number.isFinite(dayUnix)) return;
@@ -8567,9 +8605,15 @@ function showHeatTip(cellEl) {
   if (cellEl.dataset.cell) {
     try { cell = JSON.parse(cellEl.dataset.cell); } catch (_) { cell = null; }
   }
-  const lines = analyticsHeatTipLines(dayUnix, cell);
+  const tip = analyticsHeatTip(dayUnix, cell);
+  let html = `<div class="heat-tip"><div class="heat-tip-title">${esc(tip.title)}</div>`;
+  if (tip.rows && tip.rows.length) {
+    html += tip.rows.map((r) => `<div class="heat-tip-row"><span class="heat-tip-k">${esc(r.label)}</span><span class="heat-tip-v">${esc(r.value)}</span></div>`).join('');
+  } else {
+    html += `<div class="heat-tip-note">${esc(tip.note || '')}</div>`;
+  }
   const el = tlTip();
-  el.innerHTML = `<div class="tl-tip-meta">${lines.map((l) => `<div>${esc(l)}</div>`).join('')}</div>`;
+  el.innerHTML = html + '</div>';
   el.hidden = false;
   placeTlTip(el);
 }
@@ -8597,13 +8641,13 @@ function analyticsRenderHeatmap(panel, resp) {
   const { weeks, max } = analyticsYearGrid(cells, heat.from, heat.to);
   card.hidden = false;
   const title = panel.querySelector('#an-heat-title');
-  if (title) title.textContent = 'Token Usage';
+  if (title) title.textContent = 'Token Activity';
   // Square edge from the MEASURED available width (the card is unhidden, so
   // the scroll host has a real clientWidth) — explicit tracks and sizes,
   // no engine-dependent aspect-ratio-in-grid sizing.
   const cell = analyticsHeatCellSize(host.clientWidth, weeks.length);
   const template = `grid-template-columns:2.6em repeat(${weeks.length}, ${cell}px)`;
-  let html = `<div class="an-heat an-heat-year" style="--hm:${cell}px" role="img" aria-label="token usage over the past year">`;
+  let html = `<div class="an-heat an-heat-year" style="--hm:${cell}px" role="img" aria-label="token activity over the past year">`;
   html += `<div class="an-heat-mon" style="${template}"><div class="hm-corner"></div>`;
   for (const s of analyticsYearMonthSpans(weeks)) {
     html += `<div class="hm-mon" style="grid-column:${s.col + 2} / span ${s.span}">${esc(s.label)}</div>`;

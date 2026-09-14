@@ -190,11 +190,14 @@ func TestWebAssetsAnalyticsTabContract(t *testing.T) {
 		"function analyticsPickerHTML()",
 		"function analyticsPickerRender(panel)",
 		"analyticsRangeBounds(",
+		// All-time anchor: from=0 is clamped server-side to the oldest bucket
+		// and re-learned from the echoed window for granularity gating.
+		"let anAllTimeSince = 0",
 		"analyticsGranOptions(",
 		"function analyticsRenderLegend(host, u, labels, colors, hiddenSet)",
 		"function analyticsLegendCollapse(host)",
-		"function analyticsTickLabel(v, tickSpanSec)",
-		"function analyticsXAxisValues(_u, splits)",
+		"analyticsTickLabel(",
+		"function analyticsXAxisValues(u, splits)",
 		"function analyticsMaybeAutoRefresh()",
 		"analyticsSave('gran', 'auto')",
 		"function analyticsXRange(xs)",
@@ -220,7 +223,7 @@ func TestWebAssetsAnalyticsTabContract(t *testing.T) {
 		"analyticsYearMonthSpans(",
 		"analyticsHeatLevel(",
 		"resp.heatmap",
-		"'Token Usage'",
+		"'Token Activity'",
 		"function showHeatTip(cellEl)",
 		// Leaderboard: sortable headers + row drilldown into Requests.
 		"function analyticsSortState()",
@@ -243,8 +246,9 @@ func TestWebAssetsAnalyticsTabContract(t *testing.T) {
 	}
 	for _, want := range []string{
 		"export function analyticsYearGrid(",
+		"export function analyticsTickLabel(v, tickSpanSec, tickPx)",
 		"export function analyticsYearMonthSpans(",
-		"export function analyticsHeatTipLines(",
+		"export function analyticsHeatTip(",
 		"export function analyticsHeatCellSize(",
 		"export function analyticsHeatLevel(",
 		"export const HEAT_DAYS",
@@ -537,7 +541,12 @@ func TestWebAssetsRequestsSessionContract(t *testing.T) {
 		"sessionViewHTML(rows, agg, { live: false, session: requestsFilter.session })",
 		`<div class="sess-sticky">${sessionViewHTML(rows, liveSessionAgg`,
 		"class=\"sess-sticky\" style=\"margin-bottom:12px\" hidden",
-		"tr.scrollIntoView({ behavior: 'smooth', block: 'center' })",
+		// Timeline bar → inline detail + locate: instant rect-based jump (a
+		// smooth/element scroll dies on the first mid-flight replaceChildren),
+		// and only when EXPANDING an off-screen row — collapse or an
+		// already-visible row must not move the page under the cursor.
+		"window.scrollTo({ top: window.scrollY + rect.top",
+		"if (!tr.isConnected || !opening) return",
 		// Both host cards must drop the .card overflow clipping (card-open):
 		// an overflow ancestor becomes the scroll container for sticky
 		// descendants and a never-scrolling card kills the pin entirely.
