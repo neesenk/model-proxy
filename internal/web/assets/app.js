@@ -35,11 +35,12 @@ import {
   analyticsRowSortKey, ANALYTICS_TABLE_SORT, analyticsSortRows,
   analyticsMetricOptions, analyticsMetricAllowed,
   liveSessionSummary, liveSessionOrder, shortSessionId, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary,
+  cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
   detailFetchState, quotaErrKind, accountUsageState,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, securityKpisHTML, mergeSecurityFeed,
-  SECURITY_RANGES, securityRangeFromSecs, securityFilterQuery, securityFilterFromQuery,
+  SECURITY_RANGES, securityRangeFromSecs, securityFilterQuery, securityFilterFromQuery, explainCacheKey,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
   iconPin, iconRefresh, iconChevron, statusBadgeHTML, kpiDeltaClass, logLineHTML,
 } from './pure.js';
@@ -285,8 +286,16 @@ function statusHash() {
 
 // requestsHash builds the Requests URL hash from the live filter; only
 // non-default values ride along so an unfiltered tab stays a clean #requests.
+// A live request-drill pin (the Security page's "view the original request"
+// link) rides along too, so filter refinement does not drop the pinned view.
 function requestsHash() {
-  const q = requestsFilterQuery(requestsFilter);
+  const parts = [requestsFilterQuery(requestsFilter)];
+  if (requestDrill) {
+    parts.push('request=' + encodeURIComponent(requestDrill.request));
+    if (requestDrill.kind) parts.push('kind=' + encodeURIComponent(requestDrill.kind));
+    if (requestDrill.name) parts.push('name=' + encodeURIComponent(requestDrill.name));
+  }
+  const q = parts.filter(Boolean).join('&');
   return '#requests' + (q ? '?' + q : '');
 }
 
@@ -397,6 +406,7 @@ window.addEventListener('hashchange', () => {
   // Security filter (its first mount templates the selects from it).
   const nextFilter = tab === 'requests' ? requestsFilterFromQuery(query) : null;
   if (nextFilter) requestsFilter = nextFilter;
+  if (tab === 'requests') requestDrill = requestDrillFromQuery(query);
   const secSeed = tab === 'security' ? securityFilterFromQuery(query) : null;
   if (secSeed) securityFilter = secSeed;
   const switched = tab !== activeTab;
@@ -433,6 +443,7 @@ window.addEventListener('hashchange', () => {
       loadRequests(requestsCombos);
     }
   }
+  if (tab === 'requests') applyRequestDrill();
   if (tab === 'security' && secSeed) {
     // Mirror image of the requests branch: after a switch the tab render
     // already ran through the seeded filter; without one (an in-tab hash
@@ -512,6 +523,80 @@ function sessionLinkClick(e) {
   return link && link.dataset.session ? link.dataset.session : null;
 }
 
+// The request-drill pin: #requests?request=<id>&kind=&name= (the Security
+// page's "view the original request" link). The pinned request renders as an
+// expanded card above the table — the guard hits located and highlighted
+// (the explain view) on top of the full request detail (the same renderer
+// the table's row expansion uses) — independent of the table's filters, so
+// an old or filtered-out request still drills cleanly.
+let requestDrill = null;
+
+function requestDrillFromQuery(params) {
+  if (!params || !params.request) return null;
+  return {
+    request: String(params.request),
+    kind: params.kind === 'secret' || params.kind === 'path' ? params.kind : '',
+    name: params.name || '',
+  };
+}
+
+// applyRequestDrill renders (or clears) the pinned request card. Fetches the
+// request detail through the shared bounded cache; the explain context is
+// fetched once per pin (no cache — reopening is rare and freshness matters
+// more than the request saved).
+async function applyRequestDrill() {
+  const host = document.getElementById('req-drill');
+  if (!host) return;
+  if (!requestDrill) {
+    host.innerHTML = '';
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  const { request, kind, name } = requestDrill;
+  host.innerHTML = '<div class="msg hint">loading request ' + esc(String(request).slice(-8)) + '…</div>';
+  let recs = requestsDetailCache.get(request);
+  if (!recs) {
+    let resp;
+    try {
+      resp = await apiGet('/api/requests/' + encodeURIComponent(request));
+    } catch (e) {
+      host.innerHTML = (e && e.status === 404)
+        ? '<div class="msg hint">request ' + esc(request) + ' is not in the request log (retention pruned it, or it predates logging)</div>'
+        : '<div class="msg err">' + esc(e.message) + '</div>';
+      return;
+    }
+    recs = resp.records || [];
+    cacheRequestDetail(request, recs);
+  }
+  let explainHtml = '';
+  if (kind && name) {
+    try {
+      const q = 'request_id=' + encodeURIComponent(request) + '&kind=' + encodeURIComponent(kind) + '&name=' + encodeURIComponent(name);
+      const ex = await apiGet('/api/security/explain?' + q);
+      explainHtml = securityExplainHTML(ex);
+    } catch (e) {
+      explainHtml = '<div class="msg hint">guard hits could not be re-located: ' + esc(e.message) + '</div>';
+    }
+  }
+  if (!requestDrill || requestDrill.request !== request || !host.isConnected) return; // pin changed/unmounted mid-fetch
+  host.innerHTML = `<div class="card" style="margin-bottom:12px;">
+    <header class="card-head"><span class="card-head-title"><h2>Request ${esc(request)}</h2><span class="meta">pinned from the Security drill${kind ? ' · guard hits located below' : ''}</span></span>
+    <span class="card-head-side"><button id="req-drill-close" class="btn" title="close the pinned view">✕</button></span></header>
+    <div class="card-body">
+    ${explainHtml}
+    <div class="req-drill-detail">${recs.length ? detailRecordsHTML(recs, {}) : '<div class="msg hint">no record</div>'}</div>
+  </div></div>`;
+  const close = document.getElementById('req-drill-close');
+  if (close) close.onclick = () => {
+    requestDrill = null;
+    setHash(requestsHash(), false);
+    applyRequestDrill();
+  };
+  host.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  reqDetailChanged();
+}
+
 async function renderRequestsTab() {
   const panel = panels.requests;
   if (!panel) return;
@@ -523,6 +608,7 @@ async function renderRequestsTab() {
   // an option so the selection stays visible and reversible).
   const seeded = requestsFilterFromQuery(parseHash().query);
   if (seeded) requestsFilter = seeded;
+  requestDrill = requestDrillFromQuery(parseHash().query);
   resetCombos();
   panel.innerHTML = `<div class="card card-open"><div class="card-body">
     <div class="req-controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
@@ -539,8 +625,10 @@ async function renderRequestsTab() {
       <button id="req-refresh" class="btn">${iconRefresh()}Refresh</button>
     </div>
     <div id="req-session-summary" class="sess-sticky" style="margin-bottom:12px" hidden></div>
+    <div id="req-drill" hidden></div>
     <div id="req-table"></div>
   </div></div>`;
+  applyRequestDrill();
   const combos = requestsCombos = {
     providerOptions: [], modelOptions: [],
     facetState: { providerModels: {}, agents: [] },
@@ -948,7 +1036,9 @@ function renderRequestsSessionSummary(combos) {
   hideTlTip();
   host.innerHTML = sessionViewHTML(rows, agg, { live: false, session: requestsFilter.session });
   wireSessionTimeline(host, (id) => {
-    const tr = document.querySelector('.req-row[data-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]');
+    // The row may be virtualized out of the DOM — mount it first, then
+    // expand + flash as before.
+    const tr = reqRowForId(id);
     if (!tr) return;
     toggleRequestDetail(tr);
     tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -962,6 +1052,20 @@ function renderRequestsSessionSummary(combos) {
   syncSessThOffset(host);
 }
 
+// reqFilterParams serializes the Requests tab filter into /api/requests
+// query params (shared by the initial load and the scroll-driven older-page
+// fetches, which must agree or the pages would not line up).
+function reqFilterParams() {
+  const q = new URLSearchParams();
+  if (requestsFilter.session) q.set('session', requestsFilter.session);
+  if (requestsFilter.agent) q.set('agent', requestsFilter.agent);
+  if (requestsFilter.model) q.set('model', requestsFilter.model);
+  if (requestsFilter.provider) q.set('provider', requestsFilter.provider);
+  if (requestsFilter.errors) q.set('errors', '1');
+  if (requestsFilter.shadow) q.set('shadow', requestsFilter.shadow);
+  return q;
+}
+
 async function loadRequests(combos) {
   const tbl = document.getElementById('req-table');
   // Painting a fresh table drops every open detail row (an in-flight fetch
@@ -970,36 +1074,40 @@ async function loadRequests(combos) {
   // empty table shows the loading hint — so a refresh never flashes blank.
   const paint = (html) => {
     if (!tbl) return;
+    reqTearDown(reqVirt);
+    reqVirt = null;
     tbl.querySelectorAll('[data-chunk]').forEach((host) => bodyChunkRegistry.delete(host.dataset.chunk));
     dropRawBodies(tbl);
     tbl.innerHTML = html;
   };
   if (tbl && !tbl.firstElementChild) paint('<span class="hint">loading…</span>');
-  const q = new URLSearchParams();
-  if (requestsFilter.session) q.set('session', requestsFilter.session);
-  if (requestsFilter.agent) q.set('agent', requestsFilter.agent);
-  if (requestsFilter.model) q.set('model', requestsFilter.model);
-  if (requestsFilter.provider) q.set('provider', requestsFilter.provider);
-  if (requestsFilter.errors) q.set('errors', '1');
-  if (requestsFilter.shadow) q.set('shadow', requestsFilter.shadow);
-  // A session view is a focused drill-down, so pull more of it (still under
-  // the backend's 1000 cap) than the default browse window.
-  q.set('limit', requestsFilter.session ? '500' : '200');
+  const q = reqFilterParams();
+  // The browse list starts small (REQ_BROWSE_LIMIT); scrolling near the
+  // bottom pulls older pages on demand (reqLoadOlder). A session view is a
+  // focused drill-down, so it still opens with a deeper window (under the
+  // backend's 1000 cap) — scroll loading extends it to the cap from there.
+  const pageSize = requestsFilter.session ? REQ_SESSION_LIMIT : REQ_BROWSE_LIMIT;
+  q.set('limit', String(pageSize));
+  const token = ++reqLoadSeq;
   let resp;
   try {
     resp = await apiGet('/api/requests?' + q.toString());
   } catch (e) {
+    if (token !== reqLoadSeq) return;
     paint(`<div class="msg err">${esc(e.message)}</div>`);
     hideRequestsSessionSummary();
     return;
   }
+  if (token !== reqLoadSeq) return;
   if (!resp.enabled) {
     paint('<div class="msg hint">Request logging is off. Enable <code>request_log.enabled</code> in config to capture request/response bodies for replay and debugging.</div>');
     hideRequestsSessionSummary();
     return;
   }
-  // Facets come from the scanned log window (data-driven), so refresh the
-  // dropdowns even when the current filter matches nothing.
+  // Facets come from the indexed log (data-driven, limit-independent on the
+  // index path), so refresh the dropdowns even when the current filter
+  // matches nothing. Scroll-loaded pages do NOT re-sync: a to=-bounded page
+  // sees a narrower window and would shrink the dropdowns for no reason.
   syncRequestFacets(resp.facets, combos);
   const recs = resp.records || [];
   combos.lastRecords = recs;
@@ -1008,40 +1116,321 @@ async function loadRequests(combos) {
     paint('<div class="msg hint">No matching requests.</div>');
     return;
   }
-  let rows = '';
-  for (const r of recs) {
-    // Same row renderer as the Live tables (one implementation): snake_case
-    // records project through persistedSummaryRow into the merged camelCase
-    // row shape. Bytes columns are gone — the token cell (in/out + cache
-    // read) is the useful signal, matching Live.
-    rows += requestRowHTML(persistedSummaryRow(r), {
-      rowClass: 'req-row' + (r.status >= 400 ? ' req-row-err' : ''),
-      fmtTime,
-    });
+  // Virtual table: the thead is static, the tbody renders only the viewport
+  // window of rows (spacers keep the scrollbar sized to the whole list) and
+  // a hint line reports the loaded count / load-older state.
+  paint(`<table class="table">${requestTableHeadHTML()}<tbody></tbody></table><div class="hint req-count" hidden></div>`);
+  if (!tbl) return;
+  const v = reqVirt = {
+    tbl: tbl.querySelector('table'),
+    hint: tbl.querySelector('.req-count'),
+    combos, recs, pageSize,
+    more: recs.length >= pageSize && recs.length < REQ_MAX_LOADED,
+    loading: false, failedAt: 0, err: '', revealId: '',
+    heights: new Map(), avg: 38, offsets: [0], pool: new Map(), key: '', byId: null,
+  };
+  v.tbody = v.tbl.tBodies[0];
+  v.byId = new Map(recs.map((r, i) => [r.request_id, i]));
+  wireReqScroll();
+  reqHint(v);
+  reqFrame(v);
+}
+
+// ---------- Requests table virtual scrolling ----------
+//
+// The Requests table keeps only the rows near the viewport in the DOM:
+// spacer rows carry the height of the unloaded gaps so the page scrollbar
+// reflects every loaded record; rows enter the DOM as the window approaches
+// and leave it again once the window moves on. Pooled <tr> nodes keep open
+// detail rows (and their chunked-body state) alive across window moves — a
+// row with an open detail is pinned into every window until it is closed.
+// Older pages are fetched on demand: nearing the bottom pulls the next page
+// via to=<oldest second> keyset pagination (the boundary second is re-fetched
+// and deduped by request id, see mergeRecordsPages), so the default browse
+// window stays at 50 while deeper history is one scroll away (capped at the
+// backend's 1000).
+const REQ_BROWSE_LIMIT = 50;
+const REQ_SESSION_LIMIT = 500;
+const REQ_MAX_LOADED = 1000;
+const REQ_OVERSCAN_PX = 480;
+const REQ_LOAD_AHEAD_PX = 700;
+let reqVirt = null;
+let reqLoadSeq = 0;
+let reqScrollWired = false;
+let reqScrollScheduled = false;
+
+// reqTearDown frees the pooled rows' lazy-render state (chunked bodies, raw
+// body registries) when the table is replaced by a fresh load — pooled nodes
+// may be detached from the DOM, so they are walked via the pool, not the
+// (already replaced) container.
+function reqTearDown(v) {
+  if (!v) return;
+  v.pool.forEach((tr) => {
+    const units = [tr];
+    const det = tr.nextElementSibling;
+    if (det && det.classList.contains('req-detail-row')) units.push(det);
+    for (const node of units) {
+      node.querySelectorAll('[data-chunk]').forEach((h) => bodyChunkRegistry.delete(h.dataset.chunk));
+      dropRawBodies(node);
+    }
+  });
+  v.pool.clear();
+}
+
+// reqRowNode returns the pooled <tr> for record i, creating (and wiring) it
+// on first use. Rows reuse the SAME renderer as the Live tables (one
+// implementation): snake_case records project through persistedSummaryRow
+// into the merged camelCase row shape.
+function reqRowNode(v, i) {
+  const rec = v.recs[i];
+  let tr = v.pool.get(rec.request_id);
+  if (tr) return tr;
+  const holder = document.createElement('tbody');
+  holder.innerHTML = requestRowHTML(persistedSummaryRow(rec), {
+    rowClass: 'req-row' + (rec.status >= 400 ? ' req-row-err' : ''),
+    fmtTime,
+  });
+  tr = holder.firstElementChild;
+  v.pool.set(rec.request_id, tr);
+  // Session cell → filter this tab to that session (same linkage as picking
+  // it in the dropdown: the agent filter narrows to that session's agents);
+  // anywhere else on the row toggles the inline detail.
+  tr.onclick = (e) => {
+    const session = sessionLinkClick(e);
+    if (session) {
+      requestsFilter.session = session;
+      const allowed = linkedAgents(requestsFilter.session, v.combos.sessions, v.combos.facetState.agents);
+      if (requestsFilter.agent && !allowed.includes(requestsFilter.agent)) requestsFilter.agent = '';
+      updateRequestsHash();
+      renderRequestSelectors(v.combos);
+      loadRequests(v.combos);
+      return;
+    }
+    toggleRequestDetail(tr);
+  };
+  return tr;
+}
+
+function reqSpacer(px) {
+  const tr = document.createElement('tr');
+  tr.className = 'req-spacer';
+  tr.innerHTML = `<td style="height:${Math.max(0, Math.round(px))}px"></td>`;
+  return tr;
+}
+
+// reqRebuildOffsets recomputes the running row tops from the measured
+// heights (cumulativeOffsets is the single definition); unmeasured rows fall
+// back to the running average (rows are near-uniform, so the estimate only
+// carries the scrollbar until first measure).
+function reqRebuildOffsets(v) {
+  const hs = new Array(v.recs.length);
+  for (let i = 0; i < v.recs.length; i += 1) {
+    const h = v.heights.get(v.recs[i].request_id);
+    hs[i] = Number.isFinite(h) && h > 0 ? h : v.avg;
   }
-  paint(`<table class="table">${requestTableHeadHTML()}<tbody>${rows}</tbody></table>`);
-  document.querySelectorAll('.req-row').forEach((tr) => {
-    // Session cell → filter this tab to that session (same linkage as picking
-    // it in the dropdown: the agent filter narrows to that session's agents);
-    // anywhere else on the row toggles the inline detail.
-    tr.onclick = (e) => {
-      // Session cell → filter this tab to that session (same linkage as picking
-      // it in the dropdown: the agent filter narrows to that session's agents);
-      // anywhere else on the row toggles the inline detail.
-      const session = sessionLinkClick(e);
-      if (session) {
-        requestsFilter.session = session;
-        const allowed = linkedAgents(requestsFilter.session, combos.sessions, combos.facetState.agents);
-        if (requestsFilter.agent && !allowed.includes(requestsFilter.agent)) requestsFilter.agent = '';
-        updateRequestsHash();
-        renderRequestSelectors(combos);
-        loadRequests(combos);
-        return;
-      }
-      toggleRequestDetail(tr);
-    };
+  v.offsets = cumulativeOffsets(hs);
+}
+
+// reqReconcile mounts exactly the desired rows — the viewport window plus
+// every pinned row (open detail) and any in-flight reveal (timeline jump) —
+// and unloads the rest back into the pool. Spacer rows fill the gaps so
+// scroll geometry never changes as rows load/unload.
+function reqReconcile(v, extraIndex) {
+  if (!v.tbody || !v.tbl.isConnected) return;
+  const n = v.recs.length;
+  // Viewport in table coordinates (the table's top edge is 0).
+  const rect = v.tbl.getBoundingClientRect();
+  const win = virtualWindow(v.offsets, Math.max(0, -rect.top), Math.max(0, window.innerHeight - rect.top), REQ_OVERSCAN_PX);
+  const want = new Set();
+  if (win) for (let i = win.first; i <= win.last; i += 1) want.add(i);
+  // Pinned rows: an open detail must survive window moves (its chunked body
+  // state lives on the DOM nodes), wherever the user scrolls.
+  v.pool.forEach((tr) => {
+    if (!tr.classList.contains('req-open')) return;
+    const i = v.byId.get(tr.dataset.id);
+    if (i != null) want.add(i);
+  });
+  // A timeline jump scrolls SMOOTHLY to a row that may start far outside
+  // the window: keep it mounted until the window reaches it naturally,
+  // otherwise the first scroll event mid-flight would unmount the target
+  // and abort the scroll.
+  let reveal = -1;
+  if (v.revealId) {
+    const ri = v.byId.get(v.revealId);
+    reveal = ri != null ? ri : -1;
+    if (reveal >= 0) {
+      if (win && reveal >= win.first && reveal <= win.last) v.revealId = '';
+      else want.add(reveal);
+    } else {
+      v.revealId = '';
+    }
+  }
+  if (extraIndex != null && extraIndex >= 0 && extraIndex < n) want.add(extraIndex);
+  const idx = [...want].sort((a, b) => a - b);
+  if (!idx.length) {
+    if (v.key !== '') { v.key = ''; v.tbody.replaceChildren(); }
+    return;
+  }
+  // Skip the rebuild while the mounted set and the spacer bounds are
+  // unchanged — scrolling within a window must not touch the DOM at all.
+  const key = idx.join(',') + '|' + Math.round(v.offsets[idx[0]]) + '|' + Math.round(v.offsets[idx[idx.length - 1] + 1]);
+  if (key === v.key) return;
+  v.key = key;
+  const frag = document.createDocumentFragment();
+  const mounted = [];
+  let prev = -1;
+  for (const i of idx) {
+    const gap = prev < 0 ? v.offsets[i] : v.offsets[i] - v.offsets[prev + 1];
+    if (gap >= 1) frag.appendChild(reqSpacer(gap));
+    const tr = reqRowNode(v, i);
+    const det = tr.classList.contains('req-open') && tr.nextElementSibling && tr.nextElementSibling.classList.contains('req-detail-row')
+      ? tr.nextElementSibling : null;
+    frag.appendChild(tr);
+    if (det) frag.appendChild(det);
+    mounted.push({ i, tr, det });
+    prev = i;
+  }
+  const tail = v.offsets[n] - v.offsets[prev + 1];
+  if (tail >= 1) frag.appendChild(reqSpacer(tail));
+  v.tbody.replaceChildren(frag);
+  // Measure the mounted units (row + its open detail) so the next offsets —
+  // and with them the spacer heights — use real heights, not the average.
+  let sum = 0;
+  for (const m of mounted) {
+    let h = m.tr.getBoundingClientRect().height;
+    if (m.det) h += m.det.getBoundingClientRect().height;
+    if (h > 0) { v.heights.set(v.recs[m.i].request_id, h); sum += h; }
+  }
+  if (mounted.length) v.avg = Math.max(12, sum / mounted.length);
+}
+
+// reqFrame is the scroll/resize entry: refresh the window, then fetch the
+// next older page when the bottom of the loaded list comes into reach. A
+// short first page (list shorter than the viewport) chains itself until the
+// scrollbar engages or the log is exhausted.
+function reqFrame(v) {
+  if (!v || !v.tbl || !v.tbl.isConnected) return;
+  reqRebuildOffsets(v);
+  reqReconcile(v);
+  const rect = v.tbl.getBoundingClientRect();
+  if (v.more && !v.loading && rect.bottom - window.innerHeight < REQ_LOAD_AHEAD_PX && Date.now() - v.failedAt > 2500) {
+    reqLoadOlder(v);
+  }
+}
+
+function wireReqScroll() {
+  if (reqScrollWired) return;
+  reqScrollWired = true;
+  // Capture phase: scroll does not bubble, and the same frame must not
+  // touch the DOM synchronously (rAF coalescing, same as wireBodyChunks).
+  document.addEventListener('scroll', () => {
+    const v = reqVirt;
+    if (!v || !v.tbl || !v.tbl.isConnected || reqScrollScheduled) return;
+    reqScrollScheduled = true;
+    requestAnimationFrame(() => {
+      reqScrollScheduled = false;
+      const cur = reqVirt;
+      if (cur && cur.tbl && cur.tbl.isConnected) reqFrame(cur);
+    });
+  }, true);
+}
+
+// reqLoadOlder fetches the next page of older records: same filters, limit
+// at the page size, to = the oldest loaded record's second. The boundary
+// second is re-fetched; mergeRecordsPages dedupes by id. A short page means
+// the (filtered) log is exhausted; the 1000-row backend cap ends paging too.
+async function reqLoadOlder(v) {
+  if (v.loading || !v.more) return;
+  v.loading = true;
+  v.err = '';
+  reqHint(v);
+  const q = reqFilterParams();
+  const to = oldestTsSec(v.recs);
+  if (to != null) q.set('to', String(to));
+  q.set('limit', String(v.pageSize));
+  let chained = false;
+  try {
+    const resp = await apiGet('/api/requests?' + q.toString());
+    if (reqVirt !== v) return;
+    const page = (resp && resp.records) || [];
+    const merged = mergeRecordsPages(v.recs, page);
+    v.recs = merged.records;
+    v.byId = new Map(v.recs.map((r, i) => [r.request_id, i]));
+    v.combos.lastRecords = v.recs;
+    v.more = page.length >= v.pageSize && v.recs.length < REQ_MAX_LOADED;
+    chained = merged.added > 0;
+  } catch (e) {
+    // Keep the loaded rows on screen; the hint carries the error and the
+    // failedAt backoff keeps a dead upstream from being re-hit every frame.
+    v.failedAt = Date.now();
+    v.err = (e && e.message) || 'request failed';
+  }
+  v.loading = false;
+  if (reqVirt !== v || !v.tbl.isConnected) return;
+  reqHint(v);
+  if (chained) reqFrame(v);
+}
+
+// reqHint paints the count/load-older status line under the table.
+function reqHint(v) {
+  if (!v.hint) return;
+  if (v.loading) {
+    v.hint.hidden = false;
+    v.hint.textContent = 'loading older requests…';
+  } else if (v.err) {
+    v.hint.hidden = false;
+    v.hint.textContent = `could not load older requests: ${v.err}`;
+  } else if (v.more) {
+    v.hint.hidden = false;
+    v.hint.textContent = `showing ${fmtNum(v.recs.length)} requests · scroll down for older`;
+  } else {
+    // A list that fits the default window needs no narration.
+    const quiet = v.recs.length <= REQ_BROWSE_LIMIT;
+    v.hint.hidden = quiet;
+    v.hint.textContent = v.recs.length >= REQ_MAX_LOADED
+      ? `showing the first ${fmtNum(v.recs.length)} requests`
+      : `showing ${fmtNum(v.recs.length)} requests`;
+  }
+}
+
+// reqDetailChanged re-measures a row's unit after its inline detail opens,
+// fills or closes: the detail's height belongs to the row's footprint, so
+// the offsets (and the spacers below) go stale the moment it changes.
+function reqDetailChanged() {
+  const v = reqVirt;
+  if (!v) return;
+  requestAnimationFrame(() => {
+    if (reqVirt !== v || !v.tbody || !v.tbl.isConnected) return;
+    v.pool.forEach((tr) => {
+      if (!tr.classList.contains('req-open') || !tr.isConnected) return;
+      const det = tr.nextElementSibling;
+      let h = tr.getBoundingClientRect().height;
+      if (det && det.classList.contains('req-detail-row')) h += det.getBoundingClientRect().height;
+      if (h > 0) v.heights.set(tr.dataset.id, h);
+    });
+    v.key = '';
+    reqFrame(v);
   });
 }
+
+// reqRowForId returns the summary row for a request id, mounting it first if
+// the window virtualized it away — the session timeline jumps to bars whose
+// rows may sit far outside the rendered window. The reveal pin keeps the
+// row mounted through the smooth scroll (see reqReconcile).
+function reqRowForId(id) {
+  const v = reqVirt;
+  if (!v || !v.tbody) {
+    return document.querySelector('.req-row[data-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]');
+  }
+  for (let i = 0; i < v.recs.length; i += 1) {
+    if (v.recs[i].request_id !== id) continue;
+    v.revealId = id;
+    reqRebuildOffsets(v);
+    reqReconcile(v, i);
+    return v.pool.get(id) || null;
+  }  return null;
+}
+
 
 // requestsDetailCache holds the fetched records by request_id so re-opening a
 // record skips the (slow) log rescan. Records are immutable once written; the
@@ -1241,6 +1630,7 @@ async function toggleRequestDetail(tr) {
   const cached = requestsDetailCache.get(id);
   if (cached) {
     row.firstElementChild.innerHTML = detailRecordsHTML(cached, relOpts);
+    reqDetailChanged();
     return;
   }
   let resp;
@@ -1251,16 +1641,21 @@ async function toggleRequestDetail(tr) {
     row.firstElementChild.innerHTML = (e && e.status === 404)
       ? '<div class="msg hint">not logged — the request did not commit, so there is no request-log record</div>'
       : `<div class="msg err">${esc(e.message)}</div>`;
+    reqDetailChanged();
     return;
   }
   if (!row.isConnected) return; // closed, or the table was rebuilt while loading
   const recs = resp.records || [];
   if (!recs.length) {
     row.firstElementChild.innerHTML = '<div class="msg hint">no record</div>';
+    reqDetailChanged();
     return;
   }
   row.firstElementChild.innerHTML = detailRecordsHTML(recs, requestRelTimeOpts(id));
   cacheRequestDetail(id, recs);
+  // The detail's height joins the row's footprint — remeasure so the
+  // spacers below (and any further fetches) stay anchored.
+  reqDetailChanged();
 }
 
 // closeDetailFor removes the detail row anchored to `tr` (its next sibling) and
@@ -1272,6 +1667,7 @@ function closeDetailFor(tr) {
   row.querySelectorAll('[data-chunk]').forEach((host) => bodyChunkRegistry.delete(host.dataset.chunk));
   dropRawBodies(row);
   row.remove();
+  reqDetailChanged();
 }
 
 // BODY_CHUNK_CHARS bounds how much of a large body enters the DOM at once.
@@ -1465,8 +1861,15 @@ let securityAuditOn = true;
 // half of both the KPI row and the MERGED chronological feed, so whichever
 // lands first paints with the data it has and the second refresh completes
 // the picture (stale halves are never blanked).
-let securityKpiData = { blocks: null, stats: null };
+let securityKpiData = { blocks: null, stats: null, counts: null };
 let securityFeedData = { records: null, adjudications: null };
+// The Rule-hits leaderboard's own audit slice: FIXED query params (all
+// kinds, whole retention, the 1000-row cap) so the Activity filters — which
+// go server-side on the FEED query — cannot change its counts. The
+// leaderboard is the rule-ops view; the only allowed coupling is its own
+// rows drilling INTO the feed (setSecurityRule), never the reverse.
+let securityRulesData = { records: null };
+let securityRulesSeq = 0;
 // The adjudication channel's current on/off switch (feed.enabled) — the KPI
 // row's LLM tiles and the rule-leaderboard's noise hint key off it, telling
 // off from merely quiet.
@@ -1474,6 +1877,18 @@ let securityAdjudicationEnabled = false;
 // Which refresh halves failed since their last success — the parts list of
 // the shared stale-data banner (setRefreshError).
 const securityFailParts = new Set();
+// analyze expansions the user opened, keyed by explainCacheKey. renderSecurity
+// Feed rebuilds #sec-table wholesale (Refresh / auto-refresh / filter change),
+// so the open set is snapshotted here and every expansion that still has a row
+// is restored after the rebuild — same snapshot-then-restore rule as
+// renderLogsInto's open <details>.
+const securityExpanded = new Set();
+// Bounded explain-result cache by the same key. A restored expansion paints
+// from cache instead of refetching every 30s tick; entries hold either the
+// settled result or the in-flight promise (concurrent restores share one
+// request). In-page rendered data only — nothing persisted beyond the page.
+const SECURITY_EXPLAIN_CACHE_MAX = 32;
+const securityExplainCache = new Map();
 
 // securityRefreshOk clears one half's failure mark, dropping the banner once
 // every half is healthy again (or narrowing it while others still fail).
@@ -1494,6 +1909,33 @@ function securityRefreshFail(part) {
   return !hasData;
 }
 
+// securityRenderAll repaints every Security data host from stored data. The
+// loaders commit through this ONE function so the gate's parked fire (which
+// replaces earlier pending fires) is always a complete picture — a half's
+// commit can never be lost to another half landing during the same gesture.
+function securityRenderAll() {
+  renderSecurityKpis();
+  renderSecurityFeed();
+  renderRuleLeaderboard();
+  paintSecurityBlocks();
+}
+
+// commitSecurityRender is the loaders' commit-time checkpoint of the
+// interaction gate (see deferAutoRefresh): a fetch that was still in flight
+// when the user started a text selection / opened a select must NOT rebuild
+// the panel when it lands — that wipes the selection mid-gesture and janks
+// the double-click (the deterministic "switch back to Security, dblclick,
+// page stutters" path: re-entry always fires these fetches). The data is
+// already stored; the parked commit paints from it once the gesture ends
+// (hold watcher). Synchronous user actions (filter clicks, verdict select)
+// keep calling the renderers directly — user-initiated renders bypass the
+// gate by contract.
+function commitSecurityRender() {
+  const panel = panels.security;
+  if (panel && deferAutoRefresh(panel, securityRenderAll)) return;
+  securityRenderAll();
+}
+
 // securityMergedRows merges the two feed halves narrowed to the current kind
 // window (the audit half is already server-filtered by kind; the ring half
 // is filtered here so the two agree). Verdict/rule narrowing stays with the
@@ -1507,7 +1949,7 @@ function securityMergedRows() {
 function renderSecurityKpis() {
   const el = document.getElementById('sec-kpis');
   if (!el) return;
-  el.innerHTML = securityKpisHTML(securityKpiData.blocks, securityMergedRows(), securityKpiData.stats, securityAdjudicationEnabled);
+  el.innerHTML = securityKpisHTML(securityKpiData.blocks, securityKpiData.counts, securityKpiData.stats, securityAdjudicationEnabled);
 }
 
 // syncSecurityRuleChip paints the removable rule-filter chip into the
@@ -1524,29 +1966,56 @@ function syncSecurityRuleChip() {
 }
 
 // setSecurityRule toggles the feed's rule filter (client-side over the
-// merged rows) and mirrors it into the URL hash.
+// merged rows) and mirrors it into the URL hash. The leaderboard's selection
+// flips in place (syncRuleSel) — rebuilding that table on click is what used
+// to eat double-click text selections on its rows: the clicked row died
+// mid-gesture, between the two clicks.
 function setSecurityRule(rule) {
   securityFilter.rule = rule || '';
   updateSecurityHash();
   renderSecurityFeed();
+  syncRuleSel();
+}
+
+// syncRuleSel flips the leaderboard rows' selection marker to the current
+// rule filter without rebuilding the table (the data did not change — only
+// which row is the active filter).
+function syncRuleSel() {
+  document.querySelectorAll('#sec-rules tr.sec-rule').forEach((tr) => {
+    tr.classList.toggle('sel', securityFilter.rule === tr.dataset.rule);
+  });
 }
 
 // renderSecurityFeed renders the merged audit + AI-verdict feed: one
 // chronological table (newest first). Fresh verdicts are deduped upstream
 // (mergeSecurityFeed folds the ring entry into its audit record, surfacing
 // the judge model/cached inline); ring-only rows (cached occurrences,
-// pre-restart leftovers) keep the ai· badge — suppressed low verdicts are
-// visible HERE and nowhere else.
+// pre-restart leftovers) keep the ai· badge. LOW verdicts never render
+// here: the judge suppressed them, so they exist only in the KPI counter,
+// the rule-hit counts and the JSONL trail — listing them would be noise.
+//
+// Re-entry and every 30s tick re-fetch and re-render; on an unchanged feed
+// the rebuild is pure waste AND lands as a full-table innerHTML swap that
+// eats a text selection just started (the gate only sees selections that
+// already exist — a fetch landing between the two clicks of a double-click
+// is invisible to it). So: fingerprint everything that feeds the markup and
+// skip the DOM write entirely when nothing changed (same idiom as the Logs
+// card's logsPrevKey). Incremental state (open analyze expansions, the
+// user's own DOM edits) rides the untouched DOM.
+let securityFeedFingerprint = '';
+
 function renderSecurityFeed() {
   const tbl = document.getElementById('sec-table');
   if (!tbl) return;
   syncSecurityRuleChip();
   const ring = securityFeedData.adjudications;
   if (!securityAuditOn && (!ring || !ring.length)) {
+    securityFeedFingerprint = '';
     tbl.innerHTML = '<div class="msg hint">Security audit is off. Enable <code>guard.audit</code> in config to persist guard hits (secret / path / drift) to the audit log.</div>';
     return;
   }
   const rows = securityMergedRows()
+    .filter((r) => r.verdict !== 'low')
     .filter((r) => !securityFilter.verdict || r.verdict === securityFilter.verdict)
     .filter((r) => !securityFilter.rule || r.names.includes(securityFilter.rule));
   const hints = [];
@@ -1557,50 +2026,91 @@ function renderSecurityFeed() {
     hints.push(`<div class="hint" style="margin-bottom:8px;">skipped ${fmtNum(securityFeedSkipped)} unreadable line(s) while scanning</div>`);
   }
   if (!rows.length) {
+    securityFeedFingerprint = '';
     tbl.innerHTML = hints.join('') + '<div class="msg hint">No matching records.</div>';
     return;
   }
+  const recs = securityFeedData.records || [];
+  const fingerprint = JSON.stringify([
+    rows, hints, securityLimit,
+    securityAuditOn && recs.length >= securityLimit && securityLimit < 1000,
+  ]);
+  if (fingerprint === securityFeedFingerprint && tbl.querySelector('table')) {
+    // Identical data, table already on screen: keep the DOM (and any
+    // in-progress text selection / open expansion) exactly as it is.
+    syncRuleSel();
+    return;
+  }
+  securityFeedFingerprint = fingerprint;
   const kindBadge = { secret: 'warn', path: '', drift: 'muted' };
-  const vBadge = { high: 'err', low: 'ok', error: 'warn', skipped: 'muted' };
+  const vBadge = { high: 'err', medium: 'warn', error: 'warn', skipped: 'muted' };
   const body = [];
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
+    // Both halves are analyzable when the explain endpoint can query them
+    // (request id + secret/path kind) — cached ring verdicts (ai· rows) and
+    // audit records share the same re-scan surface, and the ring row's
+    // "why" (verdict reason + located hits) is exactly what analyze shows.
+    // The explain key never rides an HTML attribute (its separator would not
+    // survive attribute parsing); handlers carry it in closures and the
+    // expansion row holds it as a DOM property.
+    const analyzable = r.requestId && (r.kind === 'secret' || r.kind === 'path');
+    // Drill into the original request: opens the Requests tab pinned to this
+    // request with the guard hits located and highlighted (the explain view
+    // rides the request detail). kind+name let the drill re-scan server-side.
+    const drillUrl = r.requestId && (r.kind === 'secret' || r.kind === 'path')
+      ? '#requests?request=' + encodeURIComponent(r.requestId) +
+        '&kind=' + encodeURIComponent(r.kind) +
+        '&name=' + encodeURIComponent(r.names.join(','))
+      : '';
+    const drillLink = drillUrl
+      ? `<div><a class="mono drill-link" href="${drillUrl}" title="view the original request with the hit highlighted">req ${esc(String(r.requestId).slice(-6))} ↗</a></div>`
+      : '';
+    // Session cell: session-link (same idiom as the Blocked table and the
+    // request tables) — click drills into that session's requests.
+    const sessionCell = r.sessionId
+      ? `<td class="mono session-link" data-session="${esc(r.sessionId)}" title="${esc(r.sessionId)} — view this session's requests">${esc(shortSessionId(r.sessionId))}</td>`
+      : '<td class="mono">—</td>';
     if (r.src === 'ai') {
-      body.push(`<tr>
+      const why = r.reason || r.detail;
+      const evidence = r.evidence ? `<div class="hint">${esc(r.evidence)}</div>` : '';
+      body.push(`<tr data-sec-i="${i}"${analyzable ? ' class="sec-row"' : ''}>
       <td class="mono">${esc(fmtMs(r.ts))}</td>
       <td><span class="badge ${vBadge[r.verdict] || ''}">${esc(r.verdict)}</span>${r.cached ? ' <span class="badge muted">cached</span>' : ''}</td>
       <td><span class="badge ${r.kind === 'path' ? '' : 'warn'}">ai·${esc(r.kind)}</span></td>
       <td class="mono">${esc(r.names.join(', ') || '—')}</td>
       <td class="mono">${esc(r.exposed || '—')}</td>
-      <td class="mono">${esc(r.detail || '—')}</td>
-      <td>—</td>
+      ${sessionCell}
+      <td class="mono">${esc(why || '—')}${evidence}${drillLink}</td>
     </tr>`);
       continue;
     }
     const strength = r.kind === 'path' ? r.strength : '';
     const strengthBadge = strength ? ` <span class="badge ${strength === 'strong' ? 'warn' : 'muted'}">${strength}</span>` : '';
     // Merged rows carry the judge attribution the ring added on top of the
-    // persistent audit record.
+    // persistent audit record. The verdict's own judgment logic (the LLM
+    // reason, verbatim) and the exact-match attribution (source label +
+    // masked key, in detail) render directly — no program-side paraphrase.
     const judge = r.judge ? ` <span class="hint">judge ${esc(r.judge)}${r.cached ? ' · cached' : ''}</span>` : '';
-    const analyzable = r.requestId && (r.kind === 'secret' || r.kind === 'path');
-    body.push(`<tr>
+    const verdictText = r.reason ? `<div>${esc(r.reason)}</div>${r.evidence ? `<div class="hint">evidence: ${esc(r.evidence)}</div>` : ''}` : '';
+    const detailText = r.detail ? `<div>${esc(r.detail)}</div>` : '';
+    body.push(`<tr data-sec-i="${i}"${analyzable ? ' class="sec-row"' : ''}>
       <td class="mono">${esc(fmtMs(r.ts))}</td>
       <td>${r.verdict ? `<span class="badge ${vBadge[r.verdict] || ''}">${esc(r.verdict)}</span>` : '—'}</td>
       <td><span class="badge ${kindBadge[r.kind] || ''}">${esc(r.kind)}</span></td>
       <td class="mono">${esc(r.names.join(', ') || '—')}</td>
       <td class="mono">${esc(r.agent ? r.agent + (r.exposed ? ' @ ' + r.exposed : '') : '—')}</td>
-      <td class="mono">action=${esc(r.action || '—')}${strengthBadge}${judge}</td>
-      <td>${analyzable ? `<button class="btn sec-analyze" data-sec-i="${i}">analyze</button>` : '—'}</td>
+      ${sessionCell}
+      <td class="mono">${verdictText}${detailText}<div>action=${esc(r.action || '—')}${strengthBadge}${judge}</div>${drillLink}</td>
     </tr>`);
   }
   // The audit half may have more rows than the current budget (the ring
   // half is always fully loaded) — offer to deepen the query window.
-  const recs = securityFeedData.records || [];
   const more = securityAuditOn && recs.length >= securityLimit && securityLimit < 1000
     ? `<div style="margin-top:8px;"><button id="sec-more" class="btn" title="deepen the audit window (up to 1,000 rows)">Show More</button></div>`
     : '';
   tbl.innerHTML = hints.join('') + `<table class="table">
-  <thead><tr><th>time</th><th>verdict</th><th>kind</th><th>rule / names</th><th>who</th><th>detail</th><th></th></tr></thead>
+  <thead><tr><th>time</th><th>verdict</th><th>kind</th><th>rule / names</th><th>who</th><th>session</th><th>detail</th></tr></thead>
   <tbody>${body.join('')}</tbody></table>` + more;
   const moreBtn = document.getElementById('sec-more');
   if (moreBtn) {
@@ -1609,10 +2119,37 @@ function renderSecurityFeed() {
       loadSecurity();
     };
   }
-  tbl.querySelectorAll('.sec-analyze').forEach((btn) => {
-    btn.onclick = () => analyzeSecurityHit(btn, rows[Number(btn.dataset.secI)]);
+  // Each data row carries one click router: the session cell is a
+  // session-link drilling into that session's requests (same idiom as the
+  // Blocked table), anywhere else on an analyzable row toggles its analyze
+  // expansion (cursor:pointer via .sec-row), clicks that land on the drill
+  // link (or any future a/button) navigate instead, and the second click of
+  // a double-click is a text-selection gesture — the detail cell carries
+  // copyable verdict text. Rows with neither a session nor an analyzable
+  // hit (headless drift) stay inert.
+  tbl.querySelectorAll('tr[data-sec-i]').forEach((tr) => {
+    const rec = rows[Number(tr.dataset.secI)];
+    if (!rec) return;
+    const analyzable = !!rec.requestId && (rec.kind === 'secret' || rec.kind === 'path');
+    if (!analyzable && !rec.sessionId) return;
+    const key = analyzable ? explainCacheKey(rec.requestId, rec.kind, rec.names) : '';
+    tr.onclick = (e) => {
+      if (e.detail > 1) return;
+      const session = sessionLinkClick(e);
+      if (session) {
+        location.hash = '#requests?' + requestsFilterQuery({ session });
+        return;
+      }
+      if (e.target.closest('a, button')) return;
+      if (analyzable) analyzeSecurityHit(tr, key, rec);
+    };
   });
-  renderRuleLeaderboard();
+  restoreSecurityDetails(rows);
+  // No leaderboard rebuild here: this render also runs on rule-filter clicks
+  // (setSecurityRule), and replacing leaderboard rows mid-gesture kills the
+  // double-click text selection being made on them. The loaders rebuild it
+  // when their data actually changes.
+  syncRuleSel();
 }
 
 // fmtMs renders a unix-millisecond audit timestamp as "MM-DD HH:MM:SS" —
@@ -1624,9 +2161,9 @@ function fmtMs(ms) {
   return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${d.toLocaleTimeString('en-US', { hour12: false })}`;
 }
 
-// renderSecurityTab builds the guard audit-log view: KPI tiles, the rule
-// leaderboard, the blocked-session card, and the merged Activity feed with
-// its filter row. On-demand (no poll) — fetch happens on tab entry and on
+// renderSecurityTab builds the guard audit-log view: KPI tiles, the
+// blocked-session card, the rule leaderboard, and the merged Activity feed
+// with its filter row. On-demand (no poll) — fetch happens on tab entry and on
 // Refresh, like Requests. Records carry pattern/path NAMES and the action
 // only; matched content never reaches the API, so every field is safe to
 // render verbatim.
@@ -1670,19 +2207,22 @@ async function renderSecurityTab() {
   // shared link must land on the same view, not the unfiltered list.
   const seeded = securityFilterFromQuery(parseHash().query);
   if (seeded) securityFilter = seeded;
-  securityKpiData = { blocks: null, stats: null };
+  securityKpiData = { blocks: null, stats: null, counts: null };
   securityFeedData = { records: null, adjudications: null };
+  securityRulesData = { records: null };
   // Information hierarchy: summary tiles first, then the actionable blocked
-  // list with its unblock controls, and one merged chronological feed last.
+  // list with its unblock controls, then the merged chronological feed. The
+  // rule leaderboard lives INSIDE Activity (a collapsible section between
+  // the legend and the feed it filters) — its click-to-filter target is the
+  // feed table right below it.
   panel.innerHTML = `<div id="sec-kpis"></div>
-  <div id="sec-rules"></div>
   <div class="card">
-    <header class="card-head"><span class="card-head-title"><h2>Blocked sessions</h2><span class="meta">high verdicts · persist until unblocked</span></span><span class="card-head-side"><button id="sec-unblock-all" class="btn danger" hidden>unblock all</button></span></header>
+    <header class="card-head"><span class="card-head-title"><h2>Blocked sessions</h2><span class="meta">high verdicts + exact matches · persist until unblocked</span></span><span class="card-head-side"><button id="sec-unblock-all" class="btn danger" hidden>unblock all</button></span></header>
     <div class="card-body">
     <div id="sec-blocks"><span class="hint">loading…</span></div>
   </div></div>
   <div class="card">
-    <header class="card-head"><span class="card-head-title"><h2>Activity</h2><span class="meta">audit + AI verdicts · newest first · suppressed lows appear only here</span></span></header>
+    <header class="card-head"><span class="card-head-title"><h2>Activity</h2><span class="meta">audit + AI verdicts · newest first · low verdicts suppressed</span></span></header>
     <div class="card-body">
     <div class="req-controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
       <select id="sec-kind" class="req-input" title="filter by guard hit kind (server-side)">
@@ -1694,7 +2234,7 @@ async function renderSecurityTab() {
       <select id="sec-verdict" class="req-input" title="filter by adjudication verdict">
         <option value="" ${securityFilter.verdict === '' ? 'selected' : ''}>All Verdicts</option>
         <option value="high" ${securityFilter.verdict === 'high' ? 'selected' : ''}>High</option>
-        <option value="low" ${securityFilter.verdict === 'low' ? 'selected' : ''}>Low</option>
+        <option value="medium" ${securityFilter.verdict === 'medium' ? 'selected' : ''}>Medium</option>
         <option value="error" ${securityFilter.verdict === 'error' ? 'selected' : ''}>Error</option>
         <option value="skipped" ${securityFilter.verdict === 'skipped' ? 'selected' : ''}>Skipped</option>
       </select>
@@ -1705,6 +2245,10 @@ async function renderSecurityTab() {
       <button id="sec-refresh" class="btn">${iconRefresh()}Refresh</button>
     </div>
     ${securityLegendHTML()}
+    <details id="sec-rules" class="sec-rules" open>
+      <summary>Rule hits <span class="meta">whole audit window · all kinds · independent of the feed filters</span></summary>
+      <div id="sec-rules-body"></div>
+    </details>
     <div id="sec-table"></div>
   </div></div>`;
   // kind and range change the SERVER query (a new window is a new query:
@@ -1770,13 +2314,38 @@ async function unblockAllSessions() {
   }
 }
 
-// refreshSecurityData reloads the audit table and both guard cards. Shared by
+// refreshSecurityData reloads the audit table and the guard cards. Shared by
 // the first mount and every tab re-entry (which keeps the rendered cards on
 // screen instead of re-flashing the loading skeleton).
 function refreshSecurityData() {
   loadSecurity();
   loadSecurityAdjudications();
   loadSecurityBlocks();
+  loadSecurityRules();
+}
+
+// loadSecurityRules feeds the Rule-hits leaderboard: a second audit query
+// with FIXED parameters (no kind, no from — the whole 30d retention — at the
+// backend's 1000-row cap), deliberately independent of the Activity filters.
+// The feed's kind/range selects go server-side on ITS query; sharing that
+// response would let a feed filter silently re-scope the leaderboard (narrow
+// the feed to path hits and every secret rule would vanish from the ops
+// view). Same stale-on-failure contract as the other loaders: banner part
+// "rules", old data stays on screen.
+async function loadSecurityRules() {
+  const seq = ++securityRulesSeq;
+  let resp;
+  try {
+    resp = await apiGet('/api/security?limit=1000');
+  } catch (e) {
+    if (seq !== securityRulesSeq) return;
+    securityRefreshFail('rules');
+    return;
+  }
+  if (seq !== securityRulesSeq) return;
+  securityRulesData.records = resp.records || [];
+  securityRefreshOk('rules');
+  commitSecurityRender();
 }
 
 // loadSecurityAdjudications feeds the AI-verdict half of the KPI row and
@@ -1799,26 +2368,32 @@ async function loadSecurityAdjudications() {
   securityAdjudicationEnabled = !!(resp && resp.enabled);
   securityKpiData.stats = (resp && resp.stats) || {};
   securityFeedData.adjudications = recs;
-  renderSecurityKpis();
-  renderSecurityFeed();
-  renderRuleLeaderboard();
+  commitSecurityRender();
 }
 
-// renderRuleLeaderboard paints the rule-ops card: per-rule hit counts over
-// the current feed window (audit records + suppressed low verdicts, which
-// carry no audit record). Pattern rules piling up hits while the AI second
-// opinion is OFF get the "enable adjudicate" hint — high-frequency
-// false-positive rules are exactly the channel's use case (the threshold
-// avoids hinting on one-off hits). Rows are drill targets: clicking one
-// narrows the Activity feed to that rule (click again / the chip ✕ clears).
+// renderRuleLeaderboard paints the rule-ops table INSIDE Activity (the
+// collapsible #sec-rules section above the feed): per-rule hit counts over
+// the whole audit window from the leaderboard's OWN unfiltered audit slice
+// (see loadSecurityRules — the Activity kind/range filters must not change
+// these counts) plus suppressed low verdicts from the ring. Pattern rules
+// piling up hits while the AI second opinion is OFF get the "enable
+// adjudicate" hint — high-frequency false-positive rules are exactly the
+// channel's use case (the threshold avoids hinting on one-off hits). Rows
+// are drill targets: clicking one narrows the Activity feed to that rule
+// (click again / the chip ✕ clears). Only the body div is rewritten — the
+// <details> wrapper (and the user's open/collapsed choice) survives data
+// refreshes; an empty leaderboard hides the section entirely.
 function renderRuleLeaderboard() {
-  const el = document.getElementById('sec-rules');
-  if (!el) return;
-  const rows = ruleHitsLeaderboard(securityFeedData.records, securityFeedData.adjudications);
+  const wrap = document.getElementById('sec-rules');
+  const el = document.getElementById('sec-rules-body');
+  if (!wrap || !el) return;
+  const rows = ruleHitsLeaderboard(securityRulesData.records, securityFeedData.adjudications);
   if (!rows.length) {
+    wrap.hidden = true;
     el.innerHTML = '';
     return;
   }
+  wrap.hidden = false;
   const top = rows.slice(0, 8);
   const kindBadge = { secret: 'warn', path: '', drift: 'muted' };
   const body = top.map((r) => {
@@ -1833,43 +2408,30 @@ function renderRuleLeaderboard() {
       <td class="mono">${esc(r.lastTs ? fmtMs(r.lastTs) : '—')}${hint}</td>
     </tr>`;
   }).join('');
-  el.innerHTML = `<div class="card">
-    <header class="card-head"><span class="card-head-title"><h2>Rule hits</h2><span class="meta">current feed window · audit records + suppressed lows</span></span></header>
-    <div class="card-body">
-    <table class="table">
-      <thead><tr><th>rule</th><th>kind</th><th class="num">hits</th><th>last seen</th></tr></thead>
-      <tbody>${body}</tbody>
-    </table>
-  </div></div>`;
+  el.innerHTML = `<table class="table">
+    <thead><tr><th>rule</th><th>kind</th><th class="num">hits</th><th>last seen</th></tr></thead>
+    <tbody>${body}</tbody>
+  </table>`;
   el.querySelectorAll('tr.sec-rule').forEach((tr) => {
-    tr.onclick = () => setSecurityRule(securityFilter.rule === tr.dataset.rule ? '' : tr.dataset.rule);
+    tr.onclick = (e) => {
+      // The second click of a double-click (text selection) must not re-toggle
+      // the filter: click one already re-rendered this row away, and running
+      // the action again mid-gesture destroys the selection being made.
+      if (e.detail > 1) return;
+      setSecurityRule(securityFilter.rule === tr.dataset.rule ? '' : tr.dataset.rule);
+    };
   });
 }
 
-// loadSecurityBlocks renders the persisted session-block table with
-// per-row unblock (DELETE /api/security/blocks/<id>); errors surface the
-// backend message, success refreshes both guard cards. The session cell is
-// a session-link: blocked-session → "what did it send" is the natural
-// investigation path, and the hash drill lands on the Requests tab with
-// that session pinned (Back returns to Security).
-async function loadSecurityBlocks() {
+// paintSecurityBlocks renders the persisted session-block table from stored
+// data (called by securityRenderAll). The session cell is a session-link:
+// blocked-session → "what did it send" is the natural investigation path,
+// and the hash drill lands on the Requests tab with that session pinned
+// (Back returns to Security).
+function paintSecurityBlocks() {
   const el = document.getElementById('sec-blocks');
   if (!el) return;
-  let resp;
-  try {
-    resp = await apiGet('/api/security/blocks');
-  } catch (e) {
-    // Keep the last successful table on screen; only a first-load failure
-    // (nothing rendered yet) shows the inline error card.
-    if (securityRefreshFail('blocks') && !el.querySelector('table')) {
-      el.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
-    }
-    return;
-  }
-  securityRefreshOk('blocks');
-  const blocks = (resp && resp.blocks) || [];
-  securityKpiData.blocks = blocks;
-  renderSecurityKpis();
+  const blocks = securityKpiData.blocks || [];
   const all = document.getElementById('sec-unblock-all');
   if (all) all.hidden = blocks.length === 0;
   if (!blocks.length) {
@@ -1890,6 +2452,9 @@ async function loadSecurityBlocks() {
   <tbody>${rows}</tbody></table>`;
   el.querySelectorAll('tr').forEach((tr) => {
     tr.onclick = (e) => {
+      // Same double-click guard as the rule leaderboard: the second click of
+      // a selection gesture must not re-fire the drill navigation.
+      if (e.detail > 1) return;
       const session = sessionLinkClick(e);
       if (session) location.hash = '#requests?' + requestsFilterQuery({ session });
     };
@@ -1908,6 +2473,28 @@ async function loadSecurityBlocks() {
       }
     };
   });
+}
+
+// loadSecurityBlocks fetches the persisted session blocks (with per-row
+// unblock, DELETE /api/security/blocks/<id>); errors surface the backend
+// message. Painting goes through the gated commit like every loader.
+async function loadSecurityBlocks() {
+  const el = document.getElementById('sec-blocks');
+  if (!el) return;
+  let resp;
+  try {
+    resp = await apiGet('/api/security/blocks');
+  } catch (e) {
+    // Keep the last successful table on screen; only a first-load failure
+    // (nothing rendered yet) shows the inline error card.
+    if (securityRefreshFail('blocks') && !el.querySelector('table')) {
+      el.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+    }
+    return;
+  }
+  securityRefreshOk('blocks');
+  securityKpiData.blocks = (resp && resp.blocks) || [];
+  commitSecurityRender();
 }
 
 async function loadSecurity() {
@@ -1941,40 +2528,141 @@ async function loadSecurity() {
   securityAuditOn = !!resp.enabled;
   securityFeedSkipped = resp.skipped || 0;
   securityFeedData.records = resp.records || [];
+  // Server-side verdict aggregation over the same window (the KPI tiles read
+  // this; counting the client-merged feed drifted with the in-memory ring).
+  securityKpiData.counts = resp.counts || null;
   securityRefreshOk('security');
-  renderSecurityFeed();
-  renderSecurityKpis();
+  commitSecurityRender();
 }
 
-// analyzeSecurityHit toggles the inline analysis row under an audit record:
-// on expand it fetches /api/security/explain ON DEMAND (never prefetched) and
-// renders located, highlighted match snippets; a second click collapses.
-async function analyzeSecurityHit(btn, rec) {
-  const tr = btn.closest('tr');
-  const next = tr.nextElementSibling;
-  if (next && next.classList.contains('sec-detail')) {
-    next.remove();
+// analyzeSecurityHit toggles one row's inline analysis expansion: on expand
+// it fetches /api/security/explain ON DEMAND (never prefetched) and renders
+// located, highlighted match snippets; a second click collapses (the trigger
+// is a click on the row itself — there is no button column). The open
+// state rides securityExpanded, so the feed re-render that follows a Refresh
+// or auto-refresh tick restores the expansion instead of silently collapsing
+// it. Rows sharing one key (same request + kind + names — e.g. repeated
+// cached verdicts of one request) share one expansion.
+function analyzeSecurityHit(tr, key, rec) {
+  if (!rec || !key) return;
+  if (securityExpanded.has(key)) {
+    securityExpanded.delete(key);
+    removeSecurityDetail(key);
     return;
   }
+  securityExpanded.add(key);
+  insertSecurityDetail(tr, key, rec);
+}
+
+
+// insertSecurityDetail builds the expansion row under tr. A cached result
+// paints immediately; anything else (nothing yet, or a fetch still in flight)
+// parks an "analyzing…" placeholder that the fetch's settle handler fills.
+function insertSecurityDetail(tr, key, rec) {
   const detailTr = document.createElement('tr');
   detailTr.className = 'sec-detail';
+  detailTr.dataset.secKey = key;
   const td = document.createElement('td');
-  td.colSpan = 8;
-  td.innerHTML = '<span class="hint">analyzing…</span>';
+  td.colSpan = 7;
+  const cached = securityExplainCache.get(key);
+  if (cached && typeof cached.then !== 'function') {
+    td.innerHTML = securityExplainHTML(cached);
+  } else {
+    td.innerHTML = '<span class="hint">analyzing…</span>';
+    securityExplainFor(key, rec);
+  }
   detailTr.appendChild(td);
   tr.after(detailTr);
+}
+
+// removeSecurityDetail drops the expansion row(s) for one key (toggle-off).
+function removeSecurityDetail(key) {
+  for (const tr of document.querySelectorAll('#sec-table tr.sec-detail')) {
+    if (tr.dataset.secKey === key) tr.remove();
+  }
+}
+
+// securityExplainFor returns the (possibly still in-flight) explain result
+// for key, fetching it at most once: the promise itself is cached so a
+// re-render's restore racing the original click shares one request. On
+// settle the promise entry is swapped for the result (dropped on error) and
+// every connected expansion row is painted — the row the fetch started
+// under may have been replaced by a re-render in the meantime.
+function securityExplainFor(key, rec) {
+  const hit = securityExplainCache.get(key);
+  if (hit) return hit;
   const q = new URLSearchParams({
     request_id: rec.requestId,
     kind: rec.kind,
     name: (rec.names || []).join(','),
   });
-  try {
-    const resp = await apiGet('/api/security/explain?' + q.toString());
-    // The row may have been re-rendered (Refresh) while the fetch flew.
-    if (!td.isConnected) return;
-    td.innerHTML = securityExplainHTML(resp);
-  } catch (e) {
-    if (td.isConnected) td.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+  const p = apiGet('/api/security/explain?' + q.toString()).then(
+    (resp) => {
+      securityExplainSet(key, resp);
+      paintSecurityDetail(key);
+      return resp;
+    },
+    (e) => {
+      securityExplainCache.delete(key);
+      paintSecurityDetail(key, `<div class="msg err">${esc(e.message || String(e))}</div>`);
+      return null;
+    },
+  );
+  securityExplainSet(key, p);
+  return p;
+}
+
+// securityExplainSet stores a result or in-flight promise and keeps the cache
+// bounded: oldest-first eviction, skipping keys with a live expansion (their
+// entry is what the next restore paints from).
+function securityExplainSet(key, value) {
+  securityExplainCache.delete(key);
+  securityExplainCache.set(key, value);
+  while (securityExplainCache.size > SECURITY_EXPLAIN_CACHE_MAX) {
+    let evicted = false;
+    for (const k of securityExplainCache.keys()) {
+      if (securityExpanded.has(k)) continue;
+      securityExplainCache.delete(k);
+      evicted = true;
+      break;
+    }
+    if (!evicted) break; // everything resident is expanded — let the cap slide
+  }
+}
+
+// paintSecurityDetail writes rendered explain HTML (or a ready-made error
+// block) into every connected expansion row for key. html omitted = paint
+// from cache ("analyzing…" placeholder while the entry is still a promise).
+function paintSecurityDetail(key, html) {
+  for (const tr of document.querySelectorAll('#sec-table tr.sec-detail')) {
+    if (tr.dataset.secKey !== key) continue;
+    const cached = securityExplainCache.get(key);
+    tr.cells[0].innerHTML = html !== undefined
+      ? html
+      : (cached && typeof cached.then !== 'function' ? securityExplainHTML(cached) : '<span class="hint">analyzing…</span>');
+  }
+}
+
+// restoreSecurityDetails re-inserts the expansions the user opened before
+// this table rebuild (Refresh / auto-refresh / filter change wiped them with
+// the innerHTML swap). Row→tr correlation goes through the HTML-safe row
+// index (data-sec-i), never the explain key itself. One expansion per key:
+// the first row carrying it wins, so repeated identical rows (cached verdict
+// floods) show one canonical detail instead of one per row.
+function restoreSecurityDetails(rows) {
+  const idxByKey = new Map();
+  (rows || []).forEach((r, i) => {
+    if (!r.requestId || (r.kind !== 'secret' && r.kind !== 'path')) return;
+    const key = explainCacheKey(r.requestId, r.kind, r.names);
+    if (!idxByKey.has(key)) idxByKey.set(key, i);
+  });
+  for (const key of securityExpanded) {
+    const i = idxByKey.get(key);
+    if (i === undefined) continue;
+    const tr = document.querySelector(`#sec-table tr[data-sec-i="${i}"]`);
+    if (!tr) continue;
+    if (tr.nextElementSibling && tr.nextElementSibling.classList.contains('sec-detail')) continue;
+    insertSecurityDetail(tr, key, rows[i]);
   }
 }
 
@@ -7445,6 +8133,8 @@ window.addEventListener('resize', () => {
     // The sticky session views' heights ride the trace SVG's aspect ratio,
     // so the table-header offset they feed (--sess-h) goes stale on resize.
     document.querySelectorAll('.sess-sticky').forEach((el) => syncSessThOffset(el));
+    // A taller/shorter viewport shows more/fewer virtualized request rows.
+    if (reqVirt) reqFrame(reqVirt);
   }, 150);
 });
 

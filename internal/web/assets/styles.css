@@ -167,11 +167,15 @@ h3 { font-size: 0.8125rem; }
 .icon-chevron { transition: transform .15s ease; }
 
 /* ---------- top bar ---------- */
+/* Solid by design, not just taste: the topbar is sticky over every table, and
+   a backdrop-filter (frosted glass) forces the compositor to re-blur whatever
+   scrolls/repaints beneath it — mouse text selection under the bar drives that
+   repaint continuously (edge auto-scroll + incremental selection paint) and
+   turns selection into visible jank. A solid bar repaints nothing per frame. */
 .topbar {
   position: sticky; top: 0; z-index: 40;
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  background: var(--surface);
   border-bottom: 1px solid var(--border-2);
-  backdrop-filter: saturate(1.4) blur(8px);
 }
 .topbar-row {
   max-width: 1240px;
@@ -292,8 +296,14 @@ main {
 
 /* Config tab: vertical rhythm between stacked cards. */
 #tab-config > .card { margin-bottom: 16px; }
-#tab-security > .card { margin-bottom: 16px; }
-#tab-security > .an-kpis { margin-bottom: 16px; }
+/* Security paints its KPI row and Rule-hits card through loader-owned host
+   divs (#sec-kpis / #sec-rules are what the 30s tick repaints), so that
+   content sits one level below the tab — reach in for the same rhythm. The
+   selectors only match when the host actually rendered content, so an empty
+   #sec-rules (no hits in the window) leaves no stray gap. */
+#tab-security > .card,
+#tab-security > #sec-kpis > .an-kpis,
+#tab-security > #sec-rules > .card { margin-bottom: 16px; }
 
 /* ---------- status pills (v1 API kept: ok/warn/err/muted) ---------- */
 .pill {
@@ -387,6 +397,11 @@ main {
 .req-row.req-row-err > td { background: color-mix(in srgb, var(--err) 5%, transparent); }
 .req-row.req-row-err:hover > td { background: color-mix(in srgb, var(--err) 8%, transparent); }
 .req-detail-row > td { background: var(--surface-2); padding: 10px 14px; }
+/* Virtualized rows: spacer rows keep the scrollbar sized to the whole
+   loaded list while only the viewport window stays in the DOM. */
+.table tbody tr.req-spacer td { padding: 0; border-bottom: 0; }
+.table tbody tr.req-spacer, .table tbody tr.req-spacer:hover { background: transparent; }
+.req-count { margin-top: 8px; }
 .req-rec { font-size: 0.75rem; }
 .req-rec + .req-rec { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-2); }
 .req-rec > .hint { margin-bottom: 6px; }
@@ -485,13 +500,70 @@ main {
    feed by that rule); the active rule carries the indicator-bar selection
    language, like every selected state in v2. */
 tr.sec-rule { cursor: pointer; }
+/* Selection tint spans every cell, but the indicator bar is ONE bar at the
+   row's left edge: the box-shadow is per-td, and applying it to every cell
+   draws a stray accent line at each column boundary. Inset shadow (not
+   border-left) so border-collapse layout doesn't shift. */
 tr.sec-rule.sel > td {
   background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+tr.sec-rule.sel > td:first-child {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 tr.sec-detail > td { background: var(--surface-2); }
-.sec-explain-match { margin: 8px 0; }
-.sec-snippet { max-height: 160px; margin-top: 6px; }
+/* Activity rows with an analyzable hit toggle their analyze expansion on row
+   click (no button column) — the pointer cursor marks them clickable. */
+tr.sec-row { cursor: pointer; }
+/* analyze expansion: verdict summary first, then one card per rule. The td
+   sits on --surface-2, so cards render on --surface to read as raised. */
+/* Rule hits: a collapsible section INSIDE the Activity card (between the
+   legend and the feed table it filters) — summary reads as a section title,
+   the body div is the only part data refresh rewrites (open/collapsed state
+   lives on the <details> and survives). */
+details.sec-rules { margin: 0 0 12px; padding: 0 0 8px; border-bottom: 1px solid var(--border); }
+details.sec-rules > summary { cursor: pointer; font-size: 0.8rem; color: var(--text); }
+details.sec-rules > summary .meta { margin-left: 6px; font-size: 0.75rem; color: var(--muted); font-family: var(--mono); }
+details.sec-rules #sec-rules-body { margin-top: 8px; }
+details.sec-rules table { margin-bottom: 0; }
+/* Security drill link (Activity row -> pinned request view) and the pinned
+   view's detail spacing. */
+.drill-link { color: var(--accent); text-decoration: none; font-size: 0.75rem; }
+.drill-link:hover { text-decoration: underline; }
+.req-drill-detail { margin-top: 10px; }
+.sec-explain { display: grid; gap: 8px; }
+.sec-explain-adj {
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-inner);
+  padding: 8px 10px;
+  display: grid;
+  gap: 5px;
+}
+.sec-explain-adj-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.sec-explain-adj-row .badge { flex: none; }
+.sec-explain-adj-row .sec-explain-reason { color: var(--text); }
+.sec-explain-rule {
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-inner);
+  padding: 8px 10px;
+  display: grid;
+  gap: 6px;
+}
+.sec-explain-rule-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.sec-explain-note { font-size: 0.8125rem; }
+.sec-explain-occ { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: start; }
+.sec-explain-occ-n { color: var(--muted); font-size: 0.75rem; font-family: var(--mono); padding-top: 2px; }
+/* Snippets are ~160-byte windows of raw body: wrap them (a wide table cell
+   must not force horizontal scrolling) but keep the hit visibly marked. */
+.sec-snippet {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin-top: 0;
+}
 .sec-snippet mark {
   background: color-mix(in srgb, var(--accent) 28%, transparent);
   color: var(--text);
@@ -1409,7 +1481,10 @@ dialog {
   width: calc(100% - 32px);
   box-shadow: var(--shadow-3);
 }
-dialog::backdrop { background: rgba(8,12,20,.5); backdrop-filter: blur(3px); }
+/* No backdrop-filter anywhere (see .topbar): Windows Chromium's D3D raster
+   path turns continuous repaint-under-blur (mouse text selection) into
+   visible multi-second stalls; the translucent overlay alone is enough. */
+dialog::backdrop { background: rgba(8,12,20,.55); }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 14px 18px; border-bottom: 1px solid var(--border-2);

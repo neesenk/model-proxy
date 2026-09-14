@@ -1559,7 +1559,9 @@ export function securityRangeFromSecs(value, nowMs = Date.now()) {
 // (only non-default values — an unfiltered tab stays a clean #security).
 // securityFilterFromQuery reads them back: null when the hash carries no
 // filter keys (a bare #security must not clobber an in-memory filter), junk
-// enum values dropping back to their defaults.
+// enum values dropping back to their defaults. 'low' is not a valid verdict
+// filter: the feed never renders low rows, so a stale verdict=low link
+// degrades to the unfiltered view.
 export function securityFilterQuery(f) {
   if (!f) return '';
   const q = new URLSearchParams();
@@ -1577,7 +1579,7 @@ export function securityFilterFromQuery(params) {
   if (!has) return null;
   return {
     kind: ['secret', 'path', 'drift'].includes(params.kind) ? params.kind : '',
-    verdict: ['high', 'low', 'error', 'skipped'].includes(params.verdict) ? params.verdict : '',
+    verdict: ['high', 'medium', 'error', 'skipped'].includes(params.verdict) ? params.verdict : '',
     range: ['24h', '7d', '30d'].includes(params.range) ? params.range : 'all',
     rule: params.rule || '',
   };
@@ -1606,8 +1608,9 @@ export function mergeSecurityFeed(records, adjudications) {
       action: r.action || '', verdict: r.verdict || '',
       agent: r.agent || '', exposed: r.exposed || '',
       detail: r.detail || '', requestId: r.request_id || '',
+      reason: r.reason || '', evidence: r.evidence || '',
       strength: r.kind === 'path' ? pathStrengthFromAction(r.action) : '',
-      judge: '', cached: false, sessionId: '',
+      judge: r.model || '', cached: false, sessionId: r.session_id || '',
     };
     rows.push(row);
     if (row.verdict && row.requestId) {
@@ -1624,6 +1627,8 @@ export function mergeSecurityFeed(records, adjudications) {
       dup.judge = a.model || dup.judge;
       dup.cached = dup.cached || !!a.cached;
       dup.sessionId = dup.sessionId || a.session_id || '';
+      dup.reason = dup.reason || a.reason || '';
+      dup.evidence = dup.evidence || a.evidence || '';
       continue;
     }
     rows.push({
@@ -1631,6 +1636,7 @@ export function mergeSecurityFeed(records, adjudications) {
       action: a.action || '', verdict: a.verdict || '',
       agent: '', exposed: a.model || '',
       detail: a.reason || '', requestId: a.request_id || '',
+      reason: a.reason || '', evidence: a.evidence || '',
       sessionId: a.session_id || '', cached: !!a.cached, strength: '',
       judge: a.model || '',
     });
@@ -1641,18 +1647,17 @@ export function mergeSecurityFeed(records, adjudications) {
 
 // securityKpisHTML renders the Security page's summary tile row (the
 // an-kpis design-system grid): blocked-session count plus the verdict
-// digest. Verdict counts come from the MERGED feed (deduped by
-// mergeSecurityFeed), never the in-memory ring alone — audit records with a
-// verdict survive restarts while the 256-entry ring does not, and the tiles
-// must agree with the feed rendered right below them. The LLM-usage tiles
+// digest. Verdict counts are the SERVER-side aggregation over the same audit
+// window (/api/security counts: SQL GROUP BY in the SQLite store, plus the
+// cumulative low counter from guard_stats.json) — they must NOT be counted
+// from the client-merged feed: that blend included the in-memory ring's
+// cached-replay rows and drifted on every restart. The LLM-usage tiles
 // render only when the adjudication channel is (or was) active; a disabled
 // channel shows one "off" tile instead of two permanent zeros.
-export function securityKpisHTML(blocks, feed, stats, adjudicationOn) {
+export function securityKpisHTML(blocks, counts, stats, adjudicationOn) {
   const bl = blocks || [];
-  const c = { high: 0, low: 0, error: 0, skipped: 0 };
-  for (const r of feed || []) {
-    if (r && c[r.verdict] !== undefined) c[r.verdict]++;
-  }
+  const c = counts || {};
+  const num = (v) => Number(v) || 0;
   const st = stats || {};
   const inTok = Number(st.input_tokens) || 0;
   const outTok = Number(st.output_tokens) || 0;
@@ -1664,9 +1669,10 @@ export function securityKpisHTML(blocks, feed, stats, adjudicationOn) {
     : tile('llm adjudication', 'off', false, 'guard.adjudicate not configured');
   return `<div class="an-kpis">` +
     tile('blocked sessions', fmtNum(bl.length), bl.length > 0) +
-    tile('high verdicts', fmtNum(c.high), c.high > 0) +
-    tile('low (suppressed)', fmtNum(c.low), false) +
-    tile('errors', fmtNum(c.error + c.skipped), c.error + c.skipped > 0) +
+    tile('high verdicts', fmtNum(num(c.high)), num(c.high) > 0) +
+    tile('medium verdicts', fmtNum(num(c.medium)), false, 'recorded, no session block') +
+    tile('low (suppressed)', fmtNum(num(c.low)), false, 'ignored tier — cumulative (rows ring-only)') +
+    tile('errors', fmtNum(num(c.error) + num(c.skipped)), num(c.error) + num(c.skipped) > 0) +
     llm +
     `</div>`;
 }
@@ -1677,7 +1683,7 @@ export function securityLegendHTML() {
   const actions = SECURITY_ACTION_HELP.map((a) => `<li><code>${esc(a.name)}</code> — ${esc(a.text)}</li>`).join('');
   return `<details class="sec-legend"><summary>What do these records mean?</summary>` +
     `<ul>${kinds}</ul><div class="hint">action:</div><ul>${actions}</ul>` +
-    `<div class="hint">Matched content is never stored in the audit log (deliberate). Use analyze on a row to re-scan the original request and locate each hit.</div></details>`;
+    `<div class="hint">Matched content is never stored in the audit log (deliberate). Click a row to re-scan the original request and locate each hit.</div></details>`;
 }
 
 // SECURITY_EXPLAIN_STATUS_NOTES maps /api/security/explain statuses to the
@@ -1690,38 +1696,70 @@ export const SECURITY_EXPLAIN_STATUS_NOTES = {
   scanner_unavailable: 'The current generation has no guard scanner (guard disabled or scanner build failed).',
 };
 
-// securityExplainHTML renders one /api/security/explain result: per located
-// match a header (name + strength badge + explanation + regex/source) and a
-// context window with the hit highlighted. The window arrives pre-split
-// (pre/hit/post strings) — never byte offsets, which would not survive the
-// Go-bytes → JS-UTF-16 boundary. Every interpolated value is escaped.
+// explainCacheKey is the stable identity of one analyze expansion — the
+// explain endpoint's query triple (request_id, kind, names), name-order
+// normalized so the same audit/AI row yields one key across re-renders.
+// app.js keys the open-expansion set and the explain cache by it.
+export function explainCacheKey(requestId, kind, names) {
+  const ns = Array.isArray(names) ? [...names] : [names];
+  ns.sort();
+  return `${requestId || ''}\u0000${kind || ''}\u0000${ns.join(',')}`;
+}
+
+// securityExplainHTML renders one /api/security/explain result: the LLM
+// adjudication summary first (the "why" of the verdict), then one card per
+// rule name — rule identity (name + strength + explanation + regex/source)
+// once, followed by each located occurrence with the hit highlighted in its
+// context window (numbered when a rule fired more than once; the backend
+// caps occurrences per name). Matches arrive offset-sorted, so occurrences
+// of different rules interleave — grouping is done here. The window arrives
+// pre-split (pre/hit/post strings) — never byte offsets, which would not
+// survive the Go-bytes → JS-UTF-16 boundary. Every interpolated value is
+// escaped.
 export function securityExplainHTML(result) {
   if (!result || typeof result !== 'object') return '';
   const note = SECURITY_EXPLAIN_STATUS_NOTES[result.status];
   let out = note ? `<div class="msg hint">${esc(note)}</div>` : '';
   const adj = Array.isArray(result.adjudications) ? result.adjudications : [];
   if (adj.length) {
-    const vBadge = { high: 'err', low: 'ok', error: 'warn', skipped: 'muted' };
+    const vBadge = { high: 'err', medium: 'warn', low: 'ok', error: 'warn', skipped: 'muted' };
     out += `<div class="sec-explain-adj"><div class="hint">LLM adjudication:</div>` + adj.map((a) =>
-      `<div><code>${esc(a.rule)}</code> <span class="badge ${vBadge[a.verdict] || ''}">${esc(a.verdict)}</span>` +
-      `${a.cached ? ' <span class="badge muted">cached</span>' : ''}${a.model ? ` <span class="hint">${esc(a.model)}</span>` : ''}` +
-      `${a.reason ? ` — ${esc(a.reason)}` : ''}</div>`).join('') + `</div>`;
+      `<div class="sec-explain-adj-row"><span class="badge ${vBadge[a.verdict] || ''}">${esc(a.verdict)}</span>` +
+      `<code>${esc(a.rule)}</code>` +
+      `${a.cached ? '<span class="badge muted">cached</span>' : ''}` +
+      `${a.model ? `<span class="hint">${esc(a.model)}</span>` : ''}` +
+      `${a.reason ? `<span class="sec-explain-reason">${esc(a.reason)}</span>` : ''}</div>` +
+      `${a.evidence ? `<div class="sec-explain-note">evidence: ${esc(a.evidence)}</div>` : ''}`).join('') + `</div>`;
   }
   const matches = Array.isArray(result.matches) ? result.matches : [];
   if (!matches.length && !note) return '<div class="msg hint">Nothing to show.</div>';
+  const groups = new Map();
   for (const m of matches) {
-    const strength = m.strength ? ` <span class="badge ${m.strength === 'strong' ? 'warn' : 'muted'}">${esc(m.strength)}</span>` : '';
-    const rule = m.regex ? `<div class="hint">regex <code>${esc(m.regex)}</code>${m.source ? ` · source: ${esc(m.source)}` : ''}</div>` : '';
-    const explanation = m.explanation ? `<div class="hint">${esc(m.explanation)}</div>` : '';
-    let body = '';
-    if (m.located && (m.pre !== undefined || m.hit !== undefined)) {
-      body = `<pre class="log-pre body-pre sec-snippet">${esc(m.pre)}<mark>${esc(m.hit)}</mark>${esc(m.post)}</pre>`;
-    } else if (!m.located) {
-      body = '<div class="hint">not re-located in the stored request body</div>';
-    }
-    out += `<div class="sec-explain-match"><div><code>${esc(m.name)}</code>${strength}</div>${explanation}${rule}${body}</div>`;
+    if (!m || typeof m !== 'object') continue;
+    const g = groups.get(m.name);
+    if (g) g.push(m);
+    else groups.set(m.name, [m]);
   }
-  return out;
+  for (const [name, occ] of groups) {
+    const first = occ[0];
+    const strength = first.strength ? ` <span class="badge ${first.strength === 'strong' ? 'warn' : 'muted'}">${esc(first.strength)}</span>` : '';
+    const rule = first.regex ? `<div class="hint">regex <code>${esc(first.regex)}</code>${first.source ? ` · source: ${esc(first.source)}` : ''}</div>` : '';
+    const explanation = first.explanation ? `<div class="sec-explain-note">${esc(first.explanation)}</div>` : '';
+    let occs = '';
+    occ.forEach((m, i) => {
+      let body = '';
+      if (m.located && (m.pre !== undefined || m.hit !== undefined)) {
+        body = `<pre class="log-pre body-pre sec-snippet">${esc(m.pre)}<mark>${esc(m.hit)}</mark>${esc(m.post)}</pre>`;
+      } else if (!m.located) {
+        body = '<div class="hint">not re-located in the stored request body</div>';
+      }
+      if (!body) return;
+      const label = occ.length > 1 ? `<span class="sec-explain-occ-n">#${i + 1}</span>` : '';
+      occs += `<div class="sec-explain-occ">${label}${body}</div>`;
+    });
+    out += `<div class="sec-explain-rule"><div class="sec-explain-rule-head"><code>${esc(name)}</code>${strength}</div>${explanation}${rule}${occs}</div>`;
+  }
+  return `<div class="sec-explain">${out}</div>`;
 }
 
 // ===========================================================================
@@ -2335,6 +2373,87 @@ export function requestRowHTML(row, opts) {
     <td class="num${slow ? ' warn' : ''}">${lat}</td>
     <td class="num">${tk}</td>
   </tr>`;
+}
+
+// ---------- virtualized request table ----------
+//
+// Pure math for the Requests tab's scroll windowing (DOM side in app.js):
+// the table keeps only the rows near the viewport in the DOM and spacer
+// rows carry the height of the unloaded gaps, so the page scrollbar always
+// reflects the whole loaded list.
+
+// cumulativeOffsets turns per-row heights into running tops: offsets[i] is
+// the top of row i and offsets[n] the total height.
+export function cumulativeOffsets(heights) {
+  const out = [0];
+  let acc = 0;
+  for (let i = 0; i < heights.length; i += 1) {
+    const h = Number(heights[i]);
+    acc += Number.isFinite(h) && h > 0 ? h : 0;
+    out.push(acc);
+  }
+  return out;
+}
+
+// virtualWindow returns the inclusive {first,last} index range whose rows
+// intersect [viewTop - overscan, viewBottom + overscan] (binary search over
+// the cumulative offsets), or null when no row is in range — empty list,
+// degenerate viewport, or the table scrolled fully past.
+export function virtualWindow(offsets, viewTop, viewBottom, overscan) {
+  const n = offsets.length - 1;
+  if (n <= 0 || !(viewBottom > viewTop)) return null;
+  const top = viewTop - (overscan || 0);
+  const bottom = viewBottom + (overscan || 0);
+  let lo = 0, hi = n - 1, first = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (offsets[mid + 1] > top) { first = mid; hi = mid - 1; } else { lo = mid + 1; }
+  }
+  if (first === -1) return null;
+  lo = first; hi = n - 1;
+  let last = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (offsets[mid] < bottom) { last = mid; lo = mid + 1; } else { hi = mid - 1; }
+  }
+  if (last < first) return null;
+  return { first, last };
+}
+
+// mergeRecordsPages merges an older page into the loaded newest-first list.
+// Keyset pagination refetches the whole boundary SECOND (to= is inclusive at
+// second granularity), so duplicate ids drop here; order stays newest-first
+// by parsed ts with the already-loaded record winning ties.
+export function mergeRecordsPages(loaded, page) {
+  const base = loaded || [];
+  const seen = new Set();
+  for (const r of base) if (r && r.request_id) seen.add(r.request_id);
+  const added = [];
+  for (const r of page || []) {
+    if (!r || !r.request_id || seen.has(r.request_id)) continue;
+    seen.add(r.request_id);
+    added.push(r);
+  }
+  if (!added.length) return { records: base, added: 0 };
+  const tsOf = (r) => {
+    const t = Date.parse(r.ts);
+    return Number.isFinite(t) ? t : 0;
+  };
+  const records = base.concat(added).sort((a, b) => tsOf(b) - tsOf(a));
+  return { records, added: added.length };
+}
+
+// oldestTsSec is the to= bound for fetching the next older page: the oldest
+// loaded record's unix second. That second is re-fetched and deduped by id
+// (mergeRecordsPages), so nothing between pages can slip through. Null when
+// no record carries a parsable ts.
+export function oldestTsSec(records) {
+  let min = Infinity;
+  for (const r of records || []) {
+    const t = Date.parse(r && r.ts);
+    if (Number.isFinite(t) && t < min) min = t;
+  }
+  return Number.isFinite(min) ? Math.floor(min / 1000) : null;
 }
 
 // ---------- request detail chat view ----------

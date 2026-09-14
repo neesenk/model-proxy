@@ -10,6 +10,7 @@ import {
   verdictBadge, modelCapMatrix, providerCapsSummary, providerFrozen, providerNames,
   ruleHitsLeaderboard,
   sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary,
+  cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   cacheHitRate, settingsDiff, settingsRestartKeys,
   TOKEN_RANGES, tokenRangeBounds, tokenRangeLabel, tokensRangeQuery,
@@ -30,7 +31,7 @@ import {
   quotaErrKind, accountUsageState,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
   securityKpisHTML, mergeSecurityFeed, SECURITY_RANGES, securityRangeFromSecs,
-  securityFilterQuery, securityFilterFromQuery,
+  securityFilterQuery, securityFilterFromQuery, explainCacheKey,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
   iconPin, iconRefresh, iconChevron, statusBadgeClass, statusBadgeHTML,
   kpiDeltaClass, logLineHTML,
@@ -1255,18 +1256,18 @@ test('pathStrengthFromAction maps log-weak to weak, configured actions to strong
 });
 
 test('securityKpisHTML summarizes blocks, verdict counts and LLM usage', () => {
-  // Verdict counts come from the MERGED feed rows (not the ring alone) —
-  // this is exactly the restart story: audit records with a verdict persist
-  // while the ring empties.
-  const feed = [
-    { verdict: 'high' }, { verdict: 'high' }, { verdict: 'low' },
-    { verdict: 'low' }, { verdict: 'low' }, { verdict: 'error' }, { verdict: 'skipped' },
-  ];
-  const stats = { calls: 7, input_tokens: 12345, output_tokens: 678 };
-  const html = securityKpisHTML([{ session_id: 's' }], feed, stats, true);
+  // Verdict counts come from the SERVER-side aggregation (/api/security
+  // counts — SQL GROUP BY over the audit store plus the cumulative low
+  // counter), never from counting the client-merged feed: that blend
+  // included the in-memory ring's cached-replay rows and drifted on restart.
+  const counts = { high: 2, medium: 1, low: 2, error: 1, skipped: 1 };
+  const stats = { calls: 7, input_tokens: 12345, output_tokens: 678, low_verdicts: 2 };
+  const html = securityKpisHTML([{ session_id: 's' }], counts, stats, true);
   if (!html.includes('blocked sessions') || !html.includes('>1<')) throw new Error('blocked tile');
   if (!html.includes('high verdicts') || !html.includes('>2<')) throw new Error('high tile');
-  if (!html.includes('low (suppressed)') || !html.includes('>3<')) throw new Error('low tile');
+  if (!html.includes('medium verdicts') || !html.includes('>1<')) throw new Error('medium tile');
+  if (!html.includes('recorded, no session block')) throw new Error('medium tile description');
+  if (!html.includes('low (suppressed)') || !html.includes('>2<')) throw new Error('low tile');
   if (!html.includes('errors') || !html.includes('>2<')) throw new Error('errors tile (error+skipped)');
   if (!html.includes('llm calls') || !html.includes('>7<')) throw new Error('llm calls tile');
   if (!html.includes('llm tokens')) throw new Error('llm tokens tile');
@@ -1274,16 +1275,49 @@ test('securityKpisHTML summarizes blocks, verdict counts and LLM usage', () => {
   if (!html.includes('in 12.3K') || !html.includes('out 678')) throw new Error('token split detail line');
   if (!html.includes('class="v err"')) throw new Error('non-zero blocked/high must use the err accent');
   // zero-state: no err accents anywhere, tokens tile renders 0
-  const clean = securityKpisHTML([], [], {}, true);
+  const clean = securityKpisHTML([], {}, {}, true);
   if (clean.includes('class="v err"')) throw new Error('zero state must not use err accent');
   if (!clean.includes('>0<')) throw new Error('zero calls tile');
   // adjudication channel off and never used: one "off" tile instead of two
   // permanent zeros (past usage still shows the real tiles)
-  const off = securityKpisHTML([], [], {}, false);
+  const off = securityKpisHTML([], {}, {}, false);
   if (!off.includes('llm adjudication') || !off.includes('>off<')) throw new Error('off tile');
   if (off.includes('llm calls') || off.includes('llm tokens')) throw new Error('off state must drop the usage tiles');
-  const past = securityKpisHTML([], [], { calls: 3, input_tokens: 10, output_tokens: 5 }, false);
+  const past = securityKpisHTML([], {}, { calls: 3, input_tokens: 10, output_tokens: 5 }, false);
   if (!past.includes('llm calls') || !past.includes('>3<')) throw new Error('past usage keeps the real tiles');
+});
+
+test('securityExplainHTML renders verdict badges and per-verdict evidence', () => {
+  const html = securityExplainHTML({
+    status: 'ok',
+    adjudications: [
+      { rule: 'ssh', verdict: 'medium', reason: 'tool call touches key path', evidence: 'bash argument references ~/.ssh/id_rsa', model: 'glm-5.3-flash' },
+      { rule: 'jwt', verdict: 'high', reason: 'live token shape' },
+    ],
+    matches: [{ name: 'ssh', located: true, pre: 'x', hit: 'id_rsa', post: 'y' }],
+  });
+  if (!/>medium</.test(html)) throw new Error('medium verdict badge');
+  if (!/badge warn[^>]*>medium</.test(html)) throw new Error('medium must use the warn badge');
+  if (!html.includes('evidence: bash argument references ~/.ssh/id_rsa')) throw new Error('evidence row');
+  const count = (html.match(/evidence:/g) || []).length;
+  if (count !== 1) throw new Error(`evidence rows = ${count}, want exactly 1 (jwt has none)`);
+});
+
+test('mergeSecurityFeed carries the LLM verdict attribution for the drill views', () => {
+  const rows = mergeSecurityFeed(
+    [
+      { ts: 300, kind: 'secret', names: ['ssh'], action: 'log', request_id: 'r1', verdict: 'medium', reason: 'tool call touches key path', evidence: 'bash argument references ~/.ssh/id_rsa', model: 'glm-5.3-flash', session_id: 's1' },
+    ],
+    [
+      { ts: 100, kind: 'secret', rule: 'ssh', verdict: 'medium', reason: 'tool call touches key path', evidence: 'bash argument references ~/.ssh/id_rsa', model: 'glm-5.3-flash', request_id: 'r1', session_id: 's1', cached: true },
+    ],
+  );
+  if (rows.length !== 1) throw new Error('ring entry must fold into the audit row');
+  const r = rows[0];
+  if (r.reason !== 'tool call touches key path') throw new Error('reason must ride the merged row');
+  if (r.evidence !== 'bash argument references ~/.ssh/id_rsa') throw new Error('evidence must ride the merged row');
+  if (r.judge !== 'glm-5.3-flash') throw new Error('model attribution');
+  if (r.sessionId !== 's1') throw new Error('session attribution');
 });
 
 test('mergeSecurityFeed interleaves audit and AI rows, newest first, normalized', () => {
@@ -1354,9 +1388,13 @@ test('security filter query round-trips through the URL hash', () => {
   if (!back || back.kind !== 'secret' || back.verdict !== 'high' || back.range !== '7d' || back.rule !== 'openai_api_key') throw new Error('round-trip');
   if (securityFilterFromQuery({}) !== null) throw new Error('no keys → null (bare hash must not clobber the filter)');
   if (securityFilterFromQuery(null) !== null) throw new Error('null params');
-  // junk enum values drop back to defaults, free-text rule survives
+  // junk enum values drop back to defaults, free-text rule survives; 'low'
+  // is junk for the verdict filter — the feed never renders low rows, so a
+  // stale verdict=low bookmark must land on the unfiltered view
   const junk = securityFilterFromQuery({ kind: 'bogus', verdict: 'nope', range: '99d', rule: 'my_rule' });
   if (!junk || junk.kind !== '' || junk.verdict !== '' || junk.range !== 'all' || junk.rule !== 'my_rule') throw new Error('junk handling');
+  const lowLink = securityFilterFromQuery({ verdict: 'low' });
+  if (!lowLink || lowLink.verdict !== '') throw new Error('stale verdict=low degrades to unfiltered');
 });
 
 test('securityRangeFromSecs maps window presets to unix-second bounds', () => {
@@ -1440,6 +1478,49 @@ test('securityExplainHTML status notes cover non-ok statuses', () => {
   }
   assert.equal(securityExplainHTML(null), '');
   assert.equal(securityExplainHTML({ status: 'ok', matches: [] }), '<div class="msg hint">Nothing to show.</div>');
+});
+
+test('explainCacheKey normalizes name order and copies the input array', () => {
+  const a = explainCacheKey('r1', 'secret', ['openai_api_key', 'ssh']);
+  const b = explainCacheKey('r1', 'secret', ['ssh', 'openai_api_key']);
+  assert.equal(a, b, 'same record with reordered names must share one key');
+  assert.notEqual(a, explainCacheKey('r2', 'secret', ['openai_api_key', 'ssh']), 'different request');
+  assert.notEqual(a, explainCacheKey('r1', 'path', ['openai_api_key', 'ssh']), 'different kind');
+  const names = ['a', 'b'];
+  explainCacheKey('r', 'secret', names);
+  assert.deepEqual(names, ['a', 'b'], 'input array must not be sorted in place');
+  assert.ok(explainCacheKey('', 'secret', ['x']).startsWith('\u0000'), 'empty request id stays distinct from a real one');
+});
+
+test('securityExplainHTML groups interleaved occurrences under one rule card', () => {
+  const html = securityExplainHTML({
+    status: 'ok',
+    matches: [
+      { name: 'ssh', strength: 'strong', located: true, pre: 'a', hit: '~/.ssh', post: 'b' },
+      { name: 'openai_api_key', located: true, pre: 'x', hit: 'sk-…-ab', post: 'y' },
+      { name: 'ssh', strength: 'strong', located: true, pre: 'c', hit: '~/id_rsa', post: 'd' },
+    ],
+  });
+  const firstSsh = html.indexOf('~/.ssh');
+  const apiKey = html.indexOf('sk-…-ab');
+  const secondSsh = html.indexOf('~/id_rsa');
+  assert.ok(firstSsh >= 0 && apiKey >= 0 && secondSsh >= 0, 'all occurrences rendered');
+  // grouping is the point: one rule's occurrences render adjacently in its
+  // card instead of staying interleaved in body-offset order
+  assert.ok(firstSsh < secondSsh && secondSsh < apiKey, 'same-rule occurrences group into one card');
+  // one rule card per name: identity and explanation appear once, occurrences numbered
+  assert.equal(html.split('sec-explain-rule-head').length - 1, 2, 'two rule cards');
+  assert.ok(html.includes('#1') && html.includes('#2'), 'occurrences numbered when a rule fired twice');
+  assert.ok(!html.includes('#1') || !html.includes('#3'), 'no phantom third occurrence');
+});
+
+test('securityExplainHTML single occurrences render without an index label', () => {
+  const html = securityExplainHTML({
+    status: 'ok',
+    matches: [{ name: 'ssh', located: true, pre: 'a', hit: '~/.ssh', post: 'b' }],
+  });
+  assert.ok(!html.includes('sec-explain-occ-n'), 'one occurrence needs no #1 label');
+  assert.ok(html.includes('<mark>~/.ssh</mark>'));
 });
 
 // ---------------------------------------------------------------------------
@@ -2061,6 +2142,58 @@ test('requestRowHTML cache badge shows the hit share and highlights at 80%', () 
   assert.ok(!cool.includes('tok-cache hot'), 'low share stays muted');
   const none = requestRowHTML({ requestId: 'c', ts: 1, status: 200, input: 10, output: 5 }, { rowClass: 'req-row' });
   assert.ok(!/cache/.test(none), 'no cache read → no note');
+});
+
+test('virtual table windowing: cumulative offsets and the visible range', () => {
+  const offsets = cumulativeOffsets([10, 10, 10, 10, 10]);
+  assert.deepEqual(offsets, [0, 10, 20, 30, 40, 50]);
+  // Variable heights fold in order; non-positive entries contribute nothing.
+  assert.deepEqual(cumulativeOffsets([20, 0, 30]), [0, 20, 20, 50]);
+  assert.deepEqual(cumulativeOffsets([]), [0]);
+  // Viewport covering rows 1-2 plus 10px overscan pulls 0..3.
+  assert.deepEqual(virtualWindow(offsets, 10, 30, 10), { first: 0, last: 3 });
+  // Strictly inside row 2 with no overscan: exactly row 2.
+  assert.deepEqual(virtualWindow(offsets, 21, 29, 0), { first: 2, last: 2 });
+  // Viewport above/below the table, degenerate viewport, empty table.
+  assert.equal(virtualWindow(offsets, -50, -10, 0), null);
+  assert.equal(virtualWindow(offsets, 60, 90, 0), null);
+  assert.equal(virtualWindow(offsets, 40, 40, 0), null);
+  assert.equal(virtualWindow([0], 0, 100, 0), null);
+});
+
+test('mergeRecordsPages dedupes the boundary second and keeps newest-first', () => {
+  const loaded = [
+    { request_id: 'a', ts: '2026-08-20T12:00:03Z' },
+    { request_id: 'b', ts: '2026-08-20T12:00:02Z' },
+  ];
+  // Keyset pagination refetches the whole boundary second: b comes back.
+  const page = [
+    { request_id: 'b', ts: '2026-08-20T12:00:02Z' },
+    { request_id: 'c', ts: '2026-08-20T12:00:01Z' },
+  ];
+  const out = mergeRecordsPages(loaded, page);
+  assert.equal(out.added, 1);
+  assert.deepEqual(out.records.map((r) => r.request_id), ['a', 'b', 'c']);
+  // Re-merging the same page adds nothing and does not mutate order.
+  const again = mergeRecordsPages(out.records, page);
+  assert.equal(again.added, 0);
+  assert.deepEqual(again.records.map((r) => r.request_id), ['a', 'b', 'c']);
+  // An out-of-order page still lands newest-first.
+  const fresh = mergeRecordsPages([], [
+    { request_id: 'x', ts: '2026-08-20T11:00:00Z' },
+    { request_id: 'y', ts: '2026-08-20T12:59:00Z' },
+  ]);
+  assert.deepEqual(fresh.records.map((r) => r.request_id), ['y', 'x']);
+  assert.equal(fresh.added, 2);
+});
+
+test('oldestTsSec floors the oldest loaded record to whole seconds', () => {
+  const sec = Math.floor(Date.parse('2026-08-20T11:59:58Z') / 1000);
+  assert.equal(oldestTsSec([{ ts: '2026-08-20T12:00:03Z' }, { ts: '2026-08-20T11:59:58Z' }]), sec);
+  assert.equal(oldestTsSec([{ ts: '2026-08-20T12:00:03Z' }]), Math.floor(Date.parse('2026-08-20T12:00:03Z') / 1000));
+  assert.equal(oldestTsSec([]), null);
+  assert.equal(oldestTsSec([{ ts: 'not-a-time' }]), null);
+  assert.equal(oldestTsSec(null), null);
 });
 
 test('ttft rides the bar summary and session health p50', () => {

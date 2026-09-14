@@ -445,8 +445,11 @@ func TestWebAssetsRequestsSessionContract(t *testing.T) {
 		"raw request body (",
 		// All three request tables (Requests tab, Live ring, Live session
 		// view) render through the one shared row renderer; bytes columns
-		// are gone in favor of the token cell with cache read.
-		"rows += requestRowHTML(persistedSummaryRow(r), {",
+		// are gone in favor of the token cell with cache read. The Requests
+		// tab rows are pooled per request id and mounted window-by-window
+		// (virtual scrolling) — still the same renderer, just not one big
+		// string per table.
+		"holder.innerHTML = requestRowHTML(persistedSummaryRow(rec), {",
 		// Health chips row + relative-time context on the detail hint.
 		"sessionSummaryHTML(s, o, sessionHealthSummary(rows))",
 		"function requestRelTimeOpts(id)",
@@ -550,6 +553,95 @@ func TestWebAssetsRequestsSessionContract(t *testing.T) {
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js missing shared session-view marker %q", want)
+		}
+	}
+}
+
+// TestWebAssetsRequestsVirtualScrollContract protects the Requests tab's
+// virtualized table: a small default page (50) with scroll-driven older
+// pages via to= keyset pagination, and a DOM that only carries the viewport
+// window of rows (spacers keep the scrollbar sized). These are wiring facts
+// (DOM behavior node cannot observe), pinned at their exact call sites.
+func TestWebAssetsRequestsVirtualScrollContract(t *testing.T) {
+	js := mustWebAsset(t, "app.js")
+	pure := mustWebAsset(t, "pure.js")
+	css := mustWebAsset(t, "styles.css")
+	// Default page sizes: browse 50 (scroll loads older), session drill-down
+	// keeps its deeper 500 window; paging stops at the backend's 1000 cap.
+	for _, want := range []string{
+		"const REQ_BROWSE_LIMIT = 50;",
+		"const REQ_SESSION_LIMIT = 500;",
+		"const REQ_MAX_LOADED = 1000;",
+		"requestsFilter.session ? REQ_SESSION_LIMIT : REQ_BROWSE_LIMIT",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing virtual-scroll limit marker %q", want)
+		}
+	}
+	// Keyset pagination: the older page reuses the exact filter params and
+	// sets to=oldest second; the boundary-second duplicates dedupe through
+	// mergeRecordsPages (pure.js, behavior-tested).
+	for _, want := range []string{
+		"function reqFilterParams()",
+		"const to = oldestTsSec(v.recs);",
+		"q.set('to', String(to));",
+		"q.set('limit', String(v.pageSize));",
+		"const merged = mergeRecordsPages(v.recs, page);",
+		"v.more = page.length >= v.pageSize && v.recs.length < REQ_MAX_LOADED;",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing keyset-pagination marker %q", want)
+		}
+	}
+	// Window rendering: scroll listener must be capture-phase + rAF
+	// coalesced (scroll does not bubble; sync DOM work in the handler janks
+	// the frame), reconcile must skip unchanged windows, and spacer rows
+	// must keep the scroll geometry (class pinned in styles.css too).
+	for _, want := range []string{
+		"const win = virtualWindow(v.offsets,",
+		"if (key === v.key) return;",
+		"v.tbody.replaceChildren(frag);",
+		"frag.appendChild(reqSpacer(gap));",
+		"}, true);",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing window-render marker %q", want)
+		}
+	}
+	// Pinned open details + timeline reveals must survive window moves, and
+	// pooled rows' chunk/raw-body state must be freed when the table is
+	// rebuilt (pooled nodes may be detached from the container).
+	for _, want := range []string{
+		"tr.classList.contains('req-open')",
+		"v.revealId = id;",
+		"function reqTearDown(v)",
+		"dropRawBodies(node);",
+		"function reqRowForId(id)",
+		"function reqDetailChanged()",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing pinned-detail marker %q", want)
+		}
+	}
+	// Pure windowing helpers stay in pure.js (behavior coverage lives in
+	// jstests/pure.test.mjs) and the spacer row styling must neutralize the
+	// generic tbody hover/border rules.
+	for _, want := range []string{
+		"export function cumulativeOffsets(",
+		"export function virtualWindow(",
+		"export function mergeRecordsPages(",
+		"export function oldestTsSec(",
+	} {
+		if !strings.Contains(pure, want) {
+			t.Errorf("pure.js missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"tr.req-spacer td { padding: 0; border-bottom: 0; }",
+		"tr.req-spacer, .table tbody tr.req-spacer:hover { background: transparent; }",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("styles.css missing spacer marker %q", want)
 		}
 	}
 }
