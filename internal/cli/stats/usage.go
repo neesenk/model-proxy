@@ -68,7 +68,7 @@ func PrintProviderUsage(cfg *configdomain.Config, provName string) {
 			}
 			fmt.Printf("%s (%s)\n", display.Bold(display.Cyan(a.Label)), accounts.Mask(a.ID))
 			cred := a.Credentials()
-			if p := providerbuild.BuildOne(cfg, buildOpts(), provName, prov, cred); p != nil {
+			if p := providerbuild.BuildOne(cfg, providerbuild.BuildOpts(), provName, prov, cred); p != nil {
 				if err := p.Usage(); err != nil {
 					fmt.Println(display.Yellow("  (usage unavailable: " + err.Error() + ")"))
 				}
@@ -77,7 +77,7 @@ func PrintProviderUsage(cfg *configdomain.Config, provName string) {
 		return
 	}
 	// Single-account / non-pooled / aqp / codex: build one provider + call Usage.
-	provMap := providerbuild.BuildProviders(cfg, accountStore(), buildOpts()).Providers
+	provMap := providerbuild.BuildProviders(cfg, accountStore(), providerbuild.BuildOpts()).Providers
 	p := provMap[provName]
 	if p == nil {
 		return
@@ -109,15 +109,6 @@ func accountStore() accounts.Store {
 		usageStoreKey = home
 	}
 	return usageStore
-}
-
-func buildOpts() providerbuild.BuildOptions {
-	return providerbuild.BuildOptions{
-		HomeDir:                  homeDir(),
-		CodexCLIVersion:          providerbuild.CodexCLIVersion,
-		CodexCacheVersion:        providerbuild.CodexCacheVersion,
-		ListArkAgentPlanModelIDs: providerbuild.ListArkAgentPlanModelIDs,
-	}
 }
 
 func homeDir() string {

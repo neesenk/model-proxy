@@ -251,7 +251,7 @@ func ProviderImplFor(cfg *configdomain.Config, provName string) (provider.Provid
 	if _, ok := cfg.Providers[provName]; !ok {
 		return nil, fmt.Errorf("unknown provider %q", provName)
 	}
-	provMap := providerbuild.BuildProviders(cfg, accountStore(), buildOpts()).Providers
+	provMap := providerbuild.BuildProviders(cfg, accountStore(), providerbuild.BuildOpts()).Providers
 	target := provName
 	if vids, pooled := PoolVirtuals(cfg, provName); pooled {
 		target = vids[0]
