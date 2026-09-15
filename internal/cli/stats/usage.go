@@ -4,12 +4,12 @@ package stats
 import (
 	"fmt"
 	"model-proxy/internal/accounts"
+	cliframework "model-proxy/internal/cli/framework"
 	"model-proxy/internal/display"
 	"model-proxy/internal/providerbuild"
 	"os"
 	"sort"
 	"strings"
-	"sync"
 
 	configdomain "model-proxy/internal/config"
 )
@@ -94,24 +94,11 @@ const UsageDivider = "───────────────────�
 
 // --- usage-local environment seams and display helpers ---
 
-var (
-	usageStoreMu  sync.Mutex
-	usageStoreKey string
-	usageStore    accounts.Store
-)
+// accountStoreLazy is the shared CLI seam (cli/framework): the credential
+// store is cached keyed by the current home directory so tests can isolate
+// HOME (t.Setenv) before first use.
+var accountStoreLazy cliframework.LazyAccountStore
 
 func accountStore() accounts.Store {
-	home := homeDir()
-	usageStoreMu.Lock()
-	defer usageStoreMu.Unlock()
-	if home != usageStoreKey {
-		usageStore = accounts.NewStore(home)
-		usageStoreKey = home
-	}
-	return usageStore
-}
-
-func homeDir() string {
-	h, _ := os.UserHomeDir()
-	return h
+	return accountStoreLazy.Get()
 }
