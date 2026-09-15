@@ -55,7 +55,7 @@ fi
 # Historical packages below the repository-wide baseline have an explicit
 # floor. Unlike a blanket exemption, this makes any regression fail while the
 # remaining gap stays visible. Raise a floor whenever durable tests improve it.
-historical_floor_packages=" model-proxy model-proxy/internal/cli model-proxy/internal/cli/framework model-proxy/internal/cli/login model-proxy/internal/cli/models model-proxy/internal/cli/serve model-proxy/internal/httpx model-proxy/internal/targetexec model-proxy/scripts/soak "
+historical_floor_packages=" model-proxy model-proxy/internal/cli model-proxy/internal/cli/framework model-proxy/internal/cli/login model-proxy/internal/cli/models model-proxy/internal/cli/serve model-proxy/internal/httpx model-proxy/internal/targetexec model-proxy/scripts/soak model-proxy/scripts/e2eguard "
 coverage_floor_for() {
   case "$1" in
     # Root package main is process-entry/composition-only (signal/listener/
@@ -75,6 +75,11 @@ coverage_floor_for() {
     # main_test.go. Floor re-measured under go1.27 (statement-counting drift
     # vs the go1.26-era 56.7).
     model-proxy/scripts/soak) echo "55.0" ;;
+    # Same harness shape as soak: main() is an os.Exit wrapper, scenarios
+    # drive a live daemon over HTTP. Measured 80.1% under go1.27 locally but
+    # 79.3% under the CI-pinned go1.26 (statement-counting drift, pitfalls
+    # #33) — the CI measurement is the authoritative floor.
+    model-proxy/scripts/e2eguard) echo "79.3" ;;
     *) echo "$baseline" ;;
   esac
 }
