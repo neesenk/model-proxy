@@ -532,17 +532,28 @@ func TestGuardAdjudication_RepeatHighContentIntercepted(t *testing.T) {
 
 	// The interception is attributed: an audit record with verdict=high and
 	// action=block exists for the repeat (beyond the seeded verdict record).
+	// The audit logger writes on its own goroutine (seclog.Enqueue), so the
+	// record may lag the 400 response — poll for it instead of racing the
+	// first read (flaked under the CI race runner).
 	highBlock := 0
-	for _, r := range readSeclogRecords(t, home) {
-		if r.Verdict == "high" && r.Action == "block" {
-			highBlock++
-			if strings.Contains(r.Detail, adjudDummyKey) {
-				t.Error("interception record leaked the matched bytes")
+	deadline := time.Now().Add(3 * time.Second)
+	for highBlock == 0 && time.Now().Before(deadline) {
+		for _, r := range readSeclogRecords(t, home) {
+			if r.Verdict == "high" && r.Action == "block" {
+				highBlock++
 			}
+		}
+		if highBlock == 0 {
+			time.Sleep(3 * time.Millisecond)
 		}
 	}
 	if highBlock == 0 {
-		t.Error("no action=block verdict=high record for the intercepted repeat")
+		t.Fatal("no action=block verdict=high record for the intercepted repeat")
+	}
+	for _, r := range readSeclogRecords(t, home) {
+		if r.Verdict == "high" && r.Action == "block" && strings.Contains(r.Detail, adjudDummyKey) {
+			t.Error("interception record leaked the matched bytes")
+		}
 	}
 
 	// The index persists hash-only: rebuild the service over the same state
