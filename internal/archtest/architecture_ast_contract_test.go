@@ -948,7 +948,11 @@ func productionGoFilesRecursively(t *testing.T, root string) []string {
 		}
 		if entry.IsDir() {
 			switch entry.Name() {
-			case ".git", "testdata", "vendor":
+			// .worktree holds git-ignored scratch checkouts (e.g. the nightly
+			// job's worktree): walking into one counts every production call
+			// site twice and trips the single-owner contracts on copies of
+			// the very tree under test.
+			case ".git", ".worktree", "testdata", "vendor":
 				return fs.SkipDir
 			}
 			return nil

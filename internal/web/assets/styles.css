@@ -302,7 +302,7 @@ main {
    selectors only match when the host actually rendered content, so an empty
    #sec-rules (no hits in the window) leaves no stray gap. */
 #tab-security > .card,
-#tab-security > #sec-kpis > .an-kpis,
+#tab-security > #sec-kpis > .kpi-grid,
 #tab-security > #sec-rules > .card { margin-bottom: 16px; }
 
 /* ---------- status pills (v1 API kept: ok/warn/err/muted) ---------- */
@@ -377,6 +377,16 @@ main {
   z-index: 5;
   box-shadow: inset 0 -1px 0 var(--border-2);
 }
+/* The three request tables (Requests / Live ring / Live session view) pin
+   their column geometry to the shared colgroup (pure.js
+   requestTableHeadHTML): the Requests table virtualizes its rows and the
+   Live tables re-render on every SSE event, so auto layout would re-derive
+   column widths from whichever rows happen to be mounted — the columns
+   visibly jitter while scrolling. Fixed layout keeps every window identical;
+   unbreakable mono overflow wraps inside its column instead of stretching
+   it (anywhere only bites when a token genuinely does not fit). */
+#req-table .table, #live-table .table, #live-session-panel .table { table-layout: fixed; }
+#req-table .table td, #live-table .table td, #live-session-panel .table td { overflow-wrap: anywhere; }
 .table tbody tr { transition: background-color .1s ease; }
 .table tbody tr:hover { background: color-mix(in srgb, var(--surface-2) 70%, var(--surface)); }
 .table tr:last-child td { border-bottom: none; }
@@ -1582,10 +1592,15 @@ dialog::backdrop { background: rgba(8,12,20,.55); }
      overflow-x card-body ancestor). */
   .table th { position: static; box-shadow: none; border-bottom: 1px solid var(--border-2); }
   .card-body { overflow-x: auto; }
+  /* Fixed-layout request tables (colgroup geometry) would otherwise squeeze
+     eight columns into a phone-width card; a min-width keeps the columns
+     usable and lets the card-body scroll them horizontally like the other
+     wide tables. */
+  #req-table .table, #live-table .table, #live-session-panel .table { min-width: 720px; }
   .sess-sticky { position: static; margin: 0; padding: 0; border-bottom: none; }
   /* The dashboard KPI row pins 6 columns on desktop; at phone widths each
      cell would collapse to ~55px. Two columns keep the numbers readable. */
-  .dash-wrap .an-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dash-wrap .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 560px) {
@@ -1687,13 +1702,18 @@ dialog::backdrop { background: rgba(8,12,20,.55); }
   padding: 1px 5px;
 }
 
-.an-kpis {
+/* KPI stat tiles: the shared design-system component for headline metrics
+   (Dashboard / Analytics / Security). One .kpi-grid of .kpi tiles, each
+   label (.k) + big mono value (.v) + small detail line (.d); the value
+   carries the semantic color (.v.err) and the detail line the delta
+   semantics (up=ok, down/flat=muted, bad-increase=err). */
+.kpi-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
   margin-bottom: 14px;
 }
-.an-kpi {
+.kpi {
   background: var(--surface);
   border: 1px solid var(--border-2);
   border-radius: var(--r-card);
@@ -1701,21 +1721,20 @@ dialog::backdrop { background: rgba(8,12,20,.55); }
   padding: 12px 14px;
   min-width: 0;
 }
-.an-kpi .k {
+.kpi .k {
   font-size: 0.6875rem;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: .05em;
   font-weight: 600;
+  white-space: nowrap;
 }
-.an-kpi .v { font-family: var(--mono); font-size: 1.1875rem; font-variant-numeric: tabular-nums; margin-top: 3px; }
-.an-kpi .v.err { color: var(--err-fg); }
-/* v2 delta semantics: up=ok, down/flat=muted, bad-increase (failures rising)
-   = err. */
-.an-kpi .d { font-size: 0.6875rem; font-family: var(--mono); color: var(--muted); margin-top: 3px; }
-.an-kpi .d.up   { color: var(--ok-fg); }
-.an-kpi .d.bad  { color: var(--err-fg); }
-.an-kpi .note {
+.kpi .v { font-family: var(--mono); font-size: 1.1875rem; font-variant-numeric: tabular-nums; margin-top: 3px; }
+.kpi .v.err { color: var(--err-fg); }
+.kpi .d { font-size: 0.6875rem; font-family: var(--mono); color: var(--muted); margin-top: 3px; }
+.kpi .d.up   { color: var(--ok-fg); }
+.kpi .d.bad  { color: var(--err-fg); }
+.kpi .note {
   font-size: 0.6875rem;
   font-family: var(--mono);
   color: var(--warn-fg);
@@ -1948,7 +1967,7 @@ dialog::backdrop { background: rgba(8,12,20,.55); }
 .an-tip .lab { max-width: 150px; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
 .an-tip .row span:last-child { margin-left: auto; padding-left: 12px; }
 
-.dash-wrap .an-kpis { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.dash-wrap .kpi-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 /* Dashboard pane header: names the fixed window so the numbers are readable
    at a glance (KPI deltas compare against the hour before it). Same title +
    inline meta pairing as .card-head-title, without the card chrome. */

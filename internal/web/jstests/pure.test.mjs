@@ -1292,28 +1292,31 @@ test('securityKpisHTML summarizes blocks, verdict counts and LLM usage', () => {
   const counts = { high: 2, medium: 1, low: 2, error: 1, skipped: 1 };
   const stats = { calls: 7, input_tokens: 12345, output_tokens: 678, low_verdicts: 2 };
   const html = securityKpisHTML([{ session_id: 's' }], counts, stats, true);
-  if (!html.includes('blocked sessions') || !html.includes('>1<')) throw new Error('blocked tile');
-  if (!html.includes('high verdicts') || !html.includes('>2<')) throw new Error('high tile');
-  if (!html.includes('medium verdicts') || !html.includes('>1<')) throw new Error('medium tile');
-  if (!html.includes('recorded, no session block')) throw new Error('medium tile description');
-  if (!html.includes('low (suppressed)') || !html.includes('>2<')) throw new Error('low tile');
-  if (!html.includes('errors') || !html.includes('>2<')) throw new Error('errors tile (error+skipped)');
-  if (!html.includes('llm calls') || !html.includes('>7<')) throw new Error('llm calls tile');
-  if (!html.includes('llm tokens')) throw new Error('llm tokens tile');
+  if (!html.includes('class="kpi-grid"') || !html.includes('class="kpi"')) throw new Error('shared KPI tile component (.kpi-grid/.kpi)');
+  if (!html.includes('blocked sessions') || !html.includes('>1<')) throw new Error('blocked stat');
+  if (!html.includes('high verdicts') || !html.includes('>2<')) throw new Error('high stat');
+  if (!html.includes('medium verdicts') || !html.includes('>1<')) throw new Error('medium stat');
+  if (!html.includes('no session block')) throw new Error('medium stat description');
+  // The low tier is deliberately absent from the strip (suppressed noise) —
+  // it still counts in Rule hits and the JSONL trail.
+  if (/suppressed|low \(/.test(html)) throw new Error('low tier must not render as a KPI stat');
+  if (!html.includes('errors') || !html.includes('>2<')) throw new Error('errors stat (error+skipped)');
+  if (!html.includes('llm calls') || !html.includes('>7<')) throw new Error('llm calls stat');
+  if (!html.includes('llm tokens')) throw new Error('llm tokens stat');
   if (!html.includes('13K')) throw new Error('token total uses compact format (12345+678=13023)');
   if (!html.includes('in 12.3K') || !html.includes('out 678')) throw new Error('token split detail line');
   if (!html.includes('class="v err"')) throw new Error('non-zero blocked/high must use the err accent');
-  // zero-state: no err accents anywhere, tokens tile renders 0
+  // zero-state: no err accents anywhere, tokens stat renders 0
   const clean = securityKpisHTML([], {}, {}, true);
   if (clean.includes('class="v err"')) throw new Error('zero state must not use err accent');
-  if (!clean.includes('>0<')) throw new Error('zero calls tile');
-  // adjudication channel off and never used: one "off" tile instead of two
-  // permanent zeros (past usage still shows the real tiles)
+  if (!clean.includes('>0<')) throw new Error('zero calls stat');
+  // adjudication channel off and never used: one "off" stat instead of two
+  // permanent zeros (past usage still shows the real stats)
   const off = securityKpisHTML([], {}, {}, false);
-  if (!off.includes('llm adjudication') || !off.includes('>off<')) throw new Error('off tile');
-  if (off.includes('llm calls') || off.includes('llm tokens')) throw new Error('off state must drop the usage tiles');
+  if (!off.includes('llm adjudication') || !off.includes('>off<')) throw new Error('off stat');
+  if (off.includes('llm calls') || off.includes('llm tokens')) throw new Error('off state must drop the usage stats');
   const past = securityKpisHTML([], {}, { calls: 3, input_tokens: 10, output_tokens: 5 }, false);
-  if (!past.includes('llm calls') || !past.includes('>3<')) throw new Error('past usage keeps the real tiles');
+  if (!past.includes('llm calls') || !past.includes('>3<')) throw new Error('past usage keeps the real stats');
 });
 
 test('securityExplainHTML renders verdict badges and per-verdict evidence', () => {
@@ -2108,6 +2111,13 @@ test('unified request table: one head and row renderer for all three tables', ()
   assert.equal((head.match(/<th[ >]/g) || []).length, 8, '8 columns');
   assert.ok(head.includes('Tokens In / Out'), 'token column replaces bytes');
   assert.ok(!/req bytes|resp bytes/.test(head), 'bytes columns are gone');
+  // Fixed geometry: the colgroup pins every column's share (8 cols summing
+  // to 100%) so virtual scrolling / live re-renders cannot re-derive column
+  // widths from the mounted rows (scroll jitter). styles.css pairs it with
+  // table-layout: fixed on the three request tables.
+  const widths = [...head.matchAll(/<col style="width:(\d+)%"\/>/g)].map((m) => Number(m[1]));
+  assert.equal(widths.length, 8, 'colgroup pins all 8 columns');
+  assert.equal(widths.reduce((a, b) => a + b, 0), 100, 'column shares sum to 100%');
   // A full row: session link, status badge, tokens with cache read.
   const row = requestRowHTML({
     requestId: 'r1', ts: 5000, session: 'sess-abcd1234', agent: 'claude-code',

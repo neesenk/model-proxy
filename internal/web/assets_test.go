@@ -568,6 +568,11 @@ func TestWebAssetsRequestsSessionContract(t *testing.T) {
 		"svg.setPointerCapture(start.id)",
 		"function syncSessThOffset(",
 		"syncSessThOffset(host);",
+		// Clearing the session filter hides the pinned view through the SAME
+		// re-sync: skipping it leaves --sess-h at the pinned view's stale
+		// height and the sticky th floats that many px below the topbar, a
+		// transparent gap where scrolled rows bleed through.
+		"if (!requestsFilter.session) { host.hidden = true; host.innerHTML = ''; syncSessThOffset(host); return; }",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js missing shared session-view marker %q", want)
@@ -657,10 +662,21 @@ func TestWebAssetsRequestsVirtualScrollContract(t *testing.T) {
 	for _, want := range []string{
 		"tr.req-spacer td { padding: 0; border-bottom: 0; }",
 		"tr.req-spacer, .table tbody tr.req-spacer:hover { background: transparent; }",
+		// The request tables ride a fixed colgroup geometry (pure.js
+		// requestTableHeadHTML): auto layout re-derives column widths from
+		// whichever rows the window has mounted, so the columns jittered
+		// while scrolling. table-layout: fixed pins every window to the
+		// same split.
+		"#req-table .table, #live-table .table, #live-session-panel .table { table-layout: fixed; }",
 	} {
 		if !strings.Contains(css, want) {
 			t.Errorf("styles.css missing spacer marker %q", want)
 		}
+	}
+	// The colgroup is the single geometry source shared by all three request
+	// tables; dropping it (or the fixed layout above) reopens scroll jitter.
+	if !strings.Contains(pure, "<colgroup><col ") {
+		t.Errorf("pure.js requestTableHeadHTML missing fixed column geometry (colgroup)")
 	}
 }
 

@@ -1025,7 +1025,10 @@ function hideRequestsSessionSummary() {
 function renderRequestsSessionSummary(combos) {
   const host = document.getElementById('req-session-summary');
   if (!host) return;
-  if (!requestsFilter.session) { host.hidden = true; host.innerHTML = ''; return; }
+  // Clearing the session filter must re-export the th offset too: without
+  // the sync, --sess-h keeps the pinned view's last measured height and the
+  // sticky header leaves a gap strip where scrolled rows show through.
+  if (!requestsFilter.session) { host.hidden = true; host.innerHTML = ''; syncSessThOffset(host); return; }
   const agg = (combos.sessions || []).find((s) => s.session_id === requestsFilter.session) || null;
   const rows = (combos.lastRecords || []).map(persistedSummaryRow);
   // The SAME session view the Live panel renders (chips + trace timeline —
@@ -2253,7 +2256,7 @@ async function renderSecurityTab() {
   // feed table right below it.
   panel.innerHTML = `<div id="sec-kpis"></div>
   <div class="card">
-    <header class="card-head"><span class="card-head-title"><h2>Blocked sessions</h2><span class="meta">high verdicts + exact matches · persist until unblocked</span></span><span class="card-head-side"><button id="sec-unblock-all" class="btn danger" hidden>unblock all</button></span></header>
+    <header class="card-head"><span class="card-head-title"><h2>Blocked sessions</h2><span class="meta">high verdicts + exact matches · persist until unblocked</span></span><span class="card-head-side"><button id="sec-unblock-all" class="btn danger" hidden>Unblock all</button></span></header>
     <div class="card-body">
     <div id="sec-blocks"><span class="hint">loading…</span></div>
   </div></div>
@@ -4412,7 +4415,7 @@ function renderDashboardSection(main) {
         <span class="meta">trailing 60-minute window · per-minute buckets by model · deltas vs the hour before</span>
       </header>
       <div id="dash-error" class="msg err" hidden></div>
-      <div id="dash-kpis" class="an-kpis"></div>
+      <div id="dash-kpis" class="kpi-grid"></div>
       <div class="an-chart-card">
         <div class="an-chart-head">
           <div class="an-seg" id="dash-metric" role="group" aria-label="Metric"></div>
@@ -7867,7 +7870,7 @@ function analyticsLayoutHTML() {
     </div>
     <div id="an-error" class="msg err" hidden></div>
     <div id="an-filter-hint" class="an-filter-hint" hidden></div>
-    <div id="an-kpis" class="an-kpis"></div>
+    <div id="an-kpis" class="kpi-grid"></div>
     <div class="an-chart-card">
       <div class="an-chart-head">
         <div class="an-seg" id="an-metric" role="group" aria-label="Metric"></div>
@@ -8150,7 +8153,7 @@ function analyticsRenderKpis(host, resp) {
     },
   ];
   host.innerHTML = chips.map((chip) => `
-    <div class="an-kpi">
+    <div class="kpi">
       <div class="k">${esc(chip.k)}</div>
       <div class="v${chip.k === 'Failures' && Number(chip.v) > 0 ? ' err' : ''}"${chip.tip ? ` title="${esc(chip.tip)}"` : ''}>${esc(chip.v)}</div>
       <div>${fmtDelta(chip.d, chip.warn)}${chip.note ? `<div class="note" title="${esc(chip.note)}">${esc(chip.note)}</div>` : ''}</div>

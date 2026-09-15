@@ -1742,15 +1742,17 @@ export function securitySegmentsHTML(row) {
     ` <span>${esc(sg.reason || sg.evidence || '')}</span></div>`).join('');
 }
 
-// securityKpisHTML renders the Security page's summary tile row (the
-// an-kpis design-system grid): blocked-session count plus the verdict
-// digest. Verdict counts are the SERVER-side aggregation over the same audit
-// window (/api/security counts: SQL GROUP BY in the SQLite store, plus the
-// cumulative low counter from guard_stats.json) — they must NOT be counted
-// from the client-merged feed: that blend included the in-memory ring's
-// cached-replay rows and drifted on every restart. The LLM-usage tiles
-// render only when the adjudication channel is (or was) active; a disabled
-// channel shows one "off" tile instead of two permanent zeros.
+// securityKpisHTML renders the Security page's summary stat row with the
+// shared KPI tile component (.kpi-grid/.kpi — the same design-system idiom
+// the Dashboard and Analytics pages render). Verdict counts are the
+// SERVER-side aggregation over the same audit window (/api/security counts:
+// SQL GROUP BY in the SQLite store) — they must NOT be counted from the
+// client-merged feed: that blend included the in-memory ring's cached-replay
+// rows and drifted on every restart. The low tier is deliberately absent
+// (suppressed noise; it still counts in Rule hits and the JSONL trail). The
+// LLM-usage stats render only when the adjudication channel is (or was)
+// active; a disabled channel shows one "off" tile instead of two permanent
+// zeros.
 export function securityKpisHTML(blocks, counts, stats, adjudicationOn) {
   const bl = blocks || [];
   const c = counts || {};
@@ -1759,16 +1761,15 @@ export function securityKpisHTML(blocks, counts, stats, adjudicationOn) {
   const inTok = Number(st.input_tokens) || 0;
   const outTok = Number(st.output_tokens) || 0;
   const tile = (k, v, err, d) =>
-    `<div class="an-kpi"><div class="k">${esc(k)}</div><div class="v${err ? ' err' : ''}">${v}</div>${d ? `<div class="d">${d}</div>` : ''}</div>`;
+    `<div class="kpi"><div class="k">${esc(k)}</div><div class="v${err ? ' err' : ''}">${v}</div>${d ? `<div class="d">${esc(d)}</div>` : ''}</div>`;
   const llm = adjudicationOn || (Number(st.calls) || 0) > 0
-    ? tile('llm calls', fmtNum(st.calls || 0), false, 'judge invocations (cache hits free)') +
+    ? tile('llm calls', fmtNum(st.calls || 0), false, 'cache hits free') +
       tile('llm tokens', fmtCompact(inTok + outTok), false, `in ${fmtCompact(inTok)} · out ${fmtCompact(outTok)}`)
     : tile('llm adjudication', 'off', false, 'guard.adjudicate not configured');
-  return `<div class="an-kpis">` +
+  return `<div class="kpi-grid">` +
     tile('blocked sessions', fmtNum(bl.length), bl.length > 0) +
     tile('high verdicts', fmtNum(num(c.high)), num(c.high) > 0) +
-    tile('medium verdicts', fmtNum(num(c.medium)), false, 'recorded, no session block') +
-    tile('low (suppressed)', fmtNum(num(c.low)), false, 'ignored tier — cumulative (rows ring-only)') +
+    tile('medium verdicts', fmtNum(num(c.medium)), false, 'no session block') +
     tile('errors', fmtNum(num(c.error) + num(c.skipped)), num(c.error) + num(c.skipped) > 0) +
     llm +
     `</div>`;
@@ -2435,7 +2436,15 @@ export function sessionTimeline(rows, opts) {
 // opts: rowClass (req-row/live-row + modifiers), liveKey (adds data-live-key),
 // modelNote (guard badge), fmtTime (locale stays in app.js).
 export function requestTableHeadHTML() {
-  return `<thead><tr><th>Time</th><th>Agent</th><th>Session</th><th>Status</th><th>Model</th><th>Provider</th><th class="num">ms</th><th class="num">Tokens In / Out</th></tr></thead>`;
+  // The colgroup pins the column geometry for ALL THREE request tables
+  // (Requests / Live ring / Live session view — table-layout: fixed in
+  // styles.css rides it). They virtualize rows (Requests) and re-render on
+  // every SSE event (Live), so auto layout would re-derive column widths
+  // from whichever rows happen to be mounted and the columns visibly jitter
+  // while scrolling. Model is the flexible column; the rest take fixed
+  // shares sized to their content (mono timestamps/ids, badges, numerics).
+  return `<colgroup><col style="width:9%"/><col style="width:10%"/><col style="width:9%"/><col style="width:6%"/><col style="width:24%"/><col style="width:9%"/><col style="width:9%"/><col style="width:24%"/></colgroup>` +
+    `<thead><tr><th>Time</th><th>Agent</th><th>Session</th><th>Status</th><th>Model</th><th>Provider</th><th class="num">ms</th><th class="num">Tokens In / Out</th></tr></thead>`;
 }
 
 // guardMarksHTML renders a request's guard/adjudication annotations (the
