@@ -50,11 +50,11 @@ route derivation 输入（见 request-routing 文档），不持有 Proxy/runtim
 ownership 契约钉死该 facade 不得重建（根 `package main` 同样不得重建）；
 `internal/app/proxy_snapshot.go` 集中 config/provider/catalog/pricing 读取与 generation 一致的
 持久化快照；
-`internal/app/proxy_reload.go` 只编译 explicit/derived route 与 pool fan-out；
-`internal/app/proxy_reload.go` 执行 generation 原子交换及交换后的持久化/刷新编排；
+`internal/app/proxy_reload.go` 编译 explicit/derived route 与 pool fan-out，并执行
+generation 原子交换及交换后的持久化/刷新编排；
 `internal/app/proxy_http.go` 只承载主代理 HTTP 路由、models 响应和早期终态事件；
-`internal/app/proxy_schedule.go` 从单个 detached dashboard snapshot 投影调度状态；
-`internal/app/proxy_schedule.go` 只把 config route/pin 输入映射到 runtime Manager；
+`internal/app/proxy_schedule.go` 把 config route/pin 输入映射到 runtime Manager，并从单个
+detached dashboard snapshot 投影调度状态；
 `internal/app/proxy_read_endpoints.go` 只把应用层 health/cooldown/param/rate-limit 输入映射到
 runtime Manager，并保留 429 后 quota refresh 编排；
 `internal/admin` 是 Web admin 应用服务：把组合根经 `internal/app/web_adapter.go`
@@ -238,7 +238,7 @@ body/header 的 metadata API，detail/replay 才能查询完整 Record。
 
 `internal/observe/seclog` 是安全审计日志叶子包（仓库内只依赖 `observe/logfile` 与
 `observe/logx`，另以 modernc 纯 Go 驱动写 SQLite——与 stats store / requestlog 索引同款
-WAL+busy_timeout+单连接配方），拥有审计事件 Record schema（kind: secret/path/drift）与
+WAL+busy_timeout+单连接配方），拥有审计事件 Record schema（kind: secret/path/drift/unblock）与
 **双层存储**：全量 JSONL 留痕（非阻塞队列、按大小+按天轮转、retention sweep、
 owner-only 权限与单 writer 由共享 `observe/logfile` sink 拥有；每条记录都落盘，包括被
 忽略档的 low verdict，但不再被任何查询面读取，仅供 tail）与可查询 SQLite 库
@@ -317,7 +317,9 @@ low=忽略档——仅 JSONL 留痕，reason=判定逻辑 + evidence=事实依�
 Caller/Sink/RuntimeConfig 端口、有界任务队列 + worker + 在途去重、verdict LRU 缓存
 （持久化 `guard_verdicts.json`，只存 hash→verdict；缓存重放不重复触发 sink，high 仍刷新
 拦截表）、会话拦截表（持久化 `guard_blocks.json`，high verdict 与精确匹配拦截共用，
-直至显式解除）与最近判定 ring。
+直至显式解除）、high 判定 repeat 拦截索引（持久化 `guard_blocked.json`，只存命中字节
+sha256 与判定归属，path 命中不进索引，见
+`docs/decisions/intentional-behaviors.md` 条目 39）与最近判定 ring。
 匹配内容（Job.Hit）只在内存中流转，永不持久化/序列化/进 DTO；模型调用与观测
 副作用分别经 Caller/Sink 端口由 `internal/app` 注入：模型调用经共享调度 seam
 `modelExchange`（`internal/app/model_call.go`——与 forward 同一条 Manager.DecideOrder
@@ -480,7 +482,7 @@ daemon/supervisor 的 signal 与 pid/probe 编排。child process detach 属性�
 不得回依赖根 `cli`（DAG guard 强制）：`cli/login`（login/import）、
 `cli/models`（models/test）、`cli/doctor`（doctor）、`cli/presets`（add/presets）、
 `cli/stats`（stats/usage）、`cli/audit`（audit）、`cli/status`（serve
-status/schedule/routes）、`cli/admin`（pin/unpin/unfreeze/freeze）、`cli/guard`（guard blocks/unblock）、`cli/diag`
+status/schedule/routes/cache）、`cli/admin`（pin/unpin/unfreeze/freeze）、`cli/guard`（guard blocks/unblock）、`cli/diag`
 （wire/replay/shadow）、`cli/config`（config init|print|check）、
 `cli/account`（logout）、`cli/serve`（daemon/stop/reload 编排）。
 `cli/clitest` 是纯测试支撑包：拥有子进程 harness（TestHelperProcess 分发）与共享
@@ -515,7 +517,7 @@ forward / target executor / cache adapter → internal/cache
 target executor / Shadow → internal/transport/bodycapture
 config / app / provider / providerbuild / login / pricing / CLI 出站调用 → internal/upstreamproxy（上游代理策略叶子包）
 probe 执行（daemon 探测 pass / CLI / Web 测活）→ internal/probe → config / provider
-wire verdict / target plan → internal/runtime/wirecap → config / provider（值类型）
+wire verdict / target plan → internal/runtime/wirecap（无仓库内依赖叶子包）
 schedule / health / resolver / quota adapter → internal/runtime
 target plan / target executor → internal/protocol
 composition root → internal/config → internal/pricing / internal/protocol/wire
@@ -529,13 +531,13 @@ application → serveAssembly → applicationRuntime → Proxy
 
 - 叶子包（不得依赖其他 `model-proxy/*` 包）：`adjudicate`、`archtest`（纯测试包）、`cache`、
   `configedit`、`credstore`、`daemonctl`、`display`、`guard`、`httpx`、
-  `observe/counters`、`observe/events`、`observe/logx`、`protocol/wire`、`upstreamproxy`、
-  `transport/bodycapture`、`webauth`；
+  `observe/counters`、`observe/events`、`observe/logx`、`protocol/wire`、`runtime/wirecap`、
+  `upstreamproxy`、`transport/bodycapture`、`webauth`；
 - `accounts → credstore`；
 - `guard/session → guard`；
 - `app → accounts, adjudicate, admin, appapi, cache, catalog,
-  config, configedit, credstore, display, forward, fusion, guard, guard/session, httpx, login, observe/budget,
-  observe/counters, observe/events, observe/logx, observe/requestlog, observe/seclog, observe/stats, presets,
+  config, display, forward, fusion, guard, guard/session, httpx, login, observe/budget,
+  observe/counters, observe/events, observe/logx, observe/requestlog, observe/seclog, observe/stats,
   pricing, probe, protocol, provider, providerbuild, routing, runtime, runtime/wirecap, shadow,
   targetexec, transport/bodycapture, upstreamproxy, web, webauth`；
 - `admin → accounts, appapi, cache, config, configedit, credstore, fusion, login,
@@ -551,7 +553,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/admin → cli/framework, config, daemonctl, display`（`pin`/`unpin`/`unfreeze`/`freeze`）；
 - `cli/guard → appapi, cli/framework, config, daemonctl, display`（`guard blocks`/`guard unblock`）；
 - `cli/audit → cli/framework, config, observe/seclog`（`audit`）；
-- `cli/clicommon → appapi, daemonctl, display, provider`；
+- `cli/clicommon → appapi, daemonctl, display`；
 - `cli/clitest → accounts`（纯测试支撑：子进程 harness 与共享 fixture，生产代码不得依赖）；
 - `cli/config → accounts, cli/framework, config, display, provider, routing, takeover`（`config init|print|check`）；
 - `cli/diag → cli/framework, cli/models, config, daemonctl, display, observe/requestlog, probe, provider, upstreamproxy`（`wire`/`replay`/`shadow`）；
@@ -560,7 +562,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/framework → accounts, config`；
 - `cli/presets → cli/framework, cli/login, cli/serve, config, login, presets`；
 - `cli/stats → accounts, cli/framework, config, daemonctl, display, observe/stats, providerbuild`（`stats`/`usage`）；
-- `cli/status → appapi, cli/clicommon, cli/framework, config, daemonctl, display, routing`（`serve status`/`schedule`/`routes`）；
+- `cli/status → appapi, cli/clicommon, cli/framework, config, daemonctl, display, routing`（`serve status`/`schedule`/`routes`/`cache`）；
 - `cli/serve → config, observe/logx`；
 - `cli/login → accounts, cli/framework, cli/serve, config, display, login, provider`；
 - `cli/models → cli/serve, cli/framework, accounts, catalog, config,
@@ -588,7 +590,6 @@ application → serveAssembly → applicationRuntime → Proxy
 - `providerbuild → accounts, config, display, provider, observe/logx, upstreamproxy`；
 - `routing → catalog, config, protocol, provider`（均为值类型消费）；
 - `runtime → config, runtime/wirecap, provider, observe/logx`；
-- `runtime/wirecap → config, provider`；
 - `takeover → catalog, config, routing, observe/logx, providerbuild, runtime/wirecap`；
 - `shadow → targetexec, transport/bodycapture`；
 - `targetexec → cache, config, protocol, transport/bodycapture, provider, observe/logx`；
@@ -690,8 +691,8 @@ type alias 和 method expression 都会被守卫计为新的引用点并判定�
   或任意 `model-proxy/*` 包；应用层重新声明 store、entry 或 recorder；
 - `internal/transport/bodycapture` 反向依赖 request log、protocol、Proxy、
   Config、Provider 或任意 `model-proxy/*` 包；
-- `internal/runtime/wirecap` 反向依赖 Proxy、HTTP/Web/CLI 或 `config` /
-  `provider` 值类型之外的 `model-proxy/*` 包；应用层重新声明 verdict、
+- `internal/runtime/wirecap` 反向依赖 Proxy、HTTP/Web/CLI
+  或任意 `model-proxy/*` 包（无仓库内依赖叶子）；应用层重新声明 verdict、
   provider/model 级 capabilities map、其锁或 model_caps.json 文件格式；
 - `internal/runtime` 依赖 `config`/`provider` 值类型与 `runtime/wirecap` 之外的
   Proxy、HTTP/Web/CLI 或持久化实现；应用层恢复 health/sticky/pin/model-lock/paramBlock/spread/quota

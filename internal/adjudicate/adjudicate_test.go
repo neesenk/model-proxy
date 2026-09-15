@@ -304,13 +304,15 @@ func TestBlockPersistence_AndUnblock(t *testing.T) {
 	if _, ok := s2.Blocked("sess-9"); !ok {
 		t.Fatal("block did not survive the restart")
 	}
-	if !s2.Unblock("sess-9") {
+	if bl, ok := s2.Unblock("sess-9"); !ok {
 		t.Fatal("Unblock reported not-blocked")
+	} else if bl.Rule != "jwt" || bl.RequestID != "r9" {
+		t.Errorf("Unblock returned %+v, want the removed block's attribution", bl)
 	}
 	if _, ok := s2.Blocked("sess-9"); ok {
 		t.Fatal("session still blocked after Unblock")
 	}
-	if s2.Unblock("sess-9") {
+	if _, ok := s2.Unblock("sess-9"); ok {
 		t.Error("second Unblock must report false")
 	}
 	// The unblocked state is persisted too.
@@ -405,9 +407,11 @@ func TestLLMUsageStats_CountsCallsNotCacheHits(t *testing.T) {
 	}
 	// Low verdicts accumulate per occurrence (the first pass ran 4 unique
 	// lows + 1 cached echo = 5 suppressed occurrences by now). The shared
-	// 2s waitFor once flaked under a fully parallel ./... run — poll with a
-	// roomier local deadline instead.
-	deadline := time.Now().Add(8 * time.Second)
+	// 2s waitFor flaked under a fully parallel ./... run — a saturated
+	// machine starves the workers past any short wall budget — so poll with
+	// a roomier local deadline (a healthy run returns in milliseconds; the
+	// budget only matters when the whole suite races in parallel).
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, _, _, lows := s.Stats(); lows >= 5 {
 			return
@@ -573,7 +577,7 @@ func TestBlockStore_DrainRaceMerge(t *testing.T) {
 
 	// An explicit unblock of the ADOPTED entry stays removed on the next
 	// persist (it is in lastDisk now, so the merge cannot resurrect it).
-	if !b.Unblock("late-write") {
+	if _, ok := b.Unblock("late-write"); !ok {
 		t.Fatal("unblock refused an adopted entry")
 	}
 	b.Block("another", Block{Kind: KindSecret, Rule: "r4", Ts: time.Now().UnixMilli()})

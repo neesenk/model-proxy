@@ -227,6 +227,15 @@ func TestServeCacheHitReplayAndBypass(t *testing.T) {
 	snap := h.snapshot(cfg)
 	snap.Cache = responsecache.New(responsecache.Options{TTL: time.Hour, MaxEntries: 8, MaxBodyBytes: 1 << 16})
 
+	// The cache hit must land in the request log too (provider "(cache)"):
+	// history-blind cache hits would vanish from the Requests page, session
+	// aggregates and any guard correlation pointing at them.
+	logDir := t.TempDir()
+	reqLog := requestlog.New(requestlog.Options{Directory: logDir, MaxBodyBytes: 1 << 20})
+	go reqLog.Run()
+	t.Cleanup(reqLog.Shutdown)
+	h.svc.ReqLog = reqLog
+
 	if w := h.serve(snap, "openai", "/v1/chat/completions", openaiChatBody(), nil); w.Code != 200 {
 		t.Fatalf("first status = %d", w.Code)
 	}
@@ -245,6 +254,26 @@ func TestServeCacheHitReplayAndBypass(t *testing.T) {
 	}
 	if !cacheEnd {
 		t.Error("cache hit must emit a (cache) end event")
+	}
+	reqLog.Shutdown()
+	rows, err := requestlog.QuerySummaries(logDir, requestlog.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fresh commit's logging is app-owned (internal/app target pipeline);
+	// in this harness the cache-hit row is the one that must appear.
+	if len(rows) != 1 {
+		t.Fatalf("request-log rows = %d, want the cache-hit row", len(rows))
+	}
+	if rows[0].Provider != "(cache)" || rows[0].Status != 200 {
+		t.Errorf("cache-hit row = %+v, want provider (cache) status 200", rows[0])
+	}
+	detail, err := requestlog.QueryRecords(logDir, requestlog.Filter{})
+	if err != nil || len(detail) != 1 {
+		t.Fatalf("detail rows = %d err = %v", len(detail), err)
+	}
+	if !strings.Contains(detail[0].ResponseBody, "cached") || detail[0].RequestBody == "" {
+		t.Errorf("cache-hit record bodies missing: resp = %.60q", detail[0].ResponseBody)
 	}
 
 	// Pin: bypasses the cache and forces the pinned backend even with its

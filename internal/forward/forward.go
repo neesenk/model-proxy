@@ -128,7 +128,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	// store on a fresh 2xx commit. SKIPPED entirely when a force-provider
 	// override OR a pin is in effect — both mean "send to THIS backend", not a
 	// stale cached answer.
-	cacheKey, cacheHit := p.lookupResponseCache(cache, r, origBody, calledModel, proto, exposed, agent, requestID, w, forcedProvider != "" || force)
+	cacheKey, cacheHit := p.lookupResponseCache(cache, r, origBody, calledModel, proto, exposed, agent, clientSession, requestID, w, forcedProvider != "" || force)
 	if cacheHit {
 		return
 	}
@@ -1183,7 +1183,14 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 // entirely when a force-provider override OR a pin is in effect — both mean
 // "send to THIS backend", not a stale cached answer. hit == true means a
 // cached response was replayed and the caller must return.
-func (p pipeline) lookupResponseCache(cache *responsecache.Store, r *http.Request, origBody []byte, calledModel, proto, exposed, agent, requestID string, w http.ResponseWriter, bypass bool) (cacheKey string, hit bool) {
+//
+// A hit still writes a request-log record (provider "(cache)"): the request
+// is an LLM-protocol commit the operator must be able to find in history —
+// without it, cache hits are live-visible but vanish from the Requests page,
+// session aggregates, and any guard-verdict correlation pointing at them.
+// Provider metrics/agent stats deliberately stay untouched (the documented
+// cache-hit contract).
+func (p pipeline) lookupResponseCache(cache *responsecache.Store, r *http.Request, origBody []byte, calledModel, proto, exposed, agent, clientSession, requestID string, w http.ResponseWriter, bypass bool) (cacheKey string, hit bool) {
 	if cache != nil && !bypass {
 		cacheKey = responsecache.Key(r, origBody)
 		if e, ok := cache.Lookup(cacheKey, calledModel, time.Now()); ok {
@@ -1203,6 +1210,23 @@ func (p pipeline) lookupResponseCache(cache *responsecache.Store, r *http.Reques
 				Provider: "(cache)",
 				Status:   e.Status(),
 			})
+			if p.svc.ReqLog != nil {
+				body := e.Body()
+				requestlog.Complete(p.svc.ReqLog, requestlog.Input{
+					StartedAt:   time.Now(),
+					RequestID:   requestID,
+					SessionID:   clientSession,
+					Protocol:    proto,
+					Method:      r.Method,
+					Path:        r.URL.Path,
+					CalledModel: calledModel,
+					Exposed:     exposed,
+					Agent:       agent,
+					Provider:    "(cache)",
+					Status:      e.Status(),
+					RequestBody: origBody,
+				}, body, int64(len(body)), false)
+			}
 			w.Header().Set("x-mp-cache", "hit")
 			_ = responsecache.Replay(w, e)
 			return cacheKey, true

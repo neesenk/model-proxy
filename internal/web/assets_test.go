@@ -422,6 +422,10 @@ func TestWebAssetsRequestsSessionContract(t *testing.T) {
 		"export function requestTableHeadHTML(",
 		"export function sessionHealthSummary(",
 		"export function chatTurnsSliceHTML(",
+		// Detail meta strip + guard trail card: the labeled-group and
+		// verdict-led rendering (behavioral coverage in jstests).
+		"export function requestMetaHTML(",
+		"export function guardMarksDetailHTML(",
 		"export const CHAT_RECENT = 4;",
 	} {
 		if !strings.Contains(pure, want) {
@@ -454,18 +458,23 @@ func TestWebAssetsRequestsSessionContract(t *testing.T) {
 		// (virtual scrolling) — still the same renderer, just not one big
 		// string per table.
 		"holder.innerHTML = requestRowHTML(persistedSummaryRow(rec), {",
-		// Health chips row + relative-time context on the detail hint.
+		// Health chips row + relative-time context on the detail meta strip.
 		"sessionSummaryHTML(s, o, sessionHealthSummary(rows))",
 		"function requestRelTimeOpts(id)",
-		// TTFT: rows map ttft_ms; the detail hint shows it.
+		// TTFT: rows map ttft_ms; the detail meta strip (pure requestMetaHTML)
+		// renders it inside the RESULT group.
 		"ttftMs: rec.ttft_ms != null ? rec.ttft_ms : null,",
-		"' · ttft ' + fmtDurMs(r.ttft_ms)",
-		"' · ttft ' + fmtDurMs(r.ttft_ms)",
 		"return requestRowHTML(r, {",
 		"raw response body (",
 		"const rawBodyRegistry = new Map();",
 		"renders on first expand",
 		"dropRawBodies(tbl);",
+		// Detail structure: labeled meta strip leads each record, the guard
+		// trail card rides the first record via opts.guard (server-joined
+		// annotations — the frontend never re-derives them).
+		"${requestMetaHTML(r, rel)}${guardCard}",
+		"detailRecordsHTML(cached, { ...relOpts, guard: requestsGuardCache.get(id) })",
+		"detailRecordsHTML(recs, { ...requestRelTimeOpts(id), guard })",
 		// The chat history expands to a FLAT chunked transcript (parse once,
 		// 25-turn slices appended by the shared scroll loader) — measured
 		// 35KB/340 nodes for the first chunk of an 862-turn session.

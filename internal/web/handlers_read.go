@@ -148,7 +148,13 @@ func (s *Server) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
 		writeJSONErr(w, http.StatusNotFound, "no record for request id "+id)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"records": records})
+	// Guard annotations (interceptions / verdicts / unblocks for this request)
+	// ride the response envelope — Record itself never carries guard state.
+	guard := queries.GuardAnnotations([]string{id})[id]
+	if guard == nil {
+		guard = []requestlog.GuardMark{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"records": records, "guard": guard})
 }
 
 func (s *Server) handleAccountsList(w http.ResponseWriter, _ *http.Request) {
@@ -261,18 +267,18 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSecurity serves GET /api/security: guard audit-log records (secret /
-// path / drift hits) projected by the read port. kind is validated here so an
-// unknown value is a client error instead of a silently empty result; from/to
-// follow the /api/stats parsing convention (unix seconds or RFC3339) and are
-// converted to the audit log's unix-millisecond filter domain (to is
-// inclusive to the end of the named second).
+// path / drift hits and the unblock trail) projected by the read port. kind is
+// validated here so an unknown value is a client error instead of a silently
+// empty result; from/to follow the /api/stats parsing convention (unix seconds
+// or RFC3339) and are converted to the audit log's unix-millisecond filter
+// domain (to is inclusive to the end of the named second).
 func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	query := appapi.SecurityQuery{Kind: q.Get("kind"), Limit: 100}
 	switch query.Kind {
-	case "", "secret", "path", "drift":
+	case "", "secret", "path", "drift", "unblock":
 	default:
-		writeJSONErr(w, http.StatusBadRequest, "kind must be secret, path or drift")
+		writeJSONErr(w, http.StatusBadRequest, "kind must be secret, path, drift or unblock")
 		return
 	}
 	if v := q.Get("limit"); v != "" {

@@ -33,9 +33,10 @@ const (
 
 // Audit event kinds.
 const (
-	KindSecret = "secret"
-	KindPath   = "path"
-	KindDrift  = "drift"
+	KindSecret  = "secret"
+	KindPath    = "path"
+	KindDrift   = "drift"
+	KindUnblock = "unblock"
 )
 
 // Record is one audit event. It is written to the full JSONL trail (every

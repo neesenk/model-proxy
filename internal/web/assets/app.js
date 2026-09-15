@@ -34,12 +34,12 @@ import {
   HEAT_DAYS, analyticsHeatLevel, analyticsYearGrid, analyticsYearMonthSpans, analyticsHeatCellSize, analyticsHeatTip,
   analyticsRowSortKey, ANALYTICS_TABLE_SORT, analyticsSortRows,
   analyticsMetricOptions, analyticsMetricAllowed,
-  liveSessionSummary, liveSessionOrder, shortSessionId, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary,
+  liveSessionSummary, liveSessionOrder, shortSessionId, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary, guardMarksDetailHTML, requestMetaHTML,
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
   detailFetchState, quotaErrKind, accountUsageState,
-  pathStrengthFromAction, securityLegendHTML, securityExplainHTML, securityKpisHTML, mergeSecurityFeed,
+  pathStrengthFromAction, securityLegendHTML, securityExplainHTML, securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML,
   SECURITY_RANGES, securityRangeFromSecs, securityFilterQuery, securityFilterFromQuery, explainCacheKey,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
   iconPin, iconRefresh, iconChevron, statusBadgeHTML, kpiDeltaClass, logLineHTML,
@@ -1462,10 +1462,17 @@ function reqRowForId(id) {
 const REQUESTS_DETAIL_CACHE_MAX = 10;
 const requestsDetailCache = new Map();
 
-function cacheRequestDetail(id, recs) {
+// requestsGuardCache holds the guard/adjudication annotations from the
+// detail envelope (/api/requests/<id> guard key) beside the records cache —
+// evicted with it.
+const requestsGuardCache = new Map();
+
+function cacheRequestDetail(id, recs, guard) {
   requestsDetailCache.set(id, recs);
+  requestsGuardCache.set(id, guard || []);
   while (requestsDetailCache.size > REQUESTS_DETAIL_CACHE_MAX) {
     requestsDetailCache.delete(requestsDetailCache.keys().next().value);
+    requestsGuardCache.delete(requestsGuardCache.keys().next().value);
   }
 }
 
@@ -1558,19 +1565,14 @@ function rawBodyLabel(text, contentType, kind) {
 }
 
 // detailRecordsHTML renders the expanded detail for one request's records.
-// The human-readable chat transcript (pure.js chatViewHTML — role-labeled
-// turns, collapsed thinking/tool blocks with readable arguments, usage line)
-// leads; the raw JSON/SSE bodies stay below in collapsed <details> that only
-// render their (bounded, lazily chunked) view on first expand.
-// fmtBytes humanizes a captured body size for the detail hint line.
-function fmtBytes(n) {
-  const v = Number(n) || 0;
-  if (v >= 1048576) return (v / 1048576).toFixed(1) + 'MB';
-  if (v >= 1024) return Math.round(v / 1024) + 'KB';
-  return v + 'B';
-}
-
-// detailRecordsHTML renders the expanded detail for one request's records.
+// Each record leads with a LABELED meta strip (pure.js requestMetaHTML:
+// when/call/result/route/size groups instead of a flat dot-run), followed by
+// the guard/adjudication trail card on the first record (opts.guard — the
+// request-level security annotations joined server-side), then the
+// human-readable chat transcript (pure.js chatViewHTML — role-labeled turns,
+// collapsed thinking/tool blocks with readable arguments, usage line); the
+// raw JSON/SSE bodies stay below in collapsed <details> that only render
+// their (bounded, lazily chunked) view on first expand.
 // opts.prevTs / opts.sessionStartTs (unix ms) add the relative-time context
 // (T+ since session start, Δ after the previous request) when the caller
 // knows the neighbors — the Requests table paint path does; the popover and
@@ -1602,8 +1604,11 @@ function detailRecordsHTML(recs, opts) {
     const rel = [];
     if (recTs != null && o.sessionStartTs != null && recTs >= o.sessionStartTs) rel.push('T+' + fmtDurMs(recTs - o.sessionStartTs));
     if (recTs != null && o.prevTs != null && recTs >= o.prevTs) rel.push('Δ' + fmtDurMs(recTs - o.prevTs) + ' after prev');
+    // The guard trail card rides the FIRST record: context first (which
+    // request this is), then the security outcome for it.
+    const guardCard = html === '' && o.guard ? guardMarksDetailHTML(o.guard) : '';
     html += `<div class="req-rec">
-      <div class="hint">${esc(r.ts)}${rel.length ? ' · ' + esc(rel.join(' · ')) : ''} · ${esc(r.method)} ${esc(r.path)} · attempt ${r.attempt} · ${r.status} · ${r.latency_ms}ms${r.ttft_ms ? ' · ttft ' + fmtDurMs(r.ttft_ms) : ''} · req ${fmtBytes(r.request_size)} · resp ${fmtBytes(r.response_size)} · ${esc(r.provider)}/${esc(r.upstream_model)}</div>
+      ${requestMetaHTML(r, rel)}${guardCard}
       ${chat}
       <details class="raw-body" data-raw="${esc(reqId)}"><summary>raw request body (${fmtNum(r.request_size)} bytes · ${esc(rawBodyLabel(r.request_body, '', 'request'))})</summary><div class="raw-body-host"><span class="hint">renders on first expand</span></div></details>
       <details class="raw-body" data-raw="${esc(resId)}"><summary>raw response body (${fmtNum(r.response_size)} bytes · ${esc(rawBodyLabel(r.response_body, ct, 'response'))})</summary><div class="raw-body-host"><span class="hint">renders on first expand</span></div></details>
@@ -1652,7 +1657,7 @@ async function toggleRequestDetail(tr) {
   const relOpts = requestRelTimeOpts(id);
   const cached = requestsDetailCache.get(id);
   if (cached) {
-    row.firstElementChild.innerHTML = detailRecordsHTML(cached, relOpts);
+    row.firstElementChild.innerHTML = detailRecordsHTML(cached, { ...relOpts, guard: requestsGuardCache.get(id) });
     reqDetailChanged();
     return;
   }
@@ -1674,8 +1679,9 @@ async function toggleRequestDetail(tr) {
     reqDetailChanged();
     return;
   }
-  row.firstElementChild.innerHTML = detailRecordsHTML(recs, requestRelTimeOpts(id));
-  cacheRequestDetail(id, recs);
+  const guard = Array.isArray(resp.guard) ? resp.guard : [];
+  row.firstElementChild.innerHTML = detailRecordsHTML(recs, { ...requestRelTimeOpts(id), guard });
+  cacheRequestDetail(id, recs, guard);
   // The detail's height joins the row's footprint — remeasure so the
   // spacers below (and any further fetches) stay anchored.
   reqDetailChanged();
@@ -2065,7 +2071,7 @@ function renderSecurityFeed() {
     return;
   }
   securityFeedFingerprint = fingerprint;
-  const kindBadge = { secret: 'warn', path: '', drift: 'muted' };
+  const kindBadge = { secret: 'warn', path: '', drift: 'muted', unblock: 'ok' };
   const vBadge = { high: 'err', medium: 'warn', error: 'warn', skipped: 'muted' };
   const body = [];
   for (let i = 0; i < rows.length; i++) {
@@ -2095,8 +2101,11 @@ function renderSecurityFeed() {
       ? `<td class="mono session-link" data-session="${esc(r.sessionId)}" title="${esc(r.sessionId)} — view this session's requests">${esc(shortSessionId(r.sessionId))}</td>`
       : '<td class="mono">—</td>';
     if (r.src === 'ai') {
-      const why = r.reason || r.detail;
-      const evidence = r.evidence ? `<div class="hint">${esc(r.evidence)}</div>` : '';
+      // A merged multi-rule row carries the per-rule breakdown as segments;
+      // the single-why rendering stays for one-segment rows.
+      const segs = securitySegmentsHTML(r);
+      const why = segs ? '' : (r.reason || r.detail);
+      const evidence = !segs && r.evidence ? `<div class="hint">${esc(r.evidence)}</div>` : '';
       body.push(`<tr data-sec-i="${i}"${analyzable ? ' class="sec-row"' : ''}>
       <td class="mono">${esc(fmtMs(r.ts))}</td>
       <td><span class="badge ${vBadge[r.verdict] || ''}">${esc(r.verdict)}</span>${r.cached ? ' <span class="badge muted">cached</span>' : ''}</td>
@@ -2104,7 +2113,7 @@ function renderSecurityFeed() {
       <td class="mono">${esc(r.names.join(', ') || '—')}</td>
       <td class="mono">${esc(r.exposed || '—')}</td>
       ${sessionCell}
-      <td class="mono">${esc(why || '—')}${evidence}${drillLink}</td>
+      <td class="mono">${segs}${esc(why || '—')}${evidence}${drillLink}</td>
     </tr>`);
       continue;
     }
@@ -2115,7 +2124,11 @@ function renderSecurityFeed() {
     // reason, verbatim) and the exact-match attribution (source label +
     // masked key, in detail) render directly — no program-side paraphrase.
     const judge = r.judge ? ` <span class="hint">judge ${esc(r.judge)}${r.cached ? ' · cached' : ''}</span>` : '';
-    const verdictText = r.reason ? `<div>${esc(r.reason)}</div>${r.evidence ? `<div class="hint">evidence: ${esc(r.evidence)}</div>` : ''}` : '';
+    // Merged multi-rule rows: the headline verdict already rides the verdict
+    // column; the per-rule verdicts/reasons render as segments instead of a
+    // duplicated single reason.
+    const segs = securitySegmentsHTML(r);
+    const verdictText = segs ? '' : (r.reason ? `<div>${esc(r.reason)}</div>${r.evidence ? `<div class="hint">evidence: ${esc(r.evidence)}</div>` : ''}` : '');
     const detailText = r.detail ? `<div>${esc(r.detail)}</div>` : '';
     body.push(`<tr data-sec-i="${i}"${analyzable ? ' class="sec-row"' : ''}>
       <td class="mono">${esc(fmtMs(r.ts))}</td>
@@ -2124,7 +2137,7 @@ function renderSecurityFeed() {
       <td class="mono">${esc(r.names.join(', ') || '—')}</td>
       <td class="mono">${esc(r.agent ? r.agent + (r.exposed ? ' @ ' + r.exposed : '') : '—')}</td>
       ${sessionCell}
-      <td class="mono">${verdictText}${detailText}<div>action=${esc(r.action || '—')}${strengthBadge}${judge}</div>${drillLink}</td>
+      <td class="mono">${segs}${verdictText}${detailText}<div>action=${esc(r.action || '—')}${strengthBadge}${judge}</div>${drillLink}</td>
     </tr>`);
   }
   // The audit half may have more rows than the current budget (the ring
@@ -2253,6 +2266,7 @@ async function renderSecurityTab() {
         <option value="secret" ${securityFilter.kind === 'secret' ? 'selected' : ''}>Secret</option>
         <option value="path" ${securityFilter.kind === 'path' ? 'selected' : ''}>Path</option>
         <option value="drift" ${securityFilter.kind === 'drift' ? 'selected' : ''}>Drift</option>
+        <option value="unblock" ${securityFilter.kind === 'unblock' ? 'selected' : ''}>Unblock</option>
       </select>
       <select id="sec-verdict" class="req-input" title="filter by adjudication verdict">
         <option value="" ${securityFilter.verdict === '' ? 'selected' : ''}>All Verdicts</option>
@@ -2930,6 +2944,10 @@ function persistedSummaryRow(rec) {
     shadow: !!rec.shadow,
     inFlight: false,
     guardHits: [],
+    // Guard/adjudication annotations joined server-side from the security
+    // audit trail (interceptions, verdicts, unblocks) — rendered as badges by
+    // requestRowHTML.
+    guardMarks: Array.isArray(rec.guard) ? rec.guard : [],
     progressText: '', progressBytes: 0,
     persisted: true,
   };

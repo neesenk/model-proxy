@@ -578,10 +578,15 @@ func NewHTTPError(status int, message string) error {
 // fallback inside admin; every method carries the exact semantics of the
 // requestlog scan function of the same name (filter mapping, newest-first
 // top-K, facets collected before the filter, detail including bodies).
+// GuardAnnotations is the admin-only join extension: the decorated port
+// correlates guard hits/LLM verdicts/unblocks onto request ids; the raw
+// requestlog implementation returns nil (the request log knows nothing about
+// guard state).
 type RequestLogQueries interface {
 	SummariesWithFacets(requestlog.Filter) ([]requestlog.Summary, requestlog.Facets, error)
 	Detail(requestID string) ([]requestlog.Record, error)
 	SessionSummaries(scanLimit, limit int, costOf func(provider, model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error)
+	GuardAnnotations(requestIDs []string) map[string][]requestlog.GuardMark
 }
 
 // ReadAPI is the complete read-only capability consumed by the Web transport.

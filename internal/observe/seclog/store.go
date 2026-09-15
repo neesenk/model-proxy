@@ -322,3 +322,77 @@ func Query(dir string, filter Filter) (*Result, error) {
 	}
 	return s.query(filter)
 }
+
+// queryByRequestIDsChunk is the IN-list bound: one query page of request ids,
+// comfortably under SQLite's default 999 host-parameter limit.
+const queryByRequestIDsChunk = 500
+
+// QueryByRequestIDs returns the audit records for a batch of requests in one
+// round trip family (one chunked IN query per 500 ids), newest first per id.
+// It is the request↔guard correlation source for the requests read surfaces;
+// empty ids return an empty map, and a directory without a database file is an
+// empty store (no error, no file created).
+func QueryByRequestIDs(dir string, ids []string) (map[string][]*Record, error) {
+	out := make(map[string][]*Record, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	// Deduplicate: a summary page can repeat a request id (primary + shadow
+	// records of one request).
+	unique := make([]string, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		unique = append(unique, id)
+	}
+	if len(unique) == 0 {
+		return out, nil
+	}
+	s, err := openQueryStore(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer s.Close() // nil-safe
+	if s == nil {
+		return out, nil
+	}
+	for start := 0; start < len(unique); start += queryByRequestIDsChunk {
+		end := start + queryByRequestIDsChunk
+		if end > len(unique) {
+			end = len(unique)
+		}
+		page := unique[start:end]
+		placeholders := make([]byte, 0, len(page)*2)
+		args := make([]any, 0, len(page))
+		for i, id := range page {
+			if i > 0 {
+				placeholders = append(placeholders, ',')
+			}
+			placeholders = append(placeholders, '?')
+			args = append(args, id)
+		}
+		rows, err := s.db.Query(`SELECT ts, kind, request_id, session_id, agent, protocol, exposed,
+			names, action, verdict, reason, evidence, model, detail
+			FROM audit_records WHERE request_id IN (`+string(placeholders)+`) ORDER BY ts DESC, id DESC`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("seclog: query store by request ids: %w", err)
+		}
+		for rows.Next() {
+			rec, err := scanRecord(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[rec.RequestID] = append(out[rec.RequestID], rec)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("seclog: query store by request ids: %w", err)
+		}
+		rows.Close()
+	}
+	return out, nil
+}

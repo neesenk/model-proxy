@@ -7,7 +7,53 @@
 当前 UI 是 v2 设计系统（历史上曾与 v1 在 `/v2/` 并行共存，现已原位替换、v1 已删除；`/v2/` 仅 301 到 `/ui/`）。`styles.css` 文件头注释是设计契约：rem 字阶（根字号是唯一字号旋钮）、圆角分级、海拔分层、选中态统一为指示条/凸起滑块（实心琥珀只留给 `.btn.primary`）、状态一律 badge、颜色只编码语义。
 
 - 纯函数单一事实源在 `pure.js`（含 v2 展示辅助：iconPin/iconRefresh/iconChevron/statusBadge*/kpiDeltaClass/logLineHTML），全部归 `jstests/pure.test.mjs` 行为覆盖；新增纯逻辑先进 pure.js 并补用例。
-- `node --check` 语法门禁与 `docs/frontend` 契约测试（assets_test.go）覆盖 `app.js`/`pure.js`。
+- `node --check` 语法门禁与 `jstests/contract.test.mjs`（对 `docs/web-api.md` 的字段契约）覆盖 `app.js`/`pure.js`；样式漂移由 `jstests/registry.test.mjs` 门禁保护（见「模式注册表」）。
+
+## 模式注册表（单一实现目录）
+
+相似 UI 功能不得出现第二份实现。新 UI 元素的决策路由：① 翻 `styles.css` 的
+`/* ---------- 区段 ---------- */` 注释找相近模式 → ② 查下表归类、消费其唯一实现 →
+③ 查 `pure.js` 导出；仍找不到才允许新建。新建必须同 commit 完成：实现进唯一事实源
+（纯逻辑 pure.js / DOM 装配 app.js / 样式 styles.css 对应区段）、登记下表、
+`jstests/registry.test.mjs` 的门禁按需加条目。发现第二份实现时合并回唯一实现，不并存。
+
+| 模式 | 唯一实现 | 已有用例 |
+|---|---|---|
+| 卡片面板 | `.card`/`.card-head`/`.card-body`，app.js `buildCard` | 所有 tab 的卡 |
+| 状态徽章 | `.badge` + pure.js `statusBadge` | 请求 status / guard verdict / pills |
+| KPI 瓦片 | `.an-kpis`/`.an-kpi` | Dashboard / Analytics / Security |
+| 数据表 | `.table`（sticky th 用 `--sticky-top`） | 全部列表 |
+| 请求表（三表一份） | pure.js `requestTableHeadHTML`+`requestRowHTML` | Requests / Live 环 / Live 会话 |
+| 请求详情 | app.js `detailRecordsHTML`（`requestMetaHTML`/`guardMarksDetailHTML`/`chatViewHTML`） | 行内展开 / Live 弹层 |
+| guard 徽标 | pure.js `guardMarksHTML` | 请求表 model 单元 |
+| 会话视图 | app.js `sessionViewHTML`+`wireSessionTimeline`，pure.js `sessionHealthSummary` | Live 会话 / Requests 汇总 |
+| 时间线 tooltip | app.js `showTlTip`/`hideTlTip`，pure.js `sessionBarSummary` | 会话时间线 |
+| 大 body | app.js `chunkedBodyHTML` | raw body / 大 SSE |
+| 弹层 | `data-popup`+`hidden`；body 级走 app.js `comboInstances` | 日历 / combobox / 下拉 |
+| 模态 | `<dialog>`（`.live-detail-pop`） | Live 详情 / confirm |
+| 表单控件 | `.field`/`.req-input`/`.route-target-row` | 全部表单与工具行 |
+| 按钮 | `.btn`（`.small`/`.primary`/`.danger`） | 全部动作 |
+| 日志行 | `.log-line` + app.js `bindLogSelection` | Logs 卡 |
+| JSON 高亮 | `.code-json`（`.j-key`/`.j-str`/`.j-num`/`.j-lit`） | body/JSON 视图 |
+| 刷新门 | app.js `deferAutoRefresh`+`cancelAutoRefreshHold` | 全部 tick/SSE 渲染 |
+| tab 保留 | app.js `retainTab` | 全部 tab |
+| stale 横幅 | app.js `setRefreshError` + pure.js `staleDataText` | 刷新失败路径 |
+| 视图状态 | pure.js `requestsFilterQuery`/`requestsFilterFromQuery`，app.js `statusHash` | URL hash |
+
+样式漂移门禁（`jstests/registry.test.mjs`，随 `node --test` 与 `go test ./internal/web` 跑）：
+
+- **class 白名单**：app.js/pure.js/index.html 输出的每个静态 class 必须在
+  styles.css 有定义，或登记进测试的 `CLASS_EXEMPT`（每条带一句理由）。
+  新 class 二选一：按既有模式补样式，或进 EXEMPT 说明为何不需要样式；
+  不再输出的 EXEMPT 条目会被测试清退（防死豁免）。
+- **色值区**：styles.css 的硬编码颜色只允许出现在 `:root` 块（亮/暗两处）、
+  CodeMirror 区段、以及字面白名单（`.btn` 实心档的 `#fff`/`#000`/`#1c1200`
+  与两处 scrim 阴影）；新颜色必须进 `:root` 变量（设计契约见文件头）。
+- **ID 锚点**：styles.css 的 `#id` 选择器只允许既有的页面宿主/结构锚点
+  （表格几何、sticky 宿主、单页覆盖），组件样式一律 class——`#id` 规则无法
+  复用，正是一次性实现滋生的位置。
+- **文档同步**：上表反引号符号由测试核对确实存在于资产中——实现改名时
+  注册表必须跟着改，否则测试红。
 
 ## 边界
 
@@ -31,8 +77,8 @@
   `logsOpenDetails`）。
 - 用户主动触发的渲染（筛选点击、mutation、切 section）绕过门：它们自己会先关闭弹层。
 - 定时 tick 盘点：Status 5s（整页重渲染，双门）、Analytics 30s（仅 live 窗口）、Security 30s（loader 只重绘数据宿主、不重建工具栏）、Accounts 30s（后台失败走 stale 横幅；**操作中守卫**——pane 内有 disabled 按钮时跳过，避免打断 Test/测活/Test All 的进行态）、顶栏 header 5s（`maybeConnRefresh`：仅 dot+meta 文本经 `setConn` 单点写入、不重建面板 DOM → **门豁免**（钉在 jstests/autorefresh.test.mjs）；Status tab 激活时跳过避免重复 /api/status）。新增 tick 必须复用 `deferAutoRefresh` 双门 + `cancelAutoRefreshHold` 停止钩子（仅写 topbar chrome 文本的 tick 才允许豁免），并在 `jstests/autorefresh.test.mjs` 加钉。
-- **表内 tokens 单元的 cache read 带命中占比（两位小数、去尾零；≥80% `.tok-cache.hot` ok 色）；详情 hint 行带 bytes 与相对时间（T+/Δ，`requestRelTimeOpts` 从已加载列表按时间序推导，弹层无邻居时只显绝对时间）。三张请求表是单一份实现**（pure.js `requestTableHeadHTML` + `requestRowHTML`）：Requests 标签页、Live 全量环、Live 会话视图共用同一列集（time · agent · session · status · model · provider · ms · tokens in/out + cache read），Live 只是数据源换成实时行；Requests 记录经 `persistedSummaryRow` 投影成合并行形态后进同一渲染器——改列/徽章/单元格语义只改这一处，三表同步生效。bytes 列已移除（token 单元是有效信号）。**Requests 表是虚拟滚动的**（app.js `reqVirt` 一套：`reqReconcile`/`reqFrame`/`reqLoadOlder`）：浏览默认只拉 50 条（session 下钻首拉 500），滚动近底用相同过滤参数 + `to=<已加载最旧秒>` 键集分页拉更旧一页（边界秒重拉、`mergeRecordsPages` 按 id 去重，pure.js；累计 1000 封顶），DOM 只保留视口窗口内的行（spacer 行 `.req-spacer` 撑住滚动几何，测量高度进 offsets、未测行用滑动均值估计）；行节点按 id 池化复用（`reqRowNode`），**展开详情的行钉住不卸载**（详情的分块 body 状态活在 DOM 节点上），时间线跳转经 `reqRowForId` 先挂载（reveal pin 防被窗口移动卸载），再在详情填充后按行实时 rect 瞬时跳转（`behavior:auto`——平滑滚动会被窗口 reconcile 的 replaceChildren 中途取消，rAF 等待在后台标签页挂死，offsets 定位受未测行估算误差累积偏移）；只在展开且行在视口外时滚动，收起或行已可见不动页面（否则会拽动 sticky Trace 卡下的光标位置）；表格重建时 `reqTearDown` 沿池清理 chunk/raw-body 注册表（池化节点可能已脱离容器，不能只扫容器）。滚动监听是 document 级 capture + rAF 合帧（scroll 不冒泡，同 `wireBodyChunks` 惯例）；加载失败保留旧行、hint 行报错并 2.5s 退避重试。
-- **Security 页的数据面是两个异构源的合并**：审计半边（/api/security，30d 持久）携带服务端过滤 kind/from/limit（kind/range/limit 由控件驱动，"show more" 逐级加深到 1000 上限，换窗口重置），AI 半边（/api/security/adjudications，内存 ring 256、重启清零）只做客户端过滤。合并唯一发生在 pure.js `mergeSecurityFeed`：fresh（未命中缓存）verdict 同时落审计记录与 ring，按 request_id+kind+verdict+rule 折叠进审计行（judge model/cached/sessionId 随行）；ring-only 行（缓存命中、重启残留）保留 ai· 行。KPI verdict 计数**必须**来自 `/api/security` 的服务端 `counts` 字段（SQL 聚合 + 判定服务累计 low 计数）——不得退回客户端数合并流（合并流含 ring 缓存重放行，重启即漂移；pure.js `securityKpisHTML(blocks, counts, stats, on)` 的第二参就是 counts 对象）；**feed 永不渲染 low 行**（`renderSecurityFeed` 在过滤链首位硬过滤 `verdict !== 'low'`：判定已忽略的命中进列表就是噪音；low 只存在于 KPI 计数、Rule hits 计数与 JSONL 留痕），verdict 过滤器枚举因此是 high/medium/error/skipped（无 low 选项；`securityFilterFromQuery` 把 `verdict=low` 当非法值降级为不过滤，stale 书签不产生空列表）。llm 用量 tiles 只在判定通道开启或有历史用量时渲染，否则显示单个 off tile。三个 loader（audit/adjudications/blocks）刷新失败保留旧数据并经 `securityRefreshOk/Fail` 聚合进 `setRefreshError` 横幅，仅首次加载（无任何数据）允许内联错误；第四个 loader `loadSecurityRules` 用**固定参数**（无 kind、无 from、limit=1000）拉自己的审计切片喂 Rule hits 排行榜——Activity 的 kind/range 是 feed 查询的服务端过滤，复用该响应会让 feed 过滤器悄悄改掉排行榜计数（收窄 feed 到 path 就从运维视图里抹掉全部 secret 规则），排行榜与 feed 过滤器唯一允许的耦合方向是行点击下钻。**Rule hits 是 Activity 卡内的折叠区**（`#sec-rules` details + `#sec-rules-body` 宿主，位于 legend 与 feed 表之间、其过滤对象正下方）：`renderRuleLeaderboard` 只重写 body div，`<details>` 的开合状态归用户所有、数据刷新不得重置；排行榜为空时整个 section `hidden`。响应级 hint（skipped 行数、guard.audit 关闭说明）存模块状态由 `renderSecurityFeed` 统一渲染，不得 insertAdjacentHTML 直插（会被下一次 innerHTML 重建抹掉）。verdict 枚举是 high/medium/low/error/skipped（medium 徽章 warn 色，explain 判定块带 reason+evidence 两段；low 徽章只出现在 explain 的判定块里——同请求的 ring low 判定仍会在展开视图中显示，feed 列表本身无 low 行）；feed 行 detail 列直显 LLM 的 reason/evidence 原文与精确匹配溯源（detail），不做程序侧转述。带 request_id 的 secret/path 行有 req 下钻链接（`#requests?request=<id>&kind=&name=`）：Requests 页顶部渲染 pinned 卡（`applyRequestDrill`）——explain 高亮定位 + 完整请求详情（复用 `detailRecordsHTML`），独立于列表过滤器；被拦截的 400 请求也落 request log，下钻同样可达。feed 表带 session 列（合并行 `sessionId`，缩写 `shortSessionId`、title 全量）：session 单元是 session-link，经 `#requests?session=…` hash 下钻跳转（与 Blocked 卡同款）。Rule hits 行可点击下钻（设 rule 过滤 + 可移除 chip）；Blocked sessions 行的 session 单元是 session-link，经 `#requests?session=…` hash 下钻跳转（同 Analytics 表格的 data-drill 惯例）。
+- **表内 tokens 单元的 cache read 带命中占比（两位小数、去尾零；≥80% `.tok-cache.hot` ok 色）；详情结构是三区分层：labeled meta strip（pure.js `requestMetaHTML`：when/call/result/route/size 五组小写标签 + mono 值，status 用彩色 badge，相对时间 T+/Δ 由 `requestRelTimeOpts` 从已加载列表按时间序推导、弹层无邻居时只显绝对时间）→ guard 轨迹（`guardMarksDetailHTML`，仅在有标注时渲染，挂在首条记录 meta 之后：与 meta strip 同一扁平语法——单个 `⚑ guard` 标签组，每条一行 verdict 徽章引导 + rule code + 归属〔judge/cached/action/kind〕+ 右缘时间，reason 单行省略号、全文〔reason+evidence+detail〕进 title tooltip；不嵌套卡片）→ 对话/原始 body（`chatViewHTML` + 折叠 raw bodies）；model 单元的 guard 徽标（`guardMarksHTML`，≤3 个 + 溢出计数：`⚑ block`/`judge·verdict`/`unblocked`，title 载 scrub 后 reason/溯源）。三张请求表是单一份实现**（pure.js `requestTableHeadHTML` + `requestRowHTML`）：Requests 标签页、Live 全量环、Live 会话视图共用同一列集（time · agent · session · status · model · provider · ms · tokens in/out + cache read），Live 只是数据源换成实时行；Requests 记录经 `persistedSummaryRow` 投影成合并行形态后进同一渲染器（`guard` 标注随行——服务端在 `/api/requests` summary 与 `/api/requests/<id>` 的 `guard` 键按 request_id join 安全审计轨迹，**前端不做第二次推导**；详情卡经 `detailRecordsHTML` 的 `opts.guard` 注入，弹层/live 详情不传时只渲染 meta strip）；改列/徽章/单元格语义只改这一处，三表同步生效。bytes 列已移除（token 单元是有效信号）。**Requests 表是虚拟滚动的**（app.js `reqVirt` 一套：`reqReconcile`/`reqFrame`/`reqLoadOlder`）：浏览默认只拉 50 条（session 下钻首拉 500），滚动近底用相同过滤参数 + `to=<已加载最旧秒>` 键集分页拉更旧一页（边界秒重拉、`mergeRecordsPages` 按 id 去重，pure.js；累计 1000 封顶），DOM 只保留视口窗口内的行（spacer 行 `.req-spacer` 撑住滚动几何，测量高度进 offsets、未测行用滑动均值估计）；行节点按 id 池化复用（`reqRowNode`），**展开详情的行钉住不卸载**（详情的分块 body 状态活在 DOM 节点上），时间线跳转经 `reqRowForId` 先挂载（reveal pin 防被窗口移动卸载），再在详情填充后按行实时 rect 瞬时跳转（`behavior:auto`——平滑滚动会被窗口 reconcile 的 replaceChildren 中途取消，rAF 等待在后台标签页挂死，offsets 定位受未测行估算误差累积偏移）；只在展开且行在视口外时滚动，收起或行已可见不动页面（否则会拽动 sticky Trace 卡下的光标位置）；表格重建时 `reqTearDown` 沿池清理 chunk/raw-body 注册表（池化节点可能已脱离容器，不能只扫容器）。滚动监听是 document 级 capture + rAF 合帧（scroll 不冒泡，同 `wireBodyChunks` 惯例）；加载失败保留旧行、hint 行报错并 2.5s 退避重试。
+- **Security 页的数据面是两个异构源的合并**：审计半边（/api/security，30d 持久）携带服务端过滤 kind/from/limit（kind/range/limit 由控件驱动，"show more" 逐级加深到 1000 上限，换窗口重置），AI 半边（/api/security/adjudications，内存 ring 256、重启清零）只做客户端过滤。合并唯一发生在 pure.js `mergeSecurityFeed`：fresh（未命中缓存）verdict 同时落审计记录与 ring，按 request_id+kind+verdict+rule 折叠进审计行（judge model/cached/sessionId 随行）；ring-only 行（缓存命中、重启残留）保留 ai· 行；**同请求同 channel（kind）的行再归并为一行**——worst verdict 头条徽章、names 连接、per-rule verdict/理由为行内 segments（`securitySegmentsHTML` 渲染，单段行不渲染 segments）（审计库仍逐规则留痕，explain/repeat 不受影响）。请求行徽标按 (kind, verdict) 计数合并（`groupGuardMarks`，`judge·error ×2`，各规则理由并入 title tooltip）；详情 guard 组同 channel 一行、异构 verdict/理由逐段（`guardMarksDetailHTML`）。KPI verdict 计数**必须**来自 `/api/security` 的服务端 `counts` 字段（SQL 聚合 + 判定服务累计 low 计数）——不得退回客户端数合并流（合并流含 ring 缓存重放行，重启即漂移；pure.js `securityKpisHTML(blocks, counts, stats, on)` 的第二参就是 counts 对象）；**feed 永不渲染 low 行**（`renderSecurityFeed` 在过滤链首位硬过滤 `verdict !== 'low'`：判定已忽略的命中进列表就是噪音；low 只存在于 KPI 计数、Rule hits 计数与 JSONL 留痕），verdict 过滤器枚举因此是 high/medium/error/skipped（无 low 选项；`securityFilterFromQuery` 把 `verdict=low` 当非法值降级为不过滤，stale 书签不产生空列表）。llm 用量 tiles 只在判定通道开启或有历史用量时渲染，否则显示单个 off tile。三个 loader（audit/adjudications/blocks）刷新失败保留旧数据并经 `securityRefreshOk/Fail` 聚合进 `setRefreshError` 横幅，仅首次加载（无任何数据）允许内联错误；第四个 loader `loadSecurityRules` 用**固定参数**（无 kind、无 from、limit=1000）拉自己的审计切片喂 Rule hits 排行榜——Activity 的 kind/range 是 feed 查询的服务端过滤，复用该响应会让 feed 过滤器悄悄改掉排行榜计数（收窄 feed 到 path 就从运维视图里抹掉全部 secret 规则），排行榜与 feed 过滤器唯一允许的耦合方向是行点击下钻。**Rule hits 是 Activity 卡内的折叠区**（`#sec-rules` details + `#sec-rules-body` 宿主，位于 legend 与 feed 表之间、其过滤对象正下方）：`renderRuleLeaderboard` 只重写 body div，`<details>` 的开合状态归用户所有、数据刷新不得重置；排行榜为空时整个 section `hidden`。响应级 hint（skipped 行数、guard.audit 关闭说明）存模块状态由 `renderSecurityFeed` 统一渲染，不得 insertAdjacentHTML 直插（会被下一次 innerHTML 重建抹掉）。verdict 枚举是 high/medium/low/error/skipped（medium 徽章 warn 色，explain 判定块带 reason+evidence 两段；low 徽章只出现在 explain 的判定块里——同请求的 ring low 判定仍会在展开视图中显示，feed 列表本身无 low 行）；feed 行 detail 列直显 LLM 的 reason/evidence 原文与精确匹配溯源（detail），不做程序侧转述。带 request_id 的 secret/path 行有 req 下钻链接（`#requests?request=<id>&kind=&name=`）：Requests 页顶部渲染 pinned 卡（`applyRequestDrill`）——explain 高亮定位 + 完整请求详情（复用 `detailRecordsHTML`），独立于列表过滤器；被拦截的 400 请求也落 request log，下钻同样可达。feed 表带 session 列（合并行 `sessionId`，缩写 `shortSessionId`、title 全量）：session 单元是 session-link，经 `#requests?session=…` hash 下钻跳转（与 Blocked 卡同款）。Rule hits 行可点击下钻（设 rule 过滤 + 可移除 chip）；Blocked sessions 行的 session 单元是 session-link，经 `#requests?session=…` hash 下钻跳转（同 Analytics 表格的 data-drill 惯例）。audit kind 枚举含 `unblock`（会话解除留痕行：kind 徽章 ok 色、无 verdict、不可 analyze、不进 Rule hits 计数——`ruleHitsLeaderboard` 硬排除，操作历史不是规则命中率）。
 - **行内 analyze（explain）是双半边统一的按需展开，触发是整行点击（无按钮列）**：审计行与 ai·（缓存 verdict）行只要带 request_id 且 kind ∈ {secret,path} 都可 analyze（ai· 行的"为什么"正是 explain 的判定块 + 定位命中），可分析行挂 `.sec-row`（cursor:pointer）。行 `onclick` 的路由顺序：`e.detail > 1`（双击选字）直接 return → session-link 命中走 `#requests?session=…` 下钻 → `e.target.closest('a, button')` 命中（req 下钻链接等）放行导航 → 其余才 toggle analyze；既无 session 也无可分析命中的行（如无头 drift）保持惰性。展开状态存 `securityExpanded`（pure.js `explainCacheKey`：request_id+kind+names，名字序归一；key 绝不进 HTML 属性——分隔符 \u0000 过不了属性解析，会变 U+FFFD 导致恢复失配；行↔数据用 HTML 安全的整数 `data-sec-i` 关联，key 只活在 JS 闭包与 DOM property）。`renderSecurityFeed` 重建表后 `restoreSecurityDetails` 按快照恢复展开；结果与在途 promise 缓存在有界 `securityExplainCache`（32 条，跳过仍展开的 key 驱逐），恢复零 refetch，同 key 并发去重，settle 后统一 `paintSecurityDetail`（fetch 起飞后行被重渲染替换也能落笔）。explain 渲染（pure.js `securityExplainHTML`）：LLM 判定块在前（verdict/rule/cached/model/reason 一行一条），命中按规则名分组——规则身份（名/强度/解释/regex/source）每卡一次，多个 occurrence 编号 #n，片段 `pre-wrap`+`break-all` 折行（宽表格单元不得逼出横向滚动）。
 - **可点击表格行的双击守卫**：rule 行、blocked 行与 Activity feed 行（点击 toggle analyze 展开）的 `onclick` 必须 `if (e.detail > 1) return`——双击的第二击是文字选择手势的一半，再跑一次动作（toggle/下钻）既破坏选择又白付一次全表重渲染；feed 行的 detail 列带可复制的 LLM verdict 原文，该守卫是复制体验的一部分。rule 过滤点击路径（`setSecurityRule`）**不得重建 leaderboard 表**（只 `syncRuleSel` 原地翻 class）：两击之间替换行节点会打断浏览器的双击计数，文字永远选不中；leaderboard 的数据重建只在 loader（loadSecurity/loadSecurityAdjudications/loadSecurityRules，数据真变了）里做，`renderSecurityFeed` 尾部只做 sel 同步。
 - **Security loader 的渲染 commit 必须过交互门的 commit-time 检查点**（框架双门的第二门，见 deferAutoRefresh 注释；Status 页的同款）：四个 loader（loadSecurity/loadSecurityAdjudications/loadSecurityBlocks/loadSecurityRules）fetch 落地后**不得直接重建面板**——切回 Security 必然触发这些 fetch，用户双击落在飞行窗口内时无条件 commit 会吃掉选区并卡顿（"切回来一双击就卡"的确定路径）。统一走 `commitSecurityRender()`：无交互立即 `securityRenderAll()`（KPI+feed+leaderboard+blocks 从已存数据整面重绘——parked fire 会被后落的 loader 替换，任何半边的提交都不得丢失，所以 commit 必须是全量单函数）；有选区/焦点时 park 到 hold watcher，手势结束约 400ms 后落地。同步用户动作（过滤点击、verdict select、hash 恢复）仍直接调 renderer——用户发起的渲染按契约绕过门。
@@ -65,9 +111,11 @@
 
 ```bash
 node --check internal/web/assets/app.js internal/web/assets/pure.js
-node --test internal/web/jstests/pure.test.mjs
+node --test internal/web/jstests/*.test.mjs
 go test ./internal/web -count=1
 ```
+
+结构自查（新增 UI 元素时）：模式注册表是否已归类？相似功能（表格/徽章/弹层/tick）是否复用唯一实现？新 class 是否有样式定义或 `CLASS_EXEMPT` 理由？
 
 `pure.js` 只收零 DOM 依赖的纯函数（esc、格式化、YAML 高度计算等），
 `app.js` 从 `./pure.js` import；新增纯逻辑先进 pure.js 并在

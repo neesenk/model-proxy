@@ -723,6 +723,134 @@ func TestSecurityMissingDirectoryDegradesToDisabled(t *testing.T) {
 	}
 }
 
+// TestRequestLogQueriesGuardJoin pins the request↔guard correlation: the
+// decorated query port joins the security audit trail (and the live
+// adjudication ring) onto request summaries by request id — the synchronous
+// interception, the async verdicts and the unblock trail all land on the
+// request row they belong to, with ring/store duplicates merged onto the
+// ring entry (model + cached attribution) and ring-only low verdicts carried
+// from the ring.
+func TestRequestLogQueriesGuardJoin(t *testing.T) {
+	home := setTestHome(t)
+	reqDir := t.TempDir()
+	writeGuardJoinRequestLog(t, reqDir,
+		requestlog.Record{Ts: "2026-09-14T02:09:12Z", RequestID: "r-hit", SessionID: "s1", CalledModel: "m", Provider: "p", Status: 400},
+		requestlog.Record{Ts: "2026-09-14T02:10:00Z", RequestID: "r-clean", SessionID: "s1", CalledModel: "m", Provider: "p", Status: 200},
+	)
+	auditPath := filepath.Join(home, "logs", "security.log")
+	if err := os.MkdirAll(filepath.Dir(auditPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range []*seclog.Record{
+		{Ts: 1000, Kind: "secret", RequestID: "r-hit", Names: []string{"openai_api_key"}, Action: "log"},
+		{Ts: 3000, Kind: "secret", RequestID: "r-hit", Names: []string{"openai_api_key"}, Action: "log", Verdict: "high", Reason: "real key"},
+		{Ts: 5000, Kind: "unblock", RequestID: "r-hit", SessionID: "s1", Names: []string{"openai_api_key"}, Action: "unblock", Detail: "session re-admitted"},
+	} {
+		if err := seclog.AppendSync(filepath.Dir(auditPath), rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ring := []appapi.SecurityAdjudication{
+		{Ts: 3000, Kind: "secret", Rule: "openai_api_key", Verdict: "high", Reason: "real key", Model: "glm-5.3", RequestID: "r-hit", SessionID: "s1", Cached: true},
+		{Ts: 2500, Kind: "secret", Rule: "openai_api_key", Verdict: "low", Reason: "fixture", RequestID: "r-clean", SessionID: "s1"},
+	}
+	service := New(Ports{
+		RequestLogDirectory: func() string { return reqDir },
+		Config: func() *configdomain.Config {
+			return &configdomain.Config{Guard: configdomain.GuardConfig{Audit: true, AuditPath: auditPath}}
+		},
+		AdjudicationRecent: func() []appapi.SecurityAdjudication { return ring },
+	})
+
+	summaries, _, err := service.RequestLogQueries().SummariesWithFacets(requestlog.Filter{Limit: 10, UsageOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]requestlog.Summary{}
+	for _, s := range summaries {
+		byID[s.RequestID] = s
+	}
+	hit := byID["r-hit"]
+	// The unblock record is EXCLUDED from the request join: it is a
+	// session-level operator action, not a property of the request it points
+	// back at (it lives on the Security feed and the blocked-sessions card).
+	if len(hit.Guard) != 2 {
+		t.Fatalf("r-hit guard = %+v, want 2 marks (judge·high merged, classic) — unblock must not join", hit.Guard)
+	}
+	for _, m := range hit.Guard {
+		if m.Kind == "unblock" {
+			t.Errorf("unblock mark joined the request row: %+v", m)
+		}
+	}
+	// Newest first; the ring and store agree on the high verdict → ONE mark
+	// with the ring's attribution (model + cached + source=judge).
+	high := hit.Guard[0]
+	if high.Verdict != "high" || high.Source != "judge" || high.Model != "glm-5.3" || !high.Cached {
+		t.Errorf("high mark = %+v, want the ring-enriched entry", high)
+	}
+	if hit.Guard[1].Action != "log" || hit.Guard[1].Source != "audit" || hit.Guard[1].Verdict != "" {
+		t.Errorf("classic mark = %+v", hit.Guard[1])
+	}
+	// The low verdict exists ONLY in the ring — it still reaches the row.
+	clean := byID["r-clean"]
+	if len(clean.Guard) != 1 || clean.Guard[0].Verdict != "low" || clean.Guard[0].Source != "judge" {
+		t.Errorf("r-clean guard = %+v, want the ring-only low verdict", clean.Guard)
+	}
+
+	// The detail surface reads the same join (unblock excluded there too).
+	direct := service.RequestLogQueries().GuardAnnotations([]string{"r-hit"})
+	if len(direct["r-hit"]) != 2 {
+		t.Errorf("GuardAnnotations(r-hit) = %+v", direct["r-hit"])
+	}
+}
+
+// TestRequestLogQueriesWithoutGuardSources: no ring port and audit off → the
+// undecorated port, no annotations, summaries unchanged.
+func TestRequestLogQueriesWithoutGuardSources(t *testing.T) {
+	reqDir := t.TempDir()
+	writeGuardJoinRequestLog(t, reqDir,
+		requestlog.Record{Ts: "2026-09-14T02:09:12Z", RequestID: "r-hit", CalledModel: "m", Provider: "p", Status: 400},
+	)
+	home := setTestHome(t)
+	service := New(Ports{
+		RequestLogDirectory: func() string { return reqDir },
+		Config: func() *configdomain.Config {
+			return &configdomain.Config{Guard: configdomain.GuardConfig{Audit: false, AuditPath: filepath.Join(home, "logs", "security.log")}}
+		},
+	})
+	queries := service.RequestLogQueries()
+	if _, ok := queries.(guardJoinQueries); ok {
+		t.Fatal("port decorated without any guard source")
+	}
+	if got := queries.GuardAnnotations([]string{"r-hit"}); got != nil {
+		t.Errorf("GuardAnnotations = %v, want nil on the raw port", got)
+	}
+	summaries, _, err := queries.SummariesWithFacets(requestlog.Filter{Limit: 5, UsageOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 || summaries[0].Guard != nil {
+		t.Errorf("summaries = %+v, want unannotated rows", summaries)
+	}
+}
+
+// writeGuardJoinRequestLog seeds one request-log file the directory scan can
+// read (same shape as the web-layer read tests).
+func writeGuardJoinRequestLog(t *testing.T, dir string, records ...requestlog.Record) {
+	t.Helper()
+	path := filepath.Join(dir, "requests-20260914-020000.log")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	for _, record := range records {
+		if err := json.NewEncoder(file).Encode(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestConfigDocument(t *testing.T) {
 	path := writeTestConfig(t)
 	service := New(Ports{ConfigFile: func() string { return path }})

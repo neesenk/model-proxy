@@ -28,7 +28,7 @@ force-provider 字符串；`internal/forward/plan.go` 的 `requestRoutingSchedul
 config、parent identity、route keys 与 generation，并经注入的 schedule 端口
 （app: `Proxy.schedule`）进入 `internal/runtime.Manager`。`serveOnce` 每个 pass 只构造一个
 Planner，同时用于
-主动 `Apply` 与反应式 `ContextOverflowRetry`，禁止重新读取 Proxy 或构造第二份
+主动 `Apply` 与反应式 `ContextOverflowRetryWithProfile`，禁止重新读取 Proxy 或构造第二份
 generation。
 
 `internal/catalog` 作为无仓库内依赖叶子包拥有 models.dev slim projection、

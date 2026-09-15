@@ -131,7 +131,9 @@ func (s *Service) RequestLogDirectory() string {
 
 // RequestLogQueries returns the request-log query port: the tailing SQLite
 // index when the composition root started one, the directory scan otherwise
-// (index open failure degrades, never fails closed). A nil result means the
+// (index open failure degrades, never fails closed), decorated with the
+// guard↔request correlation join when any guard source is available (the
+// security audit store or the live adjudication ring). A nil result means the
 // request log is disabled — the handlers answer their {enabled:false} shape.
 func (s *Service) RequestLogQueries() appapi.RequestLogQueries {
 	if s.ports.RequestLogDirectory == nil {
@@ -145,7 +147,39 @@ func (s *Service) RequestLogQueries() appapi.RequestLogQueries {
 	if s.ports.RequestLogIndex != nil {
 		index = s.ports.RequestLogIndex()
 	}
-	return requestLogQueries{dir: dir, index: index}
+	base := requestLogQueries{dir: dir, index: index}
+	if !s.guardJoinAvailable() {
+		return base
+	}
+	return guardJoinQueries{requestLogQueries: base, service: s}
+}
+
+// guardJoinAvailable reports whether any guard annotation source exists: the
+// security audit store (audit on, directory present) or the live adjudication
+// ring port. Without either the decorator would add allocation for no rows.
+func (s *Service) guardJoinAvailable() bool {
+	if s.ports.AdjudicationRecent != nil {
+		return true
+	}
+	return s.auditDirIfEnabled() != ""
+}
+
+// auditDirIfEnabled derives the security audit directory when audit is on and
+// the directory exists ("" otherwise). Best-effort, same convention as
+// Security: fail-soft to no annotations rather than failing the request read.
+func (s *Service) auditDirIfEnabled() string {
+	if s.ports.Config == nil {
+		return ""
+	}
+	cfg := s.ports.Config()
+	if cfg == nil || !cfg.Guard.AuditEnabled() {
+		return ""
+	}
+	dir := filepath.Dir(cfg.Guard.AuditPathValue(accounts.HomeDir()))
+	if _, err := os.Stat(dir); err != nil {
+		return ""
+	}
+	return dir
 }
 
 // requestLogQueries adapts the index (or the scan fallback) to
@@ -176,6 +210,137 @@ func (q requestLogQueries) SessionSummaries(scanLimit, limit int, costOf func(pr
 		return q.index.SessionSummaries(scanLimit, limit, costOf)
 	}
 	return requestlog.SessionSummaries(q.dir, scanLimit, limit, costOf)
+}
+
+// GuardAnnotations on the raw port: the request log store itself knows
+// nothing about guard state — the decorated port below owns the join.
+func (q requestLogQueries) GuardAnnotations([]string) map[string][]requestlog.GuardMark { return nil }
+
+// guardJoinQueries decorates the request-log query port with the
+// guard↔request correlation: every summary page and detail read is joined
+// with the security audit trail by request id (synchronous interceptions,
+// async LLM verdicts, unblocks), so the requests surfaces answer "why was
+// this request blocked / how was it judged" in place. The join is read-only
+// and best-effort — a failing audit source degrades to unannotated rows,
+// never to a failed request read.
+type guardJoinQueries struct {
+	requestLogQueries
+	service *Service
+}
+
+func (q guardJoinQueries) SummariesWithFacets(filter requestlog.Filter) ([]requestlog.Summary, requestlog.Facets, error) {
+	summaries, facets, err := q.requestLogQueries.SummariesWithFacets(filter)
+	if err != nil {
+		return summaries, facets, err
+	}
+	ids := make([]string, 0, len(summaries))
+	for i := range summaries {
+		ids = append(ids, summaries[i].RequestID)
+	}
+	for id, marks := range q.service.GuardAnnotations(ids) {
+		for i := range summaries {
+			if summaries[i].RequestID == id {
+				summaries[i].Guard = marks
+			}
+		}
+	}
+	return summaries, facets, nil
+}
+
+func (q guardJoinQueries) GuardAnnotations(ids []string) map[string][]requestlog.GuardMark {
+	return q.service.GuardAnnotations(ids)
+}
+
+// GuardAnnotations correlates one batch of request ids with the guard trail.
+// Sources, merged and deduped (newest first per request):
+//
+//   - the live adjudication ring (ports.AdjudicationRecent): the freshest
+//     verdicts including the ring-only low tier and cached-replay attribution;
+//   - the security audit store (security.db, indexed by request_id): the
+//     durable rows — synchronous interception records, high/medium/error/
+//     skipped verdicts, and unblock trail entries.
+//
+// Ring and store overlap on every stored verdict; the ring entry wins the
+// collision (it carries model + cached attribution), keyed by
+// (kind, names, verdict, reason).
+func (s *Service) GuardAnnotations(ids []string) map[string][]requestlog.GuardMark {
+	out := make(map[string][]requestlog.GuardMark, len(ids))
+	if len(ids) == 0 {
+		return out
+	}
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			want[id] = true
+		}
+	}
+	if len(want) == 0 {
+		return out
+	}
+	type markKey struct {
+		kind    string
+		names   string
+		verdict string
+		reason  string
+	}
+	seen := make(map[string]map[markKey]int)
+	add := func(id string, m requestlog.GuardMark, enriched bool) {
+		key := markKey{kind: m.Kind, names: strings.Join(m.Names, "\x00"), verdict: m.Verdict, reason: m.Reason}
+		if byKey := seen[id]; byKey != nil {
+			if i, ok := byKey[key]; ok {
+				// The ring and the store describe the same verdict; prefer the
+				// ring entry (model/cached attribution).
+				if enriched {
+					out[id][i] = m
+				}
+				return
+			}
+		} else {
+			seen[id] = map[markKey]int{}
+		}
+		seen[id][key] = len(out[id])
+		out[id] = append(out[id], m)
+	}
+	if s.ports.AdjudicationRecent != nil {
+		for _, r := range s.ports.AdjudicationRecent() {
+			if r.RequestID == "" || !want[r.RequestID] {
+				continue
+			}
+			add(r.RequestID, requestlog.GuardMark{
+				Ts: r.Ts, Kind: r.Kind, Names: []string{r.Rule}, Action: r.Action,
+				Verdict: r.Verdict, Reason: r.Reason, Evidence: r.Evidence,
+				Model: r.Model, Cached: r.Cached, Source: "judge",
+			}, true)
+		}
+	}
+	if dir := s.auditDirIfEnabled(); dir != "" {
+		if byRequest, err := seclog.QueryByRequestIDs(dir, ids); err == nil {
+			for id, records := range byRequest {
+				if !want[id] {
+					continue
+				}
+				for _, rec := range records {
+					// Unblock is a session-level operator action, not a
+					// property of the request it points back at — it stays
+					// on the Security feed and the blocked-sessions card,
+					// never on request rows.
+					if rec.Kind == seclog.KindUnblock {
+						continue
+					}
+					add(id, requestlog.GuardMark{
+						Ts: rec.Ts, Kind: rec.Kind, Names: append([]string(nil), rec.Names...),
+						Action: rec.Action, Verdict: rec.Verdict, Reason: rec.Reason,
+						Evidence: rec.Evidence, Model: rec.Model, Detail: rec.Detail, Source: "audit",
+					}, false)
+				}
+			}
+		}
+	}
+	for id := range out {
+		marks := out[id]
+		sort.SliceStable(marks, func(i, j int) bool { return marks[i].Ts > marks[j].Ts })
+	}
+	return out
 }
 
 func (s *Service) Accounts() []appapi.ProviderAccounts {

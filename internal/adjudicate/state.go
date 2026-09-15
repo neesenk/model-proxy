@@ -285,15 +285,19 @@ func (b *blockStore) Block(sessionID string, bl Block) {
 	b.persistLocked()
 }
 
-func (b *blockStore) Unblock(sessionID string) bool {
+// Unblock removes one session block and returns the removed entry so the
+// caller can record the unblock with its original attribution; false when the
+// session was not blocked.
+func (b *blockStore) Unblock(sessionID string) (Block, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if _, ok := b.blocks[sessionID]; !ok {
-		return false
+	bl, ok := b.blocks[sessionID]
+	if !ok {
+		return Block{}, false
 	}
 	delete(b.blocks, sessionID)
 	b.persistLocked()
-	return true
+	return bl, true
 }
 
 // BlockEntry is one block plus its session key (the map key re-attached for

@@ -56,6 +56,15 @@ func (e *Entry) Status() int {
 	return e.status
 }
 
+// Body returns the cached response body (the bytes Replay writes). Read-only
+// use only — the slice is the entry's storage.
+func (e *Entry) Body() []byte {
+	if e == nil {
+		return nil
+	}
+	return e.body
+}
+
 // Store is a bounded, concurrency-safe exact-response cache.
 type Store struct {
 	counters     *Counters

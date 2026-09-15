@@ -186,7 +186,7 @@ capability scanner 的 target 跳过与 400 信封通道，proxy 无特判。str
 ## 回归测试
 
 以下纯 codec/state/framing 测试位于 `internal/protocol/`；名称以
-`TestForward_` 开头的 Proxy 接线测试仍位于根包，防止 codec 正确但 transport
+`TestForward_` 开头的 Proxy 接线测试位于 `internal/app`，防止 codec 正确但 transport
 接线错误。
 
 - `TestProtocolConversionRegistryIsComplete` 断言六组跨协议 pair 均同时注册

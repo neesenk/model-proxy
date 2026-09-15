@@ -2,6 +2,31 @@ package requestlog
 
 import "sort"
 
+// GuardMark is one guard/adjudication annotation joined onto a request at
+// QUERY time — the correlation of the security audit trail (interceptions,
+// LLM verdicts, unblocks) with the request row, so the requests surfaces can
+// show why a request was blocked or how it was judged without a second
+// cross-page lookup. It is never part of the persisted request-log record:
+// the authoritative row lives in the security audit log, keyed by RequestID.
+// Fields mirror the audit projection (labels and scrubbed verdict text only —
+// matched content never enters a mark).
+type GuardMark struct {
+	Ts       int64    `json:"ts"`
+	Kind     string   `json:"kind"` // secret | path | unblock
+	Names    []string `json:"names,omitempty"`
+	Action   string   `json:"action,omitempty"`
+	Verdict  string   `json:"verdict,omitempty"` // high | medium | low | error | skipped
+	Reason   string   `json:"reason,omitempty"`
+	Evidence string   `json:"evidence,omitempty"`
+	Model    string   `json:"model,omitempty"`
+	Detail   string   `json:"detail,omitempty"`
+	Cached   bool     `json:"cached,omitempty"`
+	// Source distinguishes the live adjudication ring ("judge" — includes the
+	// ring-only low verdicts and cached attribution) from the durable audit
+	// store ("audit").
+	Source string `json:"source,omitempty"`
+}
+
 // Summary is the metadata-only list API projection.
 type Summary struct {
 	Ts            string `json:"ts"`
@@ -26,6 +51,10 @@ type Summary struct {
 	CacheRead     uint64 `json:"cache_read,omitempty"`
 	CacheCreation uint64 `json:"cache_creation,omitempty"`
 	Shadow        bool   `json:"shadow,omitempty"`
+	// Guard carries the request's guard/adjudication annotations when the read
+	// surface joins them in (admin's decorated query port); the raw
+	// requestlog scan leaves it empty. Newest first.
+	Guard []GuardMark `json:"guard,omitempty"`
 }
 
 // Summarize projects one full record to list-safe metadata.

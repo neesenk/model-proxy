@@ -381,12 +381,46 @@ func (p *Proxy) adjudicationBlocks() []appapi.SecurityBlock {
 	return p.adjudication.Blocks()
 }
 
-// adjudicationUnblock implements admin.Ports.AdjudicationUnblock.
+// adjudicationUnblock implements admin.Ports.AdjudicationUnblock. Removing a
+// block is itself a security-relevant action, so a successful unblock leaves
+// an audit record (kind=unblock, carrying the original block's attribution:
+// rule, originating request, judging model) and a live event — the block's
+// creation is already recorded at verdict/exact-match time; without the unblock
+// record the trail would silently lose who re-admitted the session. The
+// record rides the CURRENT generation's seclog (audit off → JSONL/store both
+// absent, fail-soft: the unblock itself must never fail because of it).
 func (p *Proxy) adjudicationUnblock(sessionID string) bool {
 	if p.adjudication == nil {
 		return false
 	}
-	return p.adjudication.Unblock(sessionID)
+	bl, ok := p.adjudication.Unblock(sessionID)
+	if !ok {
+		return false
+	}
+	detail := "session re-admitted; block was kind=" + bl.Kind
+	if bl.RequestID != "" {
+		detail += " request=" + bl.RequestID
+	}
+	if bl.Model != "" {
+		detail += " model=" + bl.Model
+	}
+	names := []string{bl.Rule}
+	if bl.Rule == "" {
+		names = nil
+	}
+	snap := p.SnapshotRuntime()
+	forward.AuditGuardHit(snap.SecLog, forward.GuardAuditHit{
+		Kind: seclog.KindUnblock, Action: "unblock",
+		RequestID: bl.RequestID, SessionID: sessionID,
+		Names: names, Detail: detail,
+	})
+	p.events.Publish(observeevents.Event{
+		Type:      "guard",
+		Ts:        time.Now().UnixMilli(),
+		SessionID: sessionID,
+		Detail:    "unblock rule=" + bl.Rule + " — session re-admitted",
+	})
+	return true
 }
 
 // adjudicationStats implements admin.Ports.AdjudicationStats.

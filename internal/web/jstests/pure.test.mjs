@@ -9,7 +9,7 @@ import {
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
   verdictBadge, modelCapMatrix, providerCapsSummary, providerFrozen, providerNames,
   ruleHitsLeaderboard,
-  sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary,
+  sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary, guardMarksHTML, guardMarksDetailHTML, requestMetaHTML,
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   cacheHitRate, settingsDiff, settingsRestartKeys,
@@ -30,7 +30,7 @@ import {
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
   quotaErrKind, accountUsageState,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
-  securityKpisHTML, mergeSecurityFeed, SECURITY_RANGES, securityRangeFromSecs,
+  securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML, SECURITY_RANGES, securityRangeFromSecs,
   securityFilterQuery, securityFilterFromQuery, explainCacheKey,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
   iconPin, iconRefresh, iconChevron, statusBadgeClass, statusBadgeHTML,
@@ -2176,6 +2176,206 @@ test('requestRowHTML cache badge shows the hit share and highlights at 80%', () 
   assert.ok(near.includes('cache 9,996 (99.96%)'), near);
   const full = requestRowHTML({ requestId: 'e', ts: 1, status: 200, input: 0, output: 5, cacheRead: 5000 }, { rowClass: 'req-row' });
   assert.ok(full.includes('cache 5,000 (100%)'), 'exact 100% stays integer');
+});
+
+// The request↔guard correlation: badges on the row, the full trail in the
+// detail block, same-outcome multi-rule marks grouped, and unblock trail
+// rows excluded from rule-hit counts.
+test('guardMarksHTML renders interception, verdict and unblock badges', () => {
+  const html = guardMarksHTML([
+    { ts: 5, kind: 'secret', names: ['openai_api_key'], action: 'block', source: 'audit' },
+    { ts: 4, kind: 'secret', names: ['openai_api_key'], verdict: 'high', reason: 'real key', model: 'glm-5.3', source: 'judge', cached: true },
+    { ts: 3, kind: 'unblock', names: ['openai_api_key'], action: 'unblock', detail: 'session re-admitted' },
+  ]);
+  assert.ok(html.includes('⚑ block openai_api_key'), html);
+  assert.ok(html.includes('badge err'), 'a block badge is an error badge');
+  // A repeat-interception record carries action=block AND the original
+  // verdict — the BLOCK wins; rendering judge·high would hide that this
+  // request was rejected.
+  const intercepted = guardMarksHTML([
+    { ts: 2, kind: 'secret', names: ['openai_api_key'], action: 'block', verdict: 'high', reason: 'live key', source: 'audit' },
+  ]);
+  assert.ok(intercepted.includes('⚑ block openai_api_key'), intercepted);
+  assert.ok(!intercepted.includes('judge·'), intercepted);
+  assert.ok(html.includes('judge·high·cached'), html);
+  assert.ok(html.includes('unblocked'), html);
+  assert.ok(html.includes('badge ok'), 'the unblock badge uses the ok class');
+  // The verdict reason rides the title (scrubbed text, escaped).
+  assert.ok(html.includes('title="real key"'), html);
+  // Several rules under ONE outcome collapse into a single counted badge —
+  // a multi-rule request reads as one event, not a badge flood.
+  const multi = guardMarksHTML([
+    { ts: 3, kind: 'secret', names: ['kube'], verdict: 'error', reason: 'timeout', model: 'glm-5.3' },
+    { ts: 2, kind: 'secret', names: ['docker'], verdict: 'error', reason: 'timeout', model: 'glm-5.3' },
+    { ts: 1, kind: 'secret', names: ['jwt'], verdict: 'low', reason: 'fixture' },
+  ]);
+  assert.ok(multi.includes('judge·error ×2'), multi);
+  assert.ok(multi.includes('judge·low'), multi);
+  assert.ok(!multi.includes('+'), 'no overflow chip — grouping kept it to two badges');
+  // Different verdicts never merge even on the same rule.
+  const split = guardMarksHTML([
+    { ts: 2, kind: 'secret', names: ['jwt'], verdict: 'high', reason: 'a' },
+    { ts: 1, kind: 'secret', names: ['jwt'], verdict: 'low', reason: 'b' },
+  ]);
+  assert.ok(split.includes('judge·high') && split.includes('judge·low'), split);
+  // Distinct reasons under ONE verdict still merge (kind+verdict grouping):
+  // a single counted badge whose tooltip carries every rule's reason.
+  const flood = guardMarksHTML([1, 2, 3, 4, 5].map((n) => ({ ts: n, kind: 'secret', names: ['r' + n], verdict: 'low', reason: 'x' + n })));
+  assert.ok(flood.includes('judge·low ×5'), flood);
+  assert.ok(!flood.includes('+'), flood);
+  for (let i = 1; i <= 5; i++) assert.ok(flood.includes('x' + i), 'tooltip joins rule reasons');
+  // Genuinely different verdicts still cap with an overflow count.
+  const caps = guardMarksHTML(['high', 'medium', 'low', 'error', 'skipped'].map((v, i) => ({ ts: i, kind: 'secret', names: ['r' + i], verdict: v, reason: 'x' + i })));
+  assert.ok(caps.includes('+2'), caps);
+  assert.equal(guardMarksHTML([]), '');
+  assert.equal(guardMarksHTML(null), '');
+});
+
+test('requestRowHTML renders joined guard marks in the model cell', () => {
+  const row = requestRowHTML(
+    { requestId: 'r1', ts: 1, status: 400, model: 'm', guardMarks: [{ ts: 2, kind: 'secret', names: ['jwt'], action: 'block' }] },
+    { rowClass: 'req-row' },
+  );
+  assert.ok(row.includes('⚑ block jwt'), row);
+  const plain = requestRowHTML({ requestId: 'r2', ts: 1, status: 200, model: 'm' }, { rowClass: 'req-row' });
+  assert.ok(!plain.includes('guard'), 'rows without marks stay clean');
+});
+
+test('guardMarksDetailHTML renders one row per channel with per-rule reasons', () => {
+  const html = guardMarksDetailHTML([
+    { ts: 5, kind: 'secret', names: ['openai_api_key'], action: 'log', verdict: 'high', reason: 'real key', evidence: 'sk-proj prefix', model: 'glm-5.3', source: 'judge' },
+    { ts: 6, kind: 'unblock', action: 'unblock', detail: 'session re-admitted; block was kind=secret' },
+  ]);
+  // One labeled group in the shared meta-strip idiom — one row per channel.
+  assert.ok(html.includes('req-meta-guard'), html);
+  assert.ok(html.includes('<div class="req-meta-k">⚑ guard</div>'), html);
+  assert.equal(html.match(/req-guard-row/g).length, 2, html);
+  assert.ok(html.includes('<span class="badge err">high</span>'), html);
+  assert.ok(html.includes('<code>openai_api_key</code>'), html);
+  assert.ok(html.includes('judge glm-5.3'), html);
+  assert.ok(html.includes('req-guard-time'), html);
+  assert.ok(html.includes('real key'), html);
+  assert.ok(html.includes('<span class="badge ok">unblocked</span>'), html);
+  assert.ok(html.includes('session re-admitted'), html);
+  assert.equal(guardMarksDetailHTML([]), '');
+  assert.equal(guardMarksDetailHTML(null), '');
+
+  // Two rules of ONE channel with different judgment reasons: still ONE row
+  // (the channel row), one reason line per rule — each with its own verdict
+  // badge and rule name.
+  const multi = guardMarksDetailHTML([
+    { ts: 3, kind: 'path', names: ['kube'], verdict: 'medium', reason: 'cluster credentials', model: 'glm-5.3-flash' },
+    { ts: 2, kind: 'path', names: ['docker'], verdict: 'medium', reason: 'registry auth', model: 'glm-5.3-flash' },
+  ]);
+  assert.equal(multi.match(/req-guard-row/g).length, 1, multi);
+  assert.equal(multi.match(/req-guard-line/g).length, 2, multi);
+  assert.ok(multi.includes('<code>kube, docker</code>'), multi);
+  assert.ok(multi.includes('cluster credentials') && multi.includes('registry auth'), multi);
+
+  // Same verdict AND same reason across rules → a single shared reason line.
+  const shared = guardMarksDetailHTML([
+    { ts: 3, kind: 'secret', names: ['a'], verdict: 'error', reason: 'judge timeout', model: 'm' },
+    { ts: 2, kind: 'secret', names: ['b'], verdict: 'error', reason: 'judge timeout', model: 'm' },
+  ]);
+  assert.equal(shared.match(/req-guard-row/g).length, 1, shared);
+  assert.equal(shared.match(/req-guard-line/g).length, 1, shared);
+  assert.ok(shared.includes('<code>a, b</code>'), shared);
+});
+
+test('requestMetaHTML groups the record facts under labeled keys', () => {
+  const html = requestMetaHTML(
+    { ts: '2026-09-13T18:12:58Z', method: 'POST', path: '/v1/messages', attempt: 0, status: 200, latency_ms: 1165, ttft_ms: 1200, provider: 'zhipu', upstream_model: 'glm-5.3-flash', request_size: 177, response_size: 451 },
+    ['T+4m', 'Δ48.0s after prev'],
+  );
+  assert.equal(html.match(/req-meta-g/g).length, 5, html);
+  assert.ok(html.includes('<div class="req-meta-k">when</div>'), html);
+  assert.ok(html.includes('2026-09-13T18:12:58Z · T+4m · Δ48.0s after prev'), html);
+  assert.ok(html.includes('<div class="req-meta-k">call</div>'), html);
+  assert.ok(html.includes('POST <span class="req-meta-dim">/v1/messages</span>'), html);
+  assert.ok(html.includes('<div class="req-meta-k">result</div>'), html);
+  assert.ok(html.includes('<span class="badge ok">200</span>'), 'status rides as a colored badge');
+  assert.ok(html.includes('1,165ms'), html);
+  assert.ok(html.includes('<div class="req-meta-k">route</div>'), html);
+  assert.ok(html.includes('zhipu / glm-5.3-flash'), html);
+  assert.ok(html.includes('<div class="req-meta-k">size</div>'), html);
+  assert.ok(html.includes('req 177'), html);
+  // Sparse records drop their empty groups instead of rendering blanks.
+  const sparse = requestMetaHTML({ ts: 't', method: 'GET', status: 400 }, []);
+  assert.ok(sparse.includes('when') && sparse.includes('call') && sparse.includes('result'));
+  assert.ok(!sparse.includes('route'), sparse);
+  assert.ok(!sparse.includes('size'), sparse);
+});
+
+test('ruleHitsLeaderboard ignores the unblock trail', () => {
+  const rows = ruleHitsLeaderboard([
+    { ts: 100, kind: 'secret', names: ['jwt'] },
+    { ts: 200, kind: 'unblock', names: ['jwt'], action: 'unblock' },
+  ], []);
+  assert.equal(rows.length, 1, 'the unblock record must not create or inflate a rule row');
+  assert.equal(rows[0].hits, 1);
+});
+
+test('mergeSecurityFeed passes unblock trail rows through as audit rows', () => {
+  const rows = mergeSecurityFeed([
+    { ts: 900, kind: 'unblock', session_id: 's', names: ['jwt'], action: 'unblock', detail: 'session re-admitted', request_id: 'r1' },
+  ], []);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].kind, 'unblock');
+  assert.equal(rows[0].action, 'unblock');
+  assert.equal(rows[0].src, 'audit');
+});
+
+// One request hitting several rules writes one audit record PER rule (the
+// adjudication sink is rule-granular); the feed display merges those rows
+// into ONE row per request per channel — worst verdict headlines, per-rule
+// verdicts/reasons ride as segments (securitySegmentsHTML).
+test('mergeSecurityFeed merges same-request rows per channel with segments', () => {
+  const rows = mergeSecurityFeed([
+    { ts: 100, kind: 'path', request_id: 'r14', names: ['kube'], action: 'log', verdict: 'medium', reason: 'cluster credentials' },
+    { ts: 101, kind: 'path', request_id: 'r14', names: ['docker'], action: 'log', verdict: 'medium', reason: 'registry auth' },
+    { ts: 102, kind: 'secret', request_id: 'r14', names: ['openai_api_key'], action: 'log', verdict: 'high', reason: 'real key' },
+    { ts: 103, kind: 'secret', request_id: 'r15', names: ['jwt'], action: 'log', verdict: 'error', reason: 'judge timeout' },
+    { ts: 104, kind: 'drift', names: ['config'], action: 'log' },
+  ]);
+  // kube+docker: ONE row (names joined, newest ts) with per-rule segments.
+  const pathRow = rows.find((r) => r.kind === 'path');
+  assert.ok(pathRow, 'path row exists');
+  assert.deepEqual(pathRow.names.sort(), ['docker', 'kube']);
+  assert.equal(pathRow.ts, 101);
+  assert.equal(pathRow.segments.length, 2);
+  assert.ok(pathRow.segments.some((sg) => sg.names[0] === 'kube' && sg.reason === 'cluster credentials'), JSON.stringify(pathRow.segments));
+  assert.equal(rows.filter((r) => r.kind === 'path').length, 1, 'one row per channel');
+  // A different channel (secret) of the same request stays its own row; the
+  // same channel of a DIFFERENT request stays separate; no-request-id rows
+  // (drift) never merge.
+  assert.equal(rows.length, 4, `rows = ${rows.map((r) => r.kind + ':' + r.names.join(','))}`);
+  assert.ok(rows.some((r) => r.kind === 'secret' && r.names.includes('openai_api_key') && r.verdict === 'high'));
+  assert.ok(rows.some((r) => r.kind === 'secret' && r.names.includes('jwt') && r.verdict === 'error'));
+  assert.ok(rows.some((r) => r.kind === 'drift'));
+  // Heterogeneous verdicts within one channel still merge: the worst
+  // verdict headlines the row.
+  const mixed = mergeSecurityFeed([
+    { ts: 1, kind: 'secret', request_id: 'r1', names: ['a'], verdict: 'medium', reason: 'shape only' },
+    { ts: 2, kind: 'secret', request_id: 'r1', names: ['b'], verdict: 'high', reason: 'live key' },
+  ]);
+  assert.equal(mixed.length, 1, 'one merged row');
+  assert.equal(mixed[0].verdict, 'high', 'worst verdict headlines');
+  assert.equal(mixed[0].reason, 'live key');
+  assert.equal(mixed[0].segments.length, 2);
+});
+
+test('securitySegmentsHTML renders per-rule lines only for merged rows', () => {
+  assert.equal(securitySegmentsHTML(null), '');
+  assert.equal(securitySegmentsHTML({ segments: [{ names: ['a'], verdict: 'low' }] }), '');
+  const html = securitySegmentsHTML({ segments: [
+    { names: ['kube'], verdict: 'medium', reason: 'cluster credentials' },
+    { names: ['docker'], verdict: 'medium', reason: 'registry auth', cached: true },
+  ] });
+  assert.equal(html.match(/sec-seg/g).length, 2, html);
+  assert.ok(html.includes('<code>kube</code>') && html.includes('cluster credentials'), html);
+  assert.ok(html.includes('<code>docker</code>') && html.includes('registry auth'), html);
+  assert.ok(html.includes('badge warn'), 'medium renders warn');
+  assert.ok(html.includes('badge muted">cached'), 'cached badge rides the segment');
 });
 
 test('virtual table windowing: cumulative offsets and the visible range', () => {

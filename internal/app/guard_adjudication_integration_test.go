@@ -247,6 +247,43 @@ func TestGuardAdjudication_HighVerdictBlocksAndUnblocks(t *testing.T) {
 	if _, ok := p.adjudication.Blocked("sess-hi"); ok {
 		t.Error("session still blocked after unblock")
 	}
+
+	// The unblock itself left a trail (operator-action audit): an audit
+	// record with kind=unblock carrying the original block's attribution
+	// (rule + originating request), and a guard live event. The audit write
+	// is async — poll for it like every other seclog assertion.
+	deadline := time.Now().Add(3 * time.Second)
+	found = false
+	for time.Now().Before(deadline) {
+		for _, r := range readSeclogRecords(t, home) {
+			if r.Kind != seclog.KindUnblock {
+				continue
+			}
+			found = true
+			if r.SessionID != "sess-hi" || r.Action != "unblock" {
+				t.Errorf("unblock record = %+v, want session sess-hi action unblock", r)
+			}
+			if len(r.Names) != 1 || r.Names[0] != "openai_api_key" {
+				t.Errorf("unblock record names = %v, want the blocked rule", r.Names)
+			}
+		}
+		if found {
+			break
+		}
+		time.Sleep(3 * time.Millisecond)
+	}
+	if !found {
+		t.Error("unblock wrote no kind=unblock audit record")
+	}
+	sawEvent := false
+	for _, d := range guardEventDetails(p) {
+		if strings.Contains(d, "unblock rule=openai_api_key") {
+			sawEvent = true
+		}
+	}
+	if !sawEvent {
+		t.Errorf("unblock emitted no guard event: %v", guardEventDetails(p))
+	}
 }
 
 // A broken judge (5xx) fails OPEN: the classic immediate record reappears

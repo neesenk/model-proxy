@@ -105,15 +105,16 @@ race-clean 只是必要条件。并发测试还必须断言功能不变量，例
 
 叶子包的纯行为测试与实现放在同一模块目录；composition root 只保留跨模块行为和
 HTTP/CLI 生命周期集成测试。例如 `internal/observe/events/hub_test.go` 精确断言
-ring cap、detached snapshot、取消订阅、慢消费者丢弃和终态查询；根包只验证
+ring cap、detached snapshot、取消订阅、慢消费者丢弃和终态查询；`internal/app` 只验证
 forward/cache/Fusion 发布语义及 `/api/events` SSE 契约。测试不得为读取内部状态
 而恢复根包 type alias、访问模块互斥锁或暴露 test-only 生产接口。
 
-根包不再保留测试文件。CLI 子命令与进程生命周期集成测试归 `internal/cli`
+根包只保留进程边界测试（`main_test.go` 的 build version 注入、`cli_serve_test.go`
+的 log_level 过滤），不再保留领域行为测试。CLI 子命令与进程生命周期集成测试归 `internal/cli`
 （os.Exit/log.Fatal 命令经 subprocess harness 覆盖：共享实现在
 `internal/cli/clitest`（`HelperProcess` / `RunCLI*` / 共享 fixture），每个命令包以
 自己的 `TestHelperProcess` 注册本包 handler）；`app.NewRuntime`
-装配行为测试归 `internal/app/runtime_assembly_test.go`；架构 AST 契约测试归
+装配行为测试归 `internal/app/runtime_test.go`；架构 AST 契约测试归
 `internal/archtest`（纯测试包，经 `repoRoot` 定位模块根，调用点写模块根相对路径）。
 跨文件共享 fixture 只保留在各包的 `*_test_support_test.go`，不得复制 helper 或
 把 test-only hook 塞回生产结构。一个文件只覆盖一个清晰领域时不按行数强拆；
@@ -121,7 +122,7 @@ forward/cache/Fusion 发布语义及 `/api/events` SSE 契约。测试不得为�
 领域拆分，并保持原测试名、断言与 cleanup 语义。
 
 Provider 的 `Usage`、`Quota`、fetch/parse、认证和显示格式测试直接归
-`internal/provider/*_test.go`；根包只验证 YAML/账号池/build dispatch/CLI 输出等组合行为，
+`internal/provider/*_test.go`；组合层（`internal/app`/`internal/cli`）只验证 YAML/账号池/build dispatch/CLI 输出等组合行为，
 不得在 `_test.go` 重建已删除的 `show*Usage` / `fetch*Quota` 兼容函数后重复测试。
 
 ### 架构 DAG 与交互合同
@@ -147,20 +148,20 @@ positive/negative control，证明它既能接受合法图/调用点，也能抓
 HTTP/CLI、reload-generation、shutdown order 和并发行为测试。
 
 Web transport 的 HTTP routing、JSON presentation、asset serving、login session
-store 和 task owner 测试归 `internal/web/*_test.go`；根包只保留真实应用
+store 和 task owner 测试归 `internal/web/*_test.go`；`internal/app` 只保留真实应用
 `ReadAPI` / `CommandAPI` 适配、mux composition 及 Web 与 daemon/Proxy lifecycle
 的集成行为。测试通过端口和 HTTP 结果断言，不得让 `internal/web` import root 或为
 读取 session/task 内部状态恢复 root-private hook。
 
 精确响应缓存的 key/store/recorder/header/replay 单测归
-`internal/cache/*_test.go`；根包保留 force/pin bypass、协议转换后的
+`internal/cache/*_test.go`；`internal/app` 保留 force/pin bypass、协议转换后的
 客户端字节、client cancel、reload generation、live event 与 Web status 集成
 测试。缓存断言通过公开 `Stats` 与 HTTP 结果完成，不得读取内部 entry map/counter。
 
 请求日志的 Record 构造、header allowlist、writer rotation/权限、异步 drain/drop、
 retention、top-K 查询、Summary 脱敏与 Shadow 聚合单测归
 `internal/observe/requestlog/*_test.go`；通用有界流捕获归
-`internal/transport/bodycapture/reader_test.go`。根包只保留原始请求体与上游改写
+`internal/transport/bodycapture/reader_test.go`。`internal/app` 只保留原始请求体与上游改写
 body 的映射、协议转换后客户端字节、HTTP list/detail 脱敏、replay 拒绝截断、
 Fusion/Shadow 记录以及 shutdown drain 顺序的集成测试。列表测试必须同时断言
 request body、response body、response headers 均不出现，不能只检查其中一项。
@@ -169,14 +170,14 @@ Fusion 的 registry/budget、quorum/grace collection、judge/synthesis body、
 usage/rune helper 和 Engine gate/fan-out 单测归 `internal/fusion/*_test.go`；
 Shadow 的 sampling、concurrency gate、detached request rewrite/auth/header、
 fail-closed conversion 与 bounded capture 单测归
-`internal/shadow/*_test.go`。根包只保留真实 resolver/target plan、reload
+`internal/shadow/*_test.go`。`internal/app` 只保留真实 resolver/target plan、reload
 generation、target policy、stream/client response、metrics/events/request log
 和 Shadow-before-drain 集成；不得为检查 semaphore、registry ring 或随机数而
 暴露内部字段或恢复根兼容类型。
 
 SQLite stats 的 schema/additive migration、legacy import、minute/agent upsert、
 retention、raw/wide/calendar 查询与 query plan 测试归
-`internal/observe/stats/*_test.go`。根包只保留 metrics/tokens/agents → flusher
+`internal/observe/stats/*_test.go`。`internal/app` 只保留 metrics/tokens/agents → flusher
 投影、失败分钟批次重试、reset-vs-flush、Proxy final flush/Store close、HTTP JSON
 shape 和 CLI 显示集成。宽 bucket 必须逐字段断言所有 additive counter、
 `MAX(last_request_at)`、平均值与 bucket floor；shutdown 测试需重开数据库证明
@@ -224,7 +225,7 @@ schedule、persist/dashboard snapshot 的纯状态机测试归
 model/param 隔离、quota 嵌套 slice 深拷贝、schedule commit gate、resolver spread
 gate、quota projection 与 health/pin/sticky/spread 的单锁决策、Dashboard
 PreviewOrder 的 order/sticky/facts parity 与无 mutation，以及并发 snapshot 的
-generation 与内容不会混代。根包只保留真实
+generation 与内容不会混代。`internal/app` 只保留真实
 forward/Fusion/reload/HTTP/CLI/persistence/quota poll 编排；集成测试通过公开行为
 或 detached snapshot 断言，不得访问 Manager mutex 或恢复第二份内部 map。
 
@@ -258,7 +259,7 @@ forward/Fusion/reload/HTTP/CLI/persistence/quota poll 编排；集成测试通�
 - state、credential、request log 使用 `t.TempDir()` 或显式注入 path。
 - 后台 owner 必须提供 stop/wait；测试通过 `t.Cleanup` 关闭。
 - 普通功能测试统一使用 `newTestProxy`；它在构造前注入独立 state path，并自动注册 `Proxy.Close`。需要验证重启恢复时使用 `newTestProxyAt` 显式共享同一个测试 state path，并在创建下一实例前关闭旧实例。仅验证生产构造器本身时可在隔离 HOME 下直接调用 `NewProxy`，并精确断言默认 state path。
-- 不涉及凭据语义的根包行为测试使用 `testProviderID`，不得借用 `static` 形成对账号文件策略的隐式依赖。必须从 YAML 加载真实 `provider_id: static` 的 reload/CLI 测试，使用 `useStaticProviderPools` 写入隔离 HOME 下的 plural pool；static 凭据边界本身则精确断言 missing、legacy、损坏/空 plural 均 fail-closed。
+- 不涉及凭据语义的 `internal/app` 行为测试使用 `testProviderID`，不得借用 `static` 形成对账号文件策略的隐式依赖。必须从 YAML 加载真实 `provider_id: static` 的 reload/CLI 测试，使用 `useStaticProviderPools` 写入隔离 HOME 下的 plural pool；static 凭据边界本身则精确断言 missing、legacy、损坏/空 plural 均 fail-closed。
 - 禁止在测试日志输出真实 token、cookie、prompt 或用户请求体。
 
 
@@ -307,6 +308,23 @@ Fuzz 语料补充规则：`FuzzConvertSSE` 的 seed 阶段会从协议包读取�
 真实上游维度的对应验证由 `tools/agenttest` 承担（`sweep.mjs` 参数矩阵、
 `codews.mjs` 编码工程、`compare.mjs` 原生/转换对比），发现的上游措辞回归
 按上表沉淀为 E2E 用例。
+
+## guard 端到端套件（`scripts/e2eguard`，手动运行，打真实环境）
+
+`go run ./scripts/e2eguard -base-url http://127.0.0.1:15722 -model glm-5.3-flash`
+是对**运行中的代理**做 guard/判定/关联全链路验证的端到端套件：13 个场景覆盖
+干净请求、low 忽略档（ring-only、不落库、不拉黑）、判定缓存回放（不二次计费）、
+high 判定→会话拉黑→unblock 留痕（kind=unblock 记录 + 原请求标注 + 复通）、
+高危内容 repeat 拦截（同步 400、不再判定）、单请求多规则（逐规则标注）、
+weak 路径忽略、无头请求判定、详情 guard 关联与用量记账。fixture 全部合成
+（自标注 dummy key / 每次运行随机生成的 sk-proj- 形态替身 / 凭据**路径**而非
+凭据值）；known-secret 精确匹配与跨请求分片通道刻意不在线上驱动（需要把真
+凭据写进请求体，落请求日志违红线）——两者由 hermetic 集成测试覆盖。verdict
+来自真实判定模型：fixture 措辞按判定 prompt 的分档语义工程化（dummy→low、
+production key→high），判定漂移时场景 FAIL 并跳过依赖链（high 链路按构造依赖
+high）。`-only a,b` 选子集，`-token`/`MP_ADMIN_TOKEN` 过 admin auth。套件自身
+hermetic：`main_test.go` 用脚本化 fake daemon（guard 语义参考模型）+ httptest
+wire-shape + 错误注入三套测试覆盖 harness。
 
 ## soak 压测工具（`scripts/soak`，手动运行）
 

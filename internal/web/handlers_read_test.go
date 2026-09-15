@@ -73,6 +73,12 @@ func (d dirRequestLogQueries) Detail(id string) ([]requestlog.Record, error) {
 func (d dirRequestLogQueries) SessionSummaries(scanLimit, limit int, costOf func(string, string, requestlog.Usage) float64) ([]requestlog.SessionSummary, error) {
 	return requestlog.SessionSummaries(d.dir, scanLimit, limit, costOf)
 }
+
+// The raw directory adapter has no guard sources; the correlation join lives
+// in the admin-decorated port.
+func (d dirRequestLogQueries) GuardAnnotations([]string) map[string][]requestlog.GuardMark {
+	return nil
+}
 func (r *readAPIStub) Accounts() []appapi.ProviderAccounts { return r.accounts }
 func (r *readAPIStub) Tokens(from, to int64) ([]appapi.TokenUsage, error) {
 	r.tokensFrom = from
@@ -591,7 +597,8 @@ func TestReadLogsAndRequestLogEndpoints(t *testing.T) {
 
 	detail := serveRead(t, s, http.MethodGet, "/api/requests/wanted")
 	var gotDetail struct {
-		Records []requestlog.Record `json:"records"`
+		Records []requestlog.Record    `json:"records"`
+		Guard   []requestlog.GuardMark `json:"guard"`
 	}
 	decodeReadJSON(t, detail, &gotDetail)
 	if detail.Code != http.StatusOK || len(gotDetail.Records) != 1 || gotDetail.Records[0].RequestBody != "secret" || gotDetail.Records[0].ResponseHeaders != `{"x-request-id":"x"}` {
@@ -599,6 +606,11 @@ func TestReadLogsAndRequestLogEndpoints(t *testing.T) {
 	}
 	if gotDetail.Records[0].Agent != "claude-code" {
 		t.Errorf("detail record agent = %q, want claude-code", gotDetail.Records[0].Agent)
+	}
+	// The guard envelope is always present on the detail surface — an empty
+	// array when the request has no guard trail (nil map coerced, never null).
+	if gotDetail.Guard == nil || len(gotDetail.Guard) != 0 {
+		t.Errorf("detail guard = %#v, want empty non-null", gotDetail.Guard)
 	}
 	missing := serveRead(t, s, http.MethodGet, "/api/requests/nope")
 	var routeError struct {
@@ -645,6 +657,55 @@ func TestReadLogsAndRequestLogEndpoints(t *testing.T) {
 
 // TestReadRequestsSessionFilter: the /api/requests?session= param narrows the
 // request-log scan to one client session.
+// guardJoinStubQueries pins the detail surface's guard envelope passthrough:
+// whatever the decorated port joins for the request id rides the response
+// next to the records.
+type guardJoinStubQueries struct {
+	dirRequestLogQueries
+	marks map[string][]requestlog.GuardMark
+}
+
+func (g guardJoinStubQueries) GuardAnnotations(ids []string) map[string][]requestlog.GuardMark {
+	out := make(map[string][]requestlog.GuardMark, len(ids))
+	for _, id := range ids {
+		if m, ok := g.marks[id]; ok {
+			out[id] = m
+		}
+	}
+	return out
+}
+
+func TestReadRequestDetailCarriesGuardTrail(t *testing.T) {
+	tmp := t.TempDir()
+	writeReadLog(t, tmp,
+		requestlog.Record{Ts: "2026-07-29T12:00:00Z", RequestID: "r1", CalledModel: "m", Provider: "p", Status: 400, RequestBody: "b", ResponseBody: "blocked"},
+	)
+	s := newReadServer(t, &readAPIStub{queries: guardJoinStubQueries{
+		dirRequestLogQueries: dirRequestLogQueries{tmp},
+		marks: map[string][]requestlog.GuardMark{
+			"r1": {
+				{Ts: 4000, Kind: "secret", Names: []string{"openai_api_key"}, Action: "block", Source: "audit"},
+				{Ts: 3000, Kind: "secret", Names: []string{"openai_api_key"}, Verdict: "high", Reason: "real key", Model: "glm-5.3", Source: "judge", Cached: true},
+			},
+		},
+	}})
+	detail := serveRead(t, s, http.MethodGet, "/api/requests/r1")
+	var got struct {
+		Records []requestlog.Record    `json:"records"`
+		Guard   []requestlog.GuardMark `json:"guard"`
+	}
+	decodeReadJSON(t, detail, &got)
+	if detail.Code != http.StatusOK || len(got.Records) != 1 {
+		t.Fatalf("detail = (%d, %d records)", detail.Code, len(got.Records))
+	}
+	if len(got.Guard) != 2 {
+		t.Fatalf("guard = %#v, want the joined marks", got.Guard)
+	}
+	if got.Guard[0].Action != "block" || got.Guard[1].Verdict != "high" || got.Guard[1].Model != "glm-5.3" || !got.Guard[1].Cached {
+		t.Errorf("guard marks = %#v", got.Guard)
+	}
+}
+
 func TestReadRequestsSessionFilter(t *testing.T) {
 	tmp := t.TempDir()
 	writeReadLog(t, tmp,
@@ -1054,8 +1115,13 @@ func TestReadSecurityEndpoint(t *testing.T) {
 	}
 	invalid := serveRead(t, s, http.MethodGet, "/api/security?kind=tokens")
 	decodeReadJSON(t, invalid, &routeError)
-	if invalid.Code != http.StatusBadRequest || routeError.Error != "kind must be secret, path or drift" {
+	if invalid.Code != http.StatusBadRequest || routeError.Error != "kind must be secret, path, drift or unblock" {
 		t.Fatalf("invalid kind = (%d, %#v)", invalid.Code, routeError)
+	}
+	// The unblock trail is a first-class kind on the filter surface.
+	serveRead(t, s, http.MethodGet, "/api/security?kind=unblock")
+	if securityQuery != (appapi.SecurityQuery{Kind: "unblock", Limit: 100}) {
+		t.Fatalf("unblock query = %#v", securityQuery)
 	}
 
 	reads.security = func(appapi.SecurityQuery) (appapi.SecurityResult, error) {

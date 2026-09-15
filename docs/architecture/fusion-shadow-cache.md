@@ -26,7 +26,7 @@ request log、`internal/cache`、
   重写响应时保存的是 live 路径实际发送的 content-type（客户端最终收到的
   协议体与 content-type 一致）；
 - 命中重放原始客户端协议字节并设置 `x-mp-cache: hit`；
-- cache hit 不计 provider metrics/agent stats，但产生 live end event；
+- cache hit 不计 provider metrics/agent stats，但产生 live end event，并写一条 `provider="(cache)"` 的 request-log 记录（请求体 + 重放的响应体，usage 为空）——缓存命中的请求在 Requests 页/会话聚合/守卫关联里历史可见，不再只活在 Live；
 - pin 和 force-provider 跳过读写缓存；
 - reload 重建缓存并清空条目（缓存 body 不落盘）；
 - **命中/未命中计数器持久化**：`~/.model-proxy/cache_state.json`（`internal/app/cache_state.go`）按

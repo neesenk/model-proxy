@@ -444,8 +444,9 @@ func (s *Service) Blocked(sessionID string) (Block, bool) { return s.blocks.Bloc
 // path applies it automatically).
 func (s *Service) Block(sessionID string, b Block) { s.blocks.Block(sessionID, b) }
 
-// Unblock removes one session block; false when not blocked.
-func (s *Service) Unblock(sessionID string) bool { return s.blocks.Unblock(sessionID) }
+// Unblock removes one session block and returns the removed entry (for the
+// unblock audit trail); false when not blocked.
+func (s *Service) Unblock(sessionID string) (Block, bool) { return s.blocks.Unblock(sessionID) }
 
 // Blocks snapshots the block table (with session ids), newest first.
 func (s *Service) Blocks() []BlockEntry { return s.blocks.Snapshot() }

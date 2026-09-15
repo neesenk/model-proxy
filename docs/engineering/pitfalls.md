@@ -50,7 +50,7 @@
 19. reload 中 config generation 与运行态 snapshot/fingerprint 必须一致。
 20. `internal/cli/serve/supervisor.go` 的 supervisor `SpawnWorker` 可能返回 nil，调用方必须检查。
 21. Proxy 级 goroutine 必须经 `Lifecycle.Run` 接纳；serve process 只能通过
-    `applicationRuntime` 调用 `startRuntimeServices`/`Proxy.Close`。不得绕过它分散
+    `applicationRuntime` 调用 `StartRuntimeServices`/`Proxy.Close`。不得绕过它分散
     启动或 final flush。
 22. daemon 收到退出信号时必须先 `http.Server.Shutdown` drain handler，再
     `Proxy.Close`；deadline 超时调用 `Server.Close` 只能取消连接，仍须等待 handler
@@ -85,7 +85,8 @@
     关闭到上游的连接（不带 body 的会）。客户端在响应头阶段断开后，代理与上游
     之间的连接会存留到上游响应或 `upstream_timeout` 兜底。测试里模拟"上游挂起
     等待取消"时，不要依赖上游 handler 的 `r.Context().Done()` 传播，用测试自己
-    控制的释放信号（见 `internal/app/client_cancel_test.go` 的 release channel）。
+    控制的释放信号（见 `internal/app/forward_retry_test.go` 的
+    `TestUC_ClientCancelDuringHeadersStopsFailoverAndKeepsCircuitClosed` release channel）。
 29. `quota_poll_interval` 在 tracker `Start()` 时读取一次并冻结 ticker：reload
     热改不生效，重启才生效（Web 配置编辑该键后需重启 daemon）。快照失鲜窗口
     （`QuotaTracker.FreshnessMaxAge`）在同一时刻以同一 cadence 冻结——调度 skip、

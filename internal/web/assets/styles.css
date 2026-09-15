@@ -409,6 +409,33 @@ main {
 .req-rec summary { cursor: pointer; color: var(--muted); }
 .req-rec summary:hover { color: var(--text); }
 
+/* Request detail expansion: labeled meta strip (when/call/result/route/size)
+ * + the guard trail as a FLAT extension of the same strip idiom (one ⚑ guard
+ * label group; one badge-led line per mark, judgment reason as a single
+ * ellipsized line with the full text in the tooltip — no nested cards). */
+.req-meta { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-bottom: 8px; }
+.req-meta-g { display: grid; gap: 1px; }
+.req-meta-k { font-size: 0.625rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.req-meta-v { font-size: 0.8125rem; font-family: var(--mono); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.req-meta-v .badge { flex: none; }
+.req-meta-dim { color: var(--muted); }
+.req-meta-guard .req-meta-v { flex-direction: column; align-items: flex-start; gap: 2px; }
+.req-guard-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.req-guard-row .badge { flex: none; }
+.req-guard-time { margin-left: auto; color: var(--muted); font-size: 0.75rem; font-family: var(--mono); }
+/* Reason lines WRAP (never nowrap): an auto-layout table sizes itself to
+ * the min-content width of its cells — an unbreakable nowrap line would
+ * stretch the whole table past the viewport (max-width:100% is meaningless
+ * against a content-sized parent). overflow-wrap:anywhere keeps long
+ * tokens (URLs, masked keys) from becoming the new min-content. */
+.req-guard-line { white-space: normal; overflow-wrap: anywhere; color: var(--muted); font-size: 0.75rem; }
+.req-guard-line .badge { flex: none; }
+.req-guard-line code { font-size: 0.75rem; }
+/* Per-rule segment lines inside a merged Security-feed row (one row per
+ * request per channel; each rule keeps its own verdict + reason). */
+.sec-seg { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+.sec-seg .badge { flex: none; }
+
 /* Live monitor rows reuse the Requests idiom. */
 .live-row { cursor: pointer; }
 .live-row:hover > td { background: color-mix(in srgb, var(--accent) 5%, transparent); }
@@ -616,6 +643,7 @@ dialog.live-detail-pop .modal-body { overflow: auto; }
   max-height: min(70vh, 760px);
 }
 .code-json .j-key { color: var(--accent-ink); }
+.code-json .j-str { color: var(--ok-fg); }
 .code-json .j-num { color: var(--muted); }
 .code-json .j-lit { color: var(--muted); font-style: italic; }
 

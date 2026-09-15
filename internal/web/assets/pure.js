@@ -293,6 +293,9 @@ export function ruleHitsLeaderboard(records, adjudications) {
   };
   for (const r of records || []) {
     if (!r) continue;
+    // The unblock trail is operator action history, not rule hits — counting
+    // it here would inflate the hit rates the leaderboard ranks by.
+    if (r.kind === 'unblock') continue;
     for (const n of r.names || []) bump(n, r.kind, r.ts);
   }
   for (const a of adjudications || []) {
@@ -1623,7 +1626,7 @@ export function securityFilterFromQuery(params) {
 // one chronological feed (newest first). The projection normalizes both
 // sources onto one row shape: audit rows carry agent/exposed/action/strength,
 // AI rows carry verdict/model/reason/session. kind filtering is the caller's
-// business (audit kinds secret|path|drift; AI rows are secret|path).
+// business (audit kinds secret|path|drift|unblock; AI rows are secret|path).
 //
 // A fresh (uncached) verdict lands in BOTH sources — the adjudication sink
 // writes the persistent audit record (with verdict+reason) and the ring holds
@@ -1675,8 +1678,68 @@ export function mergeSecurityFeed(records, adjudications) {
       judge: a.model || '',
     });
   }
-  rows.sort((x, y) => (y.ts || 0) - (x.ts || 0));
-  return rows;
+  // One request may hit several rules whose verdicts land as separate audit
+  // records / ring entries (the adjudication sink is rule-granular). The
+  // DISPLAY merges them into ONE row per request per channel (kind): the
+  // worst verdict headlines the row, the per-rule verdicts/reasons ride as
+  // in-row segments (securitySegmentsHTML). The operator reads one security
+  // event per request per channel, never one row per rule. Rows without a
+  // request id (drift, headless hits) never merge; the audit store keeps
+  // per-rule records — explain's name-granular drill and the repeat index
+  // are unaffected.
+  const vRank = { high: 5, error: 4, medium: 3, skipped: 2, low: 1, '': 0 };
+  const groups = new Map();
+  const merged = [];
+  for (const row of rows) {
+    if (!row.requestId) { merged.push(row); continue; }
+    const seg = {
+      names: [...row.names], verdict: row.verdict, reason: row.reason,
+      evidence: row.evidence, judge: row.judge, cached: !!row.cached, action: row.action,
+    };
+    const k = row.requestId + '\u0000' + row.kind;
+    const i = groups.get(k);
+    if (i === undefined) {
+      groups.set(k, merged.length);
+      merged.push({ ...row, names: [...row.names], segments: [seg] });
+      continue;
+    }
+    const g = merged[i];
+    for (const n of row.names) {
+      if (!g.names.includes(n)) g.names.push(n);
+    }
+    if ((row.ts || 0) > (g.ts || 0)) g.ts = row.ts;
+    g.sessionId = g.sessionId || row.sessionId;
+    g.src = g.src === 'audit' || row.src === 'audit' ? 'audit' : g.src;
+    g.cached = g.cached || !!row.cached;
+    if ((vRank[row.verdict] || 0) > (vRank[g.verdict] || 0)) {
+      // The new worst verdict headlines the merged row.
+      g.verdict = row.verdict;
+      g.reason = row.reason;
+      g.evidence = row.evidence;
+      g.detail = row.detail || g.detail;
+      g.action = row.action || g.action;
+    } else {
+      g.evidence = g.evidence || row.evidence;
+      g.detail = g.detail || row.detail;
+      g.action = g.action || g.action;
+    }
+    g.judge = g.judge || row.judge;
+    g.segments.push(seg);
+  }
+  merged.sort((x, y) => (y.ts || 0) - (x.ts || 0));
+  return merged;
+}
+
+// securitySegmentsHTML renders the per-rule breakdown of a merged feed row
+// (one line per rule: verdict badge + rule + its own judgment reason). Empty
+// for single-segment rows — the row's own verdict/reason already say it.
+export function securitySegmentsHTML(row) {
+  const segs = row && row.segments;
+  if (!segs || segs.length < 2) return '';
+  const vBadge = { high: 'err', medium: 'warn', low: 'ok', error: 'warn', skipped: 'muted' };
+  return segs.map((sg) => `<div class="sec-seg"><span class="badge ${vBadge[sg.verdict] || ''}">${esc(sg.verdict || '—')}</span>` +
+    `<code>${esc((sg.names || []).join(', ') || '—')}</code>${sg.cached ? ' <span class="badge muted">cached</span>' : ''}` +
+    ` <span>${esc(sg.reason || sg.evidence || '')}</span></div>`).join('');
 }
 
 // securityKpisHTML renders the Security page's summary tile row (the
@@ -2375,6 +2438,176 @@ export function requestTableHeadHTML() {
   return `<thead><tr><th>Time</th><th>Agent</th><th>Session</th><th>Status</th><th>Model</th><th>Provider</th><th class="num">ms</th><th class="num">Tokens In / Out</th></tr></thead>`;
 }
 
+// guardMarksHTML renders a request's guard/adjudication annotations (the
+// security-audit join riding /api/requests summaries) as compact badges:
+// synchronous interceptions (⚑ block), LLM verdicts (judge·high…) and
+// unblock trail entries. Titles carry the scrubbed judgment logic /
+// attribution. Capped at three badges plus an overflow count so dense rows
+// stay readable.
+// groupGuardMarks merges the marks of ONE request that share the same
+// channel and verdict (kind + verdict) into a single mark with joined
+// names — the ROW BADGE idiom: one badge per verdict, counted (`×N`), the
+// per-rule reasons joined into the tooltip. A request hitting several rules
+// reads as one event per verdict, not one badge per rule.
+export function groupGuardMarks(marks) {
+  if (!marks || marks.length <= 1) return marks || [];
+  const key = (m) => (m.kind || '') + '\u0000' + (m.verdict || '');
+  const out = [];
+  const idx = new Map();
+  for (const m of marks) {
+    const k = key(m);
+    const i = idx.get(k);
+    if (i === undefined) {
+      idx.set(k, out.length);
+      out.push({ ...m, names: [...(m.names || [])] });
+      continue;
+    }
+    const g = out[i];
+    for (const n of m.names || []) {
+      if (n && !g.names.includes(n)) g.names.push(n);
+    }
+    // Per-rule reasons join into the tooltip (newline-separated, deduped).
+    if (m.reason && !(g.reason || '').includes(m.reason)) {
+      g.reason = g.reason ? g.reason + '\n' + m.reason : m.reason;
+    }
+    if (!g.model && m.model) g.model = m.model;
+    if ((m.ts || 0) > (g.ts || 0)) g.ts = m.ts;
+  }
+  return out;
+}
+
+// guardMarksHTML renders a request's guard/adjudication annotations (the
+// security-audit join riding /api/requests summaries) as compact badges,
+// ONE per verdict (groupGuardMarks merges the rules of a verdict into a
+// counted badge; the per-rule reasons ride the tooltip): synchronous
+// interceptions (⚑ block), LLM verdicts (judge·high…) and unblock entries.
+// Capped at three badges plus an overflow count so dense rows stay
+// readable.
+export function guardMarksHTML(marks) {
+  const ms = groupGuardMarks(marks);
+  if (!ms.length) return '';
+  const cls = { high: 'err', medium: 'warn', error: 'warn', low: 'muted', skipped: 'muted' };
+  const parts = ms.slice(0, 3).map((m) => {
+    const n = (m.names || []).length;
+    // Single rule: name it; several rules under one verdict: count them.
+    const one = n === 1 ? ' ' + esc(m.names[0]) : '';
+    const many = n > 1 ? ` ×${n}` : '';
+    if (m.kind === 'unblock') {
+      return `<span class="badge ok" title="${esc(m.detail || 'block removed')}">unblocked</span>`;
+    }
+    // Priority: an interception (action=block) is a BLOCK even when the
+    // record carries a verdict — repeat-interception records ride the
+    // original verdict as attribution, and rendering them as judge·verdict
+    // would hide that this request was rejected.
+    if (m.action === 'block') {
+      return `<span class="badge err" title="${esc(m.reason || m.detail || '')}">⚑ block${one || many}</span>`;
+    }
+    if (m.verdict) {
+      return `<span class="badge ${cls[m.verdict] || ''}" title="${esc(m.reason || m.evidence || '')}">judge·${esc(m.verdict)}${m.cached ? '·cached' : ''}${many}</span>`;
+    }
+    return `<span class="badge warn" title="${esc(m.detail || m.reason || '')}">⚑ guard${one || many}</span>`;
+  });
+  if (ms.length > 3) parts.push(`<span class="badge muted">+${ms.length - 3}</span>`);
+  return ' ' + parts.join(' ');
+}
+
+export function requestMetaHTML(r, rel) {
+  const groups = [];
+  const g = (k, v) => {
+    if (v == null || v === '') return;
+    groups.push(`<div class="req-meta-g"><div class="req-meta-k">${esc(k)}</div><div class="req-meta-v">${v}</div></div>`);
+  };
+  const when = [esc(r && r.ts)].concat((rel || []).map((x) => esc(x))).filter(Boolean).join(' · ');
+  g('when', when);
+  if (r && r.method) g('call', `${esc(r.method)} <span class="req-meta-dim">${esc(r.path || '')}</span> · attempt ${Number(r.attempt) || 0}`);
+  if (r) {
+    let result = statusBadgeHTML(r.status);
+    if (Number.isFinite(Number(r.latency_ms)) && r.status != null) {
+      result += ` ${fmtNum(r.latency_ms)}ms`;
+      if (r.ttft_ms) result += ` <span class="req-meta-dim">· ttft ${fmtNum(r.ttft_ms)}ms</span>`;
+    }
+    g('result', result);
+    const route = [r.provider, r.upstream_model].filter(Boolean).map((x) => esc(x)).join(' / ');
+    if (route) g('route', route);
+    if (r.request_size || r.response_size) {
+      g('size', `req ${fmtNum(r.request_size)} <span class="req-meta-dim">→</span> resp ${fmtNum(r.response_size)}`);
+    }
+  }
+  return `<div class="req-meta">${groups.join('')}</div>`;
+}
+
+// guardMarksDetailHTML renders the request's guard/adjudication trail as a
+// FLAT extension of the meta strip: ONE row per channel (kind) — the worst
+// verdict of the channel leads, per-rule judgment reasons render as their
+// own lines beneath when they differ (a single shared reason renders once).
+// The full text of every segment rides the row tooltip. Empty string when
+// the request has no guard trail.
+export function guardMarksDetailHTML(marks) {
+  if (!marks || !marks.length) return '';
+  const vBadge = { high: 'err', medium: 'warn', low: 'ok', error: 'warn', skipped: 'muted' };
+  const vRank = { high: 5, error: 4, medium: 3, skipped: 2, low: 1, '': 0 };
+  const byKind = new Map();
+  for (const m of marks) {
+    if (!byKind.has(m.kind)) byKind.set(m.kind, []);
+    byKind.get(m.kind).push(m);
+  }
+  const rows = [...byKind.entries()].map(([kind, group]) => {
+    let head = group[0];
+    let newest = group[0];
+    for (const m of group) {
+      if ((vRank[m.verdict] || 0) > (vRank[head.verdict] || 0)) head = m;
+      if ((m.ts || 0) > (newest.ts || 0)) newest = m;
+    }
+    // An interception leads with the block badge; its verdict (repeat
+    // interception carries the original high) rides right beside it.
+    let lead;
+    if (kind === 'unblock') lead = '<span class="badge ok">unblocked</span>';
+    else if (head.action === 'block') lead = '<span class="badge err">⚑ block</span>';
+    else if (head.verdict) lead = `<span class="badge ${vBadge[head.verdict] || ''}">${esc(head.verdict)}</span>`;
+    else lead = '<span class="badge warn">⚑ hit</span>';
+    if (head.action === 'block' && head.verdict) {
+      lead += ` <span class="badge ${vBadge[head.verdict] || ''}">${esc(head.verdict)}</span>`;
+    }
+    const names = [];
+    for (const m of group) for (const n of m.names || []) if (!names.includes(n)) names.push(n);
+    const trail = [];
+    const judgeModel = group.map((m) => m.model).filter(Boolean)[0] || '';
+    if (judgeModel) trail.push(`judge ${esc(judgeModel)}`);
+    if (group.some((m) => m.cached)) trail.push('<span class="badge muted">cached</span>');
+    if (head.action && kind !== 'unblock') trail.push(esc(head.action));
+    trail.push(esc(kind));
+    const tip = group.flatMap((m) => {
+      const who = (m.names || []).join(', ');
+      return [m.reason, m.evidence ? `evidence: ${m.evidence}` : '', m.detail]
+        .filter(Boolean).map((x) => (who ? `[${who}] ` : '') + x);
+    }).join('\n');
+    // One visible line per judgment: a single line when every segment of the
+    // channel shares verdict+reason, one per rule otherwise.
+    const same = group.every((m) => m.verdict === group[0].verdict && m.reason === group[0].reason);
+    let lines = '';
+    if (same && group[0].reason) {
+      lines = `<div class="req-guard-line" title="${esc(tip)}">${esc(group[0].reason)}</div>`;
+    } else if (!same) {
+      lines = group.filter((m) => m.reason).map((m) =>
+        `<div class="req-guard-line" title="${esc(tip)}"><span class="badge ${vBadge[m.verdict] || ''}">${esc(m.verdict || '—')}</span> <code>${esc((m.names || []).join(', '))}</code> ${esc(m.reason)}</div>`).join('');
+    }
+    return `<div class="req-guard-row"${tip ? ` title="${esc(tip)}"` : ''}>${lead}` +
+      (names.length ? `<code>${esc(names.join(', '))}</code>` : '') +
+      `<span class="hint">${trail.join(' · ')}</span>` +
+      `<span class="req-guard-time">${esc(fmtMsLocal(newest.ts))}</span></div>${lines}`;
+  });
+  return `<div class="req-meta req-meta-guard"><div class="req-meta-g">` +
+    `<div class="req-meta-k">⚑ guard</div><div class="req-meta-v">${rows.join('')}</div></div></div>`;
+}
+
+// Local ms formatter for guard marks (app.js's fmtMs is not importable here —
+// pure.js is the dependency leaf).
+function fmtMsLocal(ts) {
+  const n = Number(ts);
+  if (!Number.isFinite(n)) return '';
+  return new Date(n).toLocaleTimeString();
+}
+
 export function requestRowHTML(row, opts) {
   const o = opts || {};
   const r = row || {};
@@ -2404,7 +2637,7 @@ export function requestRowHTML(row, opts) {
     <td class="mono${dim}">${esc(r.agent || '—')}</td>
     ${sess}
     <td class="st">${statusBadgeHTML(r.inFlight ? null : r.status, r.inFlight)}</td>
-    <td>${esc(r.model || '—')}${o.modelNote || ''}</td>
+    <td>${esc(r.model || '—')}${o.modelNote || ''}${guardMarksHTML(r.guardMarks)}</td>
     <td class="mono${dim}">${esc(r.inFlight ? '…' : (r.provider || '—'))}${r.shadow ? ' <span class="badge muted">shadow</span>' : ''}</td>
     <td class="num${slow ? ' warn' : ''}">${lat}</td>
     <td class="num">${tk}</td>
