@@ -154,7 +154,14 @@ reload 结果在 daemon 的 **log 文件**里（`[reload] config reloaded succes
 开发机上 `model-proxy serve` 常同时是 coding agent 自己的 LLM 网关。把 kill 和
 start 拆到两次工具调用/两个终端步饗，中间的下线窗口会让依赖它的 agent 下一次
 模型调用直接 `Connection error`——连生成下一条重启命令都做不到，形成自锁
-（陷阱条目见 `docs/engineering/pitfalls.md` #24）。正确做法是**单条命令**完成切换：
+（陷阱条目见 `docs/engineering/pitfalls.md` #24）。推荐用封装好的脚本（端口默认从
+config.yaml 的 `listen:` 解析，`--build` 先构建再切换）：
+
+```sh
+scripts/restart_serve.sh --build          # 等价于下面两步：构建 + 原子切换
+```
+
+手动等价做法仍是**单条命令**完成切换：
 
 ```sh
 # 1) 先构建（不动运行中的进程）：

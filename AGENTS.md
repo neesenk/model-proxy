@@ -26,7 +26,7 @@ model-proxy 是单进程模块化单体：根 `package main` 只负责进程入�
 | request routing、catalog、implicit routes | `docs/architecture/request-routing.md` |
 | 协议转换、Provider、凭据/login | `docs/architecture/protocol-conversion.md`、`internal/provider/AGENTS.md`、`docs/backend-contracts.md` |
 | Fusion、Shadow、Cache、request log、live | `docs/architecture/fusion-shadow-cache.md` |
-| Web/API/UI | `docs/web-api.md`；前端另读 `internal/web/assets/AGENTS.md` |
+| Web/API/UI | `docs/web-api.md`；前端硬规则另读 `internal/web/assets/AGENTS.md`，页面/组件实现细节见 `docs/frontend.md` |
 | CLI、serve、daemon、进程生命周期 | `CLI.md`、`docs/architecture/overview.md`、`docs/engineering/pitfalls.md` |
 | 测试、覆盖率、构建、架构 guard | `docs/engineering/testing.md` |
 | takeover、反直觉行为 | `docs/client-takeover.md`、`docs/decisions/intentional-behaviors.md` |
@@ -37,7 +37,7 @@ model-proxy 是单进程模块化单体：根 `package main` 只负责进程入�
 
 - 先读取上表中的相关专题及目标目录最近的 `AGENTS.md`，不要把领域契约复制回根文件。
 - 保留用户和其他任务的现有改动；未经要求不 commit、push、reset 或清理工作区。
-- 重启运行中的 `serve` 必须在同一条 shell 命令内原子完成停+启（构建先行；SIGINT→等端口→拉起），拆开执行会断连把它当 LLM 网关的工具链；陷阱与命令模板见 `docs/engineering/pitfalls.md` 与 `CLI.md`。
+- 重启运行中的 `serve` 用 `scripts/restart_serve.sh`（`--build` 构建先行再切换；SIGINT→等端口→拉起一次调用内原子完成），禁止把停/启拆到两次调用——中间的下线窗口会断连把它当 LLM 网关的工具链；陷阱背景见 `docs/engineering/pitfalls.md` 条目 24b，手动等价模板见 `CLI.md`「手动重启」。
 - 请求体、响应体、cookie、token、API key 等敏感数据只在必要范围内读取，不得写入日志、测试输出或文档示例。
 - 一个事实只保留一个权威定义：实现契约进对应 `docs/architecture/` 专题，跨模块陷阱进 `docs/engineering/pitfalls.md`，有意行为进 `docs/decisions/intentional-behaviors.md`。
 
