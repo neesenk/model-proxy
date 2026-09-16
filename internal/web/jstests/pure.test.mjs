@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  esc, fmtNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
+  esc, fmtNum, fmtCompactNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
   verdictBadge, modelCapMatrix, providerCapsSummary, providerFrozen, providerNames,
   ruleHitsLeaderboard,
@@ -64,6 +64,23 @@ test('fmtNum renders en-US grouping and maps nullish to 0', () => {
   assert.equal(fmtNum(undefined), '0');
   assert.equal(fmtNum(0), '0');
   assert.equal(fmtNum(1234567), '1,234,567');
+});
+
+test('fmtCompactNum shortens large counts with K/M suffixes', () => {
+  assert.equal(fmtCompactNum(null), '0');
+  assert.equal(fmtCompactNum(0), '0');
+  assert.equal(fmtCompactNum(512), '512');
+  assert.equal(fmtCompactNum(999), '999');
+  assert.equal(fmtCompactNum(2400), '2.4K');
+  assert.equal(fmtCompactNum(3581), '3.6K');
+  assert.equal(fmtCompactNum(9990), '10K');
+  assert.equal(fmtCompactNum(15060), '15K');
+  assert.equal(fmtCompactNum(118400), '118K');
+  assert.equal(fmtCompactNum(999499), '999K');
+  assert.equal(fmtCompactNum(999500), '1M');
+  assert.equal(fmtCompactNum(118208), '118K');
+  assert.equal(fmtCompactNum(1234567), '1.2M');
+  assert.equal(fmtCompactNum(2340000), '2.3M');
 });
 
 test('avgLatencyMs divides summed latency by request count, rounded', () => {
@@ -1154,10 +1171,10 @@ test('liveSessionOrder keeps live-only sessions with missing timestamps and dedu
 });
 
 test('shortSessionId abbreviates long ids, passes short labels through', () => {
-  assert.equal(shortSessionId('1234567890abcdef9012'), '12345678…9012');
+  assert.equal(shortSessionId('1234567890abcdef9012'), '1234…12');
   assert.equal(shortSessionId('main'), 'main');
   assert.equal(shortSessionId('1234567890123456'), '1234567890123456'); // 16 chars: unchanged
-  assert.equal(shortSessionId('12345678901234567'), '12345678…4567');  // 17 chars: abbreviated
+  assert.equal(shortSessionId('12345678901234567'), '1234…67');  // 17 chars: abbreviated
   assert.equal(shortSessionId(''), '');
   assert.equal(shortSessionId(null), '');
 });
@@ -1800,6 +1817,53 @@ test('sessionTimeline compresses long idle gaps into a segmented axis', () => {
   assert.equal(fussy.segments.length, 2);
 });
 
+test('sessionTimeline segments by turn_key when both rows have one', () => {
+  const sameTurn = sessionTimeline([
+    { requestId: 'a', ts: 0, latencyMs: 500, turnKey: 'turn-1' },
+    { requestId: 'b', ts: 1000, latencyMs: 500, turnKey: 'turn-1' },
+    { requestId: 'c', ts: 2000, latencyMs: 500, turnKey: 'turn-1' },
+  ], { fmt: (t) => String(t) });
+  assert.equal(sameTurn.segments.length, 1, 'identical turn keys stay in one segment');
+
+  const differentTurns = sessionTimeline([
+    { requestId: 'a', ts: 0, latencyMs: 500, turnKey: 'turn-1' },
+    { requestId: 'b', ts: 1000, latencyMs: 500, turnKey: 'turn-2' },
+    { requestId: 'c', ts: 2000, latencyMs: 500, turnKey: 'turn-3' },
+  ], { fmt: (t) => String(t) });
+  assert.equal(differentTurns.segments.length, 3, 'each different turn key starts a new segment');
+
+  // A turn-key change wins over a short gap that would not trigger the old
+  // 2-minute heuristic.
+  const quickSwitch = sessionTimeline([
+    { requestId: 'a', ts: 0, latencyMs: 500, turnKey: 'turn-1' },
+    { requestId: 'b', ts: 5000, latencyMs: 500, turnKey: 'turn-2' },
+  ], { fmt: (t) => String(t) });
+  assert.equal(quickSwitch.segments.length, 2, 'turn boundary splits even under 2 minutes');
+});
+
+test('sessionTimeline falls back to idle gap when turn_key is missing', () => {
+  // Both rows lack a turn key: the legacy 2-minute gap heuristic applies.
+  const emptyGap = sessionTimeline([
+    { requestId: 'a', ts: 0, latencyMs: 500 },
+    { requestId: 'b', ts: 6 * 60 * 1000, latencyMs: 500 },
+  ], { fmt: (t) => String(t) });
+  assert.equal(emptyGap.segments.length, 2);
+
+  // A mix: the keyed row keeps its boundary with an empty-key neighbour by
+  // falling back to the time heuristic.
+  const mixedShort = sessionTimeline([
+    { requestId: 'a', ts: 0, latencyMs: 500, turnKey: 'turn-1' },
+    { requestId: 'b', ts: 1000, latencyMs: 500 },
+  ], { fmt: (t) => String(t) });
+  assert.equal(mixedShort.segments.length, 1, 'short gap with an empty turn key stays together');
+
+  const mixedLong = sessionTimeline([
+    { requestId: 'a', ts: 0, latencyMs: 500, turnKey: 'turn-1' },
+    { requestId: 'b', ts: 6 * 60 * 1000, latencyMs: 500 },
+  ], { fmt: (t) => String(t) });
+  assert.equal(mixedLong.segments.length, 2, 'long gap with an empty turn key still splits');
+});
+
 test('sessionTimeline zoom window filters rows and owns the axis domain', () => {
   const rows = [
     { requestId: 'a', ts: 0, latencyMs: 100, status: 200 },
@@ -2128,8 +2192,9 @@ test('unified request table: one head and row renderer for all three tables', ()
   assert.ok(row.includes('session-link'), 'session cell is a link');
   assert.ok(row.includes('badge ok'), 'status renders as a badge');
   assert.ok(row.includes('class="num warn"'), '>10s latency flags warn');
-  assert.ok(row.includes('310 / 132'), 'tokens in / out');
-  assert.ok(row.includes('· cache 2,400'), 'cache read rides the token cell');
+  assert.ok(row.includes('310/132'), 'tokens in / out');
+  assert.ok(row.includes('· cache 2.4K'), 'cache read rides the token cell, compacted');
+  assert.ok(row.includes('title="in 310 · out 132 · cache 2,400"'), 'exact counts ride the cell title');
   // In-flight live row: dimmed, pending badge, empty tokens, live-key.
   const live = requestRowHTML({
     requestId: 'r2', ts: 1, model: 'm', inFlight: true, guardHits: [],
@@ -2174,18 +2239,18 @@ test('sessionHealthSummary derives health signals with gap/percentile guards', (
 
 test('requestRowHTML cache badge shows the hit share and highlights at 80%', () => {
   const hot = requestRowHTML({ requestId: 'a', ts: 1, status: 200, input: 100, output: 5, cacheRead: 900 }, { rowClass: 'req-row' });
-  assert.ok(hot.includes('cache 900 (90%)'), 'percentage rides the cache note');
+  assert.ok(hot.includes('cache 900(90%)'), 'percentage rides the cache note');
   assert.ok(hot.includes('tok-cache hot'), '≥80% highlights');
   const cool = requestRowHTML({ requestId: 'b', ts: 1, status: 200, input: 900, output: 5, cacheRead: 100 }, { rowClass: 'req-row' });
-  assert.ok(cool.includes('cache 100 (10%)'));
+  assert.ok(cool.includes('cache 100(10%)'));
   assert.ok(!cool.includes('tok-cache hot'), 'low share stays muted');
   const none = requestRowHTML({ requestId: 'c', ts: 1, status: 200, input: 10, output: 5 }, { rowClass: 'req-row' });
   assert.ok(!/cache/.test(none), 'no cache read → no note');
   // Two-decimal precision: near-total hits must not read as "100%".
   const near = requestRowHTML({ requestId: 'd', ts: 1, status: 200, input: 4, output: 5, cacheRead: 9996 }, { rowClass: 'req-row' });
-  assert.ok(near.includes('cache 9,996 (99.96%)'), near);
+  assert.ok(near.includes('cache 10K(99.96%)'), near);
   const full = requestRowHTML({ requestId: 'e', ts: 1, status: 200, input: 0, output: 5, cacheRead: 5000 }, { rowClass: 'req-row' });
-  assert.ok(full.includes('cache 5,000 (100%)'), 'exact 100% stays integer');
+  assert.ok(full.includes('cache 5K(100%)'), 'exact 100% stays integer');
 });
 
 // The request↔guard correlation: badges on the row, the full trail in the

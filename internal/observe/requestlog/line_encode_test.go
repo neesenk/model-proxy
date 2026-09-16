@@ -54,6 +54,10 @@ func TestAppendRecordLineMatchesJSONMarshal(t *testing.T) {
 		Ts: "2026-08-16T10:00:00Z", RequestID: "rid-diag", SessionID: "s",
 		Diagnostics: []ConversionDiagnostic{{Code: "stop_dropped", Detail: "dropping stop"}},
 	})
+	// TurnKey is written between response_headers and diagnostics when present.
+	records = append(records, &Record{
+		Ts: "2026-08-16T10:00:00Z", RequestID: "rid-turn", SessionID: "s", TurnKey: "0123456789abcdef",
+	})
 	for i, rec := range records {
 		want, err := json.Marshal(rec)
 		if err != nil {

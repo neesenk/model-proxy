@@ -219,7 +219,7 @@ func (effects targetExecutionEffects) CaptureUsage(
 			if effects.proxy.agents != nil && agent != "" {
 				effects.proxy.agents.AddTokens(agent, target.Provider, target.Model, usage)
 			}
-			observe(targetexec.Usage{Input: usage.Input, Output: usage.Output})
+			observe(targetexec.Usage{Input: usage.Input, Output: usage.Output, CacheRead: usage.CacheRead, CacheCreation: usage.CacheCreation})
 		},
 	)
 }
@@ -286,6 +286,8 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 			LatencyMs:     attempt.TotalMilliseconds,
 			Input:         attempt.Usage.Input,
 			Output:        attempt.Usage.Output,
+			CacheRead:     attempt.Usage.CacheRead,
+			CacheCreation: attempt.Usage.CacheCreation,
 		})
 	}
 }

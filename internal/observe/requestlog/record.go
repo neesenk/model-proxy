@@ -35,6 +35,10 @@ type Record struct {
 	RequestBody     string `json:"request_body"`
 	ResponseBody    string `json:"response_body"`
 	ResponseHeaders string `json:"response_headers,omitempty"`
+	// TurnKey is a fingerprint of this request's conversational turn. Empty on
+	// records written before the field existed or when the body carries no user
+	// text; omitted from the JSONL line when empty.
+	TurnKey string `json:"turn_key,omitempty"`
 	// Diagnostics lists the attempt's protocol-conversion diagnostics
 	// (structured lossy-conversion observations, stable codes).
 	Diagnostics []ConversionDiagnostic `json:"diagnostics,omitempty"`
@@ -126,6 +130,7 @@ func (l *Logger) BuildRecord(in Input) *Record {
 	if in.ResponseTruncated {
 		rec.ResponseBody += truncationMarker
 	}
+	rec.TurnKey = computeTurnKey(in.RequestBody)
 	return rec
 }
 
@@ -201,6 +206,10 @@ func appendRecordLine(dst []byte, rec *Record) []byte {
 	if rec.ResponseHeaders != "" {
 		dst = append(dst, `,"response_headers":`...)
 		dst = appendJSONString(dst, rec.ResponseHeaders)
+	}
+	if rec.TurnKey != "" {
+		dst = append(dst, `,"turn_key":`...)
+		dst = appendJSONString(dst, rec.TurnKey)
 	}
 	if len(rec.Diagnostics) > 0 {
 		dst = append(dst, `,"diagnostics":[`...)

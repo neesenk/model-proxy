@@ -387,6 +387,9 @@ main {
    it (anywhere only bites when a token genuinely does not fit). */
 #req-table .table, #live-table .table, #live-session-panel .table { table-layout: fixed; }
 #req-table .table td, #live-table .table td, #live-session-panel .table td { overflow-wrap: anywhere; }
+/* Model is the one nowrap column: its 10% share cannot fit long names, so
+   they ellipsize instead of wrapping (full name rides the cell's title). */
+.table td.cell-model { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .table tbody tr { transition: background-color .1s ease; }
 .table tbody tr:hover { background: color-mix(in srgb, var(--surface-2) 70%, var(--surface)); }
 .table tr:last-child td { border-bottom: none; }

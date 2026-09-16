@@ -553,10 +553,10 @@ func TestForward_EmitsLiveEvents(t *testing.T) {
 // model-normalized while the usage frames pass through.
 func TestForward_LiveEndEventCarriesStreamUsage(t *testing.T) {
 	const upstreamStream = "data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\n" +
-		"data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[],\"usage\":{\"prompt_tokens\":17,\"completion_tokens\":9,\"total_tokens\":26}}\n\n" +
+		"data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[],\"usage\":{\"prompt_tokens\":17,\"completion_tokens\":9,\"total_tokens\":26,\"prompt_tokens_details\":{\"cached_tokens\":5}}}\n\n" +
 		"data: [DONE]\n\n"
 	const clientStream = "data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\n" +
-		"data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[],\"usage\":{\"prompt_tokens\":17,\"completion_tokens\":9,\"total_tokens\":26}}\n\n" +
+		"data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[],\"usage\":{\"prompt_tokens\":17,\"completion_tokens\":9,\"total_tokens\":26,\"prompt_tokens_details\":{\"cached_tokens\":5}}}\n\n" +
 		"data: [DONE]\n\n"
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "text/event-stream")
@@ -615,8 +615,8 @@ func TestForward_LiveEndEventCarriesStreamUsage(t *testing.T) {
 	if start.RequestID == "" || end.RequestID != start.RequestID ||
 		end.Agent != "claude-code" || end.Protocol != "openai" ||
 		end.Exposed != "glm" || end.Provider != "z" || end.UpstreamModel != "gpt-x" || end.Status != http.StatusOK ||
-		end.Input != 17 || end.Output != 9 || end.LatencyMs < 0 {
-		t.Errorf("start=%+v terminal=%+v, want matching request id; claude-code/openai/glm/z/gpt-x/200; usage 17/9; non-negative latency", start, end)
+		end.Input != 17 || end.Output != 9 || end.CacheRead != 5 || end.CacheCreation != 0 || end.LatencyMs < 0 {
+		t.Errorf("start=%+v terminal=%+v, want matching request id; claude-code/openai/glm/z/gpt-x/200; usage 17/9 cache-read 5; non-negative latency", start, end)
 	}
 }
 

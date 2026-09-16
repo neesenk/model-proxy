@@ -2945,6 +2945,7 @@ function persistedSummaryRow(rec) {
     cacheRead: rec.cache_read || 0,
     cacheCreation: rec.cache_creation || 0,
     shadow: !!rec.shadow,
+    turnKey: rec.turn_key || '',
     inFlight: false,
     guardHits: [],
     // Guard/adjudication annotations joined server-side from the security
@@ -2972,7 +2973,7 @@ function liveSessionRows() {
       requestId: r.requestId, ts: r.ts, session: r.session,
       agent: '', model: '', provider: '', status: 0, latencyMs: null,
       input: 0, output: 0, cacheRead: 0, cacheCreation: 0,
-      inFlight: false, guardHits: [],
+      turnKey: '', inFlight: false, guardHits: [],
       progressText: '', progressBytes: 0,
     }));
   }
@@ -3396,6 +3397,7 @@ function applyLiveEvent(e) {
       requestId: e.request_id,
       ts: e.ts, session: e.session_id || '', agent: e.agent, model: e.exposed || '—',
       provider: '', status: 0, latencyMs: null, input: 0, output: 0,
+      cacheRead: 0, cacheCreation: 0,
       inFlight: true, guardHits: popPendingGuards(e.request_id),
       progressText: '', progressBytes: 0,
     };
@@ -3413,6 +3415,8 @@ function applyLiveEvent(e) {
     row.latencyMs = e.latency_ms;
     row.input = e.input || 0;
     row.output = e.output || 0;
+    row.cacheRead = e.cache_read || 0;
+    row.cacheCreation = e.cache_creation || 0;
     row.inFlight = false;
     return;
   }
@@ -3458,6 +3462,7 @@ function synthLiveRow(e) {
     requestId: e.request_id,
     ts: e.ts, session: e.session_id || '', agent: e.agent, model: e.exposed || '—',
     provider: '', status: 0, latencyMs: null, input: 0, output: 0,
+    cacheRead: 0, cacheCreation: 0,
     inFlight: false, guardHits: popPendingGuards(e.request_id),
     progressText: '', progressBytes: 0,
   };

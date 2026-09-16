@@ -110,7 +110,7 @@ Shadow 作为 `internal/runtime.Lifecycle` 的有限 log-producing task 接纳�
 
 ## Request log
 
-request log 是异步、非阻塞、owner-only 的 JSONL。查询分两条路径：
+request log 是异步、非阻塞、owner-only 的 JSONL。每条记录可选地携带 `turn_key`——写入时从 request body 提取的对话轮次指纹（消息总数 + 最后一条真实 user 文本的哈希），供 UI Trace 时间线按轮次分段；旧记录或无法提取 user 文本时为空/省略。查询分两条路径：
 
 协议转换后的响应流与 Responses state/Shadow 共用
 `internal/transport/bodycapture.Reader`：reader 只负责有界 tee、完整长度和

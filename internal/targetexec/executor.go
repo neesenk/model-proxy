@@ -53,7 +53,7 @@ type AttemptDTO struct {
 }
 
 // Usage is deliberately independent of root metrics/token types.
-type Usage struct{ Input, Output uint64 }
+type Usage struct{ Input, Output, CacheRead, CacheCreation uint64 }
 
 // Effects bridge application-owned logging, metrics, live events and usage
 // observation. Nil Effects is safe and means no application side effects.

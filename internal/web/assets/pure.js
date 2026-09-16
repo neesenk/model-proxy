@@ -22,6 +22,24 @@ export function fmtNum(n) {
   return Number(n).toLocaleString('en-US');
 }
 
+// fmtCompactNum shortens large counts for dense table cells (token columns):
+// plain grouped integer below 1K, one trimmed decimal below 10K (3.6K),
+// rounded integer K below 1M (118K), one trimmed decimal M at 1M+ (2.3M).
+// Lossy by design — the exact value belongs in the cell's title tooltip.
+export function fmtCompactNum(n) {
+  const v = Number(n) || 0;
+  if (v < 1000) return fmtNum(v);
+  if (v < 10000) {
+    const d = Math.round(v / 100) / 10;
+    return (d >= 10 ? '10' : String(d)) + 'K';
+  }
+  if (v < 1000000) {
+    const k = Math.round(v / 1000);
+    return (k >= 1000 ? '1M' : k + 'K');
+  }
+  return String(Math.round(v / 100000) / 10) + 'M';
+}
+
 // avgLatencyMs derives the per-request average latency (ms) from the cumulative
 // counters a provider carries: latency_ms_sum / requests (0 when no requests).
 // Rounded — latencies are observability, not billing.
@@ -1443,12 +1461,12 @@ export function liveSessionOrder(sessions, liveRows) {
   });
 }
 
-// shortSessionId abbreviates a session id for dense table cells: first 8 +
-// '…' + last 4. Ids of 16 chars or fewer pass through unchanged (labels like
+// shortSessionId abbreviates a session id for dense table cells: first 4 +
+// '…' + last 2. Ids of 16 chars or fewer pass through unchanged (labels like
 // "main" stay readable); the full id rides in the cell's title tooltip.
 export function shortSessionId(id) {
   const s = String(id || '');
-  return s.length > 16 ? s.slice(0, 8) + '…' + s.slice(-4) : s;
+  return s.length > 16 ? s.slice(0, 4) + '…' + s.slice(-2) : s;
 }
 
 // liveSessionSummary folds one session's request rows (live events + persisted
@@ -2246,7 +2264,7 @@ export function responseExcerpt(text, maxChars) {
 // stray drag never blanks the card.
 //
 // Rows accept the session panel's merged shape: {requestId, ts (unix ms or
-// RFC3339), latencyMs, status, input, output, attempt, inFlight}. Rows
+// RFC3339), latencyMs, status, input, output, attempt, inFlight, turnKey}. Rows
 // without a parseable ts are skipped (counted in .skipped). Returns
 // {svg, lanes, skipped, segments} — empty svg when fewer than 2 rows remain
 // (1 when a zoom window is active); segments is [{t0, t1, x0, x1}] in viewBox
@@ -2281,6 +2299,7 @@ export function sessionTimeline(rows, opts) {
       tokens: (Number(r.input) || 0) + (Number(r.output) || 0),
       attempt: Number(r.attempt) || 0,
       inFlight: !!r.inFlight,
+      turnKey: r.turnKey || '',
     });
   }
   norm.sort((a, b) => a.ts - b.ts);
@@ -2297,13 +2316,24 @@ export function sessionTimeline(rows, opts) {
   }
   if (vis.length < (win ? 1 : 2)) return { svg: '', lanes: 0, skipped, segments: [] };
 
-  // Segment the visible rows at long idle gaps; each segment keeps its own
-  // time→x mapping (piecewise-linear overall, monotonic).
+  // Segment the visible rows by conversational turn when possible, falling
+  // back to the idle-gap heuristic for rows without a turn key (old records or
+  // bodies that yielded no user text). Each segment keeps its own time→x
+  // mapping (piecewise-linear overall, monotonic).
   const segs = [];
   let cur = null;
+  let prev = null;
   for (const n of vis) {
     const nEnd = n.end != null ? n.end : n.ts;
-    if (!cur || n.ts - cur.t1 > GAP_MS) {
+    let newSeg = false;
+    if (!cur) {
+      newSeg = true;
+    } else if (n.turnKey && prev && prev.turnKey && n.turnKey !== prev.turnKey) {
+      newSeg = true;
+    } else if (!n.turnKey || !prev || !prev.turnKey) {
+      if (n.ts - cur.t1 > GAP_MS) newSeg = true;
+    }
+    if (newSeg) {
       cur = { t0: n.ts, t1: nEnd, items: [] };
       segs.push(cur);
     } else if (nEnd > cur.t1) {
@@ -2311,6 +2341,7 @@ export function sessionTimeline(rows, opts) {
     }
     cur.items.push(n);
     n.seg = cur;
+    prev = n;
   }
   const usable = W - padL - padR;
   const plotW = Math.max(usable - (segs.length - 1) * BREAK_W, 50);
@@ -2441,9 +2472,12 @@ export function requestTableHeadHTML() {
   // styles.css rides it). They virtualize rows (Requests) and re-render on
   // every SSE event (Live), so auto layout would re-derive column widths
   // from whichever rows happen to be mounted and the columns visibly jitter
-  // while scrolling. Model is the flexible column; the rest take fixed
-  // shares sized to their content (mono timestamps/ids, badges, numerics).
-  return `<colgroup><col style="width:9%"/><col style="width:10%"/><col style="width:9%"/><col style="width:6%"/><col style="width:24%"/><col style="width:9%"/><col style="width:9%"/><col style="width:24%"/></colgroup>` +
+  // while scrolling. Shares are sized to content: mono timestamps/ids,
+  // badges and numerics take narrow fixed cuts; Session gets just enough for
+  // the shortened id on one line; Tokens is widest (in/out + cache read +
+  // hit share); Model is a narrow nowrap column — long names ellipsize
+  // (`.cell-model`), the full name rides the cell's title.
+  return `<colgroup><col style="width:11%"/><col style="width:10%"/><col style="width:10%"/><col style="width:6%"/><col style="width:10%"/><col style="width:12%"/><col style="width:10%"/><col style="width:31%"/></colgroup>` +
     `<thead><tr><th>Time</th><th>Agent</th><th>Session</th><th>Status</th><th>Model</th><th>Provider</th><th class="num">ms</th><th class="num">Tokens In / Out</th></tr></thead>`;
 }
 
@@ -2624,8 +2658,10 @@ export function requestRowHTML(row, opts) {
   const lat = (r.inFlight || r.latencyMs == null) ? '' : fmtNum(r.latencyMs);
   const slow = !r.inFlight && r.latencyMs != null && r.latencyMs > 10000;
   let tk = '';
+  let tkTitle = '';
   if (!r.inFlight && (Number(r.input) || Number(r.output))) {
-    tk = `${fmtNum(r.input)} / ${fmtNum(r.output)}`;
+    tk = `${fmtCompactNum(r.input)}/${fmtCompactNum(r.output)}`;
+    tkTitle = `in ${fmtNum(r.input)} · out ${fmtNum(r.output)}`;
     const cr = Number(r.cacheRead);
     if (cr > 0) {
       // Cache read rides the token cell with its hit share; ≥80% highlights
@@ -2634,7 +2670,8 @@ export function requestRowHTML(row, opts) {
       // a misleading "100%".
       const denom = cr + (Number(r.input) || 0);
       const pct = denom > 0 ? Math.round((cr / denom) * 10000) / 100 : null;
-      tk += ` <span class="tok-cache${pct != null && pct >= 80 ? ' hot' : ''}">· cache ${fmtNum(cr)}${pct != null ? ` (${pct}%)` : ''}</span>`;
+      tk += ` <span class="tok-cache${pct != null && pct >= 80 ? ' hot' : ''}">· cache ${fmtCompactNum(cr)}${pct != null ? `(${pct}%)` : ''}</span>`;
+      tkTitle += ` · cache ${fmtNum(cr)}`;
     }
   }
   const sess = r.session
@@ -2646,10 +2683,10 @@ export function requestRowHTML(row, opts) {
     <td class="mono${dim}">${esc(r.agent || '—')}</td>
     ${sess}
     <td class="st">${statusBadgeHTML(r.inFlight ? null : r.status, r.inFlight)}</td>
-    <td>${esc(r.model || '—')}${o.modelNote || ''}${guardMarksHTML(r.guardMarks)}</td>
+    <td class="cell-model" title="${esc(r.model || '')}">${esc(r.model || '—')}${o.modelNote || ''}${guardMarksHTML(r.guardMarks)}</td>
     <td class="mono${dim}">${esc(r.inFlight ? '…' : (r.provider || '—'))}${r.shadow ? ' <span class="badge muted">shadow</span>' : ''}</td>
     <td class="num${slow ? ' warn' : ''}">${lat}</td>
-    <td class="num">${tk}</td>
+    <td class="num"${tkTitle ? ` title="${esc(tkTitle)}"` : ''}>${tk}</td>
   </tr>`;
 }
 

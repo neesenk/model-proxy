@@ -51,6 +51,10 @@ type Summary struct {
 	CacheRead     uint64 `json:"cache_read,omitempty"`
 	CacheCreation uint64 `json:"cache_creation,omitempty"`
 	Shadow        bool   `json:"shadow,omitempty"`
+	// TurnKey is the conversational-turn fingerprint persisted with the record.
+	// Empty on records written before the field existed or when no user text
+	// could be extracted.
+	TurnKey string `json:"turn_key,omitempty"`
 	// Guard carries the request's guard/adjudication annotations when the read
 	// surface joins them in (admin's decorated query port); the raw
 	// requestlog scan leaves it empty. Newest first.
@@ -68,7 +72,7 @@ func Summarize(record Record) Summary {
 		TTFTMs: record.TTFTMs, RequestSize: record.RequestSize, ResponseSize: record.ResponseSize,
 		Input: record.ParsedUsage.Input, Output: record.ParsedUsage.Output,
 		CacheRead: record.ParsedUsage.CacheRead, CacheCreation: record.ParsedUsage.CacheCreation,
-		Shadow: record.Shadow,
+		Shadow: record.Shadow, TurnKey: record.TurnKey,
 	}
 }
 

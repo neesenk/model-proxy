@@ -32,6 +32,8 @@ type Event struct {
 	LatencyMs     int64  `json:"latency_ms"`
 	Input         uint64 `json:"input"`
 	Output        uint64 `json:"output"`
+	CacheRead     uint64 `json:"cache_read,omitempty"`
+	CacheCreation uint64 `json:"cache_creation,omitempty"`
 	ReceivedBytes int64  `json:"received_bytes,omitempty"` // response bytes seen so far (progress only)
 	Text          string `json:"text,omitempty"`           // head-capped response prefix (progress only)
 	Detail        string `json:"detail,omitempty"`         // free-form context for non-lifecycle types

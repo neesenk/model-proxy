@@ -198,6 +198,8 @@ func (p pipeline) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag 
 			LatencyMs:     res.LatencyMs,
 			Input:         res.Usage.Input,
 			Output:        res.Usage.Output,
+			CacheRead:     res.Usage.CacheRead,
+			CacheCreation: res.Usage.CacheCreation,
 		})
 	}()
 
