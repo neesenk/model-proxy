@@ -47,8 +47,11 @@ func TestWebAssetsJavaScriptSyntax(t *testing.T) {
 }
 
 // TestWebAssetsPureJSUnitTests runs every jstests/*.test.mjs file with
-// Node's built-in test runner — the pure.js helper tests plus the
-// docs/frontend field contracts — no framework dependency. Files are
+// Node's built-in test runner — the pure.js helper tests, the web-api.md field
+// contracts, and the browser-driven UI e2e (uie2e/uivisual self-gate: fast
+// skip without MP_UI_E2E=1 — the heavy browser automation is an on-demand
+// gate, not part of the every-change matrix; docs/engineering/testing.md
+// 「UI 浏览器 e2e」) — no npm framework dependency. Files are
 // enumerated here (not via `node --test <dir>`, whose directory-argument
 // support varies across node versions). Same node gate as the syntax check.
 func TestWebAssetsPureJSUnitTests(t *testing.T) {

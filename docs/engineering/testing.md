@@ -245,13 +245,14 @@ forward/Fusion/reload/HTTP/CLI/persistence/quota poll 编排；集成测试通�
 
 | 改动 | 追加验证 |
 |---|---|
-| Web JS | `node --check internal/web/assets/app.js internal/web/assets/pure.js` + `node --test internal/web/jstests/pure.test.mjs`（Go 侧 `TestWebAssets*` 驱动；无 node 时 Skip，`MP_REQUIRE_NODE=1` 时缺 node 必须 FAIL，CI 以该开关运行） |
+| Web JS | `node --check internal/web/assets/app.js internal/web/assets/pure.js` + `node --test internal/web/jstests/*.test.mjs`（Go 侧 `TestWebAssets*` 驱动；无 node 时 Skip，`MP_REQUIRE_NODE=1` 时缺 node 必须 FAIL，CI 以该开关运行；glob 中的浏览器 e2e 默认快速 Skip——耗时 UI 自动化是按需门禁，见「UI 浏览器 e2e」节，`MP_UI_E2E=1` 启用） |
 | 并发、reload、持久化 | 定向 `go test -race -run ... -count=20` |
 | build tags/平台代码 | Linux + Windows cross build |
 | CLI 显示 | `CLI.md` 对应 stdout/stderr/exit code 测试 |
 | Provider parser | 成功、错误、空 body、认证隔离 |
 | SSE/转换 | client cancel、read error、trailing usage、逐字节输出 |
 | 性能敏感路径 | `go test ./... -run='^$' -bench=. -benchtime=1x` smoke（见「Benchmark 约束」） |
+| serve 重启脚本 | `go test ./scripts/restartserve -count=1`（真实二进制 + 真实 serve 进程，unix-only） |
 
 ## 测试数据安全
 
@@ -351,6 +352,62 @@ ok/err/错误率/p50/p95/p99/流式 TTFT/状态码分布，`-max-error-rate` 超
 - 成本：每个用例都是真实付费调用，prompt 必须极短、max_tokens 给小值（≤512）。
 - 安全：响应 body 不打全量（失败 excerpt ≤500 字符）；禁止输出 API key/token/凭据。
 - alias 响应 model 归一化的 live 对应用例是 `TestLive_AliasResponseModelNormalization`（hermetic 对应 `TestForward_AliasResponseModelNormalizationE2E`，见上方 forward e2e 契约表）：kimi-code 的 kimi-k3→k3 alias 形态下，chat buffered/SSE、anthropic 转换与 anthropic 透传（含 message_start 嵌套 model）五条客户端路径都必须回显 calledModel，并用 target-model commit metrics 证明上游确实收到 k3——缺了这条，上游若某天自己回显 kimi-k3，断言将失去对归一化的证明力。
+
+## 重启脚本 e2e（`scripts/restartserve`，真实二进制，常规矩阵）
+
+`scripts/restart_serve.sh` 的端到端契约由 `scripts/restartserve/`（纯测试包）承载：构建真实 model-proxy 二进制，在沙箱（`t.TempDir` HOME、loopback 空闲端口、static provider）启动真实 `serve` 进程，再运行脚本并断言可观察语义——**热切换**（旧进程 SIGINT 后退出、端口换 pid 重新监听、脚本日志出现新实例 listening 行）与**冷启动**（无监听者时从 config.yaml 的 `listen:` 解析端口并拉起）。旧进程退出用 cmd.Wait 回收后的 channel 判定（未回收的僵尸会让 kill(2) 假阳性）；并发/等待一律用轮询条件，不用固定 Sleep 赌时序。外部前置条件：lsof + nohup（unix-only），Windows 明确 Skip。进入常规 `go test ./...` 与 race 矩阵。
+
+## UI 浏览器 e2e（`internal/web/jstests/uie2e.test.mjs` / `uivisual.test.mjs`，按需门禁）
+
+**不进每次修改的默认矩阵**——耗时 UI 自动化是阶段门禁：UI 改动提交前与发版前用
+`MP_UI_E2E=1 node --test internal/web/jstests/uie2e.test.mjs internal/web/jstests/uivisual.test.mjs`
+显式运行。默认（无 `MP_UI_E2E`）两个文件快速 Skip，常规 `node --test jstests/*.test.mjs`
+与 `go test ./internal/web` 不受影响；`MP_UI_E2E=1` 且无浏览器时 Skip，再加
+`MP_REQUIRE_UI_E2E=1` 升级为 FAIL（同 `MP_REQUIRE_NODE` 模式）。
+
+实现：真实浏览器端到端，不引入 npm 浏览器框架。共享 boot fixture 在 `uiboot.mjs`
+（唯一事实源，不得复制）：构建真实二进制，沙箱启动 `serve`（temp HOME、loopback 端口、
+static provider + **进程内 stub 上游**——终态 5xx 不经 capture 层、不落 request log，
+因此必须用 200 round-trip 驱动；stub 是 loopback 常量响应，不是真实上游），经零依赖
+CDP 驱动（`cdp.mjs`：Node 内置 WebSocket + 本地 Chromium/Chrome，发现链 `MP_BROWSER` →
+playwright 缓存 → 系统安装）加载真实 `/ui/`。
+
+- `uie2e.test.mjs`（行为流）：① shell 启动且零 JS 错误（预注入 error hook + CDP
+  `exceptionThrown`/`console.error` 双通道收集）；② 六个 tab 点击后全部渲染非空面板；
+  ③ 真实代理请求出现在 Requests UI——先断言 `/api/requests` 的服务端事实
+  （`called_model`），再驱动 `#req-refresh` 等表格行出现；④ **交互场景，按模式族覆盖全
+  UI**——点击展开族（Requests 行内详情开合、Config editor 折叠组、Security 命中行
+  analyze〔含 guard 红线断言：完整秘密值绝不进 UI、掩码片段可见〕）、浮层族（combobox
+  `data-popup` 开选关、Status Live 详情 dialog 开关、Token Usage 日历 popover 开选关）、
+  下拉表单族（facet 填充的原生 select 过滤与还原）、懒加载族（Requests 虚拟滚动更旧页、
+  chat 历史 “N earlier turns” 首次展开才解析渲染）、点击族（Accounts provider 导航）。
+- `uivisual.test.mjs`（视觉检查，核心问题是「UI 是否正常渲染」）：逐 tab 断言核心内容
+  **真实可见**（非零几何 + 非 visibility/display 隐藏，非仅 DOM 存在）+ 真实数据文本
+  （dummy provider、m1 请求行、KPI 瓦片、YAML 内容、账号导航），无可见错误横幅
+  （`.refresh-err`/`.msg.err`），零 JS 错误；每 tab 落一张 PNG 截图（签名 + 体积下限防
+  空白页、跨 tab 互不相同防同一坏页），写入 `MP_UI_SHOTS` 或测试结束时打印的临时目录
+  供人工复核。**列几何均衡**：表格铺满卡片内容盒（右侧无死空白，注意 clientWidth 含
+  padding 要扣除）、八列契约每列非挤压宽度（≥24px 防挤到不可读）、列间不重叠、表头与
+  数据行逐列对齐（fixed layout 同一 colgroup）。
+
+实现陷阱（排障前先读）：页面在代理未就绪时导航会落 `chrome-error://` 并被 Chrome 换
+文档，投向将死文档的点击全部丢失——boot 必须等「URL 正确 + readyState complete +
+`.tab-panel.active`」而非仅 tab 按钮存在（按钮在静态 HTML 里，监听器由 deferred module
+后绑）；点击激活后控件由异步 render 构建，立即点 `#req-refresh` 会空踏，必须随轮询
+重点；展开行详情与在途 refresh 的 replaceChildren 重建竞争时详情行会被带走，展开点击
+同样随轮询重点，且进入 Requests 页要等表签名静止再操作（重建发生在 detail fetch 在途
+时会把详情行永久卡在 loading…——疑似真实 UI 缺陷，见会话记录）；Requests 表是虚拟滚动，
+`tbody tr` 首行是 0 高度 `.req-spacer`，可见性断言要排除；跨场景共享页面状态时滚动位置
+会残留（先滚到底的场景会污染后续“取首行=newest”的假设），按 `data-id` 精确选行；
+request-log 索引异步 reconcile（~250ms），刚 commit 的记录未必立刻是 records[0]——按
+可区分特征（如 request_size）轮询；chat 历史区挂 `content-visibility:auto`，未渲染子树
+的 innerText 为空，必须用 textContent 断言；YAML 编辑器是 CodeMirror **5**，容器类名是
+`.CodeMirror` 不是 `.cm-editor`；request log keyset 分页按秒推进，造滚动加载数据必须按
+毫秒间隔铺开时间戳。static 池夹具（sha256 id 的 plural pool 文件）与 `internal/app` 的
+`writePoolFile` 同形状。拉起的外部进程必须闭环回收：脚本经 nohup 拉起的 serve 会
+reparent、不随测试退出（restartserve 按端口注册 cleanup，断言失败也回收）；浏览器 e2e
+的 shutdown 先注册 exit 监听再发 SIGINT、drain 超时升级 SIGKILL，并挂 `process.on('exit')`
+安全网——测试进程硬退出也不留 serve/浏览器残迹。
 
 ## 文档修改检查清单
 
