@@ -180,7 +180,7 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 	account := ""
 	if srv.MCPAuthMode() == "provider" {
 		if len(accounts) == 0 {
-			http.Error(w, fmt.Sprintf("mcp %q: provider %q has no logged-in account — run `model-proxy login %s`", name, srv.Provider, srv.Provider), http.StatusServiceUnavailable)
+			http.Error(w, fmt.Sprintf("mcp %q: %s", name, mcpNoAccountErr(srv)), http.StatusServiceUnavailable)
 			return
 		}
 		if hasSess {
@@ -443,6 +443,27 @@ func mcpNextAccount(accounts []string, account string) string {
 		}
 	}
 	return accounts[0]
+}
+
+// mcpNoAccountErr is the shared message for a provider-backed MCP server
+// whose pool is empty (upstream-facing variants prefix it with "mcp %q:").
+func mcpNoAccountErr(srv configdomain.MCPServer) string {
+	return fmt.Sprintf("provider %q has no logged-in account — run `model-proxy login %s`", srv.Provider, srv.Provider)
+}
+
+// mcpAccountGate picks a round-robin account for a provider-backed server and
+// tags the response with the live-provider header; ok=false after writing the
+// empty-pool 503 terminal response. Callers own the MCPAuthMode gate —
+// auth: none servers have no account at all.
+func (p *Proxy) mcpAccountGate(w http.ResponseWriter, snap RuntimeSnapshot, name string, srv configdomain.MCPServer) (account string, ok bool) {
+	accounts := mcpAccounts(snap, srv)
+	if len(accounts) == 0 {
+		http.Error(w, fmt.Sprintf("mcp %q: %s", name, mcpNoAccountErr(srv)), http.StatusServiceUnavailable)
+		return "", false
+	}
+	account = accounts[int(p.mcpRR.Add(1))%len(accounts)]
+	mcpSetLiveProvider(w, account)
+	return account, true
 }
 
 // mcpClientFor resolves the upstream HTTP client: the server's own proxy_url
