@@ -201,6 +201,15 @@ body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`
 
 `hasRecoveredUntried` 只依赖「是否存在 available 但本 pass 未尝试的目标」：冷却中途恢复（TOCTOU）或全部目标同时恢复时给予零等待重排，由 forward 的 round budget（≤2）防止无限循环。不再要求「至少仍有一个目标在冷却」。
 
+## 流式保活（SSE keepalive）
+
+`stream_keepalive` 默认 15s，`"0"` 关闭。客户端面向的 SSE 流（`clientStream` 且 status < 300）在上游静默超过该间隔时，`targetexec` 经 `flushCopyHeartbeat` 向客户端写一帧 SSE 注释心跳（`: ping\n\n`，协议级 no-op）。契约边界：
+
+- **只在 commit（上游响应头已收到、`WriteHeader` 已发）之后才开始**——header 之前的连接失败仍完整保留透明 failover；代价是 header 之后上游在 prefill 中途断流无法再 failover，客户端看到断流（有意取舍，慢 TTFT 收益大于该窗口风险）。
+- 心跳写在响应链的**客户端写出侧**，不经过 body 读取侧的 CaptureResponse/CaptureUsage/cache recorder——request log、usage、响应缓存永远见不到心跳帧。
+- 心跳经 `timingResponseWriter.WriteHeartbeat` 旁路首字节标记——TTFT 只测量上游真实首字节，不被代理 padding 污染。
+- 非流式（JSON）响应绝不写注释帧（会损坏 body）；数据流动时每写一帧重置计时器，只在静默期发心跳。
+
 ## 回归测试
 
 - half-open 的成功、5xx、429、普通 4xx 生命周期。
@@ -208,5 +217,6 @@ body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`
 - 普通 target 与 Fusion leg 的 429 kind/horizon、metric、quota refresh 一致。
 - 同 provider 不同 model 的锁和 paramBlock 隔离。
 - empty stream 的 EOF、client cancel、upstream read error。
+- SSE keepalive：静默期心跳帧、ttft 不被心跳标记、录制链/缓存无心跳、client gone 后 reader goroutine 释放。
 - cooldown 全部恢复、部分恢复、跨轮纯 429、混合硬失败。
 - request-aware/context retry 后的实际目标冷却判定。

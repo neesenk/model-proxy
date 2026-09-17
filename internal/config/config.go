@@ -662,6 +662,7 @@ type Scheduling struct {
 	ModelLockout      string `yaml:"model_lockout"`       // model-level failure (404 / model-denied / empty 200): lock (provider,model) this long (default 10m)
 	RetryWait         string `yaml:"retry_wait"`          // all targets cooling down: wait ≤ this for the earliest expiry and retry (≤2×) instead of an immediate error (default 10s; "0" disables)
 	UpstreamTimeout   string `yaml:"upstream_timeout"`    // per-upstream-request timeout (default 1800s)
+	StreamKeepalive   string `yaml:"stream_keepalive"`    // SSE comment heartbeat into client-facing streams after this much upstream silence (default 15s; "0" disables)
 	StickyDwell       string `yaml:"sticky_dwell"`        // min time on the chosen provider before re-evaluating (default 10m)
 	QuotaPollInterval string `yaml:"quota_poll_interval"` // background poll cadence (default 5m)
 	QuotaSwitchMargin int    `yaml:"quota_switch_margin"` // switch if another plan provider's effective remaining beats current by ≥ this many pct points (default 15)
@@ -715,6 +716,12 @@ func (s Scheduling) Timeout() time.Duration {
 		return d
 	}
 	return 1800 * time.Second
+}
+func (s Scheduling) Keepalive() time.Duration {
+	if d, err := time.ParseDuration(s.StreamKeepalive); err == nil {
+		return d // "0" disables the stream heartbeat
+	}
+	return 15 * time.Second
 }
 func (s Scheduling) Dwell() time.Duration {
 	if d, err := time.ParseDuration(s.StickyDwell); err == nil {
@@ -1547,8 +1554,9 @@ func (c *Config) validate() error {
 	// "quota-aware scheduling").
 
 	// Duration strings (pitfalls #14): apart from fields whose contract
-	// explicitly allows "0" (retry_wait disables the cooldown wait; stats /
-	// request_log retention "0" keeps history forever), a SET duration must
+	// explicitly allows "0" (retry_wait disables the cooldown wait;
+	// stream_keepalive disables the SSE heartbeat; stats / request_log
+	// retention "0" keeps history forever), a SET duration must
 	// parse and be positive — e.g. upstream_timeout: "0s" would silently
 	// remove the only timeout bound on upstream and shadow requests.
 	durationChecks := []struct {
@@ -1564,6 +1572,7 @@ func (c *Config) validate() error {
 		{"scheduling.sticky_dwell", c.Scheduling.StickyDwell, false},
 		{"scheduling.quota_poll_interval", c.Scheduling.QuotaPollInterval, false},
 		{"scheduling.retry_wait", c.Scheduling.RetryWait, true},
+		{"scheduling.stream_keepalive", c.Scheduling.StreamKeepalive, true},
 		{"cache.ttl", c.Cache.TTL, false},
 		{"pricing.ttl", c.Pricing.TTL, false},
 		{"stats.retention", c.Stats.Retention, true},

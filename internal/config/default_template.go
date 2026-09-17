@@ -209,6 +209,7 @@ providers:
 #   model_lockout: 10m          # (default 10m) model-level failure (404 / model-denied / empty 200): lock (provider,model)
 #   retry_wait: 10s             # (default 10s; "0" disables) all targets cooling down: wait ≤ this for the earliest expiry and retry (≤2×)
 #   upstream_timeout: 1800s     # (default 1800s) per-upstream-request timeout
+#   stream_keepalive: 15s       # (default 15s; "0" disables) SSE comment heartbeat into client streams after this much upstream silence
 #   sticky_dwell: 10m           # (default 10m) min time on the chosen provider before re-evaluating
 #   quota_poll_interval: 5m     # (default 5m)  background quota poll cadence
 #   quota_switch_margin: 15     # (default 15)  switch provider if another's effective remaining beats current by >= this many pct points

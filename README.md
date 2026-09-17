@@ -580,6 +580,7 @@ routes:
 - **全冷却等待重试**（`retry_wait`，默认 10s，`"0"` 关闭）：当路由的**所有**目标都在冷却（限频/熔断）且最早到期 ≤ 预算时，代理静默等到期后整体重试，最多 2 次——代替立即报错让客户端走自己的重试循环；某目标在调度和终局之间恢复但本轮未被试，则**零等待立即重排**一次（仍在 2 次预算内）；客户端断开立即中止。重试耗尽或冷却超预算时按**跨轮失败类别**给出诚实终局：**纯限频 → 429 + `Retry-After`**，含硬失败/熔断成分 → 502（`x-mp-force-provider` 一次性覆盖不参与等待）。
 - **粘性驻留**（`sticky_dwell`，默认 10m）：每个路由「停」在一个 provider 上，在驻留窗口内优先用它（保 prompt cache，不为已恢复的高优先 provider 频繁回切）；只有它熔断/限频或驻留到期才换。10m ≈ 2× 缓存 TTL（~5m）：够保住活跃会话缓存、扛过短暂抖动，又能在有限时间内回到首选 provider。
 - **上游超时**（`upstream_timeout`，默认 1800s）：每个上游请求带超时，挂起的上游在超时后失败进入熔断/failover，而不是无限拖住请求；默认 1800s 以容纳长 thinking 流与超长输出，需要更快 failover 可调小。
+- **流式保活**（`stream_keepalive`，默认 15s，`"0"` 关闭）：客户端 SSE 流在上游静默（如大上下文 prefill 导致分钟级 TTFT）期间，每间隔向客户端写一帧 SSE 注释心跳（`: ping`，各官方 SDK 都会跳过），防止客户端/边缘 idle 超时掐断连接。心跳只在收到上游响应头之后才开始——之前的连接失败仍完整保留透明 failover；心跳帧不计入 TTFT、不进 request log/响应缓存。
 
 ```yaml
 scheduling:
@@ -590,6 +591,7 @@ scheduling:
   model_lockout: 10m          # 模型级失败锁定时长
   retry_wait: 10s             # 全冷却时等待重试预算（"0" 关闭）
   upstream_timeout: 1800s
+  stream_keepalive: 15s       # SSE 静默心跳间隔（"0" 关闭）
   sticky_dwell: 10m
   quota_poll_interval: 5m   # 后台 Quota() 轮询周期
   quota_switch_margin: 15   # 切换 provider 的 quota 边际（百分点）

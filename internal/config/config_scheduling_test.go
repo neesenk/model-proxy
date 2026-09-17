@@ -1,12 +1,31 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
 // --- Scheduling default + invalid-duration fallbacks ---
+
+// YAML-load coverage (pitfalls #13): yaml.v3 silently ignores unknown keys, so
+// a mistyped `stream_keepalive` tag would pass every struct-construction test
+// above while never landing from a real config file.
+func TestScheduling_StreamKeepaliveYAMLLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	base := "listen: 127.0.0.1:0\nproviders:\n  p:\n    provider_id: zhipu\n    openai_base_url: https://x\n"
+	cfg, err := LoadConfigFromBytes(path, []byte(base+"scheduling:\n  stream_keepalive: 30s\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if cfg.Scheduling.Keepalive() != 30*time.Second {
+		t.Fatalf("keepalive from YAML = %v, want 30s", cfg.Scheduling.Keepalive())
+	}
+	if _, err := LoadConfigFromBytes(path, []byte(base+"scheduling:\n  stream_keepalive: -1s\n")); err == nil {
+		t.Fatal("negative stream_keepalive accepted, want validation error")
+	}
+}
 
 func TestScheduling_DefaultsAndInvalid(t *testing.T) {
 	var s Scheduling // all zero
@@ -30,6 +49,9 @@ func TestScheduling_DefaultsAndInvalid(t *testing.T) {
 	}
 	if s.Timeout() != 1800*time.Second {
 		t.Errorf("default timeout=%v want 1800s", s.Timeout())
+	}
+	if s.Keepalive() != 15*time.Second {
+		t.Errorf("default keepalive=%v want 15s", s.Keepalive())
 	}
 	if s.Dwell() != 10*time.Minute {
 		t.Errorf("default dwell=%v want 10m", s.Dwell())
@@ -68,6 +90,7 @@ func TestScheduling_DefaultsAndInvalid(t *testing.T) {
 		ModelLockout:      "bad",
 		RetryWait:         "bad",
 		UpstreamTimeout:   "bad",
+		StreamKeepalive:   "bad",
 		StickyDwell:       "bad",
 		QuotaPollInterval: "bad",
 	}
@@ -89,6 +112,9 @@ func TestScheduling_DefaultsAndInvalid(t *testing.T) {
 	if bad.Timeout() != 1800*time.Second {
 		t.Errorf("invalid timeout fallback=%v want 1800s", bad.Timeout())
 	}
+	if bad.Keepalive() != 15*time.Second {
+		t.Errorf("invalid keepalive fallback=%v want 15s", bad.Keepalive())
+	}
 	if bad.Dwell() != 10*time.Minute {
 		t.Errorf("invalid dwell fallback=%v want 10m", bad.Dwell())
 	}
@@ -105,6 +131,7 @@ func TestScheduling_DefaultsAndInvalid(t *testing.T) {
 		ModelLockout:      "30m",
 		RetryWait:         "0",
 		UpstreamTimeout:   "5s",
+		StreamKeepalive:   "30s",
 		StickyDwell:       "3m",
 		QuotaPollInterval: "1m",
 		QuotaSwitchMargin: 25,
@@ -129,6 +156,12 @@ func TestScheduling_DefaultsAndInvalid(t *testing.T) {
 	}
 	if good.Timeout() != 5*time.Second {
 		t.Errorf("explicit timeout=%v want 5s", good.Timeout())
+	}
+	if good.Keepalive() != 30*time.Second {
+		t.Errorf("explicit keepalive=%v want 30s", good.Keepalive())
+	}
+	if (Scheduling{StreamKeepalive: "0"}).Keepalive() != 0 {
+		t.Errorf("keepalive \"0\" must disable, got %v", (Scheduling{StreamKeepalive: "0"}).Keepalive())
 	}
 	if good.Dwell() != 3*time.Minute {
 		t.Errorf("explicit dwell=%v want 3m", good.Dwell())
@@ -208,6 +241,7 @@ func TestValidate_RejectsNonPositiveDurations(t *testing.T) {
 	// The documented zeros stay legal.
 	for _, set := range []func(*Config){
 		func(c *Config) { c.Scheduling.RetryWait = "0" },
+		func(c *Config) { c.Scheduling.StreamKeepalive = "0" },
 		func(c *Config) { c.Stats.Retention = "0" },
 		func(c *Config) { c.RequestLog.Retention = "0" },
 		func(c *Config) { c.Scheduling.UpstreamTimeout = "30m" },

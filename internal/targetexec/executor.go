@@ -294,7 +294,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 		} else {
 			executor.release(target.Provider)
 		}
-		return executor.commit(runtime.Cache, plan, exchange, scope, dto, timedWriter, clientWantsStream)
+		return executor.commit(runtime.Cache, runtime.Scheduling.Keepalive(), plan, exchange, scope, dto, timedWriter, clientWantsStream)
 	}
 	executor.release(target.Provider)
 	executor.failover(target)
@@ -303,6 +303,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 
 func (executor Executor) commit(
 	cache *responsecache.Store,
+	keepalive time.Duration,
 	plan Plan,
 	exchange Exchange,
 	scope Scope,
@@ -471,7 +472,19 @@ func (executor Executor) commit(
 		body = recorder
 	}
 	counting := &countingReadCloser{ReadCloser: body}
-	end := flushCopy(exchange.Writer, counting)
+	// SSE keepalive: for client-facing event streams, write a comment
+	// heartbeat after `keepalive` of upstream silence so client/edge idle
+	// timeouts don't cut slow-TTFT streams. The heartbeat starts only after
+	// the upstream response headers committed above, so the pre-headers
+	// failover window stays intact; the frames bypass the recording chain
+	// and the ttft marker. Non-stream responses must never see a comment
+	// frame (it would corrupt a JSON body).
+	var end streamEnd
+	if clientStream && response.StatusCode < 300 && keepalive > 0 {
+		end = flushCopyHeartbeat(exchange.Writer, counting, keepalive)
+	} else {
+		end = flushCopy(exchange.Writer, counting)
+	}
 	body.Close()
 	if response.StatusCode < 300 && counting.Count == 0 && end == streamEOF && exchange.Request.Context().Err() == nil {
 		if executor.State != nil {

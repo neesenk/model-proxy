@@ -135,6 +135,98 @@ func flushCopy(writer http.ResponseWriter, body io.ReadCloser) streamEnd {
 	}
 }
 
+// heartbeatFrame is an SSE comment line: a protocol-level no-op that every
+// compliant SSE parser (openai / anthropic / responses SDKs) skips. Written
+// only into client-facing event streams to reset client/edge idle timers
+// while a slow-TTFT upstream is still silent.
+var heartbeatFrame = []byte(": ping\n\n")
+
+// flushCopyHeartbeat is flushCopy plus a keepalive ticker: whenever the
+// upstream body stays silent for interval, a heartbeat comment frame goes to
+// the client. Body reads run on a helper goroutine so the ticker can fire
+// during a blocked Read; only the calling goroutine writes to the client.
+// Heartbeats bypass the recording chain (they are written to the client,
+// never read from the body) and the ttft marker (via WriteHeartbeat).
+func flushCopyHeartbeat(writer http.ResponseWriter, body io.ReadCloser, interval time.Duration) streamEnd {
+	flusher, _ := writer.(http.Flusher)
+	heartbeatWriter, hasHeartbeat := writer.(interface {
+		WriteHeartbeat([]byte) (int, error)
+	})
+	writeHeartbeat := func() error {
+		if hasHeartbeat {
+			_, err := heartbeatWriter.WriteHeartbeat(heartbeatFrame)
+			return err
+		}
+		_, err := writer.Write(heartbeatFrame)
+		return err
+	}
+	bufp := flushBufPool.Get().(*[]byte)
+	buf := *bufp
+	type readResult struct {
+		n   int
+		err error
+	}
+	readReq := make(chan struct{})
+	readRes := make(chan readResult, 1)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for range readReq {
+			n, err := body.Read(buf)
+			readRes <- readResult{n, err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	recycle := true
+	defer func() {
+		close(readReq)
+		if recycle {
+			<-readerDone
+			flushBufPool.Put(bufp)
+		}
+	}()
+	// At most one read request is outstanding: the reader goroutine parks in
+	// body.Read until the upstream produces bytes, and re-sending the request
+	// before that read completes would deadlock the loop.
+	readReq <- struct{}{}
+	for {
+		select {
+		case result := <-readRes:
+			if result.n > 0 {
+				if _, err := writer.Write(buf[:result.n]); err != nil {
+					return streamClientGone
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+				ticker.Reset(interval)
+			}
+			if result.err != nil {
+				if result.err == io.EOF {
+					return streamEOF
+				}
+				return streamUpstreamErr
+			}
+			readReq <- struct{}{}
+		case <-ticker.C:
+			if err := writeHeartbeat(); err != nil {
+				// The reader goroutine may still be parked in body.Read holding
+				// buf; the caller's body.Close unblocks it, but the buffer must
+				// NOT return to the pool before that — abandon it to the GC.
+				recycle = false
+				return streamClientGone
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}
+}
+
 type timingResponseWriter struct {
 	http.ResponseWriter
 	firstByte    time.Time
@@ -153,6 +245,12 @@ func (writer *timingResponseWriter) Write(body []byte) (int, error) {
 		writer.firstByte = time.Now()
 	}
 	return writer.ResponseWriter.Write(body)
+}
+
+// WriteHeartbeat writes a client-facing keepalive frame WITHOUT recording the
+// first byte: TTFT measures the upstream's first real byte, not proxy padding.
+func (writer *timingResponseWriter) WriteHeartbeat(frame []byte) (int, error) {
+	return writer.ResponseWriter.Write(frame)
 }
 
 func (writer *timingResponseWriter) Flush() {

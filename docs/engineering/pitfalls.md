@@ -33,7 +33,7 @@
     的变更（lost update；CLI 与 daemon 是不同进程，进程内互斥不够）。锁文件是
     `<config>.lock`（advisory flock，Windows 用 LockFileEx），只阻塞其他写者、从不阻塞读。
 13. 新顶层配置字段必须六步同步：`internal/config.Config` → `rawConfig` → 拷贝段 → validate → 该包的 YAML 加载测试（yaml.v3 会静默忽略未知键，不能只直接构造 Config）→ 示例与文档（`config.yaml` 模板/README）。根包不承载字段或默认值逻辑（`config_compat.go` 已删除）。
-14. duration 字段除明确允许的 `retry_wait: "0"` 外应验证为正数；任何允许零/负数的字段都要写入契约。
+14. duration 字段除明确允许的 `retry_wait: "0"`（关闭等待重试）与 `stream_keepalive: "0"`（关闭 SSE 心跳）外应验证为正数；任何允许零/负数的字段都要写入契约。
 15. `BillingClass` iota 不是调度顺序，必须通过独立 `tierRank` 映射 `plan < unknown < payg`。
 
 ## 并发与生命周期
