@@ -213,12 +213,10 @@ func cmdTestStdio(cfg *configdomain.Config, name string, srv configdomain.MCPSer
 	}
 }
 
-// mcpStdioKeyFor resolves the account key for a provider-backed stdio server
-// (first live pool account; "" for auth: none).
-func mcpStdioKeyFor(cfg *configdomain.Config, srv configdomain.MCPServer) (string, string, error) {
-	if srv.MCPAuthMode() != "provider" {
-		return "", "", nil
-	}
+// firstProviderAccount builds the provider set once and resolves the first
+// live account for a provider-backed MCP server: pool virtual ids first, the
+// plain provider name otherwise.
+func firstProviderAccount(cfg *configdomain.Config, srv configdomain.MCPServer) (provider.Provider, string, error) {
 	built := providerbuild.BuildProviders(cfg, accounts.NewStore(accounts.HomeDir()), providerbuild.BuildOpts())
 	ids := built.PoolIndex[srv.Provider]
 	if len(ids) == 0 {
@@ -227,11 +225,24 @@ func mcpStdioKeyFor(cfg *configdomain.Config, srv configdomain.MCPServer) (strin
 		}
 	}
 	if len(ids) == 0 {
-		return "", "", fmt.Errorf("provider %q has no logged-in account — run `model-proxy login %s`", srv.Provider, srv.Provider)
+		return nil, "", fmt.Errorf("provider %q has no logged-in account — run `model-proxy login %s`", srv.Provider, srv.Provider)
 	}
 	prov := built.Providers[ids[0]]
 	if prov == nil {
-		return "", "", fmt.Errorf("provider %q account %q is not runnable", srv.Provider, ids[0])
+		return nil, "", fmt.Errorf("provider %q account %q is not runnable", srv.Provider, ids[0])
+	}
+	return prov, ids[0], nil
+}
+
+// mcpStdioKeyFor resolves the account key for a provider-backed stdio server
+// (first live pool account; "" for auth: none).
+func mcpStdioKeyFor(cfg *configdomain.Config, srv configdomain.MCPServer) (string, string, error) {
+	if srv.MCPAuthMode() != "provider" {
+		return "", "", nil
+	}
+	prov, id, err := firstProviderAccount(cfg, srv)
+	if err != nil {
+		return "", "", err
 	}
 	kr, ok := prov.(provider.KeyReporter)
 	if !ok {
@@ -241,7 +252,7 @@ func mcpStdioKeyFor(cfg *configdomain.Config, srv configdomain.MCPServer) (strin
 	if err != nil {
 		return "", "", err
 	}
-	return key, ids[0], nil
+	return key, id, nil
 }
 
 // mcpAuthFor builds the credential injector for one server. Provider-backed
@@ -270,22 +281,12 @@ func mcpAuthFor(cfg *configdomain.Config, srv configdomain.MCPServer) (func(*htt
 		}
 		return withStatic(nil), "", nil
 	}
-	built := providerbuild.BuildProviders(cfg, accounts.NewStore(accounts.HomeDir()), providerbuild.BuildOpts())
-	ids := built.PoolIndex[srv.Provider]
-	if len(ids) == 0 {
-		if _, ok := built.Providers[srv.Provider]; ok {
-			ids = []string{srv.Provider}
-		}
-	}
-	if len(ids) == 0 {
-		return nil, "", fmt.Errorf("provider %q has no logged-in account — run `model-proxy login %s`", srv.Provider, srv.Provider)
-	}
-	prov := built.Providers[ids[0]]
-	if prov == nil {
-		return nil, "", fmt.Errorf("provider %q account %q is not runnable", srv.Provider, ids[0])
+	prov, id, err := firstProviderAccount(cfg, srv)
+	if err != nil {
+		return nil, "", err
 	}
 	if srv.AuthHeader == "" || srv.AuthHeader == "Authorization" {
-		return withStatic(func(req *http.Request) error { return prov.AuthHeaders(req) }), ids[0], nil
+		return withStatic(func(req *http.Request) error { return prov.AuthHeaders(req) }), id, nil
 	}
 	kr, ok := prov.(provider.KeyReporter)
 	if !ok {
@@ -299,7 +300,7 @@ func mcpAuthFor(cfg *configdomain.Config, srv configdomain.MCPServer) (func(*htt
 		}
 		req.Header.Set(header, key)
 		return nil
-	}), ids[0], nil
+	}), id, nil
 }
 
 func mcpNames(cfg *configdomain.Config) []string {
