@@ -4,12 +4,12 @@ package stats
 import (
 	"fmt"
 	"model-proxy/internal/accounts"
+	cliframework "model-proxy/internal/cli/framework"
 	"model-proxy/internal/display"
 	"model-proxy/internal/providerbuild"
 	"os"
 	"sort"
 	"strings"
-	"sync"
 
 	configdomain "model-proxy/internal/config"
 )
@@ -68,7 +68,7 @@ func PrintProviderUsage(cfg *configdomain.Config, provName string) {
 			}
 			fmt.Printf("%s (%s)\n", display.Bold(display.Cyan(a.Label)), accounts.Mask(a.ID))
 			cred := a.Credentials()
-			if p := providerbuild.BuildOne(cfg, buildOpts(), provName, prov, cred); p != nil {
+			if p := providerbuild.BuildOne(cfg, providerbuild.BuildOpts(), provName, prov, cred); p != nil {
 				if err := p.Usage(); err != nil {
 					fmt.Println(display.Yellow("  (usage unavailable: " + err.Error() + ")"))
 				}
@@ -77,7 +77,7 @@ func PrintProviderUsage(cfg *configdomain.Config, provName string) {
 		return
 	}
 	// Single-account / non-pooled / aqp / codex: build one provider + call Usage.
-	provMap := providerbuild.BuildProviders(cfg, accountStore(), buildOpts()).Providers
+	provMap := providerbuild.BuildProviders(cfg, accountStore(), providerbuild.BuildOpts()).Providers
 	p := provMap[provName]
 	if p == nil {
 		return
@@ -94,33 +94,11 @@ const UsageDivider = "───────────────────�
 
 // --- usage-local environment seams and display helpers ---
 
-var (
-	usageStoreMu  sync.Mutex
-	usageStoreKey string
-	usageStore    accounts.Store
-)
+// accountStoreLazy is the shared CLI seam (cli/framework): the credential
+// store is cached keyed by the current home directory so tests can isolate
+// HOME (t.Setenv) before first use.
+var accountStoreLazy cliframework.LazyAccountStore
 
 func accountStore() accounts.Store {
-	home := homeDir()
-	usageStoreMu.Lock()
-	defer usageStoreMu.Unlock()
-	if home != usageStoreKey {
-		usageStore = accounts.NewStore(home)
-		usageStoreKey = home
-	}
-	return usageStore
-}
-
-func buildOpts() providerbuild.BuildOptions {
-	return providerbuild.BuildOptions{
-		HomeDir:                  homeDir(),
-		CodexCLIVersion:          providerbuild.CodexCLIVersion,
-		CodexCacheVersion:        providerbuild.CodexCacheVersion,
-		ListArkAgentPlanModelIDs: providerbuild.ListArkAgentPlanModelIDs,
-	}
-}
-
-func homeDir() string {
-	h, _ := os.UserHomeDir()
-	return h
+	return accountStoreLazy.Get()
 }
