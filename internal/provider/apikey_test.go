@@ -24,6 +24,27 @@ func TestApiKeyBaseWithKeyInjectsBoundKey(t *testing.T) {
 	}
 }
 
+// TestKeyReporterReportsRawKey pins the KeyReporter seam used by the MCP
+// gateway's custom auth headers: the raw credential must equal what
+// AuthHeaders injects as Bearer, and a bound base must serve it without
+// touching any file.
+func TestKeyReporterReportsRawKey(t *testing.T) {
+	b := NewApiKeyBaseWithKey("volcengine", "RAW-PLAN-KEY")
+	var kr KeyReporter = b
+	key, err := kr.ReportKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key != "RAW-PLAN-KEY" {
+		t.Fatalf("ReportKey = %q, want RAW-PLAN-KEY", key)
+	}
+	// Providers embedding *ApiKeyBase promote the seam (interface assertion).
+	var prov Provider = &ZhipuProvider{ApiKeyBase: NewApiKeyBaseWithKey("zhipu", "ZK")}
+	if _, ok := prov.(KeyReporter); !ok {
+		t.Fatal("ZhipuProvider does not promote KeyReporter")
+	}
+}
+
 // TestApiKeyBaseBoundRefreshIsNoOp asserts that Refresh on a bound (in-memory)
 // ApiKeyBase is a no-op: the bound key is immutable (there's no file to re-read),
 // so Refresh must NOT clear the cache. Without this guard, a 401-refresh-retry

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
@@ -89,6 +90,29 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"lines": lines})
 }
 
+func (s *Server) handleMCPSurface(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.reads.MCPSurface())
+}
+
+// handleMCPTest runs the MCP handshake against one server (POST
+// /api/mcp/test {"name": "..."}). Unknown names are a client error; a failed
+// handshake is a 200 with ok:false (the UI renders the reason inline).
+func (s *Server) handleMCPTest(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		writeJSONErr(w, http.StatusBadRequest, "mcp test: name is required")
+		return
+	}
+	result, err := s.commands.ProbeMCP(r.Context(), req.Name)
+	if err != nil {
+		writeJSONErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) handleRequestsList(w http.ResponseWriter, r *http.Request) {
 	queries := s.reads.RequestLogQueries()
 	if queries == nil {
@@ -99,6 +123,9 @@ func (s *Server) handleRequestsList(w http.ResponseWriter, r *http.Request) {
 	f := requestlog.Filter{Model: q.Get("model"), Provider: q.Get("provider"), Agent: q.Get("agent"), Session: q.Get("session"), ErrorsOnly: q.Get("errors") != "", Limit: 100}
 	if v := q.Get("shadow"); v == "only" || v == "exclude" {
 		f.Shadow = v
+	}
+	if v := q.Get("kind"); v == "mcp" || v == "llm" {
+		f.Kind = v
 	}
 	if v := q.Get("status"); v != "" {
 		if n, e := strconv.Atoi(v); e == nil {

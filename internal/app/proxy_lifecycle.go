@@ -69,6 +69,12 @@ func (p *Proxy) refreshCatalogAsync() {
 // final stats/state flushes.
 func (p *Proxy) closeRuntimeServices() {
 	p.lifecycle.BeginStop()
+	// Reap stdio MCP children first: they write no logs, and killing them
+	// early unblocks any in-flight stdio Call so request goroutines can exit
+	// before the log drain.
+	if p.mcpStdio != nil {
+		p.mcpStdio.killAll()
+	}
 	p.lifecycle.WaitBeforeLogDrain()
 	// Stop the AI adjudication workers BEFORE the audit logger drains:
 	// verdict-side audit records must not enqueue into a drained logger

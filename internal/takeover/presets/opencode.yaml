@@ -16,3 +16,9 @@ json:
 models:
   shape: opencode
   json_path: provider.{{provider_id}}.models
+mcp:
+  json_path: mcp
+  json_entry:
+    type: remote
+    url: "{{mcp.url}}"
+    enabled: true

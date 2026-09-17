@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -92,7 +93,32 @@ func bigmodelQuota(url string, auth func(*http.Request) error, headers map[strin
 	}
 	s, _ := ParseZhipuQuota(body, "")
 	if s == nil {
+		// Distinguish the BigModel error envelope ({"success":false,"code":…,
+		// "msg":…} — e.g. their quota endpoint serving 内部服务器错误 after a
+		// backend incident) from a body that simply isn't this API at all: the
+		// former must surface the upstream message instead of the misleading
+		// "not zhipu quota format".
+		if msg := bigmodelErrorMessage(body); msg != "" {
+			return &QuotaSnapshot{Billing: BillingUnknown, Err: "zhipu quota upstream error: " + msg}, nil
+		}
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: "not zhipu quota format"}, nil
 	}
 	return s, nil
+}
+
+// bigmodelErrorMessage extracts the message from a BigModel error envelope
+// ({"success":false, "code":…, "msg":"…"}), "" for anything else.
+func bigmodelErrorMessage(body []byte) string {
+	var env struct {
+		Success *bool  `json:"success"`
+		Code    int    `json:"code"`
+		Msg     string `json:"msg"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return ""
+	}
+	if env.Success == nil || *env.Success || env.Msg == "" {
+		return ""
+	}
+	return fmt.Sprintf("code %d: %s", env.Code, env.Msg)
 }

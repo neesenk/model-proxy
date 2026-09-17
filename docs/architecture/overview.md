@@ -345,6 +345,20 @@ responsesState/fusionReg/reqLog + `NewHealthGate`/`NewEffects`/`Schedule`/`Shado
 执行一次回调。Responses state、request log 与 Shadow 共用这一 transport
 primitive；各自的持久化和业务判断不得反向塞进通用 reader。
 
+`internal/mcp` 是无仓库内依赖的 MCP 网关 wire 语义叶子包，拥有：有界 JSON-RPC
+帧解析（method/id/响应配对）、SSE data 帧提取、有界会话表（512 会话 × 30 分钟空闲
+TTL 的 LRU，本地 session id →（server、账号、上游 session id）；**惰性回收**——无后台
+goroutine，进程级跨代状态，永不序列化/落盘，先例 `internal/guard/session`；回收经
+锁外 `OnEvict` 回调联动子进程 kill；路由会话态（子会话/工具粘滞/聚合缓存）只经
+`RouteXxx` 锁内拷贝方法访问）、header 转发白名单、路由纯逻辑（规范名聚合、
+tools/call 名字改写、合成响应、`FailoverStatus`）、legacy SSE `EndpointRewriter`
+（endpoint 事件 URL 逐行改写）、`StdioConn`（stdio 子进程唯一 owner：换行 JSON-RPC、
+id 解复用、Close 杀进程回收），以及 `Probe`（initialize + tools/list 握手）。
+HTTP 发送、凭据注入、request log、生命周期全部留在调用方：
+`internal/app/proxy_mcp*.go`（`/mcp/` handler、路由编排、legacy SSE 通道、stdio 注册表、
+guard 扫描、live 事件、Web 探测）与 `internal/cli/mcp`。设计见
+`docs/research/design-mcp-gateway.md`，实现契约见 `docs/architecture/mcp.md`。
+
 `internal/probe` 拥有全仓所有探测执行：唯一的请求构造+发送配方 `probe.Do`
 （URL join → `RewriteRequest` → headers（`/v1/messages` 预置 `anthropic-version`）→
 `AuthHeaders` → `prov.Headers` → `ExtraHeaders`）、模型可调性探测
@@ -484,7 +498,7 @@ daemon/supervisor 的 signal 与 pid/probe 编排。child process detach 属性�
 `cli/stats`（stats/usage）、`cli/audit`（audit）、`cli/status`（serve
 status/schedule/routes/cache）、`cli/admin`（pin/unpin/unfreeze/freeze）、`cli/guard`（guard blocks/unblock）、`cli/diag`
 （wire/replay/shadow）、`cli/config`（config init|print|check）、
-`cli/account`（logout）、`cli/serve`（daemon/stop/reload 编排）。
+`cli/account`（logout）、`cli/mcp`（mcp list/test）、`cli/serve`（daemon/stop/reload 编排）。
 `cli/clitest` 是纯测试支撑包：拥有子进程 harness（TestHelperProcess 分发）与共享
 fixture，只被各命令包的测试 import。
 
@@ -530,13 +544,13 @@ application → serveAssembly → applicationRuntime → Proxy
 `internalRepositoryImportPolicy` 互为镜像——两处必须同步修改：
 
 - 叶子包（不得依赖其他 `model-proxy/*` 包）：`adjudicate`、`archtest`（纯测试包）、`cache`、
-  `configedit`、`credstore`、`daemonctl`、`display`、`guard`、`httpx`、
+  `configedit`、`credstore`、`daemonctl`、`display`、`guard`、`httpx`、`mcp`、
   `observe/counters`、`observe/events`、`observe/logx`、`protocol/wire`、`runtime/wirecap`、
   `upstreamproxy`、`transport/bodycapture`、`webauth`；
 - `accounts → credstore`；
 - `guard/session → guard`；
 - `app → accounts, adjudicate, admin, appapi, cache, catalog,
-  config, display, forward, fusion, guard, guard/session, httpx, login, observe/budget,
+  config, display, forward, fusion, guard, guard/session, httpx, login, mcp, observe/budget,
   observe/counters, observe/events, observe/logx, observe/requestlog, observe/seclog, observe/stats,
   pricing, probe, protocol, provider, providerbuild, routing, runtime, runtime/wirecap, shadow,
   targetexec, transport/bodycapture, upstreamproxy, web, webauth`；
@@ -546,7 +560,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `appapi → adjudicate, fusion, observe/requestlog, observe/stats, presets, pricing`
   （adjudicate 仅为其 BlockEntry/Result 快照类型提供 DTO 别名，见 appapi/types.go）；
 - `cli → cli/account, cli/admin, cli/audit, cli/config, cli/diag, cli/doctor,
-  cli/framework, cli/guard, cli/login, cli/models, cli/presets, cli/stats, cli/status, config, display, takeover,
+  cli/framework, cli/guard, cli/login, cli/mcp, cli/models, cli/presets, cli/stats, cli/status, config, display, takeover,
   observe/logx`（registry + 进程级 shell：调度循环、help、takeover/restore）；
 - `catalog → upstreamproxy`；
 - `cli/account → accounts, cli/framework, cli/serve, config, display, login, providerbuild`（`logout`）；
@@ -565,6 +579,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/status → appapi, cli/clicommon, cli/framework, config, daemonctl, display, routing`（`serve status`/`schedule`/`routes`/`cache`）；
 - `cli/serve → config, observe/logx`；
 - `cli/login → accounts, cli/framework, cli/serve, config, display, login, provider`；
+- `cli/mcp → accounts, cli/framework, config, display, mcp, provider, providerbuild, upstreamproxy`（`mcp list`/`mcp test`）；
 - `cli/models → cli/serve, cli/framework, accounts, catalog, config,
   configedit, display, probe, provider, providerbuild, routing, runtime/wirecap, upstreamproxy`；
 - `login → accounts, config, display, provider, observe/logx, upstreamproxy`；
@@ -711,6 +726,7 @@ type alias 和 method expression 都会被守卫计为新的引用点并判定�
 - 请求感知路由：`request-routing.md`
 - 协议转换：`protocol-conversion.md`
 - Fusion、Shadow、Cache 与观测：`fusion-shadow-cache.md`
+- MCP 网关：`mcp.md`
 - Web/API：`../web-api.md`
 
 架构边界的静态回归位于 `internal/archtest/architecture_*_contract_test.go` 套件（基于 go/ast 检查

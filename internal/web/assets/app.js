@@ -227,6 +227,7 @@ const panels = {
   accounts: document.getElementById('tab-accounts'),
   analytics: document.getElementById('tab-analytics'),
   requests: document.getElementById('tab-requests'),
+  mcp: document.getElementById('tab-mcp'),
   security: document.getElementById('tab-security'),
 };
 let activeTab = 'status';
@@ -258,7 +259,7 @@ function parseHash() {
   const raw = (location.hash || '').replace(/^#\/?/, ''); // drop leading "#"/"#/"
   const [path, queryRaw] = raw.split('?');
   const [tab, ...rest] = path.split('/');
-  if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics' || tab === 'requests' || tab === 'security') {
+  if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics' || tab === 'requests' || tab === 'mcp' || tab === 'security') {
     // decodeURIComponent so provider/section names with special chars
     // round-trip; a malformed sequence decodes to "" (treated as "no sub" ->
     // first provider / default section). For #status/<section>, sub is the
@@ -358,8 +359,19 @@ function tabHash(tab) {
   return '#' + tab;
 }
 
-function activateTab(name) {
-  activeTab = name;
+// Per-tab scroll memory. Panels switch via display, so the whole page shares
+// ONE document scroll: without this, entering a tab lets the browser clamp
+// scrollY to the incoming panel's height — leaving a long table for a short
+// page lands at an unpredictable spot and reads as a jump. The outgoing
+// tab's position is saved and the incoming tab's last position restored
+// right after the class toggle, against the stale DOM (the async data
+// refresh keeps roughly the same height; the Live ring is retained across
+// remounts for exactly this reason).
+let tabScrollMemory = {};
+function showTabPanel(name) {
+  const prevTab = activeTab;
+  const switched = prevTab !== name;
+  if (switched) tabScrollMemory[prevTab] = window.scrollY;
   for (const b of tabBtns) {
     const on = b.dataset.tab === name;
     b.classList.toggle('active', on);
@@ -368,6 +380,14 @@ function activateTab(name) {
   for (const [k, p] of Object.entries(panels)) {
     if (p) p.classList.toggle('active', k === name);
   }
+  if (switched && tabScrollMemory[name] != null) {
+    window.scrollTo(0, tabScrollMemory[name]);
+  }
+}
+
+function activateTab(name) {
+  showTabPanel(name);
+  activeTab = name;
   if (name === 'status') {
     securityStopAutoRefresh();
     accountsStopAutoRefresh();
@@ -382,6 +402,7 @@ function activateTab(name) {
   if (name === 'accounts') renderAccountsTab();
   if (name === 'analytics') renderAnalyticsTab();
   if (name === 'requests') renderRequestsTab();
+  if (name === 'mcp') renderMCPTab();
   if (name === 'security') renderSecurityTab();
   // Reflect the tab in the URL. A tab switch is a navigation the user may want
   // to Back out of, so push a history entry. Accounts adds its provider segment
@@ -458,15 +479,8 @@ window.addEventListener('hashchange', () => {
 
 // activateTab without the hash push (called from hashchange).
 function activateTabSilent(name) {
+  showTabPanel(name);
   activeTab = name;
-  for (const b of tabBtns) {
-    const on = b.dataset.tab === name;
-    b.classList.toggle('active', on);
-    b.setAttribute('aria-selected', on ? 'true' : 'false');
-  }
-  for (const [k, p] of Object.entries(panels)) {
-    if (p) p.classList.toggle('active', k === name);
-  }
   if (name === 'status') {
     securityStopAutoRefresh();
     accountsStopAutoRefresh();
@@ -481,6 +495,7 @@ function activateTabSilent(name) {
   if (name === 'accounts') renderAccountsTab();
   if (name === 'analytics') renderAnalyticsTab();
   if (name === 'requests') renderRequestsTab();
+  if (name === 'mcp') renderMCPTab();
   if (name === 'security') renderSecurityTab();
 }
 
@@ -2744,8 +2759,20 @@ let bootLiveSession = '';
 // its full re-render (scroll anchor preserved).
 function renderLiveCard(target) {
   stopLiveEvents();
-  liveRows = [];
+  // Ring retention (stale-while-revalidate, the same policy as the tab
+  // panels): completed rows survive the remount and paint immediately, so
+  // re-entering the Live section shows a full-height table instead of the
+  // "old table → connecting… stub → regrow row by row" three-stage bounce.
+  // In-flight rows are dropped: their end events were missed while
+  // disconnected and they would render as never-finishing dim rows. The
+  // session selection resumes too (it used to silently reset to All on
+  // every re-entry).
+  const resumeSession = liveSessionFilter;
+  liveRows = liveRows.filter((r) => !r.inFlight);
   liveByReq = {};
+  for (const r of liveRows) {
+    if (r.requestId) liveByReq[r.requestId] = r;
+  }
   liveDetailState.clear();
   livePendingGuards.clear();
   liveEventSeq = 0;
@@ -2779,13 +2806,25 @@ function renderLiveCard(target) {
     const v = bootLiveSession;
     bootLiveSession = '';
     onLiveSessionChange(v);
+  } else if (resumeSession) {
+    // Re-entry keeps the previous session view (hash, dropdown and panel
+    // stay in agreement); onLiveSessionChange re-renders the panel and
+    // refetches its persisted rows.
+    onLiveSessionChange(resumeSession);
+  } else if (liveRows.length) {
+    // Retained ring: paint the full table in the same task as the mount —
+    // no stub flash, the card is full-height from the first frame.
+    renderLiveTable();
   }
   // Preload recent persisted sessions so the dropdown lists them even before
-  // the first live event (best-effort: request logging may be off).
-  apiGet('/api/sessions?limit=200').then((resp) => {
-    liveSessionList = (resp && resp.sessions) || [];
-    refreshLiveSessionOptions();
-  }).catch(() => { /* request logging off / unavailable */ });
+  // the first live event (best-effort: request logging may be off). A session
+  // resume refetches the list itself — skip the duplicate.
+  if (!resumeSession) {
+    apiGet('/api/sessions?limit=200').then((resp) => {
+      liveSessionList = (resp && resp.sessions) || [];
+      refreshLiveSessionOptions();
+    }).catch(() => { /* request logging off / unavailable */ });
+  }
   liveActive = true;
   try {
     liveES = new EventSource('/api/events');
@@ -4344,8 +4383,9 @@ function selectStatusSection(name, push = true) {
 function selectStatusSectionSilent(name) {
   if (!STATUS_SECTIONS.some((s) => s.key === name)) name = 'schedule';
   statusSelected = name;
-  // Leaving the Live section closes its SSE connection (the card is remounted
-  // fresh, rows reset, on the next entry).
+  // Leaving the Live section closes its SSE connection; on re-entry the card
+  // remounts with the retained ring (completed rows survive — see
+  // renderLiveCard) and reconnects.
   if (name !== 'live') stopLiveEvents();
   document.querySelectorAll('.status-nav-item').forEach((b) => {
     b.classList.toggle('active', b.dataset.section === name);
@@ -8861,6 +8901,8 @@ async function boot() {
     activateTabSilent('analytics');
   } else if (bootTab === 'requests') {
     activateTabSilent('requests');
+  } else if (bootTab === 'mcp') {
+    activateTabSilent('mcp');
   } else if (bootTab === 'security') {
     activateTabSilent('security');
   } else {
@@ -8884,6 +8926,113 @@ async function boot() {
   // then keep it ticking on every tab (see maybeConnRefresh).
   refreshConnIndicator();
   maybeConnRefresh();
+}
+
+// ---------- MCP tab ----------
+
+// MCP gateway surface (/api/mcp): configured servers + aggregated routes with
+// live session gauges, plus per-server handshake probes (POST /api/mcp/test).
+// All renders here are user-triggered (tab activation, Refresh/Test clicks),
+// so no auto-refresh gate applies; a failed background refresh keeps the old
+// DOM and reports through setRefreshError like every other tab.
+let mcpData = null;
+// Per-server probe outcomes, keyed by server name: {state:'busy'|'ok'|'err',
+// text, tools, latencyMs}. Survives re-renders within the page session.
+const mcpProbe = new Map();
+
+async function renderMCPTab() {
+  const panel = panels.mcp;
+  // Re-entry keeps the rendered cards (the .mcp-host marker only exists after
+  // a successful first mount; a failed first activation retries the skeleton).
+  if (await retainTab(panel, '.mcp-host', loadMCP)) return;
+  panel.innerHTML = '<div class="mcp-host"><span class="hint">loading…</span></div>';
+  await loadMCP();
+}
+
+async function loadMCP() {
+  const panel = panels.mcp;
+  try {
+    mcpData = await apiGet('/api/mcp');
+    renderMCPInto();
+    setRefreshError(panel, null);
+  } catch (e) {
+    setRefreshError(panel, (e && e.message) || String(e));
+  }
+}
+
+function renderMCPInto() {
+  const host = panels.mcp && panels.mcp.querySelector('.mcp-host');
+  if (!host || !mcpData) return;
+  const servers = mcpData.servers || [];
+  const routes = mcpData.routes || [];
+  if (servers.length === 0 && routes.length === 0) {
+    host.innerHTML = buildCard('MCP', '', '<span class="hint">No MCP servers configured — add an mcp: section to config.yaml.</span>');
+    return;
+  }
+  host.innerHTML = mcpServersCardHTML(servers) + mcpRoutesCardHTML(routes);
+  const refresh = host.querySelector('[data-mcp-refresh]');
+  if (refresh) refresh.onclick = () => loadMCP();
+  for (const btn of host.querySelectorAll('[data-mcp-test]')) {
+    btn.onclick = () => mcpTestServer(btn.dataset.mcpTest);
+  }
+}
+
+function mcpServersCardHTML(servers) {
+  const rows = servers.map((s) => {
+    const enabled = s.enabled ? '<span class="badge ok">on</span>' : '<span class="badge muted">off</span>';
+    const endpoint = s.url || s.command || '';
+    const auth = s.auth === 'provider' ? `provider: ${esc(s.provider || '')}` : 'none';
+    const accounts = s.auth === 'provider' ? `<td class="num">${s.accounts || 0}</td>` : '<td class="num">—</td>';
+    const probe = mcpProbe.get(s.name);
+    let action = `<button class="btn small" data-mcp-test="${esc(s.name)}">Test</button>`;
+    if (probe && probe.state === 'busy') action = '<span class="hint">testing…</span>';
+    let resultRow = '';
+    if (probe && probe.state !== 'busy') {
+      const badge = probe.state === 'ok' ? '<span class="badge ok">ok</span>' : '<span class="badge err">fail</span>';
+      const tools = (probe.tools || []).slice(0, 8).map((t) => `<span class="badge muted">${esc(t)}</span>`).join(' ');
+      const more = (probe.tools || []).length > 8 ? ` +${probe.tools.length - 8}` : '';
+      resultRow = `<tr><td></td><td colspan="10">${badge} <span class="hint">${esc(probe.text)}${probe.latencyMs != null ? ` · ${probe.latencyMs} ms` : ''}</span> ${tools}${esc(more)}</td></tr>`;
+    }
+    const stats = `<td class="num">${s.calls || 0}</td><td class="num">${s.errors || 0}</td><td class="num">${s.calls ? (s.avg_latency_ms || 0) : '—'}</td>`;
+    return `<tr><td>${esc(s.name)}</td><td>${enabled}</td><td>${esc(s.transport)}</td><td>${auth}</td><td>${esc(endpoint)}</td>${accounts}<td class="num">${s.sessions || 0}</td>${stats}<td>${action}</td></tr>` + resultRow;
+  }).join('');
+  const table = `<table class="table"><thead><tr><th>Name</th><th>Enabled</th><th>Transport</th><th>Auth</th><th>Endpoint</th><th class="num">Accounts</th><th class="num">Sessions</th><th class="num">Calls</th><th class="num">Errors</th><th class="num">Avg ms</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  return buildCard('MCP Servers', `${servers.length} servers`, table, '', '<button class="btn small" data-mcp-refresh>Refresh</button>');
+}
+
+function mcpRoutesCardHTML(routes) {
+  if (routes.length === 0) return '';
+  const rows = routes.map((r) => {
+    const enabled = r.enabled ? '<span class="badge ok">on</span>' : '<span class="badge muted">off</span>';
+    const targets = (r.targets || []).map((t) => `${esc(t.server)} (${t.tools})`).join(' → ');
+    return `<tr><td>${esc(r.name)}</td><td>${enabled}</td><td>${targets}</td><td class="num">${r.sessions || 0}</td><td class="num">${r.calls || 0}</td><td class="num">${r.errors || 0}</td><td class="num">${r.calls ? (r.avg_latency_ms || 0) : '—'}</td></tr>`;
+  }).join('');
+  const table = `<table class="table"><thead><tr><th>Name</th><th>Enabled</th><th>Targets (failover order)</th><th class="num">Sessions</th><th class="num">Calls</th><th class="num">Errors</th><th class="num">Avg ms</th></tr></thead><tbody>${rows}</tbody></table>`;
+  return buildCard('MCP Routes', `${routes.length} routes`, table);
+}
+
+// mcpTestServer runs the handshake probe against one server and re-renders
+// (user-triggered, so the auto-refresh gate does not apply).
+async function mcpTestServer(name) {
+  if (mcpProbe.get(name)?.state === 'busy') return;
+  mcpProbe.set(name, { state: 'busy' });
+  renderMCPInto();
+  try {
+    const res = await apiPost('/api/mcp/test', { name });
+    if (res && res.ok) {
+      mcpProbe.set(name, {
+        state: 'ok',
+        text: `${res.server_name || ''} ${res.server_version || ''} (${res.protocol || ''}${res.sessionful ? ', sessionful' : ''}${res.stdio ? ', stdio' : ''})`,
+        tools: res.tools || [],
+        latencyMs: res.latency_ms,
+      });
+    } else {
+      mcpProbe.set(name, { state: 'err', text: (res && res.error) || 'probe failed', tools: [], latencyMs: res && res.latency_ms });
+    }
+  } catch (e) {
+    mcpProbe.set(name, { state: 'err', text: (e && e.message) || String(e), tools: [] });
+  }
+  renderMCPInto();
 }
 
 boot();

@@ -29,8 +29,12 @@ type GuardMark struct {
 
 // Summary is the metadata-only list API projection.
 type Summary struct {
-	Ts            string `json:"ts"`
-	RequestID     string `json:"request_id"`
+	Ts        string `json:"ts"`
+	RequestID string `json:"request_id"`
+	// Kind is the traffic class discriminator: "" = LLM forward traffic,
+	// "mcp" = MCP gateway exchange. Omitted from JSON for LLM rows
+	// (back-compat with pre-kind consumers).
+	Kind          string `json:"kind,omitempty"`
 	SessionID     string `json:"session_id"`
 	Protocol      string `json:"protocol"`
 	Method        string `json:"method"`
@@ -64,7 +68,7 @@ type Summary struct {
 // Summarize projects one full record to list-safe metadata.
 func Summarize(record Record) Summary {
 	return Summary{
-		Ts: record.Ts, RequestID: record.RequestID, SessionID: record.SessionID,
+		Ts: record.Ts, RequestID: record.RequestID, Kind: record.Kind, SessionID: record.SessionID,
 		Protocol: record.Protocol, Method: record.Method, Path: record.Path,
 		Exposed: record.Exposed, CalledModel: record.CalledModel,
 		UpstreamModel: record.UpstreamModel, Provider: record.Provider,

@@ -138,6 +138,27 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 # budgets:                  # 月度预算告警（默认关；启用需重启）：按 stats 用量 × 价格目录
 #   monthly_usd: 20         # 每分钟核对当月等价成本，越线发 "budget" live event（SSE /api/events），
 #   providers: {zhipu: 5}   # 可选 webhook_url 时附带 POST {scope, month, threshold_usd, actual_usd}
+# mcp:                      # MCP 网关：把远程 MCP 服务挂到 daemon 的 /mcp/<name> 端点，
+#                           # 客户端（.mcp.json / opencode / Codex）指向代理，凭据不出代理
+#   zhipu-search:           # provider 型：复用该 provider 账号池凭据（会话粘单账号，401 轮换一次）
+#     provider: zhipu
+#     url: https://open.bigmodel.cn/api/mcp/web_search_prime/mcp
+#     # transport: streamable（默认）| sse（legacy）| stdio（本地子进程）
+#   zhipu-vision:           # stdio：每客户端会话一个本地子进程
+#     transport: stdio
+#     provider: zhipu
+#     command: [npx, -y, "@z_ai/mcp-server"]
+#     env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU}
+#   exa:                    # auth: none：匿公共端点
+#     url: https://mcp.exa.ai/mcp
+#     auth: none            # 自定义鉴权头：auth_header: X-Agent-Plan-Key（火山 datapro 形态，apikey provider 限定）
+#                           # 静态头只允许 env:VAR 间接引用；出站秘密扫描：guard.mcp_secrets（默认 off）
+#                           # 离线 CLI：model-proxy mcp list / mcp test <name>；Web 有 MCP tab
+# mcp_routes:               # 聚合路由：同一能力多个后端，tools/call 按序 failover（会话内粘滞）
+#   web-search:             # tools/list 只暴露规范名；业务错误不 failover
+#     targets:
+#       - {mcp: zhipu-search, tools: {web_search: web_search_prime}}
+#       - {mcp: exa,          tools: {web_search: web_search_exa}}
                             # （2 次重试，失败只记日志）；providers 条目是该 provider 的独立阈值
                             # （覆盖全局）；每 (scope, 月份, 阈值) 每进程只告警一次，重启可能重复
 ```

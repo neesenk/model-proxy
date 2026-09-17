@@ -11,6 +11,7 @@ import (
 	clidoctor "model-proxy/internal/cli/doctor"
 	cliguard "model-proxy/internal/cli/guard"
 	clilogin "model-proxy/internal/cli/login"
+	climcp "model-proxy/internal/cli/mcp"
 	climodels "model-proxy/internal/cli/models"
 	clipresets "model-proxy/internal/cli/presets"
 	clistats "model-proxy/internal/cli/stats"
@@ -52,6 +53,7 @@ func NewApplication(serve func(args []string)) *Application {
 		"audit":    ProcessCommand(cliaudit.RunAudit),
 		"guard":    ProcessCommand(cliguard.RunGuard),
 		"test":     ProcessCommand(climodels.CmdTest),
+		"mcp":      ProcessCommand(climcp.RunMCP),
 		"replay":   ProcessCommand(clidiag.RunReplay),
 		"shadow":   ProcessCommand(clidiag.RunShadow),
 		"wire":     ProcessCommand(clidiag.RunWire),

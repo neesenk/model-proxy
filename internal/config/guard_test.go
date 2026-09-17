@@ -298,3 +298,20 @@ func TestAdjudicateConfigDefaults(t *testing.T) {
 		t.Errorf("queue/context/cache defaults = %d/%d/%d", a.QueueCap(), a.ContextWindow(), a.CacheCapacity())
 	}
 }
+
+func TestGuardMCPSecretsAction(t *testing.T) {
+	if got := (GuardConfig{}).MCPSecretsAction(); got != "off" {
+		t.Fatalf("default mcp_secrets = %q, want off", got)
+	}
+	if got := (GuardConfig{MCPSecrets: "block"}).MCPSecretsAction(); got != "block" {
+		t.Fatalf("mcp_secrets = %q", got)
+	}
+	cfg := &Config{
+		Listen:    "127.0.0.1:1",
+		Providers: map[string]Provider{"z": {Provider: "zhipu", OpenAIBaseURL: "https://x"}},
+		Guard:     GuardConfig{MCPSecrets: "bogus"},
+	}
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "mcp_secrets") {
+		t.Fatalf("bad action must fail validation: %v", err)
+	}
+}

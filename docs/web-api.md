@@ -163,6 +163,29 @@ KPI chip 行（同一 `analyticsRenderKpis`，tokens 同为四桶直合，含等
 
 **锁与依赖纪律**：`Proxy.pricingMu` 独立叶子锁；`pricingSnapshot`/`priceOverrides` 经 `cfgSnapshot()` RLock 读 cfg，不持 `p.mu` 调入。`internal/pricing` 不依赖 main 包的 YAML 配置、Proxy 或 Web；组合根的 `detachedPricing`（`internal/app/proxy_snapshot.go`）是 `PriceConfig → pricing.Override` 的复制/单位边界，admin 端口与 budget watcher 共用。无 stats store → `series:[]`（nil-safe）。
 
+## MCP 网关面（`GET /api/mcp`）
+
+MCP 网关（config `mcp:` / `mcp_routes:`，见 `docs/architecture/mcp.md`）的只读投影，
+供 Web UI 的 MCP 区块使用。返回 `{servers, routes}`（均无凭据值：URL/命令是 config
+形状；auth_header 名与 env 间接引用一律不投影——红线同凭据）：
+
+- `servers[]`：`{name, enabled, transport (streamable|sse|stdio), auth (provider|none),
+  provider?, url?, command? (stdio argv 拼接，展示用), accounts? (provider 型池内可用账号数),
+  sessions, calls, errors, avg_latency_ms}`——`sessions` 是绑定到该 server 的活会话表项数
+  （进程级跨代状态，咨询性 gauge）；`calls`/`errors`/`avg_latency_ms` 是 MCP 网关自己的
+  进程级调用计数（errors = status ≥ 400 的终态交换；重启归零），与 LLM metrics 统计
+  通道刻意分离（MCP 无 token，不污染模型统计面板）。
+- `routes[]`：`{name, enabled, targets: [{server, tools}], sessions, calls, errors, avg_latency_ms}`。
+
+`POST /api/mcp/test`（body `{"name": "<server>"}`）对该 server 跑一次握手探测（initialize +
+tools/list，streamable 走 HTTP、stdio 本地拉起子进程，凭据用池内首个可用账号），返回
+`{ok, error?, server_name?, server_version?, protocol?, sessionful?, stdio?, tools?, latency_ms}`；
+未知名为 404 族错误，路由名按客户端错误拒绝（聚合面不经此探测——经网关本身调用）。
+Web MCP tab 的行内 Test 按钮消费此端点。
+
+请求日志的 MCP 记录经 `GET /api/requests` 的 `kind=mcp|llm` 参数过滤（Summary 带
+`kind` 字段，LLM 行为空字符串并省略）。
+
 ## Web 运行时边界
 
 HTTP/UI transport 统一归 `internal/web`。其 `Server` 不持有 `*Proxy`，只消费

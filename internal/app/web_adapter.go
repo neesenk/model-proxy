@@ -3,6 +3,8 @@ package app
 
 import (
 	"errors"
+	"strings"
+
 	"model-proxy/internal/admin"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/fusion"
@@ -148,6 +150,63 @@ func (p *Proxy) adminPorts(
 			p.mu.RLock()
 			defer p.mu.RUnlock()
 			return p.cfg.LogFile
+		},
+		MCPState: func() admin.MCPState {
+			// One generation capture for config + pool identity; session gauges
+			// come from the process-lifetime table (cross-generation by design).
+			p.mu.RLock()
+			cfg := p.cfg
+			providers := p.providers
+			poolIndex := p.poolIndex
+			p.mu.RUnlock()
+			counts := p.mcpSessions.ServerCounts()
+			stats := p.mcpStats.Snapshot()
+			state := admin.MCPState{}
+			for name, srv := range cfg.MCP {
+				st := stats[name]
+				transport := srv.Transport
+				if transport == "" {
+					transport = "streamable"
+				}
+				accounts := 0
+				if srv.MCPAuthMode() == "provider" {
+					if ids, ok := poolIndex[srv.Provider]; ok {
+						accounts = len(ids)
+					} else if _, ok := providers[srv.Provider]; ok {
+						accounts = 1
+					}
+				}
+				state.Servers = append(state.Servers, admin.MCPServerState{
+					Name:         name,
+					Enabled:      srv.MCPEffectiveEnabled(),
+					Transport:    transport,
+					Auth:         srv.MCPAuthMode(),
+					Provider:     srv.Provider,
+					URL:          srv.URL,
+					Command:      strings.Join(srv.Command, " "),
+					Accounts:     accounts,
+					Sessions:     counts[name],
+					Calls:        st.Calls,
+					Errors:       st.Errors,
+					AvgLatencyMs: st.AvgLatencyMs,
+				})
+			}
+			for name, route := range cfg.MCPRoutes {
+				st := stats[name]
+				rs := admin.MCPRouteState{
+					Name:         name,
+					Enabled:      route.MCPRouteEffectiveEnabled(),
+					Sessions:     counts[name],
+					Calls:        st.Calls,
+					Errors:       st.Errors,
+					AvgLatencyMs: st.AvgLatencyMs,
+				}
+				for _, t := range route.Targets {
+					rs.Targets = append(rs.Targets, admin.MCPRouteTargetState{Server: t.Server, Tools: len(t.Tools)})
+				}
+				state.Routes = append(state.Routes, rs)
+			}
+			return state
 		},
 		DashboardState: func(now time.Time) admin.DashboardState {
 			// Capture reload-owned values and the Manager dashboard under the
@@ -312,6 +371,7 @@ func (p *Proxy) adminPorts(
 			runtime := p.SnapshotRuntime()
 			return runtime.Cfg, runtime.Providers
 		},
+		ProbeMCP:            p.probeMCP,
 		LocateGuardHits:     p.locateGuardHits,
 		AdjudicationBlocks:  p.adjudicationBlocks,
 		AdjudicationUnblock: p.adjudicationUnblock,

@@ -14,3 +14,7 @@ toml:
         base_url = "{{base_url}}"
         wire_api = "responses"
         requires_openai_auth = true
+mcp:
+  toml_section: 'mcp_servers."{{mcp.name}}"'
+  toml_body: |
+    url = "{{mcp.url}}"

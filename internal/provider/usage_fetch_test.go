@@ -91,6 +91,10 @@ func TestBigmodelQuotaMatrix(t *testing.T) {
 		{"auth-adjacent 401", http.StatusUnauthorized, "denied", "HTTP 401", false},
 		{"server error", http.StatusInternalServerError, "boom", "HTTP 500", false},
 		{"success wrong shape", http.StatusOK, `{"hello":"world"}`, "not zhipu quota format", false},
+		// BigModel error envelope over 200 (observed 2026-09-17 after MCP
+		// usage: their quota endpoint answered code 500 内部服务器错误):
+		// surface the upstream message instead of the misleading format claim.
+		{"upstream error envelope", http.StatusOK, `{"code":500,"msg":"内部服务器错误","success":false}`, "zhipu quota upstream error: code 500: 内部服务器错误", false},
 		{"success zhipu envelope", http.StatusOK, `{"success":true,"data":{"level":"pro","limits":[{"type":"TOKENS_LIMIT","unit":3,"percentage":40,"nextResetTime":1750000000000,"usage":100000,"currentValue":40000,"remaining":60000}]}}`, "", true},
 	}
 	for _, tc := range cases {

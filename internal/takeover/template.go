@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -55,6 +56,10 @@ type Template struct {
 	TOML   *TOMLTemplate   `yaml:"toml"`
 	Env    *EnvTemplate    `yaml:"env"`
 	Models *ModelsTemplate `yaml:"models"`
+	// MCP renders the gateway's MCP surface (config mcp: + mcp_routes:) as
+	// client MCP entries pointing at http://<listen>/mcp/<name>. Nil = the
+	// template writes no MCP config.
+	MCP *MCPTemplate `yaml:"mcp"`
 
 	// Source is where the template was loaded from: "preset" or the user
 	// templates directory. Filled by LoadTemplates, used by `takeover list`.
@@ -106,6 +111,21 @@ type ModelsTemplate struct {
 	AlsoRemove string `yaml:"also_remove"`
 }
 
+// MCPTemplate describes how the gateway's MCP servers/routes are written
+// into a client config. json renders an object at json_path with one
+// json_entry per entry (placeholders {{mcp.name}} / {{mcp.url}} / the global
+// set); toml renders one section per entry. env format is unsupported.
+type MCPTemplate struct {
+	// JSONPath is where the rendered MCP object is stored (json format).
+	JSONPath string `yaml:"json_path"`
+	// JSONEntry is the per-entry value template (a YAML map/list/scalar;
+	// placeholders substituted in every string leaf).
+	JSONEntry any `yaml:"json_entry"`
+	// TOMLSection is the per-entry section name pattern; TOMLBody its body.
+	TOMLSection string `yaml:"toml_section"`
+	TOMLBody    string `yaml:"toml_body"`
+}
+
 // DefaultTemplatesDir is the user template root; <dir>/<name>.yaml overrides
 // the preset of the same name or adds a new client.
 func DefaultTemplatesDir() string {
@@ -145,12 +165,16 @@ func ParseTemplate(name, source string, data []byte) (*Template, error) {
 	t.File = expandHome(t.File)
 	switch t.Format {
 	case "json":
-		if t.JSON == nil || len(t.JSON.Set) == 0 {
-			return nil, fmt.Errorf("template %s: format json requires non-empty json.set", name)
+		// json.set may be empty (or the whole json: block absent) when the
+		// template writes ONLY mcp entries.
+		hasSet := t.JSON != nil && len(t.JSON.Set) > 0
+		hasMCP := t.MCP != nil && t.MCP.JSONPath != ""
+		if !hasSet && !hasMCP {
+			return nil, fmt.Errorf("template %s: format json requires non-empty json.set (or an mcp: block)", name)
 		}
 	case "toml":
-		if t.TOML == nil || (len(t.TOML.TopKeys) == 0 && len(t.TOML.Sections) == 0) {
-			return nil, fmt.Errorf("template %s: format toml requires toml.top_keys and/or toml.sections", name)
+		if t.TOML == nil || (len(t.TOML.TopKeys) == 0 && len(t.TOML.Sections) == 0 && t.MCP == nil) {
+			return nil, fmt.Errorf("template %s: format toml requires toml.top_keys and/or toml.sections (or an mcp: block)", name)
 		}
 	case "env":
 		if t.Env == nil || len(t.Env.Set) == 0 {
@@ -182,6 +206,20 @@ func ParseTemplate(name, source string, data []byte) (*Template, error) {
 			}
 		default:
 			return nil, fmt.Errorf("template %s: models.shape must be opencode|pi|kimi, got %q", name, t.Models.Shape)
+		}
+	}
+	if t.MCP != nil {
+		switch t.Format {
+		case "json":
+			if t.MCP.JSONPath == "" || t.MCP.JSONEntry == nil {
+				return nil, fmt.Errorf("template %s: mcp requires json_path + json_entry for format json", name)
+			}
+		case "toml":
+			if t.MCP.TOMLSection == "" || t.MCP.TOMLBody == "" {
+				return nil, fmt.Errorf("template %s: mcp requires toml_section + toml_body for format toml", name)
+			}
+		default:
+			return nil, fmt.Errorf("template %s: mcp is unsupported for format env", name)
 		}
 	}
 	return &t, nil
@@ -288,8 +326,16 @@ type renderContext struct {
 	providerID  string
 	displayName string
 	models      []ExposedModel
+	mcp         []mcpEntry
 	meta        map[string]map[string]catalog.Model
 	routes      map[string][]configdomain.RouteTarget
+}
+
+// mcpEntry is one gateway MCP surface entry (server or route) rendered into
+// client MCP config.
+type mcpEntry struct {
+	Name string
+	URL  string
 }
 
 func (t *Template) contextFor(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) renderContext {
@@ -310,12 +356,23 @@ func (t *Template) contextFor(cfg *configdomain.Config, meta map[string]map[stri
 	if display == "" {
 		display = "model-proxy"
 	}
+	// MCP surface: every configured server and route becomes one client entry
+	// pointing at the gateway. Sorted for deterministic output.
+	mcpEntries := make([]mcpEntry, 0, len(cfg.MCP)+len(cfg.MCPRoutes))
+	for name := range cfg.MCP {
+		mcpEntries = append(mcpEntries, mcpEntry{Name: name, URL: proxyURL + "/mcp/" + name})
+	}
+	for name := range cfg.MCPRoutes {
+		mcpEntries = append(mcpEntries, mcpEntry{Name: name, URL: proxyURL + "/mcp/" + name})
+	}
+	sort.Slice(mcpEntries, func(i, j int) bool { return mcpEntries[i].Name < mcpEntries[j].Name })
 	return renderContext{
 		proxyURL:    proxyURL,
 		baseURL:     baseURL,
 		providerID:  pid,
 		displayName: display,
 		models:      ExposedModels(cfg, meta, routes),
+		mcp:         mcpEntries,
 		meta:        meta,
 		routes:      routes,
 	}
@@ -329,6 +386,14 @@ func (c renderContext) substitute(s string) string {
 		"{{provider_id}}", c.providerID,
 		"{{display_name}}", c.displayName,
 	).Replace(s)
+}
+
+// substituteMCP resolves the per-entry placeholders first, then the global set.
+func (c renderContext) substituteMCP(s string, e mcpEntry) string {
+	return c.substitute(strings.NewReplacer(
+		"{{mcp.name}}", e.Name,
+		"{{mcp.url}}", e.URL,
+	).Replace(s))
 }
 
 // Rewrite renders the template into the client config file (creating it when
@@ -368,13 +433,49 @@ func (t *Template) rewriteJSON(ctx renderContext) error {
 	if err != nil {
 		return err
 	}
-	for path, value := range t.JSON.Set {
-		setDotted(v, strings.Split(ctx.substitute(path), "."), substituteValue(value, ctx.substitute))
+	if t.JSON != nil {
+		for path, value := range t.JSON.Set {
+			setDotted(v, strings.Split(ctx.substitute(path), "."), substituteValue(value, ctx.substitute))
+		}
 	}
 	if t.Models != nil {
 		setDotted(v, strings.Split(ctx.substitute(t.Models.JSONPath), "."), t.Models.renderCollection(ctx))
 	}
+	if t.MCP != nil && len(ctx.mcp) > 0 {
+		// Empty gateway surface: leave the client's existing MCP config alone.
+		// Otherwise MERGE: entries pointing elsewhere (the user's own servers)
+		// are preserved; this proxy's surface is replaced wholesale — current
+		// entries plus stale leftovers from earlier takeovers, both identified
+		// by the /mcp/ URL under this proxy URL.
+		path := strings.Split(ctx.substitute(t.MCP.JSONPath), ".")
+		existing := dottedMap(v, path)
+		proxyPrefix := ctx.proxyURL + "/mcp/"
+		for k, e := range existing {
+			if m, ok := e.(map[string]any); ok {
+				if u, ok := m["url"].(string); ok && strings.HasPrefix(u, proxyPrefix) {
+					delete(existing, k)
+				}
+			}
+		}
+		for _, e := range ctx.mcp {
+			existing[e.Name] = substituteValue(t.MCP.JSONEntry, func(s string) string { return ctx.substituteMCP(s, e) })
+		}
+	}
 	return WriteJSONConfig(t.File, v)
+}
+
+// dottedMap navigates (creating) the map at v[path...] and returns it.
+// A non-map value in the way is replaced (the mcp writer owns that subtree).
+func dottedMap(v map[string]any, path []string) map[string]any {
+	for _, k := range path {
+		next, _ := v[k].(map[string]any)
+		if next == nil {
+			next = map[string]any{}
+			v[k] = next
+		}
+		v = next
+	}
+	return v
 }
 
 // substituteValue walks decoded YAML values, substituting placeholders in
@@ -451,6 +552,20 @@ func (t *Template) rewriteTOML(ctx renderContext) error {
 			}
 			name := substituteModel(t.Models.TOMLSection, mv, ctx)
 			body := "\n[" + name + "]\n" + substituteModel(t.Models.TOMLBody, mv, ctx) + "\n"
+			text = ReplaceOrAppendTOMLSection(text, name, body)
+		}
+	}
+	if t.MCP != nil {
+		// Drop stale proxy mcp sections first (previous takeover leftovers):
+		// any [<prefix>...] section whose body carries this proxy's /mcp/ URL,
+		// where <prefix> is the template's literal section-name prefix.
+		prefix := strings.Split(t.MCP.TOMLSection, "{{")[0]
+		if prefix != "" {
+			text = removeTOMLSectionsWithURL(text, prefix, ctx.proxyURL+"/mcp/")
+		}
+		for _, e := range ctx.mcp {
+			name := ctx.substituteMCP(t.MCP.TOMLSection, e)
+			body := "\n[" + name + "]\n" + ctx.substituteMCP(t.MCP.TOMLBody, e) + "\n"
 			text = ReplaceOrAppendTOMLSection(text, name, body)
 		}
 	}
@@ -546,7 +661,8 @@ func (t *Template) Pointer(cfg *configdomain.Config) (current, expected string) 
 	}
 	switch t.Format {
 	case "json":
-		if t.JSON.DriftPath == "" {
+		// json may be nil on mcp-only templates (no drift probe either way).
+		if t.JSON == nil || t.JSON.DriftPath == "" {
 			return "(no drift probe)", expected
 		}
 		var v map[string]any
@@ -559,6 +675,9 @@ func (t *Template) Pointer(cfg *configdomain.Config) (current, expected string) 
 		}
 		return s, expected
 	case "toml":
+		if t.TOML == nil {
+			return "(no drift probe)", expected
+		}
 		text := string(data)
 		if _, hasSelector := t.TOML.TopKeys["model_provider"]; hasSelector {
 			// codex style: drift when the top-level selector no longer points at

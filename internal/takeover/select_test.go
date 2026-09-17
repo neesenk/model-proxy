@@ -130,10 +130,10 @@ func TestResolveClients_AllCollapsesToOnePerFamily(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveClients(all): %v", err)
 	}
-	// 10 preset templates collapse to 6 families: claude, codex, gemini-cli,
-	// kimi, opencode, pi.
-	if len(clients) != 6 {
-		t.Fatalf("ResolveClients(all) = %v, want one per family (6)", namesOf(clients))
+	// 11 preset templates collapse to 7 families: claude, claude-mcp, codex,
+	// gemini-cli, kimi, opencode, pi.
+	if len(clients) != 7 {
+		t.Fatalf("ResolveClients(all) = %v, want one per family (7)", namesOf(clients))
 	}
 	seen := map[string]int{}
 	for _, c := range clients {

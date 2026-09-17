@@ -269,6 +269,10 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleLogs(w, r)
 	case p == "/api/requests" && r.Method == http.MethodGet:
 		s.handleRequestsList(w, r)
+	case p == "/api/mcp" && r.Method == http.MethodGet:
+		s.handleMCPSurface(w, r)
+	case p == "/api/mcp/test" && r.Method == http.MethodPost:
+		s.handleMCPTest(w, r)
 	case p == "/api/sessions" && r.Method == http.MethodGet:
 		s.handleSessions(w, r)
 	case p == "/api/security" && r.Method == http.MethodGet:

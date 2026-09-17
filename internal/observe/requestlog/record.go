@@ -11,8 +11,12 @@ import (
 
 // Record is one line in the JSONL request log.
 type Record struct {
-	Ts            string `json:"ts"`
-	Shadow        bool   `json:"shadow,omitempty"`
+	Ts     string `json:"ts"`
+	Shadow bool   `json:"shadow,omitempty"`
+	// Kind separates traffic classes sharing the log: empty = LLM forward
+	// traffic (the historical default, kept empty for back-compat), "mcp" =
+	// MCP gateway exchanges (/mcp/<name>).
+	Kind          string `json:"kind,omitempty"`
 	RequestID     string `json:"request_id"`
 	SessionID     string `json:"session_id"`
 	Protocol      string `json:"protocol"`
@@ -59,6 +63,7 @@ type ConversionDiagnostic struct {
 type Input struct {
 	Timestamp         time.Time
 	StartedAt         time.Time
+	Kind              string
 	RequestID         string
 	SessionID         string
 	Protocol          string
@@ -102,6 +107,7 @@ func (l *Logger) BuildRecord(in Input) *Record {
 	rec := &Record{
 		Ts:              now.UTC().Format(time.RFC3339),
 		Shadow:          strings.HasPrefix(in.RequestID, "shadow-"),
+		Kind:            in.Kind,
 		RequestID:       in.RequestID,
 		SessionID:       in.SessionID,
 		Protocol:        in.Protocol,
@@ -164,6 +170,10 @@ func appendRecordLine(dst []byte, rec *Record) []byte {
 	dst = appendJSONString(dst, rec.Ts)
 	if rec.Shadow {
 		dst = append(dst, `,"shadow":true`...)
+	}
+	if rec.Kind != "" {
+		dst = append(dst, `,"kind":`...)
+		dst = appendJSONString(dst, rec.Kind)
 	}
 	dst = append(dst, `,"request_id":`...)
 	dst = appendJSONString(dst, rec.RequestID)

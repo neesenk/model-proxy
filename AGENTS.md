@@ -26,6 +26,7 @@ model-proxy 是单进程模块化单体：根 `package main` 只负责进程入�
 | request routing、catalog、implicit routes | `docs/architecture/request-routing.md` |
 | 协议转换、Provider、凭据/login | `docs/architecture/protocol-conversion.md`、`internal/provider/AGENTS.md`、`docs/backend-contracts.md` |
 | Fusion、Shadow、Cache、request log、live | `docs/architecture/fusion-shadow-cache.md` |
+| MCP 网关（mcp: 配置、/mcp/ 端点、会话粘滞） | `docs/architecture/mcp.md`；设计背景与实测见 `docs/research/design-mcp-gateway.md` |
 | Web/API/UI | `docs/web-api.md`；前端硬规则另读 `internal/web/assets/AGENTS.md`，页面/组件实现细节见 `docs/frontend.md` |
 | CLI、serve、daemon、进程生命周期 | `CLI.md`、`docs/architecture/overview.md`、`docs/engineering/pitfalls.md` |
 | 测试、覆盖率、构建、架构 guard | `docs/engineering/testing.md` |

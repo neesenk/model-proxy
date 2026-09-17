@@ -40,3 +40,14 @@ Status 5s（整页重渲染，双门）、Analytics 30s（仅 live 窗口）、S
 ## 窄屏断点
 
 **窄屏是系统断点而非逐案修补**：≤720px（topbar 两行 + tabs 横向滚动、status/accounts 单列、表头停 sticky、`.card-body` 横向滚动、Dashboard KPI 6→2 列）与 ≤560px（`.row-actions` 换行、更紧的页面 gutter）两层，见 styles.css 的 responsive 段；新增布局必须说明这两个断点下的行为（表格靠 `.card-body` 横向滚动，不隐藏列）。uPlot 图表随窗口 resize 由防抖钩子重设宽度（app.js `chartResizeTimer`）。
+
+## MCP 页
+
+MCP tab（`#mcp`，无子段/hash 参数）展示网关面（`/api/mcp`）：servers 卡（Name/Enabled/
+Transport/Auth/Endpoint/Accounts/Sessions + 行内 Test 按钮）与 routes 卡（Name/Enabled/
+Targets 链/Sessions）。Test 触发 `POST /api/mcp/test`（握手探测），结果行内渲染在该 server
+行正下方（ok/fail badge + serverInfo/延迟 + 工具徽章，超 8 个折叠计数）。**全部渲染为用户
+触发**（tab 激活经 `retainTab` 重入守卫、Refresh/Test 点击），无自动刷新 tick，因此不适用
+deferAutoRefresh 双门；后台刷新失败保留旧 DOM 走 `setRefreshError`。结构标记 `.mcp-host`
+（无视觉样式，已登记 registry 的 CLASS_EXEMPT）；表格/徽章/按钮全部复用既有
+`.table`/`.card`/`.badge`/`.btn` 模式，无新增样式。

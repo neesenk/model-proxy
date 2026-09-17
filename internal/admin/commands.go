@@ -176,6 +176,16 @@ func (s *Service) AddAccount(
 	}, nil
 }
 
+// ProbeMCP delegates the MCP server handshake to the composition-root port
+// (404-style error for unknown/route names, both handled by the web layer as
+// bad-request rather than transport failure).
+func (s *Service) ProbeMCP(ctx context.Context, name string) (appapi.MCPProbeResult, error) {
+	if s.ports.ProbeMCP == nil {
+		return appapi.MCPProbeResult{}, fmt.Errorf("mcp probe is not available")
+	}
+	return s.ports.ProbeMCP(ctx, name)
+}
+
 func (s *Service) ProbeAccount(
 	ctx context.Context,
 	name string,

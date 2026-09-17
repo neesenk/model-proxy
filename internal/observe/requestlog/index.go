@@ -182,6 +182,7 @@ func (x *Indexer) ensureColumns() error {
 	defer rows.Close()
 	hasTTFT := false
 	hasTurnKey := false
+	hasKind := false
 	for rows.Next() {
 		var cid, notnull, pk int
 		var name, ctype string
@@ -194,6 +195,8 @@ func (x *Indexer) ensureColumns() error {
 			hasTTFT = true
 		case "turn_key":
 			hasTurnKey = true
+		case "kind":
+			hasKind = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -206,6 +209,11 @@ func (x *Indexer) ensureColumns() error {
 	}
 	if !hasTurnKey {
 		if _, err := x.db.Exec(`ALTER TABLE records ADD COLUMN turn_key TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if !hasKind {
+		if _, err := x.db.Exec(`ALTER TABLE records ADD COLUMN kind TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
 	}
@@ -481,9 +489,9 @@ func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int6
 	stmt, err := tx.Prepare(`INSERT INTO records
 		(request_id, ts, ts_ms, session_id, agent, protocol, method, path,
 		 called_model, upstream_model, exposed, provider, attempt, status,
-		 latency_ms, ttft_ms, request_size, response_size, turn_key, shadow,
+		 latency_ms, ttft_ms, request_size, response_size, turn_key, kind, shadow,
 		 input, output, cache_read, cache_creation, file, "offset", length)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -499,7 +507,7 @@ func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int6
 			row.record.CalledModel, row.record.UpstreamModel, row.record.Exposed,
 			row.record.Provider, row.record.Attempt, row.record.Status,
 			row.record.LatencyMs, row.record.TTFTMs, row.record.RequestSize, row.record.ResponseSize,
-			row.record.TurnKey, shadow, row.usage.Input, row.usage.Output, row.usage.CacheRead,
+			row.record.TurnKey, row.record.Kind, shadow, row.usage.Input, row.usage.Output, row.usage.CacheRead,
 			row.usage.CacheCreation, row.file, row.offset, row.length,
 		); err != nil {
 			return err
@@ -559,6 +567,12 @@ func filterSQL(filter Filter) (string, []any) {
 	case "exclude":
 		clauses = append(clauses, `shadow = 0`)
 	}
+	switch filter.Kind {
+	case "mcp":
+		clauses = append(clauses, `kind = 'mcp'`)
+	case "llm":
+		clauses = append(clauses, `kind = ''`)
+	}
 	if !filter.From.IsZero() || !filter.To.IsZero() {
 		clauses = append(clauses, `ts_ms > 0`)
 		if !filter.From.IsZero() {
@@ -588,7 +602,7 @@ func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) 
 	where, args := filterSQL(filter)
 	query := `SELECT ts, request_id, session_id, protocol, method, path, exposed,
 		called_model, upstream_model, provider, agent, attempt, status, latency_ms, ttft_ms,
-		request_size, response_size, turn_key, input, output, cache_read, cache_creation, shadow
+		request_size, response_size, turn_key, kind, input, output, cache_read, cache_creation, shadow
 		FROM records` + where + ` ORDER BY ts DESC, rowid DESC`
 	if filter.Limit > 0 {
 		query += ` LIMIT ?`
@@ -609,7 +623,7 @@ func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) 
 			&summary.Method, &summary.Path, &summary.Exposed, &summary.CalledModel,
 			&summary.UpstreamModel, &summary.Provider, &summary.Agent, &summary.Attempt,
 			&summary.Status, &summary.LatencyMs, &summary.TTFTMs, &summary.RequestSize, &summary.ResponseSize,
-			&summary.TurnKey, &summary.Input, &summary.Output, &summary.CacheRead, &summary.CacheCreation,
+			&summary.TurnKey, &summary.Kind, &summary.Input, &summary.Output, &summary.CacheRead, &summary.CacheCreation,
 			&shadow,
 		); err != nil {
 			_ = rows.Close()

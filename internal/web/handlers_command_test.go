@@ -32,6 +32,7 @@ type commandFake struct {
 	remove       func(string, string) (appapi.MutationResult, error)
 	begin        func(context.Context, string) (appapi.LoginStart, error)
 	refreshMdls  func(context.Context, string) (appapi.ModelsRefreshResult, error)
+	probeMCP     func(context.Context, string) (appapi.MCPProbeResult, error)
 }
 
 func (fake *commandFake) ResetStats() error {
@@ -646,6 +647,13 @@ func (fake *commandFake) RefreshModels(ctx context.Context, provider string) (ap
 		return fake.refreshMdls(ctx, provider)
 	}
 	return appapi.ModelsRefreshResult{Provider: provider}, nil
+}
+
+func (fake *commandFake) ProbeMCP(ctx context.Context, name string) (appapi.MCPProbeResult, error) {
+	if fake.probeMCP != nil {
+		return fake.probeMCP(ctx, name)
+	}
+	return appapi.MCPProbeResult{OK: true, ServerName: "fake", Tools: []string{"search"}}, nil
 }
 
 func TestModelsRefreshReceivesRequestCancellation(t *testing.T) {

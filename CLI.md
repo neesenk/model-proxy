@@ -895,6 +895,38 @@ test <model> [--config PATH]
 
 ---
 
+## 13b. `mcp` — MCP 网关服务器管理（离线，不需 daemon）
+
+```
+mcp [list] [--config PATH]
+mcp test <name> [--config PATH]
+```
+
+管理 config `mcp:` 节声明的 MCP 网关服务器（daemon 经 `/mcp/<name>` 暴露，见
+`docs/research/design-mcp-gateway.md`）。实现：`internal/cli/mcp`；握手（initialize +
+notifications/initialized + tools/list，JSON 与 SSE 分帧响应都支持）归
+`internal/mcp.Probe`。出站走全局代理链（与 `test` 相同的维护类调用语义）。
+
+### `mcp list` stdout
+
+无配置时一行 `no mcp servers configured — add an mcp: section to config.yaml`；否则
+`NAME / ENABLED / AUTH / PROVIDER / URL` 表（按名排序，disabled 的 ENABLED 列
+为暗色 `no`）。有 `mcp_routes:` 时追加 `ROUTE / ENABLED / TARGETS (failover order)` 表
+（成员以 `server (N tools) → …` 链式展示）。
+
+### `mcp test <name>` stdout
+
+成功：`✓ <name> → <serverInfo.name> <version> (<protocol>, sessionful|stateless|stdio)[ via <account>] — N tools (<latency>)`（绿）+ 缩进工具名列表（超过 12 个折叠为 `… and N more`）。provider 型服务器用池内第一个可用账号注入凭据（`auth_header` 自定义头经 `provider.KeyReporter` 取原始 key）；`auth: none` 不注入、不显示 `via`。`transport: stdio` 服务器在**本地拉起子进程**探测（env 解析与 daemon 相同：
+`${account.api_key}`/`env:VAR`），结果显示 `stdio` 标记。
+<name> 为路由名时不执行：stderr 提示路由是聚合面，引导改测成员 server 或经 daemon 的 `/mcp/<route>` 探测（exit 1）。
+
+### 退出码
+
+0 = 握手成功；1 = 未知服务器名、服务器 disabled、无已登录账号、OAuth provider
+配了自定义 auth_header、或上游 HTTP/RPC 错误（stderr `✗ …` 红）。
+
+---
+
 ## 14. `pin` / `unpin` — 手动钉住路由 provider（热切换，需 daemon + web.enabled）
 
 ```

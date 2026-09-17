@@ -425,7 +425,10 @@ func CheckTakeoverDrift(cfg *configdomain.Config, bakDir, templatesDir string) [
 		}
 		d.Taken = true
 		d.Current, d.Expected = c.Template.Pointer(cfg)
-		d.OK = d.Current == d.Expected
+		// A template without a drift probe is exempt from drift detection —
+		// there is nothing to compare, and reporting it as drifted would be a
+		// false alarm right after every takeover (mcp-only templates).
+		d.OK = d.Current == d.Expected || d.Current == "(no drift probe)"
 		out = append(out, d)
 	}
 	return out

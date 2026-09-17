@@ -60,6 +60,16 @@ type Config struct {
 	Guard GuardConfig `yaml:"guard"`
 	// Budgets configures personal monthly equivalent-cost alerts.
 	Budgets BudgetsConfig `yaml:"budgets"`
+	// MCP declares remote MCP (Model Context Protocol) backends exposed by
+	// the gateway at /mcp/<name>: provider-backed servers reuse the
+	// provider's credential pool, `auth: none` servers are anonymous public
+	// endpoints. Empty/missing = the /mcp/ surface is off. See
+	// docs/research/design-mcp-gateway.md.
+	MCP map[string]MCPServer `yaml:"mcp"`
+	// MCPRoutes declares aggregated MCP routes (mcp_routes:): one canonical
+	// tool surface over several mcp: servers with tools/call failover. Shares
+	// the /mcp/<name> namespace with MCP (collisions are a validation error).
+	MCPRoutes map[string]MCPRoute `yaml:"mcp_routes"`
 	// MaxRequestBodyBytes caps the accepted inbound request body; larger
 	// bodies are rejected with 413 before any routing work, bounding per-
 	// request memory (the body is fully buffered for routing/conversion).
@@ -165,6 +175,12 @@ type GuardConfig struct {
 	// pattern hits (rule-table/custom secret patterns and strong
 	// sensitive-path hits). Default off; see AdjudicateConfig.
 	Adjudicate AdjudicateConfig `yaml:"adjudicate"`
+	// MCPSecrets gates the outbound secret scan on MCP gateway request bodies
+	// (tools/call arguments can carry pasted credentials toward third-party
+	// MCP servers). Same action set as secrets (log|redact|block|off) but
+	// DEFAULT OFF: MCP is opt-in surface, scanning every tool call has a
+	// cost, and provider-backed servers already hold the credential.
+	MCPSecrets string `yaml:"mcp_secrets"`
 }
 
 // AdjudicateConfig is the guard.adjudicate block: instead of recording a
@@ -290,6 +306,15 @@ func (g GuardConfig) SecretsAction() string {
 		return "log"
 	}
 	return g.Secrets
+}
+
+// MCPSecretsAction returns the effective MCP-body secret action, defaulting
+// to "off" (unlike the LLM-path secrets default log — see MCPSecrets).
+func (g GuardConfig) MCPSecretsAction() string {
+	if g.MCPSecrets == "" {
+		return "off"
+	}
+	return g.MCPSecrets
 }
 
 // KnownSecretsEnabled reports whether exact-value matching of proxy-managed
@@ -1045,6 +1070,10 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		Prices              map[string]PriceConfig  `yaml:"prices"`
 		Guard               GuardConfig             `yaml:"guard"`
 		Budgets             BudgetsConfig           `yaml:"budgets"`
+		// Must mirror Config.MCP (same silent-drop trap as the shadow knobs).
+		MCP map[string]MCPServer `yaml:"mcp"`
+		// Must mirror Config.MCPRoutes.
+		MCPRoutes map[string]MCPRoute `yaml:"mcp_routes"`
 		// Must mirror Config.MaxRequestBodyBytes (same silent-drop trap as the
 		// shadow knobs above).
 		MaxRequestBodyBytes int64            `yaml:"max_request_body_bytes"`
@@ -1100,6 +1129,8 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.Pricing = raw.Pricing
 	cfg.Prices = raw.Prices
 	cfg.Guard = raw.Guard
+	cfg.MCP = raw.MCP
+	cfg.MCPRoutes = raw.MCPRoutes
 	// Normalize guard.extra_paths: drop exact duplicates (blank entries are a
 	// validation error in validate, not silently dropped).
 	if len(cfg.Guard.ExtraPaths) > 1 {
@@ -1403,6 +1434,15 @@ func (c *Config) validate() error {
 	if c.ShadowMaxConcurrent < 0 {
 		return fmt.Errorf("shadow_max_concurrent %d must be >= 0", c.ShadowMaxConcurrent)
 	}
+	// mcp: gateway server declarations (names, urls, auth combinations,
+	// provider references, custom auth headers).
+	if err := c.validateMCP(); err != nil {
+		return err
+	}
+	// mcp_routes: aggregated tool surfaces over mcp: servers.
+	if err := c.validateMCPRoutes(); err != nil {
+		return err
+	}
 	// guard.secrets: closed action set (default log).
 	switch c.Guard.SecretsAction() {
 	case "log", "redact", "block", "off":
@@ -1416,6 +1456,12 @@ func (c *Config) validate() error {
 	case "log", "block", "off":
 	default:
 		return fmt.Errorf("guard.paths %q invalid — use log, block, or off (redact is not supported for paths: rewriting a path would corrupt legitimate coding work)", c.Guard.Paths)
+	}
+	// guard.mcp_secrets: closed action set (default off).
+	switch c.Guard.MCPSecretsAction() {
+	case "log", "redact", "block", "off":
+	default:
+		return fmt.Errorf("guard.mcp_secrets %q invalid — use log, redact, block, or off", c.Guard.MCPSecrets)
 	}
 	// guard.audit_path: when set it must be absolute (unset = the caller
 	// derives the default from the home dir, see AuditPathValue).

@@ -78,6 +78,7 @@ const CLASS_EXEMPT = {
   'live-pop-close': 'Live 弹层关闭按钮钩子，样式走 .btn',
   'live-pop-meta': 'Live 弹层 meta 行钩子，样式走 .modal-head .meta',
   'logs': 'Logs 视图标记（样式由 status-logs-active 状态类承载）',
+  'mcp-host': 'MCP 页 retainTab 重入守卫的结构标记，无视觉样式',
   'model-caps-refresh': 'Test All 刷新按钮的 JS 绑定钩子，样式走 .btn',
   'prov-acct-c': '账号 tint 槽位动态前缀（prov-acct-c${slot}）',
   'prov-table': '复合 .table 的语义标记，样式走 .table',
@@ -195,7 +196,7 @@ test('#id selectors are page-host structural anchors only', () => {
   // Component styling must ride classes — an #id rule cannot be reused and
   // is exactly where one-off implementations breed.
   const ANCHORS = new Set([
-    'tab-config', 'tab-security', 'sec-kpis', 'sec-rules', 'sec-rules-body',
+    'tab-config', 'tab-security', 'tab-mcp', 'sec-kpis', 'sec-rules', 'sec-rules-body',
     'req-table', 'live-table', 'live-session-panel', 'confirm-challenge',
     'req-session', 'req-provider', 'req-model', 'acc-msg',
   ]);

@@ -278,3 +278,38 @@ func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
 // kimi-cli's LLMModel schema REQUIRES max_context_size (no default — omitting
 // it fails config validation), so the value is the same conservative default
 // the proxy uses everywhere else, taken from its routing-package owner.
+
+// removeTOMLSectionsWithURL drops every [section] whose header starts with
+// the given literal prefix (e.g. `mcp_servers."`) AND whose body contains
+// needle (a URL fragment). Used by the mcp takeover writer to clean stale
+// proxy-managed sections before re-rendering the current surface, without
+// touching sections that point elsewhere.
+func removeTOMLSectionsWithURL(text, headerPrefix, needle string) string {
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); {
+		trimmed := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") &&
+			strings.HasPrefix(trimmed[1:len(trimmed)-1], headerPrefix) {
+			// Section runs until the next header line (or EOF).
+			end := len(lines)
+			contains := false
+			for j := i + 1; j < len(lines); j++ {
+				if strings.HasPrefix(strings.TrimSpace(lines[j]), "[") {
+					end = j
+					break
+				}
+				if strings.Contains(lines[j], needle) {
+					contains = true
+				}
+			}
+			if contains {
+				i = end
+				continue
+			}
+		}
+		out = append(out, lines[i])
+		i++
+	}
+	return strings.Join(out, "\n")
+}

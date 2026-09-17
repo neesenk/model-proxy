@@ -308,3 +308,29 @@ func TestUsageScannerResponsesWireShapes(t *testing.T) {
 		}
 	}
 }
+
+func TestMCPStats(t *testing.T) {
+	s := NewMCPStats()
+	s.Record("web-search", 200, 100)
+	s.Record("web-search", 200, 300)
+	s.Record("web-search", 502, 50)
+	s.Record("exa", 200, 10)
+	snap := s.Snapshot()
+	ws := snap["web-search"]
+	if ws.Calls != 3 || ws.Errors != 1 || ws.AvgLatencyMs != 150 {
+		t.Fatalf("web-search = %+v", ws)
+	}
+	if snap["exa"].Calls != 1 || snap["exa"].Errors != 0 {
+		t.Fatalf("exa = %+v", snap["exa"])
+	}
+	if ws.LastCallAt == 0 {
+		t.Fatal("LastCallAt not set")
+	}
+	// nil receiver and empty name are safe no-ops.
+	var nilStats *MCPStats
+	nilStats.Record("x", 200, 1)
+	s.Record("", 200, 1)
+	if len(s.Snapshot()) != 2 {
+		t.Fatalf("snapshot = %v", s.Snapshot())
+	}
+}

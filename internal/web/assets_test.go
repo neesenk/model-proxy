@@ -689,6 +689,46 @@ func TestWebAssetsRequestsVirtualScrollContract(t *testing.T) {
 // request, and a 404/notLogged must render as a neutral hint, not a red error.
 // The popover has a single ensure/fetch path shared by the All/live table and
 // the session panel.
+// TestWebAssetsTabSwitchStabilityContract pins the tab-switch stability
+// wiring: entering a tab restores that tab's last scroll position (panels
+// share ONE document scroll — display toggling lets the browser clamp
+// scrollY to the incoming panel's height), and re-entering Status→Live
+// keeps the card's height stable: the live ring survives the remount
+// (in-flight rows dropped — their end events were missed while
+// disconnected), the retained ring paints in the mount task, the session
+// selection resumes, and the empty-ring placeholder reserves height in CSS.
+func TestWebAssetsTabSwitchStabilityContract(t *testing.T) {
+	js := mustWebAsset(t, "app.js")
+	for _, want := range []string{
+		"let tabScrollMemory = {};",
+		"tabScrollMemory[prevTab] = window.scrollY;",
+		"window.scrollTo(0, tabScrollMemory[name]);",
+		"showTabPanel(name);",
+		"liveRows = liveRows.filter((r) => !r.inFlight);",
+		"const resumeSession = liveSessionFilter;",
+		"onLiveSessionChange(resumeSession);",
+		"} else if (liveRows.length) {",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q", want)
+		}
+	}
+	css := mustWebAsset(t, "styles.css")
+	for _, want := range []string{
+		"#live-table { min-height: 180px; }",
+		// Entry fade: opacity-only (never transform/height — the panels hold
+		// sticky theads and the sticky session view) and guarded by
+		// prefers-reduced-motion.
+		"animation: panel-in 140ms ease-out;",
+		"@media (prefers-reduced-motion: no-preference)",
+		"@keyframes panel-in { from { opacity: 0; } }",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("styles.css missing %q", want)
+		}
+	}
+}
+
 func TestWebAssetsLiveDetailErrorTerminal(t *testing.T) {
 	js := mustWebAsset(t, "app.js")
 	for _, want := range []string{
@@ -708,5 +748,41 @@ func TestWebAssetsLiveDetailErrorTerminal(t *testing.T) {
 	}
 	if got := strings.Count(js, "detailFetchState(e.status, e.message)"); got != 1 {
 		t.Errorf("app.js should normalize live detail fetch failures with detailFetchState, got %d", got)
+	}
+}
+
+// TestWebAssetsMCPTabContract pins the MCP tab's five wiring points — the
+// regression chain that produced an empty page: panel map entry, both tab
+// application call sites, the parseHash whitelist, and the boot chain, plus
+// the index.html button/section. Any one missing = silent empty tab.
+func TestWebAssetsMCPTabContract(t *testing.T) {
+	indexHTML := mustWebAsset(t, "index.html")
+	js := mustWebAsset(t, "app.js")
+	for _, want := range []string{
+		`data-tab="mcp"`,
+		`id="tab-mcp"`,
+	} {
+		if !strings.Contains(indexHTML, want) {
+			t.Errorf("index.html missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		`mcp: document.getElementById('tab-mcp'),`, // panels map entry
+		`if (name === 'mcp') renderMCPTab();`,      // both activate call sites
+		`tab === 'mcp' || tab === 'security'`,      // parseHash whitelist
+		`} else if (bootTab === 'mcp') {`,          // boot chain branch
+		`async function renderMCPTab()`,            // renderer exists
+		`apiGet('/api/mcp')`,                       // read surface
+		`apiPost('/api/mcp/test', { name })`,       // probe surface
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q", want)
+		}
+	}
+	// Both activateTab and activateTabSilent must call the renderer (two
+	// application points, user click + hash navigation).
+	if strings.Count(js, `if (name === 'mcp') renderMCPTab();`) != 2 {
+		t.Errorf("renderMCPTab call sites = %d, want exactly 2 (activateTab + activateTabSilent)",
+			strings.Count(js, `if (name === 'mcp') renderMCPTab();`))
 	}
 }

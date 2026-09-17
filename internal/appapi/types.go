@@ -115,6 +115,51 @@ type AgentModelUsage struct {
 }
 
 // Pin is the public projection of one manual route pin.
+// MCPSurface is the JSON-safe projection of the MCP gateway: configured
+// servers and aggregated routes plus live session gauges. Credential-adjacent
+// config (auth_header names, env indirections) and URLs are config shape,
+// never secret VALUES (the credential red line applies: no keys, no header
+// values, no resolved env).
+type MCPSurface struct {
+	Servers []MCPServerInfo `json:"servers"`
+	Routes  []MCPRouteInfo  `json:"routes"`
+}
+
+// MCPServerInfo is one mcp: server entry plus its live session gauge.
+type MCPServerInfo struct {
+	Name      string `json:"name"`
+	Enabled   bool   `json:"enabled"`
+	Transport string `json:"transport"` // streamable | sse | stdio
+	Auth      string `json:"auth"`      // provider | none
+	Provider  string `json:"provider,omitempty"`
+	URL       string `json:"url,omitempty"`
+	Command   string `json:"command,omitempty"`  // stdio only, argv joined
+	Accounts  int    `json:"accounts,omitempty"` // live pool accounts (provider-backed)
+	Sessions  int    `json:"sessions"`           // live gateway sessions bound to this server
+	// Process-lifetime call counters from the MCP gateway's own stats channel
+	// (not the LLM metrics store — MCP carries no tokens).
+	Calls        uint64 `json:"calls"`
+	Errors       uint64 `json:"errors"`         // terminal exchanges with status >= 400
+	AvgLatencyMs uint64 `json:"avg_latency_ms"` // mean wall-clock ms per terminal exchange
+}
+
+// MCPRouteInfo is one mcp_routes: entry plus its live session gauge.
+type MCPRouteInfo struct {
+	Name         string               `json:"name"`
+	Enabled      bool                 `json:"enabled"`
+	Targets      []MCPRouteTargetInfo `json:"targets"`
+	Sessions     int                  `json:"sessions"`
+	Calls        uint64               `json:"calls"`
+	Errors       uint64               `json:"errors"`
+	AvgLatencyMs uint64               `json:"avg_latency_ms"`
+}
+
+// MCPRouteTargetInfo is one route target (member server + tool count).
+type MCPRouteTargetInfo struct {
+	Server string `json:"server"`
+	Tools  int    `json:"tools"`
+}
+
 type Pin struct {
 	Route     string
 	Provider  string
@@ -629,6 +674,9 @@ type ReadAPI interface {
 	// Presets lists the provider preset catalog (internal/presets) for the
 	// web Add-Provider wizard.
 	Presets() []presets.Preset
+	// MCPSurface projects the MCP gateway (config mcp:/mcp_routes: plus live
+	// session gauges) for the /api/mcp read endpoint.
+	MCPSurface() MCPSurface
 }
 
 // CommandAPI is the complete mutation/active-probe capability consumed by the
@@ -670,6 +718,26 @@ type CommandAPI interface {
 	// outage never wipes models:, the list is written unvalidated with a
 	// warning instead.
 	RefreshModels(ctx context.Context, provider string) (ModelsRefreshResult, error)
+	// ProbeMCP runs the MCP handshake (initialize + tools/list) against one
+	// mcp: server through its configured credentials — the daemon twin of
+	// `model-proxy mcp test <name>`. Route names are rejected (aggregated
+	// surfaces are probed through the gateway, not here).
+	ProbeMCP(ctx context.Context, name string) (MCPProbeResult, error)
+}
+
+// MCPProbeResult is one mcp: server handshake outcome (the /api/mcp/test
+// response). OK=false carries Error; tool names only (no schemas, no
+// credentials anywhere).
+type MCPProbeResult struct {
+	OK            bool     `json:"ok"`
+	Error         string   `json:"error,omitempty"`
+	ServerName    string   `json:"server_name,omitempty"`
+	ServerVersion string   `json:"server_version,omitempty"`
+	Protocol      string   `json:"protocol,omitempty"`
+	Sessionful    bool     `json:"sessionful,omitempty"`
+	Stdio         bool     `json:"stdio,omitempty"`
+	Tools         []string `json:"tools,omitempty"`
+	LatencyMs     int64    `json:"latency_ms"`
 }
 
 // RequirePorts validates that both application ports are present. It is

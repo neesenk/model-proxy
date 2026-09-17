@@ -109,6 +109,12 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 	}
 	proto := string(protocol.ForPath(r.URL.Path))
 	if proto == "" {
+		if strings.HasPrefix(r.URL.Path, "/mcp/") {
+			// MCP gateway surface (mcp: config). Forward-side auth has already
+			// run above; unknown names answer 404 inside serveMCP.
+			p.serveMCP(w, r)
+			return
+		}
 		// Non-LLM path (browser well-known probes, favicon, stray GETs): answer
 		// 502 WITHOUT a live event. The Live monitor is an LLM-request view; only
 		// /v1/messages, /v1/chat/completions and /v1/responses produce events.

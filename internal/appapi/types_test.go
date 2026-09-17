@@ -106,6 +106,7 @@ func (fakeCommands) BeginLogin(context.Context, string) (LoginStart, error) {
 }
 
 func (fakeReads) Presets() []presets.Preset       { return nil }
+func (fakeReads) MCPSurface() MCPSurface          { return MCPSurface{} }
 func (fakeReads) SecurityBlocks() []SecurityBlock { return nil }
 func (fakeReads) SecurityAdjudications() SecurityAdjudicationFeed {
 	return SecurityAdjudicationFeed{Adjudications: []SecurityAdjudication{}}
@@ -115,4 +116,8 @@ func (fakeCommands) SecurityUnblock(string) error { return nil }
 func (fakeCommands) AddPreset(string) ([]string, string, error) { return nil, "", nil }
 func (fakeCommands) RefreshModels(context.Context, string) (ModelsRefreshResult, error) {
 	return ModelsRefreshResult{}, nil
+}
+
+func (fakeCommands) ProbeMCP(context.Context, string) (MCPProbeResult, error) {
+	return MCPProbeResult{}, nil
 }

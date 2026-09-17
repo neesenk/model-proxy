@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +50,7 @@ type readAPIStub struct {
 	adjudicationStats appapi.SecurityAdjudicationStats
 	config            func() (appapi.ConfigDocument, error)
 	presets           []presets.Preset
+	mcpSurface        appapi.MCPSurface
 	models            appapi.ModelsDocument
 }
 
@@ -1539,7 +1541,8 @@ func TestAdminAuthDisabledKeepsLoopbackTrust(t *testing.T) {
 	}
 }
 
-func (r *readAPIStub) Presets() []presets.Preset { return r.presets }
+func (r *readAPIStub) Presets() []presets.Preset     { return r.presets }
+func (r *readAPIStub) MCPSurface() appapi.MCPSurface { return r.mcpSurface }
 
 func (r *readAPIStub) ModelsDocument() appapi.ModelsDocument {
 	if r.models.Providers == nil {
@@ -1749,5 +1752,68 @@ func TestReadAnalyticsAllTimeClampsToEarliestBucket(t *testing.T) {
 	decodeReadJSON(t, resp, &out)
 	if resp.Code != http.StatusOK || out.From != 0 || len(windows) == 0 || windows[0] != 0 {
 		t.Fatalf("empty-store all-time = (%d, from %d, queries %v)", resp.Code, out.From, windows)
+	}
+}
+
+// TestHandleMCPSurface serves the configured servers/routes projection with
+// live gauges; TestHandleMCPTest covers the probe command path.
+func TestHandleMCPSurface(t *testing.T) {
+	s := newReadServer(t, &readAPIStub{mcpSurface: appapi.MCPSurface{
+		Servers: []appapi.MCPServerInfo{
+			{Name: "zhipu-search", Enabled: true, Transport: "streamable", Auth: "provider", Provider: "zhipu", URL: "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp", Accounts: 2, Sessions: 3},
+			{Name: "exa", Enabled: true, Transport: "streamable", Auth: "none", URL: "https://mcp.exa.ai/mcp"},
+		},
+		Routes: []appapi.MCPRouteInfo{
+			{Name: "web-search", Enabled: true, Sessions: 1, Targets: []appapi.MCPRouteTargetInfo{{Server: "zhipu-search", Tools: 1}, {Server: "exa", Tools: 1}}},
+		},
+	}})
+	req := httptest.NewRequest(http.MethodGet, "/api/mcp", nil)
+	rec := httptest.NewRecorder()
+	s.serveAPI(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body)
+	}
+	var out appapi.MCPSurface
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Servers) != 2 || out.Servers[0].Name != "zhipu-search" || out.Servers[0].Sessions != 3 || out.Servers[0].Accounts != 2 {
+		t.Fatalf("servers = %+v", out.Servers)
+	}
+	if len(out.Routes) != 1 || len(out.Routes[0].Targets) != 2 || out.Routes[0].Sessions != 1 {
+		t.Fatalf("routes = %+v", out.Routes)
+	}
+}
+
+func TestHandleMCPTest(t *testing.T) {
+	var gotName string
+	s := newReadServerWithCommands(t, &readAPIStub{}, &commandFake{
+		probeMCP: func(_ context.Context, name string) (appapi.MCPProbeResult, error) {
+			gotName = name
+			return appapi.MCPProbeResult{OK: true, ServerName: "fake-mcp", Protocol: "2025-03-26", Tools: []string{"search", "read"}, LatencyMs: 42}, nil
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/mcp/test", strings.NewReader(`{"name":"zhipu-search"}`))
+	rec := httptest.NewRecorder()
+	s.serveAPI(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body)
+	}
+	if gotName != "zhipu-search" {
+		t.Fatalf("probe name = %q", gotName)
+	}
+	var out appapi.MCPProbeResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.OK || len(out.Tools) != 2 || out.LatencyMs != 42 {
+		t.Fatalf("probe result = %+v", out)
+	}
+	// Missing name → 400.
+	req = httptest.NewRequest(http.MethodPost, "/api/mcp/test", strings.NewReader(`{}`))
+	rec = httptest.NewRecorder()
+	s.serveAPI(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty name = %d, want 400", rec.Code)
 	}
 }

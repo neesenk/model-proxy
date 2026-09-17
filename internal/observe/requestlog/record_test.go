@@ -173,3 +173,37 @@ func TestRecordTTFTRoundTrip(t *testing.T) {
 		t.Fatalf("Summarize ttft = %d, want 320", s.TTFTMs)
 	}
 }
+
+// TestRecordKindRoundTrip pins the MCP traffic-class field: kind must flow
+// from Input through BuildRecord and the hand-rolled JSONL encoder, and must
+// stay absent (back-compat) for plain LLM records.
+func TestRecordKindRoundTrip(t *testing.T) {
+	logger := New(Options{Directory: t.TempDir(), MaxBodyBytes: 1 << 20})
+	rec := logger.BuildRecord(Input{
+		RequestID: "rid-mcp-1",
+		Kind:      "mcp",
+		Protocol:  "mcp",
+		Method:    "tools/call",
+		Path:      "/mcp/exa",
+		Status:    200,
+	})
+	if rec.Kind != "mcp" {
+		t.Fatalf("Kind = %q", rec.Kind)
+	}
+	line := appendRecordLine(nil, rec)
+	var decoded Record
+	if err := json.Unmarshal(line, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Kind != "mcp" {
+		t.Fatalf("decoded Kind = %q (line: %s)", decoded.Kind, line)
+	}
+	// Back-compat: LLM records carry no kind member at all.
+	plain := logger.BuildRecord(Input{RequestID: "rid-1", Protocol: "anthropic"})
+	if plain.Kind != "" {
+		t.Fatalf("plain Kind = %q", plain.Kind)
+	}
+	if bytes.Contains(appendRecordLine(nil, plain), []byte(`"kind"`)) {
+		t.Fatal("kind leaked into LLM record line")
+	}
+}

@@ -535,3 +535,41 @@ routes:
 		t.Errorf("pool provider should get the login hint, not a config change:\n%s", out)
 	}
 }
+
+// TestCheckTakeoverDrift_NoProbeExempt: a taken-over template without a drift
+// probe (mcp-only claude-mcp preset) is exempt — reported taken but never
+// drifted (regression: post-takeover false alarm).
+func TestCheckTakeoverDrift_NoProbeExempt(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg, err := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:8314
+providers:
+  aqp: {provider_id: aqp, openai_base_url: https://x}
+mcp:
+  exa: {url: https://mcp.exa.ai/mcp, auth: none}
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	bakDir := filepath.Join(home, ".model-proxy")
+	if err := os.MkdirAll(bakDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Taken over (backup marker + written mcpServers).
+	if err := os.WriteFile(filepath.Join(bakDir, "claude-mcp.bak"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"),
+		[]byte(`{"mcpServers":{"exa":{"type":"http","url":"http://127.0.0.1:8314/mcp/exa"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range clidoctor.CheckTakeoverDrift(cfg, bakDir, "") {
+		if d.Client == "claude-mcp" {
+			if !d.Taken || !d.OK {
+				t.Fatalf("claude-mcp = %+v, want taken+ok (no-probe exempt)", d)
+			}
+			return
+		}
+	}
+	t.Fatal("claude-mcp not reported")
+}

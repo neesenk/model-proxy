@@ -56,6 +56,24 @@ func (b *ApiKeyBase) AuthHeaders(req *http.Request) error {
 	return nil
 }
 
+// KeyReporter is the opt-in seam for apikey-backed providers to expose the
+// raw credential for non-Authorization auth injection — the MCP gateway's
+// custom auth headers (e.g. volcengine's X-Agent-Plan-Key). Like
+// SecretReporter (docs/decisions/intentional-behaviors.md item 15), the value
+// stays in memory: never serialized, logged, persisted, or exposed via any
+// DTO/Web API. Providers embedding *ApiKeyBase promote ReportKey; OAuth
+// providers (aqp/codex) do not implement it, so custom-header MCP servers
+// fail closed on them.
+type KeyReporter interface {
+	ReportKey() (string, error)
+}
+
+// ReportKey implements KeyReporter: the same credential AuthHeaders injects
+// as Bearer, returned raw for custom-header injection.
+func (b *ApiKeyBase) ReportKey() (string, error) {
+	return b.LoadKey()
+}
+
 // Refresh clears the cached key (next AuthHeaders call re-reads the file).
 // A bound base has no file to re-read and its key is immutable → no-op.
 func (b *ApiKeyBase) Refresh() error {

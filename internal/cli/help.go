@@ -45,6 +45,7 @@ Commands:
   audit                Show the security audit log (offline, no daemon)
   guard                List/unblock AI-adjudicated session blocks
   test <model>         End-to-end probe of a model's route targets (real upstream calls)
+  mcp [list|test]      Manage MCP gateway servers (mcp: config; test runs the handshake)
   replay <id> --to P   Re-answer a logged request with a different backend
   shadow report       Shadow-evaluation aggregation (primary vs shadow compare)
   wire record <prov>  Record raw upstream SSE streams into testdata/wire/
@@ -285,6 +286,16 @@ Subcommands:
   overriding) and probe each
   target once with a real minimal upstream call.
   Exit status is 0 when at least one target answers 2xx, 1 when all fail.`,
+
+	"mcp": `mcp [subcommand] [--config PATH]
+
+  Manage MCP gateway servers (the mcp: config section; the daemon exposes
+  them at /mcp/<name>).
+
+Subcommands:
+  list              List configured MCP servers (name, enabled, auth, provider, url).
+  test <name>       Run the MCP handshake (initialize + tools/list) against one
+                    server through its configured credentials.`,
 
 	"stats": `stats [flags] [--config PATH]
 

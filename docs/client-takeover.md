@@ -57,11 +57,23 @@ models:                            # 可选:按暴露模型逐个输出元数据
     model = "{{model.id}}"
     max_context_size = {{model.context}}
   also_remove: 'models.{{model.id}}'           # 可选:写前清理旧段(如未加引号的遗留块)
+
+mcp:                               # 可选:把网关 mcp:/mcp_routes: 面写成客户端 MCP 配置
+  json_path: mcpServers            # json:对象注入点(claude: mcpServers;opencode: mcp)
+  json_entry: {type: http, url: "{{mcp.url}}"}  # 每条目值模板(占位符见下)
+  toml_section: 'mcp_servers."{{mcp.name}}"'   # toml:每条目段名
+  toml_body: |
+    url = "{{mcp.url}}"
 ```
 
 占位符：`{{proxy_url}}` `{{base_url}}` `{{token}}`(= `PROXY_MANAGED`)
 `{{provider_id}}` `{{display_name}}`；模型循环内另有 `{{model.id}}`
-`{{model.context}}` `{{model.output}}`。
+`{{model.context}}` `{{model.output}}`；mcp 条目循环内另有 `{{mcp.name}}` `{{mcp.url}}`
+（url = `<proxy>/mcp/<name>`，server 与 route 各占一条，按名排序）。
+
+mcp 渲染是**合并语义**：先清理指向本代理 `/mcp/` 的陈旧条目（JSON 按 url 前缀、TOML 按
+段名前缀+正文 URL 匹配），再写入当前面；用户自有 MCP 条目保留；网关面无条目时不动客户端
+配置。env 格式不支持 mcp 块（校验拒绝）。
 
 ## 协议感知变体选择
 
@@ -111,6 +123,9 @@ opencode 族：opencode=anthropic / opencode-openai=openai / opencode-responses=
 | codex | `~/.codex/config.toml` | toml | `[model_providers."<id>"]`(wire_api=responses)+ 顶层 `model_provider` 选择器 |
 | kimi | `~/.kimi/config.toml` | toml | `[providers."<id>"]`(`openai_legacy`,带 /v1)+ 每模型 `[models."<name>"]`(provider/model/max_context_size,点号名必须引号;无元数据回退 `routing.DefaultModelMetadata.Context`) |
 | gemini-cli | `~/.gemini/.env` | env | `GOOGLE_GEMINI_BASE_URL`(带 /v1)+ `GEMINI_API_KEY` 占位 |
+| claude-mcp | `~/.claude.json` | json | 独立族：网关 MCP 面写 `mcpServers`（http 型条目），只动代理命名空间 |
+| （opencode 三变体） | 同上 | json | 附 `mcp` 块：`mcp` 节写 remote 型条目（enabled: true） |
+| （codex） | 同上 | toml | 附 `mcp` 块：`[mcp_servers."<name>"]` 段写网关条目 |
 
 凭据一律占位符 `PROXY_MANAGED`,真实 key 只在代理侧。
 

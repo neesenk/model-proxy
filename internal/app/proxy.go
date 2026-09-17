@@ -11,6 +11,7 @@ import (
 	"model-proxy/internal/fusion"
 	"model-proxy/internal/guard"
 	guardsession "model-proxy/internal/guard/session"
+	mcpkg "model-proxy/internal/mcp"
 	"model-proxy/internal/observe/budget"
 	"model-proxy/internal/observe/counters"
 	obscounters "model-proxy/internal/observe/counters"
@@ -92,6 +93,10 @@ type processServices struct {
 	reqLogIndex        *requestlog.Indexer           // tailing SQLite index over the request log (web read path); nil = request log disabled or index open failed (reads fall back to directory scans)
 	reqLogIndexStarted bool                          // lifecycle owns the indexer loop/shutdown only when started alongside reqLog
 	sessionScan        *guardsession.Store           // split-exfiltration session windows; process-lifetime (survives reload like metrics), never serialized or logged
+	mcpSessions        *mcpkg.SessionTable           // /mcp/ gateway session table (local→upstream session + pinned account); process-lifetime cross-generation state, lazy expiry, never serialized or logged
+	mcpRR              atomic.Uint64                 // /mcp/ account round-robin counter for sessionless requests
+	mcpStdio           *mcpStdioRegistry             // /mcp/ stdio children (one per session/sub-session); killed on session eviction and Close
+	mcpStats           *obscounters.MCPStats         // /mcp/ per-name call counters (process-lifetime, in-memory only; deliberately separate from the LLM metrics store)
 	adjudication       *adjudicate.Service           // AI second-opinion channel for guard pattern hits; process-lifetime, persisted verdict cache + session blocks
 	responsesState     *protocol.ResponsesStateStore // previous_response_id replay for Responses clients bridged to stateless backends
 	events             *observeevents.Hub            // live request monitor fan-out hub (SSE /api/events); always non-nil
@@ -231,6 +236,15 @@ func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 	// (like p.metrics below), NOT reload-owned — reload must not wipe in-flight
 	// session context. Never logged or persisted (see internal/guard/session).
 	p.sessionScan = guardsession.NewStore()
+	// MCP gateway session table: same cross-generation discipline as
+	// sessionScan — reload must not drop live client sessions; entries pin
+	// their account by id and fail closed later if a new generation removes it.
+	p.mcpSessions = mcpkg.NewSessionTable(512, 30*time.Minute)
+	// Stdio children die with their session (TTL/LRU/DELETE) via the table's
+	// eviction callback; Proxy.Close reaps the rest.
+	p.mcpStdio = newMCPStdioRegistry()
+	p.mcpSessions.SetOnEvict(p.mcpOnMCPSessionEvict)
+	p.mcpStats = obscounters.NewMCPStats()
 	// AI second-opinion channel for guard pattern hits: process-lifetime
 	// (workers idle while guard.adjudicate is off; persisted session blocks
 	// stay enforced regardless). State derives from the injected state path

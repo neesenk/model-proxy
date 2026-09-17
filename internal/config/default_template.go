@@ -53,6 +53,7 @@ providers:
     # peak_hours:                       # multi-segment, per-segment multiplier
     #   - {window: "14:00-18:00", multiplier: 2}
     models:
+      - claude-fable-5-1
       - claude-opus-5
       - claude-sonnet-5
       - deepseek-v4-flash
@@ -62,6 +63,7 @@ providers:
       - gpt-5.6-luna
       - gpt-5.6-sol
       - gpt-5.6-terra
+      - gpt-6-astra
       - kimi-k3
   codex:
     openai_base_url: https://chatgpt.com/backend-api/codex

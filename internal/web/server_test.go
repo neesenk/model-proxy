@@ -192,4 +192,9 @@ func (testCommandAPI) RefreshModels(context.Context, string) (appapi.ModelsRefre
 	return appapi.ModelsRefreshResult{}, nil
 }
 
-func (testReadAPI) Presets() []presets.Preset { return nil }
+func (testCommandAPI) ProbeMCP(context.Context, string) (appapi.MCPProbeResult, error) {
+	return appapi.MCPProbeResult{}, nil
+}
+
+func (testReadAPI) Presets() []presets.Preset     { return nil }
+func (testReadAPI) MCPSurface() appapi.MCPSurface { return appapi.MCPSurface{} }

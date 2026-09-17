@@ -27,10 +27,13 @@ type Filter struct {
 	RequestID  string
 	Session    string
 	Shadow     string
-	From       time.Time
-	To         time.Time
-	Limit      int
-	UsageOnly  bool
+	// Kind filters the traffic class: "" = all, "mcp" = MCP gateway records
+	// only, "llm" = LLM forward records (kind-less) only.
+	Kind      string
+	From      time.Time
+	To        time.Time
+	Limit     int
+	UsageOnly bool
 }
 
 func (f Filter) matches(record Record) bool {
@@ -39,6 +42,16 @@ func (f Filter) matches(record Record) bool {
 	}
 	if f.Session != "" && record.SessionID != f.Session {
 		return false
+	}
+	switch f.Kind {
+	case "mcp":
+		if record.Kind != "mcp" {
+			return false
+		}
+	case "llm":
+		if record.Kind != "" {
+			return false
+		}
 	}
 	if f.Model != "" &&
 		!containsFold(record.CalledModel, f.Model) &&

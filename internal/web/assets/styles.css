@@ -251,6 +251,16 @@ main {
 }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
+/* Tab entry fade: opacity-only by design — a compositor-only animation with
+   zero layout/paint participation, so the sticky theads and the sticky
+   session view inside the panels are untouched (transform/height animations
+   would shift or reflow them). The incoming panel eases in over ~140ms;
+   the outgoing one simply stops painting (display:none). Disabled under
+   prefers-reduced-motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .tab-panel.active { animation: panel-in 140ms ease-out; }
+}
+@keyframes panel-in { from { opacity: 0; } }
 
 .grid {
   display: grid;
@@ -296,6 +306,8 @@ main {
 
 /* Config tab: vertical rhythm between stacked cards. */
 #tab-config > .card { margin-bottom: 16px; }
+/* MCP tab: same rhythm between the Servers/Routes cards (mcp-host wrapper). */
+#tab-mcp > .mcp-host > .card { margin-bottom: 16px; }
 /* Security paints its KPI row and Rule-hits card through loader-owned host
    divs (#sec-kpis / #sec-rules are what the 30s tick repaints), so that
    content sits one level below the tab — reach in for the same rhythm. The
@@ -450,6 +462,10 @@ main {
 .sec-seg .badge { flex: none; }
 
 /* Live monitor rows reuse the Requests idiom. */
+/* Empty-ring placeholder height: without a floor the card collapses to a
+   one-line "connecting…" stub on mount and every streaming row grows the
+   page again — the switch-into-Live bounce. */
+#live-table { min-height: 180px; }
 .live-row { cursor: pointer; }
 .live-row:hover > td { background: color-mix(in srgb, var(--accent) 5%, transparent); }
 .live-row.live-open > td { background: color-mix(in srgb, var(--accent) 8%, transparent); }

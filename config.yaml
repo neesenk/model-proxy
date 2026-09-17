@@ -54,6 +54,7 @@ providers:
     models:
       - claude-opus-5
       - claude-sonnet-5
+      - claude-fable-5-1
       - deepseek-v4-flash
       - deepseek-v4-pro
       - glm-5.3
@@ -61,6 +62,7 @@ providers:
       - gpt-5.6-luna
       - gpt-5.6-sol
       - gpt-5.6-terra
+      - gpt-6-astra
       - kimi-k3
   codex:
     provider_id: codex
@@ -141,6 +143,7 @@ providers:
     models:
       - claude-opus-5
       - claude-sonnet-5
+      - claude-fable-5-1
       - deepseek-v4-flash
       - deepseek-v4-pro
       - glm-5.3
@@ -148,6 +151,7 @@ providers:
       - gpt-5.6-luna
       - gpt-5.6-sol
       - gpt-5.6-terra
+      - gpt-6-astra
       - kimi-k3
 
   # Kimi Code (Moonshot membership coding plan — NOT the pay-as-you-go 开放平台).
@@ -323,6 +327,84 @@ cache:
   max_entries: 6000                   # default
   max_body_bytes: 262144              # default 256KiB; larger responses not cached
 
+# MCP gateway: expose remote MCP (Model Context Protocol) servers at
+# /mcp/<name> on the daemon, so MCP clients (Claude Code .mcp.json, opencode,
+# Codex, pi) point at the proxy instead of holding provider credentials.
+# Provider-backed servers reuse that provider's credential pool (sessions pin
+# to one account; a sessionless 401 rotates once); `auth: none` servers are
+# anonymous public endpoints. Credentials are injected in memory only — never
+# in config or logs. `mcp list` / `mcp test <name>` are the offline CLI.
+# mcp:
+#   zhipu-search:                      # client endpoint: POST http://127.0.0.1:PORT/mcp/zhipu-search
+#     provider: zhipu                  # credential pool of this providers: entry
+#     url: https://open.bigmodel.cn/api/mcp/web_search_prime/mcp
+#     # transport: streamable          # streamable (default) | sse (legacy HTTP+SSE) | stdio (local child)
+#     # timeout: 300s                  # per-POST upstream budget (default 300s)
+#     # proxy_url: off                 # override the proxy chain for this server
+#     # headers: {X-Api-Key: env:TAVILY_API_KEY}   # static headers, env:VAR indirection ONLY
+#     # enabled: false                 # keep config but answer 404
+#   zhipu-search-legacy:               # legacy SSE form of the same upstream
+#     provider: zhipu
+#     url: https://open.bigmodel.cn/api/mcp/web_search_prime/sse
+#     transport: sse
+#   zhipu-vision:                      # stdio: one local child process per client session
+#     transport: stdio
+#     provider: zhipu                  # ${account.api_key} resolves from this pool
+#     command: [npx, -y, "@z_ai/mcp-server"]
+#     env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU}
+#   ark-datapro:                       # custom auth header: the RAW key goes
+#     provider: volcengine             # under auth_header instead of Bearer
+#     url: https://datapro.hqd.cn-beijing.volces.com/mcp
+#     auth_header: X-Agent-Plan-Key    # apikey providers only (not aqp/codex)
+#   exa:
+#     url: https://mcp.exa.ai/mcp
+#     auth: none                       # anonymous public endpoint
+# Aggregated routes: one canonical tool surface over several mcp: servers
+# (same /mcp/<name> namespace). tools/call fails over the targets in order
+# (transport/401/404/429/5xx only — JSON-RPC business errors return as-is),
+# sticky per session; tools/list exposes only the canonical names.
+# mcp_routes:
+#   web-search:                        # client endpoint: POST /mcp/web-search
+#     targets:
+#       - {mcp: zhipu-search, tools: {web_search: web_search_prime}}
+#       - {mcp: exa,          tools: {web_search: web_search_exa}}
+
+# ---- active MCP surface (tool names verified via `mcp test` 2026-09-17) ----
+# jina intentionally omitted: mcp.jina.ai unreachable from this host today
+# (curl EOF on all paths; re-add when it recovers).
+mcp:
+  zhipu-search: {provider: zhipu, url: https://open.bigmodel.cn/api/mcp/web_search_prime/mcp}
+  zhipu-reader: {provider: zhipu, url: https://open.bigmodel.cn/api/mcp/web_reader/mcp}
+  zhipu-zread:  {provider: zhipu, url: https://open.bigmodel.cn/api/mcp/zread/mcp}
+  ark-datapro:  {provider: volcengine, url: https://datapro.hqd.cn-beijing.volces.com/mcp, auth_header: X-Agent-Plan-Key}
+  exa:          {url: https://mcp.exa.ai/mcp, auth: none}
+  firecrawl:    {url: https://mcp.firecrawl.dev/v2/mcp, auth: none}
+  context7:     {url: https://mcp.context7.com/mcp, auth: none}
+  deepwiki:     {url: https://mcp.deepwiki.com/mcp, auth: none}
+  grep-app:     {url: https://mcp.grep.app, auth: none}
+  huggingface:  {url: https://huggingface.co/mcp, auth: none}
+  zhipu-vision:
+    transport: stdio
+    provider: zhipu
+    command: [npx, -y, "@z_ai/mcp-server"]
+    env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU}
+
+mcp_routes:
+  web-search:
+    targets:
+      - {mcp: zhipu-search, tools: {web_search: web_search_prime}}
+      - {mcp: exa,          tools: {web_search: web_search_exa}}
+      - {mcp: firecrawl,    tools: {web_search: firecrawl_search}}
+  url-read:
+    targets:
+      - {mcp: zhipu-reader, tools: {url_read: webReader}}
+      - {mcp: exa,          tools: {url_read: web_fetch_exa}}
+      - {mcp: firecrawl,    tools: {url_read: firecrawl_scrape}}
+  code-search:
+    targets:
+      - {mcp: grep-app,     tools: {code_search: searchGitHub}}
+      - {mcp: zhipu-zread,  tools: {code_search: search_doc}}
+
 # Outbound secret guard (DLP-lite): scans the raw request body for
 # high-confidence secret patterns (PEM private-key headers, AWS/OpenAI/
 # Anthropic/GitHub/Google tokens) BEFORE forwarding upstream — coding agents
@@ -340,6 +422,9 @@ cache:
 #                     # adjudicate below).
 #   known_secrets: true   # default true; also match the proxy's own credentials
 #   decode: true          # default true; catch base64/hex-encoded forms
+#   mcp_secrets: off      # outbound secret scan on MCP gateway request bodies
+#                         # (tools/call arguments): log | redact | block | off
+#                         # (default off — unlike the LLM-path secrets default)
 #   paths: log            # log (default) | block | off — sensitive-path signal;
 #                         # redact intentionally unsupported (rewriting a path
 #                         # would corrupt legitimate coding work)

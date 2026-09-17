@@ -8,6 +8,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -57,6 +58,10 @@ type Ports struct {
 	// RequestLogDirectory reports the request-log directory ("" when the
 	// request log is disabled).
 	RequestLogDirectory func() string
+	// MCPState returns the detached MCP gateway state (config shape + live
+	// session gauges) for the /api/mcp projection. Nil = MCP surface reports
+	// empty.
+	MCPState func() MCPState
 	// RequestLogIndex returns the process-lifetime tailing SQLite index over
 	// the request-log directory (nil when the request log is disabled or the
 	// index failed to open). The index is set once at startup and never
@@ -134,6 +139,12 @@ type Ports struct {
 	// one runtime snapshot, so an account probe can never pair one config
 	// generation with another generation's impl.
 	ProbeRuntime func() (cfg *configdomain.Config, providers map[string]provider.Provider)
+	// ProbeMCP runs the MCP handshake against one mcp: server through its
+	// configured credentials (implemented by the composition root, which owns
+	// the credential injection and stdio spawning; internal/admin must not
+	// import internal/mcp). Network I/O happens after the port's own snapshot
+	// discipline, never under a lock.
+	ProbeMCP func(ctx context.Context, name string) (appapi.MCPProbeResult, error)
 	// LocateGuardHits re-runs guard detection over one persisted request body
 	// and returns located, display-ready matches (masked snippets, never raw
 	// secret bytes) for the security-explain surface. Implemented by the
