@@ -2,7 +2,6 @@ package admin
 
 import (
 	"sort"
-	"strings"
 
 	"model-proxy/internal/appapi"
 )
@@ -100,10 +99,4 @@ func (s *Service) MCPSurface() appapi.MCPSurface {
 	}
 	sort.Slice(out.Routes, func(i, j int) bool { return out.Routes[i].Name < out.Routes[j].Name })
 	return out
-}
-
-// joinArgv renders a stdio command for display (space-joined, shell-unsafe
-// characters left as-is — display only, never re-parsed).
-func joinArgv(argv []string) string {
-	return strings.Join(argv, " ")
 }
