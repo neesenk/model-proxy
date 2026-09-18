@@ -38,6 +38,9 @@ type fakeMCPUpstream struct {
 	sessionID string         // "" = stateless server (never issues a session)
 	failKeys  map[string]int // Authorization value → remaining 401 count
 	sseInit   bool
+	// reinitSessionID, when set, replaces sessionID on initialize requests that
+	// ALREADY carry an upstream session id (upstream-side id rotation).
+	reinitSessionID string
 }
 
 func (f *fakeMCPUpstream) serve(w http.ResponseWriter, r *http.Request) {
@@ -74,8 +77,12 @@ func (f *fakeMCPUpstream) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 	switch frame {
 	case "initialize":
-		if f.sessionID != "" {
-			w.Header().Set("Mcp-Session-Id", f.sessionID)
+		sid := f.sessionID
+		if f.reinitSessionID != "" && hit.session != "" {
+			sid = f.reinitSessionID
+		}
+		if sid != "" {
+			w.Header().Set("Mcp-Session-Id", sid)
 		}
 		payload := `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fake","version":"0.1"}}}`
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -971,5 +978,124 @@ func TestMCPGateway_StatsSurfaced(t *testing.T) {
 	got := surface.Servers[0]
 	if got.Calls != 2 || got.Errors != 0 {
 		t.Fatalf("calls/errors = %d/%d, want 2/0", got.Calls, got.Errors)
+	}
+}
+
+// TestMCPGateway_CrossOriginRedirectNoLeak: an upstream answering 307 to a
+// FOREIGN host must fail the exchange instead of re-sending the injected
+// credential (auth_header / Authorization / static headers) to the redirect
+// target. Regression for the default redirect policy leaking keys cross-origin.
+func TestMCPGateway_CrossOriginRedirectNoLeak(t *testing.T) {
+	leaked := make(chan string, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked <- r.Header.Get("X-Agent-Plan-Key")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/mcp", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirector.Close)
+
+	srv := newMCPTestProxy(t, "volcengine", []string{"plan-key-1"}, map[string]configdomain.MCPServer{
+		"dp": {Provider: "volcengine", URL: redirector.URL, AuthHeader: "X-Agent-Plan-Key"},
+	})
+	resp := mcpPost(t, srv.URL+"/mcp/dp", "", mcpCallBody)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("redirected call = %d, want 502 (cross-origin redirect refused)", resp.StatusCode)
+	}
+	// The exchange is fully over; had the redirect been followed, the target
+	// would have recorded the key before the gateway answered.
+	select {
+	case key := <-leaked:
+		t.Fatalf("credential leaked to redirect target: %q", key)
+	default:
+	}
+}
+
+// TestMCPGateway_ReinitializeRefreshesUpstreamID: a stateful upstream that
+// rotates its Mcp-Session-Id on re-initialize rebinds the session — later
+// requests address the NEW upstream id, not the stale one (which 404s).
+func TestMCPGateway_ReinitializeRefreshesUpstreamID(t *testing.T) {
+	up := &fakeMCPUpstream{sessionID: "up-1", reinitSessionID: "up-2"}
+	upSrv := httptest.NewServer(http.HandlerFunc(up.serve))
+	t.Cleanup(upSrv.Close)
+
+	srv := newMCPTestProxy(t, "zhipu", []string{"k-A"}, map[string]configdomain.MCPServer{
+		"zs": {Provider: "zhipu", URL: upSrv.URL},
+	})
+	resp := mcpPost(t, srv.URL+"/mcp/zs", "", mcpInitBody)
+	localSID := resp.Header.Get("Mcp-Session-Id")
+	resp.Body.Close()
+	if localSID == "" {
+		t.Fatal("no local session minted")
+	}
+	// Re-initialize on the established session: the upstream rotates its id.
+	resp = mcpPost(t, srv.URL+"/mcp/zs", localSID, mcpInitBody)
+	if got := resp.Header.Get("Mcp-Session-Id"); got != localSID {
+		t.Fatalf("re-initialize local id = %q, want stable %q", got, localSID)
+	}
+	resp.Body.Close()
+	// The next call must carry the ROTATED upstream id.
+	resp = mcpPost(t, srv.URL+"/mcp/zs", localSID, mcpCallBody)
+	resp.Body.Close()
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	last := up.hits[len(up.hits)-1]
+	if last.session != "up-2" {
+		t.Fatalf("upstream session after rotation = %q, want up-2", last.session)
+	}
+}
+
+// TestMCPGateway_LiveProviderIsServingAccount: after the one-shot 401
+// rotation, the live end event names the account that actually SERVED, not
+// the one that failed (first-commit-wins on the writer must not record the
+// pre-rotation pick).
+func TestMCPGateway_LiveProviderIsServingAccount(t *testing.T) {
+	up := &fakeMCPUpstream{failKeys: map[string]int{"Bearer k-A": 1}}
+	upSrv := httptest.NewServer(http.HandlerFunc(up.serve))
+	t.Cleanup(upSrv.Close)
+
+	t.Setenv("HOME", t.TempDir())
+	writeMCPKeys(t, "zhipu", "k-A", "k-B") // pool: #aaa (k-A), #bbb (k-B)
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:0",
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "http://127.0.0.1:1", Models: []string{"m"}},
+		},
+		MCP: map[string]configdomain.MCPServer{"zs": {Provider: "zhipu", URL: upSrv.URL}},
+	}
+	p := newTestProxy(t, cfg)
+	srv := httptest.NewServer(http.HandlerFunc(p.Handler))
+	t.Cleanup(srv.Close)
+
+	// Two sessionless calls: the poisoned key (k-A) 401s exactly once and the
+	// call rotates to the good account (see TestMCPGateway_401RotatesOnce).
+	// Whichever virtual id holds k-A, BOTH calls end served by the same good
+	// account — so both end events must name the same provider. Pre-fix, the
+	// rotating call's end recorded the FAILED pre-rotation pick and the two
+	// events diverged.
+	mcpPost(t, srv.URL+"/mcp/zs", "", mcpCallBody).Body.Close()
+	mcpPost(t, srv.URL+"/mcp/zs", "", mcpCallBody).Body.Close()
+	counts := map[string]int{}
+	for _, a := range up.auths() {
+		counts[a]++
+	}
+	if counts["Bearer k-A"] != 1 {
+		t.Fatalf("poisoned key hit %d times, want exactly 1 (rotation did not happen)", counts["Bearer k-A"])
+	}
+
+	var ends []string
+	for _, e := range p.events.Snapshot() {
+		if e.Protocol == "mcp" && e.Type == "end" {
+			ends = append(ends, e.Provider)
+		}
+	}
+	if len(ends) != 2 {
+		t.Fatalf("mcp end events = %v", ends)
+	}
+	if ends[0] == "" || ends[0] != ends[1] {
+		t.Fatalf("end event providers diverged: %v (the rotated call recorded the failed account)", ends)
 	}
 }

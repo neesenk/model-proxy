@@ -327,8 +327,8 @@ const (
 // pid file derived from the configured log path — the shared prelude of
 // CmdStop and CmdReload. ok == false means a user-facing message was already
 // printed (no daemon running, or a stale pid file removed) and the caller
-// must return. Terminal errors (bad config, unreadable/invalid pid file,
-// unfindable process) stay log.Fatal, matching the historical contract.
+// must return. Terminal errors (bad config, unreadable/invalid pid file)
+// stay log.Fatal, matching the historical contract.
 func resolveDaemonPid(env DaemonEnv, sa Args, yellow, gray func(string) string) (proc *os.Process, pid int, pidPath string, ok bool) {
 	cfg, err := env.LoadConfig(sa.Config)
 	if err != nil {
@@ -350,12 +350,18 @@ func resolveDaemonPid(env DaemonEnv, sa Args, yellow, gray func(string) string) 
 		log.Fatalf("invalid pid in %s: %q", pidPath, string(pidStr))
 	}
 
-	// Check the process exists and is signalable.
+	// Check the process exists and is signalable. On Unix os.FindProcess
+	// always succeeds (it just wraps the pid); on Windows it calls
+	// OpenProcess and DOES fail for a dead/nonexistent pid. Both the
+	// FindProcess error and a failed Signal(0) probe therefore mean "daemon
+	// gone" — treat both as the friendly stale-pid path (exit 0) rather than
+	// log.Fatal: `serve reload` against a crashed daemon is not a usage
+	// error, and the historical reload contract returned normally here.
 	proc, err = os.FindProcess(pid)
-	if err != nil {
-		log.Fatalf("find process %d: %v", pid, err)
+	if err == nil {
+		err = proc.Signal(syscall.Signal(0))
 	}
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
+	if err != nil {
 		// Process is gone — clean up the stale pid file.
 		os.Remove(pidPath)
 		fmt.Println(yellow("Daemon not running.") + " (removed stale pid file " + gray(pidPath) + ")")

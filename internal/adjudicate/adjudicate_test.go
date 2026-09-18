@@ -3,10 +3,12 @@ package adjudicate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -215,6 +217,31 @@ func TestMediumVerdict_RecordsWithoutBlocking(t *testing.T) {
 	}
 }
 
+// A Caller contract violation — nil error with an off-vocabulary verdict —
+// must fail open through the sink like any other failure, NOT panic the
+// worker (a worker panic has no recover and would take the daemon down).
+func TestInvalidVerdictNilError_FailsOpenWithoutPanic(t *testing.T) {
+	s, caller, sink := newTestService(t, Options{})
+	caller.setAnswer(func(Job) (string, string, string, error) { return "bogus", "", "", nil })
+
+	s.Enqueue(testJob("sk-proj-abcdefghij1234567890"))
+	waitFor(t, func() bool { _, _, f := sink.counts(); return f == 1 })
+	recent := s.Recent()
+	if len(recent) != 1 || recent[0].Verdict != VerdictError {
+		t.Fatalf("recent = %+v, want one error entry", recent)
+	}
+	if !strings.Contains(recent[0].Reason, "unrecognized verdict bogus") {
+		t.Errorf("reason = %q, want the unrecognized-verdict detail", recent[0].Reason)
+	}
+	if _, ok := s.Blocked("sess-1"); ok {
+		t.Error("an invalid verdict must not block the session")
+	}
+	// The worker survived: a following valid job is still adjudicated.
+	caller.setAnswer(func(Job) (string, string, string, error) { return VerdictLow, "fixture", "", nil })
+	s.Enqueue(testJob("sk-proj-qrstuvwxyz0987654321"))
+	waitFor(t, func() bool { _, l, _ := sink.counts(); return l == 1 })
+}
+
 func TestCallerError_FailsOpenThroughSink(t *testing.T) {
 	s, caller, sink := newTestService(t, Options{})
 	caller.setAnswer(func(Job) (string, string, string, error) { return "", "", "", errors.New("dial timeout") })
@@ -360,9 +387,42 @@ func TestScrub_MasksHitEchoAndControlChars(t *testing.T) {
 	if strings.ContainsAny(got, "\x1b\n") {
 		t.Errorf("scrub left control characters: %q", got)
 	}
-	// Short hits (<8 bytes) are not masked (maskSecretBytes parity).
-	if got := scrub("abc", "abc"); got != "abc" {
-		t.Errorf("short hit must not be masked: %q", got)
+	// Short hits (<8 bytes) are masked wholesale too (maskSecretBytes
+	// parity): a short custom-pattern hit must never land on disk verbatim.
+	if got := scrub("abc", "the abc token"); got != "the [MASKED] token" {
+		t.Errorf("short hit must be fully masked: %q", got)
+	}
+}
+
+// Short hits are masked in the persisted reason/evidence of a verdict, not
+// just in the scrub unit — regression for a short custom-pattern hit landing
+// on disk verbatim.
+func TestShortHit_MaskedInReasonAndEvidence(t *testing.T) {
+	s, caller, sink := newTestService(t, Options{})
+	caller.setAnswer(func(Job) (string, string, string, error) {
+		return VerdictMedium, "short abc hit judged", "the abc bytes were cited", nil
+	})
+	s.Enqueue(testJob("abc"))
+	waitFor(t, func() bool {
+		sink.mu.Lock()
+		defer sink.mu.Unlock()
+		return len(sink.medium) == 1
+	})
+	recent := s.Recent()
+	if len(recent) != 1 {
+		t.Fatalf("recent = %+v, want one medium entry", recent)
+	}
+	if recent[0].Reason != "short [MASKED] hit judged" {
+		t.Errorf("reason = %q, want the short hit masked", recent[0].Reason)
+	}
+	if recent[0].Evidence != "the [MASKED] bytes were cited" {
+		t.Errorf("evidence = %q, want the short hit masked", recent[0].Evidence)
+	}
+	sink.mu.Lock()
+	evidence := sink.lastEvidence
+	sink.mu.Unlock()
+	if strings.Contains(evidence, "abc") {
+		t.Errorf("sink evidence leaked the short hit: %q", evidence)
 	}
 }
 
@@ -595,6 +655,85 @@ func TestBlockStore_DrainRaceMerge(t *testing.T) {
 	for _, sid := range []string{"pre-existing", "ours", "another"} {
 		if _, ok := s2.Blocked(sid); !ok {
 			t.Errorf("session %s lost on disk", sid)
+		}
+	}
+}
+
+// A cached-verdict Enqueue spawns its apply off the worker pool; Close must
+// wait for every accepted apply so the sink/audit side effects land before
+// the app drains seclog. Regression: enqueue a cache hit and Close
+// immediately — after Close returns the apply's effects (block refresh, ring
+// entry) must already be visible.
+func TestCloseDrainsCachedApply(t *testing.T) {
+	s := New(Options{StateDir: t.TempDir()})
+	caller := &fakeCaller{answer: func(Job) (string, string, string, error) {
+		return VerdictHigh, "real key shape", "", nil
+	}}
+	sink := &fakeSink{}
+	s.Start(staticConfig{model: "judge", timeout: 5 * time.Second, blockSession: true, enabled: true}, caller, sink)
+
+	s.Enqueue(testJob("sk-cachedhigh-abcdefghijklmnop"))
+	waitFor(t, func() bool { h, _, _ := sink.counts(); return h == 1 })
+
+	// Cache hit: the apply runs in a spawned goroutine, then Close right away.
+	j2 := testJob("sk-cachedhigh-abcdefghijklmnop")
+	j2.SessionID = "sess-2"
+	if !s.Enqueue(j2) {
+		t.Fatal("Enqueue refused a cached job")
+	}
+	s.Close(time.Second)
+	if _, ok := s.Blocked("sess-2"); !ok {
+		t.Error("cached high apply lost: sess-2 not blocked when Close returned")
+	}
+	if n := len(s.Recent()); n != 2 {
+		t.Errorf("ring entries = %d, want 2 (fresh + cached replay)", n)
+	}
+}
+
+// The accept-after-drain race: Enqueue checked closed and released mu, then
+// Close drained an empty queue and exited the workers, and the late non-
+// blocking delivery was accepted but never processed. With the delivery
+// inside the mu critical section every accepted job is either queued before
+// the drain or refused. Loop concurrent Enqueue/Close rounds and assert every
+// Enqueue that returned true produced exactly one sink record.
+func TestEnqueueCloseRace_NoAcceptedJobLost(t *testing.T) {
+	for round := 0; round < 50; round++ {
+		s := New(Options{Workers: 1, MaxQueue: 64, StateDir: t.TempDir()})
+		caller := &fakeCaller{answer: func(Job) (string, string, string, error) {
+			return VerdictLow, "fixture", "", nil
+		}}
+		sink := &fakeSink{}
+		s.Start(staticConfig{model: "m", timeout: 5 * time.Second, enabled: true}, caller, sink)
+
+		var accepted atomic.Int64
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for w := 0; w < 4; w++ {
+			wg.Add(1)
+			go func(w int) {
+				defer wg.Done()
+				<-start
+				for i := 0; i < 8; i++ {
+					// Unique content per job: no in-flight dedup, no cache
+					// hit — every accepted job must reach the caller.
+					hit := fmt.Sprintf("sk-race-%d-%d-%d-aaaaaaaaaaaa", round, w, i)
+					if s.Enqueue(testJob(hit)) {
+						accepted.Add(1)
+					}
+				}
+			}(w)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			s.Close(30 * time.Second)
+		}()
+		close(start)
+		wg.Wait()
+
+		if _, lows, _ := sink.counts(); int64(lows) != accepted.Load() {
+			t.Fatalf("round %d: accepted %d jobs but %d reached the sink — an accepted job was lost", round, accepted.Load(), lows)
 		}
 	}
 }

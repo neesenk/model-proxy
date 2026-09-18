@@ -31,7 +31,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 			"model-proxy/internal/presets": true, "model-proxy/internal/pricing": true,
 			"model-proxy/internal/probe": true, "model-proxy/internal/provider": true,
 			"model-proxy/internal/routing": true, "model-proxy/internal/runtime": true,
-			"model-proxy/internal/runtime/wirecap": true,
+			"model-proxy/internal/runtime/wirecap": true, "model-proxy/internal/takeover": true,
 		},
 		"model-proxy/internal/archtest":      nil,
 		"model-proxy/internal/cache":         nil,

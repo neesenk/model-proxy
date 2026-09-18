@@ -427,6 +427,7 @@ type anthropicSSEToOpenAISSE struct {
 	done         bool
 	finished     bool
 	errored      bool // stream terminated via an error path — never emit usage/[DONE]
+	doneDelim    bool // an explicit data: [DONE] delimiter arrived (OpenRouter dialect): a clean terminal even without a stop_reason
 	usageSent    bool
 	doneSent     bool
 	bomStripped  bool
@@ -521,10 +522,22 @@ func (t *anthropicSSEToOpenAISSE) hasOutput() bool { return len(t.out) > 0 }
 func (t *anthropicSSEToOpenAISSE) isDone() bool    { return t.done }
 
 // drainDone emits the finish chunk (when message_delta hasn't), then the
-// usage chunk + data: [DONE]. A stream that terminated via an error path gets
-// the error chunk only — synthesizing a usage chunk or [DONE] after it would
-// fake a clean terminal (fail-closed, like the responses→chat sibling).
+// usage chunk + data: [DONE]. Two terminators stay CLEAN without a
+// stop_reason: a stop_reason-carrying message_delta already finished the
+// message, and an explicit data: [DONE] delimiter (OpenRouter dialect) is a
+// deliberate terminator — see the parity tests. Anything else that reached
+// the terminator (bare message_stop, or message_delta with an empty
+// stop_reason) was truncated upstream: synthesizing finish_reason:"stop"
+// would fake a clean terminal on exactly the client bytes the executor's
+// cache gate checks, so it fails closed like streamEnd — error chunk only,
+// no usage, no [DONE].
 func (t *anthropicSSEToOpenAISSE) drainDone() (eof bool) {
+	if !t.finished && !t.errored && !t.doneDelim {
+		t.emitStreamErrorChunk("upstream stream ended without a terminal stop_reason")
+		t.finished = true
+		t.errored = true
+		t.done = true
+	}
 	if !t.finished {
 		t.emitChunk(map[string]any{}, "stop", nil)
 		t.finished = true
@@ -579,6 +592,7 @@ func (t *anthropicSSEToOpenAISSE) dispatch(frameEvent string, dataEvents []strin
 		// it as a clean terminal exactly like the sibling directions: the
 		// done-branch above emits the finish chunk (when message_delta
 		// hasn't) + data: [DONE], and later frames are never scanned.
+		t.doneDelim = true
 		t.done = true
 		return
 	}
@@ -758,7 +772,12 @@ func (t *anthropicSSEToOpenAISSE) dispatch(frameEvent string, dataEvents []strin
 			// wire shape — the OpenAI-protocol usage scanner keys on the
 			// "usage" marker, not on the finish chunk). Guard: a malformed
 			// stream with >1 message_delta must not emit >1 finish chunk.
-			if !t.finished {
+			// An EMPTY stop_reason does not finish the message — the
+			// same-protocol cache gate (stream_complete) requires a
+			// non-empty stop_reason, and inventing finish_reason:"stop"
+			// here would fake a clean terminal on exactly the client bytes
+			// that gate checks.
+			if !t.finished && ev.Delta.StopReason != "" {
 				t.emitChunk(map[string]any{}, mapStopReasonToFinish(ev.Delta.StopReason), nil)
 				t.finished = true
 			}

@@ -71,8 +71,10 @@ type Record struct {
 }
 
 // Options carries resolved persistence policy. MaxBytes <= 0 selects
-// DefaultMaxBytes. Retention == 0 keeps rotated files forever; Retention < 0
-// selects DefaultRetention.
+// DefaultMaxBytes. Retention == 0 keeps rotated files and store rows
+// forever; Retention < 0 selects DefaultRetention. The window is shared by
+// both halves: the JSONL trail sweeps rotated files by mtime, the SQLite
+// store sweeps rows by ts.
 type Options struct {
 	MaxBytes  int64
 	Retention time.Duration
@@ -92,13 +94,21 @@ func (o Options) normalized() Options {
 // SQLite store handle. Every enqueued record lands in the JSONL trail; the
 // same write also inserts into security.db unless the record is an
 // ignored-tier low verdict (the insert runs on the logfile writer goroutine,
-// so one connection serializes all writes). A store that fails to open
+// so one connection serializes all writes). Both halves share one retention
+// window: the SQLite half sweeps rows by ts on the JSONL half's sweep cadence
+// (startup, then hourly between writes, and once more at Shutdown after the
+// sink drained). A store that fails to open
 // degrades to JSONL-only — the guard and its raw trail must not stop because
 // the queryable half is unavailable — with a warning log. The application
 // lifecycle must stop producers before calling Shutdown.
 type Logger struct {
-	sink  *logfile.Logger
-	store *store
+	sink      *logfile.Logger
+	store     *store
+	retention time.Duration
+	// lastStoreSweep timestamps the previous row sweep; touched only at
+	// construction, on the writer goroutine (inside the encode hook) and at
+	// Shutdown after the sink drained — never concurrently.
+	lastStoreSweep time.Time
 }
 
 // New returns a logger for dir. Run must be started exactly once before
@@ -116,11 +126,14 @@ func New(dir string, opts Options) (*Logger, error) {
 			Retention:  opts.Retention,
 			Tag:        "seclog",
 		}),
+		retention: opts.Retention,
 	}
 	if st, err := openStore(dir); err != nil {
 		logx.Warnf("seclog: queryable store unavailable, JSONL trail only: %v", err)
 	} else {
 		l.store = st
+		// Startup row sweep, the same moment the JSONL half sweeps at Run.
+		l.sweepStore(time.Now())
 	}
 	return l, nil
 }
@@ -145,6 +158,13 @@ func (l *Logger) Enqueue(record *Record) {
 		}
 		if err := l.store.insert(record); err != nil {
 			logx.Warnf("%v", err)
+		}
+		// Row-level retention sweep on the JSONL half's hourly cadence,
+		// piggybacking on writes (an idle log has nothing new to expire
+		// relative to its last sweep).
+		if l.retention > 0 && now.Sub(l.lastStoreSweep) >= logfile.SweepInterval {
+			l.lastStoreSweep = now
+			l.sweepStore(now)
 		}
 		return line, nil
 	})
@@ -176,13 +196,27 @@ func (l *Logger) Run() {
 
 // Shutdown drains accepted records and waits for Run to close the file and
 // the store handle (inserts happen on the writer goroutine, so closing after
-// the sink drained is race-free).
+// the sink drained is race-free). A final retention sweep runs before the
+// store closes — the drain-time sweep of the SQLite half.
 func (l *Logger) Shutdown() {
 	if l == nil {
 		return
 	}
 	l.sink.Shutdown()
+	l.sweepStore(time.Now())
 	if err := l.store.Close(); err != nil {
 		logx.Warnf("seclog: close store: %v", err)
+	}
+}
+
+// sweepStore deletes store rows older than the retention window — the SQLite
+// half of the retention sweep, sharing the JSONL half's window. Retention <= 0
+// (keep forever) disables it, matching the JSONL half.
+func (l *Logger) sweepStore(now time.Time) {
+	if l.retention <= 0 {
+		return
+	}
+	if err := l.store.deleteExpired(now.Add(-l.retention).UnixMilli()); err != nil {
+		logx.Warnf("%v", err)
 	}
 }

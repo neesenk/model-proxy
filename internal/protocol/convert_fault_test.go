@@ -40,6 +40,8 @@ func TestConvertFault_UnknownSSEEventSkipped(t *testing.T) {
 		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
 		"event: content_block_delta\n" +
 		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}` + "\n\n" +
 		"event: message_stop\n" +
 		`data: {"type":"message_stop"}` + "\n\n"
 	eventsA := drainSSE(t, newAnthropicToResponsesSSE(strings.NewReader(inA), "c"))
@@ -63,6 +65,8 @@ func TestConvertFault_MalformedDataFrameSkipped(t *testing.T) {
 		"data: {broken json\n\n" +
 		"event: content_block_delta\n" +
 		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}` + "\n\n" +
 		"event: message_stop\n" +
 		`data: {"type":"message_stop"}` + "\n\n"
 	eventsA := drainSSE(t, newAnthropicToResponsesSSE(strings.NewReader(inA), "c"))

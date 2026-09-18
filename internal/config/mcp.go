@@ -33,13 +33,15 @@ type MCPServer struct {
 	// Command is the stdio child command (transport: stdio only), argv form
 	// — e.g. [npx, -y, "@z_ai/mcp-server"]. Resolved against PATH.
 	Command []string `yaml:"command"`
-	// Env sets extra child environment (transport: stdio only). Values:
+	// Env sets extra child environment (transport: stdio only). Indirect forms:
 	// "${account.api_key}" injects the picked pool account's raw key (needs
-	// provider:, apikey providers only); "env:VAR" copies a process
-	// environment variable; anything else is literal (for non-secret flags
-	// like Z_AI_MODE — credentials must use the two indirect forms, red
-	// line 3). The child gets a MINIMAL base env (PATH/HOME/TMPDIR/LANG),
-	// never the daemon's full environment.
+	// provider:, apikey providers only), "env:VAR" copies a process environment
+	// variable. Literal values are allowed for benign keys (mode flags like
+	// Z_AI_MODE) but REJECTED for credential-shaped names (KEY/TOKEN/SECRET/
+	// PASSWORD/AUTH/CREDENTIAL segments — red line 3: credentials never land
+	// in config; headers: stays literal-free altogether).
+	// The child gets a MINIMAL base env (PATH/HOME/TMPDIR/LANG), never the
+	// daemon's full environment.
 	Env map[string]string `yaml:"env"`
 	// Provider names a providers: entry whose account pool supplies the
 	// credential injected on upstream requests. Empty requires `auth: none`.
@@ -272,6 +274,9 @@ func envRefValid(v string) bool {
 // environment) plus the configured entries with ${account.api_key} replaced
 // by accountKey (the picked pool account's raw key, "" when the server has
 // no provider credential) and env:VAR copied from the process environment.
+// Literal values are allowed for benign keys (mode flags etc.) but rejected
+// for credential-shaped names (see envKeySensitive) — enforced fail-closed
+// at resolve time too, so credentials never land in config.
 // Shared by the daemon (internal/app) and the `mcp test` CLI.
 func ResolveMCPStdioEnv(s MCPServer, accountKey string) ([]string, error) {
 	env := []string{
@@ -294,11 +299,30 @@ func ResolveMCPStdioEnv(s MCPServer, accountKey string) ([]string, error) {
 				return nil, fmt.Errorf("env[%s]: environment variable %s is not set", k, varName)
 			}
 			env = append(env, k+"="+value)
+		case envKeySensitive(k):
+			return nil, fmt.Errorf("env[%s]: literal values are rejected for credential-shaped keys — use ${account.api_key} or env:VAR indirection", k)
 		default:
 			env = append(env, k+"="+v)
 		}
 	}
 	return env, nil
+}
+
+// envKeySensitive reports whether an environment variable name looks like it
+// carries a credential (per-segment match, so Z_AI_MODE is benign while
+// OPENAI_API_KEY or AUTH_TOKEN are not). Best-effort guardrail: a credential
+// under a deliberately benign name is a config-authoring decision, not
+// something validation can prove.
+func envKeySensitive(name string) bool {
+	for _, seg := range strings.FieldsFunc(strings.ToUpper(name), func(r rune) bool {
+		return !('A' <= r && r <= 'Z') && !('0' <= r && r <= '9')
+	}) {
+		switch seg {
+		case "KEY", "APIKEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "AUTH", "CREDENTIAL", "CREDENTIALS", "PRIVATE":
+			return true
+		}
+	}
+	return false
 }
 
 // ResolveMCPHeaders resolves the server's static headers against the process
@@ -377,6 +401,8 @@ func (c *Config) validateMCPStdio(name string, s MCPServer) error {
 			if !envRefValid(v) {
 				return fmt.Errorf("mcp %q: env[%q] has invalid env: indirection %q", name, k, v)
 			}
+		case envKeySensitive(k):
+			return fmt.Errorf("mcp %q: env[%q] has a credential-shaped name — literal values are rejected here, use ${account.api_key} or env:VAR indirection (same rule as headers:)", name, k)
 		}
 	}
 	return nil

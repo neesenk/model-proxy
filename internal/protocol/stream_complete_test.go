@@ -1,6 +1,9 @@
 package protocol
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestStreamTerminalComplete(t *testing.T) {
 	anthropicComplete := "event: message_start\n" +
@@ -75,5 +78,67 @@ func TestStreamTerminalComplete(t *testing.T) {
 				t.Fatalf("StreamTerminalComplete(%s) = %v, want %v", test.proto, got, test.want)
 			}
 		})
+	}
+}
+
+// TestStreamTerminalComplete_ConvertedTruncation: a truncated anthropic
+// upstream (bare message_stop, or message_delta with an EMPTY stop_reason)
+// must NOT become terminal-complete on the client side — the anthropic→chat
+// and anthropic→responses converters fail closed (error chunk /
+// response.failed) instead of synthesizing finish_reason:"stop" or
+// response.completed, because the executor's cache gate checks exactly these
+// converted bytes (caching a fake-clean terminal would poison every retry
+// for the TTL). An explicit data: [DONE] delimiter (OpenRouter dialect)
+// stays a clean terminal, matching the same-protocol openai gate.
+func TestStreamTerminalComplete_ConvertedTruncation(t *testing.T) {
+	const head = "event: message_start\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"m\"}}\n\n" +
+		"event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"
+	const bareStop = head +
+		"event: message_stop\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+	const emptyReason = head +
+		"event: message_delta\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"\"}}\n\n" +
+		"event: message_stop\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+	const complete = head +
+		"event: message_delta\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n" +
+		"event: message_stop\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+	const doneDelim = head + "data: [DONE]\n\n"
+
+	chat := func(t *testing.T, in string) []byte {
+		t.Helper()
+		return readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(in), "m"))
+	}
+	resp := func(t *testing.T, in string) []byte {
+		t.Helper()
+		return readAllChecked(t, newAnthropicToResponsesSSE(strings.NewReader(in), "m"))
+	}
+	if got := StreamTerminalComplete(OpenAI, chat(t, bareStop)); got {
+		t.Errorf("chat-converted bare message_stop judged complete — truncated stream would poison the cache:\n%s", chat(t, bareStop))
+	}
+	if got := StreamTerminalComplete(OpenAI, chat(t, emptyReason)); got {
+		t.Errorf("chat-converted empty stop_reason judged complete:\n%s", chat(t, emptyReason))
+	}
+	if got := StreamTerminalComplete(OpenAI, chat(t, complete)); !got {
+		t.Errorf("chat-converted complete stream judged incomplete:\n%s", chat(t, complete))
+	}
+	if got := StreamTerminalComplete(OpenAI, chat(t, doneDelim)); !got {
+		t.Errorf("chat-converted explicit [DONE] delimiter judged incomplete (OpenRouter dialect is a clean terminal):\n%s", chat(t, doneDelim))
+	}
+	if got := StreamTerminalComplete(Responses, resp(t, bareStop)); got {
+		t.Errorf("responses-converted bare message_stop judged complete — truncated stream would poison the cache:\n%s", resp(t, bareStop))
+	}
+	if got := StreamTerminalComplete(Responses, resp(t, emptyReason)); got {
+		t.Errorf("responses-converted empty stop_reason judged complete:\n%s", resp(t, emptyReason))
+	}
+	if got := StreamTerminalComplete(Responses, resp(t, complete)); !got {
+		t.Errorf("responses-converted complete stream judged incomplete:\n%s", resp(t, complete))
 	}
 }

@@ -147,7 +147,17 @@ var heartbeatFrame = []byte(": ping\n\n")
 // during a blocked Read; only the calling goroutine writes to the client.
 // Heartbeats bypass the recording chain (they are written to the client,
 // never read from the body) and the ttft marker (via WriteHeartbeat).
-func flushCopyHeartbeat(writer http.ResponseWriter, body io.ReadCloser, interval time.Duration) streamEnd {
+//
+// source is the RAW upstream body at the bottom of body's wrapper chain (the
+// recording wrappers sit between the two). On a heartbeat write failure the
+// parked helper Read is unplugged by closing source — NOT body: the close
+// then reaches the parked Read from below and every wrapper's post-Read
+// logic unwinds on the reader goroutine alone, while the caller's later
+// full-chain body.Close runs strictly after this function returns (the
+// reader is drained first). Closing the wrapper chain instead would run its
+// Close-side effects (usage commit, capture callback) concurrently with the
+// same wrappers unwinding on the reader goroutine.
+func flushCopyHeartbeat(writer http.ResponseWriter, body, source io.ReadCloser, interval time.Duration) streamEnd {
 	flusher, _ := writer.(http.Flusher)
 	heartbeatWriter, hasHeartbeat := writer.(interface {
 		WriteHeartbeat([]byte) (int, error)
@@ -184,8 +194,14 @@ func flushCopyHeartbeat(writer http.ResponseWriter, body io.ReadCloser, interval
 	recycle := true
 	defer func() {
 		close(readReq)
+		// ALWAYS drain the reader before returning: the caller's post-copy
+		// tail (body.Close, counter/recorder reads, usage commit) must never
+		// race a Read still unwinding through the recording wrappers. Every
+		// return path guarantees the goroutine exits promptly — a parked Read
+		// is unplugged by the source close in the heartbeat-failure branch
+		// before this defer runs.
+		<-readerDone
 		if recycle {
-			<-readerDone
 			flushBufPool.Put(bufp)
 		}
 	}()
@@ -193,6 +209,12 @@ func flushCopyHeartbeat(writer http.ResponseWriter, body io.ReadCloser, interval
 	// body.Read until the upstream produces bytes, and re-sending the request
 	// before that read completes would deadlock the loop.
 	readReq <- struct{}{}
+	// A heartbeat is a comment LINE: an upstream read can split an SSE event
+	// at any byte, and appending ": ping\n\n" behind a partial line corrupts
+	// the client's reassembly ("data: {\"cho: ping"). Ticks that land
+	// mid-line are skipped; the ticker keeps firing, so the heartbeat is
+	// merely deferred until the frame completes (or the stream ends).
+	lineAligned := true
 	for {
 		select {
 		case result := <-readRes:
@@ -203,6 +225,7 @@ func flushCopyHeartbeat(writer http.ResponseWriter, body io.ReadCloser, interval
 				if flusher != nil {
 					flusher.Flush()
 				}
+				lineAligned = buf[result.n-1] == '\n'
 				ticker.Reset(interval)
 			}
 			if result.err != nil {
@@ -213,11 +236,18 @@ func flushCopyHeartbeat(writer http.ResponseWriter, body io.ReadCloser, interval
 			}
 			readReq <- struct{}{}
 		case <-ticker.C:
+			if !lineAligned {
+				continue
+			}
 			if err := writeHeartbeat(); err != nil {
 				// The reader goroutine may still be parked in body.Read holding
-				// buf; the caller's body.Close unblocks it, but the buffer must
-				// NOT return to the pool before that — abandon it to the GC.
+				// buf; the buffer must NOT return to the pool — abandon it to
+				// the GC. Close the RAW source (never the wrapper chain, see
+				// the function comment) so the parked Read unwinds and the
+				// drain in the deferred cleanup completes; the caller's own
+				// body.Close afterwards is an idempotent second close.
 				recycle = false
+				_ = source.Close()
 				return streamClientGone
 			}
 			if flusher != nil {

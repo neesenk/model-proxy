@@ -35,6 +35,8 @@ import {
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
   iconPin, iconRefresh, iconChevron, statusBadgeClass, statusBadgeHTML,
   kpiDeltaClass, logLineHTML,
+  takeoverStatusBadge, takeoverClientLabel, takeoverRunSummary, takeoverRestoreSummary, takeoverModeHint,
+  shadowMatchBadge,
 } from '../assets/pure.js';
 
 test('esc escapes all five HTML-significant chars', () => {
@@ -1213,6 +1215,32 @@ test('mergeLiveAndPersistedRow lets live tokens win', () => {
   assert.equal(got.agent, 'codex');
 });
 
+test('mergeLiveAndPersistedRow merges cache buckets with live-non-zero-wins', () => {
+  // A persisted row truncated to zero tokens by max_body_bytes must pick up
+  // the live end event's cache counts instead of showing 0 (which disagreed
+  // with the All live table).
+  const truncated = mergeLiveAndPersistedRow(
+    { requestId: 'r1', status: 200, input: 0, output: 0, cacheRead: 4200, cacheCreation: 128 },
+    { requestId: 'r1', status: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+  );
+  assert.equal(truncated.cacheRead, 4200);
+  assert.equal(truncated.cacheCreation, 128);
+  // A live zero must never erase a real persisted count.
+  const kept = mergeLiveAndPersistedRow(
+    { requestId: 'r1', status: 200, input: 5, output: 2, cacheRead: 0, cacheCreation: 0 },
+    { requestId: 'r1', input: 7, output: 3, cacheRead: 900, cacheCreation: 50 },
+  );
+  assert.equal(kept.cacheRead, 900);
+  assert.equal(kept.cacheCreation, 50);
+  // A live non-zero cache value wins over the persisted one.
+  const wins = mergeLiveAndPersistedRow(
+    { requestId: 'r1', cacheRead: 100, cacheCreation: 0 },
+    { requestId: 'r1', cacheRead: 40, cacheCreation: 60 },
+  );
+  assert.equal(wins.cacheRead, 100);
+  assert.equal(wins.cacheCreation, 60);
+});
+
 test('mergeLiveAndPersistedRow inherits persisted tokens when live has zero', () => {
   const live = { requestId: 'r1', status: 200, input: 0, output: 0, provider: 'p' };
   const persisted = { requestId: 'r1', input: 7, output: 3, provider: 'old', agent: 'claude-code' };
@@ -1334,6 +1362,14 @@ test('securityKpisHTML summarizes blocks, verdict counts and LLM usage', () => {
   if (off.includes('llm calls') || off.includes('llm tokens')) throw new Error('off state must drop the usage stats');
   const past = securityKpisHTML([], {}, { calls: 3, input_tokens: 10, output_tokens: 5 }, false);
   if (!past.includes('llm calls') || !past.includes('>3<')) throw new Error('past usage keeps the real stats');
+  // Counts unavailable (server-side aggregation failed): verdict tiles render
+  // '—' with the reason, never misleading zeros; blocks/llm tiles keep real data.
+  const unavail = securityKpisHTML([{ session_id: 's' }], null, stats, true, 'verdict counts unavailable');
+  if (!unavail.includes('verdict counts unavailable')) throw new Error('countsError rides the verdict tiles');
+  const dashCount = (unavail.match(/<div class="v">—<\/div>/g) || []).length;
+  if (dashCount !== 3) throw new Error(`expected 3 unavailable verdict tiles, got ${dashCount}`);
+  if (unavail.includes('high verdicts') && unavail.includes('>2<')) throw new Error('unavailable counts must not render zeros/stale numbers');
+  if (!unavail.includes('llm calls') || !unavail.includes('>7<')) throw new Error('llm tiles unaffected by countsError');
 });
 
 test('securityExplainHTML renders verdict badges and per-verdict evidence', () => {
@@ -1839,6 +1875,32 @@ test('sessionTimeline segments by turn_key when both rows have one', () => {
     { requestId: 'b', ts: 5000, latencyMs: 500, turnKey: 'turn-2' },
   ], { fmt: (t) => String(t) });
   assert.equal(quickSwitch.segments.length, 2, 'turn boundary splits even under 2 minutes');
+});
+
+test('sessionTimeline keeps every segment inside the viewBox for many-turn sessions', () => {
+  // Agentic sessions split one segment per turn; 100 turns must not push the
+  // tail past the right edge — the compressed-gap strip shrinks instead of
+  // silently clipping bars while the title still counts them.
+  const rows = Array.from({ length: 100 }, (_, i) => ({
+    requestId: 'r' + i, ts: i * 10000, latencyMs: 1000, status: 200, turnKey: 'turn-' + i,
+  }));
+  const tl = sessionTimeline(rows, { fmt: (t) => String(t) });
+  assert.equal(tl.segments.length, 100);
+  const right = 900 - 8; // W - padR
+  for (const s of tl.segments) {
+    assert.ok(s.x0 >= 8 - 1e-6 && s.x1 <= right + 1e-6, `segment out of viewBox: ${s.x0}..${s.x1}`);
+  }
+  assert.equal(tl.svg.match(/<rect /g).length, 100, 'every request bar renders');
+  // The small-segment floor must never overflow either: one dominant turn
+  // plus 11 tiny ones still fits the axis.
+  const mixed = sessionTimeline([
+    { requestId: 'big', ts: 0, latencyMs: 3600000, turnKey: 't0' },
+    ...Array.from({ length: 11 }, (_, i) => ({ requestId: 's' + i, ts: 3600000 + (i + 1) * 10000, latencyMs: 100, turnKey: 't' + (i + 1) })),
+  ], { fmt: (t) => String(t) });
+  assert.equal(mixed.segments.length, 12);
+  for (const s of mixed.segments) {
+    assert.ok(s.x1 <= right + 1e-6, `floored segment out of viewBox: ${s.x1}`);
+  }
 });
 
 test('sessionTimeline falls back to idle gap when turn_key is missing', () => {
@@ -2496,6 +2558,26 @@ test('mergeRecordsPages dedupes the boundary second and keeps newest-first', () 
   assert.equal(fresh.added, 2);
 });
 
+test('mergeRecordsPages keeps same-second ties in page order, loaded first', () => {
+  // The sort key is only second-granular ts; the backend breaks same-second
+  // ties by rowid DESC. The tie contract here is Array#sort stability over
+  // base.concat(added): records already loaded (the newer page) keep their
+  // slots ahead of the newly merged older page within one second.
+  const ts = '2026-08-20T12:00:02Z';
+  const loaded = [
+    { request_id: 'a', ts },
+    { request_id: 'b', ts },
+  ];
+  const page = [
+    { request_id: 'c', ts },
+    { request_id: 'b', ts }, // boundary-second refetch: deduped
+    { request_id: 'd', ts: '2026-08-20T12:00:01Z' },
+  ];
+  const out = mergeRecordsPages(loaded, page);
+  assert.equal(out.added, 2);
+  assert.deepEqual(out.records.map((r) => r.request_id), ['a', 'b', 'c', 'd']);
+});
+
 test('oldestTsSec floors the oldest loaded record to whole seconds', () => {
   const sec = Math.floor(Date.parse('2026-08-20T11:59:58Z') / 1000);
   assert.equal(oldestTsSec([{ ts: '2026-08-20T12:00:03Z' }, { ts: '2026-08-20T11:59:58Z' }]), sec);
@@ -2698,4 +2780,60 @@ test('analyticsRowSortKey survives the move to pure.js unchanged', () => {
   assert.equal(analyticsRowSortKey({ tokens: 7 }, 'tokens'), 7);
   assert.equal(analyticsRowSortKey({ errPct: null }, 'errors'), -1);
   assert.equal(analyticsRowSortKey({ cost: null }, 'cost'), -1);
+});
+
+// ---------- Takeover tab ----------
+
+test('takeoverStatusBadge renders the five takeover states', () => {
+  assert.equal(takeoverStatusBadge({ installed: false }), '<span class="badge muted">not installed</span>');
+  assert.equal(takeoverStatusBadge({ installed: true, taken_over: false }), '<span class="badge muted">not taken over</span>');
+  assert.equal(takeoverStatusBadge({ installed: true, taken_over: true, drift_ok: true }), '<span class="badge ok">taken over</span>');
+  const drift = takeoverStatusBadge({ installed: true, taken_over: true, drift_ok: false, current: 'http://dead:1', expected: 'http://127.0.0.1:15721' });
+  assert.ok(drift.includes('badge err'));
+  assert.ok(drift.includes('>drift<'));
+  assert.ok(drift.includes('http://dead:1') && drift.includes('http://127.0.0.1:15721'), 'tooltip carries current → expected');
+  // Tooltip content is escaped.
+  assert.ok(!takeoverStatusBadge({ installed: true, taken_over: true, drift_ok: false, current: '"><img' }).includes('"><img'));
+  // Null-safe.
+  assert.equal(takeoverStatusBadge(null), '<span class="badge muted">not installed</span>');
+});
+
+test('takeoverClientLabel marks auto-selected variants and split-changing families', () => {
+  assert.equal(takeoverClientLabel({ name: 'claude' }), 'claude');
+  assert.ok(takeoverClientLabel({ name: 'pi', auto_selected: true }).includes('>*</span>'));
+  assert.ok(takeoverClientLabel({ name: 'pi', split_changes: true }).includes('⇄'));
+  assert.ok(!takeoverClientLabel({ name: 'pi' }).includes('*'));
+  assert.ok(!takeoverClientLabel({ name: '<b>' }).includes('<b>'));
+});
+
+test('takeoverRunSummary / takeoverRestoreSummary flatten mutation results', () => {
+  assert.equal(
+    takeoverRunSummary({ applied: [{ name: 'pi', note: 'best coverage' }, { name: 'claude' }], skipped: ['gemini-cli'] }),
+    'taken over: pi <span class="hint">(best coverage)</span>, claude · skipped (config not present): gemini-cli',
+  );
+  assert.equal(takeoverRunSummary({ applied: [], skipped: [] }), 'nothing to do');
+  assert.equal(takeoverRunSummary(null), 'nothing to do');
+  assert.equal(
+    takeoverRestoreSummary({ restored: ['pi'], skipped: ['codex'] }),
+    'restored: pi · skipped (no backup): codex',
+  );
+  assert.equal(takeoverRestoreSummary({ restored: [], skipped: [] }), 'nothing to restore');
+  // Names are escaped.
+  assert.ok(!takeoverRunSummary({ applied: [{ name: '<b>x' }], skipped: [] }).includes('<b>x'));
+});
+
+test('shadowMatchBadge classifies primary/shadow match rates', () => {
+  assert.equal(shadowMatchBadge(1), '<span class="badge ok">100.0%</span>');
+  assert.equal(shadowMatchBadge(0.995), '<span class="badge ok">99.5%</span>');
+  assert.equal(shadowMatchBadge(0.97), '<span class="badge warn">97.0%</span>');
+  assert.equal(shadowMatchBadge(0.8), '<span class="badge err">80.0%</span>');
+  assert.equal(shadowMatchBadge(null), '<span class="badge muted">—</span>');
+  assert.equal(shadowMatchBadge(NaN), '<span class="badge muted">—</span>');
+});
+
+test('takeoverModeHint describes each mode', () => {
+  assert.equal(takeoverModeHint('unified'), 'one entry per family — best native protocol coverage');
+  assert.equal(takeoverModeHint(''), 'one entry per family — best native protocol coverage');
+  assert.equal(takeoverModeHint('split'), 'one entry per native protocol — every model passes through unchanged');
+  assert.ok(takeoverModeHint('anthropic').includes('anthropic'));
 });

@@ -108,6 +108,12 @@ func (fakeCommands) BeginLogin(context.Context, string) (LoginStart, error) {
 func (fakeReads) Presets() []presets.Preset       { return nil }
 func (fakeReads) MCPSurface() MCPSurface          { return MCPSurface{} }
 func (fakeReads) SecurityBlocks() []SecurityBlock { return nil }
+func (fakeReads) TakeoverSurface(string) (TakeoverSurface, error) {
+	return TakeoverSurface{}, nil
+}
+func (fakeReads) TakeoverTemplate(string) (TakeoverTemplateDoc, error) {
+	return TakeoverTemplateDoc{}, nil
+}
 func (fakeReads) SecurityAdjudications() SecurityAdjudicationFeed {
 	return SecurityAdjudicationFeed{Adjudications: []SecurityAdjudication{}}
 }
@@ -120,4 +126,21 @@ func (fakeCommands) RefreshModels(context.Context, string) (ModelsRefreshResult,
 
 func (fakeCommands) ProbeMCP(context.Context, string) (MCPProbeResult, error) {
 	return MCPProbeResult{}, nil
+}
+func (fakeCommands) RunTakeover(string, string) (TakeoverRunResult, error) {
+	return TakeoverRunResult{}, nil
+}
+func (fakeCommands) RestoreTakeover(string) (TakeoverRestoreResult, error) {
+	return TakeoverRestoreResult{}, nil
+}
+func (fakeCommands) SaveTakeoverTemplate(string, []byte) error { return nil }
+func (fakeCommands) DeleteTakeoverTemplate(string) error       { return nil }
+func (fakeCommands) Replay(context.Context, string, string) (ReplayResult, error) {
+	return ReplayResult{}, nil
+}
+func (fakeCommands) TestRoute(context.Context, string) (RouteTestResult, error) {
+	return RouteTestResult{}, nil
+}
+func (fakeCommands) PullModelsCatalog(context.Context) (ModelsCatalogPull, error) {
+	return ModelsCatalogPull{}, nil
 }

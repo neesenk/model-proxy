@@ -265,6 +265,12 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleModels(w, r)
 	case p == "/api/models/refresh" && r.Method == http.MethodPost:
 		s.handleModelsRefresh(w, r)
+	case p == "/api/models/catalog/refresh" && r.Method == http.MethodPost:
+		s.handleModelsCatalogRefresh(w, r)
+	case p == "/api/routes/test" && r.Method == http.MethodPost:
+		s.handleRouteTest(w, r)
+	case p == "/api/replay" && r.Method == http.MethodPost:
+		s.handleReplay(w, r)
 	case p == "/api/logs" && r.Method == http.MethodGet:
 		s.handleLogs(w, r)
 	case p == "/api/requests" && r.Method == http.MethodGet:
@@ -273,6 +279,18 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleMCPSurface(w, r)
 	case p == "/api/mcp/test" && r.Method == http.MethodPost:
 		s.handleMCPTest(w, r)
+	case p == "/api/takeover" && r.Method == http.MethodGet:
+		s.handleTakeover(w, r)
+	case p == "/api/takeover" && r.Method == http.MethodPost:
+		s.handleTakeoverRun(w, r)
+	case p == "/api/takeover/restore" && r.Method == http.MethodPost:
+		s.handleTakeoverRestore(w, r)
+	case strings.HasPrefix(p, "/api/takeover/templates/") && r.Method == http.MethodGet:
+		s.handleTakeoverTemplateGet(w, r)
+	case strings.HasPrefix(p, "/api/takeover/templates/") && r.Method == http.MethodPut:
+		s.handleTakeoverTemplatePut(w, r)
+	case strings.HasPrefix(p, "/api/takeover/templates/") && r.Method == http.MethodDelete:
+		s.handleTakeoverTemplateDelete(w, r)
 	case p == "/api/sessions" && r.Method == http.MethodGet:
 		s.handleSessions(w, r)
 	case p == "/api/security" && r.Method == http.MethodGet:

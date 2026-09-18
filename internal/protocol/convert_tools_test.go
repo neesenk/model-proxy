@@ -438,7 +438,7 @@ func TestStreaming_MessageIdPassthrough(t *testing.T) {
 	if !strings.Contains(string(out), `"id":"chatcmpl-real"`) {
 		t.Errorf("forward did not pass through message id:\n%s", string(out))
 	}
-	rev := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_real\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	rev := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_real\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 	out2 := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(rev), "claude"))
 	if !strings.Contains(string(out2), `"id":"msg_real"`) {
 		t.Errorf("reverse did not pass through message id:\n%s", string(out2))

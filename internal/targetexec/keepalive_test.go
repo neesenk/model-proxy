@@ -61,7 +61,7 @@ func TestFlushCopyHeartbeatEmitsHeartbeatDuringSilence(t *testing.T) {
 	timed := newTimingResponseWriter(recorder)
 	writer := &frameWriter{ResponseWriter: timed, frames: make(chan string, 32)}
 	end := make(chan streamEnd, 1)
-	go func() { end <- flushCopyHeartbeat(writer, pipeReader, 10*time.Millisecond) }()
+	go func() { end <- flushCopyHeartbeat(writer, pipeReader, pipeReader, 10*time.Millisecond) }()
 
 	if frame := waitFrame(t, writer.frames); frame != ": ping\n\n" {
 		t.Fatalf("silence produced %q, want a heartbeat frame", frame)
@@ -98,7 +98,7 @@ func TestFlushCopyHeartbeatEmitsHeartbeatDuringSilence(t *testing.T) {
 func TestFlushCopyHeartbeatCleanEOFWithoutData(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	body := io.NopCloser(strings.NewReader(""))
-	if got := flushCopyHeartbeat(recorder, body, time.Hour); got != streamEOF {
+	if got := flushCopyHeartbeat(recorder, body, body, time.Hour); got != streamEOF {
 		t.Fatalf("end = %v, want clean EOF", got)
 	}
 	if recorder.Body.Len() != 0 {
@@ -106,23 +106,123 @@ func TestFlushCopyHeartbeatCleanEOFWithoutData(t *testing.T) {
 	}
 }
 
-// A heartbeat write failure (client gone) must release the parked reader
-// goroutine once the caller closes the body, exactly like flushCopy's
-// client-gone path.
+// Data resets the silence clock: heartbeat -> data -> silence must produce
+// another heartbeat AFTER the data (the ticker.Reset path), not only before.
+func TestFlushCopyHeartbeatResetsTickerOnData(t *testing.T) {
+	pipeReader, pipeWriter := io.Pipe()
+	recorder := httptest.NewRecorder()
+	writer := &frameWriter{ResponseWriter: recorder, frames: make(chan string, 32)}
+	end := make(chan streamEnd, 1)
+	go func() { end <- flushCopyHeartbeat(writer, pipeReader, pipeReader, 10*time.Millisecond) }()
+
+	if frame := waitFrame(t, writer.frames); frame != ": ping\n\n" {
+		t.Fatalf("initial silence produced %q, want a heartbeat", frame)
+	}
+	if _, err := pipeWriter.Write([]byte("data: a\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	// Extra heartbeats may already be queued ahead of the data frame on a
+	// slow scheduler; drain until the data arrives.
+	for frame := waitFrame(t, writer.frames); frame != "data: a\n\n"; frame = waitFrame(t, writer.frames) {
+		if frame != ": ping\n\n" {
+			t.Fatalf("unexpected frame %q before the data", frame)
+		}
+	}
+	if frame := waitFrame(t, writer.frames); frame != ": ping\n\n" {
+		t.Fatalf("post-data silence produced %q, want a heartbeat after the data", frame)
+	}
+	if err := pipeWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-end; got != streamEOF {
+		t.Fatalf("end = %v, want clean EOF", got)
+	}
+	body := recorder.Body.String()
+	dataAt := strings.Index(body, "data: a\n\n")
+	if dataAt <= 0 || !strings.Contains(body[dataAt:], ": ping\n\n") {
+		t.Fatalf("client body = %q, want heartbeats both before and after the data", body)
+	}
+}
+
+// An upstream read can split an SSE event at any byte. A heartbeat appended
+// behind a partial line would corrupt the client's reassembly, so ticks that
+// land mid-line must be deferred until the frame completes.
+func TestFlushCopyHeartbeatDefersToLineBoundary(t *testing.T) {
+	pipeReader, pipeWriter := io.Pipe()
+	recorder := httptest.NewRecorder()
+	writer := &frameWriter{ResponseWriter: recorder, frames: make(chan string, 32)}
+	end := make(chan streamEnd, 1)
+	go func() { end <- flushCopyHeartbeat(writer, pipeReader, pipeReader, 10*time.Millisecond) }()
+
+	partial := "data: {\"cho"
+	if _, err := pipeWriter.Write([]byte(partial)); err != nil {
+		t.Fatal(err)
+	}
+	if frame := waitFrame(t, writer.frames); frame != partial {
+		t.Fatalf("frame = %q, want the partial data chunk", frame)
+	}
+	// Stay silent well past several intervals: no heartbeat may be appended
+	// to the half-written line.
+	select {
+	case frame := <-writer.frames:
+		t.Fatalf("mid-frame silence produced %q, want the heartbeat deferred to a line boundary", frame)
+	case <-time.After(200 * time.Millisecond):
+	}
+	rest := "\"}\n\n"
+	if _, err := pipeWriter.Write([]byte(rest)); err != nil {
+		t.Fatal(err)
+	}
+	if frame := waitFrame(t, writer.frames); frame != rest {
+		t.Fatalf("frame = %q, want the rest of the split frame", frame)
+	}
+	if frame := waitFrame(t, writer.frames); frame != ": ping\n\n" {
+		t.Fatalf("aligned silence produced %q, want a heartbeat", frame)
+	}
+	if err := pipeWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-end; got != streamEOF {
+		t.Fatalf("end = %v, want clean EOF", got)
+	}
+	body := recorder.Body.String()
+	if stripped := strings.ReplaceAll(body, ": ping\n\n", ""); stripped != partial+rest {
+		t.Fatalf("client body minus heartbeats = %q, want the original stream %q", stripped, partial+rest)
+	}
+	for offset := 0; ; {
+		at := strings.Index(body[offset:], ": ping")
+		if at < 0 {
+			break
+		}
+		at += offset
+		if at > 0 && body[at-1] != '\n' {
+			t.Fatalf("heartbeat at offset %d is not at a line boundary: %q", at, body)
+		}
+		offset = at + len(": ping")
+	}
+}
+
+// A heartbeat write failure (client gone) must unplug and drain the parked
+// reader goroutine BEFORE flushCopyHeartbeat returns: the caller's post-copy
+// tail then runs strictly after the recording chain went idle.
 func TestFlushCopyHeartbeatWriteFailureReleasesReader(t *testing.T) {
 	pipeReader, pipeWriter := io.Pipe()
 	defer pipeWriter.Close()
 	body := &readWatchBody{ReadCloser: pipeReader, returned: make(chan struct{}, 1)}
 	end := make(chan streamEnd, 1)
-	go func() { end <- flushCopyHeartbeat(failingResponseWriter{}, body, 10*time.Millisecond) }()
+	go func() { end <- flushCopyHeartbeat(failingResponseWriter{}, body, pipeReader, 10*time.Millisecond) }()
 	if got := <-end; got != streamClientGone {
 		t.Fatalf("end = %v, want client gone", got)
 	}
-	body.Close()
+	// Regression: the caller's post-copy tail (body.Close, counter reads,
+	// usage commit) must never race a Read unwinding through the recording
+	// wrappers. flushCopyHeartbeat unplugs the parked Read itself (raw
+	// source close) and drains the reader BEFORE returning — the unwind
+	// signal must therefore already be observable here, without the caller
+	// having to close the body first.
 	select {
 	case <-body.returned:
 	case <-time.After(5 * time.Second):
-		t.Fatal("reader goroutine still parked after body close")
+		t.Fatal("reader goroutine still parked after flushCopyHeartbeat returned")
 	}
 }
 
@@ -275,5 +375,40 @@ func TestExecutorKeepaliveSkipsNonStream(t *testing.T) {
 	}
 	if got := writer.Body.String(); got != `{"ok":true}` {
 		t.Fatalf("non-stream body = %q, want untouched JSON", got)
+	}
+}
+
+// Heartbeat frames add bytes beyond the upstream body, so a keepalive stream
+// must not forward the upstream Content-Length; without keepalive the
+// zero-copy passthrough keeps it.
+func TestExecutorKeepaliveStripsUpstreamContentLength(t *testing.T) {
+	stream := "data: {\"id\":\"c1\",\"model\":\"model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	run := func(t *testing.T, keepalive string) *httptest.ResponseRecorder {
+		provider := &executorTestProvider{}
+		attempt, writer := testAttempt(provider, `{"model":"model","stream":true,"messages":[]}`, Policy{LastTarget: true})
+		runtime := attempt.Runtime()
+		runtime.Scheduling = configdomain.Scheduling{StreamKeepalive: keepalive}
+		attempt = NewAttempt(runtime, attempt.Plan(), attempt.Exchange(), attempt.Scope(), attempt.Policy())
+		response := testResponse(http.StatusOK, stream)
+		response.Header.Set("Content-Type", "text/event-stream")
+		response.Header.Set("Content-Length", "999")
+		result := (Executor{
+			Client: &sequenceDoer{responses: []*http.Response{response}},
+			State:  &executorState{},
+		}).Execute(attempt)
+		if !result.Committed {
+			t.Fatalf("result = %+v", result)
+		}
+		if got := writer.Body.String(); got != stream {
+			t.Fatalf("client body = %q, want the passthrough stream", got)
+		}
+		return writer
+	}
+	if got := run(t, "10ms").Header().Get("Content-Length"); got != "" {
+		t.Fatalf("keepalive stream forwarded Content-Length %q, want it stripped", got)
+	}
+	if got := run(t, "0").Header().Get("Content-Length"); got != "999" {
+		t.Fatalf("passthrough without keepalive lost Content-Length: got %q, want the upstream value", got)
 	}
 }

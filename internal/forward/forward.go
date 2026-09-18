@@ -867,6 +867,14 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 		// with verdict "skipped".
 		emitSecrets := patternSecretNames(secretNames)
 		adjSecretsOn := p.svc.Adjudicator != nil && cfg.Guard.AdjudicateEnabled() && action != "off"
+		// The repeat index is consulted even with the adjudicate channel
+		// OFF: a persisted high verdict has two enforcement faces — the
+		// session-block table (enforced above with the channel off) and the
+		// repeat content index — and they must not diverge when the operator
+		// disables the channel (e.g. to stop the LLM spend); decision 39's
+		// "any later request carrying the same bytes is intercepted" carries
+		// no channel-off exemption.
+		repeatIndexOn := p.svc.Adjudicator != nil && action != "off"
 		var secretFailOpen []string
 		// Repeat interception: hit bytes already adjudicated HIGH on an
 		// earlier request (persisted sha256 index in the adjudication
@@ -879,7 +887,7 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 			rule, reason, evidence, model string
 			names                         []string
 		}
-		if adjSecretsOn {
+		if repeatIndexOn {
 			jobs, leftover := buildAdjudications(sc, preGuardBody, emitSecrets, AdjudicationKindSecret, false, cfg.Guard.Adjudicate.ContextWindow(), adjMeta)
 			var adjJobs []GuardAdjudication
 			for _, j := range jobs {
@@ -894,7 +902,18 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 				}
 				adjJobs = append(adjJobs, j)
 			}
-			secretFailOpen = append(leftover, p.enqueueAdjudications(adjJobs)...)
+			if adjSecretsOn {
+				secretFailOpen = append(leftover, p.enqueueAdjudications(adjJobs)...)
+			} else {
+				// Channel off: consult-only — no enqueue, and the spans that
+				// were NOT repeat-blocked keep the classic immediate record
+				// below exactly as before (same names, no "skipped" verdict:
+				// nothing was deferred, the channel is off).
+				for _, j := range adjJobs {
+					secretFailOpen = append(secretFailOpen, j.Rule)
+				}
+				secretFailOpen = append(secretFailOpen, leftover...)
+			}
 			if len(repeatBlocked.names) > 0 {
 				if p.svc.Metrics != nil {
 					for _, name := range repeatBlocked.names {
@@ -921,19 +940,14 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 				if adjMeta.SessionID != "" {
 					p.svc.Adjudicator.BlockSession(adjMeta.SessionID, repeatBlocked.rule, requestID, repeatBlocked.reason)
 				}
-				// The intercepted names are handled by the record above — they
-				// must not also take the classic fail-open record.
-				blockedSet := map[string]bool{}
-				for _, n := range repeatBlocked.names {
-					blockedSet[n] = true
-				}
-				emit := secretFailOpen[:0]
-				for _, n := range secretFailOpen {
-					if !blockedSet[n] {
-						emit = append(emit, n)
-					}
-				}
-				secretFailOpen = emit
+				// Fail-open suppression is SEGMENT-granular, never
+				// name-granular: intercepted jobs were consumed by the
+				// ContentBlocked loop above, so every secretFailOpen entry
+				// belongs to a DIFFERENT segment — a cap-overflow/dedup
+				// leftover span, or a failed enqueue of a non-blocked job.
+				// One rule with two segments (A intercepted, B failed) keeps
+				// both records: the repeat record above covers segment A, the
+				// fail-open record below covers segment B.
 			}
 			emitSecrets = secretFailOpen
 		}
@@ -954,7 +968,7 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 				Detail:    "secrets=" + strings.Join(emitSecrets, ",") + " action=" + action,
 			})
 			verdict := ""
-			if len(secretFailOpen) > 0 {
+			if adjSecretsOn && len(secretFailOpen) > 0 {
 				verdict = "skipped" // names that could not be adjudicated (cap/dedup/queue overflow)
 			}
 			AuditGuardHit(runtime.SecLog, GuardAuditHit{

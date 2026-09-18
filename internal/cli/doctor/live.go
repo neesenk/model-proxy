@@ -392,44 +392,21 @@ func RenderDoctorTakeover(drift []ClientDrift) string {
 	return display.Bold("Takeover") + "\n  " + strings.Join(parts, "  ·  ") + "\n"
 }
 
-// ClientDrift is the takeover state of one agent client: taken (a backup
-// marker exists) or not; when taken, ok reports whether the client's config
-// still points at this proxy. current/expected feed the drift detail line.
-type ClientDrift struct {
-	Client   string
-	File     string
-	Taken    bool
-	OK       bool
-	Current  string
-	Expected string
-}
+// ClientDrift is the takeover state of one agent client — the type and the
+// taken/drift computation live in internal/takeover (single owner shared by
+// doctor, the takeover command's post-write verification, and the Web admin
+// takeover surface); this alias keeps the doctor API stable.
+type ClientDrift = takeover.ClientDrift
 
-// checkTakeoverDrift compares every taken-over client's proxy pointer against
-// the value takeover would write today. Drift happens when a client upgrade
-// rewrites its config or the proxy's listen address changes — the agent then
-// silently talks to a dead endpoint, which looks exactly like "agent stuck".
-// Local files only, read-only. The pointer is template-driven (drift probe
-// declared by each takeover template; templatesDir "" = DefaultTemplatesDir).
+// CheckTakeoverDrift compares every taken-over client's proxy pointer against
+// the value takeover would write today (delegates to takeover.CheckDrift).
+// Local files only, read-only. Template load failures degrade to a stderr
+// note and an empty result — doctor stays best-effort.
 func CheckTakeoverDrift(cfg *configdomain.Config, bakDir, templatesDir string) []ClientDrift {
-	out := []ClientDrift{}
-	clients, err := takeover.ListClients(cfg, "", templatesDir)
+	out, err := takeover.CheckDrift(cfg, bakDir, templatesDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "doctor: takeover templates: %v\n", err)
-		return out
-	}
-	for _, c := range clients {
-		d := ClientDrift{Client: c.Name, File: c.File}
-		if _, err := os.Stat(filepath.Join(bakDir, c.Name+".bak")); err != nil {
-			out = append(out, d) // no backup marker → not taken over
-			continue
-		}
-		d.Taken = true
-		d.Current, d.Expected = c.Template.Pointer(cfg)
-		// A template without a drift probe is exempt from drift detection —
-		// there is nothing to compare, and reporting it as drifted would be a
-		// false alarm right after every takeover (mcp-only templates).
-		d.OK = d.Current == d.Expected || d.Current == "(no drift probe)"
-		out = append(out, d)
+		return []ClientDrift{}
 	}
 	return out
 }

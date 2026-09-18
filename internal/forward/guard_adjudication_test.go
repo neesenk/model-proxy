@@ -422,3 +422,111 @@ func containsName(names []string, want string) bool {
 	}
 	return false
 }
+
+// TestServeGuardRepeatBlockedKeepsSiblingFailOpen: one rule with two distinct
+// spans in one request — span A repeats previously-adjudicated-high content
+// (repeat interception), span B's Enqueue fails (queue full). The repeat
+// record covers segment A only; segment B must still get its fail-open
+// record. A name-granular suppression would delete B's record because the
+// RULE name already appears in the repeat record.
+func TestServeGuardRepeatBlockedKeepsSiblingFailOpen(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("ok"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	adj.enqueue = func() bool { return false } // every enqueue refuses
+	h.svc.Adjudicator = adj
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off",
+		Adjudicate: guardAdjudicateOn()}))
+	snap.Guard = guardScanner(t, nil)
+
+	keyA := "sk-capture-dummy-not-a-real-key-aa"
+	keyB := "sk-capture-dummy-not-a-real-key-bb"
+	contentBlockedHit = keyA
+	defer func() { contentBlockedHit = "" }()
+
+	audit, _ := serveCollectingAudit(t, h, &snap, secretBody(keyA+" and "+keyB), nil, http.StatusBadRequest)
+	var repeat, failOpen bool
+	for _, r := range audit {
+		if r.Kind != seclog.KindSecret || !containsName(r.Names, "openai_api_key") {
+			continue
+		}
+		switch {
+		case r.Verdict == "high" && r.Action == "block":
+			repeat = true // segment A: repeat interception record
+		case r.Verdict == "skipped":
+			failOpen = true // segment B: enqueue refusal fail-open record
+		}
+	}
+	if !repeat {
+		t.Error("repeat interception record (verdict=high action=block) missing")
+	}
+	if !failOpen {
+		t.Error("sibling segment's fail-open record (verdict=skipped) was suppressed by name-granular dedup")
+	}
+}
+
+// TestServeGuardRepeatBlockedWithChannelOff: the repeat-interception index
+// is enforced even with the adjudicate channel disabled — the session-block
+// table from the same high verdict already enforces with the channel off
+// (TestServeGuardAdjudicationBlockedSession), and the two persistence faces
+// of one verdict must not diverge when the operator stops the LLM spend.
+func TestServeGuardRepeatBlockedWithChannelOff(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("ok"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	h.svc.Adjudicator = adj
+	// NO Adjudicate: guardAdjudicateOn() — the channel is OFF.
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off"}))
+	snap.Guard = guardScanner(t, nil)
+
+	key := "sk-capture-dummy-not-a-real-key-zz"
+	contentBlockedHit = key
+	defer func() { contentBlockedHit = "" }()
+
+	audit, _ := serveCollectingAudit(t, h, &snap, secretBody(key), nil, http.StatusBadRequest)
+	var repeat bool
+	for _, r := range audit {
+		if r.Kind == seclog.KindSecret && r.Verdict == "high" && r.Action == "block" && containsName(r.Names, "openai_api_key") {
+			repeat = true
+		}
+	}
+	if !repeat {
+		t.Error("channel-off repeat interception record (verdict=high action=block) missing")
+	}
+	// Nothing may be enqueued with the channel off.
+	if jobs := adj.captured(); len(jobs) != 0 {
+		t.Errorf("channel off still enqueued adjudication jobs: %+v", jobs)
+	}
+}
+
+// TestServeGuardChannelOffClassicRecordUnchanged: with the channel off and
+// NO repeat hit, the classic immediate record keeps its pre-channel shape —
+// verdict empty (not "skipped"), one record, request flows upstream.
+func TestServeGuardChannelOffClassicRecordUnchanged(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("ok"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	h.svc.Adjudicator = adj
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off"}))
+	snap.Guard = guardScanner(t, nil)
+
+	audit, _ := serveCollectingAudit(t, h, &snap, secretBody("sk-capture-dummy-not-a-real-key-cc"), nil, http.StatusOK)
+	var classic int
+	for _, r := range audit {
+		if r.Kind == seclog.KindSecret && containsName(r.Names, "openai_api_key") {
+			classic++
+			if r.Verdict != "" {
+				t.Errorf("channel-off classic record verdict = %q, want empty (nothing was deferred)", r.Verdict)
+			}
+			if r.Action != "log" {
+				t.Errorf("channel-off classic record action = %q, want log", r.Action)
+			}
+		}
+	}
+	if classic != 1 {
+		t.Errorf("classic records = %d, want 1", classic)
+	}
+	if jobs := adj.captured(); len(jobs) != 0 {
+		t.Errorf("channel off enqueued jobs: %+v", jobs)
+	}
+}

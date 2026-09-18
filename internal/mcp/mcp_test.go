@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -186,5 +188,50 @@ func TestSessionTable_OnEvict(t *testing.T) {
 	}
 	if len(evicted) != 4 || evicted[3] != e+":srvE" {
 		t.Fatalf("expiry evict = %v", evicted)
+	}
+}
+
+// TestSessionTable_RouteOpsConcurrent hammers one route session's RouteXxx
+// methods from many goroutines. Meaningful under -race: the Subs/Sticky maps
+// are shared state and must be serialized under the table lock (regression
+// for map access after Unlock, which crashed as concurrent map writes).
+func TestSessionTable_RouteOpsConcurrent(t *testing.T) {
+	tbl := NewSessionTable(64, time.Minute)
+	sid := tbl.PutRoute("r")
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			server := fmt.Sprintf("srv-%d", g%3)
+			tool := fmt.Sprintf("tool-%d", g%4)
+			for i := 0; i < 200; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				tbl.RouteSubPut(sid, SubSession{Server: server, Account: "a", UpstreamID: "u", Initialized: true})
+				tbl.RouteSubGet(sid, server)
+				tbl.RouteStickyPut(sid, tool, server)
+				tbl.RouteStickyGet(sid, tool)
+				tbl.RouteToolsPut(sid, []ToolSpec{{Name: tool}})
+				tbl.RouteToolsGet(sid)
+				tbl.RouteSubs(sid)
+				if i%17 == 0 {
+					tbl.RouteSubDrop(sid, server)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	close(stop)
+	// The session survived and its state is coherent.
+	if !tbl.RouteSessionValid(sid) {
+		t.Fatal("route session lost")
+	}
+	if tools, ok := tbl.RouteToolsGet(sid); !ok || len(tools) != 1 {
+		t.Fatalf("tools cache = %v %v", tools, ok)
 	}
 }

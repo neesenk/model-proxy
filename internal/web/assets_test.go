@@ -786,3 +786,86 @@ func TestWebAssetsMCPTabContract(t *testing.T) {
 			strings.Count(js, `if (name === 'mcp') renderMCPTab();`))
 	}
 }
+
+// TestWebAssetsTakeoverTabContract pins the Takeover tab's wiring points —
+// same regression chain as the MCP tab: panel map entry, both tab application
+// call sites, the parseHash whitelist, the boot chain, the index.html
+// button/section/modal, and the API surfaces it consumes.
+func TestWebAssetsTakeoverTabContract(t *testing.T) {
+	indexHTML := mustWebAsset(t, "index.html")
+	js := mustWebAsset(t, "app.js")
+	for _, want := range []string{
+		`data-tab="takeover"`,
+		`id="tab-takeover"`,
+		`id="tk-modal"`,
+	} {
+		if !strings.Contains(indexHTML, want) {
+			t.Errorf("index.html missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		`takeover: document.getElementById('tab-takeover'),`,               // panels map entry
+		`if (name === 'takeover') renderTakeoverTab();`,                    // both activate call sites
+		`tab === 'takeover'`,                                               // parseHash whitelist
+		`} else if (bootTab === 'takeover') {`,                             // boot chain branch
+		`async function renderTakeoverTab()`,                               // renderer exists
+		`apiGet('/api/takeover?mode=' + encodeURIComponent(takeoverMode))`, // read surface (mode preview)
+		`apiPost('/api/takeover', { client, mode: takeoverMode })`,         // run surface
+		`apiPost('/api/takeover/restore', { client })`,                     // restore surface
+		`/api/takeover/templates/`,                                         // template editor surface
+		`retainTab(panel, '.tk-host', loadTakeover)`,                       // re-entry guard marker
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q", want)
+		}
+	}
+	if strings.Count(js, `if (name === 'takeover') renderTakeoverTab();`) != 2 {
+		t.Errorf("renderTakeoverTab call sites = %d, want exactly 2 (activateTab + activateTabSilent)",
+			strings.Count(js, `if (name === 'takeover') renderTakeoverTab();`))
+	}
+}
+
+// TestWebAssetsEvalTabContract pins the Eval tab's wiring (same regression
+// chain as MCP/Takeover) plus the diagnostics actions landing in existing
+// surfaces: request replay strip, per-route test button, catalog refresh.
+func TestWebAssetsEvalTabContract(t *testing.T) {
+	indexHTML := mustWebAsset(t, "index.html")
+	js := mustWebAsset(t, "app.js")
+	for _, want := range []string{
+		`data-tab="eval"`,
+		`id="tab-eval"`,
+	} {
+		if !strings.Contains(indexHTML, want) {
+			t.Errorf("index.html missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		`eval: document.getElementById('tab-eval'),`, // panels map entry
+		`if (name === 'eval') renderEvalTab();`,      // both activate call sites
+		`tab === 'eval'`,                             // parseHash whitelist
+		`} else if (bootTab === 'eval') {`,           // boot chain branch
+		`async function renderEvalTab()`,             // renderer exists
+		`apiGet('/api/shadow-report')`,               // shadow surface
+		`apiGet('/api/fusion')`,                      // fusion surface
+		`retainTab(panel, '.eval-host', loadEval)`,   // re-entry guard marker
+		// Replay (request detail) / route test (schedule) / catalog refresh
+		// (models) wiring.
+		`apiPost('/api/replay', { id, provider })`,
+		`apiPost('/api/routes/test', { model: route })`,
+		`apiPost('/api/models/catalog/refresh')`,
+		`data-test-route`,
+		`data-replay-id`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q", want)
+		}
+	}
+	if strings.Count(js, `if (name === 'eval') renderEvalTab();`) != 2 {
+		t.Errorf("renderEvalTab call sites = %d, want exactly 2 (activateTab + activateTabSilent)",
+			strings.Count(js, `if (name === 'eval') renderEvalTab();`))
+	}
+	// Shadow records are never replayable: the strip guard must stay.
+	if !strings.Contains(js, `if (id.startsWith('shadow-')) return '';`) {
+		t.Error("replay strip lost the shadow-record guard")
+	}
+}

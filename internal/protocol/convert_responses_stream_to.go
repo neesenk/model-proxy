@@ -407,6 +407,17 @@ func (t *anthropicSSEToResponsesSSE) handle(event string, data map[string]any) {
 			}
 		}
 	case "message_stop":
+		// A bare message_stop without a preceding stop_reason-carrying
+		// message_delta is a truncated generation — the same-protocol cache
+		// gate requires a non-empty stop_reason. finish() would synthesize
+		// response.completed, faking a clean terminal on exactly the client
+		// bytes that gate checks, so fail closed exactly like streamEnd's
+		// no-terminal branch.
+		if t.stopRsn == "" {
+			t.emitFailed("upstream stream ended without a terminal stop_reason")
+			t.done = true
+			return
+		}
 		t.finish()
 	case "ping":
 		// keep-alive, no responses equivalent

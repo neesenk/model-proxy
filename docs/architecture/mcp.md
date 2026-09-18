@@ -40,6 +40,8 @@ key（apikey provider 限定；aqp/codex 在 config 校验期即拒绝，`auth: 
 取自同一代。header 过界由 `internal/mcp` 的双向窄白名单控制（客户端侧
 Accept/Content-Type/MCP-Protocol-Version；响应侧 Content-Type/Cache-Control/
 MCP-Protocol-Version + 改写后的 Mcp-Session-Id），凭据与 hop-by-hop 永不过界。
+上游客户端（`mcpClientFor` 与 probe 共用策略 `mcp.CheckNoCrossOriginRedirect`）拒绝
+**跨域重定向**：凭据头在首次发送前注入，跟随 3xx 到外域会泄 key；同源重定向正常跟随。
 
 ## 会话与账号
 
@@ -49,6 +51,8 @@ MCP-Protocol-Version + 改写后的 Mcp-Session-Id），凭据与 hop-by-hop 永
 - 上游 `initialize` 响应带回 `Mcp-Session-Id` 时建立绑定
   `local → (server, account, upstream id)` 并改写响应头；后续请求按本地 id 粘到
   **同一账号**并还原上游 id。stateless 上游（实测 Firecrawl 无 session id）不铸造会话。
+  已建会话上 re-initialize 且上游**轮换**了自己的 id 时，绑定刷新到新 id
+  （`SessionTable.RefreshUpstream`），否则后续请求拿陈旧 id 必 404。
 - 会话绑定 server：拿着 A server 的会话访问 B server 按未知会话 404。
 - 无会话请求：池内 round-robin（进程级计数器）；**401 时一次**账号轮换重试（镜像
   `BufferedLeg` 的一次 401 语义），不写健康状态、不引入完整 failover。带会话的 401
@@ -62,7 +66,7 @@ request log `Record.Kind`（`json:"kind,omitempty"`）：空 = LLM 流量（历�
 `"mcp"` = 网关交换。MCP 记录的投影：`Protocol="mcp"`、`Method`=JSON-RPC method
 （GET/DELETE 用 HTTP 动词，批量标注 `(batch)`）、`Path=/mcp/<name>`、`Exposed`=服务器
 名、`Provider`=账号虚拟 id（匿型为空）、status/latency/收发 size 与 body 截断策略与
-LLM 记录一致。首期不进 live events（Live 是 LLM 视图）。
+LLM 记录一致。MCP 交换进入 live events（`protocol="mcp"`，见下文「统计、Live 事件与配额冷却」）。
 
 ## CLI
 
@@ -84,7 +88,9 @@ initialize + tools/list，经 `internal/mcp.Probe`）为离线诊断，出站走
   notifications/initialized，各自独立选账号（池内 RR）、记录上游 session id 与**该后端
   协商的协议版本**（后续子会话请求以 `protoOverride` 覆盖 `MCP-Protocol-Version`，
   例如智谱实测协商到 2024-11-05）。并发同（session, server）可能重复 initialize，
-  最后一次 `RouteSubPut` 生效——无害（两个上游会话都有效）。
+  最后一次 `RouteSubPut` 生效——HTTP 后端无害（两个上游会话都有效）；stdio spawn 按
+  registry key 单飞（`lockSpawn` + 锁内复查，败者不 fork），registry put 覆盖时 Close
+  旧 conn 是兜底（锁外 Close，不串行化 registry）。
 - `tools/list`：按 target 顺序聚合各后端工具，对外只暴露**规范名**（第一 target 的
   schema 胜出；获取失败的后端跳过，聚合面降级不整体失败），按路由会话缓存
   （`RouteToolsPut`）；工具等价是 config 声明的人工事实，v1 不做 schema/参数推导。
@@ -93,6 +99,8 @@ initialize + tools/list，经 `internal/mcp.Probe`）为离线诊断，出站走
   改写 params.name 后透传参数。**failover 只发生在传输/鉴权/会话/限流/服务端故障**
   （`mcp.FailoverStatus`：网络错误、401、404、429、5xx；401/404 同时 drop 子会话强制
   重建）；HTTP <300 的 JSON-RPC **业务错误原样返回、绝不 failover**。全部失败 502。
+  候选集为空时区分两种语义：无人声明该工具 → -32602 unknown tool；声明者全部因
+  配额窗耗尽被预降权跳过 → -32000 quota-exhausted（而非误报 unknown tool）。
 - `DELETE`：向所有已初始化子会话转发 DELETE 后清本地会话；notifications 向已初始化
   子会话广播（fire-and-forget，客户端恒 202）；`ping` 本地应答；其他方法 -32601。
 - 会话表路由态（子会话/粘滞/工具缓存）只能经 `SessionTable.RouteXxx` 方法访问
@@ -110,14 +118,18 @@ GET 流结束即删会话（相关性随流消亡）。路由 target 引用 sse 
 
 ### stdio 后端（`transport: stdio`）
 
-本地子进程后端（智谱 vision、火山豆包搜索形态）：`command` + `env`（`${account.api_key}`
-模板 / `env:VAR` / 非密字面量；基础环境最小化 PATH/HOME/TMPDIR/LANG，凭据注入走
+本地子进程后端（智谱 vision、火山豆包搜索形态）：`command` + `env`（值为
+`${account.api_key}` 模板、`env:VAR` 进程环境引用，或良性键的字面量——模式开关类
+配置直接写 config；凭据形键名（KEY/TOKEN/SECRET/PASSWORD/AUTH/CREDENTIAL 分段匹配）
+的字面量在加载期拒绝，红线 3；基础环境最小化 PATH/HOME/TMPDIR/LANG，凭据注入走
 `config.ResolveMCPStdioEnv`，daemon 与 CLI 共用）。`internal/mcp.StdioConn` 拥有子进程：
 换行分隔 JSON-RPC、按 id 解复用、Close 杀进程并回收。进程模型是**每客户端会话一进程**
 （MCP stdio 语义单客户端），pinned 挂本地会话 id、路由挂 (route session, server) 键；
 `mcpStdioRegistry`（processServices，每 server 8 个上限）是 owner：会话表 `OnEvict`
 （TTL/LRU/DELETE，锁外触发）联动 kill，`Proxy.Close` 开头 killAll（子进程不写日志）。
 stdio 会话无上游 session id 概念；子进程死亡 → 502 + 丢会话让客户端重连。
+stdio 交换同样受 `timeout:` 约束：`StdioConn.Call(ctx, ...)` 监听 ctx，挂起的子进程
+不再永久阻塞调用方（pinned 转发/握手、路由子会话、probe、CLI 全接线）。
 http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验拒绝。
 
 ### 出站扫描与静态头

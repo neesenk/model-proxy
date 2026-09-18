@@ -26,6 +26,8 @@ func TestAgentRestoreOnBoot(t *testing.T) {
 	f := NewFlusher(ss, m, tc, agents, nil, nil)
 	agents.IncRequests("pi", "zhipu", "glm")
 	agents.AddTokens("pi", "zhipu", "glm", obscounters.TokenUsage{Input: 100, Output: 40, CacheCreation: 6, CacheRead: 30})
+	agents.AddLatency("pi", "zhipu", "glm", 500, 120)
+	agents.AddDuration("pi", "zhipu", "glm", 900)
 	agents.IncFailure("pi", "zhipu", "glm")
 	if !f.Flush(time.Now()) {
 		t.Fatal("first flush reported no write")
@@ -44,12 +46,19 @@ func TestAgentRestoreOnBoot(t *testing.T) {
 	}
 	defer res.Store.Close()
 
-	// Hot counter restored: the Agents read shows the persisted totals.
+	// Hot counter restored: the Agents read shows the persisted totals —
+	// including TTFT/Duration (the flusher's diff baseline carries them; a
+	// counter seeded without them restarts at zero and every post-restart
+	// delta clamps to zero until the in-memory total catches up with the
+	// whole history).
 	snap := agents2.Snapshot()
 	got := snap[obscounters.AgentKey{Agent: "pi", Provider: "zhipu", Model: "glm"}]
 	if got.Requests != 1 || got.Input != 100 || got.Output != 40 ||
 		got.CacheCreation != 6 || got.CacheRead != 30 || got.Failures != 1 {
 		t.Fatalf("restored agent counter = %+v, want reqs=1 in=100 out=40 cc=6 cr=30 fail=1", got)
+	}
+	if got.LatencySum != 500 || got.TTFTSum != 120 || got.DurationSum != 900 {
+		t.Fatalf("restored agent latency fields = lat=%d ttft=%d dur=%d, want 500/120/900", got.LatencySum, got.TTFTSum, got.DurationSum)
 	}
 
 	// Seeding alone must not double-count: an idle flush (no new traffic)
@@ -58,6 +67,8 @@ func TestAgentRestoreOnBoot(t *testing.T) {
 		t.Fatal("idle flush after boot restore wrote a batch (agent baseline not seeded)")
 	}
 	agents2.IncRequests("pi", "zhipu", "glm")
+	agents2.AddLatency("pi", "zhipu", "glm", 700, 200)
+	agents2.AddDuration("pi", "zhipu", "glm", 1300)
 	if !res.Flusher.Flush(time.Now().Add(time.Minute)) {
 		t.Fatal("flush after new traffic reported no write")
 	}
@@ -71,6 +82,13 @@ func TestAgentRestoreOnBoot(t *testing.T) {
 	}
 	if totalReq != 2 {
 		t.Fatalf("persisted agent requests = %d, want 2 (1 historical + 1 new, no re-count)", totalReq)
+	}
+	// The post-reboot TTFT delta must flush as the NEW traffic's value, not
+	// clamp to zero against the un-seeded counter (the pre-fix symptom:
+	// agent ttft/tok-s metrics read zero after every restart).
+	snap2 := agents2.Snapshot()[obscounters.AgentKey{Agent: "pi", Provider: "zhipu", Model: "glm"}]
+	if snap2.TTFTSum != 120+200 || snap2.DurationSum != 900+1300 {
+		t.Fatalf("post-reboot agent counter ttft=%d dur=%d, want 320/2200 (baseline + new traffic)", snap2.TTFTSum, snap2.DurationSum)
 	}
 }
 

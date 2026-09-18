@@ -66,6 +66,15 @@ func (testReadAPI) ConfigDocument() (appapi.ConfigDocument, error) {
 }
 func (testReadAPI) ModelsDocument() appapi.ModelsDocument { return appapi.ModelsDocument{} }
 
+// Takeover stubs: the takeover surface is owned by another change; these test
+// doubles only need to satisfy the widened appapi interfaces.
+func (testReadAPI) TakeoverSurface(string) (appapi.TakeoverSurface, error) {
+	return appapi.TakeoverSurface{}, nil
+}
+func (testReadAPI) TakeoverTemplate(string) (appapi.TakeoverTemplateDoc, error) {
+	return appapi.TakeoverTemplateDoc{}, nil
+}
+
 type testCommandAPI struct {
 	begin func(context.Context, string) (appapi.LoginStart, error)
 }
@@ -98,6 +107,25 @@ func (api testCommandAPI) BeginLogin(ctx context.Context, name string) (appapi.L
 		return appapi.LoginStart{}, errors.New("not implemented")
 	}
 	return api.begin(ctx, name)
+}
+
+// Takeover stubs: see testReadAPI above.
+func (testCommandAPI) RunTakeover(string, string) (appapi.TakeoverRunResult, error) {
+	return appapi.TakeoverRunResult{}, nil
+}
+func (testCommandAPI) RestoreTakeover(string) (appapi.TakeoverRestoreResult, error) {
+	return appapi.TakeoverRestoreResult{}, nil
+}
+func (testCommandAPI) SaveTakeoverTemplate(string, []byte) error { return nil }
+func (testCommandAPI) DeleteTakeoverTemplate(string) error       { return nil }
+func (testCommandAPI) Replay(context.Context, string, string) (appapi.ReplayResult, error) {
+	return appapi.ReplayResult{}, nil
+}
+func (testCommandAPI) TestRoute(context.Context, string) (appapi.RouteTestResult, error) {
+	return appapi.RouteTestResult{}, nil
+}
+func (testCommandAPI) PullModelsCatalog(context.Context) (appapi.ModelsCatalogPull, error) {
+	return appapi.ModelsCatalogPull{}, nil
 }
 
 type completedLogin struct{}

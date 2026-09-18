@@ -452,12 +452,13 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	prices := s.reads.Pricing()
 	seriesOut := observeanalytics.Group(bs, by, prices.Overrides, prices.Catalog, prices.Aliases)
 	totals := observeanalytics.FoldTotals(bs, prices.Overrides, prices.Catalog, prices.Aliases)
-	priced, unpriced := map[string]bool{}, map[string]bool{}
+	priced, unpriced := map[providerModelPair]bool{}, map[providerModelPair]bool{}
 	for _, b := range bs {
+		key := providerModelPair{Provider: b.Provider, Model: b.Model}
 		if _, ok := pricing.ResolveAliased(prices.Overrides, prices.Catalog, prices.Aliases, b.Provider, b.Model); ok {
-			priced[b.Model] = true
+			priced[key] = true
 		} else {
-			unpriced[b.Model] = true
+			unpriced[key] = true
 		}
 	}
 	// Comparison window: the equal-length span immediately before `from`
@@ -505,7 +506,7 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	if agents == nil {
 		agents = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"granularity": g, "by": by, "from": from, "to": to, "series": seriesOut, "totals": totals, "compare": compare, "price_coverage": map[string]any{"priced": mapKeys(priced), "unpriced": mapKeys(unpriced)}, "heatmap": map[string]any{"from": yearFrom, "to": now.Unix(), "cells": observeanalytics.YearCells(heatBuckets, prices.Overrides, prices.Catalog, prices.Aliases)}, "agents": agents})
+	writeJSON(w, http.StatusOK, map[string]any{"granularity": g, "by": by, "from": from, "to": to, "series": seriesOut, "totals": totals, "compare": compare, "price_coverage": map[string]any{"priced": sortedProviderModels(priced), "unpriced": sortedProviderModels(unpriced)}, "heatmap": map[string]any{"from": yearFrom, "to": now.Unix(), "cells": observeanalytics.YearCells(heatBuckets, prices.Overrides, prices.Catalog, prices.Aliases)}, "agents": agents})
 }
 
 func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {

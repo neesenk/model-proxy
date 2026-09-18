@@ -1426,6 +1426,12 @@ export function mergeLiveAndPersistedRow(live, persisted) {
     base.input = live.input || 0;
     base.output = live.output || 0;
   }
+  // Cache buckets merge per field with the same live-non-zero-wins rule: a
+  // persisted row truncated to zero tokens by max_body_bytes must still pick
+  // up the live end event's cache counts (and a live zero must never erase a
+  // real persisted count).
+  if (live.cacheRead) base.cacheRead = live.cacheRead;
+  if (live.cacheCreation) base.cacheCreation = live.cacheCreation;
   // Fill from persisted only when live still lacks the value.
   if (!base.agent && persisted.agent) base.agent = persisted.agent;
   if (!base.model && persisted.model) base.model = persisted.model;
@@ -1770,8 +1776,10 @@ export function securitySegmentsHTML(row) {
 // (suppressed noise; it still counts in Rule hits and the JSONL trail). The
 // LLM-usage stats render only when the adjudication channel is (or was)
 // active; a disabled channel shows one "off" tile instead of two permanent
-// zeros.
-export function securityKpisHTML(blocks, counts, stats, adjudicationOn) {
+// zeros. When the server reports countsError (the verdict aggregation query
+// failed while records loaded), the verdict tiles render '—' as unavailable
+// instead of misleading zeros.
+export function securityKpisHTML(blocks, counts, stats, adjudicationOn, countsError) {
   const bl = blocks || [];
   const c = counts || {};
   const num = (v) => Number(v) || 0;
@@ -1780,15 +1788,18 @@ export function securityKpisHTML(blocks, counts, stats, adjudicationOn) {
   const outTok = Number(st.output_tokens) || 0;
   const tile = (k, v, err, d) =>
     `<div class="kpi"><div class="k">${esc(k)}</div><div class="v${err ? ' err' : ''}">${v}</div>${d ? `<div class="d">${esc(d)}</div>` : ''}</div>`;
+  const verdictTile = (k, v, errOn, d) => countsError
+    ? tile(k, '—', false, countsError)
+    : tile(k, fmtNum(v), errOn, d);
   const llm = adjudicationOn || (Number(st.calls) || 0) > 0
     ? tile('llm calls', fmtNum(st.calls || 0), false, 'cache hits free') +
       tile('llm tokens', fmtCompact(inTok + outTok), false, `in ${fmtCompact(inTok)} · out ${fmtCompact(outTok)}`)
     : tile('llm adjudication', 'off', false, 'guard.adjudicate not configured');
   return `<div class="kpi-grid">` +
     tile('blocked sessions', fmtNum(bl.length), bl.length > 0) +
-    tile('high verdicts', fmtNum(num(c.high)), num(c.high) > 0) +
-    tile('medium verdicts', fmtNum(num(c.medium)), false, 'no session block') +
-    tile('errors', fmtNum(num(c.error) + num(c.skipped)), num(c.error) + num(c.skipped) > 0) +
+    verdictTile('high verdicts', num(c.high), num(c.high) > 0) +
+    verdictTile('medium verdicts', num(c.medium), false, 'no session block') +
+    verdictTile('errors', num(c.error) + num(c.skipped), num(c.error) + num(c.skipped) > 0) +
     llm +
     `</div>`;
 }
@@ -2344,18 +2355,30 @@ export function sessionTimeline(rows, opts) {
     prev = n;
   }
   const usable = W - padL - padR;
-  const plotW = Math.max(usable - (segs.length - 1) * BREAK_W, 50);
+  // The compressed-gap strip shrinks as the segment count grows: agentic
+  // sessions split one segment per turn (100+ is normal), and reserving the
+  // full BREAK_W per gap would push the tail past the viewBox's right edge
+  // and silently clip those bars while the title still counts them.
+  const gaps = segs.length - 1;
+  const minPlotW = Math.max(usable / 2, 50);
+  const breakW = gaps > 0 ? Math.min(BREAK_W, Math.max(0, (usable - minPlotW) / gaps)) : 0;
+  const plotW = Math.max(usable - gaps * breakW, 50);
   // sqrt weighting + a floor so single-request bursts keep a readable width;
   // the floor only applies while few segments exist (it must never overflow).
-  const floorW = segs.length <= 12 ? 24 : 0;
+  const floorW = segs.length <= 12 ? Math.min(24, plotW / segs.length) : 0;
   const weights = segs.map((s) => Math.sqrt(Math.max(s.t1 - s.t0, 1000)));
   const wsum = weights.reduce((a, b) => a + b, 0);
+  // The floor can lift small shares past their allotment; rescale so the
+  // segments always sum to plotW and the axis stays inside the viewBox.
+  const widths = segs.map((s, i) => Math.max((plotW * weights[i]) / wsum, floorW));
+  const wTotal = widths.reduce((a, b) => a + b, 0);
+  const fit = wTotal > plotW ? plotW / wTotal : 1;
   let cursor = padL;
   for (let i = 0; i < segs.length; i++) {
     const s = segs[i];
     s.x0 = cursor;
-    s.w = Math.max((plotW * weights[i]) / wsum, floorW);
-    cursor += s.w + BREAK_W;
+    s.w = widths[i] * fit;
+    cursor += s.w + breakW;
   }
   const x = (t) => {
     for (const s of segs) {
@@ -2441,7 +2464,7 @@ export function sessionTimeline(rows, opts) {
   const tickSvg = ticks.map((tk) => `<text class="tl-tick" x="${x(tk.t).toFixed(1)}" y="${H - 5}" text-anchor="${tk.anchor}">${esc(fmt(tk.t))}</text>`).join('');
   // One dashed divider per compressed gap, centered in its reserved strip.
   const breaks = segs.slice(1).map((s) => {
-    const bx = s.x0 - BREAK_W / 2;
+    const bx = s.x0 - breakW / 2;
     return `<line class="tl-break" x1="${bx.toFixed(1)}" y1="${topH}" x2="${bx.toFixed(1)}" y2="${H - axisH}"><title>idle gap compressed</title></line>`;
   }).join('');
 
@@ -3221,4 +3244,89 @@ export function requestsFilterFromQuery(params) {
     errors: params.errors === '1' || params.errors === 'true',
     shadow: params.shadow === 'only' || params.shadow === 'exclude' ? params.shadow : '',
   };
+}
+
+// ---------- Takeover tab ----------
+
+// takeoverStatusBadge renders one client row's takeover state badge
+// (GET /api/takeover client entry). Five states: the client config file is
+// absent (not installed), no backup marker (not taken over), taken over and
+// the drift probe still points at this proxy (taken over), or drifted (err,
+// with the current → expected pointer detail in the tooltip).
+export function takeoverStatusBadge(c) {
+  if (!c || !c.installed) return '<span class="badge muted">not installed</span>';
+  if (!c.taken_over) return '<span class="badge muted">not taken over</span>';
+  if (c.drift_ok) return '<span class="badge ok">taken over</span>';
+  const tip = `now points at ${c.current || '?'} — takeover would write ${c.expected || '?'}`;
+  return `<span class="badge err" title="${esc(tip)}">drift</span>`;
+}
+
+// takeoverClientLabel renders the template (variant) cell: variants the
+// selected mode would write for their family get a "*" marker (the backend
+// gates it to multi-variant families, so single-variant clients stay clean),
+// and families where split mode would write a different entry set get a "⇄"
+// marker (the CLI's interactive unified-vs-split prompt surfaces as this hint).
+export function takeoverClientLabel(c) {
+  const name = esc(c.name || '');
+  const auto = c.auto_selected
+    ? '<span class="hint" title="variant the selected mode writes for this client family">*</span>'
+    : '';
+  const split = c.split_changes
+    ? ' <span class="hint" title="split mode writes one entry per native protocol for this family">⇄</span>'
+    : '';
+  return name + auto + split;
+}
+
+// takeoverModeHint describes what a takeover mode writes (shown next to the
+// mode select; the select re-resolves the per-family variant preview
+// server-side via GET /api/takeover?mode=).
+export function takeoverModeHint(mode) {
+  switch (mode) {
+    case 'split':
+      return 'one entry per native protocol — every model passes through unchanged';
+    case 'anthropic':
+    case 'openai':
+    case 'responses':
+      return `pin the ${mode} variant where the family has one (others: unified)`;
+    default:
+      return 'one entry per family — best native protocol coverage';
+  }
+}
+
+// takeoverRunSummary flattens a POST /api/takeover result into one status
+// line (applied with optional selection notes, skipped-not-installed).
+export function takeoverRunSummary(res) {
+  const parts = [];
+  const applied = (res && res.applied) || [];
+  if (applied.length) {
+    parts.push('taken over: ' + applied.map((a) => esc(a.name) + (a.note ? ` <span class="hint">(${esc(a.note)})</span>` : '')).join(', '));
+  }
+  const skipped = (res && res.skipped) || [];
+  if (skipped.length) parts.push('skipped (config not present): ' + skipped.map(esc).join(', '));
+  if (!parts.length) return 'nothing to do';
+  return parts.join(' · ');
+}
+
+// takeoverRestoreSummary flattens a POST /api/takeover/restore result.
+export function takeoverRestoreSummary(res) {
+  const parts = [];
+  const restored = (res && res.restored) || [];
+  if (restored.length) parts.push('restored: ' + restored.map(esc).join(', '));
+  const skipped = (res && res.skipped) || [];
+  if (skipped.length) parts.push('skipped (no backup): ' + skipped.map(esc).join(', '));
+  if (!parts.length) return 'nothing to restore';
+  return parts.join(' · ');
+}
+
+// ---------- Eval tab (shadow report + fusion) ----------
+
+// shadowMatchBadge renders the status-match rate (0..1) of a primary/shadow
+// route pair: ≥99% ok, ≥95% warn, below err, missing muted.
+export function shadowMatchBadge(rate) {
+  if (rate == null) return '<span class="badge muted">—</span>';
+  const n = Number(rate);
+  if (!Number.isFinite(n)) return '<span class="badge muted">—</span>';
+  const pct = n * 100;
+  const cls = pct >= 99 ? 'ok' : pct >= 95 ? 'warn' : 'err';
+  return `<span class="badge ${cls}">${pct.toFixed(1)}%</span>`;
 }

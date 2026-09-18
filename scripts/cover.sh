@@ -43,7 +43,7 @@ fi
 baseline=80
 
 # Coverage statement counting is toolchain-sensitive (docs/engineering/
-# pitfalls.md #33): CI pins the toolchain via go-version-file: go.mod, so a
+# pitfalls.md #34): CI pins the toolchain via go-version-file: go.mod, so a
 # different local toolchain can shift per-package numbers by a few points.
 # Warn (never fail) on a mismatch — the CI measurement stays authoritative.
 gomod_go=$(awk '/^go /{print $2; exit}' go.mod)
@@ -78,7 +78,7 @@ coverage_floor_for() {
     # Same harness shape as soak: main() is an os.Exit wrapper, scenarios
     # drive a live daemon over HTTP. Measured 80.1% under go1.27 locally but
     # 79.3% under the CI-pinned go1.26 (statement-counting drift, pitfalls
-    # #33) — the CI measurement is the authoritative floor.
+    # #34) — the CI measurement is the authoritative floor.
     model-proxy/scripts/e2eguard) echo "79.3" ;;
     *) echo "$baseline" ;;
   esac

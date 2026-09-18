@@ -51,7 +51,7 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
   管道/重定向/文件保留标准库默认 `LstdFlags` 时间戳（CI、收集场景）。
   serve 系命令启动时显式 `log.SetFlags(LstdFlags|Lmicroseconds)` 覆盖该判定，运行日志
   恒带时间戳。
-- 例外：`takeover`/`restore` 的逐客户端进度走 `log.Printf`（stderr）；`models refresh` 的 diff 行（`config: added/removed ...`）和 fallback 通知走 stderr；`config check` 的 `✗ config invalid` 走 **stdout**（`fmt.Println`，见下）。
+- 例外：`takeover`/`restore` 的逐客户端进度走 `log.Printf`（stderr）；`models refresh` 的 diff 行（`config: added/removed ...`）和 fallback 通知走 stderr；`doctor` 的 `✗ config invalid` 走 **stdout**（`fmt.Println`，见 §12）。
 
 ### 着色
 
@@ -72,7 +72,7 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
 | `truncate(s, n)` | `s[:n]+"..."`（n 之外截断），用于上游错误体摘录。 |
 | `compactNum(n)` | 紧凑数字（千位 K / 百万 M），用于计数器列。 |
 | `pad(s, n)` | 左对齐补空格到 n 列；`len(s)>=n` 时原样（不截断）。 |
-| `providerNames(cfg)` | 配置里的 provider 名，逗号分隔，**未排序**（map 迭代序）。用于「unknown provider」错误。 |
+| `providerNames(cfg)` | 配置里的 provider 名，逗号分隔，**已排序**。用于「unknown provider」错误。 |
 | `routeNames(cfg)` | 路由名，逗号分隔，**已排序**。用于 `serve` 启动日志。 |
 
 ### 全局选项
@@ -217,7 +217,7 @@ takeover list       # 可用模板:内置预设 + ~/.model-proxy/takeover-templa
   ```
   `guard.audit` 开启时按 doctor 同款语义追加一条 kind=drift 安全审计记录（agent=takeover，同日同 client 去重，见 §19）；审计追加失败只 stderr 提示。漂移不影响 exit code。`restore` 不做该校验（恢复原状是预期）。
 
-失败：`log.Fatal(err)` -> stderr + exit 1（config 加载失败 / 模板解析失败 / 未知 client / 备份失败 / 改写失败）。kimi 模板写 `~/.kimi/config.toml`：注入 `[providers."model-proxy"]`（`type = "openai_legacy"`，base_url 带 `/v1`）+ 每个暴露模型一个 `[models."<name>"]` 块；开启 `web.auth.api_keys_file` 后需把 `PROXY_MANAGED` 占位 key 换成文件里的真实 key。
+失败：`log.Fatal(err)` -> stderr + exit 1（config 加载失败 / 模板解析失败 / 未知 client / 备份失败 / 改写失败）。kimi 模板写 `~/.kimi-code/config.toml`：注入 `[providers."model-proxy"]`（`type = "openai_legacy"`，base_url 带 `/v1`）+ 每个暴露模型一个 `[models."<name>"]` 块；开启 `web.auth.api_keys_file` 后需把 `PROXY_MANAGED` 占位 key 换成文件里的真实 key。
 
 ---
 
@@ -529,7 +529,7 @@ config init|print|check
 stdout：
 ```
 listen: <LISTEN>
-provider <NAME>: openai_base_url=<URL> provider_id=<ID> (<N> models)
+provider <NAME>: openai_base_url=<URL> provider_id=<ID> priority=<P> (<N> models)
 ...
 route <EXPOSED>: <N> targets
 ...
@@ -537,7 +537,7 @@ route <EXPOSED>: <N> targets
 
 ### `config check`
 
-- 无效 -> **stdout** `✗ config invalid: <ERR>`（红）+ exit 1。
+- 无效 -> `log.Fatal`（stderr）+ exit 1。
 - 有效 -> stdout `✓ config valid`（绿）+ 缩进摘要：
   ```
     listen:    <LISTEN>
@@ -545,22 +545,23 @@ route <EXPOSED>: <N> targets
     providers: <N>
       <NAME>: <URL> (<ID>, <N> models)
       ...
-    routes:    <N>
+    routes:    <N> (derived from provider model lists; explicit routes override)
       <EXPOSED>: <N> targets
       ...
     scheduling: threshold=<T> cooldown=<D> rate_backoff=<D> timeout=<D> dwell=<D>
+    credentials: pools=<MODE> (<SOURCE>) oauth=<MODE> (<SOURCE>)
     guard: secrets=<ACTION> known_secrets=<BOOL> decode=<BOOL> paths=<ACTION> audit=<BOOL>
       audit_path: <PATH>
       patterns: built-in tables (embedded) + <N> custom (<NAME>, ...)
       extra_paths: <N>
   ```
-  guard 段为生效值（load 默认值已应用；`RenderGuardSummary`）：内置规则表嵌入在二进制里，只报「embedded」不报条数——这样 CLI 不需要依赖 internal/guard；自定义扩展（`guard.extra_patterns` 计数 + name 列表、`guard.extra_paths` 计数）来自 config 结构。
+  guard 段为生效值（load 默认值已应用；`RenderGuardSummary`）：内置规则表嵌入在二进制里，只报「embedded」不报条数——这样 CLI 不需要依赖 internal/guard；自定义扩展（`guard.extra_patterns` 计数 + name 列表、`guard.extra_paths` 计数）来自 config 结构。`credentials:` 行报池/OAuth 两侧各自的凭据存储模式与来源（env/config/default）；env 与 config 不一致时其后追加黄色 `⚠` 提示行。
 
 ### 通用
 
 - 无子命令 -> stdout `usage: model-proxy config [init|print|check]` + exit 1。
 - 未知子命令 -> stderr `unknown config subcommand: <SUB>` + exit 1。
-- config 加载失败（`print`/`check`）-> `log.Fatal`（stderr）+ exit 1；但 `check` 的「无效 config」走 stdout + exit 1（见上，便于脚本区分）。
+- config 加载失败（`print`/`check`）-> `log.Fatal`（stderr）+ exit 1（`doctor` 的「无效 config」例外走 stdout，见 §12）。
 
 ### Route target 字段（`routes:` 下每个 target）
 
@@ -677,7 +678,7 @@ stats [--from TIME] [--to TIME] [--provider P] [--model M] [--bucket B] [--granu
 - 窗口名：`[from, to]` 落在当天内显示 `今天`，否则 `MM-DD HH:MM ~ MM-DD HH:MM`。
 - `成功率` = `(requests − failures − 429) / requests`（`/api/stats`、`/api/agents` 路径；`/api/analytics` 无失败计数，该段省略），下限钳到 0.0%。
 - `等价成本`：仅 `/api/analytics` 且窗口内至少一个已定价点时出现（未定价点不计入）。
-- `承担 <P>%`：请求数占比最高的 provider（stats/analytics）；`--by-agent` 时为 input+output token 占比最高的 agent（与表格排序一致）。
+- `承担 <P>%`：请求数占比最高的 provider（stats/analytics）；`--by-agent` 时为总 token（input+output+cache_create+cache_read）占比最高的 agent（与表格排序一致）。
 - 无数据：摘要行为 `<窗口> 暂无数据`（后续仍打印原有的 `(no stats in range ...)` 行）。
 
 `--json` 输出结构不变（原样透传，无摘要行）。
@@ -706,13 +707,13 @@ provider         model               <day|month>     reqs      input    output  
 
 ### `--by-agent`（`renderAgents` -> `/api/agents`）
 
-带 `--by-agent` 时改走 `/api/agents`（agent 维度：哪个客户端发的请求），把窗口内所有 (agent, provider, model, minute) 桶按 agent 折叠成「谁在烧我的配额」汇总表，按 input+output 总 token 降序：
+带 `--by-agent` 时改走 `/api/agents`（agent 维度：哪个客户端发的请求），把窗口内所有 (agent, provider, model, minute) 桶按 agent 折叠成「谁在烧我的配额」汇总表，按总 token（input+output+cache_create+cache_read）降序：
 
 ```
-agent                reqs        input       output
+agent / model            reqs     input     output  cache_create  cache_read     total      lat     fail
 ```
 
-每行 = `<AGENT(16)> <reqs(10)> <input(12)> <output(12)>`（`compactNum`）。`--from`/`--to`/`--bucket` 仍适用；`--provider`/`--model`/`--agent` 过滤在此模式同样生效（作为 query 参数传给 `/api/agents` 由服务端过滤）。`--json` -> stdout 原始 `/api/agents` 响应（`agentResp`）。agent 识别见 `detectAgent`（claude-cli/x-claude-code-session-id -> `claude-code`，`codex` -> `codex`，`opencode` -> `opencode`，`pi/` -> `pi`，无 UA -> `unknown`，其余 -> `other`）。
+每行 = `<AGENT(24)> <reqs(8)> <input(10)> <output(10)> <cache_create(12)> <cache_read(11)> <total(10)> <lat(8)> <fail(8)>`（`compactNum`；`lat` 为平均延迟），每个 agent 行下按 token 降序缩进列出其 per-(provider, model) 分解行。`--from`/`--to`/`--bucket` 仍适用；`--provider`/`--model`/`--agent` 过滤在此模式同样生效（作为 query 参数传给 `/api/agents` 由服务端过滤）。`--json` -> stdout 原始 `/api/agents` 响应（`agentResp`）。agent 识别见 `detectAgent`（claude-cli/x-claude-code-session-id -> `claude-code`，`codex` -> `codex`，`opencode` -> `opencode`，`pi/` -> `pi`，无 UA -> `unknown`，其余 -> UA 派生标签（产品 token，如 `curl`），纯空白 UA 才是 `other`）。
 
 > 解析失败时，analytics 路径的报错为 `parse analytics response: <ERR>`（与 `/api/stats` 路径的 `parse stats response: <ERR>` 对应，见下节）。
 
@@ -806,7 +807,6 @@ Routes (dry-run: no live quota -> tier then priority)
     ⚠ no plan provider - only pay-as-you-go                                                       # 该路由无 plan provider 时
         ↔ target protocol <P> — converts when client protocol differs; lossy: …                    # target 声明 protocol: 时
         ⚠ reasoning-required model behind openai-chat conversion — … (replay cache not implemented) # reasoning 模型 + openai-chat 转换时（计入 warning 数）
-        ⚠ codex speaks the OpenAI Responses API … — only Responses-speaking clients …              # codex target（线协议说明，计入 warning 数）
         ⚠ no protocol: declared, but <ID> speaks <P> — …; add protocol: <P>                        # 缺 protocol: 且 provider 有协议 hint 时（计入 warning 数）
 
 Scheduling
@@ -815,13 +815,13 @@ Scheduling
 <⚠ N warning(s) | ✓ no warnings>
 ```
 - `<TIER>` = `plan` / `pay-as-you-go`。
-- `<SOURCE>` = `quotaSourceLabel(provider_id)`：aqp=`monthly_usage`、codex=`wham/usage`、zhipu=`quota/limit`、volcengine=`GetAFPUsage (AK/SK)`、deepseek=`user/balance`、kimi-code=`usages`、其他=`(none -> unknown at runtime)`。
+- `<SOURCE>` = `quotaSourceLabel(provider_id)`：aqp=`monthly_usage`、codex=`wham/usage`、zhipu=`quota/limit`、zcode=`quota/limit`、volcengine=`GetAFPUsage (AK/SK)`、deepseek=`user/balance`、kimi-code=`usages`、其他=`(none -> unknown at runtime)`。
 - `<PEAK>` = `peakSummary`：`09:00-12:00(×2), 14:00-18:00(×2)` 或 `-`。
 - 末行：`⚠ <N> warning(s)`（黄）或 `✓ no warnings`（绿）。返回值 = warning 数。
 
 ### 失败
 
-config 无效 -> **stdout** `✗ config invalid:  <ERR>`（红）+ exit 1（注意：`doctor` 的无效路径走 stdout + exit 1，同 `config check`）。
+config 无效 -> **stdout** `✗ config invalid:  <ERR>`（红）+ exit 1（`doctor` 的无效路径走 stdout + exit 1，`config check` 则是 stderr `log.Fatal`，见 §8）。
 
 ### `doctor --live` — 实时诊断（需 running daemon + web.enabled）
 
@@ -829,7 +829,7 @@ config 无效 -> **stdout** `✗ config invalid:  <ERR>`（红）+ exit 1（注�
 doctor --live [--config PATH]
 ```
 
-逻辑（`internal/cli/doctor/live.go` 的 `RenderDoctorLive`）：连 daemon `GET /api/status` + `GET /api/requests?errors=1&limit=5`，叠加本地 takeover 漂移检查（`<configDir>/.model-proxy/<client>.bak` 存在 = 已接管，校验该 client 配置里的 proxy 指针是否仍等于 `takeover.proxy_url` 推导值），输出**结论先行**报告，回答「agent 为什么不动了」。对 daemon 纯只读；唯一磁盘副作用：检出漂移的 client 在 `guard.audit` 开启时追加一条安全审计记录（见 §19）。有 `--live` 时离线报告不再输出。
+逻辑（`internal/cli/doctor/live.go` 的 `RenderDoctorLive`）：连 daemon `GET /api/status` + `GET /api/requests?errors=1&limit=5`，叠加本地 takeover 漂移检查（`<configDir>/.model-proxy/<client>.bak` 存在 = 已接管，校验该 client 配置里的 proxy 指针是否仍等于该 takeover 模板会写入的值——模板 `base_url`/`proxy_url` 推导，默认 `http://<listen>`），输出**结论先行**报告，回答「agent 为什么不动了」。对 daemon 纯只读；唯一磁盘副作用：检出漂移的 client 在 `guard.audit` 开启时追加一条安全审计记录（见 §19）。有 `--live` 时离线报告不再输出。
 
 ### stdout
 
@@ -868,7 +868,7 @@ Takeover
 - 结论区按严重度排序：✗ route 全灭 -> ⚠（pin / 配额将尽 / warnings / takeover 漂移）-> ✓ 健康 route 落点；无 ✗/⚠ 时首行 `✓ no problems found`。
 - route 全灭判定：schedule `ordered` 中 `available=true` 数为 0。daemon 的 decideOrder 只返回当前可调度目标（全灭时 `ordered` 为空），故 target 数与恢复时间候选由 CLI 端从生效路由表（推导 + 显式 routes）+ 池展开推导；`<CAUSE>` = `quota cooldown` / `daily cooldown` / `rate-limit cooldown` / `circuit breaker` / `model lock`，跨目标取最早恢复（模型锁按 target 的 model 精确匹配，数据源为 `/api/status` 的 `model_locks`）。
 - `request_log` 未开启时 Recent failures 节是一行 dim 提示（`request_log disabled — …`），不算错误；无任何失败记录时显示 `none recorded`。
-- takeover 三态：`not taken over`（无 .bak）/ `✓`（指针相符）/ `✗ drift`（指针不符、文件丢失或不可读；漂移细节进结论区）。各 client 期望值与 takeover 写入完全一致：claude `env.ANTHROPIC_BASE_URL`、opencode `provider[<pid>].options.baseURL`（含 `/v1` 后缀）、codex `model_provider` + `[model_providers."<pid>"]` 的 `base_url`、pi `providers[<pid>].baseUrl`。
+- takeover 三态：`not taken over`（无 .bak）/ `✓`（指针相符）/ `✗ drift`（指针不符、文件丢失或不可读；漂移细节进结论区）。漂移检查覆盖全部 takeover 模板，各 client 期望值与 takeover 写入完全一致：claude `env.ANTHROPIC_BASE_URL`、opencode `provider[<pid>].options.baseURL`（含 `/v1` 后缀）、codex `model_provider` + `[model_providers."<pid>"]` 的 `base_url`、pi `providers[<pid>].baseUrl`、gemini-cli `GOOGLE_GEMINI_BASE_URL`（带 `/v1` 后缀）、kimi（`~/.kimi-code/config.toml`）`providers."<pid>".base_url`；mcp-only 模板（claude-mcp）无漂移探针，豁免漂移判定（`(no drift probe)`）。
 - 漂移审计：`guard.audit` 开启（默认）时，每个漂移 client 追加一条 `kind=drift`、`agent=doctor` 的安全审计记录（`seclog.AppendSync`），`detail` 只含 `client=<名> expected=<期望host> actual=<实际host>`——`net/url` 解析取 `Host`，永不含 URL 路径与查询串；无 scheme 的指针（`evil-host:8317/v1` 会被误解析为 scheme）回退取第一个 `/` 前的部分（过滤控制字符），非 URL 占位值（含空格/括号的 `(file missing)` 等）归一为 `(no-url)`。**同一 client 当天已有 drift 记录则不重复追加**（漂移通常持续到用户修复；去重查询失败不阻断追加）。`guard.audit: false` 不写；append 失败只降级为 stderr `⚠ security audit append failed: <ERR>`，doctor 输出与 exit code 不变。
 
 ### 失败（stderr `✗ <ERR>` + exit 1）
@@ -966,7 +966,7 @@ replay <id> --to <provider> [--config PATH]
 
 ### 失败（stderr `✗ <ERR>` + exit 1）
 
-- 不可达：`cannot reach daemon at <LISTEN>: <ERR>` + 换行 `is `model-proxy serve` running?`
+- 不可达：`cannot reach daemon: <ERR>`
 - 无日志：`no request log for id <ID> (is request_log.enabled on?)`（404）
 - 记录无 body：`record <ID> has no captured request body`
 - 上游 ≥400：`✗ <BODY_TRUNC_400>`
@@ -1034,7 +1034,7 @@ freeze <provider> [--config PATH]
 wire record <provider> [--model M] [--prompt P] [--out DIR]
 ```
 
-逻辑（`internal/cli/diag/wire.go` 的 `CmdWireRecord`）：对 provider 的三个端点各发 `stream=true` 最小请求（`/responses`、`/chat/completions` 走 `openai_base_url`；`/v1/messages` 走 `anthropic_base_url`，缺省回落 `openai_base_url`），把**原始响应字节**写入 `<out>/<proto>_<provider><scenario>.sse`（`--out` 默认 `testdata/wire/`，供 `internal/protocol/convert_golden_test.go` 回放）。每端点录 3 个场景：**text**（无后缀，prompt 一句话）、**`_tool`**（强制工具调用：`get_weather` + `tool_choice` 强制）、**`_thinking`**（开启推理：responses 用 `reasoning.effort:low`、chat 用 `reasoning_effort:low`、anthropic 用 `thinking.budget_tokens`）——后两个覆盖工具调用/思考流这些纯文本流碰不到的转换硬路径，不支持的场景按失败写 `.err`。请求构造与 forward 同序：RewriteRequest → AuthHeaders → 配置 `headers` → ExtraHeaders（`/v1/messages` 预置 `anthropic-version`）；单请求 30s 超时；`--model` 缺省取 provider 首个模型/首个路由目标。responses 请求的两个特殊性：input 用 list 形式（codex 拒绝字符串简写）、不带 `max_output_tokens`（codex 400）。
+逻辑（`internal/cli/diag/wire.go` 的 `CmdWireRecord`）：对 provider 的三个端点各发 `stream=true` 最小请求（`/responses`、`/chat/completions` 走 `openai_base_url`；`/v1/messages` 走 `anthropic_base_url`，缺省回落 `openai_base_url`），把**原始响应字节**写入 `<out>/<proto>_<provider><scenario>.sse`（`--out` 默认 `testdata/wire/`，供 `internal/protocol/convert_golden_test.go` 回放）。每端点录 3 个场景：**text**（无后缀，prompt 一句话）、**`_tool`**（工具调用：`get_weather` 工具 + 祈使句 prompt，`tool_choice` 保持 `auto`——强制值会被 thinking-mode 后端 400）、**`_thinking`**（开启推理：responses 用 `reasoning.effort:low`、chat 用 `reasoning_effort:low`、anthropic 用 `thinking.budget_tokens`）——后两个覆盖工具调用/思考流这些纯文本流碰不到的转换硬路径，不支持的场景按失败写 `.err`。请求构造与 forward 同序：RewriteRequest → AuthHeaders → 配置 `headers` → ExtraHeaders（`/v1/messages` 预置 `anthropic-version`）；单请求 30s 超时；`--model` 缺省取 provider 首个模型/首个路由目标。responses 请求的两个特殊性：input 用 list 形式（codex 拒绝字符串简写）、不带 `max_output_tokens`（codex 400）。
 
 ### stdout / stderr
 
@@ -1052,11 +1052,11 @@ wire record <provider> [--model M] [--prompt P] [--out DIR]
 audit [--stats] [--from TIME] [--to TIME] [--kind KIND] [--limit N] [--json] [--config PATH]
 ```
 
-逻辑（`internal/cli/audit/audit.go` 的 `CmdAudit` -> `RenderAudit`）：离线直读 seclog 目录——`guard.audit_path`（默认 `~/.model-proxy/log/security/security.log`）取 `filepath.Dir`，扫描其中全部 `security-*.log`（活动 + 轮转文件，daemon 不在也能查，同 `doctor` 离线语义）。config 加载失败 -> `log.Fatal`（stderr）+ exit 1（同 `stats`）。
+逻辑（`internal/cli/audit/audit.go` 的 `CmdAudit` -> `RenderAudit`）：离线直读 seclog 目录——`guard.audit_path`（默认 `~/.model-proxy/log/security/security.log`）取 `filepath.Dir`，查询其中的 `security.db`（SQLite，审计的唯一查询面；daemon 不在也能查，同 `doctor` 离线语义）。同目录的 `security-*.log` 全量 JSONL 留痕不参与查询。config 加载失败 -> `log.Fatal`（stderr）+ exit 1（同 `stats`）。
 
 - `--from` / `--to`：`now`、时长（`1h`/`30m`，表示"多久之前"；另接受整数天数后缀 `7d`）、unix 秒、RFC3339；默认不限（闭区间，毫秒精度）。负时长（如 `-1h`/`-7d`）报错；`--from` 晚于 `--to` -> `✗ --from is after --to (empty window)` + exit 1。
 - `--kind`：`secret` | `path` | `drift`；其他值 -> stderr `✗ invalid --kind "<V>": must be secret, path, or drift` + exit 1。
-- `--limit N`：只保留最新 N 条（默认 50；`0`/负数 = 全部；`--stats` 下忽略）。非整数 -> stderr `✗ invalid --limit: …` + exit 1。
+- `--limit N`：只保留最新 N 条（默认 50；`0` = 全部；负数/非整数 -> stderr `✗ invalid --limit: must be a non-negative integer (default 50, 0 = no cap)` + exit 1；`--stats` 下忽略）。
 - `--stats`：聚合视图替代原始记录——对**过滤后的全集**统计（忽略 `--limit`，改用内部上限 10000 条，超出按最新优先截断）：总数 + 按 kind 命中数、命中名（`names` 展开）top 10、agent top 10、按 action 计数。可与 `--from`/`--to`/`--kind` 组合。
 - `--json`：stdout 为 records 数组原样 JSON（`seclog.Record`，最新在前；空结果为 `[]`），供 jq。与 `--stats` 组合时输出聚合对象：`{"from":ms,"to":ms,"total":N,"by_kind":{...},"by_action":{...},"top_names":[{"name","count"}],"top_agents":[...]}`（`from`/`to` 为查询窗口，`0`/不限则省略；列表按 count 降序、name 升序）。
 - 未识别 flag/位置参数 -> `✗ unknown flag "<A>"` + exit 1；`--from`/`--to`/`--kind`/`--limit` 缺值 -> `✗ <FLAG> requires a value` + exit 1（`--config` 及其值由 configPath 消费，不算未知）。
@@ -1068,7 +1068,7 @@ time           kind    agent         route             names                 act
 <MM-DD HH:MM:SS(14)> <kind(7)> <agent(12)> <exposed(16)> <逗号连接(20)> <action(7)> <detail>
 ```
 
-记录按时间倒序（最新在前）。表格列：`time kind agent route names action verdict detail`——`verdict` 仅 AI 二次判定（`guard.adjudicate`）来源的记录有值（`high`＝模型判真实泄露；`error`/`skipped`＝判定调用失败/队列满，fail-open 回到经典立即记录），经典立即记录为空；`detail` 对 high/error 记录携带 scrub 后的模型解释（≤120 字符，命中内容已掩码）。空结果 -> `(no security audit records in <DIR>)`；目录不存在 -> `(no security audit records yet — <DIR> does not exist)`（均 exit 0）。扫描中跳过的不可解析行数（含无法打开的日志文件，每个计 1）追加一行 `  (<N> unreadable line(s) skipped)`；文件末尾无换行符的半行是 daemon 写入中的撕裂尾行，直接忽略、不计入 skipped。detail 列渲染前过滤控制字符（`\n`/`\t`/ANSI 转义等 -> 空格），防生产者破坏表格。
+记录按时间倒序（最新在前）。表格列：`time kind agent route names action verdict detail`——`verdict` 仅 AI 二次判定（`guard.adjudicate`）来源的记录有值：`high`＝模型判真实泄露；`medium`＝形似风险但窗口内无法确证（只记录、不拉黑）；`error`/`skipped`＝判定调用失败/队列满等，fail-open 回到经典立即记录；`low`（忽略档）只写全量 JSONL、不进 SQLite，CLI 永远查不到；经典立即记录（精确匹配拦截、drift）为空。判定记录的模型判断在独立字段 `reason`（判定逻辑，≤200 字符）与 `evidence`（事实依据，≤300 字符），两者均经 scrub（控制字符过滤 + 命中内容掩码为 `[MASKED]`），随 `--json` 输出可见；表格 `detail` 列渲染的是 `Record.Detail`（drift 归因、精确匹配拦截的凭据溯源等自由文本）。空结果 -> `(no security audit records in <DIR>)`；目录不存在 -> `(no security audit records yet — <DIR> does not exist)`（均 exit 0）。查询直读 SQLite，一行要么是一条完整记录要么不存在——`Skipped` 恒为 0（`(<N> unreadable line(s) skipped)` 输出分支仅为兼容保留，实际不会打印）。detail 列渲染前过滤控制字符（`\n`/`\t`/ANSI 转义等 -> 空格），防生产者破坏表格。
 
 ### stdout（`--stats` 聚合，`FormatAuditStats`）
 

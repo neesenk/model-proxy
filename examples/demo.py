@@ -6,7 +6,7 @@
   2. 代理在跑：model-proxy serve --config config.yaml
   3. 用 codex 协议 + gpt-5.5：先 model-proxy login codex（拿独立 OAuth token）
 
-代理监听 http://127.0.0.1:15721，按 URL 路径前缀路由：
+代理监听 http://127.0.0.1:15722（本仓库 config.yaml 的 listen；`--port` 可改），按 URL 路径前缀路由：
   --protocol anthropic  → POST /v1/messages   (claude 路由 → aqp 网关, AQP key)
   --protocol codex      → POST /v1/responses  (codex 路由 → 按 model 分流:
                           gpt-5.5 → chatgpt.com + codex OAuth; 其他 → aqp 网关)

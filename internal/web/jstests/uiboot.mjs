@@ -42,7 +42,11 @@ async function waitFor(desc, fn, timeoutMs = 30000) {
   throw new Error(`timeout waiting for ${desc}${lastErr ? ` (last error: ${lastErr.message})` : ''}`);
 }
 
-export async function bootUiE2E() {
+// bootUiE2E boots the sandboxed proxy + browser. opts.adminToken, when set,
+// additionally enables web.auth (admin_token_file) so auth-gated UI paths
+// (e.g. the admin-auth modal) are exercisable; the token is returned on
+// ctx.adminToken.
+export async function bootUiE2E(opts = {}) {
   const ctx = { skipReason: null, waitFor, shutdown: async () => {} };
   // 耗时的浏览器 e2e 是按需门禁，不进每次修改的默认矩阵：MP_UI_E2E=1 才启动
   // 浏览器与代理；此时无浏览器 → Skip，MP_REQUIRE_UI_E2E=1 → FAIL。
@@ -68,7 +72,16 @@ export async function bootUiE2E() {
   // In-process loopback stub upstream: answers any POST with a valid OpenAI
   // chat.completion so a real request round-trips client → proxy → upstream
   // and back (terminal 5xx responses are not request-logged by design).
+  // GET /models.dev serves a minimal valid catalog so the models.dev cache
+  // refresh (Model Catalog card) stays hermetic via MP_MODELSDEV_URL below.
   ctx.upstream = http.createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/models.dev') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        zhipuai: { models: { 'glm-4.7': { limit: { context: 128000, output: 8192 } } } },
+      }));
+      return;
+    }
     req.resume();
     req.on('end', () => {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -81,11 +94,22 @@ export async function bootUiE2E() {
   });
   await new Promise((r) => ctx.upstream.listen(0, '127.0.0.1', r));
   const upstreamPort = ctx.upstream.address().port;
+  ctx.modelsDevURL = `http://127.0.0.1:${upstreamPort}/models.dev`;
 
   const proxyBin = path.join(ctx.sandbox, 'model-proxy');
   const build = spawnSync('go', ['build', '-o', proxyBin, '.'], { cwd: REPO, encoding: 'utf8' });
   assert.equal(build.status, 0, `go build failed:\n${build.stderr}`);
 
+  let authBlock = '';
+  if (opts.adminToken) {
+    const tokFile = path.join(ctx.sandbox, 'admin_token');
+    writeFileSync(tokFile, `${opts.adminToken}\n`, { mode: 0o600 });
+    authBlock = `web:
+  auth:
+    admin_token_file: ${tokFile}
+`;
+    ctx.adminToken = opts.adminToken;
+  }
   writeFileSync(path.join(ctx.sandbox, 'config.yaml'), `listen: 127.0.0.1:${ctx.port}
 providers:
   dummy:
@@ -94,7 +118,7 @@ providers:
     models: [m1]
 request_log:
   enabled: true
-`, { mode: 0o600 });
+${authBlock}`, { mode: 0o600 });
 
   // Static providers fail closed without a pool account (the request would die
   // before the capture layer and never reach the request log). Write a real
@@ -112,7 +136,11 @@ request_log:
   ctx.proxyLog = path.join(ctx.sandbox, 'serve.log');
   ctx.proxy = spawn(proxyBin, ['serve'], {
     cwd: ctx.sandbox,
-    env: { HOME: path.join(ctx.sandbox, 'home'), PATH: process.env.PATH },
+    env: {
+      HOME: path.join(ctx.sandbox, 'home'),
+      PATH: process.env.PATH,
+      MP_MODELSDEV_URL: ctx.modelsDevURL,
+    },
     stdio: ['ignore', 'ignore', 'ignore'],
   });
 

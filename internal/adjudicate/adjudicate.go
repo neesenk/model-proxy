@@ -161,6 +161,11 @@ type Service struct {
 	mu       sync.Mutex
 	inflight map[string]bool
 	closed   bool
+	// applyWg tracks the cached-verdict applies Enqueue spawns off the worker
+	// pool, so Close does not return before every accepted apply's sink/audit
+	// side effects landed (the app drains seclog only after Close returns).
+	// Adds happen under mu, so they are all visible once closed is set.
+	applyWg sync.WaitGroup
 
 	// llm usage accounting: real model calls only (cache hits and in-flight
 	// dedup never reach a Caller). Guarded by statsMu so the metrics read
@@ -277,19 +282,28 @@ func (s *Service) Enqueue(j Job) bool {
 		return true
 	}
 	if v, ok := s.cache.get(key); ok {
+		// Cached verdict: apply asynchronously through the same path a worker
+		// would (no queue latency for the common history-echo case). The Add
+		// runs under mu so Close — which sets closed under the same mu before
+		// waiting on applyWg — can never pass its wait ahead of this apply.
+		s.applyWg.Add(1)
 		s.mu.Unlock()
-		// Cached verdict: apply synchronously through the same path a worker
-		// would (no queue latency for the common history-echo case).
-		go s.apply(j, v.Verdict, v.Reason, v.Evidence, model, blockSession, true)
+		go func() {
+			defer s.applyWg.Done()
+			s.apply(j, v.Verdict, v.Reason, v.Evidence, model, blockSession, true)
+		}()
 		return true
 	}
 	s.inflight[key] = true
-	s.mu.Unlock()
+	// Deliver under mu: the send is non-blocking (no deadlock), and keeping it
+	// inside the critical section closes the accept-after-drain window — once
+	// Close sets closed under the same mu, no accepted job can land in the
+	// queue behind the workers' drain check.
 	select {
 	case s.queue <- j:
+		s.mu.Unlock()
 		return true
 	default:
-		s.mu.Lock()
 		delete(s.inflight, key)
 		s.mu.Unlock()
 		return false
@@ -328,9 +342,11 @@ func (s *Service) process(j Job) {
 	}
 	s.statsMu.Unlock()
 	if err != nil || (verdict != VerdictHigh && verdict != VerdictMedium && verdict != VerdictLow) {
-		detail := err.Error()
-		if err == nil {
-			detail = "model returned unrecognized verdict " + verdict
+		// err may be nil here (a nil error with an off-vocabulary verdict) —
+		// dereferencing it would panic the worker and take the daemon down.
+		detail := "model returned unrecognized verdict " + verdict
+		if err != nil {
+			detail = err.Error()
 		}
 		s.ring.add(Result{Ts: j.Ts, Kind: j.Kind, Rule: j.Rule, Verdict: VerdictError,
 			Reason: truncate(scrub(j.Hit, detail), maxReasonLen), Model: model,
@@ -403,7 +419,8 @@ func (s *Service) apply(j Job, verdict, reason, evidence, model string, blockSes
 }
 
 // Close stops intake and waits for the workers to drain the queue or the
-// deadline, whichever comes first. Jobs still queued past the deadline are
+// deadline, whichever comes first, then waits for the cached-verdict applies
+// Enqueue spawned (applyWg). Jobs still queued past the deadline are
 // dropped (their Enqueue already returned true; the caller-side fail-open
 // contract covers only Enqueue=false — dropped-at-shutdown jobs are the
 // documented shutdown-loss window, same direction as seclog's drain).
@@ -412,6 +429,7 @@ func (s *Service) Close(drain time.Duration) {
 	if s.closed {
 		s.mu.Unlock()
 		<-s.done
+		s.applyWg.Wait()
 		return
 	}
 	s.closed = true
@@ -421,6 +439,11 @@ func (s *Service) Close(drain time.Duration) {
 	case <-s.done:
 	case <-time.After(drain):
 	}
+	// The cached-verdict applies Enqueue spawned run outside the worker
+	// WaitGroup; Close returns only after every accepted one completed, so a
+	// late apply can never lose its audit record to the seclog drain that
+	// follows in the app's shutdown order.
+	s.applyWg.Wait()
 }
 
 // CacheKey derives the stable verdict-cache key for one job: the hash covers
@@ -476,8 +499,10 @@ func (s *Service) CacheLen() int { return s.cache.Len() }
 
 // scrub makes a model-provided (or error) string safe for persistence:
 // control characters collapse to spaces and any occurrence of the matched
-// hit (≥8 bytes — maskSecretBytes parity) is replaced, so a reason echoing
-// the payload can never carry it into logs.
+// hit is replaced, so a reason echoing the payload can never carry it into
+// logs. Masking is maskSecretBytes-aligned: short hits (<8 bytes, e.g. from
+// a short custom pattern) are masked wholesale too — a short hit must never
+// land on disk verbatim.
 func scrub(hit, s string) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -488,7 +513,7 @@ func scrub(hit, s string) string {
 		}
 	}
 	out := b.String()
-	if len(hit) >= 8 {
+	if hit != "" {
 		out = strings.ReplaceAll(out, hit, "[MASKED]")
 	}
 	return out

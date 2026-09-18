@@ -124,7 +124,7 @@ type processServices struct {
 	// writer survive reload, including disabled generations.
 	cacheStatePath string
 	cacheCounters  *responsecache.Counters
-	cachePersistMu sync.Mutex // serializes cache snapshot/write and durable reset
+	cachePersistMu sync.Mutex // serializes cache snapshot/write across generations
 }
 
 // Proxy holds the compiled provider instances + the config.

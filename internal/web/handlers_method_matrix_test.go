@@ -36,6 +36,13 @@ func TestServeAPIWrongMethodMatrix(t *testing.T) {
 		{http.MethodGet, "/api/health/freeze"},
 		{http.MethodGet, "/api/models/refresh"},
 		{http.MethodPut, "/api/models/refresh"},
+		{http.MethodPut, "/api/takeover"},
+		{http.MethodGet, "/api/takeover/restore"},
+		{http.MethodPost, "/api/takeover/templates/claude"},
+		{http.MethodDelete, "/api/takeover"},
+		{http.MethodGet, "/api/replay"},
+		{http.MethodGet, "/api/routes/test"},
+		{http.MethodGet, "/api/models/catalog/refresh"},
 	}
 	for _, tc := range cases {
 		rec := guardRequest(t, tc.method, tc.path, "", "")
@@ -70,6 +77,13 @@ func TestAdminAuthGatesMutationEndpoints(t *testing.T) {
 		{http.MethodPost, "/api/pin", `{"route":"glm","provider":"zhipu"}`},
 		{http.MethodDelete, "/api/pin?route=glm", ""},
 		{http.MethodPost, "/api/config/validate", "listen: 127.0.0.1:0\nproviders: {}\n"},
+		{http.MethodPost, "/api/takeover", `{"client":"all"}`},
+		{http.MethodPost, "/api/takeover/restore", `{}`},
+		{http.MethodPut, "/api/takeover/templates/mine", `{"yaml":"format: json"}`},
+		{http.MethodDelete, "/api/takeover/templates/mine", ""},
+		{http.MethodPost, "/api/replay", `{"id":"r1","provider":"p"}`},
+		{http.MethodPost, "/api/routes/test", `{"model":"m"}`},
+		{http.MethodPost, "/api/models/catalog/refresh", ""},
 	}
 	for _, m := range mutations {
 		rec := httptest.NewRecorder()

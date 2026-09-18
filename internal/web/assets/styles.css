@@ -304,18 +304,15 @@ main {
 .card-body.flush { padding: 0; }
 .card-body.tight { padding: 10px 16px; }
 
-/* Config tab: vertical rhythm between stacked cards. */
-#tab-config > .card { margin-bottom: 16px; }
-/* MCP tab: same rhythm between the Servers/Routes cards (mcp-host wrapper). */
-#tab-mcp > .mcp-host > .card { margin-bottom: 16px; }
-/* Security paints its KPI row and Rule-hits card through loader-owned host
-   divs (#sec-kpis / #sec-rules are what the 30s tick repaints), so that
-   content sits one level below the tab — reach in for the same rhythm. The
-   selectors only match when the host actually rendered content, so an empty
-   #sec-rules (no hits in the window) leaves no stray gap. */
-#tab-security > .card,
-#tab-security > #sec-kpis > .kpi-grid,
-#tab-security > #sec-rules > .card { margin-bottom: 16px; }
+/* Vertical rhythm between stacked content blocks — ONE shared rule for every
+   tab panel: any card (or KPI grid) rendered anywhere inside a tab panel gets
+   16px separation, no matter which tab or loader/host wrapper produced it
+   (.status-main, .tk-host, .mcp-host, .eval-host, #sec-kpis, #sec-rules, …).
+   Per-tab/per-host margin patches (`#tab-config > .card`, `.status-main >
+   .card`, `#tab-mcp > .mcp-host > .card`, the #tab-security trio) are
+   superseded by this rule — do not reintroduce page-specific spacing. */
+.tab-panel .card,
+.tab-panel .kpi-grid { margin-bottom: 16px; }
 
 /* ---------- status pills (v1 API kept: ok/warn/err/muted) ---------- */
 .pill {
@@ -430,6 +427,14 @@ main {
 .req-rec { font-size: 0.75rem; }
 .req-rec + .req-rec { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-2); }
 .req-rec > .hint { margin-bottom: 6px; }
+/* Replay strip (per-request force-provider re-answer): one inline control row
+   under the detail records, result renders below it. */
+.req-replay { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--border-2); }
+.req-replay .req-input { width: 12rem; }
+.req-replay [data-replay-result] { flex-basis: 100%; }
+
+/* Takeover tab: the templates/backups directory line under the clients table. */
+.tk-dirs { margin-top: 10px; font-family: var(--mono); font-size: 0.6875rem; overflow-wrap: anywhere; }
 .req-rec details { margin-top: 6px; }
 .req-rec summary { cursor: pointer; color: var(--muted); }
 .req-rec summary:hover { color: var(--text); }
@@ -722,6 +727,7 @@ dialog.live-detail-pop .modal-body { overflow: auto; }
 .route-block:last-child { border-bottom: none; }
 .route-head { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
 .route-head .route-name { font-family: var(--mono); font-size: 0.8125rem; font-weight: 550; }
+.route-test-result { margin-top: 8px; font-size: 0.75rem; }
 .route-chain { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 0.75rem; }
 .route-node {
   display: inline-flex;
@@ -1252,7 +1258,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
 .acct-main { min-width: 0; }
 .status-main { min-width: 0; }
-.status-main > .card { margin-bottom: 16px; }
+/* card rhythm comes from the shared .tab-panel rule (layout section). */
 
 /* status sidebar — visually identical to .acct-nav but a DISTINCT class (see
    v1 note: the Accounts tab's querySelector must never match the Status

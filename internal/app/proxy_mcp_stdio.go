@@ -9,6 +9,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,8 +29,9 @@ const mcpStdioPerServerCap = 8
 // mcpStdioRegistry owns the live stdio children, keyed by session id (pinned)
 // or routeSessionID+"\x00"+server (route subs).
 type mcpStdioRegistry struct {
-	mu    sync.Mutex
-	conns map[string]*mcpStdioEntry
+	mu     sync.Mutex
+	conns  map[string]*mcpStdioEntry
+	spawns map[string]*mcpSpawnLock // in-flight lazy spawns, keyed like conns
 }
 
 type mcpStdioEntry struct {
@@ -37,8 +39,41 @@ type mcpStdioEntry struct {
 	conn   *mcpkg.StdioConn
 }
 
+// mcpSpawnLock serializes lazy spawns for one registry key (refcounted, so
+// the map entry is dropped once the last racer leaves).
+type mcpSpawnLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
 func newMCPStdioRegistry() *mcpStdioRegistry {
-	return &mcpStdioRegistry{conns: map[string]*mcpStdioEntry{}}
+	return &mcpStdioRegistry{conns: map[string]*mcpStdioEntry{}, spawns: map[string]*mcpSpawnLock{}}
+}
+
+// lockSpawn serializes lazy child spawns for one key (route sub-session
+// ensure): the first caller spawns and handshakes; racers wait, then re-check
+// and reuse the winner's conn. Without it, concurrent ensures fork duplicate
+// children whose loser either leaks or is killed while the racing caller is
+// still mid-flight on it. The returned func releases the lock.
+func (r *mcpStdioRegistry) lockSpawn(key string) func() {
+	r.mu.Lock()
+	l := r.spawns[key]
+	if l == nil {
+		l = &mcpSpawnLock{}
+		r.spawns[key] = l
+	}
+	l.refs++
+	r.mu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		r.mu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(r.spawns, key)
+		}
+		r.mu.Unlock()
+	}
 }
 
 func (r *mcpStdioRegistry) get(key string) (*mcpkg.StdioConn, bool) {
@@ -51,20 +86,29 @@ func (r *mcpStdioRegistry) get(key string) (*mcpkg.StdioConn, bool) {
 	return e.conn, true
 }
 
-// put registers a child, enforcing the per-server cap.
+// put registers a child, enforcing the per-server cap. Overwriting an
+// existing key (two concurrent ensures racing one sub-session) reaps the
+// replaced child OUTSIDE the lock — Close blocks in Wait and must never
+// serialize the registry.
 func (r *mcpStdioRegistry) put(key, server string, conn *mcpkg.StdioConn) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	_, replacing := r.conns[key]
 	count := 0
 	for _, e := range r.conns {
 		if e.server == server {
 			count++
 		}
 	}
-	if count >= mcpStdioPerServerCap {
+	if count >= mcpStdioPerServerCap && !replacing {
+		r.mu.Unlock()
 		return fmt.Errorf("mcp %q: too many live stdio sessions (%d cap)", server, mcpStdioPerServerCap)
 	}
+	old := r.conns[key]
 	r.conns[key] = &mcpStdioEntry{server: server, conn: conn}
+	r.mu.Unlock()
+	if old != nil {
+		old.conn.Close()
+	}
 	return nil
 }
 
@@ -160,8 +204,17 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 
 	if r.Method == http.MethodDelete {
 		if localSID != "" {
-			p.mcpStdio.kill(localSID)
-			p.mcpSessions.Delete(localSID)
+			// Sessions are bound to their server (same ownership rule as the
+			// HTTP pinned path): an id minted by another /mcp/ name must not
+			// kill this server's child — treat as unknown session.
+			if s, ok := p.mcpSessions.Get(localSID); ok {
+				if s.Server != name {
+					http.Error(w, "mcp: unknown session", http.StatusNotFound)
+					return
+				}
+				p.mcpStdio.kill(localSID)
+				p.mcpSessions.Delete(localSID)
+			}
 		}
 		w.WriteHeader(http.StatusOK)
 		return
@@ -199,7 +252,9 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 			p.mcpLog(name, account, frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false)
 			return
 		}
-		resp, err := conn.Call(body)
+		initCtx, initCancel := context.WithTimeout(r.Context(), srv.MCPTimeoutDuration())
+		resp, err := conn.Call(initCtx, body)
+		initCancel()
 		if err != nil {
 			conn.Close()
 			http.Error(w, fmt.Sprintf("mcp %q: stdio initialize: %v", name, err), http.StatusBadGateway)
@@ -214,7 +269,7 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 			return
 		}
 		// Initialized notification: required by stateful servers.
-		conn.Call(mcpNotifInitBody) //nolint — best-effort
+		conn.Call(r.Context(), mcpNotifInitBody) //nolint — best-effort
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Mcp-Session-Id", sid)
 		w.WriteHeader(http.StatusOK)
@@ -223,7 +278,9 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 		return
 	}
 
-	// Everything else needs an established session.
+	// Everything else needs an established session — owned by THIS server
+	// (same rule as the HTTP pinned path: a foreign /mcp/ id 404s here instead
+	// of reaching another server's child process).
 	if localSID == "" {
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32600, "mcp stdio: session required — POST initialize first")
 		w.Header().Set("Content-Type", "application/json")
@@ -231,7 +288,7 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 		w.Write(respBody)
 		return
 	}
-	if _, ok := p.mcpSessions.Get(localSID); !ok {
+	if s, ok := p.mcpSessions.Get(localSID); !ok || s.Server != name {
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32600, "mcp: unknown or expired session — re-initialize")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
@@ -246,7 +303,9 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 		w.Write(respBody)
 		return
 	}
-	resp, err := conn.Call(body)
+	callCtx, callCancel := context.WithTimeout(r.Context(), srv.MCPTimeoutDuration())
+	resp, err := conn.Call(callCtx, body)
+	callCancel()
 	if err != nil {
 		// Dead child: drop the session so the client re-initializes instead
 		// of retrying a corpse.

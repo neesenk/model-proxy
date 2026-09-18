@@ -11,6 +11,8 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { bootUiE2E } from './uiboot.mjs';
 
 let ctx = null;
@@ -79,7 +81,7 @@ test('UI shell boots against the real backend', async (t) => {
 
 test('every tab renders a non-empty panel', async (t) => {
   if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
-  for (const name of ['requests', 'security', 'analytics', 'config', 'accounts', 'status']) {
+  for (const name of ['requests', 'security', 'analytics', 'config', 'accounts', 'takeover', 'eval', 'status']) {
     await ctx.ev(`document.querySelector('[data-tab="${name}"]').click()`);
     await ctx.waitFor(`#tab-${name} active`, () => ctx.ev(
       `document.getElementById('tab-${name}').classList.contains('active')`));
@@ -400,4 +402,202 @@ test('accounts 页点击 provider 渲染账号详情 (点击族)', async (t) => 
   await ctx.waitFor('account detail', () => ctx.ev(
     `(document.querySelector('.acct-main')?.innerText || '').includes('e2e')`));
   assert.deepEqual(await ctx.pageErrors(), [], 'accounts 选择不得有 JS 错误');
+});
+
+test('takeover 页：模板表渲染与真实 takeover/restore 闭环 (mutation 族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // Install a fake claude config inside the sandbox HOME — the proxy process
+  // runs with HOME=<sandbox>/home, so takeover rewrites exactly this file.
+  const claudeDir = path.join(ctx.sandbox, 'home', '.claude');
+  mkdirSync(claudeDir, { recursive: true });
+  const claudeFile = path.join(claudeDir, 'settings.json');
+  writeFileSync(claudeFile, '{"env":{"KEEP":"1"}}');
+
+  await ctx.ev(`document.querySelector('[data-tab="takeover"]').click()`);
+  await ctx.waitFor('takeover table renders claude row', () => ctx.ev(
+    `document.querySelector('#tab-takeover .table') && document.querySelector('#tab-takeover').innerHTML.includes('claude')`));
+  // Installed + not taken over → the row offers a Takeover button.
+  await ctx.waitFor('claude row offers takeover', () => ctx.ev(
+    `!!document.querySelector('[data-tk-takeover="claude"]')`));
+
+  await ctx.ev(`document.querySelector('[data-tk-takeover="claude"]').click()`);
+  await ctx.waitFor('claude taken over (row offers restore)', () => ctx.ev(
+    `!!document.querySelector('[data-tk-restore="claude"]')`));
+  const written = JSON.parse(readFileSync(claudeFile, 'utf8'));
+  assert.equal(written.env.ANTHROPIC_BASE_URL, `http://127.0.0.1:${ctx.port}`,
+    'takeover points the client at the sandbox proxy');
+  assert.equal(written.env.ANTHROPIC_AUTH_TOKEN, 'PROXY_MANAGED');
+  assert.equal(written.env.KEEP, '1', 'unrelated keys survive the rewrite');
+
+  // Restore goes through the shared confirm modal.
+  await ctx.ev(`document.querySelector('[data-tk-restore="claude"]').click()`);
+  await ctx.waitFor('confirm modal open', () => ctx.ev(`document.getElementById('confirm-modal').open === true`));
+  await ctx.ev(`document.getElementById('confirm-yes').click()`);
+  await ctx.waitFor('claude restored (row offers takeover again)', () => ctx.ev(
+    `!!document.querySelector('[data-tk-takeover="claude"]')`));
+  assert.equal(readFileSync(claudeFile, 'utf8'), '{"env":{"KEEP":"1"}}',
+    'restore returns the verbatim backup');
+  assert.deepEqual(await ctx.pageErrors(), [], 'takeover flow must not raise JS errors');
+});
+
+test('takeover 模板编辑器：preset 查看/覆盖/校验拒绝/删除恢复 (模态族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  await ctx.ev(`document.querySelector('[data-tab="takeover"]').click()`);
+  await ctx.waitFor('takeover table', () => ctx.ev(`!!document.querySelector('[data-tk-edit="claude"]')`));
+
+  // Preset view: read-only textarea with the embedded document.
+  await ctx.ev(`document.querySelector('[data-tk-edit="claude"]').click()`);
+  await ctx.waitFor('template modal open', () => ctx.ev(
+    `document.getElementById('tk-modal').open === true && !!document.getElementById('tk-yaml')`));
+  assert.equal(await ctx.ev(`document.getElementById('tk-yaml').readOnly`), true);
+  assert.ok(await ctx.ev(`document.getElementById('tk-yaml').value.includes('ANTHROPIC_BASE_URL')`));
+
+  // Save As Override → the user template replaces the preset.
+  await ctx.ev(`document.getElementById('tk-save').click()`);
+  await ctx.waitFor('override active server-side', async () => {
+    const r = await fetch(`${ctx.baseUrl}/api/takeover/templates/claude`);
+    return r.ok && (await r.json()).source === 'user';
+  });
+  await ctx.waitFor('table re-rendered with user source', () => ctx.ev(
+    `document.querySelector('#tab-takeover').innerHTML.includes('>user<')`));
+
+  // Invalid candidate (pi family variant without protocol) is rejected
+  // inline — the backend validates the merged template set fail-closed.
+  await ctx.ev(`document.querySelector('[data-tk-new]').click()`);
+  await ctx.waitFor('new-template modal', () => ctx.ev(
+    `document.getElementById('tk-modal').open === true && !!document.getElementById('tk-name')`));
+  const badYaml = 'file: ~/x.json\nformat: json\nclient: pi\njson:\n  set:\n    env.X: "{{base_url}}"\n';
+  await ctx.ev(`(() => { document.getElementById('tk-name').value = 'pi-broken';
+    document.getElementById('tk-yaml').value = ${JSON.stringify(badYaml)}; })()`);
+  await ctx.ev(`document.getElementById('tk-save').click()`);
+  await ctx.waitFor('validation error inline', () => ctx.ev(
+    `!document.getElementById('tk-msg').hidden && document.getElementById('tk-msg').textContent.includes('protocol')`));
+  await ctx.waitFor('modal still open after rejected save', () => ctx.ev(
+    `document.getElementById('tk-modal').open === true`));
+  await ctx.ev(`document.getElementById('tk-cancel').click()`);
+
+  // Delete the override (confirm modal) → the preset is active again.
+  await ctx.ev(`document.querySelector('[data-tk-edit="claude"]').click()`);
+  await ctx.waitFor('editor reopened', () => ctx.ev(`document.getElementById('tk-modal').open === true`));
+  await ctx.ev(`document.getElementById('tk-delete').click()`);
+  await ctx.waitFor('delete confirm modal', () => ctx.ev(`document.getElementById('confirm-modal').open === true`));
+  await ctx.ev(`document.getElementById('confirm-yes').click()`);
+  await ctx.waitFor('preset restored server-side', async () => {
+    const r = await fetch(`${ctx.baseUrl}/api/takeover/templates/claude`);
+    return r.ok && (await r.json()).source === 'preset';
+  });
+  assert.deepEqual(await ctx.pageErrors(), [], 'template editor flow must not raise JS errors');
+});
+
+test('eval 页渲染 shadow report 与 fusion 空态 (渲染族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  await ctx.ev(`document.querySelector('[data-tab="eval"]').click()`);
+  await ctx.waitFor('shadow card empty hint', () => ctx.ev(
+    `document.getElementById('tab-eval').innerHTML.includes('No shadow pairs')`));
+  await ctx.waitFor('fusion card empty hint', () => ctx.ev(
+    `document.getElementById('tab-eval').innerHTML.includes('No fusion workflows')`));
+  assert.deepEqual(await ctx.pageErrors(), [], 'eval tab must not raise JS errors');
+});
+
+test('请求详情 replay 条：一次性 force-provider 重答 (mutation 族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  await driveRequest();
+  await gotoRequestsWithRows();
+  await ctx.ev(`document.querySelector('#req-table tbody tr:not(.req-spacer)').click()`);
+  await ctx.waitFor('replay strip in the detail row', () => ctx.ev(
+    `!!document.querySelector('.req-detail-row [data-replay-run]')`));
+  await ctx.ev(`(() => { document.querySelector('.req-detail-row [data-replay-provider]').value = 'dummy'; })()`);
+  await ctx.ev(`document.querySelector('.req-detail-row [data-replay-run]').click()`);
+  await ctx.waitFor('replay answer status 200', () => ctx.ev(
+    `(document.querySelector('.req-detail-row [data-replay-status]') || {}).textContent?.includes('200')`));
+  // The replayed body renders through the same lazy raw-body details.
+  assert.ok(await ctx.ev(`!!document.querySelector('.req-detail-row [data-replay-result] .raw-body')`));
+  assert.deepEqual(await ctx.pageErrors(), [], 'replay flow must not raise JS errors');
+});
+
+test('status 页 schedule route test 与 models catalog refresh (mutation 族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  await ctx.ev(`document.querySelector('[data-tab="status"]').click()`);
+  await ctx.waitFor('status nav', () => ctx.ev(`!!document.querySelector('[data-section="schedule"]')`));
+  await ctx.ev(`document.querySelector('[data-section="schedule"]').click()`);
+  await ctx.waitFor('route m1 test button', () => ctx.ev(`!!document.querySelector('[data-test-route="m1"]')`));
+  await ctx.ev(`document.querySelector('[data-test-route="m1"]').click()`);
+  await ctx.waitFor('route test probes ok', () => ctx.ev(
+    `(document.querySelector('[data-test-result-for="m1"]') || {}).innerHTML?.includes('HTTP 200')`));
+
+  await ctx.ev(`document.querySelector('[data-section="models"]').click()`);
+  await ctx.waitFor('catalog refresh button', () => ctx.ev(`!!document.querySelector('[data-catalog-refresh]')`));
+  await ctx.ev(`document.querySelector('[data-catalog-refresh]').click()`);
+  await ctx.waitFor('catalog refreshed from the stub', () => ctx.ev(
+    `(document.querySelector('[data-catalog-result]') || {}).textContent?.includes('models cached')`));
+  // The stub catalog carries exactly one model.
+  await ctx.waitFor('catalog count from stub', () => ctx.ev(
+    `(document.querySelector('[data-catalog-result]') || {}).textContent?.includes('1 models')`));
+  assert.deepEqual(await ctx.pageErrors(), [], 'status diagnostics must not raise JS errors');
+});
+
+test('takeover 页 mode 下拉驱动服务端变体预览 (表单族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  await ctx.ev(`document.querySelector('[data-tab="takeover"]').click()`);
+  await ctx.waitFor('takeover table', () => ctx.ev(`!!document.getElementById('tk-mode')`));
+
+  // The sandbox route table serves m1 via the static openai endpoint, so the
+  // unified preview marks the openai variant of BOTH multi-variant families.
+  const markedRows = () => ctx.ev(`(() => {
+    const out = [];
+    for (const tr of document.querySelectorAll('#tab-takeover tbody tr')) {
+      if (tr.innerHTML.includes('>*</span>')) {
+        const edit = tr.querySelector('[data-tk-edit]');
+        if (edit) out.push(edit.dataset.tkEdit);
+      }
+    }
+    return out.sort().join(',');
+  })()`);
+  await ctx.waitFor('unified preview marks the openai variants', async () =>
+    (await markedRows()) === 'opencode-openai,pi-openai');
+
+  // Switching the select re-resolves the surface server-side (?mode=) and the
+  // markers move to the responses variants; the hint line explains the mode.
+  await ctx.ev(`(() => { const s = document.getElementById('tk-mode'); s.value = 'responses';
+    s.dispatchEvent(new Event('change')); })()`);
+  await ctx.waitFor('responses preview marks the responses variants', async () =>
+    (await markedRows()) === 'opencode-responses,pi-responses');
+  await ctx.waitFor('mode hint updated', () => ctx.ev(
+    `(document.getElementById('tk-mode-hint') || {}).textContent?.includes('pin the responses')`));
+  // Single-variant families never carry the marker.
+  assert.equal(await ctx.ev(`(() => {
+    for (const tr of document.querySelectorAll('#tab-takeover tbody tr')) {
+      const edit = tr.querySelector('[data-tk-edit]');
+      if (edit && edit.dataset.tkEdit === 'claude') return tr.innerHTML.includes('>*</span>');
+    }
+    return true;
+  })()`), false, 'claude (single-variant family) must stay unmarked');
+  assert.deepEqual(await ctx.pageErrors(), [], 'mode preview must not raise JS errors');
+});
+
+// admin-auth modal: dismissing it with Esc must resolve the boot promise —
+// pre-fix, the promise only settled on a successful submit, so Esc left the
+// whole UI hung on a blank page (no tab ever activated). Boots its own
+// auth-enabled proxy instance (the shared ctx has no web.auth).
+test('Esc on the admin-auth modal keeps boot alive', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  const auth = await bootUiE2E({ adminToken: 'e2e-admin-token' });
+  if (auth.skipReason) { t.skip(auth.skipReason); return; }
+  try {
+    await auth.waitFor('admin-auth modal open', () => auth.ev(
+      'document.getElementById("admin-auth-modal").open === true'));
+    // Real Escape key press: the browser fires cancel + closes the dialog.
+    await auth.cdp.send('Input.dispatchKeyEvent', {
+      type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27,
+    }, auth.tab);
+    await auth.waitFor('modal dismissed', () => auth.ev(
+      'document.getElementById("admin-auth-modal").open === false'));
+    // Boot continued past the auth gate: the default tab activated (with the
+    // pre-fix hang, activateTabSilent never ran and no tab had .active).
+    await auth.waitFor('a tab activated after dismiss', () => auth.ev(
+      'document.querySelector("[data-tab].active") !== null'));
+    assert.deepEqual(await auth.pageErrors(), [], 'dismiss flow must not raise JS errors');
+  } finally {
+    await auth.shutdown();
+  }
 });

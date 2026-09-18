@@ -464,7 +464,7 @@ func TestPresetOpencodeVariantNpm(t *testing.T) {
 	}
 }
 
-// --- kimi template: ~/.kimi/config.toml provider + model blocks ---
+// --- kimi template: ~/.kimi-code/config.toml provider + model blocks ---
 
 func TestTemplateKimi(t *testing.T) {
 	dir := t.TempDir()

@@ -121,7 +121,7 @@ func cmdTest(cfg *configdomain.Config, name string) {
 		fmt.Fprintf(os.Stderr, "%s %v\n", display.Red("✗"), err)
 		os.Exit(1)
 	}
-	client := &http.Client{Transport: upstreamproxy.AutoTransport()}
+	client := &http.Client{Transport: upstreamproxy.AutoTransport(), CheckRedirect: mcpkg.CheckNoCrossOriginRedirect}
 	ctx, cancel := context.WithTimeout(context.Background(), srv.MCPTimeoutDuration())
 	defer cancel()
 	start := time.Now()
@@ -171,8 +171,10 @@ func cmdTestStdio(cfg *configdomain.Config, name string, srv configdomain.MCPSer
 		os.Exit(1)
 	}
 	defer conn.Close()
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), srv.MCPTimeoutDuration())
+	defer probeCancel()
 	lat := func() time.Duration { return time.Since(start).Round(time.Millisecond) }
-	initResp, err := conn.Call([]byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"model-proxy-probe","version":"1.0"}}}`))
+	initResp, err := conn.Call(probeCtx, []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"model-proxy-probe","version":"1.0"}}}`))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s %s — initialize: %v (%s)\n", display.Red("✗"), name, err, lat())
 		os.Exit(1)
@@ -182,8 +184,8 @@ func cmdTestStdio(cfg *configdomain.Config, name string, srv configdomain.MCPSer
 		fmt.Fprintf(os.Stderr, "%s %s — initialize: no protocolVersion in response (%s)\n", display.Red("✗"), name, lat())
 		os.Exit(1)
 	}
-	conn.Call([]byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)) //nolint — best-effort
-	listResp, err := conn.Call([]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
+	conn.Call(probeCtx, []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)) //nolint — best-effort
+	listResp, err := conn.Call(probeCtx, []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s %s — tools/list: %v (%s)\n", display.Red("✗"), name, err, lat())
 		os.Exit(1)
