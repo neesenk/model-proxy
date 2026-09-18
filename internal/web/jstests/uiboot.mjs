@@ -68,7 +68,16 @@ export async function bootUiE2E() {
   // In-process loopback stub upstream: answers any POST with a valid OpenAI
   // chat.completion so a real request round-trips client → proxy → upstream
   // and back (terminal 5xx responses are not request-logged by design).
+  // GET /models.dev serves a minimal valid catalog so the models.dev cache
+  // refresh (Model Catalog card) stays hermetic via MP_MODELSDEV_URL below.
   ctx.upstream = http.createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/models.dev') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        zhipuai: { models: { 'glm-4.7': { limit: { context: 128000, output: 8192 } } } },
+      }));
+      return;
+    }
     req.resume();
     req.on('end', () => {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -81,6 +90,7 @@ export async function bootUiE2E() {
   });
   await new Promise((r) => ctx.upstream.listen(0, '127.0.0.1', r));
   const upstreamPort = ctx.upstream.address().port;
+  ctx.modelsDevURL = `http://127.0.0.1:${upstreamPort}/models.dev`;
 
   const proxyBin = path.join(ctx.sandbox, 'model-proxy');
   const build = spawnSync('go', ['build', '-o', proxyBin, '.'], { cwd: REPO, encoding: 'utf8' });
@@ -112,7 +122,11 @@ request_log:
   ctx.proxyLog = path.join(ctx.sandbox, 'serve.log');
   ctx.proxy = spawn(proxyBin, ['serve'], {
     cwd: ctx.sandbox,
-    env: { HOME: path.join(ctx.sandbox, 'home'), PATH: process.env.PATH },
+    env: {
+      HOME: path.join(ctx.sandbox, 'home'),
+      PATH: process.env.PATH,
+      MP_MODELSDEV_URL: ctx.modelsDevURL,
+    },
     stdio: ['ignore', 'ignore', 'ignore'],
   });
 

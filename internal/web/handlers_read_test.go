@@ -52,6 +52,8 @@ type readAPIStub struct {
 	presets           []presets.Preset
 	mcpSurface        appapi.MCPSurface
 	models            appapi.ModelsDocument
+	takeover          func(string) (appapi.TakeoverSurface, error)
+	takeoverTemplate  func(string) (appapi.TakeoverTemplateDoc, error)
 }
 
 func (r *readAPIStub) Dashboard(time.Time) appapi.Dashboard { return r.dashboard }
@@ -1612,6 +1614,20 @@ func (r *readAPIStub) ModelsDocument() appapi.ModelsDocument {
 		return appapi.ModelsDocument{Providers: map[string]appapi.ProviderModelCaps{}}
 	}
 	return r.models
+}
+
+func (r *readAPIStub) TakeoverSurface(mode string) (appapi.TakeoverSurface, error) {
+	if r.takeover != nil {
+		return r.takeover(mode)
+	}
+	return appapi.TakeoverSurface{Clients: []appapi.TakeoverClient{}}, nil
+}
+
+func (r *readAPIStub) TakeoverTemplate(name string) (appapi.TakeoverTemplateDoc, error) {
+	if r.takeoverTemplate != nil {
+		return r.takeoverTemplate(name)
+	}
+	return appapi.TakeoverTemplateDoc{}, appapi.NewHTTPError(http.StatusNotFound, "unknown takeover template: "+name)
 }
 
 // TestSecurityBlocksAndAdjudications covers the guard AI-adjudication

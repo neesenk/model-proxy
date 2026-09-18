@@ -3245,3 +3245,88 @@ export function requestsFilterFromQuery(params) {
     shadow: params.shadow === 'only' || params.shadow === 'exclude' ? params.shadow : '',
   };
 }
+
+// ---------- Takeover tab ----------
+
+// takeoverStatusBadge renders one client row's takeover state badge
+// (GET /api/takeover client entry). Five states: the client config file is
+// absent (not installed), no backup marker (not taken over), taken over and
+// the drift probe still points at this proxy (taken over), or drifted (err,
+// with the current → expected pointer detail in the tooltip).
+export function takeoverStatusBadge(c) {
+  if (!c || !c.installed) return '<span class="badge muted">not installed</span>';
+  if (!c.taken_over) return '<span class="badge muted">not taken over</span>';
+  if (c.drift_ok) return '<span class="badge ok">taken over</span>';
+  const tip = `now points at ${c.current || '?'} — takeover would write ${c.expected || '?'}`;
+  return `<span class="badge err" title="${esc(tip)}">drift</span>`;
+}
+
+// takeoverClientLabel renders the template (variant) cell: variants the
+// selected mode would write for their family get a "*" marker (the backend
+// gates it to multi-variant families, so single-variant clients stay clean),
+// and families where split mode would write a different entry set get a "⇄"
+// marker (the CLI's interactive unified-vs-split prompt surfaces as this hint).
+export function takeoverClientLabel(c) {
+  const name = esc(c.name || '');
+  const auto = c.auto_selected
+    ? '<span class="hint" title="variant the selected mode writes for this client family">*</span>'
+    : '';
+  const split = c.split_changes
+    ? ' <span class="hint" title="split mode writes one entry per native protocol for this family">⇄</span>'
+    : '';
+  return name + auto + split;
+}
+
+// takeoverModeHint describes what a takeover mode writes (shown next to the
+// mode select; the select re-resolves the per-family variant preview
+// server-side via GET /api/takeover?mode=).
+export function takeoverModeHint(mode) {
+  switch (mode) {
+    case 'split':
+      return 'one entry per native protocol — every model passes through unchanged';
+    case 'anthropic':
+    case 'openai':
+    case 'responses':
+      return `pin the ${mode} variant where the family has one (others: unified)`;
+    default:
+      return 'one entry per family — best native protocol coverage';
+  }
+}
+
+// takeoverRunSummary flattens a POST /api/takeover result into one status
+// line (applied with optional selection notes, skipped-not-installed).
+export function takeoverRunSummary(res) {
+  const parts = [];
+  const applied = (res && res.applied) || [];
+  if (applied.length) {
+    parts.push('taken over: ' + applied.map((a) => esc(a.name) + (a.note ? ` <span class="hint">(${esc(a.note)})</span>` : '')).join(', '));
+  }
+  const skipped = (res && res.skipped) || [];
+  if (skipped.length) parts.push('skipped (config not present): ' + skipped.map(esc).join(', '));
+  if (!parts.length) return 'nothing to do';
+  return parts.join(' · ');
+}
+
+// takeoverRestoreSummary flattens a POST /api/takeover/restore result.
+export function takeoverRestoreSummary(res) {
+  const parts = [];
+  const restored = (res && res.restored) || [];
+  if (restored.length) parts.push('restored: ' + restored.map(esc).join(', '));
+  const skipped = (res && res.skipped) || [];
+  if (skipped.length) parts.push('skipped (no backup): ' + skipped.map(esc).join(', '));
+  if (!parts.length) return 'nothing to restore';
+  return parts.join(' · ');
+}
+
+// ---------- Eval tab (shadow report + fusion) ----------
+
+// shadowMatchBadge renders the status-match rate (0..1) of a primary/shadow
+// route pair: ≥99% ok, ≥95% warn, below err, missing muted.
+export function shadowMatchBadge(rate) {
+  if (rate == null) return '<span class="badge muted">—</span>';
+  const n = Number(rate);
+  if (!Number.isFinite(n)) return '<span class="badge muted">—</span>';
+  const pct = n * 100;
+  const cls = pct >= 99 ? 'ok' : pct >= 95 ? 'warn' : 'err';
+  return `<span class="badge ${cls}">${pct.toFixed(1)}%</span>`;
+}

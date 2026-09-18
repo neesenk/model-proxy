@@ -36,6 +36,17 @@ func presetTemplates() (map[string]*Template, error) {
 	return out, nil
 }
 
+// PresetTemplateYAML returns the raw embedded YAML document for one preset
+// template (the Web admin template editor shows/overrides the verbatim
+// document, not the parsed struct). Unknown names report "unknown template".
+func PresetTemplateYAML(name string) ([]byte, error) {
+	data, err := presetsFS.ReadFile("presets/" + name + ".yaml")
+	if err != nil {
+		return nil, fmt.Errorf("unknown takeover template %q", name)
+	}
+	return data, nil
+}
+
 func sortTemplates(ts []*Template) {
 	sort.Slice(ts, func(i, j int) bool { return ts[i].Name < ts[j].Name })
 }

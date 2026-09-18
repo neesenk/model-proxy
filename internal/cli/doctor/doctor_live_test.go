@@ -334,7 +334,7 @@ providers:
 	write(".config/opencode/opencode.json", `{"provider":{"model-proxy":{"options":{"baseURL":"http://127.0.0.1:9999/v1"}}}}`)
 	// codex: never taken over (no .bak, no file).
 	// kimi: taken over, provider base_url matches what the kimi template writes.
-	write(".kimi/config.toml", `[providers."model-proxy"]
+	write(".kimi-code/config.toml", `[providers."model-proxy"]
 type = "openai_legacy"
 base_url = "`+proxyURL+`/v1"
 api_key = "PROXY_MANAGED"

@@ -5,11 +5,14 @@
 修改 `takeover` / `restore`、客户端模板、模板解析或渲染引擎时必读。
 
 实现归属：备份/恢复、模板引擎与内嵌预设归 `internal/takeover`
-（`RunTakeover` / `RunRestore` / `ListClients` / `LoadTemplates` / `TemplateByName` /
+（`RunTakeover` / `RunRestore` / `RunTakeoverReport` / `RunRestoreReport` /
+`CheckDrift` / `ListClients` / `LoadTemplates` / `TemplateByName` / `PresetTemplateYAML` /
 `BackupDir`；引擎在 `template.go`，预设在 `presets/*.yaml`）；`internal/cli`
 （`commands.go` 的 `RunTakeover` / `RunRestore`）只解析参数、加载 config 并注入
 模型事实（catalog 加载与 source 标记留在 CLI 层）；doctor 的漂移检测
-（`CheckTakeoverDrift`）读模板的 drift 探针。
+（`CheckTakeoverDrift`）是 `takeover.CheckDrift` 的薄包装。WebUI 面（Takeover tab）
+经 `/api/takeover` 一族端点消费同一实现（`internal/admin/takeover.go` 只做投影与
+目录解析，见 `docs/web-api.md`）。
 
 ## 模板机制
 
@@ -121,7 +124,7 @@ opencode 族：opencode=anthropic / opencode-openai=openai / opencode-responses=
 | pi | `~/.pi/agent/models.json` | json | `anthropic-messages`,base_url 裸(pi 自拼 `/v1/messages`)+ 全量模型(pi 形状) |
 | pi-openai / pi-responses | 同上 | json | `openai-completions` / `openai-responses` 变体(base_url 带 /v1,独立 provider_id) |
 | codex | `~/.codex/config.toml` | toml | `[model_providers."<id>"]`(wire_api=responses)+ 顶层 `model_provider` 选择器 |
-| kimi | `~/.kimi/config.toml` | toml | `[providers."<id>"]`(`openai_legacy`,带 /v1)+ 每模型 `[models."<name>"]`(provider/model/max_context_size,点号名必须引号;无元数据回退 `routing.DefaultModelMetadata.Context`) |
+| kimi | `~/.kimi-code/config.toml` | toml | `[providers."<id>"]`(`openai_legacy`,带 /v1)+ 每模型 `[models."<name>"]`(provider/model/max_context_size,点号名必须引号;无元数据回退 `routing.DefaultModelMetadata.Context`) |
 | gemini-cli | `~/.gemini/.env` | env | `GOOGLE_GEMINI_BASE_URL`(带 /v1)+ `GEMINI_API_KEY` 占位 |
 | claude-mcp | `~/.claude.json` | json | 独立族：网关 MCP 面写 `mcpServers`（http 型条目），只动代理命名空间 |
 | （opencode 三变体） | 同上 | json | 附 `mcp` 块：`mcp` 节写 remote 型条目（enabled: true） |

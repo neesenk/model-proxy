@@ -373,14 +373,18 @@ CDP 驱动（`cdp.mjs`：Node 内置 WebSocket + 本地 Chromium/Chrome，发现
 playwright 缓存 → 系统安装）加载真实 `/ui/`。
 
 - `uie2e.test.mjs`（行为流）：① shell 启动且零 JS 错误（预注入 error hook + CDP
-  `exceptionThrown`/`console.error` 双通道收集）；② 六个 tab 点击后全部渲染非空面板；
+  `exceptionThrown`/`console.error` 双通道收集）；② 九个 tab 点击后全部渲染非空面板；
   ③ 真实代理请求出现在 Requests UI——先断言 `/api/requests` 的服务端事实
   （`called_model`），再驱动 `#req-refresh` 等表格行出现；④ **交互场景，按模式族覆盖全
   UI**——点击展开族（Requests 行内详情开合、Config editor 折叠组、Security 命中行
   analyze〔含 guard 红线断言：完整秘密值绝不进 UI、掩码片段可见〕）、浮层族（combobox
   `data-popup` 开选关、Status Live 详情 dialog 开关、Token Usage 日历 popover 开选关）、
   下拉表单族（facet 填充的原生 select 过滤与还原）、懒加载族（Requests 虚拟滚动更旧页、
-  chat 历史 “N earlier turns” 首次展开才解析渲染）、点击族（Accounts provider 导航）。
+  chat 历史 “N earlier turns” 首次展开才解析渲染）、点击族（Accounts provider 导航）、
+  **mutation 族**（Takeover 页真实 takeover/restore 闭环〔沙箱 HOME 里的伪 claude 配置被
+  改写并逐字节恢复〕、模板编辑器 preset 查看→覆盖→校验拒绝→删除恢复、Requests 详情
+  replay 条一次性 force-provider 重答、Schedule 卡 route test 逐 target 探测、Models 区
+  catalog refresh 打进程内 stub 的 models.dev）、渲染族（Eval 页 shadow/fusion 空态）。
 - `uivisual.test.mjs`（视觉检查，核心问题是「UI 是否正常渲染」）：逐 tab 断言核心内容
   **真实可见**（非零几何 + 非 visibility/display 隐藏，非仅 DOM 存在）+ 真实数据文本
   （dummy provider、m1 请求行、KPI 瓦片、YAML 内容、账号导航），无可见错误横幅

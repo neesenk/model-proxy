@@ -139,6 +139,11 @@ type Ports struct {
 	// one runtime snapshot, so an account probe can never pair one config
 	// generation with another generation's impl.
 	ProbeRuntime func() (cfg *configdomain.Config, providers map[string]provider.Provider)
+	// RouteProbeImpl resolves one provider's probe implementation the way the
+	// forward path binds credentials: the parent impl, or the first pooled
+	// virtual account's impl when pooled (nil when unavailable). Used by the
+	// route-target probe (TestRoute, the `test <model>` daemon twin).
+	RouteProbeImpl func(name string) provider.Provider
 	// ProbeMCP runs the MCP handshake against one mcp: server through its
 	// configured credentials (implemented by the composition root, which owns
 	// the credential injection and stdio spawning; internal/admin must not
@@ -172,6 +177,13 @@ type Ports struct {
 	// tests point them at stub endpoints after construction.
 	NewAqpClient    func(storePath string) *login.AqpClient
 	NewCodexOptions func() *login.CodexLoginServerOptions
+
+	// HomeDir returns the user's home directory root for takeover operations
+	// (user template dir <home>/.model-proxy/takeover-templates and the
+	// models.dev catalog cache). A nil func or empty result falls back to
+	// accounts.HomeDir(). Tests inject t.TempDir() so takeover never touches
+	// the real HOME.
+	HomeDir func() string
 }
 
 // ModelRefreshRuntime is an immutable, single-generation model refresh input.

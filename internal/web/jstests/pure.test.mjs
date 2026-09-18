@@ -35,6 +35,8 @@ import {
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
   iconPin, iconRefresh, iconChevron, statusBadgeClass, statusBadgeHTML,
   kpiDeltaClass, logLineHTML,
+  takeoverStatusBadge, takeoverClientLabel, takeoverRunSummary, takeoverRestoreSummary, takeoverModeHint,
+  shadowMatchBadge,
 } from '../assets/pure.js';
 
 test('esc escapes all five HTML-significant chars', () => {
@@ -2778,4 +2780,60 @@ test('analyticsRowSortKey survives the move to pure.js unchanged', () => {
   assert.equal(analyticsRowSortKey({ tokens: 7 }, 'tokens'), 7);
   assert.equal(analyticsRowSortKey({ errPct: null }, 'errors'), -1);
   assert.equal(analyticsRowSortKey({ cost: null }, 'cost'), -1);
+});
+
+// ---------- Takeover tab ----------
+
+test('takeoverStatusBadge renders the five takeover states', () => {
+  assert.equal(takeoverStatusBadge({ installed: false }), '<span class="badge muted">not installed</span>');
+  assert.equal(takeoverStatusBadge({ installed: true, taken_over: false }), '<span class="badge muted">not taken over</span>');
+  assert.equal(takeoverStatusBadge({ installed: true, taken_over: true, drift_ok: true }), '<span class="badge ok">taken over</span>');
+  const drift = takeoverStatusBadge({ installed: true, taken_over: true, drift_ok: false, current: 'http://dead:1', expected: 'http://127.0.0.1:15721' });
+  assert.ok(drift.includes('badge err'));
+  assert.ok(drift.includes('>drift<'));
+  assert.ok(drift.includes('http://dead:1') && drift.includes('http://127.0.0.1:15721'), 'tooltip carries current → expected');
+  // Tooltip content is escaped.
+  assert.ok(!takeoverStatusBadge({ installed: true, taken_over: true, drift_ok: false, current: '"><img' }).includes('"><img'));
+  // Null-safe.
+  assert.equal(takeoverStatusBadge(null), '<span class="badge muted">not installed</span>');
+});
+
+test('takeoverClientLabel marks auto-selected variants and split-changing families', () => {
+  assert.equal(takeoverClientLabel({ name: 'claude' }), 'claude');
+  assert.ok(takeoverClientLabel({ name: 'pi', auto_selected: true }).includes('>*</span>'));
+  assert.ok(takeoverClientLabel({ name: 'pi', split_changes: true }).includes('⇄'));
+  assert.ok(!takeoverClientLabel({ name: 'pi' }).includes('*'));
+  assert.ok(!takeoverClientLabel({ name: '<b>' }).includes('<b>'));
+});
+
+test('takeoverRunSummary / takeoverRestoreSummary flatten mutation results', () => {
+  assert.equal(
+    takeoverRunSummary({ applied: [{ name: 'pi', note: 'best coverage' }, { name: 'claude' }], skipped: ['gemini-cli'] }),
+    'taken over: pi <span class="hint">(best coverage)</span>, claude · skipped (config not present): gemini-cli',
+  );
+  assert.equal(takeoverRunSummary({ applied: [], skipped: [] }), 'nothing to do');
+  assert.equal(takeoverRunSummary(null), 'nothing to do');
+  assert.equal(
+    takeoverRestoreSummary({ restored: ['pi'], skipped: ['codex'] }),
+    'restored: pi · skipped (no backup): codex',
+  );
+  assert.equal(takeoverRestoreSummary({ restored: [], skipped: [] }), 'nothing to restore');
+  // Names are escaped.
+  assert.ok(!takeoverRunSummary({ applied: [{ name: '<b>x' }], skipped: [] }).includes('<b>x'));
+});
+
+test('shadowMatchBadge classifies primary/shadow match rates', () => {
+  assert.equal(shadowMatchBadge(1), '<span class="badge ok">100.0%</span>');
+  assert.equal(shadowMatchBadge(0.995), '<span class="badge ok">99.5%</span>');
+  assert.equal(shadowMatchBadge(0.97), '<span class="badge warn">97.0%</span>');
+  assert.equal(shadowMatchBadge(0.8), '<span class="badge err">80.0%</span>');
+  assert.equal(shadowMatchBadge(null), '<span class="badge muted">—</span>');
+  assert.equal(shadowMatchBadge(NaN), '<span class="badge muted">—</span>');
+});
+
+test('takeoverModeHint describes each mode', () => {
+  assert.equal(takeoverModeHint('unified'), 'one entry per family — best native protocol coverage');
+  assert.equal(takeoverModeHint(''), 'one entry per family — best native protocol coverage');
+  assert.equal(takeoverModeHint('split'), 'one entry per native protocol — every model passes through unchanged');
+  assert.ok(takeoverModeHint('anthropic').includes('anthropic'));
 });

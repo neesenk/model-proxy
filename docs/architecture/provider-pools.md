@@ -65,7 +65,8 @@ provider。只有 missing/legacy 来源允许普通 API-key provider 保持旧 f
 
 同一次 `providerbuild.BuildProviders` pass 必须同时产出 runtime providers、`poolIndex`、
 `parentOf`；startup/reload 将 build 结果直接
-传给 `synthesizeImplicitRoutesFrom`，不得再读取账号文件。这样一次 generation
+传给 `routing.DeriveRoutesFrom` + `routing.BuildExpandedRoutes`（`internal/app/proxy_reload.go`），
+不得再读取账号文件。这样一次 generation
 不会出现“新 route eligibility + 旧 provider key”或反向组合。
 
 账号 ID：

@@ -559,7 +559,8 @@ application → serveAssembly → applicationRuntime → Proxy
   targetexec, transport/bodycapture, upstreamproxy, web, webauth`；
 - `admin → accounts, appapi, cache, config, configedit, credstore, fusion, login,
   observe/counters, observe/logx, observe/requestlog, observe/seclog, observe/stats, presets, pricing, probe,
-  provider, routing, runtime, runtime/wirecap`（Web admin 应用服务；不得回依赖 app/web/cli）；
+  provider, routing, runtime, runtime/wirecap, takeover`（Web admin 应用服务；不得回依赖 app/web/cli；
+  takeover 边是 takeover/restore 与模板管理的 daemon 孪生）；
 - `appapi → adjudicate, fusion, observe/requestlog, observe/stats, presets, pricing`
   （adjudicate 仅为其 BlockEntry/Result 快照类型提供 DTO 别名，见 appapi/types.go）；
 - `cli → cli/account, cli/admin, cli/audit, cli/config, cli/diag, cli/doctor,

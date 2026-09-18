@@ -34,7 +34,7 @@
     `<config>.lock`（advisory flock，Windows 用 LockFileEx），只阻塞其他写者、从不阻塞读。
 13. 新顶层配置字段必须六步同步：`internal/config.Config` → `rawConfig` → 拷贝段 → validate → 该包的 YAML 加载测试（yaml.v3 会静默忽略未知键，不能只直接构造 Config）→ 示例与文档（`config.yaml` 模板/README）。根包不承载字段或默认值逻辑（`config_compat.go` 已删除）。
 14. duration 字段除明确允许的 `retry_wait: "0"`（关闭等待重试）与 `stream_keepalive: "0"`（关闭 SSE 心跳）外应验证为正数；任何允许零/负数的字段都要写入契约。
-15. `BillingClass` iota 不是调度顺序，必须通过独立 `tierRank` 映射 `plan < unknown < payg`。
+15. `BillingClass` iota 不是调度顺序，必须通过独立 `schedulingTier` 映射 `plan < unknown < payg`。
 
 ## 并发与生命周期
 
@@ -81,6 +81,12 @@
 24. 文件日志禁用 ANSI color。
 25. request log list/report 不得在 metadata 查询中持有完整 body。
 26. 运行态按名字落盘必须经过 config fingerprint；测试不得写真实 `~/.model-proxy`。
+26b. takeover 相关测试必须 `t.Setenv("HOME", t.TempDir())` **整户隔离** HOME：预设模板的
+    `file:`~展开走 `os.UserHomeDir()`，`takeover all`（含 admin/Web 面的
+    `RunTakeover("all")`）在真实 HOME 下会把**真实客户端配置**（`~/.claude/settings.json`、
+    `~/.pi/agent/models.json` 等）改写进备份目录指到临时路径的状态——备份随 `t.TempDir()`
+    清理即不可恢复。只替换 `HomeDir` 端口/templatesDir 不够（模板 file 展开不看它们）；
+    `internal/takeover` 与 `internal/admin` 的 takeover 测试都以 `t.Setenv("HOME", …)` 为准。
 27. quota snapshot 超过 `3×poll_interval` 或带错误时只能视为 unknown。
 28. Go 标准库行为：取消一个**带请求 body** 的外发 `http.Client.Do` 不会立刻
     关闭到上游的连接（不带 body 的会）。客户端在响应头阶段断开后，代理与上游

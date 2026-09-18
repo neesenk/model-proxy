@@ -43,6 +43,8 @@ import {
   SECURITY_RANGES, securityRangeFromSecs, securityFilterQuery, securityFilterFromQuery, explainCacheKey,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
   iconPin, iconRefresh, iconChevron, statusBadgeHTML, kpiDeltaClass, logLineHTML,
+  takeoverStatusBadge, takeoverClientLabel, takeoverRunSummary, takeoverRestoreSummary, takeoverModeHint,
+  shadowMatchBadge,
 } from './pure.js';
 
 function el(tag, opts = {}) {
@@ -137,6 +139,14 @@ async function apiDel(path) {
   });
   return apiParse(r);
 }
+async function apiPut(path, body) {
+  const r = await fetch(path, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return apiParse(r);
+}
 async function apiParse(r) {
   let txt = '';
   try { txt = await r.text(); } catch (_) { /* network blip */ }
@@ -225,9 +235,11 @@ const panels = {
   status: document.getElementById('tab-status'),
   config: document.getElementById('tab-config'),
   accounts: document.getElementById('tab-accounts'),
+  takeover: document.getElementById('tab-takeover'),
   analytics: document.getElementById('tab-analytics'),
   requests: document.getElementById('tab-requests'),
   mcp: document.getElementById('tab-mcp'),
+  eval: document.getElementById('tab-eval'),
   security: document.getElementById('tab-security'),
 };
 let activeTab = 'status';
@@ -259,7 +271,7 @@ function parseHash() {
   const raw = (location.hash || '').replace(/^#\/?/, ''); // drop leading "#"/"#/"
   const [path, queryRaw] = raw.split('?');
   const [tab, ...rest] = path.split('/');
-  if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics' || tab === 'requests' || tab === 'mcp' || tab === 'security') {
+  if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics' || tab === 'requests' || tab === 'mcp' || tab === 'security' || tab === 'takeover' || tab === 'eval') {
     // decodeURIComponent so provider/section names with special chars
     // round-trip; a malformed sequence decodes to "" (treated as "no sub" ->
     // first provider / default section). For #status/<section>, sub is the
@@ -403,6 +415,8 @@ function activateTab(name) {
   if (name === 'analytics') renderAnalyticsTab();
   if (name === 'requests') renderRequestsTab();
   if (name === 'mcp') renderMCPTab();
+  if (name === 'takeover') renderTakeoverTab();
+  if (name === 'eval') renderEvalTab();
   if (name === 'security') renderSecurityTab();
   // Reflect the tab in the URL. A tab switch is a navigation the user may want
   // to Back out of, so push a history entry. Accounts adds its provider segment
@@ -496,6 +510,8 @@ function activateTabSilent(name) {
   if (name === 'analytics') renderAnalyticsTab();
   if (name === 'requests') renderRequestsTab();
   if (name === 'mcp') renderMCPTab();
+  if (name === 'takeover') renderTakeoverTab();
+  if (name === 'eval') renderEvalTab();
   if (name === 'security') renderSecurityTab();
 }
 
@@ -1663,6 +1679,67 @@ function requestRelTimeOpts(id) {
   };
 }
 
+// replayStripHTML renders the per-request replay control (`model-proxy
+// replay <id> --to <provider>` as an inline action): provider input with a
+// datalist of providers observed in the loaded facet data, a run button and a
+// result host. Shadow records are fire-and-forget evaluations — the backend
+// refuses to replay them, so the strip is not offered.
+function replayStripHTML(id) {
+  if (id.startsWith('shadow-')) return '';
+  return `<div class="req-replay" data-replay-id="${esc(id)}">` +
+    '<span class="hint">Replay to</span>' +
+    '<input class="req-input" list="req-replay-providers" placeholder="provider" data-replay-provider>' +
+    '<button class="btn small" data-replay-run>Replay</button>' +
+    '<span class="hint" data-replay-status></span>' +
+    '<div data-replay-result></div>' +
+    '</div>';
+}
+
+// wireReplayStrip binds the strip's run button and lazily creates the shared
+// provider datalist (options from the Requests facet providers).
+function wireReplayStrip(cell) {
+  const strip = cell && cell.querySelector('[data-replay-id]');
+  if (!strip) return;
+  let list = document.getElementById('req-replay-providers');
+  if (!list) {
+    list = document.createElement('datalist');
+    list.id = 'req-replay-providers';
+    document.body.appendChild(list);
+  }
+  // Options track the Requests facet providers (refreshed per loadRequests).
+  const providers = (requestsCombos && requestsCombos.providerOptions) || [];
+  list.innerHTML = providers.map((p) => `<option value="${esc(p)}"></option>`).join('');
+  strip.querySelector('[data-replay-run]').onclick = () => replayRun(strip);
+}
+
+// replayRun executes the one-shot force-provider replay and renders the
+// exchange outcome inline (status badge + latency; body in the same lazy
+// raw-body details as request/response bodies — chunked, rendered on expand).
+async function replayRun(strip) {
+  const id = strip.dataset.replayId;
+  const provider = strip.querySelector('[data-replay-provider]').value.trim();
+  const status = strip.querySelector('[data-replay-status]');
+  const result = strip.querySelector('[data-replay-result]');
+  if (!provider) {
+    status.textContent = 'pick a provider first';
+    return;
+  }
+  const btn = strip.querySelector('[data-replay-run]');
+  btn.disabled = true;
+  status.textContent = 'replaying…';
+  result.innerHTML = '';
+  try {
+    const res = await apiPost('/api/replay', { id, provider });
+    status.innerHTML = `${statusBadgeHTML(res.status)} ${esc(String(res.latency_ms))} ms${res.truncated ? ' · truncated at 4 MiB' : ''}`;
+    const bodyId = registerRawBody(res.body || '', 'application/json', 'response');
+    result.innerHTML = `<details class="raw-body" data-raw="${esc(bodyId)}"><summary>replay response body (${fmtNum((res.body || '').length)} bytes)</summary><div class="raw-body-host"><span class="hint">renders on first expand</span></div></details>`;
+  } catch (e) {
+    status.innerHTML = `<span class="msg err">${esc((e && e.message) || String(e))}</span>`;
+  }
+  btn.disabled = false;
+  reqDetailChanged();
+}
+
 // toggleRequestDetail expands/collapses the full record under a summary row.
 // Multiple rows can stay open at once: clicking a row toggles only that row's
 // detail and never closes another row's. An in-flight fetch fills its own row
@@ -1685,7 +1762,8 @@ async function toggleRequestDetail(tr) {
   const relOpts = requestRelTimeOpts(id);
   const cached = requestsDetailCache.get(id);
   if (cached) {
-    row.firstElementChild.innerHTML = detailRecordsHTML(cached, { ...relOpts, guard: requestsGuardCache.get(id) });
+    row.firstElementChild.innerHTML = detailRecordsHTML(cached, { ...relOpts, guard: requestsGuardCache.get(id) }) + replayStripHTML(id);
+    wireReplayStrip(row.firstElementChild);
     reqDetailChanged();
     return;
   }
@@ -1708,7 +1786,8 @@ async function toggleRequestDetail(tr) {
     return;
   }
   const guard = Array.isArray(resp.guard) ? resp.guard : [];
-  row.firstElementChild.innerHTML = detailRecordsHTML(recs, { ...requestRelTimeOpts(id), guard });
+  row.firstElementChild.innerHTML = detailRecordsHTML(recs, { ...requestRelTimeOpts(id), guard }) + replayStripHTML(id);
+  wireReplayStrip(row.firstElementChild);
   cacheRequestDetail(id, recs, guard);
   // The detail's height joins the row's footprint — remeasure so the
   // spacers below (and any further fetches) stay anchored.
@@ -4911,6 +4990,16 @@ async function freezeProvider(name, btn) {
 // or unsupported by definition). Providers with no probe data are omitted
 // server-side; an empty store renders a hint instead of a blank section.
 function renderModelsCard(target, providers) {
+  // models.dev metadata cache (the `models pull` web twin): the refreshed
+  // catalog is consumed by the next reload/takeover, so no re-render follows.
+  // The result text rides module state so the Status tick's re-render keeps it.
+  target.insertAdjacentHTML('beforeend', buildCard(
+    'Model Catalog',
+    'models.dev metadata cache',
+    '<button class="btn small" data-catalog-refresh>Refresh Catalog</button> <span class="hint" data-catalog-result>' + esc(modelsCatalogResult) + '</span>',
+    'flush'));
+  const catBtn = target.querySelector('[data-catalog-refresh]');
+  if (catBtn) catBtn.addEventListener('click', () => refreshModelsCatalog(catBtn));
   const entries = modelCapMatrix(providers);
   if (!entries.length) {
     target.insertAdjacentHTML('beforeend', buildCard('Models', '',
@@ -4968,6 +5057,31 @@ async function refreshProviderModels(btn) {
     btn.disabled = false;
     btn.textContent = 'Refresh';
     window.alert('models refresh failed: ' + e.message);
+  }
+}
+
+// refreshModelsCatalog force-refreshes the models.dev metadata cache
+// (POST /api/models/catalog/refresh, the web twin of `model-proxy models
+// pull`) and reports the count/etag inline; failures keep the old cache and
+// show the backend message. The result text survives Status tick re-renders
+// via the module-level modelsCatalogResult.
+let modelsCatalogResult = '';
+
+async function refreshModelsCatalog(btn) {
+  btn.disabled = true;
+  btn.textContent = 'refreshing…';
+  try {
+    const r = await apiPost('/api/models/catalog/refresh');
+    modelsCatalogResult = `${fmtNum(r.count)} models cached${r.etag ? ` · etag ${r.etag}` : ''} — picked up on next reload/takeover`;
+  } catch (e) {
+    modelsCatalogResult = 'catalog refresh failed: ' + ((e && e.message) || String(e));
+  }
+  const out = document.querySelector('[data-catalog-result]');
+  if (out) out.textContent = modelsCatalogResult;
+  const currentBtn = document.querySelector('[data-catalog-refresh]');
+  if (currentBtn) {
+    currentBtn.disabled = false;
+    currentBtn.textContent = 'Refresh Catalog';
   }
 }
 
@@ -5050,11 +5164,13 @@ function renderScheduleCard(target, st) {
       }
       pools = pools.replace(/ · $/, '') + '</span>';
     }
+    const testRes = routeTestResults.get(route);
     blocks += `<div class="route-block">
-      <div class="route-head"><span class="route-name">${esc(route)}</span></div>
+      <div class="route-head"><span class="route-name">${esc(route)}</span><button class="btn small" data-test-route="${esc(route)}" title="probe every route target with a real upstream request (model-proxy test)"${testRes && testRes.busy ? ' disabled' : ''}>${testRes && testRes.busy ? 'testing…' : 'Test'}</button></div>
       <div class="route-chain">${chain}</div>
       ${meta ? `<div class="route-meta">${meta}</div>` : ''}
       ${pools}
+      <div class="route-test-result" data-test-result-for="${esc(route)}"${testRes ? '' : ' hidden'}>${testRes ? testRes.html : ''}</div>
     </div>`;
   }
   const html = buildCard('Schedule', `${names.length} routes`, blocks, 'flush');
@@ -5075,6 +5191,11 @@ function renderScheduleCard(target, st) {
     }
     const pinBtn = e.target.closest('[data-pin-route]');
     const unpinBtn = e.target.closest('[data-unpin-route]');
+    const testBtn = e.target.closest('[data-test-route]');
+    if (testBtn) {
+      testRouteTargets(card, testBtn.dataset.testRoute, testBtn);
+      return;
+    }
     if (!pinBtn && !unpinBtn) return;
     try {
       if (pinBtn) {
@@ -5087,6 +5208,50 @@ function renderScheduleCard(target, st) {
       if (msg) showMsg(msg, 'err', err.message);
     }
   });
+}
+
+// testRouteTargets runs the per-target upstream probe for one route (the web
+// twin of `model-proxy test <model>`, POST /api/routes/test) and renders one
+// ✓/✗ line per target under the route block. The result lives in the
+// module-level routeTestResults map (same survival pattern as the MCP tab's
+// probe map): the Status tab's 5s tick re-renders the whole panel, so the
+// block's result host re-fills from the map on every render instead of
+// losing the outcome.
+const routeTestResults = new Map(); // route → {html, busy}
+
+async function testRouteTargets(card, route, btn) {
+  const host = card.querySelector(`[data-test-result-for="${CSS.escape(route)}"]`);
+  const prev = routeTestResults.get(route);
+  if (!host || (prev && prev.busy)) return;
+  routeTestResults.set(route, { html: '<span class="hint">probing route targets…</span>', busy: true });
+  btn.disabled = true;
+  btn.textContent = 'testing…';
+  host.hidden = false;
+  host.innerHTML = routeTestResults.get(route).html;
+  try {
+    const res = await apiPost('/api/routes/test', { model: route });
+    const lines = (res.results || []).map((t) => {
+      const badge = t.ok ? '<span class="badge ok">✓</span>' : '<span class="badge err">✗</span>';
+      const status = t.http_status ? `HTTP ${t.http_status}` : '';
+      const reason = t.reason ? ` — ${esc(t.reason)}` : '';
+      return `<div>${badge} <span class="mono">${esc(t.provider)}</span> (${esc(t.model)}) ${status}${reason} <span class="hint">${fmtNum(t.latency_ms)} ms</span></div>`;
+    }).join('');
+    routeTestResults.set(route, { html: lines || '<span class="hint">no targets</span>', busy: false });
+  } catch (e) {
+    routeTestResults.set(route, { html: `<span class="msg err">${esc((e && e.message) || String(e))}</span>`, busy: false });
+  }
+  // The card may have been re-rendered by the status tick mid-flight —
+  // re-query the host before painting.
+  const current = document.querySelector(`[data-test-result-for="${CSS.escape(route)}"]`);
+  if (current) {
+    current.hidden = false;
+    current.innerHTML = routeTestResults.get(route).html;
+  }
+  const currentBtn = document.querySelector(`[data-test-route="${CSS.escape(route)}"]`);
+  if (currentBtn) {
+    currentBtn.disabled = false;
+    currentBtn.textContent = 'Test';
+  }
 }
 
 // renderTokensCard draws the per-(provider, model) token usage table.
@@ -8918,6 +9083,10 @@ async function boot() {
     activateTabSilent('requests');
   } else if (bootTab === 'mcp') {
     activateTabSilent('mcp');
+  } else if (bootTab === 'takeover') {
+    activateTabSilent('takeover');
+  } else if (bootTab === 'eval') {
+    activateTabSilent('eval');
   } else if (bootTab === 'security') {
     activateTabSilent('security');
   } else {
@@ -9048,6 +9217,340 @@ async function mcpTestServer(name) {
     mcpProbe.set(name, { state: 'err', text: (e && e.message) || String(e), tools: [] });
   }
   renderMCPInto();
+}
+
+// ---------- Takeover tab ----------
+
+// Client takeover surface (/api/takeover): every template with its
+// install/takeover/drift state, takeover/restore execution (the daemon twins
+// of `model-proxy takeover|restore`) and user template editing
+// (/api/takeover/templates/<name>). All renders are user-triggered (tab
+// activation via retainTab, Refresh/button clicks), so the deferAutoRefresh
+// gate does not apply; a failed refresh keeps the old DOM and reports through
+// setRefreshError like every other tab.
+let takeoverData = null;
+// Session-scoped mode for takeover runs (unified|split|anthropic|openai|
+// responses); restore never does protocol selection and ignores it.
+let takeoverMode = 'unified';
+// In-flight mutation guard: action buttons disable while a run is in flight.
+let takeoverBusy = false;
+// Last mutation outcome, rendered above the table until the next action.
+let takeoverResult = null; // {html, warnings:[], err}
+
+async function renderTakeoverTab() {
+  const panel = panels.takeover;
+  // Re-entry keeps the rendered card (the .tk-host marker only exists after a
+  // successful first mount; a failed first activation retries the skeleton).
+  if (await retainTab(panel, '.tk-host', loadTakeover)) return;
+  panel.innerHTML = '<div class="tk-host"><span class="hint">loading…</span></div>';
+  await loadTakeover();
+}
+
+async function loadTakeover() {
+  const panel = panels.takeover;
+  try {
+    takeoverData = await apiGet('/api/takeover?mode=' + encodeURIComponent(takeoverMode));
+    renderTakeoverInto();
+    setRefreshError(panel, null);
+  } catch (e) {
+    setRefreshError(panel, (e && e.message) || String(e));
+  }
+}
+
+const TAKEOVER_MODES = ['unified', 'split', 'anthropic', 'openai', 'responses'];
+
+function takeoverResultHTML() {
+  if (!takeoverResult) return '';
+  if (takeoverResult.err) return `<div class="msg err">${esc(takeoverResult.err)}</div>`;
+  const warnings = (takeoverResult.warnings || []).map((w) => `<div class="msg hint">⚠ ${esc(w)}</div>`).join('');
+  return `<div class="msg">${takeoverResult.html}</div>` + warnings;
+}
+
+function takeoverRowHTML(c) {
+  let action;
+  if (c.taken_over) {
+    action = `<button class="btn small" data-tk-restore="${esc(c.name)}" ${takeoverBusy ? 'disabled' : ''}>Restore</button>`;
+  } else if (c.installed) {
+    action = `<button class="btn small" data-tk-takeover="${esc(c.name)}" ${takeoverBusy ? 'disabled' : ''}>Takeover</button>`;
+  } else {
+    action = '<span class="hint">—</span>';
+  }
+  const edit = `<button class="btn small" data-tk-edit="${esc(c.name)}">${c.source === 'user' ? 'Edit' : 'View'}</button>`;
+  // Client = the agent family (pi, opencode); Template = the concrete variant
+  // (pi-openai). They coincide for single-variant clients.
+  return `<tr><td>${esc(c.family)}</td><td>${takeoverClientLabel(c)}</td><td>${esc(c.format)}</td>` +
+    `<td><span class="badge muted">${esc(c.source)}</span></td>` +
+    `<td class="hint" title="${esc(c.file)}">${esc(c.file)}</td>` +
+    `<td>${takeoverStatusBadge(c)}</td>` +
+    `<td>${action} ${edit}</td></tr>`;
+}
+
+function renderTakeoverInto() {
+  const host = panels.takeover && panels.takeover.querySelector('.tk-host');
+  if (!host || !takeoverData) return;
+  const clients = takeoverData.clients || [];
+  const rows = clients.map(takeoverRowHTML).join('');
+  const table = `<table class="table"><thead><tr><th>Client</th><th>Template</th><th>Format</th><th>Source</th><th>Config File</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  const modeOptions = TAKEOVER_MODES.map((m) => `<option value="${m}" ${takeoverMode === m ? 'selected' : ''}>${m}</option>`).join('');
+  const actions =
+    `<select id="tk-mode" class="req-input" title="Takeover mode (restore ignores it)">${modeOptions}</select>` +
+    `<span class="hint" id="tk-mode-hint">${esc(takeoverModeHint(takeoverMode))}</span>` +
+    `<button class="btn small primary" data-tk-takeover="" ${takeoverBusy ? 'disabled' : ''}>Takeover All</button>` +
+    `<button class="btn small" data-tk-restore="" ${takeoverBusy ? 'disabled' : ''}>Restore All</button>` +
+    '<button class="btn small" data-tk-new>New Template</button>' +
+    '<button class="btn small" data-tk-refresh>Refresh</button>';
+  const result = takeoverResultHTML();
+  const dirs = `<div class="hint tk-dirs">templates: ${esc(takeoverData.templates_dir || '')} · backups: ${esc(takeoverData.backup_dir || '')}</div>`;
+  host.innerHTML = buildCard('Client Takeover', `${clients.length} templates`, result + table + dirs, '', actions);
+
+  const modeSel = host.querySelector('#tk-mode');
+  // The mode select is functional: switching it re-resolves the surface
+  // server-side (?mode=) so the * markers preview what Takeover would write.
+  if (modeSel) modeSel.onchange = () => { takeoverMode = modeSel.value; loadTakeover(); };
+  for (const btn of host.querySelectorAll('[data-tk-takeover]')) {
+    btn.onclick = () => takeoverRun(btn.dataset.tkTakeover);
+  }
+  for (const btn of host.querySelectorAll('[data-tk-restore]')) {
+    btn.onclick = () => takeoverRestore(btn.dataset.tkRestore);
+  }
+  for (const btn of host.querySelectorAll('[data-tk-edit]')) {
+    btn.onclick = () => openTakeoverTemplate(btn.dataset.tkEdit);
+  }
+  const refresh = host.querySelector('[data-tk-refresh]');
+  if (refresh) refresh.onclick = () => loadTakeover();
+  const add = host.querySelector('[data-tk-new]');
+  if (add) add.onclick = () => openTakeoverTemplate('');
+}
+
+// takeoverRun executes one takeover (client '' = all) with the selected mode
+// and re-renders from a fresh surface afterwards.
+async function takeoverRun(client) {
+  if (takeoverBusy) return;
+  takeoverBusy = true;
+  renderTakeoverInto();
+  try {
+    const res = await apiPost('/api/takeover', { client, mode: takeoverMode });
+    takeoverResult = { html: takeoverRunSummary(res), warnings: res.warnings || [], err: '' };
+  } catch (e) {
+    takeoverResult = { html: '', warnings: [], err: (e && e.message) || String(e) };
+  }
+  takeoverBusy = false;
+  await loadTakeover();
+}
+
+// takeoverRestore restores one client (or all, confirmDialog first — restore
+// ends the takeover) and re-renders.
+async function takeoverRestore(client) {
+  if (takeoverBusy) return;
+  const what = client ? `client ${client}` : 'ALL taken-over clients';
+  const ok = await confirmDialog(
+    'Restore ' + (client || 'all') + '?',
+    `Restore the original config of ${what} from the takeover backup? This ends the takeover and deletes the backup marker.`,
+    'Restore',
+  );
+  if (!ok) return;
+  takeoverBusy = true;
+  renderTakeoverInto();
+  try {
+    const res = await apiPost('/api/takeover/restore', { client });
+    takeoverResult = { html: takeoverRestoreSummary(res), warnings: [], err: '' };
+  } catch (e) {
+    takeoverResult = { html: '', warnings: [], err: (e && e.message) || String(e) };
+  }
+  takeoverBusy = false;
+  await loadTakeover();
+}
+
+// ---------- Takeover template editor ----------
+
+// openTakeoverTemplate opens the #tk-modal editor: name '' starts a new user
+// template; an existing name loads its YAML (preset → read-only view with
+// Save As Override, user → editable with Save/Delete).
+async function openTakeoverTemplate(name) {
+  const modal = document.getElementById('tk-modal');
+  if (!modal) return;
+  let doc = null;
+  if (name) {
+    try {
+      doc = await apiGet('/api/takeover/templates/' + encodeURIComponent(name));
+    } catch (e) {
+      takeoverResult = { html: '', warnings: [], err: (e && e.message) || String(e) };
+      renderTakeoverInto();
+      return;
+    }
+  }
+  renderTakeoverTemplateModal(modal, name, doc);
+  if (!modal.open) modal.showModal();
+}
+
+function renderTakeoverTemplateModal(modal, name, doc) {
+  const isNew = !name;
+  const source = doc ? doc.source : 'user';
+  const presetView = doc && doc.source === 'preset';
+  const title = isNew ? 'New Template' : `${name} (${source})`;
+  const nameField = isNew
+    ? '<div class="field"><label for="tk-name">Template Name</label><input id="tk-name" autocomplete="off" spellcheck="false" placeholder="my-agent"></div>'
+    : '';
+  const pathHint = doc && doc.path ? `<span class="hint">${esc(doc.path)}</span>` : '';
+  const saveLabel = presetView ? 'Save As Override' : 'Save';
+  const deleteBtn = doc && doc.source === 'user'
+    ? '<button type="button" class="btn small danger" id="tk-delete">Delete</button>'
+    : '';
+  modal.innerHTML =
+    `<header class="modal-head">
+       <h2 id="tk-title">${esc(title)}</h2>
+       <button type="button" class="link-btn" id="tk-cancel" aria-label="Close">Close</button>
+     </header>
+     <div class="modal-body">
+       ${nameField}
+       <div class="field">
+         <label for="tk-yaml">Template YAML</label>
+         <textarea id="tk-yaml" rows="18" spellcheck="false" ${presetView ? 'readonly' : ''}>${esc(doc ? doc.yaml : '')}</textarea>
+         ${presetView ? '<span class="hint">Built-in preset — saving writes a user override that replaces it.</span>' : ''}
+         ${pathHint}
+       </div>
+       <div class="msg err" id="tk-msg" hidden></div>
+       <div class="modal-actions">
+         ${deleteBtn}
+         <button type="button" class="btn small primary" id="tk-save">${saveLabel}</button>
+       </div>
+     </div>`;
+
+  const close = () => { if (modal.open) modal.close(); };
+  modal.querySelector('#tk-cancel').addEventListener('click', close);
+  const msg = modal.querySelector('#tk-msg');
+  const fail = (text) => { msg.hidden = false; msg.textContent = text; };
+
+  modal.querySelector('#tk-save').addEventListener('click', async () => {
+    const target = isNew ? modal.querySelector('#tk-name').value.trim() : name;
+    if (!target) { fail('template name is required'); return; }
+    const yaml = modal.querySelector('#tk-yaml').value;
+    const saveBtn = modal.querySelector('#tk-save');
+    saveBtn.disabled = true;
+    try {
+      await apiPut('/api/takeover/templates/' + encodeURIComponent(target), { yaml });
+      close();
+      takeoverResult = { html: `template ${esc(target)} saved`, warnings: [], err: '' };
+      await loadTakeover();
+    } catch (e) {
+      fail((e && e.message) || String(e));
+      saveBtn.disabled = false;
+    }
+  });
+
+  const del = modal.querySelector('#tk-delete');
+  if (del) {
+    del.addEventListener('click', async () => {
+      const ok = await confirmDialog(
+        `Delete template ${name}?`,
+        'Remove this user template? If it overrides a built-in preset, the preset becomes active again.',
+        'Delete',
+      );
+      if (!ok) return;
+      try {
+        await apiDel('/api/takeover/templates/' + encodeURIComponent(name));
+        close();
+        takeoverResult = { html: `template ${esc(name)} deleted`, warnings: [], err: '' };
+        await loadTakeover();
+      } catch (e) {
+        fail((e && e.message) || String(e));
+      }
+    });
+  }
+}
+
+// ---------- Eval tab ----------
+
+// Evaluation/observability surfaces that already have APIs: the shadow report
+// (/api/shadow-report — primary vs shadow backend comparison over paired
+// request-log samples) and the Fusion orchestration feed (/api/fusion —
+// per-workflow stats + recent runs). All renders are user-triggered (tab
+// activation via retainTab, Refresh clicks), so the deferAutoRefresh gate
+// does not apply. Each half settles independently: a failed fetch keeps the
+// last good data on screen and reports through setRefreshError.
+let evalShadow = null;
+let evalFusion = null;
+
+async function renderEvalTab() {
+  const panel = panels.eval;
+  if (await retainTab(panel, '.eval-host', loadEval)) return;
+  panel.innerHTML = '<div class="eval-host"><span class="hint">loading…</span></div>';
+  await loadEval();
+}
+
+async function loadEval() {
+  const panel = panels.eval;
+  const [shadow, fusion] = await Promise.allSettled([
+    apiGet('/api/shadow-report'),
+    apiGet('/api/fusion'),
+  ]);
+  const errs = [];
+  if (shadow.status === 'fulfilled') evalShadow = shadow.value;
+  else errs.push((shadow.reason && shadow.reason.message) || String(shadow.reason));
+  if (fusion.status === 'fulfilled') evalFusion = fusion.value;
+  else errs.push((fusion.reason && fusion.reason.message) || String(fusion.reason));
+  if (evalShadow || evalFusion) renderEvalInto();
+  setRefreshError(panel, errs.length ? errs.join(' · ') : null);
+}
+
+function renderEvalInto() {
+  const host = panels.eval && panels.eval.querySelector('.eval-host');
+  if (!host) return;
+  host.innerHTML = evalShadowCardHTML(evalShadow) + evalFusionCardHTML(evalFusion);
+  const refresh = host.querySelector('[data-eval-refresh]');
+  if (refresh) refresh.onclick = () => loadEval();
+}
+
+function evalShadowCardHTML(data) {
+  const refreshBtn = '<button class="btn small" data-eval-refresh>Refresh</button>';
+  if (!data) return buildCard('Shadow Report', '', '<span class="hint">loading…</span>', '', refreshBtn);
+  if (!data.enabled) {
+    return buildCard('Shadow Report', '', '<span class="hint">Shadow evaluation needs request_log.enabled; no paired samples are recorded otherwise.</span>', '', refreshBtn);
+  }
+  const entries = data.entries || [];
+  if (!entries.length) {
+    return buildCard('Shadow Report', '24h', '<span class="hint">No shadow pairs in the last 24h.</span>', '', refreshBtn);
+  }
+  const rows = entries.map((e) => `<tr><td class="mono">${esc(e.route)}</td><td>${esc(e.primary_provider)}</td><td>${esc(e.shadow_provider)}</td>` +
+    `<td class="num">${fmtNum(e.samples)}</td><td>${shadowMatchBadge(e.status_match_rate)}</td>` +
+    `<td class="num">${fmtNum(e.primary_latency_ms)}</td><td class="num">${fmtNum(e.shadow_latency_ms)}</td>` +
+    `<td class="num">${e.latency_diff_ms > 0 ? '+' : ''}${fmtNum(e.latency_diff_ms)}</td></tr>`).join('');
+  const table = `<table class="table"><thead><tr><th>Route</th><th>Primary</th><th>Shadow</th><th class="num">Samples</th><th>Status Match</th><th class="num">Primary ms</th><th class="num">Shadow ms</th><th class="num">Δ ms</th></tr></thead><tbody>${rows}</tbody></table>`;
+  return buildCard('Shadow Report', `last 24h · ${entries.length} route pairs`, table, '', refreshBtn);
+}
+
+function evalFusionCardHTML(data) {
+  if (!data) return buildCard('Fusion', '', '<span class="hint">loading…</span>');
+  const workflows = data.workflows || {};
+  const names = Object.keys(workflows).sort();
+  const runs = data.runs || [];
+  if (!names.length && !runs.length) {
+    return buildCard('Fusion', '', '<span class="hint">No fusion workflows configured or no runs yet — fusion workflows live in config under fusion:.</span>');
+  }
+  let out = '';
+  if (names.length) {
+    const rows = names.map((name) => {
+      const w = workflows[name];
+      const degraded = Object.entries(w.degraded || {}).map(([k, v]) => `${esc(k)}×${v}`).join(', ') || '—';
+      return `<tr><td class="mono">${esc(name)}</td><td class="num">${fmtNum(w.runs)}</td><td class="num">${fmtNum(w.runs_today)}</td>` +
+        `<td class="num">${fmtNum(w.quorum_met)}</td><td class="num">${Number(w.amplification || 0).toFixed(2)}×</td><td class="hint">${degraded}</td></tr>`;
+    }).join('');
+    out += `<table class="table"><thead><tr><th>Workflow</th><th class="num">Runs</th><th class="num">Today</th><th class="num">Quorum Met</th><th class="num">Amplification</th><th>Degraded</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  if (runs.length) {
+    const rows = runs.map((r) => {
+      const legs = (r.legs || []);
+      const legsTip = legs.map((l) => `${l.provider}/${l.model} ${l.status}${l.err ? ' — ' + l.err : ''}`).join('\n');
+      const quorum = r.quorum ? '<span class="badge ok">quorum</span>' : `<span class="badge warn">${esc(r.degraded || 'partial')}</span>`;
+      const synth = r.synth_committed ? `<span class="badge ok">${r.synth_status || 'ok'}</span>` : '<span class="badge muted">—</span>';
+      return `<tr><td class="mono">${esc(fmtTimeSafe(r.ts) || '')}</td><td class="mono">${esc(r.workflow)}</td><td class="mono">${esc(r.route)}</td>` +
+        `<td>${quorum}</td><td class="num">${fmtNum(r.drafts_used)}</td>` +
+        `<td class="num" title="${esc(legsTip)}">${legs.length}</td>` +
+        `<td>${r.judge_used ? '<span class="badge muted">judge</span>' : ''}</td><td>${synth}</td></tr>`;
+    }).join('');
+    out += `<table class="table"><thead><tr><th>Time</th><th>Workflow</th><th>Route</th><th>Quorum</th><th class="num">Drafts</th><th class="num">Legs</th><th>Judge</th><th>Synth</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  return buildCard('Fusion', `${names.length} workflows · ${runs.length} recent runs`, out);
 }
 
 boot();

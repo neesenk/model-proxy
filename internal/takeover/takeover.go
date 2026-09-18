@@ -206,13 +206,45 @@ type ModelFacts struct {
 	DefaultOutput  int
 }
 
+// AppliedClient records one client config rewritten by a takeover run; Note
+// carries the protocol auto-selection rationale when one applied.
+type AppliedClient struct {
+	Name string
+	Note string
+}
+
+// TakeoverReport is the structured outcome of RunTakeoverReport: which client
+// configs were rewritten, which were skipped (batch mode, config file absent),
+// and the metadata-default warnings the run emitted.
+type TakeoverReport struct {
+	Applied  []AppliedClient
+	Skipped  []string
+	Warnings []string
+}
+
+// RestoreReport is the structured outcome of RunRestoreReport.
+type RestoreReport struct {
+	Restored []string
+	Skipped  []string
+}
+
 func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFacts, templatesDir string, mode ResolveMode) error {
+	_, err := RunTakeoverReport(cfg, which, bakDir, facts, templatesDir, mode)
+	return err
+}
+
+// RunTakeoverReport is RunTakeover plus a structured report for non-CLI
+// callers (the Web admin API): the logging/progress behavior is identical,
+// but applied/skipped clients and warnings also come back as data.
+func RunTakeoverReport(cfg *configdomain.Config, which, bakDir string, facts ModelFacts, templatesDir string, mode ResolveMode) (TakeoverReport, error) {
+	var report TakeoverReport
 	clients, err := ResolveClientsMode(cfg, which, templatesDir, mode)
 	if err != nil {
-		return err
+		return report, err
 	}
 	routes := facts.Routes
 	meta := facts.Meta
+	report.Warnings = MetadataWarnings(clients, cfg, facts)
 	EmitTakeoverWarnings(clients, cfg, meta, facts)
 
 	// `all`/`""` expands to every client; a client whose config file isn't
@@ -235,53 +267,75 @@ func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFact
 		if err := Backup(c.File, bakDir, c.Name); err != nil {
 			if batch && errors.Is(err, ErrNoFile) {
 				logx.Infof("  ~ %s skipped (config not present: %s)", c.Name, c.File)
+				report.Skipped = append(report.Skipped, c.Name)
 				continue
 			}
-			return fmt.Errorf("%s backup: %w", c.Name, err)
+			return report, fmt.Errorf("%s backup: %w", c.Name, err)
 		}
 		survivors = append(survivors, c)
 	}
 	for _, c := range survivors {
 		if err := c.Rewrite(cfg, meta, routes); err != nil {
-			return fmt.Errorf("%s rewrite: %w", c.Name, err)
+			return report, fmt.Errorf("%s rewrite: %w", c.Name, err)
 		}
 		logx.Infof("  ✓ %s done", c.Name)
+		report.Applied = append(report.Applied, AppliedClient{Name: c.Name, Note: c.Note})
 	}
-	return nil
+	return report, nil
 }
 
-// EmitTakeoverWarnings prints a stderr warning for each default-sourced model
-// that a metadata-writing client (opencode, pi, kimi) in this takeover set will emit.
-// claude/codex don't write per-model metadata, so they are skipped to avoid noise.
-func EmitTakeoverWarnings(clients []ClientSpec, cfg *configdomain.Config, meta map[string]map[string]catalog.Model, facts ModelFacts) {
+// MetadataWarnings returns one warning per default-sourced model that a
+// metadata-writing client (opencode, pi, kimi) in this takeover set will
+// emit. claude/codex don't write per-model metadata, so they are skipped to
+// avoid noise.
+func MetadataWarnings(clients []ClientSpec, cfg *configdomain.Config, facts ModelFacts) []string {
 	if !WritesMetadata(clients) || facts.SourceDefault < 0 {
-		return
+		return nil
 	}
-	for _, m := range ExposedModels(cfg, meta, facts.Routes) {
+	var out []string
+	for _, m := range ExposedModels(cfg, facts.Meta, facts.Routes) {
 		if facts.Sources[m.Provider] != nil && facts.Sources[m.Provider][m.RealModel] == facts.SourceDefault {
-			fmt.Fprintf(os.Stderr, "warning: model %s at %s: no models.dev metadata — wrote defaults (ctx=%d out=%d text-only)\n",
-				m.RealModel, m.Provider, facts.DefaultContext, facts.DefaultOutput)
+			out = append(out, fmt.Sprintf("model %s at %s: no models.dev metadata — wrote defaults (ctx=%d out=%d text-only)",
+				m.RealModel, m.Provider, facts.DefaultContext, facts.DefaultOutput))
 		}
+	}
+	return out
+}
+
+// EmitTakeoverWarnings prints MetadataWarnings to stderr, one line each.
+func EmitTakeoverWarnings(clients []ClientSpec, cfg *configdomain.Config, meta map[string]map[string]catalog.Model, facts ModelFacts) {
+	for _, w := range MetadataWarnings(clients, cfg, facts) {
+		fmt.Fprintln(os.Stderr, "warning: "+w)
 	}
 }
 
 func RunRestore(cfg *configdomain.Config, which, bakDir, templatesDir string) error {
+	_, err := RunRestoreReport(cfg, which, bakDir, templatesDir)
+	return err
+}
+
+// RunRestoreReport is RunRestore plus a structured report for non-CLI
+// callers (the Web admin API).
+func RunRestoreReport(cfg *configdomain.Config, which, bakDir, templatesDir string) (RestoreReport, error) {
+	var report RestoreReport
 	clients, batch, err := restoreClients(cfg, which, templatesDir)
 	if err != nil {
-		return err
+		return report, err
 	}
 	for _, c := range clients {
 		logx.Infof("restore %s: %s (from %s/)", c.Name, c.File, bakDir)
 		if err := Restore(c.File, bakDir, c.Name); err != nil {
 			if batch && errors.Is(err, ErrNoFile) {
 				logx.Infof("  ~ %s skipped (no backup in %s/)", c.Name, bakDir)
+				report.Skipped = append(report.Skipped, c.Name)
 				continue
 			}
-			return fmt.Errorf("%s restore: %w", c.Name, err)
+			return report, fmt.Errorf("%s restore: %w", c.Name, err)
 		}
 		logx.Infof("  ✓ %s restored", c.Name)
+		report.Restored = append(report.Restored, c.Name)
 	}
-	return nil
+	return report, nil
 }
 
 // restoreClients resolves the client set for restore — deliberately WITHOUT

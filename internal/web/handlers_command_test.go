@@ -33,6 +33,13 @@ type commandFake struct {
 	begin        func(context.Context, string) (appapi.LoginStart, error)
 	refreshMdls  func(context.Context, string) (appapi.ModelsRefreshResult, error)
 	probeMCP     func(context.Context, string) (appapi.MCPProbeResult, error)
+	takeoverRun  func(string, string) (appapi.TakeoverRunResult, error)
+	takeoverRest func(string) (appapi.TakeoverRestoreResult, error)
+	templateSave func(string, []byte) error
+	templateDel  func(string) error
+	replay       func(context.Context, string, string) (appapi.ReplayResult, error)
+	routeTest    func(context.Context, string) (appapi.RouteTestResult, error)
+	catalogPull  func(context.Context) (appapi.ModelsCatalogPull, error)
 }
 
 func (fake *commandFake) ResetStats() error {
@@ -130,6 +137,55 @@ func (fake *commandFake) BeginLogin(ctx context.Context, provider string) (appap
 		return fake.begin(ctx, provider)
 	}
 	return appapi.LoginStart{}, nil
+}
+
+func (fake *commandFake) RunTakeover(client, mode string) (appapi.TakeoverRunResult, error) {
+	if fake.takeoverRun != nil {
+		return fake.takeoverRun(client, mode)
+	}
+	return appapi.TakeoverRunResult{}, nil
+}
+
+func (fake *commandFake) RestoreTakeover(client string) (appapi.TakeoverRestoreResult, error) {
+	if fake.takeoverRest != nil {
+		return fake.takeoverRest(client)
+	}
+	return appapi.TakeoverRestoreResult{}, nil
+}
+
+func (fake *commandFake) SaveTakeoverTemplate(name string, yaml []byte) error {
+	if fake.templateSave != nil {
+		return fake.templateSave(name, yaml)
+	}
+	return nil
+}
+
+func (fake *commandFake) DeleteTakeoverTemplate(name string) error {
+	if fake.templateDel != nil {
+		return fake.templateDel(name)
+	}
+	return nil
+}
+
+func (fake *commandFake) Replay(ctx context.Context, id, provider string) (appapi.ReplayResult, error) {
+	if fake.replay != nil {
+		return fake.replay(ctx, id, provider)
+	}
+	return appapi.ReplayResult{}, nil
+}
+
+func (fake *commandFake) TestRoute(ctx context.Context, model string) (appapi.RouteTestResult, error) {
+	if fake.routeTest != nil {
+		return fake.routeTest(ctx, model)
+	}
+	return appapi.RouteTestResult{}, nil
+}
+
+func (fake *commandFake) PullModelsCatalog(ctx context.Context) (appapi.ModelsCatalogPull, error) {
+	if fake.catalogPull != nil {
+		return fake.catalogPull(ctx)
+	}
+	return appapi.ModelsCatalogPull{}, nil
 }
 
 func newCommandTestServer(t *testing.T, commands *commandFake) *Server {

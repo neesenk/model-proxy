@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/admin"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/fusion"
@@ -371,6 +372,20 @@ func (p *Proxy) adminPorts(
 			runtime := p.SnapshotRuntime()
 			return runtime.Cfg, runtime.Providers
 		},
+		RouteProbeImpl: func(name string) provider.Provider {
+			// Same parent-or-first-pooled-virtual resolution as
+			// ModelRefreshRuntime: the forward path binds the first pooled
+			// virtual's credentials, so the probe must use the same impl.
+			p.mu.RLock()
+			defer p.mu.RUnlock()
+			impl := p.providers[name]
+			if impl == nil {
+				if vids := p.poolIndex[name]; len(vids) > 0 {
+					impl = p.providers[vids[0]]
+				}
+			}
+			return impl
+		},
 		ProbeMCP:            p.probeMCP,
 		LocateGuardHits:     p.locateGuardHits,
 		AdjudicationBlocks:  p.adjudicationBlocks,
@@ -410,5 +425,8 @@ func (p *Proxy) adminPorts(
 		},
 		NewAqpClient:    newAqpClient,
 		NewCodexOptions: newCodexOptions,
+		// Takeover (user template dir + models.dev catalog cache) roots at the
+		// same home the accounts store uses.
+		HomeDir: accounts.HomeDir,
 	}
 }

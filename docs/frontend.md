@@ -33,6 +33,23 @@ Status 5s（整页重渲染，双门）、Analytics 30s（仅 live 窗口）、S
 
 **请求详情默认是人读对话视图**（pure.js `chatViewHTML`，经 `detailRecordsHTML` 同时服务 Requests 行内展开与 Live 弹层）：消息块解析覆盖 anthropic/openai/responses 与 SSE 流折叠（按 index 重组 text/thinking/tool_use 增量、usage 并入）；system、thinking、tool_result、超长参数一律 `<details>` 折叠，请求侧只展开最近 4 轮（`CHAT_RECENT`）其余收进 "N earlier turns" 且**懒加载**——折叠态只是占位符（初始 DOM 与轮数无关）；展开时 `parseChatRequest` **只解析一次**（messages 缓存在 registry entry 上），完整历史平铺渲染进 `.cv-hist-scroll` 滚动容器、复用 `bodyChunkRegistry` 每 25 轮一块滚动追加（追加经 rAF 合帧，不在 scroll 事件里同步插 DOM；`.cv-hist-scroll .cv-msg` 挂 `content-visibility: auto` 原生虚拟化，滚动成本与已加载深度无关）——不要退回"逐轮折叠/逐轮点击"的形态（用户明确要求平铺直读），也不要在展开路径重复解析大 body；工具参数与 JSON 工具结果经 `readableValue` 渲染为 `key: value` 可读文本（嵌套缩进、小标量数组逗号连接），不用 JSON 语法；**原始 body 永远保留在下方折叠 `<details>` 且懒渲染**——body 文本挂 `rawBodyRegistry`（绝不进 data 属性），document 级 capture `toggle` 监听首次展开时才调 `capturedBodyView`，程序化恢复 open 同样触发；teardown 与 `[data-chunk]` 同站清理（`dropRawBodies`，选择器是 `[data-raw]`，聊天历史折叠与 raw body 共用同一注册表）；超限 raw body 与大 SSE（`bodyLinesHTML` 行数或总量超限）一律走 `chunkedBodyHTML` 64KB 滚动分块，绝不整段塞单个 `<pre>`；单块文本 4k/参数 2k 截断、>1.5MB 不解析直接回落 raw-only；`fillLiveDetailPop` 不再默认展开任何 details。新增协议形态先扩 `contentToBlocks`/`foldSSEBlocks` 并配 jstest。
 
+**请求详情 replay 条**（Requests 页行内展开底部，`replayStripHTML`/`wireReplayStrip`/
+`replayRun`）：`replay <id> --to <provider>` 的行内版——provider 输入框带共享 datalist
+（选项 = Requests facet 的 providerOptions，每次 loadRequests 后刷新）+ Replay 按钮；
+shadow 记录不提供该条（后端同样拒绝，双重一致）。结果就地渲染：status 徽章
+（`statusBadgeHTML`）+ 延迟 + 响应体走与请求/响应 body 同一套 `rawBodyRegistry` 懒渲染
+折叠 details（4 MiB 截断标记随行），结果注入后必须调 `reqDetailChanged()` 让虚拟滚动
+重测行高。Live 弹层与 pinned drill 卡不挂 replay 条（仅 Requests 表行内展开）。
+
+**Schedule 卡 per-route Test**（`testRouteTargets`，`test <model>` 的行内版）：route-head
+的 Test 按钮对 `POST /api/routes/test`，结果逐 target 一行（✓/✗ 徽章 + provider(model) +
+HTTP 状态 + reason + 延迟）渲染在该 route 块内 `.route-test-result`；**原地更新不重建
+Schedule 卡**（整卡重渲染会打断其他 route 进行中的测试态）。
+
+**Models 区 Model Catalog 卡**（`refreshModelsCatalog`，`models pull` 的 Web 版）：
+`POST /api/models/catalog/refresh` 强刷 models.dev 缓存，结果（数量/etag）行内展示，
+提示下一次 reload/takeover 才消费；失败保留旧缓存并显示后端 message。
+
 ## URL hash 视图状态
 
 **视图状态进 URL hash**（tab / Accounts provider / Status section / Requests 过滤器 / Security 过滤器 / Live 会话选择，见 app.js 顶部路由注释）：requests 过滤器只携带非默认值（pure.js `requestsFilterQuery/FromQuery`），变更走 `replaceState` 不刷历史；hashchange 还原时**先种过滤器再激活 tab**，且自由输入控件（provider/model/errors/shadow）必须跟随 `syncRequestsFreeControls`，否则下次 Refresh 会把旧值读回过滤器。Live 会话选择 rides `#status/live?session=…`（`statusHash()`）：**写 hash 必须在渲染之后**（挂载 Live 卡会重置选择，hash 要反映渲染后真值）；hashchange/boot 还原要在 section 挂载之后 apply——boot 特别不能直接 apply（Status tab 是异步渲染，直接 apply 会与 Live 卡挂载竞态、挂载重置把选择冲掉），必须存 `bootLiveSession` pending、由 `renderLiveCard` 挂载后消费；下拉选项构建要保底保留当前选中 id（hash 还原的会话可能暂不在 live 行/聚合里）。
@@ -40,6 +57,41 @@ Status 5s（整页重渲染，双门）、Analytics 30s（仅 live 窗口）、S
 ## 窄屏断点
 
 **窄屏是系统断点而非逐案修补**：≤720px（topbar 两行 + tabs 横向滚动、status/accounts 单列、表头停 sticky、`.card-body` 横向滚动、Dashboard KPI 6→2 列）与 ≤560px（`.row-actions` 换行、更紧的页面 gutter）两层，见 styles.css 的 responsive 段；新增布局必须说明这两个断点下的行为（表格靠 `.card-body` 横向滚动，不隐藏列）。uPlot 图表随窗口 resize 由防抖钩子重设宽度（app.js `chartResizeTimer`）。
+
+## Eval 页
+
+Eval tab（`#eval`，无子段/hash 参数）承载「已有 API 无 UI」的评测观测面：**Shadow
+Report** 卡（`/api/shadow-report`，固定 24h 窗口：Route/Primary/Shadow/Samples/Status
+Match——pure.js `shadowMatchBadge` 分档 ≥99% ok / ≥95% warn / 以下 err / 缺失 muted——
+与双侧延迟、Δms；`enabled:false`（request_log 关闭）渲染说明性 hint）与 **Fusion** 卡
+（`/api/fusion`：workflows 汇总表 Runs/Today/Quorum Met/Amplification/Degraded 原因计数
++ 最近 runs 表 Time/Workflow/Route/Quorum 徽章/Drafts/Legs（title 载逐 leg 状态）/Judge/
+Synth）。两个 loader 经 `Promise.allSettled` **独立 settle**：半边失败保留旧数据，错误经
+`setRefreshError` 横幅聚合，只有两边都失败且无旧数据时才只剩横幅。全部渲染为用户触发
+（tab 激活经 `retainTab` 重入守卫 `.eval-host`、Refresh 点击），无自动刷新 tick。
+
+## Takeover 页
+
+Takeover tab（`#takeover`，无子段/hash 参数）是 `takeover`/`restore` CLI 的 Web 面
+（`/api/takeover` 一族端点，语义归 docs/web-api.md 与 docs/client-takeover.md）：单卡
+「Client Takeover」列出全部模板——Client 列是客户端族（pi/opencode/claude…），Template
+列是具体变体（pi-openai…；标记：`*` = 当前模式下该族会被写入的变体、只标多变体族，
+`⇄` = split 会写出不同集合；纯逻辑 pure.js `takeoverClientLabel`）/Format/Source/
+Config File/Status，状态徽章五态——not installed（muted）/ not taken over（muted）/
+taken over（ok）/ drift（err，title 载 current→expected），徽章唯一实现 pure.js
+`takeoverStatusBadge`。头部动作行：Mode 选择器（`.req-input` select，
+unified/split/anthropic/openai/responses，会话内记忆 `takeoverMode`）——**切换即经
+`?mode=` 重拉 surface 刷新 `*` 预览**，旁挂模式语义 hint（pure.js `takeoverModeHint`）；
+restore 不看 mode——+ Takeover All / Restore All / New Template；行内动作 Takeover
+（未接管且已安装）或 Restore（已接管，confirmDialog 确认）+ Edit（模板编辑器）。
+执行结果渲染进卡内 `.msg` 区（applied 名单带 note、skipped、warnings），mutation 后
+整表重拉；表尾 `.tk-dirs` 行展示 templates/backup 目录。模板编辑器是 `#tk-modal`
+`<dialog>`：preset 只读查看 + 「Save As Override」；user 模板可编辑保存（PUT 先校验
+后落盘，后端 400 消息内联显示）/ 删除（confirmDialog）；New Template 需要名字输入。
+**全部渲染为用户触发**（tab 激活经 `retainTab` 重入守卫、Refresh/按钮点击），无自动
+刷新 tick，不适用 deferAutoRefresh 双门；失败保留旧 DOM 走 `setRefreshError`。结构标记
+`.tk-host`（无视觉样式，registry CLASS_EXEMPT）；表格/徽章/按钮/模态/表单全部复用
+既有 `.table`/`.badge`/`.btn`/`.field`/`.msg` 模式；新增样式仅 `.tk-dirs`（目录行）。
 
 ## MCP 页
 

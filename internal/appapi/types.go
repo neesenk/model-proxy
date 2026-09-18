@@ -621,6 +621,108 @@ func NewHTTPError(status int, message string) error {
 	return &HTTPError{Status: status, Message: message}
 }
 
+// ---- takeover (client config takeover surface) ----
+
+// TakeoverClient is one client template's projected state for the
+// GET /api/takeover surface. Current/Expected carry the drift detail only
+// when TakenOver && !DriftOK.
+type TakeoverClient struct {
+	Name         string `json:"name"`
+	Family       string `json:"family"`
+	Protocol     string `json:"protocol,omitempty"`
+	Format       string `json:"format"`
+	Source       string `json:"source"` // preset | user
+	Description  string `json:"description,omitempty"`
+	File         string `json:"file"`
+	Installed    bool   `json:"installed"`
+	TakenOver    bool   `json:"taken_over"`
+	DriftOK      bool   `json:"drift_ok"`
+	Current      string `json:"current,omitempty"`
+	Expected     string `json:"expected,omitempty"`
+	AutoSelected bool   `json:"auto_selected"`
+	SplitChanges bool   `json:"split_changes,omitempty"`
+}
+
+// TakeoverSurface is the GET /api/takeover response. AutoSelected previews
+// the variant the requested mode would write per family (multi-variant
+// families only — single-variant families stay unmarked).
+type TakeoverSurface struct {
+	Clients      []TakeoverClient `json:"clients"`
+	TemplatesDir string           `json:"templates_dir"`
+	BackupDir    string           `json:"backup_dir"`
+}
+
+// TakeoverTemplateDoc is one template's raw YAML document (user override when
+// present, else the embedded preset) for the template editor.
+type TakeoverTemplateDoc struct {
+	Name   string `json:"name"`
+	Source string `json:"source"` // preset | user
+	YAML   string `json:"yaml"`
+	Path   string `json:"path,omitempty"` // user override file path
+}
+
+// TakeoverApplied is one rewritten client in a TakeoverRunResult; Note is the
+// protocol auto-selection rationale when one applied.
+type TakeoverApplied struct {
+	Name string `json:"name"`
+	Note string `json:"note,omitempty"`
+}
+
+// TakeoverRunResult is the POST /api/takeover response.
+type TakeoverRunResult struct {
+	Status   string            `json:"status"`
+	Applied  []TakeoverApplied `json:"applied"`
+	Skipped  []string          `json:"skipped"`
+	Warnings []string          `json:"warnings"`
+}
+
+// TakeoverRestoreResult is the POST /api/takeover/restore response.
+type TakeoverRestoreResult struct {
+	Status   string   `json:"status"`
+	Restored []string `json:"restored"`
+	Skipped  []string `json:"skipped"`
+}
+
+// ---- diagnostics: replay / route test / catalog pull ----
+
+// ReplayResult is the POST /api/replay response: one logged request re-sent
+// to the proxy with a one-shot x-mp-force-provider pin (same semantics as
+// `model-proxy replay <id> --to <provider>` — no global pin, no failover
+// change, cache bypassed by the force-provider rule). Status is the upstream
+// exchange's HTTP status; Body carries the response (SSE streams included),
+// capped at the replay body cap with Truncated marking the cut.
+type ReplayResult struct {
+	Status    int    `json:"status"`
+	Body      string `json:"body"`
+	Truncated bool   `json:"truncated,omitempty"`
+	LatencyMs int64  `json:"latency_ms"`
+}
+
+// RouteTestTarget is one probed route target of a `test <model>` run.
+type RouteTestTarget struct {
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+	OK         bool   `json:"ok"`
+	HTTPStatus int    `json:"http_status"`
+	Reason     string `json:"reason,omitempty"`
+	LatencyMs  int64  `json:"latency_ms"`
+}
+
+// RouteTestResult is the POST /api/routes/test response: one real upstream
+// probe per route target of an exposed model, in scheduling (priority) order.
+type RouteTestResult struct {
+	Model   string            `json:"model"`
+	Results []RouteTestTarget `json:"results"`
+}
+
+// ModelsCatalogPull is the POST /api/models/catalog/refresh response (the
+// daemon twin of `model-proxy models pull`).
+type ModelsCatalogPull struct {
+	Status string `json:"status"`
+	Count  int    `json:"count"`
+	ETag   string `json:"etag,omitempty"`
+}
+
 // RequestLogQueries is the read port over the request-log store consumed by
 // the /api/requests and /api/sessions handlers. The production implementation
 // is the tailing SQLite index (*requestlog.Indexer) with a directory-scan
@@ -681,6 +783,14 @@ type ReadAPI interface {
 	// MCPSurface projects the MCP gateway (config mcp:/mcp_routes: plus live
 	// session gauges) for the /api/mcp read endpoint.
 	MCPSurface() MCPSurface
+	// TakeoverSurface projects the takeover template/client state (takeover
+	// status + drift probe per client) for the /api/takeover read endpoint.
+	// mode selects which per-family variant the auto_selected marker previews
+	// ("" = unified); unknown modes are a 400-class error.
+	TakeoverSurface(mode string) (TakeoverSurface, error)
+	// TakeoverTemplate returns one template's raw YAML document — the user
+	// override when present, else the embedded preset (404 when neither).
+	TakeoverTemplate(name string) (TakeoverTemplateDoc, error)
 }
 
 // CommandAPI is the complete mutation/active-probe capability consumed by the
@@ -727,6 +837,34 @@ type CommandAPI interface {
 	// `model-proxy mcp test <name>`. Route names are rejected (aggregated
 	// surfaces are probed through the gateway, not here).
 	ProbeMCP(ctx context.Context, name string) (MCPProbeResult, error)
+	// RunTakeover is the daemon twin of `model-proxy takeover [client]
+	// [--mode]` (client "" / "all" = batch; mode "" = unified — the Web has
+	// no interactive prompt). Backup/rewrite semantics are the CLI's.
+	RunTakeover(client, mode string) (TakeoverRunResult, error)
+	// RestoreTakeover is the daemon twin of `model-proxy restore [client]`.
+	RestoreTakeover(client string) (TakeoverRestoreResult, error)
+	// SaveTakeoverTemplate validates and writes a user takeover template
+	// (<templatesDir>/<name>.yaml), fail-closed: the candidate must parse and
+	// keep the merged template set (presets + user overrides) loadable.
+	SaveTakeoverTemplate(name string, yaml []byte) error
+	// DeleteTakeoverTemplate removes a user takeover template; deleting a
+	// built-in preset (no user override on disk) is rejected.
+	DeleteTakeoverTemplate(name string) error
+	// Replay re-sends one logged request to the proxy's own forward endpoint
+	// with a one-shot force-provider pin (the daemon twin of
+	// `model-proxy replay <id> --to <provider>`). The upstream exchange
+	// completes for any status — ReplayResult carries it; errors are only
+	// "cannot replay" conditions (no record, shadow record, truncated
+	// capture, unknown provider, network failure).
+	Replay(ctx context.Context, id, provider string) (ReplayResult, error)
+	// TestRoute probes every route target of one exposed model with a real
+	// minimal upstream request (the daemon twin of `model-proxy test
+	// <model>`), in scheduling (priority) order.
+	TestRoute(ctx context.Context, model string) (RouteTestResult, error)
+	// PullModelsCatalog force-refreshes the models.dev metadata cache (the
+	// daemon twin of `model-proxy models pull`). The refreshed cache is picked
+	// up by the next reload/takeover; the runtime is not reloaded here.
+	PullModelsCatalog(ctx context.Context) (ModelsCatalogPull, error)
 }
 
 // MCPProbeResult is one mcp: server handshake outcome (the /api/mcp/test
