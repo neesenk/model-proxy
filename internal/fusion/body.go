@@ -179,7 +179,10 @@ func StripDraftFields(body []byte) []byte {
 
 // ParseUsage extracts the non-streaming Anthropic, Responses, and OpenAI
 // usage variants. Cache-token fields are retained separately and are not
-// folded into Input.
+// folded into Input; for the inclusive OpenAI/Responses totals the cached
+// share (carried only by the *_tokens_details spellings) is deducted from
+// Input once — the same extraction convention as the pass-through usage
+// scanner and the request-log usage projection.
 func ParseUsage(body []byte) Usage {
 	var response struct {
 		Usage struct {
@@ -189,16 +192,33 @@ func ParseUsage(body []byte) Usage {
 			CacheRead        uint64 `json:"cache_read_input_tokens"`
 			PromptTokens     uint64 `json:"prompt_tokens"`
 			CompletionTokens uint64 `json:"completion_tokens"`
+			// OpenAI chat shape; prompt_tokens includes the cached share.
+			PromptTokensDetails struct {
+				CachedTokens uint64 `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+			// Responses shape; input_tokens includes the cached share.
+			InputTokensDetails struct {
+				CachedTokens uint64 `json:"cached_tokens"`
+			} `json:"input_tokens_details"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal(body, &response) != nil {
 		return Usage{}
 	}
+	u := response.Usage
+	// Anthropic's cache_read_input_tokens and the inclusive-shape details
+	// spellings report the same bucket; merge by max like the SSE scanner.
+	cacheRead := max(u.CacheRead, u.PromptTokensDetails.CachedTokens, u.InputTokensDetails.CachedTokens)
+	// Anthropic input_tokens is already cache-exclusive; the OpenAI/Responses
+	// totals are inclusive, so each shape's cached share is deducted from its
+	// own inclusive total (clamped at zero), never from the anthropic field.
+	prompt := u.PromptTokens - min(u.PromptTokensDetails.CachedTokens, u.PromptTokens)
+	input := u.InputTokens - min(u.InputTokensDetails.CachedTokens, u.InputTokens)
 	return Usage{
-		Input:         response.Usage.InputTokens + response.Usage.PromptTokens,
-		Output:        response.Usage.OutputTokens + response.Usage.CompletionTokens,
-		CacheCreation: response.Usage.CacheCreation,
-		CacheRead:     response.Usage.CacheRead,
+		Input:         prompt + input,
+		Output:        u.OutputTokens + u.CompletionTokens,
+		CacheCreation: u.CacheCreation,
+		CacheRead:     cacheRead,
 	}
 }
 

@@ -1377,6 +1377,9 @@ function wireReqScroll() {
 // at the page size, to = the oldest loaded record's second. The boundary
 // second is re-fetched; mergeRecordsPages dedupes by id. A short page means
 // the (filtered) log is exhausted; the 1000-row backend cap ends paging too.
+// A full page that adds nothing (more than pageSize records in the boundary
+// second — the second-granular cursor cannot advance) re-arms the failedAt
+// backoff instead of re-pulling the identical page in a hot loop.
 async function reqLoadOlder(v) {
   if (v.loading || !v.more) return;
   v.loading = true;
@@ -1397,6 +1400,13 @@ async function reqLoadOlder(v) {
     v.combos.lastRecords = v.recs;
     v.more = page.length >= v.pageSize && v.recs.length < REQ_MAX_LOADED;
     chained = merged.added > 0;
+    if (!chained && v.more) {
+      // A full page that added nothing means more than pageSize records share
+      // the boundary second: the keyset cursor (whole seconds) cannot advance
+      // past them. Re-arm the failedAt backoff so the scroll trigger does not
+      // re-pull the identical page on every frame.
+      v.failedAt = Date.now();
+    }
   } catch (e) {
     // Keep the loaded rows on screen; the hint carries the error and the
     // failedAt backoff keeps a dead upstream from being re-hit every frame.
@@ -1908,7 +1918,7 @@ let securityAuditOn = true;
 // half of both the KPI row and the MERGED chronological feed, so whichever
 // lands first paints with the data it has and the second refresh completes
 // the picture (stale halves are never blanked).
-let securityKpiData = { blocks: null, stats: null, counts: null };
+let securityKpiData = { blocks: null, stats: null, counts: null, countsError: '' };
 let securityFeedData = { records: null, adjudications: null };
 // The Rule-hits leaderboard's own audit slice: FIXED query params (all
 // kinds, whole retention, the 1000-row cap) so the Activity filters — which
@@ -1996,7 +2006,7 @@ function securityMergedRows() {
 function renderSecurityKpis() {
   const el = document.getElementById('sec-kpis');
   if (!el) return;
-  el.innerHTML = securityKpisHTML(securityKpiData.blocks, securityKpiData.counts, securityKpiData.stats, securityAdjudicationEnabled);
+  el.innerHTML = securityKpisHTML(securityKpiData.blocks, securityKpiData.counts, securityKpiData.stats, securityAdjudicationEnabled, securityKpiData.countsError);
 }
 
 // syncSecurityRuleChip paints the removable rule-filter chip into the
@@ -2261,7 +2271,7 @@ async function renderSecurityTab() {
   // shared link must land on the same view, not the unfiltered list.
   const seeded = securityFilterFromQuery(parseHash().query);
   if (seeded) securityFilter = seeded;
-  securityKpiData = { blocks: null, stats: null, counts: null };
+  securityKpiData = { blocks: null, stats: null, counts: null, countsError: '' };
   securityFeedData = { records: null, adjudications: null };
   securityRulesData = { records: null };
   // Information hierarchy: summary tiles first, then the actionable blocked
@@ -2586,6 +2596,9 @@ async function loadSecurity() {
   // Server-side verdict aggregation over the same window (the KPI tiles read
   // this; counting the client-merged feed drifted with the in-memory ring).
   securityKpiData.counts = resp.counts || null;
+  // Zero counts and unavailable counts are different states: the verdict
+  // tiles must render '—' when the server-side aggregation failed.
+  securityKpiData.countsError = resp.counts_error || '';
   securityRefreshOk('security');
   commitSecurityRender();
 }
@@ -7658,7 +7671,9 @@ function pollLogin(sessionId) {
 //     input,output,cache_creation,cache_read,avg_latency_ms,avg_ttft_ms,cost,priced}
 //   totals.{requests,failures,input,output,cache_creation,cache_read,cost}
 //   compare.{from,to,requests,failures,input,output,cost}  (equal-length previous window)
-//   price_coverage.{priced,unpriced}
+//   price_coverage.{priced,unpriced} — arrays of {provider, model} pairs
+//   (pricing resolves per provider via the alias fallback, so one model can
+//   be priced under one provider and unpriced under another)
 //   heatmap.cells[].{weekday(0=Mon),hour,…same derived block as totals}
 //   agents.[]  (in-range facet, feeds the agent filter's datalist)
 // Per-request/token tables live on the Status page (Token usage/Agents); this
@@ -8194,7 +8209,7 @@ function analyticsRenderKpis(host, resp) {
       k: 'Cost (USD)',
       v: t.cost == null ? 'n/a' : '$' + t.cost.toFixed(2),
       d: pctDelta(t.cost == null ? null : t.cost, c ? c.cost : null),
-      note: un.length ? `${un.length} unpriced: ${un.join(', ')}` : '',
+      note: un.length ? `${un.length} unpriced: ${un.map((m) => (m && m.provider ? m.provider + '/' : '') + (m && m.model || '')).join(', ')}` : '',
     },
   ];
   host.innerHTML = chips.map((chip) => `

@@ -515,8 +515,14 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 			} `json:"points"`
 		} `json:"series"`
 		PriceCoverage struct {
-			Priced   []string `json:"priced"`
-			Unpriced []string `json:"unpriced"`
+			Priced []struct {
+				Provider string `json:"provider"`
+				Model    string `json:"model"`
+			} `json:"priced"`
+			Unpriced []struct {
+				Provider string `json:"provider"`
+				Model    string `json:"model"`
+			} `json:"unpriced"`
 		} `json:"price_coverage"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -556,8 +562,8 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 		t.Errorf("unpriced point cost must be nil, got %v", *points[0].Cost)
 	}
 	found := false
-	for _, model := range got.PriceCoverage.Unpriced {
-		found = found || model == "deepseek-v4-pro"
+	for _, pm := range got.PriceCoverage.Unpriced {
+		found = found || (pm.Provider == "deepseek" && pm.Model == "deepseek-v4-pro")
 	}
 	if !found {
 		t.Errorf("price_coverage.unpriced must list deepseek-v4-pro: %+v",
@@ -583,7 +589,10 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 			Provider string `json:"provider"`
 		} `json:"series"`
 		PriceCoverage struct {
-			Unpriced []string `json:"unpriced"`
+			Unpriced []struct {
+				Provider string `json:"provider"`
+				Model    string `json:"model"`
+			} `json:"unpriced"`
 		} `json:"price_coverage"`
 	}
 	if err := json.Unmarshal(all.Body.Bytes(), &allResp); err != nil {
@@ -595,8 +604,8 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 		}
 	}
 	for _, m := range allResp.PriceCoverage.Unpriced {
-		if m == "ssh" || m == "ok" || m == "decision" {
-			t.Errorf("virtual model %q leaked into price_coverage.unpriced", m)
+		if m.Model == "ssh" || m.Model == "ok" || m.Model == "decision" {
+			t.Errorf("virtual model %q leaked into price_coverage.unpriced", m.Model)
 		}
 	}
 
@@ -790,7 +799,10 @@ func TestAPIAnalyticsUsesCatalogThenDetachedOverride(t *testing.T) {
 				Cost *float64 `json:"cost"`
 			} `json:"totals"`
 			PriceCoverage struct {
-				Priced []string `json:"priced"`
+				Priced []struct {
+					Provider string `json:"provider"`
+					Model    string `json:"model"`
+				} `json:"priced"`
 			} `json:"price_coverage"`
 		}
 		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
@@ -803,8 +815,8 @@ func TestAPIAnalyticsUsesCatalogThenDetachedOverride(t *testing.T) {
 		if point.Cost == nil || response.Totals.Cost == nil {
 			t.Fatalf("priced response has nil cost: %+v", response)
 		}
-		for _, model := range response.PriceCoverage.Priced {
-			covered = covered || model == "glm-4.6"
+		for _, pm := range response.PriceCoverage.Priced {
+			covered = covered || pm.Model == "glm-4.6"
 		}
 		return *point.Cost, *response.Totals.Cost, point.Priced, covered
 	}

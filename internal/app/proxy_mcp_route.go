@@ -9,6 +9,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -178,6 +179,8 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 		srv    configdomain.MCPServer
 	}
 	var cands []candidate
+	declared := false // some enabled target declares this canonical tool
+	quotaBlocked := false
 	for _, t := range route.Targets {
 		backendName, ok := t.Tools[canonical]
 		if !ok || backendName == "" {
@@ -187,15 +190,24 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 		if !ok || !srv.MCPEffectiveEnabled() {
 			continue
 		}
+		declared = true
 		if mcpProviderQuotaExhausted(p.runtimeState.Quota(srv.Provider)) {
 			// Pre-emptive skip: the provider's shared MCP-tool time window is
 			// exhausted (zhipu TIME_LIMIT). The call-time 429 failover remains
 			// the backstop for windows the poll has not caught yet.
+			quotaBlocked = true
 			continue
 		}
 		cands = append(cands, candidate{t, srv})
 	}
 	if len(cands) == 0 {
+		if declared && quotaBlocked {
+			// Every backend declaring the tool is quota-exhausted: say so
+			// instead of misreporting -32602 "unknown tool".
+			respBody := mcpkg.BuildErrorResponse(frame.ID, -32000, fmt.Sprintf("tools/call: all backends for tool %q are quota-exhausted (provider MCP-tool window) — retry after the window resets", canonical))
+			p.mcpRouteWriteJSON(w, frame, sid, http.StatusOK, respBody)
+			return
+		}
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32602, fmt.Sprintf("tools/call: unknown tool %q", canonical))
 		p.mcpRouteWriteJSON(w, frame, sid, http.StatusOK, respBody)
 		return
@@ -224,14 +236,18 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 		}
 		if sub.Protocol == "stdio" {
 			// stdio backend: single JSON-RPC message over the child conn,
-			// wrapped as an HTTP response for the shared commit path.
+			// wrapped as an HTTP response for the shared commit path. The
+			// exchange is bounded by the backend's timeout: a hung child can
+			// never park the caller.
 			conn, ok := p.mcpStdio.get(mcpRouteStdioKey(sid, c.target.Server))
 			if !ok {
 				lastErr = fmt.Errorf("stdio sub-session lost")
 				p.mcpSessions.RouteSubDrop(sid, c.target.Server)
 				continue
 			}
-			payload, callErr := conn.Call(out)
+			callCtx, callCancel := context.WithTimeout(r.Context(), c.srv.MCPTimeoutDuration())
+			payload, callErr := conn.Call(callCtx, out)
+			callCancel()
 			if callErr != nil {
 				lastErr = callErr
 				p.mcpStdio.kill(mcpRouteStdioKey(sid, c.target.Server))
@@ -292,8 +308,10 @@ func mcpRouteStdioKey(routeSID, server string) string {
 
 // mcpRouteEnsureSub lazily builds the backend sub-session: initialize (with
 // account pick for provider-backed servers) + initialized notification.
-// Concurrent calls for the same (session, server) may both initialize — the
-// last RouteSubPut wins; both upstream sessions are valid, so this is benign.
+// Concurrent calls for the same (session, server): HTTP backends may both
+// initialize — the last RouteSubPut wins; both upstream sessions are valid,
+// so this is benign. stdio spawns are singleflight per registry key — only
+// one child is forked and racers reuse it (lockSpawn + re-check).
 func (p *Proxy) mcpRouteEnsureSub(snap RuntimeSnapshot, srv configdomain.MCPServer, server, sid string, inbound *http.Request) (mcpkg.SubSession, error) {
 	if sub, ok := p.mcpSessions.RouteSubGet(sid, server); ok && sub.Initialized {
 		return sub, nil
@@ -308,17 +326,27 @@ func (p *Proxy) mcpRouteEnsureSub(snap RuntimeSnapshot, srv configdomain.MCPServ
 	}
 	if srv.MCPStdio() {
 		// stdio backend: one child per (route session, server); the canned
-		// handshake negotiates once, the conn lives in the registry.
+		// handshake negotiates once, the conn lives in the registry. Spawn is
+		// singleflight per key: concurrent ensures must not fork duplicates.
+		key := mcpRouteStdioKey(sid, server)
+		unlock := p.mcpStdio.lockSpawn(key)
+		defer unlock()
+		if sub, ok := p.mcpSessions.RouteSubGet(sid, server); ok && sub.Initialized {
+			return sub, nil // a racing caller just built it
+		}
 		conn, err := p.mcpStdioStart(snap, srv, account)
 		if err != nil {
 			return mcpkg.SubSession{}, err
 		}
-		if _, err := conn.Call(mcpRouteInitBody); err != nil {
+		initCtx, initCancel := context.WithTimeout(inbound.Context(), srv.MCPTimeoutDuration())
+		_, err = conn.Call(initCtx, mcpRouteInitBody)
+		initCancel()
+		if err != nil {
 			conn.Close()
 			return mcpkg.SubSession{}, fmt.Errorf("stdio initialize: %w", err)
 		}
-		conn.Call(mcpNotifInitBody) //nolint — best-effort
-		if err := p.mcpStdio.put(mcpRouteStdioKey(sid, server), server, conn); err != nil {
+		conn.Call(inbound.Context(), mcpNotifInitBody) //nolint — best-effort
+		if err := p.mcpStdio.put(key, server, conn); err != nil {
 			conn.Close()
 			return mcpkg.SubSession{}, err
 		}
@@ -373,7 +401,9 @@ func (p *Proxy) mcpRouteFetchTools(snap RuntimeSnapshot, srv configdomain.MCPSer
 		if !ok {
 			return nil, fmt.Errorf("stdio sub-session lost")
 		}
-		payload, err := conn.Call([]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
+		listCtx, listCancel := context.WithTimeout(inbound.Context(), srv.MCPTimeoutDuration())
+		payload, err := conn.Call(listCtx, []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
+		listCancel()
 		if err != nil {
 			return nil, err
 		}
@@ -411,7 +441,7 @@ func (p *Proxy) mcpRouteFanOut(snap RuntimeSnapshot, route configdomain.MCPRoute
 		}
 		if sub.Protocol == "stdio" {
 			if conn, ok := p.mcpStdio.get(mcpRouteStdioKey(sid, sub.Server)); ok {
-				conn.Call(body) //nolint — fire-and-forget
+				conn.Call(inbound.Context(), body) //nolint — fire-and-forget
 			}
 			continue
 		}

@@ -243,7 +243,10 @@ WAL+busy_timeout+单连接配方），拥有审计事件 Record schema（kind: s
 owner-only 权限与单 writer 由共享 `observe/logfile` sink 拥有；每条记录都落盘，包括被
 忽略档的 low verdict，但不再被任何查询面读取，仅供 tail）与可查询 SQLite 库
 （`security.db`，与 JSONL 同目录；精确匹配、drift、medium/high verdict 与 fail-open 的
-error/skipped 落库，low 按设计排除——"忽略"意味着无查询面，不是无痕迹）。写入路径在
+error/skipped 落库，low 按设计排除——"忽略"意味着无查询面，不是无痕迹）。两层共享同一
+retention 窗口（`Retention`/`DefaultRetention` 30 天，0＝两层都永久保留）：JSONL 按轮转文件
+mtime sweep，SQLite 按行 `ts` 删除（同一 sweep 节奏：启动、写入路径上每小时、Shutdown
+drain 后各一次），两层同步过期。写入路径在
 logfile 的 writer goroutine 内双写（队列满统一丢弃计数；store 打不开降级为 JSONL-only 并
 告警）；查询是纯 SQL（newest-first、kind/from/to/limit/request_id，Truncated 由同谓词
 COUNT 精确判定）；`AppendSync` 供 CLI 绕开 daemon 同步双写（doctor drift 去重依赖库里的

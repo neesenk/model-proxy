@@ -283,6 +283,24 @@ func TestParseUsageJSON(t *testing.T) {
 	if got := ParseUsage([]byte(`{"usage":{"prompt_tokens":20,"completion_tokens":7}}`)); got != (Usage{Input: 20, Output: 7}) {
 		t.Fatalf("openai usage = %+v", got)
 	}
+	// OpenAI chat shape: prompt_tokens is inclusive of the cached share —
+	// cached_tokens lands in CacheRead and is deducted from Input once.
+	if got := ParseUsage([]byte(`{"usage":{"prompt_tokens":100,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":60}}}`)); got != (Usage{Input: 40, Output: 7, CacheRead: 60}) {
+		t.Fatalf("openai cached usage = %+v", got)
+	}
+	// Responses shape: same inclusive convention via input_tokens_details.
+	if got := ParseUsage([]byte(`{"usage":{"input_tokens":80,"output_tokens":9,"input_tokens_details":{"cached_tokens":50}}}`)); got != (Usage{Input: 30, Output: 9, CacheRead: 50}) {
+		t.Fatalf("responses cached usage = %+v", got)
+	}
+	// Anthropic's input_tokens is already cache-exclusive: no deduction even
+	// when a details spelling rides along (merged by max, deducted once).
+	if got := ParseUsage([]byte(`{"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":90,"prompt_tokens_details":{"cached_tokens":90}}}`)); got != (Usage{Input: 10, Output: 5, CacheRead: 90}) {
+		t.Fatalf("anthropic usage with stray details = %+v", got)
+	}
+	// The deduction clamps at zero for a fully cached inclusive prompt.
+	if got := ParseUsage([]byte(`{"usage":{"prompt_tokens":50,"prompt_tokens_details":{"cached_tokens":80}}}`)); got != (Usage{Input: 0, CacheRead: 80}) {
+		t.Fatalf("over-cached usage = %+v", got)
+	}
 	if got := ParseUsage([]byte(`not json`)); got != (Usage{}) {
 		t.Fatalf("invalid usage = %+v", got)
 	}

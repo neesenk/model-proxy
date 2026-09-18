@@ -35,9 +35,11 @@ request log、`internal/cache`、
   `Options.Counters` 共享同一个进程级计数 owner；reload 仅重建响应条目，不读盘、不重复 seed，
   旧 snapshot 的迟到 Lookup 仍累计在同一 owner。缓存关闭时 owner 继续存在。
   lifecycle 拥有的每分钟循环（含启动时关闭、之后 reload 开启的情况）+ shutdown final save
-  原子写（temp+fsync+rename）；`cachePersistMu` 串行化 snapshot→write 与 reset，避免旧保存覆盖 reset。
-  reset-stats 即使缓存关闭也先落盘零状态再清内存，失败返回错误并保留缓存计数供重试；I/O 不持
-  `Proxy.mu`。corrupt/未来 version 文件按零状态起步，绝不阻塞启动。
+  原子写（temp+fsync+rename）；`cachePersistMu` 串行化 snapshot→write，避免迟到写相互覆盖。
+  reset-stats（POST /api/tokens/reset）**不动**响应缓存计数器——命中率是运营指标而非用量
+  记账，内存计数与持久化历史都保留（契约由 `cache_state_test.go` 的
+  `TestResetStatsKeepsResponseCacheCounters` 钉住）；I/O 不持 `Proxy.mu`。
+  corrupt/未来 version 文件按零状态起步，绝不阻塞启动。
 
 缓存机制由 `internal/cache` 叶子包拥有：request key、TTL/容量 store、
 bounded recorder、转换后 header normalization 与逐块 flush replay。
@@ -54,7 +56,7 @@ generation 隔离，reload 后旧请求即使完成也只能写入旧 Store。
 `internal/app/proxy_http.go` 与 `internal/web/server.go` 服务（events 包只提供
 `ServeEvents` handler，不拥有 HTTP 路由）。
 
-forward 产生 start/end，包含 agent、protocol、provider、status、latency、tokens 和稳定 request_id。cache hit、400/502 终局也必须产生 end。**只有 LLM 协议路径**（`/v1/messages`、`/v1/chat/completions`、`/v1/responses`）进入 live/请求日志；未知路径（浏览器 `/.well-known/...` 探测、favicon、迷路 GET）在 handler 层直接 502，**不产生 live 事件、不写请求日志**（unrouted model 仍是非空 proto，照旧产生终局 end）。`GET /api/events` 先重放 ring，再推送 SSE，15 秒 keepalive。
+forward 产生 start/end，包含 agent、protocol、provider、status、latency、tokens（end 另带 `cache_read`/`cache_creation`，omitempty）和稳定 request_id。cache hit、400/502 终局也必须产生 end。进入 live/请求日志的是 LLM 协议路径（`/v1/messages`、`/v1/chat/completions`、`/v1/responses`）与 MCP 网关交换（`/mcp/<name>`，`protocol="mcp"`、request log `kind="mcp"`，见 `mcp.md`）；未知路径（浏览器 `/.well-known/...` 探测、favicon、迷路 GET）在 handler 层直接 502，**不产生 live 事件、不写请求日志**（unrouted model 仍是非空 proto，照旧产生终局 end）。`GET /api/events` 先重放 ring，再推送 SSE，15 秒 keepalive。
 
 出站秘密扫描（DLP-lite，`guard.secrets`）在 forward 读取完整请求体后、cache
 查询与所有 forward 分支之前对共享 body 扫描一次（`internal/guard` 的高置信

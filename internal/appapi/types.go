@@ -420,6 +420,10 @@ type SecurityResult struct {
 	// restart). Low comes from the adjudication service's cumulative counter
 	// (lows never enter the queryable store by design).
 	Counts *SecurityVerdictCounts `json:"counts,omitempty"`
+	// CountsError marks the verdict aggregation as unavailable (the counts
+	// query failed while the records query succeeded): Counts stays absent so
+	// the client can render "unavailable" instead of misleading zeros.
+	CountsError string `json:"counts_error,omitempty"`
 }
 
 // SecurityVerdictCounts is the verdict digest of one audit window.

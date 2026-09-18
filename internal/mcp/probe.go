@@ -22,9 +22,24 @@ type ProbeResult struct {
 	Latency       time.Duration
 }
 
-// probeTimeout bounds the whole probe exchange; the caller's http.Client
-// governs per-request transport behavior.
-const probeBodyCap = 1 << 20 // 1 MiB — tools/list responses are small by nature
+// probeBodyCap bounds one probe response body — tools/list responses are
+// small by nature. The caller bounds the whole exchange via ctx and governs
+// transport behavior via the http.Client.
+const probeBodyCap = 1 << 20 // 1 MiB
+
+// CheckNoCrossOriginRedirect is the http.Client.CheckRedirect policy for MCP
+// upstream exchanges: same-origin redirects are followed, cross-origin ones
+// are refused. Credential headers (Authorization, auth_header, env-referenced
+// static headers) are injected before send, and the stdlib only strips
+// Authorization on cross-host hops — a followed cross-origin redirect would
+// leak the raw key to the redirect target.
+func CheckNoCrossOriginRedirect(req *http.Request, via []*http.Request) error {
+	origin := via[len(via)-1].URL
+	if !strings.EqualFold(req.URL.Scheme, origin.Scheme) || !strings.EqualFold(req.URL.Host, origin.Host) {
+		return fmt.Errorf("mcp: refusing cross-origin redirect to %s://%s (injected credentials must not leak)", req.URL.Scheme, req.URL.Host)
+	}
+	return nil
+}
 
 // Probe runs the MCP handshake against url: initialize → (optional)
 // notifications/initialized → tools/list. auth injects credentials onto each
@@ -149,7 +164,9 @@ func doRPC(ctx context.Context, client *http.Client, url string, auth func(*http
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
+		// Redirects are refused cross-origin by CheckNoCrossOriginRedirect; a
+		// terminal 3xx reaching here carries no MCP semantics.
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)

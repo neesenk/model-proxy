@@ -196,7 +196,6 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			account = accounts[int(p.mcpRR.Add(1))%len(accounts)]
 		}
-		mcpSetLiveProvider(w, account)
 	}
 
 	resp, upstreamBodyCap, err := p.mcpRoundTrip(snap, name, srv, account, sess.UpstreamID, r, body)
@@ -207,6 +206,11 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 		resp.Body.Close()
 		account = mcpNextAccount(accounts, account)
 		resp, upstreamBodyCap, err = p.mcpRoundTrip(snap, name, srv, account, sess.UpstreamID, r, body)
+	}
+	if srv.MCPAuthMode() == "provider" {
+		// Record AFTER the one-shot rotation: the live end event names the
+		// account that actually served (the writer is first-commit-wins).
+		mcpSetLiveProvider(w, account)
 	}
 	if err != nil {
 		http.Error(w, fmt.Sprintf("mcp %q: upstream: %v", name, err), http.StatusBadGateway)
@@ -223,6 +227,12 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case hasSess:
 			responseSID = localSID // keep the established local id
+			if upSID != sess.UpstreamID && srv.Transport != "sse" {
+				// The upstream rotated its session id on re-initialize: rebind
+				// so later requests don't 404 on the stale id. (Legacy sse
+				// stores the full POST endpoint URL in UpstreamID instead.)
+				p.mcpSessions.RefreshUpstream(localSID, upSID)
+			}
 		case r.Method == http.MethodPost && frame.Method == "initialize" && resp.StatusCode < 300:
 			responseSID = p.mcpSessions.Put(name, account, upSID)
 		}
@@ -458,10 +468,11 @@ func (p *Proxy) mcpClientFor(snap RuntimeSnapshot, srv configdomain.MCPServer, a
 	key, proxyFunc, err := p.proxyResolver.Resolve(snap.Cfg.Proxy, perProvider)
 	if err != nil {
 		// Load-time validation rejects bad proxy settings; keep the shared
-		// default rather than silently downgrading to direct.
-		return p.client
+		// transport rather than silently downgrading to direct. Wrap it so the
+		// MCP credential headers still never follow a cross-origin redirect.
+		return &http.Client{Timeout: 0, Transport: p.client.Transport, CheckRedirect: mcpkg.CheckNoCrossOriginRedirect}
 	}
-	return &http.Client{Timeout: 0, Transport: p.pooledTransport(key, proxyFunc)}
+	return &http.Client{Timeout: 0, Transport: p.pooledTransport(key, proxyFunc), CheckRedirect: mcpkg.CheckNoCrossOriginRedirect}
 }
 
 // mcpStreamResponse copies the upstream body to the client, flushing after

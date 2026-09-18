@@ -276,7 +276,7 @@ func TestMCPStdioValidation(t *testing.T) {
 				Transport: "stdio",
 				Provider:  "zhipu",
 				Command:   []string{"npx", "-y", "@z_ai/mcp-server"},
-				Env:       map[string]string{"Z_AI_API_KEY": "${account.api_key}", "Z_AI_MODE": "ZHIPU"},
+				Env:       map[string]string{"Z_AI_API_KEY": "${account.api_key}", "Z_AI_MODE": "env:Z_AI_MODE"},
 			},
 			"local": {Transport: "stdio", Command: []string{"/usr/local/bin/mcp-fs"}},
 		}
@@ -300,6 +300,8 @@ func TestMCPStdioValidation(t *testing.T) {
 		{"bad env key", func(s *MCPServer) { s.Env["BAD KEY"] = "x" }, "not a valid environment variable name"},
 		{"empty env value", func(s *MCPServer) { s.Env["Z_AI_MODE"] = "" }, "is empty"},
 		{"bad env indirection", func(s *MCPServer) { s.Env["Z_AI_MODE"] = "env:bad-var" }, "invalid env: indirection"},
+		{"literal on benign env key is allowed", func(s *MCPServer) { s.Env["Z_AI_MODE"] = "ZHIPU" }, ""},
+		{"literal on credential-shaped key", func(s *MCPServer) { s.Env["Z_AI_API_KEY"] = "sk-literal" }, "credential-shaped name"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -308,9 +310,47 @@ func TestMCPStdioValidation(t *testing.T) {
 			tc.mutate(&s)
 			cfg.MCP["vision"] = s
 			err := cfg.validate()
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("err = %v, want nil", err)
+				}
+				return
+			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want substring %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestResolveMCPStdioEnv: the two indirection forms resolve, benign literals
+// pass through, unset variables and credential-shaped literals fail closed
+// (the rule is enforced again here so a caller that skips validation still
+// can't smuggle config-held credentials).
+func TestResolveMCPStdioEnv(t *testing.T) {
+	t.Setenv("MY_MODE", "ZHIPU")
+	srv := MCPServer{Env: map[string]string{
+		"Z_AI_API_KEY": "${account.api_key}",
+		"Z_AI_MODE":    "env:MY_MODE",
+		"PLAIN_FLAG":   "on",
+	}}
+	env, err := ResolveMCPStdioEnv(srv, "key-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "Z_AI_API_KEY=key-1") ||
+		!strings.Contains(joined, "Z_AI_MODE=ZHIPU") ||
+		!strings.Contains(joined, "PLAIN_FLAG=on") {
+		t.Fatalf("env = %v", env)
+	}
+	if _, err := ResolveMCPStdioEnv(srv, ""); err == nil || !strings.Contains(err.Error(), "requires a provider account") {
+		t.Fatalf("account key without account = %v", err)
+	}
+	if _, err := ResolveMCPStdioEnv(MCPServer{Env: map[string]string{"X": "env:DEFINITELY_UNSET_VAR_XYZ"}}, ""); err == nil || !strings.Contains(err.Error(), "not set") {
+		t.Fatalf("unset env: = %v", err)
+	}
+	if _, err := ResolveMCPStdioEnv(MCPServer{Env: map[string]string{"MY_AUTH_TOKEN": "literal-value"}}, ""); err == nil || !strings.Contains(err.Error(), "credential-shaped keys") {
+		t.Fatalf("literal credential-shaped env = %v", err)
 	}
 }

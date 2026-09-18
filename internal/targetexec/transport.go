@@ -193,6 +193,12 @@ func flushCopyHeartbeat(writer http.ResponseWriter, body io.ReadCloser, interval
 	// body.Read until the upstream produces bytes, and re-sending the request
 	// before that read completes would deadlock the loop.
 	readReq <- struct{}{}
+	// A heartbeat is a comment LINE: an upstream read can split an SSE event
+	// at any byte, and appending ": ping\n\n" behind a partial line corrupts
+	// the client's reassembly ("data: {\"cho: ping"). Ticks that land
+	// mid-line are skipped; the ticker keeps firing, so the heartbeat is
+	// merely deferred until the frame completes (or the stream ends).
+	lineAligned := true
 	for {
 		select {
 		case result := <-readRes:
@@ -203,6 +209,7 @@ func flushCopyHeartbeat(writer http.ResponseWriter, body io.ReadCloser, interval
 				if flusher != nil {
 					flusher.Flush()
 				}
+				lineAligned = buf[result.n-1] == '\n'
 				ticker.Reset(interval)
 			}
 			if result.err != nil {
@@ -213,6 +220,9 @@ func flushCopyHeartbeat(writer http.ResponseWriter, body io.ReadCloser, interval
 			}
 			readReq <- struct{}{}
 		case <-ticker.C:
+			if !lineAligned {
+				continue
+			}
 			if err := writeHeartbeat(); err != nil {
 				// The reader goroutine may still be parked in body.Read holding
 				// buf; the caller's body.Close unblocks it, but the buffer must

@@ -854,8 +854,8 @@ func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 			Cost     *float64 `json:"cost"`
 		} `json:"compare"`
 		Coverage struct {
-			Priced   []string `json:"priced"`
-			Unpriced []string `json:"unpriced"`
+			Priced   []providerModelPair `json:"priced"`
+			Unpriced []providerModelPair `json:"unpriced"`
 		} `json:"price_coverage"`
 		Series []struct {
 			Model  string `json:"model"`
@@ -912,7 +912,9 @@ func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 		analyticsResponse.Totals.Cost == nil || math.Abs(*analyticsResponse.Totals.Cost-.03) > 1e-12 ||
 		analyticsResponse.Compare.From != -60 || analyticsResponse.Compare.To != 40 || analyticsResponse.Compare.Requests != 3 || analyticsResponse.Compare.Tokens != 28 ||
 		analyticsResponse.Compare.TokSec == nil || math.Abs(*analyticsResponse.Compare.TokSec-2) > 1e-9 ||
-		strings.Join(analyticsResponse.Coverage.Priced, ",") != "priced" || strings.Join(analyticsResponse.Coverage.Unpriced, ",") != "unknown" || len(analyticsResponse.Series) != 2 || !analyticsResponse.Series[0].Points[0].Priced || analyticsResponse.Series[1].Points[0].Cost != nil {
+		!reflect.DeepEqual(analyticsResponse.Coverage.Priced, []providerModelPair{{Provider: "p", Model: "priced"}}) ||
+		!reflect.DeepEqual(analyticsResponse.Coverage.Unpriced, []providerModelPair{{Provider: "p", Model: "unknown"}}) ||
+		len(analyticsResponse.Series) != 2 || !analyticsResponse.Series[0].Points[0].Priced || analyticsResponse.Series[1].Points[0].Cost != nil {
 		t.Fatalf("analytics queries=%#v response=%#v", analyticsQueries, analyticsResponse)
 	}
 	// Per-series unified block: the priced series folds only its own bucket
@@ -967,6 +969,39 @@ func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 	}
 }
 
+// TestReadAnalyticsPriceCoverageByProviderModel pins the (provider, model)
+// granularity of price_coverage: pricing resolves through a provider-scoped
+// alias fallback, so one upstream model can be priced under one provider and
+// unpriced under another — a model-only key would list it in both buckets.
+func TestReadAnalyticsPriceCoverageByProviderModel(t *testing.T) {
+	reads := &readAPIStub{
+		analytics: func(appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
+			return []observestats.AnalyticsBucket{
+				{Provider: "p", Model: "k3", Bucket: 100, Requests: 1, Input: 10, Output: 5},
+				{Provider: "q", Model: "k3", Bucket: 100, Requests: 1, Input: 10, Output: 5},
+			}, nil
+		},
+		pricing: appapi.PricingSnapshot{
+			Catalog: &pricing.Catalog{ByModel: map[string]pricing.Entry{"kimi-k3": {Prompt: .001, Completion: .002}}},
+			Aliases: map[string]string{pricing.AliasKey("p", "k3"): "kimi-k3"},
+		},
+	}
+	s := newReadServer(t, reads)
+	resp := serveRead(t, s, http.MethodGet, "/api/analytics?from=100&to=200")
+	var out struct {
+		Coverage struct {
+			Priced   []providerModelPair `json:"priced"`
+			Unpriced []providerModelPair `json:"unpriced"`
+		} `json:"price_coverage"`
+	}
+	decodeReadJSON(t, resp, &out)
+	if resp.Code != http.StatusOK ||
+		!reflect.DeepEqual(out.Coverage.Priced, []providerModelPair{{Provider: "p", Model: "k3"}}) ||
+		!reflect.DeepEqual(out.Coverage.Unpriced, []providerModelPair{{Provider: "q", Model: "k3"}}) {
+		t.Fatalf("price coverage = (%d, %#v)", resp.Code, out.Coverage)
+	}
+}
+
 func TestReadHelperBranches(t *testing.T) {
 	if err := appapi.RequirePorts(nil, testCommandAPI{}); err == nil || err.Error() != "appapi ReadAPI is nil" {
 		t.Fatalf("nil reads error = %v", err)
@@ -984,11 +1019,13 @@ func TestReadHelperBranches(t *testing.T) {
 			t.Errorf("normalizeBucket(%q) = %d, want %d", test.in, got, test.want)
 		}
 	}
-	if got := mapKeys(nil); len(got) != 0 || got == nil {
-		t.Fatalf("mapKeys(nil) = %#v, want non-nil empty", got)
+	if got := sortedProviderModels(nil); len(got) != 0 || got == nil {
+		t.Fatalf("sortedProviderModels(nil) = %#v, want non-nil empty", got)
 	}
-	if got := strings.Join(mapKeys(map[string]bool{"z": true, "a": true}), ","); got != "a,z" {
-		t.Fatalf("sorted map keys = %q", got)
+	if got := sortedProviderModels(map[providerModelPair]bool{
+		{Provider: "q", Model: "m"}: true, {Provider: "p", Model: "z"}: true, {Provider: "p", Model: "a"}: true,
+	}); fmt.Sprintf("%v", got) != "[{p a} {p z} {q m}]" {
+		t.Fatalf("sorted provider/model pairs = %v", got)
 	}
 
 	file := filepath.Join(t.TempDir(), "tail.log")
@@ -1124,6 +1161,32 @@ func TestReadSecurityEndpoint(t *testing.T) {
 	serveRead(t, s, http.MethodGet, "/api/security?kind=unblock")
 	if securityQuery != (appapi.SecurityQuery{Kind: "unblock", Limit: 100}) {
 		t.Fatalf("unblock query = %#v", securityQuery)
+	}
+
+	// Verdict-counts failure (records loaded, aggregation failed): the wire
+	// carries counts_error and omits counts, so the client renders
+	// "unavailable" instead of silent zeros.
+	reads.security = func(appapi.SecurityQuery) (appapi.SecurityResult, error) {
+		return appapi.SecurityResult{
+			Enabled:     true,
+			Records:     []appapi.SecurityRecord{{Ts: 1700000000123, Kind: "secret"}},
+			CountsError: "verdict counts unavailable",
+		}, nil
+	}
+	degraded := serveRead(t, s, http.MethodGet, "/api/security")
+	var degradedResponse struct {
+		Enabled     bool                          `json:"enabled"`
+		Counts      *appapi.SecurityVerdictCounts `json:"counts"`
+		CountsError string                        `json:"counts_error"`
+		Records     []appapi.SecurityRecord       `json:"records"`
+	}
+	decodeReadJSON(t, degraded, &degradedResponse)
+	if degraded.Code != http.StatusOK || !degradedResponse.Enabled || degradedResponse.Counts != nil ||
+		degradedResponse.CountsError != "verdict counts unavailable" || len(degradedResponse.Records) != 1 {
+		t.Fatalf("degraded security = (%d, %#v)", degraded.Code, degradedResponse)
+	}
+	if !strings.Contains(degraded.Body.String(), `"counts_error"`) || strings.Contains(degraded.Body.String(), `"counts"`) {
+		t.Fatalf("degraded security wire must carry counts_error and omit counts: %s", degraded.Body.String())
 	}
 
 	reads.security = func(appapi.SecurityQuery) (appapi.SecurityResult, error) {

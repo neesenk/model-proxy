@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os/exec"
@@ -127,7 +128,9 @@ func (c *StdioConn) readLoop(stdout io.Reader) {
 
 // Call sends one JSON-RPC message and waits for its response. Notifications
 // (no id) return nil immediately after the write. A closed/dead conn errors.
-func (c *StdioConn) Call(body []byte) ([]byte, error) {
+// ctx bounds the wait: cancellation aborts the pending entry and returns —
+// a hung child can never park a caller forever.
+func (c *StdioConn) Call(ctx context.Context, body []byte) ([]byte, error) {
 	if c.closed.Load() {
 		return nil, fmt.Errorf("stdio: conn closed")
 	}
@@ -165,6 +168,13 @@ func (c *StdioConn) Call(body []byte) ([]byte, error) {
 		return payload, nil
 	case <-c.readDone:
 		return nil, fmt.Errorf("stdio: child exited (stderr tail: %s)", tail(c.stderr.String(), 200))
+	case <-ctx.Done():
+		// Drop the pending entry so a late response is discarded (readLoop
+		// tolerates missing entries) instead of leaking the registration.
+		c.mu.Lock()
+		delete(c.pending, key)
+		c.mu.Unlock()
+		return nil, fmt.Errorf("stdio: call: %w", ctx.Err())
 	}
 }
 

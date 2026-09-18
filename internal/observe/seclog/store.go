@@ -8,7 +8,9 @@
 //   - this SQLite half (security.db next to the JSONL files) is the only
 //     query surface: exact-match hits, drift, medium/high verdicts and the
 //     fail-open error/skipped records land here; low verdicts are excluded
-//     by design ("ignored" means no query presence, not no trace).
+//     by design ("ignored" means no query presence, not no trace). Rows are
+//     swept by ts on the JSONL half's retention cadence (startup, hourly
+//     between writes, shutdown) so both tiers expire under one window.
 //
 // Concurrency follows the in-repo SQLite recipe (internal/observe/stats,
 // requestlog's index): WAL + busy_timeout(250ms) + synchronous(NORMAL) with a
@@ -177,6 +179,21 @@ func (s *store) insert(rec *Record) error {
 		rec.Exposed, names, rec.Action, rec.Verdict, rec.Reason, rec.Evidence, rec.Model, rec.Detail)
 	if err != nil {
 		return fmt.Errorf("seclog: insert audit record: %w", err)
+	}
+	return nil
+}
+
+// deleteExpired removes rows older than cutoff (unix ms) — the SQLite half of
+// the retention sweep. Both halves share one retention window (the JSONL half
+// sweeps rotated files by mtime; this half sweeps rows by ts), so the query
+// surface and the raw trail expire together. It runs on the same single
+// connection as inserts, serialized with every write.
+func (s *store) deleteExpired(cutoffMs int64) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if _, err := s.db.Exec(`DELETE FROM audit_records WHERE ts < ?`, cutoffMs); err != nil {
+		return fmt.Errorf("seclog: sweep store: %w", err)
 	}
 	return nil
 }

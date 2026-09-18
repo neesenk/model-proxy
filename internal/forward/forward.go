@@ -921,19 +921,14 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 				if adjMeta.SessionID != "" {
 					p.svc.Adjudicator.BlockSession(adjMeta.SessionID, repeatBlocked.rule, requestID, repeatBlocked.reason)
 				}
-				// The intercepted names are handled by the record above — they
-				// must not also take the classic fail-open record.
-				blockedSet := map[string]bool{}
-				for _, n := range repeatBlocked.names {
-					blockedSet[n] = true
-				}
-				emit := secretFailOpen[:0]
-				for _, n := range secretFailOpen {
-					if !blockedSet[n] {
-						emit = append(emit, n)
-					}
-				}
-				secretFailOpen = emit
+				// Fail-open suppression is SEGMENT-granular, never
+				// name-granular: intercepted jobs were consumed by the
+				// ContentBlocked loop above, so every secretFailOpen entry
+				// belongs to a DIFFERENT segment — a cap-overflow/dedup
+				// leftover span, or a failed enqueue of a non-blocked job.
+				// One rule with two segments (A intercepted, B failed) keeps
+				// both records: the repeat record above covers segment A, the
+				// fail-open record below covers segment B.
 			}
 			emitSecrets = secretFailOpen
 		}

@@ -396,6 +396,11 @@ func (executor Executor) commit(
 	if normalizeModel != "" && response.StatusCode < 300 && upstreamStream {
 		transformed = true
 	}
+	// Heartbeat frames are bytes the upstream body never had, so a forwarded
+	// Content-Length would understate the client body; a keepalive stream
+	// drops the length header exactly like a transformed one. (clientStream
+	// already implies a <300 status.)
+	heartbeat := clientStream && keepalive > 0
 	// Hop-by-hop headers belong to ONE transport connection, never to the
 	// client (RFC 9110 §7.6.1): strip Connection (plus every header it names),
 	// Trailer and the other connection-scoped tokens. HTTP/2 upstreams never
@@ -414,7 +419,7 @@ func (executor Executor) commit(
 		if hopByHopHeaders[lower] || connectionNamed[lower] {
 			continue
 		}
-		if transformed && (strings.EqualFold(key, "content-length") || strings.EqualFold(key, "transfer-encoding")) {
+		if (transformed || heartbeat) && (strings.EqualFold(key, "content-length") || strings.EqualFold(key, "transfer-encoding")) {
 			continue
 		}
 		if modeMismatch && strings.EqualFold(key, "content-type") {
@@ -480,7 +485,7 @@ func (executor Executor) commit(
 	// and the ttft marker. Non-stream responses must never see a comment
 	// frame (it would corrupt a JSON body).
 	var end streamEnd
-	if clientStream && response.StatusCode < 300 && keepalive > 0 {
+	if heartbeat {
 		end = flushCopyHeartbeat(exchange.Writer, counting, keepalive)
 	} else {
 		end = flushCopy(exchange.Writer, counting)

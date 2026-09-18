@@ -1052,11 +1052,11 @@ wire record <provider> [--model M] [--prompt P] [--out DIR]
 audit [--stats] [--from TIME] [--to TIME] [--kind KIND] [--limit N] [--json] [--config PATH]
 ```
 
-逻辑（`internal/cli/audit/audit.go` 的 `CmdAudit` -> `RenderAudit`）：离线直读 seclog 目录——`guard.audit_path`（默认 `~/.model-proxy/log/security/security.log`）取 `filepath.Dir`，扫描其中全部 `security-*.log`（活动 + 轮转文件，daemon 不在也能查，同 `doctor` 离线语义）。config 加载失败 -> `log.Fatal`（stderr）+ exit 1（同 `stats`）。
+逻辑（`internal/cli/audit/audit.go` 的 `CmdAudit` -> `RenderAudit`）：离线直读 seclog 目录——`guard.audit_path`（默认 `~/.model-proxy/log/security/security.log`）取 `filepath.Dir`，查询其中的 `security.db`（SQLite，审计的唯一查询面；daemon 不在也能查，同 `doctor` 离线语义）。同目录的 `security-*.log` 全量 JSONL 留痕不参与查询。config 加载失败 -> `log.Fatal`（stderr）+ exit 1（同 `stats`）。
 
 - `--from` / `--to`：`now`、时长（`1h`/`30m`，表示"多久之前"；另接受整数天数后缀 `7d`）、unix 秒、RFC3339；默认不限（闭区间，毫秒精度）。负时长（如 `-1h`/`-7d`）报错；`--from` 晚于 `--to` -> `✗ --from is after --to (empty window)` + exit 1。
 - `--kind`：`secret` | `path` | `drift`；其他值 -> stderr `✗ invalid --kind "<V>": must be secret, path, or drift` + exit 1。
-- `--limit N`：只保留最新 N 条（默认 50；`0`/负数 = 全部；`--stats` 下忽略）。非整数 -> stderr `✗ invalid --limit: …` + exit 1。
+- `--limit N`：只保留最新 N 条（默认 50；`0` = 全部；负数/非整数 -> stderr `✗ invalid --limit: must be a non-negative integer (default 50, 0 = no cap)` + exit 1；`--stats` 下忽略）。
 - `--stats`：聚合视图替代原始记录——对**过滤后的全集**统计（忽略 `--limit`，改用内部上限 10000 条，超出按最新优先截断）：总数 + 按 kind 命中数、命中名（`names` 展开）top 10、agent top 10、按 action 计数。可与 `--from`/`--to`/`--kind` 组合。
 - `--json`：stdout 为 records 数组原样 JSON（`seclog.Record`，最新在前；空结果为 `[]`），供 jq。与 `--stats` 组合时输出聚合对象：`{"from":ms,"to":ms,"total":N,"by_kind":{...},"by_action":{...},"top_names":[{"name","count"}],"top_agents":[...]}`（`from`/`to` 为查询窗口，`0`/不限则省略；列表按 count 降序、name 升序）。
 - 未识别 flag/位置参数 -> `✗ unknown flag "<A>"` + exit 1；`--from`/`--to`/`--kind`/`--limit` 缺值 -> `✗ <FLAG> requires a value` + exit 1（`--config` 及其值由 configPath 消费，不算未知）。
@@ -1068,7 +1068,7 @@ time           kind    agent         route             names                 act
 <MM-DD HH:MM:SS(14)> <kind(7)> <agent(12)> <exposed(16)> <逗号连接(20)> <action(7)> <detail>
 ```
 
-记录按时间倒序（最新在前）。表格列：`time kind agent route names action verdict detail`——`verdict` 仅 AI 二次判定（`guard.adjudicate`）来源的记录有值（`high`＝模型判真实泄露；`error`/`skipped`＝判定调用失败/队列满，fail-open 回到经典立即记录），经典立即记录为空；`detail` 对 high/error 记录携带 scrub 后的模型解释（≤120 字符，命中内容已掩码）。空结果 -> `(no security audit records in <DIR>)`；目录不存在 -> `(no security audit records yet — <DIR> does not exist)`（均 exit 0）。扫描中跳过的不可解析行数（含无法打开的日志文件，每个计 1）追加一行 `  (<N> unreadable line(s) skipped)`；文件末尾无换行符的半行是 daemon 写入中的撕裂尾行，直接忽略、不计入 skipped。detail 列渲染前过滤控制字符（`\n`/`\t`/ANSI 转义等 -> 空格），防生产者破坏表格。
+记录按时间倒序（最新在前）。表格列：`time kind agent route names action verdict detail`——`verdict` 仅 AI 二次判定（`guard.adjudicate`）来源的记录有值：`high`＝模型判真实泄露；`medium`＝形似风险但窗口内无法确证（只记录、不拉黑）；`error`/`skipped`＝判定调用失败/队列满等，fail-open 回到经典立即记录；`low`（忽略档）只写全量 JSONL、不进 SQLite，CLI 永远查不到；经典立即记录（精确匹配拦截、drift）为空。判定记录的模型判断在独立字段 `reason`（判定逻辑，≤200 字符）与 `evidence`（事实依据，≤300 字符），两者均经 scrub（控制字符过滤 + 命中内容掩码为 `[MASKED]`），随 `--json` 输出可见；表格 `detail` 列渲染的是 `Record.Detail`（drift 归因、精确匹配拦截的凭据溯源等自由文本）。空结果 -> `(no security audit records in <DIR>)`；目录不存在 -> `(no security audit records yet — <DIR> does not exist)`（均 exit 0）。查询直读 SQLite，一行要么是一条完整记录要么不存在——`Skipped` 恒为 0（`(<N> unreadable line(s) skipped)` 输出分支仅为兼容保留，实际不会打印）。detail 列渲染前过滤控制字符（`\n`/`\t`/ANSI 转义等 -> 空格），防生产者破坏表格。
 
 ### stdout（`--stats` 聚合，`FormatAuditStats`）
 

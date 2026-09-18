@@ -477,3 +477,43 @@ func TestMCPRoute_QuotaExhaustedSkipsBackend(t *testing.T) {
 		t.Fatalf("fallback not used: exa=%d", exa.calls())
 	}
 }
+
+// TestMCPRoute_AllCandidatesQuotaExhausted: when every backend declaring a
+// tool is quota-skipped, the answer must say quota-exhausted (-32000), not
+// misreport -32602 "unknown tool". An undeclared tool still gets -32602.
+func TestMCPRoute_AllCandidatesQuotaExhausted(t *testing.T) {
+	zs, _, servers, routes := twoRouteBackends(t)
+	// Single-target route: the zhipu backend alone declares web_search.
+	routes = map[string]configdomain.MCPRoute{
+		"web-search": {Targets: []configdomain.MCPRouteTarget{
+			{Server: "zs", Tools: map[string]string{"web_search": "web_search_prime"}},
+		}},
+	}
+	p, srv := newMCPRouteTestProxyP(t, []string{"k-A"}, servers, routes)
+	p.runtimeState.SetQuota("zhipu", &provider.QuotaSnapshot{
+		Billing: provider.BillingPlan,
+		Windows: []provider.QuotaWindow{
+			{Label: "Daily time", Kind: "time", DetailLabel: "By MCP tool", RemainingPct: 0},
+		},
+	}, 1)
+
+	resp := mcpPost(t, srv.URL+"/mcp/web-search", "", routeInitBody)
+	sid := resp.Header.Get("Mcp-Session-Id")
+	resp.Body.Close()
+
+	resp = mcpPost(t, srv.URL+"/mcp/web-search", sid, routeCallBody("web_search"))
+	body := mustRead(resp)
+	if !strings.Contains(body, "quota-exhausted") || strings.Contains(body, "unknown tool") {
+		t.Fatalf("quota-exhausted call misreported: %s", body)
+	}
+	if zs.calls() != 0 {
+		t.Fatalf("exhausted backend received a call: %d", zs.calls())
+	}
+
+	// A tool nobody declares is still unknown (-32602).
+	resp = mcpPost(t, srv.URL+"/mcp/web-search", sid, routeCallBody("nope"))
+	body = mustRead(resp)
+	if !strings.Contains(body, `-32602`) || !strings.Contains(body, "unknown tool") {
+		t.Fatalf("undeclared tool = %s, want -32602 unknown tool", body)
+	}
+}

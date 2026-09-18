@@ -27,8 +27,8 @@ DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 PORT=
 LOG=
 DO_BUILD=0
-STOP_TIMEOUT=150    # 15s: graceful drain budget is 8s, plus margin
-START_TIMEOUT=600   # 60s: first request may trigger catalog refresh etc.
+STOP_TIMEOUT_S=15    # graceful drain budget is 8s, plus margin
+START_TIMEOUT_S=60   # first request may trigger catalog refresh etc.
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -67,12 +67,14 @@ if [ -n "$PIDS" ]; then
   kill -INT $PIDS
 fi
 
-# 3) wait for the port to be released
-i=0
+# 3) wait for the port to be released. Wall-clock budget (date +%s), not an
+#    iteration count: the sleep below falls back to `sleep 1` on /bin/sh
+#    implementations without fractional sleep, which would silently multiply
+#    any iteration-based budget by 10.
+deadline=$(( $(date +%s) + STOP_TIMEOUT_S ))
 while port_listening; do
-  i=$((i + 1))
-  if [ "$i" -ge "$STOP_TIMEOUT" ]; then
-    echo "timeout: port $PORT still listening after SIGINT" >&2
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    echo "timeout: port $PORT still listening ${STOP_TIMEOUT_S}s after SIGINT" >&2
     exit 1
   fi
   sleep 0.1 2>/dev/null || sleep 1   # some /bin/sh sleep lack fractions
@@ -83,11 +85,10 @@ done
 cd "$DIR"
 nohup ./model-proxy serve >> "$LOG" 2>&1 &
 
-i=0
+deadline=$(( $(date +%s) + START_TIMEOUT_S ))
 while ! port_listening; do
-  i=$((i + 1))
-  if [ "$i" -ge "$START_TIMEOUT" ]; then
-    echo "timeout: serve did not listen on $PORT within $((START_TIMEOUT / 10))s; see $LOG" >&2
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    echo "timeout: serve did not listen on $PORT within ${START_TIMEOUT_S}s; see $LOG" >&2
     exit 1
   fi
   sleep 0.1 2>/dev/null || sleep 1

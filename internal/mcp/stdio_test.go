@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -71,7 +72,7 @@ func startHelperConn(t *testing.T) *StdioConn {
 
 func TestStdioConn_HandshakeAndCall(t *testing.T) {
 	conn := startHelperConn(t)
-	initResp, err := conn.Call([]byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	initResp, err := conn.Call(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,10 +80,10 @@ func TestStdioConn_HandshakeAndCall(t *testing.T) {
 		t.Fatalf("initialize = %s", initResp)
 	}
 	// Notifications: write-only, immediate nil.
-	if _, err := conn.Call([]byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)); err != nil {
+	if _, err := conn.Call(context.Background(), []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)); err != nil {
 		t.Fatal(err)
 	}
-	callResp, err := conn.Call([]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"q":"x"}}}`))
+	callResp, err := conn.Call(context.Background(), []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"q":"x"}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +91,7 @@ func TestStdioConn_HandshakeAndCall(t *testing.T) {
 		t.Fatalf("call = %s (env not injected?)", callResp)
 	}
 	// String ids correlate too.
-	resp, err := conn.Call([]byte(`{"jsonrpc":"2.0","id":"abc","method":"tools/list"}`))
+	resp, err := conn.Call(context.Background(), []byte(`{"jsonrpc":"2.0","id":"abc","method":"tools/list"}`))
 	if err != nil || !strings.Contains(string(resp), `"search"`) {
 		t.Fatalf("string id = %s err=%v", resp, err)
 	}
@@ -103,7 +104,7 @@ func TestStdioConn_DeadChild(t *testing.T) {
 	}
 	defer conn.Close()
 	// The helper skips (env marker missing) and exits → every Call fails.
-	if _, err := conn.Call([]byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`)); err == nil {
+	if _, err := conn.Call(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`)); err == nil {
 		t.Fatal("call on dead child succeeded")
 	}
 }
@@ -112,7 +113,7 @@ func TestStdioConn_CloseIdempotent(t *testing.T) {
 	conn := startHelperConn(t)
 	conn.Close()
 	conn.Close() // must not panic or double-wait
-	if _, err := conn.Call([]byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`)); err == nil {
+	if _, err := conn.Call(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`)); err == nil {
 		t.Fatal("call after Close succeeded")
 	}
 	// The read loop must have finished (no goroutine leak).
@@ -126,5 +127,60 @@ func TestStdioConn_CloseIdempotent(t *testing.T) {
 func TestStdioConn_EmptyCommand(t *testing.T) {
 	if _, err := StartStdio(nil, nil); err == nil {
 		t.Fatal("empty command accepted")
+	}
+}
+
+// TestStdioConn_CallContextCancel: a hung child (never answers) must not park
+// the caller — ctx cancel aborts the wait, drops the pending registration,
+// and leaves the conn usable. Regression for the ctx-less Call blocking
+// forever on a hung subprocess.
+func TestStdioConn_CallContextCancel(t *testing.T) {
+	conn := startHelperConn(t) // helper answers known methods only; "hang" gets no reply
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := conn.Call(ctx, []byte(`{"jsonrpc":"2.0","id":9,"method":"hang"}`))
+		done <- err
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("canceled call returned nil error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled call never returned (hung child parked the caller)")
+	}
+	// The pending registration must be gone (a late response would be
+	// discarded) and the conn still works.
+	conn.mu.Lock()
+	pending := len(conn.pending)
+	conn.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending entry leaked: %d", pending)
+	}
+	resp, err := conn.Call(context.Background(), []byte(`{"jsonrpc":"2.0","id":10,"method":"tools/list"}`))
+	if err != nil || !strings.Contains(string(resp), `"search"`) {
+		t.Fatalf("conn unusable after cancel: resp=%s err=%v", resp, err)
+	}
+}
+
+// TestStdioConn_CallContextTimeout: the timeout path of the same contract.
+func TestStdioConn_CallContextTimeout(t *testing.T) {
+	conn := startHelperConn(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := conn.Call(ctx, []byte(`{"jsonrpc":"2.0","id":11,"method":"hang"}`))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "deadline exceeded") {
+			t.Fatalf("timeout error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed-out call never returned")
 	}
 }

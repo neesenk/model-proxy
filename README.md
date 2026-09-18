@@ -149,6 +149,7 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 #     provider: zhipu
 #     command: [npx, -y, "@z_ai/mcp-server"]
 #     env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU}
+#                           # env 值：${account.api_key} / env:VAR 间接形式，或良性键的字面量；凭据形键名（…_KEY/TOKEN/SECRET/…）拒绝字面量
 #   exa:                    # auth: none：匿公共端点
 #     url: https://mcp.exa.ai/mcp
 #     auth: none            # 自定义鉴权头：auth_header: X-Agent-Plan-Key（火山 datapro 形态，apikey provider 限定）
@@ -419,7 +420,7 @@ routes:
 
 **定位是「重试/重复请求盾牌」**：多轮对话 body 逐轮变长，正常会话命中率≈0；前缀复用的经济性由上游 prompt caching 覆盖，精确缓存接住的是客户端原地重试、CI/脚本里的重复单发。
 
-命中/未命中统计跨 reload 和重启保留，reload 仅清空响应条目。Reset counters 即使在缓存关闭时也清理持久化历史；完整语义见 [缓存统计契约](docs/architecture/fusion-shadow-cache.md#精确响应缓存)。Web 模型 Refresh 支持请求取消，并在并发修改 provider 时返回冲突供重试，见 [模型刷新提交边界](docs/web-api.md#模型刷新提交边界)。
+命中/未命中统计跨 reload 和重启保留，reload 仅清空响应条目。Reset counters 只清调用统计（metrics/tokens/agents），**不动**响应缓存的命中/未命中计数（内存与持久化历史都保留）——命中率是运营指标而非用量记账；完整语义见 [缓存统计契约](docs/architecture/fusion-shadow-cache.md#精确响应缓存)。Web 模型 Refresh 支持请求取消，并在并发修改 provider 时返回冲突供重试，见 [模型刷新提交边界](docs/web-api.md#模型刷新提交边界)。
 
 ## 出站安全扫描与审计（guard）
 
@@ -435,7 +436,7 @@ routes:
 
 动作与观测：`guard.secrets` 控制秘密类命中（log/redact/block/off），`guard.paths` 控制路径命中（log/block/off；只作用于 strong，weak 完全忽略，见上）。命中只上报**模式类型名/路径类别名**（live event + `("guard", <名>)` 计数器），匹配内容永不落日志、事件或测试输出。同一请求同时命中两类时两类都计数/审计（secrets=block 不短路 paths 扫描），响应动作 secrets 优先、paths=block 只阻断 strong 命中。命中持久化到安全审计日志（默认 `~/.model-proxy/log/security/security*.log`，0600，与请求日志同一持久化模式：活动文件按天命名、同日重启追加同一文件，超大小归档轮转，30 天保留），用 `model-proxy audit [--kind secret|path|drift] [--from 1h] [--json]` 离线查询；`doctor --live` 检出 takeover 漂移（客户端 BASE_URL 被改离代理——API key 劫持手法）时也会写一条 `drift` 审计记录。
 
-**AI 二次判定（`guard.adjudicate`，默认关；本仓库随附的 `config.yaml` 是显式开启的示例）**：规则表/custom 秘密命中与 strong 路径命中在 `secrets/paths = log` 档下不再立即记录——命中片段（±256B 上下文，窗口内**其它**秘密命中先掩码）异步发给指定模型（`guard.adjudicate.model`，经共享调度 seam 走 provider `/v1/messages`——与正常流量同款排序/冷却感知/熔断回写、每次尝试独立预算切片，但不进转发管线：不重扫 guard、不进 cache/request log/forward 统计）判定：**high**＝真实泄露 → 审计记录（`verdict` 字段）+ 可选拉黑该会话；**low**＝fixture/示例/文档等良性内容 → 屏蔽（只留 `adjudicated_low` 计数器与 WebUI 最近判定 feed，不落审计）。结果按内容 hash 缓存并持久化（`~/.model-proxy/guard_verdicts.json`，只存 hash→verdict）——会话历史回显同一片段只计费一次；判定通道自带 LLM 用量记账（真实调用次数与 in/out token，缓存命中不计费，`guard_stats.json` 持久化、重启累计不清零；Security 页 verdict KPI 由服务端对审计库聚合 + 累计 low 计数，跨重启稳定），见 WebUI Security 页 KPI 与 `/api/security/adjudications` 的 `stats` 字段。会话拉黑持久化（`guard_blocks.json`）直到显式解除：`model-proxy guard unblock <session-id>` 或 WebUI Security 页。队列满、单请求判定数超上限（4 个 job）、跨规则同内容去重、模型错误、超时一律 **fail-open** 回到经典立即记录（verdict=error/skipped），绝不因判定器不可用而静音 guard。known-secret 精确通道与 secrets/paths=block 同步拦截不参与判定。**重复拦截**：secret 类命中一旦判定 high，其内容哈希进入持久化索引（`guard_blocked.json`，只存 hash），此后任何会话再携带相同字节直接 400 + 拉黑（不再二次判定）——与 known-secret 精确匹配同款机制；path 类命中不索引（路径字面量跨上下文合法复现）。注意：开启即表示接受把命中片段发给指定模型（这是"凭据不出机器"红线的显式 opt-in 例外，可用本地模型）。
+**AI 二次判定（`guard.adjudicate`，默认关；本仓库随附的 `config.yaml` 是显式开启的示例）**：规则表/custom 秘密命中与 strong 路径命中在 `secrets/paths = log` 档下不再立即记录——命中片段（±256B 上下文，窗口内**其它**秘密命中先掩码）异步发给指定模型（`guard.adjudicate.model`，经共享调度 seam 走 provider `/v1/messages`——与正常流量同款排序/冷却感知/熔断回写、每次尝试独立预算切片，但不进转发管线：不重扫 guard、不进 cache/request log/forward 统计）判定：**high**＝真实泄露 → 审计记录（`verdict` 字段）+ 可选拉黑该会话；**medium**＝可疑但不确定 → 只记录不拉黑；**low**＝fixture/示例/文档等良性内容 → 屏蔽（只留 `adjudicated_low` 计数器与 WebUI 最近判定 feed，不落审计）。结果按内容 hash 缓存并持久化（`~/.model-proxy/guard_verdicts.json`，只存 hash→verdict）——会话历史回显同一片段只计费一次；判定通道自带 LLM 用量记账（真实调用次数与 in/out token，缓存命中不计费，`guard_stats.json` 持久化、重启累计不清零；Security 页 verdict KPI 由服务端对审计库聚合 + 累计 low 计数，跨重启稳定），见 WebUI Security 页 KPI 与 `/api/security/adjudications` 的 `stats` 字段。会话拉黑持久化（`guard_blocks.json`）直到显式解除：`model-proxy guard unblock <session-id>` 或 WebUI Security 页。队列满、单请求判定数超上限（4 个 job）、跨规则同内容去重、模型错误、超时一律 **fail-open** 回到经典立即记录（verdict=error/skipped），绝不因判定器不可用而静音 guard。known-secret 精确通道与 secrets/paths=block 同步拦截不参与判定。**重复拦截**：secret 类命中一旦判定 high，其内容哈希进入持久化索引（`guard_blocked.json`，只存 hash），此后任何会话再携带相同字节直接 400 + 拉黑（不再二次判定）——与 known-secret 精确匹配同款机制；path 类命中不索引（路径字面量跨上下文合法复现）。注意：开启即表示接受把命中片段发给指定模型（这是"凭据不出机器"红线的显式 opt-in 例外，可用本地模型）。
 
 规则维护：你的凭据免维护（自动派生）；新 key 格式用 `guard.extra_patterns`、敏感路径用 `guard.extra_paths`——Config 页的 Guard rules 编辑器或直接改 config（热 reload 即时生效）；也可以向上游同步内置表（升 `rules.json` 的 upstream pin → 重抽 → review）。哪些规则在产生噪音看 Security 页的 Rule hits 卡。
 

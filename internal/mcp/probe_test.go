@@ -129,3 +129,48 @@ func TestProbe_RPCError(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// TestProbe_RedirectPolicy: a cross-origin redirect must be REFUSED before
+// the credential-bearing request is re-sent (auth headers are injected before
+// the first send and the stdlib only strips Authorization on cross-host hops);
+// a same-origin redirect is followed normally. Regression for key leakage via
+// 307 to a foreign host.
+func TestProbe_RedirectPolicy(t *testing.T) {
+	// Cross-origin: 307 to a different host.
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("credential-bearing request reached redirect target (auth=%q)", r.Header.Get("Authorization"))
+	}))
+	defer target.Close()
+	cross := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/mcp", http.StatusTemporaryRedirect)
+	}))
+	defer cross.Close()
+	client := cross.Client()
+	client.CheckRedirect = CheckNoCrossOriginRedirect
+	_, err := Probe(context.Background(), client, cross.URL, func(r *http.Request) error {
+		r.Header.Set("Authorization", "Bearer leak-me-not")
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "cross-origin redirect") {
+		t.Fatalf("cross-origin redirect not refused: %v", err)
+	}
+
+	// Same-origin: 307 to another path on the same host is followed.
+	fk := &fakeMCPServer{sessionID: "up-session-1"}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/mcp", fk.handler())
+	mux.HandleFunc("/old", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/mcp", http.StatusTemporaryRedirect)
+	})
+	same := httptest.NewServer(mux)
+	defer same.Close()
+	sameClient := same.Client()
+	sameClient.CheckRedirect = CheckNoCrossOriginRedirect
+	res, err := Probe(context.Background(), sameClient, same.URL+"/old", nil)
+	if err != nil {
+		t.Fatalf("same-origin redirect must be followed: %v", err)
+	}
+	if res.ServerName != "fake-mcp" {
+		t.Fatalf("same-origin probe = %+v", res)
+	}
+}

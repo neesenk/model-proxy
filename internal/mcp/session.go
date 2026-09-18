@@ -169,6 +169,20 @@ func (t *SessionTable) PutRoute(route string) string {
 	return id
 }
 
+// RefreshUpstream rebinds a live session's upstream session id: a stateful
+// upstream that re-issues its Mcp-Session-Id on re-initialize (id rotation)
+// must not leave later requests addressing the stale id (404s). Unknown or
+// expired ids are a no-op; the LRU position/LastSeen are untouched.
+func (t *SessionTable) RefreshUpstream(id, upstreamID string) {
+	t.mu.Lock()
+	if _, ok := t.entries[id]; ok && !t.expired(t.sessions[id]) {
+		s := t.sessions[id]
+		s.UpstreamID = upstreamID
+		t.sessions[id] = s
+	}
+	t.mu.Unlock()
+}
+
 // routeSessionLockedE resolves a live route session, refreshing LRU/LastSeen
 // like Get. Pinned-passthrough sessions (Route == nil) and unknown ids report
 // ok=false; expired sessions are removed and returned in evicted. Caller must
@@ -205,12 +219,15 @@ func (t *SessionTable) RouteSessionValid(id string) bool {
 func (t *SessionTable) RouteSubGet(id, server string) (SubSession, bool) {
 	t.mu.Lock()
 	s, evicted, ok := t.routeSessionLockedE(id)
+	var sub SubSession
+	if ok {
+		// The Route maps are shared by every goroutine serving this session —
+		// all reads/writes stay UNDER the table lock (lock-held copy
+		// semantics); only the eviction callback fires after Unlock.
+		sub, ok = s.Route.Subs[server]
+	}
 	t.mu.Unlock()
 	t.fireEvicted(evicted)
-	if !ok {
-		return SubSession{}, false
-	}
-	sub, ok := s.Route.Subs[server]
 	return sub, ok
 }
 
@@ -219,39 +236,38 @@ func (t *SessionTable) RouteSubGet(id, server string) (SubSession, bool) {
 func (t *SessionTable) RouteSubPut(id string, sub SubSession) bool {
 	t.mu.Lock()
 	s, evicted, ok := t.routeSessionLockedE(id)
+	if ok {
+		s.Route.Subs[sub.Server] = sub
+	}
 	t.mu.Unlock()
 	t.fireEvicted(evicted)
-	if !ok {
-		return false
-	}
-	s.Route.Subs[sub.Server] = sub
-	return true
+	return ok
 }
 
 // RouteSubDrop removes one backend sub-session (session-invalid failover).
 func (t *SessionTable) RouteSubDrop(id, server string) {
 	t.mu.Lock()
 	s, evicted, ok := t.routeSessionLockedE(id)
-	t.mu.Unlock()
-	t.fireEvicted(evicted)
 	if ok {
 		delete(s.Route.Subs, server)
 	}
+	t.mu.Unlock()
+	t.fireEvicted(evicted)
 }
 
 // RouteSubs returns copies of all backend sub-sessions (DELETE fan-out).
 func (t *SessionTable) RouteSubs(id string) []SubSession {
 	t.mu.Lock()
 	s, evicted, ok := t.routeSessionLockedE(id)
+	var out []SubSession
+	if ok {
+		out = make([]SubSession, 0, len(s.Route.Subs))
+		for _, sub := range s.Route.Subs {
+			out = append(out, sub)
+		}
+	}
 	t.mu.Unlock()
 	t.fireEvicted(evicted)
-	if !ok {
-		return nil
-	}
-	out := make([]SubSession, 0, len(s.Route.Subs))
-	for _, sub := range s.Route.Subs {
-		out = append(out, sub)
-	}
 	return out
 }
 
@@ -259,12 +275,12 @@ func (t *SessionTable) RouteSubs(id string) []SubSession {
 func (t *SessionTable) RouteStickyGet(id, canonical string) (string, bool) {
 	t.mu.Lock()
 	s, evicted, ok := t.routeSessionLockedE(id)
+	var server string
+	if ok {
+		server, ok = s.Route.Sticky[canonical]
+	}
 	t.mu.Unlock()
 	t.fireEvicted(evicted)
-	if !ok {
-		return "", false
-	}
-	server, ok := s.Route.Sticky[canonical]
 	return server, ok
 }
 
@@ -272,39 +288,39 @@ func (t *SessionTable) RouteStickyGet(id, canonical string) (string, bool) {
 func (t *SessionTable) RouteStickyPut(id, canonical, server string) {
 	t.mu.Lock()
 	s, evicted, ok := t.routeSessionLockedE(id)
-	t.mu.Unlock()
-	t.fireEvicted(evicted)
 	if ok {
 		s.Route.Sticky[canonical] = server
 	}
+	t.mu.Unlock()
+	t.fireEvicted(evicted)
 }
 
 // RouteToolsGet returns the session's aggregated tools cache.
 func (t *SessionTable) RouteToolsGet(id string) ([]ToolSpec, bool) {
 	t.mu.Lock()
 	s, evicted, ok := t.routeSessionLockedE(id)
+	var out []ToolSpec
+	ready := ok && s.Route.ToolsReady
+	if ready {
+		out = make([]ToolSpec, len(s.Route.Tools))
+		copy(out, s.Route.Tools)
+	}
 	t.mu.Unlock()
 	t.fireEvicted(evicted)
-	if !ok || !s.Route.ToolsReady {
-		return nil, false
-	}
-	out := make([]ToolSpec, len(s.Route.Tools))
-	copy(out, s.Route.Tools)
-	return out, true
+	return out, ready
 }
 
 // RouteToolsPut stores the session's aggregated tools cache.
 func (t *SessionTable) RouteToolsPut(id string, tools []ToolSpec) bool {
 	t.mu.Lock()
 	s, evicted, ok := t.routeSessionLockedE(id)
+	if ok {
+		s.Route.Tools = append([]ToolSpec(nil), tools...)
+		s.Route.ToolsReady = true
+	}
 	t.mu.Unlock()
 	t.fireEvicted(evicted)
-	if !ok {
-		return false
-	}
-	s.Route.Tools = append([]ToolSpec(nil), tools...)
-	s.Route.ToolsReady = true
-	return true
+	return ok
 }
 
 // Delete drops a session (client DELETE or fail-closed invalidation).

@@ -230,8 +230,10 @@ func TestRetentionSweepRemovesAgedFiles(t *testing.T) {
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf("stale file still present after sweep (stat err = %v)", err)
 	}
-	// The live record survives: the active file is never swept, and the sweep
-	// never touches the store (its name does not match the audit-file scheme).
+	// The live record survives: the active file is never swept, and the store
+	// row is fresh — the row sweep removes only rows older than the window
+	// (and the file sweep never touches security.db, whose name does not
+	// match the audit-file scheme).
 	if _, err := os.Stat(storePath(dir)); err != nil {
 		t.Errorf("security.db must survive a retention sweep, stat err = %v", err)
 	}
@@ -258,6 +260,55 @@ func TestRetentionZeroKeepsFilesForever(t *testing.T) {
 
 	if _, err := os.Stat(stale); err != nil {
 		t.Errorf("retention=0 must keep files forever, stat err = %v", err)
+	}
+	// The SQLite half honors the same keep-forever policy.
+	result := queryKinds(t, dir, Filter{})
+	if len(result.Records) != 1 {
+		t.Fatalf("records = %d, want 1 (retention=0 sweeps nothing)", len(result.Records))
+	}
+}
+
+// The SQLite half shares the JSONL half's retention window: rows older than
+// the window are swept (startup/hourly/shutdown cadence), so the queryable
+// store cannot accumulate audit rows long after the rotated trail files are
+// gone. Regression: an expired row and a live one; the shutdown sweep must
+// delete exactly the expired row.
+func TestStoreRetentionSweepDeletesExpiredRows(t *testing.T) {
+	dir := t.TempDir()
+	expired := time.Now().Add(-2 * time.Hour).UnixMilli()
+	logger := startLogger(t, dir, Options{Retention: time.Hour})
+	logger.Enqueue(&Record{Ts: expired, Kind: KindSecret, Names: []string{"jwt"}, Action: "log"})
+	logger.Enqueue(&Record{Kind: KindSecret, Names: []string{"jwt"}, Action: "log"}) // zero Ts stamps now
+	logger.Shutdown()
+
+	result := queryKinds(t, dir, Filter{})
+	if len(result.Records) != 1 {
+		t.Fatalf("records after sweep = %d, want 1 (expired row deleted)", len(result.Records))
+	}
+	if result.Records[0].Ts == expired {
+		t.Errorf("expired row survived the store sweep: %+v", result.Records[0])
+	}
+	// The JSONL trail is file-granular: both lines are in today's active
+	// file, which the sweep never removes.
+	if lines := jsonlLines(t, dir); len(lines) != 2 {
+		t.Errorf("JSONL trail lines = %d, want 2 (file-level sweep keeps the active file)", len(lines))
+	}
+}
+
+// A startup sweep clears rows that aged past the window while the daemon was
+// down (no writes happened to trigger the write-path sweep).
+func TestStoreRetentionSweepAtStartup(t *testing.T) {
+	dir := t.TempDir()
+	expired := time.Now().Add(-2 * time.Hour).UnixMilli()
+	if err := AppendSync(dir, &Record{Ts: expired, Kind: KindDrift, Detail: "client=claude"}); err != nil {
+		t.Fatal(err)
+	}
+	logger := startLogger(t, dir, Options{Retention: time.Hour})
+	logger.Shutdown()
+
+	result := queryKinds(t, dir, Filter{})
+	if len(result.Records) != 0 {
+		t.Fatalf("records after startup sweep = %d, want 0", len(result.Records))
 	}
 }
 

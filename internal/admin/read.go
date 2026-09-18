@@ -16,6 +16,7 @@ import (
 	"model-proxy/internal/credstore"
 	"model-proxy/internal/fusion"
 	obscounters "model-proxy/internal/observe/counters"
+	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/observe/seclog"
 	observestats "model-proxy/internal/observe/stats"
@@ -713,6 +714,12 @@ func (s *Service) Security(query appapi.SecurityQuery) (appapi.SecurityResult, e
 			counts.Low = s.ports.AdjudicationStats().LowVerdicts
 		}
 		out.Counts = counts
+	} else {
+		// Records loaded but the verdict aggregation failed: surface the
+		// failure instead of letting the KPI tiles fall back to silent zeros.
+		// The error may embed local paths, so the client gets a fixed marker.
+		logx.Warnf("[admin] security verdict counts unavailable: %v", err)
+		out.CountsError = "verdict counts unavailable"
 	}
 	for _, record := range result.Records {
 		out.Records = append(out.Records, appapi.SecurityRecord{

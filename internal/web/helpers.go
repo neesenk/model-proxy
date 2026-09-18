@@ -155,14 +155,24 @@ func statsWindow(q url.Values, window time.Duration) (from, to int64) {
 	return from, to
 }
 
-func mapKeys(m map[string]bool) []string {
-	if len(m) == 0 {
-		return []string{}
-	}
-	out := make([]string, 0, len(m))
+// providerModelPair keys the analytics price coverage: pricing resolves per
+// (provider, model) — the alias fallback is provider-scoped — so the same
+// upstream model can be priced under one provider and unpriced under another.
+type providerModelPair struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
+func sortedProviderModels(m map[providerModelPair]bool) []providerModelPair {
+	out := make([]providerModelPair, 0, len(m))
 	for k := range m {
 		out = append(out, k)
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Provider != out[j].Provider {
+			return out[i].Provider < out[j].Provider
+		}
+		return out[i].Model < out[j].Model
+	})
 	return out
 }

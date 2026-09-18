@@ -25,9 +25,21 @@ import (
 
 var (
 	binary    string
+	binaryDir string
 	buildOnce sync.Once
 	buildErr  error
 )
+
+// TestMain cleans up the shared build directory that requireBinary creates
+// with os.MkdirTemp (t.TempDir is unusable there: buildOnce runs inside the
+// first test but the binary must outlive it for the rest of the suite).
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if binaryDir != "" {
+		_ = os.RemoveAll(binaryDir)
+	}
+	os.Exit(code)
+}
 
 func rootDir(t *testing.T) string {
 	t.Helper()
@@ -62,6 +74,7 @@ func requireBinary(t *testing.T) string {
 			buildErr = err
 			return
 		}
+		binaryDir = tmp
 		binary = filepath.Join(tmp, "model-proxy")
 		cmd := exec.Command("go", "build", "-o", binary, ".")
 		cmd.Dir = rootDir(t)
@@ -264,8 +277,11 @@ func TestHotRestartReplacesListener(t *testing.T) {
 func TestColdStartParsesPortFromConfig(t *testing.T) {
 	dir, port := sandbox(t)
 
-	out := runScript(t, dir) // no --port: exercise the config.yaml parser
+	// Register BEFORE runScript: if the script fails (t.Fatalf inside
+	// runScript), a cleanup registered after it would never run and the
+	// nohup'd serve would leak.
 	killPortOnCleanup(t, port)
+	out := runScript(t, dir) // no --port: exercise the config.yaml parser
 
 	if !strings.Contains(out, fmt.Sprintf("restarted on port %d", port)) {
 		t.Errorf("script output %q missing parsed port %d", out, port)

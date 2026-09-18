@@ -94,7 +94,7 @@ func (p *Proxy) probeMCPStdio(ctx context.Context, snap RuntimeSnapshot, srv con
 	}
 	defer conn.Close()
 	result := appapi.MCPProbeResult{Stdio: true}
-	initResp, err := conn.Call(mcpRouteInitBody)
+	initResp, err := conn.Call(ctx, mcpRouteInitBody)
 	if err != nil {
 		result.Error = fmt.Sprintf("initialize: %v", err)
 		result.LatencyMs = time.Since(start).Milliseconds()
@@ -106,8 +106,8 @@ func (p *Proxy) probeMCPStdio(ctx context.Context, snap RuntimeSnapshot, srv con
 		result.LatencyMs = time.Since(start).Milliseconds()
 		return result
 	}
-	conn.Call(mcpNotifInitBody) //nolint — best-effort
-	listResp, err := conn.Call([]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
+	conn.Call(ctx, mcpNotifInitBody) //nolint — best-effort
+	listResp, err := conn.Call(ctx, []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
 	if err != nil {
 		result.Error = fmt.Sprintf("tools/list: %v", err)
 		result.LatencyMs = time.Since(start).Milliseconds()

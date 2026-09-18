@@ -244,6 +244,7 @@ routes:
 #   model_lockout: 10m # (default 10m) model-level failure (404 / model-denied / empty 200): lock (provider,model)
 #   retry_wait: 10s # (default 10s; "0" disables) all targets cooling down: wait ≤ this for the earliest expiry and retry (≤2×)
 #   upstream_timeout: 1800s # (default 1800s) per-upstream-request timeout
+#   stream_keepalive: 15s # (default 15s; "0" disables) SSE comment heartbeat into client streams after this much upstream silence
 #   sticky_dwell: 10m # (default 10m) min time on the chosen provider before re-evaluating
 #   quota_poll_interval: 5m # (default 5m) background quota poll cadence
 #   quota_switch_margin: 15 # (default 15) switch provider if another's effective remaining beats current by >= this many pct points
@@ -352,6 +353,8 @@ cache:
 #     provider: zhipu                  # ${account.api_key} resolves from this pool
 #     command: [npx, -y, "@z_ai/mcp-server"]
 #     env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU}
+#     # env values: ${account.api_key} (pool key), env:VAR (daemon env), or a
+#     # literal — literals on credential-shaped names (…_KEY/TOKEN/SECRET/…) are rejected
 #   ark-datapro:                       # custom auth header: the RAW key goes
 #     provider: volcengine             # under auth_header instead of Bearer
 #     url: https://datapro.hqd.cn-beijing.volces.com/mcp
@@ -387,7 +390,7 @@ mcp:
     transport: stdio
     provider: zhipu
     command: [npx, -y, "@z_ai/mcp-server"]
-    env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU}
+    env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU}   # literals OK for benign keys; credential-shaped names (…_KEY/TOKEN/…) still require indirection
 
 mcp_routes:
   web-search:

@@ -1426,6 +1426,12 @@ export function mergeLiveAndPersistedRow(live, persisted) {
     base.input = live.input || 0;
     base.output = live.output || 0;
   }
+  // Cache buckets merge per field with the same live-non-zero-wins rule: a
+  // persisted row truncated to zero tokens by max_body_bytes must still pick
+  // up the live end event's cache counts (and a live zero must never erase a
+  // real persisted count).
+  if (live.cacheRead) base.cacheRead = live.cacheRead;
+  if (live.cacheCreation) base.cacheCreation = live.cacheCreation;
   // Fill from persisted only when live still lacks the value.
   if (!base.agent && persisted.agent) base.agent = persisted.agent;
   if (!base.model && persisted.model) base.model = persisted.model;
@@ -1770,8 +1776,10 @@ export function securitySegmentsHTML(row) {
 // (suppressed noise; it still counts in Rule hits and the JSONL trail). The
 // LLM-usage stats render only when the adjudication channel is (or was)
 // active; a disabled channel shows one "off" tile instead of two permanent
-// zeros.
-export function securityKpisHTML(blocks, counts, stats, adjudicationOn) {
+// zeros. When the server reports countsError (the verdict aggregation query
+// failed while records loaded), the verdict tiles render '—' as unavailable
+// instead of misleading zeros.
+export function securityKpisHTML(blocks, counts, stats, adjudicationOn, countsError) {
   const bl = blocks || [];
   const c = counts || {};
   const num = (v) => Number(v) || 0;
@@ -1780,15 +1788,18 @@ export function securityKpisHTML(blocks, counts, stats, adjudicationOn) {
   const outTok = Number(st.output_tokens) || 0;
   const tile = (k, v, err, d) =>
     `<div class="kpi"><div class="k">${esc(k)}</div><div class="v${err ? ' err' : ''}">${v}</div>${d ? `<div class="d">${esc(d)}</div>` : ''}</div>`;
+  const verdictTile = (k, v, errOn, d) => countsError
+    ? tile(k, '—', false, countsError)
+    : tile(k, fmtNum(v), errOn, d);
   const llm = adjudicationOn || (Number(st.calls) || 0) > 0
     ? tile('llm calls', fmtNum(st.calls || 0), false, 'cache hits free') +
       tile('llm tokens', fmtCompact(inTok + outTok), false, `in ${fmtCompact(inTok)} · out ${fmtCompact(outTok)}`)
     : tile('llm adjudication', 'off', false, 'guard.adjudicate not configured');
   return `<div class="kpi-grid">` +
     tile('blocked sessions', fmtNum(bl.length), bl.length > 0) +
-    tile('high verdicts', fmtNum(num(c.high)), num(c.high) > 0) +
-    tile('medium verdicts', fmtNum(num(c.medium)), false, 'no session block') +
-    tile('errors', fmtNum(num(c.error) + num(c.skipped)), num(c.error) + num(c.skipped) > 0) +
+    verdictTile('high verdicts', num(c.high), num(c.high) > 0) +
+    verdictTile('medium verdicts', num(c.medium), false, 'no session block') +
+    verdictTile('errors', num(c.error) + num(c.skipped), num(c.error) + num(c.skipped) > 0) +
     llm +
     `</div>`;
 }
@@ -2344,18 +2355,30 @@ export function sessionTimeline(rows, opts) {
     prev = n;
   }
   const usable = W - padL - padR;
-  const plotW = Math.max(usable - (segs.length - 1) * BREAK_W, 50);
+  // The compressed-gap strip shrinks as the segment count grows: agentic
+  // sessions split one segment per turn (100+ is normal), and reserving the
+  // full BREAK_W per gap would push the tail past the viewBox's right edge
+  // and silently clip those bars while the title still counts them.
+  const gaps = segs.length - 1;
+  const minPlotW = Math.max(usable / 2, 50);
+  const breakW = gaps > 0 ? Math.min(BREAK_W, Math.max(0, (usable - minPlotW) / gaps)) : 0;
+  const plotW = Math.max(usable - gaps * breakW, 50);
   // sqrt weighting + a floor so single-request bursts keep a readable width;
   // the floor only applies while few segments exist (it must never overflow).
-  const floorW = segs.length <= 12 ? 24 : 0;
+  const floorW = segs.length <= 12 ? Math.min(24, plotW / segs.length) : 0;
   const weights = segs.map((s) => Math.sqrt(Math.max(s.t1 - s.t0, 1000)));
   const wsum = weights.reduce((a, b) => a + b, 0);
+  // The floor can lift small shares past their allotment; rescale so the
+  // segments always sum to plotW and the axis stays inside the viewBox.
+  const widths = segs.map((s, i) => Math.max((plotW * weights[i]) / wsum, floorW));
+  const wTotal = widths.reduce((a, b) => a + b, 0);
+  const fit = wTotal > plotW ? plotW / wTotal : 1;
   let cursor = padL;
   for (let i = 0; i < segs.length; i++) {
     const s = segs[i];
     s.x0 = cursor;
-    s.w = Math.max((plotW * weights[i]) / wsum, floorW);
-    cursor += s.w + BREAK_W;
+    s.w = widths[i] * fit;
+    cursor += s.w + breakW;
   }
   const x = (t) => {
     for (const s of segs) {
@@ -2441,7 +2464,7 @@ export function sessionTimeline(rows, opts) {
   const tickSvg = ticks.map((tk) => `<text class="tl-tick" x="${x(tk.t).toFixed(1)}" y="${H - 5}" text-anchor="${tk.anchor}">${esc(fmt(tk.t))}</text>`).join('');
   // One dashed divider per compressed gap, centered in its reserved strip.
   const breaks = segs.slice(1).map((s) => {
-    const bx = s.x0 - BREAK_W / 2;
+    const bx = s.x0 - breakW / 2;
     return `<line class="tl-break" x1="${bx.toFixed(1)}" y1="${topH}" x2="${bx.toFixed(1)}" y2="${H - axisH}"><title>idle gap compressed</title></line>`;
   }).join('');
 

@@ -322,6 +322,7 @@ mcp_routes:
 func TestMCPTestStdio(t *testing.T) {
 	clitest.SetPoolHome(t, t.TempDir())
 	clitest.WritePoolFile(t, "zhipu", "zhipu", "pool-key-1")
+	t.Setenv("MCP_STDIO_CHILD", "1") // env: values are indirection-only (literals rejected)
 	cfgPath := clitest.WriteTempConfig(t, `
 listen: 127.0.0.1:1
 providers:
@@ -332,7 +333,7 @@ mcp:
     provider: zhipu
     command: ["`+os.Args[0]+`", "-test.run=TestHelperProcess"]
     env:
-      MCP_STDIO_CHILD: "1"
+      MCP_STDIO_CHILD: env:MCP_STDIO_CHILD
       CHILD_KEY: ${account.api_key}
 `)
 	out := clitest.GrabStdout(t, func() {
