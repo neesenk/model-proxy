@@ -156,21 +156,21 @@ func (x scheduledExchange) exchange(ctx context.Context, snap forward.Snapshot, 
 		}
 		if rep.Status >= 500 {
 			x.p.recordFailure(t.Provider, snap.Cfg.Scheduling, snap.Generation)
-			lastErr = fmt.Errorf("adjudication call (%s): status %d: %s", t.Provider, rep.Status, truncateAdjudication(string(rep.Body), 200))
+			lastErr = fmt.Errorf("adjudication call (%s): status %d (body %d bytes)", t.Provider, rep.Status, len(rep.Body))
 			continue
 		}
 		if rep.Status == 404 || targetexec.IsModelDenied(rep.Status, rep.Body) {
 			// Model-level denial locks only this (provider, model) leg — the
 			// provider's other routes stay schedulable.
 			x.p.recordModelFailure(t.Provider, t.Model, snap.Cfg.Scheduling, snap.Generation)
-			lastErr = fmt.Errorf("adjudication call (%s): status %d: %s", t.Provider, rep.Status, truncateAdjudication(string(rep.Body), 200))
+			lastErr = fmt.Errorf("adjudication call (%s): status %d (body %d bytes)", t.Provider, rep.Status, len(rep.Body))
 			continue
 		}
 		if rep.Status >= 300 {
 			// Other 4xx: the request shape or auth was rejected — not a
 			// provider-health signal (the executor likewise commits unhandled
 			// 4xx without a health write).
-			lastErr = fmt.Errorf("adjudication call (%s): status %d: %s", t.Provider, rep.Status, truncateAdjudication(string(rep.Body), 200))
+			lastErr = fmt.Errorf("adjudication call (%s): status %d (body %d bytes)", t.Provider, rep.Status, len(rep.Body))
 			continue
 		}
 		if validate != nil {

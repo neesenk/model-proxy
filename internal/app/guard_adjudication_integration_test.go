@@ -31,7 +31,10 @@ type judgeUpstream struct {
 	prompts []string
 	verdict string // "high" | "low" | "" (model breaks → fail-open)
 	reason  string
-	srv     *httptest.Server
+	// raw, when non-empty, replaces the verdict JSON with this exact text
+	// (a 2xx non-JSON judge reply — the "no JSON verdict" error path).
+	raw string
+	srv *httptest.Server
 }
 
 func newJudgeUpstream(t *testing.T, verdict, reason string) *judgeUpstream {
@@ -43,6 +46,13 @@ func newJudgeUpstream(t *testing.T, verdict, reason string) *judgeUpstream {
 		j.prompts = append(j.prompts, string(b))
 		j.mu.Unlock()
 		w.Header().Set("content-type", "application/json")
+		if j.raw != "" {
+			reply, _ := json.Marshal(map[string]any{
+				"content": []map[string]string{{"type": "text", "text": j.raw}},
+			})
+			w.Write(reply)
+			return
+		}
 		if j.verdict == "" {
 			w.WriteHeader(http.StatusInternalServerError)
 			fmt.Fprint(w, `{"error":"model unavailable"}`)
@@ -303,6 +313,36 @@ func TestGuardAdjudication_JudgeErrorFailsOpen(t *testing.T) {
 	}
 	if _, ok := p.adjudication.Blocked("sess-err"); ok {
 		t.Error("judge error must not block the session")
+	}
+}
+
+// A 2xx judge reply without a verdict JSON fails the leg, and the error
+// detail that lands in the audit Reason must NOT carry the reply text: a
+// judge that QUOTES the payload (here: the hit truncated mid-key) defeats
+// scrub's full-substring mask, so reply/upstream body excerpts never enter
+// error details at all — length descriptors only.
+func TestGuardAdjudication_ErrorDetailNeverCarriesReplyText(t *testing.T) {
+	judge := newJudgeUpstream(t, "", "")
+	// Echo the dummy key CUT IN HALF: the full-hit scrub cannot match a
+	// partial quote, exactly the pre-fix leak vector.
+	judge.raw = "that payload contains " + adjudDummyKey[:len(adjudDummyKey)/2] + "… which looks secret"
+	_, proxyURL, _, home, _ := newAdjudicationProxy(t, judge, "off")
+
+	if resp := postWithSession(t, proxyURL, guardPoolRequestBody(adjudDummyKey), "sess-raw"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	waitForAdjudication(t, judge, 1)
+
+	records := waitForAuditVerdict(t, home, "error")
+	if len(records) == 0 {
+		t.Fatal("no-JSON-verdict path did not write an audit record")
+	}
+	for _, r := range records {
+		for _, leak := range []string{adjudDummyKey[:len(adjudDummyKey)/2], adjudDummyKey, "looks secret"} {
+			if strings.Contains(r.Reason, leak) {
+				t.Errorf("audit Reason carries judge reply text %q: %q", leak, r.Reason)
+			}
+		}
 	}
 }
 

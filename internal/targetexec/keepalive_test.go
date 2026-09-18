@@ -61,7 +61,7 @@ func TestFlushCopyHeartbeatEmitsHeartbeatDuringSilence(t *testing.T) {
 	timed := newTimingResponseWriter(recorder)
 	writer := &frameWriter{ResponseWriter: timed, frames: make(chan string, 32)}
 	end := make(chan streamEnd, 1)
-	go func() { end <- flushCopyHeartbeat(writer, pipeReader, 10*time.Millisecond) }()
+	go func() { end <- flushCopyHeartbeat(writer, pipeReader, pipeReader, 10*time.Millisecond) }()
 
 	if frame := waitFrame(t, writer.frames); frame != ": ping\n\n" {
 		t.Fatalf("silence produced %q, want a heartbeat frame", frame)
@@ -98,7 +98,7 @@ func TestFlushCopyHeartbeatEmitsHeartbeatDuringSilence(t *testing.T) {
 func TestFlushCopyHeartbeatCleanEOFWithoutData(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	body := io.NopCloser(strings.NewReader(""))
-	if got := flushCopyHeartbeat(recorder, body, time.Hour); got != streamEOF {
+	if got := flushCopyHeartbeat(recorder, body, body, time.Hour); got != streamEOF {
 		t.Fatalf("end = %v, want clean EOF", got)
 	}
 	if recorder.Body.Len() != 0 {
@@ -113,7 +113,7 @@ func TestFlushCopyHeartbeatResetsTickerOnData(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	writer := &frameWriter{ResponseWriter: recorder, frames: make(chan string, 32)}
 	end := make(chan streamEnd, 1)
-	go func() { end <- flushCopyHeartbeat(writer, pipeReader, 10*time.Millisecond) }()
+	go func() { end <- flushCopyHeartbeat(writer, pipeReader, pipeReader, 10*time.Millisecond) }()
 
 	if frame := waitFrame(t, writer.frames); frame != ": ping\n\n" {
 		t.Fatalf("initial silence produced %q, want a heartbeat", frame)
@@ -152,7 +152,7 @@ func TestFlushCopyHeartbeatDefersToLineBoundary(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	writer := &frameWriter{ResponseWriter: recorder, frames: make(chan string, 32)}
 	end := make(chan streamEnd, 1)
-	go func() { end <- flushCopyHeartbeat(writer, pipeReader, 10*time.Millisecond) }()
+	go func() { end <- flushCopyHeartbeat(writer, pipeReader, pipeReader, 10*time.Millisecond) }()
 
 	partial := "data: {\"cho"
 	if _, err := pipeWriter.Write([]byte(partial)); err != nil {
@@ -201,23 +201,28 @@ func TestFlushCopyHeartbeatDefersToLineBoundary(t *testing.T) {
 	}
 }
 
-// A heartbeat write failure (client gone) must release the parked reader
-// goroutine once the caller closes the body, exactly like flushCopy's
-// client-gone path.
+// A heartbeat write failure (client gone) must unplug and drain the parked
+// reader goroutine BEFORE flushCopyHeartbeat returns: the caller's post-copy
+// tail then runs strictly after the recording chain went idle.
 func TestFlushCopyHeartbeatWriteFailureReleasesReader(t *testing.T) {
 	pipeReader, pipeWriter := io.Pipe()
 	defer pipeWriter.Close()
 	body := &readWatchBody{ReadCloser: pipeReader, returned: make(chan struct{}, 1)}
 	end := make(chan streamEnd, 1)
-	go func() { end <- flushCopyHeartbeat(failingResponseWriter{}, body, 10*time.Millisecond) }()
+	go func() { end <- flushCopyHeartbeat(failingResponseWriter{}, body, pipeReader, 10*time.Millisecond) }()
 	if got := <-end; got != streamClientGone {
 		t.Fatalf("end = %v, want client gone", got)
 	}
-	body.Close()
+	// Regression: the caller's post-copy tail (body.Close, counter reads,
+	// usage commit) must never race a Read unwinding through the recording
+	// wrappers. flushCopyHeartbeat unplugs the parked Read itself (raw
+	// source close) and drains the reader BEFORE returning — the unwind
+	// signal must therefore already be observable here, without the caller
+	// having to close the body first.
 	select {
 	case <-body.returned:
 	case <-time.After(5 * time.Second):
-		t.Fatal("reader goroutine still parked after body close")
+		t.Fatal("reader goroutine still parked after flushCopyHeartbeat returned")
 	}
 }
 

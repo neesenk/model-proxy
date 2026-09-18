@@ -199,6 +199,7 @@ async function establishAdminSessionIfRequired() {
         });
         await apiParse(response);
         form.removeEventListener('submit', authenticate);
+        dialog.removeEventListener('cancel', dismissed);
         dialog.close();
         resolve();
       } catch (e) {
@@ -210,7 +211,18 @@ async function establishAdminSessionIfRequired() {
         submit.disabled = false;
       }
     };
+    // Esc (and any browser cancel gesture) closes a <dialog> via the cancel
+    // event; without this handler the await below would never settle and
+    // boot() would hang forever on a blank page (#login-modal handles the
+    // same gesture). Resolving lets boot continue: later API calls 401 and
+    // render their normal error states until the page is reloaded.
+    const dismissed = () => {
+      form.removeEventListener('submit', authenticate);
+      dialog.removeEventListener('cancel', dismissed);
+      resolve();
+    };
     form.addEventListener('submit', authenticate);
+    dialog.addEventListener('cancel', dismissed);
   });
 }
 

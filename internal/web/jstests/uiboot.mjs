@@ -42,7 +42,11 @@ async function waitFor(desc, fn, timeoutMs = 30000) {
   throw new Error(`timeout waiting for ${desc}${lastErr ? ` (last error: ${lastErr.message})` : ''}`);
 }
 
-export async function bootUiE2E() {
+// bootUiE2E boots the sandboxed proxy + browser. opts.adminToken, when set,
+// additionally enables web.auth (admin_token_file) so auth-gated UI paths
+// (e.g. the admin-auth modal) are exercisable; the token is returned on
+// ctx.adminToken.
+export async function bootUiE2E(opts = {}) {
   const ctx = { skipReason: null, waitFor, shutdown: async () => {} };
   // 耗时的浏览器 e2e 是按需门禁，不进每次修改的默认矩阵：MP_UI_E2E=1 才启动
   // 浏览器与代理；此时无浏览器 → Skip，MP_REQUIRE_UI_E2E=1 → FAIL。
@@ -96,6 +100,16 @@ export async function bootUiE2E() {
   const build = spawnSync('go', ['build', '-o', proxyBin, '.'], { cwd: REPO, encoding: 'utf8' });
   assert.equal(build.status, 0, `go build failed:\n${build.stderr}`);
 
+  let authBlock = '';
+  if (opts.adminToken) {
+    const tokFile = path.join(ctx.sandbox, 'admin_token');
+    writeFileSync(tokFile, `${opts.adminToken}\n`, { mode: 0o600 });
+    authBlock = `web:
+  auth:
+    admin_token_file: ${tokFile}
+`;
+    ctx.adminToken = opts.adminToken;
+  }
   writeFileSync(path.join(ctx.sandbox, 'config.yaml'), `listen: 127.0.0.1:${ctx.port}
 providers:
   dummy:
@@ -104,7 +118,7 @@ providers:
     models: [m1]
 request_log:
   enabled: true
-`, { mode: 0o600 });
+${authBlock}`, { mode: 0o600 });
 
   // Static providers fail closed without a pool account (the request would die
   // before the capture layer and never reach the request log). Write a real

@@ -189,7 +189,12 @@ func (c adjudicationCaller) Adjudicate(ctx context.Context, model string, j adju
 		}
 		m := adjudicationVerdictJSON.FindString(text)
 		if m == "" {
-			return fmt.Errorf("no JSON verdict: %s", truncateAdjudication(text, 120))
+			// Length only, never the reply text: this error is scrubbed
+			// against the hit's FULL bytes before persistence, but a judge
+			// reply that quotes the payload truncated or transformed would
+			// slip a full-substring mask — body excerpts never enter error
+			// details at all.
+			return fmt.Errorf("no JSON verdict in model reply (%d bytes)", len(text))
 		}
 		var r adjudicationReply
 		if err := json.Unmarshal([]byte(m), &r); err != nil {
@@ -236,13 +241,6 @@ func extractAnthropicText(body []byte) string {
 		}
 	}
 	return b.String()
-}
-
-func truncateAdjudication(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }
 
 // extractAnthropicUsage reads the usage block of a non-streaming

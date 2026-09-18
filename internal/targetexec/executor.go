@@ -486,7 +486,10 @@ func (executor Executor) commit(
 	// frame (it would corrupt a JSON body).
 	var end streamEnd
 	if heartbeat {
-		end = flushCopyHeartbeat(exchange.Writer, counting, keepalive)
+		// response.Body is the raw source at the bottom of body's wrapper
+		// chain — flushCopyHeartbeat closes it to unplug a parked helper Read
+		// when the client goes away (see the transport comment).
+		end = flushCopyHeartbeat(exchange.Writer, counting, response.Body, keepalive)
 	} else {
 		end = flushCopy(exchange.Writer, counting)
 	}

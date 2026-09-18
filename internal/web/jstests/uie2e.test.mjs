@@ -574,3 +574,30 @@ test('takeover 页 mode 下拉驱动服务端变体预览 (表单族)', async (t
   })()`), false, 'claude (single-variant family) must stay unmarked');
   assert.deepEqual(await ctx.pageErrors(), [], 'mode preview must not raise JS errors');
 });
+
+// admin-auth modal: dismissing it with Esc must resolve the boot promise —
+// pre-fix, the promise only settled on a successful submit, so Esc left the
+// whole UI hung on a blank page (no tab ever activated). Boots its own
+// auth-enabled proxy instance (the shared ctx has no web.auth).
+test('Esc on the admin-auth modal keeps boot alive', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  const auth = await bootUiE2E({ adminToken: 'e2e-admin-token' });
+  if (auth.skipReason) { t.skip(auth.skipReason); return; }
+  try {
+    await auth.waitFor('admin-auth modal open', () => auth.ev(
+      'document.getElementById("admin-auth-modal").open === true'));
+    // Real Escape key press: the browser fires cancel + closes the dialog.
+    await auth.cdp.send('Input.dispatchKeyEvent', {
+      type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27,
+    }, auth.tab);
+    await auth.waitFor('modal dismissed', () => auth.ev(
+      'document.getElementById("admin-auth-modal").open === false'));
+    // Boot continued past the auth gate: the default tab activated (with the
+    // pre-fix hang, activateTabSilent never ran and no tab had .active).
+    await auth.waitFor('a tab activated after dismiss', () => auth.ev(
+      'document.querySelector("[data-tab].active") !== null'));
+    assert.deepEqual(await auth.pageErrors(), [], 'dismiss flow must not raise JS errors');
+  } finally {
+    await auth.shutdown();
+  }
+});
