@@ -97,7 +97,7 @@ provider 级 wire verdict 由 `probeAllWireCaps` 在 boot/reload 时异步探测
 
 provider 级 yes 结论永久信任（错误 yes 由上述运行时路径纠正）；**provider 级 no 结论有 24h TTL**（`wireCapNegativeTTL`），到期后下一次 boot/reload 探测 pass 重探——一次性错误 no（上游发布中临时 404 等）不会永久降级该 provider。模型级矩阵**无 TTL**：失效只由 config fingerprint（`providerbuild.ProtocolConfigFingerprint`）触发，fingerprint 匹配即复用结论（持久化格式与恢复门控见 `runtime-state.md`）。fingerprint 不覆盖 models 列表，因此每次探测 pass 还会把当前 config（models: ∪ 路由 target）不再服务的 model 条目从 store 剔除（`ModelStore.PruneModels`）——从 config 删掉的 model 不会留在矩阵和 /api/models 里。
 
-**判定的不对称兜底**：provider 级 `classifyWireStatus` 把 404 以外的全部 4xx（含 401/403/405/429）一律判 yes，而运行时纠正只认 404。对 `/responses` 需要不同鉴权、或对未实现路径返 405 的网关会产生 wrong-yes 且不会被自动翻转——此时只能显式声明 `protocol:` 兜底，绕过 verdict。模型级的 400 措辞嗅探与 401/403/429→unknown 是有意的口径差异，见 `docs/decisions/intentional-behaviors.md`。
+**判定的不对称兜底**：provider 级 `runtime/wirecap.ClassifyProviderStatus` 把 404 以外的全部 4xx（含 401/403/405/429）一律判 yes，而运行时纠正只认 404。对 `/responses` 需要不同鉴权、或对未实现路径返 405 的网关会产生 wrong-yes 且不会被自动翻转——此时只能显式声明 `protocol:` 兜底，绕过 verdict。模型级的 400 措辞嗅探与 401/403/429→unknown 是有意的口径差异，见 `docs/decisions/intentional-behaviors.md`。
 
 运行态健康、模型锁和调度状态统一位于 `internal/runtime.Manager`。Manager 以
 单锁和 generation gate 保证健康 mutation、availability 过滤、schedule、

@@ -81,18 +81,9 @@ func wireLegFresh(v triState, probedAt time.Time) bool {
 // shrink it for the timeout branch.
 var wireCapProbeTimeout = 10 * time.Second
 
-// classifyWireStatus maps a probe outcome to a verdict. 404 → no (the proxy
-// only probes known LLM paths, so a 404 means the route doesn't exist).
-// 2xx/400/401/403/429 → yes: the endpoint exists (a 400 is a shape dispute,
-// not a missing route; auth/quota answers prove the route exists). Timeouts,
-// connection errors and 5xx → unknown: no negative conclusion is cached, so
-// the next boot re-probes.
-func classifyWireStatus(status int, err error) triState {
-	return runtimewire.ClassifyStatus(status, err)
-}
-
-// classifyProviderWireStatus is classifyWireStatus with the agent-grade 400
-// rule: provider legs are probed with a function tool attached, and a 400
+// classifyProviderWireStatus maps a probe outcome to a verdict with the
+// agent-grade 400 rule: provider legs are probed with a function tool
+// attached, and a 400
 // carrying a model/tool rejection wording ("Function tools ... are not
 // supported for <model> in <path>") means the leg is not callable for
 // agentic traffic — No, not the generic "shape dispute proves the route"
@@ -247,14 +238,6 @@ func (p *Proxy) startWireCapProbe() {
 		p.probeAllWireCaps()
 		p.probeAllModelCaps()
 	})
-}
-
-// resolveByWire is the pure wire-verdict decision matrix, applied when neither
-// an explicit protocol: nor a ProtocolHint decided. Returns the backend
-// protocol and whether the choice was a VERDICT-DRIVEN switch to responses
-// (the only case the runtime 404 correction rewinds).
-func resolveByWire(clientProto string, hasAnthropicBase bool, caps wireCaps, ok bool) (proto string, viaResponsesVerdict bool) {
-	return runtimewire.Resolve(clientProto, hasAnthropicBase, caps, ok)
 }
 
 // resolvedBackendProto determines the backend protocol for a route target (or

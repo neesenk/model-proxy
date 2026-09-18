@@ -11,6 +11,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -320,7 +321,7 @@ func (p *Proxy) mcpRouteEnsureSub(snap RuntimeSnapshot, srv configdomain.MCPServ
 	if srv.MCPAuthMode() == "provider" {
 		accounts := mcpAccounts(snap, srv)
 		if len(accounts) == 0 {
-			return mcpkg.SubSession{}, fmt.Errorf("provider %q has no logged-in account — run `model-proxy login %s`", srv.Provider, srv.Provider)
+			return mcpkg.SubSession{}, errors.New(mcpNoAccountErr(srv))
 		}
 		account = accounts[int(p.mcpRR.Add(1))%len(accounts)]
 	}

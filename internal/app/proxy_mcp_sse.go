@@ -20,13 +20,11 @@ import (
 func (p *Proxy) serveMCPLegacySSE(w http.ResponseWriter, r *http.Request, name string, srv configdomain.MCPServer, snap RuntimeSnapshot, started time.Time, requestID string) {
 	account := ""
 	if srv.MCPAuthMode() == "provider" {
-		accounts := mcpAccounts(snap, srv)
-		if len(accounts) == 0 {
-			http.Error(w, fmt.Sprintf("mcp %q: provider %q has no logged-in account — run `model-proxy login %s`", name, srv.Provider, srv.Provider), http.StatusServiceUnavailable)
+		var ok bool
+		account, ok = p.mcpAccountGate(w, snap, name, srv)
+		if !ok {
 			return
 		}
-		account = accounts[int(p.mcpRR.Add(1))%len(accounts)]
-		mcpSetLiveProvider(w, account)
 	}
 	resp, capBytes, err := p.mcpDo(r.Context(), snap, srv, account, mcpCallOpts{
 		method:        http.MethodGet,

@@ -240,13 +240,11 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 	if frame.Method == "initialize" {
 		account := ""
 		if srv.MCPAuthMode() == "provider" {
-			accounts := mcpAccounts(snap, srv)
-			if len(accounts) == 0 {
-				http.Error(w, fmt.Sprintf("mcp %q: provider %q has no logged-in account — run `model-proxy login %s`", name, srv.Provider, srv.Provider), http.StatusServiceUnavailable)
+			var ok bool
+			account, ok = p.mcpAccountGate(w, snap, name, srv)
+			if !ok {
 				return
 			}
-			account = accounts[int(p.mcpRR.Add(1))%len(accounts)]
-			mcpSetLiveProvider(w, account)
 		}
 		conn, err := p.mcpStdioStart(snap, srv, account)
 		if err != nil {
