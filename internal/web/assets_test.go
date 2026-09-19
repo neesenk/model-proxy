@@ -817,8 +817,8 @@ func TestWebAssetsTakeoverTabContract(t *testing.T) {
 		`apiPost('/api/takeover/preview', Object.assign({ managed_only: true }, req))`, // dry-run preview (same req)
 		`apiPost('/api/takeover/preview', body || { client: name, mode: 'unified', managed_only: true });`, // editor preview (disk template, or template_body draft)
 		`apiPost('/api/takeover/restore', { client })`,                                                     // restore surface
-		`/api/takeover/templates/`,                                                                         // template editor surface
-		`retainTab(panel, '.tk-host', loadTakeover)`,                                                       // re-entry guard marker
+		`/api/takeover/templates/`,                   // template editor surface
+		`retainTab(panel, '.tk-host', loadTakeover)`, // re-entry guard marker
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js missing %q", want)
