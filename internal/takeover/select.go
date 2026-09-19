@@ -150,8 +150,27 @@ func splitAssignment(family string, variants []*Template, cov *ProtocolCoverage)
 	return out
 }
 
-// splitNote summarizes the partition for the log, one segment per variant.
-func splitNote(family string, assignment map[string]map[string]bool) string {
+// protocolDisplayName names a wire protocol the way users think about it;
+// unknown protocols fall back to the raw id.
+func protocolDisplayName(proto string) string {
+	switch proto {
+	case "anthropic":
+		return "Anthropic"
+	case "openai":
+		return "Chat Completion"
+	case "responses":
+		return "Responses"
+	}
+	return proto
+}
+
+// splitNote summarizes the partition as counts per protocol — the model
+// lists themselves are visible in the rendered preview below the note.
+func splitNote(variants []*Template, assignment map[string]map[string]bool) string {
+	proto := map[string]string{}
+	for _, v := range variants {
+		proto[v.Name] = v.Protocol
+	}
 	names := make([]string, 0, len(assignment))
 	for name := range assignment {
 		names = append(names, name)
@@ -159,14 +178,13 @@ func splitNote(family string, assignment map[string]map[string]bool) string {
 	sort.Strings(names)
 	parts := make([]string, 0, len(names))
 	for _, name := range names {
-		models := make([]string, 0, len(assignment[name]))
-		for m := range assignment[name] {
-			models = append(models, m)
+		label := protocolDisplayName(proto[name])
+		if label == "" {
+			label = name
 		}
-		sort.Strings(models)
-		parts = append(parts, fmt.Sprintf("%s: [%s]", name, strings.Join(models, ", ")))
+		parts = append(parts, fmt.Sprintf("%d %s", len(assignment[name]), label))
 	}
-	return fmt.Sprintf("client %s: split by native protocol — %s", family, strings.Join(parts, "; "))
+	return strings.Join(parts, " · ") + " — all native passthrough"
 }
 
 // selectVariant picks one template from a family: the variant whose declared
@@ -186,20 +204,21 @@ func selectVariant(family string, variants []*Template, cov *ProtocolCoverage) *
 	return best
 }
 
-// selectionNote explains an auto-selection in one log line: why this variant,
-// and which exposed models will still ride the converter.
+// selectionNote explains an auto-selection in one line: the protocol, the
+// native-coverage count, and only the EXCEPTIONS (converting / unknown
+// models) — the full model list is already visible in the picker/preview.
 func selectionNote(family string, picked *Template, cov *ProtocolCoverage) string {
 	if cov.Total == 0 {
 		return fmt.Sprintf("client %s: using %s (no routes configured — default variant)", family, picked.Name)
 	}
 	score := cov.Counts[picked.Protocol]
-	note := fmt.Sprintf("client %s: using %s — protocol %s natively covers %d/%d exposed models",
-		family, picked.Name, picked.Protocol, score, cov.Total)
+	note := fmt.Sprintf("using %s protocol — %d/%d models native passthrough",
+		picked.Protocol, score, cov.Total)
 	if conv := cov.converts(picked.Protocol); len(conv) > 0 {
-		note += fmt.Sprintf("; conversion needed for: %s", strings.Join(conv, ", "))
+		note += fmt.Sprintf("; protocol conversion: %s", strings.Join(conv, ", "))
 	}
 	if len(cov.Unknown) > 0 {
-		note += fmt.Sprintf("; native protocol unknown for: %s", strings.Join(cov.Unknown, ", "))
+		note += fmt.Sprintf("; protocol unknown: %s", strings.Join(cov.Unknown, ", "))
 	}
 	return note
 }
@@ -289,7 +308,7 @@ func ResolveClientsMode(cfg *configdomain.Config, which, templatesDir string, mo
 					if mode.IsProtocol() && t.Protocol != "" && t.Protocol != string(mode) {
 						return nil, fmt.Errorf("template %s speaks protocol %q, not %q — drop --mode or name the %s variant", t.Name, t.Protocol, mode, mode)
 					}
-					return []ClientSpec{{Name: t.Name, File: t.File, Template: t, Rewrite: t.Rewrite}}, nil
+					return []ClientSpec{{Name: t.Name, File: t.File, Template: t, Rewrite: t.Rewrite, RewriteOpts: t.RewriteOpts}}, nil
 				}
 			}
 			if _, ok := byFamily[which]; !ok {
@@ -313,9 +332,9 @@ func ResolveClientsMode(cfg *configdomain.Config, which, templatesDir string, mo
 			note := ""
 			switch {
 			case picked != nil:
-				note = fmt.Sprintf("client %s: using %s — protocol %s pinned by --mode", family, picked.Name, mode)
+				note = fmt.Sprintf("client %s: using %s (%s protocol) — pinned by --mode", family, picked.Name, mode)
 				if conv := cov.converts(string(mode)); len(conv) > 0 {
-					note += fmt.Sprintf("; conversion needed for: %s", strings.Join(conv, ", "))
+					note += fmt.Sprintf("; protocol conversion: %s", strings.Join(conv, ", "))
 				}
 			case len(variants) > 1:
 				picked = selectVariant(family, variants, cov)
@@ -324,17 +343,18 @@ func ResolveClientsMode(cfg *configdomain.Config, which, templatesDir string, mo
 				picked = variants[0]
 			}
 			out = append(out, ClientSpec{
-				Name:     picked.Name,
-				File:     picked.File,
-				Template: picked,
-				Rewrite:  picked.Rewrite,
-				Note:     note,
+				Name:        picked.Name,
+				File:        picked.File,
+				Template:    picked,
+				Rewrite:     picked.Rewrite,
+				RewriteOpts: picked.RewriteOpts,
+				Note:        note,
 			})
 			continue
 		}
 		if len(variants) > 1 && mode == ModeSplit && cov.Total > 0 {
 			assignment := splitAssignment(family, variants, cov)
-			note := splitNote(family, assignment)
+			note := splitNote(variants, assignment)
 			noted := false
 			for _, v := range variants {
 				models := assignment[v.Name]
@@ -348,6 +368,24 @@ func ResolveClientsMode(cfg *configdomain.Config, which, templatesDir string, mo
 					Template: v,
 					Rewrite: func(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) error {
 						return v.RewriteFiltered(cfg, meta, routes, models)
+					},
+					RewriteOpts: func(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget, opts TakeoverOptions) error {
+						// The split assignment and the user's model subset
+						// intersect: only models in both ride this variant.
+						filtered := models
+						if len(opts.Models) > 0 {
+							want := map[string]bool{}
+							for _, m := range opts.Models {
+								want[m] = true
+							}
+							filtered = map[string]bool{}
+							for m := range models {
+								if want[m] {
+									filtered[m] = true
+								}
+							}
+						}
+						return v.RewriteOptsFiltered(cfg, meta, routes, filtered, opts)
 					},
 				}
 				if !noted {
@@ -365,11 +403,12 @@ func ResolveClientsMode(cfg *configdomain.Config, which, templatesDir string, mo
 			note = selectionNote(family, picked, cov)
 		}
 		out = append(out, ClientSpec{
-			Name:     picked.Name,
-			File:     picked.File,
-			Template: picked,
-			Rewrite:  picked.Rewrite,
-			Note:     note,
+			Name:        picked.Name,
+			File:        picked.File,
+			Template:    picked,
+			Rewrite:     picked.Rewrite,
+			RewriteOpts: picked.RewriteOpts,
+			Note:        note,
 		})
 	}
 	return out, nil

@@ -105,11 +105,15 @@ func (fakeCommands) BeginLogin(context.Context, string) (LoginStart, error) {
 	return LoginStart{}, nil
 }
 
-func (fakeReads) Presets() []presets.Preset       { return nil }
-func (fakeReads) MCPSurface() MCPSurface          { return MCPSurface{} }
-func (fakeReads) SecurityBlocks() []SecurityBlock { return nil }
+func (fakeReads) Presets() []presets.Preset          { return nil }
+func (fakeReads) MCPSurface() MCPSurface             { return MCPSurface{} }
+func (fakeReads) SecurityBlocks() []SecurityBlock    { return nil }
 func (fakeReads) TakeoverSurface(string) (TakeoverSurface, error) {
 	return TakeoverSurface{}, nil
+}
+
+func (fakeReads) PreviewTakeover(TakeoverRunRequest, bool) (TakeoverPreview, error) {
+	return TakeoverPreview{Writes: []TakeoverPreviewWrite{}}, nil
 }
 func (fakeReads) TakeoverTemplate(string) (TakeoverTemplateDoc, error) {
 	return TakeoverTemplateDoc{}, nil
@@ -117,7 +121,7 @@ func (fakeReads) TakeoverTemplate(string) (TakeoverTemplateDoc, error) {
 func (fakeReads) SecurityAdjudications() SecurityAdjudicationFeed {
 	return SecurityAdjudicationFeed{Adjudications: []SecurityAdjudication{}}
 }
-func (fakeCommands) SecurityUnblock(string) error { return nil }
+func (fakeCommands) SecurityUnblock(string) error  { return nil }
 
 func (fakeCommands) AddPreset(string) ([]string, string, error) { return nil, "", nil }
 func (fakeCommands) RefreshModels(context.Context, string) (ModelsRefreshResult, error) {
@@ -127,7 +131,7 @@ func (fakeCommands) RefreshModels(context.Context, string) (ModelsRefreshResult,
 func (fakeCommands) ProbeMCP(context.Context, string) (MCPProbeResult, error) {
 	return MCPProbeResult{}, nil
 }
-func (fakeCommands) RunTakeover(string, string) (TakeoverRunResult, error) {
+func (fakeCommands) RunTakeover(TakeoverRunRequest) (TakeoverRunResult, error) {
 	return TakeoverRunResult{}, nil
 }
 func (fakeCommands) RestoreTakeover(string) (TakeoverRestoreResult, error) {

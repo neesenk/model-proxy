@@ -3,7 +3,10 @@ file: ~/.codex/config.toml
 format: toml
 client: codex
 protocol: responses
-base_url: bare
+base_url: v1
+models:
+  shape: codex
+  catalog_file: ~/.codex/model-proxy-models.json
 toml:
   top_keys:
     model_provider: '"{{provider_id}}"'

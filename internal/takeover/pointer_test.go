@@ -16,12 +16,12 @@ import (
 func TestPointerCodex(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "config.toml")
-	cfg := baseCfg() // Listen 127.0.0.1:15721 → expected bare proxy URL
+	cfg := baseCfg() // Listen 127.0.0.1:15721 → expected versioned /v1 proxy URL
 	good := `model_provider = "model-proxy"
 
 [model_providers."model-proxy"]
 name = "model-proxy"
-base_url = "http://127.0.0.1:15721"
+base_url = "http://127.0.0.1:15721/v1"
 wire_api = "responses"
 `
 	if err := os.WriteFile(file, []byte(good), 0o600); err != nil {
@@ -40,9 +40,9 @@ wire_api = "responses"
 	}
 
 	// Section intact but base_url stale (listen port changed).
-	stale := strings.Replace(good, `base_url = "http://127.0.0.1:15721"`, `base_url = "http://127.0.0.1:9999"`, 1)
+	stale := strings.Replace(good, `base_url = "http://127.0.0.1:15721/v1"`, `base_url = "http://127.0.0.1:9999/v1"`, 1)
 	os.WriteFile(file, []byte(stale), 0o600)
-	if cur, exp := tpl.Pointer(cfg); cur != "http://127.0.0.1:9999" || exp != "http://127.0.0.1:15721" {
+	if cur, exp := tpl.Pointer(cfg); cur != "http://127.0.0.1:9999/v1" || exp != "http://127.0.0.1:15721/v1" {
 		t.Errorf("stale base_url: current=%q expected=%q", cur, exp)
 	}
 

@@ -57,7 +57,7 @@ func (testReadAPI) Security(appapi.SecurityQuery) (appapi.SecurityResult, error)
 func (testReadAPI) SecurityExplain(string, string, []string) (appapi.SecurityExplainResult, error) {
 	return appapi.SecurityExplainResult{}, nil
 }
-func (testReadAPI) SecurityBlocks() []appapi.SecurityBlock { return nil }
+func (testReadAPI) SecurityBlocks() []appapi.SecurityBlock    { return nil }
 func (testReadAPI) SecurityAdjudications() appapi.SecurityAdjudicationFeed {
 	return appapi.SecurityAdjudicationFeed{Adjudications: []appapi.SecurityAdjudication{}}
 }
@@ -70,6 +70,10 @@ func (testReadAPI) ModelsDocument() appapi.ModelsDocument { return appapi.Models
 // doubles only need to satisfy the widened appapi interfaces.
 func (testReadAPI) TakeoverSurface(string) (appapi.TakeoverSurface, error) {
 	return appapi.TakeoverSurface{}, nil
+}
+
+func (testReadAPI) PreviewTakeover(appapi.TakeoverRunRequest, bool) (appapi.TakeoverPreview, error) {
+	return appapi.TakeoverPreview{}, nil
 }
 func (testReadAPI) TakeoverTemplate(string) (appapi.TakeoverTemplateDoc, error) {
 	return appapi.TakeoverTemplateDoc{}, nil
@@ -86,9 +90,9 @@ func (testCommandAPI) FreezeHealth(string) ([]string, error)     { return nil, n
 func (testCommandAPI) SetPin(string, string, time.Duration) (appapi.Pin, bool) {
 	return appapi.Pin{}, true
 }
-func (testCommandAPI) ClearPin(string) bool         { return true }
-func (testCommandAPI) SecurityUnblock(string) error { return nil }
-func (testCommandAPI) SaveConfig([]byte) error      { return nil }
+func (testCommandAPI) ClearPin(string) bool          { return true }
+func (testCommandAPI) SecurityUnblock(string) error  { return nil }
+func (testCommandAPI) SaveConfig([]byte) error       { return nil }
 func (testCommandAPI) ValidateConfig([]byte) []appapi.ValidationIssue {
 	return nil
 }
@@ -110,7 +114,7 @@ func (api testCommandAPI) BeginLogin(ctx context.Context, name string) (appapi.L
 }
 
 // Takeover stubs: see testReadAPI above.
-func (testCommandAPI) RunTakeover(string, string) (appapi.TakeoverRunResult, error) {
+func (testCommandAPI) RunTakeover(appapi.TakeoverRunRequest) (appapi.TakeoverRunResult, error) {
 	return appapi.TakeoverRunResult{}, nil
 }
 func (testCommandAPI) RestoreTakeover(string) (appapi.TakeoverRestoreResult, error) {

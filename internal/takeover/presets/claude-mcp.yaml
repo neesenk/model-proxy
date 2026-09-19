@@ -1,9 +1,0 @@
-description: claude — 用户级 MCP 服务器表（~/.claude.json mcpServers，指向本代理 /mcp/<name>）
-file: ~/.claude.json
-format: json
-client: claude-mcp
-mcp:
-  json_path: mcpServers
-  json_entry:
-    type: http
-    url: "{{mcp.url}}"

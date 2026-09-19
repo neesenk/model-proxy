@@ -2,20 +2,39 @@ package takeover_test
 
 import (
 	"encoding/json"
-	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/takeover"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"model-proxy/internal/catalog"
+	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/takeover"
 )
 
 // takeover_test.go covers the takeover client templates (presets rendered by
 // the engine: json/toml/env formats + model shapes) and the TOML text helpers.
 // These are pure file/string operations against the takeover target files —
 // fully testable with temp dirs.
+
+// TestMain isolates HOME for the WHOLE package: preset templates carry
+// user-home-relative auxiliary paths (codex's ~/.codex/model-proxy-models.json
+// catalog, claude's ~/.claude.json MCP storage) that a test driving a preset
+// rewrites even when the main config file is redirected to a temp path.
+// Without this, `go test` silently clobbers the developer's real client
+// configs (pitfalls.md 26b family).
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "takeover-test-home-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "test home:", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(home)
+	os.Setenv("HOME", home)
+	code := m.Run()
+	os.Exit(code)
+}
 
 func baseCfg() *configdomain.Config {
 	return &configdomain.Config{
@@ -41,6 +60,15 @@ func presetFor(t *testing.T, name, file string) *takeover.Template {
 	}
 	tpl.File = file
 	return tpl
+}
+
+func mustReadTOML(t *testing.T, file string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // --- claude template: sets ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN ---
@@ -126,6 +154,37 @@ func TestTemplateOpencode(t *testing.T) {
 	}
 }
 
+// TestTemplateOpencode_ReasoningAndToolCallFlags: opencode's model schema
+// carries reasoning/tool_call booleans; without them opencode treats
+// reasoning models as plain chat models. Metadata drives the flags; models
+// without metadata get neither (opencode defaults both false).
+func TestTemplateOpencode_ReasoningAndToolCallFlags(t *testing.T) {
+	dir := t.TempDir()
+	cfg := baseCfg()
+	file := filepath.Join(dir, "opencode.json")
+	os.WriteFile(file, []byte(`{}`), 0o644)
+	meta := map[string]map[string]catalog.Model{
+		"aqp": {"glm-5.2": {Reasoning: true, ToolCall: true,
+			Modalities: catalog.Modalities{Input: []string{"text", "image"}, Output: []string{"text"}}}},
+	}
+	if err := presetFor(t, "opencode", file).Rewrite(cfg, meta, cfg.Routes); err != nil {
+		t.Fatal(err)
+	}
+	var v map[string]any
+	b, _ := os.ReadFile(file)
+	json.Unmarshal(b, &v)
+	p, _ := v["provider"].(map[string]any)["model-proxy"].(map[string]any)
+	m, _ := p["models"].(map[string]any)["glm-5.2"].(map[string]any)
+	if m["reasoning"] != true || m["tool_call"] != true {
+		t.Errorf("reasoning/tool_call flags not written from metadata: %v", m)
+	}
+	mods, _ := m["modalities"].(map[string]any)
+	in, _ := mods["input"].([]any)
+	if len(in) != 2 || in[1] != "image" {
+		t.Errorf("input modalities = %v, want [text image]", in)
+	}
+}
+
 // --- pi template: writes provider with bare baseURL (no /v1) + anthropic-messages api ---
 
 func TestTemplatePi(t *testing.T) {
@@ -180,6 +239,12 @@ name = "old"
 	}
 	if !strings.Contains(text, `[model_providers."model-proxy"]`) {
 		t.Errorf("codex config missing [model_providers.\"model-proxy\"] section:\n%s", text)
+	}
+	// codex appends /responses to the provider base_url (wire_api=responses),
+	// so it MUST carry /v1 — a bare proxy URL makes codex request /responses,
+	// which the gateway does not route (502 no route for path /responses).
+	if !strings.Contains(text, `base_url = "http://127.0.0.1:15721/v1"`) {
+		t.Errorf("codex base_url must be the versioned endpoint (codex appends /responses):\n%s", text)
 	}
 	// Note: the codex template does NOT remove a pre-existing provider section
 	// under a different id; it only injects/replaces its own. The top-level
@@ -601,5 +666,368 @@ api_key = "OLD"
 	}
 	if strings.Count(string(b), `[providers."model-proxy"]`) != 1 {
 		t.Errorf("stale block not replaced in place:\n%s", b)
+	}
+}
+
+// TestTemplateKimi_CapabilitiesFromMetadata: models.dev metadata drives
+// kimi-code's per-model capability block. Without it kimi-cli treats every
+// proxied model as text-only and never enables thinking — the regression
+// this pins. Mapping verified against kimi's own managed config entries:
+// k3-like (reasoning + image/video + tool_call + effort dial) gets the full
+// set incl. dynamically_loaded_tools; highspeed-like (no effort dial) gets
+// neither dynamically_loaded_tools nor the effort lines; models without
+// metadata render an empty array, never a fabricated capability.
+func TestTemplateKimi_CapabilitiesFromMetadata(t *testing.T) {
+	dir := t.TempDir()
+	cfg := baseCfg()
+	file := filepath.Join(dir, "kimi.toml")
+	os.WriteFile(file, []byte(""), 0o644)
+	k3 := catalog.Model{
+		Reasoning: true, ToolCall: true,
+		Modalities:       catalog.Modalities{Input: []string{"text", "image", "video"}, Output: []string{"text"}},
+		ReasoningEfforts: []string{"low", "high", "max"},
+	}
+	meta := map[string]map[string]catalog.Model{"aqp": {"glm-5.2": k3}}
+	if err := presetFor(t, "kimi", file).Rewrite(cfg, meta, cfg.Routes); err != nil {
+		t.Fatal(err)
+	}
+	text := string(mustReadTOML(t, file))
+	if !strings.Contains(text, `capabilities = ["thinking", "always_thinking", "image_in", "video_in", "tool_use", "dynamically_loaded_tools"]`) {
+		t.Errorf("k3-like capabilities wrong:\n%s", text)
+	}
+	if !strings.Contains(text, `support_efforts = ["low", "high", "max"]`) ||
+		!strings.Contains(text, `default_effort = "max"`) {
+		t.Errorf("k3-like effort block wrong:\n%s", text)
+	}
+
+	// highspeed-like: same minus the effort dial → no dynamically_loaded_tools,
+	// and NO effort lines at all (an empty support_efforts would break the
+	// effort selector; the placeholder renders to nothing).
+	os.WriteFile(file, []byte(""), 0o644)
+	hs := k3
+	hs.ReasoningEfforts = nil
+	meta = map[string]map[string]catalog.Model{"aqp": {"glm-5.2": hs}}
+	if err := presetFor(t, "kimi", file).Rewrite(cfg, meta, cfg.Routes); err != nil {
+		t.Fatal(err)
+	}
+	text = string(mustReadTOML(t, file))
+	if !strings.Contains(text, `capabilities = ["thinking", "always_thinking", "image_in", "video_in", "tool_use"]`) {
+		t.Errorf("highspeed-like capabilities wrong:\n%s", text)
+	}
+	if strings.Contains(text, "support_efforts") || strings.Contains(text, "default_effort") {
+		t.Errorf("effort-less model must not get effort lines:\n%s", text)
+	}
+
+	// No metadata at all → empty capabilities array, no effort lines.
+	os.WriteFile(file, []byte(""), 0o644)
+	if err := presetFor(t, "kimi", file).Rewrite(cfg, nil, cfg.Routes); err != nil {
+		t.Fatal(err)
+	}
+	text = string(mustReadTOML(t, file))
+	if !strings.Contains(text, "capabilities = []") {
+		t.Errorf("metadata-less model must render the explicit empty array:\n%s", text)
+	}
+	if strings.Contains(text, "default_effort") {
+		t.Errorf("metadata-less model must not get effort lines:\n%s", text)
+	}
+}
+
+// TestTemplateCodex_ModelCatalog: the codex shape writes a standalone
+// model-catalog JSON (one entry per exposed model, visibility "list" so the
+// /model picker shows it, reasoning levels from the effort dial) and points
+// model_catalog_json at it — codex then offers every proxy model, replacing
+// its bundled list.
+func TestTemplateCodex_ModelCatalog(t *testing.T) {
+	// HOME is isolated: the run/restore half of this test goes through the
+	// REAL preset paths (~ expansion must land inside the sandbox, never in
+	// the developer's actual ~/.codex).
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	cfg := baseCfg()
+	file := filepath.Join(dir, ".codex", "config.toml")
+	catalogFile := filepath.Join(dir, ".codex", "model-proxy-models.json")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tpl, err := takeover.TemplateByName("codex", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpl.File = file
+	tpl.Models.CatalogFile = catalogFile
+	meta := map[string]map[string]catalog.Model{
+		"aqp": {"glm-5.2": {Context: 131072, Reasoning: true, ToolCall: true,
+			Modalities:       catalog.Modalities{Input: []string{"text", "image"}, Output: []string{"text"}},
+			ReasoningEfforts: []string{"low", "high", "max"}}},
+	}
+	if err := tpl.Rewrite(cfg, meta, cfg.Routes); err != nil {
+		t.Fatal(err)
+	}
+
+	// The client config points at the catalog (versioned proxy URL pinned by
+	// TestTemplateCodex; here the catalog wiring matters).
+	text := string(mustReadTOML(t, file))
+	if !strings.Contains(text, `model_catalog_json = "`+catalogFile+`"`) {
+		t.Errorf("config missing model_catalog_json:\n%s", text)
+	}
+	var doc struct {
+		Models []struct {
+			Slug         string `json:"slug"`
+			Visibility   string `json:"visibility"`
+			Context      int64  `json:"context_window"`
+			DefaultLevel string `json:"default_reasoning_level"`
+			Levels       []struct {
+				Effort string `json:"effort"`
+			} `json:"supported_reasoning_levels"`
+			ShellType string   `json:"shell_type"`
+			Input     []string `json:"input_modalities"`
+			Messages  *struct {
+				Template string `json:"instructions_template"`
+			} `json:"model_messages"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(mustReadTOML(t, catalogFile), &doc); err != nil {
+		t.Fatalf("catalog not valid JSON: %v", err)
+	}
+	if len(doc.Models) != 1 || doc.Models[0].Slug != "glm-5.2" {
+		t.Fatalf("catalog models = %+v, want one glm-5.2", doc.Models)
+	}
+	m := doc.Models[0]
+	if m.Visibility != "list" || m.Context != 131072 {
+		t.Errorf("catalog entry missing visibility/context: %+v", m)
+	}
+	// Regression: codex's ModelInfo has 16 serde-REQUIRED fields and rejects
+	// entries missing instructions ("missing both base_instructions and
+	// model_messages.instructions_template") — every entry must carry them.
+	if m.Messages == nil || m.Messages.Template == "" {
+		t.Errorf("catalog entry missing model_messages.instructions_template")
+	}
+	if m.ShellType != "unified_exec" {
+		t.Errorf("catalog entry missing shell_type: %q", m.ShellType)
+	}
+	if m.DefaultLevel != "max" || len(m.Levels) != 3 || m.Levels[0].Effort != "low" {
+		t.Errorf("reasoning levels wrong: %+v", m)
+	}
+	if len(m.Input) != 2 || m.Input[1] != "image" {
+		t.Errorf("input modalities = %v, want [text image]", m.Input)
+	}
+
+	// Restore removes the catalog together with the takeover (real preset
+	// paths under the isolated HOME — proving the end-to-end flow). Reset the
+	// config to a clean pre-takeover state first: the backup the run takes
+	// must not carry this test's earlier direct-rewrite leftovers.
+	if err := os.WriteFile(file, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(catalogFile)
+	bakDir := filepath.Join(dir, ".mp")
+	facts := takeover.ModelFactsFor(cfg, "codex", dir, dir, takeover.ModeUnified)
+	if err := takeover.RunTakeover(cfg, "codex", bakDir, facts, dir, takeover.ModeUnified); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".codex", "model-proxy-models.json")); err != nil {
+		t.Fatalf("run via preset did not write the catalog: %v", err)
+	}
+	if err := takeover.RunRestore(cfg, "codex", bakDir, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".codex", "model-proxy-models.json")); !os.IsNotExist(err) {
+		t.Errorf("restore must delete the model catalog: stat err=%v", err)
+	}
+	if strings.Contains(string(mustReadTOML(t, filepath.Join(dir, ".codex", "config.toml"))), "model_catalog_json") {
+		t.Errorf("restore must remove model_catalog_json from the config")
+	}
+}
+
+// TestTemplateClaude_ModelAndMCPCombined: one claude takeover covers BOTH
+// files — the model takeover (settings.json env injection) and the MCP
+// surface (~/.claude.json mcpServers, the merged former claude-mcp preset) —
+// each with its own backup unit, and restore returns both originals.
+func TestTemplateClaude_ModelAndMCPCombined(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := filepath.Join(home, ".claude", "settings.json")
+	claudeJSON := filepath.Join(home, ".claude.json")
+	if err := os.WriteFile(settings, []byte(`{"env":{"KEEP":"1"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(claudeJSON, []byte(`{"theme":"dark","mcpServers":{"mine":{"url":"https://other.example/mcp"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:15721",
+		MCP:    map[string]configdomain.MCPServer{"exa": {URL: "https://mcp.exa.ai/mcp"}},
+	}
+	bakDir := filepath.Join(home, ".mp")
+	if err := takeover.RunTakeover(cfg, "claude", bakDir, takeover.ModelFacts{SourceDefault: -1}, home, takeover.ModeUnified); err != nil {
+		t.Fatal(err)
+	}
+	// Model takeover landed in settings.json (unrelated keys kept).
+	env := mustJSONField(t, settings, "env")
+	if env["KEEP"] != "1" || env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:15721" {
+		t.Errorf("settings.json env wrong: %v", env)
+	}
+	// MCP surface landed in ~/.claude.json (own file, user entry kept).
+	doc := mustJSONField(t, claudeJSON, "mcpServers")
+	if _, ok := doc["mine"]; !ok {
+		t.Errorf("user's own mcp server dropped: %v", doc)
+	}
+	exa, _ := doc["exa"].(map[string]any)
+	if exa == nil || exa["url"] != "http://127.0.0.1:15721/mcp/exa" {
+		t.Errorf("gateway mcp entry missing/wrong: %v", doc)
+	}
+	// Both backup units exist.
+	for _, marker := range []string{"claude.bak", "claude-mcp.bak"} {
+		if _, err := os.Stat(filepath.Join(bakDir, marker)); err != nil {
+			t.Errorf("backup marker %s missing: %v", marker, err)
+		}
+	}
+	// Restore returns both originals and removes both markers.
+	if err := takeover.RunRestore(cfg, "claude", bakDir, home); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(mustReadTOML(t, settings)); got != `{"env":{"KEEP":"1"}}` {
+		t.Errorf("settings.json not restored verbatim: %s", got)
+	}
+	if !strings.Contains(string(mustReadTOML(t, claudeJSON)), `"mine"`) ||
+		strings.Contains(string(mustReadTOML(t, claudeJSON)), "127.0.0.1:15721") {
+		t.Errorf("~/.claude.json not restored to its original content")
+	}
+	for _, marker := range []string{"claude.bak", "claude-mcp.bak", "claude-mcp.bak.meta"} {
+		if _, err := os.Stat(filepath.Join(bakDir, marker)); !os.IsNotExist(err) {
+			t.Errorf("marker %s must be gone after restore", marker)
+		}
+	}
+}
+
+// mustJSONField parses a JSON file and returns one object field as a map.
+func mustJSONField(t *testing.T, file, field string) map[string]any {
+	t.Helper()
+	var v map[string]any
+	if err := json.Unmarshal(mustReadTOML(t, file), &v); err != nil {
+		t.Fatalf("%s: %v", file, err)
+	}
+	m, _ := v[field].(map[string]any)
+	if m == nil {
+		t.Fatalf("%s missing object field %q: %v", file, field, v)
+	}
+	return m
+}
+
+// TestTemplateKimi_ModelAndMCPCombined: kimi's MCP surface lives in its own
+// file (~/.kimi-code/mcp.json, mcpServers with url entries) next to the
+// model takeover's config.toml — one takeover covers both, each with its own
+// backup unit, and restore returns both.
+func TestTemplateKimi_ModelAndMCPCombined(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".kimi-code"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgTOML := filepath.Join(home, ".kimi-code", "config.toml")
+	mcpJSON := filepath.Join(home, ".kimi-code", "mcp.json")
+	if err := os.WriteFile(cfgTOML, []byte("default_model = \"x\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mcpJSON, []byte(`{"mcpServers":{"mine":{"url":"https://other/mcp"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:15721",
+		Providers: map[string]configdomain.Provider{
+			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.2"}},
+		},
+		MCP: map[string]configdomain.MCPServer{"exa": {URL: "https://mcp.exa.ai/mcp"}},
+	}
+	bakDir := filepath.Join(home, ".mp")
+	if err := takeover.RunTakeover(cfg, "kimi", bakDir, takeover.ModelFacts{SourceDefault: -1}, home, takeover.ModeUnified); err != nil {
+		t.Fatal(err)
+	}
+	// Model takeover in config.toml (unrelated top key kept).
+	if !strings.Contains(string(mustReadTOML(t, cfgTOML)), `providers."model-proxy"`) ||
+		!strings.Contains(string(mustReadTOML(t, cfgTOML)), "default_model") {
+		t.Errorf("config.toml takeover wrong:\n%s", mustReadTOML(t, cfgTOML))
+	}
+	// MCP surface in mcp.json (own file, user entry kept).
+	servers := mustJSONField(t, mcpJSON, "mcpServers")
+	if _, ok := servers["mine"]; !ok {
+		t.Errorf("user's own mcp server dropped: %v", servers)
+	}
+	exa, _ := servers["exa"].(map[string]any)
+	if exa == nil || exa["url"] != "http://127.0.0.1:15721/mcp/exa" {
+		t.Errorf("gateway entry missing/wrong: %v", servers)
+	}
+	// Both backup units.
+	for _, marker := range []string{"kimi.bak", "kimi-mcp.bak"} {
+		if _, err := os.Stat(filepath.Join(bakDir, marker)); err != nil {
+			t.Errorf("backup %s missing: %v", marker, err)
+		}
+	}
+	// Restore returns both originals.
+	if err := takeover.RunRestore(cfg, "kimi", bakDir, home); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(mustReadTOML(t, mcpJSON)); !strings.Contains(got, "mine") || strings.Contains(got, "127.0.0.1:15721") {
+		t.Errorf("mcp.json not restored verbatim: %s", got)
+	}
+	if _, err := os.Stat(filepath.Join(bakDir, "kimi-mcp.bak")); !os.IsNotExist(err) {
+		t.Errorf("kimi-mcp.bak must be gone after restore")
+	}
+}
+
+// TestTemplateClaudeDefaultModelEnvs: claude's managed surface covers the
+// default-model slots too — ANTHROPIC_MODEL/SONNET/OPUS ride the
+// largest-context exposed model (flagship tier), HAIKU the smallest
+// (background tier) — so a fresh takeover needs no manual model plumbing.
+func TestTemplateClaudeDefaultModelEnvs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := filepath.Join(home, ".claude", "settings.json")
+	if err := os.WriteFile(settings, []byte(`{"env":{"FOO":"keep"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:15721",
+		Providers: map[string]configdomain.Provider{
+			"aqp": {Provider: "aqp", OpenAIBaseURL: "http://x", Models: []string{"small", "big"}},
+		},
+	}
+	bakDir := filepath.Join(home, ".mp")
+	facts := takeover.ModelFacts{
+		Routes: map[string][]configdomain.RouteTarget{
+			"small": {{Provider: "aqp", Model: "small"}},
+			"big":   {{Provider: "aqp", Model: "big"}},
+		},
+		Meta: map[string]map[string]catalog.Model{
+			"aqp": {
+				"small": {Context: 128000},
+				"big":   {Context: 1000000},
+			},
+		},
+		SourceDefault: -1,
+	}
+	if err := takeover.RunTakeover(cfg, "claude", bakDir, facts, home, takeover.ModeUnified); err != nil {
+		t.Fatal(err)
+	}
+	env := mustJSONField(t, settings, "env")
+	for _, k := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL"} {
+		if env[k] != "big" {
+			t.Errorf("%s = %v, want big (largest context)", k, env[k])
+		}
+	}
+	if env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "small" {
+		t.Errorf("HAIKU = %v, want small (smallest context)", env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
+	}
+	if env["FOO"] != "keep" {
+		t.Errorf("unrelated env dropped: %v", env)
 	}
 }

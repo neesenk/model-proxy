@@ -53,6 +53,7 @@ type readAPIStub struct {
 	mcpSurface        appapi.MCPSurface
 	models            appapi.ModelsDocument
 	takeover          func(string) (appapi.TakeoverSurface, error)
+	takeoverPreview   func(appapi.TakeoverRunRequest, bool) (appapi.TakeoverPreview, error)
 	takeoverTemplate  func(string) (appapi.TakeoverTemplateDoc, error)
 }
 
@@ -1621,6 +1622,13 @@ func (r *readAPIStub) TakeoverSurface(mode string) (appapi.TakeoverSurface, erro
 		return r.takeover(mode)
 	}
 	return appapi.TakeoverSurface{Clients: []appapi.TakeoverClient{}}, nil
+}
+
+func (r *readAPIStub) PreviewTakeover(req appapi.TakeoverRunRequest, managedOnly bool) (appapi.TakeoverPreview, error) {
+	if r.takeoverPreview != nil {
+		return r.takeoverPreview(req, managedOnly)
+	}
+	return appapi.TakeoverPreview{Writes: []appapi.TakeoverPreviewWrite{}}, nil
 }
 
 func (r *readAPIStub) TakeoverTemplate(name string) (appapi.TakeoverTemplateDoc, error) {

@@ -94,7 +94,7 @@ func TestTakeoverSurfaceRunAndRestoreRoundTrip(t *testing.T) {
 	if err := os.WriteFile(rig.clientFile, []byte(`{"other": true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	result, err := rig.service.RunTakeover("testclient", "")
+	result, err := rig.service.RunTakeover(appapi.TakeoverRunRequest{Client: "testclient"})
 	if err != nil {
 		t.Fatalf("RunTakeover: %v", err)
 	}
@@ -177,12 +177,52 @@ func TestTakeoverSurfaceModePreview(t *testing.T) {
 	}
 }
 
+func TestPreviewTakeover(t *testing.T) {
+	rig := newTakeoverTestRig(t)
+
+	// Existing client file: preview merges over it and reports exists.
+	os.MkdirAll(filepath.Dir(rig.clientFile), 0o755)
+	if err := os.WriteFile(rig.clientFile, []byte(`{"keep":"me"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := rig.service.PreviewTakeover(appapi.TakeoverRunRequest{Client: "testclient"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Client != "testclient" || preview.Mode != "unified" || len(preview.Writes) != 1 {
+		t.Fatalf("preview = %+v, want one unified write for testclient", preview)
+	}
+	w := preview.Writes[0]
+	if !w.Exists || w.File != rig.clientFile || len(w.Templates) != 1 || w.Templates[0] != "testclient" {
+		t.Fatalf("write = %+v", w)
+	}
+	if !strings.Contains(w.Content, "TEST_BASE_URL") || !strings.Contains(w.Content, "http://127.0.0.1:15721") || !strings.Contains(w.Content, "keep") {
+		t.Errorf("preview content wrong:\n%s", w.Content)
+	}
+	// The real file must be untouched.
+	after, _ := os.ReadFile(rig.clientFile)
+	if string(after) != `{"keep":"me"}` {
+		t.Errorf("preview mutated the real file: %s", after)
+	}
+
+	// Error classes: unknown client and bad mode are 400s, not 500s.
+	_, err = rig.service.PreviewTakeover(appapi.TakeoverRunRequest{Client: "nope"}, false)
+	var httpErr *appapi.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Status != 400 {
+		t.Errorf("unknown client err = %v, want 400", err)
+	}
+	_, err = rig.service.PreviewTakeover(appapi.TakeoverRunRequest{Client: "testclient", Mode: "bogus"}, false)
+	if !errors.As(err, &httpErr) || httpErr.Status != 400 {
+		t.Errorf("bad mode err = %v, want 400", err)
+	}
+}
+
 func TestTakeoverBatchSkipsUninstalled(t *testing.T) {
 	rig := newTakeoverTestRig(t)
 	// Batch mode with an isolated HOME: no client config exists anywhere, so
 	// every template (presets included) is skipped, nothing is applied, and
 	// no file is created under the fake HOME.
-	result, err := rig.service.RunTakeover("all", "unified")
+	result, err := rig.service.RunTakeover(appapi.TakeoverRunRequest{Client: "all", Mode: "unified"})
 	if err != nil {
 		t.Fatalf("RunTakeover(all): %v", err)
 	}
@@ -205,7 +245,7 @@ func TestTakeoverBatchSkipsUninstalled(t *testing.T) {
 
 func TestRunTakeoverRejectsUnknownClientAndMode(t *testing.T) {
 	rig := newTakeoverTestRig(t)
-	if _, err := rig.service.RunTakeover("nope", ""); err == nil ||
+	if _, err := rig.service.RunTakeover(appapi.TakeoverRunRequest{Client: "nope"}); err == nil ||
 		!strings.Contains(err.Error(), "unknown takeover client") {
 		t.Errorf("unknown client err = %v, want the available-templates error", err)
 	}
@@ -213,7 +253,7 @@ func TestRunTakeoverRejectsUnknownClientAndMode(t *testing.T) {
 		!strings.Contains(err.Error(), "unknown takeover client") {
 		t.Errorf("restore unknown client err = %v, want the available-templates error", err)
 	}
-	_, err := rig.service.RunTakeover("testclient", "bogus")
+	_, err := rig.service.RunTakeover(appapi.TakeoverRunRequest{Client: "testclient", Mode: "bogus"})
 	var httpErr *appapi.HTTPError
 	if !errors.As(err, &httpErr) || httpErr.Status != 400 {
 		t.Errorf("bad mode err = %v, want 400 HTTPError", err)

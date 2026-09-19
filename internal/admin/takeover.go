@@ -5,11 +5,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/appapi"
 	"model-proxy/internal/configedit"
+	"model-proxy/internal/routing"
 	"model-proxy/internal/takeover"
 )
 
@@ -50,7 +52,17 @@ func (s *Service) TakeoverSurface(mode string) (appapi.TakeoverSurface, error) {
 		Clients:      []appapi.TakeoverClient{},
 		TemplatesDir: templatesDir,
 		BackupDir:    bakDir,
+		Models:       []string{},
+		MCP:          []string{},
 	}
+	for exposed := range routing.RouteTable(cfg) {
+		surface.Models = append(surface.Models, exposed)
+	}
+	sort.Strings(surface.Models)
+	// The offered MCP list equals what a default run writes: routes plus
+	// unrouted servers (routed members are pruned — naming them back is a
+	// template-level include_routed_members choice, not a chip).
+	surface.MCP = takeover.MCPSurfaceNames(cfg)
 	clients, err := takeover.ListClients(cfg, "", templatesDir)
 	if err != nil {
 		return surface, err
@@ -102,6 +114,7 @@ func (s *Service) TakeoverSurface(mode string) (appapi.TakeoverSurface, error) {
 			DriftOK:      !d.Taken || d.OK,
 			AutoSelected: selected[c.Name],
 			SplitChanges: splitChanges[family],
+			HasMCP:       c.Template.MCP != nil,
 		}
 		if d.Taken && !d.OK {
 			entry.Current = d.Current
@@ -128,23 +141,27 @@ func fileExists(path string) bool {
 
 // RunTakeover executes a takeover run (the daemon twin of the CLI command).
 // mode "" defaults to unified — the Web transport has no interactive prompt.
-func (s *Service) RunTakeover(client, mode string) (appapi.TakeoverRunResult, error) {
+func (s *Service) RunTakeover(req appapi.TakeoverRunRequest) (appapi.TakeoverRunResult, error) {
 	result := appapi.TakeoverRunResult{
 		Status:   "ok",
 		Applied:  []appapi.TakeoverApplied{},
 		Skipped:  []string{},
 		Warnings: []string{},
 	}
-	resolved, err := resolveTakeoverMode(mode)
+	resolved, err := resolveTakeoverMode(req.Mode)
+	if err != nil {
+		return result, err
+	}
+	resolvedScope, err := resolveTakeoverScope(req.Scope)
 	if err != nil {
 		return result, err
 	}
 	cfg := s.ports.Config()
 	homeDir, templatesDir, bakDir := s.takeoverDirs()
-	report, err := takeover.RunTakeoverReport(
-		cfg, client, bakDir,
-		takeover.ModelFactsFor(cfg, client, homeDir, templatesDir, resolved),
-		templatesDir, resolved,
+	report, err := takeover.RunTakeoverReportOpts(
+		cfg, req.Client, bakDir,
+		takeover.ModelFactsFor(cfg, req.Client, homeDir, templatesDir, resolved),
+		templatesDir, takeover.TakeoverOptions{Mode: resolved, Scope: resolvedScope, MCP: req.MCP, Models: req.Models},
 	)
 	if err != nil {
 		return result, err
@@ -155,6 +172,70 @@ func (s *Service) RunTakeover(client, mode string) (appapi.TakeoverRunResult, er
 	result.Skipped = append(result.Skipped, report.Skipped...)
 	result.Warnings = append(result.Warnings, report.Warnings...)
 	return result, nil
+}
+
+// PreviewTakeover dry-renders what RunTakeover would write for client/mode
+// (POST /api/takeover/preview) — the Web confirmation dialog's config
+// preview. No real file is touched; unknown clients/modes are 400-class
+// client errors, exactly where the run path would fail.
+func (s *Service) PreviewTakeover(req appapi.TakeoverRunRequest, managedOnly bool) (appapi.TakeoverPreview, error) {
+	preview := appapi.TakeoverPreview{
+		Client: req.Client,
+		Mode:   req.Mode,
+		Writes: []appapi.TakeoverPreviewWrite{},
+	}
+	resolved, err := resolveTakeoverMode(req.Mode)
+	if err != nil {
+		return preview, err
+	}
+	if resolved != "" {
+		preview.Mode = string(resolved)
+	}
+	cfg := s.ports.Config()
+	homeDir, templatesDir, _ := s.takeoverDirs()
+	facts := takeover.ModelFactsFor(cfg, req.Client, homeDir, templatesDir, resolved)
+	resolvedScope, err := resolveTakeoverScope(req.Scope)
+	if err != nil {
+		return preview, err
+	}
+	var writes []takeover.PreviewWrite
+	if req.TemplateBody != "" {
+		// Editor draft: render the unsaved YAML through the same pipeline
+		// via a private templates dir — the disk template is not consulted.
+		writes, err = takeover.PreviewWritesDraft(cfg, req.Client, req.TemplateBody,
+			takeover.TakeoverOptions{Mode: resolved, Scope: resolvedScope, MCP: req.MCP, Models: req.Models},
+			facts, managedOnly)
+	} else {
+		writes, err = takeover.PreviewWritesOpts(cfg, req.Client, templatesDir,
+			takeover.TakeoverOptions{Mode: resolved, Scope: resolvedScope, MCP: req.MCP, Models: req.Models},
+			facts, managedOnly)
+	}
+	if err != nil {
+		// Resolution failures (unknown client, protocol mismatch) are the
+		// user's to fix — the run endpoint classifies them 400 as well.
+		return preview, appapi.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	for _, w := range writes {
+		preview.Writes = append(preview.Writes, appapi.TakeoverPreviewWrite{
+			Templates: w.Templates,
+			Notes:     w.Notes,
+			File:      w.File,
+			Exists:    w.Exists,
+			Content:   w.Content,
+		})
+	}
+	return preview, nil
+}
+
+// resolveTakeoverScope validates the wire scope value; unknown values are a
+// client error (400), matching the CLI's usage failure.
+func resolveTakeoverScope(scope string) (takeover.RewriteScope, error) {
+	s := takeover.RewriteScope(scope)
+	if !s.Valid() {
+		return "", appapi.NewHTTPError(http.StatusBadRequest,
+			fmt.Sprintf("unknown takeover scope %q (want model|mcp|all)", scope))
+	}
+	return s, nil
 }
 
 // resolveTakeoverMode validates the wire mode value; unknown values are a
@@ -197,22 +278,21 @@ func validTemplateName(name string) bool {
 	return !strings.ContainsAny(name, `/\`) && !strings.Contains(name, "..")
 }
 
-// TakeoverTemplate returns one template's raw YAML: the user override when
-// present, else the embedded preset document.
+// TakeoverTemplate returns the raw YAML document containing one template: the
+// user-override document when present, else the embedded preset document.
+// For a variant declared inside a merged variants: document the containing
+// document is returned (the editor shows/overrides the whole family file).
 func (s *Service) TakeoverTemplate(name string) (appapi.TakeoverTemplateDoc, error) {
 	if !validTemplateName(name) {
 		return appapi.TakeoverTemplateDoc{}, appapi.NewHTTPError(http.StatusBadRequest, "invalid template name: "+name)
 	}
 	_, templatesDir, _ := s.takeoverDirs()
-	userPath := filepath.Join(templatesDir, name+".yaml")
-	data, err := os.ReadFile(userPath)
-	if err == nil {
-		return appapi.TakeoverTemplateDoc{Name: name, Source: "user", YAML: string(data), Path: userPath}, nil
-	}
-	if !os.IsNotExist(err) {
+	if data, path, err := takeover.UserTemplateDocYAML(templatesDir, name); err != nil {
 		return appapi.TakeoverTemplateDoc{}, err
+	} else if data != nil {
+		return appapi.TakeoverTemplateDoc{Name: name, Source: "user", YAML: string(data), Path: path}, nil
 	}
-	preset, err := takeover.PresetTemplateYAML(name)
+	preset, err := takeover.PresetTemplateDocYAML(name)
 	if err != nil {
 		return appapi.TakeoverTemplateDoc{}, appapi.NewHTTPError(http.StatusNotFound, "unknown takeover template: "+name)
 	}

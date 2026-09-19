@@ -102,6 +102,18 @@ func opencodeModelsCollection(models []ExposedModel) map[string]any {
 			"limit":      limit,
 			"modalities": modalities,
 		}
+		// opencode's model schema also carries reasoning / tool_call flags —
+		// omitting them makes opencode treat reasoning models as plain chat
+		// models (no reasoning-effort control, no tool support indicator).
+		// Only asserted true; opencode defaults both to false.
+		if m.PM.Reasoning {
+			entry := out[m.Exposed].(map[string]any)
+			entry["reasoning"] = true
+		}
+		if m.PM.ToolCall {
+			entry := out[m.Exposed].(map[string]any)
+			entry["tool_call"] = true
+		}
 	}
 	return out
 }
@@ -159,6 +171,68 @@ func piModelsCollection(models []ExposedModel) []map[string]any {
 		piModels = []map[string]any{{"id": "glm-5.2", "name": "glm-5.2", "input": []string{"text"}, "maxTokens": 4096}}
 	}
 	return piModels
+}
+
+// codexModelCatalog builds the ModelInfo list for codex's
+// model_catalog_json file ({"models":[...]}). The catalog REPLACES codex's
+// bundled model list, so every entry must be self-sufficient: visibility
+// "list" puts it in the /model picker, priority 50 sorts proxy models after
+// codex's own (6..99), and metadata comes from models.dev the same way as the
+// other clients. Reasoning levels map 1:1 from the effort dial (default =
+// highest); models without metadata still get a valid minimal entry.
+func codexModelCatalog(models []ExposedModel) []map[string]any {
+	out := make([]map[string]any, 0, len(models))
+	for _, m := range models {
+		// ModelInfo's serde has 16 fields WITHOUT #[serde(default)] — every
+		// entry must carry them all or codex rejects the whole catalog
+		// ("missing field …"). Defaults mirror codex's bundled models.json so
+		// proxy models behave like first-class entries.
+		entry := map[string]any{
+			"slug":                         m.Exposed,
+			"display_name":                 DisplayName(m.Exposed),
+			"description":                  "Routed through model-proxy",
+			"supported_reasoning_levels":   []map[string]any{},
+			"shell_type":                   "unified_exec",
+			"visibility":                   "list",
+			"supported_in_api":             true,
+			"priority":                     50,
+			"availability_nux":             nil,
+			"upgrade":                      nil,
+			"support_verbosity":            false,
+			"default_verbosity":            nil,
+			"apply_patch_tool_type":        "freeform",
+			"truncation_policy":            map[string]any{"mode": "tokens", "limit": 10000},
+			"experimental_supported_tools": []string{},
+			"used_fallback_model_metadata": false,
+		}
+		if m.PM.Context > 0 {
+			entry["context_window"] = m.PM.Context
+			entry["max_context_window"] = m.PM.Context
+		}
+		input := piInputModalities(m.PM.Modalities.Input)
+		if len(input) > 0 {
+			entry["input_modalities"] = input
+		}
+		// Codex rejects entries without instructions (see
+		// codex_instructions.go); every entry carries the agent template.
+		entry["model_messages"] = map[string]any{
+			"instructions_template":  codexInstructionsTemplate,
+			"instructions_variables": nil,
+		}
+		if len(m.PM.ReasoningEfforts) > 0 {
+			levels := make([]map[string]any, 0, len(m.PM.ReasoningEfforts))
+			for _, e := range m.PM.ReasoningEfforts {
+				levels = append(levels, map[string]any{
+					"effort":      e,
+					"description": e + " reasoning effort",
+				})
+			}
+			entry["supported_reasoning_levels"] = levels
+			entry["default_reasoning_level"] = m.PM.ReasoningEfforts[len(m.PM.ReasoningEfforts)-1]
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // SetTOMLTopKey sets a top-level bare key (placed before any [section]).

@@ -1,24 +1,58 @@
-description: opencode — @ai-sdk/anthropic provider(自拼 /messages,base_url 带 /v1)+ 全量暴露模型
+description: opencode — provider 条目 + 全量暴露模型；协议变体（anthropic/openai/responses）见 variants
 file: ~/.config/opencode/opencode.json
 format: json
 client: opencode
-protocol: anthropic
-base_url: v1
-json:
-  set:
-    provider.{{provider_id}}:
-      name: "{{display_name}}"
-      npm: "@ai-sdk/anthropic"
-      options:
-        apiKey: "{{token}}"
-        baseURL: "{{base_url}}"
-  drift_path: provider.{{provider_id}}.options.baseURL
-models:
-  shape: opencode
-  json_path: provider.{{provider_id}}.models
 mcp:
   json_path: mcp
   json_entry:
     type: remote
     url: "{{mcp.url}}"
     enabled: true
+variants:
+  - name: opencode
+    protocol: anthropic
+    base_url: v1
+    json:
+      set:
+        provider.{{provider_id}}:
+          name: "{{display_name}}"
+          npm: "@ai-sdk/anthropic"
+          options:
+            apiKey: "{{token}}"
+            baseURL: "{{base_url}}"
+      drift_path: provider.{{provider_id}}.options.baseURL
+    models:
+      shape: opencode
+      json_path: provider.{{provider_id}}.models
+  - name: opencode-openai
+    protocol: openai
+    base_url: v1
+    provider_id: model-proxy-openai
+    json:
+      set:
+        provider.{{provider_id}}:
+          name: "{{display_name}} (openai-compatible)"
+          npm: "@ai-sdk/openai-compatible"
+          options:
+            apiKey: "{{token}}"
+            baseURL: "{{base_url}}"
+      drift_path: provider.{{provider_id}}.options.baseURL
+    models:
+      shape: opencode
+      json_path: provider.{{provider_id}}.models
+  - name: opencode-responses
+    protocol: responses
+    base_url: v1
+    provider_id: model-proxy-responses
+    json:
+      set:
+        provider.{{provider_id}}:
+          name: "{{display_name}} (responses)"
+          npm: "@ai-sdk/openai"
+          options:
+            apiKey: "{{token}}"
+            baseURL: "{{base_url}}"
+      drift_path: provider.{{provider_id}}.options.baseURL
+    models:
+      shape: opencode
+      json_path: provider.{{provider_id}}.models

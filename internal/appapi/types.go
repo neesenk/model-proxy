@@ -641,6 +641,9 @@ type TakeoverClient struct {
 	Expected     string `json:"expected,omitempty"`
 	AutoSelected bool   `json:"auto_selected"`
 	SplitChanges bool   `json:"split_changes,omitempty"`
+	// HasMCP reports whether the template writes an MCP surface — the
+	// takeover dialog offers the mcp scope checkbox only when it does.
+	HasMCP bool `json:"has_mcp"`
 }
 
 // TakeoverSurface is the GET /api/takeover response. AutoSelected previews
@@ -650,6 +653,10 @@ type TakeoverSurface struct {
 	Clients      []TakeoverClient `json:"clients"`
 	TemplatesDir string           `json:"templates_dir"`
 	BackupDir    string           `json:"backup_dir"`
+	// Models lists the exposed model names (route table keys) and MCP the
+	// gateway server/route names — the takeover dialog's subset selections.
+	Models []string `json:"models"`
+	MCP    []string `json:"mcp"`
 }
 
 // TakeoverTemplateDoc is one template's raw YAML document (user override when
@@ -659,6 +666,22 @@ type TakeoverTemplateDoc struct {
 	Source string `json:"source"` // preset | user
 	YAML   string `json:"yaml"`
 	Path   string `json:"path,omitempty"` // user override file path
+}
+
+// TakeoverRunRequest is the POST /api/takeover (and preview) body: the
+// client ("" = batch), protocol mode, model/mcp scope, and optional SUBSET
+// selections (nil MCP/Models = everything the gateway exposes).
+type TakeoverRunRequest struct {
+	Client string   `json:"client"`
+	Mode   string   `json:"mode"`
+	Scope  string   `json:"scope"`
+	MCP    []string `json:"mcp"`
+	Models []string `json:"models"`
+	// TemplateBody is preview-only (POST /api/takeover/preview with
+	// template_body): renders this UNSAVED draft YAML instead of the disk
+	// template — the template editor's live preview. The run endpoint
+	// ignores it.
+	TemplateBody string `json:"template_body,omitempty"`
 }
 
 // TakeoverApplied is one rewritten client in a TakeoverRunResult; Note is the
@@ -681,6 +704,26 @@ type TakeoverRestoreResult struct {
 	Status   string   `json:"status"`
 	Restored []string `json:"restored"`
 	Skipped  []string `json:"skipped"`
+}
+
+// TakeoverPreviewWrite is one client config file a takeover would write
+// (POST /api/takeover/preview). Split mode may merge several variants into
+// one file; Templates lists them in application order and Content is the
+// final merged document — byte-identical to what the real run would leave.
+type TakeoverPreviewWrite struct {
+	Templates []string `json:"templates"`
+	Notes     []string `json:"notes,omitempty"`
+	File      string   `json:"file"`
+	Exists    bool     `json:"exists"`
+	Content   string   `json:"content"`
+}
+
+// TakeoverPreview is the POST /api/takeover/preview response: the dry-run
+// rendering behind the Web takeover confirmation dialog.
+type TakeoverPreview struct {
+	Client string                 `json:"client"`
+	Mode   string                 `json:"mode"`
+	Writes []TakeoverPreviewWrite `json:"writes"`
 }
 
 // ---- diagnostics: replay / route test / catalog pull ----
@@ -788,6 +831,13 @@ type ReadAPI interface {
 	// mode selects which per-family variant the auto_selected marker previews
 	// ("" = unified); unknown modes are a 400-class error.
 	TakeoverSurface(mode string) (TakeoverSurface, error)
+	// PreviewTakeover dry-renders what POST /api/takeover would write for the
+	// request (same resolution path) WITHOUT touching any real file;
+	// semantics and error classes mirror the run command.
+	// managedOnly=false renders the merged final document over a private
+	// copy of the real client file; true renders only the template's own
+	// entries (the template editor view). scope: ""|"model"|"mcp".
+	PreviewTakeover(req TakeoverRunRequest, managedOnly bool) (TakeoverPreview, error)
 	// TakeoverTemplate returns one template's raw YAML document — the user
 	// override when present, else the embedded preset (404 when neither).
 	TakeoverTemplate(name string) (TakeoverTemplateDoc, error)
@@ -840,7 +890,7 @@ type CommandAPI interface {
 	// RunTakeover is the daemon twin of `model-proxy takeover [client]
 	// [--mode]` (client "" / "all" = batch; mode "" = unified — the Web has
 	// no interactive prompt). Backup/rewrite semantics are the CLI's.
-	RunTakeover(client, mode string) (TakeoverRunResult, error)
+	RunTakeover(req TakeoverRunRequest) (TakeoverRunResult, error)
 	// RestoreTakeover is the daemon twin of `model-proxy restore [client]`.
 	RestoreTakeover(client string) (TakeoverRestoreResult, error)
 	// SaveTakeoverTemplate validates and writes a user takeover template

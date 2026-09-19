@@ -22,14 +22,14 @@ func TestRunTakeoverReport_AppliedSkippedWarnings(t *testing.T) {
 	bakDir := filepath.Join(dir, ".mp")
 
 	// claude's config is absent → batch skips it and reports the skip.
-	report, err := takeover.RunTakeoverReport(cfg, "claude", bakDir, takeover.ModelFacts{SourceDefault: -1}, templatesDir, takeover.ModeUnified)
+	report, err := takeover.RunTakeoverReport(cfg, "claude", bakDir, takeover.ModelFacts{SourceDefault: -1}, templatesDir, takeover.ModeUnified, takeover.ScopeAll)
 	if err == nil || !strings.Contains(err.Error(), "backup") {
 		// A single named client is a hard error when its file is missing.
 		t.Fatalf("single missing client: err = %v, want a backup error", err)
 	}
 
 	os.WriteFile(claudeFile, []byte(`{"env":{"OLD":"1"}}`), 0o644)
-	report, err = takeover.RunTakeoverReport(cfg, "claude", bakDir, takeover.ModelFacts{SourceDefault: -1}, templatesDir, takeover.ModeUnified)
+	report, err = takeover.RunTakeoverReport(cfg, "claude", bakDir, takeover.ModelFacts{SourceDefault: -1}, templatesDir, takeover.ModeUnified, takeover.ScopeAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestCheckDrift_ThreeStates(t *testing.T) {
 
 	// Takeover → taken, pointer matches.
 	os.WriteFile(claudeFile, []byte(`{"env":{"OLD":"1"}}`), 0o644)
-	if _, err := takeover.RunTakeoverReport(cfg, "claude", bakDir, takeover.ModelFacts{SourceDefault: -1}, templatesDir, takeover.ModeUnified); err != nil {
+	if _, err := takeover.RunTakeoverReport(cfg, "claude", bakDir, takeover.ModelFacts{SourceDefault: -1}, templatesDir, takeover.ModeUnified, takeover.ScopeAll); err != nil {
 		t.Fatal(err)
 	}
 	if d := driftOf("claude"); !d.Taken || !d.OK {

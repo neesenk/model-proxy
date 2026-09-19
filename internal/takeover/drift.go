@@ -1,6 +1,7 @@
 package takeover
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 
@@ -44,9 +45,28 @@ func CheckDrift(cfg *configdomain.Config, bakDir, templatesDir string) ([]Client
 		d.Current, d.Expected = c.Template.Pointer(cfg)
 		// A template without a drift probe is exempt from drift detection —
 		// there is nothing to compare, and reporting it as drifted would be a
-		// false alarm right after every takeover (mcp-only templates).
-		d.OK = d.Current == d.Expected || d.Current == "(no drift probe)"
+		// false alarm right after every takeover (mcp-only templates). The
+		// same applies to an mcp-scope backup: its takeover never wrote the
+		// model pointer the probe compares.
+		scope := backupScope(filepath.Join(bakDir, c.Name+".bak.meta"))
+		d.OK = scope == ScopeMCP || d.Current == d.Expected || d.Current == "(no drift probe)"
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// backupScope reads the takeover scope a backup recorded (missing meta or
+// field = ScopeAll — pre-scope backups were full takeovers).
+func backupScope(metaPath string) RewriteScope {
+	mb, err := os.ReadFile(metaPath)
+	if err != nil {
+		return ScopeAll
+	}
+	var meta struct {
+		Scope string `json:"scope"`
+	}
+	if err := json.Unmarshal(mb, &meta); err != nil {
+		return ScopeAll
+	}
+	return RewriteScope(meta.Scope)
 }

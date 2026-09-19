@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"model-proxy/internal/appapi"
 )
 
 // handlers_takeover.go — the /api/takeover subtree: client takeover surface
@@ -27,20 +29,38 @@ func (s *Server) handleTakeover(w http.ResponseWriter, r *http.Request) {
 // twin of `model-proxy takeover [client] [--mode]`. client ""/"all" is the
 // batch form; mode "" defaults to unified (no interactive prompt on the Web).
 func (s *Server) handleTakeoverRun(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Client string `json:"client"`
-		Mode   string `json:"mode"`
-	}
+	var req appapi.TakeoverRunRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		writeJSONErr(w, http.StatusBadRequest, "malformed JSON body: "+err.Error())
 		return
 	}
-	result, err := s.commands.RunTakeover(req.Client, req.Mode)
+	result, err := s.commands.RunTakeover(req)
 	if err != nil {
 		writePortErr(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// handleTakeoverPreview serves POST /api/takeover/preview {client?, mode?}
+// — the dry-run rendering behind the takeover confirmation dialog: what the
+// corresponding POST /api/takeover would write, rendered against private
+// copies (no real file is touched).
+func (s *Server) handleTakeoverPreview(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		appapi.TakeoverRunRequest
+		ManagedOnly bool `json:"managed_only"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		writeJSONErr(w, http.StatusBadRequest, "malformed JSON body: "+err.Error())
+		return
+	}
+	preview, err := s.reads.PreviewTakeover(req.TakeoverRunRequest, req.ManagedOnly)
+	if err != nil {
+		writePortErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
 }
 
 // handleTakeoverRestore serves POST /api/takeover/restore {client?} — the

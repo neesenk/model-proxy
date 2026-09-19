@@ -59,7 +59,22 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 // Both files are written atomically: a truncated .bak would poison every
 // future takeover (the "existing backup is kept" idempotency rule would keep
 // the corrupt copy forever) and lose the user's original client config.
+// BackupScoped copies file verbatim into bakDir/<name>.bak with the takeover
+// scope recorded in the meta (ScopeMCP backups are exempt from the model
+// drift probe — the model part was never written). Backup is the ScopeAll
+// form kept for callers that do not choose.
+func BackupScoped(file, bakDir, name string, scope RewriteScope) error {
+	if err := backup(file, bakDir, name, scope); err != nil {
+		return err
+	}
+	return nil
+}
+
 func Backup(file, bakDir, name string) error {
+	return backup(file, bakDir, name, ScopeAll)
+}
+
+func backup(file, bakDir, name string, scope RewriteScope) error {
 	if _, err := os.Stat(file); err != nil {
 		if os.IsNotExist(err) {
 			return ErrNoFile
@@ -89,6 +104,9 @@ func Backup(file, bakDir, name string) error {
 			"backed_up_at": time.Now().Format(time.RFC3339),
 			"sha256":       Sha256hex(data),
 			"path":         file,
+		}
+		if scope != ScopeAll {
+			meta["scope"] = string(scope)
 		}
 		mb, err := json.MarshalIndent(meta, "", "  ")
 		if err != nil {
@@ -229,16 +247,99 @@ type RestoreReport struct {
 }
 
 func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFacts, templatesDir string, mode ResolveMode) error {
-	_, err := RunTakeoverReport(cfg, which, bakDir, facts, templatesDir, mode)
+	return RunTakeoverOpts(cfg, which, bakDir, facts, templatesDir, DefaultTakeoverOptions(mode))
+}
+
+// RunTakeoverOpts is RunTakeover with full options (scope + subset
+// selections).
+func RunTakeoverOpts(cfg *configdomain.Config, which, bakDir string, facts ModelFacts, templatesDir string, opts TakeoverOptions) error {
+	_, err := RunTakeoverReportOpts(cfg, which, bakDir, facts, templatesDir, opts)
 	return err
+}
+
+// RewriteScope selects what a takeover writes: the model/provider part, the
+// MCP surface, or both (the default). Backups record the scope so drift and
+// restore can tell a model-only takeover from a full one.
+type RewriteScope string
+
+const (
+	ScopeAll   RewriteScope = ""      // provider/models + MCP (the CLI default)
+	ScopeModel RewriteScope = "model" // provider/models only; MCP untouched
+	ScopeMCP   RewriteScope = "mcp"   // MCP surface only; provider/models untouched
+)
+
+func (s RewriteScope) Valid() bool {
+	switch s {
+	case ScopeAll, ScopeModel, ScopeMCP:
+		return true
+	}
+	return false
+}
+
+// TakeoverOptions carries the run/preview shape beyond client resolution:
+// the protocol mode, the model/mcp scope, and optional SUBSET selections —
+// nil MCP/Models means "everything the gateway exposes", a non-nil list
+// writes only the named entries (the Web dialog's partial takeover).
+type TakeoverOptions struct {
+	Mode   ResolveMode
+	Scope  RewriteScope
+	MCP    []string // gateway server/route names to write (nil = all)
+	Models []string // exposed model names to write (nil = all)
+}
+
+// DefaultTakeoverOptions is the CLI-equivalent run: unified, full scope,
+// everything the gateway exposes.
+func DefaultTakeoverOptions(mode ResolveMode) TakeoverOptions {
+	return TakeoverOptions{Mode: mode}
+}
+
+func (o TakeoverOptions) validated() (TakeoverOptions, error) {
+	if !o.Scope.Valid() {
+		return o, fmt.Errorf("unknown takeover scope %q (want model|mcp|all)", o.Scope)
+	}
+	switch o.Mode {
+	case ModeUnified, ModeSplit:
+	default:
+		if !o.Mode.IsProtocol() {
+			return o, fmt.Errorf("unknown takeover mode %q (want unified|split|anthropic|openai|responses)", o.Mode)
+		}
+	}
+	if len(o.MCP) > 0 {
+		seen := map[string]bool{}
+		for _, n := range o.MCP {
+			if n == "" || seen[n] {
+				return o, fmt.Errorf("invalid MCP selection entry %q", n)
+			}
+			seen[n] = true
+		}
+	}
+	if len(o.Models) > 0 {
+		seen := map[string]bool{}
+		for _, n := range o.Models {
+			if n == "" || seen[n] {
+				return o, fmt.Errorf("invalid model selection entry %q", n)
+			}
+			seen[n] = true
+		}
+	}
+	return o, nil
 }
 
 // RunTakeoverReport is RunTakeover plus a structured report for non-CLI
 // callers (the Web admin API): the logging/progress behavior is identical,
 // but applied/skipped clients and warnings also come back as data.
-func RunTakeoverReport(cfg *configdomain.Config, which, bakDir string, facts ModelFacts, templatesDir string, mode ResolveMode) (TakeoverReport, error) {
+func RunTakeoverReport(cfg *configdomain.Config, which, bakDir string, facts ModelFacts, templatesDir string, mode ResolveMode, scope RewriteScope) (TakeoverReport, error) {
+	return RunTakeoverReportOpts(cfg, which, bakDir, facts, templatesDir, TakeoverOptions{Mode: mode, Scope: scope})
+}
+
+// RunTakeoverReportOpts is RunTakeoverReport with full options.
+func RunTakeoverReportOpts(cfg *configdomain.Config, which, bakDir string, facts ModelFacts, templatesDir string, opts TakeoverOptions) (TakeoverReport, error) {
 	var report TakeoverReport
-	clients, err := ResolveClientsMode(cfg, which, templatesDir, mode)
+	opts, err := opts.validated()
+	if err != nil {
+		return report, err
+	}
+	clients, err := ResolveClientsMode(cfg, which, templatesDir, opts.Mode)
 	if err != nil {
 		return report, err
 	}
@@ -264,7 +365,7 @@ func RunTakeoverReport(cfg *configdomain.Config, which, bakDir string, facts Mod
 		if c.Note != "" {
 			logx.Infof("  %s", c.Note)
 		}
-		if err := Backup(c.File, bakDir, c.Name); err != nil {
+		if err := BackupScoped(c.File, bakDir, c.Name, opts.Scope); err != nil {
 			if batch && errors.Is(err, ErrNoFile) {
 				logx.Infof("  ~ %s skipped (config not present: %s)", c.Name, c.File)
 				report.Skipped = append(report.Skipped, c.Name)
@@ -272,10 +373,19 @@ func RunTakeoverReport(cfg *configdomain.Config, which, bakDir string, facts Mod
 			}
 			return report, fmt.Errorf("%s backup: %w", c.Name, err)
 		}
+		if aux := mcpAuxFile(c.Template); aux != "" {
+			// A separate MCP storage file is part of the same takeover — its
+			// backup rides under <name>-mcp so the restore unit matches. A
+			// missing aux file is normal even for a named client (a fresh
+			// install never configured MCP): the rewrite creates it.
+			if err := BackupScoped(aux, bakDir, c.Name+"-mcp", opts.Scope); err != nil && !errors.Is(err, ErrNoFile) {
+				return report, fmt.Errorf("%s mcp backup: %w", c.Name, err)
+			}
+		}
 		survivors = append(survivors, c)
 	}
 	for _, c := range survivors {
-		if err := c.Rewrite(cfg, meta, routes); err != nil {
+		if err := c.RewriteOpts(cfg, meta, routes, opts); err != nil {
 			return report, fmt.Errorf("%s rewrite: %w", c.Name, err)
 		}
 		logx.Infof("  ✓ %s done", c.Name)
@@ -332,6 +442,22 @@ func RunRestoreReport(cfg *configdomain.Config, which, bakDir, templatesDir stri
 			}
 			return report, fmt.Errorf("%s restore: %w", c.Name, err)
 		}
+		// A separate MCP storage file was backed up as <name>-mcp — restore
+		// it as part of the same takeover (missing backup = the aux file was
+		// never present before the takeover; try anyway, ErrNoFile is skipped
+		// below via the shared path).
+		if aux := mcpAuxFile(c.Template); aux != "" {
+			if err := Restore(aux, bakDir, c.Name+"-mcp"); err != nil && !errors.Is(err, ErrNoFile) {
+				return report, fmt.Errorf("%s mcp restore: %w", c.Name, err)
+			}
+		}
+		// Side artifacts the takeover wrote next to the client config (codex's
+		// model-catalog JSON) end with the takeover too.
+		if c.Template != nil && c.Template.Models != nil && c.Template.Models.CatalogFile != "" {
+			if err := os.Remove(expandHome(c.Template.Models.CatalogFile)); err != nil && !os.IsNotExist(err) {
+				logx.Warnf("takeover: restore %s: could not remove model catalog %s: %v", c.Name, c.Template.Models.CatalogFile, err)
+			}
+		}
 		logx.Infof("  ✓ %s restored", c.Name)
 		report.Restored = append(report.Restored, c.Name)
 	}
@@ -384,6 +510,10 @@ type ClientSpec struct {
 	Name    string
 	File    string
 	Rewrite func(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) error
+	// RewriteOpts applies the same rewrite with full options (scope + MCP/
+	// model subset selections). Derived from the template (plus the split
+	// model filter); plain Rewrite stays for direct template adapters.
+	RewriteOpts func(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget, opts TakeoverOptions) error
 	// Template is the resolved client template (preset or user-defined) —
 	// doctor's drift probe and facts' metadata decision read it.
 	Template *Template
@@ -426,10 +556,11 @@ func ListClients(cfg *configdomain.Config, which, templatesDir string) ([]Client
 	for _, t := range templates {
 		t := t
 		out = append(out, ClientSpec{
-			Name:     t.Name,
-			File:     t.File,
-			Template: t,
-			Rewrite:  t.Rewrite,
+			Name:        t.Name,
+			File:        t.File,
+			Template:    t,
+			Rewrite:     t.Rewrite,
+			RewriteOpts: t.RewriteOpts,
 		})
 	}
 	return out, nil

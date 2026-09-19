@@ -118,3 +118,86 @@ func TestTemplateValidation(t *testing.T) {
 		}
 	}
 }
+
+// TestParseVariantsTemplate: a variants: document expands into one template
+// per variant — each carrying the shared top-level fields (file/format/
+// client/mcp) plus its own protocol identity and write blocks. Downstream
+// (family selection, backup units, the Web surface) works on the expanded
+// templates exactly like the former one-variant-per-file presets.
+func TestParseVariantsTemplate(t *testing.T) {
+	doc := `
+description: pi family
+file: ~/.pi/agent/models.json
+format: json
+client: pi
+variants:
+  - name: pi
+    protocol: anthropic
+    base_url: bare
+    json:
+      set:
+        providers.{{provider_id}}: {baseUrl: "{{base_url}}", api: "anthropic-messages"}
+      drift_path: providers.{{provider_id}}.baseUrl
+    models:
+      shape: pi
+      json_path: providers.{{provider_id}}.models
+  - name: pi-openai
+    protocol: openai
+    base_url: v1
+    provider_id: model-proxy-openai
+    json:
+      set:
+        providers.{{provider_id}}: {baseUrl: "{{base_url}}", api: "openai-completions"}
+    models:
+      shape: pi
+      json_path: providers.{{provider_id}}.models
+`
+	parsed, err := takeover.ParseTemplate("pi", "preset", []byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed) != 2 {
+		t.Fatalf("expanded = %d templates, want 2", len(parsed))
+	}
+	byName := map[string]*takeover.Template{}
+	for _, t := range parsed {
+		byName[t.Name] = t
+	}
+	pi := byName["pi"]
+	openai := byName["pi-openai"]
+	if pi == nil || openai == nil {
+		t.Fatalf("expanded names missing: %v", parsed)
+	}
+	if pi.File != openai.File || pi.Client != "pi" || pi.Format != "json" {
+		t.Errorf("shared fields not inherited: %+v vs %+v", pi, openai)
+	}
+	if pi.BaseURL != "bare" || openai.BaseURL != "v1" || openai.ProviderID != "model-proxy-openai" {
+		t.Errorf("per-variant overrides lost: pi=%+v openai=%+v", pi, openai)
+	}
+	if pi.Protocol != "anthropic" || openai.Protocol != "openai" {
+		t.Errorf("protocols wrong: %q / %q", pi.Protocol, openai.Protocol)
+	}
+	if pi.JSON == nil || openai.JSON == nil {
+		t.Fatalf("per-variant json blocks lost")
+	}
+	if pi.Models == nil || pi.Models.JSONPath == "" {
+		t.Errorf("per-variant models block lost")
+	}
+
+	// A single variants entry is a footgun (a plain template says it better).
+	if _, err := takeover.ParseTemplate("one", "preset", []byte("file: ~/x.json\nformat: json\nclient: c\nvariants:\n  - name: a\n    protocol: openai\n    json:\n      set: {a: b}\n")); err == nil ||
+		!strings.Contains(err.Error(), "two or more") {
+		t.Errorf("single variant: want error, got %v", err)
+	}
+	// Duplicate variant names are ambiguous — reject.
+	if _, err := takeover.ParseTemplate("dup", "preset", []byte("file: ~/x.json\nformat: json\nclient: c\nvariants:\n  - name: a\n    protocol: openai\n    json:\n      set: {a: b}\n  - name: a\n    protocol: anthropic\n    json:\n      set: {a: b}\n")); err == nil ||
+		!strings.Contains(err.Error(), "declared twice") {
+		t.Errorf("duplicate variant: want error, got %v", err)
+	}
+	// Write blocks at the top level are the plain-template shape — rejected
+	// alongside variants to keep documents unambiguous.
+	if _, err := takeover.ParseTemplate("mix", "preset", []byte("file: ~/x.json\nformat: json\nclient: c\njson:\n  set: {a: b}\nvariants:\n  - name: a\n    protocol: openai\n    json:\n      set: {a: b}\n")); err == nil ||
+		!strings.Contains(err.Error(), "under each variant") {
+		t.Errorf("top-level write block with variants: want error, got %v", err)
+	}
+}

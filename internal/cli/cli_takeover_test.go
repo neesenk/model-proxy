@@ -630,8 +630,8 @@ providers:
 	if n := strings.Count(text, `"id": "glm-5.3"`); n != 1 {
 		t.Errorf("glm-5.3 appears %d times, want 1:\n%s", n, text)
 	}
-	if !strings.Contains(stderr, "split by native protocol") {
-		t.Errorf("selection note missing from log:\n%s", stderr)
+	if !strings.Contains(stderr, "1 Anthropic") || !strings.Contains(stderr, "1 Responses") || !strings.Contains(stderr, "all native passthrough") {
+		t.Errorf("split note must summarize each protocol's model count:\n%s", stderr)
 	}
 }
 
@@ -691,7 +691,7 @@ providers:
 	if strings.Contains(text, `"anthropic-messages"`) {
 		t.Errorf("pinned openai must not also write the anthropic variant:\n%s", text)
 	}
-	if !strings.Contains(stderr, "pinned by --mode") || !strings.Contains(stderr, "conversion needed for: glm-5.3") {
+	if !strings.Contains(stderr, "pinned by --mode") || !strings.Contains(stderr, "protocol conversion: glm-5.3") {
 		t.Errorf("log must explain the pin and its conversion cost:\n%s", stderr)
 	}
 }

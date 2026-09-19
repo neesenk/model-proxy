@@ -283,6 +283,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleTakeover(w, r)
 	case p == "/api/takeover" && r.Method == http.MethodPost:
 		s.handleTakeoverRun(w, r)
+	case p == "/api/takeover/preview" && r.Method == http.MethodPost:
+		s.handleTakeoverPreview(w, r)
 	case p == "/api/takeover/restore" && r.Method == http.MethodPost:
 		s.handleTakeoverRestore(w, r)
 	case strings.HasPrefix(p, "/api/takeover/templates/") && r.Method == http.MethodGet:

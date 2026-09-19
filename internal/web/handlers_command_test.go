@@ -33,7 +33,7 @@ type commandFake struct {
 	begin        func(context.Context, string) (appapi.LoginStart, error)
 	refreshMdls  func(context.Context, string) (appapi.ModelsRefreshResult, error)
 	probeMCP     func(context.Context, string) (appapi.MCPProbeResult, error)
-	takeoverRun  func(string, string) (appapi.TakeoverRunResult, error)
+	takeoverRun  func(appapi.TakeoverRunRequest) (appapi.TakeoverRunResult, error)
 	takeoverRest func(string) (appapi.TakeoverRestoreResult, error)
 	templateSave func(string, []byte) error
 	templateDel  func(string) error
@@ -139,9 +139,9 @@ func (fake *commandFake) BeginLogin(ctx context.Context, provider string) (appap
 	return appapi.LoginStart{}, nil
 }
 
-func (fake *commandFake) RunTakeover(client, mode string) (appapi.TakeoverRunResult, error) {
+func (fake *commandFake) RunTakeover(req appapi.TakeoverRunRequest) (appapi.TakeoverRunResult, error) {
 	if fake.takeoverRun != nil {
-		return fake.takeoverRun(client, mode)
+		return fake.takeoverRun(req)
 	}
 	return appapi.TakeoverRunResult{}, nil
 }

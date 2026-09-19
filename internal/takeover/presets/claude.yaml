@@ -1,4 +1,4 @@
-description: Claude Code — env injection into settings.json (claude 自拼 /v1/messages,base_url 用 bare)
+description: Claude Code — settings.json env 注入(claude 自拼 /v1/messages,base_url 用 bare)+ ~/.claude.json mcpServers 接管
 file: ~/.claude/settings.json
 format: json
 client: claude
@@ -8,4 +8,14 @@ json:
   set:
     env.ANTHROPIC_BASE_URL: "{{base_url}}"
     env.ANTHROPIC_AUTH_TOKEN: "{{token}}"
+    env.ANTHROPIC_MODEL: "{{model.primary}}"
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL: "{{model.primary}}"
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL: "{{model.primary}}"
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL: "{{model.fast}}"
   drift_path: env.ANTHROPIC_BASE_URL
+mcp:
+  file: ~/.claude.json
+  json_path: mcpServers
+  json_entry:
+    type: http
+    url: "{{mcp.url}}"

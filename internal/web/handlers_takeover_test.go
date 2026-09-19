@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -67,8 +68,8 @@ func TestTakeoverSurfaceHandler(t *testing.T) {
 func TestTakeoverRunHandler(t *testing.T) {
 	var gotClient, gotMode string
 	commands := &commandFake{
-		takeoverRun: func(client, mode string) (appapi.TakeoverRunResult, error) {
-			gotClient, gotMode = client, mode
+		takeoverRun: func(req appapi.TakeoverRunRequest) (appapi.TakeoverRunResult, error) {
+			gotClient, gotMode = req.Client, req.Mode
 			return appapi.TakeoverRunResult{
 				Status:   "ok",
 				Applied:  []appapi.TakeoverApplied{{Name: "pi", Note: "native coverage"}},
@@ -103,7 +104,7 @@ func TestTakeoverRunHandler(t *testing.T) {
 	}
 
 	// Backend failure (unknown client, bad mode) → 400 with the message.
-	commands.takeoverRun = func(string, string) (appapi.TakeoverRunResult, error) {
+	commands.takeoverRun = func(appapi.TakeoverRunRequest) (appapi.TakeoverRunResult, error) {
 		return appapi.TakeoverRunResult{}, errors.New(`unknown takeover client "nope"`)
 	}
 	rec = commandRequest(s, http.MethodPost, "/api/takeover", `{"client":"nope"}`)
@@ -193,5 +194,47 @@ func TestTakeoverTemplateHandlers(t *testing.T) {
 	rec = commandRequest(s, http.MethodDelete, "/api/takeover/templates/claude", "")
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "built-in preset") {
 		t.Errorf("DELETE preset = %d %s, want 400 with reason", rec.Code, rec.Body)
+	}
+}
+
+func TestTakeoverPreviewHandler(t *testing.T) {
+	reads := &readAPIStub{takeoverPreview: func(req appapi.TakeoverRunRequest, managedOnly bool) (appapi.TakeoverPreview, error) {
+		if req.Client == "pi" && req.Mode == "split" {
+			return appapi.TakeoverPreview{
+				Client: req.Client, Mode: req.Mode,
+				Writes: []appapi.TakeoverPreviewWrite{{
+					Templates: []string{"pi", "pi-responses"}, File: "~/.pi/agent/models.json",
+					Exists: true, Content: "{}",
+				}},
+			}, nil
+		}
+		return appapi.TakeoverPreview{}, appapi.NewHTTPError(http.StatusBadRequest, "unknown takeover client "+req.Client)
+	}}
+	s := newReadServer(t, reads)
+
+	rec := commandRequest(s, http.MethodPost, "/api/takeover/preview", `{"client":"pi","mode":"split"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview → %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Client string `json:"client"`
+		Mode   string `json:"mode"`
+		Writes []struct {
+			Templates []string `json:"templates"`
+			Exists    bool     `json:"exists"`
+		} `json:"writes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Client != "pi" || body.Mode != "split" || len(body.Writes) != 1 ||
+		len(body.Writes[0].Templates) != 2 || !body.Writes[0].Exists {
+		t.Errorf("preview body = %+v", body)
+	}
+
+	// A resolution failure keeps the service's 400 classification.
+	rec = commandRequest(s, http.MethodPost, "/api/takeover/preview", `{"client":"nope"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown client → %d, want 400", rec.Code)
 	}
 }
