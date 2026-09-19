@@ -36,9 +36,12 @@ func CmdGuard(args []string, cfg *configdomain.Config, stdout, stderr io.Writer)
 	jsonOut := hasFlag(args, "--json")
 	base := "http://" + cfg.Listen
 	if len(pos) == 0 {
-		fmt.Fprintln(stderr, "usage: model-proxy guard <blocks|unblock> [args]")
+		fmt.Fprintln(stderr, "usage: model-proxy guard <blocks|unblock|allowed|disallow> [args]")
 		fmt.Fprintln(stderr, "  guard blocks                 list adjudicated-blocked sessions")
-		fmt.Fprintln(stderr, "  guard unblock <session-id>   re-admit a blocked session")
+		fmt.Fprintln(stderr, "  guard unblock <session-id>   re-admit a blocked session (also releases")
+		fmt.Fprintln(stderr, "                               its content from re-interception)")
+		fmt.Fprintln(stderr, "  guard allowed                list operator content overrides")
+		fmt.Fprintln(stderr, "  guard disallow <hash>        revoke one content override")
 		return 1
 	}
 	switch pos[0] {
@@ -50,8 +53,16 @@ func CmdGuard(args []string, cfg *configdomain.Config, stdout, stderr io.Writer)
 			return 1
 		}
 		return runUnblock(base, pos[1], stdout, stderr)
+	case "allowed":
+		return renderAllowed(base, jsonOut, stdout, stderr)
+	case "disallow":
+		if len(pos) < 2 || pos[1] == "" {
+			fmt.Fprintf(stderr, "%s usage: model-proxy guard disallow <content-hash>\n", display.Red("✗"))
+			return 1
+		}
+		return runDisallow(base, pos[1], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "%s unknown guard subcommand %q — use blocks or unblock\n", display.Red("✗"), pos[0])
+		fmt.Fprintf(stderr, "%s unknown guard subcommand %q — use blocks, unblock, allowed or disallow\n", display.Red("✗"), pos[0])
 		return 1
 	}
 }
@@ -117,7 +128,68 @@ func runUnblock(base, sessionID string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "%s %s\n", display.Red("✗"), display.Truncate(strings.TrimSpace(string(rb)), 200))
 		return 1
 	}
-	fmt.Fprintf(stdout, "%s unblocked session %s — requests are admitted again\n", display.Green("✓"), sessionID)
+	fmt.Fprintf(stdout, "%s unblocked session %s — requests are admitted again; the verdict's content joins the operator override table\n", display.Green("✓"), sessionID)
+	return 0
+}
+
+// fetchAllowed gets /api/security/allowed (newest first).
+func fetchAllowed(base string) ([]appapi.SecurityAllowed, error) {
+	rb, status, err := daemonctl.Get(base, "/api/security/allowed")
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("%s", display.Truncate(strings.TrimSpace(string(rb)), 200))
+	}
+	var out struct {
+		Allowed []appapi.SecurityAllowed `json:"allowed"`
+	}
+	if err := json.Unmarshal(rb, &out); err != nil {
+		return nil, err
+	}
+	return out.Allowed, nil
+}
+
+func renderAllowed(base string, jsonOut bool, stdout, stderr io.Writer) int {
+	allowed, err := fetchAllowed(base)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s %v\n", display.Red("✗"), err)
+		return 1
+	}
+	if jsonOut {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(allowed)
+		return 0
+	}
+	if len(allowed) == 0 {
+		fmt.Fprintf(stdout, "%s no operator content overrides\n", display.Dim("•"))
+		return 0
+	}
+	fmt.Fprintf(stdout, "%s %d content override(s) — these bytes are never re-intercepted or re-judged\n\n", display.Bold("guard"), len(allowed))
+	for _, a := range allowed {
+		ts := time.UnixMilli(a.Ts).Format("2006-01-02 15:04:05")
+		fmt.Fprintf(stdout, "  %s\n", display.Bold(a.Hash))
+		fmt.Fprintf(stdout, "    rule=%s kind=%s source=%s ts=%s\n", a.Rule, a.Kind, a.Source, ts)
+		if a.Reason != "" {
+			fmt.Fprintf(stdout, "    reason: %s\n", a.Reason)
+		}
+		fmt.Fprintf(stdout, "    revoke: model-proxy guard disallow %s\n\n", a.Hash)
+	}
+	return 0
+}
+
+func runDisallow(base, hash string, stdout, stderr io.Writer) int {
+	rb, status, err := daemonctl.Do(http.MethodDelete, base, "/api/security/allowed/"+url.PathEscape(hash))
+	if err != nil {
+		fmt.Fprintf(stderr, "%s %v\n", display.Red("✗"), err)
+		return 1
+	}
+	if status != http.StatusOK {
+		fmt.Fprintf(stderr, "%s %s\n", display.Red("✗"), display.Truncate(strings.TrimSpace(string(rb)), 200))
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s revoked content override %s — next occurrence returns to fresh adjudication\n", display.Green("✓"), hash)
 	return 0
 }
 

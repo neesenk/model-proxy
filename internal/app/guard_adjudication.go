@@ -104,6 +104,13 @@ func (a adjudicatorAdapter) BlockSession(sessionID, rule, requestID, reason stri
 	})
 }
 
+// BlockSessionContent implements the repeat-interception path: the hit
+// bytes are recorded on the block (hash + cache key) so the operator
+// Unblock cascade can release the content together with the session.
+func (a adjudicatorAdapter) BlockSessionContent(sessionID, rule, requestID, reason, hit string) {
+	a.svc.BlockWithHit(sessionID, rule, requestID, reason, hit)
+}
+
 // AdjudicationConfig implements adjudicate.RuntimeConfig: the CURRENT
 // generation's model, per-call timeout and session-block switch, resolved
 // under a brief read lock (never held across the model call itself).
@@ -377,6 +384,32 @@ func (p *Proxy) adjudicationBlocks() []appapi.SecurityBlock {
 		return nil
 	}
 	return p.adjudication.Blocks()
+}
+
+// adjudicationAllowed implements admin.Ports.AdjudicationAllowed.
+func (p *Proxy) adjudicationAllowed() []appapi.SecurityAllowed {
+	if p.adjudication == nil {
+		return nil
+	}
+	return p.adjudication.AllowedSnapshot()
+}
+
+// adjudicationDisallow implements admin.Ports.AdjudicationDisallow. Revoking
+// an operator override is security-relevant: a live event records it (the
+// allow itself was recorded by the unblock cascade's audit trail).
+func (p *Proxy) adjudicationDisallow(hash string) bool {
+	if p.adjudication == nil {
+		return false
+	}
+	if !p.adjudication.Disallow(hash) {
+		return false
+	}
+	p.events.Publish(observeevents.Event{
+		Type:   "guard",
+		Ts:     time.Now().UnixMilli(),
+		Detail: "content override revoked (hash " + hash[:min(12, len(hash))] + "…) — next occurrence returns to fresh adjudication",
+	})
+	return true
 }
 
 // adjudicationUnblock implements admin.Ports.AdjudicationUnblock. Removing a

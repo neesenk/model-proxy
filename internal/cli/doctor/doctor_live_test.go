@@ -537,8 +537,8 @@ routes:
 }
 
 // TestCheckTakeoverDrift_NoProbeExempt: a taken-over template without a drift
-// probe (mcp-only claude-mcp preset) is exempt — reported taken but never
-// drifted (regression: post-takeover false alarm).
+// probe (mcp-only user template) is exempt — reported taken but never drifted
+// (regression: post-takeover false alarm).
 func TestCheckTakeoverDrift_NoProbeExempt(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -552,24 +552,31 @@ mcp:
 		t.Fatalf("load: %v", err)
 	}
 	bakDir := filepath.Join(home, ".model-proxy")
-	if err := os.MkdirAll(bakDir, 0o700); err != nil {
+	templatesDir := filepath.Join(bakDir, "takeover-templates")
+	if err := os.MkdirAll(templatesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// An mcp-only user template (the merged claude preset carries a probe, so
+	// the no-probe path needs its own template).
+	if err := os.WriteFile(filepath.Join(templatesDir, "my-mcp.yaml"), []byte(
+		"file: ~/.myagent.json\nformat: json\nmcp:\n  json_path: mcpServers\n  json_entry: {type: http, url: \"{{mcp.url}}\"}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// Taken over (backup marker + written mcpServers).
-	if err := os.WriteFile(filepath.Join(bakDir, "claude-mcp.bak"), []byte("{}"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(bakDir, "my-mcp.bak"), []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, ".claude.json"),
+	if err := os.WriteFile(filepath.Join(home, ".myagent.json"),
 		[]byte(`{"mcpServers":{"exa":{"type":"http","url":"http://127.0.0.1:8314/mcp/exa"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, d := range clidoctor.CheckTakeoverDrift(cfg, bakDir, "") {
-		if d.Client == "claude-mcp" {
+	for _, d := range clidoctor.CheckTakeoverDrift(cfg, bakDir, templatesDir) {
+		if d.Client == "my-mcp" {
 			if !d.Taken || !d.OK {
-				t.Fatalf("claude-mcp = %+v, want taken+ok (no-probe exempt)", d)
+				t.Fatalf("my-mcp = %+v, want taken+ok (no-probe exempt)", d)
 			}
 			return
 		}
 	}
-	t.Fatal("claude-mcp not reported")
+	t.Fatal("my-mcp not reported")
 }

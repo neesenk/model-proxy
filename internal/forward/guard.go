@@ -56,6 +56,10 @@ type Adjudicator interface {
 	// display — identity, never the value). Like high-verdict blocks it
 	// persists until explicitly unblocked.
 	BlockSession(sessionID, rule, requestID, reason string)
+	// BlockSessionContent blocks a session for a REPEAT interception of
+	// already-adjudicated-high bytes: the hit is recorded on the block so a
+	// later operator unblock cascades the release to the content itself.
+	BlockSessionContent(sessionID, rule, requestID, reason, hit string)
 	// ContentBlocked reports that these raw SECRET-hit bytes were already
 	// adjudicated high on an earlier request (persisted sha256 index, hash
 	// only — the bytes never persist). The pipeline intercepts repeats

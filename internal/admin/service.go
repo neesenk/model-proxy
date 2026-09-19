@@ -160,7 +160,13 @@ type Ports struct {
 	// blocks (nil = channel absent; the service reports an empty list).
 	AdjudicationBlocks func() []appapi.SecurityBlock
 	// AdjudicationUnblock removes one session block (false = not blocked).
+	// The removal cascades the operator's risk judgment to the content
+	// behind the verdict (see adjudicate.Service.Unblock).
 	AdjudicationUnblock func(sessionID string) bool
+	// AdjudicationAllowed snapshots the operator content overrides.
+	AdjudicationAllowed func() []appapi.SecurityAllowed
+	// AdjudicationDisallow revokes one content override (false = not found).
+	AdjudicationDisallow func(hash string) bool
 	// AdjudicationRecent snapshots the recent-verdict ring, newest first.
 	AdjudicationRecent func() []appapi.SecurityAdjudication
 	// AdjudicationStats reports the channel's LLM usage (calls + tokens).

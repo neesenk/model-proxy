@@ -25,7 +25,9 @@ func (s *Service) SecurityBlocks() []appapi.SecurityBlock {
 }
 
 // SecurityUnblock implements DELETE /api/security/blocks/<session>: removing
-// the persisted block re-admits the session's requests immediately.
+// the persisted block re-admits the session's requests immediately. The
+// removal cascades the operator's risk judgment to the content behind the
+// verdict — the same hit bytes are neither re-intercepted nor re-judged.
 func (s *Service) SecurityUnblock(sessionID string) error {
 	if s.ports.AdjudicationUnblock == nil {
 		return errors.New("guard adjudication is not wired")
@@ -35,6 +37,34 @@ func (s *Service) SecurityUnblock(sessionID string) error {
 	}
 	if !s.ports.AdjudicationUnblock(sessionID) {
 		return &appapi.HTTPError{Status: http.StatusNotFound, Message: "session " + sessionID + " is not blocked"}
+	}
+	return nil
+}
+
+// SecurityAllowed implements GET /api/security/allowed: the operator content
+// overrides (hash-keyed; never the bytes themselves).
+func (s *Service) SecurityAllowed() []appapi.SecurityAllowed {
+	if s.ports.AdjudicationAllowed == nil {
+		return []appapi.SecurityAllowed{}
+	}
+	if allowed := s.ports.AdjudicationAllowed(); allowed != nil {
+		return allowed
+	}
+	return []appapi.SecurityAllowed{}
+}
+
+// SecurityDisallow implements DELETE /api/security/allowed/<hash>: revoking
+// one override returns the content to fresh adjudication on its next
+// occurrence. Fails closed so a UI button can never silently no-op.
+func (s *Service) SecurityDisallow(hash string) error {
+	if s.ports.AdjudicationDisallow == nil {
+		return errors.New("guard adjudication is not wired")
+	}
+	if hash == "" {
+		return errors.New("content hash is required")
+	}
+	if !s.ports.AdjudicationDisallow(hash) {
+		return &appapi.HTTPError{Status: http.StatusNotFound, Message: "content hash is not allowed"}
 	}
 	return nil
 }

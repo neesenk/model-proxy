@@ -93,6 +93,131 @@ func (c staticConfig) AdjudicationConfig() (string, time.Duration, bool, bool) {
 	return c.model, c.timeout, c.blockSession, c.enabled
 }
 
+// TestUnblockCascadesToContent: unblocking IS the operator's final risk
+// judgment — the verdict's repeat-interception entry moves into the operator
+// override table (same bytes never re-intercepted, never re-judged), the
+// verdict cache drops, and both survive a restart. Pre-cascade entries
+// (no recorded artifacts) release the session only — no error, no collateral.
+func TestUnblockCascadesToContent(t *testing.T) {
+	dir := t.TempDir()
+	caller := &fakeCaller{}
+	sink := &fakeSink{}
+	s := New(Options{StateDir: dir})
+	s.Start(staticConfig{model: "judge", timeout: 5 * time.Second, blockSession: true, enabled: true}, caller, sink)
+	t.Cleanup(func() { s.Close(time.Second) })
+	caller.setAnswer(func(Job) (string, string, string, error) { return VerdictHigh, "real key shape", "", nil })
+
+	hit := "sk-proj-abcdefghij1234567890"
+	if !s.Enqueue(testJob(hit)) {
+		t.Fatal("Enqueue refused a fresh job")
+	}
+	waitFor(t, func() bool { _, ok := s.Blocked("sess-1"); return ok })
+	if _, blocked := s.ContentBlocked(hit); !blocked {
+		t.Fatal("content not in repeat index after high verdict")
+	}
+	if s.CacheLen() != 1 {
+		t.Fatalf("verdict cache len = %d, want 1", s.CacheLen())
+	}
+
+	bl, ok := s.Unblock("sess-1")
+	if !ok {
+		t.Fatal("unblock failed")
+	}
+	if len(bl.ContentHashes) != 1 || len(bl.CacheKeys) != 1 {
+		t.Fatalf("removed block artifacts = %+v, want one hash + one cache key", bl)
+	}
+	if _, blocked := s.ContentBlocked(hit); blocked {
+		t.Error("repeat index still intercepts after cascade unblock")
+	}
+	if s.CacheLen() != 0 {
+		t.Error("verdict cache not purged by the cascade")
+	}
+	allowed := s.AllowedSnapshot()
+	if len(allowed) != 1 || allowed[0].Source != "session-unblock" || allowed[0].Rule != "openai_api_key" {
+		t.Fatalf("allowed = %+v, want one session-unblock openai_api_key override", allowed)
+	}
+
+	// Same bytes again: accepted silently, never re-judged, never re-blocked.
+	callsBefore := len(caller.calls)
+	if !s.Enqueue(testJob(hit)) {
+		t.Fatal("Enqueue refused allowed content")
+	}
+	if got := len(caller.calls); got != callsBefore {
+		t.Errorf("judge calls = %d, want unchanged %d (allowed content is never re-judged)", got, callsBefore)
+	}
+	if _, ok := s.Blocked("sess-1"); ok {
+		t.Error("session re-blocked after operator override")
+	}
+
+	// The override survives a restart (fresh service over the same state).
+	s2 := New(Options{StateDir: dir})
+	if got := s2.AllowedSnapshot(); len(got) != 1 {
+		t.Fatalf("allowed after reload = %d, want 1", len(got))
+	}
+	if _, blocked := s2.ContentBlocked(hit); blocked {
+		t.Error("reloaded service still intercepts overridden content")
+	}
+
+	// Disallow revokes: enforcement returns to fresh adjudication.
+	if !s2.Disallow(s2.AllowedSnapshot()[0].Hash) {
+		t.Fatal("Disallow rejected a live override")
+	}
+	if len(s2.AllowedSnapshot()) != 0 {
+		t.Error("override not removed")
+	}
+}
+
+// TestUnblockHashlessEntry_SessionOnly: pre-cascade blocks (no recorded
+// artifacts — e.g. the exact-match channel) release the session only; the
+// repeat index and other content stay untouched.
+func TestUnblockHashlessEntry_SessionOnly(t *testing.T) {
+	s, _, _ := newTestService(t, Options{})
+	s.blockedContent.Record("sk-proj-abcdefghij1234567890", BlockedContent{Kind: KindSecret, Rule: "openai_api_key", Ts: 1})
+	s.Block("sess-2", Block{Kind: KindSecret, Rule: "jwt", Ts: 1})
+
+	if _, ok := s.Unblock("sess-2"); !ok {
+		t.Fatal("hashless unblock failed")
+	}
+	if _, ok := s.Blocked("sess-2"); ok {
+		t.Error("session still blocked")
+	}
+	if _, blocked := s.ContentBlocked("sk-proj-abcdefghij1234567890"); !blocked {
+		t.Error("unrelated repeat entry consumed by a hashless unblock")
+	}
+	if len(s.AllowedSnapshot()) != 0 {
+		t.Error("hashless unblock created an override")
+	}
+}
+
+// TestBlockWithHit_RecordsArtifacts: the repeat-interception re-block
+// records the content hash + cache key (attributed from the index entry), so
+// the operator unblock cascade works no matter which path produced the
+// block.
+func TestBlockWithHit_RecordsArtifacts(t *testing.T) {
+	s, _, _ := newTestService(t, Options{})
+	hit := "sk-proj-abcdefghij1234567890"
+	s.blockedContent.Record(hit, BlockedContent{Kind: KindSecret, Rule: "openai_api_key", Model: "judge", Ts: 1})
+
+	s.BlockWithHit("sess-9", "openai_api_key", "req-9", "repeat of earlier high", hit)
+	bl, ok := s.Blocked("sess-9")
+	if !ok {
+		t.Fatal("session not blocked")
+	}
+	if len(bl.ContentHashes) != 1 || len(bl.CacheKeys) != 1 {
+		t.Fatalf("block artifacts = %+v, want hash + cache key", bl)
+	}
+	// …and the cascade releases content + session together.
+	if _, ok := s.Unblock("sess-9"); !ok {
+		t.Fatal("unblock failed")
+	}
+	if _, blocked := s.ContentBlocked(hit); blocked {
+		t.Error("repeat index still intercepts after cascade")
+	}
+	if len(s.AllowedSnapshot()) != 1 {
+		t.Error("override not recorded")
+	}
+}
+
 func testJob(hit string) Job {
 	return Job{
 		Kind: KindSecret, Rule: "openai_api_key", Hit: hit,

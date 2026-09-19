@@ -17,12 +17,13 @@ import (
 // fakeAdjudicator captures enqueued jobs and scripts the session-block
 // answers (the app-side adapter is covered in internal/app).
 type fakeAdjudicator struct {
-	mu           sync.Mutex
-	jobs         []GuardAdjudication
-	enqueue      func() bool // script: nil = accept
-	blocked      map[string][2]string
-	blocks       []string // session ids added through BlockSession
-	blockReasons []string
+	mu                 sync.Mutex
+	jobs               []GuardAdjudication
+	enqueue            func() bool // script: nil = accept
+	blocked            map[string][2]string
+	blocks             []string // session ids added through BlockSession
+	blockReasons       []string
+	contentBlockedHits []string // hits passed through BlockSessionContent
 }
 
 func newFakeAdjudicator() *fakeAdjudicator {
@@ -63,6 +64,15 @@ func (f *fakeAdjudicator) BlockSession(sessionID, rule, requestID, reason string
 	f.blocked[sessionID] = [2]string{rule, requestID}
 	f.blockReasons = append(f.blockReasons, reason)
 	f.blocks = append(f.blocks, sessionID)
+}
+
+func (f *fakeAdjudicator) BlockSessionContent(sessionID, rule, requestID, reason, hit string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blocked[sessionID] = [2]string{rule, requestID}
+	f.blockReasons = append(f.blockReasons, reason)
+	f.blocks = append(f.blocks, sessionID)
+	f.contentBlockedHits = append(f.contentBlockedHits, hit)
 }
 
 func (f *fakeAdjudicator) captured() []GuardAdjudication {
@@ -219,6 +229,70 @@ func TestServeGuardAdjudicationBlockedSession(t *testing.T) {
 		t.Errorf("block message = %q, want rule + unblock hint", w.Body.String())
 	}
 	// The upstream must never see the request.
+	if up.hits() != 0 {
+		t.Errorf("upstream saw %d requests, want 0", up.hits())
+	}
+}
+
+// TestServeGuardAdjudicationBodyCarriedSession: agents without session
+// headers (Codex on the Responses protocol carries
+// client_metadata.session_id in the body) still get their session identity
+// into the adjudication channel — a later high verdict must land in the
+// block table and therefore the unblock list. Header values keep priority
+// over the body field.
+func TestServeGuardAdjudicationBodyCarriedSession(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("ok"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	h.svc.Adjudicator = adj
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off",
+		Adjudicate: guardAdjudicateOn()}))
+	snap.Guard = guardScanner(t, nil)
+
+	body := `{"model":"m","client_metadata":{"session_id":"s-body-1","thread_id":"t-1"},"messages":[{"role":"user","content":"sk-capture-dummy-not-a-real-key"}]}`
+	w := h.serve(snap, "openai", "/v1/chat/completions", body, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (deferred channel never blocks synchronously)", w.Code)
+	}
+	jobs := adj.captured()
+	if len(jobs) != 1 {
+		t.Fatalf("jobs = %d, want 1", len(jobs))
+	}
+	if jobs[0].SessionID != "s-body-1" {
+		t.Errorf("job session id = %q, want body-carried s-body-1", jobs[0].SessionID)
+	}
+
+	// A header, when present, outranks the body field.
+	w = h.serve(snap, "openai", "/v1/chat/completions", body, map[string]string{"x-claude-code-session-id": "s-hdr-1"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	jobs = adj.captured()
+	if len(jobs) != 2 || jobs[1].SessionID != "s-hdr-1" {
+		t.Errorf("job session id = %+v, want header-carried s-hdr-1", jobs[1:])
+	}
+}
+
+// TestServeGuardAdjudicationBlockedSessionFromBody: the block-table lookup
+// uses the same derivation — a session blocked under its body-carried id is
+// enforced even though the client sends no session header.
+func TestServeGuardAdjudicationBlockedSessionFromBody(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("ok"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	adj.blocked["s-body-1"] = [2]string{"jwt", "req-9"}
+	h.svc.Adjudicator = adj
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off"}))
+	snap.Guard = guardScanner(t, nil)
+
+	body := `{"model":"m","client_metadata":{"session_id":"s-body-1"},"messages":[{"role":"user","content":"clean"}]}`
+	w := h.serve(snap, "openai", "/v1/chat/completions", body, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "guard unblock s-body-1") {
+		t.Errorf("block message = %q, want unblock hint for s-body-1", w.Body.String())
+	}
 	if up.hits() != 0 {
 		t.Errorf("upstream saw %d requests, want 0", up.hits())
 	}

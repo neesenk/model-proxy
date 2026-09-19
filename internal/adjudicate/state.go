@@ -180,10 +180,33 @@ func (c *verdictCache) Len() int {
 	return len(c.ents)
 }
 
+// remove drops cache entries by key (the operator Unblock cascade) and
+// persists; absent keys are no-ops.
+func (c *verdictCache) remove(keys ...string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	changed := false
+	for _, k := range keys {
+		if _, ok := c.ents[k]; ok {
+			delete(c.ents, k)
+			changed = true
+		}
+	}
+	if !changed {
+		return
+	}
+	c.reorder()
+	_ = writeStateFile(c.path, verdictFile{Version: 1, Entries: c.ents})
+}
+
 // ---- session blocks ---------------------------------------------------
 
 // Block is one blocked session (high verdict + block_session). It persists
-// across restarts and clears only via Unblock.
+// across restarts and clears only via Unblock. ContentHashes/CacheKeys
+// record the verdict's enforcement artifacts (repeat-index entries +
+// verdict-cache keys) so an operator Unblock can cascade: releasing the
+// session also releases the same content from re-interception (the operator
+// unblock IS the final risk judgment — the judge never re-litigates it).
 type Block struct {
 	Kind      string `json:"kind"`
 	Rule      string `json:"rule"`
@@ -191,6 +214,11 @@ type Block struct {
 	Model     string `json:"model,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 	Ts        int64  `json:"ts"`
+	// ContentHashes: sha256(hit) per secret hit behind the verdict (empty
+	// for channels without hit bytes, e.g. exact known-secret matches).
+	ContentHashes []string `json:"content_hashes,omitempty"`
+	// CacheKeys: the verdict-cache keys behind the verdict.
+	CacheKeys []string `json:"cache_keys,omitempty"`
 }
 
 // blockFile is the on-disk form of guard_blocks.json.
@@ -281,8 +309,31 @@ func (b *blockStore) Blocked(sessionID string) (Block, bool) {
 func (b *blockStore) Block(sessionID string, bl Block) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	// A refresh that carries no artifact hashes (e.g. the exact-match
+	// channel) must not strip the hashes an earlier verdict recorded —
+	// otherwise a later Unblock could no longer cascade.
+	if prev, ok := b.blocks[sessionID]; ok {
+		bl.ContentHashes = unionStrings(prev.ContentHashes, bl.ContentHashes)
+		bl.CacheKeys = unionStrings(prev.CacheKeys, bl.CacheKeys)
+	}
 	b.blocks[sessionID] = bl
 	b.persistLocked()
+}
+
+// unionStrings merges two hash/key sets preserving order (first-seen first).
+func unionStrings(a, b []string) []string {
+	if len(a) == 0 {
+		return b
+	}
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, s := range append(append([]string{}, a...), b...) {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // Unblock removes one session block and returns the removed entry so the
@@ -457,6 +508,166 @@ func (s *blockedContentStore) Record(hit string, v BlockedContent) {
 	s.ents[key] = v
 	s.evictLocked()
 	_ = writeStateFile(s.path, blockedContentFile{Version: 1, Entries: s.ents})
+}
+
+// Remove deletes one entry by its sha256 key (the operator Unblock cascade)
+// and reports whether it existed.
+func (s *blockedContentStore) Remove(hash string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.ents[hash]; !ok {
+		return false
+	}
+	delete(s.ents, hash)
+	_ = writeStateFile(s.path, blockedContentFile{Version: 1, Entries: s.ents})
+	return true
+}
+
+// Entry returns one entry by hash (attribution for the repeat re-block path).
+func (s *blockedContentStore) Entry(hash string) (BlockedContent, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.ents[hash]
+	return v, ok
+}
+
+// Snapshot lists the index newest first (audit surfaces; hashes only).
+func (s *blockedContentStore) Snapshot() []BlockedContentEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]BlockedContentEntry, 0, len(s.ents))
+	for k, v := range s.ents {
+		out = append(out, BlockedContentEntry{Hash: k, BlockedContent: v})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Ts > out[j].Ts })
+	return out
+}
+
+// BlockedContentEntry is one repeat-interception entry with its key (the
+// admin/API DTO shape).
+type BlockedContentEntry struct {
+	Hash string `json:"hash"`
+	BlockedContent
+}
+
+// ---- allowed content (operator override) ---------------------------------
+
+// AllowedContent is an operator-reviewed hit: unblocking a session whose
+// verdict produced repeat-interception entries cascades the release to the
+// content itself. The judge channel never re-litigates allowed bytes — the
+// operator unblock is the final risk judgment. Like every persisted guard
+// artifact it stores hashes only, never the hit bytes.
+type AllowedContent struct {
+	Kind   string `json:"kind"`
+	Rule   string `json:"rule,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	Source string `json:"source,omitempty"` // how the allow was granted (e.g. session-unblock)
+	Ts     int64  `json:"ts"`
+}
+
+type allowedContentFile struct {
+	Version int                       `json:"version"`
+	Entries map[string]AllowedContent `json:"entries"`
+}
+
+// allowedContentStore is the persisted operator-override table, keyed by the
+// same sha256(hit) the repeat index uses so a cascade can move entries
+// verbatim. Oldest entries evict past max.
+type allowedContentStore struct {
+	mu   sync.Mutex
+	path string
+	max  int
+	ents map[string]AllowedContent
+}
+
+func loadAllowedContentStore(path string, max int) *allowedContentStore {
+	s := &allowedContentStore{path: path, max: max, ents: map[string]AllowedContent{}}
+	if path == "" || max <= 0 {
+		return s
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return s
+	}
+	var f allowedContentFile
+	if json.Unmarshal(data, &f) != nil || f.Version != 1 {
+		return s
+	}
+	for k, v := range f.Entries {
+		s.ents[k] = v
+	}
+	s.evictLocked()
+	return s
+}
+
+func (s *allowedContentStore) evictLocked() {
+	if len(s.ents) <= s.max {
+		return
+	}
+	type kt struct {
+		k  string
+		ts int64
+	}
+	order := make([]kt, 0, len(s.ents))
+	for k, v := range s.ents {
+		order = append(order, kt{k, v.Ts})
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i].ts < order[j].ts })
+	for len(s.ents) > s.max {
+		delete(s.ents, order[0].k)
+		order = order[1:]
+	}
+}
+
+// Allowed reports whether these hit bytes carry an operator override.
+func (s *allowedContentStore) Allowed(hit string) (AllowedContent, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.ents[hashHit(hit)]
+	return v, ok
+}
+
+// AllowHash records an override for an already-hashed entry (the Unblock
+// cascade moves repeat-index keys verbatim).
+func (s *allowedContentStore) AllowHash(hash string, v AllowedContent) {
+	if hash == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ents[hash] = v
+	s.evictLocked()
+	_ = writeStateFile(s.path, allowedContentFile{Version: 1, Entries: s.ents})
+}
+
+// Remove revokes one override (hash key); enforcement falls back to fresh
+// adjudication on the content's next occurrence.
+func (s *allowedContentStore) Remove(hash string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.ents[hash]; !ok {
+		return false
+	}
+	delete(s.ents, hash)
+	_ = writeStateFile(s.path, allowedContentFile{Version: 1, Entries: s.ents})
+	return true
+}
+
+// AllowedEntry is one override plus its key (the admin/API DTO shape).
+type AllowedEntry struct {
+	Hash string `json:"hash"`
+	AllowedContent
+}
+
+func (s *allowedContentStore) Snapshot() []AllowedEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]AllowedEntry, 0, len(s.ents))
+	for k, v := range s.ents {
+		out = append(out, AllowedEntry{Hash: k, AllowedContent: v})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Ts > out[j].Ts })
+	return out
 }
 
 // Blocked looks the raw hit bytes up.

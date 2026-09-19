@@ -501,6 +501,11 @@ type SecurityExplainAdjudication struct {
 // field set has one owner.
 type SecurityBlock = adjudicate.BlockEntry
 
+// SecurityAllowed is one operator content override: hit bytes released by a
+// session unblock's cascade (or a future explicit allow surface). Same alias
+// convention — the adjudicate package owns the field set.
+type SecurityAllowed = adjudicate.AllowedEntry
+
 // SecurityAdjudicationStats is the LLM usage accounting of the adjudication
 // channel: real model calls and their token totals. Cache hits cost nothing
 // and are not counted.
@@ -815,6 +820,9 @@ type ReadAPI interface {
 	// path; names are the audit record's pattern/category names.
 	SecurityExplain(requestID, kind string, names []string) (SecurityExplainResult, error)
 	SecurityBlocks() []SecurityBlock
+	// SecurityAllowed lists the operator content overrides (session-unblock
+	// cascade; hash-keyed, never the bytes themselves).
+	SecurityAllowed() []SecurityAllowed
 	SecurityAdjudications() SecurityAdjudicationFeed
 	ConfigDocument() (ConfigDocument, error)
 	// ModelsDocument projects the startup protocol probe's per-provider model
@@ -858,6 +866,9 @@ type CommandAPI interface {
 	ClearPin(route string) bool
 	// SecurityUnblock removes one persisted guard-adjudication session block.
 	SecurityUnblock(sessionID string) error
+	// SecurityDisallow revokes one content override — the content returns to
+	// fresh adjudication on its next occurrence.
+	SecurityDisallow(hash string) error
 	SaveConfig([]byte) error
 	// ValidateConfig lints candidate config bytes without persisting anything;
 	// an empty result means valid.

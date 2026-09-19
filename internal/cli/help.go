@@ -43,7 +43,7 @@ Commands:
   cache                Show exact-response cache hit stats (queries the daemon)
   doctor               Offline scheduling diagnostic (config only, no daemon)
   audit                Show the security audit log (offline, no daemon)
-  guard                List/unblock AI-adjudicated session blocks
+  guard                List/unblock adjudicated session blocks; manage content overrides
   test <model>         End-to-end probe of a model's route targets (real upstream calls)
   mcp [list|test]      Manage MCP gateway servers (mcp: config; test runs the handshake)
   replay <id> --to P   Re-answer a logged request with a different backend
@@ -266,7 +266,7 @@ Flags:
                 filtered set (--limit ignored; internal cap 10000 records)
   --json        raw records JSON for jq; with --stats, the aggregate as JSON`,
 
-	"guard": `guard <blocks|unblock> [--json] [--config PATH]
+	"guard": `guard <blocks|unblock|allowed|disallow> [--json] [--config PATH]
 
   Manage the AI second-opinion session blocks (guard.adjudicate): pattern
   guard hits a high verdict from the designated model under block_session
@@ -274,10 +274,19 @@ Flags:
   the WebUI Security page. Blocks persist across daemon restarts. Requires
   the running daemon (admin API).
 
+  Unblocking IS the operator's final risk judgment: the verdict's content
+  moves to the operator override table (same bytes are never re-intercepted
+  or re-judged). Manage those overrides with allowed/disallow.
+
 Subcommands:
   blocks                 list blocked sessions (newest first)
   blocks --json          raw JSON for jq
-  unblock <session-id>   re-admit a blocked session immediately`,
+  unblock <session-id>   re-admit a blocked session immediately (also
+                         releases its content — operator override)
+  allowed                list operator content overrides (hash-keyed)
+  allowed --json         raw JSON for jq
+  disallow <hash>        revoke one override — the content returns to
+                         fresh adjudication on its next occurrence`,
 
 	"test": `test <model> [--config PATH]
 

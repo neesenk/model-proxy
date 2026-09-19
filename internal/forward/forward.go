@@ -66,10 +66,16 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	// Detect the calling agent once (UA / known headers); attributed to guard
 	// and cache-hit events here and to whichever target commits downstream.
 	agent := counters.DetectAgent(r)
-	// Resolve the client session id once from the configured header allowlist;
-	// it rides every live event and the request log (never the routing sticky
+	// Resolve the client session id once: first the configured header
+	// allowlist, then — for agents that send no session headers (Codex on
+	// the Responses protocol carries it as client_metadata.session_id in
+	// the body) — the body-derived fallback. It rides every live event, the
+	// request log and the guard session dimension (never the routing sticky
 	// key, which stays x-claude-code-session-id).
 	clientSession := requestlog.SessionID(r, cfg.RequestLog.ResolvedSessionHeaders())
+	if clientSession == "" {
+		clientSession = requestlog.SessionIDFromBody(origBody)
+	}
 
 	calledModel := protocol.ExtractModel(origBody)
 	if calledModel == "" {
@@ -788,7 +794,7 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 		// block outlives the config that produced it (it persists until
 		// explicitly unblocked via CLI/WebUI, by design).
 		if p.svc.Adjudicator != nil {
-			if sid := r.Header.Get("x-claude-code-session-id"); sid != "" {
+			if sid := clientSession; sid != "" {
 				if rule, rid, blocked := p.svc.Adjudicator.SessionBlocked(sid); blocked {
 					p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
 					http.Error(w, fmt.Sprintf("blocked: session %s was adjudicated high-risk by guard (rule=%s, request=%s) — unblock via 'model-proxy guard unblock %s' or the WebUI Security page", sid, rule, rid, sid), http.StatusBadRequest)
@@ -800,7 +806,7 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 		secretNames := guardDecision.Secrets
 		adjMeta := GuardAdjudication{
 			RequestID: requestID,
-			SessionID: r.Header.Get("x-claude-code-session-id"),
+			SessionID: clientSession,
 			Agent:     agent,
 			Proto:     proto,
 			Exposed:   exposed,
@@ -885,6 +891,7 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 		// below. Secret hits only (path literals stay per-occurrence).
 		var repeatBlocked struct {
 			rule, reason, evidence, model string
+			firstHit                      string
 			names                         []string
 		}
 		if repeatIndexOn {
@@ -895,6 +902,7 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 					if repeatBlocked.rule == "" {
 						repeatBlocked.rule, repeatBlocked.reason = rule, reason
 						repeatBlocked.evidence, repeatBlocked.model = evidence, model
+						repeatBlocked.firstHit = j.Hit
 						_ = kind // always the secret channel by construction
 					}
 					repeatBlocked.names = append(repeatBlocked.names, j.Rule)
@@ -938,7 +946,7 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 					Model: repeatBlocked.model,
 				})
 				if adjMeta.SessionID != "" {
-					p.svc.Adjudicator.BlockSession(adjMeta.SessionID, repeatBlocked.rule, requestID, repeatBlocked.reason)
+					p.svc.Adjudicator.BlockSessionContent(adjMeta.SessionID, repeatBlocked.rule, requestID, repeatBlocked.reason, repeatBlocked.firstHit)
 				}
 				// Fail-open suppression is SEGMENT-granular, never
 				// name-granular: intercepted jobs were consumed by the
@@ -1072,7 +1080,7 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 		//     secret's longest prefix seen in order across the session.
 		// secrets=off disables this pass together with the secrets channel.
 		var fragmented bool
-		sessionID := r.Header.Get("x-claude-code-session-id")
+		sessionID := clientSession
 		if action != "off" && cfg.Guard.SessionScanEnabled() && sc.HasKnownSecrets() &&
 			sessionID != "" && p.svc.SessionScan != nil {
 			tail, progress, tailKnown, tailKnownOK := p.svc.SessionScan.Snapshot(sessionID, sc)

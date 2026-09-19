@@ -182,6 +182,12 @@ type Service struct {
 	// bytes (sha256-keyed, persisted hash-only in guard_blocked.json).
 	blockedContent *blockedContentStore
 
+	// allowedContent is the operator-override table: hit bytes whose risk an
+	// operator has finally judged acceptable (via session Unblock's cascade).
+	// Both hit gates (repeat interception, fresh adjudication) skip allowed
+	// bytes — the judge never re-litigates an operator decision.
+	allowedContent *allowedContentStore
+
 	stop chan struct{}
 	done chan struct{}
 }
@@ -215,6 +221,7 @@ func New(opts Options) *Service {
 	s.cache = loadVerdictCache(statePath(opts.StateDir, "guard_verdicts.json"), opts.CacheMax)
 	s.blocks = loadBlockStore(statePath(opts.StateDir, "guard_blocks.json"))
 	s.blockedContent = loadBlockedContentStore(statePath(opts.StateDir, "guard_blocked.json"), opts.CacheMax)
+	s.allowedContent = loadAllowedContentStore(statePath(opts.StateDir, "guard_allowed.json"), opts.CacheMax)
 	s.statsPath = statePath(opts.StateDir, "guard_stats.json")
 	s.statsCalls, s.statsInTok, s.statsOutTok, s.statsLows = loadUsageStats(s.statsPath)
 	s.ring = newResultRing(opts.RingSize)
@@ -270,6 +277,13 @@ func (s *Service) Enqueue(j Job) bool {
 	if s.closed {
 		s.mu.Unlock()
 		return false
+	}
+	// Operator override: allowed bytes are neither re-intercepted nor
+	// re-judged — reporting acceptance (not queue overflow) keeps the
+	// forward path from failing open to the classic immediate record.
+	if _, ok := s.allowedContent.Allowed(j.Hit); ok {
+		s.mu.Unlock()
+		return true
 	}
 	model, _, blockSession, enabled := s.cfg.AdjudicationConfig()
 	if !enabled {
@@ -378,10 +392,17 @@ func (s *Service) apply(j Job, verdict, reason, evidence, model string, blockSes
 		// channel exists to suppress — the ring entry below is the
 		// per-occurrence visibility.
 		if blockSession && j.SessionID != "" {
-			s.blocks.Block(j.SessionID, Block{
+			bl := Block{
 				Kind: j.Kind, Rule: j.Rule, Reason: reason, Model: model,
 				RequestID: j.RequestID, Ts: res.Ts,
-			})
+			}
+			if j.Kind == KindSecret {
+				// Record the verdict's enforcement artifacts so a later
+				// operator Unblock can cascade to the content itself.
+				bl.ContentHashes = []string{hashHit(j.Hit)}
+				bl.CacheKeys = []string{CacheKey(j, model)}
+			}
+			s.blocks.Block(j.SessionID, bl)
 		}
 		// Every SECRET-kind high (fresh or cached replay) joins the
 		// repeat-interception index: the same credential bytes in a later
@@ -469,7 +490,59 @@ func (s *Service) Block(sessionID string, b Block) { s.blocks.Block(sessionID, b
 
 // Unblock removes one session block and returns the removed entry (for the
 // unblock audit trail); false when not blocked.
-func (s *Service) Unblock(sessionID string) (Block, bool) { return s.blocks.Unblock(sessionID) }
+// Unblock removes one session block and cascades the operator's risk
+// judgment to the content behind it: every recorded repeat-interception
+// entry moves into the operator-override table (same bytes are never
+// re-intercepted and never re-judged), and the verdict-cache entries drop so
+// no cached high can resurrect them. It returns the removed entry for the
+// unblock audit record; false when the session was not blocked.
+func (s *Service) Unblock(sessionID string) (Block, bool) {
+	bl, ok := s.blocks.Unblock(sessionID)
+	if !ok {
+		return Block{}, false
+	}
+	if len(bl.ContentHashes) == 0 && len(bl.CacheKeys) == 0 {
+		return bl, true // pre-cascade entry (or hash-less channel): session-only release
+	}
+	now := s.opts.Now().UnixMilli()
+	for _, h := range bl.ContentHashes {
+		bc, hadEntry := s.blockedContent.Entry(h)
+		s.blockedContent.Remove(h)
+		ac := AllowedContent{Kind: bl.Kind, Rule: bl.Rule, Reason: bl.Reason, Source: "session-unblock", Ts: now}
+		if hadEntry {
+			ac.Kind, ac.Rule, ac.Reason = bc.Kind, bc.Rule, bc.Reason
+		}
+		s.allowedContent.AllowHash(h, ac)
+	}
+	s.cache.remove(bl.CacheKeys...)
+	return bl, true
+}
+
+// BlockWithHit blocks a session for a REPEAT interception: the hit bytes are
+// known, so the block entry records the content hash (and the cache key,
+// attributed from the original index entry) — keeping the Unblock cascade
+// intact no matter which path produced the block.
+func (s *Service) BlockWithHit(sessionID, rule, requestID, reason, hit string) {
+	hash := hashHit(hit)
+	bc, _ := s.blockedContent.Entry(hash)
+	bl := Block{
+		Kind: bc.Kind, Rule: rule, Reason: reason, Model: bc.Model,
+		RequestID: requestID, Ts: s.opts.Now().UnixMilli(),
+		ContentHashes: []string{hash},
+	}
+	if bc.Kind != "" && bc.Model != "" {
+		bl.CacheKeys = []string{CacheKey(Job{Kind: bc.Kind, Rule: bc.Rule, Hit: hit}, bc.Model)}
+	}
+	s.blocks.Block(sessionID, bl)
+}
+
+// AllowedSnapshot lists the operator overrides newest first (audit surface).
+func (s *Service) AllowedSnapshot() []AllowedEntry { return s.allowedContent.Snapshot() }
+
+// Disallow revokes one operator override. Enforcement falls back to fresh
+// adjudication on the content's next occurrence (the repeat index entry was
+// already consumed by the cascade); false when the hash was not allowed.
+func (s *Service) Disallow(hash string) bool { return s.allowedContent.Remove(hash) }
 
 // Blocks snapshots the block table (with session ids), newest first.
 func (s *Service) Blocks() []BlockEntry { return s.blocks.Snapshot() }
@@ -479,8 +552,11 @@ func (s *Service) Recent() []Result { return s.ring.Snapshot() }
 
 // ContentBlocked reports whether these raw hit bytes were already adjudicated
 // high (secret-kind hits only — see apply). The forward path uses it to
-// intercept repeats verbatim.
+// intercept repeats verbatim. Operator-allowed bytes are never blocked.
 func (s *Service) ContentBlocked(hit string) (BlockedContent, bool) {
+	if _, ok := s.allowedContent.Allowed(hit); ok {
+		return BlockedContent{}, false
+	}
 	return s.blockedContent.Blocked(hit)
 }
 
