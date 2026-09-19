@@ -124,3 +124,58 @@ func TestParseReasoning(t *testing.T) {
 		t.Error("Reasoning lost across disk round-trip")
 	}
 }
+
+// TestParseTopLevelToolCallAndEfforts pins the CURRENT models.dev api.json
+// shape: tool_call lives at the model object's top level (the nested
+// features.tool_call shape in the main fixture is the legacy fallback), and
+// reasoning_options type "effort" values project onto ReasoningEfforts with
+// "none" filtered (it is the thinking-off switch, not an effort level).
+func TestParseTopLevelToolCallAndEfforts(t *testing.T) {
+	fixture := `{
+  "kimi-for-coding": {"models": {
+    "k3": {"limit":{"context":1048576,"output":131072},"modalities":{"input":["text","image","video"],"output":["text"]},
+           "reasoning":true,"tool_call":true,
+           "reasoning_options":[{"type":"toggle"},{"type":"effort","values":["low","high","max"]}]},
+    "kimi-for-coding-highspeed": {"limit":{"context":262144,"output":32768},"modalities":{"input":["text","image"],"output":["text"]},
+           "reasoning":true,"tool_call":true,"reasoning_options":[]},
+    "plain": {"limit":{"context":1000,"output":100},"modalities":{"input":["text"],"output":["text"]}}
+  }}
+}`
+	cat, err := parse([]byte(fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	k3, _ := cat.Lookup("k3")
+	if !k3.ToolCall || !k3.Reasoning {
+		t.Fatalf("k3 top-level flags lost: %+v", k3)
+	}
+	want := []string{"low", "high", "max"}
+	if len(k3.ReasoningEfforts) != len(want) {
+		t.Fatalf("k3 efforts = %v, want %v", k3.ReasoningEfforts, want)
+	}
+	for i := range want {
+		if k3.ReasoningEfforts[i] != want[i] {
+			t.Fatalf("k3 efforts = %v, want %v", k3.ReasoningEfforts, want)
+		}
+	}
+	hs, _ := cat.Lookup("kimi-for-coding-highspeed")
+	if len(hs.ReasoningEfforts) != 0 {
+		t.Fatalf("highspeed efforts = %v, want none (empty reasoning_options)", hs.ReasoningEfforts)
+	}
+	plain, _ := cat.Lookup("plain")
+	if plain.ToolCall || plain.Reasoning || len(plain.ReasoningEfforts) != 0 {
+		t.Fatalf("plain model must stay capability-free: %+v", plain)
+	}
+
+	// "none" is filtered from effort values.
+	noneFiltered := `{"p":{"models":{"m":{"limit":{"context":1,"output":1},
+	  "reasoning_options":[{"type":"effort","values":["none","low","high"]}]}}}}`
+	cat2, err := parse([]byte(noneFiltered))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := cat2.Lookup("m")
+	if len(m.ReasoningEfforts) != 2 || m.ReasoningEfforts[0] != "low" || m.ReasoningEfforts[1] != "high" {
+		t.Fatalf(`efforts with "none" = %v, want [low high]`, m.ReasoningEfforts)
+	}
+}
