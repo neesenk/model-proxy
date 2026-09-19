@@ -1299,11 +1299,21 @@ func TestMCPGateway_LiveProviderIsServingAccount(t *testing.T) {
 		t.Fatalf("poisoned key hit %d times, want exactly 1 (rotation did not happen)", counts["Bearer k-A"])
 	}
 
+	// End events publish after their handlers return (deferred identity
+	// threading) — poll until both landed instead of one snapshot.
 	var ends []string
-	for _, e := range p.events.Snapshot() {
-		if e.Protocol == "mcp" && e.Type == "end" {
-			ends = append(ends, e.Provider)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ends = ends[:0]
+		for _, e := range p.events.Snapshot() {
+			if e.Protocol == "mcp" && e.Type == "end" {
+				ends = append(ends, e.Provider)
+			}
 		}
+		if len(ends) == 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if len(ends) != 2 {
 		t.Fatalf("mcp end events = %v", ends)
