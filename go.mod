@@ -1,6 +1,6 @@
 module model-proxy
 
-go 1.26.4
+go 1.27.1
 
 require (
 	// Pinned to the upstream main-branch commit that added native go1.27
