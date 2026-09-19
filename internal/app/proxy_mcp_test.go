@@ -1046,31 +1046,32 @@ func TestMCPGateway_LegacySSE(t *testing.T) {
 	}
 	mu.Unlock()
 
-	// Closing the GET stream kills the legacy session.
+	// Closing the GET stream kills the legacy session — asynchronously: the
+	// reaper observes stream end and drops the table entry, so the stale-id
+	// probe must POLL until the mps id stops resolving (slow CI machines hit
+	// the window where cleanup has not landed yet; a single probe flakes).
 	close(release)
 	resp.Body.Close()
-	deadline = time.Now().Add(2 * time.Second)
-	for {
-		post = mcpPost(t, srv.URL+"/mcp/legacy?mps="+localID, "", mcpCallBody)
-		post.Body.Close()
-		mu.Lock()
-		urlBefore := postURL
-		mu.Unlock()
-		_ = urlBefore
-		break
-	}
-	// After stream end the session is gone: the mps id no longer resolves, so
-	// the request must NOT carry the upstream correlation (fails closed as a
-	// sessionless request against the sse URL, never to /messages).
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		mu.Lock()
 		got := postURL
 		mu.Unlock()
-		if got == "/messages?sessionId=up-42" {
-			t.Fatal("stale mps session still reached the upstream endpoint")
+		if got != "/messages?sessionId=up-42" {
+			break // session gone: subsequent POSTs stopped correlating
 		}
-		break
+		post = mcpPost(t, srv.URL+"/mcp/legacy?mps="+localID, "", mcpCallBody)
+		post.Body.Close()
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	got := postURL
+	mu.Unlock()
+	// After stream end the session is gone: the mps id no longer resolves, so
+	// the request must NOT carry the upstream correlation (fails closed as a
+	// sessionless request against the sse URL, never to /messages).
+	if got == "/messages?sessionId=up-42" {
+		t.Fatal("stale mps session still reached the upstream endpoint")
 	}
 }
 
@@ -1098,20 +1099,34 @@ func TestMCPGateway_LiveEvents(t *testing.T) {
 	mcpPost(t, srv.URL+"/mcp/zs", "", mcpInitBody).Body.Close()
 	mcpPost(t, srv.URL+"/mcp/ghost", "", mcpCallBody).Body.Close()
 
-	var starts, ends []string
-	for _, e := range p.events.Snapshot() {
-		if e.Protocol != "mcp" {
-			continue
-		}
-		switch e.Type {
-		case "start":
-			starts = append(starts, e.RequestID+":"+e.Exposed)
-		case "end":
-			if e.Exposed != "zs" || e.Status != 200 || e.Provider != "zhipu" {
-				t.Fatalf("end event = %+v", e)
+	// The end event publishes after the handler returns (identity threading
+	// defers it), so poll for it instead of snapshotting once — on slow CI
+	// the response can beat the deferred publish.
+	collectEvents := func() (starts, ends []string) {
+		for _, e := range p.events.Snapshot() {
+			if e.Protocol != "mcp" {
+				continue
 			}
-			ends = append(ends, e.RequestID)
+			switch e.Type {
+			case "start":
+				starts = append(starts, e.RequestID+":"+e.Exposed)
+			case "end":
+				if e.Exposed != "zs" || e.Status != 200 || e.Provider != "zhipu" {
+					t.Fatalf("end event = %+v", e)
+				}
+				ends = append(ends, e.RequestID)
+			}
 		}
+		return starts, ends
+	}
+	var starts, ends []string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		starts, ends = collectEvents()
+		if len(starts) == 1 && len(ends) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if len(starts) != 1 || !strings.HasSuffix(starts[0], ":zs") {
 		t.Fatalf("start events = %v (unknown server must not publish)", starts)
