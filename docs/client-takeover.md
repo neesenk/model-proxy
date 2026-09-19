@@ -48,6 +48,15 @@ toml:                              # format=toml:文本行编辑(无 TOML decode
         base_url = "{{base_url}}"
         wire_api = "responses"
 
+variants:                          # 多协议 agent 单文档声明(opencode/pi 预设的形态):
+  - name: pi                       #   每变体一份协议身份(name/protocol/base_url/
+    protocol: anthropic            #   provider_id)与写入块(json/models),展开成
+    base_url: bare                 #   独立模板——族选择/split 分区/备份单元/CLI
+    json: {…}                      #   `takeover <变体名>` 全部按展开后模板工作
+  - name: pi-openai                # 顶层只留共享字段(description/file/format/
+    protocol: openai               #   client);mcp 块可顶层共享(渲染与变体无关)
+    base_url: v1                   #   顶层出现写入块/协议身份与 variants 互斥(校验拒绝)
+
 env:                               # format=env:KEY=VALUE 文件(注释/未管键保留)
   set: {GOOGLE_GEMINI_BASE_URL: "{{base_url}}", GEMINI_API_KEY: "{{token}}"}
 
@@ -56,15 +65,17 @@ models:                            # 可选:按暴露模型逐个输出元数据
   json_path: provider.{{provider_id}}.models   # opencode/pi:集合注入点
   toml_section: 'models."{{model.id}}"'        # kimi:每模型段名
   toml_body: |                     # 支持 {{model.id}} {{model.context}} {{model.output}} {{provider_id}}
-    provider = "{{provider_id}}"
+    provider = "{{provider_id}}"               #   及 kimi 能力块 {{model.capabilities}} {{model.efforts}}
     model = "{{model.id}}"
     max_context_size = {{model.context}}
   also_remove: 'models.{{model.id}}'           # 可选:写前清理旧段(如未加引号的遗留块)
 
 mcp:                               # 可选:把网关 mcp:/mcp_routes: 面写成客户端 MCP 配置
-  json_path: mcpServers            # json:对象注入点(claude: mcpServers;opencode: mcp)
+  file: ~/.claude.json             # 可选:MCP 存于独立 JSON 文件时(claude/kimi;缺省写主文件,如 opencode/codex)——独立备份单元 <name>-mcp,与主文件格式无关(mcp 块按 JSON 语义校验/渲染)
+  json_path: mcpServers            # json:对象注入点(claude 的 ~/.claude.json;opencode: mcp)
   json_entry: {type: http, url: "{{mcp.url}}"}  # 每条目值模板(占位符见下)
   toml_section: 'mcp_servers."{{mcp.name}}"'   # toml:每条目段名
+  include_routed_members: false    # 可选(默认 false):被 mcp_routes 聚合的成员 server 不再单独写条目——route 是规范入口,成员直连会造成客户端工具重叠;true 恢复全量投影
   toml_body: |
     url = "{{mcp.url}}"
 ```
@@ -72,7 +83,15 @@ mcp:                               # 可选:把网关 mcp:/mcp_routes: 面写成
 占位符：`{{proxy_url}}` `{{base_url}}` `{{token}}`(= `PROXY_MANAGED`)
 `{{provider_id}}` `{{display_name}}`；模型循环内另有 `{{model.id}}`
 `{{model.context}}` `{{model.output}}`；mcp 条目循环内另有 `{{mcp.name}}` `{{mcp.url}}`
-（url = `<proxy>/mcp/<name>`，server 与 route 各占一条，按名排序）。
+（url = `<proxy>/mcp/<name>`，按名排序）。**默认面 = 全部 route + 未被任何启用 route
+聚合的 server**：被聚合的成员默认不单独投影（route 已覆盖其能力，重复直连会让客户端
+看到重叠工具）；`include_routed_members: true` 恢复全量。禁用的 server/route 不投影
+（其 `/mcp/` 端点 404，写入即死条目）；禁用的 route 不拥有成员——其成员回退直连投影，
+能力保持可达。显式 MCP 子集（CLI `--mcp` / Web 确认对话框 chip）在全量面上选择：点名
+被裁剪的成员 = 显式要求直连，优于默认裁剪。kimi 形状另有
+`{{model.capabilities}}`（models.dev 元数据派生的 TOML 能力数组，见下节）与
+`{{model.efforts}}`（`support_efforts` + `default_effort` 两行块，模型无 effort
+档位时渲染为空——写空档位会破坏 kimi-cli 的 effort 选择器）。
 
 mcp 渲染是**合并语义**：先清理指向本代理 `/mcp/` 的陈旧条目（JSON 按 url 前缀、TOML 按
 段名前缀+正文 URL 匹配），再写入当前面；用户自有 MCP 条目保留；网关面无条目时不动客户端
@@ -117,16 +136,12 @@ opencode 族：opencode=anthropic / opencode-openai=openai / opencode-responses=
 
 | 模板 | file | format | 要点 |
 |---|---|---|---|
-| claude | `~/.claude/settings.json` | json | env 注入 `ANTHROPIC_BASE_URL`(bare)+ `ANTHROPIC_AUTH_TOKEN`；Claude Code 自拼 `/v1/messages` |
-| opencode | `~/.config/opencode/opencode.json` | json | `@ai-sdk/anthropic`(自拼 `/messages`,base_url 带 /v1)+ 全量模型(opencode 形状) |
-| opencode-openai | 同上 | json | `@ai-sdk/openai-compatible` 变体(OpenAI Chat Completions),provider_id `model-proxy-openai` |
-| opencode-responses | 同上 | json | `@ai-sdk/openai` 变体(OpenAI Responses `/v1/responses`),provider_id `model-proxy-responses` |
-| pi | `~/.pi/agent/models.json` | json | `anthropic-messages`,base_url 裸(pi 自拼 `/v1/messages`)+ 全量模型(pi 形状) |
-| pi-openai / pi-responses | 同上 | json | `openai-completions` / `openai-responses` 变体(base_url 带 /v1,独立 provider_id) |
-| codex | `~/.codex/config.toml` | toml | `[model_providers."<id>"]`(wire_api=responses)+ 顶层 `model_provider` 选择器 |
-| kimi | `~/.kimi-code/config.toml` | toml | `[providers."<id>"]`(`openai_legacy`,带 /v1)+ 每模型 `[models."<name>"]`(provider/model/max_context_size,点号名必须引号;无元数据回退 `routing.DefaultModelMetadata.Context`) |
+| claude | `~/.claude/settings.json` | json | env 注入 `ANTHROPIC_BASE_URL`(bare)+ `ANTHROPIC_AUTH_TOKEN`；Claude Code 自拼 `/v1/messages`。**同一模板还接管 MCP**：`mcp.file: ~/.claude.json`（Claude Code 的 user-scope MCP 存在与主配置不同的文件）——一次 takeover 同时落两个文件，各自独立备份单元（`claude.bak` / `claude-mcp.bak`），restore 一并恢复 |
+| opencode(单文档 3 变体) | `~/.config/opencode/opencode.json` | json | 变体 = 协议档位:`@ai-sdk/anthropic`(自拼 `/messages`)/ `@ai-sdk/openai-compatible`(Chat Completions,provider_id `model-proxy-openai`)/ `@ai-sdk/openai`(Responses,provider_id `model-proxy-responses`),base_url 均 /v1 + 全量模型(opencode 形状)+ 顶层共享 mcp 块 |
+| pi(单文档 3 变体) | `~/.pi/agent/models.json` | json | 变体 = 协议档位:`anthropic-messages`(base_url 裸,pi 自拼 `/v1/messages`)/ `openai-completions` / `openai-responses`(base_url 带 /v1,独立 provider_id)+ 全量模型(pi 形状) |
+| codex | `~/.codex/config.toml` | toml | `[model_providers."<id>"]`(wire_api=responses,base_url 带 /v1——codex 拼 base_url+/responses)+ 顶层 `model_provider` 选择器 + **模型目录**：`~/.codex/model-proxy-models.json`(shape codex,每暴露模型一条 ModelInfo：visibility=list、context/effort 档位/输入模态来自 models.dev)+ 顶层 `model_catalog_json` 指向它——codex 加载后**替换**内置目录，/model 选择器即列出全部代理模型；restore 一并删除目录文件 |
+| kimi | `~/.kimi-code/config.toml` | toml | `[providers."<id>"]`(`openai_legacy`,带 /v1)+ 每模型 `[models."<name>"]`(provider/model/max_context_size/capabilities,可选 support_efforts+default_effort;点号名必须引号;无元数据回退 `routing.DefaultModelMetadata.Context`)。**同一模板还接管 MCP**:`mcp.file: ~/.kimi-code/mcp.json`(Kimi Code 的 MCP 配置独立于 config.toml,`mcpServers`/`url` 条目)——独立备份单元 `kimi-mcp.bak`,restore 一并恢复 |
 | gemini-cli | `~/.gemini/.env` | env | `GOOGLE_GEMINI_BASE_URL`(带 /v1)+ `GEMINI_API_KEY` 占位 |
-| claude-mcp | `~/.claude.json` | json | 独立族：网关 MCP 面写 `mcpServers`（http 型条目），只动代理命名空间 |
 | （opencode 三变体） | 同上 | json | 附 `mcp` 块：`mcp` 节写 remote 型条目（enabled: true） |
 | （codex） | 同上 | toml | 附 `mcp` 块：`[mcp_servers."<name>"]` 段写网关条目 |
 
@@ -138,6 +153,34 @@ opencode 族：opencode=anthropic / opencode-openai=openai / opencode-responses=
 `compat: {sendSessionAffinityHeaders: true}`,因此 takeover 后的 pi 请求带会话
 UUID，代理据此填请求日志 `session_id` 与 live 事件 `session_id`（见
 `docs/web-api.md` 的 `/api/events`、Live 会话分析）。
+
+## 能力元数据（models.dev → 客户端能力声明）
+
+models.dev 是能力的唯一外部事实源；`internal/catalog` 投影 `tool_call`/`reasoning`/
+`modalities.input`/`reasoning_options`(effort 档位,`none` 是思考开关不算档位)。
+takeover 把它们翻译成各客户端的模型能力声明——**没有元数据就不写该能力**（宁可保守
+也不虚构）：
+
+- **kimi**（用户实测报告的回归）：`capabilities` 数组逐项派生——`thinking`+
+  `always_thinking` ← reasoning；`image_in`/`video_in` ← 输入模态；`tool_use` ←
+  tool_call；`dynamically_loaded_tools` ← tool_call 且有 effort 档位（kimi 官方
+  托管配置 4/4 吻合：k3/kimi-for-coding/k3-256k 有、highspeed 无）。
+  `support_efforts` ← effort 档位原样；`default_effort` ← 最高档（models.dev 无逐
+  模型默认值标记，kimi 官方默认不一致:kimi-for-coding=max、k3=high——takeover 取
+  最高档暴露全部能力，用户可在 config.toml 或模板覆盖里改）。无元数据 →
+  `capabilities = []`（等价于今天的能力缺失行为，而非虚构能力）。
+- **pi**：`reasoning: true` + `input`（text/image，pi schema 只收这两值）+ 窗口
+  元数据已有；缺 `reasoning` 会让 pi 把思考模型当纯聊天模型（既有行为已覆盖）。
+- **opencode**：模型 schema 的 `reasoning`/`tool_call` 布尔 + `modalities` 照写；
+  缺失会让 opencode 隐藏思考/工具能力。
+- **claude / codex / gemini-cli**：配置 schema 无逐模型能力声明（claude 只有 env、
+  codex 的 `model_reasoning_effort` 是用户偏好而非能力声明、gemini-cli 是 env 键），
+  无需也无处可写——复查确认。
+
+`catalog.parse` 同时修正 models.dev 当前 api.json 的 `tool_call` 顶层位置（旧投影
+读 `features.tool_call`，实测 7838/7838 个模型都在顶层——旧代码恒 false）；磁盘缓存
+`models_cache.json` 旧格式缺 `efforts` 字段，刷新（`models pull` / Web 的 Refresh
+Catalog）后生效。
 
 ## 机制契约（与模板机制无关的部分不变）
 
