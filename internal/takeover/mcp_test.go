@@ -35,7 +35,11 @@ func TestMCPJSONRendering(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	target := filepath.Join(home, ".claude.json")
-	if err := os.WriteFile(target, []byte(`{"theme":"dark","mcpServers":{"keep-me":{"type":"http","url":"https://other.example/mcp"},"stale-gone":{"type":"http","url":"http://127.0.0.1:15721/mcp/stale-gone"}}}`), 0o600); err != nil {
+	// Seed with a stale proxy entry (name in the current generated namespace
+	// but pointing at an old proxy URL), a user server elsewhere, and a user
+	// server that happens to share the proxy URL prefix but is not in the
+	// generated namespace — the latter must survive cleanup.
+	if err := os.WriteFile(target, []byte(`{"theme":"dark","mcpServers":{"keep-me":{"type":"http","url":"https://other.example/mcp"},"same-prefix-user":{"type":"http","url":"http://127.0.0.1:15721/mcp/same-prefix-user"},"exa":{"type":"http","url":"http://127.0.0.1:9999/mcp/exa"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	tmpl, err := takeover.TemplateByName("claude", t.TempDir())
@@ -75,8 +79,8 @@ func TestMCPJSONRendering(t *testing.T) {
 	if _, ok := servers["keep-me"]; !ok {
 		t.Fatalf("pre-existing server dropped: %s", data)
 	}
-	if _, ok := servers["stale-gone"]; ok {
-		t.Fatalf("stale proxy entry from a previous takeover not cleaned: %s", data)
+	if _, ok := servers["same-prefix-user"]; !ok {
+		t.Fatalf("user server sharing the proxy URL prefix was dropped: %s", data)
 	}
 	// Idempotent: second render produces identical bytes.
 	if err := tmpl.Rewrite(cfg, nil, nil); err != nil {
@@ -97,7 +101,11 @@ func TestMCPTOMLRendering(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(target, []byte("# codex config\n[mcp_servers.\"stale-gone\"]\nurl = \"http://127.0.0.1:15721/mcp/stale-gone\"\n[mcp_servers.\"keep-me\"]\nurl = \"https://other.example/mcp\"\n"), 0o600); err != nil {
+	// Seed with a stale proxy section (name in the current generated namespace
+	// but pointing at an old proxy URL), a user section elsewhere, and a user
+	// section that shares the proxy URL prefix but is not in the generated
+	// namespace — the latter must survive cleanup.
+	if err := os.WriteFile(target, []byte("# codex config\n[mcp_servers.\"exa\"]\nurl = \"http://127.0.0.1:9999/mcp/exa\"\n[mcp_servers.\"same-prefix-user\"]\nurl = \"http://127.0.0.1:15721/mcp/same-prefix-user\"\n[mcp_servers.\"keep-me\"]\nurl = \"https://other.example/mcp\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	tmpl, err := takeover.TemplateByName("codex", t.TempDir())
@@ -122,8 +130,11 @@ func TestMCPTOMLRendering(t *testing.T) {
 	if !strings.Contains(string(text), `url = "http://127.0.0.1:15721/mcp/web-search"`) {
 		t.Fatalf("route URL missing:\n%s", text)
 	}
-	if strings.Contains(string(text), "stale-gone") {
-		t.Fatalf("stale proxy section not cleaned:\n%s", text)
+	if !strings.Contains(string(text), `[mcp_servers."same-prefix-user"]`) {
+		t.Fatalf("user section sharing the proxy URL prefix was dropped:\n%s", text)
+	}
+	if strings.Contains(string(text), "http://127.0.0.1:9999/mcp/exa") {
+		t.Fatalf("stale proxy URL not rewritten:\n%s", text)
 	}
 	if err := tmpl.Rewrite(cfg, nil, nil); err != nil {
 		t.Fatal(err)
@@ -137,13 +148,15 @@ func TestMCPTOMLRendering(t *testing.T) {
 	}
 }
 
-// TestMCPEmptySurfaceSkips: with no mcp: config the client's existing MCP
-// section is left untouched.
+// TestMCPEmptySurfaceSkips: with no mcp: config the gateway surface is empty,
+// so the client's existing MCP section is left untouched — even entries that
+// look like proxy leftovers are preserved because the template has nothing to
+// generate and therefore no namespace to clean.
 func TestMCPEmptySurfaceSkips(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	target := filepath.Join(home, ".claude.json")
-	original := `{"mcpServers":{"keep-me":{"type":"http","url":"https://other.example/mcp"}}}`
+	original := `{"mcpServers":{"keep-me":{"type":"http","url":"https://other.example/mcp"},"exa":{"type":"http","url":"http://127.0.0.1:15721/mcp/exa"}}}`
 	if err := os.WriteFile(target, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -158,11 +171,14 @@ func TestMCPEmptySurfaceSkips(t *testing.T) {
 	var v map[string]any
 	json.Unmarshal(data, &v)
 	servers, _ := v["mcpServers"].(map[string]any)
-	if len(servers) != 1 {
+	if len(servers) != 2 {
 		t.Fatalf("empty gateway surface rewrote mcpServers: %s", data)
 	}
 	if _, ok := servers["keep-me"]; !ok {
 		t.Fatalf("existing entry dropped: %s", data)
+	}
+	if _, ok := servers["exa"]; !ok {
+		t.Fatalf("proxy-looking entry dropped when gateway surface empty: %s", data)
 	}
 }
 
@@ -288,5 +304,117 @@ func TestMCPSurfaceNames(t *testing.T) {
 	cfg.MCPRoutes["web-search"] = r
 	if got := takeover.MCPSurfaceNames(cfg); strings.Join(got, ",") != "exa,zhipu-search" {
 		t.Fatalf("disabled route surface = %v", got)
+	}
+}
+
+// TestMCPJSONExplicitEmptySelectionClears: an explicit empty MCP selection
+// (opts.MCP = []) clears proxy-managed entries in the generated namespace
+// while preserving the user's own servers.
+func TestMCPJSONExplicitEmptySelectionClears(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	target := filepath.Join(home, ".claude.json")
+	if err := os.WriteFile(target, []byte(`{"mcpServers":{"keep-me":{"type":"http","url":"https://other.example/mcp"},"exa":{"type":"http","url":"http://127.0.0.1:15721/mcp/exa"},"same-prefix-user":{"type":"http","url":"http://127.0.0.1:15721/mcp/same-prefix-user"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := takeover.TemplateByName("claude", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := cfgWithMCP()
+	if err := tmpl.RewriteOptsFiltered(cfg, nil, nil, nil, takeover.TakeoverOptions{MCP: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(target)
+	var v map[string]any
+	json.Unmarshal(data, &v)
+	servers, _ := v["mcpServers"].(map[string]any)
+	if _, ok := servers["exa"]; ok {
+		t.Fatalf("explicit empty selection left proxy entry exa: %s", data)
+	}
+	if _, ok := servers["web-search"]; ok {
+		t.Fatalf("explicit empty selection left proxy entry web-search: %s", data)
+	}
+	if _, ok := servers["keep-me"]; !ok {
+		t.Fatalf("explicit empty selection dropped user entry keep-me: %s", data)
+	}
+	if _, ok := servers["same-prefix-user"]; !ok {
+		t.Fatalf("explicit empty selection dropped user entry same-prefix-user: %s", data)
+	}
+}
+
+// TestMCPTOMLExplicitEmptySelectionClears is the TOML-side mirror of
+// TestMCPJSONExplicitEmptySelectionClears.
+func TestMCPTOMLExplicitEmptySelectionClears(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	target := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("[mcp_servers.\"exa\"]\nurl = \"http://127.0.0.1:15721/mcp/exa\"\n[mcp_servers.\"same-prefix-user\"]\nurl = \"http://127.0.0.1:15721/mcp/same-prefix-user\"\n[mcp_servers.\"keep-me\"]\nurl = \"https://other.example/mcp\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := takeover.TemplateByName("codex", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := cfgWithMCP()
+	if err := tmpl.RewriteOptsFiltered(cfg, nil, nil, nil, takeover.TakeoverOptions{MCP: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	text, _ := os.ReadFile(target)
+	if strings.Contains(string(text), `[mcp_servers."exa"]`) {
+		t.Fatalf("explicit empty selection left proxy section exa:\n%s", text)
+	}
+	if strings.Contains(string(text), `[mcp_servers."web-search"]`) {
+		t.Fatalf("explicit empty selection left proxy section web-search:\n%s", text)
+	}
+	if !strings.Contains(string(text), `[mcp_servers."keep-me"]`) {
+		t.Fatalf("explicit empty selection dropped user section keep-me:\n%s", text)
+	}
+	if !strings.Contains(string(text), `[mcp_servers."same-prefix-user"]`) {
+		t.Fatalf("explicit empty selection dropped user section same-prefix-user:\n%s", text)
+	}
+}
+
+// TestMCPTOMLCRLFAndCustomPrefixSection: CRLF line endings must not prevent
+// stale section cleanup, and a user-defined section that shares the header
+// prefix and proxy URL must survive because its name is not in the generated
+// namespace.
+func TestMCPTOMLCRLFAndCustomPrefixSection(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	target := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// CRLF file with a stale proxy section, a user custom section sharing the
+	// prefix and proxy URL, and an unrelated section.
+	crlf := "[mcp_servers.\"exa\"]\r\nurl = \"http://127.0.0.1:15721/mcp/exa\"\r\n[mcp_servers.\"my-custom\"]\r\nurl = \"http://127.0.0.1:15721/mcp/my-custom\"\r\n[mcp_servers.\"keep-me\"]\r\nurl = \"https://other.example/mcp\"\r\n"
+	if err := os.WriteFile(target, []byte(crlf), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := takeover.TemplateByName("codex", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := cfgWithMCP()
+	if err := tmpl.Rewrite(cfg, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(target)
+	text := string(b)
+	if strings.Contains(text, "\r") {
+		t.Fatalf("CRLF was not normalized to LF:\n%q", text)
+	}
+	if !strings.Contains(text, `[mcp_servers."exa"]`) {
+		t.Fatalf("current proxy section exa missing:\n%s", text)
+	}
+	if !strings.Contains(text, `[mcp_servers."my-custom"]`) {
+		t.Fatalf("user custom section with shared prefix was dropped:\n%s", text)
+	}
+	if !strings.Contains(text, `[mcp_servers."keep-me"]`) {
+		t.Fatalf("unrelated user section was dropped:\n%s", text)
 	}
 }

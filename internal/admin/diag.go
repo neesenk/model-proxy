@@ -71,6 +71,9 @@ func (s *Service) Replay(ctx context.Context, id, providerName string) (appapi.R
 			"record "+id+" request body was truncated at request_log.max_body_bytes — replay would send an incomplete request; raise max_body_bytes and recapture")
 	}
 	cfg := s.ports.Config()
+	if cfg == nil {
+		return appapi.ReplayResult{}, appapi.NewHTTPError(http.StatusServiceUnavailable, "no config generation")
+	}
 	if _, ok := cfg.Providers[providerName]; !ok {
 		return appapi.ReplayResult{}, appapi.NewHTTPError(http.StatusBadRequest,
 			fmt.Sprintf("unknown provider %q — available: %s", providerName, cfg.ProviderNames()))

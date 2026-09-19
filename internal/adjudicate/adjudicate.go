@@ -102,6 +102,11 @@ type Usage struct {
 // already parsed from the model reply. usage reports the call's token cost
 // for the service's LLM-usage metrics (cache hits never reach a Caller and
 // are not billed).
+//
+// CONTRACT: err must NOT contain the matched hit bytes, body excerpts, or
+// any transform/fragment of the request content. Error details are persisted
+// (scrubbed) but scrub is defense-in-depth; callers should report structural
+// failures only (status, shape, length, parse errors).
 type Caller interface {
 	Adjudicate(ctx context.Context, model string, j Job) (verdict, reason, evidence string, usage Usage, err error)
 }
@@ -170,13 +175,21 @@ type Service struct {
 	// llm usage accounting: real model calls only (cache hits and in-flight
 	// dedup never reach a Caller). Guarded by statsMu so the metrics read
 	// never contends with the queue hot path. The counters are persisted
-	// (guard_stats.json) so the usage surface survives restarts.
-	statsMu     sync.Mutex
-	statsPath   string
-	statsCalls  int64
-	statsInTok  int64
-	statsOutTok int64
-	statsLows   int64
+	// (guard_stats.json) so the usage surface survives restarts. Disk writes
+	// are serialized by statsFlushMu and happen outside statsMu.
+	statsMu      sync.Mutex
+	statsFlushMu sync.Mutex
+	statsPath    string
+	statsCalls   int64
+	statsInTok   int64
+	statsOutTok  int64
+	statsLows    int64
+	// last counters successfully persisted; guarded by statsFlushMu so writes
+	// are monotonic and a stale snapshot cannot regress the on-disk low count.
+	statsLastCalls int64
+	statsLastIn    int64
+	statsLastOut   int64
+	statsLastLows  int64
 
 	// blockedContent is the repeat-interception index of HIGH-verdict hit
 	// bytes (sha256-keyed, persisted hash-only in guard_blocked.json).
@@ -347,14 +360,13 @@ func (s *Service) process(j Job) {
 	s.statsCalls++
 	s.statsInTok += usage.InputTokens
 	s.statsOutTok += usage.OutputTokens
-	// Persist under the same lock: the write stays ordered with the counter
-	// increments, so a slower earlier write can never regress the file behind
-	// a newer one (the file is ~100 bytes and judge calls are rare — the
-	// fsync under statsMu is not a hot-path concern).
-	if s.statsPath != "" {
-		writeUsageStats(s.statsPath, s.statsCalls, s.statsInTok, s.statsOutTok, s.statsLows)
-	}
 	s.statsMu.Unlock()
+	// Persist outside statsMu: fsync must not block other workers or readers.
+	// statsFlushMu serializes writers so the on-disk counters never regress.
+	// The write is monotonic (skip if no counter increased) so a process write
+	// that races past a low-verdict apply cannot overwrite a higher low count
+	// with the stale value it read before apply ran.
+	s.flushStatsLocked()
 	if err != nil || (verdict != VerdictHigh && verdict != VerdictMedium && verdict != VerdictLow) {
 		// err may be nil here (a nil error with an off-vocabulary verdict) —
 		// dereferencing it would panic the worker and take the daemon down.
@@ -391,9 +403,21 @@ func (s *Service) apply(j Job, verdict, reason, evidence, model string, blockSes
 		// history-echo occurrence would rebuild exactly the audit flood this
 		// channel exists to suppress — the ring entry below is the
 		// per-occurrence visibility.
+		//
+		// Record the repeat-interception index BEFORE the session block so
+		// observers that poll the block table never see a block whose
+		// associated content hash has not yet been recorded (the block flush
+		// can yield while the worker is still in this function).
+		if j.Kind == KindSecret {
+			s.blockedContent.Record(j.Hit, BlockedContent{
+				Kind: j.Kind, Rule: j.Rule, Reason: reason, Evidence: evidence,
+				Model: model, Ts: res.Ts,
+			})
+		}
 		if blockSession && j.SessionID != "" {
 			bl := Block{
-				Kind: j.Kind, Rule: j.Rule, Reason: reason, Model: model,
+				Kind: j.Kind, Rule: j.Rule, Rules: []string{j.Rule},
+				Reason: reason, Model: model,
 				RequestID: j.RequestID, Ts: res.Ts,
 			}
 			if j.Kind == KindSecret {
@@ -403,18 +427,6 @@ func (s *Service) apply(j Job, verdict, reason, evidence, model string, blockSes
 				bl.CacheKeys = []string{CacheKey(j, model)}
 			}
 			s.blocks.Block(j.SessionID, bl)
-		}
-		// Every SECRET-kind high (fresh or cached replay) joins the
-		// repeat-interception index: the same credential bytes in a later
-		// request are intercepted verbatim by the forward path, exactly like
-		// the known-secret exact channel. Path literals are deliberately
-		// excluded — a short literal (~/.ssh) repeats legitimately across
-		// contexts, and path verdicts stay per-occurrence.
-		if j.Kind == KindSecret {
-			s.blockedContent.Record(j.Hit, BlockedContent{
-				Kind: j.Kind, Rule: j.Rule, Reason: reason, Evidence: evidence,
-				Model: model, Ts: res.Ts,
-			})
 		}
 		if !cached {
 			s.sink.High(j, reason, evidence, model)
@@ -429,10 +441,8 @@ func (s *Service) apply(j Job, verdict, reason, evidence, model string, blockSes
 		// record — rows stay ring-only by design.
 		s.statsMu.Lock()
 		s.statsLows++
-		if s.statsPath != "" {
-			writeUsageStats(s.statsPath, s.statsCalls, s.statsInTok, s.statsOutTok, s.statsLows)
-		}
 		s.statsMu.Unlock()
+		s.flushStatsLocked()
 		if !cached {
 			s.sink.Low(j, reason, evidence, model)
 		}
@@ -526,7 +536,8 @@ func (s *Service) BlockWithHit(sessionID, rule, requestID, reason, hit string) {
 	hash := hashHit(hit)
 	bc, _ := s.blockedContent.Entry(hash)
 	bl := Block{
-		Kind: bc.Kind, Rule: rule, Reason: reason, Model: bc.Model,
+		Kind: bc.Kind, Rule: rule, Rules: []string{rule},
+		Reason: reason, Model: bc.Model,
 		RequestID: requestID, Ts: s.opts.Now().UnixMilli(),
 		ContentHashes: []string{hash},
 	}
@@ -570,15 +581,34 @@ func (s *Service) Stats() (calls, inputTokens, outputTokens, lowVerdicts int64) 
 	return s.statsCalls, s.statsInTok, s.statsOutTok, s.statsLows
 }
 
+// flushStatsLocked persists the current stats counters if they have advanced
+// beyond the last written snapshot. Caller must NOT hold statsMu.
+func (s *Service) flushStatsLocked() {
+	s.statsFlushMu.Lock()
+	defer s.statsFlushMu.Unlock()
+	calls, inTok, outTok, lows := s.Stats()
+	if calls <= s.statsLastCalls && inTok <= s.statsLastIn && outTok <= s.statsLastOut && lows <= s.statsLastLows {
+		return
+	}
+	if s.statsPath != "" {
+		writeUsageStats(s.statsPath, calls, inTok, outTok, lows)
+	}
+	s.statsLastCalls, s.statsLastIn, s.statsLastOut, s.statsLastLows = calls, inTok, outTok, lows
+}
+
 // CacheLen reports the verdict-cache size (diagnostics/tests).
 func (s *Service) CacheLen() int { return s.cache.Len() }
 
 // scrub makes a model-provided (or error) string safe for persistence:
 // control characters collapse to spaces and any occurrence of the matched
-// hit is replaced, so a reason echoing the payload can never carry it into
-// logs. Masking is maskSecretBytes-aligned: short hits (<8 bytes, e.g. from
-// a short custom pattern) are masked wholesale too — a short hit must never
-// land on disk verbatim.
+// hit (or a long-enough fragment of it) is replaced, so a reason echoing
+// the payload can never carry it into logs. Masking is maskSecretBytes-
+// aligned: short hits (<8 bytes, e.g. from a short custom pattern) are
+// masked wholesale too — a short hit must never land on disk verbatim.
+//
+// Callers (the Caller implementation) must still never put request content
+// into error details; the fragment mask here is defense-in-depth against
+// future callers that might quote a portion of the matched bytes.
 func scrub(hit, s string) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -589,8 +619,27 @@ func scrub(hit, s string) string {
 		}
 	}
 	out := b.String()
-	if hit != "" {
-		out = strings.ReplaceAll(out, hit, "[MASKED]")
+	if hit == "" {
+		return out
+	}
+	// Full hit first.
+	out = strings.ReplaceAll(out, hit, "[MASKED]")
+	// Defense in depth: mask any substring of the hit that is long enough
+	// to be a recognizable fragment (>= 8 bytes). Shorter substrings are
+	// either the full short hit (handled above) or too generic to attribute.
+	if len(hit) >= 8 {
+		const minFragment = 8
+		seen := make(map[string]bool)
+		for i := 0; i < len(hit); i++ {
+			for j := i + minFragment; j <= len(hit); j++ {
+				frag := hit[i:j]
+				if seen[frag] {
+					continue
+				}
+				seen[frag] = true
+				out = strings.ReplaceAll(out, frag, "[MASKED]")
+			}
+		}
 	}
 	return out
 }

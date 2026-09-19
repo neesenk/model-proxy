@@ -2,6 +2,7 @@ package admin
 
 import (
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,14 @@ func (rig *takeoverTestRig) clientRow(t *testing.T, name string) appapi.Takeover
 	}
 	t.Fatalf("client %q missing from surface (have %d clients)", name, len(surface.Clients))
 	return appapi.TakeoverClient{}
+}
+
+func TestTakeoverSurfaceNilConfig(t *testing.T) {
+	service := New(Ports{Config: func() *configdomain.Config { return nil }})
+	_, err := service.TakeoverSurface("")
+	if httpErrorStatus(t, err) != http.StatusServiceUnavailable {
+		t.Fatalf("nil config err = %v, want 503", err)
+	}
 }
 
 func TestTakeoverSurfaceRunAndRestoreRoundTrip(t *testing.T) {

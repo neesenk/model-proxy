@@ -82,14 +82,15 @@ func TestStreamTerminalComplete(t *testing.T) {
 }
 
 // TestStreamTerminalComplete_ConvertedTruncation: a truncated anthropic
-// upstream (bare message_stop, or message_delta with an EMPTY stop_reason)
-// must NOT become terminal-complete on the client side — the anthropic→chat
-// and anthropic→responses converters fail closed (error chunk /
-// response.failed) instead of synthesizing finish_reason:"stop" or
-// response.completed, because the executor's cache gate checks exactly these
-// converted bytes (caching a fake-clean terminal would poison every retry
-// for the TTL). An explicit data: [DONE] delimiter (OpenRouter dialect)
-// stays a clean terminal, matching the same-protocol openai gate.
+// upstream (bare message_stop, message_delta with an EMPTY stop_reason, or a
+// non-empty stop_reason followed by EOF with no message_stop) must NOT become
+// terminal-complete on the client side — the anthropic→chat and
+// anthropic→responses converters fail closed (error chunk / response.failed)
+// instead of synthesizing finish_reason:"stop" or response.completed, because
+// the executor's cache gate checks exactly these converted bytes (caching a
+// fake-clean terminal would poison every retry for the TTL). An explicit
+// data: [DONE] delimiter (OpenRouter dialect) stays a clean terminal, matching
+// the same-protocol openai gate.
 func TestStreamTerminalComplete_ConvertedTruncation(t *testing.T) {
 	const head = "event: message_start\n" +
 		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"m\"}}\n\n" +
@@ -111,6 +112,9 @@ func TestStreamTerminalComplete_ConvertedTruncation(t *testing.T) {
 		"event: message_stop\n" +
 		"data: {\"type\":\"message_stop\"}\n\n"
 	const doneDelim = head + "data: [DONE]\n\n"
+	const stopReasonEOF = head +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}` + "\n" // no blank line / message_stop
 
 	chat := func(t *testing.T, in string) []byte {
 		t.Helper()
@@ -140,5 +144,11 @@ func TestStreamTerminalComplete_ConvertedTruncation(t *testing.T) {
 	}
 	if got := StreamTerminalComplete(Responses, resp(t, complete)); !got {
 		t.Errorf("responses-converted complete stream judged incomplete:\n%s", resp(t, complete))
+	}
+	if got := StreamTerminalComplete(OpenAI, chat(t, stopReasonEOF)); got {
+		t.Errorf("chat-converted message_delta(stop_reason) without message_stop judged complete:\n%s", chat(t, stopReasonEOF))
+	}
+	if got := StreamTerminalComplete(Responses, resp(t, stopReasonEOF)); got {
+		t.Errorf("responses-converted message_delta(stop_reason) without message_stop judged complete:\n%s", resp(t, stopReasonEOF))
 	}
 }

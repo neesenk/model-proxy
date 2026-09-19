@@ -76,6 +76,10 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	if clientSession == "" {
 		clientSession = requestlog.SessionIDFromBody(origBody)
 	}
+	// The trusted session key used for security decisions (block table,
+	// repeat interception, session scan). Body-carried client_metadata.session_id
+	// is intentionally NOT accepted for these decisions.
+	sessionKey := r.Header.Get("x-claude-code-session-id")
 
 	calledModel := protocol.ExtractModel(origBody)
 	if calledModel == "" {
@@ -123,7 +127,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	// The stage is extracted to runOutboundGuard (same generation's snapshot
 	// scanner; nil only in degenerate hand-built proxies — skipped then).
 	var guardBlocked bool
-	origBody, guardBlocked = p.runOutboundGuard(runtime, proto, w, r, requestID, agent, clientSession, exposed, calledModel, origBody)
+	origBody, guardBlocked = p.runOutboundGuard(runtime, proto, w, r, requestID, agent, clientSession, exposed, calledModel, sessionKey, origBody)
 	if guardBlocked {
 		return
 	}
@@ -168,7 +172,6 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		upPath = strings.TrimPrefix(upPath, "/v1")
 	}
 
-	sessionKey := r.Header.Get("x-claude-code-session-id")
 	// routeKeys = all callable route names (explicit ∪ implicit) — used by
 	// the scheduler to tell route-name sticky keys (preserve) from session-id
 	// keys (evict after dwell). Generation-owned: rebuilt with expandedRoutes.
@@ -732,6 +735,23 @@ func (p pipeline) guardTerminal(w http.ResponseWriter, r *http.Request, rec guar
 
 // ForcedProviderFromRequest extracts the HTTP boundary value used by replay.
 // Header wins over query. The policy package receives only the resulting value.
+// dedupeStrings returns a copy of s with duplicate entries removed,
+// preserving first-seen order.
+func dedupeStrings(s []string) []string {
+	if len(s) <= 1 {
+		return s
+	}
+	seen := make(map[string]bool, len(s))
+	out := make([]string, 0, len(s))
+	for _, v := range s {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 func ForcedProviderFromRequest(request *http.Request) string {
 	if request == nil {
 		return ""
@@ -780,7 +800,7 @@ func (p pipeline) expandFusionResponses(fc fusionCtx, backendProto string, body 
 // (credential red line). Returns the (possibly redacted) body every later
 // branch consumes; blocked == true means a terminal response was already
 // written and the caller must return.
-func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.ResponseWriter, r *http.Request, requestID, agent, clientSession, exposed, calledModel string, origBody []byte) (body []byte, blocked bool) {
+func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.ResponseWriter, r *http.Request, requestID, agent, clientSession, exposed, calledModel, sessionKey string, origBody []byte) (body []byte, blocked bool) {
 	cfg := runtime.Cfg
 	if sc := runtime.Guard; sc != nil {
 		action := cfg.Guard.SecretsAction()
@@ -793,8 +813,12 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 		// BEFORE any scanning — a blocked session pays no scan cost, and the
 		// block outlives the config that produced it (it persists until
 		// explicitly unblocked via CLI/WebUI, by design).
+		// Block-table lookup uses the trusted session header only. The body-
+		// carried client_metadata.session_id is intentionally NOT accepted for
+		// security decisions: it is request-writable and could otherwise let a
+		// client associate a block with another session.
 		if p.svc.Adjudicator != nil {
-			if sid := clientSession; sid != "" {
+			if sid := sessionKey; sid != "" {
 				if rule, rid, blocked := p.svc.Adjudicator.SessionBlocked(sid); blocked {
 					p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
 					http.Error(w, fmt.Sprintf("blocked: session %s was adjudicated high-risk by guard (rule=%s, request=%s) — unblock via 'model-proxy guard unblock %s' or the WebUI Security page", sid, rule, rid, sid), http.StatusBadRequest)
@@ -856,8 +880,8 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 					Agent: agent, Proto: proto, Exposed: exposed,
 					Detail: exactDetail,
 				})
-				if p.svc.Adjudicator != nil && adjMeta.SessionID != "" {
-					p.svc.Adjudicator.BlockSession(adjMeta.SessionID, exactKnown[0], requestID, exactDetail)
+				if p.svc.Adjudicator != nil && sessionKey != "" {
+					p.svc.Adjudicator.BlockSession(sessionKey, exactKnown, requestID, exactDetail)
 				}
 			}
 		}
@@ -891,7 +915,7 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 		// below. Secret hits only (path literals stay per-occurrence).
 		var repeatBlocked struct {
 			rule, reason, evidence, model string
-			firstHit                      string
+			hits                          []string
 			names                         []string
 		}
 		if repeatIndexOn {
@@ -902,9 +926,9 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 					if repeatBlocked.rule == "" {
 						repeatBlocked.rule, repeatBlocked.reason = rule, reason
 						repeatBlocked.evidence, repeatBlocked.model = evidence, model
-						repeatBlocked.firstHit = j.Hit
 						_ = kind // always the secret channel by construction
 					}
+					repeatBlocked.hits = append(repeatBlocked.hits, j.Hit)
 					repeatBlocked.names = append(repeatBlocked.names, j.Rule)
 					continue
 				}
@@ -945,8 +969,8 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 					Verdict: "high", Reason: repeatBlocked.reason, Evidence: repeatBlocked.evidence,
 					Model: repeatBlocked.model,
 				})
-				if adjMeta.SessionID != "" {
-					p.svc.Adjudicator.BlockSessionContent(adjMeta.SessionID, repeatBlocked.rule, requestID, repeatBlocked.reason, repeatBlocked.firstHit)
+				if sessionKey != "" {
+					p.svc.Adjudicator.BlockSessionContent(sessionKey, repeatBlocked.rule, requestID, repeatBlocked.reason, dedupeStrings(repeatBlocked.hits))
 				}
 				// Fail-open suppression is SEGMENT-granular, never
 				// name-granular: intercepted jobs were consumed by the
@@ -1080,7 +1104,7 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 		//     secret's longest prefix seen in order across the session.
 		// secrets=off disables this pass together with the secrets channel.
 		var fragmented bool
-		sessionID := clientSession
+		sessionID := sessionKey
 		if action != "off" && cfg.Guard.SessionScanEnabled() && sc.HasKnownSecrets() &&
 			sessionID != "" && p.svc.SessionScan != nil {
 			tail, progress, tailKnown, tailKnownOK := p.svc.SessionScan.Snapshot(sessionID, sc)
@@ -1137,7 +1161,7 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 					Agent: agent, Proto: proto, Exposed: exposed,
 				})
 				if p.svc.Adjudicator != nil {
-					p.svc.Adjudicator.BlockSession(sessionID, "known_secret_fragmented", requestID, "credential reassembled across requests (split exfiltration)")
+					p.svc.Adjudicator.BlockSession(sessionID, []string{"known_secret_fragmented"}, requestID, "credential reassembled across requests (split exfiltration)")
 				}
 			}
 			// Merge the current body into the session window whether or not
@@ -1154,7 +1178,10 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 		// pattern hits were NOT deferred to adjudication), then the
 		// fragmented completion, then a config paths=block.
 		if len(exactKnown) > 0 {
-			msg := fmt.Sprintf("blocked: request body contains a credential configured on this proxy (%s) — session blocked until unblocked via 'model-proxy guard unblock %s' or the WebUI Security page", strings.Join(exactKnown, ", "), adjMeta.SessionID)
+			msg := fmt.Sprintf("blocked: request body contains a credential configured on this proxy (%s)", strings.Join(exactKnown, ", "))
+			if sessionKey != "" {
+				msg += fmt.Sprintf(" — session blocked until unblocked via 'model-proxy guard unblock %s' or the WebUI Security page", sessionKey)
+			}
 			p.guardTerminal(w, r, guardTerminalRecord{
 				requestID: requestID, sessionID: clientSession, proto: proto, exposed: exposed,
 				calledModel: calledModel, agent: agent, body: preGuardBody, msg: msg,
@@ -1162,7 +1189,10 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 			return origBody, true
 		}
 		if len(repeatBlocked.names) > 0 {
-			msg := fmt.Sprintf("blocked: request body repeats content already adjudicated high-risk by guard (%s) — session blocked until unblocked via 'model-proxy guard unblock %s' or the WebUI Security page", strings.Join(repeatBlocked.names, ","), adjMeta.SessionID)
+			msg := fmt.Sprintf("blocked: request body repeats content already adjudicated high-risk by guard (%s)", strings.Join(repeatBlocked.names, ","))
+			if sessionKey != "" {
+				msg += fmt.Sprintf(" — session blocked until unblocked via 'model-proxy guard unblock %s' or the WebUI Security page", sessionKey)
+			}
 			p.guardTerminal(w, r, guardTerminalRecord{
 				requestID: requestID, sessionID: clientSession, proto: proto, exposed: exposed,
 				calledModel: calledModel, agent: agent, body: preGuardBody, msg: msg,

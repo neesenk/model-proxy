@@ -109,6 +109,42 @@ func TestStdioConn_DeadChild(t *testing.T) {
 	}
 }
 
+// TestHelperProcessStderr doubles as a fake child that prints a secret token
+// to stderr and exits non-zero.
+func TestHelperProcessStderr(t *testing.T) {
+	if os.Getenv("MCP_STDIO_HELPER") != "stderr" {
+		t.Skip("not a helper subprocess")
+	}
+	fmt.Fprintln(os.Stderr, "secret-stderr-token-42")
+	os.Exit(1)
+}
+
+// TestStdioConn_CallErrorOmitsStderr: a dead child must not leak raw stderr
+// into the error returned to callers — stderr is untrusted and may contain
+// credentials that would otherwise surface in HTTP responses. The captured
+// stderr remains reachable for redacted debug logging.
+func TestStdioConn_CallErrorOmitsStderr(t *testing.T) {
+	conn, err := StartStdio(
+		[]string{os.Args[0], "-test.run=TestHelperProcessStderr"},
+		[]string{"MCP_STDIO_HELPER=stderr", "PATH=" + os.Getenv("PATH")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, err = conn.Call(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
+	if err == nil {
+		t.Fatal("expected error from dead child")
+	}
+	if strings.Contains(err.Error(), "secret-stderr-token-42") {
+		t.Fatalf("error leaks stderr: %v", err)
+	}
+	// stderr is still captured for debug logging.
+	if !strings.Contains(conn.Stderr(), "secret-stderr-token-42") {
+		t.Fatalf("stderr not captured for debug: %q", conn.Stderr())
+	}
+}
+
 func TestStdioConn_CloseIdempotent(t *testing.T) {
 	conn := startHelperConn(t)
 	conn.Close()

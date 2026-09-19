@@ -1,9 +1,11 @@
 package takeover
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	configdomain "model-proxy/internal/config"
@@ -26,6 +28,7 @@ type PreviewWrite struct {
 	File      string // the real client config path
 	Exists    bool   // the file exists pre-takeover (false = takeover creates it)
 	Content   string // the merged result a takeover would leave behind
+	format    string // json|toml|env: drives format-aware path replacement
 }
 
 // PreviewWrites renders the takeover result for which/mode without touching
@@ -185,7 +188,7 @@ func PreviewWritesOpts(cfg *configdomain.Config, which, templatesDir string, opt
 		key := redirect[sp.File]
 		w, ok := byFile[key]
 		if !ok {
-			w = &PreviewWrite{File: sp.File, Templates: []string{}, Notes: []string{}}
+			w = &PreviewWrite{File: sp.File, Templates: []string{}, Notes: []string{}, format: sp.Template.Format}
 			byFile[key] = w
 			order = append(order, key)
 		}
@@ -217,13 +220,84 @@ func PreviewWritesOpts(cfg *configdomain.Config, which, templatesDir string, opt
 	// The redirected side-file paths (codex model catalog) appear verbatim in
 	// the rendered client config (model_catalog_json = "<tmp>/…"); show the
 	// REAL path a takeover would write instead of the preview's temp path.
-	for real, dst := range redirect {
-		if real == "" || filepath.Dir(real) == tmp {
-			continue
-		}
-		for i := range out {
-			out[i].Content = strings.ReplaceAll(out[i].Content, dst, real)
+	// Replacement is format-aware so backslashes or quotes in the real path do
+	// not break JSON/TOML string escaping.
+	pathRedirect := map[string]string{}
+	for real, tmp := range redirect {
+		if real != "" && filepath.Dir(real) != tmp {
+			pathRedirect[real] = tmp
 		}
 	}
+	for i := range out {
+		out[i].Content = replaceRedirectedPaths(out[i].Content, out[i].format, pathRedirect)
+	}
 	return out, nil
+}
+
+// replaceRedirectedPaths substitutes preview temp paths with the real side-file
+// paths they stand in for, respecting the config file format so escaping stays
+// valid. The redirect map keys are real paths and values are temp paths.
+func replaceRedirectedPaths(content, format string, redirect map[string]string) string {
+	switch format {
+	case "json":
+		return replaceRedirectedPathsJSON(content, redirect)
+	case "toml":
+		return replaceRedirectedPathsTOML(content, redirect)
+	case "env":
+		return replaceRedirectedPathsEnv(content, redirect)
+	default:
+		return replaceRedirectedPathsRaw(content, redirect)
+	}
+}
+
+func replaceRedirectedPathsJSON(content string, redirect map[string]string) string {
+	for real, tmp := range redirect {
+		quotedTmp, _ := json.Marshal(tmp)
+		quotedReal, _ := json.Marshal(real)
+		content = strings.ReplaceAll(content, string(quotedTmp), string(quotedReal))
+	}
+	return content
+}
+
+func replaceRedirectedPathsTOML(content string, redirect map[string]string) string {
+	lines := strings.Split(content, "\n")
+	for i, l := range lines {
+		eq := strings.IndexByte(l, '=')
+		if eq < 0 {
+			continue
+		}
+		val := strings.TrimSpace(l[eq+1:])
+		for real, tmp := range redirect {
+			if val == strconv.Quote(tmp) {
+				lines[i] = l[:eq] + "= " + strconv.Quote(real)
+				break
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func replaceRedirectedPathsEnv(content string, redirect map[string]string) string {
+	lines := strings.Split(content, "\n")
+	for i, l := range lines {
+		eq := strings.IndexByte(l, '=')
+		if eq < 0 {
+			continue
+		}
+		val := strings.TrimSpace(l[eq+1:])
+		for real, tmp := range redirect {
+			if val == tmp {
+				lines[i] = l[:eq] + "=" + real
+				break
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func replaceRedirectedPathsRaw(content string, redirect map[string]string) string {
+	for real, tmp := range redirect {
+		content = strings.ReplaceAll(content, tmp, real)
+	}
+	return content
 }

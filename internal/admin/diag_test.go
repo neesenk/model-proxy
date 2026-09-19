@@ -109,6 +109,22 @@ func TestReplayGuards(t *testing.T) {
 	}
 }
 
+func TestReplayNilConfig(t *testing.T) {
+	dir := t.TempDir()
+	line := `{"ts":"2026-07-29T12:00:00Z","request_id":"r1","path":"/v1/messages","request_body":"{}"}`
+	if err := os.WriteFile(filepath.Join(dir, "requests-20260729.log"), []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := New(Ports{
+		Config:              func() *configdomain.Config { return nil },
+		RequestLogDirectory: func() string { return dir },
+	})
+	_, err := service.Replay(context.Background(), "r1", "deepseek")
+	if httpErrorStatus(t, err) != http.StatusServiceUnavailable {
+		t.Fatalf("nil config err = %v, want 503", err)
+	}
+}
+
 func TestTestRoute(t *testing.T) {
 	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:1",

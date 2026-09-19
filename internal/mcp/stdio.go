@@ -163,11 +163,11 @@ func (c *StdioConn) Call(ctx context.Context, body []byte) ([]byte, error) {
 	select {
 	case payload, ok := <-ch:
 		if !ok {
-			return nil, fmt.Errorf("stdio: child exited (stderr tail: %s)", tail(c.stderr.String(), 200))
+			return nil, fmt.Errorf("stdio: child exited")
 		}
 		return payload, nil
 	case <-c.readDone:
-		return nil, fmt.Errorf("stdio: child exited (stderr tail: %s)", tail(c.stderr.String(), 200))
+		return nil, fmt.Errorf("stdio: child exited")
 	case <-ctx.Done():
 		// Drop the pending entry so a late response is discarded (readLoop
 		// tolerates missing entries) instead of leaking the registration.
@@ -176,6 +176,13 @@ func (c *StdioConn) Call(ctx context.Context, body []byte) ([]byte, error) {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("stdio: call: %w", ctx.Err())
 	}
+}
+
+// Stderr returns the captured tail of the child's stderr for debug logging.
+// The caller is responsible for redacting any sensitive content before
+// emitting it anywhere user-visible.
+func (c *StdioConn) Stderr() string {
+	return c.stderr.String()
 }
 
 // Close kills and reaps the child. Idempotent.
@@ -188,12 +195,4 @@ func (c *StdioConn) Close() {
 		c.cmd.Process.Kill()
 	}
 	c.cmd.Wait()
-}
-
-// tail returns the last n bytes of s for compact error messages.
-func tail(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return "…" + s[len(s)-n:]
 }

@@ -107,7 +107,7 @@ func (s *Server) handleMCPTest(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.commands.ProbeMCP(r.Context(), req.Name)
 	if err != nil {
-		writeJSONErr(w, http.StatusNotFound, err.Error())
+		writePortErr(w, http.StatusNotFound, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -534,7 +534,11 @@ func (s *Server) handleSecurityBlocks(w http.ResponseWriter, _ *http.Request) {
 // content overrides created by session-unblock cascades (hash-keyed; the
 // hit bytes themselves never persist).
 func (s *Server) handleSecurityAllowed(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"allowed": s.reads.SecurityAllowed()})
+	allowed := s.reads.SecurityAllowed()
+	if allowed == nil {
+		allowed = []appapi.SecurityAllowed{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"allowed": allowed})
 }
 
 // handleSecurityDisallow serves DELETE /api/security/allowed/<hash>:

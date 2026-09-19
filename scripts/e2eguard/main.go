@@ -320,10 +320,12 @@ func (d *httpDaemon) Unblock(session string) error {
 // adjudicates fresh content: the verdict cache and the repeat-interception
 // index are keyed by hit bytes, and reused fixtures would short-circuit the
 // judge with cached verdicts or outright 400s).
-func randHex(n int) string {
+func randHex(n int) (string, error) {
 	b := make([]byte, n/2+1)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)[:n]
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b)[:n], nil
 }
 
 func dummyKeyBody(key string) string {
@@ -376,10 +378,11 @@ func renderBody(tmpl string, model string) string {
 // run carries the cross-scenario state (dependency chain: the block-related
 // scenarios ride on the high verdict landing).
 type run struct {
-	d       daemon
-	model   string
-	timeout time.Duration
-	stamp   string
+	d            daemon
+	model        string
+	timeout      time.Duration
+	pollInterval time.Duration
+	stamp        string
 
 	dummyKey     string
 	lowRequestID string
@@ -396,10 +399,14 @@ type scenario struct {
 	fn      func(r *run) error
 }
 
-// poll retries check every 500ms until it returns nil or the budget lapses;
-// the last error is the assertion message.
+// poll retries check until it returns nil or the budget lapses; the last
+// error is the assertion message. The poll interval defaults to 500ms.
 func poll(r *run, what string, check func() error) error {
 	deadline := time.Now().Add(r.timeout)
+	interval := r.pollInterval
+	if interval <= 0 {
+		interval = 500 * time.Millisecond
+	}
 	var last error
 	for {
 		if err := check(); err == nil {
@@ -410,7 +417,7 @@ func poll(r *run, what string, check func() error) error {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("%s: %v (waited %s)", what, last, r.timeout)
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(interval)
 	}
 }
 
@@ -532,7 +539,11 @@ func scenarioClean(r *run) error {
 
 func scenarioLowDummy(r *run) error {
 	sid := "e2e-low-" + r.stamp
-	r.dummyKey = "sk-dummy-" + randHex(40) + "-notreal"
+	key, err := randHex(40)
+	if err != nil {
+		return err
+	}
+	r.dummyKey = "sk-dummy-" + key + "-notreal"
 	status, err := r.post(sid, dummyKeyBody(r.dummyKey))
 	if err != nil {
 		return err
@@ -629,7 +640,11 @@ func scenarioCachedEcho(r *run) error {
 
 func scenarioHighReal(r *run) error {
 	r.highSession = "e2e-high-" + r.stamp
-	r.highKey = "sk-proj-" + randHex(48)
+	key, err := randHex(48)
+	if err != nil {
+		return err
+	}
+	r.highKey = "sk-proj-" + key
 	status, err := r.post(r.highSession, realKeyBody(r.highKey))
 	if err != nil {
 		return err
@@ -887,33 +902,50 @@ func scenarioWeakPath(r *run) error {
 		return fmt.Errorf("weak-path request status %d, want 200", status)
 	}
 	// Weak hits (prose address mentions) are ignored entirely: no verdict,
-	// no audit record, no marks. Give the async channel a beat to prove the
-	// absence, then assert.
-	time.Sleep(2 * time.Second)
-	rows, err := r.d.Summaries(sid)
-	if err != nil {
-		return err
+	// no audit record, no marks. Poll for the absence with a bounded budget
+	// instead of a fixed 2s sleep so the happy path returns as soon as the
+	// committed row confirms the path stayed clean.
+	budget := r.timeout
+	if budget > 2*time.Second {
+		budget = 2 * time.Second
 	}
-	if len(rows) == 0 {
-		return fmt.Errorf("no request row")
-	}
-	if len(rows[0].Guard) != 0 {
-		return fmt.Errorf("weak path produced marks: %+v", rows[0].Guard)
-	}
-	feed, err := r.d.Adjudications()
-	if err != nil {
-		return err
-	}
-	for _, a := range feed.Adjudications {
-		if a.RequestID == rows[0].RequestID {
-			return fmt.Errorf("weak path reached the judge: %+v", a)
+	short := *r
+	short.timeout = budget
+	var requestID string
+	if err := poll(&short, "weak path stays clean", func() error {
+		rows, err := r.d.Summaries(sid)
+		if err != nil {
+			return err
 		}
+		if len(rows) == 0 {
+			return fmt.Errorf("no row yet")
+		}
+		requestID = rows[0].RequestID
+		if len(rows[0].Guard) != 0 {
+			return fmt.Errorf("weak path produced marks: %+v", rows[0].Guard)
+		}
+		feed, err := r.d.Adjudications()
+		if err != nil {
+			return err
+		}
+		for _, a := range feed.Adjudications {
+			if a.RequestID == requestID {
+				return fmt.Errorf("weak path reached the judge: %+v", a)
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	return nil
 }
 
 func scenarioHeadless(r *run) error {
-	key := "sk-dummy-" + randHex(40) + "-headless"
+	rand, err := randHex(40)
+	if err != nil {
+		return err
+	}
+	key := "sk-dummy-" + rand + "-headless"
 	status, err := r.post("", dummyKeyBody(key)) // no session header
 	if err != nil {
 		return err
@@ -1016,8 +1048,17 @@ type result struct {
 // runSuite executes the scenarios sequentially and reports. The returned
 // counts feed the process exit code.
 func runSuite(d daemon, model string, timeout time.Duration, only map[string]bool) ([]result, *run) {
-	stamp := fmt.Sprintf("%s-%s", time.Now().Format("0102-150405"), randHex(4))
-	r := &run{d: d, model: model, timeout: timeout, stamp: stamp}
+	return runSuiteWith(d, model, timeout, only, 500*time.Millisecond)
+}
+
+// runSuiteWith is the configurable test entry point: pollInterval lets tests
+// avoid hardcoded wall-clock timing.
+func runSuiteWith(d daemon, model string, timeout time.Duration, only map[string]bool, pollInterval time.Duration) ([]result, *run) {
+	stamp, err := randHex(4)
+	if err != nil {
+		return []result{{name: "suite-init", status: "FAIL", detail: fmt.Sprintf("stamp: %v", err)}}, &run{d: d, model: model, timeout: timeout, pollInterval: pollInterval}
+	}
+	r := &run{d: d, model: model, timeout: timeout, pollInterval: pollInterval, stamp: fmt.Sprintf("%s-%s", time.Now().Format("0102-150405"), stamp)}
 	var results []result
 	for _, sc := range scenarios() {
 		if len(only) > 0 && !only[sc.name] {

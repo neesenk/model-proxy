@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -256,8 +257,9 @@ func TestRequestLogQueriesIndexDelegation(t *testing.T) {
 	if queries == nil {
 		t.Fatal("RequestLogQueries = nil with index wired")
 	}
-	// The index reconciles on its own tick; poll until the record appears.
-	deadline := time.Now().Add(5 * time.Second)
+	// The index reconciles on its own tick; wait for each pass until the record appears.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	for {
 		summaries, _, err := queries.SummariesWithFacets(requestlog.Filter{Limit: 10})
 		if err != nil {
@@ -266,10 +268,9 @@ func TestRequestLogQueriesIndexDelegation(t *testing.T) {
 		if len(summaries) == 2 && summaries[0].RequestID == "shadow-r1" {
 			break
 		}
-		if time.Now().After(deadline) {
+		if err := indexer.WaitReconciled(ctx); err != nil {
 			t.Fatal("index-delegated query never saw the record")
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
 	// The shadow report answers through the same index delegation: the pair
 	// aggregates once both sides are indexed (a scan-free read).
@@ -281,10 +282,42 @@ func TestRequestLogQueriesIndexDelegation(t *testing.T) {
 		if len(report) == 1 && report[0].Route == "m" && report[0].PrimaryProvider == "p" && report[0].ShadowProvider == "sp" && report[0].Samples == 1 && report[0].StatusMatchRate == 1 && report[0].PrimaryLatencyMs == 5 && report[0].ShadowLatencyMs == 8 {
 			break
 		}
-		if time.Now().After(deadline) {
+		if err := indexer.WaitReconciled(ctx); err != nil {
 			t.Fatal("index-delegated shadow report never saw the pair")
 		}
-		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestRequestLogQueriesDetailReturnsIndexError: an index failure on a detail
+// query must be returned, not silently hidden by falling through to the MCP
+// split-stream scan.
+func TestRequestLogQueriesDetailReturnsIndexError(t *testing.T) {
+	dir := t.TempDir()
+	mcpDir := t.TempDir()
+	lines := `{"ts":"2026-07-29T12:00:00Z","request_id":"r1","called_model":"m","exposed":"m","provider":"p","status":200}
+`
+	if err := os.WriteFile(filepath.Join(dir, "requests-20260729.log"), []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	indexer, err := requestlog.NewIndexer(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go indexer.Run()
+	indexer.Shutdown()
+
+	service := New(Ports{
+		RequestLogDirectory:    func() string { return dir },
+		MCPRequestLogDirectory: func() string { return mcpDir },
+		RequestLogIndex:        func() *requestlog.Indexer { return indexer },
+	})
+	queries := service.RequestLogQueries()
+	if queries == nil {
+		t.Fatal("RequestLogQueries = nil with index wired")
+	}
+	_, err = queries.Detail("r1", "")
+	if err == nil {
+		t.Fatal("expected index error, got nil")
 	}
 }
 
@@ -692,6 +725,17 @@ func TestSecurityAuditDisabled(t *testing.T) {
 	}
 	if result.Enabled || result.Records == nil || len(result.Records) != 0 {
 		t.Errorf("disabled result = %+v", result)
+	}
+}
+
+func TestSecurityNilConfigDegradesToDisabled(t *testing.T) {
+	service := New(Ports{Config: func() *configdomain.Config { return nil }})
+	result, err := service.Security(appapi.SecurityQuery{Kind: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Enabled || result.Records == nil || len(result.Records) != 0 {
+		t.Errorf("nil config result = %+v", result)
 	}
 }
 

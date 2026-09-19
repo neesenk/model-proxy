@@ -59,7 +59,10 @@ func pumpSSEFrames(h sseFrameHooks, sc *bufio.Scanner, bomStripped *bool, trackE
 		}
 		line := ""
 		if sc.Scan() {
-			line = strings.TrimSpace(sc.Text())
+			// Keep prefix matching strict: only strip the trailing CR from
+			// CRLF. Leading whitespace would turn " data:" into a data line,
+			// which is not spec-compliant and hides malformed upstream bytes.
+			line = strings.TrimRight(sc.Text(), "\r")
 			if bomStripped != nil && !*bomStripped {
 				// Tolerate one leading UTF-8 BOM at stream start (some gateways
 				// prepend it); mid-stream BOMs stay untouched.

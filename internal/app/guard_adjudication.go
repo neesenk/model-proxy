@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -76,7 +75,11 @@ func (a adjudicatorAdapter) Enqueue(ga forward.GuardAdjudication) bool {
 
 func (a adjudicatorAdapter) SessionBlocked(sessionID string) (rule, requestID string, blocked bool) {
 	bl, ok := a.svc.Blocked(sessionID)
-	return bl.Rule, bl.RequestID, ok
+	rule = bl.Rule
+	if len(bl.Rules) > 1 {
+		rule = strings.Join(bl.Rules, ",")
+	}
+	return rule, bl.RequestID, ok
 }
 
 // ContentBlocked projects the persisted repeat-interception index (sha256 of
@@ -93,22 +96,30 @@ func (a adjudicatorAdapter) ContentBlocked(hit string) (kind, rule, reason, evid
 // BlockSession implements the exact-match interception path: the block table
 // is the same one high verdicts use (persists until an explicit unblock).
 // reason carries the operator attribution (credential source label + masked
-// key display) recorded on the block for the Security page.
-func (a adjudicatorAdapter) BlockSession(sessionID, rule, requestID, reason string) {
-	a.svc.Block(sessionID, adjudicate.Block{
+// key display) recorded on the block for the Security page. rules records
+// every exact-match name that contributed, so the unblock audit trail is
+// complete.
+func (a adjudicatorAdapter) BlockSession(sessionID string, rules []string, requestID, reason string) {
+	bl := adjudicate.Block{
 		Kind:      adjudicate.KindSecret,
-		Rule:      rule,
+		Rules:     rules,
 		Reason:    reason,
 		RequestID: requestID,
 		Ts:        time.Now().UnixMilli(),
-	})
+	}
+	if len(rules) > 0 {
+		bl.Rule = rules[0]
+	}
+	a.svc.Block(sessionID, bl)
 }
 
 // BlockSessionContent implements the repeat-interception path: the hit
 // bytes are recorded on the block (hash + cache key) so the operator
 // Unblock cascade can release the content together with the session.
-func (a adjudicatorAdapter) BlockSessionContent(sessionID, rule, requestID, reason, hit string) {
-	a.svc.BlockWithHit(sessionID, rule, requestID, reason, hit)
+func (a adjudicatorAdapter) BlockSessionContent(sessionID, rule, requestID, reason string, hits []string) {
+	for _, hit := range hits {
+		a.svc.BlockWithHit(sessionID, rule, requestID, reason, hit)
+	}
 }
 
 // AdjudicationConfig implements adjudicate.RuntimeConfig: the CURRENT
@@ -149,8 +160,28 @@ Answer STRICTLY as JSON, nothing else:
 "medium" = risk-shaped but not confirmable from the snippet: a tool call or command touching credential paths/files without verifiable live material, operational context where a real secret may be involved, or partial/ambiguous key material.
 "low" = benign content: placeholder/example/fixture/dummy key, documentation or regex source code, variable name, masked or redacted value, plain path mention in legitimate coding work.`
 
-// adjudicationVerdictJSON pulls the first {...} object out of a model reply.
-var adjudicationVerdictJSON = regexp.MustCompile(`\{[^{}]*\}`)
+// extractFirstJSONObject returns the first brace-balanced JSON object in s,
+// or the empty string if none. It handles nested objects (e.g. a reason that
+// contains braces), unlike a flat regex.
+func extractFirstJSONObject(s string) string {
+	start := strings.Index(s, "{")
+	if start == -1 {
+		return ""
+	}
+	depth := 0
+	for i := start; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return ""
+}
 
 type adjudicationReply struct {
 	Risk     string `json:"risk"`
@@ -194,7 +225,7 @@ func (c adjudicationCaller) Adjudicate(ctx context.Context, model string, j adju
 		if text == "" {
 			return fmt.Errorf("empty model reply")
 		}
-		m := adjudicationVerdictJSON.FindString(text)
+		m := extractFirstJSONObject(text)
 		if m == "" {
 			// Length only, never the reply text: this error is scrubbed
 			// against the hit's FULL bytes before persistence, but a judge
@@ -324,6 +355,7 @@ func (s adjudicationSink) High(j adjudicate.Job, reason, evidence, model string)
 // counter (the ring entry is the per-occurrence visibility).
 func (s adjudicationSink) Medium(j adjudicate.Job, reason, evidence, model string) {
 	if s.p.metrics != nil {
+		s.p.metrics.Inc("guard", j.Rule, counters.EvGuardHits)
 		s.p.metrics.Inc("guard", "adjudicated_medium", counters.EvGuardHits)
 	}
 	snap := s.p.SnapshotRuntime()
@@ -341,6 +373,7 @@ func (s adjudicationSink) Medium(j adjudicate.Job, reason, evidence, model strin
 // the point of the channel. Cached occurrences write nothing at all.
 func (s adjudicationSink) Low(j adjudicate.Job, reason, evidence, model string) {
 	if s.p.metrics != nil {
+		s.p.metrics.Inc("guard", j.Rule, counters.EvGuardHits)
 		s.p.metrics.Inc("guard", "adjudicated_low", counters.EvGuardHits)
 	}
 	snap := s.p.SnapshotRuntime()
@@ -435,9 +468,9 @@ func (p *Proxy) adjudicationUnblock(sessionID string) bool {
 	if bl.Model != "" {
 		detail += " model=" + bl.Model
 	}
-	names := []string{bl.Rule}
-	if bl.Rule == "" {
-		names = nil
+	names := bl.Rules
+	if len(names) == 0 && bl.Rule != "" {
+		names = []string{bl.Rule}
 	}
 	snap := p.SnapshotRuntime()
 	forward.AuditGuardHit(snap.SecLog, forward.GuardAuditHit{

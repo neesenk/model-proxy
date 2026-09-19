@@ -47,19 +47,21 @@ type Adjudicator interface {
 	// caller must fail open (classic immediate record, verdict "skipped").
 	Enqueue(a GuardAdjudication) bool
 	// SessionBlocked reports a session block (high verdict or exact-match
-	// interception; persists until unblocked via CLI/WebUI).
+	// interception; persists until unblocked via CLI/WebUI). rule is a display
+	// summary of the contributing rules.
 	SessionBlocked(sessionID string) (rule, requestID string, blocked bool)
 	// BlockSession adds one session block directly — the exact-match
 	// interception path (a configured credential appeared verbatim; zero
-	// false positives by construction, no LLM round-trip). reason carries the
-	// operator-facing attribution (credential source label + masked key
-	// display — identity, never the value). Like high-verdict blocks it
-	// persists until explicitly unblocked.
-	BlockSession(sessionID, rule, requestID, reason string)
+	// false positives by construction, no LLM round-trip). rules records every
+	// exact-match name that contributed; reason carries the operator-facing
+	// attribution (credential source label + masked key display — identity,
+	// never the value). Like high-verdict blocks it persists until explicitly
+	// unblocked.
+	BlockSession(sessionID string, rules []string, requestID, reason string)
 	// BlockSessionContent blocks a session for a REPEAT interception of
-	// already-adjudicated-high bytes: the hit is recorded on the block so a
+	// already-adjudicated-high bytes: each hit is recorded on the block so a
 	// later operator unblock cascades the release to the content itself.
-	BlockSessionContent(sessionID, rule, requestID, reason, hit string)
+	BlockSessionContent(sessionID, rule, requestID, reason string, hits []string)
 	// ContentBlocked reports that these raw SECRET-hit bytes were already
 	// adjudicated high on an earlier request (persisted sha256 index, hash
 	// only — the bytes never persist). The pipeline intercepts repeats

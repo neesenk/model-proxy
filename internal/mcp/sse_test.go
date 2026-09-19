@@ -58,3 +58,32 @@ func TestEndpointRewriter(t *testing.T) {
 		t.Fatalf("multi-endpoint: calls=%d out=%q", calls, out3)
 	}
 }
+
+// TestEndpointRewriter_PreservesDataWhitespace: the whitespace after
+// "data:" (the SSE field separator) and the original line terminator must
+// survive the rewrite instead of being erased by a whole-line TrimSpace.
+func TestEndpointRewriter_PreservesDataWhitespace(t *testing.T) {
+	stream := "event: endpoint\r\ndata:  /messages?sessionId=xyz\r\nevent: message\r\ndata:  {\"a\":1}\r\n"
+	rewrote := ""
+	r := NewEndpointRewriter(strings.NewReader(stream), func(data string) string {
+		rewrote = data
+		return "/mcp/zs?mps=local-1"
+	})
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rewrote != "/messages?sessionId=xyz" {
+		t.Fatalf("rewrite input = %q", rewrote)
+	}
+	want := "data:  /mcp/zs?mps=local-1\r\n"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("out missing preserved whitespace: %q", out)
+	}
+	if strings.Contains(string(out), "data: /mcp/zs") {
+		t.Fatalf("leading spaces collapsed: %q", out)
+	}
+	if !strings.Contains(string(out), "data:  {\"a\":1}\r\n") {
+		t.Fatalf("message event damaged: %q", out)
+	}
+}

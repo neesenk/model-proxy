@@ -1,6 +1,7 @@
 package forward
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,23 +12,43 @@ import (
 	"testing"
 
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/guard"
 	"model-proxy/internal/observe/seclog"
 )
 
 // fakeAdjudicator captures enqueued jobs and scripts the session-block
 // answers (the app-side adapter is covered in internal/app).
 type fakeAdjudicator struct {
-	mu                 sync.Mutex
-	jobs               []GuardAdjudication
-	enqueue            func() bool // script: nil = accept
-	blocked            map[string][2]string
-	blocks             []string // session ids added through BlockSession
-	blockReasons       []string
-	contentBlockedHits []string // hits passed through BlockSessionContent
+	mu                     sync.Mutex
+	jobs                   []GuardAdjudication
+	enqueue                func() bool // script: nil = accept
+	blocked                map[string][2]string
+	blocks                 []string // session ids added through BlockSession
+	blockRules             map[string][]string
+	blockReasons           []string
+	scriptedContentBlocked map[string]bool     // hits scripted as repeat-blocked for ContentBlocked
+	contentBlockedHits     map[string][]string // hits passed through BlockSessionContent per session
 }
 
 func newFakeAdjudicator() *fakeAdjudicator {
-	return &fakeAdjudicator{blocked: map[string][2]string{}, enqueue: func() bool { return true }}
+	return &fakeAdjudicator{
+		blocked:                map[string][2]string{},
+		blockRules:             map[string][]string{},
+		scriptedContentBlocked: map[string]bool{},
+		contentBlockedHits:     map[string][]string{},
+		enqueue:                func() bool { return true },
+	}
+}
+
+// withContentBlockedHits scripts the given hits as repeat-blocked for
+// ContentBlocked. Used when more than one hit needs to match.
+func (f *fakeAdjudicator) withContentBlockedHits(hits ...string) *fakeAdjudicator {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, h := range hits {
+		f.scriptedContentBlocked[h] = true
+	}
+	return f
 }
 
 // contentBlockedHit scripts ContentBlocked: when non-empty, exactly these hit
@@ -35,6 +56,14 @@ func newFakeAdjudicator() *fakeAdjudicator {
 var contentBlockedHit string
 
 func (f *fakeAdjudicator) ContentBlocked(hit string) (kind, rule, reason, evidence, model string, blocked bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.scriptedContentBlocked) > 0 {
+		if !f.scriptedContentBlocked[hit] {
+			return "", "", "", "", "", false
+		}
+		return "secret", "openai_api_key", "repeat of earlier high verdict", "", "judge-model", true
+	}
 	if hit != contentBlockedHit {
 		return "", "", "", "", "", false
 	}
@@ -58,21 +87,22 @@ func (f *fakeAdjudicator) SessionBlocked(sessionID string) (string, string, bool
 	return v[0], v[1], ok
 }
 
-func (f *fakeAdjudicator) BlockSession(sessionID, rule, requestID, reason string) {
+func (f *fakeAdjudicator) BlockSession(sessionID string, rules []string, requestID, reason string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.blocked[sessionID] = [2]string{rule, requestID}
+	f.blocked[sessionID] = [2]string{strings.Join(rules, ","), requestID}
+	f.blockRules[sessionID] = append([]string(nil), rules...)
 	f.blockReasons = append(f.blockReasons, reason)
 	f.blocks = append(f.blocks, sessionID)
 }
 
-func (f *fakeAdjudicator) BlockSessionContent(sessionID, rule, requestID, reason, hit string) {
+func (f *fakeAdjudicator) BlockSessionContent(sessionID, rule, requestID, reason string, hits []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.blocked[sessionID] = [2]string{rule, requestID}
 	f.blockReasons = append(f.blockReasons, reason)
 	f.blocks = append(f.blocks, sessionID)
-	f.contentBlockedHits = append(f.contentBlockedHits, hit)
+	f.contentBlockedHits[sessionID] = append(f.contentBlockedHits[sessionID], hits...)
 }
 
 func (f *fakeAdjudicator) captured() []GuardAdjudication {
@@ -270,31 +300,6 @@ func TestServeGuardAdjudicationBodyCarriedSession(t *testing.T) {
 	jobs = adj.captured()
 	if len(jobs) != 2 || jobs[1].SessionID != "s-hdr-1" {
 		t.Errorf("job session id = %+v, want header-carried s-hdr-1", jobs[1:])
-	}
-}
-
-// TestServeGuardAdjudicationBlockedSessionFromBody: the block-table lookup
-// uses the same derivation — a session blocked under its body-carried id is
-// enforced even though the client sends no session header.
-func TestServeGuardAdjudicationBlockedSessionFromBody(t *testing.T) {
-	up := newFakeUpstream(t, openaiOKResponder("ok"))
-	h := newHarness()
-	adj := newFakeAdjudicator()
-	adj.blocked["s-body-1"] = [2]string{"jwt", "req-9"}
-	h.svc.Adjudicator = adj
-	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off"}))
-	snap.Guard = guardScanner(t, nil)
-
-	body := `{"model":"m","client_metadata":{"session_id":"s-body-1"},"messages":[{"role":"user","content":"clean"}]}`
-	w := h.serve(snap, "openai", "/v1/chat/completions", body, nil)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "guard unblock s-body-1") {
-		t.Errorf("block message = %q, want unblock hint for s-body-1", w.Body.String())
-	}
-	if up.hits() != 0 {
-		t.Errorf("upstream saw %d requests, want 0", up.hits())
 	}
 }
 
@@ -602,5 +607,130 @@ func TestServeGuardChannelOffClassicRecordUnchanged(t *testing.T) {
 	}
 	if jobs := adj.captured(); len(jobs) != 0 {
 		t.Errorf("channel off enqueued jobs: %+v", jobs)
+	}
+}
+
+// TestServeGuardRepeatBlockedMultipleHitsCascade: when one request carries
+// two DIFFERENT previously-adjudicated-high bytes, both hits must be recorded
+// on the session block so an operator unblock releases both. Only recording
+// the first hit would leave the second one intercepting after unblock.
+func TestServeGuardRepeatBlockedMultipleHitsCascade(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("ok"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	adj.enqueue = func() bool { return false } // no adjudication: repeat only
+	h.svc.Adjudicator = adj
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off"}))
+	snap.Guard = guardScanner(t, nil)
+
+	keyA := "sk-capture-dummy-not-a-real-key-aa"
+	keyB := "sk-capture-dummy-not-a-real-key-bb"
+	// ContentBlocked answers true for both hits (the fake ignores the rule).
+	adj.withContentBlockedHits(keyA, keyB)
+
+	headers := map[string]string{"x-claude-code-session-id": "sess-repeat"}
+	w := h.serve(snap, "openai", "/v1/chat/completions", secretBody(keyA+" and "+keyB), headers)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	adj.mu.Lock()
+	gotHits := append([]string(nil), adj.contentBlockedHits["sess-repeat"]...)
+	adj.mu.Unlock()
+	if len(gotHits) != 2 {
+		t.Fatalf("recorded hits = %d %v, want 2", len(gotHits), gotHits)
+	}
+	seen := map[string]bool{}
+	for _, h := range gotHits {
+		seen[h] = true
+	}
+	if !seen[keyA] || !seen[keyB] {
+		t.Errorf("hits = %v, want both %q and %q", gotHits, keyA, keyB)
+	}
+}
+
+// TestServeGuardBlockedSessionIgnoresBodyCarriedSessionID: the block table is
+// a security decision and must use only the trusted session header. A body-
+// carried client_metadata.session_id must NOT cause the request to be rejected
+// under another session's block.
+func TestServeGuardBlockedSessionIgnoresBodyCarriedSessionID(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("ok"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	adj.blocked["s-header"] = [2]string{"jwt", "req-9"}
+	h.svc.Adjudicator = adj
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off"}))
+	snap.Guard = guardScanner(t, nil)
+
+	// No session header, but the body claims the blocked session id.
+	body := `{"model":"m","client_metadata":{"session_id":"s-header"},"messages":[{"role":"user","content":"clean"}]}`
+	w := h.serve(snap, "openai", "/v1/chat/completions", body, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("body-carried session must not trigger block: status = %d, want 200", w.Code)
+	}
+
+	// With the header present, the block IS enforced.
+	w = h.serve(snap, "openai", "/v1/chat/completions", body, map[string]string{"x-claude-code-session-id": "s-header"})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("header-carried session must trigger block: status = %d, want 400", w.Code)
+	}
+}
+
+// TestServeGuardExactMatchRecordsAllRules: when both known_secret and
+// known_secret_encoded fire, the block must record every contributing rule,
+// not just the first one.
+func TestServeGuardExactMatchRecordsAllRules(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("never"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	h.svc.Adjudicator = adj
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off"}))
+	// Construct a scanner with a known secret that has both raw and encoded
+	// forms. The body contains the raw value, but the encoded needle is also
+	// registered, so exactKnown will list both channels.
+	sc, err := guard.NewScannerWithOptions(nil,
+		[]guard.KnownSecret{{Value: guardTestSecret, Label: "pool:test#acc/key"}}, nil, guard.Options{Decode: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap.Guard = sc
+
+	// Body contains both the raw secret and one of its base64-encoded forms so
+	// the known-secret exact channel reports both rule names.
+	encoded := base64.StdEncoding.EncodeToString([]byte(guardTestSecret))
+	body := secretBody("raw " + guardTestSecret + " encoded " + encoded)
+	headers := map[string]string{"x-claude-code-session-id": "s-exact"}
+	w := h.serve(snap, "openai", "/v1/chat/completions", body, headers)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	adj.mu.Lock()
+	rules := adj.blockRules["s-exact"]
+	adj.mu.Unlock()
+	if len(rules) != 2 {
+		t.Fatalf("recorded rules = %v, want 2", rules)
+	}
+	if rules[0] != "known_secret" || rules[1] != "known_secret_encoded" {
+		t.Errorf("rules = %v, want [known_secret known_secret_encoded]", rules)
+	}
+}
+
+// TestServeGuardEmptySessionIDMessage: when a request is blocked but carries
+// no session id, the terminal message explains the block without an unusable
+// 'guard unblock ' command.
+func TestServeGuardEmptySessionIDMessage(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("never"))
+	h := newHarness()
+	adj := newFakeAdjudicator()
+	h.svc.Adjudicator = adj
+	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off"}))
+	snap.Guard = guardScanner(t, nil)
+
+	w := h.serve(snap, "openai", "/v1/chat/completions", secretBody("token "+guardTestSecret), nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "guard unblock") {
+		t.Errorf("empty-session message must not mention unblock command: %q", body)
 	}
 }

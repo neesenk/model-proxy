@@ -150,7 +150,8 @@ GET 流结束即删会话（相关性随流消亡）。路由 target 引用 sse 
 stdio 会话无上游 session id 概念；子进程死亡 → 502 + 丢会话让客户端重连。
 stdio 交换同样受 `timeout:` 约束：`StdioConn.Call(ctx, ...)` 监听 ctx，挂起的子进程
 不再永久阻塞调用方（pinned 转发/握手、路由子会话、probe、CLI 全接线）。
-http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验拒绝。
+http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验拒绝；反之
+`command`/`env` 只对 stdio 有效，出现在 streamable/sse 服务器上时校验失败。
 
 ### 出站扫描与静态头
 

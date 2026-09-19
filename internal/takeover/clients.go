@@ -353,33 +353,37 @@ func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
 // it fails config validation), so the value is the same conservative default
 // the proxy uses everywhere else, taken from its routing-package owner.
 
-// removeTOMLSectionsWithURL drops every [section] whose header starts with
-// the given literal prefix (e.g. `mcp_servers."`) AND whose body contains
-// needle (a URL fragment). Used by the mcp takeover writer to clean stale
-// proxy-managed sections before re-rendering the current surface, without
-// touching sections that point elsewhere.
-func removeTOMLSectionsWithURL(text, headerPrefix, needle string) string {
+// removeTOMLSectionsWithURL drops every [section] whose name is in the
+// generatedSections set AND whose body contains needle (a URL fragment).
+// Used by the mcp takeover writer to clean stale proxy-managed sections
+// before re-rendering the current surface, without touching user-defined
+// sections that happen to share the same header prefix or URL prefix.
+// CRLF line endings are normalized to LF so \r does not break header matching.
+func removeTOMLSectionsWithURL(text, needle string, generatedSections map[string]bool) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
 	lines := strings.Split(text, "\n")
 	out := make([]string, 0, len(lines))
 	for i := 0; i < len(lines); {
 		trimmed := strings.TrimSpace(lines[i])
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") &&
-			strings.HasPrefix(trimmed[1:len(trimmed)-1], headerPrefix) {
-			// Section runs until the next header line (or EOF).
-			end := len(lines)
-			contains := false
-			for j := i + 1; j < len(lines); j++ {
-				if strings.HasPrefix(strings.TrimSpace(lines[j]), "[") {
-					end = j
-					break
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			sectionName := strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+			if generatedSections[sectionName] {
+				// Section runs until the next header line (or EOF).
+				end := len(lines)
+				contains := false
+				for j := i + 1; j < len(lines); j++ {
+					if strings.HasPrefix(strings.TrimSpace(lines[j]), "[") {
+						end = j
+						break
+					}
+					if strings.Contains(lines[j], needle) {
+						contains = true
+					}
 				}
-				if strings.Contains(lines[j], needle) {
-					contains = true
+				if contains {
+					i = end
+					continue
 				}
-			}
-			if contains {
-				i = end
-				continue
 			}
 		}
 		out = append(out, lines[i])

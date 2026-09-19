@@ -33,18 +33,21 @@ type judgeUpstream struct {
 	reason  string
 	// raw, when non-empty, replaces the verdict JSON with this exact text
 	// (a 2xx non-JSON judge reply — the "no JSON verdict" error path).
-	raw string
-	srv *httptest.Server
+	raw    string
+	srv    *httptest.Server
+	called chan int // signals the call count after each request
 }
 
 func newJudgeUpstream(t *testing.T, verdict, reason string) *judgeUpstream {
 	t.Helper()
-	j := &judgeUpstream{verdict: verdict, reason: reason}
+	j := &judgeUpstream{verdict: verdict, reason: reason, called: make(chan int, 16)}
 	j.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		j.mu.Lock()
 		j.prompts = append(j.prompts, string(b))
+		callCount := len(j.prompts)
 		j.mu.Unlock()
+		j.called <- callCount
 		w.Header().Set("content-type", "application/json")
 		if j.raw != "" {
 			reply, _ := json.Marshal(map[string]any{
@@ -157,6 +160,7 @@ func TestGuardAdjudication_LowVerdictSuppressesDummyKey(t *testing.T) {
 		t.Fatalf("upstream calls = %d, want 1 (deferred channel never blocks sync)", len(bodies()))
 	}
 	waitForAdjudication(t, judge, 1)
+	waitForAuditVerdict(t, home, "low")
 
 	// History echo: the same content re-requested is served from the verdict
 	// cache — the judge is NOT called again.
@@ -222,6 +226,7 @@ func TestGuardAdjudication_HighVerdictBlocksAndUnblocks(t *testing.T) {
 	// Blocked: the next request of the session 400s with the unblock hint
 	// and never reaches the upstream.
 	waitForBlock(t, p, "sess-hi")
+	waitForAuditVerdict(t, home, "high")
 	resp := postWithSession(t, proxyURL, guardPoolRequestBody("clean body"), "sess-hi")
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("blocked status = %d, want 400", resp.StatusCode)
@@ -359,6 +364,7 @@ func TestGuardAdjudication_HighPathVerdictRecordsAsPathKind(t *testing.T) {
 	}
 	waitForAdjudication(t, judge, 1)
 	waitForBlock(t, p, "sess-path")
+	waitForAuditVerdict(t, home, "high")
 
 	records := readSeclogRecords(t, home)
 	found := false
@@ -379,16 +385,18 @@ func TestGuardAdjudication_HighPathVerdictRecordsAsPathKind(t *testing.T) {
 
 func waitForAdjudication(t *testing.T, j *judgeUpstream, calls int) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
+	deadline := time.After(3 * time.Second)
+	for {
 		if j.calls() >= calls {
-			// Small grace for the sink side effects to land after the call.
-			time.Sleep(30 * time.Millisecond)
 			return
 		}
-		time.Sleep(2 * time.Millisecond)
+		select {
+		case <-j.called:
+			// a call completed; loop checks the count
+		case <-deadline:
+			t.Fatalf("judge not called (want %d, got %d)", calls, j.calls())
+		}
 	}
-	t.Fatalf("judge not called (want %d)", calls)
 }
 
 func waitForBlock(t *testing.T, p *Proxy, session string) {

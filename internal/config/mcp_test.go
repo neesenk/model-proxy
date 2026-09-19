@@ -56,6 +56,8 @@ func TestMCPValidate_Errors(t *testing.T) {
 		{"invalid header name", "s", MCPServer{Provider: "zhipu", URL: "https://x", AuthHeader: "Bad Header"}, "not a valid HTTP header name"},
 		{"bad timeout", "s", MCPServer{Provider: "zhipu", URL: "https://x", Timeout: "later"}, "not a valid duration"},
 		{"bad proxy", "s", MCPServer{Provider: "zhipu", URL: "https://x", ProxyURL: "nonsense://"}, "proxy_url"},
+		{"command on http transport", "s", MCPServer{Provider: "zhipu", URL: "https://x", Command: []string{"npx", "-y", "@z_ai/mcp-server"}}, "command is only valid with transport stdio"},
+		{"env on http transport", "s", MCPServer{Provider: "zhipu", URL: "https://x", Env: map[string]string{"Z_AI_MODE": "ZHIPU"}}, "env is only valid with transport stdio"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -244,6 +246,15 @@ func TestResolveMCPHeaders(t *testing.T) {
 	if out, err := ResolveMCPHeaders(MCPServer{}); out != nil || err != nil {
 		t.Fatalf("no headers = %v %v", out, err)
 	}
+	// Empty-but-set env:VAR must resolve to "" (allowed), distinct from unset.
+	t.Setenv("MCP_EMPTY_HEADER", "")
+	out, err = ResolveMCPHeaders(MCPServer{Headers: map[string]string{"X-Empty": "env:MCP_EMPTY_HEADER"}})
+	if err != nil {
+		t.Fatalf("empty-but-set header env: = %v", err)
+	}
+	if out["X-Empty"] != "" {
+		t.Fatalf("empty header value = %q", out["X-Empty"])
+	}
 }
 
 func TestMCPTransportValidation(t *testing.T) {
@@ -352,5 +363,12 @@ func TestResolveMCPStdioEnv(t *testing.T) {
 	}
 	if _, err := ResolveMCPStdioEnv(MCPServer{Env: map[string]string{"MY_AUTH_TOKEN": "literal-value"}}, ""); err == nil || !strings.Contains(err.Error(), "credential-shaped keys") {
 		t.Fatalf("literal credential-shaped env = %v", err)
+	}
+	// Empty-but-set env:VAR must resolve to "" (allowed), distinct from unset.
+	t.Setenv("MCP_EMPTY_ENV", "")
+	if env, err := ResolveMCPStdioEnv(MCPServer{Env: map[string]string{"EMPTY": "env:MCP_EMPTY_ENV"}}, ""); err != nil {
+		t.Fatalf("empty-but-set env: = %v", err)
+	} else if !strings.Contains(strings.Join(env, "\n"), "EMPTY=") {
+		t.Fatalf("empty env value missing: %v", env)
 	}
 }

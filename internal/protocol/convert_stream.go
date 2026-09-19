@@ -431,6 +431,7 @@ type anthropicSSEToOpenAISSE struct {
 	usageSent    bool
 	doneSent     bool
 	bomStripped  bool
+	stopRsn      string       // non-empty when a message_delta with stop_reason arrived; finish emitted on message_stop/[DONE]
 	curBlock     int          // anthropic block index currently open
 	curType      string       // "text" / "tool_use" / ""
 	toolCallIdx  map[int]int  // anthropic block index → openai tool_call index
@@ -521,25 +522,28 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 func (t *anthropicSSEToOpenAISSE) hasOutput() bool { return len(t.out) > 0 }
 func (t *anthropicSSEToOpenAISSE) isDone() bool    { return t.done }
 
-// drainDone emits the finish chunk (when message_delta hasn't), then the
-// usage chunk + data: [DONE]. Two terminators stay CLEAN without a
-// stop_reason: a stop_reason-carrying message_delta already finished the
-// message, and an explicit data: [DONE] delimiter (OpenRouter dialect) is a
+// drainDone emits the finish chunk (when message_stop hasn't), then the
+// usage chunk + data: [DONE]. The only clean terminal without an explicit
+// message_stop is a data: [DONE] delimiter (OpenRouter dialect), which is a
 // deliberate terminator — see the parity tests. Anything else that reached
-// the terminator (bare message_stop, or message_delta with an empty
-// stop_reason) was truncated upstream: synthesizing finish_reason:"stop"
-// would fake a clean terminal on exactly the client bytes the executor's
-// cache gate checks, so it fails closed like streamEnd — error chunk only,
-// no usage, no [DONE].
+// the terminator (bare message_stop, message_delta with an empty stop_reason,
+// or EOF before message_stop) was truncated upstream: synthesizing a finish
+// chunk would fake a clean terminal on exactly the client bytes the
+// executor's cache gate checks, so it fails closed like streamEnd — error
+// chunk only, no usage, no [DONE].
 func (t *anthropicSSEToOpenAISSE) drainDone() (eof bool) {
-	if !t.finished && !t.errored && !t.doneDelim {
+	if !t.finished && !t.errored && !t.doneDelim && t.stopRsn == "" {
 		t.emitStreamErrorChunk("upstream stream ended without a terminal stop_reason")
 		t.finished = true
 		t.errored = true
 		t.done = true
 	}
 	if !t.finished {
-		t.emitChunk(map[string]any{}, "stop", nil)
+		finish := "stop"
+		if t.stopRsn != "" {
+			finish = mapStopReasonToFinish(t.stopRsn)
+		}
+		t.emitChunk(map[string]any{}, finish, nil)
 		t.finished = true
 	}
 	if !t.errored {
@@ -645,11 +649,11 @@ func (t *anthropicSSEToOpenAISSE) dispatch(frameEvent string, dataEvents []strin
 		if ev.Message.Model != "" {
 			t.model = ev.Message.Model
 		}
-		if t.finished {
-			// Post-terminal guard: once the finish chunk went out at
-			// message_delta, ignore any content/tool frames a malformed
-			// upstream emits after it (sibling directions suppress the
-			// same way). message_stop/error still terminate the stream.
+		if t.finished || t.stopRsn != "" {
+			// Post-terminal guard: once a terminal message_delta arrives,
+			// ignore any content/tool frames a malformed upstream emits
+			// after it (sibling directions suppress the same way).
+			// message_stop/error still terminate the stream.
 			switch ev.Type {
 			case "content_block_start", "content_block_delta", "content_block_stop":
 				continue
@@ -767,21 +771,24 @@ func (t *anthropicSSEToOpenAISSE) dispatch(frameEvent string, dataEvents []strin
 			updateUsageValue(ev.Usage.CacheRead, &t.cacheRead)
 			updateUsageValue(ev.Usage.CacheCreate, &t.cacheCreate)
 			updateUsageValue(ev.Usage.OutputTokens, &t.outputTokens)
-			// The finish chunk carries finish_reason only; usage follows in
-			// its own empty-choices chunk before [DONE] (the include_usage
-			// wire shape — the OpenAI-protocol usage scanner keys on the
-			// "usage" marker, not on the finish chunk). Guard: a malformed
-			// stream with >1 message_delta must not emit >1 finish chunk.
-			// An EMPTY stop_reason does not finish the message — the
-			// same-protocol cache gate (stream_complete) requires a
-			// non-empty stop_reason, and inventing finish_reason:"stop"
-			// here would fake a clean terminal on exactly the client bytes
-			// that gate checks.
+			// Record a non-empty stop_reason but do NOT emit the finish chunk
+			// yet. The same-protocol cache gate requires both a
+			// stop_reason-carrying message_delta AND a message_stop; emitting
+			// finish_reason here and then reaching EOF without message_stop
+			// would let the converted stream be judged terminal-complete and
+			// poison the cache.
 			if !t.finished && ev.Delta.StopReason != "" {
-				t.emitChunk(map[string]any{}, mapStopReasonToFinish(ev.Delta.StopReason), nil)
-				t.finished = true
+				t.stopRsn = ev.Delta.StopReason
 			}
 		case "message_stop":
+			// A bare message_stop without a preceding stop_reason-carrying
+			// message_delta is a truncated generation — fail-closed like EOF
+			// without a terminal signal.
+			if t.stopRsn == "" {
+				t.emitStreamErrorChunk("upstream stream ended without a terminal stop_reason")
+				t.finished = true
+				t.errored = true
+			}
 			t.done = true
 		}
 		if t.done {

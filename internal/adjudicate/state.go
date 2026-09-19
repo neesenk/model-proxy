@@ -90,11 +90,12 @@ type verdictFile struct {
 // verdictCache is an LRU over the persisted verdicts. Keys are content
 // hashes (CacheKey); values never contain the matched bytes.
 type verdictCache struct {
-	mu    sync.Mutex
-	path  string
-	max   int
-	order []string // LRU: oldest first
-	ents  map[string]verdictEntry
+	mu      sync.Mutex
+	flushMu sync.Mutex // serializes disk writes so persistence never regresses
+	path    string
+	max     int
+	order   []string // LRU: oldest first
+	ents    map[string]verdictEntry
 }
 
 // loadVerdictCache reads the persisted cache; missing/corrupt files start
@@ -165,13 +166,31 @@ func (c *verdictCache) get(key string) (verdictEntry, bool) {
 
 func (c *verdictCache) put(key string, v verdictEntry) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if _, ok := c.ents[key]; !ok {
 		c.order = append(c.order, key)
 	}
 	c.ents[key] = v
 	c.evict()
-	_ = writeStateFile(c.path, verdictFile{Version: 1, Entries: c.ents})
+	c.mu.Unlock()
+	c.flush()
+}
+
+// flush writes the current memory state to disk. Callers must have just
+// mutated the cache; the actual I/O happens outside c.mu so readers are not
+// blocked by fsync.
+func (c *verdictCache) flush() {
+	if c.path == "" {
+		return
+	}
+	c.flushMu.Lock()
+	defer c.flushMu.Unlock()
+	c.mu.Lock()
+	f := verdictFile{Version: 1, Entries: make(map[string]verdictEntry, len(c.ents))}
+	for k, v := range c.ents {
+		f.Entries[k] = v
+	}
+	c.mu.Unlock()
+	_ = writeStateFile(c.path, f)
 }
 
 func (c *verdictCache) Len() int {
@@ -184,7 +203,6 @@ func (c *verdictCache) Len() int {
 // persists; absent keys are no-ops.
 func (c *verdictCache) remove(keys ...string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	changed := false
 	for _, k := range keys {
 		if _, ok := c.ents[k]; ok {
@@ -193,10 +211,12 @@ func (c *verdictCache) remove(keys ...string) {
 		}
 	}
 	if !changed {
+		c.mu.Unlock()
 		return
 	}
 	c.reorder()
-	_ = writeStateFile(c.path, verdictFile{Version: 1, Entries: c.ents})
+	c.mu.Unlock()
+	c.flush()
 }
 
 // ---- session blocks ---------------------------------------------------
@@ -214,6 +234,10 @@ type Block struct {
 	Model     string `json:"model,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 	Ts        int64  `json:"ts"`
+	// Rules records every exact-match rule that contributed to the block.
+	// Rule holds the first (display) rule for backward compatibility; Rules
+	// is the full set used by the unblock audit trail.
+	Rules []string `json:"rules,omitempty"`
 	// ContentHashes: sha256(hit) per secret hit behind the verdict (empty
 	// for channels without hit bytes, e.g. exact known-secret matches).
 	ContentHashes []string `json:"content_hashes,omitempty"`
@@ -229,17 +253,18 @@ type blockFile struct {
 
 // blockStore is the persisted session block table.
 type blockStore struct {
-	mu     sync.Mutex
-	path   string
-	blocks map[string]Block
+	mu      sync.Mutex
+	flushMu sync.Mutex // serializes disk writes; I/O never happens under mu
+	path    string
+	blocks  map[string]Block
 	// loadedAt/lastDisk fence the restart drain race: a SIGINT'd process
 	// stops its listener (the port frees and a successor may boot and load
 	// the file) BEFORE its workers drain, so a late high verdict can hit the
-	// file after this store already loaded it. persistLocked adopts disk
-	// entries that appeared SINCE the last state we knew (absent here AND
-	// absent from lastDisk, Ts newer than our load) instead of clobbering
-	// them. Entries that were in lastDisk but not in memory are OUR OWN
-	// removals (Unblock) and must stay removed.
+	// file after this store already loaded it. flush adopts disk entries that
+	// appeared SINCE the last state we knew (absent here AND absent from
+	// lastDisk, Ts newer than our load) instead of clobbering them. Entries
+	// that were in lastDisk but not in memory are OUR OWN removals (Unblock)
+	// and must stay removed.
 	loadedAt time.Time
 	lastDisk map[string]Block
 }
@@ -268,34 +293,87 @@ func loadBlockStore(path string) *blockStore {
 	return b
 }
 
-// persistLocked writes the table, first adopting disk entries that appeared
-// since the last state we knew (the drain-race writes of a SIGINT'd
-// predecessor — see the struct comment). Caller holds b.mu.
-func (b *blockStore) persistLocked() {
-	if b.path != "" {
-		if data, err := os.ReadFile(b.path); err == nil {
-			var f blockFile
-			if json.Unmarshal(data, &f) == nil && f.Version == 1 {
-				loadedMs := b.loadedAt.UnixMilli()
-				for sid, bl := range f.Blocks {
-					if _, ours := b.blocks[sid]; ours {
-						continue
-					}
-					if _, known := b.lastDisk[sid]; known {
-						continue // we removed it ourselves (Unblock)
-					}
-					if bl.Ts > loadedMs {
-						b.blocks[sid] = bl // late predecessor write: adopt
-					}
-				}
-			}
+// flush writes the table, first adopting disk entries that appeared since
+// the last state we knew (the drain-race writes of a SIGINT'd predecessor —
+// see the struct comment). All disk I/O happens outside b.mu; the lock is
+// only held for short memory/fence snapshots and updates.
+func (b *blockStore) flush() {
+	if b.path == "" {
+		return
+	}
+	b.flushMu.Lock()
+	defer b.flushMu.Unlock()
+
+	// 1. Snapshot memory and fences under lock.
+	b.mu.Lock()
+	mem := make(map[string]Block, len(b.blocks))
+	for k, v := range b.blocks {
+		mem[k] = v
+	}
+	lastDisk := make(map[string]Block, len(b.lastDisk))
+	for k, v := range b.lastDisk {
+		lastDisk[k] = v
+	}
+	loadedMs := b.loadedAt.UnixMilli()
+	b.mu.Unlock()
+
+	// 2. Read disk outside lock.
+	var disk blockFile
+	if data, err := os.ReadFile(b.path); err == nil {
+		if json.Unmarshal(data, &disk) != nil || disk.Version != 1 {
+			disk.Blocks = map[string]Block{}
+		}
+	} else {
+		disk.Blocks = map[string]Block{}
+	}
+
+	// 3. Compute late-predecessor adopts.
+	adopted := make(map[string]Block)
+	for sid, bl := range disk.Blocks {
+		if _, ours := mem[sid]; ours {
+			continue
+		}
+		if _, known := lastDisk[sid]; known {
+			continue // we removed it ourselves (Unblock)
+		}
+		if bl.Ts > loadedMs {
+			adopted[sid] = bl
 		}
 	}
-	if err := writeStateFile(b.path, blockFile{Version: 1, Blocks: b.blocks}); err == nil {
-		b.lastDisk = make(map[string]Block, len(b.blocks))
+
+	// 4. Apply adopts to current memory (without overwriting concurrent
+	// mutations) and re-snapshot under lock.
+	if len(adopted) > 0 {
+		b.mu.Lock()
+		for sid, bl := range adopted {
+			if _, exists := b.blocks[sid]; !exists {
+				b.blocks[sid] = bl
+				mem[sid] = bl
+			}
+		}
+		// Re-snapshot in case another goroutine added/removed entries while
+		// we were reading disk.
+		mem = make(map[string]Block, len(b.blocks))
 		for k, v := range b.blocks {
+			mem[k] = v
+		}
+		b.mu.Unlock()
+	}
+
+	// 5. Write merged snapshot outside lock (copy the map so the marshal
+	// cannot race with later mutations).
+	snap := make(map[string]Block, len(mem))
+	for k, v := range mem {
+		snap[k] = v
+	}
+	if err := writeStateFile(b.path, blockFile{Version: 1, Blocks: snap}); err == nil {
+		// 6. Update lastDisk under lock.
+		b.mu.Lock()
+		b.lastDisk = make(map[string]Block, len(mem))
+		for k, v := range mem {
 			b.lastDisk[k] = v
 		}
+		b.mu.Unlock()
 	}
 }
 
@@ -308,16 +386,39 @@ func (b *blockStore) Blocked(sessionID string) (Block, bool) {
 
 func (b *blockStore) Block(sessionID string, bl Block) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	// A refresh that carries no artifact hashes (e.g. the exact-match
 	// channel) must not strip the hashes an earlier verdict recorded —
 	// otherwise a later Unblock could no longer cascade.
 	if prev, ok := b.blocks[sessionID]; ok {
 		bl.ContentHashes = unionStrings(prev.ContentHashes, bl.ContentHashes)
 		bl.CacheKeys = unionStrings(prev.CacheKeys, bl.CacheKeys)
+		// Preserve the first recorded display attribution; only hashes/keys
+		// are refreshed by later verdicts for the same session.
+		if bl.Kind == "" {
+			bl.Kind = prev.Kind
+		}
+		if bl.Rule == "" {
+			bl.Rule = prev.Rule
+		}
+		if len(bl.Rules) == 0 {
+			bl.Rules = prev.Rules
+		}
+		if bl.Reason == "" {
+			bl.Reason = prev.Reason
+		}
+		if bl.Model == "" {
+			bl.Model = prev.Model
+		}
+		if bl.RequestID == "" {
+			bl.RequestID = prev.RequestID
+		}
+		if bl.Ts == 0 {
+			bl.Ts = prev.Ts
+		}
 	}
 	b.blocks[sessionID] = bl
-	b.persistLocked()
+	b.mu.Unlock()
+	b.flush()
 }
 
 // unionStrings merges two hash/key sets preserving order (first-seen first).
@@ -341,13 +442,14 @@ func unionStrings(a, b []string) []string {
 // session was not blocked.
 func (b *blockStore) Unblock(sessionID string) (Block, bool) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	bl, ok := b.blocks[sessionID]
 	if !ok {
+		b.mu.Unlock()
 		return Block{}, false
 	}
 	delete(b.blocks, sessionID)
-	b.persistLocked()
+	b.mu.Unlock()
+	b.flush()
 	return bl, true
 }
 
@@ -362,11 +464,11 @@ type BlockEntry struct {
 
 func (b *blockStore) Snapshot() []BlockEntry {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	out := make([]BlockEntry, 0, len(b.blocks))
 	for sid, bl := range b.blocks {
 		out = append(out, BlockEntry{SessionID: sid, Block: bl})
 	}
+	b.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Block.Ts != out[j].Block.Ts {
 			return out[i].Block.Ts > out[j].Block.Ts
@@ -447,10 +549,11 @@ type blockedContentFile struct {
 // added on every high verdict (fresh or cached replay) and survive restarts;
 // the oldest entries evict past max.
 type blockedContentStore struct {
-	mu   sync.Mutex
-	path string
-	max  int
-	ents map[string]BlockedContent
+	mu      sync.Mutex
+	flushMu sync.Mutex
+	path    string
+	max     int
+	ents    map[string]BlockedContent
 }
 
 func loadBlockedContentStore(path string, max int) *blockedContentStore {
@@ -504,23 +607,39 @@ func hashHit(hit string) string {
 func (s *blockedContentStore) Record(hit string, v BlockedContent) {
 	key := hashHit(hit)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.ents[key] = v
 	s.evictLocked()
-	_ = writeStateFile(s.path, blockedContentFile{Version: 1, Entries: s.ents})
+	s.mu.Unlock()
+	s.flush()
 }
 
 // Remove deletes one entry by its sha256 key (the operator Unblock cascade)
 // and reports whether it existed.
 func (s *blockedContentStore) Remove(hash string) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, ok := s.ents[hash]; !ok {
+		s.mu.Unlock()
 		return false
 	}
 	delete(s.ents, hash)
-	_ = writeStateFile(s.path, blockedContentFile{Version: 1, Entries: s.ents})
+	s.mu.Unlock()
+	s.flush()
 	return true
+}
+
+func (s *blockedContentStore) flush() {
+	if s.path == "" {
+		return
+	}
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	s.mu.Lock()
+	f := blockedContentFile{Version: 1, Entries: make(map[string]BlockedContent, len(s.ents))}
+	for k, v := range s.ents {
+		f.Entries[k] = v
+	}
+	s.mu.Unlock()
+	_ = writeStateFile(s.path, f)
 }
 
 // Entry returns one entry by hash (attribution for the repeat re-block path).
@@ -574,10 +693,11 @@ type allowedContentFile struct {
 // same sha256(hit) the repeat index uses so a cascade can move entries
 // verbatim. Oldest entries evict past max.
 type allowedContentStore struct {
-	mu   sync.Mutex
-	path string
-	max  int
-	ents map[string]AllowedContent
+	mu      sync.Mutex
+	flushMu sync.Mutex
+	path    string
+	max     int
+	ents    map[string]AllowedContent
 }
 
 func loadAllowedContentStore(path string, max int) *allowedContentStore {
@@ -634,23 +754,39 @@ func (s *allowedContentStore) AllowHash(hash string, v AllowedContent) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.ents[hash] = v
 	s.evictLocked()
-	_ = writeStateFile(s.path, allowedContentFile{Version: 1, Entries: s.ents})
+	s.mu.Unlock()
+	s.flush()
 }
 
 // Remove revokes one override (hash key); enforcement falls back to fresh
 // adjudication on the content's next occurrence.
 func (s *allowedContentStore) Remove(hash string) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, ok := s.ents[hash]; !ok {
+		s.mu.Unlock()
 		return false
 	}
 	delete(s.ents, hash)
-	_ = writeStateFile(s.path, allowedContentFile{Version: 1, Entries: s.ents})
+	s.mu.Unlock()
+	s.flush()
 	return true
+}
+
+func (s *allowedContentStore) flush() {
+	if s.path == "" {
+		return
+	}
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	s.mu.Lock()
+	f := allowedContentFile{Version: 1, Entries: make(map[string]AllowedContent, len(s.ents))}
+	for k, v := range s.ents {
+		f.Entries[k] = v
+	}
+	s.mu.Unlock()
+	_ = writeStateFile(s.path, f)
 }
 
 // AllowedEntry is one override plus its key (the admin/API DTO shape).

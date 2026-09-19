@@ -1722,6 +1722,27 @@ func TestSecurityBlocksAndAdjudications(t *testing.T) {
 	}
 }
 
+// TestHandleSecurityAllowedNilSerializesAsEmptyArray: the read port may return
+// nil for an empty allow-list; the handler must serialize it as {allowed: []},
+// never {allowed: null}.
+func TestHandleSecurityAllowedNilSerializesAsEmptyArray(t *testing.T) {
+	s := newReadServer(t, &readAPIStub{})
+	rec := serveRead(t, s, http.MethodGet, "/api/security/allowed")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var out struct {
+		Allowed []appapi.SecurityAllowed `json:"allowed"`
+	}
+	decodeReadJSON(t, rec, &out)
+	if out.Allowed == nil {
+		t.Fatalf("allowed serialized as null: %s", rec.Body.String())
+	}
+	if len(out.Allowed) != 0 {
+		t.Fatalf("allowed = %+v, want empty", out.Allowed)
+	}
+}
+
 // TestReadAnalyticsYearHeatmapAndAgentFacet pins the /api/analytics
 // response's fixed trailing-year heatmap + agent-facet projections: the
 // heatmap rides the same Analytics port at day granularity (same filters,
@@ -1910,5 +1931,24 @@ func TestHandleMCPTest(t *testing.T) {
 	s.serveAPI(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("empty name = %d, want 400", rec.Code)
+	}
+	// Error from ProbeMCP maps through writePortErr with the same shape.
+	s = newReadServerWithCommands(t, &readAPIStub{}, &commandFake{
+		probeMCP: func(_ context.Context, name string) (appapi.MCPProbeResult, error) {
+			return appapi.MCPProbeResult{}, appapi.NewHTTPError(http.StatusNotFound, "no such server: "+name)
+		},
+	})
+	req = httptest.NewRequest(http.MethodPost, "/api/mcp/test", strings.NewReader(`{"name":"missing"}`))
+	rec = httptest.NewRecorder()
+	s.serveAPI(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("error status = %d, want 404", rec.Code)
+	}
+	var errOut map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &errOut); err != nil {
+		t.Fatal(err)
+	}
+	if errOut["error"] != "no such server: missing" {
+		t.Fatalf("error body = %q", rec.Body.String())
 	}
 }

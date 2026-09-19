@@ -356,12 +356,13 @@ guard:
 	if content := readConfig(t, path); strings.Contains(content, "extra_paths") {
 		t.Errorf("nil extra_paths must delete the key:\n%s", content)
 	}
-	// A malformed row value leaves the key alone instead of corrupting it.
-	if err := service.EditConfig(appapi.EditRequest{
+	// A malformed row value is rejected with 400 and leaves the key alone.
+	err = service.EditConfig(appapi.EditRequest{
 		Kind: "guard",
 		Data: map[string]any{"extra_patterns": "not-a-list"},
-	}); err != nil {
-		t.Fatal(err)
+	})
+	if httpErrorStatus(t, err) != http.StatusBadRequest {
+		t.Fatalf("malformed extra_patterns must return 400, got %v", err)
 	}
 	if content := readConfig(t, path); !strings.Contains(content, "myvendor_key") {
 		t.Errorf("malformed list value must leave the key untouched:\n%s", content)

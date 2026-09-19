@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -181,6 +182,8 @@ func ParseToolsListResult(payload []byte) ([]ToolSpec, error) {
 // target is skipped (first target wins — it is the failover head). Canonical
 // names whose backend tool is missing from the fetched list are skipped
 // (a backend that dropped a tool silently degrades only its own target).
+// Within a target, canonical names are emitted in sorted order so the
+// aggregated tools/list is deterministic.
 func MergeCanonicalTools(toolsByServer map[string][]ToolSpec, targets []TargetMapping) []ToolSpec {
 	var out []ToolSpec
 	exposed := map[string]bool{}
@@ -190,11 +193,16 @@ func MergeCanonicalTools(toolsByServer map[string][]ToolSpec, targets []TargetMa
 		for _, spec := range backend {
 			byName[spec.Name] = spec
 		}
-		for canonical, backendName := range t.Tools {
+		canonicals := make([]string, 0, len(t.Tools))
+		for canonical := range t.Tools {
+			canonicals = append(canonicals, canonical)
+		}
+		sort.Strings(canonicals)
+		for _, canonical := range canonicals {
 			if exposed[canonical] {
 				continue
 			}
-			spec, ok := byName[backendName]
+			spec, ok := byName[t.Tools[canonical]]
 			if !ok {
 				continue
 			}

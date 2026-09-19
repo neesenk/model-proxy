@@ -4,14 +4,16 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"net/http"
 	"strconv"
 
 	"gopkg.in/yaml.v3"
 
+	"model-proxy/internal/appapi"
 	"model-proxy/internal/configedit"
 )
 
-func (s *Service) editConfigNode(mutate func(*yaml.Node)) error {
+func (s *Service) editConfigNode(mutate func(*yaml.Node) error) error {
 	// The whole load→mutate→write span runs under the config file lock:
 	// AddPreset and the CLI `add` command RMW the same config.yaml (the CLI
 	// from another process); without the lock the later writer's rename
@@ -25,7 +27,9 @@ func (s *Service) editConfigNode(mutate func(*yaml.Node)) error {
 		if configedit.MapNode(root) == nil {
 			return fmt.Errorf("config is not a YAML mapping")
 		}
-		mutate(root)
+		if err := mutate(root); err != nil {
+			return err
+		}
 		var buffer bytes.Buffer
 		encoder := yaml.NewEncoder(&buffer)
 		encoder.SetIndent(2)
@@ -40,17 +44,18 @@ func (s *Service) editConfigNode(mutate func(*yaml.Node)) error {
 }
 
 func (s *Service) editGeneral(data map[string]any) error {
-	return s.editConfigNode(func(root *yaml.Node) {
+	return s.editConfigNode(func(root *yaml.Node) error {
 		for _, key := range []string{"listen", "log_level", "log_file"} {
 			if value, ok := data[key]; ok {
 				applyScalar(root, key, value)
 			}
 		}
+		return nil
 	})
 }
 
 func (s *Service) editScheduling(data map[string]any) error {
-	return s.editConfigNode(func(root *yaml.Node) {
+	return s.editConfigNode(func(root *yaml.Node) error {
 		scheduling := configedit.ChildMap(root, "scheduling")
 		for _, key := range []string{
 			"circuit_threshold",
@@ -70,6 +75,7 @@ func (s *Service) editScheduling(data map[string]any) error {
 				applyScalar(scheduling, key, value)
 			}
 		}
+		return nil
 	})
 }
 
@@ -79,24 +85,26 @@ func (s *Service) editScheduling(data map[string]any) error {
 // is the same validate+save+reload pipeline as every other edit — the UI owns
 // the "restart required" hint (docs/engineering/pitfalls.md #29/#31).
 func (s *Service) editRequestLog(data map[string]any) error {
-	return s.editConfigNode(func(root *yaml.Node) {
+	return s.editConfigNode(func(root *yaml.Node) error {
 		requestLog := configedit.ChildMap(root, "request_log")
 		for _, key := range []string{"enabled", "dir", "max_file_size", "max_body_bytes", "retention", "mcp_split", "mcp_dir"} {
 			if value, ok := data[key]; ok {
 				applyScalar(requestLog, key, value)
 			}
 		}
+		return nil
 	})
 }
 
 func (s *Service) editStats(data map[string]any) error {
-	return s.editConfigNode(func(root *yaml.Node) {
+	return s.editConfigNode(func(root *yaml.Node) error {
 		stats := configedit.ChildMap(root, "stats")
 		for _, key := range []string{"db_path", "retention"} {
 			if value, ok := data[key]; ok {
 				applyScalar(stats, key, value)
 			}
 		}
+		return nil
 	})
 }
 
@@ -107,7 +115,7 @@ func (s *Service) editStats(data map[string]any) error {
 // is left untouched. guard.adjudicate is deliberately NOT editable here —
 // it is an explicit opt-in exception (decision 36) and stays YAML-only.
 func (s *Service) editGuard(data map[string]any) error {
-	return s.editConfigNode(func(root *yaml.Node) {
+	return s.editConfigNode(func(root *yaml.Node) error {
 		guard := configedit.ChildMap(root, "guard")
 		for _, key := range []string{"secrets", "paths", "known_secrets", "decode", "audit", "session_scan", "audit_path"} {
 			if value, ok := data[key]; ok {
@@ -125,21 +133,23 @@ func (s *Service) editGuard(data map[string]any) error {
 			}
 			list, ok := value.([]any)
 			if !ok {
-				continue // malformed row from the form — leave the key alone
+				return appapi.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("guard %s must be a list", key))
 			}
 			configedit.SetChildNode(guard, key, configedit.MustEncode(list))
 		}
+		return nil
 	})
 }
 
 func (s *Service) editCache(data map[string]any) error {
-	return s.editConfigNode(func(root *yaml.Node) {
+	return s.editConfigNode(func(root *yaml.Node) error {
 		cache := configedit.ChildMap(root, "cache")
 		for _, key := range []string{"enabled", "ttl", "max_entries", "max_body_bytes"} {
 			if value, ok := data[key]; ok {
 				applyScalar(cache, key, value)
 			}
 		}
+		return nil
 	})
 }
 
@@ -177,16 +187,17 @@ func scalarString(value any) string {
 
 func (s *Service) editStructured(kind, name string, data map[string]any) error {
 	if data["delete"] == true {
-		return s.editConfigNode(func(root *yaml.Node) {
+		return s.editConfigNode(func(root *yaml.Node) error {
 			switch kind {
 			case "provider":
 				configedit.DeleteKey(configedit.ChildMap(root, "providers"), name)
 			case "route":
 				configedit.DeleteKey(configedit.ChildMap(root, "routes"), name)
 			}
+			return nil
 		})
 	}
-	return s.editConfigNode(func(root *yaml.Node) {
+	return s.editConfigNode(func(root *yaml.Node) error {
 		switch kind {
 		case "provider":
 			providerConfig := configedit.ChildMap(configedit.ChildMap(root, "providers"), name)
@@ -209,5 +220,6 @@ func (s *Service) editStructured(kind, name string, data map[string]any) error {
 				configedit.SetChildNode(configedit.ChildMap(root, "routes"), name, configedit.MustEncode(targets))
 			}
 		}
+		return nil
 	})
 }

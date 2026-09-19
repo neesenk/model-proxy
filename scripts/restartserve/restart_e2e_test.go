@@ -208,15 +208,22 @@ func runScript(t *testing.T, dir string, args ...string) string {
 	return string(out)
 }
 
-// killPortOnCleanup SIGINTs whatever listens on the port when the test ends.
-// Register it IMMEDIATELY after any script/start that may bring a listener up,
-// so a mid-test assertion failure cannot leak a serve process (脚本经 nohup
-// 拉起的进程不是本测试的子进程，不跟着测试退出）。
-func killPortOnCleanup(t *testing.T, port int) {
+// killPortOnCleanup SIGINTs the expected listener on test teardown. When
+// expectedPID is non-zero it is killed directly; otherwise the port is used as
+// a fallback but the process is verified to be the model-proxy test binary
+// before any signal is sent, so an unrelated listener cannot be killed.
+func killPortOnCleanup(t *testing.T, port int, binary string, expectedPID int) {
 	t.Helper()
 	t.Cleanup(func() {
-		pid, err := pidOnPort(port)
-		if err != nil {
+		pid := expectedPID
+		if pid == 0 {
+			found, err := pidOnPort(port)
+			if err != nil {
+				return
+			}
+			pid = found
+		}
+		if !isTestBinary(pid, binary) {
 			return
 		}
 		_ = syscall.Kill(pid, syscall.SIGINT)
@@ -226,6 +233,20 @@ func killPortOnCleanup(t *testing.T, port int) {
 
 func processGone(pid int) bool {
 	return syscall.Kill(pid, 0) == syscall.ESRCH
+}
+
+// isTestBinary verifies pid belongs to the model-proxy binary we built for
+// this suite. On Linux /proc/<pid>/exe is authoritative; on Darwin we fall back
+// to the process command name from ps.
+func isTestBinary(pid int, binary string) bool {
+	if exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)); err == nil {
+		return exe == binary
+	}
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == filepath.Base(binary)
 }
 
 func exitedYet(exited <-chan error) bool {
@@ -243,7 +264,8 @@ func exitedYet(exited <-chan error) bool {
 func TestHotRestartReplacesListener(t *testing.T) {
 	dir, port := sandbox(t)
 	pid1, exited1 := startServe(t, dir, port)
-	killPortOnCleanup(t, port) // 覆盖脚本拉起的新实例；pid1 由 startServe 自己清理
+	// 覆盖脚本拉起的新实例；pid1 由 startServe 自己清理。binary 已由 sandbox 构建。
+	killPortOnCleanup(t, port, binary, 0)
 
 	out := runScript(t, dir, "--port", strconv.Itoa(port))
 
@@ -279,8 +301,8 @@ func TestColdStartParsesPortFromConfig(t *testing.T) {
 
 	// Register BEFORE runScript: if the script fails (t.Fatalf inside
 	// runScript), a cleanup registered after it would never run and the
-	// nohup'd serve would leak.
-	killPortOnCleanup(t, port)
+	// nohup'd serve would leak. binary 已由 sandbox 构建。
+	killPortOnCleanup(t, port, binary, 0)
 	out := runScript(t, dir) // no --port: exercise the config.yaml parser
 
 	if !strings.Contains(out, fmt.Sprintf("restarted on port %d", port)) {

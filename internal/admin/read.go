@@ -232,15 +232,23 @@ func (q requestLogQueries) Detail(requestID, stream string) ([]requestlog.Record
 		return requestlog.QueryRecordsIn(q.mcpDir, requestlog.MCPFilePrefix, requestlog.Filter{RequestID: requestID, Limit: 50})
 	}
 	if q.index != nil {
-		// The index seek already falls back to the scan on a miss.
+		// The index seek already falls back to the scan on a miss, but an
+		// indexing failure must be surfaced rather than hidden by the split-
+		// stream fallthrough.
 		records, err := q.index.Detail(requestID)
-		if (err == nil && len(records) > 0) || q.mcpDir == "" || stream == "llm" {
-			return records, err
+		if err != nil {
+			return nil, err
+		}
+		if len(records) > 0 || q.mcpDir == "" || stream == "llm" {
+			return records, nil
 		}
 	} else {
 		records, err := requestlog.QueryRecords(q.dir, requestlog.Filter{RequestID: requestID, Limit: 50})
-		if (err == nil && len(records) > 0) || q.mcpDir == "" || stream == "llm" {
-			return records, err
+		if err != nil {
+			return nil, err
+		}
+		if len(records) > 0 || q.mcpDir == "" || stream == "llm" {
+			return records, nil
 		}
 	}
 	// Split stream fallthrough: an id that lives in the mcp- files must stay
@@ -711,7 +719,7 @@ func (s *Service) ModelsDocument() appapi.ModelsDocument {
 func (s *Service) Security(query appapi.SecurityQuery) (appapi.SecurityResult, error) {
 	disabled := appapi.SecurityResult{Records: []appapi.SecurityRecord{}}
 	cfg := s.ports.Config()
-	if !cfg.Guard.AuditEnabled() {
+	if cfg == nil || !cfg.Guard.AuditEnabled() {
 		return disabled, nil
 	}
 	dir := filepath.Dir(cfg.Guard.AuditPathValue(accounts.HomeDir()))

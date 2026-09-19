@@ -3,8 +3,10 @@ package requestlog
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"model-proxy/internal/observe/logfile"
@@ -265,6 +267,21 @@ func (x *Indexer) runReconcile() {
 	select {
 	case x.reconciled <- struct{}{}:
 	default:
+	}
+}
+
+// WaitReconciled blocks until the background loop finishes at least one more
+// reconcile pass (or ctx is done). It is a test seam for observing the indexer
+// without sleeps.
+func (x *Indexer) WaitReconciled(ctx context.Context) error {
+	if x == nil {
+		return errors.New("nil indexer")
+	}
+	select {
+	case <-x.reconciled:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -656,6 +673,9 @@ func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) 
 // by kind: shadow evaluation rows are LLM-stream rows, and legacy kind=mcp
 // rows can never pair (their ids carry no shadow- twin).
 func (x *Indexer) ShadowReport(filter Filter) ([]ShadowReportEntry, error) {
+	// Shadow evaluation rows are LLM-stream rows; ignore any kind filter so the
+	// report stays comparable to the scan path.
+	filter.Kind = ""
 	where, args := filterSQL(filter)
 	query := `SELECT request_id, shadow, exposed, provider, status, latency_ms, response_size
 		FROM records` + where + ` ORDER BY ts DESC, rowid DESC`

@@ -346,6 +346,7 @@ cache:
 #     # proxy_url: off                 # override the proxy chain for this server
 #     # headers: {X-Api-Key: env:TAVILY_API_KEY}   # static headers, env:VAR indirection ONLY
 #     # enabled: false                 # keep config but answer 404
+#     # command: and env: are stdio-only; they are rejected at validation for streamable/sse
 #   zhipu-search-legacy:               # legacy SSE form of the same upstream
 #     provider: zhipu
 #     url: https://open.bigmodel.cn/api/mcp/web_search_prime/sse

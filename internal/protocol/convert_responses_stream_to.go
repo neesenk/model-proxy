@@ -33,6 +33,7 @@ type anthropicSSEToResponsesSSE struct {
 	model, id   string
 	started     bool
 	done        bool
+	bomStripped bool
 	nextOutIdx  int
 	blocks      map[int]*rsRevBlock
 	doneItems   []map[string]any // completed output items (for response.completed.output)
@@ -78,7 +79,7 @@ func (t *anthropicSSEToResponsesSSE) ensureCreated() {
 }
 
 func (t *anthropicSSEToResponsesSSE) Read(p []byte) (int, error) {
-	if pumpSSEFrames(t, t.sc, nil, true) {
+	if pumpSSEFrames(t, t.sc, &t.bomStripped, true) {
 		return 0, io.EOF
 	}
 	n := copy(p, t.out)
@@ -112,10 +113,9 @@ func (t *anthropicSSEToResponsesSSE) scanError(err error) {
 }
 
 func (t *anthropicSSEToResponsesSSE) streamEnd() {
-	if t.stopRsn != "" {
-		t.finish()
-		return
-	}
+	// A message_delta with stop_reason is not enough: the same-protocol
+	// cache gate requires the matching message_stop. Reaching EOF without
+	// it is a truncated stream, not a clean terminal.
 	t.emitFailed("upstream stream terminated before a terminal event")
 	t.done = true
 }
@@ -567,6 +567,7 @@ type openaiSSEToResponsesSSE struct {
 	model, id       string
 	started         bool
 	done            bool
+	bomStripped     bool
 	nextOutIdx      int
 	textOut         int // output_index of the open message/text item (-1 none)
 	msgOpened       bool
@@ -720,7 +721,7 @@ func (t *openaiSSEToResponsesSSE) openReasoning() {
 }
 
 func (t *openaiSSEToResponsesSSE) Read(p []byte) (int, error) {
-	if pumpSSEFrames(t, t.sc, nil, true) {
+	if pumpSSEFrames(t, t.sc, &t.bomStripped, true) {
 		return 0, io.EOF
 	}
 	n := copy(p, t.out)

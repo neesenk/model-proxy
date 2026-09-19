@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"net/url"
 	"strings"
@@ -73,22 +74,38 @@ func (e *EndpointRewriter) Read(p []byte) (int, error) {
 }
 
 // maybeRewrite applies the rewrite to the data line of the first "endpoint"
-// event (tracked by event name, per the SSE event model).
+// event (tracked by event name, per the SSE event model). It preserves the
+// original line terminator and the whitespace immediately after "data:" (the
+// SSE field separator), replacing only the actual data value instead of
+// trimming the whole line.
 func (e *EndpointRewriter) maybeRewrite(line []byte) []byte {
 	if e.done {
 		return line
 	}
-	trimmed := strings.TrimSpace(string(line))
-	if strings.HasPrefix(trimmed, "event:") {
-		e.await = strings.TrimSpace(strings.TrimPrefix(trimmed, "event:")) == "endpoint"
+	// Split off the terminator so we can reconstruct the line unchanged for
+	// non-matching bytes and preserve \r\n vs \n for the rewritten line.
+	body, term := line, []byte{}
+	switch {
+	case bytes.HasSuffix(body, []byte("\r\n")):
+		body, term = body[:len(body)-2], []byte("\r\n")
+	case bytes.HasSuffix(body, []byte("\n")):
+		body, term = body[:len(body)-1], []byte("\n")
+	}
+	if bytes.HasPrefix(body, []byte("event:")) {
+		eventValue := strings.TrimSpace(string(body[len("event:"):]))
+		e.await = eventValue == "endpoint"
 		return line
 	}
-	if !e.await || !strings.HasPrefix(trimmed, "data:") {
+	if !e.await || !bytes.HasPrefix(body, []byte("data:")) {
 		return line
 	}
-	payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
-	out := e.rewrite(payload)
+	// Separate the SSE separator whitespace from the data value so the value
+	// is what gets rewritten while the separator is preserved verbatim.
+	rest := body[len("data:"):]
+	value := bytes.TrimLeft(rest, " \t")
+	separator := rest[:len(rest)-len(value)]
+	out := e.rewrite(string(value))
 	e.done = true
 	e.await = false
-	return []byte("data: " + out + "\n")
+	return append(append(append([]byte("data:"), separator...), []byte(out)...), term...)
 }

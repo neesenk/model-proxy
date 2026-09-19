@@ -155,6 +155,7 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 #     command: [npx, -y, "@z_ai/mcp-server"]
 #     env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU}
 #                           # env 值：${account.api_key} / env:VAR 间接形式，或良性键的字面量；凭据形键名（…_KEY/TOKEN/SECRET/…）拒绝字面量
+#                           # command 与 env 仅对 transport: stdio 有效，配在 streamable/sse 上会被校验拒绝
 #   exa:                    # auth: none：匿公共端点
 #     url: https://mcp.exa.ai/mcp
 #     auth: none            # 自定义鉴权头：auth_header: X-Agent-Plan-Key（火山 datapro 形态，apikey provider 限定）

@@ -2,6 +2,7 @@ package requestlog
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -220,6 +221,29 @@ func TestIndexShadowReportEquivalenceVsScan(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].Route != "beta" || got[0].Samples != 2 || got[1].Route != "alpha" || got[1].Samples != 1 {
 		t.Fatalf("index shadow report = %+v", got)
+	}
+}
+
+// TestIndexShadowReportIgnoresKindFilter verifies that ShadowReport never
+// filters by kind: shadow evaluation rows are LLM-stream rows, and a caller-
+// supplied kind=mcp filter must not suppress the paired shadow rows.
+func TestIndexShadowReportIgnoresKindFilter(t *testing.T) {
+	dir := t.TempDir()
+	records := []Record{
+		{Ts: "2026-07-29T12:00:00Z", RequestID: "r1", Exposed: "m", Provider: "p", Status: 200, LatencyMs: 5},
+		{Ts: "2026-07-29T12:00:01Z", RequestID: "shadow-r1", Provider: "sp", Status: 200, LatencyMs: 8, Shadow: true},
+		{Ts: "2026-07-29T12:00:02Z", RequestID: "mcp-1", Provider: "mcp", Status: 200, Kind: "mcp"},
+	}
+	writeRecordFile(t, dir, "requests-20260729.log", records)
+	indexer := newTestIndexer(t, dir)
+	mustReconcile(t, indexer)
+
+	report, err := indexer.ShadowReport(Filter{Kind: "mcp", Limit: 100})
+	if err != nil {
+		t.Fatalf("ShadowReport: %v", err)
+	}
+	if len(report) != 1 || report[0].Route != "m" || report[0].PrimaryProvider != "p" || report[0].ShadowProvider != "sp" {
+		t.Fatalf("shadow report with kind=mcp = %+v, want one paired row", report)
 	}
 }
 
@@ -625,15 +649,15 @@ func TestIndexConcurrentReconcileAndQueries(t *testing.T) {
 	}
 
 	writer.Wait()
-	deadline := time.Now().Add(10 * time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	for {
 		if got := indexRowCount(t, indexer); got == total {
 			break
 		}
-		if time.Now().After(deadline) {
+		if err := indexer.WaitReconciled(ctx); err != nil {
 			t.Fatalf("index rows = %d, want %d (indexer did not catch up)", indexRowCount(t, indexer), total)
 		}
-		time.Sleep(2 * time.Millisecond)
 	}
 	close(stop)
 	readers.Wait()

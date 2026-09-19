@@ -7,6 +7,7 @@ package protocol
 // drainSse/sseItems pattern).
 
 import (
+	"bufio"
 	"io"
 	"strings"
 	"testing"
@@ -179,5 +180,49 @@ func TestConvertSSEDrain(t *testing.T) {
 	events2 := drainSSE(t, strings.NewReader("data: [DONE]"))
 	if len(events2) != 1 || sseEventType(events2[0]) != "[DONE]" {
 		t.Errorf("unterminated final frame not parsed: %+v", events2)
+	}
+}
+
+// strictPrefixHooks is a minimal sseFrameHooks implementation used to exercise
+// the pump directly without the noise of a full protocol converter.
+type strictPrefixHooks struct {
+	frames []sseEvent
+	done   bool
+}
+
+func (h *strictPrefixHooks) hasOutput() bool     { return false }
+func (h *strictPrefixHooks) isDone() bool        { return h.done }
+func (h *strictPrefixHooks) drainDone() bool     { return true }
+func (h *strictPrefixHooks) scanError(err error) {}
+func (h *strictPrefixHooks) streamEnd()          { h.done = true }
+func (h *strictPrefixHooks) dispatch(frameEvent string, _ []string, payload string) {
+	h.frames = append(h.frames, sseEvent{event: frameEvent, data: payload})
+}
+
+// TestSSEPump_StrictPrefix: the shared pump must only recognize lines whose
+// *non-space* prefix is exactly "data:" or "event:". Leading spaces hide
+// malformed upstream bytes instead of being silently treated as valid frames.
+func TestSSEPump_StrictPrefix(t *testing.T) {
+	in := "event: e\n" +
+		"data: ok\n\n" +
+		" data: ignored\n" +
+		" event: ignored2\n" +
+		"data: still-ok\n\n"
+	sc := bufio.NewScanner(strings.NewReader(in))
+	sc.Buffer(make([]byte, 0, 64*1024), sseScanBuf)
+	h := &strictPrefixHooks{}
+	for {
+		if pumpSSEFrames(h, sc, nil, false) {
+			break
+		}
+	}
+	if len(h.frames) != 2 {
+		t.Fatalf("got %d frames, want 2: %+v", len(h.frames), h.frames)
+	}
+	if h.frames[0].event != "e" || h.frames[0].data != "ok" {
+		t.Errorf("frame[0] = %+v, want event=e data=ok", h.frames[0])
+	}
+	if h.frames[1].event != "" || h.frames[1].data != "still-ok" {
+		t.Errorf("frame[1] = %+v, want event=\"\" data=still-ok", h.frames[1])
 	}
 }

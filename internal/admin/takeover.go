@@ -43,6 +43,9 @@ func (s *Service) takeoverDirs() (homeDir, templatesDir, bakDir string) {
 // the auto_selected marker previews ("" = unified); invalid modes are a 400.
 func (s *Service) TakeoverSurface(mode string) (appapi.TakeoverSurface, error) {
 	cfg := s.ports.Config()
+	if cfg == nil {
+		return appapi.TakeoverSurface{}, appapi.NewHTTPError(http.StatusServiceUnavailable, "no config generation")
+	}
 	_, templatesDir, bakDir := s.takeoverDirs()
 	resolvedMode, err := resolveTakeoverMode(mode)
 	if err != nil {

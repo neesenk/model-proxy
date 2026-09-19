@@ -186,6 +186,12 @@ func (c *Config) validateMCP() error {
 			}
 			continue
 		}
+		if len(s.Command) > 0 {
+			return fmt.Errorf("mcp %q: command is only valid with transport stdio — drop command for HTTP transports", name)
+		}
+		if len(s.Env) > 0 {
+			return fmt.Errorf("mcp %q: env is only valid with transport stdio — drop env for HTTP transports", name)
+		}
 		if s.URL == "" {
 			return fmt.Errorf("mcp %q: url is empty — set the upstream MCP endpoint (streamable HTTP)", name)
 		}
@@ -294,8 +300,8 @@ func ResolveMCPStdioEnv(s MCPServer, accountKey string) ([]string, error) {
 			env = append(env, k+"="+accountKey)
 		case strings.HasPrefix(v, "env:"):
 			varName := strings.TrimPrefix(v, "env:")
-			value := os.Getenv(varName)
-			if value == "" {
+			value, ok := os.LookupEnv(varName)
+			if !ok {
 				return nil, fmt.Errorf("env[%s]: environment variable %s is not set", k, varName)
 			}
 			env = append(env, k+"="+value)
@@ -336,8 +342,8 @@ func ResolveMCPHeaders(s MCPServer) (map[string]string, error) {
 	out := make(map[string]string, len(s.Headers))
 	for h, ref := range s.Headers {
 		varName := strings.TrimPrefix(ref, "env:")
-		value := os.Getenv(varName)
-		if value == "" {
+		value, ok := os.LookupEnv(varName)
+		if !ok {
 			return nil, fmt.Errorf("headers[%q]: environment variable %s is not set", h, varName)
 		}
 		out[h] = value

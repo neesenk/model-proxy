@@ -118,6 +118,7 @@ type responsesSSEToAnthropicSSE struct {
 	started     bool
 	done        bool
 	errored     bool
+	bomStripped bool
 	nextIdx     int
 	blocks      map[int]*rsBlock // responses output_index → block
 	curTextOut  int              // output_index of the open text block (-1 none)
@@ -297,7 +298,7 @@ func (t *responsesSSEToAnthropicSSE) materializeCompletedOutput(output any) {
 }
 
 func (t *responsesSSEToAnthropicSSE) Read(p []byte) (int, error) {
-	if pumpSSEFrames(t, t.sc, nil, true) {
+	if pumpSSEFrames(t, t.sc, &t.bomStripped, true) {
 		return 0, io.EOF
 	}
 	n := copy(p, t.out)
@@ -749,6 +750,7 @@ type responsesSSEToOpenAISSE struct {
 	started      bool
 	done         bool
 	errored      bool
+	bomStripped  bool
 	toolIdx      map[int]int       // responses output_index → chat tool_calls index
 	toolArgsSeen map[int]bool      // responses output_index → at least one arguments delta emitted
 	pendArgs     map[string]string // early arguments deltas (before added/done)
@@ -800,7 +802,7 @@ func (t *responsesSSEToOpenAISSE) toolIndex(outIdx int) int {
 }
 
 func (t *responsesSSEToOpenAISSE) Read(p []byte) (int, error) {
-	if pumpSSEFrames(t, t.sc, nil, true) {
+	if pumpSSEFrames(t, t.sc, &t.bomStripped, true) {
 		return 0, io.EOF
 	}
 	n := copy(p, t.out)

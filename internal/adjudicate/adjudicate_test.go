@@ -519,6 +519,26 @@ func TestScrub_MasksHitEchoAndControlChars(t *testing.T) {
 	}
 }
 
+// TestScrub_MasksLongFragments: a judge reason or error detail that quotes a
+// long-enough fragment of the hit (>= 8 bytes) is also masked, even if the
+// full hit is not present. Shorter fragments are deliberately not masked —
+// they are too generic to attribute — but the full short-hit case above still
+// masks the entire hit.
+func TestScrub_MasksLongFragments(t *testing.T) {
+	hit := "sk-proj-abcdefghij1234567890"
+	got := scrub(hit, "the model cited proj-abcdefghij12345678 as evidence")
+	if strings.Contains(got, "proj-abcdefghij12345678") {
+		t.Errorf("scrub leaked a long fragment: %q", got)
+	}
+	if !strings.Contains(got, "[MASKED]") {
+		t.Errorf("scrub did not mask the fragment: %q", got)
+	}
+	// A 7-byte fragment is below the threshold and stays as-is.
+	if short := scrub(hit, "token k-proj- end"); strings.Contains(short, "[MASKED]") {
+		t.Errorf("scrub masked a short (<8) fragment: %q", short)
+	}
+}
+
 // Short hits are masked in the persisted reason/evidence of a verdict, not
 // just in the scrub unit — regression for a short custom-pattern hit landing
 // on disk verbatim.
@@ -577,12 +597,28 @@ func TestLLMUsageStats_CountsCallsNotCacheHits(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		s.Enqueue(testJob("sk-usage-dummy-not-a-real-key-000" + string(rune('a'+i))))
 	}
-	waitFor(t, func() bool { _, low, _ := sink.counts(); return low >= 1 })
-	waitFor(t, func() bool { calls, _, _, _ := s.Stats(); return calls >= 1 })
+	// Wait until all four real low verdicts have landed before enqueueing the
+	// cached echo — otherwise the cache-hit apply can race ahead of a still-
+	// queued unique low and the cumulative count assertion becomes flaky.
+	waitFor(t, func() bool {
+		_, low, _ := sink.counts()
+		calls, _, _, _ := s.Stats()
+		return low == 4 && calls == 4
+	})
 	// Cache hit on identical content adds no call and no tokens.
 	j := testJob("sk-usage-dummy-not-a-real-key-000a")
 	s.Enqueue(j)
-	time.Sleep(50 * time.Millisecond)
+	// Low verdicts accumulate per occurrence (4 unique lows + 1 cached echo).
+	// The shared 2s waitFor flaked under a fully parallel ./... run — a
+	// saturated machine starves the workers past any short wall budget — so
+	// poll with a roomier local deadline.
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, _, _, lows := s.Stats(); lows >= 5 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 	calls, in, out, _ := s.Stats()
 	if calls != int64(caller.count()) {
 		t.Errorf("stats calls = %d, caller calls = %d — must match 1:1", calls, caller.count())
@@ -590,20 +626,18 @@ func TestLLMUsageStats_CountsCallsNotCacheHits(t *testing.T) {
 	if in <= 0 || out <= 0 {
 		t.Errorf("token accounting empty: in=%d out=%d (fake reports 100/20)", in, out)
 	}
-	// Low verdicts accumulate per occurrence (the first pass ran 4 unique
-	// lows + 1 cached echo = 5 suppressed occurrences by now). The shared
-	// 2s waitFor flaked under a fully parallel ./... run — a saturated
-	// machine starves the workers past any short wall budget — so poll with
-	// a roomier local deadline (a healthy run returns in milliseconds; the
-	// budget only matters when the whole suite races in parallel).
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, _, _, lows := s.Stats(); lows >= 5 {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
+	if lows := sinkLowCount(sink); lows != 4 {
+		t.Errorf("sink low records = %d, want 4 (cached echo must not re-emit)", lows)
 	}
-	t.Fatal("cumulative lows did not reach 5")
+	if _, _, _, lows := s.Stats(); lows < 5 {
+		t.Fatal("cumulative lows did not reach 5")
+	}
+}
+
+func sinkLowCount(s *fakeSink) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.low)
 }
 
 func TestVerdictCacheLRU_EvictsOldest(t *testing.T) {
@@ -649,9 +683,12 @@ func TestLLMUsageStats_PersistAcrossServiceRebuild(t *testing.T) {
 		t.Fatalf("lifetime stats = %d calls / %d in / %d out / %d lows, want 2/200/40/2 (both jobs answered low)", calls, in, out, lows)
 	}
 	// The write-through lands right after the stats block; poll for the file
-	// rather than assuming it beats this line.
+	// and for the final low count rather than assuming it beats this line.
 	statsPath := filepath.Join(dir, "guard_stats.json")
-	waitFor(t, func() bool { _, err := os.Stat(statsPath); return err == nil })
+	waitFor(t, func() bool {
+		data, err := os.ReadFile(statsPath)
+		return err == nil && strings.Contains(string(data), `"calls": 2`) && strings.Contains(string(data), `"low_verdicts": 2`)
+	})
 	data, err := os.ReadFile(statsPath)
 	if err != nil {
 		t.Fatalf("guard_stats.json not written: %v", err)

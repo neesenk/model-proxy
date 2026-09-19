@@ -770,19 +770,31 @@ func (t *Template) rewriteJSON(ctx renderContext, scope RewriteScope) error {
 }
 
 // mergeMCPIntoJSON folds the gateway MCP surface into one JSON document.
-// Empty gateway surface: leave the client's existing MCP config alone.
-// Otherwise MERGE: entries pointing elsewhere (the user's own servers) are
-// preserved; this proxy's surface is replaced wholesale — current entries
-// plus stale leftovers from earlier takeovers, both identified by the /mcp/
-// URL under this proxy URL.
+// A nil MCP block means the template does not manage MCP config — leave the
+// client's existing MCP config alone. Otherwise stale proxy entries are
+// cleaned and the current surface is written; an explicit empty selection
+// (opts.MCP = []) clears proxy entries while preserving the user's own
+// servers.
+//
+// Cleanup matches two things: the entry's URL must be under this proxy's
+// /mcp/ prefix, AND the entry name must belong to the template's generated
+// namespace (ctx.mcpAll). This protects a user-defined server that happens
+// to share the same URL prefix from being deleted.
 func mergeMCPIntoJSON(v map[string]any, mcp *MCPTemplate, ctx renderContext) {
-	if mcp == nil || len(ctx.mcp) == 0 {
+	if mcp == nil {
 		return
 	}
 	path := strings.Split(ctx.substitute(mcp.JSONPath), ".")
 	existing := dottedMap(v, path)
 	proxyPrefix := ctx.proxyURL + "/mcp/"
+	generatedNames := make(map[string]bool, len(ctx.mcpAll))
+	for _, e := range ctx.mcpAll {
+		generatedNames[e.Name] = true
+	}
 	for k, e := range existing {
+		if !generatedNames[k] {
+			continue
+		}
 		if m, ok := e.(map[string]any); ok {
 			if u, ok := m["url"].(string); ok && strings.HasPrefix(u, proxyPrefix) {
 				delete(existing, k)
@@ -923,12 +935,15 @@ func (t *Template) rewriteTOML(ctx renderContext, scope RewriteScope) error {
 	}
 	if t.MCP != nil && scope != ScopeModel {
 		// Drop stale proxy mcp sections first (previous takeover leftovers):
-		// any [<prefix>...] section whose body carries this proxy's /mcp/ URL,
-		// where <prefix> is the template's literal section-name prefix.
-		prefix := strings.Split(t.MCP.TOMLSection, "{{")[0]
-		if prefix != "" {
-			text = removeTOMLSectionsWithURL(text, prefix, ctx.proxyURL+"/mcp/")
+		// sections whose names are in the template-generated namespace and
+		// whose body carries this proxy's /mcp/ URL. The namespace is derived
+		// from the full gateway surface (ctx.mcpAll) so routed-member pruning
+		// or an explicit empty selection still cleans stale proxy entries.
+		generatedSections := make(map[string]bool, len(ctx.mcpAll))
+		for _, e := range ctx.mcpAll {
+			generatedSections[ctx.substituteMCP(t.MCP.TOMLSection, e)] = true
 		}
+		text = removeTOMLSectionsWithURL(text, ctx.proxyURL+"/mcp/", generatedSections)
 		for _, e := range ctx.mcp {
 			name := ctx.substituteMCP(t.MCP.TOMLSection, e)
 			body := "\n[" + name + "]\n" + ctx.substituteMCP(t.MCP.TOMLBody, e) + "\n"

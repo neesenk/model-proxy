@@ -117,6 +117,37 @@ func TestMergeCanonicalTools(t *testing.T) {
 	}
 }
 
+// TestMergeCanonicalTools_OrderStable: canonical names inside a target must be
+// emitted in sorted order regardless of map iteration randomness.
+func TestMergeCanonicalTools_OrderStable(t *testing.T) {
+	toolsByServer := map[string][]ToolSpec{
+		"srv": {
+			{Name: "b_tool", Description: "b"},
+			{Name: "a_tool", Description: "a"},
+			{Name: "c_tool", Description: "c"},
+		},
+	}
+	targets := []TargetMapping{
+		{Server: "srv", Tools: map[string]string{
+			"canonical_z": "c_tool",
+			"canonical_a": "a_tool",
+			"canonical_m": "b_tool",
+		}},
+	}
+	want := []string{"canonical_a", "canonical_m", "canonical_z"}
+	for i := 0; i < 20; i++ {
+		merged := MergeCanonicalTools(toolsByServer, targets)
+		if len(merged) != len(want) {
+			t.Fatalf("merged = %+v", merged)
+		}
+		for j, name := range want {
+			if merged[j].Name != name {
+				t.Fatalf("iteration %d: merged[%d].Name = %q, want %q", i, j, merged[j].Name, name)
+			}
+		}
+	}
+}
+
 func TestSplitRPCMessagesAndParseInitialize(t *testing.T) {
 	msgs := SplitRPCMessages("text/event-stream", []byte("event: message\ndata: {\"a\":1}\n\ndata: {\"b\":2}\n\n"))
 	if len(msgs) != 2 {

@@ -551,7 +551,11 @@ func (f *flakyDaemon) once(key string) error {
 }
 
 func (f *flakyDaemon) Post(model, body, session string) (int, error) {
-	if err := f.once("post:" + session + ":" + body[:24]); err != nil {
+	key := body
+	if len(key) > 24 {
+		key = key[:24]
+	}
+	if err := f.once("post:" + session + ":" + key); err != nil {
 		return 0, err
 	}
 	return f.inner.Post(model, body, session)
@@ -593,7 +597,66 @@ func (f *flakyDaemon) Unblock(session string) error {
 	return f.inner.Unblock(session)
 }
 
-func TestSuiteErrorPropagation(t *testing.T) {
+// flakySummariesDaemon injects exactly one transient failure on the first
+// Summaries call per session. Summaries only appears inside poll loops, so the
+// suite must retry and recover — this exercises retry semantics without the
+// brittle 300ms < 500ms wall-clock coupling of the original error-propagation
+// test.
+type flakySummariesDaemon struct {
+	inner    daemon
+	failed   map[string]bool
+	injected int
+}
+
+func (f *flakySummariesDaemon) Post(model, body, session string) (int, error) {
+	return f.inner.Post(model, body, session)
+}
+func (f *flakySummariesDaemon) Summaries(session string) ([]summary, error) {
+	if !f.failed[session] {
+		f.failed[session] = true
+		f.injected++
+		return nil, fmt.Errorf("injected summaries failure: %s", session)
+	}
+	return f.inner.Summaries(session)
+}
+func (f *flakySummariesDaemon) DetailGuard(requestID string) ([]guardMark, error) {
+	return f.inner.DetailGuard(requestID)
+}
+func (f *flakySummariesDaemon) Adjudications() (adjudicationFeed, error) {
+	return f.inner.Adjudications()
+}
+func (f *flakySummariesDaemon) SecurityRecords(kind string) ([]secRecord, error) {
+	return f.inner.SecurityRecords(kind)
+}
+func (f *flakySummariesDaemon) Blocks() ([]blockEntry, error) {
+	return f.inner.Blocks()
+}
+func (f *flakySummariesDaemon) Unblock(session string) error {
+	return f.inner.Unblock(session)
+}
+
+func TestSuiteRetriesTransientFailures(t *testing.T) {
+	inner := newFakeDaemon(func(marker string) string {
+		if marker == "real" {
+			return "high"
+		}
+		return "low"
+	})
+	f := &flakySummariesDaemon{inner: inner, failed: map[string]bool{}}
+	// A short poll interval with a generous timeout proves retries happen
+	// without relying on the default 500ms tick or a timeout shorter than it.
+	results, _ := runSuiteWith(f, "m", 2*time.Second, nil, 50*time.Millisecond)
+	for _, res := range results {
+		if res.status != "PASS" {
+			t.Errorf("%s = %s, want PASS (transient failure should have been retried)", res.name, res.status)
+		}
+	}
+	if f.injected == 0 {
+		t.Error("no transient Summaries failures were injected, retry semantics not exercised")
+	}
+}
+
+func TestSuitePostErrorPropagation(t *testing.T) {
 	inner := newFakeDaemon(func(marker string) string {
 		if marker == "real" {
 			return "high"
@@ -601,9 +664,10 @@ func TestSuiteErrorPropagation(t *testing.T) {
 		return "low"
 	})
 	f := &flakyDaemon{inner: inner, failed: map[string]bool{}}
-	results, _ := runSuite(f, "m", 300*time.Millisecond, nil)
-	// Every scenario that runs must FAIL with the injected error, never
-	// panic or hang; the skip chain still holds.
+	results, _ := runSuite(f, "m", time.Second, nil)
+	// Post is not inside a poll loop, so the first injected Post failure per
+	// scenario propagates as a scenario failure rather than a retry. The
+	// important property is that the error is surfaced, never a panic or hang.
 	for _, res := range results {
 		if res.status == "PASS" {
 			t.Errorf("%s passed despite an injected first-call failure", res.name)
@@ -611,5 +675,15 @@ func TestSuiteErrorPropagation(t *testing.T) {
 		if res.status == "FAIL" && !strings.Contains(res.detail, "injected") && !strings.Contains(res.detail, "status ") {
 			t.Errorf("%s failed oddly: %s", res.name, res.detail)
 		}
+	}
+}
+
+func TestFlakyDaemonShortBodyNoPanic(t *testing.T) {
+	// Regression: the old code sliced body[:24] and panicked on short bodies.
+	inner := newFakeDaemon(func(string) string { return "low" })
+	f := &flakyDaemon{inner: inner, failed: map[string]bool{}}
+	// A body shorter than 24 bytes must not panic.
+	if _, err := f.Post("m", `{}`, "s"); err == nil || !strings.Contains(err.Error(), "injected") {
+		t.Fatalf("expected injected failure, got %v", err)
 	}
 }

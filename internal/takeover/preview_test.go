@@ -6,6 +6,7 @@ import (
 	"model-proxy/internal/takeover"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -414,4 +415,64 @@ json:
 		takeover.TakeoverOptions{Mode: takeover.ModeUnified}, takeover.ModelFacts{SourceDefault: -1}, true); err == nil {
 		t.Fatalf("invalid draft must be a parse error")
 	}
+}
+
+// TestPreviewWrites_EscapesRedirectedRealPath: when the real side-file path
+// contains characters that need escaping inside a JSON/TOML string (quotes,
+// backslashes), the preview replacement must produce a valid config document,
+// not corrupt the string with raw text substitution.
+func TestPreviewWrites_EscapesRedirectedRealPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// A directory with a quote in its name exercises TOML double-quote escaping.
+	realDir := filepath.Join(home, `real"quotes`, ".codex")
+	if err := os.MkdirAll(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	realCatalog := filepath.Join(realDir, "model-proxy-models.json")
+
+	templatesDir := t.TempDir()
+	tpl := `description: test codex
+file: ` + filepath.Join(home, `.codex`, `config.toml`) + `
+format: toml
+client: codex
+protocol: responses
+models:
+  shape: codex
+  catalog_file: ` + strconv.Quote(realCatalog) + `
+toml:
+  top_keys:
+    model_provider: '"{{provider_id}}"'
+`
+	if err := os.WriteFile(filepath.Join(templatesDir, "codex.yaml"), []byte(tpl), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Listen: "127.0.0.1:15721",
+		Providers: map[string]config.Provider{
+			"aqp": {Provider: "aqp", OpenAIBaseURL: "http://x", Models: []string{"glm-5.2"}},
+		},
+		Routes: map[string][]config.RouteTarget{
+			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2", Priority: 1}},
+		},
+	}
+	writes, err := takeover.PreviewWrites(cfg, "codex", templatesDir, takeover.ModeUnified, takeover.ModelFacts{Routes: cfg.Routes, SourceDefault: -1}, false, takeover.ScopeAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(writes) != 1 {
+		t.Fatalf("writes = %+v, want 1", writes)
+	}
+	content := writes[0].Content
+	// The real path must appear, and the TOML line must remain parseable as a
+	// double-quoted string (the quote inside the path is escaped).
+	if !strings.Contains(content, `model_catalog_json = "`+escapeTOMLString(realCatalog)+`"`) {
+		t.Fatalf("redirected real path not correctly escaped in TOML:\n%s", content)
+	}
+}
+
+func escapeTOMLString(s string) string {
+	// TOML double-quoted strings use the same escapes as Go string literals for
+	// the characters that matter here (", \, \b, \t, \n, \f, \r).
+	return strconv.Quote(s)[1 : len(strconv.Quote(s))-1]
 }
