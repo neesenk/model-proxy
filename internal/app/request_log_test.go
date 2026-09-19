@@ -600,6 +600,14 @@ func TestForward_RequestLog_CapturesAgent(t *testing.T) {
 	postWithUA("curl/8.0")
 
 	awaitCommitMetrics(t, proxy, counters.PMKey{Provider: "backend", Model: "client-model"})
+	// Metrics commit and request-log persistence are SEPARATE async paths:
+	// under -race (10-20x slower) the second record can queue after its
+	// metrics land, and shutdown's flush would then miss it. Poll the log
+	// until both records are durable BEFORE shutting down.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(allRecords(t, dir)) != 2 {
+		time.Sleep(10 * time.Millisecond)
+	}
 	shutdown()
 	records := allRecords(t, dir)
 	if len(records) != 2 {
