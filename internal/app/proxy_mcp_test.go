@@ -1188,7 +1188,26 @@ func TestMCPGateway_StatsSurfaced(t *testing.T) {
 	if len(surface.Servers) != 1 || surface.Servers[0].Name != "fc" {
 		t.Fatalf("surface = %+v", surface)
 	}
+	// Stats settle asynchronously (the counting rides the deferred terminal
+	// path like the live events) — poll until both calls landed.
+	deadline := time.Now().Add(2 * time.Second)
 	got := surface.Servers[0]
+	for time.Now().Before(deadline) {
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodGet, "/api/mcp", nil)
+		mux.ServeHTTP(rec, req)
+		if err := json.Unmarshal(rec.Body.Bytes(), &surface); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(surface.Servers) != 1 {
+			t.Fatalf("surface = %+v", surface)
+		}
+		got = surface.Servers[0]
+		if got.Calls == 2 && got.Errors == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if got.Calls != 2 || got.Errors != 0 {
 		t.Fatalf("calls/errors = %d/%d, want 2/0", got.Calls, got.Errors)
 	}
