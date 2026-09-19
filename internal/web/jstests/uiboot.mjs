@@ -153,7 +153,11 @@ ${authBlock}`, { mode: 0o600 });
   process.once('exit', killOrphans);
 
   await waitFor('proxy /api/status', async () => {
-    const r = await fetch(`${ctx.baseUrl}/api/status`);
+    // With web.auth enabled (adminToken sandbox) /api/status answers 401 to
+    // anonymous probes by design — send the token so this is a liveness
+    // check, not an auth check.
+    const r = await fetch(`${ctx.baseUrl}/api/status`, ctx.adminToken
+      ? { headers: { Authorization: `Bearer ${ctx.adminToken}` } } : {});
     return r.ok;
   }, 45000);
 
