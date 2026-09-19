@@ -641,23 +641,71 @@ func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) 
 	}
 	_ = rows.Close()
 
-	facets, err := x.queryFacets()
+	facets, err := x.queryFacets(filter)
 	if err != nil {
 		return nil, Facets{}, err
 	}
 	return summaries, facets, nil
 }
 
+// ShadowReport is requestlog.ShadowReport served from the index: the same
+// window semantics (filterSQL's From/To over ts_ms), the same newest-first
+// top-K retention before pairing (ORDER BY ts DESC LIMIT, where the scan
+// keeps its timestamp heap), and the same pairing/aggregation (both feed
+// shadowPairRow into aggregateShadowPairs). Like the scan, it never filters
+// by kind: shadow evaluation rows are LLM-stream rows, and legacy kind=mcp
+// rows can never pair (their ids carry no shadow- twin).
+func (x *Indexer) ShadowReport(filter Filter) ([]ShadowReportEntry, error) {
+	where, args := filterSQL(filter)
+	query := `SELECT request_id, shadow, exposed, provider, status, latency_ms, response_size
+		FROM records` + where + ` ORDER BY ts DESC, rowid DESC`
+	if filter.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, filter.Limit)
+	}
+	rows, err := x.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	pairRows := make([]shadowPairRow, 0, 64)
+	for rows.Next() {
+		var row shadowPairRow
+		var shadow int
+		if err := rows.Scan(&row.RequestID, &shadow, &row.Exposed, &row.Provider, &row.Status, &row.LatencyMs, &row.ResponseSize); err != nil {
+			return nil, err
+		}
+		row.Shadow = shadow != 0
+		pairRows = append(pairRows, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return aggregateShadowPairs(pairRows), nil
+}
+
 // queryFacets collects the distinct provider/model/agent sets over every
 // indexed row through the same facetCollector the scan feeds, so the shapes
 // (sorted slices, non-nil maps) are identical.
-func (x *Indexer) queryFacets() (Facets, error) {
-	rows, err := x.db.Query(`SELECT DISTINCT provider, exposed, called_model, agent FROM records`)
+func (x *Indexer) queryFacets(filter Filter) (Facets, error) {
+	// Kind is a stream selector, not a data facet: unlike model/provider
+	// (whose facets are deliberately collected before the filter so dropdowns
+	// cannot narrow themselves into a dead end), browsing one stream must not
+	// offer the other stream's values — mcp server names would pollute the
+	// model dropdown of an LLM-only view.
+	where, args := "", []any{}
+	switch filter.Kind {
+	case "mcp":
+		where = ` WHERE kind = 'mcp'`
+	case "llm":
+		where = ` WHERE kind = ''`
+	}
+	rows, err := x.db.Query(`SELECT DISTINCT provider, exposed, called_model, agent FROM records`+where, args...)
 	if err != nil {
 		return Facets{}, err
 	}
 	defer func() { _ = rows.Close() }()
-	collector := newFacetCollector()
+	collector := newFacetCollector(filter.Kind)
 	for rows.Next() {
 		var provider, exposed, called, agent string
 		if err := rows.Scan(&provider, &exposed, &called, &agent); err != nil {

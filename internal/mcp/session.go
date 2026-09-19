@@ -19,8 +19,13 @@ type Session struct {
 	Server     string // mcp server name (config key under mcp:)
 	Account    string // virtual provider id pinned for the session ("" for auth: none)
 	UpstreamID string // upstream Mcp-Session-Id (legacy sse: the full upstream POST URL)
-	Created    time.Time
-	LastSeen   time.Time
+	// Client is the initialize-time clientInfo.name bound to this session
+	// ("" when the client declared none): the request-log attribution for
+	// follow-up exchanges of stateful sessions — later requests carry only
+	// the session id, not their identity.
+	Client   string
+	Created  time.Time
+	LastSeen time.Time
 	// Route is non-nil for route (mcp_routes:) sessions: the proxy owns the
 	// client session and lazily builds per-backend sub-sessions. Pinned
 	// passthrough sessions leave it nil and use Account/UpstreamID above.
@@ -167,6 +172,22 @@ func (t *SessionTable) PutRoute(route string) string {
 	t.mu.Unlock()
 	t.fireEvicted(evicted)
 	return id
+}
+
+// SetClient binds the initialize-time clientInfo.name onto a live session
+// (client attribution for later session-carried requests). Unknown or
+// expired ids are a no-op; the LRU position/LastSeen are untouched.
+func (t *SessionTable) SetClient(id, client string) {
+	if client == "" {
+		return
+	}
+	t.mu.Lock()
+	if _, ok := t.entries[id]; ok && !t.expired(t.sessions[id]) {
+		s := t.sessions[id]
+		s.Client = client
+		t.sessions[id] = s
+	}
+	t.mu.Unlock()
 }
 
 // RefreshUpstream rebinds a live session's upstream session id: a stateful

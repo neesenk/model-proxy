@@ -81,7 +81,7 @@ func (s *Service) editScheduling(data map[string]any) error {
 func (s *Service) editRequestLog(data map[string]any) error {
 	return s.editConfigNode(func(root *yaml.Node) {
 		requestLog := configedit.ChildMap(root, "request_log")
-		for _, key := range []string{"enabled", "dir", "max_file_size", "max_body_bytes", "retention"} {
+		for _, key := range []string{"enabled", "dir", "max_file_size", "max_body_bytes", "retention", "mcp_split", "mcp_dir"} {
 			if value, ok := data[key]; ok {
 				applyScalar(requestLog, key, value)
 			}

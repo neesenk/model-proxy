@@ -195,7 +195,7 @@ func (p *Proxy) mcpStdioStart(snap RuntimeSnapshot, srv configdomain.MCPServer, 
 // serveMCPStdio handles /mcp/<name> for transport: stdio servers: one child
 // per client session, JSON-RPC bridged over HTTP (single JSON responses; no
 // SSE framing, no GET stream).
-func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name string, srv configdomain.MCPServer, snap RuntimeSnapshot, started time.Time, requestID string) {
+func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name string, srv configdomain.MCPServer, snap RuntimeSnapshot, started time.Time, requestID string, ident *mcpIdentity) {
 	if r.Method == http.MethodGet {
 		http.Error(w, "mcp stdio: GET server-stream is not supported", http.StatusMethodNotAllowed)
 		return
@@ -249,7 +249,7 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 		conn, err := p.mcpStdioStart(snap, srv, account)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("mcp %q: stdio start: %v", name, err), http.StatusBadGateway)
-			p.mcpLog(name, account, frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false)
+			p.mcpLog(name, account, frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false, ident)
 			return
 		}
 		initCtx, initCancel := context.WithTimeout(r.Context(), srv.MCPTimeoutDuration())
@@ -258,10 +258,12 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 		if err != nil {
 			conn.Close()
 			http.Error(w, fmt.Sprintf("mcp %q: stdio initialize: %v", name, err), http.StatusBadGateway)
-			p.mcpLog(name, account, frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false)
+			p.mcpLog(name, account, frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false, ident)
 			return
 		}
 		sid := p.mcpSessions.Put(name, account, "")
+		// Bind the declared client identity onto the stdio session.
+		p.mcpSessions.SetClient(sid, mcpkg.ParseClientInfo(body))
 		if err := p.mcpStdio.put(sid, name, conn); err != nil {
 			conn.Close()
 			p.mcpSessions.Delete(sid)
@@ -274,7 +276,7 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 		w.Header().Set("Mcp-Session-Id", sid)
 		w.WriteHeader(http.StatusOK)
 		w.Write(resp)
-		p.mcpLog(name, account, frame, r.Method, http.StatusOK, started, requestID, body, resp, int64(len(resp)), false)
+		p.mcpLog(name, account, frame, r.Method, http.StatusOK, started, requestID, body, resp, int64(len(resp)), false, ident)
 		return
 	}
 
@@ -312,7 +314,7 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 		p.mcpStdio.kill(localSID)
 		p.mcpSessions.Delete(localSID)
 		http.Error(w, fmt.Sprintf("mcp %q: stdio call: %v", name, err), http.StatusBadGateway)
-		p.mcpLog(name, "", frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false)
+		p.mcpLog(name, "", frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false, ident)
 		return
 	}
 	if resp == nil {
@@ -325,7 +327,7 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 	w.Header().Set("Mcp-Session-Id", localSID)
 	w.WriteHeader(http.StatusOK)
 	w.Write(resp)
-	p.mcpLog(name, "", frame, r.Method, http.StatusOK, started, requestID, body, resp, int64(len(resp)), false)
+	p.mcpLog(name, "", frame, r.Method, http.StatusOK, started, requestID, body, resp, int64(len(resp)), false, ident)
 }
 
 // mcpStdioSynthResponse wraps one stdio JSON-RPC payload as an HTTP response

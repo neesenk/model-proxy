@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // route.go — the pure logic of aggregated MCP routes (mcp_routes:): JSON-RPC
@@ -98,6 +99,33 @@ func ParseClientProtocol(body []byte) string {
 		return ""
 	}
 	return v.Params.ProtocolVersion
+}
+
+var clientInfoNeedle = []byte(`"clientInfo"`)
+
+// ParseClientInfo extracts params.clientInfo.name from an initialize body —
+// the MCP-side client identity (e.g. "codex-mcp-client"). "" when the body
+// is not parseable or carries no clientInfo. The name is the raw client
+// declaration; mapping it onto agent labels belongs to the observe layer.
+func ParseClientInfo(body []byte) string {
+	if !bytes.Contains(body, clientInfoNeedle) {
+		return ""
+	}
+	var v struct {
+		Params *struct {
+			ClientInfo *struct {
+				Name string `json:"name"`
+			} `json:"clientInfo"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(body, &v); err != nil || v.Params == nil || v.Params.ClientInfo == nil {
+		return ""
+	}
+	name := strings.TrimSpace(v.Params.ClientInfo.Name)
+	if len(name) > 128 {
+		return ""
+	}
+	return name
 }
 
 // RewriteToolCallName returns the tools/call body with params.name replaced

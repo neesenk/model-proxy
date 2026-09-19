@@ -17,7 +17,7 @@ import (
 )
 
 // serveMCPLegacySSE handles GET /mcp/<name> for transport: sse servers.
-func (p *Proxy) serveMCPLegacySSE(w http.ResponseWriter, r *http.Request, name string, srv configdomain.MCPServer, snap RuntimeSnapshot, started time.Time, requestID string) {
+func (p *Proxy) serveMCPLegacySSE(w http.ResponseWriter, r *http.Request, name string, srv configdomain.MCPServer, snap RuntimeSnapshot, started time.Time, requestID string, ident *mcpIdentity) {
 	account := ""
 	if srv.MCPAuthMode() == "provider" {
 		var ok bool
@@ -32,7 +32,7 @@ func (p *Proxy) serveMCPLegacySSE(w http.ResponseWriter, r *http.Request, name s
 	})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("mcp %q: upstream: %v", name, err), http.StatusBadGateway)
-		p.mcpLog(name, account, mcpkg.Frame{}, r.Method, http.StatusBadGateway, started, requestID, nil, nil, 0, false)
+		p.mcpLog(name, account, mcpkg.Frame{}, r.Method, http.StatusBadGateway, started, requestID, nil, nil, 0, false, ident)
 		return
 	}
 	defer resp.Body.Close()
@@ -40,7 +40,7 @@ func (p *Proxy) serveMCPLegacySSE(w http.ResponseWriter, r *http.Request, name s
 	w.WriteHeader(resp.StatusCode)
 	if resp.StatusCode != http.StatusOK {
 		captured, total, truncated := mcpStreamResponse(w, resp.Body, capBytes)
-		p.mcpLog(name, account, mcpkg.Frame{}, r.Method, resp.StatusCode, started, requestID, nil, captured, total, truncated)
+		p.mcpLog(name, account, mcpkg.Frame{}, r.Method, resp.StatusCode, started, requestID, nil, captured, total, truncated, ident)
 		return
 	}
 	// Rewrite the upstream's endpoint event back to the gateway, binding the
@@ -60,5 +60,5 @@ func (p *Proxy) serveMCPLegacySSE(w http.ResponseWriter, r *http.Request, name s
 		// ends (client disconnect or upstream close), POSTs to it are dead.
 		p.mcpSessions.Delete(sid)
 	}
-	p.mcpLog(name, account, mcpkg.Frame{}, r.Method, resp.StatusCode, started, requestID, nil, captured, total, truncated)
+	p.mcpLog(name, account, mcpkg.Frame{}, r.Method, resp.StatusCode, started, requestID, nil, captured, total, truncated, ident)
 }

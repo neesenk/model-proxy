@@ -83,7 +83,21 @@ func Summarize(record Record) Summary {
 // QuerySummaries returns list-safe metadata. Bodies and response headers are
 // discarded before top-K retention, so memory is bounded by metadata size.
 func QuerySummaries(dir string, filter Filter) ([]Summary, error) {
-	records, err := query(dir, filter, true, nil)
+	records, err := query(dir, filePrefix, filter, true, nil)
+	if err != nil {
+		return nil, err
+	}
+	summaries := make([]Summary, 0, len(records))
+	for _, record := range records {
+		summaries = append(summaries, Summarize(record))
+	}
+	return summaries, nil
+}
+
+// QuerySummariesIn is QuerySummaries for a non-default stream (only
+// <prefix>*.log files are scanned — the split MCP stream's read path).
+func QuerySummariesIn(dir, prefix string, filter Filter) ([]Summary, error) {
+	records, err := query(dir, prefix, filter, true, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -100,8 +114,25 @@ func QuerySummaries(dir string, filter Filter) ([]Summary, error) {
 // from every decoded record before the request's own model/provider filter is
 // applied, so the dropdowns never narrow themselves into a dead end.
 func QuerySummariesWithFacets(dir string, filter Filter) ([]Summary, Facets, error) {
-	collector := newFacetCollector()
-	records, err := query(dir, filter, true, collector)
+	collector := newFacetCollector(filter.Kind)
+	records, err := query(dir, filePrefix, filter, true, collector)
+	if err != nil {
+		return nil, Facets{}, err
+	}
+	summaries := make([]Summary, 0, len(records))
+	for _, record := range records {
+		summaries = append(summaries, Summarize(record))
+	}
+	return summaries, collector.facets(), nil
+}
+
+// QuerySummariesWithFacetsIn is QuerySummariesWithFacets for a non-default
+// stream (only <prefix>*.log files are scanned — the split MCP stream's
+// /api/requests?kind=mcp read path; facets stay data-driven over that
+// stream's files).
+func QuerySummariesWithFacetsIn(dir, prefix string, filter Filter) ([]Summary, Facets, error) {
+	collector := newFacetCollector(filter.Kind)
+	records, err := query(dir, prefix, filter, true, collector)
 	if err != nil {
 		return nil, Facets{}, err
 	}
@@ -129,19 +160,49 @@ type ShadowReportEntry struct {
 // ShadowReport pairs primary records with shadow-<request-id> records and
 // aggregates them by route and provider pair.
 func ShadowReport(dir string, filter Filter) ([]ShadowReportEntry, error) {
-	records, err := query(dir, filter, true, nil)
+	records, err := query(dir, filePrefix, filter, true, nil)
 	if err != nil {
 		return nil, err
 	}
+	rows := make([]shadowPairRow, len(records))
+	for i := range records {
+		rows[i] = shadowPairRow{
+			RequestID: records[i].RequestID, Shadow: records[i].Shadow,
+			Exposed: records[i].Exposed, Provider: records[i].Provider,
+			Status: records[i].Status, LatencyMs: records[i].LatencyMs,
+			ResponseSize: records[i].ResponseSize,
+		}
+	}
+	return aggregateShadowPairs(rows), nil
+}
+
+// shadowPairRow is the metadata projection the shadow report aggregates over:
+// request identity and outcome only, never bodies. The directory scan
+// (ShadowReport) and the SQLite index (Indexer.ShadowReport) both feed these
+// rows into aggregateShadowPairs so the two surfaces answer identically.
+type shadowPairRow struct {
+	RequestID    string
+	Shadow       bool
+	Exposed      string
+	Provider     string
+	Status       int
+	LatencyMs    int64
+	ResponseSize int64
+}
+
+// aggregateShadowPairs pairs primary rows with shadow-<request-id> rows and
+// aggregates them by route and provider pair. Unpaired rows on either side
+// are skipped; entries sort by sample count (desc) then route.
+func aggregateShadowPairs(rows []shadowPairRow) []ShadowReportEntry {
 	type pair struct {
-		primary *Record
-		shadow  *Record
+		primary *shadowPairRow
+		shadow  *shadowPairRow
 	}
 	pairs := map[string]*pair{}
-	for i := range records {
-		record := &records[i]
-		id := record.RequestID
-		if record.Shadow {
+	for i := range rows {
+		row := &rows[i]
+		id := row.RequestID
+		if row.Shadow {
 			id = trimShadowPrefix(id)
 		}
 		current := pairs[id]
@@ -149,10 +210,10 @@ func ShadowReport(dir string, filter Filter) ([]ShadowReportEntry, error) {
 			current = &pair{}
 			pairs[id] = current
 		}
-		if record.Shadow {
-			current.shadow = record
+		if row.Shadow {
+			current.shadow = row
 		} else {
-			current.primary = record
+			current.primary = row
 		}
 	}
 
@@ -214,7 +275,7 @@ func ShadowReport(dir string, filter Filter) ([]ShadowReportEntry, error) {
 		}
 		return result[i].Route < result[j].Route
 	})
-	return result, nil
+	return result
 }
 
 func trimShadowPrefix(id string) string {

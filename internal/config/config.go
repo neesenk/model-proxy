@@ -537,12 +537,23 @@ type PriceConfig struct {
 // truncation past it to bound memory. retention (default 720h = 30 days; "0" =
 // keep forever) controls a periodic sweep that deletes rotated files older
 // than the window; the active file is never deleted.
+//
+// mcp_split (default false) routes MCP gateway records (kind="mcp") to their
+// own stream: mcp-YYYYMMDD.log files under mcp_dir (default
+// ~/.model-proxy/log/mcp) sharing this block's size/body/retention policy.
+// The requests- stream and its SQLite index go back to LLM-only traffic;
+// /api/requests?kind=mcp reads the split stream via directory scan. Like the
+// rest of the block, changing it requires a restart.
 type RequestLogConfig struct {
 	Enabled      bool   `yaml:"enabled"`
 	Dir          string `yaml:"dir"`
 	MaxFileSize  int64  `yaml:"max_file_size"`
 	MaxBodyBytes int    `yaml:"max_body_bytes"`
 	Retention    string `yaml:"retention"`
+	// MCPSplit moves kind="mcp" records to a dedicated mcp- stream under
+	// MCPDir instead of mixing them into the requests- files.
+	MCPSplit bool   `yaml:"mcp_split"`
+	MCPDir   string `yaml:"mcp_dir"`
 	// SessionHeaders is the ordered allowlist of client request headers whose
 	// first non-empty value becomes the request's session id (request-log
 	// `session_id` and live /api/events `session_id`). Defaults to
@@ -580,6 +591,15 @@ func (r RequestLogConfig) ResolvedDir() string {
 		return ExpandPath(r.Dir)
 	}
 	return filepath.Join(LogDir(homeDir()), "requests")
+}
+
+// ResolvedMCPDir returns the split MCP stream's directory, defaulting to
+// ~/.model-proxy/log/mcp (sibling of the requests/security streams).
+func (r RequestLogConfig) ResolvedMCPDir() string {
+	if r.MCPDir != "" {
+		return ExpandPath(r.MCPDir)
+	}
+	return filepath.Join(LogDir(homeDir()), "mcp")
 }
 
 // MaxFileSizeBytes returns the per-file rotation cap in bytes, defaulting to 1 GiB.

@@ -3,6 +3,7 @@ package requestlog
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,34 @@ func TestSessionIDFirstNonEmptyWins(t *testing.T) {
 	// A custom allowlist overrides the order and trims the value.
 	if got := SessionID(r, []string{"x-session-id"}); got != "sess-2" {
 		t.Fatalf("custom allowlist = %q, want trimmed sess-2", got)
+	}
+}
+
+// TestSessionIDFromBody pins the body-carried fallback for agents without
+// session headers (Codex on the Responses protocol): extraction from
+// client_metadata.session_id, and the defensive rejections.
+func TestSessionIDFromBody(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "codex responses shape",
+			body: `{"model":"gpt-5.6","stream":true,"client_metadata":{"session_id":" 01a0b26d-fde4-4f6f-8bd5-58cb9a0f8b1e ","thread_id":"t-1"},"input":[]}`,
+			want: "01a0b26d-fde4-4f6f-8bd5-58cb9a0f8b1e",
+		},
+		{name: "no client_metadata", body: `{"model":"m","input":[]}`, want: ""},
+		{name: "empty session_id", body: `{"client_metadata":{"session_id":""}}`, want: ""},
+		{name: "non-string session_id", body: `{"client_metadata":{"session_id":42}}`, want: ""},
+		{name: "oversized ignored", body: `{"client_metadata":{"session_id":"` + strings.Repeat("a", 129) + `"}}`, want: ""},
+		{name: "invalid json", body: `{"client_metadata":`, want: ""},
+		{name: "needle-less body skips parse", body: `not json at all`, want: ""},
+	}
+	for _, tc := range cases {
+		if got := SessionIDFromBody([]byte(tc.body)); got != tc.want {
+			t.Errorf("%s: SessionIDFromBody = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 

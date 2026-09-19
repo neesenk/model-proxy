@@ -76,6 +76,15 @@ func TestRequestLogConfigAccessors(t *testing.T) {
 	if got := (RequestLogConfig{Dir: "/tmp/requests"}).ResolvedDir(); got != "/tmp/requests" {
 		t.Errorf("explicit dir = %q", got)
 	}
+	if got := def.ResolvedMCPDir(); got != filepath.Join(home, ".model-proxy", "log", "mcp") {
+		t.Errorf("default mcp dir = %q", got)
+	}
+	if got := (RequestLogConfig{MCPDir: "/tmp/mcp"}).ResolvedMCPDir(); got != "/tmp/mcp" {
+		t.Errorf("explicit mcp dir = %q", got)
+	}
+	if got := (RequestLogConfig{MCPDir: "~/mcplogs"}).ResolvedMCPDir(); got != filepath.Join(home, "mcplogs") {
+		t.Errorf("expanded mcp dir = %q", got)
+	}
 	if got := def.MaxFileSizeBytes(); got != 1<<30 {
 		t.Errorf("default max file size = %d", got)
 	}

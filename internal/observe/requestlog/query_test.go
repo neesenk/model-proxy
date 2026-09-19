@@ -118,7 +118,7 @@ func TestMetadataQueryClearsBodiesAndResponseHeadersBeforeRetention(t *testing.T
 	}
 	writeRecordFile(t, dir, "requests-20260718-100000.log", source)
 
-	metadata, err := query(dir, Filter{Limit: 1}, true, nil)
+	metadata, err := query(dir, filePrefix, Filter{Limit: 1}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

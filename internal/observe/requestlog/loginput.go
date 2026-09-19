@@ -4,6 +4,8 @@
 package requestlog
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -34,6 +36,42 @@ func SessionID(r *http.Request, headers []string) string {
 		}
 	}
 	return ""
+}
+
+// clientMetadataNeedle pre-filters SessionIDFromBody's JSON parse: bodies
+// without the field skip the full unmarshal entirely (codex conversations
+// run multi-megabyte).
+var clientMetadataNeedle = []byte(`"client_metadata"`)
+
+// maxBodySessionIDLen bounds a body-carried session id (a UUID-shaped
+// identity token, never free text): oversized values are ignored rather
+// than truncated, because a truncated id would silently split one session
+// across two identities.
+const maxBodySessionIDLen = 128
+
+// SessionIDFromBody extracts the session id of agents that send no session
+// headers: the Responses-protocol convention (Codex) rides it in the
+// top-level client_metadata.session_id field. Callers invoke it only when
+// SessionID(headers) came back empty, and the result feeds the same
+// observation surfaces (live events, request log, guard session blocks) —
+// never the routing sticky key, which stays x-claude-code-session-id.
+func SessionIDFromBody(body []byte) string {
+	if !bytes.Contains(body, clientMetadataNeedle) {
+		return ""
+	}
+	var b struct {
+		ClientMetadata struct {
+			SessionID string `json:"session_id"`
+		} `json:"client_metadata"`
+	}
+	if json.Unmarshal(body, &b) != nil {
+		return ""
+	}
+	sid := strings.TrimSpace(b.ClientMetadata.SessionID)
+	if sid == "" || len(sid) > maxBodySessionIDLen {
+		return ""
+	}
+	return sid
 }
 
 // BuildInput maps application-owned request/route state to the detached

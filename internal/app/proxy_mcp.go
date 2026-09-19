@@ -64,6 +64,54 @@ func mcpSetLiveProvider(w http.ResponseWriter, provider string) {
 	}
 }
 
+// mcpIdentity carries the client-attribution inputs of one MCP exchange:
+// the User-Agent-derived agent label, the client's own session header value
+// (request_log.session_headers allowlist — same derivation as the LLM
+// surface), and the local Mcp-Session-Id. mcpLog resolves them into the
+// record's agent/session_id fields.
+type mcpIdentity struct {
+	uaAgent   string
+	clientSID string
+	localSID  string
+	// resolvedAgent/resolvedSession carry mcpLog's final attribution back to
+	// serveMCP's deferred live end event (it publishes after the handler
+	// returned, so the write is visible there). Written once, on the logging
+	// goroutine, before the handler returns — no concurrent access.
+	resolvedAgent   string
+	resolvedSession string
+}
+
+// mcpIdentityFor captures the per-request attribution inputs from the
+// snapshot's session-header allowlist and the request's headers. The identity
+// is per-request state threaded by pointer through the handler paths.
+func (p *Proxy) mcpIdentityFor(r *http.Request, snap RuntimeSnapshot) *mcpIdentity {
+	return &mcpIdentity{
+		uaAgent:   counters.DetectAgent(r),
+		clientSID: requestlog.SessionID(r, snap.Cfg.RequestLog.ResolvedSessionHeaders()),
+		localSID:  r.Header.Get("Mcp-Session-Id"),
+	}
+}
+
+// mcpAgentFor resolves the record's agent label. The MCP-native identity
+// wins: clientInfo is the protocol's own client declaration (initialize
+// frames carry it directly, later exchanges via the session binding), which
+// beats a UA string that may be a bare transport label ("go-http-client").
+// The UA remains the fallback — it is the only signal on GET probes and
+// stateless pre-initialize exchanges.
+func (p *Proxy) mcpAgentFor(ident *mcpIdentity, frame mcpkg.Frame, reqBody []byte) string {
+	if frame.Method == "initialize" {
+		if name := mcpkg.ParseClientInfo(reqBody); name != "" {
+			return counters.AgentFromMCPClient(name)
+		}
+	}
+	if ident.localSID != "" {
+		if s, ok := p.mcpSessions.Get(ident.localSID); ok && s.Client != "" {
+			return counters.AgentFromMCPClient(s.Client)
+		}
+	}
+	return ident.uaAgent
+}
+
 // serveMCP handles /mcp/<name>. Registered in Proxy.Handler before the
 // protocol.ForPath fallback, it answers 404 (not the LLM 502) for unknown
 // names. The forward-surface api-keys gate has already run (this is not an
@@ -77,6 +125,7 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snap := p.SnapshotRuntime()
+	ident := p.mcpIdentityFor(r, snap)
 	srv, isServer := snap.Cfg.MCP[name]
 	isServer = isServer && srv.MCPEffectiveEnabled()
 	route, isRoute := snap.Cfg.MCPRoutes[name]
@@ -90,15 +139,19 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 	// writer's captured status/provider). The Live monitor's contract mirrors
 	// the LLM surface: every start pairs an end with a stable request_id.
 	if p.events != nil {
-		agent := counters.DetectAgent(r)
-		p.events.Publish(observeevents.Event{Type: "start", Ts: started.UnixMilli(), RequestID: requestID, Agent: agent, Protocol: "mcp", Exposed: name})
+		p.events.Publish(observeevents.Event{Type: "start", Ts: started.UnixMilli(), RequestID: requestID, Agent: ident.uaAgent, Protocol: "mcp", Exposed: name})
 		lw := &mcpLiveWriter{ResponseWriter: w, status: http.StatusOK}
 		defer func() {
+			agent := ident.uaAgent
+			if ident.resolvedAgent != "" {
+				agent = ident.resolvedAgent
+			}
 			p.events.Publish(observeevents.Event{
 				Type:      "end",
 				Ts:        time.Now().UnixMilli(),
 				RequestID: requestID,
 				Agent:     agent,
+				SessionID: ident.resolvedSession,
 				Protocol:  "mcp",
 				Exposed:   name,
 				Provider:  lw.provider,
@@ -110,7 +163,7 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	if isRoute {
 		// Aggregated routes (mcp_routes:) share the /mcp/<name> namespace.
-		p.serveMCPRoute(w, r, name, route, snap, started, requestID)
+		p.serveMCPRoute(w, r, name, route, snap, started, requestID, ident)
 		return
 	}
 	if r.Method != http.MethodPost && r.Method != http.MethodGet && r.Method != http.MethodDelete {
@@ -120,12 +173,12 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && srv.Transport == "sse" {
 		// Legacy HTTP+SSE: GET opens the event stream (endpoint rewrite +
 		// channel binding lives in proxy_mcp_sse.go).
-		p.serveMCPLegacySSE(w, r, name, srv, snap, started, requestID)
+		p.serveMCPLegacySSE(w, r, name, srv, snap, started, requestID, ident)
 		return
 	}
 	if srv.MCPStdio() {
 		// Local child-process backend (one process per session).
-		p.serveMCPStdio(w, r, name, srv, snap, started, requestID)
+		p.serveMCPStdio(w, r, name, srv, snap, started, requestID, ident)
 		return
 	}
 	// Inbound body cap: same bound as the LLM forward surface.
@@ -156,6 +209,7 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 		// Legacy sse POSTs carry the local session in the rewritten endpoint
 		// URL's query instead of the streamable session header.
 		localSID = r.URL.Query().Get("mps")
+		ident.localSID = localSID
 	}
 	var (
 		sess    mcpkg.Session
@@ -214,7 +268,7 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		http.Error(w, fmt.Sprintf("mcp %q: upstream: %v", name, err), http.StatusBadGateway)
-		p.mcpLog(name, account, frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false)
+		p.mcpLog(name, account, frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false, ident)
 		return
 	}
 	defer resp.Body.Close()
@@ -238,6 +292,11 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if responseSID != "" && frame.Method == "initialize" {
+		// Bind the declared client identity (initialize mint AND re-init on
+		// an established session — later requests carry only the id).
+		p.mcpSessions.SetClient(responseSID, mcpkg.ParseClientInfo(body))
+	}
 	mcpkg.CopyUpstreamHeaders(w.Header(), resp.Header)
 	if responseSID != "" {
 		w.Header().Set("Mcp-Session-Id", responseSID)
@@ -250,7 +309,7 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 			p.mcpSessions.Delete(localSID)
 		}
 	}
-	p.mcpLog(name, account, frame, r.Method, resp.StatusCode, started, requestID, body, captured, total, truncated)
+	p.mcpLog(name, account, frame, r.Method, resp.StatusCode, started, requestID, body, captured, total, truncated, ident)
 }
 
 // mcpRoundTrip builds and sends one upstream exchange: allowlisted client
@@ -375,8 +434,10 @@ func (p *Proxy) mcpDo(ctx context.Context, snap RuntimeSnapshot, srv configdomai
 		return nil, 0, err
 	}
 	capBytes := 0
-	if p.reqLog != nil {
-		capBytes = p.reqLog.MaxBodyBytes()
+	// The stream that records the exchange governs the capture cap (the split
+	// mcp- logger when active; policy values are shared with the LLM stream).
+	if target := p.mcpLogTarget(); target != nil {
+		capBytes = target.MaxBodyBytes()
 	}
 	return resp, capBytes, nil
 }
@@ -536,7 +597,7 @@ func mcpStreamResponse(w http.ResponseWriter, src io.Reader, capBytes int) ([]by
 // mcpLog projects the exchange into the request log (kind="mcp"). Bodies obey
 // the logger's existing truncation policy; the method logged is the JSON-RPC
 // method (HTTP verb for GET/DELETE).
-func (p *Proxy) mcpLog(name, account string, frame mcpkg.Frame, httpMethod string, status int, started time.Time, requestID string, reqBody, respCaptured []byte, respTotal int64, respTruncated bool) {
+func (p *Proxy) mcpLog(name, account string, frame mcpkg.Frame, httpMethod string, status int, started time.Time, requestID string, reqBody, respCaptured []byte, respTotal int64, respTruncated bool, ident *mcpIdentity) {
 	// The per-name call counter is the MCP gateway's own stats channel
 	// (deliberately separate from the LLM metrics store — no tokens, no
 	// Analytics pollution). Recorded for every terminal exchange regardless
@@ -544,7 +605,24 @@ func (p *Proxy) mcpLog(name, account string, frame mcpkg.Frame, httpMethod strin
 	if p.mcpStats != nil {
 		p.mcpStats.Record(name, status, time.Since(started).Milliseconds())
 	}
-	if p.reqLog == nil {
+	// Client attribution: the session-header allowlist wins (clients that
+	// stamp their own session id on every call), the local MCP session id
+	// groups the exchanges of one client MCP session otherwise. The agent
+	// comes from the resolved identity (UA, initialize clientInfo, or the
+	// session-bound client label). Resolved BEFORE the logging nil-check:
+	// the live end event consumes the write-back regardless of request-log
+	// enablement (live events never depend on request_log).
+	session := ident.clientSID
+	if session == "" {
+		session = ident.localSID
+	}
+	agent := p.mcpAgentFor(ident, frame, reqBody)
+	// Hand the resolution to the deferred live end event (publishes after
+	// this handler path returns).
+	ident.resolvedAgent = agent
+	ident.resolvedSession = session
+	logger := p.mcpLogTarget()
+	if logger == nil {
 		return
 	}
 	method := frame.Method
@@ -554,10 +632,12 @@ func (p *Proxy) mcpLog(name, account string, frame mcpkg.Frame, httpMethod strin
 			method = httpMethod + " (batch)"
 		}
 	}
-	p.reqLog.Enqueue(p.reqLog.BuildRecord(requestlog.Input{
+	logger.Enqueue(logger.BuildRecord(requestlog.Input{
 		StartedAt:         started,
 		RequestID:         requestID,
 		Kind:              "mcp",
+		Agent:             agent,
+		SessionID:         session,
 		Protocol:          "mcp",
 		Method:            method,
 		Path:              "/mcp/" + name,
@@ -569,4 +649,14 @@ func (p *Proxy) mcpLog(name, account string, frame mcpkg.Frame, httpMethod strin
 		ResponseSize:      respTotal,
 		ResponseTruncated: respTruncated,
 	}))
+}
+
+// mcpLogTarget picks the stream MCP records are written to: the split mcp-
+// logger when request_log.mcp_split is on, the shared requests- logger
+// otherwise (both nil when request logging is off — nothing is recorded).
+func (p *Proxy) mcpLogTarget() *requestlog.Logger {
+	if p.mcpReqLog != nil {
+		return p.mcpReqLog
+	}
+	return p.reqLog
 }

@@ -197,7 +197,7 @@ func TestQueryUsageOnlyStripsBodies(t *testing.T) {
 			RequestBody:  "{}",
 			ResponseBody: "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\n"},
 	})
-	records, err := query(dir, Filter{Limit: 10, UsageOnly: true}, false, nil)
+	records, err := query(dir, filePrefix, Filter{Limit: 10, UsageOnly: true}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

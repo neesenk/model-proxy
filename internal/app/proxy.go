@@ -92,6 +92,8 @@ type processServices struct {
 	reqLogStarted      bool                          // lifecycle owns loop/shutdown only when started by startRuntimeServices
 	reqLogIndex        *requestlog.Indexer           // tailing SQLite index over the request log (web read path); nil = request log disabled or index open failed (reads fall back to directory scans)
 	reqLogIndexStarted bool                          // lifecycle owns the indexer loop/shutdown only when started alongside reqLog
+	mcpReqLog          *requestlog.Logger            // split MCP stream (kind="mcp" records) when request_log.mcp_split is on; nil = MCP records share reqLog
+	mcpReqLogStarted   bool                          // lifecycle owns the split stream's loop/shutdown only when started by startRuntimeServices
 	sessionScan        *guardsession.Store           // split-exfiltration session windows; process-lifetime (survives reload like metrics), never serialized or logged
 	mcpSessions        *mcpkg.SessionTable           // /mcp/ gateway session table (local→upstream session + pinned account); process-lifetime cross-generation state, lazy expiry, never serialized or logged
 	mcpRR              atomic.Uint64                 // /mcp/ account round-robin counter for sessionless requests

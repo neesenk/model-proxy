@@ -15,6 +15,7 @@ import (
 	"time"
 
 	configdomain "model-proxy/internal/config"
+	observeevents "model-proxy/internal/observe/events"
 )
 
 // ---- MCP gateway test harness ----
@@ -633,6 +634,203 @@ func TestMCPGateway_RequestLogKind(t *testing.T) {
 	}
 }
 
+// TestMCPGateway_RequestLogSplitStream: with request_log.mcp_split on, MCP
+// exchanges land in the dedicated mcp- stream under mcp_dir and NEVER in the
+// requests- stream (which goes back to LLM-only traffic).
+func TestMCPGateway_RequestLogSplitStream(t *testing.T) {
+	up := &fakeMCPUpstream{sessionID: "up-1"}
+	upSrv := httptest.NewServer(http.HandlerFunc(up.serve))
+	t.Cleanup(upSrv.Close)
+
+	t.Setenv("HOME", t.TempDir())
+	writeMCPKeys(t, "zhipu", "k-A")
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:0",
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "http://127.0.0.1:1", Models: []string{"m"}},
+		},
+		MCP: map[string]configdomain.MCPServer{"zs": {Provider: "zhipu", URL: upSrv.URL}},
+	}
+	p := newTestProxy(t, cfg)
+	reqDir, mcpDir := t.TempDir(), t.TempDir()
+	p.initRequestLog(configdomain.RequestLogConfig{Enabled: true, Dir: reqDir, MCPSplit: true, MCPDir: mcpDir})
+	if p.reqLog == nil || p.mcpReqLog == nil {
+		t.Fatal("split request log not initialized")
+	}
+	p.reqLogStarted = p.lifecycle.Run(func(<-chan struct{}) { p.reqLog.Run() })
+	p.mcpReqLogStarted = p.lifecycle.Run(func(<-chan struct{}) { p.mcpReqLog.Run() })
+	srv := httptest.NewServer(http.HandlerFunc(p.Handler))
+	t.Cleanup(srv.Close)
+
+	resp := mcpPost(t, srv.URL+"/mcp/zs", "", mcpInitBody)
+	localSID := resp.Header.Get("Mcp-Session-Id")
+	resp.Body.Close()
+	mcpPost(t, srv.URL+"/mcp/zs", localSID, mcpCallBody).Body.Close()
+
+	// Bounded poll: the single-writer sink flushes on its own schedule.
+	deadline := time.Now().Add(5 * time.Second)
+	var mcpContent, reqContent string
+	for {
+		mcpContent = readAllLogFiles(t, mcpDir)
+		reqContent = readAllLogFiles(t, reqDir)
+		if strings.Count(mcpContent, `"kind":"mcp"`) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("mcp records never landed in the split stream:\n%s", mcpContent)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for _, want := range []string{`"kind":"mcp"`, `"method":"initialize"`, `"method":"tools/call"`, `"path":"/mcp/zs"`} {
+		if !strings.Contains(mcpContent, want) {
+			t.Errorf("split stream missing %s\n%s", want, mcpContent)
+		}
+	}
+	if strings.Contains(mcpContent, "k-A") || strings.Contains(mcpContent, "Bearer") {
+		t.Errorf("credential leaked into split stream\n%s", mcpContent)
+	}
+	if reqContent != "" {
+		t.Errorf("requests- stream received mcp traffic despite mcp_split:\n%s", reqContent)
+	}
+}
+
+// readAllLogFiles concatenates every .log file in dir (empty when none exist
+// yet — the sink creates files lazily).
+func readAllLogFiles(t *testing.T, dir string) string {
+	t.Helper()
+	entries, _ := os.ReadDir(dir)
+	var b strings.Builder
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".log") {
+			data, _ := os.ReadFile(filepath.Join(dir, e.Name()))
+			b.Write(data)
+		}
+	}
+	return b.String()
+}
+
+// TestMCPGateway_RequestLogAttribution: MCP records carry the client
+// attribution — agent from the initialize clientInfo (a UA-less client) or
+// the UA, session from the client's session-header allowlist value or the
+// local MCP session id.
+func TestMCPGateway_RequestLogAttribution(t *testing.T) {
+	up := &fakeMCPUpstream{sessionID: "up-at-1"}
+	upSrv := httptest.NewServer(http.HandlerFunc(up.serve))
+	t.Cleanup(upSrv.Close)
+
+	t.Setenv("HOME", t.TempDir())
+	writeMCPKeys(t, "zhipu", "k-A")
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:0",
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "http://127.0.0.1:1", Models: []string{"m"}},
+		},
+		MCP: map[string]configdomain.MCPServer{"zs": {Provider: "zhipu", URL: upSrv.URL}},
+	}
+	p := newTestProxy(t, cfg)
+	logDir := t.TempDir()
+	p.initRequestLog(configdomain.RequestLogConfig{Enabled: true, Dir: logDir})
+	p.reqLogStarted = p.lifecycle.Run(func(<-chan struct{}) { p.reqLog.Run() })
+	srv := httptest.NewServer(http.HandlerFunc(p.Handler))
+	t.Cleanup(srv.Close)
+
+	// A UA-less client: initialize declares codex-mcp-client; the follow-up
+	// carries only the session id. A client session header (allowlist) rides
+	// both requests and wins the session_id field.
+	const clientSession = "codex-thread-7"
+	postWithIdentity := func(session, body string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/mcp/zs", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("x-session-id", clientSession)
+		if session != "" {
+			req.Header.Set("Mcp-Session-Id", session)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"codex-mcp-client","version":"0.1"}}}`
+	resp := postWithIdentity("", initBody)
+	localSID := resp.Header.Get("Mcp-Session-Id")
+	resp.Body.Close()
+	if localSID == "" {
+		t.Fatal("no session minted — attribution via session cannot be tested")
+	}
+	postWithIdentity(localSID, mcpCallBody).Body.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	var lines []string
+	for {
+		content := readAllLogFiles(t, logDir)
+		lines = strings.Split(content, "\n")
+		hits := 0
+		for _, l := range lines {
+			if strings.Contains(l, `"kind":"mcp"`) {
+				hits++
+			}
+		}
+		if hits >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("mcp records never landed:\n%s", content)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var initRec, callRec map[string]any
+	for _, l := range lines {
+		if !strings.Contains(l, `"kind":"mcp"`) {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(l), &rec); err != nil {
+			continue
+		}
+		switch rec["method"] {
+		case "initialize":
+			initRec = rec
+		case "tools/call":
+			callRec = rec
+		}
+	}
+	if initRec == nil || callRec == nil {
+		t.Fatalf("missing records (init present=%v call present=%v)", initRec != nil, callRec != nil)
+	}
+	for name, rec := range map[string]map[string]any{"initialize": initRec, "tools/call": callRec} {
+		if got := rec["agent"]; got != "codex" {
+			t.Errorf("%s record agent = %v, want codex (clientInfo/session binding)", name, got)
+		}
+		if got := rec["session_id"]; got != clientSession {
+			t.Errorf("%s record session_id = %v, want the client session header %q", name, got, clientSession)
+		}
+	}
+	// Session attribution without the allowlist header: the local MCP session
+	// id groups the exchanges instead.
+	resp2 := mcpPost(t, srv.URL+"/mcp/zs", localSID, mcpCallBody)
+	resp2.Body.Close()
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		content := readAllLogFiles(t, logDir)
+		if strings.Count(content, `"method":"tools/call"`) >= 2 {
+			if !strings.Contains(content, `"session_id":"`+localSID+`"`) {
+				t.Fatalf("no record carries the local session id %q:\n%s", localSID, content)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("second tools/call never landed:\n%s", content)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func mustRead(resp *http.Response) string {
 	defer resp.Body.Close()
 	buf := &strings.Builder{}
@@ -1097,5 +1295,70 @@ func TestMCPGateway_LiveProviderIsServingAccount(t *testing.T) {
 	}
 	if ends[0] == "" || ends[0] != ends[1] {
 		t.Fatalf("end event providers diverged: %v (the rotated call recorded the failed account)", ends)
+	}
+}
+
+// TestMCPGateway_LiveEventAttribution: the live end event carries the same
+// resolved attribution the request log records — the clientInfo-derived agent
+// (a UA-less client) and the session id (allowlist header or the local MCP
+// session id). The start event can only know the UA label.
+func TestMCPGateway_LiveEventAttribution(t *testing.T) {
+	up := &fakeMCPUpstream{sessionID: "up-live-1"}
+	upSrv := httptest.NewServer(http.HandlerFunc(up.serve))
+	t.Cleanup(upSrv.Close)
+
+	t.Setenv("HOME", t.TempDir())
+	writeMCPKeys(t, "zhipu", "k-A")
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:0",
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "http://127.0.0.1:1", Models: []string{"m"}},
+		},
+		MCP: map[string]configdomain.MCPServer{"zs": {Provider: "zhipu", URL: upSrv.URL}},
+	}
+	p := newTestProxy(t, cfg)
+	srv := httptest.NewServer(http.HandlerFunc(p.Handler))
+	t.Cleanup(srv.Close)
+
+	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"codex-mcp-client","version":"0.1"}}}`
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/mcp/zs", strings.NewReader(initBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("x-session-id", "live-thread-9")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localSID := resp.Header.Get("Mcp-Session-Id")
+	resp.Body.Close()
+	if localSID == "" {
+		t.Fatal("no session minted")
+	}
+
+	var endEvent *observeevents.Event
+	deadline := time.Now().Add(5 * time.Second)
+	for endEvent == nil {
+		for _, e := range p.events.Snapshot() {
+			if e.Protocol == "mcp" && e.Type == "end" && e.Exposed == "zs" {
+				cp := e
+				endEvent = &cp
+			}
+		}
+		if endEvent != nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if endEvent == nil {
+		t.Fatal("mcp end event never published")
+	}
+	if endEvent.Agent != "codex" {
+		t.Errorf("end event agent = %q, want codex (clientInfo resolution)", endEvent.Agent)
+	}
+	if endEvent.SessionID != "live-thread-9" {
+		t.Errorf("end event session_id = %q, want the allowlist header value", endEvent.SessionID)
 	}
 }

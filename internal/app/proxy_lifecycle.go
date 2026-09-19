@@ -37,6 +37,11 @@ func (p *Proxy) StartRuntimeServices(cfg *configdomain.Config) {
 			})
 		}
 	}
+	if p.mcpReqLog != nil {
+		p.mcpReqLogStarted = p.lifecycle.Run(func(<-chan struct{}) {
+			p.mcpReqLog.Run()
+		})
+	}
 
 	// Cache-counter persistence (cache_state.json): owned by the lifecycle;
 	// per-minute saves plus one final save in closeRuntimeServices. Register
@@ -95,6 +100,11 @@ func (p *Proxy) closeRuntimeServices() {
 	}
 	if p.reqLogStarted {
 		p.reqLog.Shutdown()
+	}
+	// The split MCP stream drains alongside the main log (same restart-only
+	// lifecycle; no indexer follows it, so no ordering constraint).
+	if p.mcpReqLogStarted {
+		p.mcpReqLog.Shutdown()
 	}
 	// Drain order matters: the indexer's Shutdown runs one final reconcile
 	// after the log writer drained, so the last committed records are indexed

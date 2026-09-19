@@ -157,6 +157,7 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			"quota": true, "metrics": true, "tokens": true, "agents": true,
 			"stats": true, "flusher": true, "reqLog": true, "reqLogStarted": true,
 			"reqLogIndex": true, "reqLogIndexStarted": true,
+			"mcpReqLog": true, "mcpReqLogStarted": true,
 			"sessionScan": true, "responsesState": true, "events": true, "adjudication": true,
 			"mcpSessions": true, "mcpRR": true, "mcpStdio": true, "mcpStats": true,
 			"fusionReg": true, "catalog": true, "budget": true,

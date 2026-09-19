@@ -136,7 +136,13 @@ func rawPrefilter(line []byte, filter Filter) bool {
 // letting an older-named file hold newer records) stays tolerated: every file
 // is peeked independently.
 func QueryRecords(dir string, filter Filter) ([]Record, error) {
-	return query(dir, filter, false, nil)
+	return query(dir, filePrefix, filter, false, nil)
+}
+
+// QueryRecordsIn is QueryRecords for a non-default stream: only files named
+// <prefix>*.log in dir are scanned (e.g. the split MCP stream's mcp- files).
+func QueryRecordsIn(dir, prefix string, filter Filter) ([]Record, error) {
+	return query(dir, prefix, filter, false, nil)
 }
 
 // Facets are the distinct providers, models and agents observed in the scanned
@@ -155,16 +161,21 @@ type Facets struct {
 
 // facetCollector accumulates the distinct values during one scan. It is fed
 // every decoded record BEFORE filter.matches, so the dropdowns are not narrowed
-// by the currently applied model/provider filter.
+// by the currently applied model/provider filter. The one exception is Kind:
+// it is a stream selector, not a data facet (an LLM-only view must not offer
+// mcp server names in its model dropdown), so records of the other stream are
+// skipped.
 type facetCollector struct {
+	kind       string
 	providers  map[string]bool
 	models     map[string]bool
 	agents     map[string]bool
 	byProvider map[string]map[string]bool
 }
 
-func newFacetCollector() *facetCollector {
+func newFacetCollector(kind string) *facetCollector {
 	return &facetCollector{
+		kind:       kind,
 		providers:  map[string]bool{},
 		models:     map[string]bool{},
 		agents:     map[string]bool{},
@@ -173,6 +184,16 @@ func newFacetCollector() *facetCollector {
 }
 
 func (c *facetCollector) add(record Record) {
+	switch c.kind {
+	case "mcp":
+		if record.Kind != "mcp" {
+			return
+		}
+	case "llm":
+		if record.Kind != "" {
+			return
+		}
+	}
 	model := record.Exposed
 	if model == "" {
 		model = record.CalledModel
@@ -308,7 +329,7 @@ func peekFirstRecordTs(path string) (string, bool) {
 	return record.Ts, true
 }
 
-func query(dir string, filter Filter, metadataOnly bool, facets *facetCollector) ([]Record, error) {
+func query(dir, prefix string, filter Filter, metadataOnly bool, facets *facetCollector) ([]Record, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -319,7 +340,7 @@ func query(dir string, filter Filter, metadataOnly bool, facets *facetCollector)
 			continue
 		}
 		name := entry.Name()
-		if strings.HasPrefix(name, "requests-") && strings.HasSuffix(name, ".log") {
+		if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, ".log") {
 			names = append(names, name)
 		}
 	}

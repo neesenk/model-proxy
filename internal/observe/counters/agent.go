@@ -237,3 +237,28 @@ func (a *AgentCounter) Reset() {
 	defer a.mu.Unlock()
 	a.m = map[AgentKey]*AgentCount{}
 }
+
+// AgentFromMCPClient maps an MCP initialize frame's clientInfo.name onto the
+// agent label set — the MCP-side attribution seam (the gateway stamps it on
+// request-log records when the User-Agent signal is absent or generic).
+// Known families map onto the same closed set DetectAgent produces so both
+// surfaces agree ("codex-mcp-client" and a codex_cli_rs UA are both "codex");
+// unknown names keep a sanitized product label via the same uaLabel fallback
+// so distinct clients remain distinguishable. "" in, "" out.
+func AgentFromMCPClient(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	if n == "" {
+		return ""
+	}
+	switch {
+	case strings.Contains(n, "codex"):
+		return "codex"
+	case strings.Contains(n, "claude-code"), strings.Contains(n, "claude-cli"):
+		return "claude-code"
+	case strings.Contains(n, "opencode"):
+		return "opencode"
+	case n == "pi" || strings.HasPrefix(n, "pi-"):
+		return "pi"
+	}
+	return uaLabel(n)
+}

@@ -156,6 +156,73 @@ func TestIndexSummariesEquivalenceVsScan(t *testing.T) {
 	}
 }
 
+// TestIndexShadowReportEquivalenceVsScan pins the index-backed shadow report
+// against the directory scan across the window/limit matrix, including the
+// unpaired-row skips. The eval page loads this surface on every open; the
+// scan streams every JSONL line of the window (multi-MB bodies included, then
+// discarded), while the index answers from metadata rows — this test holds
+// the two answers identical.
+func TestIndexShadowReportEquivalenceVsScan(t *testing.T) {
+	dir := t.TempDir()
+	primaries := []Record{
+		{Ts: "2026-07-19T01:00:00Z", RequestID: "b1", Exposed: "beta", Provider: "primary-b", Status: 200, LatencyMs: 10, ResponseSize: 1},
+		{Ts: "2026-07-19T01:00:01Z", RequestID: "b2", Exposed: "beta", Provider: "primary-b", Status: 500, LatencyMs: 20, ResponseSize: 2},
+		{Ts: "2026-07-20T01:00:00Z", RequestID: "a1", Exposed: "alpha", Provider: "primary-a", Status: 200, LatencyMs: 100, ResponseSize: 1000},
+		{Ts: "2026-07-20T01:00:01Z", RequestID: "lonely-primary", Exposed: "ignored", Provider: "primary", Status: 200},
+	}
+	shadows := []Record{
+		{Ts: "2026-07-19T01:01:00Z", RequestID: "shadow-b1", Provider: "shadow-b", Status: 201, LatencyMs: 40, ResponseSize: 4, Shadow: true},
+		{Ts: "2026-07-19T01:01:01Z", RequestID: "shadow-b2", Provider: "shadow-b", Status: 503, LatencyMs: 50, ResponseSize: 5, Shadow: true},
+		{Ts: "2026-07-20T01:01:00Z", RequestID: "shadow-a1", Provider: "shadow-a", Status: 500, LatencyMs: 160, ResponseSize: 800, Shadow: true},
+		{Ts: "2026-07-20T01:01:01Z", RequestID: "shadow-lonely-shadow", Provider: "shadow", Status: 200, Shadow: true},
+	}
+	writeRecordFile(t, dir, "requests-20260719.log", primaries[:2])
+	writeRecordFile(t, dir, "requests-20260719-2.log", shadows[:2])
+	writeRecordFile(t, dir, "requests-20260720.log", primaries[2:])
+	writeRecordFile(t, dir, "requests-20260720-2.log", shadows[2:])
+	indexer := newTestIndexer(t, dir)
+	mustReconcile(t, indexer)
+
+	from19, _ := time.Parse(time.RFC3339, "2026-07-19T00:00:00Z")
+	from20, _ := time.Parse(time.RFC3339, "2026-07-20T00:00:00Z")
+	to19, _ := time.Parse(time.RFC3339, "2026-07-19T23:59:59Z")
+	filters := map[string]Filter{
+		"baseline":        {Limit: 100},
+		"no limit":        {},
+		"day 19 window":   {From: from19, To: to19, Limit: 100},
+		"from day 20":     {From: from20, Limit: 100},
+		"to mid window":   {To: from20, Limit: 100},
+		"limit top-k":     {Limit: 3},
+		"shadow-only":     {Shadow: "only", Limit: 100},
+		"errors only":     {ErrorsOnly: true, Limit: 100},
+		"provider filter": {Provider: "primary-b", Limit: 100},
+	}
+	for name, filter := range filters {
+		t.Run(name, func(t *testing.T) {
+			want, err := ShadowReport(dir, filter)
+			if err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			got, err := indexer.ShadowReport(filter)
+			if err != nil {
+				t.Fatalf("index: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("shadow report differs:\nindex: %+v\nscan:  %+v", got, want)
+			}
+		})
+	}
+
+	// Sanity: the baseline window pairs both groups and skips the unpaired.
+	got, err := indexer.ShadowReport(Filter{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Route != "beta" || got[0].Samples != 2 || got[1].Route != "alpha" || got[1].Samples != 1 {
+		t.Fatalf("index shadow report = %+v", got)
+	}
+}
+
 // TestIndexReconcileAppendRotationRetention covers the reconcile state
 // machine: appends advance the cursor, a new (rotated-day) file joins, a
 // deleted file drops its rows, and a shrunk file is re-indexed from zero.

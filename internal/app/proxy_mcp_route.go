@@ -30,7 +30,7 @@ var mcpNotifInitBody = []byte(`{"jsonrpc":"2.0","method":"notifications/initiali
 
 // serveMCPRoute handles /mcp/<route>. Dispatched from serveMCP after the
 // pinned-server lookup misses; the api-keys gate and method check already ran.
-func (p *Proxy) serveMCPRoute(w http.ResponseWriter, r *http.Request, name string, route configdomain.MCPRoute, snap RuntimeSnapshot, started time.Time, requestID string) {
+func (p *Proxy) serveMCPRoute(w http.ResponseWriter, r *http.Request, name string, route configdomain.MCPRoute, snap RuntimeSnapshot, started time.Time, requestID string, ident *mcpIdentity) {
 	if r.Method == http.MethodGet {
 		// Aggregated routes have no single upstream to stream from.
 		http.Error(w, "mcp route: GET server-stream is not supported on aggregated routes", http.StatusMethodNotAllowed)
@@ -76,13 +76,16 @@ func (p *Proxy) serveMCPRoute(w http.ResponseWriter, r *http.Request, name strin
 	// separately at sub-session build time.
 	if frame.Method == "initialize" {
 		sid := p.mcpSessions.PutRoute(name)
+		// The proxy owns the client session: bind the declared client
+		// identity so the session's later exchanges attribute to it.
+		p.mcpSessions.SetClient(sid, mcpkg.ParseClientInfo(body))
 		result := mcpkg.BuildInitializeResult(mcpkg.ParseClientProtocol(body), name)
 		respBody := mcpkg.BuildResultResponse(frame.ID, result)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Mcp-Session-Id", sid)
 		w.WriteHeader(http.StatusOK)
 		w.Write(respBody)
-		p.mcpLog(name, "", frame, r.Method, http.StatusOK, started, requestID, body, respBody, int64(len(respBody)), false)
+		p.mcpLog(name, "", frame, r.Method, http.StatusOK, started, requestID, body, respBody, int64(len(respBody)), false, ident)
 		return
 	}
 
@@ -90,21 +93,21 @@ func (p *Proxy) serveMCPRoute(w http.ResponseWriter, r *http.Request, name strin
 	if localSID == "" {
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32600, "mcp route: session required — POST initialize first")
 		p.mcpRouteWriteJSON(w, frame, "", http.StatusBadRequest, respBody)
-		p.mcpLog(name, "", frame, r.Method, http.StatusBadRequest, started, requestID, body, respBody, int64(len(respBody)), false)
+		p.mcpLog(name, "", frame, r.Method, http.StatusBadRequest, started, requestID, body, respBody, int64(len(respBody)), false, ident)
 		return
 	}
 	if !p.mcpSessions.RouteSessionValid(localSID) {
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32600, "mcp route: unknown or expired session — re-initialize")
 		p.mcpRouteWriteJSON(w, frame, "", http.StatusNotFound, respBody)
-		p.mcpLog(name, "", frame, r.Method, http.StatusNotFound, started, requestID, body, respBody, int64(len(respBody)), false)
+		p.mcpLog(name, "", frame, r.Method, http.StatusNotFound, started, requestID, body, respBody, int64(len(respBody)), false, ident)
 		return
 	}
 
 	switch frame.Method {
 	case "tools/list":
-		p.mcpRouteToolsList(w, r, name, route, snap, localSID, frame, body, started, requestID)
+		p.mcpRouteToolsList(w, r, name, route, snap, localSID, frame, body, started, requestID, ident)
 	case "tools/call":
-		p.mcpRouteToolsCall(w, r, name, route, snap, localSID, frame, body, started, requestID)
+		p.mcpRouteToolsCall(w, r, name, route, snap, localSID, frame, body, started, requestID, ident)
 	case "ping":
 		respBody := mcpkg.BuildResultResponse(frame.ID, json.RawMessage(`{}`))
 		p.mcpRouteWriteJSON(w, frame, localSID, http.StatusOK, respBody)
@@ -135,7 +138,7 @@ func (p *Proxy) mcpRouteWriteJSON(w http.ResponseWriter, frame mcpkg.Frame, sid 
 // mcpRouteToolsList aggregates the canonical tool surface, cached per route
 // session. A backend that fails its handshake/list is skipped — the route
 // degrades to the remaining targets instead of failing wholesale.
-func (p *Proxy) mcpRouteToolsList(w http.ResponseWriter, r *http.Request, name string, route configdomain.MCPRoute, snap RuntimeSnapshot, sid string, frame mcpkg.Frame, body []byte, started time.Time, requestID string) {
+func (p *Proxy) mcpRouteToolsList(w http.ResponseWriter, r *http.Request, name string, route configdomain.MCPRoute, snap RuntimeSnapshot, sid string, frame mcpkg.Frame, body []byte, started time.Time, requestID string, ident *mcpIdentity) {
 	tools, cached := p.mcpSessions.RouteToolsGet(sid)
 	if !cached {
 		toolsByServer := map[string][]mcpkg.ToolSpec{}
@@ -161,13 +164,13 @@ func (p *Proxy) mcpRouteToolsList(w http.ResponseWriter, r *http.Request, name s
 	result, _ := json.Marshal(map[string]any{"tools": tools})
 	respBody := mcpkg.BuildResultResponse(frame.ID, result)
 	p.mcpRouteWriteJSON(w, frame, sid, http.StatusOK, respBody)
-	p.mcpLog(name, "", frame, r.Method, http.StatusOK, started, requestID, body, respBody, int64(len(respBody)), false)
+	p.mcpLog(name, "", frame, r.Method, http.StatusOK, started, requestID, body, respBody, int64(len(respBody)), false, ident)
 }
 
 // mcpRouteToolsCall routes one call to its backends in target order (sticky
 // within the session), failing over on transport/auth/session/rate/server
 // faults — never on JSON-RPC business errors.
-func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name string, route configdomain.MCPRoute, snap RuntimeSnapshot, sid string, frame mcpkg.Frame, body []byte, started time.Time, requestID string) {
+func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name string, route configdomain.MCPRoute, snap RuntimeSnapshot, sid string, frame mcpkg.Frame, body []byte, started time.Time, requestID string, ident *mcpIdentity) {
 	canonical := mcpkg.ParseToolCallName(body)
 	if canonical == "" {
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32602, "tools/call: params.name is required")
@@ -262,12 +265,12 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 			w.Header().Set("Mcp-Session-Id", sid)
 			w.WriteHeader(resp.StatusCode)
 			capBytes := 0
-			if p.reqLog != nil {
-				capBytes = p.reqLog.MaxBodyBytes()
+			if target := p.mcpLogTarget(); target != nil {
+				capBytes = target.MaxBodyBytes()
 			}
 			captured, total, truncated := mcpStreamResponse(w, resp.Body, capBytes)
 			resp.Body.Close()
-			p.mcpLog(name, c.target.Server, frame, r.Method, resp.StatusCode, started, requestID, body, captured, total, truncated)
+			p.mcpLog(name, c.target.Server, frame, r.Method, resp.StatusCode, started, requestID, body, captured, total, truncated, ident)
 			return
 		}
 		resp, capBytes, err := p.mcpRoutePost(snap, c.srv, sub.Account, out, sub.UpstreamID, sub.Protocol, r)
@@ -295,11 +298,11 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 		w.WriteHeader(resp.StatusCode)
 		captured, total, truncated := mcpStreamResponse(w, resp.Body, capBytes)
 		resp.Body.Close()
-		p.mcpLog(name, c.target.Server, frame, r.Method, resp.StatusCode, started, requestID, body, captured, total, truncated)
+		p.mcpLog(name, c.target.Server, frame, r.Method, resp.StatusCode, started, requestID, body, captured, total, truncated, ident)
 		return
 	}
 	http.Error(w, fmt.Sprintf("mcp route %q: all %d backend(s) failed for tool %q: %v", name, len(cands), canonical, lastErr), http.StatusBadGateway)
-	p.mcpLog(name, "", frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false)
+	p.mcpLog(name, "", frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false, ident)
 }
 
 // mcpRouteStdioKey is the registry key for a route session's stdio child.
