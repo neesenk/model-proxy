@@ -244,6 +244,14 @@ func (p *Proxy) adminPorts(
 		RequestLogDirectory: func() string {
 			return p.reqLog.Directory()
 		},
+		MCPRequestLogDirectory: func() string {
+			// Same restart-only lifetime as reqLog (set once in initRequestLog
+			// before serving starts, never swapped) — no lock, same discipline.
+			if p.mcpReqLog == nil {
+				return ""
+			}
+			return p.mcpReqLog.Directory()
+		},
 		RequestLogIndex: func() *requestlog.Indexer {
 			// Process-lifetime and never swapped (set once in initRequestLog
 			// before serving starts), so no lock — same discipline as reqLog.
@@ -386,13 +394,15 @@ func (p *Proxy) adminPorts(
 			}
 			return impl
 		},
-		ProbeMCP:            p.probeMCP,
-		LocateGuardHits:     p.locateGuardHits,
-		AdjudicationBlocks:  p.adjudicationBlocks,
-		AdjudicationUnblock: p.adjudicationUnblock,
-		AdjudicationRecent:  p.adjudicationRecent,
-		AdjudicationStats:   p.adjudicationStats,
-		AdjudicationEnabled: p.adjudicationEnabled,
+		ProbeMCP:             p.probeMCP,
+		LocateGuardHits:      p.locateGuardHits,
+		AdjudicationBlocks:   p.adjudicationBlocks,
+		AdjudicationUnblock:  p.adjudicationUnblock,
+		AdjudicationAllowed:  p.adjudicationAllowed,
+		AdjudicationDisallow: p.adjudicationDisallow,
+		AdjudicationRecent:   p.adjudicationRecent,
+		AdjudicationStats:    p.adjudicationStats,
+		AdjudicationEnabled:  p.adjudicationEnabled,
 		ModelRefreshRuntime: func(name string) admin.ModelRefreshRuntime {
 			// Same parent-or-first-pooled-virtual resolution as the model-caps
 			// probe pass: the model list is per-upstream, not per-account.

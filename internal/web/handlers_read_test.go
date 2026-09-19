@@ -72,7 +72,13 @@ type dirRequestLogQueries struct{ dir string }
 func (d dirRequestLogQueries) SummariesWithFacets(f requestlog.Filter) ([]requestlog.Summary, requestlog.Facets, error) {
 	return requestlog.QuerySummariesWithFacets(d.dir, f)
 }
-func (d dirRequestLogQueries) Detail(id string) ([]requestlog.Record, error) {
+func (d dirRequestLogQueries) ShadowReport(f requestlog.Filter) ([]requestlog.ShadowReportEntry, error) {
+	return requestlog.ShadowReport(d.dir, f)
+}
+func (d dirRequestLogQueries) Detail(id, stream string) ([]requestlog.Record, error) {
+	if stream == "mcp" {
+		return nil, nil
+	}
 	return requestlog.QueryRecords(d.dir, requestlog.Filter{RequestID: id, Limit: 50})
 }
 func (d dirRequestLogQueries) SessionSummaries(scanLimit, limit int, costOf func(string, string, requestlog.Usage) float64) ([]requestlog.SessionSummary, error) {
@@ -138,6 +144,7 @@ func (r *readAPIStub) SecurityExplain(requestID, kind string, names []string) (a
 	}
 	return r.explain(requestID, kind, names)
 }
+func (r *readAPIStub) SecurityAllowed() []appapi.SecurityAllowed { return nil }
 func (r *readAPIStub) SecurityBlocks() []appapi.SecurityBlock {
 	if r.blocks == nil {
 		return []appapi.SecurityBlock{}
@@ -734,7 +741,7 @@ func TestReadShadowReportAndErrors(t *testing.T) {
 		requestlog.Record{Ts: "2026-07-29T12:00:00Z", RequestID: "pair", Exposed: "chat", Provider: "primary", Status: 200, LatencyMs: 11, ResponseSize: 100},
 		requestlog.Record{Ts: "2026-07-29T12:00:01Z", RequestID: "shadow-pair", Shadow: true, Exposed: "chat", Provider: "shadow", Status: 500, LatencyMs: 18, ResponseSize: 70},
 	)
-	reads := &readAPIStub{logDir: tmp}
+	reads := &readAPIStub{logDir: tmp, queries: dirRequestLogQueries{tmp}}
 	s := newReadServer(t, reads)
 	report := serveRead(t, s, http.MethodGet, "/api/shadow-report?from=2026-07-29T11:59:00Z&to=2026-07-29T12:02:00Z")
 	var got struct {
@@ -761,6 +768,7 @@ func TestReadShadowReportAndErrors(t *testing.T) {
 	}
 
 	reads.logDir = filepath.Join(t.TempDir(), "missing")
+	reads.queries = dirRequestLogQueries{reads.logDir}
 	failed := serveRead(t, s, http.MethodGet, "/api/shadow-report")
 	var routeError struct {
 		Error string `json:"error"`

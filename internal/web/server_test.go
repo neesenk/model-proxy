@@ -58,6 +58,7 @@ func (testReadAPI) SecurityExplain(string, string, []string) (appapi.SecurityExp
 	return appapi.SecurityExplainResult{}, nil
 }
 func (testReadAPI) SecurityBlocks() []appapi.SecurityBlock    { return nil }
+func (testReadAPI) SecurityAllowed() []appapi.SecurityAllowed { return nil }
 func (testReadAPI) SecurityAdjudications() appapi.SecurityAdjudicationFeed {
 	return appapi.SecurityAdjudicationFeed{Adjudications: []appapi.SecurityAdjudication{}}
 }
@@ -92,6 +93,7 @@ func (testCommandAPI) SetPin(string, string, time.Duration) (appapi.Pin, bool) {
 }
 func (testCommandAPI) ClearPin(string) bool          { return true }
 func (testCommandAPI) SecurityUnblock(string) error  { return nil }
+func (testCommandAPI) SecurityDisallow(string) error { return nil }
 func (testCommandAPI) SaveConfig([]byte) error       { return nil }
 func (testCommandAPI) ValidateConfig([]byte) []appapi.ValidationIssue {
 	return nil

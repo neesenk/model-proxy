@@ -289,12 +289,13 @@ test('security 页命中行点击展开 analyze，秘密片段掩码 (点击展�
 
 test('status Live 段点击行打开详情弹层并关闭 (弹层族)', async (t) => {
   if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
-  await ctx.ev(`document.querySelector('[data-tab="status"]').click()`);
-  await ctx.waitFor('status active', () => ctx.ev(
-    `document.getElementById('tab-status').classList.contains('active')`));
-  await ctx.waitFor('status nav mounted', () => ctx.ev(
-    `!!document.querySelector('.status-nav-item[data-section="live"]')`));
-  await ctx.ev(`document.querySelector('.status-nav-item[data-section="live"]').click()`);
+  // Live 监视已从 Status 迁到 Requests 页（侧栏 Live Requests 导航）。
+  await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
+  await ctx.waitFor('requests active', () => ctx.ev(
+    `document.getElementById('tab-requests').classList.contains('active')`));
+  await ctx.waitFor('requests nav mounted', () => ctx.ev(
+    `!!document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]')`));
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
   await ctx.waitFor('live card mounted', () => ctx.ev(`!!document.getElementById('live-table')`));
   // SSE 订阅下驱动真实请求 → live 行出现。
   await driveRequest(1);
@@ -421,7 +422,17 @@ test('takeover 页：模板表渲染与真实 takeover/restore 闭环 (mutation 
     `!!document.querySelector('[data-tk-takeover="claude"]')`));
 
   await ctx.ev(`document.querySelector('[data-tk-takeover="claude"]').click()`);
-  await ctx.waitFor('claude taken over (row offers restore)', () => ctx.ev(
+  // The confirm dialog renders the dry-run preview: the exact config the
+  // takeover would write, before the run is confirmed.
+  await ctx.waitFor('preview dialog open with rendered write', () => ctx.ev(
+    `(() => { const w = document.getElementById('tkr-writes');
+      return document.getElementById('tk-run-modal').open === true
+        && w.innerHTML.includes('ANTHROPIC_BASE_URL')
+        && !w.innerHTML.includes('KEEP'); })()`));
+  assert.equal(await ctx.ev(`document.getElementById('tkr-writes').querySelector('.code') !== null`), true,
+    'preview renders highlighted config');
+  await ctx.ev(`document.getElementById('tkr-run').click()`);
+  await ctx.waitFor('claude taken over (family row offers restore)', () => ctx.ev(
     `!!document.querySelector('[data-tk-restore="claude"]')`));
   const written = JSON.parse(readFileSync(claudeFile, 'utf8'));
   assert.equal(written.env.ANTHROPIC_BASE_URL, `http://127.0.0.1:${ctx.port}`,
@@ -449,8 +460,14 @@ test('takeover 模板编辑器：preset 查看/覆盖/校验拒绝/删除恢复 
   await ctx.ev(`document.querySelector('[data-tk-edit="claude"]').click()`);
   await ctx.waitFor('template modal open', () => ctx.ev(
     `document.getElementById('tk-modal').open === true && !!document.getElementById('tk-yaml')`));
-  assert.equal(await ctx.ev(`document.getElementById('tk-yaml').readOnly`), true);
+  // Every template opens EDITABLE — including built-in presets (saving
+  // writes the user override; the hint says so).
+  assert.equal(await ctx.ev(`document.getElementById('tk-yaml').hidden`), false);
+  assert.equal(await ctx.ev(`document.getElementById('tk-yaml').readOnly`), false);
   assert.ok(await ctx.ev(`document.getElementById('tk-yaml').value.includes('ANTHROPIC_BASE_URL')`));
+  // The rendered-config section dry-runs this exact template.
+  await ctx.waitFor('rendered config preview', () => ctx.ev(
+    `(document.getElementById('tk-rendered') || {}).innerHTML.includes('ANTHROPIC_BASE_URL')`));
 
   // Save As Override → the user template replaces the preset.
   await ctx.ev(`document.getElementById('tk-save').click()`);
@@ -458,14 +475,28 @@ test('takeover 模板编辑器：preset 查看/覆盖/校验拒绝/删除恢复 
     const r = await fetch(`${ctx.baseUrl}/api/takeover/templates/claude`);
     return r.ok && (await r.json()).source === 'user';
   });
-  await ctx.waitFor('table re-rendered with user source', () => ctx.ev(
-    `document.querySelector('#tab-takeover').innerHTML.includes('>user<')`));
+  await ctx.waitFor('table re-rendered with user template', () => ctx.ev(
+    `(() => { const b = document.querySelector('[data-tk-edit="claude"]');
+      return b && b.textContent.trim() === 'Edit'; })()`));
 
   // Invalid candidate (pi family variant without protocol) is rejected
   // inline — the backend validates the merged template set fail-closed.
   await ctx.ev(`document.querySelector('[data-tk-new]').click()`);
   await ctx.waitFor('new-template modal', () => ctx.ev(
     `document.getElementById('tk-modal').open === true && !!document.getElementById('tk-name')`));
+  // The Format picker seeds a starter skeleton per format; the placeholder
+  // reference table documents the engine's variable set.
+  assert.equal(await ctx.ev(`document.getElementById('tk-format').value`), 'json');
+  assert.ok(await ctx.ev(`document.getElementById('tk-yaml').value.includes('# Takeover template')`),
+    'starter skeleton prefilled');
+  assert.ok(await ctx.ev(`document.querySelector('#tk-modal details').innerHTML.includes('placeholder')`),
+    'placeholder help rendered');
+  await ctx.ev(`(() => { const f = document.getElementById('tk-format'); f.value = 'toml';
+    f.dispatchEvent(new Event('change')); })()`);
+  assert.ok(await ctx.ev(`document.getElementById('tk-yaml').value.includes('top_keys')`),
+    'toml starter swapped in');
+  await ctx.ev(`(() => { const f = document.getElementById('tk-format'); f.value = 'json';
+    f.dispatchEvent(new Event('change')); })()`);
   const badYaml = 'file: ~/x.json\nformat: json\nclient: pi\njson:\n  set:\n    env.X: "{{base_url}}"\n';
   await ctx.ev(`(() => { document.getElementById('tk-name').value = 'pi-broken';
     document.getElementById('tk-yaml').value = ${JSON.stringify(badYaml)}; })()`);
@@ -499,18 +530,29 @@ test('eval 页渲染 shadow report 与 fusion 空态 (渲染族)', async (t) => 
   assert.deepEqual(await ctx.pageErrors(), [], 'eval tab must not raise JS errors');
 });
 
-test('请求详情 replay 条：一次性 force-provider 重答 (mutation 族)', async (t) => {
+test('请求详情 replay 条：常规下拉 + 按模型过滤 + 可读渲染 (mutation 族)', async (t) => {
   if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
   await driveRequest();
   await gotoRequestsWithRows();
   await ctx.ev(`document.querySelector('#req-table tbody tr:not(.req-spacer)').click()`);
   await ctx.waitFor('replay strip in the detail row', () => ctx.ev(
     `!!document.querySelector('.req-detail-row [data-replay-run]')`));
+  // The provider control is a PLAIN select (no free-typing input), and its
+  // options are filtered to the providers that carry the request's model:
+  // the sandbox config has exactly one provider (dummy, models [m1]) and the
+  // driven request asked for m1, so dummy is the only eligible option.
+  assert.ok(await ctx.ev(`document.querySelector('.req-detail-row [data-replay-provider]').tagName === 'SELECT'`),
+    'provider 控件应是常规 select 下拉框');
+  const opts = await ctx.ev(`[...document.querySelectorAll('.req-detail-row [data-replay-provider] option')].map((o) => o.value)`);
+  assert.deepEqual(opts.filter(Boolean), ['dummy'], `按模型过滤后的 provider 选项（got: ${opts.join(',')}）`);
   await ctx.ev(`(() => { document.querySelector('.req-detail-row [data-replay-provider]').value = 'dummy'; })()`);
   await ctx.ev(`document.querySelector('.req-detail-row [data-replay-run]').click()`);
   await ctx.waitFor('replay answer status 200', () => ctx.ev(
     `(document.querySelector('.req-detail-row [data-replay-status]') || {}).textContent?.includes('200')`));
-  // The replayed body renders through the same lazy raw-body details.
+  // The replayed answer renders in the SAME readable format as the record
+  // detail (chat view turns), with the raw body in the lazy details below.
+  assert.ok(await ctx.ev(`!!document.querySelector('.req-detail-row [data-replay-result] .cv')`),
+    'replay 结果应以 chat 视图（与请求详情同格式）渲染');
   assert.ok(await ctx.ev(`!!document.querySelector('.req-detail-row [data-replay-result] .raw-body')`));
   assert.deepEqual(await ctx.pageErrors(), [], 'replay flow must not raise JS errors');
 });
@@ -536,43 +578,139 @@ test('status 页 schedule route test 与 models catalog refresh (mutation 族)',
   assert.deepEqual(await ctx.pageErrors(), [], 'status diagnostics must not raise JS errors');
 });
 
-test('takeover 页 mode 下拉驱动服务端变体预览 (表单族)', async (t) => {
+test('takeover 确认对话框：变体切换驱动预览与执行单位 (表单族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // Install a fake pi config so the pi family (multi-variant) is takeoverable.
+  const piDir = path.join(ctx.sandbox, 'home', '.pi', 'agent');
+  mkdirSync(piDir, { recursive: true });
+  writeFileSync(path.join(piDir, 'models.json'), '{}');
+  await ctx.ev(`document.querySelector('[data-tab="takeover"]').click()`);
+  await ctx.waitFor('takeover table', () => ctx.ev(`!!document.querySelector('.tk-family')`));
+  await ctx.waitFor('pi family offers takeover', () => ctx.ev(
+    `!!document.querySelector('[data-tk-takeover="pi"]')`));
+
+  // One row per family; the config format renders as a small badge.
+  const famFormats = () => ctx.ev(`(() => {
+    const out = {};
+    for (const tr of document.querySelectorAll('#tab-takeover tbody tr')) {
+      const name = tr.querySelector('.tk-fam-name');
+      const badge = tr.querySelector('td:first-child .badge');
+      if (name && badge) out[name.textContent] = badge.textContent;
+    }
+    return out;
+  })()`);
+  await ctx.waitFor('format badges render', async () => {
+    const h = await famFormats();
+    return h.opencode === 'json' && h.pi === 'json' && h.codex === 'toml';
+  });
+
+  // The pi family Takeover opens the confirm dialog with the auto variant
+  // preselected; its preview shows the openai provider entry.
+  await ctx.ev(`document.querySelector('[data-tk-takeover="pi"]').click()`);
+  await ctx.waitFor('dialog open with auto variant chip pressed', () => ctx.ev(
+    `document.getElementById('tk-run-modal').open === true`
+    + ` && !!document.querySelector('[data-tkr-variant-chip="pi-openai"][aria-pressed="true"]')`));
+  await ctx.waitFor('preview shows the openai provider entry', () => ctx.ev(
+    `document.getElementById('tkr-writes').innerHTML.includes('pi-openai')`));
+
+  // Picking another variant re-resolves the preview server-side (exact
+  // template pin) and moves the preview to that variant's provider entry.
+  await ctx.ev(`document.querySelector('[data-tkr-variant-chip="pi-responses"]').click()`);
+  await ctx.waitFor('preview switched to the responses variant', () => ctx.ev(
+    `document.getElementById('tkr-writes').innerHTML.includes('pi-responses')`));
+
+  // Scope checkboxes: unchecking mcp narrows the preview to the model part
+  // (families without an MCP block render no mcp checkbox — skip then).
+  const hasMcpChip = await ctx.ev(`document.querySelector('[data-tkr-scope="mcp"]') !== null`);
+  if (hasMcpChip) {
+    await ctx.ev(`document.querySelector('[data-tkr-scope="mcp"]').click()`);
+    await ctx.waitFor('mcp chip off preview', () => ctx.ev(
+      `(() => { const w = document.getElementById('tkr-writes');
+        return !w.innerHTML.includes('mcpServers'); })()`));
+    await ctx.ev(`document.querySelector('[data-tkr-scope="mcp"]').click()`);
+    await ctx.waitFor('mcp chip on preview', () => ctx.ev(
+      `document.getElementById('tkr-writes').innerHTML.includes('mcpServers')`));
+    // Subset chip: pick only one MCP server; the preview narrows to it.
+    await ctx.ev(`(() => { const chips = document.querySelectorAll('[data-tkr-mcp]');
+      for (let i = 1; i < chips.length; i++) chips[i].click(); })()`);
+    await ctx.waitFor('mcp subset preview narrows', () => ctx.ev(
+      `(() => { const w = document.getElementById('tkr-writes');
+        const m = w.innerHTML.match(/127\.0\.0\.1:\d+\/mcp\/[a-z0-9-]+/g) || [];
+        return m.length > 0 && new Set(m).size === 1; })()`));
+  }
+
+  // Model chips toggle too (regression: dataset key mismatch made model
+  // chips no-ops) — deselect one model and the preview loses it.
+  const modelChips = await ctx.ev(`document.querySelectorAll('[data-tkr-model]').length`);
+  if (modelChips > 0) {
+    const before = await ctx.ev(`(() => { const w = document.getElementById('tkr-writes');
+      return (w.innerHTML.match(/127[.]0[.]0[.]1:\\d+\\/v1\\/chat\\/completions|glm-5/g) || []).length; })()`);
+    await ctx.ev(`document.querySelector('[data-tkr-model]').click()`);
+    await new Promise(r => setTimeout(r, 600));
+    const after = await ctx.ev(`(() => { const w = document.getElementById('tkr-writes');
+      return (w.innerHTML.match(/127[.]0[.]0[.]1:\\d+\\/v1\\/chat\\/completions|glm-5/g) || []).length; })()`);
+    // toggling a model off must CHANGE the rendered preview (the sandbox
+    // route table has few models, so any change proves the chip works)
+    assert.notEqual(after, before, 'model chip toggle must change the preview');
+  }
+
+  // The split option previews the partition: m1 is openai-native, so split
+  // assigns it to pi-openai alone — variants with no models are dropped
+  // (no empty provider entries), exactly like the run would.
+  await ctx.ev(`document.querySelector('[data-tkr-variant-chip="split"]').click()`);
+  await ctx.waitFor('split preview shows the partition', () => ctx.ev(
+    `(() => { const w = document.getElementById('tkr-writes');
+      return w.innerHTML.includes('pi-openai') && !w.innerHTML.includes('pi-responses')
+        && w.querySelectorAll('.tk-write').length === 1; })()`));
+
+  // Cancel — nothing was written.
+  await ctx.ev(`document.getElementById('tkr-no').click()`);
+  assert.equal(await ctx.ev(`document.getElementById('tk-run-modal').open`), false);
+
+  // Variant rows are gone entirely — one row per family, no stray templates.
+  assert.equal(await ctx.ev(`document.querySelectorAll('#tab-takeover tbody tr').length`), 6,
+    'exactly one row per family');
+  assert.deepEqual(await ctx.pageErrors(), [], 'dialog flow must not raise JS errors');
+});
+
+// template editor draft preview: editing the YAML textarea re-renders the
+// UNSAVED draft (debounced auto + manual Refresh), while the saved template
+// stays untouched on disk until Save.
+test('takeover 模板编辑器：草稿实时预览（未保存编辑即时渲染）', async (t) => {
   if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
   await ctx.ev(`document.querySelector('[data-tab="takeover"]').click()`);
-  await ctx.waitFor('takeover table', () => ctx.ev(`!!document.getElementById('tk-mode')`));
-
-  // The sandbox route table serves m1 via the static openai endpoint, so the
-  // unified preview marks the openai variant of BOTH multi-variant families.
-  const markedRows = () => ctx.ev(`(() => {
-    const out = [];
-    for (const tr of document.querySelectorAll('#tab-takeover tbody tr')) {
-      if (tr.innerHTML.includes('>*</span>')) {
-        const edit = tr.querySelector('[data-tk-edit]');
-        if (edit) out.push(edit.dataset.tkEdit);
-      }
-    }
-    return out.sort().join(',');
-  })()`);
-  await ctx.waitFor('unified preview marks the openai variants', async () =>
-    (await markedRows()) === 'opencode-openai,pi-openai');
-
-  // Switching the select re-resolves the surface server-side (?mode=) and the
-  // markers move to the responses variants; the hint line explains the mode.
-  await ctx.ev(`(() => { const s = document.getElementById('tk-mode'); s.value = 'responses';
-    s.dispatchEvent(new Event('change')); })()`);
-  await ctx.waitFor('responses preview marks the responses variants', async () =>
-    (await markedRows()) === 'opencode-responses,pi-responses');
-  await ctx.waitFor('mode hint updated', () => ctx.ev(
-    `(document.getElementById('tk-mode-hint') || {}).textContent?.includes('pin the responses')`));
-  // Single-variant families never carry the marker.
-  assert.equal(await ctx.ev(`(() => {
-    for (const tr of document.querySelectorAll('#tab-takeover tbody tr')) {
-      const edit = tr.querySelector('[data-tk-edit]');
-      if (edit && edit.dataset.tkEdit === 'claude') return tr.innerHTML.includes('>*</span>');
-    }
-    return true;
-  })()`), false, 'claude (single-variant family) must stay unmarked');
-  assert.deepEqual(await ctx.pageErrors(), [], 'mode preview must not raise JS errors');
+  await ctx.waitFor('takeover table', () => ctx.ev(`!!document.querySelector('.tk-family')`));
+  await ctx.ev(`document.querySelector('[data-tk-edit="claude"]').click()`);
+  await ctx.waitFor('editor open with rendered preview', () => ctx.ev(
+    `document.getElementById('tk-modal').open === true`
+    + ` && !!document.getElementById('tk-rendered')`));
+  await ctx.waitFor('initial preview renders the saved template', () => ctx.ev(
+    `(document.getElementById('tk-rendered').textContent || '').includes('ANTHROPIC_BASE_URL')`));
+  // Refresh (manual draft trigger) exists.
+  assert.equal(await ctx.ev(`!!document.getElementById('tk-refresh-draft')`), true,
+    'draft Refresh button present');
+  // Edit the YAML (input event): the debounced draft preview must carry the
+  // unsaved marker — rendered through template_body, not the disk template.
+  const NL = 'String.fromCharCode(10)';
+  await ctx.ev(
+    `"use strict"; (() => { const ta = document.getElementById("tk-yaml");` +
+    ` const lines = ta.value.split(${NL}).map(l =>` +
+    ` l.trim().startsWith("env.ANTHROPIC_BASE_URL:") ? l + ${NL} + "    env.E2E_DRAFT_MARKER: live" : l);` +
+    ` ta.value = lines.join(${NL}); ta.dispatchEvent(new Event("input")); })()`);
+  await ctx.waitFor('draft preview carries the unsaved marker', () => ctx.ev(
+    `(document.getElementById('tk-rendered').textContent || '').includes('E2E_DRAFT_MARKER')`),
+    6000);
+  // The disk template is untouched (the draft never saves): reopening the
+  // editor shows the saved doc without the marker.
+  await ctx.ev(`document.getElementById('tk-cancel').click()`);
+  await ctx.ev(`document.querySelector('[data-tk-edit="claude"]').click()`);
+  await ctx.waitFor('reopened editor renders the SAVED template', () => ctx.ev(
+    `(document.getElementById('tk-rendered').textContent || '').includes('ANTHROPIC_BASE_URL')`));
+  assert.equal(await ctx.ev(
+    `(document.getElementById('tk-rendered').textContent || '').includes('E2E_DRAFT_MARKER')`),
+    false, 'draft edits must not persist without Save');
+  await ctx.ev(`document.getElementById('tk-cancel').click()`);
+  assert.deepEqual(await ctx.pageErrors(), [], 'editor draft flow must not raise JS errors');
 });
 
 // admin-auth modal: dismissing it with Esc must resolve the boot promise —
@@ -600,4 +738,57 @@ test('Esc on the admin-auth modal keeps boot alive', async (t) => {
   } finally {
     await auth.shutdown();
   }
+});
+
+// MCP Live 的会话下拉必须只列 MCP 会话：/api/sessions 是 LLM-only 聚合，
+// 把它灌进 MCP 流的下拉会把 Model 会话列在 MCP 工具栏下（回归：流切换后
+// 旧池不清不换 + MCP 直接复用 /api/sessions）。
+test('MCP Live 会话下拉只列 MCP 会话，不读 /api/sessions (流隔离族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
+  await ctx.waitFor('requests tab active', () => ctx.ev(
+    `document.getElementById('tab-requests').classList.contains('active')`));
+  // 进入 Model 流 Live，等 LLM 池加载（真实 /api/sessions）。
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
+  await ctx.waitFor('live card mounted', () => ctx.ev(`!!document.getElementById('live-table')`));
+  // 仪表化 fetch：切换后命中 /api/sessions 即失败；kind=mcp 池查询喂固定记录。
+  await ctx.ev(`(() => {
+    window.__sessHits = 0;
+    window.__origFetch = window.fetch;
+    window.fetch = (url, ...rest) => {
+      const u = String(url);
+      if (u.includes('/api/sessions')) window.__sessHits++;
+      if (u.includes('kind=mcp') && u.includes('limit=500')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          enabled: true,
+          records: [
+            { request_id: 'mcp-live-e2e-1', kind: 'mcp', session_id: 'mcp-live-sess-a', ts: '2026-09-18T10:00:00Z', status: 200 },
+            { request_id: 'mcp-live-e2e-2', kind: 'mcp', session_id: 'mcp-live-sess-b', ts: '2026-09-18T09:00:00Z', status: 200 },
+          ],
+          facets: { providers: [], models: [], agents: [], provider_models: {} },
+        }), { headers: { 'content-type': 'application/json' } }));
+      }
+      return window.__origFetch(url, ...rest);
+    };
+  })()`);
+  try {
+    await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream="mcp"]').click()`);
+    await ctx.waitFor('mcp pool option mounted', () => ctx.ev(
+      `!!document.querySelector('#live-session option[value="mcp-live-sess-a"]')`));
+    // 下拉只含空值与 MCP 池会话（环内无 MCP 行时）；LLM 会话 id 不得残留。
+    const opts = await ctx.ev(`[...document.querySelectorAll('#live-session option')].map((o) => o.value)`);
+    const llmIds = (await (await fetch(`${ctx.baseUrl}/api/sessions?limit=200`)).json()).sessions.map((x) => x.session_id);
+    for (const id of llmIds) {
+      assert.ok(!opts.includes(id), `MCP 下拉不得列出 LLM 会话 ${id}（got: ${opts.join(',')}）`);
+    }
+    assert.ok(opts.includes('mcp-live-sess-b'), '池内第二个 MCP 会话也在下拉里');
+    assert.equal(await ctx.ev('window.__sessHits'), 0, '切换到 MCP 流后不得再请求 /api/sessions');
+  } finally {
+    await ctx.ev(`window.fetch = window.__origFetch; delete window.__origFetch;`);
+    // 回到 Model 流 Live，真实池重新加载（先还原 fetch 再切，避免假数据污染）。
+    await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
+    await ctx.waitFor('model pool reloaded', () => ctx.ev(
+      `![...document.querySelectorAll('#live-session option')].some((o) => o.value === 'mcp-live-sess-a')`));
+  }
+  assert.deepEqual(await ctx.pageErrors(), [], 'MCP 会话下拉隔离不得有 JS 错误');
 });

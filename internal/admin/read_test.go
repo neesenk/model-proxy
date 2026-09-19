@@ -188,8 +188,11 @@ func TestLogFileAndRequestLogDirectory(t *testing.T) {
 // through the directory scan with identical semantics.
 func TestRequestLogQueriesFallback(t *testing.T) {
 	dir := t.TempDir()
-	line := `{"ts":"2026-07-29T12:00:00Z","request_id":"r1","session_id":"s1","called_model":"m","provider":"p","status":200,"request_body":"body","response_body":"{\"usage\":{\"input_tokens\":3,\"output_tokens\":4}}"}`
-	if err := os.WriteFile(filepath.Join(dir, "requests-20260729.log"), []byte(line+"\n"), 0o600); err != nil {
+	lines := `{"ts":"2026-07-29T12:00:00Z","request_id":"r1","session_id":"s1","called_model":"m","exposed":"m","provider":"p","status":200,"request_body":"body","response_body":"{\"usage\":{\"input_tokens\":3,\"output_tokens\":4}}"}
+` +
+		`{"ts":"2026-07-29T12:00:01Z","request_id":"shadow-r1","provider":"sp","status":500,"latency_ms":9,"response_size":7,"shadow":true}
+`
+	if err := os.WriteFile(filepath.Join(dir, "requests-20260729.log"), []byte(lines), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	service := New(Ports{RequestLogDirectory: func() string { return dir }})
@@ -201,13 +204,15 @@ func TestRequestLogQueriesFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(summaries) != 1 || summaries[0].RequestID != "r1" || summaries[0].Input != 3 || summaries[0].Output != 4 {
+	// The shadow row rides the listing too (Shadow: "only"/"exclude" is the
+	// caller's filter, not the listing's default).
+	if len(summaries) != 2 || summaries[0].RequestID != "shadow-r1" || summaries[0].Provider != "sp" || summaries[1].RequestID != "r1" || summaries[1].Input != 3 || summaries[1].Output != 4 {
 		t.Fatalf("fallback summaries = %+v", summaries)
 	}
-	if len(facets.Providers) != 1 || facets.Providers[0] != "p" {
+	if len(facets.Providers) != 2 || facets.Providers[0] != "p" || facets.Providers[1] != "sp" {
 		t.Fatalf("fallback facets = %+v", facets)
 	}
-	records, err := queries.Detail("r1")
+	records, err := queries.Detail("r1", "")
 	if err != nil || len(records) != 1 || records[0].RequestBody != "body" {
 		t.Fatalf("fallback detail = (%+v, %v)", records, err)
 	}
@@ -215,14 +220,26 @@ func TestRequestLogQueriesFallback(t *testing.T) {
 	if err != nil || len(sessions) != 1 || sessions[0].SessionID != "s1" || sessions[0].Usage.Input != 3 {
 		t.Fatalf("fallback sessions = (%+v, %v)", sessions, err)
 	}
+	report, err := queries.ShadowReport(requestlog.Filter{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// r1+shadow-r1 pair once; the status classes disagree (200 vs 500) so
+	// the match rate is 0 and the route comes from the primary row.
+	if len(report) != 1 || report[0].Route != "m" || report[0].PrimaryProvider != "p" || report[0].ShadowProvider != "sp" || report[0].Samples != 1 || report[0].StatusMatchRate != 0 || report[0].ShadowLatencyMs != 9 {
+		t.Fatalf("fallback shadow report = %+v", report)
+	}
 }
 
 // TestRequestLogQueriesIndexDelegation: with a running index wired, the query
 // port delegates to it (the reconciled index answers, not the raw directory).
 func TestRequestLogQueriesIndexDelegation(t *testing.T) {
 	dir := t.TempDir()
-	line := `{"ts":"2026-07-29T12:00:00Z","request_id":"r1","called_model":"m","provider":"p","status":200}`
-	if err := os.WriteFile(filepath.Join(dir, "requests-20260729.log"), []byte(line+"\n"), 0o600); err != nil {
+	lines := `{"ts":"2026-07-29T12:00:00Z","request_id":"r1","called_model":"m","exposed":"m","provider":"p","status":200,"latency_ms":5}
+` +
+		`{"ts":"2026-07-29T12:00:01Z","request_id":"shadow-r1","provider":"sp","status":200,"latency_ms":8,"shadow":true}
+`
+	if err := os.WriteFile(filepath.Join(dir, "requests-20260729.log"), []byte(lines), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	indexer, err := requestlog.NewIndexer(dir)
@@ -246,11 +263,26 @@ func TestRequestLogQueriesIndexDelegation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(summaries) == 1 && summaries[0].RequestID == "r1" {
+		if len(summaries) == 2 && summaries[0].RequestID == "shadow-r1" {
 			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("index-delegated query never saw the record")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// The shadow report answers through the same index delegation: the pair
+	// aggregates once both sides are indexed (a scan-free read).
+	for {
+		report, err := queries.ShadowReport(requestlog.Filter{Limit: 100})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(report) == 1 && report[0].Route == "m" && report[0].PrimaryProvider == "p" && report[0].ShadowProvider == "sp" && report[0].Samples == 1 && report[0].StatusMatchRate == 1 && report[0].PrimaryLatencyMs == 5 && report[0].ShadowLatencyMs == 8 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("index-delegated shadow report never saw the pair")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

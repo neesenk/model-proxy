@@ -111,7 +111,6 @@ providers:
       - {window: "14:00-18:00", multiplier: 4}
     models:
       - deepseek-flash
-
   # Volcengine Ark (火山方舟, including "Agent Plan"). API key via `login volcengine`.
   # Two protocol bases: openai_base_url = Ark OpenAI base, anthropic_base_url =
   # Ark Anthropic-compatible base (no /v1; proxy keeps /v1/messages).
@@ -133,7 +132,6 @@ providers:
       - glm-5.3
       - glm-5.3-flash
       - kimi-k3
-
   shopee:
     provider_id: static
     priority: 3
@@ -153,7 +151,6 @@ providers:
       - gpt-5.6-terra
       - gpt-6-astra
       - kimi-k3
-
   # Kimi Code (Moonshot membership coding plan — NOT the pay-as-you-go 开放平台).
   # API key via `login kimi-code` (from https://www.kimi.com/code/console).
   # Two protocol bases under the same gateway: openai_base_url = .../coding/v1
@@ -185,7 +182,6 @@ providers:
       - k3-256k
       - kimi-for-coding
       - kimi-for-coding-highspeed
-
 # Qianwen Token Plan 个人版 (千问 AI Token Plan personal edition). API key via
 # `login qwen-plan` (from the Token Plan console; key format sk-sp-…). Two
 # protocol bases: openai_base_url = OpenAI-compatible base, anthropic_base_url
@@ -233,7 +229,6 @@ providers:
 routes:
   deepseek-v4-pro: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-flash]
   deepseek-v4-flash: [aqp/deepseek-v4-flash, volcengine/deepseek-v4-flash, shopee/deepseek-v4-flash, deepseek/deepseek-flash]
-
 # Scheduling: every field has a code default (config.go accessors), so this
 # block can be omitted entirely. Uncomment a line to override.
 # scheduling:
@@ -266,16 +261,25 @@ routes:
 # is a derived view — deleting it just triggers a full rebuild on next start.
 # Uncomment to enable:
 request_log:
-  enabled: true                       # default false
-  dir: ~/.model-proxy/log/requests    # default
-  max_file_size: 1073741824           # 1G per file (rotate on size or day)
-  max_body_bytes: 5242880             # 5MB cap per body (truncates past it)
-  retention: 720h                     # 30d; delete rotated files older than this; 0 = forever
+  enabled: true # default false
+  dir: ~/.model-proxy/log/requests # default
+  max_file_size: 1073741824 # 1G per file (rotate on size or day)
+  max_body_bytes: 5242880 # 5MB cap per body (truncates past it)
+  retention: 720h # 30d; delete rotated files older than this; 0 = forever
+  # MCP gateway exchanges (kind="mcp") go to their OWN stream instead of
+  # polluting the LLM request log: mcp-YYYYMMDD.log files under mcp_dir
+  # (default ~/.model-proxy/log/mcp), sharing the size/body/retention policy
+  # above. The Requests page and /api/requests go back to LLM-only traffic;
+  # /api/requests?kind=mcp reads the split stream. Restart-only. Default off.
+  mcp_split: true
+  # mcp_dir: ~/.model-proxy/log/mcp # default
   # Client session-id header allowlist (ordered; first non-empty wins). Drives
   # the request-log session_id and the live /api/events session_id. Default:
   # [x-claude-code-session-id, x-session-affinity, x-session-id, x-opencode-session]
+  # Clients that send no session header (Codex) fall back to the body-carried
+  # client_metadata.session_id (Responses-protocol convention) — the derived
+  # id feeds observation + guard session blocks, never the routing sticky key.
   # session_headers: [x-claude-code-session-id, x-session-affinity]
-
 # Web admin UI + JSON API (/ui/ + /api/). Enabled by default. Without the
 # optional auth below, listen must stay loopback (enforced at startup);
 # configuring both auth files allows a non-loopback listen. Uncomment to
@@ -290,9 +294,8 @@ request_log:
 # and per-agent dims; powers the `stats` CLI and Web UI Analytics/Requests
 # pages). Defaults shown; omit the block to accept them.
 stats:
-  db_path: ~/.model-proxy/stats.db    # default
-  retention: 0                        # default 30d; 0 = keep forever
-
+  db_path: ~/.model-proxy/stats.db # default
+  retention: 0 # default 30d; 0 = keep forever
 # Equivalent-cost analytics: token usage × OpenRouter price catalog (cached).
 # pricing:
 #   enabled: true                       # default; false disables catalog fetch (prices: overrides still work)
@@ -323,11 +326,10 @@ stats:
 # duplicate single-shot requests; multi-turn chats change the body every turn,
 # so the hit rate there is ≈ 0 (prefix savings belong to upstream prompt caching).
 cache:
-  enabled: true                       # default false
-  ttl: 60m                            # default
-  max_entries: 6000                   # default
-  max_body_bytes: 262144              # default 256KiB; larger responses not cached
-
+  enabled: true # default false
+  ttl: 60m # default
+  max_entries: 6000 # default
+  max_body_bytes: 262144 # default 256KiB; larger responses not cached
 # MCP gateway: expose remote MCP (Model Context Protocol) servers at
 # /mcp/<name> on the daemon, so MCP clients (Claude Code .mcp.json, opencode,
 # Codex, pi) point at the proxy instead of holding provider credentials.
@@ -366,6 +368,9 @@ cache:
 # (same /mcp/<name> namespace). tools/call fails over the targets in order
 # (transport/401/404/429/5xx only — JSON-RPC business errors return as-is),
 # sticky per session; tools/list exposes only the canonical names.
+# Takeover projection: routes are the canonical client entries — member
+# servers aggregated here are pruned from takeover writes by default
+# (template mcp.include_routed_members: true restores the full list).
 # mcp_routes:
 #   web-search:                        # client endpoint: POST /mcp/web-search
 #     targets:
@@ -376,38 +381,42 @@ cache:
 # jina intentionally omitted: mcp.jina.ai unreachable from this host today
 # (curl EOF on all paths; re-add when it recovers).
 mcp:
-  zhipu-search: {provider: zhipu, url: https://open.bigmodel.cn/api/mcp/web_search_prime/mcp}
-  zhipu-reader: {provider: zhipu, url: https://open.bigmodel.cn/api/mcp/web_reader/mcp}
-  zhipu-zread:  {provider: zhipu, url: https://open.bigmodel.cn/api/mcp/zread/mcp}
-  ark-datapro:  {provider: volcengine, url: https://datapro.hqd.cn-beijing.volces.com/mcp, auth_header: X-Agent-Plan-Key}
-  exa:          {url: https://mcp.exa.ai/mcp, auth: none}
-  firecrawl:    {url: https://mcp.firecrawl.dev/v2/mcp, auth: none}
-  context7:     {url: https://mcp.context7.com/mcp, auth: none}
-  deepwiki:     {url: https://mcp.deepwiki.com/mcp, auth: none}
-  grep-app:     {url: https://mcp.grep.app, auth: none}
-  huggingface:  {url: https://huggingface.co/mcp, auth: none}
-  zhipu-vision:
+  zhipu-search: {provider: zhipu, url: 'https://open.bigmodel.cn/api/mcp/web_search_prime/mcp'}
+  zhipu-reader: {provider: zhipu, url: 'https://open.bigmodel.cn/api/mcp/web_reader/mcp'}
+  zhipu-zread: {provider: zhipu, url: 'https://open.bigmodel.cn/api/mcp/zread/mcp'}
+  ark-datapro: {provider: volcengine, url: 'https://datapro.hqd.cn-beijing.volces.com/mcp', auth_header: X-Agent-Plan-Key}
+  exa: {url: 'https://mcp.exa.ai/mcp', auth: none}
+  firecrawl: {url: 'https://mcp.firecrawl.dev/v2/mcp', auth: none}
+  context7: {url: 'https://mcp.context7.com/mcp', auth: none}
+  deepwiki: {url: 'https://mcp.deepwiki.com/mcp', auth: none}
+  grep-app: {url: 'https://mcp.grep.app', auth: none}
+  vision:                            # generic name: any vision-capable backend can land here
     transport: stdio
     provider: zhipu
     command: [npx, -y, "@z_ai/mcp-server"]
-    env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU}   # literals OK for benign keys; credential-shaped names (…_KEY/TOKEN/…) still require indirection
-
+    env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU} # literals OK for benign keys; credential-shaped names (…_KEY/TOKEN/…) still require indirection
 mcp_routes:
-  web-search:
+  # Web research: search (three engines by scenario — parameter shapes differ,
+  # so they are NOT one failover set), read+clean (zhipu reader and firecrawl
+  # scrape share the url parameter and DO fail over), batch clean fetch, and
+  # document parsing.
+  web-research:
     targets:
-      - {mcp: zhipu-search, tools: {web_search: web_search_prime}}
-      - {mcp: exa,          tools: {web_search: web_search_exa}}
-      - {mcp: firecrawl,    tools: {web_search: firecrawl_search}}
-  url-read:
-    targets:
-      - {mcp: zhipu-reader, tools: {url_read: webReader}}
-      - {mcp: exa,          tools: {url_read: web_fetch_exa}}
-      - {mcp: firecrawl,    tools: {url_read: firecrawl_scrape}}
+      - {mcp: zhipu-search, tools: {web_search: web_search_prime}}                 # general/cn-optimized search (search_query)
+      - {mcp: ark-datapro, tools: {dataset_search: dataPro_search}}                 # professional dataset search (volcengine datapro)
+      - {mcp: exa,          tools: {web_search_semantic: web_search_exa,           # semantic search (query+objective, required both)
+                                     url_fetch_batch: web_fetch_exa}}              # batch clean text (urls[])
+      - {mcp: firecrawl,    tools: {web_search_domain: firecrawl_search,           # filtered search (domains/categories/tbs)
+                                     url_read: firecrawl_scrape,                   # failover leg for url_read
+                                     url_read_deep: firecrawl_scrape,              # full scrape: formats/pdf/screenshot/json extraction
+                                     doc_parse: firecrawl_parse}}                  # file parse/clean (PDF/HTML -> markdown/json)
+      - {mcp: zhipu-reader, tools: {url_read: webReader}}                          # fast markdown read (url) — schema baseline for url_read
   code-search:
     targets:
       - {mcp: grep-app,     tools: {code_search: searchGitHub}}
-      - {mcp: zhipu-zread,  tools: {code_search: search_doc}}
-
+      - {mcp: zhipu-zread,  tools: {repo_doc_search: search_doc, repo_read_file: read_file, repo_tree: get_repo_structure}}
+      - {mcp: deepwiki,     tools: {wiki_qa: ask_question, wiki_contents: read_wiki_contents, wiki_structure: read_wiki_structure}}
+      - {mcp: context7,     tools: {lib_resolve: resolve-library-id, lib_docs: query-docs}}
 # Outbound secret guard (DLP-lite): scans the raw request body for
 # high-confidence secret patterns (PEM private-key headers, AWS/OpenAI/
 # Anthropic/GitHub/Google tokens) BEFORE forwarding upstream — coding agents
@@ -471,6 +480,12 @@ mcp_routes:
 #                         # rejected outright (400 + session block, no
 #                         # second judge call), exactly like known-secret
 #                         # exact matches. Path hits are never indexed.
+#                         # UNBLOCK IS THE FINAL RISK CALL: unblocking a
+#                         # session cascades — the verdict's content joins
+#                         # the operator override table (guard_allowed.json)
+#                         # and those bytes are never re-intercepted or
+#                         # re-judged. Auditable/revocable: `guard allowed`
+#                         # / `guard disallow <hash>`.
 #                         # The judge call goes through the shared scheduling
 #                         # seam: same ordering + cooldown skip + pin as
 #                         # forward traffic, per-attempt budget slices (a
@@ -500,8 +515,8 @@ mcp_routes:
 guard:
   adjudicate:
     enabled: true
-    model: glm-5.3-flash   # judging model (derived route; zhipu/volcengine/
-                           # shopee/aqp all carry anthropic_base_url)
+    model: glm-5.3-flash # judging model (derived route; zhipu/volcengine/
+    # shopee/aqp all carry anthropic_base_url)
     block_session: true
 
 # Shadow evaluation: after the primary response commits, re-send the same request

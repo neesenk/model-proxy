@@ -77,6 +77,8 @@ func (fake *commandFake) SetPin(route, provider string, ttl time.Duration) (appa
 	return appapi.Pin{}, true
 }
 
+func (fake *commandFake) SecurityAllowed() []appapi.SecurityAllowed { return nil }
+func (fake *commandFake) SecurityDisallow(hash string) error        { return nil }
 func (fake *commandFake) SecurityUnblock(sessionID string) error {
 	if fake.unblock != nil {
 		return fake.unblock(sessionID)

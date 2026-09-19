@@ -112,7 +112,18 @@ Shadow 作为 `internal/runtime.Lifecycle` 的有限 log-producing task 接纳�
 
 ## Request log
 
-request log 是异步、非阻塞、owner-only 的 JSONL。每条记录可选地携带 `turn_key`——写入时从 request body 提取的对话轮次指纹（消息总数 + 最后一条真实 user 文本的哈希），供 UI Trace 时间线按轮次分段；旧记录或无法提取 user 文本时为空/省略。查询分两条路径：
+request log 是异步、非阻塞、owner-only 的 JSONL。每条记录可选地携带 `turn_key`——写入时从 request body 提取的对话轮次指纹（消息总数 + 最后一条真实 user 文本的哈希），供 UI Trace 时间线按轮次分段；旧记录或无法提取 user 文本时为空/省略。
+
+**MCP 拆分流（`request_log.mcp_split`，默认关）**：开启后 `kind="mcp"` 记录写入
+独立的 `mcp-YYYYMMDD.log` 流（目录 `mcp_dir`，默认 `~/.model-proxy/log/mcp`，
+与 requests- 流共享 max_file_size/max_body_bytes/retention 策略；`requestlog.Options.FilePrefix`
+参数化流前缀，查询侧用 `QueryRecordsIn`/`QuerySummariesWithFacetsIn` 按前缀扫描）。
+requests- 流与尾随索引回到 LLM-only；admin 适配层把 `kind=mcp` 查询路由到拆分流
+（目录扫描，无索引），其余查询钉在 LLM 行（`kind ""` 等价 `"llm"`，旧文件里的历史
+mcp 行不再出现在默认视图与 facets），`Detail` 对两流做先 requests 后 mcp 的
+fallthrough。拆分流 restart-only，与主 logger 同生命周期。
+
+查询分两条路径：
 
 协议转换后的响应流与 Responses state/Shadow 共用
 `internal/transport/bodycapture.Reader`：reader 只负责有界 tee、完整长度和
@@ -135,11 +146,14 @@ Close-once 回调，日志 schema、入队与 replay 判断不进入 transport �
 Shutdown 在 log writer drain 之后跑一次 final reconcile（final flush）。
 写热路径（forward commit → Enqueue）不碰 SQLite。查询与扫描版语义逐字段一致：
 `SummariesWithFacets`（WHERE 映射 Filter，facets 在 filter 之前对全部已索引行
-采集；usage 字段只在 `UsageOnly` 下填充）、`Detail`（按 (file, offset, length)
+采集——例外是 `Kind`：它是流选择器而非数据 facet，llm/mcp 过滤同样收窄 facets，
+mcp server 名不会污染 LLM 视图的 model 下拉；usage 字段只在 `UsageOnly` 下填充）、`Detail`（按 (file, offset, length)
 seek 读回完整行，索引未命中或 seek 失败回落 `QueryRecords` 目录扫描——刚 commit、
 indexer 尚未追上的记录不会误报 not logged）、`SessionSummaries`（索引列供给
-usage，聚合复用扫描版同一 Go 代码）。`/api/shadow-report` 需要 body 配对，保持
-文件扫描不进索引。indexer 由 `internal/app/observe_adapters.go initRequestLog`
+usage，聚合复用扫描版同一 Go 代码）。`/api/shadow-report` 的配对只需要 metadata
+（request_id/shadow 标志/provider/status/latency/response_size，不需要 body），同样
+走索引：`ShadowReport`（索引列供给配对元数据，聚合复用扫描版同一 Go 代码，
+Limit 同为配对前的新到旧 top-K）；索引不可用回落目录扫描，语义一致。indexer 由 `internal/app/observe_adapters.go initRequestLog`
 创建、与 logger 同为 restart-only 进程级服务（reload 不重建）；打开失败只 warn，
 web 读路径经 `appapi.RequestLogQueries` 端口回落目录扫描（admin 适配层负责
 nil-index 退化）。

@@ -277,6 +277,8 @@ type ConfigRequestLog struct {
 	MaxFileSize  int64  `json:"max_file_size"`
 	MaxBodyBytes int    `json:"max_body_bytes"`
 	Retention    string `json:"retention"`
+	MCPSplit     bool   `json:"mcp_split"`
+	MCPDir       string `json:"mcp_dir"`
 }
 
 // ConfigStats mirrors stats.* (db_path/retention are restart-only).
@@ -783,7 +785,18 @@ type ModelsCatalogPull struct {
 // guard state).
 type RequestLogQueries interface {
 	SummariesWithFacets(requestlog.Filter) ([]requestlog.Summary, requestlog.Facets, error)
-	Detail(requestID string) ([]requestlog.Record, error)
+	// ShadowReport returns the paired primary/shadow aggregation over the
+	// filter's window — the exact semantics of the requestlog.ShadowReport
+	// scan (index-backed when available). The eval page's slow half: on a
+	// multi-GB request log the scan streams every JSONL line of the window,
+	// so this must go through the index like the other listing reads.
+	ShadowReport(requestlog.Filter) ([]requestlog.ShadowReportEntry, error)
+	// Detail returns the full records for one request id. stream is a routing
+	// hint from the caller's view: "mcp" reads the split MCP stream only
+	// (an MCP id never lives in the requests index — the hint avoids the
+	// slow index-miss fallback), "llm" reads the requests store, "" tries
+	// the requests store first and falls through to the split stream.
+	Detail(requestID, stream string) ([]requestlog.Record, error)
 	SessionSummaries(scanLimit, limit int, costOf func(provider, model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error)
 	GuardAnnotations(requestIDs []string) map[string][]requestlog.GuardMark
 }

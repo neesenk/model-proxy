@@ -793,6 +793,20 @@ export function sessionsForAgent(agent, sessions) {
 // agent facet. An unknown session id (selected but aged out of the aggregate)
 // keeps the full facet list rather than collapsing to none, so the dropdown
 // never becomes a dead end.
+// linkedProviders is linkedModels' inverse for the replay strip: the
+// providers whose model list carries the given model (case-insensitive exact
+// name). Empty when nothing matches — the caller decides the fallback.
+export function linkedProviders(model, providerModels) {
+  const want = String(model || '').trim().toLowerCase();
+  if (!want) return [];
+  const out = [];
+  for (const name of Object.keys(providerModels || {})) {
+    const models = providerModels[name] || [];
+    if (models.some((m) => String(m || '').trim().toLowerCase() === want)) out.push(name);
+  }
+  return out;
+}
+
 export function linkedAgents(session, sessions, agentFacets) {
   const all = agentFacets || [];
   if (!session) return [...all];
@@ -1472,7 +1486,7 @@ export function liveSessionOrder(sessions, liveRows) {
 // "main" stay readable); the full id rides in the cell's title tooltip.
 export function shortSessionId(id) {
   const s = String(id || '');
-  return s.length > 16 ? s.slice(0, 4) + '…' + s.slice(-2) : s;
+  return s.length > 16 ? s.slice(0, 4) + '…' + s.slice(-4) : s;
 }
 
 // liveSessionSummary folds one session's request rows (live events + persisted
@@ -2489,7 +2503,17 @@ export function sessionTimeline(rows, opts) {
 // (persisted records carry it; pure live rows show what the end event had).
 // opts: rowClass (req-row/live-row + modifiers), liveKey (adds data-live-key),
 // modelNote (guard badge), fmtTime (locale stays in app.js).
-export function requestTableHeadHTML() {
+export function requestTableHeadHTML(opts) {
+  const mcp = !!(opts && opts.mcp);
+  if (mcp) {
+    // The MCP table speaks the MCP domain with its own 7-column geometry:
+    // Model→Server (exposed = server name), Provider→Account (pool virtual
+    // id), no token column (MCP exchanges carry no usage — session lookup
+    // is the analysis axis, not tokens). Shares still pin every column
+    // (fixed layout) and sum to 100.
+    return `<colgroup><col style="width:13%"/><col style="width:11%"/><col style="width:19%"/><col style="width:8%"/><col style="width:17%"/><col style="width:22%"/><col style="width:10%"/></colgroup>` +
+      `<thead><tr><th>Time</th><th>Agent</th><th>Session</th><th>Status</th><th>Server</th><th>Account</th><th class="num">ms</th></tr></thead>`;
+  }
   // The colgroup pins the column geometry for ALL THREE request tables
   // (Requests / Live ring / Live session view — table-layout: fixed in
   // styles.css rides it). They virtualize rows (Requests) and re-render on
@@ -2500,9 +2524,10 @@ export function requestTableHeadHTML() {
   // the shortened id on one line; Tokens is widest (in/out + cache read +
   // hit share); Model is a narrow nowrap column — long names ellipsize
   // (`.cell-model`), the full name rides the cell's title.
-  return `<colgroup><col style="width:11%"/><col style="width:10%"/><col style="width:10%"/><col style="width:6%"/><col style="width:10%"/><col style="width:12%"/><col style="width:10%"/><col style="width:31%"/></colgroup>` +
+  return `<colgroup><col style="width:11%"/><col style="width:10%"/><col style="width:11%"/><col style="width:6%"/><col style="width:10%"/><col style="width:12%"/><col style="width:10%"/><col style="width:30%"/></colgroup>` +
     `<thead><tr><th>Time</th><th>Agent</th><th>Session</th><th>Status</th><th>Model</th><th>Provider</th><th class="num">ms</th><th class="num">Tokens In / Out</th></tr></thead>`;
 }
+
 
 // guardMarksHTML renders a request's guard/adjudication annotations (the
 // security-audit join riding /api/requests summaries) as compact badges:
@@ -2682,7 +2707,7 @@ export function requestRowHTML(row, opts) {
   const slow = !r.inFlight && r.latencyMs != null && r.latencyMs > 10000;
   let tk = '';
   let tkTitle = '';
-  if (!r.inFlight && (Number(r.input) || Number(r.output))) {
+  if (!o.mcp && !r.inFlight && (Number(r.input) || Number(r.output))) {
     tk = `${fmtCompactNum(r.input)}/${fmtCompactNum(r.output)}`;
     tkTitle = `in ${fmtNum(r.input)} · out ${fmtNum(r.output)}`;
     const cr = Number(r.cacheRead);
@@ -2697,6 +2722,9 @@ export function requestRowHTML(row, opts) {
       tkTitle += ` · cache ${fmtNum(cr)}`;
     }
   }
+  // plainSession renders the id as inert text (the MCP stream shows the
+  // session as attribution info, but has no session drill-down — that is an
+  // LLM-side concept; the cell must not look or act like a link there).
   const sess = r.session
     ? `<td class="mono${dim} session-link" data-session="${esc(r.session)}" title="${esc(r.session)} — view this session">${esc(shortSessionId(r.session))}</td>`
     : `<td class="mono${dim}">—</td>`;
@@ -2709,7 +2737,7 @@ export function requestRowHTML(row, opts) {
     <td class="cell-model" title="${esc(r.model || '')}">${esc(r.model || '—')}${o.modelNote || ''}${guardMarksHTML(r.guardMarks)}</td>
     <td class="mono${dim}">${esc(r.inFlight ? '…' : (r.provider || '—'))}${r.shadow ? ' <span class="badge muted">shadow</span>' : ''}</td>
     <td class="num${slow ? ' warn' : ''}">${lat}</td>
-    <td class="num"${tkTitle ? ` title="${esc(tkTitle)}"` : ''}>${tk}</td>
+    ${o.mcp ? '' : `<td class="num"${tkTitle ? ` title="${esc(tkTitle)}"` : ''}>${tk}</td>`}
   </tr>`;
 }
 
@@ -3221,6 +3249,7 @@ export function hashQueryParams(q) {
 export function requestsFilterQuery(f) {
   if (!f) return '';
   const q = new URLSearchParams();
+  if (f.stream) q.set('stream', f.stream);
   if (f.session) q.set('session', f.session);
   if (f.agent) q.set('agent', f.agent);
   if (f.model) q.set('model', f.model);
@@ -3233,10 +3262,11 @@ export function requestsFilterQuery(f) {
 export function requestsFilterFromQuery(params) {
   if (!params) return null;
   const has =
-    params.session || params.agent || params.model ||
+    params.stream || params.session || params.agent || params.model ||
     params.provider || params.errors || params.shadow;
   if (!has) return null;
   return {
+    stream: params.stream === 'mcp' ? 'mcp' : '',
     session: params.session || '',
     agent: params.agent || '',
     model: params.model || '',
@@ -3248,61 +3278,315 @@ export function requestsFilterFromQuery(params) {
 
 // ---------- Takeover tab ----------
 
-// takeoverStatusBadge renders one client row's takeover state badge
-// (GET /api/takeover client entry). Five states: the client config file is
-// absent (not installed), no backup marker (not taken over), taken over and
-// the drift probe still points at this proxy (taken over), or drifted (err,
-// with the current → expected pointer detail in the tooltip).
-export function takeoverStatusBadge(c) {
-  if (!c || !c.installed) return '<span class="badge muted">not installed</span>';
-  if (!c.taken_over) return '<span class="badge muted">not taken over</span>';
-  if (c.drift_ok) return '<span class="badge ok">taken over</span>';
-  const tip = `now points at ${c.current || '?'} — takeover would write ${c.expected || '?'}`;
-  return `<span class="badge err" title="${esc(tip)}">drift</span>`;
-}
+// ---- config highlighting (template YAML + rendered client configs) ----
 
-// takeoverClientLabel renders the template (variant) cell: variants the
-// selected mode would write for their family get a "*" marker (the backend
-// gates it to multi-variant families, so single-variant clients stay clean),
-// and families where split mode would write a different entry set get a "⇄"
-// marker (the CLI's interactive unified-vs-split prompt surfaces as this hint).
-export function takeoverClientLabel(c) {
-  const name = esc(c.name || '');
-  const auto = c.auto_selected
-    ? '<span class="hint" title="variant the selected mode writes for this client family">*</span>'
-    : '';
-  const split = c.split_changes
-    ? ' <span class="hint" title="split mode writes one entry per native protocol for this family">⇄</span>'
-    : '';
-  return name + auto + split;
-}
+// The token classes reuse the JSON highlighter's (j-key/j-str/j-num/j-lit
+// under a .code container) — one highlight implementation, several grammars.
+// Every token and separator is esc()aped before interpolation, so the result
+// is safe for innerHTML.
 
-// takeoverModeHint describes what a takeover mode writes (shown next to the
-// mode select; the select re-resolves the per-family variant preview
-// server-side via GET /api/takeover?mode=).
-export function takeoverModeHint(mode) {
-  switch (mode) {
-    case 'split':
-      return 'one entry per native protocol — every model passes through unchanged';
-    case 'anthropic':
-    case 'openai':
-    case 'responses':
-      return `pin the ${mode} variant where the family has one (others: unified)`;
-    default:
-      return 'one entry per family — best native protocol coverage';
+// hlSplitComment splits one line into [code, comment] at a `#` that starts a
+// comment: at line start or preceded by whitespace, outside quotes. Returns
+// [line, ''] when the line has no comment.
+function hlSplitComment(line) {
+  let quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === '\\') i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (ch === '#' && (i === 0 || /\s/.test(line[i - 1]))) {
+      return [line.slice(0, i), line.slice(i)];
+    }
   }
+  return [line, ''];
+}
+
+// hlValueTokens tokenizes a value segment: quoted strings, booleans/null,
+// numbers; everything else passes through escaped.
+function hlValueTokens(s) {
+  const re = /("(?:\\.|[^"\\])*"|'(?:[^'])*')|\b(true|false|null)\b|(-?\d+(?:\.\d+)?)|\b([A-Za-z_-][\w.-]*)\b/g;
+  let out = '';
+  let last = 0;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    out += esc(s.slice(last, m.index));
+    if (m[1] !== undefined) out += `<span class="j-str">${esc(m[1])}</span>`;
+    else if (m[2] !== undefined) out += `<span class="j-lit">${esc(m[2])}</span>`;
+    else if (m[3] !== undefined) out += `<span class="j-num">${esc(m[3])}</span>`;
+    else out += `<span class="j-key">${esc(m[4])}</span>`;
+    last = re.lastIndex;
+  }
+  return out + esc(s.slice(last));
+}
+
+// highlightYAML tokenizes YAML per line: comments (#…), keys (word: at line
+// start, after an optional list dash), then the value segment.
+export function highlightYAML(text) {
+  return String(text).split('\n').map((line) => {
+    const [code, comment] = hlSplitComment(line);
+    let out = comment ? `<span class="j-com">${esc(comment)}</span>` : '';
+    if (!code.trim()) return out;
+    const m = code.match(/^(\s*(?:-\s+)?)([A-Za-z_][\w .\/'"-]*?|'[^']*'|"[^"]*")(\s*:)(\s*.*)$/);
+    if (m) {
+      return out + esc(m[1]) +
+        `<span class="j-key">${esc(m[2])}</span>` + esc(m[3]) + hlValueTokens(m[4]);
+    }
+    return out + hlValueTokens(code);
+  }).join('\n');
+}
+
+// highlightTOML tokenizes TOML per line: comments, [section] headers, and
+// key = value pairs.
+export function highlightTOML(text) {
+  return String(text).split('\n').map((line) => {
+    const [code, comment] = hlSplitComment(line);
+    let out = comment ? `<span class="j-com">${esc(comment)}</span>` : '';
+    const trimmed = code.trim();
+    if (!trimmed) return out;
+    const header = trimmed.match(/^(\s*)(\[+)([^\]]*)(\]+)(\s*(?:=.*)?)$/);
+    if (header && !header[5].trim()) {
+      return out + esc(header[1]) + esc(header[2]) +
+        `<span class="j-key">${esc(header[3])}</span>` + esc(header[4]);
+    }
+    const kv = code.match(/^(\s*)([A-Za-z_][\w.-]*|"[^"]*"|'[^']*')(\s*=)(\s*.*)$/);
+    if (kv) {
+      return out + esc(kv[1]) +
+        `<span class="j-key">${esc(kv[2])}</span>` + esc(kv[3]) + hlValueTokens(kv[4]);
+    }
+    return out + hlValueTokens(code);
+  }).join('\n');
+}
+
+// highlightEnv tokenizes KEY=VALUE lines with # comments.
+export function highlightEnv(text) {
+  return String(text).split('\n').map((line) => {
+    const [code, comment] = hlSplitComment(line);
+    let out = comment ? `<span class="j-com">${esc(comment)}</span>` : '';
+    const kv = code.match(/^(\s*)([A-Za-z_][\w]*)(\s*=)(\s*.*)$/);
+    if (kv) {
+      return out + esc(kv[1]) +
+        `<span class="j-key">${esc(kv[2])}</span>` + esc(kv[3]) + hlValueTokens(kv[4]);
+    }
+    return out + (code ? hlValueTokens(code) : '');
+  }).join('\n');
+}
+
+// highlightConfig dispatches on the client config format (json reuses the
+// existing highlightJSON; anything unknown is escaped plain).
+export function highlightConfig(text, fmt) {
+  switch (fmt) {
+    case 'json': return highlightJSON(String(text));
+    case 'yaml': return highlightYAML(text);
+    case 'toml': return highlightTOML(text);
+    case 'env': return highlightEnv(text);
+    default: return esc(String(text));
+  }
+}
+
+// takeoverFamilyGroups buckets the takeover surface by client family (the
+// table renders one header row per family with its variants listed under
+// it). Aggregates drive the family header: installed (any variant), taken
+// (variant list with a backup marker), drift (taken but off-proxy).
+export function takeoverFamilyGroups(clients) {
+  const byFamily = new Map();
+  for (const c of clients || []) {
+    const f = c.family || c.name;
+    if (!byFamily.has(f)) byFamily.set(f, []);
+    byFamily.get(f).push(c);
+  }
+  return [...byFamily.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([family, variants]) => ({
+      family,
+      variants,
+      multi: variants.length > 1,
+      installed: variants.some((c) => c.installed),
+      taken: variants.filter((c) => c.taken_over),
+      drift: variants.some((c) => c.taken_over && !c.drift_ok),
+      mcp: variants.some((c) => c.has_mcp),
+    }));
+}
+
+// takeoverFamilyBadge aggregates one family's state for its row: drift wins
+// over taken over, a family with no installed variant is not installed, and
+// ANY taken variant reads as "taken over" (the tooltip names which variants
+// carry a backup marker). Ambiguous states carry a plain-language tooltip.
+export function takeoverFamilyBadge(g) {
+  if (!g || !g.installed) {
+    return '<span class="badge muted" title="no config file found on disk for this agent">not installed</span>';
+  }
+  if (g.drift) {
+    return '<span class="badge err" title="the config file was changed outside model-proxy since the takeover — Restore brings back the proxy-managed version">changed externally</span>';
+  }
+  if (g.taken && g.taken.length) {
+    return `<span class="badge ok" title="${g.taken.map((c) => esc(c.name)).join(', ')}">taken over</span>`;
+  }
+  return '<span class="badge muted">not taken over</span>';
+}
+
+// TAKEOVER_TEMPLATE_EXAMPLES are the New Template starter skeletons, one per
+// format (the modal's Format select swaps them in). They double as living
+// documentation of the placeholder set — keep in sync with the engine
+// (internal/takeover/template.go) and docs/client-takeover.md.
+export const TAKEOVER_TEMPLATE_EXAMPLES = {
+  json: `# Takeover template — writes this agent's config so it talks to model-proxy.
+# Docs: docs/client-takeover.md · overrides live in <templates_dir>/<name>.yaml
+description: my agent via model-proxy
+file: ~/.myagent/config.json   # client config path (~ expanded)
+format: json                   # json | toml | env
+client: myagent                # agent family: variants of one agent share this id
+protocol: openai               # wire protocol this variant writes (multi-variant families: distinct)
+base_url: bare                 # bare | v1 (append /v1 to the proxy URL)
+provider_id: model-proxy       # distinct per variant writing the same file
+json:
+  set:
+    providers.{{provider_id}}:
+      baseUrl: "{{base_url}}"
+      apiKey: "{{token}}"
+    defaultProvider: "{{provider_id}}"
+  drift_path: providers.{{provider_id}}.baseUrl
+# models:                      # per-model metadata (shape opencode|pi) — writes
+#   shape: opencode            # a rendered collection at json_path
+#   json_path: provider.{{provider_id}}.models
+# mcp:                         # gateway MCP surface as client MCP entries
+#   json_path: mcpServers
+#   json_entry:
+#     url: "{{mcp.url}}"
+#     command: "{{mcp.name}}"
+`,
+  toml: `# Takeover template (TOML client config) — docs: docs/client-takeover.md
+description: my toml agent via model-proxy
+file: ~/.myagent/config.toml
+format: toml
+client: myagent-toml
+protocol: openai
+base_url: bare
+toml:
+  top_keys:
+    model_provider: '"{{provider_id}}"'   # value written verbatim after substitution (quote strings!)
+  sections:
+    - name: 'model_providers."{{provider_id}}"'
+      body: |
+        name = "{{display_name}}"
+        base_url = "{{base_url}}"
+        api_key = "{{token}}"
+# models:                      # per-model TOML sections (shape kimi)
+#   shape: kimi
+#   toml_section: 'models."{{model.id}}"'
+#   toml_body: |
+#     provider = "{{provider_id}}"
+#     max_context_size = {{model.context}}
+#     capabilities = {{model.capabilities}}
+#     {{model.efforts}}
+`,
+  env: `# Takeover template (env-style client config) — docs: docs/client-takeover.md
+description: my env agent via model-proxy
+file: ~/.myagent/.env
+format: env
+client: myagent-env
+protocol: openai
+base_url: bare
+env:
+  set:
+    MYAGENT_BASE_URL: "{{base_url}}"
+    MYAGENT_API_KEY: "{{token}}"
+`,
+};
+
+// TAKEOVER_PLACEHOLDERS documents the placeholder set for the template
+// editor's help table (single source: internal/takeover/template.go).
+export const TAKEOVER_PLACEHOLDERS = [
+  { name: '{{base_url}}', desc: 'proxy endpoint for this template (base_url: v1 appends /v1)' },
+  { name: '{{proxy_url}}', desc: 'bare proxy URL (no /v1)' },
+  { name: '{{token}}', desc: 'sentinel API key (PROXY_MANAGED)' },
+  { name: '{{provider_id}}', desc: 'provider id (provider_id:, default model-proxy)' },
+  { name: '{{display_name}}', desc: 'display name (display_name:, default model-proxy)' },
+  { name: '{{mcp.name}}', desc: 'per MCP entry: gateway server/route name (mcp: block)' },
+  { name: '{{mcp.url}}', desc: 'per MCP entry: the gateway URL /mcp/<name> under this proxy (mcp: block)' },
+  { name: '{{model.id}}', desc: 'per model: exposed name (models: toml loop)' },
+  { name: '{{model.context}}', desc: 'per model: context window from models.dev (models: loop)' },
+  { name: '{{model.output}}', desc: 'per model: max output tokens (models: loop)' },
+  { name: '{{model.capabilities}}', desc: 'per model: kimi capabilities array from models.dev (kimi shape)' },
+  { name: '{{model.efforts}}', desc: 'per model: kimi support_efforts/default_effort lines, empty without an effort dial (kimi shape)' },
+];
+
+// takeoverVariantLabel names a protocol variant the way users think about
+// it, uniformly across every multi-protocol agent: the auto-selected one is
+// "Auto (<protocol>)" so the pick is self-explanatory, the others describe
+// what picking them means (ALL exposed models ride that one protocol), and
+// split is "Split by Protocol".
+export function takeoverVariantLabel(c) {
+  if (!c) return '';
+  const p = takeoverProtocolLabel(c.protocol);
+  if (c.auto_selected) return p ? `Auto (${p})` : 'Auto';
+  switch (c.protocol) {
+    case 'anthropic': return 'All Anthropic';
+    case 'openai': return 'All Chat Completion';
+    case 'responses': return 'All Responses';
+    default: return c.name || '';
+  }
+}
+
+// takeoverProtocolLabel names a wire protocol the way users think about it —
+// template ids (opencode-openai) never appear in the dialog.
+export function takeoverProtocolLabel(protocol) {
+  switch (protocol) {
+    case 'anthropic': return 'Anthropic';
+    case 'openai': return 'Chat Completion';
+    case 'responses': return 'Responses';
+    default: return '';
+  }
+}
+
+// takeoverWriteVariantsLabel renders a preview write's contributing variants
+// as protocol labels resolved through the takeover surface (a "<name> (mcp)"
+// entry is that variant's separate MCP storage file — the suffix is kept).
+// Names missing from the surface (custom user templates) pass through — their
+// author chose them.
+export function takeoverWriteVariantsLabel(templates, clients) {
+  const byName = new Map((clients || []).map((c) => [c.name, c]));
+  const parts = [];
+  for (const t of templates || []) {
+    const mcp = t.endsWith(' (mcp)');
+    const name = mcp ? t.slice(0, -' (mcp)'.length) : t;
+    const c = byName.get(name);
+    const label = (c && takeoverProtocolLabel(c.protocol)) || name;
+    parts.push(mcp ? label + ' (mcp)' : label);
+  }
+  return parts.join(' + ');
+}
+
+// takeoverClientLabel renders one surface entry for users: the family name
+// for the default variant (it IS the agent's name), "family (protocol)" for
+// other variants — raw variant ids (opencode-openai) stay in hover tooltips.
+export function takeoverClientLabel(c) {
+  if (!c) return '';
+  if (!c.family || c.family === c.name) return c.name || '';
+  const p = takeoverProtocolLabel(c.protocol);
+  return p ? `${c.family} (${p})` : c.family;
 }
 
 // takeoverRunSummary flattens a POST /api/takeover result into one status
-// line (applied with optional selection notes, skipped-not-installed).
-export function takeoverRunSummary(res) {
+// line (applied with optional selection notes, skipped-not-installed). With
+// the takeover surface (clients) given, entries render via
+// takeoverClientLabel — raw template ids mean nothing to users.
+export function takeoverRunSummary(res, clients) {
+  const byName = new Map((clients || []).map((c) => [c.name, c]));
+  const label = (name) => {
+    const c = byName.get(name);
+    return c ? takeoverClientLabel(c) : name;
+  };
   const parts = [];
   const applied = (res && res.applied) || [];
   if (applied.length) {
-    parts.push('taken over: ' + applied.map((a) => esc(a.name) + (a.note ? ` <span class="hint">(${esc(a.note)})</span>` : '')).join(', '));
+    parts.push('taken over: ' + applied.map((a) => esc(label(a.name)) + (a.note ? ` <span class="hint">(${esc(a.note)})</span>` : '')).join(', '));
   }
   const skipped = (res && res.skipped) || [];
-  if (skipped.length) parts.push('skipped (config not present): ' + skipped.map(esc).join(', '));
+  if (skipped.length) parts.push('skipped (config not present): ' + skipped.map((n) => esc(label(n))).join(', '));
   if (!parts.length) return 'nothing to do';
   return parts.join(' · ');
 }

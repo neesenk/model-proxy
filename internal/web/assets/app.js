@@ -34,7 +34,7 @@ import {
   HEAT_DAYS, analyticsHeatLevel, analyticsYearGrid, analyticsYearMonthSpans, analyticsHeatCellSize, analyticsHeatTip,
   analyticsRowSortKey, ANALYTICS_TABLE_SORT, analyticsSortRows,
   analyticsMetricOptions, analyticsMetricAllowed,
-  liveSessionSummary, liveSessionOrder, shortSessionId, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary, guardMarksDetailHTML, requestMetaHTML,
+  liveSessionSummary, liveSessionOrder, shortSessionId, linkedProviders, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary, guardMarksDetailHTML, requestMetaHTML,
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
@@ -43,7 +43,10 @@ import {
   SECURITY_RANGES, securityRangeFromSecs, securityFilterQuery, securityFilterFromQuery, explainCacheKey,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
   iconPin, iconRefresh, iconChevron, statusBadgeHTML, kpiDeltaClass, logLineHTML,
-  takeoverStatusBadge, takeoverClientLabel, takeoverRunSummary, takeoverRestoreSummary, takeoverModeHint,
+  takeoverRunSummary, takeoverRestoreSummary, takeoverVariantLabel,
+  takeoverWriteVariantsLabel, takeoverClientLabel,
+  takeoverFamilyGroups, takeoverFamilyBadge, highlightConfig,
+  TAKEOVER_TEMPLATE_EXAMPLES, TAKEOVER_PLACEHOLDERS,
   shadowMatchBadge,
 } from './pure.js';
 
@@ -268,7 +271,7 @@ let activeTab = 'status';
 //   #requests?session=…&agent=…   (Requests tab filter — refresh/shared link
 //                                  lands on the same view; only non-default
 //                                  filter values ride along)
-//   #status/live?session=…        (Status → Live section with one session
+//   #requests/live?stream=…&session=… (Requests → Live sub-view, one stream
 //                                  selected — same refresh/restore story)
 //   #security?kind=…&verdict=…&range=…&rule=…
 //                                 (Security tab filter — same story: kind is
@@ -302,11 +305,7 @@ function parseHash() {
 // BEFORE hashing: mounting the Live card resets the selection, and the hash
 // must reflect the post-render truth.
 function statusHash() {
-  let h = '#status/' + statusSelected;
-  if (statusSelected === 'live' && liveSessionFilter) {
-    h += '?session=' + encodeURIComponent(liveSessionFilter);
-  }
-  return h;
+  return '#status/' + statusSelected;
 }
 
 // requestsHash builds the Requests URL hash from the live filter; only
@@ -314,6 +313,13 @@ function statusHash() {
 // A live request-drill pin (the Security page's "view the original request"
 // link) rides along too, so filter refinement does not drop the pinned view.
 function requestsHash() {
+  if (requestsSub === 'live') {
+    const q = new URLSearchParams();
+    if (requestsFilter.stream) q.set('stream', requestsFilter.stream);
+    if (liveSessionFilter) q.set('session', liveSessionFilter);
+    const qs = q.toString();
+    return '#requests/live' + (qs ? '?' + qs : '');
+  }
   const parts = [requestsFilterQuery(requestsFilter)];
   if (requestDrill) {
     parts.push('request=' + encodeURIComponent(requestDrill.request));
@@ -356,8 +362,7 @@ function syncRequestsFreeControls() {
   if (m) m.value = requestsFilter.model;
   const e = document.getElementById('req-errors');
   if (e) e.checked = !!requestsFilter.errors;
-  const sh = document.getElementById('req-shadow');
-  if (sh) sh.value = requestsFilter.shadow;
+  requestsFilter.shadow = '';
 }
 
 // pushHash sets the hash without re-triggering the hashchange listener (the
@@ -410,15 +415,19 @@ function showTabPanel(name) {
 }
 
 function activateTab(name) {
+  const prevTab = activeTab;
   showTabPanel(name);
   activeTab = name;
+  // The live monitor is owned by the Requests tab now: its SSE closes when
+  // the tab is left (the Live sub-view remounts with the retained ring on
+  // re-entry).
+  if (prevTab === 'requests' && name !== 'requests') stopLiveEvents();
   if (name === 'status') {
     securityStopAutoRefresh();
     accountsStopAutoRefresh();
     renderStatusTab();
   } else {
     stopStatusRefresh();
-    stopLiveEvents();
     securityStopAutoRefresh();
     accountsStopAutoRefresh();
   }
@@ -446,7 +455,7 @@ for (const b of tabBtns) {
 
 // hashchange: browser back/forward (or manual hash edit) drives the view. Apply
 // the hash's tab + (Accounts) provider WITHOUT pushing back, avoiding a loop.
-window.addEventListener('hashchange', () => {
+function handleHashChange() {
   const { tab, sub, query } = parseHash();
   // Seed the Requests filter BEFORE activation: the first mount templates the
   // free inputs from it and the re-entry path loads through it. Same for the
@@ -463,21 +472,42 @@ window.addEventListener('hashchange', () => {
   if (tab === 'accounts' && sub) {
     selectProviderSilent(sub);
   }
+  if (tab === 'status' && sub === 'live') {
+    // Legacy links: the live monitor moved to the Requests tab. Rewrite the
+    // hash in place (replaceState — no history spam) and re-dispatch through
+    // the requests branch below by recursing once on the rewritten hash.
+    const q = new URLSearchParams();
+    if (query.stream) q.set('stream', query.stream);
+    if (query.session) q.set('session', query.session);
+    const qs = q.toString();
+    setHash('#requests/live' + (qs ? '?' + qs : ''), false);
+    handleHashChange();
+    return;
+  }
   if (tab === 'status' && sub) {
     selectStatusSectionSilent(sub);
   }
-  if (tab === 'status' && sub === 'live') {
-    // Apply the hash's session (empty clears to all-live). When the live
-    // card is already mounted a direct apply is safe; when it is not (first
-    // entry to Status — the tab renders async through its fetches), apply
-    // via the bootLiveSession pending that renderLiveCard consumes on
-    // mount, or the mount's selection reset would wipe the hash session —
-    // the same race boot fixed.
-    const liveSess = query.session || '';
-    if (document.getElementById('live-session')) {
-      if (liveSessionFilter !== liveSess) onLiveSessionChange(liveSess);
-    } else {
-      bootLiveSession = liveSess;
+  if (tab === 'requests') {
+    // Sub-view routing (#requests/live vs the log): apply the hash's sub and
+    // — on the live view — its session pin, the same mount-race-safe way the
+    // Status-era code did (bootLiveSession feeds the card's mount).
+    if (sub === 'live') {
+      const liveSess = query.session || '';
+      if (requestsSub !== 'live') {
+        bootLiveSession = liveSess;
+        applyRequestsSub('live', false);
+      } else if (document.getElementById('live-session')) {
+        if (liveSessionFilter !== liveSess) onLiveSessionChange(liveSess);
+      }
+      syncLogStreamUI();
+      syncLiveStreamUI();
+      syncReqNav();
+      if (document.getElementById('live-table')) renderLiveTable();
+      // The log reload for a changed filter/stream is handled by the shared
+      // nextFilter block below (it also runs on the live sub-view — a
+      // background refresh of the hidden log table, harmless and idempotent).
+    } else if (requestsSub !== 'log') {
+      applyRequestsSub('log', false);
     }
   }
   if (tab === 'requests' && nextFilter) {
@@ -501,19 +531,25 @@ window.addEventListener('hashchange', () => {
       renderSecurityFeed();
     }
   }
-});
+}
+
+window.addEventListener('hashchange', handleHashChange);
 
 // activateTab without the hash push (called from hashchange).
 function activateTabSilent(name) {
+  const prevTab = activeTab;
   showTabPanel(name);
   activeTab = name;
+  // The live monitor is owned by the Requests tab now: its SSE closes when
+  // the tab is left (the Live sub-view remounts with the retained ring on
+  // re-entry).
+  if (prevTab === 'requests' && name !== 'requests') stopLiveEvents();
   if (name === 'status') {
     securityStopAutoRefresh();
     accountsStopAutoRefresh();
     renderStatusTab();
   } else {
     stopStatusRefresh();
-    stopLiveEvents();
     securityStopAutoRefresh();
     accountsStopAutoRefresh();
   }
@@ -532,7 +568,12 @@ function activateTabSilent(name) {
 // Per-tab filter state (model/provider substring, exact agent/session, plus
 // errors-only and the shadow tri-state).
 // Persists across re-renders within a session so a refresh keeps the view.
-let requestsFilter = { session: '', agent: '', model: '', provider: '', errors: false, shadow: '' };
+let requestsFilter = { stream: '', session: '', agent: '', model: '', provider: '', errors: false, shadow: '' };
+// The Requests tab's sub-view: 'log' (persisted request log) or 'live' (the
+// SSE monitor, moved here from the Status tab). The stream (requestsFilter.
+// stream, '' = LLM/Model, 'mcp') is shared by both sub-views — the LLM/MCP
+// choice follows the user across the log and the live monitor.
+let requestsSub = 'log';
 
 // renderRequestsTab builds the request-log query view: a filter row + a table of
 // metadata-only summaries fetched from /api/requests, with click-to-expand rows
@@ -555,6 +596,14 @@ async function retainTab(panel, marker, refresh) {
   if (!panel || !panel.querySelector(marker)) return false;
   await refresh();
   return true;
+}
+
+// requestDetailURL builds the detail-fetch URL for one request id: on the
+// MCP stream it carries kind=mcp so the backend drills the split stream
+// directly (an MCP id is never in the requests index; without the hint the
+// index miss falls back to scanning the whole multi-GB requests directory).
+function requestDetailURL(id) {
+  return '/api/requests/' + encodeURIComponent(id) + (requestsFilter.stream === 'mcp' ? '?kind=mcp' : '');
 }
 
 // sessionLinkClick returns the session id when a row click landed on the
@@ -602,7 +651,7 @@ async function applyRequestDrill() {
   if (!recs) {
     let resp;
     try {
-      resp = await apiGet('/api/requests/' + encodeURIComponent(request));
+      resp = await apiGet(requestDetailURL(request));
     } catch (e) {
       host.innerHTML = (e && e.status === 404)
         ? '<div class="msg hint">request ' + esc(request) + ' is not in the request log (retention pruned it, or it predates logging)</div>'
@@ -643,7 +692,12 @@ async function applyRequestDrill() {
 async function renderRequestsTab() {
   const panel = panels.requests;
   if (!panel) return;
-  if (await retainTab(panel, '#req-table', () => refreshRequestsData(requestsCombos))) return;
+  if (await retainTab(panel, '#req-table', () => refreshRequestsData(requestsCombos))) {
+    // Retained mount: restore the last sub-view (a live mount remounts here —
+    // the SSE was closed when the tab was left; completed rows survive).
+    applyRequestsSub(requestsSub, false);
+    return;
+  }
   // Seed the filter from the URL hash (#requests?session=…): a refresh or a
   // shared link must land on the same view, not the unfiltered list. The
   // skeleton below templates the free inputs from the filter; the linked
@@ -652,25 +706,43 @@ async function renderRequestsTab() {
   const seeded = requestsFilterFromQuery(parseHash().query);
   if (seeded) requestsFilter = seeded;
   requestDrill = requestDrillFromQuery(parseHash().query);
+  const startSub = parseHash().sub === 'live' ? 'live' : 'log';
+  if (startSub === 'live' && parseHash().query.session) bootLiveSession = parseHash().query.session;
   resetCombos();
-  panel.innerHTML = `<div class="card card-open"><div class="card-body">
+  panel.innerHTML = `<div class="req-layout"><nav class="req-nav" aria-label="Requests sections">
+      <div class="req-nav-group"${requestsFilter.stream === '' ? ' data-on="1"' : ''}>
+        <div class="req-nav-title">Model</div>
+        <button type="button" class="req-nav-item${startSub === 'log' && requestsFilter.stream === '' ? ' active' : ''}" data-sub="log" data-stream="">All Requests</button>
+        <button type="button" class="req-nav-item${startSub === 'live' && requestsFilter.stream === '' ? ' active' : ''}" data-sub="live" data-stream="">Live Requests</button>
+      </div>
+      <div class="req-nav-group"${requestsFilter.stream === 'mcp' ? ' data-on="1"' : ''}>
+        <div class="req-nav-title">MCP</div>
+        <button type="button" class="req-nav-item${startSub === 'log' && requestsFilter.stream === 'mcp' ? ' active' : ''}" data-sub="log" data-stream="mcp">All Requests</button>
+        <button type="button" class="req-nav-item${startSub === 'live' && requestsFilter.stream === 'mcp' ? ' active' : ''}" data-sub="live" data-stream="mcp">Live Requests</button>
+      </div>
+    </nav><div class="req-main"><div class="card card-open"><div class="card-body">
+    <div id="req-log-view"${startSub === 'live' ? ' hidden' : ''}>
     <div class="req-controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
       <select id="req-agent" class="req-input" title="filter by client agent"><option value="">All Agents</option></select>
-      <select id="req-session" class="req-input" title="filter by client session"><option value="">All Sessions</option></select>
+      <select id="req-session" class="req-input" title="filter by session (Model: client session header; MCP: the exchange's session id)"><option value="">All Sessions</option></select>
       <span class="combo"><input id="req-provider" placeholder="All Providers" value="${esc(requestsFilter.provider)}" class="req-input"/></span>
-      <span class="combo"><input id="req-model" placeholder="All Models" value="${esc(requestsFilter.model)}" class="req-input"/></span>
-      <select id="req-shadow" class="req-input">
-        <option value="" ${requestsFilter.shadow === '' ? 'selected' : ''}>All</option>
-        <option value="only" ${requestsFilter.shadow === 'only' ? 'selected' : ''}>Shadow Only</option>
-        <option value="exclude" ${requestsFilter.shadow === 'exclude' ? 'selected' : ''}>No Shadow</option>
-      </select>
+      <span class="combo"><input id="req-model" placeholder="${requestsFilter.stream === 'mcp' ? 'All Servers' : 'All Models'}" value="${esc(requestsFilter.model)}" class="req-input"/></span>
       <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="req-errors" ${requestsFilter.errors ? 'checked' : ''}/> Errors Only</label>
       <button id="req-refresh" class="btn">${iconRefresh()}Refresh</button>
     </div>
     <div id="req-session-summary" class="sess-sticky" style="margin-bottom:12px" hidden></div>
     <div id="req-drill" hidden></div>
     <div id="req-table"></div>
-  </div></div>`;
+    </div>
+    <div id="req-live-view"${startSub !== 'live' ? ' hidden' : ''}></div>
+  </div></div></div></div>`;
+  panel.querySelectorAll('.req-nav-item').forEach((b) => {
+    b.addEventListener('click', () => selectRequestsView(
+      b.dataset.sub === 'live' ? 'live' : 'log',
+      b.dataset.stream === 'mcp' ? 'mcp' : '',
+      true,
+    ));
+  });
   applyRequestDrill();
   const combos = requestsCombos = {
     providerOptions: [], modelOptions: [],
@@ -683,10 +755,17 @@ async function renderRequestsTab() {
     requestsFilter.provider = document.getElementById('req-provider').value.trim();
     requestsFilter.model = document.getElementById('req-model').value.trim();
     requestsFilter.errors = document.getElementById('req-errors').checked;
-    requestsFilter.shadow = document.getElementById('req-shadow').value;
     updateRequestsHash();
     loadRequests(combos);
   };
+  // The left sidebar's items drive both dimensions (sub-view + stream)
+  // through module-level selectRequestsView; the log reload needs this
+  // closure's filter machinery, so hand it the entry points.
+  reloadRequestsLogView = () => {
+    renderRequestSelectors(combos);
+    refresh();
+  };
+  reloadRequestsLiveView = () => renderLiveTable();
   // Agent and session are linked both ways: picking an agent narrows the
   // session list to that agent's sessions, and picking a session narrows the
   // agent list to the agents seen on it (normally pinning a single one). A
@@ -715,7 +794,6 @@ async function renderRequestsTab() {
     refresh();
   };
   document.getElementById('req-refresh').onclick = refresh;
-  document.getElementById('req-shadow').onchange = refresh;
   document.getElementById('req-agent').onchange = onAgentSelect;
   document.getElementById('req-session').onchange = onSessionSelect;
   // The checkbox applies immediately too — every filter control (session,
@@ -728,6 +806,78 @@ async function renderRequestsTab() {
   // back out of the DOM, so an empty select would otherwise clear a filter
   // that survived the re-render.
   refreshRequestsData(combos);
+  applyRequestsSub(startSub, false);
+}
+
+// applyRequestsSub switches the Requests tab's sub-view: the persisted log or
+// the live SSE monitor (moved here from the Status tab). push=true adds a
+// history entry (a sub-nav click the user may Back out of); false only keeps
+// the hash in agreement (hashchange/boot/retain paths, where the hash already
+// reflects the target).
+function applyRequestsSub(sub, push) {
+  if (sub !== 'live') sub = 'log';
+  requestsSub = sub;
+  const logView = document.getElementById('req-log-view');
+  const liveView = document.getElementById('req-live-view');
+  if (!logView || !liveView) return;
+  logView.hidden = sub === 'live';
+  liveView.hidden = sub !== 'live';
+  syncReqNav();
+  if (sub === 'live') {
+    // Mount on first entry — and on re-entry after the tab leave closed the
+    // SSE: renderLiveCard appends its card, so clear the host first (the
+    // previous mount's DOM lingers); completed rows survive in the ring.
+    if (!liveActive) {
+      liveView.innerHTML = '';
+      renderLiveCard(liveView);
+    }
+  } else {
+    stopLiveEvents();
+    syncLogStreamUI();
+  }
+  if (push) setHash(requestsHash(), true);
+  else if (activeTab === 'requests' && parseHash().tab === 'requests') setHash(requestsHash(), false);
+}
+
+// syncReqNav highlights the sidebar item matching the CURRENT (sub, stream)
+// pair — the nav encodes both dimensions (Log: LLM/MCP, Live: Model/MCP).
+function syncReqNav() {
+  document.querySelectorAll('.req-nav-item').forEach((b) => {
+    b.classList.toggle('active', b.dataset.sub === requestsSub && b.dataset.stream === requestsFilter.stream);
+  });
+  document.querySelectorAll('.req-nav-group').forEach((g) => {
+    if (g.dataset.stream === requestsFilter.stream) g.setAttribute('data-on', '1');
+    else g.removeAttribute('data-on');
+  });
+}
+
+// selectRequestsView is the sidebar's click action: one item pins both the
+// sub-view and the stream. reloadLog/reloadLive are injected by the Requests
+// mount (they close over the log filter machinery); direct hashchange/boot
+// paths bypass this and apply pieces individually.
+let reloadRequestsLogView = null;
+let reloadRequestsLiveView = null;
+
+function selectRequestsView(sub, stream, push) {
+  if (sub !== 'live') sub = 'log';
+  const nextStream = stream === 'mcp' ? 'mcp' : '';
+  const streamChanged = requestsFilter.stream !== nextStream;
+  const subChanged = requestsSub !== sub;
+  if (!streamChanged && !subChanged) return;
+  if (streamChanged) {
+    applyRequestsStreamFlip(nextStream);
+  }
+  if (subChanged) {
+    applyRequestsSub(sub, false);
+  } else {
+    syncReqNav();
+  }
+  if (sub === 'log') {
+    if (reloadRequestsLogView) reloadRequestsLogView();
+  } else if (subChanged) {
+    if (reloadRequestsLiveView) reloadRequestsLiveView();
+  }
+  if (push) setHash(requestsHash(), true);
 }
 
 // refreshRequestsData repaints the retained filter selections, reloads the
@@ -768,12 +918,25 @@ function renderRequestSelectors(combos) {
   if (sessionSel) {
     // Same ordering as the Live dropdown: most recently active first, ties
     // by session id (pure.js liveSessionOrder over the agent-filtered
-    // summaries; no live rows to merge here).
-    let ids = liveSessionOrder(sessionsForAgent(requestsFilter.agent, combos.sessions), []);
+    // summaries; no live rows to merge here). The MCP stream derives its
+    // options from the loaded MCP records themselves — the /api/sessions
+    // aggregate is LLM-only — newest first, no agent linkage.
+    let ids;
+    if (requestsFilter.stream === 'mcp') {
+      const seen = new Set();
+      ids = [];
+      for (const rec of (combos.lastRecords || [])) {
+        const sid = rec.session_id || '';
+        if (sid && !seen.has(sid)) { seen.add(sid); ids.push(sid); }
+      }
+    } else {
+      ids = liveSessionOrder(sessionsForAgent(requestsFilter.agent, combos.sessions), []);
+    }
     if (requestsFilter.session && !ids.includes(requestsFilter.session)) ids = [requestsFilter.session, ...ids];
-    // v2: full session ids in the options (the select is fixed 16rem wide;
-    // the closed box ellipsizes, the OS popup shows the whole id). Matches
-    // the Live page's full-id dropdown.
+    // v2: full session ids in the options (the select is 11–14rem wide so
+    // the whole filter row holds one line; the closed box ellipsizes, the
+    // OS popup shows the whole id). Matches the Live page's full-id
+    // dropdown.
     sessionSel.innerHTML = '<option value="">All Sessions</option>' +
       ids.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
     sessionSel.value = requestsFilter.session;
@@ -1118,12 +1281,12 @@ function renderRequestsSessionSummary(combos) {
 // fetches, which must agree or the pages would not line up).
 function reqFilterParams() {
   const q = new URLSearchParams();
+  q.set('kind', requestsFilter.stream === 'mcp' ? 'mcp' : 'llm');
   if (requestsFilter.session) q.set('session', requestsFilter.session);
   if (requestsFilter.agent) q.set('agent', requestsFilter.agent);
   if (requestsFilter.model) q.set('model', requestsFilter.model);
   if (requestsFilter.provider) q.set('provider', requestsFilter.provider);
   if (requestsFilter.errors) q.set('errors', '1');
-  if (requestsFilter.shadow) q.set('shadow', requestsFilter.shadow);
   return q;
 }
 
@@ -1180,7 +1343,7 @@ async function loadRequests(combos) {
   // Virtual table: the thead is static, the tbody renders only the viewport
   // window of rows (spacers keep the scrollbar sized to the whole list) and
   // a hint line reports the loaded count / load-older state.
-  paint(`<table class="table">${requestTableHeadHTML()}<tbody></tbody></table><div class="hint req-count" hidden></div>`);
+  paint(`<table class="table">${requestTableHeadHTML({ mcp: requestsFilter.stream === 'mcp' })}<tbody></tbody></table><div class="hint req-count" hidden></div>`);
   if (!tbl) return;
   const v = reqVirt = {
     tbl: tbl.querySelector('table'),
@@ -1250,6 +1413,7 @@ function reqRowNode(v, i) {
   holder.innerHTML = requestRowHTML(persistedSummaryRow(rec), {
     rowClass: 'req-row' + (rec.status >= 400 ? ' req-row-err' : ''),
     fmtTime,
+    mcp: requestsFilter.stream === 'mcp',
   });
   tr = holder.firstElementChild;
   v.pool.set(rec.request_id, tr);
@@ -1692,36 +1856,80 @@ function requestRelTimeOpts(id) {
 }
 
 // replayStripHTML renders the per-request replay control (`model-proxy
-// replay <id> --to <provider>` as an inline action): provider input with a
-// datalist of providers observed in the loaded facet data, a run button and a
-// result host. Shadow records are fire-and-forget evaluations — the backend
-// refuses to replay them, so the strip is not offered.
-function replayStripHTML(id) {
+// replay <id> --to <provider>` as an inline action): a PLAIN provider select
+// (no free-typing) whose options are the providers that actually carry the
+// request's model (config catalog provider_models — a provider without the
+// model can only answer an upstream 4xx), a run button and a result host.
+// Shadow records are fire-and-forget evaluations — the backend refuses to
+// replay them, so the strip is not offered. Nor is it on the MCP stream:
+// replay is the LLM forward pipeline (chat-completions re-send); MCP
+// exchanges have no provider axis.
+function replayStripHTML(id, model) {
   if (id.startsWith('shadow-')) return '';
-  return `<div class="req-replay" data-replay-id="${esc(id)}">` +
+  if (requestsFilter.stream === 'mcp') return '';
+  return `<div class="req-replay" data-replay-id="${esc(id)}" data-replay-model="${esc(model || '')}">` +
     '<span class="hint">Replay to</span>' +
-    '<input class="req-input" list="req-replay-providers" placeholder="provider" data-replay-provider>' +
+    '<select class="req-input" data-replay-provider><option value="">provider…</option></select>' +
     '<button class="btn small" data-replay-run>Replay</button>' +
     '<span class="hint" data-replay-status></span>' +
     '<div data-replay-result></div>' +
     '</div>';
 }
 
-// wireReplayStrip binds the strip's run button and lazily creates the shared
-// provider datalist (options from the Requests facet providers).
+// replayModelOf picks the model a replay will ask for from the record set:
+// the exposed name (what the client called) with the upstream/called names
+// as fallbacks for pre-exposure records.
+function replayModelOf(recs) {
+  const r = recs && recs[0];
+  if (!r) return '';
+  return r.exposed || r.upstream_model || r.called_model || '';
+}
+
+// replayProvidersFor resolves the eligible replay targets for one model: the
+// config catalog's provider→models map is authoritative (it covers providers
+// never observed in the log); the facet map is the interim source until the
+// catalog warms. No match at all (alias/route-rewritten name) falls back to
+// every known provider rather than stranding the control.
+function replayProvidersFor(model) {
+  const facets = (requestsCombos && requestsCombos.facetState.providerModels) || {};
+  const catalog = (configCache && configCache.provider_models) || null;
+  let providers = linkedProviders(model, catalog || facets);
+  if (!providers.length && catalog) providers = linkedProviders(model, facets);
+  if (!providers.length) providers = (requestsCombos && requestsCombos.providerOptions) || [];
+  return providers;
+}
+
+// fillReplayProviders (re)fills one strip's provider select, keeping the
+// current selection when it survives the refill.
+function fillReplayProviders(strip) {
+  const sel = strip.querySelector('[data-replay-provider]');
+  if (!sel) return;
+  const prev = sel.value;
+  const providers = replayProvidersFor(strip.dataset.replayModel || '');
+  sel.innerHTML = '<option value="">provider…</option>' +
+    providers.map((p) => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  sel.value = prev && providers.includes(prev) ? prev : '';
+}
+
+// wireReplayStrip binds the strip's run button, fills the model-scoped
+// provider select and warms the config catalog in the background (first use
+// on the Requests page — the catalog is not boot data; once warm every
+// mounted strip refills from the authoritative map).
+let replayCatalogWarming = false;
+
 function wireReplayStrip(cell) {
   const strip = cell && cell.querySelector('[data-replay-id]');
   if (!strip) return;
-  let list = document.getElementById('req-replay-providers');
-  if (!list) {
-    list = document.createElement('datalist');
-    list.id = 'req-replay-providers';
-    document.body.appendChild(list);
-  }
-  // Options track the Requests facet providers (refreshed per loadRequests).
-  const providers = (requestsCombos && requestsCombos.providerOptions) || [];
-  list.innerHTML = providers.map((p) => `<option value="${esc(p)}"></option>`).join('');
+  fillReplayProviders(strip);
   strip.querySelector('[data-replay-run]').onclick = () => replayRun(strip);
+  if (!configCache && !replayCatalogWarming) {
+    replayCatalogWarming = true;
+    apiGet('/api/config').then((cfg) => {
+      configCache = cfg;
+      document.querySelectorAll('[data-replay-id]').forEach(fillReplayProviders);
+    }).catch(() => { /* catalog unavailable: facet map keeps serving */ })
+      .finally(() => { replayCatalogWarming = false; });
+  }
 }
 
 // replayRun executes the one-shot force-provider replay and renders the
@@ -1743,13 +1951,42 @@ async function replayRun(strip) {
   try {
     const res = await apiPost('/api/replay', { id, provider });
     status.innerHTML = `${statusBadgeHTML(res.status)} ${esc(String(res.latency_ms))} ms${res.truncated ? ' · truncated at 4 MiB' : ''}`;
-    const bodyId = registerRawBody(res.body || '', 'application/json', 'response');
-    result.innerHTML = `<details class="raw-body" data-raw="${esc(bodyId)}"><summary>replay response body (${fmtNum((res.body || '').length)} bytes)</summary><div class="raw-body-host"><span class="hint">renders on first expand</span></div></details>`;
+    // The readable renderer needs the ORIGINAL request body for the chat
+    // transcript; the open detail's cache normally has it, the fetch below
+    // covers the cold paths (pinned drill, cache eviction).
+    if (!requestsDetailCache.has(id)) {
+      try {
+        const d = await apiGet(requestDetailURL(id));
+        if (d && d.records && d.records.length) cacheRequestDetail(id, d.records, Array.isArray(d.guard) ? d.guard : []);
+      } catch (_) { /* no request body → raw-body-only rendering */ }
+    }
+    result.innerHTML = replayResultHTML(id, res);
   } catch (e) {
     status.innerHTML = `<span class="msg err">${esc((e && e.message) || String(e))}</span>`;
   }
   btn.disabled = false;
   reqDetailChanged();
+}
+
+// replayResultHTML renders the replay exchange in the SAME readable format
+// as the list's request detail: the chat transcript (pure.js chatViewHTML —
+// role-labeled turns, usage line) built from the ORIGINAL request body and
+// the replayed response, with the raw response body in the same collapsed
+// lazy <details> below. The original request comes from the open detail's
+// cache (the strip lives inside it); an API fetch is the fallback (pinned
+// drill strips, cache eviction). Non-chat bodies (MCP JSON-RPC, errors)
+// leave chatViewHTML empty and the raw details carry them alone.
+function replayResultHTML(id, res) {
+  wireRawBodies();
+  const body = res.body || '';
+  const cached = requestsDetailCache.get(id);
+  const reqBody = (cached && cached.length && cached[0].request_body) || '';
+  const ct = /^data:/.test(body) ? 'text/event-stream' : 'application/json';
+  const histId = registerRawBody(reqBody, '', 'chat-history');
+  const chat = chatViewHTML(reqBody, body, ct, { histKey: histId });
+  const bodyId = registerRawBody(body, ct, 'response');
+  return chat +
+    `<details class="raw-body" data-raw="${esc(bodyId)}"><summary>replay response body (${fmtNum(body.length)} bytes)</summary><div class="raw-body-host"><span class="hint">renders on first expand</span></div></details>`;
 }
 
 // toggleRequestDetail expands/collapses the full record under a summary row.
@@ -1774,14 +2011,14 @@ async function toggleRequestDetail(tr) {
   const relOpts = requestRelTimeOpts(id);
   const cached = requestsDetailCache.get(id);
   if (cached) {
-    row.firstElementChild.innerHTML = detailRecordsHTML(cached, { ...relOpts, guard: requestsGuardCache.get(id) }) + replayStripHTML(id);
+    row.firstElementChild.innerHTML = detailRecordsHTML(cached, { ...relOpts, guard: requestsGuardCache.get(id) }) + replayStripHTML(id, replayModelOf(cached));
     wireReplayStrip(row.firstElementChild);
     reqDetailChanged();
     return;
   }
   let resp;
   try {
-    resp = await apiGet('/api/requests/' + encodeURIComponent(id));
+    resp = await apiGet(requestDetailURL(id));
   } catch (e) {
     if (!row.isConnected) return;
     row.firstElementChild.innerHTML = (e && e.status === 404)
@@ -1798,7 +2035,7 @@ async function toggleRequestDetail(tr) {
     return;
   }
   const guard = Array.isArray(resp.guard) ? resp.guard : [];
-  row.firstElementChild.innerHTML = detailRecordsHTML(recs, { ...requestRelTimeOpts(id), guard }) + replayStripHTML(id);
+  row.firstElementChild.innerHTML = detailRecordsHTML(recs, { ...requestRelTimeOpts(id), guard }) + replayStripHTML(id, replayModelOf(recs));
   wireReplayStrip(row.firstElementChild);
   cacheRequestDetail(id, recs, guard);
   // The detail's height joins the row's footprint — remeasure so the
@@ -2846,13 +3083,13 @@ let liveSessionList = [];     // recent SessionSummary list (dropdown options)
 let liveSessionLoading = false;
 let liveSessionError = '';
 let liveSessionOptionsKey = '';
-// Boot-time #status/live?session=… pin, consumed by renderLiveCard right
+// Boot-time #requests/live?session=… pin, consumed by renderLiveCard right
 // after the mount that resets the selection (see there for the race).
 let bootLiveSession = '';
 
-// renderLiveCard mounts the live request monitor into the Status Live section
-// and opens the SSE connection (closed by stopLiveEvents when the section or
-// tab is left). Rows are merged per request: a start event opens a dimmed
+// renderLiveCard mounts the live request monitor into the Requests tab's Live
+// sub-view and opens the SSE connection (closed by stopLiveEvents when the
+// sub-view or tab is left). Rows are merged per request: a start event opens a dimmed
 // in-flight row; guard hits attach a ⚑ badge and accumulate in the row; the
 // end event fills in provider/status/latency/tokens. Clicking a request row
 // opens the full detail in a modal popover (fetched from /api/requests/<id>
@@ -2887,13 +3124,20 @@ function renderLiveCard(target) {
   liveSessionLoading = false;
   liveSessionError = '';
   liveSessionOptionsKey = '';
-  target.insertAdjacentHTML('beforeend', buildCard('Live requests', '',
-    `<div class="live-toolbar">
-       <label class="hint" for="live-session">Session</label>
-       <select id="live-session" class="req-input"><option value="">All (live)</option></select>
-     </div>
-     <div id="live-table"><span class="msg hint">connecting…</span></div>
-     <div id="live-session-panel" hidden></div>`, 'tight', '', 'card-open'));
+  // NO card wrapper here: #req-live-view already sits inside the Requests
+  // tab's single outer card (the same one hosting the Log sub-view), so a
+  // wrapper would nest card-in-card. Only the content mounts: toolbar, ring
+  // table, session panel.
+  target.insertAdjacentHTML('beforeend', `
+    <div class="live-toolbar">
+      <label class="hint" for="live-session">Session</label>
+      <select id="live-session" class="req-input"><option value="">All (live)</option></select>
+    </div>
+    <div id="live-table"><span class="msg hint">connecting…</span></div>
+    <div id="live-session-panel" hidden></div>`);
+  // The session toolbar serves BOTH streams — MCP rows drill their own
+  // sessions (the fetch carries kind=mcp; options come from the MCP half of
+  // the ring).
   const sel = document.getElementById('live-session');
   if (sel) {
     sel.onchange = () => onLiveSessionChange(sel.value);
@@ -2902,7 +3146,7 @@ function renderLiveCard(target) {
     // session list stale until it arrives.
     sel.onblur = () => refreshLiveSessionOptions();
   }
-  // Consume a boot-time #status/live?session=… pin here: this mount is the
+  // Consume a boot-time #requests/live?session=… pin here: this mount is the
   // point that resets liveSessionFilter, and boot's direct apply raced it
   // (the status tab renders async, so the card mounted AFTER boot applied
   // and wiped the selection — refresh lost the ?session= param).
@@ -2920,15 +3164,10 @@ function renderLiveCard(target) {
     // no stub flash, the card is full-height from the first frame.
     renderLiveTable();
   }
-  // Preload recent persisted sessions so the dropdown lists them even before
-  // the first live event (best-effort: request logging may be off). A session
-  // resume refetches the list itself — skip the duplicate.
-  if (!resumeSession) {
-    apiGet('/api/sessions?limit=200').then((resp) => {
-      liveSessionList = (resp && resp.sessions) || [];
-      refreshLiveSessionOptions();
-    }).catch(() => { /* request logging off / unavailable */ });
-  }
+  // Preload the persisted session pool so the dropdown lists sessions even
+  // before the first live event (best-effort: request logging may be off). A
+  // session resume refetches the pool itself — skip the duplicate.
+  if (!resumeSession) loadLiveSessionPool();
   liveActive = true;
   try {
     liveES = new EventSource('/api/events');
@@ -2969,7 +3208,7 @@ function refreshLiveSessionOptions() {
   const sel = document.getElementById('live-session');
   if (!sel) return;
   if (sel === document.activeElement) return;
-  let sorted = liveSessionOrder(liveSessionList, liveRows);
+  let sorted = liveSessionOrder(liveSessionList, liveRows.filter(liveRowInStream));
   // Keep the active selection as an option even when neither source knows it
   // (a hash-restored session whose live rows aged out of the ring / whose
   // /api/sessions entry is still loading) — same guarantee as the Requests
@@ -2996,11 +3235,11 @@ function refreshLiveSessionOptions() {
 // analysis, loading the persisted request list + aggregate for the selection.
 function onLiveSessionChange(value) {
   liveSessionFilter = value;
-  // Mirror the selection into the URL (#status/live?session=…) so refresh/
-  // shared links restore this view; replaceState keeps dropdown refinement
-  // out of the back-history. setHash is a no-op when the hash already
-  // matches (boot/hashchange apply paths), so no loop.
-  if (activeTab === 'status') setHash(statusHash(), false);
+  // Mirror the selection into the URL (#requests/live?session=…) so
+  // refresh/shared links restore this view; replaceState keeps dropdown
+  // refinement out of the back-history. setHash is a no-op when the hash
+  // already matches (boot/hashchange apply paths), so no loop.
+  if (activeTab === 'requests' && requestsSub === 'live') setHash(requestsHash(), false);
   liveSessionRecords = [];
   liveSessionAgg = null;
   liveSessionError = '';
@@ -3023,21 +3262,69 @@ function onLiveSessionChange(value) {
   if (panel) panel.hidden = false;
   liveSessionLoading = true;
   renderLiveSessionPanel();
+  // The MCP stream never reads /api/sessions (LLM-only): its records ARE the
+  // session truth — the pool derives from them, the aggregate stays null and
+  // the chips fold from the rows.
+  const isMcp = requestsFilter.stream === 'mcp';
   Promise.all([
-    apiGet('/api/requests?session=' + encodeURIComponent(value) + '&limit=500')
+    apiGet('/api/requests?session=' + encodeURIComponent(value) + '&limit=500&kind=' + (isMcp ? 'mcp' : 'llm'))
       .then((r) => ({ recs: (r && r.records) || [] }))
       .catch((e) => ({ err: e.message })),
-    apiGet('/api/sessions?limit=200').then((r) => (r && r.sessions) || []).catch(() => []),
+    isMcp ? Promise.resolve([]) : apiGet('/api/sessions?limit=200').then((r) => (r && r.sessions) || []).catch(() => []),
   ]).then(([reqs, sessions]) => {
     if (liveSessionFilter !== value) return; // switched away while loading
     liveSessionLoading = false;
     if (reqs.err) liveSessionError = reqs.err;
     else liveSessionRecords = reqs.recs;
-    liveSessionList = sessions;
-    liveSessionAgg = sessions.find((s) => s.session_id === value) || null;
+    if (isMcp) {
+      const seen = new Set();
+      const pool = [];
+      for (const rec of liveSessionRecords) {
+        const sid = rec.session_id || '';
+        if (!sid || seen.has(sid)) continue;
+        seen.add(sid);
+        pool.push({ session_id: sid, last_ts: rec.ts });
+      }
+      liveSessionList = pool;
+    } else liveSessionList = sessions;
+    // The LLM aggregate backs the chips when rows alone undercount (aged-out
+    // ring); MCP has no aggregate and always derives from its rows.
+    liveSessionAgg = requestsFilter.stream === 'mcp'
+      ? null
+      : (sessions.find((s) => s.session_id === value) || null);
     refreshLiveSessionOptions();
     renderLiveSessionPanel();
   });
+}
+
+// loadLiveSessionPool fetches the persisted half of the Live session
+// dropdown, per stream: the Model stream reads /api/sessions (the LLM
+// aggregate), the MCP stream derives its options from recent MCP records —
+// /api/sessions is LLM-only and would list Model session ids under the MCP
+// toolbar. Entries keep the {session_id, last_ts} shape liveSessionOrder
+// consumes. Best-effort: request logging off just leaves the ring rows.
+function loadLiveSessionPool() {
+  if (requestsFilter.stream === 'mcp') {
+    apiGet('/api/requests?kind=mcp&limit=500').then((resp) => {
+      const seen = new Set();
+      const pool = [];
+      for (const rec of ((resp && resp.records) || [])) {
+        const sid = rec.session_id || '';
+        if (!sid || seen.has(sid)) continue;
+        seen.add(sid);
+        pool.push({ session_id: sid, last_ts: rec.ts });
+      }
+      liveSessionList = pool;
+      liveSessionOptionsKey = null;
+      refreshLiveSessionOptions();
+    }).catch(() => { /* request logging off / unavailable */ });
+    return;
+  }
+  apiGet('/api/sessions?limit=200').then((resp) => {
+    liveSessionList = (resp && resp.sessions) || [];
+    liveSessionOptionsKey = null;
+    refreshLiveSessionOptions();
+  }).catch(() => { /* request logging off / unavailable */ });
 }
 
 // enterLiveSession switches the Live card into one session's view from a
@@ -3080,6 +3367,7 @@ function persistedSummaryRow(rec) {
     model: rec.exposed || rec.upstream_model || rec.called_model || '',
     provider: rec.provider || '',
     status: rec.status || 0,
+    responseSize: rec.response_size != null ? rec.response_size : 0,
     latencyMs: rec.latency_ms != null ? rec.latency_ms : null,
     ttftMs: rec.ttft_ms != null ? rec.ttft_ms : null,
     attempt: rec.attempt || 0,
@@ -3111,6 +3399,7 @@ function liveSessionRows() {
   }
   for (const r of liveRows) {
     if (r.session !== liveSessionFilter) continue;
+    if (!liveRowInStream(r)) continue;
     const persisted = byId.get(r.requestId);
     byId.set(r.requestId, mergeLiveAndPersistedRow(r, persisted || {
       requestId: r.requestId, ts: r.ts, session: r.session,
@@ -3350,7 +3639,7 @@ function showTlTip(bar, row) {
     fillTlExcerpt(el, cached, seq);
     return;
   }
-  apiGet('/api/requests/' + encodeURIComponent(id)).then((resp) => {
+  apiGet(requestDetailURL(id)).then((resp) => {
     const recs = (resp && resp.records) || [];
     if (!recs.length) return;
     cacheRequestDetail(id, recs);
@@ -3538,6 +3827,7 @@ function applyLiveEvent(e) {
   if (e.type === 'start') {
     liveByReq[e.request_id] = {
       requestId: e.request_id,
+      proto: e.protocol || '',
       ts: e.ts, session: e.session_id || '', agent: e.agent, model: e.exposed || '—',
       provider: '', status: 0, latencyMs: null, input: 0, output: 0,
       cacheRead: 0, cacheCreation: 0,
@@ -3553,6 +3843,10 @@ function applyLiveEvent(e) {
     const row = liveByReq[e.request_id] || synthLiveRow(e);
     row.ts = e.ts;
     if (!row.session && e.session_id) row.session = e.session_id;
+    // MCP end events carry the resolved attribution (clientInfo label /
+    // session binding) that the start event could not know yet.
+    if (e.agent && e.agent !== 'unknown') row.agent = e.agent;
+    if (e.session_id && !row.session) row.session = e.session_id;
     row.provider = e.provider || '—';
     row.status = e.status || 0;
     row.latencyMs = e.latency_ms;
@@ -3603,6 +3897,7 @@ function popPendingGuards(id) {
 function synthLiveRow(e) {
   const row = {
     requestId: e.request_id,
+    proto: e.protocol || '',
     ts: e.ts, session: e.session_id || '', agent: e.agent, model: e.exposed || '—',
     provider: '', status: 0, latencyMs: null, input: 0, output: 0,
     cacheRead: 0, cacheCreation: 0,
@@ -3656,6 +3951,7 @@ function liveSummaryRowHTML(r, open) {
     liveKey: true,
     modelNote: guard,
     fmtTime: fmtTimeSafe,
+    mcp: requestsFilter.stream === 'mcp',
   });
 }
 
@@ -3682,6 +3978,68 @@ function liveRowHTML(r) {
 // are PREPENDED, the rebuild preserves the viewport (captureLiveViewState /
 // restoreLiveViewState): when the page is scrolled away from the top the
 // visible region does not shift.
+// liveRowInStream reports whether a ring row belongs to the active stream:
+// 'mcp' keeps protocol="mcp" gateway exchanges, '' (Model) keeps everything
+// else (LLM traffic plus the standalone non-request events, which are
+// LLM-side signals).
+function liveRowInStream(r) {
+  return requestsFilter.stream === 'mcp' ? r.proto === 'mcp' : r.proto !== 'mcp';
+}
+
+// syncLogStreamUI repaints the Log sub-view's stream tabs and the
+// stream-dependent controls (hidden session/shadow, model placeholder) after
+// the stream changed outside the log's own click path (the live view's tabs,
+// hashchange, sub-view switches).
+function syncLogStreamUI() {
+  const isMcp = requestsFilter.stream === 'mcp';
+  syncReqNav();
+  const modelInput = document.getElementById('req-model');
+  if (modelInput) modelInput.placeholder = isMcp ? 'All Servers' : 'All Models';
+}
+
+// setRequestsStream flips the shared stream ('' = LLM/Model, 'mcp') and
+// syncs BOTH sub-views' chrome. Session ids do not cross streams (LLM client
+// sessions vs MCP exchange sessions), so a switch clears the session/shadow
+// selections. Returns whether the stream changed; callers own the reload.
+// applyRequestsStreamFlip mutates the shared stream state for BOTH entry
+// paths (setRequestsStream for hashchange, selectRequestsView for sidebar
+// clicks): session/shadow selections clear (ids do not cross streams) and
+// the Live session pool swaps — it is stream-scoped (Model reads
+// /api/sessions, MCP derives from its records), so without the swap the
+// dropdown would keep listing the other stream's session ids.
+function applyRequestsStreamFlip(next) {
+  requestsFilter.stream = next;
+  requestsFilter.session = '';
+  requestsFilter.shadow = '';
+  if (liveSessionFilter) onLiveSessionChange('');
+  liveSessionList = [];
+  // null (never equal to a string key) forces the rebuild: '' would equal
+  // the empty pool's own key and the early-return would keep the other
+  // stream's options rendered.
+  liveSessionOptionsKey = null;
+  refreshLiveSessionOptions();
+  if (liveActive) loadLiveSessionPool();
+  syncLogStreamUI();
+  syncLiveStreamUI();
+}
+
+function setRequestsStream(stream) {
+  const next = stream === 'mcp' ? 'mcp' : '';
+  if (requestsFilter.stream === next) return false;
+  applyRequestsStreamFlip(next);
+  return true;
+}
+// (setRequestsStream stays the hashchange path's stream applier; sidebar
+// clicks go through selectRequestsView, which subsumes it.)
+
+// syncLiveStreamUI repaints the live stream tabs and toolbar after the stream
+// changed outside the tab click path (hashchange back/forward).
+function syncLiveStreamUI() {
+  // The session toolbar serves both streams (MCP drills its own sessions);
+  // nothing to toggle — kept as the stream-changed notification hook for
+  // live chrome.
+}
+
 function renderLiveTable() {
   refreshLiveSessionOptions();
   if (liveSessionFilter) {
@@ -3692,15 +4050,17 @@ function renderLiveTable() {
   }
   const tbl = document.getElementById('live-table');
   if (!tbl) return;
-  // All (live) view is the pure live ring (newest 100 events, no persisted
-  // backfill); persisted history lives in the session view and Requests tab.
-  const rows = liveRows;
+  // All (live) view is the pure live ring (newest events, no persisted
+  // backfill); persisted history lives in the session view and the Log
+  // sub-view. The ring holds BOTH streams; the view filters to the active
+  // one (rows are tagged with their event protocol).
+  const rows = liveRows.filter(liveRowInStream);
   if (!rows.length) {
     tbl.innerHTML = '<span class="msg hint">Waiting for requests…</span>';
     return;
   }
   const viewState = captureLiveViewState(tbl);
-  tbl.innerHTML = `<table class="table">${requestTableHeadHTML()}<tbody>${rows.map((r) => liveRowHTML(r)).join('')}</tbody></table>`;
+  tbl.innerHTML = `<table class="table">${requestTableHeadHTML({ mcp: requestsFilter.stream === 'mcp' })}<tbody>${rows.map((r) => liveRowHTML(r)).join('')}</tbody></table>`;
   document.querySelectorAll('#live-table .live-row').forEach((tr) => wireLiveRow(tr));
   restoreLiveViewState(tbl, viewState);
 }
@@ -3854,6 +4214,13 @@ function applyLiveEventDOM(e) {
   refreshLiveSessionOptions();
   const tbl = document.getElementById('live-table');
   if (!tbl) return;
+  // Stream gate: the other stream's rows are not in this table — a miss must
+  // not "recover" by prepending them (the end-event fallback below).
+  if (e.request_id && liveByReq[e.request_id] && !liveRowInStream(liveByReq[e.request_id])) return;
+  if (!e.request_id && requestsFilter.stream === 'mcp') {
+    // Standalone non-request events (budget & friends) are LLM-side signals.
+    return;
+  }
   const tbody = tbl.querySelector('tbody');
   if (!tbody) {
     renderLiveTable();
@@ -4183,7 +4550,6 @@ const STATUS_SECTIONS = [
   { key: 'tokens', label: 'Token Usage' },
   { key: 'cache', label: 'Cache' },
   { key: 'logs', label: 'Logs' },
-  { key: 'live', label: 'Live' },
 ];
 let statusCache = { st: null, tok: [], logs: [], accounts: [], agents: [], since: 0 };
 // modelsCache is the last GET /api/models response ({providers:{…}}): the
@@ -4460,15 +4826,6 @@ function renderStatusSection(key) {
       // .log-pre and defeat the capture.
       renderLogsInto(main, statusCache.logs || []);
       break;
-    case 'live':
-      // The live card is event-driven (SSE), not poll-driven: mount it once
-      // per section entry. The 5s status tick re-renders the active section,
-      // which must NOT wipe the card or reconnect the EventSource.
-      if (!liveActive) {
-        main.innerHTML = '';
-        renderLiveCard(main);
-      }
-      break;
   }
 }
 
@@ -4487,10 +4844,6 @@ function selectStatusSection(name, push = true) {
 function selectStatusSectionSilent(name) {
   if (!STATUS_SECTIONS.some((s) => s.key === name)) name = 'schedule';
   statusSelected = name;
-  // Leaving the Live section closes its SSE connection; on re-entry the card
-  // remounts with the retained ring (completed rows survive — see
-  // renderLiveCard) and reconnects.
-  if (name !== 'live') stopLiveEvents();
   document.querySelectorAll('.status-nav-item').forEach((b) => {
     b.classList.toggle('active', b.dataset.section === name);
   });
@@ -5607,7 +5960,7 @@ function confirmDialog(title, message, confirmLabel, opts = {}) {
           <button type="button" class="link-btn" id="confirm-cancel" aria-label="Close">Close</button>
         </header>
         <div class="modal-body">
-          <p>${esc(message)}</p>${challengeHTML}
+          <p>${opts && opts.htmlMessage ? message : esc(message)}</p>${challengeHTML}
           <div class="modal-actions">
             <button type="button" class="btn small" id="confirm-no">Cancel</button>
             <button type="button" class="btn small danger-solid" id="confirm-yes">${esc(confirmLabel)}</button>
@@ -6731,6 +7084,14 @@ const SETTINGS_GROUPS = [
       {
         key: 'retention', label: 'retention', type: 'text', def: '720h',
         help: 'Delete rotated files older than this (30d). 0 keeps them forever. The active file is never deleted.',
+      },
+      {
+        key: 'mcp_split', label: 'mcp_split', type: 'checkbox', def: 'false',
+        help: 'Route MCP gateway exchanges (kind="mcp") to their own mcp-*.log stream under mcp_dir instead of mixing them into the LLM request log. The Requests page goes back to LLM-only traffic; /api/requests?kind=mcp reads the split stream.',
+      },
+      {
+        key: 'mcp_dir', label: 'mcp_dir', type: 'text', def: '~/.model-proxy/log/mcp',
+        help: 'Directory for the split MCP stream (mcp-YYYYMMDD.log files) when mcp_split is on. Shares max_file_size/max_body_bytes/retention with the request log.',
       },
     ],
   },
@@ -9078,7 +9439,17 @@ async function boot() {
   // Initial render: activate the tab the URL hash names (so a refresh or shared
   // link lands on the same view), defaulting to Status. For
   // #accounts/<provider>, preset the selection before the fetch.
-  const { tab: bootTab, sub: bootSub, query: bootQuery } = parseHash();
+  let { tab: bootTab, sub: bootSub, query: bootQuery } = parseHash();
+  // Legacy #status/live links: the live monitor lives under Requests now —
+  // rewrite before any tab activation so the boot lands on the live view.
+  if (bootTab === 'status' && bootSub === 'live') {
+    const q = new URLSearchParams();
+    if (bootQuery.stream) q.set('stream', bootQuery.stream);
+    if (bootQuery.session) q.set('session', bootQuery.session);
+    const qs = q.toString();
+    setHash('#requests/live' + (qs ? '?' + qs : ''), false);
+    ({ tab: bootTab, sub: bootSub, query: bootQuery } = parseHash());
+  }
   if (bootTab === 'accounts' && bootSub) {
     accountsSelectedProvider = bootSub;
   }
@@ -9104,20 +9475,8 @@ async function boot() {
   } else {
     activateTabSilent('status');
   }
-  // #status/live?session=… — stash as pending instead of applying here: the
-  // status tab renders ASYNC (5 fetches), so applying now races the Live
-  // card mount, whose reset would wipe the selection. renderLiveCard
-  // consumes the pin right after mounting (the deterministic point).
-  if (bootTab === 'status' && bootSub === 'live' && bootQuery.session && statusSelected === 'live') {
-    bootLiveSession = bootQuery.session;
-    if (document.getElementById('live-session')) {
-      // Defensive: the live card is already mounted (not the normal boot
-      // path) — consume the pin now instead of waiting for a mount.
-      const v = bootLiveSession;
-      bootLiveSession = '';
-      onLiveSessionChange(v);
-    }
-  }
+  // #requests/live?session=… is consumed by renderRequestsTab/renderLiveCard
+  // (the deterministic post-mount point); nothing to apply here.
   // Update the header connection indicator regardless of the landing tab,
   // then keep it ticking on every tab (see maybeConnRefresh).
   refreshConnIndicator();
@@ -9241,9 +9600,6 @@ async function mcpTestServer(name) {
 // gate does not apply; a failed refresh keeps the old DOM and reports through
 // setRefreshError like every other tab.
 let takeoverData = null;
-// Session-scoped mode for takeover runs (unified|split|anthropic|openai|
-// responses); restore never does protocol selection and ignores it.
-let takeoverMode = 'unified';
 // In-flight mutation guard: action buttons disable while a run is in flight.
 let takeoverBusy = false;
 // Last mutation outcome, rendered above the table until the next action.
@@ -9258,18 +9614,24 @@ async function renderTakeoverTab() {
   await loadTakeover();
 }
 
+// takeoverReqSeq guards against stale-response reordering: tab activation,
+// mode switches and post-mutation refreshes can race, and a late-arriving
+// older surface (e.g. the previous mode) must never overwrite a newer one.
+let takeoverReqSeq = 0;
 async function loadTakeover() {
   const panel = panels.takeover;
+  const seq = ++takeoverReqSeq;
   try {
-    takeoverData = await apiGet('/api/takeover?mode=' + encodeURIComponent(takeoverMode));
+    const data = await apiGet('/api/takeover');
+    if (seq !== takeoverReqSeq) return;
+    takeoverData = data;
     renderTakeoverInto();
     setRefreshError(panel, null);
   } catch (e) {
+    if (seq !== takeoverReqSeq) return;
     setRefreshError(panel, (e && e.message) || String(e));
   }
 }
-
-const TAKEOVER_MODES = ['unified', 'split', 'anthropic', 'openai', 'responses'];
 
 function takeoverResultHTML() {
   if (!takeoverResult) return '';
@@ -9278,49 +9640,43 @@ function takeoverResultHTML() {
   return `<div class="msg">${takeoverResult.html}</div>` + warnings;
 }
 
-function takeoverRowHTML(c) {
-  let action;
-  if (c.taken_over) {
-    action = `<button class="btn small" data-tk-restore="${esc(c.name)}" ${takeoverBusy ? 'disabled' : ''}>Restore</button>`;
-  } else if (c.installed) {
-    action = `<button class="btn small" data-tk-takeover="${esc(c.name)}" ${takeoverBusy ? 'disabled' : ''}>Takeover</button>`;
-  } else {
-    action = '<span class="hint">—</span>';
+// The table shows ONE row per client family (one template document). The
+// protocol variants live inside the merged variants: document — View opens
+// the whole document, and variant choice happens in the Takeover confirm
+// dialog (auto-selected by native coverage, pickable per run). The family
+// row's hint names the auto variant so the preview is visible at a glance.
+function takeoverFamilyRowHTML(g) {
+  let action = '';
+  const viewBtn = `<button class="btn small" data-tk-edit="${esc(g.family)}">Edit</button>`;
+  if (g.taken && g.taken.length) {
+    action = `<button class="btn small ok" data-tk-restore="${esc(g.family)}" ${takeoverBusy ? 'disabled' : ''}>Restore</button> `;
+  } else if (g.installed) {
+    action = `<button class="btn small primary" data-tk-takeover="${esc(g.family)}" ${takeoverBusy ? 'disabled' : ''}>Takeover</button> `;
   }
-  const edit = `<button class="btn small" data-tk-edit="${esc(c.name)}">${c.source === 'user' ? 'Edit' : 'View'}</button>`;
-  // Client = the agent family (pi, opencode); Template = the concrete variant
-  // (pi-openai). They coincide for single-variant clients.
-  return `<tr><td>${esc(c.family)}</td><td>${takeoverClientLabel(c)}</td><td>${esc(c.format)}</td>` +
-    `<td><span class="badge muted">${esc(c.source)}</span></td>` +
-    `<td class="hint" title="${esc(c.file)}">${esc(c.file)}</td>` +
-    `<td>${takeoverStatusBadge(c)}</td>` +
-    `<td>${action} ${edit}</td></tr>`;
+  const file = g.variants[0] ? g.variants[0].file : '';
+  const fmt = g.variants[0] ? g.variants[0].format : '';
+  return `<tr class="tk-family"><td><span class="tk-fam-name">${esc(g.family)}</span> <span class="badge muted">${esc(fmt)}</span></td>` +
+    `<td class="hint" title="${esc(file)}">${esc(file)}</td>` +
+    `<td>${takeoverFamilyBadge(g)}</td>` +
+    `<td>${action}${viewBtn}</td></tr>`;
 }
 
 function renderTakeoverInto() {
   const host = panels.takeover && panels.takeover.querySelector('.tk-host');
   if (!host || !takeoverData) return;
   const clients = takeoverData.clients || [];
-  const rows = clients.map(takeoverRowHTML).join('');
-  const table = `<table class="table"><thead><tr><th>Client</th><th>Template</th><th>Format</th><th>Source</th><th>Config File</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
-  const modeOptions = TAKEOVER_MODES.map((m) => `<option value="${m}" ${takeoverMode === m ? 'selected' : ''}>${m}</option>`).join('');
+  const groups = takeoverFamilyGroups(clients);
+  const rows = groups.map(takeoverFamilyRowHTML).join('');
+  const table = `<table class="table"><thead><tr><th>Client</th><th>Config File</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   const actions =
-    `<select id="tk-mode" class="req-input" title="Takeover mode (restore ignores it)">${modeOptions}</select>` +
-    `<span class="hint" id="tk-mode-hint">${esc(takeoverModeHint(takeoverMode))}</span>` +
-    `<button class="btn small primary" data-tk-takeover="" ${takeoverBusy ? 'disabled' : ''}>Takeover All</button>` +
-    `<button class="btn small" data-tk-restore="" ${takeoverBusy ? 'disabled' : ''}>Restore All</button>` +
     '<button class="btn small" data-tk-new>New Template</button>' +
     '<button class="btn small" data-tk-refresh>Refresh</button>';
   const result = takeoverResultHTML();
   const dirs = `<div class="hint tk-dirs">templates: ${esc(takeoverData.templates_dir || '')} · backups: ${esc(takeoverData.backup_dir || '')}</div>`;
-  host.innerHTML = buildCard('Client Takeover', `${clients.length} templates`, result + table + dirs, '', actions);
+  host.innerHTML = buildCard('Client Takeover', `${groups.length} clients · ${clients.length} templates`, result + table + dirs, '', actions);
 
-  const modeSel = host.querySelector('#tk-mode');
-  // The mode select is functional: switching it re-resolves the surface
-  // server-side (?mode=) so the * markers preview what Takeover would write.
-  if (modeSel) modeSel.onchange = () => { takeoverMode = modeSel.value; loadTakeover(); };
   for (const btn of host.querySelectorAll('[data-tk-takeover]')) {
-    btn.onclick = () => takeoverRun(btn.dataset.tkTakeover);
+    btn.onclick = () => openTakeoverConfirm(btn.dataset.tkTakeover);
   }
   for (const btn of host.querySelectorAll('[data-tk-restore]')) {
     btn.onclick = () => takeoverRestore(btn.dataset.tkRestore);
@@ -9334,31 +9690,293 @@ function renderTakeoverInto() {
   if (add) add.onclick = () => openTakeoverTemplate('');
 }
 
-// takeoverRun executes one takeover (client '' = all) with the selected mode
-// and re-renders from a fresh surface afterwards.
-async function takeoverRun(client) {
-  if (takeoverBusy) return;
-  takeoverBusy = true;
-  renderTakeoverInto();
-  try {
-    const res = await apiPost('/api/takeover', { client, mode: takeoverMode });
-    takeoverResult = { html: takeoverRunSummary(res), warnings: res.warnings || [], err: '' };
-  } catch (e) {
-    takeoverResult = { html: '', warnings: [], err: (e && e.message) || String(e) };
-  }
-  takeoverBusy = false;
-  await loadTakeover();
+// ---------- Takeover run confirmation dialog ----------
+
+// takeoverWriteFmt resolves a preview write's client-config format from the
+// surface (write.templates[0] names a template the surface carries).
+function takeoverWriteFmt(write) {
+  const name = (write.templates || [])[0];
+  const c = (takeoverData && takeoverData.clients || []).find((x) => x.name === name);
+  return c ? c.format : '';
 }
 
-// takeoverRestore restores one client (or all, confirmDialog first — restore
-// ends the takeover) and re-renders.
+// tkPreviewWriteHTML renders one file a takeover would write: path + exists
+// badge + contributing variants (protocol labels; raw template ids only on
+// hover), then the highlighted final content (exactly what the run leaves
+// behind — the dialog's whole point).
+function tkPreviewWriteHTML(w) {
+  const raw = (w.templates || []).join(' + ');
+  const variants = takeoverWriteVariantsLabel(w.templates, takeoverData && takeoverData.clients);
+  const exists = w.exists
+    ? '<span class="badge muted" title="only the entries managed by model-proxy are added or replaced — everything else in the file stays untouched">updates existing file</span>'
+    : '<span class="badge warn">creates new file</span>';
+  const notes = (w.notes || []).map((n) => `<div class="tk-note">ⓘ ${esc(n)}</div>`).join('');
+  return `<div class="tk-write">` +
+    `<div class="tk-write-head"><span class="file">${esc(w.file)}</span>${exists}` +
+    `<span class="hint" title="${esc(raw)}">${esc(variants)}</span></div>${notes}` +
+    `<pre class="code">${highlightConfig(w.content || '', takeoverWriteFmt(w))}</pre></div>`;
+}
+
+// openTakeoverConfirm runs the takeover flow with a preview first (the Web
+// twin of the CLI's interactive prompt). Everything the run will write is
+// chosen HERE, at the point of execution:
+//   - WHAT: the model/provider part, the MCP surface, or both (checkboxes)
+//   - WHICH entries: subsets of the exposed models and gateway MCP servers
+//     (all selected by default; unchecking any narrows the request)
+//   - variant: multi-variant families pick the protocol variant to write
+//     (the auto-selected one by default; picking another pins that exact
+//     template, identical to naming it on the CLI) plus a split option
+// The dialog shows the exact config Takeover would leave behind (managed
+// entries only) before the Confirm button fires the run.
+async function openTakeoverConfirm(client) {
+  if (takeoverBusy) return;
+  const modal = document.getElementById('tk-run-modal');
+  if (!modal) return;
+  const group = (takeoverFamilyGroups(takeoverData && takeoverData.clients || [])
+    .find((g) => g.family === client)) || { variants: [], mcp: false };
+  const variants = group.variants || [];
+  const multi = variants.length > 1;
+  const hasMCP = !!group.mcp;
+  const allModels = (takeoverData && takeoverData.models) || [];
+  const allMcp = (takeoverData && takeoverData.mcp) || [];
+
+  // Mutable run shape: variant selection + scope + subset selections.
+  let sel = { client, mode: 'unified' };
+  let scopeModel = true, scopeMCP = hasMCP;
+  let modelSel = null, mcpSel = null; // null = all; Set = checked subset
+
+  // Every choice in this dialog is a chip (toggle for scopes/subsets, one
+  // mutually-exclusive group for variants) — one interaction language, wrap
+  // layout instead of tall checkbox lists.
+  const chip = (label, attr, on, extra) =>
+    `<button type="button" class="tk-chip" ${attr} aria-pressed="${on}" ${extra || ''}>${esc(label)}</button>`;
+  const chipGroup = (items, scroll) =>
+    `<div class="tk-chips${scroll ? ' scroll' : ''}">${items.join('')}</div>`;
+
+  const scopeChips = chip('Models', 'data-tkr-scope="model"', true)
+    + (hasMCP ? chip('MCP', 'data-tkr-scope="mcp"', hasMCP) : '');
+  const modelChips = chipGroup(allModels.map((m) =>
+    chip(m, `data-tkr-model="${esc(m)}"`, true)), allModels.length > 12);
+  const mcpChips = hasMCP ? chipGroup(allMcp.map((m) =>
+    chip(m, `data-tkr-mcp="${esc(m)}"`, true)), allMcp.length > 12) : '';
+  const variantChips = multi ? chipGroup(variants.map((c) => {
+    const tip = c.auto_selected
+      ? 'picked automatically — the protocol most of your models speak natively'
+      : `write every model through the ${c.protocol} protocol (conversion where needed)`;
+    return chip(takeoverVariantLabel(c), `data-tkr-variant-chip="${esc(c.name)}"`, !!c.auto_selected, `title="${esc(tip)}"`);
+  }).concat([chip('Split by Protocol', 'data-tkr-variant-chip="split"', false,
+    'title="one provider entry per protocol — every model connects natively, no conversion"')])) : '';
+
+  const row = (label, body, scope) =>
+    `<div class="tk-pick-row" data-tkr-row="${scope || ''}"><span class="tk-pick-label">${label}</span>${body}</div>`;
+
+  modal.innerHTML =
+    `<header class="modal-head">
+       <h2 id="tkr-title">Takeover ${esc(client)}</h2>
+       <button type="button" class="link-btn" id="tkr-cancel" aria-label="Close">Close</button>
+     </header>
+     <div class="modal-body">
+       <div class="tk-pick">
+         ${row('Include', chipGroup([scopeChips]))}
+         ${row(`Models <span class="hint" data-tkr-count="models">${allModels.length}/${allModels.length}</span>`, modelChips, 'model')}
+         ${hasMCP ? row(`MCP <span class="hint" data-tkr-count="mcp">${allMcp.length}/${allMcp.length}</span>`, mcpChips, 'mcp') : ''}
+         ${multi ? row('Protocol', variantChips) : ''}
+       </div>
+       <div class="tk-summary" id="tkr-summary" hidden></div>
+       <div class="hint tk-status" id="tkr-status">loading preview…</div>
+       <div id="tkr-writes" class="tk-writes"></div>
+       <div class="msg err" id="tkr-msg" hidden></div>
+       <div class="modal-actions">
+         <button type="button" class="btn small" id="tkr-no">Cancel</button>
+         <button type="button" class="btn small primary" id="tkr-run">Takeover</button>
+       </div>
+     </div>`;
+
+  const writesEl = modal.querySelector('#tkr-writes');
+  const msgEl = modal.querySelector('#tkr-msg');
+  const runBtn = modal.querySelector('#tkr-run');
+  const fail = (text) => { msgEl.hidden = false; msgEl.textContent = text; runBtn.disabled = true; };
+  delete modal.dataset.hLocked; // re-lock on this open's first rendered frame
+
+  const buildReq = () => {
+    const scope = scopeModel && scopeMCP ? '' : (scopeModel ? 'model' : (scopeMCP ? 'mcp' : 'none'));
+    if (scope === 'none') return null;
+    const req = { client: sel.client, mode: sel.mode, scope };
+    if (modelSel) req.models = allModels.filter((m) => modelSel.has(m));
+    if (mcpSel) req.mcp = allMcp.filter((m) => mcpSel.has(m));
+    return req;
+  };
+  // Preview loads keep the previous content on screen (no flash): only a
+  // status line tracks loading, and rapid chip clicks coalesce into one
+  // request.
+  let previewSeq = 0;
+  let previewTimer = null;
+  let statusTimer = null;
+  const statusEl = () => modal.querySelector('#tkr-status');
+  const loadPreview = () => {
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = setTimeout(loadPreviewNow, 200);
+  };
+  const loadPreviewNow = async () => {
+    msgEl.hidden = true;
+    const seq = ++previewSeq;
+    const req = buildReq();
+    if (!req) {
+      writesEl.innerHTML = '<span class="hint">nothing selected — turn Models or MCP back on above</span>';
+      runBtn.disabled = true;
+      return;
+    }
+    // The status line only appears for SLOW requests (>400ms): fast
+    // previews land with zero visual change.
+    const status = statusEl();
+    if (statusTimer) clearTimeout(statusTimer);
+    if (status) {
+      statusTimer = setTimeout(() => { if (status) status.textContent = 'updating preview…'; }, 400);
+    }
+    try {
+      const res = await apiPost('/api/takeover/preview', Object.assign({ managed_only: true }, req));
+      if (seq !== previewSeq) return; // a newer selection superseded this one
+      const html = !(res.writes || []).length
+        ? '<span class="hint">nothing to write</span>'
+        : res.writes.map(tkPreviewWriteHTML).join('');
+      // Replace the preview WITHOUT the flash: skip identical content, and
+      // carry each code block's scroll position over the rebuild (losing the
+      // reading position on every chip click is what reads as flicker).
+      if (writesEl.innerHTML !== html) {
+        const scrolls = [...writesEl.querySelectorAll('pre.code')].map((el) => el.scrollTop);
+        writesEl.innerHTML = html;
+        [...writesEl.querySelectorAll('pre.code')].forEach((el, i) => {
+          if (scrolls[i] !== undefined) el.scrollTop = scrolls[i];
+        });
+      }
+      if (statusTimer) clearTimeout(statusTimer);
+      if (status) status.textContent = '';
+      runBtn.disabled = false;
+      // The summary bar mirrors the live selection: switching anything
+      // (variant/scope/subset) shows HERE first, even when the preview body
+      // is largely identical between variants. Variants show their friendly
+      // label (Auto (…)/All …/Split by Protocol), never the raw template id.
+      const summary = modal.querySelector('#tkr-summary');
+      if (summary) {
+        const counts = [];
+        if (scopeModel) counts.push((modelSel ? modelSel.size + '/' + allModels.length : String(allModels.length)) + ' models');
+        if (scopeMCP && hasMCP) counts.push((mcpSel ? mcpSel.size + '/' + allMcp.length : String(allMcp.length)) + ' MCP');
+        const picked = variants.find((v) => v.name === sel.client);
+        const variantText = sel.mode === 'split' ? 'Split by Protocol' : (picked ? takeoverVariantLabel(picked) : '');
+        summary.hidden = false;
+        summary.innerHTML = '<span class="val">' + esc(client) + '</span>'
+          + (multi && variantText ? ' · ' + esc(variantText) : '')
+          + (counts.length ? ' · ' + esc(counts.join(' · ')) : '');
+      }
+      // Lock the dialog's body height on the first rendered frame: the
+      // dialog opens hugging its content (no empty floor) and stays that
+      // tall while selections swap the preview inside it.
+      if (!modal.dataset.hLocked) {
+        modal.dataset.hLocked = '1';
+        const body = modal.querySelector('.modal-body');
+        if (body) body.style.height = Math.min(body.scrollHeight, window.innerHeight - 150) + 'px';
+      }
+    } catch (e) {
+      if (seq !== previewSeq) return;
+      if (statusTimer) clearTimeout(statusTimer);
+      fail((e && e.message) || String(e));
+    }
+  };
+  const setCount = (kind, n, total) => {
+    const el = modal.querySelector(`[data-tkr-count="${kind}"]`);
+    if (el) el.textContent = `${n}/${total}`;
+  };
+  // Scope chips: toggle, keep at least one on.
+  for (const c of modal.querySelectorAll('[data-tkr-scope]')) {
+    c.onclick = () => {
+      const isModel = c.dataset.tkrScope === 'model';
+      if (isModel) scopeModel = !scopeModel;
+      else scopeMCP = !scopeMCP;
+      c.setAttribute('aria-pressed', String(isModel ? scopeModel : scopeMCP));
+      // The subset list only makes sense while its scope is on.
+      const subsetRow = modal.querySelector(`[data-tkr-row="${c.dataset.tkrScope}"]`);
+      if (subsetRow) subsetRow.hidden = !(isModel ? scopeModel : scopeMCP);
+      loadPreview();
+    };
+  }
+  // Subset chips: toggle one entry; all-on collapses back to "no filter".
+  // kind is the SINGULAR dataset key ('model'/'mcp' — data-tkr-model →
+  // dataset.tkrModel); plural is only the count label.
+  const bindSubset = (kind, countKind) => {
+    const key = 'tkr' + kind.charAt(0).toUpperCase() + kind.slice(1);
+    const chips = [...modal.querySelectorAll(`[data-tkr-${kind}]`)];
+    if (!chips.length) return;
+    const all = kind === 'model' ? allModels : allMcp;
+    for (const c of chips) {
+      c.onclick = () => {
+        const on = c.getAttribute('aria-pressed') === 'true';
+        c.setAttribute('aria-pressed', String(!on));
+        const selected = new Set(chips.filter((x) => x.getAttribute('aria-pressed') === 'true')
+          .map((x) => x.dataset[key]));
+        const allOn = selected.size === all.length;
+        if (kind === 'model') modelSel = allOn ? null : selected;
+        else mcpSel = allOn ? null : selected;
+        setCount(countKind, allOn ? all.length : selected.size, all.length);
+        loadPreview();
+      };
+    }
+  };
+  bindSubset('model', 'models');
+  bindSubset('mcp', 'mcp');
+  // Variant chips: mutually exclusive (the last pressed stays on).
+  for (const c of modal.querySelectorAll('[data-tkr-variant-chip]')) {
+    c.onclick = () => {
+      for (const x of modal.querySelectorAll('[data-tkr-variant-chip]')) {
+        x.setAttribute('aria-pressed', String(x === c));
+      }
+      if (c.dataset.tkrVariantChip === 'split') {
+        sel = { client, mode: 'split' };
+      } else {
+        sel = { client: c.dataset.tkrVariantChip, mode: 'unified' };
+      }
+      loadPreview();
+    };
+  }
+  modal.querySelector('#tkr-cancel').onclick = () => modal.close();
+  modal.querySelector('#tkr-no').onclick = () => modal.close();
+  runBtn.onclick = async () => {
+    if (takeoverBusy) return;
+    const req = buildReq();
+    if (!req) return;
+    takeoverBusy = true;
+    runBtn.disabled = true;
+    renderTakeoverInto();
+    try {
+      const res = await apiPost('/api/takeover', req);
+      takeoverResult = { html: takeoverRunSummary(res, takeoverData && takeoverData.clients), warnings: res.warnings || [], err: '' };
+      modal.close();
+    } catch (e) {
+      takeoverResult = { html: '', warnings: [], err: (e && e.message) || String(e) };
+      modal.close();
+    }
+    takeoverBusy = false;
+    await loadTakeover();
+  };
+  if (!modal.open) modal.showModal();
+  await loadPreview();
+}
+
+// takeoverRestore restores one family (or all, confirmDialog first — restore
+// ends the takeover) and re-renders. The confirmation lists the backups that
+// would be restored, so the user sees exactly what ends.
 async function takeoverRestore(client) {
   if (takeoverBusy) return;
-  const what = client ? `client ${client}` : 'ALL taken-over clients';
+  const surface = takeoverData && takeoverData.clients || [];
+  const scope = surface.filter((c) => c.family === client && c.taken_over);
+  const list = scope.length
+    ? '<div class="hint">' + scope.map((c) => `${esc(takeoverClientLabel(c))} → ${esc(c.file)}`).join('<br>') + '</div>'
+    : '';
+  const what = `client ${client}`;
   const ok = await confirmDialog(
-    'Restore ' + (client || 'all') + '?',
-    `Restore the original config of ${what} from the takeover backup? This ends the takeover and deletes the backup marker.`,
+    'Restore ' + client + '?',
+    `Restore the original config of ${what} from the takeover backup? This ends the takeover and deletes the backup marker.${list ? '<br><br>Backups to restore:<br>' + list : ''}`,
     'Restore',
+    { htmlMessage: true },
   );
   if (!ok) return;
   takeoverBusy = true;
@@ -9381,6 +9999,13 @@ async function takeoverRestore(client) {
 async function openTakeoverTemplate(name) {
   const modal = document.getElementById('tk-modal');
   if (!modal) return;
+  // Entering the editor invalidates any render still in flight for the
+  // previous open and clears the stale preview host — the doc fetch below is
+  // async, and until it rebuilds the modal the OLD DOM (a previous draft,
+  // maybe) would still read as current.
+  modal.dataset.tkPreviewSeq = String((Number(modal.dataset.tkPreviewSeq) || 0) + 1);
+  const staleHost = modal.querySelector('#tk-rendered');
+  if (staleHost) staleHost.innerHTML = '<span class="hint">rendering…</span>';
   let doc = null;
   if (name) {
     try {
@@ -9393,21 +10018,96 @@ async function openTakeoverTemplate(name) {
   }
   renderTakeoverTemplateModal(modal, name, doc);
   if (!modal.open) modal.showModal();
+  // The rendered-config preview loads after the modal opens so the dialog is
+  // interactive while the dry-run renders. Existing templates render the
+  // saved doc; a new template previews its starter skeleton as a draft.
+  if (name) loadTakeoverTemplatePreview(modal, name);
+  else {
+    const host = modal.querySelector('#tk-rendered');
+    if (host) host.innerHTML = '<span class="hint">type a template name to preview the draft.</span>';
+  }
+}
+
+// loadTakeoverTemplatePreview fills the editor's rendered-config section with
+// ONLY the entries this exact template writes (managed_only: rendered from an
+// empty file), not the whole merged client config — the editor answers "what
+// does this template contribute", the run-confirm dialog answers "what will
+// my file look like". Exact template pin; mode unified so a protocol pin can
+// never conflict with the template.
+async function loadTakeoverTemplatePreview(modal, name, draft) {
+  const host = modal.querySelector('#tk-rendered');
+  if (!host) return;
+  // Request serial: a slow earlier render (typ. a draft preview still in
+  // flight when the editor closed/reopened) must not clobber the fresh one.
+  modal.dataset.tkPreviewSeq = String((Number(modal.dataset.tkPreviewSeq) || 0) + 1);
+  const seq = modal.dataset.tkPreviewSeq;
+  // A draft (unsaved editor text) renders through template_body; a brand-new
+  // template previews via its typed name the same way — the disk template is
+  // never consulted for drafts.
+  const body = draft != null ? { client: name, mode: 'unified', managed_only: true, template_body: draft } : null;
+  try {
+    const res = await apiPost('/api/takeover/preview', body || { client: name, mode: 'unified', managed_only: true });
+    if (seq !== modal.dataset.tkPreviewSeq) return;
+    const writes = res.writes || [];
+    if (!writes.length) {
+      host.innerHTML = '<span class="hint">nothing to write</span>';
+      return;
+    }
+    const c = (takeoverData && takeoverData.clients || []).find((x) => x.name === name);
+    const fmt = c ? c.format : '';
+    host.innerHTML = writes.map((w) =>
+      `<div class="tk-write-head"><span class="file">${esc(w.file)}</span>` +
+      `<span class="badge muted">${w.exists ? 'updates existing file' : 'creates new file'}</span></div>` +
+      `<pre class="code">${highlightConfig(w.content || '', fmt)}</pre>`).join('');
+  } catch (e) {
+    host.innerHTML = `<div class="msg err">${esc((e && e.message) || String(e))}</div>`;
+  }
+}
+
+// tkPlaceholderHelp renders the placeholder documentation table (data from
+// pure.js TAKEOVER_PLACEHOLDERS — the engine's placeholder set).
+function tkPlaceholderHelp() {
+  const rows = TAKEOVER_PLACEHOLDERS.map((p) =>
+    `<tr><td class="mono">${esc(p.name)}</td><td class="hint">${esc(p.desc)}</td></tr>`).join('');
+  return `<details><summary class="hint">placeholders &amp; blocks reference</summary>` +
+    `<table class="table"><thead><tr><th>Placeholder</th><th>Resolves to</th></tr></thead><tbody>${rows}</tbody></table></details>`;
 }
 
 function renderTakeoverTemplateModal(modal, name, doc) {
   const isNew = !name;
   const source = doc ? doc.source : 'user';
   const presetView = doc && doc.source === 'preset';
-  const title = isNew ? 'New Template' : `${name} (${source})`;
+  const title = isNew ? 'New Template' : `${name} (${source === 'preset' ? 'built-in' : 'custom'})`;
   const nameField = isNew
     ? '<div class="field"><label for="tk-name">Template Name</label><input id="tk-name" autocomplete="off" spellcheck="false" placeholder="my-agent"></div>'
+    : '';
+  // New templates pick their client-config format first; the picker swaps the
+  // starter skeleton (TAKEOVER_TEMPLATE_EXAMPLES) so the YAML always matches
+  // the chosen format's blocks.
+  const formatField = isNew
+    ? `<div class="field"><label for="tk-format">Format</label><select id="tk-format" class="req-input">`
+      + ['json', 'toml', 'env'].map((f) => `<option value="${f}" ${f === 'json' ? 'selected' : ''}>${f}</option>`).join('')
+      + `</select><span class="hint">client config file format — the starter YAML below adapts.</span></div>`
     : '';
   const pathHint = doc && doc.path ? `<span class="hint">${esc(doc.path)}</span>` : '';
   const saveLabel = presetView ? 'Save As Override' : 'Save';
   const deleteBtn = doc && doc.source === 'user'
     ? '<button type="button" class="btn small danger" id="tk-delete">Delete</button>'
     : '';
+  // Every template opens EDITABLE — editing a built-in preset and saving
+  // writes the user override that replaces it (the hint says so); no
+  // read-only view to flip out of first.
+  const presetHint = presetView
+    ? '<span class="hint">Built-in preset — saving stores your own copy, which then takes precedence.</span>'
+    : '';
+  const yamlField = `<div class="field"><label for="tk-yaml">Template YAML</label>
+         <textarea id="tk-yaml" rows="18" spellcheck="false">${esc(isNew ? TAKEOVER_TEMPLATE_EXAMPLES.json : (doc ? doc.yaml : ''))}</textarea>
+         ${isNew ? tkPlaceholderHelp() : presetHint + pathHint}
+       </div>`;
+  const rendered = `<div class="field"><label>Rendered Config <span class="hint">(draft — only what this template writes, not the whole client file)</span>
+         <button type="button" class="btn small" id="tk-refresh-draft">Refresh</button></label>
+         <div id="tk-rendered"><span class="hint">rendering…</span></div>
+       </div>`;
   modal.innerHTML =
     `<header class="modal-head">
        <h2 id="tk-title">${esc(title)}</h2>
@@ -9415,12 +10115,9 @@ function renderTakeoverTemplateModal(modal, name, doc) {
      </header>
      <div class="modal-body">
        ${nameField}
-       <div class="field">
-         <label for="tk-yaml">Template YAML</label>
-         <textarea id="tk-yaml" rows="18" spellcheck="false" ${presetView ? 'readonly' : ''}>${esc(doc ? doc.yaml : '')}</textarea>
-         ${presetView ? '<span class="hint">Built-in preset — saving writes a user override that replaces it.</span>' : ''}
-         ${pathHint}
-       </div>
+       ${formatField}
+       ${yamlField}
+       ${rendered}
        <div class="msg err" id="tk-msg" hidden></div>
        <div class="modal-actions">
          ${deleteBtn}
@@ -9428,10 +10125,55 @@ function renderTakeoverTemplateModal(modal, name, doc) {
        </div>
      </div>`;
 
+  // Format picker: swapping the format re-seeds the starter skeleton, unless
+  // the user already edited it (dirty textarea keeps their text).
+  const fmtSel = modal.querySelector('#tk-format');
+  const yamlArea = modal.querySelector('#tk-yaml');
+  if (fmtSel && yamlArea) {
+    fmtSel.onchange = () => {
+      if (yamlArea.value !== yamlArea.defaultValue && !yamlArea.value.startsWith('# Takeover template')) {
+        if (!confirm('Replace the edited YAML with the ' + fmtSel.value + ' starter?')) return;
+      }
+      yamlArea.value = TAKEOVER_TEMPLATE_EXAMPLES[fmtSel.value] || '';
+    };
+  }
+
   const close = () => { if (modal.open) modal.close(); };
   modal.querySelector('#tk-cancel').addEventListener('click', close);
   const msg = modal.querySelector('#tk-msg');
   const fail = (text) => { msg.hidden = false; msg.textContent = text; };
+
+  // Draft preview: edits re-render (debounced) through template_body — the
+  // unsaved YAML, never the disk template. New templates need a typed name
+  // first; while it is missing the preview host says so instead of firing.
+  let draftTimer = null;
+  const previewNow = async () => {
+    const target = isNew ? (modal.querySelector('#tk-name') ? modal.querySelector('#tk-name').value.trim() : '') : name;
+    const host = modal.querySelector('#tk-rendered');
+    if (!target) {
+      if (host) host.innerHTML = '<span class="hint">type a template name to preview the draft.</span>';
+      return;
+    }
+    await loadTakeoverTemplatePreview(modal, target, yamlArea ? yamlArea.value : '');
+  };
+  if (yamlArea) {
+    yamlArea.addEventListener('input', () => {
+      if (draftTimer) clearTimeout(draftTimer);
+      draftTimer = setTimeout(previewNow, 900);
+    });
+  }
+  const nameInput = modal.querySelector('#tk-name');
+  if (nameInput) {
+    nameInput.addEventListener('input', () => {
+      if (draftTimer) clearTimeout(draftTimer);
+      draftTimer = setTimeout(previewNow, 900);
+    });
+  }
+  const refreshBtn = modal.querySelector('#tk-refresh-draft');
+  if (refreshBtn) refreshBtn.addEventListener('click', () => {
+    if (draftTimer) clearTimeout(draftTimer);
+    previewNow();
+  });
 
   modal.querySelector('#tk-save').addEventListener('click', async () => {
     const target = isNew ? modal.querySelector('#tk-name').value.trim() : name;

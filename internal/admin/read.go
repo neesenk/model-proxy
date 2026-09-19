@@ -144,11 +144,15 @@ func (s *Service) RequestLogQueries() appapi.RequestLogQueries {
 	if dir == "" {
 		return nil
 	}
+	mcpDir := ""
+	if s.ports.MCPRequestLogDirectory != nil {
+		mcpDir = s.ports.MCPRequestLogDirectory()
+	}
 	var index *requestlog.Indexer
 	if s.ports.RequestLogIndex != nil {
 		index = s.ports.RequestLogIndex()
 	}
-	base := requestLogQueries{dir: dir, index: index}
+	base := requestLogQueries{dir: dir, mcpDir: mcpDir, index: index}
 	if !s.guardJoinAvailable() {
 		return base
 	}
@@ -185,25 +189,63 @@ func (s *Service) auditDirIfEnabled() string {
 
 // requestLogQueries adapts the index (or the scan fallback) to
 // appapi.RequestLogQueries. *requestlog.Indexer satisfies that interface
-// structurally; this adapter only adds the nil-index degradation.
+// structurally; this adapter only adds the nil-index degradation and the
+// split-stream routing: when mcpDir is set (request_log.mcp_split on) kind=mcp
+// lists read the split mcp- stream via directory scan (no index follows it),
+// while every other listing is pinned to LLM rows (kind "" behaves as "llm")
+// so legacy mcp rows still present in old requests- files stop polluting the
+// requests view and its facets.
 type requestLogQueries struct {
-	dir   string
-	index *requestlog.Indexer
+	dir    string
+	mcpDir string
+	index  *requestlog.Indexer
 }
 
 func (q requestLogQueries) SummariesWithFacets(filter requestlog.Filter) ([]requestlog.Summary, requestlog.Facets, error) {
+	if q.mcpDir != "" && filter.Kind == "mcp" {
+		return requestlog.QuerySummariesWithFacetsIn(q.mcpDir, requestlog.MCPFilePrefix, filter)
+	}
+	if q.mcpDir != "" && filter.Kind == "" {
+		filter.Kind = "llm"
+	}
 	if q.index != nil {
 		return q.index.SummariesWithFacets(filter)
 	}
 	return requestlog.QuerySummariesWithFacets(q.dir, filter)
 }
 
-func (q requestLogQueries) Detail(requestID string) ([]requestlog.Record, error) {
+func (q requestLogQueries) ShadowReport(filter requestlog.Filter) ([]requestlog.ShadowReportEntry, error) {
+	// No mcp_split routing here: shadow evaluation rows are LLM-stream rows,
+	// and both the index and the scan read exactly the requests- stream.
+	if q.index != nil {
+		return q.index.ShadowReport(filter)
+	}
+	return requestlog.ShadowReport(q.dir, filter)
+}
+
+func (q requestLogQueries) Detail(requestID, stream string) ([]requestlog.Record, error) {
+	// stream hint: an MCP-stream row drills straight into the split stream —
+	// its id is never in the requests index, and the index's miss fallback
+	// scans the whole (multi-GB) requests directory, which is exactly the
+	// seconds-long path the hint exists to skip.
+	if stream == "mcp" && q.mcpDir != "" {
+		return requestlog.QueryRecordsIn(q.mcpDir, requestlog.MCPFilePrefix, requestlog.Filter{RequestID: requestID, Limit: 50})
+	}
 	if q.index != nil {
 		// The index seek already falls back to the scan on a miss.
-		return q.index.Detail(requestID)
+		records, err := q.index.Detail(requestID)
+		if (err == nil && len(records) > 0) || q.mcpDir == "" || stream == "llm" {
+			return records, err
+		}
+	} else {
+		records, err := requestlog.QueryRecords(q.dir, requestlog.Filter{RequestID: requestID, Limit: 50})
+		if (err == nil && len(records) > 0) || q.mcpDir == "" || stream == "llm" {
+			return records, err
+		}
 	}
-	return requestlog.QueryRecords(q.dir, requestlog.Filter{RequestID: requestID, Limit: 50})
+	// Split stream fallthrough: an id that lives in the mcp- files must stay
+	// drill-downable (the UI opens /api/requests/<id> from any listing).
+	return requestlog.QueryRecordsIn(q.mcpDir, requestlog.MCPFilePrefix, requestlog.Filter{RequestID: requestID, Limit: 50})
 }
 
 func (q requestLogQueries) SessionSummaries(scanLimit, limit int, costOf func(provider, model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error) {
@@ -787,7 +829,7 @@ func (s *Service) SecurityExplain(requestID, kind string, names []string) (appap
 		result.Status = appapi.SecurityExplainNoRequestLog
 		return result, nil
 	}
-	records, err := queries.Detail(requestID)
+	records, err := queries.Detail(requestID, "")
 	if err != nil {
 		return appapi.SecurityExplainResult{}, err
 	}
@@ -986,6 +1028,8 @@ func configSettings(config *configdomain.Config) appapi.ConfigSettings {
 			MaxFileSize:  config.RequestLog.MaxFileSize,
 			MaxBodyBytes: config.RequestLog.MaxBodyBytes,
 			Retention:    config.RequestLog.Retention,
+			MCPSplit:     config.RequestLog.MCPSplit,
+			MCPDir:       config.RequestLog.MCPDir,
 		},
 		Stats: appapi.ConfigStats{
 			DBPath:    config.Stats.DBPath,

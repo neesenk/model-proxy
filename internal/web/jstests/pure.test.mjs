@@ -9,7 +9,7 @@ import {
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
   verdictBadge, modelCapMatrix, providerCapsSummary, providerFrozen, providerNames,
   ruleHitsLeaderboard,
-  sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary, guardMarksHTML, guardMarksDetailHTML, requestMetaHTML,
+  sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, linkedProviders, sessionHealthSummary, guardMarksHTML, guardMarksDetailHTML, requestMetaHTML,
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   cacheHitRate, settingsDiff, settingsRestartKeys,
@@ -35,7 +35,10 @@ import {
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
   iconPin, iconRefresh, iconChevron, statusBadgeClass, statusBadgeHTML,
   kpiDeltaClass, logLineHTML,
-  takeoverStatusBadge, takeoverClientLabel, takeoverRunSummary, takeoverRestoreSummary, takeoverModeHint,
+takeoverRunSummary, takeoverRestoreSummary, takeoverVariantLabel,
+  takeoverProtocolLabel, takeoverWriteVariantsLabel, takeoverClientLabel,
+  highlightYAML, highlightTOML, highlightEnv, highlightConfig,
+  takeoverFamilyGroups, takeoverFamilyBadge, TAKEOVER_TEMPLATE_EXAMPLES, TAKEOVER_PLACEHOLDERS,
   shadowMatchBadge,
 } from '../assets/pure.js';
 
@@ -630,6 +633,20 @@ test('linkedModels with no provider unions every model and route name', () => {
   );
 });
 
+test('linkedProviders filters providers by the model they carry', () => {
+  const map = { 'zhipu': ['glm-5.3', 'glm-5.3-air'], 'deepseek': ['deepseek-v4'], 'openai': ['gpt-6'] };
+  assert.deepEqual(linkedProviders('glm-5.3', map), ['zhipu']);
+  // Case/whitespace-insensitive exact name; substring partials do NOT match
+  // (unlike linkedModels — replay targets a concrete catalog entry).
+  assert.deepEqual(linkedProviders('  GLM-5.3 ', map), ['zhipu']);
+  assert.deepEqual(linkedProviders('glm', map), []);
+  // Unknown model / empty inputs degrade to empty (caller falls back).
+  assert.deepEqual(linkedProviders('nope', map), []);
+  assert.deepEqual(linkedProviders('', map), []);
+  assert.deepEqual(linkedProviders('glm-5.3', null), []);
+  assert.deepEqual(linkedProviders('glm-5.3', {}), []);
+});
+
 test('linkedModels tolerates missing/empty inputs', () => {
   assert.deepEqual(linkedModels('', {}, {}), []);
   assert.deepEqual(linkedModels('ghost', LINKED_PROVIDER_MODELS, LINKED_ROUTES), []);
@@ -1173,10 +1190,10 @@ test('liveSessionOrder keeps live-only sessions with missing timestamps and dedu
 });
 
 test('shortSessionId abbreviates long ids, passes short labels through', () => {
-  assert.equal(shortSessionId('1234567890abcdef9012'), '1234…12');
+  assert.equal(shortSessionId('1234567890abcdef9012'), '1234…9012');
   assert.equal(shortSessionId('main'), 'main');
   assert.equal(shortSessionId('1234567890123456'), '1234567890123456'); // 16 chars: unchanged
-  assert.equal(shortSessionId('12345678901234567'), '1234…67');  // 17 chars: abbreviated
+  assert.equal(shortSessionId('12345678901234567'), '1234…4567');  // 17 chars: abbreviated
   assert.equal(shortSessionId(''), '');
   assert.equal(shortSessionId(null), '');
 });
@@ -2214,16 +2231,22 @@ test('readableValue flattens JSON into human text', () => {
 
 test('requests filter hash round-trips, omitting defaults and dropping junk', () => {
   // Only non-default values ride along; an all-default filter yields no query.
-  assert.equal(requestsFilterQuery({ session: '', agent: '', model: '', provider: '', errors: false, shadow: '' }), '');
-  const q = requestsFilterQuery({ session: 'sess demo/1', agent: 'pi', model: '', provider: 'zhipu', errors: true, shadow: 'only' });
+  assert.equal(requestsFilterQuery({ stream: '', session: '', agent: '', model: '', provider: '', errors: false, shadow: '' }), '');
+  const q = requestsFilterQuery({ stream: '', session: 'sess demo/1', agent: 'pi', model: '', provider: 'zhipu', errors: true, shadow: 'only' });
   assert.equal(q, 'session=sess+demo%2F1&agent=pi&provider=zhipu&errors=1&shadow=only');
   // Round-trip through hashQueryParams + fromQuery.
   const back = requestsFilterFromQuery(hashQueryParams(q));
-  assert.deepEqual(back, { session: 'sess demo/1', agent: 'pi', model: '', provider: 'zhipu', errors: true, shadow: 'only' });
+  assert.deepEqual(back, { stream: '', session: 'sess demo/1', agent: 'pi', model: '', provider: 'zhipu', errors: true, shadow: 'only' });
+  // The MCP stream rides stream=mcp and round-trips; junk values fall back
+  // to the LLM default.
+  const mcp = requestsFilterQuery({ stream: 'mcp', session: '', agent: 'codex', model: '', provider: '', errors: false, shadow: '' });
+  assert.equal(mcp, 'stream=mcp&agent=codex');
+  assert.deepEqual(requestsFilterFromQuery(hashQueryParams(mcp)), { stream: 'mcp', session: '', agent: 'codex', model: '', provider: '', errors: false, shadow: '' });
+  assert.deepEqual(requestsFilterFromQuery({ stream: 'bogus' }), { stream: '', session: '', agent: '', model: '', provider: '', errors: false, shadow: '' });
   // Junk shadow falls back to the tri-state default; truthy errors spellings
   // other than 1/true normalize to false.
   const junk = requestsFilterFromQuery({ session: 's', shadow: 'bogus', errors: 'yes' });
-  assert.deepEqual(junk, { session: 's', agent: '', model: '', provider: '', errors: false, shadow: '' });
+  assert.deepEqual(junk, { stream: '', session: 's', agent: '', model: '', provider: '', errors: false, shadow: '' });
   // No filter keys → null (a bare #requests must not clobber live state);
   // null/undefined params normalize to null.
   assert.equal(requestsFilterFromQuery({}), null);
@@ -2244,6 +2267,22 @@ test('unified request table: one head and row renderer for all three tables', ()
   const widths = [...head.matchAll(/<col style="width:(\d+)%"\/>/g)].map((m) => Number(m[1]));
   assert.equal(widths.length, 8, 'colgroup pins all 8 columns');
   assert.equal(widths.reduce((a, b) => a + b, 0), 100, 'column shares sum to 100%');
+  // The MCP variant speaks the MCP domain: Server/Account labels, no token
+  // column (7-column geometry) and session cells drill the session.
+  const mcpHead = requestTableHeadHTML({ mcp: true });
+  assert.ok(mcpHead.includes('<th>Server</th>') && mcpHead.includes('<th>Account</th>'));
+  assert.ok(!mcpHead.includes('Tokens'), 'mcp head carries no token column');
+  assert.equal((mcpHead.match(/<th[ >]/g) || []).length, 7, 'mcp head has 7 columns');
+  const mcpWidths = [...mcpHead.matchAll(/<col style="width:\d+%\"\/>/g)];
+  assert.equal(mcpWidths.length, 7, 'mcp colgroup pins 7 columns');
+  const mcpRow = requestRowHTML({
+    requestId: 'm1', ts: 5000, session: 'sess-abcd1234', agent: 'codex',
+    model: 'web-search', provider: 'zhipu#2', status: 200, latencyMs: 30,
+    input: 0, output: 0,
+  }, { mcp: true, fmtTime: (t) => 'T' + t });
+  assert.equal((mcpRow.match(/<td/g) || []).length, 7, 'mcp row has 7 cells');
+  assert.ok(mcpRow.includes('session-link'), 'mcp session cell drills the session');
+  assert.ok(!mcpRow.includes('cache'), 'mcp row carries no token markup');
   // A full row: session link, status badge, tokens with cache read.
   const row = requestRowHTML({
     requestId: 'r1', ts: 5000, session: 'sess-abcd1234', agent: 'claude-code',
@@ -2784,27 +2823,7 @@ test('analyticsRowSortKey survives the move to pure.js unchanged', () => {
 
 // ---------- Takeover tab ----------
 
-test('takeoverStatusBadge renders the five takeover states', () => {
-  assert.equal(takeoverStatusBadge({ installed: false }), '<span class="badge muted">not installed</span>');
-  assert.equal(takeoverStatusBadge({ installed: true, taken_over: false }), '<span class="badge muted">not taken over</span>');
-  assert.equal(takeoverStatusBadge({ installed: true, taken_over: true, drift_ok: true }), '<span class="badge ok">taken over</span>');
-  const drift = takeoverStatusBadge({ installed: true, taken_over: true, drift_ok: false, current: 'http://dead:1', expected: 'http://127.0.0.1:15721' });
-  assert.ok(drift.includes('badge err'));
-  assert.ok(drift.includes('>drift<'));
-  assert.ok(drift.includes('http://dead:1') && drift.includes('http://127.0.0.1:15721'), 'tooltip carries current → expected');
-  // Tooltip content is escaped.
-  assert.ok(!takeoverStatusBadge({ installed: true, taken_over: true, drift_ok: false, current: '"><img' }).includes('"><img'));
-  // Null-safe.
-  assert.equal(takeoverStatusBadge(null), '<span class="badge muted">not installed</span>');
-});
 
-test('takeoverClientLabel marks auto-selected variants and split-changing families', () => {
-  assert.equal(takeoverClientLabel({ name: 'claude' }), 'claude');
-  assert.ok(takeoverClientLabel({ name: 'pi', auto_selected: true }).includes('>*</span>'));
-  assert.ok(takeoverClientLabel({ name: 'pi', split_changes: true }).includes('⇄'));
-  assert.ok(!takeoverClientLabel({ name: 'pi' }).includes('*'));
-  assert.ok(!takeoverClientLabel({ name: '<b>' }).includes('<b>'));
-});
 
 test('takeoverRunSummary / takeoverRestoreSummary flatten mutation results', () => {
   assert.equal(
@@ -2820,6 +2839,36 @@ test('takeoverRunSummary / takeoverRestoreSummary flatten mutation results', () 
   assert.equal(takeoverRestoreSummary({ restored: [], skipped: [] }), 'nothing to restore');
   // Names are escaped.
   assert.ok(!takeoverRunSummary({ applied: [{ name: '<b>x' }], skipped: [] }).includes('<b>x'));
+  // With the surface given, non-default variant ids render as family + protocol label.
+  const surface = [
+    { name: 'opencode', family: 'opencode', protocol: 'anthropic' },
+    { name: 'opencode-openai', family: 'opencode', protocol: 'openai' },
+  ];
+  assert.equal(
+    takeoverRunSummary({ applied: [{ name: 'opencode-openai' }, { name: 'opencode' }], skipped: ['opencode-openai'] }, surface),
+    'taken over: opencode (Chat Completion), opencode · skipped (config not present): opencode (Chat Completion)',
+  );
+});
+
+test('takeoverProtocolLabel / takeoverWriteVariantsLabel hide raw template ids', () => {
+  assert.equal(takeoverProtocolLabel('anthropic'), 'Anthropic');
+  assert.equal(takeoverProtocolLabel('openai'), 'Chat Completion');
+  assert.equal(takeoverProtocolLabel('responses'), 'Responses');
+  assert.equal(takeoverProtocolLabel(''), '');
+  const surface = [
+    { name: 'opencode', protocol: 'anthropic' },
+    { name: 'opencode-responses', protocol: 'responses' },
+  ];
+  assert.equal(takeoverWriteVariantsLabel(['opencode'], surface), 'Anthropic');
+  assert.equal(
+    takeoverWriteVariantsLabel(['opencode', 'opencode-responses'], surface),
+    'Anthropic + Responses',
+  );
+  assert.equal(takeoverWriteVariantsLabel(['opencode (mcp)'], surface), 'Anthropic (mcp)');
+  // Unknown names (custom user templates) pass through; empty input is empty.
+  assert.equal(takeoverWriteVariantsLabel(['my-agent'], surface), 'my-agent');
+  assert.equal(takeoverWriteVariantsLabel([], surface), '');
+  assert.equal(takeoverWriteVariantsLabel(null, null), '');
 });
 
 test('shadowMatchBadge classifies primary/shadow match rates', () => {
@@ -2831,9 +2880,102 @@ test('shadowMatchBadge classifies primary/shadow match rates', () => {
   assert.equal(shadowMatchBadge(NaN), '<span class="badge muted">—</span>');
 });
 
-test('takeoverModeHint describes each mode', () => {
-  assert.equal(takeoverModeHint('unified'), 'one entry per family — best native protocol coverage');
-  assert.equal(takeoverModeHint(''), 'one entry per family — best native protocol coverage');
-  assert.equal(takeoverModeHint('split'), 'one entry per native protocol — every model passes through unchanged');
-  assert.ok(takeoverModeHint('anthropic').includes('anthropic'));
+// ---- takeover config highlighting ----
+
+test('highlightYAML marks keys, strings, comments and escapes safely', () => {
+  const html = highlightYAML('file: ~/.agent/config.json   # path comment\nformat: json\napi_key: "{{token}}"');
+  assert.ok(html.includes('<span class="j-key">file</span>'), `key span missing: ${html}`);
+  assert.ok(html.includes('<span class="j-com"># path comment</span>'), `comment span missing: ${html}`);
+  assert.ok(html.includes('<span class="j-str">&quot;{{token}}&quot;</span>'), `string span missing: ${html}`);
+  // HTML in input must stay escaped — the result goes into innerHTML.
+  const evil = highlightYAML('x: "<script>"');
+  assert.ok(!evil.includes('<script>'), `unescaped payload: ${evil}`);
+  // A quoted # inside a value is not a comment.
+  const noComment = highlightYAML('url: "http://x/#frag"  # real comment');
+  assert.equal((noComment.match(/j-com/g) || []).length, 1, `in-string # treated as comment: ${noComment}`);
+  assert.ok(noComment.includes('x/#frag'), `in-string # dropped: ${noComment}`);
+});
+
+test('highlightTOML marks sections, keys and env marks KEY= lines', () => {
+  const toml = highlightTOML('[providers."model-proxy"]\nbase_url = "http://127.0.0.1:15722/v1"\n# comment');
+  assert.ok(toml.includes('<span class="j-key">providers.&quot;model-proxy&quot;</span>'), `section span missing: ${toml}`);
+  assert.ok(toml.includes('<span class="j-str">&quot;http://127.0.0.1:15722/v1&quot;</span>'), `string span missing: ${toml}`);
+  assert.ok(toml.includes('<span class="j-com"># comment</span>'));
+  const env = highlightEnv('MYAGENT_BASE_URL=http://x/v1  # endpoint');
+  assert.ok(env.includes('<span class="j-key">MYAGENT_BASE_URL</span>'), `env key missing: ${env}`);
+  assert.ok(env.includes('j-com'), `env comment missing: ${env}`);
+});
+
+test('highlightConfig dispatches by format', () => {
+  assert.ok(highlightConfig('{"a": 1}', 'json').includes('j-key'));
+  assert.ok(highlightConfig('a: 1', 'yaml').includes('j-key'));
+  assert.ok(highlightConfig('[s]\nk = "v"', 'toml').includes('j-key'));
+  assert.ok(highlightConfig('K=v', 'env').includes('j-key'));
+  assert.equal(highlightConfig('<x>', 'unknown'), '&lt;x&gt;');
+});
+
+// ---- takeover family aggregation ----
+
+test('takeoverFamilyGroups buckets by family and aggregates state', () => {
+  const clients = [
+    { name: 'pi', family: 'pi', installed: true, taken_over: true, drift_ok: true },
+    { name: 'pi-openai', family: 'pi', installed: true, taken_over: false, drift_ok: true },
+    { name: 'claude', family: 'claude', installed: true, taken_over: false, drift_ok: true },
+    { name: 'kimi', family: 'kimi', installed: false, taken_over: false, drift_ok: true },
+  ];
+  const groups = takeoverFamilyGroups(clients);
+  assert.deepEqual(groups.map((g) => g.family), ['claude', 'kimi', 'pi']);
+  const pi = groups[2];
+  assert.equal(pi.variants.length, 2);
+  assert.ok(pi.multi && pi.installed);
+  assert.deepEqual(pi.taken.map((c) => c.name), ['pi']);
+  assert.equal(takeoverFamilyBadge(pi), '<span class="badge ok" title="pi">taken over</span>');
+  assert.equal(takeoverFamilyBadge(groups[0]), '<span class="badge muted">not taken over</span>');
+  assert.equal(takeoverFamilyBadge(groups[1]),
+    '<span class="badge muted" title="no config file found on disk for this agent">not installed</span>');
+  const drifted = takeoverFamilyGroups([
+    { name: 'a', family: 'a', installed: true, taken_over: true, drift_ok: false },
+  ])[0];
+  const driftBadge = takeoverFamilyBadge(drifted);
+  assert.ok(driftBadge.includes('badge err') && driftBadge.includes('changed externally'),
+    `drift must read as changed externally with an explanation, got: ${driftBadge}`);
+  assert.ok(driftBadge.includes('title="'), 'drift badge must carry an explanatory tooltip');
+  const allTaken = takeoverFamilyGroups([
+    { name: 'a', family: 'a', installed: true, taken_over: true, drift_ok: true },
+  ])[0];
+  assert.equal(takeoverFamilyBadge(allTaken), '<span class="badge ok" title="a">taken over</span>');
+});
+
+test('TAKEOVER_TEMPLATE_EXAMPLES covers every format and documents placeholders', () => {
+  assert.deepEqual(Object.keys(TAKEOVER_TEMPLATE_EXAMPLES).sort(), ['env', 'json', 'toml']);
+  for (const [fmt, yaml] of Object.entries(TAKEOVER_TEMPLATE_EXAMPLES)) {
+    assert.ok(yaml.includes(`format: ${fmt}`), `${fmt} example must declare its format`);
+    assert.ok(yaml.includes('file: ~'), `${fmt} example must show the file path`);
+    assert.ok(yaml.includes('{{base_url}}'), `${fmt} example must reference placeholders`);
+  }
+  const documented = TAKEOVER_PLACEHOLDERS.map((p) => p.name);
+  for (const ph of ['{{base_url}}', '{{token}}', '{{provider_id}}', '{{mcp.url}}', '{{model.id}}', '{{model.capabilities}}', '{{model.efforts}}']) {
+    assert.ok(documented.includes(ph), `placeholder ${ph} missing from the help table`);
+  }
+});
+
+test('takeoverVariantLabel names variants uniformly across agents', () => {
+  assert.equal(takeoverVariantLabel({ name: 'pi', protocol: 'anthropic', auto_selected: true }), 'Auto (Anthropic)');
+  assert.equal(takeoverVariantLabel({ name: 'pi', protocol: '', auto_selected: true }), 'Auto');
+  assert.equal(takeoverVariantLabel({ name: 'pi', protocol: 'anthropic', auto_selected: false }), 'All Anthropic');
+  assert.equal(takeoverVariantLabel({ name: 'pi-openai', protocol: 'openai' }), 'All Chat Completion');
+  assert.equal(takeoverVariantLabel({ name: 'pi-responses', protocol: 'responses' }), 'All Responses');
+  assert.equal(takeoverVariantLabel({ name: 'custom', protocol: '' }), 'custom');
+  assert.equal(takeoverVariantLabel(null), '');
+});
+
+test('takeoverClientLabel renders family names, not variant ids', () => {
+  assert.equal(takeoverClientLabel({ name: 'claude', family: 'claude', protocol: 'anthropic' }), 'claude');
+  assert.equal(takeoverClientLabel({ name: 'opencode-openai', family: 'opencode', protocol: 'openai' }),
+    'opencode (Chat Completion)');
+  assert.equal(takeoverClientLabel({ name: 'opencode-responses', family: 'opencode', protocol: 'responses' }),
+    'opencode (Responses)');
+  // No family/protocol signal → the raw name is all we have.
+  assert.equal(takeoverClientLabel({ name: 'my-agent' }), 'my-agent');
+  assert.equal(takeoverClientLabel(null), '');
 });

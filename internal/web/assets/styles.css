@@ -676,10 +676,10 @@ dialog.live-detail-pop .modal-body { overflow: auto; }
 .live-detail-row .log-pre {
   max-height: min(70vh, 760px);
 }
-.code-json .j-key { color: var(--accent-ink); }
-.code-json .j-str { color: var(--ok-fg); }
-.code-json .j-num { color: var(--muted); }
-.code-json .j-lit { color: var(--muted); font-style: italic; }
+.code .j-key, .code-json .j-key { color: var(--accent-ink); }
+.code .j-str, .code-json .j-str { color: var(--ok-fg); }
+.code .j-num, .code-json .j-num { color: var(--muted); }
+.code .j-lit, .code-json .j-lit { color: var(--muted); font-style: italic; }
 
 /* A single over-long line collapses into a <details>. */
 .json-long { margin: 4px 0; }
@@ -1042,6 +1042,11 @@ textarea.yaml {
   color: var(--err-fg);
 }
 .btn.danger:hover { background: var(--err-bg); border-color: color-mix(in srgb, var(--err) 55%, var(--border)); }
+.btn.ok {
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
+  color: var(--ok-fg);
+}
+.btn.ok:hover { background: var(--ok-bg); border-color: color-mix(in srgb, var(--ok) 55%, var(--border)); }
 .btn.danger-solid {
   background: var(--err);
   border-color: var(--err);
@@ -1130,16 +1135,17 @@ details.editor > .editor-body { padding: 14px 16px; }
 .req-controls > label { height: 34px; }
 .req-controls > label { display: inline-flex; align-items: center; gap: 4px; }
 
-/* v2 Requests toolbar widths: the session select auto-fits its widest option
-   (full ids — the closed box shows the whole id once it fits; 16rem floor
-   keeps it usable before sessions load, 26rem ceiling keeps an extreme id
-   from stretching the row) while the provider/model combo inputs shrink;
-   they filter by prefix, so 9rem comfortably fits a typed provider/model
-   name. Scoped to this toolbar only (Security/Live rows keep the .req-input
-   defaults). */
-.req-controls #req-session { min-width: 16rem; max-width: 26rem; }
+/* v2 Requests toolbar widths — sized to hold the WHOLE filter row on one
+   line at default resolutions (agent + session + provider + model + shadow
+   + errors + refresh ≈ the card width after the 210px sidebar): the session
+   select drops the old full-id 16–26rem box for an 11–14rem box (long ids
+   ellipsize in the closed box; the OS popup still shows the full id, and the
+   title tooltip carries it), and the provider/model combo inputs tighten to
+   7rem (they filter by prefix — a typed name fits). Scoped to this toolbar
+   only (Security/Live rows keep the .req-input defaults). */
+.req-controls #req-session { min-width: 11rem; max-width: 14rem; }
 .req-controls #req-provider,
-.req-controls #req-model { width: 8rem; max-width: 8rem; }
+.req-controls #req-model { width: 7rem; max-width: 7rem; }
 
 /* Searchable combobox dropdown. */
 .combo { position: relative; display: inline-flex; }
@@ -1213,7 +1219,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
   max-height: calc(100vh - var(--topbar-h) - 36px);
   overflow: auto;
 }
-.acct-nav-title {
+.acct-nav-title, .req-nav-title {
   font-size: 0.6875rem;
   text-transform: uppercase;
   letter-spacing: .06em;
@@ -1257,19 +1263,31 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .acct-nav-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 0.75rem; }
 
 .acct-main { min-width: 0; }
-.status-main { min-width: 0; }
+.status-main, .req-main { min-width: 0; }
 /* card rhythm comes from the shared .tab-panel rule (layout section). */
 
 /* status sidebar — visually identical to .acct-nav but a DISTINCT class (see
    v1 note: the Accounts tab's querySelector must never match the Status
    sidebar when both DOM trees are live). */
-.status-layout {
+.status-layout, .req-layout {
   display: grid;
   grid-template-columns: 210px 1fr;
   gap: 20px;
   align-items: start;
 }
-.status-nav {
+/* requests sidebar groups: the title names the traffic type (Model / MCP),
+   the items under it (All Requests / Live Requests) are indented one level;
+   the group holding the active item carries data-on and its title takes the
+   accent ink. Items share the flat status-nav selection language (tinted
+   fill + indicator bar on active, quiet surface hover) — no borders, no
+   per-item chrome. */
+.req-nav-group { display: grid; gap: 2px; }
+.req-nav-group + .req-nav-group { margin-top: 14px; }
+.req-nav-group .req-nav-title { padding: 2px 8px 6px; }
+.req-nav-group[data-on] .req-nav-title { color: var(--accent-ink); }
+.req-nav-group .req-nav-item { padding-left: 20px; }
+
+.status-nav, .req-nav {
   background: var(--surface);
   border: 1px solid var(--border-2);
   border-radius: var(--r-card);
@@ -1280,7 +1298,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
   max-height: calc(100vh - var(--topbar-h) - 36px);
   overflow: auto;
 }
-.status-nav-item {
+.status-nav-item, .req-nav-item {
   appearance: none;
   width: 100%;
   background: transparent;
@@ -1297,13 +1315,13 @@ input[type="checkbox"] { accent-color: var(--accent); }
   text-align: left;
   position: relative;
 }
-.status-nav-item:hover { background: var(--surface-2); }
-.status-nav-item.active {
+.status-nav-item:hover, .req-nav-item:hover { background: var(--surface-2); }
+.status-nav-item.active, .req-nav-item.active {
   background: color-mix(in srgb, var(--accent) 10%, var(--surface));
   color: var(--accent-ink);
   font-weight: 600;
 }
-.status-nav-item.active::before {
+.status-nav-item.active::before, .req-nav-item.active::before {
   content: '';
   position: absolute;
   left: 0;
@@ -1351,8 +1369,8 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .model-caps .table th:last-child, .model-caps .table td:last-child { padding-right: 16px; }
 .model-caps-empty { color: var(--muted); }
 @media (max-width: 720px) {
-  .status-layout { grid-template-columns: 1fr; }
-  .status-nav {
+  .status-layout, .req-layout { grid-template-columns: 1fr; }
+  .status-nav, .req-nav {
     position: static;
     max-height: none;
     display: flex;
@@ -1360,8 +1378,10 @@ input[type="checkbox"] { accent-color: var(--accent); }
     gap: 4px;
     padding: 8px;
   }
-  .status-nav-item { width: auto; flex: 0 1 auto; }
-  .status-nav-item.active::before { display: none; }
+  .status-nav-item, .req-nav-item { width: auto; flex: 0 1 auto; }
+  .status-nav-item.active::before, .req-nav-item.active::before { display: none; }
+  .req-nav-group .req-nav-title { width: 100%; padding: 0 4px 4px; }
+  .req-nav-group .req-nav-item { padding-left: 10px; }
 }
 .acct-toolbar {
   display: flex;
@@ -1585,6 +1605,122 @@ dialog::backdrop { background: rgba(8,12,20,.55); }
 .modal-status { font-size: 0.75rem; color: var(--muted); font-family: var(--mono); margin-top: 8px; }
 .modal-status.err { color: var(--err-fg); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+/* ---------- config code blocks (takeover template / rendered preview) ---------- */
+/* One code-block implementation shared by the JSON highlighter's .code-json
+   and the takeover YAML/TOML/env highlighters — token colors live on the
+   j-* classes below. */
+.code {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  margin: 0;
+  padding: 12px 14px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-inner);
+}
+.code .j-com { color: var(--muted); font-style: italic; }
+
+/* Wide takeover dialogs (template editor / run confirm): config content
+   needs more room than the default 520px dialog. Scroll lives on the body,
+   same pattern as dialog.live-detail-pop. */
+dialog.tk-wide { max-width: min(880px, calc(100vw - 48px)); }
+dialog.tk-wide .modal-body { overflow: auto; max-height: calc(100vh - 160px); }
+/* The run-confirm dialog locks its body height AFTER the first preview
+   renders (app.js sets it inline): the initial dialog hugs its content —
+   no empty floor — and later selection changes swap content inside a fixed
+   frame instead of resizing (re-centring) the popup. The max-height caps
+   the lock to the viewport. */
+dialog.tk-fixed .modal-body { max-height: calc(100vh - 150px); }
+
+/* Takeover family table: one header row per client family sharing the
+   variant rows' column grid; its variant rows are visually nested. */
+.tk-family > td {
+  background: var(--surface-2);
+  border-top: 1px solid var(--border);
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+.tk-family .tk-fam-name { font-weight: 600; }
+
+/* Takeover run dialog: chip pickers (scope / subsets / variants). One
+   interaction language for every choice; selected = amber outline + tint
+   (the design system's selected state, solid amber stays with .btn.primary). */
+.tk-pick { display: grid; gap: 8px; margin-bottom: 12px; }
+.tk-pick-row { display: flex; align-items: flex-start; gap: 10px; }
+.tk-pick-label {
+  min-width: 88px; padding-top: 3px;
+  font-size: 0.75rem; color: var(--muted);
+}
+.tk-chips { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; }
+.tk-chips.scroll { max-height: 128px; overflow: auto; padding-right: 4px; }
+.tk-chip {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--muted);
+  border-radius: var(--r-chip);
+  padding: 2px 9px;
+  font-size: 0.6875rem;
+  font-family: var(--mono);
+  cursor: pointer;
+  transition: border-color .12s ease, background-color .12s ease, color .12s ease;
+}
+.tk-chip:hover { border-color: color-mix(in srgb, var(--text) 22%, var(--border)); color: var(--text); }
+/* Selected = neutral raised state (surface-3 + full text color): with most
+   chips selected by default the picker must read calm, not alarm-tinted;
+   deselected entries fade to muted instead. */
+.tk-chip[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--text) 30%, var(--border));
+  background: var(--surface-3);
+  color: var(--text);
+  font-weight: 500;
+}
+.tk-chip[aria-pressed="false"] {
+  opacity: .62;
+}
+
+/* Takeover run dialog: the selection summary bar + one CARD per file a
+   takeover would write (bordered, header strip, embedded code view). */
+.tk-status { display: block; min-height: 1rem; font-size: 0.6875rem; }
+.tk-summary {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 0.75rem; color: var(--muted);
+  border-bottom: 1px solid var(--border-2);
+  padding-bottom: 6px; margin-bottom: 10px;
+}
+.tk-summary .val { color: var(--text); font-weight: 500; font-family: var(--mono); font-size: 0.6875rem; }
+.tk-write {
+  border: 1px solid var(--border);
+  border-radius: var(--r-inner);
+  overflow: hidden;
+  margin: 0 0 12px 0;
+}
+.tk-write-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 0.75rem;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border-2);
+  padding: 7px 12px;
+}
+.tk-write-head .file { font-family: var(--mono); font-weight: 500; word-break: break-all; color: var(--text); }
+.tk-note {
+  padding: 6px 12px;
+  font-size: 0.6875rem;
+  line-height: 1.5;
+  white-space: pre-line;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-bottom: 1px solid var(--border-2);
+}
+.tk-write pre.code { border: none; border-radius: 0; max-height: 280px; }
+.tk-writes > .hint { display: block; margin: 8px 0; }
 
 /* ---------- responsive ---------- */
 @media (max-width: 720px) {

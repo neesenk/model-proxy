@@ -435,12 +435,14 @@ func TestWebAssetsRequestsSessionContract(t *testing.T) {
 			t.Errorf("pure.js missing %q", want)
 		}
 	}
-	// #status/live?session=… must survive a refresh: boot stashes the pin in
-	// bootLiveSession and renderLiveCard consumes it right after the mount
-	// that resets the selection (a direct boot apply raced that mount).
+	// #requests/live?session=… must survive a refresh: the requests mount
+	// stashes the pin in bootLiveSession and renderLiveCard consumes it right
+	// after the mount that resets the selection (a direct apply raced that
+	// mount). The hashchange path does the same for in-tab navigation.
 	for _, want := range []string{
 		"let bootLiveSession = '';",
-		"bootLiveSession = bootQuery.session;",
+		"bootLiveSession = parseHash().query.session;",
+		"bootLiveSession = liveSess;",
 		"if (bootLiveSession) {",
 	} {
 		if !strings.Contains(js, want) {
@@ -563,7 +565,7 @@ func TestWebAssetsRequestsSessionContract(t *testing.T) {
 		// an overflow ancestor becomes the scroll container for sticky
 		// descendants and a never-scrolling card kills the pin entirely.
 		`<div class="card card-open"><div class="card-body">`,
-		", 'tight', '', 'card-open'))",
+		`<div id="live-table"><span class="msg hint">connecting…</span></div>`,
 		// Zoom drag must not capture the pointer on pointerdown: capture
 		// retargets the release + derived click to the SVG root and kills
 		// every plain bar click. Capture belongs to the drag branch only.
@@ -798,22 +800,25 @@ func TestWebAssetsTakeoverTabContract(t *testing.T) {
 		`data-tab="takeover"`,
 		`id="tab-takeover"`,
 		`id="tk-modal"`,
+		`id="tk-run-modal"`,
 	} {
 		if !strings.Contains(indexHTML, want) {
 			t.Errorf("index.html missing %q", want)
 		}
 	}
 	for _, want := range []string{
-		`takeover: document.getElementById('tab-takeover'),`,               // panels map entry
-		`if (name === 'takeover') renderTakeoverTab();`,                    // both activate call sites
-		`tab === 'takeover'`,                                               // parseHash whitelist
-		`} else if (bootTab === 'takeover') {`,                             // boot chain branch
-		`async function renderTakeoverTab()`,                               // renderer exists
-		`apiGet('/api/takeover?mode=' + encodeURIComponent(takeoverMode))`, // read surface (mode preview)
-		`apiPost('/api/takeover', { client, mode: takeoverMode })`,         // run surface
-		`apiPost('/api/takeover/restore', { client })`,                     // restore surface
-		`/api/takeover/templates/`,                                         // template editor surface
-		`retainTab(panel, '.tk-host', loadTakeover)`,                       // re-entry guard marker
+		`takeover: document.getElementById('tab-takeover'),`,                           // panels map entry
+		`if (name === 'takeover') renderTakeoverTab();`,                                // both activate call sites
+		`tab === 'takeover'`,                                                           // parseHash whitelist
+		`} else if (bootTab === 'takeover') {`,                                         // boot chain branch
+		`async function renderTakeoverTab()`,                                           // renderer exists
+		`apiGet('/api/takeover')`,                                                      // read surface
+		`apiPost('/api/takeover', req)`,                                                // run surface (confirm dialog, req = {client, mode, scope, subsets})
+		`apiPost('/api/takeover/preview', Object.assign({ managed_only: true }, req))`, // dry-run preview (same req)
+		`apiPost('/api/takeover/preview', body || { client: name, mode: 'unified', managed_only: true });`, // editor preview (disk template, or template_body draft)
+		`apiPost('/api/takeover/restore', { client })`,                                                     // restore surface
+		`/api/takeover/templates/`,                                                                         // template editor surface
+		`retainTab(panel, '.tk-host', loadTakeover)`,                                                       // re-entry guard marker
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js missing %q", want)

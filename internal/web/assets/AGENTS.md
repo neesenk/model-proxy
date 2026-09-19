@@ -34,7 +34,7 @@
 | 表单控件 | `.field`/`.req-input`/`.route-target-row` | 全部表单与工具行 |
 | 按钮 | `.btn`（`.small`/`.primary`/`.danger`） | 全部动作 |
 | 日志行 | `.log-line` + app.js `bindLogSelection` | Logs 卡 |
-| JSON 高亮 | `.code-json`（`.j-key`/`.j-str`/`.j-num`/`.j-lit`） | body/JSON 视图 |
+| JSON 高亮 | `.code` 容器 + `.j-key`/`.j-str`/`.j-num`/`.j-lit`/`.j-com` token；pure.js `highlightJSON`（json）/`highlightYAML`/`highlightTOML`/`highlightEnv`（`highlightConfig` 分发） | body/JSON 视图、takeover 模板/渲染预览 |
 | 刷新门 | app.js `deferAutoRefresh`+`cancelAutoRefreshHold` | 全部 tick/SSE 渲染 |
 | tab 保留 | app.js `retainTab` | 全部 tab |
 | stale 横幅 | app.js `setRefreshError` + pure.js `staleDataText` | 刷新失败路径 |

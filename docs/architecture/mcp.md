@@ -68,6 +68,26 @@ request log `Record.Kind`（`json:"kind,omitempty"`）：空 = LLM 流量（历�
 名、`Provider`=账号虚拟 id（匿型为空）、status/latency/收发 size 与 body 截断策略与
 LLM 记录一致。MCP 交换进入 live events（`protocol="mcp"`，见下文「统计、Live 事件与配额冷却」）。
 
+**拆分流（`request_log.mcp_split`，默认关）**：开启时 `kind="mcp"` 记录改写入独立
+的 `mcp-YYYYMMDD.log` 流（`mcp_dir`，默认 `~/.model-proxy/log/mcp`，策略值与
+request_log 块共享；写入侧 `mcpLogTarget` 选流，截断 cap 取所选流的
+`MaxBodyBytes`）。requests- 流与尾随索引回到 LLM-only，`/api/requests?kind=mcp`
+经 admin 适配层改读拆分流（目录扫描，无索引），`Detail` 双流 fallthrough——语义
+细节见 `docs/architecture/fusion-shadow-cache.md` 的 Request log 节。客户端每
+thread 全量重握手（Codex 每 `thread/start` 对全部服务器 initialize +
+notifications/initialized + tools/list）是常态，拆分流让这类探测噪音不再混入
+LLM 请求日志与 Requests 页。
+
+**来源标识（agent/session_id 投影）**：每条 MCP 记录携带客户端归属——`agent`
+优先取 MCP 原生身份：initialize 帧的 `params.clientInfo.name`（`mcp.ParseClientInfo`
+提取，会话铸造/重初始化时经 `SessionTable.SetClient` 绑定到本地会话，后续只带
+会话 id 的请求也能归属），归一化到 `counters.AgentFromMCPClient` 的封闭标签集
+（`codex-mcp-client`→`codex`，与 UA 面同集）；UA（`counters.DetectAgent`）仅作
+兜底（GET 探测、无会话的预初始化交换；传输层 UA 如 `go-http-client` 会被
+clientInfo 覆盖）。`session_id` 优先取 `request_log.session_headers` 允许列表里
+客户端自带的会话头，否则用本地 `Mcp-Session-Id`（同一客户端 MCP 会话的交换
+按会话分组）。路由会话同样绑定（proxy 自答 initialize 后 `SetClient`）。
+
 ## CLI
 
 `model-proxy mcp list`（配置服务器表 + 路由表）与 `model-proxy mcp test <name>`（握手测活：
@@ -148,9 +168,11 @@ http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验�
   `MetricsStore` 刻意分离——MCP 交换无 token，不进 Status/Analytics/stats.db 统计管线。
   记录不依赖 request_log 开关。
 - MCP 交换（pinned/route/stdio 全覆盖）发布 live start/end（protocol="mcp"）：start 在
-  server/route 命中后发出，end 由 defer 恰好一次发出，status/provider 经
+  server/route 命中后发出（agent 取 UA 标签），end 由 defer 恰好一次发出，status/provider 经
   `mcpLiveWriter` 捕获（WriteHeader 截获 status、各 commit 点 `mcpSetLiveProvider`；
-  Flush 透传不破坏流式）。与 LLM 面同一契约：start/end 必带稳定 request_id 配对。
+  Flush 透传不破坏流式）；end 另携带 `mcpLog` 解析回写的 agent（clientInfo/会话绑定
+  标签）与 session_id（`mcpIdentity` 指针线程化，defer 在 handler 返回后发布、读到
+  回写值）。与 LLM 面同一契约：start/end 必带稳定 request_id 配对。
 - 路由 tools/call 候选构建时跳过**共享 MCP 工具时间窗耗尽**的 provider（智谱
   TIME_LIMIT 窗 `Kind=time + DetailLabel="By MCP tool" + RemainingPct==0`，经
   `Manager.Quota` 克隆读取；未轮询到则 fail-open）。这是预降权，call 时 429 failover
@@ -163,7 +185,9 @@ http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验�
   internal/mcp，探测由组合根全权实现。Web MCP tab 复用 card/table/badge 既有模式，
   全部渲染为用户触发（无自动刷新 tick）。
 - takeover `mcp:` 模板块（`json_path`+`json_entry` / `toml_section`+`toml_body`）把网关面
-  写成客户端 MCP 配置：合并语义——指向本代理 `/mcp/` 的陈旧条目先清（JSON 按 url 前缀、
-  TOML 按段名前缀+URL 内容），用户自有条目保留；网关面无条目时不动客户端配置。预设：
+  写成客户端 MCP 配置：**默认面 = 全部 route + 未被聚合的 server**（被聚合成员不重复
+  投影，`include_routed_members: true` 恢复全量；禁用面不投影）；合并语义——指向本代理
+  `/mcp/` 的陈旧条目先清（JSON 按 url 前缀、TOML 按段名前缀+URL 内容），用户自有条目
+  保留；网关面无条目时不动客户端配置。预设：
   `claude-mcp`（~/.claude.json mcpServers，独立族）、opencode 三变体（`mcp` 节）、codex
   （`[mcp_servers."<name>"]` 段）。

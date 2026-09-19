@@ -161,12 +161,18 @@ func (s *Server) handleRequestsList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
 	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/requests/"), "/")
+	// kind is the caller's stream hint (mcp rows drill the split stream
+	// directly; see appapi.RequestLogQueries.Detail).
+	detailStream := ""
+	if v := r.URL.Query().Get("kind"); v == "mcp" || v == "llm" {
+		detailStream = v
+	}
 	queries := s.reads.RequestLogQueries()
 	if queries == nil || id == "" {
 		writeJSONErr(w, http.StatusNotFound, "request logging is off or no id given")
 		return
 	}
-	records, err := queries.Detail(id)
+	records, err := queries.Detail(id, detailStream)
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "request query: "+err.Error())
 		return
@@ -382,7 +388,7 @@ func (s *Server) handleShadowReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	from, to := statsWindow(r.URL.Query(), 24*time.Hour)
-	entries, err := requestlog.ShadowReport(dir, requestlog.Filter{From: time.Unix(from, 0), To: time.Unix(to, 0), Limit: 10000})
+	entries, err := s.reads.RequestLogQueries().ShadowReport(requestlog.Filter{From: time.Unix(from, 0), To: time.Unix(to, 0), Limit: 10000})
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "shadow report: "+err.Error())
 		return
@@ -522,6 +528,29 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 // guard-adjudication session blocks (high verdicts), newest first.
 func (s *Server) handleSecurityBlocks(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"blocks": s.reads.SecurityBlocks()})
+}
+
+// handleSecurityAllowed serves GET /api/security/allowed: the operator
+// content overrides created by session-unblock cascades (hash-keyed; the
+// hit bytes themselves never persist).
+func (s *Server) handleSecurityAllowed(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"allowed": s.reads.SecurityAllowed()})
+}
+
+// handleSecurityDisallow serves DELETE /api/security/allowed/<hash>:
+// revokes one content override; the content returns to fresh adjudication
+// on its next occurrence.
+func (s *Server) handleSecurityDisallow(w http.ResponseWriter, r *http.Request) {
+	hash := strings.TrimPrefix(r.URL.Path, "/api/security/allowed/")
+	if hash == "" || strings.Contains(hash, "/") {
+		writeJSONErr(w, http.StatusBadRequest, "content hash is required")
+		return
+	}
+	if err := s.commands.SecurityDisallow(hash); err != nil {
+		writePortErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "disallowed", "hash": hash})
 }
 
 // handleSecurityAdjudications serves GET /api/security/adjudications: the

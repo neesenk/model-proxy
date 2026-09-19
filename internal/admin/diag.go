@@ -44,7 +44,7 @@ func (s *Service) Replay(ctx context.Context, id, providerName string) (appapi.R
 		return appapi.ReplayResult{}, appapi.NewHTTPError(http.StatusBadRequest,
 			"request_log is disabled — nothing to replay")
 	}
-	records, err := queries.Detail(id)
+	records, err := queries.Detail(id, "")
 	if err != nil {
 		return appapi.ReplayResult{}, err
 	}

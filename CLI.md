@@ -1094,12 +1094,18 @@ by action
 ```
 guard blocks [--json] [--config PATH]
 guard unblock <session-id> [--config PATH]
+guard allowed [--json] [--config PATH]
+guard disallow <content-hash> [--config PATH]
 ```
 
 `guard.adjudicate` 开启且 `block_session: true` 时，pattern 命中被指定模型判为 **high** 的会话会被拉黑（400 拒绝该会话后续请求，直至显式解除）；拉黑状态持久化（`~/.model-proxy/guard_blocks.json`）跨重启保留。本命令是解除面之一（另一面是 WebUI Security 页的 Blocked sessions 表）。
 
+**unblock 即终审**：拉黑条目记录判定背后的内容哈希，解除会话时级联把 repeat 拦截索引条目移入操作员豁免表（`~/.model-proxy/guard_allowed.json`，只存 hash）——同样字节不再被拦截、也不再送判（判定模型不翻操作员的案），verdict 缓存对应键同步删除；豁免可审计/可撤销。无哈希的旧条目（升级前创建）只放行会话，下次 repeat 重新拉黑时新条目即带哈希。
+
 - `guard blocks`：GET `/api/security/blocks`，按时间新到旧列出（session、rule、kind、ts、reason、request、model、解除命令提示）；空表输出 `• no adjudicated-blocked sessions`。`--json` 原样输出数组。
-- `guard unblock <session-id>`：DELETE `/api/security/blocks/<id>`，成功输出 `✓ unblocked session <id> — requests are admitted again`；未知会话 404（exit 1）。
+- `guard unblock <session-id>`：DELETE `/api/security/blocks/<id>`，成功输出 `✓ unblocked session <id> — requests are admitted again; the verdict's content joins the operator override table`；未知会话 404（exit 1）。
+- `guard allowed`：GET `/api/security/allowed`，列出操作员内容豁免（hash、rule、kind、source、ts、撤销命令提示）；空表输出 `• no operator content overrides`。`--json` 原样输出数组。
+- `guard disallow <content-hash>`：DELETE `/api/security/allowed/<hash>`，撤销一条豁免——后续同字节回归逐次新判；未知 hash 404（exit 1）。
 - 错误路径：daemon 不可达 / HTTP 非 200 → `✗ <message>` exit 1；无子命令或未知子命令 → usage exit 1。
 - 实现与锁定测试：`internal/cli/guard/guard.go`、`guard_cli_test.go`；判定链路本体见 `internal/adjudicate` 与 README「出站安全扫描与审计」。
 

@@ -58,6 +58,11 @@ type Ports struct {
 	// RequestLogDirectory reports the request-log directory ("" when the
 	// request log is disabled).
 	RequestLogDirectory func() string
+	// MCPRequestLogDirectory reports the split MCP stream's directory
+	// ("" when request_log.mcp_split is off or the request log is disabled).
+	// kind=mcp queries and detail fallthroughs route there instead of the
+	// requests- stream.
+	MCPRequestLogDirectory func() string
 	// MCPState returns the detached MCP gateway state (config shape + live
 	// session gauges) for the /api/mcp projection. Nil = MCP surface reports
 	// empty.

@@ -301,6 +301,10 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleSecurityExplain(w, r)
 	case p == "/api/security/blocks" && r.Method == http.MethodGet:
 		s.handleSecurityBlocks(w, r)
+	case p == "/api/security/allowed" && r.Method == http.MethodGet:
+		s.handleSecurityAllowed(w, r)
+	case strings.HasPrefix(p, "/api/security/allowed/") && r.Method == http.MethodDelete:
+		s.handleSecurityDisallow(w, r)
 	case p == "/api/security/adjudications" && r.Method == http.MethodGet:
 		s.handleSecurityAdjudications(w, r)
 	case strings.HasPrefix(p, "/api/security/blocks/") && r.Method == http.MethodDelete:

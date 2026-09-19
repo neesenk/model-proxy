@@ -223,7 +223,10 @@ accessor）与 `observe/logfile`、`observe/logx` 的请求访问日志数据面
 JSONL Record schema、body/header 截断与白名单、Record 编码与入队；非阻塞队列、单 writer 的轮转/
 retention/owner-only 权限由共享 `observe/logfile` sink 拥有（文件按天命名
 `requests-YYYYMMDD.log`，同日重启追加同一文件，size 轮转改名
-`requests-YYYYMMDD--HHMMSS-<seq>.log`，首次写入才懒建文件）；流式 top-K 查询（带文件级提前终止：peek 文件末尾记录
+`requests-YYYYMMDD--HHMMSS-<seq>.log`，首次写入才懒建文件；`request_log.mcp_split`
+开启时另有独立 `mcp-` 前缀拆分流写 `mcp_dir`，`Options.FilePrefix` 参数化、
+查询侧 `QueryRecordsIn`/`QuerySummariesWithFacetsIn` 按前缀扫描，语义细节见
+`docs/architecture/fusion-shadow-cache.md` 的 Request log 节）；流式 top-K 查询（带文件级提前终止：peek 文件末尾记录
 Ts 为上界，堆满或越 From 下界的文件整文件跳过，peek 异常回退全量流扫）、list-safe
 Summary 和 Shadow 聚合仍归本包。尾随 SQLite 索引同样归本包（`index.go` 的
 `Indexer`：<dir>/index.db 派生视图、250ms reconcile、失效自愈、(file,offset,length)
