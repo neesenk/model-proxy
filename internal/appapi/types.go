@@ -312,11 +312,41 @@ type ProviderModelCaps struct {
 	Models      map[string]ModelProtocols `json:"models"`
 }
 
+// ModelsCatalogStatus is the models.dev metadata cache's on-disk state,
+// surfaced on GET /api/models for the Status page's Model Catalog card. A
+// zero count with no fetched_at means no cache has been pulled yet. The read
+// is disk-only — it never triggers a network refresh.
+type ModelsCatalogStatus struct {
+	Count     int        `json:"count"`
+	FetchedAt *time.Time `json:"fetched_at,omitempty"`
+	ETag      string     `json:"etag,omitempty"`
+}
+
+// ModelMatchEntry is one configured model's catalog-match state for the Model
+// Catalog card: whether HydrateModels' lookup finds the model in the models.dev
+// cache, and which catalog id the lookup uses (the provider's catalog_alias
+// target when aliased, else the model id itself). Entries mirror HydrateModels'
+// model set — each provider's models plus route-referenced models, deduplicated
+// per provider — sorted by provider then model.
+type ModelMatchEntry struct {
+	Provider  string `json:"provider"`
+	Model     string `json:"model"`
+	CatalogID string `json:"catalog_id"`
+	Matched   bool   `json:"matched"`
+	Aliased   bool   `json:"aliased"`
+}
+
 // ModelsDocument is the transport projection for GET /api/models: the startup
-// protocol probe's verdicts per provider and model. Providers with no probe
-// data are omitted; an empty store projects `{"providers":{}}`.
+// protocol probe's verdicts per provider and model, the models.dev cache's
+// on-disk status, the configured-model match list against that cache, and the
+// sorted catalog id list for the match picker. Providers with no probe data
+// are omitted; an empty store projects `{"providers":{},"catalog":{"count":0},"match":[]}`.
+// CatalogIDs is empty when no cache has been pulled.
 type ModelsDocument struct {
-	Providers map[string]ProviderModelCaps `json:"providers"`
+	Providers  map[string]ProviderModelCaps `json:"providers"`
+	Catalog    ModelsCatalogStatus          `json:"catalog"`
+	Match      []ModelMatchEntry            `json:"match"`
+	CatalogIDs []string                     `json:"catalog_ids,omitempty"`
 }
 
 // ModelsRefreshDrop is one model dropped by the models-refresh endpoint probe,

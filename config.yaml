@@ -50,7 +50,8 @@ providers:
     aqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
     # peak_hours: "09:00-18:00"  # optional: route scheduling deprioritizes aqp during its peak window
     headers: # sent on every aqp upstream request (forward + probe), after auth
-      x-ccswitch-client: "0.2.7" # mirror AIS Switch's client header (bare app version, verified vs 0.2.1 binary + live log); bump when AIS Switch updates
+      x-ccswitch-client: "0.2.7" # mirror AIS Switch's client header (bare app version, verified vs 0.2.1 binary + live log);
+                                 # bump when AIS Switch updates
     models:
       - claude-opus-5
       - claude-sonnet-5
@@ -395,7 +396,8 @@ mcp:
     transport: stdio
     provider: zhipu
     command: [npx, -y, "@z_ai/mcp-server"]
-    env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU} # literals OK for benign keys; credential-shaped names (…_KEY/TOKEN/…) still require indirection
+    env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU} # literals OK for benign keys; credential-shaped names (…_KEY/TOKEN/…)
+                                                                # still require indirection
 mcp_routes:
   # Web research: search (three engines by scenario — parameter shapes differ,
   # so they are NOT one failover set), read+clean (zhipu reader and firecrawl

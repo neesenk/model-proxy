@@ -209,6 +209,68 @@ export function settingsRestartKeys(diff, groups) {
   return out;
 }
 
+// sumItemHTML renders one .sum-grid cell: small muted key (with an optional
+// on/off state badge) over a mono value that ellipsizes with a title tooltip.
+// Shared by the Config Summary card (configSummaryHTML) and the Status page's
+// Model Catalog card — the single implementation of this label+value cell.
+export function sumItemHTML(k, state, v) {
+  const badge = state === 'on' ? ' <span class="badge ok">on</span>'
+    : state === 'off' ? ' <span class="badge muted">off</span>' : '';
+  return `<div class="sum-item"><div class="sum-k">${esc(k)}${badge}</div>` +
+    `<div class="sum-v" title="${esc(v)}">${esc(v)}</div></div>`;
+}
+
+// configSummaryHTML renders the Config tab's Summary card body: a KPI tile
+// row (the shared .kpi-grid/.kpi headline-metrics component) for listen /
+// providers / routes, then a .sum-grid overview of the feature blocks from
+// the settings projection (log / request_log / stats / cache / guard) plus
+// the MCP gateway surface (GET /api/mcp, passed as `mcp`; null when that
+// fetch failed — the item then renders '—' without a state badge rather
+// than claiming the gateway is off). Absent scalar keys show the code
+// default marked "(default)" — the same convention the settings form's
+// placeholders use; log_level/log_file arrive loader-filled, so they never
+// carry the marker. The fallback default literals here (log file, stats.db,
+// request dir, cache ttl/entries) mirror the loader's Go defaults
+// (internal/config) — Go is authoritative; keep them in sync when a default
+// changes. On/off blocks carry a badge (state is always a badge,
+// per the design contract).
+export function configSummaryHTML(cfg, mcp) {
+  const c = cfg || {};
+  const s = c.summary || {};
+  const settings = c.settings || {};
+  const pm = c.provider_models || {};
+  const meta = c.provider_meta || {};
+  const modelCount = Object.values(pm).reduce((n, l) => n + (Array.isArray(l) ? l.length : 0), 0);
+  const aliasCount = Object.values(meta).reduce((n, m) => n + Object.keys((m && m.alias) || {}).length, 0);
+  const eff = (v, def) => (v === undefined || v === null || v === '' || v === 0 ? `${def} (default)` : String(v));
+  const onoff = (b) => (b ? 'on' : 'off');
+  const tile = (k, v, d) =>
+    `<div class="kpi"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>${d ? `<div class="d">${esc(d)}</div>` : ''}</div>`;
+  const item = sumItemHTML;
+  const rl = settings.request_log || {};
+  const st = settings.stats || {};
+  const cache = settings.cache || {};
+  const g = settings.guard || {};
+  const mcpServers = (mcp && mcp.servers) || [];
+  const mcpRoutes = (mcp && mcp.routes) || [];
+  const mcpEnabled = (list) => list.filter((x) => x && x.enabled).length;
+  const mcpConfigured = mcpServers.length + mcpRoutes.length > 0;
+  return `<div class="kpi-grid sum-tiles">` +
+    tile('listen', s.listen || '—') +
+    tile('providers', fmtNum(s.provider_count), `${fmtNum(modelCount)} models · ${fmtNum(aliasCount)} aliases`) +
+    tile('routes', fmtNum(s.route_count), 'effective table') +
+    `</div><div class="sum-grid">` +
+    item('log', '', `${settings.log_level || 'info'} → ${settings.log_file || '/tmp/model-proxy.log'}`) +
+    item('request_log', rl.enabled ? 'on' : 'off', rl.enabled ? eff(rl.dir, '~/.model-proxy/log/requests') : '—') +
+    item('stats', '', eff(st.db_path, '~/.model-proxy/stats.db')) +
+    item('cache', cache.enabled ? 'on' : 'off', cache.enabled ? `ttl ${eff(cache.ttl, '10m')} · max ${cache.max_entries || 1000} entries` : '—') +
+    item('guard', '', `secrets ${g.secrets || 'log'} · paths ${g.paths || 'log'} · known ${onoff(g.known_secrets)} · decode ${onoff(g.decode)}`) +
+    item('mcp', mcp ? (mcpConfigured ? 'on' : 'off') : '', mcpConfigured
+      ? `${mcpEnabled(mcpServers)}/${mcpServers.length} servers · ${mcpEnabled(mcpRoutes)}/${mcpRoutes.length} routes enabled`
+      : '—') +
+    `</div>`;
+}
+
 // YAML_EDITOR_MIN_HEIGHT is the hard floor for the Raw YAML editor: below it
 // the Config card would collapse into an unusable strip, so short viewports
 // scroll the page instead.
@@ -250,6 +312,77 @@ export function modelCapMatrix(providers) {
     out.push({ name, fingerprint: caps.fingerprint || '', probedAt: caps.probed_at || '', models });
   }
   return out;
+}
+
+// catalogMatchSummary folds the GET /api/models match list into the counts the
+// Model Catalog card's collapsed summary line shows.
+export function catalogMatchSummary(entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  const matched = list.filter((e) => e && e.matched).length;
+  return { total: list.length, matched };
+}
+
+// catalogMatchHTML renders the Model Catalog card's Model Matching <details>
+// (collapsed by default; `open` restores the user's toggle across Status
+// ticks): one row per configured model with a matched/unmatched badge, the
+// effective catalog id (aliased lookups carry an "aliased" marker), and the
+// row action — Match for unmatched models, Edit + Clear for aliased ones,
+// '—' for direct matches. The interactive editor/save wiring lives in app.js
+// (catalogMatchEditorHTML + saveCatalogMatch); this pure layer owns markup
+// only. With an empty catalog cache the table is replaced by a Refresh hint —
+// without ids there is nothing to match against. Rows carry
+// data-provider/data-model for the delegated click handlers.
+export function catalogMatchHTML(entries, catalogEmpty, open) {
+  const list = Array.isArray(entries) ? entries : [];
+  if (!list.length) return '';
+  const { total, matched } = catalogMatchSummary(list);
+  let body;
+  if (catalogEmpty) {
+    body = '<div class="hint" style="margin-top:8px">catalog cache is empty — Refresh above to fetch models.dev metadata before matching</div>';
+  } else {
+    let rows = '';
+    for (const e of list) {
+      const badge = e.matched
+        ? '<span class="badge ok">matched</span>'
+        : '<span class="badge warn">unmatched</span>';
+      const catId = e.catalog_id || '';
+      const aliased = e.aliased ? ' <span class="badge muted">aliased</span>' : '';
+      let action = '<span class="subdue">—</span>';
+      if (e.aliased) {
+        action = `<button class="btn small" data-cat-match-edit data-provider="${esc(e.provider)}" data-model="${esc(e.model)}">Edit</button>` +
+          ` <button class="btn small" data-cat-match-clear data-provider="${esc(e.provider)}" data-model="${esc(e.model)}">Clear</button>`;
+      } else if (!e.matched) {
+        action = `<button class="btn small" data-cat-match-edit data-provider="${esc(e.provider)}" data-model="${esc(e.model)}">Match…</button>`;
+      }
+      rows += `<tr>
+        <td class="mono">${esc(e.provider)}</td>
+        <td class="mono">${esc(e.model)}</td>
+        <td>${badge}</td>
+        <td class="mono">${esc(catId)}${aliased}</td>
+        <td class="cat-match-action">${action}</td>
+      </tr>`;
+    }
+    body = `<table class="table">
+      <thead><tr><th>provider</th><th>model</th><th>status</th><th>catalog id</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  }
+  return `<details class="cat-match"${open ? ' open' : ''}>
+    <summary>Model Matching <span class="meta">${matched}/${total} matched</span></summary>
+    ${body}
+  </details>`;
+}
+
+// catalogMatchEditorHTML renders the inline editor that replaces a match
+// row's action cell: one datalist-backed input (suggestions = catalog_ids,
+// attached lazily by app.js) with Save/Cancel. The input follows the ✕
+// clear contract (attachClearable wired by app.js).
+export function catalogMatchEditorHTML(currentId) {
+  return `<span class="cat-match-editor">
+    <input class="req-input" type="text" list="cat-id-list" autocomplete="off" spellcheck="false" placeholder="models.dev catalog id" value="${esc(currentId || '')}">
+    <button class="btn small primary" data-cat-match-save>Save</button>
+    <button class="btn small" data-cat-match-cancel>Cancel</button>
+  </span>`;
 }
 
 // cacheHitRate derives the exact-response cache hit rate (GET /api/status
@@ -520,6 +653,111 @@ export function tokenRangeTriggerLabel(state) {
       : 'Custom…';
   }
   return tokenRangeLabel(state);
+}
+
+// tokenRangePickerHTML is the SINGLE markup source for the time-dimension
+// picker used by the Status tokens card, the Analytics toolbar and the
+// Accounts Token usage sections (identical .tr-* look and interaction): a two-part
+// trigger button (caption + active dimension + chevron) plus a popover with
+// the preset list on the left (checkmark on the active preset) and, while
+// open, a two-month custom-range calendar on the right. `ns` is the
+// data-attribute namespace ('tr'/'an'/'acc') so each tab wires its own state
+// without selector collisions; opts.now (ms) is injectable for tests,
+// opts.triggerId optionally pins an id on the trigger (the Status e2e flow
+// addresses #tr-trigger), opts.extraPresets prepends tab-local presets
+// (e.g. the Accounts tab's quota-window default) ahead of TOKEN_RANGES, and
+// opts.label overrides the trigger's value half for presets the shared
+// label helper doesn't know. range/picker are the tab's applied-range and
+// popover-UI states ({preset, customStart, customEnd} / {open, view, pick,
+// selecting}).
+export function tokenRangePickerHTML(range, picker, ns, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const triggerId = opts.triggerId ? ` id="${opts.triggerId}"` : '';
+  const presetList = [...(opts.extraPresets || []), ...TOKEN_RANGES];
+  const presets = presetList.map((w) => {
+    const active = w.value === 'custom'
+      ? (range.preset === 'custom' || picker.selecting)
+      : range.preset === w.value;
+    return `<button class="tr-preset${active ? ' active' : ''}" data-${ns}-preset="${esc(w.value)}">
+      <span class="tr-check">${active ? '✓' : ''}</span>${esc(w.label)}
+    </button>`;
+  }).join('');
+
+  let calendar = '';
+  if (picker.open) {
+    const months = twoMonthWindow(picker.view.year, picker.view.month).map(({ year, month }) => {
+      const weeks = calendarMonthGrid(year, month).map((week) => `<tr>${week.map((day) => {
+        if (day === null) return '<td class="tr-blank"></td>';
+        const dayYmd = ymd(year, month, day);
+        const future = isFutureDay(year, month, day, now);
+        // While a NEW pick is in progress the previously applied range's
+        // highlight gives way to the pick's own start circle.
+        const applied = range.preset === 'custom' && !picker.pick ? range : null;
+        const isStart = dayYmd === picker.pick || (applied && dayYmd === applied.customStart);
+        const isEnd = applied && dayYmd === applied.customEnd;
+        const inRange = applied && !isStart && !isEnd &&
+          dayYmd > applied.customStart && dayYmd < applied.customEnd;
+        const cls = ['tr-day'];
+        if (isStart || isEnd) cls.push('tr-day-selected');
+        else if (inRange) cls.push('tr-day-inrange');
+        return `<td><button class="${cls.join(' ')}" data-${ns}-day="${dayYmd}" ${future ? 'disabled' : ''}>${day}</button></td>`;
+      }).join('')}</tr>`).join('');
+      const header = WEEKDAYS.map((w) => `<th>${w}</th>`).join('');
+      return `<div class="tr-month">
+        <div class="tr-month-title">${esc(monthTitle(year, month))}</div>
+        <table class="tr-grid"><thead><tr>${header}</tr></thead><tbody>${weeks}</tbody></table>
+      </div>`;
+    }).join('');
+    const thisMonth = (() => { const d = new Date(now); return d.getFullYear() * 12 + d.getMonth(); })();
+    const viewRight = picker.view.year * 12 + picker.view.month + 1;
+    calendar = `<div class="tr-cal">
+      <button class="tr-nav tr-prev" data-${ns}-nav="-1" aria-label="previous month">‹</button>
+      <div class="tr-months">${months}</div>
+      <button class="tr-nav tr-next" data-${ns}-nav="1" aria-label="next month" ${viewRight >= thisMonth ? 'disabled' : ''}>›</button>
+    </div>`;
+  }
+
+  return `<div class="tr-wrap">
+    <button class="btn small tr-trigger" type="button"${triggerId} aria-haspopup="true" aria-expanded="${picker.open}">
+      <span class="tr-caption">Time Range</span>
+      <span class="tr-value">${esc(opts.label ?? tokenRangeTriggerLabel(range))}</span>
+      <span class="tr-chevron">▾</span>
+    </button>
+    <div class="tr-popover" data-popup ${picker.open ? '' : 'hidden'}>
+      <div class="tr-presets">${presets}</div>
+      ${calendar}
+    </div>
+  </div>`;
+}
+
+// quotaUsageFromSec reads the admin-projected current billing period start
+// (QuotaSnapshot.UsageFrom — the provider layer's UsageWindow derivation:
+// the ultimate window's ResetsAt − Duration, so 7d vs 30d cycles are
+// distinguished server-side; zero when not a resolvable plan). Returns unix
+// seconds, or null when absent/invalid/not in the past (Go's zero time
+// "0001-01-01…" parses to a hugely negative instant).
+export function quotaUsageFromSec(snap, now = Date.now()) {
+  if (!snap || typeof snap.UsageFrom !== 'string' || !snap.UsageFrom) return null;
+  const ms = new Date(snap.UsageFrom).getTime();
+  if (!Number.isFinite(ms) || ms <= 0 || ms >= now) return null;
+  return Math.floor(ms / 1000);
+}
+
+// quotaWindowFromSec resolves the quota-window preset for CROSS-PROVIDER
+// views (Status tokens cards, Analytics): a /api/status quota map in, the
+// FIRST provider (keys sorted — deterministic) whose snapshot projects a
+// usable UsageFrom out. Returns {from, key} (unix seconds + the provider
+// whose billing cycle drives the window — attribution for the aggregate
+// view, since providers may run 7d vs 30d cycles), or null when no plan
+// window resolves. Provider-scoped consumers (the Accounts tab, whose
+// selection picks the provider) resolve per-key instead.
+export function quotaWindowFromSec(quota, now = Date.now()) {
+  if (!quota) return null;
+  for (const key of Object.keys(quota).sort()) {
+    const from = quotaUsageFromSec(quota[key], now);
+    if (from != null) return { from, key };
+  }
+  return null;
 }
 
 // prettyJSON returns indented JSON (2-space) for a captured request/response

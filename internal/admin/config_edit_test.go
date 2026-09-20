@@ -159,6 +159,52 @@ func TestEditConfigProvider(t *testing.T) {
 	}
 }
 
+// TestEditConfigProviderCatalogAlias pins the Model Matching write path: the
+// mapping lands as a yaml map under the provider (validate accepts it because
+// the key names a configured model), and sending an empty map removes the key
+// entirely instead of leaving an empty mapping node.
+func TestEditConfigProviderCatalogAlias(t *testing.T) {
+	path := writeTestConfig(t)
+	spy := &reloadSpy{}
+	service := editService(t, path, spy)
+	if err := service.EditConfig(appapi.EditRequest{
+		Kind: "provider",
+		Name: "zhipu",
+		Data: map[string]any{"catalog_alias": map[string]any{"glm": "glm-4.6"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	content := readConfig(t, path)
+	if !strings.Contains(content, "catalog_alias") || !strings.Contains(content, "glm: glm-4.6") {
+		t.Errorf("catalog_alias write missing:\n%s", content)
+	}
+	// A key that is not in the provider's models list is rejected by validate
+	// and must not touch the file.
+	before := readConfig(t, path)
+	err := service.EditConfig(appapi.EditRequest{
+		Kind: "provider",
+		Name: "zhipu",
+		Data: map[string]any{"catalog_alias": map[string]any{"typo-model": "glm-4.6"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "not in its models: list") {
+		t.Errorf("typo key: want validate error, got %v", err)
+	}
+	if readConfig(t, path) != before {
+		t.Error("rejected catalog_alias edit changed the config file")
+	}
+	// Empty map deletes the key.
+	if err := service.EditConfig(appapi.EditRequest{
+		Kind: "provider",
+		Name: "zhipu",
+		Data: map[string]any{"catalog_alias": map[string]any{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if content := readConfig(t, path); strings.Contains(content, "catalog_alias") {
+		t.Errorf("empty catalog_alias map must delete the key:\n%s", content)
+	}
+}
+
 func TestEditConfigRoute(t *testing.T) {
 	path := writeTestConfig(t)
 	spy := &reloadSpy{}

@@ -24,8 +24,10 @@ import {
   esc, fmtNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
   verdictBadge, modelCapMatrix, providerCapsSummary, providerFrozen, providerNames, cacheHitRate,
-  settingsDiff, settingsRestartKeys, TOKEN_RANGES, tokensRangeQuery, tokenRangeLabel,
-  tokenRangeTriggerLabel, parseLocalDate, tokenRangeBounds, tokenCustomBounds,
+  catalogMatchHTML, catalogMatchEditorHTML,
+  settingsDiff, settingsRestartKeys, configSummaryHTML, TOKEN_RANGES, tokensRangeQuery, tokenRangeLabel,
+  tokenRangeTriggerLabel, parseLocalDate, tokenRangeBounds, tokenCustomBounds, tokenRangePickerHTML,
+  quotaUsageFromSec, quotaWindowFromSec,
   WEEKDAYS, monthTitle, calendarMonthGrid, twoMonthWindow, shiftMonth, ymd, isFutureDay, rangePick,
   parseSSE, isSSE, prettyJSON, formatJSONLoose, highlightJSON, splitLinesByBudget, linkedModels,
   sessionsForAgent, linkedAgents,
@@ -42,7 +44,7 @@ import {
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML,
   SECURITY_RANGES, securityRangeFromSecs, securityFilterQuery, securityFilterFromQuery, explainCacheKey,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
-  iconPin, iconRefresh, iconChevron, statusBadgeHTML, kpiDeltaClass, logLineHTML,
+  iconPin, iconRefresh, iconChevron, statusBadgeHTML, kpiDeltaClass, logLineHTML, sumItemHTML,
   takeoverRunSummary, takeoverRestoreSummary, takeoverVariantLabel,
   takeoverWriteVariantsLabel, takeoverClientLabel,
   takeoverFamilyGroups, takeoverFamilyBadge, highlightConfig,
@@ -69,6 +71,14 @@ function fmtTimeSafe(ts) {
   if (!ts) return '';
   const d = new Date(ts);
   return isNaN(d.getTime()) ? String(ts) : fmtTime(d.toISOString());
+}
+
+// fmtDateTimeSafe renders a timestamp as local date + time (the version time
+// of a cached artifact, where the date matters as much as the clock).
+function fmtDateTimeSafe(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return isNaN(d.getTime()) ? String(ts) : d.toLocaleString('en-US', { hour12: false });
 }
 
 function fmtTime(s) {
@@ -796,6 +806,10 @@ async function renderRequestsTab() {
   document.getElementById('req-refresh').onclick = refresh;
   document.getElementById('req-agent').onchange = onAgentSelect;
   document.getElementById('req-session').onchange = onSessionSelect;
+  // The shared ✕ affordance resets a picked filter to All (same contract as
+  // the text combos; the change dispatch drives onAgentSelect/onSessionSelect).
+  attachClearable(document.getElementById('req-agent'));
+  attachClearable(document.getElementById('req-session'));
   // The checkbox applies immediately too — every filter control (session,
   // combos, shadow select, errors only) has the same on-change behavior.
   document.getElementById('req-errors').onchange = refresh;
@@ -941,6 +955,8 @@ function renderRequestSelectors(combos) {
       ids.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
     sessionSel.value = requestsFilter.session;
   }
+  // Programmatic value sets fire no events — re-sync the ✕ affordance.
+  for (const sel of [agentSel, sessionSel]) syncClearable(sel);
 }
 
 // comboInstances tracks live comboboxes so one set of global listeners can
@@ -1051,6 +1067,8 @@ function attachCombo(input, options, onSelect) {
   input.addEventListener('blur', () => { setTimeout(close, 0); });
   comboInstances.add({ input, menu, close });
   wireComboGlobals();
+  // The shared ✕ clear affordance; clearing commits like an Enter (onSelect).
+  attachClearable(input, onSelect);
 }
 
 // positionCombo pins the fixed-positioned menu under the input, flipping above
@@ -1068,6 +1086,65 @@ function positionCombo(input, menu) {
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
   menu.style.minWidth = `${rect.width}px`;
+}
+
+// attachClearable adds the shared inline ✕ clear affordance to a filter
+// control (contract: docs/frontend.md — every suggestion-dropdown text input
+// gets one, and filter <select>s with an "All …" default get the same ✕ to
+// reset to All). The ✕ shows only while the control holds a value (the
+// host's .has-text class tracks input/change events); clicking it clears (or
+// resets to ''), refocuses the control, then commits through the control's
+// normal paths: a bubbling input+change pair (datalist/prefill/change
+// listeners) plus the optional onClear callback (a combobox's filter
+// commit). Combobox hosts (.combo) are reused in place — the ✕ takes the
+// chevron's slot while text is present; other controls gain a .clearable
+// wrapper span (on a <select> the ✕ sits left of the native arrow).
+function attachClearable(input, onClear) {
+  if (!input || input.dataset.clearWired === '1') return;
+  input.dataset.clearWired = '1';
+  let host = input.closest('.combo');
+  if (host) {
+    host.classList.add('clearable');
+  } else {
+    host = document.createElement('span');
+    host.className = 'clearable';
+    input.parentNode.insertBefore(host, input);
+    host.appendChild(input);
+  }
+  const isSelect = input.tagName === 'SELECT';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'clear-x';
+  btn.tabIndex = -1;
+  btn.title = isSelect ? 'Reset to All' : 'Clear';
+  btn.setAttribute('aria-label', isSelect ? 'Reset filter to All' : 'Clear input');
+  btn.textContent = '✕';
+  host.appendChild(btn);
+  const sync = () => host.classList.toggle('has-text', input.value.length > 0);
+  input.addEventListener('input', sync);
+  input.addEventListener('change', sync);
+  sync();
+  // mousedown preventDefault: the button never steals the control's focus, so
+  // a combobox's blur-close (or a datalist/select popup) cannot swallow the
+  // clear.
+  btn.addEventListener('mousedown', (event) => event.preventDefault());
+  btn.addEventListener('click', () => {
+    if (!input.value) return;
+    input.value = '';
+    sync();
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.focus();
+    if (onClear) onClear();
+  });
+}
+
+// syncClearable re-syncs the ✕ visibility after a PROGRAMMATIC value change
+// (which fires no input/change event) — e.g. renderRequestSelectors option
+// rebuilds or onLiveSessionChange's dropdown mirroring.
+function syncClearable(el) {
+  const host = el && el.closest('.clearable');
+  if (host) host.classList.toggle('has-text', el.value.length > 0);
 }
 
 // ===========================================================================
@@ -3145,6 +3222,8 @@ function renderLiveCard(target) {
     // SSE event may be far away, and a closed dropdown must not leave the
     // session list stale until it arrives.
     sel.onblur = () => refreshLiveSessionOptions();
+    // Shared ✕ affordance: resets to All (live) through the same onchange.
+    attachClearable(sel);
   }
   // Consume a boot-time #requests/live?session=… pin here: this mount is the
   // point that resets liveSessionFilter, and boot's direct apply raced it
@@ -3226,6 +3305,7 @@ function refreshLiveSessionOptions() {
   sel.innerHTML = '<option value="">All (live)</option>' +
     sorted.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
   sel.value = liveSessionFilter;
+  syncClearable(sel);
 }
 
 // (v2: liveSessionLabel — the 8…4 session-id abbreviation — was removed;
@@ -3247,7 +3327,10 @@ function onLiveSessionChange(value) {
   // the dropdown selection too; setting value programmatically fires no
   // change event, so no loop.
   const sel = document.getElementById('live-session');
-  if (sel) sel.value = value;
+  if (sel) {
+    sel.value = value;
+    syncClearable(sel);
+  }
   const tbl = document.getElementById('live-table');
   const panel = document.getElementById('live-session-panel');
   if (!value) {
@@ -4552,9 +4635,10 @@ const STATUS_SECTIONS = [
   { key: 'logs', label: 'Logs' },
 ];
 let statusCache = { st: null, tok: [], logs: [], accounts: [], agents: [], since: 0 };
-// modelsCache is the last GET /api/models response ({providers:{…}}): the
-// startup protocol probe's per-provider capability matrix. Read only through
-// modelsCache.<field> so jstests/contract.test.mjs pins the documented fields.
+// modelsCache is the last GET /api/models response ({providers:{…}, catalog}):
+// the startup protocol probe's per-provider capability matrix plus the
+// models.dev cache's disk status. Read only through modelsCache.<field> so
+// jstests/contract.test.mjs pins the documented fields.
 let modelsCache = { providers: {} };
 let statusSelected = 'schedule';
 
@@ -4622,8 +4706,9 @@ async function renderStatusTab(background = false) {
   try {
     // An incomplete custom range (tokensRangeQuery → null) never fires a
     // request the server would 400 — the cards keep their previous data
-    // while the date-input hint shows.
-    const rangeQuery = tokensRangeQuery(tokensRange, Date.now());
+    // while the date-input hint shows. 'quota' rides statusQuotaWindow (the
+    // 5s status snapshot's quota map, at most one tick stale).
+    const rangeQuery = statusTokensRangeQuery();
     // Each part settles independently ({ok, data?}): a failed part must
     // keep the last successful value in statusCache (never an empty array
     // that renders as "no data") and surface via the .refresh-err banner.
@@ -5354,17 +5439,46 @@ async function freezeProvider(name, btn) {
 // (muted, probe pending) visually distinct from no (err, concluded negative
 // or unsupported by definition). Providers with no probe data are omitted
 // server-side; an empty store renders a hint instead of a blank section.
+// The leading Model Catalog card shows the models.dev cache's disk state
+// (modelsCache.catalog — count, fetched_at version time, etag) as a
+// .sum-grid, with the Refresh action pinned to the card head's right edge
+// (same danger-solid button as the per-provider probe Refresh below).
 function renderModelsCard(target, providers) {
-  // models.dev metadata cache (the `models pull` web twin): the refreshed
-  // catalog is consumed by the next reload/takeover, so no re-render follows.
+  // models.dev metadata cache (the `models pull` web twin): Refresh persists
+  // the new cache to disk; the runtime consumes it on the next
+  // reload/takeover, but the card itself re-fetches /api/models so the status
+  // and Model Matching list reflect the fresh cache immediately.
   // The result text rides module state so the Status tick's re-render keeps it.
+  const cat = (modelsCache && modelsCache.catalog) || {};
+  const catalogGrid = [
+    sumItemHTML('models', '', cat.count ? fmtNum(cat.count) : '—'),
+    sumItemHTML('fetched', '', fmtDateTimeSafe(cat.fetched_at) || '—'),
+    sumItemHTML('etag', '', cat.etag || '—'),
+  ].join('');
+  // Model Matching: the configured-model × catalog match list (GET /api/models
+  // match block). Collapsed by default; the open state rides module state so
+  // the 5s Status tick never folds it back (AGENTS.md details-snapshot rule).
+  const matchBlock = catalogMatchHTML(modelsCache && modelsCache.match, !cat.count, catMatchOpen);
   target.insertAdjacentHTML('beforeend', buildCard(
     'Model Catalog',
     'models.dev metadata cache',
-    '<button class="btn small" data-catalog-refresh>Refresh Catalog</button> <span class="hint" data-catalog-result>' + esc(modelsCatalogResult) + '</span>',
-    'flush'));
+    `<div class="sum-grid">${catalogGrid}</div>
+     ${matchBlock}
+     <div class="hint" style="margin-top:8px">consumed on next reload/takeover <span data-catalog-result>${esc(modelsCatalogResult)}</span></div>`,
+    '',
+    '<button class="btn small danger-solid" data-catalog-refresh>Refresh</button>'));
   const catBtn = target.querySelector('[data-catalog-refresh]');
   if (catBtn) catBtn.addEventListener('click', () => refreshModelsCatalog(catBtn));
+  const catMatch = target.querySelector('details.cat-match');
+  if (catMatch) {
+    catMatch.addEventListener('toggle', () => { catMatchOpen = catMatch.open; });
+    catMatch.addEventListener('click', (event) => {
+      const editBtn = event.target.closest('[data-cat-match-edit]');
+      if (editBtn) { openCatalogMatchEditor(editBtn); return; }
+      const clearBtn = event.target.closest('[data-cat-match-clear]');
+      if (clearBtn) { saveCatalogMatch(clearBtn.dataset.provider, clearBtn.dataset.model, '', clearBtn); }
+    });
+  }
   const entries = modelCapMatrix(providers);
   if (!entries.length) {
     target.insertAdjacentHTML('beforeend', buildCard('Models', '',
@@ -5429,24 +5543,94 @@ async function refreshProviderModels(btn) {
 // (POST /api/models/catalog/refresh, the web twin of `model-proxy models
 // pull`) and reports the count/etag inline; failures keep the old cache and
 // show the backend message. The result text survives Status tick re-renders
-// via the module-level modelsCatalogResult.
+// via the module-level modelsCatalogResult. A successful refresh re-fetches
+// /api/models and re-renders the section: the cache file changed on disk, so
+// the catalog status AND the Model Matching list (match verdicts + the
+// picker's catalog_ids) are stale until refetched — the runtime still
+// consumes the new cache only on next reload/takeover.
 let modelsCatalogResult = '';
 
 async function refreshModelsCatalog(btn) {
   btn.disabled = true;
   btn.textContent = 'refreshing…';
+  let ok = false;
   try {
     const r = await apiPost('/api/models/catalog/refresh');
     modelsCatalogResult = `${fmtNum(r.count)} models cached${r.etag ? ` · etag ${r.etag}` : ''} — picked up on next reload/takeover`;
+    ok = true;
   } catch (e) {
     modelsCatalogResult = 'catalog refresh failed: ' + ((e && e.message) || String(e));
+  }
+  if (ok) {
+    // renderStatusTab refetches /api/models and re-renders the active
+    // section; the catalog result text rides modelsCatalogResult.
+    await renderStatusTab();
+    return;
   }
   const out = document.querySelector('[data-catalog-result]');
   if (out) out.textContent = modelsCatalogResult;
   const currentBtn = document.querySelector('[data-catalog-refresh]');
   if (currentBtn) {
     currentBtn.disabled = false;
-    currentBtn.textContent = 'Refresh Catalog';
+    currentBtn.textContent = 'Refresh';
+  }
+}
+
+// catMatchOpen is the Model Matching <details> open state, kept at module
+// level so the 5s Status tick (which rebuilds the Models section from scratch)
+// restores it instead of folding the list shut mid-browse.
+let catMatchOpen = false;
+
+// openCatalogMatchEditor swaps a match row's action cell for the inline
+// editor: a datalist-backed input over modelsCache.catalog_ids (the datalist
+// is attached lazily — thousands of <option> nodes are not worth rendering on
+// every tick) + Save/Cancel. The input follows the ✕ clear contract; while it
+// holds focus the auto-refresh gate defers the Status tick.
+function openCatalogMatchEditor(btn) {
+  const provider = btn.dataset.provider;
+  const model = btn.dataset.model;
+  const cell = btn.closest('td');
+  const details = btn.closest('details');
+  if (!cell) return;
+  const entry = ((modelsCache && modelsCache.match) || []).find((e) => e.provider === provider && e.model === model);
+  // Capture `details` BEFORE swapping the cell — the swap detaches btn, and
+  // closest() on a detached node finds nothing.
+  if (details && !details.querySelector('#cat-id-list')) {
+    const ids = (modelsCache && modelsCache.catalog_ids) || [];
+    details.insertAdjacentHTML('beforeend',
+      `<datalist id="cat-id-list">${ids.map((id) => `<option value="${esc(id)}">`).join('')}</datalist>`);
+  }
+  cell.innerHTML = catalogMatchEditorHTML(entry && entry.aliased ? entry.catalog_id : '');
+  const input = cell.querySelector('input');
+  attachClearable(input);
+  input.focus();
+  cell.querySelector('[data-cat-match-save]').addEventListener('click', (event) => {
+    saveCatalogMatch(provider, model, input.value.trim(), event.currentTarget);
+  });
+  // Cancel re-renders the section from cache — a user-initiated render that
+  // bypasses the auto-refresh gate (it discards only this editor).
+  cell.querySelector('[data-cat-match-cancel]').addEventListener('click', () => renderStatusSection('models'));
+}
+
+// saveCatalogMatch persists one catalog_alias mapping: it rebuilds the
+// provider's full desired map from the current match list (aliased entries
+// only) plus this edit — catalogId '' removes the model's mapping (Clear) —
+// and posts the whole map to /api/config/edit (empty map deletes the key
+// server-side). The config edit reloads the daemon; the tab then re-renders
+// from a fresh /api/models so the badge flips to the backend's own verdict.
+async function saveCatalogMatch(provider, model, catalogId, btn) {
+  const map = {};
+  for (const e of (modelsCache && modelsCache.match) || []) {
+    if (e.provider === provider && e.aliased) map[e.model] = e.catalog_id;
+  }
+  if (catalogId) map[model] = catalogId; else delete map[model];
+  if (btn) btn.disabled = true;
+  try {
+    await apiPost('/api/config/edit', { kind: 'provider', name: provider, data: { catalog_alias: map } });
+    await renderStatusTab();
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    window.alert('catalog match failed: ' + ((e && e.message) || String(e)));
   }
 }
 
@@ -5663,9 +5847,9 @@ function renderCacheCard(target, st) {
 
 function renderTokensCard(target, usage) {
   if (!usage || usage.length === 0) {
-    const empty = tokensRange.preset === 'all'
+    const empty = statusTokensEffectiveRange().preset === 'all'
       ? 'No observed usage yet. Counts accrue as the proxy streams SSE responses.'
-      : `No usage in the selected range (${tokenRangeLabel(tokensRange)}).`;
+      : `No usage in the selected range (${statusTokensRangeLabel()}).`;
     const html = buildCard('Token usage', '0',
       `<div class="empty-state">${empty}</div>`);
     target.insertAdjacentHTML('beforeend', html);
@@ -5722,11 +5906,53 @@ function sinceLabel() {
 let tokensRange = { preset: 'today', customStart: '', customEnd: '' };
 let tokensRangePicker = { open: false, view: null, pick: null, selecting: false };
 
+// statusQuotaWindow resolves the quota-window preset for the Status tokens
+// cards: the CROSS-PROVIDER quota map from the 5s status snapshot — the
+// first resolvable plan provider (keys sorted; pure.js quotaWindowFromSec
+// returns {from, key} — the key attributes whose billing cycle drives the
+// window, since providers may run 7d vs 30d).
+function statusQuotaWindow() {
+  return quotaWindowFromSec(statusCache.st && statusCache.st.quota);
+}
+
+// statusTokensEffectiveRange degrades an unresolvable 'quota' preset to
+// 'all' (checkmark, labels and the query stay in agreement — e.g. a stale
+// session after the last plan provider lost its snapshot).
+function statusTokensEffectiveRange() {
+  if (tokensRange.preset === 'quota' && !statusQuotaWindow()) {
+    return { preset: 'all', customStart: '', customEnd: '' };
+  }
+  return tokensRange;
+}
+
+// statusTokensRangeQuery builds the /api/tokens query for the tokens cards:
+// 'quota' → [first plan provider's UsageFrom, now], rolling with resets;
+// everything else via the shared tokensRangeQuery ('' = all-time).
+function statusTokensRangeQuery() {
+  const eff = statusTokensEffectiveRange();
+  if (eff.preset === 'quota') {
+    const q = statusQuotaWindow();
+    return q ? `?from=${q.from}&to=${Math.floor(Date.now() / 1000)}` : '';
+  }
+  return tokensRangeQuery(eff, Date.now());
+}
+
+// statusTokensRangeLabel renders the applied range for the cards' meta line
+// and empty states; 'quota' attributes the driving provider.
+function statusTokensRangeLabel() {
+  const eff = statusTokensEffectiveRange();
+  if (eff.preset === 'quota') {
+    const q = statusQuotaWindow();
+    return q ? `Quota (${q.key})` : 'All Time';
+  }
+  return tokenRangeLabel(eff);
+}
+
 // tokensRangeMeta is the shared range label for the Token usage and Agents
 // cards: the counting-epoch anchor for the cumulative view, the selected
 // range otherwise.
 function tokensRangeMeta() {
-  return tokensRange.preset === 'all' ? sinceLabel() : tokenRangeLabel(tokensRange);
+  return statusTokensEffectiveRange().preset === 'all' ? sinceLabel() : statusTokensRangeLabel();
 }
 
 // rangePickerClose closes the popover and discards any in-progress custom
@@ -5753,72 +5979,25 @@ function rangePickerOnOutside(e) {
 
 // renderTokensRangeControls draws the 时间维度-style time-dimension picker
 // above the Token usage / Agents cards (one picker drives both — they share
-// the same /api/tokens payload): a two-part trigger button (caption + active
-// dimension + chevron) opening a popover with a preset list on the left
-// (checkmark on the active preset, click applies and closes) and a two-month
-// calendar on the right for the custom range (first click sets start, second
-// sets end with swap, complete range applies and closes; future days are
-// dimmed and unclickable; ‹ › move the window by one month, never past the
-// month containing today).
+// the same /api/tokens payload): markup comes from the single pure.js
+// builder `tokenRangePickerHTML` (shared with Analytics/Accounts), the
+// popover offers a preset list on the left (checkmark on the active preset,
+// click applies and closes) and a two-month calendar on the right for the
+// custom range (first click sets start, second sets end with swap, complete
+// range applies and closes; future days are dimmed and unclickable; ‹ ›
+// move the window by one month, never past the month containing today).
 function renderTokensRangeControls(target) {
   const picker = tokensRangePicker;
-  const presets = TOKEN_RANGES.map((w) => {
-    const active = w.value === 'custom'
-      ? (tokensRange.preset === 'custom' || picker.selecting)
-      : tokensRange.preset === w.value;
-    return `<button class="tr-preset${active ? ' active' : ''}" data-tr-preset="${esc(w.value)}">
-      <span class="tr-check">${active ? '✓' : ''}</span>${esc(w.label)}
-    </button>`;
-  }).join('');
-
-  let calendar = '';
-  if (picker.open) {
-    const now = Date.now();
-    const months = twoMonthWindow(picker.view.year, picker.view.month).map(({ year, month }) => {
-      const weeks = calendarMonthGrid(year, month).map((week) => `<tr>${week.map((day) => {
-        if (day === null) return '<td class="tr-blank"></td>';
-        const dayYmd = ymd(year, month, day);
-        const future = isFutureDay(year, month, day, now);
-        // While a NEW pick is in progress the previously applied range's
-        // highlight gives way to the pick's own start circle.
-        const applied = tokensRange.preset === 'custom' && !picker.pick ? tokensRange : null;
-        const isStart = dayYmd === picker.pick || (applied && dayYmd === applied.customStart);
-        const isEnd = applied && dayYmd === applied.customEnd;
-        const inRange = applied && !isStart && !isEnd &&
-          dayYmd > applied.customStart && dayYmd < applied.customEnd;
-        const cls = ['tr-day'];
-        if (isStart || isEnd) cls.push('tr-day-selected');
-        else if (inRange) cls.push('tr-day-inrange');
-        return `<td><button class="${cls.join(' ')}" data-tr-day="${dayYmd}" ${future ? 'disabled' : ''}>${day}</button></td>`;
-      }).join('')}</tr>`).join('');
-      const header = WEEKDAYS.map((w) => `<th>${w}</th>`).join('');
-      return `<div class="tr-month">
-        <div class="tr-month-title">${esc(monthTitle(year, month))}</div>
-        <table class="tr-grid"><thead><tr>${header}</tr></thead><tbody>${weeks}</tbody></table>
-      </div>`;
-    }).join('');
-    const thisMonth = (() => { const d = new Date(now); return d.getFullYear() * 12 + d.getMonth(); })();
-    const viewRight = picker.view.year * 12 + picker.view.month + 1;
-    calendar = `<div class="tr-cal">
-      <button class="tr-nav tr-prev" data-tr-nav="-1" aria-label="previous month">‹</button>
-      <div class="tr-months">${months}</div>
-      <button class="tr-nav tr-next" data-tr-nav="1" aria-label="next month" ${viewRight >= thisMonth ? 'disabled' : ''}>›</button>
-    </div>`;
-  }
+  // The Quota Window preset rides the cross-provider quota map (first
+  // resolvable plan provider); an unresolvable preset degrades to 'all'.
+  const quota = statusQuotaWindow();
+  const eff = statusTokensEffectiveRange();
+  const extra = quota ? [{ value: 'quota', label: 'Quota Window' }] : [];
+  const label = (eff.preset === 'quota' && quota) ? `Quota (${quota.key})` : undefined;
 
   target.insertAdjacentHTML('beforeend',
     `<div class="tokens-toolbar">
-      <div class="tr-wrap">
-        <button class="btn small tr-trigger" id="tr-trigger" aria-haspopup="true" aria-expanded="${picker.open}">
-          <span class="tr-caption">Time Range</span>
-          <span class="tr-value">${esc(tokenRangeTriggerLabel(tokensRange))}</span>
-          <span class="tr-chevron">▾</span>
-        </button>
-        <div class="tr-popover" data-popup ${picker.open ? '' : 'hidden'}>
-          <div class="tr-presets">${presets}</div>
-          ${calendar}
-        </div>
-      </div>
+      ${tokenRangePickerHTML(eff, picker, 'tr', { triggerId: 'tr-trigger', extraPresets: extra, label })}
       <button class="btn small danger-solid" id="btn-tokens-reset">Reset counters</button>
     </div>`);
 
@@ -5886,9 +6065,9 @@ function renderTokensRangeControls(target) {
 // window as the provider/model table (both reset by the Reset counters button).
 function renderAgentsCard(target, agents) {
   if (!agents || !agents.length) {
-    const hint = tokensRange.preset === 'all'
+    const hint = statusTokensEffectiveRange().preset === 'all'
       ? 'No agent activity yet. Agents are detected from the client User-Agent (claude-cli, codex, opencode, pi); unrecognized clients are labeled by their User-Agent.'
-      : `No agent activity in the selected range (${tokenRangeLabel(tokensRange)}).`;
+      : `No agent activity in the selected range (${statusTokensRangeLabel()}).`;
     target.insertAdjacentHTML('beforeend', buildCard('Agents', tokensRangeMeta(),
       `<div class="msg hint">${hint}</div>`));
     return;
@@ -6396,7 +6575,7 @@ async function renderConfigTab() {
      <div class="card" id="preset-card">
        <header class="card-head"><h2>Add provider preset</h2></header>
        <div class="card-body">
-         <div class="row-actions">
+         <div class="row-actions preset-row">
            <select id="preset-select" class="req-input" aria-label="Provider preset"></select>
            <button class="btn small" id="btn-preset-add">Add &amp; reload</button>
          </div>
@@ -6514,22 +6693,21 @@ async function addPresetFromWizard() {
 }
 
 async function loadConfigAll() {
-  const cfg = await apiGet('/api/config');
+  // The MCP gateway surface is an independent read: a failure must not break
+  // the Config tab, so it degrades to null and the Summary's mcp item renders
+  // '—' without a state badge (never a false "off").
+  const [cfg, mcp] = await Promise.all([
+    apiGet('/api/config'),
+    apiGet('/api/mcp').catch(() => null),
+  ]);
   configCache = cfg;
   // Fill the preset wizard select in the same pass (independent of the
   // config body; failures leave the select empty without breaking the tab).
   loadPresetSelect();
-  const s = cfg.summary || {};
   document.getElementById('config-summary').outerHTML =
     `<div id="config-summary" class="card">
        <header class="card-head"><h2>Summary</h2></header>
-       <div class="card-body">
-         <dl class="kvs">
-           <dt>listen</dt><dd>${esc(s.listen || '—')}</dd>
-           <dt>providers</dt><dd>${fmtNum(s.provider_count)}</dd>
-           <dt>routes</dt><dd>${fmtNum(s.route_count)}</dd>
-         </dl>
-       </div>
+       <div class="card-body">${configSummaryHTML(cfg, mcp)}</div>
      </div>`;
   setYamlValue(cfg.yaml || '');
   // Fresh baseline for restart-key diffing; the lint result for the loaded
@@ -6743,6 +6921,7 @@ async function populateProviderDatalist() {
     if (nameInp && !nameInp.dataset.wired) {
       nameInp.dataset.wired = '1';
       nameInp.addEventListener('input', prefillProviderForm);
+      attachClearable(nameInp);
     }
     prefillProviderForm();
   } catch (_) { /* best-effort */ }
@@ -6860,6 +7039,7 @@ function buildRouteForm(editorId) {
   // When the route name matches an existing route, load its targets as rows.
   const nameInp = document.getElementById('route-name');
   nameInp.addEventListener('input', () => syncRouteRowsFromConfig(nameInp.value.trim()));
+  attachClearable(nameInp);
   document.getElementById('btn-route-addrow').addEventListener('click', () => addRouteTargetRow({ provider: '', model: '', priority: '' }));
   document.getElementById('btn-route-save').addEventListener('click', applyRouteEdit);
   document.getElementById('btn-route-delete').addEventListener('click', deleteRoute);
@@ -7427,6 +7607,78 @@ let accountsQuota = null;
 let accountsTokens = null;
 let accountsSelectedProvider = null;
 
+// accountsRange is the APPLIED time-dimension state of the Accounts tab's
+// Token usage sections (same shape and pure.js helpers as the Status tab's
+// tokensRange). The initial preset is 'quota' — the provider-layer-derived
+// current billing period (QuotaSnapshot.UsageFrom, projected by
+// /api/status: ultimate window's ResetsAt − Duration, 7d vs 30d cycles
+// distinguished server-side), so plan accounts' token numbers default to the
+// SAME window their quota snapshots describe (zhipu resets 09-25 17:50 on a
+// 7d cycle → the default window starts 09-18 17:50). Providers without a
+// resolvable plan window degrade to 'all' (the cumulative view this tab
+// historically showed). accountsRangeTouched marks an explicit user pick —
+// the 'quota' default re-resolves per provider (and as resets roll over)
+// until the user chooses something. accountsRangePicker is the popover's
+// own UI state; accountsRangePickerHost keys WHICH account card's picker
+// hosts the open popover (data-acct — the applied range is provider-wide,
+// the popover only ever renders in the one card it was opened in). All
+// module-level like tokensRange: they persist across re-renders and provider
+// switches, and an open popover defers the 30s tick (data-popup gate).
+let accountsRange = { preset: 'quota', customStart: '', customEnd: '' };
+let accountsRangeTouched = false;
+let accountsRangePicker = { open: false, view: null, pick: null, selecting: false };
+let accountsRangePickerHost = null;
+// accountsTokensQueryLast is the /api/tokens query the current accountsTokens
+// payload was fetched with — a provider switch (or a quota reset rolling
+// over) changes the derived quota window, and comparing against this detects
+// when the cached rows no longer match the selected provider's window.
+let accountsTokensQueryLast = null;
+
+// accountsQuotaFromSec resolves the selected provider's quota-derived window
+// start: the FIRST account whose snapshot projects a usable UsageFrom (pool
+// accounts on one plan share cadence; accounts without quota are skipped).
+function accountsQuotaFromSec() {
+  const providers = (accountsCache && accountsCache.providers) || [];
+  const p = providers.find((x) => x.name === accountsSelectedProvider);
+  if (!p) return null;
+  for (const a of (p.accounts || [])) {
+    const snap = accountsQuota ? accountsQuota[accountProviderKey(p, a)] : null;
+    const from = quotaUsageFromSec(snap);
+    if (from != null) return from;
+  }
+  return null;
+}
+
+// accountsEffectiveRange resolves the applied range for rendering/querying:
+// an unresolvable 'quota' preset (no plan window for this provider) degrades
+// to 'all' so the checkmark, labels and query all agree.
+function accountsEffectiveRange() {
+  if (accountsRange.preset === 'quota' && accountsQuotaFromSec() == null) {
+    return { preset: 'all', customStart: '', customEnd: '' };
+  }
+  return accountsRange;
+}
+
+// accountsRangeLabel is the display label for the applied range (trigger
+// value, collapsed hints, empty states).
+function accountsRangeLabel() {
+  const eff = accountsEffectiveRange();
+  return eff.preset === 'quota' ? 'Quota Window' : tokenRangeLabel(eff);
+}
+
+// accountsTokensQuery builds the /api/tokens query for the applied range:
+// 'quota' → the provider's current billing period [UsageFrom, now] (rolling
+// — recomputed on every fetch, so it follows resets); everything else via
+// the shared tokensRangeQuery ('' = all-time cumulative).
+function accountsTokensQuery() {
+  const eff = accountsEffectiveRange();
+  if (eff.preset === 'quota') {
+    const from = accountsQuotaFromSec();
+    return from != null ? `?from=${from}&to=${Math.floor(Date.now() / 1000)}` : '';
+  }
+  return tokensRangeQuery(eff) || '';
+}
+
 // renderAccountsTab fetches the account list + the quota + token snapshots in
 // parallel, then renders the provider sidebar + the selected provider's detail.
 // /api/status and /api/tokens are best-effort (a young daemon may have neither):
@@ -7488,17 +7740,28 @@ async function renderAccountsTab() {
 async function loadAccountsData(background = false) {
   const panel = panels.accounts;
   try {
-    const [acc, st, tok] = await Promise.all([
+    // Status first: its quota snapshot seeds the tokens query window (the
+    // 'quota' default derives UsageFrom from it), so the FIRST tokens fetch
+    // is already scoped instead of flashing all-time numbers and refetching.
+    // A failed status fetch keeps the LAST known quota (per-part settle: the
+    // quota cards and the derived window survive a transient failure).
+    const st = await apiGet('/api/status').catch(() => null);
+    if (st && st.quota) accountsQuota = st.quota;
+    // The applied time range rides the /api/tokens query ('' = all-time
+    // cumulative; from/to = SQLite minute-bucket aggregation; 'quota' rolls
+    // with the provider's reset schedule). tokensRangeQuery never returns
+    // null for an applied state — the '||' is defensive only.
+    const tokensQuery = accountsTokensQuery();
+    accountsTokensQueryLast = tokensQuery;
+    const [acc, tok] = await Promise.all([
       apiGet('/api/accounts'),
-      apiGet('/api/status').catch(() => null),
-      apiGet('/api/tokens').catch(() => ({ usage: [] })),
+      apiGet('/api/tokens' + tokensQuery).catch(() => ({ usage: [] })),
     ]);
     // Commit-time gate: an interaction that started while the fetches were
     // in flight defers the landing render (the hold watcher re-runs a fresh
     // background load once the user is done).
     if (background && deferAutoRefresh(panel, () => loadAccountsData(true))) return;
     accountsCache = acc;
-    accountsQuota = (st && st.quota) || {};
     accountsTokens = (tok && tok.usage) || [];
     renderAccountsNav(acc.providers || []);
     if (background) setRefreshError(panel, null);
@@ -7511,6 +7774,129 @@ async function loadAccountsData(background = false) {
     }
     showMsg(document.getElementById('acc-msg'), 'err', e.message);
   }
+}
+
+// accountsPickerClose closes the popover and discards any in-progress custom
+// pick — Esc and outside clicks never change the applied range.
+function accountsPickerClose() {
+  accountsRangePicker = { open: false, view: null, pick: null, selecting: false };
+  accountsRangePickerHost = null;
+  document.removeEventListener('keydown', accountsPickerOnKey);
+  document.removeEventListener('click', accountsPickerOnOutside, true);
+}
+
+function accountsPickerOnKey(e) {
+  if (e.key === 'Escape') {
+    accountsPickerClose();
+    accountsPickerRender();
+  }
+}
+
+function accountsPickerOnOutside(e) {
+  if (!e.target.closest('.tr-wrap')) {
+    accountsPickerClose();
+    accountsPickerRender();
+  }
+}
+
+// accountsPickerHTML renders ONE account card's date-range trigger + popover
+// — the shared pure.js builder `tokenRangePickerHTML` (the same .tr-* look
+// and interaction as the Status→Token usage and Analytics pickers) bound to
+// the accounts range state ('acc' data-attribute ns). The applied range is
+// provider-wide (one /api/tokens window), so every card's trigger shows the
+// same label; the OPEN popover renders only in the card it was opened in
+// (keyed by provider key) — the other cards keep their closed triggers. The
+// provider-local 'Quota Window' preset rides extraPresets (first row) and is
+// only offered when this provider's snapshot resolves a plan window; the
+// effective range (quota → all degradation) drives the checkmark and label.
+function accountsPickerHTML(acctKey) {
+  const eff = accountsEffectiveRange();
+  const open = accountsRangePicker.open && acctKey === accountsRangePickerHost;
+  const picker = open ? accountsRangePicker : { open: false, view: null, pick: null, selecting: false };
+  const extra = accountsQuotaFromSec() != null ? [{ value: 'quota', label: 'Quota Window' }] : [];
+  return tokenRangePickerHTML(eff, picker, 'acc', { extraPresets: extra, label: accountsRangeLabel() });
+}
+
+// accountsMaybeRefetchRange re-fetches when the derived tokens query no
+// longer matches the payload in hand — the 'quota' preset re-resolves per
+// provider (switching zhipu 7d ↔ codex 30d) and as resets roll over, so a
+// provider switch or a rollover discovered by a fresh status snapshot
+// triggers exactly one refresh. Touched presets (7d/30d/custom/all) are
+// provider-independent and stable across switches.
+function accountsMaybeRefetchRange() {
+  if (accountsTokensQuery() !== accountsTokensQueryLast) loadAccountsData();
+}
+
+// accountsPickerRender (re)draws the picker into every Token usage section's
+// host (.acc-range-host — one per account card, keyed by data-acct) and wires
+// the interactions. Picker-internal updates (open/close, month navigation,
+// day picking) re-render ONLY these hosts — no refetch; applying a range
+// refetches the tab data so every account card's Token usage section
+// re-renders over the new window (quota snapshots are unaffected — the
+// upstream owns their windows). Clicking another card's trigger while a
+// popover is open MOVES the popover there (open-in-one-place semantics), it
+// does not toggle everything shut.
+function accountsPickerRender() {
+  document.querySelectorAll('.acc-range-host').forEach((host) => {
+    const key = host.dataset.acct || '';
+    host.innerHTML = accountsPickerHTML(key);
+    host.querySelector('.tr-trigger').onclick = () => {
+      if (accountsRangePicker.open && accountsRangePickerHost === key) {
+        accountsPickerClose();
+      } else {
+        // Open (or move the popover to this card) on the month containing the
+        // current selection (custom start day when a custom range is
+        // applied), else the month containing today.
+        const anchor = (accountsRange.preset === 'custom' && parseLocalDate(accountsRange.customStart)) || new Date();
+        accountsRangePicker = { open: true, view: { year: anchor.getFullYear(), month: anchor.getMonth() }, pick: null, selecting: false };
+        accountsRangePickerHost = key;
+        document.addEventListener('keydown', accountsPickerOnKey);
+        document.addEventListener('click', accountsPickerOnOutside, true);
+      }
+      accountsPickerRender();
+    };
+    host.querySelectorAll('[data-acc-preset]').forEach((btn) => {
+      btn.onclick = () => {
+        const value = btn.dataset.accPreset;
+        if (value === 'custom') {
+          // Checkmark moves to custom and the calendar takes over; the applied
+          // range only changes once both days are picked.
+          accountsRangePicker.selecting = true;
+          accountsRangePicker.pick = null;
+          accountsPickerRender();
+          return;
+        }
+        accountsRange = { preset: value, customStart: '', customEnd: '' };
+        accountsRangeTouched = true; // explicit pick pins the preset
+        accountsPickerClose();
+        loadAccountsData();
+      };
+    });
+    host.querySelectorAll('[data-acc-day]').forEach((btn) => {
+      btn.onclick = () => {
+        if (!accountsRangePicker.selecting && accountsRange.preset !== 'custom') {
+          // Clicking days without the custom dimension armed starts a custom pick.
+          accountsRangePicker.selecting = true;
+        }
+        const result = rangePick(accountsRangePicker.pick, btn.dataset.accDay);
+        if (!result.complete) {
+          accountsRangePicker.pick = result.pick;
+          accountsPickerRender();
+          return;
+        }
+        accountsRange = { preset: 'custom', customStart: result.start, customEnd: result.end };
+        accountsRangeTouched = true; // an applied custom range is an explicit pick
+        accountsPickerClose();
+        loadAccountsData();
+      };
+    });
+    host.querySelectorAll('[data-acc-nav]').forEach((btn) => {
+      btn.onclick = () => {
+        accountsRangePicker.view = shiftMonth(accountsRangePicker.view.year, accountsRangePicker.view.month, Number(btn.dataset.accNav));
+        accountsPickerRender();
+      };
+    });
+  });
 }
 
 // refreshAccountUsage re-polls ONE account's quota (POST /api/quota/refresh
@@ -7707,7 +8093,14 @@ function selectProviderSilent(name) {
   main.querySelectorAll('details.acct-section').forEach((d) => {
     secOpen[(d.dataset.acct || '') + '/' + (d.dataset.sec || '')] = d.open;
   });
+  // Like the Status/Analytics pickers, the popover's open/pick state is
+  // module-level and deliberately SURVIVES pane rebuilds (provider switch,
+  // Refresh usage, tab re-click refresh): the rebuilt Token usage sections
+  // re-render the popover open (in the keyed card) with its view/pick intact
+  // — a mid-pick re-render must not throw away the user's in-progress custom
+  // range.
   main.innerHTML = renderProviderDetail(p, accountsQuota, accountsTokens);
+  accountsPickerRender();
   main.querySelectorAll('details.acct-section').forEach((d) => {
     const k = (d.dataset.acct || '') + '/' + (d.dataset.sec || '');
     if (k in secOpen) d.open = secOpen[k];
@@ -7736,6 +8129,10 @@ function selectProviderSilent(name) {
   main.querySelectorAll('[data-relogin]').forEach((b) => {
     b.addEventListener('click', () => startAsyncLogin(p.name, p.provider_id));
   });
+  // A provider switch re-resolves the 'quota' default against the new
+  // provider's plan window (zhipu 7d ↔ codex 30d): when the derived window no
+  // longer matches the fetched payload, refresh exactly once.
+  accountsMaybeRefetchRange();
 }
 
 // renderProviderDetail builds the right pane: a toolbar (provider name + meta +
@@ -7795,7 +8192,7 @@ function accountCard(p, a, quota, tokens) {
   // usage_url (/user/balance) and is polled like a plan provider.
   const refreshBtn = (p.billing === 'pay-as-you-go' && !p.usage_endpoint) ? ''
     : `<button class="btn small" data-refresh="${esc(key)}" title="Re-poll this account's quota now">Refresh usage</button>`;
-  return `<section class="card acct-card">
+  return `<section class="card acct-card card-open">
     <div class="account-row acct-card-head">
       <div>
         <div class="acct-label">${esc(label)}</div>
@@ -7831,18 +8228,26 @@ function accountUsageDetails(p, snap, acctKey) {
 }
 
 // accountTokensDetails wraps the per-account token counters in a collapsible
-// section. The summary hint previews the model count + request total.
+// section. The summary hint previews the model count + request total; when a
+// time window is applied it also carries the window label — the picker itself
+// lives inside the section body, so the collapsed hint is where a reader
+// checks which window the numbers describe.
 function accountTokensDetails(rows, acctKey) {
   let totalReqs = 0;
   for (const r of rows) totalReqs += Number(r.requests || 0);
+  const eff = accountsEffectiveRange();
+  const rangeTail = eff.preset === 'all' ? '' : ` · ${accountsRangeLabel()}`;
   const hint = rows.length
-    ? `${rows.length} model${rows.length > 1 ? 's' : ''} · ${fmtNum(totalReqs)} req`
-    : 'No usage';
+    ? `${rows.length} model${rows.length > 1 ? 's' : ''} · ${fmtNum(totalReqs)} req${rangeTail}`
+    : `No usage${rangeTail}`;
   // Default the section to collapsed when there are no token rows ("no usage").
   const openAttr = rows.length ? ' open' : '';
   return `<details class="acct-section" data-acct="${esc(acctKey)}" data-sec="tokens"${openAttr}>
     <summary>${iconChevron()}Token usage<span class="acct-hint">${esc(hint)}</span></summary>
-    <div class="acct-section-body">${renderAccountTokens(rows)}</div>
+    <div class="acct-section-body">
+      <div class="acc-range-host" data-acct="${esc(acctKey)}"></div>
+      ${renderAccountTokens(rows)}
+    </div>
   </details>`;
 }
 
@@ -7914,7 +8319,16 @@ function renderAccountUsage(p, snap) {
 // renderAccountTokens renders the per-account token table (sorted by model)
 // with a totals row. Empty -> inline message.
 function renderAccountTokens(rows) {
-  if (!rows || rows.length === 0) return `<div class="acct-empty">No token usage observed</div>`;
+  if (!rows || rows.length === 0) {
+    // Range-aware empty text: with a window applied the zeros mean "nothing
+    // in THAT window", not "never used" (the cumulative view keeps the
+    // original wording).
+    const eff = accountsEffectiveRange();
+    const empty = eff.preset === 'all'
+      ? 'No token usage observed'
+      : `No token usage in the selected range (${accountsRangeLabel()}).`;
+    return `<div class="acct-empty">${empty}</div>`;
+  }
   const sorted = rows.slice().sort((a, b) => (a.model || '').localeCompare(b.model || ''));
   let tIn = 0, tOut = 0, tCC = 0, tCR = 0, tReq = 0;
   let trs = '';
@@ -8256,15 +8670,30 @@ function analyticsSave(name, val) {
 
 // analyticsRangeBounds resolves the picker state to {from, to} unix seconds:
 // presets via tokenRangeBounds (local-time aligned), custom via
-// tokenCustomBounds (closed full local days), 'all' → from 0 (the all-time
+// tokenCustomBounds (closed full local days), 'quota' → the cross-provider
+// billing window [first plan provider's UsageFrom, now] (anQuota below;
+// rolling — recomputed per render), 'all' → from 0 (the all-time
 // sentinel — the server clamps it to the oldest persisted bucket and echoes
 // the real window, learned below as anAllTimeSince).
-// An invalid custom range returns null (the caller falls back to all-time).
+// An invalid custom range — or an unresolvable 'quota' preset — returns null
+// (the caller falls back to all-time).
 function analyticsRangeBounds(range) {
   if (range.preset === 'custom') return tokenCustomBounds(range.customStart, range.customEnd);
+  if (range.preset === 'quota') {
+    const q = quotaWindowFromSec(anQuota);
+    return q ? { from: q.from, to: Math.floor(Date.now() / 1000) } : null;
+  }
   if (range.preset === 'all') return { from: 0, to: Math.floor(Date.now() / 1000) };
   return tokenRangeBounds(range.preset);
 }
+
+// anQuota holds the last /api/status quota map fetched by the analytics
+// loader — the Quota Window preset and its picker row resolve from it
+// (pure.js quotaWindowFromSec: first plan provider, keys sorted). Best-effort
+// per-part settle: a failed fetch keeps the last known value; a stored
+// 'quota' preset that no longer resolves degrades to all-time (bounds ||
+// fallback + the picker's effective range).
+let anQuota = null;
 
 // anAllTimeSince is the server-echoed start of the all-time window (the
 // oldest stats bucket), learned from the first all-time response. The
@@ -8302,65 +8731,19 @@ function analyticsPickerOnOutside(e) {
   }
 }
 
-// analyticsPickerHTML renders the date-range trigger + popover using the same
-// .tr-* markup and pure.js calendar helpers as the Status→Token usage picker
-// (identical look and interaction), bound to the analytics range state.
+// analyticsPickerHTML renders the date-range trigger + popover bound to the
+// analytics range state — markup comes from the single pure.js builder
+// `tokenRangePickerHTML` (the same .tr-* look and interaction as the
+// Status→Token usage and Accounts pickers). The Quota Window preset rides
+// the loader-fetched quota map; an unresolvable stored 'quota' preset
+// degrades to 'all' in the checkmark and label.
 function analyticsPickerHTML() {
+  const quota = quotaWindowFromSec(anQuota);
   const range = analyticsState().range;
-  const picker = anRangePicker;
-  const presets = TOKEN_RANGES.map((w) => {
-    const active = w.value === 'custom'
-      ? (range.preset === 'custom' || picker.selecting)
-      : range.preset === w.value;
-    return `<button class="tr-preset${active ? ' active' : ''}" data-an-preset="${esc(w.value)}">
-      <span class="tr-check">${active ? '✓' : ''}</span>${esc(w.label)}
-    </button>`;
-  }).join('');
-
-  let calendar = '';
-  if (picker.open) {
-    const now = Date.now();
-    const months = twoMonthWindow(picker.view.year, picker.view.month).map(({ year, month }) => {
-      const weeks = calendarMonthGrid(year, month).map((week) => `<tr>${week.map((day) => {
-        if (day === null) return '<td class="tr-blank"></td>';
-        const dayYmd = ymd(year, month, day);
-        const future = isFutureDay(year, month, day, now);
-        const applied = range.preset === 'custom' && !picker.pick ? range : null;
-        const isStart = dayYmd === picker.pick || (applied && dayYmd === applied.customStart);
-        const isEnd = applied && dayYmd === applied.customEnd;
-        const inRange = applied && !isStart && !isEnd &&
-          dayYmd > applied.customStart && dayYmd < applied.customEnd;
-        const cls = ['tr-day'];
-        if (isStart || isEnd) cls.push('tr-day-selected');
-        else if (inRange) cls.push('tr-day-inrange');
-        return `<td><button class="${cls.join(' ')}" data-an-day="${dayYmd}" ${future ? 'disabled' : ''}>${day}</button></td>`;
-      }).join('')}</tr>`).join('');
-      const header = WEEKDAYS.map((w) => `<th>${w}</th>`).join('');
-      return `<div class="tr-month">
-        <div class="tr-month-title">${esc(monthTitle(year, month))}</div>
-        <table class="tr-grid"><thead><tr>${header}</tr></thead><tbody>${weeks}</tbody></table>
-      </div>`;
-    }).join('');
-    const thisMonth = (() => { const d = new Date(now); return d.getFullYear() * 12 + d.getMonth(); })();
-    const viewRight = picker.view.year * 12 + picker.view.month + 1;
-    calendar = `<div class="tr-cal">
-      <button class="tr-nav tr-prev" data-an-nav="-1" aria-label="previous month">‹</button>
-      <div class="tr-months">${months}</div>
-      <button class="tr-nav tr-next" data-an-nav="1" aria-label="next month" ${viewRight >= thisMonth ? 'disabled' : ''}>›</button>
-    </div>`;
-  }
-
-  return `<div class="tr-wrap">
-    <button class="btn small tr-trigger" type="button" aria-haspopup="true" aria-expanded="${picker.open}">
-      <span class="tr-caption">Time Range</span>
-      <span class="tr-value">${esc(tokenRangeTriggerLabel(range))}</span>
-      <span class="tr-chevron">▾</span>
-    </button>
-    <div class="tr-popover" data-popup ${picker.open ? '' : 'hidden'}>
-      <div class="tr-presets">${presets}</div>
-      ${calendar}
-    </div>
-  </div>`;
+  const eff = (range.preset === 'quota' && !quota) ? { preset: 'all', customStart: '', customEnd: '' } : range;
+  const extra = quota ? [{ value: 'quota', label: 'Quota Window' }] : [];
+  const label = (eff.preset === 'quota' && quota) ? `Quota (${quota.key})` : undefined;
+  return tokenRangePickerHTML(eff, anRangePicker, 'an', { extraPresets: extra, label });
 }
 
 // analyticsPickerRender (re)draws the picker into its toolbar host and wires
@@ -8517,6 +8900,8 @@ function buildAnalyticsLayout(panel, state, granOptions, granActive) {
   elModel.value = state.model;
   elAgent.value = state.agent;
   // Free-text filters: commit on Enter or blur (change), not per keystroke.
+  // The shared ✕ clear button (attachClearable) commits via the dispatched
+  // change event, same as a manual clear + blur.
   for (const [input, key] of [[elProvider, 'provider'], [elModel, 'model'], [elAgent, 'agent']]) {
     input.onchange = () => {
       const v = input.value.trim();
@@ -8525,6 +8910,7 @@ function buildAnalyticsLayout(panel, state, granOptions, granActive) {
       renderAnalyticsTab();
     };
     input.onkeydown = (e) => { if (e.key === 'Enter') input.blur(); };
+    attachClearable(input);
   }
 }
 
@@ -8534,6 +8920,15 @@ async function renderAnalyticsTab(background = false) {
   if (background && deferAutoRefresh(panel, () => renderAnalyticsTab(true))) return;
   analyticsStopAutoRefresh();
   const state = analyticsState();
+  // Quota Window preset support: resolve the cross-provider billing window
+  // from a best-effort /api/status fetch (the picker's preset row renders
+  // from it on every full render, not just quota-pinned ones). Failure keeps
+  // the last known quota — an unresolvable preset degrades to all-time
+  // below, and the stale banner carries the analytics fetch itself.
+  try {
+    const st = await apiGet('/api/status');
+    if (st && st.quota) anQuota = st.quota;
+  } catch (_) { /* keep last known quota */ }
   // Window bounds drive both the query and the granularity gating — computed
   // from state (localStorage) BEFORE any DOM write so a failed background
   // refresh can keep the previous view untouched.
@@ -8636,7 +9031,12 @@ function analyticsStopAutoRefresh() {
 function analyticsMaybeAutoRefresh() {
   analyticsStopAutoRefresh();
   const st = analyticsState();
-  if (st.range.preset !== '1h' && st.range.preset !== 'today') return;
+  // Live windows whose trailing edge is 'now' need periodic refreshes: 1h /
+  // today presets, plus a resolvable quota window (it rolls at resets and its
+  // 'to' moves with the clock — same staleness argument as 'today').
+  const live = st.range.preset === '1h' || st.range.preset === 'today' ||
+    (st.range.preset === 'quota' && quotaWindowFromSec(anQuota) != null);
+  if (!live) return;
   anRefreshTimer = setInterval(() => {
     const panel = panels.analytics;
     if (!panel || !panel.classList.contains('active')) return;
@@ -9549,10 +9949,14 @@ function mcpServersCardHTML(servers) {
       resultRow = `<tr><td></td><td colspan="10">${badge} <span class="hint">${esc(probe.text)}${probe.latencyMs != null ? ` · ${probe.latencyMs} ms` : ''}</span> ${tools}${esc(more)}</td></tr>`;
     }
     const stats = `<td class="num">${s.calls || 0}</td><td class="num">${s.errors || 0}</td><td class="num">${s.calls ? (s.avg_latency_ms || 0) : '—'}</td>`;
-    return `<tr><td>${esc(s.name)}</td><td>${enabled}</td><td>${esc(s.transport)}</td><td>${auth}</td><td>${esc(endpoint)}</td>${accounts}<td class="num">${s.sessions || 0}</td>${stats}<td>${action}</td></tr>` + resultRow;
+    return `<tr><td>${esc(s.name)}</td><td>${enabled}</td><td>${esc(s.transport)}</td><td>${auth}</td><td class="mcp-wrap" title="${esc(endpoint)}">${esc(endpoint)}</td>${accounts}<td class="num">${s.sessions || 0}</td>${stats}<td>${action}</td></tr>` + resultRow;
   }).join('');
-  const table = `<table class="table"><thead><tr><th>Name</th><th>Enabled</th><th>Transport</th><th>Auth</th><th>Endpoint</th><th class="num">Accounts</th><th class="num">Sessions</th><th class="num">Calls</th><th class="num">Errors</th><th class="num">Avg ms</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
-  return buildCard('MCP Servers', `${servers.length} servers`, table, '', '<button class="btn small" data-mcp-refresh>Refresh</button>');
+  // Fixed column geometry (colgroup + table-layout: fixed, the request-table
+  // contract): long endpoints/commands wrap inside their column instead of
+  // pushing the table past the card edge, which clips the trailing columns.
+  const cols = '<colgroup>' + [9, 6, 8, 10, 31, 6, 7, 6, 6, 6, 5].map((w) => `<col style="width:${w}%"/>`).join('') + '</colgroup>';
+  const table = `<table class="table">${cols}<thead><tr><th>Name</th><th>Enabled</th><th>Transport</th><th>Auth</th><th>Endpoint</th><th class="num">Accounts</th><th class="num">Sessions</th><th class="num">Calls</th><th class="num">Errors</th><th class="num">Avg ms</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  return buildCard('MCP Servers', `${servers.length} servers`, table, 'mcp-table', '<button class="btn small" data-mcp-refresh>Refresh</button>');
 }
 
 function mcpRoutesCardHTML(routes) {
@@ -9560,10 +9964,11 @@ function mcpRoutesCardHTML(routes) {
   const rows = routes.map((r) => {
     const enabled = r.enabled ? '<span class="badge ok">on</span>' : '<span class="badge muted">off</span>';
     const targets = (r.targets || []).map((t) => `${esc(t.server)} (${t.tools})`).join(' → ');
-    return `<tr><td>${esc(r.name)}</td><td>${enabled}</td><td>${targets}</td><td class="num">${r.sessions || 0}</td><td class="num">${r.calls || 0}</td><td class="num">${r.errors || 0}</td><td class="num">${r.calls ? (r.avg_latency_ms || 0) : '—'}</td></tr>`;
+    return `<tr><td>${esc(r.name)}</td><td>${enabled}</td><td class="mcp-wrap">${targets}</td><td class="num">${r.sessions || 0}</td><td class="num">${r.calls || 0}</td><td class="num">${r.errors || 0}</td><td class="num">${r.calls ? (r.avg_latency_ms || 0) : '—'}</td></tr>`;
   }).join('');
-  const table = `<table class="table"><thead><tr><th>Name</th><th>Enabled</th><th>Targets (failover order)</th><th class="num">Sessions</th><th class="num">Calls</th><th class="num">Errors</th><th class="num">Avg ms</th></tr></thead><tbody>${rows}</tbody></table>`;
-  return buildCard('MCP Routes', `${routes.length} routes`, table);
+  const cols = '<colgroup>' + [10, 8, 52, 8, 7, 7, 8].map((w) => `<col style="width:${w}%"/>`).join('') + '</colgroup>';
+  const table = `<table class="table">${cols}<thead><tr><th>Name</th><th>Enabled</th><th>Targets (failover order)</th><th class="num">Sessions</th><th class="num">Calls</th><th class="num">Errors</th><th class="num">Avg ms</th></tr></thead><tbody>${rows}</tbody></table>`;
+  return buildCard('MCP Routes', `${routes.length} routes`, table, 'mcp-table');
 }
 
 // mcpTestServer runs the handshake probe against one server and re-renders

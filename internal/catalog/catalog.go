@@ -73,12 +73,42 @@ func (c *Catalog) Count() int {
 	return len(c.byName)
 }
 
+// Names returns every catalog model id, sorted — the picker list for the
+// catalog-match UI. A nil catalog yields nil.
+func (c *Catalog) Names() []string {
+	if c == nil {
+		return nil
+	}
+	names := make([]string, 0, len(c.byName))
+	for name := range c.byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // ETag returns the last successfully observed HTTP entity tag.
 func (c *Catalog) ETag() string {
 	if c == nil {
 		return ""
 	}
 	return c.etag
+}
+
+// FetchedAt returns when the catalog was last successfully refreshed (zero
+// for an in-memory catalog that was never persisted).
+func (c *Catalog) FetchedAt() time.Time {
+	if c == nil {
+		return time.Time{}
+	}
+	return c.fetchedAt
+}
+
+// LoadCache reads only the on-disk cache — no network, no TTL check — for
+// read-only status surfaces. A missing file is (nil, nil); a corrupt file is
+// an error.
+func LoadCache(path string) (*Catalog, error) {
+	return load(path)
 }
 
 func empty() *Catalog { return New(nil) }

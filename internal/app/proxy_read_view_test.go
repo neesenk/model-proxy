@@ -28,7 +28,7 @@ func TestAdminServiceReturnsDetachedSnapshots(t *testing.T) {
 	p.routeWarnings = []string{"warning-one"}
 	p.recordModelFailure("up", "m", configdomain.Scheduling{ModelLockout: "1h"})
 
-	ports := p.adminPorts(func() string { return "" }, nil, nil)
+	ports := p.adminPorts(func() string { return "" }, nil, nil, nil)
 	service := admin.New(ports)
 	dashboard := service.Dashboard(time.Now())
 	providers := ports.ProviderConfigs()
@@ -110,7 +110,7 @@ func TestAdminDashboardScheduleUsesCapturedRuntimeSnapshot(t *testing.T) {
 		t.Fatalf("captured schedule mixed live state: %+v", got)
 	}
 
-	service := admin.New(p.adminPorts(func() string { return "" }, nil, nil))
+	service := admin.New(p.adminPorts(func() string { return "" }, nil, nil, nil))
 	fresh := decode(service.Dashboard(now).Schedule)
 	if got := fresh.Models["m"]; got.First != "b" || got.Pin != "b" {
 		t.Fatalf("fresh schedule did not observe current state: %+v", got)
@@ -129,7 +129,7 @@ func TestAdminModelCapsPortProjectsDetachedSnapshot(t *testing.T) {
 	})
 
 	// Empty store → empty, non-nil map (JSON {"providers":{}} downstream).
-	ports := p.adminPorts(func() string { return "" }, nil, nil)
+	ports := p.adminPorts(func() string { return "" }, nil, nil, nil)
 	if snapshot := ports.ModelCapsSnapshot(); snapshot == nil || len(snapshot) != 0 {
 		t.Fatalf("empty store snapshot = %+v", snapshot)
 	}
@@ -173,7 +173,7 @@ func TestAdminModelCapsReplacePortStampsCurrentFingerprint(t *testing.T) {
 	p.modelCaps.Put("up", "stale", "old-m",
 		runtimewire.ModelProtocols{Chat: triYes, Anthropic: triNo, Responses: triNo}, time.Now())
 
-	ports := p.adminPorts(func() string { return "" }, nil, nil)
+	ports := p.adminPorts(func() string { return "" }, nil, nil, nil)
 	ports.ModelCapsReplace("up", ports.ModelRefreshRuntime("up").Fingerprint, map[string]runtimewire.ModelProtocols{
 		"m1": {Chat: triYes, Anthropic: triNo, Responses: triYes},
 	})
@@ -210,7 +210,7 @@ func TestAdminProviderImplPortResolvesPoolFallback(t *testing.T) {
 	p.providers["pooled#a1"] = virtual
 	p.poolIndex["pooled"] = []string{"pooled#a1"}
 
-	ports := p.adminPorts(func() string { return "" }, nil, nil)
+	ports := p.adminPorts(func() string { return "" }, nil, nil, nil)
 	if got := ports.ModelRefreshRuntime("solo").Provider; got != direct {
 		t.Errorf("ProviderImpl(solo) = %v, want the direct impl", got)
 	}
@@ -240,7 +240,7 @@ func TestAdminModelRefreshRejectsPreReloadFingerprint(t *testing.T) {
 		return cfg
 	}
 	p := newTestProxy(t, write(up.URL+"/old"))
-	ports := p.adminPorts(func() string { return file }, nil, nil)
+	ports := p.adminPorts(func() string { return file }, nil, nil, nil)
 	captured := ports.ModelRefreshRuntime("up")
 	write(up.URL + "/new")
 	if err := p.Reload(file); err != nil {

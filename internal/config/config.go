@@ -813,6 +813,13 @@ type Provider struct {
 	// aggregated under one exposed name. Responses are normalized back to the
 	// exposed name before commit (docs/architecture/protocol-conversion.md).
 	Alias map[string]string `yaml:"alias"`
+	// CatalogAlias maps a real model id (key, must appear in Models) to the
+	// models.dev catalog id used for metadata lookup — the escape hatch for
+	// providers whose upstream model id doesn't match the catalog's global
+	// name (e.g. a reseller's "kimi-k2" vs the catalog's "kimi-k2-0905-preview").
+	// Unlike Alias it never changes routing or the names clients see; it only
+	// steers HydrateModels' catalog lookup (docs/architecture/request-routing.md).
+	CatalogAlias map[string]string `yaml:"catalog_alias"`
 	// Capabilities is a manual per-model capability override — the escape hatch
 	// for models the models.dev catalog doesn't know (codex/aqp/volcengine blind
 	// spots). Keys are model names (validate requires them to appear in Models);
@@ -1358,6 +1365,23 @@ func (c *Config) validate() error {
 				if c != "image" && c != "tools" {
 					return fmt.Errorf("provider %q: capabilities[%q]: unknown capability %q — valid values: image, tools", name, model, c)
 				}
+			}
+		}
+		// catalog_alias: same key rule as capabilities (typo guard), plus the
+		// mapped catalog id must be non-empty.
+		for model, catalogID := range p.CatalogAlias {
+			if catalogID == "" {
+				return fmt.Errorf("provider %q: catalog_alias[%q] is empty — set it to the models.dev catalog id or drop the entry", name, model)
+			}
+			inModels := false
+			for _, m := range p.Models {
+				if m == model {
+					inModels = true
+					break
+				}
+			}
+			if !inModels {
+				return fmt.Errorf("provider %q: catalog_alias key %q is not in its models: list — likely a typo; add the model to models: or fix the key", name, model)
 			}
 		}
 	}

@@ -188,6 +188,132 @@ test('combobox popup opens, picks option, applies filter (浮层 + 下拉)', asy
   assert.deepEqual(await ctx.pageErrors(), [], 'combobox flow must not raise JS errors');
 });
 
+test('suggestion-dropdown inputs and filter selects expose the inline ✕ clear (清除按钮族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  await driveRequest(1);
+  await gotoRequestsWithRows();
+
+  // Combobox (Requests provider): typing turns on .has-text and reveals the ✕
+  // inside the input's right edge. Enter commits the typed filter; clicking
+  // the ✕ then clears, refocuses the input, and commits the empty filter
+  // (the provider= key leaves the URL hash) — same path as a manual clear.
+  const clearXOf = (id) => `document.getElementById('${id}').closest('.clearable').querySelector('.clear-x')`;
+  const clickClearX = (id) => ctx.ev(`(() => {
+    const b = ${clearXOf(id)};
+    b.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+    b.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    b.click();
+  })()`);
+  await ctx.ev(`(() => {
+    const i = document.getElementById('req-provider');
+    i.value = 'dummy';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await ctx.waitFor('provider ✕ visible', () => ctx.ev(`(() => {
+    const i = document.getElementById('req-provider');
+    const host = i.closest('.clearable');
+    return host.classList.contains('has-text')
+      && ${clearXOf('req-provider')}.getBoundingClientRect().width > 0;
+  })()`));
+  await ctx.ev(`document.getElementById('req-provider')
+    .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))`);
+  await ctx.waitFor('provider filter committed', () => ctx.ev(`location.hash.includes('provider=dummy')`));
+  await clickClearX('req-provider');
+  await ctx.waitFor('provider cleared + committed', () => ctx.ev(
+    `document.getElementById('req-provider').value === '' && !location.hash.includes('provider=')`));
+  await ctx.waitFor('✕ hidden after clear', () => ctx.ev(
+    `!document.getElementById('req-provider').closest('.clearable').classList.contains('has-text')`));
+  assert.equal(await ctx.ev(
+    `document.activeElement === document.getElementById('req-provider')`), true, 'clear keeps focus on the input');
+
+  // Datalist (Analytics provider): same affordance, commit lands in
+  // localStorage via the input's change handler.
+  await ctx.ev(`document.querySelector('[data-tab="analytics"]').click()`);
+  await ctx.waitFor('analytics toolbar', () => ctx.ev(`!!document.getElementById('an-provider')`));
+  await ctx.ev(`(() => {
+    const i = document.getElementById('an-provider');
+    i.value = 'zzz';
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    i.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await ctx.waitFor('analytics provider committed', () => ctx.ev(
+    `localStorage.getItem('an-provider') === 'zzz' && !!document.getElementById('an-provider')`));
+  await ctx.waitFor('analytics ✕ visible', () => ctx.ev(`(() => {
+    const i = document.getElementById('an-provider');
+    if (!i) return false;
+    const host = i.closest('.clearable');
+    return host && host.classList.contains('has-text')
+      && host.querySelector('.clear-x').getBoundingClientRect().width > 0;
+  })()`));
+  await ctx.ev(`(() => {
+    const b = document.getElementById('an-provider').closest('.clearable').querySelector('.clear-x');
+    b.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    b.click();
+  })()`);
+  await ctx.waitFor('analytics provider cleared + committed', () => ctx.ev(
+    `localStorage.getItem('an-provider') === '' && document.getElementById('an-provider')
+      && document.getElementById('an-provider').value === ''`));
+
+  // Filter <select> (Requests agent): a picked value shows the ✕ left of the
+  // OS arrow; clicking it resets to All and commits through onchange.
+  await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
+  await ctx.waitFor('requests tab active again', () => ctx.ev(
+    `document.getElementById('tab-requests').classList.contains('active')`));
+  await ctx.waitFor('agent option populated', () => ctx.ev(
+    `[...document.getElementById('req-agent').options].some(o => o.value === 'node')`));
+  await ctx.ev(`(() => {
+    const s = document.getElementById('req-agent');
+    s.value = 'node';
+    s.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await ctx.waitFor('agent ✕ visible', () => ctx.ev(`(() => {
+    const s = document.getElementById('req-agent');
+    const host = s.closest('.clearable');
+    return host && host.classList.contains('has-text')
+      && host.querySelector('.clear-x').getBoundingClientRect().width > 0;
+  })()`));
+  await clickClearX('req-agent');
+  await ctx.waitFor('agent reset to All + committed', () => ctx.ev(
+    `document.getElementById('req-agent').value === '' && !location.hash.includes('agent=')`));
+  await ctx.waitFor('select ✕ hidden after reset', () => ctx.ev(
+    `!document.getElementById('req-agent').closest('.clearable').classList.contains('has-text')`));
+
+  // Live view session select (#live-session): same ✕ reset, committed through
+  // onLiveSessionChange (the session= key leaves the hash). One request carries
+  // a session header so the dropdown has a real option (the pool comes from
+  // /api/sessions, which only aggregates session-tagged records).
+  {
+    const resp = await fetch(`${ctx.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'e2e-clear-sess' },
+      body: JSON.stringify({ model: 'm1', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(resp.status, 200, `session drive failed: ${resp.status}`);
+  }
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
+  await ctx.waitFor('live view mounted', () => ctx.ev(`!!document.getElementById('live-session')`));
+  await ctx.waitFor('live session option populated', () => ctx.ev(
+    `[...document.getElementById('live-session').options].some(o => o.value)`));
+  await ctx.ev(`(() => {
+    const s = document.getElementById('live-session');
+    s.value = [...s.options].find((o) => o.value).value;
+    s.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await ctx.waitFor('live session ✕ visible', () => ctx.ev(`(() => {
+    const s = document.getElementById('live-session');
+    const host = s.closest('.clearable');
+    return s.value && host && host.classList.contains('has-text')
+      && host.querySelector('.clear-x').getBoundingClientRect().width > 0;
+  })()`));
+  await clickClearX('live-session');
+  await ctx.waitFor('live session reset + committed', () => ctx.ev(
+    `document.getElementById('live-session').value === '' && !location.hash.includes('session=')`));
+  // Leave the Requests page back on the Log sub-view for the following tests.
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="log"][data-stream=""]').click()`);
+  await ctx.waitFor('log view restored', () => ctx.ev(`!!document.getElementById('req-refresh')`));
+  assert.deepEqual(await ctx.pageErrors(), [], 'clear-affordance flow must not raise JS errors');
+});
+
 test('native select filter applies (下拉表单)', async (t) => {
   if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
   await driveRequest(1);
@@ -405,6 +531,50 @@ test('accounts 页点击 provider 渲染账号详情 (点击族)', async (t) => 
   assert.deepEqual(await ctx.pageErrors(), [], 'accounts 选择不得有 JS 错误');
 });
 
+test('accounts 页 Token usage 时间范围选择器驱动窗口化拉取 (弹层族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // 只在未激活时点击 tab：重复点击会重新触发 renderAccountsTab 的前台
+  // loadAccountsData（popover 状态虽跨重建存活，不必要的重拉只增加抖动）。
+  await ctx.ev(`(() => {
+    if (!document.getElementById('tab-accounts').classList.contains('active'))
+      document.querySelector('[data-tab="accounts"]').click();
+    return true;
+  })()`);
+  await ctx.waitFor('accounts active', () => ctx.ev(
+    `document.getElementById('tab-accounts').classList.contains('active')`));
+  // 选择器在各账号卡的 Token usage 区块内：展开（有数据的卡默认开，无数据
+  // 的卡默认折叠——程序性展开不依赖默认）。
+  await ctx.waitFor('tokens section mounted', () => ctx.ev(
+    `!!document.querySelector('details.acct-section[data-sec="tokens"] .acc-range-host')`));
+  await ctx.ev(`(() => {
+    document.querySelectorAll('details.acct-section[data-sec="tokens"]').forEach((d) => { d.open = true; });
+    return true;
+  })()`);
+  await ctx.waitFor('default label All Time', () => ctx.ev(
+    `document.querySelector('.acc-range-host .tr-value').textContent.trim() === 'All Time'`));
+  await ctx.ev(`document.querySelector('.acc-range-host .tr-trigger').click()`);
+  await ctx.waitFor('accounts range popover open', () => ctx.ev(`(() => {
+    const p = document.querySelector('.acc-range-host .tr-popover[data-popup]:not([hidden])');
+    if (!p) return false;
+    const r = p.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && p.querySelectorAll('.tr-presets *').length > 0;
+  })()`));
+  // 服务端事实先行：窗口化 /api/tokens 可用（同一解析器驱动 from/to）。选
+  // Last 7d → popover 关闭、触发器标签与折叠态 hint 更新、前端带 from/to 重拉。
+  const wr = await fetch(`${ctx.baseUrl}/api/tokens?from=0&to=${Math.floor(Date.now() / 1000)}`);
+  assert.equal(wr.status, 200, 'windowed /api/tokens must answer 200');
+  await ctx.ev(`[...document.querySelectorAll('.acc-range-host .tr-presets button')]
+    .find(b => b.textContent.includes('Last 7d')).click()`);
+  await ctx.waitFor('range applied to trigger', () => ctx.ev(
+    `document.querySelector('.acc-range-host .tr-value').textContent.trim() === 'Last 7d'`));
+  await ctx.waitFor('range applied to collapsed hint', () => ctx.ev(
+    `[...document.querySelectorAll('.acct-section[data-sec="tokens"] .acct-hint')]
+      .every(h => h.textContent.includes('Last 7d'))`));
+  await ctx.waitFor('accounts range popover closed after pick', () => ctx.ev(
+    `!document.querySelector('.acc-range-host .tr-popover[data-popup]:not([hidden])')`));
+  assert.deepEqual(await ctx.pageErrors(), [], 'accounts 时间选择器不得有 JS 错误');
+});
+
 test('takeover 页：模板表渲染与真实 takeover/restore 闭环 (mutation 族)', async (t) => {
   if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
   // Install a fake claude config inside the sandbox HOME — the proxy process
@@ -575,6 +745,46 @@ test('status 页 schedule route test 与 models catalog refresh (mutation 族)',
   // The stub catalog carries exactly one model.
   await ctx.waitFor('catalog count from stub', () => ctx.ev(
     `(document.querySelector('[data-catalog-result]') || {}).textContent?.includes('1 models')`));
+
+  // Model Matching: the sandbox provider's m1 is not in the one-model stub
+  // catalog, so the row starts unmatched; matching it to the stub's glm-4.7
+  // writes catalog_alias via /api/config/edit and the reloaded match list
+  // flips the row to matched + aliased (the backend owns the verdict).
+  await ctx.waitFor('match details', () => ctx.ev(`!!document.querySelector('details.cat-match')`));
+  await ctx.ev(`document.querySelector('details.cat-match > summary').click()`);
+  await ctx.waitFor('m1 row unmatched', () => ctx.ev(
+    `!!document.querySelector('details.cat-match [data-cat-match-edit][data-provider="dummy"][data-model="m1"]')`));
+  assert.ok(await ctx.ev(`document.querySelector('details.cat-match').innerHTML.includes('0/1 matched')`),
+    'match summary should start at 0/1 matched');
+  await ctx.ev(`document.querySelector('details.cat-match [data-cat-match-edit]').click()`);
+  await ctx.waitFor('match editor with catalog ids datalist', () => ctx.ev(
+    `!!document.querySelector('details.cat-match .cat-match-editor input[list="cat-id-list"]')`));
+  const modelsDoc = await ctx.ev(`fetch('/api/models').then((r) => r.json())`);
+  assert.ok((modelsDoc.catalog_ids || []).includes('glm-4.7'),
+    `/api/models catalog_ids should carry the stub id after refresh (got ${JSON.stringify({ catalog: modelsDoc.catalog, ids: (modelsDoc.catalog_ids || []).length, match: modelsDoc.match })})`);
+  await ctx.waitFor('datalist carries the stub catalog id', () => ctx.ev(
+    `[...document.querySelectorAll('#cat-id-list option')].some((o) => o.value === 'glm-4.7')`));
+  await ctx.ev(`(() => {
+    const input = document.querySelector('details.cat-match .cat-match-editor input');
+    input.value = 'glm-4.7';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await ctx.ev(`document.querySelector('details.cat-match [data-cat-match-save]').click()`);
+  await ctx.waitFor('m1 row flips to matched via alias', () => ctx.ev(
+    `(() => {
+      const d = document.querySelector('details.cat-match');
+      return d && d.innerHTML.includes('1/1 matched')
+        && d.innerHTML.includes('<span class="badge muted">aliased</span>');
+    })()`));
+  // Clear removes the mapping (empty map deletes the key server-side) and the
+  // row returns to unmatched.
+  await ctx.ev(`document.querySelector('details.cat-match [data-cat-match-clear]').click()`);
+  await ctx.waitFor('m1 row back to unmatched after clear', () => ctx.ev(
+    `(() => {
+      const d = document.querySelector('details.cat-match');
+      return d && d.innerHTML.includes('0/1 matched')
+        && !!d.querySelector('[data-cat-match-edit][data-model="m1"]');
+    })()`));
   assert.deepEqual(await ctx.pageErrors(), [], 'status diagnostics must not raise JS errors');
 });
 

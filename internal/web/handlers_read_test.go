@@ -217,8 +217,9 @@ func decodeReadJSON(t *testing.T, recorder *httptest.ResponseRecorder, out any) 
 }
 
 // TestReadModelsEndpoint pins GET /api/models: 200 with the documented
-// {providers:{name:{fingerprint,probed_at,models:{id:{chat,anthropic,responses}}}}}
-// shape, and an empty store projecting {"providers":{}} (never null).
+// {providers:{name:{fingerprint,probed_at,models:{id:{chat,anthropic,responses}}}},
+// catalog:{count,fetched_at?,etag?}} shape, and an empty store projecting
+// {"providers":{},"catalog":{"count":0}} (never null).
 func TestReadModelsEndpoint(t *testing.T) {
 	probed := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
 	reads := &readAPIStub{models: appapi.ModelsDocument{Providers: map[string]appapi.ProviderModelCaps{
@@ -256,14 +257,18 @@ func TestReadModelsEndpoint(t *testing.T) {
 		t.Errorf("models[m1] = %+v, want yes/no/unknown", m)
 	}
 
-	// Empty store → {"providers":{}} (non-null object).
-	reads.models = appapi.ModelsDocument{}
+	// Empty store → {"providers":{},"catalog":{"count":0},"match":[]} (non-null
+	// collections; the admin projection always initializes them).
+	reads.models = appapi.ModelsDocument{
+		Providers: map[string]appapi.ProviderModelCaps{},
+		Match:     []appapi.ModelMatchEntry{},
+	}
 	rec = serveRead(t, s, http.MethodGet, "/api/models")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("empty store: GET /api/models = %d, want 200", rec.Code)
 	}
-	if body := strings.TrimSpace(rec.Body.String()); body != `{"providers":{}}` {
-		t.Errorf("empty store body = %s, want {\"providers\":{}}", body)
+	if body := strings.TrimSpace(rec.Body.String()); body != `{"providers":{},"catalog":{"count":0},"match":[]}` {
+		t.Errorf("empty store body = %s, want {\"providers\":{},\"catalog\":{\"count\":0},\"match\":[]}", body)
 	}
 
 	// GET-only route: POST falls through to the JSON 404 like every read endpoint.

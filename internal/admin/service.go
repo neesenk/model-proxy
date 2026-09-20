@@ -12,8 +12,10 @@ import (
 	"net/http"
 	"time"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/appapi"
 	responsecache "model-proxy/internal/cache"
+	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/fusion"
 	"model-proxy/internal/login"
@@ -107,6 +109,11 @@ type Ports struct {
 	// was probed yet). The ModelStore owns its own leaf lock, so the closure
 	// does not take p.mu.
 	ModelCapsSnapshot func() map[string]runtimewire.ProviderModelCaps
+	// ModelsCatalogCache loads the models.dev cache from disk — never a
+	// network refresh — memoized on the file's (mtime, size) so the Status
+	// page's 5s /api/models poll costs one stat per tick (catalog.DiskCache,
+	// owned by the composition root). Nil degrades to the zero catalog status.
+	ModelsCatalogCache func(path string) *catalog.Catalog
 	// Pricing returns the pricing catalog (immutable after publication), a
 	// detached copy of the configured overrides, and the provider alias map
 	// (pricing.AliasKey(provider, upstreamModel) → exposed name).
@@ -257,4 +264,17 @@ func (s *Service) currentConfigFile() string {
 		return ""
 	}
 	return s.ports.ConfigFile()
+}
+
+// homeDir resolves the disk root for every admin surface that touches user
+// files (models.dev cache, takeover dirs, account pools): the HomeDir port
+// when set to a non-empty value, the real user home otherwise. Tests inject
+// t.TempDir() so those surfaces stay hermetic.
+func (s *Service) homeDir() string {
+	if s.ports.HomeDir != nil {
+		if h := s.ports.HomeDir(); h != "" {
+			return h
+		}
+	}
+	return accounts.HomeDir()
 }

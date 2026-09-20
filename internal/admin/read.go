@@ -12,6 +12,7 @@ import (
 
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/appapi"
+	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/credstore"
 	"model-proxy/internal/fusion"
@@ -65,7 +66,18 @@ func (s *Service) Dashboard(now time.Time) appapi.Dashboard {
 		if snapshots := runtimeSnapshot.Quotas; snapshots != nil {
 			quota = make(map[string]any, len(snapshots))
 			for key, snapshot := range snapshots {
-				quota[key] = snapshot
+				if snapshot == nil {
+					quota[key] = snapshot
+					continue
+				}
+				// Project the current billing period's start onto a detached
+				// copy (UsageWindow — the provider layer's single definition of
+				// the quota-aligned usage window, same ultimate-window semantics
+				// the scheduler paces against). Runtime state stays untouched;
+				// zero UsageFrom = not resolvable.
+				cp := *snapshot
+				cp.UsageFrom, _ = snapshot.UsageWindow(now)
+				quota[key] = cp
 			}
 		}
 	}
@@ -686,28 +698,104 @@ func (s *Service) Pins() []appapi.Pin {
 // the transport DTO. The port already returns a detached deep copy; this method
 // owns only the Verdict → string presentation mapping. Providers present in the
 // snapshot with no models keep their fingerprint/probed_at with an empty (never
-// nil) models map so the UI can show "probed, no models recorded".
+// nil) models map so the UI can show "probed, no models recorded". The catalog
+// block is a disk-only read of the models.dev cache (LoadCache — never a
+// network refresh); an unreadable/absent cache degrades to the zero status.
+// The match list mirrors routing.HydrateModels on the live config against that
+// same cache (catalog_alias applied), so the card shows exactly the metadata
+// source the next reload/takeover will use; catalog_ids is the sorted picker
+// list for assigning aliases to unmatched models.
 func (s *Service) ModelsDocument() appapi.ModelsDocument {
-	document := appapi.ModelsDocument{Providers: map[string]appapi.ProviderModelCaps{}}
-	if s.ports.ModelCapsSnapshot == nil {
-		return document
-	}
-	for name, caps := range s.ports.ModelCapsSnapshot() {
-		models := make(map[string]appapi.ModelProtocols, len(caps.Models))
-		for model, mp := range caps.Models {
-			models[model] = appapi.ModelProtocols{
-				Chat:      mp.Chat.String(),
-				Anthropic: mp.Anthropic.String(),
-				Responses: mp.Responses.String(),
+	document := appapi.ModelsDocument{Providers: map[string]appapi.ProviderModelCaps{}, Match: []appapi.ModelMatchEntry{}}
+	if s.ports.ModelCapsSnapshot != nil {
+		for name, caps := range s.ports.ModelCapsSnapshot() {
+			models := make(map[string]appapi.ModelProtocols, len(caps.Models))
+			for model, mp := range caps.Models {
+				models[model] = appapi.ModelProtocols{
+					Chat:      mp.Chat.String(),
+					Anthropic: mp.Anthropic.String(),
+					Responses: mp.Responses.String(),
+				}
+			}
+			document.Providers[name] = appapi.ProviderModelCaps{
+				Fingerprint: caps.Fingerprint,
+				ProbedAt:    caps.ProbedAt,
+				Models:      models,
 			}
 		}
-		document.Providers[name] = appapi.ProviderModelCaps{
-			Fingerprint: caps.Fingerprint,
-			ProbedAt:    caps.ProbedAt,
-			Models:      models,
-		}
+	}
+	cat := s.modelsCatalogCache()
+	document.Catalog = modelsCatalogStatus(cat)
+	var cfg *configdomain.Config
+	if s.ports.Config != nil {
+		cfg = s.ports.Config()
+	}
+	document.Match = modelsMatchProjection(cfg, cat)
+	if cat != nil && cat.Count() > 0 {
+		document.CatalogIDs = cat.Names()
 	}
 	return document
+}
+
+// modelsCatalogCache fetches the models.dev cache through the memoized disk
+// port (catalog.DiskCache — never a network refresh; the composition root owns
+// the memo instance). Same HomeDir port policy as PullModelsCatalog. A nil
+// port or unreadable cache yields nil (zero status, empty match projection).
+func (s *Service) modelsCatalogCache() *catalog.Catalog {
+	if s.ports.ModelsCatalogCache == nil {
+		return nil
+	}
+	return s.ports.ModelsCatalogCache(configdomain.ModelsCatalogPath(s.homeDir()))
+}
+
+func modelsCatalogStatus(cat *catalog.Catalog) appapi.ModelsCatalogStatus {
+	if cat == nil {
+		return appapi.ModelsCatalogStatus{}
+	}
+	status := appapi.ModelsCatalogStatus{Count: cat.Count(), ETag: cat.ETag()}
+	if fetched := cat.FetchedAt(); !fetched.IsZero() {
+		status.FetchedAt = &fetched
+	}
+	return status
+}
+
+// modelsMatchProjection lists every model HydrateModels hydrates (provider
+// models ∪ route targets, deduplicated per provider) with its catalog-match
+// state. The matched flag reuses HydrateModels' own source verdict so the card
+// can never disagree with runtime hydration; catalog_id is the effective lookup
+// id (catalog_alias target when set, else the model id).
+func modelsMatchProjection(cfg *configdomain.Config, cat *catalog.Catalog) []appapi.ModelMatchEntry {
+	out := []appapi.ModelMatchEntry{}
+	if cfg == nil {
+		return out
+	}
+	_, sources := routing.HydrateModels(cfg, cat)
+	providers := make([]string, 0, len(sources))
+	for name := range sources {
+		providers = append(providers, name)
+	}
+	sort.Strings(providers)
+	for _, name := range providers {
+		models := make([]string, 0, len(sources[name]))
+		for model := range sources[name] {
+			models = append(models, model)
+		}
+		sort.Strings(models)
+		for _, model := range models {
+			entry := appapi.ModelMatchEntry{
+				Provider:  name,
+				Model:     model,
+				CatalogID: model,
+				Matched:   sources[name][model] == routing.SrcModelsDev,
+			}
+			if alias := cfg.Providers[name].CatalogAlias[model]; alias != "" {
+				entry.CatalogID = alias
+				entry.Aliased = true
+			}
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 // Security projects the guard audit log (seclog) into transport DTOs. The

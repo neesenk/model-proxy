@@ -169,6 +169,13 @@ surplus =
 
 正数表示使用进度落后，优先消耗；负数表示超前，应回避。
 
+`QuotaSnapshot.UsageWindow(now)` 是**当前计费周期起点的唯一权威定义**：ultimate 窗口的
+`ResetsAt − Duration`（7d/30d 周期由 provider 解析器写入的 `Duration` 区分，与
+Surplus/fLeft 读同一 ultimate 窗口）。不可解析（非 plan、带错误、无可用 reset/周期或起点
+不在过去）返回零值。admin Dashboard 投影时把它写到脱离式副本的 `UsageFrom` 字段
+（运行态快照不携带、调度与持久化不读），Web Accounts 页 Token usage 的默认窗口消费它；
+不得在别处（前端/CLI）重推导周期语义。
+
 排序顺序：
 
 ```text

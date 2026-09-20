@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"model-proxy/internal/accounts"
 	"model-proxy/internal/appapi"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/probe"
@@ -164,12 +163,7 @@ func (s *Service) TestRoute(ctx context.Context, model string) (appapi.RouteTest
 // daemon twin of `model-proxy models pull`. The refreshed cache is consumed
 // by the next reload/takeover; the runtime is not reloaded here.
 func (s *Service) PullModelsCatalog(_ context.Context) (appapi.ModelsCatalogPull, error) {
-	homeDir := accounts.HomeDir()
-	if s.ports.HomeDir != nil {
-		if h := s.ports.HomeDir(); h != "" {
-			homeDir = h
-		}
-	}
+	homeDir := s.homeDir()
 	cat, err := configdomain.LoadModelsCatalog(homeDir, true)
 	if err != nil {
 		return appapi.ModelsCatalogPull{}, err

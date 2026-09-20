@@ -8,15 +8,17 @@ import {
   esc, fmtNum, fmtCompactNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
   verdictBadge, modelCapMatrix, providerCapsSummary, providerFrozen, providerNames,
+  catalogMatchHTML, catalogMatchSummary, catalogMatchEditorHTML,
   ruleHitsLeaderboard,
   sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, linkedProviders, sessionHealthSummary, guardMarksHTML, guardMarksDetailHTML, requestMetaHTML,
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
-  cacheHitRate, settingsDiff, settingsRestartKeys,
+  cacheHitRate, settingsDiff, settingsRestartKeys, configSummaryHTML,
   TOKEN_RANGES, tokenRangeBounds, tokenRangeLabel, tokensRangeQuery,
   tokenCustomBounds, parseLocalDate,
   WEEKDAYS, monthTitle, calendarMonthGrid, twoMonthWindow, shiftMonth, ymd,
-  isFutureDay, rangePick, customRangeLabel, tokenRangeTriggerLabel,
+  isFutureDay, rangePick, customRangeLabel, tokenRangeTriggerLabel, tokenRangePickerHTML,
+  quotaUsageFromSec, quotaWindowFromSec,
   prettyJSON, formatJSONLoose, jsonToHTML, parseSSE, isSSE, highlightJSON, splitLinesByBudget, linkedModels,
   sessionsForAgent, linkedAgents,
   fmtGuardDetail, fmtProgressBytes, analyticsChartSeries, analyticsPointValue, analyticsTableRows, analyticsTickLabel,
@@ -209,6 +211,58 @@ test('modelCapMatrix tolerates empty and malformed providers maps', () => {
   assert.deepEqual(p.models, [{ id: 'm', chat: undefined, anthropic: undefined, responses: undefined }]);
 });
 
+test('catalogMatchSummary counts matched entries, tolerating junk', () => {
+  assert.deepEqual(catalogMatchSummary(null), { total: 0, matched: 0 });
+  assert.deepEqual(catalogMatchSummary([
+    { matched: true }, { matched: false }, null, {},
+  ]), { total: 4, matched: 1 });
+});
+
+test('catalogMatchHTML renders a collapsed details with per-row badges and actions', () => {
+  const html = catalogMatchHTML([
+    { provider: 'zhipu', model: 'glm-4.6', catalog_id: 'glm-4.6', matched: true, aliased: false },
+    { provider: 'kimi', model: 'k2', catalog_id: 'kimi-k2-0905-preview', matched: true, aliased: true },
+    { provider: 'codex', model: 'gpt-5.5', catalog_id: 'gpt-5.5', matched: false, aliased: false },
+  ], false, false);
+  // Collapsed by default, matched count in the summary.
+  assert.match(html, /<details class="cat-match">/);
+  assert.match(html, /Model Matching <span class="meta">2\/3 matched<\/span>/);
+  // Direct match: ok badge, no action buttons.
+  assert.match(html, /<td class="mono">zhipu<\/td>/);
+  assert.ok(html.includes('<span class="badge ok">matched</span>'));
+  // Aliased row: catalog id + aliased marker + Edit/Clear actions.
+  assert.ok(html.includes('<span class="badge muted">aliased</span>'));
+  assert.match(html, /data-cat-match-edit data-provider="kimi" data-model="k2"/);
+  assert.match(html, /data-cat-match-clear data-provider="kimi" data-model="k2"/);
+  // Unmatched row: warn badge + Match action.
+  assert.ok(html.includes('<span class="badge warn">unmatched</span>'));
+  assert.match(html, /data-cat-match-edit data-provider="codex" data-model="gpt-5.5"/);
+  // open=true restores the expanded state.
+  assert.match(catalogMatchHTML([{ provider: 'p', model: 'm', matched: true }], false, true),
+    /<details class="cat-match" open>/);
+});
+
+test('catalogMatchHTML escapes names and handles the empty-catalog and empty-list cases', () => {
+  assert.equal(catalogMatchHTML([], false, false), '');
+  assert.equal(catalogMatchHTML(null, false, false), '');
+  // No catalog cache: hint instead of a table (nothing to match against).
+  const empty = catalogMatchHTML([{ provider: 'p', model: 'm', matched: false }], true, false);
+  assert.ok(empty.includes('catalog cache is empty'));
+  assert.ok(!empty.includes('<table'));
+  const xss = catalogMatchHTML([{ provider: '"><img>', model: '<b>', catalog_id: 'x"', matched: false }], false, false);
+  assert.ok(!xss.includes('<img>') && !xss.includes('<b>'));
+  assert.ok(xss.includes('&quot;'));
+});
+
+test('catalogMatchEditorHTML renders the datalist editor with the current id prefilled', () => {
+  const html = catalogMatchEditorHTML('kimi-k2-0905-preview');
+  assert.ok(html.includes('list="cat-id-list"'));
+  assert.ok(html.includes('value="kimi-k2-0905-preview"'));
+  assert.ok(html.includes('data-cat-match-save'));
+  assert.ok(html.includes('data-cat-match-cancel'));
+  assert.ok(catalogMatchEditorHTML('').includes('value=""'));
+});
+
 test('providerCapsSummary counts yes-verdict legs per protocol', () => {
   const [zeta] = modelCapMatrix({
     zeta: { models: {
@@ -331,6 +385,78 @@ test('settingsRestartKeys ignores hot-reloadable changes', () => {
   assert.deepEqual(settingsRestartKeys({}, RESTART_GROUPS), []);
 });
 
+test('configSummaryHTML renders KPI tiles plus the feature-block grid', () => {
+  const html = configSummaryHTML({
+    summary: { listen: '127.0.0.1:15722', provider_count: 2, route_count: 5 },
+    provider_models: { a: ['m1', 'm2'], b: ['m3'] },
+    provider_meta: { a: { priority: 0, alias: { m1: 'alias-1' } }, b: { priority: 1 } },
+    settings: {
+      log_level: 'debug', log_file: '/tmp/mp.log',
+      request_log: { enabled: true, dir: '~/r' },
+      stats: { db_path: '~/stats.db' },
+      cache: { enabled: true, ttl: '5m', max_entries: 42 },
+      guard: { secrets: 'block', paths: 'log', known_secrets: true, decode: false },
+    },
+  });
+  assert.match(html, /^<div class="kpi-grid sum-tiles">/);
+  assert.match(html, /<div class="k">listen<\/div><div class="v">127\.0\.0\.1:15722<\/div>/);
+  assert.match(html, /<div class="k">providers<\/div><div class="v">2<\/div><div class="d">3 models · 1 aliases<\/div>/);
+  assert.match(html, /<div class="k">routes<\/div><div class="v">5<\/div><div class="d">effective table<\/div>/);
+  assert.match(html, /<div class="sum-grid">/);
+  assert.match(html, /<div class="sum-k">log<\/div><div class="sum-v" title="debug → \/tmp\/mp\.log">debug → \/tmp\/mp\.log<\/div>/);
+  assert.match(html, /<div class="sum-k">request_log <span class="badge ok">on<\/span><\/div><div class="sum-v" title="~\/r">~\/r<\/div>/);
+  assert.match(html, /<div class="sum-k">stats<\/div><div class="sum-v" title="~\/stats\.db">~\/stats\.db<\/div>/);
+  assert.match(html, /<div class="sum-k">cache <span class="badge ok">on<\/span><\/div><div class="sum-v" title="ttl 5m · max 42 entries">ttl 5m · max 42 entries<\/div>/);
+  assert.match(html, /<div class="sum-k">guard<\/div><div class="sum-v" title="secrets block · paths log · known on · decode off">/);
+});
+
+test('configSummaryHTML marks absent keys with the code default and off blocks with a muted badge', () => {
+  const html = configSummaryHTML({});
+  assert.match(html, /<div class="k">listen<\/div><div class="v">—<\/div>/);
+  assert.match(html, /<div class="k">providers<\/div><div class="v">0<\/div><div class="d">0 models · 0 aliases<\/div>/);
+  assert.match(html, /<div class="sum-v" title="info → \/tmp\/model-proxy\.log">/);
+  assert.match(html, /<div class="sum-k">request_log <span class="badge muted">off<\/span><\/div><div class="sum-v" title="—">—<\/div>/);
+  assert.match(html, /<div class="sum-v" title="~\/\.model-proxy\/stats\.db \(default\)">/);
+  assert.match(html, /<div class="sum-k">cache <span class="badge muted">off<\/span><\/div><div class="sum-v" title="—">—<\/div>/);
+  assert.match(html, /secrets log · paths log · known off · decode off/);
+});
+
+test('configSummaryHTML keeps enabled blocks honest about defaulted sub-keys', () => {
+  const html = configSummaryHTML({
+    settings: { request_log: { enabled: true }, cache: { enabled: true } },
+  });
+  assert.match(html, /<div class="sum-v" title="~\/\.model-proxy\/log\/requests \(default\)">/);
+  assert.match(html, /<div class="sum-v" title="ttl 10m \(default\) · max 1000 entries">/);
+});
+
+test('configSummaryHTML escapes config values before interpolation', () => {
+  const html = configSummaryHTML({
+    summary: { listen: '<img>' },
+    settings: { stats: { db_path: '"><script>' } },
+  });
+  assert.ok(!html.includes('<img>') && !html.includes('<script>'));
+  assert.match(html, /&lt;img&gt;/);
+  assert.match(html, /&quot;&gt;&lt;script&gt;/);
+});
+
+test('configSummaryHTML renders the MCP gateway surface with enabled counts', () => {
+  const html = configSummaryHTML({}, {
+    servers: [{ name: 'a', enabled: true }, { name: 'b', enabled: false }],
+    routes: [{ name: 'r', enabled: true, targets: [] }],
+  });
+  assert.match(html, /<div class="sum-k">mcp <span class="badge ok">on<\/span><\/div><div class="sum-v" title="1\/2 servers · 1\/1 routes enabled">/);
+});
+
+test('configSummaryHTML shows mcp off when the gateway has no servers or routes', () => {
+  const html = configSummaryHTML({}, { servers: [], routes: [] });
+  assert.match(html, /<div class="sum-k">mcp <span class="badge muted">off<\/span><\/div><div class="sum-v" title="—">—<\/div>/);
+});
+
+test('configSummaryHTML renders mcp as unavailable (no badge) when the fetch failed', () => {
+  const html = configSummaryHTML({}, null);
+  assert.match(html, /<div class="sum-k">mcp<\/div><div class="sum-v" title="—">—<\/div>/);
+});
+
 test('tokenRangeBounds resolves rolling presets against now', () => {
   // 2026-03-01 10:30:15 LOCAL (constructed via the Date API, so the test is
   // timezone-independent). Rolling presets end at now.
@@ -417,6 +543,131 @@ test('tokenRangeLabel renders presets, custom ranges, and the incomplete state',
   assert.equal(tokenRangeLabel({ preset: 'custom', customStart: '2026-09-01', customEnd: '2026-09-05' }),
     '2026-09-01 – 2026-09-05');
   assert.equal(tokenRangeLabel({ preset: 'custom', customStart: '', customEnd: '' }), 'Custom…');
+});
+
+test('tokenRangePickerHTML opts: extraPresets prepend + label override', () => {
+  const html = tokenRangePickerHTML(
+    { preset: 'quota', customStart: '', customEnd: '' },
+    { open: false, view: null, pick: null, selecting: false },
+    'acc',
+    { extraPresets: [{ value: 'quota', label: 'Quota Window' }], label: 'Quota Window' });
+  // The tab-local preset is the FIRST row and carries the checkmark; the
+  // shared presets follow in their canonical order.
+  assert.ok(/<button class="tr-preset active" data-acc-preset="quota">[\s\S]*<span class="tr-check">✓<\/span>Quota Window/.test(html));
+  assert.ok(html.indexOf('data-acc-preset="quota"') < html.indexOf('data-acc-preset="all"'));
+  // The label override wins the trigger's value half (the shared label
+  // helper does not know the tab-local preset).
+  assert.ok(html.includes('<span class="tr-value">Quota Window</span>'));
+  // Without the option the shared presets alone are rendered.
+  const plain = tokenRangePickerHTML(
+    { preset: '7d', customStart: '', customEnd: '' },
+    { open: false, view: null, pick: null, selecting: false },
+    'tr');
+  assert.ok(!plain.includes('data-tr-preset="quota"'));
+  assert.ok(plain.includes('<span class="tr-value">Last 7d</span>'));
+});
+
+test('quotaUsageFromSec reads the projected billing-period start, guards garbage', () => {
+  const now = new Date(2026, 8, 20, 12, 0, 0).getTime();
+  // zhipu-shaped weekly window: reset 09-25 17:50 on a 7d cycle → started
+  // 09-18 17:50 (the provider layer derives this; the UI only parses it).
+  const from = quotaUsageFromSec({ UsageFrom: '2026-09-18T17:50:59+08:00' }, now);
+  assert.equal(from, Math.floor(new Date('2026-09-18T17:50:59+08:00').getTime() / 1000));
+  // Zero time (Go's unset time.Time) parses far in the past → null.
+  assert.equal(quotaUsageFromSec({ UsageFrom: '0001-01-01T00:00:00Z' }, now), null);
+  assert.equal(quotaUsageFromSec({ UsageFrom: '2027-01-01T00:00:00Z' }, now), null); // future
+  assert.equal(quotaUsageFromSec({ UsageFrom: 'not a date' }, now), null);
+  assert.equal(quotaUsageFromSec({}, now), null);
+  assert.equal(quotaUsageFromSec(null, now), null);
+  assert.equal(quotaUsageFromSec(undefined, now), null);
+});
+
+test('quotaWindowFromSec picks the first resolvable plan provider, keys sorted', () => {
+  const now = new Date(2026, 8, 20, 12, 0, 0).getTime();
+  const quota = {
+    zhipu: { UsageFrom: '2026-09-18T17:50:59+08:00' },
+    codex: { UsageFrom: '2026-09-01T08:00:00+08:00' },   // 30d cycle, later in sort
+    deepseek: { UsageFrom: '0001-01-01T00:00:00Z' },     // payg: zero time → skipped
+    broken: { Err: 'boom' },                              // no UsageFrom → skipped
+  };
+  // codex < zhipu alphabetically — the first SORTED key wins, not insertion.
+  const got = quotaWindowFromSec(quota, now);
+  assert.equal(got.key, 'codex');
+  assert.equal(got.from, Math.floor(new Date('2026-09-01T08:00:00+08:00').getTime() / 1000));
+  // Only unresolvable entries → null; empty/garbage maps → null.
+  assert.equal(quotaWindowFromSec({ deepseek: quota.deepseek }, now), null);
+  assert.equal(quotaWindowFromSec({}, now), null);
+  assert.equal(quotaWindowFromSec(null, now), null);
+  // Snapshot values may be projections (plain objects) — numeric-ish or
+  // malformed UsageFrom fields are skipped, not thrown.
+  assert.equal(quotaWindowFromSec({ x: { UsageFrom: 123 } }, now), null);
+});
+
+test('tokenRangePickerHTML closed state: hidden popover, namespace attrs, trigger label', () => {
+  const closed = tokenRangePickerHTML(
+    { preset: '7d', customStart: '', customEnd: '' },
+    { open: false, view: null, pick: null, selecting: false },
+    'acc');
+  // Popover is present but hidden, and carries the interaction-gate hook.
+  assert.ok(closed.includes('class="tr-popover" data-popup hidden'));
+  // No calendar while closed.
+  assert.ok(!closed.includes('tr-cal'));
+  // Trigger reflects the applied preset label.
+  assert.ok(closed.includes('<span class="tr-value">Last 7d</span>'));
+  // Namespace rides every wired control so tabs never collide; the active
+  // preset carries the checkmark.
+  assert.ok(closed.includes('data-acc-preset="7d"'));
+  assert.ok(!closed.includes('data-tr-preset'));
+  assert.ok(/<button class="tr-preset active" data-acc-preset="7d">[\s\S]*<span class="tr-check">✓<\/span>Last 7d/
+    .test(closed));
+  // opt.triggerId pins the Status e2e's #tr-trigger address.
+  const status = tokenRangePickerHTML(
+    { preset: 'today', customStart: '', customEnd: '' },
+    { open: false, view: null, pick: null, selecting: false },
+    'tr', { triggerId: 'tr-trigger' });
+  assert.ok(status.includes('class="btn small tr-trigger" type="button" id="tr-trigger"'));
+  assert.ok(status.includes('data-tr-preset="today"'));
+});
+
+test('tokenRangePickerHTML open state: two-month calendar, applied range, future days', () => {
+  const now = new Date(2026, 8, 8, 12, 0, 0).getTime(); // 2026-09-08 local
+  const html = tokenRangePickerHTML(
+    { preset: 'custom', customStart: '2026-09-02', customEnd: '2026-09-05' },
+    { open: true, view: { year: 2026, month: 8 }, pick: null, selecting: false },
+    'an', { now });
+  assert.ok(html.includes('class="tr-popover" data-popup ')); // open → no hidden
+  // Two month panes: September + October 2026, nav buttons wired per ns.
+  assert.ok(html.includes('September 2026'));
+  assert.ok(html.includes('October 2026'));
+  assert.ok(html.includes('data-an-nav="-1"'));
+  // The view's right edge reaches this month → next is clamped disabled.
+  assert.ok(/data-an-nav="1" aria-label="next month" disabled/.test(html));
+  const cell = (dayYmd) => {
+    const m = new RegExp(`<button class="([^"]*)" data-an-day="${dayYmd}"([^>]*)>`).exec(html);
+    return m ? m[1] + (m[2].includes('disabled') ? ' disabled' : '') : null;
+  };
+  // Applied custom range: endpoints circled, middle days in-range, today
+  // selectable, future days disabled, adjacent-month days absent (blank).
+  assert.equal(cell('2026-09-02'), 'tr-day tr-day-selected');
+  assert.equal(cell('2026-09-05'), 'tr-day tr-day-selected');
+  assert.equal(cell('2026-09-03'), 'tr-day tr-day-inrange');
+  assert.equal(cell('2026-09-06'), 'tr-day'); // outside range
+  assert.equal(cell('2026-09-08'), 'tr-day'); // today
+  assert.equal(cell('2026-09-09'), 'tr-day disabled'); // future
+  assert.equal(cell('2026-10-01'), 'tr-day disabled'); // next month is all future
+  // While a NEW pick is in progress the pick's start circle replaces the
+  // applied range's highlight.
+  const picking = tokenRangePickerHTML(
+    { preset: 'custom', customStart: '2026-09-02', customEnd: '2026-09-05' },
+    { open: true, view: { year: 2026, month: 8 }, pick: '2026-09-07', selecting: true },
+    'an', { now });
+  const pickCell = (dayYmd) => {
+    const m = new RegExp(`<button class="([^"]*)" data-an-day="${dayYmd}"([^>]*)>`).exec(picking);
+    return m ? m[1] : null;
+  };
+  assert.equal(pickCell('2026-09-07'), 'tr-day tr-day-selected');
+  assert.equal(pickCell('2026-09-02'), 'tr-day'); // applied start no longer circled
+  assert.equal(pickCell('2026-09-03'), 'tr-day'); // applied range no longer shaded
 });
 
 test('calendarMonthGrid aligns weeks Sunday-first with blank edge cells', () => {

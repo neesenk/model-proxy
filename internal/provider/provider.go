@@ -58,6 +58,13 @@ type QuotaSnapshot struct {
 	// snapshot, flat/decreasing usage, or a poll gap > 3×poll_interval).
 	// Display-only: scheduling never reads it, and it is not persisted.
 	ExhaustionEta time.Time
+	// UsageFrom is the current billing period's start (UsageWindow's derived
+	// ResetsAt−Duration), set by the admin Dashboard projection at request
+	// time so consumers can align usage queries with the quota window without
+	// re-deriving the reset cycle. Zero when not resolvable (not a measured
+	// plan, poll error, no usable ultimate reset/cycle). Runtime state never
+	// sets it; scheduling and persistence never read it.
+	UsageFrom time.Time
 }
 
 // Surplus is the scheduling pace-score derived from this snapshot:
@@ -105,6 +112,36 @@ func (s *QuotaSnapshot) Surplus(now time.Time, peakMult float64) float64 {
 		fLeft = 1
 	}
 	return remaining - fLeft
+}
+
+// UsageWindow returns the start of the CURRENT billing period: the ultimate
+// window's last reset (ResetsAt − Duration). It reads the same ultimate
+// window Surplus/fLeft pace against — Duration is the nominal reset cycle
+// the provider parsers set (5h/24h/7d/30d), so 7d and 30d plans resolve
+// distinctly — giving usage views (Web accounts tab) one authoritative way
+// to align their query window with the quota window instead of all-time
+// counters. ok is false when the snapshot is not a measured plan account,
+// carries a poll error, has no usable ultimate reset/cycle, or the derived
+// start is not in the past (broken poll data, e.g. a reset >1 cycle out).
+func (s *QuotaSnapshot) UsageWindow(now time.Time) (time.Time, bool) {
+	if s == nil || s.Billing != BillingPlan || s.Err != "" {
+		return time.Time{}, false
+	}
+	var ult *QuotaWindow
+	for i := range s.Windows {
+		if s.Windows[i].Ultimate {
+			ult = &s.Windows[i]
+			break
+		}
+	}
+	if ult == nil || ult.ResetsAt.IsZero() || ult.Duration <= 0 {
+		return time.Time{}, false
+	}
+	from := ult.ResetsAt.Add(-ult.Duration)
+	if !from.Before(now) {
+		return time.Time{}, false
+	}
+	return from, true
 }
 
 // Provider encapsulates all behavior for an upstream backend: auth, request

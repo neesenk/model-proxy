@@ -86,6 +86,8 @@ providers:
       - gpt-5.5
     # capabilities:               # 可选：手动声明模型能力（models.dev 查不到时的逃生口，声明即权威）
     #   gpt-5.5: [image, tools]
+    # catalog_alias:              # 可选：上游模型名 → models.dev 目录 id（元数据查找改路，不改路由/对外名）
+    #   gpt-5.5: gpt-5
   zhipu:
     provider_id: zhipu
     openai_base_url: https://open.bigmodel.cn/api/paas/v4

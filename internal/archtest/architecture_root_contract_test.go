@@ -123,6 +123,9 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 		wantProxyFields := map[string]bool{
 			"mu": true, "configGeneration": true,
 			"pricingMu": true, "closeOnce": true, "pprofEnabled": true,
+			// catalogLoader is the initCatalog seam (production:
+			// configdomain.LoadModelsCatalog; tests stub it offline).
+			"catalogLoader": true,
 		}
 		if got := structContractViolations(
 			namedStructFields(t, rootPackage, "Proxy"), wantProxyFields, nil,

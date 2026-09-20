@@ -2,12 +2,14 @@ package app
 
 import (
 	"encoding/json"
-	configdomain "model-proxy/internal/config"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
+	"model-proxy/internal/catalog"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
 )
 
@@ -41,6 +43,12 @@ func newTestProxy(t testing.TB, cfg *configdomain.Config) *Proxy {
 func newTestProxyAt(t testing.TB, cfg *configdomain.Config, statePath string) *Proxy {
 	t.Helper()
 	p := NewProxyWithStatePath(cfg, statePath)
+	// Tests stay offline: Reload's best-effort models.dev refresh would hit
+	// the real network from the shared TestMain HOME (above) and pollute it
+	// for later exact-body /api/models assertions. Tests that need catalog
+	// metadata replace this stub (TestReloadRefreshesCatalogThroughLoader) or
+	// set p.catalog directly.
+	p.catalogLoader = func(string, bool) (*catalog.Catalog, error) { return nil, nil }
 	t.Cleanup(p.Close)
 	return p
 }
@@ -57,6 +65,55 @@ func TestNewProxy_DefaultStatePath(t *testing.T) {
 	want := filepath.Join(home, ".model-proxy", "quota_state.json")
 	if p.quota.Path != want {
 		t.Fatalf("NewProxy quota path = %q, want %q", p.quota.Path, want)
+	}
+}
+
+// TestReloadRefreshesCatalogThroughLoader pins the reload catalog seam: the
+// refresh runs through p.catalogLoader and installs the returned catalog for
+// request-aware routing. This is the behavioral guard behind newTestProxyAt's
+// offline stub — a wiring regression here would silently send every Reload
+// test to the real models.dev endpoint and pollute the shared test HOME,
+// instead of failing a test.
+func TestReloadRefreshesCatalogThroughLoader(t *testing.T) {
+	cfg, err := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://x}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newTestProxy(t, cfg)
+	if p.catalogSnapshot() != nil {
+		t.Fatal("fresh test proxy must start with no catalog")
+	}
+	calls := 0
+	p.catalogLoader = func(homeDir string, _ bool) (*catalog.Catalog, error) {
+		calls++
+		if homeDir == "" {
+			t.Error("loader homeDir must be non-empty")
+		}
+		return catalog.New(map[string]catalog.Model{"glm-5": {Context: 128}}), nil
+	}
+	yamlPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(yamlPath, []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: https://x}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Reload(yamlPath); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	// The refresh is async (lifecycle goroutine): poll for the install.
+	deadline := time.Now().Add(2 * time.Second)
+	for p.catalogSnapshot() == nil {
+		if time.Now().After(deadline) {
+			t.Fatalf("reload never installed the loader's catalog (calls=%d)", calls)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if calls == 0 {
+		t.Error("reload must route the catalog refresh through catalogLoader")
+	}
+	if m, ok := p.catalogSnapshot().Lookup("glm-5"); !ok || m.Context != 128 {
+		t.Fatalf("installed catalog metadata = %+v, want glm-5 ctx 128", m)
 	}
 }
 

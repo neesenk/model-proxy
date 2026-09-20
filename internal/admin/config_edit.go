@@ -215,6 +215,16 @@ func (s *Service) editStructured(kind, name string, data map[string]any) error {
 			if models, ok := data["models"]; ok {
 				configedit.SetChildNode(providerConfig, "models", configedit.MustEncode(models))
 			}
+			// catalog_alias: full-map replace (the client sends the provider's
+			// complete desired map); an empty map deletes the key so the YAML
+			// doesn't retain an empty mapping node.
+			if catalogAlias, ok := data["catalog_alias"]; ok {
+				if m, isMap := catalogAlias.(map[string]any); isMap && len(m) == 0 {
+					configedit.DeleteKey(providerConfig, "catalog_alias")
+				} else {
+					configedit.SetChildNode(providerConfig, "catalog_alias", configedit.MustEncode(catalogAlias))
+				}
+			}
 		case "route":
 			if targets, ok := data["targets"]; ok {
 				configedit.SetChildNode(configedit.ChildMap(root, "routes"), name, configedit.MustEncode(targets))

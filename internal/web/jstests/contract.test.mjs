@@ -37,7 +37,10 @@ function documentedTopLevelKeys(row) {
     if (ch === '}') { depth--; token = ''; if (depth <= 0) break; continue; }
     if (depth !== 1) continue;
     if (ch === ':') {
-      const key = token.trim();
+      // The token since the last boundary may carry the separating comma
+      // ("…}, catalog:") — the key is its last word.
+      const words = token.trim().split(/[\s,]+/).filter(Boolean);
+      const key = words.pop() || '';
       if (key) keys.add(key);
       token = '';
       continue;

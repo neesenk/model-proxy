@@ -560,7 +560,7 @@ application → serveAssembly → applicationRuntime → Proxy
   observe/counters, observe/events, observe/logx, observe/requestlog, observe/seclog, observe/stats,
   pricing, probe, protocol, provider, providerbuild, routing, runtime, runtime/wirecap, shadow,
   targetexec, transport/bodycapture, upstreamproxy, web, webauth`；
-- `admin → accounts, appapi, cache, config, configedit, credstore, fusion, login,
+- `admin → accounts, appapi, cache, catalog, config, configedit, credstore, fusion, login,
   observe/counters, observe/logx, observe/requestlog, observe/seclog, observe/stats, presets, pricing, probe,
   provider, routing, runtime, runtime/wirecap, takeover`（Web admin 应用服务；不得回依赖 app/web/cli；
   takeover 边是 takeover/restore 与模板管理的 daemon 孪生）；

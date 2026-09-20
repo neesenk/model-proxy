@@ -23,8 +23,9 @@ var DefaultModelMetadata = catalog.Model{
 
 // HydrateModels computes effective metadata for the union of configured model
 // names and models referenced by routes. The neutral catalog owns metadata
-// lookup; this routing policy owns Config traversal and fallback/source rules.
-// cfg and its maps are never mutated.
+// lookup; this routing policy owns Config traversal and fallback/source rules —
+// including the per-provider catalog_alias remap consulted before the direct
+// id. cfg and its maps are never mutated.
 func HydrateModels(cfg *configdomain.Config, cat *catalog.Catalog) (meta map[string]map[string]catalog.Model, sources map[string]map[string]ModelSource) {
 	meta = map[string]map[string]catalog.Model{}
 	sources = map[string]map[string]ModelSource{}
@@ -36,9 +37,16 @@ func HydrateModels(cfg *configdomain.Config, cat *catalog.Catalog) (meta map[str
 		}
 		return meta[providerName], sources[providerName]
 	}
-	resolve := func(modelName string) (catalog.Model, ModelSource) {
-		if model, ok := cat.Lookup(modelName); ok {
-			return model, SrcModelsDev
+	// resolve looks a model up in the catalog through the single Lookup site
+	// below. lookupIDs orders the candidate ids: a provider's catalog_alias
+	// remaps the lookup id (for upstream ids the catalog doesn't name); a
+	// missed alias falls back to the direct id so a stale mapping degrades to
+	// pre-alias behavior instead of masking a direct hit.
+	resolve := func(providerConfig configdomain.Provider, modelName string) (catalog.Model, ModelSource) {
+		for _, id := range lookupIDs(providerConfig, modelName) {
+			if model, ok := cat.Lookup(id); ok {
+				return model, SrcModelsDev
+			}
 		}
 		return DefaultModelMetadata, SrcDefault
 	}
@@ -49,20 +57,30 @@ func HydrateModels(cfg *configdomain.Config, cat *catalog.Catalog) (meta map[str
 			if _, duplicate := models[modelName]; duplicate {
 				continue
 			}
-			models[modelName], modelSources[modelName] = resolve(modelName)
+			models[modelName], modelSources[modelName] = resolve(providerConfig, modelName)
 		}
 	}
 	for _, targets := range cfg.Routes {
 		for _, target := range targets {
-			if _, exists := cfg.Providers[target.Provider]; !exists {
+			providerConfig, exists := cfg.Providers[target.Provider]
+			if !exists {
 				continue
 			}
 			models, modelSources := ensure(target.Provider)
 			if _, duplicate := models[target.Model]; duplicate {
 				continue
 			}
-			models[target.Model], modelSources[target.Model] = resolve(target.Model)
+			models[target.Model], modelSources[target.Model] = resolve(providerConfig, target.Model)
 		}
 	}
 	return meta, sources
+}
+
+// lookupIDs lists the catalog ids one model resolves through, in probe order:
+// the provider's catalog_alias remap first (when set), then the direct id.
+func lookupIDs(providerConfig configdomain.Provider, modelName string) []string {
+	if alias := providerConfig.CatalogAlias[modelName]; alias != "" && alias != modelName {
+		return []string{alias, modelName}
+	}
+	return []string{modelName}
 }

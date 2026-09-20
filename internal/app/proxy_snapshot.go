@@ -131,11 +131,13 @@ func (p *Proxy) catalogSnapshot() *catalog.Catalog {
 
 // initCatalog loads the models.dev metadata catalog best-effort (context window
 // + modalities for request-aware routing). On failure p.catalog stays nil and
-// the proxy runs without request-aware routing (forwards unchanged). Called from
-// runProxy only — direct NewProxy callers (tests) stay offline; tests that need
-// metadata set p.catalog directly.
+// the proxy runs without request-aware routing (forwards unchanged). The load
+// runs through p.catalogLoader (production: configdomain.LoadModelsCatalog;
+// test stub: newTestProxyAt) so the reload-triggered refresh is injectable.
+// Direct NewProxy callers (tests) stay offline; tests that need metadata set
+// p.catalog directly.
 func (p *Proxy) initCatalog() {
-	cat, err := configdomain.LoadModelsCatalog(accounts.HomeDir(), false)
+	cat, err := p.catalogLoader(accounts.HomeDir(), false)
 	if err != nil || cat == nil {
 		if err != nil {
 			logx.Warnf("[models] catalog load failed: %v - running without request-aware routing", err)

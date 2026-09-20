@@ -7,6 +7,7 @@ import (
 
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/admin"
+	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/fusion"
 	"model-proxy/internal/login"
@@ -56,6 +57,11 @@ func NewWebServer(proxy *Proxy, configFile string) *WebServer {
 	}
 	// Keep test endpoint overrides dynamic: tests replace these hooks after
 	// construction, while the admin service reads them at login start.
+	// The models.dev disk cache memo lives for the WebServer lifetime: the
+	// Status page polls /api/models every 5s and the (mtime, size) keying
+	// makes each poll one stat instead of a full cache decode (catalog owns
+	// the models.dev source kernel).
+	modelsCatalogCache := catalog.NewDiskCache()
 	server.api = admin.New(proxy.adminPorts(
 		func() string {
 			return server.configFile
@@ -66,6 +72,7 @@ func NewWebServer(proxy *Proxy, configFile string) *WebServer {
 		func() *login.CodexLoginServerOptions {
 			return server.newCodexOptions()
 		},
+		modelsCatalogCache.Load,
 	))
 	// The live SSE stream is served by the web transport's /api/ subtree; the
 	// hub itself stays owned by the Proxy (snapshot/event producers publish
@@ -128,10 +135,12 @@ func (p *Proxy) adminPorts(
 	configFile func() string,
 	newAqpClient func(storePath string) *login.AqpClient,
 	newCodexOptions func() *login.CodexLoginServerOptions,
+	modelsCatalogCache func(path string) *catalog.Catalog,
 ) admin.Ports {
 	return admin.Ports{
-		ConfigFile: configFile,
-		Config:     p.snapshotConfig,
+		ConfigFile:         configFile,
+		Config:             p.snapshotConfig,
+		ModelsCatalogCache: modelsCatalogCache,
 		ProviderConfig: func(name string) (configdomain.Provider, bool) {
 			p.mu.RLock()
 			defer p.mu.RUnlock()

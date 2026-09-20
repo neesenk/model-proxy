@@ -179,3 +179,52 @@ func TestParseTopLevelToolCallAndEfforts(t *testing.T) {
 		t.Fatalf(`efforts with "none" = %v, want [low high]`, m.ReasoningEfforts)
 	}
 }
+
+func TestFetchedAtAndLoadCache(t *testing.T) {
+	var nilCat *Catalog
+	if !nilCat.FetchedAt().IsZero() {
+		t.Error("nil catalog FetchedAt must be zero")
+	}
+	fresh := New(map[string]Model{"m": {Context: 1}})
+	if !fresh.FetchedAt().IsZero() {
+		t.Error("in-memory catalog FetchedAt must be zero before any pull")
+	}
+
+	dir := t.TempDir()
+	path := dir + "/models_cache.json"
+	if cat, err := LoadCache(path); err != nil || cat != nil {
+		t.Fatalf("LoadCache(missing) = %v, %v — want (nil, nil)", cat, err)
+	}
+
+	pulled, err := EnsureFresh(RefreshOptions{
+		CacheFile: path,
+		Fetch: func(_, _ string) (int, []byte, string, error) {
+			return 200, []byte(fixture), "etag-1", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("EnsureFresh: %v", err)
+	}
+	if pulled.FetchedAt().IsZero() {
+		t.Fatal("pulled catalog must carry fetched_at")
+	}
+	loaded, err := LoadCache(path)
+	if err != nil {
+		t.Fatalf("LoadCache: %v", err)
+	}
+	if loaded.Count() != 3 || loaded.ETag() != "etag-1" || !loaded.FetchedAt().Equal(pulled.FetchedAt()) {
+		t.Errorf("LoadCache round-trip = count %d etag %q fetched %v", loaded.Count(), loaded.ETag(), loaded.FetchedAt())
+	}
+}
+
+func TestNamesSorted(t *testing.T) {
+	var nilCat *Catalog
+	if nilCat.Names() != nil {
+		t.Error("nil catalog Names must be nil")
+	}
+	cat := New(map[string]Model{"b": {Context: 1}, "a": {Context: 1}, "c": {Context: 1}})
+	names := cat.Names()
+	if len(names) != 3 || names[0] != "a" || names[1] != "b" || names[2] != "c" {
+		t.Errorf("Names = %v, want sorted [a b c]", names)
+	}
+}

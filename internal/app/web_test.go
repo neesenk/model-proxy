@@ -49,18 +49,25 @@ func TestAPIStatus(t *testing.T) {
 // TestAPIModelsEndToEnd: GET /api/models serves the startup protocol probe's
 // capability matrix through the REAL chain (Proxy.modelCaps → admin port
 // closure → admin projection → web transport): verdict strings, fingerprint,
-// probed_at — and an empty store projecting {"providers":{}}.
+// probed_at — and an empty store projecting {"providers":{}} with a zero
+// catalog status.
 func TestAPIModelsEndToEnd(t *testing.T) {
+	// HOME sandbox: the /api/models projection reads the models.dev cache from
+	// disk (admin Service.modelsCatalogCache). The exact-body assertion below
+	// requires a HOME with no cache file, independent of what other tests in
+	// this package leave behind (same pattern as the tests above).
+	t.Setenv("HOME", t.TempDir())
 	w, p := newTestWeb(t)
 
-	// Empty store → {"providers":{}} (non-null object).
+	// Empty store → {"providers":{},"catalog":{"count":0},"match":[]}
+	// (non-null collections).
 	rec := httptest.NewRecorder()
 	serveWeb(w, rec, httptest.NewRequest("GET", "/api/models", nil))
 	if rec.Code != 200 {
 		t.Fatalf("empty store: status=%d want 200", rec.Code)
 	}
-	if body := strings.TrimSpace(rec.Body.String()); body != `{"providers":{}}` {
-		t.Fatalf("empty store body = %s, want {\"providers\":{}}", body)
+	if body := strings.TrimSpace(rec.Body.String()); body != `{"providers":{},"catalog":{"count":0},"match":[]}` {
+		t.Fatalf("empty store body = %s, want {\"providers\":{},\"catalog\":{\"count\":0},\"match\":[]}", body)
 	}
 
 	probed := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)

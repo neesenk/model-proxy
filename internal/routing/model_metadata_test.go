@@ -56,3 +56,38 @@ func TestHydrateModels(t *testing.T) {
 		t.Errorf("volcengine/doubao-x source = %v, want SrcDefault", src["volcengine"]["doubao-x"])
 	}
 }
+
+// TestHydrateModelsCatalogAlias pins the provider catalog_alias lookup rule:
+// the alias target is looked up first; a stale alias that misses the catalog
+// falls back to the direct model id (never masks a direct hit); only when both
+// miss does the default apply. Aliases apply to route-referenced models too.
+func TestHydrateModelsCatalogAlias(t *testing.T) {
+	cat := catalog.New(map[string]catalog.Model{
+		"kimi-k2-0905-preview": {Context: 262144, Output: 32768},
+		"direct-hit":           {Context: 111, Output: 11},
+	})
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			// reseller id unknown to the catalog, remapped to the real entry
+			"reseller": {Models: []string{"kimi-k2"}, CatalogAlias: map[string]string{"kimi-k2": "kimi-k2-0905-preview"}},
+			// stale alias (catalog no longer carries it) — direct id still hits
+			"stale": {Models: []string{"direct-hit"}, CatalogAlias: map[string]string{"direct-hit": "gone-id"}},
+			// alias misses and no direct hit — default
+			"blind": {Models: []string{"mystery"}, CatalogAlias: map[string]string{"mystery": "also-gone"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{
+			"k2": {{Provider: "reseller", Model: "kimi-k2"}},
+		},
+	}
+	meta, src := HydrateModels(cfg, cat)
+
+	if pm := meta["reseller"]["kimi-k2"]; pm.Context != 262144 || src["reseller"]["kimi-k2"] != SrcModelsDev {
+		t.Errorf("reseller/kimi-k2 should hydrate via catalog_alias: %+v src=%v", pm, src["reseller"]["kimi-k2"])
+	}
+	if pm := meta["stale"]["direct-hit"]; pm.Context != 111 || src["stale"]["direct-hit"] != SrcModelsDev {
+		t.Errorf("stale/direct-hit should fall back to the direct id: %+v src=%v", pm, src["stale"]["direct-hit"])
+	}
+	if pm := meta["blind"]["mystery"]; pm.Context != DefaultModelMetadata.Context || src["blind"]["mystery"] != SrcDefault {
+		t.Errorf("blind/mystery should be default: %+v src=%v", pm, src["blind"]["mystery"])
+	}
+}

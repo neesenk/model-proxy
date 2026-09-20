@@ -14,6 +14,7 @@ import (
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/appapi"
 	responsecache "model-proxy/internal/cache"
+	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/fusion"
 	obscounters "model-proxy/internal/observe/counters"
@@ -134,6 +135,51 @@ func TestDashboardProjection(t *testing.T) {
 	dashboard.Schedule[0] = '['
 	if state.RouteWarnings[0] != "warn-one" || string(state.Schedule) != `{"models":{}}` {
 		t.Error("dashboard DTO aliases the captured state")
+	}
+}
+
+// TestDashboardQuotaUsageFromProjection pins the quota projection contract:
+// every served entry carries the provider-layer UsageWindow-derived current
+// billing period start (UsageFrom) on a DETACHED copy — runtime snapshots
+// stay untouched, and unresolvable snapshots (non-plan, no ultimate cycle)
+// keep the zero UsageFrom.
+func TestDashboardQuotaUsageFromProjection(t *testing.T) {
+	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	weekly := &provider.QuotaSnapshot{
+		Billing: provider.BillingPlan,
+		Windows: []provider.QuotaWindow{{
+			Label: "Weekly tokens", Ultimate: true,
+			Duration: 7 * 24 * time.Hour,
+			ResetsAt: time.Date(2026, 9, 25, 17, 50, 59, 0, time.UTC), // zhipu-shaped
+		}},
+	}
+	payg := &provider.QuotaSnapshot{Billing: provider.BillingPayG}
+	service := New(Ports{
+		DashboardState: func(time.Time) DashboardState {
+			return DashboardState{
+				Runtime:      runtimestate.DashboardSnapshot{Quotas: map[string]*provider.QuotaSnapshot{"zhipu": weekly, "deepseek": payg}},
+				QuotaEnabled: true,
+				StartedAt:    now,
+			}
+		},
+	})
+
+	dashboard := service.Dashboard(now)
+
+	zq, ok := dashboard.Quota["zhipu"].(provider.QuotaSnapshot)
+	if !ok {
+		t.Fatalf("quota[zhipu] = %T, want projected provider.QuotaSnapshot value", dashboard.Quota["zhipu"])
+	}
+	wantFrom := time.Date(2026, 9, 18, 17, 50, 59, 0, time.UTC)
+	if !zq.UsageFrom.Equal(wantFrom) {
+		t.Errorf("UsageFrom = %v, want %v (reset − 7d cycle)", zq.UsageFrom, wantFrom)
+	}
+	if !weekly.UsageFrom.IsZero() {
+		t.Errorf("runtime snapshot mutated: UsageFrom = %v, want zero (detached copy only)", weekly.UsageFrom)
+	}
+	dq, ok := dashboard.Quota["deepseek"].(provider.QuotaSnapshot)
+	if !ok || !dq.UsageFrom.IsZero() {
+		t.Errorf("quota[deepseek] = %v, want zero UsageFrom for a non-plan snapshot", dashboard.Quota["deepseek"])
 	}
 }
 
@@ -644,6 +690,8 @@ func TestModelsDocumentProjection(t *testing.T) {
 				"empty": {Fingerprint: "fedcba9876543210", ProbedAt: probed},
 			}
 		},
+		// Sandboxed: ModelsDocument reads the catalog cache from disk.
+		HomeDir: func() string { return t.TempDir() },
 	})
 
 	document := service.ModelsDocument()
@@ -688,28 +736,166 @@ func TestModelsDocumentProjection(t *testing.T) {
 }
 
 func TestModelsDocumentEmptyStore(t *testing.T) {
-	// Empty snapshot → {"providers":{}} (non-nil, never null).
+	// Empty snapshot → {"providers":{},"catalog":{"count":0},"match":[]}
+	// (non-nil maps/slices, no cache on disk → zero catalog status). HomeDir
+	// is sandboxed so the disk-only cache read never touches the real HOME.
 	service := New(Ports{
 		ModelCapsSnapshot: func() map[string]runtimewire.ProviderModelCaps {
 			return map[string]runtimewire.ProviderModelCaps{}
 		},
+		HomeDir: func() string { return t.TempDir() },
 	})
 	document := service.ModelsDocument()
 	if document.Providers == nil || len(document.Providers) != 0 {
 		t.Errorf("empty store document = %+v", document)
 	}
+	if document.Catalog != (appapi.ModelsCatalogStatus{}) {
+		t.Errorf("empty store catalog status = %+v, want zero", document.Catalog)
+	}
 	data, err := json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != `{"providers":{}}` {
-		t.Errorf("empty store JSON = %s, want {\"providers\":{}}", data)
+	if string(data) != `{"providers":{},"catalog":{"count":0},"match":[]}` {
+		t.Errorf("empty store JSON = %s, want {\"providers\":{},\"catalog\":{\"count\":0},\"match\":[]}", data)
 	}
 
-	// A missing port degrades to the same empty document.
-	document = New(Ports{}).ModelsDocument()
+	// A missing ModelCapsSnapshot port degrades to the same empty document.
+	// HomeDir is still sandboxed: the disk-only catalog read must never touch
+	// the real HOME.
+	document = New(Ports{HomeDir: func() string { return t.TempDir() }}).ModelsDocument()
 	if document.Providers == nil || len(document.Providers) != 0 {
 		t.Errorf("nil port document = %+v", document)
+	}
+}
+
+func TestModelsDocumentCatalogStatus(t *testing.T) {
+	home := t.TempDir()
+	cachePath := configdomain.ModelsCatalogPath(home)
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cache := `{"fetched_at":"2026-09-19T10:00:00Z","etag":"e1","by_name":{"m":{"ctx":1024,"out":256,"in":["text"],"out_mod":["text"]}}}`
+	if err := os.WriteFile(cachePath, []byte(cache), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := New(Ports{
+		HomeDir:            func() string { return home },
+		ModelsCatalogCache: catalog.NewDiskCache().Load,
+	})
+	document := service.ModelsDocument()
+	if document.Catalog.Count != 1 || document.Catalog.ETag != "e1" ||
+		document.Catalog.FetchedAt == nil || !document.Catalog.FetchedAt.Equal(time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)) {
+		t.Errorf("catalog status = %+v", document.Catalog)
+	}
+	data, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Catalog struct {
+			Count     int    `json:"count"`
+			FetchedAt string `json:"fetched_at"`
+			ETag      string `json:"etag"`
+		} `json:"catalog"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("document JSON = %s: %v", data, err)
+	}
+	if decoded.Catalog.Count != 1 || decoded.Catalog.ETag != "e1" || decoded.Catalog.FetchedAt != "2026-09-19T10:00:00Z" {
+		t.Errorf("wire catalog = %+v (%s)", decoded.Catalog, data)
+	}
+
+	// A corrupt cache degrades to the zero status instead of failing the read.
+	if err := os.WriteFile(cachePath, []byte(`{corrupt`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := service.ModelsDocument().Catalog; got != (appapi.ModelsCatalogStatus{}) {
+		t.Errorf("corrupt cache catalog status = %+v, want zero", got)
+	}
+}
+
+// TestModelsDocumentMatch pins the Model Matching projection: the list mirrors
+// HydrateModels' model set and source verdicts against the on-disk catalog
+// cache (catalog_alias applied), is sorted by provider then model, and the
+// catalog_ids picker list is sorted and omitted when no cache exists.
+func TestModelsDocumentMatch(t *testing.T) {
+	home := t.TempDir()
+	cachePath := configdomain.ModelsCatalogPath(home)
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cache := `{"fetched_at":"2026-09-19T10:00:00Z","etag":"e1","by_name":{` +
+		`"kimi-k2-0905-preview":{"ctx":262144,"out":32768,"in":["text"],"out_mod":["text"]},` +
+		`"glm-4.6":{"ctx":204800,"out":131072,"in":["text"],"out_mod":["text"]}}}`
+	if err := os.WriteFile(cachePath, []byte(cache), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {Models: []string{"glm-4.6"}},
+			"kimi": {Models: []string{"k2"},
+				CatalogAlias: map[string]string{"k2": "kimi-k2-0905-preview"}},
+			"codex": {Models: []string{"gpt-5.5"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{
+			// route-only model of a known provider joins the match set
+			"extra": {{Provider: "codex", Model: "gpt-5.1"}},
+			// unknown provider is skipped by HydrateModels — never listed
+			"ghost": {{Provider: "nope", Model: "m"}},
+		},
+	}
+	service := New(Ports{
+		HomeDir:            func() string { return home },
+		ModelsCatalogCache: catalog.NewDiskCache().Load,
+		Config:             func() *configdomain.Config { return cfg },
+	})
+	document := service.ModelsDocument()
+
+	want := []appapi.ModelMatchEntry{
+		{Provider: "codex", Model: "gpt-5.1", CatalogID: "gpt-5.1", Matched: false},
+		{Provider: "codex", Model: "gpt-5.5", CatalogID: "gpt-5.5", Matched: false},
+		{Provider: "kimi", Model: "k2", CatalogID: "kimi-k2-0905-preview", Matched: true, Aliased: true},
+		{Provider: "zhipu", Model: "glm-4.6", CatalogID: "glm-4.6", Matched: true},
+	}
+	if len(document.Match) != len(want) {
+		t.Fatalf("match = %+v", document.Match)
+	}
+	for i, entry := range want {
+		if document.Match[i] != entry {
+			t.Errorf("match[%d] = %+v, want %+v", i, document.Match[i], entry)
+		}
+	}
+	if got := document.CatalogIDs; len(got) != 2 || got[0] != "glm-4.6" || got[1] != "kimi-k2-0905-preview" {
+		t.Errorf("catalog_ids = %v, want sorted [glm-4.6 kimi-k2-0905-preview]", got)
+	}
+
+	// Without a cache the match list still mirrors hydration (all unmatched)
+	// and catalog_ids is omitted.
+	if err := os.Remove(cachePath); err != nil {
+		t.Fatal(err)
+	}
+	uncached := service.ModelsDocument()
+	if len(uncached.Match) != len(want) {
+		t.Fatalf("uncached match = %+v", uncached.Match)
+	}
+	for _, entry := range uncached.Match {
+		if entry.Matched {
+			t.Errorf("uncached entry %+v must be unmatched", entry)
+		}
+	}
+	if uncached.CatalogIDs != nil {
+		t.Errorf("uncached catalog_ids = %v, want nil", uncached.CatalogIDs)
+	}
+
+	// Nil config degrades to an empty (never nil) list.
+	empty := New(Ports{
+		HomeDir:            func() string { return home },
+		ModelsCatalogCache: catalog.NewDiskCache().Load,
+		Config:             func() *configdomain.Config { return nil },
+	}).ModelsDocument()
+	if empty.Match == nil || len(empty.Match) != 0 {
+		t.Errorf("nil-config match = %+v, want empty slice", empty.Match)
 	}
 }
 

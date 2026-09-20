@@ -23,7 +23,8 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/accounts": {"model-proxy/internal/credstore": true},
 		"model-proxy/internal/admin": {
 			"model-proxy/internal/accounts": true, "model-proxy/internal/appapi": true,
-			"model-proxy/internal/cache": true, "model-proxy/internal/config": true,
+			"model-proxy/internal/cache": true, "model-proxy/internal/catalog": true,
+			"model-proxy/internal/config":     true,
 			"model-proxy/internal/configedit": true, "model-proxy/internal/credstore": true,
 			"model-proxy/internal/fusion": true, "model-proxy/internal/login": true,
 			"model-proxy/internal/observe/counters": true, "model-proxy/internal/observe/logx": true,

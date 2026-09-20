@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appJs = readFileSync(join(here, '..', 'assets', 'app.js'), 'utf8');
+const pureJs = readFileSync(join(here, '..', 'assets', 'pure.js'), 'utf8');
 
 // fnBody extracts a top-level `function NAME(` / `async function NAME(`
 // declaration's body via brace matching (comments and strings may contain
@@ -115,9 +116,13 @@ test('the Security and Accounts 30s ticks gate, guard and stop cleanly', () => {
 });
 
 test('every transient popup layer carries data-popup', () => {
-  // .tr-popover: tokens picker + analytics picker (two template sites).
-  assert.equal(count(appJs, 'class="tr-popover" data-popup'), 2,
-    'both time-range popovers must declare data-popup for the gate');
+  // .tr-popover: the single pure.js builder `tokenRangePickerHTML` serves
+  // the tokens / analytics / accounts pickers — the popover must declare
+  // data-popup there, and app.js must not grow popover markup beside it.
+  assert.equal(count(pureJs, 'class="tr-popover" data-popup'), 1,
+    'the shared time-range popover must declare data-popup for the gate');
+  assert.equal(count(appJs, 'class="tr-popover"'), 0,
+    'time-range popover markup must come from pure.js tokenRangePickerHTML');
   assert.ok(appJs.includes('class="route-pin-menu" data-popup'),
     'the pin menu must declare data-popup for the gate');
   assert.ok(appJs.includes("menu.setAttribute('data-popup', '')"),

@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 
-	"model-proxy/internal/accounts"
 	"model-proxy/internal/appapi"
 	"model-proxy/internal/configedit"
 	"model-proxy/internal/routing"
@@ -27,12 +26,7 @@ import (
 // takeover.DefaultTemplatesDir but rooted at the port's home so tests stay
 // hermetic) and bakDir (backup markers under the config file's directory).
 func (s *Service) takeoverDirs() (homeDir, templatesDir, bakDir string) {
-	homeDir = accounts.HomeDir()
-	if s.ports.HomeDir != nil {
-		if h := s.ports.HomeDir(); h != "" {
-			homeDir = h
-		}
-	}
+	homeDir = s.homeDir()
 	templatesDir = filepath.Join(homeDir, ".model-proxy", "takeover-templates")
 	bakDir = takeover.BackupDir(s.currentConfigFile())
 	return homeDir, templatesDir, bakDir

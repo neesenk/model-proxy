@@ -7,7 +7,7 @@
 
 ## 自动刷新 tick 盘点
 
-Status 5s（整页重渲染，双门）、Analytics 30s（仅 live 窗口）、Security 30s（loader 只重绘数据宿主、不重建工具栏）、Accounts 30s（后台失败走 stale 横幅；**操作中守卫**——pane 内有 disabled 按钮时跳过，避免打断 Test/测活/Test All 的进行态）、顶栏 header 5s（`maybeConnRefresh`：仅 dot+meta 文本经 `setConn` 单点写入、不重建面板 DOM → **门豁免**（钉在 jstests/autorefresh.test.mjs）；Status tab 激活时跳过避免重复 /api/status）。新增 tick 的强制规则（双门 + 停止钩子 + autorefresh.test.mjs 加钉）见 `internal/web/assets/AGENTS.md` 交互门一节。
+Status 5s（整页重渲染，双门）、Analytics 30s（仅 live 窗口——1h/today 预设与可解析的 Quota Window，后者的 to 随时钟走、窗口随重置滚动）、Security 30s（loader 只重绘数据宿主、不重建工具栏）、Accounts 30s（后台失败走 stale 横幅；**操作中守卫**——pane 内有 disabled 按钮时跳过，避免打断 Test/测活/Test All 的进行态）、顶栏 header 5s（`maybeConnRefresh`：仅 dot+meta 文本经 `setConn` 单点写入、不重建面板 DOM → **门豁免**（钉在 jstests/autorefresh.test.mjs）；Status tab 激活时跳过避免重复 /api/status）。新增 tick 的强制规则（双门 + 停止钩子 + autorefresh.test.mjs 加钉）见 `internal/web/assets/AGENTS.md` 交互门一节。
 
 ## 请求表（三合一渲染、列几何、虚拟滚动）
 
@@ -56,7 +56,19 @@ Schedule 卡**（整卡重渲染会打断其他 route 进行中的测试态）�
 
 **Models 区 Model Catalog 卡**（`refreshModelsCatalog`，`models pull` 的 Web 版）：
 `POST /api/models/catalog/refresh` 强刷 models.dev 缓存，结果（数量/etag）行内展示，
-提示下一次 reload/takeover 才消费；失败保留旧缓存并显示后端 message。
+提示下一次 reload/takeover 才消费；失败保留旧缓存并显示后端 message。成功后立即重取
+`/api/models` 重渲染本区——缓存文件已落盘，catalog 状态与 Model Matching 清单
+（匹配判定 + 编辑器的 catalog_ids 候选）必须立刻反映新缓存。
+
+**Model Matching 折叠列表**（同一卡内，`details.cat-match`，默认折叠）：展示
+`/api/models` 的 `match` 清单——每个已配置模型的目录匹配状态（matched 用 `.badge ok`、
+unmatched 用 `.badge warn`，`catalog_id` 是生效查找 id，alias 命中带 aliased 标注）。
+unmatched 行的 Match 按钮在行内展开编辑器：`catalog_ids` datalist 输入（按契约挂
+`attachClearable` 的 ✕）+ Save/Cancel；alias 行另有 Clear 解除映射。Save/Clear 都整体回写
+该 provider 的 `catalog_alias` map 到 `POST /api/config/edit`（kind=provider），成功后
+`renderStatusTab()` 重取 `/api/models` 重渲染。details 的展开态存模块级
+`catMatchOpen`（toggle 事件维护、渲染时恢复），5s tick 不会把它折回去；编辑器输入
+持焦时自动刷新门天然延迟 tick。缓存为空（count 0）时不渲染表格，只提示先 Refresh。
 
 ## URL hash 视图状态
 
@@ -65,6 +77,18 @@ Schedule 卡**（整卡重渲染会打断其他 route 进行中的测试态）�
 ## 窄屏断点
 
 **窄屏是系统断点而非逐案修补**：≤720px（topbar 两行 + tabs 横向滚动、status/accounts 单列、表头停 sticky、`.card-body` 横向滚动、Dashboard KPI 6→2 列）与 ≤560px（`.row-actions` 换行、更紧的页面 gutter）两层，见 styles.css 的 responsive 段；新增布局必须说明这两个断点下的行为（表格靠 `.card-body` 横向滚动，不隐藏列）。uPlot 图表随窗口 resize 由防抖钩子重设宽度（app.js `chartResizeTimer`）。
+
+## 筛选输入的清除按钮（✕）
+
+**每个带建议下拉的文本筛选输入和带「All …」默认项的筛选 `<select>` 共用唯一的清除实现**（app.js `attachClearable`，样式 `.clearable`/`.clear-x`，注册表见 `internal/web/assets/AGENTS.md`）：combobox（`attachCombo`：Requests provider/model）、datalist 输入（Analytics 的 provider/model/agent、Config 表单的 prov-name/route-name）、以及筛选 select（Requests Log 的 agent/session、Live 视图的 `#live-session`）一致覆盖。行为契约：控件有值时宿主带 `.has-text`、右缘显示 ✕（combobox 宿主上 ✕ 让位替换 ::after 下拉箭头；原生 select 上 ✕ 位于 OS 箭头左侧，tooltip 为 Reset to All）；点击 ✕ 清空/复位并保持焦点在控件上（mousedown preventDefault，不抢焦点、不触发 blur 关弹层），随后走该控件的**正常提交路径**——派发冒泡的 input+change 事件（datalist 预填/select onchange 监听器自然响应）+ combobox 的 onSelect 回调（等价于清空后回车），不是旁路写状态。程序性改值（`renderRequestSelectors` 重建选项、`onLiveSessionChange` 镜像下拉选择、`refreshLiveSessionOptions` 重设值）不触发事件，由调用方补一次 `syncClearable` 同步。新增加入筛选语义的下拉/输入控件必须调 `attachClearable`，不得另写清除按钮。非 combobox 挂点（含原生 select）会被 `attachClearable` 包进一层 `.clearable` span，父容器的 flex/grid 尺寸假设随之转移到包裹层——新增这类挂点必须同时说明两个系统断点下父容器的布局行为（既有补偿模式见 styles.css 的 `.field .clearable`/`.an-toolbar .clearable`）。
+
+## 时间维度选择器与 Quota Window 预设
+
+**时间维度选择器是三处同款的单一实现**（markup 唯一源 pure.js `tokenRangePickerHTML`；交互/降级语义见 `docs/web-api.md` GET `/api/tokens` 行）：Status 页 tokens 区（驱动 Token usage + Agents 卡，默认 today）、Analytics 工具栏（localStorage 持久化，默认 1h）、Accounts 页各账号卡 Token usage 区块（默认 Quota Window，见「Accounts 页」节）。**Quota Window 预设**复用于全部三处：窗口 = 当前计费周期 [`quota[key].UsageFrom`, now]，窗口起点的推导归 provider 层（`QuotaSnapshot.UsageWindow`，见 `docs/architecture/runtime-state.md`），前端只解析投影值。跨 provider 页面（Status tokens 卡、Analytics）没有所选 provider 语境——pure.js `quotaWindowFromSec` 取 quota map 中**首个（key 排序）可解析 plan provider** 的窗口，触发器标签 `Quota (<provider>)` 归属驱动 provider（多 plan provider 周期不同（7d↔30d）时聚合视图是近似，归属可见）；Analytics 的 loader 为此在每次整面渲染时附带 best-effort /api/status（失败保留上次值），quota 窗口计入 30s live 刷新集合；Status 直接用 5s status 快照里的 quota map（至多落后一个 tick）。不可解析（无 plan provider、轮询全败）时预设行不渲染、已存 'quota' 选择降级为 All Time（勾选/标签/查询三处一致）。
+
+## Accounts 页
+
+**Accounts 页的 Token usage 是可窗口化的，默认跟随额度窗口**：每个账号卡的 Token usage 区块（`details.acct-section` 展开态）顶部挂同款时间维度选择器（宿主 `.acc-range-host` 每卡一个，markup 来自 pure.js `tokenRangePickerHTML` 的单一源，与 Status tokens 区/Analytics 工具栏同 `.tr-*` 样式与交互；`acc` data-ns），把 `/api/tokens` 的 from/to 窗口应用到该 provider 全部账号卡的 Token usage 表——quota 快照（Usage 区）的窗口归上游所有，不随其变。**默认预设是 `quota`（Quota Window）**：取 `/api/status` 投影的 `quota[key].UsageFrom`（provider 层 `QuotaSnapshot.UsageWindow` 的权威推导——ultimate 窗口 `ResetsAt − Duration`，7d/30d 由 provider 解析器区分，与调度 Surplus/fLeft 同源；前端 pure.js `quotaUsageFromSec` 只解析不重推导）到 now；`loadAccountsData` **先拉 /api/status 再拉 /api/tokens**，首次拉取即带窗口（不闪全量再重拉），status 失败保留上次 quota（per-part settle）。不可解析（非 plan、无周期）时**降级为 all**（有效范围 `accountsEffectiveRange` 驱动勾选/标签/查询三处一致）；随重置滚动（每次 fetch 重算 from）。用户显式选任何预设/自定义区间后 `accountsRangeTouched=true`（选择固化，不再随 provider 切换重解析）；切 provider 或 quota 重置导致派生查询变化时由 `accountsMaybeRefetchRange`（比对 `accountsTokensQueryLast`）恰好补拉一次。窗口状态 provider 级共享：`accountsRange`（模块级 `{preset, customStart, customEnd}`）+ `accountsRangePicker`（popover UI 态）+ `accountsRangePickerHost`（data-acct 键，标记 popover 当前打开的卡）——popover 只在所点开的卡渲染，其余卡显示同步的闭合触发器；点另一卡触发器 = 把 popover **移到**该卡。应用（预设或完整自定义区间）即前台重拉 `loadAccountsData`（用户主动渲染绕过交互门，先关弹层）；popover 内部更新（开合/翻月/选段）只重绘各选择器宿主，不重拉。popover 的 open/pick 态与 Status/Analytics 同样跨整面重建存活；30s 后台 tick 经 `deferAutoRefresh` 双门，popover（`[data-popup]`）打开时延迟。折叠态 hint 尾随窗口标签（非 all 时），空表文案区分口径——窗口内无数据显示 "No token usage in the selected range (…)"，累计口径保持 "No token usage observed"。账号卡挂 `card-open` 豁免 `.card` 的 overflow 裁剪（popover 会超出卡界；无 flush 贴边内容，同 Requests/Live 先例）；popover 从区块左缘向右开，与 Status 选择器同几何。
 
 ## Eval 页
 
@@ -137,5 +161,8 @@ Targets 链/Sessions）。Test 触发 `POST /api/mcp/test`（握手探测），�
 行正下方（ok/fail badge + serverInfo/延迟 + 工具徽章，超 8 个折叠计数）。**全部渲染为用户
 触发**（tab 激活经 `retainTab` 重入守卫、Refresh/Test 点击），无自动刷新 tick，因此不适用
 deferAutoRefresh 双门；后台刷新失败保留旧 DOM 走 `setRefreshError`。结构标记 `.mcp-host`
-（无视觉样式，已登记 registry 的 CLASS_EXEMPT）；表格/徽章/按钮全部复用既有
-`.table`/`.card`/`.badge`/`.btn` 模式，无新增样式。
+（无视觉样式，已登记 registry 的 CLASS_EXEMPT）。**两表列几何固定**：colgroup 百分比 +
+`.mcp-table .table { table-layout: fixed }`（与请求表同一契约）——长 endpoint/command 在列内
+`overflow-wrap: anywhere` 折行（`.mcp-wrap`，全文进 title tooltip），不再把表顶出卡缘
+（`.card` overflow 裁剪曾静默吃掉尾部 numeric/action 列）；≤720px 给 720px min-width、靠
+`.card-body` 横向滚动。徽章/按钮复用既有 `.badge`/`.btn` 模式。

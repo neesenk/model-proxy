@@ -61,6 +61,7 @@ function rootBlockRanges(text) {
 // reason; styling the class instead (via an existing pattern) is usually
 // the right fix. Entries that stop being emitted are reported as dead.
 const CLASS_EXEMPT = {
+  'acc-range-host': 'Accounts Token usage 区块内时间选择器宿主钩子（每账号卡一个，data-acct 键控唯一打开位），视觉走内层 .tr-wrap',
   'card-title': 'buildCard 标题行语义钩子，样式走 .card-head 上下文',
   'cv-history': '聊天历史滚动容器钩子，样式走 .cv-* 后代规则',
   'cv-hist-host': '聊天历史展开块宿主钩子（[data-chunk] 注册表）',

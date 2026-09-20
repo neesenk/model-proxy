@@ -137,6 +137,12 @@ type Proxy struct {
 	processServices
 	pricingMu sync.Mutex // guards pricing during refresh (thundering-herd guard on pricing.EnsureFresh)
 	closeOnce sync.Once
+	// catalogLoader loads the models.dev metadata catalog for initCatalog
+	// (boot + reload's best-effort refresh). Production wiring is
+	// configdomain.LoadModelsCatalog, set once by NewProxyWithStatePath before
+	// any goroutine can read it; tests replace it so Reload never reaches the
+	// real network or writes the shared test HOME.
+	catalogLoader func(homeDir string, force bool) (*catalog.Catalog, error)
 	// pprofEnabled (MP_PPROF=1 at construction) exposes /debug/pprof/ on the
 	// proxy handler for live profiling. Opt-in: profiles can carry request
 	// data in heap samples, so the endpoint is off by default.
@@ -226,7 +232,8 @@ func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 			transports:    map[string]*http.Transport{},
 		},
 		// Read once here (not per request): MP_PPROF=1 turns on /debug/pprof/.
-		pprofEnabled: os.Getenv("MP_PPROF") == "1",
+		pprofEnabled:  os.Getenv("MP_PPROF") == "1",
+		catalogLoader: configdomain.LoadModelsCatalog,
 	}
 	p.runtimeState.ReplaceGeneration(1)
 	p.configGeneration.Store(1)

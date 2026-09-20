@@ -34,7 +34,9 @@ generation。
 `internal/catalog` 作为无仓库内依赖叶子包拥有 models.dev slim projection、
 canonical-owner 去重、HTTP/ETag/TTL 刷新和磁盘缓存。`internal/config/modelscatalog.go` 只注入 HOME
 cache path 与 `MP_MODELSDEV_URL`；Config 中的 provider/route 名单遍历与
-fallback/source 策略由 `internal/routing/model_metadata.go`（`HydrateModels`）拥有。daemon
+fallback/source 策略由 `internal/routing/model_metadata.go`（`HydrateModels`）拥有。查找顺序：
+provider `catalog_alias[model]` 映射的目录 id 优先，未命中回落 model id 直查（陈旧映射不会遮蔽直接命中），
+再落空用保守默认元数据。`catalog_alias` 只改元数据查找，不改路由与对外名（改名用 `alias`）。daemon
 启动时同步加载 catalog（最多受 source HTTP timeout 限制），reload 后的刷新才经
 lifecycle gate 异步执行；catalog 为 nil 时请求感知路由整体 no-op，不能因此把
 所有目标过滤为空。
