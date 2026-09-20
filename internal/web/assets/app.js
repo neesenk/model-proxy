@@ -50,9 +50,9 @@ import {
   takeoverFamilyGroups, takeoverFamilyBadge, highlightConfig,
   TAKEOVER_TEMPLATE_EXAMPLES, TAKEOVER_PLACEHOLDERS,
   shadowMatchBadge,
-  MCP_HISTORY_GRANULARITIES, MCP_HISTORY_METRICS, mcpHistoryFilterSeries, mcpHistorySummaryRows,
-  mcpHistoryChartSeries, mcpHistoryMetricOptions, mcpHistoryValueText,
-  mcpHistorySummaryTableHTML, mcpHistoryEmptyHTML, mcpHistorySkeletonHTML,
+  MCP_ANALYTICS_METRICS, mcpAnalyticsFilterSeries, mcpAnalyticsToolFilter,
+  mcpAnalyticsSummaryGroups, mcpAnalyticsChartSeries, mcpAnalyticsMetricOptions, mcpAnalyticsValueText,
+  mcpAnalyticsSummaryTableHTML, mcpAnalyticsEmptyHTML, mcpAnalyticsSkeletonHTML,
   mcpSubTabFromHash, mcpHash,
 } from './pure.js';
 
@@ -640,7 +640,7 @@ function handleHashChange() {
       const host = panels.mcp && panels.mcp.querySelector('.mcp-host');
       if (host) {
         mcpShowSubTab(host, target);
-        if (target === 'history' && !mcpHistoryData && !mcpHistoryLoading) loadMCPHistory(host);
+        if (target === 'analytics' && !mcpAnalyticsData && !mcpAnalyticsLoading) loadMCPAnalytics(host);
       }
     }
   }
@@ -9585,7 +9585,7 @@ window.addEventListener('resize', () => {
     };
     if (dashChart && dashChart.u) dashChart.width = rewidth(dashChart.u, dashChart.width) ?? dashChart.width;
     for (const u of analyticsCharts) rewidth(u, null);
-    for (const u of mcpHistoryCharts) rewidth(u, null);
+    for (const u of mcpAnalyticsCharts) rewidth(u, null);
     // The sticky session views' heights ride the trace SVG's aspect ratio,
     // so the table-header offset they feed (--sess-h) goes stale on resize.
     document.querySelectorAll('.sess-sticky').forEach((el) => syncSessThOffset(el));
@@ -10306,15 +10306,20 @@ function mcpSubTabSave(v) {
   try { localStorage.setItem('mcp-tab', v); } catch (_) { /* ignore */ }
 }
 
-// History sub-tab state.
-let mcpHistoryData = null;
-let mcpHistoryLoading = false;
-let mcpHistoryPicker = { open: false, view: null, pick: null, selecting: false };
+// MCP Analytics sub-tab state. Mirrors the Analytics tab: the same time-range
+// picker, the same auto granularity gating (analyticsGranularity over the
+// window span), drag-zoom, and a 30s auto-refresh for live windows — so the
+// past Analytics fixes (minute-granularity windows, x-axis label density)
+// apply here through the one shared implementation.
+let mcpAnalyticsData = null;
+let mcpAnalyticsError = null; // last fetch error when nothing rendered yet
+let mcpAnalyticsLoading = false;
+let mcpAnalyticsPicker = { open: false, view: null, pick: null, selecting: false };
 
-function mcpHistoryState() {
-  let range = { preset: '7d', customStart: '', customEnd: '' };
+function mcpAnalyticsState() {
+  let range = { preset: '1h', customStart: '', customEnd: '' };
   try {
-    const raw = localStorage.getItem('mcph-range');
+    const raw = localStorage.getItem('mcpa-range');
     if (raw) {
       const v = JSON.parse(raw);
       if (v && typeof v.preset === 'string') range = { customStart: '', customEnd: '', ...v };
@@ -10322,17 +10327,17 @@ function mcpHistoryState() {
   } catch (_) { /* ignore */ }
   return {
     range,
-    gran: localStorage.getItem('mcph-gran') || 'day',
-    metric: localStorage.getItem('mcph-metric') || 'calls',
-    kind: localStorage.getItem('mcph-kind') || '',
-    name: localStorage.getItem('mcph-name') || '',
+    gran: localStorage.getItem('mcpa-gran') || 'auto',
+    metric: localStorage.getItem('mcpa-metric') || 'calls',
+    server: localStorage.getItem('mcpa-server') || '',
+    tool: localStorage.getItem('mcpa-tool') || '',
   };
 }
-function mcpHistorySave(name, val) {
-  try { localStorage.setItem('mcph-' + name, typeof val === 'string' ? val : JSON.stringify(val)); } catch (_) { /* ignore */ }
+function mcpAnalyticsSave(name, val) {
+  try { localStorage.setItem('mcpa-' + name, typeof val === 'string' ? val : JSON.stringify(val)); } catch (_) { /* ignore */ }
 }
 
-function mcpHistoryRangeBounds(range, now = Date.now()) {
+function mcpAnalyticsRangeBounds(range, now = Date.now()) {
   if (range.preset === 'custom') {
     const b = tokenCustomBounds(range.customStart, range.customEnd);
     return b || { from: 0, to: Math.floor(now / 1000) };
@@ -10376,7 +10381,7 @@ function renderMCPInto() {
     return;
   }
   const tab = mcpSubTabState();
-  const navItems = ['servers', 'routes', 'history'].map((t) => {
+  const navItems = ['servers', 'routes', 'analytics'].map((t) => {
     const active = t === tab ? ' active' : '';
     return `<button type="button" class="status-nav-item${active}" data-mcp-tab="${esc(t)}">
       <span class="status-nav-name">${esc(mcpSubTabLabel(t))}</span>
@@ -10390,7 +10395,7 @@ function renderMCPInto() {
       <div class="status-main">
         <div id="mcp-servers-view"${tab === 'servers' ? '' : ' hidden'}></div>
         <div id="mcp-routes-view"${tab === 'routes' ? '' : ' hidden'}></div>
-        <div id="mcp-history-view"${tab === 'history' ? '' : ' hidden'}></div>
+        <div id="mcp-analytics-view"${tab === 'analytics' ? '' : ' hidden'}></div>
       </div>
     </div>`;
   for (const btn of host.querySelectorAll('.status-nav button[data-mcp-tab]')) {
@@ -10402,7 +10407,7 @@ function renderMCPInto() {
       // (the hashchange listener applies mcpSubTabFromHash without pushing).
       navHash(mcpHash(next));
       mcpShowSubTab(host, next);
-      if (next === 'history' && !mcpHistoryData && !mcpHistoryLoading) loadMCPHistory(host);
+      if (next === 'analytics' && !mcpAnalyticsData) loadMCPAnalytics(host);
     };
   }
   const serversView = host.querySelector('#mcp-servers-view');
@@ -10414,7 +10419,7 @@ function renderMCPInto() {
   for (const btn of serversView.querySelectorAll('[data-mcp-test]')) {
     btn.onclick = () => mcpTestServer(btn.dataset.mcpTest);
   }
-  renderMCPHistory(host);
+  renderMCPAnalytics(host);
 }
 
 function mcpShowSubTab(host, tab) {
@@ -10423,9 +10428,9 @@ function mcpShowSubTab(host, tab) {
   }
   host.querySelector('#mcp-servers-view').hidden = tab !== 'servers';
   host.querySelector('#mcp-routes-view').hidden = tab !== 'routes';
-  host.querySelector('#mcp-history-view').hidden = tab !== 'history';
-  if (tab === 'history') {
-    for (const u of mcpHistoryCharts) {
+  host.querySelector('#mcp-analytics-view').hidden = tab !== 'analytics';
+  if (tab === 'analytics') {
+    for (const u of mcpAnalyticsCharts) {
       try {
         if (u && u.root && document.contains(u.root)) {
           const chartHost = u.root.parentElement;
@@ -10433,6 +10438,9 @@ function mcpShowSubTab(host, tab) {
         }
       } catch (_) { /* malformed */ }
     }
+    mcpAnalyticsMaybeAutoRefresh();
+  } else {
+    mcpAnalyticsStopAutoRefresh();
   }
 }
 
@@ -10441,7 +10449,6 @@ function mcpServersCardHTML(servers) {
     const enabled = s.enabled ? '<span class="badge ok">on</span>' : '<span class="badge muted">off</span>';
     const endpoint = s.url || s.command || '';
     const auth = s.auth === 'provider' ? `provider: ${esc(s.provider || '')}` : 'none';
-    const accounts = s.auth === 'provider' ? `<td class="num">${s.accounts || 0}</td>` : '<td class="num">—</td>';
     const probe = mcpProbe.get(s.name);
     let action = `<button class="btn small" data-mcp-test="${esc(s.name)}">Test</button>`;
     if (probe && probe.state === 'busy') action = '<span class="hint">testing…</span>';
@@ -10450,22 +10457,20 @@ function mcpServersCardHTML(servers) {
       const badge = probe.state === 'ok' ? '<span class="badge ok">ok</span>' : '<span class="badge err">fail</span>';
       const tools = (probe.tools || []).slice(0, 8).map((t) => `<span class="badge muted">${esc(t)}</span>`).join(' ');
       const more = (probe.tools || []).length > 8 ? ` +${probe.tools.length - 8}` : '';
-      resultRow = `<tr><td></td><td colspan="9">${badge} <span class="hint">${esc(probe.text)}${probe.latencyMs != null ? ` · ${probe.latencyMs} ms` : ''}</span> ${tools}${esc(more)}</td></tr>`;
+      resultRow = `<tr><td></td><td colspan="8">${badge} <span class="hint">${esc(probe.text)}${probe.latencyMs != null ? ` · ${probe.latencyMs} ms` : ''}</span> ${tools}${esc(more)}</td></tr>`;
     }
     const stats = `<td class="num">${s.errors || 0}</td><td class="num">${s.calls ? (s.avg_latency_ms || 0) : '—'}</td>`;
-    return `<tr><td class="mcp-clip" title="${esc(s.name)}">${esc(s.name)}</td><td>${enabled}</td><td class="mcp-wrap">${esc(s.transport)}</td><td class="mcp-clip" title="${esc(auth)}">${auth}</td><td class="mcp-clip" title="${esc(endpoint)}">${esc(endpoint)}</td>${accounts}<td class="num">${s.sessions || 0}</td>${stats}<td>${action}</td></tr>` + resultRow;
+    return `<tr><td class="mcp-wrap">${esc(s.name)}</td><td>${enabled}</td><td class="mcp-wrap">${esc(s.transport)}</td><td class="mcp-wrap">${auth}</td><td class="mcp-wrap" title="${esc(endpoint)}">${esc(endpoint)}</td><td class="num">${s.sessions || 0}</td>${stats}<td>${action}</td></tr>` + resultRow;
   }).join('');
   // Fixed column geometry (colgroup + table-layout: fixed, the request-table
   // contract): narrow badge/numeric/button columns get fixed small widths;
-  // Name and Endpoint take the flexible remainder and clip with ellipsis
-  // (endpoint URLs are the canonical long value to clip; full text rides the
-  // title tooltip). Transport wraps inside its fixed column. The table has a
-  // realistic min-width so it never collapses into unreadable slivers; the
-  // card-body scrolls horizontally when the sidebar leaves less room.
+  // Endpoint takes the flexible remainder. All content cells wrap inside their
+  // columns (overflow-wrap:anywhere) so the table fits the capped content
+  // width without horizontal scrolling; only genuinely narrow viewports scroll.
   const cols = '<colgroup>' + [
-    'auto', '70px', '110px', '130px', 'auto', '80px', '80px', '70px', '80px', '80px',
+    '110px', '40px', '95px', '130px', 'auto', '70px', '60px', '60px', '60px',
   ].map((w) => `<col style="width:${w}"/>`).join('') + '</colgroup>';
-  const table = `<table class="table">${cols}<thead><tr><th>Name</th><th>Enabled</th><th>Transport</th><th>Auth</th><th>Endpoint</th><th class="num">Accounts</th><th class="num">Sessions</th><th class="num">Errors</th><th class="num">Avg ms</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  const table = `<table class="table">${cols}<thead><tr><th>Name</th><th>On</th><th>Transport</th><th>Auth</th><th>Endpoint</th><th class="num">Sessions</th><th class="num">Errors</th><th class="num">MS</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   return buildCard('MCP Servers', `${servers.length} servers`, table, 'mcp-table mcp-servers-table', '<button class="btn small" data-mcp-refresh>Refresh</button>');
 }
 
@@ -10474,10 +10479,10 @@ function mcpRoutesCardHTML(routes) {
   const rows = routes.map((r) => {
     const enabled = r.enabled ? '<span class="badge ok">on</span>' : '<span class="badge muted">off</span>';
     const targets = (r.targets || []).map((t) => `${esc(t.server)} (${t.tools})`).join(' → ');
-    return `<tr><td class="mcp-clip" title="${esc(r.name)}">${esc(r.name)}</td><td>${enabled}</td><td class="mcp-wrap">${targets}</td><td class="num">${r.sessions || 0}</td><td class="num">${r.errors || 0}</td><td class="num">${r.calls ? (r.avg_latency_ms || 0) : '—'}</td></tr>`;
+    return `<tr><td class="mcp-wrap">${esc(r.name)}</td><td>${enabled}</td><td class="mcp-wrap">${targets}</td><td class="num">${r.sessions || 0}</td><td class="num">${r.errors || 0}</td><td class="num">${r.calls ? (r.avg_latency_ms || 0) : '—'}</td></tr>`;
   }).join('');
-  const cols = '<colgroup>' + ['auto', '70px', 'auto', '80px', '70px', '80px'].map((w) => `<col style="width:${w}"/>`).join('') + '</colgroup>';
-  const table = `<table class="table">${cols}<thead><tr><th>Name</th><th>Enabled</th><th>Targets (failover order)</th><th class="num">Sessions</th><th class="num">Errors</th><th class="num">Avg ms</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const cols = '<colgroup>' + ['110px', '60px', 'auto', '94px', '80px', '68px'].map((w) => `<col style="width:${w}"/>`).join('') + '</colgroup>';
+  const table = `<table class="table">${cols}<thead><tr><th>Name</th><th>On</th><th>Targets (failover order)</th><th class="num">Sessions</th><th class="num">Errors</th><th class="num">MS</th></tr></thead><tbody>${rows}</tbody></table>`;
   return buildCard('MCP Routes', `${routes.length} routes`, table, 'mcp-table mcp-routes-table');
 }
 
@@ -10505,9 +10510,9 @@ async function mcpTestServer(name) {
   renderMCPInto();
 }
 
-// ---------- MCP History sub-tab ----------
+// ---------- MCP Analytics sub-tab ----------
 
-function mcpHistoryBucketLabel(ts, gran) {
+function mcpAnalyticsBucketLabel(ts, gran) {
   if (!ts) return '—';
   const d = new Date(ts * 1000);
   if (gran === 'minute' || gran === 'hour') {
@@ -10519,210 +10524,370 @@ function mcpHistoryBucketLabel(ts, gran) {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-function mcpHistoryPickerClose() {
-  mcpHistoryPicker = { open: false, view: null, pick: null, selecting: false };
-  document.removeEventListener('keydown', mcpHistoryPickerOnKey);
-  document.removeEventListener('click', mcpHistoryPickerOnOutside, true);
+function mcpAnalyticsPickerClose() {
+  mcpAnalyticsPicker = { open: false, view: null, pick: null, selecting: false };
+  document.removeEventListener('keydown', mcpAnalyticsPickerOnKey);
+  document.removeEventListener('click', mcpAnalyticsPickerOnOutside, true);
 }
 
-function mcpHistoryPickerOnKey(e) {
+function mcpAnalyticsPickerOnKey(e) {
   if (e.key === 'Escape') {
-    mcpHistoryPickerClose();
+    mcpAnalyticsPickerClose();
     const host = panels.mcp && panels.mcp.querySelector('.mcp-host');
-    if (host) mcpHistoryPickerRender(host);
+    if (host) mcpAnalyticsPickerRender(host);
   }
 }
 
-function mcpHistoryPickerOnOutside(e) {
+function mcpAnalyticsPickerOnOutside(e) {
   if (!e.target.closest('.tr-wrap')) {
-    mcpHistoryPickerClose();
+    mcpAnalyticsPickerClose();
     const host = panels.mcp && panels.mcp.querySelector('.mcp-host');
-    if (host) mcpHistoryPickerRender(host);
+    if (host) mcpAnalyticsPickerRender(host);
   }
 }
 
-function mcpHistoryPickerRender(host) {
-  const hostEl = host.querySelector('#mcph-range-host');
+// mcpAnalyticsPickerRender draws the range trigger + popover from the shared
+// pure.js builder (the same component as the Analytics toolbar and Status
+// tokens) and wires the 'mcpa' namespace. Applying a preset or a custom day
+// range resets the granularity to auto and clears any drag-zoom, matching the
+// Analytics tab's range-change behavior.
+function mcpAnalyticsPickerRender(host) {
+  const hostEl = host.querySelector('#mcpa-range-host');
   if (!hostEl) return;
-  const state = mcpHistoryState();
-  hostEl.innerHTML = tokenRangePickerHTML(state.range, mcpHistoryPicker, 'mcph');
+  const state = mcpAnalyticsState();
+  hostEl.innerHTML = tokenRangePickerHTML(state.range, mcpAnalyticsPicker, 'mcpa');
   const trigger = hostEl.querySelector('.tr-trigger');
   if (trigger) {
     trigger.onclick = () => {
-      if (mcpHistoryPicker.open) {
-        mcpHistoryPickerClose();
+      if (mcpAnalyticsPicker.open) {
+        mcpAnalyticsPickerClose();
       } else {
         const anchor = (state.range.preset === 'custom' && parseLocalDate(state.range.customStart)) || new Date();
-        mcpHistoryPicker = { open: true, view: { year: anchor.getFullYear(), month: anchor.getMonth() }, pick: null, selecting: false };
-        document.addEventListener('keydown', mcpHistoryPickerOnKey);
-        document.addEventListener('click', mcpHistoryPickerOnOutside, true);
+        mcpAnalyticsPicker = { open: true, view: { year: anchor.getFullYear(), month: anchor.getMonth() }, pick: null, selecting: false };
+        document.addEventListener('keydown', mcpAnalyticsPickerOnKey);
+        document.addEventListener('click', mcpAnalyticsPickerOnOutside, true);
       }
-      mcpHistoryPickerRender(host);
+      mcpAnalyticsPickerRender(host);
     };
   }
-  hostEl.querySelectorAll('[data-mcph-preset]').forEach((btn) => {
+  hostEl.querySelectorAll('[data-mcpa-preset]').forEach((btn) => {
     btn.onclick = () => {
-      const value = btn.dataset.mcphPreset;
+      const value = btn.dataset.mcpaPreset;
       if (value === 'custom') {
-        mcpHistoryPicker.selecting = true;
-        mcpHistoryPicker.pick = null;
-        mcpHistoryPickerRender(host);
+        mcpAnalyticsPicker.selecting = true;
+        mcpAnalyticsPicker.pick = null;
+        mcpAnalyticsPickerRender(host);
         return;
       }
-      mcpHistorySave('range', { preset: value, customStart: '', customEnd: '' });
-      mcpHistoryPickerClose();
-      loadMCPHistory(host);
+      mcpAnalyticsSave('range', { preset: value, customStart: '', customEnd: '' });
+      mcpAnalyticsSave('gran', 'auto');
+      mcpAnalyticsZoom = null;
+      mcpAnalyticsPickerClose();
+      loadMCPAnalytics(host);
     };
   });
-  hostEl.querySelectorAll('[data-mcph-day]').forEach((btn) => {
+  hostEl.querySelectorAll('[data-mcpa-day]').forEach((btn) => {
     btn.onclick = () => {
-      if (!mcpHistoryPicker.selecting && state.range.preset !== 'custom') {
-        mcpHistoryPicker.selecting = true;
+      if (!mcpAnalyticsPicker.selecting && state.range.preset !== 'custom') {
+        mcpAnalyticsPicker.selecting = true;
       }
-      const result = rangePick(mcpHistoryPicker.pick, btn.dataset.mcphDay);
+      const result = rangePick(mcpAnalyticsPicker.pick, btn.dataset.mcpaDay);
       if (!result.complete) {
-        mcpHistoryPicker.pick = result.pick;
-        mcpHistoryPickerRender(host);
+        mcpAnalyticsPicker.pick = result.pick;
+        mcpAnalyticsPickerRender(host);
         return;
       }
-      mcpHistorySave('range', { preset: 'custom', customStart: result.start, customEnd: result.end });
-      mcpHistoryPickerClose();
-      loadMCPHistory(host);
+      mcpAnalyticsSave('range', { preset: 'custom', customStart: result.start, customEnd: result.end });
+      mcpAnalyticsSave('gran', 'auto');
+      mcpAnalyticsZoom = null;
+      mcpAnalyticsPickerClose();
+      loadMCPAnalytics(host);
     };
   });
-  hostEl.querySelectorAll('[data-mcph-nav]').forEach((btn) => {
+  hostEl.querySelectorAll('[data-mcpa-nav]').forEach((btn) => {
     btn.onclick = () => {
-      mcpHistoryPicker.view = shiftMonth(mcpHistoryPicker.view.year, mcpHistoryPicker.view.month, Number(btn.dataset.mcphNav));
-      mcpHistoryPickerRender(host);
+      mcpAnalyticsPicker.view = shiftMonth(mcpAnalyticsPicker.view.year, mcpAnalyticsPicker.view.month, Number(btn.dataset.mcpaNav));
+      mcpAnalyticsPickerRender(host);
     };
   });
 }
 
-function mcpHistoryFetchQuery() {
-  const state = mcpHistoryState();
-  const bounds = mcpHistoryRangeBounds(state.range);
-  const q = new URLSearchParams();
-  q.set('from', String(bounds.from));
-  q.set('to', String(bounds.to));
-  q.set('granularity', state.gran);
-  if (state.kind) q.set('kind', state.kind);
-  if (state.name) q.set('name', state.name);
-  return '/api/mcp/analytics?' + q.toString();
+// mcpAnalyticsEffectiveGran mirrors the Analytics tab's granularity gating:
+// the stored preference applies only while the current window span allows it
+// (analyticsGranularity falls back to auto), so the query and the segment
+// control always agree on one effective granularity.
+function mcpAnalyticsEffectiveGran(state, from) {
+  const bounds = mcpAnalyticsRangeBounds(state.range);
+  const spanSec = Math.max(bounds.to - (state.range.preset === 'all' && from ? from : bounds.from), 1);
+  const granOptions = analyticsGranOptions(spanSec);
+  const granPrefAllowed = state.gran === 'auto' || (granOptions.find((o) => o.id === state.gran) || {}).allowed;
+  const granActive = granPrefAllowed ? state.gran : 'auto';
+  return { bounds, granOptions, granActive, gran: analyticsGranularity(spanSec, granActive), spanSec };
 }
 
-async function loadMCPHistory(host) {
-  if (mcpHistoryLoading) return;
-  mcpHistoryLoading = true;
-  const summaryHost = host.querySelector('#mcph-summary-host');
-  if (summaryHost) summaryHost.innerHTML = mcpHistorySkeletonHTML();
+// loadMCPAnalytics fetches /api/mcp/analytics for the current controls and
+// re-renders. background=true marks the 30s live-window tick: entry and
+// commit both pass the shared interaction gate so an open picker or a focused
+// filter can never be clobbered by a refresh. A failed refresh with a rendered
+// view keeps the old data and reports through the stale banner.
+async function loadMCPAnalytics(host, background = false) {
+  const panel = panels.mcp;
+  if (!host) return;
+  if (background && deferAutoRefresh(panel, () => loadMCPAnalytics(host, true))) return;
+  mcpAnalyticsStopAutoRefresh();
+  mcpAnalyticsLoading = true;
+  const state = mcpAnalyticsState();
+  const eff = mcpAnalyticsEffectiveGran(state, mcpAllTimeSince);
+  const q = new URLSearchParams({
+    from: String(eff.bounds.from),
+    to: String(eff.bounds.to),
+    granularity: eff.gran,
+  });
+  if (state.server) q.set('name', state.server);
+  if (state.tool) q.set('tool', state.tool);
+  let resp = null;
+  let fetchErr = null;
   try {
-    mcpHistoryData = await apiGet(mcpHistoryFetchQuery());
-    setRefreshError(panels.mcp, null);
+    resp = await apiGet('/api/mcp/analytics?' + q.toString());
+    mcpAnalyticsError = null;
   } catch (e) {
-    const msg = (e && e.message) || String(e);
-    if (summaryHost) summaryHost.innerHTML = `<div class="msg err">${esc(msg)}</div>`;
-    setRefreshError(panels.mcp, staleDataText('MCP history unavailable: ' + msg));
-    mcpHistoryLoading = false;
+    fetchErr = e;
+  }
+  // All-time anchor: the server clamps from=0 to the oldest persisted bucket.
+  // Learn that real start from the echoed from; when it changes the effective
+  // granularity, re-issue once with the true span (same pattern as the
+  // Analytics tab's anAllTimeSince).
+  if (!fetchErr && resp && state.range.preset === 'all') {
+    const echoed = Number(resp.from) || 0;
+    if (echoed > 0 && echoed !== mcpAllTimeSince) {
+      mcpAllTimeSince = echoed;
+      const trueSpan = Math.max(eff.bounds.to - echoed, 1);
+      if (analyticsGranularity(trueSpan, eff.granActive) !== eff.gran) {
+        mcpAnalyticsLoading = false;
+        return loadMCPAnalytics(host, background);
+      }
+    }
+  }
+  mcpAnalyticsLoading = false;
+  if (fetchErr && mcpAnalyticsData) {
+    setRefreshError(panel, staleDataText('MCP analytics unavailable: ' + ((fetchErr && fetchErr.message) || String(fetchErr))));
+    mcpAnalyticsMaybeAutoRefresh();
     return;
   }
-  mcpHistoryLoading = false;
-  renderMCPHistory(host);
+  if (background && deferAutoRefresh(panel, () => loadMCPAnalytics(host, true))) return;
+  if (fetchErr) {
+    mcpAnalyticsError = (fetchErr && fetchErr.message) || String(fetchErr);
+    setRefreshError(panel, staleDataText('MCP analytics unavailable: ' + mcpAnalyticsError));
+  } else {
+    mcpAnalyticsData = resp;
+    setRefreshError(panel, null);
+  }
+  renderMCPAnalytics(host);
+  mcpAnalyticsMaybeAutoRefresh();
 }
 
-// Live uPlot instances for the MCP History chart; destroyed on re-render so
+// Live uPlot instances for the MCP Analytics chart; destroyed on re-render so
 // the canvases and document-level legend listener don't leak across innerHTML
 // resets.
-let mcpHistoryCharts = [];
+let mcpAnalyticsCharts = [];
 
-function destroyMCPHistoryCharts() {
-  for (const u of mcpHistoryCharts) {
+function destroyMCPAnalyticsCharts() {
+  for (const u of mcpAnalyticsCharts) {
     try { u.destroy(); } catch (_) { /* already detached */ }
   }
-  mcpHistoryCharts = [];
+  mcpAnalyticsCharts = [];
 }
 
-// Session-persistent set of series labels toggled off in the MCP History chart
-// legend, so metric switches and refetches keep the operator's dimmed series.
-const mcpHistoryLegendHidden = new Set();
+// Session-persistent set of series labels toggled off in the chart legend, so
+// metric switches and refetches keep the operator's dimmed series.
+const mcpAnalyticsLegendHidden = new Set();
 
-function renderMCPHistory(host) {
-  const view = host.querySelector('#mcp-history-view');
+// mcpAnalyticsZoom holds the operator's drag-zoom selection ({from, to} unix
+// seconds) across re-renders — auto-refresh and metric switches must not
+// reset a deliberate zoom. Cleared by the reset button and whenever the
+// queried window itself changes (range/granularity/server/tool).
+let mcpAnalyticsZoom = null;
+
+// mcpAllTimeSince is the learned real start of persisted MCP stats (the
+// server clamps the all-time from=0 sentinel to the oldest bucket and echoes
+// it) so the granularity gating uses the true span instead of eternity.
+let mcpAllTimeSince = 0;
+
+// mcpAnalyticsRefreshTimer periodically re-fetches the LIVE windows (Last 1h /
+// Today) whose trailing edge moves with the clock — same policy as the
+// Analytics tab. Ticks pass the shared interaction gate; the interval is
+// re-armed by every load and stopped on sub-tab switch.
+let mcpAnalyticsRefreshTimer = null;
+
+function mcpAnalyticsStopAutoRefresh() {
+  if (mcpAnalyticsRefreshTimer) {
+    clearInterval(mcpAnalyticsRefreshTimer);
+    mcpAnalyticsRefreshTimer = null;
+  }
+  cancelAutoRefreshHold(panels.mcp);
+}
+
+function mcpAnalyticsMaybeAutoRefresh() {
+  mcpAnalyticsStopAutoRefresh();
+  const st = mcpAnalyticsState();
+  if (st.range.preset !== '1h' && st.range.preset !== 'today') return;
+  mcpAnalyticsRefreshTimer = setInterval(() => {
+    const panel = panels.mcp;
+    if (!panel || !panel.classList.contains('active')) return;
+    const host = panel.querySelector('.mcp-host');
+    const view = host && host.querySelector('#mcp-analytics-view');
+    if (!view || view.hidden) return;
+    if (deferAutoRefresh(panel, () => loadMCPAnalytics(host, true))) return;
+    loadMCPAnalytics(host, true);
+  }, 30000);
+}
+
+// Suggestion facets for the Server/Tool datalist filters. Like the Analytics
+// tab's facets, they only grow within a session: a narrowed response must not
+// erase options the user can switch back to.
+const mcpFacetServers = new Set();
+const mcpFacetTools = new Map(); // server name -> Set(tool)
+
+function mcpAnalyticsFillDatalists(view, resp, state) {
+  for (const s of ((resp && resp.series) || [])) {
+    if (s && s.name) mcpFacetServers.add(s.name);
+  }
+  for (const s of ((resp && resp.tool_series) || [])) {
+    if (!s || !s.name || !s.tool) continue;
+    let set = mcpFacetTools.get(s.name);
+    if (!set) { set = new Set(); mcpFacetTools.set(s.name, set); }
+    set.add(s.tool);
+  }
+  const serverList = view.querySelector('#mcpa-server-list');
+  if (serverList) serverList.innerHTML = [...mcpFacetServers].sort().map((n) => `<option value="${esc(n)}"></option>`).join('');
+  const toolList = view.querySelector('#mcpa-tool-list');
+  if (toolList) {
+    const tools = mcpFacetTools.get(state.server) || new Set();
+    toolList.innerHTML = [...tools].sort().map((n) => `<option value="${esc(n)}"></option>`).join('');
+  }
+}
+
+// renderMCPAnalytics rebuilds the sub-tab's toolbar + chart + summary from
+// the cached response (the Analytics tab's rebuild-per-render structure, so
+// control states can never drift from the data). The toolbar has the two
+// filters — Server (servers and routes share one namespace, listed together)
+// and that server's Tools — plus the shared range picker and the auto
+// granularity segment.
+function renderMCPAnalytics(host) {
+  const view = host.querySelector('#mcp-analytics-view');
   if (!view || view.hidden) return;
-  const state = mcpHistoryState();
-  const names = [...new Set((mcpHistoryData && mcpHistoryData.series || []).map((s) => s.name))].sort();
+  const state = mcpAnalyticsState();
+  const eff = mcpAnalyticsEffectiveGran(state, mcpAllTimeSince);
+  const gran = (mcpAnalyticsData && mcpAnalyticsData.granularity) || eff.gran;
   view.innerHTML = `
     <div class="an-toolbar">
-      <span id="mcph-range-host"></span>
-      <div class="an-seg" id="mcph-gran" role="group" aria-label="Granularity"></div>
-      <select id="mcph-kind" class="req-input">
-        <option value="">All Kinds</option>
-        <option value="server"${state.kind === 'server' ? ' selected' : ''}>Servers</option>
-        <option value="route"${state.kind === 'route' ? ' selected' : ''}>Routes</option>
-      </select>
-      <select id="mcph-name" class="req-input">
-        <option value="">All Names</option>
-        ${names.map((n) => `<option value="${esc(n)}"${state.name === n ? ' selected' : ''}>${esc(n)}</option>`).join('')}
-      </select>
-      <button type="button" class="btn small" id="mcph-refresh">Refresh</button>
+      <span id="mcpa-range-host"></span>
+      <div class="an-seg" id="mcpa-gran" role="group" aria-label="Granularity"></div>
+      <input id="mcpa-server" class="req-input" placeholder="Server" list="mcpa-server-list" autocomplete="off" spellcheck="false" />
+      <datalist id="mcpa-server-list"></datalist>
+      <input id="mcpa-tool" class="req-input" placeholder="Tool" list="mcpa-tool-list" autocomplete="off" spellcheck="false"${state.server ? '' : ' disabled'} />
+      <datalist id="mcpa-tool-list"></datalist>
     </div>
     <div class="an-chart-card">
       <div class="an-chart-head">
-        <div class="an-seg" id="mcph-metric" role="group" aria-label="Metric"></div>
+        <div class="an-seg" id="mcpa-metric" role="group" aria-label="Metric"></div>
       </div>
       <div class="an-chart-wrap">
-        <div id="mcph-chart" class="an-chart"></div>
+        <div id="mcpa-chart" class="an-chart"></div>
+        <button type="button" id="mcpa-zoom-reset" class="an-zoom-reset" hidden>↔ Reset Zoom</button>
       </div>
-      <div id="mcph-legend"></div>
+      <div id="mcpa-legend"></div>
     </div>
-    <div id="mcph-summary-host"></div>`;
-  mcpHistoryPickerRender(host);
-  analyticsSeg(view.querySelector('#mcph-gran'), MCP_HISTORY_GRANULARITIES.map((g) => ({ value: g.value, label: g.label })), state.gran, (v) => {
-    mcpHistorySave('gran', v);
-    loadMCPHistory(host);
+    <div id="mcpa-summary-host"></div>`;
+  mcpAnalyticsPickerRender(host);
+  analyticsSeg(view.querySelector('#mcpa-gran'), eff.granOptions.map((o) => ({
+    value: o.id, label: o.label, disabled: !o.allowed,
+  })), eff.granActive, (v) => {
+    mcpAnalyticsSave('gran', v);
+    mcpAnalyticsZoom = null;
+    loadMCPAnalytics(host);
   });
-  analyticsSeg(view.querySelector('#mcph-metric'), mcpHistoryMetricOptions(), state.metric, (v) => {
-    mcpHistorySave('metric', v);
-    renderMCPHistory(host);
+  analyticsSeg(view.querySelector('#mcpa-metric'), mcpAnalyticsMetricOptions(), state.metric, (v) => {
+    mcpAnalyticsSave('metric', v);
+    renderMCPAnalytics(host);
   });
-  const kindSel = view.querySelector('#mcph-kind');
-  const nameSel = view.querySelector('#mcph-name');
-  kindSel.onchange = () => { mcpHistorySave('kind', kindSel.value); loadMCPHistory(host); };
-  nameSel.onchange = () => { mcpHistorySave('name', nameSel.value); loadMCPHistory(host); };
-  attachClearable(kindSel);
-  attachClearable(nameSel);
-  view.querySelector('#mcph-refresh').onclick = () => loadMCPHistory(host);
+  const serverInput = view.querySelector('#mcpa-server');
+  const toolInput = view.querySelector('#mcpa-tool');
+  serverInput.value = state.server;
+  toolInput.value = state.tool;
+  // Free-text filters: commit on Enter or blur (change), not per keystroke —
+  // same contract as the Analytics tab's provider/model/agent inputs. Picking
+  // a different server invalidates the tool filter beneath it.
+  serverInput.onchange = () => {
+    const v = serverInput.value.trim();
+    if (v === mcpAnalyticsState().server) return;
+    mcpAnalyticsSave('server', v);
+    mcpAnalyticsSave('tool', '');
+    mcpAnalyticsZoom = null;
+    loadMCPAnalytics(host);
+  };
+  serverInput.onkeydown = (e) => { if (e.key === 'Enter') serverInput.blur(); };
+  attachClearable(serverInput);
+  toolInput.onchange = () => {
+    const v = toolInput.value.trim();
+    if (v === mcpAnalyticsState().tool) return;
+    mcpAnalyticsSave('tool', v);
+    mcpAnalyticsZoom = null;
+    loadMCPAnalytics(host);
+  };
+  toolInput.onkeydown = (e) => { if (e.key === 'Enter') toolInput.blur(); };
+  attachClearable(toolInput);
+  mcpAnalyticsFillDatalists(view, mcpAnalyticsData, state);
 
-  const summaryHost = view.querySelector('#mcph-summary-host');
-  if (!mcpHistoryData) {
-    summaryHost.innerHTML = mcpHistorySkeletonHTML();
-    loadMCPHistory(host);
+  const summaryHost = view.querySelector('#mcpa-summary-host');
+  if (!mcpAnalyticsData) {
+    summaryHost.innerHTML = mcpAnalyticsError
+      ? `<div class="msg err">${esc(mcpAnalyticsError)}</div>`
+      : mcpAnalyticsSkeletonHTML();
+    if (!mcpAnalyticsError) loadMCPAnalytics(host);
     return;
   }
-  const series = mcpHistoryFilterSeries(mcpHistoryData.series, state.kind, state.name);
-  const gran = mcpHistoryData.granularity || state.gran;
-  if (!series.length) {
-    summaryHost.innerHTML = buildCard('Summary', '', mcpHistoryEmptyHTML(), 'mcp-table mcp-history-table');
+  const series = mcpAnalyticsFilterSeries(mcpAnalyticsData.series, state.server);
+  const groups = mcpAnalyticsSummaryGroups(series, mcpAnalyticsData.tool_series, state.tool);
+  if (!groups.length) {
+    summaryHost.innerHTML = buildCard('Summary', '', mcpAnalyticsEmptyHTML(), 'mcp-table mcp-analytics-table');
+    mcpAnalyticsRenderChart(view, [], state.metric, gran);
     return;
   }
-  const rows = mcpHistorySummaryRows(series);
-  summaryHost.innerHTML = buildCard('Summary', `${rows.length} series`, mcpHistorySummaryTableHTML(rows, {
-    formatTime: (ts) => ts ? mcpHistoryBucketLabel(ts, gran) : '—',
-  }), 'mcp-table mcp-history-table');
-  mcpHistoryRenderChart(view, series, state.metric, gran);
+  const toolCount = groups.reduce((n, g) => n + g.tools.length, 0);
+  summaryHost.innerHTML = buildCard('Summary', `${groups.length} servers · ${toolCount} tools`, mcpAnalyticsSummaryTableHTML(groups, {
+    formatTime: (ts) => ts ? mcpAnalyticsBucketLabel(ts, gran) : '—',
+  }), 'mcp-table mcp-analytics-table');
+  mcpAnalyticsRenderChart(view, mcpAnalyticsChartSelection(state), state.metric, gran);
 }
 
-// mcpHistoryRenderChart draws the selected metric's trend chart with uPlot,
-// reusing the same column renderer, tooltip and legend chips as Analytics.
-function mcpHistoryRenderChart(view, series, metricId, gran) {
+// mcpAnalyticsChartSelection resolves which series the chart draws for the
+// current filters: every server at top level, the selected server's per-tool
+// series on drill-down (falling back to the server's own series when the
+// window predates tool-dimension collection), and the single tool with both
+// filters set.
+function mcpAnalyticsChartSelection(state) {
+  const data = mcpAnalyticsData;
+  if (!data) return [];
+  if (!state.server) return mcpAnalyticsFilterSeries(data.series, '');
+  const tools = mcpAnalyticsToolFilter(data.tool_series, state.server, state.tool);
+  if (tools.length) return tools.map((s) => ({ name: s.tool, points: s.points }));
+  return state.tool ? [] : mcpAnalyticsFilterSeries(data.series, state.server);
+}
+
+// mcpAnalyticsRenderChart draws the selected metric's trend chart with uPlot,
+// reusing the same column renderer, x-axis label density logic, tooltip and
+// legend chips as Analytics.
+function mcpAnalyticsRenderChart(view, series, metricId, gran) {
   if (typeof uPlot === 'undefined') return;
-  const host = view.querySelector('#mcph-chart');
-  const legendHost = view.querySelector('#mcph-legend');
+  const host = view.querySelector('#mcpa-chart');
+  const legendHost = view.querySelector('#mcpa-legend');
   if (!host) return;
-  destroyMCPHistoryCharts();
+  destroyMCPAnalyticsCharts();
   host.innerHTML = '';
-  const metric = MCP_HISTORY_METRICS.find((m) => m.id === metricId) || MCP_HISTORY_METRICS[0];
-  const grid = analyticsWindowGrid(mcpHistoryData && mcpHistoryData.from, mcpHistoryData && mcpHistoryData.to, gran);
-  const data = mcpHistoryChartSeries(series, metric.id, grid);
+  const metric = MCP_ANALYTICS_METRICS.find((m) => m.id === metricId) || MCP_ANALYTICS_METRICS[0];
+  const grid = analyticsWindowGrid(mcpAnalyticsData && mcpAnalyticsData.from, mcpAnalyticsData && mcpAnalyticsData.to, gran);
+  const data = mcpAnalyticsChartSeries(series, metric.id, grid);
   if (!data.x.length || !data.labels.length) {
     host.innerHTML = '<div class="empty-state">No series in range</div>';
     return;
@@ -10741,11 +10906,23 @@ function mcpHistoryRenderChart(view, series, metricId, gran) {
     height: 260,
     series: uSeries,
     scales: {
-      x: { time: true, range: () => fullRange },
+      x: { time: true, range: () => (mcpAnalyticsZoom ? [mcpAnalyticsZoom.from, mcpAnalyticsZoom.to] : fullRange) },
       y: { range: (_u, min, max) => [0, Math.max(max, min || 0, 1)] },
     },
     cursor: { drag: { x: true, y: false, setScale: true } },
-    plugins: [mcpHistoryChartTooltip(metric.id, gran)],
+    hooks: {
+      // Record the finished drag-selection's data range so re-renders
+      // (auto-refresh, metric switch) restore the zoomed window.
+      setSelect: [(u) => {
+        const from = u.posToVal(u.select.left, 'x');
+        const to = u.posToVal(u.select.left + u.select.width, 'x');
+        if (to - from > 1) {
+          mcpAnalyticsZoom = { from, to };
+          mcpAnalyticsZoomControls(view);
+        }
+      }],
+    },
+    plugins: [mcpAnalyticsChartTooltip(metric.id, gran)],
     axes: [
       { ...axis, values: analyticsXAxisValues },
       { label: metric.axis, size: 60, ...axis, values: (_u, splits) => splits.map((v) => (v == null ? '' : fmtCompact(v))) },
@@ -10754,15 +10931,34 @@ function mcpHistoryRenderChart(view, series, metricId, gran) {
   };
   try {
     const u = new uPlot(opts, [data.x, ...data.ys], host);
-    mcpHistoryCharts.push(u);
-    analyticsRenderLegend(legendHost, u, data.labels, colors, mcpHistoryLegendHidden);
+    mcpAnalyticsCharts.push(u);
+    analyticsRenderLegend(legendHost, u, data.labels, colors, mcpAnalyticsLegendHidden);
+    mcpAnalyticsZoomControls(view);
   } catch (_) { /* malformed data */ }
 }
 
-// mcpHistoryChartTooltip is the MCP History variant of analyticsTooltip: same
-// floating bucket label + series rows, but values formatted by the active MCP
-// metric (calls/errors/avg_ms).
-function mcpHistoryChartTooltip(metricId, gran) {
+// mcpAnalyticsZoomControls toggles the chart corner's "reset zoom" button from
+// mcpAnalyticsZoom and wires its click: clear the selection and restore the
+// full padded window on the live chart.
+function mcpAnalyticsZoomControls(view) {
+  const btn = view.querySelector('#mcpa-zoom-reset');
+  if (!btn) return;
+  btn.hidden = !mcpAnalyticsZoom;
+  if (btn.onclick) return; // wired once per render
+  btn.onclick = () => {
+    mcpAnalyticsZoom = null;
+    const u = mcpAnalyticsCharts[mcpAnalyticsCharts.length - 1];
+    if (u && u.data[0] && u.data[0].length) {
+      try { u.setScale('x', { min: analyticsXRange(u.data[0])[0], max: analyticsXRange(u.data[0])[1] }); } catch (_) { /* malformed */ }
+    }
+    btn.hidden = true;
+  };
+}
+
+// mcpAnalyticsChartTooltip is the MCP Analytics variant of analyticsTooltip:
+// same floating bucket label + series rows, but values formatted by the active
+// MCP metric (calls/errors/avg_ms).
+function mcpAnalyticsChartTooltip(metricId, gran) {
   return {
     hooks: {
       init: (u) => {
@@ -10770,10 +10966,10 @@ function mcpHistoryChartTooltip(metricId, gran) {
         tip.className = 'an-tip';
         tip.hidden = true;
         u.over.appendChild(tip);
-        u.mcphTip = tip;
+        u.mcpaTip = tip;
       },
       setCursor: (u) => {
-        const tip = u.mcphTip;
+        const tip = u.mcpaTip;
         if (!tip) return;
         const idx = u.cursor.idx;
         if (idx == null || u.cursor.left < 0 || !u.data[0] || !u.data[0].length) {
@@ -10787,7 +10983,7 @@ function mcpHistoryChartTooltip(metricId, gran) {
           const v = u.data[i][idx];
           const stroke = u.series[i].stroke;
           const dot = typeof stroke === 'string' ? ` style="background:${stroke}"` : '';
-          rows += `<div class="row"><i class="dot"${dot}></i><span class="lab">${esc(u.series[i].label)}</span><span>${esc(mcpHistoryValueText(metricId, v))}</span></div>`;
+          rows += `<div class="row"><i class="dot"${dot}></i><span class="lab">${esc(u.series[i].label)}</span><span>${esc(mcpAnalyticsValueText(metricId, v))}</span></div>`;
         }
         tip.innerHTML = `<div class="t">${esc(analyticsBucketLabel(t, gran))}</div>${rows}`;
         tip.hidden = false;

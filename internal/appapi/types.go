@@ -162,30 +162,41 @@ type MCPRouteTargetInfo struct {
 
 // MCPAnalyticsQuery describes one persisted MCP usage aggregation read.
 // From/To are unix seconds, inclusive. Granularity defaults to "day" in the
-// transport; Name/Kind are optional filters. Kind must be "server" or "route"
-// when non-empty.
+// transport; Name (exposed server or route) and Tool are optional filters.
 type MCPAnalyticsQuery struct {
 	From        int64
 	To          int64
 	Granularity string
 	Name        string
-	Kind        string
+	Tool        string
 }
 
 // MCPAnalyticsResult is the transport projection for GET /api/mcp/analytics.
-// Series are grouped by (kind, name); each series carries one point per
+// Series are grouped by exposed name; ToolSeries are grouped by (name, tool)
+// and carry the tools/call dimension only. Each series carries one point per
 // calendar bucket that had traffic in the inclusive [from,to] window.
 type MCPAnalyticsResult struct {
-	Granularity string               `json:"granularity"`
-	From        int64                `json:"from"`
-	To          int64                `json:"to"`
-	Series      []MCPAnalyticsSeries `json:"series"`
+	Granularity string                   `json:"granularity"`
+	From        int64                    `json:"from"`
+	To          int64                    `json:"to"`
+	Series      []MCPAnalyticsSeries     `json:"series"`
+	ToolSeries  []MCPToolAnalyticsSeries `json:"tool_series"`
 }
 
 // MCPAnalyticsSeries is one MCP server or route's bucketed usage.
 type MCPAnalyticsSeries struct {
-	Kind   string              `json:"kind"`
 	Name   string              `json:"name"`
+	Points []MCPAnalyticsPoint `json:"points"`
+	Totals MCPAnalyticsTotals  `json:"totals"`
+}
+
+// MCPToolAnalyticsSeries is one (server-or-route, tool) pair's bucketed
+// tools/call usage. Tool is the client-facing name (canonical for route
+// exchanges). Rows only exist from the moment the tool dimension was added,
+// so older history has no tool rows.
+type MCPToolAnalyticsSeries struct {
+	Name   string              `json:"name"`
+	Tool   string              `json:"tool"`
 	Points []MCPAnalyticsPoint `json:"points"`
 	Totals MCPAnalyticsTotals  `json:"totals"`
 }

@@ -608,6 +608,18 @@ func (p *Proxy) mcpLog(name, account string, frame mcpkg.Frame, httpMethod strin
 		if account != "" && account != name {
 			p.mcpStats.Record(account, status, latencyMs)
 		}
+		// Per-tool dimension: tools/call only. The tool name is the
+		// client-facing one — for route exchanges the logged reqBody is the
+		// original client frame, so ParseToolCallName yields the canonical
+		// route name, not the backend's rewritten name.
+		if frame.Method == "tools/call" {
+			if tool := mcpkg.ParseToolCallName(reqBody); tool != "" {
+				p.mcpStats.RecordTool(name, tool, status, latencyMs)
+				if account != "" && account != name {
+					p.mcpStats.RecordTool(account, tool, status, latencyMs)
+				}
+			}
+		}
 	}
 	// Client attribution: the session-header allowlist wins (clients that
 	// stamp their own session id on every call), the local MCP session id

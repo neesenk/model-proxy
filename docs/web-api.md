@@ -200,12 +200,15 @@ Web MCP tab 的行内 Test 按钮消费此端点。
 
 ### `GET /api/mcp/analytics`
 
-MCP 网关历史聚合统计（供 Web UI **History** 子标签）。请求参数：
+MCP 网关历史聚合统计（供 Web UI MCP tab 的 **Analytics** 子标签）。请求参数：
 
 - `from` / `to`：unix 秒（闭区间），缺省时为**最近 30 天**（与 `/api/analytics` 默认窗口一致）。
+  `from=0` 是 all-time 哨兵：服务端将其钳位到最早已持久化 bucket 并回显在 `from` 中
+  （UI 据此学习真实窗口起点，用于粒度 gating）。
 - `granularity`：`minute`、`hour`、`day`、`week`、`month` 之一，**默认 `day`**。
-- `kind`：可选，精确过滤 `server` 或 `route`。
-- `name`：可选，精确过滤某一条 server/route 名。
+- `name`：可选，精确过滤某一条 server/route 名（两者共享一个命名空间，UI 的 Server
+  筛选不区分 kind）。
+- `tool`：可选，精确过滤 tool 名（与 `name` 组合 = 某 server 的某个 tool）。
 
 成功响应 200：
 
@@ -216,7 +219,6 @@ MCP 网关历史聚合统计（供 Web UI **History** 子标签）。请求参�
   "to": 456,
   "series": [
     {
-      "kind": "server" | "route",
       "name": "...",
       "points": [
         { "ts": 123, "calls": 5, "errors": 1, "avg_latency_ms": 640 }
@@ -228,9 +230,22 @@ MCP 网关历史聚合统计（供 Web UI **History** 子标签）。请求参�
         "last_call_at": 123
       }
     }
+  ],
+  "tool_series": [
+    {
+      "name": "...",
+      "tool": "...",
+      "points": [{ "ts": 123, "calls": 4, "errors": 0, "avg_latency_ms": 500 }],
+      "totals": { "calls": 4, "errors": 0, "avg_latency_ms": 500, "last_call_at": 123 }
+    }
   ]
 }
 ```
+
+`series` 按暴露名分组（server 级，覆盖全部 MCP 交换——initialize/tools/list/tools/call
+等）；`tool_series` 按 (name, tool) 分组，**只计 `tools/call`**，`tool` 为客户端视角名
+（route 交换记 canonical 名而非后端改写名）。tool 维度从支持该统计的版本起才开始累积，
+更早的历史没有 tool 行。
 
 错误：参数非法返回 400 `{ "error": "..." }`；stats 存储不可用或查询失败返回 500 并带 `error` 文本，UI 直接展示后端消息。
 

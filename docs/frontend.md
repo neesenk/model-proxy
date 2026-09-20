@@ -7,7 +7,7 @@
 
 ## 自动刷新 tick 盘点
 
-Status 5s（整页重渲染，双门）、Analytics 30s（仅 live 窗口——1h/today 预设与可解析的 Quota Window，后者的 to 随时钟走、窗口随重置滚动）、Security 30s（loader 只重绘数据宿主、不重建工具栏）、Accounts 30s（后台失败走 stale 横幅；**操作中守卫**——pane 内有 disabled 按钮时跳过，避免打断 Test/测活/Test All 的进行态）、顶栏 header 5s（`maybeConnRefresh`：仅 dot+meta 文本经 `setConn` 单点写入、不重建面板 DOM → **门豁免**（钉在 jstests/autorefresh.test.mjs）；Status tab 激活时跳过避免重复 /api/status）。新增 tick 的强制规则（双门 + 停止钩子 + autorefresh.test.mjs 加钉）见 `internal/web/assets/AGENTS.md` 交互门一节。
+Status 5s（整页重渲染，双门）、Analytics 30s（仅 live 窗口——1h/today 预设与可解析的 Quota Window，后者的 to 随时钟走、窗口随重置滚动）、MCP Analytics 子标签 30s（仅 live 窗口——1h/today 预设；切出子标签停止、进入重武装）、Security 30s（loader 只重绘数据宿主、不重建工具栏）、Accounts 30s（后台失败走 stale 横幅；**操作中守卫**——pane 内有 disabled 按钮时跳过，避免打断 Test/测活/Test All 的进行态）、顶栏 header 5s（`maybeConnRefresh`：仅 dot+meta 文本经 `setConn` 单点写入、不重建面板 DOM → **门豁免**（钉在 jstests/autorefresh.test.mjs）；Status tab 激活时跳过避免重复 /api/status）。新增 tick 的强制规则（双门 + 停止钩子 + autorefresh.test.mjs 加钉）见 `internal/web/assets/AGENTS.md` 交互门一节。
 
 ## 请求表（三合一渲染、列几何、虚拟滚动）
 
@@ -86,7 +86,7 @@ unmatched 行的 Match 按钮在行内展开编辑器：`catalog_ids` datalist �
 
 ## 时间维度选择器与 Quota Window 预设
 
-**时间维度选择器是三处同款的单一实现**（markup 唯一源 pure.js `tokenRangePickerHTML`；交互/降级语义见 `docs/web-api.md` GET `/api/tokens` 行）：Status 页 tokens 区（驱动 Token usage + Agents 卡，默认 today）、Analytics 工具栏（localStorage 持久化，默认 1h）、Accounts 页各账号卡 Token usage 区块（默认 Quota Window，见「Accounts 页」节）。**Quota Window 预设**复用于全部三处：窗口 = 当前计费周期 [`quota[key].UsageFrom`, now]，窗口起点的推导归 provider 层（`QuotaSnapshot.UsageWindow`，见 `docs/architecture/runtime-state.md`），前端只解析投影值。Status tokens 卡没有所选 provider 语境——pure.js `quotaWindowFromSec` 取 quota map 中**首个（key 排序）可解析 plan provider** 的窗口，触发器标签 `Quota (<provider>)` 归属驱动 provider（多 plan provider 周期不同（7d↔30d）时聚合视图是近似，归属可见），直接用 5s status 快照里的 quota map（至多落后一个 tick）；不可解析（无 plan provider、轮询全败）时预设行不渲染、已存 'quota' 选择降级为 All Time。**Analytics 的 Quota Window 按 provider 过滤器解析**（pure.js `quotaWindowForProvider`：先查 provider 自身 key，再查 `name#<accountId>` 池账号虚拟键，首个可解析者驱动窗口，与 Accounts 页同 plan 同周期假设）：provider 未选择（或所选 provider 无 plan 窗口）时预设行渲染但禁用（灰态），已存 'quota' 选择降级为 All Time（勾选/标签/查询三处一致）；选择/切换 provider 后窗口按该 provider 的 UsageFrom 动态重算，触发器标签 `Quota (<provider>)` 归属所选 provider。Analytics 的 loader 为此在每次整面渲染时附带 best-effort /api/status（失败保留上次值），可解析的 quota 窗口计入 30s live 刷新集合。
+**时间维度选择器是四处同款的单一实现**（markup 唯一源 pure.js `tokenRangePickerHTML`；交互/降级语义见 `docs/web-api.md` GET `/api/tokens` 行）：Status 页 tokens 区（驱动 Token usage + Agents 卡，默认 today）、Analytics 工具栏（localStorage 持久化，默认 1h）、Accounts 页各账号卡 Token usage 区块（默认 Quota Window，见「Accounts 页」节）、MCP 页 Analytics 子标签（默认 1h，无 Quota Window 预设）。**Quota Window 预设**复用于全部三处：窗口 = 当前计费周期 [`quota[key].UsageFrom`, now]，窗口起点的推导归 provider 层（`QuotaSnapshot.UsageWindow`，见 `docs/architecture/runtime-state.md`），前端只解析投影值。Status tokens 卡没有所选 provider 语境——pure.js `quotaWindowFromSec` 取 quota map 中**首个（key 排序）可解析 plan provider** 的窗口，触发器标签 `Quota (<provider>)` 归属驱动 provider（多 plan provider 周期不同（7d↔30d）时聚合视图是近似，归属可见），直接用 5s status 快照里的 quota map（至多落后一个 tick）；不可解析（无 plan provider、轮询全败）时预设行不渲染、已存 'quota' 选择降级为 All Time。**Analytics 的 Quota Window 按 provider 过滤器解析**（pure.js `quotaWindowForProvider`：先查 provider 自身 key，再查 `name#<accountId>` 池账号虚拟键，首个可解析者驱动窗口，与 Accounts 页同 plan 同周期假设）：provider 未选择（或所选 provider 无 plan 窗口）时预设行渲染但禁用（灰态），已存 'quota' 选择降级为 All Time（勾选/标签/查询三处一致）；选择/切换 provider 后窗口按该 provider 的 UsageFrom 动态重算，触发器标签 `Quota (<provider>)` 归属所选 provider。Analytics 的 loader 为此在每次整面渲染时附带 best-effort /api/status（失败保留上次值），可解析的 quota 窗口计入 30s live 刷新集合。
 
 ## Accounts 页
 
@@ -158,9 +158,9 @@ Refresh/按钮点击），无自动刷新 tick，不适用 deferAutoRefresh 双�
 ## MCP 页
 
 MCP tab 展示网关面（`/api/mcp`），内部拆成三个子标签：**Servers**、**Routes**、
-**History**。子标签选择 persists 在 `localStorage['mcp-tab']`，默认 Servers；同时
+**Analytics**。子标签选择 persists 在 `localStorage['mcp-tab']`，默认 Servers；同时
 **URL hash 子段保留当前子标签**，形式为 `#mcp/servers`、`#mcp/routes`、
-`#mcp/history`。刷新页面或从链接打开时按 hash 子段定位；子标签切换更新地址栏
+`#mcp/analytics`。刷新页面或从链接打开时按 hash 子段定位；子标签切换更新地址栏
 （`replaceState`）和 `localStorage`；浏览器前进/后退通过 `hashchange` 切换子标签。
 空或非法子段回退到 `localStorage` 或默认 Servers。子标签切换不触发骨架屏或重复拉取；
 tab 重入经 `retainTab` 守卫。
@@ -169,25 +169,40 @@ tab 重入经 `retainTab` 守卫。
 `.status-nav` + `.status-nav-item` + `.status-main`，与 Status 页 `STATUS_SECTIONS`
 侧栏同一份 markup/class/ARIA；持久化仍走 `localStorage['mcp-tab']`。
 
-- **Servers** 子标签：servers 表（Name/Enabled/Transport/Auth/Endpoint/Accounts/Sessions/Errors/Avg ms
-  + 行内 Test 按钮）+ Refresh 按钮。Test 触发 `POST /api/mcp/test`（握手探测），结果行内
+- **Servers** 子标签：servers 表（Name/On/Transport/Auth/Endpoint/Sessions/Errors/MS
+  + 末列行内 Test 按钮）+ Refresh 按钮。全部内容单元格在列内折行
+  （`overflow-wrap:anywhere`），常规窗口下无横向滚动。Test 触发 `POST /api/mcp/test`（握手探测），结果行内
   渲染在该 server 行正下方（ok/fail badge + serverInfo/延迟 + 工具徽章，超 8 个折叠计数）。
-- **Routes** 子标签：routes 表（Name/Enabled/Targets 链/Sessions/Errors/Avg ms），视觉与当前一致。
-- **History** 子标签：消费 `GET /api/mcp/analytics` 历史聚合统计。工具栏包含与
-  Analytics/Token usage 同款时间范围选择器（`tokenRangePickerHTML`；无 Quota Window 预设）、
-  粒度分段按钮（Minute/Hour/Day/Week/Month，默认 Day）、Kind 下拉（All/Servers/Routes）和
-  Name 下拉（从返回 series 填充）。结果上方是 **Analytics 同款 uPlot 趋势图**（`.an-chart-card`/`.an-chart-wrap`/`.an-chart`/`.an-legend`/`.an-chip`，柱形图、tooltip、可点击 legend chip），
-  指标切换器提供 Calls/Errors/Avg ms；下方保留 **Summary 表**（Kind/Name/Calls/Errors/Avg ms/
-  Last Call）。图表 helper（`mcpHistoryChartSeries` 等）进 `pure.js`。
-  视图状态 persists 在 `mcph-range`、`mcph-gran`、`mcph-metric`、`mcph-kind`、`mcph-name`。
+- **Routes** 子标签：routes 表（Name/On/Targets 链/Sessions/Errors/MS），视觉与当前一致。
+- **Analytics** 子标签：消费 `GET /api/mcp/analytics`（server 级 `series` + tool 维度
+  `tool_series`），UI 契约与 **Analytics 页同款**——同一 `tokenRangePickerHTML` 时间选择器
+  （无 Quota Window 预设）、同一 auto 粒度分段钮（`analyticsGranOptions` 跨度 gating、
+  切范围重置 auto、all-time 锚定重发）、同一 X 轴标签密度降级（`analyticsXAxisValues`）、
+  柱形图 + 拖选缩放（Reset Zoom）+ tooltip + 可点击 legend chip。默认窗口 Last 1h；
+  **Last 1h/Today 为 live 窗口，30s 自动刷新**（tick 走 `deferAutoRefresh` 入口/提交
+  双门；切子标签停止、进入重新武装，`mcpShowSubTab` 负责）。
+  工具栏的筛选是**两个 datalist 输入**（与 Analytics 的 provider/model/agent 同款
+  commit-on-change + `attachClearable` 交互）：**Server**（server 与 route 共享命名空间、
+  混排不区分 kind，建议项跨渲染累加）和 **Tool**（未选 Server 时 disabled；建议项来自
+  该 server 的 `tool_series`；换 Server 即清空已选 Tool）。
+  **图表 drill-down**：未选 Server → 每 server 一条 series；选中 Server → 该 server
+  每 tool 一条（窗口早于 tool 维度采集时回退为该 server 自身 series）；两者都选 →
+  单 tool series。指标切换器 Calls/Errors/Avg ms。
+  下方 **Summary 表**采用 Status→Token usage→Agents 卡的父子行形式（唯一实现
+  `.agent-summary`/`.agent-model`）：父行为 server 总指标，其下子行为各 tool 指标；
+  列 Server / Tool、Calls、Errors、Avg ms、Last Call。纯 helper
+  （`mcpAnalyticsSummaryGroups`/`mcpAnalyticsSummaryTableHTML`/`mcpAnalyticsChartSeries`
+  等）进 `pure.js`。视图状态 persists 在 `mcpa-range`（默认 `1h`）、`mcpa-gran`
+  （默认 `auto`）、`mcpa-metric`、`mcpa-server`、`mcpa-tool`。
 
-**全部渲染为用户触发**（tab 激活/Refresh/子标签切换/Test/过滤器变更），无自动刷新 tick，
-因此不适用 deferAutoRefresh 双门；后台刷新失败保留旧 DOM 走 `setRefreshError`。结构标记
+Servers/Routes 渲染为用户触发（tab 激活/Refresh/子标签切换/Test），Analytics 子标签
+另有上述 30s live tick；后台刷新失败保留旧 DOM 走 `setRefreshError`。结构标记
 `.mcp-host`（无视觉样式，已登记 registry 的 CLASS_EXEMPT）。**三表列几何固定**：
 colgroup 用 `table-layout: fixed`（与请求表同一契约），但不再按百分比均分——短
 badge/数字/按钮列给固定小宽度（px），Name/Endpoint/Targets 占剩余弹性空间。
 长 endpoint URL 在弹性列内 ellipsis 裁剪并附 `title` tooltip；Targets 链与长 Transport
 值在 `.mcp-wrap` 列内 `overflow-wrap: anywhere` 折行；Name/Auth 用 `.mcp-clip` 单行省略。
-Servers/Routes/History 各自拥有 realistic `min-width`（1050/750/700px）；当侧栏挤占使
-卡片内容区小于该宽度时，`.card-body` 横向滚动，避免列被压成不可读的碎片。徽章/按钮复用
+Servers/Routes/Analytics 各自拥有 realistic `min-width`（760/700/600px）；当侧栏挤占使
+卡片内容区小于该宽度时，`.card-body` 横向滚动，避免列被压成不可读的碎片。三表单元格水平
+padding 收紧为 10px（默认 14px），为密集列几何腾出约 80px。徽章/按钮复用
 既有 `.badge`/`.btn` 模式。

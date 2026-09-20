@@ -852,9 +852,9 @@ func TestAPIAnalyticsUsesCatalogThenDetachedOverride(t *testing.T) {
 }
 
 // TestAPIMCPAnalyticsHandler pins the persisted MCP analytics endpoint:
-// bucketed reads, (kind, name) grouping, calls/errors totals, weighted-average
-// latency, last_call_at max, and name/kind filters. A disabled stats store
-// fails closed rather than returning empty buckets.
+// bucketed reads, name grouping, calls/errors totals, weighted-average
+// latency, last_call_at max, name/tool filters, and the per-tool dimension.
+// A disabled stats store fails closed rather than returning empty buckets.
 func TestAPIMCPAnalyticsHandler(t *testing.T) {
 	p := &Proxy{
 		processServices: processServices{
@@ -875,6 +875,19 @@ func TestAPIMCPAnalyticsHandler(t *testing.T) {
 	if err := p.stats.FlushMCPBuckets(base+3600, []observestats.MCPBucketDelta{
 		{Name: "web-search", Kind: observestats.MCPKindServer, Calls: 4, Errors: 0, LatencyMsSum: 800, LastCallAt: base + 3700},
 		{Name: "exa", Kind: observestats.MCPKindServer, Calls: 1, Errors: 1, LatencyMsSum: 100, LastCallAt: base + 3800},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Per-tool rows across the same window.
+	if err := p.stats.FlushMCPToolBuckets(base, []observestats.MCPToolBucketDelta{
+		{Name: "web-search", Tool: "search", Kind: observestats.MCPKindServer, Calls: 2, Errors: 1, LatencyMsSum: 200, LastCallAt: base + 10},
+		{Name: "web-search", Tool: "fetch", Kind: observestats.MCPKindServer, Calls: 1, Errors: 0, LatencyMsSum: 100, LastCallAt: base + 40},
+		{Name: "search-route", Tool: "lookup", Kind: observestats.MCPKindRoute, Calls: 5, Errors: 2, LatencyMsSum: 1000, LastCallAt: base + 30},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.stats.FlushMCPToolBuckets(base+3600, []observestats.MCPToolBucketDelta{
+		{Name: "web-search", Tool: "search", Kind: observestats.MCPKindServer, Calls: 4, Errors: 0, LatencyMsSum: 800, LastCallAt: base + 3700},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -907,7 +920,7 @@ func TestAPIMCPAnalyticsHandler(t *testing.T) {
 		t.Fatalf("series = %+v", got.Series)
 	}
 	ws := byName["web-search"]
-	if ws.Kind != "server" || len(ws.Points) != 1 || ws.Points[0].Calls != 6 || ws.Points[0].Errors != 1 {
+	if len(ws.Points) != 1 || ws.Points[0].Calls != 6 || ws.Points[0].Errors != 1 {
 		t.Errorf("web-search point = %+v", ws.Points)
 	}
 	// weighted avg = (200+800) / (2+4) = 166.666...
@@ -915,32 +928,52 @@ func TestAPIMCPAnalyticsHandler(t *testing.T) {
 		t.Errorf("web-search totals = %+v", ws.Totals)
 	}
 	exa := byName["exa"]
-	if exa.Kind != "server" || exa.Totals.Calls != 4 || exa.Totals.Errors != 1 || exa.Totals.LastCallAt != base+3800 {
+	if exa.Totals.Calls != 4 || exa.Totals.Errors != 1 || exa.Totals.LastCallAt != base+3800 {
 		t.Errorf("exa totals = %+v", exa.Totals)
 	}
 	rt := byName["search-route"]
-	if rt.Kind != "route" || rt.Totals.Calls != 5 || rt.Totals.Errors != 2 || rt.Totals.LastCallAt != base+30 {
+	if rt.Totals.Calls != 5 || rt.Totals.Errors != 2 || rt.Totals.LastCallAt != base+30 {
 		t.Errorf("search-route totals = %+v", rt.Totals)
 	}
 
-	// Kind filter limits to servers.
+	// Per-tool dimension groups by (name, tool).
+	tools := map[[2]string]appapi.MCPToolAnalyticsSeries{}
+	for _, s := range got.ToolSeries {
+		tools[[2]string{s.Name, s.Tool}] = s
+	}
+	if len(tools) != 3 {
+		t.Fatalf("tool_series = %+v", got.ToolSeries)
+	}
+	search := tools[[2]string{"web-search", "search"}]
+	if len(search.Points) != 1 || search.Points[0].Calls != 6 || search.Points[0].Errors != 1 || search.Totals.Calls != 6 || search.Totals.Errors != 1 || search.Totals.LastCallAt != base+3700 {
+		t.Errorf("web-search/search = %+v", search)
+	}
+	if math.Abs(search.Totals.AvgLatencyMs-1000.0/6.0) > 1e-9 {
+		t.Errorf("web-search/search avg = %v", search.Totals.AvgLatencyMs)
+	}
+	if fetch := tools[[2]string{"web-search", "fetch"}]; fetch.Totals.Calls != 1 || fetch.Totals.LastCallAt != base+40 {
+		t.Errorf("web-search/fetch = %+v", fetch)
+	}
+	if lookup := tools[[2]string{"search-route", "lookup"}]; lookup.Totals.Calls != 5 || lookup.Totals.Errors != 2 {
+		t.Errorf("search-route/lookup = %+v", lookup)
+	}
+
+	// Tool filter isolates one tool.
 	rec = httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(
 		http.MethodGet,
-		fmt.Sprintf("/api/mcp/analytics?from=%d&to=%d&granularity=day&kind=server", base, base+7200),
+		fmt.Sprintf("/api/mcp/analytics?from=%d&to=%d&granularity=day&tool=lookup", base, base+7200),
 		nil,
 	))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("kind filter status=%d", rec.Code)
+		t.Fatalf("tool filter status=%d", rec.Code)
 	}
 	got = appapi.MCPAnalyticsResult{}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	for _, s := range got.Series {
-		if s.Kind != "server" {
-			t.Errorf("kind filter leaked route: %+v", s)
-		}
+	if len(got.ToolSeries) != 1 || got.ToolSeries[0].Tool != "lookup" {
+		t.Errorf("tool filter tool_series = %+v", got.ToolSeries)
 	}
 
 	// Name filter isolates one server.

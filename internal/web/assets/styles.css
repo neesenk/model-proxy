@@ -1451,9 +1451,13 @@ input[type="checkbox"] { accent-color: var(--accent); }
    unreadable slivers. */
 .mcp-table.card-body { overflow-x: auto; }
 .mcp-table .table { table-layout: fixed; width: 100%; }
-.mcp-servers-table .table { min-width: 1050px; }
-.mcp-routes-table .table { min-width: 750px; }
-.mcp-history-table .table { min-width: 700px; }
+.mcp-servers-table .table { min-width: 760px; }
+.mcp-routes-table .table { min-width: 700px; }
+.mcp-analytics-table .table { min-width: 600px; }
+/* Dense 10-column geometry: slightly tighter horizontal padding than the
+   default 14px buys ~80px across a Servers row, keeping headers fully visible
+   inside the 928px the capped layout leaves beside the sidebar. */
+.mcp-table .table th, .mcp-table .table td { padding-left: 10px; padding-right: 10px; }
 .mcp-table .table th { white-space: nowrap; }
 .mcp-table .table td .badge { white-space: nowrap; }
 .mcp-table .mcp-clip { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1540,7 +1544,9 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .acct-totals td { font-weight: 600; border-top: 2px solid var(--border); color: var(--text); }
 .acct-totals td:first-child { font-family: var(--sans); text-transform: uppercase; font-size: 0.6875rem; letter-spacing: .04em; color: var(--muted); }
 
-/* Agents card */
+/* Grouped summary rows (single implementation, two consumers): the Status
+   Agents card (parent agent + per-model children) and the MCP Analytics
+   Summary (parent server + per-tool children). */
 .agent-summary td { font-weight: 600; border-top: 1px solid var(--border); }
 .agent-model td:first-child { padding-left: 1.75em; color: var(--muted); }
 
@@ -1865,7 +1871,7 @@ dialog.tk-fixed .modal-body { max-height: calc(100vh - 150px); }
      narrow viewports; the card-body scrolls them horizontally. */
   .mcp-servers-table .table { min-width: 1050px; }
   .mcp-routes-table .table { min-width: 750px; }
-  .mcp-history-table .table { min-width: 700px; }
+  .mcp-analytics-table .table { min-width: 700px; }
   .sess-sticky { position: static; margin: 0; padding: 0; border-bottom: none; }
   /* The dashboard KPI row pins 6 columns on desktop; at phone widths each
      cell would collapse to ~55px. Two columns keep the numbers readable. */

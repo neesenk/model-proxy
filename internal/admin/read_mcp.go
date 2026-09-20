@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"net/http"
 	"sort"
 
 	"model-proxy/internal/appapi"
@@ -103,27 +102,25 @@ func (s *Service) MCPSurface() appapi.MCPSurface {
 }
 
 // MCPAnalytics projects persisted MCP usage buckets for the
-// /api/mcp/analytics endpoint. Kind is validated here so an unknown value is a
-// client error; the store's QueryMCPBuckets validates granularity.
+// /api/mcp/analytics endpoint. Name/Tool are optional filters applied at the
+// port; the store's QueryMCPBuckets validates granularity.
 func (s *Service) MCPAnalytics(query appapi.MCPAnalyticsQuery) (appapi.MCPAnalyticsResult, error) {
 	result := appapi.MCPAnalyticsResult{
 		Granularity: query.Granularity,
 		From:        query.From,
 		To:          query.To,
 		Series:      []appapi.MCPAnalyticsSeries{},
-	}
-	if query.Kind != "" && query.Kind != "server" && query.Kind != "route" {
-		return result, appapi.NewHTTPError(http.StatusBadRequest, "kind must be server or route")
+		ToolSeries:  []appapi.MCPToolAnalyticsSeries{},
 	}
 	if s.ports.MCPAnalytics == nil {
 		return result, nil
 	}
-	rows, err := s.ports.MCPAnalytics(query.From, query.To, query.Granularity, query.Name, query.Kind)
+	rows, toolRows, err := s.ports.MCPAnalytics(query.From, query.To, query.Granularity, query.Name, query.Tool)
 	if err != nil {
 		return result, err
 	}
-	// Group rows by (kind, name), preserving a stable encounter order.
-	type key struct{ kind, name string }
+	// Group rows by exposed name, preserving a stable encounter order.
+	type key struct{ name string }
 	type group struct {
 		points []appapi.MCPAnalyticsPoint
 		calls  uint64
@@ -136,7 +133,7 @@ func (s *Service) MCPAnalytics(query appapi.MCPAnalyticsQuery) (appapi.MCPAnalyt
 	groups := map[key]*group{}
 	order := []key{}
 	for _, r := range rows {
-		k := key{kind: r.Kind, name: r.Name}
+		k := key{name: r.Name}
 		g, ok := groups[k]
 		if !ok {
 			g = &group{points: []appapi.MCPAnalyticsPoint{}}
@@ -163,8 +160,53 @@ func (s *Service) MCPAnalytics(query appapi.MCPAnalyticsQuery) (appapi.MCPAnalyt
 			avgLatency = float64(g.latencyMsSum) / float64(g.calls)
 		}
 		result.Series = append(result.Series, appapi.MCPAnalyticsSeries{
-			Kind:   k.kind,
 			Name:   k.name,
+			Points: g.points,
+			Totals: appapi.MCPAnalyticsTotals{
+				Calls:        g.calls,
+				Errors:       g.errors,
+				AvgLatencyMs: avgLatency,
+				LastCallAt:   g.lastCallAt,
+			},
+		})
+	}
+	// Same projection for the (name, tool) dimension.
+	type toolKey struct {
+		name string
+		tool string
+	}
+	toolGroups := map[toolKey]*group{}
+	toolOrder := []toolKey{}
+	for _, r := range toolRows {
+		k := toolKey{name: r.Name, tool: r.Tool}
+		g, ok := toolGroups[k]
+		if !ok {
+			g = &group{points: []appapi.MCPAnalyticsPoint{}}
+			toolGroups[k] = g
+			toolOrder = append(toolOrder, k)
+		}
+		g.points = append(g.points, appapi.MCPAnalyticsPoint{
+			Ts:           r.Bucket,
+			Calls:        r.Calls,
+			Errors:       r.Errors,
+			AvgLatencyMs: r.AvgLatencyMs,
+		})
+		g.calls += r.Calls
+		g.errors += r.Errors
+		g.latencyMsSum += r.LatencyMsSum
+		if r.LastCallAt > g.lastCallAt {
+			g.lastCallAt = r.LastCallAt
+		}
+	}
+	for _, k := range toolOrder {
+		g := toolGroups[k]
+		avgLatency := 0.0
+		if g.calls > 0 {
+			avgLatency = float64(g.latencyMsSum) / float64(g.calls)
+		}
+		result.ToolSeries = append(result.ToolSeries, appapi.MCPToolAnalyticsSeries{
+			Name:   k.name,
+			Tool:   k.tool,
 			Points: g.points,
 			Totals: appapi.MCPAnalyticsTotals{
 				Calls:        g.calls,

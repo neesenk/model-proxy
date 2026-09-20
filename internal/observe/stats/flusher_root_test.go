@@ -641,3 +641,108 @@ func TestFlusherMCPPath(t *testing.T) {
 		t.Errorf("reset flush row = %+v", rows[0])
 	}
 }
+
+// TestFlusherMCPToolPath verifies the flusher diff + persist path for the
+// per-tool MCP counters, including the reset case where a counter's current
+// value is lower than the previous snapshot.
+func TestFlusherMCPToolPath(t *testing.T) {
+	ss := openFlusherTestStore(t)
+	mcp := obscounters.NewMCPStats()
+	kind := func(name string) (MCPKind, bool) {
+		switch name {
+		case "srv":
+			return MCPKindServer, true
+		case "rt":
+			return MCPKindRoute, true
+		default:
+			return "", false
+		}
+	}
+	f := NewFlusher(
+		ss,
+		obscounters.NewMetricsStore(),
+		obscounters.NewTokenCounter(),
+		obscounters.NewAgentCounter(),
+		nil, nil,
+		WithMCPStats(mcp, kind),
+	)
+
+	mcp.RecordTool("srv", "search", 200, 100)
+	mcp.RecordTool("srv", "search", 500, 50)
+	mcp.RecordTool("srv", "fetch", 200, 30)
+	mcp.RecordTool("rt", "lookup", 200, 10)
+	mcp.RecordTool("ghost", "x", 200, 10) // unresolvable name: skipped
+	f.Flush(time.Unix(60, 0))
+
+	rows, err := ss.QueryMCPToolBuckets(0, 120, "minute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("first flush rows = %d, want 3: %+v", len(rows), rows)
+	}
+	byTool := map[[2]string]MCPToolBucketRow{}
+	for _, r := range rows {
+		byTool[[2]string{r.Name, r.Tool}] = r
+	}
+	if s := byTool[[2]string{"srv", "search"}]; s.Calls != 2 || s.Errors != 1 || s.LatencyMsSum != 150 || s.Kind != "server" {
+		t.Errorf("srv/search first flush = %+v", s)
+	}
+	if fetch := byTool[[2]string{"srv", "fetch"}]; fetch.Calls != 1 || fetch.Errors != 0 {
+		t.Errorf("srv/fetch first flush = %+v", fetch)
+	}
+	if lookup := byTool[[2]string{"rt", "lookup"}]; lookup.Calls != 1 || lookup.Kind != "route" {
+		t.Errorf("rt/lookup first flush = %+v", lookup)
+	}
+
+	// Second minute: more calls on one tool.
+	mcp.RecordTool("srv", "search", 200, 70)
+	f.Flush(time.Unix(120, 0))
+
+	rows, err = ss.QueryMCPToolBuckets(0, 180, "minute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var searchTotal uint64
+	for _, r := range rows {
+		if r.Name == "srv" && r.Tool == "search" {
+			searchTotal += r.Calls
+		}
+	}
+	if searchTotal != 3 {
+		t.Errorf("srv/search cumulative calls = %d, want 3", searchTotal)
+	}
+
+	// Counter reset: the next snapshot is lower than the previous baseline.
+	// The flusher must treat the current value as the delta.
+	mcp.Reset()
+	mcp.RecordTool("srv", "search", 200, 40)
+	mcp.RecordTool("srv", "search", 200, 60)
+	f.Flush(time.Unix(180, 0))
+
+	rows, err = ss.QueryMCPToolBuckets(180, 240, "minute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("reset flush rows = %d, want 1: %+v", len(rows), rows)
+	}
+	if rows[0].Bucket != 180 || rows[0].Calls != 2 || rows[0].LatencyMsSum != 100 {
+		t.Errorf("reset flush row = %+v", rows[0])
+	}
+
+	// Reset must drain the tool channel too.
+	if err := f.Reset(); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	rows, err = ss.QueryMCPToolBuckets(0, 240, "minute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("durable tool rows after Reset = %d, want 0", len(rows))
+	}
+	if len(mcp.RawToolSnapshot()) != 0 {
+		t.Error("runtime tool counters must be empty after Reset")
+	}
+}

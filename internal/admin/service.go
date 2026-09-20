@@ -105,7 +105,8 @@ type Ports struct {
 	// MCPAnalytics queries persisted MCP usage buckets for the
 	// /api/mcp/analytics endpoint. The closure returns an empty slice and nil
 	// error when the stats store is disabled; store errors are returned as-is.
-	MCPAnalytics func(from, to int64, granularity, name, kind string) ([]observestats.MCPBucketRow, error)
+	// The second return carries the per-tool (name, tool) dimension.
+	MCPAnalytics func(from, to int64, granularity, name, tool string) ([]observestats.MCPBucketRow, []observestats.MCPToolBucketRow, error)
 	// Pins returns the active pins (expired ones already dropped).
 	Pins func() map[string]PinState
 	// ModelCapsSnapshot returns the startup protocol probe's detached

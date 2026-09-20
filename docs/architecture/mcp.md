@@ -167,6 +167,13 @@ http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验�
   进程级计数器 `observe/counters.MCPStats`（按 name 计 calls/errors/avg_latency_ms；
   errors = status ≥ 400），再经分钟 flusher 持久化到 `stats.db` 的 `mcp_buckets`
   表（`name, kind, minute, calls, errors, latency_ms_sum, last_call_at`）。
+  `tools/call` 交换另记 **tool 维度**：`mcpLog` 对原始客户端 body 跑
+  `mcp.ParseToolCallName`，非空 tool 名时 `RecordTool(name, tool, …)`（route 的
+  account 双计规则同 server 级），flusher 经 `DiffMCPTools` 持久化到
+  `mcp_tool_buckets`（`name, tool, kind, minute, …`，PK `(name, tool, minute)`）。
+  tool 名为**客户端视角**——route 交换记 canonical 名（记录用的是改写前 body），
+  不是后端改写名。tool 行只覆盖 `tools/call`：非 call 方法（initialize/tools/list 等）
+  没有 tool 名，只能经 server 级 `series` 观测。
   计数归属规则：
   - pinned/直连 server 的交换只记该 server 名；
   - 路由的 `initialize`/`tools/list` 只记路由名；
@@ -174,15 +181,17 @@ http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验�
     不同时，会同时记**路由名**和**后端 server 名**各一次——因此两个命名空间的
     调用数之和会大于实际请求数；
   - 路由全部后端失败（502）只记路由名，不记后端。
-  flusher 通过 `WithMCPStats` 选项接入，每分钟对 `MCPStats.RawSnapshot()` 做 diff
-  （`DiffMCP`），由 `initStats()` 里的 config-backed kind 解析器把名字归类为
-  `server` 或 `route`；解析失败的名字被跳过。diff 也处理计数器 reset
-  （`current < previous` 时以 current 为 delta）。持久化遵循与 LLM stats 相同的
-  retention/prune 配置（`stats.retention`）。`POST /api/tokens/reset` 会同时清空
-  `mcpStats` 及其 flusher 基线。
+  flusher 通过 `WithMCPStats` 选项接入，每分钟对 `MCPStats.RawSnapshot()`/
+  `RawToolSnapshot()` 做 diff（`DiffMCP`/`DiffMCPTools`），由 `initStats()` 里的
+  config-backed kind 解析器把名字归类为 `server` 或 `route`；解析失败的名字被跳过。
+  diff 也处理计数器 reset（`current < previous` 时以 current 为 delta）。持久化遵循与
+  LLM stats 相同的 retention/prune 配置（`stats.retention`，prune/reset 同步覆盖两张
+  MCP 表）。`POST /api/tokens/reset` 会同时清空 `mcpStats` 及其 flusher 基线。
   - `/api/mcp`（Servers/Routes 标签）仍然只展示**进程生命周期**的内存计数——进程
     重启归零；
-  - `/api/mcp/analytics`（History 标签）读取 `mcp_buckets` 持久化聚合，跨重启保留。
+  - `/api/mcp/analytics`（Analytics 子标签）读取 `mcp_buckets`/`mcp_tool_buckets`
+    持久化聚合，跨重启保留。tool 维度从该能力加入起才开始累积，更早的历史没有
+    tool 行（UI 在窗口无 tool 行时回退到 server 级 series）。
   MCP 统计与 LLM `MetricsStore`/token 计数/agent 计数是**完全独立的管线**：不进入
   Status/Analytics 的 provider/model 维度，不参与等价成本计算，也不混入
   `minute_buckets`/`agent_buckets`。记录不依赖 `request_log` 开关。

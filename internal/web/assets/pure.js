@@ -3893,61 +3893,79 @@ export function shadowMatchBadge(rate) {
   return `<span class="badge ${cls}">${pct.toFixed(1)}%</span>`;
 }
 
-// ---------- MCP History sub-tab ----------
+// ---------- MCP Analytics sub-tab ----------
 
-// Granularity options for the MCP History view (API values are lowercase;
-// labels are Title Case per the design system).
-export const MCP_HISTORY_GRANULARITIES = [
-  { value: 'minute', label: 'Minute' },
-  { value: 'hour', label: 'Hour' },
-  { value: 'day', label: 'Day' },
-  { value: 'week', label: 'Week' },
-  { value: 'month', label: 'Month' },
-];
-
-// Metric switcher options for the MCP History trend chart.
-export const MCP_HISTORY_METRICS = [
+// Metric switcher options for the MCP Analytics trend chart. The granularity
+// switcher reuses ANALYTICS_GRAN_OPTIONS (the analyticsGranularity window
+// gating) — this MCP view intentionally shares that single implementation.
+export const MCP_ANALYTICS_METRICS = [
   { id: 'calls', label: 'Calls', axis: 'calls', gap: false },
   { id: 'errors', label: 'Errors', axis: 'errors', gap: false },
   { id: 'avg_ms', label: 'Avg ms', axis: 'ms', gap: true },
 ];
 
-// mcpHistoryMetricOptions returns the metric segment's option list for the
+// mcpAnalyticsMetricOptions returns the metric segment's option list for the
 // chart switcher. All three metrics are always available.
-export function mcpHistoryMetricOptions() {
-  return MCP_HISTORY_METRICS.map((m) => ({ value: m.id, label: m.label, disabled: false }));
+export function mcpAnalyticsMetricOptions() {
+  return MCP_ANALYTICS_METRICS.map((m) => ({ value: m.id, label: m.label, disabled: false }));
 }
 
-// mcpHistoryFilterSeries returns the subset of series matching the optional
-// kind ('server'/'route') and exact name filters.
-export function mcpHistoryFilterSeries(series, kind, name) {
+// mcpAnalyticsFilterSeries returns the subset of server-level series matching
+// the optional exact name filter. Servers and routes share one namespace and
+// are listed together in the Server filter.
+export function mcpAnalyticsFilterSeries(series, name) {
   return (series || []).filter((s) => {
-    if (kind && s.kind !== kind) return false;
     if (name && s.name !== name) return false;
     return true;
   });
 }
 
-// mcpHistorySummaryRows flattens each series' totals into a summary row,
-// sorted by calls descending then name ascending.
-export function mcpHistorySummaryRows(series) {
+// mcpAnalyticsToolFilter returns the subset of tool series for one exposed
+// name, optionally narrowed to a single exact tool. Name is required — tool
+// rows only make sense within one server's scope.
+export function mcpAnalyticsToolFilter(toolSeries, name, tool) {
+  return (toolSeries || []).filter((s) => {
+    if (!name || s.name !== name) return false;
+    if (tool && s.tool !== tool) return false;
+    return true;
+  });
+}
+
+// mcpAnalyticsSummaryGroups flattens the server-level series and the tool
+// series into the grouped summary shape: one entry per exposed name (sorted
+// calls desc, then name asc) carrying its totals plus a `tools` array of that
+// server's per-tool totals (sorted the same way, filtered by the optional
+// exact tool filter — a server with no matching tools is omitted entirely).
+export function mcpAnalyticsSummaryGroups(series, toolSeries, tool) {
   return (series || []).map((s) => {
     const t = s.totals || {};
+    const tools = (toolSeries || []).filter((ts) => ts.name === s.name && (!tool || ts.tool === tool))
+      .map((ts) => {
+        const tt = ts.totals || {};
+        return {
+          tool: ts.tool || '',
+          calls: Number(tt.calls) || 0,
+          errors: Number(tt.errors) || 0,
+          avgLatencyMs: Number(tt.avg_latency_ms) || 0,
+          lastCallAt: Number(tt.last_call_at) || 0,
+        };
+      }).sort((a, b) => (b.calls - a.calls) || a.tool.localeCompare(b.tool));
+    if (tool && !tools.length) return null;
     return {
-      kind: s.kind || '',
       name: s.name || '',
       calls: Number(t.calls) || 0,
       errors: Number(t.errors) || 0,
       avgLatencyMs: Number(t.avg_latency_ms) || 0,
       lastCallAt: Number(t.last_call_at) || 0,
+      tools,
     };
-  }).sort((a, b) => (b.calls - a.calls) || a.name.localeCompare(b.name));
+  }).filter(Boolean).sort((a, b) => (b.calls - a.calls) || a.name.localeCompare(b.name));
 }
 
-// mcpHistoryPointValue reads one metric from an /api/mcp/analytics point.
+// mcpAnalyticsPointValue reads one metric from an /api/mcp/analytics point.
 // avg_ms is a gap metric: it is meaningless without traffic, so it returns null
 // when the bucket has no calls (uPlot draws a gap instead of a zero).
-export function mcpHistoryPointValue(p, kind) {
+export function mcpAnalyticsPointValue(p, kind) {
   if (!p) return null;
   switch (kind) {
     case 'calls': return Number(p.calls || 0);
@@ -3957,77 +3975,79 @@ export function mcpHistoryPointValue(p, kind) {
   }
 }
 
-// mcpHistoryChartSeries turns /api/mcp/analytics `series` into the arrays
+// mcpAnalyticsChartSeries turns /api/mcp/analytics series into the arrays
 // uPlot needs: x is the sorted union of bucket timestamps in unix SECONDS and,
 // when the caller passes xGrid, the queried window grid. Count metrics
 // (calls/errors) zero-fill empty buckets; avg_ms draws a gap where there is no
 // traffic. Returns {x, ys, labels}.
-export function mcpHistoryChartSeries(series, kind, xGrid) {
+export function mcpAnalyticsChartSeries(series, kind, xGrid) {
   const list = Array.isArray(series) ? series : [];
   const dataX = list.flatMap((s) => (s.points || []).map((p) => Number(p.ts) || 0));
   const x = [...new Set((Array.isArray(xGrid) && xGrid.length ? xGrid : []).concat(dataX))].sort((a, b) => a - b);
   const labels = [];
   const ys = [];
-  const metric = MCP_HISTORY_METRICS.find((m) => m.id === kind);
+  const metric = MCP_ANALYTICS_METRICS.find((m) => m.id === kind);
   const zeroFill = metric ? !metric.gap : false;
   for (const s of list) {
     labels.push(s.name || '');
     const by = Object.fromEntries((s.points || []).map((p) => [Number(p.ts) || 0, p]));
     ys.push(x.map((t) => {
-      const v = mcpHistoryPointValue(by[t], kind);
+      const v = mcpAnalyticsPointValue(by[t], kind);
       return v == null && zeroFill ? 0 : v;
     }));
   }
   return { x, ys, labels };
 }
 
-// mcpHistoryValueText renders one MCP History metric value for display (chart
-// tooltip, legend). Counts use fmtCompact; avg_ms rounds to ms.
-export function mcpHistoryValueText(metricId, v) {
+// mcpAnalyticsValueText renders one MCP Analytics metric value for display
+// (chart tooltip, legend). Counts use fmtCompact; avg_ms rounds to ms.
+export function mcpAnalyticsValueText(metricId, v) {
   if (v == null || !isFinite(v)) return '—';
   if (metricId === 'avg_ms') return Math.round(v) + 'ms';
   return fmtCompact(v);
 }
 
-// mcpHistorySummaryTableHTML renders the History summary table. Rows carry the
-// same shape produced by mcpHistorySummaryRows; opts.formatTime converts the
-// last-call timestamp into display text. A colgroup pins the fixed layout:
-// Kind and the numeric columns get fixed small widths; Name takes the flexible
-// remainder. Long names clip with ellipsis and expose full text via title.
-export function mcpHistorySummaryTableHTML(rows, opts = {}) {
-  if (!rows || !rows.length) return '';
+// mcpAnalyticsSummaryTableHTML renders the grouped summary table in the Status
+// Agents-card form: one bold parent row per exposed name with its overall
+// totals, indented child rows beneath for each of that server's tools.
+// opts.formatTime converts the last-call timestamp into display text. A
+// colgroup pins the fixed layout: the name column takes the flexible remainder;
+// numeric columns get fixed small widths. Long names clip with ellipsis and
+// expose full text via title.
+export function mcpAnalyticsSummaryTableHTML(groups, opts = {}) {
+  if (!groups || !groups.length) return '';
   const fmtTime = opts.formatTime || ((ts) => ts ? String(ts) : '—');
-  const cols = '<colgroup>' + ['80px', 'auto', '70px', '70px', '80px', '130px'].map((w) => `<col style="width:${w}"/>`).join('') + '</colgroup>';
-  const body = rows.map((r) => `<tr>
-    <td><span class="badge muted">${esc(r.kind)}</span></td>
-    <td class="mcp-clip" title="${esc(r.name)}">${esc(r.name)}</td>
-    <td class="num">${fmtNum(r.calls)}</td>
+  const cell = (label, title) => `<td class="mcp-clip" title="${esc(title != null ? title : label)}">${esc(label)}</td>`;
+  const nums = (r) => `<td class="num">${fmtNum(r.calls)}</td>
     <td class="num">${fmtNum(r.errors)}</td>
     <td class="num">${r.avgLatencyMs ? fmtNum(Math.round(r.avgLatencyMs)) + 'ms' : '—'}</td>
-    <td class="num">${esc(fmtTime(r.lastCallAt))}</td>
-  </tr>`).join('');
+    <td class="num">${esc(fmtTime(r.lastCallAt))}</td>`;
+  const cols = '<colgroup>' + ['auto', '70px', '80px', '68px', '130px'].map((w) => `<col style="width:${w}"/>`).join('') + '</colgroup>';
+  const body = groups.map((g) => `<tr class="agent-summary">${cell(g.name)}${nums(g)}</tr>` +
+    g.tools.map((t) => `<tr class="agent-model">${cell(t.tool)}${nums(t)}</tr>`).join('')
+  ).join('');
   return `<table class="table">${cols}
-    <thead><tr><th>Kind</th><th>Name</th><th class="num">Calls</th><th class="num">Errors</th><th class="num">Avg ms</th><th class="num">Last Call</th></tr></thead>
+    <thead><tr><th>Server / Tool</th><th class="num">Calls</th><th class="num">Errors</th><th class="num">Avg ms</th><th class="num">Last Call</th></tr></thead>
     <tbody>${body}</tbody>
   </table>`;
 }
 
-// mcpHistoryEmptyHTML is the History empty-state hint.
-export function mcpHistoryEmptyHTML() {
+// mcpAnalyticsEmptyHTML is the Analytics empty-state hint.
+export function mcpAnalyticsEmptyHTML() {
   return '<span class="hint">No MCP calls in the selected range.</span>';
 }
 
-// mcpHistorySkeletonHTML is the History first-load placeholder.
-export function mcpHistorySkeletonHTML() {
+// mcpAnalyticsSkeletonHTML is the Analytics first-load placeholder.
+export function mcpAnalyticsSkeletonHTML() {
   return '<span class="hint">loading…</span>';
 }
 
 // ---------- MCP tab URL hash state ----------
 
 // VALID_MCP_SUB_TABS lists the canonical MCP sub-tab segment values. The hash
-// form is #mcp/<sub> (servers, routes, history); an empty/invalid sub falls
+// form is #mcp/<sub> (servers, routes, analytics); an empty/invalid sub falls
 // back to the caller's default (usually localStorage or 'servers').
-export const VALID_MCP_SUB_TABS = ['servers', 'routes', 'history'];
+export const VALID_MCP_SUB_TABS = ['servers', 'routes', 'analytics'];
 
 // mcpSubTabFromHash validates an MCP sub-tab hash segment. Returns the
 // canonical sub-tab id when valid, or '' when empty/invalid so the caller can

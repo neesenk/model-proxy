@@ -183,3 +183,172 @@ func DiffMCP(
 	}
 	return deltas
 }
+
+// MCPToolBucketDelta is one (name, tool, minute) delta produced by the stats
+// flusher. The tool name is the client-facing one (canonical for route
+// exchanges); kind is resolved from the exposed name exactly like DiffMCP.
+type MCPToolBucketDelta struct {
+	Name         string
+	Tool         string
+	Kind         MCPKind
+	Calls        uint64
+	Errors       uint64
+	LatencyMsSum uint64
+	LastCallAt   int64
+}
+
+// MCPToolBucketRow is one aggregated (name, tool) bucket returned by
+// QueryMCPToolBuckets.
+type MCPToolBucketRow struct {
+	Name         string  `json:"name"`
+	Tool         string  `json:"tool"`
+	Kind         string  `json:"kind"`
+	Bucket       int64   `json:"bucket"`
+	Calls        uint64  `json:"calls"`
+	Errors       uint64  `json:"errors"`
+	LatencyMsSum uint64  `json:"latency_ms_sum"`
+	LastCallAt   int64   `json:"last_call_at"`
+	AvgLatencyMs float64 `json:"avg_latency_ms"`
+}
+
+// FlushMCPToolBuckets upserts per-(name, tool) MCP deltas into one minute
+// bucket.
+func (s *Store) FlushMCPToolBuckets(minute int64, deltas []MCPToolBucketDelta) error {
+	return s.FlushMCPToolBucketsContext(context.Background(), minute, deltas)
+}
+
+// FlushMCPToolBucketsContext is FlushMCPToolBuckets with cancellation for
+// lifecycle-bounded writes.
+func (s *Store) FlushMCPToolBucketsContext(
+	ctx context.Context,
+	minute int64,
+	deltas []MCPToolBucketDelta,
+) error {
+	if len(deltas) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO mcp_tool_buckets
+		(name, tool, kind, minute, calls, errors, latency_ms_sum, last_call_at)
+		VALUES (?,?,?,?,?,?,?,?)
+		ON CONFLICT(name, tool, minute) DO UPDATE SET
+			calls = calls + excluded.calls,
+			errors = errors + excluded.errors,
+			latency_ms_sum = latency_ms_sum + excluded.latency_ms_sum,
+			last_call_at = MAX(last_call_at, excluded.last_call_at)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, d := range deltas {
+		if _, err := stmt.ExecContext(
+			ctx,
+			d.Name,
+			d.Tool,
+			string(d.Kind),
+			minute,
+			d.Calls,
+			d.Errors,
+			d.LatencyMsSum,
+			d.LastCallAt,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// QueryMCPToolBuckets returns calendar-aligned (name, tool) aggregates over
+// mcp_tool_buckets for the inclusive [from, to] range. granularity matches the
+// local-time bucketing used by QueryMCPBuckets.
+func (s *Store) QueryMCPToolBuckets(from, to int64, granularity string) ([]MCPToolBucketRow, error) {
+	return s.QueryMCPToolBucketsContext(context.Background(), from, to, granularity)
+}
+
+// QueryMCPToolBucketsContext is QueryMCPToolBuckets with cancellation support.
+func (s *Store) QueryMCPToolBucketsContext(
+	ctx context.Context,
+	from, to int64,
+	granularity string,
+) ([]MCPToolBucketRow, error) {
+	labelExpr, labelArgs, layout, err := analyticsBucketing(granularity)
+	if err != nil {
+		return nil, err
+	}
+
+	query := `SELECT name, tool, kind,
+		` + labelExpr + ` AS d,
+		SUM(calls), SUM(errors), SUM(latency_ms_sum), MAX(last_call_at)
+		FROM mcp_tool_buckets WHERE minute >= ? AND minute <= ?`
+	args := append([]any{}, labelArgs...)
+	args = append(args, from, to)
+	query += ` GROUP BY name, tool, ` + labelExpr + ` ORDER BY name, tool, d`
+	args = append(args, labelArgs...)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var buckets []MCPToolBucketRow
+	for rows.Next() {
+		var (
+			row  MCPToolBucketRow
+			date string
+		)
+		if err := rows.Scan(
+			&row.Name,
+			&row.Tool,
+			&row.Kind,
+			&date,
+			&row.Calls,
+			&row.Errors,
+			&row.LatencyMsSum,
+			&row.LastCallAt,
+		); err != nil {
+			return nil, err
+		}
+		row.Bucket = localCalendarStart(date, layout, granularity)
+		row.AvgLatencyMs = averageMilliseconds(row.LatencyMsSum, row.Calls)
+		buckets = append(buckets, row)
+	}
+	return buckets, rows.Err()
+}
+
+// DiffMCPTools turns two cumulative (name, tool) snapshots into deltas. Names
+// whose kind cannot be resolved are skipped; LastCallAt is carried as the
+// cumulative current value (Store merges it with MAX).
+func DiffMCPTools(
+	current, previous map[obscounters.MCPToolKey]obscounters.MCPStatRaw,
+	kind func(string) (MCPKind, bool),
+) []MCPToolBucketDelta {
+	deltas := []MCPToolBucketDelta{}
+	for key, cur := range current {
+		k, ok := kind(key.Name)
+		if !ok {
+			continue
+		}
+		prev := previous[key]
+		delta := MCPToolBucketDelta{
+			Name:         key.Name,
+			Tool:         key.Tool,
+			Kind:         k,
+			Calls:        mcpDeltaField(cur.Calls, prev.Calls),
+			Errors:       mcpDeltaField(cur.Errors, prev.Errors),
+			LatencyMsSum: mcpDeltaField(cur.LatencySum, prev.LatencySum),
+			LastCallAt:   cur.LastCallAt,
+		}
+		if delta.Calls == 0 && delta.Errors == 0 && delta.LatencyMsSum == 0 {
+			continue
+		}
+		deltas = append(deltas, delta)
+	}
+	return deltas
+}

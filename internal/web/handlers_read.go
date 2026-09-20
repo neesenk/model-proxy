@@ -95,12 +95,20 @@ func (s *Server) handleMCPSurface(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleMCPAnalytics serves GET /api/mcp/analytics: persisted MCP usage
-// buckets grouped by (kind, name). Defaults match /api/analytics (window =
-// last 30 days, granularity = day). Invalid granularity/kind are 400s; a
-// disabled stats store or store error is fail-closed with a clear message.
+// buckets grouped by exposed name, plus the per-tool dimension in
+// tool_series. Defaults match /api/analytics (window = last 30 days,
+// granularity = day); from=0 clamps to the oldest persisted bucket so the
+// UI's all-time anchor matches the real window. Invalid granularity is a
+// 400; a disabled stats store or store error is fail-closed with a clear
+// message.
 func (s *Server) handleMCPAnalytics(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	from, to := statsWindow(q, 30*24*time.Hour)
+	if from == 0 {
+		if earliest := s.reads.StatsSince(); earliest > 0 {
+			from = earliest
+		}
+	}
 	g := q.Get("granularity")
 	if g == "" {
 		g = "day"
@@ -111,17 +119,12 @@ func (s *Server) handleMCPAnalytics(w http.ResponseWriter, r *http.Request) {
 		writeJSONErr(w, http.StatusBadRequest, "granularity must be minute, hour, day, week or month")
 		return
 	}
-	kind := q.Get("kind")
-	if kind != "" && kind != "server" && kind != "route" {
-		writeJSONErr(w, http.StatusBadRequest, "kind must be server or route")
-		return
-	}
 	result, err := s.reads.MCPAnalytics(appapi.MCPAnalyticsQuery{
 		From:        from,
 		To:          to,
 		Granularity: g,
 		Name:        q.Get("name"),
-		Kind:        kind,
+		Tool:        q.Get("tool"),
 	})
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "mcp analytics query: "+err.Error())

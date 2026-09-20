@@ -330,28 +330,42 @@ func (p *Proxy) adminPorts(
 			}
 			return names
 		},
-		MCPAnalytics: func(from, to int64, granularity, name, kind string) ([]observestats.MCPBucketRow, error) {
+		MCPAnalytics: func(from, to int64, granularity, name, tool string) ([]observestats.MCPBucketRow, []observestats.MCPToolBucketRow, error) {
 			if p.stats == nil {
-				return nil, errors.New("MCP stats store is not available")
+				return nil, nil, errors.New("MCP stats store is not available")
 			}
 			rows, err := p.stats.QueryMCPBuckets(from, to, granularity)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
-			if name == "" && kind == "" {
-				return rows, nil
-			}
-			filtered := make([]observestats.MCPBucketRow, 0, len(rows))
-			for _, r := range rows {
-				if name != "" && r.Name != name {
-					continue
+			if name != "" {
+				filtered := make([]observestats.MCPBucketRow, 0, len(rows))
+				for _, r := range rows {
+					if r.Name != name {
+						continue
+					}
+					filtered = append(filtered, r)
 				}
-				if kind != "" && r.Kind != kind {
-					continue
-				}
-				filtered = append(filtered, r)
+				rows = filtered
 			}
-			return filtered, nil
+			toolRows, err := p.stats.QueryMCPToolBuckets(from, to, granularity)
+			if err != nil {
+				return nil, nil, err
+			}
+			if name != "" || tool != "" {
+				filtered := make([]observestats.MCPToolBucketRow, 0, len(toolRows))
+				for _, r := range toolRows {
+					if name != "" && r.Name != name {
+						continue
+					}
+					if tool != "" && r.Tool != tool {
+						continue
+					}
+					filtered = append(filtered, r)
+				}
+				toolRows = filtered
+			}
+			return rows, toolRows, nil
 		},
 		FusionSnapshot: func(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
 			return p.fusionReg.Snapshot(workflow, now)

@@ -79,6 +79,24 @@ test('the Analytics 30s tick gates at entry and at commit time', () => {
   assert.ok(stop.includes('cancelAutoRefreshHold'), 'stopping analytics auto-refresh must drop the pending hold refresh');
 });
 
+test('the MCP Analytics 30s tick gates at entry and at commit time', () => {
+  const body = fnBody(appJs, 'loadMCPAnalytics');
+  assert.ok(count(body, 'deferAutoRefresh(panel') >= 2,
+    'loadMCPAnalytics must gate the entry fetch and the post-fetch landing writes');
+  assert.ok(count(body, 'mcpAnalyticsMaybeAutoRefresh()') >= 2,
+    'the failure paths must re-arm the live-window timer (it would otherwise die)');
+  const arm = fnBody(appJs, 'mcpAnalyticsMaybeAutoRefresh');
+  assert.ok(count(arm, 'deferAutoRefresh(panel') >= 1, 'the interval tick must pass through the gate');
+  assert.ok(arm.includes("classList.contains('active')"), 'the MCP tick must no-op off-tab');
+  assert.ok(arm.includes('#mcp-analytics-view'), 'the MCP tick must no-op off the analytics sub-tab');
+  const stop = fnBody(appJs, 'mcpAnalyticsStopAutoRefresh');
+  assert.ok(stop.includes('cancelAutoRefreshHold'), 'stopping MCP analytics auto-refresh must drop the pending hold refresh');
+  // Sub-tab switching owns the ticker: leaving stops it, entering re-arms it.
+  const show = fnBody(appJs, 'mcpShowSubTab');
+  assert.ok(show.includes('mcpAnalyticsStopAutoRefresh();'), 'leaving the analytics sub-tab must stop the ticker');
+  assert.ok(show.includes('mcpAnalyticsMaybeAutoRefresh();'), 'entering the analytics sub-tab must arm the ticker');
+});
+
 test('the Security and Accounts 30s ticks gate, guard and stop cleanly', () => {
   // Security: interval tick passes through the gate and only while active.
   const sec = fnBody(appJs, 'securityMaybeAutoRefresh');

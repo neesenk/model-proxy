@@ -111,7 +111,20 @@ func (s *Store) migrate() error {
 		last_call_at INTEGER DEFAULT 0,
 		PRIMARY KEY (name, kind, minute)
 	);
-	CREATE INDEX IF NOT EXISTS idx_mcp_minute ON mcp_buckets(minute);`)
+	CREATE INDEX IF NOT EXISTS idx_mcp_minute ON mcp_buckets(minute);
+
+	CREATE TABLE IF NOT EXISTS mcp_tool_buckets (
+		name TEXT NOT NULL,
+		tool TEXT NOT NULL,
+		kind TEXT NOT NULL,
+		minute INTEGER NOT NULL,
+		calls INTEGER DEFAULT 0,
+		errors INTEGER DEFAULT 0,
+		latency_ms_sum INTEGER DEFAULT 0,
+		last_call_at INTEGER DEFAULT 0,
+		PRIMARY KEY (name, tool, minute)
+	);
+	CREATE INDEX IF NOT EXISTS idx_mcp_tool_minute ON mcp_tool_buckets(minute);`)
 	if err != nil {
 		return fmt.Errorf("migrate stats schema: %w", err)
 	}
@@ -357,6 +370,13 @@ func (s *Store) PruneContext(ctx context.Context, now time.Time) error {
 	); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM mcp_tool_buckets WHERE minute < ?`,
+		cutoff,
+	); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -374,6 +394,9 @@ func (s *Store) Reset() error {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM mcp_buckets`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM mcp_tool_buckets`); err != nil {
 		return err
 	}
 	return tx.Commit()

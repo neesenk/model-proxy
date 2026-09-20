@@ -43,9 +43,9 @@ takeoverRunSummary, takeoverRestoreSummary, takeoverVariantLabel,
   highlightYAML, highlightTOML, highlightEnv, highlightConfig,
   takeoverFamilyGroups, takeoverFamilyBadge, TAKEOVER_TEMPLATE_EXAMPLES, TAKEOVER_PLACEHOLDERS,
   shadowMatchBadge,
-  MCP_HISTORY_GRANULARITIES, MCP_HISTORY_METRICS, mcpHistoryFilterSeries, mcpHistorySummaryRows,
-  mcpHistoryChartSeries, mcpHistoryMetricOptions, mcpHistoryPointValue, mcpHistoryValueText,
-  mcpHistorySummaryTableHTML, mcpHistoryEmptyHTML, mcpHistorySkeletonHTML,
+  MCP_ANALYTICS_METRICS, mcpAnalyticsFilterSeries, mcpAnalyticsToolFilter, mcpAnalyticsSummaryGroups,
+  mcpAnalyticsChartSeries, mcpAnalyticsMetricOptions, mcpAnalyticsPointValue, mcpAnalyticsValueText,
+  mcpAnalyticsSummaryTableHTML, mcpAnalyticsEmptyHTML, mcpAnalyticsSkeletonHTML,
   VALID_MCP_SUB_TABS, mcpSubTabFromHash, mcpHash,
 } from '../assets/pure.js';
 
@@ -3303,126 +3303,164 @@ test('takeoverClientLabel renders family names, not variant ids', () => {
   assert.equal(takeoverClientLabel(null), '');
 });
 
-// ---------- MCP History helpers ----------
+// ---------- MCP Analytics helpers ----------
 
-test('MCP_HISTORY_GRANULARITIES lists minute through month with Title Case labels', () => {
-  assert.deepEqual(MCP_HISTORY_GRANULARITIES.map((g) => g.value), ['minute', 'hour', 'day', 'week', 'month']);
-  assert.ok(MCP_HISTORY_GRANULARITIES.every((g) => g.label[0] >= 'A' && g.label[0] <= 'Z'));
+test('MCP_ANALYTICS_METRICS lists calls/errors/avg_ms', () => {
+  assert.deepEqual(MCP_ANALYTICS_METRICS.map((m) => m.id), ['calls', 'errors', 'avg_ms']);
+  assert.ok(MCP_ANALYTICS_METRICS.every((m) => m.label && m.axis));
 });
 
-test('MCP_HISTORY_METRICS lists calls/errors/avg_ms', () => {
-  assert.deepEqual(MCP_HISTORY_METRICS.map((m) => m.id), ['calls', 'errors', 'avg_ms']);
-  assert.ok(MCP_HISTORY_METRICS.every((m) => m.label && m.axis));
-});
-
-test('mcpHistoryMetricOptions exposes the three metrics', () => {
-  const opts = mcpHistoryMetricOptions();
+test('mcpAnalyticsMetricOptions exposes the three metrics', () => {
+  const opts = mcpAnalyticsMetricOptions();
   assert.deepEqual(opts.map((o) => o.value), ['calls', 'errors', 'avg_ms']);
   assert.ok(opts.every((o) => !o.disabled));
 });
 
-test('mcpHistoryFilterSeries filters by kind and exact name', () => {
+test('mcpAnalyticsFilterSeries filters by exact server name only', () => {
   const series = [
-    { kind: 'server', name: 's1' },
-    { kind: 'server', name: 's2' },
-    { kind: 'route', name: 'r1' },
+    { name: 's1' },
+    { name: 's2' },
+    { name: 'r1' },
   ];
-  assert.equal(mcpHistoryFilterSeries(series, 'server', '').length, 2);
-  assert.equal(mcpHistoryFilterSeries(series, '', 's2').length, 1);
-  assert.equal(mcpHistoryFilterSeries(series, 'route', 'r1').length, 1);
-  assert.equal(mcpHistoryFilterSeries(series, 'server', 'r1').length, 0);
-  assert.equal(mcpHistoryFilterSeries(null, '', '').length, 0);
+  assert.equal(mcpAnalyticsFilterSeries(series, '').length, 3);
+  assert.equal(mcpAnalyticsFilterSeries(series, 's2').length, 1);
+  assert.equal(mcpAnalyticsFilterSeries(series, 'missing').length, 0);
+  assert.equal(mcpAnalyticsFilterSeries(null, '').length, 0);
 });
 
-test('mcpHistorySummaryRows aggregates totals and sorts by calls desc', () => {
+test('mcpAnalyticsToolFilter requires the server and matches the tool exactly', () => {
+  const toolSeries = [
+    { name: 's1', tool: 'search' },
+    { name: 's1', tool: 'fetch' },
+    { name: 's2', tool: 'search' },
+  ];
+  assert.equal(mcpAnalyticsToolFilter(toolSeries, 's1', '').length, 2);
+  assert.equal(mcpAnalyticsToolFilter(toolSeries, 's1', 'fetch').length, 1);
+  assert.equal(mcpAnalyticsToolFilter(toolSeries, 's1', 'missing').length, 0);
+  assert.equal(mcpAnalyticsToolFilter(toolSeries, '', 'search').length, 0);
+  assert.equal(mcpAnalyticsToolFilter(null, 's1', '').length, 0);
+});
+
+test('mcpAnalyticsSummaryGroups groups tools under servers sorted by calls desc', () => {
   const series = [
-    { kind: 'server', name: 'b', totals: { calls: 5, errors: 1, avg_latency_ms: 100, last_call_at: 200 } },
-    { kind: 'route', name: 'a', totals: { calls: 12, errors: 3, avg_latency_ms: 50, last_call_at: 100 } },
+    { name: 'b', totals: { calls: 5, errors: 1, avg_latency_ms: 100, last_call_at: 200 } },
+    { name: 'a', totals: { calls: 12, errors: 3, avg_latency_ms: 50, last_call_at: 100 } },
   ];
-  const rows = mcpHistorySummaryRows(series);
-  assert.deepEqual(rows.map((r) => r.name), ['a', 'b']);
-  assert.deepEqual(rows[0], { kind: 'route', name: 'a', calls: 12, errors: 3, avgLatencyMs: 50, lastCallAt: 100 });
+  const toolSeries = [
+    { name: 'b', tool: 'x', totals: { calls: 4, errors: 1, avg_latency_ms: 80, last_call_at: 150 } },
+    { name: 'b', tool: 'y', totals: { calls: 1, errors: 0, avg_latency_ms: 120, last_call_at: 200 } },
+    { name: 'a', tool: 'z', totals: { calls: 12, errors: 3, avg_latency_ms: 50, last_call_at: 100 } },
+  ];
+  const groups = mcpAnalyticsSummaryGroups(series, toolSeries, '');
+  assert.deepEqual(groups.map((g) => g.name), ['a', 'b']);
+  assert.deepEqual(groups[0], { name: 'a', calls: 12, errors: 3, avgLatencyMs: 50, lastCallAt: 100, tools: [
+    { tool: 'z', calls: 12, errors: 3, avgLatencyMs: 50, lastCallAt: 100 },
+  ] });
+  assert.deepEqual(groups[1].tools.map((t) => t.tool), ['x', 'y']);
 });
 
-test('mcpHistorySummaryRows tolerates missing totals', () => {
-  const rows = mcpHistorySummaryRows([{ kind: 'server', name: 'x' }]);
-  assert.deepEqual(rows[0], { kind: 'server', name: 'x', calls: 0, errors: 0, avgLatencyMs: 0, lastCallAt: 0 });
+test('mcpAnalyticsSummaryGroups tool filter drops servers without the tool', () => {
+  const series = [
+    { name: 'a', totals: { calls: 12 } },
+    { name: 'b', totals: { calls: 5 } },
+  ];
+  const toolSeries = [
+    { name: 'a', tool: 'search', totals: { calls: 12 } },
+    { name: 'b', tool: 'fetch', totals: { calls: 5 } },
+  ];
+  const groups = mcpAnalyticsSummaryGroups(series, toolSeries, 'search');
+  assert.deepEqual(groups.map((g) => g.name), ['a']);
+  assert.equal(groups[0].tools.length, 1);
+  // Tool rows that exist for a name missing from `series` are ignored.
+  const orphan = mcpAnalyticsSummaryGroups([{ name: 'a', totals: { calls: 1 } }], toolSeries, '');
+  assert.equal(orphan.length, 1);
+  assert.equal(orphan[0].tools.length, 1);
 });
 
-test('mcpHistoryPointValue reads calls/errors/avg_ms', () => {
-  assert.equal(mcpHistoryPointValue({ ts: 1, calls: 5, errors: 1, avg_latency_ms: 100 }, 'calls'), 5);
-  assert.equal(mcpHistoryPointValue({ ts: 1, calls: 5, errors: 1, avg_latency_ms: 100 }, 'errors'), 1);
-  assert.equal(mcpHistoryPointValue({ ts: 1, calls: 5, errors: 1, avg_latency_ms: 100 }, 'avg_ms'), 100);
-  assert.equal(mcpHistoryPointValue({ ts: 1, calls: 0, errors: 0, avg_latency_ms: 100 }, 'avg_ms'), null);
-  assert.equal(mcpHistoryPointValue(null, 'calls'), null);
+test('mcpAnalyticsSummaryGroups tolerates missing totals', () => {
+  const groups = mcpAnalyticsSummaryGroups([{ name: 'x' }], null, '');
+  assert.deepEqual(groups[0], { name: 'x', calls: 0, errors: 0, avgLatencyMs: 0, lastCallAt: 0, tools: [] });
 });
 
-test('mcpHistoryChartSeries builds x/ys/labels for uPlot', () => {
+test('mcpAnalyticsPointValue reads calls/errors/avg_ms', () => {
+  assert.equal(mcpAnalyticsPointValue({ ts: 1, calls: 5, errors: 1, avg_latency_ms: 100 }, 'calls'), 5);
+  assert.equal(mcpAnalyticsPointValue({ ts: 1, calls: 5, errors: 1, avg_latency_ms: 100 }, 'errors'), 1);
+  assert.equal(mcpAnalyticsPointValue({ ts: 1, calls: 5, errors: 1, avg_latency_ms: 100 }, 'avg_ms'), 100);
+  assert.equal(mcpAnalyticsPointValue({ ts: 1, calls: 0, errors: 0, avg_latency_ms: 100 }, 'avg_ms'), null);
+  assert.equal(mcpAnalyticsPointValue(null, 'calls'), null);
+});
+
+test('mcpAnalyticsChartSeries builds x/ys/labels for uPlot', () => {
   const series = [
     { name: 's1', points: [{ ts: 10, calls: 3, errors: 1, avg_latency_ms: 100 }, { ts: 20, calls: 2, errors: 0, avg_latency_ms: 50 }] },
     { name: 's2', points: [{ ts: 10, calls: 1, errors: 0, avg_latency_ms: 80 }] },
   ];
-  const data = mcpHistoryChartSeries(series, 'calls', [5, 10, 15, 20]);
+  const data = mcpAnalyticsChartSeries(series, 'calls', [5, 10, 15, 20]);
   assert.deepEqual(data.x, [5, 10, 15, 20]);
   assert.deepEqual(data.labels, ['s1', 's2']);
   assert.deepEqual(data.ys[0], [0, 3, 0, 2]);
   assert.deepEqual(data.ys[1], [0, 1, 0, 0]);
 });
 
-test('mcpHistoryChartSeries gaps avg_ms for buckets with no calls', () => {
+test('mcpAnalyticsChartSeries gaps avg_ms for buckets with no calls', () => {
   const series = [
     { name: 's1', points: [{ ts: 10, calls: 3, errors: 1, avg_latency_ms: 100 }, { ts: 20, calls: 0, errors: 0, avg_latency_ms: 50 }] },
   ];
-  const data = mcpHistoryChartSeries(series, 'avg_ms', [10, 20]);
+  const data = mcpAnalyticsChartSeries(series, 'avg_ms', [10, 20]);
   assert.deepEqual(data.ys[0], [100, null]);
 });
 
-test('mcpHistoryChartSeries returns empty for empty input', () => {
-  const data = mcpHistoryChartSeries([], 'calls');
+test('mcpAnalyticsChartSeries returns empty for empty input', () => {
+  const data = mcpAnalyticsChartSeries([], 'calls');
   assert.deepEqual(data.x, []);
   assert.deepEqual(data.ys, []);
   assert.deepEqual(data.labels, []);
 });
 
-test('mcpHistoryValueText formats counts and avg_ms', () => {
-  assert.equal(mcpHistoryValueText('calls', 1234), '1.2K');
-  assert.equal(mcpHistoryValueText('errors', 7), '7');
-  assert.equal(mcpHistoryValueText('avg_ms', 123.7), '124ms');
-  assert.equal(mcpHistoryValueText('calls', null), '—');
+test('mcpAnalyticsValueText formats counts and avg_ms', () => {
+  assert.equal(mcpAnalyticsValueText('calls', 1234), '1.2K');
+  assert.equal(mcpAnalyticsValueText('errors', 7), '7');
+  assert.equal(mcpAnalyticsValueText('avg_ms', 123.7), '124ms');
+  assert.equal(mcpAnalyticsValueText('calls', null), '—');
 });
 
-test('mcpHistorySummaryTableHTML renders a fixed-layout table with escaped values', () => {
-  const rows = [{ kind: 'server', name: '<x>', calls: 5, errors: 1, avgLatencyMs: 100, lastCallAt: 0 }];
-  const html = mcpHistorySummaryTableHTML(rows, { formatTime: () => 'never' });
+test('mcpAnalyticsSummaryTableHTML renders grouped parent/child rows', () => {
+  const groups = [{
+    name: '<srv>', calls: 5, errors: 1, avgLatencyMs: 100, lastCallAt: 200,
+    tools: [{ tool: 'a<b', calls: 3, errors: 1, avgLatencyMs: 90, lastCallAt: 100 }],
+  }];
+  const html = mcpAnalyticsSummaryTableHTML(groups, { formatTime: () => 'never' });
   assert.match(html, /<table class="table">/);
   assert.match(html, /<colgroup>/);
-  assert.match(html, /<span class="badge muted">server<\/span>/);
-  assert.match(html, /<td class="mcp-clip" title="&lt;x&gt;">/);
-  assert.ok(!html.includes('<x>'));
-  assert.ok(html.includes('&lt;x&gt;'));
+  assert.match(html, /<th>Server \/ Tool<\/th>/);
+  assert.match(html, /<tr class="agent-summary"><td class="mcp-clip" title="&lt;srv&gt;">&lt;srv&gt;<\/td>/);
+  assert.match(html, /<tr class="agent-model"><td class="mcp-clip" title="a&lt;b">a&lt;b<\/td>/);
+  assert.ok(!html.includes('<srv>'));
+  assert.ok(!html.includes('a<b>'));
   assert.match(html, /never/);
 });
 
-test('mcpHistorySummaryTableHTML returns empty for empty rows', () => {
-  assert.equal(mcpHistorySummaryTableHTML([]), '');
-  assert.equal(mcpHistorySummaryTableHTML(null), '');
+test('mcpAnalyticsSummaryTableHTML returns empty for empty groups', () => {
+  assert.equal(mcpAnalyticsSummaryTableHTML([]), '');
+  assert.equal(mcpAnalyticsSummaryTableHTML(null), '');
 });
 
-test('mcpHistoryEmptyHTML and mcpHistorySkeletonHTML are hint placeholders', () => {
-  assert.ok(mcpHistoryEmptyHTML().includes('No MCP calls'));
-  assert.ok(mcpHistorySkeletonHTML().includes('loading'));
+test('mcpAnalyticsEmptyHTML and mcpAnalyticsSkeletonHTML are hint placeholders', () => {
+  assert.ok(mcpAnalyticsEmptyHTML().includes('No MCP calls'));
+  assert.ok(mcpAnalyticsSkeletonHTML().includes('loading'));
 });
 
 // ---------- MCP tab hash helpers ----------
 
 test('VALID_MCP_SUB_TABS enumerates the three sub-tabs', () => {
-  assert.deepEqual(VALID_MCP_SUB_TABS, ['servers', 'routes', 'history']);
+  assert.deepEqual(VALID_MCP_SUB_TABS, ['servers', 'routes', 'analytics']);
 });
 
 test('mcpSubTabFromHash returns canonical sub-tabs, empty for unknown/missing', () => {
   assert.equal(mcpSubTabFromHash('servers'), 'servers');
   assert.equal(mcpSubTabFromHash('routes'), 'routes');
-  assert.equal(mcpSubTabFromHash('history'), 'history');
+  assert.equal(mcpSubTabFromHash('analytics'), 'analytics');
+  assert.equal(mcpSubTabFromHash('history'), '');
   assert.equal(mcpSubTabFromHash(''), '');
   assert.equal(mcpSubTabFromHash('bogus'), '');
   assert.equal(mcpSubTabFromHash(null), '');
@@ -3432,7 +3470,8 @@ test('mcpSubTabFromHash returns canonical sub-tabs, empty for unknown/missing', 
 test('mcpHash builds #mcp/<sub> for valid sub-tabs and bare #mcp otherwise', () => {
   assert.equal(mcpHash('servers'), '#mcp/servers');
   assert.equal(mcpHash('routes'), '#mcp/routes');
-  assert.equal(mcpHash('history'), '#mcp/history');
+  assert.equal(mcpHash('analytics'), '#mcp/analytics');
+  assert.equal(mcpHash('history'), '#mcp');
   assert.equal(mcpHash(''), '#mcp');
   assert.equal(mcpHash('bogus'), '#mcp');
   assert.equal(mcpHash(null), '#mcp');

@@ -201,7 +201,7 @@ test('#id selectors are page-host structural anchors only', () => {
   const ANCHORS = new Set([
     'tab-config', 'sec-rules-body',
     'req-table', 'live-table', 'live-session-panel', 'confirm-challenge',
-    'req-session', 'req-provider', 'req-model', 'acc-msg',
+    'req-session', 'acc-msg',
   ]);
   const stripped = stripCssComments(css).replace(/url\([^)]*\)/g, (m) => m.replace(/[^\n]/g, ' '));
   const isHex = (t) => /^[0-9a-fA-F]{3}$/.test(t) || /^[0-9a-fA-F]{6}$/.test(t) || /^[0-9a-fA-F]{8}$/.test(t);
