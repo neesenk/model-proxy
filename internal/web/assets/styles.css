@@ -1555,7 +1555,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
   box-shadow: var(--shadow-3);
 }
 .tr-popover[hidden] { display: none; }
-.tr-presets { display: grid; gap: 2px; align-content: start; min-width: 120px; }
+.tr-presets { display: grid; gap: 2px; align-content: start; min-width: 150px; }
 .tr-preset {
   display: flex;
   align-items: center;
@@ -1569,6 +1569,10 @@ input[type="checkbox"] { accent-color: var(--accent); }
   color: var(--text);
   font-size: 0.8125rem;
   cursor: pointer;
+  /* Preset labels are single-line by contract ("Quota Window" is the
+     longest); nowrap lets the column auto-size to the longest label so rem
+     scaling can never re-introduce wrapping. */
+  white-space: nowrap;
 }
 .tr-preset:hover { background: var(--surface-2); }
 .tr-preset.active { color: var(--accent-ink); font-weight: 600; }
