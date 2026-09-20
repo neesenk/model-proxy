@@ -1160,17 +1160,19 @@ details.cat-match .table { margin-top: 8px; }
 .req-controls > label { height: 34px; }
 .req-controls > label { display: inline-flex; align-items: center; gap: 4px; }
 
-/* v2 Requests toolbar widths — sized to hold the WHOLE filter row on one
-   line at default resolutions (agent + session + provider + model + shadow
-   + errors + refresh ≈ the card width after the 210px sidebar): the session
-   select drops the old full-id 16–26rem box for an 11–14rem box (long ids
-   ellipsize in the closed box; the OS popup still shows the full id, and the
-   title tooltip carries it), and the provider/model combo inputs tighten to
-   7rem (they filter by prefix — a typed name fits). Scoped to this toolbar
-   only (Security/Live rows keep the .req-input defaults). */
-.req-controls #req-session { min-width: 11rem; max-width: 14rem; }
-.req-controls #req-provider,
-.req-controls #req-model { width: 7rem; max-width: 7rem; }
+/* v2 Requests toolbar widths — the whole filter row holds on ONE line at
+   default resolutions (agent + session + provider + model + errors +
+   refresh ≈ the ~928px card width left by the 210px sidebar): the session
+   select is a fixed 11rem box (long ids ellipsize in the closed box; the OS
+   popup still shows the full id, and the title tooltip carries it), and the
+   provider/model combos flex to absorb whatever the container has left
+   (floored at their 7rem prefix-filter width, capped at 12rem so ultrawide
+   windows don't stretch them silly). Narrower windows still wrap gracefully
+   (flex-wrap on the container). Scoped to this toolbar only (Security/Live
+   rows keep the .req-input defaults). */
+.req-controls #req-session { width: 11rem; }
+.req-controls .combo { flex: 1 1 7rem; min-width: 0; max-width: 12rem; }
+.req-controls .combo > .req-input { width: 100%; max-width: none; }
 
 /* Searchable combobox dropdown. */
 .combo { position: relative; display: inline-flex; }
