@@ -40,7 +40,7 @@ import {
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
-  detailFetchState, quotaErrKind, accountUsageState,
+  detailFetchState, CLIENT_GONE_STATUS, notLoggedHint, quotaErrKind, accountUsageState,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML,
   SECURITY_RANGES, securityRangeFromSecs, securityFilterQuery, securityFilterFromQuery, explainCacheKey,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
@@ -361,7 +361,7 @@ function normalizeRequestsHash(p) {
   const q = { ...p.query };
   delete q.stream;
   const qs = new URLSearchParams(q).toString();
-  setHash('#requests/' + requestsViewKey(stream, view) + (qs ? '?' + qs : ''), false);
+  mirrorHash('#requests/' + requestsViewKey(stream, view) + (qs ? '?' + qs : ''));
   return parseHash();
 }
 
@@ -404,10 +404,12 @@ function securityHash() {
   return '#security' + (q ? '?' + q : '');
 }
 
-// updateSecurityHash mirrors filter changes into the URL (replaceState, like
-// updateRequestsHash — in-tab refinement must not spam history).
-function updateSecurityHash() {
-  if (activeTab === 'security') setHash(securityHash(), false);
+// updateSecurityHash mirrors filter changes into the URL. Filter picks are
+// navigation (push — Back steps back through filter states inside the tab,
+// never exits it); the hashchange/boot echo path passes no argument and
+// replaces (the hash already reflects the target).
+function updateSecurityHash(push) {
+  if (activeTab === 'security') setHash(securityHash(), !!push);
 }
 
 // updateRequestsHash mirrors filter changes into the URL. replaceState by
@@ -453,6 +455,20 @@ function setHash(hash, push) {
     location.hash = hash;
   }
 }
+
+// navHash/mirrorHash are the UI framework's hash-write contract — every hash
+// write goes through one of them (setHash above stays the primitive):
+// - navHash: a user-visible view change (tab entry, sub-tab, provider,
+//   section, filter selection, session drill) — PUSHES a history entry so
+//   Back walks back through the app's views instead of exiting the tab early.
+// - mirrorHash: programmatic mirroring of state that is ALREADY applied
+//   (canonical rewrites of legacy hashes, hashchange/boot echoes, mount-time
+//   sync, refresh-button read-backs) — replaces in place and must never run
+//   for a user action.
+// Rule of thumb: if a click made the URL change, it goes through navHash; if
+// the app caught up with a change that happened elsewhere, mirrorHash.
+function navHash(hash) { setHash(hash, true); }
+function mirrorHash(hash) { setHash(hash, false); }
 
 function tabHash(tab) {
   return '#' + tab;
@@ -510,14 +526,17 @@ function activateTab(name) {
   if (name === 'eval') renderEvalTab();
   if (name === 'security') renderSecurityTab();
   // Reflect the tab in the URL. A tab switch is a navigation the user may want
-  // to Back out of, so push a history entry. Accounts adds its provider segment
-  // in selectProvider (replaceState - same tab, finer-grained). Status includes
-  // its active section so a refresh lands on the same view.
-  if (name === 'status') setHash(statusHash(), true);
-  else if (name === 'requests') setHash(requestsHash(), true);
-  else if (name === 'security') setHash(securityHash(), true);
-  else if (name === 'mcp') setHash(mcpHash(mcpSubTabState()), true);
-  else if (name !== 'accounts') setHash(tabHash(name), true);
+  // to Back out of, so push a history entry. Accounts used to skip this
+  // (its provider segment was replaceState) — excluding it meant Back from a
+  // pushed provider entry skipped past the whole tab; entering any tab now
+  // pushes its bare entry. Providers add their segment on top in
+  // selectProvider (also a push). Status includes its active section so a
+  // refresh lands on the same view.
+  if (name === 'status') navHash(statusHash());
+  else if (name === 'requests') navHash(requestsHash());
+  else if (name === 'security') navHash(securityHash());
+  else if (name === 'mcp') navHash(mcpHash(mcpSubTabState()));
+  else navHash(tabHash(name));
 }
 
 for (const b of tabBtns) {
@@ -533,10 +552,15 @@ function handleHashChange() {
   const reqView = tab === 'requests' ? requestsViewFromKey(sub) : null;
   // Requests filter/drill seeding does NOT happen here — the router owns it
   // (mountLogPage/applyLogQuery seed the target page's slice; seeding here
-  // would pollute the PREVIOUS page's filters on a cross-page step). Same
-  // for the Security filter (its first mount templates the selects from it).
+  // would pollute the PREVIOUS page's filters on a cross-page step). The
+  // Security filter follows the same split, with one addition: a NULL seed
+  // (a bare #security — Back to the unfiltered tab) RESETS the filter —
+  // retaining it would strand the controls on a hash that no longer carries
+  // them.
   const secSeed = tab === 'security' ? securityFilterFromQuery(query) : null;
-  if (secSeed) securityFilter = secSeed;
+  if (tab === 'security') {
+    securityFilter = secSeed || { kind: '', verdict: '', range: 'all', rule: '' };
+  }
   const switched = tab !== activeTab;
   if (switched) {
     activateTabSilent(tab);
@@ -553,7 +577,7 @@ function handleHashChange() {
     const q = new URLSearchParams();
     if (query.session) q.set('session', query.session);
     const qs = q.toString();
-    setHash('#requests/' + requestsViewKey(stream, 'live') + (qs ? '?' + qs : ''), false);
+    mirrorHash('#requests/' + requestsViewKey(stream, 'live') + (qs ? '?' + qs : ''));
     handleHashChange();
     return;
   }
@@ -595,11 +619,15 @@ function handleHashChange() {
       scheduleFormRestoreGuard();
     }
   }
-  if (tab === 'security' && secSeed) {
+  if (tab === 'security') {
     // Mirror image of the requests branch: after a switch the tab render
     // already ran through the seeded filter; without one (an in-tab hash
-    // edit / leaderboard drill) sync the controls and reload in place.
+    // edit / leaderboard drill / Back to the bare tab) sync the controls
+    // and reload in place — the filter was reset above when the hash went
+    // bare, so the controls and the feed must follow it down.
     syncSecurityControls();
+    syncRuleSel();
+    scheduleFormRestoreGuard();
     if (!switched && document.getElementById('sec-table')) {
       loadSecurity();
       renderSecurityFeed();
@@ -857,7 +885,7 @@ async function applyRequestDrill() {
   const close = document.getElementById('req-drill-close');
   if (close) close.onclick = () => {
     requestDrill = null;
-    setHash(requestsHash(), false);
+    mirrorHash(requestsHash());
     applyRequestDrill();
   };
   host.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -966,8 +994,8 @@ function navigateRequestsPageInner(page, opts) {
     hostLive.innerHTML = '';
     renderLiveCard(hostLive, query);
   }
-  if (o.push) setHash(requestsHash(), true);
-  else if (activeTab === 'requests' && parseHash().tab === 'requests') setHash(requestsHash(), false);
+  if (o.push) navHash(requestsHash());
+  else if (activeTab === 'requests' && parseHash().tab === 'requests') mirrorHash(requestsHash());
 }
 
 // reenterRequestsPage is the retained-shell tab re-entry hook: refresh the
@@ -1099,22 +1127,36 @@ function mountLogPage(page, query) {
 // deferred re-apply lands after the restore window and wins.
 function scheduleFormRestoreGuard() {
   const page = activeRequestsPageKey;
+  const tab = activeTab;
   const deadline = performance.now() + 4000;
   const tick = () => {
-    if (activeRequestsPageKey !== page || performance.now() > deadline) return;
-    const pageInfo = REQUESTS_PAGES[page];
-    if (pageInfo && pageInfo.view === 'log') {
-      const st = logPageState[page];
-      if (st) {
-        const sel = document.getElementById('req-session');
-        if (sel && sel.value !== st.filters.session) sel.value = st.filters.session;
-        const agent = document.getElementById('req-agent');
-        if (agent && agent.value !== st.filters.agent) agent.value = st.filters.agent;
+    if (activeTab !== tab || performance.now() > deadline) return;
+    if (tab === 'requests') {
+      if (activeRequestsPageKey !== page) return;
+      const pageInfo = REQUESTS_PAGES[page];
+      if (pageInfo && pageInfo.view === 'log') {
+        const st = logPageState[page];
+        if (st) {
+          const sel = document.getElementById('req-session');
+          if (sel && sel.value !== st.filters.session) sel.value = st.filters.session;
+          const agent = document.getElementById('req-agent');
+          if (agent && agent.value !== st.filters.agent) agent.value = st.filters.agent;
+        }
+      } else {
+        const S = livePageState[page];
+        const sel = document.getElementById('live-session');
+        if (S && sel && sel.value !== S.session) sel.value = S.session;
       }
-    } else {
-      const S = livePageState[page];
-      const sel = document.getElementById('live-session');
-      if (S && sel && sel.value !== S.session) sel.value = S.session;
+    } else if (tab === 'security') {
+      // Chrome's same-document form restore rolls an interacted select back
+      // to the pushed entry's snapshot on Back (no JS events) — re-assert
+      // the security filter's values the same way.
+      const k = document.getElementById('sec-kind');
+      if (k && k.value !== securityFilter.kind) k.value = securityFilter.kind;
+      const v = document.getElementById('sec-verdict');
+      if (v && v.value !== securityFilter.verdict) v.value = securityFilter.verdict;
+      const r = document.getElementById('sec-range');
+      if (r && r.value !== securityFilter.range) r.value = securityFilter.range;
     }
     window.setTimeout(tick, 100);
   };
@@ -2712,7 +2754,7 @@ function syncSecurityRuleChip() {
 // mid-gesture, between the two clicks.
 function setSecurityRule(rule) {
   securityFilter.rule = rule || '';
-  updateSecurityHash();
+  updateSecurityHash(true);
   renderSecurityFeed();
   syncRuleSel();
 }
@@ -3005,7 +3047,7 @@ async function renderSecurityTab() {
     securityFilter.kind = document.getElementById('sec-kind').value;
     securityFilter.range = document.getElementById('sec-range').value;
     securityLimit = 100;
-    updateSecurityHash();
+    updateSecurityHash(true);
     loadSecurity();
   };
   document.getElementById('sec-refresh').onclick = () => refreshSecurityData();
@@ -3013,7 +3055,7 @@ async function renderSecurityTab() {
   document.getElementById('sec-range').onchange = reloadAudit;
   document.getElementById('sec-verdict').onchange = () => {
     securityFilter.verdict = document.getElementById('sec-verdict').value;
-    updateSecurityHash();
+    updateSecurityHash(true);
     renderSecurityFeed();
   };
   const unblockAll = document.getElementById('sec-unblock-all');
@@ -3621,7 +3663,7 @@ function onLiveSessionChange(value) {
   // navigation (push) — Back must return to the ring view, not skip past
   // the Requests tab. setHash is a no-op when the hash already matches
   // (boot/hashchange apply paths), so no loop and no duplicate entries.
-  if (activeTab === 'requests' && activeRequestsPage().view === 'live') setHash(requestsHash(), true);
+  if (activeTab === 'requests' && activeRequestsPage().view === 'live') navHash(requestsHash());
   S.records = [];
   S.agg = null;
   S.error = '';
@@ -4284,6 +4326,14 @@ function applyLiveEvent(e) {
     row.cacheRead = e.cache_read || 0;
     row.cacheCreation = e.cache_creation || 0;
     row.inFlight = false;
+    // A client-gone terminal (499) never writes a request-log record — the
+    // pipeline published this end event INSTEAD of committing — so the detail
+    // popover must not fetch /api/requests/<id>: pre-mark not-logged here.
+    // shouldFetchDetail is terminal on it, and openLiveDetailPop keeps the
+    // mark on explicit re-open (there is nothing to retry into).
+    if (e.status === CLIENT_GONE_STATUS) {
+      liveDetailState.set(e.request_id, { loading: false, error: '', notLogged: true });
+    }
     return;
   }
   if (e.type === 'progress') {
@@ -4686,7 +4736,7 @@ function liveDetailHTML(r) {
     return html;
   }
   if (state.notLogged) {
-    html += '<div class="msg hint">not logged — the request did not commit, so there is no request-log record</div>';
+    html += `<div class="msg hint">${esc(notLoggedHint(r.status))}</div>`;
     return html;
   }
   if (state.error) {
@@ -4835,9 +4885,13 @@ function openLiveDetailPop(id) {
   const row = liveRowById(id);
   if (!row) return;
   liveDetailPopId = id;
-  // Re-opening after a fetch error clears it so the fetch is retried.
+  // Re-opening after a fetch error clears it so the fetch is retried. A
+  // client-gone terminal is not a retryable miss — its record can never
+  // exist — so the not-logged mark stays.
   const state = liveDetailState.get(id) || {};
-  if (state.error || state.notLogged) liveDetailState.set(id, { ...state, error: '', notLogged: false });
+  if ((state.error || state.notLogged) && row.status !== CLIENT_GONE_STATUS) {
+    liveDetailState.set(id, { ...state, error: '', notLogged: false });
+  }
   const dialog = ensureLiveDetailPop();
   fillLiveDetailPop(dialog, row);
   if (!dialog.open) dialog.showModal();
@@ -4885,8 +4939,9 @@ async function fetchLiveDetail(id) {
   let recs = [];
   try {
     // requestDetailURL carries the page's stream hint: an MCP id is never
-    // in the requests index, and the hint-less URL makes the backend scan
-    // the whole requests directory (seconds on a real log).
+    // in the requests index, and the hint-less URL pays the requests
+    // stream's fallback tail scan before the split-stream fallthrough
+    // (the hint routes the split stream directly).
     const resp = await apiGet(requestDetailURL(id));
     recs = resp.records || [];
   } catch (e) {
@@ -5229,7 +5284,7 @@ function renderStatusSection(key) {
 function selectStatusSection(name, push = true) {
   if (!STATUS_SECTIONS.some((s) => s.key === name)) name = 'schedule';
   selectStatusSectionSilent(name);
-  if (push) setHash(statusHash(), true);
+  if (push) navHash(statusHash());
 }
 
 // selectStatusSectionSilent renders without touching the hash (used by the
@@ -8223,9 +8278,9 @@ async function refreshAccountUsage(btn, p) {
     const st = await apiGet('/api/status').catch(() => null);
     if (st && st.quota) accountsQuota = st.quota;
     // Re-render the detail pane with the fresh snapshot (keeps the same
-    // provider selected; selectProvider re-wires the buttons with a fresh,
+    // provider selected; the mirror re-wires the buttons with a fresh,
     // enabled Refresh button - so no manual reset is needed on success).
-    selectProvider(accountsSelectedProvider);
+    selectProviderMirror(accountsSelectedProvider);
   } catch (e) {
     // On failure the pane was NOT re-rendered, so reset the clicked button.
     btn.disabled = false;
@@ -8365,7 +8420,17 @@ function renderAccountsNav(providers) {
   if (!accountsSelectedProvider || !sorted.some((p) => p.name === accountsSelectedProvider)) {
     accountsSelectedProvider = sorted[0].name;
   }
-  selectProvider(accountsSelectedProvider);
+  // Programmatic default/re-render selection — mirror, don't push (only a
+  // user click on a provider item is navigation).
+  selectProviderMirror(accountsSelectedProvider);
+}
+
+// selectProviderMirror is the programmatic twin of selectProvider (initial
+// default selection, quota-refresh re-render): the selection is already the
+// app's own follow-up state, so the hash mirrors in place.
+function selectProviderMirror(name) {
+  selectProviderSilent(name);
+  if (name && activeTab === 'accounts') mirrorHash('#accounts/' + encodeURIComponent(name));
 }
 
 // selectProvider highlights the sidebar item and renders that provider's
@@ -8375,7 +8440,10 @@ function renderAccountsNav(providers) {
 // (#accounts/<provider>) so a refresh lands on the same provider.
 function selectProvider(name) {
   selectProviderSilent(name);
-  if (name) setHash('#accounts/' + encodeURIComponent(name), false);
+  // Provider picks are navigation: Back returns to the previous provider
+  // (or the provider-less list). The hashchange listener applies the sub via
+  // selectProviderSilent without pushing.
+  if (name) navHash('#accounts/' + encodeURIComponent(name));
 }
 
 // selectProviderSilent renders without touching the hash (used by the hashchange
@@ -10169,7 +10237,7 @@ async function boot() {
     const q = new URLSearchParams();
     if (bootQuery.session) q.set('session', bootQuery.session);
     const qs = q.toString();
-    setHash('#requests/' + requestsViewKey(stream, 'live') + (qs ? '?' + qs : ''), false);
+    mirrorHash('#requests/' + requestsViewKey(stream, 'live') + (qs ? '?' + qs : ''));
     ({ tab: bootTab, sub: bootSub, query: bootQuery } = parseHash());
   }
   // Canonicalize legacy requests shapes (bare #requests, #requests/live,
@@ -10330,7 +10398,9 @@ function renderMCPInto() {
       const next = btn.dataset.mcpTab;
       if (next === mcpSubTabState()) return;
       mcpSubTabSave(next);
-      setHash(mcpHash(next), false);
+      // Sub-tab clicks are navigation: Back returns to the previous sub-tab
+      // (the hashchange listener applies mcpSubTabFromHash without pushing).
+      navHash(mcpHash(next));
       mcpShowSubTab(host, next);
       if (next === 'history' && !mcpHistoryData && !mcpHistoryLoading) loadMCPHistory(host);
     };

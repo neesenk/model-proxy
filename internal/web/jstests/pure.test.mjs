@@ -30,6 +30,7 @@ import {
   liveSessionOrder, shortSessionId,
   fmtCompact,
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
+  CLIENT_GONE_STATUS, notLoggedHint,
   quotaErrKind, accountUsageState,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
   securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML, SECURITY_RANGES, securityRangeFromSecs,
@@ -1519,6 +1520,20 @@ test('detailFetchState treats a 404 as an expected unlogged request', () => {
   assert.deepEqual(detailFetchState(404, 'no record for request id x'), { loading: false, error: '', notLogged: true });
   assert.deepEqual(detailFetchState(500, 'boom'), { loading: false, error: 'boom' });
   assert.deepEqual(detailFetchState(0, undefined), { loading: false, error: 'load failed' });
+});
+
+test('notLoggedHint names the client-gone terminal, stays generic otherwise', () => {
+  // The client-gone terminal (live status 499) never has a record — the
+  // pipeline publishes the end event instead of committing — and the Live
+  // popover marks it not-logged without fetching; the hint names the cause.
+  assert.equal(CLIENT_GONE_STATUS, 499);
+  assert.equal(notLoggedHint(499), 'client cancelled before commit — no request-log record');
+  // Every other unlogged terminal (a fetch that 404'd, e.g. an unrouted
+  // 502) keeps the generic wording, including absent/unknown status.
+  const generic = 'not logged — the request did not commit, so there is no request-log record';
+  assert.equal(notLoggedHint(502), generic);
+  assert.equal(notLoggedHint(undefined), generic);
+  assert.equal(notLoggedHint(0), generic);
 });
 
 
@@ -3382,7 +3397,7 @@ test('mcpHistorySummaryTableHTML renders a fixed-layout table with escaped value
   assert.match(html, /<table class="table">/);
   assert.match(html, /<colgroup>/);
   assert.match(html, /<span class="badge muted">server<\/span>/);
-  assert.match(html, /<td class="mono" title="&lt;x&gt;">/);
+  assert.match(html, /<td class="mcp-clip" title="&lt;x&gt;">/);
   assert.ok(!html.includes('<x>'));
   assert.ok(html.includes('&lt;x&gt;'));
   assert.match(html, /never/);

@@ -1587,3 +1587,108 @@ test('MCP Live 会话下拉不受跨流在途 /api/sessions 迟到响应污染 (
   }
   assert.deepEqual(await ctx.pageErrors(), [], '在途防护不得有 JS 错误');
 });
+
+// UI 框架的 hash 契约：用户动作导致的 URL 变化必须 push 浏览器历史
+//（navHash），Back 在应用内逐级回退而不是提前退出 tab；程序性镜像
+//（canonical 重写/hashchange 回写）才允许 replace（mirrorHash）。本测试
+// 钉住三个此前漏掉的写入点：MCP 子标签、Security 过滤器、Accounts
+// provider 选择。
+test('MCP 子标签 / Security 过滤 / Accounts provider 选择进浏览器历史，Back 逐级回退 (导航族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // The E2E serve has no mcp: config — feed /api/mcp a minimal server+route
+  // surface so the sub-tab sidebar renders.
+  await ctx.ev(`(() => {
+    window.__origFetch = window.fetch;
+    window.fetch = (url, ...rest) => {
+      if (String(url).endsWith('/api/mcp')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          servers: [{ name: 'nav-mcp-srv', enabled: true, transport: 'stdio', sessions: 0, calls: 0, errors: 0, avg_latency_ms: 0 }],
+          routes: [{ name: 'nav-mcp-route', enabled: true, targets: [], sessions: 0, calls: 0, errors: 0, avg_latency_ms: 0 }],
+        }), { headers: { 'content-type': 'application/json' } }));
+      }
+      return window.__origFetch(url, ...rest);
+    };
+  })()`);
+  try {
+  // A previous run may have left the last sub-tab in localStorage — entering
+  // the tab would restore it into the hash, so start from the bare default.
+  await ctx.ev(`localStorage.removeItem('mcp-tab')`);
+  // --- MCP sub-tab: routes click pushes; Back returns to servers ---
+  await ctx.ev(`document.querySelector('[data-tab="mcp"]').click()`);
+  await ctx.waitFor('mcp tab active', () => ctx.ev(
+    `document.getElementById('tab-mcp') && document.getElementById('tab-mcp').classList.contains('active')`));
+  await ctx.waitFor('mcp sub-tab buttons mounted', () => ctx.ev(
+    `!!document.querySelector('button[data-mcp-tab="routes"]')`));
+  await ctx.waitFor('mcp servers-entry hash', () => ctx.ev(`location.hash === '#mcp/servers'`));
+  await ctx.ev(`document.querySelector('button[data-mcp-tab="routes"]').click()`);
+  await ctx.waitFor('routes sub-tab hash pushed', () => ctx.ev(
+    `location.hash === '#mcp/routes'`), 8000);
+  await ctx.waitFor('routes view visible', () => ctx.ev(
+    `!document.getElementById('mcp-routes-view').hidden`), 8000);
+  await ctx.ev(`history.back()`);
+  await ctx.waitFor('back returns to mcp servers', () => ctx.ev(`(() => {
+    if (location.hash !== '#mcp/servers') return false;
+    const v = document.getElementById('mcp-servers-view');
+    return !!v && !v.hidden;
+  })()`), 10000);
+  // --- Security filter: kind select pushes; Back resets the filter ---
+  await ctx.ev(`document.querySelector('[data-tab="security"]').click()`);
+  await ctx.waitFor('security tab active', () => ctx.ev(
+    `document.getElementById('tab-security').classList.contains('active')`));
+  await ctx.waitFor('sec-kind mounted', () => ctx.ev(
+    `!!document.getElementById('sec-kind') && document.getElementById('sec-kind').value === ''`), 8000);
+  await ctx.ev(`(() => {
+    const s = document.getElementById('sec-kind');
+    s.value = 'secret';
+    s.dispatchEvent(new Event('change'));
+  })()`);
+  await ctx.waitFor('kind filter hash pushed', () => ctx.ev(
+    `location.hash === '#security?kind=secret'`), 8000);
+  await ctx.ev(`history.back()`);
+  // Chrome's same-document form restore can roll the select back to the
+  // pushed snapshot (no JS events); the guard re-asserts the reset filter.
+  await ctx.waitFor('back returns to unfiltered security', () => ctx.ev(`(() => {
+    if (location.hash !== '#security') return false;
+    return document.getElementById('sec-kind').value === '';
+  })()`), 10000);
+  // --- Accounts provider: pick pushes; Back returns to the bare list ---
+  await ctx.ev(`document.querySelector('[data-tab="accounts"]').click()`);
+  await ctx.waitFor('accounts tab active', () => ctx.ev(
+    `document.getElementById('tab-accounts').classList.contains('active')`));
+  await ctx.waitFor('provider nav mounted', () => ctx.ev(
+    `!!document.querySelector('.acct-nav button.acct-nav-item')`), 8000);
+  // Tab entry pushed the bare #accounts; the initial default-provider
+  // selection MIRRORS in place (programmatic, not a user action) — so the
+  // stack holds exactly one accounts entry so far.
+  await ctx.waitFor('default provider mirrored', () => ctx.ev(`(() => {
+    if (!location.hash.startsWith('#accounts/')) return false;
+    return !!document.querySelector('.acct-nav-item.active');
+  })()`), 8000);
+  const picked = await ctx.ev(`(() => {
+    const items = [...document.querySelectorAll('.acct-nav-item')];
+    const other = items.find((b) => !b.classList.contains('active'));
+    if (!other) return '';
+    other.click();
+    return other.dataset.provider;
+  })()`);
+  if (picked) {
+    await ctx.waitFor('provider hash pushed', () => ctx.ev(
+      `location.hash === '#accounts/' + encodeURIComponent(${JSON.stringify(picked)})`), 8000);
+    await ctx.ev(`history.back()`);
+    await ctx.waitFor('back returns to default provider', () => ctx.ev(`(() => {
+      if (location.hash !== '#accounts/dummy') return false;
+      return !!document.querySelector('.acct-nav-item.active');
+    })()`), 10000);
+  }
+  await ctx.ev(`history.back()`);
+  // The bare #accounts entry was MIRORRED into the default provider by the
+  // programmatic first selection (replaceState) — the user never saw that
+  // intermediate state, so it is correctly absent from history. The next
+  // Back steps out of the tab entirely.
+  await ctx.waitFor('back steps out of accounts tab', () => ctx.ev(
+    `location.hash === '#security'`), 10000);
+  assert.deepEqual(await ctx.pageErrors(), [], '导航契约不得有 JS 错误');
+  } finally {
+    await ctx.ev(`window.fetch = window.__origFetch; delete window.__origFetch;`);
+  }
+});

@@ -1669,6 +1669,25 @@ export function detailFetchState(status, message) {
   return { loading: false, error: message || 'load failed' };
 }
 
+// CLIENT_GONE_STATUS is the live end status for a request the CALLER abandoned
+// before any commit (the pipeline publishes the terminal event INSTEAD of
+// committing; see forward's statusClientGone). Such a request has no
+// request-log record and never will, so the Live detail popover marks it
+// not-logged up front instead of fetching /api/requests/<id> — a fetch that
+// can only miss.
+export const CLIENT_GONE_STATUS = 499;
+
+// notLoggedHint is the popover hint for a request with no request-log record.
+// The client-gone terminal names its cause; every other unlogged terminal (a
+// detail fetch that 404'd, e.g. an unrouted-model 502) keeps the generic
+// wording.
+export function notLoggedHint(status) {
+  if (status === CLIENT_GONE_STATUS) {
+    return 'client cancelled before commit — no request-log record';
+  }
+  return 'not logged — the request did not commit, so there is no request-log record';
+}
+
 // mergeLiveAndPersistedRow overlays a live event row onto a persisted request
 // summary row. Live wins for in-flight state, status, latency, provider, model,
 // and guard/progress; persisted fills missing agent and tokens (non-streaming
