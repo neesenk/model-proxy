@@ -9,8 +9,10 @@ import (
 // MCPStats is the MCP gateway's call counter: per exposed name (server or
 // route — they share one namespace) calls/errors/latency. In-memory and
 // process-lifetime like the hot metrics counters (restart resets), but
-// DELIBERATELY separate from MetricsStore: MCP exchanges carry no tokens and
-// must not pollute the LLM dashboards (Status/Analytics/stats.db).
+// DELIBERATELY separate from the LLM metrics pipeline: MCP exchanges carry no
+// tokens and must not pollute the provider/model dashboards (Status/Analytics
+// minute_buckets/agent_buckets). The per-minute flusher persists deltas to the
+// dedicated mcp_buckets table in stats.db.
 type MCPStats struct {
 	mu sync.Mutex // guards m only; increments are atomic after get-or-create
 	m  map[string]*mcpStatEntry
@@ -78,4 +80,43 @@ func (s *MCPStats) Snapshot() map[string]MCPStatSnapshot {
 		}
 	}
 	return out
+}
+
+// MCPStatRaw is the non-averaged counter totals used by the stats flusher.
+type MCPStatRaw struct {
+	Calls      uint64
+	Errors     uint64
+	LatencySum uint64
+	LastCallAt int64
+}
+
+// RawSnapshot returns per-name cumulative totals without averaging. This is the
+// durable-persistence view of the counter; Snapshot remains the dashboard view.
+func (s *MCPStats) RawSnapshot() map[string]MCPStatRaw {
+	if s == nil {
+		return map[string]MCPStatRaw{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]MCPStatRaw, len(s.m))
+	for name, e := range s.m {
+		out[name] = MCPStatRaw{
+			Calls:      e.calls.Load(),
+			Errors:     e.errors.Load(),
+			LatencySum: e.latencySum.Load(),
+			LastCallAt: e.lastCallAt.Load(),
+		}
+	}
+	return out
+}
+
+// Reset clears all per-name counters. It is used by the stats flusher's reset
+// path so the next diff baseline starts from zero.
+func (s *MCPStats) Reset() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m = map[string]*mcpStatEntry{}
 }

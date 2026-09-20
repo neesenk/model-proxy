@@ -174,7 +174,10 @@ PIDS=$(lsof -tiTCP:<PORT> -sTCP:LISTEN); [ -n "$PIDS" ] && kill -INT $PIDS; \
 ```
 
 SIGINT 触发上述优雅退出（drain + final flush）；端口按 config.yaml 的 `listen:` 替换
-（本仓开发机为 15722）。
+（本仓开发机为 15722）。注意脚本在按端口 SIGINT 之前会先停 pidfile 属主（daemon 的
+supervisor 或占 pidfile 的前台 serve，pidfile 由 config `log_file:` 派生、缺省
+`$TMPDIR/model-proxy.pid`）——只杀端口监听者对 daemon 模式只杀掉 worker，supervisor
+约 1 秒后就会重拉它抢回端口（见 `docs/engineering/pitfalls.md` #24b）。
 
 ### 性能剖析（可选）
 

@@ -94,6 +94,42 @@ func (s *Server) handleMCPSurface(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.reads.MCPSurface())
 }
 
+// handleMCPAnalytics serves GET /api/mcp/analytics: persisted MCP usage
+// buckets grouped by (kind, name). Defaults match /api/analytics (window =
+// last 30 days, granularity = day). Invalid granularity/kind are 400s; a
+// disabled stats store or store error is fail-closed with a clear message.
+func (s *Server) handleMCPAnalytics(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	from, to := statsWindow(q, 30*24*time.Hour)
+	g := q.Get("granularity")
+	if g == "" {
+		g = "day"
+	}
+	switch g {
+	case "minute", "hour", "day", "week", "month":
+	default:
+		writeJSONErr(w, http.StatusBadRequest, "granularity must be minute, hour, day, week or month")
+		return
+	}
+	kind := q.Get("kind")
+	if kind != "" && kind != "server" && kind != "route" {
+		writeJSONErr(w, http.StatusBadRequest, "kind must be server or route")
+		return
+	}
+	result, err := s.reads.MCPAnalytics(appapi.MCPAnalyticsQuery{
+		From:        from,
+		To:          to,
+		Granularity: g,
+		Name:        q.Get("name"),
+		Kind:        kind,
+	})
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, "mcp analytics query: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 // handleMCPTest runs the MCP handshake against one server (POST
 // /api/mcp/test {"name": "..."}). Unknown names are a client error; a failed
 // handshake is a 200 with ok:false (the UI renders the reason inline).

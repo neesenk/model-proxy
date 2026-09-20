@@ -29,12 +29,13 @@ type routeHit struct {
 // fakeRouteBackend is a per-target MCP server double for route tests.
 type fakeRouteBackend struct {
 	mu         sync.Mutex
-	sessionID  string // "" = stateless backend
-	protocol   string // protocolVersion to negotiate
-	tools      string // JSON array fragment of tool specs
-	callStatus int    // HTTP status for tools/call (default 200)
-	callBizErr bool   // answer tools/call with a JSON-RPC error over 200
-	down       bool   // refuse everything with 500
+	sessionID  string        // "" = stateless backend
+	protocol   string        // protocolVersion to negotiate
+	tools      string        // JSON array fragment of tool specs
+	callStatus int           // HTTP status for tools/call (default 200)
+	callBizErr bool          // answer tools/call with a JSON-RPC error over 200
+	down       bool          // refuse everything with 500
+	callDelay  time.Duration // artificial latency for tools/call
 	hits       []routeHit
 	deletes    int
 }
@@ -88,6 +89,9 @@ func (f *fakeRouteBackend) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":2,"result":{"tools":%s}}`, f.tools)
 	case "tools/call":
+		if f.callDelay > 0 {
+			time.Sleep(f.callDelay)
+		}
 		if callStatus != 0 && callStatus != 200 {
 			http.Error(w, "backend fault", callStatus)
 			return
@@ -515,5 +519,48 @@ func TestMCPRoute_AllCandidatesQuotaExhausted(t *testing.T) {
 	body = mustRead(resp)
 	if !strings.Contains(body, `-32602`) || !strings.Contains(body, "unknown tool") {
 		t.Fatalf("undeclared tool = %s, want -32602 unknown tool", body)
+	}
+}
+
+// TestMCPRoute_ToolsCallStatsCreditBackend: a successful routed tools/call
+// increments the route's own stats entry and ALSO credits the chosen backend
+// server, so the in-memory MCP stats reflect both the exposed name and the
+// real target.
+func TestMCPRoute_ToolsCallStatsCreditBackend(t *testing.T) {
+	zs, _, servers, routes := twoRouteBackends(t)
+	zs.callDelay = 10 * time.Millisecond
+	p, srv := newMCPRouteTestProxyP(t, []string{"k-A"}, servers, routes)
+
+	resp := mcpPost(t, srv.URL+"/mcp/web-search", "", routeInitBody)
+	sid := resp.Header.Get("Mcp-Session-Id")
+	resp.Body.Close()
+	mcpPost(t, srv.URL+"/mcp/web-search", sid, routeListBody).Body.Close()
+
+	before := p.mcpStats.Snapshot()
+	mcpPost(t, srv.URL+"/mcp/web-search", sid, routeCallBody("web_search")).Body.Close()
+	after := p.mcpStats.Snapshot()
+
+	routeBefore := before["web-search"]
+	routeAfter := after["web-search"]
+	if routeAfter.Calls != routeBefore.Calls+1 {
+		t.Fatalf("route calls %d -> %d, want +1", routeBefore.Calls, routeAfter.Calls)
+	}
+	if routeAfter.Errors != routeBefore.Errors {
+		t.Fatalf("route errors changed: %d -> %d", routeBefore.Errors, routeAfter.Errors)
+	}
+
+	zsStat := after["zs"]
+	if zsStat.Calls != 1 {
+		t.Fatalf("backend 'zs' calls = %d, want 1", zsStat.Calls)
+	}
+	if zsStat.Errors != 0 {
+		t.Fatalf("backend 'zs' errors = %d, want 0", zsStat.Errors)
+	}
+	if zsStat.AvgLatencyMs == 0 {
+		t.Fatalf("backend 'zs' avg_latency_ms unset")
+	}
+
+	if after["exa"].Calls != 0 {
+		t.Fatalf("unused backend 'exa' calls = %d, want 0", after["exa"].Calls)
 	}
 }

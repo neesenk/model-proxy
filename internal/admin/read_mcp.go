@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"net/http"
 	"sort"
 
 	"model-proxy/internal/appapi"
@@ -99,4 +100,79 @@ func (s *Service) MCPSurface() appapi.MCPSurface {
 	}
 	sort.Slice(out.Routes, func(i, j int) bool { return out.Routes[i].Name < out.Routes[j].Name })
 	return out
+}
+
+// MCPAnalytics projects persisted MCP usage buckets for the
+// /api/mcp/analytics endpoint. Kind is validated here so an unknown value is a
+// client error; the store's QueryMCPBuckets validates granularity.
+func (s *Service) MCPAnalytics(query appapi.MCPAnalyticsQuery) (appapi.MCPAnalyticsResult, error) {
+	result := appapi.MCPAnalyticsResult{
+		Granularity: query.Granularity,
+		From:        query.From,
+		To:          query.To,
+		Series:      []appapi.MCPAnalyticsSeries{},
+	}
+	if query.Kind != "" && query.Kind != "server" && query.Kind != "route" {
+		return result, appapi.NewHTTPError(http.StatusBadRequest, "kind must be server or route")
+	}
+	if s.ports.MCPAnalytics == nil {
+		return result, nil
+	}
+	rows, err := s.ports.MCPAnalytics(query.From, query.To, query.Granularity, query.Name, query.Kind)
+	if err != nil {
+		return result, err
+	}
+	// Group rows by (kind, name), preserving a stable encounter order.
+	type key struct{ kind, name string }
+	type group struct {
+		points []appapi.MCPAnalyticsPoint
+		calls  uint64
+		errors uint64
+		// latencyMsSum accumulates the bucket's raw latency sum for a precise
+		// calls-weighted series average.
+		latencyMsSum uint64
+		lastCallAt   int64
+	}
+	groups := map[key]*group{}
+	order := []key{}
+	for _, r := range rows {
+		k := key{kind: r.Kind, name: r.Name}
+		g, ok := groups[k]
+		if !ok {
+			g = &group{points: []appapi.MCPAnalyticsPoint{}}
+			groups[k] = g
+			order = append(order, k)
+		}
+		g.points = append(g.points, appapi.MCPAnalyticsPoint{
+			Ts:           r.Bucket,
+			Calls:        r.Calls,
+			Errors:       r.Errors,
+			AvgLatencyMs: r.AvgLatencyMs,
+		})
+		g.calls += r.Calls
+		g.errors += r.Errors
+		g.latencyMsSum += r.LatencyMsSum
+		if r.LastCallAt > g.lastCallAt {
+			g.lastCallAt = r.LastCallAt
+		}
+	}
+	for _, k := range order {
+		g := groups[k]
+		avgLatency := 0.0
+		if g.calls > 0 {
+			avgLatency = float64(g.latencyMsSum) / float64(g.calls)
+		}
+		result.Series = append(result.Series, appapi.MCPAnalyticsSeries{
+			Kind:   k.kind,
+			Name:   k.name,
+			Points: g.points,
+			Totals: appapi.MCPAnalyticsTotals{
+				Calls:        g.calls,
+				Errors:       g.errors,
+				AvgLatencyMs: avgLatency,
+				LastCallAt:   g.lastCallAt,
+			},
+		})
+	}
+	return result, nil
 }

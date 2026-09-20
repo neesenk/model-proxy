@@ -232,3 +232,6 @@ func (testCommandAPI) ProbeMCP(context.Context, string) (appapi.MCPProbeResult, 
 
 func (testReadAPI) Presets() []presets.Preset     { return nil }
 func (testReadAPI) MCPSurface() appapi.MCPSurface { return appapi.MCPSurface{} }
+func (testReadAPI) MCPAnalytics(appapi.MCPAnalyticsQuery) (appapi.MCPAnalyticsResult, error) {
+	return appapi.MCPAnalyticsResult{}, nil
+}

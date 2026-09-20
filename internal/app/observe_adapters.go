@@ -170,6 +170,19 @@ func (p *Proxy) statsFlushLoop(stop <-chan struct{}) {
 // initStats binds startup-only config to the long-lived Store via
 // internal/observe/stats.Bootstrap.
 func (p *Proxy) initStats(config configdomain.StatsConfig) {
+	mcpKind := func(name string) (observestats.MCPKind, bool) {
+		cfg := p.cfgSnapshot()
+		if cfg == nil {
+			return "", false
+		}
+		if _, ok := cfg.MCP[name]; ok {
+			return observestats.MCPKindServer, true
+		}
+		if _, ok := cfg.MCPRoutes[name]; ok {
+			return observestats.MCPKindRoute, true
+		}
+		return "", false
+	}
 	result := observestats.Bootstrap(
 		config.ResolvedDBPath(),
 		config.RetentionDuration(),
@@ -177,6 +190,7 @@ func (p *Proxy) initStats(config configdomain.StatsConfig) {
 		p.metrics,
 		p.tokens,
 		p.agents,
+		observestats.WithMCPStats(p.mcpStats, mcpKind),
 	)
 	p.stats = result.Store
 	p.flusher = result.Flusher

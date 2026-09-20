@@ -333,4 +333,18 @@ func TestMCPStats(t *testing.T) {
 	if len(s.Snapshot()) != 2 {
 		t.Fatalf("snapshot = %v", s.Snapshot())
 	}
+
+	raw := s.RawSnapshot()["web-search"]
+	if raw.Calls != 3 || raw.Errors != 1 || raw.LatencySum != 450 || raw.LastCallAt == 0 {
+		t.Errorf("raw snapshot = %+v, want calls=3 errors=1 latencySum=450", raw)
+	}
+	if len(nilStats.RawSnapshot()) != 0 {
+		t.Errorf("nil RawSnapshot = %v", nilStats.RawSnapshot())
+	}
+
+	s.Reset()
+	if len(s.RawSnapshot()) != 0 {
+		t.Errorf("after Reset: %v", s.RawSnapshot())
+	}
+	nilStats.Reset()
 }

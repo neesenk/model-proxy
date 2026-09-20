@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"model-proxy/internal/appapi"
 	configdomain "model-proxy/internal/config"
 	obscounters "model-proxy/internal/observe/counters"
@@ -847,6 +848,128 @@ func TestAPIAnalyticsUsesCatalogThenDetachedOverride(t *testing.T) {
 	}
 	if got := catalogRequests.Load(); got != 1 {
 		t.Errorf("catalog requests = %d, want one cached refresh", got)
+	}
+}
+
+// TestAPIMCPAnalyticsHandler pins the persisted MCP analytics endpoint:
+// bucketed reads, (kind, name) grouping, calls/errors totals, weighted-average
+// latency, last_call_at max, and name/kind filters. A disabled stats store
+// fails closed rather than returning empty buckets.
+func TestAPIMCPAnalyticsHandler(t *testing.T) {
+	p := &Proxy{
+		processServices: processServices{
+			metrics: obscounters.NewMetricsStore(),
+			stats:   newTestStatsStore(t),
+		},
+	}
+	base := time.Date(2026, 9, 20, 0, 0, 0, 0, time.Local).Unix()
+	// Seed two servers and one route across two hours so day aggregation folds
+	// them into one bucket per (kind, name).
+	if err := p.stats.FlushMCPBuckets(base, []observestats.MCPBucketDelta{
+		{Name: "web-search", Kind: observestats.MCPKindServer, Calls: 2, Errors: 1, LatencyMsSum: 200, LastCallAt: base + 10},
+		{Name: "exa", Kind: observestats.MCPKindServer, Calls: 3, Errors: 0, LatencyMsSum: 900, LastCallAt: base + 20},
+		{Name: "search-route", Kind: observestats.MCPKindRoute, Calls: 5, Errors: 2, LatencyMsSum: 1000, LastCallAt: base + 30},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.stats.FlushMCPBuckets(base+3600, []observestats.MCPBucketDelta{
+		{Name: "web-search", Kind: observestats.MCPKindServer, Calls: 4, Errors: 0, LatencyMsSum: 800, LastCallAt: base + 3700},
+		{Name: "exa", Kind: observestats.MCPKindServer, Calls: 1, Errors: 1, LatencyMsSum: 100, LastCallAt: base + 3800},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	w := NewWebServer(p, "test-config.yaml")
+	mux := http.NewServeMux()
+	w.Register(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(
+		http.MethodGet,
+		fmt.Sprintf("/api/mcp/analytics?from=%d&to=%d&granularity=day", base, base+7200),
+		nil,
+	))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got appapi.MCPAnalyticsResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, rec.Body.String())
+	}
+	if got.Granularity != "day" {
+		t.Errorf("granularity = %q, want day", got.Granularity)
+	}
+	byName := map[string]appapi.MCPAnalyticsSeries{}
+	for _, s := range got.Series {
+		byName[s.Name] = s
+	}
+	if len(byName) != 3 {
+		t.Fatalf("series = %+v", got.Series)
+	}
+	ws := byName["web-search"]
+	if ws.Kind != "server" || len(ws.Points) != 1 || ws.Points[0].Calls != 6 || ws.Points[0].Errors != 1 {
+		t.Errorf("web-search point = %+v", ws.Points)
+	}
+	// weighted avg = (200+800) / (2+4) = 166.666...
+	if ws.Totals.Calls != 6 || ws.Totals.Errors != 1 || math.Abs(ws.Totals.AvgLatencyMs-1000.0/6.0) > 1e-9 || ws.Totals.LastCallAt != base+3700 {
+		t.Errorf("web-search totals = %+v", ws.Totals)
+	}
+	exa := byName["exa"]
+	if exa.Kind != "server" || exa.Totals.Calls != 4 || exa.Totals.Errors != 1 || exa.Totals.LastCallAt != base+3800 {
+		t.Errorf("exa totals = %+v", exa.Totals)
+	}
+	rt := byName["search-route"]
+	if rt.Kind != "route" || rt.Totals.Calls != 5 || rt.Totals.Errors != 2 || rt.Totals.LastCallAt != base+30 {
+		t.Errorf("search-route totals = %+v", rt.Totals)
+	}
+
+	// Kind filter limits to servers.
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(
+		http.MethodGet,
+		fmt.Sprintf("/api/mcp/analytics?from=%d&to=%d&granularity=day&kind=server", base, base+7200),
+		nil,
+	))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("kind filter status=%d", rec.Code)
+	}
+	got = appapi.MCPAnalyticsResult{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range got.Series {
+		if s.Kind != "server" {
+			t.Errorf("kind filter leaked route: %+v", s)
+		}
+	}
+
+	// Name filter isolates one server.
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(
+		http.MethodGet,
+		fmt.Sprintf("/api/mcp/analytics?from=%d&to=%d&granularity=day&name=web-search", base, base+7200),
+		nil,
+	))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("name filter status=%d", rec.Code)
+	}
+	got = appapi.MCPAnalyticsResult{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Series) != 1 || got.Series[0].Name != "web-search" {
+		t.Errorf("name filter series = %+v", got.Series)
+	}
+
+	// Disabled stats store: fail-closed 500.
+	p.processServices.stats = nil
+	w = NewWebServer(p, "test-config.yaml")
+	mux = http.NewServeMux()
+	w.Register(mux)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/mcp/analytics?from=1&to=2", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("nil stats store status=%d want 500; body=%s", rec.Code, rec.Body.String())
 	}
 }
 

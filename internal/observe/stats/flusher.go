@@ -30,6 +30,7 @@ const (
 type Sink interface {
 	FlushContext(context.Context, int64, map[Key]Counters) error
 	FlushAgentsContext(context.Context, int64, map[AgentKey]AgentCounters) error
+	FlushMCPBucketsContext(context.Context, int64, []MCPBucketDelta) error
 	PruneContext(context.Context, time.Time) error
 	Reset() error
 }
@@ -44,18 +45,25 @@ type Flusher struct {
 	tokens  *obscounters.TokenCounter
 	agents  *obscounters.AgentCounter
 
+	mcpStats *obscounters.MCPStats
+	mcpKind  func(string) (MCPKind, bool)
+
 	mu         sync.Mutex
 	prev       map[Key]Counters
 	agentPrev  map[AgentKey]AgentCounters
+	mcpPrev    map[string]obscounters.MCPStatRaw
 	pending    []Batch
 	agentQueue []AgentBatch
+	mcpQueue   []MCPBatch
 	lastBucket int64
 
 	flushFailures      uint64
 	agentFlushFailures uint64
+	mcpFlushFailures   uint64
 	pruneFailures      uint64
 	coalesced          uint64
 	agentCoalesced     uint64
+	mcpCoalesced       uint64
 }
 
 type Batch struct {
@@ -68,6 +76,27 @@ type AgentBatch struct {
 	deltas map[AgentKey]AgentCounters
 }
 
+type MCPBatch struct {
+	minute int64
+	deltas []MCPBucketDelta
+}
+
+// FlusherOption configures an optional counter input on a Flusher.
+type FlusherOption func(*Flusher)
+
+// WithMCPStats wires the MCP gateway call counter into the flusher. kind
+// resolves each recorded name to "server" or "route"; names it cannot classify
+// are skipped.
+func WithMCPStats(
+	stats *obscounters.MCPStats,
+	kind func(string) (MCPKind, bool),
+) FlusherOption {
+	return func(f *Flusher) {
+		f.mcpStats = stats
+		f.mcpKind = kind
+	}
+}
+
 func NewFlusher(
 	stats Sink,
 	metrics *obscounters.MetricsStore,
@@ -75,11 +104,16 @@ func NewFlusher(
 	agents *obscounters.AgentCounter,
 	baseline map[Key]Counters,
 	agentBaseline map[AgentKey]AgentCounters,
+	opts ...FlusherOption,
 ) *Flusher {
-	return &Flusher{
+	f := &Flusher{
 		stats: stats, metrics: metrics, tokens: tokens, agents: agents, prev: baseline,
 		agentPrev: agentBaseline,
 	}
+	for _, opt := range opts {
+		opt(f)
+	}
+	return f
 }
 
 func (f *Flusher) collect() map[Key]Counters {
@@ -131,6 +165,13 @@ func (f *Flusher) collectAgents() map[AgentKey]AgentCounters {
 		}
 	}
 	return snapshot
+}
+
+func (f *Flusher) collectMCP() map[string]obscounters.MCPStatRaw {
+	if f.mcpStats == nil {
+		return nil
+	}
+	return f.mcpStats.RawSnapshot()
 }
 
 // DiffCounters returns cur-prev, clamped at zero. LastRequestAt is carried as a
@@ -224,8 +265,10 @@ func (f *Flusher) FlushContextCycle(ctx context.Context, now time.Time) bool {
 	deltas := DiffCounters(current, f.prev)
 	agentCurrent := f.collectAgents()
 	agentDeltas := DiffAgent(agentCurrent, f.agentPrev)
+	mcpCurrent := f.collectMCP()
+	mcpDeltas := DiffMCP(mcpCurrent, f.mcpPrev, f.mcpKind)
 
-	if len(deltas) > 0 || len(agentDeltas) > 0 {
+	if len(deltas) > 0 || len(agentDeltas) > 0 || len(mcpDeltas) > 0 {
 		minute := now.Unix()/60*60 - 60
 		if minute <= f.lastBucket {
 			minute = f.lastBucket + 60
@@ -237,14 +280,19 @@ func (f *Flusher) FlushContextCycle(ctx context.Context, now time.Time) bool {
 		if len(agentDeltas) > 0 {
 			f.enqueueAgent(AgentBatch{minute: minute, deltas: agentDeltas})
 		}
+		if len(mcpDeltas) > 0 {
+			f.enqueueMCP(MCPBatch{minute: minute, deltas: mcpDeltas})
+		}
 	}
 	// The detached batches now own every observed delta, so baselines can move
-	// even if SQLite is temporarily unavailable. Reset clears both queues under
+	// even if SQLite is temporarily unavailable. Reset clears all queues under
 	// this same mutex.
 	f.prev = current
 	f.agentPrev = agentCurrent
+	f.mcpPrev = mcpCurrent
 
 	wrote := f.flushPending(ctx, MaxStatsBatchesPerFlush)
+	wrote = f.flushPendingMCP(ctx, MaxStatsBatchesPerFlush) || wrote
 	f.prune(ctx, now)
 	return wrote
 }
@@ -346,6 +394,41 @@ func MergeAgentDeltas(
 	}
 }
 
+func (f *Flusher) enqueueMCP(batch MCPBatch) {
+	f.mcpQueue = append(f.mcpQueue, batch)
+	if len(f.mcpQueue) <= MaxPendingStatsBatches {
+		return
+	}
+	merged := map[string]MCPBucketDelta{}
+	for _, d := range f.mcpQueue[0].deltas {
+		merged[d.Name] = d
+	}
+	for _, d := range f.mcpQueue[1].deltas {
+		cur := merged[d.Name]
+		cur.Calls += d.Calls
+		cur.Errors += d.Errors
+		cur.LatencyMsSum += d.LatencyMsSum
+		if d.LastCallAt > cur.LastCallAt {
+			cur.LastCallAt = d.LastCallAt
+		}
+		merged[d.Name] = cur
+	}
+	f.mcpQueue[1].minute = f.mcpQueue[0].minute
+	f.mcpQueue[1].deltas = make([]MCPBucketDelta, 0, len(merged))
+	for _, d := range merged {
+		f.mcpQueue[1].deltas = append(f.mcpQueue[1].deltas, d)
+	}
+	f.mcpQueue = f.mcpQueue[1:]
+	f.mcpCoalesced++
+	if f.mcpCoalesced == 1 || f.mcpCoalesced%60 == 0 {
+		logx.Warnf(
+			"[stats] MCP backlog exceeded %d batches; coalesced %d old minute batches",
+			MaxPendingStatsBatches,
+			f.mcpCoalesced,
+		)
+	}
+}
+
 func (f *Flusher) flushPending(ctx context.Context, limit int) bool {
 	wrote := false
 	for attempts := 0; len(f.pending) > 0 && attempts < limit; attempts++ {
@@ -387,19 +470,49 @@ func (f *Flusher) flushPending(ctx context.Context, limit int) bool {
 	return wrote
 }
 
+func (f *Flusher) flushPendingMCP(ctx context.Context, limit int) bool {
+	wrote := false
+	for attempts := 0; len(f.mcpQueue) > 0 && attempts < limit; attempts++ {
+		batch := f.mcpQueue[0]
+		if err := f.stats.FlushMCPBucketsContext(ctx, batch.minute, batch.deltas); err != nil {
+			f.mcpFlushFailures++
+			if f.mcpFlushFailures == 1 || f.mcpFlushFailures%60 == 0 {
+				logx.Warnf(
+					"[stats] MCP flush failed: %v (minute %d retained; attempt %d)",
+					err,
+					batch.minute,
+					f.mcpFlushFailures,
+				)
+			}
+			break
+		}
+		f.mcpFlushFailures = 0
+		f.mcpQueue = f.mcpQueue[1:]
+		wrote = true
+	}
+	return wrote
+}
+
 func (f *Flusher) PendingCounts() (provider, agent int) {
-	provider, agent, _ = f.PendingCountsContext(context.Background())
+	provider, agent, _, _ = f.pendingAll(context.Background())
 	return provider, agent
 }
 
 func (f *Flusher) PendingCountsContext(
 	ctx context.Context,
 ) (provider, agent int, locked bool) {
+	provider, agent, _, locked = f.pendingAll(ctx)
+	return provider, agent, locked
+}
+
+func (f *Flusher) pendingAll(
+	ctx context.Context,
+) (provider, agent, mcp int, locked bool) {
 	if !f.lockContext(ctx) {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	defer f.mu.Unlock()
-	return len(f.pending), len(f.agentQueue), true
+	return len(f.pending), len(f.agentQueue), len(f.mcpQueue), true
 }
 
 // flushForShutdown gives transient Store failures a best-effort retry window.
@@ -411,19 +524,20 @@ func (f *Flusher) FlushForShutdown(timeout time.Duration) {
 	defer cancel()
 	f.FlushContextCycle(ctx, time.Now())
 	for {
-		providerPending, agentPending, locked := f.PendingCountsContext(ctx)
+		providerPending, agentPending, mcpPending, locked := f.pendingAll(ctx)
 		if !locked {
 			logx.Warnf("[stats] shutdown retry window exhausted while waiting for the flusher lock")
 			return
 		}
-		if providerPending == 0 && agentPending == 0 {
+		if providerPending == 0 && agentPending == 0 && mcpPending == 0 {
 			return
 		}
 		if ctx.Err() != nil {
 			logx.Warnf(
-				"[stats] shutdown retry window exhausted with %d provider and %d agent batches pending",
+				"[stats] shutdown retry window exhausted with %d provider, %d agent, and %d MCP batches pending",
 				providerPending,
 				agentPending,
+				mcpPending,
 			)
 			return
 		}
@@ -449,10 +563,10 @@ func (f *Flusher) prune(ctx context.Context, now time.Time) {
 	f.pruneFailures = 0
 }
 
-// reset atomically clears durable history, the three runtime owners, and both
-// diff baselines relative to a concurrent flush. Durable reset runs first: on
-// failure the live counters remain intact rather than being resurrected from an
-// uncleared database at the next process start.
+// reset atomically clears durable history, the counter runtime owners, and
+// their diff baselines relative to a concurrent flush. Durable reset runs
+// first: on failure the live counters remain intact rather than being
+// resurrected from an uncleared database at the next process start.
 func (f *Flusher) Reset() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -469,16 +583,23 @@ func (f *Flusher) Reset() error {
 	if f.agents != nil {
 		f.agents.Reset()
 	}
+	if f.mcpStats != nil {
+		f.mcpStats.Reset()
+	}
 	f.prev = f.collect()
 	f.agentPrev = f.collectAgents()
+	f.mcpPrev = f.collectMCP()
 	f.pending = nil
 	f.agentQueue = nil
+	f.mcpQueue = nil
 	f.lastBucket = 0
 	f.flushFailures = 0
 	f.agentFlushFailures = 0
+	f.mcpFlushFailures = 0
 	f.pruneFailures = 0
 	f.coalesced = 0
 	f.agentCoalesced = 0
+	f.mcpCoalesced = 0
 	return nil
 }
 

@@ -27,6 +27,7 @@ func Bootstrap(
 	metrics *obscounters.MetricsStore,
 	tokens *obscounters.TokenCounter,
 	agents *obscounters.AgentCounter,
+	opts ...FlusherOption,
 ) BootstrapResult {
 	store, err := Open(Options{Path: path, Retention: retention})
 	if err != nil {
@@ -80,6 +81,6 @@ func Bootstrap(
 	}
 	return BootstrapResult{
 		Store:   store,
-		Flusher: NewFlusher(store, metrics, tokens, agents, baseline, agentBaseline),
+		Flusher: NewFlusher(store, metrics, tokens, agents, baseline, agentBaseline, opts...),
 	}
 }

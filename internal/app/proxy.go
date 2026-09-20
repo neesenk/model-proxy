@@ -98,7 +98,7 @@ type processServices struct {
 	mcpSessions        *mcpkg.SessionTable           // /mcp/ gateway session table (local→upstream session + pinned account); process-lifetime cross-generation state, lazy expiry, never serialized or logged
 	mcpRR              atomic.Uint64                 // /mcp/ account round-robin counter for sessionless requests
 	mcpStdio           *mcpStdioRegistry             // /mcp/ stdio children (one per session/sub-session); killed on session eviction and Close
-	mcpStats           *obscounters.MCPStats         // /mcp/ per-name call counters (process-lifetime, in-memory only; deliberately separate from the LLM metrics store)
+	mcpStats           *obscounters.MCPStats         // /mcp/ per-name call counters (process-lifetime in-memory counters, also fed to the persistent mcp_buckets flusher; deliberately separate from the LLM metrics pipeline)
 	adjudication       *adjudicate.Service           // AI second-opinion channel for guard pattern hits; process-lifetime, persisted verdict cache + session blocks
 	responsesState     *protocol.ResponsesStateStore // previous_response_id replay for Responses clients bridged to stateless backends
 	events             *observeevents.Hub            // live request monitor fan-out hub (SSE /api/events); always non-nil
@@ -421,6 +421,9 @@ func (p *Proxy) resetStats() error {
 		}
 		if p.agents != nil {
 			p.agents.Reset()
+		}
+		if p.mcpStats != nil {
+			p.mcpStats.Reset()
 		}
 	}
 	// The response-cache counters are deliberately NOT reset here: the cache

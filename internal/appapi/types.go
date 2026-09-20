@@ -160,6 +160,55 @@ type MCPRouteTargetInfo struct {
 	Tools  int    `json:"tools"`
 }
 
+// MCPAnalyticsQuery describes one persisted MCP usage aggregation read.
+// From/To are unix seconds, inclusive. Granularity defaults to "day" in the
+// transport; Name/Kind are optional filters. Kind must be "server" or "route"
+// when non-empty.
+type MCPAnalyticsQuery struct {
+	From        int64
+	To          int64
+	Granularity string
+	Name        string
+	Kind        string
+}
+
+// MCPAnalyticsResult is the transport projection for GET /api/mcp/analytics.
+// Series are grouped by (kind, name); each series carries one point per
+// calendar bucket that had traffic in the inclusive [from,to] window.
+type MCPAnalyticsResult struct {
+	Granularity string               `json:"granularity"`
+	From        int64                `json:"from"`
+	To          int64                `json:"to"`
+	Series      []MCPAnalyticsSeries `json:"series"`
+}
+
+// MCPAnalyticsSeries is one MCP server or route's bucketed usage.
+type MCPAnalyticsSeries struct {
+	Kind   string              `json:"kind"`
+	Name   string              `json:"name"`
+	Points []MCPAnalyticsPoint `json:"points"`
+	Totals MCPAnalyticsTotals  `json:"totals"`
+}
+
+// MCPAnalyticsPoint is one calendar bucket of MCP terminal exchanges.
+// AvgLatencyMs is the request-weighted mean latency for the bucket.
+type MCPAnalyticsPoint struct {
+	Ts           int64   `json:"ts"`
+	Calls        uint64  `json:"calls"`
+	Errors       uint64  `json:"errors"`
+	AvgLatencyMs float64 `json:"avg_latency_ms"`
+}
+
+// MCPAnalyticsTotals rolls up every point in the series: calls and errors are
+// summed, avg_latency_ms is the request-weighted mean across all points, and
+// last_call_at is the maximum last_call_at observed.
+type MCPAnalyticsTotals struct {
+	Calls        uint64  `json:"calls"`
+	Errors       uint64  `json:"errors"`
+	AvgLatencyMs float64 `json:"avg_latency_ms"`
+	LastCallAt   int64   `json:"last_call_at"`
+}
+
 type Pin struct {
 	Route     string
 	Provider  string
@@ -877,6 +926,10 @@ type ReadAPI interface {
 	// MCPSurface projects the MCP gateway (config mcp:/mcp_routes: plus live
 	// session gauges) for the /api/mcp read endpoint.
 	MCPSurface() MCPSurface
+	// MCPAnalytics projects persisted MCP usage buckets for the
+	// /api/mcp/analytics endpoint. A nil or disabled stats store returns an
+	// empty result (no series) and no error; a query error is returned as-is.
+	MCPAnalytics(MCPAnalyticsQuery) (MCPAnalyticsResult, error)
 	// TakeoverSurface projects the takeover template/client state (takeover
 	// status + drift probe per client) for the /api/takeover read endpoint.
 	// mode selects which per-family variant the auto_selected marker previews

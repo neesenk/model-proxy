@@ -603,7 +603,11 @@ func (p *Proxy) mcpLog(name, account string, frame mcpkg.Frame, httpMethod strin
 	// Analytics pollution). Recorded for every terminal exchange regardless
 	// of request-log enablement.
 	if p.mcpStats != nil {
-		p.mcpStats.Record(name, status, time.Since(started).Milliseconds())
+		latencyMs := time.Since(started).Milliseconds()
+		p.mcpStats.Record(name, status, latencyMs)
+		if account != "" && account != name {
+			p.mcpStats.Record(account, status, latencyMs)
+		}
 	}
 	// Client attribution: the session-header allowlist wins (clients that
 	// stamp their own session id on every call), the local MCP session id

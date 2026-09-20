@@ -330,6 +330,29 @@ func (p *Proxy) adminPorts(
 			}
 			return names
 		},
+		MCPAnalytics: func(from, to int64, granularity, name, kind string) ([]observestats.MCPBucketRow, error) {
+			if p.stats == nil {
+				return nil, errors.New("MCP stats store is not available")
+			}
+			rows, err := p.stats.QueryMCPBuckets(from, to, granularity)
+			if err != nil {
+				return nil, err
+			}
+			if name == "" && kind == "" {
+				return rows, nil
+			}
+			filtered := make([]observestats.MCPBucketRow, 0, len(rows))
+			for _, r := range rows {
+				if name != "" && r.Name != name {
+					continue
+				}
+				if kind != "" && r.Kind != kind {
+					continue
+				}
+				filtered = append(filtered, r)
+			}
+			return filtered, nil
+		},
 		FusionSnapshot: func(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
 			return p.fusionReg.Snapshot(workflow, now)
 		},

@@ -1,6 +1,7 @@
 #!/bin/sh
 # restart_serve.sh — atomically restart a running `model-proxy serve` in ONE
-# invocation (SIGINT -> wait for port release -> nohup start -> wait for listen).
+# invocation (stop pidfile owner -> SIGINT listeners -> wait for port release
+# -> nohup start -> wait for listen).
 #
 # Why atomicity matters (docs/engineering/pitfalls.md #24b, CLI.md「手动重启」):
 # on dev machines this proxy is often the coding agent's own LLM gateway.
@@ -61,13 +62,58 @@ if [ "$DO_BUILD" -eq 1 ]; then
   (cd "$DIR" && go build -o model-proxy.new . && mv model-proxy.new model-proxy)
 fi
 
-# 2) SIGINT current listeners (graceful: HTTP drain + final flush)
+# 2) stop the pidfile owner (daemon supervisor, or a pidfile-owning foreground
+#    serve) BEFORE touching the port. SIGINTing only the port listener kills
+#    just a daemon's worker, and the supervisor respawns it after ~1s backoff:
+#    either the respawned worker wins the port back (the new instance fails to
+#    bind but the port-listen wait below still "succeeds" — a silent stale-
+#    binary restart), or the new instance wins and the orphaned supervisor
+#    resurrects the OLD binary whenever the new serve later exits.
+LOG_FILE=$(sed -n 's/^log_file:[[:space:]]*["'"'"']*\([^"'"'"']*\)["'"'"']*[[:space:]]*$/\1/p' \
+  "$DIR/config.yaml" | head -n1)
+if [ -z "$LOG_FILE" ]; then
+  # same default as serve's ResolveLogFile: os.TempDir()/model-proxy.log
+  PIDFILE="${TMPDIR:-/tmp}/model-proxy.pid"
+else
+  case "$LOG_FILE" in
+    "~/"*) LOG_FILE="$HOME/${LOG_FILE#"~/"}" ;;
+  esac
+  case "$LOG_FILE" in
+    /*) : ;;
+    *)  LOG_FILE="$DIR/$LOG_FILE" ;;
+  esac
+  case "$LOG_FILE" in
+    *.log) PIDFILE="${LOG_FILE%.log}.pid" ;;
+    *)     PIDFILE="$LOG_FILE.pid" ;;
+  esac
+fi
+if [ -f "$PIDFILE" ]; then
+  SPID=$(sed -n 's/^\([0-9][0-9]*\).*$/\1/p' "$PIDFILE" | head -n1)
+  # identity check: a stale pidfile may name a reused, foreign pid — only ever
+  # signal a process that is actually a model-proxy.
+  if [ -n "$SPID" ] && kill -0 "$SPID" 2>/dev/null && \
+     [ "$(ps -p "$SPID" -o comm= 2>/dev/null | sed 's:.*/::')" = "model-proxy" ]; then
+    kill -TERM "$SPID" 2>/dev/null || true
+    deadline=$(( $(date +%s) + STOP_TIMEOUT_S ))
+    while kill -0 "$SPID" 2>/dev/null; do
+      if [ "$(date +%s)" -ge "$deadline" ]; then
+        kill -KILL "$SPID" 2>/dev/null || true
+        sleep 1
+        break
+      fi
+      sleep 0.1 2>/dev/null || sleep 1
+    done
+  fi
+fi
+
+# 3) SIGINT current listeners (graceful: HTTP drain + final flush). Anything
+#    left listening here owns no live pidfile (e.g. started by hand).
 PIDS=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
 if [ -n "$PIDS" ]; then
   kill -INT $PIDS
 fi
 
-# 3) wait for the port to be released. Wall-clock budget (date +%s), not an
+# 4) wait for the port to be released. Wall-clock budget (date +%s), not an
 #    iteration count: the sleep below falls back to `sleep 1` on /bin/sh
 #    implementations without fractional sleep, which would silently multiply
 #    any iteration-based budget by 10.
@@ -80,7 +126,7 @@ while port_listening; do
   sleep 0.1 2>/dev/null || sleep 1   # some /bin/sh sleep lack fractions
 done
 
-# 4) start and wait for the port to come back — same invocation, no gap for
+# 5) start and wait for the port to come back — same invocation, no gap for
 #    a second tool call to creep into
 cd "$DIR"
 nohup ./model-proxy serve >> "$LOG" 2>&1 &

@@ -556,3 +556,88 @@ func TestFlushForShutdownDrainsPending(t *testing.T) {
 		t.Errorf("durable requests = %d, want 1", got)
 	}
 }
+
+// TestFlusherMCPPath verifies the flusher diff + persist path for MCP counters,
+// including the reset case where a counter's current value is lower than the
+// previous snapshot.
+func TestFlusherMCPPath(t *testing.T) {
+	ss := openFlusherTestStore(t)
+	mcp := obscounters.NewMCPStats()
+	kind := func(name string) (MCPKind, bool) {
+		switch name {
+		case "srv":
+			return MCPKindServer, true
+		case "rt":
+			return MCPKindRoute, true
+		default:
+			return "", false
+		}
+	}
+	f := NewFlusher(
+		ss,
+		obscounters.NewMetricsStore(),
+		obscounters.NewTokenCounter(),
+		obscounters.NewAgentCounter(),
+		nil, nil,
+		WithMCPStats(mcp, kind),
+	)
+
+	mcp.Record("srv", 200, 100)
+	mcp.Record("srv", 500, 50)
+	mcp.Record("rt", 200, 30)
+	f.Flush(time.Unix(60, 0))
+
+	rows, err := ss.QueryMCPBuckets(0, 120, "minute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("first flush rows = %d, want 2: %+v", len(rows), rows)
+	}
+	byName := map[string]MCPBucketRow{}
+	for _, r := range rows {
+		byName[r.Name] = r
+	}
+	if s := byName["srv"]; s.Calls != 2 || s.Errors != 1 || s.LatencyMsSum != 150 {
+		t.Errorf("srv first flush = %+v", s)
+	}
+	if r := byName["rt"]; r.Calls != 1 || r.Kind != "route" {
+		t.Errorf("rt first flush = %+v", r)
+	}
+
+	// Second minute: more calls.
+	mcp.Record("srv", 200, 70)
+	f.Flush(time.Unix(120, 0))
+
+	rows, err = ss.QueryMCPBuckets(0, 180, "minute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var srvTotal uint64
+	for _, r := range rows {
+		if r.Name == "srv" {
+			srvTotal += r.Calls
+		}
+	}
+	if srvTotal != 3 {
+		t.Errorf("srv cumulative calls = %d, want 3", srvTotal)
+	}
+
+	// Simulate a counter reset: the next snapshot is lower than the previous
+	// baseline. The flusher must treat the current value as the delta.
+	mcp.Reset()
+	mcp.Record("srv", 200, 40)
+	mcp.Record("srv", 200, 60)
+	f.Flush(time.Unix(180, 0))
+
+	rows, err = ss.QueryMCPBuckets(180, 240, "minute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("reset flush rows = %d, want 1: %+v", len(rows), rows)
+	}
+	if rows[0].Bucket != 180 || rows[0].Calls != 2 || rows[0].LatencyMsSum != 100 {
+		t.Errorf("reset flush row = %+v", rows[0])
+	}
+}

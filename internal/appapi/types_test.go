@@ -105,8 +105,11 @@ func (fakeCommands) BeginLogin(context.Context, string) (LoginStart, error) {
 	return LoginStart{}, nil
 }
 
-func (fakeReads) Presets() []presets.Preset          { return nil }
-func (fakeReads) MCPSurface() MCPSurface             { return MCPSurface{} }
+func (fakeReads) Presets() []presets.Preset { return nil }
+func (fakeReads) MCPSurface() MCPSurface    { return MCPSurface{} }
+func (fakeReads) MCPAnalytics(MCPAnalyticsQuery) (MCPAnalyticsResult, error) {
+	return MCPAnalyticsResult{}, nil
+}
 func (fakeReads) SecurityBlocks() []SecurityBlock    { return nil }
 func (fakeReads) SecurityAllowed() []SecurityAllowed { return nil }
 func (fakeReads) TakeoverSurface(string) (TakeoverSurface, error) {

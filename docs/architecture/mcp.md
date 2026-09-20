@@ -164,10 +164,28 @@ http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验�
 ### 统计、Live 事件与配额冷却
 
 - 统计：每个终态交换（pinned/route/stdio 全覆盖）经 `mcpLog` 记录到 MCP 网关自己的
-  进程级计数器（`observe/counters.MCPStats`，按 name 计 calls/errors/avg_latency_ms；
-  errors = status ≥ 400；重启归零），经 `/api/mcp` 投影到 Web MCP tab。与 LLM
-  `MetricsStore` 刻意分离——MCP 交换无 token，不进 Status/Analytics/stats.db 统计管线。
-  记录不依赖 request_log 开关。
+  进程级计数器 `observe/counters.MCPStats`（按 name 计 calls/errors/avg_latency_ms；
+  errors = status ≥ 400），再经分钟 flusher 持久化到 `stats.db` 的 `mcp_buckets`
+  表（`name, kind, minute, calls, errors, latency_ms_sum, last_call_at`）。
+  计数归属规则：
+  - pinned/直连 server 的交换只记该 server 名；
+  - 路由的 `initialize`/`tools/list` 只记路由名；
+  - 路由的 `tools/call` 在 `account`（实际后端 server 名）非空且与暴露的 `name`
+    不同时，会同时记**路由名**和**后端 server 名**各一次——因此两个命名空间的
+    调用数之和会大于实际请求数；
+  - 路由全部后端失败（502）只记路由名，不记后端。
+  flusher 通过 `WithMCPStats` 选项接入，每分钟对 `MCPStats.RawSnapshot()` 做 diff
+  （`DiffMCP`），由 `initStats()` 里的 config-backed kind 解析器把名字归类为
+  `server` 或 `route`；解析失败的名字被跳过。diff 也处理计数器 reset
+  （`current < previous` 时以 current 为 delta）。持久化遵循与 LLM stats 相同的
+  retention/prune 配置（`stats.retention`）。`POST /api/tokens/reset` 会同时清空
+  `mcpStats` 及其 flusher 基线。
+  - `/api/mcp`（Servers/Routes 标签）仍然只展示**进程生命周期**的内存计数——进程
+    重启归零；
+  - `/api/mcp/analytics`（History 标签）读取 `mcp_buckets` 持久化聚合，跨重启保留。
+  MCP 统计与 LLM `MetricsStore`/token 计数/agent 计数是**完全独立的管线**：不进入
+  Status/Analytics 的 provider/model 维度，不参与等价成本计算，也不混入
+  `minute_buckets`/`agent_buckets`。记录不依赖 `request_log` 开关。
 - MCP 交换（pinned/route/stdio 全覆盖）发布 live start/end（protocol="mcp"）：start 在
   server/route 命中后发出（agent 取 UA 标签），end 由 defer 恰好一次发出，status/provider 经
   `mcpLiveWriter` 捕获（WriteHeader 截获 status、各 commit 点 `mcpSetLiveProvider`；

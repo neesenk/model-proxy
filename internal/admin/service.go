@@ -102,6 +102,10 @@ type Ports struct {
 	AnalyticsAgentNames func(from, to int64, provider, model string) []string
 	// FusionSnapshot returns the fusion registry projection for one workflow.
 	FusionSnapshot func(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
+	// MCPAnalytics queries persisted MCP usage buckets for the
+	// /api/mcp/analytics endpoint. The closure returns an empty slice and nil
+	// error when the stats store is disabled; store errors are returned as-is.
+	MCPAnalytics func(from, to int64, granularity, name, kind string) ([]observestats.MCPBucketRow, error)
 	// Pins returns the active pins (expired ones already dropped).
 	Pins func() map[string]PinState
 	// ModelCapsSnapshot returns the startup protocol probe's detached

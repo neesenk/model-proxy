@@ -277,6 +277,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleRequestsList(w, r)
 	case p == "/api/mcp" && r.Method == http.MethodGet:
 		s.handleMCPSurface(w, r)
+	case p == "/api/mcp/analytics" && r.Method == http.MethodGet:
+		s.handleMCPAnalytics(w, r)
 	case p == "/api/mcp/test" && r.Method == http.MethodPost:
 		s.handleMCPTest(w, r)
 	case p == "/api/takeover" && r.Method == http.MethodGet:

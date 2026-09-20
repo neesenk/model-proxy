@@ -51,6 +51,7 @@ type readAPIStub struct {
 	config            func() (appapi.ConfigDocument, error)
 	presets           []presets.Preset
 	mcpSurface        appapi.MCPSurface
+	mcpAnalytics      func(appapi.MCPAnalyticsQuery) (appapi.MCPAnalyticsResult, error)
 	models            appapi.ModelsDocument
 	takeover          func(string) (appapi.TakeoverSurface, error)
 	takeoverPreview   func(appapi.TakeoverRunRequest, bool) (appapi.TakeoverPreview, error)
@@ -1622,6 +1623,12 @@ func TestAdminAuthDisabledKeepsLoopbackTrust(t *testing.T) {
 
 func (r *readAPIStub) Presets() []presets.Preset     { return r.presets }
 func (r *readAPIStub) MCPSurface() appapi.MCPSurface { return r.mcpSurface }
+func (r *readAPIStub) MCPAnalytics(q appapi.MCPAnalyticsQuery) (appapi.MCPAnalyticsResult, error) {
+	if r.mcpAnalytics == nil {
+		return appapi.MCPAnalyticsResult{}, nil
+	}
+	return r.mcpAnalytics(q)
+}
 
 func (r *readAPIStub) ModelsDocument() appapi.ModelsDocument {
 	if r.models.Providers == nil {
@@ -1955,5 +1962,94 @@ func TestHandleMCPTest(t *testing.T) {
 	}
 	if errOut["error"] != "no such server: missing" {
 		t.Fatalf("error body = %q", rec.Body.String())
+	}
+}
+
+// TestHandleMCPAnalytics pins GET /api/mcp/analytics: default window/granularity,
+// DTO shape, name/kind passthrough, invalid granularity/kind 400s, and store
+// errors surfaced as fail-closed 500s.
+func TestHandleMCPAnalytics(t *testing.T) {
+	var gotQuery appapi.MCPAnalyticsQuery
+	fixed := time.Date(2026, 9, 20, 0, 0, 0, 0, time.Local).Unix()
+	reads := &readAPIStub{
+		mcpAnalytics: func(q appapi.MCPAnalyticsQuery) (appapi.MCPAnalyticsResult, error) {
+			gotQuery = q
+			return appapi.MCPAnalyticsResult{
+				Granularity: q.Granularity,
+				From:        q.From,
+				To:          q.To,
+				Series: []appapi.MCPAnalyticsSeries{
+					{
+						Kind: "server",
+						Name: "web-search",
+						Points: []appapi.MCPAnalyticsPoint{
+							{Ts: fixed, Calls: 5, Errors: 1, AvgLatencyMs: 640},
+						},
+						Totals: appapi.MCPAnalyticsTotals{Calls: 9, Errors: 2, AvgLatencyMs: 700, LastCallAt: fixed},
+					},
+				},
+			}, nil
+		},
+	}
+	s := newReadServer(t, reads)
+
+	rec := serveRead(t, s, http.MethodGet, "/api/mcp/analytics?from=100&to=200&granularity=day&name=web-search&kind=server")
+	var out appapi.MCPAnalyticsResult
+	decodeReadJSON(t, rec, &out)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if gotQuery != (appapi.MCPAnalyticsQuery{From: 100, To: 200, Granularity: "day", Name: "web-search", Kind: "server"}) {
+		t.Fatalf("query = %+v, want from=100 to=200 granularity=day name=web-search kind=server", gotQuery)
+	}
+	if out.Granularity != "day" || out.From != 100 || out.To != 200 {
+		t.Fatalf("envelope = %+v", out)
+	}
+	if len(out.Series) != 1 || out.Series[0].Kind != "server" || out.Series[0].Name != "web-search" {
+		t.Fatalf("series = %+v", out.Series)
+	}
+	if len(out.Series[0].Points) != 1 || out.Series[0].Points[0].Ts != fixed || out.Series[0].Points[0].Calls != 5 || out.Series[0].Points[0].AvgLatencyMs != 640 {
+		t.Fatalf("points = %+v", out.Series[0].Points)
+	}
+	if out.Series[0].Totals.Calls != 9 || out.Series[0].Totals.Errors != 2 || out.Series[0].Totals.AvgLatencyMs != 700 || out.Series[0].Totals.LastCallAt != fixed {
+		t.Fatalf("totals = %+v", out.Series[0].Totals)
+	}
+
+	// Defaults: granularity=day, window=[now-30d, now].
+	now := time.Now()
+	defaultRec := serveRead(t, s, http.MethodGet, "/api/mcp/analytics")
+	decodeReadJSON(t, defaultRec, &out)
+	if defaultRec.Code != http.StatusOK {
+		t.Fatalf("default status = %d, want 200; body=%s", defaultRec.Code, defaultRec.Body.String())
+	}
+	if gotQuery.Granularity != "day" {
+		t.Fatalf("default granularity = %q, want day", gotQuery.Granularity)
+	}
+	wantFrom := now.Add(-30 * 24 * time.Hour).Unix()
+	if gotQuery.From < wantFrom-2 || gotQuery.From > wantFrom+2 || gotQuery.To < now.Add(-2*time.Second).Unix() || gotQuery.To > now.Add(2*time.Second).Unix() {
+		t.Fatalf("default window = %d..%d, want around %d..%d", gotQuery.From, gotQuery.To, wantFrom, now.Unix())
+	}
+
+	var errOut struct {
+		Error string `json:"error"`
+	}
+	invalidGran := serveRead(t, s, http.MethodGet, "/api/mcp/analytics?granularity=year")
+	decodeReadJSON(t, invalidGran, &errOut)
+	if invalidGran.Code != http.StatusBadRequest || errOut.Error != "granularity must be minute, hour, day, week or month" {
+		t.Fatalf("invalid granularity = (%d, %q)", invalidGran.Code, errOut.Error)
+	}
+	invalidKind := serveRead(t, s, http.MethodGet, "/api/mcp/analytics?kind=tool")
+	decodeReadJSON(t, invalidKind, &errOut)
+	if invalidKind.Code != http.StatusBadRequest || errOut.Error != "kind must be server or route" {
+		t.Fatalf("invalid kind = (%d, %q)", invalidKind.Code, errOut.Error)
+	}
+
+	reads.mcpAnalytics = func(appapi.MCPAnalyticsQuery) (appapi.MCPAnalyticsResult, error) {
+		return appapi.MCPAnalyticsResult{}, errors.New("store down")
+	}
+	failed := serveRead(t, s, http.MethodGet, "/api/mcp/analytics?from=1&to=2")
+	decodeReadJSON(t, failed, &errOut)
+	if failed.Code != http.StatusInternalServerError || errOut.Error != "mcp analytics query: store down" {
+		t.Fatalf("store error = (%d, %q)", failed.Code, errOut.Error)
 	}
 }
