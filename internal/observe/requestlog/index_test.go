@@ -465,6 +465,96 @@ func TestIndexDetailSeek(t *testing.T) {
 	}
 }
 
+// TestIndexDetailFallbackScansOnlyUnindexedTail pins the Detail fallback's
+// scan domain: only the bytes beyond a file's indexed cursor. A findable id
+// inside already-indexed bytes exists only with its index row removed
+// (hand-rolled below; in production an indexed row is always seekable), and
+// the fallback must miss it — the full-directory QueryRecords fallback it
+// replaced streamed every indexed byte for such misses (seconds on a real
+// multi-GB log; every never-logged id, e.g. the Live view's client-gone
+// 499, paid it on each drill).
+func TestIndexDetailFallbackScansOnlyUnindexedTail(t *testing.T) {
+	dir := t.TempDir()
+	writeIndexFixture(t, dir)
+	indexer := newTestIndexer(t, dir)
+	mustReconcile(t, indexer)
+
+	// Indexed bytes are not rescanned: r1 sits in requests-20260729.log,
+	// fully indexed — deleting its index row must turn Detail into a miss.
+	if _, err := indexer.db.Exec(`DELETE FROM records WHERE request_id = ?`, "r1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := indexer.Detail("r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("detail over deleted index row = %+v, want empty (only the un-indexed tail is scanned)", got)
+	}
+
+	// The lag case the fallback exists for: committed after the last
+	// reconcile pass, i.e. appended beyond an indexed file's cursor.
+	appendRecordLines(t, filepath.Join(dir, "requests-20260730.log"), Record{
+		Ts: "2026-07-30T05:00:00Z", RequestID: "lagging", Status: 200, ResponseBody: "lag-body",
+	})
+	got, err = indexer.Detail("lagging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ResponseBody != "lag-body" {
+		t.Fatalf("lagging detail = %+v, want the tail record", got)
+	}
+
+	// A file reconcile has never seen (absent from the files table) has
+	// cursor zero: the whole file is the un-indexed tail (index rebuild).
+	writeRecordFile(t, dir, "requests-20260731.log", []Record{{
+		Ts: "2026-07-31T01:00:00Z", RequestID: "newfile", Status: 200, ResponseBody: "new-body",
+	}})
+	got, err = indexer.Detail("newfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ResponseBody != "new-body" {
+		t.Fatalf("newfile detail = %+v, want the never-reconciled file's record", got)
+	}
+
+	// A decodable final line without its newline is still returned (the scan
+	// path parses the unterminated tail too — the newline lands in the same
+	// Write, so the content is complete); a genuinely torn write that cannot
+	// decode is skipped.
+	last := filepath.Join(dir, "requests-20260731.log")
+	appendFragment := func(s string) {
+		t.Helper()
+		file, err := os.OpenFile(last, os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.Write([]byte(s)); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendFragment(`{"request_id":"torn-ok","ts":"2026-07-31T02:00:00Z","status":200,"response_body":"ok"}`)
+	got, err = indexer.Detail("torn-ok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ResponseBody != "ok" {
+		t.Fatalf("torn-ok detail = %+v, want the unterminated-but-decodable line", got)
+	}
+	// Terminate the line above, then leave a torn write as the new tail.
+	appendFragment("\n" + `{"request_id":"torn-bad","ts":"2026-07-31T03:00:00Z","sta`)
+	got, err = indexer.Detail("torn-bad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("torn-bad detail = %+v, want empty (a torn write is not consumable)", got)
+	}
+}
+
 // TestIndexUsageParity: the usage columns written at index time equal
 // ExtractUsage over the raw bodies, for both the JSON and the SSE shape, and
 // flow into summaries only under UsageOnly.

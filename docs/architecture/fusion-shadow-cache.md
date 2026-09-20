@@ -148,8 +148,12 @@ Shutdown 在 log writer drain 之后跑一次 final reconcile（final flush）�
 `SummariesWithFacets`（WHERE 映射 Filter，facets 在 filter 之前对全部已索引行
 采集——例外是 `Kind`：它是流选择器而非数据 facet，llm/mcp 过滤同样收窄 facets，
 mcp server 名不会污染 LLM 视图的 model 下拉；usage 字段只在 `UsageOnly` 下填充）、`Detail`（按 (file, offset, length)
-seek 读回完整行，索引未命中或 seek 失败回落 `QueryRecords` 目录扫描——刚 commit、
-indexer 尚未追上的记录不会误报 not logged）、`SessionSummaries`（索引列供给
+seek 读回完整行；索引未命中或 seek 失败回落 `tailScan`——只流式读取各文件「已索引
+cursor 之后」的未索引字节：一个 reconcile tick 内刚 commit、indexer 尚未追上的
+记录不会误报 not logged，而从未落盘的 id（任何 pre-commit 终局，如 live 视图的
+client-gone 499）保持毫秒级 miss，不再是全目录秒级扫描。从未 reconcile 过的文件
+〔索引重建中〕cursor 为 0、整个文件都是尾部；截断/替换文件在 reconcile 回卷 cursor
+之前没有可读尾部）、`SessionSummaries`（索引列供给
 usage，聚合复用扫描版同一 Go 代码）。`/api/shadow-report` 的配对只需要 metadata
 （request_id/shadow 标志/provider/status/latency/response_size，不需要 body），同样
 走索引：`ShadowReport`（索引列供给配对元数据，聚合复用扫描版同一 Go 代码，

@@ -31,8 +31,8 @@ const (
 	// defaultReconcileInterval is the tailing tick: how often the indexer
 	// picks up appended lines, rotations, truncations and retention deletes.
 	defaultReconcileInterval = 250 * time.Millisecond
-	// indexDetailLimit mirrors the detail handler's scan filter
-	// (Filter{RequestID: id, Limit: 50}).
+	// indexDetailLimit bounds the indexed locations one Detail id may seek
+	// (mirrors the scan-side detail filter's Limit 50).
 	indexDetailLimit = 50
 )
 
@@ -740,11 +740,13 @@ func (x *Indexer) queryFacets(filter Filter) (Facets, error) {
 }
 
 // Detail returns the full records (bodies included) for one request id: a
-// (file, offset, length) seek per indexed row instead of a directory scan. Any
-// index miss — the id is not indexed yet (committed within the last reconcile
-// tick), the file was rotated away, or the stored bytes no longer decode —
-// falls back to the file scan, so a just-committed record never reports
-// "not logged".
+// (file, offset, length) seek per indexed row instead of a directory scan.
+// Any index miss — the id is not indexed yet (committed after the last
+// reconcile pass), the file was rotated away, or the stored bytes no longer
+// decode — falls back to tailScan, which streams only the UN-indexed bytes
+// of each file: a just-committed record never reports "not logged", while a
+// never-logged id (any pre-commit terminal, e.g. the live view's client-gone
+// 499) stays a cheap miss instead of a whole-history scan.
 func (x *Indexer) Detail(requestID string) ([]Record, error) {
 	rows, err := x.db.Query(
 		`SELECT file, "offset", length FROM records WHERE request_id = ? ORDER BY ts DESC, rowid DESC LIMIT ?`,
@@ -773,17 +775,128 @@ func (x *Indexer) Detail(requestID string) ([]Record, error) {
 	}
 	_ = rows.Close()
 	if len(locations) == 0 {
-		return QueryRecords(x.dir, Filter{RequestID: requestID, Limit: indexDetailLimit})
+		return x.tailScan(requestID)
 	}
 	records := make([]Record, 0, len(locations))
 	for _, loc := range locations {
 		record, err := x.readRecordAt(loc.file, loc.offset, loc.length)
 		if err != nil {
-			return QueryRecords(x.dir, Filter{RequestID: requestID, Limit: indexDetailLimit})
+			return x.tailScan(requestID)
 		}
 		records = append(records, record)
 	}
 	return records, nil
+}
+
+// tailScan searches the UN-indexed tail of every log file for one request id:
+// the Detail fallback's scanner. An index miss means the record either is not
+// logged at all (any pre-commit terminal never writes one) or was committed
+// after the last reconcile pass and lives beyond a file's indexed cursor;
+// that lag window is the only region that can hold the latter, so exactly it
+// is streamed — never the indexed history (the full-directory QueryRecords
+// fallback this replaced turned every never-logged id into a multi-GB scan).
+// Files are visited newest-first (reverse name order, like query) and the
+// scan stops at the first match: a request_id identifies exactly one record
+// (the scan's early-stop contract). A file absent from the files table was
+// never reconciled (an index being rebuilt from scratch), so its cursor is
+// zero and the whole file is the tail; a truncated/replaced file (size below
+// the cursor) has no readable tail until reconcile rewinds it (< one tick).
+func (x *Indexer) tailScan(requestID string) ([]Record, error) {
+	entries, err := os.ReadDir(x.dir)
+	if err != nil {
+		return nil, err
+	}
+	sizes := make(map[string]int64, len(entries))
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, filePrefix) || !strings.HasSuffix(name, ".log") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		sizes[name] = info.Size()
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return nil, nil
+	}
+	cursors := make(map[string]int64, len(names))
+	rows, err := x.db.Query(`SELECT path, size_indexed FROM files`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var name string
+		var cursor int64
+		if err := rows.Scan(&name, &cursor); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		cursors[name] = cursor
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+	sort.Strings(names)
+	for i := len(names) - 1; i >= 0; i-- {
+		name := names[i]
+		if sizes[name] <= cursors[name] {
+			continue // fully indexed: no un-indexed bytes can hold a lagging commit
+		}
+		record, found, err := scanTailForID(x.dir, name, cursors[name], requestID)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			return []Record{record}, nil
+		}
+	}
+	return nil, nil
+}
+
+// scanTailForID reads the JSONL lines beyond cursor looking for one request
+// id. cursor sits on a line boundary by construction (reconcile advances it
+// only past newline-terminated lines); the final unterminated line is parsed
+// too when it decodes (the scan path's convention — the writer's newline
+// lands in the same Write, so a decodable line is complete content), while a
+// torn write that fails to decode is skipped, same as every other scan path.
+// The id prefilter is the byte containment query() applies before decoding,
+// with Filter.matches's exact post-decode check inlined.
+func scanTailForID(dir, name string, cursor int64, requestID string) (Record, bool, error) {
+	file, err := os.Open(filepath.Join(dir, name))
+	if err != nil {
+		// Vanished between readdir and open (retention sweep): nothing new.
+		return Record{}, false, nil
+	}
+	defer func() { _ = file.Close() }()
+	if _, err := file.Seek(cursor, io.SeekStart); err != nil {
+		return Record{}, false, err
+	}
+	reader := bufio.NewReaderSize(file, 256<<10)
+	needle := []byte(requestID)
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 && bytes.Contains(trimmed, needle) {
+			var record Record
+			if json.Unmarshal(trimmed, &record) == nil && record.RequestID == requestID {
+				return record, true, nil
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				return Record{}, false, readErr
+			}
+			return Record{}, false, nil
+		}
+	}
 }
 
 // readRecordAt reads and decodes one raw JSONL line at its indexed position.

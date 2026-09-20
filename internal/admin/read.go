@@ -237,9 +237,8 @@ func (q requestLogQueries) ShadowReport(filter requestlog.Filter) ([]requestlog.
 
 func (q requestLogQueries) Detail(requestID, stream string) ([]requestlog.Record, error) {
 	// stream hint: an MCP-stream row drills straight into the split stream —
-	// its id is never in the requests index, and the index's miss fallback
-	// scans the whole (multi-GB) requests directory, which is exactly the
-	// seconds-long path the hint exists to skip.
+	// its id is never in the requests index, and the hint-less URL first pays
+	// the index's tail-scan fallback before the split-stream fallthrough.
 	if stream == "mcp" && q.mcpDir != "" {
 		return requestlog.QueryRecordsIn(q.mcpDir, requestlog.MCPFilePrefix, requestlog.Filter{RequestID: requestID, Limit: 50})
 	}
