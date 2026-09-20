@@ -27,7 +27,7 @@ import {
   catalogMatchHTML, catalogMatchEditorHTML,
   settingsDiff, settingsRestartKeys, configSummaryHTML, TOKEN_RANGES, tokensRangeQuery, tokenRangeLabel,
   tokenRangeTriggerLabel, parseLocalDate, tokenRangeBounds, tokenCustomBounds, tokenRangePickerHTML,
-  quotaUsageFromSec, quotaWindowFromSec,
+  quotaUsageFromSec, quotaWindowFromSec, quotaWindowForProvider,
   WEEKDAYS, monthTitle, calendarMonthGrid, twoMonthWindow, shiftMonth, ymd, isFutureDay, rangePick,
   parseSSE, isSSE, prettyJSON, formatJSONLoose, highlightJSON, splitLinesByBudget, linkedModels,
   sessionsForAgent, linkedAgents,
@@ -50,6 +50,10 @@ import {
   takeoverFamilyGroups, takeoverFamilyBadge, highlightConfig,
   TAKEOVER_TEMPLATE_EXAMPLES, TAKEOVER_PLACEHOLDERS,
   shadowMatchBadge,
+  MCP_HISTORY_GRANULARITIES, MCP_HISTORY_METRICS, mcpHistoryFilterSeries, mcpHistorySummaryRows,
+  mcpHistoryChartSeries, mcpHistoryMetricOptions, mcpHistoryValueText,
+  mcpHistorySummaryTableHTML, mcpHistoryEmptyHTML, mcpHistorySkeletonHTML,
+  mcpSubTabFromHash, mcpHash,
 } from './pure.js';
 
 function el(tag, opts = {}) {
@@ -278,11 +282,11 @@ let activeTab = 'status';
 //   #config
 //   #accounts
 //   #accounts/<provider>   (Accounts tab with a provider selected)
-//   #requests?session=…&agent=…   (Requests tab filter — refresh/shared link
-//                                  lands on the same view; only non-default
-//                                  filter values ride along)
-//   #requests/live?stream=…&session=… (Requests → Live sub-view, one stream
-//                                  selected — same refresh/restore story)
+//   #requests/<stream>_<view>            (Requests tab — the four canonical
+//                                  segments: #requests/model_all,
+//                                  model_live, mcp_all, mcp_live; filter/
+//                                  session/drill params ride the query,
+//                                  refresh/shared links land on the same view)
 //   #security?kind=…&verdict=…&range=…&rule=…
 //                                 (Security tab filter — same story: kind is
 //                                  the server-side audit query filter, the
@@ -318,17 +322,70 @@ function statusHash() {
   return '#status/' + statusSelected;
 }
 
-// requestsHash builds the Requests URL hash from the live filter; only
-// non-default values ride along so an unfiltered tab stays a clean #requests.
-// A live request-drill pin (the Security page's "view the original request"
-// link) rides along too, so filter refinement does not drop the pinned view.
+// The Requests tab's view identity (stream × sub-view) rides the hash
+// SEGMENT, never the query:
+//   #requests/model_all   #requests/model_live    (Model stream)
+//   #requests/mcp_all     #requests/mcp_live      (MCP stream)
+// `all` is the persisted request log, `live` the SSE monitor. Filter,
+// session and drill pins ride the query; `stream` does not — the segment
+// owns it. Legacy shapes (bare #requests, #requests/live, ?stream=mcp) are
+// rewritten to the canonical segment in place by normalizeRequestsHash, so
+// refreshes and shared links from before the scheme change keep landing on
+// the same view.
+
+// requestsViewKey maps (stream, view) to the canonical segment.
+function requestsViewKey(stream, view) {
+  return (stream === 'mcp' ? 'mcp' : 'model') + '_' + (view === 'live' ? 'live' : 'all');
+}
+
+// requestsViewFromKey parses a canonical segment back to {stream, view}
+// ('' = Model stream); null for anything else (legacy/unknown subs).
+function requestsViewFromKey(key) {
+  const m = /^(model|mcp)_(all|live)$/.exec(key || '');
+  return m ? { key: m[0], stream: m[1] === 'mcp' ? 'mcp' : '', view: m[2] } : null;
+}
+
+// normalizeRequestsHash rewrites a legacy requests hash to the canonical
+// segment in place (replaceState — no history entry) and returns the fresh
+// parse; an already-canonical hash (no stray stream param) returns its parse
+// untouched. Runs at boot and on every hashchange, so downstream consumers
+// only ever see the four canonical segments. The legacy ?stream=mcp param is
+// absorbed into the segment and stripped from the query; when both are
+// present the segment wins.
+function normalizeRequestsHash(p) {
+  if (!p || p.tab !== 'requests') return p;
+  const canon = requestsViewFromKey(p.sub);
+  if (canon && !('stream' in p.query)) return p;
+  const stream = canon ? canon.stream : (p.query.stream === 'mcp' ? 'mcp' : '');
+  const view = canon ? canon.view : (p.sub === 'live' ? 'live' : 'all');
+  const q = { ...p.query };
+  delete q.stream;
+  const qs = new URLSearchParams(q).toString();
+  setHash('#requests/' + requestsViewKey(stream, view) + (qs ? '?' + qs : ''), false);
+  return parseHash();
+}
+
+// requestsLink builds a cross-tab drill link into the Model-stream request
+// log in the canonical segment shape (security hits, analytics rows and
+// session links are all LLM-side; MCP has no cross-tab drill sources).
+function requestsLink(queryStr) {
+  return '#requests/model_all' + (queryStr ? '?' + queryStr : '');
+}
+
+// requestsHash builds the Requests URL hash in the canonical
+// #requests/<stream>_<view> segment shape: the segment owns BOTH the stream
+// and the sub-view; only non-default filter values, the live session pin and
+// a request-drill pin (the Security page's "view the original request"
+// link) ride the query, so an unfiltered view stays a bare segment.
 function requestsHash() {
-  if (requestsSub === 'live') {
+  const page = activeRequestsPage();
+  const seg = page.key;
+  if (page.view === 'live') {
+    const S = activeLiveState() || { session: '' };
     const q = new URLSearchParams();
-    if (requestsFilter.stream) q.set('stream', requestsFilter.stream);
-    if (liveSessionFilter) q.set('session', liveSessionFilter);
+    if (S.session) q.set('session', S.session);
     const qs = q.toString();
-    return '#requests/live' + (qs ? '?' + qs : '');
+    return '#requests/' + seg + (qs ? '?' + qs : '');
   }
   const parts = [requestsFilterQuery(requestsFilter)];
   if (requestDrill) {
@@ -337,7 +394,7 @@ function requestsHash() {
     if (requestDrill.name) parts.push('name=' + encodeURIComponent(requestDrill.name));
   }
   const q = parts.filter(Boolean).join('&');
-  return '#requests' + (q ? '?' + q : '');
+  return '#requests/' + seg + (q ? '?' + q : '');
 }
 
 // securityHash builds the Security URL hash from the live filter (same
@@ -353,10 +410,13 @@ function updateSecurityHash() {
   if (activeTab === 'security') setHash(securityHash(), false);
 }
 
-// updateRequestsHash mirrors filter changes into the URL (replaceState, like
-// the Accounts provider pin — in-tab refinement must not spam history).
-function updateRequestsHash() {
-  if (activeTab === 'requests') setHash(requestsHash(), false);
+// updateRequestsHash mirrors filter changes into the URL. replaceState by
+// default (in-tab refinement must not spam history); push=true for session
+// navigation — drilling into a session is a VIEW change, so Back must
+// return to the unfiltered list instead of skipping past the Requests tab
+// (replace rewrote the tab's only history entry).
+function updateRequestsHash(push) {
+  if (activeTab === 'requests') setHash(requestsHash(), !!push);
 }
 
 // syncRequestsFreeControls pushes the filter state into the free-form
@@ -456,6 +516,7 @@ function activateTab(name) {
   if (name === 'status') setHash(statusHash(), true);
   else if (name === 'requests') setHash(requestsHash(), true);
   else if (name === 'security') setHash(securityHash(), true);
+  else if (name === 'mcp') setHash(mcpHash(mcpSubTabState()), true);
   else if (name !== 'accounts') setHash(tabHash(name), true);
 }
 
@@ -466,13 +527,14 @@ for (const b of tabBtns) {
 // hashchange: browser back/forward (or manual hash edit) drives the view. Apply
 // the hash's tab + (Accounts) provider WITHOUT pushing back, avoiding a loop.
 function handleHashChange() {
-  const { tab, sub, query } = parseHash();
-  // Seed the Requests filter BEFORE activation: the first mount templates the
-  // free inputs from it and the re-entry path loads through it. Same for the
-  // Security filter (its first mount templates the selects from it).
-  const nextFilter = tab === 'requests' ? requestsFilterFromQuery(query) : null;
-  if (nextFilter) requestsFilter = nextFilter;
-  if (tab === 'requests') requestDrill = requestDrillFromQuery(query);
+  // Canonicalize the requests hash first (legacy shapes rewrite in place):
+  // everything below sees only the four #requests/<stream>_<view> segments.
+  const { tab, sub, query } = normalizeRequestsHash(parseHash());
+  const reqView = tab === 'requests' ? requestsViewFromKey(sub) : null;
+  // Requests filter/drill seeding does NOT happen here — the router owns it
+  // (mountLogPage/applyLogQuery seed the target page's slice; seeding here
+  // would pollute the PREVIOUS page's filters on a cross-page step). Same
+  // for the Security filter (its first mount templates the selects from it).
   const secSeed = tab === 'security' ? securityFilterFromQuery(query) : null;
   if (secSeed) securityFilter = secSeed;
   const switched = tab !== activeTab;
@@ -484,53 +546,55 @@ function handleHashChange() {
   }
   if (tab === 'status' && sub === 'live') {
     // Legacy links: the live monitor moved to the Requests tab. Rewrite the
-    // hash in place (replaceState — no history spam) and re-dispatch through
-    // the requests branch below by recursing once on the rewritten hash.
+    // hash in place (replaceState — no history spam) to the canonical
+    // requests segment and re-dispatch through the requests branch below by
+    // recursing once on the rewritten hash.
+    const stream = query.stream === 'mcp' ? 'mcp' : '';
     const q = new URLSearchParams();
-    if (query.stream) q.set('stream', query.stream);
     if (query.session) q.set('session', query.session);
     const qs = q.toString();
-    setHash('#requests/live' + (qs ? '?' + qs : ''), false);
+    setHash('#requests/' + requestsViewKey(stream, 'live') + (qs ? '?' + qs : ''), false);
     handleHashChange();
     return;
   }
   if (tab === 'status' && sub) {
     selectStatusSectionSilent(sub);
   }
-  if (tab === 'requests') {
-    // Sub-view routing (#requests/live vs the log): apply the hash's sub and
-    // — on the live view — its session pin, the same mount-race-safe way the
-    // Status-era code did (bootLiveSession feeds the card's mount).
-    if (sub === 'live') {
+  if (reqView) {
+    // Page routing goes through the router — the single mount/unmount/sync
+    // ordering (per-path drift here was the flip/reload/pool bug farm):
+    // a cross-page step mounts the target page (seeding its filter/drill
+    // slice), a same-page step lets the page apply the refinement itself.
+    if (reqView.key !== activeRequestsPageKey) {
+      navigateRequestsPage(reqView.key, { query, push: false });
+    } else if (reqView.view !== 'live') {
+      // History-driven same-page refinement REMOUNTS the log page instead
+      // of applying in place: Chrome's form-state restore on same-document
+      // Back asynchronously reverts the selects to the pushed entry's
+      // snapshot (no JS events), and any later DOM read-back re-drills the
+      // filters — a fresh mount owns its controls outright.
+      // (requestsViewFromKey speaks the SEGMENT vocabulary 'all'|'live'; the
+      // page configs' 'log'|'live' — comparing against 'log' never matched
+      // and every same-page Back fell into the live branch below, where
+      // renderLiveTable on a log page threw `ringIn is not a function` and
+      // the drill never unmounted.)
+      const hostLog = document.getElementById('req-log-view');
+      if (hostLog) hostLog.innerHTML = '';
+      // A bare segment seeds nothing — reset the slice so the remount
+      // paints the unfiltered list (a query-carrying step seeds below).
+      const st = logPageState[reqView.key];
+      if (st && !requestsFilterFromQuery(query)) clearLogFilters(st);
+      navigateRequestsPage(reqView.key, { query, push: false });
+    } else {
+      const S = activeLiveState();
       const liveSess = query.session || '';
-      if (requestsSub !== 'live') {
-        bootLiveSession = liveSess;
-        applyRequestsSub('live', false);
-      } else if (document.getElementById('live-session')) {
-        if (liveSessionFilter !== liveSess) onLiveSessionChange(liveSess);
+      if (S && document.getElementById('live-session') && S.session !== liveSess) {
+        onLiveSessionChange(liveSess);
       }
-      syncLogStreamUI();
-      syncLiveStreamUI();
-      syncReqNav();
       if (document.getElementById('live-table')) renderLiveTable();
-      // The log reload for a changed filter/stream is handled by the shared
-      // nextFilter block below (it also runs on the live sub-view — a
-      // background refresh of the hidden log table, harmless and idempotent).
-    } else if (requestsSub !== 'log') {
-      applyRequestsSub('log', false);
+      scheduleFormRestoreGuard();
     }
   }
-  if (tab === 'requests' && nextFilter) {
-    // After a tab switch renderRequestsTab already rendered through the
-    // seeded filter; the free controls still need the sync (the re-entry
-    // path does not rebuild them). Without a switch this IS the reload.
-    syncRequestsFreeControls();
-    if (!switched && requestsCombos && document.getElementById('req-table')) {
-      renderRequestSelectors(requestsCombos);
-      loadRequests(requestsCombos);
-    }
-  }
-  if (tab === 'requests') applyRequestDrill();
   if (tab === 'security' && secSeed) {
     // Mirror image of the requests branch: after a switch the tab render
     // already ran through the seeded filter; without one (an in-tab hash
@@ -539,6 +603,17 @@ function handleHashChange() {
     if (!switched && document.getElementById('sec-table')) {
       loadSecurity();
       renderSecurityFeed();
+    }
+  }
+  if (tab === 'mcp') {
+    const target = mcpSubTabFromHash(sub) || mcpSubTabState();
+    mcpSubTabSave(target);
+    if (!switched) {
+      const host = panels.mcp && panels.mcp.querySelector('.mcp-host');
+      if (host) {
+        mcpShowSubTab(host, target);
+        if (target === 'history' && !mcpHistoryData && !mcpHistoryLoading) loadMCPHistory(host);
+      }
     }
   }
 }
@@ -573,17 +648,108 @@ function activateTabSilent(name) {
   if (name === 'security') renderSecurityTab();
 }
 
-// ---------- Requests tab (request-log query UI) ----------
+// ---------- Requests tab: four pages over shared engines ----------
+//
+// Architecture (docs/frontend.md「Requests 页」): the four views —
+// model_all | model_live | mcp_all | mcp_live — are PAGES. Each page carries
+// its whole domain config (query kind, session-pool source, ring predicate,
+// table/session-view opts, detail routing) and its OWN state (filters on
+// the log pages, session selection on the live pages); nothing branches on
+// a stream flag. The engines — log table + virtual scroll, the SSE live
+// ring, detail views — are shared components that serve whichever page is
+// mounted, reading the page's config through activeRequestsPage(). The
+// router navigateRequestsPage() is the ONLY writer of "which page is
+// mounted": sidebar clicks, hashchange, boot and tab re-entry all funnel
+// through it, so apply/sync/render has exactly one ordering (the per-path
+// ordering drift was where the flip/reload/pool bugs lived).
 
-// Per-tab filter state (model/provider substring, exact agent/session, plus
-// errors-only and the shadow tri-state).
-// Persists across re-renders within a session so a refresh keeps the view.
-let requestsFilter = { stream: '', session: '', agent: '', model: '', provider: '', errors: false, shadow: '' };
-// The Requests tab's sub-view: 'log' (persisted request log) or 'live' (the
-// SSE monitor, moved here from the Status tab). The stream (requestsFilter.
-// stream, '' = LLM/Model, 'mcp') is shared by both sub-views — the LLM/MCP
-// choice follows the user across the log and the live monitor.
-let requestsSub = 'log';
+// Page configs. stream/view mirror the nav dimensions (nav buttons encode
+// both); every other slot is a domain decision the engines consume:
+//   kind            /api/requests kind param ('' = server default LLM)
+//   detailKind      /api/requests/<id> kind hint ('' = none)
+//   modelPlaceholder  the model combo's placeholder wording
+//   pool            session-pool source for BOTH pages of the domain:
+//                   'sessions' (/api/sessions
+//                   aggregate) | 'mcp-records' (derive from kind=mcp records)
+//   ringIn          live-ring membership predicate for this page
+//   standaloneEvents  whether non-request SSE events (budget & friends)
+//                   render as standalone rows (LLM-side signals)
+//   table           requestTableHeadHTML/requestRowHTML opts (domain switch)
+//   sessionView     sessionViewHTML opts (chips/identity domain switch)
+//   logSessionsFromAggregate  log page: session options come from the
+//                   /api/sessions-linked aggregate (true) or from the
+//                   loaded records themselves (false — MCP)
+//   replay          whether the replay strip is offered (LLM forward only)
+const REQUESTS_PAGES = {
+  model_all: {
+    key: 'model_all', stream: '', view: 'log',
+    kind: '', detailKind: '', modelPlaceholder: 'All Models',
+    logSessionsFromAggregate: true, replay: true,
+    table: {}, sessionView: {},
+  },
+  model_live: {
+    key: 'model_live', stream: '', view: 'live',
+    kind: '', detailKind: '',
+    pool: 'sessions', ringIn: (r) => r.proto !== 'mcp', standaloneEvents: true,
+    table: {}, sessionView: {},
+  },
+  mcp_all: {
+    key: 'mcp_all', stream: 'mcp', view: 'log',
+    kind: 'mcp', detailKind: 'mcp', modelPlaceholder: 'All Servers',
+    pool: 'mcp-records',
+    logSessionsFromAggregate: false, replay: false,
+    table: { mcp: true }, sessionView: { mcp: true },
+  },
+  mcp_live: {
+    key: 'mcp_live', stream: 'mcp', view: 'live',
+    kind: 'mcp', detailKind: 'mcp',
+    pool: 'mcp-records', ringIn: (r) => r.proto === 'mcp', standaloneEvents: false,
+    table: { mcp: true }, sessionView: { mcp: true },
+  },
+};
+
+// Router-owned: which page is mounted ('' = none yet).
+let activeRequestsPageKey = '';
+function activeRequestsPage() {
+  return REQUESTS_PAGES[activeRequestsPageKey] || REQUESTS_PAGES.model_all;
+}
+
+// Per-page state stores. The log pages own filters + facet/record state and
+// the drill pin; the live pages own their session selection state. Switching
+// pages never copies state across (ids do not cross streams) — each page
+// resumes where the user left it.
+function newLogPageState() {
+  return {
+    filters: { session: '', agent: '', model: '', provider: '', errors: false, shadow: '' },
+    combos: { providerOptions: [], modelOptions: [], facetState: { providerModels: {}, agents: [] }, sessions: [], lastRecords: [], sessionPool: [] },
+    drill: null,
+  };
+}
+function newLivePageState() {
+  return {
+    session: '', records: [], agg: null, list: [],
+    loading: false, error: '', optionsKey: '', bootPin: '',
+  };
+}
+const logPageState = {
+  model_all: newLogPageState(),
+  mcp_all: newLogPageState(),
+};
+const livePageState = {
+  model_live: newLivePageState(),
+  mcp_live: newLivePageState(),
+};
+function activeLogState() { return logPageState[activeRequestsPageKey] || null; }
+function activeLiveState() { return livePageState[activeRequestsPageKey] || null; }
+
+// Engine seams: the log engine's historical module bindings are REASSIGNED
+// by the router to the active page's state objects on every log-page mount,
+// so reads and writes land in that page's slice. requestsFilter.stream no
+// longer exists — the page key owns the stream (pure.js query functions
+// never see it).
+let requestsFilter = logPageState.model_all.filters;
+let requestsCombos = logPageState.model_all.combos;
+let requestDrill = null;
 
 // renderRequestsTab builds the request-log query view: a filter row + a table of
 // metadata-only summaries fetched from /api/requests, with click-to-expand rows
@@ -594,7 +760,6 @@ let requestsSub = 'log';
 // fetched rows (so the session summary can render once the aggregate
 // arrives). Module scope: tab re-entry skips the skeleton rebuild below and
 // must refresh through the same object the wired controls use.
-let requestsCombos = null;
 
 // retainTab implements the stale-while-revalidate tab re-entry guard (the
 // "切 tab 不得闪骨架屏" rule): when the first-activation skeleton has already
@@ -613,7 +778,8 @@ async function retainTab(panel, marker, refresh) {
 // directly (an MCP id is never in the requests index; without the hint the
 // index miss falls back to scanning the whole multi-GB requests directory).
 function requestDetailURL(id) {
-  return '/api/requests/' + encodeURIComponent(id) + (requestsFilter.stream === 'mcp' ? '?kind=mcp' : '');
+  const hint = activeRequestsPage().detailKind;
+  return '/api/requests/' + encodeURIComponent(id) + (hint ? '?kind=' + hint : '');
 }
 
 // sessionLinkClick returns the session id when a row click landed on the
@@ -625,14 +791,13 @@ function sessionLinkClick(e) {
   return link && link.dataset.session ? link.dataset.session : null;
 }
 
-// The request-drill pin: #requests?request=<id>&kind=&name= (the Security
+// The request-drill pin: #requests/model_all?request=<id>&kind=&name= (the Security
 // page's "view the original request" link). The pinned request renders as an
 // expanded card above the table — the guard hits located and highlighted
 // (the explain view) on top of the full request detail (the same renderer
 // the table's row expansion uses) — independent of the table's filters, so
-// an old or filtered-out request still drills cleanly.
-let requestDrill = null;
-
+// an old or filtered-out request still drills cleanly. (The binding is a
+// router-managed seam over the active log page's slice.)
 function requestDrillFromQuery(params) {
   if (!params || !params.request) return null;
   return {
@@ -699,99 +864,197 @@ async function applyRequestDrill() {
   reqDetailChanged();
 }
 
+// renderRequestsTab builds the Requests tab SHELL only — the sidebar nav
+// and the two page hosts — then hands off to the router. The shell survives
+// tab re-entry (retainTab); pages mount/unmount inside it.
 async function renderRequestsTab() {
   const panel = panels.requests;
   if (!panel) return;
-  if (await retainTab(panel, '#req-table', () => refreshRequestsData(requestsCombos))) {
-    // Retained mount: restore the last sub-view (a live mount remounts here —
-    // the SSE was closed when the tab was left; completed rows survive).
-    applyRequestsSub(requestsSub, false);
+  if (await retainTab(panel, '.req-layout', () => reenterRequestsPage())) {
+    // Retained shell: the live SSE was closed when the tab was left —
+    // reenterRequestsPage already remounted/refreshed the active page.
+    syncReqNav();
     return;
   }
-  // Seed the filter from the URL hash (#requests?session=…): a refresh or a
-  // shared link must land on the same view, not the unfiltered list. The
-  // skeleton below templates the free inputs from the filter; the linked
-  // selects pick it up in renderRequestSelectors (an unknown id is kept as
-  // an option so the selection stays visible and reversible).
-  const seeded = requestsFilterFromQuery(parseHash().query);
-  if (seeded) requestsFilter = seeded;
-  requestDrill = requestDrillFromQuery(parseHash().query);
-  const startSub = parseHash().sub === 'live' ? 'live' : 'log';
-  if (startSub === 'live' && parseHash().query.session) bootLiveSession = parseHash().query.session;
-  resetCombos();
   panel.innerHTML = `<div class="req-layout"><nav class="req-nav" aria-label="Requests sections">
-      <div class="req-nav-group"${requestsFilter.stream === '' ? ' data-on="1"' : ''}>
+      <div class="req-nav-group" data-stream="">
         <div class="req-nav-title">Model</div>
-        <button type="button" class="req-nav-item${startSub === 'log' && requestsFilter.stream === '' ? ' active' : ''}" data-sub="log" data-stream="">All Requests</button>
-        <button type="button" class="req-nav-item${startSub === 'live' && requestsFilter.stream === '' ? ' active' : ''}" data-sub="live" data-stream="">Live Requests</button>
+        <button type="button" class="req-nav-item" data-sub="log" data-stream="">All Requests</button>
+        <button type="button" class="req-nav-item" data-sub="live" data-stream="">Live Requests</button>
       </div>
-      <div class="req-nav-group"${requestsFilter.stream === 'mcp' ? ' data-on="1"' : ''}>
+      <div class="req-nav-group" data-stream="mcp">
         <div class="req-nav-title">MCP</div>
-        <button type="button" class="req-nav-item${startSub === 'log' && requestsFilter.stream === 'mcp' ? ' active' : ''}" data-sub="log" data-stream="mcp">All Requests</button>
-        <button type="button" class="req-nav-item${startSub === 'live' && requestsFilter.stream === 'mcp' ? ' active' : ''}" data-sub="live" data-stream="mcp">Live Requests</button>
+        <button type="button" class="req-nav-item" data-sub="log" data-stream="mcp">All Requests</button>
+        <button type="button" class="req-nav-item" data-sub="live" data-stream="mcp">Live Requests</button>
       </div>
     </nav><div class="req-main"><div class="card card-open"><div class="card-body">
-    <div id="req-log-view"${startSub === 'live' ? ' hidden' : ''}>
+    <div id="req-log-view" hidden></div>
+    <div id="req-live-view" hidden></div>
+  </div></div></div></div>`;
+  panel.querySelectorAll('.req-nav-item').forEach((b) => {
+    b.addEventListener('click', () => navigateRequestsPage(
+      (b.dataset.stream === 'mcp' ? 'mcp' : 'model') + '_' + (b.dataset.sub === 'live' ? 'live' : 'all'),
+      { push: true },
+    ));
+  });
+  // Mount the page the (already canonical) hash names; a non-requests hash
+  // (sidebar tab click into the tab) falls back to model_all.
+  // Parse the target page BEFORE any await can observe a mid-flight hash
+  // (activateTab pushes the requests hash while this async mount runs).
+  const bootView = requestsViewFromKey(parseHash().sub);
+  navigateRequestsPage(bootView ? bootView.key : 'model_all', { query: parseHash().query });
+}
+
+// navigateRequestsPage is the router — the ONLY writer of which page is
+// mounted. Every entry path (sidebar clicks, hashchange, boot, tab
+// re-entry) funnels through here, so mount/sync/render has one ordering.
+//   key    one of model_all | model_live | mcp_all | mcp_live
+//   opts.query  hash query params to apply (filters / drill / session pin)
+//   opts.push   add a history entry (user navigation)
+function navigateRequestsPage(key, opts) {
+  const page = REQUESTS_PAGES[key];
+  if (!page) return;
+  navigateRequestsPageInner(page, opts);
+}
+function navigateRequestsPageInner(page, opts) {
+  const key = page.key;
+  const o = opts || {};
+  const query = o.query || {};
+  const hostLog = document.getElementById('req-log-view');
+  const hostLive = document.getElementById('req-live-view');
+  if (!hostLog || !hostLive) return;
+  const prev = activeRequestsPageKey;
+  const switching = prev !== key;
+  activeRequestsPageKey = key;
+
+  // UNMOUNT the outgoing page's DOM: exactly one page owns a host at a time
+  // (a hidden-but-alive previous mount keeps stale controls interactive and
+  // lets clicks land in an invisible table). Page STATE survives in its
+  // slice; only the DOM goes.
+  if (prev && prev !== key) {
+    const prevPage = REQUESTS_PAGES[prev];
+    if (prevPage) {
+      if (prevPage.view === 'log') {
+        if (logPageState[prev]) logPageState[prev].drill = requestDrill;
+        const hostLogOut = document.getElementById('req-log-view');
+        if (hostLogOut) hostLogOut.innerHTML = '';
+      } else {
+        stopLiveEvents();
+      }
+    }
+  }
+
+  if (page.view === 'log') {
+    // Bind the log engine's seams to THIS page's state before anything reads.
+    const st = logPageState[key];
+    requestsFilter = st.filters;
+    requestsCombos = st.combos;
+    requestDrill = st.drill;
+  }
+
+  syncReqNav();
+  hostLog.hidden = page.view === 'live';
+  hostLive.hidden = page.view !== 'live';
+
+  if (page.view === 'log') {
+    if (switching || !hostLog.querySelector('.req-controls')) mountLogPage(page, query);
+    else applyLogQuery(query);
+  } else {
+    // Live pages always (re)mount the card: the SSE closes on tab leave and
+    // sub-view switch, and renderLiveCard owns ring retention + the session
+    // resume, so a remount is the same cheap operation as a refresh.
+    hostLive.innerHTML = '';
+    renderLiveCard(hostLive, query);
+  }
+  if (o.push) setHash(requestsHash(), true);
+  else if (activeTab === 'requests' && parseHash().tab === 'requests') setHash(requestsHash(), false);
+}
+
+// reenterRequestsPage is the retained-shell tab re-entry hook: refresh the
+// active page in place (log: data reload through its wired controls; live:
+// card remount — the SSE was closed when the tab was left).
+function reenterRequestsPage() {
+  const page = activeRequestsPage();
+  if (!activeRequestsPageKey) return;
+  if (page.view === 'log') {
+    refreshRequestsData(requestsCombos);
+    applyRequestDrill();
+  } else {
+    const hostLive = document.getElementById('req-live-view');
+    if (hostLive) { hostLive.innerHTML = ''; renderLiveCard(hostLive, {}); }
+  }
+}
+
+// syncReqNav highlights the sidebar item matching the mounted page (the nav
+// encodes both dimensions: data-stream × data-sub).
+function syncReqNav() {
+  const page = activeRequestsPage();
+  document.querySelectorAll('.req-nav-item').forEach((b) => {
+    b.classList.toggle('active', b.dataset.sub === page.view && b.dataset.stream === page.stream);
+  });
+  document.querySelectorAll('.req-nav-group').forEach((g) => {
+    if (g.dataset.stream === page.stream) g.setAttribute('data-on', '1');
+    else g.removeAttribute('data-on');
+  });
+}
+
+// mountLogPage builds one log page's view into #req-log-view from ITS OWN
+// state (filters/facets/records persist per page) and seeds any query keys
+// the hash carries. The controls' wiring is mount-local; all writes land in
+// the page's slice through the engine seams.
+function mountLogPage(page, query) {
+  const host = document.getElementById('req-log-view');
+  if (!host) return;
+  const st = logPageState[page.key];
+  // Seed filter keys from the hash (a refresh or shared link lands on the
+  // same view; unknown keys drop). Object.assign keeps the page's filter
+  // OBJECT identity (the engine seams point at it).
+  const seeded = requestsFilterFromQuery(query);
+  if (seeded) Object.assign(st.filters, seeded);
+  st.drill = requestDrillFromQuery(query);
+  requestDrill = st.drill;
+  host.innerHTML = `
     <div class="req-controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
       <select id="req-agent" class="req-input" title="filter by client agent"><option value="">All Agents</option></select>
       <select id="req-session" class="req-input" title="filter by session (Model: client session header; MCP: the exchange's session id)"><option value="">All Sessions</option></select>
-      <span class="combo"><input id="req-provider" placeholder="All Providers" value="${esc(requestsFilter.provider)}" class="req-input"/></span>
-      <span class="combo"><input id="req-model" placeholder="${requestsFilter.stream === 'mcp' ? 'All Servers' : 'All Models'}" value="${esc(requestsFilter.model)}" class="req-input"/></span>
-      <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="req-errors" ${requestsFilter.errors ? 'checked' : ''}/> Errors Only</label>
+      <span class="combo"><input id="req-provider" placeholder="All Providers" value="${esc(st.filters.provider)}" class="req-input"/></span>
+      <span class="combo"><input id="req-model" placeholder="${esc(page.modelPlaceholder)}" value="${esc(st.filters.model)}" class="req-input"/></span>
+      <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="req-errors" ${st.filters.errors ? 'checked' : ''}/> Errors Only</label>
       <button id="req-refresh" class="btn">${iconRefresh()}Refresh</button>
     </div>
     <div id="req-session-summary" class="sess-sticky" style="margin-bottom:12px" hidden></div>
     <div id="req-drill" hidden></div>
-    <div id="req-table"></div>
-    </div>
-    <div id="req-live-view"${startSub !== 'live' ? ' hidden' : ''}></div>
-  </div></div></div></div>`;
-  panel.querySelectorAll('.req-nav-item').forEach((b) => {
-    b.addEventListener('click', () => selectRequestsView(
-      b.dataset.sub === 'live' ? 'live' : 'log',
-      b.dataset.stream === 'mcp' ? 'mcp' : '',
-      true,
-    ));
-  });
-  applyRequestDrill();
-  const combos = requestsCombos = {
-    providerOptions: [], modelOptions: [],
-    facetState: { providerModels: {}, agents: [] },
-    sessions: [], lastRecords: [],
-  };
+    <div id="req-table"></div>`;
+  const combos = st.combos;
   const refresh = () => {
-    requestsFilter.agent = document.getElementById('req-agent').value;
-    requestsFilter.session = document.getElementById('req-session').value;
-    requestsFilter.provider = document.getElementById('req-provider').value.trim();
-    requestsFilter.model = document.getElementById('req-model').value.trim();
-    requestsFilter.errors = document.getElementById('req-errors').checked;
+    st.filters.agent = document.getElementById('req-agent').value;
+    st.filters.session = document.getElementById('req-session').value;
+    st.filters.provider = document.getElementById('req-provider').value.trim();
+    st.filters.model = document.getElementById('req-model').value.trim();
+    st.filters.errors = document.getElementById('req-errors').checked;
     updateRequestsHash();
     loadRequests(combos);
   };
-  // The left sidebar's items drive both dimensions (sub-view + stream)
-  // through module-level selectRequestsView; the log reload needs this
-  // closure's filter machinery, so hand it the entry points.
-  reloadRequestsLogView = () => {
-    renderRequestSelectors(combos);
-    refresh();
-  };
-  reloadRequestsLiveView = () => renderLiveTable();
   // Agent and session are linked both ways: picking an agent narrows the
   // session list to that agent's sessions, and picking a session narrows the
   // agent list to the agents seen on it (normally pinning a single one). A
   // selection the other dimension no longer offers is cleared rather than
   // silently ANDed into an empty result.
   const onAgentSelect = () => {
-    requestsFilter.agent = document.getElementById('req-agent').value;
-    const allowed = sessionsForAgent(requestsFilter.agent, combos.sessions).map((s) => s.session_id);
-    if (requestsFilter.session && !allowed.includes(requestsFilter.session)) requestsFilter.session = '';
+    st.filters.agent = document.getElementById('req-agent').value;
+    const allowed = sessionsForAgent(st.filters.agent, combos.sessions).map((s) => s.session_id);
+    if (st.filters.session && !allowed.includes(st.filters.session)) st.filters.session = '';
     renderRequestSelectors(combos);
     refresh();
   };
   const onSessionSelect = () => {
-    requestsFilter.session = document.getElementById('req-session').value;
-    const allowed = linkedAgents(requestsFilter.session, combos.sessions, combos.facetState.agents);
-    if (requestsFilter.agent && !allowed.includes(requestsFilter.agent)) requestsFilter.agent = '';
+    st.filters.session = document.getElementById('req-session').value;
+    const allowed = linkedAgents(st.filters.session, combos.sessions, combos.facetState.agents);
+    if (st.filters.agent && !allowed.includes(st.filters.agent)) st.filters.agent = '';
+    // Session pick is navigation (push): Back returns to the unfiltered
+    // list. Must run before refresh() — refresh's own hash write is a
+    // replace, which no-ops once the hash already matches.
+    updateRequestsHash(true);
     renderRequestSelectors(combos);
     refresh();
   };
@@ -810,8 +1073,8 @@ async function renderRequestsTab() {
   // the text combos; the change dispatch drives onAgentSelect/onSessionSelect).
   attachClearable(document.getElementById('req-agent'));
   attachClearable(document.getElementById('req-session'));
-  // The checkbox applies immediately too — every filter control (session,
-  // combos, shadow select, errors only) has the same on-change behavior.
+  // The checkbox applies immediately too — every filter control has the same
+  // on-change behavior.
   document.getElementById('req-errors').onchange = refresh;
   attachCombo(document.getElementById('req-provider'), combos.providerOptions, onProviderSelect);
   attachCombo(document.getElementById('req-model'), combos.modelOptions, refresh);
@@ -820,78 +1083,73 @@ async function renderRequestsTab() {
   // back out of the DOM, so an empty select would otherwise clear a filter
   // that survived the re-render.
   refreshRequestsData(combos);
-  applyRequestsSub(startSub, false);
+  applyRequestDrill();
+  // Chrome's same-document history form restore can revert the freshly
+  // painted selects to the pushed entry's snapshot (history-driven
+  // remounts land here right after Back) — the guard re-asserts the page
+  // state's values for a short window.
+  scheduleFormRestoreGuard();
 }
 
-// applyRequestsSub switches the Requests tab's sub-view: the persisted log or
-// the live SSE monitor (moved here from the Status tab). push=true adds a
-// history entry (a sub-nav click the user may Back out of); false only keeps
-// the hash in agreement (hashchange/boot/retain paths, where the hash already
-// reflects the target).
-function applyRequestsSub(sub, push) {
-  if (sub !== 'live') sub = 'log';
-  requestsSub = sub;
-  const logView = document.getElementById('req-log-view');
-  const liveView = document.getElementById('req-live-view');
-  if (!logView || !liveView) return;
-  logView.hidden = sub === 'live';
-  liveView.hidden = sub !== 'live';
-  syncReqNav();
-  if (sub === 'live') {
-    // Mount on first entry — and on re-entry after the tab leave closed the
-    // SSE: renderLiveCard appends its card, so clear the host first (the
-    // previous mount's DOM lingers); completed rows survive in the ring.
-    if (!liveActive) {
-      liveView.innerHTML = '';
-      renderLiveCard(liveView);
+// scheduleFormRestoreGuard re-applies the page's control values shortly
+// after a history-driven (Back/Forward) application. Chrome restores form
+// controls to the pushed entry's snapshot on same-document history
+// navigation — asynchronously, AFTER the hashchange handler's sync render —
+// silently reverting selects (no JS setter, no DOM mutation events). One
+// deferred re-apply lands after the restore window and wins.
+function scheduleFormRestoreGuard() {
+  const page = activeRequestsPageKey;
+  const deadline = performance.now() + 4000;
+  const tick = () => {
+    if (activeRequestsPageKey !== page || performance.now() > deadline) return;
+    const pageInfo = REQUESTS_PAGES[page];
+    if (pageInfo && pageInfo.view === 'log') {
+      const st = logPageState[page];
+      if (st) {
+        const sel = document.getElementById('req-session');
+        if (sel && sel.value !== st.filters.session) sel.value = st.filters.session;
+        const agent = document.getElementById('req-agent');
+        if (agent && agent.value !== st.filters.agent) agent.value = st.filters.agent;
+      }
+    } else {
+      const S = livePageState[page];
+      const sel = document.getElementById('live-session');
+      if (S && sel && sel.value !== S.session) sel.value = S.session;
     }
-  } else {
-    stopLiveEvents();
-    syncLogStreamUI();
-  }
-  if (push) setHash(requestsHash(), true);
-  else if (activeTab === 'requests' && parseHash().tab === 'requests') setHash(requestsHash(), false);
+    window.setTimeout(tick, 100);
+  };
+  window.setTimeout(tick, 100);
 }
 
-// syncReqNav highlights the sidebar item matching the CURRENT (sub, stream)
-// pair — the nav encodes both dimensions (Log: LLM/MCP, Live: Model/MCP).
-function syncReqNav() {
-  document.querySelectorAll('.req-nav-item').forEach((b) => {
-    b.classList.toggle('active', b.dataset.sub === requestsSub && b.dataset.stream === requestsFilter.stream);
-  });
-  document.querySelectorAll('.req-nav-group').forEach((g) => {
-    if (g.dataset.stream === requestsFilter.stream) g.setAttribute('data-on', '1');
-    else g.removeAttribute('data-on');
-  });
+// applyLogQuery handles a same-page hash refinement (Back/Forward between
+// filter steps of the SAME log page): re-seed the filter keys and reload.
+// clearLogFilters resets a log page's filter slice to its unfiltered
+// state — the target of a history step onto a bare segment (Back from a
+// drilled session must land on the plain list, not keep the pin).
+function clearLogFilters(st) {
+  st.filters.session = '';
+  st.filters.agent = '';
+  st.filters.model = '';
+  st.filters.provider = '';
+  st.filters.errors = false;
+  st.filters.shadow = '';
 }
 
-// selectRequestsView is the sidebar's click action: one item pins both the
-// sub-view and the stream. reloadLog/reloadLive are injected by the Requests
-// mount (they close over the log filter machinery); direct hashchange/boot
-// paths bypass this and apply pieces individually.
-let reloadRequestsLogView = null;
-let reloadRequestsLiveView = null;
-
-function selectRequestsView(sub, stream, push) {
-  if (sub !== 'live') sub = 'log';
-  const nextStream = stream === 'mcp' ? 'mcp' : '';
-  const streamChanged = requestsFilter.stream !== nextStream;
-  const subChanged = requestsSub !== sub;
-  if (!streamChanged && !subChanged) return;
-  if (streamChanged) {
-    applyRequestsStreamFlip(nextStream);
-  }
-  if (subChanged) {
-    applyRequestsSub(sub, false);
-  } else {
-    syncReqNav();
-  }
-  if (sub === 'log') {
-    if (reloadRequestsLogView) reloadRequestsLogView();
-  } else if (subChanged) {
-    if (reloadRequestsLiveView) reloadRequestsLiveView();
-  }
-  if (push) setHash(requestsHash(), true);
+function applyLogQuery(query) {
+  const st = activeLogState();
+  const seeded = requestsFilterFromQuery(query);
+  // A bare segment (no query keys) is the unfiltered list: Back from a
+  // drilled session lands here, so a null seed must CLEAR the filters
+  // instead of no-op'ing (the session pin would survive the Back step).
+  if (seeded) Object.assign(st.filters, seeded);
+  else clearLogFilters(st);
+  requestDrill = requestDrillFromQuery(query);
+  st.drill = requestDrill;
+  syncRequestsFreeControls();
+  renderRequestSelectors(st.combos);
+  loadRequests(st.combos);
+  applyRequestDrill();
+  scheduleFormRestoreGuard();
 }
 
 // refreshRequestsData repaints the retained filter selections, reloads the
@@ -935,16 +1193,19 @@ function renderRequestSelectors(combos) {
     // summaries; no live rows to merge here). The MCP stream derives its
     // options from the loaded MCP records themselves — the /api/sessions
     // aggregate is LLM-only — newest first, no agent linkage.
+    // Session options follow the page config: the aggregate-linked list
+    // (Model) or the MCP session POOL — an independent kind=mcp query with
+    // no filters, the SAME source the Live page's dropdown uses, so both
+    // MCP pages list identical sessions. The loaded records are only a
+    // fallback while the pool is still in flight.
     let ids;
-    if (requestsFilter.stream === 'mcp') {
-      const seen = new Set();
-      ids = [];
-      for (const rec of (combos.lastRecords || [])) {
-        const sid = rec.session_id || '';
-        if (sid && !seen.has(sid)) { seen.add(sid); ids.push(sid); }
-      }
-    } else {
+    if (activeRequestsPage().logSessionsFromAggregate) {
       ids = liveSessionOrder(sessionsForAgent(requestsFilter.agent, combos.sessions), []);
+    } else {
+      const pool = (combos.sessionPool && combos.sessionPool.length)
+        ? combos.sessionPool
+        : (combos.lastRecords || []).map((r) => ({ session_id: r.session_id, last_ts: r.ts }));
+      ids = liveSessionOrder(pool, []);
     }
     if (requestsFilter.session && !ids.includes(requestsFilter.session)) ids = [requestsFilter.session, ...ids];
     // v2: full session ids in the options (the select is 11–14rem wide so
@@ -976,13 +1237,6 @@ function wireComboGlobals() {
   const closeAll = () => comboInstances.forEach((combo) => combo.close());
   window.addEventListener('resize', closeAll);
   window.addEventListener('scroll', closeAll, true);
-}
-
-// resetCombos drops a previous Requests render's menus/state (its inputs are
-// gone) so stale fixed-positioned menus cannot float over the new tab.
-function resetCombos() {
-  comboInstances.forEach((combo) => combo.menu.remove());
-  comboInstances.clear();
 }
 
 // attachCombo turns a text input into a searchable dropdown. The menu is a
@@ -1317,10 +1571,12 @@ function renderRequestsSessionSummary(combos) {
   // The SAME session view the Live panel renders (chips + trace timeline —
   // one implementation, shared); bars toggle the table's inline detail row
   // AND locate it: the row scrolls into view and flashes, because a busy
-  // session's table can be hundreds of rows deep.
+  // session's table can be hundreds of rows deep. The mcp flag speaks the
+  // stream's domain (server/account identity, no token chips).
   host.hidden = false;
   hideTlTip();
-  host.innerHTML = sessionViewHTML(rows, agg, { live: false, session: requestsFilter.session });
+  const page = activeRequestsPage();
+  host.innerHTML = sessionViewHTML(rows, agg, { live: false, session: requestsFilter.session, ...page.sessionView });
   wireSessionTimeline(host, (id) => {
     void (async () => {
       // The row may be virtualized out of the DOM — mount it first, then
@@ -1358,7 +1614,8 @@ function renderRequestsSessionSummary(combos) {
 // fetches, which must agree or the pages would not line up).
 function reqFilterParams() {
   const q = new URLSearchParams();
-  q.set('kind', requestsFilter.stream === 'mcp' ? 'mcp' : 'llm');
+  const kind = activeRequestsPage().kind;
+  if (kind) q.set('kind', kind);
   if (requestsFilter.session) q.set('session', requestsFilter.session);
   if (requestsFilter.agent) q.set('agent', requestsFilter.agent);
   if (requestsFilter.model) q.set('model', requestsFilter.model);
@@ -1390,6 +1647,15 @@ async function loadRequests(combos) {
   const pageSize = requestsFilter.session ? REQ_SESSION_LIMIT : REQ_BROWSE_LIMIT;
   q.set('limit', String(pageSize));
   const token = ++reqLoadSeq;
+  // MCP session options come from the page's POOL (independent kind=mcp
+  // query with NO filters, the same source the Live page uses) — deriving
+  // them from the loaded records undercounts: the browse window is smaller,
+  // filters narrow it, and scroll pages load late. The Model stream keeps
+  // its /api/sessions aggregate in syncRequestFacets.
+  const page = activeRequestsPage();
+  const poolPromise = (page && page.pool === 'mcp-records')
+    ? apiGet('/api/requests?kind=mcp&limit=500').then(mcpPoolFromRecords).catch(() => null)
+    : null;
   let resp;
   try {
     resp = await apiGet('/api/requests?' + q.toString());
@@ -1409,10 +1675,22 @@ async function loadRequests(combos) {
   // index path), so refresh the dropdowns even when the current filter
   // matches nothing. Scroll-loaded pages do NOT re-sync: a to=-bounded page
   // sees a narrower window and would shrink the dropdowns for no reason.
-  syncRequestFacets(resp.facets, combos);
+  // ORDER: lastRecords is assigned BEFORE syncRequestFacets — the MCP
+  // session dropdown derives its options from the loaded records, and the
+  // old order rendered the selectors against the PREVIOUS load's records
+  // (empty on first mount; after a session drill + clear it left the
+  // dropdown stuck on the drilled session's records alone).
   const recs = resp.records || [];
   combos.lastRecords = recs;
+  syncRequestFacets(resp.facets, combos);
   renderRequestsSessionSummary(combos);
+  if (poolPromise) poolPromise.then((pool) => {
+    if (pool === null || token !== reqLoadSeq) return; // failed, or superseded
+    combos.sessionPool = pool; // per-page slice: stale writes cannot leak
+    if (activeRequestsPage() === page && document.getElementById('req-session')) {
+      renderRequestSelectors(combos);
+    }
+  });
   if (!recs.length) {
     paint('<div class="msg hint">No matching requests.</div>');
     return;
@@ -1420,7 +1698,7 @@ async function loadRequests(combos) {
   // Virtual table: the thead is static, the tbody renders only the viewport
   // window of rows (spacers keep the scrollbar sized to the whole list) and
   // a hint line reports the loaded count / load-older state.
-  paint(`<table class="table">${requestTableHeadHTML({ mcp: requestsFilter.stream === 'mcp' })}<tbody></tbody></table><div class="hint req-count" hidden></div>`);
+  paint(`<table class="table">${requestTableHeadHTML(activeRequestsPage().table)}<tbody></tbody></table><div class="hint req-count" hidden></div>`);
   if (!tbl) return;
   const v = reqVirt = {
     tbl: tbl.querySelector('table'),
@@ -1490,7 +1768,7 @@ function reqRowNode(v, i) {
   holder.innerHTML = requestRowHTML(persistedSummaryRow(rec), {
     rowClass: 'req-row' + (rec.status >= 400 ? ' req-row-err' : ''),
     fmtTime,
-    mcp: requestsFilter.stream === 'mcp',
+    ...activeRequestsPage().table,
   });
   tr = holder.firstElementChild;
   v.pool.set(rec.request_id, tr);
@@ -1503,7 +1781,7 @@ function reqRowNode(v, i) {
       requestsFilter.session = session;
       const allowed = linkedAgents(requestsFilter.session, v.combos.sessions, v.combos.facetState.agents);
       if (requestsFilter.agent && !allowed.includes(requestsFilter.agent)) requestsFilter.agent = '';
-      updateRequestsHash();
+      updateRequestsHash(true); // session drill is navigation: Back returns to the list
       renderRequestSelectors(v.combos);
       loadRequests(v.combos);
       return;
@@ -1943,7 +2221,7 @@ function requestRelTimeOpts(id) {
 // exchanges have no provider axis.
 function replayStripHTML(id, model) {
   if (id.startsWith('shadow-')) return '';
-  if (requestsFilter.stream === 'mcp') return '';
+  if (!activeRequestsPage().replay) return '';
   return `<div class="req-replay" data-replay-id="${esc(id)}" data-replay-model="${esc(model || '')}">` +
     '<span class="hint">Replay to</span>' +
     '<select class="req-input" data-replay-provider><option value="">provider…</option></select>' +
@@ -2521,9 +2799,9 @@ function renderSecurityFeed() {
     // request with the guard hits located and highlighted (the explain view
     // rides the request detail). kind+name let the drill re-scan server-side.
     const drillUrl = r.requestId && (r.kind === 'secret' || r.kind === 'path')
-      ? '#requests?request=' + encodeURIComponent(r.requestId) +
+      ? requestsLink('request=' + encodeURIComponent(r.requestId) +
         '&kind=' + encodeURIComponent(r.kind) +
-        '&name=' + encodeURIComponent(r.names.join(','))
+        '&name=' + encodeURIComponent(r.names.join(',')))
       : '';
     const drillLink = drillUrl
       ? `<div><a class="mono drill-link" href="${drillUrl}" title="view the original request with the hit highlighted">req ${esc(String(r.requestId).slice(-6))} ↗</a></div>`
@@ -2606,7 +2884,7 @@ function renderSecurityFeed() {
       if (e.detail > 1) return;
       const session = sessionLinkClick(e);
       if (session) {
-        location.hash = '#requests?' + requestsFilterQuery({ session });
+        location.hash = requestsLink(requestsFilterQuery({ session }));
         return;
       }
       if (e.target.closest('a, button')) return;
@@ -2926,7 +3204,7 @@ function paintSecurityBlocks() {
       // a selection gesture must not re-fire the drill navigation.
       if (e.detail > 1) return;
       const session = sessionLinkClick(e);
-      if (session) location.hash = '#requests?' + requestsFilterQuery({ session });
+      if (session) location.hash = requestsLink(requestsFilterQuery({ session }));
     };
   });
   el.querySelectorAll('.sec-unblock').forEach((btn) => {
@@ -3141,6 +3419,29 @@ function restoreSecurityDetails(rows) {
 
 // ---------- Live monitor (Status → Live section, SSE /api/events) ----------
 
+// The SSE handshake REPLAYS the hub's recent-event ring on every connect
+// (serveEvents: subscribe → burst recent → stream), while the live ring
+// RETAINS completed rows across remounts (stale-while-revalidate, see
+// renderLiveCard). Without replay folding the two double-count: a replayed
+// start for a request whose row already survived would unshift a second,
+// identical row — two entries per request after every sub-view round trip.
+// applyLiveEvent folds replayed events into existing state; the helpers
+// below dedupe the retained ring and its DOM at remount as the second line
+// of defense.
+
+// dedupeRetainedLiveRows is the remount filter for the retained live ring:
+// it drops in-flight rows (their end events were missed while the SSE was
+// closed — they would render as never-finishing dim rows) and any request-id
+// duplicate (first occurrence wins: in the newest-first ring that is the row
+// liveByReq tracked, i.e. the one whose end event landed). A duplicate that
+// survived this remount would sit in the ring until it ages out. Event-only
+// rows carry no request id and pass through.
+function dedupeRetainedLiveRows(r, i, rows) {
+  if (r.inFlight) return false;
+  if (!r.requestId) return true;
+  return rows.findIndex((o) => o.requestId === r.requestId) === i;
+}
+
 let liveES = null;       // the EventSource for /api/events (null when not connected)
 let liveActive = false;  // the section's card is mounted and connected
 let liveRows = [];       // newest-first ring of merged request rows (capped)
@@ -3148,21 +3449,17 @@ let liveByReq = {};      // request_id -> row object (while in the ring)
 let liveDetailState = new Map(); // request_id -> {loading, error} (records live in requestsDetailCache)
 let livePendingGuards = new Map(); // request_id -> [{ts, type, detail}] for hits that arrived before start
 let liveEventSeq = 0;    // synthetic key counter for standalone event-only rows
+                       // (NEVER reset on remount: retained rows keep their
+                       // keys, and a reset would mint colliding 'ev-N' keys)
 
 // Session mode (Live card): selecting a session replaces the live table with a
 // per-session analysis. Rows merge the persisted request log (/api/requests?
 // session=) with the live event rows; token/cost totals come from the
 // /api/sessions aggregate (persisted rows carry no tokens).
-let liveSessionFilter = '';   // selected session id ('' = live mode)
-let liveSessionRecords = [];  // persisted Summary rows for the selected session
-let liveSessionAgg = null;    // persisted SessionSummary for the selected session
-let liveSessionList = [];     // recent SessionSummary list (dropdown options)
-let liveSessionLoading = false;
-let liveSessionError = '';
-let liveSessionOptionsKey = '';
-// Boot-time #requests/live?session=… pin, consumed by renderLiveCard right
-// after the mount that resets the selection (see there for the race).
-let bootLiveSession = '';
+// Live session state (selected session, its records/aggregate, the dropdown
+// pool + options key, the boot pin) lives PER PAGE in livePageState — the
+// functions below address the mounted page's slice through activeLiveState()
+// (S). Two live pages never share a session selection.
 
 // renderLiveCard mounts the live request monitor into the Requests tab's Live
 // sub-view and opens the SSE connection (closed by stopLiveEvents when the
@@ -3175,32 +3472,34 @@ let bootLiveSession = '';
 // (budget & friends) still render as standalone one-line rows. The All/live
 // table is updated incrementally on each SSE event; the session panel keeps
 // its full re-render (scroll anchor preserved).
-function renderLiveCard(target) {
+function renderLiveCard(target, query) {
   stopLiveEvents();
+  const S = activeLiveState();
+  if (!S) return;
+  S.bootPin = (query && query.session) || '';
   // Ring retention (stale-while-revalidate, the same policy as the tab
   // panels): completed rows survive the remount and paint immediately, so
   // re-entering the Live section shows a full-height table instead of the
   // "old table → connecting… stub → regrow row by row" three-stage bounce.
-  // In-flight rows are dropped: their end events were missed while
-  // disconnected and they would render as never-finishing dim rows. The
-  // session selection resumes too (it used to silently reset to All on
-  // every re-entry).
-  const resumeSession = liveSessionFilter;
-  liveRows = liveRows.filter((r) => !r.inFlight);
+  // In-flight rows and request-id duplicates are dropped (see
+  // dedupeRetainedLiveRows); the session selection resumes too (it used to
+  // silently reset to All on every re-entry) unless the router's query
+  // pins a session (the pin wins over the resume).
+  const resumeSession = S.bootPin || S.session;
+  liveRows = liveRows.filter(dedupeRetainedLiveRows);
   liveByReq = {};
   for (const r of liveRows) {
     if (r.requestId) liveByReq[r.requestId] = r;
   }
   liveDetailState.clear();
   livePendingGuards.clear();
-  liveEventSeq = 0;
-  liveSessionFilter = '';
-  liveSessionRecords = [];
-  liveSessionAgg = null;
-  liveSessionList = [];
-  liveSessionLoading = false;
-  liveSessionError = '';
-  liveSessionOptionsKey = '';
+  S.session = '';
+  S.records = [];
+  S.agg = null;
+  S.list = [];
+  S.loading = false;
+  S.error = '';
+  S.optionsKey = '';
   // NO card wrapper here: #req-live-view already sits inside the Requests
   // tab's single outer card (the same one hosting the Log sub-view), so a
   // wrapper would nest card-in-card. Only the content mounts: toolbar, ring
@@ -3225,13 +3524,12 @@ function renderLiveCard(target) {
     // Shared ✕ affordance: resets to All (live) through the same onchange.
     attachClearable(sel);
   }
-  // Consume a boot-time #requests/live?session=… pin here: this mount is the
-  // point that resets liveSessionFilter, and boot's direct apply raced it
-  // (the status tab renders async, so the card mounted AFTER boot applied
-  // and wiped the selection — refresh lost the ?session= param).
-  if (bootLiveSession) {
-    const v = bootLiveSession;
-    bootLiveSession = '';
+  // Consume the router's ?session= pin here: this mount is the point that
+  // resets the selection, and applying it earlier (boot/hashchange) raced
+  // the mount (the card mounted AFTER the apply and wiped it).
+  if (S.bootPin) {
+    const v = S.bootPin;
+    S.bootPin = '';
     onLiveSessionChange(v);
   } else if (resumeSession) {
     // Re-entry keeps the previous session view (hash, dropdown and panel
@@ -3287,24 +3585,26 @@ function refreshLiveSessionOptions() {
   const sel = document.getElementById('live-session');
   if (!sel) return;
   if (sel === document.activeElement) return;
-  let sorted = liveSessionOrder(liveSessionList, liveRows.filter(liveRowInStream));
+  const S = activeLiveState();
+  if (!S) return;
+  let sorted = liveSessionOrder(S.list, liveRows.filter(liveRowInStream));
   // Keep the active selection as an option even when neither source knows it
   // (a hash-restored session whose live rows aged out of the ring / whose
   // /api/sessions entry is still loading) — same guarantee as the Requests
   // dropdown, so the visible selection never silently reverts to all-live.
-  if (liveSessionFilter && !sorted.includes(liveSessionFilter)) {
-    sorted = [liveSessionFilter, ...sorted];
+  if (S.session && !sorted.includes(S.session)) {
+    sorted = [S.session, ...sorted];
   }
   const key = sorted.join('\n');
-  if (key === liveSessionOptionsKey) return;
-  liveSessionOptionsKey = key;
+  if (key === S.optionsKey) return;
+  S.optionsKey = key;
   // v2: the Live session dropdown shows the FULL id — this toolbar holds a
   // single control with the rest of the row empty, so unlike the dense
   // Requests filter row there is no reason to abbreviate (and the select is
   // widened via .live-toolbar select to match; see styles.css).
   sel.innerHTML = '<option value="">All (live)</option>' +
     sorted.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
-  sel.value = liveSessionFilter;
+  sel.value = S.session;
   syncClearable(sel);
 }
 
@@ -3314,15 +3614,17 @@ function refreshLiveSessionOptions() {
 // onLiveSessionChange switches between the live table and one session's
 // analysis, loading the persisted request list + aggregate for the selection.
 function onLiveSessionChange(value) {
-  liveSessionFilter = value;
-  // Mirror the selection into the URL (#requests/live?session=…) so
-  // refresh/shared links restore this view; replaceState keeps dropdown
-  // refinement out of the back-history. setHash is a no-op when the hash
-  // already matches (boot/hashchange apply paths), so no loop.
-  if (activeTab === 'requests' && requestsSub === 'live') setHash(requestsHash(), false);
-  liveSessionRecords = [];
-  liveSessionAgg = null;
-  liveSessionError = '';
+  const S = activeLiveState();
+  S.session = value;
+  // Mirror the selection into the URL (#requests/<stream>_live?session=…) so
+  // refresh/shared links restore this view. Entering/leaving a session is
+  // navigation (push) — Back must return to the ring view, not skip past
+  // the Requests tab. setHash is a no-op when the hash already matches
+  // (boot/hashchange apply paths), so no loop and no duplicate entries.
+  if (activeTab === 'requests' && activeRequestsPage().view === 'live') setHash(requestsHash(), true);
+  S.records = [];
+  S.agg = null;
+  S.error = '';
   // Entering a session from a record (row cell / detail popover) must move
   // the dropdown selection too; setting value programmatically fires no
   // change event, so no loop.
@@ -3337,44 +3639,46 @@ function onLiveSessionChange(value) {
     // All (live) mode: the pure live ring, no persisted backfill.
     if (tbl) tbl.hidden = false;
     if (panel) { panel.hidden = true; panel.innerHTML = ''; syncSessThOffset(panel); }
-    liveSessionLoading = false;
+    S.loading = false;
     renderLiveTable();
     return;
   }
   if (tbl) tbl.hidden = true;
   if (panel) panel.hidden = false;
-  liveSessionLoading = true;
+  S.loading = true;
   renderLiveSessionPanel();
-  // The MCP stream never reads /api/sessions (LLM-only): its records ARE the
-  // session truth — the pool derives from them, the aggregate stays null and
-  // the chips fold from the rows.
-  const isMcp = requestsFilter.stream === 'mcp';
+  // The pool half: LLM reads /api/sessions; MCP derives its pool from its
+  // OWN full record list (kind=mcp, NO session filter) — deriving from the
+  // session-filtered records above would collapse the dropdown to just the
+  // selected session (and the collapse survived the clear: the All-live
+  // early-return does not refetch the pool, so the options diverged from the
+  // freshly-opened page). Mirrors the LLM path: every selection refreshes
+  // the FULL pool, keeping clear/initial options consistent.
+  // Both fetches are page-configured and PAGE-GUARDED (the router may have
+  // switched pages while they were in flight — see loadLiveSessionPool).
+  const page = activeRequestsPage();
+  const fetchPool = page.pool === 'mcp-records'
+    ? () => apiGet('/api/requests?kind=mcp&limit=500').then(mcpPoolFromRecords).catch(() => [])
+    : () => apiGet('/api/sessions?limit=200').then((r) => (r && r.sessions) || []).catch(() => []);
   Promise.all([
-    apiGet('/api/requests?session=' + encodeURIComponent(value) + '&limit=500&kind=' + (isMcp ? 'mcp' : 'llm'))
+    apiGet('/api/requests?session=' + encodeURIComponent(value) + '&limit=500&kind=' + (page.kind || 'llm'))
       .then((r) => ({ recs: (r && r.records) || [] }))
       .catch((e) => ({ err: e.message })),
-    isMcp ? Promise.resolve([]) : apiGet('/api/sessions?limit=200').then((r) => (r && r.sessions) || []).catch(() => []),
-  ]).then(([reqs, sessions]) => {
-    if (liveSessionFilter !== value) return; // switched away while loading
-    liveSessionLoading = false;
-    if (reqs.err) liveSessionError = reqs.err;
-    else liveSessionRecords = reqs.recs;
-    if (isMcp) {
-      const seen = new Set();
-      const pool = [];
-      for (const rec of liveSessionRecords) {
-        const sid = rec.session_id || '';
-        if (!sid || seen.has(sid)) continue;
-        seen.add(sid);
-        pool.push({ session_id: sid, last_ts: rec.ts });
-      }
-      liveSessionList = pool;
-    } else liveSessionList = sessions;
+    fetchPool(),
+  ]).then(([reqs, pool]) => {
+    if (S.session !== value) return; // switched away while loading
+    if (activeRequestsPage() !== page) return; // page switched while loading
+    S.loading = false;
+    if (reqs.err) S.error = reqs.err;
+    else S.records = reqs.recs;
+    S.list = pool;
     // The LLM aggregate backs the chips when rows alone undercount (aged-out
     // ring); MCP has no aggregate and always derives from its rows.
-    liveSessionAgg = requestsFilter.stream === 'mcp'
+    // The aggregate backs the chips when rows alone undercount (aged-out
+    // ring); the MCP pages have no aggregate and derive from their rows.
+    S.agg = page.pool === 'mcp-records'
       ? null
-      : (sessions.find((s) => s.session_id === value) || null);
+      : (pool.find((x) => x.session_id === value) || null);
     refreshLiveSessionOptions();
     renderLiveSessionPanel();
   });
@@ -3386,26 +3690,42 @@ function onLiveSessionChange(value) {
 // /api/sessions is LLM-only and would list Model session ids under the MCP
 // toolbar. Entries keep the {session_id, last_ts} shape liveSessionOrder
 // consumes. Best-effort: request logging off just leaves the ring rows.
-function loadLiveSessionPool() {
-  if (requestsFilter.stream === 'mcp') {
-    apiGet('/api/requests?kind=mcp&limit=500').then((resp) => {
-      const seen = new Set();
-      const pool = [];
-      for (const rec of ((resp && resp.records) || [])) {
-        const sid = rec.session_id || '';
-        if (!sid || seen.has(sid)) continue;
-        seen.add(sid);
-        pool.push({ session_id: sid, last_ts: rec.ts });
-      }
-      liveSessionList = pool;
-      liveSessionOptionsKey = null;
-      refreshLiveSessionOptions();
-    }).catch(() => { /* request logging off / unavailable */ });
-    return;
+// The response is STREAM-GUARDED: a flip while the fetch was in flight must
+// not land the other stream's sessions in the current dropdown (the option
+// list may also come from liveRows, so "the option appeared" is NOT proof
+// the pool fetch landed — the stale response can arrive seconds later).
+// mcpPoolFromRecords derives the MCP session pool from a /api/records
+// response: first-seen (newest-first) session ids carrying their newest
+// record's ts — the {session_id, last_ts} shape liveSessionOrder consumes.
+// The response MUST be the full kind=mcp record list, never a
+// session-filtered slice (the pool is the dropdown's option truth).
+function mcpPoolFromRecords(resp) {
+  const seen = new Set();
+  const pool = [];
+  for (const rec of ((resp && resp.records) || [])) {
+    const sid = rec.session_id || '';
+    if (!sid || seen.has(sid)) continue;
+    seen.add(sid);
+    pool.push({ session_id: sid, last_ts: rec.ts });
   }
-  apiGet('/api/sessions?limit=200').then((resp) => {
-    liveSessionList = (resp && resp.sessions) || [];
-    liveSessionOptionsKey = null;
+  return pool;
+}
+
+function loadLiveSessionPool() {
+  // The pool source is the page config's ('sessions' aggregate vs derived
+  // from kind=mcp records); the response is PAGE-GUARDED — the router may
+  // have switched pages while the fetch was in flight, and the other page's
+  // pool must never land here (dropdown options may also come from ring
+  // rows, so "the option appeared" is not proof this fetch landed).
+  const page = activeRequestsPage();
+  const fetchPool = page.pool === 'mcp-records'
+    ? () => apiGet('/api/requests?kind=mcp&limit=500').then(mcpPoolFromRecords)
+    : () => apiGet('/api/sessions?limit=200').then((r) => (r && r.sessions) || []);
+  fetchPool().then((pool) => {
+    const S = activeLiveState();
+    if (activeRequestsPage() !== page || !S) return; // switched away meanwhile
+    S.list = pool;
+    S.optionsKey = null;
     refreshLiveSessionOptions();
   }).catch(() => { /* request logging off / unavailable */ });
 }
@@ -3477,11 +3797,11 @@ function persistedSummaryRow(rec) {
 // tokens. Newest first.
 function liveSessionRows() {
   const byId = new Map();
-  for (const rec of liveSessionRecords) {
+  for (const rec of activeLiveState().records) {
     byId.set(rec.request_id, persistedSummaryRow(rec));
   }
   for (const r of liveRows) {
-    if (r.session !== liveSessionFilter) continue;
+    if (r.session !== activeLiveState().session) continue;
     if (!liveRowInStream(r)) continue;
     const persisted = byId.get(r.requestId);
     byId.set(r.requestId, mergeLiveAndPersistedRow(r, persisted || {
@@ -3506,14 +3826,20 @@ function liveTsMs(ts) {
 // used by the Live session panel and the Requests session filter. `opts.live`
 // false omits the trailing live-row count (Requests rows are all persisted).
 function sessionSummaryHTML(s, opts, health) {
-  const showLive = !opts || opts.live !== false;
+  const o = opts || {};
+  const showLive = o.live !== false;
+  // MCP sessions speak the exchange domain: no token/cost chips (MCP
+  // exchanges carry no usage) and server/account identity labels — the same
+  // projection the MCP log table columns use (model=exposed server,
+  // provider=pool virtual account).
+  const mcp = !!o.mcp;
   const chips = [
     `${fmtNum(s.requests)} requests`,
-    `${fmtNum(s.input)} in / ${fmtNum(s.output)} out`,
-    (s.cacheRead || s.cacheCreation) ? `${fmtNum(s.cacheRead)} cache-read · ${fmtNum(s.cacheCreation)} cache-write` : '',
+    mcp ? '' : `${fmtNum(s.input)} in / ${fmtNum(s.output)} out`,
+    !mcp && (s.cacheRead || s.cacheCreation) ? `${fmtNum(s.cacheRead)} cache-read · ${fmtNum(s.cacheCreation)} cache-write` : '',
     s.avgLatencyMs != null ? `avg ${s.avgLatencyMs}ms` : '',
     s.errors ? `${fmtNum(s.errors)} errors` : '',
-    s.cost != null ? '$' + s.cost.toFixed(4) : '',
+    !mcp && s.cost != null ? '$' + s.cost.toFixed(4) : '',
     showLive ? `${fmtNum(s.liveRows)} live` : '',
   ].filter(Boolean).map((c) => `<span class="live-chip">${esc(c)}</span>`).join('');
   // Identity footer: small uppercase key + mono value pairs, a deliberate
@@ -3522,7 +3848,9 @@ function sessionSummaryHTML(s, opts, health) {
   const item = (k, vals) => (vals && vals.length)
     ? `<span class="sess-meta-item"><span class="sess-meta-k">${esc(k)}</span><span class="sess-meta-v">${esc(vals.join(', '))}</span></span>`
     : '';
-  const meta = item('provider', s.providers) + item('model', s.models);
+  const meta = mcp
+    ? item('server', s.models) + item('account', s.providers)
+    : item('provider', s.providers) + item('model', s.models);
   return `<div class="live-session-summary">${chips}</div>${sessionHealthChipsHTML(health)}${meta ? `<div class="sess-meta">${meta}</div>` : ''}`;
 }
 
@@ -3835,24 +4163,29 @@ function wireTimelineZoom(svg, zoom) {
 // in the modal popover.
 function renderLiveSessionPanel() {
   const panel = document.getElementById('live-session-panel');
-  if (!panel || !liveSessionFilter) return;
-  if (liveSessionLoading) { panel.innerHTML = '<span class="hint">loading session…</span>'; syncSessThOffset(panel); return; }
-  if (liveSessionError) { panel.innerHTML = `<div class="msg err">${esc(liveSessionError)}</div>`; syncSessThOffset(panel); return; }
+  const S = activeLiveState();
+  if (!panel || !S || !S.session) return;
+  if (S.loading) { panel.innerHTML = '<span class="hint">loading session…</span>'; syncSessThOffset(panel); return; }
+  if (S.error) { panel.innerHTML = `<div class="msg err">${esc(S.error)}</div>`; syncSessThOffset(panel); return; }
   const rows = liveSessionRows();
   // The panel re-renders on every session event; snapshot the scroll anchor
   // first so a rebuild does not shift what the user is reading, and drop the
   // hover tooltip — its anchor bar is about to be replaced.
   const viewState = captureLiveViewState(panel);
   hideTlTip();
+  // The session view + table head speak the page's domain (its table/
+  // sessionView opts): the MCP page renders the 7-column Server/Account
+  // geometry and server/account chips — the LLM head over MCP rows
+  // misaligns columns and reads as the Model view.
   const body = rows.length
-    ? `<table class="table">${requestTableHeadHTML()}<tbody>${rows.map((r) => liveSummaryRowHTML(r, liveDetailPopId === r.requestId)).join('')}</tbody></table>`
+    ? `<table class="table">${requestTableHeadHTML(activeRequestsPage().table)}<tbody>${rows.map((r) => liveSummaryRowHTML(r, liveDetailPopId === r.requestId)).join('')}</tbody></table>`
     : '<div class="msg hint">no requests recorded for this session yet</div>';
-  panel.innerHTML = `<div class="sess-sticky">${sessionViewHTML(rows, liveSessionAgg, { session: liveSessionFilter })}</div>${body}`;
+  panel.innerHTML = `<div class="sess-sticky">${sessionViewHTML(rows, S.agg, { session: S.session, ...activeRequestsPage().sessionView })}</div>${body}`;
   panel.querySelectorAll('.live-row').forEach((tr) => {
     wireLiveRow(tr);
   });
   wireSessionTimeline(panel, openLiveDetailPop, {
-    session: liveSessionFilter,
+    session: S.session,
     rerender: renderLiveSessionPanel,
     rows,
   });
@@ -3908,6 +4241,19 @@ function stopLiveEvents() {
 // All/live mode and falls back to renderLiveTable for the session panel.
 function applyLiveEvent(e) {
   if (e.type === 'start') {
+    // Replay fold: a start for a request already in liveByReq is a
+    // re-broadcast (the SSE handshake replays the recent-event ring on every
+    // (re)connect; the server publishes exactly one start per request id) —
+    // merge into the retained row instead of unshifting a duplicate. The
+    // row's completion state is never regressed here: a replayed end follows
+    // in ring order and re-applies idempotently, so only late-settling
+    // attribution (session/agent) is filled in.
+    const kept = liveByReq[e.request_id];
+    if (kept) {
+      if (!kept.session && e.session_id) kept.session = e.session_id;
+      if (e.agent && e.agent !== 'unknown' && (!kept.agent || kept.agent === 'unknown')) kept.agent = e.agent;
+      return;
+    }
     liveByReq[e.request_id] = {
       requestId: e.request_id,
       proto: e.protocol || '',
@@ -3952,15 +4298,24 @@ function applyLiveEvent(e) {
   // id is known, else queue it so a later start/end can claim it.
   const hit = { ts: e.ts, type: e.type, detail: e.detail || '' };
   if (e.request_id && liveByReq[e.request_id]) {
-    liveByReq[e.request_id].guardHits.push(hit);
+    // Replay fold: a re-broadcast hit identical to one already attached
+    // (same ts+type+detail) must not double the ⚑ badge.
+    const hits = liveByReq[e.request_id].guardHits;
+    if (!hits.some((h) => h.ts === hit.ts && h.type === hit.type && h.detail === hit.detail)) {
+      hits.push(hit);
+    }
   } else if (e.request_id) {
     const pending = livePendingGuards.get(e.request_id) || [];
     pending.push(hit);
     livePendingGuards.set(e.request_id, pending);
   } else {
+    // Replay fold: an identical standalone event (same ts + rendered detail)
+    // already in the ring is a re-broadcast — one line, not two.
+    const detail = (e.type || '') + ' ' + (e.detail || '');
+    if (liveRows.some((r) => r.eventOnly && r.ts === e.ts && r.guardDetail === detail)) return;
     liveRows.unshift({
       ts: e.ts, agent: e.agent, model: e.exposed || '',
-      eventOnly: true, guardDetail: (e.type || '') + ' ' + (e.detail || ''),
+      eventOnly: true, guardDetail: detail,
       key: 'ev-' + (liveEventSeq++),
     });
     trimLiveRows();
@@ -4034,7 +4389,7 @@ function liveSummaryRowHTML(r, open) {
     liveKey: true,
     modelNote: guard,
     fmtTime: fmtTimeSafe,
-    mcp: requestsFilter.stream === 'mcp',
+    ...activeRequestsPage().table,
   });
 }
 
@@ -4054,78 +4409,17 @@ function liveRowHTML(r) {
   return liveSummaryRowHTML(r, liveDetailPopId === r.requestId);
 }
 
-// renderLiveTable redraws the merged rows: one line per request. In-flight
-// rows are dimmed with a pending marker; the tokens column reads "in / out".
-// This is the full-rebuild path used on tab switches and as a fallback; the
-// hot SSE path uses applyLiveEventDOM for targeted surgery. Because new rows
-// are PREPENDED, the rebuild preserves the viewport (captureLiveViewState /
-// restoreLiveViewState): when the page is scrolled away from the top the
-// visible region does not shift.
-// liveRowInStream reports whether a ring row belongs to the active stream:
-// 'mcp' keeps protocol="mcp" gateway exchanges, '' (Model) keeps everything
-// else (LLM traffic plus the standalone non-request events, which are
-// LLM-side signals).
+// liveRowInStream reports whether a ring row belongs to the mounted live
+// page: the page config's ringIn predicate (model_live keeps LLM traffic +
+// standalone non-request events, mcp_live keeps protocol="mcp" exchanges).
 function liveRowInStream(r) {
-  return requestsFilter.stream === 'mcp' ? r.proto === 'mcp' : r.proto !== 'mcp';
-}
-
-// syncLogStreamUI repaints the Log sub-view's stream tabs and the
-// stream-dependent controls (hidden session/shadow, model placeholder) after
-// the stream changed outside the log's own click path (the live view's tabs,
-// hashchange, sub-view switches).
-function syncLogStreamUI() {
-  const isMcp = requestsFilter.stream === 'mcp';
-  syncReqNav();
-  const modelInput = document.getElementById('req-model');
-  if (modelInput) modelInput.placeholder = isMcp ? 'All Servers' : 'All Models';
-}
-
-// setRequestsStream flips the shared stream ('' = LLM/Model, 'mcp') and
-// syncs BOTH sub-views' chrome. Session ids do not cross streams (LLM client
-// sessions vs MCP exchange sessions), so a switch clears the session/shadow
-// selections. Returns whether the stream changed; callers own the reload.
-// applyRequestsStreamFlip mutates the shared stream state for BOTH entry
-// paths (setRequestsStream for hashchange, selectRequestsView for sidebar
-// clicks): session/shadow selections clear (ids do not cross streams) and
-// the Live session pool swaps — it is stream-scoped (Model reads
-// /api/sessions, MCP derives from its records), so without the swap the
-// dropdown would keep listing the other stream's session ids.
-function applyRequestsStreamFlip(next) {
-  requestsFilter.stream = next;
-  requestsFilter.session = '';
-  requestsFilter.shadow = '';
-  if (liveSessionFilter) onLiveSessionChange('');
-  liveSessionList = [];
-  // null (never equal to a string key) forces the rebuild: '' would equal
-  // the empty pool's own key and the early-return would keep the other
-  // stream's options rendered.
-  liveSessionOptionsKey = null;
-  refreshLiveSessionOptions();
-  if (liveActive) loadLiveSessionPool();
-  syncLogStreamUI();
-  syncLiveStreamUI();
-}
-
-function setRequestsStream(stream) {
-  const next = stream === 'mcp' ? 'mcp' : '';
-  if (requestsFilter.stream === next) return false;
-  applyRequestsStreamFlip(next);
-  return true;
-}
-// (setRequestsStream stays the hashchange path's stream applier; sidebar
-// clicks go through selectRequestsView, which subsumes it.)
-
-// syncLiveStreamUI repaints the live stream tabs and toolbar after the stream
-// changed outside the tab click path (hashchange back/forward).
-function syncLiveStreamUI() {
-  // The session toolbar serves both streams (MCP drills its own sessions);
-  // nothing to toggle — kept as the stream-changed notification hook for
-  // live chrome.
+  return activeRequestsPage().ringIn(r);
 }
 
 function renderLiveTable() {
   refreshLiveSessionOptions();
-  if (liveSessionFilter) {
+  const S = activeLiveState();
+  if (S && S.session) {
     // Session mode: the live table is hidden; refresh the session panel from
     // the merged live + persisted rows instead.
     renderLiveSessionPanel();
@@ -4143,7 +4437,7 @@ function renderLiveTable() {
     return;
   }
   const viewState = captureLiveViewState(tbl);
-  tbl.innerHTML = `<table class="table">${requestTableHeadHTML({ mcp: requestsFilter.stream === 'mcp' })}<tbody>${rows.map((r) => liveRowHTML(r)).join('')}</tbody></table>`;
+  tbl.innerHTML = `<table class="table">${requestTableHeadHTML(activeRequestsPage().table)}<tbody>${rows.map((r) => liveRowHTML(r)).join('')}</tbody></table>`;
   document.querySelectorAll('#live-table .live-row').forEach((tr) => wireLiveRow(tr));
   restoreLiveViewState(tbl, viewState);
 }
@@ -4280,13 +4574,14 @@ function prependLiveRows(tbl, tbody, rows) {
 // update the existing row in place; progress events only feed the detail
 // popover (via the onmessage hook), the summary row does not change.
 function applyLiveEventDOM(e) {
-  if (liveSessionFilter) {
+  if (activeLiveState() && activeLiveState().session) {
     // Session mode: only the selected session's events change the panel;
     // unrelated events must not rebuild it. The dropdown still picks up new
     // sessions cheaply.
     const owner = e.request_id && liveByReq[e.request_id];
-    const relevant = e.session_id === liveSessionFilter ||
-      (owner && owner.session === liveSessionFilter);
+    const sess = activeLiveState().session;
+    const relevant = e.session_id === sess ||
+      (owner && owner.session === sess);
     if (!relevant) {
       refreshLiveSessionOptions();
       return;
@@ -4300,7 +4595,7 @@ function applyLiveEventDOM(e) {
   // Stream gate: the other stream's rows are not in this table — a miss must
   // not "recover" by prepending them (the end-event fallback below).
   if (e.request_id && liveByReq[e.request_id] && !liveRowInStream(liveByReq[e.request_id])) return;
-  if (!e.request_id && requestsFilter.stream === 'mcp') {
+  if (!e.request_id && !activeRequestsPage().standaloneEvents) {
     // Standalone non-request events (budget & friends) are LLM-side signals.
     return;
   }
@@ -4313,6 +4608,11 @@ function applyLiveEventDOM(e) {
   if (e.type === 'start') {
     const row = liveByReq[e.request_id];
     if (!row) return;
+    // Replay fold: a retained row's summary <tr> is already in the tbody
+    // (renderLiveTable painted the retained ring at mount) — refresh it in
+    // place instead of prepending a second DOM row for the same request.
+    const existing = findLiveSummaryRow(tbody, row.requestId);
+    if (existing) { updateLiveSummaryRow(existing, row); return; }
     prependLiveRows(tbl, tbody, [row]);
     return;
   }
@@ -4345,9 +4645,13 @@ function applyLiveEventDOM(e) {
     return;
   }
 
-  // Event-only row (no request id): prepend it.
+  // Event-only row (no request id): prepend it — unless its line is already
+  // in the tbody (replay fold: the state layer skipped the duplicate, so
+  // liveRows[0] is the retained original of a re-broadcast event).
   const row = liveRows[0];
-  if (row && row.eventOnly) prependLiveRows(tbl, tbody, [row]);
+  if (row && row.eventOnly && !tbody.querySelector(`tr[data-live-key="${row.key}"]`)) {
+    prependLiveRows(tbl, tbody, [row]);
+  }
 }
 
 // liveGuardSectionHTML renders the accumulated guard hits for a live detail
@@ -4438,7 +4742,8 @@ let liveDetailPop = null;    // the lazily-created shared <dialog>
 function liveRowById(id) {
   const live = liveByReq[id];
   if (live) return live;
-  if (!liveSessionFilter) return null;
+  const S = activeLiveState();
+  if (!S || !S.session) return null;
   return liveSessionRows().find((r) => r.requestId === id) || null;
 }
 
@@ -4579,7 +4884,10 @@ function ensureLiveDetailFetched(id, row) {
 async function fetchLiveDetail(id) {
   let recs = [];
   try {
-    const resp = await apiGet('/api/requests/' + encodeURIComponent(id));
+    // requestDetailURL carries the page's stream hint: an MCP id is never
+    // in the requests index, and the hint-less URL makes the backend scan
+    // the whole requests directory (seconds on a real log).
+    const resp = await apiGet(requestDetailURL(id));
     recs = resp.records || [];
   } catch (e) {
     liveDetailState.set(id, detailFetchState(e.status, e.message));
@@ -8670,17 +8978,18 @@ function analyticsSave(name, val) {
 
 // analyticsRangeBounds resolves the picker state to {from, to} unix seconds:
 // presets via tokenRangeBounds (local-time aligned), custom via
-// tokenCustomBounds (closed full local days), 'quota' → the cross-provider
-// billing window [first plan provider's UsageFrom, now] (anQuota below;
+// tokenCustomBounds (closed full local days), 'quota' → the SELECTED
+// provider's billing window [provider's UsageFrom, now] (anQuota below;
 // rolling — recomputed per render), 'all' → from 0 (the all-time
 // sentinel — the server clamps it to the oldest persisted bucket and echoes
 // the real window, learned below as anAllTimeSince).
-// An invalid custom range — or an unresolvable 'quota' preset — returns null
+// An invalid custom range — or an unresolvable 'quota' preset (no provider
+// selected, or the selected provider has no plan window) — returns null
 // (the caller falls back to all-time).
-function analyticsRangeBounds(range) {
+function analyticsRangeBounds(range, provider) {
   if (range.preset === 'custom') return tokenCustomBounds(range.customStart, range.customEnd);
   if (range.preset === 'quota') {
-    const q = quotaWindowFromSec(anQuota);
+    const q = anQuotaWindow(provider);
     return q ? { from: q.from, to: Math.floor(Date.now() / 1000) } : null;
   }
   if (range.preset === 'all') return { from: 0, to: Math.floor(Date.now() / 1000) };
@@ -8688,12 +8997,21 @@ function analyticsRangeBounds(range) {
 }
 
 // anQuota holds the last /api/status quota map fetched by the analytics
-// loader — the Quota Window preset and its picker row resolve from it
-// (pure.js quotaWindowFromSec: first plan provider, keys sorted). Best-effort
-// per-part settle: a failed fetch keeps the last known value; a stored
-// 'quota' preset that no longer resolves degrades to all-time (bounds ||
-// fallback + the picker's effective range).
+// loader — the Quota Window preset and its picker row resolve from it,
+// scoped to the provider filter (pure.js quotaWindowForProvider: the
+// provider's own entry, else its "name#<accountId>" pool entries).
+// Best-effort per-part settle: a failed fetch keeps the last known value; a
+// stored 'quota' preset that no longer resolves (provider cleared, or the
+// provider has no plan window) degrades to all-time (bounds || fallback +
+// the picker's effective range).
 let anQuota = null;
+
+// anQuotaWindow resolves the Quota Window preset for the provider filter's
+// current value — null while no provider is selected (the preset renders
+// disabled) or the selected provider projects no plan window.
+function anQuotaWindow(provider) {
+  return provider ? quotaWindowForProvider(anQuota, provider) : null;
+}
 
 // anAllTimeSince is the server-echoed start of the all-time window (the
 // oldest stats bucket), learned from the first all-time response. The
@@ -8734,15 +9052,17 @@ function analyticsPickerOnOutside(e) {
 // analyticsPickerHTML renders the date-range trigger + popover bound to the
 // analytics range state — markup comes from the single pure.js builder
 // `tokenRangePickerHTML` (the same .tr-* look and interaction as the
-// Status→Token usage and Accounts pickers). The Quota Window preset rides
-// the loader-fetched quota map; an unresolvable stored 'quota' preset
-// degrades to 'all' in the checkmark and label.
+// Status→Token usage and Accounts pickers). The Quota Window preset resolves
+// per provider filter: no provider selected (or no plan window for it) → the
+// row stays visible but disabled; a stored 'quota' preset that no longer
+// resolves degrades to 'all' in the checkmark and label.
 function analyticsPickerHTML() {
-  const quota = quotaWindowFromSec(anQuota);
-  const range = analyticsState().range;
+  const state = analyticsState();
+  const quota = anQuotaWindow(state.provider);
+  const range = state.range;
   const eff = (range.preset === 'quota' && !quota) ? { preset: 'all', customStart: '', customEnd: '' } : range;
-  const extra = quota ? [{ value: 'quota', label: 'Quota Window' }] : [];
-  const label = (eff.preset === 'quota' && quota) ? `Quota (${quota.key})` : undefined;
+  const extra = [{ value: 'quota', label: 'Quota Window', disabled: !quota }];
+  const label = (eff.preset === 'quota' && quota) ? `Quota (${state.provider})` : undefined;
   return tokenRangePickerHTML(eff, anRangePicker, 'an', { extraPresets: extra, label });
 }
 
@@ -8920,11 +9240,11 @@ async function renderAnalyticsTab(background = false) {
   if (background && deferAutoRefresh(panel, () => renderAnalyticsTab(true))) return;
   analyticsStopAutoRefresh();
   const state = analyticsState();
-  // Quota Window preset support: resolve the cross-provider billing window
-  // from a best-effort /api/status fetch (the picker's preset row renders
-  // from it on every full render, not just quota-pinned ones). Failure keeps
-  // the last known quota — an unresolvable preset degrades to all-time
-  // below, and the stale banner carries the analytics fetch itself.
+  // Quota Window preset support: resolve the SELECTED provider's billing
+  // window from a best-effort /api/status fetch (the picker's preset row
+  // renders from it on every full render, not just quota-pinned ones).
+  // Failure keeps the last known quota — an unresolvable preset degrades to
+  // all-time below, and the stale banner carries the analytics fetch itself.
   try {
     const st = await apiGet('/api/status');
     if (st && st.quota) anQuota = st.quota;
@@ -8932,7 +9252,7 @@ async function renderAnalyticsTab(background = false) {
   // Window bounds drive both the query and the granularity gating — computed
   // from state (localStorage) BEFORE any DOM write so a failed background
   // refresh can keep the previous view untouched.
-  const bounds = analyticsRangeBounds(state.range) || { from: 0, to: Math.floor(Date.now() / 1000) };
+  const bounds = analyticsRangeBounds(state.range, state.provider) || { from: 0, to: Math.floor(Date.now() / 1000) };
   // All-time granularity gating uses the learned real window start; before
   // the first response it is unknown and the effective granularity gets
   // re-issued once the echoed from lands (below).
@@ -9035,7 +9355,7 @@ function analyticsMaybeAutoRefresh() {
   // today presets, plus a resolvable quota window (it rolls at resets and its
   // 'to' moves with the clock — same staleness argument as 'today').
   const live = st.range.preset === '1h' || st.range.preset === 'today' ||
-    (st.range.preset === 'quota' && quotaWindowFromSec(anQuota) != null);
+    (st.range.preset === 'quota' && anQuotaWindow(st.provider) != null);
   if (!live) return;
   anRefreshTimer = setInterval(() => {
     const panel = panels.analytics;
@@ -9197,6 +9517,7 @@ window.addEventListener('resize', () => {
     };
     if (dashChart && dashChart.u) dashChart.width = rewidth(dashChart.u, dashChart.width) ?? dashChart.width;
     for (const u of analyticsCharts) rewidth(u, null);
+    for (const u of mcpHistoryCharts) rewidth(u, null);
     // The sticky session views' heights ride the trace SVG's aspect ratio,
     // so the table-header offset they feed (--sess-h) goes stale on resize.
     document.querySelectorAll('.sess-sticky').forEach((el) => syncSessThOffset(el));
@@ -9770,7 +10091,7 @@ function analyticsRenderTable(panel, resp, metricId) {
     const share = r.costShare != null ? r.costShare * 100 : null;
     const costTip = r.costPerMTok == null ? '' : ` title="$${r.costPerMTok.toFixed(2)} per 1M tokens"`;
     const shareTip = share == null ? '' : ` title="${share.toFixed(1)}% of priced cost"`;
-    const drill = '#requests?' + requestsFilterQuery({ provider: r.provider, model: r.model, agent: r.agent });
+    const drill = requestsLink(requestsFilterQuery({ provider: r.provider, model: r.model, agent: r.agent }));
     const errTip = r.errPct == null ? '' : ` title="${esc(`${fmtNum(r.failures)} failures · ${fmtNum(r.failovers)} failover attempts · ${fmtNum(r.rateLimited)} rate-limited (429)`)}"`;
     return `<tr data-drill="${esc(drill)}" title="view requests · ${esc(r.label)}">
       <td class="mono">${esc(r.label)}</td>
@@ -9841,20 +10162,27 @@ async function boot() {
   // #accounts/<provider>, preset the selection before the fetch.
   let { tab: bootTab, sub: bootSub, query: bootQuery } = parseHash();
   // Legacy #status/live links: the live monitor lives under Requests now —
-  // rewrite before any tab activation so the boot lands on the live view.
+  // rewrite to the canonical requests segment before any tab activation so
+  // the boot lands on the live view.
   if (bootTab === 'status' && bootSub === 'live') {
+    const stream = bootQuery.stream === 'mcp' ? 'mcp' : '';
     const q = new URLSearchParams();
-    if (bootQuery.stream) q.set('stream', bootQuery.stream);
     if (bootQuery.session) q.set('session', bootQuery.session);
     const qs = q.toString();
-    setHash('#requests/live' + (qs ? '?' + qs : ''), false);
+    setHash('#requests/' + requestsViewKey(stream, 'live') + (qs ? '?' + qs : ''), false);
     ({ tab: bootTab, sub: bootSub, query: bootQuery } = parseHash());
   }
+  // Canonicalize legacy requests shapes (bare #requests, #requests/live,
+  // ?stream=mcp) the same way, so the boot mount reads canonical segments.
+  ({ tab: bootTab, sub: bootSub, query: bootQuery } = normalizeRequestsHash(parseHash()));
   if (bootTab === 'accounts' && bootSub) {
     accountsSelectedProvider = bootSub;
   }
   if (bootTab === 'status' && bootSub && STATUS_SECTIONS.some((s) => s.key === bootSub)) {
     statusSelected = bootSub;
+  }
+  if (bootTab === 'mcp') {
+    mcpActiveSub = mcpSubTabFromHash(bootSub) || mcpSubTabState();
   }
   if (bootTab === 'config') {
     activateTabSilent('config');
@@ -9875,7 +10203,7 @@ async function boot() {
   } else {
     activateTabSilent('status');
   }
-  // #requests/live?session=… is consumed by renderRequestsTab/renderLiveCard
+  // #requests/<stream>_live?session=… is consumed by renderRequestsTab/renderLiveCard
   // (the deterministic post-mount point); nothing to apply here.
   // Update the header connection indicator regardless of the landing tab,
   // then keep it ticking on every tab (see maybeConnRefresh).
@@ -9887,13 +10215,63 @@ async function boot() {
 
 // MCP gateway surface (/api/mcp): configured servers + aggregated routes with
 // live session gauges, plus per-server handshake probes (POST /api/mcp/test).
-// All renders here are user-triggered (tab activation, Refresh/Test clicks),
-// so no auto-refresh gate applies; a failed background refresh keeps the old
-// DOM and reports through setRefreshError like every other tab.
+// The tab is split into three sub-tabs: Servers, Routes, and History. All
+// renders are user-triggered (tab activation, sub-tab switch, Refresh/Test/
+// filter clicks), so no auto-refresh gate applies; a failed refresh keeps the
+// old DOM and reports through setRefreshError.
 let mcpData = null;
 // Per-server probe outcomes, keyed by server name: {state:'busy'|'ok'|'err',
 // text, tools, latencyMs}. Survives re-renders within the page session.
 const mcpProbe = new Map();
+// In-session MCP sub-tab selection. Holds the most recently applied sub-tab
+// (including one driven by the URL hash), so re-renders and tab re-entry stay
+// in sync with the address bar before falling back to localStorage.
+let mcpActiveSub = '';
+
+function mcpSubTabState() {
+  if (mcpActiveSub) return mcpActiveSub;
+  try { const v = localStorage.getItem('mcp-tab'); if (v) return v; } catch (_) { /* ignore */ }
+  return 'servers';
+}
+function mcpSubTabSave(v) {
+  mcpActiveSub = v;
+  try { localStorage.setItem('mcp-tab', v); } catch (_) { /* ignore */ }
+}
+
+// History sub-tab state.
+let mcpHistoryData = null;
+let mcpHistoryLoading = false;
+let mcpHistoryPicker = { open: false, view: null, pick: null, selecting: false };
+
+function mcpHistoryState() {
+  let range = { preset: '7d', customStart: '', customEnd: '' };
+  try {
+    const raw = localStorage.getItem('mcph-range');
+    if (raw) {
+      const v = JSON.parse(raw);
+      if (v && typeof v.preset === 'string') range = { customStart: '', customEnd: '', ...v };
+    }
+  } catch (_) { /* ignore */ }
+  return {
+    range,
+    gran: localStorage.getItem('mcph-gran') || 'day',
+    metric: localStorage.getItem('mcph-metric') || 'calls',
+    kind: localStorage.getItem('mcph-kind') || '',
+    name: localStorage.getItem('mcph-name') || '',
+  };
+}
+function mcpHistorySave(name, val) {
+  try { localStorage.setItem('mcph-' + name, typeof val === 'string' ? val : JSON.stringify(val)); } catch (_) { /* ignore */ }
+}
+
+function mcpHistoryRangeBounds(range, now = Date.now()) {
+  if (range.preset === 'custom') {
+    const b = tokenCustomBounds(range.customStart, range.customEnd);
+    return b || { from: 0, to: Math.floor(now / 1000) };
+  }
+  if (range.preset === 'all') return { from: 0, to: Math.floor(now / 1000) };
+  return tokenRangeBounds(range.preset, now) || { from: 0, to: Math.floor(now / 1000) };
+}
 
 async function renderMCPTab() {
   const panel = panels.mcp;
@@ -9915,8 +10293,13 @@ async function loadMCP() {
   }
 }
 
+function mcpSubTabLabel(t) {
+  return t[0].toUpperCase() + t.slice(1);
+}
+
 function renderMCPInto() {
-  const host = panels.mcp && panels.mcp.querySelector('.mcp-host');
+  const panel = panels.mcp;
+  const host = panel && panel.querySelector('.mcp-host');
   if (!host || !mcpData) return;
   const servers = mcpData.servers || [];
   const routes = mcpData.routes || [];
@@ -9924,11 +10307,62 @@ function renderMCPInto() {
     host.innerHTML = buildCard('MCP', '', '<span class="hint">No MCP servers configured — add an mcp: section to config.yaml.</span>');
     return;
   }
-  host.innerHTML = mcpServersCardHTML(servers) + mcpRoutesCardHTML(routes);
-  const refresh = host.querySelector('[data-mcp-refresh]');
+  const tab = mcpSubTabState();
+  const navItems = ['servers', 'routes', 'history'].map((t) => {
+    const active = t === tab ? ' active' : '';
+    return `<button type="button" class="status-nav-item${active}" data-mcp-tab="${esc(t)}">
+      <span class="status-nav-name">${esc(mcpSubTabLabel(t))}</span>
+    </button>`;
+  }).join('');
+  host.innerHTML = `
+    <div class="status-layout">
+      <nav class="status-nav" aria-label="MCP Sections">
+        ${navItems}
+      </nav>
+      <div class="status-main">
+        <div id="mcp-servers-view"${tab === 'servers' ? '' : ' hidden'}></div>
+        <div id="mcp-routes-view"${tab === 'routes' ? '' : ' hidden'}></div>
+        <div id="mcp-history-view"${tab === 'history' ? '' : ' hidden'}></div>
+      </div>
+    </div>`;
+  for (const btn of host.querySelectorAll('.status-nav button[data-mcp-tab]')) {
+    btn.onclick = () => {
+      const next = btn.dataset.mcpTab;
+      if (next === mcpSubTabState()) return;
+      mcpSubTabSave(next);
+      setHash(mcpHash(next), false);
+      mcpShowSubTab(host, next);
+      if (next === 'history' && !mcpHistoryData && !mcpHistoryLoading) loadMCPHistory(host);
+    };
+  }
+  const serversView = host.querySelector('#mcp-servers-view');
+  const routesView = host.querySelector('#mcp-routes-view');
+  serversView.innerHTML = mcpServersCardHTML(servers);
+  routesView.innerHTML = mcpRoutesCardHTML(routes);
+  const refresh = serversView.querySelector('[data-mcp-refresh]');
   if (refresh) refresh.onclick = () => loadMCP();
-  for (const btn of host.querySelectorAll('[data-mcp-test]')) {
+  for (const btn of serversView.querySelectorAll('[data-mcp-test]')) {
     btn.onclick = () => mcpTestServer(btn.dataset.mcpTest);
+  }
+  renderMCPHistory(host);
+}
+
+function mcpShowSubTab(host, tab) {
+  for (const btn of host.querySelectorAll('.status-nav button[data-mcp-tab]')) {
+    btn.classList.toggle('active', btn.dataset.mcpTab === tab);
+  }
+  host.querySelector('#mcp-servers-view').hidden = tab !== 'servers';
+  host.querySelector('#mcp-routes-view').hidden = tab !== 'routes';
+  host.querySelector('#mcp-history-view').hidden = tab !== 'history';
+  if (tab === 'history') {
+    for (const u of mcpHistoryCharts) {
+      try {
+        if (u && u.root && document.contains(u.root)) {
+          const chartHost = u.root.parentElement;
+          if (chartHost) u.setSize({ width: Math.max(chartHost.clientWidth || 600, 320), height: 260 });
+        }
+      } catch (_) { /* malformed */ }
+    }
   }
 }
 
@@ -9946,16 +10380,16 @@ function mcpServersCardHTML(servers) {
       const badge = probe.state === 'ok' ? '<span class="badge ok">ok</span>' : '<span class="badge err">fail</span>';
       const tools = (probe.tools || []).slice(0, 8).map((t) => `<span class="badge muted">${esc(t)}</span>`).join(' ');
       const more = (probe.tools || []).length > 8 ? ` +${probe.tools.length - 8}` : '';
-      resultRow = `<tr><td></td><td colspan="10">${badge} <span class="hint">${esc(probe.text)}${probe.latencyMs != null ? ` · ${probe.latencyMs} ms` : ''}</span> ${tools}${esc(more)}</td></tr>`;
+      resultRow = `<tr><td></td><td colspan="9">${badge} <span class="hint">${esc(probe.text)}${probe.latencyMs != null ? ` · ${probe.latencyMs} ms` : ''}</span> ${tools}${esc(more)}</td></tr>`;
     }
-    const stats = `<td class="num">${s.calls || 0}</td><td class="num">${s.errors || 0}</td><td class="num">${s.calls ? (s.avg_latency_ms || 0) : '—'}</td>`;
+    const stats = `<td class="num">${s.errors || 0}</td><td class="num">${s.calls ? (s.avg_latency_ms || 0) : '—'}</td>`;
     return `<tr><td>${esc(s.name)}</td><td>${enabled}</td><td>${esc(s.transport)}</td><td>${auth}</td><td class="mcp-wrap" title="${esc(endpoint)}">${esc(endpoint)}</td>${accounts}<td class="num">${s.sessions || 0}</td>${stats}<td>${action}</td></tr>` + resultRow;
   }).join('');
   // Fixed column geometry (colgroup + table-layout: fixed, the request-table
   // contract): long endpoints/commands wrap inside their column instead of
   // pushing the table past the card edge, which clips the trailing columns.
-  const cols = '<colgroup>' + [9, 6, 8, 10, 31, 6, 7, 6, 6, 6, 5].map((w) => `<col style="width:${w}%"/>`).join('') + '</colgroup>';
-  const table = `<table class="table">${cols}<thead><tr><th>Name</th><th>Enabled</th><th>Transport</th><th>Auth</th><th>Endpoint</th><th class="num">Accounts</th><th class="num">Sessions</th><th class="num">Calls</th><th class="num">Errors</th><th class="num">Avg ms</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  const cols = '<colgroup>' + [12, 6, 7, 9, 28, 6, 8, 6, 7, 11].map((w) => `<col style="width:${w}%"/>`).join('') + '</colgroup>';
+  const table = `<table class="table">${cols}<thead><tr><th>Name</th><th>Enabled</th><th>Transport</th><th>Auth</th><th>Endpoint</th><th class="num">Accounts</th><th class="num">Sessions</th><th class="num">Errors</th><th class="num">Avg ms</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   return buildCard('MCP Servers', `${servers.length} servers`, table, 'mcp-table', '<button class="btn small" data-mcp-refresh>Refresh</button>');
 }
 
@@ -9964,10 +10398,10 @@ function mcpRoutesCardHTML(routes) {
   const rows = routes.map((r) => {
     const enabled = r.enabled ? '<span class="badge ok">on</span>' : '<span class="badge muted">off</span>';
     const targets = (r.targets || []).map((t) => `${esc(t.server)} (${t.tools})`).join(' → ');
-    return `<tr><td>${esc(r.name)}</td><td>${enabled}</td><td class="mcp-wrap">${targets}</td><td class="num">${r.sessions || 0}</td><td class="num">${r.calls || 0}</td><td class="num">${r.errors || 0}</td><td class="num">${r.calls ? (r.avg_latency_ms || 0) : '—'}</td></tr>`;
+    return `<tr><td>${esc(r.name)}</td><td>${enabled}</td><td class="mcp-wrap">${targets}</td><td class="num">${r.sessions || 0}</td><td class="num">${r.errors || 0}</td><td class="num">${r.calls ? (r.avg_latency_ms || 0) : '—'}</td></tr>`;
   }).join('');
-  const cols = '<colgroup>' + [10, 8, 52, 8, 7, 7, 8].map((w) => `<col style="width:${w}%"/>`).join('') + '</colgroup>';
-  const table = `<table class="table">${cols}<thead><tr><th>Name</th><th>Enabled</th><th>Targets (failover order)</th><th class="num">Sessions</th><th class="num">Calls</th><th class="num">Errors</th><th class="num">Avg ms</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const cols = '<colgroup>' + [14, 8, 40, 11, 10, 17].map((w) => `<col style="width:${w}%"/>`).join('') + '</colgroup>';
+  const table = `<table class="table">${cols}<thead><tr><th>Name</th><th>Enabled</th><th>Targets (failover order)</th><th class="num">Sessions</th><th class="num">Errors</th><th class="num">Avg ms</th></tr></thead><tbody>${rows}</tbody></table>`;
   return buildCard('MCP Routes', `${routes.length} routes`, table, 'mcp-table');
 }
 
@@ -9993,6 +10427,304 @@ async function mcpTestServer(name) {
     mcpProbe.set(name, { state: 'err', text: (e && e.message) || String(e), tools: [] });
   }
   renderMCPInto();
+}
+
+// ---------- MCP History sub-tab ----------
+
+function mcpHistoryBucketLabel(ts, gran) {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  if (gran === 'minute' || gran === 'hour') {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  if (gran === 'month') {
+    return d.toLocaleDateString([], { year: 'numeric', month: 'short' });
+  }
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function mcpHistoryPickerClose() {
+  mcpHistoryPicker = { open: false, view: null, pick: null, selecting: false };
+  document.removeEventListener('keydown', mcpHistoryPickerOnKey);
+  document.removeEventListener('click', mcpHistoryPickerOnOutside, true);
+}
+
+function mcpHistoryPickerOnKey(e) {
+  if (e.key === 'Escape') {
+    mcpHistoryPickerClose();
+    const host = panels.mcp && panels.mcp.querySelector('.mcp-host');
+    if (host) mcpHistoryPickerRender(host);
+  }
+}
+
+function mcpHistoryPickerOnOutside(e) {
+  if (!e.target.closest('.tr-wrap')) {
+    mcpHistoryPickerClose();
+    const host = panels.mcp && panels.mcp.querySelector('.mcp-host');
+    if (host) mcpHistoryPickerRender(host);
+  }
+}
+
+function mcpHistoryPickerRender(host) {
+  const hostEl = host.querySelector('#mcph-range-host');
+  if (!hostEl) return;
+  const state = mcpHistoryState();
+  hostEl.innerHTML = tokenRangePickerHTML(state.range, mcpHistoryPicker, 'mcph');
+  const trigger = hostEl.querySelector('.tr-trigger');
+  if (trigger) {
+    trigger.onclick = () => {
+      if (mcpHistoryPicker.open) {
+        mcpHistoryPickerClose();
+      } else {
+        const anchor = (state.range.preset === 'custom' && parseLocalDate(state.range.customStart)) || new Date();
+        mcpHistoryPicker = { open: true, view: { year: anchor.getFullYear(), month: anchor.getMonth() }, pick: null, selecting: false };
+        document.addEventListener('keydown', mcpHistoryPickerOnKey);
+        document.addEventListener('click', mcpHistoryPickerOnOutside, true);
+      }
+      mcpHistoryPickerRender(host);
+    };
+  }
+  hostEl.querySelectorAll('[data-mcph-preset]').forEach((btn) => {
+    btn.onclick = () => {
+      const value = btn.dataset.mcphPreset;
+      if (value === 'custom') {
+        mcpHistoryPicker.selecting = true;
+        mcpHistoryPicker.pick = null;
+        mcpHistoryPickerRender(host);
+        return;
+      }
+      mcpHistorySave('range', { preset: value, customStart: '', customEnd: '' });
+      mcpHistoryPickerClose();
+      loadMCPHistory(host);
+    };
+  });
+  hostEl.querySelectorAll('[data-mcph-day]').forEach((btn) => {
+    btn.onclick = () => {
+      if (!mcpHistoryPicker.selecting && state.range.preset !== 'custom') {
+        mcpHistoryPicker.selecting = true;
+      }
+      const result = rangePick(mcpHistoryPicker.pick, btn.dataset.mcphDay);
+      if (!result.complete) {
+        mcpHistoryPicker.pick = result.pick;
+        mcpHistoryPickerRender(host);
+        return;
+      }
+      mcpHistorySave('range', { preset: 'custom', customStart: result.start, customEnd: result.end });
+      mcpHistoryPickerClose();
+      loadMCPHistory(host);
+    };
+  });
+  hostEl.querySelectorAll('[data-mcph-nav]').forEach((btn) => {
+    btn.onclick = () => {
+      mcpHistoryPicker.view = shiftMonth(mcpHistoryPicker.view.year, mcpHistoryPicker.view.month, Number(btn.dataset.mcphNav));
+      mcpHistoryPickerRender(host);
+    };
+  });
+}
+
+function mcpHistoryFetchQuery() {
+  const state = mcpHistoryState();
+  const bounds = mcpHistoryRangeBounds(state.range);
+  const q = new URLSearchParams();
+  q.set('from', String(bounds.from));
+  q.set('to', String(bounds.to));
+  q.set('granularity', state.gran);
+  if (state.kind) q.set('kind', state.kind);
+  if (state.name) q.set('name', state.name);
+  return '/api/mcp/analytics?' + q.toString();
+}
+
+async function loadMCPHistory(host) {
+  if (mcpHistoryLoading) return;
+  mcpHistoryLoading = true;
+  const summaryHost = host.querySelector('#mcph-summary-host');
+  if (summaryHost) summaryHost.innerHTML = mcpHistorySkeletonHTML();
+  try {
+    mcpHistoryData = await apiGet(mcpHistoryFetchQuery());
+    setRefreshError(panels.mcp, null);
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    if (summaryHost) summaryHost.innerHTML = `<div class="msg err">${esc(msg)}</div>`;
+    setRefreshError(panels.mcp, staleDataText('MCP history unavailable: ' + msg));
+    mcpHistoryLoading = false;
+    return;
+  }
+  mcpHistoryLoading = false;
+  renderMCPHistory(host);
+}
+
+// Live uPlot instances for the MCP History chart; destroyed on re-render so
+// the canvases and document-level legend listener don't leak across innerHTML
+// resets.
+let mcpHistoryCharts = [];
+
+function destroyMCPHistoryCharts() {
+  for (const u of mcpHistoryCharts) {
+    try { u.destroy(); } catch (_) { /* already detached */ }
+  }
+  mcpHistoryCharts = [];
+}
+
+// Session-persistent set of series labels toggled off in the MCP History chart
+// legend, so metric switches and refetches keep the operator's dimmed series.
+const mcpHistoryLegendHidden = new Set();
+
+function renderMCPHistory(host) {
+  const view = host.querySelector('#mcp-history-view');
+  if (!view || view.hidden) return;
+  const state = mcpHistoryState();
+  const names = [...new Set((mcpHistoryData && mcpHistoryData.series || []).map((s) => s.name))].sort();
+  view.innerHTML = `
+    <div class="an-toolbar">
+      <span id="mcph-range-host"></span>
+      <div class="an-seg" id="mcph-gran" role="group" aria-label="Granularity"></div>
+      <select id="mcph-kind" class="req-input">
+        <option value="">All Kinds</option>
+        <option value="server"${state.kind === 'server' ? ' selected' : ''}>Servers</option>
+        <option value="route"${state.kind === 'route' ? ' selected' : ''}>Routes</option>
+      </select>
+      <select id="mcph-name" class="req-input">
+        <option value="">All Names</option>
+        ${names.map((n) => `<option value="${esc(n)}"${state.name === n ? ' selected' : ''}>${esc(n)}</option>`).join('')}
+      </select>
+      <button type="button" class="btn small" id="mcph-refresh">Refresh</button>
+    </div>
+    <div class="an-chart-card">
+      <div class="an-chart-head">
+        <div class="an-seg" id="mcph-metric" role="group" aria-label="Metric"></div>
+      </div>
+      <div class="an-chart-wrap">
+        <div id="mcph-chart" class="an-chart"></div>
+      </div>
+      <div id="mcph-legend"></div>
+    </div>
+    <div id="mcph-summary-host"></div>`;
+  mcpHistoryPickerRender(host);
+  analyticsSeg(view.querySelector('#mcph-gran'), MCP_HISTORY_GRANULARITIES.map((g) => ({ value: g.value, label: g.label })), state.gran, (v) => {
+    mcpHistorySave('gran', v);
+    loadMCPHistory(host);
+  });
+  analyticsSeg(view.querySelector('#mcph-metric'), mcpHistoryMetricOptions(), state.metric, (v) => {
+    mcpHistorySave('metric', v);
+    renderMCPHistory(host);
+  });
+  const kindSel = view.querySelector('#mcph-kind');
+  const nameSel = view.querySelector('#mcph-name');
+  kindSel.onchange = () => { mcpHistorySave('kind', kindSel.value); loadMCPHistory(host); };
+  nameSel.onchange = () => { mcpHistorySave('name', nameSel.value); loadMCPHistory(host); };
+  attachClearable(kindSel);
+  attachClearable(nameSel);
+  view.querySelector('#mcph-refresh').onclick = () => loadMCPHistory(host);
+
+  const summaryHost = view.querySelector('#mcph-summary-host');
+  if (!mcpHistoryData) {
+    summaryHost.innerHTML = mcpHistorySkeletonHTML();
+    loadMCPHistory(host);
+    return;
+  }
+  const series = mcpHistoryFilterSeries(mcpHistoryData.series, state.kind, state.name);
+  const gran = mcpHistoryData.granularity || state.gran;
+  if (!series.length) {
+    summaryHost.innerHTML = buildCard('Summary', '', mcpHistoryEmptyHTML(), 'mcp-table');
+    return;
+  }
+  const rows = mcpHistorySummaryRows(series);
+  summaryHost.innerHTML = buildCard('Summary', `${rows.length} series`, mcpHistorySummaryTableHTML(rows, {
+    formatTime: (ts) => ts ? mcpHistoryBucketLabel(ts, gran) : '—',
+  }), 'mcp-table');
+  mcpHistoryRenderChart(view, series, state.metric, gran);
+}
+
+// mcpHistoryRenderChart draws the selected metric's trend chart with uPlot,
+// reusing the same column renderer, tooltip and legend chips as Analytics.
+function mcpHistoryRenderChart(view, series, metricId, gran) {
+  if (typeof uPlot === 'undefined') return;
+  const host = view.querySelector('#mcph-chart');
+  const legendHost = view.querySelector('#mcph-legend');
+  if (!host) return;
+  destroyMCPHistoryCharts();
+  host.innerHTML = '';
+  const metric = MCP_HISTORY_METRICS.find((m) => m.id === metricId) || MCP_HISTORY_METRICS[0];
+  const grid = analyticsWindowGrid(mcpHistoryData && mcpHistoryData.from, mcpHistoryData && mcpHistoryData.to, gran);
+  const data = mcpHistoryChartSeries(series, metric.id, grid);
+  if (!data.x.length || !data.labels.length) {
+    host.innerHTML = '<div class="empty-state">No series in range</div>';
+    return;
+  }
+  const colors = analyticsChartColors();
+  const fullRange = analyticsXRange(data.x);
+  const uSeries = [{ label: 'time' }];
+  data.labels.forEach((label, i) => {
+    const stroke = colors[i % colors.length];
+    uSeries.push({ label, stroke, width: 1, fill: withAlpha(stroke, 0.55), paths: analyticsBarPaths(), points: { show: false } });
+  });
+  const axis = uplotAxisStyle();
+  const opts = {
+    title: metric.label + ' (' + metric.axis + ')',
+    width: Math.max(host.clientWidth || 600, 320),
+    height: 260,
+    series: uSeries,
+    scales: {
+      x: { time: true, range: () => fullRange },
+      y: { range: (_u, min, max) => [0, Math.max(max, min || 0, 1)] },
+    },
+    cursor: { drag: { x: true, y: false, setScale: true } },
+    plugins: [mcpHistoryChartTooltip(metric.id, gran)],
+    axes: [
+      { ...axis, values: analyticsXAxisValues },
+      { label: metric.axis, size: 60, ...axis, values: (_u, splits) => splits.map((v) => (v == null ? '' : fmtCompact(v))) },
+    ],
+    legend: { show: false },
+  };
+  try {
+    const u = new uPlot(opts, [data.x, ...data.ys], host);
+    mcpHistoryCharts.push(u);
+    analyticsRenderLegend(legendHost, u, data.labels, colors, mcpHistoryLegendHidden);
+  } catch (_) { /* malformed data */ }
+}
+
+// mcpHistoryChartTooltip is the MCP History variant of analyticsTooltip: same
+// floating bucket label + series rows, but values formatted by the active MCP
+// metric (calls/errors/avg_ms).
+function mcpHistoryChartTooltip(metricId, gran) {
+  return {
+    hooks: {
+      init: (u) => {
+        const tip = document.createElement('div');
+        tip.className = 'an-tip';
+        tip.hidden = true;
+        u.over.appendChild(tip);
+        u.mcphTip = tip;
+      },
+      setCursor: (u) => {
+        const tip = u.mcphTip;
+        if (!tip) return;
+        const idx = u.cursor.idx;
+        if (idx == null || u.cursor.left < 0 || !u.data[0] || !u.data[0].length) {
+          tip.hidden = true;
+          return;
+        }
+        const t = u.data[0][idx];
+        let rows = '';
+        for (let i = 1; i < u.series.length; i++) {
+          if (u.series[i].show === false) continue;
+          const v = u.data[i][idx];
+          const stroke = u.series[i].stroke;
+          const dot = typeof stroke === 'string' ? ` style="background:${stroke}"` : '';
+          rows += `<div class="row"><i class="dot"${dot}></i><span class="lab">${esc(u.series[i].label)}</span><span>${esc(mcpHistoryValueText(metricId, v))}</span></div>`;
+        }
+        tip.innerHTML = `<div class="t">${esc(analyticsBucketLabel(t, gran))}</div>${rows}`;
+        tip.hidden = false;
+        const w = tip.offsetWidth, h = tip.offsetHeight;
+        let x = u.cursor.left + 14;
+        if (x + w > u.over.clientWidth - 4) x = Math.max(u.cursor.left - w - 14, 4);
+        let y = u.cursor.top + 14;
+        if (y + h > u.over.clientHeight - 4) y = Math.max(u.cursor.top - h - 14, 4);
+        tip.style.left = x + 'px';
+        tip.style.top = y + 'px';
+      },
+    },
+  };
 }
 
 // ---------- Takeover tab ----------

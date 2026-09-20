@@ -396,6 +396,37 @@ func TestWebAssetsBodyViewerContract(t *testing.T) {
 // the shared summary renderer (also used by the Live session panel).
 func TestWebAssetsRequestsSessionContract(t *testing.T) {
 	js := mustWebAsset(t, "app.js")
+	// Segment routing contract: the Requests tab's view identity rides the
+	// hash SEGMENT (#requests/model_all | model_live | mcp_all | mcp_live);
+	// the query carries only filter/session/drill keys. Legacy shapes
+	// (bare #requests, #requests/live, ?stream=mcp) rewrite in place at boot
+	// and on every hashchange, and the four cross-tab drill builders go
+	// through requestsLink. Behavior-covered by the UI e2e routing test.
+	for _, want := range []string{
+		"function requestsViewKey(stream, view) {",
+		"function requestsViewFromKey(key) {",
+		"function normalizeRequestsHash(p) {",
+		"function requestsLink(queryStr) {",
+		"const { tab, sub, query } = normalizeRequestsHash(parseHash());",
+		"({ tab: bootTab, sub: bootSub, query: bootQuery } = normalizeRequestsHash(parseHash()));",
+		// Four-page architecture: page configs + the router are the single
+		// writer of which page is mounted (behavior-covered by the UI e2e
+		// routing test).
+		"const REQUESTS_PAGES = {",
+		"function navigateRequestsPage(key, opts) {",
+		"function activeRequestsPage() {",
+		"activeRequestsPageKey = key;",
+		"return '#requests/model_all' + (queryStr ? '?' + queryStr : '');",
+		// The query layer must NOT know the stream key (segment-owned).
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q", want)
+		}
+	}
+	pureJs := mustWebAsset(t, "pure.js")
+	if strings.Contains(pureJs, "q.set('stream'") {
+		t.Errorf("pure.js requestsFilterQuery must not emit a stream query key (the hash segment owns the stream)")
+	}
 	// .card carries overflow: hidden (radius clipping), which makes it the
 	// scroll container for sticky descendants — a card that never scrolls
 	// kills page-level stickiness. The two session-view host cards must opt
@@ -435,15 +466,15 @@ func TestWebAssetsRequestsSessionContract(t *testing.T) {
 			t.Errorf("pure.js missing %q", want)
 		}
 	}
-	// #requests/live?session=… must survive a refresh: the requests mount
-	// stashes the pin in bootLiveSession and renderLiveCard consumes it right
-	// after the mount that resets the selection (a direct apply raced that
-	// mount). The hashchange path does the same for in-tab navigation.
+	// #requests/<stream>_live?session=… must survive a refresh: the router
+	// hands the query to renderLiveCard, which stashes the pin in the page's
+	// bootPin and consumes it right after the mount that resets the selection
+	// (a direct apply raced that mount). The pin lives in the page's state
+	// slice (livePageState), not a module global.
 	for _, want := range []string{
-		"let bootLiveSession = '';",
-		"bootLiveSession = parseHash().query.session;",
-		"bootLiveSession = liveSess;",
-		"if (bootLiveSession) {",
+		"S.bootPin = (query && query.session) || '';",
+		"if (S.bootPin) {",
+		"const resumeSession = S.bootPin || S.session;",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js missing live-session boot pin marker %q", want)
@@ -551,9 +582,15 @@ func TestWebAssetsRequestsSessionContract(t *testing.T) {
 	for _, want := range []string{
 		"function sessionViewHTML(",
 		"function wireSessionTimeline(",
-		"sessionViewHTML(rows, liveSessionAgg, { session: liveSessionFilter })",
-		"sessionViewHTML(rows, agg, { live: false, session: requestsFilter.session })",
-		`<div class="sess-sticky">${sessionViewHTML(rows, liveSessionAgg`,
+		"sessionViewHTML(rows, S.agg, { session: S.session, ...activeRequestsPage().sessionView })",
+		"sessionViewHTML(rows, agg, { live: false, session: requestsFilter.session, ...page.sessionView })",
+		// The session view (and the Live session panel's table head) must
+		// speak the stream's domain: the MCP variant carries the 7-column
+		// Server/Account geometry and drops the LLM token/cost chips — the
+		// LLM head over 7-cell MCP rows misaligns and reads as the Model view
+		// (behavior-covered by the UI e2e MCP-domain session-panel test).
+		"requestTableHeadHTML(activeRequestsPage().table)",
+		`<div class="sess-sticky">${sessionViewHTML(rows, S.agg`,
 		"class=\"sess-sticky\" style=\"margin-bottom:12px\" hidden",
 		// Timeline bar → inline detail + locate: instant rect-based jump (a
 		// smooth/element scroll dies on the first mid-flight replaceChildren),
@@ -699,6 +736,11 @@ func TestWebAssetsRequestsVirtualScrollContract(t *testing.T) {
 // (in-flight rows dropped — their end events were missed while
 // disconnected), the retained ring paints in the mount task, the session
 // selection resumes, and the empty-ring placeholder reserves height in CSS.
+// The ring is also deduped by request id at that remount: every SSE
+// (re)connect replays the hub's recent-event ring, so a replayed start
+// must never add a second row for a request the retained ring already
+// holds (the Live sub-view round trip used to duplicate every retained
+// row this way — behavior-covered by the UI e2e replay test).
 func TestWebAssetsTabSwitchStabilityContract(t *testing.T) {
 	js := mustWebAsset(t, "app.js")
 	for _, want := range []string{
@@ -706,8 +748,11 @@ func TestWebAssetsTabSwitchStabilityContract(t *testing.T) {
 		"tabScrollMemory[prevTab] = window.scrollY;",
 		"window.scrollTo(0, tabScrollMemory[name]);",
 		"showTabPanel(name);",
-		"liveRows = liveRows.filter((r) => !r.inFlight);",
-		"const resumeSession = liveSessionFilter;",
+		"liveRows = liveRows.filter(dedupeRetainedLiveRows);",
+		"function dedupeRetainedLiveRows(r, i, rows) {",
+		"return rows.findIndex((o) => o.requestId === r.requestId) === i;",
+		"const kept = liveByReq[e.request_id];",
+		"const resumeSession = S.bootPin || S.session;",
 		"onLiveSessionChange(resumeSession);",
 		"} else if (liveRows.length) {",
 	} {

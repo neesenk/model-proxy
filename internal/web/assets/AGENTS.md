@@ -30,7 +30,8 @@
 | 时间线 tooltip | app.js `showTlTip`/`hideTlTip`，pure.js `sessionBarSummary` | 会话时间线 |
 | 大 body | app.js `chunkedBodyHTML` | raw body / 大 SSE |
 | 弹层 | `data-popup`+`hidden`；body 级走 app.js `comboInstances` | 日历 / combobox / 下拉 |
-| 时间维度选择器 | pure.js `tokenRangePickerHTML`（`TOKEN_RANGES` 预设 + 双月日历；tr-* 样式）+ 各 tab wiring（Status tokens 区 / Analytics 工具栏 / Accounts Token usage 区块）；Quota Window 预设复用 `quotaWindowFromSec` | jstests/pure.test.mjs（tokenRangePickerHTML 开/合两态 + quotaWindowFromSec） |
+| 时间维度选择器 | pure.js `tokenRangePickerHTML`（`TOKEN_RANGES` 预设 + 双月日历；tr-* 样式）+ 各 tab wiring（Status tokens 区 / Analytics 工具栏 / Accounts Token usage 区块）；Quota Window 预设跨 provider 语境复用 `quotaWindowFromSec`，provider 语境（Analytics）用 `quotaWindowForProvider` | jstests/pure.test.mjs（tokenRangePickerHTML 开/合两态 + quotaWindowFromSec/quotaWindowForProvider） |
+| 面板内子标签导航 | Status 同款左侧边栏 `.status-layout`/`.status-nav`/`.status-nav-item`（`data-mcp-tab` 驱动） | MCP tab 的 Servers/Routes/History 子标签切换 |
 | 筛选输入清除 | `.clearable`/`.clear-x`，app.js `attachClearable`（契约见 `docs/frontend.md`） | combobox / datalist 筛选输入、带 All 默认项的筛选 select |
 | 目录匹配列表 | `details.cat-match` + pure.js `catalogMatchHTML`/`catalogMatchEditorHTML` + app.js `saveCatalogMatch`（契约见 `docs/frontend.md`） | Status Model Catalog 卡 |
 | 模态 | `<dialog>`（`.live-detail-pop`） | Live 详情 / confirm |
@@ -41,7 +42,7 @@
 | 刷新门 | app.js `deferAutoRefresh`+`cancelAutoRefreshHold` | 全部 tick/SSE 渲染 |
 | tab 保留 | app.js `retainTab` | 全部 tab |
 | stale 横幅 | app.js `setRefreshError` + pure.js `staleDataText` | 刷新失败路径 |
-| 视图状态 | pure.js `requestsFilterQuery`/`requestsFilterFromQuery`，app.js `statusHash` | URL hash |
+| 视图状态 | pure.js `requestsFilterQuery`/`requestsFilterFromQuery`/`mcpSubTabFromHash`/`mcpHash`，app.js `statusHash` | URL hash |
 
 样式漂移门禁（`jstests/registry.test.mjs`，随 `node --test` 与 `go test ./internal/web` 跑）：
 

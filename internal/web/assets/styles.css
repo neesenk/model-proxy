@@ -1442,11 +1442,17 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .model-caps-empty { color: var(--muted); }
 
 /* MCP tab tables: fixed layout pinned by the markup colgroup (the request
-   table contract) so long endpoints/commands wrap inside their column
-   instead of widening the table past the card edge — .card clips overflow,
-   which silently hid the trailing numeric/action columns. */
-.mcp-table .table { table-layout: fixed; }
-.mcp-table .mcp-wrap { overflow-wrap: anywhere; }
+   table contract). Cells that must not wrap clip with ellipsis instead of
+   overflowing into the next column; the Endpoint/Targets wrapping columns keep
+   overflow-wrap:anywhere. The card-body scrolls horizontally when the sidebar
+   leaves less than the table's 720px floor, so the fixed geometry never
+   collapses into overlapping columns. */
+.mcp-table.card-body { overflow-x: auto; }
+.mcp-table .table { table-layout: fixed; min-width: 720px; }
+.mcp-table .table th,
+.mcp-table .table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-table .table td .badge { white-space: nowrap; }
+.mcp-table .mcp-wrap { white-space: normal; overflow-wrap: anywhere; }
 @media (max-width: 720px) {
   .status-layout, .req-layout { grid-template-columns: 1fr; }
   .status-nav, .req-nav {
@@ -1576,6 +1582,8 @@ input[type="checkbox"] { accent-color: var(--accent); }
 }
 .tr-preset:hover { background: var(--surface-2); }
 .tr-preset.active { color: var(--accent-ink); font-weight: 600; }
+.tr-preset:disabled { color: var(--muted); cursor: default; }
+.tr-preset:disabled:hover { background: none; }
 .tr-check { width: 1em; color: var(--accent); }
 .tr-cal { display: flex; gap: 8px; align-items: flex-start; }
 .tr-months { display: flex; gap: 16px; }

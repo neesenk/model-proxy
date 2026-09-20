@@ -18,7 +18,7 @@ import {
   tokenCustomBounds, parseLocalDate,
   WEEKDAYS, monthTitle, calendarMonthGrid, twoMonthWindow, shiftMonth, ymd,
   isFutureDay, rangePick, customRangeLabel, tokenRangeTriggerLabel, tokenRangePickerHTML,
-  quotaUsageFromSec, quotaWindowFromSec,
+  quotaUsageFromSec, quotaWindowFromSec, quotaWindowForProvider,
   prettyJSON, formatJSONLoose, jsonToHTML, parseSSE, isSSE, highlightJSON, splitLinesByBudget, linkedModels,
   sessionsForAgent, linkedAgents,
   fmtGuardDetail, fmtProgressBytes, analyticsChartSeries, analyticsPointValue, analyticsTableRows, analyticsTickLabel,
@@ -42,6 +42,10 @@ takeoverRunSummary, takeoverRestoreSummary, takeoverVariantLabel,
   highlightYAML, highlightTOML, highlightEnv, highlightConfig,
   takeoverFamilyGroups, takeoverFamilyBadge, TAKEOVER_TEMPLATE_EXAMPLES, TAKEOVER_PLACEHOLDERS,
   shadowMatchBadge,
+  MCP_HISTORY_GRANULARITIES, MCP_HISTORY_METRICS, mcpHistoryFilterSeries, mcpHistorySummaryRows,
+  mcpHistoryChartSeries, mcpHistoryMetricOptions, mcpHistoryPointValue, mcpHistoryValueText,
+  mcpHistorySummaryTableHTML, mcpHistoryEmptyHTML, mcpHistorySkeletonHTML,
+  VALID_MCP_SUB_TABS, mcpSubTabFromHash, mcpHash,
 } from '../assets/pure.js';
 
 test('esc escapes all five HTML-significant chars', () => {
@@ -601,6 +605,53 @@ test('quotaWindowFromSec picks the first resolvable plan provider, keys sorted',
   // Snapshot values may be projections (plain objects) — numeric-ish or
   // malformed UsageFrom fields are skipped, not thrown.
   assert.equal(quotaWindowFromSec({ x: { UsageFrom: 123 } }, now), null);
+});
+
+test('quotaWindowForProvider resolves the selected provider, own key then pool entries', () => {
+  const now = new Date(2026, 8, 20, 12, 0, 0).getTime();
+  const quota = {
+    aqp: { UsageFrom: '2026-09-01T08:00:00+08:00' },
+    zhipu: { UsageFrom: '2026-09-18T17:50:59+08:00' },
+    'pool#a1': { UsageFrom: '0001-01-01T00:00:00Z' },   // unresolvable → skipped
+    'pool#a2': { UsageFrom: '2026-09-10T00:00:00+08:00' },
+  };
+  // The provider's own entry wins and drives the window (NOT the first
+  // sorted key of the whole map — aqp exists but zhipu was asked for).
+  const z = quotaWindowForProvider(quota, 'zhipu', now);
+  assert.equal(z.key, 'zhipu');
+  assert.equal(z.from, Math.floor(new Date('2026-09-18T17:50:59+08:00').getTime() / 1000));
+  // Multi-entry pools key quota per account ("name#<accountId>"): the first
+  // resolvable account stands in for the pool.
+  const p = quotaWindowForProvider(quota, 'pool', now);
+  assert.equal(p.key, 'pool#a2');
+  assert.equal(p.from, Math.floor(new Date('2026-09-10T00:00:00+08:00').getTime() / 1000));
+  // A prefix look-alike ("poolx") must not match "pool" — the '#' boundary
+  // is part of the match.
+  assert.equal(quotaWindowForProvider({ 'poolx#a1': quota['pool#a2'] }, 'pool', now), null);
+  // No provider selected, unknown provider, or no resolvable entry → null.
+  assert.equal(quotaWindowForProvider(quota, '', now), null);
+  assert.equal(quotaWindowForProvider(quota, 'deepseek', now), null);
+  assert.equal(quotaWindowForProvider({ zhipu: { Err: 'boom' } }, 'zhipu', now), null);
+  assert.equal(quotaWindowForProvider(null, 'zhipu', now), null);
+});
+
+test('tokenRangePickerHTML disabled extra preset renders unclickable', () => {
+  const html = tokenRangePickerHTML(
+    { preset: 'all', customStart: '', customEnd: '' },
+    { open: false, view: null, pick: null, selecting: false },
+    'an',
+    { extraPresets: [{ value: 'quota', label: 'Quota Window', disabled: true }] });
+  // Disabled rows stay visible (stable layout) but carry the disabled attr
+  // and never the active checkmark.
+  assert.ok(/<button class="tr-preset" data-an-preset="quota" disabled>/.test(html));
+  assert.ok(!/data-an-preset="quota" disabled>\s*<span class="tr-check">✓/.test(html));
+  // Enabled extra presets render without the attribute.
+  const enabled = tokenRangePickerHTML(
+    { preset: 'all', customStart: '', customEnd: '' },
+    { open: false, view: null, pick: null, selecting: false },
+    'an',
+    { extraPresets: [{ value: 'quota', label: 'Quota Window' }] });
+  assert.ok(/<button class="tr-preset" data-an-preset="quota">/.test(enabled));
 });
 
 test('tokenRangePickerHTML closed state: hidden popover, namespace attrs, trigger label', () => {
@@ -2482,18 +2533,24 @@ test('readableValue flattens JSON into human text', () => {
 
 test('requests filter hash round-trips, omitting defaults and dropping junk', () => {
   // Only non-default values ride along; an all-default filter yields no query.
+  // The stream is NOT a query key — it lives in the hash segment
+  // (#requests/<stream>_<view>, app.js requestsViewKey), so it neither emits
+  // nor parses here (a stray legacy ?stream= is absorbed by
+  // normalizeRequestsHash before FromQuery ever runs).
   assert.equal(requestsFilterQuery({ stream: '', session: '', agent: '', model: '', provider: '', errors: false, shadow: '' }), '');
+  assert.equal(requestsFilterQuery({ stream: 'mcp', session: '', agent: '', model: '', provider: '', errors: false, shadow: '' }), '');
   const q = requestsFilterQuery({ stream: '', session: 'sess demo/1', agent: 'pi', model: '', provider: 'zhipu', errors: true, shadow: 'only' });
   assert.equal(q, 'session=sess+demo%2F1&agent=pi&provider=zhipu&errors=1&shadow=only');
   // Round-trip through hashQueryParams + fromQuery.
   const back = requestsFilterFromQuery(hashQueryParams(q));
   assert.deepEqual(back, { stream: '', session: 'sess demo/1', agent: 'pi', model: '', provider: 'zhipu', errors: true, shadow: 'only' });
-  // The MCP stream rides stream=mcp and round-trips; junk values fall back
-  // to the LLM default.
   const mcp = requestsFilterQuery({ stream: 'mcp', session: '', agent: 'codex', model: '', provider: '', errors: false, shadow: '' });
-  assert.equal(mcp, 'stream=mcp&agent=codex');
-  assert.deepEqual(requestsFilterFromQuery(hashQueryParams(mcp)), { stream: 'mcp', session: '', agent: 'codex', model: '', provider: '', errors: false, shadow: '' });
-  assert.deepEqual(requestsFilterFromQuery({ stream: 'bogus' }), { stream: '', session: '', agent: '', model: '', provider: '', errors: false, shadow: '' });
+  assert.equal(mcp, 'agent=codex');
+  assert.deepEqual(requestsFilterFromQuery(hashQueryParams(mcp)), { stream: '', session: '', agent: 'codex', model: '', provider: '', errors: false, shadow: '' });
+  // A stream-only query is not a filter key: null (segment-only hash must
+  // not clobber an in-memory filter).
+  assert.equal(requestsFilterFromQuery({ stream: 'mcp' }), null);
+  assert.equal(requestsFilterFromQuery({ stream: 'bogus' }), null);
   // Junk shadow falls back to the tri-state default; truthy errors spellings
   // other than 1/true normalize to false.
   const junk = requestsFilterFromQuery({ session: 's', shadow: 'bogus', errors: 'yes' });
@@ -3229,4 +3286,139 @@ test('takeoverClientLabel renders family names, not variant ids', () => {
   // No family/protocol signal → the raw name is all we have.
   assert.equal(takeoverClientLabel({ name: 'my-agent' }), 'my-agent');
   assert.equal(takeoverClientLabel(null), '');
+});
+
+// ---------- MCP History helpers ----------
+
+test('MCP_HISTORY_GRANULARITIES lists minute through month with Title Case labels', () => {
+  assert.deepEqual(MCP_HISTORY_GRANULARITIES.map((g) => g.value), ['minute', 'hour', 'day', 'week', 'month']);
+  assert.ok(MCP_HISTORY_GRANULARITIES.every((g) => g.label[0] >= 'A' && g.label[0] <= 'Z'));
+});
+
+test('MCP_HISTORY_METRICS lists calls/errors/avg_ms', () => {
+  assert.deepEqual(MCP_HISTORY_METRICS.map((m) => m.id), ['calls', 'errors', 'avg_ms']);
+  assert.ok(MCP_HISTORY_METRICS.every((m) => m.label && m.axis));
+});
+
+test('mcpHistoryMetricOptions exposes the three metrics', () => {
+  const opts = mcpHistoryMetricOptions();
+  assert.deepEqual(opts.map((o) => o.value), ['calls', 'errors', 'avg_ms']);
+  assert.ok(opts.every((o) => !o.disabled));
+});
+
+test('mcpHistoryFilterSeries filters by kind and exact name', () => {
+  const series = [
+    { kind: 'server', name: 's1' },
+    { kind: 'server', name: 's2' },
+    { kind: 'route', name: 'r1' },
+  ];
+  assert.equal(mcpHistoryFilterSeries(series, 'server', '').length, 2);
+  assert.equal(mcpHistoryFilterSeries(series, '', 's2').length, 1);
+  assert.equal(mcpHistoryFilterSeries(series, 'route', 'r1').length, 1);
+  assert.equal(mcpHistoryFilterSeries(series, 'server', 'r1').length, 0);
+  assert.equal(mcpHistoryFilterSeries(null, '', '').length, 0);
+});
+
+test('mcpHistorySummaryRows aggregates totals and sorts by calls desc', () => {
+  const series = [
+    { kind: 'server', name: 'b', totals: { calls: 5, errors: 1, avg_latency_ms: 100, last_call_at: 200 } },
+    { kind: 'route', name: 'a', totals: { calls: 12, errors: 3, avg_latency_ms: 50, last_call_at: 100 } },
+  ];
+  const rows = mcpHistorySummaryRows(series);
+  assert.deepEqual(rows.map((r) => r.name), ['a', 'b']);
+  assert.deepEqual(rows[0], { kind: 'route', name: 'a', calls: 12, errors: 3, avgLatencyMs: 50, lastCallAt: 100 });
+});
+
+test('mcpHistorySummaryRows tolerates missing totals', () => {
+  const rows = mcpHistorySummaryRows([{ kind: 'server', name: 'x' }]);
+  assert.deepEqual(rows[0], { kind: 'server', name: 'x', calls: 0, errors: 0, avgLatencyMs: 0, lastCallAt: 0 });
+});
+
+test('mcpHistoryPointValue reads calls/errors/avg_ms', () => {
+  assert.equal(mcpHistoryPointValue({ ts: 1, calls: 5, errors: 1, avg_latency_ms: 100 }, 'calls'), 5);
+  assert.equal(mcpHistoryPointValue({ ts: 1, calls: 5, errors: 1, avg_latency_ms: 100 }, 'errors'), 1);
+  assert.equal(mcpHistoryPointValue({ ts: 1, calls: 5, errors: 1, avg_latency_ms: 100 }, 'avg_ms'), 100);
+  assert.equal(mcpHistoryPointValue({ ts: 1, calls: 0, errors: 0, avg_latency_ms: 100 }, 'avg_ms'), null);
+  assert.equal(mcpHistoryPointValue(null, 'calls'), null);
+});
+
+test('mcpHistoryChartSeries builds x/ys/labels for uPlot', () => {
+  const series = [
+    { name: 's1', points: [{ ts: 10, calls: 3, errors: 1, avg_latency_ms: 100 }, { ts: 20, calls: 2, errors: 0, avg_latency_ms: 50 }] },
+    { name: 's2', points: [{ ts: 10, calls: 1, errors: 0, avg_latency_ms: 80 }] },
+  ];
+  const data = mcpHistoryChartSeries(series, 'calls', [5, 10, 15, 20]);
+  assert.deepEqual(data.x, [5, 10, 15, 20]);
+  assert.deepEqual(data.labels, ['s1', 's2']);
+  assert.deepEqual(data.ys[0], [0, 3, 0, 2]);
+  assert.deepEqual(data.ys[1], [0, 1, 0, 0]);
+});
+
+test('mcpHistoryChartSeries gaps avg_ms for buckets with no calls', () => {
+  const series = [
+    { name: 's1', points: [{ ts: 10, calls: 3, errors: 1, avg_latency_ms: 100 }, { ts: 20, calls: 0, errors: 0, avg_latency_ms: 50 }] },
+  ];
+  const data = mcpHistoryChartSeries(series, 'avg_ms', [10, 20]);
+  assert.deepEqual(data.ys[0], [100, null]);
+});
+
+test('mcpHistoryChartSeries returns empty for empty input', () => {
+  const data = mcpHistoryChartSeries([], 'calls');
+  assert.deepEqual(data.x, []);
+  assert.deepEqual(data.ys, []);
+  assert.deepEqual(data.labels, []);
+});
+
+test('mcpHistoryValueText formats counts and avg_ms', () => {
+  assert.equal(mcpHistoryValueText('calls', 1234), '1.2K');
+  assert.equal(mcpHistoryValueText('errors', 7), '7');
+  assert.equal(mcpHistoryValueText('avg_ms', 123.7), '124ms');
+  assert.equal(mcpHistoryValueText('calls', null), '—');
+});
+
+test('mcpHistorySummaryTableHTML renders a fixed-layout table with escaped values', () => {
+  const rows = [{ kind: 'server', name: '<x>', calls: 5, errors: 1, avgLatencyMs: 100, lastCallAt: 0 }];
+  const html = mcpHistorySummaryTableHTML(rows, { formatTime: () => 'never' });
+  assert.match(html, /<table class="table">/);
+  assert.match(html, /<colgroup>/);
+  assert.match(html, /<span class="badge muted">server<\/span>/);
+  assert.match(html, /<td class="mono" title="&lt;x&gt;">/);
+  assert.ok(!html.includes('<x>'));
+  assert.ok(html.includes('&lt;x&gt;'));
+  assert.match(html, /never/);
+});
+
+test('mcpHistorySummaryTableHTML returns empty for empty rows', () => {
+  assert.equal(mcpHistorySummaryTableHTML([]), '');
+  assert.equal(mcpHistorySummaryTableHTML(null), '');
+});
+
+test('mcpHistoryEmptyHTML and mcpHistorySkeletonHTML are hint placeholders', () => {
+  assert.ok(mcpHistoryEmptyHTML().includes('No MCP calls'));
+  assert.ok(mcpHistorySkeletonHTML().includes('loading'));
+});
+
+// ---------- MCP tab hash helpers ----------
+
+test('VALID_MCP_SUB_TABS enumerates the three sub-tabs', () => {
+  assert.deepEqual(VALID_MCP_SUB_TABS, ['servers', 'routes', 'history']);
+});
+
+test('mcpSubTabFromHash returns canonical sub-tabs, empty for unknown/missing', () => {
+  assert.equal(mcpSubTabFromHash('servers'), 'servers');
+  assert.equal(mcpSubTabFromHash('routes'), 'routes');
+  assert.equal(mcpSubTabFromHash('history'), 'history');
+  assert.equal(mcpSubTabFromHash(''), '');
+  assert.equal(mcpSubTabFromHash('bogus'), '');
+  assert.equal(mcpSubTabFromHash(null), '');
+  assert.equal(mcpSubTabFromHash(undefined), '');
+});
+
+test('mcpHash builds #mcp/<sub> for valid sub-tabs and bare #mcp otherwise', () => {
+  assert.equal(mcpHash('servers'), '#mcp/servers');
+  assert.equal(mcpHash('routes'), '#mcp/routes');
+  assert.equal(mcpHash('history'), '#mcp/history');
+  assert.equal(mcpHash(''), '#mcp');
+  assert.equal(mcpHash('bogus'), '#mcp');
+  assert.equal(mcpHash(null), '#mcp');
 });

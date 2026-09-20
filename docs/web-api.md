@@ -156,7 +156,7 @@ selection）跨自动刷新/指标切换保持（`anZoom` 模块态，重渲染�
 （`analyticsRenderLegend`，替代 uPlot 内置：色点 chip 点击切 series 显隐，
 会话内记忆；超过两行时余下收进 "+N more" 下拉（`analyticsLegendCollapse`，
 外点关闭））→ **排行榜**（每 series 一行：requests/tokens/err%/avg lat/tok per s/cost/混台
-$/1M tok/cost share 比例条；err% 单元格悬停给 `N failures · F failover attempts · L rate-limited (429)` 分解）。**列头点击排序**：默认仍按当前 chart metric 降序（图与表讲同一个故事），点任一列头固定该列排序（首次点击用该列默认方向——量/率/成本列降序、series A→Z、status 升序=最差模型在前，再点切换方向，箭头+aria-sort 标示，持久化到 localStorage `an-sort`，"无数据"行恒排最后）；排序纯客户端（同一响应内重渲染，不重新 fetch）。**点击行下钻 Requests**：by=model 行带 provider+model 过滤、by=agent 行再加 agent（`#requests?…` hash 管线先种过滤器再激活 tab，浏览器 Back 回到 Analytics 视图；Requests 页的 provider/model 是子串匹配、agent 精确匹配，时间窗不随行携带）。per-(provider,model) 的 token/请求
+$/1M tok/cost share 比例条；err% 单元格悬停给 `N failures · F failover attempts · L rate-limited (429)` 分解）。**列头点击排序**：默认仍按当前 chart metric 降序（图与表讲同一个故事），点任一列头固定该列排序（首次点击用该列默认方向——量/率/成本列降序、series A→Z、status 升序=最差模型在前，再点切换方向，箭头+aria-sort 标示，持久化到 localStorage `an-sort`，"无数据"行恒排最后）；排序纯客户端（同一响应内重渲染，不重新 fetch）。**点击行下钻 Requests**：by=model 行带 provider+model 过滤、by=agent 行再加 agent（`#requests/model_all?…` hash 管线先种过滤器再激活 tab，浏览器 Back 回到 Analytics 视图；Requests 页的 provider/model 是子串匹配、agent 精确匹配，时间窗不随行携带）。per-(provider,model) 的 token/请求
 总量在 Status 页 Token Usage，两页不重复；未定价模型（如 `doubao-*`）显示 `n/a`。
 
 最后（页面最底）是**一年 token 用量热力图卡片**（`analyticsRenderHeatmap`：GitHub 贡献图式——每列一个周一起始的周、行 Mon..Sun（行标只标 Mon/Wed/Fri）、正方形格子按当日四桶 token 总量着 5 档序数强度 `hm-l0..l4`（`--chart-0` 的 color-mix；格子边长由 `analyticsHeatCellSize`（pure.js）按实测卡片宽计算，8..18px 整数填满右侧、超宽封顶、过窄回落横向滚动）；**横轴月份标签居中盖在各自月份的列跨度上**（`analyticsYearMonthSpans`，周列本就不与日历月精确对齐——标签只作参考，跨 <2 列的月不标注）；窗口为服务端固定「12 整月 + 当月至今」（本月 1 日回退 12 个月→now）、**不随工具栏时间/粒度/metric 变化**；窗口外的格隐形、窗口内无流量的日留白；悬停显示**共享浮动 tooltip**（与 Requests/Live 会话时间线同款 `.tl-tip`：body 级单例、`pointer-events:none`、有意不带 `data-popup`——悬停不阻塞 30s 自动刷新，重渲染/滚动/按下即隐藏，90ms 停留去抖，容器级事件委托；浮层是结构化「标题 + 标签/值行」（`analyticsHeatTip`，纯函数归 pure.js）：标题为 `Mon, Jan 5, 2026` 式本地日期，行只列有数据的指标（Requests/Tokens 紧凑格式/Cost/Errors/Avg Latency 人性化秒），标签 muted、值右对齐等宽；**窗口内无流量的日也给日期 + “No usage” 备注**；全年无数据时整卡隐藏）。
@@ -185,15 +185,54 @@ MCP 网关（config `mcp:` / `mcp_routes:`，见 `docs/architecture/mcp.md`）�
   provider?, url?, command? (stdio argv 拼接，展示用), accounts? (provider 型池内可用账号数),
   sessions, calls, errors, avg_latency_ms}`——`sessions` 是绑定到该 server 的活会话表项数
   （进程级跨代状态，咨询性 gauge）；`calls`/`errors`/`avg_latency_ms` 是 MCP 网关自己的
-  进程级调用计数（errors = status ≥ 400 的终态交换；重启归零），与 LLM metrics 统计
-  通道刻意分离（MCP 无 token，不污染模型统计面板）。
-- `routes[]`：`{name, enabled, targets: [{server, tools}], sessions, calls, errors, avg_latency_ms}`。
+  **进程级内存调用计数**（errors = status ≥ 400 的终态交换；进程重启归零），与 LLM
+  metrics 统计通道刻意分离（MCP 无 token，不污染模型统计面板）。
+- `routes[]`：`{name, enabled, targets: [{server, tools}], sessions, calls, errors, avg_latency_ms}`——
+  计数同样是进程级内存计数。注意：路由 `tools/call` 在调用落到具体后端 server 时，会同时
+  给**路由名**和**后端 server 名**各记一次调用；因此 Servers 与 Routes 两个标签页的数字
+  不能直接相加，History 持久化视图也按同样双记规则入库。
 
 `POST /api/mcp/test`（body `{"name": "<server>"}`）对该 server 跑一次握手探测（initialize +
 tools/list，streamable 走 HTTP、stdio 本地拉起子进程，凭据用池内首个可用账号），返回
 `{ok, error?, server_name?, server_version?, protocol?, sessionful?, stdio?, tools?, latency_ms}`；
 未知名为 404；路由名不是错误——返回 200 `{ok:false,error}`（提示改测成员 server 或经网关本身调用，聚合面不经此探测）。
 Web MCP tab 的行内 Test 按钮消费此端点。
+
+### `GET /api/mcp/analytics`
+
+MCP 网关历史聚合统计（供 Web UI **History** 子标签）。请求参数：
+
+- `from` / `to`：unix 秒（闭区间），缺省时为**最近 30 天**（与 `/api/analytics` 默认窗口一致）。
+- `granularity`：`minute`、`hour`、`day`、`week`、`month` 之一，**默认 `day`**。
+- `kind`：可选，精确过滤 `server` 或 `route`。
+- `name`：可选，精确过滤某一条 server/route 名。
+
+成功响应 200：
+
+```json
+{
+  "granularity": "day",
+  "from": 123,
+  "to": 456,
+  "series": [
+    {
+      "kind": "server" | "route",
+      "name": "...",
+      "points": [
+        { "ts": 123, "calls": 5, "errors": 1, "avg_latency_ms": 640 }
+      ],
+      "totals": {
+        "calls": 9,
+        "errors": 2,
+        "avg_latency_ms": 700,
+        "last_call_at": 123
+      }
+    }
+  ]
+}
+```
+
+错误：参数非法返回 400 `{ "error": "..." }`；stats 存储不可用或查询失败返回 500 并带 `error` 文本，UI 直接展示后端消息。
 
 请求日志的 MCP 记录经 `GET /api/requests` 的 `kind=mcp|llm` 参数过滤（Summary 带
 `kind` 字段，LLM 行为空字符串并省略）。

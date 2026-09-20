@@ -26,16 +26,36 @@ after(async () => { if (ctx) await ctx.shutdown(); });
 // log's keyset pagination (`to=<oldest loaded second>` + boundary rescan +
 // id 去重) cannot advance when every record shares one second (实测：60 条同秒
 // 记录让更旧页查询永远拉回同一批、去重后为零增长)。
-async function driveRequest(n = 1, gapMs = 0) {
+// The request log commits ASYNCHRONOUSLY (~250ms flush cadence): the 200
+// response returns before the record is visible in /api/requests, so a UI
+// fetch landing inside that window silently misses it (the log view has no
+// interval poll to pick it up later — intermittent 20s timeouts). Before
+// returning, wait on the SERVER until the driven records are committed:
+// every caller's subsequent UI assertions then start from a visible log.
+async function driveRequest(n = 1, gapMs = 0, session = '') {
+  const countVisible = async () => (await fetch(`${ctx.baseUrl}/api/requests?limit=1000`)
+    .then((r) => r.json())).records.length;
+  const before = await countVisible();
   for (let i = 0; i < n; i++) {
+    // x-session-id is on the built-in session-header allowlist: with it the
+    // driven record lands in a session (row session-link, session dropdown).
+    const headers = { 'content-type': 'application/json' };
+    if (session) headers['x-session-id'] = session;
     const resp = await fetch(`${ctx.baseUrl}/v1/chat/completions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers,
       body: JSON.stringify({ model: 'm1', messages: [{ role: 'user', content: 'hi' }] }),
     });
     assert.equal(resp.status, 200, `driveRequest(${i}) got ${resp.status}`);
     if (gapMs) await new Promise((r) => setTimeout(r, gapMs));
   }
+  const want = before + n;
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    if ((await countVisible()) >= want) return;
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  throw new Error(`driven records never committed: want ${want}, got ${await countVisible()}`);
 }
 
 // gotoRequestsWithRows lands on the Requests tab with at least one mounted
@@ -47,13 +67,37 @@ async function driveRequest(n = 1, gapMs = 0) {
 // a subsequent click just expanded; worse, a rebuild during an in-flight
 // detail fetch strands the detail row at "loading…" forever
 // (toggleRequestDetail 在 row.isConnected=false 时放弃回填).
+// The scroll reset pins the window to the NEWEST rows: tab re-entry restores
+// the tab's remembered document scroll (tabScrollMemory), so an earlier
+// test that scrolled to the bottom (virtual-scroll paging) leaves the
+// viewport on the OLDEST loaded records — the newest row (e.g. the one this
+// test just drove with a session header) sits outside the mounted window
+// and row-selectors time out.
 async function gotoRequestsWithRows() {
   await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
   await ctx.waitFor('requests tab active', () => ctx.ev(
     `document.getElementById('tab-requests').classList.contains('active')`));
-  await ctx.waitFor('mounted request row', async () => {
+  // Land explicitly on the Model log page: a previous test may have left a
+  // live page mounted, and the router resumes it on tab re-entry (exclusive
+  // hosts — the log view's controls are gone while live is active).
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="log"][data-stream=""]').click()`);
+  await ctx.waitFor('log view mounted', () => ctx.ev(
+    `document.getElementById('req-log-view').hidden === false && !!document.getElementById('req-refresh')`));
+  await ctx.ev(`window.scrollTo(0, 0)`);
+  // The log view is on-demand (no interval poll): pre-existing rows from an
+  // earlier mount would satisfy a bare row-count check with a STALE table —
+  // records driven after the last load (this test's session request) never
+  // appear. Force one COMPLETED refresh that started after we got here:
+  // loadRequests repaints the whole table (paint replaces innerHTML), so a
+  // fresh <table> node without our marker proves a fetch landed.
+  await ctx.ev(`(() => { const t = document.querySelector('#req-table table'); if (t) t.__stale = 1; })()`);
+  await ctx.waitFor('fresh request table painted', async () => {
     await ctx.ev(`document.getElementById('req-refresh')?.click()`);
-    return ctx.ev(`document.querySelectorAll('#req-table tbody tr:not(.req-spacer)').length >= 1`);
+    return ctx.ev(`(() => {
+      const t = document.querySelector('#req-table table');
+      return !!t && !t.__stale
+        && document.querySelectorAll('#req-table tbody tr:not(.req-spacer)').length >= 1;
+    })()`);
   });
   const signature = () => ctx.ev(
     `(document.querySelector('#req-table tbody tr:not(.req-spacer)')?.dataset.id || '')
@@ -441,6 +485,91 @@ test('status Live 段点击行打开详情弹层并关闭 (弹层族)', async (t
   await ctx.waitFor('live detail pop closed', () => ctx.ev(
     `!document.querySelector('dialog.live-detail-pop')?.open`));
   assert.deepEqual(await ctx.pageErrors(), [], 'live 弹层不得有 JS 错误');
+});
+
+test('Live 子视图往返不因 SSE replay 产生重复行 (remount 族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // 回归：SSE 每次连接都会重放 hub 的 recent ring（serveEvents 先 burst 后
+  // stream），而 Live remount 会保留已完成行 —— 两者叠加曾把每个保留行复制成
+  // 两行（2 条 → 4 条，两条重复）。行为契约：往返后行集合不变，且每个
+  // request id 恰好出现一次（重放的 start/end 必须折叠进保留行）。
+  await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
+  await ctx.waitFor('requests active', () => ctx.ev(
+    `document.getElementById('tab-requests').classList.contains('active')`));
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
+  await ctx.waitFor('live card mounted', () => ctx.ev(`!!document.getElementById('live-table')`));
+  await driveRequest(2, 30);
+  await ctx.waitFor('two fresh live rows', () => ctx.ev(
+    `document.querySelectorAll('#live-table tr.live-row[data-id]').length >= 2`), 20000);
+  const idsBefore = await ctx.ev(
+    `[...document.querySelectorAll('#live-table tr.live-row[data-id]')].map(tr => tr.dataset.id)`);
+  assert.ok(idsBefore.length >= 2, 'live 表应至少有本次驱动的 2 行');
+  // 往返：All Requests（关 SSE）→ Live Requests（remount + 重放）。
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="log"][data-stream=""]').click()`);
+  await ctx.waitFor('log view visible', () => ctx.ev(
+    `document.getElementById('req-log-view').hidden === false`));
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
+  await ctx.waitFor('live card remounted', () => ctx.ev(`!!document.getElementById('live-table')`));
+  // 重放的 burst 已到达并折叠：行数与往返前一致且无重复 id。
+  await ctx.waitFor('replay settled, no duplicate rows', async () => {
+    const ids = await ctx.ev(
+      `[...document.querySelectorAll('#live-table tr.live-row[data-id]')].map(tr => tr.dataset.id)`);
+    return ids.length === new Set(ids).size && ids.length === idsBefore.length;
+  }, 20000);
+  const idsAfter = await ctx.ev(
+    `[...document.querySelectorAll('#live-table tr.live-row[data-id]')].map(tr => tr.dataset.id)`);
+  assert.deepEqual([...new Set(idsAfter)].sort(), [...new Set(idsBefore)].sort(),
+    '往返后行集合必须不变（SSE 重放不得复制行）');
+  assert.equal(idsAfter.length, new Set(idsAfter).size, '每个 request id 只能出现一次');
+  assert.deepEqual(await ctx.pageErrors(), [], 'live 往返不得有 JS 错误');
+});
+
+test('Requests 子视图路由：四个 canonical segment + legacy hash 重写 (路由族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // 契约：视图身份（流 × 子视图）骑在 hash SEGMENT 上——
+  // #requests/model_all | model_live | mcp_all | mcp_live；query 只带过滤器/
+  // session/drill 键。旧形态（裸 #requests、#requests/live、?stream=mcp、
+  // #status/live）在 boot/hashchange 原地重写为 canonical segment。
+  const hashIs = (h) => ctx.ev(`location.hash === ${JSON.stringify(h)}`);
+  await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
+  await ctx.waitFor('requests active', () => ctx.ev(
+    `document.getElementById('tab-requests').classList.contains('active')`));
+  // 侧栏四项各落到对应 segment，且导航高亮跟随。
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="log"][data-stream=""]').click()`);
+  await ctx.waitFor('model_all hash', () => hashIs('#requests/model_all'));
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
+  await ctx.waitFor('model_live hash + live card', async () =>
+    (await hashIs('#requests/model_live')) && await ctx.ev(`!!document.getElementById('live-table')`));
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="log"][data-stream="mcp"]').click()`);
+  await ctx.waitFor('mcp_all hash + log view', async () =>
+    (await hashIs('#requests/mcp_all')) && await ctx.ev(
+      `document.getElementById('req-log-view').hidden === false && document.getElementById('req-live-view').hidden === true`));
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream="mcp"]').click()`);
+  await ctx.waitFor('mcp_live hash + live card', async () =>
+    (await hashIs('#requests/mcp_live')) && await ctx.ev(`!!document.getElementById('live-table')`));
+  // 旧形态原地重写：?stream=mcp 吸进 segment，session pin 保留。
+  await ctx.ev(`location.hash = '#requests/live?stream=mcp&session=legacy-sess'`);
+  await ctx.waitFor('legacy stream param absorbed', () => hashIs('#requests/mcp_live?session=legacy-sess'));
+  await ctx.waitFor('session pin restored in dropdown', () => ctx.ev(
+    `document.getElementById('live-session').value === 'legacy-sess'`));
+  // 清空会话选择（否则重挂 Live 卡会按设计 resume 上次选择，把
+  // ?session= 写回 hash，干扰后面两步的裸 segment 断言）。
+  await ctx.ev(`(() => {
+    const s = document.getElementById('live-session');
+    s.value = '';
+    s.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await ctx.waitFor('live session cleared', () => ctx.ev(
+    `document.getElementById('live-session').value === '' && !location.hash.includes('session=')`));
+  // 裸 #requests 与旧 #status/live 同样归一到 canonical segment。
+  await ctx.ev(`location.hash = '#requests'`);
+  await ctx.waitFor('bare requests normalized', async () =>
+    (await hashIs('#requests/model_all')) && await ctx.ev(
+      `document.getElementById('req-log-view').hidden === false`));
+  await ctx.ev(`location.hash = '#status/live'`);
+  await ctx.waitFor('legacy status/live rewritten', async () =>
+    (await hashIs('#requests/model_live')) && await ctx.ev(`!!document.getElementById('live-table')`));
+  assert.deepEqual(await ctx.pageErrors(), [], '路由重写不得有 JS 错误');
 });
 
 test('token usage 时间范围日历浮层开合 (弹层族)', async (t) => {
@@ -927,6 +1056,394 @@ test('takeover 模板编辑器：草稿实时预览（未保存编辑即时渲�
 // pre-fix, the promise only settled on a successful submit, so Esc left the
 // whole UI hung on a blank page (no tab ever activated). Boots its own
 // auth-enabled proxy instance (the shared ctx has no web.auth).
+// Live 子视图的流翻转必须重渲染环表：model_live ↔ mcp_live 往返（sub 不变、
+// 仅 stream 翻转）下，旧代码只同步 chrome 不重渲染，环表残留上一个流的行——
+// 两个页面显示一模一样的 Model 内容。回归钉住：切到 mcp_live 环表只剩 mcp 行
+//（夹具无 MCP 流量 → 空），切回 model_live 行回来。
+test('model_live ↔ mcp_live 流翻转重渲染环表，不残留上一个流的行 (流隔离族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  const hashIs = (h) => ctx.ev(`location.hash === ${JSON.stringify(h)}`);
+  await driveRequest(2, 30);
+  await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
+  await ctx.waitFor('requests tab active', () => ctx.ev(
+    `document.getElementById('tab-requests').classList.contains('active')`));
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
+  await ctx.waitFor('model rows visible', () => ctx.ev(
+    `document.querySelectorAll('#live-table tr.live-row[data-id]').length >= 2`), 20000);
+  const before = await ctx.ev(`document.querySelectorAll('#live-table tr.live-row[data-id]').length`);
+  // 同 sub 翻转流（不重挂卡）：环表必须立刻只剩 mcp 行 → 空。
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream="mcp"]').click()`);
+  await ctx.waitFor('mcp_live ring emptied', () => ctx.ev(
+    `location.hash === '#requests/mcp_live' && document.querySelectorAll('#live-table tr.live-row[data-id]').length === 0`));
+  // 切回：行回来（环保留，非重拉）。
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
+  await ctx.waitFor('model rows restored', async () =>
+    (await hashIs('#requests/model_live')) && await ctx.ev(
+      `document.querySelectorAll('#live-table tr.live-row[data-id]').length >= ${before}`));
+  assert.deepEqual(await ctx.pageErrors(), [], '流翻转不得有 JS 错误');
+});
+
+// MCP 会话面板必须说 MCP 域：7 列 Server/Account 表头（不是 Model 的 8 列
+// MODEL/PROVIDER/TOKENS）、chips 无 token/成本、身份行 server/account。旧代码
+// 表头漏传 mcp opt，MCP 行（7 单元格）盖在 LLM 表头下列错位，看起来就是
+// model_live 的内容。
+test('mcp_live 会话面板渲染 MCP 域表头与 chips，不显 Model 语义 (流隔离族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
+  await ctx.waitFor('requests tab active', () => ctx.ev(
+    `document.getElementById('tab-requests').classList.contains('active')`));
+  await ctx.ev(`(() => {
+    window.__origFetch = window.fetch;
+    window.fetch = (url, ...rest) => {
+      const u = String(url);
+      if (u.includes('kind=mcp') && u.includes('session=')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          enabled: true,
+          records: [{ request_id: 'mcp-dom-1', kind: 'mcp', session_id: 'mcp-dom-sess', ts: '2026-09-18T10:00:00Z', status: 200, exposed: 'vision', provider: 'acct#2' }],
+          facets: { providers: [], models: [], agents: [], provider_models: {} },
+        }), { headers: { 'content-type': 'application/json' } }));
+      }
+      if (u.includes('kind=mcp') && u.includes('limit=500')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          enabled: true,
+          records: [{ request_id: 'mcp-dom-1', kind: 'mcp', session_id: 'mcp-dom-sess', ts: '2026-09-18T10:00:00Z', status: 200 }],
+          facets: { providers: [], models: [], agents: [], provider_models: {} },
+        }), { headers: { 'content-type': 'application/json' } }));
+      }
+      return window.__origFetch(url, ...rest);
+    };
+  })()`);
+  try {
+    await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream="mcp"]').click()`);
+    await ctx.waitFor('mcp live card mounted', () => ctx.ev(`!!document.getElementById('live-table')`));
+    await ctx.ev(`(() => {
+      const s = document.getElementById('live-session');
+      s.value = 'mcp-dom-sess';
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await ctx.waitFor('session panel rendered', () => ctx.ev(`(() => {
+      const p = document.getElementById('live-session-panel');
+      return p && !p.hidden && p.innerText.includes('vision');
+    })()`));
+    const head = await ctx.ev(`document.querySelector('#live-session-panel thead').innerText`);
+    assert.ok(head.includes('SERVER') && head.includes('ACCOUNT'), `MCP 会话面板表头应为 Server/Account 域（got: ${head}）`);
+    assert.ok(!head.includes('TOKENS') && !head.includes('PROVIDER'), `MCP 会话表头不得残留 Model 列（got: ${head}）`);
+    const chips = await ctx.ev(`document.querySelector('#live-session-panel .live-session-summary').innerText`);
+    assert.ok(!chips.includes('in /') && !chips.includes('$'), `MCP 会话 chips 无 token/成本（got: ${chips}）`);
+    const meta = await ctx.ev(`document.querySelector('#live-session-panel .sess-meta').innerText`);
+    assert.ok(/server/i.test(meta) && !/model:/i.test(meta), `MCP 身份行应为 server/account（got: ${meta}）`);
+  } finally {
+    await ctx.ev(`window.fetch = window.__origFetch; delete window.__origFetch;`);
+    await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
+    await ctx.waitFor('back to model live', () => ctx.ev(`location.hash === '#requests/model_live'`));
+  }
+  assert.deepEqual(await ctx.pageErrors(), [], 'MCP 会话面板域渲染不得有 JS 错误');
+});
+
+// session 下钻是导航（push）：四个页面的下拉选择/行点击进入会话视图后，
+// 浏览器后退必须回到未选 session 的上一视图（列表/环），而不是跳出
+// Requests tab（replaceState 改写了 tab 的唯一历史条目）。
+test('Log 页 session 下钻后浏览器后退回到未过滤列表（model_all + mcp_all）(导航族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  await driveRequest(1, 0, 'nav-log-sess');
+  // --- model_all: row session-link click ---
+  await gotoRequestsWithRows();
+  // The poll returns on ANY row — wait specifically for one carrying a
+  // session link (records without session headers render "—" there). The
+  // refresh click rides the wait: after earlier tests the table already
+  // holds stale rows, so without re-clicking the just-driven record (with
+  // its session) never lands in the list.
+  await ctx.waitFor('row with session link', async () => {
+    await ctx.ev(`document.getElementById('req-refresh')?.click()`);
+    return ctx.ev(`!!document.querySelector('#req-table tbody tr:not(.req-spacer) .session-link')`);
+  }, 20000);
+  await ctx.ev(`document.querySelector('#req-table tbody tr:not(.req-spacer) .session-link').click()`);
+  await ctx.waitFor('model_all session drilled', () => ctx.ev(`(() => {
+    const h = location.hash;
+    return h.startsWith('#requests/model_all') && h.includes('session=');
+  })()`));
+  await ctx.ev(`history.back()`);
+  await ctx.waitFor('back returns to unfiltered model_all', () => ctx.ev(`(() => {
+    if (location.hash !== '#requests/model_all') return false;
+    const s = document.getElementById('req-session');
+    return !!s && s.value === '';
+  })()`));
+  // --- mcp_all: dropdown selection ---
+  const mcpRecs = JSON.stringify([
+    { request_id: 'nav-mcp-1', kind: 'mcp', session_id: 'nav-mcp-sess', ts: '2026-09-18T10:00:00Z', status: 200, exposed: 'vision' },
+  ]);
+  await ctx.ev(`(() => {
+    window.__origFetch = window.fetch;
+    window.fetch = (url, ...rest) => {
+      const u = String(url);
+      if (u.includes('/api/requests') && u.includes('kind=mcp')) {
+        const m = /(?:[?&])session=([^&]*)/.exec(u);
+        const sess = m ? decodeURIComponent(m[1]) : '';
+        const ALL = ${mcpRecs};
+        const records = sess ? ALL.filter((r) => r.session_id === sess) : ALL;
+        return Promise.resolve(new Response(JSON.stringify({
+          enabled: true, records,
+          facets: { providers: [], models: [], agents: [], provider_models: {} },
+        }), { headers: { 'content-type': 'application/json' } }));
+      }
+      return window.__origFetch(url, ...rest);
+    };
+  })()`);
+  try {
+    await ctx.ev(`document.querySelector('.req-nav-item[data-sub="log"][data-stream="mcp"]').click()`);
+    await ctx.waitFor('mcp_all options ready', () => ctx.ev(`(() => {
+      const s = document.getElementById('req-session');
+      return s && [...s.options].some((o) => o.value === 'nav-mcp-sess');
+    })()`));
+    await ctx.ev(`(() => {
+      const s = document.getElementById('req-session');
+      s.value = 'nav-mcp-sess';
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await ctx.waitFor('mcp_all session drilled', () => ctx.ev(`(() => {
+      const h = location.hash;
+      return h.startsWith('#requests/mcp_all') && h.includes('session=nav-mcp-sess');
+    })()`));
+    await ctx.ev(`history.back()`);
+    await ctx.waitFor('back returns to unfiltered mcp_all', () => ctx.ev(`(() => {
+      if (location.hash !== '#requests/mcp_all') return false;
+      const s = document.getElementById('req-session');
+      return !!s && s.value === '';
+    })()`));
+  } finally {
+    await ctx.ev(`window.fetch = window.__origFetch; delete window.__origFetch;`);
+  }
+  assert.deepEqual(await ctx.pageErrors(), [], 'log 页 session 导航不得有 JS 错误');
+});
+
+test('Live 页 session 选择后浏览器后退回到环视图（model_live + mcp_live）(导航族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  await driveRequest(1, 0, 'nav-live-sess');
+  // --- model_live: real traffic session from /api/sessions ---
+  await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
+  await ctx.waitFor('requests tab active', () => ctx.ev(
+    `document.getElementById('tab-requests').classList.contains('active')`));
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
+  await ctx.waitFor('model_live options ready', () => ctx.ev(`(() => {
+    const s = document.getElementById('live-session');
+    return s && [...s.options].some((o) => o.value !== '');
+  })()`));
+  await ctx.ev(`(() => {
+    const s = document.getElementById('live-session');
+    s.value = [...s.options].find((o) => o.value !== '').value;
+    s.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await ctx.waitFor('model_live session pinned in hash', () => ctx.ev(`(() => {
+    const h = location.hash;
+    return h.startsWith('#requests/model_live') && h.includes('session=');
+  })()`));
+  await ctx.ev(`history.back()`);
+  await ctx.waitFor('back returns to the ring', () => ctx.ev(`(() => {
+    if (location.hash !== '#requests/model_live') return false;
+    const s = document.getElementById('live-session');
+    return !!s && s.value === '';
+  })()`));
+  // --- mcp_live: faked pool + session records ---
+  const sessRecs = JSON.stringify([
+    { request_id: 'nav-mcp-live-1', kind: 'mcp', session_id: 'nav-mcp-live-sess', ts: '2026-09-18T10:00:00Z', status: 200, exposed: 'vision' },
+  ]);
+  await ctx.ev(`(() => {
+    window.__origFetch = window.fetch;
+    window.fetch = (url, ...rest) => {
+      const u = String(url);
+      if (u.includes('kind=mcp')) {
+        const m = /(?:[?&])session=([^&]*)/.exec(u);
+        const sess = m ? decodeURIComponent(m[1]) : '';
+        const src = ${sessRecs};
+        const records = sess ? src.filter((r) => r.session_id === sess) : src;
+        return Promise.resolve(new Response(JSON.stringify({
+          enabled: true, records,
+          facets: { providers: [], models: [], agents: [], provider_models: {} },
+        }), { headers: { 'content-type': 'application/json' } }));
+      }
+      return window.__origFetch(url, ...rest);
+    };
+  })()`);
+  try {
+    await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream="mcp"]').click()`);
+    await ctx.waitFor('mcp_live options ready', () => ctx.ev(`(() => {
+      const s = document.getElementById('live-session');
+      return s && [...s.options].some((o) => o.value === 'nav-mcp-live-sess');
+    })()`));
+    // The mcp_live page's state slice RETAINS its last session selection
+    // (resume is by design — TestWebAssetsTabSwitchStabilityContract), so a
+    // previous test's drill makes the nav-click push carry that session and
+    // Back would land on a session entry instead of the bare ring. Clear
+    // the retained selection first (its own push) so the ring entry exists.
+    await ctx.ev(`(() => {
+      const s = document.getElementById('live-session');
+      if (s && s.value !== '') {
+        s.value = '';
+        s.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    })()`);
+    await ctx.waitFor('mcp_live bare ring pushed', () => ctx.ev(
+      `location.hash === '#requests/mcp_live'`));
+    await ctx.ev(`(() => {
+      const s = document.getElementById('live-session');
+      s.value = 'nav-mcp-live-sess';
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await ctx.waitFor('mcp_live session pinned in hash', () => ctx.ev(`(() => {
+      const h = location.hash;
+      return h.startsWith('#requests/mcp_live') && h.includes('session=nav-mcp-live-sess');
+    })()`));
+    await ctx.ev(`history.back()`);
+    await ctx.waitFor('back returns to the mcp ring', () => ctx.ev(`(() => {
+      if (location.hash !== '#requests/mcp_live') return false;
+      const s = document.getElementById('live-session');
+      return !!s && s.value === '';
+    })()`), 40000);
+  } finally {
+    await ctx.ev(`window.fetch = window.__origFetch; delete window.__origFetch;`);
+    await ctx.ev(`document.querySelector('.req-nav-item[data-sub="log"][data-stream=""]').click()`);
+    await ctx.waitFor('back to log', () => ctx.ev(`location.hash === '#requests/model_all'`));
+  }
+  assert.deepEqual(await ctx.pageErrors(), [], 'live 页 session 导航不得有 JS 错误');
+});
+
+// mcp_live 点开一条记录的详情必须携带 kind=mcp 提示：MCP id 不在 requests
+// 索引里，无提示的 /api/requests/<id> 会让后端回退到全目录线性扫描（真实
+// 日志上秒级卡顿）——提示让它直查 split 流。
+test('mcp_live 行详情请求携带 kind=mcp 提示，直查 split 流 (流隔离族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  const detailRecs = JSON.stringify([
+    { request_id: 'mcp-dom-1', kind: 'mcp', session_id: 'mcp-dom-sess', ts: '2026-09-18T10:00:00Z', status: 200, exposed: 'vision', provider: 'acct#2', request_body: '{"method":"tools/list"}', response_body: '{"result":[]}' },
+  ]);
+  await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
+  await ctx.waitFor('requests tab active', () => ctx.ev(
+    `document.getElementById('tab-requests').classList.contains('active')`));
+  await ctx.ev(`(() => {
+    window.__detailUrls = [];
+    window.__origFetch = window.fetch;
+    window.fetch = (url, ...rest) => {
+      const u = String(url);
+      if (u.includes('kind=mcp') && u.includes('session=')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          enabled: true,
+          records: [{ request_id: 'mcp-dom-1', kind: 'mcp', session_id: 'mcp-dom-sess', ts: '2026-09-18T10:00:00Z', status: 200, exposed: 'vision', provider: 'acct#2' }],
+          facets: { providers: [], models: [], agents: [], provider_models: {} },
+        }), { headers: { 'content-type': 'application/json' } }));
+      }
+      if (u.includes('kind=mcp') && u.includes('limit=500')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          enabled: true,
+          records: [{ request_id: 'mcp-dom-1', kind: 'mcp', session_id: 'mcp-dom-sess', ts: '2026-09-18T10:00:00Z', status: 200 }],
+          facets: { providers: [], models: [], agents: [], provider_models: {} },
+        }), { headers: { 'content-type': 'application/json' } }));
+      }
+      if (u.includes('/api/requests/mcp-dom-1')) {
+        window.__detailUrls.push(u);
+        return Promise.resolve(new Response(JSON.stringify({ enabled: true, records: ${detailRecs} }), { headers: { 'content-type': 'application/json' } }));
+      }
+      return window.__origFetch(url, ...rest);
+    };
+  })()`);
+  try {
+    await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream="mcp"]').click()`);
+    await ctx.waitFor('mcp live card mounted', () => ctx.ev(`!!document.getElementById('live-table')`));
+    await ctx.ev(`(() => {
+      const s = document.getElementById('live-session');
+      s.value = 'mcp-dom-sess';
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await ctx.waitFor('session row rendered', () => ctx.ev(
+      `!!document.querySelector('#live-session-panel tr.live-row[data-id="mcp-dom-1"]')`));
+    await ctx.ev(`document.querySelector('#live-session-panel tr.live-row[data-id="mcp-dom-1"]').click()`);
+    await ctx.waitFor('detail pop rendered', () => ctx.ev(
+      `document.querySelector('dialog.live-detail-pop[open] .live-pop-body').innerText.length > 0`));
+    const urls = await ctx.ev(`window.__detailUrls`);
+    assert.equal(urls.length, 1, `应恰好发出一次详情请求（got: ${JSON.stringify(urls)}）`);
+    assert.ok(urls[0].includes('kind=mcp'), `详情请求必须携带 kind=mcp 提示（got: ${urls[0]}）`);
+    await ctx.ev(`document.querySelector('dialog.live-detail-pop .live-pop-close').click()`);
+  } finally {
+    await ctx.ev(`window.fetch = window.__origFetch; delete window.__origFetch;`);
+    await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
+    await ctx.waitFor('back to model live', () => ctx.ev(`location.hash === '#requests/model_live'`));
+  }
+  assert.deepEqual(await ctx.pageErrors(), [], '详情 hint 流程不得有 JS 错误');
+});
+
+// MCP Log（#requests/mcp_all）的 Session 下拉从已加载记录推导：记录必须在
+// syncRequestFacets 渲染下拉之前写入 combos.lastRecords —— 旧顺序永远用上一批
+// 记录渲染（首拉空下拉；会话下钻后清除，下拉卡在只剩被钻会话一条）。
+test('mcp_all Session 下拉随记录加载填充，清除过滤后不塌缩 (流隔离族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // The browse table sees only TWO sessions (its 50-record window /
+  // filters); the independent pool query (kind=mcp, limit=500, no session)
+  // knows a THIRD. The dropdown must list all three — same source as the
+  // mcp_live dropdown, not the loaded records.
+  const allRecs = JSON.stringify([
+    { request_id: 'log-mcp-1', kind: 'mcp', session_id: 'log-mcp-sess-a', ts: '2026-09-18T10:00:00Z', status: 200, exposed: 'vision' },
+    { request_id: 'log-mcp-2', kind: 'mcp', session_id: 'log-mcp-sess-b', ts: '2026-09-18T09:00:00Z', status: 200, exposed: 'vision' },
+  ]);
+  const poolRecs = JSON.stringify([
+    ...JSON.parse(allRecs),
+    { request_id: 'log-mcp-3', kind: 'mcp', session_id: 'log-mcp-sess-c', ts: '2026-09-18T08:00:00Z', status: 200, exposed: 'vision' },
+  ]);
+  await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
+  await ctx.waitFor('requests tab active', () => ctx.ev(
+    `document.getElementById('tab-requests').classList.contains('active')`));
+  await ctx.ev(`(() => {
+    const ALL = ${allRecs};
+    const POOL = ${poolRecs};
+    window.__origFetch = window.fetch;
+    window.fetch = (url, ...rest) => {
+      const u = String(url);
+      if (u.includes('/api/requests') && u.includes('kind=mcp')) {
+        const m = /(?:[?&])session=([^&]*)/.exec(u);
+        const sess = m ? decodeURIComponent(m[1]) : '';
+        const isPool = u.includes('limit=500') && !sess;
+        const source = isPool ? POOL : ALL;
+        const records = sess ? source.filter((r) => r.session_id === sess) : source;
+        return Promise.resolve(new Response(JSON.stringify({
+          enabled: true, records,
+          facets: { providers: [], models: [], agents: [], provider_models: {} },
+        }), { headers: { 'content-type': 'application/json' } }));
+      }
+      return window.__origFetch(url, ...rest);
+    };
+  })()`);
+  try {
+    await ctx.ev(`document.querySelector('.req-nav-item[data-sub="log"][data-stream="mcp"]').click()`);
+    // 首拉：下拉必须列出池的全部三个会话（含表格窗口看不到的 sess-c；
+    // 旧代码从已加载记录推导，永远只有浏览窗口内的两个）。
+    await ctx.waitFor('mcp session options populated from the pool', () => ctx.ev(`(() => {
+      const opts = [...document.getElementById('req-session').options].map((o) => o.value);
+      return opts.includes('log-mcp-sess-a') && opts.includes('log-mcp-sess-b')
+        && opts.includes('log-mcp-sess-c');
+    })()`), 20000);
+    // 选一个会话（下钻）再清除：下拉必须回到两个会话（旧代码卡在只剩被钻的一条）。
+    await ctx.ev(`(() => {
+      const s = document.getElementById('req-session');
+      s.value = 'log-mcp-sess-a';
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await ctx.waitFor('session drill applied', () => ctx.ev(
+      `location.hash.includes('session=log-mcp-sess-a')`));
+    await ctx.ev(`(() => {
+      const s = document.getElementById('req-session');
+      s.value = '';
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await ctx.waitFor('clear restores full options', () => ctx.ev(`(() => {
+      const opts = [...document.getElementById('req-session').options].map((o) => o.value);
+      return opts.includes('log-mcp-sess-a') && opts.includes('log-mcp-sess-b')
+        && document.getElementById('req-session').value === '';
+    })()`), 20000);
+  } finally {
+    await ctx.ev(`window.fetch = window.__origFetch; delete window.__origFetch;`);
+    await ctx.ev(`document.querySelector('.req-nav-item[data-sub="log"][data-stream=""]').click()`);
+    await ctx.waitFor('back to model log', () => ctx.ev(`location.hash === '#requests/model_all'`));
+  }
+  assert.deepEqual(await ctx.pageErrors(), [], 'mcp_all 下拉不得有 JS 错误');
+});
+
 test('Esc on the admin-auth modal keeps boot alive', async (t) => {
   if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
   const auth = await bootUiE2E({ adminToken: 'e2e-admin-token' });
@@ -1001,4 +1518,72 @@ test('MCP Live 会话下拉只列 MCP 会话，不读 /api/sessions (流隔离�
       `![...document.querySelectorAll('#live-session option')].some((o) => o.value === 'mcp-live-sess-a')`));
   }
   assert.deepEqual(await ctx.pageErrors(), [], 'MCP 会话下拉隔离不得有 JS 错误');
+});
+
+// MCP Live 会话下拉的跨流在途响应防护：Model 流发出的 /api/sessions 还在
+// 途时切到 MCP 流，迟到的响应不得把 Model 会话灌进 MCP 下拉（回归：下拉
+// 选项可来自 liveRows，「选项已出现」不代表池响应已落地——旧代码里迟到的
+// /api/sessions 响应在切换数秒后覆盖 liveSessionList）。
+test('MCP Live 会话下拉不受跨流在途 /api/sessions 迟到响应污染 (流隔离族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // 造一个真实 LLM 会话（/api/sessions 里有它）。
+  {
+    const resp = await fetch(`${ctx.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'llm-race-sess' },
+      body: JSON.stringify({ model: 'm1', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(resp.status, 200, `session drive failed: ${resp.status}`);
+  }
+  await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
+  await ctx.waitFor('requests tab active', () => ctx.ev(
+    `document.getElementById('tab-requests').classList.contains('active')`));
+  // 仪表化 fetch：/api/sessions 延迟 900ms 透传（制造在途窗口）；kind=mcp
+  // 池查询即时返回固定 MCP 记录。
+  await ctx.ev(`(() => {
+    window.__origFetch = window.fetch;
+    window.fetch = (url, ...rest) => {
+      const u = String(url);
+      if (u.includes('/api/sessions')) {
+        return new Promise((resolve) => setTimeout(() => resolve(window.__origFetch(url, ...rest)), 900));
+      }
+      if (u.includes('kind=mcp') && u.includes('limit=500')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          enabled: true,
+          records: [
+            { request_id: 'mcp-race-1', kind: 'mcp', session_id: 'mcp-race-sess-a', ts: '2026-09-18T10:00:00Z', status: 200 },
+          ],
+          facets: { providers: [], models: [], agents: [], provider_models: {} },
+        }), { headers: { 'content-type': 'application/json' } }));
+      }
+      return window.__origFetch(url, ...rest);
+    };
+  })()`);
+  try {
+    // 前置状态归一：先到 Model 流 Log（避免前一个测试停在 model_live 时，
+    // 点击同项导航被 selectRequestsView 的 no-change 早退吞掉、根本不发出
+    // 被延迟的 /api/sessions，测试空跑）。
+    await ctx.ev(`document.querySelector('.req-nav-item[data-sub="log"][data-stream=""]').click()`);
+    await ctx.waitFor('log view visible', () => ctx.ev(
+      `document.getElementById('req-log-view').hidden === false`));
+    // 进 Model 流 Live（发出被延迟的 /api/sessions），立即切 MCP 流 ——
+    // 切换发生在延迟窗口内，旧行为下迟到的响应会在 ~900ms 后落地。
+    await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
+    await ctx.waitFor('live card mounted', () => ctx.ev(`!!document.getElementById('live-table')`));
+    await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream="mcp"]').click()`);
+    await ctx.waitFor('mcp pool option mounted', () => ctx.ev(
+      `!!document.querySelector('#live-session option[value="mcp-race-sess-a"]')`));
+    // 等过延迟窗口 + 余量：迟到的 /api/sessions 必须已被流守卫丢弃。
+    await new Promise((r) => setTimeout(r, 1800));
+    const opts = await ctx.ev(`[...document.querySelectorAll('#live-session option')].map((o) => o.value)`);
+    assert.ok(!opts.includes('llm-race-sess'),
+      `迟到的 /api/sessions 响应不得把 Model 会话灌进 MCP 下拉（got: ${opts.join(',')}）`);
+    assert.ok(opts.includes('mcp-race-sess-a'), 'MCP 池会话仍在下拉里');
+  } finally {
+    await ctx.ev(`window.fetch = window.__origFetch; delete window.__origFetch;`);
+    await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
+    await ctx.waitFor('model pool reloaded', () => ctx.ev(
+      `!!document.querySelector('#live-session option[value="llm-race-sess"]')`));
+  }
+  assert.deepEqual(await ctx.pageErrors(), [], '在途防护不得有 JS 错误');
 });

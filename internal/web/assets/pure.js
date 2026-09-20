@@ -678,7 +678,7 @@ export function tokenRangePickerHTML(range, picker, ns, opts = {}) {
     const active = w.value === 'custom'
       ? (range.preset === 'custom' || picker.selecting)
       : range.preset === w.value;
-    return `<button class="tr-preset${active ? ' active' : ''}" data-${ns}-preset="${esc(w.value)}">
+    return `<button class="tr-preset${active ? ' active' : ''}" data-${ns}-preset="${esc(w.value)}"${w.disabled ? ' disabled' : ''}>
       <span class="tr-check">${active ? '✓' : ''}</span>${esc(w.label)}
     </button>`;
   }).join('');
@@ -754,6 +754,24 @@ export function quotaUsageFromSec(snap, now = Date.now()) {
 export function quotaWindowFromSec(quota, now = Date.now()) {
   if (!quota) return null;
   for (const key of Object.keys(quota).sort()) {
+    const from = quotaUsageFromSec(quota[key], now);
+    if (from != null) return { from, key };
+  }
+  return null;
+}
+
+// quotaWindowForProvider resolves the quota-window preset for ONE selected
+// provider (the Analytics toolbar, whose provider filter picks the billing
+// context): the provider's own entry first, then its virtual per-account
+// keys "provider#<accountId>" (multi-entry pools key quota per account;
+// pool accounts on one plan share cadence, so the first resolvable account
+// stands in — the same assumption as the Accounts tab). Returns {from, key}
+// like quotaWindowFromSec, or null when no provider is selected or no entry
+// of that provider projects a usable UsageFrom.
+export function quotaWindowForProvider(quota, provider, now = Date.now()) {
+  if (!quota || !provider) return null;
+  const keys = [provider, ...Object.keys(quota).filter((k) => k.startsWith(provider + '#')).sort()];
+  for (const key of keys) {
     const from = quotaUsageFromSec(quota[key], now);
     if (from != null) return { from, key };
   }
@@ -3468,14 +3486,16 @@ export function chatViewHTML(requestText, responseText, responseContentType, opt
 
 // ---------- Requests filter URL-hash state ----------
 //
-// The Requests tab's filter rides the URL hash (#requests?session=…&agent=…)
-// so a refresh or shared link lands on the same view instead of the full
-// list. hashQueryParams parses the query portion into a plain object;
-// requestsFilterQuery projects the filter onto params (only non-default
-// values — an unfiltered tab stays a clean #requests); requestsFilterFromQuery
-// reads them back, returning null when the hash carries no filter keys (a
-// bare #requests must not clobber an in-memory filter) and dropping junk
-// values (shadow keeps its tri-state enum).
+// The Requests tab's filter rides the URL hash query
+// (#requests/<stream>_<view>?session=…&agent=…) so a refresh or shared link
+// lands on the same view instead of the full list. The stream and sub-view
+// live in the hash SEGMENT (app.js requestsViewKey/FromKey) — the query
+// carries only filter keys. hashQueryParams parses the query portion into a
+// plain object; requestsFilterQuery projects the filter onto params (only
+// non-default values — an unfiltered view stays a bare segment);
+// requestsFilterFromQuery reads them back, returning null when the query
+// carries no filter keys (a segment-only hash must not clobber an in-memory
+// filter) and dropping junk values (shadow keeps its tri-state enum).
 
 export function hashQueryParams(q) {
   const out = {};
@@ -3487,7 +3507,6 @@ export function hashQueryParams(q) {
 export function requestsFilterQuery(f) {
   if (!f) return '';
   const q = new URLSearchParams();
-  if (f.stream) q.set('stream', f.stream);
   if (f.session) q.set('session', f.session);
   if (f.agent) q.set('agent', f.agent);
   if (f.model) q.set('model', f.model);
@@ -3500,11 +3519,13 @@ export function requestsFilterQuery(f) {
 export function requestsFilterFromQuery(params) {
   if (!params) return null;
   const has =
-    params.stream || params.session || params.agent || params.model ||
+    params.session || params.agent || params.model ||
     params.provider || params.errors || params.shadow;
   if (!has) return null;
   return {
-    stream: params.stream === 'mcp' ? 'mcp' : '',
+    // stream is segment-owned (it stays '' here — the hashchange/boot
+    // callers seed it from requestsViewFromKey right after this).
+    stream: '',
     session: params.session || '',
     agent: params.agent || '',
     model: params.model || '',
@@ -3851,4 +3872,155 @@ export function shadowMatchBadge(rate) {
   const pct = n * 100;
   const cls = pct >= 99 ? 'ok' : pct >= 95 ? 'warn' : 'err';
   return `<span class="badge ${cls}">${pct.toFixed(1)}%</span>`;
+}
+
+// ---------- MCP History sub-tab ----------
+
+// Granularity options for the MCP History view (API values are lowercase;
+// labels are Title Case per the design system).
+export const MCP_HISTORY_GRANULARITIES = [
+  { value: 'minute', label: 'Minute' },
+  { value: 'hour', label: 'Hour' },
+  { value: 'day', label: 'Day' },
+  { value: 'week', label: 'Week' },
+  { value: 'month', label: 'Month' },
+];
+
+// Metric switcher options for the MCP History trend chart.
+export const MCP_HISTORY_METRICS = [
+  { id: 'calls', label: 'Calls', axis: 'calls', gap: false },
+  { id: 'errors', label: 'Errors', axis: 'errors', gap: false },
+  { id: 'avg_ms', label: 'Avg ms', axis: 'ms', gap: true },
+];
+
+// mcpHistoryMetricOptions returns the metric segment's option list for the
+// chart switcher. All three metrics are always available.
+export function mcpHistoryMetricOptions() {
+  return MCP_HISTORY_METRICS.map((m) => ({ value: m.id, label: m.label, disabled: false }));
+}
+
+// mcpHistoryFilterSeries returns the subset of series matching the optional
+// kind ('server'/'route') and exact name filters.
+export function mcpHistoryFilterSeries(series, kind, name) {
+  return (series || []).filter((s) => {
+    if (kind && s.kind !== kind) return false;
+    if (name && s.name !== name) return false;
+    return true;
+  });
+}
+
+// mcpHistorySummaryRows flattens each series' totals into a summary row,
+// sorted by calls descending then name ascending.
+export function mcpHistorySummaryRows(series) {
+  return (series || []).map((s) => {
+    const t = s.totals || {};
+    return {
+      kind: s.kind || '',
+      name: s.name || '',
+      calls: Number(t.calls) || 0,
+      errors: Number(t.errors) || 0,
+      avgLatencyMs: Number(t.avg_latency_ms) || 0,
+      lastCallAt: Number(t.last_call_at) || 0,
+    };
+  }).sort((a, b) => (b.calls - a.calls) || a.name.localeCompare(b.name));
+}
+
+// mcpHistoryPointValue reads one metric from an /api/mcp/analytics point.
+// avg_ms is a gap metric: it is meaningless without traffic, so it returns null
+// when the bucket has no calls (uPlot draws a gap instead of a zero).
+export function mcpHistoryPointValue(p, kind) {
+  if (!p) return null;
+  switch (kind) {
+    case 'calls': return Number(p.calls || 0);
+    case 'errors': return Number(p.errors || 0);
+    case 'avg_ms': return Number(p.calls || 0) ? Number(p.avg_latency_ms || 0) : null;
+    default: return null;
+  }
+}
+
+// mcpHistoryChartSeries turns /api/mcp/analytics `series` into the arrays
+// uPlot needs: x is the sorted union of bucket timestamps in unix SECONDS and,
+// when the caller passes xGrid, the queried window grid. Count metrics
+// (calls/errors) zero-fill empty buckets; avg_ms draws a gap where there is no
+// traffic. Returns {x, ys, labels}.
+export function mcpHistoryChartSeries(series, kind, xGrid) {
+  const list = Array.isArray(series) ? series : [];
+  const dataX = list.flatMap((s) => (s.points || []).map((p) => Number(p.ts) || 0));
+  const x = [...new Set((Array.isArray(xGrid) && xGrid.length ? xGrid : []).concat(dataX))].sort((a, b) => a - b);
+  const labels = [];
+  const ys = [];
+  const metric = MCP_HISTORY_METRICS.find((m) => m.id === kind);
+  const zeroFill = metric ? !metric.gap : false;
+  for (const s of list) {
+    labels.push(s.name || '');
+    const by = Object.fromEntries((s.points || []).map((p) => [Number(p.ts) || 0, p]));
+    ys.push(x.map((t) => {
+      const v = mcpHistoryPointValue(by[t], kind);
+      return v == null && zeroFill ? 0 : v;
+    }));
+  }
+  return { x, ys, labels };
+}
+
+// mcpHistoryValueText renders one MCP History metric value for display (chart
+// tooltip, legend). Counts use fmtCompact; avg_ms rounds to ms.
+export function mcpHistoryValueText(metricId, v) {
+  if (v == null || !isFinite(v)) return '—';
+  if (metricId === 'avg_ms') return Math.round(v) + 'ms';
+  return fmtCompact(v);
+}
+
+// mcpHistorySummaryTableHTML renders the History summary table. Rows carry the
+// same shape produced by mcpHistorySummaryRows; opts.formatTime converts the
+// last-call timestamp into display text. A colgroup pins the fixed layout so
+// long names do not push the numeric columns out of the card.
+export function mcpHistorySummaryTableHTML(rows, opts = {}) {
+  if (!rows || !rows.length) return '';
+  const fmtTime = opts.formatTime || ((ts) => ts ? String(ts) : '—');
+  const cols = '<colgroup>' + [10, 37, 10, 10, 13, 20].map((w) => `<col style="width:${w}%"/>`).join('') + '</colgroup>';
+  const body = rows.map((r) => `<tr>
+    <td><span class="badge muted">${esc(r.kind)}</span></td>
+    <td class="mono" title="${esc(r.name)}">${esc(r.name)}</td>
+    <td class="num">${fmtNum(r.calls)}</td>
+    <td class="num">${fmtNum(r.errors)}</td>
+    <td class="num">${r.avgLatencyMs ? fmtNum(Math.round(r.avgLatencyMs)) + 'ms' : '—'}</td>
+    <td class="num">${esc(fmtTime(r.lastCallAt))}</td>
+  </tr>`).join('');
+  return `<table class="table">${cols}
+    <thead><tr><th>Kind</th><th>Name</th><th class="num">Calls</th><th class="num">Errors</th><th class="num">Avg ms</th><th class="num">Last Call</th></tr></thead>
+    <tbody>${body}</tbody>
+  </table>`;
+}
+
+// mcpHistoryEmptyHTML is the History empty-state hint.
+export function mcpHistoryEmptyHTML() {
+  return '<span class="hint">No MCP calls in the selected range.</span>';
+}
+
+// mcpHistorySkeletonHTML is the History first-load placeholder.
+export function mcpHistorySkeletonHTML() {
+  return '<span class="hint">loading…</span>';
+}
+
+// ---------- MCP tab URL hash state ----------
+
+// VALID_MCP_SUB_TABS lists the canonical MCP sub-tab segment values. The hash
+// form is #mcp/<sub> (servers, routes, history); an empty/invalid sub falls
+// back to the caller's default (usually localStorage or 'servers').
+export const VALID_MCP_SUB_TABS = ['servers', 'routes', 'history'];
+
+// mcpSubTabFromHash validates an MCP sub-tab hash segment. Returns the
+// canonical sub-tab id when valid, or '' when empty/invalid so the caller can
+// fall back to its persisted/default state.
+export function mcpSubTabFromHash(sub) {
+  if (VALID_MCP_SUB_TABS.includes(sub)) return sub;
+  return '';
+}
+
+// mcpHash builds the MCP tab URL hash for a validated sub-tab. Callers must
+// pass a canonical sub-tab id (VALID_MCP_SUB_TABS); an invalid value degrades
+// to the bare #mcp hash.
+export function mcpHash(sub) {
+  if (VALID_MCP_SUB_TABS.includes(sub)) return '#mcp/' + sub;
+  return '#mcp';
 }
