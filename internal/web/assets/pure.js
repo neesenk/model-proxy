@@ -3972,15 +3972,16 @@ export function mcpHistoryValueText(metricId, v) {
 
 // mcpHistorySummaryTableHTML renders the History summary table. Rows carry the
 // same shape produced by mcpHistorySummaryRows; opts.formatTime converts the
-// last-call timestamp into display text. A colgroup pins the fixed layout so
-// long names do not push the numeric columns out of the card.
+// last-call timestamp into display text. A colgroup pins the fixed layout:
+// Kind and the numeric columns get fixed small widths; Name takes the flexible
+// remainder. Long names clip with ellipsis and expose full text via title.
 export function mcpHistorySummaryTableHTML(rows, opts = {}) {
   if (!rows || !rows.length) return '';
   const fmtTime = opts.formatTime || ((ts) => ts ? String(ts) : '—');
-  const cols = '<colgroup>' + [10, 37, 10, 10, 13, 20].map((w) => `<col style="width:${w}%"/>`).join('') + '</colgroup>';
+  const cols = '<colgroup>' + ['80px', 'auto', '70px', '70px', '80px', '130px'].map((w) => `<col style="width:${w}"/>`).join('') + '</colgroup>';
   const body = rows.map((r) => `<tr>
     <td><span class="badge muted">${esc(r.kind)}</span></td>
-    <td class="mono" title="${esc(r.name)}">${esc(r.name)}</td>
+    <td class="mcp-clip" title="${esc(r.name)}">${esc(r.name)}</td>
     <td class="num">${fmtNum(r.calls)}</td>
     <td class="num">${fmtNum(r.errors)}</td>
     <td class="num">${r.avgLatencyMs ? fmtNum(Math.round(r.avgLatencyMs)) + 'ms' : '—'}</td>

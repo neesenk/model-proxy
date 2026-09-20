@@ -10383,14 +10383,20 @@ function mcpServersCardHTML(servers) {
       resultRow = `<tr><td></td><td colspan="9">${badge} <span class="hint">${esc(probe.text)}${probe.latencyMs != null ? ` · ${probe.latencyMs} ms` : ''}</span> ${tools}${esc(more)}</td></tr>`;
     }
     const stats = `<td class="num">${s.errors || 0}</td><td class="num">${s.calls ? (s.avg_latency_ms || 0) : '—'}</td>`;
-    return `<tr><td>${esc(s.name)}</td><td>${enabled}</td><td>${esc(s.transport)}</td><td>${auth}</td><td class="mcp-wrap" title="${esc(endpoint)}">${esc(endpoint)}</td>${accounts}<td class="num">${s.sessions || 0}</td>${stats}<td>${action}</td></tr>` + resultRow;
+    return `<tr><td class="mcp-clip" title="${esc(s.name)}">${esc(s.name)}</td><td>${enabled}</td><td class="mcp-wrap">${esc(s.transport)}</td><td class="mcp-clip" title="${esc(auth)}">${auth}</td><td class="mcp-clip" title="${esc(endpoint)}">${esc(endpoint)}</td>${accounts}<td class="num">${s.sessions || 0}</td>${stats}<td>${action}</td></tr>` + resultRow;
   }).join('');
   // Fixed column geometry (colgroup + table-layout: fixed, the request-table
-  // contract): long endpoints/commands wrap inside their column instead of
-  // pushing the table past the card edge, which clips the trailing columns.
-  const cols = '<colgroup>' + [12, 6, 7, 9, 28, 6, 8, 6, 7, 11].map((w) => `<col style="width:${w}%"/>`).join('') + '</colgroup>';
+  // contract): narrow badge/numeric/button columns get fixed small widths;
+  // Name and Endpoint take the flexible remainder and clip with ellipsis
+  // (endpoint URLs are the canonical long value to clip; full text rides the
+  // title tooltip). Transport wraps inside its fixed column. The table has a
+  // realistic min-width so it never collapses into unreadable slivers; the
+  // card-body scrolls horizontally when the sidebar leaves less room.
+  const cols = '<colgroup>' + [
+    'auto', '70px', '110px', '130px', 'auto', '80px', '80px', '70px', '80px', '80px',
+  ].map((w) => `<col style="width:${w}"/>`).join('') + '</colgroup>';
   const table = `<table class="table">${cols}<thead><tr><th>Name</th><th>Enabled</th><th>Transport</th><th>Auth</th><th>Endpoint</th><th class="num">Accounts</th><th class="num">Sessions</th><th class="num">Errors</th><th class="num">Avg ms</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
-  return buildCard('MCP Servers', `${servers.length} servers`, table, 'mcp-table', '<button class="btn small" data-mcp-refresh>Refresh</button>');
+  return buildCard('MCP Servers', `${servers.length} servers`, table, 'mcp-table mcp-servers-table', '<button class="btn small" data-mcp-refresh>Refresh</button>');
 }
 
 function mcpRoutesCardHTML(routes) {
@@ -10398,11 +10404,11 @@ function mcpRoutesCardHTML(routes) {
   const rows = routes.map((r) => {
     const enabled = r.enabled ? '<span class="badge ok">on</span>' : '<span class="badge muted">off</span>';
     const targets = (r.targets || []).map((t) => `${esc(t.server)} (${t.tools})`).join(' → ');
-    return `<tr><td>${esc(r.name)}</td><td>${enabled}</td><td class="mcp-wrap">${targets}</td><td class="num">${r.sessions || 0}</td><td class="num">${r.errors || 0}</td><td class="num">${r.calls ? (r.avg_latency_ms || 0) : '—'}</td></tr>`;
+    return `<tr><td class="mcp-clip" title="${esc(r.name)}">${esc(r.name)}</td><td>${enabled}</td><td class="mcp-wrap">${targets}</td><td class="num">${r.sessions || 0}</td><td class="num">${r.errors || 0}</td><td class="num">${r.calls ? (r.avg_latency_ms || 0) : '—'}</td></tr>`;
   }).join('');
-  const cols = '<colgroup>' + [14, 8, 40, 11, 10, 17].map((w) => `<col style="width:${w}%"/>`).join('') + '</colgroup>';
+  const cols = '<colgroup>' + ['auto', '70px', 'auto', '80px', '70px', '80px'].map((w) => `<col style="width:${w}"/>`).join('') + '</colgroup>';
   const table = `<table class="table">${cols}<thead><tr><th>Name</th><th>Enabled</th><th>Targets (failover order)</th><th class="num">Sessions</th><th class="num">Errors</th><th class="num">Avg ms</th></tr></thead><tbody>${rows}</tbody></table>`;
-  return buildCard('MCP Routes', `${routes.length} routes`, table, 'mcp-table');
+  return buildCard('MCP Routes', `${routes.length} routes`, table, 'mcp-table mcp-routes-table');
 }
 
 // mcpTestServer runs the handshake probe against one server and re-renders
@@ -10625,13 +10631,13 @@ function renderMCPHistory(host) {
   const series = mcpHistoryFilterSeries(mcpHistoryData.series, state.kind, state.name);
   const gran = mcpHistoryData.granularity || state.gran;
   if (!series.length) {
-    summaryHost.innerHTML = buildCard('Summary', '', mcpHistoryEmptyHTML(), 'mcp-table');
+    summaryHost.innerHTML = buildCard('Summary', '', mcpHistoryEmptyHTML(), 'mcp-table mcp-history-table');
     return;
   }
   const rows = mcpHistorySummaryRows(series);
   summaryHost.innerHTML = buildCard('Summary', `${rows.length} series`, mcpHistorySummaryTableHTML(rows, {
     formatTime: (ts) => ts ? mcpHistoryBucketLabel(ts, gran) : '—',
-  }), 'mcp-table');
+  }), 'mcp-table mcp-history-table');
   mcpHistoryRenderChart(view, series, state.metric, gran);
 }
 

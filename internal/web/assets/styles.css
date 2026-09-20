@@ -1442,16 +1442,21 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .model-caps-empty { color: var(--muted); }
 
 /* MCP tab tables: fixed layout pinned by the markup colgroup (the request
-   table contract). Cells that must not wrap clip with ellipsis instead of
-   overflowing into the next column; the Endpoint/Targets wrapping columns keep
-   overflow-wrap:anywhere. The card-body scrolls horizontally when the sidebar
-   leaves less than the table's 720px floor, so the fixed geometry never
-   collapses into overlapping columns. */
+   table contract). Narrow badge/numeric/button columns get fixed small widths;
+   Name/Endpoint/Targets take the flexible remainder. Cells that should stay on
+   one line clip with ellipsis (server names, endpoint URLs, auth text); cells
+   that wrap (Transport, Targets, Endpoint, result rows) use overflow-wrap:anywhere.
+   The card-body scrolls horizontally when the sidebar leaves less room than the
+   table's realistic min-width, so the fixed geometry never collapses into
+   unreadable slivers. */
 .mcp-table.card-body { overflow-x: auto; }
-.mcp-table .table { table-layout: fixed; min-width: 720px; }
-.mcp-table .table th,
-.mcp-table .table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-table .table { table-layout: fixed; width: 100%; }
+.mcp-servers-table .table { min-width: 1050px; }
+.mcp-routes-table .table { min-width: 750px; }
+.mcp-history-table .table { min-width: 700px; }
+.mcp-table .table th { white-space: nowrap; }
 .mcp-table .table td .badge { white-space: nowrap; }
+.mcp-table .mcp-clip { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mcp-table .mcp-wrap { white-space: normal; overflow-wrap: anywhere; }
 @media (max-width: 720px) {
   .status-layout, .req-layout { grid-template-columns: 1fr; }
@@ -1856,8 +1861,11 @@ dialog.tk-fixed .modal-body { max-height: calc(100vh - 150px); }
      usable and lets the card-body scroll them horizontally like the other
      wide tables. */
   #req-table .table, #live-table .table, #live-session-panel .table { min-width: 720px; }
-  /* The MCP tables (11 and 7 fixed columns) follow the same floor. */
-  .mcp-table .table { min-width: 720px; }
+  /* The MCP tables keep their realistic floors so they remain readable on
+     narrow viewports; the card-body scrolls them horizontally. */
+  .mcp-servers-table .table { min-width: 1050px; }
+  .mcp-routes-table .table { min-width: 750px; }
+  .mcp-history-table .table { min-width: 700px; }
   .sess-sticky { position: static; margin: 0; padding: 0; border-bottom: none; }
   /* The dashboard KPI row pins 6 columns on desktop; at phone widths each
      cell would collapse to ~55px. Two columns keep the numbers readable. */

@@ -181,8 +181,11 @@ tab 重入经 `retainTab` 守卫。
 
 **全部渲染为用户触发**（tab 激活/Refresh/子标签切换/Test/过滤器变更），无自动刷新 tick，
 因此不适用 deferAutoRefresh 双门；后台刷新失败保留旧 DOM 走 `setRefreshError`。结构标记
-`.mcp-host`（无视觉样式，已登记 registry 的 CLASS_EXEMPT）。**两表列几何固定**：
-colgroup 百分比 + `.mcp-table .table { table-layout: fixed }`（与请求表同一契约）——长
-endpoint/command 在列内 `overflow-wrap: anywhere` 折行（`.mcp-wrap`，全文进 title tooltip），
-不再把表顶出卡缘（`.card` overflow 裁剪曾静默吃掉尾部 numeric/action 列）；≤720px 给 720px
-min-width、靠 `.card-body` 横向滚动。徽章/按钮复用既有 `.badge`/`.btn` 模式。
+`.mcp-host`（无视觉样式，已登记 registry 的 CLASS_EXEMPT）。**三表列几何固定**：
+colgroup 用 `table-layout: fixed`（与请求表同一契约），但不再按百分比均分——短
+badge/数字/按钮列给固定小宽度（px），Name/Endpoint/Targets 占剩余弹性空间。
+长 endpoint URL 在弹性列内 ellipsis 裁剪并附 `title` tooltip；Targets 链与长 Transport
+值在 `.mcp-wrap` 列内 `overflow-wrap: anywhere` 折行；Name/Auth 用 `.mcp-clip` 单行省略。
+Servers/Routes/History 各自拥有 realistic `min-width`（1050/750/700px）；当侧栏挤占使
+卡片内容区小于该宽度时，`.card-body` 横向滚动，避免列被压成不可读的碎片。徽章/按钮复用
+既有 `.badge`/`.btn` 模式。
