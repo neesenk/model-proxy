@@ -72,6 +72,7 @@ Responses → {anthropic, chat}（`responsesSSETo*`，读 `response.*` 事件）
 - `response.incomplete` 读 `incomplete_details.reason`：`content_filter`→`refusal`/`content_filter`，其余→`max_tokens`/`length`；**usage 同样读取**（cc-switch completed/incomplete 统一取 usage——max_tokens 截断恰好最需要计费）。
 - `response.refusal.delta` → `text_delta` / `delta.content`（refusal 正文是真实内容；stop 语义由 finish/stop_reason 携带，与 `internal/protocol/convert.go` 方向 refusal→text 对齐）；非流式 `{type:"refusal"}` content part 同样转 text。**chat→r 反向保留 refusal**：非流式空 content + 非空 `refusal` 的 message 产出带 `{type:"refusal", refusal}` part 的 output message item；流式 `delta.refusal` 打开 refusal content part，流式发出 `response.refusal.delta`/`.done` 与 part 键 content_part 帧，不塌缩为正文 text。
 - 上游 SSE 必须出现协议终止信号：Responses 为 `response.completed`/`response.incomplete`/`response.failed`，Anthropic 为 `message_stop`（已带 stop_reason 的 `message_delta` 可在 EOF 兜底；方言 `data: [DONE]` 同为显式终止符——干净终态、合成 finish（若 `message_delta` 未发），其后帧不再扫描处理），Chat 为 `[DONE]` 或非空 `finish_reason`。无终止信号 EOF、scanner 错误或未闭合的 function arguments 一律 fail-closed：Anthropic 客户端收到 `error`，Chat 客户端收到 error chunk，Responses 客户端收到 `response.failed`；不得合成 `message_stop`/`[DONE]`/`response.completed`。a→chat 方向同此：scanner 错误/EOF 前终止/上游 error event 只产出 error chunk，不再补发 usage chunk 与 `data: [DONE]`；finish chunk 之后的 content/tool 帧被 post-terminal guard 抑制（与其他方向一致）。
+- **同协议透传同样 fail-closed**（`internal/protocol/stream_terminal_watch.go`，executor 在 passthrough 流式路径包裹 `TerminalWatcher`）：上游字节原样转发，影子扫描帧边界追踪同一组终止信号；流已开始（至少一个 `data:` 行）却在终止信号前 EOF/读错时，向客户端追加协议原生错误终态——Anthropic `event: error`（`upstream stream ended before message_stop`）、Chat error chunk（`upstream stream ended without a terminal finish_reason`，不带 `[DONE]`）、Responses `response.failed`（`upstream stream ended before a terminal response event`）。文案是客户端契约：agent 客户端（pi）按错误文案正则判定可重试，这些措辞命中其模式表。两个例外：上游自带错误终态（error event / error chunk / `response.failed`）不重复合成；Anthropic 裸 `message_stop`（kimi 方言）对客户端可接受、不合成（缓存可回放性仍由 `StreamTerminalComplete` 单独把关）。空 body 不合成，保留 executor 的零字节 200 失败路径。watcher 位于 effects 链之下：request log / usage / cache recorder 看到含合成终态的完整客户端字节，合成流天然不过缓存门禁。合成载荷用 struct 序列化（sonic 不排序 map key，字节必须稳定）。
 
 方言兼容（真实流量录制发现）：
 
@@ -192,6 +193,7 @@ capability scanner 的 target 跳过与 400 信封通道，proxy 无特判。str
 - `TestProtocolConversionRegistryIsComplete` 断言六组跨协议 pair 均同时注册
   request、response、stream codec；未知协议与同协议不得命中注册表。
 - 同协议逐字节透传（`TestConvertFault_SameProtocolPassthrough`：anthropic/responses 两方向请求与响应均 byte-identical，端到端）。
+- 同协议透传截断 fail-closed（`internal/protocol/stream_terminal_watch_test.go` + `internal/app/stream_terminal_test.go`）：三协议截断合成对应错误终态（anthropic `event: error` / chat error chunk 无 `[DONE]` / responses `response.failed` 带追踪 id）；完整流、裸 `message_stop`、无 `[DONE]` 的 finish_reason、上游自带错误终态均字节不变不合成；读错误先送合成终态再返错；空 body 不合成；单字节 chunk 边界与折叠 data 行分类不变；端到端 anthropic/chat 透传截断复刻 zhipu 事故形态。
 - tools、并行工具、图片、usage 双向转换（anthropic↔openai-chat）。
 - 交错 tool delta 和 trailing usage。
 - 转换失败发生在 commit 前。

@@ -461,6 +461,23 @@ func (executor Executor) commit(
 			}
 		})
 	}
+	// Same-protocol passthrough streams bypass the converters, so an upstream
+	// that abandons a generation mid-stream used to reach the client as a bare
+	// EOF: state-tracking clients (Anthropic SDKs) hard-fail, lenient ones
+	// silently accept a truncated answer. The watcher forwards bytes untouched
+	// while shadow-scanning for the client protocol's terminal sequence and,
+	// when the upstream ends without one, appends a protocol-native terminal
+	// error event — the same fail-closed shape the converters already emit
+	// (never a fake finish_reason / [DONE] / message_stop). It wraps BELOW the
+	// effects chain (request log, usage capture and the cache recorder see the
+	// client's bytes, so a synthesized terminal keeps failing the cache gate)
+	// and ABOVE the model normalizer and responses-state capture, which must
+	// observe the raw upstream stream.
+	var terminalWatch *protocol.TerminalWatcher
+	if !convert && upstreamStream {
+		terminalWatch = protocol.WatchStreamTerminal(body, plan.ClientProtocol())
+		body = terminalWatch
+	}
 	// The wrapper order intentionally mirrors the root pipeline: transformed
 	// client bytes are captured for continuation, then logging, usage, cache and client.
 	if executor.Effects != nil {
@@ -499,6 +516,10 @@ func (executor Executor) commit(
 			executor.State.RecordModelFailure(dto.Target)
 		}
 		logx.Warnf("[proto=%s provider=%s] 200 with zero-byte body — model locked post-commit; next request fails over",
+			plan.ClientProtocol(), dto.Target.Provider)
+	}
+	if terminalWatch != nil && terminalWatch.Synthesized() {
+		logx.Warnf("[proto=%s provider=%s] upstream stream ended before its terminal sequence — synthesized a protocol-native error terminal for the client (delivered, never cached)",
 			plan.ClientProtocol(), dto.Target.Provider)
 	}
 	if recorder != nil && recorder.Complete() && len(recorder.Body()) > 0 {
