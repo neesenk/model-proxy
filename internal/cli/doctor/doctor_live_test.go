@@ -335,7 +335,7 @@ providers:
 	// codex: never taken over (no .bak, no file).
 	// kimi: taken over, provider base_url matches what the kimi template writes.
 	write(".kimi-code/config.toml", `[providers."model-proxy"]
-type = "openai_legacy"
+type = "openai"
 base_url = "`+proxyURL+`/v1"
 api_key = "PROXY_MANAGED"
 `)

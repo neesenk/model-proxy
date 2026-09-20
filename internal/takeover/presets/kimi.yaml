@@ -1,4 +1,4 @@
-description: kimi(Kimi Code CLI)— config.toml 注入 openai_legacy provider + 每模型 models 段 + ~/.kimi-code/mcp.json 接管网关 MCP 面
+description: kimi(Kimi Code CLI)— config.toml 注入 openai provider + 每模型 models 段 + ~/.kimi-code/mcp.json 接管网关 MCP 面
 file: ~/.kimi-code/config.toml
 format: toml
 client: kimi
@@ -8,7 +8,7 @@ toml:
   sections:
     - name: 'providers."{{provider_id}}"'
       body: |
-        type = "openai_legacy"
+        type = "openai"
         base_url = "{{base_url}}"
         api_key = "{{token}}"
 mcp:

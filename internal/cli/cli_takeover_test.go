@@ -124,7 +124,7 @@ toml:
   sections:
     - name: 'providers."{{provider_id}}"'
       body: |
-        type = "openai_legacy"
+        type = "openai"
         base_url = "{{base_url}}"
         api_key = "{{token}}"
 models:

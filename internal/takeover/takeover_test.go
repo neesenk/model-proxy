@@ -547,8 +547,8 @@ func TestTemplateKimi(t *testing.T) {
 	if !strings.Contains(text, `[providers."model-proxy"]`) {
 		t.Errorf("kimi config missing [providers.\"model-proxy\"] section:\n%s", text)
 	}
-	if !strings.Contains(text, `type = "openai_legacy"`) {
-		t.Errorf("kimi provider must declare openai_legacy (Chat Completions):\n%s", text)
+	if !strings.Contains(text, `type = "openai"`) {
+		t.Errorf("kimi provider must declare openai (Chat Completions wire; kimi-cli 2.x dropped the openai_legacy type):\n%s", text)
 	}
 	if !strings.Contains(text, `base_url = "http://127.0.0.1:15721/v1"`) {
 		t.Errorf("kimi provider base_url must be the versioned proxy endpoint:\n%s", text)
@@ -638,6 +638,12 @@ provider = "model-proxy"
 	text := string(b)
 	if strings.Contains(text, "[models.glm-5.2]") {
 		t.Errorf("legacy unquoted model block survived rewrite:\n%s", text)
+	}
+	if strings.Contains(text, "openai_legacy") {
+		t.Errorf("legacy openai_legacy provider type survived rewrite (kimi-cli 2.x rejects it):\n%s", text)
+	}
+	if !strings.Contains(text, `type = "openai"`) {
+		t.Errorf("provider must be rewritten to the openai wire type:\n%s", text)
 	}
 	if strings.Count(text, `[models."glm-5.2"]`) != 1 {
 		t.Errorf("quoted model block missing or duplicated:\n%s", text)

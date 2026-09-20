@@ -220,7 +220,7 @@ takeover list       # 可用模板:内置预设 + ~/.model-proxy/takeover-templa
   ```
   `guard.audit` 开启时按 doctor 同款语义追加一条 kind=drift 安全审计记录（agent=takeover，同日同 client 去重，见 §19）；审计追加失败只 stderr 提示。漂移不影响 exit code。`restore` 不做该校验（恢复原状是预期）。
 
-失败：`log.Fatal(err)` -> stderr + exit 1（config 加载失败 / 模板解析失败 / 未知 client / 备份失败 / 改写失败）。kimi 模板写 `~/.kimi-code/config.toml`：注入 `[providers."model-proxy"]`（`type = "openai_legacy"`，base_url 带 `/v1`）+ 每个暴露模型一个 `[models."<name>"]` 块；开启 `web.auth.api_keys_file` 后需把 `PROXY_MANAGED` 占位 key 换成文件里的真实 key。
+失败：`log.Fatal(err)` -> stderr + exit 1（config 加载失败 / 模板解析失败 / 未知 client / 备份失败 / 改写失败）。kimi 模板写 `~/.kimi-code/config.toml`：注入 `[providers."model-proxy"]`（`type = "openai"`，base_url 带 `/v1`）+ 每个暴露模型一个 `[models."<name>"]` 块；开启 `web.auth.api_keys_file` 后需把 `PROXY_MANAGED` 占位 key 换成文件里的真实 key。
 
 ---
 
