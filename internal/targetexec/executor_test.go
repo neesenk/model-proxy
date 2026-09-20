@@ -240,6 +240,43 @@ func TestExecutor429And5xxFailover(t *testing.T) {
 	}
 }
 
+// kimi-code answers the exhausted 5-hour coding-plan window with 403
+// "You've reached your 5-hour usage limit" — that body must route into the
+// reactive rate-limit cooldown + failover path (same as 429), not the
+// plain-4xx commit that keeps dispatching into the dead account.
+func TestExecutor403QuotaBodyRateLimits(t *testing.T) {
+	provider := &executorTestProvider{}
+	attempt, _ := testAttempt(provider, `{}`, Policy{})
+	state := &executorState{}
+	effects := &executorEffects{}
+	body := `{"error":{"message":"You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends. To continue now, purchase extra usage or upgrade your plan: https://www.kimi.com/membership/subscription?tab=quota"}}`
+	before := time.Now()
+	result := (Executor{
+		Client: &sequenceDoer{responses: []*http.Response{testResponse(403, body)}}, State: state, Effects: effects,
+	}).Execute(attempt)
+	if result.Committed || result.Outcome != OutcomeRateLimited || state.rateLimits != 1 ||
+		effects.rateLimits != 1 || effects.failovers != 1 || effects.failures != 0 ||
+		state.rateLimitDecision.Kind != RateLimitQuota ||
+		state.rateLimitDecision.Until.Before(before) {
+		t.Fatalf("403 quota result=%+v state=%+v effects=%+v", result, state, effects)
+	}
+}
+
+// A 403 without quota proof in the body must keep the generic path: committed
+// to the client as-is, no cooldown, no failover (intentional-behaviors #3).
+func TestExecutor403PlainBodyCommits(t *testing.T) {
+	provider := &executorTestProvider{}
+	attempt, _ := testAttempt(provider, `{}`, Policy{})
+	state := &executorState{}
+	effects := &executorEffects{}
+	result := (Executor{
+		Client: &sequenceDoer{responses: []*http.Response{testResponse(403, `{"error":"forbidden"}`)}}, State: state, Effects: effects,
+	}).Execute(attempt)
+	if !result.Committed || state.rateLimits != 0 || effects.rateLimits != 0 || effects.failovers != 0 {
+		t.Fatalf("plain 403 result=%+v state=%+v effects=%+v", result, state, effects)
+	}
+}
+
 func TestExecutorCommitUsesShapedBody(t *testing.T) {
 	provider := &executorTestProvider{}
 	attempt, _ := testAttempt(provider, `{"model":"model","store":false}`, Policy{LastTarget: true})

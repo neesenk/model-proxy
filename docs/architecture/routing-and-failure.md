@@ -114,7 +114,7 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   `DeadlineExceeded`（父 ctx 仍存活）照常计入熔断。
 - exhausted 401 的观测只记 failover，不记 `evFailures`；熔断状态与请求 metric
   是不同语义，普通执行器和 Fusion leg 必须保持一致。
-- 429 进入 provider 限频冷却，不计熔断。
+- 429 进入 provider 限频冷却，不计熔断；**403 且 body 证明配额耗尽**（`targetexec.ParseQuotaDenied`，kimi-code 的 5 小时套餐窗口耗尽即此形态）同路：记限频冷却 + failover，终局按限频类分类。
 - 404、model-denied、空 200 只锁 `(provider, model)`。
 - 半开状态使用 `halfOpenInFlight` 单飞。
 - 普通 4xx commit 必须释放半开槽，但不得清除失败历史。
@@ -137,6 +137,8 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
 3. 分类默认值。
 
 body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`（`days?|d|hours?|minutes?|seconds?` 等单位）和 reset/retry 关键词邻近的 RFC3339。上限 7 天；duration 在乘法前必须 clamp，防止溢出。
+
+非 429 状态码携带配额耗尽证据时走同一分类器：`targetexec.ParseQuotaDenied`（body 命中 quota/daily 措辞即采纳，否则返回 false 保持通用 4xx 路径）复用 `ParseRateLimit` 的 kind/horizon 计算，executor 对 403 调用它并记 `RecordRateLimit` + failover（kimi-code 把 5 小时套餐窗口耗尽答成 403 "You've reached your 5-hour usage limit"，此前它落入普通 4xx commit：不冷却、不 failover，路由继续把流量派进已耗尽的账号）。
 
 分类与 horizon 只由 `internal/targetexec.ParseRateLimit` 计算；普通
 `targetexec.Executor`、Fusion leg 与 guard 判定的调度 seam

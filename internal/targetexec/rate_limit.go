@@ -40,6 +40,7 @@ var quotaExhaustedMarkers = [][]byte{
 	[]byte("exceeded your current quota"),
 	[]byte("quota exhausted"),
 	[]byte("quota_exhausted"),
+	[]byte("usage limit"),
 	[]byte("credit balance"),
 	[]byte("balance not enough"),
 	[]byte("account balance"),
@@ -125,6 +126,19 @@ func classify429(body []byte) RateLimitKind {
 		}
 	}
 	return RateLimitTransient
+}
+
+// ParseQuotaDenied reports whether a non-429 response body proves plan or
+// quota exhaustion (kimi-code answers the exhausted 5-hour coding-plan window
+// with 403 "You've reached your 5-hour usage limit"). ok=false means the body
+// carries no quota proof and the caller must keep its generic status
+// handling; a positive verdict reuses ParseRateLimit for kind and horizon so
+// every caller applies one classification rule.
+func ParseQuotaDenied(response *http.Response, bodyPeek []byte, now time.Time, scheduling configdomain.Scheduling) (RateLimitDecision, bool) {
+	if len(bodyPeek) == 0 || classify429(bodyPeek) == RateLimitTransient {
+		return RateLimitDecision{}, false
+	}
+	return ParseRateLimit(response, bodyPeek, now, scheduling), true
 }
 
 func parseResetHint(body []byte, now time.Time) (time.Time, bool) {

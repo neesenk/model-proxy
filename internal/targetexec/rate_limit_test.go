@@ -28,12 +28,38 @@ func TestClassify429(t *testing.T) {
 		{`{"error":{"code":"Insufficient_Quota","message":"You Exceeded Your Current Quota"}}`, RateLimitQuota},
 		{`{"error":"Daily Quota Exhausted"}`, RateLimitDaily},
 		{`{"error":"Too Many Requests"}`, RateLimitTransient},
+		{`{"error":{"message":"You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends."}}`, RateLimitQuota},
 		{``, RateLimitTransient},
 	}
 	for _, test := range cases {
 		if got := classify429([]byte(test.body)); got != test.want {
 			t.Errorf("classify429(%q) = %v, want %v", test.body, got, test.want)
 		}
+	}
+}
+
+func TestParseQuotaDenied(t *testing.T) {
+	now := time.Date(2026, 9, 20, 22, 0, 0, 0, time.UTC)
+	scheduling := configdomain.Scheduling{RateLimitBackoff: "60s", QuotaCooldown: "2h"}
+
+	kimiBody := []byte(`{"error":{"message":"You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends."}}`)
+	decision, ok := ParseQuotaDenied(nil, kimiBody, now, scheduling)
+	if !ok || decision.Kind != RateLimitQuota {
+		t.Fatalf("kimi 403 body = %+v ok=%v, want quota", decision, ok)
+	}
+	if want := now.Add(2 * time.Hour); decision.Until != want {
+		t.Errorf("quota horizon = %v, want scheduling default %v", decision.Until, want)
+	}
+
+	if _, ok := ParseQuotaDenied(nil, []byte(`{"error":"forbidden"}`), now, scheduling); ok {
+		t.Error("plain 403 body must not classify as quota denial")
+	}
+	if _, ok := ParseQuotaDenied(nil, nil, now, scheduling); ok {
+		t.Error("empty body must not classify as quota denial")
+	}
+	// Transient rate-limit phrasing proves nothing about quota on a 403.
+	if _, ok := ParseQuotaDenied(nil, []byte(`{"error":"too many requests"}`), now, scheduling); ok {
+		t.Error("transient body must not classify as quota denial")
 	}
 }
 

@@ -195,6 +195,24 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			if policy.ContextRetry != nil || response.StatusCode == 400 || response.StatusCode == 403 || response.StatusCode == 404 {
 				peek = peekResponseBody(response, contextOverflowPeek)
 			}
+			// kimi-code answers the exhausted 5-hour coding-plan window with
+			// 403 "You've reached your 5-hour usage limit" - quota exhaustion
+			// proven by the body on a non-429 status must take the same
+			// reactive cooldown + failover path as 429, or the route keeps
+			// committing the raw upstream denial (no cooldown, no failover);
+			// the quota poller only gates scheduling on the ultimate window.
+			if response.StatusCode == http.StatusForbidden {
+				if decision, ok := ParseQuotaDenied(response, peek, time.Now(), runtime.Scheduling); ok {
+					response.Body.Close()
+					if executor.State != nil {
+						executor.State.RecordRateLimit(target.Provider, decision)
+						logx.Infof("[proto=%s provider=%s] 403 body proves %s exhaustion - skipped until %s",
+							plan.ClientProtocol(), target.Provider, decision.Kind, decision.Until.Format(time.RFC3339))
+					}
+					executor.rateLimited(target)
+					return Result{Outcome: OutcomeRateLimited}
+				}
+			}
 			if response.StatusCode == http.StatusRequestEntityTooLarge && !retriedImages {
 				if smaller, changed := protocol.ShrinkImages(body, 1<<20, 2048); changed {
 					response.Body.Close()

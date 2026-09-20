@@ -8,7 +8,7 @@
 
 1. **空 200 视为模型失败**：LLM 端点没有合法的空成功响应，部分逆向网关会在过载时返回空 200。
 2. **404 failover 并锁模型**：proxy 只转发已知 LLM 路径，404 表示模型或上游路径不可用。
-3. **400/403 model-denied failover**：只有保守命中模型不可用语义才 failover；普通 4xx 原样 commit。
+3. **400/403 model-denied failover**：只有保守命中模型不可用语义才 failover；普通 4xx 原样 commit。例外：403 且 body 命中配额耗尽措辞（`targetexec.ParseQuotaDenied`，如 kimi-code "You've reached your 5-hour usage limit"）按限频处理（冷却 + failover）——配额耗尽是 provider 级事实，不是请求形状问题。
 4. **Unsupported parameter 自动剥离一次**：只处理顶层字段，受 never-strip 白名单保护，并按 `(provider, model)` 学习。
 5. **daily/quota 429 使用长冷却**：body reset hint 始终优先；没有 hint 时 daily 到午夜、quota 默认 1h；`unfreeze` 是人工逃生口（no-arg = 全部），`freeze` 是反向人工开关（显式冻结 provider 至 unfreeze，成功/失败记录不解冻；**刻意只接受显式 provider、无 freeze-all**——全冻结=自我断供，批量形式只留在逃生口一侧）。
 6. **冻结态恢复需要 config fingerprint**：防止不同配置或测试二进制把同名 provider 的旧状态恢复到当前实例。
