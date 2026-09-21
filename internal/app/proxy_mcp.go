@@ -68,17 +68,21 @@ func mcpSetLiveProvider(w http.ResponseWriter, provider string) {
 // the User-Agent-derived agent label, the client's own session header value
 // (request_log.session_headers allowlist — same derivation as the LLM
 // surface), and the local Mcp-Session-Id. mcpLog resolves them into the
-// record's agent/session_id fields.
+// record's agent/session_id fields (plus the tools/call tool name — same
+// write-back lane, consumed by the request-log record and the live end
+// event alike).
 type mcpIdentity struct {
 	uaAgent   string
 	clientSID string
 	localSID  string
-	// resolvedAgent/resolvedSession carry mcpLog's final attribution back to
-	// serveMCP's deferred live end event (it publishes after the handler
-	// returned, so the write is visible there). Written once, on the logging
-	// goroutine, before the handler returns — no concurrent access.
+	// resolvedAgent/resolvedSession/resolvedTool carry mcpLog's final
+	// attribution back to serveMCP's deferred live end event (it publishes
+	// after the handler returned, so the write is visible there). Written
+	// once, on the logging goroutine, before the handler returns — no
+	// concurrent access.
 	resolvedAgent   string
 	resolvedSession string
+	resolvedTool    string
 }
 
 // mcpIdentityFor captures the per-request attribution inputs from the
@@ -155,6 +159,7 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 				Protocol:  "mcp",
 				Exposed:   name,
 				Provider:  lw.provider,
+				Tool:      ident.resolvedTool,
 				Status:    lw.status,
 				LatencyMs: time.Since(started).Milliseconds(),
 			})
@@ -598,6 +603,15 @@ func mcpStreamResponse(w http.ResponseWriter, src io.Reader, capBytes int) ([]by
 // the logger's existing truncation policy; the method logged is the JSON-RPC
 // method (HTTP verb for GET/DELETE).
 func (p *Proxy) mcpLog(name, account string, frame mcpkg.Frame, httpMethod string, status int, started time.Time, requestID string, reqBody, respCaptured []byte, respTotal int64, respTruncated bool, ident *mcpIdentity) {
+	// Tool name of a tools/call exchange — parsed once here, then consumed
+	// by the per-tool stats, the request-log record and the live end event.
+	// Client-facing on purpose: for route exchanges the logged reqBody is
+	// the original client frame, so ParseToolCallName yields the canonical
+	// route name, not the backend's rewritten name.
+	tool := ""
+	if frame.Method == "tools/call" {
+		tool = mcpkg.ParseToolCallName(reqBody)
+	}
 	// The per-name call counter is the MCP gateway's own stats channel
 	// (deliberately separate from the LLM metrics store — no tokens, no
 	// Analytics pollution). Recorded for every terminal exchange regardless
@@ -608,16 +622,10 @@ func (p *Proxy) mcpLog(name, account string, frame mcpkg.Frame, httpMethod strin
 		if account != "" && account != name {
 			p.mcpStats.Record(account, status, latencyMs)
 		}
-		// Per-tool dimension: tools/call only. The tool name is the
-		// client-facing one — for route exchanges the logged reqBody is the
-		// original client frame, so ParseToolCallName yields the canonical
-		// route name, not the backend's rewritten name.
-		if frame.Method == "tools/call" {
-			if tool := mcpkg.ParseToolCallName(reqBody); tool != "" {
-				p.mcpStats.RecordTool(name, tool, status, latencyMs)
-				if account != "" && account != name {
-					p.mcpStats.RecordTool(account, tool, status, latencyMs)
-				}
+		if tool != "" {
+			p.mcpStats.RecordTool(name, tool, status, latencyMs)
+			if account != "" && account != name {
+				p.mcpStats.RecordTool(account, tool, status, latencyMs)
 			}
 		}
 	}
@@ -637,6 +645,7 @@ func (p *Proxy) mcpLog(name, account string, frame mcpkg.Frame, httpMethod strin
 	// this handler path returns).
 	ident.resolvedAgent = agent
 	ident.resolvedSession = session
+	ident.resolvedTool = tool
 	logger := p.mcpLogTarget()
 	if logger == nil {
 		return
@@ -657,6 +666,7 @@ func (p *Proxy) mcpLog(name, account string, frame mcpkg.Frame, httpMethod strin
 		Protocol:          "mcp",
 		Method:            method,
 		Path:              "/mcp/" + name,
+		Tool:              tool,
 		Exposed:           name,
 		Provider:          account,
 		Status:            status,

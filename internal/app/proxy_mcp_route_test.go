@@ -450,6 +450,14 @@ func TestMCPRoute_RequestLogProjection(t *testing.T) {
 			t.Errorf("route log missing %s\n%s", want, content)
 		}
 	}
+	// The tools/call record carries the CLIENT-FACING (canonical route) tool
+	// name — not the backend-rewritten web_search_prime.
+	if !strings.Contains(content, `"tool":"web_search"`) {
+		t.Errorf("route log missing the canonical tool name\n%s", content)
+	}
+	if strings.Contains(content, `"tool":"web_search_prime"`) {
+		t.Errorf("route log projected the backend-rewritten tool name\n%s", content)
+	}
 }
 
 // TestMCPRoute_QuotaExhaustedSkipsBackend: a provider whose shared MCP-tool

@@ -64,9 +64,12 @@ MCP-Protocol-Version + 改写后的 Mcp-Session-Id），凭据与 hop-by-hop 永
 
 request log `Record.Kind`（`json:"kind,omitempty"`）：空 = LLM 流量（历史数据兼容），
 `"mcp"` = 网关交换。MCP 记录的投影：`Protocol="mcp"`、`Method`=JSON-RPC method
-（GET/DELETE 用 HTTP 动词，批量标注 `(batch)`）、`Path=/mcp/<name>`、`Exposed`=服务器
+（GET/DELETE 用 HTTP 动词，批量标注 `(batch)`）、`Path=/mcp/<name>`、`Tool`=tools/call
+的客户端视角工具名（`json:"tool,omitempty"`，与 stats 的 tool 维度同一 `ParseToolCallName`
+解析；非 call 方法与老记录为空/省略，summary 与尾随索引列同带）、`Exposed`=服务器
 名、`Provider`=账号虚拟 id（匿型为空）、status/latency/收发 size 与 body 截断策略与
-LLM 记录一致。MCP 交换进入 live events（`protocol="mcp"`，见下文「统计、Live 事件与配额冷却」）。
+LLM 记录一致。MCP 交换进入 live events（`protocol="mcp"`，end 事件携带同源 `tool`
+——start 发出时 body 尚未解析，见下文「统计、Live 事件与配额冷却」）。
 
 **拆分流（`request_log.mcp_split`，默认关）**：开启时 `kind="mcp"` 记录改写入独立
 的 `mcp-YYYYMMDD.log` 流（`mcp_dir`，默认 `~/.model-proxy/log/mcp`，策略值与
@@ -168,7 +171,8 @@ http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验�
   errors = status ≥ 400），再经分钟 flusher 持久化到 `stats.db` 的 `mcp_buckets`
   表（`name, kind, minute, calls, errors, latency_ms_sum, last_call_at`）。
   `tools/call` 交换另记 **tool 维度**：`mcpLog` 对原始客户端 body 跑
-  `mcp.ParseToolCallName`，非空 tool 名时 `RecordTool(name, tool, …)`（route 的
+  `mcp.ParseToolCallName`（同一次解析同时供给 stats、request log 记录的 `Tool`
+  字段与 live end 事件的 `tool`），非空 tool 名时 `RecordTool(name, tool, …)`（route 的
   account 双计规则同 server 级），flusher 经 `DiffMCPTools` 持久化到
   `mcp_tool_buckets`（`name, tool, kind, minute, …`，PK `(name, tool, minute)`）。
   tool 名为**客户端视角**——route 交换记 canonical 名（记录用的是改写前 body），

@@ -1593,6 +1593,20 @@ test('mergeLiveAndPersistedRow inherits persisted model and agent', () => {
   assert.equal(got.agent, 'pi');
 });
 
+test('mergeLiveAndPersistedRow merges the MCP tool: live end event wins, persisted backfills', () => {
+  // Live start rows never carry the tool (the body is parsed after the
+  // start fires) — the persisted summary backfills it.
+  const startOnly = mergeLiveAndPersistedRow(
+    { requestId: 'm1', status: 200, model: 'web-search' },
+    { requestId: 'm1', model: 'web-search', tool: 'search_videos' });
+  assert.equal(startOnly.tool, 'search_videos');
+  // The end event's tool is authoritative once it lands.
+  const ended = mergeLiveAndPersistedRow(
+    { requestId: 'm1', status: 200, model: 'web-search', tool: 'get_status' },
+    { requestId: 'm1', model: 'web-search', tool: 'search_videos' });
+  assert.equal(ended.tool, 'get_status');
+});
+
 test('mergeLiveAndPersistedRow keeps live progress and guard hits', () => {
   const live = { requestId: 'r1', inFlight: true, progressText: 'ok', progressBytes: 42, guardHits: [{ type: 'guard' }] };
   const persisted = { requestId: 'r1', status: 200 };
@@ -2590,22 +2604,33 @@ test('unified request table: one head and row renderer for all three tables', ()
   const widths = [...head.matchAll(/<col style="width:(\d+)%"\/>/g)].map((m) => Number(m[1]));
   assert.equal(widths.length, 8, 'colgroup pins all 8 columns');
   assert.equal(widths.reduce((a, b) => a + b, 0), 100, 'column shares sum to 100%');
-  // The MCP variant speaks the MCP domain: Server/Account labels, no token
-  // column (7-column geometry) and session cells drill the session.
+  // The MCP variant speaks the MCP domain: Server/Tool/Account labels, no
+  // token column (8-column geometry) and session cells drill the session.
   const mcpHead = requestTableHeadHTML({ mcp: true });
   assert.ok(mcpHead.includes('<th>Server</th>') && mcpHead.includes('<th>Account</th>'));
+  assert.ok(mcpHead.includes('<th>Tool</th>'), 'tool column sits in the mcp head');
+  assert.ok(mcpHead.indexOf('<th>Tool</th>') > mcpHead.indexOf('<th>Server</th>'), 'tool column is right of Server');
   assert.ok(!mcpHead.includes('Tokens'), 'mcp head carries no token column');
-  assert.equal((mcpHead.match(/<th[ >]/g) || []).length, 7, 'mcp head has 7 columns');
-  const mcpWidths = [...mcpHead.matchAll(/<col style="width:\d+%\"\/>/g)];
-  assert.equal(mcpWidths.length, 7, 'mcp colgroup pins 7 columns');
+  assert.equal((mcpHead.match(/<th[ >]/g) || []).length, 8, 'mcp head has 8 columns');
+  const mcpWidths = [...mcpHead.matchAll(/<col style="width:(\d+)%"\/>/g)].map((m) => Number(m[1]));
+  assert.equal(mcpWidths.length, 8, 'mcp colgroup pins 8 columns');
+  assert.equal(mcpWidths.reduce((a, b) => a + b, 0), 100, 'mcp column shares sum to 100%');
   const mcpRow = requestRowHTML({
     requestId: 'm1', ts: 5000, session: 'sess-abcd1234', agent: 'codex',
-    model: 'web-search', provider: 'zhipu#2', status: 200, latencyMs: 30,
+    model: 'web-search', tool: 'search_videos', provider: 'zhipu#2', status: 200, latencyMs: 30,
     input: 0, output: 0,
   }, { mcp: true, fmtTime: (t) => 'T' + t });
-  assert.equal((mcpRow.match(/<td/g) || []).length, 7, 'mcp row has 7 cells');
+  assert.equal((mcpRow.match(/<td/g) || []).length, 8, 'mcp row has 8 cells');
   assert.ok(mcpRow.includes('session-link'), 'mcp session cell drills the session');
+  assert.ok(/cell-model[^>]*title="search_videos"[^>]*>search_videos</.test(mcpRow), 'tool cell renders the tools/call name');
+  assert.ok(mcpRow.indexOf('search_videos') > mcpRow.indexOf('web-search'), 'tool cell sits right of the server cell');
   assert.ok(!mcpRow.includes('cache'), 'mcp row carries no token markup');
+  // Protocol traffic (initialize/tools/list) and pre-tool records read —;
+  // in-flight rows pend until the end event carries the name.
+  const noTool = requestRowHTML({ requestId: 'm2', ts: 1, agent: 'codex', model: 'web-search' }, { mcp: true });
+  assert.ok(/cell-model[^>]*>—<\/td>/.test(noTool), 'missing tool reads —');
+  const inflight = requestRowHTML({ requestId: 'm3', ts: 1, agent: 'codex', model: 'web-search', inFlight: true, guardHits: [] }, { mcp: true });
+  assert.ok(/cell-model subdue[^>]*>…<\/td>/.test(inflight), 'in-flight tool pends');
   // A full row: session link, status badge, tokens with cache read.
   const row = requestRowHTML({
     requestId: 'r1', ts: 5000, session: 'sess-abcd1234', agent: 'claude-code',
@@ -2803,6 +2828,15 @@ test('requestMetaHTML groups the record facts under labeled keys', () => {
   assert.ok(sparse.includes('when') && sparse.includes('call') && sparse.includes('result'));
   assert.ok(!sparse.includes('route'), sparse);
   assert.ok(!sparse.includes('size'), sparse);
+});
+
+test('requestMetaHTML rides the MCP tool beside the JSON-RPC method', () => {
+  const html = requestMetaHTML(
+    { ts: 't', method: 'tools/call', path: '/mcp/web-search', tool: 'search_videos', attempt: 0, status: 200 }, []);
+  assert.ok(html.includes('tools/call · search_videos <span class="req-meta-dim">/mcp/web-search</span>'), html);
+  // No tool (protocol traffic / pre-tool records): the method stands alone.
+  const bare = requestMetaHTML({ ts: 't', method: 'tools/list', path: '/mcp/web-search', attempt: 0, status: 200 }, []);
+  assert.ok(bare.includes('tools/list <span class="req-meta-dim">/mcp/web-search</span>'), bare);
 });
 
 test('ruleHitsLeaderboard ignores the unblock trail', () => {

@@ -207,3 +207,43 @@ func TestRecordKindRoundTrip(t *testing.T) {
 		t.Fatal("kind leaked into LLM record line")
 	}
 }
+
+// TestRecordToolRoundTrip pins the MCP tools/call name: tool must flow from
+// Input through BuildRecord and the hand-rolled JSONL encoder into the
+// Summary projection, and must stay absent (back-compat) for records
+// without one.
+func TestRecordToolRoundTrip(t *testing.T) {
+	logger := New(Options{Directory: t.TempDir(), MaxBodyBytes: 1 << 20})
+	rec := logger.BuildRecord(Input{
+		RequestID: "rid-mcp-1",
+		Kind:      "mcp",
+		Protocol:  "mcp",
+		Method:    "tools/call",
+		Path:      "/mcp/exa",
+		Tool:      "search_videos",
+		Status:    200,
+	})
+	if rec.Tool != "search_videos" {
+		t.Fatalf("Tool = %q", rec.Tool)
+	}
+	line := string(appendRecordLine(nil, rec))
+	if needle := `"path":"/mcp/exa","tool":"search_videos"`; !strings.Contains(line, needle) {
+		t.Fatalf("tool must ride right after path, got line %s", line)
+	}
+	var decoded Record
+	if err := json.Unmarshal([]byte(line), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Tool != "search_videos" {
+		t.Fatalf("decoded Tool = %q (line: %s)", decoded.Tool, line)
+	}
+	if s := Summarize(*rec); s.Tool != "search_videos" {
+		t.Fatalf("Summarize Tool = %q, want search_videos", s.Tool)
+	}
+	// Back-compat: records without a tool (LLM traffic, protocol exchanges,
+	// pre-field history) carry no tool member at all.
+	plain := logger.BuildRecord(Input{RequestID: "rid-1", Protocol: "anthropic"})
+	if bytes.Contains(appendRecordLine(nil, plain), []byte(`"tool"`)) {
+		t.Fatal("tool leaked into a record without one")
+	}
+}

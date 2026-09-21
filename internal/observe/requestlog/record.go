@@ -16,12 +16,17 @@ type Record struct {
 	// Kind separates traffic classes sharing the log: empty = LLM forward
 	// traffic (the historical default, kept empty for back-compat), "mcp" =
 	// MCP gateway exchanges (/mcp/<name>).
-	Kind          string `json:"kind,omitempty"`
-	RequestID     string `json:"request_id"`
-	SessionID     string `json:"session_id"`
-	Protocol      string `json:"protocol"`
-	Method        string `json:"method"`
-	Path          string `json:"path"`
+	Kind      string `json:"kind,omitempty"`
+	RequestID string `json:"request_id"`
+	SessionID string `json:"session_id"`
+	Protocol  string `json:"protocol"`
+	Method    string `json:"method"`
+	Path      string `json:"path"`
+	// Tool is the client-facing tool name of an MCP tools/call exchange
+	// (the JSON-RPC params.name; route rows carry the canonical route name,
+	// not the backend's rewritten one). Empty for every other method and on
+	// records written before the field existed.
+	Tool          string `json:"tool,omitempty"`
 	CalledModel   string `json:"called_model"`
 	UpstreamModel string `json:"upstream_model"`
 	Exposed       string `json:"exposed"`
@@ -69,6 +74,7 @@ type Input struct {
 	Protocol          string
 	Method            string
 	Path              string
+	Tool              string
 	CalledModel       string
 	UpstreamModel     string
 	Exposed           string
@@ -113,6 +119,7 @@ func (l *Logger) BuildRecord(in Input) *Record {
 		Protocol:        in.Protocol,
 		Method:          in.Method,
 		Path:            in.Path,
+		Tool:            in.Tool,
 		CalledModel:     in.CalledModel,
 		UpstreamModel:   in.UpstreamModel,
 		Exposed:         in.Exposed,
@@ -185,6 +192,10 @@ func appendRecordLine(dst []byte, rec *Record) []byte {
 	dst = appendJSONString(dst, rec.Method)
 	dst = append(dst, `,"path":`...)
 	dst = appendJSONString(dst, rec.Path)
+	if rec.Tool != "" {
+		dst = append(dst, `,"tool":`...)
+		dst = appendJSONString(dst, rec.Tool)
+	}
 	dst = append(dst, `,"called_model":`...)
 	dst = appendJSONString(dst, rec.CalledModel)
 	dst = append(dst, `,"upstream_model":`...)

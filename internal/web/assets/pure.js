@@ -1724,6 +1724,10 @@ export function mergeLiveAndPersistedRow(live, persisted) {
   // Fill from persisted only when live still lacks the value.
   if (!base.agent && persisted.agent) base.agent = persisted.agent;
   if (!base.model && persisted.model) base.model = persisted.model;
+  // Tool (MCP): live wins when the end event carried it (start events never
+  // do — the body is parsed later), persisted backfills otherwise.
+  if (live.tool) base.tool = live.tool;
+  if (!base.tool && persisted.tool) base.tool = persisted.tool;
   return base;
 }
 
@@ -2781,13 +2785,15 @@ export function sessionTimeline(rows, opts) {
 export function requestTableHeadHTML(opts) {
   const mcp = !!(opts && opts.mcp);
   if (mcp) {
-    // The MCP table speaks the MCP domain with its own 7-column geometry:
+    // The MCP table speaks the MCP domain with its own 8-column geometry:
     // Model→Server (exposed = server name), Provider→Account (pool virtual
-    // id), no token column (MCP exchanges carry no usage — session lookup
-    // is the analysis axis, not tokens). Shares still pin every column
+    // id), a Tool column right of Server (the tools/call name — the call
+    // being made; `—` on protocol traffic like initialize/tools/list) and
+    // no token column (MCP exchanges carry no usage — session lookup is
+    // the analysis axis, not tokens). Shares still pin every column
     // (fixed layout) and sum to 100.
-    return `<colgroup><col style="width:13%"/><col style="width:11%"/><col style="width:19%"/><col style="width:8%"/><col style="width:17%"/><col style="width:22%"/><col style="width:10%"/></colgroup>` +
-      `<thead><tr><th>Time</th><th>Agent</th><th>Session</th><th>Status</th><th>Server</th><th>Account</th><th class="num">ms</th></tr></thead>`;
+    return `<colgroup><col style="width:11%"/><col style="width:9%"/><col style="width:14%"/><col style="width:7%"/><col style="width:13%"/><col style="width:21%"/><col style="width:15%"/><col style="width:10%"/></colgroup>` +
+      `<thead><tr><th>Time</th><th>Agent</th><th>Session</th><th>Status</th><th>Server</th><th>Tool</th><th>Account</th><th class="num">ms</th></tr></thead>`;
   }
   // The colgroup pins the column geometry for ALL THREE request tables
   // (Requests / Live ring / Live session view — table-layout: fixed in
@@ -2885,7 +2891,12 @@ export function requestMetaHTML(r, rel) {
   };
   const when = [esc(r && r.ts)].concat((rel || []).map((x) => esc(x))).filter(Boolean).join(' · ');
   g('when', when);
-  if (r && r.method) g('call', `${esc(r.method)} <span class="req-meta-dim">${esc(r.path || '')}</span> · attempt ${Number(r.attempt) || 0}`);
+  if (r && r.method) {
+    // MCP tools/call records carry the tool name right beside the method —
+    // the detail's answer to the table's Tool column.
+    const tool = r.tool ? ` · ${esc(r.tool)}` : '';
+    g('call', `${esc(r.method)}${tool} <span class="req-meta-dim">${esc(r.path || '')}</span> · attempt ${Number(r.attempt) || 0}`);
+  }
   if (r) {
     let result = statusBadgeHTML(r.status);
     if (Number.isFinite(Number(r.latency_ms)) && r.status != null) {
@@ -3003,6 +3014,13 @@ export function requestRowHTML(row, opts) {
   const sess = r.session
     ? `<td class="mono${dim} session-link" data-session="${esc(r.session)}" title="${esc(r.session)} — view this session">${esc(shortSessionId(r.session))}</td>`
     : `<td class="mono${dim}">—</td>`;
+  // The MCP Tool cell (right of Server) names the tools/call tool —
+  // ellipsized like the model cell, full name on the title. Protocol
+  // traffic (initialize/tools/list/ping) and pre-tool records read `—`;
+  // in-flight rows pend (`…`) until the end event carries the name.
+  const toolCell = o.mcp
+    ? `<td class="cell-model${dim}" title="${esc(r.tool || '')}">${r.inFlight ? '…' : esc(r.tool || '—')}</td>`
+    : '';
   const t = o.fmtTime ? o.fmtTime(r.ts) : String(r.ts != null ? r.ts : '');
   return `<tr class="${esc(o.rowClass || '')}" data-id="${esc(r.requestId)}"${o.liveKey ? ` data-live-key="${esc(r.requestId)}"` : ''}>
     <td class="mono${dim}">${esc(t)}</td>
@@ -3010,6 +3028,7 @@ export function requestRowHTML(row, opts) {
     ${sess}
     <td class="st">${statusBadgeHTML(r.inFlight ? null : r.status, r.inFlight)}</td>
     <td class="cell-model" title="${esc(r.model || '')}">${esc(r.model || '—')}${o.modelNote || ''}${guardMarksHTML(r.guardMarks)}</td>
+    ${toolCell}
     <td class="mono${dim}">${esc(r.inFlight ? '…' : (r.provider || '—'))}${r.shadow ? ' <span class="badge muted">shadow</span>' : ''}</td>
     <td class="num${slow ? ' warn' : ''}">${lat}</td>
     ${o.mcp ? '' : `<td class="num"${tkTitle ? ` title="${esc(tkTitle)}"` : ''}>${tk}</td>`}

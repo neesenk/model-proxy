@@ -3810,6 +3810,7 @@ function persistedSummaryRow(rec) {
     session: rec.session_id,
     agent: rec.agent || '',
     model: rec.exposed || rec.upstream_model || rec.called_model || '',
+    tool: rec.tool || '',
     provider: rec.provider || '',
     status: rec.status || 0,
     responseSize: rec.response_size != null ? rec.response_size : 0,
@@ -3848,7 +3849,7 @@ function liveSessionRows() {
     const persisted = byId.get(r.requestId);
     byId.set(r.requestId, mergeLiveAndPersistedRow(r, persisted || {
       requestId: r.requestId, ts: r.ts, session: r.session,
-      agent: '', model: '', provider: '', status: 0, latencyMs: null,
+      agent: '', model: '', tool: '', provider: '', status: 0, latencyMs: null,
       input: 0, output: 0, cacheRead: 0, cacheCreation: 0,
       turnKey: '', inFlight: false, guardHits: [],
       progressText: '', progressBytes: 0,
@@ -4216,8 +4217,8 @@ function renderLiveSessionPanel() {
   const viewState = captureLiveViewState(panel);
   hideTlTip();
   // The session view + table head speak the page's domain (its table/
-  // sessionView opts): the MCP page renders the 7-column Server/Account
-  // geometry and server/account chips — the LLM head over MCP rows
+  // sessionView opts): the MCP page renders the 8-column Server/Tool/
+  // Account geometry and server/account chips — the LLM head over MCP rows
   // misaligns columns and reads as the Model view.
   const body = rows.length
     ? `<table class="table">${requestTableHeadHTML(activeRequestsPage().table)}<tbody>${rows.map((r) => liveSummaryRowHTML(r, liveDetailPopId === r.requestId)).join('')}</tbody></table>`
@@ -4294,12 +4295,14 @@ function applyLiveEvent(e) {
     if (kept) {
       if (!kept.session && e.session_id) kept.session = e.session_id;
       if (e.agent && e.agent !== 'unknown' && (!kept.agent || kept.agent === 'unknown')) kept.agent = e.agent;
+      if (!kept.tool && e.tool) kept.tool = e.tool;
       return;
     }
     liveByReq[e.request_id] = {
       requestId: e.request_id,
       proto: e.protocol || '',
       ts: e.ts, session: e.session_id || '', agent: e.agent, model: e.exposed || '—',
+      tool: e.tool || '',
       provider: '', status: 0, latencyMs: null, input: 0, output: 0,
       cacheRead: 0, cacheCreation: 0,
       inFlight: true, guardHits: popPendingGuards(e.request_id),
@@ -4315,9 +4318,11 @@ function applyLiveEvent(e) {
     row.ts = e.ts;
     if (!row.session && e.session_id) row.session = e.session_id;
     // MCP end events carry the resolved attribution (clientInfo label /
-    // session binding) that the start event could not know yet.
+    // session binding) that the start event could not know yet — and the
+    // tools/call tool name (parsed from the body after the start fired).
     if (e.agent && e.agent !== 'unknown') row.agent = e.agent;
     if (e.session_id && !row.session) row.session = e.session_id;
+    if (e.tool) row.tool = e.tool;
     row.provider = e.provider || '—';
     row.status = e.status || 0;
     row.latencyMs = e.latency_ms;
@@ -4387,6 +4392,7 @@ function synthLiveRow(e) {
     requestId: e.request_id,
     proto: e.protocol || '',
     ts: e.ts, session: e.session_id || '', agent: e.agent, model: e.exposed || '—',
+    tool: e.tool || '',
     provider: '', status: 0, latencyMs: null, input: 0, output: 0,
     cacheRead: 0, cacheCreation: 0,
     inFlight: false, guardHits: popPendingGuards(e.request_id),

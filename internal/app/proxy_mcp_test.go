@@ -625,6 +625,11 @@ func TestMCPGateway_RequestLogKind(t *testing.T) {
 			t.Errorf("request log missing %s\n%s", want, content)
 		}
 	}
+	// The tools/call record carries the tool name; the initialize record
+	// carries none (protocol traffic has no tool).
+	if !strings.Contains(content, `"tool":"search"`) {
+		t.Errorf("request log missing the tools/call tool name\n%s", content)
+	}
 	if !strings.Contains(content, `"provider":"zhipu"`) {
 		t.Errorf("request log missing account projection\n%s", content)
 	}
@@ -1137,6 +1142,60 @@ func TestMCPGateway_LiveEvents(t *testing.T) {
 	// Stable pairing: same request_id on start and end.
 	if !strings.HasPrefix(starts[0], ends[0]+":") {
 		t.Fatalf("start/end request_id mismatch: %v vs %v", starts, ends)
+	}
+}
+
+// TestMCPGateway_LiveEndCarriesTool: the live end event of a tools/call
+// exchange carries the client-facing tool name (the Live MCP table's Tool
+// column); protocol exchanges (initialize) carry none.
+func TestMCPGateway_LiveEndCarriesTool(t *testing.T) {
+	up := &fakeMCPUpstream{sessionID: "up-1"}
+	upSrv := httptest.NewServer(http.HandlerFunc(up.serve))
+	t.Cleanup(upSrv.Close)
+
+	t.Setenv("HOME", t.TempDir())
+	writeMCPKeys(t, "zhipu", "k-A")
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:0",
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "http://127.0.0.1:1", Models: []string{"m"}},
+		},
+		MCP: map[string]configdomain.MCPServer{"zs": {Provider: "zhipu", URL: upSrv.URL}},
+	}
+	p := newTestProxy(t, cfg)
+	srv := httptest.NewServer(http.HandlerFunc(p.Handler))
+	t.Cleanup(srv.Close)
+
+	resp := mcpPost(t, srv.URL+"/mcp/zs", "", mcpInitBody)
+	localSID := resp.Header.Get("Mcp-Session-Id")
+	resp.Body.Close()
+	mcpPost(t, srv.URL+"/mcp/zs", localSID, mcpCallBody).Body.Close()
+
+	// The end publishes after the handler returns (identity threading
+	// defers it) — poll instead of snapshotting once. Two exchanges landed,
+	// so exactly one end (the tools/call) must carry the tool name and the
+	// other (initialize) none.
+	deadline := time.Now().Add(2 * time.Second)
+	var tools, empties int
+	for time.Now().Before(deadline) {
+		tools, empties = 0, 0
+		for _, e := range p.events.Snapshot() {
+			if e.Protocol != "mcp" || e.Type != "end" {
+				continue
+			}
+			if e.Tool == "search" {
+				tools++
+			} else if e.Tool == "" {
+				empties++
+			}
+		}
+		if tools >= 1 && empties >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if tools != 1 || empties != 1 {
+		t.Fatalf("end events: tools/call-with-tool=%d, without=%d (want 1/1)", tools, empties)
 	}
 }
 

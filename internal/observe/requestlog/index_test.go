@@ -756,6 +756,44 @@ func TestIndexConcurrentReconcileAndQueries(t *testing.T) {
 
 // TestIndexSummariesPreserveTurnKey verifies that the derived index stores the
 // turn_key column and that the UsageOnly summary projection carries it through.
+func TestIndexSummariesPreserveTool(t *testing.T) {
+	dir := t.TempDir()
+	records := []Record{
+		{Ts: "2026-09-16T10:00:00Z", RequestID: "r-tool", SessionID: "s", Provider: "p", Status: 200, Kind: "mcp", Tool: "search_videos"},
+		{Ts: "2026-09-16T10:01:00Z", RequestID: "r-none", SessionID: "s", Provider: "p", Status: 200, Kind: "mcp"},
+	}
+	writeRecordFile(t, dir, "requests-20260916.log", records)
+	indexer := newTestIndexer(t, dir)
+	mustReconcile(t, indexer)
+
+	summaries, _, err := indexer.SummariesWithFacets(Filter{Limit: 100, UsageOnly: true, Kind: "mcp"})
+	if err != nil {
+		t.Fatalf("SummariesWithFacets: %v", err)
+	}
+	if len(summaries) != 2 {
+		t.Fatalf("got %d summaries, want 2", len(summaries))
+	}
+	byID := map[string]Summary{}
+	for _, s := range summaries {
+		byID[s.RequestID] = s
+	}
+	if byID["r-tool"].Tool != "search_videos" {
+		t.Fatalf("r-tool Tool = %q, want search_videos", byID["r-tool"].Tool)
+	}
+	if byID["r-none"].Tool != "" {
+		t.Fatalf("r-none Tool = %q, want empty", byID["r-none"].Tool)
+	}
+
+	// The scan path must agree with the index path.
+	want, _, err := QuerySummariesWithFacetsIn(dir, filePrefix, Filter{Limit: 100, UsageOnly: true, Kind: "mcp"})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if !reflect.DeepEqual(summaries, want) {
+		t.Fatalf("index/scan summaries differ:\nindex: %+v\nscan:  %+v", summaries, want)
+	}
+}
+
 func TestIndexSummariesPreserveTurnKey(t *testing.T) {
 	dir := t.TempDir()
 	records := []Record{

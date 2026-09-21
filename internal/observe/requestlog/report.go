@@ -34,11 +34,15 @@ type Summary struct {
 	// Kind is the traffic class discriminator: "" = LLM forward traffic,
 	// "mcp" = MCP gateway exchange. Omitted from JSON for LLM rows
 	// (back-compat with pre-kind consumers).
-	Kind          string `json:"kind,omitempty"`
-	SessionID     string `json:"session_id"`
-	Protocol      string `json:"protocol"`
-	Method        string `json:"method"`
-	Path          string `json:"path"`
+	Kind      string `json:"kind,omitempty"`
+	SessionID string `json:"session_id"`
+	Protocol  string `json:"protocol"`
+	Method    string `json:"method"`
+	Path      string `json:"path"`
+	// Tool is the MCP tools/call tool name (client-facing); empty on LLM
+	// rows, non-call MCP methods and records written before the field
+	// existed.
+	Tool          string `json:"tool,omitempty"`
 	Exposed       string `json:"exposed"`
 	CalledModel   string `json:"called_model"`
 	UpstreamModel string `json:"upstream_model"`
@@ -69,7 +73,7 @@ type Summary struct {
 func Summarize(record Record) Summary {
 	return Summary{
 		Ts: record.Ts, RequestID: record.RequestID, Kind: record.Kind, SessionID: record.SessionID,
-		Protocol: record.Protocol, Method: record.Method, Path: record.Path,
+		Protocol: record.Protocol, Method: record.Method, Path: record.Path, Tool: record.Tool,
 		Exposed: record.Exposed, CalledModel: record.CalledModel,
 		UpstreamModel: record.UpstreamModel, Provider: record.Provider,
 		Agent: record.Agent, Attempt: record.Attempt, Status: record.Status, LatencyMs: record.LatencyMs,

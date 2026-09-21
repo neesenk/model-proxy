@@ -175,7 +175,9 @@ func (x *Indexer) migrate() error {
 // ensureColumns adds late index columns additively (PRAGMA table_info
 // guarded ALTER — the stats ensureColumns pattern; never change a column's
 // meaning in place). ttft_ms joined after latency_ms existed; rows written
-// before it keep 0 = unknown.
+// before it keep 0 = unknown. Same for turn_key, kind and tool (the MCP
+// tools/call name): pre-existing indexed rows keep the empty default until
+// the index is rebuilt from the JSONL files.
 func (x *Indexer) ensureColumns() error {
 	rows, err := x.db.Query(`PRAGMA table_info(records)`)
 	if err != nil {
@@ -185,6 +187,7 @@ func (x *Indexer) ensureColumns() error {
 	hasTTFT := false
 	hasTurnKey := false
 	hasKind := false
+	hasTool := false
 	for rows.Next() {
 		var cid, notnull, pk int
 		var name, ctype string
@@ -199,6 +202,8 @@ func (x *Indexer) ensureColumns() error {
 			hasTurnKey = true
 		case "kind":
 			hasKind = true
+		case "tool":
+			hasTool = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -216,6 +221,11 @@ func (x *Indexer) ensureColumns() error {
 	}
 	if !hasKind {
 		if _, err := x.db.Exec(`ALTER TABLE records ADD COLUMN kind TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if !hasTool {
+		if _, err := x.db.Exec(`ALTER TABLE records ADD COLUMN tool TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
 	}
@@ -504,11 +514,11 @@ func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int6
 	}
 	defer func() { _ = tx.Rollback() }()
 	stmt, err := tx.Prepare(`INSERT INTO records
-		(request_id, ts, ts_ms, session_id, agent, protocol, method, path,
+		(request_id, ts, ts_ms, session_id, agent, protocol, method, path, tool,
 		 called_model, upstream_model, exposed, provider, attempt, status,
 		 latency_ms, ttft_ms, request_size, response_size, turn_key, kind, shadow,
 		 input, output, cache_read, cache_creation, file, "offset", length)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -520,7 +530,7 @@ func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int6
 		}
 		if _, err := stmt.Exec(
 			row.record.RequestID, row.record.Ts, row.tsMs, row.record.SessionID,
-			row.record.Agent, row.record.Protocol, row.record.Method, row.record.Path,
+			row.record.Agent, row.record.Protocol, row.record.Method, row.record.Path, row.record.Tool,
 			row.record.CalledModel, row.record.UpstreamModel, row.record.Exposed,
 			row.record.Provider, row.record.Attempt, row.record.Status,
 			row.record.LatencyMs, row.record.TTFTMs, row.record.RequestSize, row.record.ResponseSize,
@@ -617,7 +627,7 @@ func filterSQL(filter Filter) (string, []any) {
 // termination; the index answers over the whole retained set).
 func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) {
 	where, args := filterSQL(filter)
-	query := `SELECT ts, request_id, session_id, protocol, method, path, exposed,
+	query := `SELECT ts, request_id, session_id, protocol, method, path, tool, exposed,
 		called_model, upstream_model, provider, agent, attempt, status, latency_ms, ttft_ms,
 		request_size, response_size, turn_key, kind, input, output, cache_read, cache_creation, shadow
 		FROM records` + where + ` ORDER BY ts DESC, rowid DESC`
@@ -637,7 +647,7 @@ func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) 
 		)
 		if err := rows.Scan(
 			&summary.Ts, &summary.RequestID, &summary.SessionID, &summary.Protocol,
-			&summary.Method, &summary.Path, &summary.Exposed, &summary.CalledModel,
+			&summary.Method, &summary.Path, &summary.Tool, &summary.Exposed, &summary.CalledModel,
 			&summary.UpstreamModel, &summary.Provider, &summary.Agent, &summary.Attempt,
 			&summary.Status, &summary.LatencyMs, &summary.TTFTMs, &summary.RequestSize, &summary.ResponseSize,
 			&summary.TurnKey, &summary.Kind, &summary.Input, &summary.Output, &summary.CacheRead, &summary.CacheCreation,

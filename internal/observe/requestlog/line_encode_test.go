@@ -58,6 +58,11 @@ func TestAppendRecordLineMatchesJSONMarshal(t *testing.T) {
 	records = append(records, &Record{
 		Ts: "2026-08-16T10:00:00Z", RequestID: "rid-turn", SessionID: "s", TurnKey: "0123456789abcdef",
 	})
+	// Tool (MCP tools/call name) is written right after path when present.
+	records = append(records, &Record{
+		Ts: "2026-08-16T10:00:00Z", RequestID: "rid-tool", SessionID: "s", Kind: "mcp",
+		Method: "tools/call", Path: "/mcp/exa", Tool: tricky[2],
+	})
 	for i, rec := range records {
 		want, err := json.Marshal(rec)
 		if err != nil {
