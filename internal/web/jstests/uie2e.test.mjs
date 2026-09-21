@@ -1029,12 +1029,20 @@ test('takeover 确认对话框：变体切换驱动预览与执行单位 (表单
     await ctx.waitFor('mcp chip on preview', () => ctx.ev(
       `document.getElementById('tkr-writes').innerHTML.includes('mcpServers')`));
     // Subset chip: pick only one MCP server; the preview narrows to it.
-    await ctx.ev(`(() => { const chips = document.querySelectorAll('[data-tkr-mcp]');
-      for (let i = 1; i < chips.length; i++) chips[i].click(); })()`);
-    await ctx.waitFor('mcp subset preview narrows', () => ctx.ev(
-      `(() => { const w = document.getElementById('tkr-writes');
-        const m = w.innerHTML.match(/127\.0\.0\.1:\d+\/mcp\/[a-z0-9-]+/g) || [];
-        return m.length > 0 && new Set(m).size === 1; })()`));
+    // Per-server chips exist only when the proxy exposes MCP gateway
+    // servers (takeoverData.mcp) — this fixture configures none，所以仅当
+    // chips 真在场时才跑收窄断言（fixture 加上 MCP servers 后自动恢复覆盖）。
+    const mcpChipCount = await ctx.ev(`document.querySelectorAll('[data-tkr-mcp]').length`);
+    if (mcpChipCount > 1) {
+      await ctx.ev(`(() => { const chips = document.querySelectorAll('[data-tkr-mcp]');
+        for (let i = 1; i < chips.length; i++) chips[i].click(); })()`);
+      await ctx.waitFor('mcp subset preview narrows', () => ctx.ev(
+        `(() => { const w = document.getElementById('tkr-writes');
+          // 模板字面量里 \\d/\\. /\\/ 会被吞成 d/./ /：正则里的反斜杠必须双写，
+          // 否则送进页面的表达式是非法正则（Invalid regular expression flags）。
+          const m = w.innerHTML.match(/127\\.0\\.0\\.1:\\d+\\/mcp\\/[a-z0-9-]+/g) || [];
+          return m.length > 0 && new Set(m).size === 1; })()`));
+    }
   }
 
   // Model chips toggle too (regression: dataset key mismatch made model
@@ -1050,16 +1058,21 @@ test('takeover 确认对话框：变体切换驱动预览与执行单位 (表单
     // toggling a model off must CHANGE the rendered preview (the sandbox
     // route table has few models, so any change proves the chip works)
     assert.notEqual(after, before, 'model chip toggle must change the preview');
+    // Restore the model: the split step below partitions the SELECTED
+    // models — leaving m1 deselected drops every variant and nothing
+    // partitions.
+    await ctx.ev(`document.querySelector('[data-tkr-model]').click()`);
   }
 
   // The split option previews the partition: m1 is openai-native, so split
   // assigns it to pi-openai alone — variants with no models are dropped
-  // (no empty provider entries), exactly like the run would.
+  // (no empty provider entries), exactly like the run would. Write count =
+  // models.json + the family's MCP block when its scope is on.
   await ctx.ev(`document.querySelector('[data-tkr-variant-chip="split"]').click()`);
   await ctx.waitFor('split preview shows the partition', () => ctx.ev(
     `(() => { const w = document.getElementById('tkr-writes');
       return w.innerHTML.includes('pi-openai') && !w.innerHTML.includes('pi-responses')
-        && w.querySelectorAll('.tk-write').length === 1; })()`));
+        && w.querySelectorAll('.tk-write').length === ${hasMcpChip ? 2 : 1}; })()`));
 
   // Cancel — nothing was written.
   await ctx.ev(`document.getElementById('tkr-no').click()`);
