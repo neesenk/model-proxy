@@ -129,7 +129,7 @@ node sweep.mjs --scenarios ping,tool,memory,thinking --thinking off,high
 
 每个场景注入随机 `test-ref` nonce 撞开代理响应 cache,保证真实打到上游转换链路。模型不支持 thinking/vision 时对应场景会 FAIL —— 按需用 `--with-thinking`/`--with-vision` 开启,并用 `--force-provider <P>`(代理 `x-mp-force-provider` 头)把流量钉到具备能力的后端。
 
-> 环境提示:若路由的 model_map 把某协议的模型别名改写到不支持图片的上游(如本仓 config 把 anthropic 协议的 claude-haiku-4-5 映射为 deepseek-v4-flash),该协议的 vision 场景会拿到上游 400 `Model do not support image input` —— 这是配置事实,不是转换缺陷;换协议或钉到多模态后端再验。
+> 环境提示:若显式路由或 provider alias 把某协议的模型改写到不支持图片的上游,该协议的 vision 场景会拿到上游 400 `Model do not support image input` —— 这是配置事实,不是转换缺陷;换协议或钉到多模态后端再验。
 
 ## 注意
 

@@ -2,16 +2,18 @@
 """model-proxy 直接调用 demo（流式渐进输出，支持 Anthropic + codex 协议）。
 
 前置：
-  1. 已登录（model-proxy login 或 --import），或 config 配了 static_key
+  1. 已登录（model-proxy login；API key 类也可 --from-env 导入）
   2. 代理在跑：model-proxy serve --config config.yaml
-  3. 用 codex 协议 + gpt-5.5：先 model-proxy login codex（拿独立 OAuth token）
+  3. 用 codex 协议 + codex 模型（gpt-5.6-*）：先 model-proxy login codex（拿独立 OAuth token）
 
 代理监听 http://127.0.0.1:15722（本仓库 config.yaml 的 listen；`--port` 可改），按 URL 路径前缀路由：
-  --protocol anthropic  → POST /v1/messages   (claude 路由 → aqp 网关, AQP key)
-  --protocol codex      → POST /v1/responses  (codex 路由 → 按 model 分流:
-                          gpt-5.5 → chatgpt.com + codex OAuth; 其他 → aqp 网关)
+  --protocol anthropic  → POST /v1/messages
+  --protocol codex      → POST /v1/responses
+模型名按 config 的路由解析：显式 routes 覆盖优先，否则按 provider models 自动
+推导（本仓 config 显式覆盖了 deepseek-v4-pro/flash，其余模型走推导路由）。
 
-代理用真实凭据替换占位 token，按 config model_map 改写 model 字段。
+代理用真实凭据替换占位 token；路由目标/alias 改写 model 字段（响应里的 model
+归一回调用名）。
 
 输出顺序：
   1. 渐进打印 thinking（灰色）和 text（正常）—— 边收边打
@@ -154,7 +156,8 @@ def main():
     ap = argparse.ArgumentParser(description="model-proxy 流式 demo")
     ap.add_argument("prompt", nargs="?", default="reply with exactly: pong")
     ap.add_argument("model", nargs="?", default=None,
-                    help="模型别名或真实名（默认：anthropic→claude-haiku-4-5, codex→gpt-5.5）")
+                    help="模型别名或真实名（默认：anthropic→claude-sonnet-5, codex→gpt-5.6-luna；"
+                         "需是 config 暴露的路由名）")
     ap.add_argument("--protocol", choices=["anthropic", "codex"], default="anthropic",
                     help="协议：anthropic(/v1/messages) 或 codex(/v1/responses)。默认 anthropic")
     ap.add_argument("--max-tokens", type=int, default=1024,
@@ -168,7 +171,7 @@ def main():
     args = ap.parse_args()
 
     if args.model is None:
-        args.model = "gpt-5.5" if args.protocol == "codex" else "claude-haiku-4-5"
+        args.model = "gpt-5.6-luna" if args.protocol == "codex" else "claude-sonnet-5"
 
     base = f"http://{args.host}:{args.port}"
     path = "/v1/responses" if args.protocol == "codex" else "/v1/messages"
