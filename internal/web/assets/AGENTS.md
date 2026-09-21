@@ -24,6 +24,7 @@
 | KPI 瓦片 | `.kpi-grid`/`.kpi` | Dashboard / Analytics / Security |
 | 数据表 | `.table`（sticky th 用 `--sticky-top`） | 全部列表 |
 | 请求表（三表一份） | pure.js `requestTableHeadHTML`+`requestRowHTML` | Requests / Live 环 / Live 会话 |
+| 表格溢出 tooltip | app.js `reqTableCellTip`（仅真实截断时动态 `title`，`data-tip-dyn` 标记区分渲染器 title；三表单行省略样式在 styles.css 请求表区段，status 单元除外——badge 芯片不省略） | jstests/uie2e.test.mjs（长 agent 悬停出全文，renderer title 不被覆盖，status 芯片无 “200…” 假截断） |
 | 请求详情 | app.js `detailRecordsHTML`（`requestMetaHTML`/`guardMarksDetailHTML`/`chatViewHTML`） | 行内展开 / Live 弹层 |
 | guard 徽标 | pure.js `guardMarksHTML` | 请求表 model 单元 |
 | 会话视图 | app.js `sessionViewHTML`+`wireSessionTimeline`，pure.js `sessionHealthSummary` | Live 会话 / Requests 汇总 |

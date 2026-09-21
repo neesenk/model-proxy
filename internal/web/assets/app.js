@@ -1757,6 +1757,42 @@ async function loadRequests(combos) {
   reqFrame(v);
 }
 
+// ---------- request-table overflow tooltips ----------
+//
+// The request tables' summary cells are single-line ellipsis cells
+// (styles.css: the #req-table/#live-table/#live-session-panel geometry). A
+// cell whose content was clipped surfaces its full text as the native title
+// tooltip on hover. Truncation is a LAYOUT outcome — unknowable when the row
+// HTML is built (the Requests table virtualizes rows in and out of the DOM,
+// the Live tables re-render on every SSE event, and column widths track the
+// window) — so the title is set here on mouseover and re-evaluated on every
+// hover: a cell that fits again after a resize drops its tooltip the next
+// time it is hovered. Renderer-owned titles (session link, model/server/tool
+// name, token breakdown, guard badges) are never touched — the data-tip-dyn
+// marker distinguishes dynamic tips from theirs.
+function reqTableCellTip(e) {
+  const tgt = e.target;
+  const td = tgt && tgt.closest ? tgt.closest('td') : null;
+  if (!td || !td.closest('#req-table, #live-table, #live-session-panel')) return;
+  const tr = td.closest('tr');
+  if (!tr || tr.classList.contains('req-detail-row') || tr.classList.contains('req-spacer')) return;
+  // Status chips are exempt from the single-line treatment (styles.css): a
+  // fully-visible "200" badge grazing the column edge reports phantom
+  // overflow here (scrollWidth counts visible bleed too) — never grow a
+  // tooltip for it.
+  if (td.classList.contains('st')) return;
+  if (td.dataset.tipDyn) { // drop a stale dynamic tip before re-evaluating
+    td.removeAttribute('title');
+    delete td.dataset.tipDyn;
+  }
+  if (td.title || td.scrollWidth - td.clientWidth < 1) return;
+  const text = (td.textContent || '').replace(/\s+/g, ' ').trim();
+  if (!text) return;
+  td.title = text;
+  td.dataset.tipDyn = '1';
+}
+document.addEventListener('mouseover', reqTableCellTip);
+
 // ---------- Requests table virtual scrolling ----------
 //
 // The Requests table keeps only the rows near the viewport in the DOM:

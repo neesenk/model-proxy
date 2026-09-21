@@ -391,13 +391,29 @@ main {
    requestTableHeadHTML): the Requests table virtualizes its rows and the
    Live tables re-render on every SSE event, so auto layout would re-derive
    column widths from whichever rows happen to be mounted — the columns
-   visibly jitter while scrolling. Fixed layout keeps every window identical;
-   unbreakable mono overflow wraps inside its column instead of stretching
-   it (anywhere only bites when a token genuinely does not fit). */
+   visibly jitter while scrolling. Fixed layout keeps every window
+   identical. */
 #req-table .table, #live-table .table, #live-session-panel .table { table-layout: fixed; }
+/* Wrapping stays available for the detail row's nested content (inline
+   expansion: meta strips, raw bodies). */
 #req-table .table td, #live-table .table td, #live-session-panel .table td { overflow-wrap: anywhere; }
-/* Model is the one nowrap column: its 10% share cannot fit long names, so
-   they ellipsize instead of wrapping (full name rides the cell's title). */
+/* Summary rows are single-line ellipsis cells: the fixed shares cannot fit
+   long agents/sessions/model names, so content that does not fit clips
+   with an ellipsis and the full text rides a hover tooltip — cells with a
+   renderer-owned title (session link, model/server/tool, token breakdown)
+   already carry it; the rest gets one on hover from app.js reqTableCellTip,
+   only when the cell is actually clipped. EXCEPT the status cell (.st): a
+   badge chip that fully shows its "200" must not grow a spurious "…" when
+   the chip box grazes the column edge — chips neither wrap nor truncate,
+   they keep their natural size. The direct-child chain keeps the rule off
+   the detail row's nested content; spacer rows carry no content. */
+#req-table > .table > tbody > tr:not(.req-detail-row):not(.req-spacer) > td:not(.st),
+#live-table > .table > tbody > tr:not(.req-detail-row):not(.req-spacer) > td:not(.st),
+#live-session-panel > .table > tbody > tr:not(.req-detail-row):not(.req-spacer) > td:not(.st) {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* .cell-model keeps its explicit single-line treatment as the semantic
+   marker of the model/server/tool cells (the full name rides the title). */
 .table td.cell-model { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .table tbody tr { transition: background-color .1s ease; }
 .table tbody tr:hover { background: color-mix(in srgb, var(--surface-2) 70%, var(--surface)); }

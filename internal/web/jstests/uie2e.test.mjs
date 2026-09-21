@@ -203,6 +203,65 @@ test('request row click expands and collapses inline detail (点击展开)', asy
   assert.deepEqual(await ctx.pageErrors(), [], 'expand/collapse must not raise JS errors');
 });
 
+test('请求表截断单元 hover 出全文 tooltip；自带 title 不被覆盖 (悬停族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // 长 UA（DetectAgent 的 uaLabel 单 token 上限 24 字符）撑爆 10% 的 Agent
+  // 列；带 x-session-id 让 session 单元携带渲染器 title（防覆盖断言用）。
+  const longAgent = 'e2e-hover-overflow-agent';
+  const session = 'e2e-hover-session-0123456789abcdef';
+  const resp = await fetch(`${ctx.baseUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'user-agent': longAgent, 'x-session-id': session },
+    body: JSON.stringify({ model: 'm1', messages: [{ role: 'user', content: 'hi' }] }),
+  });
+  assert.equal(resp.status, 200, `drive got ${resp.status}`);
+  // 请求日志异步落盘（~250ms flush 节奏）：等服务端可见后再进 UI。
+  await ctx.waitFor('long-agent record committed', async () => {
+    const j = await fetch(`${ctx.baseUrl}/api/requests?limit=50`).then((r) => r.json());
+    return (j.records || []).some((rec) => rec.agent === longAgent);
+  });
+  // 固定几何（uivisual 同款 1440×900）：headless 默认视口窄到连 Time 单元都
+  // 截断，“放得下不长 tooltip”的断言需要确定的列宽；结束后清除 override。
+  await ctx.cdp.setViewport(ctx.tab, 1440, 900);
+  try {
+    await gotoRequestsWithRows();
+    // 驱动该记录后必须刷新过一次（gotoRequestsWithRows 的落定循环已保证
+    // 新表 paint），再定位长 agent 行悬停四个单元：截断的 agent 出全文、
+    // 放得下的 time 不长 tooltip、session 的渲染器 title 原样保留、status
+    // 芯片不省略也不长 tooltip（“200…” 假截断回归）。
+    const got = await ctx.ev(`(() => {
+      const trs = [...document.querySelectorAll('#req-table tbody tr:not(.req-spacer)')];
+      const tr = trs.find((r) => r.children[1] && r.children[1].textContent.trim() === ${JSON.stringify(longAgent)});
+      if (!tr) return null;
+      const hover = (td) => td.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      const time = tr.children[0], agent = tr.children[1], sess = tr.children[2], st = tr.children[3];
+      const sessTitleBefore = sess.getAttribute('title');
+      hover(time); hover(agent); hover(sess); hover(st);
+      return {
+        clipped: agent.scrollWidth - agent.clientWidth >= 1,
+        agentTitle: agent.getAttribute('title'),
+        timeTitle: time.getAttribute('title'),
+        sessTitle: sess.getAttribute('title'),
+        sessTitleBefore,
+        // status 单元不折行也不省略：badge 芯片完整可见，不得出现 “200…” 假截断
+        stTextOverflow: getComputedStyle(st).textOverflow,
+        stTitle: st.getAttribute('title'),
+      };
+    })()`);
+    assert.ok(got, 'long-agent row must be mounted');
+    assert.equal(got.clipped, true, 'long agent must clip the 10% agent column');
+    assert.equal(got.agentTitle, longAgent, 'clipped cell reveals its full text on hover');
+    assert.equal(got.timeTitle, null, 'a fitting cell must not grow a tooltip');
+    assert.equal(got.sessTitle, got.sessTitleBefore, 'renderer-owned title must survive the hover');
+    assert.ok(got.sessTitle && got.sessTitle.includes(session), 'session cell keeps its full-id title');
+    assert.equal(got.stTextOverflow, 'clip', 'status chip must not ellipsize (no spurious “200…”)');
+    assert.equal(got.stTitle, null, 'status chip must not grow a dynamic tooltip');
+  } finally {
+    await ctx.cdp.clearViewport(ctx.tab);
+  }
+  assert.deepEqual(await ctx.pageErrors(), [], 'hover tooltips must not raise JS errors');
+});
+
 test('combobox popup opens, picks option, applies filter (浮层 + 下拉)', async (t) => {
   if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
   await driveRequest(1);
