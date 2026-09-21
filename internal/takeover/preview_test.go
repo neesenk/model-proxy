@@ -190,6 +190,64 @@ func TestPreviewWrites_SplitMergesVariantsPerFile(t *testing.T) {
 	}
 }
 
+// TestPreviewWrites_SplitFamilySharedAuxFile: a variants family sharing one
+// MCP aux file (pi's preset: every variant carries the same mcp.file)
+// reports the aux file ONCE in split mode, with every variant named — not
+// one duplicated entry per variant.
+func TestPreviewWrites_SplitFamilySharedAuxFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".pi", "agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	modelsJSON := filepath.Join(home, ".pi", "agent", "models.json")
+	if err := os.WriteFile(modelsJSON, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mcpJSON := filepath.Join(home, ".pi", "agent", "mcp.json")
+	if err := os.WriteFile(mcpJSON, []byte(`{"mcpServers":{"mine":{"url":"https://other/mcp"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Listen: "127.0.0.1:15721",
+		Providers: map[string]config.Provider{
+			"po": {Provider: "static", OpenAIBaseURL: "http://x", Models: []string{"m1"}},
+			"pa": {Provider: "static", AnthropicBaseURL: "http://y", Models: []string{"m2"}},
+		},
+		MCP: map[string]config.MCPServer{"exa": {URL: "https://mcp.exa.ai/mcp"}},
+	}
+	facts := takeover.ModelFactsFor(cfg, "pi", home, "", takeover.ModeSplit)
+
+	writes, err := takeover.PreviewWrites(cfg, "pi", "", takeover.ModeSplit, facts, false, takeover.ScopeAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aux, main *takeover.PreviewWrite
+	for i := range writes {
+		switch writes[i].File {
+		case mcpJSON:
+			if aux != nil {
+				t.Fatalf("aux file reported twice: %+v", writes)
+			}
+			aux = &writes[i]
+		case modelsJSON:
+			main = &writes[i]
+		}
+	}
+	if aux == nil || main == nil {
+		t.Fatalf("preview must cover models.json and mcp.json: %+v", writes)
+	}
+	if len(aux.Templates) != len(main.Templates) { // every resolved variant shares the block
+		t.Fatalf("aux templates = %v, main templates = %v — the aux entry must name every variant", aux.Templates, main.Templates)
+	}
+	if !strings.Contains(aux.Content, "/mcp/exa") || !strings.Contains(aux.Content, "mine") {
+		t.Errorf("aux content missing gateway entry or user server:\n%s", aux.Content)
+	}
+	if !strings.Contains(main.Content, "model-proxy-openai") {
+		t.Errorf("models.json preview missing split variants:\n%s", main.Content)
+	}
+}
+
 // TestPreviewWrites_UnknownClientErrors keeps the resolution contract: the
 // preview fails exactly where a run would.
 func TestPreviewWrites_UnknownClientErrors(t *testing.T) {

@@ -97,7 +97,11 @@ func PreviewWritesOpts(cfg *configdomain.Config, which, templatesDir string, opt
 	// precede any Rewrite call — a spec writing its real File would mutate the
 	// user's config, which is exactly what a preview must never do.
 	redirect := map[string]string{}
-	var auxReal []struct{ real, name string }
+	var auxReal []struct {
+		real string
+		w    *PreviewWrite
+	}
+	auxIndex := map[string]int{} // real aux path → auxReal index
 	redirectAux := func(real string) (string, error) {
 		if real == "" {
 			return "", nil
@@ -135,7 +139,18 @@ func PreviewWritesOpts(cfg *configdomain.Config, which, templatesDir string, opt
 	// MCP storage) are redirected the same way: a preview must never touch
 	// the real artifacts. MCP aux files are MERGE targets, so a merged-scope
 	// preview seeds the private copy from the real file first.
-	for _, sp := range specs {
+	//
+	// The MCP.File redirect is applied only AFTER the loop: a variants
+	// family shares ONE *MCPTemplate pointer (ParseTemplate copies the
+	// reference into every variant), so mutating it mid-loop would make the
+	// next variant resolve its aux as the already-redirected TEMP path and
+	// register a bogus duplicate entry under it.
+	type auxAssignment struct {
+		spec int
+		real string
+	}
+	var auxAssign []auxAssignment
+	for i, sp := range specs {
 		if sp.Template == nil {
 			continue
 		}
@@ -151,7 +166,18 @@ func PreviewWritesOpts(cfg *configdomain.Config, which, templatesDir string, opt
 			if err != nil {
 				return nil, err
 			}
-			auxReal = append(auxReal, struct{ real, name string }{aux, sp.Name})
+			// A family sharing one aux file (pi's variants in split mode all
+			// carry the same mcp.file) registers ONE report entry; later
+			// variants append their name to it instead of duplicating the file.
+			if idx, ok := auxIndex[aux]; ok {
+				auxReal[idx].w.Templates = append(auxReal[idx].w.Templates, sp.Name+" (mcp)")
+			} else {
+				auxIndex[aux] = len(auxReal)
+				auxReal = append(auxReal, struct {
+					real string
+					w    *PreviewWrite
+				}{aux, &PreviewWrite{File: aux, Templates: []string{sp.Name + " (mcp)"}, Notes: []string{}}})
+			}
 			if !managedOnly {
 				if data, err := os.ReadFile(aux); err == nil {
 					if err := os.WriteFile(dst, data, 0o600); err != nil {
@@ -161,8 +187,11 @@ func PreviewWritesOpts(cfg *configdomain.Config, which, templatesDir string, opt
 					return nil, err
 				}
 			}
-			sp.Template.MCP.File = dst
+			auxAssign = append(auxAssign, auxAssignment{spec: i, real: aux})
 		}
+	}
+	for _, a := range auxAssign {
+		specs[a.spec].Template.MCP.File = redirect[a.real]
 	}
 	// Apply the rewrites in resolution order — split variants sharing one
 	// file must merge in the same sequence RunTakeover uses.
@@ -180,8 +209,7 @@ func PreviewWritesOpts(cfg *configdomain.Config, which, templatesDir string, opt
 	// register it for the report under its REDIRECTED key (that is where the
 	// rewrite lands), carrying the REAL path for display.
 	for _, aux := range auxReal {
-		w := &PreviewWrite{File: aux.real, Templates: []string{aux.name + " (mcp)"}, Notes: []string{}}
-		byFile[redirect[aux.real]] = w
+		byFile[redirect[aux.real]] = aux.w
 		order = append(order, redirect[aux.real])
 	}
 	for _, sp := range specs {

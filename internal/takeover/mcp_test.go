@@ -92,6 +92,96 @@ func TestMCPJSONRendering(t *testing.T) {
 	}
 }
 
+// TestMCPPiAuxFileRendering: the pi preset carries a top-level shared mcp
+// block writing the gateway surface into ~/.pi/agent/mcp.json — the Pi-owned
+// global MCP file the pi-mcp-adapter extension reads (`mcpServers` entries,
+// transport inferred from `url`, no `type` field). Every variant of the
+// family shares the block, so the openai variant lands in the same aux file
+// next to its own models.json provider entry.
+func TestMCPPiAuxFileRendering(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	target := filepath.Join(home, ".pi", "agent", "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Seed with the adapter's own settings block, a user server, and a stale
+	// proxy entry from an old run (old proxy port).
+	if err := os.WriteFile(target, []byte(`{"settings":{"ancestorConfigRoots":[]},"mcpServers":{"mine":{"command":"npx","args":["-y","some-mcp"]},"exa":{"url":"http://127.0.0.1:9999/mcp/exa"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := takeover.TemplateByName("pi", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := cfgWithMCP()
+	if err := tmpl.Rewrite(cfg, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v map[string]any
+	if err := json.Unmarshal(data, &v); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := v["settings"].(map[string]any); !ok {
+		t.Fatalf("adapter settings block dropped: %s", data)
+	}
+	servers, _ := v["mcpServers"].(map[string]any)
+	for _, name := range []string{"exa", "web-search"} {
+		entry, ok := servers[name].(map[string]any)
+		if !ok {
+			t.Fatalf("mcpServers missing %q: %s", name, data)
+		}
+		if entry["url"] != "http://127.0.0.1:15721/mcp/"+name {
+			t.Fatalf("entry %q = %v", name, entry)
+		}
+		// type: http rides along for the stricter readers (pi-mcp-client
+		// validates it explicitly; pi-mcp-adapter ignores it and discriminates
+		// by url) — same shape the claude preset writes.
+		if entry["type"] != "http" {
+			t.Fatalf("entry %q must carry type=http for cross-adapter compat: %v", name, entry)
+		}
+	}
+	if _, ok := servers["zhipu-search"]; ok {
+		t.Fatalf("routed member rendered separately: %s", data)
+	}
+	mine, ok := servers["mine"].(map[string]any)
+	if !ok || mine["command"] != "npx" {
+		t.Fatalf("user stdio server dropped: %s", data)
+	}
+
+	// The openai variant shares the same aux file: rendering it merges into
+	// the same document (idempotent surface, user entries intact).
+	openai, err := takeover.TemplateByName("pi-openai", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := openai.Rewrite(cfg, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	data2, _ := os.ReadFile(target)
+	var v2 map[string]any
+	if err := json.Unmarshal(data2, &v2); err != nil {
+		t.Fatal(err)
+	}
+	servers2, _ := v2["mcpServers"].(map[string]any)
+	if len(servers2) != 3 { // exa + web-search + mine
+		t.Fatalf("variant rewrite changed the surface: %s", data2)
+	}
+
+	// Idempotent: a second pi render produces identical bytes.
+	if err := tmpl.Rewrite(cfg, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	data3, _ := os.ReadFile(target)
+	if string(data3) != string(data2) {
+		t.Fatal("second render changed the aux file")
+	}
+}
+
 // TestMCPTOMLRendering: the codex preset appends one [mcp_servers."<name>"]
 // section per gateway entry, idempotently.
 func TestMCPTOMLRendering(t *testing.T) {

@@ -71,7 +71,7 @@ models:                            # 可选:按暴露模型逐个输出元数据
   also_remove: 'models.{{model.id}}'           # 可选:写前清理旧段(如未加引号的遗留块)
 
 mcp:                               # 可选:把网关 mcp:/mcp_routes: 面写成客户端 MCP 配置
-  file: ~/.claude.json             # 可选:MCP 存于独立 JSON 文件时(claude/kimi;缺省写主文件,如 opencode/codex)——独立备份单元 <name>-mcp,与主文件格式无关(mcp 块按 JSON 语义校验/渲染)
+  file: ~/.claude.json             # 可选:MCP 存于独立 JSON 文件时(claude/kimi/pi;缺省写主文件,如 opencode/codex)——独立备份单元 <name>-mcp,与主文件格式无关(mcp 块按 JSON 语义校验/渲染)
   json_path: mcpServers            # json:对象注入点(claude 的 ~/.claude.json;opencode: mcp)
   json_entry: {type: http, url: "{{mcp.url}}"}  # 每条目值模板(占位符见下)
   toml_section: 'mcp_servers."{{mcp.name}}"'   # toml:每条目段名
@@ -95,7 +95,10 @@ mcp:                               # 可选:把网关 mcp:/mcp_routes: 面写成
 
 mcp 渲染是**合并语义**：先清理指向本代理 `/mcp/` 的陈旧条目（JSON 按 url 前缀、TOML 按
 段名前缀+正文 URL 匹配），再写入当前面；用户自有 MCP 条目保留；网关面无条目时不动客户端
-配置。env 格式不支持 mcp 块（校验拒绝）。
+配置。env 格式不支持 mcp 块（校验拒绝）。接管前不存在的独立 mcp 文件（pi 的
+`~/.pi/agent/mcp.json` 常见——只有 pi-mcp-adapter 写过设置才会存在）无备份可做，takeover
+创建它；restore 因无 `<name>-mcp.bak` 不动它（删除可能丢失客户端接管后写入的状态），
+残留的网关条目随代理下线自然失效。
 
 ## 协议感知变体选择
 
@@ -138,7 +141,7 @@ opencode 族：opencode=anthropic / opencode-openai=openai / opencode-responses=
 |---|---|---|---|
 | claude | `~/.claude/settings.json` | json | env 注入 `ANTHROPIC_BASE_URL`(bare)+ `ANTHROPIC_AUTH_TOKEN`；Claude Code 自拼 `/v1/messages`。**同一模板还接管 MCP**：`mcp.file: ~/.claude.json`（Claude Code 的 user-scope MCP 存在与主配置不同的文件）——一次 takeover 同时落两个文件，各自独立备份单元（`claude.bak` / `claude-mcp.bak`），restore 一并恢复 |
 | opencode(单文档 3 变体) | `~/.config/opencode/opencode.json` | json | 变体 = 协议档位:`@ai-sdk/anthropic`(自拼 `/messages`)/ `@ai-sdk/openai-compatible`(Chat Completions,provider_id `model-proxy-openai`)/ `@ai-sdk/openai`(Responses,provider_id `model-proxy-responses`),base_url 均 /v1 + 全量模型(opencode 形状)+ 顶层共享 mcp 块 |
-| pi(单文档 3 变体) | `~/.pi/agent/models.json` | json | 变体 = 协议档位:`anthropic-messages`(base_url 裸,pi 自拼 `/v1/messages`)/ `openai-completions` / `openai-responses`(base_url 带 /v1,独立 provider_id)+ 全量模型(pi 形状) |
+| pi(单文档 3 变体) | `~/.pi/agent/models.json` | json | 变体 = 协议档位:`anthropic-messages`(base_url 裸,pi 自拼 `/v1/messages`)/ `openai-completions` / `openai-responses`(base_url 带 /v1,独立 provider_id)+ 全量模型(pi 形状)。**同一模板还接管 MCP**:`mcp.file: ~/.pi/agent/mcp.json`(pi 核心无内建 MCP,靠扩展读该 Pi 全局文件;条目 `{type: http, url}` ——主流 pi-mcp-adapter 忽略 type 按 url 判别、pi-mcp-client 显式校验 type;勿用 `transport` 字段:严格实现会拒绝未知字段整文件报错)——顶层共享 mcp 块,变体间共享一个 aux 文件,独立备份单元 `<variant>-mcp.bak`,restore 一并恢复 |
 | codex | `~/.codex/config.toml` | toml | `[model_providers."<id>"]`(wire_api=responses,base_url 带 /v1——codex 拼 base_url+/responses)+ 顶层 `model_provider` 选择器 + **模型目录**：`~/.codex/model-proxy-models.json`(shape codex,每暴露模型一条 ModelInfo：visibility=list、context/effort 档位/输入模态来自 models.dev)+ 顶层 `model_catalog_json` 指向它——codex 加载后**替换**内置目录，/model 选择器即列出全部代理模型；restore 一并删除目录文件 |
 | kimi | `~/.kimi-code/config.toml` | toml | `[providers."<id>"]`(`openai`,带 /v1——kimi-cli 2.x 移除了 `openai_legacy` 运行时类型,模型 wire protocol 从 provider type 解析,缺失即报 `must declare a wire protocol`)+ 每模型 `[models."<name>"]`(provider/model/max_context_size/capabilities,可选 support_efforts+default_effort;点号名必须引号;无元数据回退 `routing.DefaultModelMetadata.Context`)。**同一模板还接管 MCP**:`mcp.file: ~/.kimi-code/mcp.json`(Kimi Code 的 MCP 配置独立于 config.toml,`mcpServers`/`url` 条目)——独立备份单元 `kimi-mcp.bak`,restore 一并恢复 |
 | gemini-cli | `~/.gemini/.env` | env | `GOOGLE_GEMINI_BASE_URL`(带 /v1)+ `GEMINI_API_KEY` 占位 |

@@ -1,7 +1,13 @@
-description: pi — models.json provider 条目 + 全量暴露模型；协议变体（anthropic/openai/responses）见 variants
+description: pi — models.json provider 条目 + 全量暴露模型 + mcp.json 接管网关 MCP 面（pi MCP 扩展读取）；协议变体（anthropic/openai/responses）见 variants
 file: ~/.pi/agent/models.json
 format: json
 client: pi
+mcp:
+  file: ~/.pi/agent/mcp.json
+  json_path: mcpServers
+  json_entry:
+    type: http
+    url: "{{mcp.url}}"
 variants:
   - name: pi
     protocol: anthropic
