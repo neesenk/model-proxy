@@ -78,6 +78,14 @@
   --shadow-2: 0 4px 12px -2px rgba(16,24,40,.10), 0 2px 4px -2px rgba(16,24,40,.06);
   --shadow-3: 0 16px 40px -12px rgba(16,24,40,.24);
   --shadow: var(--shadow-1); /* compat alias (v1 name) */
+
+  /* Heatmap cell relief (Token Activity): data cells read as raised tiles
+     (small drop + inset top highlight), empty in-window cells as shallow
+     wells, peak days and hover one step higher. Box-shadow is ink overflow
+     only — it never widens the grid's width budget (see .an-heat-scroll). */
+  --hm-raise: 0 1px 2px rgba(16,24,40,.20), inset 0 1px 0 rgba(255,255,255,.30);
+  --hm-raise-hi: 0 2px 5px rgba(16,24,40,.28), inset 0 1px 0 rgba(255,255,255,.36);
+  --hm-well: inset 0 1px 2px rgba(16,24,40,.07);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -128,6 +136,14 @@
     --shadow-2: 0 4px 12px -2px rgba(0,0,0,.45);
     --shadow-3: 0 16px 44px -12px rgba(0,0,0,.65);
     --shadow: var(--shadow-1);
+
+    /* Heatmap relief, dark grade: deep black drops + faint top highlights
+       (same token pair as light; brighter borders carry the rest). The
+       highlight grade is a touch higher than the drop would suggest — on
+       near-black surfaces the inset edge is what makes the raise read. */
+    --hm-raise: 0 1px 2px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.16);
+    --hm-raise-hi: 0 2px 6px rgba(0,0,0,.65), inset 0 1px 0 rgba(255,255,255,.22);
+    --hm-well: inset 0 1px 2px rgba(0,0,0,.40);
   }
 }
 
@@ -2071,16 +2087,21 @@ dialog.tk-fixed .modal-body { max-height: calc(100vh - 150px); }
 }
 /* Year token-usage heatmap (GitHub-contribution style): same card chrome
    as the chart/table cards. Cells shade --chart-0 over --surface-2 in 5
-   ordinal levels (analyticsHeatLevel); square cells sized by --hm, one
-   column per Monday-first week, month labels riding the header row and
-   overflowing their narrow columns (nowrap + visible). The grid scrolls
-   horizontally on narrow screens. */
+   ordinal levels (analyticsHeatLevel) with a raised-tile relief (see the
+   --hm-* tokens in :root — legend swatches stay flat); square cells sized
+   by --hm, one column per Monday-first week, month labels riding the header
+   row and overflowing their narrow columns (nowrap + visible). The grid
+   scrolls horizontally on narrow screens. */
 .an-heat-card {
   background: var(--surface);
   border: 1px solid var(--border-2);
   border-radius: var(--r-card);
   box-shadow: var(--shadow-1);
-  padding: 12px 16px;
+  /* Bottom breathing room (30px): the Sun row's relief drop shadow needs
+     clearance under it or the last row reads as glued to the card edge.
+     Vertical-only — the horizontal 16px stays part of the width budget
+     analyticsHeatCellSize measures. */
+  padding: 12px 16px 30px;
   margin-bottom: 14px;
 }
 .an-heat-card[hidden] { display: none; }
@@ -2103,10 +2124,12 @@ dialog.tk-fixed .modal-body { max-height: calc(100vh - 150px); }
 .an-heat-scale .hm { width: 12px; height: 12px; flex: none; }
 .an-heat-scroll { overflow-x: auto; }
 /* Header/body are two grids sharing one template (set inline per render):
-   fixed square tracks sized by analyticsHeatCellSize from the measured
-   card width — the graph fills the card without engine-dependent
-   aspect-ratio-in-grid sizing; below the 8px floor the scroll wrapper
-   takes over. */
+   a 41px weekday gutter plus fixed square tracks sized by
+   analyticsHeatCellSize from the measured card width — the graph fills the
+   card without engine-dependent aspect-ratio-in-grid sizing; the gap count
+   and gutter budget there must stay in sync with the 3px gap + 41px track
+   here or the grid re-overflows at specific widths; below the 8px floor
+   the scroll wrapper takes over. */
 .an-heat-year {
   --hm: 13px;
   display: flex;
@@ -2143,19 +2166,22 @@ dialog.tk-fixed .modal-body { max-height: calc(100vh - 150px); }
   height: var(--hm, 13px);
   border-radius: 3px;
   background: var(--surface-2);
+  /* Empty in-window days sit as shallow wells so the raised data tiles
+     pop by contrast (the relief tokens live in :root, dark-mode graded). */
+  box-shadow: var(--hm-well);
 }
-.an-heat .hm-off { background: transparent; }
-/* Level rules must TIE the scoped base (.an-heat .hm sets surface-2 at
-   0-2-0) and come AFTER it in this file, so source order decides: a bare
-   .hm-lN class rule (0-1-0) would lose the cascade and every grid cell
-   would render as an empty square, while re-scoping to .an-heat .hm.hm-lN
-   strands the legend swatches (.an-heat-scale is outside .an-heat). The
-   unscoped two-class form covers both the grid and the legend. */
-.hm.hm-l1 { background: color-mix(in srgb, var(--chart-0) 28%, var(--surface-2)); }
-.hm.hm-l2 { background: color-mix(in srgb, var(--chart-0) 50%, var(--surface-2)); }
-.hm.hm-l3 { background: color-mix(in srgb, var(--chart-0) 72%, var(--surface-2)); }
-.hm.hm-l4 { background: color-mix(in srgb, var(--chart-0) 92%, var(--surface-2)); }
-.an-heat .hm:hover { outline: 1px solid var(--border); }
+.an-heat .hm-off { background: transparent; box-shadow: none; }
+/* Background + relief live in ONE rule per level (both unscoped so the
+   legend swatches outside .an-heat stay the scale reference — chips carry
+   the same raise as the grid): traffic days raise above the empty-day
+   wells (base rule), l1..l3 one step, peak (l4) the high step. The scoped
+   :hover rule below ties on specificity and wins by source order, so
+   hovering any in-window cell always shows the high step. */
+.hm.hm-l1 { background: color-mix(in srgb, var(--chart-0) 28%, var(--surface-2)); box-shadow: var(--hm-raise); }
+.hm.hm-l2 { background: color-mix(in srgb, var(--chart-0) 50%, var(--surface-2)); box-shadow: var(--hm-raise); }
+.hm.hm-l3 { background: color-mix(in srgb, var(--chart-0) 72%, var(--surface-2)); box-shadow: var(--hm-raise); }
+.hm.hm-l4 { background: color-mix(in srgb, var(--chart-0) 92%, var(--surface-2)); box-shadow: var(--hm-raise-hi); }
+.an-heat .hm:hover { outline: 1px solid var(--border); box-shadow: var(--hm-raise-hi); }
 /* Leaderboard interactions: sortable headers (data-sort) and drilldown rows
    (data-drill → #requests with the series' filters). Row hover background
    comes from the shared .table rule; these add the affordances. */

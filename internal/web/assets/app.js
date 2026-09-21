@@ -10100,9 +10100,12 @@ function analyticsRenderHeatmap(panel, resp) {
   if (title) title.textContent = 'Token Activity';
   // Square edge from the MEASURED available width (the card is unhidden, so
   // the scroll host has a real clientWidth) — explicit tracks and sizes,
-  // no engine-dependent aspect-ratio-in-grid sizing.
+  // no engine-dependent aspect-ratio-in-grid sizing. The weekday gutter is
+  // a fixed 41px track (NOT em) so it always sits 1px under the 42px budget
+  // analyticsHeatCellSize reserves — an em gutter would drift with the html
+  // font-size knob and re-overflow the grid at ≥19px.
   const cell = analyticsHeatCellSize(host.clientWidth, weeks.length);
-  const template = `grid-template-columns:2.6em repeat(${weeks.length}, ${cell}px)`;
+  const template = `grid-template-columns:41px repeat(${weeks.length}, ${cell}px)`;
   let html = `<div class="an-heat an-heat-year" style="--hm:${cell}px" role="img" aria-label="token activity over the past year">`;
   html += `<div class="an-heat-mon" style="${template}"><div class="hm-corner"></div>`;
   for (const s of analyticsYearMonthSpans(weeks)) {

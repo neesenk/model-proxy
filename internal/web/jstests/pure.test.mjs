@@ -3075,13 +3075,38 @@ test('analyticsHeatLevel buckets into five ordinal levels', () => {
 });
 
 test('analyticsHeatCellSize fills the measured width within the 8..18px band', () => {
-  // 1102px available, 54 columns: (1102 - 42 - 3*53) / 54 = 16.5 → 16px squares.
+  // 1102px available, 54 columns: (1102 - 42 - 3*54) / 54 = 16.6 → 16px squares.
   assert.equal(analyticsHeatCellSize(1102, 54), 16);
   // Ultra-wide stays capped; tiny widths floor at 8px (scroll takes over).
   assert.equal(analyticsHeatCellSize(3000, 54), 18);
   assert.equal(analyticsHeatCellSize(300, 54), 8);
   assert.equal(analyticsHeatCellSize(0, 54), 8);
   assert.equal(analyticsHeatCellSize(1102, 0), 18); // degenerate column count
+});
+
+test('analyticsHeatCellSize budget covers the gutter gap — grid never overflows the measured width', () => {
+  // Regression: the budget must reserve gaps for ALL n+1 tracks (one gap
+  // follows the weekday gutter too) and the 41px gutter track must fit the
+  // 42px budget. The grid's real width is 41 + 3*n + n*cell; before the fix
+  // the formula subtracted only n-1 gaps, so at widths where the floor
+  // wasted <2px (1103/1104, 1159/1160 for 56 weeks…) the grid overflowed
+  // by ~2px and re-showed the Token Activity horizontal scrollbar.
+  const GUTTER = 41; // app.js grid-template-columns first track (px)
+  const GAP = 3;     // .an-heat-mon/.an-heat-days gap
+  for (const n of [52, 53, 54, 56, 57]) {
+    for (let w = 500; w <= 1300; w++) {
+      const cell = analyticsHeatCellSize(w, n);
+      if (cell <= 8 || cell >= 18) continue; // floor band scrolls by design; cap band can't overflow
+      const gridWidth = GUTTER + GAP * n + n * cell;
+      assert.ok(gridWidth <= w,
+        `${n} cols @${w}px host: grid ${gridWidth}px overflows (cell ${cell}px)`);
+    }
+  }
+  // The exact widths that used to trigger the ~2px overflow (56 weeks).
+  for (const w of [1103, 1104, 1159, 1160]) {
+    const cell = analyticsHeatCellSize(w, 56);
+    assert.ok(GUTTER + GAP * 56 + 56 * cell <= w, `${w}px host must fit`);
+  }
 });
 
 test('analyticsHeatTip structures the day summary as title + label/value rows', () => {

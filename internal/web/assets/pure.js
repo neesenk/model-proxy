@@ -1474,9 +1474,14 @@ export function analyticsYearMonthSpans(weeks) {
 // windows fall back to the scroll wrapper) and capped at 18px (ultra-wide
 // windows keep the graph dense instead of growing giant cells). Explicit
 // sizes — not aspect-ratio-in-grid — keep every engine's layout identical.
+// The gap count is n, NOT n-1: grid gap also applies between the weekday
+// gutter track and the first week column, and the 41px gutter track stays
+// under the 42px budget by 1px — together that headroom is what keeps the
+// grid inside the measured width (a ~2px miss here re-shows the horizontal
+// scrollbar at specific window widths; regression-tested in pure.test.mjs).
 export function analyticsHeatCellSize(availablePx, weeks, gutterPx = 42, gapPx = 3) {
   const n = Math.max(1, Number(weeks) || 1);
-  const usable = (Number(availablePx) || 0) - gutterPx - gapPx * (n - 1);
+  const usable = (Number(availablePx) || 0) - gutterPx - gapPx * n;
   return Math.max(8, Math.min(18, Math.floor(usable / n)));
 }
 
