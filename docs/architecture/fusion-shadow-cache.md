@@ -112,7 +112,7 @@ Shadow 作为 `internal/runtime.Lifecycle` 的有限 log-producing task 接纳�
 
 ## Request log
 
-request log 是异步、非阻塞、owner-only 的 JSONL。每条记录可选地携带 `turn_key`——写入时从 request body 提取的对话轮次指纹（消息总数 + 最后一条真实 user 文本的哈希），供 UI Trace 时间线按轮次分段；旧记录或无法提取 user 文本时为空/省略。
+request log 是异步、非阻塞、owner-only 的 JSONL。每条记录可选地携带 `turn_key`——写入时从 request body 提取的对话轮次指纹（携带真实文本的 user 消息数 + 最后一条真实 user 文本的哈希；tool_result 块不算，因此 agentic 轮次内消息增长时指纹恒定），供 UI Trace 时间线按轮次分段；旧记录或无法提取 user 文本时为空/省略。
 
 **MCP 拆分流（`request_log.mcp_split`，默认关）**：开启后 `kind="mcp"` 记录写入
 独立的 `mcp-YYYYMMDD.log` 流（目录 `mcp_dir`，默认 `~/.model-proxy/log/mcp`，

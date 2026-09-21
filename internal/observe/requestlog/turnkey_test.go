@@ -12,14 +12,43 @@ func TestComputeTurnKeyOpenAIUserText(t *testing.T) {
 	if key == "" {
 		t.Fatal("expected non-empty turn key for openai user text")
 	}
-	// Same text but a different total message count must produce a different key.
-	body2 := []byte(`{"messages":[{"role":"user","content":"world"}]}`)
+	// Same newest text but a different real-user-text count (an earlier user
+	// turn) must produce a different key.
+	body2 := []byte(`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"world"}]}`)
 	key2 := computeTurnKey(body2)
 	if key2 == "" {
-		t.Fatal("expected non-empty turn key for single-message body")
+		t.Fatal("expected non-empty turn key for two-user body")
 	}
 	if key == key2 {
-		t.Fatalf("message count must change the key: %q == %q", key, key2)
+		t.Fatalf("user-text count must change the key: %q == %q", key, key2)
+	}
+}
+
+// TestComputeTurnKeyStableAcrossAgenticTurn is the Trace-segmentation
+// regression: within one agentic turn each follow-up request appends assistant
+// messages and tool_result user blocks, so a total-message-count hash changed
+// per request and degenerated segmentation to one segment per request. The key
+// must stay constant while the real-user-text count stays constant.
+func TestComputeTurnKeyStableAcrossAgenticTurn(t *testing.T) {
+	base := `{"messages":[
+		{"role":"user","content":[{"type":"text","text":"refactor the parser"}]},
+		{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"read","input":{}}]}`
+	mid := base + `,
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"file contents"}]},
+		{"role":"assistant","content":[{"type":"text","text":"done"}]}`
+	full := mid + `,
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"more output"}]}
+	]}`
+	keys := map[string]bool{}
+	for _, body := range []string{base + `]}`, mid + `]}`, full} {
+		k := computeTurnKey([]byte(body))
+		if k == "" {
+			t.Fatal("expected non-empty turn key across agentic sub-requests")
+		}
+		keys[k] = true
+	}
+	if len(keys) != 1 {
+		t.Fatalf("agentic turn produced %d distinct keys, want 1 stable key", len(keys))
 	}
 }
 
@@ -30,7 +59,8 @@ func TestComputeTurnKeyAnthropicSkipsToolResult(t *testing.T) {
 		{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"file contents"}]}
 	]}`)
 	key := computeTurnKey(body)
-	want := hashTurnKey(3, "keep going")
+	// tool_result-only user messages do not count: one real user-text message.
+	want := hashTurnKey(1, "keep going")
 	if key != want {
 		t.Fatalf("turn key = %q, want %q (last real user text)", key, want)
 	}
@@ -57,16 +87,20 @@ func TestComputeTurnKeyResponsesInput(t *testing.T) {
 	}
 }
 
-func TestComputeTurnKeySameTextDifferentCount(t *testing.T) {
+// TestComputeTurnKeySameTextNewTurn: the same literal text sent again as a new
+// turn — after another real user message arrived — must produce a different
+// key. (Appended assistant/tool traffic alone does NOT change the key; that is
+// the agentic-turn stability case covered above.)
+func TestComputeTurnKeySameTextNewTurn(t *testing.T) {
 	body1 := []byte(`{"messages":[{"role":"user","content":"continue"}]}`)
-	body2 := []byte(`{"messages":[{"role":"assistant","content":"ok"},{"role":"user","content":"continue"}]}`)
+	body2 := []byte(`{"messages":[{"role":"user","content":"ship it"},{"role":"assistant","content":"done"},{"role":"user","content":"continue"}]}`)
 	key1 := computeTurnKey(body1)
 	key2 := computeTurnKey(body2)
 	if key1 == "" || key2 == "" {
 		t.Fatal("expected non-empty keys")
 	}
 	if key1 == key2 {
-		t.Fatalf("same text in different message counts must differ: %q == %q", key1, key2)
+		t.Fatalf("same text as a new user turn must differ: %q == %q", key1, key2)
 	}
 }
 

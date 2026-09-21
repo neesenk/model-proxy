@@ -14,11 +14,16 @@ import (
 //   - scan backward for the newest user message that carries actual text;
 //   - skip tool_result blocks (anthropic agentic turns report tool results as
 //     role:user content blocks);
-//   - hash the message count plus the extracted text.
+//   - hash the real-user-text message count plus the extracted text.
 //
-// The message count is part of the hash so two consecutive turns that send the
-// same literal text (e.g. "continue") produce different keys. An unparseable
-// body or one with no textual user content yields an empty key.
+// The count is the number of user messages carrying actual text — NOT the
+// total message count: within one agentic turn every follow-up request appends
+// assistant/tool messages, so a total-count hash would differ per request and
+// degenerate the Trace segmentation to one segment per request. The
+// real-user-text count stays constant across a turn's sub-requests and still
+// increments when a new human instruction arrives, so two consecutive turns
+// that send the same literal text (e.g. "continue") produce different keys.
+// An unparseable body or one with no textual user content yields an empty key.
 func computeTurnKey(body []byte) string {
 	if len(body) == 0 || len(body) > 1500000 {
 		return ""
@@ -41,21 +46,25 @@ func computeTurnKey(body []byte) string {
 	} else {
 		return ""
 	}
-	count := len(msgs)
-	for i := count - 1; i >= 0; i-- {
-		m, ok := msgs[i].(map[string]any)
+	textCount := 0
+	text := ""
+	for _, um := range msgs {
+		m, ok := um.(map[string]any)
 		if !ok {
 			continue
 		}
 		if role, _ := m["role"].(string); role != "user" {
 			continue
 		}
-		text := lastUserText(m["content"])
-		if text != "" {
-			return hashTurnKey(count, text)
+		if t := lastUserText(m["content"]); t != "" {
+			textCount++
+			text = t
 		}
 	}
-	return ""
+	if text == "" {
+		return ""
+	}
+	return hashTurnKey(textCount, text)
 }
 
 // lastUserText extracts human-readable text from a user message's content.
