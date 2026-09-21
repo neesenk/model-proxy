@@ -5,9 +5,27 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 )
 
-const recentCap = 200
+const (
+	// recentModelCap is the capacity of the model-side ring: every event
+	// that is not protocol "mcp" (LLM protocol paths, guard/budget signals,
+	// standalone events). Streaming responses emit progress events (~1 per
+	// 16 KiB), so the model ring needs the larger budget.
+	recentModelCap = 2000
+	// recentMCPCap is the capacity of the MCP ring. MCP exchanges emit
+	// exactly two events each (start/end, no progress), so a smaller ring
+	// still covers ~250 exchanges while keeping replay bursts light.
+	recentMCPCap = 500
+	// ringTextCap bounds the Text prefix retained in the ring copy of a
+	// progress event. Live subscribers receive the full 32 KiB head prefix;
+	// only the retained copy (replayed to every future SSE handshake) is
+	// truncated, keeping worst-case ring memory at
+	// (recentModelCap + recentMCPCap) × ringTextCap instead of the full
+	// prefix size. The cap splits on a UTF-8 rune boundary.
+	ringTextCap = 4 << 10
+)
 
 // Event is one request lifecycle event. Type "start" fires when a request
 // enters forwarding; "end" fires when it commits or terminates early; "guard"
@@ -28,6 +46,10 @@ type Event struct {
 	Exposed       string `json:"exposed"`
 	Provider      string `json:"provider"`
 	UpstreamModel string `json:"upstream_model"`
+	// Tool is the client-facing tool name of an MCP tools/call exchange
+	// (end events only — the start fires before the body is parsed). Empty
+	// on LLM events and non-call MCP methods.
+	Tool          string `json:"tool,omitempty"`
 	Status        int    `json:"status"`
 	LatencyMs     int64  `json:"latency_ms"`
 	Input         uint64 `json:"input"`
@@ -39,11 +61,13 @@ type Event struct {
 	Detail        string `json:"detail,omitempty"`         // free-form context for non-lifecycle types
 }
 
-// Hub fans events out to subscribers and retains a bounded recent-event ring.
-// Publish never blocks on a slow subscriber.
+// Hub fans events out to subscribers and retains a bounded recent-event ring
+// per stream (MCP vs everything else). Publish never blocks on a slow
+// subscriber.
 type Hub struct {
-	mu     sync.Mutex
-	recent []Event
+	mu          sync.Mutex
+	recentModel []Event
+	recentMCP   []Event
 	// subs is an immutable subscriber snapshot swapped copy-on-write under mu.
 	// Publish loads it under the same lock as its recent-ring append (see
 	// Publish for why the ordering matters) and without allocating — one
@@ -58,19 +82,27 @@ func NewHub() *Hub {
 	return h
 }
 
-// Publish appends e to the recent ring and offers it to every subscriber.
+// Publish appends e to its stream's recent ring and offers it to every
+// subscriber. The ring retains a Text-truncated copy; subscribers receive the
+// event unchanged.
 func (h *Hub) Publish(e Event) {
 	if h == nil {
 		return
 	}
+	ring := &h.recentModel
+	limit := recentModelCap
+	if e.Protocol == "mcp" {
+		ring = &h.recentMCP
+		limit = recentMCPCap
+	}
 	h.mu.Lock()
-	h.recent = append(h.recent, e)
-	if len(h.recent) > recentCap {
-		h.recent = h.recent[len(h.recent)-recentCap:]
+	*ring = append(*ring, ringRetainedCopy(e))
+	if len(*ring) > limit {
+		*ring = (*ring)[len(*ring)-limit:]
 	}
 	// The subscriber snapshot must be loaded under the same lock as the
 	// append. Subscribe also holds mu while it registers the channel and
-	// copies the recent ring, so this orders the two exactly: either the
+	// copies the recent rings, so this orders the two exactly: either the
 	// subscriber's channel is in our snapshot (it gets e once, via delivery)
 	// or it is not (its recent copy already contains e). Loading after the
 	// Unlock instead would let a Subscribe land in between and deliver e
@@ -85,8 +117,47 @@ func (h *Hub) Publish(e Event) {
 	}
 }
 
-// Subscribe returns future events, a detached recent-event snapshot, and an
-// idempotent cancellation function. Callers must cancel when done.
+// ringRetainedCopy returns the copy stored in the ring: identical to e except
+// that a progress Text prefix longer than ringTextCap is truncated on a rune
+// boundary. Live progress rendering relies on the live delivery path (full
+// text); the retained copy only feeds the SSE handshake replay, where a
+// shorter prefix keeps ring memory bounded.
+func ringRetainedCopy(e Event) Event {
+	if len(e.Text) <= ringTextCap {
+		return e
+	}
+	cut := ringTextCap
+	for cut > 0 && !utf8.RuneStart(e.Text[cut]) {
+		cut--
+	}
+	e.Text = e.Text[:cut]
+	return e
+}
+
+// mergeRings interleaves the two rings (each oldest→newest in publish order)
+// into one ts-ascending slice. Ties keep the model-side event first — the
+// merge is only for replay order; every request's lifecycle events live in a
+// single ring and stay ordered.
+func mergeRings(model, mcp []Event) []Event {
+	out := make([]Event, 0, len(model)+len(mcp))
+	i, j := 0, 0
+	for i < len(model) && j < len(mcp) {
+		if model[i].Ts <= mcp[j].Ts {
+			out = append(out, model[i])
+			i++
+		} else {
+			out = append(out, mcp[j])
+			j++
+		}
+	}
+	out = append(out, model[i:]...)
+	out = append(out, mcp[j:]...)
+	return out
+}
+
+// Subscribe returns future events, a detached ts-ordered replay of both
+// recent rings, and an idempotent cancellation function. Callers must cancel
+// when done.
 func (h *Hub) Subscribe() (<-chan Event, []Event, func()) {
 	ch := make(chan Event, 32)
 	h.mu.Lock()
@@ -95,7 +166,7 @@ func (h *Hub) Subscribe() (<-chan Event, []Event, func()) {
 	copy(next, current)
 	next[len(current)] = ch
 	h.subs.Store(&next)
-	recent := append([]Event(nil), h.recent...)
+	recent := mergeRings(h.recentModel, h.recentMCP)
 	h.mu.Unlock()
 	cancel := func() {
 		h.mu.Lock()
@@ -136,26 +207,48 @@ func (h *Hub) HasSubscribers() bool {
 	return subs != nil && len(*subs) > 0
 }
 
-// Snapshot returns a detached copy of the recent-event ring.
+// Snapshot returns a detached, ts-ordered copy of both recent rings merged.
 func (h *Hub) Snapshot() []Event {
 	if h == nil {
 		return nil
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return append([]Event(nil), h.recent...)
+	model := append([]Event(nil), h.recentModel...)
+	mcp := append([]Event(nil), h.recentMCP...)
+	return mergeRings(model, mcp)
 }
 
-// FindEnd returns the newest terminal event for requestID.
+// FindEnd returns the newest terminal event for requestID. A request id lives
+// in exactly one ring (its protocol never changes), but both are searched so
+// the lookup needs no routing knowledge; if both ever match, the later event
+// wins.
 func (h *Hub) FindEnd(requestID string) (Event, bool) {
 	if h == nil {
 		return Event{}, false
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for i := len(h.recent) - 1; i >= 0; i-- {
-		if h.recent[i].Type == "end" && h.recent[i].RequestID == requestID {
-			return h.recent[i], true
+	m, okM := findEndInRing(h.recentModel, requestID)
+	c, okC := findEndInRing(h.recentMCP, requestID)
+	switch {
+	case okM && okC:
+		if m.Ts >= c.Ts {
+			return m, true
+		}
+		return c, true
+	case okM:
+		return m, true
+	case okC:
+		return c, true
+	}
+	return Event{}, false
+}
+
+func findEndInRing(ring []Event, requestID string) (Event, bool) {
+	for i := len(ring) - 1; i >= 0; i-- {
+		if ring[i].Type == "end" && ring[i].RequestID == requestID {
+			return ring[i], true
 		}
 	}
 	return Event{}, false

@@ -51,10 +51,18 @@ generation 隔离，reload 后旧请求即使完成也只能写入旧 Store。
 
 ## Live events
 
-`internal/observe/events.Hub` 保存最近 200 条事件并做非阻塞 fan-out。慢订阅者
+`internal/observe/events.Hub` 保存最近事件并做非阻塞 fan-out。慢订阅者
 丢事件，不能反压请求路径；`/api/events` 的 SSE/keepalive 由应用层
 `internal/app/proxy_http.go` 与 `internal/web/server.go` 服务（events 包只提供
 `ServeEvents` handler，不拥有 HTTP 路由）。
+
+ring 按协议分环：`protocol="mcp"` 的事件进 MCP 环，其余（LLM 协议路径、
+guard/budget/独立事件）进 model 环，各自独立淘汰（容量 model 2000 条 /
+MCP 500 条——MCP 每次交换只发 start/end 两条，500 条已覆盖约 250 次交换）
+——重 model 流式流量（progress 事件每 16 KiB 一条）不再把 MCP 历史挤出
+live 视图（反向同理）。`Subscribe`/`Snapshot` 返回按 ts 升序合并的两环重放；
+ring 内保留的 progress 事件 `text` 截断到 4 KiB（rune 边界，实时订阅者收
+全量前缀，只有留存副本受限），环内存上限 (2000 + 500) × 4 KiB。
 
 forward 产生 start/end，包含 agent、protocol、provider、status、latency、tokens（end 另带 `cache_read`/`cache_creation`，omitempty）和稳定 request_id。cache hit、400/502 终局也必须产生 end。进入 live/请求日志的是 LLM 协议路径（`/v1/messages`、`/v1/chat/completions`、`/v1/responses`）与 MCP 网关交换（`/mcp/<name>`，`protocol="mcp"`、request log `kind="mcp"`，见 `mcp.md`）；未知路径（浏览器 `/.well-known/...` 探测、favicon、迷路 GET）在 handler 层直接 502，**不产生 live 事件、不写请求日志**（unrouted model 仍是非空 proto，照旧产生终局 end）。`GET /api/events` 先重放 ring，再推送 SSE，15 秒 keepalive。
 

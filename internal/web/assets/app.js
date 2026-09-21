@@ -4398,10 +4398,16 @@ function synthLiveRow(e) {
   return row;
 }
 
+// LIVE_ROW_CAP bounds the retained live rows (merged across streams).
+// The server replays up to 2000 events per protocol ring, so the client keeps
+// a matching order of magnitude — 1000 rows shows the replayed history the
+// rings now retain instead of re-trimming it back to a sliver.
+const LIVE_ROW_CAP = 1000;
+
 function trimLiveRows() {
-  if (liveRows.length <= 100) return;
-  const excess = liveRows.length - 100;
-  liveRows.length = 100;
+  if (liveRows.length <= LIVE_ROW_CAP) return;
+  const excess = liveRows.length - LIVE_ROW_CAP;
+  liveRows.length = LIVE_ROW_CAP;
   // Rebuild the id index from what survives the ring.
   liveByReq = {};
   for (const r of liveRows) {
