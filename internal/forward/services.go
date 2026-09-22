@@ -60,8 +60,11 @@ type Services struct {
 	Schedule func(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, generation uint64) []RouteTarget
 	// ShadowDispatch is the post-commit shadow hook (app:
 	// Proxy.dispatchShadowAfterCommit). Called only after a normal target
-	// commits, with that attempt's Commit.
-	ShadowDispatch func(runtime Snapshot, proto, backendProto, calledModel, exposed string, primary RouteTarget, primaryRequestID string, commit *targetexec.Commit)
+	// commits, with that attempt's Commit and the primary request's resolved
+	// agent + client session id (the shadow record reuses them instead of
+	// probing its synthetic upstream request, which carries neither the
+	// client's UA nor its session headers).
+	ShadowDispatch func(runtime Snapshot, proto, backendProto, calledModel, exposed string, primary RouteTarget, primaryRequestID, primaryAgent, primarySession string, commit *targetexec.Commit)
 	// ResolveBackendProto is the wire-verdict backend protocol resolution
 	// (app: Proxy.resolvedBackendProto): declared protocol, else ProtocolHint,
 	// else the probe verdict, else the client protocol.
@@ -147,9 +150,11 @@ func (p pipeline) dispatchShadowAfterCommit(
 	exposed string,
 	primary RouteTarget,
 	primaryRequestID string,
+	primaryAgent string,
+	primarySession string,
 	commit *targetexec.Commit,
 ) {
-	p.svc.ShadowDispatch(runtime, proto, backendProto, calledModel, exposed, primary, primaryRequestID, commit)
+	p.svc.ShadowDispatch(runtime, proto, backendProto, calledModel, exposed, primary, primaryRequestID, primaryAgent, primarySession, commit)
 }
 
 // publishTerminalEvent emits a live "end" event for a request that ends before

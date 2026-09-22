@@ -21,7 +21,7 @@ Commands:
   serve status         Show running daemon status (providers/schedule/quota/tokens)
   takeover <client>    Rewrite client config to point at the proxy
   restore <client>     Restore client config from backup
-  login <provider>     Login to a provider (aqp | codex | zcode | zhipu | deepseek | kimi-code | qwen-plan | volcengine)
+  login <provider>     Login to a provider (aqp | codex | zcode | zhipu | deepseek | kimi-code | qwen-plan | volcengine | typesafe)
   add <preset>         Add a provider preset to config.yaml and log in
   presets list         List built-in provider presets
   logout <provider>    Clear provider credentials
@@ -387,6 +387,13 @@ func PrintConfigProvidersTo(out io.Writer, args []string) {
 	fmt.Fprintln(out, "\nProviders (from config):")
 	for _, n := range names {
 		p := cfg.Providers[n]
-		fmt.Fprintf(out, "  %s  provider=%s  %s\n", display.Pad(n, 14), display.Pad(p.Provider, 12), p.OpenAIBaseURL)
+		baseURL := p.OpenAIBaseURL
+		if baseURL == "" {
+			baseURL = p.DecisionsBaseURL // pure-decisions provider (typesafe)
+		}
+		if baseURL == "" {
+			baseURL = p.AnthropicBaseURL
+		}
+		fmt.Fprintf(out, "  %s  provider=%s  %s\n", display.Pad(n, 14), display.Pad(p.Provider, 12), baseURL)
 	}
 }

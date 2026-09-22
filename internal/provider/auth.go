@@ -24,6 +24,17 @@ import (
 // provider struct owns its auth injector (the auth field) and AuthHeaders/Refresh
 // delegate to it directly (no cfg.Auth callback).
 
+// refreshFailureTTL is how long a failed auth refresh (codex token refresh,
+// aqp key mint) is cached as the immediate answer before another network
+// attempt is allowed. Both providers refresh while holding their mutex, so
+// without this negative cache a down auth endpoint makes EVERY request queue
+// on the lock for a fresh 30s network round trip — the whole provider
+// collapses while auth is erroring. The TTL is deliberately short: once the
+// auth endpoint recovers, the provider self-heals within seconds, and
+// correctness never depends on the cache — forward's failover covers the
+// provider for as long as its auth keeps erroring.
+const refreshFailureTTL = 15 * time.Second
+
 // authInjector is the internal contract a provider's auth field satisfies. The
 // concrete types (AqpKeyProvider, CodexOAuthProvider) implement it; tests inject
 // fakes (fakeAuth/errAuth). The constructor wires the real injector.
@@ -67,6 +78,24 @@ type AqpKeyProvider struct {
 	cached    string
 	projectID string
 	mintedAt  time.Time
+
+	// Negative cache for failed mints (refreshFailureTTL): while now is before
+	// mintFailedUntil, keyLocked returns lastMintErr without touching the
+	// network, so a down mint endpoint cannot serialize every request on a
+	// fresh 30s timeout under p.mu. A successful mint clears both.
+	lastMintErr     error
+	mintFailedUntil time.Time
+	// now is the clock seam for the failure TTL (tests inject a fake clock;
+	// nil = time.Now). Struct-literal construction stays valid via nowTime.
+	now func() time.Time
+}
+
+// nowTime returns the injected clock, or the wall clock when unset.
+func (p *AqpKeyProvider) nowTime() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
 }
 
 // NewAqpKeyProvider builds an AqpKeyProvider from the mint URL + SSO store path.
@@ -118,6 +147,24 @@ func (p *AqpKeyProvider) keyLocked() (string, error) {
 	if p.cached != "" && time.Since(p.mintedAt) < 50*time.Minute {
 		return p.cached, nil
 	}
+	// Negative cache: a mint that failed within refreshFailureTTL is returned
+	// as-is — no new network attempt, so requests never queue on p.mu for a
+	// fresh round trip against a down endpoint.
+	if p.lastMintErr != nil && p.nowTime().Before(p.mintFailedUntil) {
+		return "", p.lastMintErr
+	}
+	key, err := p.mintLocked()
+	if err != nil {
+		p.lastMintErr, p.mintFailedUntil = err, p.nowTime().Add(refreshFailureTTL)
+		return "", err
+	}
+	p.lastMintErr, p.mintFailedUntil = nil, time.Time{}
+	return key, nil
+}
+
+// mintLocked performs the network mint (caller holds p.mu); keyLocked
+// negative-caches its failures for refreshFailureTTL.
+func (p *AqpKeyProvider) mintLocked() (string, error) {
 	cookie, err := ReadSSOCookie(p.authFile)
 	if err != nil {
 		return "", fmt.Errorf("read sso cookie: %w", err)
@@ -206,6 +253,25 @@ type CodexOAuthProvider struct {
 	cached    string    // access_token
 	exp       time.Time // access_token expiry (parsed from JWT)
 	accountID string    // chatgpt account_id (parsed from id_token JWT)
+
+	// Negative cache for failed refreshes (refreshFailureTTL): while now is
+	// before refreshFailedUntil, the refresh path returns lastRefreshErr
+	// without touching the network, so a down auth endpoint cannot serialize
+	// every request on a fresh 30s timeout under p.mu. A successful refresh
+	// clears both.
+	lastRefreshErr     error
+	refreshFailedUntil time.Time
+	// now is the clock seam for the failure TTL (tests inject a fake clock;
+	// nil = time.Now). Struct-literal construction stays valid via nowTime.
+	now func() time.Time
+}
+
+// nowTime returns the injected clock, or the wall clock when unset.
+func (p *CodexOAuthProvider) nowTime() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
 }
 
 // NewCodexOAuthProvider builds a CodexOAuthProvider reading the given auth file.
@@ -286,7 +352,7 @@ func (p *CodexOAuthProvider) token() (string, string, error) {
 	if af.Tokens.RefreshToken == "" {
 		return "", "", fmt.Errorf("codex auth has no refresh_token; run `model-proxy login codex`")
 	}
-	if err := p.refreshLocked(af); err != nil {
+	if err := p.refreshGuardedLocked(af); err != nil {
 		return "", "", err
 	}
 	return p.cached, p.accountID, nil
@@ -303,7 +369,23 @@ func (p *CodexOAuthProvider) Refresh() error {
 	if af.Tokens.RefreshToken == "" {
 		return fmt.Errorf("codex auth has no refresh_token; run `model-proxy login codex`")
 	}
-	return p.refreshLocked(af)
+	return p.refreshGuardedLocked(af)
+}
+
+// refreshGuardedLocked wraps refreshLocked with the failure negative cache
+// (caller holds p.mu): inside the refreshFailureTTL window the cached error is
+// returned without a network attempt; a success clears the cache so the next
+// failure starts a fresh window.
+func (p *CodexOAuthProvider) refreshGuardedLocked(af *CodexAuthFile) error {
+	if p.lastRefreshErr != nil && p.nowTime().Before(p.refreshFailedUntil) {
+		return p.lastRefreshErr
+	}
+	if err := p.refreshLocked(af); err != nil {
+		p.lastRefreshErr, p.refreshFailedUntil = err, p.nowTime().Add(refreshFailureTTL)
+		return err
+	}
+	p.lastRefreshErr, p.refreshFailedUntil = nil, time.Time{}
+	return nil
 }
 
 // AccountIDFromTokens returns the chatgpt account_id: prefer the stored field,

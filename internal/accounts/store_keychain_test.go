@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/zalando/go-keyring"
@@ -386,5 +387,59 @@ func TestFileBackendIgnoresKeychainMode(t *testing.T) {
 	after, err := s.Load("prov", "zhipu")
 	if err != nil || len(after.Accounts) != 0 {
 		t.Fatalf("pure file pool after RemoveAccount = (%+v, %v)", after, err)
+	}
+}
+
+// A concurrent locked save holding the pool lock must never race the
+// lazy-migration rewrite: while contended, the keychain load serves the
+// migrated snapshot WITHOUT rewriting the file to metadata-only (plaintext
+// stays; a concurrent save owns the rewrite window), and a later uncontended
+// read finishes the migration.
+func TestKeychainMigrationSkipsRewriteWhilePoolLocked(t *testing.T) {
+	keyring.MockInit()
+	dir := t.TempDir()
+	cred := Credentials{APIKey: "sk-legacy-contended"}
+	pool := Pool{Version: 1, Accounts: []Account{
+		{ID: AccountID("zhipu", cred), Label: "old", APIKey: cred.APIKey, AddedAt: "2026-01-01"},
+	}}
+	if err := NewStoreWithBackend(dir, BackendFile).Save("prov", "zhipu", pool); err != nil {
+		t.Fatalf("seed file pool: %v", err)
+	}
+
+	s := keychainStore(dir)
+	holderEntered := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	holderDone := make(chan error, 1)
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(releaseHolder) }) })
+	go func() {
+		holderDone <- s.WithLock("prov", func() error {
+			close(holderEntered)
+			<-releaseHolder
+			return nil
+		})
+	}()
+	<-holderEntered
+
+	loaded, err := s.Load("prov", "zhipu")
+	if err != nil {
+		t.Fatalf("Load under contention: %v", err)
+	}
+	if len(loaded.Accounts) != 1 || loaded.Accounts[0].APIKey != cred.APIKey {
+		t.Fatalf("contended load = %+v", loaded.Accounts)
+	}
+	if content := poolFileBytes(t, s, "prov"); !strings.Contains(content, cred.APIKey) {
+		t.Fatal("migration rewrote the pool file metadata-only while the pool lock was held")
+	}
+
+	once.Do(func() { close(releaseHolder) })
+	if err := <-holderDone; err != nil {
+		t.Fatalf("holder WithLock: %v", err)
+	}
+	if _, err := s.Load("prov", "zhipu"); err != nil {
+		t.Fatalf("Load after release: %v", err)
+	}
+	if content := poolFileBytes(t, s, "prov"); strings.Contains(content, cred.APIKey) {
+		t.Fatal("uncontended retry did not finish the metadata-only migration")
 	}
 }

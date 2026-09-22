@@ -56,8 +56,20 @@ func NewPlan(input PlanInput) Plan {
 	if input.BackendProtocol == protocol.Anthropic && input.ProviderConfig.AnthropicBaseURL != "" {
 		baseURL = input.ProviderConfig.AnthropicBaseURL
 	}
+	// decisions mirrors the anthropic override pattern: decisions_base_url
+	// wins when set, otherwise the openai base serves (OpenRouter serves
+	// /systemone on the same versioned base as chat).
+	if input.BackendProtocol == protocol.Decisions && input.ProviderConfig.DecisionsBaseURL != "" {
+		baseURL = input.ProviderConfig.DecisionsBaseURL
+	}
 	upstreamPath := input.ClientPath
 	if protocol.NeedsConversion(input.ClientProtocol, input.BackendProtocol) {
+		upstreamPath = protocol.BackendPath(input.BackendProtocol)
+	}
+	// decisions is the one protocol whose client-facing path (/v1/decisions)
+	// differs from its upstream path (/systemone): never inherit the client
+	// path, even for same-protocol passthrough.
+	if input.BackendProtocol == protocol.Decisions {
 		upstreamPath = protocol.BackendPath(input.BackendProtocol)
 	}
 	headers := make(map[string]string, len(input.ProviderConfig.Headers))
@@ -95,11 +107,21 @@ func (plan Plan) BackendProtocol() protocol.Protocol    { return plan.backendPro
 func (plan Plan) ViaResponsesVerdict() bool             { return plan.viaResponsesVerdict }
 
 // ApplyConfiguredHeaders copies static target headers without exposing the
-// generation-owned provider config map for mutation.
-func (plan Plan) ApplyConfiguredHeaders(header http.Header) {
+// generation-owned provider config map for mutation. Values in env:VAR form
+// (mandatory for credential-bearing names, see config validate) resolve
+// against the process environment at send time; a missing variable is a
+// send-time configuration error — fail-closed like the mcp headers path,
+// since silently dropping a configured header (typically auth) would surface
+// as confusing upstream 401s.
+func (plan Plan) ApplyConfiguredHeaders(header http.Header) error {
 	for key, value := range plan.configuredHeaders {
-		header.Set(key, value)
+		resolved, err := configdomain.ResolveHeaderValue(key, value)
+		if err != nil {
+			return err
+		}
+		header.Set(key, resolved)
 	}
+	return nil
 }
 
 // RewriteModel preserves the called model when a target has no replacement

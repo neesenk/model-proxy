@@ -2066,6 +2066,25 @@ func TestHandleMCPAnalytics(t *testing.T) {
 		t.Fatalf("invalid granularity = (%d, %q)", invalidGran.Code, errOut.Error)
 	}
 
+	// Fail-closed from/to (same contract as /api/tokens): garbage values and
+	// an inverted range are 400s, never a silent fallback to the default
+	// window.
+	badFrom := serveRead(t, s, http.MethodGet, "/api/mcp/analytics?from=abc")
+	decodeReadJSON(t, badFrom, &errOut)
+	if badFrom.Code != http.StatusBadRequest || errOut.Error != "from must be unix seconds or RFC3339" {
+		t.Fatalf("garbage from = (%d, %q)", badFrom.Code, errOut.Error)
+	}
+	badTo := serveRead(t, s, http.MethodGet, "/api/mcp/analytics?to=xyz")
+	decodeReadJSON(t, badTo, &errOut)
+	if badTo.Code != http.StatusBadRequest || errOut.Error != "to must be unix seconds or RFC3339" {
+		t.Fatalf("garbage to = (%d, %q)", badTo.Code, errOut.Error)
+	}
+	inverted := serveRead(t, s, http.MethodGet, "/api/mcp/analytics?from=200&to=100")
+	decodeReadJSON(t, inverted, &errOut)
+	if inverted.Code != http.StatusBadRequest || errOut.Error != "from must be <= to" {
+		t.Fatalf("inverted range = (%d, %q)", inverted.Code, errOut.Error)
+	}
+
 	reads.mcpAnalytics = func(appapi.MCPAnalyticsQuery) (appapi.MCPAnalyticsResult, error) {
 		return appapi.MCPAnalyticsResult{}, errors.New("store down")
 	}

@@ -72,6 +72,10 @@ type Run struct {
 	SynthLatencyMs int64            `json:"synth_latency_ms,omitempty"`
 	SynthInput     uint64           `json:"synth_input,omitempty"`
 	SynthOutput    uint64           `json:"synth_output,omitempty"`
+	// Selector is the decisions-model routing pass record, present only when
+	// the recipe configures a selector (shadow records too — the shadow
+	// observations are the tuning data for enforce).
+	Selector *SelectorObservation `json:"selector,omitempty"`
 }
 
 // WorkflowStats is the JSON projection of Registry's cumulative workflow

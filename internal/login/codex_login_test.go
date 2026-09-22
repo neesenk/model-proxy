@@ -129,6 +129,70 @@ func TestExchangeCodeForTokens(t *testing.T) {
 	}
 }
 
+// TestRequestUserCode_MissingFieldsNoBodyEcho (C-2 regression): a 200 body
+// missing device_auth_id/user_code must produce a keys-only error naming the
+// missing fields; the raw body — which may carry credential fragments from a
+// malformed response — must never enter the error string.
+func TestRequestUserCode_MissingFieldsNoBodyEcho(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"user_code":"","device_auth_id":"","leaked":"SECRET-FRAGMENT-XYZ"}`)
+	}))
+	defer srv.Close()
+	opts := &CodexLoginServerOptions{UsercodeURL: srv.URL, HTTPClient: &http.Client{Timeout: 5 * time.Second}}
+	_, err := RequestUserCode(opts, provider.CodexOAuthClientID)
+	if err == nil {
+		t.Fatal("missing fields: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing device_auth_id,user_code") {
+		t.Errorf("error %q must name the missing fields", err)
+	}
+	if !strings.Contains(err.Error(), "keys: device_auth_id,leaked,user_code") {
+		t.Errorf("error %q must list the response keys", err)
+	}
+	if strings.Contains(err.Error(), "SECRET-FRAGMENT-XYZ") {
+		t.Errorf("error must not echo the 200 body: %q", err)
+	}
+}
+
+// TestExchangeCodeForTokens_MissingAccessTokenNoBodyEcho (C-2 regression): a
+// 200 token response missing access_token may still carry a refresh_token
+// fragment; the error must report the missing field + response keys only. The
+// non-200 branch KEEPS its (truncated) body echo — that body is an error page,
+// not a token payload, and carries the diagnostic value.
+func TestExchangeCodeForTokens_MissingAccessTokenNoBodyEcho(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"refresh_token":"rt-SECRET-FRAGMENT","id_token":"it"}`)
+	}))
+	defer srv.Close()
+	opts := &CodexLoginServerOptions{TokenURL: srv.URL, HTTPClient: &http.Client{Timeout: 5 * time.Second}}
+	_, err := ExchangeCodeForTokens(opts, provider.CodexOAuthClientID, "authcode", "verifier")
+	if err == nil {
+		t.Fatal("missing access_token: want error, got nil")
+	}
+	const want = "token response missing access_token (keys: id_token,refresh_token)"
+	if err.Error() != want {
+		t.Errorf("error=%q want exact %q", err, want)
+	}
+	if strings.Contains(err.Error(), "rt-SECRET-FRAGMENT") {
+		t.Errorf("error must not echo the 200 body: %q", err)
+	}
+}
+
+// TestExchangeCodeForTokens_Non200KeepsBodyEcho pins the retained non-200
+// behavior: an error page's (truncated) body stays in the message.
+func TestExchangeCodeForTokens_Non200KeepsBodyEcho(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(502)
+		fmt.Fprint(w, "upstream auth broker broken")
+	}))
+	defer srv.Close()
+	opts := &CodexLoginServerOptions{TokenURL: srv.URL, HTTPClient: &http.Client{Timeout: 5 * time.Second}}
+	_, err := ExchangeCodeForTokens(opts, provider.CodexOAuthClientID, "authcode", "verifier")
+	if err == nil || !strings.Contains(err.Error(), "upstream auth broker broken") {
+		t.Errorf("non-200 error must keep the body echo, got %v", err)
+	}
+}
+
 // TestAccountIDFromTokens verifies id_token JWT parsing for account_id.
 func TestAccountIDFromTokens(t *testing.T) {
 	// build a fake id_token JWT with the chatgpt_account_id claim

@@ -397,7 +397,7 @@ func normalDeliveryShadowDispatchValid(node ast.Node) bool {
 		return false
 	}
 	call := branchDispatches[0]
-	if !selectorOnIdent(call.Fun, "p", "dispatchShadowAfterCommit") || len(call.Args) != 8 {
+	if !selectorOnIdent(call.Fun, "p", "dispatchShadowAfterCommit") || len(call.Args) != 10 {
 		return false
 	}
 	return identIs(call.Args[0], "runtime") &&
@@ -407,7 +407,9 @@ func normalDeliveryShadowDispatchValid(node ast.Node) bool {
 		identIs(call.Args[4], "exposed") &&
 		identIs(call.Args[5], "t") &&
 		identIs(call.Args[6], "requestID") &&
-		selectorOnIdent(call.Args[7], result, "Commit")
+		identIs(call.Args[7], "agent") &&
+		selectorOnIdent(call.Args[8], "flc", "SessionID") &&
+		selectorOnIdent(call.Args[9], result, "Commit")
 }
 
 func exactTargetExecutorAttempt(call *ast.CallExpr) (string, bool) {
@@ -472,14 +474,15 @@ func shadowDispatchUsesCapturedRuntime(node ast.Node) bool {
 		return false
 	}
 	run := runCalls[0]
-	if !selectorOnIdent(run.Fun, "p", "runShadow") || len(run.Args) != 10 ||
+	if !selectorOnIdent(run.Fun, "p", "runShadow") || len(run.Args) != 12 ||
 		!identIs(run.Args[0], "runtime") || !identIs(run.Args[1], shadowRuntime) ||
 		!identIs(run.Args[2], "stop") ||
 		!identIs(run.Args[3], "proto") || !identIs(run.Args[4], "backendProto") ||
 		!identIs(run.Args[5], "calledModel") || !identIs(run.Args[6], "exposed") ||
 		!identIs(run.Args[7], "shadow") ||
 		!zeroArgReceiverCall(run.Args[8], "commit", "RequestBody") ||
-		!identIs(run.Args[9], "primaryRequestID") {
+		!identIs(run.Args[9], "primaryRequestID") ||
+		!identIs(run.Args[10], "primaryAgent") || !identIs(run.Args[11], "primarySession") {
 		return false
 	}
 
@@ -1081,14 +1084,14 @@ func validCommit() {
 	attempt := makeAttempt()
 	result := p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 	if result.Committed {
-		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, result.Commit)
+		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, result.Commit)
 	}
 }
 func invalidCommit() {
 	attempt := makeAttempt()
 	result := p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 	if other.Committed {
-		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, result.Commit)
+		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, result.Commit)
 	}
 }
 func invalidExecutorBinding() {
@@ -1096,14 +1099,14 @@ func invalidExecutorBinding() {
 	other := makeAttempt()
 	result := p.targetExecutor(other.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 	if result.Committed {
-		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, result.Commit)
+		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, result.Commit)
 	}
 }
 func invalidCommitPayload() {
 	attempt := makeAttempt()
 	result := p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 	if result.Committed {
-		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, other.Commit)
+		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, other.Commit)
 	}
 }
 `, 0)
@@ -1130,7 +1133,7 @@ func validShadow() {
 	permit := shadowRuntime.TryAcquire()
 	p.lifecycle.RunBeforeLogDrain(func(stop <-chan struct{}) {
 		defer permit.Release()
-		p.runShadow(runtime, shadowRuntime, stop, proto, backendProto, calledModel, exposed, shadow, commit.RequestBody(), primaryRequestID)
+		p.runShadow(runtime, shadowRuntime, stop, proto, backendProto, calledModel, exposed, shadow, commit.RequestBody(), primaryRequestID, primaryAgent, primarySession)
 	})
 	permit.Release()
 }
@@ -1141,7 +1144,7 @@ func invalidShadow() {
 	permit := other.TryAcquire()
 	p.lifecycle.RunBeforeLogDrain(func(stop <-chan struct{}) {
 		defer permit.Release()
-		p.runShadow(runtime, other, stop, proto, backendProto, calledModel, exposed, shadow, commit.RequestBody(), primaryRequestID)
+		p.runShadow(runtime, other, stop, proto, backendProto, calledModel, exposed, shadow, commit.RequestBody(), primaryRequestID, primaryAgent, primarySession)
 	})
 	permit.Release()
 }

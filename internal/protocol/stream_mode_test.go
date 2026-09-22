@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -71,5 +72,78 @@ func TestAggregateChatSSEStringShapedError(t *testing.T) {
 		"data: {\"error\":\"rate limited\"}\n\n"
 	if _, err := aggregateSSEToResponse([]byte(raw), "openai"); err == nil {
 		t.Fatal("string-form error chunk aggregated as a clean response, want an error")
+	}
+}
+
+// The non-stream chat JSON → SSE bridge must emit spec-shaped chunks: every
+// chat.completion.chunk carries the required created field (strict SDKs
+// validate it per chunk), and usage rides its own empty-choices chunk before
+// [DONE] — the same shape the streaming converters emit — instead of riding
+// the finish_reason chunk.
+func TestChatJSONToSSEChunkContract(t *testing.T) {
+	body := `{"id":"c1","object":"chat.completion","created":1750000000,"model":"m",` +
+		`"choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],` +
+		`"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`
+	stream, err := responseToSSE([]byte(body), "openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(stream)), "\n\n")
+	if len(lines) < 2 || lines[len(lines)-1] != "data: [DONE]" {
+		t.Fatalf("stream does not end with [DONE]:\n%s", stream)
+	}
+	frames := lines[:len(lines)-1]
+	var finishChunk, usageChunk map[string]any
+	for _, ln := range frames {
+		if !strings.HasPrefix(ln, "data: ") {
+			t.Fatalf("unexpected non-data line %q", ln)
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(ln, "data: ")), &m); err != nil {
+			t.Fatalf("chunk %q is not JSON: %v", ln, err)
+		}
+		created, _ := m["created"].(float64)
+		if created == 0 {
+			t.Errorf("chunk without required created field: %s", ln)
+		}
+		if m["id"] != "c1" || m["object"] != "chat.completion.chunk" || m["model"] != "m" {
+			t.Errorf("chunk missing identity fields: %s", ln)
+		}
+		choices, _ := m["choices"].([]any)
+		if len(choices) == 0 {
+			usageChunk = m
+			continue
+		}
+		first, _ := choices[0].(map[string]any)
+		if fr, ok := first["finish_reason"]; ok && fr != nil {
+			finishChunk = m
+			if _, hasUsage := m["usage"]; hasUsage {
+				t.Errorf("finish chunk must not carry usage: %s", ln)
+			}
+		}
+	}
+	if finishChunk == nil {
+		t.Fatal("no finish_reason chunk in the bridged stream")
+	}
+	if usageChunk == nil {
+		t.Fatal("no empty-choices usage chunk before [DONE]")
+	}
+	usage, _ := usageChunk["usage"].(map[string]any)
+	if usage == nil || usage["total_tokens"] != float64(7) {
+		t.Errorf("usage chunk payload wrong: %v", usageChunk["usage"])
+	}
+}
+
+// A chat response without a created field still bridges: every synthesized
+// chunk falls back to the stream-start timestamp.
+func TestChatJSONToSSEBackfillsCreated(t *testing.T) {
+	body := `{"id":"c2","object":"chat.completion","model":"m",` +
+		`"choices":[{"index":0,"message":{"role":"assistant","content":"x"},"finish_reason":"stop"}]}`
+	stream, err := responseToSSE([]byte(body), "openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stream), `"created":`) {
+		t.Fatalf("created was not backfilled:\n%s", stream)
 	}
 }

@@ -128,7 +128,12 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			executor.failover(target)
 			return Result{Outcome: OutcomeFailedHard}
 		}
-		plan.ApplyConfiguredHeaders(req.Header)
+		if err := plan.ApplyConfiguredHeaders(req.Header); err != nil {
+			logx.Warnf("[proto=%s provider=%s] header resolve error: %v", plan.ClientProtocol(), target.Provider, err)
+			executor.release(target.Provider)
+			executor.failover(target)
+			return Result{Outcome: OutcomeFailedHard}
+		}
 		providerImpl.ExtraHeaders(req, plan.UpstreamPath())
 		started := time.Now()
 		response, err := executor.Client.Do(req)
@@ -498,13 +503,15 @@ func (executor Executor) commit(
 	}
 	// The wrapper order intentionally mirrors the root pipeline: transformed
 	// client bytes are captured for continuation, then logging, usage, cache and client.
+	// Usage capture wraps EVERY response body: the scanner counts SSE usage on
+	// streamed bodies and falls back to a whole-body JSON usage parse on
+	// non-stream ones (counters.UsageScanner) — gating on clientStream used to
+	// drop all non-stream token accounting (decisions is 100% non-stream).
 	if executor.Effects != nil {
 		body = executor.Effects.CaptureResponse(body, dto)
-		if clientStream {
-			body = executor.Effects.CaptureUsage(body, dto, func(usage Usage) {
-				dto.Usage = usage
-			})
-		}
+		body = executor.Effects.CaptureUsage(body, dto, func(usage Usage) {
+			dto.Usage = usage
+		})
 	}
 	var recorder *responsecache.Recorder
 	if cache != nil && scope.CacheKey != "" && response.StatusCode < 300 {

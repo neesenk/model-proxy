@@ -145,5 +145,9 @@ func cloneRun(run Run) Run {
 	if run.Legs != nil {
 		run.Legs = append([]LegObservation(nil), run.Legs...)
 	}
+	if run.Selector != nil {
+		observation := *run.Selector
+		run.Selector = &observation
+	}
 	return run
 }

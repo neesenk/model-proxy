@@ -580,6 +580,17 @@ func (t *responsesSSEToAnthropicSSE) handle(event string, data map[string]any) {
 			}
 			return
 		}
+		if b := t.blocks[outIdx]; b != nil && b.kind == "text" && !b.opened {
+			// added announced the message but no output_text delta ever opened
+			// the block (a gateway that skips deltas and carries the whole
+			// content in the done frame): synthesize from the complete item —
+			// the r→chat converter's contentSeen fallback, same shape. Without
+			// this the anthropic client receives an empty assistant message.
+			if item := asMap(data["item"]); item != nil && strOf(item["type"]) == "message" {
+				t.emitCompletedMessageItem(item)
+				return
+			}
+		}
 		if b := t.blocks[outIdx]; b != nil && b.kind == "tool_use" && b.opened && !b.argsSeen {
 			// Done-only arguments fallback: some backends send NO arguments
 			// deltas and carry the full arguments only in the done item —

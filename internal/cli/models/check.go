@@ -72,6 +72,16 @@ func CheckProviderModels(cfg *configdomain.Config, provName string, ids []string
 
 	client := &http.Client{Timeout: cfg.Scheduling.Timeout(), Transport: upstreamproxy.AutoTransport()}
 
+	// Decisions-protocol providers (typesafe): the hinted protocol has no leg
+	// in the chat matrix (and no chat bases to probe against) — the matrix
+	// would drop every model as "not probed". Probe with the provider's own
+	// ProbeRequest instead (probe.Callable mirrors forward's base selection,
+	// including the decisions_base_url fallback).
+	if hint := provider.ProtocolHint(provCfg.Provider, ""); hint != "" &&
+		hint != "openai" && hint != "anthropic" && hint != "responses" {
+		return checkDecisionsProviderModels(provName, provCfg, impl, client, ids)
+	}
+
 	probed := probe.ProbeModels(context.Background(), client, provCfg, impl, ids, probeConcurrency)
 	protocols = make(map[string]runtimewire.ModelProtocols, len(probed))
 	for _, r := range probed {
@@ -92,6 +102,35 @@ func CheckProviderModels(cfg *configdomain.Config, provName string, ids []string
 			kept = append(kept, r.ID)
 		} else {
 			dropped = append(dropped, DropReason{Model: r.ID, Status: legStatus(r.Legs), Reason: legsSummary(r.Legs)})
+		}
+	}
+	persistModelCaps(provName, provCfg, protocols)
+	return kept, dropped, protocols, nil
+}
+
+// checkDecisionsProviderModels is CheckProviderModels for decisions-protocol
+// providers (typesafe): each candidate is probed with the provider's own
+// System One probe (probe.Callable) instead of the chat matrix. The returned
+// protocols matrix records explicit No on every chat leg — decisions has no
+// leg there, and the hint resolves the backend protocol before the matrix is
+// ever consulted.
+func checkDecisionsProviderModels(
+	provName string,
+	provCfg configdomain.Provider,
+	impl provider.Provider,
+	client *http.Client,
+	ids []string,
+) (kept []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, err error) {
+	protocols = make(map[string]runtimewire.ModelProtocols, len(ids))
+	for _, id := range ids {
+		ok, status, reason := probe.Callable(context.Background(), client, provCfg, impl, id)
+		protocols[id] = runtimewire.ModelProtocols{
+			Chat: runtimewire.No, Anthropic: runtimewire.No, Responses: runtimewire.No,
+		}
+		if ok {
+			kept = append(kept, id)
+		} else {
+			dropped = append(dropped, DropReason{Model: id, Status: status, Reason: "decisions " + reason})
 		}
 	}
 	persistModelCaps(provName, provCfg, protocols)

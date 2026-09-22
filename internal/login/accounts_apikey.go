@@ -13,7 +13,8 @@ import (
 // Bearer-GET probe), or "" when neither is set (login skips validation). It is
 // field-based (not provider_id-based): providers with a real usage API set
 // usage_url (zhipu/deepseek/volcengine/kimi-code → unchanged); providers without
-// one (qwen-plan) validate against openai_base_url/models. Shared by the
+// one validate against openai_base_url/models (qwen-plan) or, for pure-decisions
+// providers (typesafe), decisions_base_url/models. Shared by the
 // "Validating…" message gate and AddApikeyAccount's ValidateKeyBearerGET call.
 func ApiKeyValidationURL(prov configdomain.Provider) string {
 	if prov.UsageURL != "" {
@@ -21,6 +22,9 @@ func ApiKeyValidationURL(prov configdomain.Provider) string {
 	}
 	if prov.OpenAIBaseURL != "" {
 		return strings.TrimRight(prov.OpenAIBaseURL, "/") + "/models"
+	}
+	if prov.DecisionsBaseURL != "" {
+		return strings.TrimRight(prov.DecisionsBaseURL, "/") + "/models"
 	}
 	return ""
 }

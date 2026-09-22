@@ -87,7 +87,14 @@ var (
 	// modeMu guards the process-level config mode and the cached resolution.
 	// SetProcessMode runs at config load points — including serve reload, while
 	// request-path readers may resolve concurrently — so the cache must be
-	// re-armable and race-clean (a sync.Once cannot).
+	// re-armable and race-clean (a sync.Once cannot). The auto-mode keychain
+	// probe is NEVER run under this mutex: it shells out to the OS keychain
+	// bounded by keychainOpTimeout, and each serve-reload re-arm re-triggers
+	// it — holding modeMu across it would block every ResolvedMode/Ref.Load
+	// reader for the probe's full budget (A13). Resolution therefore
+	// snapshots its inputs under the lock, resolves unlocked, and re-checks
+	// before committing; concurrent resolutions may duplicate the probe
+	// (first committer wins), which is harmless.
 	modeMu         sync.Mutex
 	configMode     Mode
 	resolved       Mode
@@ -117,19 +124,47 @@ func ResolvedMode() Mode {
 }
 
 // EffectiveMode returns the effective storage mode and where it came from.
+// The auto-mode keychain probe runs outside modeMu (see the modeMu comment):
+// a slow probe delays only the resolutions that triggered it, never readers
+// served — or waiting to be served — from the cache.
 func EffectiveMode() (Mode, ModeSource) {
-	modeMu.Lock()
-	defer modeMu.Unlock()
-	if !resolvedOK {
-		resolved, resolvedSource = computeModeLocked()
-		resolvedOK = true
-	}
-	return resolved, resolvedSource
+	env := strings.ToLower(strings.TrimSpace(os.Getenv(envCredStore)))
+	return effectiveMode(env, testing.Testing())
 }
 
-func computeModeLocked() (Mode, ModeSource) {
-	env := strings.ToLower(strings.TrimSpace(os.Getenv(envCredStore)))
-	return resolveMode(env, configMode, testing.Testing(), keychainAvailable)
+// effectiveMode resolves and caches the mode. Inputs (env snapshot, config
+// mode) are captured under modeMu; resolveMode — which in auto mode probes
+// the OS keychain, an external call bounded by keychainOpTimeout — runs
+// UNLOCKED; the result is committed only when SetProcessMode has not
+// re-armed in the meantime (a stale resolution is recomputed, never cached).
+// Split from EffectiveMode so tests can drive the non-test-binary probe
+// path hermetically through the keychainOps seam.
+func effectiveMode(env string, testBinary bool) (Mode, ModeSource) {
+	for {
+		modeMu.Lock()
+		if resolvedOK {
+			mode, source := resolved, resolvedSource
+			modeMu.Unlock()
+			return mode, source
+		}
+		cfg := configMode
+		modeMu.Unlock()
+
+		mode, source := resolveMode(env, cfg, testBinary, keychainAvailable)
+
+		modeMu.Lock()
+		if configMode != cfg {
+			// SetProcessMode re-armed while this resolution ran unlocked;
+			// caching a result computed from the pre-re-arm config would
+			// suppress the re-arm. Recompute from fresh state instead.
+			modeMu.Unlock()
+			continue
+		}
+		resolved, resolvedSource = mode, source
+		resolvedOK = true
+		modeMu.Unlock()
+		return mode, source
+	}
 }
 
 // resolveMode maps (env override, config mode, test-binary guard, keychain
@@ -241,7 +276,7 @@ func (r Ref) Load() ([]byte, error) {
 		return nil, err
 	}
 	if serr := keychainOps.Set(serviceName, r.Name, data); serr != nil {
-		r.rollbackNewKeychainOrigin(hadOrigin)
+		r.rollbackKeychainOriginAfterSetFailure(hadOrigin, serr)
 		if errors.Is(serr, ErrEntryTooLarge) {
 			// The blob physically cannot fit this backend — deterministic,
 			// and nothing was destroyed. Keep serving the plaintext copy
@@ -275,7 +310,7 @@ func (r Ref) Save(blob []byte) error {
 		return err
 	}
 	if err := keychainOps.Set(serviceName, r.Name, blob); err != nil {
-		r.rollbackNewKeychainOrigin(hadOrigin)
+		r.rollbackKeychainOriginAfterSetFailure(hadOrigin, err)
 		return err
 	}
 	if _, err := os.Stat(r.Path); err == nil {
@@ -351,7 +386,9 @@ const (
 // written before the keychain entry so a successful secret write can never be
 // left without the provenance needed for cleanup after switching to file mode.
 // The bool reports whether a marker already existed, allowing a failed backend
-// write to roll back only state created by that attempt.
+// write to roll back only state created by that attempt — and only for
+// failure classes that prove nothing was written (see
+// rollbackKeychainOriginAfterSetFailure).
 func (r Ref) persistKeychainOrigin() (bool, error) {
 	markerPath := r.Path + keychainOriginSuffix
 	info, err := os.Lstat(markerPath)
@@ -377,6 +414,23 @@ func (r Ref) persistKeychainOrigin() (bool, error) {
 func (r Ref) rollbackNewKeychainOrigin(hadOrigin bool) {
 	if !hadOrigin {
 		_ = os.Remove(r.Path + keychainOriginSuffix)
+	}
+}
+
+// rollbackKeychainOriginAfterSetFailure decides whether a failed
+// keychainOps.Set may drop the origin marker this attempt created. Only
+// ErrEntryTooLarge qualifies: the size ceiling is pre-checked before the
+// backend is ever touched, so nothing can have been written. ErrUnavailable
+// includes the timeout path whose abandoned goroutine may still complete the
+// write later (keychain.go, keychainOpTimeout), and any other class is
+// equally ambiguous — both keep the marker. A write that silently succeeds
+// without provenance can never be cleaned by a later Delete: switching back
+// to file mode would leave the secret in the OS keychain forever (C-1). A
+// marker left behind by a write that never landed costs only a tolerated
+// not-found on the next Delete.
+func (r Ref) rollbackKeychainOriginAfterSetFailure(hadOrigin bool, serr error) {
+	if errors.Is(serr, ErrEntryTooLarge) {
+		r.rollbackNewKeychainOrigin(hadOrigin)
 	}
 }
 

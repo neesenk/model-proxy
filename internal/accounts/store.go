@@ -340,27 +340,34 @@ func (s Store) Save(name, providerID string, p Pool) error {
 // PoolPath(name)+".lock": exactly one process can create it, the holder removes
 // it on return (ALWAYS, even on fn error). A crash strands a stale lockfile,
 // recovered by mtime — if older than poolLockStaleAge, a waiter removes it and
-// retries the create. SAFETY: the lock is held ONLY for the ms-scale
-// load→modify→save, NEVER during user input (see runApiKeyLoginWithInput /
-// cmdLogout, which read stdin outside the lock); poolLockStaleAge therefore
-// dwarfs any legitimate hold, so stealing a >poolLockStaleAge lockfile can never
-// race a live saver. Read-only callers (buildProviders, cmdUsage, FetchModels,
-// poolVirtuals) skip the lock — atomic rename already gives them a consistent
-// (whole-file) read.
+// retries the create. A LIVE holder heartbeats the lockfile mtime every
+// poolLockStaleAge/3 (see withLock): keychain-mode saves legally hold the lock
+// for minutes — each keychain op allows up to 30s for a GUI unlock prompt and
+// one save performs several — so staleness must mean "the heartbeat stopped",
+// not "60s passed". The lock is held ONLY for the load→modify→save and NEVER
+// during user input (see runApiKeyLoginWithInput / cmdLogout, which read
+// stdin outside the lock). Read callers still never WAIT for the lock —
+// atomic rename gives them a consistent whole-file read — but the two read
+// paths that persist as a side effect (keychain restore and lazy-migration
+// rewrites) grab it non-blockingly via tryPoolLock and skip the write when
+// contended, so an unlocked read can never race a locked save.
 const (
-	poolLockRetry    = 50 * time.Millisecond
-	poolLockMaxWait  = 10 * time.Second
-	poolLockStaleAge = 60 * time.Second
+	poolLockRetry     = 50 * time.Millisecond
+	poolLockMaxWait   = 10 * time.Second
+	poolLockStaleAge  = 60 * time.Second
+	poolLockBeatEvery = poolLockStaleAge / 3
 )
 
 func (s Store) WithLock(name string, fn func() error) error {
-	return s.withLock(name, fn, time.Sleep)
+	return s.withLock(name, fn, time.Sleep, poolLockBeatEvery)
 }
 
 // withLock is the lock acquisition core. wait is supplied by the production
 // wrapper as time.Sleep; accepting it here lets concurrency tests observe a
 // real contention point and release the holder without timing assumptions.
-func (s Store) withLock(name string, fn func() error, wait func(time.Duration)) error {
+// beat is the heartbeat interval (non-positive → poolLockBeatEvery), also
+// relaxed by tests.
+func (s Store) withLock(name string, fn func() error, wait func(time.Duration), beat time.Duration) error {
 	lockPath := s.PoolPath(name) + ".lock"
 	// Ensure the parent (~/.model-proxy) exists before the O_CREATE below —
 	// O_CREATE does not create parent dirs, and on a first-ever login savePool
@@ -401,8 +408,57 @@ func (s Store) withLock(name string, fn func() error, wait func(time.Duration)) 
 		}
 		wait(poolLockRetry)
 	}
-	defer os.Remove(lockPath)
+	// Hold heartbeat: refresh the lockfile mtime while this holder is alive
+	// so waiters' staleness check never fires under a legitimate (possibly
+	// minutes-long, keychain-mode) hold — see the WithLock contract. The
+	// goroutine is joined BEFORE the lockfile is removed so a late tick can
+	// never touch a successor's lockfile.
+	stopBeat := make(chan struct{})
+	beatStopped := make(chan struct{})
+	go func() {
+		defer close(beatStopped)
+		if beat <= 0 {
+			beat = poolLockBeatEvery
+		}
+		ticker := time.NewTicker(beat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopBeat:
+				return
+			case <-ticker.C:
+				now := time.Now()
+				_ = os.Chtimes(lockPath, now, now)
+			}
+		}
+	}()
+	defer func() {
+		close(stopBeat)
+		<-beatStopped
+		_ = os.Remove(lockPath)
+	}()
 	return fn()
+}
+
+// tryPoolLock attempts a NON-BLOCKING grab of the pool's cross-process lock,
+// for read paths that persist as a side effect (keychain restore and
+// lazy-migration rewrites). It never waits: when a mutator already holds the
+// lock — or the caller itself is inside WithLock — it returns ok=false and
+// the caller must SKIP its rewrite (the on-disk shape stays; a later
+// uncontended read retries it) instead of racing the locked save into a
+// last-writer-wins pool loss.
+func (s Store) tryPoolLock(name string) (release func(), ok bool) {
+	lockPath := s.PoolPath(name) + ".lock"
+	if err := s.ensureDirectory(); err != nil {
+		return nil, false
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, false
+	}
+	fmt.Fprintf(f, "%d\n", os.Getpid())
+	f.Close()
+	return func() { _ = os.Remove(lockPath) }, true
 }
 
 // AccountID returns a stable per-account identifier for dedup + virtual-id

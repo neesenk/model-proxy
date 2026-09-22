@@ -426,10 +426,16 @@ func (p *Proxy) mcpDo(ctx context.Context, snap RuntimeSnapshot, srv configdomai
 			return nil, 0, err
 		}
 		// Provider-level config headers layer on top (mirrors the probe
-		// recipe minus ExtraHeaders, which are LLM-chat-specific).
+		// recipe minus ExtraHeaders, which are LLM-chat-specific). env:VAR
+		// values resolve at send time like the forward path (a missing
+		// variable fails closed).
 		if provCfg, ok := configdomain.ProviderConfig(snap.Cfg, snap.ParentOf, account); ok {
 			for k, v := range provCfg.Headers {
-				upReq.Header.Set(k, v)
+				resolved, err := configdomain.ResolveHeaderValue(k, v)
+				if err != nil {
+					return nil, 0, err
+				}
+				upReq.Header.Set(k, resolved)
 			}
 		}
 	}

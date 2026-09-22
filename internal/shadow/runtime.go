@@ -215,7 +215,11 @@ func (runtime *Runtime) Execute(ctx context.Context, job Job) Result {
 		result.Err = err
 		return result
 	}
-	job.Plan.ApplyConfiguredHeaders(req.Header)
+	if err := job.Plan.ApplyConfiguredHeaders(req.Header); err != nil {
+		result.Request = req
+		result.Err = err
+		return result
+	}
 	provider.ExtraHeaders(req, job.Plan.UpstreamPath())
 
 	result.Request = req

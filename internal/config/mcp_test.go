@@ -257,6 +257,56 @@ func TestResolveMCPHeaders(t *testing.T) {
 	}
 }
 
+// TestHeaderNameSensitive pins the provider-headers credential-name guard:
+// the classic auth/cookie headers plus envKeySensitive's credential-shaped
+// segment vocabulary (shared with the mcp env: guard).
+func TestHeaderNameSensitive(t *testing.T) {
+	sensitive := []string{"Authorization", "authorization", "Proxy-Authorization", "Cookie", "cookie", "X-Api-Key", "api-key", "X-Auth-Token", "X-Secret-Header", "x_credential"}
+	for _, name := range sensitive {
+		if !headerNameSensitive(name) {
+			t.Errorf("headerNameSensitive(%q) = false, want true", name)
+		}
+	}
+	benign := []string{"x-ccswitch-client", "User-Agent", "X-Request-Id", "Accept", "X-Model-Hint", "Z_AI_MODE"}
+	for _, name := range benign {
+		if headerNameSensitive(name) {
+			t.Errorf("headerNameSensitive(%q) = true, want false", name)
+		}
+	}
+}
+
+// TestResolveHeaderValue pins the provider-headers env: expansion semantics
+// against ResolveMCPHeaders: a valid env:VAR resolves to the variable's
+// current value, an unset variable is a fail-closed error (silently dropping
+// a configured auth header would surface as confusing upstream 401s), and a
+// non-reference value is a benign-header literal that passes through.
+func TestResolveHeaderValue(t *testing.T) {
+	t.Setenv("PROVIDER_HEADER_TOKEN", "tok-123")
+	got, err := ResolveHeaderValue("Authorization", "env:PROVIDER_HEADER_TOKEN")
+	if err != nil || got != "tok-123" {
+		t.Fatalf("resolve = (%q, %v), want tok-123", got, err)
+	}
+	if _, err := ResolveHeaderValue("Authorization", "env:DEFINITELY_UNSET_VAR_XYZ"); err == nil || !strings.Contains(err.Error(), "not set") {
+		t.Fatalf("unset env must error like ResolveMCPHeaders: %v", err)
+	}
+	// The error names the header and the variable, never the value.
+	if _, err := ResolveHeaderValue("X-Api-Key", "env:DEFINITELY_UNSET_VAR_XYZ"); err == nil || !strings.Contains(err.Error(), `headers["X-Api-Key"]: environment variable DEFINITELY_UNSET_VAR_XYZ is not set`) {
+		t.Fatalf("unset env error shape: %v", err)
+	}
+	// Literal values (benign names) pass through unchanged, env:-prefixed or not.
+	if got, err := ResolveHeaderValue("X-Client", "0.2.7"); err != nil || got != "0.2.7" {
+		t.Fatalf("literal passthrough = (%q, %v)", got, err)
+	}
+	if got, err := ResolveHeaderValue("X-Client", "env:bad-var"); err != nil || got != "env:bad-var" {
+		t.Fatalf("malformed reference stays literal = (%q, %v)", got, err)
+	}
+	// Empty-but-set variable resolves to "" (allowed), distinct from unset.
+	t.Setenv("PROVIDER_EMPTY_HEADER", "")
+	if got, err := ResolveHeaderValue("X-Empty", "env:PROVIDER_EMPTY_HEADER"); err != nil || got != "" {
+		t.Fatalf("empty-but-set = (%q, %v)", got, err)
+	}
+}
+
 func TestMCPTransportValidation(t *testing.T) {
 	cfg := mcpBaseConfig()
 	cfg.MCP = map[string]MCPServer{

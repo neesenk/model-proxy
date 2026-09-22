@@ -103,6 +103,14 @@ OAuth device flow（从 codex-rs 源码确认）：issuer `https://auth.openai.c
 - Agent Plan 的 5h/每日/周/月额度在 **GetAFPUsage**（火山引擎签名 OpenAPI：`Action=GetAFPUsage&Version=2024-01-01&serviceCode=ark`，管控面，HMAC-SHA256/V4，需 AccessKey/SecretKey）—— Ark API Key（Bearer）调不了 GetAFPUsage，但能调 `/models`（`login` 用作 key 校验）。`internal/provider/volcengine_sign.go` 做 V4 签名（CredentialScope `{date}/cn-beijing/ark/request`，signing key 链 SK→kDate→kRegion→kService→kSigning，**末项 `"request"` 非 `"volcengine_request"`**；签名头仅 `host;x-date`，**不含 `x-content-sha256`**）。`login volcengine` 收 Ark API Key（必填）+ AK/SK（可选，仅 chat 可缺省）；`login` 用 `usage_url`（Bearer GET `/api/plan/v3/models`）验 Ark Key，可选 AK/SK 经 GetAFPUsage 验证（401/403 拒，其余放行）。`usage volcengine` 解析 `Result.{AFPFiveHour,AFPDaily,AFPWeekly,AFPMonthly}`（各 `Quota/Used/ResetTime`）。`models refresh` 调 **ListArkAgentPlanModel**（同理 V4 签名）解析 `Result.Datas[].ModelID`，经正则过滤 + endpoint 探测后写。未配 AK/SK 退化列 config 模型。
 - 模型 ID 是模型名（如 `doubao-seed-1-8-251228`），非推理接入点 endpoint id。
 
+## TypeSafe System One 契约（官方文档）
+
+- decisions base `https://api.typesafe.ai/v1`（`decisions_base_url` 配置；OpenRouter 兼容同一 shape，用 `openai_base_url: https://openrouter.ai/api/v1` 走回落即可）。端点 `POST /systemone`，`Authorization: Bearer <key>`；请求 `{model, state, questions}`（questions 三种题型：`choice` criteria 为 map[string]string ≤255 项、`score` criteria 为 []string 2–10 级、`noul` 无 criteria），响应 `{model, answers, usage:{input_tokens, output_tokens}}`（OpenRouter 附加 `id`/`provider`/`usage.cost`，解析容忍）。答案 typed：choice 返回 `choice`+逐项 `probabilities`+`confidence`，score 返回可落在级别之间的分值，noul 返回 0..1 概率（无 confidence）。无流式、无 tools、纯文本（不看图）。
+- 模型 id：`jev-latest`（滚动别名，会漂移）/`jev-1.13.0`（精确版本，pin 用）；调过阈值的部署应 pin。定价输入 $0.042/M token、输出免费；官方延迟 70–500ms。**实测怪癖（2026-09）**：`GET /v1/models` 只返回短家族 id（如 `jev-1.13`），而 `/systemone` 拒绝它（`api_usage_error: Unknown model`）——可调用的版本 id 要补 `.0`（`jev-1.13.0`）；`FilterModelIDs` 把短 id 改写成可调用形（别名 `jev-latest` 不在 /v1/models 里，preset 手工带）。
+- `GET /v1/models` 存在（`login typesafe` 的 key 校验与 `FetchModels` 均走它，Bearer）——返回 shape 以实测为准，解析失败时在 provider 内收敛，不扩散。
+- **无公开 billing/quota 接口**：`Quota()` 返回 `BillingUnknown` + 控制台 Notes（`https://console.typesafe.ai`），CLI `usage typesafe` 打印计费说明 + config 模型列表。
+- `ProbeRequest` 覆盖为 `POST /systemone` + 最小 noul 题（probe 框架在仅 decisions_base_url 时用其作 base，不重写 path/body）；`AuthHeaders` 用 ApiKeyBase 默认 Bearer（剥离 x-api-key）；`RewriteRequest` no-op；`FilterModelIDs` baseProbe 默认透传；`ProtocolHint("typesafe") = "decisions"`（隐式路由自动声明，chat 客户端打到 target 由 fail-closed stub 拒绝）。
+
 ## models.dev 元数据契约（`internal/catalog`，实测）
 
 - 数据源 `GET https://models.dev/api.json`（raw 3.05 MB）。gzip 后 ~286 KB（Go Transport 自动 gzip——**勿手动设 Accept-Encoding**，否则关掉自动解压）；`If-None-Match`→304 返回 0 字节。磁盘缓存只存去重 slim 投影（`by_name` 244 项，~150 KB），**绝不存 3 MB blob**。

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 )
@@ -111,6 +112,48 @@ func forceFileMode(t *testing.T) {
 		os.Unsetenv(envCredStore)
 		resetResolution()
 	})
+}
+
+// scriptedProbe scripts the auto-mode reachability probe for the
+// EffectiveMode concurrency tests: every Available call is announced on
+// entered and then waits for release to close (later calls pass straight
+// through a closed release); failAfter == 0 stays reachable forever,
+// otherwise only the first failAfter calls report reachable. The embedded
+// fakeKeychain satisfies the rest of the seam — nothing on it is expected to
+// run in these tests.
+type scriptedProbe struct {
+	*fakeKeychain
+	entered   chan struct{}
+	release   chan struct{}
+	failAfter int
+
+	mu    sync.Mutex
+	calls int
+}
+
+func newScriptedProbe(failAfter int) *scriptedProbe {
+	return &scriptedProbe{
+		fakeKeychain: newFakeKeychain(true),
+		entered:      make(chan struct{}, 32),
+		release:      make(chan struct{}),
+		failAfter:    failAfter,
+	}
+}
+
+func (s *scriptedProbe) Available(_ string) bool {
+	s.mu.Lock()
+	s.calls++
+	n := s.calls
+	s.mu.Unlock()
+	s.entered <- struct{}{}
+	<-s.release
+	return s.failAfter == 0 || n <= s.failAfter
+}
+
+func (s *scriptedProbe) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
 }
 
 func TestResolvedModeEnvOverrides(t *testing.T) {
@@ -754,5 +797,213 @@ func TestRefDeletePureFileHistoryNeverTouchesKeychain(t *testing.T) {
 	fake.mu.Unlock()
 	if deleteCalls != 0 {
 		t.Fatalf("pure-file Delete touched keychain %d times", deleteCalls)
+	}
+}
+
+// A13 regression: the auto-mode keychain probe (external call, bounded by
+// keychainOpTimeout) must run WITHOUT modeMu — every serve-reload re-arm
+// re-triggers it, and holding the mutex across it would block all concurrent
+// ResolvedMode/Ref.Load readers for the probe's full budget. Concurrent
+// resolutions may duplicate the probe (first committer wins); all must agree.
+// effectiveMode is driven directly with testBinary=false because the
+// testing.Testing() guard keeps package-level auto mode off the real probe.
+func TestEffectiveModeKeepsLockFreeDuringAutoProbe(t *testing.T) {
+	probe := newScriptedProbe(0)
+	keychainOps = probe
+	t.Cleanup(func() { keychainOps = realKeychainProvider{} })
+	resetResolution()
+	t.Cleanup(resetResolution)
+
+	const readers = 8
+	type result struct {
+		mode   Mode
+		source ModeSource
+	}
+	results := make(chan result, readers)
+	for i := 0; i < readers; i++ {
+		go func() {
+			mode, source := effectiveMode(string(ModeAuto), false)
+			results <- result{mode, source}
+		}()
+	}
+	// All readers are now in flight inside the probe (each announced before
+	// blocking on release) — none can have committed yet.
+	for i := 0; i < readers; i++ {
+		<-probe.entered
+	}
+
+	// While the probe is blocked, modeMu must be free for other takers. The
+	// timeout is a failure watchdog, not the ordering mechanism.
+	acquired := make(chan struct{})
+	go func() {
+		modeMu.Lock()
+		close(acquired)
+		modeMu.Unlock()
+	}()
+	select {
+	case <-acquired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("modeMu is held while the auto-mode keychain probe is in flight")
+	}
+
+	close(probe.release)
+	for i := 0; i < readers; i++ {
+		select {
+		case r := <-results:
+			if r.mode != ModeKeychain || r.source != SourceEnv {
+				t.Fatalf("concurrent resolution = (%q, %q), want (keychain, env MP_CRED_STORE)", r.mode, r.source)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("EffectiveMode readers stalled after the probe was released")
+		}
+	}
+	// Every reader probed exactly once (duplicated probes are the documented
+	// cost), and the committed cache serves later readers without re-probing.
+	if calls := probe.count(); calls != readers {
+		t.Fatalf("probe calls = %d, want %d", calls, readers)
+	}
+	mode, source := effectiveMode(string(ModeAuto), false)
+	if mode != ModeKeychain || source != SourceEnv {
+		t.Fatalf("post-commit resolution = (%q, %q), want cached (keychain, env)", mode, source)
+	}
+	if calls := probe.count(); calls != readers {
+		t.Fatalf("cached resolution re-probed: %d calls", calls)
+	}
+}
+
+// A13 companion: a SetProcessMode re-arm landing while a probe is in flight
+// must invalidate that resolution's inputs — the stale result is recomputed
+// (and re-probed), never cached, keeping serve-reload semantics intact with
+// the probe outside the lock.
+func TestEffectiveModeRecomputesAfterRearmDuringProbe(t *testing.T) {
+	probe := newScriptedProbe(1) // first probe reachable, later ones not
+	keychainOps = probe
+	t.Cleanup(func() { keychainOps = realKeychainProvider{} })
+	resetResolution()
+	t.Cleanup(resetResolution)
+
+	type result struct {
+		mode   Mode
+		source ModeSource
+	}
+	results := make(chan result, 1)
+	go func() {
+		mode, source := effectiveMode(string(ModeAuto), false)
+		results <- result{mode, source}
+	}()
+	<-probe.entered
+	SetProcessMode(ModeKeychain) // serve-reload re-arm, mid-probe
+	close(probe.release)
+
+	select {
+	case r := <-results:
+		// The pre-re-arm probe answered reachable (keychain); only the
+		// recomputation with fresh inputs — whose probe answers unreachable —
+		// may be returned and cached.
+		if r.mode != ModeFile || r.source != SourceEnv {
+			t.Fatalf("resolution after mid-probe re-arm = (%q, %q), want recomputed (file, env)", r.mode, r.source)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolution stalled after mid-probe re-arm")
+	}
+	if calls := probe.count(); calls != 2 {
+		t.Fatalf("probe calls = %d, want initial plus exactly one recomputation", calls)
+	}
+	mode, source := effectiveMode(string(ModeAuto), false)
+	if mode != ModeFile || source != SourceEnv {
+		t.Fatalf("cached resolution after re-arm = (%q, %q), want (file, env)", mode, source)
+	}
+	if calls := probe.count(); calls != 2 {
+		t.Fatalf("cached resolution re-probed: %d calls", calls)
+	}
+}
+
+// C-1 regression: a keychain Set failing with ErrUnavailable models the
+// timeout path whose abandoned goroutine may still land the write later. The
+// origin marker must survive so a later Delete — even after switching back to
+// file mode — can still clean an entry that materialized late; a marker left
+// behind by a write that never landed costs only a tolerated not-found.
+func TestRefSaveSetTimeoutKeepsOriginMarkerAndStaysDeletable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex_oauth_auth.json")
+	fake := newFakeKeychain(true)
+	fake.setErr = ErrUnavailable
+	useFakeKeychain(t, fake)
+
+	ref := NewRef(path)
+	if err := ref.Save([]byte(`{"tokens":{"access_token":"secret"}}`)); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Save against timing-out backend = %v, want ErrUnavailable", err)
+	}
+	// (a) Provenance survives the ambiguous failure.
+	marker, err := os.ReadFile(path + keychainOriginSuffix)
+	if err != nil || string(marker) != keychainOriginContent {
+		t.Fatalf("origin marker after timed-out Set = (%q, %v), want retained marker", marker, err)
+	}
+	if _, err := fake.Get(serviceName, ref.Name); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("fake backend unexpectedly holds the entry: %v", err)
+	}
+
+	// (b) After switching back to file mode, Delete tolerates the absent
+	// keychain entry (backend not-found) and still cleans the marker.
+	t.Setenv(envCredStore, string(ModeFile))
+	resetResolution()
+	fake.mu.Lock()
+	fake.setErr = nil
+	fake.delErr = ErrNotFound // the entry genuinely never landed
+	fake.mu.Unlock()
+	if err := ref.Delete(); err != nil {
+		t.Fatalf("Delete with absent keychain entry = %v, want tolerated nil", err)
+	}
+	fake.mu.Lock()
+	delCalls := fake.delCalls
+	fake.mu.Unlock()
+	if delCalls != 1 {
+		t.Fatalf("keychain Delete calls = %d, want 1 (retained marker drove the cleanup)", delCalls)
+	}
+	if _, err := os.Stat(path + keychainOriginSuffix); !os.IsNotExist(err) {
+		t.Fatal("origin marker must be cleaned once the backend reports absence")
+	}
+}
+
+// C-1 companion for the lazy-migration path: a migration Set failing with
+// ErrUnavailable keeps the plaintext authoritative AND keeps the origin
+// marker, so the cross-mode cleanup contract above holds there too.
+func TestRefLoadMigrationSetTimeoutKeepsOriginMarker(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kimi-code_apikeys.json")
+	legacy := []byte(`{"version":1,"accounts":[{"id":"a1","label":"a1","api_key":"sk-x"}]}`)
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFakeKeychain(true)
+	fake.setErr = ErrUnavailable
+	useFakeKeychain(t, fake)
+
+	ref := NewRef(path)
+	if _, err := ref.Load(); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("migrating Load against timing-out backend = %v, want ErrUnavailable", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != string(legacy) {
+		t.Fatalf("plaintext must survive the failed migration: (%q, %v)", got, err)
+	}
+	marker, err := os.ReadFile(path + keychainOriginSuffix)
+	if err != nil || string(marker) != keychainOriginContent {
+		t.Fatalf("origin marker after timed-out migration Set = (%q, %v), want retained marker", marker, err)
+	}
+
+	t.Setenv(envCredStore, string(ModeFile))
+	resetResolution()
+	fake.mu.Lock()
+	fake.setErr = nil
+	fake.delErr = ErrNotFound
+	fake.mu.Unlock()
+	if err := ref.Delete(); err != nil {
+		t.Fatalf("Delete with absent keychain entry = %v, want tolerated nil", err)
+	}
+	if _, err := os.Stat(path + keychainOriginSuffix); !os.IsNotExist(err) {
+		t.Fatal("origin marker must be cleaned once the backend reports absence")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("plaintext must be removed by the successful Delete")
 	}
 }

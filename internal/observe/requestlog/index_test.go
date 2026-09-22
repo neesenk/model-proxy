@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -552,6 +553,48 @@ func TestIndexDetailFallbackScansOnlyUnindexedTail(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("torn-bad detail = %+v, want empty (a torn write is not consumable)", got)
+	}
+}
+
+// TestIndexDetailFallbackReturnsAllTailMatches pins the tail-scan fallback's
+// multi-record contract: retried attempts share one request id, and the
+// fallback must return EVERY un-indexed record for that id (newest first),
+// bounded by indexDetailLimit — the same shape as Detail's indexed path, not
+// just the first hit.
+func TestIndexDetailFallbackReturnsAllTailMatches(t *testing.T) {
+	dir := t.TempDir()
+	writeIndexFixture(t, dir)
+	indexer := newTestIndexer(t, dir)
+	mustReconcile(t, indexer)
+
+	// Two un-indexed records sharing one id (a failed attempt retried).
+	appendRecordLines(t, filepath.Join(dir, "requests-20260730.log"),
+		Record{Ts: "2026-07-30T06:00:00Z", RequestID: "retry-me", Attempt: 1, Status: 500, ResponseBody: "attempt-1"},
+		Record{Ts: "2026-07-30T06:00:05Z", RequestID: "retry-me", Attempt: 2, Status: 200, ResponseBody: "attempt-2"},
+	)
+	got, err := indexer.Detail("retry-me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("detail = %d records, want 2 (both un-indexed attempts)", len(got))
+	}
+	if got[0].ResponseBody != "attempt-2" || got[1].ResponseBody != "attempt-1" {
+		t.Fatalf("detail order = [%s, %s], want newest first", got[0].ResponseBody, got[1].ResponseBody)
+	}
+
+	// The aggregate is capped at indexDetailLimit, like the indexed path.
+	many := make([]Record, indexDetailLimit+10)
+	for i := range many {
+		many[i] = Record{Ts: fmt.Sprintf("2026-07-31T01:%02d:00Z", i), RequestID: "burst", Status: 200, ResponseBody: strconv.Itoa(i)}
+	}
+	appendRecordLines(t, filepath.Join(dir, "requests-20260731.log"), many...)
+	got, err = indexer.Detail("burst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != indexDetailLimit {
+		t.Fatalf("detail = %d records, want capped at %d", len(got), indexDetailLimit)
 	}
 }
 

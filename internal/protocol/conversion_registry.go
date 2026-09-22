@@ -17,12 +17,14 @@ const (
 	protocolAnthropic = wire.Anthropic
 	protocolOpenAI    = wire.OpenAI
 	protocolResponses = wire.Responses
+	protocolDecisions = wire.Decisions
 )
 
 var supportedWireProtocols = [...]wireProtocol{
 	protocolAnthropic,
 	protocolOpenAI,
 	protocolResponses,
+	protocolDecisions,
 }
 
 func parseWireProtocol(value string) (wireProtocol, bool) {
@@ -116,6 +118,35 @@ var protocolConversions = map[conversionPair]protocolConversion{
 			return newOpenAIToResponsesSSENS(reader, model, context)
 		},
 	},
+	// Every pair involving decisions is a registered fail-closed stub: the
+	// registry's completeness contract (N×(N-1) pairs) is met, while any
+	// attempted chat↔decisions conversion refuses with a typed unsupported
+	// error so the forward path skips the target instead of passing a chat
+	// body to a decisions endpoint (or vice versa).
+	{client: protocolDecisions, backend: protocolAnthropic}: decisionsConversionRefused(protocolDecisions, protocolAnthropic),
+	{client: protocolDecisions, backend: protocolOpenAI}:    decisionsConversionRefused(protocolDecisions, protocolOpenAI),
+	{client: protocolDecisions, backend: protocolResponses}: decisionsConversionRefused(protocolDecisions, protocolResponses),
+	{client: protocolAnthropic, backend: protocolDecisions}: decisionsConversionRefused(protocolAnthropic, protocolDecisions),
+	{client: protocolOpenAI, backend: protocolDecisions}:    decisionsConversionRefused(protocolOpenAI, protocolDecisions),
+	{client: protocolResponses, backend: protocolDecisions}: decisionsConversionRefused(protocolResponses, protocolDecisions),
+}
+
+// decisionsConversionRefused builds the fail-closed stub for one pair
+// involving the decisions protocol: decisions carries typed state/questions,
+// not chat messages, so no cross-protocol conversion can exist. Request and
+// response refuse with a typed unsupported error; the stream function is
+// unreachable (request conversion fails first) and only satisfies the
+// registry's non-nil contract.
+func decisionsConversionRefused(client, backend wireProtocol) protocolConversion {
+	refuse := func() error {
+		return unsupportedFeature(string(client), string(backend), "decisions_protocol",
+			"the decisions protocol (System One typed questions) has no chat-protocol conversion")
+	}
+	return protocolConversion{
+		request:  func([]byte, convertReqOpts) ([]byte, error) { return nil, refuse() },
+		response: func([]byte, r2cCtx) ([]byte, error) { return nil, refuse() },
+		stream:   func(r io.Reader, _ string, _ r2cCtx) io.Reader { return r },
+	}
 }
 
 func lookupProtocolConversion(client, backend string) (protocolConversion, bool) {

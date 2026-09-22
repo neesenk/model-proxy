@@ -61,10 +61,14 @@ func List() ([]Preset, error) {
 		p := tpl.Providers[name]
 		models := append([]string(nil), p.Models...)
 		sort.Strings(models)
+		baseURL := p.OpenAIBaseURL
+		if baseURL == "" {
+			baseURL = p.DecisionsBaseURL // pure-decisions provider (typesafe)
+		}
 		out = append(out, Preset{
 			Name:       name,
 			ProviderID: p.Provider,
-			BaseURL:    p.OpenAIBaseURL,
+			BaseURL:    baseURL,
 			UsageURL:   p.UsageURL,
 			Billing:    p.Billing,
 			Models:     models,

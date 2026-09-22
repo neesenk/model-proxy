@@ -266,7 +266,7 @@ func newHarness() *harness {
 		NewHealthGate: func(parentOf map[string]string) targetexec.HealthGate { return gate },
 		NewEffects:    func(generation uint64) targetexec.Effects { return fx },
 		Schedule:      passthroughSchedule,
-		ShadowDispatch: func(runtime Snapshot, proto, backendProto, calledModel, exposed string, primary RouteTarget, primaryRequestID string, commit *targetexec.Commit) {
+		ShadowDispatch: func(runtime Snapshot, proto, backendProto, calledModel, exposed string, primary RouteTarget, primaryRequestID, primaryAgent, primarySession string, commit *targetexec.Commit) {
 			h.shadow = append(h.shadow, shadowCall{exposed: exposed, provider: primary.Provider})
 		},
 		ResolveBackendProto: func(declared, provName string, provCfg Provider, model, clientProto string, parentOf map[string]string) (string, bool) {

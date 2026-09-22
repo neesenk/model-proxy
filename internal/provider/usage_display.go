@@ -371,3 +371,12 @@ func (p *QwenPlanProvider) Usage() error {
 	listConfigModels(p.cfg.Models)
 	return nil
 }
+
+func (p *TypeSafeProvider) Usage() error {
+	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(p.cfg.ProviderName)))
+	fmt.Printf("%s System One decisions (input $0.042/M tokens, output free)\n", display.Dim("Billing:    "))
+	fmt.Printf("%s %s\n", display.Dim("Usage:      "), display.Gray("(console-only; no public billing API)"))
+	fmt.Printf("%s %s\n", display.Dim("Details:    "), display.Cyan("https://console.typesafe.ai"))
+	listConfigModels(p.cfg.Models)
+	return nil
+}

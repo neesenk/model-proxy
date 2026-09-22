@@ -66,7 +66,12 @@ func fetchModelInfosBearer(cfg *Config, auth func(*http.Request) error) ([]Model
 }
 
 func fetchModelInfosBearerContext(ctx context.Context, cfg *Config, auth func(*http.Request) error) ([]ModelInfo, error) {
-	url := strings.TrimRight(cfg.OpenAIBaseURL, "/") + "/models"
+	return fetchModelInfosBearerURL(ctx, strings.TrimRight(cfg.OpenAIBaseURL, "/")+"/models", auth)
+}
+
+// fetchModelInfosBearerURL is the URL-explicit variant for providers whose
+// /models lives on a non-openai base (typesafe: decisions_base_url).
+func fetchModelInfosBearerURL(ctx context.Context, url string, auth func(*http.Request) error) ([]ModelInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err

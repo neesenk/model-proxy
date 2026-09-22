@@ -119,10 +119,12 @@ providers:
     openai_base_url: https://ark.cn-beijing.volces.com/api/plan/v3
     anthropic_base_url: https://ark.cn-beijing.volces.com/api/plan
     usage_url: https://ark.cn-beijing.volces.com/api/plan/v3/models
+    alias:
+      deepseek-v4.1-flash: deepseek-flash
     models:
       - deepseek-v4-flash
       - deepseek-v4-pro
-      - doubao-seed-evolving
+      - deepseek-v4.1-flash
       - glm-5.3
       - glm-5.3-flash
       - kimi-k3
@@ -174,6 +176,23 @@ providers:
       - qwen3.6-flash
       - glm-5.2
       - deepseek-v4-pro
+
+  # TypeSafe System One decisions API (Jev): a decision model returning typed,
+  # calibrated answers (choice/score/noul + probabilities) instead of text —
+  # for routing/classification/scoring inside software, not chat. API key via
+  # 'login typesafe' (console.typesafe.ai). Pure decisions-protocol provider:
+  # decisions_base_url only (no chat protocols); clients call POST
+  # /v1/decisions with {model, state, questions}; a chat-protocol client
+  # hitting these models fails closed (no conversion exists). jev-latest
+  # tracks the newest release; pin jev-1.13.0 (exact version) when tuned
+  # thresholds must not drift. Note: /v1/models advertises the SHORT family
+  # id (jev-1.13) which /systemone rejects — refresh rewrites it to jev-X.Y.0.
+  typesafe:
+    provider_id: typesafe
+    decisions_base_url: https://api.typesafe.ai/v1
+    models:
+      - jev-latest
+      - jev-1.13.0
 
 # routes: AUTO-DERIVED — this block is intentionally omitted. Every provider
 # model is exposed under its model name (or its provider-level alias) and all

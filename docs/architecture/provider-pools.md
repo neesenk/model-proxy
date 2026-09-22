@@ -96,12 +96,13 @@ kimi-code、qwen-plan）支持池化；aqp、codex 使用各自 OAuth/SSO 单账
 每个虚拟实例必须把自己的 API key 绑定到 `provider.Config.BoundAPIKey`；同一
 provider 实例的 `AuthHeaders` 为 forward 以及采用该通用认证入口的
 FetchModels、Usage/Quota 提供认证。volcengine 还必须把该账号的
-AccessKey/SecretKey 绑定到同一实例，供 V4-signed quota 调用；其 FetchModels
-仍是下述已知例外。不得恢复一套独立的 `cfg.Auth` 分支。
+AccessKey/SecretKey 绑定到同一实例，供 V4-signed quota 调用；FetchModels
+（ListArkAgentPlanModel）同样用该虚拟自己的 AK/SK 签名（残留边界见
+「已知边界」）。不得恢复一套独立的 `cfg.Auth` 分支。
 
 单账号池文件也必须 bind；不能因为只有一条记录而退回运行期文件读取。
 
-volcengine 每账号包含 `{api_key, access_key, secret_key}`。绑定凭据存在时，`resolveAKSK` 必须排他使用该账号，不得回落到兄弟账号文件。
+volcengine 每账号包含 `{api_key, access_key, secret_key}`。绑定凭据存在时，`resolveAKSK` 必须排他使用该账号，不得回落到兄弟账号文件。chat-only 虚拟（`BoundAPIKey` 非空、无 AK/SK）是合法形态：Quota 与 FetchModels 都必须直接报 AK/SK 未配置，不得回读 legacy 单账号文件——legacy 回读仅保留给未绑定的单账号实例，且经 credstore Ref 读取（keychain 模式同样覆盖）。
 
 ## Resolver
 
@@ -138,7 +139,7 @@ spread 提前。
 
 ## 已知边界
 
-volcengine `FetchModels` 尚未按账号完全绑定；池化时 `models refresh` 复用首个虚拟凭据。探测全失败时保留合并模型集，不写空。
+volcengine `FetchModels` 已按账号绑定：每个虚拟用自己的 AK/SK 签名 `ListArkAgentPlanModel`；chat-only 虚拟（无 AK/SK）返回 needs AK/SK 错误，不借用 legacy 单账号文件；未绑定的单账号实例传空 AK/SK，由实现经 credstore 回读 `<name>_apikey.json`。池化时 `models refresh` 仍取排序后首个虚拟——若该虚拟是 chat-only 则报 needs AK/SK，不会自动换用带 AK/SK 的兄弟虚拟。探测全失败时保留合并模型集，不写空。
 
 ## 回归测试
 

@@ -157,14 +157,16 @@ fallback/source 策略）。`routing.Planner` 只能由
 或任何 I/O owner。
 
 `internal/fusion` 是只依赖 `internal/config` 值类型的编排包：
-`Engine` 拥有 first-turn/tools/budget gate、panel fan-out、quorum/grace、
+`Engine` 拥有 first-turn/selector/tools/budget gate、panel fan-out、quorum/grace、
 judge、三协议 synthesis body 构造和 run 记录时序；`Registry` 拥有 200 条有界
 run ring、per-workflow aggregate 与 local-day budget。该包只经
-`fusion.Ports` 请求 generation-bound leg/synthesis 能力，不得访问 `Proxy`、
+`fusion.Ports` 请求 generation-bound leg/synthesis/selector 能力，不得访问 `Proxy`、
 HTTP client、runtime Manager、metrics/events/request log 或 reload-owned
 对象。管线侧 `fusionAdapter`（`internal/forward/fusion.go`）在一次 `fusionCtx.runtime` 上实现这些端口；
 panel/judge 仍使用共享 `targetexec.Plan`，synthesizer 仍通过唯一
-`newTargetAttempt → targetexec.Executor` 返回客户端。
+`newTargetAttempt → targetexec.Executor` 返回客户端；selector 判定调用在
+`internal/forward/fusion_select.go`（decisions wire shape 经 `internal/protocol`，
+`fusion.go` 受契约约束不得直接 import 它）。
 
 `internal/shadow` 拥有 reload-swappable `Runtime`：sample decision、非阻塞
 concurrency gate、专用 timeout client，以及基于已解析 `targetexec.Plan` 的

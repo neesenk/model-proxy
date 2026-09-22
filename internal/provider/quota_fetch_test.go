@@ -453,5 +453,44 @@ func TestVolcengineProvider_ResolveAKSK_EmptyFileField(t *testing.T) {
 	}
 }
 
+// TestVolcengineProvider_Quota_PooledChatOnly_IgnoresLegacyFile (A06
+// regression): a pooled chat-only virtual (BoundAPIKey set, AK/SK empty) is a
+// legal shape, and the legacy single-account cred file may still exist on disk
+// (pre-pool leftover) — its AK/SK belong to a DIFFERENT account and must never
+// be borrowed to sign GetAFPUsage. Quota reports not-configured, the legacy
+// marker key never enters any error string, and no signed call leaves the
+// process (the injected OpenAPI base fails the test if reached).
+func TestVolcengineProvider_Quota_PooledChatOnly_IgnoresLegacyFile(t *testing.T) {
+	dir := t.TempDir()
+	credFile := filepath.Join(dir, "volcengine_apikey.json")
+	if err := os.WriteFile(credFile,
+		[]byte(`{"api_key":"ark","access_key":"AKLEGACY-MARKER","secret_key":"SKLEGACY-MARKER"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	orig := volcengineOpenAPIBase
+	defer func() { volcengineOpenAPIBase = orig }()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("GetAFPUsage signed call must not happen for a chat-only pooled virtual")
+	}))
+	defer srv.Close()
+	volcengineOpenAPIBase = srv.URL
+
+	p := &VolcengineProvider{cfg: &Config{BoundAPIKey: "ark-chat-key", VolcengineCredFile: credFile}}
+	s, err := p.Quota()
+	if err != nil {
+		t.Fatalf("Quota() error=%v want nil (snapshot carries the failure)", err)
+	}
+	if s.Billing != BillingUnknown || s.Err != "AK/SK not configured" {
+		t.Errorf("got %+v want BillingUnknown/AK/SK not configured", s)
+	}
+	if strings.Contains(s.Err, "AKLEGACY-MARKER") {
+		t.Errorf("error must not carry the legacy file's access key marker: %q", s.Err)
+	}
+	ak, sk, rerr := p.resolveAKSK()
+	if rerr == nil || ak != "" || sk != "" {
+		t.Errorf("resolveAKSK pooled chat-only: ak=%q sk=%q err=%v want empty + error", ak, sk, rerr)
+	}
+}
+
 // keep time referenced (aqp parser uses time.Now via AsOf in other tests).
 var _ = time.Now

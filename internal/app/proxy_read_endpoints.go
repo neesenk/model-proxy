@@ -245,7 +245,7 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 	if proto == "" {
 		proto = "anthropic"
 	}
-	if proto != "anthropic" && proto != "openai" && proto != "responses" {
+	if proto != "anthropic" && proto != "openai" && proto != "responses" && proto != "decisions" {
 		writeJSON(http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("unknown proto %q", proto)})
 		return
 	}
@@ -485,6 +485,8 @@ func routePreviewCacheRequest(preview *http.Request, proto string) *http.Request
 		request.URL.Path = "/v1/chat/completions"
 	case "responses":
 		request.URL.Path = "/v1/responses"
+	case "decisions":
+		request.URL.Path = "/v1/decisions"
 	default:
 		request.URL.Path = "/v1/messages"
 	}

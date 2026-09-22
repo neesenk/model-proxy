@@ -66,6 +66,7 @@ type fusionCtx struct {
 // route's next target". workflow is the recipe name (registry/metrics key).
 func (p pipeline) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w http.ResponseWriter, r *http.Request, cacheKey string) bool {
 	engine := fusion.Engine{Registry: p.svc.FusionReg, GracePeriod: FusionGracePeriod}
+	profile := routing.ProfileRequest(fc.origBody)
 	result := engine.Run(r.Context(), fusion.Request{
 		Workflow:     workflow,
 		RunID:        fc.flc.RequestID,
@@ -73,9 +74,13 @@ func (p pipeline) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, 
 		Agent:        fc.agent,
 		Protocol:     fc.proto,
 		OriginalBody: fc.origBody,
-		HasTools:     routing.RequestHasTools(fc.origBody),
-		Recipe:       recipe,
-	}, fusionAdapter{pipe: p, context: fc, writer: w, request: r, cacheKey: cacheKey})
+		HasTools:     profile.HasTools,
+		Facts: fusion.RequestFacts{
+			HasImage:        profile.HasImage,
+			EstimatedTokens: profile.EstimatedTokens,
+		},
+		Recipe: recipe,
+	}, fusionAdapter{pipe: p, context: fc, writer: w, request: r, cacheKey: cacheKey, selector: recipe.Selector})
 	if p.svc.Metrics != nil {
 		p.svc.Metrics.Inc("fusion", result.Run.Workflow, counters.EvFusionRuns)
 		if result.Run.Degraded != "" {
@@ -91,6 +96,7 @@ type fusionAdapter struct {
 	writer   http.ResponseWriter
 	request  *http.Request
 	cacheKey string
+	selector *SelectorConfig
 }
 
 var _ fusion.Ports = fusionAdapter{}

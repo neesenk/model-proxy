@@ -98,8 +98,8 @@ func TestKeychainAvailableFollowsBackend(t *testing.T) {
 }
 
 // TestAutoModeNeverProbesRealKeychainInTests pins the hermeticity guard:
-// computeMode under testing.Testing() resolves to file mode without touching
-// the probe — even when a mock keychain would answer Available()==true.
+// EffectiveMode under testing.Testing() resolves to file mode without
+// touching the probe — even when a mock keychain would answer Available()==true.
 func TestAutoModeNeverProbesRealKeychainInTests(t *testing.T) {
 	resetResolution()
 	t.Cleanup(resetResolution)

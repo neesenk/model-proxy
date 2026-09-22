@@ -98,7 +98,9 @@ func (leg BufferedLeg) Do(ctx context.Context, body []byte) (status int, respBod
 		if err := impl.AuthHeaders(req); err != nil {
 			return status, nil, &BufferedLegBuildError{Err: fmt.Errorf("auth: %w", err)}
 		}
-		leg.Plan.ApplyConfiguredHeaders(req.Header)
+		if err := leg.Plan.ApplyConfiguredHeaders(req.Header); err != nil {
+			return status, nil, &BufferedLegBuildError{Err: fmt.Errorf("headers: %w", err)}
+		}
 		impl.ExtraHeaders(req, leg.Plan.UpstreamPath())
 
 		resp, err = leg.Client.Do(req)

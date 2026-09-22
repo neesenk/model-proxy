@@ -109,6 +109,11 @@ type TerminalWatcher struct {
 	terminal   bool   // client-acceptable terminal sequence seen
 	sawError   bool   // protocol-native error terminal seen upstream
 	respID     string // responses: response id tracked from the first event
+	// gaveUp: the scanner saw a single line exceed sseScanBuf (the shared SSE
+	// line cap). Terminal detection is disabled for the rest of the stream —
+	// the bytes still forward untouched, but no terminal is synthesized on a
+	// later end (the scanner can no longer prove one is missing).
+	gaveUp bool
 
 	// Delivery state.
 	synth   []byte // pending synthesized terminal, served before the end
@@ -162,12 +167,14 @@ func (w *TerminalWatcher) Read(p []byte) (int, error) {
 func (w *TerminalWatcher) Close() error { return w.body.Close() }
 
 // finish consumes the upstream end. Synthesis is warranted only when the
-// stream began (an empty 200 must keep the executor's zero-byte failure path)
-// and no client-acceptable terminal and no upstream error terminal arrived.
+// stream began (an empty 200 must keep the executor's zero-byte failure path),
+// no client-acceptable terminal and no upstream error terminal arrived, and
+// the scanner did not give up (a gave-up scanner cannot prove a terminal is
+// missing).
 func (w *TerminalWatcher) finish(err error) {
 	w.done = true
 	w.end = err
-	if !w.terminal && !w.sawError && w.sawData {
+	if !w.terminal && !w.sawError && w.sawData && !w.gaveUp {
 		w.synth = w.synthesize()
 		w.synthed = true
 	}
@@ -175,12 +182,32 @@ func (w *TerminalWatcher) finish(err error) {
 
 // scan feeds forwarded bytes through the shadow scanner. Chunk boundaries are
 // irrelevant: only complete lines (up to \n) are classified, and a partial
-// trailing line stays buffered until the next chunk.
+// trailing line stays buffered until the next chunk. A line growing past the
+// shared SSE cap (sseScanBuf) disables the scanner for the stream: the
+// converters treat such a line as a protocol violation, and the watcher —
+// which must never rewrite bytes — instead stops classifying so a later end
+// never synthesizes a terminal it cannot justify.
 func (w *TerminalWatcher) scan(chunk []byte) {
+	if w.gaveUp {
+		return
+	}
 	w.pend = append(w.pend, chunk...)
 	for {
 		idx := bytes.IndexByte(w.pend, '\n')
 		if idx < 0 {
+			if len(w.pend) > sseScanBuf {
+				w.gaveUp = true
+				w.pend = nil
+				convertWarn("passthrough terminal watcher: SSE line exceeds 8 MiB — terminal detection disabled for this stream")
+			}
+			return
+		}
+		if idx > sseScanBuf {
+			// A COMPLETE line beyond the shared cap is the same protocol
+			// violation the converters' scanner rejects.
+			w.gaveUp = true
+			w.pend = nil
+			convertWarn("passthrough terminal watcher: SSE line exceeds 8 MiB — terminal detection disabled for this stream")
 			return
 		}
 		line := strings.TrimRight(string(w.pend[:idx]), "\r")
@@ -212,19 +239,27 @@ func (w *TerminalWatcher) line(line string) {
 }
 
 // dispatch inspects one complete SSE frame's folded data payload. Detection
-// keys off the payload's own "type" (some upstreams omit event: lines
-// entirely); parse failures are ignored — garbage frames are forwarded
-// untouched and merely escape terminal detection.
+// keys off the payload's own "type" first (some upstreams omit event: lines
+// entirely) and falls back to the frame's event: name — dialects that name
+// the frame only on the event line (OpenRouter-style `event: error` with a
+// {message} payload, or a payload missing its type key) are error/terminal
+// frames all the same, mirroring the chat converters' dispatch fallback.
+// Parse failures are ignored — garbage frames are forwarded untouched and
+// merely escape terminal detection.
 func (w *TerminalWatcher) dispatch(payload string) {
 	switch w.proto {
 	case Anthropic:
 		var frame struct {
 			Type string `json:"type"`
 		}
-		if sonic.UnmarshalString(payload, &frame) != nil {
-			return
+		frameType := ""
+		if sonic.UnmarshalString(payload, &frame) == nil {
+			frameType = frame.Type
 		}
-		switch frame.Type {
+		if frameType == "" {
+			frameType = w.frameEvent
+		}
+		switch frameType {
 		case "message_stop":
 			w.terminal = true
 		case "error":
@@ -233,6 +268,10 @@ func (w *TerminalWatcher) dispatch(payload string) {
 	case OpenAI:
 		if payload == "[DONE]" {
 			w.terminal = true
+			return
+		}
+		if w.frameEvent == "error" {
+			w.sawError = true
 			return
 		}
 		var frame struct {
@@ -260,7 +299,11 @@ func (w *TerminalWatcher) dispatch(payload string) {
 				ID string `json:"id"`
 			} `json:"response"`
 		}
-		if sonic.UnmarshalString(payload, &frame) != nil {
+		_ = sonic.UnmarshalString(payload, &frame)
+		if frame.Type == "" {
+			frame.Type = w.frameEvent
+		}
+		if frame.Type == "" {
 			return
 		}
 		if frame.Response.ID != "" && w.respID == "" {

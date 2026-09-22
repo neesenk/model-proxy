@@ -6,6 +6,7 @@
 
 - **多上游聚合 + 配额感知调度**：surplus 调度分 / 熔断 / 限频跳过 / 粘性驻留 / 多账号凭据池 + 会话粘性
 - **三协议转发 + 可选协议转换**：同协议字节级透传；路由目标声明 `protocol:` 即可在 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 间转换
+- **decisions 协议（System One）**：第 4 种独立协议 `POST /v1/decisions`（`{model, state, questions}` → typed answers），内置 TypeSafe Jev provider；不可与 chat 协议互转（fail-closed）。可选配给 fusion 做路由判定（selector）
 - **请求感知路由**：按图片/工具能力过滤目标、超长 prompt 自动改道大上下文模型、上游 400 溢出自动重试一次
 - **可观测性**：Web UI 九个标签页、实时请求监视（SSE）、请求日志查询、延迟（LAT/TTFT）与按 agent 维度的统计
 - **评测工具**：影子评测（真实负载双跑对比后端）、一键重放（replay）、端到端测活（`test` / UI 按钮）
@@ -77,6 +78,8 @@ providers:
     aqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
     headers:                      # 可选：每个上游请求（转发+探测）额外带的头，鉴权之后应用
       x-ccswitch-client: "0.2.7"  # 对齐 AIS Switch 的客户端标识头（值=app 裸版本号；AIS Switch 升级后同步改）
+      # 凭据类头（authorization、cookie、x-api-key 等）必须写 env:VAR 间接引用（与 mcp: headers 同规则，
+      # 字面量在加载校验时被拒）；发送时从环境变量解析，变量未设置则该请求 fail-closed
     models:                       # 只填模型名；元数据(context/output/modalities/tool_call)运行时从 models.dev 自动补
       - glm-5.2
   codex:
@@ -109,7 +112,7 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 # web:                      # 管理后台（默认开启，仅 loopback，无鉴权）
 #   enabled: true
 # stats:                    # 调用统计持久化（SQLite，默认开启，30 天保留）
-#   db_path: ~/.model-proxy/stats.db
+#   db_path: ~/.model-proxy/stats.db # 显式设置时需绝对路径（~ 展开）
 #   retention: 30d          # 0 = 永久
 # cache:                    # 精确响应缓存（默认关；逐字节重复的请求直接命中，省上游配额）
 #   enabled: true
@@ -119,8 +122,9 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 #   glm-5.2: {provider: kimi-code, sample_rate: 0.1, max_concurrent: 4}
 # request_log:              # 请求日志（完整 request/response body，默认关；Requests 页 + replay 的数据源）
 #   enabled: true
+#   dir: ~/.model-proxy/log/requests # 显式设置时需绝对路径（~ 展开）——daemon 可能从任意 CWD 拉起
 #   mcp_split: true         # MCP 网关交换单独成流（mcp-*.log，目录 mcp_dir 默认
-#                           # ~/.model-proxy/log/mcp）；Requests 页回到 LLM-only，
+#                           # ~/.model-proxy/log/mcp，同样需绝对路径）；Requests 页回到 LLM-only，
 #                           # /api/requests?kind=mcp 读拆分流。默认关，重启生效
 # guard:                    # 出站安全扫描（DLP，转发前扫描请求 body；详见下文「出站安全扫描与审计」）
 #   secrets: log            # 秘密扫描动作：log（默认，放行 + 告警）| redact（替换 [REDACTED] 后放行）
@@ -184,6 +188,7 @@ model-proxy login zhipu            # 输入 Zhipu API key（--label NAME 命名�
 model-proxy login deepseek         # 输入 DeepSeek API key（可重复 -> 多账号）
 model-proxy login volcengine       # Ark API Key + AccessKey/SecretKey（可重复 -> 多账号）
 model-proxy login qwen-plan        # 千问 Token Plan 个人版 sk-sp- key（可重复 -> 多账号）
+model-proxy login typesafe         # TypeSafe API key（console.typesafe.ai；可重复 -> 多账号）
 model-proxy login zhipu --label work --replace   # 命名账号 / 覆盖已存在的同 id 账号
 # 免粘贴导入（值不回显、不落日志；成功输出只有掩码账号 id）
 model-proxy login codex --from-codex             # 复用官方 codex CLI 登录态（~/.codex/auth.json，access_token 过期会自动 refresh）
@@ -384,7 +389,7 @@ web:
 | deepseek | `~/.model-proxy/deepseek_apikey.json` | API key（同上） |
 | volcengine | `~/.model-proxy/volcengine_apikey.json` | `{api_key, access_key, secret_key}`（同上） |
 
-**多账号凭据池**：apikey 类 provider（static/zhipu/zcode/deepseek/volcengine/kimi-code/qwen-plan）重复 `login` 会把账号累积进**池文件** `~/.model-proxy/<name>_apikeys.json`（`{version, accounts:[{id, label, api_key, (access_key, secret_key), added_at}]}`），按账号 id（volcengine 优先 `sha256(access_key)[:16]`，无 AK 时回落 `sha256(api_key)[:16]`；其余为 `sha256(api_key)[:16]`）去重，ID 永不携带原始凭据。运行时每个池被展开成 N 个虚拟 provider（`<name>#<accountId>`），共享父配置但各绑自己的凭据；路由目标命名父 provider 会 fan-out 到全部账号。plural pool 是权威凭据来源：损坏或空 pool 会禁用该 provider，不会降级读取旧 singular key。**路由跨池是会话粘性的**：按请求的 `x-claude-code-session-id` 粘同一个账号（保 prompt cache），新会话 round-robin 分到不同账号（并发散开）；只有 429/熔断才换账号。`usage <provider>` 逐账号展示全部账号。aqp/codex 是单凭据（不入池）。`login --label`/`--replace`、`logout --label`/`--all` 管理池内账号；Web UI Accounts 标签页也能增删。
+**多账号凭据池**：apikey 类 provider（static/zhipu/zcode/deepseek/volcengine/kimi-code/qwen-plan/typesafe）重复 `login` 会把账号累积进**池文件** `~/.model-proxy/<name>_apikeys.json`（`{version, accounts:[{id, label, api_key, (access_key, secret_key), added_at}]}`），按账号 id（volcengine 优先 `sha256(access_key)[:16]`，无 AK 时回落 `sha256(api_key)[:16]`；其余为 `sha256(api_key)[:16]`）去重，ID 永不携带原始凭据。运行时每个池被展开成 N 个虚拟 provider（`<name>#<accountId>`），共享父配置但各绑自己的凭据；路由目标命名父 provider 会 fan-out 到全部账号。plural pool 是权威凭据来源：损坏或空 pool 会禁用该 provider，不会降级读取旧 singular key。**路由跨池是会话粘性的**：按请求的 `x-claude-code-session-id` 粘同一个账号（保 prompt cache），新会话 round-robin 分到不同账号（并发散开）；只有 429/熔断才换账号。`usage <provider>` 逐账号展示全部账号。aqp/codex 是单凭据（不入池）。`login --label`/`--replace`、`logout --label`/`--all` 管理池内账号；Web UI Accounts 标签页也能增删。
 
 多实例支持：同一 `provider_id` 可有多个不同 name（如 `zhipu-personal` / `zhipu-work`），各自独立凭据文件/池。
 
@@ -396,9 +401,10 @@ web:
 |---|---|---|
 | Anthropic | `POST /v1/messages` | provider 的 `/messages` |
 | OpenAI | `POST /v1/responses`, `/v1/chat/completions` | provider 的同路径 |
+| Decisions | `POST /v1/decisions` | provider 的 `/systemone`（System One 决策模型，`{model, state, questions}` → typed answers；不可与 chat 协议互转，误路由 fail-closed） |
 | 模型列表 | `GET /v1/models` | 合并显式路由 + 推导路由的模型名 |
 
-**按协议转发到不同 endpoint**：provider 用 `openai_base_url`（默认 base，用于 OpenAI 协议 + `/models` + `usage`）和可选的 `anthropic_base_url`（覆盖 anthropic 协议；不设则用 `openai_base_url`）。如 DeepSeek 的 OpenAI 与 Anthropic 是两个不同 base。两个协议对客户端 `/v1` 前缀的处理相反：OpenAI 协议会剥掉客户端的 `/v1`，故 `openai_base_url` 自带版本段（如 `…/v1`、`…/paas/v4`）；Anthropic 协议保留客户端的 `/v1/messages`，故 `anthropic_base_url` **不带** `/v1`（如 `…/anthropic`、`…/api/plan`）。
+**按协议转发到不同 endpoint**：provider 用 `openai_base_url`（默认 base，用于 OpenAI 协议 + `/models` + `usage`）、可选的 `anthropic_base_url`（覆盖 anthropic 协议；不设则用 `openai_base_url`）和可选的 `decisions_base_url`（覆盖 decisions 协议；不设则回落 `openai_base_url`——OpenRouter 在同一 base 上同时服务 chat 与 `/systemone`）。如 DeepSeek 的 OpenAI 与 Anthropic 是两个不同 base，TypeSafe 则是只配 `decisions_base_url` 的纯 decisions provider。OpenAI/Decisions 协议会剥掉客户端的 `/v1`，故这两个 base 自带版本段（如 `…/v1`、`…/paas/v4`）；Anthropic 协议保留客户端的 `/v1/messages`，故 `anthropic_base_url` **不带** `/v1`（如 `…/anthropic`、`…/api/plan`）。
 
 **协议转换（opt-in）**：路由目标声明 `protocol:` 且与客户端协议不同时，代理自动做 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 三种协议的双向转换（请求 + 响应 + 流式，**tools 全链路**：`tools`/`tool_choice`/`tool_use`/`tool_result` 结构映射、流式增量事件互转、usage/cache token 透传）——比如让 Claude Code（Anthropic 协议）直连只有 OpenAI 端点的后端：
 
@@ -560,6 +566,13 @@ fusion:
     first_turn_only: true                 # 可选：仅单轮会话（无 assistant 消息）才编排
     judge: {provider: zhipu, model: glm-5.2}   # 可选：汇总前先出「共识/冲突/遗漏」评审报告
     # instruction: "..."                  # 可选：覆盖内置的结果汇总指令模板
+    # selector:                           # 可选：decisions 模型（如 TypeSafe Jev）路由判定
+    #   target: {provider: typesafe, model: jev-1.13.0, protocol: decisions}
+    #   mode: shadow                      # shadow（默认）只记录不行动 / enforce 按置信度行动
+    #   confidence: 0.55                  # enforce 行动置信度阈值
+    #   direct_score_max: 1.5             # >0：难度 ≤ 它时跳过编排直调选中模型（省 N+1）
+    #   panel_top_k: 2                    # >0：按判定概率把 panel 裁到 top-k（≥quorum）
+    #   timeout: 800ms                    # 判定调用超时（失败一律回退静态全 panel）
 
 # fusion 目标通过显式 routes 暴露（推导不含 fusion）：
 routes:
@@ -576,6 +589,7 @@ routes:
 - **代价（要想清楚再用）**：一次请求 = N+1 次上游调用（panel N 次候选生成 + 1 次结果汇总），延迟 ≈ 候选等待 + 汇总首字节。**只给困难路由用，别当默认路由**；多轮长会话建议配 `first_turn_only`（多轮自动降级直打 synthesizer）和 `max_runs_per_day` 控制成本。每家的消耗在 `stats` / Requests 页（`fusion-panel-*` 标记）里都看得见。
 - **编排观测**：`GET /api/fusion?workflow=<名>` 返回按工作流配置的聚合（编排次数/quorum 达成率/按原因的降级计数/候选与汇总 token/放大系数）+ 最近 200 次运行明细（每条调用分支的状态/延迟/token）；`stats --provider fusion` 出时间序列（requests=编排次数，failovers=降级次数）。
 - **judge 评审（可选）**：配 `judge:` 后，结果汇总前先对候选答案做一次「共识/冲突/遗漏」分析，报告注入汇总提示词（LLM-Blender「先排后融」）；judge 调用失败不影响编排。
+- **selector 路由判定（可选，实验）**：配 `selector:` 后，fan-out 前先把「最后一条用户消息 + 请求画像 + 候选 rubric」发给一个 decisions 模型（TypeSafe Jev 等 System One），一次调用并行拿到「最佳模型 choice + 难度 score + 概率 + 置信度」（~70–500ms、约 $0.000014）。`mode: shadow`（默认）只记录判定（`/api/fusion` 的 run.selector 可见），用来攒对账数据；`mode: enforce` 且置信度过阈值时：`direct_score_max` 命中的简单请求**跳过编排直调选中模型**（`selector_direct`，不消耗当日编排预算），`panel_top_k` 按概率裁 panel（永不裁到 quorum 以下）。判定失败/超时/低置信/非法选择一律回退静态全 panel；图片请求跳过判定（Jev 纯文本）。`rubric:` 可写在 panel 成员上给判定模型一句话候选描述。trim 会降低容错（top_k=2+quorum=2 时一个成员挂即降级），默认关闭。
 - **验证收益**：给 fusion 路由配一条 `shadow:` 影子（或反过来），用你自己的真实负载对比「编排 vs 单模型」，别信普遍结论。
 
 ## 调度与熔断（`scheduling`）

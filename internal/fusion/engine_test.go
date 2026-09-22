@@ -19,10 +19,19 @@ type enginePorts struct {
 	synthTarget   configdomain.RouteTarget
 	synthBody     []byte
 	synthesis     SynthesisResult
+	selector      SelectResult
+	selectCalls   []SelectRequest
 }
 
 func (ports *enginePorts) SupportsTools(configdomain.RouteTarget) bool {
 	return ports.supportsTools
+}
+
+func (ports *enginePorts) SelectPanel(_ context.Context, req SelectRequest) SelectResult {
+	ports.mu.Lock()
+	defer ports.mu.Unlock()
+	ports.selectCalls = append(ports.selectCalls, req)
+	return ports.selector
 }
 
 func (ports *enginePorts) CallLeg(_ context.Context, call LegCall) LegResult {
@@ -178,6 +187,10 @@ type blockingEnginePorts struct {
 }
 
 func (*blockingEnginePorts) SupportsTools(configdomain.RouteTarget) bool { return true }
+
+func (*blockingEnginePorts) SelectPanel(context.Context, SelectRequest) SelectResult {
+	return SelectResult{Err: errors.New("selector not expected in this test")}
+}
 
 func (ports *blockingEnginePorts) CallLeg(ctx context.Context, call LegCall) LegResult {
 	if call.Target.Provider == "fail" {

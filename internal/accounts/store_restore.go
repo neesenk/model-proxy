@@ -118,6 +118,17 @@ func (s Store) restoreFromKeychain(name, providerID string, p Pool) (Snapshot, e
 	// rewrite the pool as a plaintext file with the same atomic 0600 write as a
 	// normal save. The marker lets an explicit later logout clean the retained
 	// keychain copy without making pure file-mode histories touch keychain.
+	// Both writes are side effects of a READ path (LoadSnapshot is called with
+	// no lock): racing a concurrent locked save (login) would last-writer-wins
+	// the whole pool file and drop the just-saved account. Grab the pool lock
+	// non-blockingly; when contended, skip the rewrite entirely — the snapshot
+	// is still served and a later uncontended read retries it (same shape as
+	// the partial-restore path above).
+	release, locked := s.tryPoolLock(name)
+	if !locked {
+		return Snapshot{Pool: pool, Source: SourcePlural}, nil
+	}
+	defer release()
 	if err := s.writeRestoredKeychainMarker(name, pool); err != nil {
 		return Snapshot{Source: SourcePlural}, err
 	}

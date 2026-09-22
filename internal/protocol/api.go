@@ -18,6 +18,7 @@ const (
 	Anthropic = wire.Anthropic
 	OpenAI    = wire.OpenAI
 	Responses = wire.Responses
+	Decisions = wire.Decisions
 )
 
 // Parse validates a wire protocol name.
@@ -34,6 +35,8 @@ func ForPath(path string) Protocol {
 		return OpenAI
 	case strings.HasPrefix(path, "/v1/responses"):
 		return Responses
+	case strings.HasPrefix(path, "/v1/decisions"):
+		return Decisions
 	default:
 		return ""
 	}

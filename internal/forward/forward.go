@@ -621,6 +621,8 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 				exposed,
 				t,
 				requestID,
+				agent,
+				flc.SessionID,
 				result.Commit,
 			)
 			res.committed = true

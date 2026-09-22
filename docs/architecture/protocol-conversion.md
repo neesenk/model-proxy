@@ -9,19 +9,23 @@ route、流式转换或工具调用映射时必读。
 
 目标未声明 `protocol:` 时，上游协议按 `(*Proxy).resolvedBackendProto` 解析：显式 `protocol:` > `ProtocolHint`（codex→responses）> 模型级协议矩阵 > provider 级 wire 探测 verdict（`internal/app/wirecap.go`，boot/reload 时在 openai base 上探测 `/chat/completions` 与 `/responses`；anthropic 支持由 `anthropic_base_url` 声明，不探测）> 客户端协议透传。完整两级决策矩阵与探测分类见 `routing-and-failure.md`。只有解析出的后端协议与客户端不同，才启用转换；verdict unknown 时维持透传（boot 窗口期行为不变），verdict 说 `/responses` 不存在时 anthropic/responses 客户端自动转 chat。
 
-三个协议值：
+四个协议值：
 
 - `anthropic` = Anthropic Messages（`/v1/messages`，`messages` + content blocks）
 - `openai` = OpenAI Chat Completions（`/v1/chat/completions`，`messages` + `tool_calls`）。**不再**表示 Responses API。
 - `responses` = OpenAI Responses API（`/v1/responses`，`input` list + `output` items + `response.*` 流式事件）。`/v1/responses` 路径由 `protocol.ForPath` 独立判为 `responses`，不再并入 `openai`。
+- `decisions` = System One 决策 API（客户端 `/v1/decisions` → 上游 `/systemone`，`{model, state, questions}` → typed `answers`）。无流式、无 tools、无文本生成，与 chat 协议族无任何转换关系（见下文 decisions 节）。
 
 转换器为直连 pairwise codec，并统一注册在
 `internal/protocol/conversion_registry.go`：
 一个 client→backend pair 必须同时声明 request、反向 response 和反向 SSE
-三个入口。注册表覆盖 3×2 共六组方向，并由结构测试保证完整；`convertRequestFor`、
+三个入口。注册表覆盖 4×3 共 12 组方向，并由结构测试保证完整；`convertRequestFor`、
 `convertResponseNS` 和 `convertSSEReaderNS` 不得各自维护方向 switch。
 pair-specific codec 保留协议特有语义，不引入最低公分母 IR：hosted tools、
 reasoning 方言、namespace restore 等信息无法通过统一 message IR 无损表达。
+含 decisions 的 6 组 pair 注册为 **fail-closed stub**：request/response 返回
+`unsupportedConversionError`（chat 客户端误打 decisions target 时按 capability
+scanner 语义跳过该 target），stream 不可达仅占位。
 `needsConversion` 对任意两个不同的已知协议返回 true；未知协议值 fail-safe 不转换。
 
 `internal/protocol` 是仓库依赖叶子，拥有协议解析、转换 registry、请求/响应/SSE
@@ -35,6 +39,17 @@ Provider 映射仍由 `internal/provider.ChatReasoningMode` 定义，具体 HTTP
 Codex 后端只接受 Responses API，因此 `ProtocolHint("codex") = "responses"`。转发路径在目标未声明 `protocol:` 时经 `resolvedBackendProto` 自动回退到 `ProtocolHint`（forward/fusion/shadow 共用），所以 anthropic/chat 客户端打 codex 路由会**自动转换**,无需用户写 `protocol: responses`(显式声明仍可,且优先级最高)。Responses 客户端跨协议访问 chat/anthropic 后端时，proxy 为 `previous_response_id` 维护短期本地历史：按 session + response id 索引、TTL 30 分钟、最多 512 条、单条 2 MiB、总量 32 MiB，异步以 0600 写入 quota state 同目录的 `responses_state.json`。命中时展开完整 input/output 历史；未命中时只修复本次缺失历史导致的孤立 output/dangling call，普通显式全历史请求不做全局配对改写。只有 completed 和因 token 上限产生的 incomplete 响应进入 replay state，content_filter/其他中止不缓存。无稳定 session 时仅允许 response id 唯一命中，避免跨会话串线。此外 `protocol.ConvertRequestWithOptions` 在 target plan 注入 `CodexShaping` 且目标协议为 responses 时剥离 `max_output_tokens`/`temperature`/`top_p`——该预剥离只作用于转换路径；客户端本来就讲 responses 的同协议 codex 流量保持字节级透传（`targetexec.Plan.ConvertBody` 短路），其 unsupported parameter 400 靠 paramBlock 学习后预防性剥离自愈（`routing-and-failure.md`）。
 
 跨协议转换前先运行 capability scanner。已知无法无损表达的请求（例如 Chat `n>1`/logprobs/audio、未知 hosted tool、Anthropic MCP server、Responses 24h cache retention → Anthropic、Responses custom/freeform tool → Anthropic）不会进入上游：当前 target 被跳过并继续 failover；若没有兼容 target，按客户端协议返回 HTTP 400、code=`unsupported_protocol_conversion`。同协议透传不受扫描器影响。
+
+## decisions 协议（System One，不可互转）
+
+decisions 是第 4 个协议，与 chat 协议族刻意解耦：请求是 `{model, state, questions}`（state + 一组 typed 问题：choice/score/noul），响应是 typed `answers` + `usage`，无流式、无 tools、无文本生成。wire shape 由 `internal/protocol/decisions.go` 拥有（`BuildSystemOneBody` / `ParseSystemOneResponse`）。
+
+- **客户端路径 = `/v1/decisions`**（`protocol.ForPath`）；**上游路径 = `/systemone`**（`BackendPath("decisions")`，拼在带版本段的 base 上，如 TypeSafe `https://api.typesafe.ai/v1`）。它是唯一客户端路径 ≠ 上游路径的协议：`targetexec.NewPlan` 对 decisions 后端**无条件**使用 `BackendPath`，同协议透传也不沿用客户端路径。
+- **base URL 选择**：`decisions_base_url` 优先，未设回落 `openai_base_url`（OpenRouter 在同一 base 上同时服务 `/chat/completions` 与 `/systemone`）。`checkTargetProtocol` 对 `protocol: decisions` 要求二者至少其一。
+- **同协议透传**：decisions 客户端 → decisions 后端字节级透传（`Plan.ConvertBody` 短路）；model 改写、凭据、proxy_url、熔断、usage 记账、request log 与普通 route 一致。
+- **跨协议 fail-closed**：chat/anthropic/responses 客户端打到 decisions target（或反向）时，注册的 stub 让 request 转换返回 `unsupportedConversionError`，target 被跳过，无兼容 target 时按客户端协议返回 400——chat body 永远不会被 POST 到 `/systemone`。
+- **typesafe provider**（`provider_id: typesafe`）经 `ProtocolHint = "decisions"` 让隐式路由 target 自动声明 `protocol: decisions`；hint-covered provider 跳过 wire 探测（`probeAllWireCaps`），modelcaps 合成三腿全 No（decisions 无 probe 腿，解析永远先走 hint）。`ProtocolHint` 此处不违反「只有真实转换器存在才给 hint」规则：hint 产生的是**诚实的 fail-closed 错误**（chat 客户端）与正确透传（decisions 客户端），不是错误转换。
+- 判定用量：`usage.input_tokens`/`output_tokens` 拼写与 anthropic 相同，现有 usage 解析路径直接可读。
 
 ## 请求映射（Responses 方向）
 
@@ -60,7 +75,7 @@ Codex 后端只接受 Responses API，因此 `ProtocolHint("codex") = "responses
 
 ## 流式映射（Responses 方向）
 
-客户端 `stream` 是跨协议输出契约：成功响应若上游模式相反，proxy 在 commit 前把 SSE 聚合成目标协议 JSON，或把目标协议 JSON 合成为合法 SSE；转换/聚合失败返回 502。聚合（`aggregateResponsesSSE`）在终止 `response.completed`/`response.incomplete` 携带 status `failed`/`cancelled` 或非空 error 对象时 fail-closed（与流式转换器及非流式失败规则一致），不聚合出干净响应。相同协议透传不做模式改写，保持既有字节和首包行为。
+客户端 `stream` 是跨协议输出契约：成功响应若上游模式相反，proxy 在 commit 前把 SSE 聚合成目标协议 JSON，或把目标协议 JSON 合成为合法 SSE；转换/聚合失败返回 502。JSON 合成 chat SSE 时每个 chunk 必带 `created`（缺失回退合成时刻），usage 走独立空 `choices` chunk + `[DONE]` 前置——与流式转换器同形（`stream_mode.go` 的 chatJSONToSSE）。聚合（`aggregateResponsesSSE`）在终止 `response.completed`/`response.incomplete` 携带 status `failed`/`cancelled` 或非空 error 对象时 fail-closed（与流式转换器及非流式失败规则一致），不聚合出干净响应。相同协议透传不做模式改写，保持既有字节和首包行为。
 
 Responses → {anthropic, chat}（`responsesSSETo*`，读 `response.*` 事件）：
 
@@ -71,8 +86,8 @@ Responses → {anthropic, chat}（`responsesSSETo*`，读 `response.*` 事件）
 - `response.completed` → `message_delta`(usage) + `message_stop` / chat finish chunk（只带 finish_reason）+ 独立空 `choices:[]` usage chunk + `[DONE]`（官方 include_usage 契约，a→chat 同形、无条件下发）；usage 取自 `response.usage`（含 cache/reasoning details，见 Usage 节）。completed 事件携带 `status:"failed"`/`"cancelled"` 或 error 非空时按错误处理，不产出干净终态（与非流式 fail-closed 对齐）。
 - `response.incomplete` 读 `incomplete_details.reason`：`content_filter`→`refusal`/`content_filter`，其余→`max_tokens`/`length`；**usage 同样读取**（cc-switch completed/incomplete 统一取 usage——max_tokens 截断恰好最需要计费）。
 - `response.refusal.delta` → `text_delta` / `delta.content`（refusal 正文是真实内容；stop 语义由 finish/stop_reason 携带，与 `internal/protocol/convert.go` 方向 refusal→text 对齐）；非流式 `{type:"refusal"}` content part 同样转 text。**chat→r 反向保留 refusal**：非流式空 content + 非空 `refusal` 的 message 产出带 `{type:"refusal", refusal}` part 的 output message item；流式 `delta.refusal` 打开 refusal content part，流式发出 `response.refusal.delta`/`.done` 与 part 键 content_part 帧，不塌缩为正文 text。
-- 上游 SSE 必须出现协议终止信号：Responses 为 `response.completed`/`response.incomplete`/`response.failed`，Anthropic 为 `message_stop`（已带 stop_reason 的 `message_delta` 可在 EOF 兜底；方言 `data: [DONE]` 同为显式终止符——干净终态、合成 finish（若 `message_delta` 未发），其后帧不再扫描处理），Chat 为 `[DONE]` 或非空 `finish_reason`。无终止信号 EOF、scanner 错误或未闭合的 function arguments 一律 fail-closed：Anthropic 客户端收到 `error`，Chat 客户端收到 error chunk，Responses 客户端收到 `response.failed`；不得合成 `message_stop`/`[DONE]`/`response.completed`。a→chat 方向同此：scanner 错误/EOF 前终止/上游 error event 只产出 error chunk，不再补发 usage chunk 与 `data: [DONE]`；finish chunk 之后的 content/tool 帧被 post-terminal guard 抑制（与其他方向一致）。
-- **同协议透传同样 fail-closed**（`internal/protocol/stream_terminal_watch.go`，executor 在 passthrough 流式路径包裹 `TerminalWatcher`）：上游字节原样转发，影子扫描帧边界追踪同一组终止信号；流已开始（至少一个 `data:` 行）却在终止信号前 EOF/读错时，向客户端追加协议原生错误终态——Anthropic `event: error`（`upstream stream ended before message_stop`）、Chat error chunk（`upstream stream ended without a terminal finish_reason`，不带 `[DONE]`）、Responses `response.failed`（`upstream stream ended before a terminal response event`）。文案是客户端契约：agent 客户端（pi）按错误文案正则判定可重试，这些措辞命中其模式表。两个例外：上游自带错误终态（error event / error chunk / `response.failed`）不重复合成；Anthropic 裸 `message_stop`（kimi 方言）对客户端可接受、不合成（缓存可回放性仍由 `StreamTerminalComplete` 单独把关）。空 body 不合成，保留 executor 的零字节 200 失败路径。watcher 位于 effects 链之下：request log / usage / cache recorder 看到含合成终态的完整客户端字节，合成流天然不过缓存门禁。合成载荷用 struct 序列化（sonic 不排序 map key，字节必须稳定）。
+- 上游 SSE 必须出现协议终止信号：Responses 为 `response.completed`/`response.incomplete`/`response.failed`，Anthropic 为 `message_stop`（仅带 stop_reason 的 `message_delta` 在 EOF 时**不**兜底——终态判定严格 fail-closed；方言 `data: [DONE]` 同为显式终止符——干净终态、合成 finish（若 `message_delta` 未发），其后帧不再扫描处理），Chat 为 `[DONE]` 或非空 `finish_reason`。无终止信号 EOF、scanner 错误或未闭合的 function arguments 一律 fail-closed：Anthropic 客户端收到 `error`，Chat 客户端收到 error chunk，Responses 客户端收到 `response.failed`；不得合成 `message_stop`/`[DONE]`/`response.completed`。a→chat 方向同此：scanner 错误/EOF 前终止/上游 error event 只产出 error chunk，不再补发 usage chunk 与 `data: [DONE]`；finish chunk 之后的 content/tool 帧被 post-terminal guard 抑制（与其他方向一致）。
+- **同协议透传同样 fail-closed**（`internal/protocol/stream_terminal_watch.go`，executor 在 passthrough 流式路径包裹 `TerminalWatcher`）：上游字节原样转发，影子扫描帧边界追踪同一组终止信号——判定先看 payload 自带 `type`，缺失时回退到帧的 `event:` 行（OpenRouter 系 chat 方言 `event: error` + `{message}` 载荷、仅命名在 event 行上的 message_stop/response.failed 都算终态，与转换器的 dispatch 回退一致）；流已开始（至少一个 `data:` 行）却在终止信号前 EOF/读错时，向客户端追加协议原生错误终态——Anthropic `event: error`（`upstream stream ended before message_stop`）、Chat error chunk（`upstream stream ended without a terminal finish_reason`，不带 `[DONE]`）、Responses `response.failed`（`upstream stream ended before a terminal response event`）。文案是客户端契约：agent 客户端（pi）按错误文案正则判定可重试，这些措辞命中其模式表。两个例外：上游自带错误终态（error event / error chunk / `response.failed`）不重复合成；Anthropic 裸 `message_stop`（kimi 方言）对客户端可接受、不合成（缓存可回放性仍由 `StreamTerminalComplete` 单独把关）。空 body 不合成，保留 executor 的零字节 200 失败路径。扫描器执行与转换器相同的 8 MiB 单行上限：超限行禁用本流的终态判定（字节照转、不再合成——无法证明终态缺失）。watcher 位于 effects 链之下：request log / usage / cache recorder 看到含合成终态的完整客户端字节，合成流天然不过缓存门禁。合成载荷用 struct 序列化（sonic 不排序 map key，字节必须稳定）。
 
 方言兼容（真实流量录制发现）：
 
@@ -139,7 +154,7 @@ OpenAI/Responses → Anthropic 的 tool use id 必须满足 `^[a-zA-Z0-9_-]+$`�
 - OpenAI → Anthropic：`input = prompt − cached − cache_creation`，clamp 到非负，并设置 cache read/creation。cache_creation 识别直传 `cache_creation_input_tokens` 与 `prompt_tokens_details.cache_write_tokens` 两种拼写（直传优先），cache write 必须从 input 双减，否则在 input 与 cache 桶重复计数。流式路径同语义。
 - Anthropic → OpenAI：prompt 包含 input、cache read、cache creation，并输出 `prompt_tokens_details.cached_tokens`。
 - Responses 方向同一约定（OpenAI inclusive）：a→r 的 `input_tokens` = input + cache_read + cache_creation，`cache_read` → `input_tokens_details.cached_tokens`；r→a 反向拆分（clamp 非负）——cache write 同样双减：r→a 识别直传 `cache_creation_input_tokens`（优先）与 `input_tokens_details.cache_write_tokens`（兜底），产出 `cache_creation_input_tokens`，`input = input − cached − cache_write`，流式路径同语义；chat↔r 双向透传 `cached_tokens`（`prompt_tokens_details`↔`input_tokens_details`）和 `reasoning_tokens`（`completion_tokens_details`↔`output_tokens_details`）。流式路径同语义（a→r 从 `message_start`/`message_delta` usage 按字段存在性累计，不用缺省值覆盖）。
-- 流式 stats 计数器（`internal/observe/counters` 的 `UsageScanner`，stats store 的 CacheRead 唯一写入方）只看客户端协议字节，按上述线上形状解码三种客户端协议的 usage：anthropic `message_start`/`message_delta`、chat trailing usage chunk（含 `prompt_tokens_details.cached_tokens`，deepseek 拼写 `prompt_cache_hit_tokens` 兜底）、responses `response.completed` 快照（含 `input_tokens_details.cached_tokens`）。cache 桶一律按字段取 MAX 合并（方言在 `message_start` 与 `message_delta` 重复同一累计值，如 deepseek `cache_read_input_tokens:256` 两帧同现；zhipu/aqp 则首帧为 0/null、真值只在 `message_delta`），与 requestlog `extractSSEUsage` 的 per-field-max 对齐；Input/Output 保持 `+=`（converted 路由 prompt_tokens 只在尾帧到达）。
+- 流式 stats 计数器（`internal/observe/counters` 的 `UsageScanner`，stats store 的 CacheRead 唯一写入方）只看客户端协议字节，按上述线上形状解码三种客户端协议的 usage：anthropic `message_start`/`message_delta`、chat trailing usage chunk（含 `prompt_tokens_details.cached_tokens`，deepseek 拼写 `prompt_cache_hit_tokens` 兜底）、responses `response.completed` 快照（含 `input_tokens_details.cached_tokens`）。cache 桶一律按字段取 MAX 合并（方言在 `message_start` 与 `message_delta` 重复同一累计值，如 deepseek `cache_read_input_tokens:256` 两帧同现；zhipu/aqp 则首帧为 0/null、真值只在 `message_delta`），与 requestlog `extractSSEUsage` 的 per-field-max 对齐；Input/Output 保持 `+=`（converted 路由 prompt_tokens 只在尾帧到达）。**非流式响应**（decisions 全量、stream:false 的 chat/anthropic/responses、上游 SSE 聚合回 JSON 的转换响应）走 Commit 时整 body JSON usage 补解析（首字节 `{` 判定 JSON 模式、4 MiB 保留上限、SSE 已计数则跳过防双算），分桶语义与 SSE 路径完全一致（openai input 为 prompt_tokens 含 cache 读、cache 桶 per-field MAX）。
 
 ## 有损字段
 
@@ -190,10 +205,14 @@ capability scanner 的 target 跳过与 400 信封通道，proxy 无特判。str
 `TestForward_` 开头的 Proxy 接线测试位于 `internal/app`，防止 codec 正确但 transport
 接线错误。
 
-- `TestProtocolConversionRegistryIsComplete` 断言六组跨协议 pair 均同时注册
+- `TestProtocolConversionRegistryIsComplete` 断言 12 组跨协议 pair 均同时注册
   request、response、stream codec；未知协议与同协议不得命中注册表。
+- decisions 协议（`internal/protocol/decisions_test.go`）：`BuildSystemOneBody`/
+  `ParseSystemOneResponse` 编解码（含 OpenRouter 附加字段容忍、空 answers/坏 body 拒绝）、
+  `/v1/decisions` ↔ `/systemone` 路径恒等、6 组 chat↔decisions pair 全部 fail-closed
+  （typed unsupported）、decisions↔decisions 字节级透传。
 - 同协议逐字节透传（`TestConvertFault_SameProtocolPassthrough`：anthropic/responses 两方向请求与响应均 byte-identical，端到端）。
-- 同协议透传截断 fail-closed（`internal/protocol/stream_terminal_watch_test.go` + `internal/app/stream_terminal_test.go`）：三协议截断合成对应错误终态（anthropic `event: error` / chat error chunk 无 `[DONE]` / responses `response.failed` 带追踪 id）；完整流、裸 `message_stop`、无 `[DONE]` 的 finish_reason、上游自带错误终态均字节不变不合成；读错误先送合成终态再返错；空 body 不合成；单字节 chunk 边界与折叠 data 行分类不变；端到端 anthropic/chat 透传截断复刻 zhipu 事故形态。
+- 同协议透传截断 fail-closed（`internal/protocol/stream_terminal_watch_test.go` + `internal/app/stream_terminal_test.go`）：三协议截断合成对应错误终态（anthropic `event: error` / chat error chunk 无 `[DONE]` / responses `response.failed` 带追踪 id）；仅命名在 `event:` 行上的 error/message_stop/response.failed 方言帧不重复合成；超 8 MiB 单行禁用终态判定且字节不变；完整流、裸 `message_stop`、无 `[DONE]` 的 finish_reason、上游自带错误终态均字节不变不合成；读错误先送合成终态再返错；空 body 不合成；单字节 chunk 边界与折叠 data 行分类不变；端到端 anthropic/chat 透传截断复刻 zhipu 事故形态。
 - tools、并行工具、图片、usage 双向转换（anthropic↔openai-chat）。
 - 交错 tool delta 和 trailing usage。
 - 转换失败发生在 commit 前。
@@ -220,4 +239,4 @@ capability scanner 的 target 跳过与 400 信封通道，proxy 无特判。str
 - 低危评审修复（同上测试文件 + `internal/protocol/convert_namespace_test.go`/`internal/protocol/convert_test.go`/`internal/protocol/convert_reasoning_test.go`/`internal/protocol/convert_responses_stream_test.go`）：流式 r→a 引用链接按 block 去重、hosted fallback 名两方向撞名 fail-closed、裸 `{"type":"error"}` 错误信封转换、nsFlattenName rune 边界截断、多 thinking 块 `\n\n` 分隔（请求/响应两方向）、chat→a parts content 的 message 级 annotations 追加来源链接、空 thinking 文本的 reasoning_details 项不回放。
 - SSE 帧组装与终止符评审修复：`[DONE]` 作为 a→chat 显式终止符（其后已识别事件帧不处理、finish+`[DONE]` 不等上游 EOF、无 `message_delta` 时不追加 "terminated before a terminal event" 错误 chunk，`internal/protocol/convert_p1_parity_test.go`）；`appendSSEData` 空 data 行按 HTML spec 折叠（`data:`+`data: x` → `"\nx"`，帧开启与载荷为空的哨兵分离，`internal/protocol/convert_multiline_sse_test.go`）；responses 状态记录按折叠帧整体解析（多行 `response.output_item.done` 不再逐行丢失，`internal/protocol/responses_state_test.go`）；`convertWarn` 去重集合 1024 上限（防客户端可控内容无限增长，超帽不去重但仍记录，`internal/protocol/convert_polish_test.go`）；chat→r 的 file_id 与 file_url/file_data 并存时保留源、仅丢弃 file_id 并发 `file_id_degraded` 诊断（`internal/protocol/convert_protocol_completeness_test.go`）。
 - 无 type 的 message 简写项归一化（`internal/protocol/convert_responses_test.go` 的 `TestConvertResponsesRequest_TypesLessMessageItems`）：`{role, content}` 简写（含字符串 content）在 r→a/r→chat 两方向转为正常消息，不再被当未知 item 丢弃。
-- 规范符合性修复（`internal/protocol/convert_specfix_chat_test.go`/`convert_specfix_responses_test.go`/`convert_specfix_stream_test.go`/`convert_specfix_bridge_test.go`）：错误流后禁止合成 `[DONE]`、chunk/响应对象必填 `created`/`created_at`/递增 `sequence_number`、独立空 choices usage chunk（include_usage 形态）、effort→budget 钳制（min（阶梯, max_tokens−1)、≤1024 不发声）、r→a tool id 清洗与无 id 占位符位置配对、chat→r refusal 保留（非流式 refusal part + 流式 `response.refusal.*` 事件）、done-only/completed-only 内容回退、聚合对 failed/cancelled/非空 error fail-closed 与 `parseWireSSE` 逐行恢复（含折叠 `[DONE]` 终止）、流首 BOM 容忍、`event: error` 帧、合成 Responses 必填键补齐与 item id/annotations。
+- 规范符合性修复（`internal/protocol/convert_specfix_chat_test.go`/`convert_specfix_responses_test.go`/`convert_specfix_stream_test.go`/`convert_specfix_bridge_test.go`）：错误流后禁止合成 `[DONE]`、chunk/响应对象必填 `created`/`created_at`/递增 `sequence_number`、独立空 choices usage chunk（include_usage 形态）、effort→budget 钳制（min（阶梯, max_tokens−1)、≤1024 不发声）、r→a tool id 清洗与无 id 占位符位置配对、chat→r refusal 保留（非流式 refusal part + 流式 `response.refusal.*` 事件）、done-only/completed-only 内容回退（含 added 已建块但无 delta 的 message done 帧合成，`convert_parity_test.go` 的 added-without-deltas 用例）、聚合对 failed/cancelled/非空 error fail-closed 与 `parseWireSSE` 逐行恢复（含折叠 `[DONE]` 终止）、流首 BOM 容忍、`event: error` 帧、JSON→SSE 桥的 chunk 必带 created 与独立 usage chunk（`stream_mode_test.go` 的桥契约用例）、合成 Responses 必填键补齐与 item id/annotations。

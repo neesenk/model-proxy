@@ -235,3 +235,116 @@ routes:
 		})
 	}
 }
+
+// TestLoadFusionSelector covers the selector block: YAML loading, default
+// helpers, and every validation rule (decisions-only target, closed mode,
+// ranges, caps).
+func TestLoadFusionSelector(t *testing.T) {
+	yaml := func(fusion string) []byte {
+		return []byte(`listen: 127.0.0.1:15721
+providers:
+  a: {openai_base_url: "https://a", provider_id: static}
+  b: {openai_base_url: "https://b", provider_id: static}
+  s: {openai_base_url: "https://s", provider_id: static}
+  ts: {decisions_base_url: "https://ts/v1", provider_id: typesafe}
+` + fusion)
+	}
+	head := `fusion:
+  r:
+    panel:
+      - {provider: a, model: ma}
+      - {provider: b, model: mb, rubric: "cheap generalist"}
+    synthesizer: {provider: s, model: ms}
+`
+	cfg, err := LoadConfigFromBytes("config.yaml", yaml(head+`    selector:
+      target: {provider: ts, model: jev-1.13.0, protocol: decisions}
+      mode: enforce
+      confidence: 0.7
+      direct_score_max: 1.5
+      panel_top_k: 2
+      timeout: 500ms
+      instruction: "pick one"
+      difficulty_instruction: "rate it"
+`))
+	if err != nil {
+		t.Fatalf("valid selector config rejected: %v", err)
+	}
+	sel := cfg.Fusion["r"].Selector
+	if sel == nil || sel.Target.Provider != "ts" || sel.Target.Model != "jev-1.13.0" {
+		t.Fatalf("loaded selector = %+v", sel)
+	}
+	if sel.Mode != "enforce" || sel.Confidence != 0.7 || sel.DirectScoreMax != 1.5 ||
+		sel.PanelTopK != 2 || sel.Timeout != "500ms" ||
+		sel.Instruction != "pick one" || sel.DifficultyInstruction != "rate it" {
+		t.Errorf("loaded selector knobs = %+v", sel)
+	}
+	if got := cfg.Fusion["r"].Panel[1].Rubric; got != "cheap generalist" {
+		t.Errorf("panel rubric = %q", got)
+	}
+
+	def, err := LoadConfigFromBytes("config.yaml", yaml(head+`    selector:
+      target: {provider: ts, model: jev-1.13.0, protocol: decisions}
+`))
+	if err != nil {
+		t.Fatalf("minimal selector config rejected: %v", err)
+	}
+	d := def.Fusion["r"].Selector
+	if d.SelectorMode() != "shadow" || d.ConfidenceThreshold() != 0.55 || d.TimeoutDuration().Milliseconds() != 800 {
+		t.Errorf("selector defaults = mode %q confidence %v timeout %v", d.SelectorMode(), d.ConfidenceThreshold(), d.TimeoutDuration())
+	}
+
+	cases := []struct {
+		name          string
+		selector      string
+		wantErrSubstr string
+	}{
+		{"target not decisions", `      target: {provider: a, model: ma}
+`, "protocol: decisions"},
+		{"target explicit non-decisions protocol", `      target: {provider: ts, model: jev-1.13.0, protocol: openai}
+`, "no openai_base_url"},
+		{"target unknown provider", `      target: {provider: ghost, model: jev, protocol: decisions}
+`, "not defined"},
+		{"bad mode", `      target: {provider: ts, model: jev-1.13.0, protocol: decisions}
+      mode: yolo
+`, "mode"},
+		{"confidence out of range", `      target: {provider: ts, model: jev-1.13.0, protocol: decisions}
+      confidence: 1.5
+`, "confidence"},
+		{"direct_score_max out of range", `      target: {provider: ts, model: jev-1.13.0, protocol: decisions}
+      direct_score_max: 6
+`, "direct_score_max"},
+		{"panel_top_k out of range", `      target: {provider: ts, model: jev-1.13.0, protocol: decisions}
+      panel_top_k: 3
+`, "panel_top_k"},
+		{"instruction too long", `      target: {provider: ts, model: jev-1.13.0, protocol: decisions}
+      instruction: "` + strings.Repeat("x", fusionInstructionMaxRunes+1) + `"
+`, "instruction"},
+		{"difficulty instruction too long", `      target: {provider: ts, model: jev-1.13.0, protocol: decisions}
+      difficulty_instruction: "` + strings.Repeat("x", fusionInstructionMaxRunes+1) + `"
+`, "difficulty_instruction"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadConfigFromBytes("config.yaml", yaml(head+"    selector:\n"+tc.selector))
+			if err == nil {
+				t.Fatalf("config accepted, want error containing %q", tc.wantErrSubstr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrSubstr) {
+				t.Fatalf("error %q missing %q", err, tc.wantErrSubstr)
+			}
+		})
+	}
+
+	t.Run("panel rubric too long", func(t *testing.T) {
+		_, err := LoadConfigFromBytes("config.yaml", yaml(`fusion:
+  r:
+    panel:
+      - {provider: a, model: ma, rubric: "`+strings.Repeat("x", fusionRubricMaxRunes+1)+`"}
+      - {provider: b, model: mb}
+    synthesizer: {provider: s, model: ms}
+`))
+		if err == nil || !strings.Contains(err.Error(), "rubric") {
+			t.Fatalf("err = %v, want rubric cap error", err)
+		}
+	})
+}

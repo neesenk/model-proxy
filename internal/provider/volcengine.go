@@ -247,13 +247,23 @@ func ValidateVolcengineAKSK(ak, sk string) error {
 // resolveVolcengineAKSK picks the AccessKey/SecretKey to sign GetAFPUsage with.
 // Bound keys (cfg.AccessKey/SecretKey, the pool-bound path) are used EXCLUSIVELY
 // - the on-disk store is never consulted, preserving per-account isolation (a
-// sibling virtual's file must not leak into this account's quota call). When
-// unbound (the single-account / pre-pool path), the legacy store at
-// cfg.VolcengineCredFile is read for backward compatibility — through
-// credstore, so keychain mode covers this path too (lazy migration applies).
+// sibling virtual's file must not leak into this account's quota call). A pooled
+// virtual (cfg.BoundAPIKey set) that carries no AK/SK is the legal chat-only
+// shape: it reports "AK/SK not configured" instead of falling back to the
+// legacy single-account file, whose keys belong to a DIFFERENT account
+// (cross-account credential overreach + quota attributed to the wrong account).
+// Only the unbound single-account path (BoundAPIKey empty, explicit
+// VolcengineCredFile) reads the legacy store for backward compatibility —
+// through credstore, so keychain mode covers this path too (lazy migration
+// applies).
 func (p *VolcengineProvider) resolveAKSK() (ak, sk string, err error) {
 	if p.cfg.AccessKey != "" && p.cfg.SecretKey != "" {
 		return p.cfg.AccessKey, p.cfg.SecretKey, nil
+	}
+	if p.cfg.BoundAPIKey != "" {
+		// Pool virtual without its own AK/SK (chat-only): never borrow the
+		// legacy single-account file's keys.
+		return "", "", fmt.Errorf("AK/SK not configured")
 	}
 	if p.cfg.VolcengineCredFile == "" {
 		return "", "", fmt.Errorf("AK/SK not configured")

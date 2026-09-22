@@ -413,11 +413,74 @@ type FusionConfig struct {
 	// Instruction overrides the fixed synthesis preamble (rune-capped, see
 	// fusionInstructionMaxRunes). Empty = the built-in template.
 	Instruction string `yaml:"instruction"`
+	// Selector is an optional pre-fan-out routing decision made by a decisions
+	// model (e.g. TypeSafe Jev): one call picks the best candidate and scores
+	// task difficulty. shadow (default) only records the decision; enforce may
+	// answer directly via the chosen model (selector_direct) or trim the panel.
+	// Every failure (timeout, low confidence, invalid choice) falls back to the
+	// static full panel. nil = off.
+	Selector *SelectorConfig `yaml:"selector"`
+}
+
+// SelectorConfig tunes one fusion recipe's decisions-model routing pass. The
+// target must be a decisions-protocol provider/model (e.g. typesafe/jev-1.13);
+// its credentials, proxy, circuit breaker, request log and metrics are the
+// ordinary provider machinery's, so no key ever appears in this block.
+type SelectorConfig struct {
+	Target RouteTarget `yaml:"target"`
+	// Mode: "shadow" (default — decide and record, routing unchanged) or
+	// "enforce" (act on confident decisions).
+	Mode string `yaml:"mode"`
+	// Confidence is the enforce-mode action threshold [0,1] (default 0.55).
+	Confidence float64 `yaml:"confidence"`
+	// DirectScoreMax (0..5, default 0 = never direct): in enforce mode a
+	// confident choice whose difficulty score is at most this answers directly
+	// via the chosen model with the original body, skipping orchestration.
+	DirectScoreMax float64 `yaml:"direct_score_max"`
+	// PanelTopK (0 = no trim): in enforce mode trim the panel to the top-K
+	// candidates by decision probability (the chosen model is always kept).
+	PanelTopK int `yaml:"panel_top_k"`
+	// Timeout is the per-decision budget as a duration string (default "800ms").
+	Timeout string `yaml:"timeout"`
+	// Instruction overrides the default choice-question instructions
+	// (rune-capped like FusionConfig.Instruction). DifficultyInstruction does
+	// the same for the difficulty score question.
+	Instruction           string `yaml:"instruction"`
+	DifficultyInstruction string `yaml:"difficulty_instruction"`
+}
+
+// SelectorMode returns the effective mode (default shadow).
+func (s SelectorConfig) SelectorMode() string {
+	if s.Mode == "" {
+		return "shadow"
+	}
+	return s.Mode
+}
+
+// ConfidenceThreshold returns the enforce-mode action threshold (default 0.55).
+func (s SelectorConfig) ConfidenceThreshold() float64 {
+	if s.Confidence <= 0 {
+		return 0.55
+	}
+	return s.Confidence
+}
+
+// TimeoutDuration parses Timeout (default 800ms; malformed values are a
+// validation error upstream, so any parse failure here also gets the default).
+func (s SelectorConfig) TimeoutDuration() time.Duration {
+	if d, err := time.ParseDuration(s.Timeout); err == nil && d > 0 {
+		return d
+	}
+	return 800 * time.Millisecond
 }
 
 // fusionInstructionMaxRunes caps FusionConfig.Instruction (validation-enforced)
 // so a pasted essay can't silently bloat every synthesis prompt.
 const fusionInstructionMaxRunes = 4000
+
+// fusionRubricMaxRunes caps the per-candidate rubric fed to the decisions
+// selector: one-line descriptions keep the choice question cheap and sharp.
+const fusionRubricMaxRunes = 200
 
 // ShadowTarget names the candidate backend for shadow evaluation of a route.
 type ShadowTarget struct {
@@ -781,10 +844,15 @@ type Provider struct {
 	// OpenAIBaseURL is the default upstream base — used for the OpenAI protocol
 	// (/chat/completions, /responses) plus /models and usage. AnthropicBaseURL
 	// optionally overrides it for anthropic (/v1/messages) requests; if unset,
-	// OpenAIBaseURL serves both protocols. Both must include their version segment
-	// (e.g. .../v1, .../anthropic/v1) since the proxy strips the client's /v1.
+	// OpenAIBaseURL serves both protocols. DecisionsBaseURL optionally overrides
+	// it for decisions (/v1/decisions → upstream /systemone) requests; if unset,
+	// OpenAIBaseURL serves decisions too (OpenRouter serves /systemone on the
+	// same base as chat). OpenAI/Decisions bases must include their version
+	// segment (e.g. .../v1) since the proxy strips the client's /v1; the
+	// anthropic base must NOT (the proxy keeps the client's /v1/messages path).
 	OpenAIBaseURL    string `yaml:"openai_base_url"`
 	AnthropicBaseURL string `yaml:"anthropic_base_url"`
+	DecisionsBaseURL string `yaml:"decisions_base_url"`
 	Provider         string `yaml:"provider_id"`
 	// ProxyURL overrides the top-level proxy for this provider's forwarded
 	// traffic (http/https/socks5 URL, or "off" to force direct). Empty =
@@ -1010,11 +1078,16 @@ type RouteTarget struct {
 	Provider string `yaml:"provider"`           // config providers[] key
 	Model    string `yaml:"model"`              // real model name at that provider
 	Priority int    `yaml:"priority,omitempty"` // lower = tried first within a tier/quota band; unset (0) inherits the provider's priority
-	// Protocol declares the backend wire protocol ("anthropic", "openai", or
-	// "responses"). Empty means the client protocol is forwarded unchanged.
+	// Protocol declares the backend wire protocol ("anthropic", "openai",
+	// "responses", or "decisions"). Empty means the client protocol is
+	// forwarded unchanged.
 	// Set it only when the target requires cross-protocol conversion; the exact
 	// conversion contract belongs to internal/protocol.
 	Protocol string `yaml:"protocol"`
+	// Rubric is an optional one-line capability/cost description of this
+	// target, consumed only by the fusion selector (it becomes the candidate
+	// criterion in the decisions question). Empty = "provider/model".
+	Rubric string `yaml:"rubric,omitempty"`
 }
 
 // UnmarshalYAML accepts the compact scalar form "provider/model" (model may
@@ -1274,30 +1347,56 @@ func (c *Config) validate() error {
 		// A provider needs at least one upstream base URL. openai_base_url is the
 		// default (same-protocol openai forwarding); anthropic_base_url is used by
 		// anthropic same-protocol forwarding AND protocol:anthropic conversion
-		// targets. Requiring openai_base_url specifically would force a dummy value
-		// on pure-anthropic backends, so accept either.
-		if p.OpenAIBaseURL == "" && p.AnthropicBaseURL == "" {
-			return fmt.Errorf("provider %q: set at least one of openai_base_url / anthropic_base_url", name)
+		// targets; decisions_base_url serves decisions-protocol targets (falling
+		// back to openai_base_url when unset). Requiring openai_base_url
+		// specifically would force a dummy value on pure-anthropic or
+		// pure-decisions backends, so accept any of the three.
+		if p.OpenAIBaseURL == "" && p.AnthropicBaseURL == "" && p.DecisionsBaseURL == "" {
+			return fmt.Errorf("provider %q: set at least one of openai_base_url / anthropic_base_url / decisions_base_url", name)
 		}
 		if p.Provider == "" {
-			return fmt.Errorf("provider %q: provider_id is empty — set `provider_id:` (e.g. zhipu, aqp, codex, deepseek, volcengine, qwen-plan)", name)
+			return fmt.Errorf("provider %q: provider_id is empty — set `provider_id:` (e.g. zhipu, aqp, codex, deepseek, volcengine, qwen-plan, typesafe)", name)
 		}
 		// Check for known provider_id typos. apikey is a credential *category*
 		// (zhipu/deepseek/volcengine/kimi-code), not a registered provider_id;
 		// static's login eligibility comes from its API-key pool. The generic
 		// `headers` map is applied later as an override, but cannot make an
 		// uncredentialed static provider runnable.
-		known := map[string]bool{"aqp": true, "codex": true, "zhipu": true, "deepseek": true, "volcengine": true, "kimi-code": true, "static": true, "zcode": true, "qwen-plan": true}
+		known := map[string]bool{"aqp": true, "codex": true, "zhipu": true, "deepseek": true, "volcengine": true, "kimi-code": true, "static": true, "zcode": true, "qwen-plan": true, "typesafe": true}
 		if !known[p.Provider] {
-			return fmt.Errorf("provider %q: unknown provider_id %q — valid: aqp, codex, zhipu, deepseek, volcengine, kimi-code, static, zcode, qwen-plan", name, p.Provider)
+			return fmt.Errorf("provider %q: unknown provider_id %q — valid: aqp, codex, zhipu, deepseek, volcengine, kimi-code, static, zcode, qwen-plan, typesafe", name, p.Provider)
 		}
 		// anthropic_base_url should NOT end with /v1 (proxy keeps client's /v1 for anthropic).
 		if p.AnthropicBaseURL != "" && (strings.HasSuffix(p.AnthropicBaseURL, "/v1") || strings.HasSuffix(p.AnthropicBaseURL, "/v1/")) {
 			return fmt.Errorf("provider %q: anthropic_base_url ends with /v1 — the proxy keeps the client's /v1/messages path; remove the trailing /v1", name)
 		}
+		// Base URLs must be absolute http(s) URLs with a host (same shape as the
+		// mcp url check): a value without scheme or host would only surface at
+		// request-build time deep in the forward path.
+		for _, base := range []struct{ field, value string }{
+			{"openai_base_url", p.OpenAIBaseURL},
+			{"anthropic_base_url", p.AnthropicBaseURL},
+			{"decisions_base_url", p.DecisionsBaseURL},
+		} {
+			if base.value == "" {
+				continue
+			}
+			if u, err := url.Parse(base.value); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return fmt.Errorf("provider %q: %s %q is not a valid http(s) URL — include the scheme and host (e.g. https://api.example.com/v1)", name, base.field, base.value)
+			}
+		}
 		// usage_url should use https.
 		if p.UsageURL != "" && !strings.HasPrefix(p.UsageURL, "https://") && !strings.HasPrefix(p.UsageURL, "http://") {
 			return fmt.Errorf("provider %q: usage_url %q is not a valid URL", name, p.UsageURL)
+		}
+		// headers: credential-bearing names must use env:VAR indirection —
+		// same rule as mcp: headers (red line 3: credentials never land in
+		// config). Benign names (client hints, tracing ids) keep literal
+		// values; env: references resolve at send time (ResolveHeaderValue).
+		for h, v := range p.Headers {
+			if headerNameSensitive(h) && !envRefValid(v) {
+				return fmt.Errorf("provider %q: headers[%q] must use env:VAR indirection (e.g. env:MY_API_TOKEN) — literal values on credential headers are rejected so credentials never land in config (same rule as mcp: headers)", name, h)
+			}
 		}
 		if err := upstreamproxy.ValidateSetting(p.ProxyURL); err != nil {
 			return fmt.Errorf("provider %q: proxy_url: %w", name, err)
@@ -1476,6 +1575,42 @@ func (c *Config) validate() error {
 				return err
 			}
 		}
+		// Selector validation: target must be an explicitly decisions-protocol
+		// member; knobs stay within their ranges; instructions are capped.
+		if f.Selector != nil {
+			sel := f.Selector
+			if err := c.checkFusionTarget(name, "selector", sel.Target); err != nil {
+				return err
+			}
+			if sel.Target.Protocol != "decisions" {
+				return fmt.Errorf("fusion %q: selector target must declare protocol: decisions (got %q) — only decisions-protocol models can judge routing", name, sel.Target.Protocol)
+			}
+			switch sel.Mode {
+			case "", "shadow", "enforce":
+			default:
+				return fmt.Errorf("fusion %q: selector mode %q invalid — use shadow or enforce", name, sel.Mode)
+			}
+			if sel.Confidence < 0 || sel.Confidence > 1 {
+				return fmt.Errorf("fusion %q: selector confidence %v out of range [0, 1]", name, sel.Confidence)
+			}
+			if sel.DirectScoreMax < 0 || sel.DirectScoreMax > 5 {
+				return fmt.Errorf("fusion %q: selector direct_score_max %v out of range [0, 5]", name, sel.DirectScoreMax)
+			}
+			if sel.PanelTopK < 0 || sel.PanelTopK > len(f.Panel) {
+				return fmt.Errorf("fusion %q: selector panel_top_k %d out of range [0, %d] (panel size)", name, sel.PanelTopK, len(f.Panel))
+			}
+			if utf8.RuneCountInString(sel.Instruction) > fusionInstructionMaxRunes {
+				return fmt.Errorf("fusion %q: selector instruction is %d runes, max %d", name, utf8.RuneCountInString(sel.Instruction), fusionInstructionMaxRunes)
+			}
+			if utf8.RuneCountInString(sel.DifficultyInstruction) > fusionInstructionMaxRunes {
+				return fmt.Errorf("fusion %q: selector difficulty_instruction is %d runes, max %d", name, utf8.RuneCountInString(sel.DifficultyInstruction), fusionInstructionMaxRunes)
+			}
+		}
+		for i, m := range f.Panel {
+			if utf8.RuneCountInString(m.Rubric) > fusionRubricMaxRunes {
+				return fmt.Errorf("fusion %q: panel %d rubric is %d runes, max %d", name, i, utf8.RuneCountInString(m.Rubric), fusionRubricMaxRunes)
+			}
+		}
 	}
 	if c.ShadowSampleRate != nil {
 		if r := *c.ShadowSampleRate; r < 0 || r > 1 {
@@ -1518,6 +1653,21 @@ func (c *Config) validate() error {
 	// derives the default from the home dir, see AuditPathValue).
 	if c.Guard.AuditPath != "" && !filepath.IsAbs(c.Guard.AuditPath) {
 		return fmt.Errorf("guard.audit_path %q must be an absolute path (or unset for the default ~/.model-proxy/log/security/security.log)", c.Guard.AuditPath)
+	}
+	// Explicit data locations must be absolute after ~ / env: expansion (unset
+	// = the home-derived defaults, see ResolvedDir / ResolvedMCPDir /
+	// ResolvedDBPath). The daemon may be started from any working directory
+	// (launchd, cron, scripts, `serve` restarts), so a relative path would
+	// silently write the request log, the MCP stream or the stats DB to a
+	// CWD-dependent location.
+	for _, dataPath := range []struct{ field, value, def string }{
+		{"request_log.dir", c.RequestLog.Dir, "~/.model-proxy/log/requests"},
+		{"request_log.mcp_dir", c.RequestLog.MCPDir, "~/.model-proxy/log/mcp"},
+		{"stats.db_path", c.Stats.DBPath, "~/.model-proxy/stats.db"},
+	} {
+		if dataPath.value != "" && !filepath.IsAbs(ExpandPath(dataPath.value)) {
+			return fmt.Errorf("%s %q must be an absolute path (or unset for the default %s) — the daemon may start from any working directory, so a relative path would write to a CWD-dependent location", dataPath.field, dataPath.value, dataPath.def)
+		}
 	}
 	// guard.extra_patterns: a bad rule must fail at load, not silently never
 	// fire — name restricted to a log-safe token, regex must compile, and a
@@ -1669,7 +1819,9 @@ func (c *Config) checkFusionTarget(recipe, where string, t RouteTarget) error {
 // legal values — and against the provider's
 // base URLs: protocol:anthropic needs anthropic_base_url, openai/responses
 // need openai_base_url (responses reuses the OpenAI base, e.g. codex's
-// openai_base_url is its /responses endpoint). `what` is the caller's error
+// openai_base_url is its /responses endpoint), decisions needs
+// decisions_base_url or the openai_base_url fallback (OpenRouter serves
+// /systemone on the chat base). `what` is the caller's error
 // prefix (e.g. `route "glm" target 0` / `fusion "f" synthesizer`).
 func checkTargetProtocol(what string, t RouteTarget, prov Provider) error {
 	if t.Protocol == "" {
@@ -1677,12 +1829,16 @@ func checkTargetProtocol(what string, t RouteTarget, prov Provider) error {
 	}
 	wireProtocol, ok := wire.Parse(t.Protocol)
 	if !ok {
-		return fmt.Errorf("%s: protocol %q is not \"anthropic\", \"openai\", or \"responses\"", what, t.Protocol)
+		return fmt.Errorf("%s: protocol %q is not \"anthropic\", \"openai\", \"responses\", or \"decisions\"", what, t.Protocol)
 	}
 	switch wireProtocol {
 	case wire.Anthropic:
 		if prov.AnthropicBaseURL == "" {
 			return fmt.Errorf("%s: protocol:anthropic but provider %q has no anthropic_base_url — conversion needs it", what, t.Provider)
+		}
+	case wire.Decisions:
+		if prov.DecisionsBaseURL == "" && prov.OpenAIBaseURL == "" {
+			return fmt.Errorf("%s: protocol:decisions but provider %q has neither decisions_base_url nor openai_base_url (fallback) — conversion needs one", what, t.Provider)
 		}
 	case wire.OpenAI, wire.Responses:
 		if prov.OpenAIBaseURL == "" {

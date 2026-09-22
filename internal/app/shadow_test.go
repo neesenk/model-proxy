@@ -208,7 +208,7 @@ func TestShadowDispatchEmptyModelPassesThrough(t *testing.T) {
 		"responses",
 		"alias",
 		"alias", configdomain.ShadowTarget{Provider: "candidate"}, []byte(`{"model":"alias","input":[]}`),
-		"request-1",
+		"request-1", "zcode", "sess-1",
 	)
 	body, _ := gotBody.Load().(string)
 	var decoded map[string]any
@@ -344,7 +344,7 @@ func TestRunShadowPartialResponseIsLogged(t *testing.T) {
 		"openai",
 		"alias",
 		"alias", configdomain.ShadowTarget{Provider: "candidate", Model: "shadow-model", Protocol: "openai"}, []byte(`{"model":"alias","messages":[]}`),
-		"partial-1",
+		"partial-1", "", "",
 	)
 	shutdownLogger()
 
@@ -834,7 +834,7 @@ func TestRunShadow_NilRuntimeConfig(t *testing.T) {
 	var buf syncLogBuffer
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
-	p.runShadow(RuntimeSnapshot{}, nil, nil, "anthropic", "anthropic", "m", "g", configdomain.ShadowTarget{Provider: "p", Model: "m"}, []byte(`{}`), "rid")
+	p.runShadow(RuntimeSnapshot{}, nil, nil, "anthropic", "anthropic", "m", "g", configdomain.ShadowTarget{Provider: "p", Model: "m"}, []byte(`{}`), "rid", "", "")
 	if !strings.Contains(buf.String(), "runtime snapshot has no config") {
 		t.Fatalf("expected the nil-cfg guard log, got %q", buf.String())
 	}
@@ -935,5 +935,104 @@ func TestCloseCancelsInFlightShadowRequest(t *testing.T) {
 	case <-closed:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Proxy.Close blocked on an in-flight shadow request — no stop signal reaches the shadow client")
+	}
+}
+
+// The shadow record reuses the PRIMARY request's agent + client session id:
+// the synthetic upstream request carries neither the client's UA nor its
+// session headers, so probing it (the old behavior) left every shadow record
+// agentless and invisible in the sessions view.
+func TestShadow_LogsResultCarriesPrimaryAgentAndSession(t *testing.T) {
+	primaryUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"primary":true}`))
+	}))
+	defer primaryUp.Close()
+	shadowHit := make(chan struct{}, 1)
+	shadowUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case shadowHit <- struct{}{}:
+		default:
+		}
+		w.Write([]byte(`{"shadow":true}`))
+	}))
+	defer shadowUp.Close()
+
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"primary": {OpenAIBaseURL: primaryUp.URL, Provider: testProviderID},
+			"shadowp": {OpenAIBaseURL: shadowUp.URL, Provider: testProviderID},
+		},
+		Routes: map[string][]configdomain.RouteTarget{"glm": {{Provider: "primary", Model: "glm"}}},
+		Shadow: map[string]configdomain.ShadowTarget{"glm": {Provider: "shadowp", Model: "glm-shadow"}},
+	}
+	p, dir, shutdown := newReqLogProxy(t, cfg)
+	p.providers["primary"] = &testProv{key: "p"}
+	p.providers["shadowp"] = &testProv{key: "s"}
+	defer shutdown()
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+
+	req, _ := http.NewRequest("POST", px.URL+"/v1/responses", strings.NewReader(`{"model":"glm","input":[]}`))
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("user-agent", "claude-cli/2.1.0 (external, cli)")
+	req.Header.Set("x-session-id", "sess-shadow-attribution")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	select {
+	case <-shadowHit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shadow request never reached the candidate backend")
+	}
+	p.Close()
+	shutdown()
+	var shadowRec, primaryRec *requestlog.Record
+	for _, r := range allRecords(t, dir) {
+		rr := r
+		if strings.HasPrefix(r.RequestID, "shadow-") && r.Provider == "shadowp" {
+			shadowRec = &rr
+		} else if r.Provider == "primary" {
+			primaryRec = &rr
+		}
+	}
+	if shadowRec == nil || primaryRec == nil {
+		t.Fatalf("records missing (shadow=%v primary=%v)", shadowRec != nil, primaryRec != nil)
+	}
+	if shadowRec.Agent != "claude-code" {
+		t.Errorf("shadow record agent = %q, want claude-code from the primary's UA", shadowRec.Agent)
+	}
+	if shadowRec.SessionID != primaryRec.SessionID {
+		t.Errorf("shadow record session = %q, want the primary's %q", shadowRec.SessionID, primaryRec.SessionID)
+	}
+	if shadowRec.SessionID != "sess-shadow-attribution" {
+		t.Errorf("session id = %q, want the client's x-session-id value", shadowRec.SessionID)
+	}
+}
+
+// shadowTimeoutBudget pins the detached-execution HTTP budget: the configured
+// upstream timeout (default 1800s, sized for live streaming) capped at five
+// minutes so a hung shadow upstream cannot pin a concurrency slot for half an
+// hour.
+func TestShadowTimeoutBudgetCap(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want time.Duration
+	}{
+		{0, shadowTimeoutCap},
+		{-time.Second, shadowTimeoutCap},
+		{shadowTimeoutCap + time.Hour, shadowTimeoutCap},
+		{shadowTimeoutCap, shadowTimeoutCap},
+		{30 * time.Second, 30 * time.Second},
+		{time.Minute, time.Minute},
+	}
+	for _, c := range cases {
+		if got := shadowTimeoutBudget(c.in); got != c.want {
+			t.Errorf("shadowTimeoutBudget(%v) = %v, want %v", c.in, got, c.want)
+		}
 	}
 }

@@ -82,10 +82,11 @@ forward 产生 start/end，包含 agent、protocol、provider、status、latency
 `shadow.Runtime` 是进程级单例。生产响应 commit 后 fire-and-forget：
 
 - sample rate 的 nil 表示 1.0，显式 0 表示关闭；
-- semaphore 满时丢弃 shadow；
+- semaphore 满时丢弃 shadow（丢弃可见：runtime 的 dropped 计数驱动 `[shadow] concurrency gate full` 告警日志，首次与每第 50 次一条）；
+- shadow 的 HTTP 预算独立封顶：`min(scheduling.upstream_timeout, 5 分钟)`——上游超时默认 1800s 是为生产流式生成设计的，一个挂起的 shadow 不得占用并发槽半小时；
 - shadow 使用自身 protocol/baseURL；
 - 不得影响熔断、sticky、生产 metrics 或响应；
-- 结果进入 request_log，id 以 `shadow-<primary-id>` 配对；
+- 结果进入 request_log，id 以 `shadow-<primary-id>` 配对，agent 与 session_id 复用主请求的解析值（合成的上游请求不带客户端 UA/session 头，探测它恒为空）；
 - reload 必须让一次 dispatch 全程使用同一 generation 的 runtime、target、provider map 和 client。
 
 `internal/shadow.Runtime` 拥有可热重载的 sample decision、semaphore、专用
@@ -183,14 +184,15 @@ owner-only 权限等持久化机制由共享 sink `internal/observe/logfile` 拥
 
 ## Fusion 工作流
 
-顶层 `fusion:` 定义 2–4 个 panel 成员、synthesizer、可选 `min_panel`、judge、budget 和 instruction。route 通过 `{provider: fusion, model: <workflow>}` 引用。
+顶层 `fusion:` 定义 2–4 个 panel 成员、synthesizer、可选 `min_panel`、judge、budget、instruction 和 selector。route 通过 `{provider: fusion, model: <workflow>}` 引用。
 
-`internal/fusion.Engine` 是工作流 owner：拥有 first-turn/tools/budget gates、
+`internal/fusion.Engine` 是工作流 owner：拥有 first-turn/selector/tools/budget gates、
 panel fan-out、quorum/grace、judge、候选注入、degrade 和 registry 记录；
 `Registry` 拥有有界 run ring、aggregate 与 daily admission。Engine 只消费
 `fusion.Ports`，不持有 HTTP、Proxy、runtime state 或 observability stores。
-`internal/forward/fusion.go` 的 `fusionAdapter` 把同一个 `fusionCtx.runtime` 绑定为三个窄能力：
-tool capability、非流式 leg 和 client-facing synthesis；管线侧 `runFusion` 不再
+`internal/forward/fusion.go` 的 `fusionAdapter` 把同一个 `fusionCtx.runtime` 绑定为四个窄能力：
+tool capability、非流式 leg、client-facing synthesis 和 selector 判定调用
+（`internal/forward/fusion_select.go`）；管线侧 `runFusion` 不再
 启动 goroutine、计算 quorum 或维护 registry。
 
 ### Panel
@@ -248,12 +250,40 @@ previous_response_id：发送体是合成体的展开，但**录制的 history �
 
 judge 是可选的一次非流式内部调用，复用 panel leg 管道。成功报告以 `<JUDGE_ANALYSIS>` 注入候选前；失败只跳过报告，不让整次 Fusion 降级。
 
+### Selector（Jev 路由判定）
+
+selector 是可选的 fan-out 前路由判定：一次 decisions 协议调用（`selector.target`，
+必须显式 `protocol: decisions`，如 TypeSafe Jev）并行回答一道 Choice（最佳候选，
+选项 = panel ∪ synthesizer 去重，criterion = `rubric:` 或 `provider/model`）和一道
+Score（5 级难度）。判定调用复用与 panel leg 相同的 generation-bound 机制（resolver、
+plan、health gate、`targetexec.BufferedLeg`、metrics、request log、live event，
+tag `fusion-select`），凭据走目标 provider 的 apikey 池——config 里零凭据。
+
+- **state 构造**（`internal/fusion/selector.go` 纯函数）：只取最后一条 user 文本
+  （截断 6000 rune）+ 代码算好的画像（轮数/has_tools/has_image/estimated_input_tokens/
+  protocol）+ 候选列表。计数与估算留在代码（decisions 模型计数不可靠）；无关上下文
+  会拉低判定准确率（context rot）。
+- **gate 顺序**：first_turn → selector → tools → budget → fan-out。selector 在 budget
+  admission **之前**：`selector_direct` 直调不消耗当日编排预算；budget 耗尽时不走
+  selector 直接降级。
+- **模式**：`shadow`（默认）只记录 `run.Selector`（mode/action/choice/confidence/
+  difficulty/latency/err，`/api/fusion` 透出）用于攒对账数据；`enforce` 在
+  `confidence ≥ confidence`（默认 0.55）时行动：`difficulty ≤ direct_score_max`
+  → `selector_direct`（原始 body 直调选中模型，选中模型不支持 tools 且请求带 tools
+  时放弃直调）；`panel_top_k > 0` → 按判定概率裁 panel（永不裁到 quorum 以下，
+  保持配置顺序）。判定失败/超时/低置信/choice 不在候选集 → `fallback` 静态全 panel。
+- **硬约束在代码**：图片请求跳过 selector（decisions 模型纯文本）；trim 只作用于
+  panel 成员；pin/force-provider 在 fusion 拦截点前已处理，selector 不可见。
+- **成本与延迟**：一次判定 ≈ 70–500ms（`selector.timeout` 默认 800ms 兜底，失败即
+  回退）、~340–1000 input tokens（$0.042/M，输出免费）。trim 降低容错
+  （top_k=2 + quorum=2 时单成员失败即 insufficient_proposers 降级）——默认关闭。
+
 ### 成本和观测
 
-- `max_runs_per_day` 在 fan-out 前 admission；进入 fan-out 之前的降级（multi_turn/tools_unsupported）不消耗预算，
+- `max_runs_per_day` 在 fan-out 前 admission；进入 fan-out 之前的降级（multi_turn/tools_unsupported/selector_direct）不消耗预算，
 fan-out 之后的降级（insufficient_proposers、body_build_failed）仍计入当日预算。
 - `first_turn_only` 在多轮会话直接降级。
-- 降级原因：`insufficient_proposers`、`tools_unsupported`、`body_build_failed`、`budget_exceeded`、`multi_turn`。
+- 降级原因：`insufficient_proposers`、`tools_unsupported`、`body_build_failed`、`budget_exceeded`、`multi_turn`、`selector_direct`。
 - registry 保留 200 条 run，跨 reload 存活。
 - SQLite 中 `(fusion, workflow)` 的 requests 表示编排次数，failovers 表示降级次数。
 - Fusion 适合高质量单发场景，不应作为默认 route；典型延迟约 2 倍、成本 N+1 倍。
@@ -273,6 +303,10 @@ fan-out 之后的降级（insufficient_proposers、body_build_failed）仍计入
   原生 responses 后端 leg 的候选文本提取（不误判 empty draft）、
   responses 客户端的 previous_response_id 展开与最终响应录制。
 - quorum impossible、grace、judge failure、tools fallback、daily budget。
+- Fusion selector：shadow 记录不改路由、enforce direct（不消耗预算、tools 门拦截）、
+  低置信/错误/非法 choice 回退静态 panel、按概率 trim（不低于 quorum）、图片请求跳过、
+  state 三协议提取与截断（`internal/fusion/selector_test.go`）；decisions body shape、
+  429/5xx/空 answers/缺 model_choice/超时的健康门口径（`internal/forward/fusion_select_test.go`）。
 - `internal/fusion` 直接断言 gate、fan-out/cancel、三协议 body、registry detached
   snapshot；`internal/shadow` 直接断言 sampling 阈值、gate、header/auth/path、
   conversion fail-closed 与 bounded capture。根包只保留 generation/lifecycle/

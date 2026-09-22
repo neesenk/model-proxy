@@ -200,8 +200,11 @@ type Config struct {
 	ProviderID    string
 	ProviderName  string // the config top-level key (for display "Provider: <name>")
 	OpenAIBaseURL string
-	Headers       map[string]string
-	UsageURL      string
+	// DecisionsBaseURL is the decisions-protocol upstream base (typesafe).
+	// Empty = the openai base serves decisions too (OpenRouter fallback).
+	DecisionsBaseURL string
+	Headers          map[string]string
+	UsageURL         string
 
 	// ClientVersion is the codex /models client_version query param, resolved
 	// by the main package (config > codex CLI > ~/.codex cache > constant) and

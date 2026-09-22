@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"time"
 
-	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/requestlog"
 
 	"model-proxy/internal/forward"
@@ -29,6 +28,8 @@ func (p *Proxy) dispatchShadowAfterCommit(
 	exposed string,
 	primary configdomain.RouteTarget,
 	primaryRequestID string,
+	primaryAgent string,
+	primarySession string,
 	commit *targetexec.Commit,
 ) {
 	if commit == nil || p.reqLog == nil || len(runtime.Cfg.Shadow) == 0 {
@@ -44,6 +45,13 @@ func (p *Proxy) dispatchShadowAfterCommit(
 	}
 	permit := shadowRuntime.TryAcquire()
 	if permit == nil {
+		// The gate rejection used to be invisible from the outside — the only
+		// symptom was shadow records quietly disappearing. The runtime's
+		// dropped counter drives the cadence: first rejection, then every
+		// 50th.
+		if n := shadowRuntime.Dropped(); n == 1 || n%50 == 0 {
+			logx.Warnf("[shadow] concurrency gate full — detached dispatches dropped so far: %d (see shadow_max_concurrent)", n)
+		}
 		return
 	}
 	if !p.lifecycle.RunBeforeLogDrain(func(stop <-chan struct{}) {
@@ -59,6 +67,8 @@ func (p *Proxy) dispatchShadowAfterCommit(
 			shadow,
 			commit.RequestBody(),
 			primaryRequestID,
+			primaryAgent,
+			primarySession,
 		)
 	}) {
 		permit.Release()
@@ -72,6 +82,23 @@ func (p *Proxy) dispatchShadowAfterCommit(
 // supervisor's 10s SIGTERM window, so every final flush behind
 // WaitBeforeLogDrain still runs.
 const shadowShutdownGrace = 2 * time.Second
+
+// shadowTimeoutCap bounds one detached shadow execution's HTTP budget. The
+// upstream timeout (scheduling.upstream_timeout, default 1800s) is sized for
+// live streaming generations; a shadow evaluation must not pin one of the
+// few concurrency slots (shadow_max_concurrent, default 4) for half an hour
+// when its upstream hangs — four hung shadows would silently stall the whole
+// channel. Five minutes covers any real generation while bounding the stall.
+const shadowTimeoutCap = 5 * time.Minute
+
+// shadowTimeoutBudget is the shadow client timeout: the configured upstream
+// budget capped at shadowTimeoutCap (never larger than either).
+func shadowTimeoutBudget(upstream time.Duration) time.Duration {
+	if upstream <= 0 || upstream > shadowTimeoutCap {
+		return shadowTimeoutCap
+	}
+	return upstream
+}
 
 // runShadow sends the same prompt to a candidate backend (shadow evaluation,
 // #12): fire-and-forget, the result is logged for offline comparison and NEVER
@@ -91,7 +118,7 @@ const shadowShutdownGrace = 2 * time.Second
 // reqBody may already be converted from the client's proto). The shadow backend's
 // own protocol is shadowTarget.Protocol (defaulting to bodyProto); runShadow selects the
 // shadow base URL + path for THAT protocol and converts the body if it differs.
-func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Runtime, stop <-chan struct{}, proto, bodyProto, calledModel, exposed string, shadowTarget configdomain.ShadowTarget, reqBody []byte, primaryReqID string) {
+func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Runtime, stop <-chan struct{}, proto, bodyProto, calledModel, exposed string, shadowTarget configdomain.ShadowTarget, reqBody []byte, primaryReqID, primaryAgent, primarySession string) {
 	if runtime.Cfg == nil {
 		// Defensive: RuntimeSnapshot is handed around as a plain value — a
 		// future call site that forgets to populate it must not nil-deref
@@ -150,7 +177,7 @@ func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Run
 		CalledModel: calledModel,
 		// Per-provider proxy: same resolution chain as the live pipeline, but
 		// with shadow's own timeout budget (the pooled clients run Timeout 0).
-		Client:       &http.Client{Transport: p.transportFor(runtime.Cfg, runtime.ParentOf, target.Provider), Timeout: runtime.Cfg.Scheduling.Timeout()},
+		Client:       &http.Client{Transport: p.transportFor(runtime.Cfg, runtime.ParentOf, target.Provider), Timeout: shadowTimeoutBudget(runtime.Cfg.Scheduling.Timeout())},
 		MaxBodyBytes: logger.MaxBodyBytes(),
 	})
 	if result.Err != nil {
@@ -162,8 +189,12 @@ func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Run
 			return
 		}
 	}
+	// The synthetic upstream request carries neither the client's UA nor its
+	// session headers, so agent/session attribution comes from the PRIMARY
+	// request (resolved once in serveOnce) — without this every shadow record
+	// was agentless and invisible in the sessions view.
 	logInput := forward.BuildRequestLogInput(
-		forward.LogCtx{RequestID: "shadow-" + primaryReqID, SessionID: requestlog.SessionID(result.Request, p.sessionHeaders()), Exposed: exposed, Agent: counters.DetectAgent(result.Request)},
+		forward.LogCtx{RequestID: "shadow-" + primaryReqID, SessionID: primarySession, Exposed: exposed, Agent: primaryAgent},
 		result.Request,
 		proto,
 		calledModel, configdomain.RouteTarget{Provider: target.Provider, Model: target.Model}, result.Response,

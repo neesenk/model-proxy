@@ -79,10 +79,13 @@ type Build struct {
 // home directory (credential files), codex version probes, and the volcengine
 // signed model-list call. Tests inject fakes; production wires the real ones.
 type BuildOptions struct {
-	HomeDir                  string
-	CodexCLIVersion          func() string
-	CodexCacheVersion        func() string
-	ListArkAgentPlanModelIDs func(ctx context.Context, provName string) ([]string, error)
+	HomeDir           string
+	CodexCLIVersion   func() string
+	CodexCacheVersion func() string
+	// ListArkAgentPlanModelIDs runs the signed model listing with the caller's
+	// own AK/SK (the pool virtual's bound pair; empty = the legacy
+	// single-account fallback inside the real implementation).
+	ListArkAgentPlanModelIDs func(ctx context.Context, provName, ak, sk string) ([]string, error)
 }
 
 // BuildProviders creates provider.Provider instances from config, unrolling
@@ -279,15 +282,16 @@ func collectOAuthSecrets(opts BuildOptions, name, providerID string) []Secret {
 // (identical to the pre-pool BuildProviders).
 func BuildOne(cfg *configdomain.Config, opts BuildOptions, name string, prov configdomain.Provider, cred accounts.Credentials) provider.Provider {
 	pcfg := &provider.Config{
-		ProviderID:    prov.Provider,
-		ProviderName:  name,
-		OpenAIBaseURL: prov.OpenAIBaseURL,
-		Headers:       prov.Headers,
-		UsageURL:      prov.UsageURL,
-		AqpMintURL:    prov.AqpMintURL, // aqp: without this the key mint POSTs to ""
-		BoundAPIKey:   cred.APIKey,     // binding point #1 (forward path)
-		Models:        prov.Models,     // for the usage-display fallback (listConfigModels)
-		OAuthAuthFile: filepath.Join(opts.HomeDir, ".model-proxy", name+"_oauth_auth.json"),
+		ProviderID:       prov.Provider,
+		ProviderName:     name,
+		OpenAIBaseURL:    prov.OpenAIBaseURL,
+		DecisionsBaseURL: prov.DecisionsBaseURL,
+		Headers:          prov.Headers,
+		UsageURL:         prov.UsageURL,
+		AqpMintURL:       prov.AqpMintURL, // aqp: without this the key mint POSTs to ""
+		BoundAPIKey:      cred.APIKey,     // binding point #1 (forward path)
+		Models:           prov.Models,     // for the usage-display fallback (listConfigModels)
+		OAuthAuthFile:    filepath.Join(opts.HomeDir, ".model-proxy", name+"_oauth_auth.json"),
 	}
 	// Wire callbacks by provider type. aqp needs none: its Quota/Usage fetch
 	// monthly_usage directly (AqpProvider.fetchMonthlyUsage reads the SSO-cookie
@@ -296,7 +300,19 @@ func BuildOne(cfg *configdomain.Config, opts BuildOptions, name string, prov con
 	case "codex":
 		pcfg.ClientVersion = ResolveCodexClientVersion(prov.ClientVersion, opts.CodexCLIVersion, opts.CodexCacheVersion)
 	case "volcengine":
-		pcfg.FetchModelsFn = func(ctx context.Context) ([]string, error) { return opts.ListArkAgentPlanModelIDs(ctx, name) }
+		// FetchModels signs with THIS virtual's own AK/SK. A chat-only virtual
+		// (bound API key, no AK/SK) is a legal shape and must report
+		// not-configured instead of borrowing the legacy single-account file
+		// (cross-account parity with the provider's resolveAKSK); the unbound
+		// single-account instance passes empty AK/SK and
+		// ListArkAgentPlanModelIDs falls back to the legacy store via credstore.
+		ak, sk, bound := cred.AccessKey, cred.SecretKey, cred.APIKey != ""
+		pcfg.FetchModelsFn = func(ctx context.Context) ([]string, error) {
+			if bound && (ak == "" || sk == "") {
+				return nil, errVolcengineAKSKNeeded(name)
+			}
+			return opts.ListArkAgentPlanModelIDs(ctx, name, ak, sk)
+		}
 		// GetAFPUsage is V4-signed with the virtual's own AK/SK (bound here so
 		// each pooled account queries its own Agent Plan quota); falls back to
 		// the legacy <name>_apikey.json when unbound (single-account path).
@@ -362,17 +378,31 @@ func BuildOpts() BuildOptions {
 	}
 }
 
+// errVolcengineAKSKNeeded is the login-required error for volcengine's signed
+// model list: returned when a bound chat-only virtual has no AK/SK of its own
+// (it must not borrow another account's), and when the legacy single-account
+// store has none either (missing/incomplete).
+func errVolcengineAKSKNeeded(provName string) error {
+	return fmt.Errorf("Agent Plan model list needs AK/SK — run `model-proxy login %s`", provName)
+}
+
 // ListArkAgentPlanModelIDs calls the Volcengine signed OpenAPI ListArkAgentPlanModel
-// via the provider's stored AK/SK and returns the Agent Plan's supported model IDs.
-func ListArkAgentPlanModelIDs(ctx context.Context, provName string) ([]string, error) {
+// and returns the Agent Plan's supported model IDs. ak/sk are the caller's own
+// credentials (the pool virtual's bound pair); when empty, the legacy
+// single-account file is read via credstore (so keychain mode is covered) and
+// a missing/incomplete store yields the login-required error.
+func ListArkAgentPlanModelIDs(ctx context.Context, provName, ak, sk string) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	creds, err := LoadVolcengineCreds(accounts.HomeDir(), provName)
-	if err != nil || creds.AccessKey == "" || creds.SecretKey == "" {
-		return nil, fmt.Errorf("Agent Plan model list needs AK/SK — run `model-proxy login %s`", provName)
+	if ak == "" || sk == "" {
+		creds, err := LoadVolcengineCreds(accounts.HomeDir(), provName)
+		if err != nil || creds.AccessKey == "" || creds.SecretKey == "" {
+			return nil, errVolcengineAKSKNeeded(provName)
+		}
+		ak, sk = creds.AccessKey, creds.SecretKey
 	}
-	req, err := provider.VolcengineSignedGet("ListArkAgentPlanModel", "2024-01-01", creds.AccessKey, creds.SecretKey, time.Now(), "")
+	req, err := provider.VolcengineSignedGet("ListArkAgentPlanModel", "2024-01-01", ak, sk, time.Now(), "")
 	if err != nil {
 		return nil, err
 	}

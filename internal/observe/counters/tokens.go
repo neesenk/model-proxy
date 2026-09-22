@@ -78,6 +78,12 @@ func (tc *TokenCounter) Reset() {
 
 const scanLineCap = 64 * 1024
 
+// jsonBodyCap bounds the retained body used by the non-stream JSON usage
+// fallback (Commit). Non-stream LLM responses carry usage as the last field,
+// so a truncated body never parses — larger bodies simply behave as before
+// (no usage recorded), with no retention growth past the cap.
+const jsonBodyCap = 4 << 20
+
 // UsageScanner is a pass-through io.ReadCloser: bytes read from src are returned
 // verbatim, and observed incrementally to extract SSE usage events. It never
 // modifies, buffers the stream, or blocks the client. Failures are silent (no
@@ -90,6 +96,15 @@ type UsageScanner struct {
 	line    []byte           // current incomplete line (bounded by scanLineCap)
 	acc     TokenUsage
 	done    bool
+
+	// Non-stream fallback: when the first payload byte is '{' the body is a
+	// plain JSON response (not SSE), so it is retained (capped) for one whole-
+	// body usage parse at Commit. sseUsage marks that an SSE usage payload was
+	// already counted — the fallback then stays off (no double count).
+	sniffed  bool
+	jsonMode bool
+	sseUsage bool
+	raw      []byte
 }
 
 func NewUsageScanner(src io.ReadCloser, key TokenKey, tc *TokenCounter, onAgent func(TokenUsage)) *UsageScanner {
@@ -120,6 +135,9 @@ func (s *UsageScanner) Close() error {
 // and, if an agent sink is wired, to the agent pipeline too (same bytes, so
 // per-agent token totals reconcile with the per-model totals).
 func (s *UsageScanner) Commit() {
+	if !s.sseUsage && s.jsonMode {
+		s.parseJSONUsage()
+	}
 	s.tc.Commit(s.key, s.acc)
 	if s.onAgent != nil && (s.acc.Input > 0 || s.acc.Output > 0) {
 		s.onAgent(s.acc)
@@ -133,6 +151,23 @@ var usageMarker = []byte(`"usage"`)
 // observe scans a chunk for complete lines, extracting usage. Partial line bytes
 // are held in s.line (capped); an over-long line is flushed (skipped) to bound memory.
 func (s *UsageScanner) observe(chunk []byte) {
+	if !s.sniffed {
+		s.sniffed = true
+		// JSON responses start with '{' (possibly after whitespace/BOM); SSE
+		// streams start with data:/event:/id:/retry: or a ':' comment. Only
+		// JSON bodies are retained for the Commit-time fallback.
+		trimmed := bytes.TrimLeft(chunk, " \t\r\n\xef\xbb\xbf")
+		s.jsonMode = len(trimmed) > 0 && trimmed[0] == '{'
+	}
+	if s.jsonMode && len(s.raw) < jsonBodyCap {
+		if room := jsonBodyCap - len(s.raw); room > 0 {
+			segment := chunk
+			if len(segment) > room {
+				segment = segment[:room]
+			}
+			s.raw = append(s.raw, segment...)
+		}
+	}
 	for len(chunk) > 0 {
 		i := bytes.IndexByte(chunk, '\n')
 		segment := chunk
@@ -188,11 +223,13 @@ func (s *UsageScanner) parseLine(line []byte) {
 	}
 	if json.Unmarshal(payload, &anth) == nil {
 		if anth.Type == "message_start" {
+			s.sseUsage = true
 			s.acc.Input += anth.Message.Usage.InputTokens
 			s.acc.CacheCreation = max(s.acc.CacheCreation, anth.Message.Usage.CacheCreationTokens)
 			s.acc.CacheRead = max(s.acc.CacheRead, anth.Message.Usage.CacheReadTokens)
 		}
 		if anth.Type == "message_delta" {
+			s.sseUsage = true
 			s.acc.Output += anth.Usage.OutputTokens
 			// A native anthropic stream carries only output_tokens here, but the
 			// protocol-conversion transformer (openai→anthropic) emits input_tokens
@@ -221,6 +258,7 @@ func (s *UsageScanner) parseLine(line []byte) {
 		} `json:"usage"`
 	}
 	if json.Unmarshal(payload, &oai) == nil && oai.Usage != nil {
+		s.sseUsage = true
 		s.acc.Input += oai.Usage.PromptTokens
 		s.acc.Output += oai.Usage.CompletionTokens
 		// Cached prompt tokens ride in prompt_tokens_details (openai contract);
@@ -248,10 +286,59 @@ func (s *UsageScanner) parseLine(line []byte) {
 		} `json:"response"`
 	}
 	if json.Unmarshal(payload, &resp) == nil && resp.Response != nil && resp.Response.Usage != nil {
+		s.sseUsage = true
 		s.acc.Input = max(s.acc.Input, resp.Response.Usage.InputTokens)
 		s.acc.Output = max(s.acc.Output, resp.Response.Usage.OutputTokens)
 		if resp.Response.Usage.InputDetails != nil {
 			s.acc.CacheRead = max(s.acc.CacheRead, resp.Response.Usage.InputDetails.CachedTokens)
 		}
+	}
+}
+
+// parseJSONUsage is the Commit-time fallback for NON-stream responses: the
+// whole (capped) body is parsed once for a usage object. Ledger semantics
+// mirror the SSE path exactly: openai input is prompt_tokens inclusive of the
+// cached share (cache reads reported separately via the details object);
+// anthropic/responses/decisions read input_tokens/output_tokens with per-field
+// max cache merges. Anything unparseable or usage-less is a silent no-op
+// (error envelopes, truncated bodies, streams without usage events).
+func (s *UsageScanner) parseJSONUsage() {
+	if len(s.raw) == 0 {
+		return
+	}
+	var doc struct {
+		Usage *struct {
+			InputTokens      uint64 `json:"input_tokens"`
+			OutputTokens     uint64 `json:"output_tokens"`
+			PromptTokens     uint64 `json:"prompt_tokens"`
+			CompletionTokens uint64 `json:"completion_tokens"`
+			CacheCreation    uint64 `json:"cache_creation_input_tokens"`
+			CacheRead        uint64 `json:"cache_read_input_tokens"`
+			PromptDetails    *struct {
+				CachedTokens uint64 `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+			InputDetails *struct {
+				CachedTokens uint64 `json:"cached_tokens"`
+			} `json:"input_tokens_details"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(s.raw, &doc) != nil || doc.Usage == nil {
+		return
+	}
+	u := doc.Usage
+	if u.PromptTokens > 0 || u.CompletionTokens > 0 {
+		s.acc.Input += u.PromptTokens
+		s.acc.Output += u.CompletionTokens
+		if u.PromptDetails != nil {
+			s.acc.CacheRead = max(s.acc.CacheRead, u.PromptDetails.CachedTokens)
+		}
+		return
+	}
+	s.acc.Input += u.InputTokens
+	s.acc.Output += u.OutputTokens
+	s.acc.CacheCreation = max(s.acc.CacheCreation, u.CacheCreation)
+	s.acc.CacheRead = max(s.acc.CacheRead, u.CacheRead)
+	if u.InputDetails != nil {
+		s.acc.CacheRead = max(s.acc.CacheRead, u.InputDetails.CachedTokens)
 	}
 }

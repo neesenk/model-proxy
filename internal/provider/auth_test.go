@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -327,6 +328,141 @@ func TestAqpKeyProvider_NoSSOCookie(t *testing.T) {
 	req, _ := http.NewRequest("POST", "http://x", nil)
 	if err := p.Inject(req); err == nil {
 		t.Error("expected error when no SSO cookie")
+	}
+}
+
+// TestAqpKeyProvider_MintFailureNegativeCache (A14 regression): the mint runs
+// under p.mu with a 30s HTTP timeout, so a down mint endpoint used to make
+// every request queue on the lock for a fresh network round trip. Within
+// refreshFailureTTL the cached error must be returned with NO network attempt;
+// past the TTL a retry must happen; a successful mint must clear the cache.
+// Time advances through the injected clock — no Sleep.
+func TestAqpKeyProvider_MintFailureNegativeCache(t *testing.T) {
+	var up int32 // 0 = endpoint down (503), 1 = up (mint succeeds)
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		if atomic.LoadInt32(&up) == 0 {
+			w.WriteHeader(503)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"retcode": 0,
+			"data":    map[string]any{"api_key": "minted-key", "project_id": "p1"},
+		})
+	}))
+	defer srv.Close()
+
+	store := filepath.Join(t.TempDir(), "store.json")
+	writeSSOCookie(t, store, "SSO_C=x")
+	p := NewAqpKeyProvider(srv.URL, store)
+	now := time.Now()
+	p.now = func() time.Time { return now }
+
+	req, _ := http.NewRequest("POST", "http://x", nil)
+	err1 := p.Inject(req)
+	if err1 == nil {
+		t.Fatal("first inject against a down mint endpoint: want error")
+	}
+	if err2 := p.Inject(req); err2 == nil || err2.Error() != err1.Error() {
+		t.Fatalf("second inject within TTL: err=%v, want the SAME cached error %q", err2, err1)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("network attempts = %d, want 1 (second inject served from the negative cache)", got)
+	}
+
+	// Advance past the TTL: the next inject retries the network.
+	now = now.Add(refreshFailureTTL + time.Second)
+	if err3 := p.Inject(req); err3 == nil {
+		t.Fatal("post-TTL inject: want retry error (endpoint still down)")
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("network attempts after TTL = %d, want 2 (retry happened)", got)
+	}
+
+	// Advance past the TTL again, with the endpoint up: the mint succeeds and
+	// clears the negative cache.
+	now = now.Add(refreshFailureTTL + time.Second)
+	atomic.StoreInt32(&up, 1)
+	if err := p.Refresh(); err != nil {
+		t.Fatalf("recovered mint: %v", err)
+	}
+	// ...then goes down again: a fresh network attempt (not the stale cached
+	// error) proves the success cleared the cache.
+	atomic.StoreInt32(&up, 0)
+	if err := p.Refresh(); err == nil || err.Error() != err1.Error() {
+		t.Fatalf("post-recovery mint against down endpoint: err=%v, want a fresh %q", err, err1)
+	}
+	if got := atomic.LoadInt32(&calls); got != 4 {
+		t.Fatalf("network attempts = %d, want 4 (cache cleared by the success)", got)
+	}
+}
+
+// TestCodexOAuth_RefreshFailureNegativeCache (A14 regression): same contract
+// as the aqp case — the refresh runs under p.mu, so a down auth endpoint used
+// to serialize every request on a fresh 30s round trip. Within
+// refreshFailureTTL the cached error is returned with NO network attempt; past
+// the TTL a retry happens; a successful refresh clears the cache. Clock via
+// p.now, no Sleep.
+func TestCodexOAuth_RefreshFailureNegativeCache(t *testing.T) {
+	var up int32 // 0 = endpoint down (503), 1 = up (valid tokens)
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		if atomic.LoadInt32(&up) == 0 {
+			w.WriteHeader(503)
+			return
+		}
+		payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, time.Now().Add(72*time.Hour).Unix())))
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "head." + payload + ".sig",
+			"refresh_token": "rt-new",
+		})
+	}))
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), "auth.json")
+	writeCodexAuth(t, path, "rt-old", time.Now().Add(-time.Minute)) // expired -> refresh path
+	p := NewCodexOAuthProvider(path)
+	p.tokenURL = srv.URL
+	now := time.Now()
+	p.now = func() time.Time { return now }
+
+	err1 := p.Refresh()
+	if err1 == nil {
+		t.Fatal("first refresh against a down endpoint: want error")
+	}
+	if err2 := p.Refresh(); err2 == nil || err2.Error() != err1.Error() {
+		t.Fatalf("second refresh within TTL: err=%v, want the SAME cached error %q", err2, err1)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("network attempts = %d, want 1 (second refresh served from the negative cache)", got)
+	}
+
+	// Advance past the TTL: the next refresh retries the network.
+	now = now.Add(refreshFailureTTL + time.Second)
+	if err3 := p.Refresh(); err3 == nil {
+		t.Fatal("post-TTL refresh: want retry error (endpoint still down)")
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("network attempts after TTL = %d, want 2 (retry happened)", got)
+	}
+
+	// Advance past the TTL again, with the endpoint up: the refresh succeeds
+	// and clears the negative cache.
+	now = now.Add(refreshFailureTTL + time.Second)
+	atomic.StoreInt32(&up, 1)
+	if err := p.Refresh(); err != nil {
+		t.Fatalf("recovered refresh: %v", err)
+	}
+	// Endpoint goes down again: a fresh network attempt (not the stale cached
+	// error) proves the success cleared the cache.
+	atomic.StoreInt32(&up, 0)
+	if err := p.Refresh(); err == nil || err.Error() != err1.Error() {
+		t.Fatalf("post-recovery refresh against down endpoint: err=%v, want a fresh %q", err, err1)
+	}
+	if got := atomic.LoadInt32(&calls); got != 4 {
+		t.Fatalf("network attempts = %d, want 4 (cache cleared by the success)", got)
 	}
 }
 

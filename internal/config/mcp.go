@@ -351,6 +351,41 @@ func ResolveMCPHeaders(s MCPServer) (map[string]string, error) {
 	return out, nil
 }
 
+// headerNameSensitive reports whether a configured provider header name is
+// credential-bearing: the classic auth/cookie headers, plus any name whose
+// dash/underscore-separated segments look credential-shaped per
+// envKeySensitive (the same vocabulary the mcp env: guard uses, so x-api-key,
+// x-auth-token, api-key ... all match). Sensitive names must take env:VAR
+// indirection (Config.validate, provider headers) — red line 3: credentials
+// never land in config.
+func headerNameSensitive(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "authorization", "proxy-authorization", "cookie":
+		return true
+	}
+	return envKeySensitive(name)
+}
+
+// ResolveHeaderValue expands one configured provider header value at send
+// time. A value in env:VAR form (envRefValid) resolves to the variable's
+// current value — mandatory for credential-bearing names (validate enforces
+// it via headerNameSensitive) and available for any header. A missing
+// variable is a send-time configuration error, fail-closed exactly like
+// ResolveMCPHeaders: silently dropping a configured header (typically auth)
+// would surface as confusing upstream 401s. Any other value is a literal for
+// a benign header name and passes through unchanged.
+func ResolveHeaderValue(header, value string) (string, error) {
+	if !envRefValid(value) {
+		return value, nil
+	}
+	varName := strings.TrimPrefix(value, "env:")
+	resolved, ok := os.LookupEnv(varName)
+	if !ok {
+		return "", fmt.Errorf("headers[%q]: environment variable %s is not set", header, varName)
+	}
+	return resolved, nil
+}
+
 // customAuthHeader reports whether auth injection uses a non-Authorization
 // header carrying the raw key.
 func (s MCPServer) customAuthHeader() bool {

@@ -784,3 +784,46 @@ func TestParity_ChatToResponses_InlineThinkStream(t *testing.T) {
 		t.Errorf("non-leading think altered: %q", t3.String())
 	}
 }
+
+// A gateway that sends output_item.added for a message but never streams
+// output_text deltas, carrying the whole content only in output_item.done:
+// the anthropic client must still receive the text (the r→chat converter's
+// contentSeen fallback, mirrored on the r→a side — without this the client
+// gets an empty assistant message).
+func TestParity_AddedWithoutDeltasMessageDoneSynthesizesContent(t *testing.T) {
+	in := `data: {"type":"response.created","response":{"id":"r1","status":"in_progress"}}` + "\n\n" +
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}` + "\n\n" +
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"full answer"}]}}` + "\n\n" +
+		`data: {"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":1,"output_tokens":2}}}` + "\n\n"
+
+	// r→anthropic: the done frame's content must be synthesized as a text
+	// block instead of dropped. Assert on the PARSED delta (sonic does not
+	// sort map keys, so a raw substring pin on the serialized key order is
+	// iteration-order flaky).
+	rawA := readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
+	outA := string(rawA)
+	eventsA := drainSSE(t, strings.NewReader(outA))
+	synthesized := false
+	for _, ev := range eventsA {
+		if d := asMap(sseDataMap(t, ev)["delta"]); d != nil && strOf(d["text"]) == "full answer" {
+			synthesized = true
+		}
+	}
+	if !synthesized {
+		t.Errorf("r→a dropped the added-but-undeltaed message content:\n%s", outA)
+	}
+	assertEventSequence(t, eventsA, []string{
+		"message_start",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"message_delta",
+		"message_stop",
+	})
+
+	// r→chat: the same shape keeps its content (contentSeen fallback).
+	rawC := readAllChecked(t, newResponsesToOpenAISSE(strings.NewReader(in), "m"))
+	if !strings.Contains(string(rawC), "full answer") {
+		t.Errorf("r→chat dropped the added-but-undeltaed message content:\n%s", rawC)
+	}
+}

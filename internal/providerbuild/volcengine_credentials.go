@@ -1,28 +1,14 @@
 package providerbuild
 
-import (
-	"encoding/json"
-	"os"
-	"path/filepath"
-)
+import "model-proxy/internal/provider"
 
-// VolcengineCreds is the on-disk format of the volcengine apikey file: the Ark
-// API Key (chat) plus the Volcengine AK/SK (GetAFPUsage).
-type VolcengineCreds struct {
-	APIKey    string `json:"api_key"`
-	AccessKey string `json:"access_key"`
-	SecretKey string `json:"secret_key"`
-}
+// The legacy singular volcengine credential file is owned by the provider
+// package (internal/provider/volcengine_legacy.go): reading it must funnel
+// through credstore, and the dependency DAG forbids providerbuild from
+// importing credstore directly. These aliases keep the historical call sites
+// stable.
+type VolcengineCreds = provider.VolcengineCreds
 
 func LoadVolcengineCreds(homeDir, provName string) (*VolcengineCreds, error) {
-	path := filepath.Join(homeDir, ".model-proxy", provName+"_apikey.json")
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var c VolcengineCreds
-	if err := json.Unmarshal(b, &c); err != nil {
-		return nil, err
-	}
-	return &c, nil
+	return provider.LoadVolcengineCreds(homeDir, provName)
 }

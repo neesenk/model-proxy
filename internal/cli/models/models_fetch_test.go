@@ -29,7 +29,7 @@ func TestListArkAgentPlanModelIDs_NoCreds(t *testing.T) {
 	// loadVolcengineCreds reads ~/.model-proxy/<provName>_apikey.json. With HOME
 	// in a temp dir, the file is absent → error.
 	t.Setenv("HOME", t.TempDir())
-	_, err := providerbuild.ListArkAgentPlanModelIDs(context.Background(), "volcengine")
+	_, err := providerbuild.ListArkAgentPlanModelIDs(context.Background(), "volcengine", "", "")
 	if err == nil || !strings.Contains(err.Error(), "AK/SK") {
 		t.Errorf("no creds: err=%v want AK/SK error", err)
 	}

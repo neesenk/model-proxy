@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/zalando/go-keyring"
@@ -691,5 +692,59 @@ func TestSetProcessCredentialsModeAppliesPoolBackend(t *testing.T) {
 	SetProcessCredentialsMode("file")
 	if got := NewStore(t.TempDir()).backend; got != BackendFile {
 		t.Fatalf("NewStore backend after SetProcessCredentialsMode(file) = %v, want file", got)
+	}
+}
+
+// A concurrent locked save (login) holding the pool lock must never race the
+// read-path restore rewrite: while the lock is contended, LoadSnapshot serves
+// the restored snapshot WITHOUT rewriting the plaintext pool file, and a
+// later uncontended read performs the rewrite.
+func TestRestoreFromKeychainSkipsRewriteWhilePoolLocked(t *testing.T) {
+	keyring.MockInit()
+	dir := t.TempDir()
+	credA := Credentials{APIKey: "sk-restore-contended"}
+	pool := Pool{Version: 1, Accounts: []Account{
+		{ID: AccountID("volcengine", credA), Label: "alpha", APIKey: credA.APIKey, AddedAt: "2026-08-26"},
+	}}
+	seedKeychainPool(t, dir, "prov", "volcengine", pool)
+
+	s := NewStoreWithBackend(dir, BackendFile)
+	holderEntered := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	holderDone := make(chan error, 1)
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(releaseHolder) }) })
+	go func() {
+		holderDone <- s.WithLock("prov", func() error {
+			close(holderEntered)
+			<-releaseHolder
+			return nil
+		})
+	}()
+	<-holderEntered
+
+	snapshot, err := s.LoadSnapshot("prov", "volcengine")
+	if err != nil {
+		t.Fatalf("LoadSnapshot under contention: %v", err)
+	}
+	if len(snapshot.Pool.Accounts) != 1 || snapshot.Pool.Accounts[0].APIKey != credA.APIKey {
+		t.Fatalf("contended snapshot = %+v, want the restored account", snapshot.Pool.Accounts)
+	}
+	// The rewrite was skipped: the pool file is still the secretless
+	// metadata shape, so a concurrent locked save cannot be clobbered.
+	if content := poolFileBytes(t, s, "prov"); strings.Contains(content, credA.APIKey) {
+		t.Fatal("restore rewrote the plaintext pool file while the pool lock was held")
+	}
+
+	once.Do(func() { close(releaseHolder) })
+	if err := <-holderDone; err != nil {
+		t.Fatalf("holder WithLock: %v", err)
+	}
+	// Uncontended retry performs the rewrite.
+	if _, err := s.LoadSnapshot("prov", "volcengine"); err != nil {
+		t.Fatalf("LoadSnapshot after release: %v", err)
+	}
+	if content := poolFileBytes(t, s, "prov"); !strings.Contains(content, credA.APIKey) {
+		t.Fatal("uncontended retry did not rewrite the plaintext pool file")
 	}
 }

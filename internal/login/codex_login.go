@@ -8,12 +8,31 @@ import (
 	"model-proxy/internal/display"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
 	"model-proxy/internal/provider"
 	"model-proxy/internal/upstreamproxy"
 )
+
+// responseKeys lists the sorted top-level keys of a JSON object body. Used by
+// 200-response "missing field" errors to describe the response shape WITHOUT
+// echoing the body — a malformed 200 may carry token fragments (refresh_token,
+// authorization_code), which must never reach CLI/Web error surfaces
+// (credential red line). Non-object bodies return nil.
+func responseKeys(body []byte) []string {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
 
 // codex OAuth device flow (independent tokens, not shared with codex CLI).
 // Contract from codex-rs/login source:
@@ -98,7 +117,17 @@ func RequestUserCodeContext(ctx context.Context, opts *CodexLoginServerOptions, 
 		return nil, fmt.Errorf("parse user code response: %w", err)
 	}
 	if uc.DeviceAuthID == "" || uc.UserCode == "" {
-		return nil, fmt.Errorf("user code response missing fields: %s", display.Truncate(string(rb), 200))
+		// Keys only — a malformed 200 body may carry credential fragments
+		// (C-2); it must not be echoed into CLI/Web error surfaces.
+		var missing []string
+		if uc.DeviceAuthID == "" {
+			missing = append(missing, "device_auth_id")
+		}
+		if uc.UserCode == "" {
+			missing = append(missing, "user_code")
+		}
+		return nil, fmt.Errorf("user code response missing %s (keys: %s)",
+			strings.Join(missing, ","), strings.Join(responseKeys(rb), ","))
 	}
 	return &uc, nil
 }
@@ -236,7 +265,11 @@ func ExchangeCodeForTokensContext(ctx context.Context, opts *CodexLoginServerOpt
 		return nil, fmt.Errorf("parse token response: %w", err)
 	}
 	if tok.AccessToken == "" {
-		return nil, fmt.Errorf("token response missing access_token: %s", display.Truncate(string(rb), 200))
+		// Keys only — a 200 body missing access_token may still carry a
+		// refresh_token fragment; echoing it would leak credentials into
+		// CLI/Web error surfaces (C-2).
+		return nil, fmt.Errorf("token response missing access_token (keys: %s)",
+			strings.Join(responseKeys(rb), ","))
 	}
 	af := &provider.CodexAuthFile{AuthMode: "chatgpt"}
 	af.Tokens.AccessToken = tok.AccessToken

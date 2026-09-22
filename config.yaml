@@ -51,7 +51,10 @@ providers:
     # peak_hours: "09:00-18:00"  # optional: route scheduling deprioritizes aqp during its peak window
     headers: # sent on every aqp upstream request (forward + probe), after auth
       x-ccswitch-client: "0.2.7" # mirror AIS Switch's client header (bare app version, verified vs 0.2.1 binary + live log);
-                                 # bump when AIS Switch updates
+      # bump when AIS Switch updates
+      # credential headers (authorization, cookie, x-api-key, ...) must use env:VAR
+      # indirection (same rule as mcp: headers — literal values are rejected at load);
+      # the value resolves from the environment at send time, fail-closed when unset
     models:
       - claude-opus-5
       - claude-sonnet-5
@@ -126,10 +129,12 @@ providers:
     # base exposes /models over Bearer (unlike the signed GetAFPUsage, which needs
     # AK/SK). Runtime `usage volcengine` still uses GetAFPUsage (AK/SK), not this URL.
     usage_url: https://ark.cn-beijing.volces.com/api/plan/v3/models
+    alias:
+      deepseek-v4.1-flash: deepseek-flash
     models:
       - deepseek-v4-flash
       - deepseek-v4-pro
-      - doubao-seed-evolving
+      - deepseek-v4.1-flash
       - glm-5.3
       - glm-5.3-flash
       - kimi-k3
@@ -183,6 +188,15 @@ providers:
       - k3-256k
       - kimi-for-coding
       - kimi-for-coding-highspeed
+
+  typesafe:
+    provider_id: typesafe
+    billing: pay-as-you-go
+    priority: 2
+    decisions_base_url: https://api.typesafe.ai/v1
+    models:
+      - jev-latest
+      - jev-1.13.0
 # Qianwen Token Plan 个人版 (千问 AI Token Plan personal edition). API key via
 # `login qwen-plan` (from the Token Plan console; key format sk-sp-…). Two
 # protocol bases: openai_base_url = OpenAI-compatible base, anthropic_base_url
@@ -200,6 +214,22 @@ providers:
 #      - qwen3.6-flash
 #      - glm-5.2
 #      - deepseek-v4-pro
+
+# TypeSafe System One decisions API (Jev): typed, calibrated decisions
+# (choice/score/noul + probabilities) instead of generated text — a routing/
+# classification/scoring primitive for software, not a chat model. API key via
+# `login typesafe` (console.typesafe.ai). Pure decisions-protocol provider:
+# clients call POST /v1/decisions with {model, state, questions}; chat clients
+# fail closed (no conversion). Pin jev-1.13.0 when tuned thresholds must not
+# drift off the jev-latest alias. Note: its /v1/models advertises the SHORT
+# family id (jev-1.13) which /systemone rejects — the provider rewrites it to
+# the callable jev-X.Y.0 form on refresh. Also a preset: `model-proxy add typesafe`.
+#  typesafe:
+#    provider_id: typesafe
+#    decisions_base_url: https://api.typesafe.ai/v1
+#    models:
+#      - jev-latest
+#      - jev-1.13.0
 
 # routes: AUTO-DERIVED. Every provider model is exposed under its model name
 # (or its provider-level alias) and all providers serving the same name
@@ -263,7 +293,7 @@ routes:
 # Uncomment to enable:
 request_log:
   enabled: true # default false
-  dir: ~/.model-proxy/log/requests # default
+  dir: ~/.model-proxy/log/requests # default; explicit values must be absolute (~ expanded) — the daemon may start from any CWD
   max_file_size: 1073741824 # 1G per file (rotate on size or day)
   max_body_bytes: 5242880 # 5MB cap per body (truncates past it)
   retention: 720h # 30d; delete rotated files older than this; 0 = forever
@@ -273,7 +303,7 @@ request_log:
   # above. The Requests page and /api/requests go back to LLM-only traffic;
   # /api/requests?kind=mcp reads the split stream. Restart-only. Default off.
   mcp_split: true
-  # mcp_dir: ~/.model-proxy/log/mcp # default
+  # mcp_dir: ~/.model-proxy/log/mcp # default; same absolute-path rule as dir
   # Client session-id header allowlist (ordered; first non-empty wins). Drives
   # the request-log session_id and the live /api/events session_id. Default:
   # [x-claude-code-session-id, x-session-affinity, x-session-id, x-opencode-session]
@@ -295,7 +325,7 @@ request_log:
 # and per-agent dims; powers the `stats` CLI and Web UI Analytics/Requests
 # pages). Defaults shown; omit the block to accept them.
 stats:
-  db_path: ~/.model-proxy/stats.db # default
+  db_path: ~/.model-proxy/stats.db # default; explicit values must be absolute (~ expanded) — the daemon may start from any CWD
   retention: 0 # default 30d; 0 = keep forever
 # Equivalent-cost analytics: token usage × OpenRouter price catalog (cached).
 # pricing:
@@ -327,7 +357,7 @@ stats:
 # duplicate single-shot requests; multi-turn chats change the body every turn,
 # so the hit rate there is ≈ 0 (prefix savings belong to upstream prompt caching).
 cache:
-  enabled: true # default false
+  enabled: false # default false
   ttl: 60m # default
   max_entries: 6000 # default
   max_body_bytes: 262144 # default 256KiB; larger responses not cached
@@ -392,12 +422,12 @@ mcp:
   context7: {url: 'https://mcp.context7.com/mcp', auth: none}
   deepwiki: {url: 'https://mcp.deepwiki.com/mcp', auth: none}
   grep-app: {url: 'https://mcp.grep.app', auth: none}
-  vision:                            # generic name: any vision-capable backend can land here
+  vision: # generic name: any vision-capable backend can land here
     transport: stdio
     provider: zhipu
     command: [npx, -y, "@z_ai/mcp-server"]
     env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU} # literals OK for benign keys; credential-shaped names (…_KEY/TOKEN/…)
-                                                                # still require indirection
+    # still require indirection
 mcp_routes:
   # Web research: search (three engines by scenario — parameter shapes differ,
   # so they are NOT one failover set), read+clean (zhipu reader and firecrawl
@@ -405,21 +435,21 @@ mcp_routes:
   # document parsing.
   web-research:
     targets:
-      - {mcp: zhipu-search, tools: {web_search: web_search_prime}}                 # general/cn-optimized search (search_query)
-      - {mcp: ark-datapro, tools: {dataset_search: dataPro_search}}                 # professional dataset search (volcengine datapro)
-      - {mcp: exa,          tools: {web_search_semantic: web_search_exa,           # semantic search (query+objective, required both)
-                                     url_fetch_batch: web_fetch_exa}}              # batch clean text (urls[])
-      - {mcp: firecrawl,    tools: {web_search_domain: firecrawl_search,           # filtered search (domains/categories/tbs)
-                                     url_read: firecrawl_scrape,                   # failover leg for url_read
-                                     url_read_deep: firecrawl_scrape,              # full scrape: formats/pdf/screenshot/json extraction
-                                     doc_parse: firecrawl_parse}}                  # file parse/clean (PDF/HTML -> markdown/json)
-      - {mcp: zhipu-reader, tools: {url_read: webReader}}                          # fast markdown read (url) — schema baseline for url_read
+      - {mcp: zhipu-search, tools: {web_search: web_search_prime}} # general/cn-optimized search (search_query)
+      - {mcp: ark-datapro, tools: {dataset_search: dataPro_search}} # professional dataset search (volcengine datapro)
+      - {mcp: exa, tools: {web_search_semantic: web_search_exa, # semantic search (query+objective, required both)
+          url_fetch_batch: web_fetch_exa}} # batch clean text (urls[])
+      - {mcp: firecrawl, tools: {web_search_domain: firecrawl_search, # filtered search (domains/categories/tbs)
+          url_read: firecrawl_scrape, # failover leg for url_read
+          url_read_deep: firecrawl_scrape, # full scrape: formats/pdf/screenshot/json extraction
+          doc_parse: firecrawl_parse}} # file parse/clean (PDF/HTML -> markdown/json)
+      - {mcp: zhipu-reader, tools: {url_read: webReader}} # fast markdown read (url) — schema baseline for url_read
   code-search:
     targets:
-      - {mcp: grep-app,     tools: {code_search: searchGitHub}}
-      - {mcp: zhipu-zread,  tools: {repo_doc_search: search_doc, repo_read_file: read_file, repo_tree: get_repo_structure}}
-      - {mcp: deepwiki,     tools: {wiki_qa: ask_question, wiki_contents: read_wiki_contents, wiki_structure: read_wiki_structure}}
-      - {mcp: context7,     tools: {lib_resolve: resolve-library-id, lib_docs: query-docs}}
+      - {mcp: grep-app, tools: {code_search: searchGitHub}}
+      - {mcp: zhipu-zread, tools: {repo_doc_search: search_doc, repo_read_file: read_file, repo_tree: get_repo_structure}}
+      - {mcp: deepwiki, tools: {wiki_qa: ask_question, wiki_contents: read_wiki_contents, wiki_structure: read_wiki_structure}}
+      - {mcp: context7, tools: {lib_resolve: resolve-library-id, lib_docs: query-docs}}
 # Outbound secret guard (DLP-lite): scans the raw request body for
 # high-confidence secret patterns (PEM private-key headers, AWS/OpenAI/
 # Anthropic/GitHub/Google tokens) BEFORE forwarding upstream — coding agents
@@ -559,6 +589,15 @@ guard:
 #                                       # synthesis prompt; judge failure never fails the run
 #     # instruction: "..."              # optional: override the built-in synthesis
 #                                       # instruction template (≤ 4000 chars)
+#     # selector:                       # optional: decisions-model (e.g. TypeSafe Jev)
+#     #   target: {provider: typesafe, model: jev-1.13, protocol: decisions}
+#     #   mode: shadow                  # shadow (default, record only) | enforce (act on
+#     #                               # confidence ≥ threshold): direct_score_max > 0 answers
+#     #   confidence: 0.55              # easy requests directly via the chosen model
+#     #   direct_score_max: 0           # (selector_direct, no budget consumed); panel_top_k
+#     #   panel_top_k: 0                # trims the panel by decision probability (never
+#     #   timeout: 800ms                # below quorum). Any failure → static full panel.
+#     # panel members may carry rubric: "one-line description" to steer the choice.
 # Observe: GET /api/fusion?workflow=<name> (per-workflow aggregates + recent runs);
 # stats --provider fusion (requests = orchestrations, failovers = degrades).
 # routes:

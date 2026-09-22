@@ -1764,3 +1764,74 @@ test('MCP 子标签 / Security 过滤 / Accounts provider 选择进浏览器历�
     await ctx.ev(`window.fetch = window.__origFetch; delete window.__origFetch;`);
   }
 });
+
+// MCP Analytics 子标签在 host 重建后不得空白（A01 回归）：Servers 子标签的
+// Test/Refresh 会整体重建 MCP 面板——重建时 analytics 视图是空且 hidden 的
+// div,renderMCPAnalytics 因 hidden 早退;切回 Analytics 时缓存数据让所有
+// 加载守卫跳过,子标签停留在空白(7d/all 窗口没有 30s tick 自愈)。
+// 修复:mcpShowSubTab 进入 analytics 时,视图为空且已有数据/错误则重渲染。
+test('MCP Analytics 子标签在面板重建(Test/Refresh)后切回仍有内容 (重建族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  const analyticsBody = JSON.stringify({
+    granularity: 'hour',
+    from: Math.floor(Date.now() / 1000) - 3600,
+    to: Math.floor(Date.now() / 1000),
+    series: [{
+      name: 'e2e-mcp-srv',
+      points: [{ ts: Math.floor(Date.now() / 1000) - 600, calls: 3, errors: 0, avg_latency_ms: 12 }],
+      totals: { calls: 3, errors: 0, avg_latency_ms: 12, last_call_at: Math.floor(Date.now() / 1000) - 600 },
+    }],
+    tool_series: [{
+      name: 'e2e-mcp-srv', tool: 'ping',
+      points: [{ ts: Math.floor(Date.now() / 1000) - 600, calls: 3, errors: 0, avg_latency_ms: 12 }],
+      totals: { calls: 3, errors: 0, avg_latency_ms: 12, last_call_at: Math.floor(Date.now() / 1000) - 600 },
+    }],
+  });
+  const mcpBody = JSON.stringify({
+    servers: [{ name: 'e2e-mcp-srv', enabled: true, transport: 'stdio', sessions: 0, calls: 0, errors: 0, avg_latency_ms: 0 }],
+    routes: [],
+  });
+  await ctx.ev(`(() => {
+    window.__origFetch2 = window.fetch;
+    window.fetch = (url, ...rest) => {
+      const u = String(url);
+      if (u.endsWith('/api/mcp')) {
+        return Promise.resolve(new Response(${JSON.stringify(mcpBody)}, { headers: { 'content-type': 'application/json' } }));
+      }
+      if (u.startsWith('/api/mcp/analytics')) {
+        return Promise.resolve(new Response(${JSON.stringify(analyticsBody)}, { headers: { 'content-type': 'application/json' } }));
+      }
+      return window.__origFetch2(url, ...rest);
+    };
+  })()`);
+  try {
+    await ctx.ev(`localStorage.removeItem('mcp-tab')`);
+    await ctx.ev(`document.querySelector('[data-tab="mcp"]').click()`);
+    await ctx.waitFor('mcp sub-tab buttons mounted', () => ctx.ev(
+      `!!document.querySelector('button[data-mcp-tab="analytics"]')`));
+    // 进入 Analytics:工具栏 + Summary 渲染出来。
+    await ctx.ev(`document.querySelector('button[data-mcp-tab="analytics"]').click()`);
+    await ctx.waitFor('analytics toolbar mounted', () => ctx.ev(
+      `!!document.getElementById('mcpa-server') && !!document.querySelector('#mcp-analytics-view .an-toolbar')`), 8000);
+    await ctx.waitFor('analytics summary has content', () => ctx.ev(
+      `!!document.querySelector('#mcpa-summary-host .mcp-analytics-table, #mcpa-summary-host .card')`), 8000);
+    // 切到 Servers 并点 Refresh —— loadMCP 整体重建面板(analytics 视图被
+    // 替换成空且 hidden 的 div,正是空白 bug 的触发路径)。
+    await ctx.ev(`document.querySelector('button[data-mcp-tab="servers"]').click()`);
+    await ctx.waitFor('servers view visible', () => ctx.ev(
+      `!document.getElementById('mcp-servers-view').hidden`), 8000);
+    await ctx.ev(`document.querySelector('[data-mcp-refresh]').click()`);
+    await ctx.waitFor('panel rebuilt (toolbar gone)', () => ctx.ev(
+      `!document.getElementById('mcpa-server')`), 8000);
+    // 切回 Analytics:视图必须重新渲染出工具栏,而不是停留在空白。
+    await ctx.ev(`document.querySelector('button[data-mcp-tab="analytics"]').click()`);
+    await ctx.waitFor('analytics re-rendered after rebuild', () => ctx.ev(
+      `(() => {
+        const view = document.getElementById('mcp-analytics-view');
+        return !!view && !view.hidden && !!view.querySelector('.an-toolbar') && !!document.getElementById('mcpa-server');
+      })()`), 8000);
+    assert.deepEqual(await ctx.pageErrors(), [], '重建路径不得有 JS 错误');
+  } finally {
+    await ctx.ev(`window.fetch = window.__origFetch2; delete window.__origFetch2;`);
+  }
+});

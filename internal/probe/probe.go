@@ -46,10 +46,13 @@ func Callable(ctx context.Context, client *http.Client, prov configdomain.Provid
 
 	// Select the base URL by protocol, mirroring forward. A provider with an
 	// anthropic_base_url is probed over the anthropic protocol (its primary chat
-	// path for Claude Code); otherwise the openai protocol.
+	// path for Claude Code); otherwise the openai protocol. A pure-decisions
+	// provider (typesafe: no chat bases) is probed on its decisions base with
+	// the impl's own ProbeRequest shape (System One), never rewritten.
 	baseURL := prov.OpenAIBaseURL
 	path, body := pr.Path, pr.Body
-	if prov.AnthropicBaseURL != "" {
+	switch {
+	case prov.AnthropicBaseURL != "":
 		baseURL = prov.AnthropicBaseURL
 		// The impl's ProbeRequest may be openai-shaped; on the anthropic base
 		// the probe must speak anthropic (path + body), otherwise strict bases
@@ -58,6 +61,8 @@ func Callable(ctx context.Context, client *http.Client, prov configdomain.Provid
 		// base).
 		path = "/v1/messages"
 		body = provider.AnthropicProbeBody(modelID)
+	case baseURL == "" && prov.DecisionsBaseURL != "":
+		baseURL = prov.DecisionsBaseURL
 	}
 
 	rep, err := doCallability(ctx, client, prov, impl, Request{

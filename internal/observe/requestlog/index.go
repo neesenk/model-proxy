@@ -805,9 +805,11 @@ func (x *Indexer) Detail(requestID string) ([]Record, error) {
 // that lag window is the only region that can hold the latter, so exactly it
 // is streamed — never the indexed history (the full-directory QueryRecords
 // fallback this replaced turned every never-logged id into a multi-GB scan).
-// Files are visited newest-first (reverse name order, like query) and the
-// scan stops at the first match: a request_id identifies exactly one record
-// (the scan's early-stop contract). A file absent from the files table was
+// Files are visited newest-first (reverse name order, like query) and EVERY
+// match is collected, the aggregate capped at indexDetailLimit and ordered
+// newest-first — the same shape as Detail's indexed path, which also returns
+// up to indexDetailLimit rows for one id (retried attempts share the id).
+// A file absent from the files table was
 // never reconciled (an index being rebuilt from scratch), so its cursor is
 // zero and the whole file is the tail; a truncated/replaced file (size below
 // the cursor) has no readable tail until reconcile rewinds it (< one tick).
@@ -856,57 +858,63 @@ func (x *Indexer) tailScan(requestID string) ([]Record, error) {
 	}
 	_ = rows.Close()
 	sort.Strings(names)
+	var matches []Record
 	for i := len(names) - 1; i >= 0; i-- {
 		name := names[i]
 		if sizes[name] <= cursors[name] {
 			continue // fully indexed: no un-indexed bytes can hold a lagging commit
 		}
-		record, found, err := scanTailForID(x.dir, name, cursors[name], requestID)
+		records, err := scanTailForID(x.dir, name, cursors[name], requestID, indexDetailLimit-len(matches))
 		if err != nil {
 			return nil, err
 		}
-		if found {
-			return []Record{record}, nil
+		matches = append(matches, records...)
+		if len(matches) >= indexDetailLimit {
+			break
 		}
 	}
-	return nil, nil
+	sort.SliceStable(matches, func(i, j int) bool { return matches[i].Ts > matches[j].Ts })
+	return matches, nil
 }
 
-// scanTailForID reads the JSONL lines beyond cursor looking for one request
-// id. cursor sits on a line boundary by construction (reconcile advances it
-// only past newline-terminated lines); the final unterminated line is parsed
-// too when it decodes (the scan path's convention — the writer's newline
-// lands in the same Write, so a decodable line is complete content), while a
-// torn write that fails to decode is skipped, same as every other scan path.
-// The id prefilter is the byte containment query() applies before decoding,
-// with Filter.matches's exact post-decode check inlined.
-func scanTailForID(dir, name string, cursor int64, requestID string) (Record, bool, error) {
+// scanTailForID reads the JSONL lines beyond cursor collecting every record
+// with the given request id, at most limit of them. cursor sits on a line
+// boundary by construction (reconcile advances it only past
+// newline-terminated lines); the final unterminated line is parsed too when
+// it decodes (the scan path's convention — the writer's newline lands in the
+// same Write, so a decodable line is complete content), while a torn write
+// that fails to decode is skipped, same as every other scan path. The id
+// prefilter is the byte containment query() applies before decoding, with
+// Filter.matches's exact post-decode check inlined.
+func scanTailForID(dir, name string, cursor int64, requestID string, limit int) ([]Record, error) {
 	file, err := os.Open(filepath.Join(dir, name))
 	if err != nil {
 		// Vanished between readdir and open (retention sweep): nothing new.
-		return Record{}, false, nil
+		return nil, nil
 	}
 	defer func() { _ = file.Close() }()
 	if _, err := file.Seek(cursor, io.SeekStart); err != nil {
-		return Record{}, false, err
+		return nil, err
 	}
 	reader := bufio.NewReaderSize(file, 256<<10)
 	needle := []byte(requestID)
-	for {
+	var matches []Record
+	for limit <= 0 || len(matches) < limit {
 		line, readErr := reader.ReadBytes('\n')
 		if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 && bytes.Contains(trimmed, needle) {
 			var record Record
 			if json.Unmarshal(trimmed, &record) == nil && record.RequestID == requestID {
-				return record, true, nil
+				matches = append(matches, record)
 			}
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
-				return Record{}, false, readErr
+				return nil, readErr
 			}
-			return Record{}, false, nil
+			return matches, nil
 		}
 	}
+	return matches, nil
 }
 
 // readRecordAt reads and decodes one raw JSONL line at its indexed position.

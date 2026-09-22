@@ -98,12 +98,35 @@ func (s *Server) handleMCPSurface(w http.ResponseWriter, r *http.Request) {
 // buckets grouped by exposed name, plus the per-tool dimension in
 // tool_series. Defaults match /api/analytics (window = last 30 days,
 // granularity = day); from=0 clamps to the oldest persisted bucket so the
-// UI's all-time anchor matches the real window. Invalid granularity is a
-// 400; a disabled stats store or store error is fail-closed with a clear
-// message.
+// UI's all-time anchor matches the real window. Invalid granularity, an
+// unparseable from/to, or from > to is a 400 (same fail-closed selector
+// contract as /api/tokens — a malformed selector must not silently widen or
+// narrow the reported window); a disabled stats store or store error is
+// fail-closed with a clear message.
 func (s *Server) handleMCPAnalytics(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	from, to := statsWindow(q, 30*24*time.Hour)
+	now := time.Now()
+	from, to := now.Add(-30*24*time.Hour).Unix(), now.Unix()
+	if v := q.Get("from"); v != "" {
+		n, ok := parseStatsTime(v)
+		if !ok {
+			writeJSONErr(w, http.StatusBadRequest, "from must be unix seconds or RFC3339")
+			return
+		}
+		from = n
+	}
+	if v := q.Get("to"); v != "" {
+		n, ok := parseStatsTime(v)
+		if !ok {
+			writeJSONErr(w, http.StatusBadRequest, "to must be unix seconds or RFC3339")
+			return
+		}
+		to = n
+	}
+	if from > to {
+		writeJSONErr(w, http.StatusBadRequest, "from must be <= to")
+		return
+	}
 	if from == 0 {
 		if earliest := s.reads.StatsSince(); earliest > 0 {
 			from = earliest

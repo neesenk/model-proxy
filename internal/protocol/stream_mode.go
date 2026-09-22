@@ -490,7 +490,15 @@ func chatJSONToSSE(root map[string]any) ([]byte, error) {
 	}
 	choice := asMap(choices[0])
 	message := asMap(choice["message"])
-	base := map[string]any{"id": root["id"], "object": "chat.completion.chunk", "model": root["model"]}
+	// created is a required field of chat.completion.chunk (strict SDKs such
+	// as openai-python validate it on every chunk): prefer the non-stream
+	// response's own value and fall back to now, like the streaming
+	// converters' stream-start constant.
+	created := intOf(root["created"])
+	if created == 0 {
+		created = int(time.Now().Unix())
+	}
+	base := map[string]any{"id": root["id"], "object": "chat.completion.chunk", "model": root["model"], "created": created}
 	delta := cloneMap(message)
 	delete(delta, "role")
 	emitWireSSEBuffer := func(payload map[string]any) []byte {
@@ -508,10 +516,16 @@ func chatJSONToSSE(root map[string]any) ([]byte, error) {
 	}
 	last := cloneMap(base)
 	last["choices"] = []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": choice["finish_reason"]}}
-	if root["usage"] != nil {
-		last["usage"] = root["usage"]
-	}
 	out.Write(emitWireSSEBuffer(last))
+	// The spec-shaped terminal usage chunk (include_usage): an extra chunk
+	// before [DONE] whose choices is an empty array — the same shape the
+	// streaming converters emit; the finish chunk carries only finish_reason.
+	if root["usage"] != nil {
+		usage := cloneMap(base)
+		usage["choices"] = []any{}
+		usage["usage"] = root["usage"]
+		out.Write(emitWireSSEBuffer(usage))
+	}
 	out.WriteString("data: [DONE]\n\n")
 	return out.Bytes(), nil
 }

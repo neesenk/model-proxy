@@ -527,7 +527,7 @@ func TestWithPoolLock_FreshLockIsBusy(t *testing.T) {
 			default:
 			}
 			<-retryWaiter
-		})
+		}, 0)
 	}()
 	select {
 	case <-waiterBlocked:
@@ -607,5 +607,80 @@ func TestLoadSnapshotNormalizesLegacyVolcengineIDs(t *testing.T) {
 		if want := AccountID("volcengine", account.Credentials()); account.ID != want {
 			t.Fatalf("id %q not normalized to %q", account.ID, want)
 		}
+	}
+}
+
+// A lockfile whose mtime exceeds poolLockStaleAge must NOT be stolen while
+// its holder is alive: the holder's heartbeat refreshes the mtime, so
+// staleness keeps meaning "the owner is gone" even for a legitimate
+// minutes-long keychain-mode hold.
+func TestWithLockHeartbeatKeepsAgedLockFromBeingStolen(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStoreWithBackend(dir, BackendFile)
+	name := "prov"
+	lockPath := store.PoolPath(name) + ".lock"
+
+	holderEntered := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	holderDone := make(chan error, 1)
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(releaseHolder) }) })
+	go func() {
+		holderDone <- store.withLock(name, func() error {
+			close(holderEntered)
+			<-releaseHolder
+			return nil
+		}, time.Sleep, 5*time.Millisecond)
+	}()
+	<-holderEntered
+
+	// Age the lockfile far past poolLockStaleAge; the live holder's heartbeat
+	// must refresh it (poll for the refresh, no fixed sleep).
+	past := time.Now().Add(-2 * poolLockStaleAge)
+	if err := os.Chtimes(lockPath, past, past); err != nil {
+		t.Fatalf("age lockfile: %v", err)
+	}
+	refreshDeadline := time.Now().Add(2 * time.Second)
+	for {
+		info, err := os.Stat(lockPath)
+		if err != nil {
+			t.Fatalf("stat lockfile: %v", err)
+		}
+		if time.Since(info.ModTime()) < poolLockStaleAge {
+			break
+		}
+		if time.Now().After(refreshDeadline) {
+			t.Fatal("heartbeat never refreshed the aged lockfile")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	contenderEntered := make(chan struct{}, 1)
+	contenderDone := make(chan error, 1)
+	go func() {
+		contenderDone <- store.withLock(name, func() error {
+			contenderEntered <- struct{}{}
+			return nil
+		}, time.Sleep, 5*time.Millisecond)
+	}()
+	select {
+	case <-contenderEntered:
+		t.Fatal("contender stole the lock while its holder was alive")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	once.Do(func() { close(releaseHolder) })
+	if err := <-holderDone; err != nil {
+		t.Fatalf("holder withLock: %v", err)
+	}
+	select {
+	case <-contenderEntered:
+	case err := <-contenderDone:
+		t.Fatalf("contender returned without acquiring: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("contender did not acquire after the holder released")
+	}
+	if err := <-contenderDone; err != nil {
+		t.Fatalf("contender withLock: %v", err)
 	}
 }

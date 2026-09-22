@@ -79,7 +79,11 @@ func mapKeyringErr(err error) error {
 // closed as ErrUnavailable instead of hanging the caller. The underlying
 // syscall is not cancellable: on timeout the goroutine is abandoned (bounded
 // — one per timed-out call, result discarded), the standard Go tradeoff for
-// uncancellable I/O.
+// uncancellable I/O. That abandoned goroutine may still land the write after
+// the timeout: this is why a Set failing with ErrUnavailable is an ambiguous
+// outcome and Ref.Save/Load keep the keychain-origin marker on it
+// (rollbackKeychainOriginAfterSetFailure) — provenance must survive even a
+// write whose fate is unknown, or a later Delete could never clean the entry.
 var keychainOpTimeout = 30 * time.Second
 
 func withKeychainTimeout(op func() error) error {

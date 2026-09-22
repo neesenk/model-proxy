@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"model-proxy/internal/accounts"
@@ -337,7 +338,104 @@ func TestListArkAgentPlanModelIDs_Unreachable(t *testing.T) {
 	dead.Close()
 	t.Setenv("HTTPS_PROXY", "http://"+addr)
 	t.Setenv("HTTP_PROXY", "http://"+addr)
-	if _, err := ListArkAgentPlanModelIDs(context.Background(), "volcengine"); err == nil {
+	// Empty AK/SK: the on-disk legacy creds feed the signed call, which dies on
+	// the unreachable upstream.
+	if _, err := ListArkAgentPlanModelIDs(context.Background(), "volcengine", "", ""); err == nil {
 		t.Error("unreachable upstream: want error, got nil")
+	}
+}
+
+// fakeListSeam records the (provider|AK|SK) of each signed model-list call made
+// through the BuildOptions seam. FetchModels runs synchronously, so no locking
+// is needed.
+type fakeListSeam struct {
+	calls int
+	last  string
+}
+
+func (f *fakeListSeam) opts(home string) BuildOptions {
+	return BuildOptions{
+		HomeDir: home,
+		ListArkAgentPlanModelIDs: func(ctx context.Context, provName, ak, sk string) ([]string, error) {
+			f.calls++
+			f.last = provName + "|" + ak + "|" + sk
+			return []string{"model-a"}, nil
+		},
+	}
+}
+
+// TestBuildOne_Volcengine_FetchModels_UsesVirtualOwnCreds (A12 regression):
+// the FetchModelsFn closure must sign with THIS virtual's bound AK/SK, not
+// re-read the legacy single-account file (in a pooled setup that file is gone
+// or archived as .migrated.bak, so the pre-fix path could never succeed for
+// pooled virtuals).
+func TestBuildOne_Volcengine_FetchModels_UsesVirtualOwnCreds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	seam := &fakeListSeam{}
+	cfg := poolConfig("volcengine")
+	p := BuildOne(cfg, seam.opts(accounts.HomeDir()), "volcengine", cfg.Providers["volcengine"],
+		accounts.Credentials{APIKey: "ark-1", AccessKey: "AKV", SecretKey: "SKV"})
+	if p == nil {
+		t.Fatal("BuildOne volcengine returned nil")
+	}
+	ids, err := p.FetchModels()
+	if err != nil {
+		t.Fatalf("FetchModels: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "model-a" {
+		t.Errorf("ids=%v want the seam's [model-a]", ids)
+	}
+	if seam.calls != 1 || seam.last != "volcengine|AKV|SKV" {
+		t.Errorf("seam calls=%d last=%q, want 1 call with volcengine|AKV|SKV", seam.calls, seam.last)
+	}
+}
+
+// TestBuildOne_Volcengine_FetchModels_ChatOnlyNeedsAKSK (A12/A06 parity): a
+// chat-only virtual (bound Ark key, no AK/SK) must report needs-AK/SK instead
+// of signing with a legacy single-account file left on disk by a pre-pool
+// login — its keys belong to a DIFFERENT account. The seam must never run.
+func TestBuildOne_Volcengine_FetchModels_ChatOnlyNeedsAKSK(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	credDir := filepath.Join(home, ".model-proxy")
+	os.MkdirAll(credDir, 0o700)
+	os.WriteFile(filepath.Join(credDir, "volcengine_apikey.json"),
+		[]byte(`{"api_key":"ark","access_key":"AKLEGACY-MARKER","secret_key":"SKLEGACY-MARKER"}`), 0o600)
+
+	seam := &fakeListSeam{}
+	cfg := poolConfig("volcengine")
+	p := BuildOne(cfg, seam.opts(home), "volcengine", cfg.Providers["volcengine"],
+		accounts.Credentials{APIKey: "ark-chat-only"})
+	if p == nil {
+		t.Fatal("BuildOne volcengine returned nil")
+	}
+	_, err := p.FetchModels()
+	if err == nil || !strings.Contains(err.Error(), "AK/SK") {
+		t.Fatalf("chat-only FetchModels: err=%v, want needs-AK/SK error", err)
+	}
+	if strings.Contains(err.Error(), "AKLEGACY-MARKER") {
+		t.Errorf("error must not carry the legacy file's access key marker: %q", err)
+	}
+	if seam.calls != 0 {
+		t.Errorf("seam calls=%d, want 0 (chat-only virtual must not sign a model list)", seam.calls)
+	}
+}
+
+// TestBuildOne_Volcengine_FetchModels_UnboundLegacyFallback: the unbound
+// single-account instance passes empty AK/SK through the seam so the real
+// implementation falls back to the legacy store via credstore.
+func TestBuildOne_Volcengine_FetchModels_UnboundLegacyFallback(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	seam := &fakeListSeam{}
+	cfg := poolConfig("volcengine")
+	p := BuildOne(cfg, seam.opts(accounts.HomeDir()), "volcengine", cfg.Providers["volcengine"], accounts.Credentials{})
+	if p == nil {
+		t.Fatal("BuildOne volcengine returned nil")
+	}
+	if _, err := p.FetchModels(); err != nil {
+		t.Fatalf("FetchModels: %v", err)
+	}
+	if seam.calls != 1 || seam.last != "volcengine||" {
+		t.Errorf("seam calls=%d last=%q, want 1 call with empty AK/SK", seam.calls, seam.last)
 	}
 }

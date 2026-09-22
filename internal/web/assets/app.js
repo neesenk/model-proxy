@@ -920,10 +920,15 @@ async function renderRequestsTab() {
     <div id="req-live-view" hidden></div>
   </div></div></div></div>`;
   panel.querySelectorAll('.req-nav-item').forEach((b) => {
-    b.addEventListener('click', () => navigateRequestsPage(
-      (b.dataset.stream === 'mcp' ? 'mcp' : 'model') + '_' + (b.dataset.sub === 'live' ? 'live' : 'all'),
-      { push: true },
-    ));
+    b.addEventListener('click', () => {
+      const key = (b.dataset.stream === 'mcp' ? 'mcp' : 'model') + '_' + (b.dataset.sub === 'live' ? 'live' : 'all');
+      // Clicking the already-active sidebar item is a no-op (the guard the
+      // pre-refactor selectRequestsView had): re-navigating would silently
+      // clear the page's filters/drill-down and push a redundant history
+      // entry.
+      if (key === activeRequestsPageKey) return;
+      navigateRequestsPage(key, { push: true });
+    });
   });
   // Mount the page the (already canonical) hash names; a non-requests hash
   // (sidebar tab click into the tab) falls back to model_all.
@@ -1222,6 +1227,17 @@ function refreshRequestsData(combos) {
 function renderRequestSelectors(combos) {
   const agentSel = document.getElementById('req-agent');
   const sessionSel = document.getElementById('req-session');
+  // Rebuilding a <select>'s options while it holds focus closes the
+  // OS-drawn dropdown (assets/AGENTS.md rule): the pools/sessions feeding
+  // this land at arbitrary async times (each mount and filter change
+  // refetches the MCP pool), so defer to blur and retry then — the same
+  // guard refreshLiveSessionOptions uses.
+  const focused = agentSel === document.activeElement ? agentSel
+    : sessionSel === document.activeElement ? sessionSel : null;
+  if (focused) {
+    focused.onblur = () => { focused.onblur = null; renderRequestSelectors(combos); };
+    return;
+  }
   if (agentSel) {
     const agents = linkedAgents(requestsFilter.session, combos.sessions, combos.facetState.agents);
     if (requestsFilter.agent && !agents.includes(requestsFilter.agent)) agents.unshift(requestsFilter.agent);
@@ -1361,10 +1377,27 @@ function attachCombo(input, options, onSelect) {
     }
   });
   input.addEventListener('blur', () => { setTimeout(close, 0); });
+  // Remounts (host.innerHTML rebuilds, e.g. every log-page mount and history
+  // step) orphan earlier combos: their input is gone, but the body-level
+  // menu div and this Set entry leak one per remount — the removed
+  // resetCombos's job. Sweep disconnected instances on each new attach.
+  for (const inst of comboInstances) {
+    if (!inst.input.isConnected) {
+      comboInstances.delete(inst);
+      inst.menu.remove();
+    }
+  }
   comboInstances.add({ input, menu, close });
   wireComboGlobals();
   // The shared ✕ clear affordance; clearing commits like an Enter (onSelect).
-  attachClearable(input, onSelect);
+  attachClearable(input, () => {
+    onSelect();
+    // The ✕ path dispatches a bubbling input event and refocuses the input —
+    // both re-open this menu. Clearing equals clear + Enter (docs/frontend.md
+    // contract) and Enter closes, so close AFTER the commit: the menu must
+    // not linger open with the full option list.
+    close();
+  });
 }
 
 // positionCombo pins the fixed-positioned menu under the input, flipping above
@@ -10365,6 +10398,10 @@ function mcpSubTabSave(v) {
 let mcpAnalyticsData = null;
 let mcpAnalyticsError = null; // last fetch error when nothing rendered yet
 let mcpAnalyticsLoading = false;
+// Request sequence for loadMCPAnalytics: a slow response landing after a
+// newer load started must not clobber the newer filters' data (the same
+// guard the Requests/Security/Takeover loaders use).
+let mcpAnalyticsReqSeq = 0;
 let mcpAnalyticsPicker = { open: false, view: null, pick: null, selecting: false };
 
 function mcpAnalyticsState() {
@@ -10458,7 +10495,7 @@ function renderMCPInto() {
       // (the hashchange listener applies mcpSubTabFromHash without pushing).
       navHash(mcpHash(next));
       mcpShowSubTab(host, next);
-      if (next === 'analytics' && !mcpAnalyticsData) loadMCPAnalytics(host);
+      if (next === 'analytics' && !mcpAnalyticsData && !mcpAnalyticsLoading) loadMCPAnalytics(host);
     };
   }
   const serversView = host.querySelector('#mcp-servers-view');
@@ -10474,13 +10511,25 @@ function renderMCPInto() {
 }
 
 function mcpShowSubTab(host, tab) {
+  // On an empty MCP surface (no servers/routes) renderMCPInto exits before
+  // the three view divs exist; a hashchange landing here must not throw.
+  if (!host.querySelector('#mcp-servers-view')) return;
   for (const btn of host.querySelectorAll('.status-nav button[data-mcp-tab]')) {
     btn.classList.toggle('active', btn.dataset.mcpTab === tab);
   }
   host.querySelector('#mcp-servers-view').hidden = tab !== 'servers';
   host.querySelector('#mcp-routes-view').hidden = tab !== 'routes';
-  host.querySelector('#mcp-analytics-view').hidden = tab !== 'analytics';
+  const analyticsView = host.querySelector('#mcp-analytics-view');
+  analyticsView.hidden = tab !== 'analytics';
   if (tab === 'analytics') {
+    // A rebuilt host (Test/Refresh re-rendered the MCP panel) leaves the
+    // analytics view empty while the cached data makes every load guard
+    // skip: re-render on entry or the sub-tab stays blank until a control
+    // changes (default presets self-heal via the 30s tick; 7d/all/custom
+    // windows have none).
+    if (!analyticsView.firstElementChild && (mcpAnalyticsData || mcpAnalyticsError)) {
+      renderMCPAnalytics(host);
+    }
     for (const u of mcpAnalyticsCharts) {
       try {
         if (u && u.root && document.contains(u.root)) {
@@ -10686,6 +10735,7 @@ async function loadMCPAnalytics(host, background = false) {
   if (!host) return;
   if (background && deferAutoRefresh(panel, () => loadMCPAnalytics(host, true))) return;
   mcpAnalyticsStopAutoRefresh();
+  const seq = ++mcpAnalyticsReqSeq;
   mcpAnalyticsLoading = true;
   const state = mcpAnalyticsState();
   const eff = mcpAnalyticsEffectiveGran(state, mcpAllTimeSince);
@@ -10704,6 +10754,10 @@ async function loadMCPAnalytics(host, background = false) {
   } catch (e) {
     fetchErr = e;
   }
+  // Superseded by a newer load (filter/range change while this one was in
+  // flight): applying this response would render data that no longer matches
+  // the visible controls.
+  if (seq !== mcpAnalyticsReqSeq) return;
   // All-time anchor: the server clamps from=0 to the oldest persisted bucket.
   // Learn that real start from the echoed from; when it changes the effective
   // granularity, re-issue once with the true span (same pattern as the

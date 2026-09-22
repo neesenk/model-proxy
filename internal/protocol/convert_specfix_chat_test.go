@@ -381,7 +381,9 @@ func TestSpecfix_FoldedDoneTerminator(t *testing.T) {
 			"data: [DONE]\n" +
 			"data: {\"type\":\"message_start\",\"message\":{\"id\":\"evil\",\"usage\":{\"input_tokens\":999}}}\n\n"
 		out := string(readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(in), "c")))
-		if strings.Contains(out, "evil") || strings.Contains(out, "999") {
+		// Anchor the exact leaked fields: a bare "999" substring also matches
+		// the unix-second `created` timestamp on some wall-clock windows.
+		if strings.Contains(out, `"id":"evil"`) || strings.Contains(out, `"input_tokens":999`) {
 			t.Errorf("frame after folded [DONE] leaked into the client stream:\n%s", out)
 		}
 	})

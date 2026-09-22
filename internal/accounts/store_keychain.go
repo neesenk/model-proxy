@@ -126,8 +126,18 @@ func (s Store) loadSnapshotKeychain(name, providerID string) (Snapshot, error) {
 	}
 	p = normalizePool(providerID, p)
 	if migrated {
-		// Fail-closed on the rewrite too: secrets are safe in the keychain, and
-		// surfacing the error beats leaving plaintext on disk silently.
+		// The migration rewrite is a side effect of a READ path (LoadSnapshot
+		// runs unlocked) and must not race a concurrent locked save — grab the
+		// pool lock non-blockingly and skip the rewrite when contended (the
+		// plaintext file stays until the next uncontended load redoes the
+		// migration). Fail-closed on the uncontended rewrite itself: secrets
+		// are safe in the keychain, and surfacing the error beats leaving
+		// plaintext on disk silently.
+		release, locked := s.tryPoolLock(name)
+		if !locked {
+			return Snapshot{Pool: p, Source: SourcePlural}, nil
+		}
+		defer release()
 		if err := s.writeMetadataFile(name, p); err != nil {
 			return Snapshot{Source: SourcePlural}, fmt.Errorf("rewrite pool %s metadata-only: %w", s.PoolPath(name), err)
 		}

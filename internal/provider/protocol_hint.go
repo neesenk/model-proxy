@@ -22,11 +22,19 @@ package provider
 // This hint is only correct because a real Responses converter exists; without
 // it the hint would turn an obvious failure into a misleading one (see git
 // history).
+//
+// typesafe speaks the decisions protocol (System One typed questions). The
+// hint makes implicit route targets declare protocol: decisions; a chat-family
+// client reaching a typesafe target then hits the registered fail-closed
+// conversion stub (typed unsupported error, target skipped) instead of a chat
+// body being POSTed to /systemone.
 func ProtocolHint(providerID, model string) string {
 	_ = model
 	switch providerID {
 	case "codex":
 		return "responses"
+	case "typesafe":
+		return "decisions"
 	}
 	return ""
 }

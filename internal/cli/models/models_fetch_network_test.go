@@ -22,7 +22,9 @@ func TestListArkAgentPlanModelIDs_DeadProxy(t *testing.T) {
 	dead.Close()
 	t.Setenv("HTTPS_PROXY", "http://"+addr)
 	t.Setenv("HTTP_PROXY", "http://"+addr)
-	_, err := providerbuild.ListArkAgentPlanModelIDs(context.Background(), "volcengine")
+	// Empty AK/SK: the legacy single-account file (on disk, with AK/SK) feeds
+	// the signed call, which then dies on the dead proxy.
+	_, err := providerbuild.ListArkAgentPlanModelIDs(context.Background(), "volcengine", "", "")
 	if err == nil {
 		t.Error("listArkAgentPlanModelIDs (dead proxy): want error, got nil")
 	}

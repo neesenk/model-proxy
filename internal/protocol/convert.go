@@ -1824,12 +1824,17 @@ func convertResponseNS(body []byte, clientProto, targetProto string, r2c r2cCtx)
 }
 
 // converting — the path follows the BACKEND's protocol, not the client's).
+// decisions is the only protocol whose client-facing path (/v1/decisions)
+// differs from its upstream path: upstreams (TypeSafe/OpenRouter) serve the
+// System One shape at /systemone relative to a versioned base URL.
 func backendPath(backendProto string) string {
 	switch backendProto {
 	case "anthropic":
 		return "/v1/messages"
 	case "responses":
 		return "/responses"
+	case "decisions":
+		return "/systemone"
 	default: // "openai" (chat completions)
 		return "/chat/completions"
 	}

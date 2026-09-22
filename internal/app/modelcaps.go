@@ -106,18 +106,20 @@ func (p *Proxy) probeAllModelCaps() {
 		if p.modelCaps.PruneModels(name, keep) {
 			dirty = true
 		}
-		if provider.ProtocolHint(provCfg.Provider, "") != "" {
-			// Hint-covered provider (codex → responses): the protocol is known
-			// without probing. Synthesize once, then the fingerprint skip
-			// below keeps it stable.
+		if hint := provider.ProtocolHint(provCfg.Provider, ""); hint != "" {
+			// Hint-covered provider (codex → responses, typesafe → decisions):
+			// the protocol is known without probing. Synthesize once, then the
+			// fingerprint skip below keeps it stable. The synthesized verdict
+			// marks the hinted leg; decisions has no probe leg (hint resolves
+			// it before caps are ever consulted), so all three legs record No.
+			verdict := runtimewire.ModelProtocols{Chat: triNo, Anthropic: triNo, Responses: triNo}
+			if hint == "responses" {
+				verdict.Responses = triYes
+			}
 			if _, ok := p.modelCaps.ProviderFingerprint(name); !ok || len(models) > 0 {
 				for _, m := range models {
 					if _, ok := p.modelCaps.Get(name, m); !ok {
-						p.modelCaps.Put(name, fp, m, runtimewire.ModelProtocols{
-							Chat:      triNo,
-							Anthropic: triNo,
-							Responses: triYes,
-						}, now)
+						p.modelCaps.Put(name, fp, m, verdict, now)
 						dirty = true
 					}
 				}

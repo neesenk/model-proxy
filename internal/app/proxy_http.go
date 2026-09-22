@@ -117,7 +117,8 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 		}
 		// Non-LLM path (browser well-known probes, favicon, stray GETs): answer
 		// 502 WITHOUT a live event. The Live monitor is an LLM-request view; only
-		// /v1/messages, /v1/chat/completions and /v1/responses produce events.
+		// /v1/messages, /v1/chat/completions, /v1/responses and /v1/decisions
+		// produce events.
 		// Unrouted MODEL requests still emit a terminal end inside forward (proto
 		// is non-empty there) — that is the retry-loop case the contract protects.
 		http.Error(w, fmt.Sprintf("no route for path %s", r.URL.Path), http.StatusBadGateway)

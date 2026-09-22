@@ -393,3 +393,97 @@ func TestTerminalWatcher_ClosePropagates(t *testing.T) {
 		t.Fatal("Close did not reach the upstream body")
 	}
 }
+
+// An `event: error` frame whose payload carries no "error" key (OpenRouter
+// chat dialect: message/detail fields) is an upstream error terminal — no
+// second synthesized error may follow it.
+func TestTerminalWatcher_ChatEventLineErrorFrameNoSynthesis(t *testing.T) {
+	stream := watchChatPartial +
+		"event: error\n" +
+		`data: {"message":"provider overloaded","detail":"retry later"}` + "\n\n"
+	src := &chunkSource{chunks: [][]byte{[]byte(stream)}}
+	w := WatchStreamTerminal(src, OpenAI)
+	out, err := drainAll(t, w)
+	if err != io.EOF {
+		t.Fatalf("end error = %v, want io.EOF", err)
+	}
+	if !bytes.Equal(out, []byte(stream)) {
+		t.Fatalf("event-line error stream was modified:\n%s", out)
+	}
+	if w.Synthesized() {
+		t.Fatal("Synthesized() = true behind an event:-only upstream error frame")
+	}
+}
+
+// Anthropic dialect naming the frame only on the event: line (payload without
+// a type key): both message_stop and error must classify from the event name.
+func TestTerminalWatcher_AnthropicEventLineOnlyClassification(t *testing.T) {
+	stop := watchAnthropicPartial +
+		"event: message_stop\n" +
+		`data: {"stop":true}` + "\n\n"
+	src := &chunkSource{chunks: [][]byte{[]byte(stop)}}
+	w := WatchStreamTerminal(src, Anthropic)
+	out, err := drainAll(t, w)
+	if err != io.EOF {
+		t.Fatalf("end error = %v, want io.EOF", err)
+	}
+	if !bytes.Equal(out, []byte(stop)) || w.Synthesized() {
+		t.Fatal("event:-only message_stop was not recognized as a terminal")
+	}
+
+	failed := watchAnthropicPartial +
+		"event: error\n" +
+		`data: {"message":"overloaded"}` + "\n\n"
+	src = &chunkSource{chunks: [][]byte{[]byte(failed)}}
+	w = WatchStreamTerminal(src, Anthropic)
+	out, err = drainAll(t, w)
+	if err != io.EOF {
+		t.Fatalf("end error = %v, want io.EOF", err)
+	}
+	if !bytes.Equal(out, []byte(failed)) || w.Synthesized() {
+		t.Fatal("event:-only error frame was not recognized as an upstream error terminal")
+	}
+}
+
+// Responses dialect naming the frame only on the event: line: a
+// response.failed whose payload lacks the type key must not be followed by a
+// synthesized response.failed.
+func TestTerminalWatcher_ResponsesEventLineFailedNoSynthesis(t *testing.T) {
+	stream := watchResponsesPartial +
+		"event: response.failed\n" +
+		`data: {"response":{"id":"resp_1","object":"response","status":"failed"}}` + "\n\n"
+	src := &chunkSource{chunks: [][]byte{[]byte(stream)}}
+	w := WatchStreamTerminal(src, Responses)
+	out, err := drainAll(t, w)
+	if err != io.EOF {
+		t.Fatalf("end error = %v, want io.EOF", err)
+	}
+	if !bytes.Equal(out, []byte(stream)) {
+		t.Fatalf("event:-only response.failed stream was modified:\n%s", out)
+	}
+	if w.Synthesized() {
+		t.Fatal("Synthesized() = true behind an event:-only response.failed frame")
+	}
+}
+
+// A single SSE line exceeding the shared 8 MiB cap disables terminal
+// detection for the rest of the stream: the bytes forward untouched and no
+// terminal is synthesized on the later end (the scanner can no longer prove
+// one is missing). Memory-bounded by the same cap the converters enforce.
+func TestTerminalWatcher_OversizedLineDisablesDetectionWithoutRewrite(t *testing.T) {
+	stream := watchChatPartial +
+		"data: " + strings.Repeat("x", sseScanBuf+64) + "\n\n"
+	// chunkSource drops the unread tail of a chunk, so serve the 8 MiB+
+	// stream through a plain reader instead.
+	w := WatchStreamTerminal(io.NopCloser(bytes.NewReader([]byte(stream))), OpenAI)
+	out, err := drainAll(t, w)
+	if err != io.EOF {
+		t.Fatalf("end error = %v, want io.EOF", err)
+	}
+	if !bytes.Equal(out, []byte(stream)) {
+		t.Fatal("oversized-line stream was modified")
+	}
+	if w.Synthesized() {
+		t.Fatal("Synthesized() = true after the scanner gave up on an oversized line")
+	}
+}

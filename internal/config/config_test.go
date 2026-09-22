@@ -24,6 +24,18 @@ func TestConfig_ProviderBaseURLs(t *testing.T) {
 	}
 
 	for name, prov := range cfg.Providers {
+		if prov.OpenAIBaseURL == "" && prov.DecisionsBaseURL != "" {
+			// Pure decisions provider (typesafe): no chat endpoint to join —
+			// check the decisions URL instead (proxy strips /v1 from the client
+			// path and appends /systemone).
+			t.Run(name+"/decisions", func(t *testing.T) {
+				upstream := strings.TrimRight(prov.DecisionsBaseURL, "/") + "/systemone"
+				if strings.Contains(upstream, "/v1/v1") {
+					t.Errorf("decisions URL has double /v1: %s", upstream)
+				}
+			})
+			continue
+		}
 		t.Run(name+"/openai", func(t *testing.T) {
 			if prov.OpenAIBaseURL == "" {
 				t.Fatalf("openai_base_url is empty")
@@ -547,10 +559,13 @@ func TestValidate_ConversionBaseURL(t *testing.T) {
 		{"anthropic without anthropic_base_url", Provider{OpenAIBaseURL: "https://x", Provider: "static"}, "anthropic", "anthropic_base_url"},
 		{"openai without openai_base_url", Provider{AnthropicBaseURL: "https://x", Provider: "static"}, "openai", "openai_base_url"},
 		{"responses without openai_base_url", Provider{AnthropicBaseURL: "https://x", Provider: "static"}, "responses", "openai_base_url"},
-		{"unknown protocol", Provider{OpenAIBaseURL: "https://x", Provider: "static"}, "weird", `not "anthropic", "openai", or "responses"`},
+		{"decisions without decisions/openai base", Provider{AnthropicBaseURL: "https://x", Provider: "static"}, "decisions", "decisions_base_url"},
+		{"unknown protocol", Provider{OpenAIBaseURL: "https://x", Provider: "static"}, "weird", `not "anthropic", "openai", "responses", or "decisions"`},
 		{"anthropic with anthropic_base_url (valid)", Provider{AnthropicBaseURL: "https://x", Provider: "static"}, "anthropic", ""},
 		{"openai with openai_base_url (valid)", Provider{OpenAIBaseURL: "https://x", Provider: "static"}, "openai", ""},
 		{"responses with openai_base_url (valid)", Provider{OpenAIBaseURL: "https://x", Provider: "static"}, "responses", ""},
+		{"decisions with decisions_base_url (valid)", Provider{DecisionsBaseURL: "https://x/v1", Provider: "static"}, "decisions", ""},
+		{"decisions with openai_base_url fallback (valid)", Provider{OpenAIBaseURL: "https://x", Provider: "static"}, "decisions", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -567,6 +582,124 @@ func TestValidate_ConversionBaseURL(t *testing.T) {
 				t.Errorf("err=%v, want substring %q", err, c.wantSub)
 			}
 		})
+	}
+}
+
+// TestValidate_ProviderBaseURLSchemeHost: the three provider base URLs must
+// be absolute http(s) URLs with a host — a schemeless or hostless value would
+// only surface at request-build time deep in the forward path. Covers
+// decisions_base_url alongside the two long-standing fields.
+func TestValidate_ProviderBaseURLSchemeHost(t *testing.T) {
+	base := func(mutate func(*Provider)) *Config {
+		p := Provider{OpenAIBaseURL: "https://api.example.com/v1", Provider: "static"}
+		if mutate != nil {
+			mutate(&p)
+		}
+		return &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{"z": p}}
+	}
+	cases := []struct {
+		name    string
+		mutate  func(*Provider)
+		wantSub string // empty = expect no error
+	}{
+		{"openai missing scheme", func(p *Provider) { p.OpenAIBaseURL = "api.example.com/v1" }, `openai_base_url "api.example.com/v1" is not a valid http(s) URL`},
+		{"openai no host", func(p *Provider) { p.OpenAIBaseURL = "http://" }, `openai_base_url "http://" is not a valid http(s) URL`},
+		{"openai ftp scheme", func(p *Provider) { p.OpenAIBaseURL = "ftp://api.example.com/v1" }, `openai_base_url "ftp://api.example.com/v1" is not a valid http(s) URL`},
+		{"anthropic missing scheme", func(p *Provider) { p.AnthropicBaseURL = "api.example.com" }, `anthropic_base_url "api.example.com" is not a valid http(s) URL`},
+		{"anthropic no host", func(p *Provider) { p.AnthropicBaseURL = "https://" }, `anthropic_base_url "https://" is not a valid http(s) URL`},
+		{"decisions missing scheme", func(p *Provider) { p.DecisionsBaseURL = "api.example.com/v1" }, `decisions_base_url "api.example.com/v1" is not a valid http(s) URL`},
+		{"decisions no host", func(p *Provider) { p.DecisionsBaseURL = "https://" }, `decisions_base_url "https://" is not a valid http(s) URL`},
+		{"http with host and port valid", func(p *Provider) { p.OpenAIBaseURL = "http://127.0.0.1:8080/v1" }, ""},
+		{"https anthropic valid", func(p *Provider) { p.AnthropicBaseURL = "https://api.example.com" }, ""},
+		{"https decisions valid", func(p *Provider) { p.DecisionsBaseURL = "https://api.example.com/v1" }, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := base(tc.mutate).validate()
+			if tc.wantSub == "" {
+				if err != nil {
+					t.Errorf("expected no error, got: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("err=%v, want substring %q", err, tc.wantSub)
+			}
+		})
+	}
+}
+
+// TestValidate_DataPathsAbsolute: explicitly set data locations
+// (request_log.dir, request_log.mcp_dir, stats.db_path) must be absolute
+// after ~ / env: expansion — the daemon may start from any working directory,
+// so a relative path would write to a CWD-dependent location. Unset keeps the
+// home-derived defaults and must stay valid.
+func TestValidate_DataPathsAbsolute(t *testing.T) {
+	base := func() *Config {
+		return &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{
+			"a": {OpenAIBaseURL: "https://x", Provider: "zhipu"},
+		}}
+	}
+	cases := []struct {
+		name    string
+		mutate  func(*Config)
+		wantSub string // empty = expect no error
+	}{
+		{"request_log.dir relative", func(c *Config) { c.RequestLog.Dir = "logs/requests" }, "request_log.dir \"logs/requests\" must be an absolute path"},
+		{"request_log.mcp_dir relative", func(c *Config) { c.RequestLog.MCPDir = "mcplogs" }, "request_log.mcp_dir \"mcplogs\" must be an absolute path"},
+		{"stats.db_path relative", func(c *Config) { c.Stats.DBPath = "stats.db" }, "stats.db_path \"stats.db\" must be an absolute path"},
+		{"request_log.dir tilde expands absolute", func(c *Config) { c.RequestLog.Dir = "~/reqlogs" }, ""},
+		{"stats.db_path tilde expands absolute", func(c *Config) { c.Stats.DBPath = "~/stats.db" }, ""},
+		{"request_log.dir absolute valid", func(c *Config) { c.RequestLog.Dir = "/var/lib/model-proxy/requests" }, ""},
+		{"stats.db_path absolute valid", func(c *Config) { c.Stats.DBPath = "/var/lib/model-proxy/stats.db" }, ""},
+		{"request_log.mcp_dir absolute valid", func(c *Config) { c.RequestLog.MCPDir = "/var/lib/model-proxy/mcp" }, ""},
+		{"unset keeps defaults valid", func(c *Config) {}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base()
+			tc.mutate(cfg)
+			err := cfg.validate()
+			if tc.wantSub == "" {
+				if err != nil {
+					t.Errorf("expected no error, got: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("err=%v, want substring %q", err, tc.wantSub)
+			}
+		})
+	}
+}
+
+// TestValidate_ProviderHeadersCredentialGuard: credential-bearing provider
+// header names (authorization, cookie, x-api-key, ...) must use env:VAR
+// indirection — same rule as mcp: headers, red line 3 (credentials never
+// land in config). Benign names keep literal values.
+func TestValidate_ProviderHeadersCredentialGuard(t *testing.T) {
+	base := func(headers map[string]string) *Config {
+		return &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{
+			"a": {OpenAIBaseURL: "https://x", Provider: "static", Headers: headers},
+		}}
+	}
+	for _, name := range []string{"Authorization", "authorization", "Cookie", "X-Api-Key", "api-key", "Proxy-Authorization", "X-Auth-Token"} {
+		if err := base(map[string]string{name: "sk-literal-123"}).validate(); err == nil || !strings.Contains(err.Error(), "env:VAR") {
+			t.Errorf("sensitive header %q with literal value: err=%v, want env:VAR rejection", name, err)
+		}
+	}
+	for _, name := range []string{"Authorization", "X-Api-Key", "Cookie"} {
+		if err := base(map[string]string{name: "env:MY_UPSTREAM_TOKEN"}).validate(); err != nil {
+			t.Errorf("sensitive header %q with env: reference rejected: %v", name, err)
+		}
+	}
+	// Benign names keep literal values (client hints, tracing ids).
+	if err := base(map[string]string{"x-ccswitch-client": "0.2.7"}).validate(); err != nil {
+		t.Errorf("benign literal header rejected: %v", err)
+	}
+	// A sensitive name with a malformed env reference is still rejected.
+	if err := base(map[string]string{"Authorization": "env:bad-var"}).validate(); err == nil || !strings.Contains(err.Error(), "env:VAR") {
+		t.Errorf("malformed env: reference: err=%v, want rejection", err)
 	}
 }
 
