@@ -28,7 +28,7 @@ func TestList_DerivesFromTemplateAndFiltersUnregistered(t *testing.T) {
 		}
 		names[p.Name] = true
 	}
-	for _, want := range []string{"zhipu", "deepseek", "kimi-code", "qwen-plan", "step-plan", "volcengine", "typesafe"} {
+	for _, want := range []string{"zhipu", "deepseek", "kimi-code", "mimo", "qwen-plan", "step-plan", "volcengine", "typesafe"} {
 		if !names[want] {
 			t.Errorf("expected preset %q in catalog; got %v", want, names)
 		}

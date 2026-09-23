@@ -44,12 +44,12 @@ func ProtocolHint(providerID, model string) string {
 // dialects differ per vendor family (cc-switch mapReasoningEffort).
 //
 //	"reasoning_effort" (default) — flat reasoning_effort field, kept as-is
-//	"thinking"        — thinking: {type:"enabled"|"disabled"} (zhipu/volcengine/kimi-code/deepseek)
+//	"thinking"        — thinking: {type:"enabled"|"disabled"} (zhipu/volcengine/kimi-code/deepseek/mimo)
 //	"enable_thinking" — enable_thinking: bool (qwen-plan)
 //	"openrouter"      — native reasoning: {effort} object (aqp / OpenRouter 系)
 func ChatReasoningMode(providerID string) string {
 	switch providerID {
-	case "zhipu", "volcengine", "kimi-code", "deepseek":
+	case "zhipu", "volcengine", "kimi-code", "deepseek", "mimo":
 		return "thinking"
 	case "qwen-plan":
 		return "enable_thinking"

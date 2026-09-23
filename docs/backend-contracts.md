@@ -8,7 +8,7 @@
 |---|---|---|
 | aqp / codex | oauth_auth | `~/.model-proxy/<name>_oauth_auth.json` |
 | static | apikey | `~/.model-proxy/<name>_apikeys.json`（账号池）；无 legacy singular fallback |
-| zhipu / zcode / deepseek / kimi-code / qwen-plan / step-plan | apikey | `~/.model-proxy/<name>_apikeys.json`（账号池）；旧单数 `_apikey.json` 仅只读 fallback |
+| zhipu / zcode / deepseek / kimi-code / qwen-plan / step-plan / mimo | apikey | `~/.model-proxy/<name>_apikeys.json`（账号池）；旧单数 `_apikey.json` 仅只读 fallback |
 | volcengine | apikey | `~/.model-proxy/<name>_apikeys.json` — 每账号 `{api_key, access_key, secret_key}`；旧单数仅 fallback |
 
 路径从 provider name（config 一级 key）派生，支持多实例（如 `zhipu-personal` / `codex-work`）。多账号见 `docs/architecture/provider-pools.md`。所有路径（CLI `login`、`BuildOne`、web 异步登录、`logout`）一律用 config name，**包括 aqp/codex**（`RunLogin`/`runCodexLoginFlow` 接收 `provName` → login 内部 `oauthAuthFilePath(HomeDir(), provName)`，与 `internal/accounts` 的 `AuthFilePath(provName, "oauth_auth")` 同一路径）；曾有的「CLI login 硬编码 provider_id → 非同名实例读写错位」bug 已修，`TestAqpCodexLogin_UsesConfigNameForAuthFile` 守护。OAuth 文件不得由 Web/CLI 直接 `os.WriteFile`/`os.Remove`：codex 统一经 `provider.WriteCodexAuthFile` / `provider.ClearCodexAccount`，aqp 经对应 provider helper，最终由 `credstore.Ref` 执行 file/keychain 选择、原子权限、来源标记与跨模式删除。
@@ -112,6 +112,18 @@ OAuth device flow（从 codex-rs 源码确认）：issuer `https://auth.openai.c
 - **无公开 Credit 用量接口**（月池/加油包用量仅控制台 `platform.stepfun.com/account-overview`）；`Quota()` 返回 `BillingUnknown` + `Notes`（含控制台 URL）。额度耗尽报 **402 `quota_exceeded`**：targetexec 的 body-proven quota-denied 策略覆盖 402/403（同 kimi-code 403 模式）→ quota 冷却（默认 1h，无 reset hint）+ failover。
 - `login step-plan` 无 `usage_url`，走 `apiKeyValidationURL` 兜底：`openai_base_url/models`（Bearer GET，401/403 拒——官方 401 错误码 `invalid_api_key`）。`Logout` = `DeleteKey`。`ProbeRequest` 覆盖为 anthropic `/v1/messages` + `anthropicProbeBody`、`ExtraHeaders` 注入 `anthropic-version: 2023-06-01`（同 qwen-plan/volcengine）。无 `ProtocolHint`/`WireProtocolNote`（双协议直通）。
 - **StepSearch MCP**（config `mcp.stepfun-search`，provider 型）：`https://api.stepfun.com/step_plan/v1/mcp/web_search/mcp`，默认 Authorization Bearer（凭据从 step-plan 池注入），streamable HTTP，stateless（上游不回 `Mcp-Session-Id`，不铸造本地会话）。工具 `web_search`（¥0.04/次，计 Step Plan Credit；参数含 `category` programming|research|gov|business、`n` 1-20）与 `web_fetch`（不计费）。实测 2026-09（tools/list 268ms）。
+
+## Xiaomi MiMo 契约（官方文档 + 社区实测；按量计费）
+
+- OpenAI base `https://api.xiaomimimo.com/v1`（`/chat/completions`、`/responses`、`/models`）；Anthropic base `https://api.xiaomimimo.com/anthropic`（**不带 /v1**，代理保留客户端 `/v1/messages`，同 DeepSeek/qwen-plan）。双协议字节级透传，`RewriteRequest` no-op，URL 选择在 `proxy.forward` 按 protocol 完成。
+- 鉴权**三写**：每请求同时设 `Authorization: Bearer <key>` + `x-api-key: <key>` + `api-key: <key>`。官方文档两种认证方式（`api-key: $MIMO_API_KEY` 与 Bearer）在 OpenAI 与 Anthropic 两个兼容页都成立；`api-key` 是厂商自有拼写（Anthropic SDK 惯例是 `x-api-key`），三写覆盖全部形状，未被读取的被忽略（DeepSeek 双写模式 + 厂商 api-key 拼写）。
+- **计费：仅按量付费**（社区开发者实践，Bearer 鉴权；非厂商公开文档，字段拼写以容忍解析为准）：`GET /api/v1/balance`。`usage_url` 指向该端点——它同时是 `login mimo` 的 key 校验端点（Bearer GET，401/403 拒）与运行时配额轮询目标。config 设 `billing: pay-as-you-go`（同 deepseek）。
+- `Quota()`：balance → money 窗口（`RemainingPct=-1`，非窗口预算；`granted`/`topped_up` 拆分作 detail）→ `BillingPayG`（surplus 调度把 MiMo 当严格末位，同 deepseek）；拉取失败（auth/HTTP）→ `BillingUnknown` + `Err`（Quota 契约：绝不返回非 nil error）；未配 `usage_url` → `BillingUnknown` + 控制台 Notes。响应形状**未由厂商文档确认**：解析器容忍 `{data:{…}}`/`{result:{…}}` 信封、number 或数字字符串、多种字段拼写（balance/total_balance/available_balance/remaining_balance/credit_balance/amount；currency；granted_balance/free_quota；topped_up_balance/recharged_balance），**无法识别时返回空窗口**（不伪造 0 余额——那会在 UI 上显示成“已用光”）。
+- **Token Plan 有意不支持**：套餐用量端点（社区路径 `GET /api/v1/tokenPlan/usage`）无厂商文档、字段形状未确认，订阅账号在本代理下按按量余额呈现；套餐耗尽仍会以 402 形态 reactive failover（见下）。
+- 模型：`mimo-v2.6-flash`、`mimo-v2.6-pro`、`mimo-v2.6-pro-ultraspeed`、`mimo-v2.5-pro`、`mimo-v2.5`（官方 chat/completions 文档的 model 枚举）；`mimo-v2.5*` max_completion_tokens 默认 32768、v2.6 系 131072。`/models` 不可用时回退 config `models:`。
+- 推理强度：chat 协议 `thinking:{type:"enabled"|"disabled"}` 开关，**无 effort 档**（`ChatReasoningMode("mimo")="thinking"`，不注册 `ChatEffortProfile`）；多轮工具调用需回传 `reasoning_content`（thinking 方言的占位回传规则见 `docs/architecture/protocol-conversion.md`）。
+- `login mimo` 无独立 usage 表单（balance 即校验端点）；`Logout` = `DeleteKey`。`ProbeRequest`/`FilterModelIDs` 用 baseProbe 默认（探测框架在配了 `anthropic_base_url` 时强制 anthropic 路径）；`ExtraHeaders` 注入 `anthropic-version: 2023-06-01`——转发路径的客户端→上游头白名单**不含** anthropic-version（客户端自带的会被剥），strict Anthropic 兼容网关会因此 400（kimi-code/step-plan 同款；DeepSeek 是例外，其端点忽略该头）。无 `ProtocolHint`/`WireProtocolNote`（双协议直通）。
+- **额度耗尽**：官方 Error Codes 为 **402 Insufficient Balance**（`Insufficient account balance`）；`targetexec.ParseQuotaDenied` 的 marker 表已含 `insufficient balance`/`account balance`/`余额不足`，命中即按配额耗尽分类（默认 1h 冷却，无 reset hint）+ failover，无需 mimo 专属代码。
 
 ## Volcengine Ark 契约（双协议，含 Agent Plan，一个 key）
 

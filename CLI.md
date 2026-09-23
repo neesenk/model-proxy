@@ -241,7 +241,7 @@ login <provider> [--label <name>] [--replace]
                  [--from-env VAR [--from-env-ak VAR --from-env-sk VAR] | --from-codex]
 ```
 
-逻辑（`internal/cli/login/login.go` 的 `CmdLogin`）：经 `RunProviderLogin` 按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、static/zhipu/deepseek/kimi-code/qwen-plan/step-plan/typesafe=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `MaybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。`add` 命令复用同一分派。
+逻辑（`internal/cli/login/login.go` 的 `CmdLogin`）：经 `RunProviderLogin` 按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、static/zhipu/deepseek/kimi-code/mimo/qwen-plan/step-plan/typesafe=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `MaybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。`add` 命令复用同一分派。
 
 包切分：`internal/cli/login` 只是交互 shell（命令编排、flag 解析、stdin 提示、终端输出、loopback 回调页、daemon nudge）；传输中立核心在 `internal/login`（codex device flow、AQP SSO 客户端、apikey/volcengine 池的校验/去重/写入/删除），Web 层（`internal/app`）与 shell 驱动同一核心。
 
@@ -296,10 +296,10 @@ Authorized. Exchanging code for tokens...
 You can now use codex-native models (gpt-5.5) through the proxy.
 ```
 
-### apikey 类（zhipu/deepseek/kimi-code/qwen-plan/step-plan/typesafe，`runApiKeyLoginWithInput`）
+### apikey 类（zhipu/deepseek/kimi-code/mimo/qwen-plan/step-plan/typesafe，`runApiKeyLoginWithInput`）
 
 - stdout 提示：`Enter API key for <PROVNAME>: `（stdin 读 key）。
-- stderr（当存在可校验端点时）：`Validating API key...`。校验端点由 `apiKeyValidationURL` 解析：配了 `usage_url` 的用它（zhipu/deepseek/**kimi-code** 均配）；**未配 `usage_url` 的回退 `openai_base_url/models`**（qwen-plan/step-plan：无公开用量接口，不配 `usage_url`），openai base 也没有时回退 **`decisions_base_url/models`**（typesafe：纯 decisions provider）。校验 = GET 该端点 with `Authorization: Bearer <key>`；**401/403 或网络错误** → `login failed: validation failed: HTTP <N>: <BODY>`（exit 1，**不写池**）；其余状态码（200/404 等）= key 通过（写池）。
+- stderr（当存在可校验端点时）：`Validating API key...`。校验端点由 `apiKeyValidationURL` 解析：配了 `usage_url` 的用它（zhipu/deepseek/**kimi-code**/**mimo** 均配；mimo 的 usage_url 即 balance 端点，Bearer GET）；**未配 `usage_url` 的回退 `openai_base_url/models`**（qwen-plan/step-plan：无公开用量接口，不配 `usage_url`），openai base 也没有时回退 **`decisions_base_url/models`**（typesafe：纯 decisions provider）。校验 = GET 该端点 with `Authorization: Bearer <key>`；**401/403 或网络错误** → `login failed: validation failed: HTTP <N>: <BODY>`（exit 1，**不写池**）；其余状态码（200/404 等）= key 通过（写池）。
 - 重复 id 且非 `--replace` -> stdout 提示 `Account "<LABEL>" is already logged in. Replace its key? [y/N] `；答非 y -> `login cancelled`（exit 1）。
 - 成功 stdout：`✓ Saved account <MASKED_ID> (<LABEL>)`（绿）。
 
@@ -430,6 +430,7 @@ Provider:   <PROVNAME>
 | volcengine (`VolcengineProvider.Usage`) | 无 AK/SK：`Note:` 说明 + 列 config 模型；有 AK/SK：`Plan: <PLAN_TYPE>` + `AFPFiveHour/Daily/Weekly/Monthly` 各窗口 Quota/Used/Remaining/ResetTime |
 | kimi-code (`KimiCodeProvider.Usage`) | `Plan:       Kimi Code membership`；`Weekly limit`（Ultimate，7d）+ `5h limit`（Short，5h）+ 其他限额窗口（带进度条/重置时间）+ `Extra usage`/`Monthly cap` 钱包窗口（`n/a`）。取自 `/usages`。拉取失败：`Usage:      (unavailable: <ERR>)` + 控制台提示 + 列 config 模型 |
 | step-plan (`StepPlanProvider.Usage`) | `Billing:    Credit 月池 …`；`Usage:      (console-only; no public Credit API …)`；`Details:    <订阅页 URL>` + 列 config 模型（qwen-plan 同模式） |
+| mimo (`MiMoProvider.Usage`) | 按量余额 money 窗口（`n/a` unmeasured，`granted`/`topped-up` 拆分作 detail，取自 `/api/v1/balance`）；余额拉取失败：`Usage:      (unavailable: <ERR>)` + 控制台 URL + 列 config 模型（deepseek 同模式） |
 
 重置时间格式：`<duration>(at <time>)`；`formatResetAt`：今天显示 `HH:MM`，否则 `MM-DD HH:MM`。
 
@@ -819,7 +820,7 @@ Scheduling
 <⚠ N warning(s) | ✓ no warnings>
 ```
 - `<TIER>` = `plan` / `pay-as-you-go`。
-- `<SOURCE>` = `quotaSourceLabel(provider_id)`：aqp=`monthly_usage`、codex=`wham/usage`、zhipu=`quota/limit`、zcode=`quota/limit`、volcengine=`GetAFPUsage (AK/SK)`、deepseek=`user/balance`、kimi-code=`usages`、其他=`(none -> unknown at runtime)`。
+- `<SOURCE>` = `quotaSourceLabel(provider_id)`：aqp=`monthly_usage`、codex=`wham/usage`、zhipu=`quota/limit`、zcode=`quota/limit`、volcengine=`GetAFPUsage (AK/SK)`、deepseek=`user/balance`、kimi-code=`usages`、mimo=`balance`、其他=`(none -> unknown at runtime)`。
 - `<PEAK>` = `peakSummary`：`09:00-12:00(×2), 14:00-18:00(×2)` 或 `-`。
 - 末行：`⚠ <N> warning(s)`（黄）或 `✓ no warnings`（绿）。返回值 = warning 数。
 

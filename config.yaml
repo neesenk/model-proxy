@@ -226,6 +226,30 @@ providers:
       - step-3.5-flash
       - step-3.5-flash-2603
       - step-router-v1
+  # Xiaomi MiMo (小米 MiMo 开放平台), PAY-AS-YOU-GO only. API key via
+  # `login mimo` (from https://platform.xiaomimimo.com — Console → API Keys).
+  # One key serves both protocols; the two endpoints are per-protocol:
+  # openai_base_url = the OpenAI-compatible base (/v1), anthropic_base_url =
+  # the Anthropic-compatible base (no /v1; proxy keeps the client
+  # /v1/messages path). usage_url is BOTH the login-time key-validation
+  # endpoint and the runtime quota poll target (GET /api/v1/balance with
+  # Bearer — community-documented; the balance is not a windowed budget, so
+  # MiMo ranks as a strict last resort like deepseek). Token Plan
+  # subscriptions are NOT supported. Poolable (repeat `login`).
+  # Also a preset: `model-proxy add mimo`.
+  mimo:
+    provider_id: mimo
+    priority: 2
+    billing: pay-as-you-go
+    openai_base_url: https://api.xiaomimimo.com/v1
+    anthropic_base_url: https://api.xiaomimimo.com/anthropic
+    usage_url: https://api.xiaomimimo.com/api/v1/balance
+    models:
+      - mimo-v2.6-flash
+      - mimo-v2.6-pro
+      - mimo-v2.6-pro-ultraspeed
+      - mimo-v2.5-pro
+      - mimo-v2.5
 # Qianwen Token Plan 个人版 (千问 AI Token Plan personal edition). API key via
 # `login qwen-plan` (from the Token Plan console; key format sk-sp-…). Two
 # protocol bases: openai_base_url = OpenAI-compatible base, anthropic_base_url

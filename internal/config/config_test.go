@@ -210,6 +210,15 @@ func TestValidate_AcceptsQwenPlanProviderID(t *testing.T) {
 	}
 }
 
+func TestValidate_AcceptsMiMoProviderID(t *testing.T) {
+	c := &Config{Listen: "127.0.0.1:8787", Providers: map[string]Provider{
+		"mimo": {Provider: "mimo", OpenAIBaseURL: "https://api.xiaomimimo.com/v1"},
+	}}
+	if err := c.validate(); err != nil {
+		t.Errorf("mimo provider_id rejected: %v", err)
+	}
+}
+
 func TestValidate_AcceptsStepPlanProviderID(t *testing.T) {
 	c := &Config{Listen: "127.0.0.1:8787", Providers: map[string]Provider{
 		"step-plan": {Provider: "step-plan", OpenAIBaseURL: "https://api.stepfun.com/step_plan/v1"},

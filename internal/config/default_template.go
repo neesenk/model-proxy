@@ -209,6 +209,30 @@ providers:
       - step-3.5-flash-2603
       - step-router-v1
 
+  # Xiaomi MiMo (小米 MiMo 开放平台), PAY-AS-YOU-GO only. API key via
+  # 'login mimo' (from https://platform.xiaomimimo.com — Console → API Keys).
+  # One key serves both protocols; the two endpoints are per-protocol:
+  # openai_base_url = the OpenAI-compatible base (/v1), anthropic_base_url =
+  # the Anthropic-compatible base (no /v1; proxy keeps the client
+  # /v1/messages path). usage_url is BOTH the login-time key-validation
+  # endpoint and the runtime quota poll target (GET /api/v1/balance with
+  # Bearer — community-documented; the balance is not a windowed budget, so
+  # MiMo ranks as a strict last resort like deepseek). Token Plan
+  # subscriptions are NOT supported. Poolable (repeat 'login').
+  mimo:
+    openai_base_url: https://api.xiaomimimo.com/v1
+    anthropic_base_url: https://api.xiaomimimo.com/anthropic
+    provider_id: mimo
+    priority: 3
+    billing: pay-as-you-go
+    usage_url: https://api.xiaomimimo.com/api/v1/balance
+    models:
+      - mimo-v2.6-flash
+      - mimo-v2.6-pro
+      - mimo-v2.6-pro-ultraspeed
+      - mimo-v2.5-pro
+      - mimo-v2.5
+
   # TypeSafe System One decisions API (Jev): a decision model returning typed,
   # calibrated answers (choice/score/noul + probabilities) instead of text —
   # for routing/classification/scoring inside software, not chat. API key via
