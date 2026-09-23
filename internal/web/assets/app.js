@@ -53,6 +53,7 @@ import {
   MCP_ANALYTICS_METRICS, mcpAnalyticsFilterSeries, mcpAnalyticsToolFilter,
   mcpAnalyticsSummaryGroups, mcpAnalyticsChartSeries, mcpAnalyticsMetricOptions, mcpAnalyticsValueText,
   mcpAnalyticsSummaryTableHTML, mcpAnalyticsEmptyHTML, mcpAnalyticsSkeletonHTML,
+  mcpToolsTableHTML,
   mcpSubTabFromHash, mcpHash,
 } from './pure.js';
 
@@ -10381,6 +10382,9 @@ let mcpData = null;
 // Per-server probe outcomes, keyed by server name: {state:'busy'|'ok'|'err',
 // text, tools, latencyMs}. Survives re-renders within the page session.
 const mcpProbe = new Map();
+// Servers rows whose detail is expanded (server names). Survives probe
+// re-renders so an open detail keeps its state across Test/Refresh cycles.
+const mcpDetailOpen = new Set();
 // In-session MCP sub-tab selection. Holds the most recently applied sub-tab
 // (including one driven by the URL hash), so re-renders and tab re-entry stay
 // in sync with the address bar before falling back to localStorage.
@@ -10510,8 +10514,26 @@ function renderMCPInto() {
   routesView.innerHTML = mcpRoutesCardHTML(routes);
   const refresh = serversView.querySelector('[data-mcp-refresh]');
   if (refresh) refresh.onclick = () => loadMCP();
-  for (const btn of serversView.querySelectorAll('[data-mcp-test]')) {
-    btn.onclick = () => mcpTestServer(btn.dataset.mcpTest);
+  // Probe buttons live in both views (Servers action column + both details).
+  for (const btn of host.querySelectorAll('[data-mcp-test]')) {
+    btn.onclick = () => {
+      const name = btn.dataset.mcpTest;
+      // Probe results live in the detail view — make sure it is open so the
+      // outcome (and the tool list) is visible without a second click.
+      mcpDetailOpen.add(name);
+      mcpRunProbe(name);
+    };
+  }
+  // Row click toggles the detail (Servers and Routes share the mechanic).
+  // The double-click guard keeps the second half of a text-selection gesture
+  // from re-toggling (and paying a full re-render); buttons inside the row
+  // handle their own clicks.
+  for (const tr of host.querySelectorAll('tr.mcp-row')) {
+    tr.onclick = (e) => {
+      if (e.detail > 1) return;
+      if (e.target.closest('button')) return;
+      mcpToggleDetail(tr.dataset.mcpServer || tr.dataset.mcpRoute, tr.dataset.mcpRoute ? 'route' : 'server');
+    };
   }
   renderMCPAnalytics(host);
 }
@@ -10558,15 +10580,11 @@ function mcpServersCardHTML(servers) {
     const probe = mcpProbe.get(s.name);
     let action = `<button class="btn small" data-mcp-test="${esc(s.name)}">Test</button>`;
     if (probe && probe.state === 'busy') action = '<span class="hint">testing…</span>';
-    let resultRow = '';
-    if (probe && probe.state !== 'busy') {
-      const badge = probe.state === 'ok' ? '<span class="badge ok">ok</span>' : '<span class="badge err">fail</span>';
-      const tools = (probe.tools || []).slice(0, 8).map((t) => `<span class="badge muted">${esc(t)}</span>`).join(' ');
-      const more = (probe.tools || []).length > 8 ? ` +${probe.tools.length - 8}` : '';
-      resultRow = `<tr><td></td><td colspan="8">${badge} <span class="hint">${esc(probe.text)}${probe.latencyMs != null ? ` · ${probe.latencyMs} ms` : ''}</span> ${tools}${esc(more)}</td></tr>`;
-    }
     const stats = `<td class="num">${s.errors || 0}</td><td class="num">${s.calls ? (s.avg_latency_ms || 0) : '—'}</td>`;
-    return `<tr><td class="mcp-wrap">${esc(s.name)}</td><td>${enabled}</td><td class="mcp-wrap">${esc(s.transport)}</td><td class="mcp-wrap">${auth}</td><td class="mcp-wrap" title="${esc(endpoint)}">${esc(endpoint)}</td><td class="num">${s.sessions || 0}</td>${stats}<td>${action}</td></tr>` + resultRow;
+    const open = mcpDetailOpen.has(s.name);
+    const main = `<tr class="mcp-row${open ? ' mcp-open' : ''}" data-mcp-server="${esc(s.name)}" title="click to toggle details"><td class="mcp-wrap">${esc(s.name)}</td><td>${enabled}</td><td class="mcp-wrap">${esc(s.transport)}</td><td class="mcp-wrap">${auth}</td><td class="mcp-wrap" title="${esc(endpoint)}">${esc(endpoint)}</td><td class="num">${s.sessions || 0}</td>${stats}<td>${action}</td></tr>`;
+    const detail = open ? `<tr class="mcp-detail-row"><td colspan="9">${mcpServerDetailHTML(s)}</td></tr>` : '';
+    return main + detail;
   }).join('');
   // Fixed column geometry (colgroup + table-layout: fixed, the request-table
   // contract): narrow badge/numeric/button columns get fixed small widths;
@@ -10585,16 +10603,122 @@ function mcpRoutesCardHTML(routes) {
   const rows = routes.map((r) => {
     const enabled = r.enabled ? '<span class="badge ok">on</span>' : '<span class="badge muted">off</span>';
     const targets = (r.targets || []).map((t) => `${esc(t.server)} (${t.tools})`).join(' → ');
-    return `<tr><td class="mcp-wrap">${esc(r.name)}</td><td>${enabled}</td><td class="mcp-wrap">${targets}</td><td class="num">${r.sessions || 0}</td><td class="num">${r.errors || 0}</td><td class="num">${r.calls ? (r.avg_latency_ms || 0) : '—'}</td></tr>`;
+    const open = mcpDetailOpen.has(r.name);
+    const main = `<tr class="mcp-row${open ? ' mcp-open' : ''}" data-mcp-route="${esc(r.name)}" title="click to toggle details"><td class="mcp-wrap">${esc(r.name)}</td><td>${enabled}</td><td class="mcp-wrap">${targets}</td><td class="num">${r.sessions || 0}</td><td class="num">${r.errors || 0}</td><td class="num">${r.calls ? (r.avg_latency_ms || 0) : '—'}</td></tr>`;
+    const detail = open ? `<tr class="mcp-detail-row"><td colspan="6">${mcpRouteDetailHTML(r)}</td></tr>` : '';
+    return main + detail;
   }).join('');
   const cols = '<colgroup>' + ['110px', '60px', 'auto', '94px', '80px', '68px'].map((w) => `<col style="width:${w}"/>`).join('') + '</colgroup>';
   const table = `<table class="table">${cols}<thead><tr><th>Name</th><th>On</th><th>Targets (failover order)</th><th class="num">Sessions</th><th class="num">Errors</th><th class="num">MS</th></tr></thead><tbody>${rows}</tbody></table>`;
   return buildCard('MCP Routes', `${routes.length} routes`, table, 'mcp-table mcp-routes-table');
 }
 
-// mcpTestServer runs the handshake probe against one server and re-renders
-// (user-triggered, so the auto-refresh gate does not apply).
-async function mcpTestServer(name) {
+// mcpRouteDetailHTML renders the expanded detail under one Routes row: the
+// route's traffic gauges plus its failover chain (one labeled group per
+// target, in target order), then the probe outcome — the aggregated canonical
+// tool surface with descriptions (the backend merges the member probes
+// through the gateway's own canonical merge).
+function mcpRouteDetailHTML(r) {
+  const g = (k, v) => (v == null || v === '') ? '' : `<div class="req-meta-g"><div class="req-meta-k">${esc(k)}</div><div class="req-meta-v">${v}</div></div>`;
+  const targets = (r.targets || []).map((t, i) => g(
+    `target ${i + 1}`,
+    `${esc(t.server)} <span class="req-meta-dim">· ${t.tools || 0} tool${t.tools === 1 ? '' : 's'}</span>`,
+  ));
+  const meta = `<div class="req-meta">${[
+    g('enabled', r.enabled ? '<span class="badge ok">on</span>' : '<span class="badge muted">off</span>'),
+    g('sessions', String(r.sessions || 0)),
+    g('calls', String(r.calls || 0)),
+    g('errors', String(r.errors || 0)),
+    r.calls ? g('avg latency', `${r.avg_latency_ms || 0} ms`) : '',
+    ...targets,
+  ].join('')}</div>`;
+  const probe = mcpProbe.get(r.name);
+  let probeHTML;
+  if (!probe) {
+    probeHTML = '<div class="mcp-probe-head"><span class="hint">no probe yet — run Test to fetch the aggregated tool list</span></div>';
+  } else if (probe.state === 'busy') {
+    probeHTML = '<div class="mcp-probe-head"><span class="hint">probing targets…</span></div>';
+  } else if (probe.state === 'ok') {
+    probeHTML = `<div class="mcp-probe-head"><span class="badge ok">ok</span> <span>${esc(probe.text)}${probe.latencyMs != null ? ` <span class="req-meta-dim">· ${probe.latencyMs} ms</span>` : ''}</span> <button class="btn small" data-mcp-test="${esc(r.name)}">Re-test</button></div>` +
+      `<div class="req-meta-k">tools (${(probe.toolDetails || []).length})</div>` +
+      mcpToolsTableHTML(probe.toolDetails);
+  } else {
+    probeHTML = `<div class="mcp-probe-head"><span class="badge err">fail</span> <span>${esc(probe.text)}${probe.latencyMs != null ? ` <span class="req-meta-dim">· ${probe.latencyMs} ms</span>` : ''}</span> <button class="btn small" data-mcp-test="${esc(r.name)}">Retry</button></div>`;
+  }
+  return meta + probeHTML;
+}
+
+// mcpServerDetailHTML renders the expanded detail under one Servers row: the
+// config/traffic summary from the surface data, then the probe outcome —
+// server identity, protocol, latency — and the tool list with descriptions
+// (pure.js mcpToolsTableHTML) once a probe has run.
+function mcpServerDetailHTML(s) {
+  const g = (k, v) => (v == null || v === '') ? '' : `<div class="req-meta-g"><div class="req-meta-k">${esc(k)}</div><div class="req-meta-v">${v}</div></div>`;
+  const auth = s.auth === 'provider'
+    ? `provider: ${esc(s.provider || '')}${s.accounts ? ` <span class="req-meta-dim">· ${s.accounts} account${s.accounts === 1 ? '' : 's'}</span>` : ''}`
+    : 'none';
+  const meta = `<div class="req-meta">${[
+    g('transport', esc(s.transport)),
+    g('auth', auth),
+    g('endpoint', esc(s.url || s.command || '')),
+    g('sessions', String(s.sessions || 0)),
+    g('calls', String(s.calls || 0)),
+    g('errors', String(s.errors || 0)),
+    s.calls ? g('avg latency', `${s.avg_latency_ms || 0} ms`) : '',
+  ].join('')}</div>`;
+  const probe = mcpProbe.get(s.name);
+  let probeHTML;
+  if (!probe) {
+    probeHTML = `<div class="mcp-probe-head"><span class="hint">no probe yet — run Test to fetch the tool list</span></div>`;
+  } else if (probe.state === 'busy') {
+    probeHTML = '<div class="mcp-probe-head"><span class="hint">testing…</span></div>';
+  } else if (probe.state === 'ok') {
+    probeHTML = `<div class="mcp-probe-head"><span class="badge ok">ok</span> <span>${esc(probe.text)}${probe.latencyMs != null ? ` <span class="req-meta-dim">· ${probe.latencyMs} ms</span>` : ''}</span> <button class="btn small" data-mcp-test="${esc(s.name)}">Re-test</button></div>` +
+      `<div class="req-meta-k">tools (${(probe.toolDetails || []).length})</div>` +
+      mcpToolsTableHTML(probe.toolDetails);
+  } else {
+    probeHTML = `<div class="mcp-probe-head"><span class="badge err">fail</span> <span>${esc(probe.text)}${probe.latencyMs != null ? ` <span class="req-meta-dim">· ${probe.latencyMs} ms</span>` : ''}</span> <button class="btn small" data-mcp-test="${esc(s.name)}">Retry</button></div>`;
+  }
+  return meta + probeHTML;
+}
+
+// mcpToggleDetail opens/closes one Servers or Routes row's detail in place
+// (no panel re-render — same locality contract as the requests table's inline
+// expansion). Opening with no cached probe kicks the handshake once: the tool
+// list only exists on the live upstream, and the open detail self-populates
+// when mcpRunProbe's re-render lands. kind is 'server' | 'route'.
+function mcpToggleDetail(name, kind) {
+  const route = kind === 'route';
+  const view = panels.mcp && panels.mcp.querySelector(route ? '#mcp-routes-view' : '#mcp-servers-view');
+  if (!view || !name) return;
+  const attr = route ? 'data-mcp-route' : 'data-mcp-server';
+  const tr = view.querySelector(`tr.mcp-row[${attr}="${CSS.escape(name)}"]`);
+  if (!tr) return;
+  if (mcpDetailOpen.has(name)) {
+    mcpDetailOpen.delete(name);
+    tr.classList.remove('mcp-open');
+    const det = tr.nextElementSibling;
+    if (det && det.classList.contains('mcp-detail-row')) det.remove();
+    return;
+  }
+  mcpDetailOpen.add(name);
+  tr.classList.add('mcp-open');
+  const item = (((route ? mcpData && mcpData.routes : mcpData && mcpData.servers)) || []).find((x) => x.name === name);
+  if (!item) return; // surface reload dropped it; the next render heals
+  const row = document.createElement('tr');
+  row.className = 'mcp-detail-row';
+  row.innerHTML = route
+    ? `<td colspan="6">${mcpRouteDetailHTML(item)}</td>`
+    : `<td colspan="9">${mcpServerDetailHTML(item)}</td>`;
+  tr.insertAdjacentElement('afterend', row);
+  if (!mcpProbe.has(name)) mcpRunProbe(name);
+}
+
+// mcpRunProbe runs the handshake probe against one exposed name — a server
+// (initialize + tools/list on that upstream) or a route (the backend probes
+// and merges the enabled members) — and re-renders (user-triggered: button
+// click or first detail open — so the auto-refresh gate does not apply).
+async function mcpRunProbe(name) {
   if (mcpProbe.get(name)?.state === 'busy') return;
   mcpProbe.set(name, { state: 'busy' });
   renderMCPInto();
@@ -10603,15 +10727,19 @@ async function mcpTestServer(name) {
     if (res && res.ok) {
       mcpProbe.set(name, {
         state: 'ok',
-        text: `${res.server_name || ''} ${res.server_version || ''} (${res.protocol || ''}${res.sessionful ? ', sessionful' : ''}${res.stdio ? ', stdio' : ''})`,
-        tools: res.tools || [],
+        text: res.route
+          ? `route · ${res.targets_probed || 0}/${res.targets_total || 0} targets`
+          : `${res.server_name || ''} ${res.server_version || ''} (${res.protocol || ''}${res.sessionful ? ', sessionful' : ''}${res.stdio ? ', stdio' : ''})`,
+        toolDetails: Array.isArray(res.tool_details) && res.tool_details.length
+          ? res.tool_details
+          : (res.tools || []).map((t) => ({ name: t })),
         latencyMs: res.latency_ms,
       });
     } else {
-      mcpProbe.set(name, { state: 'err', text: (res && res.error) || 'probe failed', tools: [], latencyMs: res && res.latency_ms });
+      mcpProbe.set(name, { state: 'err', text: (res && res.error) || 'probe failed', latencyMs: res && res.latency_ms });
     }
   } catch (e) {
-    mcpProbe.set(name, { state: 'err', text: (e && e.message) || String(e), tools: [] });
+    mcpProbe.set(name, { state: 'err', text: (e && e.message) || String(e) });
   }
   renderMCPInto();
 }

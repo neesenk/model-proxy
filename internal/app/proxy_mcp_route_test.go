@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -194,6 +195,62 @@ func twoRouteBackends(t *testing.T) (zs, exa *fakeRouteBackend, servers map[stri
 		}},
 	}
 	return zs, exa, servers, routes
+}
+
+// TestMCPProbeRoute_AggregatesCanonicalTools: /api/mcp/test on a route name
+// probes the enabled members and merges their tools through the gateway's own
+// canonical merge — canonical names, first target's description, degraded
+// members skipped (the same shape the live surface exposes).
+func TestMCPProbeRoute_AggregatesCanonicalTools(t *testing.T) {
+	zs, exa, servers, routes := twoRouteBackends(t)
+	p, _ := newMCPRouteTestProxyP(t, []string{"k-A"}, servers, routes)
+	res, err := p.probeMCP(context.Background(), "web-search")
+	if err != nil {
+		t.Fatalf("probeMCP route: %v", err)
+	}
+	if !res.OK || !res.Route {
+		t.Fatalf("route probe = %+v", res)
+	}
+	if res.ServerName != "web-search" || res.TargetsProbed != 2 || res.TargetsTotal != 2 {
+		t.Fatalf("route identity = %+v", res)
+	}
+	// One canonical tool (both targets declare web_search); first target wins
+	// the description.
+	if len(res.Tools) != 1 || res.Tools[0] != "web_search" {
+		t.Fatalf("canonical tools = %v", res.Tools)
+	}
+	if len(res.ToolDetails) != 1 || res.ToolDetails[0].Description != "zhipu search" {
+		t.Fatalf("tool details = %+v", res.ToolDetails)
+	}
+	// Degradation: a down member is skipped, the probe still succeeds.
+	zs.down = true
+	res, err = p.probeMCP(context.Background(), "web-search")
+	if err != nil {
+		t.Fatalf("probeMCP degraded: %v", err)
+	}
+	if !res.OK || res.TargetsProbed != 1 || res.TargetsTotal != 2 {
+		t.Fatalf("degraded probe = %+v", res)
+	}
+	if len(res.ToolDetails) != 1 || res.ToolDetails[0].Description != "exa search" {
+		t.Fatalf("degraded tool details = %+v", res.ToolDetails)
+	}
+	_ = exa
+}
+
+// TestMCPProbeRoute_AllTargetsDown: a route whose members all fail reports
+// OK=false with the first member error and the probed/total counters.
+func TestMCPProbeRoute_AllTargetsDown(t *testing.T) {
+	zs, exa, servers, routes := twoRouteBackends(t)
+	zs.down = true
+	exa.down = true
+	p, _ := newMCPRouteTestProxyP(t, []string{"k-A"}, servers, routes)
+	res, err := p.probeMCP(context.Background(), "web-search")
+	if err != nil {
+		t.Fatalf("probeMCP: %v", err)
+	}
+	if res.OK || !res.Route || res.TargetsProbed != 0 || res.TargetsTotal != 2 || res.Error == "" {
+		t.Fatalf("all-down probe = %+v", res)
+	}
 }
 
 // TestMCPRoute_FullFlow: synthesized initialize → aggregated tools/list →

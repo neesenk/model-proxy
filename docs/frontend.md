@@ -171,9 +171,32 @@ tab 重入经 `retainTab` 守卫。
 
 - **Servers** 子标签：servers 表（Name/On/Transport/Auth/Endpoint/Sessions/Errors/MS
   + 末列行内 Test 按钮）+ Refresh 按钮。全部内容单元格在列内折行
-  （`overflow-wrap:anywhere`），常规窗口下无横向滚动。Test 触发 `POST /api/mcp/test`（握手探测），结果行内
-  渲染在该 server 行正下方（ok/fail badge + serverInfo/延迟 + 工具徽章，超 8 个折叠计数）。
-- **Routes** 子标签：routes 表（Name/On/Targets 链/Sessions/Errors/MS），视觉与当前一致。
+  （`overflow-wrap:anywhere`），常规窗口下无横向滚动。**行点击展开详情**
+  （`mcpToggleDetail`，双击守卫 `e.detail > 1`，行内按钮不触发 toggle）：
+  展开态行带选中浅底（与请求表 `req-open` 同一视觉语言），详情行
+  （`mcpServerDetailHTML`）在行正下方原地插入/移除，不重渲染面板；内容分两段——
+  面上数据的配置/流量 meta 条（transport/auth/accounts/endpoint/sessions/calls/errors/
+  avg latency，复用 `req-meta` 组）与 probe 段（ok/fail badge + serverInfo/协议/延迟 +
+  Re-test/Retry）。**tools 列表只在活上游上存在**：首次展开且无缓存 probe 时自动触发
+  一次 `POST /api/mcp/test`（握手探测 initialize + tools/list），结果落地后重渲染时
+  展开态保留（`mcpDetailOpen` 集合）；工具表（pure.js `mcpToolsTableHTML`）按
+  name + description 两列渲染（描述缺失显 `—`，空列表显 not-exposed 提示）。
+  **描述是 markdown**（MCP server 就这样发布），经 pure.js `miniMarkdownHTML`
+  子集渲染——标题/段落/列表（含嵌套）/代码块/引用/粗斜体/行内码/链接；文本先转义
+  再只输出自产标签（第三方描述无法注入标记），链接仅 http(s)；**单换行渲染为
+  `<br>`**（工具描述一行一点，折叠换行正是「长文本堆成一坨」的来源）。Test 按钮
+  点击会自动展开对应详情行（结果就住在详情里）。嵌套 tools 表不继承主表 min-width
+  （styles.css 用直接子选择器钉在主表上）。
+- **Routes** 子标签：routes 表（Name/On/Targets 链/Sessions/Errors/MS）。**与 Servers
+  同一行点击展开机制**（`mcpToggleDetail(name, 'route')`，同一 `mcpDetailOpen` 集合；
+  route 与 server 共享 `/mcp/<name>` 命名空间、不会重名）：详情行（`mcpRouteDetailHTML`）
+  给出流量 meta（enabled/sessions/calls/errors/avg latency）+ **failover 链**（每个
+  target 一组 `target N`：成员 server + 工具数，按 target 顺序）+ probe 段。
+  **路由 probe 是后端聚合**：`POST /api/mcp/test` 接受路由名，后端逐个探测 enabled
+  成员（成员失败则跳过，与活网关的降级一致）并经网关自己的 `MergeCanonicalTools`
+  合并出规范工具面（首 target 胜出、后端缺失的工具丢弃），因此详情里的工具表就是
+  客户端看到的 canonical 名称 + 描述；probe 行显示 `route · N/M targets` 而非 serverInfo。
+  probe 按钮同样住详情里（`mcpRunProbe` 为 Servers/Routes 共用）。
 - **Analytics** 子标签：消费 `GET /api/mcp/analytics`（server 级 `series` + tool 维度
   `tool_series`），UI 契约与 **Analytics 页同款**——同一 `tokenRangePickerHTML` 时间选择器
   （无 Quota Window 预设）、同一 auto 粒度分段钮（`analyticsGranOptions` 跨度 gating、

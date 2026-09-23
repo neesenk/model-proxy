@@ -50,7 +50,7 @@ func (f *fakeMCPServer) handler() http.HandlerFunc {
 			w.WriteHeader(http.StatusAccepted)
 		case "tools/list":
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"search"},{"name":"read"}]}}`))
+			w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"search","description":"Search the web"},{"name":"read"}]}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -88,8 +88,13 @@ func TestProbe_JSONAndSSE(t *testing.T) {
 		if !res.Sessionful {
 			t.Errorf("sse=%v: session not detected", sse)
 		}
-		if len(res.Tools) != 2 || res.Tools[0] != "search" || res.Tools[1] != "read" {
+		if len(res.Tools) != 2 || res.Tools[0].Name != "search" || res.Tools[1].Name != "read" {
 			t.Errorf("sse=%v: tools = %v", sse, res.Tools)
+		}
+		// The spec projection keeps descriptions (the Web detail view pairs
+		// them with names); missing descriptions stay empty, not garbage.
+		if res.Tools[0].Description != "Search the web" || res.Tools[1].Description != "" {
+			t.Errorf("sse=%v: tool descriptions = %q / %q", sse, res.Tools[0].Description, res.Tools[1].Description)
 		}
 		if !fk.sawNotif {
 			t.Errorf("sse=%v: initialized notification not sent", sse)

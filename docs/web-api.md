@@ -194,9 +194,16 @@ MCP 网关（config `mcp:` / `mcp_routes:`，见 `docs/architecture/mcp.md`）�
 
 `POST /api/mcp/test`（body `{"name": "<server>"}`）对该 server 跑一次握手探测（initialize +
 tools/list，streamable 走 HTTP、stdio 本地拉起子进程，凭据用池内首个可用账号），返回
-`{ok, error?, server_name?, server_version?, protocol?, sessionful?, stdio?, tools?, latency_ms}`；
-未知名为 404；路由名不是错误——返回 200 `{ok:false,error}`（提示改测成员 server 或经网关本身调用，聚合面不经此探测）。
-Web MCP tab 的行内 Test 按钮消费此端点。
+`{ok, error?, server_name?, server_version?, protocol?, sessionful?, stdio?, tools?, tool_details?, latency_ms}`；
+`tools` 是纯工具名列表，`tool_details` 是同序的 `[{name, description?}]` 投影（tools/list 的
+工具名 + 描述，无 schema；描述缺失的条目只携带 name）。
+**路由名同样接受**（UI Routes 详情用）：逐个探测该路由 enabled 的成员 server（成员失败
+则跳过，与活网关的降级一致），经网关自己的 `MergeCanonicalTools` 合并出规范工具面
+（首 target 胜出、后端缺失的工具丢弃），返回 `{ok, route:true, server_name:<路由名>,
+route 级 targets_probed, targets_total, tools, tool_details, latency_ms}`（不携带 serverInfo/协议——
+聚合面没有单一后端）；全部成员失败时 `ok:false` + 首个成员错误。未知名为 404；
+CLI `mcp test` 仍只测成员 server（路由是虚拟聚合面）。
+Web MCP tab 的行内 Test 按钮与行点击展开的详情消费此端点。
 
 ### `GET /api/mcp/analytics`
 

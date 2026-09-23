@@ -14,11 +14,11 @@ import (
 // ProbeResult reports one initialize + tools/list exchange against an MCP
 // endpoint — the `mcp test` CLI output and the daemon-free connectivity check.
 type ProbeResult struct {
-	ServerName    string   // serverInfo.name from initialize
-	ServerVersion string   // serverInfo.version
-	Protocol      string   // negotiated protocolVersion
-	Sessionful    bool     // upstream issued an Mcp-Session-Id
-	Tools         []string // tool names from tools/list
+	ServerName    string     // serverInfo.name from initialize
+	ServerVersion string     // serverInfo.version
+	Protocol      string     // negotiated protocolVersion
+	Sessionful    bool       // upstream issued an Mcp-Session-Id
+	Tools         []ToolSpec // tool specs from tools/list (name + description; schema raw)
 	Latency       time.Duration
 }
 
@@ -114,9 +114,7 @@ func Probe(ctx context.Context, client *http.Client, url string, auth func(*http
 	for _, msg := range lmsgs {
 		var v struct {
 			Result *struct {
-				Tools []struct {
-					Name string `json:"name"`
-				} `json:"tools"`
+				Tools []ToolSpec `json:"tools"`
 			} `json:"result"`
 			Error *struct {
 				Message string `json:"message"`
@@ -129,9 +127,7 @@ func Probe(ctx context.Context, client *http.Client, url string, auth func(*http
 			return nil, fmt.Errorf("tools/list: RPC error: %s", v.Error.Message)
 		}
 		if v.Result != nil {
-			for _, t := range v.Result.Tools {
-				res.Tools = append(res.Tools, t.Name)
-			}
+			res.Tools = append(res.Tools, v.Result.Tools...)
 			listOK = true
 			break
 		}

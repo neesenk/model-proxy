@@ -96,7 +96,9 @@ clientInfo 覆盖）。`session_id` 优先取 `request_log.session_headers` 允�
 `model-proxy mcp list`（配置服务器表 + 路由表）与 `model-proxy mcp test <name>`（握手测活：
 initialize + tools/list，经 `internal/mcp.Probe`）为离线诊断，出站走全局代理链
 （与 `test` 相同的维护类调用语义）。`mcp test` 不接受路由名（路由是虚拟聚合面，
-错误信息引导改测成员 server 或经 daemon 探测路由）。契约见 `CLI.md` §13b。
+错误信息引导改测成员 server 或经 daemon 探测路由）；Web 的 `/api/mcp/test` 额外接受
+路由名，按同样规则逐个探测 enabled 成员并经 `MergeCanonicalTools` 合并出规范工具面
+（Routes 详情视图用），CLI 仍保持成员级。契约见 `CLI.md` §13b。
 
 ## 聚合路由（`mcp_routes:`）
 

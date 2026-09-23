@@ -33,6 +33,8 @@
 | 弹层 | `data-popup`+`hidden`；body 级走 app.js `comboInstances` | 日历 / combobox / 下拉 |
 | 时间维度选择器 | pure.js `tokenRangePickerHTML`（`TOKEN_RANGES` 预设 + 双月日历；tr-* 样式）+ 各 tab wiring（Status tokens 区 / Analytics 工具栏 / Accounts Token usage 区块 / MCP Analytics 子标签）；Quota Window 预设跨 provider 语境复用 `quotaWindowFromSec`，provider 语境（Analytics）用 `quotaWindowForProvider` | jstests/pure.test.mjs（tokenRangePickerHTML 开/合两态 + quotaWindowFromSec/quotaWindowForProvider） |
 | 面板内子标签导航 | Status 同款左侧边栏 `.status-layout`/`.status-nav`/`.status-nav-item`（`data-mcp-tab` 驱动） | MCP tab 的 Servers/Routes/Analytics 子标签切换 |
+| MCP server/route 详情（行内展开） | app.js `mcpServerDetailHTML`+`mcpRouteDetailHTML`+`mcpToggleDetail`+`mcpRunProbe`（Servers 与 Routes 行点击原地插删详情行，双击守卫；probe 结果与 tools 表住在详情里），pure.js `mcpToolsTableHTML`，样式 `.mcp-row`/`.mcp-open`/`.mcp-detail-row` | jstests/pure.test.mjs（mcpToolsTableHTML 转义/空描述/空列表/markdown 描述）、uie2e.test.mjs（详情族：展开 + 自动 probe + tools 表） |
+| Markdown 子集渲染 | pure.js `miniMarkdownHTML`（工具描述等第三方 markdown：标题/段落/列表〔含嵌套〕/代码块/引用/粗斜体/行内码/链接；先转义再只输出自产标签，链接仅 http(s)，单换行 `<br>`），样式 `.md-p`/`.md-h`/`.md-ul`/`.md-ol`/`.md-li`/`.md-code`/`.md-pre`/`.md-quote`/`.md-hr`/`.md-a` | jstests/pure.test.mjs（转义/注入/列表嵌套/代码块/链接协议/换行） |
 | 筛选输入清除 | `.clearable`/`.clear-x`，app.js `attachClearable`（契约见 `docs/frontend.md`） | combobox / datalist 筛选输入、带 All 默认项的筛选 select |
 | 目录匹配列表 | `details.cat-match` + pure.js `catalogMatchHTML`/`catalogMatchEditorHTML` + app.js `saveCatalogMatch`（契约见 `docs/frontend.md`） | Status Model Catalog 卡 |
 | 模态 | `<dialog>`（`.live-detail-pop`） | Live 详情 / confirm |

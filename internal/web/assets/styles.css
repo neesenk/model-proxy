@@ -1485,9 +1485,11 @@ input[type="checkbox"] { accent-color: var(--accent); }
    unreadable slivers. */
 .mcp-table.card-body { overflow-x: auto; }
 .mcp-table .table { table-layout: fixed; width: 100%; }
-.mcp-servers-table .table { min-width: 760px; }
-.mcp-routes-table .table { min-width: 700px; }
-.mcp-analytics-table .table { min-width: 600px; }
+/* min-width 钉在直接子表上：Servers 详情行内嵌的 tools 表是后代 .table，
+   不能继承主表的横向几何（760px+ 会撑破固定列单元格）。 */
+.mcp-servers-table > .table { min-width: 760px; }
+.mcp-routes-table > .table { min-width: 700px; }
+.mcp-analytics-table > .table { min-width: 600px; }
 /* Dense 10-column geometry: slightly tighter horizontal padding than the
    default 14px buys ~80px across a Servers row, keeping headers fully visible
    inside the 928px the capped layout leaves beside the sidebar. */
@@ -1496,6 +1498,47 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .mcp-table .table td .badge { white-space: nowrap; }
 .mcp-table .mcp-clip { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mcp-table .mcp-wrap { white-space: normal; overflow-wrap: anywhere; }
+/* Servers/Routes 行点击展开的详情：行是点击入口（cursor + 展开态选中浅底，与请求表
+   req-open 同一视觉语言），详情单元格沿用请求详情行的 surface。嵌套 tools 表
+   复用 .mcp-table .table 的固定布局与紧凑 padding，只补自身间距。 */
+.mcp-table > .table tbody tr.mcp-row { cursor: pointer; }
+.mcp-table > .table tbody tr.mcp-row.mcp-open > td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.mcp-detail-row > td { background: var(--surface-2); }
+.mcp-probe-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0 2px; }
+.mcp-tools-table { margin-top: 6px; }
+.mcp-tools-table th, .mcp-tools-table td { vertical-align: top; }
+/* 工具描述的 markdown 子集渲染（pure.js miniMarkdownHTML）：第三方 MCP 描述
+   是 markdown，纯文本展示会把换行/列表/粗体压成一坨。文本已转义、只输出自产
+   标签；块级元素自带紧凑间距，行内 code 用 surface-3 底。 */
+.md-p { margin: 0 0 6px; }
+.md-p:last-child { margin-bottom: 0; }
+.md-h { font-weight: 600; margin: 8px 0 4px; }
+.md-h:first-child { margin-top: 0; }
+.md-h[data-lvl="1"] { font-size: 0.9375rem; }
+.md-h[data-lvl="2"] { font-size: 0.875rem; }
+.md-h[data-lvl="3"], .md-h[data-lvl="4"], .md-h[data-lvl="5"], .md-h[data-lvl="6"] { font-size: 0.8125rem; }
+.md-ul, .md-ol { margin: 0 0 6px; padding-left: 1.25rem; }
+.md-li { margin: 1px 0; }
+.md-code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  background: var(--surface-3);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+.md-pre {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  background: var(--surface-3);
+  border-radius: var(--r-control);
+  padding: 6px 8px;
+  margin: 0 0 6px;
+  overflow-x: auto;
+}
+.md-pre code { font-family: inherit; background: none; padding: 0; }
+.md-quote { margin: 0 0 6px; padding-left: 8px; border-left: 2px solid var(--border); color: var(--muted); }
+.md-hr { border: 0; border-top: 1px solid var(--border); margin: 8px 0; }
+.md-a { color: var(--accent-ink); }
 @media (max-width: 720px) {
   .status-layout, .req-layout { grid-template-columns: 1fr; }
   .status-nav, .req-nav {
@@ -1904,9 +1947,9 @@ dialog.tk-fixed .modal-body { max-height: calc(100vh - 150px); }
   #req-table .table, #live-table .table, #live-session-panel .table { min-width: 720px; }
   /* The MCP tables keep their realistic floors so they remain readable on
      narrow viewports; the card-body scrolls them horizontally. */
-  .mcp-servers-table .table { min-width: 1050px; }
-  .mcp-routes-table .table { min-width: 750px; }
-  .mcp-analytics-table .table { min-width: 700px; }
+  .mcp-servers-table > .table { min-width: 1050px; }
+  .mcp-routes-table > .table { min-width: 750px; }
+  .mcp-analytics-table > .table { min-width: 700px; }
   .sess-sticky { position: static; margin: 0; padding: 0; border-bottom: none; }
   /* The dashboard KPI row pins 6 columns on desktop; at phone widths each
      cell would collapse to ~55px. Two columns keep the numbers readable. */

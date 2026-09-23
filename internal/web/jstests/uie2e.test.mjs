@@ -1835,3 +1835,137 @@ test('MCP Analytics 子标签在面板重建(Test/Refresh)后切回仍有内容 
     await ctx.ev(`window.fetch = window.__origFetch2; delete window.__origFetch2;`);
   }
 });
+
+// Servers 行点击展开详情的行为流：行点击原地插详情行并自动跑一次 probe
+// （tools 只在活上游上存在）；probe 落地后 tools 表按 name + description
+// 渲染（描述缺失显 —）；再点折叠；行内 Test 按钮点击自动展开对应详情。
+test('MCP Servers 行点击展开详情：自动 probe + tools 表 + Test 自动展开 (详情族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  const mcpBody = JSON.stringify({
+    servers: [
+      { name: 'det-http', enabled: true, transport: 'streamable', auth: 'provider', provider: 'zhipu', accounts: 2, url: 'https://mcp.example/mcp', sessions: 3, calls: 12, errors: 1, avg_latency_ms: 240 },
+      { name: 'det-err', enabled: true, transport: 'stdio', command: 'fake-mcp --stdio', sessions: 0, calls: 0, errors: 0, avg_latency_ms: 0 },
+    ],
+    routes: [
+      { name: 'det-route', enabled: true, targets: [{ server: 'det-http', tools: 1 }, { server: 'det-err', tools: 1 }], sessions: 1, calls: 4, errors: 0, avg_latency_ms: 120 },
+    ],
+  });
+  const probeOK = JSON.stringify({
+    ok: true, server_name: 'det-srv', server_version: '1.2', protocol: '2025-03-26', sessionful: true,
+    tools: ['web_search', 'read_page'],
+    tool_details: [
+      { name: 'web_search', description: '**Search** the web\n\n- fast\n- cheap' },
+      { name: 'read_page' },
+    ],
+    latency_ms: 42,
+  });
+  const routeProbeOK = JSON.stringify({
+    ok: true, route: true, server_name: 'det-route', targets_probed: 2, targets_total: 2,
+    tools: ['web_search'],
+    tool_details: [{ name: 'web_search', description: '**Merged** search' }],
+    latency_ms: 88,
+  });
+  await ctx.ev(`(() => {
+    window.__origFetch3 = window.fetch;
+    window.fetch = (url, ...rest) => {
+      const u = String(url);
+      if (u.endsWith('/api/mcp')) {
+        return Promise.resolve(new Response(${JSON.stringify(mcpBody)}, { headers: { 'content-type': 'application/json' } }));
+      }
+      if (u.endsWith('/api/mcp/test')) {
+        window.__mcpProbeCalls = (window.__mcpProbeCalls || 0) + 1;
+        const body = (rest[0] && rest[0].body) ? String(rest[0].body) : '';
+        const payload = body.includes('det-route') ? ${JSON.stringify(routeProbeOK)} : ${JSON.stringify(probeOK)};
+        return Promise.resolve(new Response(payload, { headers: { 'content-type': 'application/json' } }));
+      }
+      return window.__origFetch3(url, ...rest);
+    };
+  })()`);
+  try {
+    await ctx.ev(`localStorage.removeItem('mcp-tab')`);
+    await ctx.ev(`document.querySelector('[data-tab="mcp"]').click()`);
+    await ctx.waitFor('mcp sub-tab buttons mounted', () => ctx.ev(
+      `!!document.querySelector('button[data-mcp-tab="servers"]')`), 8000);
+    await ctx.ev(`document.querySelector('button[data-mcp-tab="servers"]').click()`);
+    await ctx.waitFor('servers view visible', () => ctx.ev(
+      `!document.getElementById('mcp-servers-view').hidden`), 8000);
+    await ctx.waitFor('two server rows', () => ctx.ev(
+      `document.querySelectorAll('#mcp-servers-view tr.mcp-row').length === 2`), 8000);
+    // --- 行点击展开：详情行紧随其后，自动触发 probe ---
+    await ctx.ev(`document.querySelector('tr.mcp-row[data-mcp-server="det-http"]').click()`);
+    await ctx.waitFor('detail row open + probe auto-fired', () => ctx.ev(`(() => {
+      const tr = document.querySelector('tr.mcp-row[data-mcp-server="det-http"]');
+      if (!tr.classList.contains('mcp-open')) return false;
+      const det = tr.nextElementSibling;
+      if (!det || !det.classList.contains('mcp-detail-row')) return false;
+      return (window.__mcpProbeCalls || 0) >= 1;
+    })()`), 8000);
+    // probe 落地后 tools 表渲染：name + **markdown 描述**（粗体/列表结构化，
+    // 而不是一坨纯文本）。行选择器必须 :scope 限定——tools 表嵌在 servers
+    // 表的 tbody 里，裸 'tbody tr' 会把 tools 表自己的 thead 行也算进来
+    // （thead 行同样是外层 tbody 的后代）。
+    await ctx.waitFor('tools table rendered with markdown descriptions', () => ctx.ev(`(() => {
+      const table = document.querySelector('.mcp-detail-row .mcp-tools-table');
+      if (!table) return false;
+      const rows = table.querySelectorAll(':scope > tbody > tr');
+      if (rows.length !== 2) return false;
+      const desc = rows[0].cells[1];
+      return rows[0].cells[0].textContent === 'web_search'
+        && !!desc.querySelector('strong')
+        && desc.querySelectorAll('li').length === 2
+        && rows[1].cells[1].textContent === '—';
+    })()`), 8000);
+    // 详情首段是面上数据的 meta 条：transport/auth/endpoint/sessions/calls/
+    // errors/avg latency（有流量的 server 全组在场）。
+    assert.equal(await ctx.ev(`(() => {
+      const det = document.querySelector('tr.mcp-row[data-mcp-server="det-http"]').nextElementSibling;
+      return [...det.querySelectorAll('.req-meta .req-meta-k')].map((e) => e.textContent).join(',');
+    })()`), 'transport,auth,endpoint,sessions,calls,errors,avg latency');
+    // --- 再点折叠：详情行移除，行回到非展开态 ---
+    await ctx.ev(`document.querySelector('tr.mcp-row[data-mcp-server="det-http"]').click()`);
+    await ctx.waitFor('detail row closed', () => ctx.ev(`(() => {
+      const tr = document.querySelector('tr.mcp-row[data-mcp-server="det-http"]');
+      if (tr.classList.contains('mcp-open')) return false;
+      const det = tr.nextElementSibling;
+      return !det || !det.classList.contains('mcp-detail-row');
+    })()`), 8000);
+    // --- 行内 Test 按钮点击自动展开对应详情（结果就住在详情里） ---
+    await ctx.ev(`document.querySelector('tr.mcp-row[data-mcp-server="det-err"] [data-mcp-test]').click()`);
+    await ctx.waitFor('test button auto-opens detail with result', () => ctx.ev(`(() => {
+      const tr = document.querySelector('tr.mcp-row[data-mcp-server="det-err"]');
+      if (!tr.classList.contains('mcp-open')) return false;
+      const det = tr.nextElementSibling;
+      return !!det && !!det.classList.contains('mcp-detail-row') && !!det.querySelector('.mcp-tools-table');
+    })()`), 8000);
+    // --- Routes 行同一机制：展开 → 自动聚合 probe → 规范工具表 ---
+    await ctx.ev(`document.querySelector('button[data-mcp-tab="routes"]').click()`);
+    await ctx.waitFor('routes view visible', () => ctx.ev(
+      `!document.getElementById('mcp-routes-view').hidden`), 8000);
+    await ctx.ev(`document.querySelector('tr.mcp-row[data-mcp-route="det-route"]').click()`);
+    await ctx.waitFor('route detail open + aggregated probe landed', () => ctx.ev(`(() => {
+      const tr = document.querySelector('tr.mcp-row[data-mcp-route="det-route"]');
+      if (!tr.classList.contains('mcp-open')) return false;
+      const det = tr.nextElementSibling;
+      if (!det || !det.classList.contains('mcp-detail-row')) return false;
+      const table = det.querySelector('.mcp-tools-table');
+      if (!table) return false;
+      const rows = table.querySelectorAll(':scope > tbody > tr');
+      return rows.length === 1
+        && rows[0].cells[0].textContent === 'web_search'
+        && !!rows[0].cells[1].querySelector('strong');
+    })()`), 8000);
+    // 详情 meta 带 failover 链（每 target 一组，按 target 顺序）。
+    assert.equal(await ctx.ev(`(() => {
+      const det = document.querySelector('tr.mcp-row[data-mcp-route="det-route"]').nextElementSibling;
+      return [...det.querySelectorAll('.req-meta .req-meta-k')].map((e) => e.textContent).join(',');
+    })()`), 'enabled,sessions,calls,errors,avg latency,target 1,target 2');
+    // probe 行归 route 语义：聚合进度而非 serverInfo。
+    assert.match(await ctx.ev(`(() => {
+      const det = document.querySelector('tr.mcp-row[data-mcp-route="det-route"]').nextElementSibling;
+      return det.querySelector('.mcp-probe-head').textContent;
+    })()`), /route · 2\/2 targets/);
+    assert.deepEqual(await ctx.pageErrors(), [], '详情交互不得有 JS 错误');
+  } finally {
+    await ctx.ev(`window.fetch = window.__origFetch3; delete window.__origFetch3; delete window.__mcpProbeCalls;`);
+  }
+});

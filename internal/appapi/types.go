@@ -1002,8 +1002,9 @@ type CommandAPI interface {
 	RefreshModels(ctx context.Context, provider string) (ModelsRefreshResult, error)
 	// ProbeMCP runs the MCP handshake (initialize + tools/list) against one
 	// mcp: server through its configured credentials — the daemon twin of
-	// `model-proxy mcp test <name>`. Route names are rejected (aggregated
-	// surfaces are probed through the gateway, not here).
+	// `model-proxy mcp test <name>`. A route name aggregates the route's
+	// enabled member servers through the gateway's canonical merge (the Web
+	// Routes detail view); the CLI twin stays member-only.
 	ProbeMCP(ctx context.Context, name string) (MCPProbeResult, error)
 	// RunTakeover is the daemon twin of `model-proxy takeover [client]
 	// [--mode]` (client "" / "all" = batch; mode "" = unified — the Web has
@@ -1035,19 +1036,33 @@ type CommandAPI interface {
 	PullModelsCatalog(ctx context.Context) (ModelsCatalogPull, error)
 }
 
-// MCPProbeResult is one mcp: server handshake outcome (the /api/mcp/test
-// response). OK=false carries Error; tool names only (no schemas, no
-// credentials anywhere).
+// MCPProbeResult is one mcp: server (or aggregated route) handshake outcome
+// (the /api/mcp/test response). OK=false carries Error; `tools` is the plain
+// name list, while `tool_details` pairs each name with its description (no
+// schemas, no credentials anywhere). Route probes set Route and report the
+// aggregated canonical surface: ServerName is the route name,
+// TargetsProbed/TargetsTotal count the enabled members that answered.
 type MCPProbeResult struct {
-	OK            bool     `json:"ok"`
-	Error         string   `json:"error,omitempty"`
-	ServerName    string   `json:"server_name,omitempty"`
-	ServerVersion string   `json:"server_version,omitempty"`
-	Protocol      string   `json:"protocol,omitempty"`
-	Sessionful    bool     `json:"sessionful,omitempty"`
-	Stdio         bool     `json:"stdio,omitempty"`
-	Tools         []string `json:"tools,omitempty"`
-	LatencyMs     int64    `json:"latency_ms"`
+	OK            bool            `json:"ok"`
+	Error         string          `json:"error,omitempty"`
+	Route         bool            `json:"route,omitempty"`
+	ServerName    string          `json:"server_name,omitempty"`
+	ServerVersion string          `json:"server_version,omitempty"`
+	Protocol      string          `json:"protocol,omitempty"`
+	Sessionful    bool            `json:"sessionful,omitempty"`
+	Stdio         bool            `json:"stdio,omitempty"`
+	TargetsProbed int             `json:"targets_probed,omitempty"`
+	TargetsTotal  int             `json:"targets_total,omitempty"`
+	Tools         []string        `json:"tools,omitempty"`
+	ToolDetails   []MCPToolDetail `json:"tool_details,omitempty"`
+	LatencyMs     int64           `json:"latency_ms"`
+}
+
+// MCPToolDetail is one tools/list entry projected for the Web UI: name +
+// description only.
+type MCPToolDetail struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
 }
 
 // RequirePorts validates that both application ports are present. It is

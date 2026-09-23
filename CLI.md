@@ -920,7 +920,7 @@ notifications/initialized + tools/list，JSON 与 SSE 分帧响应都支持）�
 
 ### `mcp test <name>` stdout
 
-成功：`✓ <name> → <serverInfo.name> <version> (<protocol>, sessionful|stateless|stdio)[ via <account>] — N tools (<latency>)`（绿）+ 缩进工具名列表（超过 12 个折叠为 `… and N more`）。provider 型服务器用池内第一个可用账号注入凭据（`auth_header` 自定义头经 `provider.KeyReporter` 取原始 key）；`auth: none` 不注入、不显示 `via`。`transport: stdio` 服务器在**本地拉起子进程**探测（env 解析与 daemon 相同：
+成功：`✓ <name> → <serverInfo.name> <version> (<protocol>, sessionful|stateless|stdio)[ via <account>] — N tools (<latency>)`（绿）+ 缩进工具名列表（超过 12 个折叠为 `… and N more`；带 description 的工具另起一行缩进显示描述）。provider 型服务器用池内第一个可用账号注入凭据（`auth_header` 自定义头经 `provider.KeyReporter` 取原始 key）；`auth: none` 不注入、不显示 `via`。`transport: stdio` 服务器在**本地拉起子进程**探测（env 解析与 daemon 相同：
 `${account.api_key}`/`env:VAR`），结果显示 `stdio` 标记。
 <name> 为路由名时不执行：stderr 提示路由是聚合面，引导改测成员 server 或经 daemon 的 `/mcp/<route>` 探测（exit 1）。
 

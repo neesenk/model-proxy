@@ -46,6 +46,7 @@ takeoverRunSummary, takeoverRestoreSummary, takeoverVariantLabel,
   MCP_ANALYTICS_METRICS, mcpAnalyticsFilterSeries, mcpAnalyticsToolFilter, mcpAnalyticsSummaryGroups,
   mcpAnalyticsChartSeries, mcpAnalyticsMetricOptions, mcpAnalyticsPointValue, mcpAnalyticsValueText,
   mcpAnalyticsSummaryTableHTML, mcpAnalyticsEmptyHTML, mcpAnalyticsSkeletonHTML,
+  mcpToolsTableHTML, miniMarkdownHTML,
   VALID_MCP_SUB_TABS, mcpSubTabFromHash, mcpHash,
 } from '../assets/pure.js';
 
@@ -3548,6 +3549,77 @@ test('mcpAnalyticsSummaryTableHTML returns empty for empty groups', () => {
 test('mcpAnalyticsEmptyHTML and mcpAnalyticsSkeletonHTML are hint placeholders', () => {
   assert.ok(mcpAnalyticsEmptyHTML().includes('No MCP calls'));
   assert.ok(mcpAnalyticsSkeletonHTML().includes('loading'));
+});
+
+test('mcpToolsTableHTML renders name/description rows with escaping', () => {
+  const html = mcpToolsTableHTML([
+    { name: 'web_search', description: 'Search the <web> & return results' },
+    { name: 'read' },
+  ]);
+  assert.match(html, /<table class="table mcp-tools-table">/);
+  assert.match(html, /<colgroup>/);
+  assert.match(html, /<th>Tool<\/th><th>Description<\/th>/);
+  assert.match(html, /<td class="mcp-wrap">web_search<\/td>/);
+  // Descriptions go through the markdown subset renderer, but the text is
+  // still escaped — never markup.
+  assert.match(html, /<p class="md-p">Search the &lt;web&gt; &amp; return results<\/p>/);
+  assert.ok(!html.includes('<web>'));
+  // A missing description keeps the row with an em dash, not an empty cell.
+  assert.match(html, /<td class="mcp-wrap">read<\/td><td class="mcp-wrap"><span class="hint">—<\/span><\/td>/);
+});
+
+test('mcpToolsTableHTML renders markdown descriptions (not one clumped line)', () => {
+  const html = mcpToolsTableHTML([
+    { name: 'search', description: 'Find things.\n\n**Tips:**\n- first\n- second' },
+  ]);
+  assert.match(html, /<p class="md-p">Find things\.<\/p>/);
+  assert.match(html, /<p class="md-p"><strong>Tips:<\/strong><\/p>/);
+  assert.match(html, /<ul class="md-ul"><li class="md-li">first<\/li><li class="md-li">second<\/li><\/ul>/);
+});
+
+test('miniMarkdownHTML escapes HTML and renders the description subset', () => {
+  const html = miniMarkdownHTML([
+    'Find real-world examples.',
+    '',
+    '**Bold lead:**',
+    '- ✅ Good: `useState(`',
+    '- ❌ Bad: react tutorial',
+    '',
+    'See [docs](https://example.com/a?b=1&c=2).',
+  ].join('\n'));
+  assert.match(html, /<p class="md-p">Find real-world examples\.<\/p>/);
+  assert.match(html, /<p class="md-p"><strong>Bold lead:<\/strong><\/p>/);
+  assert.match(html, /<ul class="md-ul"><li class="md-li">✅ Good: <code class="md-code">useState\(<\/code><\/li><li class="md-li">❌ Bad: react tutorial<\/li><\/ul>/);
+  assert.match(html, /href="https:\/\/example\.com\/a\?b=1&amp;c=2"/);
+  assert.match(html, /target="_blank" rel="noopener noreferrer"/);
+  // The generated target="_blank" underscore must not be re-parsed as emphasis.
+  assert.ok(!html.includes('<em>blank'));
+  // Untrusted text can never inject markup.
+  assert.ok(!miniMarkdownHTML('<script>alert(1)</script>').includes('<script>'));
+  // Non-http(s) links stay literal text.
+  assert.ok(!miniMarkdownHTML('[x](javascript:alert(1))').includes('<a '));
+  // Empty input renders nothing (the caller supplies its own hint).
+  assert.equal(miniMarkdownHTML(''), '');
+  assert.equal(miniMarkdownHTML(null), '');
+});
+
+test('miniMarkdownHTML keeps line structure and fenced code intact', () => {
+  const html = miniMarkdownHTML('line one\nline two\n\n```\na < b\n```\n');
+  // A single newline inside a paragraph is a hard break — descriptions use one
+  // line per point, and collapsing them is the "clumped blob" failure.
+  assert.match(html, /<p class="md-p">line one<br>line two<\/p>/);
+  assert.match(html, /<pre class="md-pre"><code>a &lt; b<\/code><\/pre>/);
+});
+
+test('miniMarkdownHTML nests sub-lists inside their parent item', () => {
+  const html = miniMarkdownHTML('- a\n  - a1\n- b');
+  assert.match(html, /<ul class="md-ul"><li class="md-li">a<ul class="md-ul"><li class="md-li">a1<\/li><\/ul><\/li><li class="md-li">b<\/li><\/ul>/);
+});
+
+test('mcpToolsTableHTML renders the not-exposed hint for empty lists', () => {
+  assert.match(mcpToolsTableHTML([]), /no tools exposed/);
+  assert.match(mcpToolsTableHTML(null), /no tools exposed/);
+  assert.ok(!mcpToolsTableHTML([]).includes('<table'));
 });
 
 // ---------- MCP tab hash helpers ----------

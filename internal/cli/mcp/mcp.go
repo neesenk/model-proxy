@@ -147,7 +147,10 @@ func cmdTest(cfg *configdomain.Config, name string) {
 			fmt.Printf("  … and %d more\n", len(res.Tools)-maxShow)
 			break
 		}
-		fmt.Printf("  - %s\n", tool)
+		fmt.Printf("  - %s\n", tool.Name)
+		if tool.Description != "" {
+			fmt.Printf("      %s\n", tool.Description)
+		}
 	}
 }
 

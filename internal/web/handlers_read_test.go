@@ -1918,7 +1918,8 @@ func TestHandleMCPTest(t *testing.T) {
 	s := newReadServerWithCommands(t, &readAPIStub{}, &commandFake{
 		probeMCP: func(_ context.Context, name string) (appapi.MCPProbeResult, error) {
 			gotName = name
-			return appapi.MCPProbeResult{OK: true, ServerName: "fake-mcp", Protocol: "2025-03-26", Tools: []string{"search", "read"}, LatencyMs: 42}, nil
+			return appapi.MCPProbeResult{OK: true, ServerName: "fake-mcp", Protocol: "2025-03-26", Tools: []string{"search", "read"},
+				ToolDetails: []appapi.MCPToolDetail{{Name: "search", Description: "Search the web"}, {Name: "read"}}, LatencyMs: 42}, nil
 		},
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/mcp/test", strings.NewReader(`{"name":"zhipu-search"}`))
@@ -1936,6 +1937,11 @@ func TestHandleMCPTest(t *testing.T) {
 	}
 	if !out.OK || len(out.Tools) != 2 || out.LatencyMs != 42 {
 		t.Fatalf("probe result = %+v", out)
+	}
+	// tool_details is the detail-view projection: same order as tools, name +
+	// description pairs, empty descriptions preserved as entries.
+	if len(out.ToolDetails) != 2 || out.ToolDetails[0].Name != "search" || out.ToolDetails[0].Description != "Search the web" || out.ToolDetails[1].Description != "" {
+		t.Fatalf("tool details = %+v", out.ToolDetails)
 	}
 	// Missing name → 400.
 	req = httptest.NewRequest(http.MethodPost, "/api/mcp/test", strings.NewReader(`{}`))
