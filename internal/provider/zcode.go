@@ -2,6 +2,7 @@ package provider
 
 import (
 	crand "crypto/rand"
+	"crypto/sha256"
 	"fmt"
 	"model-proxy/internal/display"
 	"net/http"
@@ -11,33 +12,63 @@ import (
 	"sync"
 )
 
-// zcodeAppVersion is the ZCode desktop version whose client fingerprint this
-// provider reproduces. Re-probed from /Applications/ZCode.app v3.11.2
-// (2026-09-04 update; the 2026-07-20 spec probed 3.3.6 — same fingerprint
-// schema, plus the new X-ZCode-Agent header).
-const zcodeAppVersion = "3.11.2"
+// zcodeAppVersion is the ZCode client version whose fingerprint this provider
+// reproduces. ZCode was open-sourced on 2026-09-21 (github.com/zai-org/ZCode,
+// Apache-2.0, root package.json version = 3.14.0), so this is now source
+// verified instead of reverse-engineered. Cross-checked against:
+//   - packages/shared/src/zcode-source-headers.ts (base fingerprint builder)
+//   - apps/zcode-cli/packages/bootstrap/src/model-config.ts (CLI chat path:
+//     X-ZCode-Agent: glm + sourceTitle cli/electron)
+//   - apps/zcode-cli/packages/bootstrap/src/runtime-platform-headers.ts
+//     (X-Platform / X-Os-Category / X-Os-Version)
+//   - apps/zcode-cli/packages/adapters/src/model/runner-attribution.ts
+//     (x-request-id / x-session-id / x-query-id / x-zcode-trace-id /
+//     x-zcode-session-type)
+//
+// plus the 2026-09-11 mitmproxy capture of ZCode 3.11.2 (see
+// docs/backend-contracts.md "zcode 契约").
+const zcodeAppVersion = "3.14.0"
 
-// zcodeUserAgentSuffix is what the ZCode agent engine (glm/zcode.cjs, Vercel
-// AI SDK provider-utils) appends to User-Agent on chat-path requests.
-// Packet captures (2026-09-11): the DESKTOP engine sends
-// "ZCode/3.11.2 ai-sdk/provider-utils/4.0.27 runtime/node.js/24" (Electron 41
-// → node 24); the standalone CLI bundle sends the same prefix with
-// "runtime/node.js/22". We impersonate the desktop, hence node.js/24.
-const zcodeUserAgentSuffix = "ai-sdk/provider-utils/4.0.27 runtime/node.js/24"
+// AI-SDK User-Agent segments, in the order the SDKs append them:
+// @ai-sdk/anthropic@3.0.81 appends its own segment when createAnthropic builds
+// the provider (getHeaders → withUserAgentSuffix), then provider-utils appends
+// its segment plus the runtime tag when the request is issued. Node >= 21.1
+// (the CLI engine requires node >= 24) resolves the runtime via
+// navigator.userAgent, yielding "runtime/node.js/<major>" — which is exactly
+// what the 2026-09-11 capture recorded ("runtime/node.js/24"). The 3.11.2
+// capture predates @ai-sdk/anthropic v3 and lacks the ai-sdk/anthropic
+// segment; the open-sourced 3.14.0 code path emits it, so we match the source.
+const (
+	zcodeAnthropicSdkSuffix = "ai-sdk/anthropic/3.0.81"
+	zcodeUserAgentSuffix    = "ai-sdk/provider-utils/4.0.27 runtime/node.js/24"
+)
+
+// zcodeSourceTitle is ZCode's sourceTitle for the standalone CLI engine
+// (model-config.ts detectDefaultProviderSourceTitle: argv without
+// app-server/agent-server → "cli"; the desktop's agent-server → "electron").
+// The apikey Coding-Plan path this provider simulates is the CLI's built-in
+// bigmodel-api template (access: zhipu-coding-plan-api-key, baseUrl
+// open.bigmodel.cn/api/anthropic), so we impersonate the CLI, not the desktop
+// (the desktop agent-server carries the OAuth/JWT subscription path instead).
+const zcodeSourceTitle = "cli"
 
 // ZCodeProvider forwards to Zhipu BigModel's Anthropic endpoint presenting the
-// ZCode desktop client fingerprint, so a Coding Plan API key gets the plan's
-// quota treatment (0.67 consumption coefficient + official-client priority).
+// ZCode CLI client fingerprint (sourceTitle "cli"), so a Coding Plan API key
+// gets the plan's quota treatment (0.67 consumption coefficient +
+// official-client priority).
 //
 // It mirrors ZhipuProvider — same BigModel backend, same quota envelope — but
-// differs in two ways grounded in live probes of ZCode 3.3.6 and 3.11.2:
-//   - AuthHeaders sends BOTH Authorization: Bearer and x-api-key (ZCode sends
-//     both in both versions; zhipu sends Bearer and deletes x-api-key).
-//   - ExtraHeaders sets anthropic-version + the ZCode fingerprint, including
-//     3.11.2's new X-ZCode-Agent: glm header (sent unconditionally on the
-//     main chat path; see buildZCodeSourceHeadersFromContext callers).
+// differs in two ways, both source-verified against the open-sourced ZCode
+// 3.14.0 (github.com/zai-org/ZCode):
+//   - AuthHeaders sends BOTH Authorization: Bearer and x-api-key
+//     (model-execution.ts: createAnthropic sends x-api-key,
+//     withAnthropicAuthorizationHeader adds Bearer; zhipu sends Bearer and
+//     deletes x-api-key).
+//   - ExtraHeaders sets anthropic-version + the ZCode fingerprint
+//     (zcode-source-headers.ts + model-config.ts + runner-attribution.ts),
+//     including the request-attribution id headers.
 //
-// See docs/superpowers/specs/2026-07-20-zcode-provider-design.md.
+// See docs/backend-contracts.md "zcode 契约" for the full source cross-check.
 type ZCodeProvider struct {
 	*ApiKeyBase
 	baseProbe
@@ -45,7 +76,7 @@ type ZCodeProvider struct {
 	providerName string
 
 	sessionMu sync.Mutex
-	sessionID string // stable per-process UUID for X-Session-Id (lazy init)
+	sessionID string // fallback X-Session-Id when the client sends no session hint (lazy init)
 }
 
 func init() {
@@ -59,10 +90,11 @@ func init() {
 }
 
 // AuthHeaders injects the Coding Plan API key as BOTH Authorization: Bearer and
-// x-api-key — ZCode sends both in 3.3.6 and 3.11.2
-// (buildAnthropicConnectivityAuthHeaders, probed from the desktop binary; both
-// branches return the same pair). This diverges from zhipu, which sends Bearer
-// and deletes x-api-key.
+// x-api-key. Source-verified in the open-sourced ZCode 3.14.0
+// (model-execution.ts): createAnthropic's apiKey makes the AI SDK send
+// x-api-key, and withAnthropicAuthorizationHeader adds the Bearer header when
+// none is configured — the same pair the 3.3.6/3.11.2 bundles sent. This
+// diverges from zhipu, which sends Bearer and deletes x-api-key.
 func (p *ZCodeProvider) AuthHeaders(req *http.Request) error {
 	key, err := p.LoadKey()
 	if err != nil {
@@ -100,36 +132,45 @@ func (p *ZCodeProvider) ProbeRequest(modelID string) ProbeRequest {
 	}
 }
 
-// ExtraHeaders sets anthropic-version + the ZCode client fingerprint (probed
-// from ZCode 3.11.2 buildZCodeSourceHeadersFromContext + the main chat path,
-// which always appends X-ZCode-Agent: glm, and packet-captured 2026-09-11 —
-// see docs/backend-contracts.md "zcode 契约"). It runs last in the forward path
-// (after the client-UA whitelist copy and prov.Headers), so it overrides the
-// client's forwarded User-Agent. X-Title uses sourceTitle "electron" (ZCode's
-// desktop processes; its CLI sends "Z Code@cli" instead). X-Device-Mid is
-// omitted (ZCode only sends it when telemetry-state.json has a deviceMid; see
-// spec §3.2 / §9).
+// ExtraHeaders sets anthropic-version + the ZCode client fingerprint. Every
+// value is source-verified against the open-sourced ZCode 3.14.0:
+//   - zcode-source-headers.ts (buildZCodeSourceHeadersFromContext): the
+//     header set + printable-ASCII normalization + "unknown" fallbacks +
+//     osCategory mapping + X-Device-Mid only when telemetry-state.json has one.
+//   - model-config.ts (buildCliZCodeSourceHeaders, the CLI chat path):
+//     X-ZCode-Agent: glm + X-Title "Z Code@<sourceTitle>" + release channel.
+//   - runtime-platform-headers.ts: X-Platform / X-Os-Category / X-Os-Version.
+//   - runner-attribution.ts (createModelRequestAttributionHeaders): the
+//     per-request attribution id headers.
+//   - model-execution.ts: the AI SDK supplies anthropic-version 2023-06-01 and
+//     the x-api-key/Authorization dual write (see AuthHeaders).
+//
+// It runs last in the forward path (after the client-UA whitelist copy and
+// prov.Headers), so it overrides the client's forwarded User-Agent.
+// X-Device-Mid is omitted (ZCode only sends it when telemetry-state.json has a
+// deviceMid).
 func (p *ZCodeProvider) ExtraHeaders(req *http.Request, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
-	// Packet capture 2026-09-11: the chat path's UA is the ZCode UA plus the AI
-	// SDK's runtime suffix (provider-utils appends " ai-sdk/… runtime/…"), NOT
-	// the bare "ZCode/<ver>" of the connectivity probe. runtime/node.js/24
-	// matches ZCode 3.11.2's Electron 41 node runtime (desktop capture; the
-	// standalone CLI bundle sends node.js/22).
-	req.Header.Set("User-Agent", "ZCode/"+zcodeAppVersion+" "+zcodeUserAgentSuffix)
+	// Chat-path UA: "ZCode/<ver>" + the two AI-SDK segments, in append order.
+	req.Header.Set("User-Agent", "ZCode/"+zcodeAppVersion+" "+zcodeAnthropicSdkSuffix+" "+zcodeUserAgentSuffix)
 	req.Header.Set("HTTP-Referer", "https://zcode.z.ai")
-	req.Header.Set("X-Title", "Z Code@electron")
+	req.Header.Set("X-Title", "Z Code@"+zcodeSourceTitle)
 	req.Header.Set("X-ZCode-App-Version", zcodeAppVersion)
-	// New in 3.11.2: the main chat path appends this unconditionally
-	// (zcode.cjs x4i: GPt({...csn(...), "X-ZCode-Agent":"glm"}, r)).
 	req.Header.Set("X-ZCode-Agent", "glm")
-	// Packet capture 2026-09-11: every desktop request carries a per-request
-	// X-Request-Id and a per-session X-Session-Id UUID (withRequestIdHeader +
-	// session scope). Synthetic v4 UUIDs reproduce the shape; the values are
-	// ours. X-Session-Id is stable per proxy process (closest analogue of the
-	// app's per-session id); it is NOT reset on key Refresh.
+	// Attribution ids (runner-attribution.ts): x-request-id is a fresh v4 UUID
+	// per model call (and per retry attempt — createAttemptStatusContext);
+	// x-zcode-session-type is a derived enum the Coding Plan server uses to
+	// tell main/subagent/other traffic apart (we forward main-agent traffic);
+	// x-zcode-trace-id is a fresh v4 UUID per trace. x-query-id and x-session-id
+	// are keyed off the client's own interaction/session ids when present so
+	// distinct conversations stay distinct on the wire — the real CLI mints
+	// these itself (query_<uuid>/sess_<uuid>) and strips the internal prefixes
+	// before sending, so the wire values are bare UUIDs either way.
 	req.Header.Set("X-Request-Id", newZCodeUUID())
-	req.Header.Set("X-Session-Id", p.zcodeSessionID())
+	req.Header.Set("X-ZCode-Session-Type", "main")
+	req.Header.Set("X-ZCode-Trace-Id", newZCodeUUID())
+	req.Header.Set("X-Query-Id", zcodeQueryID(req))
+	req.Header.Set("X-Session-Id", p.zcodeSessionID(req))
 	req.Header.Set("X-Platform", nodePlatform(runtime.GOOS)+"-"+nodeArch(runtime.GOARCH))
 	req.Header.Set("X-Release-Channel", "production")
 	req.Header.Set("X-Client-Language", resolveClientLanguage())
@@ -182,14 +223,56 @@ func newZCodeUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// zcodeSessionID lazily mints the stable per-process X-Session-Id value.
-func (p *ZCodeProvider) zcodeSessionID() string {
+// zcodeSessionID returns the X-Session-Id value for this request. ZCode's CLI
+// mints one session id per CLI session (createSessionId = sess_<uuid>) and
+// strips the internal prefix before putting it on the wire, so the observable
+// value is a bare v4 UUID. A proxy process outlives any single conversation,
+// so we derive the id from the client's own session identifiers (whitelisted
+// onto the upstream request by targetexec before ExtraHeaders runs):
+// distinct client sessions get distinct ids, one session stays stable, and the
+// value survives proxy restarts. Without any client hint (direct API clients,
+// probes) we fall back to a process-stable random UUID.
+// NOTE: header names are Go-canonical — the whitelist's "user_id" lands as
+// "User_id" (underscore is not a canonicalization separator), hence the
+// spelling below.
+func (p *ZCodeProvider) zcodeSessionID(req *http.Request) string {
+	for _, h := range []string{"X-Claude-Code-Session-Id", "X-Session-Id", "User_id"} {
+		if v := printableASCII(req.Header.Get(h)); v != "" {
+			return zcodeUUIDFromKey("session:" + h + ":" + v)
+		}
+	}
 	p.sessionMu.Lock()
 	defer p.sessionMu.Unlock()
 	if p.sessionID == "" {
 		p.sessionID = newZCodeUUID()
 	}
 	return p.sessionID
+}
+
+// zcodeQueryID returns the X-Query-Id value for this request. ZCode's query id
+// is per user query (createQueryId = query_<uuid>, prefix stripped on the
+// wire). Claude Code's X-Interaction-Id identifies exactly one user
+// interaction, so we derive a stable id from it when present (all model calls
+// of one interaction share it, matching the real per-query scope); otherwise a
+// fresh id per request.
+func zcodeQueryID(req *http.Request) string {
+	if v := printableASCII(req.Header.Get("X-Interaction-Id")); v != "" {
+		return zcodeUUIDFromKey("query:" + v)
+	}
+	return newZCodeUUID()
+}
+
+// zcodeUUIDFromKey derives a stable RFC 4122 *v4-shaped* UUID from an opaque
+// key (sha256 → first 16 bytes, version/variant bits forced). The real ZCode
+// ids are crypto.randomUUID() v4 values; a hash formatted the same way is
+// indistinguishable on the wire while keeping one client session/interaction
+// mapped to exactly one id across processes.
+func zcodeUUIDFromKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // nodePlatform maps Go GOOS to Node's process.platform naming (windows→win32).
@@ -243,21 +326,74 @@ func printableASCII(s string) string {
 	return s
 }
 
-// resolveClientLanguage returns a printable locale (LC_ALL/LC_MESSAGES/LANG) or
-// "unknown" — mirrors ZCode's Intl locale fallback.
+// resolveClientLanguage mirrors ZCode's Intl-based lookup: the real CLI reads
+// Intl.DateTimeFormat().resolvedOptions().locale, which yields a BCP-47 tag
+// (language[-REGION], e.g. "zh-CN"/"en-US") and never carries a codeset. Go
+// has no ICU default-locale accessor, so we approximate from the same POSIX
+// variables ICU itself reads (LC_ALL/LC_MESSAGES/LANG) and normalize the value
+// into BCP-47 shape: "en_US.UTF-8" → "en-US". "C"/"POSIX" carry no language
+// and are skipped. Anything non-printable falls through to "unknown", which is
+// also ZCode's own fallback.
 func resolveClientLanguage() string {
 	for _, env := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
-		if v := printableASCII(os.Getenv(env)); v != "" {
+		if v := printableASCII(normalizeLocale(os.Getenv(env))); v != "" {
 			return v
 		}
 	}
 	return "unknown"
 }
 
-// resolveClientTimezone returns a printable timezone (TZ env) or "unknown".
+// normalizeLocale converts a POSIX locale value to the BCP-47 shape
+// Intl resolves to: drop the codeset/modifier (".UTF-8", "@euro"), split on
+// "_", lowercase the language subtag and uppercase the rest. Returns "" for
+// values that carry no language (empty, "C", "POSIX", malformed).
+func normalizeLocale(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, ".@"); i >= 0 {
+		s = s[:i]
+	}
+	if s == "" || s == "C" || s == "POSIX" {
+		return ""
+	}
+	parts := strings.Split(s, "_")
+	for i, part := range parts {
+		if part == "" {
+			return ""
+		}
+		if i == 0 {
+			parts[i] = strings.ToLower(part)
+		} else {
+			parts[i] = strings.ToUpper(part)
+		}
+	}
+	return strings.Join(parts, "-")
+}
+
+// resolveClientTimezone mirrors Intl.DateTimeFormat().resolvedOptions().timeZone:
+// the TZ env when set (leading ":" stripped, POSIX-style), else the system
+// timezone ICU would pick up, else "unknown".
 func resolveClientTimezone() string {
-	if v := printableASCII(os.Getenv("TZ")); v != "" {
+	if v := printableASCII(strings.TrimPrefix(strings.TrimSpace(os.Getenv("TZ")), ":")); v != "" {
+		return v
+	}
+	if v := systemTimezone(); v != "" {
 		return v
 	}
 	return "unknown"
+}
+
+// systemTimezone reads the /etc/localtime symlink the way ICU resolves the
+// system zone: both the /usr/share/zoneinfo/<Area>/<City> (linux) and
+// /var/db/timezone/zoneinfo/<Area>/<City> (darwin) layouts reduce to the IANA
+// name after the "zoneinfo/" segment. Returns "" when /etc/localtime is not a
+// symlink (some minimal images) or unreadable.
+func systemTimezone() string {
+	target, err := os.Readlink("/etc/localtime")
+	if err != nil {
+		return ""
+	}
+	if i := strings.Index(target, "zoneinfo/"); i >= 0 {
+		target = target[i+len("zoneinfo/"):]
+	}
+	return printableASCII(target)
 }

@@ -242,3 +242,56 @@ no testify, 80% coverage baseline.
   extraction from a real ZCode login.
 - `X-Device-Mid`: generate a stable per-install UUID stored under
   `~/.model-proxy/` and send it, for full fidelity.
+
+---
+
+## 10. 补遗：2026-09-21 开源复核（ZCode 3.14.0）
+
+ZCode 已于 2026-09-21 开源（`github.com/zai-org/ZCode`，Apache-2.0，main =
+v3.14.0），上文 3.3.6/3.11.2 的逆向结论逐条对照源码后的修订如下（实现以本补遗
+为准；`docs/backend-contracts.md` 的 zcode 契约节同步更新）：
+
+**仍然成立**
+
+- Anthropic base `https://open.bigmodel.cn/api/anthropic`（不带 `/v1`）：开源内置
+  catalog `config/provider/zcode-builtin.json`（revision 30）`bigmodel-api` 模板
+  （`zhipu-coding-plan-api-key` + `anthropic-messages`）确认；`normalizeAnthropicBaseURL`
+  会剥掉尾部 `/v1`。
+- 鉴权双写：`model-execution.ts` `createAnthropic({apiKey})` 发 `x-api-key`，
+  `withAnthropicAuthorizationHeader` 补 `Authorization: Bearer`。
+- 指纹头集合与 normalize 规则：`packages/shared/src/zcode-source-headers.ts` +
+  `bootstrap/src/model-config.ts` + `runtime-platform-headers.ts`，与 §3 表格逐行一致
+  （含 `X-ZCode-Agent: glm`、`X-Device-Mid` 条件发送、printable→`unknown` 回落）。
+- 签名无法复现的判断不变，且更稳：开源仓库不含任何签名代码（无 `x-client-sig`/
+  `c1f3a7e2` 握手），V4 签名器只存在于桌面二进制。
+- off-peak（`X-Coding-Plan-Api-Key` + `X-Off-Peak-Ticket-ID`）与 start-plan
+  （`account:*-start-plan`）均不触碰 apikey 路径。
+- 配额端点 `/api/monitor/usage/quota/limit`（`bigmodelUsageQuotaProvider.ts`）。
+
+**已变化 / 需修订**
+
+- 版本 3.3.6→3.11.2→**3.14.0**（root `package.json`）；`X-ZCode-App-Version` 与 UA 同源。
+- UA 追加段：`@ai-sdk/anthropic@3.0.81` 建 provider 时追加
+  `ai-sdk/anthropic/3.0.81`，provider-utils 再追加
+  `ai-sdk/provider-utils/4.0.27 runtime/node.js/24`（Node≥21.1 走
+  `navigator.userAgent` → `runtime/node.js/<major>`；CLI 引擎要求 node≥24）。
+  3.11.2 抓包没有 anthropic 段，按源码补齐。
+- `X-Title`：源码按 argv 推导 sourceTitle（app-server/agent-server→`electron`，
+  否则→`cli`）。apikey coding-plan 路径的真实载体是独立 CLI，代理改发
+  `Z Code@cli`（旧文档的 `electron` 来自桌面抓包）。
+- 归因 id 头（`runner-attribution.ts`）：除 `x-request-id`/`x-session-id` 外还有
+  `x-zcode-session-type`（main/subagent/other，服务端据此区分来源）、
+  `x-zcode-trace-id`、`x-query-id`；`sess_`/`query_` 前缀发 wire 前剥掉。
+  `x-request-id` 每次重试也换新。代理已同发五个（session/query 从客户端
+  `X-Claude-Code-Session-Id`/`X-Interaction-Id` 等派生稳定 UUID）。
+- 探针行为：3.14.0 连通性测试跑正式 model 执行链（完整指纹+归因头），§6 里
+  "probe 只发 3 个基础头"的差异消失；代理统一完整指纹与现行客户端一致。
+- `X-Client-Language`：源码只认 `Intl` locale，**没有** `--locale` 覆盖入口（§3 旧说法删除）；
+  代理用 LC_ALL/LC_MESSAGES/LANG 近似并归一化为 BCP-47。timezone 未设 TZ 时回退
+  `/etc/localtime`。
+- **最大结构变化**：`official-coding-plan-gateway.ts` 把
+  `open.bigmodel.cn/api/anthropic/v1/messages` 改写为
+  `zcode.z.ai/api/v1/ultra/anthropic/v1/messages`（api.z.ai→`/ultra-zai/`），
+  对所有 model provider 生效——真实 3.14.0 客户端不再直连 open.bigmodel.cn。
+  代理仍直连（端点实测存活）；套餐系数是否仍认直连路径待真 key 复测，
+  失效则把 `anthropic_base_url` 切到 ultra 网关（指纹/鉴权头原样透传）。
