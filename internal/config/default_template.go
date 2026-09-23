@@ -200,6 +200,7 @@ providers:
   # endpoints and stay out of the chat models: list. Poolable (repeat 'login').
   step-plan:
     provider_id: step-plan
+    billing: plan          # 订阅制 Credit 月池（月内消耗、月末清零），非按量余额
     openai_base_url: https://api.stepfun.com/step_plan/v1
     anthropic_base_url: https://api.stepfun.com/step_plan
     models:
@@ -248,6 +249,7 @@ providers:
   # id (jev-1.13) which /systemone rejects — refresh rewrites it to jev-X.Y.0.
   typesafe:
     provider_id: typesafe
+    billing: pay-as-you-go   # 按 token 计价（输入 $0.042/M、输出免费）
     decisions_base_url: https://api.typesafe.ai/v1
     models:
       - jev-latest
