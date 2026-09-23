@@ -26,6 +26,8 @@ type StdioConn struct {
 	readDone chan struct{}
 	readErr  error // first fatal read-loop error (set before readDone closes)
 
+	waitOnce sync.Once // cmd.Wait runs exactly once (read-loop EOF path and Close)
+
 	closed atomic.Bool
 }
 
@@ -116,6 +118,12 @@ func (c *StdioConn) readLoop(stdout io.Reader) {
 	} else if c.readErr == nil {
 		c.readErr = io.EOF
 	}
+	// Reap before signalling callers: os/exec drains cmd.Stderr (an io.Writer
+	// — its copy goroutine is the only writer) inside Wait, so only a completed
+	// Wait guarantees Stderr() holds the child's complete output. Callers that
+	// read Stderr() after a failed Call would otherwise race the copy goroutine
+	// and see a truncated/empty tail (flaked under CI load in coverage mode).
+	c.reapChild()
 	// Fail every pending caller: the child is gone.
 	c.mu.Lock()
 	for key, ch := range c.pending {
@@ -185,6 +193,13 @@ func (c *StdioConn) Stderr() string {
 	return c.stderr.String()
 }
 
+// reapChild waits for the child exactly once (the read loop's EOF path and
+// Close can both get here first). Wait also completes the internal stderr
+// copy goroutine, so after it returns Stderr() is final.
+func (c *StdioConn) reapChild() {
+	c.waitOnce.Do(func() { _ = c.cmd.Wait() })
+}
+
 // Close kills and reaps the child. Idempotent.
 func (c *StdioConn) Close() {
 	if !c.closed.CompareAndSwap(false, true) {
@@ -194,5 +209,5 @@ func (c *StdioConn) Close() {
 	if c.cmd.Process != nil {
 		c.cmd.Process.Kill()
 	}
-	c.cmd.Wait()
+	c.reapChild()
 }
