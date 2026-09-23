@@ -54,24 +54,24 @@ providers:
     #   - {window: "14:00-18:00", multiplier: 2}
     models:
       - claude-fable-5-1
-      - claude-haiku-4-5
-      - claude-opus-4-8
       - claude-opus-5
-      - claude-opus-5-5
       - claude-sonnet-5
       - deepseek-v4-flash
       - deepseek-v4-pro
-      - glm-5.2
       - glm-5.3
       - glm-5.3-flash
-      - gpt-5.4
-      - gpt-5.5
       - gpt-5.6-luna
       - gpt-5.6-sol
       - gpt-5.6-terra
       - gpt-6-astra
-      - gpt-6-sol
       - kimi-k3
+      - claude-haiku-4-5
+      - claude-opus-4-8
+      - claude-opus-5-5
+      - glm-5.2
+      - gpt-5.4
+      - gpt-5.5
+      - gpt-6-sol
   codex:
     openai_base_url: https://chatgpt.com/backend-api/codex
     # client_version: "0.144.1"   # optional; auto-detected from codex CLI if omitted
@@ -79,12 +79,14 @@ providers:
     priority: 1
     # gpt-5.4 omitted: upstream rejects it for ChatGPT-account Codex access
     # ("The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account").
+    # Order note: models[0] is the wizard's suggested "model-proxy test" model —
+    # append new models instead of re-sorting.
     models:
-      - gpt-5.5
       - gpt-5.6-luna
       - gpt-5.6-sol
       - gpt-5.6-terra
       - gpt-6-astra
+      - gpt-5.5
       - gpt-6-luna
       - gpt-6-sol
   # External provider (Zhipu BigModel — API key via login zhipu)
@@ -101,9 +103,9 @@ providers:
                                        # authoritative — models.dev metadata is ignored for it.
     usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit  # usage zhipu: 5h/weekly/monthly quota + token consumption
     models:
-      - glm-5.2
       - glm-5.3
       - glm-5.3-flash
+      - glm-5.2
   # DeepSeek (API key via 'login deepseek'). One key serves both protocols; the
   # two endpoints are per-protocol: openai_base_url = OpenAI base, anthropic_base_url =
   # Anthropic base (no /v1; proxy keeps the client /v1/messages path).
