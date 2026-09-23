@@ -4314,7 +4314,10 @@ function renderLiveSessionPanel() {
 // Long idle gaps are compressed (dashed divider) so a short burst inside a
 // multi-hour session stays readable; a drag on the SVG zooms into a time
 // window (segment map rides data-segs for the px→time inversion), and the
-// reset chip appears while a zoom is active.
+// reset chip appears while a zoom is active. The title's request count is
+// the PLOTTED count (sessionTimeline's `shown`) — it follows the zoom window
+// with the lanes, so it never claims the whole session's traffic while the
+// bars show only the selected stretch.
 function sessionTimelineCard(rows, opts) {
   const o = opts || {};
   const zoom = o.session ? sessionZoomFor(o.session) : null;
@@ -4333,7 +4336,7 @@ function sessionTimelineCard(rows, opts) {
     ? `<button class="tl-reset" type="button" title="clear zoom window">zoomed ${esc(fmtTimeSafe(zoom.from))}–${esc(fmtTimeSafe(zoom.to))} · reset</button>`
     : `<span class="tl-lg">drag to zoom</span>`;
   return `<div class="card sess-tl"><div class="card-body">
-    <div class="tl-title"><span class="tl-title-name">Trace</span><span class="tl-count">${rows.length} requests · ${tl.lanes} lane${tl.lanes === 1 ? '' : 's'}</span><span class="tl-legend">${legend.join('')}${zoomChip}</span></div>
+    <div class="tl-title"><span class="tl-title-name">Trace</span><span class="tl-count">${tl.shown} requests · ${tl.lanes} lane${tl.lanes === 1 ? '' : 's'}</span><span class="tl-legend">${legend.join('')}${zoomChip}</span></div>
     ${tl.svg.replace('<svg ', `<svg data-segs="${esc(JSON.stringify(tl.segments))}" `)}
   </div></div>`;
 }

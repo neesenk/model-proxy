@@ -2287,15 +2287,24 @@ test('sessionTimeline zoom window filters rows and owns the axis domain', () => 
   const zoomed = sessionTimeline(rows, { fmt: (t) => String(t), window: { from: -100, to: 2000 } });
   assert.deepEqual(ids(zoomed.svg), ['a', 'b']);
   assert.ok(zoomed.segments.length >= 1);
+  assert.equal(zoomed.shown, 2, 'title count tracks the zoomed rows');
   const lone = sessionTimeline(rows, { fmt: (t) => String(t), window: { from: -100, to: 500 } });
   assert.deepEqual(ids(lone.svg), ['a']);
+  assert.equal(lone.shown, 1);
   // A window that catches nothing falls back to the full view instead of
   // blanking the card (a stray drag must never orphan the reset control).
   const missed = sessionTimeline(rows, { fmt: (t) => String(t), window: { from: 100 * 3600 * 1000, to: 101 * 3600 * 1000 } });
   assert.deepEqual(ids(missed.svg), ['a', 'b', 'c']);
+  assert.equal(missed.shown, 3, 'fallback to the full view restores the full count');
   // A degenerate window (to <= from) is ignored outright.
   const junk = sessionTimeline(rows, { fmt: (t) => String(t), window: { from: 500, to: 500 } });
   assert.deepEqual(ids(junk.svg), ['a', 'b', 'c']);
+  assert.equal(junk.shown, 3);
+  // Without a window the count is every parseable row (unparseable ones are
+  // skipped, not counted).
+  const withJunkRow = sessionTimeline(rows.concat([{ requestId: 'z', ts: 'not-a-time' }]), { fmt: (t) => String(t) });
+  assert.equal(withJunkRow.shown, 3);
+  assert.equal(withJunkRow.skipped, 1);
 });
 
 test('sessionTimeline compresses lane height for busy parallel sessions', () => {

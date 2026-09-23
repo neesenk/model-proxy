@@ -2575,9 +2575,12 @@ export function responseExcerpt(text, maxChars) {
 // Rows accept the session panel's merged shape: {requestId, ts (unix ms or
 // RFC3339), latencyMs, status, input, output, attempt, inFlight, turnKey}. Rows
 // without a parseable ts are skipped (counted in .skipped). Returns
-// {svg, lanes, skipped, segments} — empty svg when fewer than 2 rows remain
-// (1 when a zoom window is active); segments is [{t0, t1, x0, x1}] in viewBox
-// px so the caller can invert a drag back into time.
+// {svg, lanes, shown, skipped, segments} — empty svg when fewer than 2 rows
+// remain (1 when a zoom window is active); `shown` counts the rows the SVG
+// actually plots (the zoom window's rows, else every parseable row) so a
+// caller's title count tracks the visible selection rather than the whole
+// session; segments is [{t0, t1, x0, x1}] in viewBox px so the caller can
+// invert a drag back into time.
 export function sessionTimeline(rows, opts) {
   const o = opts || {};
   const W = o.width || 900;
@@ -2612,7 +2615,7 @@ export function sessionTimeline(rows, opts) {
     });
   }
   norm.sort((a, b) => a.ts - b.ts);
-  if (norm.length < 2) return { svg: '', lanes: 0, skipped, segments: [] };
+  if (norm.length < 2) return { svg: '', lanes: 0, shown: 0, skipped, segments: [] };
 
   let win = null;
   if (o.window && Number.isFinite(o.window.from) && Number.isFinite(o.window.to) && o.window.to > o.window.from) {
@@ -2623,7 +2626,7 @@ export function sessionTimeline(rows, opts) {
     vis = norm.filter((n) => (n.end != null ? n.end : n.ts) >= win.from && n.ts <= win.to);
     if (vis.length === 0) { vis = norm; win = null; }
   }
-  if (vis.length < (win ? 1 : 2)) return { svg: '', lanes: 0, skipped, segments: [] };
+  if (vis.length < (win ? 1 : 2)) return { svg: '', lanes: 0, shown: 0, skipped, segments: [] };
 
   // Segment the visible rows by conversational turn when possible, falling
   // back to the idle-gap heuristic for rows without a turn key (old records or
@@ -2772,6 +2775,7 @@ export function sessionTimeline(rows, opts) {
   return {
     svg: `<svg class="tl-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="session request timeline">${bars}${line}${breaks}${tickSvg}</svg>`,
     lanes,
+    shown: vis.length,
     skipped,
     segments: segs.map((s) => ({ t0: s.t0, t1: s.t1, x0: s.x0, x1: s.x0 + s.w })),
   };
