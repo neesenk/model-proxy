@@ -26,7 +26,11 @@ func TestQuotaSourceLabel(t *testing.T) {
 	}
 }
 
-// TestDryRunOrder: offline order is tier (plan before payg) then priority asc.
+// TestDryRunOrder: offline order is priority asc — and the config `billing:`
+// label must NOT act as a tier input. The live scheduler's tier comes from the
+// measured quota snapshot (plan < unknown < payg); offline there is no
+// measurement, so a pay-as-you-go LABEL cannot demote a priority-1 target
+// behind priority-2/3 ones. Real tier/surplus ordering needs `doctor --live`.
 func TestDryRunOrder(t *testing.T) {
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
 		"plana": {}, "planb": {}, "payg": {Billing: "pay-as-you-go"},
@@ -37,7 +41,7 @@ func TestDryRunOrder(t *testing.T) {
 		{Provider: "plana", Priority: 2},
 	}
 	got := clidoctor.DryRunOrder(cfg, targets)
-	want := []string{"plana", "planb", "payg"}
+	want := []string{"payg", "plana", "planb"}
 	if len(got) != len(want) {
 		t.Fatalf("len=%d, want %d: %+v", len(got), len(want), got)
 	}

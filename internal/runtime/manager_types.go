@@ -147,12 +147,11 @@ type DashboardSnapshot struct {
 // projected from the Manager-owned quota snapshot in the same critical section
 // that reads health, pin, sticky, model locks, and spread.
 type Target struct {
-	Provider        string
-	Parent          string
-	Model           string
-	Priority        int
-	BillingOverride provider.BillingClass
-	PeakMultiplier  float64
+	Provider       string
+	Parent         string
+	Model          string
+	Priority       int
+	PeakMultiplier float64
 }
 
 type ScheduleInput struct {

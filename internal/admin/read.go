@@ -410,11 +410,10 @@ func (s *Service) Accounts() []appapi.ProviderAccounts {
 	out := make([]appapi.ProviderAccounts, 0, len(configs))
 	for name, config := range configs {
 		item := appapi.ProviderAccounts{
-			Name:          name,
-			ProviderID:    config.Provider,
-			Billing:       config.Billing,
-			UsageEndpoint: config.UsageURL != "",
-			Accounts:      []appapi.Account{},
+			Name:       name,
+			ProviderID: config.Provider,
+			Billing:    config.Billing,
+			Accounts:   []appapi.Account{},
 		}
 		switch config.Provider {
 		case "aqp":

@@ -46,17 +46,20 @@ func targetScheduleFacts(
 	now time.Time,
 	maxAge time.Duration,
 ) ScheduleFacts {
-	billing := target.BillingOverride
-	if billing == provider.BillingUnknown {
-		switch {
-		case snapshot == nil,
-			snapshot.Billing == provider.BillingUnknown,
-			snapshot.Err != "",
-			now.Sub(snapshot.AsOf) > maxAge:
-			billing = provider.BillingUnknown
-		default:
-			billing = snapshot.Billing
-		}
+	// The tier comes from the MEASURED snapshot only — never from a config
+	// label. A provider's `billing:` field is payment-method metadata (what
+	// the upstream charges), not a scheduling input: it once overrode the
+	// measurement here, which ranked a provider with a measured plan window
+	// as a strict last resort (and, via the quota tracker's old skip gate,
+	// hid its console-only usage snapshot from the UI).
+	billing := provider.BillingUnknown
+	switch {
+	case snapshot == nil,
+		snapshot.Billing == provider.BillingUnknown,
+		snapshot.Err != "",
+		now.Sub(snapshot.AsOf) > maxAge:
+	default:
+		billing = snapshot.Billing
 	}
 
 	peak := target.PeakMultiplier

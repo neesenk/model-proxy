@@ -42,8 +42,16 @@ func (p *StaticProvider) Usage() error {
 func (p *StaticProvider) FetchModels() ([]string, error) { return nil, errNotSupported }
 
 // Quota: static providers have no measurable quota - always BillingUnknown.
+// The Note is implementation-owned knowledge (this provider has no usage
+// surface at all), so the CLI and Web UI can say so instead of rendering an
+// empty unmeasured section. Billing/quota display is driven by what the
+// implementation knows, never by the config `billing:` label.
 func (p *StaticProvider) Quota() (*QuotaSnapshot, error) {
-	return &QuotaSnapshot{Billing: BillingUnknown}, nil
+	return &QuotaSnapshot{
+		Billing:      BillingUnknown,
+		RemainingPct: -1,
+		Notes:        []string{"static provider: no usage/quota surface (the key lives in the provider headers)"},
+	}, nil
 }
 
 var errNotSupported = &notSupportedErr{}

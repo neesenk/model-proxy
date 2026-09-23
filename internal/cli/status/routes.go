@@ -55,8 +55,11 @@ func CmdRoutes(args []string, cfg *configdomain.Config) {
 	}
 	for _, t := range targets {
 		prov := cfg.Providers[t.Provider]
-		fmt.Printf("  %s %-12s model=%-24s priority=%d tier=%s\n",
-			display.Dim("•"), t.Provider, t.Model, t.Priority, billingTier(prov))
+		// billing= is the CONFIGURED payment method (metadata). The scheduling
+		// tier is a runtime measurement from the quota snapshot, which this
+		// offline view cannot know — `schedule` queries the live daemon for it.
+		fmt.Printf("  %s %-12s model=%-24s priority=%d billing=%s\n",
+			display.Dim("•"), t.Provider, t.Model, t.Priority, billingLabel(prov))
 		if t.Protocol != "" {
 			fmt.Printf("    protocol: %s (declared)\n", t.Protocol)
 		}
@@ -90,11 +93,10 @@ func routeNameOrigin(cfg *configdomain.Config, model string) string {
 	return "  derived from provider model lists"
 }
 
-func billingTier(prov configdomain.Provider) string {
-	if prov.Billing == "pay-as-you-go" {
-		return "pay-as-you-go"
-	}
-	return "plan"
+// billingLabel renders the provider's configured payment method. Metadata only:
+// it is never a scheduling input (the tier comes from the measured snapshot).
+func billingLabel(prov configdomain.Provider) string {
+	return display.Or(prov.Billing, "plan")
 }
 
 func RunRoutes(args []string) { CmdRoutes(args, cliframework.LoadCmdConfig(args)) }

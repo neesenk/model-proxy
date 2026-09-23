@@ -8647,12 +8647,12 @@ function accountCard(p, a, quota, tokens) {
   const mail = a.email ? `<div class="acct-mail">${esc(a.email)}</div>` : '';
   const snap = quota ? quota[key] : null;
   const tokRows = (tokens || []).filter((t) => t.provider === key);
-  // Providers without a usage endpoint have no Quota() to poll, so the
-  // Refresh-usage button (which re-polls quota) is meaningless for them — hide
-  // it. Pay-as-you-go alone doesn't decide: deepseek is pay-as-you-go WITH a
-  // usage_url (/user/balance) and is polled like a plan provider.
-  const refreshBtn = (p.billing === 'pay-as-you-go' && !p.usage_endpoint) ? ''
-    : `<button class="btn small" data-refresh="${esc(key)}" title="Re-poll this account's quota now">Refresh usage</button>`;
+  // Every provider has a Quota() to poll (measured windows, or the
+  // implementation's own console-only snapshot), so Refresh usage is always
+  // meaningful. The `billing` label deliberately plays no part here: it is
+  // payment-method metadata, not a statement about whether quota can be
+  // queried or displayed.
+  const refreshBtn = `<button class="btn small" data-refresh="${esc(key)}" title="Re-poll this account's quota now">Refresh usage</button>`;
   return `<section class="card acct-card card-open">
     <div class="account-row acct-card-head">
       <div>

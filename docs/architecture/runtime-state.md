@@ -193,9 +193,17 @@ tierRank → priority asc → surplus desc
 
 `Manager.DecideOrder` 在同一锁内从权威 quota snapshot 投影 billing/surplus，
 并读取 pin、health、model lock、sticky 和 spread；根包只传 provider/model/
-parent、priority、billing override、peak multiplier 等 config-derived 输入，
-不得先读 quota 再调用 Manager 排序。这样一次请求决策不会在 quota projection
-与 availability/sticky 选择之间跨过 reload 或并发 mutation。
+parent、priority、peak multiplier 等 config-derived 输入，不得先读 quota 再调用
+Manager 排序。这样一次请求决策不会在 quota projection 与 availability/sticky
+选择之间跨过 reload 或并发 mutation。
+
+**tier 只来自实测 snapshot**（plan < unknown < pay-as-you-go）：config 的
+`billing:` 是付费方式元数据，既不是轮询门禁也不是调度输入——它曾经以
+`BillingOverride` 形式覆盖实测 tier（把实测 plan 的 provider 贬为严格末位），
+并让 quota tracker 跳过「pay-as-you-go 且无 usage_url」的 provider（连带把
+console-only snapshot 从 Web UI 藏掉），2026-09-24 一并移除。轮询/展示规则
+改为：配了 `usage_url` → 查询；没配但实现自带查询/控制台 URL → 由
+`Quota()` 的 Notes 呈现（CLI `usage` 与 Web UI 都渲染）。
 
 只有 `Commit=true` 且 generation 匹配时，才允许清理陈旧 sticky 或推进 pool
 spread。请求路径不深拷贝 quota 的 Notes/Windows/Details，也不为 projection

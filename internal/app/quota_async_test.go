@@ -575,7 +575,11 @@ func TestScheduleAdapter_AppliesQualityWeights(t *testing.T) {
 	}
 }
 
-func TestScheduleAdapter_ProjectsParentBillingAndMapsTargets(t *testing.T) {
+// The parent's config `billing:` label is payment-method METADATA: it must not
+// be projected into the scheduler (the old BillingOverride did exactly that,
+// demoting this measured-plan pool virtual to a strict last resort). The tier
+// comes from the virtual's own measured snapshot, so priority 1 beats 9.
+func TestScheduleAdapter_ConfigBillingLabelDoesNotReachScheduler(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	targets := []configdomain.RouteTarget{
 		{Provider: "pool#acct", Model: "pool-model", Priority: 1},
@@ -596,9 +600,6 @@ func TestScheduleAdapter_ProjectsParentBillingAndMapsTargets(t *testing.T) {
 		Billing: provider.BillingPlan,
 		AsOf:    now,
 	})
-	if got := configuredBillingOverride(p.cfg.Providers["pool"].Billing); got != provider.BillingPayG {
-		t.Fatalf("parent billing override=%v, want payg", got)
-	}
 	if got := p.quota.Snapshot("pool#acct"); got == nil || got.Billing != provider.BillingPlan {
 		t.Fatalf("virtual quota=%+v, want fresh plan snapshot", got)
 	}
@@ -619,9 +620,9 @@ func TestScheduleAdapter_ProjectsParentBillingAndMapsTargets(t *testing.T) {
 	if len(ordered) != 2 {
 		t.Fatalf("ordered=%+v, want two targets", ordered)
 	}
-	if ordered[0].Provider != "plan" || ordered[0].Model != "plan-model" ||
-		ordered[1].Provider != "pool#acct" || ordered[1].Model != "pool-model" {
-		t.Fatalf("ordered=%+v, want exact plan then payg virtual target mapping", ordered)
+	if ordered[0].Provider != "pool#acct" || ordered[0].Model != "pool-model" ||
+		ordered[1].Provider != "plan" || ordered[1].Model != "plan-model" {
+		t.Fatalf("ordered=%+v, want measured-plan pool virtual (p1) before plan (p9)", ordered)
 	}
 }
 

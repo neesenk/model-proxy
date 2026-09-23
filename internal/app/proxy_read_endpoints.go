@@ -393,12 +393,11 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 	for i, t := range targets {
 		pconf, _ := configdomain.ProviderConfig(cfg, parentOf, t.Provider)
 		runtimeTargets[i] = runtimestate.Target{
-			Provider:        t.Provider,
-			Parent:          parentOf[t.Provider],
-			Model:           t.Model,
-			Priority:        t.Priority,
-			BillingOverride: configuredBillingOverride(pconf.Billing),
-			PeakMultiplier:  pconf.PeakMultiplier(now),
+			Provider:       t.Provider,
+			Parent:         parentOf[t.Provider],
+			Model:          t.Model,
+			Priority:       t.Priority,
+			PeakMultiplier: pconf.PeakMultiplier(now),
 		}
 	}
 	decision := dash.PreviewOrder(runtimestate.ScheduleInput{

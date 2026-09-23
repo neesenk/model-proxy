@@ -117,14 +117,18 @@ func TestPollOneCommits(t *testing.T) {
 	}
 }
 
-func TestPollAllSkipsPayAsYouGo(t *testing.T) {
+// PollAll polls EVERY provider: what a provider's Quota() returns (measured
+// windows, a console-only snapshot, or nothing) is the implementation's call,
+// and the config `billing:` label must not gate polling. A pay-as-you-go
+// provider whose implementation reports a console-only snapshot keeps it — that
+// snapshot is how the console URL reaches the CLI and the Web UI.
+func TestPollAllPollsEveryProviderRegardlessOfBillingLabel(t *testing.T) {
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
 			"shopee": {Billing: "pay-as-you-go"},
 			"zhipu":  {},
 			// Pay-as-you-go WITH a usage endpoint (deepseek's /user/balance):
-			// the balance IS its quota window, so it is polled like a plan
-			// provider.
+			// the balance IS its quota window.
 			"deepseek": {Billing: "pay-as-you-go", UsageURL: "http://x/user/balance"},
 		},
 	}
@@ -137,11 +141,11 @@ func TestPollAllSkipsPayAsYouGo(t *testing.T) {
 				"deepseek": &snapshotProv{rem: -1},
 			}
 		}, mgr)
-	// Seed a stale pay-as-you-go snapshot to verify it gets dropped.
-	tr.SetSnapshot("shopee", &provider.QuotaSnapshot{Billing: provider.BillingUnknown})
+	// Seed a stale snapshot to verify a poll REPLACES it (not drops the key).
+	tr.SetSnapshot("shopee", &provider.QuotaSnapshot{Billing: provider.BillingUnknown, RemainingPct: 0.1})
 	tr.PollAll(time.Now())
-	if s := tr.Snapshot("shopee"); s != nil {
-		t.Fatalf("pay-as-you-go snapshot must be dropped, got %+v", s)
+	if s := tr.Snapshot("shopee"); s == nil || s.RemainingPct != 0.5 {
+		t.Fatalf("pay-as-you-go snapshot = %+v, want the fresh poll (0.5)", s)
 	}
 	if s := tr.Snapshot("zhipu"); s == nil || s.RemainingPct != 0.8 {
 		t.Fatalf("plan provider snapshot = %+v, want RemainingPct 0.8", s)
@@ -151,7 +155,7 @@ func TestPollAllSkipsPayAsYouGo(t *testing.T) {
 	}
 }
 
-func TestPollAllSkipsPayAsYouGoPoolVirtual(t *testing.T) {
+func TestPollAllPoolsEveryProviderRegardlessOfBillingLabel(t *testing.T) {
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
 			"shopee": {Billing: "pay-as-you-go"},
@@ -166,15 +170,18 @@ func TestPollAllSkipsPayAsYouGoPoolVirtual(t *testing.T) {
 			}
 		}, newTestManager(0))
 	tr.PollAll(time.Now())
-	if s := tr.Snapshot("shopee#acc1"); s != nil {
-		t.Fatalf("pay-as-you-go pool virtual snapshot must be dropped, got %+v", s)
+	if s := tr.Snapshot("shopee#acc1"); s == nil || s.RemainingPct != 0.5 {
+		t.Fatalf("pay-as-you-go pool virtual snapshot = %+v, want RemainingPct 0.5", s)
 	}
 	if s := tr.Snapshot("zhipu#acc1"); s == nil || s.RemainingPct != 0.6 {
 		t.Fatalf("plan pool virtual snapshot = %+v, want RemainingPct 0.6", s)
 	}
 }
 
-func TestPollOneRejectsPayAsYouGo(t *testing.T) {
+// PollOne (the Web UI's per-account "Refresh usage") re-polls any LIVE provider
+// key — the billing label is not a gate. It still fails closed for a key that
+// isn't a live provider.
+func TestPollOneAcceptsAnyLiveProviderKey(t *testing.T) {
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
 			"shopee":   {Billing: "pay-as-you-go"},
@@ -188,11 +195,11 @@ func TestPollOneRejectsPayAsYouGo(t *testing.T) {
 				"deepseek": &snapshotProv{rem: -1},
 			}
 		}, newTestManager(0))
-	if tr.PollOne("shopee") {
-		t.Fatal("PollOne must return false for pay-as-you-go provider without usage_url")
+	if !tr.PollOne("shopee") {
+		t.Fatal("PollOne must accept a live pay-as-you-go provider (its Quota() decides what to report)")
 	}
-	if s := tr.Snapshot("shopee"); s != nil {
-		t.Fatalf("pay-as-you-go PollOne snapshot = %+v, want nil", s)
+	if s := tr.Snapshot("shopee"); s == nil || s.RemainingPct != 0.5 {
+		t.Fatalf("pay-as-you-go PollOne snapshot = %+v, want RemainingPct 0.5", s)
 	}
 	if !tr.PollOne("deepseek") {
 		t.Fatal("PollOne must accept a pay-as-you-go provider with usage_url")
@@ -200,9 +207,15 @@ func TestPollOneRejectsPayAsYouGo(t *testing.T) {
 	if s := tr.Snapshot("deepseek"); s == nil {
 		t.Fatal("PollOne(deepseek) committed no snapshot")
 	}
+	if tr.PollOne("not-a-provider") {
+		t.Fatal("PollOne must return false for a key that is not a live provider")
+	}
 }
 
-func TestLoadSkipsPayAsYouGoSnapshot(t *testing.T) {
+// Load restores EVERY persisted snapshot for a live provider — the billing
+// label is not a filter. Only keys whose provider is no longer live are
+// dropped (they would otherwise be re-persisted forever).
+func TestLoadRestoresEveryLiveProviderSnapshot(t *testing.T) {
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
 			"shopee":   {Billing: "pay-as-you-go"},
@@ -234,8 +247,8 @@ func TestLoadSkipsPayAsYouGoSnapshot(t *testing.T) {
 			}
 		}, newTestManager(0))
 	tr.Load()
-	if s := tr.Snapshot("shopee"); s != nil {
-		t.Fatalf("loaded pay-as-you-go snapshot = %+v, want nil", s)
+	if s := tr.Snapshot("shopee"); s == nil {
+		t.Fatal("loaded pay-as-you-go snapshot must be kept, got nil")
 	}
 	if s := tr.Snapshot("zhipu"); s == nil || s.RemainingPct != 0.7 {
 		t.Fatalf("loaded plan snapshot = %+v, want RemainingPct 0.7", s)

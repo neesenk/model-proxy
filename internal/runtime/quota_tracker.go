@@ -264,12 +264,7 @@ func (t *QuotaTracker) PollAllGeneration(now time.Time, generation uint64) {
 	var wg sync.WaitGroup
 	results := make(map[string]*provider.QuotaSnapshot, len(provs))
 	var resultsMu sync.Mutex
-	var skipped []string
 	for name, provImpl := range provs {
-		if t.isPayAsYouGoQuota(name) {
-			skipped = append(skipped, name)
-			continue
-		}
 		wg.Add(1)
 		go func(n string, p provider.Provider) {
 			defer wg.Done()
@@ -303,14 +298,6 @@ func (t *QuotaTracker) PollAllGeneration(now time.Time, generation uint64) {
 		}
 	}
 	t.runtime.QuotaRecoveredClearCooldown(polled, now, t.FreshnessMaxAge(), generation)
-	// Drop snapshots for providers configured as pay-as-you-go without a usage
-	// endpoint: they have no measurable quota windows, so an old/stale entry
-	// (from a previous version or a loaded state file) would otherwise linger
-	// in the dashboard. Pay-as-you-go providers WITH a usage_url (deepseek's
-	// /user/balance) are polled above like plan providers.
-	for _, name := range skipped {
-		t.runtime.DeleteQuota(name, generation)
-	}
 	if err := t.Persist(); err != nil {
 		logx.Warnf("[quota] persist after pollAll failed: %v", err)
 	}
@@ -330,9 +317,6 @@ func (t *QuotaTracker) ClearForGeneration(generation uint64) {
 // sees the fresh snapshot. Returns false if the key isn't a live provider.
 func (t *QuotaTracker) PollOne(key string) bool {
 	generation := t.CurrentGeneration()
-	if t.isPayAsYouGoQuota(key) {
-		return false
-	}
 	p := t.provs()[key]
 	if p == nil {
 		return false
@@ -360,9 +344,6 @@ func (t *QuotaTracker) RefreshOne(name string, generations ...uint64) {
 		generation = generations[0]
 	}
 	if t.CurrentGeneration() != generation {
-		return
-	}
-	if t.isPayAsYouGoQuota(name) {
 		return
 	}
 	now := time.Now()
@@ -455,29 +436,6 @@ func (t *QuotaTracker) maxEtaGap() time.Duration {
 		return provider.DefaultEtaMaxGap
 	}
 	return 3 * t.cfg().Scheduling.PollInterval()
-}
-
-// isPayAsYouGoQuota reports whether a runtime quota key belongs to a provider
-// configured as pay-as-you-go WITH NO usage endpoint. Pay-as-you-go providers
-// without a usage_url (e.g. shopee) have no measurable quota window, so
-// polling them is meaningless; a pay-as-you-go provider WITH a usage_url
-// (deepseek's /user/balance) exposes its remaining balance as quota windows
-// and is polled like any plan provider. Pool virtual keys are
-// "name#<accountID>", so the billing decision uses the parent provider name.
-func (t *QuotaTracker) isPayAsYouGoQuota(key string) bool {
-	if t.cfg == nil {
-		return false
-	}
-	cfg := t.cfg()
-	if cfg == nil {
-		return false
-	}
-	parent := key
-	if i := strings.Index(key, "#"); i >= 0 {
-		parent = key[:i]
-	}
-	p, ok := cfg.Providers[parent]
-	return ok && p.Billing == "pay-as-you-go" && p.UsageURL == ""
 }
 
 // fetchQuota polls a provider's Quota(), retrying transient errors (DNS "no
@@ -654,16 +612,10 @@ func (t *QuotaTracker) Load() {
 	// Filter to the CURRENT provider set: quota keys include virtual ids from
 	// pools, so keys from removed accounts/providers would otherwise merge
 	// into the generation and be re-persisted forever (reviving on every
-	// restart). Also drop pay-as-you-go providers without a usage endpoint:
-	// they have no measurable quota windows and should not appear in the
-	// dashboard (pay-as-you-go WITH usage_url, e.g. deepseek, keeps its
-	// balance snapshot).
+	// restart).
 	current := t.provs()
 	for k, v := range wrap.Providers {
 		if _, active := current[k]; !active {
-			continue
-		}
-		if t.isPayAsYouGoQuota(k) {
 			continue
 		}
 		quota[k] = &provider.QuotaSnapshot{

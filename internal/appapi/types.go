@@ -59,13 +59,13 @@ type Account struct {
 type ProviderAccounts struct {
 	Name       string `json:"name"`
 	ProviderID string `json:"provider_id"`
-	Billing    string `json:"billing"`
-	// UsageEndpoint reports whether the provider configures a usage_url — the
-	// quota tracker polls pay-as-you-go providers only when one exists
-	// (deepseek's /user/balance), so the UI's per-account "Refresh usage"
-	// button keys off this, not billing alone.
-	UsageEndpoint bool      `json:"usage_endpoint"`
-	Accounts      []Account `json:"accounts"`
+	// Billing is payment-method metadata only (what the upstream charges). It
+	// is NOT a quota-query or scheduling input: whether a provider's quota can
+	// be polled/displayed is decided by the provider implementation (a
+	// configured usage_url, or its own console-only snapshot), never by this
+	// label.
+	Billing  string    `json:"billing"`
+	Accounts []Account `json:"accounts"`
 }
 
 // TokenUsage is one flattened provider/model usage counter. Total is the

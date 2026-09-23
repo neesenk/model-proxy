@@ -18,13 +18,6 @@ type pinEntry struct {
 	expiresAt time.Time
 }
 
-func configuredBillingOverride(value string) provider.BillingClass {
-	if value == "pay-as-you-go" {
-		return provider.BillingPayG
-	}
-	return provider.BillingUnknown
-}
-
 // schedule returns targets in try-order using quota-aware ranking:
 //
 //	tier: plan < unknown < payg (pay-as-you-go is strict last-resort)
@@ -133,12 +126,11 @@ func (p *Proxy) decideOrder(cfg *configdomain.Config, parentOf map[string]string
 	for index, target := range targets {
 		pconf, _ := configdomain.ProviderConfig(cfg, parentOf, target.Provider)
 		runtimeTargets[index] = runtimestate.Target{
-			Provider:        target.Provider,
-			Parent:          parentOf[target.Provider],
-			Model:           target.Model,
-			Priority:        target.Priority,
-			BillingOverride: configuredBillingOverride(pconf.Billing),
-			PeakMultiplier:  pconf.PeakMultiplier(now),
+			Provider:       target.Provider,
+			Parent:         parentOf[target.Provider],
+			Model:          target.Model,
+			Priority:       target.Priority,
+			PeakMultiplier: pconf.PeakMultiplier(now),
 		}
 	}
 	result := p.runtimeState.DecideOrder(runtimestate.ScheduleInput{
@@ -247,12 +239,11 @@ func scheduleStatusFromSnapshot(
 		for index, target := range targets {
 			pconf, _ := configdomain.ProviderConfig(cfg, parentOf, target.Provider)
 			runtimeTargets[index] = runtimestate.Target{
-				Provider:        target.Provider,
-				Parent:          parentOf[target.Provider],
-				Model:           target.Model,
-				Priority:        target.Priority,
-				BillingOverride: configuredBillingOverride(pconf.Billing),
-				PeakMultiplier:  pconf.PeakMultiplier(now),
+				Provider:       target.Provider,
+				Parent:         parentOf[target.Provider],
+				Model:          target.Model,
+				Priority:       target.Priority,
+				PeakMultiplier: pconf.PeakMultiplier(now),
 			}
 		}
 		baseInput := runtimestate.ScheduleInput{

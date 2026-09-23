@@ -57,8 +57,8 @@ func TestCLI_RoutesDetail(t *testing.T) {
 	}
 
 	stdout, _, _ = clitest.RunCLI(t, "routes", cfgPath, "deepseek-v4-pro")
-	if !strings.Contains(stdout, "tier=pay-as-you-go") {
-		t.Errorf("detail should show the billing tier:\n%s", stdout)
+	if !strings.Contains(stdout, "billing=pay-as-you-go") {
+		t.Errorf("detail should show the configured billing method:\n%s", stdout)
 	}
 }
 

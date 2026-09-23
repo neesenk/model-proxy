@@ -63,6 +63,22 @@
 
 阶跃星辰 Step Plan 的 Credit 月池用量同样**没有公开 API**：`GET /v1/accounts` 读的是独立的 pay-as-you-go 余额，不是套餐 Credit。与 qwen-plan 同模式：`Quota()` 返回 `BillingUnknown` + 控制台订阅页 URL（`https://platform.stepfun.com/step-plan`），不轮询不抓控制台。额度耗尽上游报 **402 `quota_exceeded`**（非 429）：targetexec 的 body-proven quota-denied 判定因此覆盖 402/403 两档（kimi-code 的 403 模式扩展），命中 `quota_exceeded` 等 marker 后走 quota 冷却（默认 1h，无 reset hint）+ failover；无 quota 佐证的 402 仍按普通 4xx 提交，不臆断为额度耗尽。
 
+## config `billing:` 是付费方式元数据，不门禁轮询/展示/调度（有意为之）
+
+`providers.<name>.billing`（`plan` | `pay-as-you-go`）只描述**上游怎么收费**。它曾以三种方式越界成"能否查询/展示配额"的开关，2026-09-24 全部移除：
+
+1. **quota tracker 跳过门**（`isPayAsYouGoQuota`：「pay-as-you-go 且无 usage_url」不轮询）→ 连带把 console-only provider 的控制台链接从 Web UI Accounts 页藏掉（`renderAccountUsage` 只在有 snapshot 时渲染 `snap.Notes`）。mimo 因此踩过：设了 `billing: pay-as-you-go` 后链接不显示。
+2. **live scheduler 的 `BillingOverride`**：config 标签覆盖实测 snapshot 的 BillingClass，把实测 plan 的 provider 贬为严格末位。
+3. **Web UI 的 Refresh-usage 按钮隐藏条件**（`billing === 'pay-as-you-go' && !usage_endpoint`）。
+
+现行规则（替代上述三者）：
+
+- **轮询**：每个 provider 每 `quota_poll_interval` 都调 `Quota()`；由实现决定查什么——配了 `usage_url` 就查（deepseek/kimi-code），没配就返回实现自己的 console-only snapshot（mimo/qwen-plan/step-plan，零 HTTP）或空 snapshot（static，带说明 Note）。config 不参与该决定。
+- **展示**：CLI `usage` 与 Web UI 只渲染 snapshot 的内容（Windows + Notes）。查询/控制台 URL 由 provider 实现写进 Notes——这是"实现即权威"，config 无需知道。
+- **调度**：tier 只来自实测 snapshot（plan < unknown < pay-as-you-go）。`billing:` 标签不进 `Target`、不进 `DryRunOrder`；`doctor` 离线 dry-run 因此只按 priority 排序（无实测即无 tier），并在标题里说明真实 tier 需 `doctor --live`。`routes`/`doctor` 里的 billing 列改为 `billing=` 元数据展示，不再冒充 tier。
+
+`static` provider 的 `Quota()` 带一条自描述 Note（"no usage/quota surface"），所以空 snapshot 不会渲染成空白段落——同样是"实现说自己知道什么"，而不是让 config 标签代言。
+
 ## 有意的测试与观测行为
 
 - 生产包的 `_test.go` 不受 DAG import policy 检查（仅无生产文件的目录例外）：

@@ -335,27 +335,35 @@ func TestDecideOrderComparesSurplusAcrossUltimatePeriods(t *testing.T) {
 	}
 }
 
-func TestDecideOrderBillingOverrideBeatsFreshQuotaBilling(t *testing.T) {
+// The scheduling tier comes from the MEASURED snapshot only. A provider's
+// config `billing:` label (payment-method metadata) must NOT reach the
+// scheduler: Target carries no billing field anymore, so a pay-as-you-go
+// provider whose Quota() measures a plan window is ranked as a plan provider,
+// and a `billing: pay-as-you-go` label can neither demote it nor (via the old
+// quota-tracker skip gate) hide its console-only snapshot from the UI.
+func TestDecideOrderTierComesFromMeasurementNotConfigLabel(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 7, 29, 18, 30, 0, 0, time.UTC)
 	m := newTestManager(8)
 	setScheduleQuota(t, m, "plan", scheduleQuota(provider.BillingPlan, .5, now), 8)
-	setScheduleQuota(t, m, "override", scheduleQuota(provider.BillingPlan, .9, now), 8)
+	// Same measured class + higher surplus: the only inputs the scheduler has.
+	setScheduleQuota(t, m, "measured", scheduleQuota(provider.BillingPlan, .9, now), 8)
 
 	result := m.DecideOrder(ScheduleInput{
 		Exposed: "route", Now: now, QuotaMaxAge: time.Hour,
 		Targets: []Target{
 			{Provider: "plan"},
-			{Provider: "override", BillingOverride: provider.BillingPayG},
+			{Provider: "measured"},
 		},
 	})
-	if !reflect.DeepEqual(result.Order, []int{0, 1}) {
-		t.Fatalf("billing override order = %v, want measured plan before pay-as-you-go", result.Order)
+	if !reflect.DeepEqual(result.Order, []int{1, 0}) {
+		t.Fatalf("order = %v, want the higher-surplus measured plan first", result.Order)
 	}
-	if got := result.Facts; got[0].Billing != provider.BillingPlan ||
-		got[1].Billing != provider.BillingPayG || math.Abs(got[1].Surplus-.9) > 1e-9 {
-		t.Fatalf("billing override facts = %+v", got)
+	for i, want := range []provider.BillingClass{provider.BillingPlan, provider.BillingPlan} {
+		if got := result.Facts[i].Billing; got != want {
+			t.Fatalf("facts[%d].Billing = %v, want %v (measured, not a config label)", i, got, want)
+		}
 	}
 }
 
@@ -409,18 +417,16 @@ func TestDecideOrderPoolSpreadStaysWithinWinningRank(t *testing.T) {
 		t.Parallel()
 		m := newTestManager(12)
 		setScheduleQuota(t, m, "plan", scheduleQuota(provider.BillingPlan, .2, now), 12)
-		setScheduleQuota(t, m, "pool#a", scheduleQuota(provider.BillingPlan, .9, now), 12)
+		// The pool loses on the MEASURED tier (a real pay-as-you-go balance
+		// snapshot, not a config label): tier 2 vs tier 0 despite the higher
+		// surplus and better priority.
+		setScheduleQuota(t, m, "pool#a", scheduleQuota(provider.BillingPayG, .9, now), 12)
 
 		result := m.DecideOrder(ScheduleInput{
 			Exposed: "route", Now: now, QuotaMaxAge: time.Hour,
 			Commit: true, Generation: 12,
 			Targets: []Target{
-				{
-					Provider:        "pool#a",
-					Parent:          "pool",
-					Priority:        1,
-					BillingOverride: provider.BillingPayG,
-				},
+				{Provider: "pool#a", Parent: "pool", Priority: 1},
 				{Provider: "plan", Priority: 9},
 			},
 		})

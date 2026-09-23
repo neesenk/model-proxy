@@ -63,19 +63,17 @@ func DoctorWithCfg(cfg *configdomain.Config) int {
 	sort.Strings(pnames)
 	for _, name := range pnames {
 		prov := cfg.Providers[name]
-		tier := "plan"
-		if prov.Billing == "pay-as-you-go" {
-			tier = "pay-as-you-go"
-		}
 		extra := ""
 		if vids, pooled := climodels.PoolVirtuals(cfg, name); pooled {
 			extra = fmt.Sprintf("  pool: %d accounts", len(vids))
 		}
+		// billing = configured payment method (metadata). The scheduling tier
+		// is a runtime measurement, not this label — see the routes header.
 		fmt.Printf("  %s %s  quota=%s  peak=%s%s\n",
-			display.Pad(name, 12), display.Cyan(display.Pad(tier, 13)), display.Gray(QuotaSourceLabel(prov.Provider)), PeakSummary(prov.PeakHours), extra)
+			display.Pad(name, 12), display.Cyan(display.Pad(display.Or(prov.Billing, "plan"), 13)), display.Gray(QuotaSourceLabel(prov.Provider)), PeakSummary(prov.PeakHours), extra)
 	}
 
-	fmt.Printf("\n%s\n", display.Bold("Routes (dry-run: no live quota → tier then priority)"))
+	fmt.Printf("\n%s\n", display.Bold("Routes (dry-run: no live quota → priority order; tier is a runtime measurement — see doctor --live)"))
 	warns := 0
 	rnames := make([]string, 0, len(cfg.Routes))
 	for n := range cfg.Routes {
@@ -88,14 +86,9 @@ func DoctorWithCfg(cfg *configdomain.Config) int {
 		hasPlan := false
 		for _, t := range DryRunOrder(cfg, targets) {
 			prov := cfg.Providers[t.Provider]
-			tier := "plan"
-			if prov.Billing == "pay-as-you-go" {
-				tier = "pay-as-you-go"
-			}
-			if tier == "plan" {
-				hasPlan = true
-			}
-			fmt.Printf("    %s %s  p%d\n", display.Pad(t.Provider, 12), display.Cyan(display.Pad(tier, 13)), t.Priority)
+			// No tier column: offline there is no measurement, and the config
+			// billing label must not impersonate one.
+			fmt.Printf("    %s p%d\n", display.Pad(t.Provider, 12), t.Priority)
 			// Wire-protocol note: a provider our protocol system can neither
 			// passthrough nor convert (none today — codex/Responses is now
 			// converted) would get the HONEST marker — which client families
@@ -258,22 +251,16 @@ func PeakSummary(ph configdomain.PeakConfig) string {
 	return strings.Join(parts, ", ")
 }
 
-// dryRunOrder sorts targets by the offline schedule order: billing tier (plan
-// before pay-as-you-go), then priority asc. With no live quota all plan-intent
-// providers are equal-surplus, so tier + priority decide.
+// dryRunOrder sorts targets by the offline schedule order: priority asc. The
+// live scheduler's first key is the MEASURED billing tier, which offline
+// diagnosis cannot know (no daemon → no quota snapshot) — and the config
+// `billing:` label is deliberately NOT used as a stand-in: it is payment-method
+// metadata, not a scheduling input (it once demoted measured-plan providers
+// here and overrode their snapshot in the live path). Use `doctor --live` for
+// the real tier/surplus order.
 func DryRunOrder(cfg *configdomain.Config, targets []configdomain.RouteTarget) []configdomain.RouteTarget {
 	out := append([]configdomain.RouteTarget(nil), targets...)
 	sort.SliceStable(out, func(i, j int) bool {
-		ti, tj := 0, 0
-		if cfg.Providers[out[i].Provider].Billing == "pay-as-you-go" {
-			ti = 1
-		}
-		if cfg.Providers[out[j].Provider].Billing == "pay-as-you-go" {
-			tj = 1
-		}
-		if ti != tj {
-			return ti < tj
-		}
 		return out[i].Priority < out[j].Priority
 	})
 	return out

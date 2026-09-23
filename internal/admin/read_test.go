@@ -429,12 +429,7 @@ func TestAccountsProjection(t *testing.T) {
 	if empty.Accounts == nil || len(empty.Accounts) != 0 {
 		t.Errorf("provider without accounts must project an empty (non-nil) list: %+v", empty.Accounts)
 	}
-	if empty.UsageEndpoint {
-		t.Errorf("provider without usage_url must project usage_endpoint=false: %+v", empty)
-	}
-	if ds := byName["deepseek"]; !ds.UsageEndpoint {
-		t.Errorf("pay-as-you-go provider with usage_url must project usage_endpoint=true: %+v", ds)
-	}
+
 }
 
 func TestTokensProjection(t *testing.T) {
