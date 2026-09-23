@@ -235,8 +235,6 @@ func QuotaSourceLabel(providerID string) string {
 		return "user/balance"
 	case "kimi-code":
 		return "usages"
-	case "mimo":
-		return "balance"
 	case "zcode":
 		return "quota/limit"
 	default:

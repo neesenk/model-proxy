@@ -220,7 +220,7 @@ model-proxy usage deepseek         # 账户余额（is_available + 各币种）
 model-proxy usage volcengine       # Agent Plan 5h/日/周/月额度（需 AK/SK；否则列 config 模型）
 model-proxy usage qwen-plan        # 个人版 Credits 仅控制台可见（输出订阅页 URL + 列模型）
 model-proxy usage step-plan        # Step Plan Credit 月池仅控制台可见（输出订阅页 URL + 列模型）
-model-proxy usage mimo             # 按量计费余额（/api/v1/balance；余额不足上游报 402，自动冷却 failover）
+model-proxy usage mimo             # 余额仅控制台可见（无 API key 计费接口；输出控制台 URL + 列模型）
 # 有 daemon 轮询历史时，配额窗口行尾会按当前消耗速率预测耗尽时间（"按当前速率 ~40m 后耗尽"）；
 # Web Status 配额卡同样展示。速率 ≤0、无历史基线或轮询断档（>3×quota_poll_interval）时不显示。
 

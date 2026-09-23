@@ -1,12 +1,8 @@
 package provider
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
-	"strings"
 	"time"
 
 	"model-proxy/internal/display"
@@ -25,15 +21,19 @@ import (
 // The proxy selects the upstream base by protocol (see proxy.forward); requests
 // are byte-level passthrough (RewriteRequest no-op).
 //
-// Billing: pay-as-you-go only. usage_url points at the community-documented
-// balance endpoint GET /api/v1/balance (Bearer auth), which doubles as the
-// login-time key-validation probe. The balance is NOT a windowed budget, so
-// Quota() reports BillingPayG with unmeasured money windows — the surplus
-// scheduler ranks MiMo as a strict last resort, exactly like deepseek.
-// MiMo's Token Plan (monthly package) is intentionally NOT supported: its
-// usage endpoint is undocumented, and a subscription account would surface
-// here as a plain balance (exhaustion still fails over reactively via the
-// upstream 402, which targetexec's quota-denied policy already classifies).
+// Billing: pay-as-you-go only, with NO public balance API. The console's
+// balance/usage endpoints (platform.xiaomimimo.com/api/v1/balance and
+// .../tokenPlan/usage) are gated on the browser SSO session cookie
+// (api-platform serviceToken), NOT on the API key — verified live 2026-09:
+// every auth-header spelling answers 401 with a loginUrl redirect, and the
+// same paths 404 on the api.xiaomimimo.com inference host. The community
+// "GET /api/v1/balance with Bearer" recipe therefore does not work for API
+// keys (cc-switch issue #2488 reaches the same conclusion). Quota() therefore
+// returns BillingUnknown carrying the console URL in Notes — the
+// qwen-plan/step-plan pattern — and exhaustion surfaces reactively as the
+// upstream 402 (see the Quota comment). The console is deliberately NOT
+// scraped for cookies (same decision as qwen-plan, see
+// docs/decisions/intentional-behaviors.md).
 //
 // ProbeRequest / FilterModelIDs keep the baseProbe defaults, like deepseek:
 // probe.Callable forces /v1/messages + the anthropic body when
@@ -47,6 +47,11 @@ type MiMoProvider struct {
 	providerName string
 }
 
+// mimoConsoleURL is the MiMo console balance page. Shown in the CLI `usage`
+// output and the Web UI (QuotaSnapshot.Notes → app.js renders snap.Notes)
+// because the balance has no public API.
+const mimoConsoleURL = "https://platform.xiaomimimo.com/#/console/balance"
+
 func init() {
 	Register("mimo", func(cfg *Config, providerName string) (Provider, error) {
 		return &MiMoProvider{
@@ -58,15 +63,16 @@ func init() {
 }
 
 // AuthHeaders injects the key as ALL documented MiMo auth shapes:
-// Authorization: Bearer (OpenAI endpoint + the /api/v1/balance GET — the shape
-// the community usage query uses), x-api-key (Anthropic SDK convention on the
-// anthropic base), and api-key (the vendor's OWN primary documented header —
-// MiMo documents `api-key: $MIMO_API_KEY` first on BOTH the OpenAI and the
-// Anthropic compatibility pages, unlike deepseek which only reads
-// Bearer/x-api-key). Endpoints ignore the shapes they don't read, so one
-// config serves every MiMo surface (deepseek dual-write pattern plus the
-// vendor's api-key spelling, since a gateway that reads only its own documented
-// header would otherwise reject the anthropic path).
+// Authorization: Bearer (OpenAI endpoint — the documented auth for
+// /chat/completions — and the login-time /models validation probe), x-api-key
+// (Anthropic SDK convention on the anthropic base), and api-key (the vendor's
+// OWN primary documented header — MiMo documents `api-key: $MIMO_API_KEY`
+// first on BOTH the OpenAI and the Anthropic compatibility pages, unlike
+// deepseek which only reads Bearer/x-api-key). Endpoints ignore the shapes
+// they don't read, so one config serves every MiMo surface (deepseek
+// dual-write pattern plus the vendor's api-key spelling, since a gateway that
+// reads only its own documented header would otherwise reject the anthropic
+// path).
 func (p *MiMoProvider) AuthHeaders(req *http.Request) error {
 	key, err := p.LoadKey()
 	if err != nil {
@@ -106,167 +112,41 @@ func (p *MiMoProvider) ExtraHeaders(req *http.Request, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
 }
 
-// Quota GETs usage_url (/api/v1/balance) and parses the pay-as-you-go balance
-// into unmeasured money windows — the deepseek contract: BillingPayG with
-// RemainingPct=-1 (a balance is not a windowed budget, so the surplus
-// scheduler ranks MiMo as a strict last resort). On ANY failure (auth, HTTP,
-// non-balance body) returns a BillingUnknown snapshot carrying the error,
-// never a non-nil error, so the scheduler poll stays alive; an unset usage_url
-// is BillingUnknown with the console link in Notes (no endpoint to poll).
+// Quota returns an unmeasured snapshot: MiMo's balance/usage endpoints are
+// console-only (browser SSO cookie, not the API key — see the type comment),
+// so there is nothing an API key can poll. The console URL rides in Notes so
+// both the CLI `usage` command and the Web UI (app.js renders snap.Notes) can
+// link to the real numbers (qwen-plan/step-plan pattern). BillingUnknown →
+// the surplus scheduler ranks MiMo by priority (neutral); exhaustion is
+// handled reactively: the upstream answers 402 "Insufficient Balance", which
+// targetexec's body-proven quota-denied policy already classifies (its marker
+// table covers insufficient balance / account balance / 余额不足) → quota
+// cooldown + failover, no MiMo-specific code.
 func (p *MiMoProvider) Quota() (*QuotaSnapshot, error) {
-	if p.cfg.UsageURL == "" {
-		return &QuotaSnapshot{
-			Billing: BillingUnknown,
-			Notes:   []string{"usage_url not set — cannot query the balance", mimoConsoleNote},
-			AsOf:    time.Now(),
-		}, nil
-	}
-	headers := map[string]string{"Accept": "application/json"}
-	for k, v := range p.cfg.Headers {
-		headers[k] = v
-	}
-	body, fail, ok := usageGet(p.cfg.UsageURL, p.AuthHeaders, headers, func(code int) string {
-		switch code {
-		case 401, 403:
-			return fmt.Sprintf("HTTP %d — check API key", code)
-		}
-		return fmt.Sprintf("HTTP %d", code)
-	})
-	if !ok {
-		return fail, nil
-	}
-	s := &QuotaSnapshot{Billing: BillingPayG, RemainingPct: -1, AsOf: time.Now()}
-	s.Windows = append(s.Windows, ParseMiMoBalance(body)...)
-	return s, nil
+	return &QuotaSnapshot{
+		Billing:      BillingUnknown,
+		RemainingPct: -1, // the documented "unknown" sentinel — 0 would read as "exhausted"
+		Notes: []string{
+			"MiMo balance is viewable only in the console (no API-key billing endpoint)",
+			"Balance & recharge: " + mimoConsoleURL,
+		},
+		AsOf: time.Now(),
+	}, nil
 }
 
-// Usage prints the MiMo balance. On an unmeasured snapshot it links the console
-// and falls back to listing config models (qwen-plan/step-plan pattern) so
-// `usage mimo` is never mute.
+// Usage prints the console pointer and the config model list (qwen-plan/
+// step-plan pattern) so `usage mimo` is never mute.
 func (p *MiMoProvider) Usage() error {
 	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(p.providerName)))
+	fmt.Printf("%s pay-as-you-go (no API-key billing endpoint)\n", display.Dim("Billing:    "))
 	s, err := p.Quota()
 	if err != nil || s == nil {
 		fmt.Printf("%s %s\n", display.Dim("Usage:      "), display.Red("(unavailable)"))
-		listConfigModels(p.cfg.Models)
-		return nil
-	}
-	if s.Billing == BillingUnknown {
-		why := "unavailable"
-		if s.Err != "" {
-			why = s.Err
-		}
-		fmt.Printf("%s %s\n", display.Dim("Usage:      "), display.Red("("+why+")"))
+	} else {
 		for _, n := range s.Notes {
 			fmt.Println(display.Dim(display.Pad("", 18)) + n)
 		}
-		listConfigModels(p.cfg.Models)
-		return nil
 	}
-	printQuotaSnapshot(s)
+	listConfigModels(p.cfg.Models)
 	return nil
-}
-
-// mimoConsoleNote is the shared "numbers live in the console" line appended to
-// unmeasured snapshots (both the CLI and the Web UI render
-// QuotaSnapshot.Notes).
-const mimoConsoleNote = "Balance & recharge: " + mimoConsoleURL
-
-// mimoConsoleURL is the MiMo console balance page.
-const mimoConsoleURL = "https://platform.xiaomimimo.com/#/console/balance"
-
-// ParseMiMoBalance parses the GET /api/v1/balance body into money windows.
-// Returns nil when the body carries no recognizable balance field (the caller
-// then shows an empty PayG snapshot — never a fabricated zero balance). The
-// endpoint's envelope/field spelling is community-documented rather than
-// vendor-published, so the parser is deliberately tolerant: a `data` (or
-// `result`) envelope is unwrapped and the amount is read from the first present
-// of several spellings, as a JSON number or a numeric string. Every window is
-// money with RemainingPct=-1 (a balance is not a windowed budget), carrying the
-// granted/topped-up split as details when the endpoint reports it.
-func ParseMiMoBalance(body []byte) []QuotaWindow {
-	root := decodeTolerant(body)
-	if root == nil {
-		return nil
-	}
-	data := unwrapEnvelope(root)
-	total, ok := firstFloat(data, "balance", "total_balance", "available_balance", "remaining_balance", "credit_balance", "amount")
-	if !ok {
-		return nil
-	}
-	w := QuotaWindow{
-		Label:        display.Or(firstString(data, "currency"), "Balance"),
-		Kind:         "money",
-		Total:        total,
-		Used:         0,
-		RemainingPct: -1,
-	}
-	var details []QuotaDetail
-	if granted, ok := firstFloat(data, "granted_balance", "free_quota", "gift_balance", "complimentary_balance"); ok {
-		details = append(details, QuotaDetail{Label: "granted", Used: granted})
-	}
-	if topped, ok := firstFloat(data, "topped_up_balance", "recharged_balance", "paid_balance"); ok {
-		details = append(details, QuotaDetail{Label: "topped-up", Used: topped})
-	}
-	if len(details) > 0 {
-		w.Details = details
-		w.DetailLabel = "Balance split"
-	}
-	return []QuotaWindow{w}
-}
-
-// decodeTolerant decodes a JSON object with numbers as json.Number (accepts
-// both JSON numbers and numeric strings). Returns nil for non-objects.
-func decodeTolerant(body []byte) map[string]any {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	var m map[string]any
-	if err := dec.Decode(&m); err != nil || m == nil {
-		return nil
-	}
-	return m
-}
-
-// unwrapEnvelope returns data when the object is a {data: {...}} (or
-// {result: {...}}) envelope, else the object itself.
-func unwrapEnvelope(m map[string]any) map[string]any {
-	for _, key := range []string{"data", "result"} {
-		if inner, ok := m[key].(map[string]any); ok {
-			return inner
-		}
-	}
-	return m
-}
-
-// firstFloat returns the first present numeric value among keys. Values arrive
-// from decodeTolerant (UseNumber), so a JSON number is a json.Number and a
-// quoted number is a string — both are accepted. ok=false when none match.
-func firstFloat(m map[string]any, keys ...string) (float64, bool) {
-	for _, k := range keys {
-		v, ok := m[k]
-		if !ok || v == nil {
-			continue
-		}
-		switch n := v.(type) {
-		case json.Number:
-			if f, err := n.Float64(); err == nil {
-				return f, true
-			}
-		case string:
-			if f, err := strconv.ParseFloat(strings.TrimSpace(n), 64); err == nil {
-				return f, true
-			}
-		}
-	}
-	return 0, false
-}
-
-// firstString returns the first present non-empty string value among keys.
-func firstString(m map[string]any, keys ...string) string {
-	for _, k := range keys {
-		if s, ok := m[k].(string); ok && strings.TrimSpace(s) != "" {
-			return strings.TrimSpace(s)
-		}
-	}
-	return ""
 }

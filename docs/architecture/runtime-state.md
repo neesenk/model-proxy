@@ -16,7 +16,7 @@
 | aqp | `monthly_usage` | plan |
 | kimi-code | `/usages` | plan |
 | deepseek | `/user/balance` | pay-as-you-go |
-| mimo | `/api/v1/balance` | pay-as-you-go |
+| mimo | 无（控制台 cookie 鉴权，非 API key） | pay-as-you-go（BillingUnknown）|
 
 最长周期窗口标记为 `Ultimate`，作为调度总预算和节奏基准；更短窗口标记为 `Short`，表示短期 rate-cap。短窗口不直接参与最终 `RemainingPct` 的 min。
 

@@ -214,10 +214,10 @@ providers:
   # One key serves both protocols; the two endpoints are per-protocol:
   # openai_base_url = the OpenAI-compatible base (/v1), anthropic_base_url =
   # the Anthropic-compatible base (no /v1; proxy keeps the client
-  # /v1/messages path). usage_url is BOTH the login-time key-validation
-  # endpoint and the runtime quota poll target (GET /api/v1/balance with
-  # Bearer — community-documented; the balance is not a windowed budget, so
-  # MiMo ranks as a strict last resort like deepseek). Token Plan
+  # /v1/messages path). No usage_url: MiMo's balance endpoint is gated on the
+  # console's browser SSO cookie, NOT the API key (verified 2026-09), so the
+  # key is validated against openai_base_url/models and quota stays
+  # console-only (BillingUnknown + console URL, like qwen-plan). Token Plan
   # subscriptions are NOT supported. Poolable (repeat 'login').
   mimo:
     openai_base_url: https://api.xiaomimimo.com/v1
@@ -225,7 +225,6 @@ providers:
     provider_id: mimo
     priority: 3
     billing: pay-as-you-go
-    usage_url: https://api.xiaomimimo.com/api/v1/balance
     models:
       - mimo-v2.6-flash
       - mimo-v2.6-pro

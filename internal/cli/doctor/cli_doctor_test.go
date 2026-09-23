@@ -18,7 +18,6 @@ func TestQuotaSourceLabel(t *testing.T) {
 		{"volcengine", "GetAFPUsage (AK/SK)"},
 		{"deepseek", "user/balance"},
 		{"kimi-code", "usages"},
-		{"mimo", "balance"},
 		{"unknown", "(none → unknown at runtime)"},
 	} {
 		if got := clidoctor.QuotaSourceLabel(tc.id); got != tc.want {
