@@ -141,15 +141,48 @@ export function quotaErrKind(snap) {
   return 'error';
 }
 
+// accountRemainingLabel is the Status-page per-account pill label for one quota
+// snapshot (app.js wraps it in the pill + color class). Pure so the
+// measurement-honesty rule is unit-tested:
+//   - no snapshot                -> 'No data'
+//   - Err                        -> by error kind
+//   - ultimate window measured   -> 'X% left'
+//   - Plan label                 -> the plan name
+//   - windows but none ultimate  -> 'Available' (a pay-as-you-go balance IS the
+//                                   availability signal)
+//   - NO windows at all          -> 'Unmeasured' — never 'Available': with no
+//                                   measurement there is nothing to claim
+//                                   (console-only providers land here)
+export function accountRemainingLabel(snap) {
+  if (!snap) return 'No data';
+  if (snap.Err) {
+    const k = quotaErrKind(snap);
+    return k === 'session-expired' ? 'Session expired'
+      : k === 'not-logged-in' ? 'Not logged in' : 'Error';
+  }
+  const windows = snap.Windows || [];
+  const ult = windows.find((w) => w.Ultimate);
+  if (ult && ult.RemainingPct != null && ult.RemainingPct >= 0) {
+    return (ult.RemainingPct * 100).toFixed(1) + '% left';
+  }
+  if (snap.Plan) return snap.Plan;
+  if (windows.length > 0) return 'Available';
+  return 'Unmeasured';
+}
+
 // accountUsageState decides the collapsed summary hint and default open state
 // for an account's Usage <details> section. The logic is pure and DOM-free so
 // it can be unit-tested; app.js calls it and renders the resulting attributes.
 //
 // Branches:
-//   - snap == null          -> hint 'no data',     collapsed
-//   - snap.Err              -> hint by error kind, open (login/error visible)
-//   - empty Windows, no Err -> hint 'unmeasured',  collapsed
-//   - non-empty Windows     -> hint by window/plan, open
+//   - snap == null                    -> hint 'no data',     collapsed
+//   - snap.Err                        -> hint by error kind, open (login/error visible)
+//   - empty Windows + Notes, no Err   -> hint 'console only', OPEN — the notes
+//     (the provider's own console/usage URL) are the section's entire content
+//     for console-only providers (mimo/qwen-plan/step-plan/static), so hiding
+//     them behind a collapsed header would bury the only pointer the user has
+//   - empty Windows, no Notes, no Err -> hint 'unmeasured',  collapsed
+//   - non-empty Windows               -> hint by window/plan, open
 export function accountUsageState(snap) {
   if (!snap) {
     return { hint: 'No data', open: false };
@@ -162,6 +195,9 @@ export function accountUsageState(snap) {
   }
   const windows = snap.Windows || [];
   if (windows.length === 0) {
+    if (snap.Notes && snap.Notes.length) {
+      return { hint: 'Console only', open: true };
+    }
     return { hint: 'Unmeasured', open: false };
   }
   const ult = windows.find((w) => w.Ultimate);

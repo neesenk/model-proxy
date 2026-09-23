@@ -5730,21 +5730,16 @@ function healthPill(h) {
 // `snap` is a raw provider.QuotaSnapshot (PascalCase) from /api/status.quota,
 // keyed by accountProviderKey(p, a); null when the account has no snapshot yet.
 function accountRemainingPill(snap) {
-  if (!snap) return `<span class="pill muted">No data</span>`;
-  if (snap.Err) {
-    const k = quotaErrKind(snap);
-    const lbl = k === 'session-expired' ? 'Session expired'
-      : k === 'not-logged-in' ? 'Not logged in' : 'Error';
-    return `<span class="pill err">${esc(lbl)}</span>`;
+  const label = accountRemainingLabel(snap);
+  if (label === 'No data') return `<span class="pill muted">No data</span>`;
+  if (snap && snap.Err) return `<span class="pill err">${esc(label)}</span>`;
+  const pct = /% left$/.test(label) ? parseFloat(label) : null;
+  if (pct != null) {
+    const cls = pct > 30 ? 'ok' : (pct > 10 ? 'warn' : 'err');
+    return `<span class="pill ${cls}">${esc(label)}</span>`;
   }
-  const ult = (snap.Windows || []).find((w) => w.Ultimate);
-  if (ult && ult.RemainingPct != null && ult.RemainingPct >= 0) {
-    const p = ult.RemainingPct;
-    const cls = p > 0.3 ? 'ok' : (p > 0.1 ? 'warn' : 'err');
-    return `<span class="pill ${cls}">${(p * 100).toFixed(1)}% left</span>`;
-  }
-  if (snap.Plan) return `<span class="pill muted">${esc(snap.Plan)}</span>`;
-  return `<span class="pill ok">Available</span>`;
+  if (label === 'Available') return `<span class="pill ok">Available</span>`;
+  return `<span class="pill muted">${esc(label)}</span>`;
 }
 
 // renderProvidersCard draws the per-provider health + request-counter table,

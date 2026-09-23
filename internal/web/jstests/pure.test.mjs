@@ -31,7 +31,7 @@ import {
   fmtCompact,
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
   CLIENT_GONE_STATUS, notLoggedHint,
-  quotaErrKind, accountUsageState,
+  quotaErrKind, accountUsageState, accountRemainingLabel,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
   securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML, SECURITY_RANGES, securityRangeFromSecs,
   securityFilterQuery, securityFilterFromQuery, explainCacheKey,
@@ -1682,6 +1682,28 @@ test('accountUsageState: error snapshots stay open', () => {
 test('accountUsageState: empty windows without error is collapsed unmeasured', () => {
   assert.deepEqual(accountUsageState({ Windows: [] }), { hint: 'Unmeasured', open: false });
   assert.deepEqual(accountUsageState({ Plan: 'Pro', Windows: [] }), { hint: 'Unmeasured', open: false });
+});
+
+test('accountUsageState: console-only snapshot (notes, no windows) opens', () => {
+  // The notes ARE the section's content for console-only providers — burying
+  // them behind a collapsed header hides the only pointer the user has.
+  const consoleOnly = {
+    Windows: [], Notes: ['console only', 'Balance & recharge: https://example.com/console'],
+  };
+  assert.deepEqual(accountUsageState(consoleOnly), { hint: 'Console only', open: true });
+  assert.deepEqual(accountUsageState({ Notes: [] }), { hint: 'Unmeasured', open: false });
+});
+
+test('accountRemainingLabel: no measurement never claims Available', () => {
+  assert.equal(accountRemainingLabel(null), 'No data');
+  assert.equal(accountRemainingLabel({ Err: 'not logged in' }), 'Not logged in');
+  assert.equal(accountRemainingLabel({ Windows: [{ Ultimate: true, RemainingPct: 0.486 }] }), '48.6% left');
+  assert.equal(accountRemainingLabel({ Plan: 'Team' }), 'Team');
+  // Windows but no ultimate (pay-as-you-go balance) -> the balance IS availability.
+  assert.equal(accountRemainingLabel({ Windows: [{ Label: 'CNY', Total: 182.5, RemainingPct: -1 }] }), 'Available');
+  // No windows at all (console-only) -> honest 'Unmeasured', NOT 'Available'.
+  assert.equal(accountRemainingLabel({ Windows: [], Notes: ['console only'] }), 'Unmeasured');
+  assert.equal(accountRemainingLabel({}), 'Unmeasured');
 });
 
 test('accountUsageState: snapshots with windows default open', () => {
