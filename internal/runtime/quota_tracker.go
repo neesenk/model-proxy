@@ -511,8 +511,13 @@ type PersistedQuotaSnapshot struct {
 	Billing      provider.BillingClass  `json:"billing"`
 	RemainingPct float64                `json:"remaining_pct"`
 	Windows      []provider.QuotaWindow `json:"windows"`
-	AsOf         time.Time              `json:"as_of"`
-	Err          string                 `json:"err,omitempty"`
+	// Notes carry the provider implementation's own display knowledge — the
+	// console/usage URLs for providers whose quota is console-only (mimo,
+	// qwen-plan, step-plan). They are persisted so a restart does not blank the
+	// CLI/Web UI link until the next poll (≤ quota_poll_interval).
+	Notes []string  `json:"notes,omitempty"`
+	AsOf  time.Time `json:"as_of"`
+	Err   string    `json:"err,omitempty"`
 }
 
 // persist writes the quota/sticky/health snapshot atomically (tmp + rename).
@@ -545,7 +550,7 @@ func (t *QuotaTracker) Persist() error {
 		for k, v := range snapshots {
 			out[k] = PersistedQuotaSnapshot{
 				Billing: v.Billing, RemainingPct: v.RemainingPct,
-				Windows: v.Windows, AsOf: v.AsOf, Err: v.Err,
+				Windows: v.Windows, Notes: v.Notes, AsOf: v.AsOf, Err: v.Err,
 			}
 		}
 		wrap["providers"] = out
@@ -620,7 +625,7 @@ func (t *QuotaTracker) Load() {
 		}
 		quota[k] = &provider.QuotaSnapshot{
 			Billing: v.Billing, RemainingPct: v.RemainingPct,
-			Windows: v.Windows, AsOf: v.AsOf, Err: v.Err,
+			Windows: v.Windows, Notes: v.Notes, AsOf: v.AsOf, Err: v.Err,
 		}
 	}
 	t.runtime.MergeQuotas(quota, t.CurrentGeneration())

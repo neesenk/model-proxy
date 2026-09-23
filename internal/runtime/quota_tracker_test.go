@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -255,6 +256,40 @@ func TestLoadRestoresEveryLiveProviderSnapshot(t *testing.T) {
 	}
 	if s := tr.Snapshot("deepseek"); s == nil {
 		t.Fatal("loaded pay-as-you-go snapshot with usage_url must be kept, got nil")
+	}
+}
+
+// Notes (the provider implementation's console/usage URLs) must survive a
+// persist → load cycle: they are the only usage surface for console-only
+// providers (mimo/qwen-plan/step-plan), and dropping them on restart would
+// blank the CLI/Web UI link until the next poll.
+func TestPersistLoadRoundTripsNotes(t *testing.T) {
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"mimo": {}},
+	}
+	path := filepath.Join(t.TempDir(), "q.json")
+	tr := NewQuotaTracker(path, func() *configdomain.Config { return cfg },
+		func() map[string]provider.Provider {
+			return map[string]provider.Provider{"mimo": &snapshotProv{rem: -1}}
+		}, newTestManager(0))
+	notes := []string{"console only", "Balance & recharge: https://example.com/console"}
+	tr.SetSnapshot("mimo", &provider.QuotaSnapshot{
+		Billing: provider.BillingUnknown, RemainingPct: -1, Notes: notes,
+	})
+	if err := tr.Persist(); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+	fresh := NewQuotaTracker(path, func() *configdomain.Config { return cfg },
+		func() map[string]provider.Provider {
+			return map[string]provider.Provider{"mimo": &snapshotProv{rem: -1}}
+		}, newTestManager(0))
+	fresh.Load()
+	got := fresh.Snapshot("mimo")
+	if got == nil {
+		t.Fatal("reloaded snapshot missing")
+	}
+	if !reflect.DeepEqual(got.Notes, notes) {
+		t.Fatalf("reloaded Notes = %q, want %q (console link must survive restart)", got.Notes, notes)
 	}
 }
 
