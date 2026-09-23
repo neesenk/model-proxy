@@ -798,14 +798,34 @@ test('takeover 页：模板表渲染与真实 takeover/restore 闭环 (mutation 
   assert.equal(written.env.ANTHROPIC_AUTH_TOKEN, 'PROXY_MANAGED');
   assert.equal(written.env.KEEP, '1', 'unrelated keys survive the rewrite');
 
+  // Taken over → the row offers BOTH a Re-takeover (idempotent sync of new
+  // models/MCP; no Restore round trip needed) and Restore.
+  await ctx.waitFor('taken-over row offers re-takeover + restore', () => ctx.ev(
+    `!!document.querySelector('[data-tk-takeover="claude"]') && !!document.querySelector('[data-tk-restore="claude"]')`));
+  assert.equal(await ctx.ev(`document.querySelector('[data-tk-takeover="claude"]').textContent`), 'Re-takeover',
+    'taken-over family labels the takeover button Re-takeover');
+  await ctx.ev(`document.querySelector('[data-tk-takeover="claude"]').click()`);
+  await ctx.waitFor('re-takeover dialog opens', () => ctx.ev(
+    `document.getElementById('tk-run-modal').open === true
+      && document.getElementById('tkr-title').textContent.includes('Re-takeover')`));
+  await ctx.ev(`document.getElementById('tkr-run').click()`);
+  await ctx.waitFor('re-takeover run completed', () => ctx.ev(
+    `document.getElementById('tk-run-modal').open === false
+      && (document.querySelector('#tab-takeover .msg') || {}).textContent?.includes('taken over')`));
+  const rewritten = JSON.parse(readFileSync(claudeFile, 'utf8'));
+  assert.equal(rewritten.env.ANTHROPIC_BASE_URL, `http://127.0.0.1:${ctx.port}`,
+    're-takeover re-applies the proxy pointer');
+  assert.equal(rewritten.env.KEEP, '1', 're-takeover keeps unrelated keys');
+
   // Restore goes through the shared confirm modal.
   await ctx.ev(`document.querySelector('[data-tk-restore="claude"]').click()`);
   await ctx.waitFor('confirm modal open', () => ctx.ev(`document.getElementById('confirm-modal').open === true`));
   await ctx.ev(`document.getElementById('confirm-yes').click()`);
-  await ctx.waitFor('claude restored (row offers takeover again)', () => ctx.ev(
-    `!!document.querySelector('[data-tk-takeover="claude"]')`));
+  await ctx.waitFor('claude restored (backup marker gone, row offers fresh takeover)', () => ctx.ev(
+    `!document.querySelector('[data-tk-restore="claude"]')
+      && document.querySelector('[data-tk-takeover="claude"]').textContent === 'Takeover'`));
   assert.equal(readFileSync(claudeFile, 'utf8'), '{"env":{"KEEP":"1"}}',
-    'restore returns the verbatim backup');
+    'restore returns the verbatim backup taken before the FIRST takeover (re-takeover kept it)');
   assert.deepEqual(await ctx.pageErrors(), [], 'takeover flow must not raise JS errors');
 });
 

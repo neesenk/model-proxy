@@ -113,7 +113,9 @@ Config File / Status / Actions）。族行（`.tk-family`）：族名 + hint（�
 族配置文件 +
 聚合状态徽章 `takeoverFamilyBadge`（changed externally（drift，带解释 tooltip）> taken over
 （title 列变体）> not installed（title 说明磁盘上无配置文件）/
-not taken over，在 STATUS 列）+ 族级 Takeover（`.btn.primary`，琥珀实心）/ Restore（`.btn.ok`，绿色描边）按钮
+not taken over，在 STATUS 列）+ 族级 Takeover（`.btn.primary`，琥珀实心；**已接管族显示为 Re-takeover**——
+takeover 幂等且保留**原始**备份，同步新增模型/MCP 无需先 Restore 再 Takeover，与 CLI
+重复执行 `takeover <client>` 等价）+ Restore（`.btn.ok`，绿色描边）按钮
 （与 CLI `takeover <client>` 同一操作单位）+ Edit（默认描边，打开**整个合并文
 档**——多协议变体声明在模板的 variants: 块
 里，变体选择发生在 Takeover 确认对话框的单选中）。头部动作行：New Template /
@@ -136,6 +138,8 @@ title 注明只动 model-proxy 管理的条目）+ 参与变体（渲染为
 协议标签 Anthropic/Chat Completion/Responses，原始模板 id 只留 title tooltip）+ 变体选择
 说明 `.tk-note` 信息条（accent 淡底，`white-space: pre-line`）+ `.code`
 高亮渲染——不含客户端自有内容，聚焦本次变更），确认按钮才执行 `POST /api/takeover`。
+已接管族打开时对话框标题与确认按钮同为 Re-takeover（同一端点；预览的
+updates-existing-file 徽章已表明只动托管条目）。
 Restore 走 confirmDialog（`htmlMessage` 选项渲染备份清单）。执行结果渲染进卡内 `.msg` 区，mutation 后整表重拉；
 `loadTakeover` 带请求序号守卫（迟到的旧响应不得覆盖新 surface）。
 

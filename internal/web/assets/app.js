@@ -11294,12 +11294,21 @@ function takeoverResultHTML() {
 // dialog (auto-selected by native coverage, pickable per run). The family
 // row's hint names the auto variant so the preview is visible at a glance.
 function takeoverFamilyRowHTML(g) {
+  const taken = !!(g.taken && g.taken.length);
   let action = '';
   const viewBtn = `<button class="btn small" data-tk-edit="${esc(g.family)}">Edit</button>`;
-  if (g.taken && g.taken.length) {
-    action = `<button class="btn small ok" data-tk-restore="${esc(g.family)}" ${takeoverBusy ? 'disabled' : ''}>Restore</button> `;
-  } else if (g.installed) {
-    action = `<button class="btn small primary" data-tk-takeover="${esc(g.family)}" ${takeoverBusy ? 'disabled' : ''}>Takeover</button> `;
+  // A taken-over family can be taken over AGAIN without restoring first:
+  // takeover is idempotent and keeps the ORIGINAL backup, so syncing newly
+  // added models/MCP never requires a Restore → Takeover round trip (the CLI
+  // has always allowed this). Label it Re-takeover to set that expectation.
+  if (g.installed) {
+    const tip = taken
+      ? ' title="re-apply the current models/MCP config to this client — keeps the existing backup"'
+      : '';
+    action = `<button class="btn small primary" data-tk-takeover="${esc(g.family)}" ${takeoverBusy ? 'disabled' : ''}${tip}>${taken ? 'Re-takeover' : 'Takeover'}</button> `;
+  }
+  if (taken) {
+    action += `<button class="btn small ok" data-tk-restore="${esc(g.family)}" ${takeoverBusy ? 'disabled' : ''}>Restore</button> `;
   }
   const file = g.variants[0] ? g.variants[0].file : '';
   const fmt = g.variants[0] ? g.variants[0].format : '';
@@ -11385,6 +11394,10 @@ async function openTakeoverConfirm(client) {
   const variants = group.variants || [];
   const multi = variants.length > 1;
   const hasMCP = !!group.mcp;
+  // A family with any backup marker is already taken over — the run just
+  // re-applies the managed entries (the original backup is kept).
+  const taken = variants.some((c) => c.taken_over);
+  const actionLabel = taken ? 'Re-takeover' : 'Takeover';
   const allModels = (takeoverData && takeoverData.models) || [];
   const allMcp = (takeoverData && takeoverData.mcp) || [];
 
@@ -11420,7 +11433,7 @@ async function openTakeoverConfirm(client) {
 
   modal.innerHTML =
     `<header class="modal-head">
-       <h2 id="tkr-title">Takeover ${esc(client)}</h2>
+       <h2 id="tkr-title">${actionLabel} ${esc(client)}</h2>
        <button type="button" class="link-btn" id="tkr-cancel" aria-label="Close">Close</button>
      </header>
      <div class="modal-body">
@@ -11436,7 +11449,7 @@ async function openTakeoverConfirm(client) {
        <div class="msg err" id="tkr-msg" hidden></div>
        <div class="modal-actions">
          <button type="button" class="btn small" id="tkr-no">Cancel</button>
-         <button type="button" class="btn small primary" id="tkr-run">Takeover</button>
+         <button type="button" class="btn small primary" id="tkr-run">${actionLabel}</button>
        </div>
      </div>`;
 

@@ -190,6 +190,9 @@ Catalog）后生效。
 - 备份位于 `<configDir>/.model-proxy/<client>.bak`(+ sha256 meta)；
 - `takeover all` / `restore all` 遇到未安装客户端时跳过并继续；单独指定客户端而文件不存在时返回硬错误；未知模板/族名是硬错误（列出可用模板与族）；`takeover all` 每族只应用自动选中的一个变体（见上文协议感知变体选择）；
 - takeover 前必须备份，restore 后不得保留代理专属残片；
+- 对**已接管**客户端再次 takeover 是受支持的一等操作（CLI 直接重复 `takeover <client>`，
+  Web 的 Re-takeover 按钮走同一 `RunTakeover`）：幂等备份保留**原始**备份不被覆盖，
+  只重写模板管理的条目——同步新增模型/MCP 无需先 restore；
 - restore 成功即结束接管：删除 `<client>.bak` 与 `<client>.bak.meta` 标记，
   drift 检查（以 `.bak` 是否存在作为"已接管"标记）随后报告该客户端未接管，
   再次 takeover 会重新备份而不是沿用陈旧备份；恢复前的 sha256 完整性校验
