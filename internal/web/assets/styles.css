@@ -1568,6 +1568,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .acct-err { color: var(--err-fg); font-style: normal; }
 .acct-quota-head { font-size: 0.75rem; color: var(--muted); font-family: var(--mono); margin-bottom: 8px; }
 .acct-notes { margin-bottom: 10px; font-size: 0.6875rem; color: var(--muted); font-family: var(--mono); display: grid; gap: 2px; }
+.acct-notes a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; word-break: break-all; }
 .acct-detail { margin: 8px 0 10px; padding: 8px 10px; background: var(--surface-2); border: 1px solid var(--border-2); border-radius: var(--r-inner); }
 .acct-detail-label { font-size: 0.6875rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 4px; }
 .acct-detail-row { display: flex; justify-content: space-between; font-size: 0.75rem; }

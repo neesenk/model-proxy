@@ -13,6 +13,7 @@ import "strings"
 //   - zhipu:    https://docs.z.ai/guides/capabilities/thinking
 //   - kimi:     https://platform.kimi.com/docs/guide/use-thinking-models
 //   - qwen:     https://help.aliyun.com (deep-thinking / 深度思考 guide)
+//   - stepfun:  https://platform.stepfun.com/docs/zh/step-plan/integrations/reasoning-api
 
 // EffortProfile describes how a provider's CHAT endpoint accepts reasoning
 // effort LEVELS beyond the on/off switch shape (ChatReasoningMode).
@@ -31,8 +32,10 @@ type EffortProfile struct {
 // shape. The zero profile (nil Enum) means "switch only" — the default for
 // every provider whose chat endpoint either passes reasoning_effort through
 // natively (aqp/shopee OpenRouter dialect) or has too fragmented per-model
-// subsets to pin down (volcengine). Register a profile ONLY when the vendor's
-// chat endpoint accepts a non-pass-through enum or replaces the switch.
+// subsets to pin down (volcengine). Register a profile when the vendor's chat
+// endpoint accepts a NON-pass-through enum, REPLACES the switch (EnumOnly),
+// or restricts the pass-through reasoning_effort field to a narrower vendor
+// enum (step-plan low|medium|high).
 func ChatEffortProfile(providerID, model string) EffortProfile {
 	switch providerID {
 	case "deepseek":
@@ -81,6 +84,17 @@ func ChatEffortProfile(providerID, model string) EffortProfile {
 				"high": "xhigh", "xhigh": "xhigh", "max": "xhigh",
 			}}
 		}
+	case "step-plan":
+		// Step Plan's chat endpoint takes reasoning_effort with the vendor
+		// enum low|medium|high (platform.stepfun.com step-plan reasoning-api).
+		// The field is the pass-through shape (ChatReasoningMode default), but
+		// the enum is restricted: canonical rungs above high clamp to high,
+		// and "off" maps to low — the step reasoning models have no off
+		// switch (step-3.5-flash only advertises a low mode).
+		return EffortProfile{Enum: map[string]string{
+			"none": "low", "minimal": "low", "low": "low", "medium": "medium",
+			"high": "high", "xhigh": "high", "max": "high",
+		}}
 	}
 	return EffortProfile{}
 }

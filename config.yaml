@@ -197,6 +197,18 @@ providers:
     models:
       - jev-latest
       - jev-1.13.0
+  step-plan:
+    provider_id: step-plan
+    priority: 1
+    billing: plan
+    openai_base_url: https://api.stepfun.com/step_plan/v1
+    anthropic_base_url: https://api.stepfun.com/step_plan
+    models:
+      - step-5-preview
+      - step-3.7-flash
+      - step-3.5-flash
+      - step-3.5-flash-2603
+      - step-router-v1
 # Qianwen Token Plan 个人版 (千问 AI Token Plan personal edition). API key via
 # `login qwen-plan` (from the Token Plan console; key format sk-sp-…). Two
 # protocol bases: openai_base_url = OpenAI-compatible base, anthropic_base_url
@@ -214,6 +226,28 @@ providers:
 #      - qwen3.6-flash
 #      - glm-5.2
 #      - deepseek-v4-pro
+
+# StepFun Step Plan (阶跃星辰订阅制 Coding Plan — Credit 月池, NOT the
+# pay-as-you-go 开放平台 channel; visiting api.stepfun.com/v1 never consumes
+# plan Credits). API key via `login step-plan` (from
+# https://platform.stepfun.com/interface-key). Two protocol bases:
+# openai_base_url = .../step_plan/v1, anthropic_base_url = .../step_plan
+# (no /v1; proxy keeps /v1/messages). No usage_url — Credit 月池 usage is
+# console-only (no public API; /v1/accounts reads the SEPARATE pay-as-you-go
+# balance); `login step-plan` validates the key by probing
+# openai_base_url/models. stepaudio-* voice models use separate audio
+# endpoints and stay out of the chat models: list. Poolable (repeat `login`).
+# Also a preset: `model-proxy add step-plan`.
+#  step-plan:
+#    provider_id: step-plan
+#    openai_base_url: https://api.stepfun.com/step_plan/v1
+#    anthropic_base_url: https://api.stepfun.com/step_plan
+#    models:
+#      - step-5-preview
+#      - step-3.7-flash
+#      - step-3.5-flash
+#      - step-3.5-flash-2603
+#      - step-router-v1
 
 # TypeSafe System One decisions API (Jev): typed, calibrated decisions
 # (choice/score/noul + probabilities) instead of generated text — a routing/
@@ -413,6 +447,7 @@ cache:
 # jina intentionally omitted: mcp.jina.ai unreachable from this host today
 # (curl EOF on all paths; re-add when it recovers).
 mcp:
+  stepfun-search: {provider: step-plan, url: 'https://api.stepfun.com/step_plan/v1/mcp/web_search/mcp'} # StepSearch: web_search ¥0.04/call (Step Plan Credit), web_fetch free
   zhipu-search: {provider: zhipu, url: 'https://open.bigmodel.cn/api/mcp/web_search_prime/mcp'}
   zhipu-reader: {provider: zhipu, url: 'https://open.bigmodel.cn/api/mcp/web_reader/mcp'}
   zhipu-zread: {provider: zhipu, url: 'https://open.bigmodel.cn/api/mcp/zread/mcp'}
@@ -429,10 +464,10 @@ mcp:
     env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU} # literals OK for benign keys; credential-shaped names (…_KEY/TOKEN/…)
     # still require indirection
 mcp_routes:
-  # Web research: search (three engines by scenario — parameter shapes differ,
-  # so they are NOT one failover set), read+clean (zhipu reader and firecrawl
-  # scrape share the url parameter and DO fail over), batch clean fetch, and
-  # document parsing.
+  # Web research: search (four engines by scenario — parameter shapes differ,
+  # so they are NOT one failover set), read+clean (zhipu reader, firecrawl
+  # scrape and stepfun web_fetch share the url parameter and DO fail over),
+  # batch clean fetch, and document parsing.
   web-research:
     targets:
       - {mcp: zhipu-search, tools: {web_search: web_search_prime}} # general/cn-optimized search (search_query)
@@ -444,6 +479,8 @@ mcp_routes:
           url_read_deep: firecrawl_scrape, # full scrape: formats/pdf/screenshot/json extraction
           doc_parse: firecrawl_parse}} # file parse/clean (PDF/HTML -> markdown/json)
       - {mcp: zhipu-reader, tools: {url_read: webReader}} # fast markdown read (url) — schema baseline for url_read
+      - {mcp: stepfun-search, tools: {web_search_category: web_search, # category-filtered search: query+category programming|research|gov|business (+use_common_search fallback toggle); ¥0.04/call as Step Plan Credit)
+          url_read: web_fetch}} # free clean fetch (url) — extra url_read failover leg
   code-search:
     targets:
       - {mcp: grep-app, tools: {code_search: searchGitHub}}

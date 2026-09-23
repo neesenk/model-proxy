@@ -372,6 +372,15 @@ func (p *QwenPlanProvider) Usage() error {
 	return nil
 }
 
+func (p *StepPlanProvider) Usage() error {
+	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(p.providerName)))
+	fmt.Printf("%s Credit 月池 (monthly pool + 30d booster packs; 1M Credit = ¥1; month-end reset)\n", display.Dim("Billing:    "))
+	fmt.Printf("%s %s\n", display.Dim("Usage:      "), display.Gray("(console-only; no public Credit API — /v1/accounts reads the pay-as-you-go balance)"))
+	fmt.Printf("%s %s\n", display.Dim("Details:    "), display.Cyan(stepPlanConsoleURL))
+	listConfigModels(p.cfg.Models)
+	return nil
+}
+
 func (p *TypeSafeProvider) Usage() error {
 	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(p.cfg.ProviderName)))
 	fmt.Printf("%s System One decisions (input $0.042/M tokens, output free)\n", display.Dim("Billing:    "))

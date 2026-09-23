@@ -8,7 +8,7 @@
 |---|---|---|
 | aqp / codex | oauth_auth | `~/.model-proxy/<name>_oauth_auth.json` |
 | static | apikey | `~/.model-proxy/<name>_apikeys.json`（账号池）；无 legacy singular fallback |
-| zhipu / zcode / deepseek / kimi-code / qwen-plan | apikey | `~/.model-proxy/<name>_apikeys.json`（账号池）；旧单数 `_apikey.json` 仅只读 fallback |
+| zhipu / zcode / deepseek / kimi-code / qwen-plan / step-plan | apikey | `~/.model-proxy/<name>_apikeys.json`（账号池）；旧单数 `_apikey.json` 仅只读 fallback |
 | volcengine | apikey | `~/.model-proxy/<name>_apikeys.json` — 每账号 `{api_key, access_key, secret_key}`；旧单数仅 fallback |
 
 路径从 provider name（config 一级 key）派生，支持多实例（如 `zhipu-personal` / `codex-work`）。多账号见 `docs/architecture/provider-pools.md`。所有路径（CLI `login`、`BuildOne`、web 异步登录、`logout`）一律用 config name，**包括 aqp/codex**（`RunLogin`/`runCodexLoginFlow` 接收 `provName` → login 内部 `oauthAuthFilePath(HomeDir(), provName)`，与 `internal/accounts` 的 `AuthFilePath(provName, "oauth_auth")` 同一路径）；曾有的「CLI login 硬编码 provider_id → 非同名实例读写错位」bug 已修，`TestAqpCodexLogin_UsesConfigNameForAuthFile` 守护。OAuth 文件不得由 Web/CLI 直接 `os.WriteFile`/`os.Remove`：codex 统一经 `provider.WriteCodexAuthFile` / `provider.ClearCodexAccount`，aqp 经对应 provider helper，最终由 `credstore.Ref` 执行 file/keychain 选择、原子权限、来源标记与跨模式删除。
@@ -101,6 +101,17 @@ OAuth device flow（从 codex-rs 源码确认）：issuer `https://auth.openai.c
 - **无公开用量/Credits 接口**：个人版 5h/7d Credits 用量仅在控制台「用量分析」页（文档「以控制台订阅页用量明细为准」）。`Quota()` 返回 `BillingUnknown` + `Notes`（含控制台 URL `https://platform.qianwenai.com/home/billing/subscription/token-plan-individual`），CLI `usage` 与 Web UI（`/api/status.quota` → app.js 渲染 `snap.Notes`）均展示该 URL。**有意不轮询/不抓控制台**（尊重平台「严禁 API 调用」条款，见 `docs/decisions/intentional-behaviors.md`）。
 - 配额窗口：5h = 700/3000/12000 Credits，7d = 2500/10000/40000 Credits（Lite/Standard/Pro）；每次消耗同时计入两层，任一层触顶暂停。429 `Allocated quota exceeded`（窗口耗尽）→ `internal/targetexec.ParseRateLimit` 分类为 `quota`（默认 1h 冷却或 body reset hint，上限 7d）→ 调度跳过并 failover；429 `Requests rate limit exceeded`（并发限频）→ `transient`（60s）。
 - `login qwen-plan` 无 `usage_url`，走 `apiKeyValidationURL` 兜底：用 `openai_base_url/models`（Bearer GET，401/403 拒）验 key。`Logout` = `DeleteKey`。`ProbeRequest` 覆盖为 anthropic `/v1/messages` + `anthropicProbeBody`、`ExtraHeaders` 注入 `anthropic-version: 2023-06-01`（`probe.Callable` 在 `anthropic_base_url` 存在时走 anthropic base，故 probe 路径必须 anthropic；OpenAI 的 `/chat/completions` 套在 anthropic base 上会 404）；`FilterModelIDs` 用 baseProbe 默认透传。无 `ProtocolHint`/`WireProtocolNote`（双协议直通）。
+
+## StepFun Step Plan 契约（官方文档，2026-09）
+
+- 订阅制 Coding Plan（Credit 月池：1M Credit = ¥1，月内灵活消耗、月末清零，可加购 30 天加油包），与 pay-as-you-go 开放平台通道（`api.stepfun.com/v1`、`/v1/accounts` 余额）**相互独立**——普通通道调用不消耗 Step Plan Credit。
+- OpenAI base `https://api.stepfun.com/step_plan/v1`（`/chat/completions`、`/models`，Bearer）；Anthropic base `https://api.stepfun.com/step_plan`（**不带 /v1**，代理保留客户端 `/v1/messages`，同 DeepSeek/qwen-plan；Claude Code 官方接入即此路径，`ANTHROPIC_AUTH_TOKEN`→Bearer）。双协议字节级透传，`RewriteRequest` no-op。
+- 鉴权双写：`Authorization: Bearer <key>` + `x-api-key: <key>`（同 DeepSeek/qwen-plan，覆盖 Anthropic 网关的两种凭据偏好；OpenAI 端忽略 x-api-key）。
+- 模型：`step-5-preview`（1M ctx）、`step-3.7-flash`、`step-3.5-flash`、`step-3.5-flash-2603`、`step-router-v1`（自动路由 deepseek-v4-pro/step-3.7-flash）；`stepaudio-2.5-*` 语音模型走独立音频端点，不进 chat `models:`。`/models` 不可用时回退 config `models:`。
+- 推理强度：chat 协议 `reasoning_effort`、Messages 协议 `output_config.effort`，枚举均 `low|medium|high`（xhigh/max 服务端映射 high；Messages 侧官方确认，chat 侧经 `ChatEffortProfile("step-plan")` 枚举层映射 minimal/none→low、xhigh/max→high）。
+- **无公开 Credit 用量接口**（月池/加油包用量仅控制台 `platform.stepfun.com/account-overview`）；`Quota()` 返回 `BillingUnknown` + `Notes`（含控制台 URL）。额度耗尽报 **402 `quota_exceeded`**：targetexec 的 body-proven quota-denied 策略覆盖 402/403（同 kimi-code 403 模式）→ quota 冷却（默认 1h，无 reset hint）+ failover。
+- `login step-plan` 无 `usage_url`，走 `apiKeyValidationURL` 兜底：`openai_base_url/models`（Bearer GET，401/403 拒——官方 401 错误码 `invalid_api_key`）。`Logout` = `DeleteKey`。`ProbeRequest` 覆盖为 anthropic `/v1/messages` + `anthropicProbeBody`、`ExtraHeaders` 注入 `anthropic-version: 2023-06-01`（同 qwen-plan/volcengine）。无 `ProtocolHint`/`WireProtocolNote`（双协议直通）。
+- **StepSearch MCP**（config `mcp.stepfun-search`，provider 型）：`https://api.stepfun.com/step_plan/v1/mcp/web_search/mcp`，默认 Authorization Bearer（凭据从 step-plan 池注入），streamable HTTP，stateless（上游不回 `Mcp-Session-Id`，不铸造本地会话）。工具 `web_search`（¥0.04/次，计 Step Plan Credit；参数含 `category` programming|research|gov|business、`n` 1-20）与 `web_fetch`（不计费）。实测 2026-09（tools/list 268ms）。
 
 ## Volcengine Ark 契约（双协议，含 Agent Plan，一个 key）
 

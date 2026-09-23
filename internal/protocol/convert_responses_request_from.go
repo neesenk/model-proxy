@@ -914,7 +914,15 @@ func applyResponsesRequestChatFields(d *Diagnostics, out, src map[string]any, re
 		case ReasoningOpenRouter:
 			out["reasoning"] = map[string]any{"effort": effort}
 		default:
-			out["reasoning_effort"] = effort
+			// reasoning_effort dialect + enum (step-plan): the endpoint accepts
+			// the same field but only a RESTRICTED enum (low|medium|high), so a
+			// registered profile maps the canonical rung through it; nil enum
+			// keeps the pure pass-through.
+			if v, ok := enum[effort]; ok && effort != "" {
+				out["reasoning_effort"] = v
+			} else {
+				out["reasoning_effort"] = effort
+			}
 		}
 	}
 	if v, ok := src["max_output_tokens"]; ok {

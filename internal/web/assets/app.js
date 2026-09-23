@@ -21,7 +21,7 @@
 
 // el builds an element with optional className/text/attrs/handlers.
 import {
-  esc, fmtNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
+  esc, linkifyEsc, fmtNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
   verdictBadge, modelCapMatrix, providerCapsSummary, providerFrozen, providerNames, cacheHitRate,
   catalogMatchHTML, catalogMatchEditorHTML,
@@ -8742,7 +8742,10 @@ function renderAccountUsage(p, snap) {
   const head = bits.length ? `<div class="acct-quota-head">${bits.join(' · ')}</div>` : '';
   let notes = '';
   if (snap.Notes && snap.Notes.length) {
-    notes = `<div class="acct-notes">${snap.Notes.map((n) => `<div>${esc(n)}</div>`).join('')}</div>`;
+    // linkifyEsc: console/subscription URLs in provider notes (qwen-plan,
+    // step-plan “Usage & subscription: …”) become open-in-new-tab links; the
+    // rest of the line stays esc-escaped text.
+    notes = `<div class="acct-notes">${snap.Notes.map((n) => `<div>${linkifyEsc(n)}</div>`).join('')}</div>`;
   }
   const windows = snap.Windows || [];
   let bars = '';

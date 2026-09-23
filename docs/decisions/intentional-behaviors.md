@@ -59,6 +59,10 @@
 
 千问 Token Plan 个人版的 Credits 用量（5h/7d 窗口）**没有公开 API**（文档「以控制台订阅页用量明细为准」），且平台条款「严禁 API 调用」明确禁止自动化/批量调用（仅允许 Claude Code/Cursor 等交互式工具）。model-proxy 作为交互式开发工具的转发代理，转发本身合规；但**有意不实现**控制台 cookie 抓取或后台配额轮询——`Quota()` 返回 `BillingUnknown`，仅把控制台订阅页 URL（`https://platform.qianwenai.com/home/billing/subscription/token-plan-individual`）附在 CLI `usage` 与 Web UI（`/api/status.quota` → app.js 渲染 `snap.Notes`）里供人工查看。窗口耗尽由 429 `Allocated quota exceeded` 经 `internal/targetexec.ParseRateLimit` 分类为 `quota` 后反应式触发冷却与 failover，无需新增轮询。
 
+## step-plan：Credit 月池仅控制台、402 反应式冷却（有意为之）
+
+阶跃星辰 Step Plan 的 Credit 月池用量同样**没有公开 API**：`GET /v1/accounts` 读的是独立的 pay-as-you-go 余额，不是套餐 Credit。与 qwen-plan 同模式：`Quota()` 返回 `BillingUnknown` + 控制台订阅页 URL（`https://platform.stepfun.com/step-plan`），不轮询不抓控制台。额度耗尽上游报 **402 `quota_exceeded`**（非 429）：targetexec 的 body-proven quota-denied 判定因此覆盖 402/403 两档（kimi-code 的 403 模式扩展），命中 `quota_exceeded` 等 marker 后走 quota 冷却（默认 1h，无 reset hint）+ failover；无 quota 佐证的 402 仍按普通 4xx 提交，不臆断为额度耗尽。
+
 ## 有意的测试与观测行为
 
 - 生产包的 `_test.go` 不受 DAG import policy 检查（仅无生产文件的目录例外）：

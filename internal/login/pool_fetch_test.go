@@ -12,7 +12,7 @@ import (
 )
 
 func TestApiKeyLikeClassification(t *testing.T) {
-	for _, id := range []string{"zhipu", "deepseek", "kimi-code", "qwen-plan", "zcode", "static"} {
+	for _, id := range []string{"zhipu", "deepseek", "kimi-code", "qwen-plan", "step-plan", "zcode", "static"} {
 		if !ApiKeyLike(id) {
 			t.Errorf("ApiKeyLike(%q) = false, want true", id)
 		}

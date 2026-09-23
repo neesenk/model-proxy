@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  esc, fmtNum, fmtCompactNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
+  esc, linkifyEsc, fmtNum, fmtCompactNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
   verdictBadge, modelCapMatrix, providerCapsSummary, providerFrozen, providerNames,
   catalogMatchHTML, catalogMatchSummary, catalogMatchEditorHTML,
@@ -51,6 +51,38 @@ takeoverRunSummary, takeoverRestoreSummary, takeoverVariantLabel,
 
 test('esc escapes all five HTML-significant chars', () => {
   assert.equal(esc(`<a href="x" class='y'>&</a>`), '&lt;a href=&quot;x&quot; class=&#39;y&#39;&gt;&amp;&lt;/a&gt;');
+});
+
+test('linkifyEsc links http(s) URLs as new-tab anchors and escapes the rest', () => {
+  const out = linkifyEsc('Usage & subscription: https://platform.stepfun.com/account-overview');
+  assert.equal(
+    out,
+    'Usage &amp; subscription: <a href="https://platform.stepfun.com/account-overview" target="_blank" rel="noopener noreferrer">https://platform.stepfun.com/account-overview</a>',
+  );
+  // The prefix text stays escaped exactly like esc.
+  assert.ok(out.startsWith('Usage &amp; subscription: '));
+});
+
+test('linkifyEsc keeps non-URL text byte-identical to esc', () => {
+  for (const s of ['Credits usage (5h/7d windows) is viewable only in the console', '', 'no links <here> & "quotes"']) {
+    assert.equal(linkifyEsc(s), esc(s));
+  }
+});
+
+test('linkifyEsc never links non-http schemes (javascript: stays inert text)', () => {
+  const out = linkifyEsc('see javascript:alert(1) and ftp://x/y');
+  assert.ok(!out.includes('<a '), `scheme payload linked: ${out}`);
+  assert.equal(out, esc('see javascript:alert(1) and ftp://x/y'));
+});
+
+test('linkifyEsc stops at delimiters and keeps entity-escaped query strings intact', () => {
+  // Parenthesised/trailing-punctuation URLs end at the delimiter; an & inside
+  // the URL is already entity-escaped by esc, which is attribute-safe as-is.
+  const out = linkifyEsc('console (https://x.example/a?b=1&c=2), details');
+  assert.equal(
+    out,
+    'console (<a href="https://x.example/a?b=1&amp;c=2" target="_blank" rel="noopener noreferrer">https://x.example/a?b=1&amp;c=2</a>), details',
+  );
 });
 
 test('esc neutralizes an attribute-injection payload', () => {

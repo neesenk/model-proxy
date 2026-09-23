@@ -177,6 +177,25 @@ providers:
       - glm-5.2
       - deepseek-v4-pro
 
+  # StepFun Step Plan (阶跃星辰订阅制 Coding Plan — Credit 月池, NOT the
+  # pay-as-you-go 开放平台 channel). API key via 'login step-plan' (from
+  # https://platform.stepfun.com/interface-key). Two protocol bases: openai_base_url
+  # = .../step_plan/v1, anthropic_base_url = .../step_plan (no /v1; proxy keeps
+  # /v1/messages). No usage_url — Credit usage is console-only (/v1/accounts reads
+  # the SEPARATE pay-as-you-go balance); 'login step-plan' validates the key by
+  # probing openai_base_url/models. stepaudio-* voice models use separate audio
+  # endpoints and stay out of the chat models: list. Poolable (repeat 'login').
+  step-plan:
+    provider_id: step-plan
+    openai_base_url: https://api.stepfun.com/step_plan/v1
+    anthropic_base_url: https://api.stepfun.com/step_plan
+    models:
+      - step-5-preview
+      - step-3.7-flash
+      - step-3.5-flash
+      - step-3.5-flash-2603
+      - step-router-v1
+
   # TypeSafe System One decisions API (Jev): a decision model returning typed,
   # calibrated answers (choice/score/noul + probabilities) instead of text —
   # for routing/classification/scoring inside software, not chat. API key via

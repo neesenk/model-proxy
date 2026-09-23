@@ -210,6 +210,15 @@ func TestValidate_AcceptsQwenPlanProviderID(t *testing.T) {
 	}
 }
 
+func TestValidate_AcceptsStepPlanProviderID(t *testing.T) {
+	c := &Config{Listen: "127.0.0.1:8787", Providers: map[string]Provider{
+		"step-plan": {Provider: "step-plan", OpenAIBaseURL: "https://api.stepfun.com/step_plan/v1"},
+	}}
+	if err := c.validate(); err != nil {
+		t.Errorf("step-plan provider_id rejected: %v", err)
+	}
+}
+
 // TestConfig_ValidateShadowErrors: shadow validation (config.go validate) —
 // each shadow entry must reference a real route + provider and a known
 // protocol; the global sample rate must be in [0,1] and max_concurrent >= 0.

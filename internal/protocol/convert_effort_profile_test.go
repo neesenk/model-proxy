@@ -22,6 +22,10 @@ var (
 		"minimal": "low", "low": "low", "medium": "medium",
 		"high": "xhigh", "xhigh": "xhigh", "max": "xhigh",
 	}
+	testStepPlanEnum = map[string]string{
+		"none": "low", "minimal": "low", "low": "low", "medium": "medium",
+		"high": "high", "xhigh": "high", "max": "high",
+	}
 )
 
 func mkResponsesReasoningReq(effort string) string {
@@ -218,5 +222,42 @@ func TestEffortProfile_NilEnumUnchanged(t *testing.T) {
 	}
 	if _, has := m["reasoning_effort"]; has {
 		t.Errorf("nil enum must not emit reasoning_effort, got %v", m["reasoning_effort"])
+	}
+}
+
+// reasoning_effort dialect + enum (step-plan): the pass-through field with a
+// RESTRICTED vendor enum — the canonical rung maps through the enum, and
+// "off" lands on low (the step reasoning models have no off switch).
+func TestEffortProfile_ReasoningEffortDialectWithEnum(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"low", "low"}, {"medium", "medium"}, {"high", "high"},
+		{"minimal", "low"}, // clamps down to the lowest real rung
+		{"xhigh", "high"},  // vendor tops out at high
+		{"max", "high"},
+		{"none", "low"}, // off maps to low — no disabled switch exists
+	} {
+		out, err := convertResponsesRequestToOpenAIFor([]byte(mkResponsesReasoningReq(tc.in)),
+			convertReqOpts{ReasoningDialect: ReasoningEffort, ReasoningEffortEnum: testStepPlanEnum, ImageOK: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := unmarshalMap(t, out)
+		if got := m["reasoning_effort"]; got != tc.want {
+			t.Errorf("%q → reasoning_effort = %v, want %q", tc.in, got, tc.want)
+		}
+		if _, has := m["thinking"]; has {
+			t.Errorf("%q → reasoning_effort dialect must not emit thinking, got %v", tc.in, m["thinking"])
+		}
+	}
+
+	// Without an enum the dialect stays the pure pass-through (OpenAI-shaped
+	// endpoints take the canonical ladder as-is).
+	out, err := convertResponsesRequestToOpenAIFor([]byte(mkResponsesReasoningReq("xhigh")),
+		convertReqOpts{ReasoningDialect: ReasoningEffort, ImageOK: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := unmarshalMap(t, out)["reasoning_effort"]; got != "xhigh" {
+		t.Errorf(`nil enum xhigh → reasoning_effort = %v, want pass-through "xhigh"`, got)
 	}
 }

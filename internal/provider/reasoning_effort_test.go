@@ -80,6 +80,23 @@ func TestChatEffortProfile_QwenPlan(t *testing.T) {
 	}
 }
 
+func TestChatEffortProfile_StepPlan(t *testing.T) {
+	// Step Plan's chat endpoint accepts reasoning_effort with the vendor enum
+	// low|medium|high — a restricted pass-through field, no thinking switch.
+	// Canonical rungs above high clamp down; "off" maps to low (the step
+	// reasoning models have no off switch).
+	want := map[string]string{
+		"none": "low", "minimal": "low", "low": "low", "medium": "medium",
+		"high": "high", "xhigh": "high", "max": "high",
+	}
+	// Model-independent (every step chat model shares the low|medium|high dial).
+	for _, model := range []string{"step-5-preview", "step-3.7-flash", "step-3.5-flash", "step-3.5-flash-2603", "step-router-v1"} {
+		if p := ChatEffortProfile("step-plan", model); !reflect.DeepEqual(p.Enum, want) || p.EnumOnly {
+			t.Errorf("step-plan %s profile = %+v, want enum %v (EnumOnly false)", model, p, want)
+		}
+	}
+}
+
 func TestChatEffortProfile_ZeroProfileDefault(t *testing.T) {
 	for _, tc := range []struct{ providerID, model string }{
 		{"volcengine", "doubao-seed-2.0"}, // per-model subsets too fragmented

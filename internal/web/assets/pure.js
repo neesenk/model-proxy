@@ -17,6 +17,19 @@ export function esc(s) {
     .replace(/'/g, '&#39;');
 }
 
+// linkifyEsc escapes plain text EXACTLY like esc, then links bare http(s) URLs
+// in the escaped output (target=_blank + rel=noopener — console links in
+// provider QuotaSnapshot.Notes must open in a new tab, never replace the UI).
+// Only http/https match, so scheme-injection payloads (javascript:…) stay
+// inert text; the href re-escapes the matched span (the text is already
+// entity-escaped, which is attribute-safe). Non-URL text is byte-identical to
+// esc output — no behavior change for note lines without links.
+export function linkifyEsc(s) {
+  const out = esc(s);
+  return out.replace(/\bhttps?:\/\/[^\s<>"')\]]+/g, (m) =>
+    `<a href="${m}" target="_blank" rel="noopener noreferrer">${m}</a>`);
+}
+
 export function fmtNum(n) {
   if (n === null || n === undefined) return '0';
   return Number(n).toLocaleString('en-US');
@@ -4063,6 +4076,145 @@ export function mcpAnalyticsSummaryTableHTML(groups, opts = {}) {
 // mcpAnalyticsEmptyHTML is the Analytics empty-state hint.
 export function mcpAnalyticsEmptyHTML() {
   return '<span class="hint">No MCP calls in the selected range.</span>';
+}
+
+// mcpToolsTableHTML renders the probe's tool list (name + description) as
+// the Servers detail's nested table. Descriptions are markdown (that is how
+// MCP servers ship them) and go through the miniMarkdownHTML subset renderer
+// — plain-text cells collapsed every line into one clumped run. A missing
+// description renders an em dash so the row keeps its geometry, and an empty
+// list renders the not-exposed hint instead of an empty table.
+export function mcpToolsTableHTML(tools) {
+  const list = Array.isArray(tools) ? tools : [];
+  if (!list.length) return '<span class="hint">no tools exposed by this server</span>';
+  const rows = list.map((t) => {
+    const name = (t && t.name) || '';
+    const desc = (t && t.description) || '';
+    return `<tr><td class="mcp-wrap">${esc(name)}</td><td class="mcp-wrap">${desc ? miniMarkdownHTML(desc) : '<span class="hint">—</span>'}</td></tr>`;
+  }).join('');
+  const cols = '<colgroup>' + ['180px', 'auto'].map((w) => `<col style="width:${w}"/>`).join('') + '</colgroup>';
+  return `<table class="table mcp-tools-table">${cols}<thead><tr><th>Tool</th><th>Description</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// ---------- Markdown-lite (MCP tool descriptions) ----------
+
+// mdInline renders ONE already-escaped line's inline markdown. Every tag it
+// emits is self-produced and the input is pre-escaped, so a third-party MCP
+// description can never inject markup. Code spans and links are held as
+// opaque fragments while emphasis runs (the generated `target="_blank"`
+// underscore must not be re-parsed as emphasis), then restored; links only
+// accept http(s) — a javascript:/data: URL stays literal text.
+function mdInline(escaped) {
+  const frags = [];
+  const hold = (html) => { frags.push(html); return `\u0000${frags.length - 1}\u0000`; };
+  const link = (label, url) => hold(`<a class="md-a" href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`);
+  let s = escaped.replace(/`([^`\n]+)`/g, (_, c) => hold(`<code class="md-code">${c}</code>`));
+  s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, url) => link(label, url));
+  s = s.replace(/&lt;(https?:\/\/[^\s]+?)&gt;/g, (_, url) => link(url, url));
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/__([^_\n]+)__/g, '<strong>$1</strong>');
+  s = s.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+  s = s.replace(/(^|[^*\w])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+  s = s.replace(/(^|[^_\w])_([^_\n]+)_/g, '$1<em>$2</em>');
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => frags[Number(i)]);
+}
+
+// miniMarkdownHTML renders the markdown subset MCP tool descriptions actually
+// use: headings, paragraphs, bullet/numbered lists (nested), fenced code,
+// blockquotes, rules, bold/italic/strike/inline code/links. Deliberately NOT a
+// general markdown engine: the text is escaped first and only self-produced
+// tags are emitted, so untrusted third-party content cannot inject markup.
+// A single newline inside a paragraph becomes <br> (not a space): tool
+// descriptions use one line per point, and collapsing them is exactly the
+// "long text clumped into one blob" failure of plain-text table cells.
+export function miniMarkdownHTML(text) {
+  const src = typeof text === 'string' ? text.replace(/\r\n?/g, '\n') : '';
+  if (!src.trim()) return '';
+  const lines = src.split('\n');
+  const out = [];
+  let para = [];
+  // Open lists: { indent, ordered, liOpen }. liOpen keeps the <li> unclosed
+  // so an indented sub-list nests INSIDE its parent item (valid markup).
+  const stack = [];
+  const flushPara = () => {
+    if (!para.length) return;
+    out.push(`<p class="md-p">${para.map(mdInline).join('<br>')}</p>`);
+    para = [];
+  };
+  const closeLi = () => {
+    const top = stack[stack.length - 1];
+    if (top && top.liOpen) { out.push('</li>'); top.liOpen = false; }
+  };
+  const closeList = () => {
+    closeLi();
+    const lvl = stack.pop();
+    out.push(lvl.ordered ? '</ol>' : '</ul>');
+  };
+  const closeTo = (depth) => { while (stack.length > depth) closeList(); };
+  const openList = (ordered, indent) => {
+    out.push(ordered ? '<ol class="md-ol">' : '<ul class="md-ul">');
+    stack.push({ indent, ordered, liOpen: false });
+  };
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const fence = /^\s*(`{3,}|~{3,})\s*[A-Za-z0-9_+-]*\s*$/.exec(line);
+    if (fence) {
+      flushPara();
+      closeTo(0);
+      const closing = new RegExp(`^\\s*${fence[1][0]}{${fence[1].length},}\\s*$`);
+      const body = [];
+      for (i += 1; i < lines.length; i += 1) {
+        if (closing.test(lines[i])) break;
+        body.push(lines[i]);
+      }
+      out.push(`<pre class="md-pre"><code>${esc(body.join('\n'))}</code></pre>`);
+      continue;
+    }
+    if (!line.trim()) { flushPara(); closeTo(0); continue; }
+    const h = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+    if (h) {
+      flushPara();
+      closeTo(0);
+      out.push(`<div class="md-h" data-lvl="${h[1].length}">${mdInline(esc(h[2]))}</div>`);
+      continue;
+    }
+    if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      flushPara();
+      closeTo(0);
+      out.push('<hr class="md-hr"/>');
+      continue;
+    }
+    const quote = /^\s{0,3}>\s?(.*)$/.exec(line);
+    if (quote) {
+      flushPara();
+      closeTo(0);
+      out.push(`<blockquote class="md-quote">${mdInline(esc(quote[1]))}</blockquote>`);
+      continue;
+    }
+    const item = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/.exec(line);
+    if (item) {
+      flushPara();
+      const indent = item[1].replace(/\t/g, '  ').length;
+      const ordered = /\d/.test(item[2]);
+      while (stack.length && indent < stack[stack.length - 1].indent) closeList();
+      if (!stack.length || indent > stack[stack.length - 1].indent) {
+        openList(ordered, indent);
+      } else if (stack[stack.length - 1].ordered !== ordered) {
+        closeList();
+        openList(ordered, indent);
+      } else {
+        closeLi();
+      }
+      out.push(`<li class="md-li">${mdInline(esc(item[3]))}`);
+      stack[stack.length - 1].liOpen = true;
+      continue;
+    }
+    closeTo(0);
+    para.push(esc(line));
+  }
+  flushPara();
+  closeTo(0);
+  return out.join('');
 }
 
 // mcpAnalyticsSkeletonHTML is the Analytics first-load placeholder.

@@ -188,6 +188,7 @@ model-proxy login zhipu            # 输入 Zhipu API key（--label NAME 命名�
 model-proxy login deepseek         # 输入 DeepSeek API key（可重复 -> 多账号）
 model-proxy login volcengine       # Ark API Key + AccessKey/SecretKey（可重复 -> 多账号）
 model-proxy login qwen-plan        # 千问 Token Plan 个人版 sk-sp- key（可重复 -> 多账号）
+model-proxy login step-plan        # 阶跃星辰 Step Plan key（platform.stepfun.com；可重复 -> 多账号）
 model-proxy login typesafe         # TypeSafe API key（console.typesafe.ai；可重复 -> 多账号）
 model-proxy login zhipu --label work --replace   # 命名账号 / 覆盖已存在的同 id 账号
 # 免粘贴导入（值不回显、不落日志；成功输出只有掩码账号 id）
@@ -217,6 +218,7 @@ model-proxy usage zhipu            # 5h/周/月配额 + token 消耗（池化时
 model-proxy usage deepseek         # 账户余额（is_available + 各币种）
 model-proxy usage volcengine       # Agent Plan 5h/日/周/月额度（需 AK/SK；否则列 config 模型）
 model-proxy usage qwen-plan        # 个人版 Credits 仅控制台可见（输出订阅页 URL + 列模型）
+model-proxy usage step-plan        # Step Plan Credit 月池仅控制台可见（输出订阅页 URL + 列模型）
 # 有 daemon 轮询历史时，配额窗口行尾会按当前消耗速率预测耗尽时间（"按当前速率 ~40m 后耗尽"）；
 # Web Status 配额卡同样展示。速率 ≤0、无历史基线或轮询断档（>3×quota_poll_interval）时不显示。
 
@@ -389,7 +391,7 @@ web:
 | deepseek | `~/.model-proxy/deepseek_apikey.json` | API key（同上） |
 | volcengine | `~/.model-proxy/volcengine_apikey.json` | `{api_key, access_key, secret_key}`（同上） |
 
-**多账号凭据池**：apikey 类 provider（static/zhipu/zcode/deepseek/volcengine/kimi-code/qwen-plan/typesafe）重复 `login` 会把账号累积进**池文件** `~/.model-proxy/<name>_apikeys.json`（`{version, accounts:[{id, label, api_key, (access_key, secret_key), added_at}]}`），按账号 id（volcengine 优先 `sha256(access_key)[:16]`，无 AK 时回落 `sha256(api_key)[:16]`；其余为 `sha256(api_key)[:16]`）去重，ID 永不携带原始凭据。运行时每个池被展开成 N 个虚拟 provider（`<name>#<accountId>`），共享父配置但各绑自己的凭据；路由目标命名父 provider 会 fan-out 到全部账号。plural pool 是权威凭据来源：损坏或空 pool 会禁用该 provider，不会降级读取旧 singular key。**路由跨池是会话粘性的**：按请求的 `x-claude-code-session-id` 粘同一个账号（保 prompt cache），新会话 round-robin 分到不同账号（并发散开）；只有 429/熔断才换账号。`usage <provider>` 逐账号展示全部账号。aqp/codex 是单凭据（不入池）。`login --label`/`--replace`、`logout --label`/`--all` 管理池内账号；Web UI Accounts 标签页也能增删。
+**多账号凭据池**：apikey 类 provider（static/zhipu/zcode/deepseek/volcengine/kimi-code/qwen-plan/step-plan/typesafe）重复 `login` 会把账号累积进**池文件** `~/.model-proxy/<name>_apikeys.json`（`{version, accounts:[{id, label, api_key, (access_key, secret_key), added_at}]}`），按账号 id（volcengine 优先 `sha256(access_key)[:16]`，无 AK 时回落 `sha256(api_key)[:16]`；其余为 `sha256(api_key)[:16]`）去重，ID 永不携带原始凭据。运行时每个池被展开成 N 个虚拟 provider（`<name>#<accountId>`），共享父配置但各绑自己的凭据；路由目标命名父 provider 会 fan-out 到全部账号。plural pool 是权威凭据来源：损坏或空 pool 会禁用该 provider，不会降级读取旧 singular key。**路由跨池是会话粘性的**：按请求的 `x-claude-code-session-id` 粘同一个账号（保 prompt cache），新会话 round-robin 分到不同账号（并发散开）；只有 429/熔断才换账号。`usage <provider>` 逐账号展示全部账号。aqp/codex 是单凭据（不入池）。`login --label`/`--replace`、`logout --label`/`--all` 管理池内账号；Web UI Accounts 标签页也能增删。
 
 多实例支持：同一 `provider_id` 可有多个不同 name（如 `zhipu-personal` / `zhipu-work`），各自独立凭据文件/池。
 

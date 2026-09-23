@@ -71,8 +71,11 @@ type RequestOptions struct {
 	// (minimal|low|medium|high|xhigh|max, and "none" where the vendor
 	// expresses off as an enum value) to the vendor-accepted string for the
 	// target chat endpoint. nil = the endpoint has no level knob beyond the
-	// ReasoningDialect switch. Plain data threaded from
-	// provider.ChatEffortProfile — the protocol package has no provider
+	// ReasoningDialect switch. Applies to every dialect: as an addition on
+	// top of the thinking/enable_thinking switch, or as the mapping table for
+	// the pass-through reasoning_effort field when the vendor enum is
+	// narrower than the canonical ladder (step-plan). Plain data threaded
+	// from provider.ChatEffortProfile — the protocol package has no provider
 	// dependency.
 	ReasoningEffortEnum map[string]string
 	// ReasoningEffortOnly emits ReasoningEffortEnum INSTEAD of the thinking
