@@ -5190,6 +5190,14 @@ async function renderStatusTab(background = false) {
       since: tokR.ok ? (tokR.data.since || 0) : prev.since,
     };
     if (modelsR.ok) modelsCache = modelsR.data;
+    // Recovery FIRST: the failure paths below prepend a stale-data banner and
+    // return WITHOUT re-rendering, and renderStatusPanel only manages the
+    // warnings banner — so nothing else would ever clear a refresh-error. A
+    // transient outage (daemon restart, network blip) would otherwise leave a
+    // permanent "refresh failed" banner on screen long after service is back.
+    // Every other panel already clears on its successful background refresh
+    // (accounts/security/MCP); status was the one that didn't.
+    if (stR.ok) setRefreshError(panels.status, null);
     if (!stR.ok) {
       // Core snapshot failed with data already on screen: keep the render,
       // report via the banner (no re-render churn needed).
@@ -9469,6 +9477,11 @@ async function renderAnalyticsTab(background = false) {
     analyticsMaybeAutoRefresh();
     return;
   }
+  // Recovery: a successful render clears any stale-data banner left by an
+  // earlier failed background refresh. The failure path above returns WITHOUT
+  // re-rendering, so without this the "Analytics unavailable" banner would
+  // outlive the outage forever (same contract as every other panel).
+  setRefreshError(panel, null);
   if (errEl) errEl.hidden = true;
   analyticsFillDatalists(panel, resp, state.provider);
   analyticsFilterHint(panel, resp, state);
