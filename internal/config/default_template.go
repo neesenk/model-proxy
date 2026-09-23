@@ -217,14 +217,17 @@ providers:
   # /v1/messages path). No usage_url: MiMo's balance endpoint is gated on the
   # console's browser SSO cookie, NOT the API key (verified 2026-09), so the
   # key is validated against openai_base_url/models and quota stays
-  # console-only (BillingUnknown + console URL, like qwen-plan). Token Plan
+  # console-only (BillingUnknown + console URL, like qwen-plan/step-plan).
+  # 'billing:' is intentionally NOT set to pay-as-you-go: the quota tracker
+  # skips pay-as-you-go providers without a usage_url, which would also hide
+  # the console link from the Web UI Accounts tab (the only usage surface
+  # MiMo has). Scheduling still sees BillingUnknown at runtime. Token Plan
   # subscriptions are NOT supported. Poolable (repeat 'login').
   mimo:
     openai_base_url: https://api.xiaomimimo.com/v1
     anthropic_base_url: https://api.xiaomimimo.com/anthropic
     provider_id: mimo
     priority: 3
-    billing: pay-as-you-go
     models:
       - mimo-v2.6-flash
       - mimo-v2.6-pro
