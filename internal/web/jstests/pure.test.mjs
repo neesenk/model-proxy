@@ -31,7 +31,7 @@ import {
   fmtCompact,
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
   CLIENT_GONE_STATUS, notLoggedHint,
-  quotaErrKind, accountUsageState, accountRemainingLabel,
+  quotaErrKind, accountUsageState, accountRemainingLabel, scheduleTierLabel, scheduleTierTitle,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
   securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML, SECURITY_RANGES, securityRangeFromSecs,
   securityFilterQuery, securityFilterFromQuery, explainCacheKey,
@@ -1692,6 +1692,17 @@ test('accountUsageState: console-only snapshot (notes, no windows) opens', () =>
   };
   assert.deepEqual(accountUsageState(consoleOnly), { hint: 'Console only', open: true });
   assert.deepEqual(accountUsageState({ Notes: [] }), { hint: 'Unmeasured', open: false });
+});
+
+test('scheduleTierLabel: measured classes verbatim, unknown -> unmeasured', () => {
+  assert.equal(scheduleTierLabel('plan'), 'plan');
+  assert.equal(scheduleTierLabel('pay-as-you-go'), 'pay-as-you-go');
+  // Bare "unknown" reads like a broken fetch; the honest name is unmeasured.
+  assert.equal(scheduleTierLabel('unknown'), 'unmeasured');
+  assert.equal(scheduleTierLabel(''), 'unmeasured');
+  assert.equal(scheduleTierLabel(undefined), 'unmeasured');
+  assert.match(scheduleTierTitle('unknown'), /no quota measurement/);
+  assert.equal(scheduleTierTitle('plan'), 'tier plan');
 });
 
 test('accountRemainingLabel: no measurement never claims Available', () => {

@@ -6111,9 +6111,9 @@ function renderScheduleCard(target, st) {
       const pinned = info.pin && (info.pin === p.provider || info.pin === p.pool_parent);
       if (pinned) classes.push('pinned');
       const peak = p.peak ? ' · peak' : '';
-      const tier = p.tier ? ` · ${esc(p.tier)}` : '';
+      const tier = ` · ${esc(scheduleTierLabel(p.tier))}`;
       const parent = p.pool_parent ? ` (${esc(p.pool_parent)})` : '';
-      const title = `priority ${p.priority} · tier ${esc(p.tier || '?')} · surplus ${(p.surplus || 0).toFixed(2)}${peak}${pinned ? ' · pinned (no failover)' : ''}`;
+      const title = `priority ${p.priority} · ${esc(scheduleTierTitle(p.tier))} · surplus ${(p.surplus || 0).toFixed(2)}${peak}${pinned ? ' · pinned (no failover)' : ''}`;
       chain += `<span class="${classes.join(' ')}" title="${esc(title)}">${pinned ? iconPin() : ''}${esc(p.provider)}${esc(parent)}${tier}</span>`;
       if (i < ordered.length - 1) chain += `<span class="route-sep">→</span>`;
     });

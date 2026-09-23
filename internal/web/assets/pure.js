@@ -141,6 +141,31 @@ export function quotaErrKind(snap) {
   return 'error';
 }
 
+// scheduleTierLabel renders one schedule-chain node's tier for display. The
+// tier is the MEASURED scheduling class from the live daemon (plan < unmeasured
+// < pay-as-you-go); the config `billing:` label deliberately never reaches it.
+// `unknown` is renamed to `unmeasured` because bare "unknown" reads like a
+// broken fetch rather than "this provider has no measurable quota" (console-only
+// providers land here — their numbers live in the vendor console).
+export function scheduleTierLabel(tier) {
+  switch (tier) {
+    case 'plan': return 'plan';
+    case 'pay-as-you-go': return 'pay-as-you-go';
+    default: return 'unmeasured';
+  }
+}
+
+// scheduleTierTitle is the tooltip suffix explaining what the tier means for
+// ordering, so an `unmeasured` node is self-explanatory instead of looking like
+// an error.
+export function scheduleTierTitle(tier) {
+  const label = scheduleTierLabel(tier);
+  if (label === 'unmeasured') {
+    return 'tier unmeasured (no quota measurement — console-only or unmeasured; ordered by priority)';
+  }
+  return `tier ${label}`;
+}
+
 // accountRemainingLabel is the Status-page per-account pill label for one quota
 // snapshot (app.js wraps it in the pill + color class). Pure so the
 // measurement-honesty rule is unit-tested:
