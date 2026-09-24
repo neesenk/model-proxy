@@ -271,11 +271,14 @@ v3.14.0），上文 3.3.6/3.11.2 的逆向结论逐条对照源码后的修订�
 **已变化 / 需修订**
 
 - 版本 3.3.6→3.11.2→**3.14.0**（root `package.json`）；`X-ZCode-App-Version` 与 UA 同源。
-- UA 追加段：`@ai-sdk/anthropic@3.0.81` 建 provider 时追加
-  `ai-sdk/anthropic/3.0.81`，provider-utils 再追加
-  `ai-sdk/provider-utils/4.0.27 runtime/node.js/24`（Node≥21.1 走
-  `navigator.userAgent` → `runtime/node.js/<major>`；CLI 引擎要求 node≥24）。
-  3.11.2 抓包没有 anthropic 段，按源码补齐。
+- UA 追加段：**2026-09-23 真实 CLI 抓包实测修正**——线上 UA 只有
+  `ZCode/<ver> ai-sdk/provider-utils/4.0.27 runtime/node.js/<major>`，
+  **没有** `ai-sdk/anthropic/3.0.81` 段。`@ai-sdk/anthropic` 的 `getHeaders()`
+  确实会追加该段，但 ZCode 在 per-request header 层（`runner-options.ts`
+  `mergeRequestHeaders`）用 defaultHeaders 的 `User-Agent` 覆盖之，随后
+  provider-utils 才追加自己的后缀（Node≥21.1 走 `navigator.userAgent` →
+  `runtime/node.js/<major>`；产品 `.nvmrc` 24.14.0）。此前"按源码补齐 anthropic
+  段"的改动已被实测推翻并移除——读 SDK dist 推断线上行为在此问题上不可靠。
 - `X-Title`：源码按 argv 推导 sourceTitle（app-server/agent-server→`electron`，
   否则→`cli`）。apikey coding-plan 路径的真实载体是独立 CLI，代理改发
   `Z Code@cli`（旧文档的 `electron` 来自桌面抓包）。
@@ -295,3 +298,25 @@ v3.14.0），上文 3.3.6/3.11.2 的逆向结论逐条对照源码后的修订�
   对所有 model provider 生效——真实 3.14.0 客户端不再直连 open.bigmodel.cn。
   代理仍直连（端点实测存活）；套餐系数是否仍认直连路径待真 key 复测，
   失效则把 `anthropic_base_url` 切到 ultra 网关（指纹/鉴权头原样透传）。
+
+## 11. 补遗：2026-09-23 自动差分测试（真实 CLI vs 代理）
+
+在 §10 的源码对照之外，建成了一套**自动差分测试**，把"真实 ZCode CLI 在线上发
+什么"固化成 golden fixture，CI 里逐头盯住代理的模拟：
+
+- `scripts/zcode-wire-diff/`：一次性 clone + build 开源仓库的 CLI
+  （`pnpm install --filter @zcode/cli...` + `pnpm --filter @zcode/cli... build`），
+  用 harness 里的个人 provider 配置（anthropic-messages，baseUrl 指向本机
+  capture server，dummy key）让真实 CLI 把模型请求打到 127.0.0.1，全程不触碰
+  BigModel、不需要真 key。`run.sh [--write]` 捕获并刷新 fixture。
+- `internal/provider/testdata/zcode-wire/real-zcode-cli.json`：golden fixture
+  （v3.14.0，28 个头，凭据已脱敏）。
+- `internal/provider/zcode_wire_test.go` `TestZCode_WireMatchesRealClientCapture`：
+  确定性指纹值精确比对、四个归因 UUID 头形状比对、**头集合 parity**（客户端发了
+  我们没发 / 我们多发 = 失败，逼重新捕获 review）。
+- 首次捕获结论：与代理指纹逐头一致；`X-Title: Z Code@cli`、`x-zcode-session-type:
+  main`、版本 3.14.0 均获实证；UA 无 `ai-sdk/anthropic/` 段（推翻 §10 的源码推断，
+  已按实测回退）。复跑两次 diff 仅剩时间戳/UUID/端口，指纹完全可复现。
+- 维护约定：ZCode 发新版本 → 跑 `scripts/zcode-wire-diff/run.sh`，review diff 后
+  `--write`；若 diff 出现真实形状变化，同步更新 `internal/provider/zcode.go`、
+  本 spec 与 `docs/backend-contracts.md`。

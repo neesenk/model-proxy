@@ -32,7 +32,7 @@ func TestZCode_ExtraHeaders_Fingerprint(t *testing.T) {
 	p.ExtraHeaders(req, "/v1/messages")
 
 	cases := map[string]string{
-		"User-Agent":           "ZCode/3.14.0 ai-sdk/anthropic/3.0.81 ai-sdk/provider-utils/4.0.27 runtime/node.js/24",
+		"User-Agent":           "ZCode/3.14.0 ai-sdk/provider-utils/4.0.27 runtime/node.js/24",
 		"HTTP-Referer":         "https://zcode.z.ai",
 		"X-Title":              "Z Code@cli",
 		"X-ZCode-App-Version":  "3.14.0",

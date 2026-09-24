@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "config": {
+    "providerConfigRules": {
+      "providerRules": [
+        {
+          "providerId": "diff-probe",
+          "providerName": "Diff Probe",
+          "enabled": true,
+          "config": {
+            "group": "standard-personal",
+            "access": {
+              "type": "api-key",
+              "apiKey": "sk-diff-dummy-key"
+            },
+            "api": {
+              "type": "anthropic-messages",
+              "baseUrl": "http://127.0.0.1:__PORT__"
+            },
+            "personalModelIds": [
+              "diff-model"
+            ],
+            "modelOrder": [
+              "diff-model"
+            ],
+            "visibility": "visible"
+          }
+        }
+      ]
+    },
+    "modelConfigRules": {
+      "providerModelRules": [
+        {
+          "modelId": "diff-model",
+          "config": {
+            "enabled": true,
+            "properties": {
+              "requiresMfjsToolSchema": false,
+              "contextWindow": 200000,
+              "inputFormat": {
+                "supportsText": true,
+                "supportsImage": false,
+                "supportsVideo": false,
+                "supportsAudio": false,
+                "supportsPdf": false
+              },
+              "outputFormat": {
+                "supportsText": true
+              },
+              "supportsToolCall": true,
+              "supportsJsonSchemaOutput": false,
+              "supportsNativeWebSearch": false,
+              "supportsMidConversationSystem": true
+            },
+            "optionSpecs": {
+              "reasoningLevel": {
+                "values": [
+                  "low",
+                  "high"
+                ],
+                "map": "reasoningLevel == \"low\" ? {\"reasoning_effort\": \"low\"} : {\"reasoning_effort\": \"high\"}"
+              },
+              "maxOutputTokens": {
+                "max": 8192,
+                "map": "maxOutputTokens > 0 ? {\"max_tokens\": maxOutputTokens} : {}"
+              }
+            }
+          },
+          "providerId": "diff-probe"
+        }
+      ],
+      "manualProviderModelRules": []
+    },
+    "defaultModelSelection": {
+      "providerId": "diff-probe",
+      "modelId": "diff-model",
+      "options": {
+        "reasoningLevel": "low"
+      }
+    }
+  }
+}

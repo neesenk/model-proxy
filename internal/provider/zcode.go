@@ -29,19 +29,19 @@ import (
 // docs/backend-contracts.md "zcode 契约").
 const zcodeAppVersion = "3.14.0"
 
-// AI-SDK User-Agent segments, in the order the SDKs append them:
-// @ai-sdk/anthropic@3.0.81 appends its own segment when createAnthropic builds
-// the provider (getHeaders → withUserAgentSuffix), then provider-utils appends
-// its segment plus the runtime tag when the request is issued. Node >= 21.1
-// (the CLI engine requires node >= 24) resolves the runtime via
-// navigator.userAgent, yielding "runtime/node.js/<major>" — which is exactly
-// what the 2026-09-11 capture recorded ("runtime/node.js/24"). The 3.11.2
-// capture predates @ai-sdk/anthropic v3 and lacks the ai-sdk/anthropic
-// segment; the open-sourced 3.14.0 code path emits it, so we match the source.
-const (
-	zcodeAnthropicSdkSuffix = "ai-sdk/anthropic/3.0.81"
-	zcodeUserAgentSuffix    = "ai-sdk/provider-utils/4.0.27 runtime/node.js/24"
-)
+// AI-SDK User-Agent suffix appended by provider-utils when the request is
+// issued: "ai-sdk/provider-utils/<ver> runtime/node.js/<node-major>".
+// LIVE-CAPTURE VERIFIED (2026-09-23, real ZCode 3.14.0 CLI against a local
+// capture server — see internal/provider/testdata/zcode-wire/): the wire UA is
+// exactly "ZCode/<ver> ai-sdk/provider-utils/4.0.27 runtime/node.js/<major>".
+// There is NO "ai-sdk/anthropic/<ver>" segment even though @ai-sdk/anthropic's
+// getHeaders appends one: ZCode re-applies its own User-Agent at the
+// per-request header layer (runner-options.ts mergeRequestHeaders), which
+// overwrites that segment, and provider-utils then appends its suffix on top.
+// runtime/node.js/<major>: Node >= 21.1 resolves it via navigator.userAgent;
+// the product pins node 24 (.nvmrc 24.14.0, engines >=24), so we send 24 (a
+// local run on node 26 captured "runtime/node.js/26").
+const zcodeUserAgentSuffix = "ai-sdk/provider-utils/4.0.27 runtime/node.js/24"
 
 // zcodeSourceTitle is ZCode's sourceTitle for the standalone CLI engine
 // (model-config.ts detectDefaultProviderSourceTitle: argv without
@@ -151,8 +151,10 @@ func (p *ZCodeProvider) ProbeRequest(modelID string) ProbeRequest {
 // deviceMid).
 func (p *ZCodeProvider) ExtraHeaders(req *http.Request, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
-	// Chat-path UA: "ZCode/<ver>" + the two AI-SDK segments, in append order.
-	req.Header.Set("User-Agent", "ZCode/"+zcodeAppVersion+" "+zcodeAnthropicSdkSuffix+" "+zcodeUserAgentSuffix)
+	// Chat-path UA (live-capture verified 2026-09-23): "ZCode/<ver>" + the
+	// provider-utils suffix; the AI-SDK's own ai-sdk/anthropic segment is
+	// overwritten by ZCode's per-request header layer before it reaches the wire.
+	req.Header.Set("User-Agent", "ZCode/"+zcodeAppVersion+" "+zcodeUserAgentSuffix)
 	req.Header.Set("HTTP-Referer", "https://zcode.z.ai")
 	req.Header.Set("X-Title", "Z Code@"+zcodeSourceTitle)
 	req.Header.Set("X-ZCode-App-Version", zcodeAppVersion)

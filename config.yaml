@@ -108,6 +108,31 @@ providers:
       - glm-5.2
       - glm-5.3
       - glm-5.3-flash
+  # ZCode (BigModel Coding Plan + ZCode client fingerprint). API key via
+  # `login zcode` (opens https://bigmodel.cn/login; paste the Coding Plan key).
+  # Same BigModel backend/quota envelope as zhipu, but every request carries the
+  # ZCode CLI fingerprint (User-Agent / HTTP-Referer / X-Title / X-ZCode-* /
+  # attribution ids — see docs/backend-contracts.md "zcode 契约") so a Coding
+  # Plan key gets plan quota treatment (0.67 coefficient) instead of being
+  # degraded as a generic agent. Auth is dual-written on every request
+  # (Authorization: Bearer + x-api-key, same value).
+  # anthropic_base_url is WITHOUT /v1 (proxy keeps the client /v1/messages).
+  # NOTE: the shipping ZCode 3.14.0 client now routes this endpoint through the
+  # zcode.z.ai ultra gateway; this provider still targets open.bigmodel.cn
+  # directly (both verified alive 2026-09). If plan-quota treatment stops
+  # applying, switch anthropic_base_url to
+  # https://zcode.z.ai/api/v1/ultra/anthropic (fingerprint/auth passthrough).
+  # usage_url doubles as the login-time key-validation endpoint (GET Bearer;
+  # 401/403 rejects the key). Poolable — repeat `login zcode` for multi-account.
+  zcode:
+    provider_id: zcode
+    priority: 2 # lower = tried first within a tier/quota band
+    openai_base_url: https://open.bigmodel.cn/api/paas/v4
+    anthropic_base_url: https://open.bigmodel.cn/api/anthropic
+    usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit # `usage zcode`: 5h/weekly/monthly quota + token consumption
+    models:
+      - glm-5.3
+      - glm-5.3-flash
   # DeepSeek (API key via `login deepseek`). One key serves both protocols; the
   # two endpoints are per-protocol: openai_base_url = OpenAI base, anthropic_base_url =
   # Anthropic base (no /v1; proxy keeps the client /v1/messages path).
