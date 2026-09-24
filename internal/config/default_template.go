@@ -278,7 +278,6 @@ providers:
     usage_url: https://openrouter.ai/api/v1/key
     models:
       - stealth/space-bunny-alpha
-      - qwen/qwen3.8-27b:free
 
   # OpenCode Go (https://opencode.ai/go — the OpenCode team's $10/month
   # SUBSCRIPTION for curated open coding models; NOT the pay-as-you-go Zen
