@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,7 +43,13 @@ type accountCred = accounts.Credentials
 type poolAccount = accounts.Account
 
 // ValidateKeyBearerGET rejects a key when the validation endpoint answers
-// 401/403 (or is unreachable). No-op when url is empty.
+// 401/403 (or is unreachable). It ALSO rejects a BigModel-style HTTP 200
+// envelope that carries a business-level auth failure (success:false + 4xx
+// code): open.bigmodel.cn's quota/usage endpoints answer 200 OK with
+// {"code":401,"msg":"令牌已过期或验证不正确","success":false} for an expired or
+// incorrect key, so a status-code-only check waves the key into the pool and
+// the failure only surfaces later as a runtime 401 on every model call. No-op
+// when url is empty.
 func ValidateKeyBearerGET(url, key string) error {
 	if url == "" {
 		return nil
@@ -63,7 +70,40 @@ func ValidateKeyBearerGET(url, key string) error {
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		return fmt.Errorf("validation failed: HTTP %d: %s", resp.StatusCode, display.Truncate(string(body), 200))
 	}
+	if code, ok := envelopeAuthFailure(body); ok {
+		return fmt.Errorf("validation failed: HTTP %d (envelope code %d): %s",
+			resp.StatusCode, code, display.Truncate(string(body), 200))
+	}
 	return nil
+}
+
+// envelopeAuthFailure reports whether body is a JSON envelope carrying a
+// business-level auth failure: success:false together with a 4xx code. Only
+// that combination counts — success:false with a non-4xx code is an ordinary
+// business error that says nothing about the key, and bodies without the
+// envelope shape (plain 200s, HTML, empty, truncated) never match.
+func envelopeAuthFailure(body []byte) (int, bool) {
+	var env struct {
+		Code    any   `json:"code"`
+		Success *bool `json:"success"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return 0, false
+	}
+	if env.Success == nil || *env.Success {
+		return 0, false
+	}
+	switch c := env.Code.(type) {
+	case float64: // JSON number
+		if c >= 400 && c < 500 {
+			return int(c), true
+		}
+	case string: // some deployments quote the code
+		if n, err := strconv.Atoi(c); err == nil && n >= 400 && n < 500 {
+			return n, true
+		}
+	}
+	return 0, false
 }
 
 // AccountLabel returns the label of the pool entry with the given id, or the

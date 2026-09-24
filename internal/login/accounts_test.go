@@ -415,3 +415,86 @@ func TestApiKeyValidationURL_Fallback(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateKeyBearerGET_BigModelEnvelope pins the 200-envelope rejection:
+// open.bigmodel.cn's quota/usage endpoints answer HTTP 200 with
+// {"code":401,...,"success":false} for an expired/incorrect key. Without the
+// envelope check, `login zcode`/`login zhipu` waves such a key into the pool
+// and every later model call 401s. Green-signal guard for both directions.
+func TestValidateKeyBearerGET_BigModelEnvelope(t *testing.T) {
+	caseFn := func(name, body string, wantErr bool) {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			w.Write([]byte(body))
+		}))
+		defer srv.Close()
+		err := ValidateKeyBearerGET(srv.URL, "k")
+		if wantErr && (err == nil || !strings.Contains(err.Error(), "validation failed")) {
+			t.Errorf("%s: want 'validation failed', got %v", name, err)
+		}
+		if !wantErr && err != nil {
+			t.Errorf("%s: want nil, got %v", name, err)
+		}
+	}
+	// The real BigModel failure envelope (numeric code).
+	caseFn("expired key envelope",
+		`{"code":401,"msg":"令牌已过期或验证不正确","success":false}`, true)
+	// Quoted-code variant.
+	caseFn("string code envelope",
+		`{"code":"403","msg":"forbidden","success":false}`, true)
+	// A healthy quota envelope must pass.
+	caseFn("valid key envelope",
+		`{"success":true,"data":{"level":"tier-4","limits":[]}}`, false)
+	// success:false with a NON-4xx code is a business error, not a key rejection.
+	caseFn("business error envelope",
+		`{"code":1001,"msg":"something else","success":false}`, false)
+	// Non-envelope bodies must pass untouched (plain 200 / HTML / empty).
+	caseFn("plain 200", `ok`, false)
+	caseFn("html", `<html>hello</html>`, false)
+	caseFn("empty", ``, false)
+}
+
+// TestAddApikeyAccount_UsageRejectionFallsBackToModels pins the second-chance
+// validation: when the usage endpoint rejects a key, the login retries against
+// the provider's OpenAI /models surface and accepts the key if THAT passes.
+// Coding-plan quota envelopes reject key shapes the model endpoints accept, so
+// a single-endpoint gate would lock out a working key. The key must still be
+// rejected when both endpoints reject it.
+func TestAddApikeyAccount_UsageRejectionFallsBackToModels(t *testing.T) {
+	run := func(usageStatus int, usageBody string, modelsStatus int) (string, error) {
+		dir := t.TempDir()
+		setPoolHome(t, dir)
+		usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(usageStatus)
+			w.Write([]byte(usageBody))
+		}))
+		defer usage.Close()
+		models := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(modelsStatus)
+			w.Write([]byte(`{"object":"list","data":[]}`))
+		}))
+		defer models.Close()
+		prov := configdomain.Provider{
+			Provider:      "zcode",
+			UsageURL:      usage.URL,
+			OpenAIBaseURL: models.URL,
+		}
+		cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"zcode": prov}}
+		return AddApikeyAccount(cfg, "zcode", prov, accountCred{APIKey: "k1"}, "", true)
+	}
+
+	// usage rejects (200 envelope 401) but /models accepts → key accepted.
+	if _, err := run(200, `{"code":401,"msg":"令牌已过期或验证不正确","success":false}`, 200); err != nil {
+		t.Errorf("usage-reject + models-accept: want nil, got %v", err)
+	}
+	// usage rejects AND /models rejects → key rejected (the /models error).
+	if _, err := run(200, `{"code":401,"msg":"bad","success":false}`, 401); err == nil ||
+		!strings.Contains(err.Error(), "validation failed") {
+		t.Errorf("usage-reject + models-reject: want 'validation failed', got %v", err)
+	}
+	// usage accepts → no fallback needed.
+	if _, err := run(200, `{"success":true,"data":{}}`, 401); err != nil {
+		t.Errorf("usage-accept: want nil, got %v", err)
+	}
+}

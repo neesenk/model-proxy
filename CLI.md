@@ -310,7 +310,7 @@ stdout：
 Opening BigModel login to fetch a Coding Plan API key…
 Enter API key for <PROVNAME>: <stdin>
 ```
-- 开浏览器到 `https://bigmodel.cn/login`（`openBrowser`）；远程/SSH 打不开时 stderr `(could not open browser: <err> — open https://bigmodel.cn/login manually)`。用户登录后到 API Keys 拿 **Coding Plan API key** 粘贴。
+- 开浏览器到 `https://bigmodel.cn/login`（`openBrowser`）；远程/SSH 打不开时 stderr `(could not open browser: <err> — open https://bigmodel.cn/login manually)`。用户登录后到 API Keys 拿 **Coding Plan API key** 粘贴。**复制注意**：BigModel key 形如 `<32位>.<17位>`（共 49 字符、中间有一个点），实测截断到点前（32 字符）会被 BigModel 全端点 401「令牌已过期或验证不正确」——粘贴前先粘到文本编辑器核对长度。校验会依次打 `usage_url` 与 `openai_base_url/models` 两个端点，任一通过即落池；均拒才报 `validation failed`。
 - 之后同 apikey 池流程：`Validating API key...`（stderr，配了 `usage_url`）→ `✓ Saved account <MASKED_ID> (<LABEL>)`。
 - 失败同 apikey：`login failed: <err>`（exit 1，不写池）。
 

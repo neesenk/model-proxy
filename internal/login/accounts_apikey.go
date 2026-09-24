@@ -29,6 +29,17 @@ func ApiKeyValidationURL(prov configdomain.Provider) string {
 	return ""
 }
 
+// openAIModelsURL returns the provider's OpenAI-style /models endpoint — the
+// natural Bearer-GET key probe — or "" when no OpenAI base is configured. Used
+// as the second-chance validation target when the usage endpoint rejects a key
+// (see AddApikeyAccount).
+func openAIModelsURL(prov configdomain.Provider) string {
+	if prov.OpenAIBaseURL == "" {
+		return ""
+	}
+	return strings.TrimRight(prov.OpenAIBaseURL, "/") + "/models"
+}
+
 // AddApikeyAccount is the non-printing apikey login core: it validates the key
 // against usage_url (if set), dedups by id under the cross-process lock, and
 // writes the pool. Returns the account id. No stdin, no stdout — the CLI shell
@@ -48,7 +59,19 @@ func AddApikeyAccount(cfg *configdomain.Config, name string, prov configdomain.P
 	// anything else (200, 404, etc.) = key accepted (the endpoint may not exist,
 	// but the key itself was not rejected).
 	if err := ValidateKeyBearerGET(ApiKeyValidationURL(prov), key); err != nil {
-		return "", err
+		// The usage endpoint rejected the key. Before giving up, retry against
+		// the provider's OpenAI /models surface: some BigModel-family usage
+		// endpoints (notably the coding-plan quota envelope) reject key shapes
+		// the model endpoints accept, and model calls are what the key is for.
+		// Only when BOTH reject is the key actually invalid — the /models error
+		// is the clearer one to surface.
+		if fb := openAIModelsURL(prov); fb != "" && fb != ApiKeyValidationURL(prov) {
+			if fbErr := ValidateKeyBearerGET(fb, key); fbErr != nil {
+				return "", fbErr
+			}
+		} else {
+			return "", err
+		}
 	}
 	id := accounts.AccountID(prov.Provider, accountCred{APIKey: key})
 	return id, withPoolLock(name, func() error {
