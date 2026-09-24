@@ -6,6 +6,7 @@ import (
 
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/provider"
 )
 
 // apiKeyValidationURL returns the endpoint used to validate an API key at login:
@@ -64,8 +65,12 @@ func AddApikeyAccount(cfg *configdomain.Config, name string, prov configdomain.P
 		// endpoints (notably the coding-plan quota envelope) reject key shapes
 		// the model endpoints accept, and model calls are what the key is for.
 		// Only when BOTH reject is the key actually invalid — the /models error
-		// is the clearer one to surface.
-		if fb := openAIModelsURL(prov); fb != "" && fb != ApiKeyValidationURL(prov) {
+		// is the clearer one to surface. An authless /models (openrouter:
+		// public, ignores the Bearer) can never reject anything, so for those
+		// providers the usage endpoint's verdict is final — falling back would
+		// wave the garbage key the usage endpoint just rejected into the pool.
+		if fb := openAIModelsURL(prov); fb != "" && fb != ApiKeyValidationURL(prov) &&
+			!provider.ModelsAuthless(prov.Provider) {
 			if fbErr := ValidateKeyBearerGET(fb, key); fbErr != nil {
 				return "", fbErr
 			}

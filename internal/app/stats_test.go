@@ -1006,6 +1006,69 @@ func TestAPIMCPAnalyticsHandler(t *testing.T) {
 	}
 }
 
+// TestAPIMCPAnalyticsFromZeroIncludesMCPHistoryPredatingLLM: the from=0
+// (all-time) anchor for /api/mcp/analytics spans ALL persisted bucket tables.
+// When MCP usage predates the first LLM bucket, the LLM-only StatsSince clamp
+// silently dropped the older MCP history from the all-time view — the
+// earliest MCP bucket fell outside the clamped window. LLM-side anchoring is
+// unchanged (EarliestMinute still reports the LLM tables' own oldest minute).
+func TestAPIMCPAnalyticsFromZeroIncludesMCPHistoryPredatingLLM(t *testing.T) {
+	p := &Proxy{
+		processServices: processServices{
+			metrics: obscounters.NewMetricsStore(),
+			stats:   newTestStatsStore(t),
+		},
+	}
+	base := time.Date(2026, 9, 20, 0, 0, 0, 0, time.Local).Unix()
+	early := base - 5*24*3600 // MCP usage five days before the first LLM usage
+	if err := p.stats.FlushMCPBuckets(early, []observestats.MCPBucketDelta{
+		{Name: "web-search", Kind: observestats.MCPKindServer, Calls: 2, Errors: 1, LatencyMsSum: 200, LastCallAt: early + 10},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.stats.Flush(base, map[observestats.Key]observestats.Counters{
+		{Provider: "zhipu", Model: "glm-5"}: {Requests: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// LLM-side anchor keeps its own semantics: the oldest LLM bucket.
+	if got := p.stats.EarliestMinute(); got != base {
+		t.Fatalf("EarliestMinute = %d, want %d (LLM tables only)", got, base)
+	}
+
+	w := NewWebServer(p, "test-config.yaml")
+	mux := http.NewServeMux()
+	w.Register(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(
+		http.MethodGet,
+		fmt.Sprintf("/api/mcp/analytics?from=0&to=%d&granularity=minute", base+60),
+		nil,
+	))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got appapi.MCPAnalyticsResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, rec.Body.String())
+	}
+	// The all-time window clamps to the OLDEST persisted bucket — the early
+	// MCP minute, not the newer first LLM bucket.
+	if got.From != early {
+		t.Fatalf("clamped from = %d, want %d (the oldest MCP bucket)", got.From, early)
+	}
+	if len(got.Series) != 1 || got.Series[0].Name != "web-search" {
+		t.Fatalf("series = %+v", got.Series)
+	}
+	ws := got.Series[0]
+	if len(ws.Points) != 1 || ws.Points[0].Ts != early || ws.Points[0].Calls != 2 {
+		t.Fatalf("web-search points = %+v, want one point at ts=%d with 2 calls", ws.Points, early)
+	}
+	if ws.Totals.Calls != 2 || ws.Totals.Errors != 1 {
+		t.Fatalf("web-search totals = %+v", ws.Totals)
+	}
+}
+
 // ---- stats_test_support_test.go ----
 
 func openTestStatsStore(path string, retention time.Duration) (*observestats.Store, error) {

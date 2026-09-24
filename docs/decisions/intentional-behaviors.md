@@ -79,6 +79,16 @@
 
 `static` provider 的 `Quota()` 带一条自描述 Note（"no usage/quota surface"），所以空 snapshot 不会渲染成空白段落——同样是"实现说自己知道什么"，而不是让 config 标签代言。
 
+## pin 命中被禁目标回落调度（有意为之）
+
+`pin` 是硬选择：pinned provider 熔断或失败也不得 failover（红线 4）。**唯一例外**是
+operator 模型禁用：`decideOrder` 的禁用剔除先于 pin 收窄，pin 命中被禁目标时按无匹配
+处理、**回落正常调度**（其余目标照常服务），而 `x-mp-force-provider` 指向被禁目标则
+400 硬失败并明确报 "is disabled"。理由：禁用是比 pin 更强的 operator 意图（刚在 UI 上
+亲手关掉的东西，pin 不应绕过 resurrect）；对比之下熔断/失败是上游状态而非 operator
+意图，pin 排障时就是要穿透它。实现与权威描述见
+`docs/architecture/runtime-state.md` 的 Pin 与 Disabled models 节。
+
 ## 有意的测试与观测行为
 
 - 生产包的 `_test.go` 不受 DAG import policy 检查（仅无生产文件的目录例外）：

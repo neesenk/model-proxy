@@ -283,6 +283,29 @@ func TestExecutor402QuotaBodyRateLimits(t *testing.T) {
 	}
 }
 
+// OpenRouter answers credit exhaustion with 402 error.metadata.limit_source
+// (openrouter_credits / openrouter_key_limit /
+// openrouter_in_flight_budget) — the body-proven quota rule must catch that
+// shape too (backend-contracts.md), or the raw 402 keeps committing with no
+// cooldown and no failover.
+func TestExecutor402OpenRouterLimitSourceRateLimits(t *testing.T) {
+	provider := &executorTestProvider{}
+	attempt, _ := testAttempt(provider, `{}`, Policy{})
+	state := &executorState{}
+	effects := &executorEffects{}
+	body := `{"error":{"message":"Not enough credits: 0.05 required, but only 0.02 remaining. Please add more credits and try again.","code":402,"metadata":{"limit_source":"openrouter_credits"}}}`
+	before := time.Now()
+	result := (Executor{
+		Client: &sequenceDoer{responses: []*http.Response{testResponse(402, body)}}, State: state, Effects: effects,
+	}).Execute(attempt)
+	if result.Committed || result.Outcome != OutcomeRateLimited || state.rateLimits != 1 ||
+		effects.rateLimits != 1 || effects.failovers != 1 || effects.failures != 0 ||
+		state.rateLimitDecision.Kind != RateLimitQuota ||
+		state.rateLimitDecision.Until.Before(before) {
+		t.Fatalf("openrouter 402 result=%+v state=%+v effects=%+v", result, state, effects)
+	}
+}
+
 // A 402 without quota proof in the body must keep the generic path: committed
 // to the client as-is, no cooldown, no failover (payment-required is not
 // inherently quota exhaustion).

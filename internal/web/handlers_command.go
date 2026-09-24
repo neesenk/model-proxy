@@ -44,11 +44,15 @@ func (s *Server) handleModelsRefresh(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleModelsDisable serves POST /api/models/disable: the Status→Models
-// card's per-model Disable/Enable toggle. disabled=true hides the model from
+// card's per-model state switch. disabled=true hides the model from
 // GET /v1/models and drops it from scheduling (fail-closed validation — an
 // unknown provider/model is a 400, never a silently-dead override); the
 // override is persisted (disabled_models.json) — it survives reloads,
-// restarts and model refreshes.
+// restarts and model refreshes. A persist failure AFTER the in-memory
+// toggle applied answers 500 with the stable "toggle applied in memory but
+// persisting it failed: " prefix (writePortErr classifies the admin
+// service's HTTPError; same semantics as /api/health/reset and
+// /api/health/freeze): the client must not treat it as "nothing happened".
 func (s *Server) handleModelsDisable(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Provider string `json:"provider"`

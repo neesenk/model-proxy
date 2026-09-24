@@ -181,7 +181,10 @@ http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验�
   不是后端改写名。tool 行只覆盖 `tools/call`：非 call 方法（initialize/tools/list 等）
   没有 tool 名，只能经 server 级 `series` 观测。
   计数归属规则：
-  - pinned/直连 server 的交换只记该 server 名；
+  - pinned/直连 server 的交换记该 server 名；`auth: provider` 时所选账号键（池虚拟 id，
+    无池时为 provider 名）同样会 `Record`/`RecordTool` 一次——该键只存在于内存计数
+    map，消费面（`/api/mcp` 只投影配置名）不展示它，flusher 的 kind 解析也跳过它
+    （不持久化）；
   - 路由的 `initialize`/`tools/list` 只记路由名；
   - 路由的 `tools/call` 在 `account`（实际后端 server 名）非空且与暴露的 `name`
     不同时，会同时记**路由名**和**后端 server 名**各一次——因此两个命名空间的

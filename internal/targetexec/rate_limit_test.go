@@ -29,6 +29,13 @@ func TestClassify429(t *testing.T) {
 		{`{"error":"Daily Quota Exhausted"}`, RateLimitDaily},
 		{`{"error":"Too Many Requests"}`, RateLimitTransient},
 		{`{"error":{"message":"You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends."}}`, RateLimitQuota},
+		// OpenRouter 402 shapes (backend-contracts.md): all carry
+		// error.metadata.limit_source; the credits message also exists
+		// without metadata on some surfaces.
+		{`{"error":{"message":"This request would exceed your available credits given your current in-flight requests. Please try again after your in-flight requests have completed, or reduce your prompt size.","code":402,"metadata":{"limit_source":"openrouter_in_flight_budget"}}}`, RateLimitQuota},
+		{`{"error":{"message":"Not enough credits: 0.05 required, but only 0.02 remaining on your key. Please add more credits and try again.","code":402,"metadata":{"limit_source":"openrouter_credits"}}}`, RateLimitQuota},
+		{`{"error":{"message":"Key spending limit reached: 1.0 USD. Limit resets in 3 hours.","code":402,"metadata":{"limit_source":"openrouter_key_limit"}}}`, RateLimitQuota},
+		{`{"error":{"message":"Not enough credits: 10 required, but only 1 remaining."}}`, RateLimitQuota},
 		{``, RateLimitTransient},
 	}
 	for _, test := range cases {

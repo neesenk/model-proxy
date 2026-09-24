@@ -237,6 +237,7 @@ func (s *Store) FlushMCPToolBucketsContext(
 		(name, tool, kind, minute, calls, errors, latency_ms_sum, last_call_at)
 		VALUES (?,?,?,?,?,?,?,?)
 		ON CONFLICT(name, tool, minute) DO UPDATE SET
+			kind = excluded.kind,
 			calls = calls + excluded.calls,
 			errors = errors + excluded.errors,
 			latency_ms_sum = latency_ms_sum + excluded.latency_ms_sum,

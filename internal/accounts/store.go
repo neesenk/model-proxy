@@ -389,11 +389,14 @@ func (s Store) withLock(name string, fn func() error, wait func(time.Duration), 
 		if !os.IsExist(err) {
 			return fmt.Errorf("pool %s lock create: %w", name, err)
 		}
-		// Lockfile exists. Decide stale vs. busy: a mtime older than
-		// poolLockStaleAge cannot belong to a live holder (holds are ms-scale),
-		// so remove it and retry the O_EXCL create. If the file vanished between
-		// the create attempt and the stat (another waiter recovered it), just
-		// loop and retry the create.
+		// Lockfile exists. Decide stale vs. busy: safety rests on the
+		// holder's heartbeat (see the contract note above — a live holder
+		// touches the mtime well inside poolLockStaleAge, keychain holds
+		// legitimately run minutes), NOT on holds being short. A mtime older
+		// than poolLockStaleAge means the heartbeat stopped (holder died),
+		// so remove it and retry the O_EXCL create. If the file vanished
+		// between the create attempt and the stat (another waiter recovered
+		// it), just loop and retry the create.
 		info, statErr := os.Stat(lockPath)
 		if statErr == nil {
 			if time.Since(info.ModTime()) > poolLockStaleAge {

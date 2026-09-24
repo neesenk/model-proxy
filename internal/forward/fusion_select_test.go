@@ -172,19 +172,38 @@ func TestCallFusionSelectorFailureClasses(t *testing.T) {
 			t.Errorf("model failures = %v, want 1", h.gate.modelFailures)
 		}
 	})
-	t.Run("timeout records circuit failure, not a cancel", func(t *testing.T) {
+	t.Run("selector-own timeout falls back without poisoning the circuit", func(t *testing.T) {
 		up := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(150 * time.Millisecond)
 			w.Write([]byte(`{}`))
 		})
 		h, p, fc, sel, req := selectorHarness(t, up)
-		sel.Timeout = "30ms"
+		sel.Timeout = "20ms"
 		res := p.callFusionSelector(context.Background(), fc, sel, req)
 		if res.Err == nil {
 			t.Fatal("want the timeout failure")
 		}
+		// The selector's own short budget expiring is a policy fallback, not
+		// an upstream-health verdict: the decisions upstream may well have
+		// been about to answer fine, and RecordFailure would count toward the
+		// provider circuit breaker that chat/panel legs on the same provider
+		// depend on (fusion-shadow-cache.md selector contract).
+		if h.gate.failures["p"] != 0 {
+			t.Errorf("failures = %d, want 0 (selector budget expiry must not open the provider circuit)", h.gate.failures["p"])
+		}
+	})
+	t.Run("transport error still records circuit failure", func(t *testing.T) {
+		up := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Write(decisionsResponseBody())
+		})
+		h, p, fc, sel, req := selectorHarness(t, up)
+		up.srv.Close() // connection refused: a REAL provider failure
+		res := p.callFusionSelector(context.Background(), fc, sel, req)
+		if res.Err == nil {
+			t.Fatal("want the transport failure")
+		}
 		if h.gate.failures["p"] != 1 {
-			t.Errorf("failures = %d, want 1 (timeout is a provider failure, not a quorum cancel)", h.gate.failures["p"])
+			t.Errorf("failures = %d, want 1 (real transport errors keep counting)", h.gate.failures["p"])
 		}
 	})
 }

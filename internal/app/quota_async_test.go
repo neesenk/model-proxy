@@ -495,7 +495,7 @@ func newQuotaProxy(t *testing.T, provs map[string]configdomain.Provider, routes 
 	for name := range provs {
 		p.providers[name] = &testProv{key: name}
 	}
-	p.expandedRoutes = p.buildExpandedRoutes()
+	p.expandedRoutes = p.buildExpandedRoutes(authNotReady(p.providers))
 	return p
 }
 

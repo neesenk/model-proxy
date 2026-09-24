@@ -498,3 +498,47 @@ func TestAddApikeyAccount_UsageRejectionFallsBackToModels(t *testing.T) {
 		t.Errorf("usage-accept: want nil, got %v", err)
 	}
 }
+
+// TestAddApikeyAccount_AuthlessModelsNoFallback pins that the /models
+// second chance only exists for providers whose /models can actually reject a
+// key. openrouter's /models is public and ignores the Bearer (invalid keys get
+// 200 — backend-contracts.md), so when its usage endpoint /key rejects a key,
+// the fallback must NOT run: it would rubber-stamp any garbage key into the
+// pool. The usage endpoint's verdict is final and /models is not even probed.
+func TestAddApikeyAccount_AuthlessModelsNoFallback(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	usage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		w.Write([]byte(`{"error":{"message":"Invalid session key"}}`))
+	}))
+	defer usage.Close()
+	modelsHits := 0
+	models := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		modelsHits++
+		w.WriteHeader(200)
+		w.Write([]byte(`{"object":"list","data":[]}`))
+	}))
+	defer models.Close()
+	prov := configdomain.Provider{
+		Provider:      "openrouter",
+		UsageURL:      usage.URL,
+		OpenAIBaseURL: models.URL,
+	}
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"openrouter": prov}}
+
+	_, err := AddApikeyAccount(cfg, "openrouter", prov, accountCred{APIKey: "garbage"}, "", true)
+	if err == nil || !strings.Contains(err.Error(), "validation failed") {
+		t.Fatalf("usage-reject + authless models: want validation failure, got %v", err)
+	}
+	if modelsHits != 0 {
+		t.Errorf("authless /models was probed %d times, want 0", modelsHits)
+	}
+	pool, loadErr := LoadPool("openrouter", "openrouter")
+	if loadErr != nil {
+		t.Fatalf("load pool: %v", loadErr)
+	}
+	if len(pool.Accounts) != 0 {
+		t.Errorf("rejected key leaked into the pool: %+v", pool.Accounts)
+	}
+}

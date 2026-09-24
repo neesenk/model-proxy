@@ -23,7 +23,7 @@ import (
 func rebuildRoutes(t *testing.T, p *Proxy) {
 	t.Helper()
 	p.mu.Lock()
-	p.expandedRoutes = p.buildExpandedRoutes()
+	p.expandedRoutes = p.buildExpandedRoutes(authNotReady(p.providers))
 	p.routeKeys = routeKeySet(p.expandedRoutes)
 	p.mu.Unlock()
 }

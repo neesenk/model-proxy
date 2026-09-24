@@ -215,6 +215,11 @@ type ModelFacts struct {
 	Routes  map[string][]configdomain.RouteTarget
 	Meta    map[string]map[string]catalog.Model
 	Sources map[string]map[string]int
+	// Unreachable lists exposed models dropped from Routes because no target
+	// can serve them over a chat protocol (decisions-only providers, e.g.
+	// typesafe's jev — no chat conversion exists). RunTakeoverReportOpts logs
+	// them so the models' absence from written configs is explained.
+	Unreachable []string
 	// SourceDefault is the application's "metadata came from conservative
 	// defaults" marker value in Sources; a negative value disables warnings.
 	SourceDefault int
@@ -347,6 +352,10 @@ func RunTakeoverReportOpts(cfg *configdomain.Config, which, bakDir string, facts
 	meta := facts.Meta
 	report.Warnings = MetadataWarnings(clients, cfg, facts)
 	EmitTakeoverWarnings(clients, cfg, meta, facts)
+	if len(facts.Unreachable) > 0 {
+		logx.Infof("  ~ excluded (no chat-protocol route — cannot be served to chat clients): %s",
+			strings.Join(facts.Unreachable, ", "))
+	}
 
 	// `all`/`""` expands to every client; a client whose config file isn't
 	// present (e.g. that agent isn't installed) is skipped with a warning

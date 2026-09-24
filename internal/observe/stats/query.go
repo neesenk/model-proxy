@@ -491,24 +491,36 @@ func (s *Store) QueryAgents(from, to int64, agent, provider, model string, bucke
 // persisted all-time totals, so the earliest bucket is when the current
 // counting epoch began (initial data or the last full reset).
 func (s *Store) EarliestMinute() int64 {
-	var minPM, minAgent sql.NullInt64
-	if err := s.db.QueryRow(`SELECT MIN(minute) FROM minute_buckets`).Scan(&minPM); err != nil {
-		return 0
-	}
-	if err := s.db.QueryRow(`SELECT MIN(minute) FROM agent_buckets`).Scan(&minAgent); err != nil {
-		return 0
-	}
-	switch {
-	case minPM.Valid && minAgent.Valid:
-		if minPM.Int64 < minAgent.Int64 {
-			return minPM.Int64
+	return s.earliestMinuteOf("minute_buckets", "agent_buckets")
+}
+
+// EarliestMinuteAll returns the oldest bucket minute across ALL stats tables
+// (unix seconds), 0 when no rows exist: the LLM pair (minute_buckets,
+// agent_buckets) plus the MCP pair (mcp_buckets, mcp_tool_buckets). It
+// anchors all-time (from=0) windows on MCP surfaces: MCP usage can predate
+// the first LLM bucket, and the LLM-only EarliestMinute would clamp the
+// window past that older MCP history (docs/web-api.md /api/mcp/analytics).
+func (s *Store) EarliestMinuteAll() int64 {
+	return s.earliestMinuteOf("minute_buckets", "agent_buckets", "mcp_buckets", "mcp_tool_buckets")
+}
+
+// earliestMinuteOf returns the smallest MIN(minute) across the given stats
+// tables. Table names are package-internal constants (never user input), so
+// the identifier interpolation is safe. 0 on a query error or when every
+// table is empty (fail-closed: no clamp, same as EarliestMinute).
+func (s *Store) earliestMinuteOf(tables ...string) int64 {
+	var earliest sql.NullInt64
+	for _, table := range tables {
+		var v sql.NullInt64
+		if err := s.db.QueryRow(`SELECT MIN(minute) FROM ` + table).Scan(&v); err != nil {
+			return 0
 		}
-		return minAgent.Int64
-	case minPM.Valid:
-		return minPM.Int64
-	case minAgent.Valid:
-		return minAgent.Int64
-	default:
+		if v.Valid && (!earliest.Valid || v.Int64 < earliest.Int64) {
+			earliest = v
+		}
+	}
+	if !earliest.Valid {
 		return 0
 	}
+	return earliest.Int64
 }

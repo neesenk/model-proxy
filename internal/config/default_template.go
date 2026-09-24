@@ -3,6 +3,10 @@ package config
 // DefaultConfigYAML is the template written by `model-proxy config init`; matches the repo's config.yaml.
 const DefaultConfigYAML = `# model-proxy config — standalone, portable to Linux.
 # Paths support ~ expansion. env:ENV_VAR reads an environment variable.
+# Order note (every provider's models: list): the wizard's suggested
+# "model-proxy test" model is models[0] of the alphabetically-first selected
+# provider — append new models at the tail instead of re-sorting, or the
+# wizard hint silently shifts.
 
 listen: 127.0.0.1:15721
 log_level: info            # debug | info | warn | error
@@ -80,8 +84,6 @@ providers:
     priority: 1
     # gpt-5.4 omitted: upstream rejects it for ChatGPT-account Codex access
     # ("The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account").
-    # Order note: models[0] is the wizard's suggested "model-proxy test" model —
-    # append new models instead of re-sorting.
     models:
       - gpt-5.6-luna
       - gpt-5.6-sol

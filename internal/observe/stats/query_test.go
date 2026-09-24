@@ -616,3 +616,54 @@ func TestQueryAgentNamesWindowAndFilters(t *testing.T) {
 		t.Fatalf("out-of-range names = %+v", outOfRange)
 	}
 }
+
+// TestEarliestMinuteAllCoversMCPTables pins the all-tables all-time anchor:
+// EarliestMinute stays LLM-only (minute_buckets/agent_buckets — the /api/tokens
+// "Since" label and the LLM analytics clamp must not shift when MCP usage
+// predates the first LLM bucket), while EarliestMinuteAll additionally spans
+// the MCP pair (mcp_buckets AND mcp_tool_buckets) so from=0 windows on MCP
+// surfaces keep MCP history that predates the first LLM bucket.
+func TestEarliestMinuteAllCoversMCPTables(t *testing.T) {
+	store := newTestStore(t, 0)
+	if got := store.EarliestMinute(); got != 0 {
+		t.Fatalf("empty store EarliestMinute = %d, want 0", got)
+	}
+	if got := store.EarliestMinuteAll(); got != 0 {
+		t.Fatalf("empty store EarliestMinuteAll = %d, want 0", got)
+	}
+
+	// Oldest persisted bucket is a per-tool MCP row; the per-name MCP row and
+	// the first LLM usage come later.
+	const (
+		toolMinute = int64(60)
+		nameMinute = int64(120)
+		llmMinute  = int64(3600)
+	)
+	if err := store.FlushMCPToolBuckets(toolMinute, []MCPToolBucketDelta{
+		{Name: "web-search", Tool: "search", Kind: MCPKindServer, Calls: 1, LatencyMsSum: 10, LastCallAt: toolMinute},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FlushMCPBuckets(nameMinute, []MCPBucketDelta{
+		{Name: "web-search", Kind: MCPKindServer, Calls: 1, LatencyMsSum: 10, LastCallAt: nameMinute},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Flush(llmMinute, map[Key]Counters{
+		{Provider: "z", Model: "m"}: {Requests: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FlushAgents(llmMinute, map[AgentKey]AgentCounters{
+		{Agent: "codex"}: {Requests: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := store.EarliestMinute(); got != llmMinute {
+		t.Fatalf("EarliestMinute = %d, want %d (LLM tables only)", got, llmMinute)
+	}
+	if got := store.EarliestMinuteAll(); got != toolMinute {
+		t.Fatalf("EarliestMinuteAll = %d, want %d (the MCP tool bucket is the oldest persisted bucket)", got, toolMinute)
+	}
+}

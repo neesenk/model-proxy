@@ -1,6 +1,8 @@
 package routing
 
 import (
+	"sort"
+
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
 )
@@ -84,4 +86,60 @@ func NativeProtocolsWithVerdict(cfg *configdomain.Config, t configdomain.RouteTa
 	settle(v.Anthropic, "anthropic", prov.AnthropicBaseURL != "")
 	settle(v.Responses, "responses", false)
 	return out
+}
+
+// isChatClientProtocol reports whether proto is one of the chat protocols
+// every takeover-configured agent speaks (anthropic|openai|responses).
+// Anything else is a different API family with no chat-protocol conversion
+// (today: decisions — fail-closed stubs in internal/protocol), so it can
+// never be served to those clients.
+func isChatClientProtocol(proto string) bool {
+	switch proto {
+	case "anthropic", "openai", "responses":
+		return true
+	}
+	return false
+}
+
+// ChatReachableRoutes filters a route table down to the exposed models a
+// chat-protocol client can actually call. A model survives while ANY of its
+// targets is servable over a client-facing chat protocol or abstains
+// (unknown native set — it may still convert or passthrough); a model whose
+// every target natively speaks only protocols outside
+// anthropic|openai|responses (decisions-only providers, e.g. typesafe's jev)
+// is unreachable through every takeover client and is dropped, its exposed
+// name returned in dropped so callers can report why it disappeared.
+// Static knowledge only (NativeProtocols without probe verdicts): explicit
+// protocol: and ProtocolHint win, matching offline consumers' resolution
+// order. A provider whose chat legs the live probe later denies is a
+// per-model reachability question, not this filter's.
+func ChatReachableRoutes(cfg *configdomain.Config, routes map[string][]configdomain.RouteTarget) (map[string][]configdomain.RouteTarget, []string) {
+	kept := make(map[string][]configdomain.RouteTarget, len(routes))
+	var dropped []string
+	for exposed, targets := range routes {
+		reachable := len(targets) == 0 // nothing to serve — abstain, not dead
+		for _, t := range targets {
+			set := NativeProtocols(cfg, t)
+			if len(set) == 0 {
+				reachable = true // abstains — may still convert or passthrough
+				break
+			}
+			for proto := range set {
+				if isChatClientProtocol(proto) {
+					reachable = true
+					break
+				}
+			}
+			if reachable {
+				break
+			}
+		}
+		if reachable {
+			kept[exposed] = targets
+		} else {
+			dropped = append(dropped, exposed)
+		}
+	}
+	sort.Strings(dropped)
+	return kept, dropped
 }

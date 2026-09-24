@@ -1,12 +1,15 @@
 package app
 
 import (
+	"encoding/json"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
 	"model-proxy/internal/runtime"
 	runtimestate "model-proxy/internal/runtime"
 	"net/http"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -199,6 +202,64 @@ func TestQuotaTracker_StickyPersistLoad(t *testing.T) {
 	got := tr2.LoadedSticky["glm-5.2"]
 	if got.Provider != "zhipu" || !got.Since.Equal(since) {
 		t.Fatalf("sticky not restored: %+v", got)
+	}
+}
+
+// TestQuotaPersist_DaemonNotesRoundTrip (d473cb2 follow-up): the daemon wires
+// p.quota.FullSnapshot = p.snapshotPersistedState, so its persist path projects
+// quotas through snapshotPersistedState — which dropped Notes. The standalone
+// tracker branch was fixed, but the daemon's quota_state.json still carried no
+// notes, blanking the console/usage link (the only usage surface of
+// console-only providers like mimo) after every restart until the next poll.
+// This test exercises the DAEMON shape: a real Proxy commits a snapshot and
+// persists through its FullSnapshot branch, the on-disk JSON is parsed (not
+// grepped) for the exact notes, and a fresh proxy on the same state file
+// restores them on boot.
+func TestQuotaPersist_DaemonNotesRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"mimo": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{},
+	}
+	statePath := filepath.Join(t.TempDir(), "quota_state.json")
+
+	p1 := newTestProxyAt(t, cfg, statePath)
+	notes := []string{"console only", "Balance & recharge: https://example.com/console"}
+	// The console-only quota shape: BillingUnknown with the console URL in Notes.
+	p1.quota.SetSnapshot("mimo", &provider.QuotaSnapshot{
+		Billing: provider.BillingUnknown, RemainingPct: -1, Notes: notes, AsOf: time.Now(),
+	})
+	if err := p1.quota.Persist(); err != nil {
+		t.Fatalf("daemon persist: %v", err)
+	}
+
+	// The daemon-written state file itself must carry the notes.
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onDisk struct {
+		Providers map[string]runtimestate.PersistedQuotaSnapshot `json:"providers"`
+	}
+	if err := json.Unmarshal(raw, &onDisk); err != nil {
+		t.Fatalf("state file is not valid JSON: %v\n%s", err, raw)
+	}
+	persisted, ok := onDisk.Providers["mimo"]
+	if !ok {
+		t.Fatalf("persisted providers missing mimo:\n%s", raw)
+	}
+	if !reflect.DeepEqual(persisted.Notes, notes) {
+		t.Fatalf("persisted notes = %q, want %q (daemon FullSnapshot projection dropped them)", persisted.Notes, notes)
+	}
+
+	// Restart: a fresh proxy boots on the same file and restores the notes.
+	p2 := newTestProxyAt(t, cfg, statePath)
+	s := p2.quota.Snapshot("mimo")
+	if s == nil {
+		t.Fatal("restored quota snapshot missing after daemon restart")
+	}
+	if !reflect.DeepEqual(s.Notes, notes) {
+		t.Fatalf("restored notes = %q, want %q (console link must survive restart)", s.Notes, notes)
 	}
 }
 

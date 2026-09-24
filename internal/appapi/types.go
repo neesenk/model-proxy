@@ -962,6 +962,20 @@ type ReadAPI interface {
 	TakeoverTemplate(name string) (TakeoverTemplateDoc, error)
 }
 
+// MCPStatsSinceReader is the optional MCP-aware companion of ReadAPI's
+// StatsSince: it reports the oldest persisted bucket minute across ALL stats
+// tables — the LLM pair (minute_buckets, agent_buckets) that StatsSince
+// covers PLUS the MCP pair (mcp_buckets, mcp_tool_buckets). All-time
+// (from=0) windows on MCP surfaces must anchor on it: MCP usage can predate
+// the first LLM bucket, and clamping to the LLM-only StatsSince silently
+// drops that older MCP history (docs/web-api.md /api/mcp/analytics). The
+// production reads chain implements it (the web_adapter composition wraps
+// the admin service, whose ports are frozen at the LLM-only StatsSince); a
+// reads port without it keeps the StatsSince clamp.
+type MCPStatsSinceReader interface {
+	MCPStatsSince() int64
+}
+
 // CommandAPI is the complete mutation/active-probe capability consumed by the
 // Web transport.
 type CommandAPI interface {

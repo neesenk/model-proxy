@@ -44,6 +44,22 @@ func (r *Registry) Admit(workflow string, limit int, now time.Time) bool {
 	return true
 }
 
+// Exhausted reports whether the workflow's local-day orchestration budget is
+// already spent, WITHOUT consuming anything. The engine peeks before the
+// selector gate so an exhausted workflow degrades straight to the
+// synthesizer instead of still paying one decisions-model selector call per
+// request; the charging Admit runs later, only on the orchestration path
+// (selector_direct stays uncharged).
+func (r *Registry) Exhausted(workflow string, limit int, now time.Time) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rollDayLocked(now)
+	return limit > 0 && r.dayRuns[workflow] >= uint64(limit)
+}
+
 // Record retains a detached Run and folds it into the cumulative aggregate.
 func (r *Registry) Record(run *Run) {
 	if r == nil || run == nil {

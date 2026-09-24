@@ -116,7 +116,10 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	// exposed name whose every target is disabled answers like an unknown
 	// model (it is also hidden from GET /v1/models). The check re-reads the
 	// Manager's live override state per request, so a toggle takes effect on
-	// the next request without a reload.
+	// the next request without a reload. The pre-filter list is kept for the
+	// force-provider 400 attribution below: a forced target that the filter
+	// dropped must be reported as "disabled", not misread as a typo.
+	preDisabledTargets := targets
 	targets = p.filterDisabledTargets(targets, parentOf)
 	if len(targets) == 0 {
 		p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusNotFound)
@@ -167,7 +170,11 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		narrowed := routing.FilterTargetsByProvider(targets, parentOf, forcedProvider)
 		if len(narrowed) == 0 {
 			p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
-			http.Error(w, fmt.Sprintf("force-provider %q is not a target for model %q", forcedProvider, exposed), http.StatusBadRequest)
+			if len(routing.FilterTargetsByProvider(preDisabledTargets, parentOf, forcedProvider)) > 0 {
+				http.Error(w, fmt.Sprintf("force-provider %q is disabled for model %q (operator toggle; re-enable it or drop the override)", forcedProvider, exposed), http.StatusBadRequest)
+			} else {
+				http.Error(w, fmt.Sprintf("force-provider %q is not a target for model %q", forcedProvider, exposed), http.StatusBadRequest)
+			}
 			return
 		}
 		targets = narrowed

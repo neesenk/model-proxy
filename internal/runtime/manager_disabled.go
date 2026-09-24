@@ -112,6 +112,15 @@ func (snapshot DashboardSnapshot) RouteFullyDisabled(targets []Target) bool {
 	return true
 }
 
+// TargetDisabledSnapshot reports whether ONE scheduling target is
+// operator-disabled per this snapshot's detached copy of the override — the
+// per-target sibling of RouteFullyDisabled (blocked-reason attribution uses
+// it so a partially disabled route's empty chain explains the disabled
+// targets as "operator disabled" instead of a misleading "unavailable").
+func (snapshot DashboardSnapshot) TargetDisabledSnapshot(target Target) bool {
+	return snapshot.disabled.targetDisabled(target)
+}
+
 // disabledModelSet is the detached snapshot form consumed by PreviewOrder
 // (DashboardSnapshot.carried). Lookup mirrors targetDisabledLocked: the exact
 // provider key or the pool parent's config-level key.

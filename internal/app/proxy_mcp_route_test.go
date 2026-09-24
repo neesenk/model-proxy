@@ -254,6 +254,48 @@ func TestMCPProbeRoute_AllTargetsDown(t *testing.T) {
 	}
 }
 
+// TestMCPProbeRoute_DisabledRouteFailsClosed: a disabled route is not
+// probeable — the probe returns the same disabled report as a disabled
+// server instead of dialing the (still-configured) member upstreams,
+// mirroring the live gateway's 404 for disabled routes.
+func TestMCPProbeRoute_DisabledRouteFailsClosed(t *testing.T) {
+	zs, exa, servers, routes := twoRouteBackends(t)
+	disabled := false
+	offRoute := routes["web-search"]
+	offRoute.Enabled = &disabled
+	routes["web-search"] = offRoute
+	p, _ := newMCPRouteTestProxyP(t, []string{"k-A"}, servers, routes)
+	res, err := p.probeMCP(context.Background(), "web-search")
+	if err != nil {
+		t.Fatalf("probeMCP disabled route: %v", err)
+	}
+	if res.OK || !res.Route || res.Error == "" {
+		t.Fatalf("disabled route probe = %+v, want OK=false Route=true with a disabled report", res)
+	}
+	if res.TargetsProbed != 0 || res.TargetsTotal != 0 {
+		t.Fatalf("disabled route probe probed/total = %d/%d, want 0/0 (no upstream dials)", res.TargetsProbed, res.TargetsTotal)
+	}
+	if want := `mcp route "web-search" is disabled (enabled: false)`; res.Error != want {
+		t.Fatalf("disabled route error = %q, want %q", res.Error, want)
+	}
+	// No member backend was contacted.
+	if zs.calls() != 0 || exa.calls() != 0 {
+		t.Fatalf("disabled route dialed backends: zs=%d exa=%d", zs.calls(), exa.calls())
+	}
+	// Sanity: a disabled SERVER keeps its own report (same contract).
+	disabledSrv := false
+	offServer := servers["zs"]
+	offServer.Enabled = &disabledSrv
+	servers["zs"] = offServer
+	res, err = p.probeMCP(context.Background(), "zs")
+	if err != nil {
+		t.Fatalf("probeMCP disabled server: %v", err)
+	}
+	if res.OK || res.Error != `mcp server "zs" is disabled (enabled: false)` {
+		t.Fatalf("disabled server probe = %+v", res)
+	}
+}
+
 // TestMCPRoute_FullFlow: synthesized initialize → aggregated tools/list →
 // routed+sticky tools/call with name rewrite and per-backend protocol →
 // DELETE fan-out.
@@ -606,26 +648,47 @@ func TestMCPRoute_ToolsCallStatsCreditBackend(t *testing.T) {
 	// (mcpLog runs post-stream: latency accounting spans the streamed body),
 	// so counter increments are asynchronously observable — an immediate
 	// Snapshot races the handler goroutine and flakes on slow/loaded runners
-	// (observed on the 2-core CI box under -race). Await the counter with a
+	// (observed on the 2-core CI box under -race). Await the counters with a
 	// bounded poll instead of asserting a timing that does not exist.
-	awaitRouteCalls := func(want uint64) map[string]obscounters.MCPStatSnapshot {
+	//
+	// The settle predicate must gate on the LAST writes the assertions below
+	// read, evaluated within one Snapshot: mcpLog records the exposed route
+	// name first and the chosen backend second (Record(name) before
+	// Record(account), and within one Record the calls increment lands before
+	// the latency sum). A snapshot that only sees the route-name increment
+	// can still catch the backend entry mid-write — its calls (or latency)
+	// not yet landed. Requiring both entries' final fields in the SAME
+	// snapshot settles the whole exchange (sequentially-consistent atomics:
+	// the returned values are exactly the reads the predicate gated on).
+	awaitRouteStats := func(settled func(snap map[string]obscounters.MCPStatSnapshot) bool) map[string]obscounters.MCPStatSnapshot {
 		t.Helper()
 		deadline := time.Now().Add(3 * time.Second)
 		for {
 			snap := p.mcpStats.Snapshot()
-			if snap["web-search"].Calls >= want {
+			if settled(snap) {
 				return snap
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("route web-search calls = %d, want %d (post-response stats write did not land)", snap["web-search"].Calls, want)
+				t.Fatalf("post-response stats write did not land: %+v", snap)
 			}
 			time.Sleep(2 * time.Millisecond)
 		}
 	}
 
-	before := awaitRouteCalls(2) // initialize + tools/list settled
+	// initialize + tools/list settle the route-name record only (those
+	// exchanges log no backend account — mcpLog is called with account "").
+	before := awaitRouteStats(func(snap map[string]obscounters.MCPStatSnapshot) bool {
+		return snap["web-search"].Calls >= 2
+	})
 	mcpPost(t, srv.URL+"/mcp/web-search", sid, routeCallBody("web_search")).Body.Close()
-	after := awaitRouteCalls(before["web-search"].Calls + 1)
+	// The tools/call credits route name AND backend: wait for the backend's
+	// calls AND latency (callDelay guarantees a non-zero latency) so the
+	// backend entry is fully written, not just created.
+	after := awaitRouteStats(func(snap map[string]obscounters.MCPStatSnapshot) bool {
+		zs := snap["zs"]
+		return snap["web-search"].Calls >= before["web-search"].Calls+1 &&
+			zs.Calls >= 1 && zs.AvgLatencyMs > 0
+	})
 
 	routeBefore := before["web-search"]
 	routeAfter := after["web-search"]

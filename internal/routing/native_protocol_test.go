@@ -76,3 +76,54 @@ func TestNativeProtocolsWithVerdict(t *testing.T) {
 		})
 	}
 }
+
+// TestChatReachableRoutes_DerivedRoutesDropsDecisionsOnly covers the
+// production path (RouteTable → ChatReachableRoutes): a typesafe provider's
+// models — whether configured with a pure decisions base or the
+// openai_base_url gateway fallback form — are decisions-only (ProtocolHint
+// short-circuits before base-URL declarations) and must be dropped, while
+// chat models survive.
+func TestChatReachableRoutes_DerivedRoutesDropsDecisionsOnly(t *testing.T) {
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
+		"zhipu":   {OpenAIBaseURL: "https://z/v1", Models: []string{"glm-5.3"}},
+		"ts-pure": {Provider: "typesafe", DecisionsBaseURL: "https://ts/v1", Models: []string{"jev-pure"}},
+		"ts-gw":   {Provider: "typesafe", OpenAIBaseURL: "https://gw/v1", Models: []string{"jev-gw"}},
+	}}
+	kept, dropped := ChatReachableRoutes(cfg, DeriveRoutesFrom(cfg))
+	if len(dropped) != 2 || dropped[0] != "jev-gw" || dropped[1] != "jev-pure" {
+		t.Fatalf("dropped = %v, want [jev-gw jev-pure]", dropped)
+	}
+	if _, ok := kept["glm-5.3"]; !ok {
+		t.Errorf("chat model glm-5.3 must stay reachable, kept = %v", kept)
+	}
+	if _, ok := kept["jev-pure"]; ok {
+		t.Errorf("decisions-only model jev-pure must be dropped, kept = %v", kept)
+	}
+}
+
+// TestChatReachableRoutes_ExplicitTargets covers the explicit-route edge
+// cases: a pinned protocol wins in both directions, a chat failover target
+// rescues an otherwise decisions-only route, and abstaining targets (unknown
+// provider, empty route) stay reachable.
+func TestChatReachableRoutes_ExplicitTargets(t *testing.T) {
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
+		"chat":    {OpenAIBaseURL: "https://x/v1"},
+		"ts-pure": {Provider: "typesafe", DecisionsBaseURL: "https://ts/v1"},
+	}}
+	routes := map[string][]configdomain.RouteTarget{
+		"pinned-decisions": {{Provider: "chat", Model: "m", Protocol: "decisions"}},
+		"pinned-chat":      {{Provider: "ts-pure", Model: "m", Protocol: "openai"}},
+		"mixed-failover":   {{Provider: "ts-pure", Model: "m"}, {Provider: "chat", Model: "m"}},
+		"unknown-provider": {{Provider: "ghost", Model: "m"}},
+		"no-targets":       {},
+	}
+	kept, dropped := ChatReachableRoutes(cfg, routes)
+	if len(dropped) != 1 || dropped[0] != "pinned-decisions" {
+		t.Fatalf("dropped = %v, want [pinned-decisions]", dropped)
+	}
+	for _, name := range []string{"pinned-chat", "mixed-failover", "unknown-provider", "no-targets"} {
+		if _, ok := kept[name]; !ok {
+			t.Errorf("%s must stay reachable, kept = %v", name, kept)
+		}
+	}
+}

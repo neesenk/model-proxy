@@ -50,6 +50,12 @@ var quotaExhaustedMarkers = [][]byte{
 	[]byte("套餐额度"),
 	[]byte("配额已用完"),
 	[]byte("额度已用完"),
+	// OpenRouter 402s prove exhaustion via error.metadata.limit_source
+	// (openrouter_credits / openrouter_key_limit /
+	// openrouter_in_flight_budget) or the classic credits message;
+	// backend-contracts.md pins the body-proven quota-denied path for them.
+	[]byte("limit_source"),
+	[]byte("not enough credits"),
 }
 
 var (

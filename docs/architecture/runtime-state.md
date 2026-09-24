@@ -42,11 +42,11 @@ Web DTO 映射和 lifecycle 都留在应用层（`internal/app`）；Manager 持
 refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` 的文件
 编排。quota snapshot 的内存权威值属于 Manager，tracker 不持有第二份 quota map。
 
-轮询范围**不包含**配置为 `billing: pay-as-you-go` 且**没有 `usage_url`** 的 provider（含其池化虚拟账号
-`name#<accountID>`）：这类 provider 没有可测量的 quota 窗口，`PollAll`/`PollOne`/`RefreshOne`
-都会跳过它们，并把已有的旧快照从 Manager 中清除。带 `usage_url` 的 pay-as-you-go provider
-（deepseek 的 `/user/balance`，余额即其 quota 窗口）与 plan provider 一样轮询、恢复和手动刷新；
-调度侧仍按 config 的 billing 字段把它们排在 `payg` 档位。
+轮询范围 = **全部已构建 provider**（含池化虚拟账号 `name#<accountID>`）。`Quota()`
+能服务什么由 provider 实现决定：配了 `usage_url` 的做 HTTP 查询（deepseek 的
+`/user/balance` 余额即其 quota 窗口）；console-only 实现（qwen-plan 模式）零 HTTP、
+返回本地 Notes snapshot。config 的 `billing:` 标签**不**门禁轮询/展示/调度（2026-09-24
+移除，历史见下文「tier 档位」段），它只作为无实测快照时的显式声明档位回退。
 
 状态文件包含：
 
@@ -289,6 +289,8 @@ session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 r
 
 - 在 availability 过滤之前收窄目标；
 - pinned provider 熔断或失败也不得 failover；
+- **唯一例外**：pin 命中被 operator 禁用的目标时按无匹配处理、回落正常调度
+  （禁用是更强的 operator 意图，见下文 Disabled models 节）；
 - pin 池化父名等于 pin 全部虚拟账号；
 - `x-mp-force-provider` 是单请求覆盖；
 - pin 仅在内存中，reload 不清，重启清除；

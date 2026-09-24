@@ -7,6 +7,7 @@ import (
 
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/admin"
+	"model-proxy/internal/appapi"
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/fusion"
@@ -80,13 +81,27 @@ func NewWebServer(proxy *Proxy, configFile string) *WebServer {
 	server.events = func(w http.ResponseWriter, r *http.Request) {
 		observeevents.ServeEvents(proxy.events, w, r)
 	}
-	server.server = mustNewWebTransport(server, browserListen)
+	server.server = mustNewWebTransport(server, browserListen, func() int64 {
+		// Same lifetime discipline as the other stats port closures: p.stats
+		// is bound once by initStats before serving starts and never swapped,
+		// so it is read bare at call time.
+		if proxy.stats == nil {
+			return 0
+		}
+		return proxy.stats.EarliestMinuteAll()
+	})
 	return server
 }
 
-func mustNewWebTransport(server *WebServer, browserListen string) *webtransport.Server {
+func mustNewWebTransport(server *WebServer, browserListen string, mcpStatsSince func() int64) *webtransport.Server {
 	transport, err := webtransport.New(webtransport.Options{
-		Reads:    server.api,
+		// reads decorates the admin service with the MCP-aware all-time
+		// anchor (appapi.MCPStatsSinceReader): the oldest persisted bucket
+		// across ALL stats tables, including the MCP pair that the LLM-only
+		// StatsSince port does not see. Interface-optional because the reads
+		// port itself lives behind admin.Ports; embedding keeps every other
+		// method on the unchanged delegation path.
+		Reads:    mcpAllTimeReads{ReadAPI: server.api, mcpStatsSince: mcpStatsSince},
 		Commands: server.api,
 		Version:  Version,
 		Events:   server.events,
@@ -102,6 +117,23 @@ func mustNewWebTransport(server *WebServer, browserListen string) *webtransport.
 		panic("construct Web transport: " + err.Error())
 	}
 	return transport
+}
+
+// mcpAllTimeReads is the appapi.ReadAPI handed to the web transport: the
+// admin service plus the MCP-aware StatsSince companion. Composition-only
+// (one field-holding wrapper, no logic beyond the delegation closure).
+type mcpAllTimeReads struct {
+	appapi.ReadAPI
+	mcpStatsSince func() int64
+}
+
+// MCPStatsSince implements appapi.MCPStatsSinceReader: the oldest persisted
+// bucket minute across all stats tables (0 when nothing is persisted yet).
+func (r mcpAllTimeReads) MCPStatsSince() int64 {
+	if r.mcpStatsSince == nil {
+		return 0
+	}
+	return r.mcpStatsSince()
 }
 
 func (server *WebServer) Register(mux *http.ServeMux) {

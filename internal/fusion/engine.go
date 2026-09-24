@@ -94,12 +94,19 @@ func (engine Engine) Run(ctx context.Context, request Request, ports Ports) Resu
 		return engine.finish(&run, request.Recipe.Synthesizer, request.OriginalBody, ports)
 	}
 
+	// Budget peek (no charge) BEFORE the selector gate: once the workflow's
+	// daily orchestration budget is spent, every further request would pay one
+	// decisions-model selector call just to degrade anyway — skip straight to
+	// the synthesizer answer. selector_direct stays uncharged: the charging
+	// Admit below runs only on the orchestration path.
+	budgetExhausted := engine.Registry.Exhausted(request.Workflow, request.Recipe.MaxRunsPerDay, time.Now())
+
 	// Selector gate (before tools/budget): one decisions-model call may answer
 	// directly (cheap requests skip orchestration — and its budget) or trim the
 	// panel. Every failure falls back to the static panel; selector_direct is
 	// deliberately NOT charged against max_runs_per_day (no orchestration ran).
 	panel := request.Recipe.Panel
-	if sel := request.Recipe.Selector; sel != nil {
+	if sel := request.Recipe.Selector; sel != nil && !budgetExhausted {
 		trimmed, direct := engine.applySelector(ctx, &run, request, ports, sel)
 		if direct != nil {
 			run.Degraded = DegradedSelectorDirect
@@ -116,7 +123,7 @@ func (engine Engine) Run(ctx context.Context, request Request, ports Ports) Resu
 			request.Route, request.Recipe.Synthesizer.Provider, request.Recipe.Synthesizer.Model)
 		return engine.finish(&run, request.Recipe.Synthesizer, request.OriginalBody, ports)
 	}
-	if !engine.Registry.Admit(request.Workflow, request.Recipe.MaxRunsPerDay, time.Now()) {
+	if budgetExhausted || !engine.Registry.Admit(request.Workflow, request.Recipe.MaxRunsPerDay, time.Now()) {
 		run.Degraded = DegradedBudgetExceeded
 		logx.Warnf("[fusion] %s: workflow %s daily orchestration budget exhausted (%d/day); answering directly (fusion_budget_exceeded)",
 			request.Route, request.Workflow, request.Recipe.MaxRunsPerDay)

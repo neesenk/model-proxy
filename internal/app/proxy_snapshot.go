@@ -191,7 +191,7 @@ func (p *Proxy) snapshotPersistedState() runtimestate.PersistedFullSnapshot {
 	for k, v := range RuntimeSnapshot.Quotas {
 		providers[k] = runtimestate.PersistedQuotaSnapshot{
 			Billing: v.Billing, RemainingPct: v.RemainingPct,
-			Windows: v.Windows, AsOf: v.AsOf, Err: v.Err,
+			Windows: v.Windows, Notes: v.Notes, AsOf: v.AsOf, Err: v.Err,
 		}
 	}
 	s := runtimestate.PersistedFullSnapshot{

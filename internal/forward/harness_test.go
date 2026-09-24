@@ -170,6 +170,7 @@ var _ targetexec.Effects = (*fakeEffects)(nil)
 // fakeRouteState implements RouteState with programmable answers.
 type fakeRouteState struct {
 	pins             map[string]bool
+	disabled         map[string]bool
 	allDown          bool
 	allRateLimited   bool
 	earliest         time.Time
@@ -189,7 +190,17 @@ func (s *fakeRouteState) HasRecoveredUntried(targets []RouteTarget, tried map[st
 func (s *fakeRouteState) QuotaFreshnessMaxAge(cfg *Config) time.Duration { return s.quotaMaxAge }
 
 func (s *fakeRouteState) FilterDisabledTargets(targets []RouteTarget, parentOf map[string]string) []RouteTarget {
-	return targets
+	if len(s.disabled) == 0 {
+		return targets
+	}
+	kept := make([]RouteTarget, 0, len(targets))
+	for _, t := range targets {
+		if s.disabled[t.Provider] {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	return kept
 }
 
 var _ RouteState = (*fakeRouteState)(nil)

@@ -605,3 +605,34 @@ func TestSetModelDisabledValidation(t *testing.T) {
 		t.Fatal("nil SetModelDisabled port must be refused, not panic")
 	}
 }
+
+// TestSetModelDisabledPersistError pins the transport classification of the
+// "memory applied, persist failed" path: unlike the validation rejections
+// (plain errors → 400), the persist failure is an appapi.HTTPError with 500
+// and the stable "toggle applied in memory but persisting it failed: "
+// prefix — the web transport and the Web UI's switch handling both branch
+// on that pair.
+func TestSetModelDisabledPersistError(t *testing.T) {
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {Models: []string{"glm-4.7"}},
+		},
+	}
+	service := New(Ports{
+		Config: func() *configdomain.Config { return cfg },
+		SetModelDisabled: func(provider, model string, disabled bool) error {
+			return errors.New("write state")
+		},
+	})
+	err := service.SetModelDisabled("zhipu", "glm-4.7", true)
+	if err == nil {
+		t.Fatal("persist error must surface, not be swallowed")
+	}
+	var classified *appapi.HTTPError
+	if !errors.As(err, &classified) || classified.Status != http.StatusInternalServerError {
+		t.Fatalf("persist error must classify as HTTPError 500, got %T %v", err, err)
+	}
+	if want := "toggle applied in memory but persisting it failed: write state"; err.Error() != want {
+		t.Fatalf("error=%q want %q", err.Error(), want)
+	}
+}

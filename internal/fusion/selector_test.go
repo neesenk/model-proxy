@@ -73,6 +73,41 @@ func TestSelectorShadowRecordsButRoutesUnchanged(t *testing.T) {
 	}
 }
 
+// A workflow whose daily orchestration budget is already spent must not pay
+// one more decisions-model selector call per request just to degrade anyway:
+// the Exhausted peek (no charge) skips the selector gate entirely and the
+// synthesizer answers directly (fusion-shadow-cache.md gate order).
+func TestSelectorBudgetExhaustedSkipsSelector(t *testing.T) {
+	registry := NewRegistry()
+	if !registry.Admit("quality", 1, time.Now()) {
+		t.Fatal("spend the single orchestration run to exhaust the budget")
+	}
+	ports := okSelectorPorts()
+	ports.selector = SelectResult{ChoiceID: "c1", Confidence: 0.9, Difficulty: 1.2}
+	sel := &configdomain.SelectorConfig{
+		Target: configdomain.RouteTarget{Provider: "typesafe", Model: "jev", Protocol: "decisions"},
+		Mode:   "enforce", DirectScoreMax: 1.5, Confidence: 0.55,
+	}
+	recipe := selectorRecipe(sel)
+	recipe.MaxRunsPerDay = 1
+	result := (Engine{Registry: registry, GracePeriod: time.Second}).Run(t.Context(), selectorRequest(recipe), ports)
+	if !result.Committed {
+		t.Fatalf("run = %+v", result.Run)
+	}
+	if len(ports.selectCalls) != 0 {
+		t.Errorf("selector calls = %d, want 0 (budget peek skips the gate)", len(ports.selectCalls))
+	}
+	if result.Run.Degraded != DegradedBudgetExceeded {
+		t.Errorf("degraded = %q, want %q", result.Run.Degraded, DegradedBudgetExceeded)
+	}
+	if len(ports.calls) != 0 {
+		t.Errorf("panel legs fanned out = %d, want 0", len(ports.calls))
+	}
+	if ports.synthTarget.Provider != "s" {
+		t.Errorf("synth target = %+v, want the configured synthesizer", ports.synthTarget)
+	}
+}
+
 func TestSelectorDirectSkipsOrchestrationAndBudget(t *testing.T) {
 	registry := NewRegistry()
 	ports := okSelectorPorts()

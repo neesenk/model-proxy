@@ -116,6 +116,15 @@ providers:
     provider_id: static
     openai_base_url: http://127.0.0.1:${upstreamPort}
     models: [m1]
+# Two gateway MCP servers so /api/takeover's mcp surface (and the takeover
+# dialog's per-server subset chips) is real data: unrouted + enabled + auth
+# none is the minimal valid declaration; nothing ever dials them (sessions
+# are per client connection, and no test hits /mcp/<name>).
+mcp:
+  e2e-search-a:
+    url: http://127.0.0.1:${upstreamPort}/mcp
+  e2e-search-b:
+    url: http://127.0.0.1:${upstreamPort}/mcp
 request_log:
   enabled: true
 ${authBlock}`, { mode: 0o600 });

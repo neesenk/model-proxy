@@ -1049,20 +1049,20 @@ test('takeover 确认对话框：变体切换驱动预览与执行单位 (表单
     await ctx.waitFor('mcp chip on preview', () => ctx.ev(
       `document.getElementById('tkr-writes').innerHTML.includes('mcpServers')`));
     // Subset chip: pick only one MCP server; the preview narrows to it.
-    // Per-server chips exist only when the proxy exposes MCP gateway
-    // servers (takeoverData.mcp) — this fixture configures none，所以仅当
-    // chips 真在场时才跑收窄断言（fixture 加上 MCP servers 后自动恢复覆盖）。
+    // Per-server chips come from the real /api/takeover mcp surface — the
+    // fixture configures two gateway servers (uiboot.mjs mcp:), so the
+    // narrowing assertion always runs.
     const mcpChipCount = await ctx.ev(`document.querySelectorAll('[data-tkr-mcp]').length`);
-    if (mcpChipCount > 1) {
-      await ctx.ev(`(() => { const chips = document.querySelectorAll('[data-tkr-mcp]');
-        for (let i = 1; i < chips.length; i++) chips[i].click(); })()`);
-      await ctx.waitFor('mcp subset preview narrows', () => ctx.ev(
-        `(() => { const w = document.getElementById('tkr-writes');
-          // 模板字面量里 \\d/\\. /\\/ 会被吞成 d/./ /：正则里的反斜杠必须双写，
-          // 否则送进页面的表达式是非法正则（Invalid regular expression flags）。
-          const m = w.innerHTML.match(/127\\.0\\.0\\.1:\\d+\\/mcp\\/[a-z0-9-]+/g) || [];
-          return m.length > 0 && new Set(m).size === 1; })()`));
-    }
+    assert.ok(mcpChipCount > 1,
+      `takeover dialog must expose ≥2 MCP subset chips (fixture has 2 servers; got ${mcpChipCount})`);
+    await ctx.ev(`(() => { const chips = document.querySelectorAll('[data-tkr-mcp]');
+      for (let i = 1; i < chips.length; i++) chips[i].click(); })()`);
+    await ctx.waitFor('mcp subset preview narrows', () => ctx.ev(
+      `(() => { const w = document.getElementById('tkr-writes');
+        // 模板字面量里 \\d/\\. /\\/ 会被吞成 d/./ /：正则里的反斜杠必须双写，
+        // 否则送进页面的表达式是非法正则（Invalid regular expression flags）。
+        const m = w.innerHTML.match(/127\\.0\\.0\\.1:\\d+\\/mcp\\/[a-z0-9-]+/g) || [];
+        return m.length > 0 && new Set(m).size === 1; })()`));
   }
 
   // Model chips toggle too (regression: dataset key mismatch made model
@@ -1687,8 +1687,9 @@ test('MCP Live 会话下拉不受跨流在途 /api/sessions 迟到响应污染 (
 // provider 选择。
 test('MCP 子标签 / Security 过滤 / Accounts provider 选择进浏览器历史，Back 逐级回退 (导航族)', async (t) => {
   if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
-  // The E2E serve has no mcp: config — feed /api/mcp a minimal server+route
-  // surface so the sub-tab sidebar renders.
+  // Feed /api/mcp a minimal, deterministic server+route surface (the serve's
+  // real mcp: config differs from what this navigation test wants to pin —
+  // its servers carry no routes).
   await ctx.ev(`(() => {
     window.__origFetch = window.fetch;
     window.fetch = (url, ...rest) => {

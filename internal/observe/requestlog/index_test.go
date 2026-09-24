@@ -874,3 +874,28 @@ func TestIndexSummariesPreserveTurnKey(t *testing.T) {
 		t.Fatalf("index/scan summaries differ:\nindex: %+v\nscan:  %+v", summaries, want)
 	}
 }
+
+// TestScanTailForIDNonPositiveLimitCollectsNothing pins the bounded tail
+// scan's own contract ("at most limit"): a non-positive limit collects
+// NOTHING instead of degenerating into an unbounded tail scan — the
+// multi-GB whole-file scan hazard this bound exists to prevent.
+func TestScanTailForIDNonPositiveLimitCollectsNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeRecordFile(t, dir, "day.jsonl", []Record{
+		{RequestID: "r1", Ts: "2026-09-25T01:00:00Z"},
+		{RequestID: "r1", Ts: "2026-09-25T02:00:00Z"},
+	})
+	for _, limit := range []int{0, -3} {
+		records, err := scanTailForID(dir, "day.jsonl", 0, "r1", limit)
+		if err != nil {
+			t.Fatalf("limit %d: %v", limit, err)
+		}
+		if len(records) != 0 {
+			t.Errorf("limit %d collected %d records, want 0", limit, len(records))
+		}
+	}
+	records, err := scanTailForID(dir, "day.jsonl", 0, "r1", 1)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("limit 1 = %d records err = %v, want exactly 1", len(records), err)
+	}
+}

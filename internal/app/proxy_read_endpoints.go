@@ -301,7 +301,10 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	// Same operator disabled-model filter as forward's route lookup: disabled
 	// targets are not candidates, and a fully disabled route previews as
-	// route_found:false with the disabled reason.
+	// route_found:false with the disabled reason. Pre-filter list kept for the
+	// force-provider error attribution (disabled vs not-a-target), same as
+	// forward.
+	preDisabledTargets := targets
 	targets = p.filterDisabledTargets(targets, parentOf)
 	if len(targets) == 0 {
 		out["exposed"] = exposed
@@ -337,7 +340,11 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 		narrowed := routing.FilterTargetsByProvider(targets, parentOf, forcedProvider)
 		if len(narrowed) == 0 {
 			out["ordered"] = []any{}
-			out["error"] = fmt.Sprintf("force-provider %q is not a target for model %q", forcedProvider, exposed)
+			if len(routing.FilterTargetsByProvider(preDisabledTargets, parentOf, forcedProvider)) > 0 {
+				out["error"] = fmt.Sprintf("force-provider %q is disabled for model %q (operator toggle; re-enable it or drop the override)", forcedProvider, exposed)
+			} else {
+				out["error"] = fmt.Sprintf("force-provider %q is not a target for model %q", forcedProvider, exposed)
+			}
 			writeJSON(http.StatusOK, out)
 			return
 		}

@@ -108,7 +108,8 @@ func (p *StepPlanProvider) ExtraHeaders(req *http.Request, path string) {
 // quota cooldown → failover.
 func (p *StepPlanProvider) Quota() (*QuotaSnapshot, error) {
 	return &QuotaSnapshot{
-		Billing: BillingUnknown,
+		Billing:      BillingUnknown,
+		RemainingPct: -1, // the documented "unknown" sentinel — 0 would read as "exhausted"
 		Notes: []string{
 			"Step Plan Credit usage (月池 + booster packs) is viewable only in the console",
 			"Usage & subscription: " + stepPlanConsoleURL,

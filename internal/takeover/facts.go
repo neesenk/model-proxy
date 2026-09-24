@@ -10,9 +10,17 @@ import (
 // RunTakeover. homeDir locates
 // the models.dev catalog cache (callers pass the CLI's HOME seam so tests can
 // isolate it).
+//
+// The route table is chat-reachable only (routing.ChatReachableRoutes):
+// models no target can serve over anthropic|openai|responses (decisions-only
+// providers, e.g. typesafe's jev) are dropped from Routes and listed in
+// Unreachable — writing them into a client config hands the agent an entry
+// that can only ever fail (the decisions protocol has no chat conversion).
 func ModelFactsFor(cfg *configdomain.Config, which, homeDir, templatesDir string, mode ResolveMode) ModelFacts {
+	routes, unreachable := routing.ChatReachableRoutes(cfg, routing.RouteTable(cfg))
 	facts := ModelFacts{
-		Routes:        routing.RouteTable(cfg),
+		Routes:        routes,
+		Unreachable:   unreachable,
 		SourceDefault: -1,
 	}
 	// Metadata is hydrated unconditionally, not just for metadata-writing

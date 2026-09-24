@@ -264,8 +264,9 @@ tag `fusion-select`），凭据走目标 provider 的 apikey 池——config 里
   protocol）+ 候选列表。计数与估算留在代码（decisions 模型计数不可靠）；无关上下文
   会拉低判定准确率（context rot）。
 - **gate 顺序**：first_turn → selector → tools → budget → fan-out。selector 在 budget
-  admission **之前**：`selector_direct` 直调不消耗当日编排预算；budget 耗尽时不走
-  selector 直接降级。
+  admission **之前**：`selector_direct` 直调不消耗当日编排预算（扣额度的 `Admit` 只在
+  编排路径上执行）；budget 耗尽时（`Registry.Exhausted` 预检，不扣额度）不走 selector
+  直接降级——否则耗尽后每个请求都要白付一次 decisions 判定调用。
 - **模式**：`shadow`（默认）只记录 `run.Selector`（mode/action/choice/confidence/
   difficulty/latency/err，`/api/fusion` 透出）用于攒对账数据；`enforce` 在
   `confidence ≥ confidence`（默认 0.55）时行动：`difficulty ≤ direct_score_max`
@@ -275,7 +276,9 @@ tag `fusion-select`），凭据走目标 provider 的 apikey 池——config 里
 - **硬约束在代码**：图片请求跳过 selector（decisions 模型纯文本）；trim 只作用于
   panel 成员；pin/force-provider 在 fusion 拦截点前已处理，selector 不可见。
 - **成本与延迟**：一次判定 ≈ 70–500ms（`selector.timeout` 默认 800ms 兜底，失败即
-  回退）、~340–1000 input tokens（$0.042/M，输出免费）。trim 降低容错
+  回退；判定超时是策略性回退，**不计** provider 熔断/失败账——熔断属于共享该 provider
+  的 chat/panel 腿，真传输错误仍计）、~340–1000 input tokens（$0.042/M，输出免费）。
+  trim 降低容错
   （top_k=2 + quorum=2 时单成员失败即 insufficient_proposers 降级）——默认关闭。
 
 ### 成本和观测

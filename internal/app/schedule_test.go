@@ -445,6 +445,46 @@ func TestScheduleStatus_BlockedReasonsOnEmptyChain(t *testing.T) {
 	}
 }
 
+// TestScheduleStatus_BlockedReasonsDisabledVsDown pins that on a partially
+// disabled route whose remaining targets are all down, the empty-chain
+// blocked entries classify the operator-disabled target as
+// "operator-disabled" (it IS a routing target — just toggled off) instead of
+// the misleading default "unavailable" that the down classification would
+// fall through to.
+func TestScheduleStatus_BlockedReasonsDisabledVsDown(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]configdomain.Provider{"a": {Provider: testProviderID}, "b": {Provider: testProviderID}},
+		map[string][]configdomain.RouteTarget{"m": {{Provider: "a", Model: "mm"}, {Provider: "b", Model: "mm"}}})
+	p.runtimeState.SetModelDisabled("a", "mm", true)
+	staticSurplus(p, "b", 0, 0)
+
+	var st struct {
+		Models map[string]struct {
+			Blocked []struct {
+				Provider string `json:"provider"`
+				Reason   string `json:"reason"`
+			} `json:"blocked"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(p.scheduleStatus(), &st); err != nil {
+		t.Fatal(err)
+	}
+	ri, ok := st.Models["m"]
+	if !ok {
+		t.Fatal("route m missing: a partially disabled route stays listed")
+	}
+	byProvider := map[string]string{}
+	for _, b := range ri.Blocked {
+		byProvider[b.Provider] = b.Reason
+	}
+	if byProvider["a"] != "operator-disabled" {
+		t.Errorf("a reason = %q, want operator-disabled", byProvider["a"])
+	}
+	if byProvider["b"] != "quota-exhausted" {
+		t.Errorf("b reason = %q, want quota-exhausted", byProvider["b"])
+	}
+}
+
 // TestScheduleTierDeclaredBillingFallback pins the app wiring of the tier
 // rule "measurement wins, explicit `billing:` declaration fills the gap":
 // an unmeasured but declared-plan provider competes INSIDE the plan tier

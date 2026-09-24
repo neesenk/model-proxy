@@ -34,6 +34,12 @@ func (p *Proxy) Reload(configPath string) error {
 		logx.Warnf("[reload] ⚠ %s", note)
 	}
 	built := providerbuild.BuildProviders(cfg, accounts.NewStore(accounts.HomeDir()), providerbuild.BuildOpts())
+	// AuthReady may read the credential store (file I/O, or the OS keychain
+	// under credentials: keychain) — evaluate it here, OUTSIDE the write lock,
+	// and hand the locked route compilation the precomputed set (same
+	// discipline as BuildProviders and the guard scanner: the lock below only
+	// swaps immutable pointers).
+	notReady := authNotReady(built.Providers)
 	// Build the guard scanner OUTSIDE the lock (regexp compilation + secret
 	// variant precomputation); the lock below only swaps the immutable pointer.
 	// Fail-closed: a scanner that cannot be built rejects the whole reload, so
@@ -57,7 +63,7 @@ func (p *Proxy) Reload(configPath string) error {
 	p.poolIndex = built.PoolIndex
 	p.parentOf = built.ParentOf
 	p.derivedRoutes = newDerived
-	p.expandedRoutes = p.buildExpandedRoutes()
+	p.expandedRoutes = p.buildExpandedRoutes(notReady)
 	p.routeKeys = routeKeySet(p.expandedRoutes)
 	hw := routing.ConfigRoutingWarnings(cfg, p.expandedRoutes)
 	p.routeWarnings = hw
@@ -137,11 +143,30 @@ func (p *Proxy) Reload(configPath string) error {
 	return appliedWarning
 }
 
+// authNotReady precomputes the provider ids whose impl reports no stored
+// credential (AuthReadyProvider). Called OUTSIDE p.mu at build/reload time:
+// AuthReady may hit the credential store (file I/O, or the OS keychain), and
+// the reload write lock that request readers queue on must stay pure
+// in-memory. The locked route compilation below only consults the set.
+func authNotReady(provs map[string]provider.Provider) map[string]bool {
+	notReady := make(map[string]bool)
+	for name, impl := range provs {
+		if ar, ok := impl.(provider.AuthReadyProvider); ok && !ar.AuthReady() {
+			notReady[name] = true
+		}
+	}
+	return notReady
+}
+
 // buildExpandedRoutes delegates to routing.BuildExpandedRoutes with the
 // pool fan-out from the unified routing resolver. Caller holds p.mu (write) —
 // in NewProxy / reload, after buildProviders has populated poolIndex.
-func (p *Proxy) buildExpandedRoutes() map[string][]configdomain.RouteTarget {
-	expanded := routing.BuildExpandedRoutes(p.cfg, p.derivedRoutes, p.expandTarget)
+// notReady is the authNotReady set precomputed outside the lock, so
+// expandTarget performs no credential I/O under the write lock.
+func (p *Proxy) buildExpandedRoutes(notReady map[string]bool) map[string][]configdomain.RouteTarget {
+	expanded := routing.BuildExpandedRoutes(p.cfg, p.derivedRoutes, func(t configdomain.RouteTarget) []configdomain.RouteTarget {
+		return p.expandTarget(t, notReady)
+	})
 	// A route whose EVERY target has no runnable implementation (provider
 	// configured but without an account/credential — e.g. zcode before its
 	// first login) leaves the effective table entirely: no empty chain block
@@ -178,8 +203,10 @@ func routeKeySet(expanded map[string][]configdomain.RouteTarget) map[string]bool
 // isn't runnable"), extended to non-pooled names. Credential-free providers
 // (static: no AuthReady marker) stay routable whenever built. "fusion" is
 // the orchestration pseudo-provider (forward intercepts it before the impl
-// lookup), so it passes without an impl.
-func (p *Proxy) expandTarget(t configdomain.RouteTarget) []configdomain.RouteTarget {
+// lookup), so it passes without an impl. AuthReady itself is evaluated by
+// authNotReady OUTSIDE the write lock (it may do credential I/O); this
+// function only reads the precomputed notReady set.
+func (p *Proxy) expandTarget(t configdomain.RouteTarget, notReady map[string]bool) []configdomain.RouteTarget {
 	expanded := newResolver(p, p.providers, p.poolIndex).Expand(t)
 	kept := expanded[:0]
 	for _, rt := range expanded {
@@ -188,7 +215,7 @@ func (p *Proxy) expandTarget(t configdomain.RouteTarget) []configdomain.RouteTar
 			if impl == nil {
 				continue
 			}
-			if ar, ok := impl.(provider.AuthReadyProvider); ok && !ar.AuthReady() {
+			if notReady[rt.Provider] {
 				continue
 			}
 		}

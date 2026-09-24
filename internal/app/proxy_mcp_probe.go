@@ -20,10 +20,19 @@ import (
 
 // probeMCP implements admin.Ports.ProbeMCP. Server names probe the upstream
 // directly; route names aggregate the route's enabled members (see
-// probeMCPRoute).
+// probeMCPRoute). Disabled surfaces (server or route) fail closed with the
+// same disabled report — mirroring the live gateway, which 404s disabled
+// routes instead of serving their aggregated surface.
 func (p *Proxy) probeMCP(ctx context.Context, name string) (appapi.MCPProbeResult, error) {
 	snap := p.SnapshotRuntime()
 	if route, isRoute := snap.Cfg.MCPRoutes[name]; isRoute {
+		if !route.MCPRouteEffectiveEnabled() {
+			return appapi.MCPProbeResult{
+				OK:    false,
+				Route: true,
+				Error: fmt.Sprintf("mcp route %q is disabled (enabled: false)", name),
+			}, nil
+		}
 		return p.probeMCPRoute(ctx, snap, name, route), nil
 	}
 	srv, ok := snap.Cfg.MCP[name]

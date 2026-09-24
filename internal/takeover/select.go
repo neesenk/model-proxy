@@ -323,7 +323,13 @@ func ResolveClientsMode(cfg *configdomain.Config, which, templatesDir string, mo
 			families = []string{which}
 		}
 	}
-	cov := protocolCoverage(cfg, routing.RouteTable(cfg), probeCaps(cfg))
+	// Coverage counts only chat-reachable models (routing.ChatReachableRoutes):
+	// a decisions-only model (typesafe's jev) can never be served to a chat
+	// client, so it must not sway variant selection, ride a split partition,
+	// or be named as "protocol conversion" — the decisions protocol has no
+	// chat conversion at all.
+	reachable, _ := routing.ChatReachableRoutes(cfg, routing.RouteTable(cfg))
+	cov := protocolCoverage(cfg, reachable, probeCaps(cfg))
 	out := make([]ClientSpec, 0, len(families))
 	for _, family := range families {
 		variants := byFamily[family]

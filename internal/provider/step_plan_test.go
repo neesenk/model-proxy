@@ -82,6 +82,9 @@ func TestStepPlan_Quota_BillingUnknownWithConsoleURL(t *testing.T) {
 	if s.Billing != BillingUnknown {
 		t.Errorf("Billing = %v, want BillingUnknown (no public Credit API)", s.Billing)
 	}
+	if s.RemainingPct != -1 {
+		t.Errorf("RemainingPct = %v, want the -1 unknown sentinel (0 would read as exhausted)", s.RemainingPct)
+	}
 	joined := strings.Join(s.Notes, "\n")
 	if !strings.Contains(joined, stepPlanConsoleURL) {
 		t.Errorf("Notes %q missing console URL %s", joined, stepPlanConsoleURL)

@@ -878,7 +878,9 @@ func (x *Indexer) tailScan(requestID string) ([]Record, error) {
 }
 
 // scanTailForID reads the JSONL lines beyond cursor collecting every record
-// with the given request id, at most limit of them. cursor sits on a line
+// with the given request id, at most limit of them — a non-positive limit
+// collects nothing (never an unbounded tail scan of a multi-GB file, the
+// hazard this bounded scan exists to avoid). cursor sits on a line
 // boundary by construction (reconcile advances it only past
 // newline-terminated lines); the final unterminated line is parsed too when
 // it decodes (the scan path's convention — the writer's newline lands in the
@@ -887,6 +889,9 @@ func (x *Indexer) tailScan(requestID string) ([]Record, error) {
 // prefilter is the byte containment query() applies before decoding, with
 // Filter.matches's exact post-decode check inlined.
 func scanTailForID(dir, name string, cursor int64, requestID string, limit int) ([]Record, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
 	file, err := os.Open(filepath.Join(dir, name))
 	if err != nil {
 		// Vanished between readdir and open (retention sweep): nothing new.
@@ -899,7 +904,7 @@ func scanTailForID(dir, name string, cursor int64, requestID string, limit int) 
 	reader := bufio.NewReaderSize(file, 256<<10)
 	needle := []byte(requestID)
 	var matches []Record
-	for limit <= 0 || len(matches) < limit {
+	for len(matches) < limit {
 		line, readErr := reader.ReadBytes('\n')
 		if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 && bytes.Contains(trimmed, needle) {
 			var record Record

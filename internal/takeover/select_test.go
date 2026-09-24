@@ -528,3 +528,45 @@ func TestResolveClients_UnknownModeFails(t *testing.T) {
 		t.Fatalf("unknown mode: want error, got %v", err)
 	}
 }
+
+// TestResolveClients_DecisionsOnlyModelExcluded keeps variant selection
+// honest about chat-reachability: a decisions-only model (typesafe's jev —
+// no chat conversion exists) must not count toward coverage, be named as
+// riding "protocol conversion", or land on a split partition.
+func TestResolveClients_DecisionsOnlyModelExcluded(t *testing.T) {
+	cfg := cfgWith(
+		map[string]configdomain.Provider{
+			"zhipu":    {OpenAIBaseURL: "https://z/v1", Models: []string{"glm-5.3"}},
+			"typesafe": {Provider: "typesafe", DecisionsBaseURL: "https://ts/v1", Models: []string{"jev-1.13.0"}},
+		}, nil)
+
+	// Unified: the only chat model is openai-native → 1/1, and the note must
+	// not claim jev converts (it cannot — the decisions protocol has no chat
+	// conversion).
+	clients, err := takeover.ResolveClients(cfg, "pi", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clients) != 1 || clients[0].Name != "pi-openai" {
+		t.Fatalf("ResolveClients(pi) = %v, want [pi-openai]", namesOf(clients))
+	}
+	if strings.Contains(clients[0].Note, "jev") {
+		t.Errorf("selection note must not name the decisions-only model: %q", clients[0].Note)
+	}
+	if !strings.Contains(clients[0].Note, "1/1") {
+		t.Errorf("selection note must count only the chat model: %q", clients[0].Note)
+	}
+
+	// Split: jev must not keep the anthropic default variant alive — only
+	// the openai variant carries the one reachable model.
+	split, err := takeover.ResolveClientsMode(cfg, "pi", t.TempDir(), takeover.ModeSplit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(split) != 1 || split[0].Name != "pi-openai" {
+		t.Fatalf("ResolveClientsMode(pi, split) = %v, want [pi-openai] only", namesOf(split))
+	}
+	if strings.Contains(split[0].Note, "jev") {
+		t.Errorf("split note must not name the decisions-only model: %q", split[0].Note)
+	}
+}

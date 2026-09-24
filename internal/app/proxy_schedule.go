@@ -390,9 +390,9 @@ func billingClassName(b provider.BillingClass) string {
 }
 
 // blockedInfo is one target's down classification for the empty-chain
-// schedule case, most-explanatory reason first: frozen > rate-limited >
-// quota-exhausted > circuit > model-locked > unavailable. Derived from the
-// same detached dashboard snapshot the schedule preview used.
+// schedule case, most-explanatory reason first: operator-disabled > frozen >
+// rate-limited > quota-exhausted > circuit > model-locked > unavailable.
+// Derived from the same detached dashboard snapshot the schedule preview used.
 type blockedInfo struct {
 	Provider string `json:"provider"`
 	Reason   string `json:"reason"`
@@ -402,8 +402,9 @@ type blockedInfo struct {
 // blockedReasons classifies every target of a route that PreviewOrder could
 // not schedule (the empty-chain case) so the Status→Schedule view can show WHY
 // instead of a bare "no providers" — the same facts the availability filter
-// used (frozen / rate-limit / quota exhaustion / circuit / model lock), read
-// from the same detached dashboard snapshot (single source, no second lock).
+// used (operator disabled / frozen / rate-limit / quota exhaustion / circuit /
+// model lock), read from the same detached dashboard snapshot (single source,
+// no second lock).
 func blockedReasons(snapshot runtimestate.DashboardSnapshot, targets []runtimestate.Target, now time.Time, quotaMaxAge time.Duration) []blockedInfo {
 	out := make([]blockedInfo, 0, len(targets))
 	for _, target := range targets {
@@ -416,6 +417,8 @@ func blockedReasons(snapshot runtimestate.DashboardSnapshot, targets []runtimest
 			return t.UTC().Format(time.RFC3339)
 		}
 		switch {
+		case snapshot.TargetDisabledSnapshot(target):
+			info.Reason = "operator-disabled"
 		case hasState && state.Frozen:
 			info.Reason = "frozen"
 		case hasState && now.Before(state.RateLimitedUntil):

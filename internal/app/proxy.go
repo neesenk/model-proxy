@@ -272,7 +272,7 @@ func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 	p.guardPoolSecrets = built.PoolSecrets
 	p.guardOAuthSecrets = built.OAuthSecrets
 	p.derivedRoutes = routing.DeriveRoutesFrom(cfg)
-	p.expandedRoutes = p.buildExpandedRoutes()
+	p.expandedRoutes = p.buildExpandedRoutes(authNotReady(built.Providers))
 	p.routeKeys = routeKeySet(p.expandedRoutes)
 	// Config-time routing hazards (reasoning-replay models behind conversion,
 	// missing protocol: on hint providers): appended to the warnings channel

@@ -162,6 +162,18 @@ func (p pipeline) callFusionSelector(ctx context.Context, fc fusionCtx, sel conf
 		if ctx.Err() == context.Canceled {
 			return fail(errFusionLegUnavailable)
 		}
+		// The selector's OWN short deadline (default 800ms) expiring is a
+		// policy fallback, not an upstream-health verdict: RecordFailure
+		// counts toward the provider circuit breaker and would penalize the
+		// chat/panel legs sharing this provider for what is only "the
+		// decisions model was slower than the budget". Real transport errors
+		// and a parent-context deadline (the genuine request timeout) still
+		// count. The selector observation (run.Selector.err) already records
+		// the timeout for /api/fusion.
+		if errors.Is(err, context.DeadlineExceeded) &&
+			legCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+			return fail(err)
+		}
 		gate.RecordFailure(m.Provider, sched, fc.runtime.Generation)
 		if p.svc.Metrics != nil {
 			p.svc.Metrics.Inc(m.Provider, m.Model, counters.EvFailures)

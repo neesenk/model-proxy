@@ -747,8 +747,10 @@ func TestModelsRefreshReceivesRequestCancellation(t *testing.T) {
 
 // TestModelsDisableHandler pins POST /api/models/disable's transport
 // contract: the provider/model/disabled triple is required (missing fields,
-// non-boolean disabled and malformed JSON are 400s), a port error maps to 400
-// with the backend message, and the happy path echoes the resulting state.
+// non-boolean disabled and malformed JSON are 400s), a plain port error
+// (validation) maps to 400 with the backend message, a persist failure after
+// the in-memory toggle applied maps to 500 with the stable prefix, and the
+// happy path echoes the resulting state.
 func TestModelsDisableHandler(t *testing.T) {
 	t.Run("validates the request shape", func(t *testing.T) {
 		server := newCommandTestServer(t, &commandFake{})
@@ -767,6 +769,25 @@ func TestModelsDisableHandler(t *testing.T) {
 		}})
 		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/models/disable", `{"provider":"up","model":"m1","disabled":true}`),
 			http.StatusBadRequest, map[string]any{"error": "unknown provider \"up\""})
+	})
+	// A persist failure AFTER the in-memory toggle applied is a 500 with the
+	// stable prefix (the admin service classifies it as an HTTPError; same
+	// semantics as /api/health/reset and /api/health/freeze) — the client
+	// must not treat it as "nothing happened".
+	t.Run("persist failure after the in-memory toggle is a 500 with the stable prefix", func(t *testing.T) {
+		server := newCommandTestServer(t, &commandFake{setModelDisabl: func(provider, model string, disabled bool) error {
+			return appapi.NewHTTPError(
+				http.StatusInternalServerError,
+				"toggle applied in memory but persisting it failed: write state",
+			)
+		}})
+		recorder := commandRequest(server, http.MethodPost, "/api/models/disable", `{"provider":"zhipu","model":"glm-4.7","disabled":true}`)
+		if recorder.Code != http.StatusInternalServerError {
+			t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		if got, want := commandJSON(t, recorder)["error"], "toggle applied in memory but persisting it failed: write state"; got != want {
+			t.Fatalf("error=%q want %q", got, want)
+		}
 	})
 	t.Run("echoes the resulting state", func(t *testing.T) {
 		var gotProvider, gotModel string

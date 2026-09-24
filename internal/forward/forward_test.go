@@ -300,6 +300,38 @@ func TestServeCacheHitReplayAndBypass(t *testing.T) {
 	}
 }
 
+// TestForceProviderDisabledTarget400: a force-provider naming a target the
+// operator disabled is a distinct 400 from the typo case — the message must
+// say "disabled" so `replay --to` / debugging doesn't chase a routing typo
+// that isn't there. Hard-fail either way (pin/force never fails over), and
+// neither the disabled target nor the route's other providers are called.
+func TestForceProviderDisabledTarget400(t *testing.T) {
+	up := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	other := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	h := newHarness()
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"up":    {OpenAIBaseURL: up.srv.URL, Provider: "test-static"},
+			"other": {OpenAIBaseURL: other.srv.URL, Provider: "test-static"},
+		},
+		Routes: map[string][]RouteTarget{"m": {{Provider: "up", Model: "mm"}, {Provider: "other", Model: "mm"}}},
+	}
+	snap := h.snapshot(cfg)
+	h.state.disabled = map[string]bool{"up": true}
+	w := h.serve(snap, "openai", "/v1/chat/completions", openaiChatBody(), map[string]string{"x-mp-force-provider": "up"})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "is disabled for model") {
+		t.Errorf("force-provider disabled status = %d body = %s, want 400 with the disabled attribution", w.Code, w.Body.String())
+	}
+	if up.hits() != 0 || other.hits() != 0 {
+		t.Errorf("upstream hits = up:%d other:%d, want 0/0 (400 before any dispatch)", up.hits(), other.hits())
+	}
+	// A name that was never a target of the route keeps the typo message.
+	w = h.serve(snap, "openai", "/v1/chat/completions", openaiChatBody(), map[string]string{"x-mp-force-provider": "typo"})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "is not a target") {
+		t.Errorf("force-provider typo status = %d body = %s, want 400 not-a-target", w.Code, w.Body.String())
+	}
+}
+
 // TestServeAllTargetsHardFail502: every target failing hard ends in an honest
 // 502 with a closing end event (and agent failure attribution).
 func TestServeAllTargetsHardFail502(t *testing.T) {

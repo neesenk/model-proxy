@@ -244,6 +244,41 @@ func TestFlushMCPToolBucketsUpsertsInSameMinute(t *testing.T) {
 	}
 }
 
+// TestFlushMCPToolBucketsUpdatesKindOnConflict: kind is not part of the
+// (name, tool, minute) primary key, so a same-key flush after a reload
+// reclassified the exposed name (server ↔ route) must move the row's kind to
+// the current classification instead of keeping the stale one.
+func TestFlushMCPToolBucketsUpdatesKindOnConflict(t *testing.T) {
+	store := newTestStore(t, 0)
+	minute := int64(60)
+	if err := store.FlushMCPToolBuckets(minute, []MCPToolBucketDelta{
+		{Name: "web-search", Tool: "search", Kind: MCPKindServer, Calls: 2, LatencyMsSum: 100, LastCallAt: 60},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Same (name, tool, minute), kind reclassified server → route (cross-reload).
+	if err := store.FlushMCPToolBuckets(minute, []MCPToolBucketDelta{
+		{Name: "web-search", Tool: "search", Kind: MCPKindRoute, Calls: 1, LatencyMsSum: 50, LastCallAt: 90},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := store.QueryMCPToolBuckets(minute, minute, "minute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v, want the same-key row upserted in place", rows)
+	}
+	row := rows[0]
+	if row.Kind != "route" {
+		t.Fatalf("kind = %q, want route (reclassified by the later flush)", row.Kind)
+	}
+	if row.Calls != 3 || row.LatencyMsSum != 150 || row.LastCallAt != 90 {
+		t.Fatalf("counters = %+v, want accumulated calls=3 latency_ms_sum=150 last_call_at=90", row)
+	}
+}
+
 func TestQueryMCPToolBucketsAggregatesByGranularity(t *testing.T) {
 	store := newTestStore(t, 0)
 	base := time.Date(2026, 9, 20, 0, 0, 0, 0, time.Local).Unix()

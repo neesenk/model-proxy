@@ -425,7 +425,7 @@ func newProxyWithStaticAt(t testing.TB, cfg *configdomain.Config, qpath string, 
 	// no runnable provider (e.g. an empty plural pool) come back — expandTarget
 	// only lists impl-backed ids.
 	p.mu.Lock()
-	p.expandedRoutes = p.buildExpandedRoutes()
+	p.expandedRoutes = p.buildExpandedRoutes(authNotReady(p.providers))
 	p.routeKeys = routeKeySet(p.expandedRoutes)
 	p.mu.Unlock()
 	return p

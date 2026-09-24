@@ -100,7 +100,8 @@ func (p *QwenPlanProvider) ExtraHeaders(req *http.Request, path string) {
 // window exhaustion is handled reactively via 429 → quota cooldown → failover.
 func (p *QwenPlanProvider) Quota() (*QuotaSnapshot, error) {
 	return &QuotaSnapshot{
-		Billing: BillingUnknown,
+		Billing:      BillingUnknown,
+		RemainingPct: -1, // the documented "unknown" sentinel — 0 would read as "exhausted"
 		Notes: []string{
 			"Credits usage (5h/7d windows) is viewable only in the console",
 			"Subscription details: " + qwenPlanConsoleURL,

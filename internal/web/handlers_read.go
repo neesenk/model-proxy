@@ -128,7 +128,19 @@ func (s *Server) handleMCPAnalytics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if from == 0 {
-		if earliest := s.reads.StatsSince(); earliest > 0 {
+		earliest := s.reads.StatsSince()
+		// The all-time anchor for MCP analytics spans ALL persisted bucket
+		// tables: MCP usage can predate the first LLM bucket, and clamping
+		// to the LLM-only StatsSince would silently drop that older MCP
+		// history. Production wires the MCP-aware companion port
+		// (appapi.MCPStatsSinceReader via web_adapter); reads ports without
+		// it keep the StatsSince clamp.
+		if m, ok := s.reads.(appapi.MCPStatsSinceReader); ok {
+			if v := m.MCPStatsSince(); v > 0 && (earliest == 0 || v < earliest) {
+				earliest = v
+			}
+		}
+		if earliest > 0 {
 			from = earliest
 		}
 	}

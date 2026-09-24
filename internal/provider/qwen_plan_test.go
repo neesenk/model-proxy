@@ -82,6 +82,9 @@ func TestQwenPlan_Quota_BillingUnknownWithConsoleURL(t *testing.T) {
 	if s.Billing != BillingUnknown {
 		t.Errorf("Billing = %v, want BillingUnknown (no public Credits API)", s.Billing)
 	}
+	if s.RemainingPct != -1 {
+		t.Errorf("RemainingPct = %v, want the -1 unknown sentinel (0 would read as exhausted)", s.RemainingPct)
+	}
 	if len(s.Windows) != 0 {
 		t.Errorf("Windows = %v, want none (unmeasured)", s.Windows)
 	}

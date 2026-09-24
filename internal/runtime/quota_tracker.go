@@ -290,7 +290,8 @@ func (t *QuotaTracker) PollAllGeneration(now time.Time, generation uint64) {
 	// A fresh poll is the measurement that can overturn a stale 429
 	// prediction: providers whose snapshot now proves available budget get
 	// their rate-limit cooldown cleared (see QuotaRecoveredClearCooldown).
-	// Skipped pay-as-you-go keys are excluded — no snapshot, no evidence.
+	// Every built provider yields a snapshot (FetchQuota nil-guards to
+	// BillingUnknown), so polled covers every quota key.
 	var polled []string
 	for n, s := range results {
 		if s != nil {

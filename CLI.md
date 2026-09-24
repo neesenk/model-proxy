@@ -299,7 +299,7 @@ You can now use codex-native models (gpt-5.5) through the proxy.
 ### apikey 类（zhipu/deepseek/kimi-code/mimo/qwen-plan/step-plan/typesafe/openrouter/opencode-go，`runApiKeyLoginWithInput`）
 
 - stdout 提示：`Enter API key for <PROVNAME>: `（stdin 读 key）。
-- stderr（当存在可校验端点时）：`Validating API key...`。校验端点由 `apiKeyValidationURL` 解析：配了 `usage_url` 的用它（zhipu/deepseek/**kimi-code** 均配；mimo 无计费端点故不配，回退 `/models`）；**未配 `usage_url` 的回退 `openai_base_url/models`**（qwen-plan/step-plan：无公开用量接口，不配 `usage_url`），openai base 也没有时回退 **`decisions_base_url/models`**（typesafe：纯 decisions provider）。校验 = GET 该端点 with `Authorization: Bearer <key>`；**401/403 或网络错误** → `login failed: validation failed: HTTP <N>: <BODY>`（exit 1，**不写池**）；其余状态码（200/404 等）= key 通过（写池）。
+- stderr（当存在可校验端点时）：`Validating API key...`。校验端点由 `apiKeyValidationURL` 解析：配了 `usage_url` 的用它（zhipu/deepseek/**kimi-code** 均配；mimo 无计费端点故不配，回退 `/models`）；**未配 `usage_url` 的回退 `openai_base_url/models`**（qwen-plan/step-plan：无公开用量接口，不配 `usage_url`），openai base 也没有时回退 **`decisions_base_url/models`**（typesafe：纯 decisions provider）。校验 = GET 该端点 with `Authorization: Bearer <key>`；**401/403 或网络错误** → `login failed: validation failed: HTTP <N>: <BODY>`（exit 1，**不写池**）；其余状态码（200/404 等）= key 通过（写池）。usage 拒后的 `/models` 二次回退**只对能拒 key 的 /models 生效**：openrouter 的 `/models` 公开且忽略 Bearer（坏 key 也 200），usage 端点（`/api/v1/key`）拒了就是拒了（`provider.ModelsAuthless`，opencode-go 同列；后者无 `usage_url`，校验本身就是对公开端点的 no-op——契约详见 backend-contracts.md）。
 - 重复 id 且非 `--replace` -> stdout 提示 `Account "<LABEL>" is already logged in. Replace its key? [y/N] `；答非 y -> `login cancelled`（exit 1）。
 - 成功 stdout：`✓ Saved account <MASKED_ID> (<LABEL>)`（绿）。
 

@@ -5978,6 +5978,13 @@ function renderModelsCard(target, providers) {
   });
 }
 
+// The backend's stable prefix for "the in-memory toggle applied but the
+// disabled_models.json write failed" (POST /api/models/disable answers 500
+// with exactly this prefix — pinned by Go tests on the admin wrap and the
+// web transport). Reliable to branch on: apiParse attaches the HTTP status
+// to every non-ok rejection, and only this path pairs 500 with the prefix.
+const MODEL_DISABLE_PERSIST_PREFIX = 'toggle applied in memory but persisting it failed: ';
+
 // toggleModel flips one provider×model's operator disable override (POST
 // /api/models/disable — the backend validates the pair against the current
 // config) from the row's state switch. Disabling (unchecking) asks for
@@ -6001,7 +6008,19 @@ async function toggleModel(provider, model, disable, el) {
     await apiPost('/api/models/disable', { provider, model, disabled: disable });
     await renderStatusTab();
   } catch (e) {
-    if (el) { el.disabled = false; el.checked = !disable; }
+    if (el) el.disabled = false;
+    // 500 + the stable persist prefix: the in-memory toggle DID apply — only
+    // the file write failed. The switch stays where the browser flipped it
+    // (reverting would claim the model still routes when the runtime already
+    // dropped it) and the backend message is surfaced verbatim with a
+    // neutral warning lead, not "failed".
+    if (e.status === 500 && String(e.message || '').startsWith(MODEL_DISABLE_PERSIST_PREFIX)) {
+      window.alert('toggle warning: ' + e.message);
+      return;
+    }
+    // Everything else (validation, network, transport) never touched the
+    // in-memory state: revert the switch to the server's truth.
+    if (el) el.checked = !disable;
     window.alert((disable ? 'disable failed: ' : 'enable failed: ') + e.message);
   }
 }
@@ -8269,7 +8288,10 @@ async function loadAccountsData(background = false) {
     accountsCache = acc;
     accountsTokens = (tok && tok.usage) || [];
     renderAccountsNav(acc.providers || []);
-    if (background) setRefreshError(panel, null);
+    // Success clears the stale banner unconditionally (same recovery rule as
+    // the Status panel): a manual re-entry that lands must not leave the
+    // banner a failed background refresh put up earlier.
+    setRefreshError(panel, null);
   } catch (e) {
     setConn('err');
     if (background && panel && panel.querySelector('.acct-nav-title')) {
@@ -10933,58 +10955,67 @@ async function loadMCPAnalytics(host, background = false) {
   mcpAnalyticsStopAutoRefresh();
   const seq = ++mcpAnalyticsReqSeq;
   mcpAnalyticsLoading = true;
-  const state = mcpAnalyticsState();
-  const eff = mcpAnalyticsEffectiveGran(state, mcpAllTimeSince);
-  const q = new URLSearchParams({
-    from: String(eff.bounds.from),
-    to: String(eff.bounds.to),
-    granularity: eff.gran,
-  });
-  if (state.server) q.set('name', state.server);
-  if (state.tool) q.set('tool', state.tool);
   let resp = null;
   let fetchErr = null;
+  // try/finally owns the loading flag: every exit — the superseded early
+  // return, the all-time re-anchor retry and any throw in the sync section
+  // (mcpAnalyticsState/renderMCPAnalytics…) — resets it. A load that died
+  // mid-flight used to leave it stuck true, permanently blocking the
+  // initial analytics load behind the !mcpAnalyticsLoading re-entry guard.
   try {
-    resp = await apiGet('/api/mcp/analytics?' + q.toString());
-    mcpAnalyticsError = null;
-  } catch (e) {
-    fetchErr = e;
-  }
-  // Superseded by a newer load (filter/range change while this one was in
-  // flight): applying this response would render data that no longer matches
-  // the visible controls.
-  if (seq !== mcpAnalyticsReqSeq) return;
-  // All-time anchor: the server clamps from=0 to the oldest persisted bucket.
-  // Learn that real start from the echoed from; when it changes the effective
-  // granularity, re-issue once with the true span (same pattern as the
-  // Analytics tab's anAllTimeSince).
-  if (!fetchErr && resp && state.range.preset === 'all') {
-    const echoed = Number(resp.from) || 0;
-    if (echoed > 0 && echoed !== mcpAllTimeSince) {
-      mcpAllTimeSince = echoed;
-      const trueSpan = Math.max(eff.bounds.to - echoed, 1);
-      if (analyticsGranularity(trueSpan, eff.granActive) !== eff.gran) {
-        mcpAnalyticsLoading = false;
-        return loadMCPAnalytics(host, background);
+    const state = mcpAnalyticsState();
+    const eff = mcpAnalyticsEffectiveGran(state, mcpAllTimeSince);
+    const q = new URLSearchParams({
+      from: String(eff.bounds.from),
+      to: String(eff.bounds.to),
+      granularity: eff.gran,
+    });
+    if (state.server) q.set('name', state.server);
+    if (state.tool) q.set('tool', state.tool);
+    try {
+      resp = await apiGet('/api/mcp/analytics?' + q.toString());
+      mcpAnalyticsError = null;
+    } catch (e) {
+      fetchErr = e;
+    }
+    // Superseded by a newer load (filter/range change while this one was in
+    // flight): applying this response would render data that no longer
+    // matches the visible controls.
+    if (seq !== mcpAnalyticsReqSeq) return;
+    // All-time anchor: the server clamps from=0 to the oldest persisted
+    // bucket. Learn that real start from the echoed from; when it changes
+    // the effective granularity, re-issue once with the true span (same
+    // pattern as the Analytics tab's anAllTimeSince). The `await` matters:
+    // returning without it would let the finally reset the retry's own
+    // in-flight loading flag the moment it started.
+    if (!fetchErr && resp && state.range.preset === 'all') {
+      const echoed = Number(resp.from) || 0;
+      if (echoed > 0 && echoed !== mcpAllTimeSince) {
+        mcpAllTimeSince = echoed;
+        const trueSpan = Math.max(eff.bounds.to - echoed, 1);
+        if (analyticsGranularity(trueSpan, eff.granActive) !== eff.gran) {
+          return await loadMCPAnalytics(host, background);
+        }
       }
     }
-  }
-  mcpAnalyticsLoading = false;
-  if (fetchErr && mcpAnalyticsData) {
-    setRefreshError(panel, staleDataText('MCP analytics unavailable: ' + ((fetchErr && fetchErr.message) || String(fetchErr))));
+    if (fetchErr && mcpAnalyticsData) {
+      setRefreshError(panel, staleDataText('MCP analytics unavailable: ' + ((fetchErr && fetchErr.message) || String(fetchErr))));
+      mcpAnalyticsMaybeAutoRefresh();
+      return;
+    }
+    if (background && deferAutoRefresh(panel, () => loadMCPAnalytics(host, true))) return;
+    if (fetchErr) {
+      mcpAnalyticsError = (fetchErr && fetchErr.message) || String(fetchErr);
+      setRefreshError(panel, staleDataText('MCP analytics unavailable: ' + mcpAnalyticsError));
+    } else {
+      mcpAnalyticsData = resp;
+      setRefreshError(panel, null);
+    }
+    renderMCPAnalytics(host);
     mcpAnalyticsMaybeAutoRefresh();
-    return;
+  } finally {
+    mcpAnalyticsLoading = false;
   }
-  if (background && deferAutoRefresh(panel, () => loadMCPAnalytics(host, true))) return;
-  if (fetchErr) {
-    mcpAnalyticsError = (fetchErr && fetchErr.message) || String(fetchErr);
-    setRefreshError(panel, staleDataText('MCP analytics unavailable: ' + mcpAnalyticsError));
-  } else {
-    mcpAnalyticsData = resp;
-    setRefreshError(panel, null);
-  }
-  renderMCPAnalytics(host);
-  mcpAnalyticsMaybeAutoRefresh();
 }
 
 // Live uPlot instances for the MCP Analytics chart; destroyed on re-render so
