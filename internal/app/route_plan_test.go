@@ -32,6 +32,7 @@ routes:
   claude-glm: [{provider: zhipu, model: glm}, {provider: deepseek, model: ds}]
   glm: [{provider: zhipu, model: glm}, {provider: deepseek, model: ds}]
 `))
+	loginAPIKeyFixtures(t, [2]string{"zhipu", "zhipu"}, [2]string{"deepseek", "deepseek"})
 	p := newTestProxy(t, cfg)
 	post := func(body string, headers map[string]string) map[string]any {
 		req := httptest.NewRequest(http.MethodPost, "/debug/route", strings.NewReader(body))
@@ -138,6 +139,7 @@ cache:
   enabled: true
   ttl: 1m
 `))
+	loginAPIKeyFixtures(t, [2]string{"zhipu", "zhipu"})
 	p := newTestProxy(t, cfg)
 	if p.cache == nil {
 		t.Fatal("config cache: section must enable the store")
@@ -192,6 +194,7 @@ guard: {secrets: %s, audit: false}
 		if err != nil {
 			t.Fatal(err)
 		}
+		loginAPIKeyFixtures(t, [2]string{"zhipu", "zhipu"})
 		p := newTestProxy(t, cfg)
 		keyReq := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(primeBody)))
 		p.cache.Put(responsecache.Key(keyReq, primeBody), "m", http.StatusOK,
@@ -253,6 +256,7 @@ guard: {secrets: off, paths: block, audit: false}
 		if err != nil {
 			t.Fatal(err)
 		}
+		loginAPIKeyFixtures(t, [2]string{"zhipu", "zhipu"})
 		p := newTestProxy(t, cfg)
 		keyReq := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(pathBody)))
 		p.cache.Put(responsecache.Key(keyReq, pathBody), "m", http.StatusOK,

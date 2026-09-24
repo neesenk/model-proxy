@@ -90,15 +90,57 @@ func TestDecideOrderExcludesDisabledTargets(t *testing.T) {
 	}
 
 	// ReplaceGeneration clears generation-scoped state but keeps the override
-	// (the pin contract).
+	// (reload preservation — same for pins).
 	m.ReplaceGeneration(9)
 	if !m.ModelDisabled("zhipu#b", "glm") {
-		t.Fatal("ReplaceGeneration cleared the operator disabled-model override (pin contract: keep)")
+		t.Fatal("ReplaceGeneration cleared the operator disabled-model override (reload keeps it)")
 	}
 	m.SetModelDisabled("zhipu", "glm", true)
 	m.ReplaceGeneration(10)
 	if !m.ModelDisabled("zhipu", "glm") {
-		t.Fatal("ReplaceGeneration cleared the operator disabled-model override (pin contract: keep)")
+		t.Fatal("ReplaceGeneration cleared the operator disabled-model override (reload keeps it)")
+	}
+}
+
+// TestRestoreDisabledModelsSeedsOverride pins the construction-time seed:
+// the persisted projection (provider→models) becomes live override entries
+// (exact + parent-keyed lookups), merges with in-memory toggles, skips junk
+// keys, and a nil/empty map is a no-op (first run).
+func TestRestoreDisabledModelsSeedsOverride(t *testing.T) {
+	m := &Manager{}
+	m.SetModelDisabled("kimi", "k3", true) // pre-existing in-memory toggle
+	m.RestoreDisabledModels(map[string][]string{
+		"zhipu": {"glm-4.7", "glm-4.6"},
+		"junk":  {""},
+		"":      {"orphan"},
+	})
+	for _, pair := range []struct{ provider, model string }{
+		{"zhipu", "glm-4.7"}, {"zhipu", "glm-4.6"}, {"kimi", "k3"},
+	} {
+		if !m.ModelDisabled(pair.provider, pair.model) {
+			t.Fatalf("restored pair %v not disabled", pair)
+		}
+	}
+	// Parent-keyed restore covers pooled virtuals in scheduling.
+	result := m.DecideOrder(disabledTestInput(
+		Target{Provider: "zhipu#a", Parent: "zhipu", Model: "glm-4.7", Priority: 1},
+		Target{Provider: "other", Model: "glm-4.7", Priority: 2},
+	))
+	if len(result.Order) != 1 || result.Order[0] != 1 {
+		t.Fatalf("restored parent-key disable order = %v, want only [other]", result.Order)
+	}
+	// Junk keys were skipped; projection stays clean.
+	if got := m.DisabledModels(); !reflect.DeepEqual(got, map[string][]string{
+		"kimi":  {"k3"},
+		"zhipu": {"glm-4.6", "glm-4.7"},
+	}) {
+		t.Fatalf("DisabledModels() after restore = %v", got)
+	}
+	// nil and empty maps are no-ops.
+	m.RestoreDisabledModels(nil)
+	m.RestoreDisabledModels(map[string][]string{})
+	if !m.ModelDisabled("zhipu", "glm-4.7") {
+		t.Fatal("no-op restore cleared an entry")
 	}
 }
 

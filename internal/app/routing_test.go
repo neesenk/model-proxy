@@ -261,8 +261,10 @@ func TestRouteExpansionFansOutPool(t *testing.T) {
 		}
 	}
 
-	// Non-pooled provider passes through unchanged (single-account / not-logged-in
-	// → loadPool returns 0 accounts → not in poolIndex → passthrough).
+	// Non-pooled provider passes through unchanged (single-account providers
+	// keep the plain-name target after expansion — needs a credential now: an
+	// unlogged provider's targets are dropped from the effective table).
+	writePoolFile(t, "z", "zhipu", "KEY-Z")
 	cfg2 := &configdomain.Config{
 		Listen:    "127.0.0.1:1",
 		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
@@ -690,6 +692,7 @@ func TestUC_AqpBetaAndHeaders(t *testing.T) {
 			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
 		},
 	}
+	loginOAuthFixture(t, "aqp", "aqp")
 	p := newTestProxy(t, cfg)
 	// Build a REAL AqpProvider (so RewriteRequest adds ?beta) with a fake
 	// Authenticator, so no auth file is read.
@@ -732,6 +735,7 @@ func TestUC_CodexStoreFalseInjected(t *testing.T) {
 			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},
 		},
 	}
+	loginOAuthFixture(t, "codex", "codex")
 	p := newTestProxy(t, cfg)
 	// Build a REAL CodexProvider (so RewriteRequest injects store:false) with a
 	// fake Authenticator, so no auth file is read.
@@ -783,6 +787,7 @@ func TestUC_DeepSeekDualProtocolBaseURL(t *testing.T) {
 			"deepseek-v4-pro": {{Provider: "deepseek", Model: "deepseek-v4-pro"}},
 		},
 	}
+	loginAPIKeyFixtures(t, [2]string{"deepseek", "deepseek"})
 	p := newTestProxy(t, cfg)
 	// deepseek provider sets both Bearer + x-api-key; use a key file via testProv override.
 	p.providers["deepseek"] = &testProv{key: "ds-key"}

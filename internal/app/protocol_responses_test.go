@@ -94,6 +94,7 @@ func TestForward_AnthropicToResponses_AutoResolve(t *testing.T) {
 		Providers: map[string]configdomain.Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: "codex"}},
 		Routes:    map[string][]configdomain.RouteTarget{"gpt-x": {{Provider: "cdx", Model: "gpt-x"}}}, // no Protocol
 	}
+	loginOAuthFixture(t, "cdx", "codex")
 	p := newTestProxy(t, cfg)
 	p.providers["cdx"] = &testProv{key: "k"}
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))

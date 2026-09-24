@@ -23,8 +23,10 @@ type Manager struct {
 	paramBlock map[ModelKey]map[string]bool
 	// disabledModels is the operator disable override (Web Status→Models
 	// toggle): a disabled (provider, model) is excluded from scheduling and
-	// from the exposed model list. Like pins it deliberately survives hot
-	// reloads (ReplaceGeneration keeps it) and is memory-only (restart clears).
+	// from the exposed model list. It deliberately survives hot reloads
+	// (ReplaceGeneration keeps it) and — unlike pins — is persisted by the
+	// composition root (disabled_models.json), so restarts and model
+	// refreshes keep it too (RestoreDisabledModels is the seed path).
 	disabledModels map[ModelKey]bool
 	spread         map[string]uint64
 	quotas         map[string]*provider.QuotaSnapshot

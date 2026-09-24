@@ -565,8 +565,9 @@ func TestSetModelDisabledValidation(t *testing.T) {
 	var gotDisabled bool
 	service := New(Ports{
 		Config: func() *configdomain.Config { return cfg },
-		SetModelDisabled: func(provider, model string, disabled bool) {
+		SetModelDisabled: func(provider, model string, disabled bool) error {
 			gotProvider, gotModel, gotDisabled = provider, model, disabled
+			return nil
 		},
 	})
 

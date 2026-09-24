@@ -8,7 +8,7 @@
 |---|---|---|
 | aqp / codex | oauth_auth | `~/.model-proxy/<name>_oauth_auth.json` |
 | static | apikey | `~/.model-proxy/<name>_apikeys.json`（账号池）；无 legacy singular fallback |
-| zhipu / zcode / deepseek / kimi-code / qwen-plan / step-plan / mimo | apikey | `~/.model-proxy/<name>_apikeys.json`（账号池）；旧单数 `_apikey.json` 仅只读 fallback |
+| zhipu / zcode / deepseek / kimi-code / qwen-plan / step-plan / mimo / openrouter / opencode-go | apikey | `~/.model-proxy/<name>_apikeys.json`（账号池）；旧单数 `_apikey.json` 仅只读 fallback |
 | volcengine | apikey | `~/.model-proxy/<name>_apikeys.json` — 每账号 `{api_key, access_key, secret_key}`；旧单数仅 fallback |
 
 路径从 provider name（config 一级 key）派生，支持多实例（如 `zhipu-personal` / `codex-work`）。多账号见 `docs/architecture/provider-pools.md`。所有路径（CLI `login`、`BuildOne`、web 异步登录、`logout`）一律用 config name，**包括 aqp/codex**（`RunLogin`/`runCodexLoginFlow` 接收 `provName` → login 内部 `oauthAuthFilePath(HomeDir(), provName)`，与 `internal/accounts` 的 `AuthFilePath(provName, "oauth_auth")` 同一路径）；曾有的「CLI login 硬编码 provider_id → 非同名实例读写错位」bug 已修，`TestAqpCodexLogin_UsesConfigNameForAuthFile` 守护。OAuth 文件不得由 Web/CLI 直接 `os.WriteFile`/`os.Remove`：codex 统一经 `provider.WriteCodexAuthFile` / `provider.ClearCodexAccount`，aqp 经对应 provider helper，最终由 `credstore.Ref` 执行 file/keychain 选择、原子权限、来源标记与跨模式删除。
@@ -125,6 +125,25 @@ OAuth device flow（从 codex-rs 源码确认）：issuer `https://auth.openai.c
 - 推理强度：chat 协议 `thinking:{type:"enabled"|"disabled"}` 开关，**无 effort 档**（`ChatReasoningMode("mimo")="thinking"`，不注册 `ChatEffortProfile`）；多轮工具调用需回传 `reasoning_content`（thinking 方言的占位回传规则见 `docs/architecture/protocol-conversion.md`）。
 - `login mimo` 无 `usage_url`，走 `apiKeyValidationURL` 兜底 `openai_base_url/models`；`Logout` = `DeleteKey`。`ProbeRequest`/`FilterModelIDs` 用 baseProbe 默认（探测框架在配了 `anthropic_base_url` 时强制 anthropic 路径）；`ExtraHeaders` 注入 `anthropic-version: 2023-06-01`——转发路径的客户端→上游头白名单**不含** anthropic-version（客户端自带的会被剥），strict Anthropic 兼容网关会因此 400（kimi-code/step-plan 同款；DeepSeek 是例外，其端点忽略该头）。无 `ProtocolHint`/`WireProtocolNote`（双协议直通）。
 - **额度耗尽**：官方 Error Codes 为 **402 Insufficient Balance**（`Insufficient account balance`）；`targetexec.ParseQuotaDenied` 的 marker 表已含 `insufficient balance`/`account balance`/`余额不足`，命中即按配额耗尽分类（默认 1h 冷却，无 reset hint）+ failover，无需 mimo 专属代码——这也是无余额接口下的主要耗尽信号。
+
+## OpenRouter 契约（官方文档 + 2026-09 线上探测）
+
+- 聚合网关（数百个厂商模型，预充值 Credit 按量计费）。OpenAI base `https://openrouter.ai/api/v1`（`/chat/completions`、`/responses`、`/models`）；Anthropic base `https://openrouter.ai/api`（**不带 /v1**，代理保留客户端 `/v1/messages`——OpenRouter 的 Anthropic Messages 端点是 `/api/v1/messages`，即 "Anthropic Skin"，支持 text/image/PDF/tools/extended thinking）。双协议字节级透传，`RewriteRequest` no-op。
+- 鉴权仪 `Authorization: Bearer`（api reference "Authentication"；Claude Code 接入即 `ANTHROPIC_AUTH_TOKEN`→Bearer 路径）。实测 `/v1/messages` 也读 `x-api-key`，但 Bearer 是文档形态——保持 ApiKeyBase 默认（Bearer，剥 x-api-key）。可选归因头 `HTTP-Referer`/`X-OpenRouter-Title`（排行榜用，未配）。
+- **模型 id 带厂商前缀**（`anthropic/claude-opus-5.5`、`openai/gpt-6-luna`、`z-ai/glm-5.3`、`moonshotai/kimi-k3`…，共 ~460 个；另有 `:free`/`:batch` 变体与 `~openai/gpt-latest` 滚动别名、`openrouter/auto` 路由器）。request-routing 的 `provider/model` 前缀收窄只在前缀是已配置 provider 名时生效，否则整串按模型名处理—— slashed id 原样透传。**models.dev 元数据按裸名索引，slashed id 不命中**（metadata 回落 default；需要请求感知路由时用 provider config `capabilities:` 声明）。价格目录恰好就是本仓 pricing 的默认源（`openrouter.ai/api/v1/models`），slashed id 天然命中定价。
+- 配额 `GET /api/v1/key`（Bearer，401 `User not found.`）→ `{data:{label, limit, limit_reset, limit_remaining, usage, usage_daily, usage_weekly, usage_monthly, is_free_tier, free_model_daily_requests:{used,limit,remaining}}}`（api reference "Limits"）。`ParseOpenRouterKeyQuota` 投影：BillingPayG、RemainingPct=-1（无窗口化总预算）；可选 per-key credit cap 窗口（limit/limit_remaining，真剩余百分比）；三个 spend 计数器（今日/本周/本月，重置点 = UTC 边界：午夜/周一午夜/月初，由 `nextUTCPeriodBoundaries` 确定）；free-model 每日请求数窗口（Kind="requests"）。`limit_reset` 是重置**类型**字符串（如 "daily"）非时间戳。Account = key label。
+- 耗尽：402 + `error.metadata.limit_source`（`openrouter_credits`/`openrouter_key_limit`/`openrouter_in_flight_budget`）→ targetexec body-proven quota-denied 覆盖 402/403 → quota 冷却 + failover。`/models` 公开且忽略鉴权（invalid Bearer 也 200），但 login 校验走 usage_url `/key`（真 401）。
+- 推理强度：chat 原生 `reasoning:{effort}` 对象（`ChatReasoningMode("openrouter")="openrouter"`，即本仓以此命名的方言；不注册 ChatEffortProfile——原生透传，同 aqp）。`ExtraHeaders` 注入 `anthropic-version: 2023-06-01`（anthropic 腿需要；openai 腿忽略）；`ProbeRequest`/`FilterModelIDs` baseProbe 默认。无 `ProtocolHint`/`WireProtocolNote`（双协议直通）。
+
+## OpenCode Go 套餐契约（官方文档 + 2026-09 线上实测）
+
+- **Go ≠ Zen**：Go 是 OpenCode 团队的 **$10/月订阅**（精选开源 coding 模型，专为国际用户稳定接入；与 /zen 按量付费网关是两个产品——独立 base、独立目录、订阅限额而非预充值 Credit）。API key 从控制台（opencode.ai/auth → 订阅 Go → 复制 key）。
+- OpenAI base `https://opencode.ai/zen/go/v1`（`/chat/completions`、`/responses`、`/models`）；Anthropic base `https://opencode.ai/zen/go`（**不带 /v1**，代理保留客户端 `/v1/messages`；官方端点表按模型分腿：Grok/GPT/Muse 走 responses，GLM/Kimi/DeepSeek/MiMo/LongCat 走 chat/completions，MiniMax/Qwen 走 messages）。双协议字节级透传，`RewriteRequest` no-op。
+- 鉴权**双写**（deepseek 模式，两腿头不同——实测）：chat/responses/models 腿只读 `Authorization: Bearer`（Bearer-only 401 "Invalid API key."）；`/v1/messages` 腿**只读 `x-api-key`**（Bearer-only 401 "Missing API key."）。错误信封 anthropic 形状 `{type:"error",error:{type:"AuthError",…}}`。
+- **用量限额（订阅制）**：按模型月度美元限额（$15/$30/$60 档），每档拆三层窗口：5h = 20%、周 = 50%、月 = 100%（如 $60 模型 = 5h $12 / 周 $30 / 月 $60）。**无公开用量 API**（文档 "You can track your current usage in the console"）→ `Quota()` 返回 `BillingUnknown` + 控制台 URL（qwen-plan 模式）；窗口耗尽反应式暴露（402/429 → targetexec 既有分类 → 冷却 + failover）。控制台可选 "Use balance"（超额回落到独立的 Zen 预充值余额而非阻断）。
+- **会话亲和**：官方要求客户端每会话发稳定 `x-opencode-session`（优化路由与 prompt cache；官方认可 Claude Code/Codex/ZCode/Pi 的原生会话头）。`ExtraHeaders` 把白名单已转发的客户端原生会话头（`x-claude-code-session-id`/`x-session-id`/`user_id`）镜像到 `x-opencode-session`——不发明值，客户端自己的 opaque 会话 id 原样传递。
+- `/models` **公开且忽略鉴权**（invalid Bearer 也 200，42 个裸 id、`owned_by:"opencode"`）；无 usage_url ⇒ `login opencode-go` 的 key 校验落在公开 `/models` 上（不能拒掉坏 key；坏 key 在首次请求 401 反应式暴露——auth 冷却 + failover）。
+- 推理强度：无已验证的厂商专属形状 ⇒ 默认 `reasoning_effort` 方言、不注册 ChatEffortProfile。`ExtraHeaders` 另注入 `anthropic-version: 2023-06-01`；`ProbeRequest`/`FilterModelIDs` baseProbe 默认；无 `ProtocolHint`/`WireProtocolNote`（双协议直通）。
 
 ## Volcengine Ark 契约（双协议，含 Agent Plan，一个 key）
 

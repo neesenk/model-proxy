@@ -122,6 +122,12 @@ type processServices struct {
 	// state path). Same leaf-lock + survives-reload discipline as wireCaps.
 	modelCaps     runtimewire.ModelStore
 	modelCapsPath string
+	// Operator disabled-model override's persistence (disabled_models.json,
+	// same state directory as model_caps.json). The runtime Manager owns the
+	// live set; this path + mutex own the file rewrite after every toggle
+	// (see model_disable_store.go).
+	disabledModelsPath string
+	disabledModelsMu   sync.Mutex
 	// Cache entries are generation-owned. Counters and their serialized disk
 	// writer survive reload, including disabled generations.
 	cacheStatePath string
@@ -332,6 +338,13 @@ func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 		MaxConcurrent: cfg.ShadowMaxConcurrent,
 		Timeout:       cfg.Scheduling.Timeout(),
 	}))
+	// Seed the operator disabled-model override from disabled_models.json
+	// (same state directory as the quota state). This is the restart/refresh
+	// survival path for the Web Status→Models toggles: reload keeps the set in
+	// memory, a fresh process re-seeds from here. Not fingerprint-gated —
+	// see runtime/disabled_file.go for the reasoning.
+	p.disabledModelsPath = runtimestate.DisabledModelsPath(qpath)
+	p.seedDisabledModels()
 	// Restore the per-route sticky selections persisted before the last restart,
 	// so the proxy resumes parking on the same providers (prompt-cache-friendly).
 	// Gated like the health restore below: a file with a MISMATCHING config

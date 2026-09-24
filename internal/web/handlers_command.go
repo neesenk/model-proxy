@@ -47,7 +47,8 @@ func (s *Server) handleModelsRefresh(w http.ResponseWriter, r *http.Request) {
 // card's per-model Disable/Enable toggle. disabled=true hides the model from
 // GET /v1/models and drops it from scheduling (fail-closed validation — an
 // unknown provider/model is a 400, never a silently-dead override); the
-// override is memory-only (survives reloads, cleared on restart).
+// override is persisted (disabled_models.json) — it survives reloads,
+// restarts and model refreshes.
 func (s *Server) handleModelsDisable(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Provider string `json:"provider"`

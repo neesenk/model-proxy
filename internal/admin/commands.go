@@ -64,8 +64,11 @@ func (s *Service) FreezeHealth(provider string) ([]string, error) {
 // Status→Models Disable/Enable). Fail-closed validation: the provider must
 // exist in the current config and the model must be one it serves (provider
 // models ∪ explicit route targets — the same set the probe matrix rows come
-// from), so a typo cannot install a silently-dead override. The override
-// itself is memory-only and intentionally not persisted.
+// from), so a typo cannot install a silently-dead override. The override is
+// persisted by the port (disabled_models.json): it survives reloads,
+// restarts and model refreshes. A port error means the in-memory toggle is
+// live but the file write failed — surfaced so the operator knows a restart
+// would lose it.
 func (s *Service) SetModelDisabled(provider, model string, disabled bool) error {
 	if provider == "" || model == "" {
 		return errors.New("provider and model are required")
@@ -83,7 +86,9 @@ func (s *Service) SetModelDisabled(provider, model string, disabled bool) error 
 	if !providerServesModel(cfg, provider, model) {
 		return fmt.Errorf("provider %q does not serve model %q", provider, model)
 	}
-	s.ports.SetModelDisabled(provider, model, disabled)
+	if err := s.ports.SetModelDisabled(provider, model, disabled); err != nil {
+		return fmt.Errorf("toggle applied in memory but persisting it failed: %w", err)
+	}
 	return nil
 }
 

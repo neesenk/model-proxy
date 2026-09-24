@@ -230,6 +230,8 @@ func QuotaSourceLabel(providerID string) string {
 		return "usages"
 	case "zcode":
 		return "quota/limit"
+	case "openrouter":
+		return "api/v1/key"
 	default:
 		return "(none → unknown at runtime)"
 	}

@@ -219,6 +219,24 @@ func TestValidate_AcceptsMiMoProviderID(t *testing.T) {
 	}
 }
 
+func TestValidate_AcceptsOpenRouterProviderID(t *testing.T) {
+	c := &Config{Listen: "127.0.0.1:8787", Providers: map[string]Provider{
+		"openrouter": {Provider: "openrouter", OpenAIBaseURL: "https://openrouter.ai/api/v1"},
+	}}
+	if err := c.validate(); err != nil {
+		t.Errorf("openrouter provider_id rejected: %v", err)
+	}
+}
+
+func TestValidate_AcceptsOpenCodeProviderID(t *testing.T) {
+	c := &Config{Listen: "127.0.0.1:8787", Providers: map[string]Provider{
+		"opencode-go": {Provider: "opencode-go", OpenAIBaseURL: "https://opencode.ai/zen/go/v1"},
+	}}
+	if err := c.validate(); err != nil {
+		t.Errorf("opencode-go provider_id rejected: %v", err)
+	}
+}
+
 func TestValidate_AcceptsStepPlanProviderID(t *testing.T) {
 	c := &Config{Listen: "127.0.0.1:8787", Providers: map[string]Provider{
 		"step-plan": {Provider: "step-plan", OpenAIBaseURL: "https://api.stepfun.com/step_plan/v1"},

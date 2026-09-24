@@ -11,6 +11,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -363,5 +365,116 @@ func TestModelDisable_ScheduleStatusOmitsFullyDisabledRoutes(t *testing.T) {
 	}
 	if len(ri.Ordered) != 1 || ri.Ordered[0].Provider != "fallback" {
 		t.Fatalf("m1 ordered = %+v, want the non-disabled fallback only", ri.Ordered)
+	}
+}
+
+// TestModelDisable_PersistedAcrossRestart pins the persistence contract: a
+// Web toggle writes disabled_models.json, a FRESH process on the same state
+// directory re-seeds its runtime Manager from the file (the fully disabled
+// model is hidden from /v1/models and answers 404 again), and Enable removes
+// the entry so the next restart starts clean.
+func TestModelDisable_PersistedAcrossRestart(t *testing.T) {
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {OpenAIBaseURL: "https://x", Provider: testProviderID, Models: []string{"glm-4.7"}},
+		},
+	}
+	stateDir := t.TempDir()
+	statePath := filepath.Join(stateDir, "quota_state.json")
+	storePath := filepath.Join(stateDir, "disabled_models.json")
+
+	p1 := newTestProxyAt(t, cfg, statePath)
+	w1 := NewWebServer(p1, "test-config.yaml")
+	rec := httptest.NewRecorder()
+	serveWeb(w1, rec, httptest.NewRequest(http.MethodPost, "/api/models/disable",
+		strings.NewReader(`{"provider":"zhipu","model":"glm-4.7","disabled":true}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/models/disable = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The toggle persisted the override to the state directory.
+	data, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("disabled_models.json after disable: %v", err)
+	}
+	if !strings.Contains(string(data), `"zhipu"`) || !strings.Contains(string(data), "glm-4.7") {
+		t.Fatalf("disabled_models.json = %s, want the zhipu/glm-4.7 entry", data)
+	}
+
+	// A fresh process on the same state dir re-seeds from the file: the
+	// runtime Manager carries the override and the forward path honors it.
+	p2 := newTestProxyAt(t, cfg, statePath)
+	if !p2.runtimeState.ModelDisabled("zhipu", "glm-4.7") {
+		t.Fatal("fresh process did not restore the persisted disable override")
+	}
+	px := httptest.NewServer(http.HandlerFunc(p2.Handler))
+	defer px.Close()
+	if ids := exposedModelIDs(t, px); contains(ids, "glm-4.7") {
+		t.Fatalf("GET /v1/models = %v after restart, want glm-4.7 hidden", ids)
+	}
+	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json",
+		stringReader(`{"model":"glm-4.7","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("client post: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound || !strings.Contains(string(body), "is disabled") {
+		t.Fatalf("restored disable status = %d body = %q, want 404 is-disabled", resp.StatusCode, body)
+	}
+
+	// Enable rewrites the file without the entry; the next process starts clean.
+	w2 := NewWebServer(p2, "test-config.yaml")
+	rec = httptest.NewRecorder()
+	serveWeb(w2, rec, httptest.NewRequest(http.MethodPost, "/api/models/disable",
+		strings.NewReader(`{"provider":"zhipu","model":"glm-4.7","disabled":false}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST enable = %d: %s", rec.Code, rec.Body.String())
+	}
+	data, err = os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("disabled_models.json after enable: %v", err)
+	}
+	if strings.Contains(string(data), "glm-4.7") {
+		t.Fatalf("disabled_models.json = %s after enable, want the entry removed", data)
+	}
+	p3 := newTestProxyAt(t, cfg, statePath)
+	if p3.runtimeState.ModelDisabled("zhipu", "glm-4.7") {
+		t.Fatal("re-enabled pair restored from disk (entry must be gone)")
+	}
+}
+
+// TestModelDisable_CorruptStoreStartsEmpty pins the degradation path: a
+// malformed disabled_models.json never takes the proxy down — construction
+// succeeds with no overrides, and the next successful toggle rewrites the
+// file whole (self-healing).
+func TestModelDisable_CorruptStoreStartsEmpty(t *testing.T) {
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {OpenAIBaseURL: "https://x", Provider: testProviderID, Models: []string{"glm-4.7"}},
+		},
+	}
+	stateDir := t.TempDir()
+	storePath := filepath.Join(stateDir, "disabled_models.json")
+	if err := os.WriteFile(storePath, []byte(`{not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	p := newTestProxyAt(t, cfg, filepath.Join(stateDir, "quota_state.json"))
+	if p.runtimeState.ModelDisabled("zhipu", "glm-4.7") {
+		t.Fatal("corrupt store seeded an override")
+	}
+
+	// The next toggle rewrites the file whole.
+	w := NewWebServer(p, "test-config.yaml")
+	rec := httptest.NewRecorder()
+	serveWeb(w, rec, httptest.NewRequest(http.MethodPost, "/api/models/disable",
+		strings.NewReader(`{"provider":"zhipu","model":"glm-4.7","disabled":true}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/models/disable = %d: %s", rec.Code, rec.Body.String())
+	}
+	data, err := os.ReadFile(storePath)
+	if err != nil || !strings.Contains(string(data), "glm-4.7") {
+		t.Fatalf("disabled_models.json after repair = %q err=%v, want valid JSON with the entry", data, err)
 	}
 }

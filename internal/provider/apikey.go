@@ -114,6 +114,16 @@ func (b *ApiKeyBase) LoadKey() (string, error) {
 	return b.cached, nil
 }
 
+// AuthReady reports whether this provider currently holds a usable API key
+// (bound pool key, or a readable store entry) — the routing-eligibility
+// signal expandTarget consults: a configured-but-never-logged-in provider
+// must not enter the effective routing table. Inherited by every
+// ApiKeyBase-embedding provider. File I/O happens only at build/reload time.
+func (b *ApiKeyBase) AuthReady() bool {
+	_, err := b.LoadKey()
+	return err == nil
+}
+
 // SaveKey writes the API key through the credential store (file mode: 0600,
 // parent dir 0700, temp+fsync+rename — a crash mid-write must not destroy the
 // only stored key; pitfalls #18 pattern). A bound base is never the source of

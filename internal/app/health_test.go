@@ -944,6 +944,7 @@ providers:
 routes:
   glm-5.2: [{provider: zhipu, model: glm-5.2}]
 `))
+	loginAPIKeyFixtures(t, [2]string{"zhipu", "zhipu"})
 	p := newTestProxy(t, cfg)
 	p.mu.Lock()
 	p.providers["zhipu"] = &testProv{key: "z"}

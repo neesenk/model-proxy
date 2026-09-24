@@ -195,6 +195,19 @@ type ProbeRequest struct {
 	Body   []byte // minimal request body for this provider's chat shape
 }
 
+// AuthReadyProvider is the optional routing-eligibility seam: providers
+// whose auth REQUIRES a stored credential implement it to report whether
+// the credential exists right now. expandTarget drops a built provider
+// whose AuthReady is false from the EFFECTIVE routing table (schedule
+// chains, /v1/models, forward) — "无凭据的 provider 不进调度链"（README）；
+// adding the account and reloading rebuilds the table. Providers WITHOUT
+// the marker (static: credential-free by design) are routable whenever
+// built. Consulted at build/reload time only, never on the request hot
+// path — AuthReady may do file I/O.
+type AuthReadyProvider interface {
+	AuthReady() bool
+}
+
 // Config is the provider-level config data passed to constructors.
 type Config struct {
 	ProviderID    string

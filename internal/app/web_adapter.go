@@ -391,8 +391,9 @@ func (p *Proxy) adminPorts(
 		ResetStats:   p.resetStats,
 		ResetHealth:  p.resetHealth,
 		FreezeHealth: p.freezeHealth,
-		SetModelDisabled: func(provider, model string, disabled bool) {
+		SetModelDisabled: func(provider, model string, disabled bool) error {
 			p.runtimeState.SetModelDisabled(provider, model, disabled)
+			return p.persistDisabledModels()
 		},
 		DisabledModels: func() map[string][]string {
 			return p.runtimeState.DisabledModels()

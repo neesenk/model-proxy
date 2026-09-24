@@ -590,6 +590,7 @@ func TestNewProxy_RouteWarningsAppended(t *testing.T) {
 	}, Routes: map[string][]configdomain.RouteTarget{
 		"k2": {{Provider: "aqp", Model: "kimi-k2-thinking", Protocol: "openai"}},
 	}}
+	loginOAuthFixture(t, "aqp", "aqp")
 	p := newTestProxy(t, cfg)
 	found := false
 	for _, w := range p.routeWarnings {

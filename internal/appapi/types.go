@@ -975,9 +975,12 @@ type CommandAPI interface {
 	FreezeHealth(provider string) ([]string, error)
 	// SetModelDisabled toggles the operator disabled-model override for one
 	// (provider, model): disabled targets are excluded from scheduling and
-	// from the exposed /v1/models list (memory-only — survives reloads, cleared
-	// on restart, like pins). Validation is fail-closed: an unknown provider
-	// or a model the provider does not serve is a client error.
+	// from the exposed /v1/models list (persisted in disabled_models.json —
+	// survives reloads, restarts and model refreshes, unlike pins).
+	// Validation is fail-closed: an unknown provider or a model the provider
+	// does not serve is a client error. The error may also be a persist
+	// failure AFTER the in-memory toggle applied (same persist-then-return
+	// semantics as FreezeHealth).
 	SetModelDisabled(provider, model string, disabled bool) error
 	SetPin(route, provider string, ttl time.Duration) (Pin, bool)
 	ClearPin(route string) bool

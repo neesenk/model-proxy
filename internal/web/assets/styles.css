@@ -40,6 +40,11 @@
   --warn-fg:   #a16207;
   --err-fg:    #b91c1c;
 
+  /* Switch track colors (the macOS-style state toggle): on = solid blue,
+     knob = white in both themes. Off uses the neutral surface-3/border. */
+  --switch-on:   #4262f6;
+  --switch-knob: #ffffff;
+
   /* Per-account tint slots (cycled within a provider's account list). */
   --acct-c0-bg: #e9f0fb; --acct-c0-bd: #446b9e;
   --acct-c1-bg: #f0ebfa; --acct-c1-bd: #6b4a9e;
@@ -110,6 +115,9 @@
     --ok-fg:     #46d17e;
     --warn-fg:   #f5c518;
     --err-fg:    #f88a8c;
+
+    --switch-on:   #5773f7;
+    --switch-knob: #ffffff;
 
     /* Per-account tint slots, dark variants. */
     --acct-c0-bg: #1a2433; --acct-c0-bd: #3b5d8a;
@@ -1044,8 +1052,9 @@ textarea.yaml {
 
 /* ---------- buttons ----------
    One solid-accent surface in the whole UI: .btn.primary. Everything else is
-   a quiet surface button; danger stays outline, danger-solid reserved for
-   destructive confirmations (unfreeze). */
+   a quiet surface button; danger stays outline, danger-solid is the solid
+   destructive tier (unfreeze / reset counters / confirm dialogs). The
+   model-row enable/disable state lives in .switch, not buttons. */
 .btn {
   appearance: none;
   border: 1px solid var(--border);
@@ -1094,9 +1103,58 @@ textarea.yaml {
   background: color-mix(in srgb, var(--err) 85%, #000);
   border-color: color-mix(in srgb, var(--err) 85%, #000);
 }
+@media (prefers-color-scheme: dark) {
+  /* dark theme redefines --err brighter, so the solid tier flips to dark
+     text for contrast (same pattern as .btn.primary's #1c1200). */
+  .btn.danger-solid { color: #000; }
+}
 .btn.small { padding: 3px 9px; font-size: 0.75rem; border-radius: var(--r-chip); }
 .btn.small .icon { width: 11px; height: 11px; }
 .btn:disabled { opacity: .55; cursor: default; }
+
+/* ---------- switch ----------
+   The row-level state toggle (Status→Models model rows: checked = routed &
+   exposed, unchecked = disabled), styled after the macOS switch from the
+   operator's reference: solid blue track + white round knob on the right
+   when on, neutral gray track + knob on the left when off. Built on a native
+   checkbox so keyboard + screen-reader semantics come free; appearance:none
+   is unavoidable for the track/knob shape, so the customization contract is
+   honored explicitly: focus ring, disabled state, and the knob position as
+   the checked mark. */
+.switch {
+  appearance: none;
+  position: relative;
+  width: 32px;
+  height: 20px;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-3);
+  cursor: pointer;
+  flex: none;
+  transition: background-color .12s ease, border-color .12s ease;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--switch-knob);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 22%, transparent);
+  transition: left .12s ease;
+}
+.switch:checked {
+  background: var(--switch-on);
+  border-color: var(--switch-on);
+}
+.switch:checked::after {
+  left: calc(100% - 16px);
+}
+.switch:focus-visible { outline: 2px solid color-mix(in srgb, var(--switch-on) 55%, transparent); outline-offset: 1px; }
+.switch:disabled { opacity: .55; cursor: default; }
 .link-btn {
   appearance: none;
   background: transparent;

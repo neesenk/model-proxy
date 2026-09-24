@@ -20,6 +20,20 @@ type AqpProvider struct {
 	auth authInjector
 }
 
+// AuthReady reports whether the SSO-cookie store holds a session (the
+// routing-eligibility seam — see provider.AuthReadyProvider). An expired
+// cookie still counts as ready: credential EXISTENCE gates routing, token
+// VALIDITY surfaces at request time (failover), matching the ApiKeyBase
+// semantics. A cfg.Auth test seam counts as ready by definition (fake
+// authenticators never read the store).
+func (p *AqpProvider) AuthReady() bool {
+	if p.cfg.Auth != nil {
+		return true
+	}
+	a, err := LoadAqpAccount(p.cfg.OAuthAuthFile)
+	return err == nil && a != nil && a.SSOSessionCookie != ""
+}
+
 func init() {
 	Register("aqp", func(cfg *Config, providerName string) (Provider, error) {
 		return &AqpProvider{cfg: cfg, auth: cfg.authOrDefault(NewAqpKeyProvider(cfg.AqpMintURL, cfg.OAuthAuthFile))}, nil

@@ -6,8 +6,10 @@ import "sort"
 // (provider, model). `provider` is the config-level provider name (a pooled
 // parent disables the model across its virtual accounts via the Target.Parent
 // check); exact virtual-id keys also work. Disabling is idempotent; enabling a
-// never-disabled pair is a no-op. Like pins the state is memory-only: it
-// survives hot reloads and is cleared on restart.
+// never-disabled pair is a no-op. The override survives hot reloads
+// (ReplaceGeneration keeps it) and — unlike pins — is PERSISTED by the
+// composition root (disabled_models.json), so it also survives restarts and
+// model refreshes; RestoreDisabledModels below is the seed path.
 func (m *Manager) SetModelDisabled(provider, model string, disabled bool) {
 	if provider == "" || model == "" {
 		return
@@ -21,6 +23,33 @@ func (m *Manager) SetModelDisabled(provider, model string, disabled bool) {
 		return
 	}
 	delete(m.disabledModels, key)
+}
+
+// RestoreDisabledModels seeds the override from persisted state — the
+// composition root calls it once at construction with the parsed
+// disabled_models.json. Unlike the sticky/health restores it is deliberately
+// NOT config-fingerprint-gated: entries are self-validating (provider, model)
+// pairs (the toggle API validated each against the config of its time), a
+// pair absent from the current config is inert (no route target matches,
+// nothing is exposed), and the operator expectation is that a disable
+// RESURFACES when the pair returns (e.g. `models refresh` re-adding the
+// model) — a whole-config fingerprint gate would wipe the set on any
+// provider edit.
+func (m *Manager) RestoreDisabledModels(entries map[string][]string) {
+	if len(entries) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureLocked()
+	for provider, models := range entries {
+		for _, model := range models {
+			if provider == "" || model == "" {
+				continue
+			}
+			m.disabledModels[ModelKey{Provider: provider, Model: model}] = true
+		}
+	}
 }
 
 // ModelDisabled reports the exact-key disable state for (provider, model).

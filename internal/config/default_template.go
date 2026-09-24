@@ -64,6 +64,7 @@ providers:
       - gpt-5.6-sol
       - gpt-5.6-terra
       - gpt-6-astra
+      - gpt-6-luna
       - kimi-k3
       - claude-haiku-4-5
       - claude-opus-4-8
@@ -103,9 +104,17 @@ providers:
                                        # authoritative — models.dev metadata is ignored for it.
     usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit  # usage zhipu: 5h/weekly/monthly quota + token consumption
     models:
+      - glm-4.5
+      - glm-4.5-air
+      - glm-4.6
+      - glm-4.7
+      - glm-5
+      - glm-5-turbo
+      - glm-5.1
+      - glm-5.2
       - glm-5.3
       - glm-5.3-flash
-      - glm-5.2
+      - glm-5.3-flashx
   # DeepSeek (API key via 'login deepseek'). One key serves both protocols; the
   # two endpoints are per-protocol: openai_base_url = OpenAI base, anthropic_base_url =
   # Anthropic base (no /v1; proxy keeps the client /v1/messages path).
@@ -121,6 +130,7 @@ providers:
     usage_url: https://api.deepseek.com/user/balance
     models:
       - deepseek-flash
+      - deepseek-v4-pro
 
   # Volcengine Ark (火山方舟, including 'Agent Plan'). API key via 'login volcengine'.
   # Two protocol bases: openai_base_url = Ark OpenAI base, anthropic_base_url =
@@ -138,9 +148,17 @@ providers:
       - deepseek-v4-flash
       - deepseek-v4-pro
       - deepseek-v4.1-flash
+      - doubao-embedding-vision
+      - doubao-seed-2.1-pro
+      - doubao-seed-2.1-turbo
+      - doubao-seed-evolving
+      - doubao-seedream-5.0-lite
       - glm-5.3
       - glm-5.3-flash
+      - kimi-k2.7-code
+      - kimi-k2.8-preview
       - kimi-k3
+      - minimax-m3
 
   # Kimi Code (Moonshot membership coding plan). API key via 'login kimi-code'
   # (from https://www.kimi.com/code/console). Two protocol bases under one
@@ -237,6 +255,68 @@ providers:
       - mimo-v2.6-pro-ultraspeed
       - mimo-v2.5-pro
       - mimo-v2.5
+
+  # OpenRouter (https://openrouter.ai — aggregated model gateway, prepaid
+  # credits). API key via 'login openrouter' (openrouter.ai/settings/keys).
+  # One key (Authorization: Bearer) serves both protocols: openai_base_url =
+  # /api/v1 (chat/completions, responses, models, key), anthropic_base_url =
+  # /api (proxy keeps the client /v1/messages path — OpenRouter's Anthropic
+  # Messages endpoint is /api/v1/messages). Model ids are VENDOR-PREFIXED
+  # (anthropic/claude-*, openai/gpt-*, z-ai/glm-*, plus :free/:batch variants
+  # — see openrouter.ai/models) and do NOT match models.dev's bare-name
+  # metadata; declare capabilities: per model when the request-aware router
+  # needs it. usage_url polls GET /key (day/week/month spend + optional
+  # per-key credit cap); credit exhaustion surfaces as upstream 402.
+  # Chat reasoning shape is the native reasoning:{effort} object. Poolable
+  # (repeat 'login').
+  openrouter:
+    openai_base_url: https://openrouter.ai/api/v1
+    anthropic_base_url: https://openrouter.ai/api
+    provider_id: openrouter
+    priority: 3
+    billing: pay-as-you-go
+    usage_url: https://openrouter.ai/api/v1/key
+    models:
+      - stealth/space-bunny-alpha
+      - qwen/qwen3.8-27b:free
+
+  # OpenCode Go (https://opencode.ai/go — the OpenCode team's $10/month
+  # SUBSCRIPTION for curated open coding models; NOT the pay-as-you-go Zen
+  # gateway at /zen). API key via 'login opencode-go' (opencode.ai/auth →
+  # sign in → subscribe to Go → copy API key). One key serves both protocols,
+  # but the legs read different auth headers (the proxy dual-writes Bearer +
+  # x-api-key): openai_base_url = /zen/go/v1 (chat/completions, responses,
+  # models — Bearer), anthropic_base_url = /zen/go (proxy keeps the client
+  # /v1/messages path — x-api-key only, verified live). Usage limits are
+  # per-model monthly dollar amounts ($15/$30/$60 tiers) split into windows
+  # (5h=20%, weekly=50%, monthly=100%); console-only (no public usage API;
+  # ExtraHeaders mirrors the client session header into x-opencode-session
+  # for Go's routing/prompt-cache affinity). /models is public, so login
+  # validation cannot reject bad keys (a wrong key surfaces at first request
+  # as 401). Poolable (repeat 'login').
+  opencode-go:
+    openai_base_url: https://opencode.ai/zen/go/v1
+    anthropic_base_url: https://opencode.ai/zen/go
+    provider_id: opencode-go
+    priority: 2
+    billing: plan
+    models:
+      - kimi-k3
+      - kimi-k2.7-code
+      - glm-5.3
+      - glm-5.3-flash
+      - glm-5.2
+      - deepseek-v4-pro
+      - deepseek-v4-flash
+      - deepseek-v4.1-flash
+      - qwen3.7-max
+      - qwen3.7-plus
+      - minimax-m3
+      - gpt-6-luna
+      - gpt-5.6-luna
+      - grok-4.7
+      - mimo-v2.6-pro
+      - longcat-2.0
 
   # TypeSafe System One decisions API (Jev): a decision model returning typed,
   # calibrated answers (choice/score/noul + probabilities) instead of text —

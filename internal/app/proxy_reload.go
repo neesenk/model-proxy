@@ -6,6 +6,7 @@ import (
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/logx"
+	"model-proxy/internal/provider"
 	"model-proxy/internal/providerbuild"
 	"model-proxy/internal/routing"
 	"model-proxy/internal/shadow"
@@ -166,21 +167,30 @@ func routeKeySet(expanded map[string][]configdomain.RouteTarget) map[string]bool
 }
 
 // expandTarget fans a single route target out across a pooled provider's
-// virtuals via the unified routing resolver front door, then drops ids with
-// no built implementation: a provider configured but without an account or
-// credential cannot serve, and expandedRoutes is the EFFECTIVE table
-// (schedule chains, /v1/models, forward) — a target forward would skip at
-// plan time must not appear in it. Same principle as buildProviders' pool
-// rule ("poolIndex never lists an id that isn't runnable"), extended to
-// non-pooled names; adding the account and reloading rebuilds the table.
-// "fusion" is the orchestration pseudo-provider (forward intercepts it before
-// the impl lookup), so it passes without an impl.
+// virtuals via the unified routing resolver front door, then drops ids that
+// cannot serve: a provider with no built implementation, or one whose
+// AuthReady reports no stored credential (configured but never logged in —
+// e.g. opencode-go before its first `login`). expandedRoutes is the
+// EFFECTIVE table (schedule chains, /v1/models, forward) — a target forward
+// would skip or 502 on must not appear in it; adding the account and
+// reloading rebuilds the table (login already triggers reload). Same
+// principle as buildProviders' pool rule ("poolIndex never lists an id that
+// isn't runnable"), extended to non-pooled names. Credential-free providers
+// (static: no AuthReady marker) stay routable whenever built. "fusion" is
+// the orchestration pseudo-provider (forward intercepts it before the impl
+// lookup), so it passes without an impl.
 func (p *Proxy) expandTarget(t configdomain.RouteTarget) []configdomain.RouteTarget {
 	expanded := newResolver(p, p.providers, p.poolIndex).Expand(t)
 	kept := expanded[:0]
 	for _, rt := range expanded {
-		if rt.Provider != "fusion" && p.providers[rt.Provider] == nil {
-			continue
+		if rt.Provider != "fusion" {
+			impl := p.providers[rt.Provider]
+			if impl == nil {
+				continue
+			}
+			if ar, ok := impl.(provider.AuthReadyProvider); ok && !ar.AuthReady() {
+				continue
+			}
 		}
 		kept = append(kept, rt)
 	}

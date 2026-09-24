@@ -106,9 +106,17 @@ providers:
       - {window: "14:00-18:00", multiplier: 4}
     usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit # `usage zhipu`: 5h/weekly/monthly quota + token consumption
     models:
+      - glm-4.5
+      - glm-4.5-air
+      - glm-4.6
+      - glm-4.7
+      - glm-5
+      - glm-5-turbo
+      - glm-5.1
       - glm-5.2
       - glm-5.3
       - glm-5.3-flash
+      - glm-5.3-flashx
   # ZCode (BigModel Coding Plan + ZCode client fingerprint). API key via
   # `login zcode` (opens https://bigmodel.cn/login; paste the Coding Plan key).
   # Same BigModel backend/quota envelope as zhipu, but every request carries the
@@ -132,8 +140,17 @@ providers:
     anthropic_base_url: https://open.bigmodel.cn/api/anthropic
     usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit # `usage zcode`: 5h/weekly/monthly quota + token consumption
     models:
+      - glm-4.5
+      - glm-4.5-air
+      - glm-4.6
+      - glm-4.7
+      - glm-5
+      - glm-5-turbo
+      - glm-5.1
+      - glm-5.2
       - glm-5.3
       - glm-5.3-flash
+      - glm-5.3-flashx
   # DeepSeek (API key via `login deepseek`). One key serves both protocols; the
   # two endpoints are per-protocol: openai_base_url = OpenAI base, anthropic_base_url =
   # Anthropic base (no /v1; proxy keeps the client /v1/messages path).
@@ -152,6 +169,7 @@ providers:
       - {window: "14:00-18:00", multiplier: 4}
     models:
       - deepseek-flash
+      - deepseek-v4-pro
   # Volcengine Ark (火山方舟, including "Agent Plan"). API key via `login volcengine`.
   # Two protocol bases: openai_base_url = Ark OpenAI base, anthropic_base_url =
   # Ark Anthropic-compatible base (no /v1; proxy keeps /v1/messages).
@@ -159,6 +177,7 @@ providers:
   volcengine:
     provider_id: volcengine
     priority: 2
+    billing: plan
     openai_base_url: https://ark.cn-beijing.volces.com/api/plan/v3
     anthropic_base_url: https://ark.cn-beijing.volces.com/api/plan
     # usage_url is the login-time key-validation endpoint: `login volcengine` GETs it
@@ -258,7 +277,6 @@ providers:
     models:
       - jev-latest
       - jev-1.13.0
-
   # StepFun Step Plan (阶跃星辰订阅制 Coding Plan — Credit 月池, NOT the
   # pay-as-you-go 开放平台 channel; visiting api.stepfun.com/v1 never consumes
   # plan Credits). API key via `login step-plan` (from
@@ -309,6 +327,67 @@ providers:
       - mimo-v2.6-pro-ultraspeed
       - mimo-v2.5-pro
       - mimo-v2.5
+  # OpenRouter (https://openrouter.ai — aggregated model gateway, prepaid
+  # credits). API key via `login openrouter` (openrouter.ai/settings/keys).
+  # One key (Authorization: Bearer) serves both protocols: openai_base_url =
+  # /api/v1 (chat/completions, responses, models, key), anthropic_base_url =
+  # /api (proxy keeps the client /v1/messages path — OpenRouter's Anthropic
+  # Messages endpoint is /api/v1/messages). Model ids are VENDOR-PREFIXED
+  # (anthropic/claude-*, openai/gpt-*, z-ai/glm-*, plus :free/:batch variants
+  # — see openrouter.ai/models) and do NOT match models.dev's bare-name
+  # metadata; declare capabilities: per model when the request-aware router
+  # needs it. usage_url polls GET /key (day/week/month spend + optional
+  # per-key credit cap); credit exhaustion surfaces as upstream 402.
+  # Chat reasoning shape is the native reasoning:{effort} object. Poolable
+  # (repeat `login`). Also a preset: `model-proxy add openrouter`.
+  openrouter:
+    openai_base_url: https://openrouter.ai/api/v1
+    anthropic_base_url: https://openrouter.ai/api
+    provider_id: openrouter
+    priority: 3
+    billing: pay-as-you-go
+    usage_url: https://openrouter.ai/api/v1/key
+    models:
+      - stealth/space-bunny-alpha
+  # OpenCode Go (https://opencode.ai/go — the OpenCode team's $10/month
+  # SUBSCRIPTION for curated open coding models; NOT the pay-as-you-go Zen
+  # gateway at /zen). API key via `login opencode-go` (opencode.ai/auth →
+  # sign in → subscribe to Go → copy API key). One key serves both protocols,
+  # but the legs read different auth headers (the proxy dual-writes Bearer +
+  # x-api-key): openai_base_url = /zen/go/v1 (chat/completions, responses,
+  # models — Bearer), anthropic_base_url = /zen/go (proxy keeps the client
+  # /v1/messages path — x-api-key only, verified live). Usage limits are
+  # per-model monthly dollar amounts ($15/$30/$60 tiers) split into windows
+  # (5h=20%, weekly=50%, monthly=100%); console-only (no public usage API;
+  # ExtraHeaders mirrors the client session header into x-opencode-session
+  # for Go's routing/prompt-cache affinity). /models is public, so login
+  # validation cannot reject bad keys (a wrong key surfaces at first request
+  # as 401). Poolable (repeat `login`). Also a preset: `model-proxy add opencode-go`.
+  opencode-go:
+    openai_base_url: https://opencode.ai/zen/go/v1
+    anthropic_base_url: https://opencode.ai/zen/go
+    provider_id: opencode-go
+    priority: 2
+    billing: plan
+    alias:
+      deepseek-v4.1-flash: deepseek-flash
+    models:
+      - kimi-k3
+      - kimi-k2.7-code
+      - glm-5.3
+      - glm-5.3-flash
+      - glm-5.2
+      - deepseek-v4-pro
+      - deepseek-v4-flash
+      - deepseek-v4.1-flash
+      - qwen3.7-max
+      - qwen3.7-plus
+      - minimax-m3
+      - gpt-6-luna
+      - gpt-5.6-luna
+      - grok-4.7
+      - mimo-v2.6-pro
+      - longcat-2.0
 # Qianwen Token Plan 个人版 (千问 AI Token Plan personal edition). API key via
 # `login qwen-plan` (from the Token Plan console; key format sk-sp-…). Two
 # protocol bases: openai_base_url = OpenAI-compatible base, anthropic_base_url
@@ -354,8 +433,8 @@ providers:
 #  claude-sonnet-4-6: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-v4-pro]
 #  sonnet: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-v4-pro]
 routes:
-  deepseek-v4-pro: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-flash]
-  deepseek-v4-flash: [aqp/deepseek-v4-flash, volcengine/deepseek-v4-flash, shopee/deepseek-v4-flash, deepseek/deepseek-flash]
+  # deepseek-v4-pro: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-flash]
+  # deepseek-v4-flash: [aqp/deepseek-v4-flash, volcengine/deepseek-v4-flash, shopee/deepseek-v4-flash, deepseek/deepseek-flash]
 # Scheduling: every field has a code default (config.go accessors), so this
 # block can be omitted entirely. Uncomment a line to override.
 # scheduling:

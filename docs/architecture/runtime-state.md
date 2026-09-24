@@ -17,6 +17,8 @@
 | kimi-code | `/usages` | plan |
 | deepseek | `/user/balance` | pay-as-you-go |
 | mimo | 无（控制台 cookie 鉴权，非 API key） | pay-as-you-go（BillingUnknown）|
+| openrouter | `api/v1/key`（花费窗口 + 可选 per-key cap） | pay-as-you-go |
+| opencode-go | 无（订阅限额仅控制台，无公开用量 API） | plan（BillingUnknown）|
 
 最长周期窗口标记为 `Ultimate`，作为调度总预算和节奏基准；更短窗口标记为 `Short`，表示短期 rate-cap。短窗口不直接参与最终 `RemainingPct` 的 min。
 
@@ -314,11 +316,19 @@ Disable/Enable）是 (provider, model) 粒度的 operator 覆盖，状态归
   精确匹配响应 cache 不受影响
   （禁用阻断的是新的上游工作，不禁已缓存答案的回放）；
 - 池化 provider 禁用父名 = 全部虚拟账号（Target.Parent 匹配）；
-- **与 pin 同生命周期契约**：仅在内存，reload 不清（`ReplaceGeneration`
-  保留），重启清除；持久禁用走 config 编辑。不落盘、不进
-  quota_state.json，也不计入 CooldownState/HasRecoveredUntried 的 down
+- **生命周期（与 pin 的 memory-only 契约不同：持久化）**：reload 不清
+  （`ReplaceGeneration` 保留内存集合），重启/`models refresh` 后由
+  `~/.model-proxy/disabled_models.json` 回种（组合根在构造时
+  `RestoreDisabledModels`，每次开关后原子重写文件——见
+  `internal/app/model_disable_store.go`）；条目是自验证的
+  (provider, model) 对，当前 config 不存在时在盘上蛰伏、pair 回归
+  （refresh 重新加回）即重新生效，**不做** sticky/health 那种 config
+  fingerprint 门控（整仓指纹会在任何 provider 编辑时清空 operator 的
+  禁用集）。不进 quota_state.json，也不计入
+  CooldownState/HasRecoveredUntried 的 down
   分类（forward 的 effective targets 在路由查找处已过滤，被禁目标
-  不进入冷却判定）；
+  不进入冷却判定）；持久化失败时内存开关照常生效、错误上报给 UI
+  （重启会丢这一次）；
 - 校验 fail-closed：provider 必须在当前 config、model 必须属该 provider
   的服务集（models: ∪ 路由 target），否则 400（`internal/admin`
   `SetModelDisabled`）；已从 config 移除的残留键不会匹配任何目标，无害。

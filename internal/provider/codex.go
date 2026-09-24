@@ -19,6 +19,19 @@ type CodexProvider struct {
 	auth authInjector
 }
 
+// AuthReady reports whether the OAuth store holds any token (the
+// routing-eligibility seam — see provider.AuthReadyProvider). A refreshable
+// store counts as ready (the access token rotates at request time); an
+// unreadable/missing store does not. A cfg.Auth test seam counts as ready
+// by definition (fake authenticators never read the store).
+func (p *CodexProvider) AuthReady() bool {
+	if p.cfg.Auth != nil {
+		return true
+	}
+	af, err := LoadCodexAuthFile(p.cfg.OAuthAuthFile)
+	return err == nil && af != nil && (af.Tokens.AccessToken != "" || af.Tokens.RefreshToken != "")
+}
+
 func init() {
 	Register("codex", func(cfg *Config, providerName string) (Provider, error) {
 		return &CodexProvider{cfg: cfg, auth: cfg.authOrDefault(NewCodexOAuthProvider(cfg.OAuthAuthFile))}, nil

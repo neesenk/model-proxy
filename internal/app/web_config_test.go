@@ -808,6 +808,7 @@ func TestServeModels_ListsExposedModels(t *testing.T) {
 			"claude-haiku-4-5": {{Provider: "aqp", Model: "glm-5.2"}},
 		},
 	}
+	loginOAuthFixture(t, "aqp", "aqp")
 	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
@@ -852,6 +853,7 @@ func TestServeModels_NoRoutesReturnsEmpty(t *testing.T) {
 		},
 		Routes: map[string][]configdomain.RouteTarget{},
 	}
+	loginOAuthFixture(t, "aqp", "aqp")
 	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()

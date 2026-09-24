@@ -128,3 +128,44 @@ func TestApiKeyBaseSaveKeyUnboundPersistsAtomically(t *testing.T) {
 		}
 	}
 }
+
+// TestApiKeyBaseAuthReady pins the routing-eligibility seam: a bound key
+// (pool virtual) or a readable store entry is ready; a missing store is not
+// (configured but never logged in — expandTarget drops such providers from
+// the effective table).
+func TestApiKeyBaseAuthReady(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := home + "/.model-proxy"
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// No store yet: not ready.
+	bare := NewApiKeyBase("ar-test")
+	if bare.AuthReady() {
+		t.Fatal("AuthReady without any credential store = true, want false")
+	}
+	// Store with a key: ready.
+	if err := bare.SaveKey("sk-ar"); err != nil {
+		t.Fatal(err)
+	}
+	if !bare.AuthReady() {
+		t.Fatal("AuthReady with a saved key = false, want true")
+	}
+	// Bound key (pool virtual): ready without touching the store.
+	bound := NewApiKeyBaseWithKey("ar-test", "BOUND")
+	if !bound.AuthReady() {
+		t.Fatal("AuthReady with a bound key = false, want true")
+	}
+	// Empty file: not ready (no api_key field).
+	empty := NewApiKeyBase("ar-empty")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/ar-empty_apikey.json", []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if empty.AuthReady() {
+		t.Fatal("AuthReady with an empty store = true, want false")
+	}
+}

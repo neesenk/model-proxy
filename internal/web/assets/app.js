@@ -5940,18 +5940,15 @@ function renderModelsCard(target, providers) {
   for (const p of entries) {
     let rows = '';
     for (const m of p.models) {
-      // Operator disable toggle (POST /api/models/disable): a disabled model
-      // is hidden from /v1/models and never routed — badge + Enable action on
-      // the row, plain Disable otherwise. Backend owns the state; the row just
-      // renders it (muted while disabled).
-      const state = m.disabled
-        ? '<span class="badge warn" title="Hidden from /v1/models and never routed — survives reload, cleared on restart">disabled</span>'
-        : '';
-      const action = m.disabled
-        ? `<button class="btn small" data-model-enable="${esc(p.name)}" data-model="${esc(m.id)}" title="Restore routing and /v1/models exposure">Enable</button>`
-        : `<button class="btn small" data-model-disable="${esc(p.name)}" data-model="${esc(m.id)}" title="Hide from /v1/models and stop routing this model">Disable</button>`;
+      // Operator disable toggle (POST /api/models/disable): one state switch
+      // per row — checked (blue, macOS-style) = routed and exposed in
+      // /v1/models, unchecked (neutral gray) = disabled (row muted via
+      // model-off). No separate badge: the switch IS the state. Backend owns
+      // the state; the row just renders it, and the switch's checked flag
+      // comes from the server response, never local echo.
+      const action = `<input type="checkbox" class="switch" data-model-toggle="${esc(p.name)}" data-model="${esc(m.id)}" aria-label="Route ${esc(m.id)} on ${esc(p.name)}" title="${m.disabled ? 'Disabled — hidden from /v1/models and never routed (persists in disabled_models.json across reload, restart and models refresh). Click to re-enable.' : 'Routed and exposed in /v1/models. Click to disable.'}"${m.disabled ? '' : ' checked'}>`;
       rows += `<tr class="${m.disabled ? 'model-off' : ''}">
-        <td class="mono">${esc(m.id)}${state ? ` ${state}` : ''}</td>
+        <td class="mono">${esc(m.id)}</td>
         <td>${protoVerdictPill(m.chat)}</td>
         <td>${protoVerdictPill(m.anthropic)}</td>
         <td>${protoVerdictPill(m.responses)}</td>
@@ -5969,40 +5966,42 @@ function renderModelsCard(target, providers) {
         <tbody>${rows}</tbody>
       </table>`,
       'flush model-caps',
-      `<button class="btn small danger-solid model-caps-refresh" data-models-refresh="${esc(p.name)}">Refresh</button>`));
+      `<button class="btn small model-caps-refresh" data-models-refresh="${esc(p.name)}">Refresh</button>`));
   }
   target.querySelectorAll('[data-models-refresh]').forEach((btn) => {
     btn.addEventListener('click', () => refreshProviderModels(btn));
   });
-  target.querySelectorAll('[data-model-disable]').forEach((btn) => {
-    btn.addEventListener('click', () => toggleModel(btn.dataset.modelDisable, btn.dataset.model, true, btn));
-  });
-  target.querySelectorAll('[data-model-enable]').forEach((btn) => {
-    btn.addEventListener('click', () => toggleModel(btn.dataset.modelEnable, btn.dataset.model, false, btn));
+  target.querySelectorAll('[data-model-toggle]').forEach((el) => {
+    // The browser flips the checkbox visually before the change event fires;
+    // toggleModel reverts it on cancel/failure (the server state is truth).
+    el.addEventListener('change', () => toggleModel(el.dataset.modelToggle, el.dataset.model, !el.checked, el));
   });
 }
 
 // toggleModel flips one provider×model's operator disable override (POST
 // /api/models/disable — the backend validates the pair against the current
-// config). Disabling asks for confirmation (it stops routing immediately:
-// in-flight conversations on that model start failing over or erroring);
-// enabling is the recovery action and runs directly. Both re-fetch /api/models
-// and re-render the Status tab so the badge state comes from the server, never
-// local echo. The override is memory-only: it survives reloads and is cleared
-// on restart (same contract as pin).
-async function toggleModel(provider, model, disable, btn) {
+// config) from the row's state switch. Disabling (unchecking) asks for
+// confirmation (it stops routing immediately: in-flight conversations on
+// that model start failing over or erroring); enabling (checking) runs
+// directly. The browser has already flipped the switch visually when the
+// change event fires, so the cancel and failure paths revert it — success
+// re-fetches /api/models and re-renders the Status tab from the server
+// response, never local echo. The override is persisted server-side
+// (disabled_models.json): it survives reload, restart and models refresh
+// (unlike pins, which are memory-only).
+async function toggleModel(provider, model, disable, el) {
   if (disable) {
     const ok = await confirmDialog('Disable model',
-      `Disable ${model} on ${provider}? The model disappears from /v1/models and requests are no longer routed to it (multi-provider models fail over to the remaining providers; a fully disabled model answers 404). Survives reload, cleared on restart.`,
+      `Disable ${model} on ${provider}? The model disappears from /v1/models and requests are no longer routed to it (multi-provider models fail over to the remaining providers; a fully disabled model answers 404). Persists across reload, restart and models refresh.`,
       'Disable');
-    if (!ok) return;
+    if (!ok) { if (el) el.checked = !disable; return; }
   }
-  if (btn) { btn.disabled = true; btn.textContent = disable ? 'Disabling…' : 'Enabling…'; }
+  if (el) el.disabled = true;
   try {
     await apiPost('/api/models/disable', { provider, model, disabled: disable });
     await renderStatusTab();
   } catch (e) {
-    if (btn) { btn.disabled = false; btn.textContent = disable ? 'Disable' : 'Enable'; }
+    if (el) { el.disabled = false; el.checked = !disable; }
     window.alert((disable ? 'disable failed: ' : 'enable failed: ') + e.message);
   }
 }

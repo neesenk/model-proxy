@@ -139,9 +139,12 @@ type Ports struct {
 	FreezeHealth func(name string, known []string) (frozen []string)
 	// SetModelDisabled toggles the operator disabled-model override for one
 	// (provider, model): disabled targets are dropped from scheduling and
-	// from the exposed /v1/models list. Memory-only (survives reloads, cleared
-	// on restart — the pin contract).
-	SetModelDisabled func(provider, model string, disabled bool)
+	// from the exposed /v1/models list. Persisted by the composition root
+	// (disabled_models.json) — survives reloads, restarts and model refreshes
+	// (unlike pins, which stay memory-only). The port error is the persist
+	// failure: the in-memory toggle is already live, the error tells the
+	// caller the NEXT process would not keep it.
+	SetModelDisabled func(provider, model string, disabled bool) error
 	// DisabledModels projects the override as a detached, sorted provider →
 	// models map for GET /api/models.
 	DisabledModels func() map[string][]string

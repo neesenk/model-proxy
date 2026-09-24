@@ -82,7 +82,7 @@ Save 时写回；metadata-only 池的 ID 同时是现有 keychain namespace，�
 remove 后重新 login。
 
 API-key provider（当前包括 static、zhipu、zcode、deepseek、volcengine、
-kimi-code、mimo、qwen-plan、step-plan）支持池化；aqp、codex 使用各自 OAuth/SSO 单账号文件，
+kimi-code、mimo、qwen-plan、step-plan、openrouter、opencode-go）支持池化；aqp、codex 使用各自 OAuth/SSO 单账号文件，
 不进入 API-key pool。login 按 id 去重，支持 label/replace，成功后触发热 reload。
 
 ## 构建期展开

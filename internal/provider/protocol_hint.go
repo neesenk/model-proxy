@@ -46,14 +46,14 @@ func ProtocolHint(providerID, model string) string {
 //	"reasoning_effort" (default) — flat reasoning_effort field, kept as-is
 //	"thinking"        — thinking: {type:"enabled"|"disabled"} (zhipu/volcengine/kimi-code/deepseek/mimo)
 //	"enable_thinking" — enable_thinking: bool (qwen-plan)
-//	"openrouter"      — native reasoning: {effort} object (aqp / OpenRouter 系)
+//	"openrouter"      — native reasoning: {effort} object (aqp / openrouter 系)
 func ChatReasoningMode(providerID string) string {
 	switch providerID {
 	case "zhipu", "volcengine", "kimi-code", "deepseek", "mimo":
 		return "thinking"
 	case "qwen-plan":
 		return "enable_thinking"
-	case "aqp", "shopee":
+	case "aqp", "shopee", "openrouter":
 		return "openrouter"
 	}
 	return "reasoning_effort"
