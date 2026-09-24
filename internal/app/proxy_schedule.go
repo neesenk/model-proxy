@@ -10,6 +10,20 @@ import (
 	"time"
 )
 
+// declaredBillingClass maps a provider's explicit `billing:` label to the
+// scheduling class; empty or invalid stays BillingUnknown (only explicit
+// declarations deputize for a missing measurement — see runtime's
+// effectiveBilling).
+func declaredBillingClass(pconf configdomain.Provider) provider.BillingClass {
+	switch pconf.Billing {
+	case "plan":
+		return provider.BillingPlan
+	case "pay-as-you-go":
+		return provider.BillingPayG
+	}
+	return provider.BillingUnknown
+}
+
 // pinEntry is a manual route→provider pin (model-proxy pin <route> <provider>
 // --ttl). expiresAt zero = no expiry (until unpin). The runtime Manager owns
 // storage; this private value is the application/Web compatibility projection.
@@ -131,6 +145,7 @@ func (p *Proxy) decideOrder(cfg *configdomain.Config, parentOf map[string]string
 			Model:          target.Model,
 			Priority:       target.Priority,
 			PeakMultiplier: pconf.PeakMultiplier(now),
+			Billing:        declaredBillingClass(pconf),
 		}
 	}
 	result := p.runtimeState.DecideOrder(runtimestate.ScheduleInput{
@@ -254,6 +269,7 @@ func scheduleStatusFromSnapshot(
 				Model:          target.Model,
 				Priority:       target.Priority,
 				PeakMultiplier: pconf.PeakMultiplier(now),
+				Billing:        declaredBillingClass(pconf),
 			}
 		}
 		// Operator disabled-model override: a route whose EVERY target is

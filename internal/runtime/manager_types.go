@@ -155,6 +155,13 @@ type Target struct {
 	Model          string
 	Priority       int
 	PeakMultiplier float64
+	// Billing is the config-DECLARED class (an explicit `billing:` label
+	// only; BillingUnknown = undeclared). It never overrides a measured
+	// snapshot — it fills the tier gap when no fresh measurement exists, so
+	// an unmeasured but declared plan/payg ranks with its real class instead
+	// of a middling "unknown" tier. Facts.Billing (the display/measurement
+	// view) stays measured-only.
+	Billing provider.BillingClass
 }
 
 type ScheduleInput struct {

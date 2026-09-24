@@ -903,7 +903,11 @@ type Provider struct {
 	// tier/quota band) rather than tried in a separate group.
 	PeakHours PeakConfig `yaml:"peak_hours"`
 	// Billing is "plan" (default, quota-bound) or "pay-as-you-go" (strict
-	// last-resort: used only when all plan providers are unavailable).
+	// last-resort: used only when all plan providers are unavailable). A
+	// fresh quota MEASUREMENT always decides the scheduling tier; this label
+	// only fills the tier gap when no measurement exists (an unmeasured but
+	// declared plan/payg ranks with its real class instead of a middling
+	// "unknown" tier) — it never overrides a measurement.
 	Billing string `yaml:"billing"`
 }
 

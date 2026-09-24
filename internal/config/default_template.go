@@ -221,8 +221,9 @@ providers:
   # console-only (BillingUnknown + console URL, like qwen-plan/step-plan).
   # billing: pay-as-you-go is METADATA (the upstream's payment method) — it
   # gates nothing: quota polling follows the provider implementation (a
-  # configured usage_url, else its own console-only snapshot), and scheduling
-  # reads the measured snapshot, never this label. Token Plan subscriptions
+  # configured usage_url, else its own console-only snapshot). Scheduling
+  # reads the measured snapshot first; only WITHOUT a measurement does this
+  # label fill the tier (it never overrides one). Token Plan subscriptions
   # are NOT supported. Poolable (repeat 'login').
   mimo:
     openai_base_url: https://api.xiaomimimo.com/v1

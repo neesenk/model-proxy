@@ -444,3 +444,40 @@ func TestScheduleStatus_BlockedReasonsOnEmptyChain(t *testing.T) {
 		t.Fatalf("until %q is not RFC3339: %v", b.Until, err)
 	}
 }
+
+// TestScheduleTierDeclaredBillingFallback pins the app wiring of the tier
+// rule "measurement wins, explicit `billing:` declaration fills the gap":
+// an unmeasured but declared-plan provider competes INSIDE the plan tier
+// (priority decides between same-class members) instead of a middling
+// unknown tier that only drains after every measured plan is exhausted;
+// a declared payg sinks to the payg tier.
+func TestScheduleTierDeclaredBillingFallback(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]configdomain.Provider{
+			"measured":   {Provider: testProviderID},
+			"declplan":   {Provider: testProviderID, Billing: "plan"},
+			"declpayg":   {Provider: testProviderID, Billing: "pay-as-you-go"},
+			"undeclared": {Provider: testProviderID},
+		},
+		map[string][]configdomain.RouteTarget{
+			// Same tier, priority decides: measured plan (worse priority)
+			// vs declared plan (better priority) — before the fix the
+			// measured one won on tier regardless of priority.
+			"same-class": {{Provider: "measured", Priority: 2}, {Provider: "declplan", Priority: 1}},
+			// Declared plan outranks undeclared despite worse priority.
+			"plan-vs-unknown": {{Provider: "undeclared", Priority: 1}, {Provider: "declplan", Priority: 2}},
+			// Declared payg sinks below undeclared despite better priority.
+			"payg-vs-unknown": {{Provider: "declpayg", Priority: 1}, {Provider: "undeclared", Priority: 2}},
+		})
+	staticSurplus(p, "measured", 0.5, 0.5)
+
+	if got := firstProvider(p, "same-class"); got != "declplan" {
+		t.Fatalf("same-class first = %q, want declplan (priority decides within the plan tier)", got)
+	}
+	if got := firstProvider(p, "plan-vs-unknown"); got != "declplan" {
+		t.Fatalf("plan-vs-unknown first = %q, want declplan (declared plan ranks in the plan tier)", got)
+	}
+	if got := firstProvider(p, "payg-vs-unknown"); got != "undeclared" {
+		t.Fatalf("payg-vs-unknown first = %q, want undeclared (declared payg ranks in the payg tier)", got)
+	}
+}

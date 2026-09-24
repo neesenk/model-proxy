@@ -405,6 +405,7 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 			Model:          t.Model,
 			Priority:       t.Priority,
 			PeakMultiplier: pconf.PeakMultiplier(now),
+			Billing:        declaredBillingClass(pconf),
 		}
 	}
 	decision := dash.PreviewOrder(runtimestate.ScheduleInput{

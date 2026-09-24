@@ -78,6 +78,20 @@ func targetScheduleFacts(
 	return ScheduleFacts{Billing: billing, Surplus: surplus}
 }
 
+// effectiveBilling resolves the tier's billing class: a fresh measurement
+// wins; without one the config-DECLARED class fills the gap (explicit
+// declarations only — undeclared stays unknown, the honest middle tier).
+// This is the corrected shape of the removed BillingOverride: the label
+// never overrides a measurement, it only deputizes when there is none —
+// same-class providers (plan vs plan) then compete on priority/surplus
+// instead of being split by mere measurability.
+func effectiveBilling(measured, declared provider.BillingClass) provider.BillingClass {
+	if measured != provider.BillingUnknown {
+		return measured
+	}
+	return declared
+}
+
 func schedulingTier(billing provider.BillingClass) int {
 	switch billing {
 	case provider.BillingPlan:
@@ -174,7 +188,7 @@ func decideOrder(input ScheduleInput, state scheduleState, commit bool) Schedule
 		candidates = append(candidates, scheduleCandidate{
 			target: target,
 			index:  i,
-			tier:   schedulingTier(facts[i].Billing),
+			tier:   schedulingTier(effectiveBilling(facts[i].Billing, target.Billing)),
 			score:  facts[i].Surplus - facts[i].QualityPenalty,
 		})
 	}

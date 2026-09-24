@@ -184,6 +184,12 @@ tierRank → priority asc → surplus desc
 ```
 
 - tier 顺序是 `plan < unknown < payg`，不可直接使用 `BillingClass` iota。
+  tier 档位判定：**实测优先，显式声明补位，都不行才 unknown**——新鲜实测
+  快照的 BillingClass 即档位；未实测（无快照/出错/过期）时回退到 config
+  **显式**声明的 `billing:`（`Target.Billing`，经 `effectiveBilling`），未声明
+  才落 unknown 中间档。声明永不覆盖实测（旧的 `BillingOverride` 错在覆盖，
+  不在参与）。展示层保持实测诚实：`Facts.Billing`/schedule 的 `tier` 仍实测
+  only，未实测靠 `billing_declared` + `(unmeasured)` 限定词标注。
 - priority 高于 surplus。
 - 相同 priority 允许多个目标组成 surplus 竞争池。
 - peak multiplier 只作用于 Short 窗口折算。
@@ -197,13 +203,17 @@ parent、priority、peak multiplier 等 config-derived 输入，不得先读 quo
 Manager 排序。这样一次请求决策不会在 quota projection 与 availability/sticky
 选择之间跨过 reload 或并发 mutation。
 
-**tier 只来自实测 snapshot**（plan < unknown < pay-as-you-go）：config 的
-`billing:` 是付费方式元数据，既不是轮询门禁也不是调度输入——它曾经以
-`BillingOverride` 形式覆盖实测 tier（把实测 plan 的 provider 贬为严格末位），
-并让 quota tracker 跳过「pay-as-you-go 且无 usage_url」的 provider（连带把
-console-only snapshot 从 Web UI 藏掉），2026-09-24 一并移除。轮询/展示规则
-改为：配了 `usage_url` → 查询；没配但实现自带查询/控制台 URL → 由
-`Quota()` 的 Notes 呈现（CLI `usage` 与 Web UI 都渲染）。
+**tier 档位 = 实测 ?? 显式声明 ?? unknown**（plan < unknown < pay-as-you-go）。
+class（plan/payg）决定档位，可测量性只决定“知不知道余量”，不再制造档位边界
+ ——同为 plan 的两个 provider（一个实测、一个 console-only 但声明了 plan）在
+同档内按 priority/surplus 竞争，而不是必须先把实测的那个耗尽。历史：config 的
+`billing:` 曾以 `BillingOverride` 形式**覆盖**实测 tier（把实测 plan 的 provider
+贬为严格末位），并让 quota tracker 跳过「pay-as-you-go 且无 usage_url」的
+provider（连带把 console-only snapshot 从 Web UI 藏掉），2026-09-24 移除；
+后来补上「声明仅补位、永不覆盖」的回退语义（`Target.Billing` +
+`effectiveBilling`）。轮询/展示规则：配了 `usage_url` → 查询；没配但实现
+自带查询/控制台 URL → 由 `Quota()` 的 Notes 呈现（CLI `usage` 与 Web UI
+都渲染）。
 
 只有 `Commit=true` 且 generation 匹配时，才允许清理陈旧 sticky 或推进 pool
 spread。请求路径不深拷贝 quota 的 Notes/Windows/Details，也不为 projection
