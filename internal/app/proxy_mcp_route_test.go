@@ -14,6 +14,7 @@ import (
 	"time"
 
 	configdomain "model-proxy/internal/config"
+	obscounters "model-proxy/internal/observe/counters"
 	"model-proxy/internal/provider"
 )
 
@@ -601,9 +602,30 @@ func TestMCPRoute_ToolsCallStatsCreditBackend(t *testing.T) {
 	resp.Body.Close()
 	mcpPost(t, srv.URL+"/mcp/web-search", sid, routeListBody).Body.Close()
 
-	before := p.mcpStats.Snapshot()
+	// The handler records stats AFTER the client has received the response
+	// (mcpLog runs post-stream: latency accounting spans the streamed body),
+	// so counter increments are asynchronously observable — an immediate
+	// Snapshot races the handler goroutine and flakes on slow/loaded runners
+	// (observed on the 2-core CI box under -race). Await the counter with a
+	// bounded poll instead of asserting a timing that does not exist.
+	awaitRouteCalls := func(want uint64) map[string]obscounters.MCPStatSnapshot {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			snap := p.mcpStats.Snapshot()
+			if snap["web-search"].Calls >= want {
+				return snap
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("route web-search calls = %d, want %d (post-response stats write did not land)", snap["web-search"].Calls, want)
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+
+	before := awaitRouteCalls(2) // initialize + tools/list settled
 	mcpPost(t, srv.URL+"/mcp/web-search", sid, routeCallBody("web_search")).Body.Close()
-	after := p.mcpStats.Snapshot()
+	after := awaitRouteCalls(before["web-search"].Calls + 1)
 
 	routeBefore := before["web-search"]
 	routeAfter := after["web-search"]
