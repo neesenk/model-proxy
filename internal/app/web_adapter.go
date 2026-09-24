@@ -391,6 +391,12 @@ func (p *Proxy) adminPorts(
 		ResetStats:   p.resetStats,
 		ResetHealth:  p.resetHealth,
 		FreezeHealth: p.freezeHealth,
+		SetModelDisabled: func(provider, model string, disabled bool) {
+			p.runtimeState.SetModelDisabled(provider, model, disabled)
+		},
+		DisabledModels: func() map[string][]string {
+			return p.runtimeState.DisabledModels()
+		},
 		QuotaEnabled: func() bool {
 			return p.quota != nil
 		},

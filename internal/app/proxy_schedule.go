@@ -213,6 +213,11 @@ func scheduleStatusFromSnapshot(
 		QualityPenalty float64 `json:"quality_penalty"`
 		Available      bool    `json:"available"`
 		Peak           bool    `json:"peak"`
+		// BillingDeclared is the config `billing:` label (metadata only — the
+		// scheduling tier above stays measured-only by design). Surfaced so the
+		// UI can annotate unmeasured nodes with their declared billing class
+		// instead of a flat "unmeasured"; omitted when the config declares none.
+		BillingDeclared string `json:"billing_declared,omitempty"`
 	}
 	type poolInfo struct {
 		Parent    string `json:"parent"`
@@ -227,6 +232,11 @@ func scheduleStatusFromSnapshot(
 		Pools      []poolInfo `json:"pools,omitempty"`
 		Pin        string     `json:"pin,omitempty"`
 		PinExpires string     `json:"pin_expires,omitempty"`
+		// Blocked explains WHY the route currently schedules nothing (one
+		// entry per target, backend-derived — the UI never re-classifies).
+		// Only present when ordered is empty; a route with servable targets
+		// never carries it.
+		Blocked []blockedInfo `json:"blocked,omitempty"`
 	}
 
 	models := map[string]routeInfo{}
@@ -245,6 +255,14 @@ func scheduleStatusFromSnapshot(
 				Priority:       target.Priority,
 				PeakMultiplier: pconf.PeakMultiplier(now),
 			}
+		}
+		// Operator disabled-model override: a route whose EVERY target is
+		// disabled is hidden from /v1/models and cannot be served — listing it
+		// here would render an empty chain block on the Status→Schedule page.
+		// Partially disabled routes keep listing (their remaining chain already
+		// excludes the disabled targets — PreviewOrder filters candidates).
+		if RuntimeSnapshot.RouteFullyDisabled(runtimeTargets) {
+			continue
 		}
 		baseInput := runtimestate.ScheduleInput{
 			Exposed:           exposed,
@@ -282,6 +300,11 @@ func scheduleStatusFromSnapshot(
 		if !pinned && len(ordered) > 0 {
 			ri.First = ordered[0].Provider
 		}
+		// Empty chain: explain why (quota exhaustion / cooldown / freeze per
+		// target) instead of leaving the UI to say just "no providers".
+		if len(ordered) == 0 {
+			ri.Blocked = blockedReasons(RuntimeSnapshot, runtimeTargets, now, 3*cfg.Scheduling.PollInterval())
+		}
 		// Track which parents appear in `ordered` so the route-level `pools`
 		// summary can be emitted. A parent may have more accounts in poolIndex
 		// than are currently in `ordered` (some unavailable) — Accounts uses
@@ -295,14 +318,15 @@ func scheduleStatusFromSnapshot(
 				parentSeen[parent] = true
 			}
 			ri.Ordered = append(ri.Ordered, provInfo{
-				Provider:       t.Provider,
-				PoolParent:     parent,
-				Priority:       t.Priority,
-				Tier:           billingClassName(decision.Facts[targetIndex].Billing),
-				Surplus:        decision.Facts[targetIndex].Surplus,
-				QualityPenalty: decision.Facts[targetIndex].QualityPenalty,
-				Available:      avail(t.Provider),
-				Peak:           pconf.PeakMultiplier(now) > 1,
+				Provider:        t.Provider,
+				PoolParent:      parent,
+				Priority:        t.Priority,
+				Tier:            billingClassName(decision.Facts[targetIndex].Billing),
+				Surplus:         decision.Facts[targetIndex].Surplus,
+				QualityPenalty:  decision.Facts[targetIndex].QualityPenalty,
+				Available:       avail(t.Provider),
+				Peak:            pconf.PeakMultiplier(now) > 1,
+				BillingDeclared: pconf.Billing,
 			})
 		}
 		if len(parentSeen) > 0 {
@@ -347,4 +371,53 @@ func billingClassName(b provider.BillingClass) string {
 	default:
 		return "unknown"
 	}
+}
+
+// blockedInfo is one target's down classification for the empty-chain
+// schedule case, most-explanatory reason first: frozen > rate-limited >
+// quota-exhausted > circuit > model-locked > unavailable. Derived from the
+// same detached dashboard snapshot the schedule preview used.
+type blockedInfo struct {
+	Provider string `json:"provider"`
+	Reason   string `json:"reason"`
+	Until    string `json:"until,omitempty"` // RFC3339 recovery hint when known
+}
+
+// blockedReasons classifies every target of a route that PreviewOrder could
+// not schedule (the empty-chain case) so the Status→Schedule view can show WHY
+// instead of a bare "no providers" — the same facts the availability filter
+// used (frozen / rate-limit / quota exhaustion / circuit / model lock), read
+// from the same detached dashboard snapshot (single source, no second lock).
+func blockedReasons(snapshot runtimestate.DashboardSnapshot, targets []runtimestate.Target, now time.Time, quotaMaxAge time.Duration) []blockedInfo {
+	out := make([]blockedInfo, 0, len(targets))
+	for _, target := range targets {
+		info := blockedInfo{Provider: target.Provider, Reason: "unavailable"}
+		state, hasState := snapshot.Providers[target.Provider]
+		until := func(t time.Time) string {
+			if t.IsZero() || !t.After(now) {
+				return ""
+			}
+			return t.UTC().Format(time.RFC3339)
+		}
+		switch {
+		case hasState && state.Frozen:
+			info.Reason = "frozen"
+		case hasState && now.Before(state.RateLimitedUntil):
+			info.Reason, info.Until = "rate-limited", until(state.RateLimitedUntil)
+		case runtimestate.QuotaExhaustedUntil(snapshot.Quotas[target.Provider], now, quotaMaxAge) != (time.Time{}):
+			info.Reason = "quota-exhausted"
+			info.Until = until(runtimestate.QuotaExhaustedUntil(snapshot.Quotas[target.Provider], now, quotaMaxAge))
+		case hasState && (state.CircuitState == "open" || state.CircuitState == "half_open"):
+			info.Reason, info.Until = "circuit", until(state.CircuitOpenUntil)
+		default:
+			for _, lock := range snapshot.ModelLocks[target.Provider] {
+				if lock.Model == target.Model && now.Before(lock.LockedUntil) {
+					info.Reason, info.Until = "model-locked", until(lock.LockedUntil)
+					break
+				}
+			}
+		}
+		out = append(out, info)
+	}
+	return out
 }

@@ -17,29 +17,30 @@ import (
 type commandFake struct {
 	mu sync.Mutex
 
-	resetStats   func() error
-	refresh      func(string) bool
-	resetHealth  func(string) ([]string, int, error)
-	freezeHealth func(string) ([]string, error)
-	setPin       func(string, string, time.Duration) (appapi.Pin, bool)
-	unblock      func(string) error
-	clearPin     func(string) bool
-	save         func([]byte) error
-	validate     func([]byte) []appapi.ValidationIssue
-	edit         func(appapi.EditRequest) error
-	add          func(context.Context, string, appapi.AccountInput) (appapi.MutationResult, error)
-	probe        func(context.Context, string, string) (appapi.ProbeResult, error)
-	remove       func(string, string) (appapi.MutationResult, error)
-	begin        func(context.Context, string) (appapi.LoginStart, error)
-	refreshMdls  func(context.Context, string) (appapi.ModelsRefreshResult, error)
-	probeMCP     func(context.Context, string) (appapi.MCPProbeResult, error)
-	takeoverRun  func(appapi.TakeoverRunRequest) (appapi.TakeoverRunResult, error)
-	takeoverRest func(string) (appapi.TakeoverRestoreResult, error)
-	templateSave func(string, []byte) error
-	templateDel  func(string) error
-	replay       func(context.Context, string, string) (appapi.ReplayResult, error)
-	routeTest    func(context.Context, string) (appapi.RouteTestResult, error)
-	catalogPull  func(context.Context) (appapi.ModelsCatalogPull, error)
+	resetStats     func() error
+	refresh        func(string) bool
+	resetHealth    func(string) ([]string, int, error)
+	freezeHealth   func(string) ([]string, error)
+	setPin         func(string, string, time.Duration) (appapi.Pin, bool)
+	unblock        func(string) error
+	clearPin       func(string) bool
+	save           func([]byte) error
+	validate       func([]byte) []appapi.ValidationIssue
+	edit           func(appapi.EditRequest) error
+	add            func(context.Context, string, appapi.AccountInput) (appapi.MutationResult, error)
+	probe          func(context.Context, string, string) (appapi.ProbeResult, error)
+	remove         func(string, string) (appapi.MutationResult, error)
+	begin          func(context.Context, string) (appapi.LoginStart, error)
+	refreshMdls    func(context.Context, string) (appapi.ModelsRefreshResult, error)
+	setModelDisabl func(string, string, bool) error
+	probeMCP       func(context.Context, string) (appapi.MCPProbeResult, error)
+	takeoverRun    func(appapi.TakeoverRunRequest) (appapi.TakeoverRunResult, error)
+	takeoverRest   func(string) (appapi.TakeoverRestoreResult, error)
+	templateSave   func(string, []byte) error
+	templateDel    func(string) error
+	replay         func(context.Context, string, string) (appapi.ReplayResult, error)
+	routeTest      func(context.Context, string) (appapi.RouteTestResult, error)
+	catalogPull    func(context.Context) (appapi.ModelsCatalogPull, error)
 }
 
 func (fake *commandFake) ResetStats() error {
@@ -707,6 +708,13 @@ func (fake *commandFake) RefreshModels(ctx context.Context, provider string) (ap
 	return appapi.ModelsRefreshResult{Provider: provider}, nil
 }
 
+func (fake *commandFake) SetModelDisabled(provider, model string, disabled bool) error {
+	if fake.setModelDisabl != nil {
+		return fake.setModelDisabl(provider, model, disabled)
+	}
+	return nil
+}
+
 func (fake *commandFake) ProbeMCP(ctx context.Context, name string) (appapi.MCPProbeResult, error) {
 	if fake.probeMCP != nil {
 		return fake.probeMCP(ctx, name)
@@ -735,4 +743,44 @@ func TestModelsRefreshReceivesRequestCancellation(t *testing.T) {
 	if !called || w.Code != http.StatusBadRequest {
 		t.Fatalf("refresh called=%v status=%d", called, w.Code)
 	}
+}
+
+// TestModelsDisableHandler pins POST /api/models/disable's transport
+// contract: the provider/model/disabled triple is required (missing fields,
+// non-boolean disabled and malformed JSON are 400s), a port error maps to 400
+// with the backend message, and the happy path echoes the resulting state.
+func TestModelsDisableHandler(t *testing.T) {
+	t.Run("validates the request shape", func(t *testing.T) {
+		server := newCommandTestServer(t, &commandFake{})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/models/disable", `{`),
+			http.StatusBadRequest, map[string]any{"error": "malformed JSON body: unexpected EOF"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/models/disable", `{}`),
+			http.StatusBadRequest, map[string]any{"error": "provider and model are required"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/models/disable", `{"provider":"up"}`),
+			http.StatusBadRequest, map[string]any{"error": "provider and model are required"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/models/disable", `{"provider":"up","model":"m1"}`),
+			http.StatusBadRequest, map[string]any{"error": "disabled (boolean) is required"})
+	})
+	t.Run("surfaces the port error verbatim", func(t *testing.T) {
+		server := newCommandTestServer(t, &commandFake{setModelDisabl: func(provider, model string, disabled bool) error {
+			return errors.New("unknown provider \"up\"")
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/models/disable", `{"provider":"up","model":"m1","disabled":true}`),
+			http.StatusBadRequest, map[string]any{"error": "unknown provider \"up\""})
+	})
+	t.Run("echoes the resulting state", func(t *testing.T) {
+		var gotProvider, gotModel string
+		var gotDisabled bool
+		server := newCommandTestServer(t, &commandFake{setModelDisabl: func(provider, model string, disabled bool) error {
+			gotProvider, gotModel, gotDisabled = provider, model, disabled
+			return nil
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/models/disable", `{"provider":"zhipu","model":"glm-4.7","disabled":true}`),
+			http.StatusOK, map[string]any{"provider": "zhipu", "model": "glm-4.7", "disabled": true, "status": "disabled"})
+		if gotProvider != "zhipu" || gotModel != "glm-4.7" || !gotDisabled {
+			t.Fatalf("port saw provider=%q model=%q disabled=%v", gotProvider, gotModel, gotDisabled)
+		}
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/models/disable", `{"provider":"zhipu","model":"glm-4.7","disabled":false}`),
+			http.StatusOK, map[string]any{"provider": "zhipu", "model": "glm-4.7", "disabled": false, "status": "enabled"})
+	})
 }

@@ -420,6 +420,14 @@ func newProxyWithStaticAt(t testing.TB, cfg *configdomain.Config, qpath string, 
 	for name, key := range keys {
 		p.providers[name] = &testProv{key: key}
 	}
+	// The injected impls stand in for credentials (login → reload): rebuild
+	// the effective route table so targets dropped at construction for having
+	// no runnable provider (e.g. an empty plural pool) come back — expandTarget
+	// only lists impl-backed ids.
+	p.mu.Lock()
+	p.expandedRoutes = p.buildExpandedRoutes()
+	p.routeKeys = routeKeySet(p.expandedRoutes)
+	p.mu.Unlock()
 	return p
 }
 

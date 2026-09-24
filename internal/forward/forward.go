@@ -110,6 +110,19 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		http.Error(w, fmt.Sprintf("model %q not found in routes", calledModel), http.StatusBadGateway)
 		return
 	}
+	// Operator disabled-model override (Web Status→Models toggle): disabled
+	// targets are dropped from the route BEFORE pin/cache/scheduling — a
+	// partially disabled route fails over to its remaining targets, and an
+	// exposed name whose every target is disabled answers like an unknown
+	// model (it is also hidden from GET /v1/models). The check re-reads the
+	// Manager's live override state per request, so a toggle takes effect on
+	// the next request without a reload.
+	targets = p.filterDisabledTargets(targets, parentOf)
+	if len(targets) == 0 {
+		p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusNotFound)
+		http.Error(w, fmt.Sprintf("model %q is disabled", calledModel), http.StatusNotFound)
+		return
+	}
 	// A pin on this route forces the pinned provider (exclusive) — compute early
 	// so the cache can bypass it (a pinned request must reach the pinned backend,
 	// not a stale cached answer from another provider — same rationale as the

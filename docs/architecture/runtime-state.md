@@ -282,6 +282,37 @@ session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 r
 - pin 仅在内存中，reload 不清，重启清除；
 - pin/force 请求必须绕过响应缓存。
 
+## Disabled models（operator 模型禁用）
+
+`POST /api/models/disable {provider, model, disabled}`（UI Status→Models 每行
+Disable/Enable）是 (provider, model) 粒度的 operator 覆盖，状态归
+`runtime.Manager` 的 `disabledModels`（`ModelKey` 键）：
+
+- **调度剔除先于 pin 收窄**：`decideOrder` 把被禁目标从 candidate 集整体
+  剔除（不是 availability 过滤——被禁目标即使 pinned 也不回退执行；pin
+  命中被禁目标时按无匹配处理，回落正常调度——禁用是更强的 operator 意图）；
+- `PreviewOrder` 走同一剔除（Dashboard 快照携带脱离式副本），
+  `/debug/schedule`、`/api/status.schedule` 与真实调度一致；
+- fusion/shadow 腿的 identity 选择在 `routing.Resolver.Pick` 入口拒答
+  （config 级 (provider, model) 精确键，池化父名天然覆盖全部虚拟账号，
+  无需枚举）；guard 判定腿经共享 `p.schedule`→`DecideOrder`，同样被剔除；
+- **对外隐藏**：`GET /v1/models` 跳过全部目标被禁用的暴露名（部分禁用的
+  多 provider 模型照常列出并 failover）；forward 路由查找在 pin/cache 之前
+  同样过滤，全禁用模型终局 404 `model … is disabled`（与未知模型的 502
+  not-found 分开）；`/debug/route` 预览同步反映；`/api/status.schedule` 与
+  `/debug/schedule` 的 route 列表**整条跳过全禁用 route**（空链块不输出）；
+  精确匹配响应 cache 不受影响
+  （禁用阻断的是新的上游工作，不禁已缓存答案的回放）；
+- 池化 provider 禁用父名 = 全部虚拟账号（Target.Parent 匹配）；
+- **与 pin 同生命周期契约**：仅在内存，reload 不清（`ReplaceGeneration`
+  保留），重启清除；持久禁用走 config 编辑。不落盘、不进
+  quota_state.json，也不计入 CooldownState/HasRecoveredUntried 的 down
+  分类（forward 的 effective targets 在路由查找处已过滤，被禁目标
+  不进入冷却判定）；
+- 校验 fail-closed：provider 必须在当前 config、model 必须属该 provider
+  的服务集（models: ∪ 路由 target），否则 400（`internal/admin`
+  `SetModelDisabled`）；已从 config 移除的残留键不会匹配任何目标，无害。
+
 ## Freeze
 
 `freeze <provider>` / `POST /api/health/freeze` 是 unfreeze 的反向人工开关：在 `providerHealth` 上设置显式 `frozen` 标志，`available()` 恒 false——调度（`decideOrder` 的 availability 过滤）、`TargetHealthy`、`CooldownState`/`HasRecoveredUntried` 全部把它当 down，直到 unfreeze。
@@ -316,3 +347,5 @@ session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 r
 - fingerprint mismatch、旧请求/慢 quota poll/resolver spread 跨 generation、
   reload clear、pin 跨 reload 保留、mutation 后立即重启。
 - pin、force、unfreeze/freeze 与 cache/failover 的交互。
+- disabled models：decideOrder/PreviewOrder 剔除（含父名键与 pin 回落）、Resolver.Pick 拒答、
+  /v1/models 隐藏与 forward 404、部分禁用 failover、ReplaceGeneration 保留、fail-closed 校验。

@@ -400,13 +400,17 @@ type ModelMatchEntry struct {
 // protocol probe's verdicts per provider and model, the models.dev cache's
 // on-disk status, the configured-model match list against that cache, and the
 // sorted catalog id list for the match picker. Providers with no probe data
-// are omitted; an empty store projects `{"providers":{},"catalog":{"count":0},"match":[]}`.
-// CatalogIDs is empty when no cache has been pulled.
+// are omitted; an empty store projects
+// `{"providers":{},"catalog":{"count":0},"match":[],"disabled":{}}`.
+// CatalogIDs is empty when no cache has been pulled. Disabled is the operator
+// disabled-model override (provider → sorted model ids) — those models are
+// hidden from GET /v1/models and never scheduled.
 type ModelsDocument struct {
 	Providers  map[string]ProviderModelCaps `json:"providers"`
 	Catalog    ModelsCatalogStatus          `json:"catalog"`
 	Match      []ModelMatchEntry            `json:"match"`
 	CatalogIDs []string                     `json:"catalog_ids,omitempty"`
+	Disabled   map[string][]string          `json:"disabled"`
 }
 
 // ModelsRefreshDrop is one model dropped by the models-refresh endpoint probe,
@@ -969,6 +973,12 @@ type CommandAPI interface {
 	// freeze-all). Persist-then-return semantics mirror ResetHealth (the
 	// error means the in-memory freeze is live but durable state is stale).
 	FreezeHealth(provider string) ([]string, error)
+	// SetModelDisabled toggles the operator disabled-model override for one
+	// (provider, model): disabled targets are excluded from scheduling and
+	// from the exposed /v1/models list (memory-only — survives reloads, cleared
+	// on restart, like pins). Validation is fail-closed: an unknown provider
+	// or a model the provider does not serve is a client error.
+	SetModelDisabled(provider, model string, disabled bool) error
 	SetPin(route, provider string, ttl time.Duration) (Pin, bool)
 	ClearPin(route string) bool
 	// SecurityUnblock removes one persisted guard-adjudication session block.

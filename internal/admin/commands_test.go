@@ -546,3 +546,61 @@ func TestAddPreset(t *testing.T) {
 		t.Errorf("unknown preset err = %v", err)
 	}
 }
+
+// TestSetModelDisabledValidation pins the fail-closed gate: the provider must
+// exist in the current config and the model must belong to its served set
+// (models: list ∪ explicit route targets — the probe matrix's own universe);
+// only then does the port fire with the exact triple.
+func TestSetModelDisabledValidation(t *testing.T) {
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {Models: []string{"glm-4.6", "glm-4.7"}},
+			"kimi":  {},
+		},
+		Routes: map[string][]configdomain.RouteTarget{
+			"routed": {{Provider: "kimi", Model: "k3"}},
+		},
+	}
+	var gotProvider, gotModel string
+	var gotDisabled bool
+	service := New(Ports{
+		Config: func() *configdomain.Config { return cfg },
+		SetModelDisabled: func(provider, model string, disabled bool) {
+			gotProvider, gotModel, gotDisabled = provider, model, disabled
+		},
+	})
+
+	for _, tc := range []struct {
+		provider, model string
+		disabled        bool
+		wantErr         string
+	}{
+		{"", "glm-4.6", true, "provider and model are required"},
+		{"zhipu", "", true, "provider and model are required"},
+		{"missing", "glm-4.6", true, `unknown provider "missing"`},
+		{"zhipu", "nope", true, `provider "zhipu" does not serve model "nope"`},
+		{"kimi", "nope", false, `provider "kimi" does not serve model "nope"`},
+	} {
+		err := service.SetModelDisabled(tc.provider, tc.model, tc.disabled)
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("SetModelDisabled(%q,%q,%v) err = %v, want %q", tc.provider, tc.model, tc.disabled, err, tc.wantErr)
+		}
+	}
+	if gotProvider != "" {
+		t.Fatalf("port fired for an invalid pair (%s/%s)", gotProvider, gotModel)
+	}
+
+	// models: member and explicit route target both pass; nil port is refused.
+	if err := service.SetModelDisabled("zhipu", "glm-4.7", true); err != nil {
+		t.Fatalf("models: member rejected: %v", err)
+	}
+	if err := service.SetModelDisabled("kimi", "k3", false); err != nil {
+		t.Fatalf("route target rejected: %v", err)
+	}
+	if gotProvider != "kimi" || gotModel != "k3" || gotDisabled {
+		t.Fatalf("port saw provider=%q model=%q disabled=%v, want kimi/k3/false", gotProvider, gotModel, gotDisabled)
+	}
+	if err := (New(Ports{Config: func() *configdomain.Config { return cfg }})).SetModelDisabled("zhipu", "glm-4.6", true); err == nil {
+		t.Fatal("nil SetModelDisabled port must be refused, not panic")
+	}
+}

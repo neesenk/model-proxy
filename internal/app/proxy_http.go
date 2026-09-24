@@ -14,6 +14,7 @@ import (
 	"model-proxy/internal/httpx"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
+	runtimestate "model-proxy/internal/runtime"
 	webtransport "model-proxy/internal/web"
 	"model-proxy/internal/webauth"
 )
@@ -141,10 +142,15 @@ func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request) {
 
 // exposedModelsJSON builds an OpenAI-style model list from all exposed model
 // names (explicit route keys plus derived-routable provider model names).
+// Operator-disabled models (Web Status→Models toggle) are hidden: an exposed
+// name whose every target is disabled is skipped — the list never advertises
+// a model the router would refuse.
 func (p *Proxy) exposedModelsJSON() []byte {
 	p.mu.RLock()
 	cfg := p.cfg
 	derived := p.derivedRoutes
+	expanded := p.expandedRoutes
+	parentOf := p.parentOf
 	p.mu.RUnlock()
 	type m struct {
 		ID      string `json:"id"`
@@ -157,8 +163,15 @@ func (p *Proxy) exposedModelsJSON() []byte {
 		if id == "" || seen[id] {
 			return
 		}
-		seen[id] = true
-		models = append(models, m{ID: id, Object: "model"})
+		// Manager read under the repository lock order (Proxy.mu was held and
+		// released above; TargetDisabled takes only the Manager lock).
+		for _, t := range expanded[id] {
+			if !p.runtimeState.TargetDisabled(runtimestate.Target{Provider: t.Provider, Parent: parentOf[t.Provider], Model: t.Model}) {
+				seen[id] = true
+				models = append(models, m{ID: id, Object: "model"})
+				return
+			}
+		}
 	}
 	for exposed := range cfg.Routes {
 		add(exposed)

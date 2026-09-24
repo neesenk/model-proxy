@@ -60,6 +60,53 @@ func (s *Service) FreezeHealth(provider string) ([]string, error) {
 	return frozen, nil
 }
 
+// SetModelDisabled toggles the operator disabled-model override (Web
+// Status→Models Disable/Enable). Fail-closed validation: the provider must
+// exist in the current config and the model must be one it serves (provider
+// models ∪ explicit route targets — the same set the probe matrix rows come
+// from), so a typo cannot install a silently-dead override. The override
+// itself is memory-only and intentionally not persisted.
+func (s *Service) SetModelDisabled(provider, model string, disabled bool) error {
+	if provider == "" || model == "" {
+		return errors.New("provider and model are required")
+	}
+	if s.ports.SetModelDisabled == nil {
+		return errors.New("model disable is not available")
+	}
+	if s.ports.Config == nil {
+		return errors.New("no config available")
+	}
+	cfg := s.ports.Config()
+	if _, ok := cfg.Providers[provider]; !ok {
+		return fmt.Errorf("unknown provider %q", provider)
+	}
+	if !providerServesModel(cfg, provider, model) {
+		return fmt.Errorf("provider %q does not serve model %q", provider, model)
+	}
+	s.ports.SetModelDisabled(provider, model, disabled)
+	return nil
+}
+
+// providerServesModel reports whether (provider, model) is routable in the
+// current config: the provider's models: list or one of its explicit route
+// targets (derived routes only aggregate provider models, so this covers the
+// derived table too).
+func providerServesModel(cfg *configdomain.Config, provider, model string) bool {
+	for _, m := range cfg.Providers[provider].Models {
+		if m == model {
+			return true
+		}
+	}
+	for _, targets := range cfg.Routes {
+		for _, t := range targets {
+			if t.Provider == provider && t.Model == model {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (s *Service) SetPin(route, provider string, ttl time.Duration) (appapi.Pin, bool) {
 	expiresAt, ok := s.ports.SetPin(route, provider, ttl)
 	if !ok {

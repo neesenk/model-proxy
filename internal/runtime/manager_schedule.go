@@ -38,6 +38,11 @@ type scheduleState struct {
 	pins            map[string]Pin
 	spread          map[string]uint64
 	targetAvailable func(Target, time.Time) bool
+	// disabled excludes operator-disabled (provider, model) targets from the
+	// candidate set BEFORE pin narrowing: the disable override is the stronger
+	// operator intent — a pinned route whose pinned target is disabled falls
+	// back to normal scheduling among the remaining candidates.
+	disabled func(Target) bool
 }
 
 func targetScheduleFacts(
@@ -113,6 +118,7 @@ func (m *Manager) DecideOrder(input ScheduleInput) ScheduleResult {
 				!m.modelLockedLocked(target.Provider, target.Model, now) &&
 				!quotaExhausted(m.quotas[target.Provider], now, input.QuotaMaxAge)
 		},
+		disabled: m.targetDisabledLocked,
 	}
 	commit := input.Commit && m.generationMatchesLocked(input.Generation)
 	return decideOrder(input, state, commit)
@@ -171,6 +177,19 @@ func decideOrder(input ScheduleInput, state scheduleState, commit bool) Schedule
 			tier:   schedulingTier(facts[i].Billing),
 			score:  facts[i].Surplus - facts[i].QualityPenalty,
 		})
+	}
+
+	// Operator disabled-model override: drop disabled targets from the
+	// candidate set entirely (before pin narrowing — see scheduleState.disabled).
+	// Facts keep their original input indices, so the projection stays aligned.
+	if state.disabled != nil {
+		kept := candidates[:0]
+		for _, candidate := range candidates {
+			if !state.disabled(candidate.target) {
+				kept = append(kept, candidate)
+			}
+		}
+		candidates = kept
 	}
 
 	pinned := false
@@ -381,6 +400,7 @@ func (m *Manager) Dashboard(now time.Time) DashboardSnapshot {
 	for parent, counter := range m.spread {
 		snapshot.spread[parent] = counter
 	}
+	snapshot.disabled = cloneDisabledModels(m.disabledModels)
 	return snapshot
 }
 
@@ -393,10 +413,10 @@ func (m *Manager) Dashboard(now time.Time) DashboardSnapshot {
 // fail open to the reactive 429 cooldown, as must a stale or errored
 // snapshot. PayG/unknown billing has no window to exhaust.
 func quotaExhausted(snapshot *provider.QuotaSnapshot, now time.Time, maxAge time.Duration) bool {
-	return !quotaExhaustedUntil(snapshot, now, maxAge).IsZero()
+	return !QuotaExhaustedUntil(snapshot, now, maxAge).IsZero()
 }
 
-// quotaExhaustedUntil reports when a freshly quota-exhausted target becomes
+// QuotaExhaustedUntil reports when a freshly quota-exhausted target becomes
 // schedulable again, or the zero time when the target is not (provably)
 // exhausted. The recovery bound is the EARLIER of the ultimate window's
 // measured reset and the snapshot's staleness horizon (AsOf+maxAge): past the
@@ -406,7 +426,7 @@ func quotaExhausted(snapshot *provider.QuotaSnapshot, now time.Time, maxAge time
 // ultimate window (never the snapshot's top-level RemainingPct): a plan
 // snapshot without a measured ultimate window fails open, as do stale or
 // errored snapshots and non-plan billing.
-func quotaExhaustedUntil(snapshot *provider.QuotaSnapshot, now time.Time, maxAge time.Duration) time.Time {
+func QuotaExhaustedUntil(snapshot *provider.QuotaSnapshot, now time.Time, maxAge time.Duration) time.Time {
 	if snapshot == nil || snapshot.Billing != provider.BillingPlan || snapshot.Err != "" {
 		return time.Time{}
 	}
@@ -461,6 +481,7 @@ func (snapshot DashboardSnapshot) PreviewOrder(input ScheduleInput) ScheduleResu
 			}
 			return !quotaExhausted(snapshot.Quotas[target.Provider], now, input.QuotaMaxAge)
 		},
+		disabled: snapshot.disabled.targetDisabled,
 	}
 	return decideOrder(input, state, false)
 }

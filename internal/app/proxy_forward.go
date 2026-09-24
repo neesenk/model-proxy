@@ -77,6 +77,10 @@ func (s proxyRouteState) PinForces(exposed string, ordered []configdomain.RouteT
 	return s.proxy.pinForces(exposed, ordered, parentOf)
 }
 
+func (s proxyRouteState) FilterDisabledTargets(targets []configdomain.RouteTarget, parentOf map[string]string) []configdomain.RouteTarget {
+	return s.proxy.filterDisabledTargets(targets, parentOf)
+}
+
 func (s proxyRouteState) CooldownState(targets []configdomain.RouteTarget, now time.Time, quotaMaxAge time.Duration) (allDown, allRateLimited bool, earliest time.Time) {
 	return s.proxy.cooldownState(targets, now, quotaMaxAge)
 }

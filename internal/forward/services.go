@@ -83,6 +83,12 @@ type RouteState interface {
 	// to the pinned provider (exclusive: no cross-route reroute, circuit
 	// bypass, cache bypass).
 	PinForces(exposed string, ordered []RouteTarget, parentOf map[string]string) bool
+	// FilterDisabledTargets drops operator-disabled (provider, model) targets
+	// (Web Status→Models toggle) from a route's target list. parentOf resolves
+	// pooled virtual ids to their config-level parent so a parent-keyed
+	// disable covers every account. The returned slice shares no state with
+	// the runtime; when nothing is disabled the input slice is returned as-is.
+	FilterDisabledTargets(targets []RouteTarget, parentOf map[string]string) []RouteTarget
 	// CooldownState inspects the targets' health/quota for the wait-retry
 	// decision: allDown = every target unavailable; allRateLimited = every
 	// down reason is rate-limit/quota class; earliest = soonest recovery.
@@ -126,6 +132,12 @@ func (p pipeline) clientFor(cfg *Config, parentOf map[string]string, provider st
 // attempt bypasses the circuit.
 func (p pipeline) pinForces(exposed string, ordered []RouteTarget, parentOf map[string]string) bool {
 	return p.state.PinForces(exposed, ordered, parentOf)
+}
+
+// filterDisabledTargets drops operator-disabled targets from a route's
+// candidate list (see RouteState.FilterDisabledTargets).
+func (p pipeline) filterDisabledTargets(targets []RouteTarget, parentOf map[string]string) []RouteTarget {
+	return p.state.FilterDisabledTargets(targets, parentOf)
 }
 
 func (p pipeline) cooldownState(targets []RouteTarget, now time.Time, quotaMaxAge time.Duration) (allDown, allRateLimited bool, earliest time.Time) {

@@ -140,7 +140,19 @@ func (p *Proxy) Reload(configPath string) error {
 // pool fan-out from the unified routing resolver. Caller holds p.mu (write) —
 // in NewProxy / reload, after buildProviders has populated poolIndex.
 func (p *Proxy) buildExpandedRoutes() map[string][]configdomain.RouteTarget {
-	return routing.BuildExpandedRoutes(p.cfg, p.derivedRoutes, p.expandTarget)
+	expanded := routing.BuildExpandedRoutes(p.cfg, p.derivedRoutes, p.expandTarget)
+	// A route whose EVERY target has no runnable implementation (provider
+	// configured but without an account/credential — e.g. zcode before its
+	// first login) leaves the effective table entirely: no empty chain block
+	// on the schedule view, no phantom key in routeKeys, no dead name in
+	// /v1/models. The config-derived table (Config page, `routes` CLI) keeps
+	// showing it — only the servable projection drops it.
+	for exposed, targets := range expanded {
+		if len(targets) == 0 {
+			delete(expanded, exposed)
+		}
+	}
+	return expanded
 }
 
 // routeKeySet derives the schedule view's route-name key set from the expanded
@@ -154,7 +166,23 @@ func routeKeySet(expanded map[string][]configdomain.RouteTarget) map[string]bool
 }
 
 // expandTarget fans a single route target out across a pooled provider's
-// virtuals via the unified routing resolver front door.
+// virtuals via the unified routing resolver front door, then drops ids with
+// no built implementation: a provider configured but without an account or
+// credential cannot serve, and expandedRoutes is the EFFECTIVE table
+// (schedule chains, /v1/models, forward) — a target forward would skip at
+// plan time must not appear in it. Same principle as buildProviders' pool
+// rule ("poolIndex never lists an id that isn't runnable"), extended to
+// non-pooled names; adding the account and reloading rebuilds the table.
+// "fusion" is the orchestration pseudo-provider (forward intercepts it before
+// the impl lookup), so it passes without an impl.
 func (p *Proxy) expandTarget(t configdomain.RouteTarget) []configdomain.RouteTarget {
-	return newResolver(p, p.providers, p.poolIndex).Expand(t)
+	expanded := newResolver(p, p.providers, p.poolIndex).Expand(t)
+	kept := expanded[:0]
+	for _, rt := range expanded {
+		if rt.Provider != "fusion" && p.providers[rt.Provider] == nil {
+			continue
+		}
+		kept = append(kept, rt)
+	}
+	return kept
 }

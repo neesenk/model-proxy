@@ -60,6 +60,15 @@ Schedule 卡**（整卡重渲染会打断其他 route 进行中的测试态）�
 `/api/models` 重渲染本区——缓存文件已落盘，catalog 状态与 Model Matching 清单
 （匹配判定 + 编辑器的 catalog_ids 候选）必须立刻反映新缓存。
 
+**Models 区每 provider 卡的模型行 Disable/Enable**（`toggleModel`）：每行末列动作按钮
+调 `POST /api/models/disable {provider, model, disabled}`；被禁行整行变暗（
+`tr.model-off`）+ `disabled` 徽章（`.badge warn`），按钮翻为 Enable。Disable 前过
+`confirmDialog`（立即停路由，影响在途会话）；Enable 直接执行。成功后
+`renderStatusTab()` 重取 `/api/models` 重渲染（状态渲染服务器返回值，不做本地回声）；
+失败恢复按钮并 alert 后端 message。徽章 title 说明生命周期：reload 保留、重启清除、
+持久禁用走 config 编辑。纯函数 `modelCapMatrix(providers, disabled)` 同时接收响应顶层
+`disabled` map，行视图带 `disabled` 布尔。
+
 **Model Matching 折叠列表**（同一卡内，`details.cat-match`，默认折叠）：展示
 `/api/models` 的 `match` 清单——每个已配置模型的目录匹配状态（matched 用 `.badge ok`、
 unmatched 用 `.badge warn`，`catalog_id` 是生效查找 id，alias 命中带 aliased 标注）。

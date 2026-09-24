@@ -226,6 +226,8 @@ func (testCommandAPI) RefreshModels(context.Context, string) (appapi.ModelsRefre
 	return appapi.ModelsRefreshResult{}, nil
 }
 
+func (testCommandAPI) SetModelDisabled(string, string, bool) error { return nil }
+
 func (testCommandAPI) ProbeMCP(context.Context, string) (appapi.MCPProbeResult, error) {
 	return appapi.MCPProbeResult{}, nil
 }

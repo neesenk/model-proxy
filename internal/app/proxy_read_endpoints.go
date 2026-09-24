@@ -299,18 +299,25 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 			targets = routing.FilterTargetsByProvider(expanded[exposed], parentOf, pref)
 		}
 	}
+	// Same operator disabled-model filter as forward's route lookup: disabled
+	// targets are not candidates, and a fully disabled route previews as
+	// route_found:false with the disabled reason.
+	targets = p.filterDisabledTargets(targets, parentOf)
+	if len(targets) == 0 {
+		out["exposed"] = exposed
+		if prefixForced != "" {
+			out["provider_prefix"] = prefixForced
+		}
+		out["route_found"] = false
+		out["error"] = fmt.Sprintf("model %q is disabled", calledModel)
+		writeJSON(http.StatusOK, out)
+		return
+	}
 	out["exposed"] = exposed
 	if prefixForced != "" {
 		out["provider_prefix"] = prefixForced
 	}
-
-	if len(targets) == 0 {
-		out["route_found"] = false
-		writeJSON(http.StatusOK, out)
-		return
-	}
 	out["route_found"] = true
-
 	force := false
 	if pin, ok := dash.Pins[exposed]; ok {
 		for _, target := range targets {

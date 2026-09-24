@@ -13,6 +13,11 @@ type fakeResolverState struct {
 	spreadCalls      int
 	spreadGeneration uint64
 	healthy          map[string]bool
+	disabled         map[string]bool
+}
+
+func (s *fakeResolverState) ModelDisabled(provider, model string) bool {
+	return s.disabled[provider+"/"+model]
 }
 
 func (s *fakeResolverState) ResolverSpreadStart(_ string, n int, generation uint64) int {
@@ -64,5 +69,38 @@ func TestResolverUsesNarrowStateCapability(t *testing.T) {
 	}
 	if state.spreadCalls != 1 {
 		t.Fatalf("sticky Pick spread calls = %d, want unchanged 1", state.spreadCalls)
+	}
+}
+
+// TestResolverPickSkipsDisabledModel pins the operator disabled-model leg of
+// Pick: a config-keyed disabled (provider, model) is refused for both pooled
+// parents and plain providers — before any identity or health work — while a
+// different model on the same provider keeps picking normally.
+func TestResolverPickSkipsDisabledModel(t *testing.T) {
+	state := &fakeResolverState{
+		healthy: map[string]bool{"pool#a": true, "solo": true},
+		disabled: map[string]bool{
+			"pool/m": true,
+		},
+	}
+	r := NewResolver(
+		state,
+		map[string]provider.Provider{"pool#a": nil, "solo": nil},
+		map[string][]string{"pool": {"pool#a"}},
+		1,
+	)
+	if _, ok := r.Pick(configdomain.RouteTarget{Provider: "pool", Model: "m"}, "s"); ok {
+		t.Fatal("Pick returned ok for a disabled pooled (provider, model)")
+	}
+	if _, ok := r.Pick(configdomain.RouteTarget{Provider: "pool", Model: "other"}, "s"); !ok {
+		t.Fatal("Pick returned !ok for a non-disabled model on the same provider")
+	}
+	// Non-pooled provider, exact config key.
+	state.disabled["solo/m2"] = true
+	if _, ok := r.Pick(configdomain.RouteTarget{Provider: "solo", Model: "m2"}, ""); ok {
+		t.Fatal("Pick returned ok for a disabled non-pooled (provider, model)")
+	}
+	if _, ok := r.Pick(configdomain.RouteTarget{Provider: "solo", Model: "m3"}, ""); !ok {
+		t.Fatal("Pick returned !ok for a non-disabled model on the solo provider")
 	}
 }

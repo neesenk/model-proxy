@@ -480,7 +480,6 @@ func newQuotaProxy(t *testing.T, provs map[string]configdomain.Provider, routes 
 			client: &http.Client{Timeout: 0},
 		},
 	}
-	p.expandedRoutes = p.buildExpandedRoutes()
 	p.quota = runtimestate.NewQuotaTracker(
 		"",
 		func() *configdomain.Config { return cfg },
@@ -489,9 +488,14 @@ func newQuotaProxy(t *testing.T, provs map[string]configdomain.Provider, routes 
 	)
 	p.quota.Generation = p.configGeneration.Load
 	t.Cleanup(p.Close)
+	// Inject the impls BEFORE building the route table: expandTarget only
+	// lists runnable providers, so a table built against the empty impl map
+	// would drop every target (the construct-then-inject seam mirrors
+	// login → reload, where credentials exist before the table rebuild).
 	for name := range provs {
 		p.providers[name] = &testProv{key: name}
 	}
+	p.expandedRoutes = p.buildExpandedRoutes()
 	return p
 }
 

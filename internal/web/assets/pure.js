@@ -143,25 +143,38 @@ export function quotaErrKind(snap) {
 
 // scheduleTierLabel renders one schedule-chain node's tier for display. The
 // tier is the MEASURED scheduling class from the live daemon (plan < unmeasured
-// < pay-as-you-go); the config `billing:` label deliberately never reaches it.
-// `unknown` is renamed to `unmeasured` because bare "unknown" reads like a
-// broken fetch rather than "this provider has no measurable quota" (console-only
-// providers land here — their numbers live in the vendor console).
-export function scheduleTierLabel(tier) {
+// < pay-as-you-go); the config `billing:` label deliberately never overrides
+// it. For an unmeasured node the billing CLASS always stays visible — it is
+// the payment-method fact (config `billing:`, defaulting to plan when
+// undeclared) — with "(unmeasured)" as a qualifier meaning "no measurable
+// quota window" (console-only providers land here — their numbers live in
+// the vendor console). A bare "unmeasured" that erases the billing class is
+// exactly what this function must not produce.
+export function scheduleTierLabel(tier, declared) {
   switch (tier) {
-    case 'plan': return 'plan';
-    case 'pay-as-you-go': return 'pay-as-you-go';
-    default: return 'unmeasured';
+    case 'plan':
+      return 'plan';
+    case 'pay-as-you-go':
+      return 'pay-as-you-go';
+    default: {
+      // Config schema: billing is "plan" (default) or "pay-as-you-go";
+      // validation rejects anything else, so anything not payg is plan.
+      const billingClass = declared === 'pay-as-you-go' ? 'pay-as-you-go' : 'plan';
+      return `${billingClass} (unmeasured)`;
+    }
   }
 }
 
 // scheduleTierTitle is the tooltip suffix explaining what the tier means for
-// ordering, so an `unmeasured` node is self-explanatory instead of looking like
+// ordering, so an unmeasured node is self-explanatory instead of looking like
 // an error.
-export function scheduleTierTitle(tier) {
-  const label = scheduleTierLabel(tier);
-  if (label === 'unmeasured') {
-    return 'tier unmeasured (no quota measurement — console-only or unmeasured; ordered by priority)';
+export function scheduleTierTitle(tier, declared) {
+  const label = scheduleTierLabel(tier, declared);
+  if (label.endsWith('(unmeasured)')) {
+    const source = declared === 'pay-as-you-go' || declared === 'plan'
+      ? `config declares billing: ${declared}`
+      : 'billing defaults to plan (undeclared)';
+    return `tier unmeasured (no quota measurement — console-only or unmeasured; ordered by priority); ${source}`;
   }
   return `tier ${label}`;
 }
@@ -374,14 +387,23 @@ export function verdictBadge(v) {
 // sorted by id. Missing fields normalize to empty values (verdict rendering
 // falls back to "unknown" via verdictBadge); a provider with no recorded
 // models keeps an empty list so the UI can show "probed, no models".
-export function modelCapMatrix(providers) {
+// `disabled` is the same response's top-level disabled map (provider →
+// model ids carrying the operator disable override); each model entry gets
+// a boolean `disabled` flag so rows can render the state + toggle without
+// re-deriving membership.
+export function modelCapMatrix(providers, disabled) {
+  const disabledSets = {};
+  for (const [name, models] of Object.entries(disabled || {})) {
+    disabledSets[name] = new Set(Array.isArray(models) ? models : []);
+  }
   const out = [];
   for (const name of Object.keys(providers || {}).sort()) {
     const caps = providers[name] || {};
+    const off = disabledSets[name] || new Set();
     const models = [];
     for (const id of Object.keys(caps.models || {}).sort()) {
       const mp = caps.models[id] || {};
-      models.push({ id, chat: mp.chat, anthropic: mp.anthropic, responses: mp.responses });
+      models.push({ id, chat: mp.chat, anthropic: mp.anthropic, responses: mp.responses, disabled: off.has(id) });
     }
     out.push({ name, fingerprint: caps.fingerprint || '', probedAt: caps.probed_at || '', models });
   }

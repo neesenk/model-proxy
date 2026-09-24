@@ -5931,7 +5931,7 @@ function renderModelsCard(target, providers) {
       if (clearBtn) { saveCatalogMatch(clearBtn.dataset.provider, clearBtn.dataset.model, '', clearBtn); }
     });
   }
-  const entries = modelCapMatrix(providers);
+  const entries = modelCapMatrix(providers, modelsCache && modelsCache.disabled);
   if (!entries.length) {
     target.insertAdjacentHTML('beforeend', buildCard('Models', '',
       '<div class="model-caps-empty">no probe data yet — provider models are probed for protocol support at daemon startup</div>'));
@@ -5940,21 +5940,32 @@ function renderModelsCard(target, providers) {
   for (const p of entries) {
     let rows = '';
     for (const m of p.models) {
-      rows += `<tr>
-        <td class="mono">${esc(m.id)}</td>
+      // Operator disable toggle (POST /api/models/disable): a disabled model
+      // is hidden from /v1/models and never routed — badge + Enable action on
+      // the row, plain Disable otherwise. Backend owns the state; the row just
+      // renders it (muted while disabled).
+      const state = m.disabled
+        ? '<span class="badge warn" title="Hidden from /v1/models and never routed — survives reload, cleared on restart">disabled</span>'
+        : '';
+      const action = m.disabled
+        ? `<button class="btn small" data-model-enable="${esc(p.name)}" data-model="${esc(m.id)}" title="Restore routing and /v1/models exposure">Enable</button>`
+        : `<button class="btn small" data-model-disable="${esc(p.name)}" data-model="${esc(m.id)}" title="Hide from /v1/models and stop routing this model">Disable</button>`;
+      rows += `<tr class="${m.disabled ? 'model-off' : ''}">
+        <td class="mono">${esc(m.id)}${state ? ` ${state}` : ''}</td>
         <td>${protoVerdictPill(m.chat)}</td>
         <td>${protoVerdictPill(m.anthropic)}</td>
         <td>${protoVerdictPill(m.responses)}</td>
+        <td class="model-caps-action">${action}</td>
       </tr>`;
     }
     if (!p.models.length) {
-      rows = '<tr><td colspan="4" class="subdue">probed, no models recorded</td></tr>';
+      rows = '<tr><td colspan="5" class="subdue">probed, no models recorded</td></tr>';
     }
     target.insertAdjacentHTML('beforeend', buildCard(
       p.name,
       `fp ${p.fingerprint || '—'} · probed ${fmtTimeSafe(p.probedAt) || '—'}`,
       `<table class="table">
-        <thead><tr><th>model</th><th>chat</th><th>anthropic</th><th>responses</th></tr></thead>
+        <thead><tr><th>model</th><th>chat</th><th>anthropic</th><th>responses</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`,
       'flush model-caps',
@@ -5963,6 +5974,37 @@ function renderModelsCard(target, providers) {
   target.querySelectorAll('[data-models-refresh]').forEach((btn) => {
     btn.addEventListener('click', () => refreshProviderModels(btn));
   });
+  target.querySelectorAll('[data-model-disable]').forEach((btn) => {
+    btn.addEventListener('click', () => toggleModel(btn.dataset.modelDisable, btn.dataset.model, true, btn));
+  });
+  target.querySelectorAll('[data-model-enable]').forEach((btn) => {
+    btn.addEventListener('click', () => toggleModel(btn.dataset.modelEnable, btn.dataset.model, false, btn));
+  });
+}
+
+// toggleModel flips one provider×model's operator disable override (POST
+// /api/models/disable — the backend validates the pair against the current
+// config). Disabling asks for confirmation (it stops routing immediately:
+// in-flight conversations on that model start failing over or erroring);
+// enabling is the recovery action and runs directly. Both re-fetch /api/models
+// and re-render the Status tab so the badge state comes from the server, never
+// local echo. The override is memory-only: it survives reloads and is cleared
+// on restart (same contract as pin).
+async function toggleModel(provider, model, disable, btn) {
+  if (disable) {
+    const ok = await confirmDialog('Disable model',
+      `Disable ${model} on ${provider}? The model disappears from /v1/models and requests are no longer routed to it (multi-provider models fail over to the remaining providers; a fully disabled model answers 404). Survives reload, cleared on restart.`,
+      'Disable');
+    if (!ok) return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = disable ? 'Disabling…' : 'Enabling…'; }
+  try {
+    await apiPost('/api/models/disable', { provider, model, disabled: disable });
+    await renderStatusTab();
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = disable ? 'Disable' : 'Enable'; }
+    window.alert((disable ? 'disable failed: ' : 'enable failed: ') + e.message);
+  }
 }
 
 // refreshProviderModels runs the daemon's models refresh (the web twin of
@@ -6120,9 +6162,9 @@ function renderScheduleCard(target, st) {
       const pinned = info.pin && (info.pin === p.provider || info.pin === p.pool_parent);
       if (pinned) classes.push('pinned');
       const peak = p.peak ? ' · peak' : '';
-      const tier = ` · ${esc(scheduleTierLabel(p.tier))}`;
+      const tier = ` · ${esc(scheduleTierLabel(p.tier, p.billing_declared))}`;
       const parent = p.pool_parent ? ` (${esc(p.pool_parent)})` : '';
-      const title = `priority ${p.priority} · ${esc(scheduleTierTitle(p.tier))} · surplus ${(p.surplus || 0).toFixed(2)}${peak}${pinned ? ' · pinned (no failover)' : ''}`;
+      const title = `priority ${p.priority} · ${esc(scheduleTierTitle(p.tier, p.billing_declared))} · surplus ${(p.surplus || 0).toFixed(2)}${peak}${pinned ? ' · pinned (no failover)' : ''}`;
       chain += `<span class="${classes.join(' ')}" title="${esc(title)}">${pinned ? iconPin() : ''}${esc(p.provider)}${esc(parent)}${tier}</span>`;
       if (i < ordered.length - 1) chain += `<span class="route-sep">→</span>`;
     });
@@ -6140,7 +6182,19 @@ function renderScheduleCard(target, st) {
         `<div class="route-pin-menu" data-popup data-pin-menu="${esc(route)}" hidden>${items}</div>` +
         `</span>`;
     }
-    if (!chain) chain = `<span class="route-meta">No providers available</span>`;
+    // Empty chain: show the backend's per-target down reasons instead of a
+    // bare "no providers" — the most common case is a measurable cause
+    // (quota exhausted / rate-limited / frozen) with a recovery hint, which
+    // the operator can act on (wait, unfreeze, or check the vendor console).
+    if (!chain) {
+      const blocked = info.blocked || [];
+      chain = blocked.length
+        ? blocked.map((b) => {
+            const hint = b.until ? untilHuman(b.until) : '';
+            return `<span class="route-node unavailable" title="${esc(b.provider)}: ${esc(b.reason)}${hint ? ` — recovers ${esc(b.until)}` : ''}">${esc(b.provider)} · ${esc(b.reason)}${esc(hint)}</span>`;
+          }).join('<span class="route-sep">·</span>')
+        : '<span class="route-meta">No providers available</span>';
+    }
     let meta = '';
     if (info.pin) {
       const exp = info.pin_expires ? ` · expires ${esc(info.pin_expires)}` : ' · no expiry';

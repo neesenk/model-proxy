@@ -92,6 +92,15 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
 真实名；响应方向对称地把客户端可见字节的 model 归一回暴露名（契约见
 `protocol-conversion.md` 接线要求的「响应 model 归一化」）。
 
+**配置真相 vs 生效表**：daemon 在推导之上还有一张生效表（`expandedRoutes`，
+reload 时重建）：池化 target 展开为虚拟账号，并且**没有 runnable impl 的
+provider 整体剔除**（凭据池为 0 账号墓碑、构建失败、static 无 plural 池——
+如 zcode 登出后；`Proxy.expandTarget` 过滤，`fusion` 伪 provider 例外，forward
+在 impl 查找前拦截它）。全部目标被剔除的 route 从生效表整体消失：不进
+schedule 链、不进 `GET /v1/models`、forward 终局 not-found。补上账号（login →
+reload 重建）即回归。CLI `routes` 与 Web Config 页的 `GET /api/config.routes`
+仍是配置真相（`RouteTable(cfg)`，不含凭据状态），两者刻意分层。
+
 - 推导是纯 config 计算：不读凭据/login 状态（构造与 reload 各恰好一次
   `DeriveRoutesFrom(cfg)`，由 `internal/archtest` 的 owner 契约保护）；CLI
   （`routes`、`models`、`test`、doctor、takeover）与 daemon 用同一 `RouteTable`；

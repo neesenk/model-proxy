@@ -751,8 +751,8 @@ func TestModelsDocumentEmptyStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != `{"providers":{},"catalog":{"count":0},"match":[]}` {
-		t.Errorf("empty store JSON = %s, want {\"providers\":{},\"catalog\":{\"count\":0},\"match\":[]}", data)
+	if string(data) != `{"providers":{},"catalog":{"count":0},"match":[],"disabled":{}}` {
+		t.Errorf("empty store JSON = %s, want {\"providers\":{},\"catalog\":{\"count\":0},\"match\":[],\"disabled\":{}}", data)
 	}
 
 	// A missing ModelCapsSnapshot port degrades to the same empty document.

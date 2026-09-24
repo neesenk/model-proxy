@@ -59,15 +59,15 @@ func TestAPIModelsEndToEnd(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	w, p := newTestWeb(t)
 
-	// Empty store → {"providers":{},"catalog":{"count":0},"match":[]}
+	// Empty store → {"providers":{},"catalog":{"count":0},"match":[],"disabled":{}}
 	// (non-null collections).
 	rec := httptest.NewRecorder()
 	serveWeb(w, rec, httptest.NewRequest("GET", "/api/models", nil))
 	if rec.Code != 200 {
 		t.Fatalf("empty store: status=%d want 200", rec.Code)
 	}
-	if body := strings.TrimSpace(rec.Body.String()); body != `{"providers":{},"catalog":{"count":0},"match":[]}` {
-		t.Fatalf("empty store body = %s, want {\"providers\":{},\"catalog\":{\"count\":0},\"match\":[]}", body)
+	if body := strings.TrimSpace(rec.Body.String()); body != `{"providers":{},"catalog":{"count":0},"match":[],"disabled":{}}` {
+		t.Fatalf("empty store body = %s, want {\"providers\":{},\"catalog\":{\"count\":0},\"match\":[],\"disabled\":{}}", body)
 	}
 
 	probed := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)

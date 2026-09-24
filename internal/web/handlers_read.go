@@ -258,9 +258,15 @@ func (s *Server) handleAccountsList(w http.ResponseWriter, _ *http.Request) {
 
 // handleModels serves GET /api/models: the startup protocol probe's
 // per-provider model capability matrix (see docs/web-api.md). The read port
-// already projects a detached snapshot with verdict strings.
+// already projects a detached snapshot with verdict strings; the disabled
+// map is normalized to a non-nil object so every Reads implementation
+// marshals the documented {"disabled":{…}} shape.
 func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.reads.ModelsDocument())
+	document := s.reads.ModelsDocument()
+	if document.Disabled == nil {
+		document.Disabled = map[string][]string{}
+	}
+	writeJSON(w, http.StatusOK, document)
 }
 
 // handleTokens serves GET /api/tokens. With no params it returns the

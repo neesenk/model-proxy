@@ -43,6 +43,40 @@ func (s *Server) handleModelsRefresh(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// handleModelsDisable serves POST /api/models/disable: the Status→Models
+// card's per-model Disable/Enable toggle. disabled=true hides the model from
+// GET /v1/models and drops it from scheduling (fail-closed validation — an
+// unknown provider/model is a 400, never a silently-dead override); the
+// override is memory-only (survives reloads, cleared on restart).
+func (s *Server) handleModelsDisable(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		Disabled *bool  `json:"disabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONErr(w, http.StatusBadRequest, "malformed JSON body: "+err.Error())
+		return
+	}
+	if req.Provider == "" || req.Model == "" {
+		writeJSONErr(w, http.StatusBadRequest, "provider and model are required")
+		return
+	}
+	if req.Disabled == nil {
+		writeJSONErr(w, http.StatusBadRequest, "disabled (boolean) is required")
+		return
+	}
+	if err := s.commands.SetModelDisabled(req.Provider, req.Model, *req.Disabled); err != nil {
+		writePortErr(w, http.StatusBadRequest, err)
+		return
+	}
+	status := "enabled"
+	if *req.Disabled {
+		status = "disabled"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"provider": req.Provider, "model": req.Model, "disabled": *req.Disabled, "status": status})
+}
+
 func (s *Server) handleQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Provider string `json:"provider,omitempty"`

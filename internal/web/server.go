@@ -265,6 +265,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleModels(w, r)
 	case p == "/api/models/refresh" && r.Method == http.MethodPost:
 		s.handleModelsRefresh(w, r)
+	case p == "/api/models/disable" && r.Method == http.MethodPost:
+		s.handleModelsDisable(w, r)
 	case p == "/api/models/catalog/refresh" && r.Method == http.MethodPost:
 		s.handleModelsCatalogRefresh(w, r)
 	case p == "/api/routes/test" && r.Method == http.MethodPost:

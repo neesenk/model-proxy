@@ -21,8 +21,13 @@ type Manager struct {
 	pins       map[string]Pin
 	modelLocks map[ModelKey]*modelLock
 	paramBlock map[ModelKey]map[string]bool
-	spread     map[string]uint64
-	quotas     map[string]*provider.QuotaSnapshot
+	// disabledModels is the operator disable override (Web Status→Models
+	// toggle): a disabled (provider, model) is excluded from scheduling and
+	// from the exposed model list. Like pins it deliberately survives hot
+	// reloads (ReplaceGeneration keeps it) and is memory-only (restart clears).
+	disabledModels map[ModelKey]bool
+	spread         map[string]uint64
+	quotas         map[string]*provider.QuotaSnapshot
 	// quality is copy-on-write: record paths (under m.mu) publish a NEW
 	// immutable map of providerQuality VALUES; readers load the pointer without
 	// the mutex so the scheduling critical section skips the decayed-status
@@ -49,6 +54,9 @@ func (m *Manager) ensureLocked() {
 	if m.paramBlock == nil {
 		m.paramBlock = make(map[ModelKey]map[string]bool)
 	}
+	if m.disabledModels == nil {
+		m.disabledModels = make(map[ModelKey]bool)
+	}
 	if m.spread == nil {
 		m.spread = make(map[string]uint64)
 	}
@@ -72,7 +80,8 @@ func (m *Manager) Generation() uint64 {
 }
 
 // ReplaceGeneration atomically clears state tied to the old config while
-// preserving operator pins, which intentionally survive hot reloads.
+// preserving operator pins and the operator disabled-model override, which
+// intentionally survive hot reloads.
 func (m *Manager) ReplaceGeneration(generation uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

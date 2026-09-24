@@ -704,7 +704,7 @@ func (s *Service) Pins() []appapi.Pin {
 // source the next reload/takeover will use; catalog_ids is the sorted picker
 // list for assigning aliases to unmatched models.
 func (s *Service) ModelsDocument() appapi.ModelsDocument {
-	document := appapi.ModelsDocument{Providers: map[string]appapi.ProviderModelCaps{}, Match: []appapi.ModelMatchEntry{}}
+	document := appapi.ModelsDocument{Providers: map[string]appapi.ProviderModelCaps{}, Match: []appapi.ModelMatchEntry{}, Disabled: map[string][]string{}}
 	if s.ports.ModelCapsSnapshot != nil {
 		for name, caps := range s.ports.ModelCapsSnapshot() {
 			models := make(map[string]appapi.ModelProtocols, len(caps.Models))
@@ -724,6 +724,11 @@ func (s *Service) ModelsDocument() appapi.ModelsDocument {
 	}
 	cat := s.modelsCatalogCache()
 	document.Catalog = modelsCatalogStatus(cat)
+	if s.ports.DisabledModels != nil {
+		if disabled := s.ports.DisabledModels(); disabled != nil {
+			document.Disabled = disabled
+		}
+	}
 	var cfg *configdomain.Config
 	if s.ports.Config != nil {
 		cfg = s.ports.Config()

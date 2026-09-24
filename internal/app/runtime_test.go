@@ -616,8 +616,12 @@ func assertCredentialBoundaryUnavailable(t *testing.T, p *Proxy, upstream *crede
 	defer proxyServer.Close()
 	status, body := post(t, proxyServer.URL+"/v1/chat/completions",
 		`{"model":"alias","messages":[]}`)
-	if status != http.StatusBadGateway || !strings.Contains(body, `all targets failed for model "alias"`) {
-		t.Fatalf("forward = status %d body %q, want 502 target failure", status, body)
+	// With no runnable provider the route leaves the effective table
+	// entirely (expandTarget drops impl-less targets), so the request answers
+	// the not-found terminal — same 502, same zero-upstream guarantee, one
+	// step earlier than the old "all targets failed" attempt chain.
+	if status != http.StatusBadGateway || !strings.Contains(body, `model "alias" not found in routes`) {
+		t.Fatalf("forward = status %d body %q, want 502 not-found (no runnable provider)", status, body)
 	}
 	if got := upstream.hits.Load(); got != 0 {
 		t.Fatalf("credential boundary leaked into %d upstream request(s)", got)

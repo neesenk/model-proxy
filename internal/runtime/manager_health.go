@@ -251,7 +251,7 @@ func (m *Manager) CooldownState(targets []Target, now time.Time, quotaMaxAge tim
 	}
 	for _, target := range targets {
 		state := m.health[target.Provider]
-		if quotaExhaustedUntil(m.quotas[target.Provider], now, quotaMaxAge).IsZero() &&
+		if QuotaExhaustedUntil(m.quotas[target.Provider], now, quotaMaxAge).IsZero() &&
 			(state == nil || state.available(now)) {
 			return false, false, time.Time{}
 		}
@@ -268,7 +268,7 @@ func (m *Manager) CooldownState(targets []Target, now time.Time, quotaMaxAge tim
 		if state != nil && now.Before(state.rateLimitedUntil) {
 			rateLimitUntil = state.rateLimitedUntil
 		}
-		if quotaUntil := quotaExhaustedUntil(m.quotas[target.Provider], now, quotaMaxAge); quotaUntil.After(rateLimitUntil) {
+		if quotaUntil := QuotaExhaustedUntil(m.quotas[target.Provider], now, quotaMaxAge); quotaUntil.After(rateLimitUntil) {
 			rateLimitUntil = quotaUntil
 		}
 		rateLimited := !rateLimitUntil.IsZero()
@@ -310,7 +310,7 @@ func (m *Manager) HasRecoveredUntried(targets []Target, tried map[string]bool, n
 	defer m.mu.Unlock()
 	for _, target := range targets {
 		state := m.health[target.Provider]
-		if !quotaExhaustedUntil(m.quotas[target.Provider], now, quotaMaxAge).IsZero() {
+		if !QuotaExhaustedUntil(m.quotas[target.Provider], now, quotaMaxAge).IsZero() {
 			continue
 		}
 		if (state == nil || state.available(now)) && !tried[target.Provider] {

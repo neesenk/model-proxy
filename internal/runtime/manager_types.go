@@ -140,6 +140,9 @@ type DashboardSnapshot struct {
 
 	capturedAt time.Time
 	spread     map[string]uint64
+	// disabled carries the operator disabled-model override into the
+	// read-only PreviewOrder path (same detachment discipline as spread).
+	disabled disabledModelSet
 }
 
 // Target contains immutable config-derived scheduling inputs. Quota-derived

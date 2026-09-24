@@ -258,8 +258,9 @@ func TestReadModelsEndpoint(t *testing.T) {
 		t.Errorf("models[m1] = %+v, want yes/no/unknown", m)
 	}
 
-	// Empty store → {"providers":{},"catalog":{"count":0},"match":[]} (non-null
-	// collections; the admin projection always initializes them).
+	// Empty store → {"providers":{},"catalog":{"count":0},"match":[],"disabled":{}}
+	// (non-null collections; the admin projection always initializes them, the
+	// transport normalizes a nil Disabled stub the same way).
 	reads.models = appapi.ModelsDocument{
 		Providers: map[string]appapi.ProviderModelCaps{},
 		Match:     []appapi.ModelMatchEntry{},
@@ -268,8 +269,8 @@ func TestReadModelsEndpoint(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("empty store: GET /api/models = %d, want 200", rec.Code)
 	}
-	if body := strings.TrimSpace(rec.Body.String()); body != `{"providers":{},"catalog":{"count":0},"match":[]}` {
-		t.Errorf("empty store body = %s, want {\"providers\":{},\"catalog\":{\"count\":0},\"match\":[]}", body)
+	if body := strings.TrimSpace(rec.Body.String()); body != `{"providers":{},"catalog":{"count":0},"match":[],"disabled":{}}` {
+		t.Errorf("empty store body = %s, want {\"providers\":{},\"catalog\":{\"count\":0},\"match\":[],\"disabled\":{}}", body)
 	}
 
 	// GET-only route: POST falls through to the JSON 404 like every read endpoint.

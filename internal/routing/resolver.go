@@ -38,6 +38,10 @@ type Resolver struct {
 type ResolverState interface {
 	ResolverSpreadStart(parent string, n int, generation uint64) int
 	TargetHealthy(virtual, model string, now time.Time) bool
+	// ModelDisabled reports the operator disabled-model override for a
+	// CONFIG-level (provider, model) — the same pair the Web Status→Models
+	// toggle sets. A disabled target must not be picked even when healthy.
+	ModelDisabled(provider, model string) bool
 }
 
 // NewResolver builds a Resolver over one request-generation snapshot.
@@ -106,6 +110,12 @@ func (r *Resolver) Expand(t configdomain.RouteTarget) []configdomain.RouteTarget
 // Health is a pre-filter read through the runtime Manager; the caller still
 // does its own authoritative gating.
 func (r *Resolver) Pick(t configdomain.RouteTarget, stickyKey string) (configdomain.RouteTarget, bool) {
+	// Operator disabled-model override: excluded before any identity or
+	// health work (the pair is config-keyed, so pooled parents match every
+	// virtual account without enumeration).
+	if r.state != nil && r.state.ModelDisabled(t.Provider, t.Model) {
+		return configdomain.RouteTarget{}, false
+	}
 	vids := r.virtualsOf(t.Provider)
 	if len(vids) == 0 {
 		return configdomain.RouteTarget{}, false

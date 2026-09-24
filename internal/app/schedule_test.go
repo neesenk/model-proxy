@@ -339,3 +339,108 @@ func TestCooldownWait_RecoveredTargetGetsAChance(t *testing.T) {
 		t.Errorf("fallback hits = %d, want ≥ 2 (429, then the recovered serve)", got)
 	}
 }
+
+// TestScheduleStatus_BillingDeclaredOnUnmeasured pins the display split: the
+// scheduling tier stays MEASURED-only (an unmeasured provider is "unknown"
+// regardless of its config `billing:` label), but the declared label rides
+// along as billing_declared so the UI can annotate "plan (unmeasured)" /
+// "pay-as-you-go (unmeasured)" instead of collapsing every unmeasured
+// provider into one indistinguishable label. Omitted when the config
+// declares none.
+func TestScheduleStatus_BillingDeclaredOnUnmeasured(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]configdomain.Provider{
+			"console-plan": {Provider: testProviderID, Billing: "plan"},
+			"console-payg": {Provider: testProviderID, Billing: "pay-as-you-go"},
+			"undeclared":   {Provider: testProviderID},
+		},
+		map[string][]configdomain.RouteTarget{
+			"m": {
+				{Provider: "console-plan", Priority: 1},
+				{Provider: "console-payg", Priority: 2},
+				{Provider: "undeclared", Priority: 3},
+			},
+		})
+	// No quota snapshots: every tier is unmeasured.
+	var st struct {
+		Models map[string]struct {
+			Ordered []struct {
+				Provider        string  `json:"provider"`
+				Tier            string  `json:"tier"`
+				BillingDeclared string  `json:"billing_declared"`
+				Surplus         float64 `json:"surplus"`
+			} `json:"ordered"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(p.scheduleStatus(), &st); err != nil {
+		t.Fatal(err)
+	}
+	ordered := st.Models["m"].Ordered
+	if len(ordered) != 3 {
+		t.Fatalf("ordered = %+v, want all three targets", ordered)
+	}
+	want := map[string]string{
+		"console-plan": "plan",
+		"console-payg": "pay-as-you-go",
+		"undeclared":   "",
+	}
+	for _, o := range ordered {
+		if o.Tier != "unknown" {
+			t.Errorf("%s tier = %q, want unknown (measured-only tier must ignore the config label)", o.Provider, o.Tier)
+		}
+		if o.BillingDeclared != want[o.Provider] {
+			t.Errorf("%s billing_declared = %q, want %q", o.Provider, o.BillingDeclared, want[o.Provider])
+		}
+	}
+}
+
+// TestScheduleStatus_BlockedReasonsOnEmptyChain pins the empty-chain
+// explanation: when every target of a listed route is unschedulable, the
+// projection carries one blocked entry per target with the most-explanatory
+// reason and a recovery hint — the real-world case is a plan provider whose
+// ultimate quota window measured 0% (e.g. kimi-code's weekly limit), which
+// the availability filter skips to avoid a deterministic 429.
+func TestScheduleStatus_BlockedReasonsOnEmptyChain(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]configdomain.Provider{"a": {Provider: testProviderID}},
+		map[string][]configdomain.RouteTarget{"m": {{Provider: "a", Priority: 1}}})
+	// Fresh plan snapshot with the ultimate window fully spent.
+	staticSurplus(p, "a", 0, 0)
+
+	var st struct {
+		Models map[string]struct {
+			First   string `json:"first"`
+			Ordered []struct {
+				Provider string `json:"provider"`
+			} `json:"ordered"`
+			Blocked []struct {
+				Provider string `json:"provider"`
+				Reason   string `json:"reason"`
+				Until    string `json:"until"`
+			} `json:"blocked"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(p.scheduleStatus(), &st); err != nil {
+		t.Fatal(err)
+	}
+	ri, ok := st.Models["m"]
+	if !ok {
+		t.Fatal("route m missing: an all-blocked route stays listed (not disabled, not impl-less)")
+	}
+	if len(ri.Ordered) != 0 || ri.First != "" {
+		t.Fatalf("ordered = %+v first = %q, want empty chain", ri.Ordered, ri.First)
+	}
+	if len(ri.Blocked) != 1 {
+		t.Fatalf("blocked = %+v, want one entry for target a", ri.Blocked)
+	}
+	b := ri.Blocked[0]
+	if b.Provider != "a" || b.Reason != "quota-exhausted" {
+		t.Fatalf("blocked entry = %+v, want a/quota-exhausted", b)
+	}
+	if b.Until == "" {
+		t.Fatal("quota-exhausted carries no recovery hint (until)")
+	}
+	if _, err := time.Parse(time.RFC3339, b.Until); err != nil {
+		t.Fatalf("until %q is not RFC3339: %v", b.Until, err)
+	}
+}

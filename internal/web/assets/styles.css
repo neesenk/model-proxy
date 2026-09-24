@@ -1474,6 +1474,11 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .model-caps .table th:first-child, .model-caps .table td:first-child { padding-left: 16px; }
 .model-caps .table th:last-child, .model-caps .table td:last-child { padding-right: 16px; }
 .model-caps-empty { color: var(--muted); }
+/* Operator-disabled model row: the whole row dims (the verdicts describe the
+   upstream, still true, but the model is out of rotation) while the badge +
+   Enable action stay readable. Action column mirrors .cat-match-action. */
+.model-caps .table tr.model-off td { color: var(--muted); }
+.model-caps-action { text-align: right; white-space: nowrap; }
 
 /* MCP tab tables: fixed layout pinned by the markup colgroup (the request
    table contract). Narrow badge/numeric/button columns get fixed small widths;

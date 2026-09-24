@@ -137,6 +137,14 @@ type Ports struct {
 	// derive it from the current generation (config names + pooled virtual
 	// account keys) under the same lock as the parentOf read.
 	FreezeHealth func(name string, known []string) (frozen []string)
+	// SetModelDisabled toggles the operator disabled-model override for one
+	// (provider, model): disabled targets are dropped from scheduling and
+	// from the exposed /v1/models list. Memory-only (survives reloads, cleared
+	// on restart — the pin contract).
+	SetModelDisabled func(provider, model string, disabled bool)
+	// DisabledModels projects the override as a detached, sorted provider →
+	// models map for GET /api/models.
+	DisabledModels func() map[string][]string
 	// Quota* drive the background quota tracker; QuotaEnabled reports whether
 	// the tracker exists at all (degenerate configs run without one).
 	QuotaEnabled func() bool

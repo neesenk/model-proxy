@@ -315,3 +315,38 @@ func (p *Proxy) ResolverSpreadStart(parent string, n int, generation uint64) int
 func (p *Proxy) TargetHealthy(virtual, model string, now time.Time) bool {
 	return p.runtimeState.TargetHealthy(virtual, model, now)
 }
+
+// ModelDisabled reports the operator disabled-model override for a
+// config-level (provider, model) — the routing ResolverState leg of the Web
+// Status→Models toggle (Fusion/Shadow target picking). Reads the runtime
+// Manager's live state; no generation gating (the override intentionally
+// survives reloads, like pins).
+func (p *Proxy) ModelDisabled(provider, model string) bool {
+	return p.runtimeState.ModelDisabled(provider, model)
+}
+
+// filterDisabledTargets drops operator-disabled targets from a route's
+// candidate list (forward's route-lookup leg of the Web Status→Models
+// toggle). parentOf resolves pooled virtual ids to their config parent so a
+// parent-keyed disable covers every account. Zero-allocation fast path when
+// nothing is disabled.
+func (p *Proxy) filterDisabledTargets(targets []configdomain.RouteTarget, parentOf map[string]string) []configdomain.RouteTarget {
+	disabled := false
+	for _, t := range targets {
+		if p.runtimeState.TargetDisabled(runtimestate.Target{Provider: t.Provider, Parent: parentOf[t.Provider], Model: t.Model}) {
+			disabled = true
+			break
+		}
+	}
+	if !disabled {
+		return targets
+	}
+	kept := make([]configdomain.RouteTarget, 0, len(targets))
+	for _, t := range targets {
+		if p.runtimeState.TargetDisabled(runtimestate.Target{Provider: t.Provider, Parent: parentOf[t.Provider], Model: t.Model}) {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	return kept
+}

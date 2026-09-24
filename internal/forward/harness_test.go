@@ -188,6 +188,10 @@ func (s *fakeRouteState) HasRecoveredUntried(targets []RouteTarget, tried map[st
 }
 func (s *fakeRouteState) QuotaFreshnessMaxAge(cfg *Config) time.Duration { return s.quotaMaxAge }
 
+func (s *fakeRouteState) FilterDisabledTargets(targets []RouteTarget, parentOf map[string]string) []RouteTarget {
+	return targets
+}
+
 var _ RouteState = (*fakeRouteState)(nil)
 
 // fakeResolverState implements routing.ResolverState: everything healthy,
@@ -196,6 +200,7 @@ type fakeResolverState struct{}
 
 func (fakeResolverState) ResolverSpreadStart(parent string, n int, generation uint64) int { return 0 }
 func (fakeResolverState) TargetHealthy(virtual, model string, now time.Time) bool         { return true }
+func (fakeResolverState) ModelDisabled(provider, model string) bool                       { return false }
 
 // fakeUpstream records requests and answers with a programmable responder.
 type fakeUpstream struct {

@@ -227,10 +227,11 @@ test('modelCapMatrix sorts providers and models, normalizing fields', () => {
       },
     },
     alpha: { fingerprint: 'fp-a', probed_at: '2026-09-01T09:00:00Z', models: {} },
-  });
+  }, { zeta: ['m-b'] });
   assert.deepEqual(matrix.map((p) => p.name), ['alpha', 'zeta']);
   assert.deepEqual(matrix[1].models.map((m) => m.id), ['m-a', 'm-b']);
-  assert.deepEqual(matrix[1].models[1], { id: 'm-b', chat: 'yes', anthropic: 'no', responses: 'unknown' });
+  assert.deepEqual(matrix[1].models[1], { id: 'm-b', chat: 'yes', anthropic: 'no', responses: 'unknown', disabled: true });
+  assert.deepEqual(matrix[1].models[0].disabled, false);
   assert.deepEqual(matrix[1].fingerprint, 'fp-z');
   assert.deepEqual(matrix[1].probedAt, '2026-09-01T10:00:00Z');
   // A probed provider with no recorded models keeps an empty list.
@@ -246,7 +247,11 @@ test('modelCapMatrix tolerates empty and malformed providers maps', () => {
   // A model entry without verdict fields surfaces undefined legs, which
   // verdictBadge renders as unknown.
   const [p] = modelCapMatrix({ up: { models: { m: null } } });
-  assert.deepEqual(p.models, [{ id: 'm', chat: undefined, anthropic: undefined, responses: undefined }]);
+  assert.deepEqual(p.models, [{ id: 'm', chat: undefined, anthropic: undefined, responses: undefined, disabled: false }]);
+  // Malformed disabled payloads (non-array / junk members) never throw and
+  // never mark unrelated providers' models.
+  const [q] = modelCapMatrix({ up: { models: { m: null } } }, { up: 'nope', other: ['m'] });
+  assert.equal(q.models[0].disabled, false);
 });
 
 test('catalogMatchSummary counts matched entries, tolerating junk', () => {
@@ -1697,12 +1702,22 @@ test('accountUsageState: console-only snapshot (notes, no windows) opens', () =>
 test('scheduleTierLabel: measured classes verbatim, unknown -> unmeasured', () => {
   assert.equal(scheduleTierLabel('plan'), 'plan');
   assert.equal(scheduleTierLabel('pay-as-you-go'), 'pay-as-you-go');
-  // Bare "unknown" reads like a broken fetch; the honest name is unmeasured.
-  assert.equal(scheduleTierLabel('unknown'), 'unmeasured');
-  assert.equal(scheduleTierLabel(''), 'unmeasured');
-  assert.equal(scheduleTierLabel(undefined), 'unmeasured');
+  // Measurement always wins over the config declaration.
+  assert.equal(scheduleTierLabel('plan', 'pay-as-you-go'), 'plan');
+  // Bare "unknown" reads like a broken fetch; the billing class stays primary.
+  assert.equal(scheduleTierLabel('unknown'), 'plan (unmeasured)'); // undeclared -> config default plan
+  assert.equal(scheduleTierLabel(''), 'plan (unmeasured)');
+  assert.equal(scheduleTierLabel(undefined), 'plan (unmeasured)');
   assert.match(scheduleTierTitle('unknown'), /no quota measurement/);
   assert.equal(scheduleTierTitle('plan'), 'tier plan');
+  // Unmeasured + declared billing: the config label surfaces as the class,
+  // "(unmeasured)" stays a qualifier — never a bare label that erases it.
+  assert.equal(scheduleTierLabel('unknown', 'plan'), 'plan (unmeasured)');
+  assert.equal(scheduleTierLabel('unknown', 'pay-as-you-go'), 'pay-as-you-go (unmeasured)');
+  assert.equal(scheduleTierLabel('', 'junk'), 'plan (unmeasured)'); // junk falls back to the plan default
+  assert.equal(scheduleTierLabel(undefined, 'plan'), 'plan (unmeasured)');
+  assert.match(scheduleTierTitle('unknown', 'plan'), /config declares billing: plan/);
+  assert.match(scheduleTierTitle('unknown'), /defaults to plan/);
 });
 
 test('accountRemainingLabel: no measurement never claims Available', () => {

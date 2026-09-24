@@ -132,6 +132,7 @@ func (fakeCommands) AddPreset(string) ([]string, string, error) { return nil, ""
 func (fakeCommands) RefreshModels(context.Context, string) (ModelsRefreshResult, error) {
 	return ModelsRefreshResult{}, nil
 }
+func (fakeCommands) SetModelDisabled(string, string, bool) error { return nil }
 
 func (fakeCommands) ProbeMCP(context.Context, string) (MCPProbeResult, error) {
 	return MCPProbeResult{}, nil
