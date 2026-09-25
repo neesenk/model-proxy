@@ -135,6 +135,15 @@ opencode 族：opencode=anthropic / opencode-openai=openai / opencode-responses=
 - restore 不做协议选择：备份标记属于当初实际接管的变体，配置可能已变，
   族名恢复会展开到族内全部变体、跳过无备份者。
 
+**chat 可达面**：takeover 只写 chat 协议（anthropic|openai|responses）可达的模型
+（`routing.ChatReachableRoutes`）：任一 route target 原生讲 chat 协议、或协议未知
+（可能透传/转换，保守 abstain）即保留；全部 target 只讲 chat 之外的协议（今天即
+
+decisions——typesafe/jev，无 chat 转换，`internal/protocol` 注册的是 fail-closed
+stub）的模型从模型面（pi/opencode/kimi/codex 的模型清单、`{{model.primary}}` 排序）、
+split 分区、协议覆盖统计与 Web 对话框 chip 中整体剔除（CLI/Web 运行日志列出被剔除
+模型及原因）。写入一个永远调不通的模型条目只会让 agent 在选择器里踩雷。
+
 ## 内嵌预设
 
 | 模板 | file | format | 要点 |

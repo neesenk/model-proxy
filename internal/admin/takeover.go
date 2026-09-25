@@ -52,7 +52,12 @@ func (s *Service) TakeoverSurface(mode string) (appapi.TakeoverSurface, error) {
 		Models:       []string{},
 		MCP:          []string{},
 	}
-	for exposed := range routing.RouteTable(cfg) {
+	// The offered model list matches what a run can write: chat-reachable
+	// routes only (routing.ChatReachableRoutes). A decisions-only model
+	// (typesafe's jev) has no chat-protocol conversion, so offering it as a
+	// chip would write a dead entry into the client config.
+	chatRoutes, _ := routing.ChatReachableRoutes(cfg, routing.RouteTable(cfg))
+	for exposed := range chatRoutes {
 		surface.Models = append(surface.Models, exposed)
 	}
 	sort.Strings(surface.Models)

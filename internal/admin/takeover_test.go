@@ -357,3 +357,31 @@ func TestTakeoverTemplateGetSaveDelete(t *testing.T) {
 		t.Errorf("post-delete source = %q, want preset restored", got.Source)
 	}
 }
+
+// TestTakeoverSurface_ExcludesDecisionsOnlyModels keeps the Web dialog's
+// model chips equal to what a run can write: chat-reachable routes only. A
+// decisions-only model (typesafe's jev — no chat conversion) offered as a
+// chip would write a dead entry into the client config.
+func TestTakeoverSurface_ExcludesDecisionsOnlyModels(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:15721",
+		Providers: map[string]configdomain.Provider{
+			"zhipu":    {OpenAIBaseURL: "https://z/v1", Models: []string{"glm-5.3"}},
+			"typesafe": {Provider: "typesafe", DecisionsBaseURL: "https://ts/v1", Models: []string{"jev-1.13.0"}},
+		},
+	}
+	service := New(Ports{
+		Config:     func() *configdomain.Config { return cfg },
+		ConfigFile: func() string { return filepath.Join(home, "config.yaml") },
+		HomeDir:    func() string { return home },
+	})
+	surface, err := service.TakeoverSurface("")
+	if err != nil {
+		t.Fatalf("TakeoverSurface: %v", err)
+	}
+	if len(surface.Models) != 1 || surface.Models[0] != "glm-5.3" {
+		t.Fatalf("surface.Models = %v, want [glm-5.3] — decisions-only jev must not be offered", surface.Models)
+	}
+}
