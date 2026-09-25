@@ -1,6 +1,12 @@
 package config
 
-// DefaultConfigYAML is the template written by `model-proxy config init`; matches the repo's config.yaml.
+// DefaultConfigYAML is the template written by `model-proxy config init`.
+// It is an INDEPENDENTLY curated artifact (new-user defaults + the embedded
+// preset catalog for `presets list` / the Web Add-provider wizard) — NOT a
+// mirror of any live config.yaml: the repo's config.yaml is the operator's
+// running config, rewritten at runtime by the daemon (models refresh) and
+// by hand, and is deliberately never compared against this template
+// (TestDefaultTemplateSelfContained guards the template's own validity).
 const DefaultConfigYAML = `# model-proxy config — standalone, portable to Linux.
 # Paths support ~ expansion. env:ENV_VAR reads an environment variable.
 # Order note (every provider's models: list): the wizard's suggested
@@ -279,7 +285,16 @@ providers:
     billing: pay-as-you-go
     usage_url: https://openrouter.ai/api/v1/key
     models:
-      - stealth/space-bunny-alpha
+      - anthropic/claude-opus-5.5
+      - anthropic/claude-sonnet-5
+      - openai/gpt-6-luna
+      - openai/gpt-5.5
+      - deepseek/deepseek-v4-pro
+      - z-ai/glm-5.3
+      - moonshotai/kimi-k3
+      - qwen/qwen3.8-flash
+      - google/gemini-3.8-flash
+      - x-ai/grok-4.7
 
   # OpenCode Go (https://opencode.ai/go — the OpenCode team's $10/month
   # SUBSCRIPTION for curated open coding models; NOT the pay-as-you-go Zen

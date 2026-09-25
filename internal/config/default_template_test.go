@@ -1,63 +1,42 @@
 package config
 
 import (
-	"os"
-	"reflect"
-	"sort"
 	"testing"
 )
 
-// TestDefaultTemplateMatchesRepoConfig guards the DefaultConfigYAML ↔
-// config.yaml sync for every provider present in BOTH: their models lists
-// (and provider_id) must be identical. The template intentionally diverges
-// structurally — it activates qwen-plan (a public addable preset, commented
-// out in the maintainer's config.yaml) and omits the private shopee block —
-// so this is a per-provider content check, not byte equality. Without it the
-// embedded preset catalog silently goes stale (wrong model counts in
-// `presets list` / the Web Add-provider wizard) whenever config.yaml's model
-// lists change without regenerating the template.
-func TestDefaultTemplateMatchesRepoConfig(t *testing.T) {
-	const repoConfig = "../../config.yaml"
-	cfgBytes, err := os.ReadFile(repoConfig)
-	if err != nil {
-		// The template test only makes sense in a full checkout (repo root
-		// present); a bare release tree (module download without the root
-		// config.yaml) has nothing to compare against.
-		t.Skipf("repo config.yaml not available: %v", err)
-	}
-	cfg, err := LoadConfigFromBytes("config.yaml", cfgBytes)
-	if err != nil {
-		t.Fatalf("repo config.yaml no longer parses: %v", err)
-	}
+// TestDefaultTemplateSelfContained guards the shipped template as an
+// INDEPENDENTLY curated artifact (new-user defaults + the embedded preset
+// catalog): it must load + validate, and every provider block must carry a
+// non-empty models list (an empty preset would render as a dead catalog
+// entry in `presets list` and the Web Add-provider wizard).
+//
+// It deliberately does NOT compare against the repo's config.yaml. That file
+// is the operator's LIVE config — the daemon itself rewrites
+// providers.<name>.models at runtime (Web Status→Models "Refresh" /
+// `models refresh`), and the operator hand-edits it — so any equality gate
+// between the two failed CI on ordinary usage (observed twice in one day:
+// a UI refresh and a manual edit each desynced the lists). Template content
+// freshness is a curation decision, not a mechanical sync; the catalog's
+// structural integrity is guarded here (valid + non-empty) and in
+// internal/presets (every listed preset has a registered implementation).
+//
+// Loading via LoadConfigFromBytes runs validate(): provider_id must be a
+// known id, base URLs must be absolute http(s), billing values legal — a
+// template regression of any of those turns this test red.
+func TestDefaultTemplateSelfContained(t *testing.T) {
 	tpl, err := LoadConfigFromBytes("config.yaml", []byte(DefaultConfigYAML))
 	if err != nil {
-		t.Fatalf("DefaultConfigYAML no longer parses: %v", err)
+		t.Fatalf("DefaultConfigYAML no longer parses/validates: %v", err)
 	}
-	if len(cfg.Providers) == 0 || len(tpl.Providers) == 0 {
-		t.Fatalf("empty providers: config=%d template=%d", len(cfg.Providers), len(tpl.Providers))
+	if len(tpl.Providers) == 0 {
+		t.Fatal("template has no providers")
 	}
-	checked := 0
-	for name, want := range cfg.Providers {
-		got, ok := tpl.Providers[name]
-		if !ok {
-			continue // provider absent from template (e.g. private shopee) — structural choice
+	for name, p := range tpl.Providers {
+		if len(p.Models) == 0 {
+			t.Errorf("template provider %q has an empty models list — every preset must expose models", name)
 		}
-		checked++
-		if got.Provider != want.Provider {
-			t.Errorf("template provider %q provider_id = %q, want %q", name, got.Provider, want.Provider)
+		if p.Provider == "" {
+			t.Errorf("template provider %q: provider_id is empty", name)
 		}
-		if len(got.Models) == 0 {
-			t.Errorf("template provider %q has an empty models list", name)
-		}
-		wantModels := append([]string(nil), want.Models...)
-		gotModels := append([]string(nil), got.Models...)
-		sort.Strings(wantModels)
-		sort.Strings(gotModels)
-		if !reflect.DeepEqual(gotModels, wantModels) {
-			t.Errorf("template provider %q models = %v, want config.yaml's %v", name, gotModels, wantModels)
-		}
-	}
-	if checked == 0 {
-		t.Fatal("no provider appears in both config.yaml and the template; sync check is vacuous")
 	}
 }
