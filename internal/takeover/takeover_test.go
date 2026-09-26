@@ -830,7 +830,7 @@ func TestTemplateCodex_ModelCatalog(t *testing.T) {
 	}
 	os.Remove(catalogFile)
 	bakDir := filepath.Join(dir, ".mp")
-	facts := takeover.ModelFactsFor(cfg, "codex", dir, dir, takeover.ModeUnified)
+	facts := takeover.ModelFactsFor(cfg, "codex", dir, dir, takeover.ModeUnified, nil)
 	if err := takeover.RunTakeover(cfg, "codex", bakDir, facts, dir, takeover.ModeUnified); err != nil {
 		t.Fatal(err)
 	}

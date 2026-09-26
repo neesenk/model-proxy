@@ -144,6 +144,23 @@ stub）的模型从模型面（pi/opencode/kimi/codex 的模型清单、`{{model
 split 分区、协议覆盖统计与 Web 对话框 chip 中整体剔除（CLI/Web 运行日志列出被剔除
 模型及原因）。写入一个永远调不通的模型条目只会让 agent 在选择器里踩雷。
 
+**operator 禁用面**：同一模型面还剔除了 operator 禁用模型开关
+（`disabled_models.json`，Web Status→Models 的每行开关）**全部目标都被禁用**的
+暴露名——与 `GET /v1/models` 的隐藏集合一致（部分禁用的多 provider 模型保留，
+照常 failover 到存活目标）。WebUI 路径读 daemon 内存中的实时集合，CLI 路径读
+持久化文件（组合根在每次开关后原子重写，两者一致）；被剔除模型同样在运行日志
+中列出及原因。写入一个请求只会 404 `model … is disabled` 的模型条目同样是死条目。
+
+**未登录面**：生效路由表对**没有任何账号凭据的 provider**（从未 `login` 的
+opencode-go、凭据池 0 账号墓碑、构建失败）整体剔除——这些模型不进
+`GET /v1/models`、请求终局 not-found。takeover 的模型面在线下镜像同一剔除
+（`providerbuild.AuthenticatedProviders`，同一 BuildProviders pass + 各 impl 的
+`AuthReady`，池化虚拟账号折回父名，只出布尔值、凭据值不出 providerbuild）；
+任一 target 的 provider 已登录即保留（多 provider 模型照常 failover），`fusion`
+伪 provider 例外。**abstain**：全部 provider 都未登录时（fresh `config init`）
+不过滤——login 后重新 takeover 补全。被剔除模型在运行日志列出及原因
+（`login` + reload 后重新 takeover 即回归）。
+
 ## 内嵌预设
 
 | 模板 | file | format | 要点 |

@@ -1,15 +1,16 @@
 // model_disable_store.go — composition-root wiring for the operator
 // disabled-model override's persistence: the file format and atomic save
-// live with the runtime state (internal/runtime disabled_file.go, the
-// model_caps.json discipline); this file owns the Proxy lifecycle — seeding
-// the Manager at construction (restart survival) and rewriting the file
-// after every toggle (refresh/restart survival). See disabled_file.go for
-// the entry semantics (self-validating pairs, no fingerprint gate).
+// live with the model state files (internal/runtime/wirecap
+// disabled_file.go, the model_caps.json discipline); this file owns the
+// Proxy lifecycle — seeding the Manager at construction (restart survival)
+// and rewriting the file after every toggle (refresh/restart survival). See
+// disabled_file.go for the entry semantics (self-validating pairs, no
+// fingerprint gate).
 package app
 
 import (
 	"model-proxy/internal/observe/logx"
-	runtimestate "model-proxy/internal/runtime"
+	"model-proxy/internal/runtime/wirecap"
 )
 
 // seedDisabledModels restores the persisted override into the runtime
@@ -18,7 +19,7 @@ import (
 // warning (a bad state file must not take the proxy down; the next
 // successful toggle rewrites it whole).
 func (p *Proxy) seedDisabledModels() {
-	entries, err := runtimestate.LoadDisabledModelsFile(p.disabledModelsPath)
+	entries, err := wirecap.LoadDisabledModelsFile(p.disabledModelsPath)
 	if err != nil {
 		logx.Warnf("[startup] disabled models store unreadable: %v; starting with none", err)
 		return
@@ -44,5 +45,5 @@ func (p *Proxy) seedDisabledModels() {
 func (p *Proxy) persistDisabledModels() error {
 	p.disabledModelsMu.Lock()
 	defer p.disabledModelsMu.Unlock()
-	return runtimestate.SaveDisabledModelsFile(p.disabledModelsPath, p.runtimeState.DisabledModels())
+	return wirecap.SaveDisabledModelsFile(p.disabledModelsPath, p.runtimeState.DisabledModels())
 }

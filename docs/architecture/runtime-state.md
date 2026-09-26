@@ -317,10 +317,15 @@ Disable/Enable）是 (provider, model) 粒度的 operator 覆盖，状态归
   `/debug/schedule` 的 route 列表**整条跳过全禁用 route**（空链块不输出）；
   精确匹配响应 cache 不受影响
   （禁用阻断的是新的上游工作，不禁已缓存答案的回放）；
+  takeover 同一剔除（`takeover.PruneDisabledRoutes`）：模型列表/Web 对话框 chip/
+  写入客户端配置的模型面跳过全禁用暴露名（WebUI 读 daemon 内存实时集合，
+  CLI 读持久化文件——见 `docs/client-takeover.md`「operator 禁用面」）；
 - 池化 provider 禁用父名 = 全部虚拟账号（Target.Parent 匹配）；
 - **生命周期（与 pin 的 memory-only 契约不同：持久化）**：reload 不清
   （`ReplaceGeneration` 保留内存集合），重启/`models refresh` 后由
-  `~/.model-proxy/disabled_models.json` 回种（组合根在构造时
+  `~/.model-proxy/disabled_models.json` 回种（文件格式与原子写在
+  `internal/runtime/wirecap/disabled_file.go`——与 model_caps.json 同目录层级，
+  供 takeover 等离线消费者读取；组合根在构造时
   `RestoreDisabledModels`，每次开关后原子重写文件——见
   `internal/app/model_disable_store.go`）；条目是自验证的
   (provider, model) 对，当前 config 不存在时在盘上蛰伏、pair 回归

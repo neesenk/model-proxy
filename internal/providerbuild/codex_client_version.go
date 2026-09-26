@@ -19,9 +19,13 @@ var semverRe = regexp.MustCompile(`\d+\.\d+\.\d+`)
 // ResolveCodexClientVersion returns the first non-empty (trimmed) version from
 // configVal, cliVer, cacheVer (in that order); if all are empty it falls back
 // to DefaultCodexClientVersion. cliVer/cacheVer are func params so tests can
-// inject fakes without spawning processes or touching the filesystem.
+// inject fakes without spawning processes or touching the filesystem; a nil
+// probe is "no answer" (skipped), so offline callers can pass zero options.
 func ResolveCodexClientVersion(configVal string, cliVer, cacheVer func() string) string {
 	for _, src := range []func() string{func() string { return configVal }, cliVer, cacheVer} {
+		if src == nil {
+			continue
+		}
 		if v := strings.TrimSpace(src()); v != "" {
 			return v
 		}

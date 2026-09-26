@@ -99,11 +99,17 @@ provider 整体剔除**（凭据池为 0 账号墓碑、构建失败、static �
 在 impl 查找前拦截它）。全部目标被剔除的 route 从生效表整体消失：不进
 schedule 链、不进 `GET /v1/models`、forward 终局 not-found。补上账号（login →
 reload 重建）即回归。CLI `routes` 与 Web Config 页的 `GET /api/config.routes`
-仍是配置真相（`RouteTable(cfg)`，不含凭据状态），两者刻意分层。
+仍是配置真相（`RouteTable(cfg)`，不含凭据状态），两者刻意分层。takeover 的
+模型面在线下镜像同一剔除（`providerbuild.AuthenticatedProviders`：同一
+BuildProviders pass + 各 impl 的 `AuthReady`，虚拟账号折回父名，只出布尔值；
+`takeover.PruneUnauthenticatedRoutes` 在 `fusion` 例外与空集 abstain 上与
+`expandTarget` 同口径——见 `docs/client-takeover.md`「未登录面」）。
 
 - 推导是纯 config 计算：不读凭据/login 状态（构造与 reload 各恰好一次
   `DeriveRoutesFrom(cfg)`，由 `internal/archtest` 的 owner 契约保护）；CLI
-  （`routes`、`models`、`test`、doctor、takeover）与 daemon 用同一 `RouteTable`；
+  （`routes`、`models`、`test`、doctor）与 daemon 用同一 `RouteTable`，takeover
+  在 `RouteTable` 之上叠自己的可服务面投影（chat 可达 / 禁用 / 未登录，见
+  `docs/client-takeover.md`）；
 - 显式 `routes:` 条目**整条覆盖**同名推导路由（用于 fusion 目标、`protocol:`
   协议转换声明、特殊排序、claude-* 别名）；target 写紧凑形式 `"provider/model"`
   字符串即可，仅当要设 `priority`/`protocol` 时才用 `{provider, model, ...}`

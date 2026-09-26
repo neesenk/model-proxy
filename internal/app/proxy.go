@@ -343,7 +343,7 @@ func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 	// survival path for the Web Status→Models toggles: reload keeps the set in
 	// memory, a fresh process re-seeds from here. Not fingerprint-gated —
 	// see runtime/disabled_file.go for the reasoning.
-	p.disabledModelsPath = runtimestate.DisabledModelsPath(qpath)
+	p.disabledModelsPath = runtimewire.DisabledModelsPath(qpath)
 	p.seedDisabledModels()
 	// Restore the per-route sticky selections persisted before the last restart,
 	// so the proxy resumes parking on the same providers (prompt-cache-friendly).

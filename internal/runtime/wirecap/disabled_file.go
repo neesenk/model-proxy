@@ -1,4 +1,4 @@
-package runtime
+package wirecap
 
 import (
 	"encoding/json"
@@ -10,13 +10,17 @@ import (
 
 // disabled_file.go — the persisted form of the operator disabled-model
 // override: disabled_models.json, kept in a SEPARATE file from
-// quota_state.json (like model_caps.json) so the override has its own
+// quota_state.json (like model_caps.json above) so the override has its own
 // lifecycle. The file is the restart/refresh survival mechanism for the Web
-// Status→Models toggle: the Manager keeps the live set in memory across hot
-// reloads, the composition root seeds the Manager from this file at
-// construction and rewrites it after every toggle — so a `models refresh`
+// Status→Models toggle: the runtime Manager keeps the live set in memory
+// across hot reloads, the composition root seeds the Manager from this file
+// at construction and rewrites it after every toggle — so a `models refresh`
 // (which hot-reloads in the daemon, or re-adds models on a later pass)
-// leaves the override effective for every pair that exists again.
+// leaves the override effective for every pair that exists again. It lives
+// in wirecap (not internal/runtime, whose Manager owns the live set) so
+// offline consumers below the runtime layer — takeover, which must offer the
+// same model list the proxy serves — can load it without importing the
+// scheduling layer.
 //
 // Entries are (provider, model) pairs the toggle API validated against the
 // config of their time; a pair absent from the current config stays on disk
@@ -30,9 +34,17 @@ import (
 const DisabledModelsFileVersion = 1
 
 // DisabledModelsPath derives the disabled_models.json path as a sibling of
-// the quota state file (mirrors wirecap.ModelCapsPath).
+// the quota state file (mirrors ModelCapsPath).
 func DisabledModelsPath(quotaStatePath string) string {
 	return filepath.Join(filepath.Dir(quotaStatePath), "disabled_models.json")
+}
+
+// DisabledModelsPathForHome derives the disabled_models.json path from a
+// home directory (the canonical state dir is <home>/.model-proxy, the same
+// root as quota_state.json — see NewProxy). Offline consumers that only hold
+// a home seam (CLI takeover) use this form.
+func DisabledModelsPathForHome(homeDir string) string {
+	return DisabledModelsPath(filepath.Join(homeDir, ".model-proxy", "quota_state.json"))
 }
 
 type disabledModelsFile struct {

@@ -145,6 +145,141 @@ func TestTakeoverSurfaceRunAndRestoreRoundTrip(t *testing.T) {
 	}
 }
 
+// TestTakeoverSurfaceAndPreview_ExcludeDisabledModels is the regression for
+// the bug where the WebUI takeover model list still offered operator-
+// disabled models: the surface's chips AND the run/preview path must prune
+// routes whose every target the disabled-model override disables — the same
+// routes /v1/models hides. A partially disabled route stays.
+func TestTakeoverSurfaceAndPreview_ExcludeDisabledModels(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfgDir := t.TempDir()
+	configFile := filepath.Join(cfgDir, "config.yaml")
+	if err := os.WriteFile(configFile, []byte("listen: 127.0.0.1:15721\nproviders: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:15721",
+		Providers: map[string]configdomain.Provider{
+			"zhipu":  {OpenAIBaseURL: "https://z/v1", Models: []string{"glm-5.3", "glm-4.7", "glm-4.6"}},
+			"resell": {OpenAIBaseURL: "https://r/v1", Models: []string{"glm-4.7"}},
+		},
+	}
+	service := New(Ports{
+		Config:     func() *configdomain.Config { return cfg },
+		ConfigFile: func() string { return configFile },
+		HomeDir:    func() string { return home },
+		// Live operator override, as the daemon wires it: glm-4.6 (only zhipu
+		// serves it) fully disabled; glm-4.7 disabled at zhipu but live at
+		// resell → partially disabled, must stay.
+		DisabledModels: func() map[string][]string {
+			return map[string][]string{"zhipu": {"glm-4.6", "glm-4.7"}}
+		},
+	})
+
+	surface, err := service.TakeoverSurface("")
+	if err != nil {
+		t.Fatalf("TakeoverSurface: %v", err)
+	}
+	has := map[string]bool{}
+	for _, m := range surface.Models {
+		has[m] = true
+	}
+	if has["glm-4.6"] {
+		t.Errorf("surface.Models offers fully disabled glm-4.6: %v", surface.Models)
+	}
+	if !has["glm-5.3"] || !has["glm-4.7"] {
+		t.Errorf("surface.Models missing live/partially-disabled models: %v", surface.Models)
+	}
+
+	// Preview must render the same pruning (the chip list and a run agree).
+	preview, err := service.PreviewTakeover(appapi.TakeoverRunRequest{Client: "pi"}, false)
+	if err != nil {
+		t.Fatalf("PreviewTakeover: %v", err)
+	}
+	var modelsWrite *appapi.TakeoverPreviewWrite
+	for i := range preview.Writes {
+		if strings.HasSuffix(preview.Writes[i].File, "models.json") {
+			modelsWrite = &preview.Writes[i]
+		}
+	}
+	if modelsWrite == nil {
+		t.Fatalf("preview must cover pi's models.json: %+v", preview.Writes)
+	}
+	if strings.Contains(modelsWrite.Content, "glm-4.6") {
+		t.Errorf("models.json preview must not contain the disabled model:\n%s", modelsWrite.Content)
+	}
+	if !strings.Contains(modelsWrite.Content, "glm-5.3") || !strings.Contains(modelsWrite.Content, "glm-4.7") {
+		t.Errorf("models.json preview missing live/partially-disabled models:\n%s", modelsWrite.Content)
+	}
+}
+
+// TestTakeoverSurface_ExcludesNotLoggedInProviders is the regression for the
+// operator report that the takeover chips offered models whose only provider
+// has no account (grok-4.7 on a never-logged-in opencode-go): the surface's
+// model list must mirror the effective routing table, which drops such
+// routes. Multi-provider models with any authenticated target stay.
+func TestTakeoverSurface_ExcludesNotLoggedInProviders(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfgDir := t.TempDir()
+	configFile := filepath.Join(cfgDir, "config.yaml")
+	if err := os.WriteFile(configFile, []byte("listen: 127.0.0.1:15721\nproviders: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:15721",
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {OpenAIBaseURL: "https://z/v1", Provider: "zhipu", Models: []string{"glm-5.3", "shared"}},
+			"ghost": {OpenAIBaseURL: "https://g/v1", Provider: "opencode-go", Models: []string{"grok-only", "shared"}},
+		},
+	}
+	service := New(Ports{
+		Config:     func() *configdomain.Config { return cfg },
+		ConfigFile: func() string { return configFile },
+		HomeDir:    func() string { return home },
+	})
+
+	// Nothing logged in yet: the abstain keeps the full list (fresh setup).
+	surface, err := service.TakeoverSurface("")
+	if err != nil {
+		t.Fatalf("TakeoverSurface: %v", err)
+	}
+	has := func(list []string, name string) bool {
+		for _, m := range list {
+			if m == name {
+				return true
+			}
+		}
+		return false
+	}
+	for _, m := range []string{"glm-5.3", "grok-only", "shared"} {
+		if !has(surface.Models, m) {
+			t.Errorf("pre-login surface must keep %q (fresh-setup abstain): %v", m, surface.Models)
+		}
+	}
+
+	// zhipu logs in: ghost-only models drop, everything with a live target
+	// stays — the chips now mirror what /v1/models serves.
+	if err := os.MkdirAll(filepath.Join(home, ".model-proxy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".model-proxy", "zhipu_apikey.json"),
+		[]byte(`{"api_key":"SOLO"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	surface, err = service.TakeoverSurface("")
+	if err != nil {
+		t.Fatalf("TakeoverSurface after login: %v", err)
+	}
+	if has(surface.Models, "grok-only") {
+		t.Errorf("surface.Models offers not-logged-in-only grok-only: %v", surface.Models)
+	}
+	if !has(surface.Models, "glm-5.3") || !has(surface.Models, "shared") {
+		t.Errorf("surface.Models missing models with an authenticated target: %v", surface.Models)
+	}
+}
+
 func TestTakeoverSurfaceModePreview(t *testing.T) {
 	rig := newTakeoverTestRig(t)
 

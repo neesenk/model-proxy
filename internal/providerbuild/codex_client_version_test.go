@@ -8,6 +8,17 @@ func TestResolveCodexClientVersion(t *testing.T) {
 	cli := func() string { return "0.144.1" }
 	cache := func() string { return "0.130.0" }
 
+	// nil probes are "no answer", not a panic — offline callers (takeover's
+	// AuthenticatedProvidersForHome) pass zero BuildOptions and must not need
+	// the process/filesystem probes just to fold a codex provider into the
+	// authenticated set.
+	if got := ResolveCodexClientVersion("", nil, nil); got != DefaultCodexClientVersion {
+		t.Errorf("nil probes should fall back to the constant: got %q want %q", got, DefaultCodexClientVersion)
+	}
+	if got := ResolveCodexClientVersion("0.200.0", nil, nil); got != "0.200.0" {
+		t.Errorf("config should win over nil probes: got %q", got)
+	}
+
 	// config value wins.
 	if got := ResolveCodexClientVersion("0.200.0", cli, cache); got != "0.200.0" {
 		t.Errorf("config should win: got %q want 0.200.0", got)

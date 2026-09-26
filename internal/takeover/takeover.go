@@ -220,6 +220,19 @@ type ModelFacts struct {
 	// typesafe's jev — no chat conversion exists). RunTakeoverReportOpts logs
 	// them so the models' absence from written configs is explained.
 	Unreachable []string
+	// Disabled lists exposed models dropped from Routes because the operator
+	// disabled-model override (disabled_models.json) disables EVERY target —
+	// the same routes /v1/models hides. RunTakeoverReportOpts logs them so
+	// the models' absence from written configs is explained.
+	Disabled []string
+	// NotLoggedIn lists exposed models dropped from Routes because every
+	// target's provider cannot authenticate (no account logged in — the same
+	// authNotReady/expandTarget projection that keeps them out of /v1/models
+	// and forward). Empty when NO provider is authenticated at all: the
+	// fresh-setup abstain keeps the full list (login + re-takeover fills it).
+	// RunTakeoverReportOpts logs them so the models' absence from written
+	// configs is explained.
+	NotLoggedIn []string
 	// SourceDefault is the application's "metadata came from conservative
 	// defaults" marker value in Sources; a negative value disables warnings.
 	SourceDefault int
@@ -355,6 +368,14 @@ func RunTakeoverReportOpts(cfg *configdomain.Config, which, bakDir string, facts
 	if len(facts.Unreachable) > 0 {
 		logx.Infof("  ~ excluded (no chat-protocol route — cannot be served to chat clients): %s",
 			strings.Join(facts.Unreachable, ", "))
+	}
+	if len(facts.Disabled) > 0 {
+		logx.Infof("  ~ excluded (operator disabled — hidden from /v1/models): %s",
+			strings.Join(facts.Disabled, ", "))
+	}
+	if len(facts.NotLoggedIn) > 0 {
+		logx.Infof("  ~ excluded (provider not logged in — hidden from /v1/models until `model-proxy login` + reload, then re-takeover): %s",
+			strings.Join(facts.NotLoggedIn, ", "))
 	}
 
 	// `all`/`""` expands to every client; a client whose config file isn't

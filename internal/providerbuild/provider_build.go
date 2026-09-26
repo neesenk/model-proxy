@@ -225,6 +225,48 @@ func CollectOAuthSecrets(cfg *configdomain.Config, opts BuildOptions) []Secret {
 	return out
 }
 
+// AuthenticatedProviders reports which CONFIG-LEVEL provider names can
+// authenticate right now — the offline twin of the runtime's
+// authNotReady/expandTarget projection that keeps not-logged-in providers'
+// models out of the effective routing table (/v1/models, forward). Same two
+// signals the reload path uses: the BuildProviders pass itself (an unbuilt
+// provider — unreadable pool, empty credential tombstone, failed BuildOne —
+// authenticates nothing) and each built impl's AuthReady (bound pool key,
+// loadable legacy singular file, or codex/aqp OAuth store; disk/keychain
+// reads only, never network). Pool virtuals fold back to their parent name
+// (config routes target the parent; the runtime fans out per account).
+// Credential-free providers (static: no AuthReady marker) count as
+// authenticated whenever built, mirroring expandTarget. Only booleans leave
+// this function — callers that must not hold credential VALUES (takeover's
+// model-list pruning) use it instead of BuildProviders' Secrets.
+func AuthenticatedProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOptions) map[string]bool {
+	built := BuildProviders(cfg, store, opts)
+	out := make(map[string]bool, len(built.Providers))
+	for name, impl := range built.Providers {
+		if parent, ok := built.ParentOf[name]; ok {
+			name = parent
+		}
+		if _, done := out[name]; done {
+			continue
+		}
+		if ar, ok := impl.(provider.AuthReadyProvider); ok {
+			if ar.AuthReady() {
+				out[name] = true // only TRUE members: the set is "can authenticate"
+			}
+			continue
+		}
+		out[name] = true // credential-free (static): routable whenever built
+	}
+	return out
+}
+
+// AuthenticatedProvidersForHome is AuthenticatedProviders rooted at a home
+// directory — the offline consumer's seam (takeover and friends hold a
+// homeDir, not a store).
+func AuthenticatedProvidersForHome(cfg *configdomain.Config, homeDir string) map[string]bool {
+	return AuthenticatedProviders(cfg, accounts.NewStore(homeDir), BuildOptions{HomeDir: homeDir})
+}
+
 // Secret is one collected credential value with its operator-facing source
 // label (pool/account/OAuth-file identity). Labels may be persisted on a
 // guard interception; values may not.

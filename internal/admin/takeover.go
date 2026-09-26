@@ -40,7 +40,7 @@ func (s *Service) TakeoverSurface(mode string) (appapi.TakeoverSurface, error) {
 	if cfg == nil {
 		return appapi.TakeoverSurface{}, appapi.NewHTTPError(http.StatusServiceUnavailable, "no config generation")
 	}
-	_, templatesDir, bakDir := s.takeoverDirs()
+	homeDir, templatesDir, bakDir := s.takeoverDirs()
 	resolvedMode, err := resolveTakeoverMode(mode)
 	if err != nil {
 		return appapi.TakeoverSurface{}, err
@@ -57,6 +57,15 @@ func (s *Service) TakeoverSurface(mode string) (appapi.TakeoverSurface, error) {
 	// (typesafe's jev) has no chat-protocol conversion, so offering it as a
 	// chip would write a dead entry into the client config.
 	chatRoutes, _ := routing.ChatReachableRoutes(cfg, routing.RouteTable(cfg))
+	// The operator disabled-model override prunes the same way a run does:
+	// chips must match what a takeover can actually write, and a route whose
+	// every target is disabled (hidden from /v1/models) would be a dead entry.
+	chatRoutes, _ = takeover.PruneDisabledRoutes(chatRoutes, s.disabledModelOverrides())
+	// Same for providers that cannot authenticate (not logged in): the
+	// effective routing table drops them, so the chips must too. Shares the
+	// exact set a run prunes by (providerbuild's offline AuthReady
+	// projection, rooted at the accounts home).
+	chatRoutes, _ = takeover.PruneUnauthenticatedRoutes(chatRoutes, takeover.AuthenticatedProviders(cfg, homeDir))
 	for exposed := range chatRoutes {
 		surface.Models = append(surface.Models, exposed)
 	}
@@ -162,7 +171,7 @@ func (s *Service) RunTakeover(req appapi.TakeoverRunRequest) (appapi.TakeoverRun
 	homeDir, templatesDir, bakDir := s.takeoverDirs()
 	report, err := takeover.RunTakeoverReportOpts(
 		cfg, req.Client, bakDir,
-		takeover.ModelFactsFor(cfg, req.Client, homeDir, templatesDir, resolved),
+		takeover.ModelFactsFor(cfg, req.Client, homeDir, templatesDir, resolved, s.disabledModelOverrides()),
 		templatesDir, takeover.TakeoverOptions{Mode: resolved, Scope: resolvedScope, MCP: req.MCP, Models: req.Models},
 	)
 	if err != nil {
@@ -195,7 +204,7 @@ func (s *Service) PreviewTakeover(req appapi.TakeoverRunRequest, managedOnly boo
 	}
 	cfg := s.ports.Config()
 	homeDir, templatesDir, _ := s.takeoverDirs()
-	facts := takeover.ModelFactsFor(cfg, req.Client, homeDir, templatesDir, resolved)
+	facts := takeover.ModelFactsFor(cfg, req.Client, homeDir, templatesDir, resolved, s.disabledModelOverrides())
 	resolvedScope, err := resolveTakeoverScope(req.Scope)
 	if err != nil {
 		return preview, err
@@ -227,6 +236,17 @@ func (s *Service) PreviewTakeover(req appapi.TakeoverRunRequest, managedOnly boo
 		})
 	}
 	return preview, nil
+}
+
+// disabledModelOverrides projects the live operator disabled-model override
+// from the runtime port (the daemon's authoritative in-memory set — the
+// same source /v1/models filters by). A missing port (tests, degraded
+// wiring) means no override: nothing is pruned.
+func (s *Service) disabledModelOverrides() map[string][]string {
+	if s.ports.DisabledModels == nil {
+		return nil
+	}
+	return s.ports.DisabledModels()
 }
 
 // resolveTakeoverScope validates the wire scope value; unknown values are a

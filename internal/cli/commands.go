@@ -147,7 +147,10 @@ func RunTakeover(args []string) {
 	}
 	bakDir := takeover.BackupDir(cliframework.ConfigPath(args))
 	mode := takeoverMode(args, cfg, which)
-	if err := takeover.RunTakeover(cfg, which, bakDir, takeover.ModelFactsFor(cfg, which, cliframework.HomeDir(), "", mode), "", mode); err != nil {
+	// The disabled-model override rides the same home seam as the catalog —
+	// a CLI takeover offers the model set the daemon actually serves.
+	facts := takeover.ModelFactsFor(cfg, which, cliframework.HomeDir(), "", mode, takeover.DisabledModelsForHome(cliframework.HomeDir()))
+	if err := takeover.RunTakeover(cfg, which, bakDir, facts, "", mode); err != nil {
 		log.Fatal(err)
 	}
 	verifyTakeoverDrift(cfg, which, bakDir, mode)

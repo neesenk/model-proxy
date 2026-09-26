@@ -154,7 +154,8 @@ func runConfigInitWizard(in io.Reader, out io.Writer) error {
 				return fmt.Errorf("reload written config: %w", err)
 			}
 			for _, c := range detected {
-				if err := takeover.RunTakeover(cfg, c.Name, takeover.BackupDir("config.yaml"), takeover.ModelFactsFor(cfg, c.Name, cliframework.HomeDir(), "", takeover.ModeUnified), "", takeover.ModeUnified); err != nil {
+				facts := takeover.ModelFactsFor(cfg, c.Name, cliframework.HomeDir(), "", takeover.ModeUnified, takeover.DisabledModelsForHome(cliframework.HomeDir()))
+				if err := takeover.RunTakeover(cfg, c.Name, takeover.BackupDir("config.yaml"), facts, "", takeover.ModeUnified); err != nil {
 					fmt.Fprintf(os.Stderr, "takeover %s failed: %v\n", c.Name, err)
 				}
 			}

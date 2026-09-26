@@ -169,7 +169,7 @@ func TestPreviewWrites_SplitMergesVariantsPerFile(t *testing.T) {
 			"pa": {Provider: "static", AnthropicBaseURL: "http://y", Models: []string{"m2"}},
 		},
 	}
-	facts := takeover.ModelFactsFor(cfg, "myagent", dir, templatesDir, takeover.ModeSplit)
+	facts := takeover.ModelFactsFor(cfg, "myagent", dir, templatesDir, takeover.ModeSplit, nil)
 	writes, err := takeover.PreviewWrites(cfg, "myagent", templatesDir, takeover.ModeSplit, facts, false, takeover.ScopeAll)
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +216,7 @@ func TestPreviewWrites_SplitFamilySharedAuxFile(t *testing.T) {
 		},
 		MCP: map[string]config.MCPServer{"exa": {URL: "https://mcp.exa.ai/mcp"}},
 	}
-	facts := takeover.ModelFactsFor(cfg, "pi", home, "", takeover.ModeSplit)
+	facts := takeover.ModelFactsFor(cfg, "pi", home, "", takeover.ModeSplit, nil)
 
 	writes, err := takeover.PreviewWrites(cfg, "pi", "", takeover.ModeSplit, facts, false, takeover.ScopeAll)
 	if err != nil {
@@ -318,7 +318,7 @@ mcp:
 		MCP:       map[string]config.MCPServer{"alpha": {URL: "https://a/mcp"}, "beta": {URL: "https://b/mcp"}},
 		MCPRoutes: map[string]config.MCPRoute{"gamma": {}},
 	}
-	facts := takeover.ModelFactsFor(cfg, "", dir, templatesDir, takeover.ModeUnified)
+	facts := takeover.ModelFactsFor(cfg, "", dir, templatesDir, takeover.ModeUnified, nil)
 
 	// MCP subset: only alpha+gamma are written; beta stays out.
 	writes, err := takeover.PreviewWritesOpts(cfg, "myagent-mcp", templatesDir,
@@ -394,7 +394,7 @@ func TestPreviewWritesOpts_ScopeMCPManagedOnly(t *testing.T) {
 		Listen: "127.0.0.1:15721",
 		MCP:    map[string]config.MCPServer{"exa": {URL: "https://mcp.exa.ai/mcp"}},
 	}
-	facts := takeover.ModelFactsFor(cfg, "", home, home, takeover.ModeUnified)
+	facts := takeover.ModelFactsFor(cfg, "", home, home, takeover.ModeUnified, nil)
 
 	writes, err := takeover.PreviewWritesOpts(cfg, "claude", home,
 		takeover.TakeoverOptions{Mode: takeover.ModeUnified, Scope: takeover.ScopeMCP}, facts, true)
