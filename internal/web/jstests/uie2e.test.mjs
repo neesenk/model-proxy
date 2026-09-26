@@ -278,6 +278,24 @@ test('combobox popup opens, picks option, applies filter (浮层 + 下拉)', asy
   // 选项含 facet 的 dummy provider；combobox 用 mousedown（不是 click）选中。
   await ctx.waitFor('dummy option in popup', () => ctx.ev(
     `!!document.querySelector('.combo-menu[data-popup]:not([hidden]) .combo-option[data-value="dummy"]')`));
+  // Scrolling INSIDE the open menu (the option list is itself the
+  // scrollable — position:fixed, overflow:auto) must NOT close it: the
+  // global capture-phase scroll-close used to yank the dropdown away
+  // mid-list-scroll (the reported bug). A page-level scroll still closes
+  // (the fixed menu's anchor scrolled away, native-select behavior).
+  {
+    const menuOpen = () => ctx.ev(`!!document.querySelector('.combo-menu[data-popup]:not([hidden])')`);
+    await ctx.ev(`(() => {
+      const m = document.querySelector('.combo-menu[data-popup]:not([hidden])');
+      m.dispatchEvent(new Event('scroll'));
+    })()`);
+    assert.ok(await menuOpen(), 'menu-internal scroll must keep the menu open');
+    await ctx.ev(`document.body.dispatchEvent(new Event('scroll'))`);
+    await ctx.waitFor('page scroll closes the menu', async () => !(await menuOpen()));
+  }
+  await ctx.ev(`document.getElementById('req-provider').click()`);
+  await ctx.waitFor('combo popup re-opened', () => ctx.ev(
+    `!!document.querySelector('.combo-menu[data-popup]:not([hidden]) .combo-option[data-value="dummy"]')`));
   await ctx.ev(`document.querySelector('.combo-menu[data-popup]:not([hidden]) .combo-option[data-value="dummy"]')
     .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`);
   // 选中后浮层关闭、值落入输入框、刷新后过滤生效（dummy 行仍在）。
@@ -289,6 +307,62 @@ test('combobox popup opens, picks option, applies filter (浮层 + 下拉)', asy
     return ctx.ev(`document.querySelectorAll('#req-table tbody tr:not(.req-spacer)').length >= 1`);
   });
   assert.deepEqual(await ctx.pageErrors(), [], 'combobox flow must not raise JS errors');
+});
+
+test('combobox 菜单滚到底不链动页面，菜单不消失（overscroll contain）(浮层族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // 14 个不同 session 的请求：Session 菜单超过 260px max-height，可滚；
+  // 压低视口让页面本身可滚（链动才有处可去）。
+  for (let i = 0; i < 14; i++) await driveRequest(1, 0, `combo-chain-sess-${i}`);
+  await gotoRequestsWithRows();
+  await ctx.cdp.setViewport(ctx.tab, 1000, 500);
+  try {
+    // Emulation.setDeviceMetricsOverride 的应用是异步的：resize（以及随
+    // 之的 scroll/reflow）事件会在设置后一小段时间才落地，而 resize/
+    // scroll 是 combobox 菜单的合法关闭源——必须等它稳定后再开菜单，
+    // 否则测的是视口切换风暴而不是滚轮链动。
+    await new Promise((r) => setTimeout(r, 600));
+    // 打开 Session 菜单（清空输入保证全量列表，focus 展开）。
+    const rect = await ctx.ev(`(() => {
+      const s = document.getElementById('req-session');
+      [...document.querySelectorAll('.combo-menu')].forEach((m) => { m.hidden = true; });
+      if (s.value !== '') { s.value = ''; s.dispatchEvent(new Event('input', { bubbles: true })); }
+      s.dispatchEvent(new Event('focus'));
+      const menu = [...document.querySelectorAll('.combo-menu')].find((m) => !m.hidden);
+      return menu ? menu.getBoundingClientRect().toJSON() : null;
+    })()`);
+    assert.ok(rect && rect.height > 0, 'session menu should open');
+    // 在菜单中心连滚 12 格：列表先滚、到底后续滚轮不得链到页面
+    //（overscroll-behavior: contain；无此规则时页面滚动会把 fixed 菜单
+    // 的锚点带走、scroll-close 直接关菜单——即上报缺陷）。
+    const cx = Math.round(rect.left + rect.width / 2);
+    const cy = Math.round(rect.top + Math.min(rect.height / 2, 100));
+    for (let i = 0; i < 12; i++) {
+      await ctx.cdp.send('Input.dispatchMouseEvent',
+        { type: 'mouseWheel', x: cx, y: cy, deltaX: 0, deltaY: 120 }, ctx.tab);
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    const state = await ctx.ev(`(() => {
+      const menu = document.querySelector('.combo-menu[data-popup]:not([hidden])');
+      return {
+        open: !!menu,
+        scrolled: menu ? menu.scrollTop > 0 : false,
+        scrollY: window.scrollY,
+      };
+    })()`);
+    assert.ok(state.open, '菜单在内部滚动后必须保持打开');
+    const css = await ctx.ev(`(() => {
+      const menu = [...document.querySelectorAll('.combo-menu')].find((m) => !m.hidden);
+      return menu ? getComputedStyle(menu).overscrollBehavior : '';
+    })()`);
+    assert.equal(css, 'contain', '打开的菜单必须计算 overscroll-behavior: contain');
+    assert.ok(state.scrolled, '滚轮应已实际滚动列表（否则未命中菜单，断言空跑）');
+    assert.equal(state.scrollY, 0,
+      `列表滚到底后滚轮不得链动页面（scrollY=${state.scrollY}——链动会关菜单）`);
+  } finally {
+    await ctx.cdp.clearViewport(ctx.tab);
+  }
+  assert.deepEqual(await ctx.pageErrors(), [], 'overscroll 契约不得有 JS 错误');
 });
 
 test('suggestion-dropdown inputs and filter selects expose the inline ✕ clear (清除按钮族)', async (t) => {
@@ -381,10 +455,10 @@ test('suggestion-dropdown inputs and filter selects expose the inline ✕ clear 
   await ctx.waitFor('select ✕ hidden after reset', () => ctx.ev(
     `!document.getElementById('req-agent').closest('.clearable').classList.contains('has-text')`));
 
-  // Live view session select (#live-session): same ✕ reset, committed through
-  // onLiveSessionChange (the session= key leaves the hash). One request carries
-  // a session header so the dropdown has a real option (the pool comes from
-  // /api/sessions, which only aggregates session-tagged records).
+  // Live view session combobox (#live-session): same ✕ reset, committed
+  // through onLiveSessionChange (the session= key leaves the hash). One
+  // request carries a session header so the pool has a real option (options
+  // come from /api/sessions, which only aggregates session-tagged records).
   {
     const resp = await fetch(`${ctx.baseUrl}/v1/chat/completions`, {
       method: 'POST',
@@ -395,13 +469,23 @@ test('suggestion-dropdown inputs and filter selects expose the inline ✕ clear 
   }
   await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
   await ctx.waitFor('live view mounted', () => ctx.ev(`!!document.getElementById('live-session')`));
-  await ctx.waitFor('live session option populated', () => ctx.ev(
-    `[...document.getElementById('live-session').options].some(o => o.value)`));
-  await ctx.ev(`(() => {
+  // The session control is a combobox now: focus opens the themed menu (the
+  // native select's .options is gone); pick through the typed path (value +
+  // input sync + Enter commit — the same path a typing user takes).
+  const liveSessPick = `(() => {
     const s = document.getElementById('live-session');
-    s.value = [...s.options].find((o) => o.value).value;
-    s.dispatchEvent(new Event('change', { bubbles: true }));
-  })()`);
+    [...document.querySelectorAll('.combo-menu')].forEach((m) => { m.hidden = true; });
+    s.dispatchEvent(new Event('focus'));
+    const menu = [...document.querySelectorAll('.combo-menu')].find((m) => !m.hidden);
+    if (!menu) return '';
+    const opt = [...menu.querySelectorAll('.combo-option')].find((o) => o.dataset.value);
+    if (!opt) return '';
+    s.value = opt.dataset.value;
+    s.dispatchEvent(new Event('input', { bubbles: true }));
+    s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    return s.value;
+  })()`;
+  await ctx.waitFor('live session option populated', () => ctx.ev(liveSessPick));
   await ctx.waitFor('live session ✕ visible', () => ctx.ev(`(() => {
     const s = document.getElementById('live-session');
     const host = s.closest('.clearable');
@@ -609,14 +693,16 @@ test('Requests 子视图路由：四个 canonical segment + legacy hash 重写 (
   // 旧形态原地重写：?stream=mcp 吸进 segment，session pin 保留。
   await ctx.ev(`location.hash = '#requests/live?stream=mcp&session=legacy-sess'`);
   await ctx.waitFor('legacy stream param absorbed', () => hashIs('#requests/mcp_live?session=legacy-sess'));
-  await ctx.waitFor('session pin restored in dropdown', () => ctx.ev(
+  await ctx.waitFor('session pin restored in combobox', () => ctx.ev(
     `document.getElementById('live-session').value === 'legacy-sess'`));
   // 清空会话选择（否则重挂 Live 卡会按设计 resume 上次选择，把
-  // ?session= 写回 hash，干扰后面两步的裸 segment 断言）。
+  // ?session= 写回 hash，干扰后面两步的裸 segment 断言）。combobox 提交
+  // 走 value + input + Enter（与真用户输入同路径）。
   await ctx.ev(`(() => {
     const s = document.getElementById('live-session');
     s.value = '';
-    s.dispatchEvent(new Event('change', { bubbles: true }));
+    s.dispatchEvent(new Event('input', { bubbles: true }));
+    s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
   })()`);
   await ctx.waitFor('live session cleared', () => ctx.ev(
     `document.getElementById('live-session').value === '' && !location.hash.includes('session=')`));
@@ -993,6 +1079,30 @@ test('status 页 schedule route test 与 models catalog refresh (mutation 族)',
       return d && d.innerHTML.includes('0/1 matched')
         && !!d.querySelector('[data-cat-match-edit][data-model="m1"]');
     })()`));
+  // Disabled-model rows: hidden by default with a Show All control per
+  // provider card. The override rides POST /api/models/disable (same call
+  // the row switch makes; driving it via fetch keeps this test about the
+  // view, not the confirm dialog), and the 5s Status tick re-renders the
+  // section from the fresh /api/models payload.
+  await ctx.ev(`fetch('/api/models/disable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: 'dummy', model: 'm1', disabled: true }) }).then((r) => r.json())`);
+  await ctx.waitFor('disabled row hidden from the default view', () => ctx.ev(
+    `(() => { const tb = document.querySelector('.model-caps table tbody'); return tb && !tb.textContent.includes('m1'); })()`));
+  await ctx.waitFor('show all control appears', () => ctx.ev(
+    `(() => { const b = document.querySelector('[data-models-visibility]'); return b && b.textContent === 'Show All'; })()`));
+  // All models of the provider are disabled → the subdue empty-state row
+  // explains the hidden count instead of a blank table.
+  await ctx.waitFor('all-disabled empty state explains the hidden row', () => ctx.ev(
+    `document.querySelector('.model-caps table tbody').textContent.includes('1 disabled model hidden')`));
+  await ctx.ev(`document.querySelector('[data-models-visibility]').click()`);
+  await ctx.waitFor('show all lists the disabled row dimmed', () => ctx.ev(
+    `(() => { const row = document.querySelector('tr.model-off'); const b = document.querySelector('[data-models-visibility]'); return row && row.textContent.includes('m1') && b && b.textContent === 'Hide Disabled'; })()`));
+  await ctx.ev(`document.querySelector('[data-models-visibility]').click()`);
+  await ctx.waitFor('hide disabled folds the row back', () => ctx.ev(
+    `(() => { const tb = document.querySelector('.model-caps table tbody'); return tb && !tb.textContent.includes('m1'); })()`));
+  // Re-enable to leave the sandbox as found (later tests serve m1).
+  await ctx.ev(`fetch('/api/models/disable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: 'dummy', model: 'm1', disabled: false }) }).then((r) => r.json())`);
+  await ctx.waitFor('re-enabled row back in the default view', () => ctx.ev(
+    `(() => { const tb = document.querySelector('.model-caps table tbody'); return tb && tb.textContent.includes('m1') && !document.querySelector('[data-models-visibility]'); })()`));
   assert.deepEqual(await ctx.pageErrors(), [], 'status diagnostics must not raise JS errors');
 });
 
@@ -1211,7 +1321,8 @@ test('mcp_live 会话面板渲染 MCP 域表头与 chips，不显 Model 语义 (
     await ctx.ev(`(() => {
       const s = document.getElementById('live-session');
       s.value = 'mcp-dom-sess';
-      s.dispatchEvent(new Event('change', { bubbles: true }));
+      s.dispatchEvent(new Event('input', { bubbles: true }));
+      s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
     })()`);
     await ctx.waitFor('session panel rendered', () => ctx.ev(`(() => {
       const p = document.getElementById('live-session-panel');
@@ -1285,12 +1396,16 @@ test('Log 页 session 下钻后浏览器后退回到未过滤列表（model_all 
     await ctx.ev(`document.querySelector('.req-nav-item[data-sub="log"][data-stream="mcp"]').click()`);
     await ctx.waitFor('mcp_all options ready', () => ctx.ev(`(() => {
       const s = document.getElementById('req-session');
-      return s && [...s.options].some((o) => o.value === 'nav-mcp-sess');
+      [...document.querySelectorAll('.combo-menu')].forEach((m) => { m.hidden = true; });
+      s.dispatchEvent(new Event('focus'));
+      const menu = [...document.querySelectorAll('.combo-menu')].find((m) => !m.hidden);
+      return !!menu && !!menu.querySelector('.combo-option[data-value="nav-mcp-sess"]');
     })()`));
     await ctx.ev(`(() => {
       const s = document.getElementById('req-session');
       s.value = 'nav-mcp-sess';
-      s.dispatchEvent(new Event('change', { bubbles: true }));
+      s.dispatchEvent(new Event('input', { bubbles: true }));
+      s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
     })()`);
     await ctx.waitFor('mcp_all session drilled', () => ctx.ev(`(() => {
       const h = location.hash;
@@ -1318,13 +1433,17 @@ test('Live 页 session 选择后浏览器后退回到环视图（model_live + mc
   await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
   await ctx.waitFor('model_live options ready', () => ctx.ev(`(() => {
     const s = document.getElementById('live-session');
-    return s && [...s.options].some((o) => o.value !== '');
+    [...document.querySelectorAll('.combo-menu')].forEach((m) => { m.hidden = true; });
+    s.dispatchEvent(new Event('focus'));
+    const menu = [...document.querySelectorAll('.combo-menu')].find((m) => !m.hidden);
+    if (!menu) return false;
+    const opt = [...menu.querySelectorAll('.combo-option')].find((o) => o.dataset.value);
+    if (!opt) return false;
+    s.value = opt.dataset.value;
+    s.dispatchEvent(new Event('input', { bubbles: true }));
+    s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    return true;
   })()`));
-  await ctx.ev(`(() => {
-    const s = document.getElementById('live-session');
-    s.value = [...s.options].find((o) => o.value !== '').value;
-    s.dispatchEvent(new Event('change', { bubbles: true }));
-  })()`);
   await ctx.waitFor('model_live session pinned in hash', () => ctx.ev(`(() => {
     const h = location.hash;
     return h.startsWith('#requests/model_live') && h.includes('session=');
@@ -1360,7 +1479,13 @@ test('Live 页 session 选择后浏览器后退回到环视图（model_live + mc
     await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream="mcp"]').click()`);
     await ctx.waitFor('mcp_live options ready', () => ctx.ev(`(() => {
       const s = document.getElementById('live-session');
-      return s && [...s.options].some((o) => o.value === 'nav-mcp-live-sess');
+      [...document.querySelectorAll('.combo-menu')].forEach((m) => { m.hidden = true; });
+      // A retained session (resume by design) would filter the menu to the
+      // typed value — clear it first so the full option list renders.
+      if (s.value !== '') { s.value = ''; s.dispatchEvent(new Event('input', { bubbles: true })); }
+      s.dispatchEvent(new Event('focus'));
+      const menu = [...document.querySelectorAll('.combo-menu')].find((m) => !m.hidden);
+      return !!menu && !!menu.querySelector('.combo-option[data-value="nav-mcp-live-sess"]');
     })()`));
     // The mcp_live page's state slice RETAINS its last session selection
     // (resume is by design — TestWebAssetsTabSwitchStabilityContract), so a
@@ -1369,17 +1494,17 @@ test('Live 页 session 选择后浏览器后退回到环视图（model_live + mc
     // the retained selection first (its own push) so the ring entry exists.
     await ctx.ev(`(() => {
       const s = document.getElementById('live-session');
-      if (s && s.value !== '') {
-        s.value = '';
-        s.dispatchEvent(new Event('change', { bubbles: true }));
-      }
+      s.value = '';
+      s.dispatchEvent(new Event('input', { bubbles: true }));
+      s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
     })()`);
     await ctx.waitFor('mcp_live bare ring pushed', () => ctx.ev(
       `location.hash === '#requests/mcp_live'`));
     await ctx.ev(`(() => {
       const s = document.getElementById('live-session');
       s.value = 'nav-mcp-live-sess';
-      s.dispatchEvent(new Event('change', { bubbles: true }));
+      s.dispatchEvent(new Event('input', { bubbles: true }));
+      s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
     })()`);
     await ctx.waitFor('mcp_live session pinned in hash', () => ctx.ev(`(() => {
       const h = location.hash;
@@ -1442,7 +1567,8 @@ test('mcp_live 行详情请求携带 kind=mcp 提示，直查 split 流 (流隔�
     await ctx.ev(`(() => {
       const s = document.getElementById('live-session');
       s.value = 'mcp-dom-sess';
-      s.dispatchEvent(new Event('change', { bubbles: true }));
+      s.dispatchEvent(new Event('input', { bubbles: true }));
+      s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
     })()`);
     await ctx.waitFor('session row rendered', () => ctx.ev(
       `!!document.querySelector('#live-session-panel tr.live-row[data-id="mcp-dom-1"]')`));
@@ -1503,30 +1629,44 @@ test('mcp_all Session 下拉随记录加载填充，清除过滤后不塌缩 (�
   })()`);
   try {
     await ctx.ev(`document.querySelector('.req-nav-item[data-sub="log"][data-stream="mcp"]').click()`);
-    // 首拉：下拉必须列出池的全部三个会话（含表格窗口看不到的 sess-c；
-    // 旧代码从已加载记录推导，永远只有浏览窗口内的两个）。
+    // 首拉：combobox 必须列出池的全部三个会话（含表格窗口看不到的 sess-c；
+    // 旧代码从已加载记录推导，永远只有浏览窗口内的两个）。选项在主题化
+    // 菜单里（focus 打开）。
     await ctx.waitFor('mcp session options populated from the pool', () => ctx.ev(`(() => {
-      const opts = [...document.getElementById('req-session').options].map((o) => o.value);
-      return opts.includes('log-mcp-sess-a') && opts.includes('log-mcp-sess-b')
-        && opts.includes('log-mcp-sess-c');
+      const s = document.getElementById('req-session');
+      [...document.querySelectorAll('.combo-menu')].forEach((m) => { m.hidden = true; });
+      s.dispatchEvent(new Event('focus'));
+      const menu = [...document.querySelectorAll('.combo-menu')].find((m) => !m.hidden);
+      if (!menu) return false;
+      const vals = [...menu.querySelectorAll('.combo-option')].map((o) => o.dataset.value);
+      return vals.includes('log-mcp-sess-a') && vals.includes('log-mcp-sess-b')
+        && vals.includes('log-mcp-sess-c');
     })()`), 20000);
-    // 选一个会话（下钻）再清除：下拉必须回到两个会话（旧代码卡在只剩被钻的一条）。
+    // 选一个会话（下钻）再清除：combobox 必须回到全部会话（旧代码卡在只剩
+    // 被钻的一条）。提交走 value + input + Enter（与真用户输入同路径）。
     await ctx.ev(`(() => {
       const s = document.getElementById('req-session');
       s.value = 'log-mcp-sess-a';
-      s.dispatchEvent(new Event('change', { bubbles: true }));
+      s.dispatchEvent(new Event('input', { bubbles: true }));
+      s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
     })()`);
     await ctx.waitFor('session drill applied', () => ctx.ev(
       `location.hash.includes('session=log-mcp-sess-a')`));
     await ctx.ev(`(() => {
       const s = document.getElementById('req-session');
       s.value = '';
-      s.dispatchEvent(new Event('change', { bubbles: true }));
+      s.dispatchEvent(new Event('input', { bubbles: true }));
+      s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
     })()`);
     await ctx.waitFor('clear restores full options', () => ctx.ev(`(() => {
-      const opts = [...document.getElementById('req-session').options].map((o) => o.value);
-      return opts.includes('log-mcp-sess-a') && opts.includes('log-mcp-sess-b')
-        && document.getElementById('req-session').value === '';
+      const s = document.getElementById('req-session');
+      [...document.querySelectorAll('.combo-menu')].forEach((m) => { m.hidden = true; });
+      s.dispatchEvent(new Event('focus'));
+      const menu = [...document.querySelectorAll('.combo-menu')].find((m) => !m.hidden);
+      if (!menu) return false;
+      const vals = [...menu.querySelectorAll('.combo-option')].map((o) => o.dataset.value);
+      return vals.includes('log-mcp-sess-a') && vals.includes('log-mcp-sess-b')
+        && s.value === '';
     })()`), 20000);
   } finally {
     await ctx.ev(`window.fetch = window.__origFetch; delete window.__origFetch;`);
@@ -1590,12 +1730,22 @@ test('MCP Live 会话下拉只列 MCP 会话，不读 /api/sessions (流隔离�
       return window.__origFetch(url, ...rest);
     };
   })()`);
+  // combobox：focus 打开菜单读选项（输入值清空保证列表不过滤）。定义在 try 外：
+  // finally 的还原检查也用同一读取器。
+  const mcpMenuOpts = `(() => {
+    const s = document.getElementById('live-session');
+    [...document.querySelectorAll('.combo-menu')].forEach((m) => { m.hidden = true; });
+    if (s.value !== '') { s.value = ''; s.dispatchEvent(new Event('input', { bubbles: true })); }
+    s.dispatchEvent(new Event('focus'));
+    const menu = [...document.querySelectorAll('.combo-menu')].find((m) => !m.hidden);
+    return menu ? [...menu.querySelectorAll('.combo-option')].map((o) => o.dataset.value) : [];
+  })()`;
   try {
     await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream="mcp"]').click()`);
-    await ctx.waitFor('mcp pool option mounted', () => ctx.ev(
-      `!!document.querySelector('#live-session option[value="mcp-live-sess-a"]')`));
-    // 下拉只含空值与 MCP 池会话（环内无 MCP 行时）；LLM 会话 id 不得残留。
-    const opts = await ctx.ev(`[...document.querySelectorAll('#live-session option')].map((o) => o.value)`);
+    await ctx.waitFor('mcp pool option mounted', async () =>
+      (await ctx.ev(mcpMenuOpts)).includes('mcp-live-sess-a'));
+    // 下拉只含 MCP 池会话（环内无 MCP 行时）；LLM 会话 id 不得残留。
+    const opts = await ctx.ev(mcpMenuOpts);
     const llmIds = (await (await fetch(`${ctx.baseUrl}/api/sessions?limit=200`)).json()).sessions.map((x) => x.session_id);
     for (const id of llmIds) {
       assert.ok(!opts.includes(id), `MCP 下拉不得列出 LLM 会话 ${id}（got: ${opts.join(',')}）`);
@@ -1606,8 +1756,8 @@ test('MCP Live 会话下拉只列 MCP 会话，不读 /api/sessions (流隔离�
     await ctx.ev(`window.fetch = window.__origFetch; delete window.__origFetch;`);
     // 回到 Model 流 Live，真实池重新加载（先还原 fetch 再切，避免假数据污染）。
     await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
-    await ctx.waitFor('model pool reloaded', () => ctx.ev(
-      `![...document.querySelectorAll('#live-session option')].some((o) => o.value === 'mcp-live-sess-a')`));
+    await ctx.waitFor('model pool reloaded', async () =>
+      !(await ctx.ev(mcpMenuOpts)).includes('mcp-live-sess-a'));
   }
   assert.deepEqual(await ctx.pageErrors(), [], 'MCP 会话下拉隔离不得有 JS 错误');
 });
@@ -1663,19 +1813,34 @@ test('MCP Live 会话下拉不受跨流在途 /api/sessions 迟到响应污染 (
     await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
     await ctx.waitFor('live card mounted', () => ctx.ev(`!!document.getElementById('live-table')`));
     await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream="mcp"]').click()`);
-    await ctx.waitFor('mcp pool option mounted', () => ctx.ev(
-      `!!document.querySelector('#live-session option[value="mcp-race-sess-a"]')`));
+    // combobox：focus 打开主题化菜单，选项是 .combo-option[data-value]。
+    const mcpMenuOpts = `(() => {
+      const s = document.getElementById('live-session');
+      [...document.querySelectorAll('.combo-menu')].forEach((m) => { m.hidden = true; });
+      if (s.value !== '') { s.value = ''; s.dispatchEvent(new Event('input', { bubbles: true })); }
+      s.dispatchEvent(new Event('focus'));
+      const menu = [...document.querySelectorAll('.combo-menu')].find((m) => !m.hidden);
+      return menu ? [...menu.querySelectorAll('.combo-option')].map((o) => o.dataset.value) : [];
+    })()`;
+    await ctx.waitFor('mcp pool option mounted', async () =>
+      (await ctx.ev(mcpMenuOpts)).includes('mcp-race-sess-a'));
     // 等过延迟窗口 + 余量：迟到的 /api/sessions 必须已被流守卫丢弃。
     await new Promise((r) => setTimeout(r, 1800));
-    const opts = await ctx.ev(`[...document.querySelectorAll('#live-session option')].map((o) => o.value)`);
+    const opts = await ctx.ev(mcpMenuOpts);
     assert.ok(!opts.includes('llm-race-sess'),
       `迟到的 /api/sessions 响应不得把 Model 会话灌进 MCP 下拉（got: ${opts.join(',')}）`);
     assert.ok(opts.includes('mcp-race-sess-a'), 'MCP 池会话仍在下拉里');
   } finally {
     await ctx.ev(`window.fetch = window.__origFetch; delete window.__origFetch;`);
     await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
-    await ctx.waitFor('model pool reloaded', () => ctx.ev(
-      `!!document.querySelector('#live-session option[value="llm-race-sess"]')`));
+    await ctx.waitFor('model pool reloaded', () => ctx.ev(`(() => {
+      const s = document.getElementById('live-session');
+      [...document.querySelectorAll('.combo-menu')].forEach((m) => { m.hidden = true; });
+      if (s.value !== '') { s.value = ''; s.dispatchEvent(new Event('input', { bubbles: true })); }
+      s.dispatchEvent(new Event('focus'));
+      const menu = [...document.querySelectorAll('.combo-menu')].find((m) => !m.hidden);
+      return !!menu && !!menu.querySelector('.combo-option[data-value="llm-race-sess"]');
+    })()`));
   }
   assert.deepEqual(await ctx.pageErrors(), [], '在途防护不得有 JS 错误');
 });

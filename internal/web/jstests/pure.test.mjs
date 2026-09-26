@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import {
   esc, linkifyEsc, fmtNum, fmtCompactNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
-  verdictBadge, modelCapMatrix, providerCapsSummary, providerFrozen, providerNames,
+  verdictBadge, modelCapMatrix, visibleModelRows, providerCapsSummary, providerFrozen, providerNames,
   catalogMatchHTML, catalogMatchSummary, catalogMatchEditorHTML,
   ruleHitsLeaderboard,
   sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, linkedProviders, sessionHealthSummary, guardMarksHTML, guardMarksDetailHTML, requestMetaHTML,
@@ -252,6 +252,28 @@ test('modelCapMatrix tolerates empty and malformed providers maps', () => {
   // never mark unrelated providers' models.
   const [q] = modelCapMatrix({ up: { models: { m: null } } }, { up: 'nope', other: ['m'] });
   assert.equal(q.models[0].disabled, false);
+});
+
+test('visibleModelRows hides disabled rows by default, Show All keeps them', () => {
+  const models = [
+    { id: 'm-live', disabled: false },
+    { id: 'm-off', disabled: true },
+    { id: 'm-off-2', disabled: true },
+  ];
+  // Default: disabled rows dropped, hidden count explains the Show All control.
+  assert.deepEqual(visibleModelRows(models, false),
+    { rows: [{ id: 'm-live', disabled: false }], hidden: 2 });
+  // Show All: every row kept (disabled ones render dimmed with their switch).
+  assert.deepEqual(visibleModelRows(models, true), { rows: models, hidden: 0 });
+  // No disabled rows: the default view is the full list, nothing hidden.
+  const allLive = [{ id: 'a' }, { id: 'b', disabled: false }];
+  assert.deepEqual(visibleModelRows(allLive, false), { rows: allLive, hidden: 0 });
+  // Empty / malformed input normalizes; null members without a disabled flag
+  // stay visible (only explicit disabled rows are filtered).
+  assert.deepEqual(visibleModelRows(null, false), { rows: [], hidden: 0 });
+  assert.deepEqual(visibleModelRows([null, { id: 'x' }], false),
+    { rows: [null, { id: 'x' }], hidden: 0 });
+  assert.deepEqual(visibleModelRows([null, { disabled: true }], false), { rows: [null], hidden: 1 });
 });
 
 test('catalogMatchSummary counts matched entries, tolerating junk', () => {

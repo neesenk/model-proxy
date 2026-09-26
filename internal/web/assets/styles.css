@@ -532,19 +532,14 @@ main {
 .live-pop-session:hover { text-decoration: underline; }
 
 /* Live session mode: toolbar + summary chips above the per-session table.
-   v2: the session select shows FULL ids (no 8…4 abbreviation) — a native
-   select auto-sizes to its widest option, so simply lifting the .req-input
-   20rem cap here lets the longest session id fit; 60% keeps an extreme id
-   from pushing the card wider on narrow screens. */
+   v2: the session combobox shows FULL ids (no 8…4 abbreviation) — the input
+   stretches with the toolbar (flex: 1 1 7rem, the Requests filter row's combo
+   sizing) and caps at 60% so an extreme id cannot push the card wider on
+   narrow screens; the combo's ✕/chevron slot rides inside the box. */
 .live-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
 .live-toolbar label { text-transform: uppercase; letter-spacing: .04em; }
-.live-toolbar select.req-input { max-width: 60%; }
-/* Once attachClearable wraps the select, the 60% cap must ride the WRAPPER:
-   a percentage cap on the select resolves against the wrapper's indefinite
-   shrink-to-fit width, leaving the wrapper wider than the control and the ✕
-   floating off its right edge. */
-.live-toolbar .clearable:has(> select) { max-width: 60%; }
-.live-toolbar .clearable > select.req-input { max-width: none; width: 100%; }
+.live-toolbar .combo { flex: 1 1 7rem; min-width: 0; max-width: 60%; }
+.live-toolbar .combo > .req-input { width: 100%; max-width: none; }
 .live-session-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .live-chip {
   font-family: var(--mono);
@@ -1252,15 +1247,15 @@ details.cat-match .table { margin-top: 8px; }
 
 /* v2 Requests toolbar widths — the whole filter row holds on ONE line at
    default resolutions (agent + session + provider + model + errors +
-   refresh ≈ the ~928px card width left by the 210px sidebar): the session
-   select is a fixed 11rem box (long ids ellipsize in the closed box; the OS
-   popup still shows the full id, and the title tooltip carries it), and the
-   provider/model combos flex to absorb whatever the container has left
+   refresh ≈ the ~928px card width left by the 210px sidebar): the agent
+   select keeps its intrinsic width, and the three combos (session /
+   provider / model) flex to absorb whatever the container has left
    (floored at their 7rem prefix-filter width, capped at 12rem so ultrawide
-   windows don't stretch them silly). Narrower windows still wrap gracefully
-   (flex-wrap on the container). Scoped to this toolbar only (Security/Live
-   rows keep the .req-input defaults). */
-.req-controls #req-session { width: 11rem; }
+   windows don't stretch them silly; long session ids ellipsize in the
+   closed box, the themed popup shows the full id and the title tooltip
+   carries it). Narrower windows still wrap gracefully (flex-wrap on the
+   container). Scoped to this toolbar only (Security/Live rows keep the
+   .req-input defaults). */
 .req-controls .combo { flex: 1 1 7rem; min-width: 0; max-width: 12rem; }
 .req-controls .combo > .req-input { width: 100%; max-width: none; }
 
@@ -1284,6 +1279,12 @@ details.cat-match .table { margin-top: 8px; }
   z-index: 70;
   max-height: 260px;
   overflow: auto;
+  /* Wheel at the list's edge (top or bottom) must NOT chain to the page:
+   * a chained page scroll moves the fixed menu's anchor away and the
+   * scroll-close handler yanks the dropdown mid-browse — the reported
+   * "scroll to the bottom and the menu disappears" bug. `contain` keeps
+   * the overscroll inside the menu (native-select popup behavior). */
+  overscroll-behavior: contain;
   padding: 5px;
   background: var(--surface);
   border: 1px solid var(--border);

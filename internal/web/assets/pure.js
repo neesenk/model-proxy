@@ -410,6 +410,25 @@ export function modelCapMatrix(providers, disabled) {
   return out;
 }
 
+// visibleModelRows filters one provider's model rows for the Status Models
+// card's default view: disabled rows (the operator disable override — the
+// same models /v1/models hides) are dropped unless showAll is set, so the
+// card lists exactly the servable set by default. Returns the visible rows
+// and the number hidden by the filter (0 when showAll — nothing is hidden),
+// letting the card render the Show All control and the all-hidden empty
+// state without re-counting. Non-array input normalizes to empty.
+export function visibleModelRows(models, showAll) {
+  const list = Array.isArray(models) ? models : [];
+  if (showAll) return { rows: list, hidden: 0 };
+  const rows = [];
+  let hidden = 0;
+  for (const m of list) {
+    if (m && m.disabled) { hidden += 1; continue; }
+    rows.push(m);
+  }
+  return { rows, hidden };
+}
+
 // catalogMatchSummary folds the GET /api/models match list into the counts the
 // Model Catalog card's collapsed summary line shows.
 export function catalogMatchSummary(entries) {

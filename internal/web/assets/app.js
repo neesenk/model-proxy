@@ -23,7 +23,7 @@
 import {
   esc, linkifyEsc, fmtNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
-  verdictBadge, modelCapMatrix, providerCapsSummary, providerFrozen, providerNames, cacheHitRate,
+  verdictBadge, modelCapMatrix, visibleModelRows, providerCapsSummary, providerFrozen, providerNames, cacheHitRate,
   catalogMatchHTML, catalogMatchEditorHTML,
   settingsDiff, settingsRestartKeys, configSummaryHTML, TOKEN_RANGES, tokensRangeQuery, tokenRangeLabel,
   tokenRangeTriggerLabel, parseLocalDate, tokenRangeBounds, tokenCustomBounds, tokenRangePickerHTML,
@@ -424,12 +424,17 @@ function updateRequestsHash(push) {
 }
 
 // syncRequestsFreeControls pushes the filter state into the free-form
-// controls (provider/model inputs, errors checkbox, shadow select). The
-// linked selects are repainted by renderRequestSelectors, but these four
+// controls (session/provider/model inputs, errors checkbox, shadow select).
+// The agent select is repainted by renderRequestSelectors, but these four
 // hold their DOM value across re-renders — after a hash-driven filter change
 // (back/forward) they must follow, or the next Refresh would read the stale
 // values back into the filter.
 function syncRequestsFreeControls() {
+  const s = document.getElementById('req-session');
+  if (s) {
+    s.value = requestsFilter.session;
+    syncClearable(s);
+  }
   const p = document.getElementById('req-provider');
   if (p) p.value = requestsFilter.provider;
   const m = document.getElementById('req-model');
@@ -751,7 +756,7 @@ function activeRequestsPage() {
 function newLogPageState() {
   return {
     filters: { session: '', agent: '', model: '', provider: '', errors: false, shadow: '' },
-    combos: { providerOptions: [], modelOptions: [], facetState: { providerModels: {}, agents: [] }, sessions: [], lastRecords: [], sessionPool: [] },
+    combos: { providerOptions: [], modelOptions: [], sessionOptions: [], facetState: { providerModels: {}, agents: [] }, sessions: [], lastRecords: [], sessionPool: [] },
     drill: null,
   };
 }
@@ -759,6 +764,9 @@ function newLivePageState() {
   return {
     session: '', records: [], agg: null, list: [],
     loading: false, error: '', optionsKey: '', bootPin: '',
+    // The session combobox's option list (attachCombo filters at open
+    // time; refreshLiveSessionOptions splices in place).
+    sessionOptions: [],
   };
 }
 const logPageState = {
@@ -1051,7 +1059,7 @@ function mountLogPage(page, query) {
   host.innerHTML = `
     <div class="req-controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
       <select id="req-agent" class="req-input" title="filter by client agent"><option value="">All Agents</option></select>
-      <select id="req-session" class="req-input" title="filter by session (Model: client session header; MCP: the exchange's session id)"><option value="">All Sessions</option></select>
+      <span class="combo"><input id="req-session" placeholder="All Sessions" value="${esc(st.filters.session)}" class="req-input" title="filter by session (Model: client session header; MCP: the exchange's session id) — type to search the session list"/></span>
       <span class="combo"><input id="req-provider" placeholder="All Providers" value="${esc(st.filters.provider)}" class="req-input"/></span>
       <span class="combo"><input id="req-model" placeholder="${esc(page.modelPlaceholder)}" value="${esc(st.filters.model)}" class="req-input"/></span>
       <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="req-errors" ${st.filters.errors ? 'checked' : ''}/> Errors Only</label>
@@ -1063,7 +1071,7 @@ function mountLogPage(page, query) {
   const combos = st.combos;
   const refresh = () => {
     st.filters.agent = document.getElementById('req-agent').value;
-    st.filters.session = document.getElementById('req-session').value;
+    st.filters.session = document.getElementById('req-session').value.trim();
     st.filters.provider = document.getElementById('req-provider').value.trim();
     st.filters.model = document.getElementById('req-model').value.trim();
     st.filters.errors = document.getElementById('req-errors').checked;
@@ -1078,12 +1086,19 @@ function mountLogPage(page, query) {
   const onAgentSelect = () => {
     st.filters.agent = document.getElementById('req-agent').value;
     const allowed = sessionsForAgent(st.filters.agent, combos.sessions).map((s) => s.session_id);
-    if (st.filters.session && !allowed.includes(st.filters.session)) st.filters.session = '';
+    if (st.filters.session && !allowed.includes(st.filters.session)) {
+      st.filters.session = '';
+      // The session control is a free-form input now: clearing the filter
+      // must clear the DISPLAYED text too (the select's option repaint used
+      // to do this implicitly).
+      const sessionInput = document.getElementById('req-session');
+      if (sessionInput) sessionInput.value = '';
+    }
     renderRequestSelectors(combos);
     refresh();
   };
   const onSessionSelect = () => {
-    st.filters.session = document.getElementById('req-session').value;
+    st.filters.session = document.getElementById('req-session').value.trim();
     const allowed = linkedAgents(st.filters.session, combos.sessions, combos.facetState.agents);
     if (st.filters.agent && !allowed.includes(st.filters.agent)) st.filters.agent = '';
     // Session pick is navigation (push): Back returns to the unfiltered
@@ -1103,16 +1118,19 @@ function mountLogPage(page, query) {
   };
   document.getElementById('req-refresh').onclick = refresh;
   document.getElementById('req-agent').onchange = onAgentSelect;
-  document.getElementById('req-session').onchange = onSessionSelect;
   // The shared ✕ affordance resets a picked filter to All (same contract as
-  // the text combos; the change dispatch drives onAgentSelect/onSessionSelect).
+  // the text combos; the change dispatch drives onAgentSelect).
   attachClearable(document.getElementById('req-agent'));
-  attachClearable(document.getElementById('req-session'));
   // The checkbox applies immediately too — every filter control has the same
   // on-change behavior.
   document.getElementById('req-errors').onchange = refresh;
   attachCombo(document.getElementById('req-provider'), combos.providerOptions, onProviderSelect);
   attachCombo(document.getElementById('req-model'), combos.modelOptions, refresh);
+  // Session is a searchable combobox over the full session ids (typed
+  // substring filters; Enter/pick commits, ✕ clears) — the same control as
+  // provider/model. Options are repainted in place by
+  // renderRequestSelectors (combos.sessionOptions).
+  attachCombo(document.getElementById('req-session'), combos.sessionOptions, onSessionSelect);
   // Paint the retained agent/session selections into the freshly rendered
   // (option-less) selects BEFORE the first fetch: refresh() reads the filter
   // back out of the DOM, so an empty select would otherwise clear a filter
@@ -1219,25 +1237,26 @@ function refreshRequestsData(combos) {
   }).catch(() => { /* request logging off / unavailable */ });
 }
 
-// renderRequestSelectors repaints the linked agent and session dropdowns from
-// the current selection: the agent options come from the log-wide agent facet
-// narrowed by the selected session, the session options from the aggregate
-// narrowed by the selected agent. A still-selected value that the aggregate
-// does not know (a session aged out of /api/sessions, an agent whose records
-// aged out of the facet window) is kept as an option so the active filter
-// stays visible and reversible.
+// renderRequestSelectors repaints the linked agent dropdown and the session
+// combobox's option list from the current selection: the agent options come
+// from the log-wide agent facet narrowed by the selected session, the
+// session options from the aggregate narrowed by the selected agent. A
+// still-selected value that the aggregate does not know (a session aged out
+// of /api/sessions, an agent whose records aged out of the facet window) is
+// kept as an option so the active filter stays visible and reversible. The
+// session control is a combobox INPUT: its option list is spliced in place
+// (combos.sessionOptions — attachCombo filters at open time) and its typed
+// value is never touched here (only onAgentSelect clears a now-invalid
+// pick); the agent <select> keeps the OS-dropdown focus guard below.
 function renderRequestSelectors(combos) {
   const agentSel = document.getElementById('req-agent');
-  const sessionSel = document.getElementById('req-session');
   // Rebuilding a <select>'s options while it holds focus closes the
   // OS-drawn dropdown (assets/AGENTS.md rule): the pools/sessions feeding
   // this land at arbitrary async times (each mount and filter change
   // refetches the MCP pool), so defer to blur and retry then — the same
   // guard refreshLiveSessionOptions uses.
-  const focused = agentSel === document.activeElement ? agentSel
-    : sessionSel === document.activeElement ? sessionSel : null;
-  if (focused) {
-    focused.onblur = () => { focused.onblur = null; renderRequestSelectors(combos); };
+  if (agentSel === document.activeElement) {
+    agentSel.onblur = () => { agentSel.onblur = null; renderRequestSelectors(combos); };
     return;
   }
   if (agentSel) {
@@ -1247,7 +1266,8 @@ function renderRequestSelectors(combos) {
       agents.map((name) => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
     agentSel.value = requestsFilter.agent;
   }
-  if (sessionSel) {
+  const sessionInput = document.getElementById('req-session');
+  if (sessionInput) {
     // Same ordering as the Live dropdown: most recently active first, ties
     // by session id (pure.js liveSessionOrder over the agent-filtered
     // summaries; no live rows to merge here). The MCP stream derives its
@@ -1268,16 +1288,13 @@ function renderRequestSelectors(combos) {
       ids = liveSessionOrder(pool, []);
     }
     if (requestsFilter.session && !ids.includes(requestsFilter.session)) ids = [requestsFilter.session, ...ids];
-    // v2: full session ids in the options (the select is 11–14rem wide so
-    // the whole filter row holds one line; the closed box ellipsizes, the
-    // OS popup shows the whole id). Matches the Live page's full-id
-    // dropdown.
-    sessionSel.innerHTML = '<option value="">All Sessions</option>' +
-      ids.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
-    sessionSel.value = requestsFilter.session;
+    // v2: full session ids in the options (the combo ellipsizes the closed
+    // box; the themed popup shows the whole id and typing filters).
+    // Matches the Live page's full-id combobox.
+    combos.sessionOptions.splice(0, combos.sessionOptions.length, ...ids);
   }
   // Programmatic value sets fire no events — re-sync the ✕ affordance.
-  for (const sel of [agentSel, sessionSel]) syncClearable(sel);
+  if (agentSel) syncClearable(agentSel);
 }
 
 // comboInstances tracks live comboboxes so one set of global listeners can
@@ -1296,7 +1313,18 @@ function wireComboGlobals() {
   });
   const closeAll = () => comboInstances.forEach((combo) => combo.close());
   window.addEventListener('resize', closeAll);
-  window.addEventListener('scroll', closeAll, true);
+  window.addEventListener('scroll', (event) => {
+    // A scroll INSIDE an open combo's own option list is the user browsing
+    // the list — the menu is itself the scrollable (position: fixed,
+    // overflow: auto), so closing here would yank the dropdown away
+    // mid-scroll. Only anchor-moving scrolls (page/panel) close: menus are
+    // fixed-positioned, so once the input's anchor scrolls the alignment is
+    // stale (same behavior as a native select popup).
+    for (const combo of comboInstances) {
+      if (!combo.menu.hidden && (event.target === combo.menu || combo.menu.contains(event.target))) return;
+    }
+    closeAll();
+  }, true);
 }
 
 // attachCombo turns a text input into a searchable dropdown. The menu is a
@@ -3620,22 +3648,22 @@ function renderLiveCard(target, query) {
   target.insertAdjacentHTML('beforeend', `
     <div class="live-toolbar">
       <label class="hint" for="live-session">Session</label>
-      <select id="live-session" class="req-input"><option value="">All (live)</option></select>
+      <span class="combo"><input id="live-session" placeholder="All (live)" value="${esc(S.session)}" class="req-input" title="filter by live session — type to search the session list"/></span>
     </div>
     <div id="live-table"><span class="msg hint">connecting…</span></div>
     <div id="live-session-panel" hidden></div>`);
   // The session toolbar serves BOTH streams — MCP rows drill their own
   // sessions (the fetch carries kind=mcp; options come from the MCP half of
-  // the ring).
+  // the ring). The control is a searchable combobox over full session ids
+  // (the same control as the Log pages' session filter): typing filters,
+  // Enter/pick commits through onLiveSessionChange, ✕ clears.
   const sel = document.getElementById('live-session');
   if (sel) {
-    sel.onchange = () => onLiveSessionChange(sel.value);
-    // Retry an options rebuild deferred by the focused-guard above: the next
+    attachCombo(sel, S.sessionOptions, () => onLiveSessionChange(sel.value.trim()));
+    // Retry an options rebuild deferred by the focused-guard below: the next
     // SSE event may be far away, and a closed dropdown must not leave the
     // session list stale until it arrives.
     sel.onblur = () => refreshLiveSessionOptions();
-    // Shared ✕ affordance: resets to All (live) through the same onchange.
-    attachClearable(sel);
   }
   // Consume the router's ?session= pin here: this mount is the point that
   // resets the selection, and applying it earlier (boot/hashchange) raced
@@ -3686,39 +3714,39 @@ function renderLiveCard(target, query) {
   };
 }
 
-// refreshLiveSessionOptions rebuilds the session dropdown from live rows plus
-// the persisted session list, ordered most-recently-active first (session id
-// ascending as the tie-break; pure.js liveSessionOrder). Rebuilds only when
-// the ordered set changes so a quiet stream does not reset the control. While
-// the select holds focus (its native dropdown may be open, or the user is
-// keyboard-navigating it) the options are NEVER swapped — replacing them
-// closes the OS-drawn popup; the blur handler below retries once the user is
-// done.
+// refreshLiveSessionOptions rebuilds the session combobox's option list from
+// live rows plus the persisted session list, ordered most-recently-active
+// first (session id ascending as the tie-break; pure.js liveSessionOrder).
+// Rebuilds only when the ordered set changes so a quiet stream does not reset
+// the control. While the input holds focus the value paint is skipped — a
+// programmatic value write would clobber the user's typed query (the option
+// splice alone is always safe: attachCombo filters at open time); the blur
+// handler retries once the user is done.
 function refreshLiveSessionOptions() {
   const sel = document.getElementById('live-session');
   if (!sel) return;
-  if (sel === document.activeElement) return;
   const S = activeLiveState();
   if (!S) return;
   let sorted = liveSessionOrder(S.list, liveRows.filter(liveRowInStream));
   // Keep the active selection as an option even when neither source knows it
   // (a hash-restored session whose live rows aged out of the ring / whose
   // /api/sessions entry is still loading) — same guarantee as the Requests
-  // dropdown, so the visible selection never silently reverts to all-live.
+  // combobox, so the visible selection never silently reverts to all-live.
   if (S.session && !sorted.includes(S.session)) {
     sorted = [S.session, ...sorted];
   }
   const key = sorted.join('\n');
+  S.sessionOptions.splice(0, S.sessionOptions.length, ...sorted);
   if (key === S.optionsKey) return;
   S.optionsKey = key;
-  // v2: the Live session dropdown shows the FULL id — this toolbar holds a
+  // v2: the Live session combobox shows the FULL id — this toolbar holds a
   // single control with the rest of the row empty, so unlike the dense
-  // Requests filter row there is no reason to abbreviate (and the select is
-  // widened via .live-toolbar select to match; see styles.css).
-  sel.innerHTML = '<option value="">All (live)</option>' +
-    sorted.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
-  sel.value = S.session;
-  syncClearable(sel);
+  // Requests filter row there is no reason to abbreviate (and the combo is
+  // widened via .live-toolbar .combo to match; see styles.css).
+  if (sel !== document.activeElement) {
+    sel.value = S.session;
+    syncClearable(sel);
+  }
 }
 
 // (v2: liveSessionLabel — the 8…4 session-id abbreviation — was removed;
@@ -5891,6 +5919,12 @@ async function freezeProvider(name, btn) {
 // (muted, probe pending) visually distinct from no (err, concluded negative
 // or unsupported by definition). Providers with no probe data are omitted
 // server-side; an empty store renders a hint instead of a blank section.
+// Disabled model rows are HIDDEN by default (visibleModelRows — the default
+// view lists what /v1/models serves); a Show All / Hide Disabled control in
+// each card head that has disabled rows flips the global modelsShowDisabled
+// flag (module state, tick-stable like catMatchOpen), and an all-disabled
+// provider renders a subdue row explaining the hidden count instead of a
+// blank table.
 // The leading Model Catalog card shows the models.dev cache's disk state
 // (modelsCache.catalog — count, fetched_at version time, etag) as a
 // .sum-grid, with the Refresh action pinned to the card head's right edge
@@ -5938,8 +5972,15 @@ function renderModelsCard(target, providers) {
     return;
   }
   for (const p of entries) {
+    // Default view: disabled rows hidden (visibleModelRows — the card lists
+    // what /v1/models serves); Show All in the card head flips the global
+    // flag and re-renders every provider card. disabledCount drives the
+    // control in BOTH states (the flag alone would lose the button once the
+    // rows are visible, leaving no way back).
+    const disabledCount = p.models.filter((m) => m && m.disabled).length;
+    const { rows: visible, hidden } = visibleModelRows(p.models, modelsShowDisabled);
     let rows = '';
-    for (const m of p.models) {
+    for (const m of visible) {
       // Operator disable toggle (POST /api/models/disable): one state switch
       // per row — checked (blue, macOS-style) = routed and exposed in
       // /v1/models, unchecked (neutral gray) = disabled (row muted via
@@ -5955,9 +5996,14 @@ function renderModelsCard(target, providers) {
         <td class="model-caps-action">${action}</td>
       </tr>`;
     }
-    if (!p.models.length) {
-      rows = '<tr><td colspan="5" class="subdue">probed, no models recorded</td></tr>';
+    if (!visible.length) {
+      rows = disabledCount > 0
+        ? `<tr><td colspan="5" class="subdue">${disabledCount} disabled model${disabledCount === 1 ? '' : 's'} hidden — Show All to list</td></tr>`
+        : '<tr><td colspan="5" class="subdue">probed, no models recorded</td></tr>';
     }
+    const visibilityBtn = disabledCount > 0
+      ? `<button class="btn small" data-models-visibility title="${modelsShowDisabled ? 'Hide the disabled rows again — they stay disabled either way; the switch on each row re-enables a model.' : 'List the disabled rows too (still dimmed) — hidden by default because disabled models disappear from /v1/models.'}">${modelsShowDisabled ? 'Hide Disabled' : 'Show All'}</button> `
+      : '';
     target.insertAdjacentHTML('beforeend', buildCard(
       p.name,
       `fp ${p.fingerprint || '—'} · probed ${fmtTimeSafe(p.probedAt) || '—'}`,
@@ -5966,10 +6012,20 @@ function renderModelsCard(target, providers) {
         <tbody>${rows}</tbody>
       </table>`,
       'flush model-caps',
-      `<button class="btn small model-caps-refresh" data-models-refresh="${esc(p.name)}">Refresh</button>`));
+      `${visibilityBtn}<button class="btn small model-caps-refresh" data-models-refresh="${esc(p.name)}">Refresh</button>`));
   }
   target.querySelectorAll('[data-models-refresh]').forEach((btn) => {
     btn.addEventListener('click', () => refreshProviderModels(btn));
+  });
+  target.querySelectorAll('[data-models-visibility]').forEach((btn) => {
+    // User-initiated re-render from the cached /api/models payload (no
+    // fetch): the click itself closes no popup, so it bypasses the refresh
+    // gate per the AGENTS contract; the 5s tick re-renders from the module
+    // flag either way.
+    btn.addEventListener('click', () => {
+      modelsShowDisabled = !modelsShowDisabled;
+      renderStatusSection('models');
+    });
   });
   target.querySelectorAll('[data-model-toggle]').forEach((el) => {
     // The browser flips the checkbox visually before the change event fires;
@@ -6092,6 +6148,13 @@ async function refreshModelsCatalog(btn) {
 // level so the 5s Status tick (which rebuilds the Models section from scratch)
 // restores it instead of folding the list shut mid-browse.
 let catMatchOpen = false;
+
+// modelsShowDisabled is the Models cards' disabled-rows visibility: disabled
+// models are hidden by default (the card lists what /v1/models serves); the
+// per-card Show All control flips this flag and re-renders the section. Kept
+// at module level so the 5s Status tick restores the user's choice instead of
+// re-hiding the rows mid-browse (same contract as catMatchOpen).
+let modelsShowDisabled = false;
 
 // openCatalogMatchEditor swaps a match row's action cell for the inline
 // editor: a datalist-backed input over modelsCache.catalog_ids (the datalist
