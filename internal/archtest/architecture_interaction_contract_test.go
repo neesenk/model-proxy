@@ -94,9 +94,11 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 
 	t.Run("Shadow dispatch uses one captured generation runtime", func(t *testing.T) {
 		shadowFile, _ := parseGoFile(t, "internal/app/proxy_shadow.go")
-		dispatch := namedMethod(t, shadowFile, "Proxy", "dispatchShadowAfterCommit")
-		if !shadowDispatchUsesCapturedRuntime(dispatch.Body) {
-			t.Error("Proxy.dispatchShadowAfterCommit must use one runtime.shadow value for sampling, admission, and runShadow")
+		for _, method := range []string{"dispatchLegacyShadow", "dispatchEvalShadow"} {
+			dispatch := namedMethod(t, shadowFile, "Proxy", method)
+			if !shadowDispatchUsesCapturedRuntime(dispatch.Body, method) {
+				t.Errorf("Proxy.%s must use one runtime.shadow value for sampling, admission, and shadow execution", method)
+			}
 		}
 	})
 
@@ -132,8 +134,8 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 		}
 
 		executeSites := importedTypeMethodCallSitesAcrossProduction(t, "model-proxy/internal/shadow", "Runtime", "Execute")
-		if len(executeSites) != 1 || executeSites[0].file != "internal/app/proxy_shadow.go" || executeSites[0].function != "runShadow" {
-			t.Errorf("shadow Runtime.Execute production call sites = %v, want only proxy_shadow.go:runShadow", executeSites)
+		if len(executeSites) != 1 || executeSites[0].file != "internal/app/proxy_shadow.go" || executeSites[0].function != "executeShadow" {
+			t.Errorf("shadow Runtime.Execute production call sites = %v, want only proxy_shadow.go:executeShadow", executeSites)
 		}
 		if sites := importedMethodExpressionSitesAcrossProduction(t, "model-proxy/internal/shadow", "Runtime", "Execute"); len(sites) != 0 {
 			t.Errorf("shadow Runtime.Execute method expressions = %v, want none", sites)
@@ -397,7 +399,7 @@ func normalDeliveryShadowDispatchValid(node ast.Node) bool {
 		return false
 	}
 	call := branchDispatches[0]
-	if !selectorOnIdent(call.Fun, "p", "dispatchShadowAfterCommit") || len(call.Args) != 10 {
+	if !selectorOnIdent(call.Fun, "p", "dispatchShadowAfterCommit") || len(call.Args) != 11 {
 		return false
 	}
 	return identIs(call.Args[0], "runtime") &&
@@ -409,7 +411,8 @@ func normalDeliveryShadowDispatchValid(node ast.Node) bool {
 		identIs(call.Args[6], "requestID") &&
 		identIs(call.Args[7], "agent") &&
 		selectorOnIdent(call.Args[8], "flc", "SessionID") &&
-		selectorOnIdent(call.Args[9], result, "Commit")
+		selectorOnIdent(call.Args[9], result, "Commit") &&
+		selectorOnIdent(call.Args[10], "st", "routing")
 }
 
 func exactTargetExecutorAttempt(call *ast.CallExpr) (string, bool) {
@@ -446,7 +449,7 @@ func exactTargetExecutorAttempt(call *ast.CallExpr) (string, bool) {
 	return attempt.Name, true
 }
 
-func shadowDispatchUsesCapturedRuntime(node ast.Node) bool {
+func shadowDispatchUsesCapturedRuntime(node ast.Node, method string) bool {
 	shadowRuntime, _, ok := uniquelyAssignedExpressionIdentifier(node, func(expr ast.Expr) bool {
 		return selectorOnIdent(expr, "runtime", "Shadow")
 	})
@@ -455,8 +458,16 @@ func shadowDispatchUsesCapturedRuntime(node ast.Node) bool {
 		len(callPathPositions(node, "p.shadow.Load")) != 0 {
 		return false
 	}
-	for _, method := range []string{"ShouldSample", "TryAcquire"} {
-		if namedCallCountInNode(node, method) != 1 || receiverCallCount(node, shadowRuntime, method) != 1 {
+	sampleMethod := "ShouldSample"
+	if method == "dispatchEvalShadow" {
+		sampleMethod = "evalRand"
+	}
+	for _, m := range []string{sampleMethod, "TryAcquire"} {
+		wantReceiver := shadowRuntime
+		if m == "evalRand" {
+			wantReceiver = "p"
+		}
+		if namedCallCountInNode(node, m) != 1 || receiverCallCount(node, wantReceiver, m) != 1 {
 			return false
 		}
 	}
@@ -469,20 +480,16 @@ func shadowDispatchUsesCapturedRuntime(node ast.Node) bool {
 		return false
 	}
 
-	runCalls := namedCallsInNode(node, "runShadow")
-	if len(runCalls) != 1 {
+	execMethod := "runShadow"
+	if method == "dispatchEvalShadow" {
+		execMethod = "runEvalShadowPair"
+	}
+	execCalls := namedCallsInNode(node, execMethod)
+	if len(execCalls) != 1 {
 		return false
 	}
-	run := runCalls[0]
-	if !selectorOnIdent(run.Fun, "p", "runShadow") || len(run.Args) != 12 ||
-		!identIs(run.Args[0], "runtime") || !identIs(run.Args[1], shadowRuntime) ||
-		!identIs(run.Args[2], "stop") ||
-		!identIs(run.Args[3], "proto") || !identIs(run.Args[4], "backendProto") ||
-		!identIs(run.Args[5], "calledModel") || !identIs(run.Args[6], "exposed") ||
-		!identIs(run.Args[7], "shadow") ||
-		!zeroArgReceiverCall(run.Args[8], "commit", "RequestBody") ||
-		!identIs(run.Args[9], "primaryRequestID") ||
-		!identIs(run.Args[10], "primaryAgent") || !identIs(run.Args[11], "primarySession") {
+	exec := execCalls[0]
+	if !selectorOnIdent(exec.Fun, "p", execMethod) {
 		return false
 	}
 
@@ -491,7 +498,7 @@ func shadowDispatchUsesCapturedRuntime(node ast.Node) bool {
 		return false
 	}
 	callback, ok := admissions[0].Args[0].(*ast.FuncLit)
-	return ok && len(namedCallsInNode(callback.Body, "runShadow")) == 1
+	return ok && len(namedCallsInNode(callback.Body, execMethod)) == 1
 }
 
 func uniquelyAssignedCallIdentifier(
@@ -1084,14 +1091,14 @@ func validCommit() {
 	attempt := makeAttempt()
 	result := p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 	if result.Committed {
-		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, result.Commit)
+		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, result.Commit, st.routing)
 	}
 }
 func invalidCommit() {
 	attempt := makeAttempt()
 	result := p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 	if other.Committed {
-		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, result.Commit)
+		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, result.Commit, st.routing)
 	}
 }
 func invalidExecutorBinding() {
@@ -1099,14 +1106,14 @@ func invalidExecutorBinding() {
 	other := makeAttempt()
 	result := p.targetExecutor(other.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 	if result.Committed {
-		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, result.Commit)
+		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, result.Commit, st.routing)
 	}
 }
 func invalidCommitPayload() {
 	attempt := makeAttempt()
 	result := p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 	if result.Committed {
-		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, other.Commit)
+		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, other.Commit, st.routing)
 	}
 }
 `, 0)
@@ -1152,10 +1159,10 @@ func invalidShadow() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !shadowDispatchUsesCapturedRuntime(namedFunction(t, shadowFile, "validShadow").Body) {
+	if !shadowDispatchUsesCapturedRuntime(namedFunction(t, shadowFile, "validShadow").Body, "dispatchLegacyShadow") {
 		t.Error("Shadow runtime dataflow control rejected one captured generation")
 	}
-	if shadowDispatchUsesCapturedRuntime(namedFunction(t, shadowFile, "invalidShadow").Body) {
+	if shadowDispatchUsesCapturedRuntime(namedFunction(t, shadowFile, "invalidShadow").Body, "dispatchLegacyShadow") {
 		t.Error("Shadow runtime dataflow control accepted a mid-dispatch runtime reload")
 	}
 

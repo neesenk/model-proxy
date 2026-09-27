@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	configdomain "model-proxy/internal/config"
 )
 
 func TestBuildRecordPreservesFieldsAndExactHeaderAllowlist(t *testing.T) {
@@ -245,5 +247,56 @@ func TestRecordToolRoundTrip(t *testing.T) {
 	plain := logger.BuildRecord(Input{RequestID: "rid-1", Protocol: "anthropic"})
 	if bytes.Contains(appendRecordLine(nil, plain), []byte(`"tool"`)) {
 		t.Fatal("tool leaked into a record without one")
+	}
+}
+
+// TestRecordRoutingRoundTrip pins the routing decision field: it flows from
+// Input through BuildRecord and the hand-rolled JSONL encoder, keeps the
+// documented shape, and decodes back. Records without a policy decision omit
+// the field entirely.
+func TestRecordRoutingRoundTrip(t *testing.T) {
+	logger := New(Options{Directory: t.TempDir(), MaxBodyBytes: 1 << 20})
+	rec := logger.BuildRecord(Input{
+		RequestID: "rid-routing-1",
+		Protocol:  "anthropic",
+		Status:    200,
+		Routing: &configdomain.RoutingDecision{
+			Source: "selector",
+			Grade:  "flash",
+			Selector: &configdomain.SelectorChoice{
+				Choice:     "g0",
+				Confidence: 0.62,
+				Difficulty: 2,
+				Enforced:   false,
+				Err:        "timeout",
+			},
+			Latch: "grade:pro",
+		},
+	})
+	if rec.Routing == nil {
+		t.Fatal("Routing was dropped by BuildRecord")
+	}
+	line := string(appendRecordLine(nil, rec))
+	wantOrder := `"source":"selector","grade":"flash","selector":{"choice":"g0","confidence":0.62,"difficulty":2,"enforced":false,"err":"timeout"},"latch":"grade:pro"`
+	if !strings.Contains(line, wantOrder) {
+		t.Fatalf("routing object ordering/fields mismatch:\n got %s\nwant substring %s", line, wantOrder)
+	}
+	var decoded Record
+	if err := json.Unmarshal([]byte(line), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Routing == nil {
+		t.Fatalf("decoded Routing = nil (line: %s)", line)
+	}
+	if decoded.Routing.Source != "selector" || decoded.Routing.Grade != "flash" || decoded.Routing.Latch != "grade:pro" {
+		t.Fatalf("decoded routing metadata = %+v", decoded.Routing)
+	}
+	if decoded.Routing.Selector == nil || decoded.Routing.Selector.Choice != "g0" || decoded.Routing.Selector.Err != "timeout" {
+		t.Fatalf("decoded selector = %+v", decoded.Routing.Selector)
+	}
+	// Back-compat: records without a routing decision carry no routing member.
+	plain := logger.BuildRecord(Input{RequestID: "rid-1", Protocol: "anthropic"})
+	if bytes.Contains(appendRecordLine(nil, plain), []byte(`"routing"`)) {
+		t.Fatal("routing leaked into a record without one")
 	}
 }

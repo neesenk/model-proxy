@@ -75,6 +75,40 @@ func (p Pin) ExpiresLabel(now time.Time) string {
 	return "expires in " + d.Round(time.Second).String()
 }
 
+// Latch is a session-scoped route-tier escalation: after enough consecutive
+// bad runs the session is pinned to Target for the Dwell window. It is memory-
+// only, not persisted, and cleared on ReplaceGeneration — same lifecycle as
+// session sticky.
+type Latch struct {
+	Target  string    `json:"target"`
+	Since   time.Time `json:"since"`
+	BadRuns int       `json:"bad_runs"`
+}
+
+// repeatTurnKey identifies one session's routing window on one exposed route.
+// The window is memory-only, generation-scoped, and bounded.
+type repeatTurnKey struct {
+	SessionKey string
+	Route      string
+}
+
+// repeatTurnEntry is one observed turn fingerprint with its observation time.
+type repeatTurnEntry struct {
+	TurnKey string
+	At      time.Time
+}
+
+// repeatTurnWindow holds the recent turn keys for one (session, route). It is
+// bounded by maxRepeatTurnWindowEntries to prevent unbounded growth.
+type repeatTurnWindow struct {
+	Entries []repeatTurnEntry
+}
+
+// maxRepeatTurnWindowEntries caps the per-(session,route) window. The value
+// covers many agentic sub-requests within one dwell window without unbounded
+// memory growth.
+const maxRepeatTurnWindowEntries = 64
+
 // ModelKey scopes model failures and learned parameter incompatibilities to one
 // provider/model pair.
 type ModelKey struct {

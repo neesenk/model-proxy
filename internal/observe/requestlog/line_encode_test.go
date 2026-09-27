@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	configdomain "model-proxy/internal/config"
 )
 
 // TestAppendRecordLineMatchesJSONMarshal pins the hand-rolled line encoder to
@@ -62,6 +64,21 @@ func TestAppendRecordLineMatchesJSONMarshal(t *testing.T) {
 	records = append(records, &Record{
 		Ts: "2026-08-16T10:00:00Z", RequestID: "rid-tool", SessionID: "s", Kind: "mcp",
 		Method: "tools/call", Path: "/mcp/exa", Tool: tricky[2],
+	})
+	// Routing decision rides after diagnostics.
+	records = append(records, &Record{
+		Ts: "2026-08-16T10:00:00Z", RequestID: "rid-routing", SessionID: "s", Status: 200,
+		Routing: &configdomain.RoutingDecision{
+			Source: "selector",
+			Grade:  "flash",
+			Selector: &configdomain.SelectorChoice{
+				Choice:     "g0",
+				Confidence: 0.62,
+				Difficulty: 2,
+				Enforced:   false,
+			},
+			Latch: "grade:pro",
+		},
 	})
 	for i, rec := range records {
 		want, err := json.Marshal(rec)

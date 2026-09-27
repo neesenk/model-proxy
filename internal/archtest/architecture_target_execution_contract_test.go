@@ -278,7 +278,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		if calls, bound := countGenerationBoundResolvers(fusion, "NewResolver"); calls != 2 || bound != calls {
 			t.Errorf("Fusion resolver calls must bind runtime generation: calls=%d bound=%d", calls, bound)
 		}
-		shadow := namedMethod(t, rootPackage, "Proxy", "runShadow")
+		shadow := namedMethod(t, rootPackage, "Proxy", "executeShadow")
 		if calls, bound := countGenerationBoundResolvers(shadow.Body, "newResolver"); calls != 1 || bound != calls {
 			t.Errorf("Shadow resolver call must bind runtime generation: calls=%d bound=%d", calls, bound)
 		}

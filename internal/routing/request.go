@@ -9,12 +9,18 @@ import (
 	configdomain "model-proxy/internal/config"
 )
 
-// Profile contains the request-derived facts used by capability and context
-// routing. A caller should compute it once and reuse it across candidate checks.
+// Profile contains the request-derived facts used by capability, context and
+// route-policy (bands) routing. A caller should compute it once and reuse it
+// across candidate checks.
 type Profile struct {
 	HasImage        bool
 	HasTools        bool
 	EstimatedTokens int64
+	// FollowUp reports that the body already carries an assistant turn — the
+	// request is a later turn of an ongoing conversation rather than a
+	// first-turn prompt. Marker-based like the other facts (no JSON parse on
+	// the hot path); see RoutePolicy bands in docs/architecture/request-routing.md.
+	FollowUp bool
 }
 
 // ProfileRequest derives the routing profile from a raw client request body.
@@ -23,7 +29,26 @@ func ProfileRequest(body []byte) Profile {
 		HasImage:        requestHasImage(body),
 		HasTools:        RequestHasTools(body),
 		EstimatedTokens: EstimateInputTokens(body),
+		FollowUp:        requestFollowUp(body),
 	}
+}
+
+// assistantMarkers are the byte forms of an assistant-role message across the
+// three client protocols (anthropic/openai messages, responses input). Spacing
+// variants are listed explicitly — same style as imageMarkers.
+var assistantMarkers = [][]byte{
+	[]byte(`"role":"assistant"`),
+	[]byte(`"role": "assistant"`),
+}
+
+// requestFollowUp reports whether the body already contains an assistant turn.
+func requestFollowUp(body []byte) bool {
+	for _, marker := range assistantMarkers {
+		if bytes.Contains(body, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // Fits reports whether model can serve profile according to an authoritative

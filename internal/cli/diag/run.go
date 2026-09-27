@@ -15,3 +15,7 @@ func RunReplay(args []string) { CmdReplay(args, cliframework.LoadCmdConfig(args)
 // RunShadow is the process-level entry for `shadow`: load config, then run
 // the shadow subcommand (report).
 func RunShadow(args []string) { CmdShadow(args, cliframework.LoadCmdConfig(args)) }
+
+// RunRouting is the process-level entry for `routing`: load config, then run
+// the routing subcommand (report).
+func RunRouting(args []string) { CmdRouting(args, cliframework.LoadCmdConfig(args)) }

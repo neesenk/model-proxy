@@ -101,6 +101,7 @@ func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 		"replay",
 		"restore",
 		"routes",
+		"routing",
 		"schedule",
 		"serve",
 		"shadow",
@@ -240,6 +241,7 @@ func TestCLICommandRegistryIsExhaustive(t *testing.T) {
 		"unpin":    "cliadmin.RunUnpin",
 		"usage":    "clistats.RunUsage",
 		"routes":   "clistatus.RunRoutes",
+		"routing":  "clidiag.RunRouting",
 		"wire":     "clidiag.RunWire",
 	}
 	app := NewApplication(serveStub)

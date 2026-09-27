@@ -163,6 +163,29 @@ func (p *Proxy) hasRecoveredUntried(targets []configdomain.RouteTarget, tried ma
 	return p.runtimeState.HasRecoveredUntried(runtimeTargets, tried, now, quotaMaxAge)
 }
 
+// latchValue reads the session latch from the runtime Manager and projects it
+// into the forward package's consumer-owned value type.
+func (p *Proxy) latchValue(sessionKey string) (forward.Latch, bool) {
+	v, ok := p.runtimeState.LatchValue(sessionKey)
+	return forward.Latch{Target: v.Target, Since: v.Since, BadRuns: v.BadRuns}, ok
+}
+
+// setLatch writes the forward package's latch view back into the runtime
+// Manager, generation-gated. The generation comes from the request snapshot.
+func (p *Proxy) setLatch(sessionKey string, value forward.Latch, generation uint64) bool {
+	return p.runtimeState.SetLatch(sessionKey, runtimestate.Latch{
+		Target:  value.Target,
+		Since:   value.Since,
+		BadRuns: value.BadRuns,
+	}, generation)
+}
+
+// checkRepeatTurn adapts runtime.Manager.CheckRepeatTurn for the forward RouteState
+// port. The window is caller-supplied (escalation.dwell).
+func (p *Proxy) checkRepeatTurn(sessionKey, route, turnKey string, now time.Time, window time.Duration, generation uint64) bool {
+	return p.runtimeState.CheckRepeatTurn(sessionKey, route, turnKey, now, window, generation)
+}
+
 // learnParamBlock records an upstream-rejected top-level request parameter for
 // a (provider, model); subsequent requests strip it preemptively
 // (applyParamBlock). Scoped per MODEL: one model's quirk (e.g. reasoning

@@ -436,6 +436,7 @@ routes:
 
 - **能力过滤**：请求带图片（`image` block / `image_url`）或带 `tools` 时，剔除不支持该能力的目标；全部不匹配则跨路由找支持的模型兜底。models.dev 查不到的 provider（codex/aqp/volcengine）默认按「不支持」保守处理——可用 provider 级 `capabilities:` 手动声明覆盖（见配置节）。
 - **上下文兜底（两道保险）**：① 主动——估算 prompt token（rune 感知，中文按字计、剔除 base64 图片），超过路由最大上下文时自动改道到更大上下文的模型；② 被动——上游返回 context-overflow 类 400 时识别错误形状，用更大上下文的目标**自动重试一次**（找不到更大目标才把 400 原样回给客户端）。
+- **档位策略（`route_policy:`）**：显式声明「什么请求优先走哪个目标/档位」。`bands` 按序求值，第一条全条件命中的 band 把它的目标/档位提到调度顺序**最前**，其余目标仍按原顺序 failover（不是硬选择，也不会把目标清空）；`grades` 把 route 目标拆成命名组，每个 grade 独立过滤，选中 grade 前置后按 `fallback`（`any`/`next_grade`/`strict`）追加其余 grade；`escalation` 提供会话级坏运行计数器，连续 `consecutive` 次终局上游错误后把会话临时钉到强目标/档位；`selector` 用 decisions 模型（如 TypeSafe Jev）按请求内容从当前目标/档位中选择一个前置，shadow 模式只记录，enforce 模式在置信度达标时行动。无 band/latch/selector 命中、无策略、或 pin/`x-mp-force-provider` 生效时，顺序与今天完全一致。信号全部来自一次请求画像扫描：`estimated_tokens_min/max`、`follow_up`（body 已含 assistant 轮次，即会话后续轮）、`has_tools`、`has_image`。band/escalation/selector 目标必须是该 route 已服务的目标（否则永不命中，启动时告警），也可以是 `{provider: fusion, model: <workflow>}`——fusion 因此从「唯一的多模型入口」变成「档位之一」。band-only 的 route 响应缓存语义不变；启用 escalation 或 selector 的 route 绕过响应缓存。详见 `docs/architecture/request-routing.md`。
 
 ## 响应缓存
 

@@ -1133,6 +1133,61 @@ guard disallow <content-hash> [--config PATH]
 
 ---
 
+## 22. `routing report` — 路由策略离线对账（离线，不需 daemon）
+
+```
+routing report [--route NAME] [--since DUR|TIME] [--retry-window DUR] [--json] [--config PATH]
+```
+
+逻辑（`internal/cli/diag/routing_report.go` 的 `CmdRouting` -> `CmdRoutingReport`）：离线只读请求日志索引（`<request_log.dir>/index.db`），不访问 daemon。输出四类报告：
+
+1. **弱标签成功率**：按 (route, grade) 汇总 `ok`（HTTP 200 + response_size>0 + 无错误类 diagnostics）、`no_retry`（同 SessionID+TurnKey 在 retry-window 内无重发）、`no_escalation`（同 SessionID 后续未触发 latch 升级）；三者全过 = `weak_ok`。
+2. **Selector 混淆矩阵**：预测档（`routing.selector.choice`） vs 实际生效档（`routing.grade`），按 difficulty 分桶（low<0.3 / mid<0.7 / high≥0.7），`enforced=true` 与 shadow 分组。
+3. **成本基线**：用 `internal/pricing` 价格表计算实际成本 vs「全走该 route 最贵档」基线，未定价部分列为 `unknown`。
+4. **判定开销**：`route-select-*` / `fusion-select-*` decisions 调用次数、延迟、token 占比。
+
+### stdout（表格）
+
+表头分四段输出：
+
+```
+Weak labels by route/grade
+ROUTE            GRADE           SAMPLES       OK   NO_RETRY   NO_ESC   WEAK_OK
+
+Selector enforce matrix / Selector shadow matrix
+DIFF       PREDICTED        ACTUAL           GRADE            SAMPLES   WEAK_OK
+
+Cost baseline
+ROUTE            SAMPLES     ACTUAL    BASELINE    UNKNOWN
+
+Decision overhead
+decision requests: N
+total latency: N ms (avg N ms)
+decision tokens: N (X.XX% of all tokens)
+```
+
+- 无请求日志目录 -> stdout `(no request log directory — enable request_log to collect routing data)` + exit 0。
+- 有日志目录但尚无索引 -> stdout `(no request log index yet — routing data will appear after the indexer runs)` + exit 0。
+- 窗口内无业务请求 -> stdout `(no routing business requests in range)` + exit 0。
+- 末尾固定打印弱标签偏差免责说明：
+  ```
+  Note: weak labels are biased — users may not retry even when dissatisfied.
+  Low-confidence / low weak-ok regions should be calibrated with L2 strong labels.
+  ```
+
+### `--json`
+
+原样输出聚合后的结构化 JSON（`routingReport` 结构），包含 `weak_label_summary`、`selector_matrix`、`cost`、`overhead`、`window_start`、`window_end`。
+
+### 失败（stderr `✗ <ERR>` + exit 1）
+
+- 索引无法打开：`cannot open request log index: <ERR>`
+- 索引查询失败：`query request log index: <ERR>`
+
+锁定测试：`internal/cli/diag/routing_report_test.go`（弱标签聚合、混淆矩阵、成本基线、空窗/无数据路径、JSON 结构）。
+
+---
+
 ## 契约改动清单（改动时须核对）
 
 改契约时，除更新本文档外，还需同步这些测试断言（`strings.Contains` 精确文案）：
@@ -1144,6 +1199,7 @@ guard disallow <content-hash> [--config PATH]
 - `internal/provider/*_test.go`：`usage` 展示的 `Provider:` 首行 + 配额窗口标记。
 - `internal/cli/audit/audit_cli_test.go`：`audit` 表格/`--json` 输出、flag 与时间解析错误文案；`internal/cli/doctor/doctor_drift_audit_test.go`：漂移审计记录（host-only detail、当日去重、audit 关闭）。
 - `internal/cli/diag/shadow_report_render_test.go`：`shadow report` 表头/数据列/截断/紧凑数字与 disabled/empty 提示文案；`internal/cli/diag/shadow_report_cmd_test.go`：`--from`/`--to` query 透传（`MakeURLQuery`）。
+- `internal/cli/diag/routing_report_test.go`：`routing report` 弱标签聚合、selector 混淆矩阵、成本基线、判定开销、空窗/无数据路径、`--json` 结构。
 - `internal/cli/status/routes_cmd_test.go`：`routes` 列表/详情/未知模型输出；`internal/cli/help_sync_test.go`：命令注册表 ↔ `-h` 清单/`Help` map/CLI.md 章节/测试子进程分发的双向同步契约；`internal/archtest` 的 `NewApplication` 注册数 ↔ `Commands` 字面量条目数自洽契约。
 - `internal/app/web_config_test.go` + `internal/web/jstests/contract.test.mjs`：`GET /api/config` 文档键 ↔ `appapi.ConfigDocument` 字段 ↔ 前端 `configCache` 读取字段的同步契约。
 

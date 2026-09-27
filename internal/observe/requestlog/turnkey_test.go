@@ -8,14 +8,14 @@ import (
 
 func TestComputeTurnKeyOpenAIUserText(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"world"}]}`)
-	key := computeTurnKey(body)
+	key := ComputeTurnKey(body)
 	if key == "" {
 		t.Fatal("expected non-empty turn key for openai user text")
 	}
 	// Same newest text but a different real-user-text count (an earlier user
 	// turn) must produce a different key.
 	body2 := []byte(`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"world"}]}`)
-	key2 := computeTurnKey(body2)
+	key2 := ComputeTurnKey(body2)
 	if key2 == "" {
 		t.Fatal("expected non-empty turn key for two-user body")
 	}
@@ -41,7 +41,7 @@ func TestComputeTurnKeyStableAcrossAgenticTurn(t *testing.T) {
 	]}`
 	keys := map[string]bool{}
 	for _, body := range []string{base + `]}`, mid + `]}`, full} {
-		k := computeTurnKey([]byte(body))
+		k := ComputeTurnKey([]byte(body))
 		if k == "" {
 			t.Fatal("expected non-empty turn key across agentic sub-requests")
 		}
@@ -58,7 +58,7 @@ func TestComputeTurnKeyAnthropicSkipsToolResult(t *testing.T) {
 		{"role":"assistant","content":[{"type":"text","text":"ok"}]},
 		{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"file contents"}]}
 	]}`)
-	key := computeTurnKey(body)
+	key := ComputeTurnKey(body)
 	// tool_result-only user messages do not count: one real user-text message.
 	want := hashTurnKey(1, "keep going")
 	if key != want {
@@ -68,7 +68,7 @@ func TestComputeTurnKeyAnthropicSkipsToolResult(t *testing.T) {
 
 func TestComputeTurnKeyArrayTextBlocks(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"part A "},{"type":"text","text":"part B"}]}]}`)
-	key := computeTurnKey(body)
+	key := ComputeTurnKey(body)
 	want := hashTurnKey(1, "part A part B")
 	if key != want {
 		t.Fatalf("turn key = %q, want %q", key, want)
@@ -78,11 +78,11 @@ func TestComputeTurnKeyArrayTextBlocks(t *testing.T) {
 func TestComputeTurnKeyResponsesInput(t *testing.T) {
 	// responses API: input may be a string or a message array.
 	str := []byte(`{"input":"string input"}`)
-	if got := computeTurnKey(str); got != hashTurnKey(0, "string input") {
+	if got := ComputeTurnKey(str); got != hashTurnKey(0, "string input") {
 		t.Fatalf("string input turn key = %q, want %q", got, hashTurnKey(0, "string input"))
 	}
 	arr := []byte(`{"input":[{"role":"user","content":"array input"}]}`)
-	if got := computeTurnKey(arr); got != hashTurnKey(1, "array input") {
+	if got := ComputeTurnKey(arr); got != hashTurnKey(1, "array input") {
 		t.Fatalf("array input turn key = %q, want %q", got, hashTurnKey(1, "array input"))
 	}
 }
@@ -94,8 +94,8 @@ func TestComputeTurnKeyResponsesInput(t *testing.T) {
 func TestComputeTurnKeySameTextNewTurn(t *testing.T) {
 	body1 := []byte(`{"messages":[{"role":"user","content":"continue"}]}`)
 	body2 := []byte(`{"messages":[{"role":"user","content":"ship it"},{"role":"assistant","content":"done"},{"role":"user","content":"continue"}]}`)
-	key1 := computeTurnKey(body1)
-	key2 := computeTurnKey(body2)
+	key1 := ComputeTurnKey(body1)
+	key2 := ComputeTurnKey(body2)
 	if key1 == "" || key2 == "" {
 		t.Fatal("expected non-empty keys")
 	}
@@ -113,8 +113,8 @@ func TestComputeTurnKeyFallsBackWhenNoUserText(t *testing.T) {
 		"",
 	}
 	for _, c := range cases {
-		if got := computeTurnKey([]byte(c)); got != "" {
-			t.Errorf("computeTurnKey(%q) = %q, want empty", c, got)
+		if got := ComputeTurnKey([]byte(c)); got != "" {
+			t.Errorf("ComputeTurnKey(%q) = %q, want empty", c, got)
 		}
 	}
 }
@@ -124,7 +124,7 @@ func TestComputeTurnKeyOversizeBody(t *testing.T) {
 	for i := range body {
 		body[i] = 'x'
 	}
-	if got := computeTurnKey(body); got != "" {
+	if got := ComputeTurnKey(body); got != "" {
 		t.Fatalf("oversize body must yield empty turn key, got %q", got)
 	}
 }

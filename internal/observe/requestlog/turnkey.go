@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// computeTurnKey returns a fingerprint that identifies one conversational turn.
+// ComputeTurnKey returns a fingerprint that identifies one conversational turn.
 // It mirrors the frontend's requestExcerpt semantics:
 //   - parse the request body as JSON;
 //   - read messages[] (openai/chat/anthropic) or input[] / input string (responses);
@@ -24,7 +24,10 @@ import (
 // increments when a new human instruction arrives, so two consecutive turns
 // that send the same literal text (e.g. "continue") produce different keys.
 // An unparseable body or one with no textual user content yields an empty key.
-func computeTurnKey(body []byte) string {
+//
+// ComputeTurnKey is the single authoritative source for turn fingerprints; it is
+// consumed by both the request log and the route escalation repeat_turn signal.
+func ComputeTurnKey(body []byte) string {
 	if len(body) == 0 || len(body) > 1500000 {
 		return ""
 	}

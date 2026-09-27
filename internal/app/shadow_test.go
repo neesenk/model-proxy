@@ -207,8 +207,8 @@ func TestShadowDispatchEmptyModelPassesThrough(t *testing.T) {
 		"responses",
 		"responses",
 		"alias",
-		"alias", configdomain.ShadowTarget{Provider: "candidate"}, []byte(`{"model":"alias","input":[]}`),
-		"request-1", "zcode", "sess-1",
+		"alias", configdomain.RouteTarget{Provider: "candidate"}, []byte(`{"model":"alias","input":[]}`),
+		"request-1", "zcode", "sess-1", nil, nil,
 	)
 	body, _ := gotBody.Load().(string)
 	var decoded map[string]any
@@ -343,8 +343,8 @@ func TestRunShadowPartialResponseIsLogged(t *testing.T) {
 		"openai",
 		"openai",
 		"alias",
-		"alias", configdomain.ShadowTarget{Provider: "candidate", Model: "shadow-model", Protocol: "openai"}, []byte(`{"model":"alias","messages":[]}`),
-		"partial-1", "", "",
+		"alias", configdomain.RouteTarget{Provider: "candidate", Model: "shadow-model", Protocol: "openai"}, []byte(`{"model":"alias","messages":[]}`),
+		"partial-1", "", "", nil, nil,
 	)
 	shutdownLogger()
 
@@ -834,7 +834,7 @@ func TestRunShadow_NilRuntimeConfig(t *testing.T) {
 	var buf syncLogBuffer
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
-	p.runShadow(RuntimeSnapshot{}, nil, nil, "anthropic", "anthropic", "m", "g", configdomain.ShadowTarget{Provider: "p", Model: "m"}, []byte(`{}`), "rid", "", "")
+	p.runShadow(RuntimeSnapshot{}, nil, nil, "anthropic", "anthropic", "m", "g", configdomain.RouteTarget{Provider: "p", Model: "m"}, []byte(`{}`), "rid", "", "", nil, nil)
 	if !strings.Contains(buf.String(), "runtime snapshot has no config") {
 		t.Fatalf("expected the nil-cfg guard log, got %q", buf.String())
 	}

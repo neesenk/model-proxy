@@ -48,6 +48,9 @@ const (
 	// scheduling+planning time per request — the proxy's own overhead, separate
 	// from upstream TTFT.
 	EvRoutingObserved MetricsEvent = "routing_observed"
+	// Routing selector observations, counted under the virtual key
+	// ("routing", "selector"): one per route-level decisions selector call.
+	EvRoutingSelectorObserved MetricsEvent = "routing_selector_observed"
 )
 
 // VirtualProviders names the counter namespaces that share the (provider,
@@ -150,7 +153,7 @@ func (s *MetricsStore) Inc(provider, model string, ev MetricsEvent) {
 	case EvGuardHits:
 		pm.Requests.Add(1)
 		pm.LastRequestAt.Store(time.Now().Unix())
-	case EvAttemptOK, EvAttemptHard, EvAttemptRateLimited, EvRoutingObserved:
+	case EvAttemptOK, EvAttemptHard, EvAttemptRateLimited, EvRoutingObserved, EvRoutingSelectorObserved:
 		pm.Requests.Add(1)
 		pm.LastRequestAt.Store(time.Now().Unix())
 	}

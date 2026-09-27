@@ -8,6 +8,8 @@ import configdomain "model-proxy/internal/config"
 type Config = configdomain.Config
 type FusionConfig = configdomain.FusionConfig
 type SelectorConfig = configdomain.SelectorConfig
+type RoutePolicy = configdomain.RoutePolicy
+type RoutingDecision = configdomain.RoutingDecision
 type Scheduling = configdomain.Scheduling
 type Provider = configdomain.Provider
 type RouteTarget = configdomain.RouteTarget

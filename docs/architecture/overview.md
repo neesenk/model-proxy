@@ -579,7 +579,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/clicommon → appapi, daemonctl, display`；
 - `cli/clitest → accounts`（纯测试支撑：子进程 harness 与共享 fixture，生产代码不得依赖）；
 - `cli/config → accounts, cli/framework, config, display, provider, routing, takeover`（`config init|print|check`）；
-- `cli/diag → cli/framework, cli/models, config, daemonctl, display, observe/requestlog, probe, provider, upstreamproxy`（`wire`/`replay`/`shadow`）；
+- `cli/diag → cli/framework, cli/models, config, daemonctl, display, observe/requestlog, pricing, probe, provider, upstreamproxy`（`wire`/`replay`/`shadow`/`routing report`）；
 - `cli/doctor → accounts, appapi, cli/clicommon, cli/framework,
   cli/models, config, credstore, display, routing, takeover, observe/seclog, provider`；
 - `cli/framework → accounts, config`；

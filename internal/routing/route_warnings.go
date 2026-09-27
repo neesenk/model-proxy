@@ -84,5 +84,79 @@ func ConfigRoutingWarnings(cfg *configdomain.Config, expanded map[string][]confi
 			// warning needed.
 		}
 	}
+	// Route-policy bands whose target/grade the route does not serve can never
+	// apply — surface the typo at startup instead of letting the band silently do
+	// nothing. For graded policies a grade: reference only needs to exist in the
+	// policy's grades; a target reference must uniquely fall into one grade (and
+	// also be served by the route). For non-graded policies the target must simply
+	// be served by the route.
+	policyRoutes := make([]string, 0, len(cfg.RoutePolicies))
+	for r := range cfg.RoutePolicies {
+		policyRoutes = append(policyRoutes, r)
+	}
+	sort.Strings(policyRoutes)
+	for _, route := range policyRoutes {
+		policy := cfg.RoutePolicies[route]
+		for i, band := range policy.Bands {
+			if policy.HasGrades() {
+				if band.Grade != "" {
+					if _, ok := policy.Grades[band.Grade]; ok {
+						continue
+					}
+					out = append(out, fmt.Sprintf("route_policy %q band %d: grade %q is not declared in grades — the band can never match; add the grade or fix the name",
+						route, i, band.Grade))
+					continue
+				}
+				if msg := gradedBandTargetWarning(route, i, band.Target, expanded[route], policy.Grades); msg != "" {
+					out = append(out, msg)
+				}
+				continue
+			}
+			if band.Grade != "" {
+				out = append(out, fmt.Sprintf("route_policy %q band %d: grade %q used but route_policy has no grades declared — the band can never match",
+					route, i, band.Grade))
+				continue
+			}
+			if bandServed(expanded[route], band.Target) {
+				continue
+			}
+			out = append(out, fmt.Sprintf("route_policy %q band %d: target %s/%s is not served by this route — the band can never match; add the target to the route or fix the name",
+				route, i, band.Target.Provider, band.Target.Model))
+		}
+	}
 	return out
+}
+
+// bandServed reports whether the route's config-level target list contains the
+// band's target. Pooled virtual IDs do not exist at config time, so plain
+// provider/model equality is the right check here.
+func bandServed(targets []configdomain.RouteTarget, want configdomain.RouteTarget) bool {
+	for _, t := range targets {
+		if t.Provider == want.Provider && t.Model == want.Model {
+			return true
+		}
+	}
+	return false
+}
+
+// gradedBandTargetWarning checks whether a target-referencing band in a graded
+// policy can ever match. It returns an empty string when the target is fine. A
+// target must both be served by the route and uniquely belong to one declared
+// grade; validation already rejects ambiguous/ungraded targets, but the warning
+// path is defensive.
+func gradedBandTargetWarning(route string, i int, target configdomain.RouteTarget, routeTargets []configdomain.RouteTarget, grades map[string][]configdomain.RouteTarget) string {
+	if !bandServed(routeTargets, target) {
+		return fmt.Sprintf("route_policy %q band %d: target %s/%s is not served by this route — the band can never match; add the target to the route or fix the name",
+			route, i, target.Provider, target.Model)
+	}
+	grade, ambiguous := GradeForTarget(target, grades)
+	if ambiguous {
+		return fmt.Sprintf("route_policy %q band %d: target %s/%s appears in multiple grades — the band can never match; use grade: <name>",
+			route, i, target.Provider, target.Model)
+	}
+	if grade == "" {
+		return fmt.Sprintf("route_policy %q band %d: target %s/%s does not belong to any grade — the band can never match; add it to a grade or use grade: <name>",
+			route, i, target.Provider, target.Model)
+	}
+	return ""
 }

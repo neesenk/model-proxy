@@ -3,6 +3,7 @@ package app
 
 import (
 	"fmt"
+	"math/rand"
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/adjudicate"
 	responsecache "model-proxy/internal/cache"
@@ -133,6 +134,12 @@ type processServices struct {
 	cacheStatePath string
 	cacheCounters  *responsecache.Counters
 	cachePersistMu sync.Mutex // serializes cache snapshot/write across generations
+	// evalRand is the random source for route_policy eval sampling. Tests
+	// inject a deterministic function here. Production uses rand.Float64.
+	evalRand func() float64
+	// evalPrimaryBodies holds sampled primary response bodies for L2 eval
+	// shadow dispatch. It is bounded and entries are removed on retrieval.
+	evalPrimaryBodies *evalBodyCache
 }
 
 // Proxy holds the compiled provider instances + the config.
@@ -232,10 +239,12 @@ func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 			parentOf:  built.ParentOf,
 		},
 		processServices: processServices{
-			lifecycle:     runtimestate.NewLifecycle(),
-			client:        &http.Client{Timeout: 0, Transport: transport},
-			proxyResolver: upstreamproxy.NewResolver(),
-			transports:    map[string]*http.Transport{},
+			lifecycle:         runtimestate.NewLifecycle(),
+			client:            &http.Client{Timeout: 0, Transport: transport},
+			proxyResolver:     upstreamproxy.NewResolver(),
+			transports:        map[string]*http.Transport{},
+			evalRand:          rand.Float64,
+			evalPrimaryBodies: newEvalBodyCache(evalBodyCacheMaxEntries, evalBodyCacheMaxBytes),
 		},
 		// Read once here (not per request): MP_PPROF=1 turns on /debug/pprof/.
 		pprofEnabled:  os.Getenv("MP_PPROF") == "1",

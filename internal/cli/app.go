@@ -56,6 +56,7 @@ func NewApplication(serve func(args []string)) *Application {
 		"mcp":      ProcessCommand(climcp.RunMCP),
 		"replay":   ProcessCommand(clidiag.RunReplay),
 		"shadow":   ProcessCommand(clidiag.RunShadow),
+		"routing":  ProcessCommand(clidiag.RunRouting),
 		"wire":     ProcessCommand(clidiag.RunWire),
 	}
 	return app

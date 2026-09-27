@@ -72,6 +72,142 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
 `{provider, model, protocol}`，冲突时保留更低 priority，池化虚拟 provider ID
 互不折叠。
 
+## 档位策略（route_policy）
+
+`route_policy:` 是 per-route 的声明式档位策略（键 = exposed route 名，与
+`shadow:`/`mcp_routes:` 同属「route 作用域的额外行为」）。协议解析见
+`internal/config` 的 `RoutePolicy`/`RouteBand`/`BandWhen`，判定与应用在
+`internal/routing` 的 `PickBand`/`PreferTarget`/`SelectGrade`（叶子纯函数）与
+`internal/forward` 的 `applyRoutePolicy`/`applyRoutePolicyGrades`（编排）。
+
+语义（实现契约）：
+
+1. **信号来自唯一一次画像扫描**（`routing.ProfileRequest`）：`estimated_tokens_min/max`
+   对应 `Profile.EstimatedTokens`，`follow_up` 对应 `Profile.FollowUp`（body 含
+   assistant 轮次的字节标记判定，即 fusion `first_turn_only` 门对「后续轮」的同一概念），
+   另有 `has_tools`/`has_image`。`when` 里列出的条件全部成立才算命中（AND），
+   空 `when` 是校验错误。**注意**：能力路由在 catalog 缺失时用空画像 no-op，而 bands 读
+   `pipeline.rawProfile`——档位信号是纯 body 事实，不依赖目录，因此目录不可用时仍然生效。
+2. **bands 按序求值，首个命中者胜**；无命中 = 保持调度顺序。
+3. **应用是「前置」不是「硬选」**：命中目标移到 `ordered` 最前，其余目标保留为 failover；
+   命中目标不在（能力过滤已剔除或本就不在该 route）时返回原顺序——策略不得造成零尝试。
+4. **硬选择优先**：pin（`force`）或 force-provider 生效时整条策略跳过，与「硬选择不进入
+   请求感知改道」同一规则。
+5. **响应 cache**：bands 的判定是 `(body, config)` 纯函数，band-only route 的缓存语义不变。
+   （后续切片引入的会话 latch / decisions selector 才需要绕过缓存，见各自章节。）
+6. **校验分层**：`internal/config` 只校验本地不变量（route 名存在、provider/recipe 存在、
+   协议归属、min ≤ max、`when` 非空、band 目标不得自带 `protocol:`——协议要写在 route
+   target 上）；「band 目标是否真的被该 route 服务」由 `internal/routing.ConfigRoutingWarnings`
+   在启动/doctor/config check 出告警（跨层事实归 routing owner，config 不能反向依赖）。
+7. **fusion 目标**：band 可以指向 `{provider: fusion, model: <workflow>}`，管线把它当普通
+   fusion target 编排（fusion 内部的降级语义不变）；这是「fusion 从唯一入口变成档位之一」
+   的落点。
+
+### 档位分组（grades）
+
+`route_policy.<route>.grades` 把 route 的目标划分成命名模型档，是「**模型选择层 vs 调度层**」
+分离的落点：选择层只输出 grade 名，调度层只在选中 grade 内排序。
+
+- **两层顺序**（graded route 的实际管线）：`schedule(全部 targets)`（调度投影）→
+  `ApplyWithProfile`（能力/context 过滤，仍保留跨 route 兜底）→ 按 grade 分组并在**档内**
+  再过滤一次（`filterGradeTargets`；空档就空着，不跨档兜底）→ `SelectGrade` 选档 →
+  `buildGradeOrdered` 按 fallback 拼接最终顺序 → 目标循环。选择层看到的只有 grade 级候选
+  与「该档是否可用」，**不含** surplus/配额数值；调度层的排序语义（surplus / peak / 熔断 /
+  粘滞 / 池化 spread）不变，作用域收窄到选中档的目标集。
+- **分组**：grade 顺序 = 目标在 route 中首次出现的顺序；一个目标只属于首次命中的 grade；
+  不在任何 grade 的目标作为 ungraded 保留在末尾。
+- **选择优先级**：`routing.SelectGrade` 按 **active latch > selector choice > band** 返回 grade 名；
+  无显式选择时保持自然顺序（各档按原序 + ungraded）——即未配置 grades 的旧行为。
+- **fallback 模式**（默认 `any`）：
+  - `any`：选中 grade 后置，其余 grade 按 route 顺序追加，最后追加 ungraded。
+  - `next_grade`：只追加选中 grade 的下一个 grade，然后 ungraded。
+  - `strict`：只尝试选中 grade，不追加任何回退。**注意**：若选中档过滤后为空，本次请求会
+    零尝试直接终局——这是显式选择，与「宁可尝试不匹配目标也不零尝试」的默认规则相反；
+    接受这种失败模式才用它。这类终局会被 `recordLatchOutcome` 计为坏运行，从而让会话在
+    escalation 的 `dwell` 内升到更强的档。
+- **与 latch 的协作**：graded route 的 escalation 可用 `grade: <name>`，latch 目标编码为
+  `"grade:<name>"`；latch 落在某 grade 时强制选该 grade，即使其过滤后为空也优先。
+- **selector 候选**：graded route 下候选为 grade 级别，ID 用 `g0..gn`，rubric 为
+  `"grade <name>"`；enforce 模式置信度达标时把选中 grade 前置。
+- **响应 cache**：仅有 bands 的 graded route 仍保持纯函数缓存语义；启用 escalation 或
+  selector 的 graded route 绕过响应 cache。
+- **校验**：grade 名非空、每个 grade 至少一个 target、target 必须属于该 route；band/escalation
+  在 graded policy 下必须引用已声明 grade，或用能无歧义解析到唯一 grade 的 target。
+
+### 会话内升级（escalation）
+
+`route_policy.<route>.escalation` 是会话级的「坏运行计数器 → 临时升档」机制：
+
+- **状态**：`runtime.Latch{Target, Since, BadRuns}`，按 `x-claude-code-session-id` 索引，内存态、
+  不持久化、随 config generation 清空——owner 是 `internal/runtime.Manager`（见
+  `docs/architecture/runtime-state.md`）。
+- **信号闭集**：`bad_signals` 为闭集，取值只能是 `upstream_error`、`empty_ok`、`repeat_turn` 之一或组合；
+  未知取值在校验时报错。默认仍只含 `upstream_error`（不配置 escalation 零行为变化）。
+  - `upstream_error`：请求终局未 commit 且客户端未断开（收到终局错误）。
+  - `empty_ok`：请求 commit 为 200，但最终写回客户端的响应体字节数为 0。该谓词是保守的：
+    只按最终客户端字节计数，不误判带空 `content` 或纯 `tool_use` 的合法 JSON/JSON 帧。
+  - `repeat_turn`：同一 `TurnKey`（`requestlog.ComputeTurnKey`，request log 与该信号的唯一权威来源）
+    在同一 session+route 的 `escalation.dwell` 滑窗内再次出现，说明客户端在重发同一轮。
+    状态由 `runtime.Manager` 持有，generation 门控、内存 only、 bounded。
+- **触发**：任一配置的坏信号贡献一次坏运行；多个信号可在同一次 outcome 中叠加。
+  连续 `consecutive` 个坏运行（默认读取侧不处理 0；配置校验要求 ≥1）后，`Target` 设为
+  `escalation.target/Grade`，`Since` 刷新，`BadRuns` 清零；下一次同会话请求会把该 target/grade
+  前置到调度顺序最前。
+- **滞回**：已升级会话在 `dwell`（默认 `30m`）内不回退；好运行（commit 且无配置的坏信号触发）
+  只清零 `BadRuns`，保留 latch target。
+- **与 band 的优先级**：先查 latch，latch 生效时跳过 bands；latch 过期/不存在时才走 bands。
+- **与硬选择的优先级**：pin / `x-mp-force-provider` 生效时整条策略（含 latch）跳过，与 bands 同一规则。
+- **响应 cache**：启用 escalation 的 route 必须绕过响应 cache（与 force-provider/pin 同语义），
+  否则已升级会话可能命中便宜档缓存。
+
+### 判定选择器（selector）
+
+`route_policy.<route>.selector` 是会话级/请求级的 decisions 模型判定：每次请求把当前
+`ordered` 目标集作为候选（`c0..cn`，`rubric` 取自 target 的 `rubric`），调用一个
+`protocol: decisions` 模型（如 TypeSafe Jev）拿到最佳选择与难度评分。
+
+- **优先级链**：在 `!force && forcedProvider == ""` 分支内，顺序为
+  **latch > selector(enforce 且置信度达标) > bands > 静态顺序**。selector 失败、低置信、
+  shadow 或未配置时顺序不变。
+- **候选集**：当前 `ordered` 中的目标（能力/上下文过滤后、或 latch/band 已调整后的顺序），
+  用 `routing.PreferTarget` 把选中目标前置，其余保留为 failover，不硬选、不清空、不切换
+  provider 身份（池化虚拟 ID 保持正确）。
+- **调用与超时**：每请求一次，timeout 来自 `SelectorConfig.TimeoutDuration()`（默认 800ms）；
+  任何失败 fail-open 回退到上一步顺序。
+- **mode**：`shadow`（默认）只记录不行动；`enforce` 在 `confidence ≥ SelectorConfig.ConfidenceThreshold()`
+  时前置选中目标。
+- **响应 cache**：启用 selector 的 route 必须绕过响应 cache，与 escalation 同一语义。
+- **实现**：route selector 与 fusion selector 共用 `internal/forward/decisions.go` 的
+  `pipeline.callDecisions` 共享 helper，事件/统计/日志语义与 fusion selector 同形状
+  （live event provider marker 为 `route-select:<model>` / `fusion-select:<model>`）。
+- **配置限制**：route 级 selector 禁止 `direct_score_max` 与 `panel_top_k`（fusion-only），
+  非 0 校验报错；instruction/difficulty_instruction 长度沿用 fusion 的 rune 上限。
+
+### L2 成对评估（eval）
+
+`route_policy.<route>.eval` 为已配置 `grades` 的 route 开启「主响应 vs 配对档响应」的
+离线成对评估（L2 strong labels）。eval 在请求 commit 后异步触发，不影响 live 请求。
+
+- **触发条件**：`pin` / `x-mp-force-provider` 等硬选择会跳过整条 route_policy，因此也
+  跳过 eval；只有正常经过档位策略且 `routingDecision.Grade != ""` 的请求才可能被评估。
+- **采样**：`sample_rate` 控制 eval 采样率，范围 `[0, 0.5]`，默认/缺省取 `0.05`。
+  采样使用 `Proxy.evalRand`（测试可注入确定性函数），并在 commit 后才做决策；响应体
+  在 `CaptureResponse` 时先无条件缓存到 `evalPrimaryBodies`，commit 后若被采样则取走。
+- **配对规则**：`pair` 支持 `opposite`（默认）或 `grade:<name>`。
+  `opposite` 使用档位在配置中首次出现的顺序：主档的下一档为配对档；最后一档回退到
+  前一档。该规则只依赖配置顺序，不依赖价格数据。
+- **影子请求**：eval 使用与 legacy shadow 同一套 `shadow.Runtime` 并发门和生命周期准入；
+  影子目标在配对档内按健康/禁用状态挑选一个可运行目标（含池化虚拟 ID 解析）。
+- **裁判模型**：`judge` 必须是 `protocol: decisions` 的 provider/model，调用
+  `internal/forward/decisions.go` 的 `CallEvalJudge`。裁判 prompt 包含主/影子两个响应正文，
+  题型为 `model_choice`，候选 `{primary_better, shadow_better, tie}`。
+- **敏感日志**：eval judge 调用标记 `Sensitive`，request log 中只保留元数据
+  （provider/model/status/latency/usage），request/response body 置空，避免用户响应正文
+  进入日志。
+- **verdict 汇总**：shadow 记录的 `diagnostics` 会写入 `eval_shadow_grade` 与 `eval_verdict`；
+  `model-proxy routing report` 按 `(route, primary_grade, shadow_grade, verdict)` 聚合展示，
+  供离线校准档位策略。
+
 ## Context overflow retry
 
 普通 4xx commit 前最多 peek 64 KiB。命中保守的 context overflow 错误且尚未重试时，选择 catalog 中严格更大 context 的目标重试一次。
@@ -132,7 +268,8 @@ BuildProviders pass + 各 impl 的 `AuthReady`，虚拟账号折回父名，只�
 
 - reasoning replay 模型使用协议转换；
 - provider wire protocol 无法表达且无法转换（当前无实例：codex Responses 已可
-  转换，`provider.WireProtocolNote` 现对所有 provider 返回空，此类为 inert marker）。
+  转换，`provider.WireProtocolNote` 现对所有 provider 返回空，此类为 inert marker）；
+- `route_policy` band 的目标不被该 route 服务（永不命中，多半是名字写错）。
 
 warning 同时出现在 daemon log、`/api/status.warnings`、models、doctor 和 config check。
 
@@ -141,6 +278,9 @@ warning 同时出现在 daemon log、`/api/status.warnings`、models、doctor �
 - capabilities override 权威性和 parentOf 解析。
 - nil catalog no-op。
 - in-route/cross-route/回落/pin/force。
+- 档位策略：band 首命中前置、无命中/目标缺席保持原序、force-provider 与 pin 跳过策略、
+  `follow_up` 标记在三种协议形态下的判定、band 目标不在 route 时的启动告警；grades 的分组/过滤/回退
+  （any/next_grade/strict）、latch 强制选 grade、selector 的 grade 级候选。
 - force-provider 即使能力不匹配也不得被替换到其他 route。
 - force-provider 是代理内部控制参数：`?force_provider=` query 由 executor 从
   上游 URL 剥除（`stripInternalQuery`），不透传给上游 API。

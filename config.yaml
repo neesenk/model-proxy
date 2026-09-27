@@ -435,6 +435,57 @@ providers:
 routes:
   # deepseek-v4-pro: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-flash]
   # deepseek-v4-flash: [aqp/deepseek-v4-flash, volcengine/deepseek-v4-flash, shopee/deepseek-v4-flash, deepseek/deepseek-flash]
+
+# route_policy: per-route tier policy (route 级档位策略) — declarative bands pick
+# a preferred target (or, with grades, a preferred grade) from the request
+# profile: estimated_tokens_min/max, follow_up (body already carries an assistant
+# turn), has_tools, has_image (listed conditions AND together). Bands are
+# evaluated in order; the FIRST match moves its target/grade to the FRONT of the
+# scheduled order while every other target stays as failover — never a hard
+# selection, and a band whose target/grade the route does not serve can never
+# match (startup warns; see docs/architecture/request-routing.md).
+# pin / x-mp-force-provider skip the policy entirely. A {provider: fusion, ...}
+# target is allowed.
+# route_policy:
+#   glm-5.3:
+#     # grades: split route targets into named groups. Each grade is filtered
+#     # independently; the selected grade goes first and fallback controls the
+#     # remaining grades. Bands may use grade: <name> or a target resolving to a
+#     # single grade. fallback: any (default) | next_grade | strict.
+#     grades:
+#       fast: [aqp/glm-5.3]
+#       strong: [zhipu/glm-5.3]
+#     fallback: any
+#     bands:
+#       - when: {follow_up: true, estimated_tokens_max: 8000}
+#         grade: fast
+#       - when: {estimated_tokens_min: 60000}
+#         grade: strong
+#     # escalation: session-level latch to a stronger target/grade after
+#     # consecutive bad upstream outcomes (upstream_error is the only supported
+#     # signal). Use grade: <name> for graded policies, target: otherwise.
+#     escalation:
+#       bad_signals: [upstream_error]
+#       consecutive: 2
+#       grade: strong
+#       dwell: 30m
+#     # selector: per-request decisions-model routing. shadow (default) records
+#     # only; enforce moves the chosen target/grade to the front when confidence
+#     # ≥ threshold. With grades candidates are grade-level (g0..gn); without
+#     # grades they are target-level (c0..cn). Route-level selector must declare
+#     # protocol: decisions and leaves direct_score_max / panel_top_k at 0.
+#     selector:
+#       target: {provider: typesafe, model: jev-1.13, protocol: decisions}
+#       mode: shadow
+#       confidence: 0.55
+#       timeout: 800ms
+#     # eval: L2 pairwise shadow evaluation for graded routes. The judge model
+#     # must declare protocol: decisions. sample_rate is capped at 0.5; pair can
+#     # be "opposite" (next grade in declaration order) or "grade:<name>".
+#     eval:
+#       sample_rate: 0.05
+#       pair: opposite
+#       judge: {provider: typesafe, model: jev-1.13, protocol: decisions}
 # Scheduling: every field has a code default (config.go accessors), so this
 # block can be omitted entirely. Uncomment a line to override.
 # scheduling:

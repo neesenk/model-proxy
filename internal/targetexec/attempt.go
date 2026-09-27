@@ -39,6 +39,9 @@ type LogContext struct {
 	// Diagnostics carries the attempt's request-conversion diagnostics
 	// (structured lossy-conversion observations) into the request log.
 	Diagnostics []ConversionDiagnostic
+	// Routing records the route-tier policy decision that selected the target
+	// order. It is log metadata only; the executor does not act on it.
+	Routing *configdomain.RoutingDecision
 }
 
 // ConversionDiagnostic is the wire-independent projection of a protocol

@@ -15,12 +15,14 @@ import (
 type Manager struct {
 	mu sync.Mutex
 
-	generation uint64
-	health     map[string]*providerHealth
-	sticky     map[string]Sticky
-	pins       map[string]Pin
-	modelLocks map[ModelKey]*modelLock
-	paramBlock map[ModelKey]map[string]bool
+	generation  uint64
+	health      map[string]*providerHealth
+	sticky      map[string]Sticky
+	latch       map[string]Latch
+	repeatTurns map[repeatTurnKey]*repeatTurnWindow
+	pins        map[string]Pin
+	modelLocks  map[ModelKey]*modelLock
+	paramBlock  map[ModelKey]map[string]bool
 	// disabledModels is the operator disable override (Web Status→Models
 	// toggle): a disabled (provider, model) is excluded from scheduling and
 	// from the exposed model list. It deliberately survives hot reloads
@@ -46,6 +48,12 @@ func (m *Manager) ensureLocked() {
 	}
 	if m.sticky == nil {
 		m.sticky = make(map[string]Sticky)
+	}
+	if m.latch == nil {
+		m.latch = make(map[string]Latch)
+	}
+	if m.repeatTurns == nil {
+		m.repeatTurns = make(map[repeatTurnKey]*repeatTurnWindow)
 	}
 	if m.pins == nil {
 		m.pins = make(map[string]Pin)
@@ -91,6 +99,8 @@ func (m *Manager) ReplaceGeneration(generation uint64) {
 	m.generation = generation
 	m.health = make(map[string]*providerHealth)
 	m.sticky = make(map[string]Sticky)
+	m.latch = make(map[string]Latch)
+	m.repeatTurns = make(map[repeatTurnKey]*repeatTurnWindow)
 	m.modelLocks = make(map[ModelKey]*modelLock)
 	m.paramBlock = make(map[ModelKey]map[string]bool)
 	m.spread = make(map[string]uint64)

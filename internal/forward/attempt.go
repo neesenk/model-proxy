@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/targetexec"
 )
@@ -21,6 +22,8 @@ type LogCtx struct {
 	OrigBody  []byte
 	// Diagnostics of THIS attempt's request conversion (empty on passthrough)
 	Diagnostics []targetexec.ConversionDiagnostic
+	// Routing records the route-tier policy decision for this request.
+	Routing *configdomain.RoutingDecision
 }
 
 // newTargetAttempt is the single assembly point shared by normal routing and
@@ -76,6 +79,7 @@ func BuildRequestLogInput(
 			Agent:       context.Agent,
 			OrigBody:    context.OrigBody,
 			Diagnostics: diags,
+			Routing:     context.Routing,
 		},
 		request,
 		protocol,

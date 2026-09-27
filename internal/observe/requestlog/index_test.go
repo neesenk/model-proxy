@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	configdomain "model-proxy/internal/config"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -873,6 +875,85 @@ func TestIndexSummariesPreserveTurnKey(t *testing.T) {
 	if !reflect.DeepEqual(summaries, want) {
 		t.Fatalf("index/scan summaries differ:\nindex: %+v\nscan:  %+v", summaries, want)
 	}
+}
+
+// TestIndexPreservesRouting verifies that the derived index stores the routing
+// decision JSON in its own column and that the column is added to existing
+// databases via ensureColumns.
+func TestIndexPreservesRouting(t *testing.T) {
+	dir := t.TempDir()
+	records := []Record{
+		{Ts: "2026-09-16T10:00:00Z", RequestID: "r-route", SessionID: "s", Provider: "p", Status: 200, Routing: &configdomain.RoutingDecision{
+			Source: "selector",
+			Grade:  "flash",
+			Selector: &configdomain.SelectorChoice{
+				Choice:     "g0",
+				Confidence: 0.62,
+				Difficulty: 2,
+				Enforced:   false,
+			},
+			Latch: "grade:pro",
+		}},
+		{Ts: "2026-09-16T10:01:00Z", RequestID: "r-none", SessionID: "s", Provider: "p", Status: 200},
+	}
+	writeRecordFile(t, dir, "requests-20260916.log", records)
+
+	// Create an indexer pre-dating the routing column by building the schema
+	// without it, then reopening: ensureColumns must add the column.
+	idx, err := NewIndexer(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.db.Exec(`ALTER TABLE records DROP COLUMN routing`); err != nil {
+		t.Fatalf("drop routing for migration test: %v", err)
+	}
+	_ = idx.db.Close()
+
+	indexer := newTestIndexer(t, dir)
+	mustReconcile(t, indexer)
+
+	detail, err := indexer.Detail("r-route")
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	if len(detail) != 1 || detail[0].Routing == nil {
+		t.Fatalf("r-route routing lost: %+v", detail)
+	}
+	if detail[0].Routing.Source != "selector" || detail[0].Routing.Grade != "flash" {
+		t.Fatalf("r-route routing = %+v", detail[0].Routing)
+	}
+
+	detail, err = indexer.Detail("r-none")
+	if err != nil {
+		t.Fatalf("detail r-none: %v", err)
+	}
+	if len(detail) != 1 || detail[0].Routing != nil {
+		t.Fatalf("r-none routing should be nil: %+v", detail)
+	}
+
+	// The raw index column must exist and hold the JSON object.
+	var routingCol string
+	if err := indexer.db.QueryRow(`SELECT routing FROM records WHERE request_id = ?`, "r-route").Scan(&routingCol); err != nil {
+		t.Fatalf("query routing column: %v", err)
+	}
+	if !strings.Contains(routingCol, `"source":"selector"`) {
+		t.Fatalf("routing column = %q, want JSON with source selector", routingCol)
+	}
+	var nullCount int
+	if err := indexer.db.QueryRow(`SELECT COUNT(*) FROM records WHERE request_id = ? AND routing IS NULL`, "r-none").Scan(&nullCount); err != nil {
+		t.Fatal(err)
+	}
+	if nullCount != 1 {
+		t.Fatalf("r-none routing null count = %d, want 1", nullCount)
+	}
+
+	// Reopen with a fresh indexer to exercise ensureColumns again.
+	_ = indexer.db.Close()
+	reopened, err := NewIndexer(dir)
+	if err != nil {
+		t.Fatalf("reopen after migration: %v", err)
+	}
+	defer func() { _ = reopened.db.Close() }()
 }
 
 // TestScanTailForIDNonPositiveLimitCollectsNothing pins the bounded tail

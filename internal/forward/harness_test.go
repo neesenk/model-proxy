@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/fusion"
 	"model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
@@ -22,9 +23,8 @@ import (
 
 // fakeProv implements provider.Provider as a static-key passthrough.
 type fakeProv struct {
-	key          string
-	authErr      error
-	rewriteCalls int
+	key     string
+	authErr error
 }
 
 func (f *fakeProv) AuthHeaders(req *http.Request) error {
@@ -36,7 +36,6 @@ func (f *fakeProv) AuthHeaders(req *http.Request) error {
 }
 func (f *fakeProv) Refresh() error { return nil }
 func (f *fakeProv) RewriteRequest(url string, body []byte, path string) (string, []byte) {
-	f.rewriteCalls++
 	return url, body
 }
 func (f *fakeProv) Logout() error                           { return nil }
@@ -131,6 +130,9 @@ type fakeEffects struct {
 	rateLimited int
 	committed   int
 	logged      int
+	// routing captures the request-log routing decision from each committed
+	// attempt, enabling tests to verify the policy outcome reached the log.
+	routing []*configdomain.RoutingDecision
 }
 
 func (e *fakeEffects) Failover(target RouteTarget) {
@@ -154,6 +156,9 @@ func (e *fakeEffects) LogAttempt(attempt targetexec.AttemptDTO) {
 	e.logged++
 }
 func (e *fakeEffects) CaptureResponse(body io.ReadCloser, attempt targetexec.AttemptDTO) io.ReadCloser {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.routing = append(e.routing, attempt.Scope.Log.Routing)
 	return body
 }
 func (e *fakeEffects) CaptureUsage(body io.ReadCloser, attempt targetexec.AttemptDTO, observe func(targetexec.Usage)) io.ReadCloser {
@@ -163,6 +168,14 @@ func (e *fakeEffects) Committed(attempt targetexec.AttemptDTO) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.committed++
+}
+
+func (e *fakeEffects) capturedRouting() []*configdomain.RoutingDecision {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]*configdomain.RoutingDecision, len(e.routing))
+	copy(out, e.routing)
+	return out
 }
 
 var _ targetexec.Effects = (*fakeEffects)(nil)
@@ -176,6 +189,15 @@ type fakeRouteState struct {
 	earliest         time.Time
 	recoveredUntried bool
 	quotaMaxAge      time.Duration
+	latch            map[string]Latch
+	// repeatTurns records observed turn keys per (session, route) for testing
+	// the repeat_turn escalation signal. Entries are (turnKey, observedAt).
+	repeatTurns map[string][]fakeRepeatEntry
+}
+
+type fakeRepeatEntry struct {
+	turnKey string
+	at      time.Time
 }
 
 func (s *fakeRouteState) PinForces(exposed string, ordered []RouteTarget, parentOf map[string]string) bool {
@@ -188,6 +210,17 @@ func (s *fakeRouteState) HasRecoveredUntried(targets []RouteTarget, tried map[st
 	return s.recoveredUntried
 }
 func (s *fakeRouteState) QuotaFreshnessMaxAge(cfg *Config) time.Duration { return s.quotaMaxAge }
+func (s *fakeRouteState) LatchValue(sessionKey string) (Latch, bool) {
+	v, ok := s.latch[sessionKey]
+	return v, ok
+}
+func (s *fakeRouteState) SetLatch(sessionKey string, value Latch, generation uint64) bool {
+	if s.latch == nil {
+		s.latch = map[string]Latch{}
+	}
+	s.latch[sessionKey] = value
+	return true
+}
 
 func (s *fakeRouteState) FilterDisabledTargets(targets []RouteTarget, parentOf map[string]string) []RouteTarget {
 	if len(s.disabled) == 0 {
@@ -201,6 +234,33 @@ func (s *fakeRouteState) FilterDisabledTargets(targets []RouteTarget, parentOf m
 		kept = append(kept, t)
 	}
 	return kept
+}
+
+func (s *fakeRouteState) CheckRepeatTurn(sessionKey, route, turnKey string, now time.Time, window time.Duration, generation uint64) bool {
+	if sessionKey == "" || route == "" || turnKey == "" {
+		return false
+	}
+	if s.repeatTurns == nil {
+		s.repeatTurns = make(map[string][]fakeRepeatEntry)
+	}
+	key := sessionKey + "\x00" + route
+	entries := s.repeatTurns[key]
+	cutoff := now.Add(-window)
+	kept := entries[:0]
+	for _, e := range entries {
+		if !e.at.Before(cutoff) {
+			kept = append(kept, e)
+		}
+	}
+	duplicate := false
+	for _, e := range kept {
+		if e.turnKey == turnKey {
+			duplicate = true
+			break
+		}
+	}
+	s.repeatTurns[key] = append(kept, fakeRepeatEntry{turnKey: turnKey, at: now})
+	return duplicate
 }
 
 var _ RouteState = (*fakeRouteState)(nil)
@@ -282,7 +342,7 @@ func newHarness() *harness {
 		NewHealthGate: func(parentOf map[string]string) targetexec.HealthGate { return gate },
 		NewEffects:    func(generation uint64) targetexec.Effects { return fx },
 		Schedule:      passthroughSchedule,
-		ShadowDispatch: func(runtime Snapshot, proto, backendProto, calledModel, exposed string, primary RouteTarget, primaryRequestID, primaryAgent, primarySession string, commit *targetexec.Commit) {
+		ShadowDispatch: func(runtime Snapshot, proto, backendProto, calledModel, exposed string, primary RouteTarget, primaryRequestID, primaryAgent, primarySession string, commit *targetexec.Commit, routingDecision *RoutingDecision) {
 			h.shadow = append(h.shadow, shadowCall{exposed: exposed, provider: primary.Provider})
 		},
 		ResolveBackendProto: func(declared, provName string, provCfg Provider, model, clientProto string, parentOf map[string]string) (string, bool) {

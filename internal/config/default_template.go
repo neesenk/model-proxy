@@ -374,6 +374,53 @@ providers:
 #   glm-5.2: [zhipu/glm-5.2, aqp/glm-5.2]
 #   gpt-5.5: [{provider: codex, model: gpt-5.5, protocol: openai}]
 
+# route_policy: per-route tier policy. Bands pick a preferred target (or, with
+# grades, a preferred grade) from the request profile — estimated_tokens_min/max,
+# follow_up (the body already carries an assistant turn), has_tools, has_image;
+# listed conditions AND together. Bands are evaluated in order and the FIRST
+# match moves its target/grade to the FRONT of the scheduled order, every other
+# target staying as failover. No match, no policy, or a hard selection
+# (pin / x-mp-force-provider) leaves the order untouched. The band target must
+# be one the route already serves — otherwise the band can never match (startup
+# warns); a {provider: fusion, ...} target is allowed and the pipeline
+# orchestrates it like any fusion target.
+# route_policy:
+#   glm-5.2:
+#     # grades: split the route targets into named groups. Each grade is filtered
+#     # independently for capability/context; the selected grade goes first and
+#     # fallback controls which remaining grades are appended. Bands may use
+#     # grade: <name> or a target that resolves unambiguously to one grade.
+#     # fallback: any (default) | next_grade | strict.
+#     grades:
+#       fast: [zhipu/glm-5.2]
+#       strong: [aqp/glm-5.2]
+#     fallback: any
+#     bands:
+#       - when: {follow_up: true, estimated_tokens_max: 8000}
+#         grade: fast
+#       - when: {estimated_tokens_min: 60000}
+#         grade: strong
+#     # escalation: session-level latch to a stronger target/grade after
+#     # consecutive bad signals. BadSignals is the closed set
+#     # {upstream_error, empty_ok, repeat_turn}; default is [upstream_error].
+#     # Use grade: <name> for graded policies, target: otherwise.
+#     escalation:
+#       bad_signals: [upstream_error]
+#       consecutive: 2
+#       grade: strong
+#       dwell: 30m
+#     # selector: per-request decisions-model routing. shadow (default) records
+#     # only; enforce moves the chosen target/grade to the front when confidence
+#     # ≥ threshold. With grades the candidates are grade-level (g0..gn); without
+#     # grades they are target-level (c0..cn). Route-level selector must declare
+#     # protocol: decisions and leaves direct_score_max / panel_top_k at 0
+#     # (they are fusion-only).
+#     selector:
+#       target: {provider: typesafe, model: jev-1.13, protocol: decisions}
+#       mode: shadow
+#       confidence: 0.55
+#       timeout: 800ms
+
 # Scheduling: failover health (circuit breaker, rate-limit skip) + sticky routing.
 # Every field has a code default (owned by internal/config), so this entire
 # block can be omitted - the values below are listed commented-out for reference.

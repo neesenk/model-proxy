@@ -23,6 +23,88 @@ func (m *Manager) Sticky(key string) (Sticky, bool) {
 	return value, ok
 }
 
+func (m *Manager) SetLatch(key string, latch Latch, generation uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureLocked()
+	if !m.generationMatchesLocked(generation) {
+		return false
+	}
+	m.latch[key] = latch
+	return true
+}
+
+func (m *Manager) LatchValue(key string) (Latch, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	value, ok := m.latch[key]
+	return value, ok
+}
+
+func (m *Manager) ClearLatch(key string, generation uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureLocked()
+	if !m.generationMatchesLocked(generation) {
+		return false
+	}
+	_, ok := m.latch[key]
+	delete(m.latch, key)
+	return ok
+}
+
+// CheckRepeatTurn reports whether the same turn key was observed for the same
+// session and exposed route within the supplied time window. It always records
+// the current observation (unless the generation has changed), so a subsequent
+// identical turn within the window will return true. The window is bounded:
+// expired entries are evicted and the per-(session,route) list is capped at
+// maxRepeatTurnWindowEntries. A non-positive window is treated as 30 minutes.
+// The method does not perform I/O or callbacks while holding the Manager lock.
+func (m *Manager) CheckRepeatTurn(sessionKey, route, turnKey string, now time.Time, window time.Duration, generation uint64) bool {
+	if sessionKey == "" || route == "" || turnKey == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureLocked()
+	if !m.generationMatchesLocked(generation) {
+		return false
+	}
+	if window <= 0 {
+		window = 30 * time.Minute
+	}
+	key := repeatTurnKey{SessionKey: sessionKey, Route: route}
+	w := m.repeatTurns[key]
+	if w == nil {
+		w = &repeatTurnWindow{}
+		m.repeatTurns[key] = w
+	}
+	cutoff := now.Add(-window)
+	// Evict expired entries.
+	kept := w.Entries[:0]
+	for _, e := range w.Entries {
+		if !e.At.Before(cutoff) {
+			kept = append(kept, e)
+		}
+	}
+	w.Entries = kept
+	// Check for a duplicate.
+	duplicate := false
+	for _, e := range w.Entries {
+		if e.TurnKey == turnKey {
+			duplicate = true
+			break
+		}
+	}
+	// Record the current observation.
+	w.Entries = append(w.Entries, repeatTurnEntry{TurnKey: turnKey, At: now})
+	// Enforce the bound by dropping oldest entries.
+	if len(w.Entries) > maxRepeatTurnWindowEntries {
+		w.Entries = w.Entries[len(w.Entries)-maxRepeatTurnWindowEntries:]
+	}
+	return duplicate
+}
+
 func (m *Manager) SetPin(route string, pin Pin) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

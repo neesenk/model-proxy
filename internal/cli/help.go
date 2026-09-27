@@ -48,6 +48,7 @@ Commands:
   mcp [list|test]      Manage MCP gateway servers (mcp: config; test runs the handshake)
   replay <id> --to P   Re-answer a logged request with a different backend
   shadow report       Shadow-evaluation aggregation (primary vs shadow compare)
+  routing report      Offline route-policy reconciliation (weak labels + selector matrix + cost)
   wire record <prov>  Record raw upstream SSE streams into testdata/wire/
   help                 Print this message
 
@@ -359,6 +360,27 @@ Flags:
   /api/shadow-report endpoint: per (route, primary, shadow) samples,
   status-match rate, latency diff and response-size ratio. Requires a
   running daemon with shadow routes configured and request_log enabled.`,
+
+	"routing": `routing report [--route NAME] [--since DUR|TIME] [--retry-window DUR] [--json] [--config PATH]
+
+  Offline route-policy reconciliation. Reads the local request-log index
+  (no daemon required) and reports:
+
+    • weak-label success rate by route/grade
+    • selector confusion matrix by difficulty (enforce vs shadow)
+    • actual cost vs "always most expensive grade" baseline
+    • selector decision overhead (requests, latency, tokens)
+
+  Weak labels treat a business request as OK when it commits HTTP 200 with
+  a non-empty body, is not followed by a retry of the same turn within the
+  retry window, and the session does not later latch to a higher grade.
+  These labels are biased; use them to spot trends, not as ground truth.
+
+  --route NAME      restrict to one exposed route
+  --since DUR|TIME  window start: Go duration ago (7d, 24h) or RFC3339
+                    (default: 7d)
+  --retry-window DUR  retry detection window (default: 10m)
+  --json            output structured JSON instead of tables`,
 }
 
 // takesProvider reports whether the command requires a <provider> argument

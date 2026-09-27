@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	configdomain "model-proxy/internal/config"
 )
 
 // Record is one line in the JSONL request log.
@@ -51,6 +53,11 @@ type Record struct {
 	// Diagnostics lists the attempt's protocol-conversion diagnostics
 	// (structured lossy-conversion observations, stable codes).
 	Diagnostics []ConversionDiagnostic `json:"diagnostics,omitempty"`
+	// Routing records the route-tier policy decision that produced the target
+	// order for this request. Omitted when no route_policy applied, when a
+	// hard selection (pin/force-provider) skipped the policy, or when no
+	// policy step (latch/selector/band) matched.
+	Routing *configdomain.RoutingDecision `json:"routing,omitempty"`
 	// ParsedUsage is a query-time projection of ResponseBody (ExtractUsage)
 	// for aggregate views that strip bodies as they read (Filter.UsageOnly).
 	// Never persisted: the JSONL encoder does not write it and json:"-"
@@ -89,6 +96,7 @@ type Input struct {
 	ResponseTruncated bool
 	ResponseHeader    http.Header
 	Diagnostics       []ConversionDiagnostic
+	Routing           *configdomain.RoutingDecision
 }
 
 const truncationMarker = "\n...[truncated by model-proxy request_log max_body_bytes]"
@@ -131,6 +139,8 @@ func (l *Logger) BuildRecord(in Input) *Record {
 		TTFTMs:          in.TTFTMilliseconds,
 		ResponseSize:    in.ResponseSize,
 		ResponseHeaders: responseHeaders(in.ResponseHeader),
+		Diagnostics:     in.Diagnostics,
+		Routing:         in.Routing,
 	}
 
 	rec.RequestSize = len(in.RequestBody)
@@ -143,7 +153,7 @@ func (l *Logger) BuildRecord(in Input) *Record {
 	if in.ResponseTruncated {
 		rec.ResponseBody += truncationMarker
 	}
-	rec.TurnKey = computeTurnKey(in.RequestBody)
+	rec.TurnKey = ComputeTurnKey(in.RequestBody)
 	return rec
 }
 
@@ -248,7 +258,59 @@ func appendRecordLine(dst []byte, rec *Record) []byte {
 		}
 		dst = append(dst, ']')
 	}
+	if rec.Routing != nil {
+		dst = append(dst, `,"routing":`...)
+		dst = appendRoutingDecision(dst, rec.Routing)
+	}
 	return append(dst, '}', '\n')
+}
+
+// appendRoutingDecision appends a JSON object for RoutingDecision.
+func appendRoutingDecision(dst []byte, r *configdomain.RoutingDecision) []byte {
+	dst = append(dst, '{')
+	dst = append(dst, `"source":`...)
+	dst = appendJSONString(dst, r.Source)
+	if r.Grade != "" {
+		dst = append(dst, `,"grade":`...)
+		dst = appendJSONString(dst, r.Grade)
+	}
+	if r.Target != "" {
+		dst = append(dst, `,"target":`...)
+		dst = appendJSONString(dst, r.Target)
+	}
+	if r.Selector != nil {
+		dst = append(dst, `,"selector":`...)
+		dst = appendSelectorChoice(dst, r.Selector)
+	}
+	if r.Latch != "" {
+		dst = append(dst, `,"latch":`...)
+		dst = appendJSONString(dst, r.Latch)
+	}
+	dst = append(dst, '}')
+	return dst
+}
+
+// appendSelectorChoice appends a JSON object for SelectorChoice.
+func appendSelectorChoice(dst []byte, s *configdomain.SelectorChoice) []byte {
+	dst = append(dst, '{')
+	dst = append(dst, `"choice":`...)
+	dst = appendJSONString(dst, s.Choice)
+	dst = append(dst, `,"confidence":`...)
+	dst = strconv.AppendFloat(dst, s.Confidence, 'f', -1, 64)
+	dst = append(dst, `,"difficulty":`...)
+	dst = strconv.AppendFloat(dst, s.Difficulty, 'f', -1, 64)
+	dst = append(dst, `,"enforced":`...)
+	if s.Enforced {
+		dst = append(dst, "true"...)
+	} else {
+		dst = append(dst, "false"...)
+	}
+	if s.Err != "" {
+		dst = append(dst, `,"err":`...)
+		dst = appendJSONString(dst, s.Err)
+	}
+	dst = append(dst, '}')
+	return dst
 }
 
 const hexDigits = "0123456789abcdef"

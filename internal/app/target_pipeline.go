@@ -128,6 +128,7 @@ func (effects targetExecutionEffects) CaptureResponse(
 			Exposed:   attempt.Scope.Log.Exposed,
 			Agent:     attempt.Scope.Agent,
 			OrigBody:  attempt.Scope.Log.OriginalBody,
+			Routing:   attempt.Scope.Log.Routing,
 		}
 		input := forward.BuildRequestLogInput(
 			logContext,
@@ -149,6 +150,11 @@ func (effects targetExecutionEffects) CaptureResponse(
 			in := input
 			in.TTFTMilliseconds = firstReadMs
 			requestlog.Complete(logger, in, captured, total, truncated)
+			// Make the captured primary body available for L2 eval shadow dispatch.
+			// Sampling is decided post-commit on the request snapshot; storing here
+			// is unconditional for eval-configured routes so the decision stays
+			// generation-consistent.
+			effects.proxy.maybeStoreEvalPrimaryBody(attempt.Scope.Log.RequestID, attempt.Scope.Log.Exposed, captured)
 		})
 	}
 

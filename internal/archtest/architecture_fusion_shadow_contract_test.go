@@ -118,22 +118,31 @@ func TestFusionShadowArchitecture(t *testing.T) {
 		}
 
 		root, rootSet := parseGoFile(t, "internal/app/proxy_shadow.go")
-		dispatch := namedMethod(t, root, "Proxy", "dispatchShadowAfterCommit")
-		samplePos := firstNamedCallPos(dispatch.Body, "ShouldSample")
-		acquirePos := firstNamedCallPos(dispatch.Body, "TryAcquire")
-		admitPos := firstNamedCallPos(dispatch.Body, "RunBeforeLogDrain")
-		if !samplePos.IsValid() || !acquirePos.IsValid() || !admitPos.IsValid() ||
-			!(samplePos < acquirePos && acquirePos < admitPos) {
-			t.Errorf("Shadow dispatch order must be sample → acquire → lifecycle admission (sample=%v acquire=%v admit=%v)",
-				samplePos, acquirePos, admitPos)
+		// Legacy and eval shadow dispatch each follow sample → acquire → lifecycle
+		// admission. Legacy uses runtime.Shadow.ShouldSample; eval uses evalRand
+		// sampling before acquiring the shared shadow concurrency permit.
+		for _, method := range []string{"dispatchLegacyShadow", "dispatchEvalShadow"} {
+			dispatch := namedMethod(t, root, "Proxy", method)
+			samplePos := firstNamedCallPos(dispatch.Body, "ShouldSample")
+			if method == "dispatchEvalShadow" {
+				samplePos = firstNamedCallPos(dispatch.Body, "evalRand")
+			}
+			acquirePos := firstNamedCallPos(dispatch.Body, "TryAcquire")
+			admitPos := firstNamedCallPos(dispatch.Body, "RunBeforeLogDrain")
+			if !samplePos.IsValid() || !acquirePos.IsValid() || !admitPos.IsValid() ||
+				!(samplePos < acquirePos && acquirePos < admitPos) {
+				t.Errorf("%s order must be sample → acquire → lifecycle admission (sample=%v acquire=%v admit=%v)",
+					method, samplePos, acquirePos, admitPos)
+			}
+			if got := namedCallCountInNode(dispatch.Body, "Release"); got != 2 {
+				t.Errorf("%s permit Release calls = %d, want admitted and rejected cleanup paths", method, got)
+			}
 		}
-		if got := namedCallCountInNode(dispatch.Body, "Release"); got != 2 {
-			t.Errorf("Shadow permit Release calls = %d, want admitted and rejected cleanup paths", got)
+		exec := namedMethod(t, root, "Proxy", "executeShadow")
+		if got := namedCallCountInNode(exec.Body, "Execute"); got != 1 {
+			t.Errorf("Proxy.executeShadow Runtime.Execute calls = %d, want exactly 1", got)
 		}
 		run := namedMethod(t, root, "Proxy", "runShadow")
-		if got := namedCallCountInNode(run.Body, "Execute"); got != 1 {
-			t.Errorf("Proxy.runShadow Runtime.Execute calls = %d, want exactly 1", got)
-		}
 		if got := forbiddenCallSites(run.Body, rootSet, map[string]bool{
 			"Do": true, "ConvertBody": true, "RewriteRequest": true,
 			"AuthHeaders": true, "New": true,

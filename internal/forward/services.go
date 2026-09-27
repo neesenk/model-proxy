@@ -64,7 +64,7 @@ type Services struct {
 	// agent + client session id (the shadow record reuses them instead of
 	// probing its synthetic upstream request, which carries neither the
 	// client's UA nor its session headers).
-	ShadowDispatch func(runtime Snapshot, proto, backendProto, calledModel, exposed string, primary RouteTarget, primaryRequestID, primaryAgent, primarySession string, commit *targetexec.Commit)
+	ShadowDispatch func(runtime Snapshot, proto, backendProto, calledModel, exposed string, primary RouteTarget, primaryRequestID, primaryAgent, primarySession string, commit *targetexec.Commit, routingDecision *RoutingDecision)
 	// ResolveBackendProto is the wire-verdict backend protocol resolution
 	// (app: Proxy.resolvedBackendProto): declared protocol, else ProtocolHint,
 	// else the probe verdict, else the client protocol.
@@ -99,6 +99,19 @@ type RouteState interface {
 	// QuotaFreshnessMaxAge is the quota-snapshot freshness window shared by
 	// the scheduling skip and the failure classification.
 	QuotaFreshnessMaxAge(cfg *Config) time.Duration
+	// LatchValue reads the current latch for sessionKey, if any. The caller
+	// (forward) decides whether the latch has expired.
+	LatchValue(sessionKey string) (Latch, bool)
+	// SetLatch writes the latch for sessionKey, generation-gated. Returns true
+	// when the write was accepted (same generation). The caller uses this for
+	// both outcome recording and explicit clears.
+	SetLatch(sessionKey string, value Latch, generation uint64) bool
+	// CheckRepeatTurn reports whether the same conversational turn (turnKey)
+	// was recently observed for this session and route, and records the current
+	// observation. The window is caller-supplied (typically escalation.dwell).
+	// The method is generation-gated and bounded; it returns false on generation
+	// mismatch or missing keys.
+	CheckRepeatTurn(sessionKey, route, turnKey string, now time.Time, window time.Duration, generation uint64) bool
 }
 
 // pipeline is the request-forwarding engine: one Services bundle plus one
@@ -165,8 +178,9 @@ func (p pipeline) dispatchShadowAfterCommit(
 	primaryAgent string,
 	primarySession string,
 	commit *targetexec.Commit,
+	routingDecision *RoutingDecision,
 ) {
-	p.svc.ShadowDispatch(runtime, proto, backendProto, calledModel, exposed, primary, primaryRequestID, primaryAgent, primarySession, commit)
+	p.svc.ShadowDispatch(runtime, proto, backendProto, calledModel, exposed, primary, primaryRequestID, primaryAgent, primarySession, commit, routingDecision)
 }
 
 // publishTerminalEvent emits a live "end" event for a request that ends before

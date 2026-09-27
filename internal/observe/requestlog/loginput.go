@@ -24,6 +24,7 @@ type LogCtx struct {
 	Agent       string
 	OrigBody    []byte
 	Diagnostics []ConversionDiagnostic
+	Routing     *configdomain.RoutingDecision
 }
 
 // SessionID returns the first non-empty value among headers (an ordered
@@ -112,6 +113,7 @@ func BuildInput(
 		RequestBody:    requestBody,
 		ResponseHeader: response.Header.Clone(),
 		Diagnostics:    context.Diagnostics,
+		Routing:        context.Routing,
 	}
 }
 

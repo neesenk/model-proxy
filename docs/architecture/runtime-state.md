@@ -296,6 +296,23 @@ session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 r
 - pin 仅在内存中，reload 不清，重启清除；
 - pin/force 请求必须绕过响应缓存。
 
+## Latch（route_policy escalation 的会话级状态）
+
+`route_policy.<route>.escalation` 的会话状态由 `internal/runtime.Manager` 以 `latch map[string]Latch`
+持有，键为 `x-claude-code-session-id`：
+
+- 值类型 `Latch{Target string, Since time.Time, BadRuns int}`：`Target` 是 `provider/model` 字符串；
+  `Since` 是最近一次升级/刷新时间；`BadRuns` 是连续坏运行计数。
+- **内存 only、不持久化**；`ReplaceGeneration` 随其他 generation-scoped 状态一并清空。
+- 访问方法 `SetLatch` / `LatchValue` / `ClearLatch` 与 `SetSticky` 同形：持 `Manager.mu`、
+  generation 门控、不回调、不做 I/O。
+- 过期（`now - Since > dwell`）的 latch 在读取侧不生效；forward 的 `recordLatchOutcome`
+  会在下一次写入时把过期 latch 覆盖掉。
+- `repeat_turn` 信号使用同一份 generation-scoped、内存-only 的滑窗状态：
+  `Manager.CheckRepeatTurn(sessionKey, route, turnKey, now, window, generation)` 按
+  `(sessionKey, route)` 索引，窗口时长复用 `escalation.dwell`，上限
+  `maxRepeatTurnWindowEntries` 条/窗口，过期条目在查询时驱逐。
+
 ## Disabled models（operator 模型禁用）
 
 `POST /api/models/disable {provider, model, disabled}`（UI Status→Models 每行

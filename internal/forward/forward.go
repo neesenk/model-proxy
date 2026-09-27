@@ -10,6 +10,7 @@ import (
 
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/observe/logx"
@@ -80,6 +81,11 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	// repeat interception, session scan). Body-carried client_metadata.session_id
 	// is intentionally NOT accepted for these decisions.
 	sessionKey := r.Header.Get("x-claude-code-session-id")
+
+	// TurnKey fingerprints one conversational turn for the repeat_turn escalation
+	// signal. It is computed once per request and checked against the session's
+	// recent turn window at outcome time.
+	turnKey := requestlog.ComputeTurnKey(origBody)
 
 	calledModel := protocol.ExtractModel(origBody)
 	if calledModel == "" {
@@ -152,9 +158,14 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	// served one is replayed from cache with no upstream call. Computed before
 	// routing (the key is the raw request), threaded into the target attempt to
 	// store on a fresh 2xx commit. SKIPPED entirely when a force-provider
-	// override OR a pin is in effect — both mean "send to THIS backend", not a
-	// stale cached answer.
-	cacheKey, cacheHit := p.lookupResponseCache(cache, r, origBody, calledModel, proto, exposed, agent, clientSession, requestID, w, forcedProvider != "" || force)
+	// override, a pin, OR a route_policy escalation/selector is in effect — all
+	// mean "send to THIS backend / session state matters", not a stale cached
+	// answer.
+	policyBypassesCache := false
+	if policy, ok := cfg.RoutePolicies[exposed]; ok && (policy.Escalation != nil || policy.Selector != nil) {
+		policyBypassesCache = true
+	}
+	cacheKey, cacheHit := p.lookupResponseCache(cache, r, origBody, calledModel, proto, exposed, agent, clientSession, requestID, w, forcedProvider != "" || force || policyBypassesCache)
 	if cacheHit {
 		return
 	}
@@ -219,6 +230,11 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	retryWait := cfg.Scheduling.RetryWaitDuration()
 	var st serveState
 	var sawHard, sawCool bool
+	// Count bytes written to the client so empty_ok can detect a 200 commit with
+	// a zero-byte final response body. The wrapper is request-scoped: only the
+	// committed pass writes meaningful body bytes, and terminal error bodies are
+	// ignored because empty_ok only looks at committed responses.
+	cw := &countingResponseWriter{ResponseWriter: w}
 	execution := serveRequest{
 		runtime: runtime,
 
@@ -229,6 +245,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		sessionKey:  sessionKey,
 		agent:       agent,
 		requestID:   requestID,
+		turnKey:     turnKey,
 
 		clientSession: clientSession,
 
@@ -239,22 +256,26 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		cacheKey:       cacheKey,
 		origBody:       origBody,
 
-		writer:  w,
+		writer:  cw,
 		request: r,
 	}
 	for round := 0; ; round++ {
 		res := p.serveOnce(execution, &st)
+		res.committedBodyBytes = cw.bytes
 		if res.committed {
+			p.recordLatchOutcome(execution, res)
 			return
 		}
 		if res.clientGone {
 			// Client went away before any commit — no terminal status is
 			// writable to a dead connection. Close the live event pair as 499
 			// (client closed request), same as the cooldown-wait cancel path.
+			p.recordLatchOutcome(execution, res)
 			p.publishTerminalEvent(requestID, r, proto, exposed, statusClientGone)
 			return
 		}
 		if res.conversionErr != nil && len(res.tried) == 0 {
+			p.recordLatchOutcome(execution, res)
 			p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
 			protocol.WriteUnsupportedConversionError(w, protocol.Protocol(proto), res.conversionErr)
 			return
@@ -305,6 +326,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 			case <-r.Context().Done():
 				// Client gave up waiting — close the live event pair (499 =
 				// client closed request) and write nothing.
+				p.recordLatchOutcome(execution, res)
 				p.publishTerminalEvent(requestID, r, proto, exposed, statusClientGone)
 				return
 			}
@@ -315,9 +337,106 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 			continue
 		}
 		// Terminal: every target failed across all passes — classify and answer.
+		p.recordLatchOutcome(execution, res)
 		p.writeAllTargetsFailed(w, r, requestID, proto, exposed, agent, clientSession, res, decision)
 		return
 	}
+}
+
+// recordLatchOutcome updates the session latch for routes that have an
+// escalation policy. It evaluates the configured bad_signals against the final
+// request outcome:
+//   - upstream_error: terminal pass that neither committed nor lost the client;
+//   - empty_ok: committed 200 whose final client-facing response body is zero bytes;
+//   - repeat_turn: the current TurnKey was recently seen for this session+route,
+//     meaning the client resent the same conversational turn and the previous
+//     answer was unsatisfactory.
+//
+// After Consecutive bad signals the latch target becomes escalation.Target/Grade;
+// a good run (committed, no empty_ok, no repeat_turn) resets BadRuns but keeps
+// an existing latch target for its dwell (hysteresis). Session-less requests and
+// routes without escalation are no-ops. Bad signals are additive within one
+// outcome: a request can contribute more than one bad run if multiple signals
+// fire.
+func (p pipeline) recordLatchOutcome(req serveRequest, res serveResult) {
+	sessionKey := req.sessionKey
+	if sessionKey == "" {
+		return
+	}
+	policy, ok := req.runtime.Cfg.RoutePolicies[req.exposed]
+	if !ok || policy.Escalation == nil {
+		return
+	}
+	escalation := policy.Escalation
+	now := time.Now()
+	latch, has := p.state.LatchValue(sessionKey)
+	if has && now.Sub(latch.Since) > escalation.DwellDuration() {
+		has = false
+	}
+
+	signalSet := make(map[string]bool, len(escalation.BadSignals))
+	for _, s := range escalation.BadSignals {
+		signalSet[s] = true
+	}
+
+	badCount := 0
+
+	// upstream_error: the caller received a final terminal error.
+	if !res.committed && !res.clientGone && signalSet["upstream_error"] {
+		badCount++
+	}
+
+	// empty_ok: committed 200 with a zero-byte final client-facing body.
+	// The predicate is intentionally conservative: it only counts when the bytes
+	// actually written back to the client total zero. Non-empty JSON that happens
+	// to contain empty content/tool_use is NOT flagged, because it still carries
+	// framing and structure.
+	committedGood := res.committed && !res.clientGone
+	if committedGood && signalSet["empty_ok"] && res.committedBodyBytes == 0 {
+		badCount++
+		committedGood = false
+	}
+
+	// repeat_turn: the client resent the same turn within the dwell window.
+	// This signal attributes the bad run to the PREVIOUS turn, so it is evaluated
+	// after the current outcome and added even if the current request committed.
+	if req.turnKey != "" && signalSet["repeat_turn"] {
+		if p.state.CheckRepeatTurn(sessionKey, req.exposed, req.turnKey, now, escalation.DwellDuration(), req.runtime.Generation) {
+			badCount++
+		}
+	}
+
+	if badCount == 0 {
+		if res.clientGone {
+			return
+		}
+		if res.committed && has {
+			// Good run: clear bad-run counter, keep any latched target/dwell.
+			_ = p.state.SetLatch(sessionKey, Latch{Target: latch.Target, Since: latch.Since, BadRuns: 0}, req.runtime.Generation)
+		}
+		return
+	}
+
+	// Bad signal(s): increment the streak.
+	badRuns := 0
+	since := now
+	target := ""
+	if has {
+		badRuns = latch.BadRuns
+		since = latch.Since
+		target = latch.Target
+	}
+	badRuns += badCount
+	if badRuns >= escalation.Consecutive {
+		if policy.HasGrades() && escalation.Grade != "" {
+			target = "grade:" + escalation.Grade
+		} else {
+			target = escalation.Target.Provider + "/" + escalation.Target.Model
+		}
+		since = now
+		badRuns = 0
+	}
+	_ = p.state.SetLatch(sessionKey, Latch{Target: target, Since: since, BadRuns: badRuns}, req.runtime.Generation)
 }
 
 // statusClientGone marks a request abandoned by the CALLER (client closed the
@@ -374,6 +493,10 @@ type serveState struct {
 	attempt           int  // monotonic target-attempt index for the request log (ti resets on a context retry)
 	profiled          bool // request profile computed (see requestProfile)
 	profile           routing.Profile
+	// routing records the route-tier policy decision for this request. It is
+	// set during serveOnce and copied into the attempt's LogCtx so the request
+	// log can persist it. Never fails closed: a nil value simply omits the field.
+	routing *configdomain.RoutingDecision
 }
 
 // enqueueAdjudications is the pipeline convenience for the guard section: a
@@ -392,10 +515,19 @@ func (p pipeline) enqueueAdjudications(jobs []GuardAdjudication) []string {
 // requestProfile returns the request's routing profile, computed at most once
 // per request: the body is immutable, so the wait-retry rounds and the
 // context-overflow retry share the first scan instead of re-walking the body.
+// Without a metadata catalog the capability view is empty (request-aware
+// filtering is a no-op then); route-policy bands read rawProfile instead,
+// because their signals are body-only facts.
 func (p pipeline) requestProfile(st *serveState, cat *catalog.Catalog, body []byte) routing.Profile {
 	if cat == nil {
 		return routing.Profile{}
 	}
+	return p.rawProfile(st, body)
+}
+
+// rawProfile returns the body-derived facts regardless of catalog availability.
+// Cached like requestProfile: one body scan per request.
+func (p pipeline) rawProfile(st *serveState, body []byte) routing.Profile {
 	if !st.profiled {
 		st.profile = routing.ProfileRequest(body)
 		st.profiled = true
@@ -419,6 +551,10 @@ type serveResult struct {
 	// circuit-breaker tick for a provider that never misbehaved.
 	clientGone    bool
 	conversionErr *protocol.UnsupportedError // first client feature no candidate conversion could safely represent
+	// committedBodyBytes is the number of bytes written to the client response
+	// writer by the committed pass. It is filled in by forward() after serveOnce
+	// returns and is used by recordLatchOutcome to evaluate the empty_ok signal.
+	committedBodyBytes int64
 	// effectiveTargets is the target set serveOnce actually considered this pass
 	// (after scheduling drops cooling targets, request-aware routing narrows, or a
 	// context-overflow retry replaces it) — NOT necessarily the original route
@@ -472,6 +608,26 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 		// route fit, fall back to a cross-route capable+fitting pool ranked by the
 		// normal scheduling policy. No-op when everything already fits.
 		ordered = planner.ApplyWithProfile(exposed, sessionKey, ordered, p.requestProfile(st, cat, origBody))
+		// Route-tier policy (route_policy): precedence is latch > selector >
+		// bands > static order. The latch is session-scoped runtime state and
+		// wins outright; otherwise bands set a deterministic baseline and a
+		// confident enforce-mode selector refines it. Bands read the body-only
+		// profile, so they also apply when the catalog is unavailable.
+		if policy, ok := cfg.RoutePolicies[exposed]; ok {
+			if policy.HasGrades() {
+				ordered, st.routing = p.applyRoutePolicyGrades(ordered, policy, st, origBody, sessionKey, r.Context(), proto, runtime, clientSession, requestID, agent, exposed, calledModel)
+			} else {
+				if latchedOrdered, latchDecision, latched := applyRouteLatch(p.state, sessionKey, ordered, policy, parentOf, routeStart); latched {
+					ordered = latchedOrdered
+					st.routing = latchDecision
+				} else {
+					ordered, st.routing = applyRoutePolicy(ordered, policy, p.rawProfile(st, origBody), parentOf)
+					selectorRes := p.applyRouteSelector(r.Context(), ordered, policy, p.rawProfile(st, origBody), parentOf, origBody, proto, runtime, sessionKey, clientSession, requestID, agent, exposed, calledModel)
+					ordered = selectorRes.ordered
+					st.routing = selectorRes.routingDecision(st.routing)
+				}
+			}
+		}
 	}
 	if p.svc.Metrics != nil {
 		p.svc.Metrics.Inc("routing", "decision", counters.EvRoutingObserved)
@@ -570,7 +726,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 				convDiags = append(convDiags, targetexec.ConversionDiagnostic{Code: item.Code, Detail: item.Detail})
 			}
 		}
-		flc := LogCtx{RequestID: requestID, SessionID: clientSession, Attempt: st.attempt, Exposed: exposed, Agent: agent, OrigBody: origBody, Diagnostics: convDiags}
+		flc := LogCtx{RequestID: requestID, SessionID: clientSession, Attempt: st.attempt, Exposed: exposed, Agent: agent, OrigBody: origBody, Diagnostics: convDiags, Routing: st.routing}
 		st.attempt++
 		// One-shot larger-context retry: when this target answers a
 		// context-overflow 400, the executor calls ctxRetry for a strictly-larger-
@@ -608,6 +764,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 					Exposed:      flc.Exposed,
 					OriginalBody: flc.OrigBody,
 					Diagnostics:  convDiags,
+					Routing:      flc.Routing,
 				},
 				ResponseContext:  plan.ResponseContext(origBody),
 				ResponsesHistory: responsesHistory,
@@ -644,6 +801,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 				agent,
 				flc.SessionID,
 				result.Commit,
+				st.routing,
 			)
 			res.committed = true
 			return res // committed: response written to the client
@@ -677,6 +835,9 @@ type serveRequest struct {
 	sessionKey  string
 	agent       string
 	requestID   string
+	// turnKey fingerprints one conversational turn for the repeat_turn escalation
+	// signal. Empty when the body carries no textual user content.
+	turnKey string
 	// clientSession is the observability session id (header allowlist), distinct
 	// from sessionKey (the routing sticky key).
 	clientSession string
@@ -693,6 +854,28 @@ type serveRequest struct {
 	writer  http.ResponseWriter
 	request *http.Request
 }
+
+// countingResponseWriter wraps an http.ResponseWriter to count bytes written to
+// the response body. It implements http.Flusher so SSE streams keep working.
+// Only Write() increments the counter; WriteHeader/Header do not.
+type countingResponseWriter struct {
+	http.ResponseWriter
+	bytes int64
+}
+
+func (c *countingResponseWriter) Write(p []byte) (int, error) {
+	n, err := c.ResponseWriter.Write(p)
+	c.bytes += int64(n)
+	return n, err
+}
+
+func (c *countingResponseWriter) Flush() {
+	if f, ok := c.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+var _ http.Flusher = (*countingResponseWriter)(nil)
 
 // PublishTerminalEvent emits a live "end" event for a request that ends before
 // the normal start/commit flow — a malformed body (400) or an unrouted model
@@ -1254,9 +1437,10 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 // served one is replayed from cache with no upstream call. Computed before
 // routing (the key is the raw request); the returned key is threaded into
 // the target attempt to store on a fresh 2xx commit. bypass skips the cache
-// entirely when a force-provider override OR a pin is in effect — both mean
-// "send to THIS backend", not a stale cached answer. hit == true means a
-// cached response was replayed and the caller must return.
+// entirely when a force-provider override, a pin, OR a route_policy
+// escalation/selector is in effect — all mean "send to THIS backend / session
+// state matters", not a stale cached answer. hit == true means a cached
+// response was replayed and the caller must return.
 //
 // A hit still writes a request-log record (provider "(cache)"): the request
 // is an LLM-protocol commit the operator must be able to find in history —

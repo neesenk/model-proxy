@@ -92,3 +92,15 @@ func (s proxyRouteState) HasRecoveredUntried(targets []configdomain.RouteTarget,
 func (s proxyRouteState) QuotaFreshnessMaxAge(cfg *configdomain.Config) time.Duration {
 	return s.proxy.quotaFreshnessMaxAge(cfg)
 }
+
+func (s proxyRouteState) LatchValue(sessionKey string) (forward.Latch, bool) {
+	return s.proxy.latchValue(sessionKey)
+}
+
+func (s proxyRouteState) SetLatch(sessionKey string, value forward.Latch, generation uint64) bool {
+	return s.proxy.setLatch(sessionKey, value, generation)
+}
+
+func (s proxyRouteState) CheckRepeatTurn(sessionKey, route, turnKey string, now time.Time, window time.Duration, generation uint64) bool {
+	return s.proxy.checkRepeatTurn(sessionKey, route, turnKey, now, window, generation)
+}

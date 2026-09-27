@@ -60,3 +60,88 @@ func TestConfigRoutingWarnings(t *testing.T) {
 		t.Errorf("len(warns) = %d, want 1 (only the k2 reasoning marker; codex auto-resolves): %v", len(warns), warns)
 	}
 }
+
+// TestConfigRoutingWarnings_GradeBands: grade: references must not produce a
+// "target not in route" false positive; target references in graded policies
+// must resolve uniquely to a declared grade.
+func TestConfigRoutingWarnings_GradeBands(t *testing.T) {
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "https://x", Models: []string{"glm-5.3-flash", "glm-5.3"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{
+			"coding": {
+				{Provider: "zhipu", Model: "glm-5.3-flash"},
+				{Provider: "zhipu", Model: "glm-5.3"},
+			},
+		},
+		RoutePolicies: map[string]configdomain.RoutePolicy{
+			"coding": {
+				Grades: map[string][]configdomain.RouteTarget{
+					"fast":   {{Provider: "zhipu", Model: "glm-5.3-flash"}},
+					"strong": {{Provider: "zhipu", Model: "glm-5.3"}},
+				},
+				Bands: []configdomain.RouteBand{
+					{When: configdomain.BandWhen{FollowUp: boolp(true)}, Grade: "fast"},
+					{When: configdomain.BandWhen{EstimatedTokensMin: int64p(60000)}, Target: configdomain.RouteTarget{Provider: "zhipu", Model: "glm-5.3"}},
+				},
+			},
+		},
+	}
+	expanded := map[string][]configdomain.RouteTarget{
+		"coding": {
+			{Provider: "zhipu", Model: "glm-5.3-flash"},
+			{Provider: "zhipu", Model: "glm-5.3"},
+		},
+	}
+	warns := ConfigRoutingWarnings(cfg, expanded)
+	joined := strings.Join(warns, "\n")
+	if strings.Contains(joined, `band 0`) || strings.Contains(joined, `grade "fast"`) {
+		t.Errorf("grade: band must not warn when grade is declared, warns = %v", warns)
+	}
+	if strings.Contains(joined, `band 1`) {
+		t.Errorf("target band that uniquely maps to a grade must not warn, warns = %v", warns)
+	}
+}
+
+// TestConfigRoutingWarnings_GradeBandUnknownGrade: a grade: reference to an
+// undeclared grade produces a warning.
+func TestConfigRoutingWarnings_GradeBandUnknownGrade(t *testing.T) {
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "https://x", Models: []string{"glm-5.3-flash"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{
+			"coding": {{Provider: "zhipu", Model: "glm-5.3-flash"}},
+		},
+		RoutePolicies: map[string]configdomain.RoutePolicy{
+			"coding": {
+				Grades: map[string][]configdomain.RouteTarget{
+					"fast": {{Provider: "zhipu", Model: "glm-5.3-flash"}},
+				},
+				Bands: []configdomain.RouteBand{
+					{When: configdomain.BandWhen{FollowUp: boolp(true)}, Grade: "unknown"},
+				},
+			},
+		},
+	}
+	expanded := map[string][]configdomain.RouteTarget{
+		"coding": {{Provider: "zhipu", Model: "glm-5.3-flash"}},
+	}
+	warns := ConfigRoutingWarnings(cfg, expanded)
+	if !containsStr(warns, `grade "unknown" is not declared`) {
+		t.Errorf("missing unknown grade warning, warns = %v", warns)
+	}
+}
+
+func containsStr(ss []string, want string) bool {
+	for _, s := range ss {
+		if strings.Contains(s, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func boolp(b bool) *bool    { return &b }
+func int64p(i int64) *int64 { return &i }

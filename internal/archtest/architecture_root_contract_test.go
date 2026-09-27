@@ -169,6 +169,7 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			"modelCaps": true, "modelCapsPath": true, "cacheStatePath": true,
 			"cacheCounters": true, "cachePersistMu": true,
 			"disabledModelsPath": true, "disabledModelsMu": true,
+			"evalRand": true, "evalPrimaryBodies": true,
 		}
 		if got := structContractViolations(
 			namedStructFields(t, rootPackage, "processServices"), wantServices, nil,

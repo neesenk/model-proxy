@@ -26,6 +26,11 @@ type Config struct {
 	LogFile   string                   `yaml:"log_file"`
 	Providers map[string]Provider      `yaml:"providers"`
 	Routes    map[string][]RouteTarget `yaml:"routes"`
+	// RoutePolicies holds the per-route tier policies (the top-level
+	// route_policy: block), keyed by exposed route name: declarative bands map
+	// request-profile signals to a preferred target. A route without an entry
+	// keeps the static scheduled order (zero behavior change).
+	RoutePolicies map[string]RoutePolicy `yaml:"route_policy"`
 	// Proxy is the global upstream proxy default (http/https/socks5 URL, or
 	// "off" to force direct). Empty = automatic chain: environment variables
 	// (HTTPS_PROXY/HTTP_PROXY/NO_PROXY) → OS system proxy → direct. A
@@ -463,6 +468,124 @@ func (s SelectorConfig) ConfidenceThreshold() float64 {
 		return 0.55
 	}
 	return s.Confidence
+}
+
+// RoutePolicy is the per-route tier policy declared under the top-level
+// route_policy: block, keyed by exposed route name. Bands are declarative
+// request-profile → preferred-target rules: the first band whose conditions all
+// hold selects a grade (or, for legacy ungraded routes, moves a target to the
+// front). Selector makes a per-request decisions-model choice among the route's
+// grades when grades are configured, otherwise among its targets. Eval
+// configures pairwise shadow evaluation (L2 strong labels) for graded routes.
+// A route without a policy keeps the static order — zero behavior change. See
+// docs/architecture/request-routing.md.
+type RoutePolicy struct {
+	Bands      []RouteBand              `yaml:"bands"`
+	Escalation *EscalationConfig        `yaml:"escalation,omitempty"`
+	Selector   *SelectorConfig          `yaml:"selector,omitempty"`
+	Grades     map[string][]RouteTarget `yaml:"grades,omitempty"`
+	Fallback   string                   `yaml:"fallback,omitempty"`
+	Eval       *EvalConfig              `yaml:"eval,omitempty"`
+}
+
+// EvalConfig configures pairwise shadow evaluation (L2 strong labels) for a
+// graded route. The judge target must speak the decisions protocol. Sampling is
+// applied post-commit and fail-open: any judge failure drops the sample without
+// affecting the live request.
+type EvalConfig struct {
+	SampleRate float64     `yaml:"sample_rate"`
+	Pair       string      `yaml:"pair"`
+	Judge      RouteTarget `yaml:"judge"`
+}
+
+// SampleRateValue returns the effective sample rate. The default is 0.05;
+// validation clamps the configured value to [0, 0.5].
+func (e *EvalConfig) SampleRateValue() float64 {
+	if e == nil {
+		return 0.05
+	}
+	if e.SampleRate <= 0 {
+		return 0.05
+	}
+	return e.SampleRate
+}
+
+// PairMode returns the validated pair mode: "opposite" or "grade:<name>".
+// An empty Pair defaults to "opposite" after validation.
+func (e *EvalConfig) PairMode() string {
+	if e == nil || e.Pair == "" {
+		return "opposite"
+	}
+	return e.Pair
+}
+
+// HasGrades reports whether this policy configures grade-based routing.
+func (p RoutePolicy) HasGrades() bool { return len(p.Grades) > 0 }
+
+// FallbackMode returns the validated fallback behavior for a graded route.
+// The empty string and "any" both mean "append remaining grades in route order";
+// "next_grade" appends only the next grade; "strict" appends none.
+func (p RoutePolicy) FallbackMode() string {
+	if p.Fallback == "" || p.Fallback == "any" {
+		return "any"
+	}
+	return p.Fallback
+}
+
+// RouteBand is one declarative preference rule. Exactly one of Target or Grade
+// must be set. Target is a normal route target ("provider/model" or the map
+// form) and resolves to the grade containing that target for graded policies.
+// Grade is the name of a grade declared in policy.Grades. A band naming a
+// target/grade the route does not serve never matches at runtime.
+type RouteBand struct {
+	When   BandWhen    `yaml:"when"`
+	Target RouteTarget `yaml:"target"`
+	Grade  string      `yaml:"grade"`
+}
+
+// BandWhen is one band's condition set: nil means "don't care", every non-nil
+// field must hold (AND). At least one field must be set — an empty when is a
+// validate error. Signals come from the single per-request routing.Profile
+// scan; follow_up mirrors "the body already carries an assistant turn" (the
+// fusion first_turn_only gate's notion of a later turn).
+type BandWhen struct {
+	EstimatedTokensMin *int64 `yaml:"estimated_tokens_min"`
+	EstimatedTokensMax *int64 `yaml:"estimated_tokens_max"`
+	FollowUp           *bool  `yaml:"follow_up"`
+	HasTools           *bool  `yaml:"has_tools"`
+	HasImage           *bool  `yaml:"has_image"`
+}
+
+// Empty reports whether no condition is set (an always-matching band would
+// silently override scheduling for every request).
+func (w BandWhen) Empty() bool {
+	return w.EstimatedTokensMin == nil && w.EstimatedTokensMax == nil &&
+		w.FollowUp == nil && w.HasTools == nil && w.HasImage == nil
+}
+
+// EscalationConfig configures session-level route-tier escalation: after a
+// run of bad upstream outcomes the session is latched to Target/Grade for Dwell.
+// Exactly one of Target or Grade must be set; Grade names a grade declared in
+// policy.Grades. BadSignals is the closed set {upstream_error, empty_ok,
+// repeat_turn}; unknown values are rejected at validate time.
+type EscalationConfig struct {
+	BadSignals  []string    `yaml:"bad_signals"`
+	Consecutive int         `yaml:"consecutive"`
+	Target      RouteTarget `yaml:"target"`
+	Grade       string      `yaml:"grade"`
+	Dwell       string      `yaml:"dwell"`
+}
+
+// DwellDuration parses Dwell (default 30m). Malformed values are rejected at
+// validate time; the accessor returns the default only when the field is empty.
+func (e EscalationConfig) DwellDuration() time.Duration {
+	if e.Dwell == "" {
+		return 30 * time.Minute
+	}
+	if d, err := time.ParseDuration(e.Dwell); err == nil && d > 0 {
+		return d
+	}
+	return 30 * time.Minute
 }
 
 // TimeoutDuration parses Timeout (default 800ms; malformed values are a
@@ -1155,6 +1278,9 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		LogFile   string                   `yaml:"log_file"`
 		Providers map[string]Provider      `yaml:"providers"`
 		Routes    map[string][]RouteTarget `yaml:"routes"`
+		// Must mirror Config.RoutePolicies (same silent-drop trap as the
+		// shadow knobs: without it the file's route_policy: would be dropped).
+		RoutePolicies map[string]RoutePolicy `yaml:"route_policy"`
 		// Must mirror Config.Proxy (same silent-drop trap as the shadow knobs).
 		Proxy      string     `yaml:"proxy"`
 		Scheduling Scheduling `yaml:"scheduling"`
@@ -1225,6 +1351,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.LogFile = raw.LogFile
 	cfg.Providers = raw.Providers
 	cfg.Routes = raw.Routes
+	cfg.RoutePolicies = raw.RoutePolicies
 	cfg.Proxy = raw.Proxy
 	cfg.Scheduling = raw.Scheduling
 	cfg.Web = raw.Web
@@ -1616,6 +1743,117 @@ func (c *Config) validate() error {
 			}
 		}
 	}
+	// Route-policy validation: keys must be callable route names; every band
+	// carries at least one condition plus a defined provider/recipe and a
+	// servable protocol. Whether a band's target is actually served by that
+	// route is a cross-layer question (internal/routing owns derivation and
+	// imports this package, not the other way round) — routing emits a
+	// ConfigRoutingWarnings entry instead of failing load here.
+	for route, policy := range c.RoutePolicies {
+		if !routeNames[route] {
+			return fmt.Errorf("route_policy %q: route not found in routes: — add a route named %q or remove the entry", route, route)
+		}
+		if len(policy.Bands) == 0 {
+			return fmt.Errorf("route_policy %q: no bands — add at least one {when, target} band or remove the entry", route)
+		}
+		if err := c.validateRoutePolicyGrades(route, policy); err != nil {
+			return err
+		}
+		for i, band := range policy.Bands {
+			what := fmt.Sprintf("route_policy %q band %d", route, i)
+			if band.When.Empty() {
+				return fmt.Errorf("%s: when has no conditions — narrow the request with estimated_tokens_min/max, follow_up, has_tools or has_image", what)
+			}
+			if band.When.EstimatedTokensMin != nil && *band.When.EstimatedTokensMin < 0 {
+				return fmt.Errorf("%s: estimated_tokens_min %d out of range (>= 0)", what, *band.When.EstimatedTokensMin)
+			}
+			if band.When.EstimatedTokensMax != nil && *band.When.EstimatedTokensMax < 0 {
+				return fmt.Errorf("%s: estimated_tokens_max %d out of range (>= 0)", what, *band.When.EstimatedTokensMax)
+			}
+			if band.When.EstimatedTokensMin != nil && band.When.EstimatedTokensMax != nil &&
+				*band.When.EstimatedTokensMin > *band.When.EstimatedTokensMax {
+				return fmt.Errorf("%s: estimated_tokens_min %d exceeds estimated_tokens_max %d — the band can never match",
+					what, *band.When.EstimatedTokensMin, *band.When.EstimatedTokensMax)
+			}
+			if err := c.validateRoutePolicyBandTarget(route, what, policy, band); err != nil {
+				return err
+			}
+		}
+		if policy.Escalation != nil {
+			esc := policy.Escalation
+			if len(esc.BadSignals) == 0 {
+				return fmt.Errorf("route_policy %q escalation: bad_signals must contain at least one signal", route)
+			}
+			for _, sig := range esc.BadSignals {
+				switch sig {
+				case "upstream_error", "empty_ok", "repeat_turn":
+				default:
+					return fmt.Errorf("route_policy %q escalation: bad_signals %q is not supported (must be one of upstream_error, empty_ok, repeat_turn)", route, sig)
+				}
+			}
+			if esc.Consecutive < 1 {
+				return fmt.Errorf("route_policy %q escalation: consecutive %d must be >= 1", route, esc.Consecutive)
+			}
+			if err := c.validateRoutePolicyEscalationTarget(route, policy, esc); err != nil {
+				return err
+			}
+			if esc.Dwell != "" {
+				if _, err := time.ParseDuration(esc.Dwell); err != nil {
+					return fmt.Errorf("route_policy %q escalation: dwell %q is not a valid duration", route, esc.Dwell)
+				}
+			}
+		}
+		if policy.Selector != nil {
+			sel := policy.Selector
+			what := fmt.Sprintf("route_policy %q selector", route)
+			if sel.Target.Provider == "" || sel.Target.Model == "" {
+				return fmt.Errorf("%s: target must name a provider and a model", what)
+			}
+			if sel.Target.Provider == "fusion" {
+				return fmt.Errorf("%s: provider \"fusion\" is not a valid selector target — use a decisions-protocol provider", what)
+			}
+			prov, ok := c.Providers[sel.Target.Provider]
+			if !ok {
+				return fmt.Errorf("%s: provider %q not defined under providers:", what, sel.Target.Provider)
+			}
+			if sel.Target.Protocol != "decisions" {
+				return fmt.Errorf("%s: target must declare protocol: decisions (got %q) — only decisions-protocol models can judge routing", what, sel.Target.Protocol)
+			}
+			if err := checkTargetProtocol(what, sel.Target, prov); err != nil {
+				return err
+			}
+			switch sel.Mode {
+			case "", "shadow", "enforce":
+			default:
+				return fmt.Errorf("%s: mode %q invalid — use shadow or enforce", what, sel.Mode)
+			}
+			if sel.Confidence < 0 || sel.Confidence > 1 {
+				return fmt.Errorf("%s: confidence %v out of range [0, 1]", what, sel.Confidence)
+			}
+			if sel.Timeout != "" {
+				if _, err := time.ParseDuration(sel.Timeout); err != nil {
+					return fmt.Errorf("%s: timeout %q is not a valid duration", what, sel.Timeout)
+				}
+			}
+			if sel.DirectScoreMax != 0 {
+				return fmt.Errorf("%s: direct_score_max %v is fusion-only and must be 0 at route level", what, sel.DirectScoreMax)
+			}
+			if sel.PanelTopK != 0 {
+				return fmt.Errorf("%s: panel_top_k %d is fusion-only and must be 0 at route level", what, sel.PanelTopK)
+			}
+			if utf8.RuneCountInString(sel.Instruction) > fusionInstructionMaxRunes {
+				return fmt.Errorf("%s: instruction is %d runes, max %d", what, utf8.RuneCountInString(sel.Instruction), fusionInstructionMaxRunes)
+			}
+			if utf8.RuneCountInString(sel.DifficultyInstruction) > fusionInstructionMaxRunes {
+				return fmt.Errorf("%s: difficulty_instruction is %d runes, max %d", what, utf8.RuneCountInString(sel.DifficultyInstruction), fusionInstructionMaxRunes)
+			}
+		}
+		if policy.Eval != nil {
+			if err := c.validateRoutePolicyEval(route, policy); err != nil {
+				return err
+			}
+		}
+	}
 	if c.ShadowSampleRate != nil {
 		if r := *c.ShadowSampleRate; r < 0 || r > 1 {
 			return fmt.Errorf("shadow_sample_rate %v out of range [0, 1]", r)
@@ -1864,4 +2102,217 @@ func ProviderConfig(cfg *Config, parentOf map[string]string, name string) (Provi
 	}
 	p, ok := cfg.Providers[name]
 	return p, ok
+}
+
+// validateRoutePolicyGrades validates the grade declarations for a route_policy.
+// When grades are configured, every grade must be non-empty, name a non-empty
+// target list, and contain only targets that belong to the route.
+func (c *Config) validateRoutePolicyGrades(route string, policy RoutePolicy) error {
+	if len(policy.Grades) == 0 {
+		return nil
+	}
+	routeTargets := c.routeTargetKeySet(route)
+	for name, targets := range policy.Grades {
+		if name == "" {
+			return fmt.Errorf("route_policy %q grades: grade name must not be empty", route)
+		}
+		if len(targets) == 0 {
+			return fmt.Errorf("route_policy %q grades: grade %q must contain at least one target", route, name)
+		}
+		for i, t := range targets {
+			if t.Provider == "" || t.Model == "" {
+				return fmt.Errorf("route_policy %q grades: grade %q target %d must name a provider and a model", route, name, i)
+			}
+			if t.Provider == "fusion" {
+				return fmt.Errorf("route_policy %q grades: grade %q target %d: fusion targets are not allowed inside grades", route, name, i)
+			}
+			if _, ok := c.Providers[t.Provider]; !ok {
+				return fmt.Errorf("route_policy %q grades: grade %q target %d: provider %q not defined under providers:", route, name, i, t.Provider)
+			}
+			if len(routeTargets) > 0 && !routeTargets[t.Provider+"/"+t.Model] {
+				return fmt.Errorf("route_policy %q grades: grade %q target %s/%s is not a target of route %q", route, name, t.Provider, t.Model, route)
+			}
+		}
+	}
+	switch policy.Fallback {
+	case "", "any", "next_grade", "strict":
+	default:
+		return fmt.Errorf("route_policy %q fallback %q invalid — use any, next_grade, or strict", route, policy.Fallback)
+	}
+	return nil
+}
+
+// routeTargetKeySet returns the config-level targets for a route as a lookup
+// set keyed by "provider/model". For explicit routes this is the declared
+// target list; for derived routes it is computed from provider model lists and
+// aliases so grade membership can be checked without importing the routing
+// package.
+func (c *Config) routeTargetKeySet(route string) map[string]bool {
+	if targets, ok := c.Routes[route]; ok && len(targets) > 0 {
+		set := make(map[string]bool, len(targets))
+		for _, t := range targets {
+			set[t.Provider+"/"+t.Model] = true
+		}
+		return set
+	}
+	set := make(map[string]bool)
+	for provName, prov := range c.Providers {
+		for _, m := range prov.Models {
+			if prov.ExposedModelName(m) == route {
+				set[provName+"/"+m] = true
+			}
+		}
+	}
+	return set
+}
+
+// validateRoutePolicyBandTarget validates a band's grade/target reference.
+func (c *Config) validateRoutePolicyBandTarget(route, what string, policy RoutePolicy, band RouteBand) error {
+	if band.Grade != "" && (band.Target.Provider != "" || band.Target.Model != "") {
+		return fmt.Errorf("%s: set either grade or target, not both", what)
+	}
+	if policy.HasGrades() {
+		if band.Grade != "" {
+			if _, ok := policy.Grades[band.Grade]; !ok {
+				return fmt.Errorf("%s: grade %q not declared in grades", what, band.Grade)
+			}
+			return nil
+		}
+		if band.Target.Provider == "" || band.Target.Model == "" {
+			return fmt.Errorf("%s: graded policy requires either grade or target", what)
+		}
+		grade, ambiguous := gradeForTarget(band.Target, policy.Grades)
+		if ambiguous {
+			return fmt.Errorf("%s: target %s/%s is ambiguous (appears in multiple grades); use grade: <name>", what, band.Target.Provider, band.Target.Model)
+		}
+		if grade == "" {
+			return fmt.Errorf("%s: target %s/%s does not belong to any grade", what, band.Target.Provider, band.Target.Model)
+		}
+		return nil
+	}
+	if band.Grade != "" {
+		return fmt.Errorf("%s: grade used but route_policy %q has no grades declared", what, route)
+	}
+	if band.Target.Provider == "" || band.Target.Model == "" {
+		return fmt.Errorf("%s: target must name a provider and a model (\"provider/model\")", what)
+	}
+	if band.Target.Protocol != "" {
+		return fmt.Errorf("%s: band targets select an existing route target — declare protocol: on the route target instead of the band", what)
+	}
+	if band.Target.Provider == "fusion" {
+		if _, ok := c.Fusion[band.Target.Model]; !ok {
+			return fmt.Errorf("%s: fusion recipe %q not defined under fusion: — add a `fusion: %s:` recipe or fix the model name", what, band.Target.Model, band.Target.Model)
+		}
+		return nil
+	}
+	if _, ok := c.Providers[band.Target.Provider]; !ok {
+		return fmt.Errorf("%s: provider %q not defined under providers: — check spelling or add the provider", what, band.Target.Provider)
+	}
+	return nil
+}
+
+// validateRoutePolicyEscalationTarget validates an escalation's grade/target reference.
+func (c *Config) validateRoutePolicyEscalationTarget(route string, policy RoutePolicy, esc *EscalationConfig) error {
+	if esc.Grade != "" && (esc.Target.Provider != "" || esc.Target.Model != "") {
+		return fmt.Errorf("route_policy %q escalation: set either grade or target, not both", route)
+	}
+	if policy.HasGrades() {
+		if esc.Grade != "" {
+			if _, ok := policy.Grades[esc.Grade]; !ok {
+				return fmt.Errorf("route_policy %q escalation: grade %q not declared in grades", route, esc.Grade)
+			}
+			return nil
+		}
+		if esc.Target.Provider == "" || esc.Target.Model == "" {
+			return fmt.Errorf("route_policy %q escalation: graded policy requires either grade or target", route)
+		}
+		grade, ambiguous := gradeForTarget(esc.Target, policy.Grades)
+		if ambiguous {
+			return fmt.Errorf("route_policy %q escalation: target %s/%s is ambiguous (appears in multiple grades); use grade: <name>", route, esc.Target.Provider, esc.Target.Model)
+		}
+		if grade == "" {
+			return fmt.Errorf("route_policy %q escalation: target %s/%s does not belong to any grade", route, esc.Target.Provider, esc.Target.Model)
+		}
+		return nil
+	}
+	if esc.Grade != "" {
+		return fmt.Errorf("route_policy %q escalation: grade used but route_policy has no grades declared", route)
+	}
+	if esc.Target.Provider == "" || esc.Target.Model == "" {
+		return fmt.Errorf("route_policy %q escalation: target must name a provider and a model", route)
+	}
+	if esc.Target.Protocol != "" {
+		return fmt.Errorf("route_policy %q escalation: target selects an existing route target — declare protocol: on the route target instead of the escalation target", route)
+	}
+	if esc.Target.Provider == "fusion" {
+		if _, ok := c.Fusion[esc.Target.Model]; !ok {
+			return fmt.Errorf("route_policy %q escalation: fusion recipe %q not defined under fusion: — add a `fusion: %s:` recipe or fix the model name", route, esc.Target.Model, esc.Target.Model)
+		}
+	} else if _, ok := c.Providers[esc.Target.Provider]; !ok {
+		return fmt.Errorf("route_policy %q escalation: provider %q not defined under providers: — check spelling or add the provider", route, esc.Target.Provider)
+	}
+	return nil
+}
+
+// validateRoutePolicyEval validates the eval block for a graded route.
+// Eval is only meaningful when grades are configured; the judge must name a
+// decisions-protocol provider/model and the pair reference must resolve.
+func (c *Config) validateRoutePolicyEval(route string, policy RoutePolicy) error {
+	eval := policy.Eval
+	if !policy.HasGrades() {
+		return fmt.Errorf("route_policy %q eval: requires grades to be configured", route)
+	}
+	if eval.SampleRate < 0 || eval.SampleRate > 0.5 {
+		return fmt.Errorf("route_policy %q eval: sample_rate %v out of range [0, 0.5]", route, eval.SampleRate)
+	}
+	if eval.Judge.Provider == "" || eval.Judge.Model == "" {
+		return fmt.Errorf("route_policy %q eval: judge must name a provider and a model", route)
+	}
+	if eval.Judge.Provider == "fusion" {
+		return fmt.Errorf("route_policy %q eval: judge provider cannot be fusion", route)
+	}
+	prov, ok := c.Providers[eval.Judge.Provider]
+	if !ok {
+		return fmt.Errorf("route_policy %q eval: judge provider %q not defined under providers:", route, eval.Judge.Provider)
+	}
+	if eval.Judge.Protocol != "decisions" {
+		return fmt.Errorf("route_policy %q eval: judge protocol must be decisions (got %q)", route, eval.Judge.Protocol)
+	}
+	if err := checkTargetProtocol(fmt.Sprintf("route_policy %q eval judge", route), eval.Judge, prov); err != nil {
+		return err
+	}
+	pair := eval.PairMode()
+	switch {
+	case pair == "opposite":
+		if len(policy.Grades) < 2 {
+			return fmt.Errorf("route_policy %q eval: pair=opposite requires at least 2 grades", route)
+		}
+	case strings.HasPrefix(pair, "grade:"):
+		g := strings.TrimPrefix(pair, "grade:")
+		if _, ok := policy.Grades[g]; !ok {
+			return fmt.Errorf("route_policy %q eval: pair grade %q not declared in grades", route, g)
+		}
+	default:
+		return fmt.Errorf("route_policy %q eval: pair %q invalid — use opposite or grade:<name>", route, eval.Pair)
+	}
+	return nil
+}
+
+// gradeForTarget returns the unique grade containing target, and whether it is
+// ambiguous (appears in more than one grade). Returns ("", false) when the
+// target belongs to no grade.
+func gradeForTarget(target RouteTarget, grades map[string][]RouteTarget) (string, bool) {
+	var found string
+	for name, targets := range grades {
+		for _, t := range targets {
+			if t.Provider == target.Provider && t.Model == target.Model {
+				if found != "" && found != name {
+					return "", true
+				}
+				found = name
+				break
+			}
+		}
+	}
+	return found, false
 }
