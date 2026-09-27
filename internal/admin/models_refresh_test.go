@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -410,5 +411,172 @@ func TestRefreshModelsCancellationAfterCommitFinishesReload(t *testing.T) {
 	}
 	if _, n := h.replacedMatrix(); n != 1 {
 		t.Fatal("committed refresh did not finish cache update")
+	}
+}
+
+// TestRefreshModels_DisabledNotProbed: operator-disabled models send no probe
+// request, are kept regardless of callability (the override is a rotation
+// choice), and their STORED verdicts ride along in the cache replace (not
+// probed ≠ dropped). The all-failed safety net is judged on the probed subset
+// only — disabled ids cannot mask a total probe outage.
+func TestRefreshModels_DisabledNotProbed(t *testing.T) {
+	var hits sync.Map // model -> count
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		body := string(raw)
+		n, _ := hits.LoadOrStore(body, 0)
+		hits.Store(body, n.(int)+1)
+		if strings.Contains(body, "off") {
+			t.Errorf("disabled model probed on the wire: %s", body)
+		}
+		if strings.Contains(body, "dead") {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":{"message":"model not supported"}}`))
+			return
+		}
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	configFile := writeRefreshConfig(t, srv.URL, "dead, live, off")
+	cfg := refreshTestConfig(srv.URL, []string{"dead", "live", "off"})
+	impl := &refreshFakeProv{fetched: []string{"live", "dead", "off"}}
+	h := newRefreshHarness(t, cfg, configFile, impl)
+	// Equip the runtime with the disabled set + stored-verdict seam.
+	inner := h.service.ports.ModelRefreshRuntime
+	h.service.ports.ModelRefreshRuntime = func(name string) ModelRefreshRuntime {
+		rt := inner(name)
+		rt.Disabled = map[string]bool{"off": true}
+		rt.StoredModelCaps = func(model string) (runtimewire.ModelProtocols, bool) {
+			if model == "off" {
+				return runtimewire.ModelProtocols{Chat: runtimewire.Yes, Anthropic: runtimewire.Yes, Responses: runtimewire.No}, true
+			}
+			return runtimewire.ModelProtocols{}, false
+		}
+		return rt
+	}
+
+	result, err := h.service.RefreshModels(context.Background(), "zp")
+	if err != nil {
+		t.Fatalf("RefreshModels: %v", err)
+	}
+	// live kept (callable), dead dropped (404), off kept UNPROBED.
+	if !reflect.DeepEqual(sortedCopy(result.Kept), []string{"live", "off"}) {
+		t.Errorf("kept = %v, want [live off] (disabled rides along)", result.Kept)
+	}
+	if len(result.ProbeDropped) != 1 || result.ProbeDropped[0].Model != "dead" {
+		t.Errorf("probe drops = %+v, want only dead", result.ProbeDropped)
+	}
+	matrix, n := h.replacedMatrix()
+	if n != 1 {
+		t.Fatalf("cache replaced %d times, want 1", n)
+	}
+	if got := matrix["off"]; got.Chat != runtimewire.Yes || got.Anthropic != runtimewire.Yes || got.Responses != runtimewire.No {
+		t.Errorf("disabled model's matrix = %+v, want stored verdict carried over verbatim", got)
+	}
+	if _, ok := matrix["dead"]; !ok {
+		t.Error("probed-but-dropped model lost its matrix entry")
+	}
+	// Config keeps the disabled model too.
+	if got := configModels(t, configFile); !reflect.DeepEqual(sortedCopy(got), []string{"live", "off"}) {
+		t.Errorf("config models = %v, want [live off]", got)
+	}
+}
+
+// TestRefreshModels_DisabledDoesNotMaskAllProbeFailed: when every PROBED
+// model fails but disabled ids exist, the outage safety net must still fire
+// (probed set kept unvalidated + warning), instead of silently wiping the
+// probed models from config.
+func TestRefreshModels_DisabledDoesNotMaskAllProbeFailed(t *testing.T) {
+	srv := bodyRulesUpstream(t /* nothing callable */)
+	configFile := writeRefreshConfig(t, srv.URL, "dead-a")
+	cfg := refreshTestConfig(srv.URL, []string{"dead-a", "off-a"})
+	impl := &refreshFakeProv{fetched: []string{"dead-a", "off-a"}}
+	h := newRefreshHarness(t, cfg, configFile, impl)
+	inner := h.service.ports.ModelRefreshRuntime
+	h.service.ports.ModelRefreshRuntime = func(name string) ModelRefreshRuntime {
+		rt := inner(name)
+		rt.Disabled = map[string]bool{"off-a": true}
+		return rt
+	}
+
+	result, err := h.service.RefreshModels(context.Background(), "zp")
+	if err != nil {
+		t.Fatalf("RefreshModels: %v", err)
+	}
+	if result.Warning == "" || !strings.Contains(result.Warning, "failed for ALL") {
+		t.Errorf("warning = %q, want the all-probe-failed outage recognized despite the disabled rider", result.Warning)
+	}
+	if !reflect.DeepEqual(sortedCopy(result.Kept), []string{"dead-a", "off-a"}) {
+		t.Errorf("kept = %v, want [dead-a off-a] (outage fallback + disabled)", result.Kept)
+	}
+	matrix, n := h.replacedMatrix()
+	if n != 0 {
+		t.Errorf("cache replaced %d times, want 0 (fail-closed on the failed probe), matrix=%v", n, matrix)
+	}
+}
+
+func sortedCopy(ids []string) []string {
+	out := append([]string(nil), ids...)
+	sort.Strings(out)
+	return out
+}
+
+// TestRefreshModels_LegacyProviderFetchesLiveList: the daemon twin must
+// discover NEW upstream models for providers whose /models fetch predates
+// FetchModelsContext (mimo/opencode-go/openrouter/step-plan) — the reported
+// parity gap where CLI `models refresh` refreshed the model list but the Web
+// UI only re-validated route-configured models. Uses a REAL registered
+// provider (mimo, store-free via BoundAPIKey) against a fake upstream that
+// lists a model absent from both config and routes.
+func TestRefreshModels_LegacyProviderFetchesLiveList(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			w.Write([]byte(`{"data":[{"id":"mimo-existing"},{"id":"mimo-brand-new"}]}`))
+		default:
+			// Probe legs: callable.
+			w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	configFile := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configFile, []byte("listen: 127.0.0.1:8080\nproviders:\n  mimo: {provider_id: mimo, openai_base_url: "+srv.URL+", models: [mimo-existing]}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"mimo": {Provider: "mimo", OpenAIBaseURL: srv.URL, Models: []string{"mimo-existing"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	impl, err := provider.New(&provider.Config{
+		ProviderID: "mimo", OpenAIBaseURL: srv.URL, BoundAPIKey: "sk-mimo-testkey1234567890",
+	}, "mimo")
+	if err != nil {
+		t.Fatalf("provider.New: %v", err)
+	}
+	h := newRefreshHarness(t, cfg, configFile, impl)
+
+	result, err := h.service.RefreshModels(context.Background(), "mimo")
+	if err != nil {
+		t.Fatalf("RefreshModels: %v", err)
+	}
+	if result.Warning != "" {
+		t.Errorf("warning = %q, want none (the live list must be fetched, not the route fallback)", result.Warning)
+	}
+	if !reflect.DeepEqual(sortedCopy(result.Kept), []string{"mimo-brand-new", "mimo-existing"}) {
+		t.Errorf("kept = %v, want the fetched live list including the new id", result.Kept)
+	}
+	if !reflect.DeepEqual(sortedCopy(result.Added), []string{"mimo-brand-new"}) {
+		t.Errorf("added = %v, want [mimo-brand-new]", result.Added)
+	}
+	written, err := configdomain.LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("written config does not load: %v", err)
+	}
+	if got := written.Providers["mimo"].Models; !reflect.DeepEqual(sortedCopy(got), []string{"mimo-brand-new", "mimo-existing"}) {
+		t.Errorf("config models = %v, want the live list written", got)
 	}
 }

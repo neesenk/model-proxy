@@ -9,8 +9,11 @@ package admin
 // fetch/probe outage never wipes models: — the merged/policy-filtered list is
 // written unvalidated with a warning instead. One deliberate hardening over
 // the CLI: the verdict cache is replaced ONLY from a healthy probe — an
-// all-failed probe keeps the previous matrix (fail-closed), where the CLI's
-// best-effort file persist also lands failed verdicts.
+// all-failed probe keeps the previous matrix (fail-closed). Partially failed
+// probes keep prior conclusions per leg on BOTH paths: the daemon's
+// ReplaceProviderModels and the CLI's file persist merge transient-unknown
+// legs back into the stored verdicts (wirecap.MergeOnUnknown), so a
+// rate-limited refresh cannot regress concluded verdicts to "? unknown".
 
 import (
 	"bytes"
@@ -91,30 +94,57 @@ func (s *Service) RefreshModels(ctx context.Context, name string) (appapi.Models
 	}
 
 	// Endpoint probe: keep a model when ANY protocol leg classifies Yes.
+	// Operator-disabled models are excluded from probing (the override is a
+	// rotation choice, not a callability signal) and ride along unvalidated.
 	kept := policyKept
 	var matrix map[string]runtimewire.ModelProtocols
 	probeHealthy := false
+	probeIDs := policyKept
 	if impl != nil {
+		if disabled := runtime.Disabled; len(disabled) > 0 {
+			probeIDs = make([]string, 0, len(policyKept))
+			for _, id := range policyKept {
+				if !disabled[id] {
+					probeIDs = append(probeIDs, id)
+				}
+			}
+		}
 		client := runtime.Client
 		if client == nil {
 			return result, fmt.Errorf("model refresh probe client is unavailable")
 		}
 		var drops []appapi.ModelsRefreshDrop
-		kept, drops, matrix = probeRefreshModels(ctx, client, provCfg, impl, policyKept)
+		var probedKept []string
+		probedKept, drops, matrix = probeRefreshModels(ctx, client, provCfg, impl, probeIDs)
 		if ctx.Err() != nil {
 			return result, ctx.Err()
 		}
 		result.ProbeDropped = drops
-		if len(policyKept) > 0 && len(kept) == 0 {
-			// Every probe failed — likely auth/network, not genuinely
-			// uncallable models. Keep the policy-filtered set unvalidated
-			// (never wipe models:) and DO NOT replace the verdict cache
-			// with the failed matrix.
-			kept = policyKept
+		if len(probeIDs) > 0 && len(probedKept) == 0 {
+			// Every probed model failed — likely auth/network, not genuinely
+			// uncallable models. Keep the probed subset unvalidated (never wipe
+			// models:) and DO NOT replace the verdict cache with the failed
+			// matrix. Judged on the PROBED subset: disabled ids ride along
+			// unconditionally and must not mask a total probe outage.
+			probedKept = probeIDs
 			result.Warning = "endpoint probe failed for ALL models (likely not logged in / network); list written unvalidated"
 		} else {
 			probeHealthy = true
 		}
+		// Disabled ids ride along unvalidated; their stored verdicts are
+		// carried into the replacement matrix verbatim (not probed ≠ dropped)
+		// so the cache replace preserves them.
+		for _, id := range policyKept {
+			if disabled := runtime.Disabled; len(disabled) > 0 && disabled[id] {
+				probedKept = append(probedKept, id)
+				if matrix != nil && runtime.StoredModelCaps != nil {
+					if stored, ok := runtime.StoredModelCaps(id); ok {
+						matrix[id] = stored
+					}
+				}
+			}
+		}
+		kept = probedKept
 	}
 	sort.Strings(kept)
 	result.Kept = kept

@@ -226,6 +226,15 @@ type ModelRefreshRuntime struct {
 	Provider    provider.Provider
 	Fingerprint string
 	Client      *http.Client
+	// Disabled is the provider's operator disabled-model set (the runtime
+	// Manager projection). Disabled models are not probed by the refresh;
+	// they ride along in the kept list and their stored verdicts are
+	// preserved verbatim in the cache replace.
+	Disabled map[string]bool
+	// StoredModelCaps reads one model's currently stored verdict matrix —
+	// the cache-preservation seam for disabled models (not probed ≠ dropped).
+	// Nil-safe: a nil seam reports no entry.
+	StoredModelCaps func(model string) (runtimewire.ModelProtocols, bool)
 }
 
 // DashboardState is one generation-consistent capture behind Dashboard. Every
