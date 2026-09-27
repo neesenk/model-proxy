@@ -165,7 +165,7 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			"mcpSessions": true, "mcpRR": true, "mcpStdio": true, "mcpStats": true,
 			"fusionReg": true, "catalog": true, "budget": true,
 			"proxyResolver": true, "transports": true, "transportsMu": true,
-			"wireCaps": true, "wireProbe": true,
+			"wireCaps": true, "wireProbe": true, "wireProbeMu": true,
 			"modelCaps": true, "modelCapsPath": true, "cacheStatePath": true,
 			"cacheCounters": true, "cachePersistMu": true,
 			"disabledModelsPath": true, "disabledModelsMu": true,

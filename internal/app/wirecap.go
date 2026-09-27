@@ -78,8 +78,11 @@ func wireLegFresh(v triState, probedAt time.Time) bool {
 }
 
 // wireCapProbeTimeout caps one probe request. A var (not const) so tests can
-// shrink it for the timeout branch.
-var wireCapProbeTimeout = 10 * time.Second
+// shrink it for the timeout branch. 30s: BigModel's thinking models can
+// exceed 10s to first byte on a cold/queued request (observed on
+// glm-5.3-flash), and a pass is async — the longer cap trades a slower pass
+// for fewer timeout-unknown legs that need re-probing.
+var wireCapProbeTimeout = 30 * time.Second
 
 // classifyProviderWireStatus maps a probe outcome to a verdict with the
 // agent-grade 400 rule: provider legs are probed with a function tool
@@ -235,9 +238,21 @@ func (p *Proxy) startWireCapProbe() {
 		if p.quota.Stopped() {
 			return
 		}
-		p.probeAllWireCaps()
-		p.probeAllModelCaps()
+		p.runWireProbePass()
 	})
+}
+
+// runWireProbePass runs one provider- + model-level probe pass, SERIALIZED
+// against other passes: rapid reloads (SIGHUP storms — login/logout, models
+// refresh, config edits all signal) each dispatch one, and overlapping passes
+// multiply the concurrent legs against the same rate-limited upstreams (the
+// observed 429 → "? unknown" flapping). A queued pass reads the CURRENT
+// generation at its own start, so serializing never probes stale config.
+func (p *Proxy) runWireProbePass() {
+	p.wireProbeMu.Lock()
+	defer p.wireProbeMu.Unlock()
+	p.probeAllWireCaps()
+	p.probeAllModelCaps()
 }
 
 // resolvedBackendProto determines the backend protocol for a route target (or

@@ -634,3 +634,65 @@ func TestWireCap_ProbeAgentGradeRejectionToNo(t *testing.T) {
 		t.Errorf("probe_version = %d, want %d", caps.ProbeVersion, runtimewire.ProbeVersion)
 	}
 }
+
+// TestWireCap_ProbePassesSerialized: probe passes dispatched back-to-back
+// (the reload/SIGHUP storm pattern) must run strictly one at a time —
+// overlapping passes would multiply concurrent legs against the same
+// rate-limited upstream and stack 429 → unknown flapping. Each pass here
+// probes 5 legs (2 provider + 3 model; 5xx keeps every verdict unconcluded so
+// nothing is skipped); the second pass must not send a single request until
+// the first completes.
+func TestWireCap_ProbePassesSerialized(t *testing.T) {
+	gate := make(chan struct{})
+	var hits atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		hits.Add(1)
+		<-gate // hold this pass open until the test releases it
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer up.Close()
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"p": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: testProviderID, Models: []string{"m1"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["p"] = &testProv{key: "k"}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); p.runWireProbePass() }()
+
+	// Wait for pass 1's provider legs (chat+responses) to arrive and block.
+	deadline := time.Now().Add(5 * time.Second)
+	for hits.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("pass 1 sent %d requests, want the 2 provider legs blocked on the gate", got)
+	}
+
+	// Dispatch pass 2 while pass 1 is blocked: serialization means it must not
+	// send anything yet.
+	wg.Add(1)
+	go func() { defer wg.Done(); p.runWireProbePass() }()
+	time.Sleep(150 * time.Millisecond)
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("pass 2 sent requests while pass 1 was still running (hits=%d) — passes must serialize", got)
+	}
+
+	// Release: both passes complete, each having sent its 5 legs.
+	close(gate)
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("probe passes did not finish after gate release")
+	}
+	if got := hits.Load(); got != 10 {
+		t.Errorf("total hits = %d, want 10 (2 passes × 5 legs)", got)
+	}
+}

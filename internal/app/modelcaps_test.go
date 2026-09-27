@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -511,4 +512,242 @@ func TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E(t *testing.T) {
 			t.Errorf("upstream paths = %v, want one /chat/completions (error surfaced, no leg-hopping)", paths)
 		}
 	})
+}
+
+// TestModelCaps_TransientFailureDoesNotFlapConcludedVerdict: a re-probe pass
+// (here: a sibling model's unknown leg keeps the provider eligible) must not
+// downgrade a model's previously CONCLUDED legs when the re-probe hits a
+// transient 429 (the zcode/zhipu "? unknown" flapping): the partially
+// concluded model keeps its yes legs through the storm and concludes fully
+// once the throttle lifts. Fully concluded models are not re-probed at all
+// (see TestModelCaps_ConcludedModelsNotReprobedAsCollateral).
+func TestModelCaps_TransientFailureDoesNotFlapConcludedVerdict(t *testing.T) {
+	// phase 0: chat/anthropic 200, responses 500 (partially conclusive)
+	// phase 1: everything 429 (the storm)
+	// phase 2: everything 200 (recovery)
+	var phase atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		switch phase.Load() {
+		case 0:
+			if r.URL.Path == "/responses" {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.Write([]byte(`{}`))
+		case 1:
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":{"code":"1302","message":"Concurrency limit reached"}}`))
+		default:
+			w.Write([]byte(`{}`))
+		}
+	}))
+	defer up.Close()
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"p": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: testProviderID, Models: []string{"m1"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["p"] = &testProv{key: "k"}
+
+	// Pass 1: m1 concludes chat/anthropic yes, responses unknown (5xx).
+	p.probeAllModelCaps()
+	if mp, _ := p.modelCaps.Get("p", "m1"); mp.Chat != triYes || mp.Anthropic != triYes || mp.Responses != triUnknown {
+		t.Fatalf("pass 1 m1 = %+v, want yes/yes/unknown", mp)
+	}
+
+	// A new model joins the config (fingerprint unchanged) while the upstream
+	// starts rate-limiting: the pass re-probes m1 (unconcluded responses leg).
+	prov := cfg.Providers["p"]
+	prov.Models = []string{"m1", "m2"}
+	cfg.Providers["p"] = prov
+	phase.Store(1)
+	p.probeAllModelCaps()
+
+	// m1 keeps its concluded legs despite the 429s (merge-on-unknown); the
+	// unconcluded responses leg stays unknown; m2 lands all-unknown.
+	if mp, _ := p.modelCaps.Get("p", "m1"); mp.Chat != triYes || mp.Anthropic != triYes || mp.Responses != triUnknown {
+		t.Errorf("m1 after throttled pass = %+v, want prior yes/yes retained + responses unknown (no flap)", mp)
+	}
+	if mp, _ := p.modelCaps.Get("p", "m2"); mp.Chat != triUnknown || mp.Responses != triUnknown {
+		t.Errorf("m2 after throttled pass = %+v, want unknown (transient, no prior verdict)", mp)
+	}
+
+	// Recovery: the throttle lifts and the next pass concludes everything.
+	phase.Store(2)
+	p.probeAllModelCaps()
+	if mp, _ := p.modelCaps.Get("p", "m2"); mp.Chat != triYes {
+		t.Errorf("m2 after recovery = %+v, want chat yes", mp)
+	}
+	if mp, _ := p.modelCaps.Get("p", "m1"); mp != (runtimewire.ModelProtocols{Chat: triYes, Anthropic: triYes, Responses: triYes}) {
+		t.Errorf("m1 after recovery = %+v, want yes/yes/yes", mp)
+	}
+}
+
+// TestModelCaps_ConcludedModelsNotReprobedAsCollateral: when one model's
+// unconcluded leg keeps a provider eligible for a pass, the provider's
+// FULLY concluded models are not re-probed — the collateral re-probe used to
+// re-burst the whole provider against rate-limited upstreams (zcode/zhipu:
+// adding one model fired 33 requests) and downgrade fine verdicts.
+func TestModelCaps_ConcludedModelsNotReprobedAsCollateral(t *testing.T) {
+	var chatHits atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		if r.URL.Path == "/chat/completions" {
+			chatHits.Add(1)
+		}
+		w.Write([]byte(`{}`))
+	}))
+	defer up.Close()
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"p": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: testProviderID, Models: []string{"m1", "m2"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["p"] = &testProv{key: "k"}
+
+	// Both models conclude.
+	p.probeAllModelCaps()
+	first := chatHits.Load()
+	if first != 2 {
+		t.Fatalf("pass 1 chat hits = %d, want 2 (one per model)", first)
+	}
+
+	// A third model joins; the eligibility re-opens the provider. The
+	// concluded m1/m2 must not be re-probed: only m3's legs fire.
+	prov := cfg.Providers["p"]
+	prov.Models = []string{"m1", "m2", "m3"}
+	cfg.Providers["p"] = prov
+	p.probeAllModelCaps()
+	if got := chatHits.Load(); got != 3 {
+		t.Errorf("chat hits after adding m3 = %d, want 3 (m1/m2 skipped as concluded, only m3 probed)", got)
+	}
+	for _, m := range []string{"m1", "m2", "m3"} {
+		if mp, ok := p.modelCaps.Get("p", m); !ok || !mp.Concluded() {
+			t.Errorf("%s = %+v (ok=%v), want concluded", m, mp, ok)
+		}
+	}
+}
+
+// TestModelCaps_ReloadRereadsFileFromDisk: reload re-reads model_caps.json
+// instead of restoring the daemon's own in-memory snapshot, so CLI-written
+// verdicts (`models refresh` persists the file, then SIGHUPs) reach the
+// running daemon — previously the daemon stayed split-brained until restart
+// and its next async persist clobbered the file with stale verdicts.
+func TestModelCaps_ReloadRereadsFileFromDisk(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Write([]byte(`{}`))
+	}))
+	defer up.Close()
+	statePath := filepath.Join(t.TempDir(), "quota_state.json")
+	capsPath := runtimewire.ModelCapsPath(statePath)
+	cfgFile := filepath.Join(filepath.Dir(statePath), "config.yaml")
+	if err := os.WriteFile(cfgFile, []byte("providers:\n  p: {provider_id: static, openai_base_url: "+up.URL+"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"p": {OpenAIBaseURL: up.URL, Provider: "static", Models: []string{"m1"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	p := newTestProxyAt(t, cfg, statePath)
+
+	// In-memory state: a 429-storm pass left the leg unknown.
+	fp := providerbuild.ProtocolConfigFingerprint(cfg.Providers["p"])
+	p.modelCaps.Put("p", fp, "m1", runtimewire.ModelProtocols{Chat: runtimewire.Unknown, Anthropic: runtimewire.No, Responses: runtimewire.No}, time.Now())
+
+	// The CLI (or another process) writes fresh verdicts to the file.
+	if err := runtimewire.SaveModelCapsFile(capsPath, map[string]runtimewire.ProviderModelCaps{
+		"p": {Fingerprint: fp, ProbedAt: time.Now(), Models: map[string]runtimewire.ModelProtocols{
+			"m1": {Chat: runtimewire.Yes, Anthropic: runtimewire.Yes, Responses: runtimewire.No},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.Reload(cfgFile); err != nil {
+		t.Fatal(err)
+	}
+	if mp, ok := p.modelCaps.Get("p", "m1"); !ok || mp.Chat != runtimewire.Yes || mp.Anthropic != runtimewire.Yes {
+		t.Errorf("after reload m1 = %+v (ok=%v), want the FILE verdicts (yes/yes) — reload must re-read model_caps.json", mp, ok)
+	}
+}
+
+// TestModelCaps_ProtocolHintOverwritesUnconcludedLegacyEntry: a hint-covered
+// provider (codex → responses) synthesizes its authoritative verdict over a
+// legacy entry whose legs never concluded — without the overwrite the entry
+// lingers as "? unknown" forever (the hint pass skipped any existing entry).
+func TestModelCaps_ProtocolHintOverwritesUnconcludedLegacyEntry(t *testing.T) {
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"codex": {OpenAIBaseURL: "https://codex.invalid", Provider: "codex", Models: []string{"gpt-6-sol"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	p := newTestProxy(t, cfg)
+
+	// Legacy entry from a pass before the provider was hint-covered: all
+	// unknown, fingerprint matching current config.
+	fp := providerbuild.ProtocolConfigFingerprint(cfg.Providers["codex"])
+	p.modelCaps.Put("codex", fp, "gpt-6-sol", runtimewire.ModelProtocols{Chat: runtimewire.Unknown, Anthropic: runtimewire.Unknown, Responses: runtimewire.Unknown}, time.Now())
+
+	p.probeAllModelCaps()
+	mp, ok := p.modelCaps.Get("codex", "gpt-6-sol")
+	if !ok || mp != (runtimewire.ModelProtocols{Chat: runtimewire.No, Anthropic: runtimewire.No, Responses: runtimewire.Yes}) {
+		t.Errorf("hint synthesis over legacy unknown = %+v (ok=%v), want no/no/yes", mp, ok)
+	}
+}
+
+// TestModelCaps_DisabledModelsNotProbed: operator-disabled models never hit
+// the upstream — not probed, not eligible (a provider whose every model is
+// disabled is skipped entirely), and their stored verdicts stay FROZEN in the
+// store (not pruned: the operator blocked the model, not the store's memory
+// of it). One disabled model on a not-logged-in provider used to fire 36
+// auth-error legs per pass.
+func TestModelCaps_DisabledModelsNotProbed(t *testing.T) {
+	var hits atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		hits.Add(1)
+		w.Write([]byte(`{}`))
+	}))
+	defer up.Close()
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"p": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: testProviderID, Models: []string{"m1", "m2"}},
+			// All-disabled provider: must not send a single request.
+			"q": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: testProviderID, Models: []string{"q1"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["p"] = &testProv{key: "k"}
+	p.providers["q"] = &testProv{key: "k"}
+	p.runtimeState.RestoreDisabledModels(map[string][]string{
+		"p": {"m2"},
+		"q": {"q1"},
+	})
+
+	// m2 carries a frozen verdict from before the disable.
+	fpP := providerbuild.ProtocolConfigFingerprint(cfg.Providers["p"])
+	p.modelCaps.Put("p", fpP, "m2", runtimewire.ModelProtocols{Chat: runtimewire.Yes, Anthropic: runtimewire.No, Responses: runtimewire.No}, time.Now())
+
+	p.probeAllModelCaps()
+
+	// Only m1's three legs fired (m2 and q1 are disabled — no requests).
+	if got := hits.Load(); got != 3 {
+		t.Errorf("upstream hits = %d, want 3 (m1's legs only; disabled m2/q1 not probed)", got)
+	}
+	if mp, ok := p.modelCaps.Get("p", "m1"); !ok || mp.Chat != triYes {
+		t.Errorf("m1 = %+v (ok=%v), want probed chat yes", mp, ok)
+	}
+	if mp, ok := p.modelCaps.Get("p", "m2"); !ok || mp.Chat != triYes || mp.Anthropic != triNo {
+		t.Errorf("m2 = %+v (ok=%v), want frozen verdict preserved verbatim", mp, ok)
+	}
 }

@@ -123,6 +123,12 @@ type processServices struct {
 	// state path). Same leaf-lock + survives-reload discipline as wireCaps.
 	modelCaps     runtimewire.ModelStore
 	modelCapsPath string
+	// wireProbeMu serializes wire/model probe passes. Rapid SIGHUP storms each
+	// dispatch a pass; unserialized passes probe the same rate-limited
+	// upstreams concurrently, stacking 429 bursts (the observed zcode/zhipu
+	// "? unknown" flapping). A queued pass re-reads the current generation at
+	// its own start, so serializing never probes a stale one.
+	wireProbeMu sync.Mutex
 	// Operator disabled-model override's persistence (disabled_models.json,
 	// same state directory as model_caps.json). The runtime Manager owns the
 	// live set; this path + mutex own the file rewrite after every toggle

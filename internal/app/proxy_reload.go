@@ -9,6 +9,7 @@ import (
 	"model-proxy/internal/provider"
 	"model-proxy/internal/providerbuild"
 	"model-proxy/internal/routing"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 	"model-proxy/internal/shadow"
 	"model-proxy/internal/upstreamproxy"
 	"time"
@@ -34,6 +35,22 @@ func (p *Proxy) Reload(configPath string) error {
 		logx.Warnf("[reload] ⚠ %s", note)
 	}
 	built := providerbuild.BuildProviders(cfg, accounts.NewStore(accounts.HomeDir()), providerbuild.BuildOpts())
+	// Re-read model_caps.json from disk BEFORE the lock (file I/O must not
+	// happen under p.mu — red line 2). The CLI `models refresh` writes fresh
+	// verdicts to this file directly; reloading from the daemon's own snapshot
+	// (the previous behavior) kept a split-brain where the running daemon never
+	// saw the CLI's verdicts until a restart, and its next async persist
+	// clobbered the file with the stale in-memory copy. When the load yields
+	// nothing usable (missing file — e.g. the boot pass has not persisted yet;
+	// malformed; version bump) the in-memory snapshot stays authoritative,
+	// matching the boot degradation.
+	modelCapsOnDisk, capsErr := runtimewire.LoadModelCapsFile(p.modelCapsPath)
+	if capsErr != nil {
+		logx.Warnf("[reload] ⚠ model_caps.json unreadable (%v); keeping in-memory verdicts", capsErr)
+	}
+	if modelCapsOnDisk == nil {
+		modelCapsOnDisk = p.modelCaps.Snapshot()
+	}
 	// AuthReady may read the credential store (file I/O, or the OS keychain
 	// under credentials: keychain) — evaluate it here, OUTSIDE the write lock,
 	// and hand the locked route compilation the precomputed set (same
@@ -97,8 +114,10 @@ func (p *Proxy) Reload(configPath string) error {
 	// fingerprints: entries whose protocol-relevant config changed are dropped
 	// now (under the same lock the snapshot readers serialize on), and the
 	// fingerprint map arms ModelStore.Put's stale-generation guard so a still
-	// in-flight pre-reload probe pass cannot write its verdicts back.
-	p.modelCaps.Restore(p.modelCaps.Snapshot(), protocolFingerprints(cfg))
+	// in-flight pre-reload probe pass cannot write its verdicts back. The
+	// restore source is the DISK re-read above, so CLI-written verdicts reach
+	// the running daemon on the refresh-triggered SIGHUP.
+	p.modelCaps.Restore(modelCapsOnDisk, protocolFingerprints(cfg))
 	p.mu.Unlock()
 	// Re-publish the config-level global proxy for the automatic chain used by
 	// non-forwarding outbound calls (see NewProxyWithStatePath).

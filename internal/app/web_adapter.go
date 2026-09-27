@@ -504,6 +504,13 @@ func (p *Proxy) adminPorts(
 				Config: cfg, Provider: impl,
 				Fingerprint: providerbuild.ProtocolConfigFingerprint(cfg.Providers[name]),
 				Client:      &http.Client{Timeout: cfg.Scheduling.Timeout(), Transport: upstreamproxy.AutoTransport()},
+				// Operator disabled models (Manager-owned; read under the same
+				// p.mu → runtime.Manager lock order) are not probed by the
+				// refresh; their stored verdicts ride along via StoredModelCaps.
+				Disabled: disabledModelSet(p.runtimeState.DisabledModels(), name),
+				StoredModelCaps: func(model string) (runtimewire.ModelProtocols, bool) {
+					return p.modelCaps.Get(name, model)
+				},
 			}
 		},
 		ModelCapsReplace: func(name, fingerprint string, models map[string]runtimewire.ModelProtocols) bool {
@@ -524,4 +531,18 @@ func (p *Proxy) adminPorts(
 		// same home the accounts store uses.
 		HomeDir: accounts.HomeDir,
 	}
+}
+
+// disabledModelSet projects one provider's disabled-model list from the
+// Manager's full map into a lookup set (nil-safe).
+func disabledModelSet(byProvider map[string][]string, provider string) map[string]bool {
+	models := byProvider[provider]
+	if len(models) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(models))
+	for _, m := range models {
+		set[m] = true
+	}
+	return set
 }
