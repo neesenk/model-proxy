@@ -164,6 +164,8 @@ providers:
     openai_base_url: https://api.deepseek.com
     anthropic_base_url: https://api.deepseek.com/anthropic
     usage_url: https://api.deepseek.com/user/balance
+    alias:
+      deepseek-flash: deepseek-v4.1-flash
     peak_hours:
       - {window: "9:00-12:00", multiplier: 4}
       - {window: "14:00-18:00", multiplier: 4}
@@ -185,8 +187,6 @@ providers:
     # base exposes /models over Bearer (unlike the signed GetAFPUsage, which needs
     # AK/SK). Runtime `usage volcengine` still uses GetAFPUsage (AK/SK), not this URL.
     usage_url: https://ark.cn-beijing.volces.com/api/plan/v3/models
-    alias:
-      deepseek-v4.1-flash: deepseek-flash
     models:
       - deepseek-v4-flash
       - deepseek-v4-pro
@@ -322,11 +322,15 @@ providers:
     openai_base_url: https://api.xiaomimimo.com/v1
     anthropic_base_url: https://api.xiaomimimo.com/anthropic
     models:
+      - mimo-v2.5
+      - mimo-v2.5-asr
+      - mimo-v2.5-pro
+      - mimo-v2.5-tts
+      - mimo-v2.5-tts-voiceclone
+      - mimo-v2.5-tts-voicedesign
       - mimo-v2.6-flash
       - mimo-v2.6-pro
       - mimo-v2.6-pro-ultraspeed
-      - mimo-v2.5-pro
-      - mimo-v2.5
   # OpenRouter (https://openrouter.ai — aggregated model gateway, prepaid
   # credits). API key via `login openrouter` (openrouter.ai/settings/keys).
   # One key (Authorization: Bearer) serves both protocols: openai_base_url =
@@ -347,6 +351,8 @@ providers:
     priority: 3
     billing: pay-as-you-go
     usage_url: https://openrouter.ai/api/v1/key
+    alias:
+      stealth/space-bunny-alpha: space-bunny-free
     models:
       - stealth/space-bunny-alpha
   # OpenCode Go (https://opencode.ai/go — the OpenCode team's $10/month
@@ -369,25 +375,43 @@ providers:
     provider_id: opencode-go
     priority: 2
     billing: plan
-    alias:
-      deepseek-v4.1-flash: deepseek-flash
     models:
-      - kimi-k3
-      - kimi-k2.7-code
+      - deepseek-flash
+      - deepseek-v4-flash
+      - deepseek-v4-flash-vision-exp
+      - deepseek-v4-pro
+      - deepseek-v4.1-flash
+      - glm-5.1
+      - glm-5.2
       - glm-5.3
       - glm-5.3-flash
-      - glm-5.2
-      - deepseek-v4-pro
-      - deepseek-v4-flash
-      - deepseek-v4.1-flash
+      - gpt-5.6-luna
+      - gpt-6-luna
+      - grok-4.6
+      - grok-4.7
+      - hy3
+      - hy4-preview
+      - kimi-k2.6
+      - kimi-k2.7-code
+      - kimi-k3
+      - longcat-2.0
+      - longcat-2.5-preview-free
+      - mimo-v2.5
+      - mimo-v2.5-pro
+      - mimo-v2.6-flash
+      - mimo-v2.6-pro
+      - minimax-m2.5
+      - minimax-m2.7
+      - minimax-m3
+      - muse-spark-1.2-contributor
+      - muse-spark-1.3-contributor
+      - omen-alpha
+      - qwen3.6-plus
       - qwen3.7-max
       - qwen3.7-plus
-      - minimax-m3
-      - gpt-6-luna
-      - gpt-5.6-luna
-      - grok-4.7
-      - mimo-v2.6-pro
-      - longcat-2.0
+      - qwen3.8-flash
+      - qwen3.8-max
+      - space-bunny-free
 # Qianwen Token Plan 个人版 (千问 AI Token Plan personal edition). API key via
 # `login qwen-plan` (from the Token Plan console; key format sk-sp-…). Two
 # protocol bases: openai_base_url = OpenAI-compatible base, anthropic_base_url
@@ -433,8 +457,8 @@ providers:
 #  claude-sonnet-4-6: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-v4-pro]
 #  sonnet: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-v4-pro]
 routes:
-  # deepseek-v4-pro: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-flash]
-  # deepseek-v4-flash: [aqp/deepseek-v4-flash, volcengine/deepseek-v4-flash, shopee/deepseek-v4-flash, deepseek/deepseek-flash]
+# deepseek-v4-pro: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-flash]
+# deepseek-v4-flash: [aqp/deepseek-v4-flash, volcengine/deepseek-v4-flash, shopee/deepseek-v4-flash, deepseek/deepseek-flash]
 
 # route_policy: per-route tier policy (route 级档位策略) — declarative bands pick
 # a preferred target (or, with grades, a preferred grade) from the request
