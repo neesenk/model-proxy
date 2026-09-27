@@ -170,6 +170,10 @@ func TestClassifyModelStatus(t *testing.T) {
 		{"400 tools not supported for model on leg", true, 400, nil, `Function tools with reasoning_effort are not supported for gpt-5.6-luna in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.`, No},
 		{"401 auth", true, 401, nil, "", Unknown},
 		{"429 quota", true, 429, nil, "", Unknown},
+		{"429 rate wording stays unknown", true, 429, nil, `{"error":{"code":"1302","message":"Concurrency limit reached / 当前API调用次数超出限额"}}`, Unknown},
+		// BigModel ships plan-permission per-model denials on 429 — a wording-
+		// backed 429 must conclude no, not flap "? unknown" forever.
+		{"429 plan-permission model denial", true, 429, nil, `{"type":"error","error":{"type":"api_error","code":"1311","message":"[1311][当前订阅套餐暂未开放GLM-5.3-FlashX权限][202609280119215eeff65006bf40a9]"}}`, No},
 		{"500", true, 500, nil, "", Unknown},
 	}
 	for _, testCase := range cases {

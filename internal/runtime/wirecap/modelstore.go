@@ -14,6 +14,28 @@ type ModelProtocols struct {
 	Responses Verdict `json:"responses"`
 }
 
+// MergeOnUnknown combines a freshly probed matrix with the previously stored
+// one: a CONCLUDED leg (yes/no) from next overwrites old; an Unknown leg
+// (transient 429/401/403/5xx/timeout — "no information") retains the previous
+// conclusion. Without this, one rate-limited probe pass downgrades a
+// known-good yes to unknown (the "? unknown" flapping observed on
+// zcode/zhipu), and /api/models + verdict routing lose information a later
+// pass must re-earn. next is returned unchanged when old agrees everywhere or
+// next concluded everything.
+func MergeOnUnknown(old, next ModelProtocols) ModelProtocols {
+	merged := next
+	if next.Chat == Unknown {
+		merged.Chat = old.Chat
+	}
+	if next.Anthropic == Unknown {
+		merged.Anthropic = old.Anthropic
+	}
+	if next.Responses == Unknown {
+		merged.Responses = old.Responses
+	}
+	return merged
+}
+
 // Concluded reports whether every leg reached a final verdict (yes or no).
 // Unknown legs are re-probed on the next pass.
 func (mp ModelProtocols) Concluded() bool {
@@ -77,6 +99,9 @@ func (store *ModelStore) ProviderFingerprint(parent string) (string, bool) {
 // expected fingerprint for the provider and this one differs — the writer is
 // a probe pass from a superseded config generation (pre-reload capture), and
 // its verdicts describe a base URL the current config no longer has.
+// When a matrix is already stored under the SAME fingerprint, an Unknown leg
+// in the incoming matrix retains the stored conclusion (MergeOnUnknown): a
+// transient upstream 429/timeout must not downgrade a concluded verdict.
 func (store *ModelStore) Put(parent, fingerprint, model string, mp ModelProtocols, now time.Time) {
 	if store == nil {
 		return
@@ -90,6 +115,11 @@ func (store *ModelStore) Put(parent, fingerprint, model string, mp ModelProtocol
 		store.caps = map[string]ProviderModelCaps{}
 	}
 	entry := store.caps[parent]
+	if entry.Fingerprint == fingerprint {
+		if prev, ok := entry.Models[model]; ok {
+			mp = MergeOnUnknown(prev, mp)
+		}
+	}
 	entry.Fingerprint = fingerprint
 	entry.ProbedAt = now
 	if entry.Models == nil {
@@ -128,7 +158,11 @@ func (store *ModelStore) PruneModels(parent string, keep map[string]bool) bool {
 // freshly probed matrix — used by models refresh (CLI `models refresh` and
 // POST /api/models/refresh), which validates the full candidate set in one
 // pass. Same stale-generation guard as Put: a refresh result computed against
-// a superseded config generation is dropped.
+// a superseded config generation is dropped. When the replaced entry shares
+// the incoming fingerprint, per-model Unknown legs retain the stored
+// conclusion (MergeOnUnknown) — a partially rate-limited refresh must not
+// regress concluded verdicts to unknown (models absent from the new set are
+// still dropped: refresh validates the FULL candidate set).
 func (store *ModelStore) ReplaceProviderModels(parent, fingerprint string, models map[string]ModelProtocols, now time.Time) {
 	if store == nil {
 		return
@@ -141,8 +175,15 @@ func (store *ModelStore) ReplaceProviderModels(parent, fingerprint string, model
 	if store.caps == nil {
 		store.caps = map[string]ProviderModelCaps{}
 	}
+	var prev ProviderModelCaps
+	if old, ok := store.caps[parent]; ok && old.Fingerprint == fingerprint {
+		prev = old
+	}
 	copied := make(map[string]ModelProtocols, len(models))
 	for model, mp := range models {
+		if p, ok := prev.Models[model]; ok {
+			mp = MergeOnUnknown(p, mp)
+		}
 		copied[model] = mp
 	}
 	store.caps[parent] = ProviderModelCaps{

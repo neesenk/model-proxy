@@ -277,3 +277,116 @@ func TestModelStorePutRejectsSupersededGeneration(t *testing.T) {
 		t.Fatalf("current-generation Put dropped: %+v ok=%v", mp, ok)
 	}
 }
+
+// TestMergeOnUnknown pins the anti-flap merge rule: a transient Unknown leg
+// (429/401/403/5xx/timeout — "no information") must retain the previously
+// concluded verdict, while a concluded leg always overwrites. Without this,
+// one rate-limited probe pass (the observed zcode/zhipu 429 storms) downgraded
+// known-good yes verdicts to "? unknown" until a lucky later pass re-earned
+// them.
+func TestMergeOnUnknown(t *testing.T) {
+	cases := []struct {
+		name string
+		old  ModelProtocols
+		next ModelProtocols
+		want ModelProtocols
+	}{
+		{
+			name: "unknown keeps prior yes",
+			old:  ModelProtocols{Chat: Yes, Anthropic: Yes, Responses: No},
+			next: ModelProtocols{Chat: Unknown, Anthropic: Yes, Responses: Unknown},
+			want: ModelProtocols{Chat: Yes, Anthropic: Yes, Responses: No},
+		},
+		{
+			name: "concluded overwrites prior",
+			old:  ModelProtocols{Chat: Yes, Anthropic: Yes, Responses: Yes},
+			next: ModelProtocols{Chat: No, Anthropic: No, Responses: No},
+			want: ModelProtocols{Chat: No, Anthropic: No, Responses: No},
+		},
+		{
+			name: "unknown with no prior stays unknown",
+			old:  ModelProtocols{},
+			next: ModelProtocols{Chat: Unknown, Anthropic: Unknown, Responses: Unknown},
+			want: ModelProtocols{Chat: Unknown, Anthropic: Unknown, Responses: Unknown},
+		},
+		{
+			name: "mix: concluded wins where concluded, old kept where unknown",
+			old:  ModelProtocols{Chat: No, Anthropic: Yes, Responses: No},
+			next: ModelProtocols{Chat: Yes, Anthropic: Unknown, Responses: Unknown},
+			want: ModelProtocols{Chat: Yes, Anthropic: Yes, Responses: No},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := MergeOnUnknown(tc.old, tc.next); got != tc.want {
+				t.Errorf("MergeOnUnknown(%+v, %+v) = %+v, want %+v", tc.old, tc.next, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestModelStorePutUnknownRetainsConcludedVerdict: a probe pass re-probing a
+// provider (e.g. because one model gained an unknown leg, or a new model was
+// added) must not downgrade previously concluded legs when the re-probe hits a
+// transient failure.
+func TestModelStorePutUnknownRetainsConcludedVerdict(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store := &ModelStore{}
+	store.Put("p", "fp", "m", ModelProtocols{Chat: Yes, Anthropic: Yes, Responses: No}, now)
+
+	// Transient 429 on every leg: prior conclusions survive.
+	store.Put("p", "fp", "m", ModelProtocols{Chat: Unknown, Anthropic: Unknown, Responses: Unknown}, now.Add(time.Minute))
+	if mp, _ := store.Get("p", "m"); mp != (ModelProtocols{Chat: Yes, Anthropic: Yes, Responses: No}) {
+		t.Errorf("after transient pass = %+v, want prior yes/yes/no retained", mp)
+	}
+
+	// A concluded correction still overwrites (the 404/no correction path).
+	store.Put("p", "fp", "m", ModelProtocols{Chat: Yes, Anthropic: No, Responses: Unknown}, now.Add(2*time.Minute))
+	if mp, _ := store.Get("p", "m"); mp != (ModelProtocols{Chat: Yes, Anthropic: No, Responses: No}) {
+		t.Errorf("after concluded pass = %+v, want yes/no + retained no", mp)
+	}
+
+	// A verdict from a DIFFERENT fingerprint is a different endpoint's truth:
+	// no merge, the fresh matrix wins wholesale.
+	store.Put("p", "fp2", "m", ModelProtocols{Chat: Unknown, Anthropic: Unknown, Responses: Unknown}, now.Add(3*time.Minute))
+	if mp, _ := store.Get("p", "m"); mp.Chat != Unknown || mp.Responses != Unknown {
+		t.Errorf("after fingerprint change put = %+v, want fresh unknowns (no cross-fingerprint merge)", mp)
+	}
+}
+
+// TestModelStoreReplaceProviderModelsMergesUnknown: models refresh replaces a
+// provider's whole matrix, but transient-unknown legs in the fresh matrix
+// retain the stored conclusions (same fingerprint), and models dropped from
+// the candidate set still leave the store.
+func TestModelStoreReplaceProviderModelsMergesUnknown(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store := &ModelStore{}
+	store.Put("p", "fp", "m1", ModelProtocols{Chat: Yes, Anthropic: Yes, Responses: No}, now)
+	store.Put("p", "fp", "m2", ModelProtocols{Chat: Yes}, now)
+
+	fresh := map[string]ModelProtocols{
+		"m1": {Chat: Unknown, Anthropic: Unknown, Responses: Unknown}, // full 429 storm
+		"m3": {Chat: Yes, Anthropic: Unknown, Responses: Unknown},     // new model
+	}
+	store.ReplaceProviderModels("p", "fp", fresh, now.Add(time.Minute))
+
+	if mp, ok := store.Get("p", "m1"); !ok || mp != (ModelProtocols{Chat: Yes, Anthropic: Yes, Responses: No}) {
+		t.Errorf("m1 = %+v (ok=%v), want prior verdicts retained through the unknown pass", mp, ok)
+	}
+	if mp, ok := store.Get("p", "m3"); !ok || mp.Chat != Yes || mp.Anthropic != Unknown {
+		t.Errorf("m3 = %+v (ok=%v), want fresh conclusions as probed", mp, ok)
+	}
+	if _, ok := store.Get("p", "m2"); ok {
+		t.Error("m2 absent from the fresh matrix must be dropped by the replace")
+	}
+
+	// Cross-fingerprint replace (config changed since the stored entry) is a
+	// different endpoint's truth: no merge, unknowns land as unknowns.
+	store.Put("p", "fp", "m1", ModelProtocols{Chat: Yes, Anthropic: Yes, Responses: No}, now)
+	store.ReplaceProviderModels("p", "fp-other", map[string]ModelProtocols{
+		"m1": {Chat: Unknown, Anthropic: Unknown, Responses: Unknown},
+	}, now.Add(2*time.Minute))
+	if mp, _ := store.Get("p", "m1"); mp.Chat != Unknown {
+		t.Errorf("cross-fingerprint replace = %+v, want fresh unknowns (no merge)", mp)
+	}
+}
