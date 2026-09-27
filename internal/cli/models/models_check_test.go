@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -302,7 +303,7 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 		},
 	}
 	ids := []string{"keep-a", "drop-b", "resp-only-c", "drop-d", "keep-e"}
-	kept, dropped, protocols, err := CheckProviderModels(cfg, "zhipu", ids)
+	kept, dropped, protocols, err := CheckProviderModels(cfg, "zhipu", ids, nil)
 	if err != nil {
 		t.Fatalf("checkProviderModels: %v", err)
 	}
@@ -391,7 +392,7 @@ func TestCheckProviderModels_NotLoggedInAllDropped(t *testing.T) {
 			"zhipu": {OpenAIBaseURL: srv.URL, Provider: "zhipu"},
 		},
 	}
-	kept, dropped, _, err := CheckProviderModels(cfg, "zhipu", []string{"glm-5.2"})
+	kept, dropped, _, err := CheckProviderModels(cfg, "zhipu", []string{"glm-5.2"}, nil)
 	if err != nil {
 		t.Fatalf("not-logged-in: want no error (impl builds file-backed), got %v", err)
 	}
@@ -702,5 +703,171 @@ func TestLoadModelCapsProjection(t *testing.T) {
 	}
 	if got := loadModelCapsProjection(cfg); got != nil {
 		t.Errorf("malformed file: projection=%v want nil", got)
+	}
+}
+
+// TestPersistModelCaps_UnknownRetainsConcludedFileVerdict: `models refresh`
+// persisting a partially rate-limited matrix must not regress verdicts already
+// concluded in model_caps.json under the same fingerprint — an Unknown leg is
+// "no information", so the stored yes/no wins (the CLI-side twin of
+// wirecap.ModelStore.Put's merge; fixes the zcode/zhipu "? unknown" flapping
+// where a refresh burst of 429s downgraded known-good legs on disk).
+func TestPersistModelCaps_UnknownRetainsConcludedFileVerdict(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+
+	provCfg := configdomain.Provider{OpenAIBaseURL: "https://example.test/v1", Provider: "zcode"}
+	fp := providerbuild.ProtocolConfigFingerprint(provCfg)
+
+	// Prior refresh concluded glm chat=yes / anthropic=yes / responses=no.
+	if err := runtimewire.SaveModelCapsFile(filepath.Join(dir, ".model-proxy", "model_caps.json"),
+		map[string]runtimewire.ProviderModelCaps{
+			"zcode": {Fingerprint: fp, ProbedAt: time.Now(), Models: map[string]runtimewire.ModelProtocols{
+				"glm": {Chat: runtimewire.Yes, Anthropic: runtimewire.Yes, Responses: runtimewire.No},
+			}},
+		}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A throttled refresh: every leg 429 → unknown.
+	if !persistModelCaps("zcode", provCfg, map[string]runtimewire.ModelProtocols{
+		"glm": {Chat: runtimewire.Unknown, Anthropic: runtimewire.Unknown, Responses: runtimewire.Unknown},
+	}, nil) {
+		t.Fatal("persistModelCaps reported no write")
+	}
+	loaded, err := runtimewire.LoadModelCapsFile(filepath.Join(dir, ".model-proxy", "model_caps.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded["zcode"].Models["glm"]; got.Chat != runtimewire.Yes || got.Anthropic != runtimewire.Yes || got.Responses != runtimewire.No {
+		t.Errorf("after throttled refresh glm = %+v, want prior yes/yes/no retained", got)
+	}
+
+	// A concluded re-probe still overwrites (corrections are not blocked).
+	if !persistModelCaps("zcode", provCfg, map[string]runtimewire.ModelProtocols{
+		"glm": {Chat: runtimewire.Yes, Anthropic: runtimewire.No, Responses: runtimewire.Unknown},
+	}, nil) {
+		t.Fatal("persistModelCaps reported no write")
+	}
+	loaded, err = runtimewire.LoadModelCapsFile(filepath.Join(dir, ".model-proxy", "model_caps.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded["zcode"].Models["glm"]; got.Anthropic != runtimewire.No || got.Responses != runtimewire.No {
+		t.Errorf("after concluded re-probe glm = %+v, want anthropic no (correction lands) + responses no (retained)", got)
+	}
+
+	// A different fingerprint (config changed bases) is a different endpoint's
+	// truth: no merge, unknowns land as-is.
+	other := provCfg
+	other.OpenAIBaseURL = "https://other.test/v1"
+	if !persistModelCaps("zcode", other, map[string]runtimewire.ModelProtocols{
+		"glm": {Chat: runtimewire.Unknown, Anthropic: runtimewire.Unknown, Responses: runtimewire.Unknown},
+	}, nil) {
+		t.Fatal("persistModelCaps reported no write")
+	}
+	loaded, err = runtimewire.LoadModelCapsFile(filepath.Join(dir, ".model-proxy", "model_caps.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded["zcode"].Models["glm"]; got.Chat != runtimewire.Unknown {
+		t.Errorf("after fingerprint change glm = %+v, want fresh unknowns (no cross-fingerprint merge)", got)
+	}
+}
+
+// TestCheckProviderModels_DisabledNotProbed: `models refresh` sends no probe
+// request for operator-disabled models, keeps them in the list regardless of
+// callability, and preserves their stored verdicts in model_caps.json (not
+// probed ≠ dropped). The all-failed safety net must still fire on the probed
+// subset (disabled ids cannot mask a total probe outage).
+func TestCheckProviderModels_DisabledNotProbed(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "KEY")
+
+	var hits sync.Map // model -> count
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		model := protocol.ExtractModel(readAll(r.Body))
+		n, _ := hits.LoadOrStore(model, 0)
+		hits.Store(model, n.(int)+1)
+		if model == "dead" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	// Disabled model carries a prior verdict in the file.
+	provCfg := configdomain.Provider{OpenAIBaseURL: srv.URL, Provider: "zhipu"}
+	fp := providerbuild.ProtocolConfigFingerprint(provCfg)
+	if err := runtimewire.SaveModelCapsFile(filepath.Join(dir, ".model-proxy", "model_caps.json"),
+		map[string]runtimewire.ProviderModelCaps{
+			"zhipu": {Fingerprint: fp, ProbedAt: time.Now(), Models: map[string]runtimewire.ModelProtocols{
+				"off": {Chat: runtimewire.Yes, Anthropic: runtimewire.Yes, Responses: runtimewire.No},
+			}},
+		}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"zhipu": provCfg}}
+	kept, dropped, protocols, err := CheckProviderModels(cfg, "zhipu", []string{"live", "off", "dead"}, []string{"off"})
+	if err != nil {
+		t.Fatalf("checkProviderModels: %v", err)
+	}
+	if got := kept; len(got) != 1 || got[0] != "live" {
+		t.Errorf("probed kept = %v, want [live] only (disabled ids are the caller's to append)", got)
+	}
+	if len(dropped) != 1 || dropped[0].Model != "dead" {
+		t.Errorf("dropped = %+v, want only dead", dropped)
+	}
+	if _, probed := protocols["off"]; probed {
+		t.Error("disabled model leaked into the fresh matrix")
+	}
+	if n, _ := hits.Load("off"); n != nil && n.(int) != 0 {
+		t.Errorf("disabled model was probed %d times", n)
+	}
+	for _, m := range []string{"live", "dead"} {
+		if n, _ := hits.Load(m); n == nil || n.(int) == 0 {
+			t.Errorf("model %s not probed", m)
+		}
+	}
+	// The file entry preserved the disabled model's frozen verdicts.
+	loaded, err := runtimewire.LoadModelCapsFile(filepath.Join(dir, ".model-proxy", "model_caps.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded["zhipu"].Models["off"]; got.Chat != runtimewire.Yes || got.Anthropic != runtimewire.Yes {
+		t.Errorf("disabled model's stored verdict = %+v, want carried over yes/yes", got)
+	}
+	// Every PROBED id lands in the file matrix (config dropping a model
+	// never erased its verdict entry — same rule as before), while the
+	// disabled id rode along unprobed.
+	if _, ok := loaded["zhipu"].Models["dead"]; !ok {
+		t.Error("probed-but-dropped model lost its file entry")
+	}
+}
+
+// TestSplitDisabledModelIDs: the partition reads the operator override file
+// under the isolated HOME; input order is preserved in both outputs; a
+// missing file degrades to probing everything.
+func TestSplitDisabledModelIDs(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	if err := runtimewire.SaveDisabledModelsFile(filepath.Join(dir, ".model-proxy", "disabled_models.json"),
+		map[string][]string{"zhipu": {"off-a", "off-b"}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
+		"zhipu": {Provider: "zhipu"},
+	}}
+	probeIDs, disabledIDs := SplitDisabledModelIDs(cfg, "zhipu", []string{"on-a", "off-a", "on-b", "off-b"})
+	if !reflect.DeepEqual(probeIDs, []string{"on-a", "on-b"}) || !reflect.DeepEqual(disabledIDs, []string{"off-a", "off-b"}) {
+		t.Errorf("partition = probe %v disabled %v", probeIDs, disabledIDs)
+	}
+	// Another provider is unaffected.
+	probeIDs, disabledIDs = SplitDisabledModelIDs(cfg, "other", []string{"off-a"})
+	if !reflect.DeepEqual(probeIDs, []string{"off-a"}) || disabledIDs != nil {
+		t.Errorf("cross-provider partition = probe %v disabled %v", probeIDs, disabledIDs)
 	}
 }

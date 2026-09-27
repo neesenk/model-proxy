@@ -238,7 +238,10 @@ func ProbeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 // without exposing mutable production hooks or reaching a real provider.
 type probeAndWriteModelsOps struct {
 	filter func(*configdomain.Config, string, []string) ([]string, []string)
-	probe  func(*configdomain.Config, string, []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, error)
+	// disabled partitions the policy-kept ids into (probeIDs, disabledIDs):
+	// operator-disabled models are not probed but always kept.
+	disabled func(*configdomain.Config, string, []string) ([]string, []string)
+	probe    func(*configdomain.Config, string, []string, []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, error)
 	// upstreamNames (may be nil): live display names from the provider's
 	// /models (provider.ModelInfoLister), shown in the kept table's NAME
 	// column ahead of the id fallback.
@@ -249,8 +252,9 @@ type probeAndWriteModelsOps struct {
 
 func productionProbeAndWriteModelsOps() probeAndWriteModelsOps {
 	return probeAndWriteModelsOps{
-		filter: ApplyProviderModelFilter,
-		probe:  CheckProviderModels,
+		filter:   ApplyProviderModelFilter,
+		disabled: SplitDisabledModelIDs,
+		probe:    CheckProviderModels,
 		display: func(cfg *configdomain.Config, provName string, policyDropped []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, upstreamNames map[string]string, perr error, allProbeFailed bool) {
 			cat, _ := configdomain.LoadModelsCatalog(homeDir(), false)
 			meta, sources := routing.HydrateModels(cfg, cat)
@@ -273,21 +277,34 @@ func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 	// callability. The endpoint probe below is the second, general pass
 	// (callable on ANY of the provider's protocol legs?).
 	policyKept, policyDropped := ops.filter(cfg, provName, merged)
-	kept, dropped, protocols, perr := ops.probe(cfg, provName, policyKept)
-	allProbeFailed := perr == nil && len(policyKept) > 0 && len(kept) == 0
+	// Operator-disabled models are excluded from probing but always kept —
+	// the disable override is a rotation choice, not a callability verdict,
+	// and refresh must not fight it (or burn probe quota on models that are
+	// out of rotation).
+	probeIDs, disabledIDs := ops.disabled(cfg, provName, policyKept)
+	kept, dropped, protocols, perr := ops.probe(cfg, provName, probeIDs, disabledIDs)
+	// allProbeFailed is judged on the PROBED outcome only (ops.probe returns
+	// kept WITHOUT the disabled ids) — disabled ids ride along
+	// unconditionally and must not mask a total probe outage.
+	allProbeFailed := perr == nil && len(probeIDs) > 0 && len(kept) == 0
 	if perr != nil {
 		// Probe infra unavailable (e.g. provider not logged in). Fall back to
 		// the policy-filtered set unvalidated rather than silently dropping
 		// everything.
 		kept = policyKept
 		dropped = nil
-	} else if allProbeFailed {
-		// Every model failed the probe. This usually means the provider is
-		// not logged in (auth fails on every request) or the network is down
-		// - not that all models are genuinely uncallable. Don't wipe config:
-		// fall back to the policy-filtered set unvalidated. `dropped` is kept
-		// so printFilterSummary can surface the failures as a warning.
-		kept = policyKept
+	} else {
+		if allProbeFailed {
+			// Every probed model failed the probe. This usually means the
+			// provider is not logged in (auth fails on every request) or the
+			// network is down - not that all models are genuinely uncallable.
+			// Don't wipe config: fall back to the probed subset unvalidated.
+			// `dropped` is kept so printFilterSummary can surface the failures
+			// as a warning.
+			kept = append([]string(nil), probeIDs...)
+		}
+		// Disabled ids ride along unvalidated in every non-error outcome.
+		kept = append(kept, disabledIDs...)
 	}
 	sort.Strings(kept)
 
@@ -304,10 +321,12 @@ func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 	// Write the validated list (overwrite, not append-only). writeProviderModels
 	// re-encodes the whole models: sequence, so ids absent from `kept` (both
 	// pre-existing uncallable ones and freshly-fetched failures) are removed.
+	configChanged := false
 	if !SameStringSet(kept, existing) {
 		if err := ops.write(configFile, provName, kept); err != nil {
 			return fmt.Errorf("writing models to config: %w", err)
 		}
+		configChanged = true
 		added, removed := DiffStringSets(existing, kept)
 		if len(added) > 0 {
 			fmt.Fprintf(os.Stderr, "config: added %d -> %v\n", len(added), added)
@@ -315,9 +334,15 @@ func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 		if len(removed) > 0 {
 			fmt.Fprintf(os.Stderr, "config: removed %d -> %v\n", len(removed), removed)
 		}
-		// Hot-reload a running daemon so the new model set takes effect for
-		// implicit routing (and refresh the display) without a manual
-		// `serve reload`. No-op if no daemon is running. Mirrors login/logout.
+	}
+	// Hot-reload a running daemon when EITHER the config models changed OR the
+	// refresh persisted fresh verdicts (any successful probe pass writes
+	// model_caps.json). The daemon's reload re-reads that file into its
+	// in-memory store — without the signal, a running daemon never sees the
+	// CLI's verdicts until restart, and its next async persist clobbers the
+	// file with the stale copy (the "? unknown" split-brain). No-op when no
+	// daemon runs. Mirrors login/logout.
+	if configChanged || (perr == nil && len(protocols) > 0) {
 		ops.reload(args, cfg)
 	}
 	return nil

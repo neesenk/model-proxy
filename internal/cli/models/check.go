@@ -52,15 +52,20 @@ type DropReason struct {
 
 // checkProviderModels probes each id in `ids` against the provider's endpoints
 // with the 3-protocol matrix and returns the callable subset (kept, preserving
-// input order) plus the dropped ones with per-leg reasons. It resolves the
-// provider implementation via providerImplFor (so auth/rewrite/probe-shape are
-// wired exactly as in the live proxy) and probes concurrently (bounded by
-// probeConcurrency). A model is kept when ANY protocol leg classifies Yes. The
-// freshly-probed matrix is returned AND persisted (best-effort) to
-// model_caps.json, replacing this provider's entry. A build failure (e.g. not
-// logged in) returns an error - the caller should fall back to keeping all ids
-// rather than silently dropping them (nothing is persisted in that case).
-func CheckProviderModels(cfg *configdomain.Config, provName string, ids []string) (kept []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, err error) {
+// input order) plus the dropped ones with per-leg reasons. DISABLED ids
+// (`disabledIDs`) are excluded from probing — the operator's override is not
+// a callability signal — and from the returned kept set (the caller appends
+// them; they also never reach the returned matrix: the persist carries their
+// stored verdicts over instead, so a disable/enable cycle loses nothing).
+// It resolves the provider implementation via providerImplFor (so auth/rewrite/
+// probe-shape are wired exactly as in the live proxy) and probes concurrently
+// (bounded by probeConcurrency). A model is kept when ANY protocol leg
+// classifies Yes. The freshly-probed matrix is persisted (best-effort) to
+// model_caps.json, replacing this provider's entry. A build failure (e.g.
+// not logged in) returns an error - the caller should fall back to keeping
+// all ids rather than silently dropping them (nothing is persisted in that
+// case).
+func CheckProviderModels(cfg *configdomain.Config, provName string, ids, disabledIDs []string) (kept []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, err error) {
 	provCfg, ok := cfg.Providers[provName]
 	if !ok {
 		return nil, nil, nil, fmt.Errorf("unknown provider %q", provName)
@@ -68,6 +73,13 @@ func CheckProviderModels(cfg *configdomain.Config, provName string, ids []string
 	impl, err := ProviderImplFor(cfg, provName)
 	if err != nil {
 		return nil, nil, nil, err
+	}
+	disabled := disabledSet(disabledIDs)
+	probeIDs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !disabled[id] {
+			probeIDs = append(probeIDs, id)
+		}
 	}
 
 	client := &http.Client{Timeout: cfg.Scheduling.Timeout(), Transport: upstreamproxy.AutoTransport()}
@@ -79,11 +91,12 @@ func CheckProviderModels(cfg *configdomain.Config, provName string, ids []string
 	// including the decisions_base_url fallback).
 	if hint := provider.ProtocolHint(provCfg.Provider, ""); hint != "" &&
 		hint != "openai" && hint != "anthropic" && hint != "responses" {
-		return checkDecisionsProviderModels(provName, provCfg, impl, client, ids)
+		return checkDecisionsProviderModels(provName, provCfg, impl, client, probeIDs, disabledIDs)
 	}
 
-	probed := probe.ProbeModels(context.Background(), client, provCfg, impl, ids, probeConcurrency)
-	protocols = make(map[string]runtimewire.ModelProtocols, len(probed))
+	probed := probe.ProbeModels(context.Background(), client, provCfg, impl, probeIDs, probeConcurrency)
+	protocols = make(map[string]runtimewire.ModelProtocols, len(ids))
+	probedKept := map[string]bool{}
 	for _, r := range probed {
 		mp := runtimewire.ModelProtocols{}
 		for _, leg := range r.Legs {
@@ -99,12 +112,21 @@ func CheckProviderModels(cfg *configdomain.Config, provName string, ids []string
 		}
 		protocols[r.ID] = mp
 		if mp.Chat == runtimewire.Yes || mp.Anthropic == runtimewire.Yes || mp.Responses == runtimewire.Yes {
-			kept = append(kept, r.ID)
+			probedKept[r.ID] = true
 		} else {
 			dropped = append(dropped, DropReason{Model: r.ID, Status: legStatus(r.Legs), Reason: legsSummary(r.Legs)})
 		}
 	}
-	persistModelCaps(provName, provCfg, protocols)
+	// Input order: probed ids keep when any leg concluded Yes. Disabled ids are
+	// the CALLER's to re-append (probeAndWriteModels) — keeping this function's
+	// return a pure probed-outcome lets the state machine judge allProbeFailed
+	// without disabled models masking a total probe outage.
+	for _, id := range ids {
+		if probedKept[id] {
+			kept = append(kept, id)
+		}
+	}
+	persistModelCaps(provName, provCfg, protocols, disabledSet(disabledIDs))
 	return kept, dropped, protocols, nil
 }
 
@@ -113,16 +135,21 @@ func CheckProviderModels(cfg *configdomain.Config, provName string, ids []string
 // System One probe (probe.Callable) instead of the chat matrix. The returned
 // protocols matrix records explicit No on every chat leg — decisions has no
 // leg there, and the hint resolves the backend protocol before the matrix is
-// ever consulted.
+// ever consulted. Disabled ids are kept without probing (same rule as the
+// chat matrix) and their stored verdicts are preserved by the persist.
 func checkDecisionsProviderModels(
 	provName string,
 	provCfg configdomain.Provider,
 	impl provider.Provider,
 	client *http.Client,
-	ids []string,
+	ids, disabledIDs []string,
 ) (kept []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, err error) {
+	disabled := disabledSet(disabledIDs)
 	protocols = make(map[string]runtimewire.ModelProtocols, len(ids))
 	for _, id := range ids {
+		if disabled[id] {
+			continue // kept below, unprobed
+		}
 		ok, status, reason := probe.Callable(context.Background(), client, provCfg, impl, id)
 		protocols[id] = runtimewire.ModelProtocols{
 			Chat: runtimewire.No, Anthropic: runtimewire.No, Responses: runtimewire.No,
@@ -133,8 +160,50 @@ func checkDecisionsProviderModels(
 			dropped = append(dropped, DropReason{Model: id, Status: status, Reason: "decisions " + reason})
 		}
 	}
-	persistModelCaps(provName, provCfg, protocols)
+	persistModelCaps(provName, provCfg, protocols, disabled)
 	return kept, dropped, protocols, nil
+}
+
+// disabledSet is the CLI-side twin of the daemon pass's set builder: one
+// provider's disabled-model list → a lookup set (nil-safe).
+func disabledSet(models []string) map[string]bool {
+	if len(models) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(models))
+	for _, m := range models {
+		set[m] = true
+	}
+	return set
+}
+
+// SplitDisabledModelIDs partitions ids into (probeIDs, disabledIDs), input
+// order preserved in both. The disabled set comes from the operator override
+// file (disabled_models.json under the models-command home) — the same
+// store the daemon seeds its Manager from, read offline so the CLI refresh
+// matches the daemon pass's "disabled models are not probed" rule. A
+// missing/unreadable file degrades to "none disabled" (probe everything).
+func SplitDisabledModelIDs(cfg *configdomain.Config, provName string, ids []string) (probeIDs, disabledIDs []string) {
+	if _, ok := cfg.Providers[provName]; !ok {
+		return ids, nil
+	}
+	entries, err := runtimewire.LoadDisabledModelsFile(runtimewire.DisabledModelsPathForHome(homeDir()))
+	if err != nil {
+		return ids, nil // unreadable → degrade to probing everything
+	}
+	disabled := disabledSet(entries[provName])
+	if len(disabled) == 0 {
+		return ids, nil
+	}
+	probeIDs = make([]string, 0, len(ids))
+	for _, id := range ids {
+		if disabled[id] {
+			disabledIDs = append(disabledIDs, id)
+		} else {
+			probeIDs = append(probeIDs, id)
+		}
+	}
+	return probeIDs, disabledIDs
 }
 
 // legStatus picks the most relevant HTTP status for a dropped model: the chat
@@ -211,27 +280,54 @@ func modelCapsFilePath() string {
 }
 
 // persistModelCaps best-effort persists one provider's freshly-probed protocol
-// matrix to model_caps.json, REPLACING the provider's Models map (refresh
-// validates the full candidate set). Other providers' entries are preserved; a
-// malformed existing file starts fresh. Failures are a stderr warning only -
-// the refresh itself never fails on this.
-func persistModelCaps(provName string, provCfg configdomain.Provider, protocols map[string]runtimewire.ModelProtocols) {
-	if len(protocols) == 0 {
-		return
+// matrix to model_caps.json, merging into the provider's existing entry when
+// its fingerprint still matches (an Unknown leg — transient 429/timeout —
+// retains the previously concluded verdict, mirroring
+// wirecap.ModelStore.Put; a refresh burst must not regress known-good legs to
+// "? unknown"). Operator-DISABLED models (`disabled`) are absent from the
+// fresh matrix by design (not probed): their previously stored entries are
+// carried over verbatim — not probed is not dropped — so a disable/enable
+// cycle neither burns probe quota nor loses the frozen verdicts. Other
+// providers' entries are preserved; a malformed existing file starts fresh.
+// Failures are a stderr warning only - the refresh itself never fails on
+// this.
+func persistModelCaps(provName string, provCfg configdomain.Provider, protocols map[string]runtimewire.ModelProtocols, disabled map[string]bool) bool {
+	if len(protocols) == 0 && len(disabled) == 0 {
+		return false
 	}
 	path := modelCapsFilePath()
 	loaded, err := runtimewire.LoadModelCapsFile(path)
 	if err != nil || loaded == nil {
 		loaded = map[string]runtimewire.ProviderModelCaps{}
 	}
+	fingerprint := providerbuild.ProtocolConfigFingerprint(provCfg)
+	merged := make(map[string]runtimewire.ModelProtocols, len(protocols))
+	for model, mp := range protocols {
+		if prev, ok := loaded[provName].Models[model]; ok && loaded[provName].Fingerprint == fingerprint {
+			mp = runtimewire.MergeOnUnknown(prev, mp)
+		}
+		merged[model] = mp
+	}
+	// Frozen disabled models keep their stored entries verbatim.
+	if old, ok := loaded[provName]; ok && old.Fingerprint == fingerprint {
+		for model, mp := range old.Models {
+			if disabled[model] {
+				if _, present := merged[model]; !present {
+					merged[model] = mp
+				}
+			}
+		}
+	}
 	loaded[provName] = runtimewire.ProviderModelCaps{
-		Fingerprint: providerbuild.ProtocolConfigFingerprint(provCfg),
+		Fingerprint: fingerprint,
 		ProbedAt:    time.Now(),
-		Models:      protocols,
+		Models:      merged,
 	}
 	if err := runtimewire.SaveModelCapsFile(path, loaded); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: persisting model capabilities to %s: %v\n", path, err)
+		return false
 	}
+	return true
 }
 
 // loadModelCapsProjection reads model_caps.json and returns the protocol
