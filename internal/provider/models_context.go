@@ -35,3 +35,16 @@ func (p *KimiCodeProvider) FetchModelsContext(ctx context.Context) ([]string, er
 func (p *QwenPlanProvider) FetchModelsContext(ctx context.Context) ([]string, error) {
 	return fetchModelsBearerContext(ctx, p.cfg, p.AuthHeaders)
 }
+
+func (p *MiMoProvider) FetchModelsContext(ctx context.Context) ([]string, error) {
+	return fetchModelsBearerContext(ctx, p.cfg, p.AuthHeaders)
+}
+func (p *OpenCodeGoProvider) FetchModelsContext(ctx context.Context) ([]string, error) {
+	return fetchModelsBearerContext(ctx, p.cfg, p.AuthHeaders)
+}
+func (p *OpenRouterProvider) FetchModelsContext(ctx context.Context) ([]string, error) {
+	return fetchModelsBearerContext(ctx, p.cfg, p.AuthHeaders)
+}
+func (p *StepPlanProvider) FetchModelsContext(ctx context.Context) ([]string, error) {
+	return fetchModelsBearerContext(ctx, p.cfg, p.AuthHeaders)
+}
