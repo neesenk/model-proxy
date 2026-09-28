@@ -117,7 +117,7 @@ func TestPollAll_DiscardsStaleGeneration(t *testing.T) {
 	}()
 	pollFor(t, prov.ran.Load, time.Second, "old-generation quota poll did not start")
 	generation.Store(2)
-	tr.Runtime().ReplaceGeneration(2)
+	tr.Runtime().ReplaceGeneration(2, nil)
 	tr.ClearForGeneration(2)
 	sentinel := &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.75}
 	if !tr.CommitSnapshot(2, "x", sentinel) {

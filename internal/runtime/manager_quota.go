@@ -74,6 +74,19 @@ func quotaProvesBudgetAvailable(snapshot *provider.QuotaSnapshot, now time.Time,
 	return true
 }
 
+// quotaSyncFailedKeepsExisting reports whether an incoming quota snapshot
+// must NOT replace the stored one: a FAILED sync (Err != "") never mutates the
+// last known-good state. Quota snapshots are backend-synced observations with
+// a last-known-good contract — serve the previous tier/surplus until a
+// SUCCESSFUL poll switches over; an errored fetch is "no information", not a
+// downgrade to unknown (that path is reserved for honest staleness aging
+// after 3× poll interval without a successful sync). First observations
+// (nothing stored yet) are still stored so operators can see WHY the tier is
+// unknown.
+func quotaSyncFailedKeepsExisting(existing, incoming *provider.QuotaSnapshot) bool {
+	return incoming != nil && incoming.Err != "" && existing != nil
+}
+
 func (m *Manager) MergeQuotas(snapshots map[string]*provider.QuotaSnapshot, generation uint64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -82,6 +95,9 @@ func (m *Manager) MergeQuotas(snapshots map[string]*provider.QuotaSnapshot, gene
 		return false
 	}
 	for name, snapshot := range snapshots {
+		if quotaSyncFailedKeepsExisting(m.quotas[name], snapshot) {
+			continue
+		}
 		m.quotas[name] = cloneQuota(snapshot)
 	}
 	return true
@@ -93,6 +109,9 @@ func (m *Manager) SetQuota(name string, snapshot *provider.QuotaSnapshot, genera
 	m.ensureLocked()
 	if !m.generationMatchesLocked(generation) {
 		return false
+	}
+	if quotaSyncFailedKeepsExisting(m.quotas[name], snapshot) {
+		return true
 	}
 	m.quotas[name] = cloneQuota(snapshot)
 	return true

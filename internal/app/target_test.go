@@ -149,7 +149,7 @@ func TestCommittedTTFTStaleGenerationDropped(t *testing.T) {
 	// The request started under generation 1 (the constructor's generation);
 	// a reload moves the manager to generation 2 while it is in flight.
 	stale := targetExecutionEffects{proxy: p, generation: 1}
-	p.runtimeState.ReplaceGeneration(2)
+	p.runtimeState.ReplaceGeneration(2, nil)
 	stale.Committed(committed)
 	if q := p.runtimeState.Dashboard(time.Now()).Quality; len(q) != 0 {
 		t.Fatalf("stale-generation TTFT wrote into the new quality map: %+v", q)

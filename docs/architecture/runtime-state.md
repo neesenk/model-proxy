@@ -42,6 +42,25 @@ Web DTO 映射和 lifecycle 都留在应用层（`internal/app`）；Manager 持
 refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` 的文件
 编排。quota snapshot 的内存权威值属于 Manager，tracker 不持有第二份 quota map。
 
+**同步语义（last-known-good）**：quota snapshot 是后端同步观测，不是 config 派生态——
+使用上一次的 cache，同步成功才切换，同步失败不改变任何数据：
+
+- 提交侧（`Manager.MergeQuotas`/`SetQuota` 的 `quotaSyncFailedKeepsExisting` 守卫）：
+  `Err != ""` 的快照永不覆盖已存在的条目（调度继续吃上一个 tier/surplus），“无信息”
+  不是降级理由；首次观测（尚无条目）仍会写入，供操作员看到 unknown 档的原因。
+  持续失败的诚实退化路径是 staleness aging（3× poll interval 后投影为 unknown），
+  不是硬重置。失败在 tracker 侧打一条 `[quota] <name> sync failed ...; keeping
+  last snapshot` warn——否则快照为何老化对操作员不可见。
+- 副作用侧：失败的同步不参与 `QuotaRecoveredClearCooldown`（pollAll 的 `polled`
+  集与 PollOne 的判定都以 `Err == ""` 为前提）——no-op 同步不得用陈旧观测推翻
+  新鲜的 429 预测。
+- reload 侧（`ReplaceGeneration`）：quota cache 跨 generation 存活，只在同一临界区
+  内对 live key 集合（config 名 + 池化虚拟 `name#<accountID>`）剪枝——被移除的
+  provider/登出的账号原子丢弃，存活者继续用 cache 直到 reload 后的 `PollAsync`
+  成功切换。旧实现整表清空曾把未声明 `billing:` 的实测 plan provider 在轮询窗口内
+  降为 unknown 档，让声明 plan 的 provider 越过更高优先级的目标（opencode-go/zcode
+  档位翻转事故）。boot 路径不变：磁盘恢复仍受 config fingerprint 门控。
+
 轮询范围 = **全部已构建 provider**（含池化虚拟账号 `name#<accountID>`）。`Quota()`
 能服务什么由 provider 实现决定：配了 `usage_url` 的做 HTTP 查询（deepseek 的
 `/user/balance` 余额即其 quota 窗口）；console-only 实现（qwen-plan 模式）零 HTTP、
@@ -77,17 +96,21 @@ resolver spread、quota poll 和 guard 判定调用（`internal/app/model_call.g
 同一健康视图）都携带开始时的 generation；health、sticky、
 modelLock、paramBlock、spread、quota 和 quality（错误率与 TTFT 样本同 gate）
 mutation 由 Manager 在同一锁内校验
-generation，旧请求和慢 poll 的结果直接丢弃。
+generation，旧请求和慢 poll 的结果直接丢弃。**例外：quota 是后端同步观测，
+cache 跨 reload 存活（见 quotaTracker 节的同步语义），只随 generation swap
+原子剪枝到 live key 集合，不受 generation 丢弃规则约束。**
 
 reload 按 `Proxy.mu → runtime.Manager` 一次性切换 cfg/providers/routes generation；
 `Proxy` 的字段按所有权分组成两个内嵌结构：`generationState` 是这次交换的完整
 reload swap unit（本段列出的全部字段），`processServices` 是跨 reload 存活的进程级
 服务；archtest 钉死两个分组的精确成员，新字段不得直接落在 `Proxy` 顶层。
 `Manager.ReplaceGeneration` 原子清空旧 health、sticky、model lock、paramBlock、
-spread、quota 和 quality（发布空 quality map），operator pin 有意跨 reload 保留。`persist()` 按同一锁顺序捕获
+spread 和 quality（发布空 quality map），operator pin 有意跨 reload 保留；quota
+cache 有意跨 reload 存活并剪枝到 live key 集（同步语义见 quotaTracker 节）。`persist()` 按同一锁顺序捕获
 config fingerprint 和 Manager 的 `generation + quota + health + route-keyed
 sticky` 原子 snapshot，不允许分别读取后拼装。reload 交换完成后同步写入「新
-fingerprint + 空 generation-scoped 运行态」；写盘失败以“配置已生效但 durability
+fingerprint + 已清空的 health/sticky + 剪枝后的 quota cache」——紧随其后的 crash
+在重启后继续吃到实测档位；写盘失败以“配置已生效但 durability
 降级”的 warning 返回，调用方不得回滚已经与 runtime 分叉的 config 文件。
 
 ### 已知缺口与目标契约
@@ -208,7 +231,9 @@ Manager 排序。这样一次请求决策不会在 quota projection 与 availabi
 **tier 档位 = 实测 ?? 显式声明 ?? unknown**（plan < unknown < pay-as-you-go）。
 class（plan/payg）决定档位，可测量性只决定“知不知道余量”，不再制造档位边界
  ——同为 plan 的两个 provider（一个实测、一个 console-only 但声明了 plan）在
-同档内按 priority/surplus 竞争，而不是必须先把实测的那个耗尽。历史：config 的
+同档内按 priority/surplus 竞争，而不是必须先把实测的那个耗尽。reload 不再制造
+“未实测窗口”：quota cache 跨 generation 存活（同步语义见 quotaTracker 节），
+实测档位在 reload 后立即生效，直到下一次同步成功切换。历史：config 的
 `billing:` 曾以 `BillingOverride` 形式**覆盖**实测 tier（把实测 plan 的 provider
 贬为严格末位），并让 quota tracker 跳过「pay-as-you-go 且无 usage_url」的
 provider（连带把 console-only snapshot 从 Web UI 藏掉），2026-09-24 移除；

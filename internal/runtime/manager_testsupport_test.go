@@ -4,6 +4,6 @@ package runtime
 // the production reload path.
 func newTestManager(generation uint64) *Manager {
 	m := &Manager{}
-	m.ReplaceGeneration(generation)
+	m.ReplaceGeneration(generation, nil)
 	return m
 }

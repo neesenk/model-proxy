@@ -160,7 +160,7 @@ func TestQualityLifecycle(t *testing.T) {
 
 	// Generation replace drops quality like the rest of the routing state.
 	m.RecordFailure("q", 3, time.Minute, 5)
-	m.ReplaceGeneration(6)
+	m.ReplaceGeneration(6, nil)
 	if len(m.qualitySnapshot()) != 0 {
 		t.Fatalf("ReplaceGeneration kept quality: %+v", m.qualitySnapshot())
 	}
@@ -193,7 +193,7 @@ func TestQualityProjectionRevalidatesAcrossGenerationReplacement(t *testing.T) {
 	// Deterministically model the only dangerous interleaving: projection from
 	// generation 1, then ReplaceGeneration publishes generation 2 before the
 	// reader takes m.mu. Revalidation must discard the old projection.
-	m.ReplaceGeneration(2)
+	m.ReplaceGeneration(2, nil)
 	m.mu.Lock()
 	m.ensureLocked()
 	quality := m.reconcileQualityProjectionLocked(projected, now)

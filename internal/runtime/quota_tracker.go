@@ -269,6 +269,7 @@ func (t *QuotaTracker) PollAllGeneration(now time.Time, generation uint64) {
 		go func(n string, p provider.Provider) {
 			defer wg.Done()
 			s := t.FetchQuota(p, now) // fetchQuota retries transient errors
+			t.warnSyncFailed(n, s)
 			resultsMu.Lock()
 			results[n] = s
 			resultsMu.Unlock()
@@ -291,10 +292,14 @@ func (t *QuotaTracker) PollAllGeneration(now time.Time, generation uint64) {
 	// prediction: providers whose snapshot now proves available budget get
 	// their rate-limit cooldown cleared (see QuotaRecoveredClearCooldown).
 	// Every built provider yields a snapshot (FetchQuota nil-guards to
-	// BillingUnknown), so polled covers every quota key.
+	// BillingUnknown), so polled covers every quota key. FAILED syncs are
+	// excluded on purpose: the Manager keeps the previous snapshot (a failed
+	// sync must not mutate state), so letting one participate would judge the
+	// cooldown against a stale measurement — a no-op sync must have no side
+	// effects either.
 	var polled []string
 	for n, s := range results {
-		if s != nil {
+		if s != nil && s.Err == "" {
 			polled = append(polled, n)
 		}
 	}
@@ -311,6 +316,22 @@ func (t *QuotaTracker) ClearForGeneration(generation uint64) {
 	t.runtime.ClearQuotas(generation)
 }
 
+// warnSyncFailed surfaces a failed quota sync in the daemon log. The
+// Manager keeps the previous snapshot (quotaSyncFailedKeepsExisting — a
+// failed sync must not mutate state), so without this line a provider whose
+// upstream usage endpoint is down would silently serve an aging snapshot
+// with no operator-visible trace of WHY it is aging.
+func (t *QuotaTracker) warnSyncFailed(name string, s *provider.QuotaSnapshot) {
+	if s == nil || s.Err == "" {
+		return
+	}
+	if prev := t.runtime.Quota(name); prev != nil {
+		logx.Warnf("[quota] %s sync failed (%s); keeping last snapshot from %s", name, s.Err, prev.AsOf.UTC().Format(time.RFC3339))
+		return
+	}
+	logx.Warnf("[quota] %s sync failed: %s", name, s.Err)
+}
+
 // pollOne re-polls a single provider by its quota key (a config name or a
 // pooled-account virtual id "name#<accountID>") and persists. Used by the Web
 // UI's per-account "Refresh usage" - unlike refreshOne it is NOT debounced
@@ -322,13 +343,20 @@ func (t *QuotaTracker) PollOne(key string) bool {
 	if p == nil {
 		return false
 	}
-	if !t.CommitSnapshot(generation, key, t.FetchQuota(p, time.Now())) {
+	s := t.FetchQuota(p, time.Now())
+	t.warnSyncFailed(key, s)
+	if !t.CommitSnapshot(generation, key, s) {
 		return false
 	}
 	// The manual "Refresh usage" click is exactly the user asking "has my
 	// budget recovered?" — a positive snapshot must also lift a stale 429
-	// cooldown (the freeze badge then syncs with the refreshed usage).
-	t.runtime.QuotaRecoveredClearCooldown([]string{key}, time.Now(), t.FreshnessMaxAge(), generation)
+	// cooldown (the freeze badge then syncs with the refreshed usage). A
+	// FAILED sync skips this on purpose: the Manager kept the previous
+	// snapshot (no state mutation), and a no-op sync must not overturn a
+	// fresh 429 prediction with a stale measurement either.
+	if s.Err == "" {
+		t.runtime.QuotaRecoveredClearCooldown([]string{key}, time.Now(), t.FreshnessMaxAge(), generation)
+	}
 	if err := t.Persist(); err != nil {
 		logx.Warnf("[quota] persist after pollOne(%s) failed: %v", key, err)
 	}
@@ -365,6 +393,7 @@ func (t *QuotaTracker) RefreshOne(name string, generations ...uint64) {
 	refreshed := false
 	if p := t.provs()[name]; p != nil {
 		s := t.FetchQuota(p, time.Now())
+		t.warnSyncFailed(name, s)
 		if t.CommitSnapshot(generation, name, s) {
 			if err := t.Persist(); err != nil {
 				logx.Warnf("[quota] persist after refreshOne(%s) failed: %v", name, err)

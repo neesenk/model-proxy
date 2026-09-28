@@ -80,7 +80,7 @@ loopback 挡不住“借用户浏览器之手”的请求，所以凡携带浏�
 | PUT | `/api/takeover/templates/<name>` | `{yaml}` | `{status:"saved",name}` / 400 | 写用户模板 `<templates_dir>/<name>.yaml`（同名覆盖预设、新名新增客户端）。**先校验后落盘**：候选与现有用户模板合并后必须整体通过 `LoadTemplates`（语法 + 多变体族 protocol 约束），失败 400 且不落盘；写入是原子写。空 yaml / 非法 name → 400 |
 | DELETE | `/api/takeover/templates/<name>` | — | `{status:"deleted",name}` / 400 / 404 | 删用户模板；删除遮蔽预设的覆盖即恢复预设。无覆盖的预设名 → 400；完全未知 → 404 |
 
-**写操作统一热重载**：所有 mutation 落盘后触发进程内 `proxy.reload` —— 同一 worker 进程原地换 cfg/providers，不重启。账号增删虽不改 config.yaml，但 reload→`buildProviders`→`loadPool` 重读池文件，新账号随即展开成虚拟。reload 通过 `runtime.Manager.ReplaceGeneration` 清空 health/sticky/model-lock/paramBlock/spread/quota（operator pin 保留）、重建响应缓存，并 kick `quota.pollAll`。注意：进程内 reload（UI 与 worker 同进程）≠ `serve reload`（给独立进程发 SIGHUP）。
+**写操作统一热重载**：所有 mutation 落盘后触发进程内 `proxy.reload` —— 同一 worker 进程原地换 cfg/providers，不重启。账号增删虽不改 config.yaml，但 reload→`buildProviders`→`loadPool` 重读池文件，新账号随即展开成虚拟。reload 通过 `runtime.Manager.ReplaceGeneration` 清空 health/sticky/model-lock/paramBlock/spread（operator pin 保留）、重建响应缓存；quota cache 是后端同步观测，跨 reload 存活并剪枝到新 provider key 集（last-known-good，见 `docs/architecture/runtime-state.md`），并 kick `quota.pollAll`。注意：进程内 reload（UI 与 worker 同进程）≠ `serve reload`（给独立进程发 SIGHUP）。
 
 **reload 失败不是静默成功**：`reload` 仅在 `config.yaml` 自身不可读/非法时失败（mutation 写的是池文件，不是 config.yaml，所以正常操作不会触发）。失败时凭据已落盘、不可撤销，故仍返回 2xx，但响应带 `warning`（错误原文）并记一行 `[accounts] reload after mutation failed` 日志；runtime 保持旧集直到 config 修复并下次 reload（普通请求不会重读池文件）。前端在 add/remove 模态框和登录 done 状态展示该 warning。config 编辑走 `saveAndReload`，先校验、失败从备份回滚并返回 400（不同于账号增删的 best-effort）。
 

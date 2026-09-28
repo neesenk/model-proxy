@@ -256,7 +256,7 @@ func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 		pprofEnabled:  os.Getenv("MP_PPROF") == "1",
 		catalogLoader: configdomain.LoadModelsCatalog,
 	}
-	p.runtimeState.ReplaceGeneration(1)
+	p.runtimeState.ReplaceGeneration(1, providerKeySet(built.Providers))
 	p.configGeneration.Store(1)
 	// Reload-owned: assigned before any request/goroutine can read it, swapped
 	// under p.mu on reload.

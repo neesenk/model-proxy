@@ -91,12 +91,12 @@ func TestDecideOrderExcludesDisabledTargets(t *testing.T) {
 
 	// ReplaceGeneration clears generation-scoped state but keeps the override
 	// (reload preservation — same for pins).
-	m.ReplaceGeneration(9)
+	m.ReplaceGeneration(9, nil)
 	if !m.ModelDisabled("zhipu#b", "glm") {
 		t.Fatal("ReplaceGeneration cleared the operator disabled-model override (reload keeps it)")
 	}
 	m.SetModelDisabled("zhipu", "glm", true)
-	m.ReplaceGeneration(10)
+	m.ReplaceGeneration(10, nil)
 	if !m.ModelDisabled("zhipu", "glm") {
 		t.Fatal("ReplaceGeneration cleared the operator disabled-model override (reload keeps it)")
 	}

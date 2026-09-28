@@ -48,6 +48,17 @@
     credstore 的凭据写同模式；provider/persist.go 旧 `atomicWriteFile` 已删除，勿恢复
     固定名写法。
 19. reload 中 config generation 与运行态 snapshot/fingerprint 必须一致。
+19b. reload 不得把「后端同步状态」当 config 派生态清空：quota snapshot 是同步
+    观测（last-known-good——用上一次的 cache，同步成功才切换，失败不改变任何
+    数据）。旧实现 `ReplaceGeneration` 整表清空 quota，把未声明 `billing:` 的
+    实测 plan provider 在 reload→PollAsync 的窗口内降为 unknown 档，声明了
+    `billing: plan` 的 provider 便越过它（tier 排在 priority 之前）——表现为
+    会话中间歇性打到并非性价比首选的 provider（opencode-go/zcode 事故）。同步
+    失败同理：`Err != ""` 的快照不得覆盖已有条目，也不得参与
+    `QuotaRecoveredClearCooldown`（no-op 同步零副作用）。现行契约：
+    `ReplaceGeneration(generation, liveQuotaKeys)` 同一临界区内存活 cache、剪枝
+    死 key；`quotaSyncFailedKeepsExisting` 守卫提交侧。新增后端同步状态
+    （模型能力、配额、账号信息）时必须套同一模式，不得退回“先置默认再同步切回”。
 20. `internal/cli/serve/supervisor.go` 的 supervisor `SpawnWorker` 可能返回 nil，调用方必须检查。
 21. Proxy 级 goroutine 必须经 `Lifecycle.Run` 接纳；serve process 只能通过
     `applicationRuntime` 调用 `StartRuntimeServices`/`Proxy.Close`。不得绕过它分散

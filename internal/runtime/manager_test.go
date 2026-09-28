@@ -88,15 +88,22 @@ func TestZeroValueAndGenerationReplacement(t *testing.T) {
 		t.Fatalf("initial spread = %d, want 0", got)
 	}
 
-	m.ReplaceGeneration(2)
+	m.ReplaceGeneration(2, map[string]bool{"old": true})
 	if got := m.Generation(); got != 2 {
 		t.Fatalf("generation = %d, want 2", got)
 	}
 	if _, ok := m.Sticky("route"); ok {
 		t.Fatal("sticky survived generation replacement")
 	}
-	if got := m.Quotas(); len(got) != 0 {
-		t.Fatalf("quotas survived replacement: %+v", got)
+	// Quota snapshots are backend-synced observations (last-known-good
+	// cache): they SURVIVE the generation swap for keys in the live set, and
+	// only keys outside it are dropped — atomically with the swap.
+	if got := m.Quota("old"); got == nil || got.Plan != "old" {
+		t.Fatalf("quota did not survive replacement: %+v", got)
+	}
+	m.ReplaceGeneration(3, nil)
+	if got := m.Quota("old"); got != nil {
+		t.Fatalf("quota for a provider outside the live set survived: %+v", got)
 	}
 	if got := m.ParamBlock("old", "m"); len(got) != 0 {
 		t.Fatalf("param block survived replacement: %v", got)
@@ -241,6 +248,93 @@ func TestQuotaDetachmentAndGating(t *testing.T) {
 	}
 }
 
+// TestQuotaSyncFailureKeepsLastSnapshot pins the last-known-good contract for
+// backend-synced quota state: a FAILED sync (Err != "") never mutates stored
+// data — the scheduler keeps serving the previous tier/surplus until a
+// successful sync switches over. First observations (nothing stored) are still
+// stored so operators can see why the tier is unknown.
+func TestQuotaSyncFailureKeepsLastSnapshot(t *testing.T) {
+	t.Parallel()
+
+	m := newTestManager(1)
+	good := &provider.QuotaSnapshot{
+		Billing:      provider.BillingPlan,
+		RemainingPct: 0.5,
+		AsOf:         time.Now(),
+	}
+	if !m.SetQuota("zcode", good, 1) {
+		t.Fatal("seed quota rejected")
+	}
+
+	// Failed sync over an existing snapshot: no-op.
+	if !m.SetQuota("zcode", &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}, 1) {
+		t.Fatal("failed sync reported a generation rejection")
+	}
+	kept := m.Quota("zcode")
+	if kept == nil || kept.Err != "" || kept.Billing != provider.BillingPlan || kept.RemainingPct != 0.5 {
+		t.Fatalf("failed sync mutated the last snapshot: %+v", kept)
+	}
+
+	// Batch merge: a failing entry keeps the stored one, a first-observation
+	// failure is stored (display-only — it projects unknown either way), and a
+	// success switches over.
+	if !m.MergeQuotas(map[string]*provider.QuotaSnapshot{
+		"zcode":  {Billing: provider.BillingUnknown, Err: "dial tcp: timeout"},
+		"fresh":  {Billing: provider.BillingUnknown, Err: "http 403"},
+		"shopee": {Billing: provider.BillingPayG, RemainingPct: 0.9, AsOf: time.Now()},
+	}, 1) {
+		t.Fatal("merge rejected current generation")
+	}
+	if kept = m.Quota("zcode"); kept == nil || kept.Err != "" || kept.RemainingPct != 0.5 {
+		t.Fatalf("failed merge entry mutated the last snapshot: %+v", kept)
+	}
+	if first := m.Quota("fresh"); first == nil || first.Err == "" {
+		t.Fatalf("first-observation failure must still be stored (operator visibility): %+v", first)
+	}
+	if swapped := m.Quota("shopee"); swapped == nil || swapped.Billing != provider.BillingPayG {
+		t.Fatalf("successful sync must switch the snapshot over: %+v", swapped)
+	}
+
+	// A stale generation is still rejected before the keep-last-good guard.
+	if m.SetQuota("zcode", &provider.QuotaSnapshot{Billing: provider.BillingPayG, AsOf: time.Now()}, 7) {
+		t.Fatal("stale generation quota mutation committed")
+	}
+	if kept = m.Quota("zcode"); kept.Billing != provider.BillingPlan {
+		t.Fatalf("stale mutation leaked: %+v", kept)
+	}
+}
+
+// TestReplaceGenerationPrunesQuotaCacheToLiveKeys pins the reload-side
+// contract: quota entries survive the generation swap (cache carryover) and
+// only keys the new provider set no longer serves are removed — atomically,
+// so a concurrent snapshot can never observe a swapped-out provider's entry
+// under the new generation.
+func TestReplaceGenerationPrunesQuotaCacheToLiveKeys(t *testing.T) {
+	t.Parallel()
+
+	m := newTestManager(1)
+	for _, name := range []string{"zcode", "zcode#a1", "ghost", "removed#b2"} {
+		if !m.SetQuota(name, &provider.QuotaSnapshot{Billing: provider.BillingPlan, AsOf: time.Now()}, 1) {
+			t.Fatalf("seed quota %s rejected", name)
+		}
+	}
+
+	m.ReplaceGeneration(2, map[string]bool{"zcode": true, "zcode#a1": true})
+	if got := m.Generation(); got != 2 {
+		t.Fatalf("generation = %d, want 2", got)
+	}
+	for _, kept := range []string{"zcode", "zcode#a1"} {
+		if m.Quota(kept) == nil {
+			t.Fatalf("live key %s was pruned", kept)
+		}
+	}
+	for _, dropped := range []string{"ghost", "removed#b2"} {
+		if m.Quota(dropped) != nil {
+			t.Fatalf("key outside the live set survived the prune: %s", dropped)
+		}
+	}
+}
+
 func TestRestoreAndPersistSnapshotSemantics(t *testing.T) {
 	t.Parallel()
 
@@ -361,8 +455,13 @@ func TestAtomicSnapshotsNeverMixGenerations(t *testing.T) {
 		defer writer.Done()
 		<-start
 		for generation := uint64(2); generation <= generations; generation++ {
-			m.ReplaceGeneration(generation)
 			name := generationName(generation)
+			// Reload contract: the swap prunes quota entries outside the live
+			// key set atomically with the generation change, so each
+			// generation's snapshot is keyed only by its own provider (keeps
+			// the mix-generation assertion below meaningful under the quota
+			// cache carryover).
+			m.ReplaceGeneration(generation, map[string]bool{name: true})
 			m.SetQuota(name, &provider.QuotaSnapshot{Plan: name}, generation)
 			m.SetSticky("route", Sticky{Provider: name}, generation)
 			m.LearnParamBlock(name, "m", name, generation)

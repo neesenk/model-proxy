@@ -207,3 +207,79 @@ func TestQuotaTrackerRefreshOneKeepsCooldown(t *testing.T) {
 		t.Fatal("RefreshOne must still commit the fetched snapshot")
 	}
 }
+
+// TestPollAllSyncFailureKeepsLastSnapshotAndHasNoSideEffects pins the
+// backend-sync contract at the poll seam: a FAILED quota sync (usage endpoint
+// down) neither mutates the last committed snapshot nor triggers the
+// measurement-driven cooldown clear — a no-op sync must have no side effects.
+// A later successful sync switches the snapshot over and may lift cooldowns.
+func TestPollAllSyncFailureKeepsLastSnapshotAndHasNoSideEffects(t *testing.T) {
+	cfg := &configdomain.Config{Scheduling: configdomain.Scheduling{QuotaPollInterval: "60s"}}
+	m := newTestManager(0)
+	prov := &windowedProv{snapshot: recoveredSnapshot(time.Now(), 0.8)}
+	tr := NewQuotaTracker("", func() *configdomain.Config { return cfg },
+		func() map[string]provider.Provider {
+			return map[string]provider.Provider{"zhipu": prov}
+		}, m)
+
+	tr.PollAll(time.Now())
+	seeded := m.Quota("zhipu")
+	if seeded == nil || seeded.Err != "" || seeded.Billing != provider.BillingPlan {
+		t.Fatalf("seed poll did not commit a good snapshot: %+v", seeded)
+	}
+
+	// The upstream starts 429-predicting a cooldown, then its usage endpoint
+	// breaks ("http 401" is a permanent fetch error: no retries).
+	m.RecordRateLimit("zhipu", time.Now().Add(80*time.Minute), Transient, 0)
+	prov.snapshot = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}
+	tr.PollAll(time.Now())
+
+	if kept := m.Quota("zhipu"); kept == nil || kept.Err != "" ||
+		kept.Billing != provider.BillingPlan || !kept.AsOf.Equal(seeded.AsOf) {
+		t.Fatalf("failed sync mutated the last snapshot: %+v", kept)
+	}
+	if m.TargetHealthy("zhipu", "glm-5.3", time.Now()) {
+		t.Fatal("failed sync must not clear the 429 cooldown (no side effects)")
+	}
+
+	// Recovery: the next successful sync switches over and lifts the cooldown.
+	prov.snapshot = recoveredSnapshot(time.Now(), 0.8)
+	tr.PollAll(time.Now())
+	if !m.TargetHealthy("zhipu", "glm-5.3", time.Now()) {
+		t.Fatal("successful sync must clear the stale cooldown again")
+	}
+	if s := m.Quota("zhipu"); s.Err != "" || s.AsOf.Equal(seeded.AsOf) {
+		t.Fatalf("successful sync did not switch the snapshot over: %+v", s)
+	}
+}
+
+// TestPollOneSyncFailureKeepsLastSnapshot: the manual per-account "Refresh
+// usage" path follows the same contract — a failing endpoint keeps the last
+// snapshot, reports a successful (no-op) commit, and leaves cooldowns alone.
+func TestPollOneSyncFailureKeepsLastSnapshot(t *testing.T) {
+	cfg := &configdomain.Config{Scheduling: configdomain.Scheduling{QuotaPollInterval: "60s"}}
+	m := newTestManager(0)
+	prov := &windowedProv{snapshot: recoveredSnapshot(time.Now(), 0.7)}
+	tr := NewQuotaTracker("", func() *configdomain.Config { return cfg },
+		func() map[string]provider.Provider {
+			return map[string]provider.Provider{"zhipu": prov}
+		}, m)
+
+	if !tr.PollOne("zhipu") {
+		t.Fatal("seed PollOne rejected")
+	}
+	seeded := m.Quota("zhipu")
+
+	m.RecordRateLimit("zhipu", time.Now().Add(80*time.Minute), Transient, 0)
+	prov.snapshot = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 403"}
+	if !tr.PollOne("zhipu") {
+		t.Fatal("failed sync must still be an accepted (no-op) commit")
+	}
+	if kept := m.Quota("zhipu"); kept == nil || kept.Err != "" ||
+		kept.Billing != provider.BillingPlan || !kept.AsOf.Equal(seeded.AsOf) {
+		t.Fatalf("failed PollOne mutated the last snapshot: %+v", kept)
+	}
+	if m.TargetHealthy("zhipu", "glm-5.3", time.Now()) {
+		t.Fatal("failed PollOne must not clear the 429 cooldown")
+	}
+}

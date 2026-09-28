@@ -37,7 +37,7 @@ func TestLatchGenerationGate(t *testing.T) {
 func TestLatchClearedOnReplaceGeneration(t *testing.T) {
 	m := newTestManager(1)
 	m.SetLatch("sess", Latch{Target: "b/mb"}, 1)
-	m.ReplaceGeneration(2)
+	m.ReplaceGeneration(2, nil)
 	if _, ok := m.LatchValue("sess"); ok {
 		t.Fatal("latch survived ReplaceGeneration")
 	}
@@ -114,7 +114,7 @@ func TestCheckRepeatTurnClearedOnReplaceGeneration(t *testing.T) {
 	now := time.Now()
 	window := time.Minute
 	m.CheckRepeatTurn("sess", "route", "turn-a", now, window, 1)
-	m.ReplaceGeneration(2)
+	m.ReplaceGeneration(2, nil)
 	if m.CheckRepeatTurn("sess", "route", "turn-a", now.Add(time.Second), window, 2) {
 		t.Fatal("turn window survived ReplaceGeneration")
 	}

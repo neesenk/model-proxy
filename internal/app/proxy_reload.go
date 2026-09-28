@@ -109,7 +109,17 @@ func (p *Proxy) Reload(configPath string) error {
 		MaxConcurrent: cfg.ShadowMaxConcurrent,
 		Timeout:       cfg.Scheduling.Timeout(),
 	}))
-	p.runtimeState.ReplaceGeneration(generation)
+	p.runtimeState.ReplaceGeneration(generation, providerKeySet(p.providers))
+	// Quota snapshots are backend-synced observations, not config-derived
+	// state: they survived the generation swap above as the last-known-good
+	// cache (switch happens only when the post-reload PollAsync SUCCEEDS).
+	// Wiping them here used to demote every un-declared-billing provider to
+	// the unknown tier for the poll window, flipping tier ordering (a
+	// declared-plan provider jumped above a measured-plan provider with
+	// better priority). Only keys the new provider set no longer serves are
+	// pruned (atomically with the swap); a failed poll keeps the previous
+	// snapshot (Manager guard), so a broken usage endpoint degrades via
+	// honest staleness aging instead of a hard reset.
 	// Re-validate model-level protocol verdicts against the new generation's
 	// fingerprints: entries whose protocol-relevant config changed are dropped
 	// now (under the same lock the snapshot readers serialize on), and the
@@ -125,11 +135,13 @@ func (p *Proxy) Reload(configPath string) error {
 	for _, w := range hw {
 		logx.Warnf("[reload] ⚠ %s", w)
 	}
-	// Persist the cleared state synchronously so empty-health + the new
+	// Persist the swapped state synchronously so cleared health + the new
 	// fingerprint land on disk now (survives a crash right after reload — the
-	// documented contract). The async poll below refreshes quota snapshots for
-	// newly added providers; pollAsync is tracked + stop-aware so it can't
-	// outlive Close (no persist after the final flush).
+	// documented contract); the quota section now carries the LAST-KNOWN-GOOD
+	// cache over the swap instead of an empty reset. The async poll below
+	// refreshes quota snapshots (switching entries only on success);
+	// pollAsync is tracked + stop-aware so it can't outlive Close (no persist
+	// after the final flush).
 	var appliedWarning error
 	if p.quota != nil {
 		persistErr := p.quota.Persist()
@@ -206,6 +218,19 @@ func routeKeySet(expanded map[string][]configdomain.RouteTarget) map[string]bool
 	keys := make(map[string]bool, len(expanded))
 	for k := range expanded {
 		keys[k] = true
+	}
+	return keys
+}
+
+// providerKeySet derives the quota cache's live key set from the runtime
+// provider map — config names plus pooled "name#<accountID>" virtuals, which
+// is exactly the quota key space. The generation swap prunes quota entries
+// against this set (cache carryover for surviving providers, atomic drop for
+// removed ones).
+func providerKeySet(providers map[string]provider.Provider) map[string]bool {
+	keys := make(map[string]bool, len(providers))
+	for name := range providers {
+		keys[name] = true
 	}
 	return keys
 }

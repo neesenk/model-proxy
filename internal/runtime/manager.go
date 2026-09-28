@@ -89,10 +89,22 @@ func (m *Manager) Generation() uint64 {
 	return m.generation
 }
 
-// ReplaceGeneration atomically clears state tied to the old config while
-// preserving operator pins and the operator disabled-model override, which
-// intentionally survive hot reloads.
-func (m *Manager) ReplaceGeneration(generation uint64) {
+// ReplaceGeneration atomically swaps the config generation: it clears state
+// tied to the old config (health, sticky, model locks, param blocks, spread,
+// quality) while preserving operator pins and the operator disabled-model
+// override. Quotas are BACKEND-SYNCED observations, not config-coupled state:
+// wiping them on reload demoted every provider to the unmeasured tier for the
+// seconds the post-reload poll needs, flipping tier ordering (a declared-plan
+// provider jumped above a measured-plan provider with better priority — the
+// opencode-go/zcode incident). The cache therefore survives the swap and is
+// only PRUNED, in the same critical section, against liveQuotaKeys — the
+// runtime provider key set (config names plus pooled "name#<accountID>"
+// virtuals), so a swapped-out provider or logged-out account drops its stale
+// entry atomically with the generation change. A successful poll switches
+// entries over afterwards, a failed one keeps them (MergeQuotas/SetQuota
+// guard), and honest staleness aging (3× poll interval) still degrades
+// entries no successful sync refreshes.
+func (m *Manager) ReplaceGeneration(generation uint64, liveQuotaKeys map[string]bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureLocked()
@@ -104,7 +116,11 @@ func (m *Manager) ReplaceGeneration(generation uint64) {
 	m.modelLocks = make(map[ModelKey]*modelLock)
 	m.paramBlock = make(map[ModelKey]map[string]bool)
 	m.spread = make(map[string]uint64)
-	m.quotas = make(map[string]*provider.QuotaSnapshot)
+	for name := range m.quotas {
+		if !liveQuotaKeys[name] {
+			delete(m.quotas, name)
+		}
+	}
 	empty := map[string]providerQuality{}
 	m.quality.Store(&empty)
 }

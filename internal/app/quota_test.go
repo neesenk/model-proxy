@@ -433,7 +433,7 @@ func newStandaloneQuotaTracker(
 	provs func() map[string]provider.Provider,
 ) *runtime.QuotaTracker {
 	manager := &runtime.Manager{}
-	manager.ReplaceGeneration(0)
+	manager.ReplaceGeneration(0, nil)
 	return runtime.NewQuotaTracker(path, cfg, provs, manager)
 }
 

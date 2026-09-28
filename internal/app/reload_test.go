@@ -129,6 +129,58 @@ providers:
 	}
 }
 
+// TestReload_KeepsQuotaCacheAcrossGeneration pins the backend-sync contract
+// at the reload seam: quota snapshots are carried over as the last-known-good
+// cache — the scheduler keeps the MEASURED tier through the post-reload poll
+// window instead of falling back to declared/unknown defaults and switching
+// back after the poll lands (the opencode-go/zcode tier flip). Keys the new
+// provider set no longer serves are pruned, and the synchronous post-swap
+// persist writes the carried cache under the new fingerprint.
+func TestReload_KeepsQuotaCacheAcrossGeneration(t *testing.T) {
+	useStaticProviderPools(t, "p")
+	cfg1Path := writeConfigFile(t, routingConfig("http://127.0.0.1:1"))
+	cfg2Path := writeConfigFile(t, routingConfig("http://127.0.0.1:2"))
+	p := newTestProxy(t, mustLoadConfigFile(t, cfg1Path))
+	// Keep reload's async poll out of the assertion window: the cache
+	// carryover is what is under test, not the post-reload refresh.
+	p.quota.Stop()
+	asOf := time.Now().Add(-time.Minute)
+	generation := p.configGeneration.Load()
+	if !p.runtimeState.SetQuota("p", &provider.QuotaSnapshot{
+		Billing: provider.BillingPlan, RemainingPct: 0.5, AsOf: asOf,
+	}, generation) {
+		t.Fatal("seed quota rejected")
+	}
+	// A key whose provider the new generation no longer serves.
+	if !p.runtimeState.SetQuota("ghost", &provider.QuotaSnapshot{Billing: provider.BillingPlan, AsOf: asOf}, generation) {
+		t.Fatal("seed ghost quota rejected")
+	}
+
+	if err := p.Reload(cfg2Path); err != nil {
+		t.Fatal(err)
+	}
+
+	kept := p.runtimeState.Quota("p")
+	if kept == nil || kept.Billing != provider.BillingPlan || kept.RemainingPct != 0.5 || !kept.AsOf.Equal(asOf) {
+		t.Fatalf("reload dropped/mutated the quota cache: %+v", kept)
+	}
+	if leaked := p.runtimeState.Quota("ghost"); leaked != nil {
+		t.Fatalf("quota for a provider outside the new set survived the prune: %+v", leaked)
+	}
+	// The synchronous post-swap persist carries the cache under the NEW
+	// fingerprint: a crash right after reload keeps serving the measured tier.
+	state := readPersistedRuntimeState(t, p.quota.Path)
+	if state.Providers["p"].Billing != provider.BillingPlan {
+		t.Fatalf("persisted quota cache after reload: %+v", state.Providers)
+	}
+	if _, still := state.Providers["ghost"]; still {
+		t.Fatalf("persisted state still carries the pruned ghost key: %+v", state.Providers)
+	}
+	if got, want := state.HealthFP, healthConfigFingerprint(mustLoadConfigFile(t, cfg2Path)); got != want {
+		t.Fatalf("health_fp = %q, want %q", got, want)
+	}
+}
+
 type persistedRuntimeState struct {
 	Providers map[string]runtimestate.PersistedQuotaSnapshot `json:"providers"`
 	Sticky    map[string]runtimestate.Sticky                 `json:"sticky"`
