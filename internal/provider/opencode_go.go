@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"model-proxy/internal/display"
+	"model-proxy/internal/protocol"
 )
 
 // OpenCodeGoProvider implements OpenCode Go (opencode.ai/zen/go) — the OpenCode
@@ -103,13 +104,19 @@ func (p *OpenCodeGoProvider) FetchModels() ([]string, error) {
 //     their native per-conversation session headers through
 //     (x-claude-code-session-id, x-session-id, user_id). The first present
 //     one is mirrored into x-opencode-session — the client's own opaque id,
-//     never invented. When NO native session header exists (agents that
-//     send none, and the proxy's own probe/test traffic), a per-request
-//     synthesized id ("mp-" + random UUID) keeps the request routable:
-//     there is no conversation key to stay stable across, so a fresh id per
-//     request is the honest representation. An explicit x-opencode-session
-//     from the client always wins.
-func (p *OpenCodeGoProvider) ExtraHeaders(req *http.Request, path string) {
+//     never invented. Agents implemented strictly against the OpenAI /
+//     Anthropic specs send no session header at all and carry the stable id
+//     in the BODY instead (prompt_cache_key / metadata.user_id /
+//     client_metadata.session_id — Kimi Code does exactly this,
+//     github.com/MoonshotAI/kimi-code/issues/3506); that id is mirrored with
+//     the same native-header priority, so one conversation keeps one Go
+//     routing/prompt-cache lane across requests. Only when NEITHER a header
+//     nor a body identity exists (the proxy's own probe/test traffic), a
+//     per-request synthesized id ("mp-" + random UUID) keeps the request
+//     routable: there is no conversation key to stay stable across, so a
+//     fresh id per request is the honest representation. An explicit
+//     x-opencode-session from the client always wins.
+func (p *OpenCodeGoProvider) ExtraHeaders(req *http.Request, body []byte, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
 	if req.Header.Get("x-opencode-session") == "" {
 		for _, h := range []string{"x-claude-code-session-id", "x-session-id", "user_id"} {
@@ -119,9 +126,17 @@ func (p *OpenCodeGoProvider) ExtraHeaders(req *http.Request, path string) {
 			}
 		}
 	}
-	// Nothing to mirror (header-less agent or the proxy's own probe): Go
-	// hard-rejects a missing x-opencode-session with 400 MissingSessionID, so
-	// synthesize one instead of sending none.
+	// Spec-conforming header-less agents: the stable conversation id rides in
+	// the body (see the method doc). protocol.SessionIDFromBody bounds it to a
+	// printable ≤256-byte token, safe to echo into a header verbatim.
+	if req.Header.Get("x-opencode-session") == "" {
+		if sid := protocol.SessionIDFromBody(body); sid != "" {
+			req.Header.Set("x-opencode-session", sid)
+		}
+	}
+	// Nothing to mirror (no header, no body identity — the proxy's own
+	// probe): Go hard-rejects a missing x-opencode-session with 400
+	// MissingSessionID, so synthesize one instead of sending none.
 	if req.Header.Get("x-opencode-session") == "" {
 		req.Header.Set("x-opencode-session", "mp-"+newRequestID())
 	}

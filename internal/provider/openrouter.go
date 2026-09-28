@@ -78,7 +78,7 @@ func (p *OpenRouterProvider) FetchModels() ([]string, error) {
 // path's client→upstream header whitelist does not carry anthropic-version,
 // and OpenRouter's Anthropic Messages endpoint behaves like the real
 // Anthropic API. Harmless on the OpenAI paths.
-func (p *OpenRouterProvider) ExtraHeaders(req *http.Request, path string) {
+func (p *OpenRouterProvider) ExtraHeaders(req *http.Request, _ []byte, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
 }
 

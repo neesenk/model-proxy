@@ -220,7 +220,7 @@ func (runtime *Runtime) Execute(ctx context.Context, job Job) Result {
 		result.Err = err
 		return result
 	}
-	provider.ExtraHeaders(req, job.Plan.UpstreamPath())
+	provider.ExtraHeaders(req, body, job.Plan.UpstreamPath())
 
 	result.Request = req
 	result.Started = time.Now()

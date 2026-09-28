@@ -62,8 +62,8 @@ func (f *fakeProviderImpl) ProbeRequest(modelID string) provider.ProbeRequest {
 		Body:   []byte(`{"model":"` + modelID + `","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":false}`),
 	}
 }
-func (f *fakeProviderImpl) ExtraHeaders(req *http.Request, path string)          {}
-func (f *fakeProviderImpl) FilterModelIDs(ids []string) (kept, dropped []string) { return ids, nil }
+func (f *fakeProviderImpl) ExtraHeaders(req *http.Request, _ []byte, path string) {}
+func (f *fakeProviderImpl) FilterModelIDs(ids []string) (kept, dropped []string)  { return ids, nil }
 
 // readAll is a tiny test helper (io.ReadAll without the import noise at call sites).
 func readAll(r io.Reader) []byte {

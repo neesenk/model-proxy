@@ -151,7 +151,7 @@ func TestOpenRouterProbeRequest_DefaultOpenAIShape(t *testing.T) {
 func TestOpenRouterExtraHeaders_AnthropicVersion(t *testing.T) {
 	p := newTestOpenRouter(t, nil)
 	req, _ := http.NewRequest("POST", "https://openrouter.ai/api/v1/messages", nil)
-	p.ExtraHeaders(req, "/v1/messages")
+	p.ExtraHeaders(req, nil, "/v1/messages")
 	if got := req.Header.Get("anthropic-version"); got != "2023-06-01" {
 		t.Errorf("anthropic-version = %q, want 2023-06-01", got)
 	}

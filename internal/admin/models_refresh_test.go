@@ -53,7 +53,7 @@ func (f *refreshFakeProv) FetchModelsContext(ctx context.Context) ([]string, err
 	}
 	return f.FetchModels()
 }
-func (f *refreshFakeProv) ExtraHeaders(*http.Request, string) {}
+func (f *refreshFakeProv) ExtraHeaders(*http.Request, []byte, string) {}
 func (f *refreshFakeProv) FilterModelIDs(ids []string) ([]string, []string) {
 	return ids, nil
 }

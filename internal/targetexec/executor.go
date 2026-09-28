@@ -134,7 +134,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			executor.failover(target)
 			return Result{Outcome: OutcomeFailedHard}
 		}
-		providerImpl.ExtraHeaders(req, plan.UpstreamPath())
+		providerImpl.ExtraHeaders(req, body, plan.UpstreamPath())
 		started := time.Now()
 		response, err := executor.Client.Do(req)
 		upstreamMS := time.Since(started).Milliseconds()

@@ -82,7 +82,7 @@ func Do(ctx context.Context, client *http.Client, prov configdomain.Provider, im
 	}
 	// Provider-specific per-request headers (aqp: anthropic-version +
 	// x-compass-request-id). Same method the forward path calls - one impl.
-	impl.ExtraHeaders(req, r.Path)
+	impl.ExtraHeaders(req, body, r.Path)
 
 	start := time.Now()
 	resp, err := client.Do(req)

@@ -102,7 +102,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/protocol":              {"model-proxy/internal/observe/logx": true, "model-proxy/internal/protocol/wire": true},
 		"model-proxy/internal/protocol/wire":         nil,
 		"model-proxy/internal/presets":               {"model-proxy/internal/config": true, "model-proxy/internal/configedit": true, "model-proxy/internal/provider": true},
-		"model-proxy/internal/provider":              {"model-proxy/internal/display": true, "model-proxy/internal/credstore": true, "model-proxy/internal/upstreamproxy": true},
+		"model-proxy/internal/provider":              {"model-proxy/internal/display": true, "model-proxy/internal/credstore": true, "model-proxy/internal/upstreamproxy": true, "model-proxy/internal/protocol": true},
 		"model-proxy/internal/providerbuild":         {"model-proxy/internal/display": true, "model-proxy/internal/accounts": true, "model-proxy/internal/config": true, "model-proxy/internal/provider": true, "model-proxy/internal/observe/logx": true, "model-proxy/internal/upstreamproxy": true},
 		"model-proxy/internal/routing":               {"model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/protocol": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/runtime":               {"model-proxy/internal/config": true, "model-proxy/internal/runtime/wirecap": true, "model-proxy/internal/provider": true, "model-proxy/internal/observe/logx": true},

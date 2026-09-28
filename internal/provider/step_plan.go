@@ -95,7 +95,7 @@ func (p *StepPlanProvider) ProbeRequest(modelID string) ProbeRequest {
 // ExtraHeaders sets anthropic-version on every upstream request (forward +
 // probe). The probe has no client request to inherit it from, and
 // anthropic-compatible endpoints expect it (harmless on the OpenAI path).
-func (p *StepPlanProvider) ExtraHeaders(req *http.Request, path string) {
+func (p *StepPlanProvider) ExtraHeaders(req *http.Request, _ []byte, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
 }
 

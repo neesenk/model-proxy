@@ -68,18 +68,21 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	// and cache-hit events here and to whichever target commits downstream.
 	agent := counters.DetectAgent(r)
 	// Resolve the client session id once: first the configured header
-	// allowlist, then — for agents that send no session headers (Codex on
-	// the Responses protocol carries it as client_metadata.session_id in
-	// the body) — the body-derived fallback. It rides every live event, the
-	// request log and the guard session dimension (never the routing sticky
-	// key, which stays x-claude-code-session-id).
+	// allowlist, then — for agents implemented strictly against the OpenAI /
+	// Anthropic specs that send no session headers — the spec-defined BODY
+	// fields (OpenAI prompt_cache_key, Anthropic metadata.user_id, Codex's
+	// client_metadata.session_id; Kimi Code carries its session id in exactly
+	// these fields, see protocol.SessionIDFromBody). It rides every live
+	// event, the request log and the guard session dimension (never the
+	// routing sticky key, which stays x-claude-code-session-id).
 	clientSession := requestlog.SessionID(r, cfg.RequestLog.ResolvedSessionHeaders())
 	if clientSession == "" {
-		clientSession = requestlog.SessionIDFromBody(origBody)
+		clientSession = protocol.SessionIDFromBody(origBody)
 	}
 	// The trusted session key used for security decisions (block table,
-	// repeat interception, session scan). Body-carried client_metadata.session_id
-	// is intentionally NOT accepted for these decisions.
+	// repeat interception, session scan). Body-carried session identity
+	// (prompt_cache_key / metadata.user_id / client_metadata.session_id) is
+	// intentionally NOT accepted for these decisions.
 	sessionKey := r.Header.Get("x-claude-code-session-id")
 
 	// TurnKey fingerprints one conversational turn for the repeat_turn escalation
@@ -1018,8 +1021,9 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 		// BEFORE any scanning — a blocked session pays no scan cost, and the
 		// block outlives the config that produced it (it persists until
 		// explicitly unblocked via CLI/WebUI, by design).
-		// Block-table lookup uses the trusted session header only. The body-
-		// carried client_metadata.session_id is intentionally NOT accepted for
+		// Block-table lookup uses the trusted session header only. Body-carried
+		// session identity (prompt_cache_key / metadata.user_id /
+		// client_metadata.session_id) is intentionally NOT accepted for
 		// security decisions: it is request-writable and could otherwise let a
 		// client associate a block with another session.
 		if p.svc.Adjudicator != nil {

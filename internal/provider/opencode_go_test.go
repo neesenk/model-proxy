@@ -163,18 +163,22 @@ func TestOpenCodeGoProbeRequest_DefaultOpenAIShape(t *testing.T) {
 }
 
 // ExtraHeaders sets anthropic-version (the whitelist does not carry it) and
-// mirrors the client's native session header into x-opencode-session (Go's
-// docs ask for a stable per-conversation id; the forward whitelist already
-// passes the native headers through). An explicit x-opencode-session from the
-// client wins; no session header → a per-request mp-<uuid> is synthesized
-// (upstream 400s MissingSessionID otherwise).
+// mirrors the client's session identity into x-opencode-session (Go REQUIRES
+// one; the forward whitelist already passes native session headers through).
+// Precedence: an explicit x-opencode-session from the client wins, then
+// native session headers, then the spec-defined BODY fields
+// (prompt_cache_key / metadata.user_id / client_metadata.session_id — Kimi
+// Code carries its stable id exactly there, see
+// github.com/MoonshotAI/kimi-code/issues/3506), and only a body with no
+// identity at all (the proxy's own probes) gets a per-request mp-<uuid>
+// synthesized (upstream 400s MissingSessionID otherwise).
 func TestOpenCodeGoExtraHeaders_SessionMirror(t *testing.T) {
 	p := newTestOpenCodeGo(t, nil)
 
 	// Claude Code's native header mirrors into x-opencode-session.
 	req, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
 	req.Header.Set("x-claude-code-session-id", "sess-cc-1")
-	p.ExtraHeaders(req, "/v1/messages")
+	p.ExtraHeaders(req, nil, "/v1/messages")
 	if got := req.Header.Get("x-opencode-session"); got != "sess-cc-1" {
 		t.Errorf("x-opencode-session = %q, want mirror of x-claude-code-session-id", got)
 	}
@@ -185,7 +189,7 @@ func TestOpenCodeGoExtraHeaders_SessionMirror(t *testing.T) {
 	// pi-style x-session-id mirrors when claude-code's is absent.
 	req2, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
 	req2.Header.Set("x-session-id", "sess-pi-2")
-	p.ExtraHeaders(req2, "/v1/messages")
+	p.ExtraHeaders(req2, nil, "/v1/messages")
 	if got := req2.Header.Get("x-opencode-session"); got != "sess-pi-2" {
 		t.Errorf("x-opencode-session = %q, want mirror of x-session-id", got)
 	}
@@ -194,9 +198,44 @@ func TestOpenCodeGoExtraHeaders_SessionMirror(t *testing.T) {
 	req3, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
 	req3.Header.Set("x-opencode-session", "sess-own")
 	req3.Header.Set("x-session-id", "sess-other")
-	p.ExtraHeaders(req3, "/v1/messages")
+	p.ExtraHeaders(req3, nil, "/v1/messages")
 	if got := req3.Header.Get("x-opencode-session"); got != "sess-own" {
 		t.Errorf("x-opencode-session = %q, want the client's own value preserved", got)
+	}
+
+	// Spec-conforming header-less agents: the stable id rides in the BODY.
+	// Kimi Code on the OpenAI wire (prompt_cache_key, chat + responses legs):
+	// mirrored verbatim so one conversation keeps one routing/prompt-cache
+	// lane (the per-request synthesized id would defeat upstream caching).
+	reqK, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/chat/completions", nil)
+	p.ExtraHeaders(reqK, []byte(`{"model":"kimi-k3","prompt_cache_key":"kimi-sess-9a2f","messages":[{"role":"user","content":"hi"}]}`), "/chat/completions")
+	if got := reqK.Header.Get("x-opencode-session"); got != "kimi-sess-9a2f" {
+		t.Errorf("x-opencode-session = %q, want body prompt_cache_key mirrored", got)
+	}
+	// Kimi Code on the Anthropic wire (metadata.user_id) and Codex on
+	// Responses (client_metadata.session_id) mirror the same way.
+	reqM, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
+	p.ExtraHeaders(reqM, []byte(`{"model":"kimi-k3","metadata":{"user_id":"hashed-user-3"},"messages":[]}`), "/v1/messages")
+	if got := reqM.Header.Get("x-opencode-session"); got != "hashed-user-3" {
+		t.Errorf("x-opencode-session = %q, want body metadata.user_id mirrored", got)
+	}
+	reqC, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/responses", nil)
+	p.ExtraHeaders(reqC, []byte(`{"model":"gpt-5.6","client_metadata":{"session_id":"codex-sess-7"},"input":[]}`), "/responses")
+	if got := reqC.Header.Get("x-opencode-session"); got != "codex-sess-7" {
+		t.Errorf("x-opencode-session = %q, want body client_metadata.session_id mirrored", got)
+	}
+	// A native session header outranks the body identity.
+	reqH, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/chat/completions", nil)
+	reqH.Header.Set("x-session-id", "sess-native")
+	p.ExtraHeaders(reqH, []byte(`{"prompt_cache_key":"kimi-sess-9a2f"}`), "/chat/completions")
+	if got := reqH.Header.Get("x-opencode-session"); got != "sess-native" {
+		t.Errorf("x-opencode-session = %q, want native header to outrank body identity", got)
+	}
+	// A body with no identity fields at all still synthesizes (probe shape).
+	reqN, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
+	p.ExtraHeaders(reqN, []byte(`{"model":"kimi-k3","messages":[]}`), "/v1/messages")
+	if got := reqN.Header.Get("x-opencode-session"); got == "" || !strings.HasPrefix(got, "mp-") {
+		t.Errorf("x-opencode-session = %q, want synthesized mp-<uuid> for identity-less body", got)
 	}
 
 	// No session header anywhere → a per-request synthesized id keeps the
@@ -204,13 +243,13 @@ func TestOpenCodeGoExtraHeaders_SessionMirror(t *testing.T) {
 	// the mp- prefix and fresh on every call (no conversation key to be stable
 	// across).
 	req4, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
-	p.ExtraHeaders(req4, "/v1/messages")
+	p.ExtraHeaders(req4, nil, "/v1/messages")
 	sess4 := req4.Header.Get("x-opencode-session")
 	if sess4 == "" || !strings.HasPrefix(sess4, "mp-") {
 		t.Errorf("x-opencode-session = %q, want synthesized mp-<uuid> for header-less agents", sess4)
 	}
 	req5, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/chat/completions", nil)
-	p.ExtraHeaders(req5, "/chat/completions")
+	p.ExtraHeaders(req5, nil, "/chat/completions")
 	sess5 := req5.Header.Get("x-opencode-session")
 	if sess5 == "" || sess5 == sess4 {
 		t.Errorf("x-opencode-session = %q, want a fresh synthesized id per request (!= %q)", sess5, sess4)

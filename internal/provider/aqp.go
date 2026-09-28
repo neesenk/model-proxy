@@ -169,7 +169,7 @@ func (p *AqpProvider) ProbeRequest(modelID string) ProbeRequest {
 // ExtraHeaders sets aqp's per-request headers: anthropic-version + a fresh
 // x-compass-request-id UUID. Applied on EVERY upstream request (forward + probe)
 // so the two paths share one implementation - no duplicated aqp branch in main.
-func (p *AqpProvider) ExtraHeaders(req *http.Request, path string) {
+func (p *AqpProvider) ExtraHeaders(req *http.Request, _ []byte, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("x-compass-request-id", newRequestID())
 }

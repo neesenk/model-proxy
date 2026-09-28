@@ -101,7 +101,7 @@ func (leg BufferedLeg) Do(ctx context.Context, body []byte) (status int, respBod
 		if err := leg.Plan.ApplyConfiguredHeaders(req.Header); err != nil {
 			return status, nil, &BufferedLegBuildError{Err: fmt.Errorf("headers: %w", err)}
 		}
-		impl.ExtraHeaders(req, leg.Plan.UpstreamPath())
+		impl.ExtraHeaders(req, body, leg.Plan.UpstreamPath())
 
 		resp, err = leg.Client.Do(req)
 		if err != nil {

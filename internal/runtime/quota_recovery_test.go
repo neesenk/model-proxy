@@ -40,7 +40,7 @@ func (w *windowedProv) Quota() (*provider.QuotaSnapshot, error) {
 func (w *windowedProv) ProbeRequest(string) provider.ProbeRequest {
 	return provider.ProbeRequest{Method: http.MethodPost, Path: "/chat/completions"}
 }
-func (w *windowedProv) ExtraHeaders(*http.Request, string)                   {}
+func (w *windowedProv) ExtraHeaders(*http.Request, []byte, string)           {}
 func (w *windowedProv) FilterModelIDs(ids []string) (kept, dropped []string) { return ids, nil }
 
 func TestQuotaRecoveredClearCooldownClearsStale429Prediction(t *testing.T) {

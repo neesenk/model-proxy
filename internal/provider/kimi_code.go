@@ -98,7 +98,7 @@ func (p *KimiCodeProvider) ProbeRequest(modelID string) ProbeRequest {
 // EVERY upstream request (forward + probe) so the probe (which has no client
 // request to copy from) is accepted by the Anthropic endpoint; harmless on the
 // OpenAI path (ignored). Mirrors AqpProvider (minus the compass request id).
-func (p *KimiCodeProvider) ExtraHeaders(req *http.Request, path string) {
+func (p *KimiCodeProvider) ExtraHeaders(req *http.Request, _ []byte, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
 }
 

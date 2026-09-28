@@ -45,8 +45,8 @@ func (f *fakeProv) Quota() (*provider.QuotaSnapshot, error) { return nil, nil }
 func (f *fakeProv) ProbeRequest(modelID string) provider.ProbeRequest {
 	return provider.ProbeRequest{Method: http.MethodPost, Path: "/chat/completions"}
 }
-func (f *fakeProv) ExtraHeaders(req *http.Request, path string)          {}
-func (f *fakeProv) FilterModelIDs(ids []string) (kept, dropped []string) { return ids, nil }
+func (f *fakeProv) ExtraHeaders(req *http.Request, _ []byte, path string) {}
+func (f *fakeProv) FilterModelIDs(ids []string) (kept, dropped []string)  { return ids, nil }
 
 var _ provider.Provider = (*fakeProv)(nil)
 

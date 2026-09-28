@@ -146,7 +146,7 @@ func TestQwenPlan_ProbeRequest_AnthropicShape(t *testing.T) {
 func TestQwenPlan_ExtraHeaders_AnthropicVersion(t *testing.T) {
 	p := newQwenPlanForTest(t, nil)
 	req := httptest.NewRequest(http.MethodPost, "https://x/apps/anthropic/v1/messages", nil)
-	p.ExtraHeaders(req, "/v1/messages")
+	p.ExtraHeaders(req, nil, "/v1/messages")
 	if got := req.Header.Get("anthropic-version"); got != "2023-06-01" {
 		t.Errorf("anthropic-version = %q, want 2023-06-01", got)
 	}

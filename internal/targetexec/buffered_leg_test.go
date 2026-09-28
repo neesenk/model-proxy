@@ -43,7 +43,7 @@ func (*bufferedLegProvider) Quota() (*provider.QuotaSnapshot, error) { return ni
 func (*bufferedLegProvider) ProbeRequest(string) provider.ProbeRequest {
 	return provider.ProbeRequest{}
 }
-func (*bufferedLegProvider) ExtraHeaders(*http.Request, string)               {}
+func (*bufferedLegProvider) ExtraHeaders(*http.Request, []byte, string)       {}
 func (*bufferedLegProvider) FilterModelIDs(ids []string) ([]string, []string) { return ids, nil }
 
 func bufferedLegPlan(provider provider.Provider) Plan {

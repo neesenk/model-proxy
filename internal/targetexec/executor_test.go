@@ -28,7 +28,7 @@ func (*executorTestProvider) Quota() (*provider.QuotaSnapshot, error) { return n
 func (*executorTestProvider) ProbeRequest(string) provider.ProbeRequest {
 	return provider.ProbeRequest{}
 }
-func (*executorTestProvider) ExtraHeaders(*http.Request, string)               {}
+func (*executorTestProvider) ExtraHeaders(*http.Request, []byte, string)       {}
 func (*executorTestProvider) FilterModelIDs(ids []string) ([]string, []string) { return ids, nil }
 
 type sequenceDoer struct {

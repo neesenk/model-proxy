@@ -610,7 +610,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `probe → config, provider`；
 - `protocol → observe/logx, protocol/wire`；
 - `pricing → upstreamproxy`；
-- `provider → credstore, display, upstreamproxy`（display 是终端着色/文本格式化叶子工具包）；
+- `provider → credstore, display, upstreamproxy, protocol`（display 是终端着色/文本格式化叶子工具包；protocol 仅消费无状态的 body 会话 id 提取 `SessionIDFromBody`，供 session 亲和 header 镜像）；
 - `providerbuild → accounts, config, display, provider, observe/logx, upstreamproxy`；
 - `routing → catalog, config, protocol, provider`（均为值类型消费）；
 - `runtime → config, runtime/wirecap, provider, observe/logx`；

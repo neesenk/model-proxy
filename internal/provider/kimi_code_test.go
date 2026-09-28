@@ -99,7 +99,7 @@ func TestKimiCodeProbeRequest(t *testing.T) {
 func TestKimiCodeExtraHeaders(t *testing.T) {
 	p := newTestKimiCode(t)
 	req, _ := http.NewRequest("POST", "https://api.kimi.com/coding/v1/messages", nil)
-	p.ExtraHeaders(req, "/v1/messages")
+	p.ExtraHeaders(req, nil, "/v1/messages")
 	if got := req.Header.Get("anthropic-version"); got != "2023-06-01" {
 		t.Errorf("anthropic-version: got %q, want 2023-06-01", got)
 	}

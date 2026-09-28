@@ -301,6 +301,18 @@ func TestServeGuardAdjudicationBodyCarriedSession(t *testing.T) {
 	if len(jobs) != 2 || jobs[1].SessionID != "s-hdr-1" {
 		t.Errorf("job session id = %+v, want header-carried s-hdr-1", jobs[1:])
 	}
+
+	// The spec body fields work identically: Kimi Code carries its session id
+	// in prompt_cache_key (OpenAI wire) / metadata.user_id (Anthropic wire).
+	kimiBody := `{"model":"m","prompt_cache_key":"kimi-sess-1","messages":[{"role":"user","content":"sk-capture-dummy-not-a-real-key"}]}`
+	w = h.serve(snap, "openai", "/v1/chat/completions", kimiBody, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	jobs = adj.captured()
+	if len(jobs) != 3 || jobs[2].SessionID != "kimi-sess-1" {
+		t.Errorf("job session id = %+v, want body-carried kimi-sess-1", jobs[2:])
+	}
 }
 
 // TestServeGuardAdjudicationPathsDeferred: strong path hits defer too (the
@@ -649,9 +661,10 @@ func TestServeGuardRepeatBlockedMultipleHitsCascade(t *testing.T) {
 }
 
 // TestServeGuardBlockedSessionIgnoresBodyCarriedSessionID: the block table is
-// a security decision and must use only the trusted session header. A body-
-// carried client_metadata.session_id must NOT cause the request to be rejected
-// under another session's block.
+// a security decision and must use only the trusted session header. Body-
+// carried session identity — client_metadata.session_id OR the spec fields
+// (prompt_cache_key / metadata.user_id) that Kimi Code & co. carry — must NOT
+// cause the request to be rejected under another session's block.
 func TestServeGuardBlockedSessionIgnoresBodyCarriedSessionID(t *testing.T) {
 	up := newFakeUpstream(t, openaiOKResponder("ok"))
 	h := newHarness()
@@ -661,15 +674,22 @@ func TestServeGuardBlockedSessionIgnoresBodyCarriedSessionID(t *testing.T) {
 	snap := h.snapshot(guardBaseConfig(up, GuardConfig{Secrets: "log", Paths: "off"}))
 	snap.Guard = guardScanner(t, nil)
 
-	// No session header, but the body claims the blocked session id.
-	body := `{"model":"m","client_metadata":{"session_id":"s-header"},"messages":[{"role":"user","content":"clean"}]}`
-	w := h.serve(snap, "openai", "/v1/chat/completions", body, nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("body-carried session must not trigger block: status = %d, want 200", w.Code)
+	// No session header, but the body claims the blocked session id — via
+	// each body field the extractor accepts.
+	for name, body := range map[string]string{
+		"client_metadata.session_id": `{"model":"m","client_metadata":{"session_id":"s-header"},"messages":[{"role":"user","content":"clean"}]}`,
+		"prompt_cache_key":           `{"model":"m","prompt_cache_key":"s-header","messages":[{"role":"user","content":"clean"}]}`,
+		"metadata.user_id":           `{"model":"m","metadata":{"user_id":"s-header"},"messages":[{"role":"user","content":"clean"}]}`,
+	} {
+		w := h.serve(snap, "openai", "/v1/chat/completions", body, nil)
+		if w.Code != http.StatusOK {
+			t.Errorf("%s: body-carried session must not trigger block: status = %d, want 200", name, w.Code)
+		}
 	}
 
 	// With the header present, the block IS enforced.
-	w = h.serve(snap, "openai", "/v1/chat/completions", body, map[string]string{"x-claude-code-session-id": "s-header"})
+	body := `{"model":"m","client_metadata":{"session_id":"s-header"},"messages":[{"role":"user","content":"clean"}]}`
+	w := h.serve(snap, "openai", "/v1/chat/completions", body, map[string]string{"x-claude-code-session-id": "s-header"})
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("header-carried session must trigger block: status = %d, want 400", w.Code)
 	}

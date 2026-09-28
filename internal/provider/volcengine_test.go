@@ -123,7 +123,7 @@ func TestVolcengineProbeRequest_AnthropicShape(t *testing.T) {
 func TestVolcengineExtraHeaders_AnthropicVersion(t *testing.T) {
 	p := newTestVolcengine(t)
 	req := httptest.NewRequest(http.MethodPost, "https://ark.cn-beijing.volces.com/api/plan/v1/messages", nil)
-	p.ExtraHeaders(req, "/v1/messages")
+	p.ExtraHeaders(req, nil, "/v1/messages")
 	if got := req.Header.Get("anthropic-version"); got != "2023-06-01" {
 		t.Errorf("anthropic-version = %q, want 2023-06-01", got)
 	}

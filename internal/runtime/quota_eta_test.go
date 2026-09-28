@@ -40,7 +40,7 @@ func (e *etaProv) Quota() (*provider.QuotaSnapshot, error) {
 func (e *etaProv) ProbeRequest(modelID string) provider.ProbeRequest {
 	return provider.ProbeRequest{Method: http.MethodPost, Path: "/chat/completions"}
 }
-func (e *etaProv) ExtraHeaders(*http.Request, string)                   {}
+func (e *etaProv) ExtraHeaders(*http.Request, []byte, string)           {}
 func (e *etaProv) FilterModelIDs(ids []string) (kept, dropped []string) { return ids, nil }
 
 func newEtaTracker(p *etaProv) *QuotaTracker {

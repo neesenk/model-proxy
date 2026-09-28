@@ -348,11 +348,11 @@ func (fakeProbeImpl) Refresh() error                  { return nil }
 func (fakeProbeImpl) RewriteRequest(targetURL string, body []byte, _ string) (string, []byte) {
 	return targetURL, body
 }
-func (fakeProbeImpl) Logout() error                           { return nil }
-func (fakeProbeImpl) Usage() error                            { return nil }
-func (fakeProbeImpl) FetchModels() ([]string, error)          { return nil, nil }
-func (fakeProbeImpl) Quota() (*provider.QuotaSnapshot, error) { return nil, nil }
-func (fakeProbeImpl) ExtraHeaders(*http.Request, string)      {}
+func (fakeProbeImpl) Logout() error                              { return nil }
+func (fakeProbeImpl) Usage() error                               { return nil }
+func (fakeProbeImpl) FetchModels() ([]string, error)             { return nil, nil }
+func (fakeProbeImpl) Quota() (*provider.QuotaSnapshot, error)    { return nil, nil }
+func (fakeProbeImpl) ExtraHeaders(*http.Request, []byte, string) {}
 func (fakeProbeImpl) FilterModelIDs(ids []string) ([]string, []string) {
 	return ids, nil
 }

@@ -29,7 +29,7 @@ func TestZCode_AuthHeaders_SendsBothBearerAndXApiKey(t *testing.T) {
 func TestZCode_ExtraHeaders_Fingerprint(t *testing.T) {
 	p := &ZCodeProvider{ApiKeyBase: NewApiKeyBaseWithKey("zcode", "k")}
 	req, _ := http.NewRequest("POST", "https://x/v1/messages", nil)
-	p.ExtraHeaders(req, "/v1/messages")
+	p.ExtraHeaders(req, nil, "/v1/messages")
 
 	cases := map[string]string{
 		"User-Agent":           "ZCode/3.14.0 ai-sdk/provider-utils/4.0.27 runtime/node.js/24",
@@ -81,7 +81,7 @@ func TestZCode_ExtraHeaders_Fingerprint(t *testing.T) {
 	// Request id and trace id must differ per call; session id must stay stable
 	// (no client session hint on this request → process-stable fallback).
 	req2, _ := http.NewRequest("POST", "https://x/v1/messages", nil)
-	p.ExtraHeaders(req2, "/v1/messages")
+	p.ExtraHeaders(req2, nil, "/v1/messages")
 	if req.Header.Get("X-Request-Id") == req2.Header.Get("X-Request-Id") {
 		t.Error("X-Request-Id identical across requests, want fresh per request")
 	}
@@ -97,7 +97,8 @@ func TestZCode_SessionID_DerivedFromClientSession(t *testing.T) {
 	// ZCode's wire x-session-id is a bare v4 UUID (the CLI strips its internal
 	// sess_ prefix). A proxy process outlives a conversation, so distinct
 	// client sessions must map to distinct stable ids — derived from the
-	// client's own session headers, not from the process lifetime.
+	// client's own session identity (headers first, then the spec-defined
+	// body fields), not from the process lifetime.
 	newReq := func(session string) *http.Request {
 		req, _ := http.NewRequest("POST", "https://x/v1/messages", nil)
 		if session != "" {
@@ -109,7 +110,7 @@ func TestZCode_SessionID_DerivedFromClientSession(t *testing.T) {
 
 	a := newReq("sess-aaa")
 	b := newReq("sess-bbb")
-	idA1, idA2, idB := p.zcodeSessionID(a), p.zcodeSessionID(a), p.zcodeSessionID(b)
+	idA1, idA2, idB := p.zcodeSessionID(a, nil), p.zcodeSessionID(a, nil), p.zcodeSessionID(b, nil)
 	for _, id := range []string{idA1, idA2, idB} {
 		if !zcodeUUIDv4Re.MatchString(id) {
 			t.Errorf("session id %q not v4-UUID shaped", id)
@@ -123,13 +124,13 @@ func TestZCode_SessionID_DerivedFromClientSession(t *testing.T) {
 	}
 	// Deterministic across provider instances (survives proxy restarts).
 	p2 := &ZCodeProvider{ApiKeyBase: NewApiKeyBaseWithKey("zcode", "k")}
-	if got := p2.zcodeSessionID(newReq("sess-aaa")); got != idA1 {
+	if got := p2.zcodeSessionID(newReq("sess-aaa"), nil); got != idA1 {
 		t.Errorf("derived session id not stable across instances: %q vs %q", got, idA1)
 	}
 	// Generic X-Session-Id hint also derives.
 	generic, _ := http.NewRequest("POST", "https://x/v1/messages", nil)
 	generic.Header.Set("X-Session-Id", "conv-42")
-	if got := p.zcodeSessionID(generic); !zcodeUUIDv4Re.MatchString(got) || got == idA1 {
+	if got := p.zcodeSessionID(generic, nil); !zcodeUUIDv4Re.MatchString(got) || got == idA1 {
 		t.Errorf("X-Session-Id hint derivation = %q, want distinct v4 UUID", got)
 	}
 	// The targetexec whitelist's "user_id" lands canonicalized as "User_id"
@@ -137,8 +138,34 @@ func TestZCode_SessionID_DerivedFromClientSession(t *testing.T) {
 	// spelling is actually matched.
 	uid, _ := http.NewRequest("POST", "https://x/v1/messages", nil)
 	uid.Header.Set("user_id", "user-7")
-	if got := p.zcodeSessionID(uid); !zcodeUUIDv4Re.MatchString(got) {
+	if got := p.zcodeSessionID(uid, nil); !zcodeUUIDv4Re.MatchString(got) {
 		t.Errorf("user_id hint derivation = %q, want v4 UUID", got)
+	}
+	// Spec-conforming header-less agents (Kimi Code on the OpenAI wire, Codex
+	// on Responses) carry the stable id in the body instead:
+	// prompt_cache_key / metadata.user_id / client_metadata.session_id. The
+	// derived wire id must be stable per body id, distinct across body ids,
+	// and must lose to a native session header.
+	bodyID := func(body string) string {
+		req, _ := http.NewRequest("POST", "https://x/v1/messages", nil)
+		return p.zcodeSessionID(req, []byte(body))
+	}
+	fromKey := bodyID(`{"model":"kimi-k3","prompt_cache_key":"kimi-sess-1","messages":[]}`)
+	fromKeyAgain := bodyID(`{"model":"kimi-k3","prompt_cache_key":"kimi-sess-1","messages":[{"role":"user","content":"more"}]}`)
+	fromUser := bodyID(`{"model":"kimi-k3","metadata":{"user_id":"hashed-user-2"},"messages":[]}`)
+	for _, id := range []string{fromKey, fromUser} {
+		if !zcodeUUIDv4Re.MatchString(id) {
+			t.Errorf("body-derived session id %q not v4-UUID shaped", id)
+		}
+	}
+	if fromKey == "" || fromKey != fromKeyAgain {
+		t.Errorf("body-derived session id not stable across the conversation: %q vs %q", fromKey, fromKeyAgain)
+	}
+	if fromKey == fromUser {
+		t.Error("distinct body session ids share one wire id")
+	}
+	if hdr := p.zcodeSessionID(newReq("sess-aaa"), []byte(`{"prompt_cache_key":"kimi-sess-1"}`)); hdr != idA1 {
+		t.Errorf("native session header must outrank body identity: got %q, want %q", hdr, idA1)
 	}
 }
 

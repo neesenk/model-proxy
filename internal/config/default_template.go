@@ -465,6 +465,8 @@ providers:
 #   # Client session-id header allowlist (ordered; first non-empty wins); drives
 #   # the request-log session_id + live /api/events session_id. Default:
 #   # [x-claude-code-session-id, x-session-affinity, x-session-id, x-opencode-session]
+#   # Header-less spec-conforming agents (Codex, Kimi Code) fall back to the
+#   # body fields prompt_cache_key / metadata.user_id / client_metadata.session_id.
 #   # session_headers: [x-claude-code-session-id, x-session-affinity]
 
 # Web admin UI + JSON API (/ui/ + /api/). Enabled by default. Without the
