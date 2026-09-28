@@ -40,8 +40,8 @@ json:                              # format=json:dotted.path → 值(嵌套 map/
   drift_path: env.ANTHROPIC_BASE_URL   # doctor 漂移探针(JSON 路径,期望值为 base_url)
 
 toml:                              # format=toml:文本行编辑(无 TOML decoder)
-  top_keys: {model_provider: '"{{provider_id}}"'}   # 顶层键(值原样写入,字符串自带引号)
-  sections:                        # replace-or-append
+  top_keys: {model_provider: '"{{provider_id}}"'}   # 顶层键(值原样写入,字符串自带引号;语义匹配见下)
+  sections:                        # replace-or-append(语义匹配见下)
     - name: 'model_providers."{{provider_id}}"'
       body: |
         name = "{{display_name}}"
@@ -240,6 +240,16 @@ Catalog）后生效。
   **保留目标文件既有权限位**（这些文件常含真实 API key，硬编码 0644 会把 0600 放宽成全局可读），
   新建文件统一 0600；
 - 渲染幂等：重复 takeover 不产生重复段/键（replace-or-append / key set）；
+- **重接管安全（语义匹配 + 去重）**：客户端会重写自己的配置文件（kimi-cli 把
+  `[providers."model-proxy"]` 归一成 `[providers.model-proxy]`、手工编辑加 `export `
+  前缀），重接管绝不能盲 append。TOML 编辑器（`internal/takeover/tomlkeys.go` 的
+  key-path 解析）把目标名与文件里的 header 都解析成点分 key 路径再比较——引号
+  风格（`"x"`/`'x'`/裸）、括号内空白归一后同一张表只认一个：首个匹配原地替换并
+  归一回模板拼法，后续重复段（历史上坏 append 的残留）全部收敛删除；顶层键同
+  理去重；`also_remove` 与 MCP 陈旧段清理同一语义。注意语义边界：未加引号的点分
+  id（`models.glm-5.3-flash`）在 TOML 里是另一张表，不与引号形式互配。env 编辑器
+  同契约：受管 KEY 的重复行与 `export ` 前缀收敛成单行规范形。doctor 的
+  toml 漂移探针同样按语义找段，客户端改拼法不误报；
 - 漂移探针模板驱动：json 用 `drift_path`，toml 有 `model_provider` top_key 时
   codex 式（选择器 + 段 base_url）否则 kimi 式（首个段 base_url），env 取渲染值
   等于 base_url 的键；无探针信息的自定义模板显示 `(no drift probe)`。

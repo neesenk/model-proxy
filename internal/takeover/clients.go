@@ -236,14 +236,20 @@ func codexModelCatalog(models []ExposedModel) []map[string]any {
 }
 
 // SetTOMLTopKey sets a top-level bare key (placed before any [section]).
-// The match is whitespace-tolerant: a pre-existing `key="x"` line (no spaces
-// around `=`) is replaced in place just like `key = "x"` — matching only the
-// spaced prefix would insert a duplicate key, which TOML rejects with a
-// parse error (bricking the whole client config). The scan stays
-// line-oriented and conservative: only a line whose pre-`=` token is exactly
-// the key (optionally quoted, since TOML treats "key" and key alike)
-// qualifies; a `=` inside a value can never produce that shape.
+// The match is SEMANTIC and whitespace/quoting-tolerant: a pre-existing
+// `key="x"` line, `'key' = "x"`, or a dotted spelling the client normalized
+// differently all replace in place — matching only one exact spelling would
+// insert a duplicate key, which TOML rejects with a parse error (bricking
+// the whole client config). Duplicate occurrences of a managed key (e.g.
+// left behind by an earlier bad append) are collapsed to the single
+// rewritten line. The scan stays line-oriented and conservative: only a line
+// whose pre-`=` token parses to the same key path qualifies; a `=` inside a
+// value can never produce that shape.
 func SetTOMLTopKey(text, key, val string) string {
+	target, ok := parseTOMLKeyPath(key)
+	if !ok {
+		target = []string{key}
+	}
 	lines := strings.Split(text, "\n")
 	firstSection := -1
 	for i, l := range lines {
@@ -253,60 +259,84 @@ func SetTOMLTopKey(text, key, val string) string {
 		}
 	}
 	prefix := key + " = "
-	for i := 0; i < len(lines); i++ {
+	replaced := false
+	out := make([]string, 0, len(lines)+1)
+	for i, l := range lines {
 		if firstSection >= 0 && i >= firstSection {
+			out = append(out, lines[i:]...)
 			break
 		}
-		l := strings.TrimSpace(lines[i])
-		if l == "" || strings.HasPrefix(l, "#") {
+		t := strings.TrimSpace(l)
+		if t == "" || strings.HasPrefix(t, "#") {
+			out = append(out, l)
 			continue
 		}
-		eq := strings.IndexByte(l, '=')
+		eq := strings.IndexByte(t, '=')
 		if eq < 0 {
+			out = append(out, l)
 			continue
 		}
-		k := strings.Trim(strings.TrimSpace(l[:eq]), `"`)
-		if k == key {
-			lines[i] = prefix + val
-			return strings.Join(lines, "\n")
+		parts, ok := parseTOMLKeyPath(strings.TrimSpace(t[:eq]))
+		if ok && equalTOMLKeyPath(parts, target) {
+			if !replaced {
+				out = append(out, prefix+val)
+				replaced = true
+			}
+			// Later duplicates of the same key collapse into the rewrite above.
+			continue
 		}
+		out = append(out, l)
+	}
+	if replaced {
+		return strings.Join(out, "\n")
 	}
 	newLine := prefix + val
 	if firstSection >= 0 {
-		lines = append(lines[:firstSection], append([]string{newLine}, lines[firstSection:]...)...)
+		out = append(out[:firstSection], append([]string{newLine}, out[firstSection:]...)...)
 	} else {
-		lines = append(lines, newLine)
+		out = append(out, newLine)
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(out, "\n")
 }
 
-// ReplaceOrAppendTOMLSection replaces an existing [section] block, or appends a new one.
-// The header must match a whole (trimmed) line — a substring search would also
-// hit the header text embedded in a quoted value (e.g. `x = "[foo]"`) and
-// corrupt the file.
+// ReplaceOrAppendTOMLSection replaces an existing [section] block, or appends
+// a new one. Header matching is SEMANTIC: the target name and each file line
+// are parsed as dotted key paths (quoting style and whitespace collapse), so
+// a client that rewrote `[providers."model-proxy"]` as `[providers.model-proxy]`
+// still matches — an exact-text comparison would miss it and APPEND A
+// DUPLICATE TABLE, which TOML rejects with a parse error. A substring match
+// is never used (it would also hit header text embedded in a quoted value,
+// e.g. `x = "[foo]"`). ALL occurrences are consolidated: the first match is
+// replaced with the new body, later duplicates (e.g. left behind by an
+// earlier bad append) are dropped — re-takeover self-heals instead of
+// stacking copies.
 func ReplaceOrAppendTOMLSection(text, sectionHeader, section string) string {
-	header := "[" + sectionHeader + "]"
-	lines := strings.Split(text, "\n")
-	start := -1
-	for i, l := range lines {
-		if strings.TrimSpace(l) == header {
-			start = i
-			break
-		}
+	target, ok := parseTOMLKeyPath(sectionHeader)
+	if !ok {
+		// Structurally broken template name: keep the legacy exact-match
+		// behavior rather than appending unconditionally.
+		target = []string{sectionHeader}
 	}
-	if start >= 0 {
-		// The old section body runs until the next header line (or EOF).
-		end := len(lines)
-		for i := start + 1; i < len(lines); i++ {
-			if strings.HasPrefix(strings.TrimSpace(lines[i]), "[") {
-				end = i
-				break
-			}
-		}
+	lines := strings.Split(text, "\n")
+	matches := sectionMatchIndices(lines, target)
+	if len(matches) > 0 {
+		body := strings.Split(strings.TrimSpace(section), "\n")
 		out := make([]string, 0, len(lines))
-		out = append(out, lines[:start]...)
-		out = append(out, strings.Split(strings.TrimSpace(section), "\n")...)
-		out = append(out, lines[end:]...)
+		replaced := false
+		for i := 0; i < len(lines); {
+			if matches[i] {
+				end := sectionEnd(lines, i)
+				if !replaced {
+					out = append(out, body...)
+					replaced = true
+				}
+				// Later duplicates of the same table collapse into the rewrite.
+				i = end
+				continue
+			}
+			out = append(out, lines[i])
+			i++
+		}
 		return strings.Join(out, "\n")
 	}
 	if len(text) > 0 && !strings.HasSuffix(text, "\n") {
@@ -316,31 +346,52 @@ func ReplaceOrAppendTOMLSection(text, sectionHeader, section string) string {
 	return text
 }
 
-// removeTOMLSection drops an entire [section] block (header + body up to the
-// next header line or EOF). No-op when the header is absent.
-func removeTOMLSection(text, sectionHeader string) string {
-	header := "[" + sectionHeader + "]"
-	lines := strings.Split(text, "\n")
-	start := -1
+// sectionMatchIndices maps line indices of headers semantically equal to
+// target (plain tables only) for quick lookup while rebuilding the file.
+func sectionMatchIndices(lines []string, target []string) map[int]bool {
+	matches := map[int]bool{}
 	for i, l := range lines {
-		if strings.TrimSpace(l) == header {
-			start = i
-			break
+		parts, isArray, ok := tomlHeaderPath(strings.TrimSpace(l))
+		if ok && !isArray && equalTOMLKeyPath(parts, target) {
+			matches[i] = true
 		}
 	}
-	if start < 0 {
-		return text
-	}
-	end := len(lines)
+	return matches
+}
+
+// sectionEnd returns the exclusive end line of the section starting at
+// start: the next header line (or EOF).
+func sectionEnd(lines []string, start int) int {
 	for i := start + 1; i < len(lines); i++ {
 		if strings.HasPrefix(strings.TrimSpace(lines[i]), "[") {
-			end = i
-			break
+			return i
 		}
 	}
+	return len(lines)
+}
+
+// removeTOMLSection drops every [section] block whose header is semantically
+// equal to sectionHeader (header + body up to the next header line or EOF).
+// No-op when no header matches.
+func removeTOMLSection(text, sectionHeader string) string {
+	target, ok := parseTOMLKeyPath(sectionHeader)
+	if !ok {
+		target = []string{sectionHeader}
+	}
+	lines := strings.Split(text, "\n")
+	matches := sectionMatchIndices(lines, target)
+	if len(matches) == 0 {
+		return text
+	}
 	out := make([]string, 0, len(lines))
-	out = append(out, lines[:start]...)
-	out = append(out, lines[end:]...)
+	for i := 0; i < len(lines); {
+		if matches[i] {
+			i = sectionEnd(lines, i)
+			continue
+		}
+		out = append(out, lines[i])
+		i++
+	}
 	return strings.Join(out, "\n")
 }
 
@@ -353,7 +404,8 @@ func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
 // it fails config validation), so the value is the same conservative default
 // the proxy uses everywhere else, taken from its routing-package owner.
 
-// removeTOMLSectionsWithURL drops every [section] whose name is in the
+// removeTOMLSectionsWithURL drops every [section] whose name is semantically
+// equal (key-path parsing — quoting/whitespace tolerant) to an entry in the
 // generatedSections set AND whose body contains needle (a URL fragment).
 // Used by the mcp takeover writer to clean stale proxy-managed sections
 // before re-rendering the current surface, without touching user-defined
@@ -361,28 +413,48 @@ func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
 // CRLF line endings are normalized to LF so \r does not break header matching.
 func removeTOMLSectionsWithURL(text, needle string, generatedSections map[string]bool) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
+	// Normalize the generated namespace to semantic key paths: the client may
+	// have rewritten our quoted headers (`mcp_servers."x"` → mcp_servers.x),
+	// and a stale proxy section that no longer matches its original spelling
+	// must still be cleaned instead of surviving to shadow the fresh write.
+	// The surface is small (one entry per gateway MCP server), so a linear
+	// scan per header line is fine.
+	targets := make([][]string, 0, len(generatedSections))
+	for name := range generatedSections {
+		if parts, ok := parseTOMLKeyPath(name); ok && len(parts) > 0 {
+			targets = append(targets, parts)
+		}
+	}
 	lines := strings.Split(text, "\n")
 	out := make([]string, 0, len(lines))
 	for i := 0; i < len(lines); {
 		trimmed := strings.TrimSpace(lines[i])
 		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			sectionName := strings.TrimSpace(trimmed[1 : len(trimmed)-1])
-			if generatedSections[sectionName] {
-				// Section runs until the next header line (or EOF).
-				end := len(lines)
-				contains := false
-				for j := i + 1; j < len(lines); j++ {
-					if strings.HasPrefix(strings.TrimSpace(lines[j]), "[") {
-						end = j
+			if parts, isArray, ok := tomlHeaderPath(trimmed); ok && !isArray {
+				matched := false
+				for _, t := range targets {
+					if equalTOMLKeyPath(parts, t) {
+						matched = true
 						break
 					}
-					if strings.Contains(lines[j], needle) {
-						contains = true
-					}
 				}
-				if contains {
-					i = end
-					continue
+				if matched {
+					// Section runs until the next header line (or EOF).
+					end := len(lines)
+					contains := false
+					for j := i + 1; j < len(lines); j++ {
+						if strings.HasPrefix(strings.TrimSpace(lines[j]), "[") {
+							end = j
+							break
+						}
+						if strings.Contains(lines[j], needle) {
+							contains = true
+						}
+					}
+					if contains {
+						i = end
+						continue
+					}
 				}
 			}
 		}

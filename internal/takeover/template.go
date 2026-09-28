@@ -1041,6 +1041,10 @@ func substituteModel(s string, vars map[string]string, ctx renderContext) string
 
 // rewriteEnv patches a KEY=VALUE file, replacing managed keys in place and
 // appending missing ones; unmanaged lines (incl. comments) are untouched.
+// Duplicate occurrences of a managed key collapse into the single rewritten
+// line, and an `export ` prefix on a managed key is tolerated (rewritten to
+// the canonical bare form) — a hand-edited file must not grow duplicate keys
+// on re-takeover.
 func (t *Template) rewriteEnv(ctx renderContext, scope RewriteScope) error {
 	data, err := readFile(t.File)
 	if err != nil && !os.IsNotExist(err) {
@@ -1050,34 +1054,45 @@ func (t *Template) rewriteEnv(ctx renderContext, scope RewriteScope) error {
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
-	remaining := map[string]string{}
+	managed := map[string]string{}
 	for k, v := range t.Env.Set {
-		remaining[k] = ctx.substitute(v)
+		managed[k] = ctx.substitute(v)
 	}
-	for i, l := range lines {
+	written := map[string]bool{}
+	out := make([]string, 0, len(lines)+len(managed))
+	for _, l := range lines {
 		trimmed := strings.TrimSpace(l)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			out = append(out, l)
 			continue
 		}
 		key, _, ok := strings.Cut(trimmed, "=")
 		if !ok {
+			out = append(out, l)
 			continue
 		}
-		key = strings.TrimSpace(key)
-		if val, managed := remaining[key]; managed {
-			lines[i] = key + "=" + val
-			delete(remaining, key)
+		key = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(key), "export "))
+		if val, isManaged := managed[key]; isManaged {
+			if !written[key] {
+				out = append(out, key+"="+val)
+				written[key] = true
+			}
+			// Later duplicates of a managed key collapse into the rewrite above.
+			continue
 		}
+		out = append(out, l)
 	}
 	// Append missing keys in sorted order for determinism.
-	for _, k := range sortedKeys(remaining) {
-		lines = append(lines, k+"="+remaining[k])
+	for _, k := range sortedKeys(managed) {
+		if !written[k] {
+			out = append(out, k+"="+managed[k])
+		}
 	}
-	out := strings.Join(lines, "\n")
-	if out != "" && !strings.HasSuffix(out, "\n") {
-		out += "\n"
+	outStr := strings.Join(out, "\n")
+	if outStr != "" && !strings.HasSuffix(outStr, "\n") {
+		outStr += "\n"
 	}
-	return atomicWriteFile(t.File, []byte(out), preserveMode(t.File, 0o600))
+	return atomicWriteFile(t.File, []byte(outStr), preserveMode(t.File, 0o600))
 }
 
 // BaseURLEndpoint returns the rendered base URL (doctor's drift expectation).
@@ -1205,22 +1220,32 @@ func tomlTopKeyValue(text, key string) (string, bool) {
 	return "", false
 }
 
-// tomlSectionScalar reads a bare scalar key inside one [section] (header is
-// the trimmed [name] line; "" never matches).
+// tomlSectionScalar reads a bare scalar key inside one [section]. The header
+// match is semantic (key-path parsing): a client-rewritten spelling of our
+// header (`[providers.model-proxy]` for `[providers."model-proxy"]`) still
+// resolves, so drift detection reads the real base_url instead of reporting
+// phantom drift on a healthy takeover. "" never matches.
 func tomlSectionScalar(text, section, key string) string {
 	if section == "" {
 		return ""
 	}
-	header := "[" + section + "]"
+	target, ok := parseTOMLKeyPath(section)
+	if !ok {
+		return ""
+	}
 	inSection := false
 	for _, line := range strings.Split(text, "\n") {
 		l := strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(l, "["):
-			inSection = l == header
+			if parts, isArray, ok := tomlHeaderPath(l); ok && !isArray {
+				inSection = equalTOMLKeyPath(parts, target)
+			} else {
+				inSection = false
+			}
 		case inSection && strings.HasPrefix(l, key):
 			if i := strings.Index(l, "="); i >= 0 {
-				return strings.Trim(strings.TrimSpace(l[i+1:]), `"`)
+				return strings.Trim(strings.TrimSpace(l[i+1:]), "\"")
 			}
 		}
 	}
