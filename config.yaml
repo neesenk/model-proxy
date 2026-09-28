@@ -135,7 +135,7 @@ providers:
   # 401/403 rejects the key). Poolable — repeat `login zcode` for multi-account.
   zcode:
     provider_id: zcode
-    priority: 2 # lower = tried first within a tier/quota band
+    priority: 0 # lower = tried first within a tier/quota band
     openai_base_url: https://open.bigmodel.cn/api/paas/v4
     anthropic_base_url: https://open.bigmodel.cn/api/anthropic
     usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit # `usage zcode`: 5h/weekly/monthly quota + token consumption
@@ -272,7 +272,7 @@ providers:
   typesafe:
     provider_id: typesafe
     billing: pay-as-you-go
-    priority: 2
+    priority: 4
     decisions_base_url: https://api.typesafe.ai/v1
     models:
       - jev-latest
@@ -317,7 +317,7 @@ providers:
   # Also a preset: `model-proxy add mimo`.
   mimo:
     provider_id: mimo
-    priority: 2
+    priority: 4
     billing: pay-as-you-go
     openai_base_url: https://api.xiaomimimo.com/v1
     anthropic_base_url: https://api.xiaomimimo.com/anthropic
@@ -375,7 +375,7 @@ providers:
     openai_base_url: https://opencode.ai/zen/go/v1
     anthropic_base_url: https://opencode.ai/zen/go
     provider_id: opencode-go
-    priority: 2
+    priority: 1
     billing: plan
     models:
       - deepseek-flash
@@ -389,7 +389,6 @@ providers:
       - glm-5.3-flash
       - gpt-5.6-luna
       - gpt-6-luna
-      - grok-4.6
       - grok-4.7
       - hy3
       - hy4-preview
@@ -559,9 +558,12 @@ request_log:
   # Client session-id header allowlist (ordered; first non-empty wins). Drives
   # the request-log session_id and the live /api/events session_id. Default:
   # [x-claude-code-session-id, x-session-affinity, x-session-id, x-opencode-session]
-  # Clients that send no session header (Codex) fall back to the body-carried
-  # client_metadata.session_id (Responses-protocol convention) — the derived
-  # id feeds observation + guard session blocks, never the routing sticky key.
+  # Clients that send no session header (Codex, Kimi Code — agents implemented
+  # strictly against the OpenAI/Anthropic specs) fall back to the spec-defined
+  # BODY fields, in order: client_metadata.session_id (Codex Responses),
+  # prompt_cache_key (OpenAI Chat/Responses; Kimi Code), metadata.user_id
+  # (Anthropic Messages; Kimi Code) — the derived id feeds observation + guard
+  # session blocks, never the routing sticky key.
   # session_headers: [x-claude-code-session-id, x-session-affinity]
 # Web admin UI + JSON API (/ui/ + /api/). Enabled by default. Without the
 # optional auth below, listen must stay loopback (enforced at startup);
