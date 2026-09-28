@@ -48,6 +48,7 @@ providers:
     openai_base_url: https://compass.llm.shopee.io/compass-api/v1
     anthropic_base_url: https://compass.llm.shopee.io/compass-api # same base without /v1; proxy keeps the client /v1/messages path
     aqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
+    billing: plan
     # peak_hours: "09:00-18:00"  # optional: route scheduling deprioritizes aqp during its peak window
     headers: # sent on every aqp upstream request (forward + probe), after auth
       x-ccswitch-client: "0.2.7" # mirror AIS Switch's client header (bare app version, verified vs 0.2.1 binary + live log);
@@ -79,6 +80,7 @@ providers:
   codex:
     provider_id: codex
     priority: 2
+    billing: plan
     openai_base_url: https://chatgpt.com/backend-api/codex
     # gpt-5.4 omitted: upstream rejects it for ChatGPT-account Codex access
     # ("The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account").
@@ -97,6 +99,7 @@ providers:
   zhipu:
     provider_id: zhipu
     priority: 1
+    billing: plan
     openai_base_url: https://open.bigmodel.cn/api/paas/v4
     anthropic_base_url: https://open.bigmodel.cn/api/anthropic
     # capabilities:                    # optional: per-model capability declaration for request-aware
@@ -136,6 +139,7 @@ providers:
   zcode:
     provider_id: zcode
     priority: 0 # lower = tried first within a tier/quota band
+    billing: plan
     openai_base_url: https://open.bigmodel.cn/api/paas/v4
     anthropic_base_url: https://open.bigmodel.cn/api/anthropic
     usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit # `usage zcode`: 5h/weekly/monthly quota + token consumption
@@ -241,6 +245,7 @@ providers:
   kimi-code:
     provider_id: kimi-code
     priority: 1
+    billing: plan
     # Model alias: expose k3 under the unified third-party name kimi-k3, so the
     # kimi-k3 route aggregates kimi-code with aqp/volcengine/shopee. Requests are
     # rewritten to the upstream name "k3"; the response's model field is
