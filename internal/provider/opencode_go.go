@@ -96,16 +96,19 @@ func (p *OpenCodeGoProvider) FetchModels() ([]string, error) {
 //     not carry it, and Go's /v1/messages follows the Anthropic Messages wire
 //     (the official wiring is @ai-sdk/anthropic, whose transport always sends
 //     the version). Harmless on the OpenAI paths.
-//   - x-opencode-session: Go's docs ask clients to "send a stable session ID
-//     in x-opencode-session for each conversation so we can optimize routing
-//     and prompt caching". The proxy fronts many client families, and the
-//     forward whitelist already passes their native per-conversation session
-//     headers through (x-claude-code-session-id, x-session-id, user_id) — Go
-//     recognizes some natively, but not every family. Mirroring the first
-//     present native session header into x-opencode-session gives every
-//     client the stable conversation id Go wants, without inventing one
-//     (the value stays the client's own opaque id). No session header →
-//     nothing is set (Go falls back to its own heuristics).
+//   - x-opencode-session: Go REQUIRES a session id on every request —
+//     header-less requests are rejected 400 MissingSessionID ("cannot be
+//     routed efficiently", verified live 2026-09 on /zen/go). The proxy
+//     fronts many client families, and the forward whitelist already passes
+//     their native per-conversation session headers through
+//     (x-claude-code-session-id, x-session-id, user_id). The first present
+//     one is mirrored into x-opencode-session — the client's own opaque id,
+//     never invented. When NO native session header exists (agents that
+//     send none, and the proxy's own probe/test traffic), a per-request
+//     synthesized id ("mp-" + random UUID) keeps the request routable:
+//     there is no conversation key to stay stable across, so a fresh id per
+//     request is the honest representation. An explicit x-opencode-session
+//     from the client always wins.
 func (p *OpenCodeGoProvider) ExtraHeaders(req *http.Request, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
 	if req.Header.Get("x-opencode-session") == "" {
@@ -115,6 +118,12 @@ func (p *OpenCodeGoProvider) ExtraHeaders(req *http.Request, path string) {
 				break
 			}
 		}
+	}
+	// Nothing to mirror (header-less agent or the proxy's own probe): Go
+	// hard-rejects a missing x-opencode-session with 400 MissingSessionID, so
+	// synthesize one instead of sending none.
+	if req.Header.Get("x-opencode-session") == "" {
+		req.Header.Set("x-opencode-session", "mp-"+newRequestID())
 	}
 }
 

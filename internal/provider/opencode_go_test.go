@@ -166,7 +166,8 @@ func TestOpenCodeGoProbeRequest_DefaultOpenAIShape(t *testing.T) {
 // mirrors the client's native session header into x-opencode-session (Go's
 // docs ask for a stable per-conversation id; the forward whitelist already
 // passes the native headers through). An explicit x-opencode-session from the
-// client wins; no session header → none is invented.
+// client wins; no session header → a per-request mp-<uuid> is synthesized
+// (upstream 400s MissingSessionID otherwise).
 func TestOpenCodeGoExtraHeaders_SessionMirror(t *testing.T) {
 	p := newTestOpenCodeGo(t, nil)
 
@@ -198,11 +199,21 @@ func TestOpenCodeGoExtraHeaders_SessionMirror(t *testing.T) {
 		t.Errorf("x-opencode-session = %q, want the client's own value preserved", got)
 	}
 
-	// No session header anywhere → none invented.
+	// No session header anywhere → a per-request synthesized id keeps the
+	// request routable (upstream 400s MissingSessionID otherwise): marked with
+	// the mp- prefix and fresh on every call (no conversation key to be stable
+	// across).
 	req4, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
 	p.ExtraHeaders(req4, "/v1/messages")
-	if got := req4.Header.Get("x-opencode-session"); got != "" {
-		t.Errorf("x-opencode-session = %q, want empty (nothing to mirror)", got)
+	sess4 := req4.Header.Get("x-opencode-session")
+	if sess4 == "" || !strings.HasPrefix(sess4, "mp-") {
+		t.Errorf("x-opencode-session = %q, want synthesized mp-<uuid> for header-less agents", sess4)
+	}
+	req5, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/chat/completions", nil)
+	p.ExtraHeaders(req5, "/chat/completions")
+	sess5 := req5.Header.Get("x-opencode-session")
+	if sess5 == "" || sess5 == sess4 {
+		t.Errorf("x-opencode-session = %q, want a fresh synthesized id per request (!= %q)", sess5, sess4)
 	}
 }
 

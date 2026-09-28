@@ -366,7 +366,9 @@ providers:
   # per-model monthly dollar amounts ($15/$30/$60 tiers) split into windows
   # (5h=20%, weekly=50%, monthly=100%); console-only (no public usage API;
   # ExtraHeaders mirrors the client session header into x-opencode-session
-  # for Go's routing/prompt-cache affinity). /models is public, so login
+  # for Go's routing/prompt-cache affinity; agents without a session header
+  # get a synthesized per-request mp-<uuid> — upstream 400s MissingSessionID
+  # otherwise). /models is public, so login
   # validation cannot reject bad keys (a wrong key surfaces at first request
   # as 401). Poolable (repeat `login`). Also a preset: `model-proxy add opencode-go`.
   opencode-go:
