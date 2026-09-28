@@ -424,8 +424,9 @@ function updateRequestsHash(push) {
 }
 
 // syncRequestsFreeControls pushes the filter state into the free-form
-// controls (session/provider/model inputs, errors checkbox, shadow select).
-// The agent select is repainted by renderRequestSelectors, but these four
+// controls (session/provider/model inputs, errors checkbox, shadow select),
+// re-syncing each ✕ affordance (programmatic sets fire no events). The
+// agent select is repainted by renderRequestSelectors, but these four
 // hold their DOM value across re-renders — after a hash-driven filter change
 // (back/forward) they must follow, or the next Refresh would read the stale
 // values back into the filter.
@@ -436,9 +437,15 @@ function syncRequestsFreeControls() {
     syncClearable(s);
   }
   const p = document.getElementById('req-provider');
-  if (p) p.value = requestsFilter.provider;
+  if (p) {
+    p.value = requestsFilter.provider;
+    syncClearable(p);
+  }
   const m = document.getElementById('req-model');
-  if (m) m.value = requestsFilter.model;
+  if (m) {
+    m.value = requestsFilter.model;
+    syncClearable(m);
+  }
   const e = document.getElementById('req-errors');
   if (e) e.checked = !!requestsFilter.errors;
   requestsFilter.shadow = '';
@@ -1092,7 +1099,10 @@ function mountLogPage(page, query) {
       // must clear the DISPLAYED text too (the select's option repaint used
       // to do this implicitly).
       const sessionInput = document.getElementById('req-session');
-      if (sessionInput) sessionInput.value = '';
+      if (sessionInput) {
+        sessionInput.value = '';
+        syncClearable(sessionInput);
+      }
     }
     renderRequestSelectors(combos);
     refresh();
@@ -1113,7 +1123,10 @@ function mountLogPage(page, query) {
     const next = linkedModels(provider, combos.facetState.providerModels, {});
     combos.modelOptions.splice(0, combos.modelOptions.length, ...next);
     const modelInput = document.getElementById('req-model');
-    if (modelInput && modelInput.value.trim() && !next.includes(modelInput.value.trim())) modelInput.value = '';
+    if (modelInput && modelInput.value.trim() && !next.includes(modelInput.value.trim())) {
+      modelInput.value = '';
+      syncClearable(modelInput);
+    }
     refresh();
   };
   document.getElementById('req-refresh').onclick = refresh;
@@ -1163,14 +1176,20 @@ function scheduleFormRestoreGuard() {
         const st = logPageState[page];
         if (st) {
           const sel = document.getElementById('req-session');
-          if (sel && sel.value !== st.filters.session) sel.value = st.filters.session;
+          if (sel && sel.value !== st.filters.session) {
+            sel.value = st.filters.session;
+            syncClearable(sel);
+          }
           const agent = document.getElementById('req-agent');
           if (agent && agent.value !== st.filters.agent) agent.value = st.filters.agent;
         }
       } else {
         const S = livePageState[page];
         const sel = document.getElementById('live-session');
-        if (S && sel && sel.value !== S.session) sel.value = S.session;
+        if (S && sel && sel.value !== S.session) {
+          sel.value = S.session;
+          syncClearable(sel);
+        }
       }
     } else if (tab === 'security') {
       // Chrome's same-document form restore rolls an interacted select back
@@ -1372,6 +1391,10 @@ function attachCombo(input, options, onSelect) {
       option.addEventListener('mousedown', (event) => {
         event.preventDefault();
         input.value = option.dataset.value;
+        // Programmatic set fires no input/change event — re-sync the ✕
+        // affordance now (leaving it to the next mount made the ✕ appear
+        // only after switching pages away and back).
+        syncClearable(input);
         close();
         onSelect();
       });
@@ -1401,6 +1424,7 @@ function attachCombo(input, options, onSelect) {
       if (!menu.hidden && active >= 0 && items[active]) {
         event.preventDefault();
         input.value = items[active].dataset.value;
+        syncClearable(input);
       }
       close();
       onSelect();
@@ -1922,6 +1946,17 @@ function reqRowNode(v, i) {
       requestsFilter.session = session;
       const allowed = linkedAgents(requestsFilter.session, v.combos.sessions, v.combos.facetState.agents);
       if (requestsFilter.agent && !allowed.includes(requestsFilter.agent)) requestsFilter.agent = '';
+      // Mirror the pick into the free-form session control (the dropdown
+      // mirroring onLiveSessionChange does for the Live page): the hash
+      // write below is a pushState — no hashchange fires, so applyLogQuery's
+      // syncRequestsFreeControls never runs — and renderRequestSelectors
+      // deliberately never touches the input's typed value. Without this
+      // the table filtered to the session while the box stayed empty.
+      const sessionInput = document.getElementById('req-session');
+      if (sessionInput) {
+        sessionInput.value = session;
+        syncClearable(sessionInput);
+      }
       updateRequestsHash(true); // session drill is navigation: Back returns to the list
       renderRequestSelectors(v.combos);
       loadRequests(v.combos);

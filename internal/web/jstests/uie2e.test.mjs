@@ -302,6 +302,16 @@ test('combobox popup opens, picks option, applies filter (浮层 + 下拉)', asy
   await ctx.waitFor('popup closed after pick', () => ctx.ev(
     `!document.querySelector('.combo-menu[data-popup]:not([hidden])')`));
   assert.equal(await ctx.ev(`document.getElementById('req-provider').value`), 'dummy');
+  // 回归（选中后 ✕ 必须立即可见）：combobox 的点选是程序性赋值
+  // （input.value = …，不派发 input/change）——修复前 .has-text 只在下一次
+  // 重新挂载时由 attachClearable 的初始 sync 补上，表现为“切页再切回 ✕
+  // 才出现”。现在 attachCombo 在两条选中路径（点选 + Enter 激活项）后立即
+  // syncClearable。
+  await ctx.waitFor('provider ✕ visible right after pick', () => ctx.ev(`(() => {
+    const host = document.getElementById('req-provider').closest('.clearable');
+    return host.classList.contains('has-text')
+      && host.querySelector('.clear-x').getBoundingClientRect().width > 0;
+  })()`));
   await ctx.waitFor('filtered rows still match', async () => {
     await ctx.ev(`document.getElementById('req-refresh')?.click()`);
     return ctx.ev(`document.querySelectorAll('#req-table tbody tr:not(.req-spacer)').length >= 1`);
@@ -402,6 +412,26 @@ test('suggestion-dropdown inputs and filter selects expose the inline ✕ clear 
     `!document.getElementById('req-provider').closest('.clearable').classList.contains('has-text')`));
   assert.equal(await ctx.ev(
     `document.activeElement === document.getElementById('req-provider')`), true, 'clear keeps focus on the input');
+
+  // Enter 选中激活项与点选同为程序性赋值——✕ 也必须立即出现（同上回归）。
+  await ctx.ev(`document.getElementById('req-provider').click()`);
+  await ctx.waitFor('combo menu open for Enter pick', () => ctx.ev(
+    `!!document.querySelector('.combo-menu[data-popup]:not([hidden]) .combo-option')`));
+  await ctx.ev(`document.getElementById('req-provider')
+    .dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }))`);
+  await ctx.ev(`document.getElementById('req-provider')
+    .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))`);
+  await ctx.waitFor('provider ✕ visible after Enter pick', () => ctx.ev(`(() => {
+    const i = document.getElementById('req-provider');
+    const host = i.closest('.clearable');
+    return i.value.length > 0 && host.classList.contains('has-text')
+      && host.querySelector('.clear-x').getBoundingClientRect().width > 0;
+  })()`));
+  // 还原终态：清掉刚提交的 provider 过滤——本测试原本以无过滤收尾，后续
+  // 路由/导航族对裸 segment 的精确 hash 断言不欢迎残留的 provider=。
+  await clickClearX('req-provider');
+  await ctx.waitFor('provider re-cleared (suite hygiene)', () => ctx.ev(
+    `document.getElementById('req-provider').value === '' && !location.hash.includes('provider=')`));
 
   // Datalist (Analytics provider): same affordance, commit lands in
   // localStorage via the input's change handler.
@@ -1360,10 +1390,19 @@ test('Log 页 session 下钻后浏览器后退回到未过滤列表（model_all 
     await ctx.ev(`document.getElementById('req-refresh')?.click()`);
     return ctx.ev(`!!document.querySelector('#req-table tbody tr:not(.req-spacer) .session-link')`);
   }, 20000);
+  const drillSess = await ctx.ev(`document.querySelector('#req-table tbody tr:not(.req-spacer) .session-link').dataset.session`);
   await ctx.ev(`document.querySelector('#req-table tbody tr:not(.req-spacer) .session-link').click()`);
   await ctx.waitFor('model_all session drilled', () => ctx.ev(`(() => {
     const h = location.hash;
     return h.startsWith('#requests/model_all') && h.includes('session=');
+  })()`));
+  // 回归：行点击下钻后 session 选择框必须镜像出所选 id（含 ✕）。下钻的
+  // hash 写入是 pushState（不触发 hashchange → applyLogQuery 的
+  // syncRequestsFreeControls 不跑），修复前表格已过滤到该会话而输入框仍空。
+  await ctx.waitFor('session input mirrors the row drill', () => ctx.ev(`(() => {
+    const s = document.getElementById('req-session');
+    return !!s && s.value === ${JSON.stringify(drillSess)}
+      && s.closest('.clearable').classList.contains('has-text');
   })()`));
   await ctx.ev(`history.back()`);
   await ctx.waitFor('back returns to unfiltered model_all', () => ctx.ev(`(() => {
