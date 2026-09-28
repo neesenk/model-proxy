@@ -98,6 +98,16 @@ var modelRejectionPhrases = []string{
 	// these entries the probe misreads the 400 as a shape dispute (yes).
 	"model not supported",
 	"not supported by this endpoint",
+	// OpenCode Go (live 2026-09): per-model protocol enforcement rejects a
+	// wrong-leg request with 400 {"type":"ModelProtocolUnsupported","message":
+	// "Model does not support this protocol."}. Without these entries the
+	// misread poisons the model matrix in the dangerous direction — every leg
+	// concludes yes, ResolveModel passes the client protocol through, and
+	// forward draws the same 400 the probe just saw. The code and the message
+	// both name the protocol explicitly, so they cannot collide with shape
+	// disputes (which never mention protocol).
+	"modelprotocolunsupported",
+	"does not support this protocol",
 	"unknown model",
 	"no such model",
 	"not supported with this model",

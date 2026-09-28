@@ -187,6 +187,123 @@ func TestCallableRetryFailureSurfacesRetryReason(t *testing.T) {
 	}
 }
 
+// Cross-leg fallback: OpenCode Go-style gateways enforce PER-MODEL protocols
+// (a chat-only model hard-rejects /v1/messages with 400 ModelProtocolUnsupported).
+// Callable must retry the remaining configured legs and report the model
+// callable on the leg that answers; any OTHER failure keeps the single-probe
+// semantics (auth errors never trigger fallback).
+func TestCallableProtocolLegFallback_AnthropicPrimaryToChat(t *testing.T) {
+	var order []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		order = append(order, r.URL.Path)
+		switch r.URL.Path {
+		case "/v1/messages":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"ModelProtocolUnsupported","message":"Model does not support this protocol."}}`))
+		case "/chat/completions":
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected probe path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	ok, status, reason := Callable(context.Background(), srv.Client(),
+		configdomain.Provider{OpenAIBaseURL: srv.URL, AnthropicBaseURL: srv.URL}, stubImpl{}, "glm-5.3-flash")
+	if !ok || status != 200 || reason != "" {
+		t.Fatalf("Callable = %v %d %q, want chat-leg success", ok, status, reason)
+	}
+	if len(order) != 2 || order[0] != "/v1/messages" || order[1] != "/chat/completions" {
+		t.Errorf("probe order = %v, want anthropic primary then chat fallback", order)
+	}
+}
+
+// Fallback walks to the responses leg when chat also draws the rejection
+// (grok-style responses-only model).
+func TestCallableProtocolLegFallback_ToResponses(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/responses" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"code":"ModelProtocolUnsupported","message":"Model does not support this protocol."}}`))
+	}))
+	defer srv.Close()
+	ok, status, reason := Callable(context.Background(), srv.Client(),
+		configdomain.Provider{OpenAIBaseURL: srv.URL, AnthropicBaseURL: srv.URL}, stubImpl{}, "grok-4.6")
+	if !ok || status != 200 || reason != "" {
+		t.Fatalf("Callable = %v %d %q, want responses-leg success", ok, status, reason)
+	}
+}
+
+// All legs reject the model's protocol: report the failure (last leg's
+// outcome) after exhausting the fallbacks — never a false positive.
+func TestCallableProtocolLegFallback_AllUnsupported(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"type":"ModelProtocolUnsupported","message":"Model does not support this protocol."}}`))
+	}))
+	defer srv.Close()
+	ok, status, reason := Callable(context.Background(), srv.Client(),
+		configdomain.Provider{OpenAIBaseURL: srv.URL, AnthropicBaseURL: srv.URL}, stubImpl{}, "m")
+	if ok || status != 400 {
+		t.Fatalf("Callable = %v %d, want dropped after exhausting legs", ok, status)
+	}
+	if calls != 3 {
+		t.Errorf("calls = %d, want 3 (anthropic + chat + responses)", calls)
+	}
+	if !strings.Contains(reason, "ModelProtocolUnsupported") {
+		t.Errorf("reason = %q, want the protocol rejection surfaced", reason)
+	}
+}
+
+// Auth failures (and any non-protocol failure) must NOT trigger the fallback:
+// a 401 on the primary leg is reported as-is, single probe.
+func TestCallableNoFallbackOnAuthError(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"type":"ModelProtocolUnsupported","message":"would be dangerous to fall back"}}`))
+	}))
+	defer srv.Close()
+	ok, status, _ := Callable(context.Background(), srv.Client(),
+		configdomain.Provider{OpenAIBaseURL: srv.URL, AnthropicBaseURL: srv.URL}, stubImpl{}, "m")
+	if ok || status != 401 {
+		t.Fatalf("Callable = %v %d, want the primary leg's 401", ok, status)
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1 (non-2xx non-protocol-rejection must not fall back)", calls)
+	}
+}
+
+// OpenAI-base primary (no anthropic base): the impl's chat probe is primary
+// and the responses leg is the fallback (mirrors the anthropic-primary
+// branch for openai-only gateways).
+func TestCallableProtocolLegFallback_OpenAIPrimaryToResponses(t *testing.T) {
+	var order []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		order = append(order, r.URL.Path)
+		if r.URL.Path == "/responses" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"code":"ModelProtocolUnsupported","message":"Model does not support this protocol."}}`))
+	}))
+	defer srv.Close()
+	ok, status, _ := Callable(context.Background(), srv.Client(),
+		configdomain.Provider{OpenAIBaseURL: srv.URL}, stubImpl{}, "m")
+	if !ok || status != 200 {
+		t.Fatalf("Callable = %v %d, want responses fallback success", ok, status)
+	}
+	if len(order) != 2 || order[0] != "/chat/completions" || order[1] != "/responses" {
+		t.Errorf("probe order = %v, want chat primary then responses fallback", order)
+	}
+}
+
 func TestStripRequestID(t *testing.T) {
 	if got := StripRequestID("boom. Request id: deadbeef"); got != "boom." {
 		t.Errorf("got %q", got)

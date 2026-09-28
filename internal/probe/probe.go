@@ -39,43 +39,85 @@ type Result struct {
 // build/auth/network error is reported as
 // ok=false with reason set (status 0) — such a model is conservatively
 // dropped by callers that filter model lists.
+//
+// Legs: the FIRST leg mirrors forward's base selection — the anthropic base
+// + /v1/messages when configured (the Claude Code path), else the impl's own
+// probe shape on the openai base (pure-decisions providers probe their
+// decisions base with the impl's shape). Gateways exist that enforce
+// PER-MODEL protocols (OpenCode Go, live 2026-09: a chat-only model
+// hard-rejects /v1/messages and a responses-only model hard-rejects
+// /chat/completions with 400 ModelProtocolUnsupported), so a leg drawing
+// exactly that rejection retries the remaining configured legs — the model
+// may be callable over another protocol. Any other failure (auth, rate
+// limit, other 4xx, 5xx, network) keeps the single-probe semantics: no
+// fallback, the failed leg's outcome is reported.
 func Callable(ctx context.Context, client *http.Client, prov configdomain.Provider, impl provider.Provider, modelID string) (ok bool, status int, reason string) {
 	// Ask the provider implementation for its probe request shape (path + body).
 	// Each provider owns its probe path/body in its own file.
 	pr := impl.ProbeRequest(modelID)
 
-	// Select the base URL by protocol, mirroring forward. A provider with an
-	// anthropic_base_url is probed over the anthropic protocol (its primary chat
-	// path for Claude Code); otherwise the openai protocol. A pure-decisions
-	// provider (typesafe: no chat bases) is probed on its decisions base with
-	// the impl's own ProbeRequest shape (System One), never rewritten.
-	baseURL := prov.OpenAIBaseURL
-	path, body := pr.Path, pr.Body
+	// Ordered probe legs: primary first (mirrors forward's base selection),
+	// then — only reached on a per-model protocol rejection — the remaining
+	// configured legs.
+	type legReq struct {
+		base, path string
+		body       []byte
+	}
+	var legs []legReq
 	switch {
 	case prov.AnthropicBaseURL != "":
-		baseURL = prov.AnthropicBaseURL
 		// The impl's ProbeRequest may be openai-shaped; on the anthropic base
 		// the probe must speak anthropic (path + body), otherwise strict bases
 		// 404 (deepseek) and lenient ones get tested with the wrong protocol
 		// shape (zhipu's gateway accepts /chat/completions on the anthropic
 		// base).
-		path = "/v1/messages"
-		body = provider.AnthropicProbeBody(modelID)
-	case baseURL == "" && prov.DecisionsBaseURL != "":
-		baseURL = prov.DecisionsBaseURL
+		legs = append(legs, legReq{prov.AnthropicBaseURL, "/v1/messages", provider.AnthropicProbeBody(modelID)})
+		if prov.OpenAIBaseURL != "" {
+			legs = append(legs,
+				legReq{prov.OpenAIBaseURL, "/chat/completions", provider.OpenAIProbeBody(modelID)},
+				legReq{prov.OpenAIBaseURL, "/responses", provider.ResponsesProbeBody(modelID)})
+		}
+	case prov.OpenAIBaseURL != "":
+		legs = append(legs, legReq{prov.OpenAIBaseURL, pr.Path, pr.Body})
+		// Cross-leg fallback for openai-base primaries too: only the canonical
+		// chat/responses shapes have a generic sibling body (exotic impl
+		// dialects keep their single leg — nothing generic to fall back to).
+		switch pr.Path {
+		case "/chat/completions":
+			legs = append(legs, legReq{prov.OpenAIBaseURL, "/responses", provider.ResponsesProbeBody(modelID)})
+		case "/responses":
+			legs = append(legs, legReq{prov.OpenAIBaseURL, "/chat/completions", provider.OpenAIProbeBody(modelID)})
+		}
+	case prov.DecisionsBaseURL != "":
+		// A pure-decisions provider (typesafe: no chat bases) is probed on its
+		// decisions base with the impl's own ProbeRequest shape (System One),
+		// never rewritten.
+		legs = append(legs, legReq{prov.DecisionsBaseURL, pr.Path, pr.Body})
+	default:
+		// No base at all: keep the historic request shape so Do surfaces the
+		// build error exactly as before.
+		legs = append(legs, legReq{"", pr.Path, pr.Body})
 	}
 
-	rep, err := doCallability(ctx, client, prov, impl, Request{
-		BaseURL: baseURL,
-		Method:  pr.Method,
-		Path:    path,
-		Body:    body,
-	})
-	if err != nil {
-		return false, 0, err.Error()
-	}
-	if rep.Status >= 200 && rep.Status < 300 {
-		return true, rep.Status, ""
+	var rep Reply
+	for _, leg := range legs {
+		var err error
+		rep, err = doCallability(ctx, client, prov, impl, Request{
+			BaseURL: leg.base,
+			Method:  pr.Method,
+			Path:    leg.path,
+			Body:    leg.body,
+		})
+		if err != nil {
+			return false, 0, err.Error()
+		}
+		if rep.Status >= 200 && rep.Status < 300 {
+			return true, rep.Status, ""
+		}
+		if rep.Status != http.StatusBadRequest || !modelProtocolUnsupported(rep.Body) {
+			break
+		}
+		// Per-model protocol rejection: the model lives on another leg — try it.
 	}
 	return false, rep.Status, reasonForBody(rep.Body)
 }
@@ -85,6 +127,27 @@ func Exchange(ctx context.Context, client *http.Client, prov configdomain.Provid
 	start := time.Now()
 	ok, status, r := Callable(ctx, client, prov, impl, modelID)
 	return Result{OK: ok, Status: status, Reason: r, Latency: time.Since(start)}
+}
+
+// modelProtocolUnsupported reports whether an upstream error body is the
+// per-model protocol rejection: a definitive statement that the model is
+// served on a DIFFERENT protocol, not a request error. OpenCode Go returns
+// {"type":"error","error":{"type":"ModelProtocolUnsupported",...}} (live
+// 2026-09); the code field is accepted too for gateways that mirror the
+// marker there. Only a 400 carrying this exact marker triggers Callable's
+// cross-leg fallback (the status gate lives at the call site) — any other
+// status or body keeps single-probe semantics.
+func modelProtocolUnsupported(body []byte) bool {
+	var ej struct {
+		Error *struct {
+			Code string `json:"code"`
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &ej) != nil || ej.Error == nil {
+		return false
+	}
+	return ej.Error.Code == "ModelProtocolUnsupported" || ej.Error.Type == "ModelProtocolUnsupported"
 }
 
 // Reason extracts a short "code: message" from an OpenAI-style error body,

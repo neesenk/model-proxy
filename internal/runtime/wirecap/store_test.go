@@ -168,6 +168,12 @@ func TestClassifyModelStatus(t *testing.T) {
 		{"400 streaming not supported is not model denial", true, 400, nil, `Streaming is not supported for this plan tier`, Yes},
 		{"400 parameter not supported is shape dispute", true, 400, nil, `Unsupported parameter: 'temperature' is not supported`, Yes},
 		{"400 tools not supported for model on leg", true, 400, nil, `Function tools with reasoning_effort are not supported for gpt-5.6-luna in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.`, No},
+		// OpenCode Go per-model protocol enforcement (live 2026-09): a
+		// wrong-leg 400 must conclude No — reading it as a shape-dispute yes
+		// poisons every leg to yes and ResolveModel passes the client protocol
+		// straight through to the same 400.
+		{"400 model protocol unsupported (type marker)", true, 400, nil, `{"type":"error","error":{"type":"ModelProtocolUnsupported","message":"Model does not support this protocol."}}`, No},
+		{"400 model protocol unsupported (code marker)", true, 400, nil, `{"error":{"code":"ModelProtocolUnsupported","message":"Model does not support this protocol."}}`, No},
 		{"401 auth", true, 401, nil, "", Unknown},
 		{"429 quota", true, 429, nil, "", Unknown},
 		{"429 rate wording stays unknown", true, 429, nil, `{"error":{"code":"1302","message":"Concurrency limit reached / 当前API调用次数超出限额"}}`, Unknown},
@@ -358,6 +364,10 @@ func TestClassifyProviderStatus(t *testing.T) {
 		// v3 additions — the shopee envelope that used to read as a
 		// shape-dispute yes (the false-positive that motivated v3).
 		{"400 retcode not supported by this endpoint", 400, nil, `{"retcode":40403,"message":"Model not supported by this endpoint"}`, No},
+		// OpenCode Go per-model protocol rejection: the provider probe model
+		// cannot use this leg — same rule as the aqp tool-rejection precedent
+		// (No with negativeTTL self-heal, not a yes).
+		{"400 model protocol unsupported", 400, nil, `{"type":"error","error":{"type":"ModelProtocolUnsupported","message":"Model does not support this protocol."}}`, No},
 		{"400 streaming not supported stays yes", 400, nil, `Streaming is not supported for this plan tier`, Yes},
 		{"401", 401, nil, "", Yes},
 		{"500", 500, nil, "", Unknown},
