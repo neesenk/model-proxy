@@ -37,12 +37,11 @@
 | `confirmations = 2`（连续 2 次升级判决才 latch） | `escalation.consecutive: 2` |
 | latch 后跳过判定直达强档 | latch 优先级高于 selector/bands |
 | judge 超时/报错 fail-open，不清空 streak | 判定 fail-open |
-| 会话级 streak（`x-switchyard-session-id`） | route 全局 latch + dwell |
+| 会话级 streak（`x-switchyard-session-id`） | 会话级 latch（按 `x-claude-code-session-id` 索引）+ dwell |
 
-这是独立团队做出的几乎相同的设计，说明该形状是收敛解。两个值得借鉴的差异：
+这是独立团队做出的几乎相同的设计，说明该形状是收敛解。一个值得借鉴的差异：
 
-1. **latch 是会话级而非 route 全局级**——全局 latch 会让单个坏会话把整条 route 抬到贵档；多用户场景应考虑会话维度。
-2. **判定对象是"已完成轮次的输出质量"**（卡住/循环/漂移），而不是只看 infra 错误。综述的级联章节同样强调响应级信号信息量远大于纯查询信号。
+1. **判定对象是"已完成轮次的输出质量"**（卡住/循环/漂移），而不是只看 infra 错误。综述的级联章节同样强调响应级信号信息量远大于纯查询信号。
 
 ## 3. 逐层对照我们的设计
 
@@ -50,13 +49,13 @@
 |---|---|---|
 | bands（follow_up / estimated_tokens 规则） | difficulty-aware + heuristic 档 | 成本为零的第一层，合理；规则准确率天花板低，文献中普遍被轻量分类器取代 |
 | selector（jev 生成前判定） | Arch-Router 式 LLM-as-judge | 逐请求 LLM 判定是**最贵的路由器形态**；先 shadow 验证再 enforce 的顺序正确；远期可考虑 BERT/kNN 级廉价分类器 |
-| escalation + latch（连续坏信号→锁档，dwell） | Switchyard escalation router | 收敛解，逐点重合；信号维度和 latch 粒度是差距（见 §4） |
+| escalation + latch（连续坏信号→锁档，dwell） | Switchyard escalation router | 收敛解，逐点重合（含会话级粒度）；信号维度是差距（见 §4） |
 | grades（flash/pro 档位池，选择/调度分离） | RouteLLM strong/weak 及 N 路推广 | 一致：路由决定能力档，调度解决档内健康与成本 |
 
 ## 4. 文献指出的三个真实短板
 
 1. **判定器缺模型能力画像**。IRT-Router/ICL-Router/SCOPE/RouteLLM 都给路由器喂模型侧信息（能力向量、行为指纹、成对胜率）。我们的 selector 只有 candidates 的 rubric 文本，同模型跨 provider 无区分度，限制了判定准确率上限。
-2. **升级信号只看 infra 错误**。`bad_signals` 目前只有 `upstream_error`；Switchyard 判的是轨迹质量（卡住/循环/漂移）。需要补"空 200 / 重复 turn / 会话内连续重试"等质量信号。
+2. **升级信号仍以 infra 错误为主**。`bad_signals` 现为闭集 `{upstream_error, empty_ok, repeat_turn}`（"空 200 / 重复 turn"已补）；Switchyard 判的是轨迹质量（卡住/循环/漂移），"会话内连续重试"等更丰富的质量信号仍缺。
 3. **没有反馈闭环，准确性不可测**。没有对账数据，selector 的准确率无法测量、只能凭感觉调参。bandit 式在线学习（PILOT/MixLLM）是远期方向，但前提是先建立标签体系和足够样本量。
 
 ## 5. 对路线图的结论

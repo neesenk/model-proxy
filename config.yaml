@@ -373,9 +373,9 @@ providers:
   # ExtraHeaders mirrors the client session header into x-opencode-session
   # for Go's routing/prompt-cache affinity; agents without a session header
   # get a synthesized per-request mp-<uuid> — upstream 400s MissingSessionID
-  # otherwise). /models is public, so login
-  # validation cannot reject bad keys (a wrong key surfaces at first request
-  # as 401). Poolable (repeat `login`). Also a preset: `model-proxy add opencode-go`.
+  # otherwise). /models is public, so login validates the key with one minimal
+  # real chat/completions request instead (bad key -> 401 -> rejected at login).
+  # Poolable (repeat `login`). Also a preset: `model-proxy add opencode-go`.
   opencode-go:
     openai_base_url: https://opencode.ai/zen/go/v1
     anthropic_base_url: https://opencode.ai/zen/go
@@ -492,8 +492,9 @@ routes:
 #       - when: {estimated_tokens_min: 60000}
 #         grade: strong
 #     # escalation: session-level latch to a stronger target/grade after
-#     # consecutive bad upstream outcomes (upstream_error is the only supported
-#     # signal). Use grade: <name> for graded policies, target: otherwise.
+#     # consecutive bad signals. BadSignals is the closed set
+#     # {upstream_error, empty_ok, repeat_turn}; default is [upstream_error].
+#     # Use grade: <name> for graded policies, target: otherwise.
 #     escalation:
 #       bad_signals: [upstream_error]
 #       consecutive: 2
@@ -510,8 +511,10 @@ routes:
 #       confidence: 0.55
 #       timeout: 800ms
 #     # eval: L2 pairwise shadow evaluation for graded routes. The judge model
-#     # must declare protocol: decisions. sample_rate is capped at 0.5; pair can
-#     # be "opposite" (next grade in declaration order) or "grade:<name>".
+#     # must declare protocol: decisions. sample_rate is validated to [0, 0.5]
+#     # (out-of-range is a config error); 0 or omitted falls back to the
+#     # default 0.05. pair can be "opposite" (next grade in declaration order)
+#     # or "grade:<name>".
 #     eval:
 #       sample_rate: 0.05
 #       pair: opposite

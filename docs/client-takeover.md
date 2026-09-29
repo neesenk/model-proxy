@@ -185,10 +185,10 @@ UUID，代理据此填请求日志 `session_id` 与 live 事件 `session_id`（�
 
 **无会话头客户端的归因（spec body 字段）**：严格按 OpenAI/Anthropic API spec
 实现的 agent（Kimi Code、Codex）不发自定义会话头，而是把稳定会话 id 放在
-请求体 spec 字段里——OpenAI Chat/Responses 的 `prompt_cache_key`（Moonshot
+请求体 spec 字段里——Codex Responses 的 `client_metadata.session_id`、
+OpenAI Chat/Responses 的 `prompt_cache_key`（Moonshot
 文档：coding agent 传 session id，会话恢复后保持不变）、Anthropic Messages
-的 `metadata.user_id`、Codex Responses 的 `client_metadata.session_id`
-（MoonshotAI/kimi-code#3506 开发者确认）。代理在 `session_headers` 允许列表
+的 `metadata.user_id`（MoonshotAI/kimi-code#3506 开发者确认）。代理在 `session_headers` 允许列表
 全空时按此优先级提取（`protocol.SessionIDFromBody`）：takeover 后的 kimi
 请求无需任何配置即获得请求日志/live 事件的会话归因；需要会话亲和头的
 上游（opencode-go 的 `x-opencode-session`、zcode 的 `X-Session-Id`）同样以

@@ -422,6 +422,15 @@ providers:
 #       mode: shadow
 #       confidence: 0.55
 #       timeout: 800ms
+#     # eval: L2 pairwise shadow evaluation for graded routes. The judge model
+#     # must declare protocol: decisions. sample_rate is validated to [0, 0.5]
+#     # (out-of-range is a config error); 0 or omitted falls back to the
+#     # default 0.05. pair can be "opposite" (next grade in declaration order)
+#     # or "grade:<name>".
+#     eval:
+#       sample_rate: 0.05
+#       pair: opposite
+#       judge: {provider: typesafe, model: jev-1.13, protocol: decisions}
 
 # Scheduling: failover health (circuit breaker, rate-limit skip) + sticky routing.
 # Every field has a code default (owned by internal/config), so this entire

@@ -498,8 +498,8 @@ type EvalConfig struct {
 	Judge      RouteTarget `yaml:"judge"`
 }
 
-// SampleRateValue returns the effective sample rate. The default is 0.05;
-// validation clamps the configured value to [0, 0.5].
+// SampleRateValue returns the effective sample rate. Validation rejects
+// values outside [0, 0.5]; zero or negative falls back to the default 0.05.
 func (e *EvalConfig) SampleRateValue() float64 {
 	if e == nil {
 		return 0.05
