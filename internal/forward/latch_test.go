@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,14 +16,14 @@ import (
 
 func TestApplyRouteLatchActive(t *testing.T) {
 	state := &fakeRouteState{latch: map[string]Latch{
-		"sess": {Target: "b/mb", Since: time.Now(), BadRuns: 0},
+		"sess\x00m": {Target: "b/mb", Since: time.Now(), BadRuns: 0},
 	}}
 	ordered := []RouteTarget{{Provider: "a", Model: "ma"}, {Provider: "b", Model: "mb"}}
 	policy := RoutePolicy{
 		Bands:      []configdomain.RouteBand{{When: configdomain.BandWhen{HasImage: boolp(true)}, Target: RouteTarget{Provider: "a", Model: "ma"}}},
 		Escalation: &configdomain.EscalationConfig{Target: RouteTarget{Provider: "b", Model: "mb"}},
 	}
-	got, decision, latched := applyRouteLatch(state, "sess", ordered, policy, nil, time.Now())
+	got, decision, latched := applyRouteLatch(state, "sess", "m", ordered, policy, nil, time.Now())
 	if !latched || got[0].Provider != "b" {
 		t.Fatalf("latched order = %+v, want b first", got)
 	}
@@ -33,11 +34,11 @@ func TestApplyRouteLatchActive(t *testing.T) {
 
 func TestApplyRouteLatchExpired(t *testing.T) {
 	state := &fakeRouteState{latch: map[string]Latch{
-		"sess": {Target: "b/mb", Since: time.Now().Add(-time.Hour), BadRuns: 0},
+		"sess\x00m": {Target: "b/mb", Since: time.Now().Add(-time.Hour), BadRuns: 0},
 	}}
 	ordered := []RouteTarget{{Provider: "a", Model: "ma"}, {Provider: "b", Model: "mb"}}
 	policy := RoutePolicy{Escalation: &configdomain.EscalationConfig{Dwell: "30m", Target: RouteTarget{Provider: "b", Model: "mb"}}}
-	got, decision, latched := applyRouteLatch(state, "sess", ordered, policy, nil, time.Now())
+	got, decision, latched := applyRouteLatch(state, "sess", "m", ordered, policy, nil, time.Now())
 	if latched {
 		t.Fatalf("expired latch should be ignored, got %+v", got)
 	}
@@ -50,12 +51,34 @@ func TestApplyRouteLatchMissing(t *testing.T) {
 	state := &fakeRouteState{latch: map[string]Latch{}}
 	ordered := []RouteTarget{{Provider: "a", Model: "ma"}}
 	policy := RoutePolicy{Escalation: &configdomain.EscalationConfig{Target: RouteTarget{Provider: "b", Model: "mb"}}}
-	got, decision, latched := applyRouteLatch(state, "sess", ordered, policy, nil, time.Now())
+	got, decision, latched := applyRouteLatch(state, "sess", "m", ordered, policy, nil, time.Now())
 	if latched || len(got) != 1 || got[0].Provider != "a" {
 		t.Fatalf("missing latch should leave order unchanged, got %+v", got)
 	}
 	if decision != nil {
 		t.Fatalf("missing latch decision = %+v, want nil", decision)
+	}
+}
+
+// TestApplyRouteLatchTargetAbsent: the latch target was filtered out of the
+// current ordered set (capability narrowing or operator disable). The latch
+// must report no hit — order unchanged, no latch decision, latched=false — so
+// bands/selector still run (same strictness as resolveLatchGrade).
+func TestApplyRouteLatchTargetAbsent(t *testing.T) {
+	state := &fakeRouteState{latch: map[string]Latch{
+		"sess\x00m": {Target: "b/mb", Since: time.Now(), BadRuns: 0},
+	}}
+	ordered := []RouteTarget{{Provider: "a", Model: "ma"}}
+	policy := RoutePolicy{Escalation: &configdomain.EscalationConfig{Target: RouteTarget{Provider: "b", Model: "mb"}}}
+	got, decision, latched := applyRouteLatch(state, "sess", "m", ordered, policy, nil, time.Now())
+	if latched {
+		t.Fatalf("latch target absent from ordered must not latch, got %+v", got)
+	}
+	if decision != nil {
+		t.Fatalf("absent latch decision = %+v, want nil", decision)
+	}
+	if len(got) != 1 || got[0].Provider != "a" {
+		t.Fatalf("order changed: %+v, want unchanged", got)
 	}
 }
 
@@ -222,7 +245,7 @@ func TestServeLatchSkippedForForceProviderAndPin(t *testing.T) {
 	snap := h.snapshot(cfg)
 	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
 	// Without force/pin the latch would send the next request straight to b.
-	h.state.SetLatch("sess-z", Latch{Target: "b/mb", Since: time.Now(), BadRuns: 0}, snap.Generation)
+	h.state.SetLatch("sess-z", "m", Latch{Target: "b/mb", Since: time.Now(), BadRuns: 0}, snap.Generation)
 
 	// force-provider a must skip the latch and hit a only.
 	w := h.serveWithSession(snap, "openai", "/v1/chat/completions", body, "sess-z", "x-mp-force-provider", "a")
@@ -308,7 +331,7 @@ func TestServeEmptyOKTriggersLatch(t *testing.T) {
 	if w := h.serveWithSession(snap, "openai", "/v1/chat/completions", body, "sess-empty"); w.Code != http.StatusOK {
 		t.Fatalf("first status = %d, want 200", w.Code)
 	}
-	latch, ok := h.state.LatchValue("sess-empty")
+	latch, ok := h.state.LatchValue("sess-empty", "m")
 	if !ok || latch.Target != "up/real" || latch.BadRuns != 0 {
 		t.Fatalf("latch = %+v ok=%v, want target=up/real badRuns=0", latch, ok)
 	}
@@ -337,7 +360,7 @@ func TestServeEmptyOKNotTriggeredForNormalBody(t *testing.T) {
 	if w := h.serveWithSession(snap, "openai", "/v1/chat/completions", body, "sess-nonempty"); w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	if _, ok := h.state.LatchValue("sess-nonempty"); ok {
+	if _, ok := h.state.LatchValue("sess-nonempty", "m"); ok {
 		t.Fatal("normal body must not trigger empty_ok latch")
 	}
 }
@@ -366,7 +389,7 @@ func TestServeRepeatTurnTriggersLatch(t *testing.T) {
 	if w := h.serveWithSession(snap, "openai", "/v1/chat/completions", body, "sess-rep"); w.Code != http.StatusOK {
 		t.Fatalf("first status = %d, want 200", w.Code)
 	}
-	if _, ok := h.state.LatchValue("sess-rep"); ok {
+	if _, ok := h.state.LatchValue("sess-rep", "m"); ok {
 		t.Fatal("first request must not be treated as repeat")
 	}
 
@@ -374,7 +397,7 @@ func TestServeRepeatTurnTriggersLatch(t *testing.T) {
 	if w := h.serveWithSession(snap, "openai", "/v1/chat/completions", body, "sess-rep"); w.Code != http.StatusOK {
 		t.Fatalf("second status = %d, want 200", w.Code)
 	}
-	latch, ok := h.state.LatchValue("sess-rep")
+	latch, ok := h.state.LatchValue("sess-rep", "m")
 	if !ok || latch.Target != "up/real" {
 		t.Fatalf("repeat did not latch: %+v ok=%v", latch, ok)
 	}
@@ -408,7 +431,7 @@ func TestServeRepeatTurnDifferentTurnDoesNotTrigger(t *testing.T) {
 	if w := h.serveWithSession(snap, "openai", "/v1/chat/completions", body2, "sess-diff"); w.Code != http.StatusOK {
 		t.Fatalf("second status = %d, want 200", w.Code)
 	}
-	if _, ok := h.state.LatchValue("sess-diff"); ok {
+	if _, ok := h.state.LatchValue("sess-diff", "m"); ok {
 		t.Fatal("different turns must not trigger repeat_turn latch")
 	}
 }
@@ -443,8 +466,236 @@ func TestServeEmptyOKWithStreamDoesNotTrigger(t *testing.T) {
 	if w := h.serveWithSession(snap, "openai", "/v1/chat/completions", body, "sess-stream"); w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	if _, ok := h.state.LatchValue("sess-stream"); ok {
+	if _, ok := h.state.LatchValue("sess-stream", "m"); ok {
 		t.Fatal("streaming body with framing bytes must not trigger empty_ok")
+	}
+}
+
+// TestServeLatchScopedToRoute: the escalation latch is keyed by (session,
+// route), same as the repeat_turn window. A latch escalated on route ra must
+// NOT front the same target on route rb — even when the session is identical
+// and rb's ordered set contains the latch target.
+func TestServeLatchScopedToRoute(t *testing.T) {
+	h := newHarness()
+	upA := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	})
+	upB := newFakeUpstream(t, openaiOKResponder("from-b"))
+	upC := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	})
+	escalation := func() *configdomain.EscalationConfig {
+		return &configdomain.EscalationConfig{
+			BadSignals:  []string{"upstream_error"},
+			Consecutive: 1,
+			Target:      RouteTarget{Provider: "b", Model: "mb"},
+			Dwell:       "30m",
+		}
+	}
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"a": {OpenAIBaseURL: upA.srv.URL, Provider: "test-static"},
+			"b": {OpenAIBaseURL: upB.srv.URL, Provider: "test-static"},
+			"c": {OpenAIBaseURL: upC.srv.URL, Provider: "test-static"},
+		},
+		Routes: map[string][]RouteTarget{
+			"ra": {{Provider: "a", Model: "ma"}},
+			"rb": {{Provider: "c", Model: "mc"}, {Provider: "b", Model: "mb"}},
+		},
+		RoutePolicies: map[string]RoutePolicy{
+			"ra": {Escalation: escalation()},
+			"rb": {Escalation: escalation()},
+		},
+	}
+	snap := h.snapshot(cfg)
+
+	// One bad run on route ra escalates the session latch to b/mb (consecutive=1).
+	w := h.serveWithSession(snap, "openai", "/v1/chat/completions", `{"model":"ra","messages":[{"role":"user","content":"hi"}]}`, "sess-iso")
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("route ra status = %d, want 502", w.Code)
+	}
+
+	// Same session on route rb: the latch taken on ra must NOT front b/mb here —
+	// rb starts with its natural first target c and fails over to b.
+	w = h.serveWithSession(snap, "openai", "/v1/chat/completions", `{"model":"rb","messages":[{"role":"user","content":"hi"}]}`, "sess-iso")
+	if w.Code != http.StatusOK {
+		t.Fatalf("route rb status = %d, want 200", w.Code)
+	}
+	if upC.hits() != 1 {
+		t.Fatalf("route rb must try its own first target first: c hits = %d, want 1 (latch from route ra leaked)", upC.hits())
+	}
+	if upB.hits() != 1 {
+		t.Fatalf("route rb failover should reach b once: b hits = %d, want 1", upB.hits())
+	}
+}
+
+// TestServeLatchBadRunsScopedToRoute: the bad-run streak is keyed by (session,
+// route) — a good run on route rb must NOT reset the streak route ra is
+// accumulating toward its escalation threshold.
+func TestServeLatchBadRunsScopedToRoute(t *testing.T) {
+	h := newHarness()
+	upA := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	})
+	var bCalls atomic.Int32
+	upB := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		// Fail the first two calls (route ra's two bad runs), succeed after.
+		if bCalls.Add(1) <= 2 {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	})
+	upC := newFakeUpstream(t, openaiOKResponder("from-c"))
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"a": {OpenAIBaseURL: upA.srv.URL, Provider: "test-static"},
+			"b": {OpenAIBaseURL: upB.srv.URL, Provider: "test-static"},
+			"c": {OpenAIBaseURL: upC.srv.URL, Provider: "test-static"},
+		},
+		Routes: map[string][]RouteTarget{
+			"ra": {{Provider: "a", Model: "ma"}, {Provider: "b", Model: "mb"}},
+			"rb": {{Provider: "c", Model: "mc"}},
+		},
+		RoutePolicies: map[string]RoutePolicy{
+			"ra": {Escalation: &configdomain.EscalationConfig{
+				BadSignals:  []string{"upstream_error"},
+				Consecutive: 2,
+				Target:      RouteTarget{Provider: "b", Model: "mb"},
+				Dwell:       "30m",
+			}},
+			"rb": {Escalation: &configdomain.EscalationConfig{
+				BadSignals:  []string{"upstream_error"},
+				Consecutive: 2,
+				Target:      RouteTarget{Provider: "c", Model: "mc"},
+				Dwell:       "30m",
+			}},
+		},
+	}
+	snap := h.snapshot(cfg)
+	raBody := `{"model":"ra","messages":[{"role":"user","content":"hi"}]}`
+	rbBody := `{"model":"rb","messages":[{"role":"user","content":"hi"}]}`
+
+	// 1: first bad run on ra (a down, b call 1 down) -> streak 1.
+	if w := h.serveWithSession(snap, "openai", "/v1/chat/completions", raBody, "sess-br"); w.Code != http.StatusBadGateway {
+		t.Fatalf("first ra status = %d, want 502", w.Code)
+	}
+	// Good run on rb (c ok) -> must NOT reset ra's streak.
+	if w := h.serveWithSession(snap, "openai", "/v1/chat/completions", rbBody, "sess-br"); w.Code != http.StatusOK {
+		t.Fatalf("rb status = %d, want 200", w.Code)
+	}
+	// 2: second bad run on ra (a down, b call 2 down) -> streak reaches 2 -> latch b/mb.
+	if w := h.serveWithSession(snap, "openai", "/v1/chat/completions", raBody, "sess-br"); w.Code != http.StatusBadGateway {
+		t.Fatalf("second ra status = %d, want 502", w.Code)
+	}
+	// 3: latched request on ra fronts b (call 3 ok) without hitting a again.
+	if w := h.serveWithSession(snap, "openai", "/v1/chat/completions", raBody, "sess-br"); w.Code != http.StatusOK {
+		t.Fatalf("third ra status = %d, want 200", w.Code)
+	}
+	if upA.hits() != 2 {
+		t.Fatalf("a hits = %d, want 2 (streak reset by route rb good run leaked; latch never escalated)", upA.hits())
+	}
+}
+
+// TestServeConversionFailureNotCountedAsBadRun: a client-shape conversion
+// failure (400 — the request cannot be represented for ANY candidate and no
+// upstream was ever contacted) must NOT feed the escalation upstream_error
+// signal. It is the client's problem, same as a guard interception, not an
+// upstream bad run; retrying the same unconvertible request must never
+// escalate a latch.
+func TestServeConversionFailureNotCountedAsBadRun(t *testing.T) {
+	h := newHarness()
+	anthropicOK := func(text string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("content-type", "application/json")
+			io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":`+strconv_(text)+`}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+		}
+	}
+	upA := newFakeUpstream(t, anthropicOK("from-a"))
+	upB := newFakeUpstream(t, anthropicOK("from-b"))
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"a": {AnthropicBaseURL: upA.srv.URL, Provider: "test-static"},
+			"b": {AnthropicBaseURL: upB.srv.URL, Provider: "test-static"},
+		},
+		Routes: map[string][]RouteTarget{
+			"m": {{Provider: "a", Model: "ma", Protocol: "anthropic"}, {Provider: "b", Model: "mb", Protocol: "anthropic"}},
+		},
+		RoutePolicies: map[string]RoutePolicy{
+			"m": {Escalation: &configdomain.EscalationConfig{
+				BadSignals:  []string{"upstream_error"},
+				Consecutive: 2,
+				Target:      RouteTarget{Provider: "b", Model: "mb"},
+				Dwell:       "30m",
+			}},
+		},
+	}
+	snap := h.snapshot(cfg)
+	// n=2 cannot be represented by any anthropic backend: every candidate
+	// fails conversion, no upstream is contacted, the client gets a 400.
+	badBody := `{"model":"m","n":2,"messages":[{"role":"user","content":"hi"}]}`
+	for i := 0; i < 2; i++ {
+		w := h.serveWithSession(snap, "openai", "/v1/chat/completions", badBody, "sess-conv")
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("unconvertible request %d: status = %d, want 400 (body %s)", i, w.Code, w.Body.String())
+		}
+	}
+	if upA.hits() != 0 || upB.hits() != 0 {
+		t.Fatalf("unconvertible request must not contact upstreams: a=%d b=%d", upA.hits(), upB.hits())
+	}
+	// A convertible request from the same session must take the natural order —
+	// the 400s above must not have escalated a latch to b/mb.
+	w := h.serveWithSession(snap, "openai", "/v1/chat/completions", openaiChatBody(), "sess-conv")
+	if w.Code != http.StatusOK {
+		t.Fatalf("convertible status = %d, want 200 (body %s)", w.Code, w.Body.String())
+	}
+	if upA.hits() != 1 || upB.hits() != 0 {
+		t.Fatalf("client-shape 400s escalated a latch: a=%d b=%d, want 1/0 (natural order)", upA.hits(), upB.hits())
+	}
+}
+
+// TestServeLatchConcurrentBadRunsCountedAtomically: concurrent requests of the
+// same (session, route) each contribute exactly one bad run — the outcome
+// recording must be one atomic read-modify-write per request, so the final
+// streak equals the number of requests (no lost updates).
+func TestServeLatchConcurrentBadRunsCountedAtomically(t *testing.T) {
+	h := newHarness()
+	up := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	})
+	cfg := &Config{
+		Providers: map[string]Provider{"up": {OpenAIBaseURL: up.srv.URL, Provider: "test-static"}},
+		Routes:    map[string][]RouteTarget{"m": {{Provider: "up", Model: "real"}}},
+		RoutePolicies: map[string]RoutePolicy{
+			"m": {Escalation: &configdomain.EscalationConfig{
+				BadSignals:  []string{"upstream_error"},
+				Consecutive: 1 << 30, // never escalates: every bad run stays in BadRuns
+				Target:      RouteTarget{Provider: "up", Model: "real"},
+				Dwell:       "30m",
+			}},
+		},
+	}
+	snap := h.snapshot(cfg)
+	body := openaiChatBody()
+	const n = 32
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if w := h.serveWithSession(snap, "openai", "/v1/chat/completions", body, "sess-conc"); w.Code != http.StatusBadGateway {
+				t.Errorf("status = %d, want 502", w.Code)
+			}
+		}()
+	}
+	wg.Wait()
+	latch, ok := h.state.LatchValue("sess-conc", "m")
+	if !ok {
+		t.Fatal("no latch recorded for concurrent bad runs")
+	}
+	if latch.BadRuns != n {
+		t.Fatalf("BadRuns = %d, want %d (lost updates in LatchValue->SetLatch read-modify-write)", latch.BadRuns, n)
 	}
 }
 

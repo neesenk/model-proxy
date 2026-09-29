@@ -382,7 +382,7 @@ func TestServeOnceGradeLatchForcesGrade(t *testing.T) {
 		},
 	}
 	snap := h.snapshot(cfg)
-	h.state.SetLatch("sess-grade", Latch{Target: "grade:strong", Since: time.Now(), BadRuns: 0}, snap.Generation)
+	h.state.SetLatch("sess-grade", "m", Latch{Target: "grade:strong", Since: time.Now(), BadRuns: 0}, snap.Generation)
 
 	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
 	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))

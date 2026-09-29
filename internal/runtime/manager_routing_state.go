@@ -23,34 +23,80 @@ func (m *Manager) Sticky(key string) (Sticky, bool) {
 	return value, ok
 }
 
-func (m *Manager) SetLatch(key string, latch Latch, generation uint64) bool {
+func (m *Manager) SetLatch(sessionKey, route string, latch Latch, generation uint64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureLocked()
 	if !m.generationMatchesLocked(generation) {
 		return false
 	}
-	m.latch[key] = latch
+	m.latch[latchKey{SessionKey: sessionKey, Route: route}] = latch
 	return true
 }
 
-func (m *Manager) LatchValue(key string) (Latch, bool) {
+func (m *Manager) LatchValue(sessionKey, route string) (Latch, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	value, ok := m.latch[key]
+	value, ok := m.latch[latchKey{SessionKey: sessionKey, Route: route}]
 	return value, ok
 }
 
-func (m *Manager) ClearLatch(key string, generation uint64) bool {
+func (m *Manager) ClearLatch(sessionKey, route string, generation uint64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureLocked()
 	if !m.generationMatchesLocked(generation) {
 		return false
 	}
+	key := latchKey{SessionKey: sessionKey, Route: route}
 	_, ok := m.latch[key]
 	delete(m.latch, key)
 	return ok
+}
+
+// RecordLatchOutcome atomically applies one request outcome to the
+// (sessionKey, route) latch: the expiry check, the bad-run streak
+// increment/reset and the escalation all happen inside this single Manager
+// critical section, so concurrent requests of the same session cannot lose
+// updates (the previous LatchValue→SetLatch read-modify-write across calls
+// could). Pure in-memory: no callbacks, no I/O while holding the lock.
+// Returns false on generation mismatch or missing keys.
+func (m *Manager) RecordLatchOutcome(in LatchOutcome, generation uint64) bool {
+	if in.SessionKey == "" || in.Route == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureLocked()
+	if !m.generationMatchesLocked(generation) {
+		return false
+	}
+	key := latchKey{SessionKey: in.SessionKey, Route: in.Route}
+	latch, has := m.latch[key]
+	if has && in.Now.Sub(latch.Since) > in.Dwell {
+		has = false
+		latch = Latch{}
+	}
+	if in.BadSignals <= 0 {
+		if in.Good && has {
+			latch.BadRuns = 0
+			m.latch[key] = latch
+		}
+		return true
+	}
+	badRuns := latch.BadRuns + in.BadSignals
+	since := latch.Since
+	target := latch.Target
+	if !has {
+		since = in.Now
+	}
+	if badRuns >= in.Consecutive {
+		target = in.Target
+		since = in.Now
+		badRuns = 0
+	}
+	m.latch[key] = Latch{Target: target, Since: since, BadRuns: badRuns}
+	return true
 }
 
 // CheckRepeatTurn reports whether the same turn key was observed for the same

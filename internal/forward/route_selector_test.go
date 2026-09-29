@@ -209,7 +209,7 @@ func TestServeRouteSelectorLatchWins(t *testing.T) {
 		Dwell:       "30m",
 	}
 	snap.Cfg.RoutePolicies["m"] = pol
-	h.state.SetLatch("sess-sel", Latch{Target: "a/ma", Since: time.Now(), BadRuns: 0}, snap.Generation)
+	h.state.SetLatch("sess-sel", "m", Latch{Target: "a/ma", Since: time.Now(), BadRuns: 0}, snap.Generation)
 
 	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}"`
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
@@ -225,6 +225,112 @@ func TestServeRouteSelectorLatchWins(t *testing.T) {
 	}
 	if upSel.hits() != 0 {
 		t.Fatalf("active latch should skip selector: selector hits = %d, want 0", upSel.hits())
+	}
+}
+
+// TestServeLatchTargetAbsentFallsThroughToSelector: a session latch whose
+// target is not part of the current ordered set (e.g. the provider was
+// disabled after the latch was taken) must NOT suppress the rest of the
+// policy chain — the selector still runs and the decision must not be
+// recorded as source=latch.
+func TestServeLatchTargetAbsentFallsThroughToSelector(t *testing.T) {
+	h := newHarness()
+	upA := newFakeUpstream(t, openaiOKResponder("from-a"))
+	upB := newFakeUpstream(t, openaiOKResponder("from-b"))
+	upSel := newFakeUpstream(t, selectorDecisionResponder("c0", 0.9))
+	snap := routeSelectorSnapshot(t, h, upA, upB, upSel)
+	pol := snap.Cfg.RoutePolicies["m"]
+	pol.Escalation = &configdomain.EscalationConfig{
+		BadSignals:  []string{"upstream_error"},
+		Consecutive: 1,
+		Target:      RouteTarget{Provider: "ghost", Model: "mg"},
+		Dwell:       "30m",
+	}
+	snap.Cfg.RoutePolicies["m"] = pol
+	h.state.SetLatch("sess-absent", "m", Latch{Target: "ghost/mg", Since: time.Now(), BadRuns: 0}, snap.Generation)
+
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}"`
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	r.Header.Set("x-claude-code-session-id", "sess-absent")
+	w := httptest.NewRecorder()
+	Serve(h.svc, h.state, snap, "openai", w, r, "req-absent")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if upSel.hits() != 1 {
+		t.Fatalf("absent latch target must not suppress the selector: selector hits = %d, want 1", upSel.hits())
+	}
+	if upA.hits() != 1 {
+		t.Fatalf("selector chose c0 (provider a): a hits = %d, want 1", upA.hits())
+	}
+	if r := h.fx.capturedRouting(); len(r) != 1 || r[0] == nil {
+		t.Fatalf("routing decision missing: %+v", r)
+	} else if r[0].Source != "selector" {
+		t.Fatalf("routing = %+v, want source=selector (latch did not reorder anything)", r[0])
+	}
+}
+
+// TestServeRouteSelectorCalledOnceAcrossCooldownRetries: the selector contract
+// is "at most one decisions call per request". When every target is cooling
+// and forward waits/retries, later rounds must reuse the first round's
+// selector outcome instead of paying the decisions call again.
+func TestServeRouteSelectorCalledOnceAcrossCooldownRetries(t *testing.T) {
+	h := newHarness()
+	rateLimited := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}
+	upA := newFakeUpstream(t, rateLimited)
+	upB := newFakeUpstream(t, rateLimited)
+	upSel := newFakeUpstream(t, selectorDecisionResponder("c1", 0.9))
+	snap := routeSelectorSnapshot(t, h, upA, upB, upSel)
+	snap.Cfg.Scheduling.RetryWait = "2s"
+	h.state.allDown = true
+	h.state.allRateLimited = true
+	h.state.earliest = time.Now().Add(5 * time.Millisecond)
+
+	w := h.serve(snap, "openai", "/v1/chat/completions", openaiChatBody(), nil)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 (all targets rate-limited)", w.Code)
+	}
+	if upA.hits()+upB.hits() < 3 {
+		t.Fatalf("expected the wait-retry loop to run more than one pass: a=%d b=%d", upA.hits(), upB.hits())
+	}
+	if upSel.hits() != 1 {
+		t.Fatalf("selector decisions calls = %d, want at most 1 per request", upSel.hits())
+	}
+	if ends := h.endEvents("route-select-req-test"); len(ends) != 1 {
+		t.Fatalf("route-select live end events = %d, want 1 (no duplicate leg per retry round)", len(ends))
+	}
+}
+
+// TestServeRouteGradeSelectorCalledOnceAcrossCooldownRetries: the graded
+// selector variant shares the same at-most-once-per-request contract.
+func TestServeRouteGradeSelectorCalledOnceAcrossCooldownRetries(t *testing.T) {
+	h := newHarness()
+	rateLimited := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}
+	upA := newFakeUpstream(t, rateLimited)
+	upB := newFakeUpstream(t, rateLimited)
+	// g0 picks the first grade so the "any" fallback still appends the second
+	// grade's target — both upstreams are tried every pass.
+	upSel := newFakeUpstream(t, selectorDecisionResponder("g0", 0.9))
+	snap := routeGradeSelectorSnapshot(t, h, upA, upB, upSel)
+	snap.Cfg.Scheduling.RetryWait = "2s"
+	h.state.allDown = true
+	h.state.allRateLimited = true
+	h.state.earliest = time.Now().Add(5 * time.Millisecond)
+
+	w := h.serve(snap, "openai", "/v1/chat/completions", openaiChatBody(), nil)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 (all targets rate-limited)", w.Code)
+	}
+	if upA.hits()+upB.hits() < 3 {
+		t.Fatalf("expected the wait-retry loop to run more than one pass: a=%d b=%d", upA.hits(), upB.hits())
+	}
+	if upSel.hits() != 1 {
+		t.Fatalf("grade selector decisions calls = %d, want at most 1 per request", upSel.hits())
 	}
 }
 

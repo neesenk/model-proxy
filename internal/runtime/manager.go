@@ -18,7 +18,7 @@ type Manager struct {
 	generation  uint64
 	health      map[string]*providerHealth
 	sticky      map[string]Sticky
-	latch       map[string]Latch
+	latch       map[latchKey]Latch
 	repeatTurns map[repeatTurnKey]*repeatTurnWindow
 	pins        map[string]Pin
 	modelLocks  map[ModelKey]*modelLock
@@ -50,7 +50,7 @@ func (m *Manager) ensureLocked() {
 		m.sticky = make(map[string]Sticky)
 	}
 	if m.latch == nil {
-		m.latch = make(map[string]Latch)
+		m.latch = make(map[latchKey]Latch)
 	}
 	if m.repeatTurns == nil {
 		m.repeatTurns = make(map[repeatTurnKey]*repeatTurnWindow)
@@ -111,7 +111,7 @@ func (m *Manager) ReplaceGeneration(generation uint64, liveQuotaKeys map[string]
 	m.generation = generation
 	m.health = make(map[string]*providerHealth)
 	m.sticky = make(map[string]Sticky)
-	m.latch = make(map[string]Latch)
+	m.latch = make(map[latchKey]Latch)
 	m.repeatTurns = make(map[repeatTurnKey]*repeatTurnWindow)
 	m.modelLocks = make(map[ModelKey]*modelLock)
 	m.paramBlock = make(map[ModelKey]map[string]bool)

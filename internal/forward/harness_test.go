@@ -189,7 +189,11 @@ type fakeRouteState struct {
 	earliest         time.Time
 	recoveredUntried bool
 	quotaMaxAge      time.Duration
-	latch            map[string]Latch
+	// latchMu guards latch: concurrent requests of the same session record
+	// outcomes in parallel, and RecordLatchOutcome must apply each one
+	// atomically (the port contract the runtime Manager fulfills with m.mu).
+	latchMu sync.Mutex
+	latch   map[string]Latch // keyed by sessionKey+"\x00"+route
 	// repeatTurns records observed turn keys per (session, route) for testing
 	// the repeat_turn escalation signal. Entries are (turnKey, observedAt).
 	repeatTurns map[string][]fakeRepeatEntry
@@ -210,15 +214,65 @@ func (s *fakeRouteState) HasRecoveredUntried(targets []RouteTarget, tried map[st
 	return s.recoveredUntried
 }
 func (s *fakeRouteState) QuotaFreshnessMaxAge(cfg *Config) time.Duration { return s.quotaMaxAge }
-func (s *fakeRouteState) LatchValue(sessionKey string) (Latch, bool) {
-	v, ok := s.latch[sessionKey]
+func (s *fakeRouteState) latchKeyFor(sessionKey, route string) string {
+	return sessionKey + "\x00" + route
+}
+func (s *fakeRouteState) LatchValue(sessionKey, route string) (Latch, bool) {
+	s.latchMu.Lock()
+	defer s.latchMu.Unlock()
+	v, ok := s.latch[s.latchKeyFor(sessionKey, route)]
 	return v, ok
 }
-func (s *fakeRouteState) SetLatch(sessionKey string, value Latch, generation uint64) bool {
+
+// SetLatch is a test helper seeding a latch directly (not part of the
+// RouteState port — production writes go through RecordLatchOutcome).
+func (s *fakeRouteState) SetLatch(sessionKey, route string, value Latch, generation uint64) bool {
+	s.latchMu.Lock()
+	defer s.latchMu.Unlock()
 	if s.latch == nil {
 		s.latch = map[string]Latch{}
 	}
-	s.latch[sessionKey] = value
+	s.latch[s.latchKeyFor(sessionKey, route)] = value
+	return true
+}
+
+// RecordLatchOutcome applies the port contract the runtime Manager guarantees:
+// the expiry check, streak increment/reset and escalation happen atomically
+// under latchMu — no read-modify-write window across concurrent requests.
+func (s *fakeRouteState) RecordLatchOutcome(o LatchOutcome, generation uint64) bool {
+	if o.SessionKey == "" || o.Route == "" {
+		return false
+	}
+	s.latchMu.Lock()
+	defer s.latchMu.Unlock()
+	if s.latch == nil {
+		s.latch = map[string]Latch{}
+	}
+	key := s.latchKeyFor(o.SessionKey, o.Route)
+	latch, has := s.latch[key]
+	if has && o.Now.Sub(latch.Since) > o.Dwell {
+		has = false
+		latch = Latch{}
+	}
+	if o.BadSignals <= 0 {
+		if o.Good && has {
+			latch.BadRuns = 0
+			s.latch[key] = latch
+		}
+		return true
+	}
+	badRuns := latch.BadRuns + o.BadSignals
+	since := latch.Since
+	target := latch.Target
+	if !has {
+		since = o.Now
+	}
+	if badRuns >= o.Consecutive {
+		target = o.Target
+		since = o.Now
+		badRuns = 0
+	}
+	s.latch[key] = Latch{Target: target, Since: since, BadRuns: badRuns}
 	return true
 }
 

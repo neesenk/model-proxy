@@ -138,12 +138,15 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
 
 `route_policy.<route>.escalation` 是会话级的「坏运行计数器 → 临时升档」机制：
 
-- **状态**：`runtime.Latch{Target, Since, BadRuns}`，按 `x-claude-code-session-id` 索引，内存态、
+- **状态**：`runtime.Latch{Target, Since, BadRuns}`，按 `(x-claude-code-session-id, route)` 索引
+  （与 repeat_turn 滑窗同粒度：一条 route 的坏运行/升级不影响另一条），内存态、
   不持久化、随 config generation 清空——owner 是 `internal/runtime.Manager`（见
   `docs/architecture/runtime-state.md`）。
 - **信号闭集**：`bad_signals` 为闭集，取值只能是 `upstream_error`、`empty_ok`、`repeat_turn` 之一或组合；
   未知取值在校验时报错。默认仍只含 `upstream_error`（不配置 escalation 零行为变化）。
-  - `upstream_error`：请求终局未 commit 且客户端未断开（收到终局错误）。
+  - `upstream_error`：请求终局未 commit 且客户端未断开（收到终局错误）。客户端侧转换失败
+    400（请求对全部候选均不可转换、上游从未被联系）**不计入**——与 guard 拦截同口径，
+    重发同一不可转换请求不会误升级 latch。
   - `empty_ok`：请求 commit 为 200，但最终写回客户端的响应体字节数为 0。该谓词是保守的：
     只按最终客户端字节计数，不误判带空 `content` 或纯 `tool_use` 的合法 JSON/JSON 帧。
   - `repeat_turn`：同一 `TurnKey`（`requestlog.ComputeTurnKey`，request log 与该信号的唯一权威来源）
@@ -156,6 +159,9 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
 - **滞回**：已升级会话在 `dwell`（默认 `30m`）内不回退；好运行（commit 且无配置的坏信号触发）
   只清零 `BadRuns`，保留 latch target。
 - **与 band 的优先级**：先查 latch，latch 生效时跳过 bands；latch 过期/不存在时才走 bands。
+  latch 目标不在当前 ordered 集（能力过滤剔除或 operator disable）时 latch 同样不生效——
+  顺序不变、不记录 `source=latch`，照常走 bands/selector（与 graded 路径
+  `resolveLatchGrade` 对不可解析目标返回 false 同一严格度）。
 - **与硬选择的优先级**：pin / `x-mp-force-provider` 生效时整条策略（含 latch）跳过，与 bands 同一规则。
 - **响应 cache**：启用 escalation 的 route 必须绕过响应 cache（与 force-provider/pin 同语义），
   否则已升级会话可能命中便宜档缓存。
@@ -172,8 +178,11 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
 - **候选集**：当前 `ordered` 中的目标（能力/上下文过滤后、或 latch/band 已调整后的顺序），
   用 `routing.PreferTarget` 把选中目标前置，其余保留为 failover，不硬选、不清空、不切换
   provider 身份（池化虚拟 ID 保持正确）。
-- **调用与超时**：每请求一次，timeout 来自 `SelectorConfig.TimeoutDuration()`（默认 800ms）；
-  任何失败 fail-open 回退到上一步顺序。
+- **调用与超时**：每请求至多一次，timeout 来自 `SelectorConfig.TimeoutDuration()`（默认 800ms）；
+  任何失败 fail-open 回退到上一步顺序。all-cooldown 等待重试的后续轮次复用首轮缓存的
+  selector 结果（缓存于 `serveState`，与 rawProfile 同一模式），不重复发起付费 decisions
+  调用、不重复发 `route-select-<requestID>` live 事件；enforce 的首选目标在新一轮 ordered
+  中缺席（如被冷却调度剔除）时保持当轮顺序，该轮 decision 降级为 fallback。
 - **mode**：`shadow`（默认）只记录不行动；`enforce` 在 `confidence ≥ SelectorConfig.ConfidenceThreshold()`
   时前置选中目标。
 - **响应 cache**：启用 selector 的 route 必须绕过响应 cache，与 escalation 同一语义。

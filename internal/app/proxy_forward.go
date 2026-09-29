@@ -93,12 +93,12 @@ func (s proxyRouteState) QuotaFreshnessMaxAge(cfg *configdomain.Config) time.Dur
 	return s.proxy.quotaFreshnessMaxAge(cfg)
 }
 
-func (s proxyRouteState) LatchValue(sessionKey string) (forward.Latch, bool) {
-	return s.proxy.latchValue(sessionKey)
+func (s proxyRouteState) LatchValue(sessionKey, route string) (forward.Latch, bool) {
+	return s.proxy.latchValue(sessionKey, route)
 }
 
-func (s proxyRouteState) SetLatch(sessionKey string, value forward.Latch, generation uint64) bool {
-	return s.proxy.setLatch(sessionKey, value, generation)
+func (s proxyRouteState) RecordLatchOutcome(outcome forward.LatchOutcome, generation uint64) bool {
+	return s.proxy.recordLatchOutcome(outcome, generation)
 }
 
 func (s proxyRouteState) CheckRepeatTurn(sessionKey, route, turnKey string, now time.Time, window time.Duration, generation uint64) bool {

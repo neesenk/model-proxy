@@ -99,6 +99,27 @@ func GradeForTarget(target configdomain.RouteTarget, grades map[string][]configd
 	return found, false
 }
 
+// TargetIndex returns the index of the first target matching want in ordered,
+// or -1 when want is absent. Matching follows the same model+provider rule as
+// PreferTarget (a parent provider name also matches a pooled virtual target),
+// so callers can distinguish "no reorder" from "target not present".
+func TargetIndex(
+	ordered []configdomain.RouteTarget,
+	want configdomain.RouteTarget,
+	parentOf map[string]string,
+) int {
+	for i, t := range ordered {
+		if t.Model != want.Model {
+			continue
+		}
+		if t.Provider != want.Provider && parentOf[t.Provider] != want.Provider {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
 // PreferTarget moves the first target matching want to the front of ordered.
 // Matching is by model plus provider and follows FilterTargetsByProvider's
 // parent rule: a band naming the parent provider also matches a pooled virtual
@@ -110,17 +131,7 @@ func PreferTarget(
 	want configdomain.RouteTarget,
 	parentOf map[string]string,
 ) []configdomain.RouteTarget {
-	idx := -1
-	for i, t := range ordered {
-		if t.Model != want.Model {
-			continue
-		}
-		if t.Provider != want.Provider && parentOf[t.Provider] != want.Provider {
-			continue
-		}
-		idx = i
-		break
-	}
+	idx := TargetIndex(ordered, want, parentOf)
 	if idx <= 0 {
 		return ordered
 	}

@@ -163,20 +163,28 @@ func (p *Proxy) hasRecoveredUntried(targets []configdomain.RouteTarget, tried ma
 	return p.runtimeState.HasRecoveredUntried(runtimeTargets, tried, now, quotaMaxAge)
 }
 
-// latchValue reads the session latch from the runtime Manager and projects it
-// into the forward package's consumer-owned value type.
-func (p *Proxy) latchValue(sessionKey string) (forward.Latch, bool) {
-	v, ok := p.runtimeState.LatchValue(sessionKey)
+// latchValue reads the (session, route) latch from the runtime Manager and
+// projects it into the forward package's consumer-owned value type.
+func (p *Proxy) latchValue(sessionKey, route string) (forward.Latch, bool) {
+	v, ok := p.runtimeState.LatchValue(sessionKey, route)
 	return forward.Latch{Target: v.Target, Since: v.Since, BadRuns: v.BadRuns}, ok
 }
 
-// setLatch writes the forward package's latch view back into the runtime
-// Manager, generation-gated. The generation comes from the request snapshot.
-func (p *Proxy) setLatch(sessionKey string, value forward.Latch, generation uint64) bool {
-	return p.runtimeState.SetLatch(sessionKey, runtimestate.Latch{
-		Target:  value.Target,
-		Since:   value.Since,
-		BadRuns: value.BadRuns,
+// recordLatchOutcome forwards one request outcome to the runtime Manager's
+// atomic latch recorder: the expiry check, streak increment/reset and
+// escalation happen in ONE Manager critical section (no read-modify-write
+// window across concurrent requests of the same session). The generation
+// comes from the request snapshot.
+func (p *Proxy) recordLatchOutcome(outcome forward.LatchOutcome, generation uint64) bool {
+	return p.runtimeState.RecordLatchOutcome(runtimestate.LatchOutcome{
+		SessionKey:  outcome.SessionKey,
+		Route:       outcome.Route,
+		Now:         outcome.Now,
+		Dwell:       outcome.Dwell,
+		Consecutive: outcome.Consecutive,
+		Target:      outcome.Target,
+		BadSignals:  outcome.BadSignals,
+		Good:        outcome.Good,
 	}, generation)
 }
 

@@ -44,14 +44,18 @@ func applyRoutePolicy(
 }
 
 // applyRouteLatch returns ordered with an active session latch target moved to
-// the front. An expired latch is ignored (the next write will clear it). The
-// latch target must actually be present in the current ordered set; otherwise
-// the order is unchanged. Latch wins over bands and selector: when a latch
-// applies the later policy steps are skipped so the escalated target stays
-// first. The returned decision records the latch source and value.
+// the front. An expired latch is ignored (the next outcome recording will
+// overwrite it). The latch is keyed by (sessionKey, route) and its target must
+// actually be present in the current ordered set; when capability narrowing or
+// an operator disable has filtered it out, the latch does not apply
+// (latched=false, no decision) so bands and the selector still run — the same
+// strictness resolveLatchGrade uses for unresolvable targets. Latch wins over
+// bands and selector: when a latch applies the later policy steps are skipped
+// so the escalated target stays first. The returned decision records the latch
+// source and value.
 func applyRouteLatch(
 	state RouteState,
-	sessionKey string,
+	sessionKey, route string,
 	ordered []RouteTarget,
 	policy RoutePolicy,
 	parentOf map[string]string,
@@ -60,7 +64,7 @@ func applyRouteLatch(
 	if sessionKey == "" || policy.Escalation == nil {
 		return ordered, nil, false
 	}
-	latch, ok := state.LatchValue(sessionKey)
+	latch, ok := state.LatchValue(sessionKey, route)
 	if !ok {
 		return ordered, nil, false
 	}
@@ -72,6 +76,9 @@ func applyRouteLatch(
 		return ordered, nil, false
 	}
 	want := RouteTarget{Provider: parts[0], Model: parts[1]}
+	if routing.TargetIndex(ordered, want, parentOf) < 0 {
+		return ordered, nil, false
+	}
 	decision := &configdomain.RoutingDecision{
 		Source: "latch",
 		Target: latch.Target,
@@ -84,6 +91,7 @@ func applyRouteLatch(
 // for observability; the ordered slice is always usable (fail-open).
 type routeSelectorResult struct {
 	ordered    []RouteTarget
+	preferred  RouteTarget // the enforce-mode pick, valid when action == "enforce"
 	mode       string
 	action     string
 	choice     string
@@ -91,6 +99,25 @@ type routeSelectorResult struct {
 	difficulty float64
 	latencyMs  int64
 	err        string
+}
+
+// reapply projects a cached selector outcome onto a later wait-retry round's
+// ordered set (which may have been re-scheduled since the decisions call): the
+// enforce preference is re-applied when the preferred target is still present;
+// when it was scheduled out (e.g. cooling), the order is kept and the action
+// downgrades to fallback so the decision record stays honest about which step
+// determined the order. Non-enforce outcomes pass the order through.
+func (r routeSelectorResult) reapply(ordered []RouteTarget, parentOf map[string]string) routeSelectorResult {
+	r.ordered = ordered
+	if r.action != "enforce" {
+		return r
+	}
+	if routing.TargetIndex(ordered, r.preferred, parentOf) < 0 {
+		r.action = "fallback"
+		return r
+	}
+	r.ordered = routing.PreferTarget(ordered, r.preferred, parentOf)
+	return r
 }
 
 // routingDecision merges the selector result with the base decision from
@@ -186,16 +213,16 @@ type gradeGroup struct {
 	index   int
 }
 
-// resolveLatchGrade returns the grade name latched for this session and the
-// raw latch value, if any. For grade-based escalation the latch target may be
-// encoded as "grade:<name>" (see recordLatchOutcome); otherwise it is resolved
-// through the policy's grade declarations. An expired or missing latch returns
-// ("", "", false).
-func resolveLatchGrade(state RouteState, sessionKey string, policy RoutePolicy, now time.Time) (grade string, latchValue string, ok bool) {
+// resolveLatchGrade returns the grade name latched for this session on this
+// route and the raw latch value, if any. For grade-based escalation the latch
+// target may be encoded as "grade:<name>" (see recordLatchOutcome); otherwise
+// it is resolved through the policy's grade declarations. An expired or
+// missing latch returns ("", "", false).
+func resolveLatchGrade(state RouteState, sessionKey, route string, policy RoutePolicy, now time.Time) (grade string, latchValue string, ok bool) {
 	if sessionKey == "" || policy.Escalation == nil || !policy.HasGrades() {
 		return "", "", false
 	}
-	latch, found := state.LatchValue(sessionKey)
+	latch, found := state.LatchValue(sessionKey, route)
 	if !found {
 		return "", "", false
 	}
@@ -372,12 +399,22 @@ func (p pipeline) applyRoutePolicyGrades(
 		}
 	}
 
-	latchedGrade, latchValue, latched := resolveLatchGrade(p.state, sessionKey, policy, now)
+	latchedGrade, latchValue, latched := resolveLatchGrade(p.state, sessionKey, exposed, policy, now)
 
 	selectorRes := gradeSelectorResult{mode: "off", action: "none"}
 	var selectorChoice string
 	if policy.Selector != nil && !latched {
-		selectorRes = p.applyRouteSelectorForGrades(ctx, filtered, policy, profile, origBody, proto, runtime, sessionKey, clientSession, requestID, agent, exposed, calledModel)
+		// At most one decisions call per request: later wait-retry rounds reuse
+		// the cached grade choice. buildGradeOrdered already tolerates a
+		// selected grade with no representatives in the re-scheduled set, so the
+		// cached choice is safe to re-apply as-is.
+		if st.selectorComputed {
+			selectorRes = st.gradeSel
+		} else {
+			selectorRes = p.applyRouteSelectorForGrades(ctx, filtered, policy, profile, origBody, proto, runtime, sessionKey, clientSession, requestID, agent, exposed, calledModel)
+			st.gradeSel = selectorRes
+			st.selectorComputed = true
+		}
 		if selectorRes.action == "enforce" {
 			selectorChoice = selectorRes.choiceGrade
 		}
@@ -449,11 +486,43 @@ func filterGradeTargets(targets []RouteTarget, cfg *Config, parentOf map[string]
 	return out
 }
 
+// routeSelector applies the route-tier selector at most once per request: the
+// first serveOnce pass pays the decisions call and caches the outcome in
+// serveState; later wait-retry rounds re-apply the cached preference to their
+// (possibly re-scheduled) ordered set via reapply instead of calling the
+// decisions model again. This keeps the "at most one decisions call per
+// request" contract the same way rawProfile caches the body scan.
+func (p pipeline) routeSelector(
+	st *serveState,
+	ctx context.Context,
+	ordered []RouteTarget,
+	policy RoutePolicy,
+	profile routing.Profile,
+	parentOf map[string]string,
+	body []byte,
+	proto string,
+	runtime Snapshot,
+	sessionKey string,
+	clientSession string,
+	requestID string,
+	agent string,
+	exposed string,
+	calledModel string,
+) routeSelectorResult {
+	if st.selectorComputed {
+		return st.routeSel.reapply(ordered, parentOf)
+	}
+	res := p.applyRouteSelector(ctx, ordered, policy, profile, parentOf, body, proto, runtime, sessionKey, clientSession, requestID, agent, exposed, calledModel)
+	st.routeSel = res
+	st.selectorComputed = true
+	return res
+}
+
 // applyRouteSelector asks the route_policy selector (when configured) to pick
 // one target from ordered. In enforce mode with a confident choice, the chosen
 // target is moved to the front via routing.PreferTarget; shadow mode and every
-// failure fall back to the original order. The decisions call is made at most
-// once per request.
+// failure fall back to the original order. Callers must go through
+// routeSelector so the decisions call is made at most once per request.
 func (p pipeline) applyRouteSelector(
 	ctx context.Context,
 	ordered []RouteTarget,
@@ -564,6 +633,7 @@ func (p pipeline) applyRouteSelector(
 
 	res.action = "enforce"
 	preferred := ordered[idx]
+	res.preferred = preferred
 	res.ordered = routing.PreferTarget(ordered, preferred, parentOf)
 	logx.Debugf("[route_policy selector route=%s] enforce choice=%s confidence=%.2f difficulty=%.1f latency=%dms -> prefer %s/%s",
 		exposed, res.choice, res.confidence, res.difficulty, res.latencyMs, preferred.Provider, preferred.Model)

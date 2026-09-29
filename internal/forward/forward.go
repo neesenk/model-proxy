@@ -346,10 +346,13 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	}
 }
 
-// recordLatchOutcome updates the session latch for routes that have an
-// escalation policy. It evaluates the configured bad_signals against the final
-// request outcome:
-//   - upstream_error: terminal pass that neither committed nor lost the client;
+// recordLatchOutcome updates the (session, route) latch for routes that have
+// an escalation policy. It evaluates the configured bad_signals against the
+// final request outcome:
+//   - upstream_error: terminal pass that neither committed nor lost the client.
+//     A client-shape conversion failure (res.conversionErr with no upstream
+//     ever tried) is NOT an upstream error — the request shape is the client's
+//     problem, same as a guard interception, and is skipped entirely;
 //   - empty_ok: committed 200 whose final client-facing response body is zero bytes;
 //   - repeat_turn: the current TurnKey was recently seen for this session+route,
 //     meaning the client resent the same conversational turn and the previous
@@ -360,7 +363,9 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 // an existing latch target for its dwell (hysteresis). Session-less requests and
 // routes without escalation are no-ops. Bad signals are additive within one
 // outcome: a request can contribute more than one bad run if multiple signals
-// fire.
+// fire. The state update itself is ONE atomic RouteState.RecordLatchOutcome
+// call (single runtime.Manager critical section) — no read-modify-write window
+// across requests of the same session.
 func (p pipeline) recordLatchOutcome(req serveRequest, res serveResult) {
 	sessionKey := req.sessionKey
 	if sessionKey == "" {
@@ -370,12 +375,16 @@ func (p pipeline) recordLatchOutcome(req serveRequest, res serveResult) {
 	if !ok || policy.Escalation == nil {
 		return
 	}
+	// Client-shape failure: the request could not be converted for ANY
+	// candidate and no upstream was ever contacted. Counting it as an
+	// upstream_error would let a client retrying one unconvertible request
+	// escalate the latch — it gets the same treatment as a guard
+	// interception (which never reaches this function).
+	if res.conversionErr != nil && len(res.tried) == 0 {
+		return
+	}
 	escalation := policy.Escalation
 	now := time.Now()
-	latch, has := p.state.LatchValue(sessionKey)
-	if has && now.Sub(latch.Since) > escalation.DwellDuration() {
-		has = false
-	}
 
 	signalSet := make(map[string]bool, len(escalation.BadSignals))
 	for _, s := range escalation.BadSignals {
@@ -394,10 +403,8 @@ func (p pipeline) recordLatchOutcome(req serveRequest, res serveResult) {
 	// actually written back to the client total zero. Non-empty JSON that happens
 	// to contain empty content/tool_use is NOT flagged, because it still carries
 	// framing and structure.
-	committedGood := res.committed && !res.clientGone
-	if committedGood && signalSet["empty_ok"] && res.committedBodyBytes == 0 {
+	if res.committed && !res.clientGone && signalSet["empty_ok"] && res.committedBodyBytes == 0 {
 		badCount++
-		committedGood = false
 	}
 
 	// repeat_turn: the client resent the same turn within the dwell window.
@@ -409,37 +416,27 @@ func (p pipeline) recordLatchOutcome(req serveRequest, res serveResult) {
 		}
 	}
 
-	if badCount == 0 {
-		if res.clientGone {
-			return
-		}
-		if res.committed && has {
-			// Good run: clear bad-run counter, keep any latched target/dwell.
-			_ = p.state.SetLatch(sessionKey, Latch{Target: latch.Target, Since: latch.Since, BadRuns: 0}, req.runtime.Generation)
-		}
+	outcome := LatchOutcome{
+		SessionKey:  sessionKey,
+		Route:       req.exposed,
+		Now:         now,
+		Dwell:       escalation.DwellDuration(),
+		Consecutive: escalation.Consecutive,
+		BadSignals:  badCount,
+		// Good run: committed, no bad signal fired — resets the streak of an
+		// existing latch, keeps target/dwell. A client-gone outcome records
+		// nothing at all.
+		Good: badCount == 0 && res.committed && !res.clientGone,
+	}
+	if badCount == 0 && !outcome.Good {
 		return
 	}
-
-	// Bad signal(s): increment the streak.
-	badRuns := 0
-	since := now
-	target := ""
-	if has {
-		badRuns = latch.BadRuns
-		since = latch.Since
-		target = latch.Target
+	if policy.HasGrades() && escalation.Grade != "" {
+		outcome.Target = "grade:" + escalation.Grade
+	} else {
+		outcome.Target = escalation.Target.Provider + "/" + escalation.Target.Model
 	}
-	badRuns += badCount
-	if badRuns >= escalation.Consecutive {
-		if policy.HasGrades() && escalation.Grade != "" {
-			target = "grade:" + escalation.Grade
-		} else {
-			target = escalation.Target.Provider + "/" + escalation.Target.Model
-		}
-		since = now
-		badRuns = 0
-	}
-	_ = p.state.SetLatch(sessionKey, Latch{Target: target, Since: since, BadRuns: badRuns}, req.runtime.Generation)
+	_ = p.state.RecordLatchOutcome(outcome, req.runtime.Generation)
 }
 
 // statusClientGone marks a request abandoned by the CALLER (client closed the
@@ -489,13 +486,21 @@ func (p pipeline) writeAllTargetsFailed(
 	http.Error(w, msg, status)
 }
 
-// serveState carries the two per-request pieces of state that must survive a
+// serveState carries the per-request pieces of state that must survive a
 // cooldown wait-retry round (serveOnce is otherwise re-entrant).
 type serveState struct {
 	retriedForContext bool // the larger-context retry is one-shot per request
 	attempt           int  // monotonic target-attempt index for the request log (ti resets on a context retry)
 	profiled          bool // request profile computed (see requestProfile)
 	profile           routing.Profile
+	// selectorComputed caches the route-tier selector outcome across wait-retry
+	// rounds: the decisions call is paid at most once per request (see
+	// routeSelector / applyRoutePolicyGrades), later rounds re-apply the cached
+	// preference to their re-scheduled ordered set. routeSel and gradeSel are
+	// mutually exclusive per request (a policy either has grades or not).
+	selectorComputed bool
+	routeSel         routeSelectorResult
+	gradeSel         gradeSelectorResult
 	// routing records the route-tier policy decision for this request. It is
 	// set during serveOnce and copied into the attempt's LogCtx so the request
 	// log can persist it. Never fails closed: a nil value simply omits the field.
@@ -620,12 +625,12 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 			if policy.HasGrades() {
 				ordered, st.routing = p.applyRoutePolicyGrades(ordered, policy, st, origBody, sessionKey, r.Context(), proto, runtime, clientSession, requestID, agent, exposed, calledModel)
 			} else {
-				if latchedOrdered, latchDecision, latched := applyRouteLatch(p.state, sessionKey, ordered, policy, parentOf, routeStart); latched {
+				if latchedOrdered, latchDecision, latched := applyRouteLatch(p.state, sessionKey, exposed, ordered, policy, parentOf, routeStart); latched {
 					ordered = latchedOrdered
 					st.routing = latchDecision
 				} else {
 					ordered, st.routing = applyRoutePolicy(ordered, policy, p.rawProfile(st, origBody), parentOf)
-					selectorRes := p.applyRouteSelector(r.Context(), ordered, policy, p.rawProfile(st, origBody), parentOf, origBody, proto, runtime, sessionKey, clientSession, requestID, agent, exposed, calledModel)
+					selectorRes := p.routeSelector(st, r.Context(), ordered, policy, p.rawProfile(st, origBody), parentOf, origBody, proto, runtime, sessionKey, clientSession, requestID, agent, exposed, calledModel)
 					ordered = selectorRes.ordered
 					st.routing = selectorRes.routingDecision(st.routing)
 				}

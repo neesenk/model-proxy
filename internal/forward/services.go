@@ -99,13 +99,15 @@ type RouteState interface {
 	// QuotaFreshnessMaxAge is the quota-snapshot freshness window shared by
 	// the scheduling skip and the failure classification.
 	QuotaFreshnessMaxAge(cfg *Config) time.Duration
-	// LatchValue reads the current latch for sessionKey, if any. The caller
-	// (forward) decides whether the latch has expired.
-	LatchValue(sessionKey string) (Latch, bool)
-	// SetLatch writes the latch for sessionKey, generation-gated. Returns true
-	// when the write was accepted (same generation). The caller uses this for
-	// both outcome recording and explicit clears.
-	SetLatch(sessionKey string, value Latch, generation uint64) bool
+	// LatchValue reads the current latch for (sessionKey, route), if any. The
+	// caller (forward) decides whether the latch has expired.
+	LatchValue(sessionKey, route string) (Latch, bool)
+	// RecordLatchOutcome atomically applies one request outcome to the
+	// (sessionKey, route) latch, generation-gated: the runtime Manager performs
+	// the expiry check, the bad-run streak increment/reset and the escalation
+	// in a single critical section, so concurrent requests of the same session
+	// cannot lose updates. Returns true when the write was accepted.
+	RecordLatchOutcome(outcome LatchOutcome, generation uint64) bool
 	// CheckRepeatTurn reports whether the same conversational turn (turnKey)
 	// was recently observed for this session and route, and records the current
 	// observation. The window is caller-supplied (typically escalation.dwell).

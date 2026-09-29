@@ -78,11 +78,41 @@ func (p Pin) ExpiresLabel(now time.Time) string {
 // Latch is a session-scoped route-tier escalation: after enough consecutive
 // bad runs the session is pinned to Target for the Dwell window. It is memory-
 // only, not persisted, and cleared on ReplaceGeneration — same lifecycle as
-// session sticky.
+// session sticky. Latches are keyed by latchKey (session + route), like the
+// repeat_turn window: one route's bad runs never reset or escalate another's.
 type Latch struct {
 	Target  string    `json:"target"`
 	Since   time.Time `json:"since"`
 	BadRuns int       `json:"bad_runs"`
+}
+
+// latchKey identifies one session's escalation latch on one exposed route.
+type latchKey struct {
+	SessionKey string
+	Route      string
+}
+
+// LatchOutcome is one request outcome applied to the (session, route) latch by
+// Manager.RecordLatchOutcome in a single critical section.
+type LatchOutcome struct {
+	SessionKey string
+	Route      string
+	Now        time.Time
+	// Dwell is the latch expiry window (escalation.dwell): a latch whose Since
+	// is older than Dwell is treated as absent.
+	Dwell time.Duration
+	// Consecutive is the escalation threshold: when the bad-run streak reaches
+	// it, the latch escalates to Target, Since refreshes and the streak resets.
+	Consecutive int
+	// Target is the latch target applied on escalation ("provider/model" or
+	// "grade:<name>"). It is only written when the streak reaches Consecutive.
+	Target string
+	// BadSignals is the number of bad-run increments this outcome contributes
+	// (multiple configured bad signals may fire on one outcome).
+	BadSignals int
+	// Good marks a committed run with no bad signals: it resets the bad-run
+	// streak of an existing latch but keeps Target/Since (hysteresis).
+	Good bool
 }
 
 // repeatTurnKey identifies one session's routing window on one exposed route.
