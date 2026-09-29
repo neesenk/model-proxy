@@ -1,12 +1,18 @@
 package login
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/display"
+	"model-proxy/internal/probe"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/upstreamproxy"
 )
 
 // apiKeyValidationURL returns the endpoint used to validate an API key at login:
@@ -17,6 +23,10 @@ import (
 // one validate against openai_base_url/models (qwen-plan) or, for pure-decisions
 // providers (typesafe), decisions_base_url/models. Shared by the
 // "Validating…" message gate and AddApikeyAccount's ValidateKeyBearerGET call.
+// Providers whose resolved endpoint is public and auth-ignoring
+// (keyProbeRequired) do NOT use it — AddApikeyAccount validates those with a
+// real model request instead; the gate still holds (validation happens, just
+// not as a GET on this URL).
 func ApiKeyValidationURL(prov configdomain.Provider) string {
 	if prov.UsageURL != "" {
 		return prov.UsageURL
@@ -42,11 +52,13 @@ func openAIModelsURL(prov configdomain.Provider) string {
 }
 
 // AddApikeyAccount is the non-printing apikey login core: it validates the key
-// against usage_url (if set), dedups by id under the cross-process lock, and
-// writes the pool. Returns the account id. No stdin, no stdout — the CLI shell
-// (or the web layer) handles UX. Callers decide replace semantics: the CLI
-// resolves it via an interactive prompt BEFORE calling this; the web layer
-// passes the client's choice.
+// (usage_url Bearer GET when set, otherwise the provider's key-rejecting
+// surface — /models normally, a minimal real ProbeRequest when /models is
+// public), dedups by id under the cross-process lock, and writes the pool.
+// Returns the account id. No stdin, no stdout — the CLI shell (or the web
+// layer) handles UX. Callers decide replace semantics: the CLI resolves it via
+// an interactive prompt BEFORE calling this; the web layer passes the client's
+// choice.
 //
 // replace=false on an existing id returns "login cancelled" without modifying
 // the pool — callers surface that error as appropriate (CLI prints, the web
@@ -58,8 +70,15 @@ func AddApikeyAccount(cfg *configdomain.Config, name string, prov configdomain.P
 	}
 	// Validate against the usage endpoint if configured. 401/403 = key invalid;
 	// anything else (200, 404, etc.) = key accepted (the endpoint may not exist,
-	// but the key itself was not rejected).
-	if err := ValidateKeyBearerGET(ApiKeyValidationURL(prov), key); err != nil {
+	// but the key itself was not rejected). Providers whose resolved validation
+	// endpoint can NEVER reject a key (ModelsAuthless && no usage_url — e.g.
+	// opencode-go's public /models) skip the Bearer GET entirely and validate
+	// with one minimal real model request instead (validateKeyByRealProbe).
+	if keyProbeRequired(prov) {
+		if err := validateKeyByRealProbe(name, prov, key); err != nil {
+			return "", err
+		}
+	} else if err := ValidateKeyBearerGET(ApiKeyValidationURL(prov), key); err != nil {
 		// The usage endpoint rejected the key. Before giving up, retry against
 		// the provider's OpenAI /models surface: some BigModel-family usage
 		// endpoints (notably the coding-plan quota envelope) reject key shapes
@@ -110,6 +129,66 @@ func AddApikeyAccount(cfg *configdomain.Config, name string, prov configdomain.P
 		}
 		return savePool(name, prov.Provider, pool)
 	})
+}
+
+// keyProbeRequired reports whether the login key validation must send a real
+// model request instead of the cheap Bearer GET: the provider's resolved
+// validation endpoint is public and ignores Authorization (ModelsAuthless —
+// it answers 200 to any Bearer, so it can never reject a bad key) AND there is
+// no usage_url to validate against instead. Driven by the property "the
+// validation endpoint cannot reject a key", not by provider id: if such an
+// upstream later adds auth to /models (ModelsAuthless entry removed) or gains
+// a usage_url, validation returns to the GET path with no code change here.
+func keyProbeRequired(prov configdomain.Provider) bool {
+	return prov.UsageURL == "" && provider.ModelsAuthless(prov.Provider)
+}
+
+// validateKeyByRealProbe validates a key by sending ONE minimal real model
+// request — the provider's own ProbeRequest shape against openai_base_url —
+// with the candidate key bound as the credential. Verdicts mirror
+// ValidateKeyBearerGET: 401/403 or a business-envelope auth failure = key
+// rejected; a build/auth/network error = rejected (fail-closed, same as the
+// GET path); any other status (200, 400, 402, 429, …) = accepted — the key was
+// not rejected, which is all login validation can claim. Fail-closed with a
+// clear error when the config has no model to probe with or no openai base.
+func validateKeyByRealProbe(name string, prov configdomain.Provider, key string) error {
+	if len(prov.Models) == 0 {
+		return fmt.Errorf("validation failed: provider %q has no models configured to probe the key against", name)
+	}
+	if prov.OpenAIBaseURL == "" {
+		return fmt.Errorf("validation failed: provider %q has no openai_base_url to probe the key against", name)
+	}
+	impl, err := provider.New(&provider.Config{
+		ProviderID:    prov.Provider,
+		ProviderName:  name,
+		OpenAIBaseURL: prov.OpenAIBaseURL,
+		Headers:       prov.Headers,
+		UsageURL:      prov.UsageURL,
+		BoundAPIKey:   key, // in-memory binding: the candidate key, never a stored one
+		Models:        prov.Models,
+	}, name)
+	if err != nil || impl == nil {
+		return fmt.Errorf("validation failed: build provider %q: %w", name, err)
+	}
+	pr := impl.ProbeRequest(prov.Models[0])
+	client := &http.Client{Timeout: 15 * time.Second, Transport: upstreamproxy.AutoTransport()}
+	rep, err := probe.Do(context.Background(), client, prov, impl, probe.Request{
+		BaseURL: prov.OpenAIBaseURL,
+		Method:  pr.Method,
+		Path:    pr.Path,
+		Body:    pr.Body,
+	})
+	if err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+	if rep.Status == http.StatusUnauthorized || rep.Status == http.StatusForbidden {
+		return fmt.Errorf("validation failed: HTTP %d: %s", rep.Status, display.Truncate(string(rep.Body), 200))
+	}
+	if code, ok := envelopeAuthFailure(rep.Body); ok {
+		return fmt.Errorf("validation failed: HTTP %d (envelope code %d): %s",
+			rep.Status, code, display.Truncate(string(rep.Body), 200))
+	}
+	return nil
 }
 
 // RemoveApikeyAccount removes the account with the given id from the named

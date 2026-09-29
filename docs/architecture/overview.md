@@ -207,7 +207,7 @@ Save 必须覆盖并 canonical 地恢复全部原 ID，未处理账号只能通�
 （`AqpClient` 的 cookie jar、bootstrap、session 轮询、API key 申领）以及
 apikey/volcengine 池的校验→去重→写入/删除（`AddApikeyAccount` /
 `AddVolcengineAccount` / `RemoveApikeyAccount` / `ValidateKeyBearerGET` /
-`FetchVisibleModels` / `LatestAPIKey` / `PoolPath`）。核心只返回值与 error，
+`validateKeyByRealProbe` / `FetchVisibleModels` / `LatestAPIKey` / `PoolPath`）。核心只返回值与 error，
 不读 stdin、不打印；Web 层（`internal/app`）直接驱动它。`internal/cli/login`
 是交互 shell：拥有 `login` 命令编排、flag 解析、stdin 提示、终端输出、
 loopback 回调页与 serve daemon 热重载 nudge，并把核心返回值适配为终端 UX。
@@ -591,7 +591,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/mcp → accounts, cli/framework, config, display, mcp, provider, providerbuild, upstreamproxy`（`mcp list`/`mcp test`）；
 - `cli/models → cli/serve, cli/framework, accounts, catalog, config,
   configedit, display, probe, provider, providerbuild, routing, runtime/wirecap, upstreamproxy`；
-- `login → accounts, config, display, provider, observe/logx, upstreamproxy`；
+- `login → accounts, config, display, probe, provider, observe/logx, upstreamproxy`（probe/provider：无 usage_url 且 /models 免鉴权的 provider 登录时以最小真实请求探测 key 有效性）；
 - `config → catalog, pricing, protocol/wire, upstreamproxy`；
 - `fusion → config, observe/logx`；
 - `forward → cache, catalog, config, fusion, guard, guard/session, observe/counters,

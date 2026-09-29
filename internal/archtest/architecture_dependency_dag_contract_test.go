@@ -86,7 +86,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		},
 		"model-proxy/internal/guard":                 nil,
 		"model-proxy/internal/guard/session":         {"model-proxy/internal/guard": true},
-		"model-proxy/internal/login":                 {"model-proxy/internal/display": true, "model-proxy/internal/accounts": true, "model-proxy/internal/config": true, "model-proxy/internal/provider": true, "model-proxy/internal/observe/logx": true, "model-proxy/internal/upstreamproxy": true},
+		"model-proxy/internal/login":                 {"model-proxy/internal/display": true, "model-proxy/internal/accounts": true, "model-proxy/internal/config": true, "model-proxy/internal/probe": true, "model-proxy/internal/provider": true, "model-proxy/internal/observe/logx": true, "model-proxy/internal/upstreamproxy": true},
 		"model-proxy/internal/mcp":                   nil,
 		"model-proxy/internal/observe/budget":        {"model-proxy/internal/config": true, "model-proxy/internal/observe/events": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/observe/logx": true, "model-proxy/internal/pricing": true},
 		"model-proxy/internal/observe/analytics":     {"model-proxy/internal/observe/stats": true, "model-proxy/internal/pricing": true},

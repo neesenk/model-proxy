@@ -34,10 +34,11 @@ import (
 // in the console"), so Quota() returns a BillingUnknown snapshot carrying the
 // console URL + the window structure (the qwen-plan pattern); window
 // exhaustion surfaces reactively as upstream 402/429 → cooldown + failover.
-// /models is PUBLIC and auth-ignoring (200 with an invalid Bearer), so login
-// key validation cannot reject bad keys there — no usage_url is set and a
-// wrong key surfaces at first request instead (401 → auth cooldown +
-// failover).
+// /models is PUBLIC and auth-ignoring (200 with an invalid Bearer) and there is
+// no usage_url, so login key validation cannot use it: login sends one minimal
+// real request instead (this provider's ProbeRequest = POST chat/completions,
+// first config model — see internal/login validateKeyByRealProbe), rejecting on
+// 401/403 / envelope auth failure / network error.
 type OpenCodeGoProvider struct {
 	*ApiKeyBase
 	baseProbe

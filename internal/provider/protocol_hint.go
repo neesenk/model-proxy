@@ -73,10 +73,13 @@ func WireProtocolNote(providerID string) string {
 // is public and ignores Authorization — it answers 200 with no Bearer, an
 // invalid Bearer, anything, so it can NEVER reject a bad key. openrouter's
 // GET /api/v1/models is the documented case (backend-contracts.md); opencode-
-// go's /models is public too (it has no usage_url, so login validation there
-// is a documented no-op). Login consults this before falling back from a
-// rejecting usage endpoint to /models — an authless surface would rubber-stamp
-// any garbage key the usage endpoint just rejected.
+// go's /models is public too. Login consults this twice: (1) before falling
+// back from a rejecting usage endpoint to /models — an authless surface would
+// rubber-stamp any garbage key the usage endpoint just rejected; (2) when
+// there is no usage_url at all (opencode-go), where the /models Bearer GET
+// would be the PRIMARY validation — those logins switch to one minimal real
+// model request (the provider's ProbeRequest) that can actually reject the key
+// (internal/login validateKeyByRealProbe).
 func ModelsAuthless(providerID string) bool {
 	switch providerID {
 	case "openrouter", "opencode-go":
