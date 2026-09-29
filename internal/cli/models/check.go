@@ -61,18 +61,21 @@ type DropReason struct {
 // probe-shape are wired exactly as in the live proxy) and probes concurrently
 // (bounded by probeConcurrency). A model is kept when ANY protocol leg
 // classifies Yes. The freshly-probed matrix is persisted (best-effort) to
-// model_caps.json, replacing this provider's entry. A build failure (e.g.
+// model_caps.json, replacing this provider's entry; `capsPersisted` reports
+// whether the verdicts actually LANDED on disk (false when there was nothing
+// to write or the write failed — the daemon must not be signalled to re-read
+// the file in that case). A build failure (e.g.
 // not logged in) returns an error - the caller should fall back to keeping
 // all ids rather than silently dropping them (nothing is persisted in that
 // case).
-func CheckProviderModels(cfg *configdomain.Config, provName string, ids, disabledIDs []string) (kept []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, err error) {
+func CheckProviderModels(cfg *configdomain.Config, provName string, ids, disabledIDs []string) (kept []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, capsPersisted bool, err error) {
 	provCfg, ok := cfg.Providers[provName]
 	if !ok {
-		return nil, nil, nil, fmt.Errorf("unknown provider %q", provName)
+		return nil, nil, nil, false, fmt.Errorf("unknown provider %q", provName)
 	}
 	impl, err := ProviderImplFor(cfg, provName)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, false, err
 	}
 	disabled := disabledSet(disabledIDs)
 	probeIDs := make([]string, 0, len(ids))
@@ -126,8 +129,8 @@ func CheckProviderModels(cfg *configdomain.Config, provName string, ids, disable
 			kept = append(kept, id)
 		}
 	}
-	persistModelCaps(provName, provCfg, protocols, disabledSet(disabledIDs))
-	return kept, dropped, protocols, nil
+	capsPersisted = persistModelCaps(provName, provCfg, protocols, disabledSet(disabledIDs))
+	return kept, dropped, protocols, capsPersisted, nil
 }
 
 // checkDecisionsProviderModels is CheckProviderModels for decisions-protocol
@@ -143,7 +146,7 @@ func checkDecisionsProviderModels(
 	impl provider.Provider,
 	client *http.Client,
 	ids, disabledIDs []string,
-) (kept []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, err error) {
+) (kept []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, capsPersisted bool, err error) {
 	disabled := disabledSet(disabledIDs)
 	protocols = make(map[string]runtimewire.ModelProtocols, len(ids))
 	for _, id := range ids {
@@ -160,8 +163,8 @@ func checkDecisionsProviderModels(
 			dropped = append(dropped, DropReason{Model: id, Status: status, Reason: "decisions " + reason})
 		}
 	}
-	persistModelCaps(provName, provCfg, protocols, disabled)
-	return kept, dropped, protocols, nil
+	capsPersisted = persistModelCaps(provName, provCfg, protocols, disabled)
+	return kept, dropped, protocols, capsPersisted, nil
 }
 
 // disabledSet is the CLI-side twin of the daemon pass's set builder: one

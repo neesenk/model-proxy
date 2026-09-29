@@ -135,6 +135,14 @@
     页照常按会话聚合——排查"为什么没拉黑"先查客户端发的是不是 claude-code 头。
     统一成单一解析点是长期方向；短期改动 guard 域会话键时必须同步
     decision 20/36 的"无头不拉黑"约束。
+33. `model_caps.json` 有**两个无协调的写进程**（CLI `models refresh` 与 daemon 的
+    async persist，各自原子 rename）：CLI 写文件 → SIGHUP 的窗口内，daemon 一个早先
+    触发的 async persist 若抢在 reload 重读前执行，会用较旧的内存快照覆盖 CLI 的结论。
+    daemon 侧的协调是 mtime 基准守卫（`Proxy.modelCapsFileBaseline`）：persist 写盘前
+    stat 目标，比 boot restore/最近 reload 重读记录的基准新即跳过（外部写者写过），
+    基准在每次读盘与自身成功写盘后更新。守卫只防覆盖、不采纳——采纳仍靠 reload 重读。
+    stat→rename 之间仍有固有 TOCTOU 残窗，两个不加锁的进程无法彻底消除；不要给这个
+    文件加跨进程锁来"修"它（CLI 是短命进程，锁文件 lifecycle 比竞态本身更危险）。
 
 ## 测试与 CI
 

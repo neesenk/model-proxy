@@ -177,6 +177,13 @@ func TestClassifyModelStatus(t *testing.T) {
 		{"401 auth", true, 401, nil, "", Unknown},
 		{"429 quota", true, 429, nil, "", Unknown},
 		{"429 rate wording stays unknown", true, 429, nil, `{"error":{"code":"1302","message":"Concurrency limit reached / 当前API调用次数超出限额"}}`, Unknown},
+		// Generic model-rejection wordings are 400-only: a gateway/CDN 429 error
+		// page can carry "does not exist"-style boilerplate, and a concluded
+		// model-level no is fingerprint-gated (no TTL) — one misread locks the
+		// leg until the config fingerprint changes.
+		{"429 generic does-not-exist wording stays unknown", true, 429, nil, `{"error":{"message":"The model 'm1' does not exist"}}`, Unknown},
+		{"429 gateway error page stays unknown", true, 429, nil, `<html><head><title>429 Too Many Requests</title></head><body>The requested resource does not exist or is temporarily rate limited.</body></html>`, Unknown},
+		{"429 invalid-model wording stays unknown", true, 429, nil, `invalid model`, Unknown},
 		// BigModel ships plan-permission per-model denials on 429 — a wording-
 		// backed 429 must conclude no, not flap "? unknown" forever.
 		{"429 plan-permission model denial", true, 429, nil, `{"type":"error","error":{"type":"api_error","code":"1311","message":"[1311][当前订阅套餐暂未开放GLM-5.3-FlashX权限][202609280119215eeff65006bf40a9]"}}`, No},

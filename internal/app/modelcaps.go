@@ -26,6 +26,7 @@ import (
 	"context"
 	configdomain "model-proxy/internal/config"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -263,8 +264,43 @@ func (p *Proxy) persistModelCaps() {
 		if p.quota.Stopped() {
 			return
 		}
-		if err := runtimewire.SaveModelCapsFile(p.modelCapsPath, p.modelCaps.Snapshot()); err != nil {
-			logx.Warnf("[modelcaps] persist failed: %v", err)
-		}
+		p.persistModelCapsNow()
 	})
+}
+
+// persistModelCapsNow is the synchronous persist core; persistModelCaps runs
+// it on the quota-tracked goroutine, tests invoke it directly (no lifecycle
+// race). Before writing it stats the target: a file NEWER than
+// modelCapsFileBaseline means an external writer (CLI `models refresh`)
+// published fresher verdicts after the in-memory store's source state was
+// read — overwriting would clobber them with the daemon's older snapshot,
+// so the write is skipped (the refresh-triggered SIGHUP makes reload adopt
+// the file; a missed signal just defers the daemon's next own persist until
+// after the next reload re-baselines). The residual stat→rename window is
+// inherent to two uncoordinated processes; the check collapses the common
+// case (an earlier-triggered persist executing after the CLI's write).
+func (p *Proxy) persistModelCapsNow() {
+	if fi, err := os.Stat(p.modelCapsPath); err == nil &&
+		fi.ModTime().UnixNano() > p.modelCapsFileBaseline.Load() {
+		logx.Debugf("[modelcaps] persist skipped: %s is newer than the in-memory baseline (external write, e.g. `models refresh`); reload will re-read it", p.modelCapsPath)
+		return
+	}
+	if err := runtimewire.SaveModelCapsFile(p.modelCapsPath, p.modelCaps.Snapshot()); err != nil {
+		logx.Warnf("[modelcaps] persist failed: %v", err)
+		return
+	}
+	p.noteModelCapsFileState()
+}
+
+// noteModelCapsFileState re-baselines modelCapsFileBaseline to the file's
+// current mtime (zero when missing/unreadable): called after every read the
+// in-memory store is derived from (boot restore, reload re-read) and after
+// every successful own persist. A zero baseline means "no file seen yet", so
+// any existing file counts as externally written.
+func (p *Proxy) noteModelCapsFileState() {
+	var nanos int64
+	if fi, err := os.Stat(p.modelCapsPath); err == nil {
+		nanos = fi.ModTime().UnixNano()
+	}
+	p.modelCapsFileBaseline.Store(nanos)
 }

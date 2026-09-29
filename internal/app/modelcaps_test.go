@@ -751,3 +751,140 @@ func TestModelCaps_DisabledModelsNotProbed(t *testing.T) {
 		t.Errorf("m2 = %+v (ok=%v), want frozen verdict preserved verbatim", mp, ok)
 	}
 }
+
+// TestModelCaps_AsyncPersistDoesNotClobberExternalWrite: the CLI `models
+// refresh` writes model_caps.json directly and then SIGHUPs the daemon. If
+// one of the daemon's EARLIER-triggered async persists runs in the window
+// between the CLI's write and the reload's disk re-read, it must NOT
+// overwrite the file with the daemon's older in-memory snapshot (the
+// split-brain the reload re-read was added to fix, re-entering through the
+// persist side). The persist must notice the file is newer than the state
+// the in-memory store was derived from and skip.
+func TestModelCaps_AsyncPersistDoesNotClobberExternalWrite(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Write([]byte(`{}`))
+	}))
+	defer up.Close()
+	statePath := filepath.Join(t.TempDir(), "quota_state.json")
+	capsPath := runtimewire.ModelCapsPath(statePath)
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"p": {OpenAIBaseURL: up.URL, Provider: "static", Models: []string{"m1"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	p := newTestProxyAt(t, cfg, statePath)
+	fp := providerbuild.ProtocolConfigFingerprint(cfg.Providers["p"])
+
+	// The daemon's in-memory snapshot is OLDER and inconclusive (a throttled
+	// pass left the chat leg unknown).
+	p.modelCaps.Put("p", fp, "m1", runtimewire.ModelProtocols{Chat: runtimewire.Unknown, Anthropic: runtimewire.No, Responses: runtimewire.No}, time.Now())
+
+	// The CLI (an external writer) persists fresh concluded verdicts.
+	if err := runtimewire.SaveModelCapsFile(capsPath, map[string]runtimewire.ProviderModelCaps{
+		"p": {Fingerprint: fp, ProbedAt: time.Now(), Models: map[string]runtimewire.ModelProtocols{
+			"m1": {Chat: runtimewire.Yes, Anthropic: runtimewire.Yes, Responses: runtimewire.No},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// An earlier-triggered async persist executes now — before any reload
+	// re-read could adopt the CLI's verdicts. (Synchronous core: the async
+	// wrapper's scheduling is quota-tracker plumbing, not under test.)
+	p.persistModelCapsNow()
+
+	loaded, err := runtimewire.LoadModelCapsFile(capsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded["p"].Models["m1"]; got.Chat != runtimewire.Yes || got.Anthropic != runtimewire.Yes {
+		t.Errorf("file after async persist = chat:%s anthropic:%s, want the CLI's yes/yes preserved — the daemon's stale snapshot clobbered the external write",
+			got.Chat, got.Anthropic)
+	}
+}
+
+// TestModelCaps_AsyncPersistWritesWhenNoExternalWrite: the skip guard must
+// not suppress the daemon's own persists — with no external writer the
+// in-memory snapshot lands on disk as before.
+func TestModelCaps_AsyncPersistWritesWhenNoExternalWrite(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Write([]byte(`{}`))
+	}))
+	defer up.Close()
+	statePath := filepath.Join(t.TempDir(), "quota_state.json")
+	capsPath := runtimewire.ModelCapsPath(statePath)
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"p": {OpenAIBaseURL: up.URL, Provider: "static", Models: []string{"m1"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	p := newTestProxyAt(t, cfg, statePath)
+	fp := providerbuild.ProtocolConfigFingerprint(cfg.Providers["p"])
+	p.modelCaps.Put("p", fp, "m1", runtimewire.ModelProtocols{Chat: runtimewire.Yes, Anthropic: runtimewire.No, Responses: runtimewire.No}, time.Now())
+
+	p.persistModelCapsNow()
+
+	loaded, err := runtimewire.LoadModelCapsFile(capsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded["p"].Models["m1"]; got.Chat != runtimewire.Yes {
+		t.Errorf("file after async persist = %+v, want the daemon's own snapshot persisted (chat:yes)", got)
+	}
+}
+
+// TestModelCaps_PersistProceedsAfterReloadBaseline: a reload re-reads the
+// file and re-baselines it; the daemon's own persists AFTER the reload must
+// still write (the skip guard compares against the re-read state, not
+// against the reload act itself) — e.g. a runtime 404 correction right after
+// a CLI-triggered reload must reach disk.
+func TestModelCaps_PersistProceedsAfterReloadBaseline(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Write([]byte(`{}`))
+	}))
+	defer up.Close()
+	statePath := filepath.Join(t.TempDir(), "quota_state.json")
+	capsPath := runtimewire.ModelCapsPath(statePath)
+	cfgFile := filepath.Join(filepath.Dir(statePath), "config.yaml")
+	if err := os.WriteFile(cfgFile, []byte("providers:\n  p: {provider_id: static, openai_base_url: "+up.URL+"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"p": {OpenAIBaseURL: up.URL, Provider: "static", Models: []string{"m1"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	p := newTestProxyAt(t, cfg, statePath)
+	fp := providerbuild.ProtocolConfigFingerprint(cfg.Providers["p"])
+
+	// The CLI writes fresh verdicts and the daemon reloads (adopting them).
+	if err := runtimewire.SaveModelCapsFile(capsPath, map[string]runtimewire.ProviderModelCaps{
+		"p": {Fingerprint: fp, ProbedAt: time.Now(), Models: map[string]runtimewire.ModelProtocols{
+			"m1": {Chat: runtimewire.Yes, Anthropic: runtimewire.Yes, Responses: runtimewire.Yes},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Reload(cfgFile); err != nil {
+		t.Fatal(err)
+	}
+
+	// A runtime correction (e.g. the model-level 404 correction) lands in the
+	// in-memory store and must reach disk via the normal async persist.
+	p.modelCaps.Put("p", fp, "m1", runtimewire.ModelProtocols{Chat: runtimewire.Yes, Anthropic: runtimewire.Yes, Responses: runtimewire.No}, time.Now())
+	p.persistModelCapsNow()
+
+	loaded, err := runtimewire.LoadModelCapsFile(capsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded["p"].Models["m1"]; got.Responses != runtimewire.No {
+		t.Errorf("file after post-reload persist = %+v, want responses:no (the correction persisted) — the skip guard must not latch", got)
+	}
+}

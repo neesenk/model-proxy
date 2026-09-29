@@ -111,6 +111,19 @@ var modelRejectionPhrases = []string{
 	"unknown model",
 	"no such model",
 	"not supported with this model",
+	// BigModel (zhipu/zcode) plan-permission denial — kept here so a 400
+	// carrying it also concludes no; on 429 it is matched via
+	// planPermissionPhrases (see ClassifyModelStatus).
+	"当前订阅套餐暂未开放",
+}
+
+// planPermissionPhrases are the ONLY wordings that conclude no on a 429:
+// plan/subscription-scoped denials so specific they cannot collide with true
+// rate-limit responses or with gateway/CDN 429 error pages (whose HTML
+// boilerplate can contain generic "does not exist"-style words — matching the
+// full modelRejectionPhrases table on 429 would turn such a transient 429
+// into a fingerprint-gated permanent no).
+var planPermissionPhrases = []string{
 	// BigModel (zhipu/zcode): a plan-level per-model permission denial rides
 	// an HTTP 429 — "[1311][当前订阅套餐暂未开放GLM-5.3-FlashX权限]" — which
 	// the 429→unknown rule left as a PERMANENT "? unknown" (unknown legs
@@ -127,9 +140,11 @@ var modelRejectionPhrases = []string{
 //   - 400 carrying a model-rejection wording → No; any other 400 → Yes (a
 //     shape dispute still proves the route serves the model — deliberately
 //     coarse, same philosophy as the provider level).
-//   - 401/403/429 → Unknown: auth/quota answers prove the route exists but
-//     say nothing about THIS model (unlike the provider level, where they
-//     count as yes).
+//   - 401/403 → Unknown: auth answers prove the route exists but say nothing
+//     about THIS model (unlike the provider level, where they count as yes).
+//   - 429 → Unknown for the same reason, EXCEPT a body carrying a
+//     plan-permission wording (planPermissionPhrases, e.g. BigModel's
+//     "当前订阅套餐暂未开放<model>权限") → No.
 func ClassifyModelStatus(probed bool, status int, err error, body []byte) Verdict {
 	if !probed {
 		return No
@@ -138,7 +153,8 @@ func ClassifyModelStatus(probed bool, status int, err error, body []byte) Verdic
 		return Unknown
 	}
 	// modelRejectionWordings reports whether the body carries a per-model
-	// rejection wording (shared with the 400 branch).
+	// rejection wording (the 400 branch only — 429 scans the narrower
+	// planPermissionPhrases instead).
 	modelRejectionWordings := func() bool {
 		lower := strings.ToLower(string(body))
 		for _, phrase := range modelRejectionPhrases {
@@ -159,12 +175,18 @@ func ClassifyModelStatus(probed bool, status int, err error, body []byte) Verdic
 	case 429:
 		// 429 is normally transient (auth/quota — the route exists but says
 		// nothing about THIS model) → unknown. EXCEPT when the body carries a
-		// per-model rejection wording: BigModel ships plan-permission denials
-		// ("当前订阅套餐暂未开放<model>权限") on 429, and treating those as
-		// unknown leaves a PERMANENT "? unknown" that re-probes forever. A
-		// wording-backed 429 is a concluded no.
-		if modelRejectionWordings() {
-			return No
+		// plan-permission denial: BigModel ships those
+		// ("当前订阅套餐暂未开放<model>权限") on 429, and treating them as
+		// unknown leaves a PERMANENT "? unknown" that re-probes forever. The
+		// scan is deliberately limited to planPermissionPhrases — the generic
+		// rejection table stays 400-only because gateway/CDN 429 error pages
+		// can carry "does not exist"-style boilerplate, and a model-level no
+		// is fingerprint-gated (no TTL): one misread locks the leg.
+		lower := strings.ToLower(string(body))
+		for _, phrase := range planPermissionPhrases {
+			if strings.Contains(lower, phrase) {
+				return No
+			}
 		}
 		return Unknown
 	case 401, 403:

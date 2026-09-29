@@ -241,7 +241,7 @@ type probeAndWriteModelsOps struct {
 	// disabled partitions the policy-kept ids into (probeIDs, disabledIDs):
 	// operator-disabled models are not probed but always kept.
 	disabled func(*configdomain.Config, string, []string) ([]string, []string)
-	probe    func(*configdomain.Config, string, []string, []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, error)
+	probe    func(*configdomain.Config, string, []string, []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, bool, error)
 	// upstreamNames (may be nil): live display names from the provider's
 	// /models (provider.ModelInfoLister), shown in the kept table's NAME
 	// column ahead of the id fallback.
@@ -282,7 +282,7 @@ func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 	// and refresh must not fight it (or burn probe quota on models that are
 	// out of rotation).
 	probeIDs, disabledIDs := ops.disabled(cfg, provName, policyKept)
-	kept, dropped, protocols, perr := ops.probe(cfg, provName, probeIDs, disabledIDs)
+	kept, dropped, protocols, capsPersisted, perr := ops.probe(cfg, provName, probeIDs, disabledIDs)
 	// allProbeFailed is judged on the PROBED outcome only (ops.probe returns
 	// kept WITHOUT the disabled ids) — disabled ids ride along
 	// unconditionally and must not mask a total probe outage.
@@ -336,13 +336,15 @@ func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 		}
 	}
 	// Hot-reload a running daemon when EITHER the config models changed OR the
-	// refresh persisted fresh verdicts (any successful probe pass writes
-	// model_caps.json). The daemon's reload re-reads that file into its
+	// refresh persisted fresh verdicts (capsPersisted — any successful probe
+	// pass whose verdicts LANDED in model_caps.json; a failed persist already
+	// printed a stderr warning and must not signal: the daemon's reload would
+	// re-read the OLD file). The daemon's reload re-reads that file into its
 	// in-memory store — without the signal, a running daemon never sees the
 	// CLI's verdicts until restart, and its next async persist clobbers the
 	// file with the stale copy (the "? unknown" split-brain). No-op when no
 	// daemon runs. Mirrors login/logout.
-	if configChanged || (perr == nil && len(protocols) > 0) {
+	if configChanged || (perr == nil && capsPersisted) {
 		ops.reload(args, cfg)
 	}
 	return nil

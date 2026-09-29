@@ -1,11 +1,14 @@
 package serve
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	configdomain "model-proxy/internal/config"
@@ -65,6 +68,54 @@ func TestMaybeReloadDaemon_ResolvesPidFileFromArgs(t *testing.T) {
 
 	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 		t.Fatalf("stale pid file at --log-file path survived: stat err=%v", err)
+	}
+}
+
+// A live daemon whose SIGHUP fails (signal delivery refused) must surface a
+// stderr warning: without it the fresh config/credential write silently waits
+// for the next reload, and the user has no idea the daemon is running stale.
+func TestMaybeReloadDaemon_WarnsWhenSIGHUPFails(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "daemon.log")
+	pidPath := PidFilePath(logFile)
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	signalErr := errors.New("operation not permitted")
+	var sighupSent bool
+	signalFn := func(_ *os.Process, sig syscall.Signal) error {
+		if sig == syscall.SIGHUP {
+			sighupSent = true
+			return signalErr
+		}
+		return nil // liveness probe: process exists
+	}
+
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	done := make(chan string)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+	maybeReloadDaemon([]string{"--log-file", logFile}, &configdomain.Config{}, signalFn)
+	w.Close()
+	os.Stderr = orig
+	out := <-done
+
+	if !sighupSent {
+		t.Fatal("SIGHUP was never attempted on a live daemon")
+	}
+	if !strings.Contains(out, fmt.Sprintf("%d", os.Getpid())) || !strings.Contains(out, signalErr.Error()) {
+		t.Errorf("stderr = %q, want a warning naming the pid and the signal error", out)
+	}
+	// A failed SIGHUP must not be misread as a stale pid file.
+	if _, err := os.Stat(pidPath); err != nil {
+		t.Errorf("pid file removed after a mere SIGHUP failure: %v", err)
 	}
 }
 

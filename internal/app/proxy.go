@@ -123,6 +123,16 @@ type processServices struct {
 	// state path). Same leaf-lock + survives-reload discipline as wireCaps.
 	modelCaps     runtimewire.ModelStore
 	modelCapsPath string
+	// modelCapsFileBaseline is the mtime (UnixNano) of the on-disk
+	// model_caps.json state the in-memory ModelStore was last derived from —
+	// recorded at boot restore and at every reload re-read — or of the
+	// daemon's own last successful persist. An async persist whose target
+	// file is NEWER than this baseline skips the write: a CLI `models
+	// refresh` (or any external writer) published fresher verdicts, and
+	// overwriting them with the daemon's older snapshot would resurrect the
+	// split-brain the reload re-read fixed. Atomic: written by boot/reload
+	// (outside p.mu), read+updated by the quota-tracked persist goroutine.
+	modelCapsFileBaseline atomic.Int64
 	// wireProbeMu serializes wire/model probe passes. Rapid SIGHUP storms each
 	// dispatch a pass; unserialized passes probe the same rate-limited
 	// upstreams concurrently, stacking 429 bursts (the observed zcode/zhipu
@@ -409,6 +419,10 @@ func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 	} else if len(loaded) > 0 {
 		p.modelCaps.Restore(loaded, protocolFingerprints(cfg))
 	}
+	// Baseline the async-persist skip guard at whatever the boot restore just
+	// saw on disk (zero when the file is absent): a CLI refresh writing after
+	// this point counts as an external write.
+	p.noteModelCapsFileState()
 	return p
 }
 

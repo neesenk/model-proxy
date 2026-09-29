@@ -303,9 +303,12 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 		},
 	}
 	ids := []string{"keep-a", "drop-b", "resp-only-c", "drop-d", "keep-e"}
-	kept, dropped, protocols, err := CheckProviderModels(cfg, "zhipu", ids, nil)
+	kept, dropped, protocols, capsPersisted, err := CheckProviderModels(cfg, "zhipu", ids, nil)
 	if err != nil {
 		t.Fatalf("checkProviderModels: %v", err)
+	}
+	if !capsPersisted {
+		t.Error("capsPersisted = false, want true (fresh matrix landed on disk)")
 	}
 	wantKept := []string{"keep-a", "resp-only-c", "keep-e"}
 	if len(kept) != len(wantKept) {
@@ -392,7 +395,7 @@ func TestCheckProviderModels_NotLoggedInAllDropped(t *testing.T) {
 			"zhipu": {OpenAIBaseURL: srv.URL, Provider: "zhipu"},
 		},
 	}
-	kept, dropped, _, err := CheckProviderModels(cfg, "zhipu", []string{"glm-5.2"}, nil)
+	kept, dropped, _, _, err := CheckProviderModels(cfg, "zhipu", []string{"glm-5.2"}, nil)
 	if err != nil {
 		t.Fatalf("not-logged-in: want no error (impl builds file-backed), got %v", err)
 	}
@@ -811,7 +814,7 @@ func TestCheckProviderModels_DisabledNotProbed(t *testing.T) {
 	}
 
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"zhipu": provCfg}}
-	kept, dropped, protocols, err := CheckProviderModels(cfg, "zhipu", []string{"live", "off", "dead"}, []string{"off"})
+	kept, dropped, protocols, _, err := CheckProviderModels(cfg, "zhipu", []string{"live", "off", "dead"}, []string{"off"})
 	if err != nil {
 		t.Fatalf("checkProviderModels: %v", err)
 	}

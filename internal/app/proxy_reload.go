@@ -51,6 +51,11 @@ func (p *Proxy) Reload(configPath string) error {
 	if modelCapsOnDisk == nil {
 		modelCapsOnDisk = p.modelCaps.Snapshot()
 	}
+	// Re-baseline the async-persist skip guard at the just-read file state
+	// (outside p.mu — the stat is file I/O): persists from here on may write
+	// again, while a CLI refresh racing AHEAD of this read still counts as
+	// newer and is not clobbered by an in-flight older persist.
+	p.noteModelCapsFileState()
 	// AuthReady may read the credential store (file I/O, or the OS keychain
 	// under credentials: keychain) — evaluate it here, OUTSIDE the write lock,
 	// and hand the locked route compilation the precomputed set (same

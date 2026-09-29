@@ -28,11 +28,11 @@ func TestProbeAndWriteModelsProbeErrorKeepsAndWritesCandidates(t *testing.T) {
 			return []string{"old-model", "candidate-b", "candidate-a"}, []string{"policy-drop"}
 		},
 		disabled: func(_ *configdomain.Config, _ string, ids []string) ([]string, []string) { return ids, nil },
-		probe: func(gotCfg *configdomain.Config, provider string, ids, _ []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, error) {
+		probe: func(gotCfg *configdomain.Config, provider string, ids, _ []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, bool, error) {
 			if gotCfg != cfg || provider != "aqp" || !reflect.DeepEqual(ids, []string{"old-model", "candidate-b", "candidate-a"}) {
 				t.Fatalf("probe args = (%p, %q, %v)", gotCfg, provider, ids)
 			}
-			return nil, []DropReason{{Model: "must-be-cleared", Status: 401}}, nil, probeErr
+			return nil, []DropReason{{Model: "must-be-cleared", Status: 401}}, nil, false, probeErr
 		},
 		display: func(gotCfg *configdomain.Config, provider string, policyDropped []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, upstreamNames map[string]string, perr error, allFailed bool) {
 			displayCalls++
@@ -102,8 +102,8 @@ func TestProbeAndWriteModelsAllProbeFailedDoesNotWipe(t *testing.T) {
 			return []string{"old-model", "candidate-b", "candidate-a"}, nil
 		},
 		disabled: func(_ *configdomain.Config, _ string, ids []string) ([]string, []string) { return ids, nil },
-		probe: func(_ *configdomain.Config, _ string, ids, _ []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, error) {
-			return nil, probeDrops, probeMatrix, nil
+		probe: func(_ *configdomain.Config, _ string, ids, _ []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, bool, error) {
+			return nil, probeDrops, probeMatrix, true, nil
 		},
 		display: func(gotCfg *configdomain.Config, provider string, _ []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, _ map[string]string, perr error, allFailed bool) {
 			if perr != nil || !allFailed {
@@ -151,8 +151,8 @@ func TestProbeAndWriteModelsWriteFailureDoesNotReload(t *testing.T) {
 			return []string{"new-model"}, nil
 		},
 		disabled: func(_ *configdomain.Config, _ string, ids []string) ([]string, []string) { return ids, nil },
-		probe: func(_ *configdomain.Config, _ string, ids, _ []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, error) {
-			return []string{"new-model"}, nil, nil, nil
+		probe: func(_ *configdomain.Config, _ string, ids, _ []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, bool, error) {
+			return []string{"new-model"}, nil, nil, true, nil
 		},
 		display: func(*configdomain.Config, string, []string, []DropReason, map[string]runtimewire.ModelProtocols, map[string]string, error, bool) {
 		},
@@ -183,10 +183,10 @@ func TestProbeAndWriteModels_ReloadsAfterCapsOnlyPersist(t *testing.T) {
 			return []string{"same-model"}, nil
 		},
 		disabled: func(_ *configdomain.Config, _ string, ids []string) ([]string, []string) { return ids, nil },
-		probe: func(_ *configdomain.Config, _ string, ids, _ []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, error) {
+		probe: func(_ *configdomain.Config, _ string, ids, _ []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, bool, error) {
 			return []string{"same-model"}, nil, map[string]runtimewire.ModelProtocols{
 				"same-model": {Chat: runtimewire.Yes, Anthropic: runtimewire.No, Responses: runtimewire.No},
-			}, nil
+			}, true, nil
 		},
 		display: func(*configdomain.Config, string, []string, []DropReason, map[string]runtimewire.ModelProtocols, map[string]string, error, bool) {
 		},
@@ -214,8 +214,8 @@ func TestProbeAndWriteModels_NoReloadOnProbeErrorWithoutChange(t *testing.T) {
 			return []string{"same-model"}, nil
 		},
 		disabled: func(_ *configdomain.Config, _ string, ids []string) ([]string, []string) { return ids, nil },
-		probe: func(_ *configdomain.Config, _ string, ids, _ []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, error) {
-			return nil, nil, nil, errors.New("provider unavailable")
+		probe: func(_ *configdomain.Config, _ string, ids, _ []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, bool, error) {
+			return nil, nil, nil, false, errors.New("provider unavailable")
 		},
 		display: func(*configdomain.Config, string, []string, []DropReason, map[string]runtimewire.ModelProtocols, map[string]string, error, bool) {
 		},
@@ -227,6 +227,40 @@ func TestProbeAndWriteModels_NoReloadOnProbeErrorWithoutChange(t *testing.T) {
 	}
 	if reloadCalls != 0 {
 		t.Fatalf("reload calls = %d, want 0 (nothing persisted, nothing changed)", reloadCalls)
+	}
+}
+
+// TestProbeAndWriteModels_NoReloadWhenCapsPersistFails: the probe ran and
+// produced a fresh matrix, but persisting it to model_caps.json FAILED — the
+// daemon must NOT be signalled: a SIGHUP would make it re-read the OLD file
+// (or clobber nothing), i.e. the reload condition is "verdicts landed on
+// disk", not merely "the probe succeeded". The persist failure itself is
+// already surfaced to the user by persistModelCaps's stderr warning.
+func TestProbeAndWriteModels_NoReloadWhenCapsPersistFails(t *testing.T) {
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
+		"aqp": {Models: []string{"same-model"}},
+	}}
+	reloadCalls := 0
+	ops := probeAndWriteModelsOps{
+		filter: func(*configdomain.Config, string, []string) ([]string, []string) {
+			return []string{"same-model"}, nil
+		},
+		disabled: func(_ *configdomain.Config, _ string, ids []string) ([]string, []string) { return ids, nil },
+		probe: func(_ *configdomain.Config, _ string, ids, _ []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, bool, error) {
+			return []string{"same-model"}, nil, map[string]runtimewire.ModelProtocols{
+				"same-model": {Chat: runtimewire.Yes, Anthropic: runtimewire.No, Responses: runtimewire.No},
+			}, false, nil // fresh matrix probed, but the persist failed
+		},
+		display: func(*configdomain.Config, string, []string, []DropReason, map[string]runtimewire.ModelProtocols, map[string]string, error, bool) {
+		},
+		write:  func(string, string, []string) error { t.Fatal("write must not run: models unchanged"); return nil },
+		reload: func([]string, *configdomain.Config) { reloadCalls++ },
+	}
+	if err := probeAndWriteModels(cfg, "aqp", []string{"same-model"}, []string{"same-model"}, nil, nil, "config.yaml", ops); err != nil {
+		t.Fatalf("probeAndWriteModels: %v", err)
+	}
+	if reloadCalls != 0 {
+		t.Fatalf("reload calls = %d, want 0 (caps persist failed — the daemon must not re-read the stale file)", reloadCalls)
 	}
 }
 
@@ -258,7 +292,7 @@ func TestProbeAndWriteModels_DisabledRideAlongUnprobed(t *testing.T) {
 			}
 			return probeIDs, disabledIDs
 		},
-		probe: func(_ *configdomain.Config, _ string, ids, disabledIDs []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, error) {
+		probe: func(_ *configdomain.Config, _ string, ids, disabledIDs []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, bool, error) {
 			probeInput = ids
 			// The probe seam still RECEIVES the disabled ids (the production
 			// impl uses them only to carry frozen verdicts through the
@@ -273,7 +307,7 @@ func TestProbeAndWriteModels_DisabledRideAlongUnprobed(t *testing.T) {
 				ids[0]: {Chat: runtimewire.Unknown},
 				ids[1]: {Chat: runtimewire.Unknown},
 			}
-			return nil, drops, matrix, nil
+			return nil, drops, matrix, true, nil
 		},
 		display: func(gotCfg *configdomain.Config, _ string, _ []string, dropped []DropReason, _ map[string]runtimewire.ModelProtocols, _ map[string]string, perr error, allFailed bool) {
 			if perr != nil || !allFailed {

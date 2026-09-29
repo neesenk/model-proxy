@@ -299,7 +299,7 @@ You can now use codex-native models (gpt-5.5) through the proxy.
 ### apikey 类（zhipu/deepseek/kimi-code/mimo/qwen-plan/step-plan/typesafe/openrouter/opencode-go，`runApiKeyLoginWithInput`）
 
 - stdout 提示：`Enter API key for <PROVNAME>: `（stdin 读 key）。
-- stderr（当存在可校验端点时）：`Validating API key...`。校验端点由 `apiKeyValidationURL` 解析：配了 `usage_url` 的用它（zhipu/deepseek/**kimi-code** 均配；mimo 无计费端点故不配，回退 `/models`）；**未配 `usage_url` 的回退 `openai_base_url/models`**（qwen-plan/step-plan：无公开用量接口，不配 `usage_url`），openai base 也没有时回退 **`decisions_base_url/models`**（typesafe：纯 decisions provider）。校验 = GET 该端点 with `Authorization: Bearer <key>`；**401/403 或网络错误** → `login failed: validation failed: HTTP <N>: <BODY>`（exit 1，**不写池**）；其余状态码（200/404 等）= key 通过（写池）。usage 拒后的 `/models` 二次回退**只对能拒 key 的 /models 生效**：openrouter 的 `/models` 公开且忽略 Bearer（坏 key 也 200），usage 端点（`/api/v1/key`）拒了就是拒了（`provider.ModelsAuthless`，opencode-go 同列；后者无 `usage_url`，校验本身就是对公开端点的 no-op——契约详见 backend-contracts.md）。
+- stderr（当存在可校验端点时）：`Validating API key...`。校验端点由 `apiKeyValidationURL` 解析：配了 `usage_url` 的用它（zhipu/deepseek/**kimi-code** 均配；mimo 无计费端点故不配，回退 `/models`）；**未配 `usage_url` 的回退 `openai_base_url/models`**（qwen-plan/step-plan：无公开用量接口，不配 `usage_url`），openai base 也没有时回退 **`decisions_base_url/models`**（typesafe：纯 decisions provider）。校验 = GET 该端点 with `Authorization: Bearer <key>`；**401/403 或网络错误** → `login failed: validation failed: HTTP <N>: <BODY>`（exit 1，**不写池**）；其余状态码（200/404 等）= key 通过（写池）。usage 拒后的 `/models` 二次回退**只对能拒 key 的 /models 生效**：openrouter 的 `/models` 公开且忽略 Bearer（坏 key 也 200），usage 端点（`/api/v1/key`）拒了就是拒了（`provider.ModelsAuthless`，opencode-go 同列）。**`ModelsAuthless` 且无 `usage_url`**（opencode-go）时校验端点永远不能拒 key，登录跳过 Bearer GET、改用候选 key 发一次最小真实请求（provider `ProbeRequest` → `openai_base_url/chat/completions`，第一个 config 模型）：401/403/信封鉴权失败/网络错误 → `login failed: validation failed: …`（exit 1，不写池），其余状态放行——契约详见 backend-contracts.md。
 - 重复 id 且非 `--replace` -> stdout 提示 `Account "<LABEL>" is already logged in. Replace its key? [y/N] `；答非 y -> `login cancelled`（exit 1）。
 - 成功 stdout：`✓ Saved account <MASKED_ID> (<LABEL>)`（绿）。
 
@@ -490,7 +490,7 @@ provider: <PROVNAME>: <N> models
 ```
 列宽：MODEL ID 26 / NAME 20 / CTX 10 / OUTPUT 8 / INPUT MODALITIES 18 / SRC 10 / PROTOCOLS 12。空集 -> stdout `(no models)`（黄）。`PROTOCOLS` 直接取本次探测刚算出的矩阵（不经文件往返），渲染规则同 `models` 列表。**NAME 列优先显示上游自报的 display name**（本次 fetch 的 live 数据，仅 ModelInfoLister provider 有），回落到 id——上游在稳定 id 背后换模型时，这里是唯一可见信号。
 
-**探测与 model_caps.json**：`checkProviderModels` 对每个候选 id 跑 3 协议矩阵探测（`probe.ProbeModelProtocols`：chat / anthropic / responses 腿，anthropic 腿仅在配置 `anthropic_base_url` 时探测），每腿经 `wirecap.ClassifyModelStatus` 归类 Yes/No/Unknown。**任一腿 Yes 即保留**，否则 drop（operator disabled 的 model 不探测且无条件保留——disable 是轮换选择不是能力事实，其已存 verdict 原样保留在 model_caps.json；探全失败的 safety net 只按被探测子集判定，disabled rider 不掩盖探测中断）。探测成功后把该 provider 的新鲜矩阵写入 `~/.model-proxy/model_caps.json`（fingerprint = `providerbuild.ProtocolConfigFingerprint`，best-effort：失败仅 stderr 告警，不影响 refresh；`perr` 时不写；同 fingerprint 下未知腿合并回已存结论——`wirecap.MergeOnUnknown`，瞬态 429/超时不再把已结论腿降级为 `? unknown`），并在**模型集有变化或 verdict 已落盘时** SIGHUP 运行中的 daemon（daemon reload 从磁盘重读 model_caps.json，否则 CLI 写入对运行中 daemon 不可见）。
+**探测与 model_caps.json**：`checkProviderModels` 对每个候选 id 跑 3 协议矩阵探测（`probe.ProbeModelProtocols`：chat / anthropic / responses 腿，anthropic 腿仅在配置 `anthropic_base_url` 时探测），每腿经 `wirecap.ClassifyModelStatus` 归类 Yes/No/Unknown。**任一腿 Yes 即保留**，否则 drop（operator disabled 的 model 不探测且无条件保留——disable 是轮换选择不是能力事实，其已存 verdict 原样保留在 model_caps.json；探全失败的 safety net 只按被探测子集判定，disabled rider 不掩盖探测中断）。探测成功后把该 provider 的新鲜矩阵写入 `~/.model-proxy/model_caps.json`（fingerprint = `providerbuild.ProtocolConfigFingerprint`，best-effort：失败仅 stderr 告警，不影响 refresh；`perr` 时不写；同 fingerprint 下未知腿合并回已存结论——`wirecap.MergeOnUnknown`，瞬态 429/超时不再把已结论腿降级为 `? unknown`），并在**模型集有变化或 verdict 已成功落盘时** SIGHUP 运行中的 daemon（daemon reload 从磁盘重读 model_caps.json，否则 CLI 写入对运行中 daemon 不可见；落盘失败仅 stderr 告警且不通知——通知只会让 daemon 重读旧文件）。
 
 **stderr 摘要（`printFilterSummary`，列表之后）**：先空行；有 drop 时：
 ```
@@ -505,7 +505,7 @@ filtered out <N> model(s):
 config: added <N> -> [<ADDED...>]
 config: removed <N> -> [<REMOVED...>]
 ```
-`added`/`removed` 来自 `diffStringSets`，已排序。无变化 -> 不写盘、不打 diff、不 reload。写盘失败 -> stderr `writing models to config: <ERR>` + exit 1（`log.Fatal`）。写盘成功后 `maybeReloadDaemon`。
+`added`/`removed` 来自 `diffStringSets`，已排序。无变化 -> 不写盘、不打 diff、不 reload。写盘失败 -> stderr `writing models to config: <ERR>` + exit 1（`log.Fatal`）。写盘成功后 `maybeReloadDaemon`（无 daemon/陈旧 pid 文件时静默；daemon 存活但 SIGHUP 发送失败时打 stderr `warning: could not signal daemon ... run `model-proxy serve reload``——否则本次写入要等下次 reload 才生效而用户无感知）。
 
 退出码：成功 0；未知 provider / 写盘失败 -> 1。
 

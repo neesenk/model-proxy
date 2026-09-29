@@ -144,11 +144,22 @@ func parsePidFileContents(raw []byte) int {
 
 // MaybeReloadDaemon SIGHUPs a running daemon after a config/credential write
 // so the change takes effect without a manual `serve reload`. Best-effort:
-// silent when no daemon runs, the pid file is stale, or the signal fails.
+// silent when no daemon runs or the pid file is stale; a FAILED SIGHUP to a
+// live daemon prints a stderr warning — otherwise the user never learns the
+// fresh write waits for the next reload (or a daemon restart) to apply.
 // It takes the caller's FULL command args so a daemon started with
 // `--log-file` is found at the pid file that flag derives — deriving from
 // Args{} would silently miss it (same resolution rule as CmdReload).
 func MaybeReloadDaemon(args []string, cfg *configdomain.Config) {
+	maybeReloadDaemon(args, cfg, func(proc *os.Process, sig syscall.Signal) error {
+		return proc.Signal(sig)
+	})
+}
+
+// maybeReloadDaemon is MaybeReloadDaemon with the signal send injectable, so
+// the liveness-probe / SIGHUP outcomes can be exercised without a real
+// daemon process.
+func maybeReloadDaemon(args []string, cfg *configdomain.Config, signal func(*os.Process, syscall.Signal) error) {
 	logFile := ResolveLogFile(ParseArgs(args), cfg)
 	pidPath := PidFilePath(logFile)
 	pidStr, err := os.ReadFile(pidPath)
@@ -163,7 +174,7 @@ func MaybeReloadDaemon(args []string, cfg *configdomain.Config) {
 	if err != nil {
 		return
 	}
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
+	if err := signal(proc, syscall.Signal(0)); err != nil {
 		// EPERM means the process EXISTS but is not signalable by us — treat
 		// it as live and skip the reload signal (it would fail too).
 		if errors.Is(err, os.ErrPermission) {
@@ -173,7 +184,12 @@ func MaybeReloadDaemon(args []string, cfg *configdomain.Config) {
 		os.Remove(pidPath)
 		return
 	}
-	_ = proc.Signal(syscall.SIGHUP)
+	if err := signal(proc, syscall.SIGHUP); err != nil {
+		// The daemon is alive but the reload signal did not land: the write
+		// the caller just persisted stays invisible to it until the next
+		// reload/restart. Say so — this used to fail silently.
+		fmt.Fprintf(os.Stderr, "warning: could not signal daemon (pid %d) to reload: %v; run `model-proxy serve reload` to apply the change\n", pid, err)
+	}
 }
 
 // ReadLivePid reads the pid file derived from logFile and returns the pid of
