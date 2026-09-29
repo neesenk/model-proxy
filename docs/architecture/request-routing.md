@@ -18,7 +18,7 @@ catalog、context overflow retry、route derivation（隐式路由的继任者�
 ## 模块边界
 
 `internal/routing` 是无状态策略包，只允许依赖 `internal/catalog`、
-`internal/config` 与 `internal/provider` 值/接口类型，不得依赖 `Proxy`、`internal/runtime`、
+`internal/config`、`internal/protocol` 与 `internal/provider` 值/接口类型，不得依赖 `Proxy`、`internal/runtime`、
 `internal/targetexec` 或任何 I/O owner。`routing.NewPlanner(PlannerInput)`
 隐藏内部字段；输入来自一次 `RuntimeSnapshot`，generation-owned map 在 reload
 时只交换、不原地修改。
@@ -28,10 +28,10 @@ force-provider 字符串；`internal/forward/plan.go` 的 `requestRoutingSchedul
 config、parent identity、route keys 与 generation，并经注入的 schedule 端口
 （app: `Proxy.schedule`）进入 `internal/runtime.Manager`。`serveOnce` 每个 pass 只构造一个
 Planner，同时用于
-主动 `Apply` 与反应式 `ContextOverflowRetryWithProfile`，禁止重新读取 Proxy 或构造第二份
+主动 `ApplyWithProfile` 与反应式 `ContextOverflowRetryWithProfile`，禁止重新读取 Proxy 或构造第二份
 generation。
 
-`internal/catalog` 作为无仓库内依赖叶子包拥有 models.dev slim projection、
+`internal/catalog` 作为仅依赖上游代理策略叶子 `internal/upstreamproxy` 的元数据源包拥有 models.dev slim projection、
 canonical-owner 去重、HTTP/ETag/TTL 刷新和磁盘缓存。`internal/config/modelscatalog.go` 只注入 HOME
 cache path 与 `MP_MODELSDEV_URL`；Config 中的 provider/route 名单遍历与
 fallback/source 策略由 `internal/routing/model_metadata.go`（`HydrateModels`）拥有。查找顺序：
@@ -203,8 +203,8 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
   采样使用 `Proxy.evalRand`（测试可注入确定性函数），并在 commit 后才做决策；响应体
   在 `CaptureResponse` 时先无条件缓存到 `evalPrimaryBodies`，commit 后若被采样则取走。
 - **配对规则**：`pair` 支持 `opposite`（默认）或 `grade:<name>`。
-  `opposite` 使用档位在配置中首次出现的顺序：主档的下一档为配对档；最后一档回退到
-  前一档。该规则只依赖配置顺序，不依赖价格数据。
+  `opposite` 使用档位在 route 目标链中首次出现的顺序（与调度 fallback `next_grade` 共用 `forward.GradeOrder`，源为该 route 的 expanded target 顺序，非 grades map 迭代序）：主档的下一档为配对档；最后一档回退到
+  前一档。该规则只依赖目标链顺序，不依赖价格数据。
 - **影子请求**：eval 使用与 legacy shadow 同一套 `shadow.Runtime` 并发门和生命周期准入；
   影子目标在配对档内按健康/禁用状态挑选一个可运行目标（含池化虚拟 ID 解析）。
 - **裁判模型**：`judge` 必须是 `protocol: decisions` 的 provider/model，调用

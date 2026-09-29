@@ -151,7 +151,7 @@ func (p *Proxy) dispatchEvalShadow(
 		return
 	}
 
-	shadowGrade, ok := resolveEvalPairGrade(primaryGrade, cfg.Pair, policy.Grades, runtime.ParentOf)
+	shadowGrade, ok := resolveEvalPairGrade(primaryGrade, cfg.Pair, runtime.ExpandedRoutes[exposed], policy.Grades, runtime.ParentOf)
 	if !ok {
 		logx.Debugf("[eval] %s: could not resolve pair grade for %s (pair=%s)", primaryRequestID, primaryGrade, cfg.Pair)
 		return
@@ -198,10 +198,11 @@ func (p *Proxy) dispatchEvalShadow(
 
 // resolveEvalPairGrade returns the shadow grade for a pairwise evaluation.
 // opposite uses the route's effective grade order (derived from the first
-// appearance of each grade in the scheduled target list). For the last grade
-// in that order, "opposite" wraps to the previous grade. This rule is written
-// in code and docs; it intentionally does not depend on pricing data.
-func resolveEvalPairGrade(primaryGrade, pair string, grades map[string][]configdomain.RouteTarget, parentOf map[string]string) (string, bool) {
+// appearance of each grade in the route's expanded target list, via
+// forward.GradeOrder — the same order the live scheduler uses). For the last
+// grade in that order, "opposite" wraps to the previous grade. This rule is
+// written in code and docs; it intentionally does not depend on pricing data.
+func resolveEvalPairGrade(primaryGrade, pair string, ordered []configdomain.RouteTarget, grades map[string][]configdomain.RouteTarget, parentOf map[string]string) (string, bool) {
 	if strings.HasPrefix(pair, "grade:") {
 		g := strings.TrimPrefix(pair, "grade:")
 		if _, ok := grades[g]; ok {
@@ -213,7 +214,7 @@ func resolveEvalPairGrade(primaryGrade, pair string, grades map[string][]configd
 	if pair != "" && pair != "opposite" {
 		return "", false
 	}
-	order := evalGradeOrder(grades, parentOf)
+	order := forward.GradeOrder(ordered, grades, parentOf)
 	if len(order) < 2 {
 		return "", false
 	}
@@ -226,26 +227,6 @@ func resolveEvalPairGrade(primaryGrade, pair string, grades map[string][]configd
 		}
 	}
 	return "", false
-}
-
-// evalGradeOrder derives a deterministic grade order from the configured grade
-// declarations. The order is the first appearance of each grade when iterating
-// the grades map, which is stable for a given config load and matches the
-// effective order used by groupTargetsByGrade when the route target order is
-// the same as the grade declaration order.
-func evalGradeOrder(grades map[string][]configdomain.RouteTarget, parentOf map[string]string) []string {
-	// Build a stable order by scanning grade targets in the order they appear
-	// in each grade's declared list, then deduplicating by first appearance.
-	seen := make(map[string]bool, len(grades))
-	var order []string
-	for name, targets := range grades {
-		_ = targets
-		if !seen[name] {
-			seen[name] = true
-			order = append(order, name)
-		}
-	}
-	return order
 }
 
 // pickEvalShadowTarget returns the first target of the shadow grade that is not

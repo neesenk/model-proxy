@@ -266,6 +266,32 @@ func gradeOfTarget(t RouteTarget, grades map[string][]RouteTarget, parentOf map[
 	return ""
 }
 
+// GradeOrder returns a route's effective grade order: the first appearance of
+// each grade when scanning its ordered targets. Graded routes use this order
+// for "next_grade" fallback, and eval pairing ("opposite") follows it too, so
+// selection and measurement agree on which grade is "next". Targets not declared
+// in any grade are ignored (they are returned separately as a safety net).
+//
+// The order is derived from the route's target list, not from the grades map:
+// Go maps do not preserve YAML declaration order, so scanning a map would be
+// nondeterministic (and could change between calls in one process).
+func GradeOrder(ordered []RouteTarget, grades map[string][]RouteTarget, parentOf map[string]string) []string {
+	if len(grades) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(grades))
+	var order []string
+	for _, t := range ordered {
+		g := gradeOfTarget(t, grades, parentOf)
+		if g == "" || seen[g] {
+			continue
+		}
+		seen[g] = true
+		order = append(order, g)
+	}
+	return order
+}
+
 // groupTargetsByGrade partitions ordered into grade groups. Grade order is
 // derived from the first appearance of each grade in ordered; ungraded targets
 // (not declared in any grade) keep their relative order and are returned
@@ -274,8 +300,6 @@ func groupTargetsByGrade(ordered []RouteTarget, grades map[string][]RouteTarget,
 	if len(grades) == 0 {
 		return nil, ordered
 	}
-	seen := make(map[string]bool, len(grades))
-	var order []string
 	targetsByGrade := make(map[string][]RouteTarget, len(grades))
 	for _, t := range ordered {
 		g := gradeOfTarget(t, grades, parentOf)
@@ -283,12 +307,9 @@ func groupTargetsByGrade(ordered []RouteTarget, grades map[string][]RouteTarget,
 			ungraded = append(ungraded, t)
 			continue
 		}
-		if !seen[g] {
-			seen[g] = true
-			order = append(order, g)
-		}
 		targetsByGrade[g] = append(targetsByGrade[g], t)
 	}
+	order := GradeOrder(ordered, grades, parentOf)
 	groups = make([]gradeGroup, 0, len(order))
 	for i, name := range order {
 		gt := targetsByGrade[name]

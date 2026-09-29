@@ -4,7 +4,7 @@
 
 ## 设计系统（v2）
 
-当前 UI 是 v2 设计系统（历史上曾与 v1 在 `/v2/` 并行共存，现已原位替换、v1 已删除；`/v2/` 仅 301 到 `/ui/`）。`styles.css` 文件头注释是设计契约：rem 字阶（根字号是唯一字号旋钮）、圆角分级、海拔分层、选中态统一为指示条/凸起滑块（实心琥珀只留给 `.btn.primary`）、状态一律 badge、颜色只编码语义。
+当前 UI 是 v2 设计系统（历史上曾与 v1 在 `/v2/` 并行共存，现已原位替换，v1 与 `/v2/` 路由一并删除，仅保留 `/ui/`）。`styles.css` 文件头注释是设计契约：rem 字阶（根字号是唯一字号旋钮）、圆角分级、海拔分层、选中态统一为指示条/凸起滑块（实心琥珀只留给 `.btn.primary`）、状态一律 badge、颜色只编码语义。
 
 - 纯函数单一事实源在 `pure.js`（含 v2 展示辅助：iconPin/iconRefresh/iconChevron/statusBadge*/kpiDeltaClass/logLineHTML），全部归 `jstests/pure.test.mjs` 行为覆盖；新增纯逻辑先进 pure.js 并补用例。
 - `node --check` 语法门禁与 `jstests/contract.test.mjs`（对 `docs/web-api.md` 的字段契约）覆盖 `app.js`/`pure.js`；样式漂移由 `jstests/registry.test.mjs` 门禁保护（见「模式注册表」）。

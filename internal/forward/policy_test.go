@@ -2,6 +2,7 @@ package forward
 
 import (
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -208,6 +209,34 @@ func TestGroupTargetsByGradePreservesRouteOrder(t *testing.T) {
 	}
 	if len(groups[0].targets) != 1 || groups[0].targets[0].Provider != "b" {
 		t.Fatalf("strong group = %+v", groups[0].targets)
+	}
+}
+
+func TestGradeOrderFollowsRouteTargetOrder(t *testing.T) {
+	// The grades map has no order; GradeOrder must derive it from the route's
+	// target list so eval pairing and next_grade fallback are deterministic.
+	grades := map[string][]RouteTarget{
+		"cheap":  {{Provider: "c", Model: "cheap"}},
+		"strong": {{Provider: "b", Model: "strong"}},
+		"best":   {{Provider: "a", Model: "best"}},
+	}
+	ordered := []RouteTarget{
+		{Provider: "a", Model: "best"},
+		{Provider: "c", Model: "cheap"},
+		{Provider: "b", Model: "strong"},
+	}
+	got := GradeOrder(ordered, grades, nil)
+	want := []string{"best", "cheap", "strong"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("GradeOrder = %v, want %v", got, want)
+	}
+	// A target declared in grades but absent from the route must not appear.
+	partial := GradeOrder(ordered[:1], grades, nil)
+	if !reflect.DeepEqual(partial, []string{"best"}) {
+		t.Fatalf("GradeOrder over single-target route = %v, want [best]", partial)
+	}
+	if GradeOrder(ordered, nil, nil) != nil {
+		t.Fatal("GradeOrder with no grades must return nil")
 	}
 }
 

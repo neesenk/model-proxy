@@ -13,7 +13,8 @@ provider，单数 `<name>_apikey.json` 仅作为只读 fallback，包装成一�
 
 文件 schema、稳定账号 ID、plural 优先/legacy fallback、原子保存和跨进程锁由
 `internal/accounts` 统一拥有；它只允许向存储叶子 `internal/credstore` 依赖以访问
-keychain/原子文件能力。该包接收已解析的 home directory，不得自行读取 HOME，
+keychain/原子文件能力。该包暴露 `HomeDir()`（`os.UserHomeDir()`）供调用方显式解析路径，
+其余存储 API 接收已解析的 home directory、不隐式读取 HOME，
 也不得依赖 Config、Provider、Proxy、Web/CLI 或执行网络验证。
 
 存储后端由 config `credentials:` 选择（`accounts.Backend`）：`file`（默认）把
@@ -82,7 +83,7 @@ Save 时写回；metadata-only 池的 ID 同时是现有 keychain namespace，�
 remove 后重新 login。
 
 API-key provider（当前包括 static、zhipu、zcode、deepseek、volcengine、
-kimi-code、mimo、qwen-plan、step-plan、openrouter、opencode-go）支持池化；aqp、codex 使用各自 OAuth/SSO 单账号文件，
+kimi-code、mimo、qwen-plan、step-plan、openrouter、opencode-go、typesafe）支持池化；aqp、codex 使用各自 OAuth/SSO 单账号文件，
 不进入 API-key pool。login 按 id 去重，支持 label/replace，成功后触发热 reload。
 
 ## 构建期展开

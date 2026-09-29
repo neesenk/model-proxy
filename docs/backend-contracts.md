@@ -8,7 +8,7 @@
 |---|---|---|
 | aqp / codex | oauth_auth | `~/.model-proxy/<name>_oauth_auth.json` |
 | static | apikey | `~/.model-proxy/<name>_apikeys.json`（账号池）；无 legacy singular fallback |
-| zhipu / zcode / deepseek / kimi-code / qwen-plan / step-plan / mimo / openrouter / opencode-go | apikey | `~/.model-proxy/<name>_apikeys.json`（账号池）；旧单数 `_apikey.json` 仅只读 fallback |
+| zhipu / zcode / deepseek / kimi-code / qwen-plan / step-plan / mimo / openrouter / opencode-go / typesafe | apikey | `~/.model-proxy/<name>_apikeys.json`（账号池）；旧单数 `_apikey.json` 仅只读 fallback |
 | volcengine | apikey | `~/.model-proxy/<name>_apikeys.json` — 每账号 `{api_key, access_key, secret_key}`；旧单数仅 fallback |
 
 路径从 provider name（config 一级 key）派生，支持多实例（如 `zhipu-personal` / `codex-work`）。多账号见 `docs/architecture/provider-pools.md`。所有路径（CLI `login`、`BuildOne`、web 异步登录、`logout`）一律用 config name，**包括 aqp/codex**（`RunLogin`/`runCodexLoginFlow` 接收 `provName` → login 内部 `oauthAuthFilePath(HomeDir(), provName)`，与 `internal/accounts` 的 `AuthFilePath(provName, "oauth_auth")` 同一路径）；曾有的「CLI login 硬编码 provider_id → 非同名实例读写错位」bug 已修，`TestAqpCodexLogin_UsesConfigNameForAuthFile` 守护。OAuth 文件不得由 Web/CLI 直接 `os.WriteFile`/`os.Remove`：codex 统一经 `provider.WriteCodexAuthFile` / `provider.ClearCodexAccount`，aqp 经对应 provider helper，最终由 `credstore.Ref` 执行 file/keychain 选择、原子权限、来源标记与跨模式删除。

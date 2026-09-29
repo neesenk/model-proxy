@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-修改 `quota.go`、调度排序、sticky、pin、health persistence、reload 或运行态锁时必读。
+修改 `manager_quota.go`、调度排序、sticky、pin、health persistence、reload 或运行态锁时必读。
 
 ## 配额归一化
 
@@ -205,7 +205,7 @@ Surplus/fLeft 读同一 ultimate 窗口）。不可解析（非 plan、带错误
 排序顺序：
 
 ```text
-tierRank → priority asc → surplus desc
+tierRank → priority asc → score desc（score = surplus − qualityPenalty）
 ```
 
 - tier 顺序是 `plan < unknown < payg`，不可直接使用 `BillingClass` iota。

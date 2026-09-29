@@ -137,7 +137,7 @@ accessor；它不是无仓库依赖叶子，只允许依赖其校验/默认值�
 composition root 与现有
 调用方不得在根包重新建立第二套配置事实或恢复 `config.go` / `config_compat.go`。
 
-`internal/catalog` 是无仓库内依赖的 models.dev 元数据源叶子包，拥有 slim
+`internal/catalog` 是 models.dev 元数据源包（仅依赖上游代理策略叶子 `internal/upstreamproxy`），拥有 slim
 projection、canonical-owner 去重、HTTP/ETag/TTL 刷新和原子磁盘缓存。
 `internal/config/modelscatalog.go` 只把
 HOME、`MP_MODELSDEV_URL` 适配成 catalog 输入；`internal/routing/model_metadata.go`
@@ -422,7 +422,7 @@ Manager 的物理文件按职责拆分，但不形成多 owner：`internal/runti
   `internal/pricing` 这一无主包依赖的叶子包拥有；价格端点优先级由
   `internal/config` 解析，应用层 `internal/app/proxy_snapshot.go` 只适配应用 HOME 路径，
   `Proxy.pricingSnapshot` 保留配置快照和并发刷新锁。
-- 统计热路径仍由 `internal/app.Proxy` 的 `metricsStore`、`tokenCounter`、`agentCounter` 各自拥有；
+- 统计热路径仍由 `internal/app.Proxy` 的 `MetricsStore`、`TokenCounter`、`AgentCounter` 各自拥有（三者在 `internal/observe/counters` 定义）；
   `internal/observe/stats.Flusher` 只做 cumulative snapshot → minute delta 的应用投影，
   SQLite schema、迁移、upsert、聚合查询、retention 与 legacy token import
   统一归无仓库内依赖的 `internal/observe/stats`。

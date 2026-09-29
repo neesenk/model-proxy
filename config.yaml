@@ -513,7 +513,7 @@ routes:
 #     # eval: L2 pairwise shadow evaluation for graded routes. The judge model
 #     # must declare protocol: decisions. sample_rate is validated to [0, 0.5]
 #     # (out-of-range is a config error); 0 or omitted falls back to the
-#     # default 0.05. pair can be "opposite" (next grade in declaration order)
+#     # default 0.05. pair can be "opposite" (next grade in route target order)
 #     # or "grade:<name>".
 #     eval:
 #       sample_rate: 0.05

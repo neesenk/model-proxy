@@ -95,8 +95,8 @@ serve [daemon|stop|reload|status] [--config PATH] [--log-file PATH]
 |---|---|
 | `serve`（无子命令） | 前台运行（`runProxy`）：加载 config、起 runtime services、注册 mux，以显式 `http.Server` 提供服务。 |
 | `serve daemon` | `daemonize`：分离一个 supervisor 进程（setsid，stdio -> log 文件），父进程立即返回。 |
-| `serve stop` | `cmdStop`：读 pid 文件，SIGTERM 等待 ≤15s，超时 SIGKILL。 |
-| `serve reload` | `cmdReload`：读 pid 文件，SIGHUP supervisor（转发给 worker 热重载）。 |
+| `serve stop` | `CmdStop`：读 pid 文件，SIGTERM 等待 ≤15s，超时 SIGKILL。 |
+| `serve reload` | `CmdReload`：读 pid 文件，SIGHUP supervisor（转发给 worker 热重载）。 |
 | `serve status` | `cmdServeStatus`：见 §11。 |
 
 ### `serve daemon` stdout（成功）
@@ -261,7 +261,7 @@ apikey 池（`<name>_apikeys.json` 与遗留单账号文件）：`keychain` 模�
 - 未知 provider -> stderr `unknown provider "<NAME>"; available: <providerNames>` + exit 1。
 - 任意登录失败 -> stderr `login failed: <err>` + exit 1。
 
-### aqp（SSO，`runLogin`）
+### aqp（SSO，`RunLogin`）
 
 stdout（引导浏览器）：
 ```
@@ -398,7 +398,7 @@ const usageDivider = "───────────────────�
 ```
 仅块**之间**打印，不在首块前/末块后。
 
-### 池化 provider（≥2 账号，`printProviderUsage`）
+### 池化 provider（≥2 账号，`PrintProviderUsage`）
 
 每账号一块，块间 `usageDivider`，每块首行：
 ```
@@ -434,7 +434,7 @@ Provider:   <PROVNAME>
 | openrouter (`OpenRouterProvider.Usage`) | `Account:   <key label>`；`Billing:   prepaid credits (pay-as-you-go)`；窗口行：Key credit cap（可选，带剩余百分比）/ Spend (today|this week|this month)（带 UTC 重置倒计时）/ Free-model req/day；Notes：充值页 URL（+free tier 标记）。取自 `GET /api/v1/key` |
 | opencode-go (`OpenCodeGoProvider.Usage`) | `Billing:    $10/month subscription (per-model monthly dollar limit; 5h=20% weekly=50% monthly=100%)`；`Usage:      (console-only; no public usage API)`；`Details:    <控制台 URL>` + 列 config 模型（qwen-plan 同模式；订阅限额仅控制台） |
 
-重置时间格式：`<duration>(at <time>)`；`formatResetAt`：今天显示 `HH:MM`，否则 `MM-DD HH:MM`。
+重置时间格式：`<duration>(at <time>)`；`FormatResetAt`：今天显示 `HH:MM`，否则 `MM-DD HH:MM`。
 
 ---
 
@@ -700,7 +700,7 @@ provider         model               <BUCKET>      reqs failover     429     fai
 
 空结果 -> stdout `(no stats in range <FROM> .. <TO>, bucket <BUCKET>)` + 换行（`FROM`/`TO` = `MM-DD HH:MM`）。
 
-`--json` -> stdout 原始 JSON（`statsResp`）。
+`--json` -> stdout 原始 JSON（`StatsResp`）。
 
 ### `--granularity` / `--cost`（`renderAnalytics` -> `/api/analytics`）
 
@@ -710,7 +710,7 @@ provider         model               <BUCKET>      reqs failover     429     fai
 provider         model               <day|month>     reqs      input    output      cost
 ```
 
-每行 = 一个 (provider, model) 在窗口内的 SUM（reqs/input/output）；`cost` 列仅 `--cost` 时出现，已定价 = `$X.XX`（点相加），未定价 = `n/a`。`--json` -> stdout 原始 `/api/analytics` 响应（`analyticsResp`）。两者都省略 = 走 `/api/stats`，输出与原 `stats` 完全一致。
+每行 = 一个 (provider, model) 在窗口内的 SUM（reqs/input/output）；`cost` 列仅 `--cost` 时出现，已定价 = `$X.XX`（点相加），未定价 = `n/a`。`--json` -> stdout 原始 `/api/analytics` 响应（`AnalyticsResp`）。两者都省略 = 走 `/api/stats`，输出与原 `stats` 完全一致。
 
 ### `--by-agent`（`renderAgents` -> `/api/agents`）
 
@@ -720,7 +720,7 @@ provider         model               <day|month>     reqs      input    output  
 agent / model            reqs     input     output  cache_create  cache_read     total      lat     fail
 ```
 
-每行 = `<AGENT(24)> <reqs(8)> <input(10)> <output(10)> <cache_create(12)> <cache_read(11)> <total(10)> <lat(8)> <fail(8)>`（`compactNum`；`lat` 为平均延迟），每个 agent 行下按 token 降序缩进列出其 per-(provider, model) 分解行。`--from`/`--to`/`--bucket` 仍适用；`--provider`/`--model`/`--agent` 过滤在此模式同样生效（作为 query 参数传给 `/api/agents` 由服务端过滤）。`--json` -> stdout 原始 `/api/agents` 响应（`agentResp`）。agent 识别见 `detectAgent`（claude-cli/x-claude-code-session-id -> `claude-code`，`codex` -> `codex`，`opencode` -> `opencode`，`pi/` -> `pi`，无 UA -> `unknown`，其余 -> UA 派生标签（产品 token，如 `curl`），纯空白 UA 才是 `other`）。
+每行 = `<AGENT(24)> <reqs(8)> <input(10)> <output(10)> <cache_create(12)> <cache_read(11)> <total(10)> <lat(8)> <fail(8)>`（`compactNum`；`lat` 为平均延迟），每个 agent 行下按 token 降序缩进列出其 per-(provider, model) 分解行。`--from`/`--to`/`--bucket` 仍适用；`--provider`/`--model`/`--agent` 过滤在此模式同样生效（作为 query 参数传给 `/api/agents` 由服务端过滤）。`--json` -> stdout 原始 `/api/agents` 响应（`AgentResp`）。agent 识别见 `DetectAgent`（claude-cli/x-claude-code-session-id -> `claude-code`，`codex` -> `codex`，`opencode` -> `opencode`，`pi/` -> `pi`，无 UA -> `unknown`，其余 -> UA 派生标签（产品 token，如 `curl`），纯空白 UA 才是 `other`）。
 
 > 解析失败时，analytics 路径的报错为 `parse analytics response: <ERR>`（与 `/api/stats` 路径的 `parse stats response: <ERR>` 对应，见下节）。
 
@@ -762,7 +762,7 @@ model-proxy  v<VERSION> · <UPTIME> · <LISTEN>
   <NAME>[ · <ACCOUNT>][ · <PLAN>]
       <LABEL>[(ultimate)|(short)]  <PCT%|->  <BAR(16)>  resets <RESET_AT>
 ```
-`q.Err` 非空 -> `      no data (<ERR>)`(dim)。`<BAR>` = `progressBar(usedPct, 16)`。`<PCT>` 为已用百分比，保留小数点后一位（如 `40.0%`）。`resets` 仅当 `ResetsAt` 非零（`formatResetAt`）。
+`q.Err` 非空 -> `      no data (<ERR>)`(dim)。`<BAR>` = `progressBar(usedPct, 16)`。`<PCT>` 为已用百分比，保留小数点后一位（如 `40.0%`）。`resets` 仅当 `ResetsAt` 非零（`FormatResetAt`）。
 
 **routing warnings**（仅当有 `st.Warnings`）：
 ```
@@ -1177,7 +1177,7 @@ decision tokens: N (X.XX% of all tokens)
 
 ### `--json`
 
-原样输出聚合后的结构化 JSON（`routingReport` 结构），包含 `weak_label_summary`、`selector_matrix`、`cost`、`overhead`、`window_start`、`window_end`。
+原样输出聚合后的结构化 JSON（`routingReport` 结构；字段无 json tag → **PascalCase**：`WeakLabelSummary`、`SelectorMatrix`、`EvalVerdicts`、`Cost`、`Overhead`、`WindowStart`、`WindowEnd` 等）。
 
 ### 失败（stderr `✗ <ERR>` + exit 1）
 

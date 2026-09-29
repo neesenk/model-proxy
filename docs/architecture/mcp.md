@@ -226,5 +226,5 @@ http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验�
   投影，`include_routed_members: true` 恢复全量；禁用面不投影）；合并语义——指向本代理
   `/mcp/` 的陈旧条目先清（JSON 按 url 前缀、TOML 按段名前缀+URL 内容），用户自有条目
   保留；网关面无条目时不动客户端配置。预设：
-  `claude-mcp`（~/.claude.json mcpServers，独立族）、opencode 三变体（`mcp` 节）、codex
+  `claude`（~/.claude.json mcpServers，独立备份单元 `claude-mcp`）、opencode 三变体（`mcp` 节）、codex
   （`[mcp_servers."<name>"]` 段）。

@@ -335,3 +335,46 @@ func TestEvalShadow_PinForceSkipsEval(t *testing.T) {
 		t.Fatal("shadow upstream was called for a force-provider request")
 	}
 }
+
+// TestResolveEvalPairGradeUsesRouteTargetOrder pins "opposite" pairing to the
+// route's expanded target order (via forward.GradeOrder), not the grades map
+// iteration order: with >=3 grades a map-derived order is nondeterministic and
+// would pair different grades on different runs.
+func TestResolveEvalPairGradeUsesRouteTargetOrder(t *testing.T) {
+	grades := map[string][]configdomain.RouteTarget{
+		"cheap":  {{Provider: "a", Model: "cheap"}},
+		"mid":    {{Provider: "b", Model: "mid"}},
+		"strong": {{Provider: "c", Model: "strong"}},
+	}
+	ordered := []configdomain.RouteTarget{
+		{Provider: "a", Model: "cheap"},
+		{Provider: "b", Model: "mid"},
+		{Provider: "c", Model: "strong"},
+	}
+	for _, tc := range []struct{ primary, want string }{
+		{"cheap", "mid"},
+		{"mid", "strong"},
+		{"strong", "mid"}, // last grade wraps to the previous one
+	} {
+		got, ok := resolveEvalPairGrade(tc.primary, "opposite", ordered, grades, nil)
+		if !ok || got != tc.want {
+			t.Fatalf("opposite(%s) = %q,%v want %q,true", tc.primary, got, ok, tc.want)
+		}
+	}
+
+	// Reversing the route target order must reverse the pairing: this is only
+	// possible if the order comes from `ordered`, not the map.
+	reversed := []configdomain.RouteTarget{
+		{Provider: "c", Model: "strong"},
+		{Provider: "b", Model: "mid"},
+		{Provider: "a", Model: "cheap"},
+	}
+	if got, ok := resolveEvalPairGrade("mid", "opposite", reversed, grades, nil); !ok || got != "cheap" {
+		t.Fatalf("opposite(mid) over reversed order = %q,%v want cheap,true", got, ok)
+	}
+
+	// An explicit grade: pair ignores the order entirely.
+	if got, ok := resolveEvalPairGrade("cheap", "grade:strong", ordered, grades, nil); !ok || got != "strong" {
+		t.Fatalf("grade:strong = %q,%v want strong,true", got, ok)
+	}
+}

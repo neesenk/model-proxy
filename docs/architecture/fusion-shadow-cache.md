@@ -64,7 +64,7 @@ live 视图（反向同理）。`Subscribe`/`Snapshot` 返回按 ts 升序合并
 ring 内保留的 progress 事件 `text` 截断到 4 KiB（rune 边界，实时订阅者收
 全量前缀，只有留存副本受限），环内存上限 (2000 + 500) × 4 KiB。
 
-forward 产生 start/end，包含 agent、protocol、provider、status、latency、tokens（end 另带 `cache_read`/`cache_creation`，omitempty）和稳定 request_id。cache hit、400/502 终局也必须产生 end。进入 live/请求日志的是 LLM 协议路径（`/v1/messages`、`/v1/chat/completions`、`/v1/responses`）与 MCP 网关交换（`/mcp/<name>`，`protocol="mcp"`、request log `kind="mcp"`，见 `mcp.md`）；未知路径（浏览器 `/.well-known/...` 探测、favicon、迷路 GET）在 handler 层直接 502，**不产生 live 事件、不写请求日志**（unrouted model 仍是非空 proto，照旧产生终局 end）。`GET /api/events` 先重放 ring，再推送 SSE，15 秒 keepalive。
+forward 产生 start/end，包含 agent、protocol、provider、status、latency、tokens（end 另带 `cache_read`/`cache_creation`，omitempty）和稳定 request_id。cache hit、400/502 终局也必须产生 end。进入 live/请求日志的是 LLM 协议路径（`/v1/messages`、`/v1/chat/completions`、`/v1/responses`、`/v1/decisions`）与 MCP 网关交换（`/mcp/<name>`，`protocol="mcp"`、request log `kind="mcp"`，见 `mcp.md`）；未知路径（浏览器 `/.well-known/...` 探测、favicon、迷路 GET）在 handler 层直接 502，**不产生 live 事件、不写请求日志**（unrouted model 仍是非空 proto，照旧产生终局 end）。`GET /api/events` 先重放 ring，再推送 SSE，15 秒 keepalive。
 
 出站秘密扫描（DLP-lite，`guard.secrets`）在 forward 读取完整请求体后、cache
 查询与所有 forward 分支之前对共享 body 扫描一次（`internal/guard` 的高置信
