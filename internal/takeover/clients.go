@@ -244,7 +244,11 @@ func codexModelCatalog(models []ExposedModel) []map[string]any {
 // left behind by an earlier bad append) are collapsed to the single
 // rewritten line. The scan stays line-oriented and conservative: only a line
 // whose pre-`=` token parses to the same key path qualifies; a `=` inside a
-// value can never produce that shape.
+// value can never produce that shape. Known blind spot: TOML multi-line
+// strings ("""...""") — a `key = value`-shaped line INSIDE a multi-line
+// string body is still scanned as a key line. Accepted because the managed
+// top-level keys sit before the first section header and generated configs
+// never use multi-line strings there.
 func SetTOMLTopKey(text, key, val string) string {
 	target, ok := parseTOMLKeyPath(key)
 	if !ok {
@@ -360,7 +364,12 @@ func sectionMatchIndices(lines []string, target []string) map[int]bool {
 }
 
 // sectionEnd returns the exclusive end line of the section starting at
-// start: the next header line (or EOF).
+// start: the next header line (or EOF). Known blind spot: TOML multi-line
+// strings — a line starting with `[` INSIDE a """...""" value is mistaken
+// for a header and truncates the section early. Accepted because generated
+// sections never contain multi-line strings; a hand-written one would at
+// worst split a replace into two sections of the same table, not duplicate
+// the table.
 func sectionEnd(lines []string, start int) int {
 	for i := start + 1; i < len(lines); i++ {
 		if strings.HasPrefix(strings.TrimSpace(lines[i]), "[") {
@@ -429,32 +438,40 @@ func removeTOMLSectionsWithURL(text, needle string, generatedSections map[string
 	out := make([]string, 0, len(lines))
 	for i := 0; i < len(lines); {
 		trimmed := strings.TrimSpace(lines[i])
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			if parts, isArray, ok := tomlHeaderPath(trimmed); ok && !isArray {
-				matched := false
-				for _, t := range targets {
-					if equalTOMLKeyPath(parts, t) {
-						matched = true
+		// tomlHeaderPath alone decides what is a header: it strips a TOML-legal
+		// trailing comment (`[mcp.servers.x] # stale`) before the bracket check,
+		// so a commented stale header is still recognized as a section boundary
+		// and cleanup target. Non-header lines (comments, key/value, blank)
+		// return ok=false and pass through untouched.
+		if parts, isArray, ok := tomlHeaderPath(trimmed); ok && !isArray {
+			matched := false
+			for _, t := range targets {
+				if equalTOMLKeyPath(parts, t) {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				// Section runs until the next header line (or EOF). Same
+				// multi-line-string blind spot as sectionEnd: a `[` line
+				// inside a """...""" value truncates the body scan early —
+				// a stale section whose URL sits past that point survives
+				// instead of being mis-cleaned, so the failure stays
+				// conservative.
+				end := len(lines)
+				contains := false
+				for j := i + 1; j < len(lines); j++ {
+					if strings.HasPrefix(strings.TrimSpace(lines[j]), "[") {
+						end = j
 						break
 					}
+					if strings.Contains(lines[j], needle) {
+						contains = true
+					}
 				}
-				if matched {
-					// Section runs until the next header line (or EOF).
-					end := len(lines)
-					contains := false
-					for j := i + 1; j < len(lines); j++ {
-						if strings.HasPrefix(strings.TrimSpace(lines[j]), "[") {
-							end = j
-							break
-						}
-						if strings.Contains(lines[j], needle) {
-							contains = true
-						}
-					}
-					if contains {
-						i = end
-						continue
-					}
+				if contains {
+					i = end
+					continue
 				}
 			}
 		}

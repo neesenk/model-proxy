@@ -78,6 +78,45 @@ base_url = "http://older"
 	}
 }
 
+// TestReplaceOrAppendTOMLSection_HeaderTrailingComment: TOML allows a
+// trailing comment on a header line (`[providers.model-proxy] # my note`,
+// e.g. left behind by hand editing). The line must still be recognized as the
+// managed table — replacing in place — never appended as a second table,
+// which TOML rejects with a parse error. The comment belongs to the replaced
+// section and goes with it (the canonical template header is restored).
+func TestReplaceOrAppendTOMLSection_HeaderTrailingComment(t *testing.T) {
+	in := "keep = 1\n[providers.model-proxy] # 手写注释\ntype = \"openai\"\nbase_url = \"http://old\"\n"
+	section := "\n[providers.\"model-proxy\"]\ntype = \"openai\"\nbase_url = \"http://new\"\n"
+	out := takeover.ReplaceOrAppendTOMLSection(in, `providers."model-proxy"`, section)
+	if got := countLines(t, out, "[providers."); got != 1 {
+		t.Errorf("%d provider tables after rewrite, want 1:\n%s", got, out)
+	}
+	if !strings.Contains(out, `base_url = "http://new"`) || strings.Contains(out, "http://old") {
+		t.Errorf("body not replaced:\n%s", out)
+	}
+	if !strings.Contains(out, `[providers."model-proxy"]`) {
+		t.Errorf("canonical header not restored:\n%s", out)
+	}
+	if !strings.Contains(out, "keep = 1") {
+		t.Errorf("unrelated content dropped:\n%s", out)
+	}
+}
+
+// TestReplaceOrAppendTOMLSection_CommentHashInsideQuotes: a `#` inside a
+// quoted key part is NOT a comment — `[providers."a#b"]` is one table named
+// a#b and must still match its quoted target.
+func TestReplaceOrAppendTOMLSection_CommentHashInsideQuotes(t *testing.T) {
+	in := "[providers.\"a#b\"]\nbase_url = \"http://old\"\n"
+	section := "\n[providers.\"a#b\"]\nbase_url = \"http://new\"\n"
+	out := takeover.ReplaceOrAppendTOMLSection(in, `providers."a#b"`, section)
+	if got := countLines(t, out, "[providers."); got != 1 {
+		t.Errorf("%d provider tables after rewrite, want 1:\n%s", got, out)
+	}
+	if !strings.Contains(out, `base_url = "http://new"`) {
+		t.Errorf("body not replaced:\n%s", out)
+	}
+}
+
 // TestReplaceOrAppendTOMLSection_ArrayTableUntouched: [[array]] headers never
 // match a plain-section target.
 func TestReplaceOrAppendTOMLSection_ArrayTableUntouched(t *testing.T) {

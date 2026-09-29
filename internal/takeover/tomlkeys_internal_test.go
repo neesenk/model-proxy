@@ -58,6 +58,35 @@ url = "http://127.0.0.1:15721/mcp/exa"
 	}
 }
 
+// TestRemoveTOMLSectionsWithURL_HeaderTrailingComment: a stale proxy MCP
+// section whose header carries a TOML-legal trailing comment
+// (`[mcp_servers.exa] # stale`) is still a section header and must be
+// cleaned when its body holds the proxy URL — the pre-fix HasSuffix("]")
+// precheck rejected the line before tomlHeaderPath could strip the comment,
+// so the stale section survived. User sections and non-header lines (full
+// comments, key/value lines) must pass through untouched.
+func TestRemoveTOMLSectionsWithURL_HeaderTrailingComment(t *testing.T) {
+	in := `# top comment
+[mcp_servers.exa] # stale proxy entry
+url = "http://127.0.0.1:15721/mcp/exa"
+
+[mcp_servers."mine"] # user's own
+url = "https://other/mcp"
+
+key = "[brackets in a value]"
+`
+	out := removeTOMLSectionsWithURL(in, "http://127.0.0.1:15721/mcp/", map[string]bool{`mcp_servers."exa"`: true})
+	if strings.Contains(out, "127.0.0.1:15721") || strings.Contains(out, "stale proxy entry") {
+		t.Errorf("commented stale proxy section survived:\n%s", out)
+	}
+	if !strings.Contains(out, `[mcp_servers."mine"] # user's own`) || !strings.Contains(out, "https://other/mcp") {
+		t.Errorf("user section dropped:\n%s", out)
+	}
+	if !strings.Contains(out, "# top comment") || !strings.Contains(out, `key = "[brackets in a value]"`) {
+		t.Errorf("non-header lines dropped:\n%s", out)
+	}
+}
+
 // TestParseTOMLKeyPath unit-cases the key-path parser: quoting styles,
 // whitespace, escapes, and structural failures.
 func TestParseTOMLKeyPath(t *testing.T) {
@@ -102,6 +131,31 @@ func TestTomlHeaderPath_ArrayDetection(t *testing.T) {
 	parts, isArray, ok = tomlHeaderPath("[history]")
 	if !ok || isArray || !equalTOMLKeyPath(parts, []string{"history"}) {
 		t.Fatalf("plain header parse = %v %v %v", parts, isArray, ok)
+	}
+}
+
+// TestTomlHeaderPath_TrailingComment: TOML allows a comment after the closing
+// bracket; the header must still parse. A `#` inside a quoted key part is
+// data, not a comment, and an unterminated quote never parses.
+func TestTomlHeaderPath_TrailingComment(t *testing.T) {
+	parts, isArray, ok := tomlHeaderPath(`[providers.model-proxy] # my note`)
+	if !ok || isArray || !equalTOMLKeyPath(parts, []string{"providers", "model-proxy"}) {
+		t.Errorf("commented header parse = %v %v %v", parts, isArray, ok)
+	}
+	parts, isArray, ok = tomlHeaderPath(`[[history]] # array note`)
+	if !ok || !isArray || !equalTOMLKeyPath(parts, []string{"history"}) {
+		t.Errorf("commented array header parse = %v %v %v", parts, isArray, ok)
+	}
+	parts, _, ok = tomlHeaderPath(`[providers."a#b"]`)
+	if !ok || !equalTOMLKeyPath(parts, []string{"providers", "a#b"}) {
+		t.Errorf("hash inside quoted part must not start a comment = %v %v", parts, ok)
+	}
+	parts, _, ok = tomlHeaderPath(`[providers.'a#b'] # note`)
+	if !ok || !equalTOMLKeyPath(parts, []string{"providers", "a#b"}) {
+		t.Errorf("hash inside literal part must not start a comment = %v %v", parts, ok)
+	}
+	if _, _, ok = tomlHeaderPath(`[providers."unterminated # not a comment`); ok {
+		t.Error("unterminated quote must not parse as a header")
 	}
 }
 

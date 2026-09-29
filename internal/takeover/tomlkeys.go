@@ -131,11 +131,45 @@ func parseHexRune(hex string) (rune, bool) {
 	return r, true
 }
 
+// stripTOMLLineComment returns the line with any trailing comment removed:
+// the comment starts at the first `#` OUTSIDE quotes. A `#` inside a quoted
+// key part (`[providers."a#b"]`) is data, not a comment. An unterminated
+// quote leaves the line untouched — parseTOMLKeyPath then rejects it.
+func stripTOMLLineComment(line string) string {
+	inBasic, inLiteral := false, false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case inBasic:
+			if c == '\\' {
+				i++
+			} else if c == '"' {
+				inBasic = false
+			}
+		case inLiteral:
+			if c == '\'' {
+				inLiteral = false
+			}
+		case c == '"':
+			inBasic = true
+		case c == '\'':
+			inLiteral = true
+		case c == '#':
+			return strings.TrimRight(line[:i], " \t")
+		}
+	}
+	return line
+}
+
 // tomlHeaderPath reports whether a trimmed line is a table header and returns
 // its semantic key path. `[[array]]` headers count as headers (they terminate
 // a section body) with isArray=true — they never equal a plain-section target,
-// so replace/remove never touches them.
+// so replace/remove never touches them. A trailing comment after the closing
+// bracket (`[providers.model-proxy] # note`) is stripped before the suffix
+// check: TOML allows it, and missing it would treat the header as absent and
+// append a duplicate table.
 func tomlHeaderPath(trimmedLine string) (parts []string, isArray bool, ok bool) {
+	trimmedLine = stripTOMLLineComment(trimmedLine)
 	if !strings.HasPrefix(trimmedLine, "[") || !strings.HasSuffix(trimmedLine, "]") {
 		return nil, false, false
 	}
