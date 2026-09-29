@@ -3752,11 +3752,13 @@ function renderLiveCard(target, query) {
 // refreshLiveSessionOptions rebuilds the session combobox's option list from
 // live rows plus the persisted session list, ordered most-recently-active
 // first (session id ascending as the tie-break; pure.js liveSessionOrder).
-// Rebuilds only when the ordered set changes so a quiet stream does not reset
-// the control. While the input holds focus the value paint is skipped — a
-// programmatic value write would clobber the user's typed query (the option
-// splice alone is always safe: attachCombo filters at open time); the blur
-// handler retries once the user is done.
+// The value repaint runs on EVERY call, before the optionsKey short-circuit:
+// the blur handler relies on it to restore the committed S.session after
+// uncommitted typing, and an unchanged option set must not skip that restore
+// (a same-value write is near-zero cost). While the input holds focus the
+// value paint is skipped — a programmatic value write would clobber the
+// user's typed query (the option splice alone is always safe: attachCombo
+// filters at open time); the blur handler retries once the user is done.
 function refreshLiveSessionOptions() {
   const sel = document.getElementById('live-session');
   if (!sel) return;
@@ -3772,8 +3774,6 @@ function refreshLiveSessionOptions() {
   }
   const key = sorted.join('\n');
   S.sessionOptions.splice(0, S.sessionOptions.length, ...sorted);
-  if (key === S.optionsKey) return;
-  S.optionsKey = key;
   // v2: the Live session combobox shows the FULL id — this toolbar holds a
   // single control with the rest of the row empty, so unlike the dense
   // Requests filter row there is no reason to abbreviate (and the combo is
@@ -3782,6 +3782,8 @@ function refreshLiveSessionOptions() {
     sel.value = S.session;
     syncClearable(sel);
   }
+  if (key === S.optionsKey) return;
+  S.optionsKey = key;
 }
 
 // (v2: liveSessionLabel — the 8…4 session-id abbreviation — was removed;
@@ -6092,7 +6094,11 @@ async function toggleModel(provider, model, disable, el) {
     const ok = await confirmDialog('Disable model',
       `Disable ${model} on ${provider}? The model disappears from /v1/models and requests are no longer routed to it (multi-provider models fail over to the remaining providers; a fully disabled model answers 404). Persists across reload, restart and models refresh.`,
       'Disable');
-    if (!ok) { if (el) el.checked = !disable; return; }
+    // Revert to the pre-flip state: the browser already flipped checked to
+    // !disable's opposite, and the disable argument equals the pre-flip
+    // checked value (disable = !postFlip = preFlip), so checked = disable
+    // restores the server's truth.
+    if (!ok) { if (el) el.checked = disable; return; }
   }
   if (el) el.disabled = true;
   try {
@@ -6110,8 +6116,9 @@ async function toggleModel(provider, model, disable, el) {
       return;
     }
     // Everything else (validation, network, transport) never touched the
-    // in-memory state: revert the switch to the server's truth.
-    if (el) el.checked = !disable;
+    // in-memory state: revert the switch to the server's truth (the pre-flip
+    // state — same identity as on the cancel path above).
+    if (el) el.checked = disable;
     window.alert((disable ? 'disable failed: ' : 'enable failed: ') + e.message);
   }
 }
@@ -11055,11 +11062,13 @@ async function loadMCPAnalytics(host, background = false) {
   mcpAnalyticsLoading = true;
   let resp = null;
   let fetchErr = null;
-  // try/finally owns the loading flag: every exit — the superseded early
-  // return, the all-time re-anchor retry and any throw in the sync section
-  // (mcpAnalyticsState/renderMCPAnalytics…) — resets it. A load that died
-  // mid-flight used to leave it stuck true, permanently blocking the
-  // initial analytics load behind the !mcpAnalyticsLoading re-entry guard.
+  // try/finally owns the loading flag, but only the LATEST load may clear
+  // it (the seq check in finally): a superseded load's early return must not
+  // drop the flag while the newer load is still in flight — the
+  // !mcpAnalyticsLoading re-entry guard would otherwise admit a duplicate
+  // concurrent initial load in that window. A load that died mid-flight used
+  // to leave it stuck true, permanently blocking the initial analytics load
+  // behind the guard.
   try {
     const state = mcpAnalyticsState();
     const eff = mcpAnalyticsEffectiveGran(state, mcpAllTimeSince);
@@ -11083,9 +11092,9 @@ async function loadMCPAnalytics(host, background = false) {
     // All-time anchor: the server clamps from=0 to the oldest persisted
     // bucket. Learn that real start from the echoed from; when it changes
     // the effective granularity, re-issue once with the true span (same
-    // pattern as the Analytics tab's anAllTimeSince). The `await` matters:
-    // returning without it would let the finally reset the retry's own
-    // in-flight loading flag the moment it started.
+    // pattern as the Analytics tab's anAllTimeSince). The retry runs with
+    // its own seq, so this invocation's finally leaves the loading flag to
+    // it; the await keeps the retry inside this load's lifetime.
     if (!fetchErr && resp && state.range.preset === 'all') {
       const echoed = Number(resp.from) || 0;
       if (echoed > 0 && echoed !== mcpAllTimeSince) {
@@ -11112,7 +11121,9 @@ async function loadMCPAnalytics(host, background = false) {
     renderMCPAnalytics(host);
     mcpAnalyticsMaybeAutoRefresh();
   } finally {
-    mcpAnalyticsLoading = false;
+    // Only the newest load clears the flag: a superseded load returning here
+    // would otherwise drop it while the newer load is still in flight.
+    if (seq === mcpAnalyticsReqSeq) mcpAnalyticsLoading = false;
   }
 }
 

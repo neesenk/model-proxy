@@ -531,6 +531,87 @@ test('suggestion-dropdown inputs and filter selects expose the inline ✕ clear 
   assert.deepEqual(await ctx.pageErrors(), [], 'clear-affordance flow must not raise JS errors');
 });
 
+// 回归：Live 页 session combobox 的 blur 恢复曾被 refreshLiveSessionOptions
+// 的 optionsKey 短路架空——选项集未变时提前 return，value 重绘永远不执行，
+// 未提交的键入（不 Enter 不点选）在 blur 后残留在输入框里，而 S.session /
+// URL hash / 表格内容全是旧值。钉住：blur 必须把输入框恢复成已提交的
+// S.session（✕ 状态与之一致）。
+test('Live 页 session combobox 未提交键入 blur 后恢复已提交值 (combobox blur 恢复族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  await driveRequest(1, 0, 'e2e-blur-sess');
+  await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
+  await ctx.waitFor('requests tab active', () => ctx.ev(
+    `document.getElementById('tab-requests').classList.contains('active')`));
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
+  await ctx.waitFor('live view mounted', () => ctx.ev(`!!document.getElementById('live-session')`));
+
+  // Commit a real session through the typed combobox path (value + input +
+  // Enter — the same path a typing user takes).
+  await ctx.waitFor('e2e-blur-sess option committed', () => ctx.ev(`(() => {
+    const s = document.getElementById('live-session');
+    [...document.querySelectorAll('.combo-menu')].forEach((m) => { m.hidden = true; });
+    if (s.value !== '') { s.value = ''; s.dispatchEvent(new Event('input', { bubbles: true })); }
+    s.dispatchEvent(new Event('focus'));
+    const menu = [...document.querySelectorAll('.combo-menu')].find((m) => !m.hidden);
+    if (!menu) return false;
+    const opt = [...menu.querySelectorAll('.combo-option')].find((o) => o.dataset.value === 'e2e-blur-sess');
+    if (!opt) return false;
+    s.value = opt.dataset.value;
+    s.dispatchEvent(new Event('input', { bubbles: true }));
+    s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    return true;
+  })()`));
+  await ctx.waitFor('session pinned in hash', () => ctx.ev(
+    `location.hash.includes('session=e2e-blur-sess')`));
+
+  // 真实 focus → 键入未提交文本（不 Enter 不点选）→ 真实 blur。sel.onblur
+  // 重跑 refreshLiveSessionOptions：选项集未变（key 短路命中）时也必须把
+  // 输入框重绘回 S.session。短超时——恢复是 blur 的同步效果，等不到即缺陷。
+  await ctx.ev(`(() => {
+    const s = document.getElementById('live-session');
+    s.focus();
+    s.value = 'uncommitted-junk';
+    s.dispatchEvent(new Event('input', { bubbles: true }));
+    s.blur();
+  })()`);
+  await ctx.waitFor('blur restores the committed session', () => ctx.ev(`(() => {
+    const s = document.getElementById('live-session');
+    if (document.activeElement === s || s.value !== 'e2e-blur-sess') return false;
+    const host = s.closest('.clearable');
+    return host.classList.contains('has-text')
+      && host.querySelector('.clear-x').getBoundingClientRect().width > 0
+      && location.hash.includes('session=e2e-blur-sess');
+  })()`), 8000);
+
+  // 同一场景的空会话半边：✕ 清空提交后，未提交键入 blur 必须恢复为空、
+  // ✕ 隐藏（残留文本会让 ✕ 对一个从未提交的过滤保持可见）。
+  await ctx.ev(`(() => {
+    const b = document.getElementById('live-session').closest('.clearable').querySelector('.clear-x');
+    b.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+    b.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    b.click();
+  })()`);
+  await ctx.waitFor('session cleared + committed', () => ctx.ev(
+    `document.getElementById('live-session').value === '' && !location.hash.includes('session=')`));
+  await ctx.ev(`(() => {
+    const s = document.getElementById('live-session');
+    s.focus();
+    s.value = 'uncommitted-junk';
+    s.dispatchEvent(new Event('input', { bubbles: true }));
+    s.blur();
+  })()`);
+  await ctx.waitFor('blur restores empty session (✕ hidden)', () => ctx.ev(`(() => {
+    const s = document.getElementById('live-session');
+    return document.activeElement !== s && s.value === ''
+      && !s.closest('.clearable').classList.contains('has-text');
+  })()`), 8000);
+
+  // 还原：回 Log 子视图，避免污染后续用例。
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="log"][data-stream=""]').click()`);
+  await ctx.waitFor('log view restored', () => ctx.ev(`!!document.getElementById('req-refresh')`));
+  assert.deepEqual(await ctx.pageErrors(), [], 'blur-restore flow must not raise JS errors');
+});
+
 test('native select filter applies (下拉表单)', async (t) => {
   if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
   await driveRequest(1);
@@ -1134,6 +1215,95 @@ test('status 页 schedule route test 与 models catalog refresh (mutation 族)',
   await ctx.waitFor('re-enabled row back in the default view', () => ctx.ev(
     `(() => { const tb = document.querySelector('.model-caps table tbody'); return tb && tb.textContent.includes('m1') && !document.querySelector('[data-models-visibility]'); })()`));
   assert.deepEqual(await ctx.pageErrors(), [], 'status diagnostics must not raise JS errors');
+});
+
+// Models 行开关的交互链本身（不是 fetch 直驱）：浏览器在 change 事件前已
+// 视觉翻转 checkbox,取消确认必须把它回退到服务器真相,行不变暗、后端不变。
+// __sw 固定的是 toggleModel 实际处理的那个元素——即使 5s Status tick 中途
+// 重渲染了本区(新元素同样渲染服务器真相),回退断言仍稳定。
+test('Models 开关取消确认后回退原态,行不变暗且后端不变 (switch 族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  const swSel = '[data-model-toggle="dummy"][data-model="m1"]';
+  await ctx.ev(`document.querySelector('[data-tab="status"]').click()`);
+  await ctx.waitFor('status nav', () => ctx.ev(`!!document.querySelector('[data-section="models"]')`));
+  await ctx.ev(`document.querySelector('[data-section="models"]').click()`);
+  await ctx.waitFor('m1 switch mounted and checked', () => ctx.ev(
+    `(() => { const sw = document.querySelector('${swSel}'); return sw && sw.checked; })()`));
+  await ctx.ev(`(() => { window.__sw = document.querySelector('${swSel}'); window.__sw.click(); })()`);
+  await ctx.waitFor('disable confirm modal open', () => ctx.ev(
+    `document.getElementById('confirm-modal').open === true`));
+  assert.equal(await ctx.ev(`window.__sw.checked`), false,
+    'change 事件前浏览器已把开关翻转为未勾选');
+  await ctx.ev(`document.getElementById('confirm-no').click()`);
+  await ctx.waitFor('confirm modal closed', () => ctx.ev(
+    `document.getElementById('confirm-modal').open === false`));
+  assert.equal(await ctx.ev(`window.__sw.checked`), true,
+    '取消确认后 toggleModel 必须把开关回退为勾选(服务器真相)');
+  await ctx.waitFor('visible switch checked and row not dimmed', () => ctx.ev(
+    `(() => { const sw = document.querySelector('${swSel}');
+      return sw && sw.checked && !sw.closest('tr').classList.contains('model-off'); })()`));
+  const models = await ctx.ev(`fetch('/api/models').then((r) => r.json())`);
+  assert.deepEqual(models.disabled || {}, {}, '取消路径不得改变后端禁用状态');
+  await ctx.ev(`delete window.__sw`);
+  assert.deepEqual(await ctx.pageErrors(), [], 'switch 取消路径不得有 JS 错误');
+});
+
+// 500 + 稳定前缀路径:内存开关已生效、只有落盘失败——开关保持浏览器翻转后
+// 的新态(不回退)、重新可用,后端 message 以 "toggle warning: " 前缀告警
+// (区别于普通失败的回退 + "disable failed: ")。fetch stub 拦截 mutation,
+// 所以真实后端状态不变;结束后强制重渲染把可见开关同步回服务器真相。
+test('Models 开关 500 持久化失败:告警且开关保持新态不回退 (switch 族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  const swSel = '[data-model-toggle="dummy"][data-model="m1"]';
+  await ctx.ev(`document.querySelector('[data-tab="status"]').click()`);
+  await ctx.waitFor('status nav', () => ctx.ev(`!!document.querySelector('[data-section="models"]')`));
+  await ctx.ev(`document.querySelector('[data-section="models"]').click()`);
+  await ctx.waitFor('m1 switch mounted and checked', () => ctx.ev(
+    `(() => { const sw = document.querySelector('${swSel}'); return sw && sw.checked; })()`));
+  await ctx.ev(`(() => {
+    window.__alerts = [];
+    window.__origAlert = window.alert;
+    window.alert = (m) => window.__alerts.push(String(m));
+    window.__origFetchSw = window.fetch;
+    window.fetch = (url, ...rest) => {
+      if (String(url).endsWith('/api/models/disable')) {
+        return Promise.resolve(new Response(
+          JSON.stringify({ error: 'toggle applied in memory but persisting it failed: e2e-boom' }),
+          { status: 500, headers: { 'content-type': 'application/json' } }));
+      }
+      return window.__origFetchSw(url, ...rest);
+    };
+  })()`);
+  try {
+    await ctx.ev(`(() => { window.__sw = document.querySelector('${swSel}'); window.__sw.click(); })()`);
+    await ctx.waitFor('disable confirm modal open', () => ctx.ev(
+      `document.getElementById('confirm-modal').open === true`));
+    await ctx.ev(`document.getElementById('confirm-yes').click()`);
+    await ctx.waitFor('toggle warning alerted', () => ctx.ev(`window.__alerts.length === 1`));
+    const msg = await ctx.ev(`window.__alerts[0]`);
+    assert.ok(msg.startsWith('toggle warning: toggle applied in memory but persisting it failed: '),
+      `500 前缀路径必须以 toggle warning 前缀告警(got: ${msg})`);
+    assert.ok(msg.includes('e2e-boom'), '告警必须携带后端 message 原文');
+    assert.equal(await ctx.ev(`window.__sw.checked`), false,
+      '500 前缀路径内存已应用,开关必须保持新态不回退');
+    assert.equal(await ctx.ev(`window.__sw.disabled`), false,
+      '失败后开关必须恢复可交互');
+    const models = await ctx.ev(`fetch('/api/models').then((r) => r.json())`);
+    assert.deepEqual(models.disabled || {}, {}, 'stub 拦截后真实后端禁用状态不变');
+  } finally {
+    await ctx.ev(`(() => {
+      window.fetch = window.__origFetchSw; delete window.__origFetchSw;
+      window.alert = window.__origAlert; delete window.__origAlert;
+      delete window.__alerts; delete window.__sw;
+    })()`);
+    // 可见开关此刻停留在"新态"而服务器真相是启用:切走再切回强制从
+    // modelsCache 重渲染,把 DOM 同步回勾选,不留不一致给后续用例。
+    await ctx.ev(`document.querySelector('[data-section="schedule"]').click()`);
+    await ctx.ev(`document.querySelector('[data-section="models"]').click()`);
+    await ctx.waitFor('switch re-synced to server truth', () => ctx.ev(
+      `(() => { const sw = document.querySelector('${swSel}'); return sw && sw.checked; })()`));
+  }
+  assert.deepEqual(await ctx.pageErrors(), [], 'switch 500 路径不得有 JS 错误');
 });
 
 test('takeover 确认对话框：变体切换驱动预览与执行单位 (表单族)', async (t) => {
@@ -1987,6 +2157,116 @@ test('MCP 子标签 / Security 过滤 / Accounts provider 选择进浏览器历�
   assert.deepEqual(await ctx.pageErrors(), [], '导航契约不得有 JS 错误');
   } finally {
     await ctx.ev(`window.fetch = window.__origFetch; delete window.__origFetch;`);
+  }
+});
+
+// loadMCPAnalytics 的 loading 标志归属：被 supersede 的旧 load 提前 return
+// 时,外层 finally 若无条件清 mcpAnalyticsLoading,新 load 仍在飞行——窗口期
+// 内子标签重入的初始加载守卫(!data && !loading)会放行一次重复并发 load。
+// 本用例用可控 deferred fetch 精确排出时序:首 load 失败(数据保持 null、
+// 工具栏挂载)→ Server 筛选连改两次(B 在途、C supersede B)→ 落地 B →
+// 子标签往返。buggy: 守卫放行第 4 次请求;fixed: 仍看到 C 在途,不发。
+// 本用例必须是全套里第一个进入 analytics 子标签的测试(mcpAnalyticsData
+// 仍是 null,初始加载守卫才可观测)。
+test('MCP Analytics 被 supersede 的 load 不得清除新 load 的在途标志 (并发族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  const mcpBody = JSON.stringify({
+    servers: [{ name: 'e2e-mcp-srv', enabled: true, transport: 'stdio', sessions: 0, calls: 0, errors: 0, avg_latency_ms: 0 }],
+    routes: [],
+  });
+  await ctx.ev(`(() => {
+    localStorage.removeItem('mcp-tab');
+    localStorage.setItem('mcpa-range', JSON.stringify({ preset: '7d', customStart: '', customEnd: '' }));
+    localStorage.removeItem('mcpa-server');
+    localStorage.removeItem('mcpa-tool');
+    window.__mcpaCalls = 0;
+    window.__mcpaPending = [];
+    window.__mcpaFailFirst = true;
+    window.__origFetchMcpa = window.fetch;
+    window.fetch = (url, ...rest) => {
+      const u = String(url);
+      if (u.endsWith('/api/mcp')) {
+        return Promise.resolve(new Response(${JSON.stringify(mcpBody)}, { headers: { 'content-type': 'application/json' } }));
+      }
+      if (u.startsWith('/api/mcp/analytics')) {
+        window.__mcpaCalls++;
+        if (window.__mcpaFailFirst) {
+          window.__mcpaFailFirst = false;
+          return Promise.resolve(new Response('e2e-first-fail', { status: 500 }));
+        }
+        return new Promise((resolve) => window.__mcpaPending.push(resolve));
+      }
+      return window.__origFetchMcpa(url, ...rest);
+    };
+  })()`);
+  try {
+    // tab 重入会 retainTab 原地刷新(loadMCP 重建面板):先给旧按钮打标记
+    // 再点 tab,等按钮换成新渲染的那批再操作,避免点到即将被替换的旧节点。
+    await ctx.ev(`document.querySelectorAll('button[data-mcp-tab]').forEach((b) => { b.__stale = 1; })`);
+    await ctx.ev(`document.querySelector('[data-tab="mcp"]').click()`);
+    await ctx.waitFor('mcp sub-tab buttons freshly rendered', () => ctx.ev(
+      `(() => { const b = document.querySelector('button[data-mcp-tab="analytics"]'); return b && !b.__stale; })()`));
+    // 首次加载失败:data 保持 null、错误渲染、工具栏挂载(Server 输入是
+    // 下面触发 load B/C 的控件)。7d 预设非 live 窗口,无 30s tick 干扰。
+    await ctx.ev(`document.querySelector('button[data-mcp-tab="analytics"]').click()`);
+    await ctx.waitFor('first load failed with toolbar mounted', () => ctx.ev(
+      `window.__mcpaCalls === 1 && !!document.getElementById('mcpa-server')
+        && !!document.querySelector('#mcpa-summary-host .msg.err')`), 8000);
+    // 连续两次提交 Server 筛选:load B 在途,load C 立刻 supersede B。
+    await ctx.ev(`(() => {
+      const s = document.getElementById('mcpa-server');
+      s.value = 'e2e-mcp-srv';
+      s.dispatchEvent(new Event('change'));
+    })()`);
+    await ctx.waitFor('load B in flight', () => ctx.ev(`window.__mcpaCalls === 2`));
+    await ctx.ev(`(() => {
+      const s = document.getElementById('mcpa-server');
+      s.value = 'e2e-mcp-srv-b';
+      s.dispatchEvent(new Event('change'));
+    })()`);
+    await ctx.waitFor('load C in flight', () => ctx.ev(`window.__mcpaCalls === 3`));
+    // B 的响应落地(superseded,不应用):它的 finally 不得清掉 C 的在途标志。
+    await ctx.ev(`window.__mcpaPending[0](new Response('e2e-drain', { status: 500 }))`);
+    await new Promise((r) => setTimeout(r, 300));
+    // 子标签往返:初始加载守卫必须仍看到 C 在途,不放行重复 load。
+    await ctx.ev(`document.querySelector('button[data-mcp-tab="servers"]').click()`);
+    await ctx.waitFor('servers view visible', () => ctx.ev(
+      `!document.getElementById('mcp-servers-view').hidden`), 8000);
+    await ctx.ev(`document.querySelector('button[data-mcp-tab="analytics"]').click()`);
+    await new Promise((r) => setTimeout(r, 500));
+    const calls = await ctx.ev(`window.__mcpaCalls`);
+    assert.equal(calls, 3,
+      `superseded load 退出不得放行重复并发初始 load(buggy=4, fixed=3, got ${calls})`);
+    // drain 在途的 C(及 buggy 路径多发的 D):以 500 落地,data 保持 null,
+    // 后续 重建族 用例的首次成功加载流程不受影响。
+    await ctx.ev(`(() => {
+      for (const resolve of window.__mcpaPending.splice(0)) {
+        resolve(new Response('e2e-drain', { status: 500 }));
+      }
+    })()`);
+    await new Promise((r) => setTimeout(r, 300));
+    // 恢复子标签状态:mcpSubTabState 有模块级缓存(mcpActiveSub),
+    // localStorage.removeItem 清不掉它——停在这里会把 'analytics' 留给
+    // 重建族 用例(它的 analytics 点击会因 next===state 直接 bail)。
+    await ctx.ev(`document.querySelector('button[data-mcp-tab="servers"]').click()`);
+    await ctx.waitFor('sub-tab state restored to servers', () => ctx.ev(
+      `!document.getElementById('mcp-servers-view').hidden
+        && localStorage.getItem('mcp-tab') === 'servers'`), 8000);
+    assert.deepEqual(await ctx.pageErrors(), [], '并发路径不得有 JS 错误');
+  } finally {
+    await ctx.ev(`(() => {
+      if (window.__mcpaPending) {
+        for (const resolve of window.__mcpaPending.splice(0)) {
+          resolve(new Response('e2e-drain', { status: 500 }));
+        }
+      }
+      window.fetch = window.__origFetchMcpa;
+      delete window.__origFetchMcpa;
+      delete window.__mcpaCalls; delete window.__mcpaPending; delete window.__mcpaFailFirst;
+      localStorage.removeItem('mcpa-server');
+      localStorage.removeItem('mcpa-tool');
+      localStorage.removeItem('mcpa-range');
+    })()`);
   }
 });
 

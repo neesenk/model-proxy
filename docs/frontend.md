@@ -65,11 +65,15 @@ Schedule 卡**（整卡重渲染会打断其他 route 进行中的测试态）�
 未勾选 = 中性灰轨道+滑块靠左）——勾选 = 路由且暴露于 `/v1/models`，
 未勾选 = 禁用（整行变暗 `tr.model-off`），不再单独渲染 disabled 徽章。
 调 `POST /api/models/disable {provider, model, disabled}`；开关在 change 事件时已
-被浏览器视觉翻转，取消确认/请求失败路径必须把 `checked` 回退（服务器状态是真相）；
+被浏览器视觉翻转，取消确认/请求失败路径必须把 `checked` 回退（服务器状态是真相——
+`disable` 实参恰等于翻转前的 checked，回退即 `checked = disable`）；
 Disable 方向过
 `confirmDialog`（立即停路由，影响在途会话）；Enable 直接执行。成功后
 `renderStatusTab()` 重取 `/api/models` 重渲染（状态渲染服务器返回值，不做本地回声）；
-失败恢复开关并 alert 后端 message。开关 title 说明当前态与生命周期：**持久化**
+失败恢复开关并 alert 后端 message。**例外**：500 + 稳定前缀
+`toggle applied in memory but persisting it failed: `（内存开关已生效、只有落盘失败，
+见 `docs/web-api.md`）**不回退**开关（回退会谎称模型仍在路由），只以
+`toggle warning: ` 前缀告警后端 message 原文。开关 title 说明当前态与生命周期：**持久化**
 （`disabled_models.json`）——reload 保留、重启与 `models refresh` 后仍生效
 （与 pin 的 memory-only 契约不同）；持久化失败时后端报错（内存开关已生效）。纯函数
 `modelCapMatrix(providers, disabled)` 同时接收响应顶层
@@ -107,7 +111,7 @@ unmatched 行的 Match 按钮在行内展开编辑器：`catalog_ids` datalist �
 
 ## 筛选输入的清除按钮（✕）
 
-**每个带建议下拉的文本筛选输入和带「All …」默认项的筛选 `<select>` 共用唯一的清除实现**（app.js `attachClearable`，样式 `.clearable`/`.clear-x`，注册表见 `internal/web/assets/AGENTS.md`）：combobox（`attachCombo`：Requests provider/model/**session**、Live 视图的 `#live-session`）、datalist 输入（Analytics 的 provider/model/agent、Config 表单的 prov-name/route-name）、以及筛选 select（Requests Log 的 agent）一致覆盖。**combobox 的会话筛选是可搜索的**：session 选项是全量 id（log 页经 `renderRequestSelectors` 原地重写 `combos.sessionOptions`——按 agent 收窄、MCP 页读会话池；live 页经 `refreshLiveSessionOptions`），输入子串过滤、Enter/点选提交（log 页 `onSessionSelect` push hash、live 页 `onLiveSessionChange`）、✕ 清空；请求表行内 session 单元格点击下钻同样镜像回控件（log 页行点击 handler 直接写 filter + pushState，不触发 hashchange → `applyLogQuery` 不跑，必须自行镜像；live 页 `enterLiveSession`→`onLiveSessionChange` 已镜像）；输入值是自由控件（`syncRequestsFreeControls` 随 hash 同步），不因选项重建被改写（只有 agent 改选会清掉已失效的 session 挑选）。行为契约：控件有值时宿主带 `.has-text`、右缘显示 ✕（combobox 宿主上 ✕ 让位替换 ::after 下拉箭头；原生 select 上 ✕ 位于 OS 箭头左侧，tooltip 为 Reset to All）；点击 ✕ 清空/复位并保持焦点在控件上（mousedown preventDefault，不抢焦点、不触发 blur 关弹层），随后走该控件的**正常提交路径**——派发冒泡的 input+change 事件（datalist 预填/select onchange 监听器自然响应）+ combobox 的 onSelect 回调（等价于清空后回车），不是旁路写状态。程序性改值（`attachCombo` 点选/Enter 选中激活项、log 页行点击 session 下钻、`onAgentSelect`/`onProviderSelect` 联动清空失效挑选、`renderRequestSelectors` 重建选项、`syncRequestsFreeControls` 随 hash 重设、`scheduleFormRestoreGuard` 表单复位、`onLiveSessionChange` 镜像下拉选择、`refreshLiveSessionOptions` 重设值）不触发事件，由调用方补一次 `syncClearable` 同步（否则 ✕ 状态滞后到下一次重新挂载才补上）。新增加入筛选语义的下拉/输入控件必须调 `attachClearable`，不得另写清除按钮。非 combobox 挂点（含原生 select）会被 `attachClearable` 包进一层 `.clearable` span，父容器的 flex/grid 尺寸假设随之转移到包裹层——新增这类挂点必须同时说明两个系统断点下父容器的布局行为（既有补偿模式见 styles.css 的 `.field .clearable`/`.an-toolbar .clearable`）。**combobox 菜单的滚动契约**（`wireComboGlobals` + styles.css `.combo-menu`）：菜单是 body 级 `position:fixed`、自身可滚（`.combo-menu` overflow:auto + **`overscroll-behavior: contain`**）；**菜单内部的滚动不关闭菜单**（用户在浏览选项列表，全局 capture-phase scroll-关闭跳过以菜单为目标的滚动事件），且 contain 阻断列表滚到边界后的**滚动链动**——滚到底继续滚轮不得带动页面（页面一滚，fixed 菜单会因锚点移动被关闭，即“滚到底菜单消失”缺陷）；页面/面板自身滚动则关闭（锚点已滚走，与原生 select 弹层同款）。uie2e 用真实 CDP 滚轮钉住两半：菜单内滚到底页面 scrollY 不动、菜单保持打开。
+**每个带建议下拉的文本筛选输入和带「All …」默认项的筛选 `<select>` 共用唯一的清除实现**（app.js `attachClearable`，样式 `.clearable`/`.clear-x`，注册表见 `internal/web/assets/AGENTS.md`）：combobox（`attachCombo`：Requests provider/model/**session**、Live 视图的 `#live-session`）、datalist 输入（Analytics 的 provider/model/agent、Config 表单的 prov-name/route-name）、以及筛选 select（Requests Log 的 agent）一致覆盖。**combobox 的会话筛选是可搜索的**：session 选项是全量 id（log 页经 `renderRequestSelectors` 原地重写 `combos.sessionOptions`——按 agent 收窄、MCP 页读会话池；live 页经 `refreshLiveSessionOptions`；blur 时它无条件把输入框重设回已提交的 `S.session`——未提交键入（不 Enter 不点选）不得残留，optionsKey 短路只跳过选项簿记、不得跳过这次重绘），输入子串过滤、Enter/点选提交（log 页 `onSessionSelect` push hash、live 页 `onLiveSessionChange`）、✕ 清空；请求表行内 session 单元格点击下钻同样镜像回控件（log 页行点击 handler 直接写 filter + pushState，不触发 hashchange → `applyLogQuery` 不跑，必须自行镜像；live 页 `enterLiveSession`→`onLiveSessionChange` 已镜像）；输入值是自由控件（`syncRequestsFreeControls` 随 hash 同步），不因选项重建被改写（只有 agent 改选会清掉已失效的 session 挑选）。行为契约：控件有值时宿主带 `.has-text`、右缘显示 ✕（combobox 宿主上 ✕ 让位替换 ::after 下拉箭头；原生 select 上 ✕ 位于 OS 箭头左侧，tooltip 为 Reset to All）；点击 ✕ 清空/复位并保持焦点在控件上（mousedown preventDefault，不抢焦点、不触发 blur 关弹层），随后走该控件的**正常提交路径**——派发冒泡的 input+change 事件（datalist 预填/select onchange 监听器自然响应）+ combobox 的 onSelect 回调（等价于清空后回车），不是旁路写状态。程序性改值（`attachCombo` 点选/Enter 选中激活项、log 页行点击 session 下钻、`onAgentSelect`/`onProviderSelect` 联动清空失效挑选、`renderRequestSelectors` 重建选项、`syncRequestsFreeControls` 随 hash 重设、`scheduleFormRestoreGuard` 表单复位、`onLiveSessionChange` 镜像下拉选择、`refreshLiveSessionOptions` 重设值）不触发事件，由调用方补一次 `syncClearable` 同步（否则 ✕ 状态滞后到下一次重新挂载才补上）。新增加入筛选语义的下拉/输入控件必须调 `attachClearable`，不得另写清除按钮。非 combobox 挂点（含原生 select）会被 `attachClearable` 包进一层 `.clearable` span，父容器的 flex/grid 尺寸假设随之转移到包裹层——新增这类挂点必须同时说明两个系统断点下父容器的布局行为（既有补偿模式见 styles.css 的 `.field .clearable`/`.an-toolbar .clearable`）。**combobox 菜单的滚动契约**（`wireComboGlobals` + styles.css `.combo-menu`）：菜单是 body 级 `position:fixed`、自身可滚（`.combo-menu` overflow:auto + **`overscroll-behavior: contain`**）；**菜单内部的滚动不关闭菜单**（用户在浏览选项列表，全局 capture-phase scroll-关闭跳过以菜单为目标的滚动事件），且 contain 阻断列表滚到边界后的**滚动链动**——滚到底继续滚轮不得带动页面（页面一滚，fixed 菜单会因锚点移动被关闭，即“滚到底菜单消失”缺陷）；页面/面板自身滚动则关闭（锚点已滚走，与原生 select 弹层同款）。uie2e 用真实 CDP 滚轮钉住两半：菜单内滚到底页面 scrollY 不动、菜单保持打开。
 
 ## 时间维度选择器与 Quota Window 预设
 
@@ -233,6 +237,10 @@ tab 重入经 `retainTab` 守卫。
   柱形图 + 拖选缩放（Reset Zoom）+ tooltip + 可点击 legend chip。默认窗口 Last 1h；
   **Last 1h/Today 为 live 窗口，30s 自动刷新**（tick 走 `deferAutoRefresh` 入口/提交
   双门；切子标签停止、进入重新武装，`mcpShowSubTab` 负责）。
+  并发守卫：响应落地用 seq 比对防旧数据覆盖新筛选；在途 loading 标志同样只有
+  **最新一次 load 可清除**（finally 里的 seq 检查）——被 supersede 的旧 load 提前
+  退出不得清标志，否则窗口期内子标签重入的初始加载守卫
+  （`!mcpAnalyticsData && !mcpAnalyticsLoading`）会放行重复并发 load。
   工具栏的筛选是**两个 datalist 输入**（与 Analytics 的 provider/model/agent 同款
   commit-on-change + `attachClearable` 交互）：**Server**（server 与 route 共享命名空间、
   混排不区分 kind，建议项跨渲染累加）和 **Tool**（未选 Server 时 disabled；建议项来自
