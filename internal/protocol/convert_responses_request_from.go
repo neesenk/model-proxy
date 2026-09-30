@@ -409,22 +409,12 @@ func convertResponsesRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, er
 			// must not fold into `system` either.
 			continue
 		case "reasoning":
-			text, sig := responsesReasoningText(item)
-			if text == "" && sig == "" {
+			blk := reasoningItemToThinkingBlock(item)
+			if blk == nil {
 				// Anthropic may reject an empty thinking block with no
 				// signature — drop the item observably.
 				warnDiag(d, "reasoning_dropped", "dropping empty reasoning item in r→a request (no summary, no encrypted_content)")
 				continue
-			}
-			var blk map[string]any
-			if text == "" && sig != "" {
-				// encrypted-only reasoning ↔ redacted_thinking (data verbatim).
-				blk = map[string]any{"type": "redacted_thinking", "data": sig}
-			} else {
-				blk = map[string]any{"type": "thinking", "thinking": text}
-				if sig != "" {
-					blk["signature"] = sig
-				}
 			}
 			msgs = append(msgs, map[string]any{"role": "assistant", "content": []map[string]any{blk}})
 		default:

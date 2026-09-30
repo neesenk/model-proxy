@@ -1076,43 +1076,12 @@ func convertOpenAIRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, error
 	// "call_a" both → "call_a") — a deterministic suffix keeps them apart so
 	// the upstream never sees colliding tool_use ids (Switchyard FNV-1a
 	// suffixes solve the same problem).
-	idMap := map[string]string{}
-	usedNorm := map[string]bool{}
-	// Id-less tool_calls get a FRESH placeholder per occurrence: two id-less
-	// calls in one message must not collapse onto one memoized toolu_empty_N
-	// (duplicate tool_use ids are a hard 400). Id-less tool_results pair
-	// positionally with those placeholders in order of appearance — the only
-	// deterministic pairing available when neither side carries an id.
-	var emptyToolIDs []string
-	emptyResults := 0
-	normID := func(id string) string {
-		if id == "" {
-			n := sanitizeToolUseID("")
-			emptyToolIDs = append(emptyToolIDs, n)
-			return n
-		}
-		if n, ok := idMap[id]; ok {
-			return n
-		}
-		n := sanitizeToolUseID(id)
-		for i := 2; usedNorm[n]; i++ {
-			n = fmt.Sprintf("%s_%d", sanitizeToolUseID(id), i)
-		}
-		usedNorm[n] = true
-		idMap[id] = n
-		return n
-	}
-	// normResultID maps a tool message's tool_call_id: non-empty ids go through
-	// the same memo as the tool_use side; an empty/missing id consumes the next
-	// unpaired id-less tool_use placeholder (order of appearance).
-	normResultID := func(id string) string {
-		if id == "" && emptyResults < len(emptyToolIDs) {
-			n := emptyToolIDs[emptyResults]
-			emptyResults++
-			return n
-		}
-		return normID(id)
-	}
+	// Tool-id pairing via the shared normalizer (contract on the type):
+	// memoized first-appearance ids, a FRESH placeholder per id-less use
+	// (duplicate tool_use ids are a hard 400), id-less results consume those
+	// placeholders positionally — the only deterministic pairing when neither
+	// side carries an id.
+	norm := newToolIDNormalizer()
 	flushPendingTool := func() {
 		if len(pendingTool) == 0 {
 			return
@@ -1123,7 +1092,7 @@ func convertOpenAIRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, error
 			content, isError := splitToolResultError(openaiTextOf(tm["content"], d))
 			blocks = append(blocks, map[string]any{
 				"type":        "tool_result",
-				"tool_use_id": normResultID(tid),
+				"tool_use_id": norm.result(tid),
 				"content":     content,
 				"is_error":    isError,
 			})
@@ -1181,7 +1150,7 @@ func convertOpenAIRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, error
 					args, _ := fn["arguments"].(string)
 					id, _ := tcm["id"].(string)
 					blocks = append(blocks, map[string]any{
-						"type": "tool_use", "id": normID(id), "name": name, "input": parseToolArgs(args, d),
+						"type": "tool_use", "id": norm.use(id), "name": name, "input": parseToolArgs(args, d),
 					})
 				}
 			}

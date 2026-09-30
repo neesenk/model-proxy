@@ -14,6 +14,55 @@ import (
 
 // --- response: responses → anthropic ---
 
+// webSearchCallItem builds the Responses `web_search_call` item from an
+// anthropic web_search_tool_result block: sources extracted from the content
+// array (url+title per web_search_result), the error-content shape marks the
+// call failed. Shared verbatim by the a→r request and response converters;
+// map insertion order is the wire byte order — keep it.
+func webSearchCallItem(b map[string]any, webSearchInputs map[string]map[string]any) map[string]any {
+	id := strOpt(b["tool_use_id"])
+	item := map[string]any{
+		"type": "web_search_call", "id": id, "status": "completed", "action": webSearchInputs[id],
+	}
+	switch content := b["content"].(type) {
+	case []any:
+		var sources []map[string]any
+		for _, raw := range content {
+			hit := asMap(raw)
+			if hit["type"] == "web_search_result" && strOpt(hit["url"]) != "" {
+				sources = append(sources, map[string]any{"url": hit["url"], "title": hit["title"]})
+			}
+		}
+		item["sources"] = sources
+	case map[string]any:
+		if content["type"] == "web_search_tool_result_error" {
+			item["status"] = "failed"
+		}
+	}
+	return item
+}
+
+// reasoningItemToThinkingBlock renders a Responses reasoning item as an
+// anthropic thinking (or redacted_thinking, when only encrypted content
+// exists) block. nil means text and signature are both empty — callers drop
+// the item observably (anthropic rejects an empty thinking block with no
+// signature).
+func reasoningItemToThinkingBlock(item map[string]any) map[string]any {
+	text, sig := responsesReasoningText(item)
+	if text == "" && sig == "" {
+		return nil
+	}
+	if text == "" && sig != "" {
+		// encrypted-only reasoning ↔ redacted_thinking (data verbatim).
+		return map[string]any{"type": "redacted_thinking", "data": sig}
+	}
+	blk := map[string]any{"type": "thinking", "thinking": text}
+	if sig != "" {
+		blk["signature"] = sig
+	}
+	return blk
+}
+
 func convertResponsesToAnthropic(body []byte) ([]byte, error) {
 	var src map[string]any
 	if err := sonic.Unmarshal(body, &src); err != nil {
@@ -81,8 +130,8 @@ func convertResponsesToAnthropic(body []byte) ([]byte, error) {
 			flushText()
 			blocks = append(blocks, responsesWebSearchToAnthropicBlocks(item, nil)...)
 		case "reasoning":
-			text, sig := responsesReasoningText(item)
-			if text == "" && sig == "" {
+			blk := reasoningItemToThinkingBlock(item)
+			if blk == nil {
 				// Anthropic may reject an empty thinking block with no
 				// signature — drop the item observably (same rule as the
 				// reasoning_details replay path).
@@ -90,15 +139,6 @@ func convertResponsesToAnthropic(body []byte) ([]byte, error) {
 				continue
 			}
 			flushText()
-			var blk map[string]any
-			if text == "" && sig != "" {
-				blk = map[string]any{"type": "redacted_thinking", "data": sig}
-			} else {
-				blk = map[string]any{"type": "thinking", "thinking": text}
-				if sig != "" {
-					blk["signature"] = sig
-				}
-			}
 			blocks = append(blocks, blk)
 		default:
 			convertWarn("dropping responses output item in r→a response: " + strOf(item["type"]))
@@ -364,26 +404,7 @@ func convertAnthropicResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, err
 				}
 			case "web_search_tool_result":
 				flushText()
-				id := strOpt(b["tool_use_id"])
-				item := map[string]any{
-					"type": "web_search_call", "id": id, "status": "completed", "action": webSearchInputs[id],
-				}
-				switch content := b["content"].(type) {
-				case []any:
-					var sources []map[string]any
-					for _, raw := range content {
-						hit := asMap(raw)
-						if hit["type"] == "web_search_result" && strOpt(hit["url"]) != "" {
-							sources = append(sources, map[string]any{"url": hit["url"], "title": hit["title"]})
-						}
-					}
-					item["sources"] = sources
-				case map[string]any:
-					if content["type"] == "web_search_tool_result_error" {
-						item["status"] = "failed"
-					}
-				}
-				output = append(output, item)
+				output = append(output, webSearchCallItem(b, webSearchInputs))
 			case "thinking":
 				flushText()
 				item := map[string]any{

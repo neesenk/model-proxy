@@ -95,26 +95,7 @@ func anthropicMsgToResponsesItems(m map[string]any, imageOK bool, d *Diagnostics
 				}
 			case "web_search_tool_result":
 				flush()
-				id := strOpt(b["tool_use_id"])
-				item := map[string]any{
-					"type": "web_search_call", "id": id, "status": "completed", "action": webSearchInputs[id],
-				}
-				switch content := b["content"].(type) {
-				case []any:
-					var sources []map[string]any
-					for _, raw := range content {
-						hit := asMap(raw)
-						if hit["type"] == "web_search_result" && strOpt(hit["url"]) != "" {
-							sources = append(sources, map[string]any{"url": hit["url"], "title": hit["title"]})
-						}
-					}
-					item["sources"] = sources
-				case map[string]any:
-					if content["type"] == "web_search_tool_result_error" {
-						item["status"] = "failed"
-					}
-				}
-				items = append(items, item)
+				items = append(items, webSearchCallItem(b, webSearchInputs))
 			case "tool_result":
 				flush()
 				txt := anthropicToolResultText(b["content"], d)
