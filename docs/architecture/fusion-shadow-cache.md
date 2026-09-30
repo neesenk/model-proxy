@@ -91,7 +91,10 @@ forward 产生 start/end，包含 agent、protocol、provider、status、latency
 - route_policy 的 `eval` 是 L2 成对评估 shadow：对 graded route 的采样主响应，把同一请求体
   重放到配对档并由 decisions judge 比较两个响应，verdict 写入 shadow 记录的 `diagnostics`。
   eval 与 legacy `shadow:` 共享 `shadow.Runtime` 的并发门和 lifecycle 准入，但采样决策独立
-  （`eval.sample_rate`），且 judge 调用标记 `Sensitive`，request log 不保留其 prompt/response
+  （`eval.sample_rate`，0 或缺省按 config.yaml 注释取默认 0.05）；采样与主响应 body 留存
+  读的是**同一个请求快照**（bodycapture 回调不重读 reload-owned 配置），judge ctx 派生自
+  lifecycle stop（30s 预算内，stop 立即取消，不吃 shadowShutdownGrace 宽限），且 judge 调用
+  标记 `Sensitive`，request log 不保留其 prompt/response
   body。详见 `docs/architecture/request-routing.md` 的「L2 成对评估」小节。
 
 `internal/shadow.Runtime` 拥有可热重载的 sample decision、semaphore、专用

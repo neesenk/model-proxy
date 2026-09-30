@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -421,5 +422,113 @@ func TestServeRouteSelectorBeatsBand(t *testing.T) {
 	}
 	if upSel.hits() != 1 {
 		t.Fatalf("selector calls = %d, want 1", upSel.hits())
+	}
+}
+
+// dropProviderOnLaterRounds returns a Schedule fake that keeps the full
+// target set on the first round and drops provider from every later round —
+// the wait-retry round's re-scheduled set a cached selector preference is
+// re-applied to.
+func dropProviderOnLaterRounds(calls *atomic.Int32, provider string) func(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, generation uint64) []RouteTarget {
+	return func(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, generation uint64) []RouteTarget {
+		if calls.Add(1) == 1 {
+			return targets
+		}
+		out := make([]RouteTarget, 0, len(targets))
+		for _, t := range targets {
+			if t.Provider != provider {
+				out = append(out, t)
+			}
+		}
+		return out
+	}
+}
+
+// TestServeRouteSelectorRetryRoundWithoutPreferredReportsFallback: the
+// selector's enforce preference is paid once and re-applied to the retry
+// round's re-scheduled set. When the preferred target was scheduled out
+// (still cooling), the round serves the natural order and the committed
+// routing decision must report fallback — selector choice recorded, not
+// enforced — instead of claiming the selector determined the order.
+func TestServeRouteSelectorRetryRoundWithoutPreferredReportsFallback(t *testing.T) {
+	h := newHarness()
+	var aCalls atomic.Int32
+	upA := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		if aCalls.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		openaiOKResponder("from-a")(w, r)
+	})
+	upB := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	upSel := newFakeUpstream(t, selectorDecisionResponder("c1", 0.9))
+	snap := routeSelectorSnapshot(t, h, upA, upB, upSel)
+	snap.Cfg.Scheduling.RetryWait = "2s"
+	h.state.allDown = true
+	h.state.allRateLimited = true
+	h.state.earliest = time.Now().Add(5 * time.Millisecond)
+	var scheduleCalls atomic.Int32
+	h.svc.Schedule = dropProviderOnLaterRounds(&scheduleCalls, "b")
+
+	w := h.serve(snap, "openai", "/v1/chat/completions", openaiChatBody(), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a serves the retry round)", w.Code)
+	}
+	if upSel.hits() != 1 {
+		t.Fatalf("selector decisions calls = %d, want at most 1 per request", upSel.hits())
+	}
+	if upB.hits() != 1 {
+		t.Fatalf("b hits = %d, want 1 (only the first round tried the preferred target)", upB.hits())
+	}
+	if upA.hits() != 2 {
+		t.Fatalf("a hits = %d, want 2 (first-round failover + retry-round commit)", upA.hits())
+	}
+	if r := h.fx.capturedRouting(); len(r) != 1 || r[0] == nil {
+		t.Fatalf("routing decision missing: %+v", r)
+	} else if r[0].Source != "fallback" || r[0].Selector == nil || r[0].Selector.Enforced || r[0].Selector.Choice != "c1" {
+		t.Fatalf("retry-round routing = %+v, want source=fallback with the cached selector choice recorded but not enforced", r[0])
+	}
+}
+
+// TestServeRouteGradeSelectorRetryRoundWithoutGradeReportsFallback: the graded
+// variant of the retry-round honesty rule. Round 2's re-scheduled set has no
+// representative of the cached enforced grade, so the committed decision must
+// not attribute the served order to that grade.
+func TestServeRouteGradeSelectorRetryRoundWithoutGradeReportsFallback(t *testing.T) {
+	h := newHarness()
+	// "any" fallback only appends grades AFTER the enforced one, so round 1
+	// tries b alone; a first serves the retry round.
+	upA := newFakeUpstream(t, openaiOKResponder("from-a"))
+	upB := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	upSel := newFakeUpstream(t, selectorDecisionResponder("g1", 0.9))
+	snap := routeGradeSelectorSnapshot(t, h, upA, upB, upSel)
+	snap.Cfg.Scheduling.RetryWait = "2s"
+	h.state.allDown = true
+	h.state.allRateLimited = true
+	h.state.earliest = time.Now().Add(5 * time.Millisecond)
+	var scheduleCalls atomic.Int32
+	h.svc.Schedule = dropProviderOnLaterRounds(&scheduleCalls, "b")
+
+	w := h.serve(snap, "openai", "/v1/chat/completions", openaiChatBody(), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a serves the retry round)", w.Code)
+	}
+	if upSel.hits() != 1 {
+		t.Fatalf("selector decisions calls = %d, want at most 1 per request", upSel.hits())
+	}
+	if upB.hits() != 1 {
+		t.Fatalf("b hits = %d, want 1 (only the first round tried the enforced grade)", upB.hits())
+	}
+	if upA.hits() != 1 {
+		t.Fatalf("a hits = %d, want 1 (the retry-round commit)", upA.hits())
+	}
+	if r := h.fx.capturedRouting(); len(r) != 1 || r[0] == nil {
+		t.Fatalf("routing decision missing: %+v", r)
+	} else if r[0].Source != "fallback" || r[0].Grade != "" || r[0].Selector == nil || r[0].Selector.Enforced || r[0].Selector.Choice != "g1" {
+		t.Fatalf("retry-round grade routing = %+v, want source=fallback, no grade, selector choice recorded but not enforced", r[0])
 	}
 }

@@ -124,6 +124,96 @@ func TestDisabledModelsForHome(t *testing.T) {
 	}
 }
 
+// TestModelFactsFor_CorruptDisabledStoreWarns is the regression for the
+// fail-open visibility gap: a malformed disabled_models.json degrades to
+// unfiltered (a takeover must not fail over bad state — behavior unchanged),
+// but that degradation used to surface only as a log line. It must now ride
+// the report warnings channel (facts.DisabledStoreWarning →
+// TakeoverReport.Warnings) while the run still writes the models a healthy
+// store might have disabled.
+func TestModelFactsFor_CorruptDisabledStoreWarns(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".model-proxy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".model-proxy", "disabled_models.json"), []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".kimi-code"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgTOML := filepath.Join(home, ".kimi-code", "config.toml")
+	if err := os.WriteFile(cfgTOML, []byte("default_model = \"glm-5.3-flash\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Listen: "127.0.0.1:15721",
+		Providers: map[string]config.Provider{
+			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.3-flash"}},
+		},
+	}
+
+	// CLI flow: DisabledModelsForHome fail-opens to nil (unfiltered)…
+	if disabled := takeover.DisabledModelsForHome(home); disabled != nil {
+		t.Fatalf("corrupt store = %v, want nil (unfiltered)", disabled)
+	}
+	facts := takeover.ModelFactsFor(cfg, "kimi", home, "", takeover.ModeUnified, takeover.DisabledModelsForHome(home))
+	// …the degradation is recorded for the warnings channel…
+	if facts.DisabledStoreWarning == "" {
+		t.Fatal("corrupt disabled store must record facts.DisabledStoreWarning")
+	}
+	// …and the run stays unfiltered: the model a healthy store could have
+	// disabled is still routed.
+	if _, ok := facts.Routes["glm-5.3-flash"]; !ok {
+		t.Errorf("fail-open must keep the model routed: %v", facts.Routes)
+	}
+
+	report, err := takeover.RunTakeoverReport(cfg, "kimi", filepath.Join(home, ".mp"), facts, home, takeover.ModeUnified, takeover.ScopeAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, w := range report.Warnings {
+		if strings.Contains(w, "disabled models store unreadable") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("disabled-store warning missing from report.Warnings: %v", report.Warnings)
+	}
+	data, err := os.ReadFile(cfgTOML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "glm-5.3-flash") {
+		t.Errorf("fail-open run must still write the model to the client config:\n%s", data)
+	}
+}
+
+// TestModelFactsFor_HealthyDisabledStoreNoWarning: a readable store (or no
+// store at all) records no degradation warning — the warnings channel stays
+// clean on the normal path.
+func TestModelFactsFor_HealthyDisabledStoreNoWarning(t *testing.T) {
+	home := t.TempDir()
+	if facts := takeover.ModelFactsFor(decisionsAndChatConfig(), "", home, "", takeover.ModeUnified, nil); facts.DisabledStoreWarning != "" {
+		t.Errorf("missing store must not warn: %q", facts.DisabledStoreWarning)
+	}
+	dir := filepath.Join(home, ".model-proxy")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "disabled_models.json"),
+		[]byte(`{"version":1,"disabled":{"zhipu":["glm-5.3"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// An override was supplied (the store loaded) — no re-check, no warning.
+	if facts := takeover.ModelFactsFor(decisionsAndChatConfig(), "", home, "", takeover.ModeUnified,
+		map[string][]string{"zhipu": {"glm-5.3"}}); facts.DisabledStoreWarning != "" {
+		t.Errorf("healthy store must not warn: %q", facts.DisabledStoreWarning)
+	}
+}
+
 // TestModelFactsFor_ExcludesNotLoggedInProviders is the regression for the
 // operator report that takeover's model list included models whose ONLY
 // provider has no account (e.g. grok-4.7 on a never-logged-in opencode-go):

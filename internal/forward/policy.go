@@ -469,7 +469,17 @@ func buildGradeRoutingDecision(
 		}
 	}
 	if selectorRes.action == "enforce" {
-		return selectorRes.routingDecision(nil, selected)
+		// The enforced grade may have NO representative in this round's
+		// filtered set: the cached choice is re-applied to a re-scheduled
+		// ordered set on wait-retry rounds (the grade's targets may all have
+		// been scheduled out), and buildGradeOrdered then falls back to the
+		// natural order. Report that honestly instead of attributing the
+		// served order to a grade nothing came from — the graded counterpart
+		// of routeSelectorResult.reapply's fallback downgrade.
+		if gradeGroupHasTargets(filtered, selected) {
+			return selectorRes.routingDecision(nil, selected)
+		}
+		selectorRes.action = "fallback"
 	}
 
 	// Determine whether a band matched on its own (without latch/selector).
@@ -488,6 +498,18 @@ func buildGradeRoutingDecision(
 	return base
 }
 
+// gradeGroupHasTargets reports whether name is one of the filtered grade
+// groups and still holds at least one target (an empty grade group means the
+// grade has no representative in the current ordered set).
+func gradeGroupHasTargets(groups []gradeGroup, name string) bool {
+	for _, g := range groups {
+		if g.name == name {
+			return len(g.targets) > 0
+		}
+	}
+	return false
+}
+
 // filterGradeTargets keeps only targets that fit the request profile, scoped to
 // the grade itself. Unlike Planner.ApplyWithProfile it never falls back to a
 // cross-route pool — an empty grade stays empty so the fallback mode can decide
@@ -495,7 +517,7 @@ func buildGradeRoutingDecision(
 func filterGradeTargets(targets []RouteTarget, cfg *Config, parentOf map[string]string, cat *catalog.Catalog, profile routing.Profile) []RouteTarget {
 	out := make([]RouteTarget, 0, len(targets))
 	for _, t := range targets {
-		if t.Provider == "fusion" {
+		if t.Provider == configdomain.FusionProvider {
 			out = append(out, t)
 			continue
 		}

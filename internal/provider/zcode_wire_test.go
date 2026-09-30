@@ -63,7 +63,7 @@ func TestZCode_WireMatchesRealClientCapture(t *testing.T) {
 	if err := p.AuthHeaders(req); err != nil {
 		t.Fatalf("AuthHeaders: %v", err)
 	}
-	p.ExtraHeaders(req, nil, fx.Path)
+	p.ExtraHeaders(req, nil, "", fx.Path)
 
 	// 1. Deterministic fingerprint values: exact match on both sides. A fixture
 	//    mismatch here means ZCode changed the value (re-capture); a proxy

@@ -1,6 +1,7 @@
 package login
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -145,5 +146,85 @@ func TestAddApikeyAccount_AuthfulModelsUnchanged(t *testing.T) {
 	}
 	if chatHits.Load() != 0 {
 		t.Fatalf("non-ModelsAuthless provider was chat-probed %d times, want 0", chatHits.Load())
+	}
+}
+
+// TestValidateKeyByRealProbe_VerdictMatrix pins the real-probe verdicts: a
+// 401/403 or a business-envelope auth failure rejects the key as invalid; a
+// 429 or 5xx is inconclusive (the probe may already have been billed — an
+// upstream outage says nothing about the key) and must surface as
+// ErrKeyUnverifiable, never as "accepted"; 200 and the remaining statuses
+// (402 payment-required, 404 on a wrong path) keep the historical
+// "not rejected = accepted" semantics.
+func TestValidateKeyByRealProbe_VerdictMatrix(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		status       int
+		body         string
+		wantErr      string // "" = accepted
+		unverifiable bool
+	}{
+		{"ok", 200, `{"id":"x","choices":[]}`, "", false},
+		{"payment required", 402, `{"error":{"message":"insufficient balance"}}`, "", false},
+		{"not found", 404, `{"error":{"message":"no such route"}}`, "", false},
+		{"unauthorized", 401, `{"error":{"message":"Invalid API key."}}`, "validation failed", false},
+		{"forbidden", 403, `{"error":{"message":"forbidden"}}`, "validation failed", false},
+		{"envelope auth failure", 200, `{"code":401,"msg":"令牌已过期或验证不正确","success":false}`, "validation failed", false},
+		{"rate limited", 429, `{"error":{"message":"slow down"}}`, "inconclusive", true},
+		{"server error", 500, `{"error":{"message":"boom"}}`, "inconclusive", true},
+		{"bad gateway", 502, `bad gateway`, "inconclusive", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				w.Write([]byte(tc.body))
+			}))
+			defer upstream.Close()
+			prov := configdomain.Provider{
+				Provider:      "opencode-go",
+				OpenAIBaseURL: upstream.URL,
+				Models:        []string{"glm-5.3"},
+			}
+			err := validateKeyByRealProbe("opencode-go", prov, "candidate-key")
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("status %d: want accepted, got %v", tc.status, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("status %d: want %q error, got %v", tc.status, tc.wantErr, err)
+			}
+			if got := errors.Is(err, ErrKeyUnverifiable); got != tc.unverifiable {
+				t.Fatalf("status %d: errors.Is(ErrKeyUnverifiable) = %v, want %v (err=%v)", tc.status, got, tc.unverifiable, err)
+			}
+		})
+	}
+}
+
+// TestAddApikeyAccount_UnverifiableProbeDoesNotPool pins fail-closed at the
+// pool boundary: an inconclusive probe (429/5xx) aborts the login and the
+// candidate key never enters the pool.
+func TestAddApikeyAccount_UnverifiableProbeDoesNotPool(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503)
+		w.Write([]byte(`{"error":{"message":"upstream unavailable"}}`))
+	}))
+	defer upstream.Close()
+	prov := configdomain.Provider{
+		Provider:      "opencode-go",
+		OpenAIBaseURL: upstream.URL,
+		Models:        []string{"glm-5.3"},
+	}
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"opencode-go": prov}}
+
+	setPoolHome(t, t.TempDir())
+	_, err := AddApikeyAccount(cfg, "opencode-go", prov, accountCred{APIKey: "candidate-key"}, "", true)
+	if !errors.Is(err, ErrKeyUnverifiable) {
+		t.Fatalf("503 probe: want ErrKeyUnverifiable, got %v", err)
+	}
+	pool, _ := LoadPool("opencode-go", "opencode-go")
+	if len(pool.Accounts) != 0 {
+		t.Fatalf("unverifiable key leaked into the pool: %+v", pool.Accounts)
 	}
 }

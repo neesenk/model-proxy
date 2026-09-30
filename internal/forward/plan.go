@@ -79,7 +79,7 @@ func (p pipeline) targetExecutor(runtime targetexec.Runtime, cfg *Config, parent
 			Runtime:    runtime,
 			Scheduling: runtime.Scheduling,
 		},
-		Effects:   p.svc.NewEffects(runtime.Generation),
+		Effects:   p.svc.NewEffects(cfg, runtime.Generation),
 		Responses: p.svc.ResponsesState,
 	}
 }

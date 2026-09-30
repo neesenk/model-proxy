@@ -134,7 +134,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			executor.failover(target)
 			return Result{Outcome: OutcomeFailedHard}
 		}
-		providerImpl.ExtraHeaders(req, body, plan.UpstreamPath())
+		providerImpl.ExtraHeaders(req, body, scope.Log.SessionID, plan.UpstreamPath())
 		started := time.Now()
 		response, err := executor.Client.Do(req)
 		upstreamMS := time.Since(started).Milliseconds()
@@ -690,6 +690,10 @@ var internalQueryKeys = map[string]bool{"force_provider": true}
 //   - x-claude-code-session-id / user_id / x-session-id /
 //     x-interaction-type / x-interaction-id: session + agent attribution the
 //     backends echo for prompt-cache warmth and abuse accounting
+//   - x-opencode-session: the client may set OpenCode Go's session-affinity
+//     header itself; forwarding it makes the "explicit client value always
+//     wins" rule in OpenCodeGoProvider.ExtraHeaders reachable on the forward
+//     path (opaque session id, not a credential)
 //   - prompt_cache_key: upstream prompt-cache shard selection
 //   - x-anthropic-billing-header: billing-plan attribution on anthropic bases
 //   - accept-language: locale-dependent model behavior
@@ -702,6 +706,7 @@ var upstreamHeaderWhitelist = []string{
 	"x-claude-code-session-id",
 	"x-interaction-type",
 	"x-interaction-id",
+	"x-opencode-session",
 	"prompt_cache_key",
 	"x-anthropic-billing-header",
 	"anthropic-beta",

@@ -517,8 +517,8 @@ func (f *fakeProviderImpl) ProbeRequest(modelID string) provider.ProbeRequest {
 		Body:   []byte(`{"model":"` + modelID + `","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":false}`),
 	}
 }
-func (f *fakeProviderImpl) ExtraHeaders(req *http.Request, _ []byte, path string) {}
-func (f *fakeProviderImpl) FilterModelIDs(ids []string) (kept, dropped []string)  { return ids, nil }
+func (f *fakeProviderImpl) ExtraHeaders(req *http.Request, _ []byte, _ string, path string) {}
+func (f *fakeProviderImpl) FilterModelIDs(ids []string) (kept, dropped []string)            { return ids, nil }
 
 // ---- test_provider_test.go ----
 

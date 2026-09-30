@@ -34,7 +34,10 @@ func TestReplaceOrAppendTOMLSection_ClientRewrittenHeader(t *testing.T) {
 	for _, header := range variants {
 		in := "keep = 1\n" + header + "\ntype = \"openai\"\nbase_url = \"http://old\"\n"
 		section := "\n[providers.\"model-proxy\"]\ntype = \"openai\"\nbase_url = \"http://new\"\n"
-		out := takeover.ReplaceOrAppendTOMLSection(in, `providers."model-proxy"`, section)
+		out, err := takeover.ReplaceOrAppendTOMLSection(in, `providers."model-proxy"`, section)
+		if err != nil {
+			t.Fatalf("header %q: %v", header, err)
+		}
 		if got := countLines(t, out, "[providers."); got != 1 {
 			t.Errorf("header %q: %d provider tables after rewrite, want 1:\n%s", header, got, out)
 		}
@@ -66,7 +69,10 @@ type = "openai"
 base_url = "http://older"
 `
 	section := "\n[providers.\"model-proxy\"]\ntype = \"openai\"\nbase_url = \"http://new\"\n"
-	out := takeover.ReplaceOrAppendTOMLSection(in, `providers."model-proxy"`, section)
+	out, err := takeover.ReplaceOrAppendTOMLSection(in, `providers."model-proxy"`, section)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := countLines(t, out, "[providers."); got != 1 {
 		t.Errorf("%d provider tables after rewrite, want 1:\n%s", got, out)
 	}
@@ -87,7 +93,10 @@ base_url = "http://older"
 func TestReplaceOrAppendTOMLSection_HeaderTrailingComment(t *testing.T) {
 	in := "keep = 1\n[providers.model-proxy] # 手写注释\ntype = \"openai\"\nbase_url = \"http://old\"\n"
 	section := "\n[providers.\"model-proxy\"]\ntype = \"openai\"\nbase_url = \"http://new\"\n"
-	out := takeover.ReplaceOrAppendTOMLSection(in, `providers."model-proxy"`, section)
+	out, err := takeover.ReplaceOrAppendTOMLSection(in, `providers."model-proxy"`, section)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := countLines(t, out, "[providers."); got != 1 {
 		t.Errorf("%d provider tables after rewrite, want 1:\n%s", got, out)
 	}
@@ -108,7 +117,10 @@ func TestReplaceOrAppendTOMLSection_HeaderTrailingComment(t *testing.T) {
 func TestReplaceOrAppendTOMLSection_CommentHashInsideQuotes(t *testing.T) {
 	in := "[providers.\"a#b\"]\nbase_url = \"http://old\"\n"
 	section := "\n[providers.\"a#b\"]\nbase_url = \"http://new\"\n"
-	out := takeover.ReplaceOrAppendTOMLSection(in, `providers."a#b"`, section)
+	out, err := takeover.ReplaceOrAppendTOMLSection(in, `providers."a#b"`, section)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := countLines(t, out, "[providers."); got != 1 {
 		t.Errorf("%d provider tables after rewrite, want 1:\n%s", got, out)
 	}
@@ -117,14 +129,74 @@ func TestReplaceOrAppendTOMLSection_CommentHashInsideQuotes(t *testing.T) {
 	}
 }
 
-// TestReplaceOrAppendTOMLSection_ArrayTableUntouched: [[array]] headers never
-// match a plain-section target.
-func TestReplaceOrAppendTOMLSection_ArrayTableUntouched(t *testing.T) {
-	in := "[[history]]\nentry = 1\n"
-	section := "\n[history]\nx = 1\n"
-	out := takeover.ReplaceOrAppendTOMLSection(in, "history", section)
-	if !strings.Contains(out, "[[history]]") || !strings.Contains(out, "[history]") {
-		t.Errorf("array table matched or dropped:\n%s", out)
+// TestReplaceOrAppendTOMLSection_ArrayTableConflict: an [[array]] table with
+// the same key path is a hard conflict. Appending a plain [table] after it
+// would define the key twice, which TOML rejects with a parse error
+// ("Key 'providers.model-proxy' has already been defined") — bricking the
+// client config. The write is refused fail-closed, with the error naming
+// the conflicting array table.
+func TestReplaceOrAppendTOMLSection_ArrayTableConflict(t *testing.T) {
+	in := "[[providers.\"model-proxy\"]]\nentry = 1\n"
+	section := "\n[providers.\"model-proxy\"]\nx = 1\n"
+	out, err := takeover.ReplaceOrAppendTOMLSection(in, `providers."model-proxy"`, section)
+	if err == nil {
+		t.Fatalf("array-table conflict must refuse the write, got:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), `[[providers."model-proxy"]]`) {
+		t.Errorf("error must name the conflicting array table: %v", err)
+	}
+}
+
+// TestReplaceOrAppendTOMLSection_MultiLineArrayBody: an array value spanning
+// lines contains `[`-prefixed element lines. Those are content, not section
+// headers — the managed section must be replaced as a WHOLE (new body in
+// place, old body including the array gone, next section untouched). The old
+// boundary scan stopped at the first `[`-prefixed element line, inserting
+// the new body mid-section and leaving orphaned array rows behind, which
+// TOML rejects ("Expected ']'").
+func TestReplaceOrAppendTOMLSection_MultiLineArrayBody(t *testing.T) {
+	in := "[foo]\nfallbacks = [\n [\"a\",\"b\"]\n]\nold = 1\n\n[bar]\nx = 1\n"
+	section := "\n[foo]\nnew = 1\n"
+	out, err := takeover.ReplaceOrAppendTOMLSection(in, "foo", section)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "[foo]\nnew = 1") {
+		t.Errorf("body not replaced in place:\n%s", out)
+	}
+	if strings.Contains(out, `"a","b"`) || strings.Contains(out, "old = 1") {
+		t.Errorf("orphaned lines of the old body survived:\n%s", out)
+	}
+	if !strings.Contains(out, "[bar]\nx = 1") {
+		t.Errorf("next section clobbered:\n%s", out)
+	}
+	if got := countLines(t, out, "[foo]"); got != 1 {
+		t.Errorf("%d [foo] tables after rewrite, want 1:\n%s", got, out)
+	}
+}
+
+// TestReplaceOrAppendTOMLSection_MultiLineStringContent: a """...""" value
+// containing header-shaped and `#`-comment-shaped lines is user data. The
+// header-shaped line inside the string must NOT be recognized as the managed
+// table — the old scanner matched it, replaced "the section" starting inside
+// the string, and destroyed the user's multi-line value. Only the real
+// managed table below is replaced; the string body survives byte-for-byte.
+func TestReplaceOrAppendTOMLSection_MultiLineStringContent(t *testing.T) {
+	in := "[docs]\ntext = \"\"\"\n[providers.\"model-proxy\"] # note\nbase_url = \"http://fake\"\n\"\"\"\n\n" +
+		"[providers.\"model-proxy\"]\nbase_url = \"http://old\"\n\n[keep]\nx = 1\n"
+	section := "\n[providers.\"model-proxy\"]\nbase_url = \"http://new\"\n"
+	out, err := takeover.ReplaceOrAppendTOMLSection(in, `providers."model-proxy"`, section)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "text = \"\"\"\n[providers.\"model-proxy\"] # note\nbase_url = \"http://fake\"\n\"\"\"") {
+		t.Errorf("user multi-line string content destroyed:\n%s", out)
+	}
+	if !strings.Contains(out, `base_url = "http://new"`) || strings.Contains(out, "http://old") {
+		t.Errorf("real managed table not replaced:\n%s", out)
+	}
+	if !strings.Contains(out, "[keep]\nx = 1") {
+		t.Errorf("unrelated section dropped:\n%s", out)
 	}
 }
 

@@ -178,7 +178,7 @@ func TestMiMoProbeRequest_DefaultOpenAIShape(t *testing.T) {
 func TestMiMoExtraHeaders_AnthropicVersion(t *testing.T) {
 	p := newTestMiMo(t, nil)
 	req, _ := http.NewRequest("POST", "https://api.xiaomimimo.com/anthropic/v1/messages", nil)
-	p.ExtraHeaders(req, nil, "/v1/messages")
+	p.ExtraHeaders(req, nil, "", "/v1/messages")
 	if got := req.Header.Get("anthropic-version"); got != "2023-06-01" {
 		t.Errorf("anthropic-version = %q, want 2023-06-01", got)
 	}

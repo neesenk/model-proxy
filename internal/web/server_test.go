@@ -86,6 +86,7 @@ type testCommandAPI struct {
 
 func (testCommandAPI) ResetStats() error                         { return nil }
 func (testCommandAPI) RefreshQuota(string) bool                  { return true }
+func (testCommandAPI) QuotaProviderKnown(string) bool            { return true }
 func (testCommandAPI) ResetHealth(string) ([]string, int, error) { return nil, 0, nil }
 func (testCommandAPI) FreezeHealth(string) ([]string, error)     { return nil, nil }
 func (testCommandAPI) SetPin(string, string, time.Duration) (appapi.Pin, bool) {

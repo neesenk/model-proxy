@@ -616,7 +616,23 @@ func TestRoutePolicyGradesRejectsInvalidShapes(t *testing.T) {
       - when: {follow_up: true}
         target: zhipu/glm-5.3
 `,
-			want: "is ambiguous",
+			// Rejected at grade validation now (before the band check): one
+			// target in two grades makes grade grouping/next_grade/eval
+			// pairing nondeterministic.
+			want: "target zhipu/glm-5.3 appears in multiple grades",
+		},
+		{
+			name: "target duplicated across grades without band reference",
+			doc: `route_policy:
+  tier:
+    grades:
+      fast: [zhipu/glm-5.3-flash, zhipu/glm-5.3]
+      strong: [zhipu/glm-5.3]
+    bands:
+      - when: {follow_up: true}
+        grade: fast
+`,
+			want: "target zhipu/glm-5.3 appears in multiple grades",
 		},
 		{
 			name: "grade target not in route",

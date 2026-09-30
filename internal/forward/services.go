@@ -52,7 +52,10 @@ type Services struct {
 	NewHealthGate func(parentOf map[string]string) targetexec.HealthGate
 	// NewEffects binds app-owned observation (metrics, request log, live
 	// events, tokens, agents, attempt quality) to one runtime generation.
-	NewEffects func(generation uint64) targetexec.Effects
+	// cfg is the request snapshot's config (same discipline as Schedule):
+	// observation decisions derived from config (e.g. eval body retention)
+	// read it from here, never from reload-owned state.
+	NewEffects func(cfg *Config, generation uint64) targetexec.Effects
 
 	// Schedule is the quota-aware scheduler (app: Proxy.schedule). The
 	// generation argument binds the sticky/round-robin mutation to the

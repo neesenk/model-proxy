@@ -44,8 +44,8 @@ func (p *Proxy) forwardServices() forward.Services {
 		NewHealthGate: func(parentOf map[string]string) targetexec.HealthGate {
 			return proxyHealthGate{proxy: p, parentOf: parentOf}
 		},
-		NewEffects: func(generation uint64) targetexec.Effects {
-			return targetExecutionEffects{proxy: p, generation: generation}
+		NewEffects: func(cfg *configdomain.Config, generation uint64) targetexec.Effects {
+			return targetExecutionEffects{proxy: p, cfg: cfg, generation: generation}
 		},
 		Schedule: func(cfg *configdomain.Config, parentOf map[string]string, exposed, sessionKey string, targets []configdomain.RouteTarget, routeKeys map[string]bool, generation uint64) []configdomain.RouteTarget {
 			return p.schedule(cfg, parentOf, exposed, sessionKey, targets, routeKeys, generation)

@@ -1,10 +1,10 @@
 package takeover
 
 import (
+	"fmt"
 	"sort"
 
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/providerbuild"
 	"model-proxy/internal/routing"
 	"model-proxy/internal/runtime/wirecap"
@@ -15,12 +15,14 @@ import (
 // offline CLI consumer's source of the live set (the composition root
 // rewrites the file after every toggle, so disk mirrors memory). The WebUI
 // path does NOT use this: its Service passes the live port projection
-// instead. A missing file is no override; a malformed file warns and
-// degrades to unfiltered — a takeover must not fail over bad state.
+// instead. A missing file is no override; a malformed file degrades to
+// unfiltered — a takeover must not fail over bad state. The degradation is
+// NOT silent: ModelFactsFor re-checks the store on the no-override path and
+// records DisabledStoreWarning, which surfaces in TakeoverReport.Warnings
+// and the stderr warnings of the run.
 func DisabledModelsForHome(homeDir string) map[string][]string {
 	entries, err := wirecap.LoadDisabledModelsFile(wirecap.DisabledModelsPathForHome(homeDir))
 	if err != nil {
-		logx.Warnf("takeover: disabled models store unreadable: %v; continuing unfiltered", err)
 		return nil
 	}
 	return entries
@@ -95,7 +97,7 @@ func PruneUnauthenticatedRoutes(routes map[string][]configdomain.RouteTarget, au
 	for exposed, targets := range routes {
 		live := false
 		for _, t := range targets {
-			if t.Provider == "fusion" || authed[t.Provider] {
+			if t.Provider == configdomain.FusionProvider || authed[t.Provider] {
 				live = true
 				break
 			}
@@ -118,9 +120,10 @@ func PruneUnauthenticatedRoutes(routes map[string][]configdomain.RouteTarget, au
 // port projection on the daemon path, DisabledModelsForHome(homeDir) on the
 // CLI path: routes whose every target it disables are dropped so takeover
 // offers exactly the model set the proxy can actually serve. The same holds
-// for providers that cannot authenticate (not logged in — computed here from
+// for providers that cannot authenticate (not logged in — computed from
 // homeDir's credential stores via providerbuild, the reload path's own
-// signals): a route with no authenticated target is dropped unless NO
+// signals; ModelFactsForAuthed lets a caller inject the set instead): a
+// route with no authenticated target is dropped unless NO
 // provider is logged in at all (fresh-setup abstain — see
 // PruneUnauthenticatedRoutes).
 //
@@ -130,15 +133,37 @@ func PruneUnauthenticatedRoutes(routes map[string][]configdomain.RouteTarget, au
 // Unreachable — writing them into a client config hands the agent an entry
 // that can only ever fail (the decisions protocol has no chat conversion).
 func ModelFactsFor(cfg *configdomain.Config, which, homeDir, templatesDir string, mode ResolveMode, disabled map[string][]string) ModelFacts {
+	return ModelFactsForAuthed(cfg, which, homeDir, templatesDir, mode, disabled, AuthenticatedProviders(cfg, homeDir))
+}
+
+// ModelFactsForAuthed is ModelFactsFor with the authenticated-provider set
+// supplied by the caller instead of recomputed from homeDir's credential
+// stores. The daemon's admin surface resolves the set from a per-config-
+// generation cache (the takeover read/preview endpoints answer every
+// request, and the offline BuildProviders pass behind AuthenticatedProviders
+// is far too expensive to rerun per preview); CLI callers keep the direct
+// compute via ModelFactsFor. An empty authed set keeps the fresh-setup
+// abstain (see PruneUnauthenticatedRoutes).
+func ModelFactsForAuthed(cfg *configdomain.Config, which, homeDir, templatesDir string, mode ResolveMode, disabled map[string][]string, authed map[string]bool) ModelFacts {
 	routes, unreachable := routing.ChatReachableRoutes(cfg, routing.RouteTable(cfg))
 	routes, disabledDropped := PruneDisabledRoutes(routes, disabled)
-	routes, loggedOut := PruneUnauthenticatedRoutes(routes, AuthenticatedProviders(cfg, homeDir))
+	routes, loggedOut := PruneUnauthenticatedRoutes(routes, authed)
 	facts := ModelFacts{
 		Routes:        routes,
 		Unreachable:   unreachable,
 		Disabled:      disabledDropped,
 		NotLoggedIn:   loggedOut,
 		SourceDefault: -1,
+	}
+	// A corrupt disabled-model store degrades fail-open (nil override =
+	// unfiltered — see DisabledModelsForHome), which used to be invisible to
+	// the operator. Surface it in the report warnings channel: re-check the
+	// store whenever no override was supplied (a present override proves the
+	// store loaded, or that the daemon's in-memory set is authoritative).
+	if len(disabled) == 0 {
+		if _, err := wirecap.LoadDisabledModelsFile(wirecap.DisabledModelsPathForHome(homeDir)); err != nil {
+			facts.DisabledStoreWarning = fmt.Sprintf("disabled models store unreadable: %v; continuing unfiltered (operator-disabled models may be written to client configs)", err)
+		}
 	}
 	// Metadata is hydrated unconditionally, not just for metadata-writing
 	// clients (opencode/pi/kimi): the single-model default placeholders

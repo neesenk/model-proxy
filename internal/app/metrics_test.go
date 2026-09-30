@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math/rand"
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/counters"
@@ -690,12 +691,15 @@ func TestPricingCachePathUsesApplicationHome(t *testing.T) {
 }
 
 func TestDetachedPricingDetachesAndConvertsOverrides(t *testing.T) {
-	proxy := &Proxy{generationState: generationState{cfg: &configdomain.Config{
-		Pricing: configdomain.PricingConfig{Enabled: false},
-		Prices: map[string]configdomain.PriceConfig{
-			"glm-4.6": {Input: 9, Output: 18, CacheRead: 1, CacheWrite: 2},
-		},
-	}}}
+	proxy := &Proxy{
+		generationState: generationState{cfg: &configdomain.Config{
+			Pricing: configdomain.PricingConfig{Enabled: false},
+			Prices: map[string]configdomain.PriceConfig{
+				"glm-4.6": {Input: 9, Output: 18, CacheRead: 1, CacheWrite: 2},
+			},
+		}},
+		processServices: processServices{evalRand: rand.Float64},
+	}
 
 	overrides, catalog, _ := proxy.detachedPricing()
 	if catalog != nil {
@@ -717,7 +721,10 @@ func TestDetachedPricingDetachesAndConvertsOverrides(t *testing.T) {
 }
 
 func TestPricingSnapshotDisabled(t *testing.T) {
-	proxy := &Proxy{generationState: generationState{cfg: &configdomain.Config{Pricing: configdomain.PricingConfig{Enabled: false}}}}
+	proxy := &Proxy{
+		generationState: generationState{cfg: &configdomain.Config{Pricing: configdomain.PricingConfig{Enabled: false}}},
+		processServices: processServices{evalRand: rand.Float64},
+	}
 	if got := proxy.pricingSnapshot(); got != nil {
 		t.Errorf("disabled pricing snapshot = %+v, want nil", got)
 	}
@@ -725,11 +732,14 @@ func TestPricingSnapshotDisabled(t *testing.T) {
 
 func TestPricingSnapshotInitialFailureReturnsEmpty(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	proxy := &Proxy{generationState: generationState{cfg: &configdomain.Config{Pricing: configdomain.PricingConfig{
-		Enabled:   true,
-		TTL:       "24h",
-		SourceURL: "://invalid-pricing-url",
-	}}}}
+	proxy := &Proxy{
+		generationState: generationState{cfg: &configdomain.Config{Pricing: configdomain.PricingConfig{
+			Enabled:   true,
+			TTL:       "24h",
+			SourceURL: "://invalid-pricing-url",
+		}}},
+		processServices: processServices{evalRand: rand.Float64},
+	}
 	got := proxy.pricingSnapshot()
 	if got == nil || len(got.ByModel) != 0 {
 		t.Errorf("failed initial refresh = %+v, want non-nil empty catalog", got)
@@ -755,11 +765,14 @@ func TestPricingSnapshotSerializesConcurrentRefresh(t *testing.T) {
 	var releaseOnce sync.Once
 	defer releaseOnce.Do(func() { close(releaseFirst) })
 
-	proxy := &Proxy{generationState: generationState{cfg: &configdomain.Config{Pricing: configdomain.PricingConfig{
-		Enabled:   true,
-		TTL:       "24h",
-		SourceURL: server.URL,
-	}}}}
+	proxy := &Proxy{
+		generationState: generationState{cfg: &configdomain.Config{Pricing: configdomain.PricingConfig{
+			Enabled:   true,
+			TTL:       "24h",
+			SourceURL: server.URL,
+		}}},
+		processServices: processServices{evalRand: rand.Float64},
+	}
 
 	firstResult := make(chan *pricing.Catalog, 1)
 	go func() {

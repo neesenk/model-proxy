@@ -19,6 +19,7 @@ type commandFake struct {
 
 	resetStats     func() error
 	refresh        func(string) bool
+	quotaKnown     func(string) bool
 	resetHealth    func(string) ([]string, int, error)
 	freezeHealth   func(string) ([]string, error)
 	setPin         func(string, string, time.Duration) (appapi.Pin, bool)
@@ -53,6 +54,13 @@ func (fake *commandFake) ResetStats() error {
 func (fake *commandFake) RefreshQuota(provider string) bool {
 	if fake.refresh != nil {
 		return fake.refresh(provider)
+	}
+	return true
+}
+
+func (fake *commandFake) QuotaProviderKnown(provider string) bool {
+	if fake.quotaKnown != nil {
+		return fake.quotaKnown(provider)
 	}
 	return true
 }
@@ -306,10 +314,13 @@ func TestCommandModelsRefreshContract(t *testing.T) {
 
 func TestCommandQuotaRefreshContract(t *testing.T) {
 	var providers []string
-	server := newCommandTestServer(t, &commandFake{refresh: func(provider string) bool {
-		providers = append(providers, provider)
-		return provider != "missing"
-	}})
+	server := newCommandTestServer(t, &commandFake{
+		quotaKnown: func(provider string) bool { return provider != "missing" },
+		refresh: func(provider string) bool {
+			providers = append(providers, provider)
+			return true
+		},
+	})
 	requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", ""), http.StatusOK, map[string]any{"status": "refreshed"})
 	requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", `{"provider":"aqp#one"}`), http.StatusOK, map[string]any{"status": "refreshed", "provider": "aqp#one"})
 	requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", `{"provider":"missing"}`), http.StatusNotFound, map[string]any{"error": "unknown provider: missing"})
@@ -322,13 +333,20 @@ func TestCommandQuotaRefreshContract(t *testing.T) {
 	if errorText := commandJSON(t, malformed)["error"]; !strings.HasPrefix(errorText.(string), "malformed JSON body: ") {
 		t.Fatalf("error=%q missing malformed prefix", errorText)
 	}
-	if got, want := strings.Join(providers, ","), ",aqp#one,missing"; got != want {
+	if got, want := strings.Join(providers, ","), ",aqp#one"; got != want {
 		t.Fatalf("RefreshQuota providers=%q want %q", got, want)
 	}
+	t.Run("sync failure keeps last-known-good and is a 502", func(t *testing.T) {
+		server := newCommandTestServer(t, &commandFake{
+			quotaKnown: func(string) bool { return true },
+			refresh:    func(string) bool { return false },
+		})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", `{"provider":"zhipu"}`), http.StatusBadGateway, map[string]any{"error": "quota sync failed for zhipu; kept last-known-good"})
+	})
 	t.Run("pay-as-you-go provider is not quota-tracked", func(t *testing.T) {
-		server := newCommandTestServer(t, &commandFake{refresh: func(provider string) bool {
-			return provider != "shopee"
-		}})
+		server := newCommandTestServer(t, &commandFake{
+			quotaKnown: func(provider string) bool { return provider != "shopee" },
+		})
 		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", `{}`), http.StatusOK, map[string]any{"status": "refreshed"})
 		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", `{"provider":"shopee"}`), http.StatusNotFound, map[string]any{"error": "unknown provider: shopee"})
 	})

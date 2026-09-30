@@ -84,6 +84,37 @@ func wireLegFresh(v triState, probedAt time.Time) bool {
 // for fewer timeout-unknown legs that need re-probing.
 var wireCapProbeTimeout = 30 * time.Second
 
+// wireProbePassBudget bounds one whole probe pass (provider + model level)
+// wall-clock, far below the 8s graceful-shutdown drain: the pass runs on the
+// quota poller WaitGroup, and quota.Stop waits for it before the final
+// persist — a pass that outlived the shutdown window used to push that wait
+// past the supervisor's hard-kill, losing the persist. When the budget (or a
+// stop) cuts a pass short, the unconcluded legs simply stay unconcluded and
+// are re-probed on the next pass. A var so tests can shrink it.
+var wireProbePassBudget = 4 * time.Second
+
+// wireProbePassContext returns the context of one probe pass: bounded by
+// wireProbePassBudget and canceled EARLY when the quota tracker stops
+// (shutdown). Probe HTTP requests bind it, so a SIGINT mid-pass cancels the
+// in-flight legs instead of letting poller.Wait() outlive the shutdown
+// window (the final quota persist runs only after that wait). The stop
+// watcher exits with the context (the caller always cancels), never past
+// the pass.
+func (p *Proxy) wireProbePassContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), wireProbePassBudget)
+	if p.quota != nil {
+		stopCh := p.quota.StopChannel()
+		go func() {
+			select {
+			case <-stopCh:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+	return ctx, cancel
+}
+
 // classifyProviderWireStatus maps a probe outcome to a verdict with the
 // agent-grade 400 rule: provider legs are probed with a function tool
 // attached, and a 400
@@ -99,8 +130,12 @@ func classifyProviderWireStatus(status int, err error, body []byte) triState {
 // with a fresh verdict) and persists the results. Eligible: has an
 // openai_base_url AND no ProtocolHint (codex is already hint-covered — its
 // protocol is known without probing). Runs synchronously; callers dispatch it
-// on a tracked goroutine (boot/reload) or invoke it directly (tests).
-func (p *Proxy) probeAllWireCaps() {
+// on a tracked goroutine with a stop/budget-bound ctx (boot/reload via
+// runWireProbePass) or invoke it directly (tests). A canceled ctx aborts the
+// pass: in-flight legs are dropped WITHOUT storing a verdict (an aborted leg
+// is no information, not an unknown verdict) and remaining providers are
+// skipped — the next pass re-probes them.
+func (p *Proxy) probeAllWireCaps(ctx context.Context) {
 	p.mu.RLock()
 	cfg := p.cfg
 	provs := p.providers
@@ -113,6 +148,9 @@ func (p *Proxy) probeAllWireCaps() {
 	var wg sync.WaitGroup
 	probed := false
 	for name, provCfg := range cfg.Providers {
+		if ctx.Err() != nil {
+			break // pass budget/stop: leave the rest to the next pass
+		}
 		if provCfg.OpenAIBaseURL == "" {
 			continue
 		}
@@ -143,9 +181,19 @@ func (p *Proxy) probeAllWireCaps() {
 		wg.Add(1)
 		go func(name string, provCfg configdomain.Provider, impl provider.Provider) {
 			defer wg.Done()
-			sem <- struct{}{}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
 			defer func() { <-sem }()
-			chatLeg, responsesLeg := probe.ProbeProviderOpenAILegs(context.Background(), client, provCfg, impl, model)
+			if ctx.Err() != nil {
+				return
+			}
+			chatLeg, responsesLeg := probe.ProbeProviderOpenAILegs(ctx, client, provCfg, impl, model)
+			if ctx.Err() != nil {
+				return // aborted mid-probe: store nothing; the next pass re-probes
+			}
 			caps := wireCaps{
 				BaseURL:      provCfg.OpenAIBaseURL,
 				Chat:         classifyProviderWireStatus(chatLeg.Status, chatLeg.Err, chatLeg.Body),
@@ -242,17 +290,36 @@ func (p *Proxy) startWireCapProbe() {
 	})
 }
 
-// runWireProbePass runs one provider- + model-level probe pass, SERIALIZED
-// against other passes: rapid reloads (SIGHUP storms — login/logout, models
-// refresh, config edits all signal) each dispatch one, and overlapping passes
-// multiply the concurrent legs against the same rate-limited upstreams (the
-// observed 429 → "? unknown" flapping). A queued pass reads the CURRENT
-// generation at its own start, so serializing never probes stale config.
+// runWireProbePass runs one provider- + model-level probe pass as a
+// SINGLE-FLIGHT with at most ONE coalesced follow-up: rapid reloads (SIGHUP
+// storms — login/logout, models refresh, config edits all signal) each
+// dispatch one, and overlapping passes multiply the concurrent legs against
+// the same rate-limited upstreams (the observed 429 → "? unknown" flapping),
+// while an unbounded queue would stack one full pass per signal onto the
+// quota poller WaitGroup and stall shutdown behind them. A dispatcher that
+// finds a pass running marks one follow-up and waits for it; further
+// dispatches while a follow-up is already marked return immediately — the
+// follow-up reads the CURRENT generation at its own start, so coalescing
+// never probes stale config. The pass itself runs on a stop-aware,
+// budget-bound context (wireProbePassContext).
 func (p *Proxy) runWireProbePass() {
-	p.wireProbeMu.Lock()
+	if !p.wireProbeMu.TryLock() {
+		// A pass is running: become its ONE queued follow-up, or return when
+		// that slot is taken (the queued pass covers this generation too).
+		if !p.wireProbePending.CompareAndSwap(false, true) {
+			return
+		}
+		p.wireProbeMu.Lock()
+		p.wireProbePending.Store(false)
+	}
 	defer p.wireProbeMu.Unlock()
-	p.probeAllWireCaps()
-	p.probeAllModelCaps()
+	if p.quota != nil && p.quota.Stopped() {
+		return
+	}
+	ctx, cancel := p.wireProbePassContext()
+	defer cancel()
+	p.probeAllWireCaps(ctx)
+	p.probeAllModelCaps(ctx)
 }
 
 // resolvedBackendProto determines the backend protocol for a route target (or

@@ -1,6 +1,7 @@
 package takeover
 
 import (
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -244,20 +245,20 @@ func codexModelCatalog(models []ExposedModel) []map[string]any {
 // left behind by an earlier bad append) are collapsed to the single
 // rewritten line. The scan stays line-oriented and conservative: only a line
 // whose pre-`=` token parses to the same key path qualifies; a `=` inside a
-// value can never produce that shape. Known blind spot: TOML multi-line
-// strings ("""...""") — a `key = value`-shaped line INSIDE a multi-line
-// string body is still scanned as a key line. Accepted because the managed
-// top-level keys sit before the first section header and generated configs
-// never use multi-line strings there.
+// value can never produce that shape. Lines inside multi-line constructs
+// ("""...""" strings, arrays spanning lines) are content, not key lines —
+// they are never matched, and a `[`-prefixed content line does not count as
+// the first section (tomlStructuralLines).
 func SetTOMLTopKey(text, key, val string) string {
 	target, ok := parseTOMLKeyPath(key)
 	if !ok {
 		target = []string{key}
 	}
 	lines := strings.Split(text, "\n")
+	structural := tomlStructuralLines(lines)
 	firstSection := -1
 	for i, l := range lines {
-		if strings.HasPrefix(strings.TrimSpace(l), "[") {
+		if structural[i] && strings.HasPrefix(strings.TrimSpace(l), "[") {
 			firstSection = i
 			break
 		}
@@ -269,6 +270,10 @@ func SetTOMLTopKey(text, key, val string) string {
 		if firstSection >= 0 && i >= firstSection {
 			out = append(out, lines[i:]...)
 			break
+		}
+		if !structural[i] {
+			out = append(out, l)
+			continue
 		}
 		t := strings.TrimSpace(l)
 		if t == "" || strings.HasPrefix(t, "#") {
@@ -313,8 +318,14 @@ func SetTOMLTopKey(text, key, val string) string {
 // e.g. `x = "[foo]"`). ALL occurrences are consolidated: the first match is
 // replaced with the new body, later duplicates (e.g. left behind by an
 // earlier bad append) are dropped — re-takeover self-heals instead of
-// stacking copies.
-func ReplaceOrAppendTOMLSection(text, sectionHeader, section string) string {
+// stacking copies. Header-shaped lines inside multi-line strings/arrays are
+// content and never match (tomlStructuralLines).
+//
+// Fail-closed: if the file declares an ARRAY of tables with the same key
+// path (`[[providers."model-proxy"]]`), the write is refused with an error
+// — appending `[providers."model-proxy"]` would define the key twice, which
+// TOML rejects with a parse error, bricking the client config.
+func ReplaceOrAppendTOMLSection(text, sectionHeader, section string) (string, error) {
 	target, ok := parseTOMLKeyPath(sectionHeader)
 	if !ok {
 		// Structurally broken template name: keep the legacy exact-match
@@ -322,14 +333,18 @@ func ReplaceOrAppendTOMLSection(text, sectionHeader, section string) string {
 		target = []string{sectionHeader}
 	}
 	lines := strings.Split(text, "\n")
-	matches := sectionMatchIndices(lines, target)
+	structural := tomlStructuralLines(lines)
+	if i := arrayTableConflictLine(lines, structural, target); i >= 0 {
+		return "", fmt.Errorf("toml section [%s]: conflicts with existing array table %s (line %d) — a plain table and an array of tables cannot share a key; refusing to rewrite", sectionHeader, strings.TrimSpace(lines[i]), i+1)
+	}
+	matches := sectionMatchIndices(lines, structural, target)
 	if len(matches) > 0 {
 		body := strings.Split(strings.TrimSpace(section), "\n")
 		out := make([]string, 0, len(lines))
 		replaced := false
 		for i := 0; i < len(lines); {
 			if matches[i] {
-				end := sectionEnd(lines, i)
+				end := sectionEnd(lines, structural, i)
 				if !replaced {
 					out = append(out, body...)
 					replaced = true
@@ -341,20 +356,42 @@ func ReplaceOrAppendTOMLSection(text, sectionHeader, section string) string {
 			out = append(out, lines[i])
 			i++
 		}
-		return strings.Join(out, "\n")
+		return strings.Join(out, "\n"), nil
 	}
 	if len(text) > 0 && !strings.HasSuffix(text, "\n") {
 		text += "\n"
 	}
 	text += strings.TrimSpace(section) + "\n"
-	return text
+	return text, nil
+}
+
+// arrayTableConflictLine returns the line index of an [[array]] header
+// semantically equal to target, or -1. ReplaceOrAppendTOMLSection refuses to
+// write over it: a plain table appended after an array of tables redefines
+// the key, and TOML rejects the document with a parse error.
+func arrayTableConflictLine(lines []string, structural []bool, target []string) int {
+	for i, l := range lines {
+		if !structural[i] {
+			continue
+		}
+		parts, isArray, ok := tomlHeaderPath(strings.TrimSpace(l))
+		if ok && isArray && equalTOMLKeyPath(parts, target) {
+			return i
+		}
+	}
+	return -1
 }
 
 // sectionMatchIndices maps line indices of headers semantically equal to
 // target (plain tables only) for quick lookup while rebuilding the file.
-func sectionMatchIndices(lines []string, target []string) map[int]bool {
+// Content lines (multi-line strings/arrays) never match: a header-shaped
+// line inside a string is user data, not a table.
+func sectionMatchIndices(lines []string, structural []bool, target []string) map[int]bool {
 	matches := map[int]bool{}
 	for i, l := range lines {
+		if !structural[i] {
+			continue
+		}
 		parts, isArray, ok := tomlHeaderPath(strings.TrimSpace(l))
 		if ok && !isArray && equalTOMLKeyPath(parts, target) {
 			matches[i] = true
@@ -364,15 +401,14 @@ func sectionMatchIndices(lines []string, target []string) map[int]bool {
 }
 
 // sectionEnd returns the exclusive end line of the section starting at
-// start: the next header line (or EOF). Known blind spot: TOML multi-line
-// strings — a line starting with `[` INSIDE a """...""" value is mistaken
-// for a header and truncates the section early. Accepted because generated
-// sections never contain multi-line strings; a hand-written one would at
-// worst split a replace into two sections of the same table, not duplicate
-// the table.
-func sectionEnd(lines []string, start int) int {
+// start: the next header line (or EOF). Lines inside multi-line constructs
+// ("""...""" strings, arrays spanning lines) are content and cannot
+// terminate the section — a `[`-prefixed array element or a header-shaped
+// string line must not cut the body in two (the orphaned remainder would
+// leave unparseable TOML behind).
+func sectionEnd(lines []string, structural []bool, start int) int {
 	for i := start + 1; i < len(lines); i++ {
-		if strings.HasPrefix(strings.TrimSpace(lines[i]), "[") {
+		if structural[i] && strings.HasPrefix(strings.TrimSpace(lines[i]), "[") {
 			return i
 		}
 	}
@@ -381,21 +417,25 @@ func sectionEnd(lines []string, start int) int {
 
 // removeTOMLSection drops every [section] block whose header is semantically
 // equal to sectionHeader (header + body up to the next header line or EOF).
-// No-op when no header matches.
+// No-op when no header matches. Multi-line string/array content is never
+// mistaken for a header (tomlStructuralLines), so a header-shaped line
+// inside a user's """...""" value survives and cannot truncate the body
+// scan.
 func removeTOMLSection(text, sectionHeader string) string {
 	target, ok := parseTOMLKeyPath(sectionHeader)
 	if !ok {
 		target = []string{sectionHeader}
 	}
 	lines := strings.Split(text, "\n")
-	matches := sectionMatchIndices(lines, target)
+	structural := tomlStructuralLines(lines)
+	matches := sectionMatchIndices(lines, structural, target)
 	if len(matches) == 0 {
 		return text
 	}
 	out := make([]string, 0, len(lines))
 	for i := 0; i < len(lines); {
 		if matches[i] {
-			i = sectionEnd(lines, i)
+			i = sectionEnd(lines, structural, i)
 			continue
 		}
 		out = append(out, lines[i])
@@ -419,9 +459,13 @@ func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
 // Used by the mcp takeover writer to clean stale proxy-managed sections
 // before re-rendering the current surface, without touching user-defined
 // sections that happen to share the same header prefix or URL prefix.
-// CRLF line endings are normalized to LF so \r does not break header matching.
+// Original line endings are preserved byte-for-byte (a `\r` sits inside the
+// trimmed/needle-matched region, so CRLF files need no normalization — and a
+// run that removes nothing returns the input unchanged). Multi-line
+// string/array content is skipped for header and boundary detection, so a
+// `[`-prefixed array element cannot truncate the body scan and hide a stale
+// URL, and a header-shaped string line is never a cleanup target.
 func removeTOMLSectionsWithURL(text, needle string, generatedSections map[string]bool) string {
-	text = strings.ReplaceAll(text, "\r\n", "\n")
 	// Normalize the generated namespace to semantic key paths: the client may
 	// have rewritten our quoted headers (`mcp_servers."x"` → mcp_servers.x),
 	// and a stale proxy section that no longer matches its original spelling
@@ -435,43 +479,46 @@ func removeTOMLSectionsWithURL(text, needle string, generatedSections map[string
 		}
 	}
 	lines := strings.Split(text, "\n")
+	structural := tomlStructuralLines(lines)
 	out := make([]string, 0, len(lines))
 	for i := 0; i < len(lines); {
 		trimmed := strings.TrimSpace(lines[i])
 		// tomlHeaderPath alone decides what is a header: it strips a TOML-legal
 		// trailing comment (`[mcp.servers.x] # stale`) before the bracket check,
 		// so a commented stale header is still recognized as a section boundary
-		// and cleanup target. Non-header lines (comments, key/value, blank)
-		// return ok=false and pass through untouched.
-		if parts, isArray, ok := tomlHeaderPath(trimmed); ok && !isArray {
-			matched := false
-			for _, t := range targets {
-				if equalTOMLKeyPath(parts, t) {
-					matched = true
-					break
-				}
-			}
-			if matched {
-				// Section runs until the next header line (or EOF). Same
-				// multi-line-string blind spot as sectionEnd: a `[` line
-				// inside a """...""" value truncates the body scan early —
-				// a stale section whose URL sits past that point survives
-				// instead of being mis-cleaned, so the failure stays
-				// conservative.
-				end := len(lines)
-				contains := false
-				for j := i + 1; j < len(lines); j++ {
-					if strings.HasPrefix(strings.TrimSpace(lines[j]), "[") {
-						end = j
+		// and cleanup target. Non-header lines (comments, key/value, blank) and
+		// content lines of multi-line constructs return ok=false / are skipped
+		// and pass through untouched.
+		if structural[i] {
+			if parts, isArray, ok := tomlHeaderPath(trimmed); ok && !isArray {
+				matched := false
+				for _, t := range targets {
+					if equalTOMLKeyPath(parts, t) {
+						matched = true
 						break
 					}
-					if strings.Contains(lines[j], needle) {
-						contains = true
-					}
 				}
-				if contains {
-					i = end
-					continue
+				if matched {
+					// Section runs until the next structural header line (or
+					// EOF): content lines of multi-line strings/arrays belong
+					// to the body, so the needle scan covers the whole section
+					// and a stale URL cannot hide behind a `[`-prefixed value
+					// line.
+					end := len(lines)
+					contains := false
+					for j := i + 1; j < len(lines); j++ {
+						if structural[j] && strings.HasPrefix(strings.TrimSpace(lines[j]), "[") {
+							end = j
+							break
+						}
+						if strings.Contains(lines[j], needle) {
+							contains = true
+						}
+					}
+					if contains {
+						i = end
+						continue
+					}
 				}
 			}
 		}

@@ -352,15 +352,24 @@ test('combobox 菜单滚到底不链动页面，菜单不消失（overscroll con
         { type: 'mouseWheel', x: cx, y: cy, deltaX: 0, deltaY: 120 }, ctx.tab);
       await new Promise((r) => setTimeout(r, 30));
     }
+    // 前置：页面本身必须确实可滚，否则"滚轮不得链动页面"的断言空真。
+    const pageGeo = await ctx.ev(`({
+      sh: document.documentElement.scrollHeight,
+      ih: window.innerHeight,
+    })`);
+    assert.ok(pageGeo.sh > pageGeo.ih,
+      `页面必须可滚（scrollHeight=${pageGeo.sh} 应 > innerHeight=${pageGeo.ih}），否则链动断言空真`);
     const state = await ctx.ev(`(() => {
       const menu = document.querySelector('.combo-menu[data-popup]:not([hidden])');
       return {
         open: !!menu,
+        scrollable: menu ? menu.scrollHeight > menu.clientHeight : false,
         scrolled: menu ? menu.scrollTop > 0 : false,
         scrollY: window.scrollY,
       };
     })()`);
     assert.ok(state.open, '菜单在内部滚动后必须保持打开');
+    assert.ok(state.scrollable, '菜单列表必须自身可滚（scrollHeight > clientHeight），否则滚动断言空跑');
     const css = await ctx.ev(`(() => {
       const menu = [...document.querySelectorAll('.combo-menu')].find((m) => !m.hidden);
       return menu ? getComputedStyle(menu).overscrollBehavior : '';
@@ -373,6 +382,59 @@ test('combobox 菜单滚到底不链动页面，菜单不消失（overscroll con
     await ctx.cdp.clearViewport(ctx.tab);
   }
   assert.deepEqual(await ctx.pageErrors(), [], 'overscroll 契约不得有 JS 错误');
+});
+
+test('form-restore guard 不擦除守卫窗口内正在键入的 session 文本（回归）', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // 回归：scheduleFormRestoreGuard 曾在 log 挂载后 4s 内每 100ms 无条件把
+  // st.filters.session 回写进 #req-session。控件从 <select> 改成文本 input
+  // 后（c4a028f），st.filters.session 只在 Enter/点选提交时更新——守卫窗口
+  // 内的自由键入被每 100ms 擦掉。修复：回写跳过持焦点的控件（Chrome 的异步
+  // form restore 从不让控件持焦点）。
+  await driveRequest(1, 0, 'guard-typing-sess');
+  await gotoRequestsWithRows();
+  // 重挂载 log 页以重启守卫窗口：经 live 子页真 unmount 再挂回。
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="live"][data-stream=""]').click()`);
+  await ctx.waitFor('live sub-page mounted', () => ctx.ev(
+    `document.getElementById('req-live-view').hidden === false && !!document.getElementById('live-table')`));
+  await ctx.ev(`document.querySelector('.req-nav-item[data-sub="log"][data-stream=""]').click()`);
+  await ctx.waitFor('log sub-page remounted', () => ctx.ev(
+    `document.getElementById('req-log-view').hidden === false && !!document.getElementById('req-session')`));
+  // 守卫窗口（4s）内持焦点慢速逐字符键入，每键跨一个 100ms 守卫 tick。
+  // 先清空挂载时绘入的已提交值（前序测试可能留下 session 过滤），从空串
+  // 开始键入，断言才能精确等于 typed。
+  const typed = 'guard-typing';
+  await ctx.ev(`(() => {
+    const s = document.getElementById('req-session');
+    s.focus();
+    s.value = '';
+    s.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  assert.equal(await ctx.ev(`document.activeElement && document.activeElement.id`), 'req-session',
+    '键入必须由持焦点的控件接收（守卫只跳过 activeElement）');
+  for (const ch of typed) {
+    await ctx.ev(`(() => {
+      const s = document.getElementById('req-session');
+      s.value += ${JSON.stringify(ch)};
+      s.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await new Promise((r) => setTimeout(r, 120));
+  }
+  // 再跨几个 tick 落定：修复前此处最终值已被回写成已提交过滤器的值。
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(await ctx.ev(`document.getElementById('req-session').value`), typed,
+    '守卫窗口内持焦点键入的文本不得被 form-restore guard 擦掉');
+  // 清场：未提交的自由文本会在下一次 Refresh 被读回过滤器（loadRequests 的
+  // DOM read-back），置空并 Enter 提交空过滤，blur 释放自动刷新门的焦点持留。
+  await ctx.ev(`(() => {
+    const s = document.getElementById('req-session');
+    s.value = '';
+    s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    s.blur();
+  })()`);
+  await ctx.waitFor('session filter cleared after test', () => ctx.ev(
+    `!location.hash.includes('session=')`));
+  assert.deepEqual(await ctx.pageErrors(), [], 'guard 回归不得有 JS 错误');
 });
 
 test('suggestion-dropdown inputs and filter selects expose the inline ✕ clear (清除按钮族)', async (t) => {

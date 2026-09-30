@@ -6,14 +6,18 @@ package admin
 // providers.<name>.models with the callable subset (comment-preserving),
 // hot-reload, and replace the provider's cached verdicts with the fresh
 // matrix. The safety nets mirror the CLI (docs/backend-contracts.md): a
-// fetch/probe outage never wipes models: — the merged/policy-filtered list is
-// written unvalidated with a warning instead. One deliberate hardening over
-// the CLI: the verdict cache is replaced ONLY from a healthy probe — an
-// all-failed probe keeps the previous matrix (fail-closed). Partially failed
-// probes keep prior conclusions per leg on BOTH paths: the daemon's
-// ReplaceProviderModels and the CLI's file persist merge transient-unknown
-// legs back into the stored verdicts (wirecap.MergeOnUnknown), so a
-// rate-limited refresh cannot regress concluded verdicts to "? unknown".
+// fetch/probe outage never wipes models: — an inconclusive leg (transient
+// 429/5xx/auth) holds no negative information, so its model is kept, and the
+// merged/policy-filtered list is written unvalidated with a warning when the
+// probe infra is unavailable. One deliberate hardening over the CLI: the
+// verdict cache is replaced ONLY from a healthy probe — at least one PROBED
+// model kept; when nothing was probed (every candidate operator-disabled)
+// the replace is skipped so the rider-only matrix cannot wipe non-candidate
+// verdicts (fail-closed). Partially failed probes keep prior conclusions per
+// leg on BOTH paths: the daemon's ReplaceProviderModels and the CLI's file
+// persist merge transient-unknown legs back into the stored verdicts
+// (wirecap.MergeOnUnknown), so a rate-limited refresh cannot regress
+// concluded verdicts to "? unknown".
 
 import (
 	"bytes"
@@ -93,7 +97,9 @@ func (s *Service) RefreshModels(ctx context.Context, name string) (appapi.Models
 		policyKept, result.PolicyDropped = impl.FilterModelIDs(merged)
 	}
 
-	// Endpoint probe: keep a model when ANY protocol leg classifies Yes.
+	// Endpoint probe: keep a model when ANY protocol leg classifies Yes, or
+	// when no PROBED leg classifies No (all probed legs inconclusive —
+	// transient 429/5xx/auth holds no negative information).
 	// Operator-disabled models are excluded from probing (the override is a
 	// rotation choice, not a callability signal) and ride along unvalidated.
 	kept := policyKept
@@ -121,15 +127,22 @@ func (s *Service) RefreshModels(ctx context.Context, name string) (appapi.Models
 		}
 		result.ProbeDropped = drops
 		if len(probeIDs) > 0 && len(probedKept) == 0 {
-			// Every probed model failed — likely auth/network, not genuinely
-			// uncallable models. Keep the probed subset unvalidated (never wipe
-			// models:) and DO NOT replace the verdict cache with the failed
-			// matrix. Judged on the PROBED subset: disabled ids ride along
-			// unconditionally and must not mask a total probe outage.
+			// Every probed model drew at least one DEFINITIVE negative leg
+			// (transient-inconclusive sweeps keep their models per-model now)
+			// — an endpoint-level breakage, not genuinely uncallable models.
+			// Keep the probed subset unvalidated (never wipe models:) and DO
+			// NOT replace the verdict cache with the failed matrix. Judged on
+			// the PROBED subset: disabled ids ride along unconditionally and
+			// must not mask a total probe outage.
 			probedKept = probeIDs
 			result.Warning = "endpoint probe failed for ALL models (likely not logged in / network); list written unvalidated"
 		} else {
-			probeHealthy = true
+			// Healthy only when at least one PROBED model survived. When every
+			// candidate is operator-disabled (probeIDs empty) nothing was
+			// probed: the matrix holds only the disabled riders' stored
+			// verdicts, and a wholesale cache replace would wipe the verdicts
+			// of models OUTSIDE this candidate set — leave the cache alone.
+			probeHealthy = len(probedKept) > 0
 		}
 		// Disabled ids ride along unvalidated; their stored verdicts are
 		// carried into the replacement matrix verbatim (not probed ≠ dropped)
@@ -185,7 +198,7 @@ func (s *Service) RefreshModels(ctx context.Context, name string) (appapi.Models
 	if !result.ConfigUpdated && ctx.Err() != nil {
 		return result, ctx.Err()
 	}
-	if probeHealthy && s.ports.ModelCapsReplace != nil {
+	if probeHealthy && len(matrix) > 0 && s.ports.ModelCapsReplace != nil {
 		if !s.ports.ModelCapsReplace(name, runtime.Fingerprint, matrix) {
 			return result, appapi.NewHTTPError(http.StatusConflict, "provider changed during model refresh; retry")
 		}
@@ -198,14 +211,32 @@ func (s *Service) RefreshModels(ctx context.Context, name string) (appapi.Models
 // anthropic only when anthropic_base_url is set) and returns the callable
 // subset (input order), the dropped ids with per-leg reasons, and the full
 // fresh matrix. The bounded fan-out lives in probe.ProbeModels; this function
-// owns only verdict classification and the keep/drop policy.
+// owns only verdict classification and the keep/drop policy: keep when ANY
+// leg concluded Yes, AND also when NO leg concluded Yes but no PROBED leg
+// concluded No either (every probed leg inconclusive — transient 429/5xx/
+// auth): the probe holds no negative information about such a model, and
+// dropping it would write one rate-limit storm back as a config deletion
+// (the allProbeFailed safety net only fires when EVERY model fails). Legs
+// whose base is not configured classify No DEFINITIONALLY and do not count
+// as negative evidence — a provider without anthropic_base_url must not turn
+// every transient chat failure into a drop.
 func probeRefreshModels(ctx context.Context, client *http.Client, provCfg configdomain.Provider, impl provider.Provider, ids []string) (kept []string, dropped []appapi.ModelsRefreshDrop, matrix map[string]runtimewire.ModelProtocols) {
 	outcomes := probe.ProbeModels(ctx, client, provCfg, impl, ids, refreshProbeConcurrency)
 	matrix = make(map[string]runtimewire.ModelProtocols, len(outcomes))
 	for _, o := range outcomes {
 		mp := runtimewire.ModelProtocols{}
+		anyYes, probedNo, anyProbed := false, false, false
 		for _, leg := range o.Legs {
 			v := runtimewire.ClassifyModelStatus(leg.Probed, leg.Status, leg.Err, leg.Body)
+			if v == runtimewire.Yes {
+				anyYes = true
+			}
+			if leg.Probed {
+				anyProbed = true
+				if v == runtimewire.No {
+					probedNo = true
+				}
+			}
 			switch leg.Leg {
 			case probe.LegChat:
 				mp.Chat = v
@@ -216,7 +247,7 @@ func probeRefreshModels(ctx context.Context, client *http.Client, provCfg config
 			}
 		}
 		matrix[o.ID] = mp
-		if mp.Chat == runtimewire.Yes || mp.Anthropic == runtimewire.Yes || mp.Responses == runtimewire.Yes {
+		if anyYes || (anyProbed && !probedNo) {
 			kept = append(kept, o.ID)
 		} else {
 			dropped = append(dropped, appapi.ModelsRefreshDrop{Model: o.ID, Reason: refreshLegsSummary(o.Legs)})

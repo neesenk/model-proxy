@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/fusion"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/routing"
@@ -82,9 +83,9 @@ func (p pipeline) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, 
 		Recipe: recipe,
 	}, fusionAdapter{pipe: p, context: fc, writer: w, request: r, cacheKey: cacheKey, selector: recipe.Selector})
 	if p.svc.Metrics != nil {
-		p.svc.Metrics.Inc("fusion", result.Run.Workflow, counters.EvFusionRuns)
+		p.svc.Metrics.Inc(configdomain.FusionProvider, result.Run.Workflow, counters.EvFusionRuns)
 		if result.Run.Degraded != "" {
-			p.svc.Metrics.Inc("fusion", result.Run.Workflow, counters.EvFusionDegraded)
+			p.svc.Metrics.Inc(configdomain.FusionProvider, result.Run.Workflow, counters.EvFusionDegraded)
 		}
 	}
 	return result.Committed
@@ -259,9 +260,10 @@ func (p pipeline) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag 
 	// Executor. Effect recording (circuit/metrics/rate-limit) stays here.
 	exchange := &targetexec.BufferedLegExchange{}
 	legStatus, respBody, err := targetexec.BufferedLeg{
-		Client:  p.clientFor(fc.runtime.Cfg, fc.runtime.ParentOf, m.Provider),
-		Plan:    plan,
-		MaxBody: 64 << 20,
+		Client:    p.clientFor(fc.runtime.Cfg, fc.runtime.ParentOf, m.Provider),
+		Plan:      plan,
+		SessionID: fc.flc.SessionID,
+		MaxBody:   64 << 20,
 		ApplyParamBlock: func(body []byte) []byte {
 			return gate.ApplyParamBlock(m.Provider, m.Model, body)
 		},

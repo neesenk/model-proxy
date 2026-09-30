@@ -216,7 +216,7 @@ func CollectCrossRoute(
 	best := make(map[targetKey]configdomain.RouteTarget)
 	for _, targets := range expanded {
 		for _, target := range targets {
-			if target.Provider == "fusion" || (keep != nil && !keep(target)) {
+			if target.Provider == configdomain.FusionProvider || (keep != nil && !keep(target)) {
 				continue
 			}
 			key := targetKey{
@@ -292,7 +292,7 @@ func (planner Planner) ApplyWithProfile(
 	}
 	inRoute := make([]configdomain.RouteTarget, 0, len(ordered))
 	for _, target := range ordered {
-		if target.Provider == "fusion" ||
+		if target.Provider == configdomain.FusionProvider ||
 			Fits(
 				planner.catalog,
 				CapabilitiesFor(planner.config, planner.parentOf, target),

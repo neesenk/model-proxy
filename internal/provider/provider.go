@@ -176,14 +176,18 @@ type Provider interface {
 	// needs (forward + probe paths) - e.g. aqp's anthropic-version +
 	// x-compass-request-id. body is the FINAL upstream request body (after
 	// conversion, provider rewrite and learned param blocks) and is READ-ONLY
-	// here: providers whose upstream keys session affinity off the
-	// spec-defined body fields (OpenAI prompt_cache_key, Anthropic
-	// metadata.user_id, Codex client_metadata.session_id — see
-	// protocol.SessionIDFromBody) may mirror that stable id into their own
-	// session header when the client sent none. Default (baseProbe) is a
-	// no-op. Called after AuthHeaders + prov.Headers so providers can layer
-	// on top.
-	ExtraHeaders(req *http.Request, body []byte, path string)
+	// here. sessionID is the client session id the forward path resolved ONCE
+	// from the ORIGINAL request (header allowlist, then the spec-defined body
+	// fields — see protocol.SessionIDFromBody): providers whose upstream keys
+	// session affinity off those body fields (OpenAI prompt_cache_key,
+	// Anthropic metadata.user_id, Codex client_metadata.session_id) must
+	// prefer sessionID over re-deriving the identity from body, because a
+	// cross-protocol conversion may rewrite or drop the original field
+	// (a→r even injects a hashed prompt_cache_key). sessionID is empty on
+	// paths with no client session (probes, shadow, internal legs). Default
+	// (baseProbe) is a no-op. Called after AuthHeaders + prov.Headers so
+	// providers can layer on top.
+	ExtraHeaders(req *http.Request, body []byte, sessionID string, path string)
 
 	// FilterModelIDs applies provider-specific static policy filters (regex
 	// rules) to a candidate model-id list, returning (kept, dropped). This is

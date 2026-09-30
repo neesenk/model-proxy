@@ -21,6 +21,13 @@ type BufferedLeg struct {
 	Client Doer // required
 	Plan   Plan // target plan (provider impl, base URL, path, headers)
 
+	// SessionID is the client session id of the request this leg belongs to,
+	// resolved once from the ORIGINAL client request by the forward path. It
+	// is handed to the provider's ExtraHeaders so session-affinity headers
+	// stay on the client's conversation lane even when this leg's body was
+	// protocol-converted; empty for session-less internal calls.
+	SessionID string
+
 	// MaxBody caps the response read; <= 0 selects defaultBufferedLegMaxBody.
 	MaxBody         int64
 	ApplyParamBlock func(body []byte) []byte // nil = identity
@@ -101,7 +108,7 @@ func (leg BufferedLeg) Do(ctx context.Context, body []byte) (status int, respBod
 		if err := leg.Plan.ApplyConfiguredHeaders(req.Header); err != nil {
 			return status, nil, &BufferedLegBuildError{Err: fmt.Errorf("headers: %w", err)}
 		}
-		impl.ExtraHeaders(req, body, leg.Plan.UpstreamPath())
+		impl.ExtraHeaders(req, body, leg.SessionID, leg.Plan.UpstreamPath())
 
 		resp, err = leg.Client.Do(req)
 		if err != nil {

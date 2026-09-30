@@ -981,6 +981,9 @@ type MCPStatsSinceReader interface {
 type CommandAPI interface {
 	ResetStats() error
 	RefreshQuota(provider string) bool
+	// QuotaProviderKnown tells an unknown quota key (404) apart from a failed
+	// sync that kept the last-known-good snapshot (502).
+	QuotaProviderKnown(provider string) bool
 	ResetHealth(provider string) ([]string, int, error)
 	// FreezeHealth marks one provider as operator-frozen until ResetHealth;
 	// unlike ResetHealth it always requires an explicit provider (no

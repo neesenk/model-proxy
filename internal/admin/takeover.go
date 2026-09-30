@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"model-proxy/internal/appapi"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/configedit"
 	"model-proxy/internal/routing"
 	"model-proxy/internal/takeover"
@@ -65,7 +66,7 @@ func (s *Service) TakeoverSurface(mode string) (appapi.TakeoverSurface, error) {
 	// effective routing table drops them, so the chips must too. Shares the
 	// exact set a run prunes by (providerbuild's offline AuthReady
 	// projection, rooted at the accounts home).
-	chatRoutes, _ = takeover.PruneUnauthenticatedRoutes(chatRoutes, takeover.AuthenticatedProviders(cfg, homeDir))
+	chatRoutes, _ = takeover.PruneUnauthenticatedRoutes(chatRoutes, s.authenticatedProviders(cfg, homeDir))
 	for exposed := range chatRoutes {
 		surface.Models = append(surface.Models, exposed)
 	}
@@ -171,7 +172,7 @@ func (s *Service) RunTakeover(req appapi.TakeoverRunRequest) (appapi.TakeoverRun
 	homeDir, templatesDir, bakDir := s.takeoverDirs()
 	report, err := takeover.RunTakeoverReportOpts(
 		cfg, req.Client, bakDir,
-		takeover.ModelFactsFor(cfg, req.Client, homeDir, templatesDir, resolved, s.disabledModelOverrides()),
+		takeover.ModelFactsForAuthed(cfg, req.Client, homeDir, templatesDir, resolved, s.disabledModelOverrides(), s.authenticatedProviders(cfg, homeDir)),
 		templatesDir, takeover.TakeoverOptions{Mode: resolved, Scope: resolvedScope, MCP: req.MCP, Models: req.Models},
 	)
 	if err != nil {
@@ -204,7 +205,7 @@ func (s *Service) PreviewTakeover(req appapi.TakeoverRunRequest, managedOnly boo
 	}
 	cfg := s.ports.Config()
 	homeDir, templatesDir, _ := s.takeoverDirs()
-	facts := takeover.ModelFactsFor(cfg, req.Client, homeDir, templatesDir, resolved, s.disabledModelOverrides())
+	facts := takeover.ModelFactsForAuthed(cfg, req.Client, homeDir, templatesDir, resolved, s.disabledModelOverrides(), s.authenticatedProviders(cfg, homeDir))
 	resolvedScope, err := resolveTakeoverScope(req.Scope)
 	if err != nil {
 		return preview, err
@@ -236,6 +237,18 @@ func (s *Service) PreviewTakeover(req appapi.TakeoverRunRequest, managedOnly boo
 		})
 	}
 	return preview, nil
+}
+
+// authenticatedProviders resolves the can-authenticate set the takeover
+// read/preview/run paths prune by. The generation-cached composition-root
+// port is the production path (one offline BuildProviders pass per config
+// generation, never per request); a missing port (tests, degraded wiring)
+// computes the set directly — same semantics, uncached.
+func (s *Service) authenticatedProviders(cfg *configdomain.Config, homeDir string) map[string]bool {
+	if s.ports.TakeoverAuthenticatedProviders != nil {
+		return s.ports.TakeoverAuthenticatedProviders()
+	}
+	return takeover.AuthenticatedProviders(cfg, homeDir)
 }
 
 // disabledModelOverrides projects the live operator disabled-model override

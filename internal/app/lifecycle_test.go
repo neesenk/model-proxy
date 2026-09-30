@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"io"
+	"math/rand"
 	cliserve "model-proxy/internal/cli/serve"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/requestlog"
@@ -227,6 +228,7 @@ func TestServeHTTPUntilShutdownDrainsHandlerBeforeProxyFinalFlush(t *testing.T) 
 		processServices: processServices{
 			lifecycle:      runtimestate.NewLifecycle(),
 			responsesState: protocol.NewResponsesStateStore(statePath),
+			evalRand:       rand.Float64,
 		},
 	}
 	t.Cleanup(p.Close)

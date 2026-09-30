@@ -18,6 +18,7 @@ import (
 	"model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/provider"
+	runtimedomain "model-proxy/internal/runtime"
 	"model-proxy/internal/targetexec"
 )
 
@@ -45,8 +46,15 @@ func (f *fakeProv) Quota() (*provider.QuotaSnapshot, error) { return nil, nil }
 func (f *fakeProv) ProbeRequest(modelID string) provider.ProbeRequest {
 	return provider.ProbeRequest{Method: http.MethodPost, Path: "/chat/completions"}
 }
-func (f *fakeProv) ExtraHeaders(req *http.Request, _ []byte, path string) {}
-func (f *fakeProv) FilterModelIDs(ids []string) (kept, dropped []string)  { return ids, nil }
+func (f *fakeProv) ExtraHeaders(req *http.Request, _ []byte, sessionID string, path string) {
+	// Test probe of the widened seam: echo the session id the executor handed
+	// to the provider so harness tests can assert the forward-resolved client
+	// session survives protocol conversion.
+	if sessionID != "" {
+		req.Header.Set("x-test-resolved-session", sessionID)
+	}
+}
+func (f *fakeProv) FilterModelIDs(ids []string) (kept, dropped []string) { return ids, nil }
 
 var _ provider.Provider = (*fakeProv)(nil)
 
@@ -180,7 +188,15 @@ func (e *fakeEffects) capturedRouting() []*configdomain.RoutingDecision {
 
 var _ targetexec.Effects = (*fakeEffects)(nil)
 
-// fakeRouteState implements RouteState with programmable answers.
+// fakeRouteState implements RouteState with programmable answers. The
+// pin/cooldown/disabled answers stay fake (the pipeline tests drive those
+// seams directly), but the latch + repeat-turn state is owned by a REAL
+// runtime.Manager: an earlier version of this fake carried a line-by-line
+// twin of Manager.RecordLatchOutcome/CheckRepeatTurn, which meant the latch
+// tests validated the copy instead of the production logic and could drift
+// silently. forward's production code must not import internal/runtime (the
+// dependency DAG; internal/app adapts between the two) — this TEST-only seam
+// is the narrow exception that keeps the tests honest.
 type fakeRouteState struct {
 	pins             map[string]bool
 	disabled         map[string]bool
@@ -189,19 +205,18 @@ type fakeRouteState struct {
 	earliest         time.Time
 	recoveredUntried bool
 	quotaMaxAge      time.Duration
-	// latchMu guards latch: concurrent requests of the same session record
-	// outcomes in parallel, and RecordLatchOutcome must apply each one
-	// atomically (the port contract the runtime Manager fulfills with m.mu).
-	latchMu sync.Mutex
-	latch   map[string]Latch // keyed by sessionKey+"\x00"+route
-	// repeatTurns records observed turn keys per (session, route) for testing
-	// the repeat_turn escalation signal. Entries are (turnKey, observedAt).
-	repeatTurns map[string][]fakeRepeatEntry
+	// latch owns the (session, route) latch and repeat-turn window exactly
+	// like production. Construction must go through newFakeRouteState so the
+	// generation gate matches the harness snapshots (Generation 1).
+	latch *runtimedomain.Manager
 }
 
-type fakeRepeatEntry struct {
-	turnKey string
-	at      time.Time
+// newFakeRouteState builds a fakeRouteState whose real Manager sits at the
+// given generation (harness snapshots use Generation 1).
+func newFakeRouteState(generation uint64) *fakeRouteState {
+	m := &runtimedomain.Manager{}
+	m.ReplaceGeneration(generation, nil)
+	return &fakeRouteState{pins: map[string]bool{}, latch: m}
 }
 
 func (s *fakeRouteState) PinForces(exposed string, ordered []RouteTarget, parentOf map[string]string) bool {
@@ -214,66 +229,42 @@ func (s *fakeRouteState) HasRecoveredUntried(targets []RouteTarget, tried map[st
 	return s.recoveredUntried
 }
 func (s *fakeRouteState) QuotaFreshnessMaxAge(cfg *Config) time.Duration { return s.quotaMaxAge }
-func (s *fakeRouteState) latchKeyFor(sessionKey, route string) string {
-	return sessionKey + "\x00" + route
-}
 func (s *fakeRouteState) LatchValue(sessionKey, route string) (Latch, bool) {
-	s.latchMu.Lock()
-	defer s.latchMu.Unlock()
-	v, ok := s.latch[s.latchKeyFor(sessionKey, route)]
-	return v, ok
+	v, ok := s.latch.LatchValue(sessionKey, route)
+	return Latch{Target: v.Target, Since: v.Since, BadRuns: v.BadRuns}, ok
 }
 
 // SetLatch is a test helper seeding a latch directly (not part of the
-// RouteState port — production writes go through RecordLatchOutcome).
+// RouteState port — production writes go through RecordLatchOutcome). It
+// seeds THROUGH the production write path: one bad signal with Consecutive=1
+// escalates immediately, landing exactly {Target, Since=Now, BadRuns:0}.
 func (s *fakeRouteState) SetLatch(sessionKey, route string, value Latch, generation uint64) bool {
-	s.latchMu.Lock()
-	defer s.latchMu.Unlock()
-	if s.latch == nil {
-		s.latch = map[string]Latch{}
-	}
-	s.latch[s.latchKeyFor(sessionKey, route)] = value
-	return true
+	return s.latch.RecordLatchOutcome(runtimedomain.LatchOutcome{
+		SessionKey:  sessionKey,
+		Route:       route,
+		Now:         value.Since,
+		Dwell:       24 * time.Hour,
+		Consecutive: 1,
+		Target:      value.Target,
+		BadSignals:  1,
+	}, generation)
 }
 
-// RecordLatchOutcome applies the port contract the runtime Manager guarantees:
-// the expiry check, streak increment/reset and escalation happen atomically
-// under latchMu — no read-modify-write window across concurrent requests.
+// RecordLatchOutcome delegates to the real Manager: the expiry check, streak
+// increment/reset and escalation happen in the production critical section,
+// so concurrent-request tests (TestServeLatchConcurrentBadRunsCountedAtomically)
+// exercise the production atomicity guarantee, not a copy of it.
 func (s *fakeRouteState) RecordLatchOutcome(o LatchOutcome, generation uint64) bool {
-	if o.SessionKey == "" || o.Route == "" {
-		return false
-	}
-	s.latchMu.Lock()
-	defer s.latchMu.Unlock()
-	if s.latch == nil {
-		s.latch = map[string]Latch{}
-	}
-	key := s.latchKeyFor(o.SessionKey, o.Route)
-	latch, has := s.latch[key]
-	if has && o.Now.Sub(latch.Since) > o.Dwell {
-		has = false
-		latch = Latch{}
-	}
-	if o.BadSignals <= 0 {
-		if o.Good && has {
-			latch.BadRuns = 0
-			s.latch[key] = latch
-		}
-		return true
-	}
-	badRuns := latch.BadRuns + o.BadSignals
-	since := latch.Since
-	target := latch.Target
-	if !has {
-		since = o.Now
-	}
-	if badRuns >= o.Consecutive {
-		target = o.Target
-		since = o.Now
-		badRuns = 0
-	}
-	s.latch[key] = Latch{Target: target, Since: since, BadRuns: badRuns}
-	return true
+	return s.latch.RecordLatchOutcome(runtimedomain.LatchOutcome{
+		SessionKey:  o.SessionKey,
+		Route:       o.Route,
+		Now:         o.Now,
+		Dwell:       o.Dwell,
+		Consecutive: o.Consecutive,
+		Target:      o.Target,
+		BadSignals:  o.BadSignals,
+		Good:        o.Good,
+	}, generation)
 }
 
 func (s *fakeRouteState) FilterDisabledTargets(targets []RouteTarget, parentOf map[string]string) []RouteTarget {
@@ -291,30 +282,7 @@ func (s *fakeRouteState) FilterDisabledTargets(targets []RouteTarget, parentOf m
 }
 
 func (s *fakeRouteState) CheckRepeatTurn(sessionKey, route, turnKey string, now time.Time, window time.Duration, generation uint64) bool {
-	if sessionKey == "" || route == "" || turnKey == "" {
-		return false
-	}
-	if s.repeatTurns == nil {
-		s.repeatTurns = make(map[string][]fakeRepeatEntry)
-	}
-	key := sessionKey + "\x00" + route
-	entries := s.repeatTurns[key]
-	cutoff := now.Add(-window)
-	kept := entries[:0]
-	for _, e := range entries {
-		if !e.at.Before(cutoff) {
-			kept = append(kept, e)
-		}
-	}
-	duplicate := false
-	for _, e := range kept {
-		if e.turnKey == turnKey {
-			duplicate = true
-			break
-		}
-	}
-	s.repeatTurns[key] = append(kept, fakeRepeatEntry{turnKey: turnKey, at: now})
-	return duplicate
+	return s.latch.CheckRepeatTurn(sessionKey, route, turnKey, now, window, generation)
 }
 
 var _ RouteState = (*fakeRouteState)(nil)
@@ -385,7 +353,8 @@ func newHarness() *harness {
 	gate := newFakeHealthGate()
 	fx := &fakeEffects{}
 	events := observeevents.NewHub()
-	h := &harness{state: &fakeRouteState{pins: map[string]bool{}, quotaMaxAge: time.Minute}, gate: gate, fx: fx, events: events}
+	h := &harness{state: newFakeRouteState(1), gate: gate, fx: fx, events: events}
+	h.state.quotaMaxAge = time.Minute
 	h.svc = Services{
 		Client:        &http.Client{Timeout: 30 * time.Second},
 		Metrics:       counters.NewMetricsStore(),
@@ -394,7 +363,7 @@ func newHarness() *harness {
 		Events:        events,
 		FusionReg:     fusion.NewRegistry(),
 		NewHealthGate: func(parentOf map[string]string) targetexec.HealthGate { return gate },
-		NewEffects:    func(generation uint64) targetexec.Effects { return fx },
+		NewEffects:    func(cfg *Config, generation uint64) targetexec.Effects { return fx },
 		Schedule:      passthroughSchedule,
 		ShadowDispatch: func(runtime Snapshot, proto, backendProto, calledModel, exposed string, primary RouteTarget, primaryRequestID, primaryAgent, primarySession string, commit *targetexec.Commit, routingDecision *RoutingDecision) {
 			h.shadow = append(h.shadow, shadowCall{exposed: exposed, provider: primary.Provider})

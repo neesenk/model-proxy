@@ -390,8 +390,10 @@ providers:
 #   glm-5.2:
 #     # grades: split the route targets into named groups. Each grade is filtered
 #     # independently for capability/context; the selected grade goes first and
-#     # fallback controls which remaining grades are appended. Bands may use
-#     # grade: <name> or a target that resolves unambiguously to one grade.
+#     # fallback controls which remaining grades are appended. A target may
+#     # belong to only ONE grade (config validation rejects cross-grade
+#     # duplicates). Bands may use grade: <name> or a target that resolves
+#     # unambiguously to one grade.
 #     # fallback: any (default) | next_grade | strict.
 #     grades:
 #       fast: [zhipu/glm-5.2]

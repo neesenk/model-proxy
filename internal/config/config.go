@@ -20,6 +20,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// FusionProvider is the reserved pseudo-provider id a route target uses to
+// reference a fusion recipe instead of an upstream provider. It carries no
+// credentials of its own and is exempt from auth/availability filtering.
+// Every comparison against this id must use this constant — bare "fusion"
+// literals once forked the offline (takeover) and runtime paths.
+const FusionProvider = "fusion"
+
 type Config struct {
 	Listen    string                   `yaml:"listen"`
 	LogLevel  string                   `yaml:"log_level"`
@@ -1629,7 +1636,7 @@ func (c *Config) validate() error {
 			// provider "fusion" is not a real provider — it references a recipe
 			// under fusion: by recipe name (the target's model field). Checked here
 			// because the generic provider-exists check below would reject it.
-			if t.Provider == "fusion" {
+			if t.Provider == FusionProvider {
 				if _, ok := c.Fusion[t.Model]; !ok {
 					return fmt.Errorf("route %q target %d: fusion recipe %q not defined under fusion: — add a `fusion: %s:` recipe or fix the model name", exposed, i, t.Model, t.Model)
 				}
@@ -1662,7 +1669,7 @@ func (c *Config) validate() error {
 		if !routeNames[route] {
 			return fmt.Errorf("shadow %q: route not found in routes: — add a route named %q", route, route)
 		}
-		if sh.Provider == "fusion" {
+		if sh.Provider == FusionProvider {
 			return fmt.Errorf("shadow %q: provider \"fusion\" is not a valid shadow target — shadow a concrete provider", route)
 		}
 		prov, ok := c.Providers[sh.Provider]
@@ -1809,7 +1816,7 @@ func (c *Config) validate() error {
 			if sel.Target.Provider == "" || sel.Target.Model == "" {
 				return fmt.Errorf("%s: target must name a provider and a model", what)
 			}
-			if sel.Target.Provider == "fusion" {
+			if sel.Target.Provider == FusionProvider {
 				return fmt.Errorf("%s: provider \"fusion\" is not a valid selector target — use a decisions-protocol provider", what)
 			}
 			prov, ok := c.Providers[sel.Target.Provider]
@@ -2042,7 +2049,7 @@ func (c *Config) checkFusionTarget(recipe, where string, t RouteTarget) error {
 	if t.Provider == "" {
 		return fmt.Errorf("%s: provider is empty", what)
 	}
-	if t.Provider == "fusion" {
+	if t.Provider == FusionProvider {
 		return fmt.Errorf("%s: nested fusion recipes are not supported", what)
 	}
 	prov, ok := c.Providers[t.Provider]
@@ -2106,12 +2113,17 @@ func ProviderConfig(cfg *Config, parentOf map[string]string, name string) (Provi
 
 // validateRoutePolicyGrades validates the grade declarations for a route_policy.
 // When grades are configured, every grade must be non-empty, name a non-empty
-// target list, and contain only targets that belong to the route.
+// target list, contain only targets that belong to the route, and no target
+// may appear in more than one grade — gradeOfTarget/GradeForTarget resolve
+// multi-grade membership nondeterministically (map iteration order), which
+// would make grade grouping, next_grade fallback and eval pairing unstable
+// per request.
 func (c *Config) validateRoutePolicyGrades(route string, policy RoutePolicy) error {
 	if len(policy.Grades) == 0 {
 		return nil
 	}
 	routeTargets := c.routeTargetKeySet(route)
+	gradeOf := make(map[string]string) // "provider/model" -> first grade declaring it
 	for name, targets := range policy.Grades {
 		if name == "" {
 			return fmt.Errorf("route_policy %q grades: grade name must not be empty", route)
@@ -2123,7 +2135,7 @@ func (c *Config) validateRoutePolicyGrades(route string, policy RoutePolicy) err
 			if t.Provider == "" || t.Model == "" {
 				return fmt.Errorf("route_policy %q grades: grade %q target %d must name a provider and a model", route, name, i)
 			}
-			if t.Provider == "fusion" {
+			if t.Provider == FusionProvider {
 				return fmt.Errorf("route_policy %q grades: grade %q target %d: fusion targets are not allowed inside grades", route, name, i)
 			}
 			if _, ok := c.Providers[t.Provider]; !ok {
@@ -2132,6 +2144,11 @@ func (c *Config) validateRoutePolicyGrades(route string, policy RoutePolicy) err
 			if len(routeTargets) > 0 && !routeTargets[t.Provider+"/"+t.Model] {
 				return fmt.Errorf("route_policy %q grades: grade %q target %s/%s is not a target of route %q", route, name, t.Provider, t.Model, route)
 			}
+			key := t.Provider + "/" + t.Model
+			if first, dup := gradeOf[key]; dup && first != name {
+				return fmt.Errorf("route_policy %q grades: target %s appears in multiple grades (%q and %q) — a target must belong to exactly one grade", route, key, first, name)
+			}
+			gradeOf[key] = name
 		}
 	}
 	switch policy.Fallback {
@@ -2199,7 +2216,7 @@ func (c *Config) validateRoutePolicyBandTarget(route, what string, policy RouteP
 	if band.Target.Protocol != "" {
 		return fmt.Errorf("%s: band targets select an existing route target — declare protocol: on the route target instead of the band", what)
 	}
-	if band.Target.Provider == "fusion" {
+	if band.Target.Provider == FusionProvider {
 		if _, ok := c.Fusion[band.Target.Model]; !ok {
 			return fmt.Errorf("%s: fusion recipe %q not defined under fusion: — add a `fusion: %s:` recipe or fix the model name", what, band.Target.Model, band.Target.Model)
 		}
@@ -2244,7 +2261,7 @@ func (c *Config) validateRoutePolicyEscalationTarget(route string, policy RouteP
 	if esc.Target.Protocol != "" {
 		return fmt.Errorf("route_policy %q escalation: target selects an existing route target — declare protocol: on the route target instead of the escalation target", route)
 	}
-	if esc.Target.Provider == "fusion" {
+	if esc.Target.Provider == FusionProvider {
 		if _, ok := c.Fusion[esc.Target.Model]; !ok {
 			return fmt.Errorf("route_policy %q escalation: fusion recipe %q not defined under fusion: — add a `fusion: %s:` recipe or fix the model name", route, esc.Target.Model, esc.Target.Model)
 		}
@@ -2268,7 +2285,7 @@ func (c *Config) validateRoutePolicyEval(route string, policy RoutePolicy) error
 	if eval.Judge.Provider == "" || eval.Judge.Model == "" {
 		return fmt.Errorf("route_policy %q eval: judge must name a provider and a model", route)
 	}
-	if eval.Judge.Provider == "fusion" {
+	if eval.Judge.Provider == FusionProvider {
 		return fmt.Errorf("route_policy %q eval: judge provider cannot be fusion", route)
 	}
 	prov, ok := c.Providers[eval.Judge.Provider]

@@ -27,8 +27,11 @@ import (
 // each candidate id is probed against the provider's OWN configured bases with
 // the three-protocol matrix (chat / anthropic / responses) from
 // probe.ProbeModelProtocols, each leg classified via
-// wirecap.ClassifyModelStatus. A model is kept when ANY leg concludes Yes;
-// otherwise it is dropped with a per-leg reason summary. The fresh matrix is
+// wirecap.ClassifyModelStatus. A model is kept when ANY leg concludes Yes,
+// or when no PROBED leg concludes No (all probed legs inconclusive — a
+// transient 429/5xx/auth sweep holds no negative information and must not be
+// written back as a config deletion); otherwise it is dropped with a per-leg
+// reason summary. The fresh matrix is
 // also persisted (best-effort) to model_caps.json so the daemon's verdict-based
 // routing and the PROTOCOLS display column can reuse it without re-probing.
 //
@@ -60,7 +63,9 @@ type DropReason struct {
 // It resolves the provider implementation via providerImplFor (so auth/rewrite/
 // probe-shape are wired exactly as in the live proxy) and probes concurrently
 // (bounded by probeConcurrency). A model is kept when ANY protocol leg
-// classifies Yes. The freshly-probed matrix is persisted (best-effort) to
+// classifies Yes, or when no probed leg classifies No (all probed legs
+// inconclusive — transient 429/5xx/auth holds no negative information).
+// The freshly-probed matrix is persisted (best-effort) to
 // model_caps.json, replacing this provider's entry; `capsPersisted` reports
 // whether the verdicts actually LANDED on disk (false when there was nothing
 // to write or the write failed — the daemon must not be signalled to re-read
@@ -102,8 +107,18 @@ func CheckProviderModels(cfg *configdomain.Config, provName string, ids, disable
 	probedKept := map[string]bool{}
 	for _, r := range probed {
 		mp := runtimewire.ModelProtocols{}
+		anyYes, probedNo, anyProbed := false, false, false
 		for _, leg := range r.Legs {
 			v := runtimewire.ClassifyModelStatus(leg.Probed, leg.Status, leg.Err, leg.Body)
+			if v == runtimewire.Yes {
+				anyYes = true
+			}
+			if leg.Probed {
+				anyProbed = true
+				if v == runtimewire.No {
+					probedNo = true
+				}
+			}
 			switch leg.Leg {
 			case probe.LegChat:
 				mp.Chat = v
@@ -114,7 +129,16 @@ func CheckProviderModels(cfg *configdomain.Config, provName string, ids, disable
 			}
 		}
 		protocols[r.ID] = mp
-		if mp.Chat == runtimewire.Yes || mp.Anthropic == runtimewire.Yes || mp.Responses == runtimewire.Yes {
+		// Keep when ANY leg concluded Yes — and also when no leg concluded
+		// Yes but no PROBED leg concluded No either (every probed leg
+		// inconclusive: transient 429/5xx/auth). The probe holds no negative
+		// information about such a model; dropping it would write one
+		// rate-limit storm back as a config deletion (the allProbeFailed
+		// safety net only fires when EVERY model fails). Legs whose base is
+		// not configured classify No DEFINITIONALLY and do not count as
+		// negative evidence — a provider without anthropic_base_url must not
+		// turn every transient chat failure into a drop.
+		if anyYes || (anyProbed && !probedNo) {
 			probedKept[r.ID] = true
 		} else {
 			dropped = append(dropped, DropReason{Model: r.ID, Status: legStatus(r.Legs), Reason: legsSummary(r.Legs)})
@@ -195,6 +219,19 @@ func SplitDisabledModelIDs(cfg *configdomain.Config, provName string, ids []stri
 		return ids, nil // unreadable → degrade to probing everything
 	}
 	disabled := disabledSet(entries[provName])
+	if vids, pooled := PoolVirtuals(cfg, provName); pooled {
+		// Same key expansion as the daemon probe pass (TargetDisabled's
+		// parent→virtuals direction): a model disabled for ANY virtual account
+		// is out of rotation there, so the refresh must not probe it either.
+		for _, vid := range vids {
+			for m := range disabledSet(entries[vid]) {
+				if disabled == nil {
+					disabled = map[string]bool{}
+				}
+				disabled[m] = true
+			}
+		}
+	}
 	if len(disabled) == 0 {
 		return ids, nil
 	}
@@ -282,6 +319,12 @@ func modelCapsFilePath() string {
 	return runtimewire.ModelCapsPath(filepath.Join(homeDir(), ".model-proxy", "quota_state.json"))
 }
 
+// persistConflictSeam, when non-nil (tests only), fires inside the
+// read-modify-write window — right before the pre-write conflict check — so
+// a regression test can land an external write at the exact race point the
+// guard exists for. Nil in production.
+var persistConflictSeam func(path string)
+
 // persistModelCaps best-effort persists one provider's freshly-probed protocol
 // matrix to model_caps.json, merging into the provider's existing entry when
 // its fingerprint still matches (an Unknown leg — transient 429/timeout —
@@ -292,6 +335,13 @@ func modelCapsFilePath() string {
 // carried over verbatim — not probed is not dropped — so a disable/enable
 // cycle neither burns probe quota nor loses the frozen verdicts. Other
 // providers' entries are preserved; a malformed existing file starts fresh.
+// The whole-file read-modify-write races the daemon's async persist (two
+// uncoordinated writers, pitfalls #33 — deliberately NO cross-process lock):
+// the daemon can land new verdicts for OTHER providers between this read and
+// this write, and the CLI's older whole-file snapshot would overwrite them.
+// Guard with the file mtime (the mirror of the daemon-side baseline guard):
+// on a mid-write conflict, re-load and re-merge onto the fresher base before
+// writing (bounded retries; the residual stat→rename window is inherent).
 // Failures are a stderr warning only - the refresh itself never fails on
 // this.
 func persistModelCaps(provName string, provCfg configdomain.Provider, protocols map[string]runtimewire.ModelProtocols, disabled map[string]bool) bool {
@@ -299,38 +349,59 @@ func persistModelCaps(provName string, provCfg configdomain.Provider, protocols 
 		return false
 	}
 	path := modelCapsFilePath()
-	loaded, err := runtimewire.LoadModelCapsFile(path)
-	if err != nil || loaded == nil {
-		loaded = map[string]runtimewire.ProviderModelCaps{}
-	}
 	fingerprint := providerbuild.ProtocolConfigFingerprint(provCfg)
-	merged := make(map[string]runtimewire.ModelProtocols, len(protocols))
-	for model, mp := range protocols {
-		if prev, ok := loaded[provName].Models[model]; ok && loaded[provName].Fingerprint == fingerprint {
-			mp = runtimewire.MergeOnUnknown(prev, mp)
+	const maxAttempts = 3
+	for attempt := 0; ; attempt++ {
+		before := int64(-1)
+		if fi, err := os.Stat(path); err == nil {
+			before = fi.ModTime().UnixNano()
 		}
-		merged[model] = mp
-	}
-	// Frozen disabled models keep their stored entries verbatim.
-	if old, ok := loaded[provName]; ok && old.Fingerprint == fingerprint {
-		for model, mp := range old.Models {
-			if disabled[model] {
-				if _, present := merged[model]; !present {
-					merged[model] = mp
+		loaded, err := runtimewire.LoadModelCapsFile(path)
+		if err != nil || loaded == nil {
+			loaded = map[string]runtimewire.ProviderModelCaps{}
+		}
+		merged := make(map[string]runtimewire.ModelProtocols, len(protocols))
+		for model, mp := range protocols {
+			if prev, ok := loaded[provName].Models[model]; ok && loaded[provName].Fingerprint == fingerprint {
+				mp = runtimewire.MergeOnUnknown(prev, mp)
+			}
+			merged[model] = mp
+		}
+		// Frozen disabled models keep their stored entries verbatim.
+		if old, ok := loaded[provName]; ok && old.Fingerprint == fingerprint {
+			for model, mp := range old.Models {
+				if disabled[model] {
+					if _, present := merged[model]; !present {
+						merged[model] = mp
+					}
 				}
 			}
 		}
+		loaded[provName] = runtimewire.ProviderModelCaps{
+			Fingerprint: fingerprint,
+			ProbedAt:    time.Now(),
+			Models:      merged,
+		}
+		if persistConflictSeam != nil {
+			persistConflictSeam(path)
+		}
+		// Conflict: another writer (the daemon's async persist, a concurrent
+		// CLI) changed the file between our read and now — re-merge onto its
+		// fresher state instead of overwriting it. "Changed" covers both an
+		// mtime bump and a file appearing where there was none.
+		conflict := false
+		if fi, err := os.Stat(path); err == nil {
+			conflict = before < 0 || fi.ModTime().UnixNano() != before
+		}
+		if conflict && attempt+1 < maxAttempts {
+			continue
+		}
+		if err := runtimewire.SaveModelCapsFile(path, loaded); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: persisting model capabilities to %s: %v\n", path, err)
+			return false
+		}
+		return true
 	}
-	loaded[provName] = runtimewire.ProviderModelCaps{
-		Fingerprint: fingerprint,
-		ProbedAt:    time.Now(),
-		Models:      merged,
-	}
-	if err := runtimewire.SaveModelCapsFile(path, loaded); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: persisting model capabilities to %s: %v\n", path, err)
-		return false
-	}
-	return true
 }
 
 // loadModelCapsProjection reads model_caps.json and returns the protocol

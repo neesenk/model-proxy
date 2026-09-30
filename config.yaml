@@ -63,6 +63,7 @@ providers:
       - claude-opus-5
       - claude-opus-5-5
       - claude-sonnet-5
+      - claude-sonnet-5-5
       - deepseek-v4-flash
       - deepseek-v4-pro
       - glm-5.2
@@ -74,8 +75,8 @@ providers:
       - gpt-5.6-sol
       - gpt-5.6-terra
       - gpt-6-astra
-      - gpt-6-sol
       - gpt-6-luna
+      - gpt-6-sol
       - kimi-k3
   codex:
     provider_id: codex
@@ -219,6 +220,7 @@ providers:
       - claude-opus-5
       - claude-opus-5-5
       - claude-sonnet-5
+      - claude-sonnet-5-5
       - deepseek-v4-flash
       - deepseek-v4-pro
       - glm-5.2
@@ -480,8 +482,10 @@ routes:
 #   glm-5.3:
 #     # grades: split route targets into named groups. Each grade is filtered
 #     # independently; the selected grade goes first and fallback controls the
-#     # remaining grades. Bands may use grade: <name> or a target resolving to a
-#     # single grade. fallback: any (default) | next_grade | strict.
+#     # remaining grades. A target may belong to only ONE grade (config
+#     # validation rejects cross-grade duplicates). Bands may use
+#     # grade: <name> or a target resolving to a single grade.
+#     # fallback: any (default) | next_grade | strict.
 #     grades:
 #       fast: [aqp/glm-5.3]
 #       strong: [zhipu/glm-5.3]

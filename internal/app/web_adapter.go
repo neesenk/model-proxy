@@ -4,6 +4,7 @@ package app
 import (
 	"errors"
 	"strings"
+	"sync"
 
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/admin"
@@ -158,17 +159,80 @@ func defaultCodexLoginOptions() *login.CodexLoginServerOptions {
 	return options
 }
 
+// takeoverAuthProvidersCache memoizes providerbuild's offline
+// authenticated-provider projection (which config-level providers can
+// authenticate right now) per config generation. The takeover read/preview
+// endpoints resolve the set on every request — the template editor previews
+// on a sub-second debounce — and one computation costs a full BuildProviders
+// pass (per-provider pool load + AuthReady; keychain mode spawns one
+// security subprocess per account field), so per-request compute is
+// untenable. Login/logout and config edits mutate credentials only through a
+// reload, which bumps the generation counter and invalidates the cache; the
+// set therefore always matches what the running daemon's effective routing
+// table can actually serve.
+type takeoverAuthProvidersCache struct {
+	// generation reads the live config generation; compute runs the offline
+	// BuildProviders projection. Both are injected so the cache stays a
+	// pure memoizer (tests drive it with counters, no Proxy).
+	generation func() uint64
+	compute    func() map[string]bool
+	mu         sync.Mutex
+	gen        uint64
+	set        map[string]bool
+}
+
+// Get returns the authenticated-provider set for the current generation,
+// computing it at most once per generation. The compute runs OUTSIDE the
+// cache mutex and never under p.mu (credential-store I/O under a lock is a
+// red line); concurrent callers may compute twice, which is harmless. The
+// returned map is shared cache state — callers must not mutate it.
+func (c *takeoverAuthProvidersCache) Get() map[string]bool {
+	gen := c.generation()
+	c.mu.Lock()
+	if c.set != nil && c.gen == gen {
+		set := c.set
+		c.mu.Unlock()
+		return set
+	}
+	c.mu.Unlock()
+	set := c.compute()
+	if c.generation() != gen {
+		// A reload interleaved with the compute: the result belongs to no
+		// single generation — return it uncached so the next call recomputes.
+		return set
+	}
+	c.mu.Lock()
+	c.gen = gen
+	c.set = set
+	c.mu.Unlock()
+	return set
+}
+
 // adminPorts adapts Proxy state to the admin service's narrow copy-by-value
 // ports. Every closure owns lock discipline (p.mu / SnapshotRuntime stays
 // here) and returns detached snapshots — never live map references into
 // reload-owned state — so internal/admin never touches locks, generations, or
-// the composition root directly.
+// the composition root directly. The one deliberate exception is
+// TakeoverAuthenticatedProviders: its map is memoized cache state shared per
+// generation, explicitly read-only to callers (see takeoverAuthProvidersCache).
 func (p *Proxy) adminPorts(
 	configFile func() string,
 	newAqpClient func(storePath string) *login.AqpClient,
 	newCodexOptions func() *login.CodexLoginServerOptions,
 	modelsCatalogCache func(path string) *catalog.Catalog,
 ) admin.Ports {
+	// One memoizer per WebServer lifetime (adminPorts is called once per
+	// NewWebServer): the takeover surface/preview/run paths share it.
+	authProviders := &takeoverAuthProvidersCache{
+		generation: p.configGeneration.Load,
+		compute: func() map[string]bool {
+			cfg := p.snapshotConfig()
+			if cfg == nil {
+				return map[string]bool{}
+			}
+			return providerbuild.AuthenticatedProvidersForHome(cfg, accounts.HomeDir())
+		},
+	}
 	return admin.Ports{
 		ConfigFile:         configFile,
 		Config:             p.snapshotConfig,
@@ -436,6 +500,9 @@ func (p *Proxy) adminPorts(
 		QuotaPollOne: func(name string) bool {
 			return p.quota.PollOne(name)
 		},
+		QuotaHasProvider: func(name string) bool {
+			return p.quota.HasProvider(name)
+		},
 		QuotaPollAll: func(now time.Time) {
 			p.quota.PollAll(now)
 		},
@@ -494,8 +561,9 @@ func (p *Proxy) adminPorts(
 			p.mu.RLock()
 			cfg := p.cfg
 			impl := p.providers[name]
+			vids := p.poolIndex[name]
 			if impl == nil {
-				if vids := p.poolIndex[name]; len(vids) > 0 {
+				if len(vids) > 0 {
 					impl = p.providers[vids[0]]
 				}
 			}
@@ -507,7 +575,7 @@ func (p *Proxy) adminPorts(
 				// Operator disabled models (Manager-owned; read under the same
 				// p.mu → runtime.Manager lock order) are not probed by the
 				// refresh; their stored verdicts ride along via StoredModelCaps.
-				Disabled: disabledModelSet(p.runtimeState.DisabledModels(), name),
+				Disabled: disabledModelSet(p.runtimeState.DisabledModels(), vids, name),
 				StoredModelCaps: func(model string) (runtimewire.ModelProtocols, bool) {
 					return p.modelCaps.Get(name, model)
 				},
@@ -530,19 +598,30 @@ func (p *Proxy) adminPorts(
 		// Takeover (user template dir + models.dev catalog cache) roots at the
 		// same home the accounts store uses.
 		HomeDir: accounts.HomeDir,
+		// The authenticated-provider projection is memoized per config
+		// generation (see takeoverAuthProvidersCache); the admin surface must
+		// not rerun the full credential-store pass per preview.
+		TakeoverAuthenticatedProviders: authProviders.Get,
 	}
 }
 
 // disabledModelSet projects one provider's disabled-model list from the
-// Manager's full map into a lookup set (nil-safe).
-func disabledModelSet(byProvider map[string][]string, provider string) map[string]bool {
-	models := byProvider[provider]
-	if len(models) == 0 {
-		return nil
-	}
-	set := make(map[string]bool, len(models))
-	for _, m := range models {
+// Manager's full map into a lookup set (nil-safe). poolVids are the provider's
+// pool virtual ids: a model disabled for ANY virtual account is out of
+// rotation there (same key expansion as TargetDisabled), so it belongs in the
+// set even though the store keys it under the virtual id.
+func disabledModelSet(byProvider map[string][]string, poolVids []string, provider string) map[string]bool {
+	set := map[string]bool{}
+	for _, m := range byProvider[provider] {
 		set[m] = true
+	}
+	for _, vid := range poolVids {
+		for _, m := range byProvider[vid] {
+			set[m] = true
+		}
+	}
+	if len(set) == 0 {
+		return nil
 	}
 	return set
 }

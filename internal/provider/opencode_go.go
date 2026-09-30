@@ -109,15 +109,21 @@ func (p *OpenCodeGoProvider) FetchModels() ([]string, error) {
 //     Anthropic specs send no session header at all and carry the stable id
 //     in the BODY instead (prompt_cache_key / metadata.user_id /
 //     client_metadata.session_id — Kimi Code does exactly this,
-//     github.com/MoonshotAI/kimi-code/issues/3506); that id is mirrored with
-//     the same native-header priority, so one conversation keeps one Go
-//     routing/prompt-cache lane across requests. Only when NEITHER a header
-//     nor a body identity exists (the proxy's own probe/test traffic), a
-//     per-request synthesized id ("mp-" + random UUID) keeps the request
-//     routable: there is no conversation key to stay stable across, so a
-//     fresh id per request is the honest representation. An explicit
-//     x-opencode-session from the client always wins.
-func (p *OpenCodeGoProvider) ExtraHeaders(req *http.Request, body []byte, path string) {
+//     github.com/MoonshotAI/kimi-code/issues/3506). The forward path resolves
+//     that identity ONCE from the ORIGINAL request and passes it as sessionID:
+//     it is mirrored before any body-field fallback, because a cross-protocol
+//     conversion may rewrite or drop the original field (chat→anthropic drops
+//     prompt_cache_key; a→r even injects a HASHED prompt_cache_key derived
+//     from metadata.user_id — re-reading the converted body would shard one
+//     conversation into a different routing/prompt-cache lane per leg), so one
+//     conversation keeps one Go routing/prompt-cache lane across requests.
+//     Only when NEITHER a header, nor sessionID, nor a body identity exists
+//     (the proxy's own probe/test traffic), a per-request synthesized id
+//     ("mp-" + random UUID) keeps the request routable: there is no
+//     conversation key to stay stable across, so a fresh id per request is
+//     the honest representation. An explicit x-opencode-session from the
+//     client always wins.
+func (p *OpenCodeGoProvider) ExtraHeaders(req *http.Request, body []byte, sessionID string, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
 	if req.Header.Get("x-opencode-session") == "" {
 		for _, h := range []string{"x-claude-code-session-id", "x-session-id", "user_id"} {
@@ -127,9 +133,16 @@ func (p *OpenCodeGoProvider) ExtraHeaders(req *http.Request, body []byte, path s
 			}
 		}
 	}
-	// Spec-conforming header-less agents: the stable conversation id rides in
-	// the body (see the method doc). protocol.SessionIDFromBody bounds it to a
-	// printable ≤256-byte token, safe to echo into a header verbatim.
+	// The forward path's resolved client session (from the ORIGINAL request:
+	// header allowlist first, then body spec fields) outranks whatever
+	// identity the CONVERTED body happens to carry — see the method doc.
+	if req.Header.Get("x-opencode-session") == "" && sessionID != "" {
+		req.Header.Set("x-opencode-session", sessionID)
+	}
+	// Spec-conforming header-less agents on unconverted legs: the stable
+	// conversation id rides in the body (see the method doc).
+	// protocol.SessionIDFromBody bounds it to a printable ≤256-byte token,
+	// safe to echo into a header verbatim.
 	if req.Header.Get("x-opencode-session") == "" {
 		if sid := protocol.SessionIDFromBody(body); sid != "" {
 			req.Header.Set("x-opencode-session", sid)

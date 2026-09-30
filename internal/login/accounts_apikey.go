@@ -2,6 +2,7 @@ package login
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -143,13 +144,24 @@ func keyProbeRequired(prov configdomain.Provider) bool {
 	return prov.UsageURL == "" && provider.ModelsAuthless(prov.Provider)
 }
 
+// ErrKeyUnverifiable marks a validation outcome where the upstream could not
+// decide the key's validity: the real-request probe was answered with 429 or a
+// 5xx, so the key was neither rejected nor accepted — yet a real (billable)
+// model request was already spent. Callers must keep this distinct from a
+// "key invalid" verdict: the key does not enter the pool (fail-closed), but
+// the operator message says "could not verify, retry" instead of "bad key".
+var ErrKeyUnverifiable = errors.New("key validation inconclusive")
+
 // validateKeyByRealProbe validates a key by sending ONE minimal real model
 // request — the provider's own ProbeRequest shape against openai_base_url —
-// with the candidate key bound as the credential. Verdicts mirror
-// ValidateKeyBearerGET: 401/403 or a business-envelope auth failure = key
-// rejected; a build/auth/network error = rejected (fail-closed, same as the
-// GET path); any other status (200, 400, 402, 429, …) = accepted — the key was
-// not rejected, which is all login validation can claim. Fail-closed with a
+// with the candidate key bound as the credential. Verdicts: 401/403 or a
+// business-envelope auth failure = key rejected; a build/auth/network error =
+// rejected (fail-closed, same as the GET path); 429 or any 5xx = the probe
+// could not decide (the request may already have been billed, and a rate
+// limit or upstream outage says nothing about the key) — rejected with
+// ErrKeyUnverifiable so "unable to verify" is never waved through as
+// "valid"; any other status (200, 400, 402, …) = accepted — the key was not
+// rejected, which is all login validation can claim. Fail-closed with a
 // clear error when the config has no model to probe with or no openai base.
 func validateKeyByRealProbe(name string, prov configdomain.Provider, key string) error {
 	if len(prov.Models) == 0 {
@@ -187,6 +199,10 @@ func validateKeyByRealProbe(name string, prov configdomain.Provider, key string)
 	if code, ok := envelopeAuthFailure(rep.Body); ok {
 		return fmt.Errorf("validation failed: HTTP %d (envelope code %d): %s",
 			rep.Status, code, display.Truncate(string(rep.Body), 200))
+	}
+	if rep.Status == http.StatusTooManyRequests || rep.Status >= 500 {
+		return fmt.Errorf("%w: HTTP %d: %s — the probe was rate-limited or the upstream errored, so the key could not be verified (retry later)",
+			ErrKeyUnverifiable, rep.Status, display.Truncate(string(rep.Body), 200))
 	}
 	return nil
 }

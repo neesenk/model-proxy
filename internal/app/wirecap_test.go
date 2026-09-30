@@ -9,6 +9,7 @@ package app
 // newProxyWithStatePath leaves disabled).
 
 import (
+	"context"
 	"io"
 	configdomain "model-proxy/internal/config"
 	"net/http"
@@ -68,7 +69,7 @@ func TestWireCap_ProbeProviders(t *testing.T) {
 	p.providers["p"] = &testProv{key: "k"}
 	p.providers["cdx"] = &testProv{key: "k"}
 
-	p.probeAllWireCaps()
+	p.probeAllWireCaps(context.Background())
 
 	caps, ok := p.wireVerdict("p")
 	if !ok {
@@ -104,7 +105,7 @@ func TestWireCap_ProbeProviders(t *testing.T) {
 	}
 
 	// Fresh verdict → second pass is a no-op.
-	p.probeAllWireCaps()
+	p.probeAllWireCaps(context.Background())
 	hitsMu.Lock()
 	defer hitsMu.Unlock()
 	if len(hits) != 2 {
@@ -138,7 +139,7 @@ func TestWireCap_ProbeNeverFabricatesAnthropicOnOpenAIBase(t *testing.T) {
 	p := newTestProxy(t, cfg)
 	p.providers["p"] = &testProv{key: "k"}
 
-	p.probeAllWireCaps()
+	p.probeAllWireCaps(context.Background())
 
 	pathsMu.Lock()
 	defer pathsMu.Unlock()
@@ -158,7 +159,7 @@ func TestWireCap_ProbeNeverFabricatesAnthropicOnOpenAIBase(t *testing.T) {
 		t.Errorf("verdict = responses:%s chat:%s, want yes/yes", caps.Responses, caps.Chat)
 	}
 	// Fresh → second pass is a no-op.
-	p.probeAllWireCaps()
+	p.probeAllWireCaps(context.Background())
 	if len(paths) != 2 {
 		t.Errorf("re-probe hit upstream %d times, want 2 total (fresh verdict skipped)", len(paths))
 	}
@@ -187,7 +188,7 @@ func TestWireCap_StaleNegativeVerdictIsReprobed(t *testing.T) {
 
 	p.setWireCaps("p", wireCaps{BaseURL: up.URL, Responses: triNo, Chat: triNo,
 		ProbedAt: time.Now().Add(-2 * wireCapNegativeTTL)})
-	p.probeAllWireCaps()
+	p.probeAllWireCaps(context.Background())
 	if hits.Load() == 0 {
 		t.Fatal("stale negative verdict was not re-probed")
 	}
@@ -198,7 +199,7 @@ func TestWireCap_StaleNegativeVerdictIsReprobed(t *testing.T) {
 
 	hits.Store(0)
 	p.setWireCaps("p", wireCaps{BaseURL: up.URL, Responses: triNo, Chat: triYes, ProbedAt: time.Now()})
-	p.probeAllWireCaps()
+	p.probeAllWireCaps(context.Background())
 	if hits.Load() != 0 {
 		t.Fatalf("fresh negative verdict re-probed (%d hits), want 0", hits.Load())
 	}
@@ -587,7 +588,7 @@ func TestWireCap_ProbeTimeoutUnknown(t *testing.T) {
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["p"] = &testProv{key: "k"}
-	p.probeAllWireCaps()
+	p.probeAllWireCaps(context.Background())
 	caps, ok := p.wireVerdict("p")
 	if !ok {
 		t.Fatal("provider not probed")
@@ -619,7 +620,7 @@ func TestWireCap_ProbeAgentGradeRejectionToNo(t *testing.T) {
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["p"] = &testProv{key: "k"}
-	p.probeAllWireCaps()
+	p.probeAllWireCaps(context.Background())
 	caps, ok := p.wireVerdict("p")
 	if !ok {
 		t.Fatal("provider p not probed")
@@ -694,5 +695,190 @@ func TestWireCap_ProbePassesSerialized(t *testing.T) {
 	}
 	if got := hits.Load(); got != 10 {
 		t.Errorf("total hits = %d, want 10 (2 passes × 5 legs)", got)
+	}
+}
+
+// TestWireProbePass_StopCancelsInFlightLegs (HIGH regression): a probe pass
+// runs on the quota poller WaitGroup, and quota.Stop waits for it BEFORE the
+// final persist — with a slow upstream the uncancellable pass used to push
+// that wait past the shutdown window (supervisor SIGKILL, final persist
+// never ran). The pass's stop-aware context must cancel the in-flight legs
+// the moment the tracker stops: Close returns fast and the final quota
+// persist lands. The pass budget is raised far above the asserted deadline
+// so only the stop path (not the budget) can satisfy it.
+func TestWireProbePass_StopCancelsInFlightLegs(t *testing.T) {
+	old := wireProbePassBudget
+	wireProbePassBudget = 30 * time.Second
+	defer func() { wireProbePassBudget = old }()
+
+	started := make(chan struct{}, 64)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		started <- struct{}{}
+		select {
+		case <-r.Context().Done(): // slow upstream: answers only when the request is canceled
+		case <-time.After(10 * time.Second): // test-failure escape hatch, keeps httptest.Close unblocked
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer up.Close()
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"p": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: testProviderID, Models: []string{"m1"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	statePath := filepath.Join(t.TempDir(), "quota_state.json")
+	p := newTestProxyAt(t, cfg, statePath)
+	p.providers["p"] = &testProv{key: "k"}
+
+	if !p.quota.Launch(func() { p.runWireProbePass() }) {
+		t.Fatal("probe pass dispatch rejected by the tracker")
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe pass did not reach the upstream")
+	}
+
+	closed := make(chan struct{})
+	go func() { p.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked behind the in-flight probe pass — stop must cancel the pass's legs")
+	}
+	// The final flush ran: quota_state.json exists (Close's quota.Persist).
+	if _, err := os.Stat(statePath); err != nil {
+		t.Errorf("final quota persist did not land %s: %v", statePath, err)
+	}
+	// The aborted pass stored no verdicts (an aborted leg is no information).
+	if _, ok := p.wireVerdict("p"); ok {
+		t.Error("aborted pass stored a provider-level verdict")
+	}
+	if _, ok := p.modelCaps.Get("p", "m1"); ok {
+		t.Error("aborted pass stored a model-level matrix")
+	}
+}
+
+// TestWireProbePass_BudgetAbortsUnconcludedLegs: when the pass budget expires
+// (a whole-provider stall), the pass abandons the unconcluded legs — no
+// verdicts are stored, so the next pass re-probes them — and returns far
+// inside the 30s per-leg timeout.
+func TestWireProbePass_BudgetAbortsUnconcludedLegs(t *testing.T) {
+	old := wireProbePassBudget
+	wireProbePassBudget = 150 * time.Millisecond
+	defer func() { wireProbePassBudget = old }()
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer up.Close()
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"p": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: testProviderID, Models: []string{"m1"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["p"] = &testProv{key: "k"}
+
+	start := time.Now()
+	p.runWireProbePass()
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("pass took %v with a 150ms budget — unconcluded legs must be abandoned", elapsed)
+	}
+	if _, ok := p.wireVerdict("p"); ok {
+		t.Error("budget-cut pass stored a provider-level verdict")
+	}
+	if _, ok := p.modelCaps.Get("p", "m1"); ok {
+		t.Error("budget-cut pass stored a model-level matrix")
+	}
+}
+
+// TestWireProbePass_CoalescesStormDispatches (single-flight regression): a
+// SIGHUP storm dispatches one pass per signal; they must not stack one full
+// pass per dispatch onto the quota poller WaitGroup (Close would wait for
+// every one). Exactly TWO passes execute here — the in-flight one plus ONE
+// coalesced follow-up, which reads the current generation at its own start —
+// and every further dispatch returns immediately without probing.
+func TestWireProbePass_CoalescesStormDispatches(t *testing.T) {
+	gate := make(chan struct{})
+	var hits atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		hits.Add(1)
+		select {
+		case <-gate:
+		case <-r.Context().Done():
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer up.Close()
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"p": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: testProviderID, Models: []string{"m1"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["p"] = &testProv{key: "k"}
+
+	// Pass 1 blocks inside the upstream handler (5 legs: 2 provider + 3 model).
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); p.runWireProbePass() }()
+	deadline := time.Now().Add(5 * time.Second)
+	for hits.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("pass 1 sent %d requests, want the 2 provider legs blocked on the gate", got)
+	}
+
+	// Dispatch 2: becomes the ONE coalesced follow-up.
+	wg.Add(1)
+	go func() { defer wg.Done(); p.runWireProbePass() }()
+	deadline = time.Now().Add(5 * time.Second)
+	for !p.wireProbePending.Load() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !p.wireProbePending.Load() {
+		t.Fatal("second dispatch did not register as the coalesced follow-up")
+	}
+
+	// Dispatches 3..6 while a follow-up is already queued: all must return
+	// immediately WITHOUT running a pass (pass 1 is still blocked, so their
+	// return proves the coalescing, not a completed run).
+	var extra sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		extra.Add(1)
+		go func() { defer extra.Done(); p.runWireProbePass() }()
+	}
+	extraDone := make(chan struct{})
+	go func() { extra.Wait(); close(extraDone) }()
+	select {
+	case <-extraDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("storm dispatches did not return while a follow-up was already queued — they must coalesce")
+	}
+
+	// Release: pass 1 finishes, the coalesced follow-up runs once — 2 passes
+	// total, never 6.
+	close(gate)
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("probe passes did not finish after gate release")
+	}
+	if got := hits.Load(); got != 10 {
+		t.Errorf("total hits = %d, want 10 (2 passes × 5 legs: in-flight + one coalesced follow-up)", got)
 	}
 }

@@ -345,7 +345,10 @@ func TestReplaceOrAppendTOMLSection_Append(t *testing.T) {
 [foo]
 bar = "baz"
 `
-	out := takeover.ReplaceOrAppendTOMLSection(in, "foo", section)
+	out, err := takeover.ReplaceOrAppendTOMLSection(in, "foo", section)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(out, `[foo]`) || !strings.Contains(out, `bar = "baz"`) {
 		t.Errorf("replaceOrAppendTOMLSection append:\n%s", out)
 	}
@@ -367,7 +370,10 @@ keep = true
 [foo]
 new = "y"
 `
-	out := takeover.ReplaceOrAppendTOMLSection(in, "foo", section)
+	out, err := takeover.ReplaceOrAppendTOMLSection(in, "foo", section)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(out, `new = "y"`) {
 		t.Errorf("replace did not add new key:\n%s", out)
 	}
@@ -394,7 +400,10 @@ new = "y"
 	// must survive untouched and the section must be appended, not "replaced".
 	in := `x = "[foo]"
 `
-	out := takeover.ReplaceOrAppendTOMLSection(in, "foo", section)
+	out, err := takeover.ReplaceOrAppendTOMLSection(in, "foo", section)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(out, `x = "[foo]"`) {
 		t.Errorf("quoted value corrupted:\n%s", out)
 	}
@@ -412,7 +421,10 @@ old = "x"
 [other]
 keep = true
 `
-	out = takeover.ReplaceOrAppendTOMLSection(in, "foo", section)
+	out, err = takeover.ReplaceOrAppendTOMLSection(in, "foo", section)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(out, `x = "[foo]"`) {
 		t.Errorf("quoted value corrupted on replace:\n%s", out)
 	}

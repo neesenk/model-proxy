@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math/rand"
 	configdomain "model-proxy/internal/config"
 	obscounters "model-proxy/internal/observe/counters"
 	runtimestate "model-proxy/internal/runtime"
@@ -123,9 +124,10 @@ func TestInitStatsRestoresAllRuntimeFieldsWithoutDuplicateFlush(t *testing.T) {
 
 	proxy := &Proxy{
 		processServices: processServices{
-			metrics: obscounters.NewMetricsStore(),
-			tokens:  obscounters.NewTokenCounter(),
-			agents:  obscounters.NewAgentCounter(),
+			metrics:  obscounters.NewMetricsStore(),
+			tokens:   obscounters.NewTokenCounter(),
+			agents:   obscounters.NewAgentCounter(),
+			evalRand: rand.Float64,
 		},
 	}
 	proxy.initStats(configdomain.StatsConfig{DBPath: path, Retention: "0"})
@@ -185,6 +187,7 @@ func TestStatsResetSerializesWithFlushAndRebaselines(t *testing.T) {
 		processServices: processServices{
 			metrics: metrics, tokens: tokens, agents: agents,
 			stats: store, flusher: flusher,
+			evalRand: rand.Float64,
 		},
 	}
 	addRuntimeStats(metrics, tokens, agents, 3, 30)
@@ -360,6 +363,7 @@ func TestProxyCloseFinalFlushesOnceAndClosesStatsStore(t *testing.T) {
 			agents:    agents,
 			stats:     store,
 			flusher:   flusher,
+			evalRand:  rand.Float64,
 		},
 	}
 	t.Cleanup(proxy.Close)
@@ -418,6 +422,7 @@ func TestProxyCloseRetriesTransientFinalStatsFailure(t *testing.T) {
 			agents:    agents,
 			stats:     store,
 			flusher:   observestats.NewFlusher(sink, metrics, tokens, agents, nil, nil),
+			evalRand:  rand.Float64,
 		},
 	}
 	t.Cleanup(proxy.Close)
@@ -505,6 +510,7 @@ func TestTokensResetClearsDurableStatsButNotResponseCache(t *testing.T) {
 		processServices: processServices{
 			metrics: metrics, tokens: tokens, agents: agents,
 			stats: store, flusher: flusher,
+			evalRand: rand.Float64,
 		},
 	}
 	addRuntimeStats(metrics, tokens, agents, 2, 20)
@@ -566,6 +572,7 @@ func TestTokensResetFailurePreservesLiveState(t *testing.T) {
 		processServices: processServices{
 			metrics: metrics, tokens: tokens, agents: agents,
 			stats: store, flusher: flusher,
+			evalRand: rand.Float64,
 		},
 	}
 	addRuntimeStats(metrics, tokens, agents, 1, 5)

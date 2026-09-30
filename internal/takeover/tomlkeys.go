@@ -131,6 +131,105 @@ func parseHexRune(hex string) (rune, bool) {
 	return r, true
 }
 
+// tomlStructuralLines scans the whole file once and reports which lines are
+// STRUCTURAL TOML (headers, key lines, comments, blanks) versus CONTENT of a
+// multi-line construct — a """...""" / ”'...”' string or an array whose
+// brackets span lines. Header recognition and section-boundary scans must
+// only look at structural lines: a line starting with `[` inside a
+// multi-line array, or a `[section]`-shaped line inside a multi-line string,
+// is data — treating it as a header replaces/removes user content or cuts a
+// section body in the middle of a value, producing unparseable TOML.
+func tomlStructuralLines(lines []string) []bool {
+	structural := make([]bool, len(lines))
+	var mlString byte // '"' or '\'' while inside a multi-line string
+	arrayDepth := 0   // unclosed [ ] outside strings (arrays spanning lines)
+	for i, line := range lines {
+		structural[i] = mlString == 0 && arrayDepth == 0
+		inBasic, inLiteral := false, false
+	scan:
+		for j := 0; j < len(line); j++ {
+			c := line[j]
+			switch {
+			case mlString == '"':
+				if c == '\\' {
+					j++ // escaped char (incl. \") is not a delimiter
+				} else if c == '"' && j+2 < len(line) && line[j+1] == '"' && line[j+2] == '"' {
+					mlString = 0
+					j += 2
+				}
+			case mlString == '\'':
+				if c == '\'' && j+2 < len(line) && line[j+1] == '\'' && line[j+2] == '\'' {
+					mlString = 0
+					j += 2
+				}
+			case inBasic:
+				if c == '\\' {
+					j++
+				} else if c == '"' {
+					inBasic = false
+				}
+			case inLiteral:
+				if c == '\'' {
+					inLiteral = false
+				}
+			case c == '#':
+				break scan // comment: the rest of the line carries no structure
+			case c == '"':
+				if j+2 < len(line) && line[j+1] == '"' && line[j+2] == '"' {
+					if close := indexTripleQuote(line, j+3, '"'); close >= 0 {
+						j = close + 2 // opens and closes on this line
+					} else {
+						mlString = '"'
+						break scan
+					}
+				} else {
+					inBasic = true
+				}
+			case c == '\'':
+				if j+2 < len(line) && line[j+1] == '\'' && line[j+2] == '\'' {
+					if close := indexTripleQuote(line, j+3, '\''); close >= 0 {
+						j = close + 2
+					} else {
+						mlString = '\''
+						break scan
+					}
+				} else {
+					inLiteral = true
+				}
+			case c == '[':
+				arrayDepth++
+			case c == ']':
+				if arrayDepth > 0 {
+					arrayDepth--
+				}
+			}
+		}
+	}
+	return structural
+}
+
+// indexTripleQuote finds the next triple-quote delimiter (""" or ”') at or
+// after from. A delimiter whose first quote is backslash-escaped (basic
+// strings only) is content, not a delimiter.
+func indexTripleQuote(line string, from int, q byte) int {
+	for j := from; j+2 < len(line); j++ {
+		if line[j] != q || line[j+1] != q || line[j+2] != q {
+			continue
+		}
+		if q == '"' {
+			slashes := 0
+			for k := j - 1; k >= 0 && line[k] == '\\'; k-- {
+				slashes++
+			}
+			if slashes%2 == 1 {
+				continue
+			}
+		}
+		return j
+	}
+	return -1
+}
+
 // stripTOMLLineComment returns the line with any trailing comment removed:
 // the comment starts at the first `#` OUTSIDE quotes. A `#` inside a quoted
 // key part (`[providers."a#b"]`) is data, not a comment. An unterminated
@@ -167,7 +266,9 @@ func stripTOMLLineComment(line string) string {
 // so replace/remove never touches them. A trailing comment after the closing
 // bracket (`[providers.model-proxy] # note`) is stripped before the suffix
 // check: TOML allows it, and missing it would treat the header as absent and
-// append a duplicate table.
+// append a duplicate table. The line must be a STRUCTURAL line (see
+// tomlStructuralLines): a header-shaped line inside a multi-line string or
+// array is content and must never reach this parser.
 func tomlHeaderPath(trimmedLine string) (parts []string, isArray bool, ok bool) {
 	trimmedLine = stripTOMLLineComment(trimmedLine)
 	if !strings.HasPrefix(trimmedLine, "[") || !strings.HasSuffix(trimmedLine, "]") {

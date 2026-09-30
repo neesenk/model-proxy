@@ -89,7 +89,7 @@ func (p *QwenPlanProvider) ProbeRequest(modelID string) ProbeRequest {
 // ExtraHeaders sets anthropic-version on every upstream request (forward + probe).
 // The probe has no client request to inherit it from, and the anthropic-compatible
 // endpoint rejects requests without it.
-func (p *QwenPlanProvider) ExtraHeaders(req *http.Request, _ []byte, path string) {
+func (p *QwenPlanProvider) ExtraHeaders(req *http.Request, _ []byte, _ string, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
 }
 

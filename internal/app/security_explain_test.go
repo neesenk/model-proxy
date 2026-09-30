@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -15,7 +16,10 @@ const explainFixtureKey = "sk-ant-api03-X9fQ2vB7nM4kL8pR1tW6yU3iO0aS5dF7gH9jK2lZ
 
 func explainTestProxy(t *testing.T, scanner *guard.Scanner) *Proxy {
 	t.Helper()
-	return &Proxy{generationState: generationState{guardScanner: scanner}}
+	return &Proxy{
+		generationState: generationState{guardScanner: scanner},
+		processServices: processServices{evalRand: rand.Float64},
+	}
 }
 
 func TestLocateGuardHitsSecretMasked(t *testing.T) {

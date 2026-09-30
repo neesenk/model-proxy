@@ -336,7 +336,16 @@ func (t *QuotaTracker) warnSyncFailed(name string, s *provider.QuotaSnapshot) {
 // pooled-account virtual id "name#<accountID>") and persists. Used by the Web
 // UI's per-account "Refresh usage" - unlike refreshOne it is NOT debounced
 // (a manual click should always re-poll) and runs synchronously so the caller
-// sees the fresh snapshot. Returns false if the key isn't a live provider.
+// sees the fresh snapshot. Returns false if the key isn't a live provider, or
+// if the sync FAILED and the last-known-good snapshot was kept: a no-op keep
+// changes nothing, so it must not report a successful refresh (nor persist or
+// clear cooldowns).
+// HasProvider reports whether key names a provider the tracker polls, letting
+// callers distinguish an unknown key from a failed (last-known-good kept) sync.
+func (t *QuotaTracker) HasProvider(key string) bool {
+	return t.provs()[key] != nil
+}
+
 func (t *QuotaTracker) PollOne(key string) bool {
 	generation := t.CurrentGeneration()
 	p := t.provs()[key]
@@ -345,7 +354,7 @@ func (t *QuotaTracker) PollOne(key string) bool {
 	}
 	s := t.FetchQuota(p, time.Now())
 	t.warnSyncFailed(key, s)
-	if !t.CommitSnapshot(generation, key, s) {
+	if t.commitSnapshot(generation, key, s) != QuotaCommitApplied {
 		return false
 	}
 	// The manual "Refresh usage" click is exactly the user asking "has my
@@ -366,7 +375,10 @@ func (t *QuotaTracker) PollOne(key string) bool {
 // refreshOne re-polls a single provider after a 429. The call is deduped: a
 // concurrent refresh (inFlight) or one that ran less than
 // pollInterval/2 ago (last) is dropped, so a 429 storm doesn't fire N upstream
-// Quota() calls + N persists for the same provider.
+// Quota() calls + N persists for the same provider. A refresh whose sync
+// FAILED commits nothing (last-known-good keep): it neither persists nor
+// stamps last — a no-op must not debounce the next refresh that might learn
+// something.
 func (t *QuotaTracker) RefreshOne(name string, generations ...uint64) {
 	generation := t.CurrentGeneration()
 	if len(generations) > 0 {
@@ -394,7 +406,7 @@ func (t *QuotaTracker) RefreshOne(name string, generations ...uint64) {
 	if p := t.provs()[name]; p != nil {
 		s := t.FetchQuota(p, time.Now())
 		t.warnSyncFailed(name, s)
-		if t.CommitSnapshot(generation, name, s) {
+		if t.commitSnapshot(generation, name, s) == QuotaCommitApplied {
 			if err := t.Persist(); err != nil {
 				logx.Warnf("[quota] persist after refreshOne(%s) failed: %v", name, err)
 			}
@@ -448,13 +460,21 @@ func (t *QuotaTracker) SetSnapshot(name string, snapshot *provider.QuotaSnapshot
 }
 
 func (t *QuotaTracker) CommitSnapshot(generation uint64, name string, snapshot *provider.QuotaSnapshot) bool {
+	return t.commitSnapshot(generation, name, snapshot) != QuotaCommitRejected
+}
+
+// commitSnapshot is CommitSnapshot with the honest three-state outcome:
+// PollOne/RefreshOne must distinguish a committed snapshot from a failed-sync
+// keep (QuotaCommitKept) so a no-op sync never persists, debounces, or
+// reports success.
+func (t *QuotaTracker) commitSnapshot(generation uint64, name string, snapshot *provider.QuotaSnapshot) QuotaCommitResult {
 	if t.CurrentGeneration() != generation {
-		return false
+		return QuotaCommitRejected
 	}
 	if snapshot != nil {
 		snapshot.ExhaustionEta = provider.EstimateExhaustionEta(t.runtime.Quota(name), snapshot, t.maxEtaGap())
 	}
-	return t.runtime.SetQuota(name, snapshot, generation)
+	return t.runtime.CommitQuota(name, snapshot, generation)
 }
 
 // maxEtaGap is the snapshot gap beyond which the burn-rate baseline is
@@ -624,6 +644,16 @@ func (t *QuotaTracker) Persist() error {
 		logx.Warnf("[quota] persist rename failed: %v", err)
 		remove()
 		return err
+	}
+	// fsync the containing directory so the RENAME itself is durable: without
+	// it a crash+reboot can lose the directory entry even though the temp file
+	// was fsynced. Best-effort — some platforms/filesystems cannot fsync a
+	// directory (e.g. Windows), and the rename is already done.
+	if d, err := os.Open(dir); err == nil {
+		if err := d.Sync(); err != nil {
+			logx.Debugf("[quota] persist dir fsync failed: %v", err)
+		}
+		d.Close()
 	}
 	return nil
 }

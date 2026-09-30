@@ -108,7 +108,7 @@ func (p *MiMoProvider) FetchModels() ([]string, error) {
 // NOT carry anthropic-version, so without this the proxy would strip the
 // version header the Anthropic SDK (Claude Code's MiMo path) always sends, and
 // a strict gateway would 400. Harmless where the endpoint ignores it.
-func (p *MiMoProvider) ExtraHeaders(req *http.Request, _ []byte, path string) {
+func (p *MiMoProvider) ExtraHeaders(req *http.Request, _ []byte, _ string, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
 }
 

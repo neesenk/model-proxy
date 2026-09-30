@@ -63,7 +63,9 @@ var VirtualProviders = map[string]struct{}{
 	"guard":    {},
 	"attempts": {},
 	"routing":  {},
-	"fusion":   {},
+	// Mirrors config.FusionProvider; counters stays a leaf package and cannot
+	// import internal/config, so keep the literal in sync by convention.
+	"fusion": {},
 }
 
 // IsVirtualProvider reports whether provider is a virtual counter namespace

@@ -28,7 +28,9 @@ func (s *Service) ResetStats() error {
 }
 
 // RefreshQuota synchronously refreshes one provider when name is non-empty, or
-// every provider otherwise. It returns false only for an unknown named key.
+// every provider otherwise. For a named provider it returns false when the key
+// is unknown OR when the sync failed and the tracker kept the last-known-good
+// snapshot; use QuotaProviderKnown to tell the two apart.
 func (s *Service) RefreshQuota(provider string) bool {
 	if !s.ports.QuotaEnabled() {
 		return true
@@ -38,6 +40,15 @@ func (s *Service) RefreshQuota(provider string) bool {
 	}
 	s.ports.QuotaPollAll(time.Now())
 	return true
+}
+
+// QuotaProviderKnown reports whether provider names a polled quota key. A nil
+// port or a disabled tracker answers true so degenerate configs never 404.
+func (s *Service) QuotaProviderKnown(provider string) bool {
+	if !s.ports.QuotaEnabled() || s.ports.QuotaHasProvider == nil {
+		return true
+	}
+	return s.ports.QuotaHasProvider(provider)
 }
 
 func (s *Service) ResetHealth(provider string) ([]string, int, error) {

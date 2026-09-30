@@ -133,12 +133,18 @@ type processServices struct {
 	// split-brain the reload re-read fixed. Atomic: written by boot/reload
 	// (outside p.mu), read+updated by the quota-tracked persist goroutine.
 	modelCapsFileBaseline atomic.Int64
-	// wireProbeMu serializes wire/model probe passes. Rapid SIGHUP storms each
-	// dispatch a pass; unserialized passes probe the same rate-limited
-	// upstreams concurrently, stacking 429 bursts (the observed zcode/zhipu
-	// "? unknown" flapping). A queued pass re-reads the current generation at
-	// its own start, so serializing never probes a stale one.
+	// wireProbeMu serializes wire/model probe passes (TryLock/Lock in
+	// runWireProbePass). Rapid SIGHUP storms each dispatch a pass; unserialized
+	// passes probe the same rate-limited upstreams concurrently, stacking 429
+	// bursts (the observed zcode/zhipu "? unknown" flapping). A queued pass
+	// re-reads the current generation at its own start, so serializing never
+	// probes a stale one.
 	wireProbeMu sync.Mutex
+	// wireProbePending marks that ONE follow-up probe pass is already queued
+	// behind the running one (runWireProbePass's single-flight coalescing):
+	// further dispatches return immediately instead of stacking a full pass
+	// per SIGHUP onto the quota poller WaitGroup.
+	wireProbePending atomic.Bool
 	// Operator disabled-model override's persistence (disabled_models.json,
 	// same state directory as model_caps.json). The runtime Manager owns the
 	// live set; this path + mutex own the file rewrite after every toggle

@@ -23,35 +23,16 @@ func (m *Manager) Sticky(key string) (Sticky, bool) {
 	return value, ok
 }
 
-func (m *Manager) SetLatch(sessionKey, route string, latch Latch, generation uint64) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.ensureLocked()
-	if !m.generationMatchesLocked(generation) {
-		return false
-	}
-	m.latch[latchKey{SessionKey: sessionKey, Route: route}] = latch
-	return true
-}
-
+// LatchValue reads the (sessionKey, route) latch. It takes no generation
+// argument because a stale read is structurally impossible: ReplaceGeneration
+// rebuilds the whole latch map inside the same m.mu critical section, so a
+// reader holding m.mu can never observe a value written under a previous
+// generation. The only production write path is RecordLatchOutcome.
 func (m *Manager) LatchValue(sessionKey, route string) (Latch, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	value, ok := m.latch[latchKey{SessionKey: sessionKey, Route: route}]
 	return value, ok
-}
-
-func (m *Manager) ClearLatch(sessionKey, route string, generation uint64) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.ensureLocked()
-	if !m.generationMatchesLocked(generation) {
-		return false
-	}
-	key := latchKey{SessionKey: sessionKey, Route: route}
-	_, ok := m.latch[key]
-	delete(m.latch, key)
-	return ok
 }
 
 // RecordLatchOutcome atomically applies one request outcome to the
@@ -61,6 +42,14 @@ func (m *Manager) ClearLatch(sessionKey, route string, generation uint64) bool {
 // updates (the previous LatchValue→SetLatch read-modify-write across calls
 // could). Pure in-memory: no callbacks, no I/O while holding the lock.
 // Returns false on generation mismatch or missing keys.
+//
+// Expired entries are DELETED, not just ignored: an entry whose Since is
+// older than the dwell would be treated as absent on its next outcome and is
+// already ignored by readers, so removing it now keeps the map bounded by the
+// sessions active within one dwell window. The sweep only touches keys of the
+// SAME route — a route's dwell is config-derived and therefore fixed for the
+// whole generation, so the outcome's Dwell is exactly the expiry window those
+// keys would be judged by (another route may use a different dwell).
 func (m *Manager) RecordLatchOutcome(in LatchOutcome, generation uint64) bool {
 	if in.SessionKey == "" || in.Route == "" {
 		return false
@@ -74,8 +63,14 @@ func (m *Manager) RecordLatchOutcome(in LatchOutcome, generation uint64) bool {
 	key := latchKey{SessionKey: in.SessionKey, Route: in.Route}
 	latch, has := m.latch[key]
 	if has && in.Now.Sub(latch.Since) > in.Dwell {
+		delete(m.latch, key)
 		has = false
 		latch = Latch{}
+	}
+	for k, l := range m.latch {
+		if k.Route == in.Route && in.Now.Sub(l.Since) > in.Dwell {
+			delete(m.latch, k)
+		}
 	}
 	if in.BadSignals <= 0 {
 		if in.Good && has {
@@ -106,6 +101,11 @@ func (m *Manager) RecordLatchOutcome(in LatchOutcome, generation uint64) bool {
 // expired entries are evicted and the per-(session,route) list is capped at
 // maxRepeatTurnWindowEntries. A non-positive window is treated as 30 minutes.
 // The method does not perform I/O or callbacks while holding the Manager lock.
+//
+// Same-route windows whose entries have ALL expired are dropped entirely: the
+// window is config-derived (escalation.dwell) and fixed per route within a
+// generation, so an emptied window can never produce a duplicate verdict —
+// keeping it would let silent sessions grow the map until the next reload.
 func (m *Manager) CheckRepeatTurn(sessionKey, route, turnKey string, now time.Time, window time.Duration, generation uint64) bool {
 	if sessionKey == "" || route == "" || turnKey == "" {
 		return false
@@ -119,21 +119,29 @@ func (m *Manager) CheckRepeatTurn(sessionKey, route, turnKey string, now time.Ti
 	if window <= 0 {
 		window = 30 * time.Minute
 	}
+	cutoff := now.Add(-window)
+	// Drop same-route windows whose entries have all expired (see doc).
+	for k, other := range m.repeatTurns {
+		if k.Route != route {
+			continue
+		}
+		kept := other.Entries[:0]
+		for _, e := range other.Entries {
+			if !e.At.Before(cutoff) {
+				kept = append(kept, e)
+			}
+		}
+		other.Entries = kept
+		if len(other.Entries) == 0 {
+			delete(m.repeatTurns, k)
+		}
+	}
 	key := repeatTurnKey{SessionKey: sessionKey, Route: route}
 	w := m.repeatTurns[key]
 	if w == nil {
 		w = &repeatTurnWindow{}
 		m.repeatTurns[key] = w
 	}
-	cutoff := now.Add(-window)
-	// Evict expired entries.
-	kept := w.Entries[:0]
-	for _, e := range w.Entries {
-		if !e.At.Before(cutoff) {
-			kept = append(kept, e)
-		}
-	}
-	w.Entries = kept
 	// Check for a duplicate.
 	duplicate := false
 	for _, e := range w.Entries {

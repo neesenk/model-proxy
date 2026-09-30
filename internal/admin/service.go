@@ -152,8 +152,11 @@ type Ports struct {
 	// the tracker exists at all (degenerate configs run without one).
 	QuotaEnabled func() bool
 	QuotaPollOne func(name string) bool
-	QuotaPollAll func(now time.Time)
-	QuotaPersist func() error
+	// QuotaHasProvider reports whether name is a provider the tracker polls,
+	// so callers can tell an unknown key apart from a failed (kept) sync.
+	QuotaHasProvider func(name string) bool
+	QuotaPollAll     func(now time.Time)
+	QuotaPersist     func() error
 	// SetPin pins a route to one provider; ok is false when the route is
 	// unknown or the provider is not one of its targets.
 	SetPin func(route, provider string, ttl time.Duration) (expiresAt time.Time, ok bool)
@@ -218,6 +221,17 @@ type Ports struct {
 	// accounts.HomeDir(). Tests inject t.TempDir() so takeover never touches
 	// the real HOME.
 	HomeDir func() string
+	// TakeoverAuthenticatedProviders projects which config-level providers
+	// can authenticate right now (the same offline AuthReady projection a
+	// takeover run prunes by), computed ONCE per config generation and
+	// cached by the composition root: the takeover read/preview endpoints
+	// resolve it on every request (the template editor previews on a
+	// sub-second debounce) and a full BuildProviders pass costs a pool load
+	// plus an AuthReady per provider — keychain mode spawns one security
+	// subprocess per account field. The returned map is shared cache state
+	// and must be treated as read-only. A nil func degrades to computing
+	// the set per call via takeover.AuthenticatedProviders (tests).
+	TakeoverAuthenticatedProviders func() map[string]bool
 }
 
 // ModelRefreshRuntime is an immutable, single-generation model refresh input.

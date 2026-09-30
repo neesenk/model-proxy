@@ -155,9 +155,10 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 	defer cancelLeg()
 	exchange := &targetexec.BufferedLegExchange{}
 	legStatus, respBody, err := targetexec.BufferedLeg{
-		Client:  p.clientFor(in.Runtime.Cfg, in.Runtime.ParentOf, m.Provider),
-		Plan:    plan,
-		MaxBody: 64 << 20,
+		Client:    p.clientFor(in.Runtime.Cfg, in.Runtime.ParentOf, m.Provider),
+		Plan:      plan,
+		SessionID: in.SessionID,
+		MaxBody:   64 << 20,
 		ApplyParamBlock: func(body []byte) []byte {
 			return gate.ApplyParamBlock(m.Provider, m.Model, body)
 		},

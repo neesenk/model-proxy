@@ -353,6 +353,13 @@ func BuildOne(cfg *configdomain.Config, opts BuildOptions, name string, prov con
 			if bound && (ak == "" || sk == "") {
 				return nil, errVolcengineAKSKNeeded(name)
 			}
+			if opts.ListArkAgentPlanModelIDs == nil {
+				// Callers that build only for auth projection
+				// (AuthenticatedProvidersForHome) leave the signed-list seam
+				// unwired: report not-configured like an unset FetchModelsFn
+				// instead of panicking if a model fetch is ever attempted.
+				return nil, fmt.Errorf("volcengine signed model listing not configured for %q", name)
+			}
 			return opts.ListArkAgentPlanModelIDs(ctx, name, ak, sk)
 		}
 		// GetAFPUsage is V4-signed with the virtual's own AK/SK (bound here so

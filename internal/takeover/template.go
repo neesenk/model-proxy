@@ -885,7 +885,10 @@ func (t *Template) rewriteTOML(ctx renderContext, scope RewriteScope) error {
 		}
 		for _, s := range t.TOML.Sections {
 			body := "\n[" + ctx.substitute(s.Name) + "]\n" + ctx.substitute(s.Body) + "\n"
-			text = ReplaceOrAppendTOMLSection(text, ctx.substitute(s.Name), body)
+			text, err = ReplaceOrAppendTOMLSection(text, ctx.substitute(s.Name), body)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	if t.Models != nil && t.Models.Shape == "kimi" && scope != ScopeMCP {
@@ -896,7 +899,10 @@ func (t *Template) rewriteTOML(ctx renderContext, scope RewriteScope) error {
 			}
 			name := substituteModel(t.Models.TOMLSection, mv, ctx)
 			body := "\n[" + name + "]\n" + substituteModel(t.Models.TOMLBody, mv, ctx) + "\n"
-			text = ReplaceOrAppendTOMLSection(text, name, body)
+			text, err = ReplaceOrAppendTOMLSection(text, name, body)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	if t.Models != nil && t.Models.Shape == "codex" && scope != ScopeMCP && len(ctx.models) > 0 {
@@ -947,7 +953,10 @@ func (t *Template) rewriteTOML(ctx renderContext, scope RewriteScope) error {
 		for _, e := range ctx.mcp {
 			name := ctx.substituteMCP(t.MCP.TOMLSection, e)
 			body := "\n[" + name + "]\n" + ctx.substituteMCP(t.MCP.TOMLBody, e) + "\n"
-			text = ReplaceOrAppendTOMLSection(text, name, body)
+			text, err = ReplaceOrAppendTOMLSection(text, name, body)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return atomicWriteFile(t.File, []byte(text), preserveMode(t.File, 0o600))
@@ -1224,7 +1233,10 @@ func tomlTopKeyValue(text, key string) (string, bool) {
 // match is semantic (key-path parsing): a client-rewritten spelling of our
 // header (`[providers.model-proxy]` for `[providers."model-proxy"]`) still
 // resolves, so drift detection reads the real base_url instead of reporting
-// phantom drift on a healthy takeover. "" never matches.
+// phantom drift on a healthy takeover. "" never matches. Header/key-shaped
+// lines inside multi-line strings or arrays are content and are skipped
+// (tomlStructuralLines), so a hand-written note cannot flip the scan into or
+// out of the managed section.
 func tomlSectionScalar(text, section, key string) string {
 	if section == "" {
 		return ""
@@ -1233,8 +1245,13 @@ func tomlSectionScalar(text, section, key string) string {
 	if !ok {
 		return ""
 	}
+	lines := strings.Split(text, "\n")
+	structural := tomlStructuralLines(lines)
 	inSection := false
-	for _, line := range strings.Split(text, "\n") {
+	for i, line := range lines {
+		if !structural[i] {
+			continue
+		}
 		l := strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(l, "["):
@@ -1244,8 +1261,8 @@ func tomlSectionScalar(text, section, key string) string {
 				inSection = false
 			}
 		case inSection && strings.HasPrefix(l, key):
-			if i := strings.Index(l, "="); i >= 0 {
-				return strings.Trim(strings.TrimSpace(l[i+1:]), "\"")
+			if eq := strings.Index(l, "="); eq >= 0 {
+				return strings.Trim(strings.TrimSpace(l[eq+1:]), "\"")
 			}
 		}
 	}

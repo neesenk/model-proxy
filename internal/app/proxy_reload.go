@@ -259,7 +259,7 @@ func (p *Proxy) expandTarget(t configdomain.RouteTarget, notReady map[string]boo
 	expanded := newResolver(p, p.providers, p.poolIndex).Expand(t)
 	kept := expanded[:0]
 	for _, rt := range expanded {
-		if rt.Provider != "fusion" {
+		if rt.Provider != configdomain.FusionProvider {
 			impl := p.providers[rt.Provider]
 			if impl == nil {
 				continue

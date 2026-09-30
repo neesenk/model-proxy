@@ -93,8 +93,12 @@ func (s *Server) handleQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Provider != "" {
-		if !s.commands.RefreshQuota(req.Provider) {
+		if !s.commands.QuotaProviderKnown(req.Provider) {
 			writeJSONErr(w, http.StatusNotFound, "unknown provider: "+req.Provider)
+			return
+		}
+		if !s.commands.RefreshQuota(req.Provider) {
+			writeJSONErr(w, http.StatusBadGateway, "quota sync failed for "+req.Provider+"; kept last-known-good")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "refreshed", "provider": req.Provider})

@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -40,7 +42,7 @@ func (w *windowedProv) Quota() (*provider.QuotaSnapshot, error) {
 func (w *windowedProv) ProbeRequest(string) provider.ProbeRequest {
 	return provider.ProbeRequest{Method: http.MethodPost, Path: "/chat/completions"}
 }
-func (w *windowedProv) ExtraHeaders(*http.Request, []byte, string)           {}
+func (w *windowedProv) ExtraHeaders(*http.Request, []byte, string, string)   {}
 func (w *windowedProv) FilterModelIDs(ids []string) (kept, dropped []string) { return ids, nil }
 
 func TestQuotaRecoveredClearCooldownClearsStale429Prediction(t *testing.T) {
@@ -255,7 +257,8 @@ func TestPollAllSyncFailureKeepsLastSnapshotAndHasNoSideEffects(t *testing.T) {
 
 // TestPollOneSyncFailureKeepsLastSnapshot: the manual per-account "Refresh
 // usage" path follows the same contract — a failing endpoint keeps the last
-// snapshot, reports a successful (no-op) commit, and leaves cooldowns alone.
+// snapshot, leaves cooldowns alone, and reports the refresh as NOT successful
+// (the keep is a no-op, not a committed snapshot).
 func TestPollOneSyncFailureKeepsLastSnapshot(t *testing.T) {
 	cfg := &configdomain.Config{Scheduling: configdomain.Scheduling{QuotaPollInterval: "60s"}}
 	m := newTestManager(0)
@@ -272,8 +275,8 @@ func TestPollOneSyncFailureKeepsLastSnapshot(t *testing.T) {
 
 	m.RecordRateLimit("zhipu", time.Now().Add(80*time.Minute), Transient, 0)
 	prov.snapshot = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 403"}
-	if !tr.PollOne("zhipu") {
-		t.Fatal("failed sync must still be an accepted (no-op) commit")
+	if tr.PollOne("zhipu") {
+		t.Fatal("failed sync must not report a successful refresh — nothing was committed")
 	}
 	if kept := m.Quota("zhipu"); kept == nil || kept.Err != "" ||
 		kept.Billing != provider.BillingPlan || !kept.AsOf.Equal(seeded.AsOf) {
@@ -281,5 +284,80 @@ func TestPollOneSyncFailureKeepsLastSnapshot(t *testing.T) {
 	}
 	if m.TargetHealthy("zhipu", "glm-5.3", time.Now()) {
 		t.Fatal("failed PollOne must not clear the 429 cooldown")
+	}
+}
+
+// TestPollOneSyncFailureDoesNotPersist: a failed PollOne/RefreshOne keeps the
+// last-known-good snapshot and must not touch the state file at all — the
+// previous bool signal reported the no-op keep as a commit, so every failed
+// sync rewrote quota_state.json with identical content.
+func TestPollOneSyncFailureDoesNotPersist(t *testing.T) {
+	cfg := &configdomain.Config{Scheduling: configdomain.Scheduling{QuotaPollInterval: "60s"}}
+	m := newTestManager(0)
+	prov := &windowedProv{snapshot: recoveredSnapshot(time.Now(), 0.7)}
+	path := filepath.Join(t.TempDir(), "quota_state.json")
+	tr := NewQuotaTracker(path, func() *configdomain.Config { return cfg },
+		func() map[string]provider.Provider {
+			return map[string]provider.Provider{"zhipu": prov}
+		}, m)
+
+	tr.PollAll(time.Now())
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("seed poll did not persist: %v", err)
+	}
+	// A rewrite goes through tmp+rename, so it always produces a NEW inode —
+	// os.SameFile detects it regardless of the filesystem's mtime granularity.
+	assertNotRewritten := func(op string) {
+		t.Helper()
+		after, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(before, after) || !after.ModTime().Equal(before.ModTime()) {
+			t.Fatalf("%s rewrote the state file for a no-op keep", op)
+		}
+	}
+
+	prov.snapshot = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}
+	if tr.PollOne("zhipu") {
+		t.Fatal("failed PollOne must report false")
+	}
+	assertNotRewritten("failed PollOne")
+
+	tr.RefreshOne("zhipu")
+	assertNotRewritten("failed RefreshOne")
+	if kept := m.Quota("zhipu"); kept == nil || kept.Err != "" {
+		t.Fatalf("failed sync mutated the last snapshot: %+v", kept)
+	}
+}
+
+// TestRefreshOneSyncFailureDoesNotDebounce: a failed RefreshOne learns
+// nothing, so it must not stamp the debounce marker — the next refresh (the
+// upstream recovered) must run immediately instead of being swallowed by the
+// half-interval debounce.
+func TestRefreshOneSyncFailureDoesNotDebounce(t *testing.T) {
+	cfg := &configdomain.Config{Scheduling: configdomain.Scheduling{QuotaPollInterval: "60s"}}
+	m := newTestManager(0)
+	prov := &windowedProv{snapshot: &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}}
+	tr := NewQuotaTracker("", func() *configdomain.Config { return cfg },
+		func() map[string]provider.Provider {
+			return map[string]provider.Provider{"zhipu": prov}
+		}, m)
+
+	// Seed a good snapshot, then fail the refresh: the keep is a no-op.
+	tr.SetSnapshot("zhipu", recoveredSnapshot(time.Now(), 0.7))
+	tr.RefreshOne("zhipu")
+	if kept := m.Quota("zhipu"); kept == nil || kept.Err != "" {
+		t.Fatalf("failed RefreshOne mutated the last snapshot: %+v", kept)
+	}
+
+	// The upstream recovers; the very next refresh (well inside the 30s
+	// debounce half-interval) must commit — the failed one did not debounce.
+	prov.snapshot = recoveredSnapshot(time.Now(), 0.9)
+	tr.RefreshOne("zhipu")
+	got := m.Quota("zhipu")
+	if got == nil || got.Err != "" || len(got.Windows) == 0 || got.Windows[0].RemainingPct != 0.9 {
+		t.Fatalf("refresh after a failed refresh was debounced: %+v", got)
 	}
 }

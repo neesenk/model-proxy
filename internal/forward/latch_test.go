@@ -15,9 +15,8 @@ import (
 )
 
 func TestApplyRouteLatchActive(t *testing.T) {
-	state := &fakeRouteState{latch: map[string]Latch{
-		"sess\x00m": {Target: "b/mb", Since: time.Now(), BadRuns: 0},
-	}}
+	state := newFakeRouteState(1)
+	state.SetLatch("sess", "m", Latch{Target: "b/mb", Since: time.Now(), BadRuns: 0}, 1)
 	ordered := []RouteTarget{{Provider: "a", Model: "ma"}, {Provider: "b", Model: "mb"}}
 	policy := RoutePolicy{
 		Bands:      []configdomain.RouteBand{{When: configdomain.BandWhen{HasImage: boolp(true)}, Target: RouteTarget{Provider: "a", Model: "ma"}}},
@@ -33,9 +32,8 @@ func TestApplyRouteLatchActive(t *testing.T) {
 }
 
 func TestApplyRouteLatchExpired(t *testing.T) {
-	state := &fakeRouteState{latch: map[string]Latch{
-		"sess\x00m": {Target: "b/mb", Since: time.Now().Add(-time.Hour), BadRuns: 0},
-	}}
+	state := newFakeRouteState(1)
+	state.SetLatch("sess", "m", Latch{Target: "b/mb", Since: time.Now().Add(-time.Hour), BadRuns: 0}, 1)
 	ordered := []RouteTarget{{Provider: "a", Model: "ma"}, {Provider: "b", Model: "mb"}}
 	policy := RoutePolicy{Escalation: &configdomain.EscalationConfig{Dwell: "30m", Target: RouteTarget{Provider: "b", Model: "mb"}}}
 	got, decision, latched := applyRouteLatch(state, "sess", "m", ordered, policy, nil, time.Now())
@@ -48,7 +46,7 @@ func TestApplyRouteLatchExpired(t *testing.T) {
 }
 
 func TestApplyRouteLatchMissing(t *testing.T) {
-	state := &fakeRouteState{latch: map[string]Latch{}}
+	state := newFakeRouteState(1)
 	ordered := []RouteTarget{{Provider: "a", Model: "ma"}}
 	policy := RoutePolicy{Escalation: &configdomain.EscalationConfig{Target: RouteTarget{Provider: "b", Model: "mb"}}}
 	got, decision, latched := applyRouteLatch(state, "sess", "m", ordered, policy, nil, time.Now())
@@ -65,9 +63,8 @@ func TestApplyRouteLatchMissing(t *testing.T) {
 // must report no hit — order unchanged, no latch decision, latched=false — so
 // bands/selector still run (same strictness as resolveLatchGrade).
 func TestApplyRouteLatchTargetAbsent(t *testing.T) {
-	state := &fakeRouteState{latch: map[string]Latch{
-		"sess\x00m": {Target: "b/mb", Since: time.Now(), BadRuns: 0},
-	}}
+	state := newFakeRouteState(1)
+	state.SetLatch("sess", "m", Latch{Target: "b/mb", Since: time.Now(), BadRuns: 0}, 1)
 	ordered := []RouteTarget{{Provider: "a", Model: "ma"}}
 	policy := RoutePolicy{Escalation: &configdomain.EscalationConfig{Target: RouteTarget{Provider: "b", Model: "mb"}}}
 	got, decision, latched := applyRouteLatch(state, "sess", "m", ordered, policy, nil, time.Now())
@@ -710,4 +707,115 @@ func (h *harness) serveWithSession(snap Snapshot, proto, target, body, session s
 	w := httptest.NewRecorder()
 	Serve(h.svc, h.state, snap, proto, w, r, "req-latch")
 	return w
+}
+
+// TestServePlanningFailureNotCountedAsBadRun: a target whose plan cannot even
+// be built (unknown provider config) is dropped BEFORE any upstream contact.
+// With no target ever tried, the terminal 502 is a config-level failure, not
+// an upstream verdict — it must not feed the escalation upstream_error signal
+// (same exemption as the client-shape conversion failure above).
+func TestServePlanningFailureNotCountedAsBadRun(t *testing.T) {
+	h := newHarness()
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"a": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: "test-static"},
+		},
+		Routes: map[string][]RouteTarget{
+			"m": {{Provider: "ghost", Model: "mg"}},
+		},
+		RoutePolicies: map[string]RoutePolicy{
+			"m": {Escalation: &configdomain.EscalationConfig{
+				BadSignals:  []string{"upstream_error"},
+				Consecutive: 1,
+				Target:      RouteTarget{Provider: "a", Model: "ma"},
+				Dwell:       "30m",
+			}},
+		},
+	}
+	snap := h.snapshot(cfg)
+	body := openaiChatBody()
+	for i := 0; i < 2; i++ {
+		w := h.serveWithSession(snap, "openai", "/v1/chat/completions", body, "sess-plan")
+		if w.Code != http.StatusBadGateway {
+			t.Fatalf("request %d: status = %d, want 502", i, w.Code)
+		}
+	}
+	if _, ok := h.state.LatchValue("sess-plan", "m"); ok {
+		t.Fatal("planTarget failure (unknown provider) with no tried target must not escalate the latch")
+	}
+}
+
+// TestServeNilProviderFailsClosedWithoutBadRun: a route target whose runtime
+// provider implementation is missing (not logged in / unresolved pooled
+// parent) must fail closed in serveOnce — before any upstream contact, without
+// counting the target as tried or the outcome as an upstream bad run. This is
+// the same explicit nil check the executor/decisions/fusion layers make, kept
+// symmetric at the orchestration layer.
+func TestServeNilProviderFailsClosedWithoutBadRun(t *testing.T) {
+	h := newHarness()
+	up := newFakeUpstream(t, openaiOKResponder("must-not-be-hit"))
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"a": {OpenAIBaseURL: up.srv.URL, Provider: "test-static"},
+		},
+		Routes: map[string][]RouteTarget{
+			"m": {{Provider: "a", Model: "ma"}},
+		},
+		RoutePolicies: map[string]RoutePolicy{
+			"m": {Escalation: &configdomain.EscalationConfig{
+				BadSignals:  []string{"upstream_error"},
+				Consecutive: 1,
+				Target:      RouteTarget{Provider: "a", Model: "ma"},
+				Dwell:       "30m",
+			}},
+		},
+	}
+	snap := h.snapshot(cfg)
+	delete(snap.Providers, "a") // runtime implementation missing
+	body := openaiChatBody()
+	for i := 0; i < 2; i++ {
+		w := h.serveWithSession(snap, "openai", "/v1/chat/completions", body, "sess-nil")
+		if w.Code != http.StatusBadGateway {
+			t.Fatalf("request %d: status = %d, want 502", i, w.Code)
+		}
+	}
+	if up.hits() != 0 {
+		t.Fatalf("nil provider must fail closed before any upstream contact: hits = %d", up.hits())
+	}
+	if _, ok := h.state.LatchValue("sess-nil", "m"); ok {
+		t.Fatal("missing provider implementation must not escalate the latch")
+	}
+}
+
+// TestRecordLatchOutcomePlanningErrExemption: the planning-level exemption is
+// scoped to passes where NO upstream was ever tried — once a target was
+// contacted, the pass is an honest upstream_error again.
+func TestRecordLatchOutcomePlanningErrExemption(t *testing.T) {
+	state := newFakeRouteState(1)
+	p := pipeline{state: state}
+	cfg := &Config{RoutePolicies: map[string]RoutePolicy{
+		"m": {Escalation: &configdomain.EscalationConfig{
+			BadSignals:  []string{"upstream_error"},
+			Consecutive: 1,
+			Target:      RouteTarget{Provider: "b", Model: "mb"},
+			Dwell:       "30m",
+		}},
+	}}
+	req := serveRequest{
+		runtime:    Snapshot{Cfg: cfg, Generation: 1},
+		sessionKey: "sess-plan-unit",
+		exposed:    "m",
+	}
+	// Planning-level failure, nothing tried: no bad run recorded.
+	p.recordLatchOutcome(req, serveResult{planningErr: true, tried: map[string]bool{}})
+	if _, ok := state.LatchValue("sess-plan-unit", "m"); ok {
+		t.Fatal("planning-level failure with no tried target must not record a bad run")
+	}
+	// A target WAS tried this pass: the terminal error counts (consecutive=1
+	// escalates immediately).
+	p.recordLatchOutcome(req, serveResult{planningErr: true, sawHard: true, tried: map[string]bool{"a": true}})
+	latch, ok := state.LatchValue("sess-plan-unit", "m")
+	if !ok || latch.Target != "b/mb" {
+		t.Fatalf("tried upstream error must escalate: latch = %+v ok = %v", latch, ok)
+	}
 }

@@ -150,7 +150,7 @@ func (p *ZCodeProvider) ProbeRequest(modelID string) ProbeRequest {
 // prov.Headers), so it overrides the client's forwarded User-Agent.
 // X-Device-Mid is omitted (ZCode only sends it when telemetry-state.json has a
 // deviceMid).
-func (p *ZCodeProvider) ExtraHeaders(req *http.Request, body []byte, path string) {
+func (p *ZCodeProvider) ExtraHeaders(req *http.Request, body []byte, sessionID string, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
 	// Chat-path UA (live-capture verified 2026-09-23): "ZCode/<ver>" + the
 	// provider-utils suffix; the AI-SDK's own ai-sdk/anthropic segment is
@@ -173,7 +173,7 @@ func (p *ZCodeProvider) ExtraHeaders(req *http.Request, body []byte, path string
 	req.Header.Set("X-ZCode-Session-Type", "main")
 	req.Header.Set("X-ZCode-Trace-Id", newZCodeUUID())
 	req.Header.Set("X-Query-Id", zcodeQueryID(req))
-	req.Header.Set("X-Session-Id", p.zcodeSessionID(req, body))
+	req.Header.Set("X-Session-Id", p.zcodeSessionID(req, body, sessionID))
 	req.Header.Set("X-Platform", nodePlatform(runtime.GOOS)+"-"+nodeArch(runtime.GOARCH))
 	req.Header.Set("X-Release-Channel", "production")
 	req.Header.Set("X-Client-Language", resolveClientLanguage())
@@ -232,21 +232,29 @@ func newZCodeUUID() string {
 // value is a bare v4 UUID. A proxy process outlives any single conversation,
 // so we derive the id from the client's own session identifiers: the
 // whitelisted session headers (targetexec copies them onto the upstream
-// request before ExtraHeaders runs), then — for agents implemented strictly
-// against the OpenAI/Anthropic specs that send no session header — the
-// spec-defined body fields (prompt_cache_key / metadata.user_id /
-// client_metadata.session_id, see protocol.SessionIDFromBody). Distinct client
+// request before ExtraHeaders runs), then the forward path's sessionID —
+// resolved ONCE from the ORIGINAL request (header allowlist, then the
+// spec-defined body fields prompt_cache_key / metadata.user_id /
+// client_metadata.session_id, see protocol.SessionIDFromBody) — then the
+// (possibly protocol-converted) body itself. sessionID outranks the body
+// because a conversion may rewrite or drop the original field (a→r even
+// injects a hashed prompt_cache_key), which would shard one conversation
+// into a different id per leg; its derivation key matches the body branch's
+// so an unconverted leg yields the same id as before. Distinct client
 // sessions get distinct ids, one session stays stable, and the value survives
 // proxy restarts. Without any client hint (direct API clients, probes) we fall
 // back to a process-stable random UUID.
 // NOTE: header names are Go-canonical — the whitelist's "user_id" lands as
 // "User_id" (underscore is not a canonicalization separator), hence the
 // spelling below.
-func (p *ZCodeProvider) zcodeSessionID(req *http.Request, body []byte) string {
+func (p *ZCodeProvider) zcodeSessionID(req *http.Request, body []byte, sessionID string) string {
 	for _, h := range []string{"X-Claude-Code-Session-Id", "X-Session-Id", "User_id"} {
 		if v := printableASCII(req.Header.Get(h)); v != "" {
 			return zcodeUUIDFromKey("session:" + h + ":" + v)
 		}
+	}
+	if sid := printableASCII(sessionID); sid != "" {
+		return zcodeUUIDFromKey("session:body:" + sid)
 	}
 	if sid := protocol.SessionIDFromBody(body); sid != "" {
 		return zcodeUUIDFromKey("session:body:" + sid)

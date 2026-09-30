@@ -471,7 +471,9 @@ func TestMCPTOMLExplicitEmptySelectionClears(t *testing.T) {
 // TestMCPTOMLCRLFAndCustomPrefixSection: CRLF line endings must not prevent
 // stale section cleanup, and a user-defined section that shares the header
 // prefix and proxy URL must survive because its name is not in the generated
-// namespace.
+// namespace. Surviving user lines keep their ORIGINAL CRLF endings — the old
+// unconditional CRLF→LF normalization rewrote the whole file's line endings
+// even when nothing was removed.
 func TestMCPTOMLCRLFAndCustomPrefixSection(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -495,16 +497,16 @@ func TestMCPTOMLCRLFAndCustomPrefixSection(t *testing.T) {
 	}
 	b, _ := os.ReadFile(target)
 	text := string(b)
-	if strings.Contains(text, "\r") {
-		t.Fatalf("CRLF was not normalized to LF:\n%q", text)
-	}
-	if !strings.Contains(text, `[mcp_servers."exa"]`) {
+	// The stale exa section was cleaned despite the CRLF endings and the
+	// current surface re-rendered (freshly rendered sections use LF).
+	if !strings.Contains(text, "[mcp_servers.\"exa\"]\nurl = \"http://127.0.0.1:15721/mcp/exa\"\n") {
 		t.Fatalf("current proxy section exa missing:\n%s", text)
 	}
-	if !strings.Contains(text, `[mcp_servers."my-custom"]`) {
-		t.Fatalf("user custom section with shared prefix was dropped:\n%s", text)
+	// User sections survive with their original CRLF line endings intact.
+	if !strings.Contains(text, "[mcp_servers.\"my-custom\"]\r\nurl = \"http://127.0.0.1:15721/mcp/my-custom\"\r\n") {
+		t.Fatalf("user custom section dropped or its line endings rewritten:\n%q", text)
 	}
-	if !strings.Contains(text, `[mcp_servers."keep-me"]`) {
-		t.Fatalf("unrelated user section was dropped:\n%s", text)
+	if !strings.Contains(text, "[mcp_servers.\"keep-me\"]\r\nurl = \"https://other.example/mcp\"\r\n") {
+		t.Fatalf("unrelated user section dropped or its line endings rewritten:\n%q", text)
 	}
 }

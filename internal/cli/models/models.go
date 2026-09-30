@@ -219,7 +219,9 @@ func FetchProviderModels(cfg *configdomain.Config, provName string) ([]ModelEntr
 // provider's current config models (for the change-diff + skip-write-if-unchanged).
 //
 // It policy-filters the candidates, probes each with the 3-protocol matrix
-// (chat/anthropic/responses, keeping a model when ANY leg classifies Yes),
+// (chat/anthropic/responses, keeping a model when ANY leg classifies Yes —
+// or when no PROBED leg classifies No, since an all-inconclusive sweep holds
+// no negative information),
 // prints the kept list + a drop summary, and overwrites `models:` with the
 // callable subset (hot-reloading a running daemon) when it changed.
 //

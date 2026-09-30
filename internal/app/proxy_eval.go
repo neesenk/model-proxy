@@ -4,6 +4,8 @@ import (
 	"container/list"
 	"strings"
 	"sync"
+
+	configdomain "model-proxy/internal/config"
 )
 
 const (
@@ -108,21 +110,30 @@ func isEvalRecursiveID(requestID string) bool {
 	return strings.HasPrefix(requestID, "shadow-") || strings.HasPrefix(requestID, "eval-judge-")
 }
 
-// maybeStoreEvalPrimaryBody stores a captured primary response body when the
-// route has eval configured. Sampling itself happens later in
-// dispatchShadowAfterCommit using the request snapshot's config; here we just
-// make the body available. This keeps the sampling decision on the snapshot
-// while avoiding an extra copy of the response bytes.
-func (p *Proxy) maybeStoreEvalPrimaryBody(requestID, exposed string, body []byte) {
-	if p == nil || p.evalPrimaryBodies == nil || isEvalRecursiveID(requestID) || len(body) == 0 {
-		return
-	}
-	cfg := p.cfgSnapshot()
+// evalConfiguredForRoute reports whether the route has route_policy eval
+// configured in cfg — where cfg must be the REQUEST's runtime snapshot
+// config, so the body-storage decision and the post-commit sampling decision
+// (dispatchEvalShadow, same snapshot) can never diverge across a reload.
+func evalConfiguredForRoute(cfg *configdomain.Config, exposed string) bool {
 	if cfg == nil {
-		return
+		return false
 	}
 	policy, ok := cfg.RoutePolicies[exposed]
-	if !ok || policy.Eval == nil {
+	return ok && policy.Eval != nil
+}
+
+// maybeStoreEvalPrimaryBody stores a captured primary response body when the
+// request's own snapshot configures eval for the route (evalConfigured is
+// computed on the request path via evalConfiguredForRoute — this post-commit
+// bodycapture callback must never re-read reload-owned config: a reload that
+// drops eval between commit and callback would otherwise let the snapshot
+// side sample while the body was never stored, silently losing the sample).
+// Sampling itself happens later in dispatchShadowAfterCommit using the same
+// request snapshot; here we just make the body available. This keeps the
+// sampling decision on the snapshot while avoiding an extra copy of the
+// response bytes.
+func (p *Proxy) maybeStoreEvalPrimaryBody(requestID string, evalConfigured bool, body []byte) {
+	if p == nil || p.evalPrimaryBodies == nil || isEvalRecursiveID(requestID) || len(body) == 0 || !evalConfigured {
 		return
 	}
 	p.evalPrimaryBodies.Store(requestID, body)

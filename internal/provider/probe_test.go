@@ -37,7 +37,7 @@ func TestBaseProbe_Defaults(t *testing.T) {
 	// ExtraHeaders is a no-op by default - a request's headers are untouched.
 	req, _ := http.NewRequest(http.MethodPost, "http://x", nil)
 	req.Header.Set("X-Marker", "keep")
-	b.ExtraHeaders(req, nil, "/chat/completions")
+	b.ExtraHeaders(req, nil, "", "/chat/completions")
 	if req.Header.Get("anthropic-version") != "" {
 		t.Errorf("default ExtraHeaders set anthropic-version; want no-op")
 	}
@@ -80,7 +80,7 @@ func TestAqpProbeRequest(t *testing.T) {
 
 func TestAqpExtraHeaders(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "http://x", nil)
-	newAqpForTest().ExtraHeaders(req, nil, "/v1/messages")
+	newAqpForTest().ExtraHeaders(req, nil, "", "/v1/messages")
 	if got := req.Header.Get("anthropic-version"); got != "2023-06-01" {
 		t.Errorf("aqp anthropic-version=%q want 2023-06-01", got)
 	}
@@ -94,7 +94,7 @@ func TestAqpExtraHeaders(t *testing.T) {
 	}
 	// Two calls produce DIFFERENT ids (per-request UUID, not a constant).
 	req2, _ := http.NewRequest(http.MethodPost, "http://x", nil)
-	newAqpForTest().ExtraHeaders(req2, nil, "/v1/messages")
+	newAqpForTest().ExtraHeaders(req2, nil, "", "/v1/messages")
 	if req2.Header.Get("x-compass-request-id") == cid {
 		t.Errorf("aqp compass id reused across calls; want a fresh UUID each time")
 	}

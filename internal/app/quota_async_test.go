@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math/rand"
 	configdomain "model-proxy/internal/config"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/provider"
@@ -477,7 +478,8 @@ func newQuotaProxy(t *testing.T, provs map[string]configdomain.Provider, routes 
 			parentOf:  map[string]string{},
 		},
 		processServices: processServices{
-			client: &http.Client{Timeout: 0},
+			client:   &http.Client{Timeout: 0},
+			evalRand: rand.Float64,
 		},
 	}
 	p.quota = runtimestate.NewQuotaTracker(

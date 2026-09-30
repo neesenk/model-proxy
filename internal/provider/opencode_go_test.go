@@ -178,7 +178,7 @@ func TestOpenCodeGoExtraHeaders_SessionMirror(t *testing.T) {
 	// Claude Code's native header mirrors into x-opencode-session.
 	req, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
 	req.Header.Set("x-claude-code-session-id", "sess-cc-1")
-	p.ExtraHeaders(req, nil, "/v1/messages")
+	p.ExtraHeaders(req, nil, "", "/v1/messages")
 	if got := req.Header.Get("x-opencode-session"); got != "sess-cc-1" {
 		t.Errorf("x-opencode-session = %q, want mirror of x-claude-code-session-id", got)
 	}
@@ -189,7 +189,7 @@ func TestOpenCodeGoExtraHeaders_SessionMirror(t *testing.T) {
 	// pi-style x-session-id mirrors when claude-code's is absent.
 	req2, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
 	req2.Header.Set("x-session-id", "sess-pi-2")
-	p.ExtraHeaders(req2, nil, "/v1/messages")
+	p.ExtraHeaders(req2, nil, "", "/v1/messages")
 	if got := req2.Header.Get("x-opencode-session"); got != "sess-pi-2" {
 		t.Errorf("x-opencode-session = %q, want mirror of x-session-id", got)
 	}
@@ -198,7 +198,7 @@ func TestOpenCodeGoExtraHeaders_SessionMirror(t *testing.T) {
 	req3, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
 	req3.Header.Set("x-opencode-session", "sess-own")
 	req3.Header.Set("x-session-id", "sess-other")
-	p.ExtraHeaders(req3, nil, "/v1/messages")
+	p.ExtraHeaders(req3, nil, "", "/v1/messages")
 	if got := req3.Header.Get("x-opencode-session"); got != "sess-own" {
 		t.Errorf("x-opencode-session = %q, want the client's own value preserved", got)
 	}
@@ -208,32 +208,32 @@ func TestOpenCodeGoExtraHeaders_SessionMirror(t *testing.T) {
 	// mirrored verbatim so one conversation keeps one routing/prompt-cache
 	// lane (the per-request synthesized id would defeat upstream caching).
 	reqK, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/chat/completions", nil)
-	p.ExtraHeaders(reqK, []byte(`{"model":"kimi-k3","prompt_cache_key":"kimi-sess-9a2f","messages":[{"role":"user","content":"hi"}]}`), "/chat/completions")
+	p.ExtraHeaders(reqK, []byte(`{"model":"kimi-k3","prompt_cache_key":"kimi-sess-9a2f","messages":[{"role":"user","content":"hi"}]}`), "", "/chat/completions")
 	if got := reqK.Header.Get("x-opencode-session"); got != "kimi-sess-9a2f" {
 		t.Errorf("x-opencode-session = %q, want body prompt_cache_key mirrored", got)
 	}
 	// Kimi Code on the Anthropic wire (metadata.user_id) and Codex on
 	// Responses (client_metadata.session_id) mirror the same way.
 	reqM, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
-	p.ExtraHeaders(reqM, []byte(`{"model":"kimi-k3","metadata":{"user_id":"hashed-user-3"},"messages":[]}`), "/v1/messages")
+	p.ExtraHeaders(reqM, []byte(`{"model":"kimi-k3","metadata":{"user_id":"hashed-user-3"},"messages":[]}`), "", "/v1/messages")
 	if got := reqM.Header.Get("x-opencode-session"); got != "hashed-user-3" {
 		t.Errorf("x-opencode-session = %q, want body metadata.user_id mirrored", got)
 	}
 	reqC, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/responses", nil)
-	p.ExtraHeaders(reqC, []byte(`{"model":"gpt-5.6","client_metadata":{"session_id":"codex-sess-7"},"input":[]}`), "/responses")
+	p.ExtraHeaders(reqC, []byte(`{"model":"gpt-5.6","client_metadata":{"session_id":"codex-sess-7"},"input":[]}`), "", "/responses")
 	if got := reqC.Header.Get("x-opencode-session"); got != "codex-sess-7" {
 		t.Errorf("x-opencode-session = %q, want body client_metadata.session_id mirrored", got)
 	}
 	// A native session header outranks the body identity.
 	reqH, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/chat/completions", nil)
 	reqH.Header.Set("x-session-id", "sess-native")
-	p.ExtraHeaders(reqH, []byte(`{"prompt_cache_key":"kimi-sess-9a2f"}`), "/chat/completions")
+	p.ExtraHeaders(reqH, []byte(`{"prompt_cache_key":"kimi-sess-9a2f"}`), "", "/chat/completions")
 	if got := reqH.Header.Get("x-opencode-session"); got != "sess-native" {
 		t.Errorf("x-opencode-session = %q, want native header to outrank body identity", got)
 	}
 	// A body with no identity fields at all still synthesizes (probe shape).
 	reqN, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
-	p.ExtraHeaders(reqN, []byte(`{"model":"kimi-k3","messages":[]}`), "/v1/messages")
+	p.ExtraHeaders(reqN, []byte(`{"model":"kimi-k3","messages":[]}`), "", "/v1/messages")
 	if got := reqN.Header.Get("x-opencode-session"); got == "" || !strings.HasPrefix(got, "mp-") {
 		t.Errorf("x-opencode-session = %q, want synthesized mp-<uuid> for identity-less body", got)
 	}
@@ -243,16 +243,58 @@ func TestOpenCodeGoExtraHeaders_SessionMirror(t *testing.T) {
 	// the mp- prefix and fresh on every call (no conversation key to be stable
 	// across).
 	req4, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
-	p.ExtraHeaders(req4, nil, "/v1/messages")
+	p.ExtraHeaders(req4, nil, "", "/v1/messages")
 	sess4 := req4.Header.Get("x-opencode-session")
 	if sess4 == "" || !strings.HasPrefix(sess4, "mp-") {
 		t.Errorf("x-opencode-session = %q, want synthesized mp-<uuid> for header-less agents", sess4)
 	}
 	req5, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/chat/completions", nil)
-	p.ExtraHeaders(req5, nil, "/chat/completions")
+	p.ExtraHeaders(req5, nil, "", "/chat/completions")
 	sess5 := req5.Header.Get("x-opencode-session")
 	if sess5 == "" || sess5 == sess4 {
 		t.Errorf("x-opencode-session = %q, want a fresh synthesized id per request (!= %q)", sess5, sess4)
+	}
+}
+
+// The forward path resolves the client session ONCE from the ORIGINAL request
+// and passes it as sessionID. On a cross-protocol leg the converted body may
+// carry no identity at all — or a DIFFERENT derived one (chat→anthropic drops
+// prompt_cache_key; a→r injects a HASHED prompt_cache_key) — so sessionID
+// must win over the body fallback: one conversation keeps one routing /
+// prompt-cache lane and never degrades to a per-request mp-<uuid>.
+func TestOpenCodeGoExtraHeaders_PassedSessionIDWins(t *testing.T) {
+	p := newTestOpenCodeGo(t, nil)
+
+	// Converted leg, body has no identity: sessionID is used, no mp- synth.
+	req, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
+	p.ExtraHeaders(req, []byte(`{"model":"kimi-k3","messages":[]}`), "kimi-sess-9a2f", "/v1/messages")
+	if got := req.Header.Get("x-opencode-session"); got != "kimi-sess-9a2f" {
+		t.Errorf("x-opencode-session = %q, want the passed session id (no mp- fallback)", got)
+	}
+
+	// Converted leg whose body carries a DIFFERENT derived identity: the
+	// original session still wins, so both legs of one conversation shard alike.
+	req2, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/responses", nil)
+	p.ExtraHeaders(req2, []byte(`{"model":"kimi-k3","prompt_cache_key":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","input":[]}`), "kimi-sess-9a2f", "/responses")
+	if got := req2.Header.Get("x-opencode-session"); got != "kimi-sess-9a2f" {
+		t.Errorf("x-opencode-session = %q, want the original session over the converted body's derived key", got)
+	}
+
+	// A native session header still outranks the passed id (identical in
+	// practice — the header is where sessionID came from).
+	req3, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
+	req3.Header.Set("x-session-id", "sess-native")
+	p.ExtraHeaders(req3, nil, "sess-other", "/v1/messages")
+	if got := req3.Header.Get("x-opencode-session"); got != "sess-native" {
+		t.Errorf("x-opencode-session = %q, want the native header to outrank the passed id", got)
+	}
+
+	// An explicit client x-opencode-session still wins over everything.
+	req4, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
+	req4.Header.Set("x-opencode-session", "sess-own")
+	p.ExtraHeaders(req4, nil, "sess-other", "/v1/messages")
+	if got := req4.Header.Get("x-opencode-session"); got != "sess-own" {
+		t.Errorf("x-opencode-session = %q, want the client's own value preserved", got)
 	}
 }
 

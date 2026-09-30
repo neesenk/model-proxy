@@ -435,3 +435,66 @@ func TestServeOnceGradeLatchForcesGrade(t *testing.T) {
 		t.Fatalf("latched grade routing = %+v, want source=latch grade=strong latch=grade:strong", st.routing)
 	}
 }
+
+// TestBuildGradeRoutingDecisionEnforceGradeAbsentReportsFallback: the graded
+// counterpart of the route-level reapply downgrade. When the selector's
+// enforced grade has no representative in THIS round's filtered set (a cached
+// choice re-applied after re-scheduling dropped the grade's targets),
+// buildGradeOrdered cannot serve it — the decision must report fallback with
+// the selector choice recorded but not enforced, instead of claiming
+// Source=selector for a grade nothing was served from.
+func TestBuildGradeRoutingDecisionEnforceGradeAbsentReportsFallback(t *testing.T) {
+	policy := gradePolicy("any")
+	fast := gradeGroup{name: "fast", targets: []RouteTarget{{Provider: "a", Model: "fast"}}}
+	strong := gradeGroup{name: "strong", targets: []RouteTarget{{Provider: "b", Model: "strong"}}}
+	enforced := gradeSelectorResult{
+		mode: "enforce", action: "enforce", choiceID: "g1", choiceGrade: "strong",
+		confidence: 0.9, difficulty: 2,
+	}
+
+	// Control: the enforced grade still has targets — honest selector
+	// attribution.
+	d := buildGradeRoutingDecision(policy, routing.Profile{}, []gradeGroup{fast, strong}, "", "", false, enforced, "strong")
+	if d == nil || d.Source != "selector" || d.Grade != "strong" || d.Selector == nil || !d.Selector.Enforced || d.Selector.Choice != "g1" {
+		t.Fatalf("served-grade decision = %+v, want source=selector grade=strong enforced choice=g1", d)
+	}
+
+	// Retry round: the grade's group is absent from the re-scheduled set.
+	d = buildGradeRoutingDecision(policy, routing.Profile{}, []gradeGroup{fast}, "", "", false, enforced, "strong")
+	if d == nil || d.Source != "fallback" || d.Grade != "" || d.Selector == nil || d.Selector.Enforced || d.Selector.Choice != "g1" {
+		t.Fatalf("absent-grade decision = %+v, want source=fallback, no grade, selector choice recorded but not enforced", d)
+	}
+
+	// Same for a group that exists but was filtered down to zero targets.
+	strongEmpty := gradeGroup{name: "strong"}
+	d = buildGradeRoutingDecision(policy, routing.Profile{}, []gradeGroup{fast, strongEmpty}, "", "", false, enforced, "strong")
+	if d == nil || d.Source != "fallback" || d.Grade != "" || d.Selector == nil || d.Selector.Enforced {
+		t.Fatalf("empty-grade decision = %+v, want source=fallback selector not enforced", d)
+	}
+}
+
+// TestRouteSelectorResultReapplyDowngradesWhenPreferredAbsent: re-apply a
+// cached enforce choice to a later wait-retry round's ordered set — when the
+// preferred target was scheduled out (e.g. cooling), the action downgrades to
+// fallback so the decision record stays honest about which step determined
+// the order.
+func TestRouteSelectorResultReapplyDowngradesWhenPreferredAbsent(t *testing.T) {
+	preferred := RouteTarget{Provider: "b", Model: "mb"}
+	res := routeSelectorResult{mode: "enforce", action: "enforce", preferred: preferred, choice: "c1", confidence: 0.9}
+
+	// Preferred still present: re-applied to the front, still enforce.
+	got := res.reapply([]RouteTarget{{Provider: "a", Model: "ma"}, preferred}, nil)
+	if got.action != "enforce" || len(got.ordered) != 2 || got.ordered[0].Provider != "b" {
+		t.Fatalf("reapply with preferred present = %+v, want enforce with b first", got)
+	}
+
+	// Preferred scheduled out: downgrade to fallback, order kept.
+	got = res.reapply([]RouteTarget{{Provider: "a", Model: "ma"}}, nil)
+	if got.action != "fallback" || len(got.ordered) != 1 || got.ordered[0].Provider != "a" {
+		t.Fatalf("reapply with preferred absent = %+v, want fallback with the natural order kept", got)
+	}
+	d := got.routingDecision(nil)
+	if d == nil || d.Source != "fallback" || d.Selector == nil || d.Selector.Enforced || d.Selector.Choice != "c1" {
+		t.Fatalf("downgraded decision = %+v, want source=fallback selector choice recorded but not enforced", d)
+	}
+}

@@ -520,3 +520,59 @@ func TestTakeoverSurface_ExcludesDecisionsOnlyModels(t *testing.T) {
 		t.Fatalf("surface.Models = %v, want [glm-5.3] — decisions-only jev must not be offered", surface.Models)
 	}
 }
+
+// TestTakeoverReadsUseWiredAuthenticatedProvidersPort pins the caching port's
+// injection: when the composition root wires
+// Ports.TakeoverAuthenticatedProviders (the per-config-generation cache), the
+// takeover read AND preview paths must prune by ITS set instead of
+// recomputing the offline credential-store pass per request. On disk nothing
+// is logged in here, so the direct compute would abstain (fresh setup) and
+// keep grok-only — observing it dropped proves the port path was taken.
+func TestTakeoverReadsUseWiredAuthenticatedProvidersPort(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfgDir := t.TempDir()
+	configFile := filepath.Join(cfgDir, "config.yaml")
+	if err := os.WriteFile(configFile, []byte("listen: 127.0.0.1:15721\nproviders: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:15721",
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {OpenAIBaseURL: "https://z/v1", Provider: "zhipu", Models: []string{"glm-5.3", "shared"}},
+			"ghost": {OpenAIBaseURL: "https://g/v1", Provider: "opencode-go", Models: []string{"grok-only", "shared"}},
+		},
+	}
+	calls := 0
+	authed := func() map[string]bool {
+		calls++
+		return map[string]bool{"zhipu": true}
+	}
+	service := New(Ports{
+		Config:                         func() *configdomain.Config { return cfg },
+		ConfigFile:                     func() string { return configFile },
+		HomeDir:                        func() string { return home },
+		TakeoverAuthenticatedProviders: authed,
+	})
+
+	surface, err := service.TakeoverSurface("")
+	if err != nil {
+		t.Fatalf("TakeoverSurface: %v", err)
+	}
+	for _, m := range surface.Models {
+		if m == "grok-only" {
+			t.Errorf("surface kept ghost-only model despite the port's authed set: %v", surface.Models)
+		}
+	}
+	if calls == 0 {
+		t.Fatal("TakeoverSurface did not consult the wired authenticated-providers port")
+	}
+
+	if _, err := service.PreviewTakeover(appapi.TakeoverRunRequest{Client: "pi"}, false); err != nil {
+		t.Fatalf("PreviewTakeover: %v", err)
+	}
+	previewCalls := calls
+	if previewCalls == 0 {
+		t.Fatal("PreviewTakeover did not consult the wired authenticated-providers port")
+	}
+}

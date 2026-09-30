@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"math/rand"
 	"net/http"
 	"strings"
 	"time"
@@ -136,13 +135,11 @@ func (p *Proxy) dispatchEvalShadow(
 	}
 	primaryGrade := routingDecision.Grade
 	cfg := policy.Eval
-	if cfg.SampleRate <= 0 {
-		return
-	}
-	if p.evalRand == nil {
-		p.evalRand = rand.Float64
-	}
-	if p.evalRand() >= cfg.SampleRate {
+	// SampleRateValue applies the documented default (0 or omitted → 0.05,
+	// per config.yaml's eval block comment); evalRand is injected at
+	// construction (production: rand.Float64; tests: deterministic draws) —
+	// a request goroutine must never lazily write the shared Proxy field.
+	if p.evalRand() >= cfg.SampleRateValue() {
 		return
 	}
 	primaryBody := p.evalPrimaryBodies.Retrieve(primaryRequestID)
@@ -282,7 +279,7 @@ func (p *Proxy) runEvalShadowPair(
 		return
 	}
 
-	verdict, diags := p.judgeEvalPair(runtime, proto, exposed, calledModel, primary, result.Target, primaryBody, result.Capture.Body, primaryReqID, primaryAgent, primarySession)
+	verdict, diags := p.judgeEvalPair(runtime, stop, proto, exposed, calledModel, primary, result.Target, primaryBody, result.Capture.Body, primaryReqID, primaryAgent, primarySession)
 	if shadowGrade != "" {
 		diags = append(diags, requestlog.ConversionDiagnostic{Code: "eval_shadow_grade", Detail: shadowGrade})
 	}
@@ -300,8 +297,12 @@ func (p *Proxy) runEvalShadowPair(
 
 // judgeEvalPair calls the configured decisions-protocol judge and returns the
 // verdict and any diagnostics. Failures return empty verdict and a diagnostic.
+// The judge context derives from the lifecycle stop channel (plus the
+// evalJudgeTimeout budget): shutdown must not be dragged past the drain
+// window by a single in-flight judge call.
 func (p *Proxy) judgeEvalPair(
 	runtime RuntimeSnapshot,
+	stop <-chan struct{},
 	proto, exposed, calledModel string,
 	primary, shadowTarget configdomain.RouteTarget,
 	primaryBody, shadowBody []byte,
@@ -322,6 +323,17 @@ func (p *Proxy) judgeEvalPair(
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), evalJudgeTimeout)
 	defer cancel()
+	// Bind the judge to lifecycle stop: unlike the shadow leg (which gets
+	// shadowShutdownGrace to finish a nearly-done generation), a judge call
+	// is a small decisions request that is safe to cut immediately. The
+	// watcher goroutine exits with ctx in every path, so nothing leaks.
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	out := forward.CallEvalJudge(p.forwardServices(), ctx, forward.EvalJudgeInput{
 		Runtime:     runtime,
 		Target:      judge,

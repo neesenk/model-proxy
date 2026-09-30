@@ -667,7 +667,7 @@ scheduling:
 
 1. 建 `internal/provider/xxx.go`，实现 Provider 接口（embed `ApiKeyBase`（文件存 API key）+ `baseProbe`（默认探测/过滤行为））。`baseProbe` 默认：探测走 OpenAI `POST /chat/completions`、无专属请求头、候选模型透传。仅当 provider 与此不符时才 override：
    - `ProbeRequest(modelID)` -- 探测请求的 path/body（如 codex 的 `/responses` + Responses API body、aqp 的 `/v1/messages`）
-   - `ExtraHeaders(req, path)` -- 每次请求（转发 + 探测）都要的专属头（如 aqp 的 `anthropic-version` + `x-compass-request-id`）
+   - `ExtraHeaders(req, body, sessionID, path)` -- 每次请求（转发 + 探测）都要的专属头（如 aqp 的 `anthropic-version` + `x-compass-request-id`）；`sessionID` 是 forward 从原始请求解析的客户端会话 id（头白名单 → body spec 字段），probe/shadow 等无会话路径为空串，需要会话亲和的 provider（opencode-go/zcode）优先使用它再回落 body 提取
    - `FilterModelIDs(ids)` -- `models refresh` 的静态策略过滤（如 volcengine 剔除 `*-latest`/lite/mini）
 2. `init()` 里 `Register("xxx", constructor)`
 3. config 加 `provider_id: xxx`

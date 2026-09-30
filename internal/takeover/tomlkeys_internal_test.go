@@ -87,6 +87,99 @@ key = "[brackets in a value]"
 	}
 }
 
+// TestRemoveTOMLSection_MultiLineConstructs: header-shaped lines inside
+// multi-line strings (”' or """) and `[`-prefixed lines inside multi-line
+// arrays are content, not structure. Removal must take the WHOLE managed
+// section — no orphaned value lines left behind (the old boundary scan
+// stopped at a `[`-prefixed array element) — and must never eat a user
+// multi-line string in a neighboring section (the old header scan matched
+// header-shaped lines inside string bodies).
+func TestRemoveTOMLSection_MultiLineConstructs(t *testing.T) {
+	in := "[docs]\ntext = '''\n[models.\"k3\"] # note\n'''\n\n" +
+		"[models.\"k3\"]\nprovider = \"x\"\nfallbacks = [\n [\"a\"]\n]\n\n[keep]\nx = 1\n"
+	out := removeTOMLSection(in, `models."k3"`)
+	if !strings.Contains(out, "text = '''\n[models.\"k3\"] # note\n'''") {
+		t.Errorf("user multi-line string content destroyed:\n%s", out)
+	}
+	if strings.Contains(out, `provider = "x"`) || strings.Contains(out, `["a"]`) {
+		t.Errorf("managed section not fully removed:\n%s", out)
+	}
+	if !strings.Contains(out, "[keep]\nx = 1") {
+		t.Errorf("unrelated section dropped:\n%s", out)
+	}
+}
+
+// TestRemoveTOMLSectionsWithURL_PreservesLineEndings pins the CRLF contract:
+// the old implementation unconditionally normalized CRLF→LF, rewriting every
+// line ending of the file even when no section was removed. A no-op run must
+// return the input byte-for-byte, and a removing run must keep the original
+// endings of the surviving lines.
+func TestRemoveTOMLSectionsWithURL_PreservesLineEndings(t *testing.T) {
+	user := "[mcp_servers.\"mine\"]\r\nurl = \"https://other/mcp\"\r\n"
+	if out := removeTOMLSectionsWithURL(user, "http://127.0.0.1:15721/mcp/", map[string]bool{`mcp_servers."exa"`: true}); out != user {
+		t.Errorf("no-op run rewrote bytes:\n%q\nwant:\n%q", out, user)
+	}
+	stale := "[mcp_servers.exa]\r\nurl = \"http://127.0.0.1:15721/mcp/exa\"\r\n" + user
+	if out := removeTOMLSectionsWithURL(stale, "http://127.0.0.1:15721/mcp/", map[string]bool{`mcp_servers."exa"`: true}); out != user {
+		t.Errorf("stale section not removed or surviving line endings rewritten:\n%q\nwant:\n%q", out, user)
+	}
+}
+
+// TestRemoveTOMLSectionsWithURL_MultiLineArrayBody: a `[`-prefixed array
+// element line inside a stale section's body is content, not a section
+// boundary — the old scan stopped there, so a proxy URL further down the
+// body was never seen and the stale section survived cleanup.
+func TestRemoveTOMLSectionsWithURL_MultiLineArrayBody(t *testing.T) {
+	in := "[mcp_servers.exa]\nfallbacks = [\n [\"a\"]\n]\nurl = \"http://127.0.0.1:15721/mcp/exa\"\n\n" +
+		"[mcp_servers.\"mine\"]\nurl = \"https://other/mcp\"\n"
+	out := removeTOMLSectionsWithURL(in, "http://127.0.0.1:15721/mcp/", map[string]bool{`mcp_servers."exa"`: true})
+	if strings.Contains(out, "127.0.0.1:15721") || strings.Contains(out, "fallbacks") {
+		t.Errorf("stale proxy section survived:\n%s", out)
+	}
+	if !strings.Contains(out, `[mcp_servers."mine"]`) || !strings.Contains(out, "https://other/mcp") {
+		t.Errorf("user section dropped:\n%s", out)
+	}
+}
+
+// TestTakeoverKimiArrayTableConflictFailsClosed is the end-to-end twin of
+// TestReplaceOrAppendTOMLSection_ArrayTableConflict: the client config
+// already declares the managed provider as an ARRAY of tables
+// ([[providers."model-proxy"]]). Writing the plain template table over it
+// would redefine the key and TOML would reject the whole config — the
+// takeover must fail closed and leave the file byte-for-byte untouched.
+func TestTakeoverKimiArrayTableConflictFailsClosed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".kimi-code"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgTOML := filepath.Join(home, ".kimi-code", "config.toml")
+	original := "default_model = \"glm-5.3-flash\"\n[[providers.\"model-proxy\"]]\ntype = \"openai\"\n"
+	if err := os.WriteFile(cfgTOML, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:15721",
+		Providers: map[string]configdomain.Provider{
+			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.3-flash"}},
+		},
+	}
+	err := RunTakeover(cfg, "kimi", filepath.Join(home, ".mp"), ModelFacts{SourceDefault: -1}, home, ModeUnified)
+	if err == nil {
+		t.Fatal("takeover over a conflicting array table must fail closed")
+	}
+	if !strings.Contains(err.Error(), `[[providers."model-proxy"]]`) {
+		t.Errorf("error must name the conflicting array table: %v", err)
+	}
+	data, rerr := os.ReadFile(cfgTOML)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if string(data) != original {
+		t.Errorf("failed takeover rewrote the client config:\n%s", data)
+	}
+}
+
 // TestParseTOMLKeyPath unit-cases the key-path parser: quoting styles,
 // whitespace, escapes, and structural failures.
 func TestParseTOMLKeyPath(t *testing.T) {

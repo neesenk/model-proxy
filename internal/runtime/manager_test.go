@@ -304,6 +304,32 @@ func TestQuotaSyncFailureKeepsLastSnapshot(t *testing.T) {
 	}
 }
 
+// TestCommitQuotaResultSignal pins the honest three-state commit signal:
+// applied vs failed-sync keep (no-op) vs generation rejection. The previous
+// bool reported the keep as success, so callers persisted and debounced for a
+// sync that changed nothing.
+func TestCommitQuotaResultSignal(t *testing.T) {
+	t.Parallel()
+
+	m := newTestManager(1)
+	good := &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5, AsOf: time.Now()}
+	if got := m.CommitQuota("zcode", good, 1); got != QuotaCommitApplied {
+		t.Fatalf("first commit = %v, want QuotaCommitApplied", got)
+	}
+	if got := m.CommitQuota("zcode", &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}, 1); got != QuotaCommitKept {
+		t.Fatalf("failed sync over an existing entry = %v, want QuotaCommitKept", got)
+	}
+	if got := m.CommitQuota("ghost", &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}, 1); got != QuotaCommitApplied {
+		t.Fatalf("first-observation failure = %v, want QuotaCommitApplied (stored for operator visibility)", got)
+	}
+	if got := m.CommitQuota("zcode", good, 7); got != QuotaCommitRejected {
+		t.Fatalf("stale generation = %v, want QuotaCommitRejected", got)
+	}
+	if kept := m.Quota("zcode"); kept == nil || kept.Err != "" || kept.RemainingPct != 0.5 {
+		t.Fatalf("kept/rejected commits mutated the snapshot: %+v", kept)
+	}
+}
+
 // TestReplaceGenerationPrunesQuotaCacheToLiveKeys pins the reload-side
 // contract: quota entries survive the generation swap (cache carryover) and
 // only keys the new provider set no longer serves are removed — atomically,

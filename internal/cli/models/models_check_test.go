@@ -62,8 +62,8 @@ func (f *fakeProviderImpl) ProbeRequest(modelID string) provider.ProbeRequest {
 		Body:   []byte(`{"model":"` + modelID + `","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":false}`),
 	}
 }
-func (f *fakeProviderImpl) ExtraHeaders(req *http.Request, _ []byte, path string) {}
-func (f *fakeProviderImpl) FilterModelIDs(ids []string) (kept, dropped []string)  { return ids, nil }
+func (f *fakeProviderImpl) ExtraHeaders(req *http.Request, _ []byte, _ string, path string) {}
+func (f *fakeProviderImpl) FilterModelIDs(ids []string) (kept, dropped []string)            { return ids, nil }
 
 // readAll is a tiny test helper (io.ReadAll without the import noise at call sites).
 func readAll(r io.Reader) []byte {
@@ -267,8 +267,10 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 	// Per (path, model) status table. The 3-leg probe hits /chat/completions and
 	// /responses on the openai base (the anthropic leg is unprobed - no
 	// anthropic_base_url). A model is KEPT when ANY leg classifies Yes (2xx
-	// here); 404 -> No, 500 -> Unknown, both drop the model. Input order must be
-	// preserved in the outputs.
+	// here), or when no PROBED leg classifies No: 404 -> No drops the model,
+	// but 500 -> Unknown on every probed leg holds no negative information and
+	// keeps it (a transient storm must not read as a deletion). Input order
+	// must be preserved in the outputs.
 	type legKey struct{ path, model string }
 	statuses := map[legKey]int{
 		{"/chat/completions", "keep-a"}:      200,
@@ -277,8 +279,8 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 		{"/responses", "drop-b"}:             404,
 		{"/chat/completions", "resp-only-c"}: 404,
 		{"/responses", "resp-only-c"}:        200,
-		{"/chat/completions", "drop-d"}:      500,
-		{"/responses", "drop-d"}:             500,
+		{"/chat/completions", "flaky-d"}:     500,
+		{"/responses", "flaky-d"}:            500,
 		{"/chat/completions", "keep-e"}:      200,
 		{"/responses", "keep-e"}:             404,
 	}
@@ -302,7 +304,7 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 			"zhipu": {OpenAIBaseURL: srv.URL, Provider: "zhipu"},
 		},
 	}
-	ids := []string{"keep-a", "drop-b", "resp-only-c", "drop-d", "keep-e"}
+	ids := []string{"keep-a", "drop-b", "resp-only-c", "flaky-d", "keep-e"}
 	kept, dropped, protocols, capsPersisted, err := CheckProviderModels(cfg, "zhipu", ids, nil)
 	if err != nil {
 		t.Fatalf("checkProviderModels: %v", err)
@@ -310,16 +312,16 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 	if !capsPersisted {
 		t.Error("capsPersisted = false, want true (fresh matrix landed on disk)")
 	}
-	wantKept := []string{"keep-a", "resp-only-c", "keep-e"}
+	wantKept := []string{"keep-a", "resp-only-c", "flaky-d", "keep-e"}
 	if len(kept) != len(wantKept) {
-		t.Fatalf("kept=%v want %v (a model is kept when ANY leg is callable)", kept, wantKept)
+		t.Fatalf("kept=%v want %v (any leg Yes, or no probed leg No)", kept, wantKept)
 	}
 	for i, m := range wantKept {
 		if kept[i] != m {
 			t.Errorf("kept[%d]=%q want %q (order must be stable)", i, kept[i], m)
 		}
 	}
-	wantDropped := []string{"drop-b", "drop-d"}
+	wantDropped := []string{"drop-b"}
 	if len(dropped) != len(wantDropped) {
 		t.Fatalf("dropped=%+v want %v", dropped, wantDropped)
 	}
@@ -342,9 +344,6 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 			t.Errorf("drop-b reason=%q missing %q", dropped[0].Reason, want)
 		}
 	}
-	if dropped[1].Status != 500 {
-		t.Errorf("drop-d status=%d want 500", dropped[1].Status)
-	}
 	// The returned matrix records the per-leg verdicts: resp-only-c is kept
 	// BECAUSE the responses leg classified Yes despite the chat 404.
 	mp, ok := protocols["resp-only-c"]
@@ -353,6 +352,12 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 	}
 	if mp.Chat != runtimewire.No || mp.Anthropic != runtimewire.No || mp.Responses != runtimewire.Yes {
 		t.Errorf("resp-only-c matrix = chat:%s ant:%s resp:%s, want no/no/yes", mp.Chat, mp.Anthropic, mp.Responses)
+	}
+	// flaky-d is kept with every PROBED leg inconclusive (5xx -> unknown); the
+	// anthropic leg is definitionally no (no base) and does not count as
+	// negative evidence.
+	if mp := protocols["flaky-d"]; mp.Chat != runtimewire.Unknown || mp.Responses != runtimewire.Unknown || mp.Anthropic != runtimewire.No {
+		t.Errorf("flaky-d matrix = chat:%s ant:%s resp:%s, want unknown/no/unknown", mp.Chat, mp.Anthropic, mp.Responses)
 	}
 	// The fresh matrix was persisted to model_caps.json under the isolated HOME,
 	// fingerprinted with the provider's current protocol config.
@@ -375,14 +380,19 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 	}
 }
 
-// --- checkProviderModels: not logged in -> all dropped with auth reason (no error) ---
+// --- checkProviderModels: not logged in -> every leg inconclusive, model kept ---
 //
 // buildProviders always builds a file-backed zhipu impl (ApiKeyBase reads the
 // key lazily), so a not-logged-in provider surfaces as a probe failure (auth
 // error), not a checkProviderModels error. The caller's fallback path is
-// triggered only when buildProviders itself can't return an impl.
+// triggered only when buildProviders itself can't return an impl. Auth
+// failures classify Unknown (no HTTP exchange), and a model with no probed
+// negative leg is KEPT: a login outage holds no callability information and
+// must not read as a config deletion (the allProbeFailed safety net used to
+// catch exactly this sweep at the provider level; the per-model rule now
+// covers it directly).
 
-func TestCheckProviderModels_NotLoggedInAllDropped(t *testing.T) {
+func TestCheckProviderModels_NotLoggedInKeepsInconclusiveModel(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir) // no pool file, no singular file -> LoadKey will fail
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -395,24 +405,21 @@ func TestCheckProviderModels_NotLoggedInAllDropped(t *testing.T) {
 			"zhipu": {OpenAIBaseURL: srv.URL, Provider: "zhipu"},
 		},
 	}
-	kept, dropped, _, _, err := CheckProviderModels(cfg, "zhipu", []string{"glm-5.2"}, nil)
+	kept, dropped, protocols, _, err := CheckProviderModels(cfg, "zhipu", []string{"glm-5.2"}, nil)
 	if err != nil {
 		t.Fatalf("not-logged-in: want no error (impl builds file-backed), got %v", err)
 	}
-	if len(kept) != 0 {
-		t.Errorf("not-logged-in: kept=%v want empty (auth fails on every leg)", kept)
+	if len(kept) != 1 || kept[0] != "glm-5.2" {
+		t.Errorf("not-logged-in: kept=%v want [glm-5.2] (auth failures are inconclusive, not negative)", kept)
 	}
-	if len(dropped) != 1 || dropped[0].Model != "glm-5.2" {
-		t.Errorf("not-logged-in: dropped=%+v want [glm-5.2]", dropped)
+	if len(dropped) != 0 {
+		t.Errorf("not-logged-in: dropped=%+v want empty (no probed leg concluded No)", dropped)
 	}
-	// Every probed leg failed at the auth step (no HTTP exchange -> status 0);
-	// the per-leg summary carries each leg's auth error, and the anthropic leg
-	// is reported as unprobed (no anthropic_base_url configured).
-	if dropped[0].Status != 0 || !strings.Contains(dropped[0].Reason, "auth") {
-		t.Errorf("not-logged-in: dropped reason=%q status=%d want auth error / status 0", dropped[0].Reason, dropped[0].Status)
-	}
-	if !strings.Contains(dropped[0].Reason, "anthropic not probed (no base)") {
-		t.Errorf("not-logged-in: dropped reason=%q want the anthropic leg marked unprobed", dropped[0].Reason)
+	// Every probed leg failed at the auth step (no HTTP exchange -> status 0)
+	// and classifies Unknown; the anthropic leg is unprobed (no
+	// anthropic_base_url configured) and definitionally No.
+	if mp := protocols["glm-5.2"]; mp.Chat != runtimewire.Unknown || mp.Responses != runtimewire.Unknown || mp.Anthropic != runtimewire.No {
+		t.Errorf("not-logged-in: matrix = chat:%s ant:%s resp:%s, want unknown/no/unknown", mp.Chat, mp.Anthropic, mp.Responses)
 	}
 }
 
@@ -778,6 +785,113 @@ func TestPersistModelCaps_UnknownRetainsConcludedFileVerdict(t *testing.T) {
 	}
 }
 
+// TestCheckProviderModels_RateLimitedModelNotDropped (#4 regression): among
+// several candidates, the ONE model whose every probed leg drew a transient
+// 429 must be KEPT — the probe holds no negative information about it, and
+// dropping it would write the rate-limit storm back as a config deletion
+// (the allProbeFailed safety net only fires when EVERY model fails, so it
+// never protected the single throttled model).
+func TestCheckProviderModels_RateLimitedModelNotDropped(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "KEY")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		model := protocol.ExtractModel(readAll(r.Body))
+		if model == "throttled" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":{"code":"1302","message":"Concurrency limit reached"}}`))
+			return
+		}
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {OpenAIBaseURL: srv.URL, Provider: "zhipu"},
+		},
+	}
+	kept, dropped, protocols, _, err := CheckProviderModels(cfg, "zhipu", []string{"ok-1", "throttled", "ok-2"}, nil)
+	if err != nil {
+		t.Fatalf("checkProviderModels: %v", err)
+	}
+	if !reflect.DeepEqual(kept, []string{"ok-1", "throttled", "ok-2"}) {
+		t.Errorf("kept = %v, want all three (the 429-only model is inconclusive, not uncallable)", kept)
+	}
+	if len(dropped) != 0 {
+		t.Errorf("dropped = %+v, want empty (no probed leg concluded No)", dropped)
+	}
+	if mp := protocols["throttled"]; mp.Chat != runtimewire.Unknown || mp.Responses != runtimewire.Unknown {
+		t.Errorf("throttled matrix = chat:%s resp:%s, want unknown/unknown", mp.Chat, mp.Responses)
+	}
+}
+
+// TestPersistModelCaps_ReMergeOnConcurrentWrite (#8 regression): the CLI's
+// whole-file read-modify-write races the daemon's async persist. When another
+// writer lands new verdicts (here: provider "daemon-prov") between the CLI's
+// read and its write, the mtime guard must detect the conflict and re-load /
+// re-merge onto the fresher base — the final file must carry BOTH writers'
+// data instead of the CLI's stale snapshot overwriting the daemon's.
+func TestPersistModelCaps_ReMergeOnConcurrentWrite(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+
+	provCfg := configdomain.Provider{OpenAIBaseURL: "https://example.test/v1", Provider: "zcode"}
+	fp := providerbuild.ProtocolConfigFingerprint(provCfg)
+	capsPath := filepath.Join(dir, ".model-proxy", "model_caps.json")
+
+	// The CLI's pre-probe world: only zcode's old entry exists.
+	if err := runtimewire.SaveModelCapsFile(capsPath, map[string]runtimewire.ProviderModelCaps{
+		"zcode": {Fingerprint: fp, ProbedAt: time.Now(), Models: map[string]runtimewire.ModelProtocols{
+			"glm": {Chat: runtimewire.Yes, Anthropic: runtimewire.Yes, Responses: runtimewire.No},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Land the daemon's write at the exact read→write race point (first
+	// attempt only; the retry must observe it on the re-load).
+	var once sync.Once
+	persistConflictSeam = func(path string) {
+		once.Do(func() {
+			loaded, err := runtimewire.LoadModelCapsFile(path)
+			if err != nil {
+				t.Errorf("seam load: %v", err)
+				return
+			}
+			loaded["daemon-prov"] = runtimewire.ProviderModelCaps{
+				Fingerprint: "fp-daemon", ProbedAt: time.Now(),
+				Models: map[string]runtimewire.ModelProtocols{"m9": {Chat: runtimewire.Yes}},
+			}
+			if err := runtimewire.SaveModelCapsFile(path, loaded); err != nil {
+				t.Errorf("seam write: %v", err)
+			}
+		})
+	}
+	t.Cleanup(func() { persistConflictSeam = nil })
+
+	if !persistModelCaps("zcode", provCfg, map[string]runtimewire.ModelProtocols{
+		"glm": {Chat: runtimewire.Yes, Anthropic: runtimewire.Unknown, Responses: runtimewire.Yes},
+	}, nil) {
+		t.Fatal("persistModelCaps reported no write")
+	}
+
+	loaded, err := runtimewire.LoadModelCapsFile(capsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The daemon's mid-write verdicts survived the CLI's persist.
+	if got, ok := loaded["daemon-prov"].Models["m9"]; !ok || got.Chat != runtimewire.Yes {
+		t.Errorf("daemon-prov entry = %+v (ok=%v), want preserved — the CLI's stale snapshot overwrote the concurrent write", got, ok)
+	}
+	// And the CLI's own fresh matrix landed (unknown anthropic merged back to
+	// the stored yes).
+	if got := loaded["zcode"].Models["glm"]; got.Chat != runtimewire.Yes || got.Anthropic != runtimewire.Yes || got.Responses != runtimewire.Yes {
+		t.Errorf("zcode glm = %+v, want yes/yes(yes merged)/yes", got)
+	}
+}
+
 // TestCheckProviderModels_DisabledNotProbed: `models refresh` sends no probe
 // request for operator-disabled models, keeps them in the list regardless of
 // callability, and preserves their stored verdicts in model_caps.json (not
@@ -872,5 +986,30 @@ func TestSplitDisabledModelIDs(t *testing.T) {
 	probeIDs, disabledIDs = SplitDisabledModelIDs(cfg, "other", []string{"off-a"})
 	if !reflect.DeepEqual(probeIDs, []string{"off-a"}) || disabledIDs != nil {
 		t.Errorf("cross-provider partition = probe %v disabled %v", probeIDs, disabledIDs)
+	}
+}
+
+// TestSplitDisabledModelIDs_PoolVirtualKey: a model disabled under a pool
+// VIRTUAL key ("zhipu#<acct>") is out of rotation for the whole parent — the
+// CLI partition expands the same keys TargetDisabled matches, so the refresh
+// must not probe it (daemon pass parity).
+func TestSplitDisabledModelIDs_PoolVirtualKey(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B")
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
+		"zhipu": {Provider: "zhipu"},
+	}}
+	vids, pooled := PoolVirtuals(cfg, "zhipu")
+	if !pooled || len(vids) != 2 {
+		t.Fatalf("pool setup: vids=%v pooled=%v", vids, pooled)
+	}
+	if err := runtimewire.SaveDisabledModelsFile(filepath.Join(dir, ".model-proxy", "disabled_models.json"),
+		map[string][]string{vids[0]: {"off-a"}}); err != nil {
+		t.Fatal(err)
+	}
+	probeIDs, disabledIDs := SplitDisabledModelIDs(cfg, "zhipu", []string{"on-a", "off-a"})
+	if !reflect.DeepEqual(probeIDs, []string{"on-a"}) || !reflect.DeepEqual(disabledIDs, []string{"off-a"}) {
+		t.Errorf("virtual-key disable not expanded: probe %v disabled %v", probeIDs, disabledIDs)
 	}
 }

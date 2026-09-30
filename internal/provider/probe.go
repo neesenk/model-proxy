@@ -37,7 +37,7 @@ func (baseProbe) ProbeRequest(modelID string) ProbeRequest {
 
 // ExtraHeaders is a no-op by default. Providers that need per-request headers
 // (aqp: anthropic-version + x-compass-request-id) override it.
-func (baseProbe) ExtraHeaders(req *http.Request, _ []byte, path string) {}
+func (baseProbe) ExtraHeaders(req *http.Request, _ []byte, _ string, path string) {}
 
 // FilterModelIDs passes the list through unchanged by default. Providers with
 // static policy rules (volcengine: drop *-latest / lite / mini) override it.

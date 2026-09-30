@@ -108,7 +108,7 @@ func TestStepPlan_ProbeRequest_Anthropic(t *testing.T) {
 func TestStepPlan_ExtraHeaders_AnthropicVersion(t *testing.T) {
 	p := newStepPlanForTest(t, nil)
 	req := httptest.NewRequest(http.MethodPost, "https://x/v1/messages", nil)
-	p.ExtraHeaders(req, nil, "/v1/messages")
+	p.ExtraHeaders(req, nil, "", "/v1/messages")
 	if got := req.Header.Get("anthropic-version"); got != "2023-06-01" {
 		t.Errorf("anthropic-version = %q, want 2023-06-01", got)
 	}

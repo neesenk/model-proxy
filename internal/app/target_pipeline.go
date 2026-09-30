@@ -70,11 +70,14 @@ func (g proxyHealthGate) NoteWireResponsesMiss(provider, model string) {
 // targetExecutionEffects maps semantic target-execution observations to the
 // application-owned metrics, logging, token, agent, request-log and live-event
 // stores. The internal package sees only the targetexec.Effects port.
-// generation is the request snapshot's runtime generation: quality samples
-// recorded here are generation-gated like the error-rate samples, so a
-// pre-reload in-flight commit cannot write into the new generation's state.
+// generation and cfg are the request snapshot's runtime generation and config:
+// quality samples recorded here are generation-gated like the error-rate
+// samples, and config-derived observation decisions (eval body retention)
+// read the request's own snapshot, so a pre-reload in-flight commit cannot
+// write into — or read from — the new generation's state.
 type targetExecutionEffects struct {
 	proxy      *Proxy
+	cfg        *configdomain.Config
 	generation uint64
 }
 
@@ -146,15 +149,18 @@ func (effects targetExecutionEffects) CaptureResponse(
 		// then completes — no synchronization needed.
 		firstReadMs := int64(0)
 		body = &ttftReadCloser{ReadCloser: body, started: attempt.Started, onFirst: func(t int64) { firstReadMs = t }}
+		// Make the captured primary body available for L2 eval shadow dispatch
+		// when the REQUEST SNAPSHOT configures eval for this route. Both this
+		// decision and the post-commit sampling (dispatchEvalShadow) read the
+		// same snapshot config (effects.cfg), so a reload between commit and
+		// dispatch cannot split them (previously the callback re-read the live
+		// config and could silently drop a sampled body).
+		evalConfigured := evalConfiguredForRoute(effects.cfg, attempt.Scope.Log.Exposed)
 		body = bodycapture.New(body, logger.MaxBodyBytes(), func(captured []byte, total int64, truncated bool) {
 			in := input
 			in.TTFTMilliseconds = firstReadMs
 			requestlog.Complete(logger, in, captured, total, truncated)
-			// Make the captured primary body available for L2 eval shadow dispatch.
-			// Sampling is decided post-commit on the request snapshot; storing here
-			// is unconditional for eval-configured routes so the decision stays
-			// generation-consistent.
-			effects.proxy.maybeStoreEvalPrimaryBody(attempt.Scope.Log.RequestID, attempt.Scope.Log.Exposed, captured)
+			effects.proxy.maybeStoreEvalPrimaryBody(attempt.Scope.Log.RequestID, evalConfigured, captured)
 		})
 	}
 

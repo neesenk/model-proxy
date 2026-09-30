@@ -59,8 +59,9 @@ func LoadModelCapsFile(path string) (map[string]ProviderModelCaps, error) {
 }
 
 // SaveModelCapsFile persists the model capabilities atomically: unique temp
-// file in the target directory + fsync + rename (the quota_tracker pattern —
-// no fixed .tmp name, so concurrent processes never clobber each other).
+// file in the target directory + fsync + rename + parent-dir fsync (the
+// quota_tracker pattern — no fixed .tmp name, so concurrent processes never
+// clobber each other).
 func SaveModelCapsFile(path string, providers map[string]ProviderModelCaps) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -96,5 +97,20 @@ func SaveModelCapsFile(path string, providers map[string]ProviderModelCaps) erro
 		_ = os.Remove(tmpName)
 		return err
 	}
+	syncParentDir(dir)
 	return nil
+}
+
+// syncParentDir fsyncs a directory after an atomic rename so the directory
+// entry itself is durable — without it a crash+reboot can acknowledge the
+// file's data fsync yet lose the rename. Best-effort: directory fsync is not
+// meaningful on every platform (Windows rejects Sync on a directory handle),
+// and the rename has already landed either way, so errors are ignored.
+func syncParentDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	defer d.Close()
+	_ = d.Sync()
 }

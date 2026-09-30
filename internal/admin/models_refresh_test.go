@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -53,7 +54,7 @@ func (f *refreshFakeProv) FetchModelsContext(ctx context.Context) ([]string, err
 	}
 	return f.FetchModels()
 }
-func (f *refreshFakeProv) ExtraHeaders(*http.Request, []byte, string) {}
+func (f *refreshFakeProv) ExtraHeaders(*http.Request, []byte, string, string) {}
 func (f *refreshFakeProv) FilterModelIDs(ids []string) ([]string, []string) {
 	return ids, nil
 }
@@ -228,10 +229,12 @@ func TestRefreshModelsNoChangeSkipsWrite(t *testing.T) {
 	}
 }
 
-// TestRefreshModelsAllProbeFailedKeepsUnvalidated: an all-failed probe (5xx
-// on every leg) must NOT wipe models: — the merged list is written
-// unvalidated with a warning, and the failed matrix never reaches the cache.
-func TestRefreshModelsAllProbeFailedKeepsUnvalidated(t *testing.T) {
+// TestRefreshModelsAllProbeInconclusiveKeepsModels: an all-INCONCLUSIVE probe
+// (5xx on every leg → unknown everywhere) must NOT wipe models: — every
+// candidate is kept (a transient sweep holds no negative information, the
+// per-model keep rule), and the replacement matrix is all-unknown so the
+// store's MergeOnUnknown retains the previously concluded verdicts.
+func TestRefreshModelsAllProbeInconclusiveKeepsModels(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -245,16 +248,22 @@ func TestRefreshModelsAllProbeFailedKeepsUnvalidated(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(result.Kept, []string{"glm-new", "glm-old"}) {
-		t.Errorf("kept = %v, want the unvalidated merged set", result.Kept)
+		t.Errorf("kept = %v, want the full candidate set (inconclusive ≠ uncallable)", result.Kept)
 	}
-	if !strings.Contains(result.Warning, "unvalidated") {
-		t.Errorf("warning = %q, want an unvalidated-write warning", result.Warning)
+	if len(result.ProbeDropped) != 0 {
+		t.Errorf("probe dropped = %+v, want none (no probed leg concluded No)", result.ProbeDropped)
 	}
 	if got := configModels(t, configFile); !reflect.DeepEqual(got, []string{"glm-new", "glm-old"}) {
 		t.Errorf("config models = %v, want the merged set (never wiped)", got)
 	}
-	if _, n := h.replacedMatrix(); n != 0 {
-		t.Errorf("ModelCapsReplace calls = %d, want 0 (failed matrix must not reach the cache)", n)
+	matrix, n := h.replacedMatrix()
+	if n != 1 {
+		t.Fatalf("ModelCapsReplace calls = %d, want 1 (kept models refresh the cache; unknown legs merge back to stored conclusions)", n)
+	}
+	for id, mp := range matrix {
+		if mp.Chat != runtimewire.Unknown || mp.Responses != runtimewire.Unknown {
+			t.Errorf("matrix[%s] = %+v, want all-unknown (MergeOnUnknown protects stored conclusions)", id, mp)
+		}
 	}
 }
 
@@ -513,6 +522,103 @@ func TestRefreshModels_DisabledDoesNotMaskAllProbeFailed(t *testing.T) {
 	matrix, n := h.replacedMatrix()
 	if n != 0 {
 		t.Errorf("cache replaced %d times, want 0 (fail-closed on the failed probe), matrix=%v", n, matrix)
+	}
+}
+
+// TestRefreshModels_AllCandidatesDisabledKeepsCache (#3 regression): when
+// EVERY candidate is operator-disabled, nothing is probed — the refresh must
+// NOT call ModelCapsReplace at all. The old probeHealthy condition
+// (probeIDs>0 && probedKept==0 → unhealthy, ELSE healthy) went healthy on an
+// empty probeIDs and replaced the cache with a matrix holding only the
+// disabled riders' stored verdicts — wiping the verdicts of every model
+// OUTSIDE the candidate set. The disabled models still ride along in kept
+// and in config.
+func TestRefreshModels_AllCandidatesDisabledKeepsCache(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	configFile := writeRefreshConfig(t, srv.URL, "off-a, off-b")
+	cfg := refreshTestConfig(srv.URL, []string{"off-a", "off-b"})
+	impl := &refreshFakeProv{fetched: []string{"off-a", "off-b"}}
+	h := newRefreshHarness(t, cfg, configFile, impl)
+	inner := h.service.ports.ModelRefreshRuntime
+	h.service.ports.ModelRefreshRuntime = func(name string) ModelRefreshRuntime {
+		rt := inner(name)
+		rt.Disabled = map[string]bool{"off-a": true, "off-b": true}
+		rt.StoredModelCaps = func(model string) (runtimewire.ModelProtocols, bool) {
+			return runtimewire.ModelProtocols{Chat: runtimewire.Yes, Anthropic: runtimewire.No, Responses: runtimewire.No}, true
+		}
+		return rt
+	}
+
+	result, err := h.service.RefreshModels(context.Background(), "zp")
+	if err != nil {
+		t.Fatalf("RefreshModels: %v", err)
+	}
+	if !reflect.DeepEqual(sortedCopy(result.Kept), []string{"off-a", "off-b"}) {
+		t.Errorf("kept = %v, want [off-a off-b] (disabled rides along unvalidated)", result.Kept)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Errorf("upstream probe hits = %d, want 0 (every candidate disabled)", got)
+	}
+	if matrix, n := h.replacedMatrix(); n != 0 {
+		t.Errorf("ModelCapsReplace calls = %d, want 0 (nothing probed — non-candidate verdicts must not be wiped), matrix=%v", n, matrix)
+	}
+	if result.ConfigUpdated {
+		t.Error("ConfigUpdated = true, want false (kept == existing)")
+	}
+}
+
+// TestRefreshModels_InconclusiveModelNotDropped (#4 regression): among
+// several candidates, the ONE model whose every probed leg drew a transient
+// 5xx must be KEPT — the probe holds no negative information about it, and
+// dropping it would write the outage back as a config deletion (the
+// all-failed safety net only fires when EVERY probed model fails).
+func TestRefreshModels_InconclusiveModelNotDropped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(raw), "flaky") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	configFile := writeRefreshConfig(t, srv.URL, "glm-good, flaky")
+	cfg := refreshTestConfig(srv.URL, []string{"glm-good", "flaky"})
+	impl := &refreshFakeProv{fetched: []string{"glm-good", "flaky"}}
+	h := newRefreshHarness(t, cfg, configFile, impl)
+
+	result, err := h.service.RefreshModels(context.Background(), "zp")
+	if err != nil {
+		t.Fatalf("RefreshModels: %v", err)
+	}
+	if !reflect.DeepEqual(sortedCopy(result.Kept), []string{"flaky", "glm-good"}) {
+		t.Errorf("kept = %v, want [flaky glm-good] (inconclusive ≠ uncallable)", result.Kept)
+	}
+	if len(result.ProbeDropped) != 0 {
+		t.Errorf("probe dropped = %+v, want none (no probed leg concluded No)", result.ProbeDropped)
+	}
+	if result.ConfigUpdated {
+		t.Error("ConfigUpdated = true, want false (nothing removed)")
+	}
+	if got := configModels(t, configFile); !reflect.DeepEqual(sortedCopy(got), []string{"flaky", "glm-good"}) {
+		t.Errorf("config models = %v, want both models retained", got)
+	}
+	matrix, n := h.replacedMatrix()
+	if n != 1 {
+		t.Fatalf("ModelCapsReplace calls = %d, want 1", n)
+	}
+	if mp := matrix["flaky"]; mp.Chat != runtimewire.Unknown || mp.Responses != runtimewire.Unknown {
+		t.Errorf("flaky matrix = %+v, want unknown legs (MergeOnUnknown protects stored conclusions)", mp)
+	}
+	if mp := matrix["glm-good"]; mp.Chat != runtimewire.Yes {
+		t.Errorf("glm-good matrix = %+v, want chat yes", mp)
 	}
 }
 

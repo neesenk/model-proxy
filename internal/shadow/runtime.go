@@ -220,7 +220,10 @@ func (runtime *Runtime) Execute(ctx context.Context, job Job) Result {
 		result.Err = err
 		return result
 	}
-	provider.ExtraHeaders(req, body, job.Plan.UpstreamPath())
+	// Shadow replays a synthetic upstream request that deliberately carries
+	// neither the client's UA nor its session headers (the session id rides
+	// the shadow RECORD instead), so sessionID stays empty here.
+	provider.ExtraHeaders(req, body, "", job.Plan.UpstreamPath())
 
 	result.Request = req
 	result.Started = time.Now()

@@ -139,14 +139,16 @@
     async persist，各自原子 rename）：CLI 写文件 → SIGHUP 的窗口内，daemon 一个早先
     触发的 async persist 若抢在 reload 重读前执行，会用较旧的内存快照覆盖 CLI 的结论。
     daemon 侧的协调是 mtime 基准守卫（`Proxy.modelCapsFileBaseline`）：persist 写盘前
-    stat 目标，比 boot restore/最近 reload 重读记录的基准新即跳过（外部写者写过），
-    基准在每次读盘与自身成功写盘后更新。守卫只防覆盖、不采纳——采纳仍靠 reload 重读。
+    stat 目标，比 boot restore/最近 reload 重读记录的基准新即判定外部写过——此时
+    不是跳过，而是 CAS-with-adopt：重新 Load 采纳外部状态并 re-baseline（reload 重读
+    仍是主采纳路径），文件不可读/版本不符才 defer。CLI 侧有同构反向守卫：写前重 stat，
+    冲突则重新 Load 合并再写（上限 3 次）。
     stat→rename 之间仍有固有 TOCTOU 残窗，两个不加锁的进程无法彻底消除；不要给这个
     文件加跨进程锁来"修"它（CLI 是短命进程，锁文件 lifecycle 比竞态本身更危险）。
 
 ## 测试与 CI
 
-33. 客户端读完响应 ≠ 服务端 commit 效应落账：带 Content-Length 的响应，客户端
+34. 客户端读完响应 ≠ 服务端 commit 效应落账：带 Content-Length 的响应，客户端
     收满字节即返回，handler goroutine 此时可能还没执行 `flushCopy` 之后的效应
     （`Effects.Committed` 的 Requests/latency/attempts-ok、agent 计数、
     body.Close 触发的 request log 入队、fusion 的 run 计数）。本机核多负载低
@@ -156,19 +158,29 @@
     断言 commit 前效应（failures/failovers/guard 命中）或用
     `httptest.ResponseRecorder` 同步驱动 handler 的测试不受影响。注意 fake
     upstream 一次性 `Write` 的 "SSE" 同样带 Content-Length，不享流式豁免。
-34. 覆盖率口径以 CI 工具链为准：CI 经 `go-version-file: go.mod` 用 go1.26.4，
+35. 覆盖率口径以 CI 工具链为准：CI 经 `go-version-file: go.mod` 用 go1.26.4，
     本机更高版本的语句计数不同（实测 `internal/cli/models` 本地 63.4% vs CI
     60.3%，足以跌破 floor）。floor/baseline 验证用
     `GOTOOLCHAIN=go1.26.4 scripts/cover.sh`；`go test` 结果缓存会掩盖重测，
     本地压测与复跑一律 `-count=1`。cover.sh 在本地工具链与 go.mod 不一致时
     会打印漂移警告（不 fail，CI 口径仍是权威）。
-35. `post()` 返回 ≠ post-commit dispatch 已执行：shadow 的
+36. `post()` 返回 ≠ post-commit dispatch 已执行：shadow 的
     `dispatchShadowAfterCommit`（`internal/forward/forward.go`）在响应写给
     客户端之后才在请求 goroutine 里同步跑，客户端返回时它可能还没执行。对
     「dispatch 恰好发生在某窗口内」（如并发 gate 饱和期）的断言，用计数
     seam/barrier（如 `shadow.Runtime.Dropped()` + `waitUntil`）而不是赌
     时序——慢机器 + race 下 dispatch 可能晚到窗口结束之后，产生合法但意外
     的结果。
+37. Go http transport 对**带 body 的请求** cancel 后不关闭上游连接：客户端 ctx
+    取消时，服务端 handler 的 `r.Context().Done()` 不一定触发（连接被保留复用）。
+    测试「客户端取消 → 上游快速感知」时，fake 上游不能靠 `r.Context().Done()` 断言，
+    要用测试控制的 channel/release 门（参考 `internal/app` 的
+    `TestJudgeEvalPairAbortsOnStop`）。
+38. 测试 fake 逐行孪生生产实现必然漂移：`internal/forward` 的 harness 曾把
+    `Manager.RecordLatchOutcome` 状态机逐行复制成 fake，5 个 latch 测试全在验副本，
+    生产回归能全绿通过。测试需要生产状态机时直接用真实 owner（测试侧 import
+    不破模块边界，archtest 只扫生产文件）；做不到时也绝不复制分支逻辑，改用
+    窄 seam 注入。
 
 ## 回归要求
 

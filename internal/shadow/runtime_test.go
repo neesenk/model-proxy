@@ -47,7 +47,7 @@ func (providerTest *testProvider) RewriteRequest(targetURL string, body []byte, 
 	return targetURL, body
 }
 
-func (providerTest *testProvider) ExtraHeaders(request *http.Request, _ []byte, path string) {
+func (providerTest *testProvider) ExtraHeaders(request *http.Request, _ []byte, _ string, path string) {
 	if providerTest.extra != nil {
 		providerTest.extra(request, path)
 	}

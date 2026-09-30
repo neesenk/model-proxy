@@ -26,7 +26,7 @@ func (stubImpl) Quota() (*provider.QuotaSnapshot, error)                      { 
 func (stubImpl) ProbeRequest(modelID string) provider.ProbeRequest {
 	return provider.ProbeRequest{Method: http.MethodPost, Path: "/chat/completions"}
 }
-func (stubImpl) ExtraHeaders(*http.Request, []byte, string)           {}
+func (stubImpl) ExtraHeaders(*http.Request, []byte, string, string)   {}
 func (stubImpl) FilterModelIDs(ids []string) (kept, dropped []string) { return ids, nil }
 
 func TestCallableOpenAISuccess(t *testing.T) {

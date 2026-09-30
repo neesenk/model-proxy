@@ -114,8 +114,9 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
   `buildGradeOrdered` 按 fallback 拼接最终顺序 → 目标循环。选择层看到的只有 grade 级候选
   与「该档是否可用」，**不含** surplus/配额数值；调度层的排序语义（surplus / peak / 熔断 /
   粘滞 / 池化 spread）不变，作用域收窄到选中档的目标集。
-- **分组**：grade 顺序 = 目标在 route 中首次出现的顺序；一个目标只属于首次命中的 grade；
-  不在任何 grade 的目标作为 ungraded 保留在末尾。
+- **分组**：grade 顺序 = 目标在 route 中首次出现的顺序；不在任何 grade 的目标作为
+  ungraded 保留在末尾。同一 target 不得声明进多个 grade——配置校验直接拒绝（跨 grade
+  重复会让分组、next_grade 与 eval 配对依赖 map 迭代序，每请求不确定）。
 - **选择优先级**：`routing.SelectGrade` 按 **active latch > selector choice > band** 返回 grade 名；
   无显式选择时保持自然顺序（各档按原序 + ungraded）——即未配置 grades 的旧行为。
 - **fallback 模式**（默认 `any`）：
@@ -131,7 +132,8 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
   `"grade <name>"`；enforce 模式置信度达标时把选中 grade 前置。
 - **响应 cache**：仅有 bands 的 graded route 仍保持纯函数缓存语义；启用 escalation 或
   selector 的 graded route 绕过响应 cache。
-- **校验**：grade 名非空、每个 grade 至少一个 target、target 必须属于该 route；band/escalation
+- **校验**：grade 名非空、每个 grade 至少一个 target、target 必须属于该 route、同一 target
+  不得出现在多个 grade（报错信息含 target 与相关 grade 名）；band/escalation
   在 graded policy 下必须引用已声明 grade，或用能无歧义解析到唯一 grade 的 target。
 
 ### 会话内升级（escalation）
@@ -146,7 +148,10 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
   未知取值在校验时报错。默认仍只含 `upstream_error`（不配置 escalation 零行为变化）。
   - `upstream_error`：请求终局未 commit 且客户端未断开（收到终局错误）。客户端侧转换失败
     400（请求对全部候选均不可转换、上游从未被联系）**不计入**——与 guard 拦截同口径，
-    重发同一不可转换请求不会误升级 latch。
+    重发同一不可转换请求不会误升级 latch。规划级失败同口径：planTarget 失败（未知 provider
+    配置）、缺 runtime provider implementation（未登录，fail-closed 跳过）、Responses state
+    展开失败导致目标在上游接触前被丢弃，且整轮没有任何 target 被真正尝试时，同样不计入坏
+    运行（`serveResult.planningErr`）——配置/规划层缺口不是上游判决。
   - `empty_ok`：请求 commit 为 200，但最终写回客户端的响应体字节数为 0。该谓词是保守的：
     只按最终客户端字节计数，不误判带空 `content` 或纯 `tool_use` 的合法 JSON/JSON 帧。
   - `repeat_turn`：同一 `TurnKey`（`requestlog.ComputeTurnKey`，request log 与该信号的唯一权威来源）
@@ -182,7 +187,10 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
   任何失败 fail-open 回退到上一步顺序。all-cooldown 等待重试的后续轮次复用首轮缓存的
   selector 结果（缓存于 `serveState`，与 rawProfile 同一模式），不重复发起付费 decisions
   调用、不重复发 `route-select-<requestID>` live 事件；enforce 的首选目标在新一轮 ordered
-  中缺席（如被冷却调度剔除）时保持当轮顺序，该轮 decision 降级为 fallback。
+  中缺席（如被冷却调度剔除）时保持当轮顺序，该轮 decision 降级为 fallback。graded route
+  同一规则：缓存的 enforce 档位在新一轮过滤后没有任何代表目标时，`buildGradeOrdered`
+  回落自然顺序，该轮 decision 同样如实降级为 fallback（selector choice 记录但不标
+  enforced），不把主响应归因到根本没被服务的 grade。
 - **mode**：`shadow`（默认）只记录不行动；`enforce` 在 `confidence ≥ SelectorConfig.ConfidenceThreshold()`
   时前置选中目标。
 - **响应 cache**：启用 selector 的 route 必须绕过响应 cache，与 escalation 同一语义。
@@ -289,7 +297,8 @@ warning 同时出现在 daemon log、`/api/status.warnings`、models、doctor �
 - in-route/cross-route/回落/pin/force。
 - 档位策略：band 首命中前置、无命中/目标缺席保持原序、force-provider 与 pin 跳过策略、
   `follow_up` 标记在三种协议形态下的判定、band 目标不在 route 时的启动告警；grades 的分组/过滤/回退
-  （any/next_grade/strict）、latch 强制选 grade、selector 的 grade 级候选。
+  （any/next_grade/strict）、latch 强制选 grade、selector 的 grade 级候选、同一 target 跨 grade
+  重复的配置拒绝、重试轮 enforce 目标/档位缺席时 decision 如实降级 fallback。
 - force-provider 即使能力不匹配也不得被替换到其他 route。
 - force-provider 是代理内部控制参数：`?force_provider=` query 由 executor 从
   上游 URL 剥除（`stripInternalQuery`），不透传给上游 API。

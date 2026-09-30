@@ -96,9 +96,13 @@ func modelCapsModels(cfg *configdomain.Config, derived map[string][]configdomain
 // (skipping providers whose fingerprint matches and whose models are all
 // concluded) and persists the results. Providers with a ProtocolHint (codex)
 // are synthesized, not probed: the hint already declares their protocol.
-// Runs synchronously; callers dispatch it on a tracked goroutine (boot/reload
-// via startWireCapProbe) or invoke it directly (tests).
-func (p *Proxy) probeAllModelCaps() {
+// Runs synchronously; callers dispatch it on a tracked goroutine with a
+// stop/budget-bound ctx (boot/reload via runWireProbePass) or invoke it
+// directly (tests). A canceled ctx aborts the pass: in-flight legs are
+// dropped WITHOUT storing a matrix (an aborted leg is no information, not an
+// unknown verdict) and remaining providers/models are skipped — the next pass
+// re-probes them.
+func (p *Proxy) probeAllModelCaps(ctx context.Context) {
 	p.mu.RLock()
 	cfg := p.cfg
 	provs := p.providers
@@ -119,6 +123,9 @@ func (p *Proxy) probeAllModelCaps() {
 	dirty := false
 	now := time.Now()
 	for name, provCfg := range cfg.Providers {
+		if ctx.Err() != nil {
+			break // pass budget/stop: leave the rest to the next pass
+		}
 		fp := providerbuild.ProtocolConfigFingerprint(provCfg)
 		models := modelCapsModels(cfg, derived, name)
 		// Prune verdicts for models the current config no longer serves. The
@@ -162,8 +169,22 @@ func (p *Proxy) probeAllModelCaps() {
 		}
 		// The probe path excludes disabled models: nothing is sent for them,
 		// and they cannot hold a provider eligible for a pass (a provider whose
-		// every model is disabled is skipped entirely).
+		// every model is disabled is skipped entirely). The filter expands the
+		// same keys TargetDisabled matches for scheduling targets — the exact
+		// config-level key AND (here, in the parent→virtuals direction) every
+		// pool-virtual key of this parent: a model disabled for ANY virtual
+		// account ("zhipu#acct1") is out of rotation there, and the pass probes
+		// once per parent with a shared parent-keyed verdict, so probing it
+		// would burn quota on a model no account rotates.
 		disabled := disabledSet(disabledByProvider[name])
+		for _, vid := range poolIndex[name] {
+			for m := range disabledSet(disabledByProvider[vid]) {
+				if disabled == nil {
+					disabled = map[string]bool{}
+				}
+				disabled[m] = true
+			}
+		}
 		probeModels := make([]string, 0, len(models))
 		for _, m := range models {
 			if !disabled[m] {
@@ -217,9 +238,19 @@ func (p *Proxy) probeAllModelCaps() {
 			wg.Add(1)
 			go func(name string, provCfg configdomain.Provider, impl provider.Provider, fp, model string) {
 				defer wg.Done()
-				sem <- struct{}{}
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
 				defer func() { <-sem }()
-				legs := probe.ProbeModelProtocols(context.Background(), client, provCfg, impl, model)
+				if ctx.Err() != nil {
+					return
+				}
+				legs := probe.ProbeModelProtocols(ctx, client, provCfg, impl, model)
+				if ctx.Err() != nil {
+					return // aborted mid-probe: store nothing; the next pass re-probes
+				}
 				mp := runtimewire.ModelProtocols{}
 				for _, leg := range legs {
 					v := runtimewire.ClassifyModelStatus(leg.Probed, leg.Status, leg.Err, leg.Body)
@@ -273,16 +304,27 @@ func (p *Proxy) persistModelCaps() {
 // race). Before writing it stats the target: a file NEWER than
 // modelCapsFileBaseline means an external writer (CLI `models refresh`)
 // published fresher verdicts after the in-memory store's source state was
-// read — overwriting would clobber them with the daemon's older snapshot,
-// so the write is skipped (the refresh-triggered SIGHUP makes reload adopt
-// the file; a missed signal just defers the daemon's next own persist until
-// after the next reload re-baselines). The residual stat→rename window is
-// inherent to two uncoordinated processes; the check collapses the common
-// case (an earlier-triggered persist executing after the CLI's write).
+// read — overwriting would clobber them with the daemon's older snapshot.
+// Instead of writing, the daemon ADOPTS the external state (re-read +
+// Restore + re-baseline, the same thing the reload re-read would do): a bare
+// skip used to latch the guard — when no reload followed (the CLI only
+// SIGHUPs on a model-set change or a successful verdict persist, and the
+// signal can miss), the file stayed newer than the baseline forever and every
+// later daemon persist was suppressed. An unreadable/external-but-unusable
+// file keeps the old defer behavior (reload re-read remains the adoption
+// path). The residual stat→rename window is inherent to two uncoordinated
+// processes; the check collapses the common case (an earlier-triggered
+// persist executing after the CLI's write).
 func (p *Proxy) persistModelCapsNow() {
 	if fi, err := os.Stat(p.modelCapsPath); err == nil &&
 		fi.ModTime().UnixNano() > p.modelCapsFileBaseline.Load() {
-		logx.Debugf("[modelcaps] persist skipped: %s is newer than the in-memory baseline (external write, e.g. `models refresh`); reload will re-read it", p.modelCapsPath)
+		if loaded, err := runtimewire.LoadModelCapsFile(p.modelCapsPath); err == nil && loaded != nil {
+			p.modelCaps.Restore(loaded, protocolFingerprints(p.cfgSnapshot()))
+			p.noteModelCapsFileState()
+			logx.Debugf("[modelcaps] persist adopted external write to %s (e.g. `models refresh`) instead of overwriting; re-baselined", p.modelCapsPath)
+		} else {
+			logx.Debugf("[modelcaps] persist skipped: %s is newer than the in-memory baseline but unreadable (external write, e.g. `models refresh`); reload will re-read it", p.modelCapsPath)
+		}
 		return
 	}
 	if err := runtimewire.SaveModelCapsFile(p.modelCapsPath, p.modelCaps.Snapshot()); err != nil {

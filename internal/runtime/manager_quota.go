@@ -103,18 +103,47 @@ func (m *Manager) MergeQuotas(snapshots map[string]*provider.QuotaSnapshot, gene
 	return true
 }
 
-func (m *Manager) SetQuota(name string, snapshot *provider.QuotaSnapshot, generation uint64) bool {
+// QuotaCommitResult is the honest three-state outcome of a quota commit: the
+// bool "accepted" signal could not distinguish a snapshot that was actually
+// committed from a failed sync that kept the last-known-good entry (a no-op),
+// so callers persisted and debounced as if something had changed.
+type QuotaCommitResult int
+
+const (
+	// QuotaCommitRejected: generation mismatch — nothing happened.
+	QuotaCommitRejected QuotaCommitResult = iota
+	// QuotaCommitKept: the incoming snapshot was a FAILED sync and an entry
+	// already existed, so the last-known-good entry was kept untouched. No
+	// state changed; the caller must not persist, debounce, or report a
+	// successful refresh.
+	QuotaCommitKept
+	// QuotaCommitApplied: the incoming snapshot was committed (a successful
+	// sync, or a first observation with no existing entry).
+	QuotaCommitApplied
+)
+
+// CommitQuota applies one quota snapshot like SetQuota but reports the honest
+// outcome (see QuotaCommitResult).
+func (m *Manager) CommitQuota(name string, snapshot *provider.QuotaSnapshot, generation uint64) QuotaCommitResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureLocked()
 	if !m.generationMatchesLocked(generation) {
-		return false
+		return QuotaCommitRejected
 	}
 	if quotaSyncFailedKeepsExisting(m.quotas[name], snapshot) {
-		return true
+		return QuotaCommitKept
 	}
 	m.quotas[name] = cloneQuota(snapshot)
-	return true
+	return QuotaCommitApplied
+}
+
+// SetQuota reports whether the write was ACCEPTED for the generation. A
+// failed sync is accepted but commits nothing (last-known-good keep), so
+// callers that must distinguish a committed snapshot from a kept no-op use
+// CommitQuota.
+func (m *Manager) SetQuota(name string, snapshot *provider.QuotaSnapshot, generation uint64) bool {
+	return m.CommitQuota(name, snapshot, generation) != QuotaCommitRejected
 }
 
 func (m *Manager) Quota(name string) *provider.QuotaSnapshot {
@@ -137,20 +166,6 @@ func (m *Manager) ClearQuotas(generation uint64) bool {
 		return false
 	}
 	m.quotas = make(map[string]*provider.QuotaSnapshot)
-	return true
-}
-
-// DeleteQuota removes a single quota snapshot when the generation matches.
-// Used by the quota tracker to drop providers that are no longer polled
-// (e.g. pay-as-you-go providers) without clearing the whole map.
-func (m *Manager) DeleteQuota(name string, generation uint64) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.ensureLocked()
-	if !m.generationMatchesLocked(generation) {
-		return false
-	}
-	delete(m.quotas, name)
 	return true
 }
 

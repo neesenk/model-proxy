@@ -7,6 +7,7 @@ package app
 // Pure store/policy/file behavior belongs to internal/runtime/wirecap.
 
 import (
+	"context"
 	"io"
 	configdomain "model-proxy/internal/config"
 	"net/http"
@@ -98,7 +99,7 @@ func TestModelCaps_ProbePass(t *testing.T) {
 	p := newTestProxy(t, cfg)
 	p.providers["p"] = &testProv{key: "k"}
 
-	p.probeAllModelCaps()
+	p.probeAllModelCaps(context.Background())
 
 	for _, m := range []string{"m1", "m2"} {
 		mp, ok := p.modelCaps.Get("p", m)
@@ -124,7 +125,7 @@ func TestModelCaps_ProbePass(t *testing.T) {
 		t.Fatal("provider fingerprint not recorded")
 	}
 	openai.resetHits()
-	p.probeAllModelCaps()
+	p.probeAllModelCaps(context.Background())
 	if total := openai.totalHits(); total != 0 {
 		t.Errorf("re-probe hit upstream %d times, want 0 (fingerprint unchanged)", total)
 	}
@@ -146,7 +147,7 @@ func TestModelCaps_FingerprintChangeReprobes(t *testing.T) {
 	// Pre-seed a verdict under a DIFFERENT fingerprint (stale config).
 	p.modelCaps.Put("p", "stale-fp", "m1",
 		runtimewire.ModelProtocols{Chat: triNo, Anthropic: triNo, Responses: triNo}, time.Now())
-	p.probeAllModelCaps()
+	p.probeAllModelCaps(context.Background())
 	mp, ok := p.modelCaps.Get("p", "m1")
 	if !ok || mp.Chat != triYes {
 		t.Errorf("after re-probe = %+v (ok=%v), want chat:yes from the new endpoint", mp, ok)
@@ -179,12 +180,12 @@ func TestModelCaps_UnknownLegsReprobed(t *testing.T) {
 	p := newTestProxy(t, cfg)
 	p.providers["p"] = &testProv{key: "k"}
 
-	p.probeAllModelCaps()
+	p.probeAllModelCaps(context.Background())
 	if mp, _ := p.modelCaps.Get("p", "m1"); mp.Chat != triUnknown {
 		t.Fatalf("chat leg = %s, want unknown after 5xx", mp.Chat)
 	}
 	flaky500 = false
-	p.probeAllModelCaps()
+	p.probeAllModelCaps(context.Background())
 	if chatHits != 2 {
 		t.Errorf("chat leg hits = %d, want 2 (unknown leg re-probed)", chatHits)
 	}
@@ -216,7 +217,7 @@ func TestModelCaps_StaleModelsPruned(t *testing.T) {
 	p.modelCaps.Put("p", fp, "stale",
 		runtimewire.ModelProtocols{Chat: triYes, Anthropic: triNo, Responses: triNo}, time.Now())
 
-	p.probeAllModelCaps()
+	p.probeAllModelCaps(context.Background())
 
 	if _, ok := p.modelCaps.Get("p", "stale"); ok {
 		t.Error("model dropped from config survived the probe pass — must be pruned")
@@ -247,7 +248,7 @@ func TestModelCaps_ProtocolHintSynthesized(t *testing.T) {
 	p := newTestProxy(t, cfg)
 	p.providers["cdx"] = &testProv{key: "k"}
 
-	p.probeAllModelCaps()
+	p.probeAllModelCaps(context.Background())
 
 	if hits != 0 {
 		t.Errorf("hint-covered provider probed (%d hits), want 0", hits)
@@ -412,7 +413,7 @@ func TestModelCaps_PersistRoundTrip(t *testing.T) {
 	}
 
 	p1 := newTestProxyAt(t, mkCfg(up.URL), statePath)
-	p1.probeAllModelCaps()
+	p1.probeAllModelCaps(context.Background())
 	// probeAllModelCaps persists ASYNC; do a synchronous save for the assertion.
 	if err := runtimewire.SaveModelCapsFile(p1.modelCapsPath, p1.modelCaps.Snapshot()); err != nil {
 		t.Fatal(err)
@@ -553,7 +554,7 @@ func TestModelCaps_TransientFailureDoesNotFlapConcludedVerdict(t *testing.T) {
 	p.providers["p"] = &testProv{key: "k"}
 
 	// Pass 1: m1 concludes chat/anthropic yes, responses unknown (5xx).
-	p.probeAllModelCaps()
+	p.probeAllModelCaps(context.Background())
 	if mp, _ := p.modelCaps.Get("p", "m1"); mp.Chat != triYes || mp.Anthropic != triYes || mp.Responses != triUnknown {
 		t.Fatalf("pass 1 m1 = %+v, want yes/yes/unknown", mp)
 	}
@@ -564,7 +565,7 @@ func TestModelCaps_TransientFailureDoesNotFlapConcludedVerdict(t *testing.T) {
 	prov.Models = []string{"m1", "m2"}
 	cfg.Providers["p"] = prov
 	phase.Store(1)
-	p.probeAllModelCaps()
+	p.probeAllModelCaps(context.Background())
 
 	// m1 keeps its concluded legs despite the 429s (merge-on-unknown); the
 	// unconcluded responses leg stays unknown; m2 lands all-unknown.
@@ -577,7 +578,7 @@ func TestModelCaps_TransientFailureDoesNotFlapConcludedVerdict(t *testing.T) {
 
 	// Recovery: the throttle lifts and the next pass concludes everything.
 	phase.Store(2)
-	p.probeAllModelCaps()
+	p.probeAllModelCaps(context.Background())
 	if mp, _ := p.modelCaps.Get("p", "m2"); mp.Chat != triYes {
 		t.Errorf("m2 after recovery = %+v, want chat yes", mp)
 	}
@@ -611,7 +612,7 @@ func TestModelCaps_ConcludedModelsNotReprobedAsCollateral(t *testing.T) {
 	p.providers["p"] = &testProv{key: "k"}
 
 	// Both models conclude.
-	p.probeAllModelCaps()
+	p.probeAllModelCaps(context.Background())
 	first := chatHits.Load()
 	if first != 2 {
 		t.Fatalf("pass 1 chat hits = %d, want 2 (one per model)", first)
@@ -622,7 +623,7 @@ func TestModelCaps_ConcludedModelsNotReprobedAsCollateral(t *testing.T) {
 	prov := cfg.Providers["p"]
 	prov.Models = []string{"m1", "m2", "m3"}
 	cfg.Providers["p"] = prov
-	p.probeAllModelCaps()
+	p.probeAllModelCaps(context.Background())
 	if got := chatHits.Load(); got != 3 {
 		t.Errorf("chat hits after adding m3 = %d, want 3 (m1/m2 skipped as concluded, only m3 probed)", got)
 	}
@@ -697,7 +698,7 @@ func TestModelCaps_ProtocolHintOverwritesUnconcludedLegacyEntry(t *testing.T) {
 	fp := providerbuild.ProtocolConfigFingerprint(cfg.Providers["codex"])
 	p.modelCaps.Put("codex", fp, "gpt-6-sol", runtimewire.ModelProtocols{Chat: runtimewire.Unknown, Anthropic: runtimewire.Unknown, Responses: runtimewire.Unknown}, time.Now())
 
-	p.probeAllModelCaps()
+	p.probeAllModelCaps(context.Background())
 	mp, ok := p.modelCaps.Get("codex", "gpt-6-sol")
 	if !ok || mp != (runtimewire.ModelProtocols{Chat: runtimewire.No, Anthropic: runtimewire.No, Responses: runtimewire.Yes}) {
 		t.Errorf("hint synthesis over legacy unknown = %+v (ok=%v), want no/no/yes", mp, ok)
@@ -738,7 +739,7 @@ func TestModelCaps_DisabledModelsNotProbed(t *testing.T) {
 	fpP := providerbuild.ProtocolConfigFingerprint(cfg.Providers["p"])
 	p.modelCaps.Put("p", fpP, "m2", runtimewire.ModelProtocols{Chat: runtimewire.Yes, Anthropic: runtimewire.No, Responses: runtimewire.No}, time.Now())
 
-	p.probeAllModelCaps()
+	p.probeAllModelCaps(context.Background())
 
 	// Only m1's three legs fired (m2 and q1 are disabled — no requests).
 	if got := hits.Load(); got != 3 {
@@ -759,7 +760,9 @@ func TestModelCaps_DisabledModelsNotProbed(t *testing.T) {
 // overwrite the file with the daemon's older in-memory snapshot (the
 // split-brain the reload re-read was added to fix, re-entering through the
 // persist side). The persist must notice the file is newer than the state
-// the in-memory store was derived from and skip.
+// the in-memory store was derived from and ADOPT the external state instead
+// of writing (see TestModelCaps_AsyncPersistAdoptsExternalWriteWithoutReload
+// for the no-reload latch the adoption also fixes).
 func TestModelCaps_AsyncPersistDoesNotClobberExternalWrite(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
@@ -886,5 +889,116 @@ func TestModelCaps_PersistProceedsAfterReloadBaseline(t *testing.T) {
 	}
 	if got := loaded["p"].Models["m1"]; got.Responses != runtimewire.No {
 		t.Errorf("file after post-reload persist = %+v, want responses:no (the correction persisted) — the skip guard must not latch", got)
+	}
+}
+
+// TestModelCaps_AsyncPersistAdoptsExternalWriteWithoutReload (latch
+// regression): when an external writer (CLI `models refresh`) publishes a
+// newer model_caps.json and NO reload follows (the CLI only SIGHUPs on a
+// model-set change / successful verdict persist, and the signal can miss),
+// the mtime skip-guard used to LATCH — the file stayed newer than the
+// baseline forever, so every later daemon persist was suppressed and daemon
+// verdicts never reached disk again. The guard must instead ADOPT the
+// external state (re-read + Restore + re-baseline) and let the daemon's own
+// later persists proceed without losing either side's verdicts.
+func TestModelCaps_AsyncPersistAdoptsExternalWriteWithoutReload(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Write([]byte(`{}`))
+	}))
+	defer up.Close()
+	statePath := filepath.Join(t.TempDir(), "quota_state.json")
+	capsPath := runtimewire.ModelCapsPath(statePath)
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"p": {OpenAIBaseURL: up.URL, Provider: "static", Models: []string{"m1", "m2", "m3"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	p := newTestProxyAt(t, cfg, statePath)
+	fp := providerbuild.ProtocolConfigFingerprint(cfg.Providers["p"])
+
+	// The daemon's in-memory snapshot is OLDER and inconclusive.
+	p.modelCaps.Put("p", fp, "m1", runtimewire.ModelProtocols{Chat: runtimewire.Unknown, Anthropic: runtimewire.No, Responses: runtimewire.No}, time.Now())
+
+	// The CLI (external writer) persists fresh concluded verdicts — newer
+	// than the daemon's baseline — and no reload ever re-reads the file.
+	if err := runtimewire.SaveModelCapsFile(capsPath, map[string]runtimewire.ProviderModelCaps{
+		"p": {Fingerprint: fp, ProbedAt: time.Now(), Models: map[string]runtimewire.ModelProtocols{
+			"m1": {Chat: runtimewire.Yes, Anthropic: runtimewire.Yes, Responses: runtimewire.No},
+			"m2": {Chat: runtimewire.Yes, Anthropic: runtimewire.No, Responses: runtimewire.No},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The daemon's persist must NOT write over the external file — it ADOPTS
+	// it: the in-memory store now serves the CLI's verdicts...
+	p.persistModelCapsNow()
+	if mp, ok := p.modelCaps.Get("p", "m1"); !ok || mp.Chat != runtimewire.Yes || mp.Anthropic != runtimewire.Yes {
+		t.Errorf("after adopt m1 = %+v (ok=%v), want the external yes/yes adopted in-memory", mp, ok)
+	}
+	// ...and the file itself is untouched.
+	loaded, err := runtimewire.LoadModelCapsFile(capsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded["p"].Models["m1"]; got.Chat != runtimewire.Yes || got.Anthropic != runtimewire.Yes {
+		t.Errorf("file after adopt = %+v, want the CLI's yes/yes preserved", got)
+	}
+
+	// The guard did NOT latch: a later daemon persist (e.g. a probe pass or
+	// 404 correction) writes again, keeping BOTH sides' verdicts.
+	p.modelCaps.Put("p", fp, "m3", runtimewire.ModelProtocols{Chat: runtimewire.Yes, Anthropic: runtimewire.No, Responses: runtimewire.Yes}, time.Now())
+	p.persistModelCapsNow()
+	loaded, err = runtimewire.LoadModelCapsFile(capsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded["p"].Models["m3"]; got.Chat != runtimewire.Yes || got.Responses != runtimewire.Yes {
+		t.Errorf("file after post-adopt persist m3 = %+v, want the daemon's new verdict persisted (guard unlatched)", got)
+	}
+	if got := loaded["p"].Models["m2"]; got.Chat != runtimewire.Yes {
+		t.Errorf("file after post-adopt persist m2 = %+v, want the CLI's verdict carried along (not lost)", got)
+	}
+}
+
+// TestModelCaps_PoolVirtualDisabledNotProbed: the probe-side disabled filter
+// expands the same keys TargetDisabled matches — a model disabled under a
+// POOL-VIRTUAL key ("zhipu#acct1") is out of rotation there, and the pass
+// probes once per parent with a shared parent-keyed verdict, so it must not
+// be probed either (previously only the config-level parent key was checked:
+// the disable blocked routing but the model was still probed).
+func TestModelCaps_PoolVirtualDisabledNotProbed(t *testing.T) {
+	var hits atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		hits.Add(1)
+		w.Write([]byte(`{}`))
+	}))
+	defer up.Close()
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: testProviderID, Models: []string{"m1", "m2"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	p := newTestProxy(t, cfg)
+	p.poolIndex["zhipu"] = []string{"zhipu#acct1"}
+	p.providers["zhipu#acct1"] = &testProv{key: "k"}
+	p.runtimeState.RestoreDisabledModels(map[string][]string{
+		"zhipu#acct1": {"m2"}, // virtual-level disable: blocks routing, must also skip probing
+	})
+
+	p.probeAllModelCaps(context.Background())
+
+	if got := hits.Load(); got != 3 {
+		t.Errorf("upstream hits = %d, want 3 (m1's legs only; virtual-disabled m2 not probed)", got)
+	}
+	if mp, ok := p.modelCaps.Get("zhipu", "m1"); !ok || mp.Chat != triYes {
+		t.Errorf("m1 = %+v (ok=%v), want probed chat yes", mp, ok)
+	}
+	if _, ok := p.modelCaps.Get("zhipu", "m2"); ok {
+		t.Error("m2 probed despite the pool-virtual disable")
 	}
 }

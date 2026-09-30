@@ -51,6 +51,14 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
   持续失败的诚实退化路径是 staleness aging（3× poll interval 后投影为 unknown），
   不是硬重置。失败在 tracker 侧打一条 `[quota] <name> sync failed ...; keeping
   last snapshot` warn——否则快照为何老化对操作员不可见。
+  **提交信号是三态的**：`Manager.CommitQuota` 返回 `QuotaCommitResult`
+  （`QuotaCommitApplied` 已提交 / `QuotaCommitKept` 失败保留=无操作 /
+  `QuotaCommitRejected` generation 拒绝）；`SetQuota` 的 bool 只表示
+  “被接受”（kept 也算接受），需要区分“真的提交了”的调用方必须用 CommitQuota。
+  tracker 侧 `commitSnapshot` 透传该三态：`PollOne` 对 kept 返回 false
+  （不 Persist、不清 cooldown、不向 Web/admin 报“已刷新”）；`RefreshOne`
+  对 kept 不 Persist 也不写 `RefreshGuard.last`——无变化的同步不得用 debounce
+  吞掉下一次可能学到东西的 refresh。
 - 副作用侧：失败的同步不参与 `QuotaRecoveredClearCooldown`（pollAll 的 `polled`
   集与 PollOne 的判定都以 `Err == ""` 为前提）——no-op 同步不得用陈旧观测推翻
   新鲜的 429 预测。
@@ -76,7 +84,7 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
 - model-scoped paramBlock；
 - config fingerprint；
 - 顶层 `wire_caps`：provider 级 wire 探测 verdict（`{base_url, chat, responses, probed_at, probe_version}`，三态以 `"yes"/"no"/"unknown"` 字符串落盘；旧版 `anthropic` 字段已随「anthropic 支持改由 config `anthropic_base_url` 声明」移除，旧文件里的该字段读取时忽略），按 parent provider 名 keyed。与 health 不同：**不受 config fingerprint 门控、reload 不清空**（能力是端点属性而非凭据/配额状态）；恢复时同时要求 parent 仍存在、记录的 `base_url` 与当前 config 一致**且 `probe_version` 为当前探测语义版本**（`runtimewire.ProbeVersion`，当前 2 = 工具注入的 agent 级探测；v1 裸 ping 条目按不匹配处理、全量重探），不匹配即作废重探。探测完成与 404 纠正时经 async persist 写盘（请求路径不得同步 persist——forward 不持 `p.mu` 转发，但 persist 经 fullSnapshot 取 `p.mu.RLock`，同步调用会排在 pending reload writer 之后阻塞请求路径，故一律异步）。verdict、选择策略与并发 map 统一归 `internal/runtime/wirecap.Store`；其 mutex 是 leaf lock，持锁时不回调 Proxy，也不进入 `Proxy.mu → runtime.Manager` 锁序。
-- 独立文件 `model_caps.json`（quota_state.json 的 sibling，路径经 `runtimewire.ModelCapsPath(qpath)` 派生）：模型级三协议矩阵（`{version:4, providers:{<name>:{fingerprint, probed_at, models:{<id>:{chat, anthropic, responses}}}}}`，三态同 `wire_caps` 字符串）。与 `wire_caps` 同文件共存不同，模型级能力有自己的文件生命周期；原子写沿用 quota 模式（同目录唯一临时文件 + fsync + rename，目录 0700、文件 0644）。**失效按 fingerprint（无 TTL）与文件 version**：：fingerprint = `providerbuild.ProtocolConfigFingerprint`（provider_id|openai_base_url|anthropic_base_url|sorted(headers) 的 sha256 前 16 hex），boot 只恢复 fingerprint 仍匹配当前 config 的条目，provider 从 config 删除即丢；fingerprint 不覆盖 models 列表，故每个探测 pass 另行把当前 config（models: ∪ 显式/派生路由 target）不再服务的 model 条目从 store 剔除（`ModelStore.PruneModels`，prune 触发 async persist）——从 config 删掉的 model 不会滞留在矩阵和 /api/models 投影里；version 不匹配（探测语义变更，如 v2 起探测腿注入 function tool 声明、v3 起计入腿级拒绝措辞("model not supported"/"not supported by this endpoint"),v4 起裸 "not supported for" 收窄为 "not supported for <model> in <path>" 正则(排除套餐层措辞误伤)）整份文件按缺失处理、全量重探；operator disabled 的（provider, model）对（`disabled_models.json`，Manager 内存态的同一投影）**不探测**：不发包、不占 eligibility，已存 verdict 冻结保留（`PruneModels` 的 keep 集仍含它们）；CLI/daemon `models refresh` 同样跳过探测并把 disabled 条目的已存 verdict 原样带进替换矩阵（not probed ≠ dropped）。结论为 unknown 的腿下一轮探测 pass 重探（且仅重探未结论的腿：fingerprint 匹配时已结论的 model 不再作为同伴 unknown 腿的殉葬品重探——整 provider 重爆会把 zcode/zhipu 这类低 RPM 上游打进 429 风暴；stale fingerprint 条目仍整体重探），且 unknown 是唯一不落盘原因的结论——探测 pass 对 inconclusive 腿打一条 warn（`[modelcaps] <p>/<m> leg <leg> inconclusive: status=N err=...`，只含 status/err 不含 body），否则事后无法区分上游 429/5xx 与 proxy 侧拨号/超时。**unknown 合并规则（anti-flap）**：新探测矩阵里的 unknown 腿是「无信息」而非否定——`ModelStore.Put`/`ReplaceProviderModels`/CLI `persistModelCaps` 在 fingerprint 一致时把 unknown 腿合并回旧结论（`MergeOnUnknown`：新结论覆盖旧值、新 unknown 保留旧值），一次性 429/超时风暴不再把已结论的 yes 降级成 `? unknown`（zcode/zhipu 实测：429 腿累计近 2000 次）；已结论的修正（yes→no）不受合并阻塔，运行时 404 纠正路径不变。探测 pass 本身由 `wireProbeMu` 串行化（SIGHUP 风暴下重叠 pass 会成倍叠加并发腿）且单腿超时 30s（BigModel 思考模型冷启动 TTFB 可超 10s）。探测完成与模型级 404 纠正时 async persist（quota-tracked goroutine，死锁理由同上；**写盘前 stat 目标文件 mtime，比 boot restore/每次 reload 重读时记录的基准新——即 CLI `models refresh` 等外部写者在其后写过——则跳过本次写并记 debug，基准在每次读盘与自身每次成功写盘后更新**：否则 CLI 写文件 → SIGHUP 的窗口内，一个早先触发的 async persist 抢在 reload 重读前执行，会用 daemon 较旧的内存快照覆盖 CLI 刚写入的结论，split-brain 从 persist 侧复活）；`POST /api/models/refresh`（`models refresh` CLI 的 daemon 孪生）探测健康时经 `ModelStore.ReplaceProviderModels` 整体替换该 provider 的条目并 async persist（全失败/impl 缺失不替换，fail-closed）。并发 map 归 `internal/runtime/wirecap.ModelStore`（leaf RWMutex、nil-safe，与 Store 同纪律；跨 reload 存活，不进 `Proxy.mu → runtime.Manager` 锁序）。`Restore` 在 boot **和每次 reload** 都执行（reload 先**从磁盘重读** `model_caps.json`——CLI `models refresh` 直接写这个文件，reload 只恢复内存快照会让运行中的 daemon 直到重启都看不到 CLI 的 verdict；async persist 的 mtime 守卫只是不覆盖外部写入，不会采纳它——采纳只能靠这次重读；文件缺失/不可读时回退内存快照），在 `p.mu` 写锁内对重读结果自校验（fingerprint 变化的条目立即丢弃），并把 fingerprint map 安装为 store 的 expected fingerprints：`Put` 携带与 expected 不一致的 fingerprint（reload 前捕获 cfg 的旧探测 pass 在 swap 后才写回）会被静默丢弃，stale verdict 不能覆盖新 generation 的状态。CLI `models` 列表/refresh 表对它做**只读**投影（fingerprint 必须匹配当前 config；文件缺失/畸形静默降级为无数据，PROTOCOLS 列显示 `-`）。takeover 的协议变体选择同样**只读**消费它（`internal/takeover/probecaps.go`，同一 fingerprint 校验；探测 no 会推翻端点声明、yes 可补出静态判定拿不到的 responses 腿，缺失/陈旧一律回退静态声明）。
+- 独立文件 `model_caps.json`（quota_state.json 的 sibling，路径经 `runtimewire.ModelCapsPath(qpath)` 派生）：模型级三协议矩阵（`{version:4, providers:{<name>:{fingerprint, probed_at, models:{<id>:{chat, anthropic, responses}}}}}`，三态同 `wire_caps` 字符串）。与 `wire_caps` 同文件共存不同，模型级能力有自己的文件生命周期；原子写沿用 quota 模式（同目录唯一临时文件 + fsync + rename + best-effort 父目录 fsync，目录 0700、文件 0644）。**失效按 fingerprint（无 TTL）与文件 version**：：fingerprint = `providerbuild.ProtocolConfigFingerprint`（provider_id|openai_base_url|anthropic_base_url|sorted(headers) 的 sha256 前 16 hex），boot 只恢复 fingerprint 仍匹配当前 config 的条目，provider 从 config 删除即丢；fingerprint 不覆盖 models 列表，故每个探测 pass 另行把当前 config（models: ∪ 显式/派生路由 target）不再服务的 model 条目从 store 剔除（`ModelStore.PruneModels`，prune 触发 async persist）——从 config 删掉的 model 不会滞留在矩阵和 /api/models 投影里；version 不匹配（探测语义变更，如 v2 起探测腿注入 function tool 声明、v3 起计入腿级拒绝措辞("model not supported"/"not supported by this endpoint"),v4 起裸 "not supported for" 收窄为 "not supported for <model> in <path>" 正则(排除套餐层措辞误伤)）整份文件按缺失处理、全量重探；operator disabled 的（provider, model）对（`disabled_models.json`，Manager 内存态的同一投影；过滤键集与 `TargetDisabled` 对齐——config 父名键 ∪ 池化虚拟账号键 `name#<accountID>`，虚拟键 disable 的 model 同样不探，因为 verdict 按 parent 共享）**不探测**：不发包、不占 eligibility，已存 verdict 冻结保留（`PruneModels` 的 keep 集仍含它们）；CLI/daemon `models refresh` 同样跳过探测并把 disabled 条目的已存 verdict 原样带进替换矩阵（not probed ≠ dropped）。结论为 unknown 的腿下一轮探测 pass 重探（且仅重探未结论的腿：fingerprint 匹配时已结论的 model 不再作为同伴 unknown 腿的殉葬品重探——整 provider 重爆会把 zcode/zhipu 这类低 RPM 上游打进 429 风暴；stale fingerprint 条目仍整体重探），且 unknown 是唯一不落盘原因的结论——探测 pass 对 inconclusive 腿打一条 warn（`[modelcaps] <p>/<m> leg <leg> inconclusive: status=N err=...`，只含 status/err 不含 body），否则事后无法区分上游 429/5xx 与 proxy 侧拨号/超时。**unknown 合并规则（anti-flap）**：新探测矩阵里的 unknown 腿是「无信息」而非否定——`ModelStore.Put`/`ReplaceProviderModels`/CLI `persistModelCaps` 在 fingerprint 一致时把 unknown 腿合并回旧结论（`MergeOnUnknown`：新结论覆盖旧值、新 unknown 保留旧值），一次性 429/超时风暴不再把已结论的 yes 降级成 `? unknown`（zcode/zhipu 实测：429 腿累计近 2000 次）；已结论的修正（yes→no）不受合并阻塔，运行时 404 纠正路径不变。探测 pass 是 single-flight：`wireProbeMu`（TryLock）保证不重叠，运行中再到的触发最多合并出**一个**后续 pass（`wireProbePending`，后续 pass 起跑时读当前 generation，合并不会探旧配置），已有后续排队时其余触发直接返回——SIGHUP 风暴不再把每信号一整轮 pass 堆进 quota poller WaitGroup（会拖住 shutdown）。pass 跑在 stop-aware 且带 wall-clock 预算的 context 上（`wireProbePassContext`：quota tracker stop 即取消，预算 `wireProbePassBudget` 4s 远小于 8s 优雅退出窗口）：探测 http 请求绑定该 ctx，慢上游不会挡住 `quota.Stop()` 的 Wait 与其后的 final persist（此前 30s 单腿超时 × `context.Background()` 派发曾让 Wait 越过 supervisor hard-kill 窗口、final persist 永不执行）；被取消/超预算的腿不落任何 verdict，下轮 pass 重探。单腿超时 30s（BigModel 思考模型冷启动 TTFB 可超 10s）。探测完成与模型级 404 纠正时 async persist（quota-tracked goroutine，死锁理由同上；**写盘前 stat 目标文件 mtime，比 boot restore/每次 reload 重读时记录的基准新——即 CLI `models refresh` 等外部写者在其后写过——则不写盘，改为重读文件 + `Restore` 采纳外部状态并 re-baseline（与 reload 重读同一动作；只跳过不采纳会在无 reload 跟进时让守卫永久 latch、daemon 自身写盘被无限抑制），文件不可读才维持 defer；基准在每次读盘与自身每次成功写盘后更新**：否则 CLI 写文件 → SIGHUP 的窗口内，一个早先触发的 async persist 抢在 reload 重读前执行，会用 daemon 较旧的内存快照覆盖 CLI 刚写入的结论，split-brain 从 persist 侧复活）；`POST /api/models/refresh`（`models refresh` CLI 的 daemon 孪生）探测健康（至少一个**被探测** model 保留）时经 `ModelStore.ReplaceProviderModels` 整体替换该 provider 的条目并 async persist（全候选 disabled——什么都没探——或 impl 缺失时不替换，fail-closed，否则只含 disabled rider 存量 verdict 的矩阵会抹掉候选集外 model 的 verdict）。并发 map 归 `internal/runtime/wirecap.ModelStore`（leaf RWMutex、nil-safe，与 Store 同纪律；跨 reload 存活，不进 `Proxy.mu → runtime.Manager` 锁序）。`Restore` 在 boot **和每次 reload** 都执行（reload 先**从磁盘重读** `model_caps.json`——CLI `models refresh` 直接写这个文件，reload 只恢复内存快照会让运行中的 daemon 直到重启都看不到 CLI 的 verdict；async persist 的 mtime 守卫命中时也会重读采纳（见上），reload 重读仍是主采纳路径；文件缺失/不可读时回退内存快照），在 `p.mu` 写锁内对重读结果自校验（fingerprint 变化的条目立即丢弃），并把 fingerprint map 安装为 store 的 expected fingerprints：`Put` 携带与 expected 不一致的 fingerprint（reload 前捕获 cfg 的旧探测 pass 在 swap 后才写回）会被静默丢弃，stale verdict 不能覆盖新 generation 的状态。CLI `models` 列表/refresh 表对它做**只读**投影（fingerprint 必须匹配当前 config；文件缺失/畸形静默降级为无数据，PROTOCOLS 列显示 `-`）。takeover 的协议变体选择同样**只读**消费它（`internal/takeover/probecaps.go`，同一 fingerprint 校验；探测 no 会推翻端点声明、yes 可补出静态判定拿不到的 responses 腿，缺失/陈旧一律回退静态声明）。
 
 模型刷新端口的单次快照、旧 fingerprint 拒绝、取消与 config 提交边界见
 [`Web/API — 模型刷新提交边界`](../web-api.md#模型刷新提交边界)。
@@ -85,7 +93,7 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
 
 tracker 在每次 commit 新快照（pollAll/pollOne/429 refresh）时，以**上一次已 commit 快照**为基线计算 ultimate 窗口的耗尽预测：`rate = Δused/Δt`，`ExhaustionEta = as_of + remaining/rate`，挂到 `QuotaSnapshot.ExhaustionEta` 后进 Manager。以下情况不预测（零值）：首个快照无基线、任一侧带错误、速率 ≤0（空闲或窗口已 reset）、`Δt > 3 × quota_poll_interval`（轮询断档，基线陈旧）、窗口已耗尽或未测量。预测**仅展示用**（`usage` CLI 窗口行尾、Web Status 配额卡），调度不读，不落盘；重启后首轮 poll 可用从 quota_state.json 恢复的上一快照作基线（断档超界则不预测）。`usage` CLI 是独立进程、单次 live fetch，其基线是经 `provider.DecorateExhaustionEta` 读取的持久化快照（按普通 provider 名 keyed；池化虚拟账号 key 无 CLI 预测）。
 
-当前实现使用 tracker 实例内的 `persistMu` 串行化 snapshot → **唯一同目录临时文件** → rename（每次写一个唯一 `.tmp`，多个 tracker/process 或 tracker 与同步调用者不再争用同名，rename 不会再 ENOENT），并在 quota poll、manual refresh、部分 429 refresh 和 unfreeze/freeze 时写盘。`Proxy.Close` 先通过 lifecycle gate 停止接收新任务，再等待 poller goroutine（含 reload 的 `pollAsync` 与 429 的 `refreshAsync`）后做 final flush；dispatch 的 accepting 检查与 `WaitGroup.Add` 在同一把锁内，不得与 shutdown 的 `Wait` 竞争。
+当前实现使用 tracker 实例内的 `persistMu` 串行化 snapshot → **唯一同目录临时文件** → rename（每次写一个唯一 `.tmp`，多个 tracker/process 或 tracker 与同步调用者不再争用同名，rename 不会再 ENOENT），rename 后再 best-effort fsync 父目录（否则 crash+reboot 可能丢掉目录项本身；部分平台/文件系统不支持目录 fsync，仅记 debug），并在 quota poll、manual refresh、部分 429 refresh 和 unfreeze/freeze 时写盘。`Proxy.Close` 先通过 lifecycle gate 停止接收新任务，再等待 poller goroutine（含 reload 的 `pollAsync` 与 429 的 `refreshAsync`）后做 final flush；dispatch 的 accepting 检查与 `WaitGroup.Add` 在同一把锁内，不得与 shutdown 的 `Wait` 竞争。
 
 ### config generation 一致性
 
@@ -335,11 +343,16 @@ session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 r
   增减与升级在**单次 `Manager.mu` 临界区**内完成（无回调、无 I/O），同 (session, route)
   并发请求的 outcome 不会互相覆盖（旧的 `LatchValue`→`SetLatch` 两段式读-改-写存在丢失更新
   窗口）。forward 只传信号（坏信号数/好运行标记 + dwell/consecutive/target 语义参数）。
-- `SetLatch` / `LatchValue` / `ClearLatch` 与 `SetSticky` 同形（持 `Manager.mu`、generation
-  门控），键同样为 `(sessionKey, route)`；forward 生产路径只用 `LatchValue`（读取侧判策略）
-  和 `RecordLatchOutcome`（唯一写入路径）。
-- 过期（`now - Since > dwell`）的 latch 在读取侧不生效；`RecordLatchOutcome` 在下一次写入时
-  把过期 latch 按不存在处理并覆盖。latch 目标被能力过滤/operator disable 剔除出
+  **`RecordLatchOutcome` 是唯一写路径**；无生产调用者的 `SetLatch`/`ClearLatch` 已删除。
+- `LatchValue` 是读取侧（forward 判策略用），不需要 generation 参数：跨代陈旧读在结构上
+  不可能——`ReplaceGeneration` 在同一 `m.mu` 临界区内整表重建 latch map，持锁读者永远
+  看不到上一代写入的值。
+- 过期（`now - Since > dwell`）的 latch 在读取侧不生效；`RecordLatchOutcome` 会把过期
+  latch **从 map 删除**（不只是按不存在处理），并顺带清扫**同 route** 其他 session 的
+  过期键——route 的 dwell 来自 config、同一 generation 内固定，所以 outcome 携带的 Dwell
+  正是这些键本来会被判定的窗口（不同 route 可能 dwell 不同，故不跨 route 清扫）。map
+  规模由此界于「一个 dwell 窗口内活跃的 session × route」，不再在 generation 内单调涨到
+  下次 reload。latch 目标被能力过滤/operator disable 剔除出
   当前 ordered 集时读取侧同样不生效（照常走 bands/selector），路由侧契约见
   `docs/architecture/request-routing.md`。
 - 客户端侧转换失败 400（请求对全部候选均不可转换、上游从未被联系）**不进入** outcome 记录——
@@ -347,7 +360,9 @@ session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 r
 - `repeat_turn` 信号使用同一份 generation-scoped、内存-only 的滑窗状态：
   `Manager.CheckRepeatTurn(sessionKey, route, turnKey, now, window, generation)` 按
   `(sessionKey, route)` 索引，窗口时长复用 `escalation.dwell`，上限
-  `maxRepeatTurnWindowEntries` 条/窗口，过期条目在查询时驱逐。
+  `maxRepeatTurnWindowEntries` 条/窗口，过期条目在查询时驱逐；条目全部过期的**同 route**
+  窗口整键删除（窗口同为 config 派生、generation 内固定，空窗不可能再产生 duplicate
+  判定），理由与 latch 清扫相同。
 
 ## Disabled models（operator 模型禁用）
 
@@ -416,6 +431,10 @@ Disable/Enable）是 (provider, model) 粒度的 operator 覆盖，状态归
   commit gate、单锁 quota+health+pin+sticky+spread 决策、PreviewOrder parity、
   atomic persist/dashboard snapshot 与 detached map/slice。
 - stale/error quota 的 unknown 降级。
+- quota 提交三态信号：CommitQuota 的 applied/kept/rejected；失败同步不 Persist、
+  PollOne 报 false、RefreshOne 不记 debounce。
+- latch/repeat-turn 的同 route 过期清扫（map 界于 dwell 窗口内活跃 session）、
+  过期 latch 删除后读取/升级语义不变。
 - quotaTracker 的并发 poll/manual refresh/429 refresh 去重、停止接纳和文件单写
   正确性；不得通过 tracker 内部 quota map 断言。
 - 多 tracker 同 path、进程退出、测试 TempDir cleanup。

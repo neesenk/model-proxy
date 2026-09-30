@@ -65,8 +65,11 @@ func TestFetchModelsContextCapabilities(t *testing.T) {
 // fetches the live list ONLY through it, and a provider that ships just the
 // legacy FetchModels silently degrades the web refresh to re-validating
 // route-configured models while the CLI discovers new ones (the mimo /
-// opencode-go / openrouter / step-plan gap). Static is the deliberate
-// exception (no /models endpoint at all; both paths return errNotSupported).
+// opencode-go / openrouter / step-plan gap). The walk is driven by the
+// package registry itself, so a newly registered provider cannot ship
+// without the capability and stay green: it must either implement
+// FetchModelsContext or carry an explicit, justified exception below
+// (static: no /models endpoint at all; both paths return errNotSupported).
 func TestFetchModelsContext_ProviderCoverage(t *testing.T) {
 	build := func(providerID string) Provider {
 		t.Helper()
@@ -76,12 +79,18 @@ func TestFetchModelsContext_ProviderCoverage(t *testing.T) {
 		}
 		return impl
 	}
-	withLiveModelsEndpoint := []string{
-		"aqp", "zhipu", "zcode", "deepseek", "kimi-code", "qwen-plan",
-		"mimo", "opencode-go", "openrouter", "step-plan",
-		"codex", "volcengine", "typesafe",
+	exceptions := map[string]string{
+		"static": "no /models endpoint at all (errNotSupported by design)",
 	}
-	for _, providerID := range withLiveModelsEndpoint {
+	for providerID := range registry {
+		if reason, ok := exceptions[providerID]; ok {
+			if _, ok := build(providerID).(interface {
+				FetchModelsContext(context.Context) ([]string, error)
+			}); ok {
+				t.Errorf("%s now implements FetchModelsContext — remove its exception (%s)", providerID, reason)
+			}
+			continue
+		}
 		t.Run(providerID, func(t *testing.T) {
 			if _, ok := build(providerID).(interface {
 				FetchModelsContext(context.Context) ([]string, error)
@@ -93,8 +102,9 @@ func TestFetchModelsContext_ProviderCoverage(t *testing.T) {
 }
 
 // TestFetchModelsContext_BearerProviders tests the four context additions
-// against a fake /models upstream: same ids as the legacy FetchModels, and
-// the request is bound to the caller's context (cancellation propagates).
+// against a fake /models upstream: the context path returns the same ids as
+// the legacy FetchModels, and the request is bound to the caller's context
+// (a pre-canceled context aborts the fetch with context.Canceled).
 func TestFetchModelsContext_BearerProviders(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/models" {
@@ -123,14 +133,34 @@ func TestFetchModelsContext_BearerProviders(t *testing.T) {
 	}
 	for _, tc := range provs {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			ids, err := FetchModelsContext(ctx, tc.p)
+			ids, err := FetchModelsContext(context.Background(), tc.p)
 			if err != nil {
 				t.Fatalf("FetchModelsContext: %v", err)
 			}
 			if len(ids) != 1 || ids[0] != "new-hot-model" {
 				t.Errorf("ids = %v, want [new-hot-model]", ids)
+			}
+			// The cancellable path must agree with the legacy FetchModels on
+			// the same upstream — a drift between them is exactly the web/CLI
+			// parity gap the capability was added to close.
+			legacyIDs, err := tc.p.FetchModels()
+			if err != nil {
+				t.Fatalf("legacy FetchModels: %v", err)
+			}
+			if len(legacyIDs) != len(ids) {
+				t.Fatalf("ids drift: context=%v legacy=%v", ids, legacyIDs)
+			}
+			for i := range ids {
+				if legacyIDs[i] != ids[i] {
+					t.Fatalf("ids drift: context=%v legacy=%v", ids, legacyIDs)
+				}
+			}
+			// The fetch is bound to the caller's context: a pre-canceled
+			// context must abort it before any upstream work.
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if _, err := FetchModelsContext(ctx, tc.p); !errors.Is(err, context.Canceled) {
+				t.Fatalf("pre-canceled fetch = %v, want context.Canceled", err)
 			}
 		})
 	}

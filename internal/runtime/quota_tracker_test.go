@@ -30,7 +30,7 @@ func (s *snapshotProv) Quota() (*provider.QuotaSnapshot, error) {
 func (s *snapshotProv) ProbeRequest(modelID string) provider.ProbeRequest {
 	return provider.ProbeRequest{Method: http.MethodPost, Path: "/chat/completions"}
 }
-func (s *snapshotProv) ExtraHeaders(*http.Request, []byte, string)           {}
+func (s *snapshotProv) ExtraHeaders(*http.Request, []byte, string, string)   {}
 func (s *snapshotProv) FilterModelIDs(ids []string) (kept, dropped []string) { return ids, nil }
 
 // flakyProv fails transiently a fixed number of times before succeeding.

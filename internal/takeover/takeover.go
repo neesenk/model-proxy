@@ -233,6 +233,13 @@ type ModelFacts struct {
 	// RunTakeoverReportOpts logs them so the models' absence from written
 	// configs is explained.
 	NotLoggedIn []string
+	// DisabledStoreWarning carries the fail-open degradation notice recorded
+	// when the operator disabled-model store (disabled_models.json) could not
+	// be read (ModelFactsFor detects it on the no-override path): the run
+	// proceeds UNFILTERED, so operator-disabled models may be written to
+	// client configs — the operator must see that the safety list was
+	// bypassed. Surfaced in TakeoverReport.Warnings and the stderr warnings.
+	DisabledStoreWarning string
 	// SourceDefault is the application's "metadata came from conservative
 	// defaults" marker value in Sources; a negative value disables warnings.
 	SourceDefault int
@@ -363,7 +370,10 @@ func RunTakeoverReportOpts(cfg *configdomain.Config, which, bakDir string, facts
 	}
 	routes := facts.Routes
 	meta := facts.Meta
-	report.Warnings = MetadataWarnings(clients, cfg, facts)
+	if facts.DisabledStoreWarning != "" {
+		report.Warnings = append(report.Warnings, facts.DisabledStoreWarning)
+	}
+	report.Warnings = append(report.Warnings, MetadataWarnings(clients, cfg, facts)...)
 	EmitTakeoverWarnings(clients, cfg, meta, facts)
 	if len(facts.Unreachable) > 0 {
 		logx.Infof("  ~ excluded (no chat-protocol route — cannot be served to chat clients): %s",
@@ -442,8 +452,12 @@ func MetadataWarnings(clients []ClientSpec, cfg *configdomain.Config, facts Mode
 	return out
 }
 
-// EmitTakeoverWarnings prints MetadataWarnings to stderr, one line each.
+// EmitTakeoverWarnings prints the run's warnings (the disabled-store
+// degradation notice plus MetadataWarnings) to stderr, one line each.
 func EmitTakeoverWarnings(clients []ClientSpec, cfg *configdomain.Config, meta map[string]map[string]catalog.Model, facts ModelFacts) {
+	if facts.DisabledStoreWarning != "" {
+		fmt.Fprintln(os.Stderr, "warning: "+facts.DisabledStoreWarning)
+	}
 	for _, w := range MetadataWarnings(clients, cfg, facts) {
 		fmt.Fprintln(os.Stderr, "warning: "+w)
 	}

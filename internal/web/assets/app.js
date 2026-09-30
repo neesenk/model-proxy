@@ -501,6 +501,10 @@ function showTabPanel(name) {
   const prevTab = activeTab;
   const switched = prevTab !== name;
   if (switched) tabScrollMemory[prevTab] = window.scrollY;
+  // Tab switches are a remount boundary: drop combo instances whose input
+  // was orphaned since the last attach instead of leaving their body-level
+  // menus around until the next attachCombo.
+  sweepComboInstances();
   for (const b of tabBtns) {
     const on = b.dataset.tab === name;
     b.classList.toggle('active', on);
@@ -1066,7 +1070,7 @@ function mountLogPage(page, query) {
   host.innerHTML = `
     <div class="req-controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
       <select id="req-agent" class="req-input" title="filter by client agent"><option value="">All Agents</option></select>
-      <span class="combo"><input id="req-session" placeholder="All Sessions" value="${esc(st.filters.session)}" class="req-input" title="filter by session (Model: client session header; MCP: the exchange's session id) — type to search the session list"/></span>
+      <span class="combo"><input id="req-session" placeholder="All Sessions" value="${esc(st.filters.session)}" class="req-input" title="filter by session (Model: client session header; MCP: the exchange's session id) — type to search the session list; the committed filter is an exact session-id match, not a substring"/></span>
       <span class="combo"><input id="req-provider" placeholder="All Providers" value="${esc(st.filters.provider)}" class="req-input"/></span>
       <span class="combo"><input id="req-model" placeholder="${esc(page.modelPlaceholder)}" value="${esc(st.filters.model)}" class="req-input"/></span>
       <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="req-errors" ${st.filters.errors ? 'checked' : ''}/> Errors Only</label>
@@ -1145,13 +1149,13 @@ function mountLogPage(page, query) {
   // renderRequestSelectors (combos.sessionOptions).
   attachCombo(document.getElementById('req-session'), combos.sessionOptions, onSessionSelect);
   // Paint the retained agent/session selections into the freshly rendered
-  // (option-less) selects BEFORE the first fetch: refresh() reads the filter
-  // back out of the DOM, so an empty select would otherwise clear a filter
-  // that survived the re-render.
+  // controls BEFORE the first fetch: refresh() reads the filter back out of
+  // the DOM, so an empty control would otherwise clear a filter that
+  // survived the re-render.
   refreshRequestsData(combos);
   applyRequestDrill();
   // Chrome's same-document history form restore can revert the freshly
-  // painted selects to the pushed entry's snapshot (history-driven
+  // painted filter controls to the pushed entry's snapshot (history-driven
   // remounts land here right after Back) — the guard re-asserts the page
   // state's values for a short window.
   scheduleFormRestoreGuard();
@@ -1161,8 +1165,12 @@ function mountLogPage(page, query) {
 // after a history-driven (Back/Forward) application. Chrome restores form
 // controls to the pushed entry's snapshot on same-document history
 // navigation — asynchronously, AFTER the hashchange handler's sync render —
-// silently reverting selects (no JS setter, no DOM mutation events). One
-// deferred re-apply lands after the restore window and wins.
+// silently reverting them (no JS setter, no DOM mutation events). One
+// deferred re-apply lands after the restore window and wins. A focused
+// control is never overwritten: the async restore never holds focus, so a
+// focused control means the user is typing inside the guard window (the
+// session controls are text inputs since the combo switch — an unconditional
+// re-assert erased in-progress typing every 100ms).
 function scheduleFormRestoreGuard() {
   const page = activeRequestsPageKey;
   const tab = activeTab;
@@ -1176,7 +1184,7 @@ function scheduleFormRestoreGuard() {
         const st = logPageState[page];
         if (st) {
           const sel = document.getElementById('req-session');
-          if (sel && sel.value !== st.filters.session) {
+          if (sel && sel !== document.activeElement && sel.value !== st.filters.session) {
             sel.value = st.filters.session;
             syncClearable(sel);
           }
@@ -1186,7 +1194,7 @@ function scheduleFormRestoreGuard() {
       } else {
         const S = livePageState[page];
         const sel = document.getElementById('live-session');
-        if (S && sel && sel.value !== S.session) {
+        if (S && sel && sel !== document.activeElement && sel.value !== S.session) {
           sel.value = S.session;
           syncClearable(sel);
         }
@@ -1321,6 +1329,20 @@ function renderRequestSelectors(combos) {
 // Requests re-render.
 const comboInstances = new Set();
 let comboGlobalsWired = false;
+let comboMenuSeq = 0;
+
+// sweepComboInstances drops combos whose input left the document (host
+// innerHTML rebuilds orphan the body-level menu div and the Set entry).
+// attachCombo sweeps on every new attach; showTabPanel sweeps on tab
+// switches so orphans don't linger until the next attach.
+function sweepComboInstances() {
+  for (const inst of comboInstances) {
+    if (!inst.input.isConnected) {
+      comboInstances.delete(inst);
+      inst.menu.remove();
+    }
+  }
+}
 
 function wireComboGlobals() {
   if (comboGlobalsWired) return;
@@ -1334,15 +1356,18 @@ function wireComboGlobals() {
   window.addEventListener('resize', closeAll);
   window.addEventListener('scroll', (event) => {
     // A scroll INSIDE an open combo's own option list is the user browsing
-    // the list — the menu is itself the scrollable (position: fixed,
-    // overflow: auto), so closing here would yank the dropdown away
-    // mid-scroll. Only anchor-moving scrolls (page/panel) close: menus are
-    // fixed-positioned, so once the input's anchor scrolls the alignment is
-    // stale (same behavior as a native select popup).
+    // that list — the menu is itself the scrollable (position: fixed,
+    // overflow: auto), so closing it here would yank the dropdown away
+    // mid-scroll. The skip is per-menu: only the scrolled menu survives; any
+    // OTHER open menu still closes (its anchor moved). Page/panel scrolls
+    // close everything: menus are fixed-positioned, so once the input's
+    // anchor scrolls the alignment is stale (same behavior as a native
+    // select popup).
     for (const combo of comboInstances) {
-      if (!combo.menu.hidden && (event.target === combo.menu || combo.menu.contains(event.target))) return;
+      if (combo.menu.hidden) continue;
+      if (event.target === combo.menu || combo.menu.contains(event.target)) continue;
+      combo.close();
     }
-    closeAll();
   }, true);
 }
 
@@ -1351,6 +1376,9 @@ function wireComboGlobals() {
 // (the native <datalist> popup is browser chrome we cannot align or style).
 // Typing filters, ArrowUp/Down moves, Enter picks the active option (or, with
 // nothing active, falls through to onSelect), Escape/outside click closes.
+// WAI-ARIA combobox semantics: the input points at the body-level listbox
+// via aria-controls, options carry role=option + id + aria-selected, and the
+// keyboard highlight mirrors into aria-activedescendant.
 function attachCombo(input, options, onSelect) {
   if (!input || input.dataset.comboWired === '1') return;
   input.dataset.comboWired = '1';
@@ -1362,15 +1390,18 @@ function attachCombo(input, options, onSelect) {
   const menu = document.createElement('div');
   menu.className = 'combo-menu';
   menu.setAttribute('role', 'listbox');
+  menu.id = `combo-menu-${++comboMenuSeq}`;
   menu.setAttribute('data-popup', ''); // the auto-refresh gate looks for this
   menu.hidden = true;
   document.body.appendChild(menu);
+  input.setAttribute('aria-controls', menu.id);
   let active = -1;
 
   const close = () => {
     if (menu.hidden) return;
     menu.hidden = true;
     input.setAttribute('aria-expanded', 'false');
+    input.removeAttribute('aria-activedescendant');
     active = -1;
   };
 
@@ -1380,10 +1411,11 @@ function attachCombo(input, options, onSelect) {
     if (!list.length) {
       menu.innerHTML = '<div class="combo-empty">no matching option</div>';
     } else {
-      menu.innerHTML = list.map((option) => `<div class="combo-option" role="option" data-value="${esc(option)}">${esc(option)}</div>`).join('');
+      menu.innerHTML = list.map((option, index) => `<div class="combo-option" role="option" id="${menu.id}-opt-${index}" aria-selected="false" data-value="${esc(option)}">${esc(option)}</div>`).join('');
     }
     menu.hidden = false;
     input.setAttribute('aria-expanded', 'true');
+    input.removeAttribute('aria-activedescendant');
     active = -1;
     positionCombo(input, menu);
     menu.querySelectorAll('.combo-option').forEach((option) => {
@@ -1414,13 +1446,22 @@ function attachCombo(input, options, onSelect) {
       active = event.key === 'ArrowDown'
         ? (active + 1) % items.length
         : (active - 1 + items.length) % items.length;
-      items.forEach((item, index) => item.classList.toggle('active', index === active));
+      items.forEach((item, index) => {
+        const on = index === active;
+        item.classList.toggle('active', on);
+        item.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      input.setAttribute('aria-activedescendant', items[active].id);
       items[active].scrollIntoView({ block: 'nearest' });
       return;
     }
     if (event.key === 'Enter') {
       // Pick the highlighted option when there is one, otherwise apply the
-      // typed text (the backend match is a substring, so free text is valid).
+      // typed text as a free-text commit. Whether free text matches anything
+      // is the backend's filter semantics: provider/model are case-
+      // insensitive substring matches, but session is an EXACT session-id
+      // match (docs/web-api.md) — Entering an id prefix on the session combo
+      // yields an empty table, not a prefix search.
       if (!menu.hidden && active >= 0 && items[active]) {
         event.preventDefault();
         input.value = items[active].dataset.value;
@@ -1434,13 +1475,9 @@ function attachCombo(input, options, onSelect) {
   // Remounts (host.innerHTML rebuilds, e.g. every log-page mount and history
   // step) orphan earlier combos: their input is gone, but the body-level
   // menu div and this Set entry leak one per remount — the removed
-  // resetCombos's job. Sweep disconnected instances on each new attach.
-  for (const inst of comboInstances) {
-    if (!inst.input.isConnected) {
-      comboInstances.delete(inst);
-      inst.menu.remove();
-    }
-  }
+  // resetCombos's job. Sweep disconnected instances on each new attach (and
+  // on tab switches via showTabPanel).
+  sweepComboInstances();
   comboInstances.add({ input, menu, close });
   wireComboGlobals();
   // The shared ✕ clear affordance; clearing commits like an Enter (onSelect).
@@ -1498,7 +1535,9 @@ function attachClearable(input, onClear) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'clear-x';
-  btn.tabIndex = -1;
+  // Keyboard-reachable: a native <button> fires click on Enter/Space, landing
+  // on the same clear path below. While the control is empty the button is
+  // display:none (.has-text gates it), so it never adds a dead tab stop.
   btn.title = isSelect ? 'Reset to All' : 'Clear';
   btn.setAttribute('aria-label', isSelect ? 'Reset filter to All' : 'Clear input');
   btn.textContent = '✕';
@@ -3683,7 +3722,7 @@ function renderLiveCard(target, query) {
   target.insertAdjacentHTML('beforeend', `
     <div class="live-toolbar">
       <label class="hint" for="live-session">Session</label>
-      <span class="combo"><input id="live-session" placeholder="All (live)" value="${esc(S.session)}" class="req-input" title="filter by live session — type to search the session list"/></span>
+      <span class="combo"><input id="live-session" placeholder="All (live)" value="${esc(S.session)}" class="req-input" title="filter by live session — type to search the session list; the committed filter is an exact session-id match, not a substring"/></span>
     </div>
     <div id="live-table"><span class="msg hint">connecting…</span></div>
     <div id="live-session-panel" hidden></div>`);
@@ -6084,11 +6123,13 @@ const MODEL_DISABLE_PERSIST_PREFIX = 'toggle applied in memory but persisting it
 // confirmation (it stops routing immediately: in-flight conversations on
 // that model start failing over or erroring); enabling (checking) runs
 // directly. The browser has already flipped the switch visually when the
-// change event fires, so the cancel and failure paths revert it — success
-// re-fetches /api/models and re-renders the Status tab from the server
-// response, never local echo. The override is persisted server-side
-// (disabled_models.json): it survives reload, restart and models refresh
-// (unlike pins, which are memory-only).
+// change event fires, so the cancel and mutation-failure paths revert it —
+// success re-fetches /api/models and re-renders the Status tab from the
+// server response, never local echo. The re-render runs in its own try: a
+// render failure after a committed mutation only warns (the server already
+// holds the new state, so reverting the switch would lie). The override is
+// persisted server-side (disabled_models.json): it survives reload, restart
+// and models refresh (unlike pins, which are memory-only).
 async function toggleModel(provider, model, disable, el) {
   if (disable) {
     const ok = await confirmDialog('Disable model',
@@ -6103,7 +6144,6 @@ async function toggleModel(provider, model, disable, el) {
   if (el) el.disabled = true;
   try {
     await apiPost('/api/models/disable', { provider, model, disabled: disable });
-    await renderStatusTab();
   } catch (e) {
     if (el) el.disabled = false;
     // 500 + the stable persist prefix: the in-memory toggle DID apply — only
@@ -6120,6 +6160,17 @@ async function toggleModel(provider, model, disable, el) {
     // state — same identity as on the cancel path above).
     if (el) el.checked = disable;
     window.alert((disable ? 'disable failed: ' : 'enable failed: ') + e.message);
+    return;
+  }
+  // The mutation committed server-side, so a render failure below must NOT
+  // roll the switch back (the server already holds the new state — reverting
+  // would show the opposite of the runtime's truth) nor report "disable
+  // failed": warn and leave the switch where the browser flipped it.
+  try {
+    await renderStatusTab();
+  } catch (e) {
+    if (el) el.disabled = false;
+    window.alert('toggle applied, but refreshing the view failed: ' + e.message);
   }
 }
 

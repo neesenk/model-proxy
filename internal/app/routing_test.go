@@ -205,8 +205,8 @@ func (t *testProv) ProbeRequest(modelID string) provider.ProbeRequest {
 		Body:   []byte(`{"model":"` + modelID + `","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`),
 	}
 }
-func (t *testProv) ExtraHeaders(req *http.Request, _ []byte, path string) {}
-func (t *testProv) FilterModelIDs(ids []string) (kept, dropped []string)  { return ids, nil }
+func (t *testProv) ExtraHeaders(req *http.Request, _ []byte, _ string, path string) {}
+func (t *testProv) FilterModelIDs(ids []string) (kept, dropped []string)            { return ids, nil }
 
 var _ provider.Provider = (*testProv)(nil)
 

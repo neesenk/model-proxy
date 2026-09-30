@@ -352,7 +352,11 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 //   - upstream_error: terminal pass that neither committed nor lost the client.
 //     A client-shape conversion failure (res.conversionErr with no upstream
 //     ever tried) is NOT an upstream error — the request shape is the client's
-//     problem, same as a guard interception, and is skipped entirely;
+//     problem, same as a guard interception, and is skipped entirely. The same
+//     exemption covers planning-level drops (res.planningErr: planTarget
+//     failure, missing runtime provider implementation, Responses state
+//     expansion failure) when no target was ever tried — a config-level gap
+//     must not count as an upstream bad run either;
 //   - empty_ok: committed 200 whose final client-facing response body is zero bytes;
 //   - repeat_turn: the current TurnKey was recently seen for this session+route,
 //     meaning the client resent the same conversational turn and the previous
@@ -375,12 +379,14 @@ func (p pipeline) recordLatchOutcome(req serveRequest, res serveResult) {
 	if !ok || policy.Escalation == nil {
 		return
 	}
-	// Client-shape failure: the request could not be converted for ANY
-	// candidate and no upstream was ever contacted. Counting it as an
-	// upstream_error would let a client retrying one unconvertible request
-	// escalate the latch — it gets the same treatment as a guard
+	// Client-shape or planning-level failure: the request could not be
+	// converted or planned for ANY candidate and no upstream was ever
+	// contacted. Counting it as an upstream_error would let a client
+	// retrying one unconvertible request — or an operator misconfiguration
+	// (unknown provider, missing runtime implementation, broken Responses
+	// state) — escalate the latch; it gets the same treatment as a guard
 	// interception (which never reaches this function).
-	if res.conversionErr != nil && len(res.tried) == 0 {
+	if len(res.tried) == 0 && (res.conversionErr != nil || res.planningErr) {
 		return
 	}
 	escalation := policy.Escalation
@@ -559,6 +565,13 @@ type serveResult struct {
 	// circuit-breaker tick for a provider that never misbehaved.
 	clientGone    bool
 	conversionErr *protocol.UnsupportedError // first client feature no candidate conversion could safely represent
+	// planningErr marks a pass where at least one target was dropped BEFORE
+	// any upstream contact for planning-level reasons: planTarget failure
+	// (unknown provider config), a missing runtime provider implementation
+	// (fail-closed), or Responses state expansion failure. Like conversionErr
+	// it is NOT an upstream verdict: recordLatchOutcome exempts a pass where
+	// nothing was ever tried (see the upstream_error signal).
+	planningErr bool
 	// committedBodyBytes is the number of bytes written to the client response
 	// writer by the committed pass. It is filled in by forward() after serveOnce
 	// returns and is used by recordLatchOutcome to evaluate the empty_ok signal.
@@ -659,7 +672,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 		// panel→synthesis engine (its synthesizer leg reuses the target
 		// executor). A force-provider override (replay) targets one concrete
 		// backend, so it skips fusion entirely.
-		if t.Provider == "fusion" && forcedProvider == "" {
+		if t.Provider == configdomain.FusionProvider && forcedProvider == "" {
 			recipe, ok := cfg.Fusion[t.Model]
 			if !ok {
 				logx.Warnf("[proto=%s model=%s] target %d: fusion recipe %q not defined, skipping", proto, exposed, ti, t.Model)
@@ -686,7 +699,20 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 			Runtime: runtime, Target: t, ClientProto: proto, ClientPath: upPath,
 		})
 		if err != nil {
+			res.planningErr = true
 			logx.Warnf("[proto=%s model=%s] target %d: %v, skipping", proto, exposed, ti, err)
+			continue
+		}
+		// Fail closed on a missing runtime provider implementation (not
+		// logged in / unresolved pooled parent) BEFORE any per-target work —
+		// the same explicit check the executor, decisions and fusion layers
+		// make. The skip marks the pass planning-level and neither counts
+		// the target as tried nor as a hard failure: a config-level gap is
+		// not an upstream verdict.
+		if plan.Provider() == nil {
+			res.planningErr = true
+			logx.Warnf("[proto=%s model=%s] target %d (%s/%s): no runtime provider implementation — failing closed, skipping",
+				proto, exposed, ti, t.Provider, t.Model)
 			continue
 		}
 
@@ -697,6 +723,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 		if proto == "responses" && plan.BackendProtocol() != protocol.Responses && p.svc.ResponsesState != nil {
 			expandedBody, history, hit, err := p.svc.ResponsesState.Expand(body, sessionKey)
 			if err != nil {
+				res.planningErr = true
 				logx.Warnf("[proto=%s model=%s] target %d (%s/%s) responses state expansion failed: %v — skipping",
 					proto, exposed, ti, t.Provider, t.Model, err)
 				continue

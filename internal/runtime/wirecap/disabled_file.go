@@ -77,9 +77,10 @@ func LoadDisabledModelsFile(path string) (map[string][]string, error) {
 }
 
 // SaveDisabledModelsFile persists the override atomically: unique temp file
-// in the target directory + fsync + rename (the quota_tracker pattern — no
-// fixed .tmp name, so concurrent processes never clobber each other). Models
-// are sorted within each provider for stable files.
+// in the target directory + fsync + rename + parent-dir fsync (the
+// quota_tracker pattern — no fixed .tmp name, so concurrent processes never
+// clobber each other). Models are sorted within each provider for stable
+// files.
 func SaveDisabledModelsFile(path string, disabled map[string][]string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -121,5 +122,6 @@ func SaveDisabledModelsFile(path string, disabled map[string][]string) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
+	syncParentDir(dir)
 	return nil
 }

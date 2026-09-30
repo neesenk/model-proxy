@@ -439,3 +439,43 @@ func TestBuildOne_Volcengine_FetchModels_UnboundLegacyFallback(t *testing.T) {
 		t.Errorf("seam calls=%d last=%q, want 1 call with empty AK/SK", seam.calls, seam.last)
 	}
 }
+
+// TestBuildOne_Volcengine_FetchModels_NilSeamIsNotConfigured is the regression
+// for the unwired-seam nil call: AuthenticatedProvidersForHome builds with
+// BuildOptions{HomeDir} only (no ListArkAgentPlanModelIDs), and the
+// FetchModelsFn closure called it unconditionally. A model fetch on such an
+// instance must report not-configured, never panic.
+func TestBuildOne_Volcengine_FetchModels_NilSeamIsNotConfigured(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := poolConfig("volcengine")
+	p := BuildOne(cfg, BuildOptions{HomeDir: accounts.HomeDir()}, "volcengine", cfg.Providers["volcengine"], accounts.Credentials{})
+	if p == nil {
+		t.Fatal("BuildOne volcengine returned nil")
+	}
+	_, err := p.FetchModels()
+	if err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("FetchModels with unwired seam: err=%v, want a not-configured error", err)
+	}
+}
+
+// TestAuthenticatedProvidersForHome_VolcengineInstanceSafe pins the motivating
+// path end to end: the auth-projection build (no signed-list seam) produces a
+// volcengine instance whose model fetch degrades to an error instead of a
+// nil-call panic.
+func TestAuthenticatedProvidersForHome_VolcengineInstanceSafe(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
+		"volcengine": {OpenAIBaseURL: "http://x", Provider: "volcengine"},
+	}}
+	// The projection itself runs (build + AuthReady) without the seam.
+	_ = AuthenticatedProvidersForHome(cfg, home)
+	built := BuildProviders(cfg, accounts.NewStore(home), BuildOptions{HomeDir: home})
+	impl := built.Providers["volcengine"]
+	if impl == nil {
+		t.Fatal("volcengine was not built")
+	}
+	if _, err := impl.FetchModels(); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("FetchModels: err=%v, want a not-configured error (no panic)", err)
+	}
+}
