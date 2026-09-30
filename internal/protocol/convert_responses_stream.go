@@ -337,6 +337,36 @@ func (t *responsesSSEToAnthropicSSE) streamEnd() {
 
 // dispatch ============================================================
 
+// frameSink is the shared fold-dispatch target shared by the SSE converters:
+// handle one parsed event; isDone stops the fold loop (converter reached its
+// terminal frame).
+type frameSink interface {
+	handle(event string, data map[string]any)
+	isDone() bool
+}
+
+// dispatchParsedFrames runs the fold-parse/handle loop over one SSE frame
+// payload, shared verbatim by the r→a / r→chat / a→r responses converters
+// (their dispatch methods differ only in the [DONE] prelude): folded JSON
+// frames are recovered individually, the event name falls back to the
+// payload's own "type" (OpenRouter-style providers omit SSE event: lines),
+// and the loop stops once the converter is done.
+func dispatchParsedFrames(t frameSink, frameEvent string, dataEvents []string, payload string) {
+	for _, parsed := range parseFoldedSSEFrames[map[string]any](payload) {
+		data := parsed.value
+		event := foldedSSEFrameEvent(frameEvent, dataEvents, parsed.line)
+		// Some providers (OpenRouter-style, e.g. aqp's /responses) omit SSE
+		// event: lines entirely — fall back to the payload's own "type".
+		if event == "" {
+			event = strKey(data, "type")
+		}
+		t.handle(event, data)
+		if t.isDone() {
+			break
+		}
+	}
+}
+
 func (t *responsesSSEToAnthropicSSE) dispatch(frameEvent string, dataEvents []string, payload string) {
 	if payload == "[DONE]" {
 		t.ensureStart()
@@ -348,19 +378,7 @@ func (t *responsesSSEToAnthropicSSE) dispatch(frameEvent string, dataEvents []st
 		t.done = true
 		return
 	}
-	for _, parsed := range parseFoldedSSEFrames[map[string]any](payload) {
-		data := parsed.value
-		event := foldedSSEFrameEvent(frameEvent, dataEvents, parsed.line)
-		// Some providers (OpenRouter-style, e.g. aqp's /responses) omit SSE
-		// event: lines entirely — fall back to the payload's own "type".
-		if event == "" {
-			event = strKey(data, "type")
-		}
-		t.handle(event, data)
-		if t.done {
-			break
-		}
-	}
+	dispatchParsedFrames(t, frameEvent, dataEvents, payload)
 }
 
 func (t *responsesSSEToAnthropicSSE) handle(event string, data map[string]any) {
@@ -865,19 +883,7 @@ func (t *responsesSSEToOpenAISSE) dispatch(frameEvent string, dataEvents []strin
 		t.done = true
 		return
 	}
-	for _, parsed := range parseFoldedSSEFrames[map[string]any](payload) {
-		data := parsed.value
-		event := foldedSSEFrameEvent(frameEvent, dataEvents, parsed.line)
-		// Some providers (OpenRouter-style, e.g. aqp's /responses) omit SSE
-		// event: lines entirely — fall back to the payload's own "type".
-		if event == "" {
-			event = strKey(data, "type")
-		}
-		t.handle(event, data)
-		if t.done {
-			break
-		}
-	}
+	dispatchParsedFrames(t, frameEvent, dataEvents, payload)
 }
 
 func (t *responsesSSEToOpenAISSE) handle(event string, data map[string]any) {

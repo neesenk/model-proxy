@@ -127,19 +127,7 @@ func (t *anthropicSSEToResponsesSSE) dispatch(frameEvent string, dataEvents []st
 		t.finish()
 		return
 	}
-	for _, parsed := range parseFoldedSSEFrames[map[string]any](payload) {
-		data := parsed.value
-		event := foldedSSEFrameEvent(frameEvent, dataEvents, parsed.line)
-		// Some providers (OpenRouter-style, e.g. aqp's /responses) omit SSE
-		// event: lines entirely — fall back to the payload's own "type".
-		if event == "" {
-			event = strKey(data, "type")
-		}
-		t.handle(event, data)
-		if t.done {
-			break
-		}
-	}
+	dispatchParsedFrames(t, frameEvent, dataEvents, payload)
 }
 
 func (t *anthropicSSEToResponsesSSE) handle(event string, data map[string]any) {
