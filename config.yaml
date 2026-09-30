@@ -66,6 +66,7 @@ providers:
       - claude-sonnet-5-5
       - deepseek-v4-flash
       - deepseek-v4-pro
+      - deepseek-v4.1-flash
       - glm-5.2
       - glm-5.3
       - glm-5.3-flash
@@ -77,6 +78,7 @@ providers:
       - gpt-6-astra
       - gpt-6-luna
       - gpt-6-sol
+      - gpt-6.1-sol
       - kimi-k3
   codex:
     provider_id: codex
@@ -222,6 +224,7 @@ providers:
       - claude-sonnet-5
       - claude-sonnet-5-5
       - deepseek-v4-flash
+      - deepseek-v4.1-flash
       - deepseek-v4-pro
       - glm-5.2
       - glm-5.3
@@ -233,6 +236,7 @@ providers:
       - gpt-5.6-terra
       - gpt-6-astra
       - gpt-6-sol
+      - gpt-6.1-sol
       - gpt-6-luna
       - kimi-k3
   # Kimi Code (Moonshot membership coding plan — NOT the pay-as-you-go 开放平台).
