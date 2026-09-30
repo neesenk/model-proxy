@@ -227,13 +227,22 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 		if got := namedCallCountInNode(order.Body, "SchedulingQuotas"); got != 0 {
 			t.Errorf("Proxy.decideOrder splits quota projection into %d Manager read(s)", got)
 		}
+		// The generation binding may be a composite-literal key or an overlay
+		// assignment (decideOrder builds its ScheduleInput via the shared
+		// scheduleInput helper and overlays the per-site fields); exactly one
+		// GenerationArg binding either way — no other generation source may
+		// reach DecideOrder's input.
 		if got := keyedCompositeFieldCallCount(
 			order.Body,
 			"ScheduleInput",
 			"Generation",
 			"GenerationArg",
+		) + assignedFieldCallCount(
+			order.Body,
+			"Generation",
+			"GenerationArg",
 		); got != 1 {
-			t.Errorf("Proxy.decideOrder runtimeGenerationArg-bound ScheduleInput fields = %d, want 1", got)
+			t.Errorf("Proxy.decideOrder GenerationArg-bound generation bindings = %d, want 1", got)
 		}
 
 		managerFile, _ := parseGoPackage(t, "internal/runtime")

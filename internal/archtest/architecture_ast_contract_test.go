@@ -1456,6 +1456,29 @@ func keyedCompositeFieldCallCount(
 	return count
 }
 
+// assignedFieldCallCount counts exact `x.Field = call(...)` bindings — the
+// overlay-assignment form of keyedCompositeFieldCallCount's literal-key form
+// (a caller that builds its struct via a shared helper cannot express the
+// binding as a composite key).
+func assignedFieldCallCount(n ast.Node, fieldName, callName string) int {
+	count := 0
+	ast.Inspect(n, func(node ast.Node) bool {
+		assign, ok := node.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			return true
+		}
+		sel, ok := assign.Lhs[0].(*ast.SelectorExpr)
+		if !ok || sel.Sel == nil || sel.Sel.Name != fieldName {
+			return true
+		}
+		if call, ok := assign.Rhs[0].(*ast.CallExpr); ok && callableName(call.Fun) == callName {
+			count++
+		}
+		return true
+	})
+	return count
+}
+
 // assertCallPathBetween guards the repository lock order structurally: the
 // exact receiver-qualified target call must be lexically enclosed by the exact
 // receiver-qualified lock and unlock calls in the same function body.
