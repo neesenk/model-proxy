@@ -30,7 +30,7 @@
 | 会话视图 | app.js `sessionViewHTML`+`wireSessionTimeline`，pure.js `sessionHealthSummary` | Live 会话 / Requests 汇总 |
 | 时间线 tooltip | app.js `showTlTip`/`hideTlTip`，pure.js `sessionBarSummary` | 会话时间线 |
 | 大 body | app.js `chunkedBodyHTML` | raw body / 大 SSE |
-| 弹层 | `data-popup`+`hidden`；body 级走 app.js `comboInstances` | 日历 / combobox / 下拉 |
+| 弹层 | `data-popup`+`hidden`；body 级走 app.js `comboInstances` | 日历 / combobox / 下拉 / models refresh 结果浮层（`.models-refresh-pop`，app.js `modelsRefreshResults` 回填存活） |
 | 时间维度选择器 | pure.js `tokenRangePickerHTML`（`TOKEN_RANGES` 预设 + 双月日历；tr-* 样式）+ 各 tab wiring（Status tokens 区 / Analytics 工具栏 / Accounts Token usage 区块 / MCP Analytics 子标签）；Quota Window 预设跨 provider 语境复用 `quotaWindowFromSec`，provider 语境（Analytics）用 `quotaWindowForProvider` | jstests/pure.test.mjs（tokenRangePickerHTML 开/合两态 + quotaWindowFromSec/quotaWindowForProvider） |
 | 面板内子标签导航 | Status 同款左侧边栏 `.status-layout`/`.status-nav`/`.status-nav-item`（`data-mcp-tab` 驱动） | MCP tab 的 Servers/Routes/Analytics 子标签切换 |
 | MCP server/route 详情（行内展开） | app.js `mcpServerDetailHTML`+`mcpRouteDetailHTML`+`mcpToggleDetail`+`mcpRunProbe`（Servers 与 Routes 行点击原地插删详情行，双击守卫；probe 结果与 tools 表住在详情里），pure.js `mcpToolsTableHTML`，样式 `.mcp-row`/`.mcp-open`/`.mcp-detail-row` | jstests/pure.test.mjs（mcpToolsTableHTML 转义/空描述/空列表/markdown 描述）、uie2e.test.mjs（详情族：展开 + 自动 probe + tools 表） |

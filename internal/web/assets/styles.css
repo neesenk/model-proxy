@@ -1539,6 +1539,37 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .model-caps .table tr.model-off td { color: var(--muted); }
 .model-caps-action { text-align: right; white-space: nowrap; }
 
+/* Models Refresh result popover: floats under the provider card's Refresh
+   button (data-popup + hidden per the popup contract, so the Status tick
+   holds while it's open); content re-fills from app.js modelsRefreshResults
+   across the post-refresh re-render. Anchored to the card head's right edge,
+   so it aligns right instead of clipping the viewport. */
+.models-refresh-wrap { position: relative; margin-left: 4px; }
+.models-refresh-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  display: grid;
+  gap: 4px;
+  width: max-content;
+  max-width: 340px;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-inner);
+  box-shadow: var(--shadow-3);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+}
+.models-refresh-pop[hidden] { display: none; }
+.models-refresh-line { overflow-wrap: anywhere; }
+.models-refresh-line.ok { color: var(--ok-fg); }
+.models-refresh-line.warn { color: var(--warn-fg); }
+.models-refresh-line.err { color: var(--err-fg); }
+
 /* MCP tab tables: fixed layout pinned by the markup colgroup (the request
    table contract). Narrow badge/numeric/button columns get fixed small widths;
    Name/Endpoint/Targets take the flexible remainder. Cells that should stay on

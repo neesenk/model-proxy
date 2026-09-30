@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import {
   esc, linkifyEsc, fmtNum, fmtCompactNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
-  verdictBadge, modelCapMatrix, visibleModelRows, providerCapsSummary, providerFrozen, providerNames,
+  verdictBadge, modelCapMatrix, visibleModelRows, modelsRefreshResultHTML, providerCapsSummary, providerFrozen, providerNames,
   catalogMatchHTML, catalogMatchSummary, catalogMatchEditorHTML,
   ruleHitsLeaderboard,
   sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, linkedProviders, sessionHealthSummary, guardMarksHTML, guardMarksDetailHTML, requestMetaHTML,
@@ -274,6 +274,39 @@ test('visibleModelRows hides disabled rows by default, Show All keeps them', () 
   assert.deepEqual(visibleModelRows([null, { id: 'x' }], false),
     { rows: [null, { id: 'x' }], hidden: 0 });
   assert.deepEqual(visibleModelRows([null, { disabled: true }], false), { rows: [null], hidden: 1 });
+});
+
+test('modelsRefreshResultHTML renders kept summary plus one line per change class', () => {
+  const html = modelsRefreshResultHTML({
+    provider: 'aqp',
+    kept: ['a', 'b'],
+    added: ['deepseek-v4.1-flash'],
+    removed: ['old-m'],
+    probe_dropped: [{ model: 'bad-m', reason: 'HTTP 404' }],
+    policy_dropped: ['pol-m'],
+    warning: 'probe timed out once',
+    config_updated: true,
+  });
+  assert.match(html, /<div class="models-refresh-line">2 models kept · config updated, reloaded<\/div>/);
+  assert.match(html, /<div class="models-refresh-line ok">added: deepseek-v4\.1-flash<\/div>/);
+  assert.match(html, /<div class="models-refresh-line warn">removed: old-m<\/div>/);
+  assert.match(html, /<div class="models-refresh-line warn">dropped: bad-m — HTTP 404<\/div>/);
+  assert.match(html, /<div class="models-refresh-line warn">policy-filtered: pol-m<\/div>/);
+  assert.match(html, /<div class="models-refresh-line warn">warning: probe timed out once<\/div>/);
+});
+
+test('modelsRefreshResultHTML escapes backend strings and normalizes missing fields', () => {
+  const html = modelsRefreshResultHTML({
+    kept: ['a'],
+    added: ['<img onerror=x>', 'b & c'],
+    config_updated: false,
+  });
+  assert.match(html, /1 model kept · config unchanged/);
+  assert.ok(html.includes('added: &lt;img onerror=x&gt;, b &amp; c'));
+  assert.ok(!html.includes('<img'));
+  // Missing arrays / empty result: kept summary only, no change lines.
+  assert.equal(modelsRefreshResultHTML({}), '<div class="models-refresh-line">0 models kept · config unchanged</div>');
+  assert.equal(modelsRefreshResultHTML(null), '<div class="models-refresh-line">0 models kept · config unchanged</div>');
 });
 
 test('catalogMatchSummary counts matched entries, tolerating junk', () => {

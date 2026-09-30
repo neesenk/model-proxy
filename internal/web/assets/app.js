@@ -44,7 +44,7 @@ import {
   accountRemainingLabel, scheduleTierLabel, scheduleTierTitle,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML,
   SECURITY_RANGES, securityRangeFromSecs, securityFilterQuery, securityFilterFromQuery, explainCacheKey,
-  POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText,
+  POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText, modelsRefreshResultHTML,
   iconPin, iconRefresh, iconChevron, statusBadgeHTML, kpiDeltaClass, logLineHTML, sumItemHTML,
   takeoverRunSummary, takeoverRestoreSummary, takeoverVariantLabel,
   takeoverWriteVariantsLabel, takeoverClientLabel,
@@ -6080,6 +6080,16 @@ function renderModelsCard(target, providers) {
     const visibilityBtn = disabledCount > 0
       ? `<button class="btn small" data-models-visibility title="${modelsShowDisabled ? 'Hide the disabled rows again — they stay disabled either way; the switch on each row re-enables a model.' : 'List the disabled rows too (still dimmed) — hidden by default because disabled models disappear from /v1/models.'}">${modelsShowDisabled ? 'Hide Disabled' : 'Show All'}</button> `
       : '';
+    // The Refresh result popover re-fills from modelsRefreshResults on every
+    // render: refreshProviderModels' post-success renderStatusTab() rebuilds
+    // this card, and the map is what carries the open popover (loading or
+    // result) across that rebuild — same survival pattern as
+    // routeTestResults on the Schedule card.
+    const refreshRes = modelsRefreshResults.get(p.name);
+    const refreshBtn = `<span class="models-refresh-wrap">` +
+      `<button class="btn small model-caps-refresh" data-models-refresh="${esc(p.name)}"${refreshRes && refreshRes.busy ? ' disabled' : ''}>${refreshRes && refreshRes.busy ? 'refreshing…' : 'Refresh'}</button>` +
+      `<div class="models-refresh-pop" data-popup data-models-refresh-pop="${esc(p.name)}"${refreshRes ? '' : ' hidden'}>${refreshRes ? refreshRes.html : ''}</div>` +
+      `</span>`;
     target.insertAdjacentHTML('beforeend', buildCard(
       p.name,
       `fp ${p.fingerprint || '—'} · probed ${fmtTimeSafe(p.probedAt) || '—'}`,
@@ -6088,8 +6098,9 @@ function renderModelsCard(target, providers) {
         <tbody>${rows}</tbody>
       </table>`,
       'flush model-caps',
-      `${visibilityBtn}<button class="btn small model-caps-refresh" data-models-refresh="${esc(p.name)}">Refresh</button>`));
+      `${visibilityBtn}${refreshBtn}`));
   }
+  wireModelsRefreshPopGlobals();
   target.querySelectorAll('[data-models-refresh]').forEach((btn) => {
     btn.addEventListener('click', () => refreshProviderModels(btn));
   });
@@ -6174,29 +6185,118 @@ async function toggleModel(provider, model, disable, el) {
   }
 }
 
+// modelsRefreshResults is the per-provider models-refresh popover state
+// (provider → {html, busy, timer}). The popover floats under the provider
+// card's Refresh button and carries data-popup + hidden per the popup
+// contract, so the 5s Status tick holds while it is open; the explicit
+// post-success renderStatusTab() bypasses that gate and rebuilds the card,
+// so the popover re-fills from this map on every render (same survival
+// pattern as routeTestResults on the Schedule card).
+const modelsRefreshResults = new Map();
+
+// MODELS_REFRESH_DISMISS_MS auto-dismisses a finished result popover; a
+// refresh still in flight (busy) is never auto- or outside-click-dismissed —
+// its popover is the only progress indicator and the button stays disabled.
+const MODELS_REFRESH_DISMISS_MS = 20000;
+
+// paintModelsRefreshPop reflects one provider's map entry into the CURRENT
+// DOM (the section may have been rebuilt since the state was stored).
+function paintModelsRefreshPop(provider) {
+  const pop = document.querySelector(`[data-models-refresh-pop="${CSS.escape(provider)}"]`);
+  if (!pop) return;
+  const entry = modelsRefreshResults.get(provider);
+  if (!entry) {
+    pop.hidden = true;
+    pop.innerHTML = '';
+    return;
+  }
+  pop.innerHTML = entry.html;
+  pop.hidden = false;
+}
+
+function armModelsRefreshDismiss(provider) {
+  const entry = modelsRefreshResults.get(provider);
+  if (!entry || entry.busy) return;
+  if (entry.timer) clearTimeout(entry.timer);
+  entry.timer = setTimeout(() => dismissModelsRefreshPop(provider), MODELS_REFRESH_DISMISS_MS);
+}
+
+function dismissModelsRefreshPop(provider) {
+  const entry = modelsRefreshResults.get(provider);
+  if (!entry || entry.busy) return;
+  if (entry.timer) clearTimeout(entry.timer);
+  modelsRefreshResults.delete(provider);
+  paintModelsRefreshPop(provider);
+}
+
+// wireModelsRefreshPopGlobals binds the popover's shared closers once:
+// outside click and Escape dismiss finished result popovers (in-flight ones
+// stay — the click that started a refresh lands inside .models-refresh-wrap
+// and never reaches the dismiss branch).
+let modelsRefreshPopGlobalsWired = false;
+function wireModelsRefreshPopGlobals() {
+  if (modelsRefreshPopGlobalsWired) return;
+  modelsRefreshPopGlobalsWired = true;
+  const dismissAll = () => {
+    for (const provider of [...modelsRefreshResults.keys()]) dismissModelsRefreshPop(provider);
+  };
+  document.addEventListener('click', (event) => {
+    if (event.target && event.target.closest && event.target.closest('.models-refresh-wrap')) return;
+    dismissAll();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') dismissAll();
+  });
+}
+
 // refreshProviderModels runs the daemon's models refresh (the web twin of
 // `model-proxy models refresh <provider>`) for one provider: fetch the live
 // list, probe every candidate, write the callable subset to config and
-// reload. The result summary is surfaced verbatim (the backend owns the
-// verdicts); the tab re-renders from fresh /api/models data afterwards.
+// reload. Progress and the verdict (kept/added/removed/dropped lines built by
+// pure.js modelsRefreshResultHTML — the backend owns the verdicts) surface in
+// the popover under the card's Refresh button instead of a blocking alert;
+// the tab re-renders from fresh /api/models data afterwards and the popover
+// rides modelsRefreshResults across that rebuild.
 async function refreshProviderModels(btn) {
   const provider = btn.getAttribute('data-models-refresh');
+  const prev = modelsRefreshResults.get(provider);
+  if (prev && prev.busy) return;
+  if (prev && prev.timer) clearTimeout(prev.timer);
+  modelsRefreshResults.set(provider, {
+    html: '<div class="models-refresh-line"><span class="spinner"></span>refreshing models…</div>',
+    busy: true,
+    timer: null,
+  });
   btn.disabled = true;
   btn.textContent = 'refreshing…';
+  paintModelsRefreshPop(provider);
+  let r;
   try {
-    const r = await apiPost('/api/models/refresh', { provider });
-    const lines = [`${r.provider}: ${r.kept.length} model${r.kept.length === 1 ? '' : 's'} kept (${r.config_updated ? 'config updated, reloaded' : 'config unchanged'})`];
-    if (r.added.length) lines.push(`added: ${r.added.join(', ')}`);
-    if (r.removed.length) lines.push(`removed: ${r.removed.join(', ')}`);
-    for (const d of r.probe_dropped) lines.push(`dropped: ${d.model} — ${d.reason}`);
-    if (r.policy_dropped.length) lines.push(`policy-filtered: ${r.policy_dropped.join(', ')}`);
-    if (r.warning) lines.push(`warning: ${r.warning}`);
-    window.alert(lines.join('\n'));
-    await renderStatusTab();
+    r = await apiPost('/api/models/refresh', { provider });
   } catch (e) {
-    btn.disabled = false;
-    btn.textContent = 'Refresh';
-    window.alert('models refresh failed: ' + e.message);
+    modelsRefreshResults.set(provider, {
+      html: `<div class="models-refresh-line err">models refresh failed: ${esc((e && e.message) || String(e))}</div>`,
+      busy: false,
+      timer: null,
+    });
+    paintModelsRefreshPop(provider);
+    const currentBtn = document.querySelector(`[data-models-refresh="${CSS.escape(provider)}"]`);
+    if (currentBtn) {
+      currentBtn.disabled = false;
+      currentBtn.textContent = 'Refresh';
+    }
+    armModelsRefreshDismiss(provider);
+    return;
+  }
+  modelsRefreshResults.set(provider, { html: modelsRefreshResultHTML(r), busy: false, timer: null });
+  armModelsRefreshDismiss(provider);
+  // The popover survives this re-render via modelsRefreshResults; a render
+  // failure after the committed refresh only leaves the popover showing the
+  // result on the stale view (the server already holds the new config).
+  try {
+    await renderStatusTab();
+  } catch {
+    paintModelsRefreshPop(provider);
   }
 }
 

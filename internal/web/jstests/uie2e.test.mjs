@@ -1276,6 +1276,18 @@ test('status 页 schedule route test 与 models catalog refresh (mutation 族)',
   await ctx.ev(`fetch('/api/models/disable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: 'dummy', model: 'm1', disabled: false }) }).then((r) => r.json())`);
   await ctx.waitFor('re-enabled row back in the default view', () => ctx.ev(
     `(() => { const tb = document.querySelector('.model-caps table tbody'); return tb && tb.textContent.includes('m1') && !document.querySelector('[data-models-visibility]'); })()`));
+  // Per-provider Refresh: the verdict surfaces in the popover under the
+  // button (data-popup contract), not a blocking alert; Escape dismisses it.
+  await ctx.ev(`document.querySelector('[data-models-refresh="dummy"]').click()`);
+  // (substring 'model kept' matches both the singular and plural summary)
+  await ctx.waitFor('refresh result popover shows the kept summary', () => ctx.ev(
+    `(() => { const p = document.querySelector('[data-models-refresh-pop="dummy"]');
+      return p && !p.hidden && p.hasAttribute('data-popup') && p.textContent.includes('model kept'); })()`));
+  await ctx.waitFor('refresh button re-enabled after the verdict', () => ctx.ev(
+    `(() => { const b = document.querySelector('[data-models-refresh="dummy"]'); return b && !b.disabled && b.textContent === 'Refresh'; })()`));
+  await ctx.ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  await ctx.waitFor('Escape dismisses the refresh popover', () => ctx.ev(
+    `(() => { const p = document.querySelector('[data-models-refresh-pop="dummy"]'); return !p || p.hidden; })()`));
   assert.deepEqual(await ctx.pageErrors(), [], 'status diagnostics must not raise JS errors');
 });
 

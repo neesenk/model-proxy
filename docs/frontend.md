@@ -60,6 +60,17 @@ Schedule 卡**（整卡重渲染会打断其他 route 进行中的测试态）�
 `/api/models` 重渲染本区——缓存文件已落盘，catalog 状态与 Model Matching 清单
 （匹配判定 + 编辑器的 catalog_ids 候选）必须立刻反映新缓存。
 
+**Models 区每 provider 卡的 Refresh 浮层**（`refreshProviderModels`，`models refresh
+<provider>` 的 Web 版）：点击卡头 Refresh 后在按钮下方弹出浮层
+（`.models-refresh-pop`，`data-popup`+`hidden` 契约——打开时 5s Status tick 被交互门
+拦住），刷新期间显示 spinner + “refreshing models…”，完成后原地显示结果行
+（kept 摘要 + added/removed/dropped/policy-filtered/warning 各一行，markup 由
+pure.js `modelsRefreshResultHTML` 生成），失败显示后端 message，不再用 alert。
+状态存模块级 `modelsRefreshResults` map（provider → {html, busy, timer}）：成功后的
+`renderStatusTab()` 重建本区，浮层靠该 map 在每次渲染时回填（同 Schedule 卡
+`routeTestResults` 的存活模式）；进行中（busy）的浮层不可关闭，结果浮层点击外部、
+Esc 或 20s 自动关闭。
+
 **Models 区每 provider 卡的模型行状态开关**（`toggleModel`）：每行末列是一个
 `input[type=checkbox].switch` 状态开关（macOS 风格：勾选 = 蓝色轨道+白色滑块靠右，
 未勾选 = 中性灰轨道+滑块靠左）——勾选 = 路由且暴露于 `/v1/models`，

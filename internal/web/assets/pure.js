@@ -429,6 +429,33 @@ export function visibleModelRows(models, showAll) {
   return { rows, hidden };
 }
 
+// modelsRefreshResultHTML renders the per-provider models refresh verdict
+// (POST /api/models/refresh — the web twin of `model-proxy models refresh
+// <provider>`) as lines for the popover floating under the provider card's
+// Refresh button: the kept summary (with the config_updated → reloaded
+// distinction) first, then one line per change class — added (ok), removed /
+// probe-dropped / policy-filtered / warning (warn). The popover is anchored
+// to the provider's own card, so the provider name is not repeated. All
+// backend strings are escaped; missing arrays normalize to empty.
+export function modelsRefreshResultHTML(r) {
+  const res = r || {};
+  const kept = (Array.isArray(res.kept) ? res.kept : []).length;
+  const lines = [`<div class="models-refresh-line">${kept} model${kept === 1 ? '' : 's'} kept · ${res.config_updated ? 'config updated, reloaded' : 'config unchanged'}</div>`];
+  const list = (cls, label, items) => {
+    const arr = Array.isArray(items) ? items : [];
+    if (arr.length) lines.push(`<div class="models-refresh-line ${cls}">${label}: ${esc(arr.join(', '))}</div>`);
+  };
+  list('ok', 'added', res.added);
+  list('warn', 'removed', res.removed);
+  for (const d of Array.isArray(res.probe_dropped) ? res.probe_dropped : []) {
+    const drop = d || {};
+    lines.push(`<div class="models-refresh-line warn">dropped: ${esc(drop.model)} — ${esc(drop.reason)}</div>`);
+  }
+  list('warn', 'policy-filtered', res.policy_dropped);
+  if (res.warning) lines.push(`<div class="models-refresh-line warn">warning: ${esc(res.warning)}</div>`);
+  return lines.join('');
+}
+
 // catalogMatchSummary folds the GET /api/models match list into the counts the
 // Model Catalog card's collapsed summary line shows.
 export function catalogMatchSummary(entries) {
