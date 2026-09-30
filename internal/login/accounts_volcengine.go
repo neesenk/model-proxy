@@ -52,39 +52,9 @@ func AddVolcengineAccount(cfg *configdomain.Config, name string, prov configdoma
 		}
 	}
 	id := accounts.AccountID(prov.Provider, accountCred{APIKey: apiKey, AccessKey: ak})
-	return id, withPoolLock(name, func() error {
-		pool, err := LoadPool(name, prov.Provider)
-		if err != nil {
-			return fmt.Errorf("load pool: %w", err)
-		}
-		now := nowTS()
-		idx := -1
-		for i, a := range pool.Accounts {
-			if a.ID == id {
-				idx = i
-				break
-			}
-		}
-		if idx >= 0 {
-			if !replace {
-				return fmt.Errorf("login cancelled")
-			}
-			pool.Accounts[idx].APIKey = apiKey
-			pool.Accounts[idx].AccessKey = ak
-			pool.Accounts[idx].SecretKey = sk
-			if label != "" {
-				pool.Accounts[idx].Label = label
-			}
-			pool.Accounts[idx].AddedAt = now
-		} else {
-			lbl := label
-			if lbl == "" {
-				lbl = id
-			}
-			pool.Accounts = append(pool.Accounts, poolAccount{
-				ID: id, Label: lbl, APIKey: apiKey, AccessKey: ak, SecretKey: sk, AddedAt: now,
-			})
-		}
-		return savePool(name, prov.Provider, pool)
+	return id, upsertPoolAccount(name, prov, id, label, replace, func(a *poolAccount) {
+		a.APIKey = apiKey
+		a.AccessKey = ak
+		a.SecretKey = sk
 	})
 }

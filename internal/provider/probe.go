@@ -39,6 +39,33 @@ func (baseProbe) ProbeRequest(modelID string) ProbeRequest {
 // (aqp: anthropic-version + x-compass-request-id) override it.
 func (baseProbe) ExtraHeaders(req *http.Request, _ []byte, _ string, path string) {}
 
+// anthropicMessagesProbe is baseProbe with the ANTHROPIC dialect swapped in:
+// probe POST /v1/messages + AnthropicProbeBody, and anthropic-version set on
+// every upstream request (forward + probe — the probe has no client request to
+// inherit the header from, and anthropic-compatible endpoints reject requests
+// without it; harmless on the OpenAI path). Embed it instead of baseProbe when
+// anthropic_base_url is the provider's primary path for Claude Code: the probe
+// MUST go to /v1/messages there because OpenAI's /chat/completions path on the
+// anthropic base 404s for every model. Providers whose ExtraHeaders does MORE
+// (aqp: + x-compass-request-id; zcode: + client fingerprint) keep baseProbe
+// and their own overrides.
+type anthropicMessagesProbe struct{ baseProbe }
+
+// ProbeRequest returns the anthropic messages shape, overriding baseProbe's
+// OpenAI /chat/completions default (see the type doc for why).
+func (anthropicMessagesProbe) ProbeRequest(modelID string) ProbeRequest {
+	return ProbeRequest{
+		Method: http.MethodPost,
+		Path:   "/v1/messages",
+		Body:   AnthropicProbeBody(modelID),
+	}
+}
+
+// ExtraHeaders sets anthropic-version on every upstream request.
+func (anthropicMessagesProbe) ExtraHeaders(req *http.Request, _ []byte, _ string, path string) {
+	req.Header.Set("anthropic-version", "2023-06-01")
+}
+
 // FilterModelIDs passes the list through unchanged by default. Providers with
 // static policy rules (volcengine: drop *-latest / lite / mini) override it.
 func (baseProbe) FilterModelIDs(ids []string) (kept, dropped []string) {

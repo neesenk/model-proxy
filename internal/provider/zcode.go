@@ -192,22 +192,12 @@ func (p *ZCodeProvider) Quota() (*QuotaSnapshot, error) {
 }
 
 // Usage prints "Provider:  zcode" first (interface contract), then the parsed
-// quota snapshot. Byte-for-byte the zhipu display logic (same BigModel backend).
+// quota snapshot — the shared BigModel view (same backend as zhipu); zcode has
+// no model-list/raw-JSON fallbacks, so a non-BigModel body is the notice.
 func (p *ZCodeProvider) Usage() error {
-	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(p.providerName)))
-	body, ok := usageGetForDisplay(p.cfg.UsageURL, p.providerName, p.AuthHeaders, p.cfg.Headers)
-	if !ok {
-		return nil
+	if _, rendered := bigmodelUsageHeaderAndQuota(p.providerName, p.cfg.UsageURL, p.AuthHeaders, p.cfg.Headers); !rendered {
+		fmt.Println(display.Yellow("Quota unavailable (not BigModel format)."))
 	}
-	if s, _ := ParseZhipuQuota(body, ""); s != nil {
-		if s.Level != "" {
-			fmt.Printf("%s %s\n", display.Dim("Level:     "), display.Magenta(s.Level))
-		}
-		DecorateExhaustionEta(p.providerName, s)
-		printQuotaSnapshot(s)
-		return nil
-	}
-	fmt.Println(display.Yellow("Quota unavailable (not BigModel format)."))
 	return nil
 }
 

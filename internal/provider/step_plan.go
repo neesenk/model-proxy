@@ -24,7 +24,9 @@ import (
 // by targetexec's body-proven quota-denied policy → cooldown + failover.
 type StepPlanProvider struct {
 	*ApiKeyBase
-	baseProbe
+	// anthropic_base_url is the primary path for Claude Code — anthropic probe
+	// + anthropic-version header (see anthropicMessagesProbe).
+	anthropicMessagesProbe
 	cfg          *Config
 	providerName string
 }
@@ -77,26 +79,6 @@ func (p *StepPlanProvider) Logout() error { return p.DeleteKey() }
 // pattern).
 func (p *StepPlanProvider) FetchModels() ([]string, error) {
 	return fetchModelsBearer(p.cfg, p.AuthHeaders)
-}
-
-// ProbeRequest returns the ANTHROPIC probe shape (/v1/messages), not baseProbe's
-// OpenAI /chat/completions: probeModelCallable selects the anthropic base URL
-// when anthropic_base_url is set (step-plan's primary path for Claude Code),
-// and OpenAI's /chat/completions path on the anthropic base would 404 for
-// every model (qwen-plan/volcengine lesson).
-func (p *StepPlanProvider) ProbeRequest(modelID string) ProbeRequest {
-	return ProbeRequest{
-		Method: http.MethodPost,
-		Path:   "/v1/messages",
-		Body:   AnthropicProbeBody(modelID),
-	}
-}
-
-// ExtraHeaders sets anthropic-version on every upstream request (forward +
-// probe). The probe has no client request to inherit it from, and
-// anthropic-compatible endpoints expect it (harmless on the OpenAI path).
-func (p *StepPlanProvider) ExtraHeaders(req *http.Request, _ []byte, _ string, path string) {
-	req.Header.Set("anthropic-version", "2023-06-01")
 }
 
 // Quota returns an unmeasured snapshot (no public Credit API — /v1/accounts

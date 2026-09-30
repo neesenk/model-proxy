@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"model-proxy/internal/display"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -260,18 +261,32 @@ func (p *CodexProvider) Usage() error {
 	return nil
 }
 
-func (p *ZhipuProvider) Usage() error {
-	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(p.providerName)))
-	body, ok := usageGetForDisplay(p.cfg.UsageURL, p.providerName, p.AuthHeaders, p.cfg.Headers)
+// bigmodelUsageHeaderAndQuota prints the shared BigModel usage view: the
+// provider header line, then the parsed quota snapshot (level + exhaustion
+// ETA + snapshot). Returns true when the quota path rendered; false means the
+// body was fetched but was not BigModel format (zhipu then falls through to
+// its model-list / raw-JSON views, zcode prints the unavailable notice), or
+// the fetch itself failed (usageGetForDisplay already reported it).
+func bigmodelUsageHeaderAndQuota(providerName, usageURL string, auth func(*http.Request) error, headers map[string]string) (body []byte, renderedQuota bool) {
+	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(providerName)))
+	body, ok := usageGetForDisplay(usageURL, providerName, auth, headers)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	if s, _ := ParseZhipuQuota(body, ""); s != nil {
 		if s.Level != "" {
 			fmt.Printf("%s %s\n", display.Dim("Level:     "), display.Magenta(s.Level))
 		}
-		DecorateExhaustionEta(p.providerName, s)
+		DecorateExhaustionEta(providerName, s)
 		printQuotaSnapshot(s)
+		return body, true
+	}
+	return body, false
+}
+
+func (p *ZhipuProvider) Usage() error {
+	body, rendered := bigmodelUsageHeaderAndQuota(p.providerName, p.cfg.UsageURL, p.AuthHeaders, p.cfg.Headers)
+	if rendered {
 		return nil
 	}
 	var ml struct {

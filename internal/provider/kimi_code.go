@@ -31,7 +31,10 @@ import (
 // GET <openai_base_url>/usages (see Quota / ParseKimiCodeQuota).
 type KimiCodeProvider struct {
 	*ApiKeyBase
-	baseProbe
+	// Kimi Code's anthropic_base_url speaks the Anthropic messages API and is
+	// the primary path — anthropic probe + anthropic-version header
+	// (see anthropicMessagesProbe).
+	anthropicMessagesProbe
 	cfg *Config
 }
 
@@ -78,28 +81,6 @@ func (p *KimiCodeProvider) FetchModels() ([]string, error) {
 // swap is visible without the vendor CLI.
 func (p *KimiCodeProvider) FetchModelInfos() ([]ModelInfo, error) {
 	return fetchModelInfosBearer(p.cfg, p.AuthHeaders)
-}
-
-// ProbeRequest overrides the OpenAI default: Kimi Code's anthropic_base_url speaks
-// the Anthropic messages API, so the probe goes to /v1/messages (base does NOT
-// include /v1; the SDK appends it) with an anthropic body. Mirrors forward's
-// anthropic path. When anthropic_base_url is unset, the probe falls back to the
-// OpenAI base (selected by probeModelCallable) and the /v1/messages path won't
-// match — but a Kimi Code config always sets anthropic_base_url.
-func (p *KimiCodeProvider) ProbeRequest(modelID string) ProbeRequest {
-	return ProbeRequest{
-		Method: http.MethodPost,
-		Path:   "/v1/messages",
-		Body:   AnthropicProbeBody(modelID),
-	}
-}
-
-// ExtraHeaders sets Kimi Code's per-request anthropic-version header. Applied on
-// EVERY upstream request (forward + probe) so the probe (which has no client
-// request to copy from) is accepted by the Anthropic endpoint; harmless on the
-// OpenAI path (ignored). Mirrors AqpProvider (minus the compass request id).
-func (p *KimiCodeProvider) ExtraHeaders(req *http.Request, _ []byte, _ string, path string) {
-	req.Header.Set("anthropic-version", "2023-06-01")
 }
 
 // usagesURL derives the quota endpoint from openai_base_url + "/usages" (the

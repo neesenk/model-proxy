@@ -29,7 +29,10 @@ import (
 // ignores x-api-key; the Anthropic-compatible endpoint reads x-api-key).
 type VolcengineProvider struct {
 	*ApiKeyBase
-	baseProbe
+	// anthropic_base_url is the primary path for Claude Code — anthropic probe
+	// + anthropic-version header (see anthropicMessagesProbe). FilterModelIDs
+	// still overrides the embedded passthrough below.
+	anthropicMessagesProbe
 	cfg *Config
 }
 
@@ -72,26 +75,6 @@ func (p *VolcengineProvider) FetchModelsContext(ctx context.Context) ([]string, 
 	return nil, fmt.Errorf("FetchModelsFn not configured")
 }
 
-// ProbeRequest returns the ANTHROPIC probe shape (/v1/messages), not baseProbe's
-// OpenAI /chat/completions. probeModelCallable selects the anthropic base URL
-// when anthropic_base_url is set (volcengine's primary path for Claude Code), so
-// the probe path MUST be anthropic — /chat/completions on the anthropic base
-// (.../api/plan/chat/completions) 404s for every model.
-func (p *VolcengineProvider) ProbeRequest(modelID string) ProbeRequest {
-	return ProbeRequest{
-		Method: http.MethodPost,
-		Path:   "/v1/messages",
-		Body:   AnthropicProbeBody(modelID),
-	}
-}
-
-// ExtraHeaders sets anthropic-version on every upstream request (forward + probe).
-// The probe has no client request to inherit it from, and the anthropic-compatible
-// endpoint rejects requests without it.
-func (p *VolcengineProvider) ExtraHeaders(req *http.Request, _ []byte, _ string, path string) {
-	req.Header.Set("anthropic-version", "2023-06-01")
-}
-
 // volcengineModelFilterRegexps are the model-id exclusion rules applied to the
 // ListArkAgentPlanModel result. Each is a compiled regexp; a model id is dropped
 // when ANY rule matches. Rules are case-insensitive. Add a line here to extend
@@ -118,7 +101,7 @@ var volcengineModelFilterRegexps = []*regexp.Regexp{
 // FilterModelIDs applies volcengine's static policy rules: drops ids matching
 // volcengineModelFilterRegexps (*-latest / doubao-seed-1-* / lite / mini). This
 // is the "policy" pass of `models refresh`; the endpoint probe is the separate
-// callability pass. Overrides baseProbe's passthrough.
+// callability pass. Overrides the embedded baseProbe passthrough.
 func (p *VolcengineProvider) FilterModelIDs(ids []string) (kept, dropped []string) {
 	for _, id := range ids {
 		if isVolcengineModelFiltered(id) {

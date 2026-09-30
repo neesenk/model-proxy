@@ -99,7 +99,19 @@ func AddApikeyAccount(cfg *configdomain.Config, name string, prov configdomain.P
 		}
 	}
 	id := accounts.AccountID(prov.Provider, accountCred{APIKey: key})
-	return id, withPoolLock(name, func() error {
+	return id, upsertPoolAccount(name, prov, id, label, replace, func(a *poolAccount) {
+		a.APIKey = key
+	})
+}
+
+// upsertPoolAccount writes the account with the given id into the named pool
+// under the cross-process lock: existing id replaces in place (replace=false
+// aborts with "login cancelled" — a CLI/Web-shared contract string, keep it
+// verbatim), otherwise appends. mutate applies the provider's credential
+// fields to a zero entry, so the apikey and volcengine (extra AK/SK) flows
+// share one state machine.
+func upsertPoolAccount(name string, prov configdomain.Provider, id, label string, replace bool, mutate func(a *poolAccount)) error {
+	return withPoolLock(name, func() error {
 		pool, err := LoadPool(name, prov.Provider)
 		if err != nil {
 			return fmt.Errorf("load pool: %w", err)
@@ -116,17 +128,21 @@ func AddApikeyAccount(cfg *configdomain.Config, name string, prov configdomain.P
 			if !replace {
 				return fmt.Errorf("login cancelled")
 			}
-			pool.Accounts[idx].APIKey = key
+			mutate(&pool.Accounts[idx])
 			if label != "" {
 				pool.Accounts[idx].Label = label
 			}
 			pool.Accounts[idx].AddedAt = now
 		} else {
-			lbl := label
-			if lbl == "" {
-				lbl = id
+			var a poolAccount
+			mutate(&a)
+			a.ID = id
+			a.Label = label
+			if a.Label == "" {
+				a.Label = id
 			}
-			pool.Accounts = append(pool.Accounts, poolAccount{ID: id, Label: lbl, APIKey: key, AddedAt: now})
+			a.AddedAt = now
+			pool.Accounts = append(pool.Accounts, a)
 		}
 		return savePool(name, prov.Provider, pool)
 	})

@@ -17,7 +17,9 @@ import (
 // → quota cooldown + failover.
 type QwenPlanProvider struct {
 	*ApiKeyBase
-	baseProbe
+	// anthropic_base_url is the primary path for Claude Code — anthropic probe
+	// + anthropic-version header (see anthropicMessagesProbe).
+	anthropicMessagesProbe
 	cfg          *Config
 	providerName string
 }
@@ -71,26 +73,6 @@ func (p *QwenPlanProvider) Logout() error { return p.DeleteKey() }
 // refresh / usage display) falls back to the config models: list.
 func (p *QwenPlanProvider) FetchModels() ([]string, error) {
 	return fetchModelsBearer(p.cfg, p.AuthHeaders)
-}
-
-// ProbeRequest returns the ANTHROPIC probe shape (/v1/messages), not baseProbe's
-// OpenAI /chat/completions. probeModelCallable selects the anthropic base URL
-// when anthropic_base_url is set (qwen-plan's primary path for Claude Code), so
-// the probe path MUST be anthropic — /chat/completions on the anthropic base
-// (.../apps/anthropic/chat/completions) 404s for every model.
-func (p *QwenPlanProvider) ProbeRequest(modelID string) ProbeRequest {
-	return ProbeRequest{
-		Method: http.MethodPost,
-		Path:   "/v1/messages",
-		Body:   AnthropicProbeBody(modelID),
-	}
-}
-
-// ExtraHeaders sets anthropic-version on every upstream request (forward + probe).
-// The probe has no client request to inherit it from, and the anthropic-compatible
-// endpoint rejects requests without it.
-func (p *QwenPlanProvider) ExtraHeaders(req *http.Request, _ []byte, _ string, path string) {
-	req.Header.Set("anthropic-version", "2023-06-01")
 }
 
 // Quota returns an unmeasured snapshot (no public Credits-usage API). The
