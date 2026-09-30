@@ -401,3 +401,29 @@ func TestOpenCodeGoLogout_DeletesKey(t *testing.T) {
 		t.Error("AuthHeaders after Logout: want error (key deleted), got nil")
 	}
 }
+
+// Session-id sources feeding x-opencode-session must be printable-ASCII
+// guarded (same idiom as zcode): a control-byte value would make net/http
+// reject the whole outbound request, and that failure would land on this
+// provider's circuit breaker — client-controllable breaker feeding.
+func TestOpenCodeGoExtraHeaders_ControlCharSessionIgnored(t *testing.T) {
+	p := newTestOpenCodeGo(t, nil)
+
+	// Control bytes in the passed session id (the forward path's header half
+	// is only TrimSpace'd): dropped, and with no body identity the
+	// synthesized mp- id keeps the request routable.
+	req, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
+	p.ExtraHeaders(req, []byte(`{"model":"kimi-k3","messages":[]}`), "bad\x01sess", "/v1/messages")
+	if got := req.Header.Get("x-opencode-session"); !strings.HasPrefix(got, "mp-") {
+		t.Errorf("x-opencode-session = %q, want synthesized mp-<uuid> (control-byte session id must be dropped)", got)
+	}
+
+	// Control bytes in a mirrored allowlist header: that header is skipped
+	// and the passed session id still provides the identity.
+	req2, _ := http.NewRequest("POST", "https://opencode.ai/zen/go/v1/messages", nil)
+	req2.Header.Set("x-session-id", "bad\x02header")
+	p.ExtraHeaders(req2, nil, "sess-good", "/v1/messages")
+	if got := req2.Header.Get("x-opencode-session"); got != "sess-good" {
+		t.Errorf("x-opencode-session = %q, want the passed session id after the dirty header was rejected", got)
+	}
+}

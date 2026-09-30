@@ -532,3 +532,50 @@ func TestServeRouteGradeSelectorRetryRoundWithoutGradeReportsFallback(t *testing
 		t.Fatalf("retry-round grade routing = %+v, want source=fallback, no grade, selector choice recorded but not enforced", r[0])
 	}
 }
+
+// TestServeRouteGradeLatchEmptyGradeFallsThroughToSelector: the graded
+// counterpart of the absent-target rule. A session latched to a grade whose
+// every target is out of the current ordered set (operator disable,
+// capability filtering) must not suppress the selector or record
+// source=latch — buildGradeOrdered serves the natural/fallback order either
+// way, and the decision must attribute it to whatever actually produced it.
+func TestServeRouteGradeLatchEmptyGradeFallsThroughToSelector(t *testing.T) {
+	h := newHarness()
+	upA := newFakeUpstream(t, openaiOKResponder("from-a"))
+	upB := newFakeUpstream(t, openaiOKResponder("from-b"))
+	upSel := newFakeUpstream(t, selectorDecisionResponder("g1", 0.9))
+	snap := routeGradeSelectorSnapshot(t, h, upA, upB, upSel)
+	pol := snap.Cfg.RoutePolicies["m"]
+	pol.Escalation = &configdomain.EscalationConfig{
+		BadSignals:  []string{"upstream_error"},
+		Consecutive: 1,
+		Target:      RouteTarget{Provider: "a", Model: "ma"},
+		Dwell:       "30m",
+	}
+	// A declared grade with no representative among the route's targets: the
+	// latch resolves to it, but its group is empty in every scheduled round.
+	pol.Grades["ghost"] = []RouteTarget{{Provider: "c", Model: "mc"}}
+	snap.Cfg.RoutePolicies["m"] = pol
+	h.state.SetLatch("sess-ghost", "m", Latch{Target: "grade:ghost", Since: time.Now(), BadRuns: 0}, snap.Generation)
+
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}"`
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	r.Header.Set("x-claude-code-session-id", "sess-ghost")
+	w := httptest.NewRecorder()
+	Serve(h.svc, h.state, snap, "openai", w, r, "req-ghost")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if upSel.hits() != 1 {
+		t.Fatalf("empty-grade latch must not suppress the selector: selector hits = %d, want 1", upSel.hits())
+	}
+	if upB.hits() != 1 {
+		t.Fatalf("selector chose g1 (strong grade / provider b) but b hits = %d, want 1", upB.hits())
+	}
+	if r := h.fx.capturedRouting(); len(r) != 1 || r[0] == nil {
+		t.Fatalf("routing decision missing: %+v", r)
+	} else if r[0].Source != "selector" || r[0].Grade != "strong" {
+		t.Fatalf("routing = %+v, want source=selector grade=strong (inert latch must not claim attribution)", r[0])
+	}
+}

@@ -215,3 +215,123 @@ func TestSetTOMLTopKey_QuotedAndDuplicateVariants(t *testing.T) {
 		t.Errorf("unrelated content dropped:\n%s", out)
 	}
 }
+
+// TestSetTOMLTopKey_BOMFirstLine: a Windows "UTF-8 with BOM" config is valid
+// TOML for mainstream parsers, but TrimSpace does not strip U+FEFF — without
+// BOM handling the BOM'd first key line is invisible to the matcher and the
+// managed key would be appended a SECOND time (duplicate key = parse error).
+func TestSetTOMLTopKey_BOMFirstLine(t *testing.T) {
+	in := "\uFEFFmodel_provider = \"direct\"\n[models.glm]\nprovider = \"x\"\n"
+	out := takeover.SetTOMLTopKey(in, "model_provider", `"model-proxy"`)
+	if got := countLines(t, out, "model_provider"); got != 1 {
+		t.Errorf("%d model_provider lines, want 1 (BOM must not blind the matcher):\n%s", got, out)
+	}
+	if !strings.HasPrefix(out, "\uFEFF") {
+		t.Errorf("BOM must be preserved on rewrite:\n%s", out)
+	}
+	if !strings.Contains(out, `model_provider = "model-proxy"`) || !strings.Contains(out, "[models.glm]") {
+		t.Errorf("managed key not canonically rewritten / unrelated content dropped:\n%s", out)
+	}
+}
+
+// TestReplaceOrAppendTOMLSection_BOM: same blindness for section headers —
+// the BOM'd managed table must be replaced in place (never appended as a
+// duplicate table), a BOM'd file with no match must append cleanly, and the
+// BOM survives both paths.
+func TestReplaceOrAppendTOMLSection_BOM(t *testing.T) {
+	section := "\n[providers.\"model-proxy\"]\ntype = \"openai\"\nbase_url = \"http://new\"\n"
+
+	in := "\uFEFF[providers.\"model-proxy\"]\ntype = \"openai\"\nbase_url = \"http://old\"\n"
+	out, err := takeover.ReplaceOrAppendTOMLSection(in, `providers."model-proxy"`, section)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countLines(t, out, "[providers."); got != 1 {
+		t.Errorf("%d provider table headers, want 1 (BOM'd header must match):\n%s", got, out)
+	}
+	if strings.Contains(out, "http://old") || !strings.Contains(out, "http://new") {
+		t.Errorf("BOM'd managed table not replaced:\n%s", out)
+	}
+	if !strings.HasPrefix(out, "\uFEFF") {
+		t.Errorf("BOM must be preserved on replace:\n%s", out)
+	}
+
+	in2 := "\uFEFFkeep = 1\n[unrelated]\nx = 1\n"
+	out2, err := takeover.ReplaceOrAppendTOMLSection(in2, `providers."model-proxy"`, section)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countLines(t, out2, "[providers."); got != 1 {
+		t.Errorf("%d provider table headers, want 1 (clean append):\n%s", got, out2)
+	}
+	if !strings.HasPrefix(out2, "\uFEFF") || !strings.Contains(out2, "[unrelated]") {
+		t.Errorf("BOM / unrelated content lost on append:\n%s", out2)
+	}
+}
+
+// TestReplaceOrAppendTOMLSection_KeyLineConflicts: a table defined (or
+// implicitly created) by a key line cannot be re-declared by an appended
+// header — TOML rejects the document. These spellings are the dotted-key /
+// inline-table counterparts of the [[array]] hard conflict and must fail
+// closed instead of stacking a duplicate definition onto the file.
+func TestReplaceOrAppendTOMLSection_KeyLineConflicts(t *testing.T) {
+	section := "\n[providers.\"model-proxy\"]\ntype = \"openai\"\n"
+	conflicts := []struct{ name, in string }{
+		{"inline table at target path", "keep = 1\nproviders.\"model-proxy\" = { type = \"openai\" }\n"},
+		{"top-level dotted subkey", "providers.model-proxy.base_url = \"http://old\"\n"},
+		{"dotted subkey inside parent section", "[providers]\nmodel-proxy.base_url = \"http://old\"\n"},
+		{"inline table at parent path", "providers = { other = 1 }\n"},
+	}
+	for _, tc := range conflicts {
+		out, err := takeover.ReplaceOrAppendTOMLSection(tc.in, `providers."model-proxy"`, section)
+		if err == nil {
+			t.Errorf("%s: expected fail-closed error, got output:\n%s", tc.name, out)
+		}
+		if out != "" {
+			t.Errorf("%s: fail-closed must return no output, got:\n%s", tc.name, out)
+		}
+	}
+}
+
+// TestReplaceOrAppendTOMLSection_KeyLineNoFalseConflicts: the conflict
+// detector must stay within TOML's actual rules — body keys of the target's
+// own or deeper sections, a NEW subtable under a dotted-defined table
+// (spec-allowed), and element-wise distinct paths are all fine to write.
+func TestReplaceOrAppendTOMLSection_KeyLineNoFalseConflicts(t *testing.T) {
+	okays := []struct{ name, in, target, section string }{
+		{
+			name:    "body key inside target section",
+			in:      "[providers.model-proxy]\nbase_url = \"http://old\"\n",
+			target:  `providers."model-proxy"`,
+			section: "\n[providers.\"model-proxy\"]\nbase_url = \"http://new\"\n",
+		},
+		{
+			name:    "body key inside deeper section",
+			in:      "[providers.\"model-proxy\".extra]\nx = 1\n",
+			target:  `providers."model-proxy"`,
+			section: "\n[providers.\"model-proxy\"]\nbase_url = \"http://new\"\n",
+		},
+		{
+			name:    "new subtable beside dotted sibling (spec-allowed)",
+			in:      "[providers]\nmodel-proxy.base_url = \"http://old\"\n",
+			target:  `providers."model-proxy".extra`,
+			section: "\n[providers.\"model-proxy\".extra]\nx = 1\n",
+		},
+		{
+			name:    "element-wise distinct path",
+			in:      "mcp_servers_exa = 1\n",
+			target:  `mcp_servers.exa`,
+			section: "\n[mcp_servers.exa]\ncommand = \"x\"\n",
+		},
+	}
+	for _, tc := range okays {
+		out, err := takeover.ReplaceOrAppendTOMLSection(tc.in, tc.target, tc.section)
+		if err != nil {
+			t.Errorf("%s: unexpected conflict error: %v", tc.name, err)
+			continue
+		}
+		if !strings.Contains(out, strings.TrimSpace(strings.Split(tc.section, "\n")[1])) {
+			t.Errorf("%s: managed table missing from output:\n%s", tc.name, out)
+		}
+	}
+}

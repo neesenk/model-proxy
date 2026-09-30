@@ -125,9 +125,12 @@ func (p *OpenCodeGoProvider) FetchModels() ([]string, error) {
 //     client always wins.
 func (p *OpenCodeGoProvider) ExtraHeaders(req *http.Request, body []byte, sessionID string, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
+	// Session-id sources are guarded with printableASCII (same as zcode): a
+	// control-byte value would make net/http reject the whole outbound request
+	// and the failure would land on this provider's circuit breaker.
 	if req.Header.Get("x-opencode-session") == "" {
 		for _, h := range []string{"x-claude-code-session-id", "x-session-id", "user_id"} {
-			if v := req.Header.Get(h); v != "" {
+			if v := printableASCII(req.Header.Get(h)); v != "" {
 				req.Header.Set("x-opencode-session", v)
 				break
 			}
@@ -136,8 +139,13 @@ func (p *OpenCodeGoProvider) ExtraHeaders(req *http.Request, body []byte, sessio
 	// The forward path's resolved client session (from the ORIGINAL request:
 	// header allowlist first, then body spec fields) outranks whatever
 	// identity the CONVERTED body happens to carry — see the method doc.
-	if req.Header.Get("x-opencode-session") == "" && sessionID != "" {
-		req.Header.Set("x-opencode-session", sessionID)
+	// The body-derived half of that resolution is already bounded to a
+	// printable token (protocol.SessionIDFromBody); the header half only got
+	// TrimSpace'd, so it needs the same guard here.
+	if req.Header.Get("x-opencode-session") == "" {
+		if sid := printableASCII(sessionID); sid != "" {
+			req.Header.Set("x-opencode-session", sid)
+		}
 	}
 	// Spec-conforming header-less agents on unconverted legs: the stable
 	// conversation id rides in the body (see the method doc).

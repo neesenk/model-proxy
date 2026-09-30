@@ -421,6 +421,16 @@ func (p pipeline) applyRoutePolicyGrades(
 	}
 
 	latchedGrade, latchValue, latched := resolveLatchGrade(p.state, sessionKey, exposed, policy, now)
+	// Same strictness as the non-graded latch (applyRouteLatch's TargetIndex
+	// check): a session latched to a grade whose every target left the current
+	// filtered set (operator disable, capability/profile filtering) is inert —
+	// buildGradeOrdered already falls back to the natural order, and an inert
+	// latch must not suppress the selector or claim source=latch for an order
+	// it did not produce. All three values clear together: SelectGrade ranks a
+	// non-empty latchedGrade above the selector choice.
+	if latched && !gradeGroupHasTargets(filtered, latchedGrade) {
+		latched, latchedGrade, latchValue = false, "", ""
+	}
 
 	selectorRes := gradeSelectorResult{mode: "off", action: "none"}
 	var selectorChoice string

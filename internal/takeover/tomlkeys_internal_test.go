@@ -384,3 +384,72 @@ func TestRewriteEnv_CollapsesDuplicatesAndExportPrefix(t *testing.T) {
 		t.Errorf("missing key not appended:\n%s", out)
 	}
 }
+
+// TestRemoveTOMLSection_BOM: removal sees through a BOM'd header and keeps
+// the BOM on the surviving content.
+func TestRemoveTOMLSection_BOM(t *testing.T) {
+	in := "\uFEFF[providers.\"model-proxy\"]\nbase_url = \"http://old\"\n[keep]\nx = 1\n"
+	out := removeTOMLSection(in, `providers."model-proxy"`)
+	if strings.Contains(out, "http://old") {
+		t.Errorf("BOM'd section not removed:\n%s", out)
+	}
+	if !strings.HasPrefix(out, "\uFEFF") || !strings.Contains(out, "[keep]") {
+		t.Errorf("BOM / unrelated section lost:\n%s", out)
+	}
+}
+
+// TestRemoveTOMLSectionsWithURL_BOM: stale-section cleanup matches BOM'd
+// headers, and a BOM'd file with nothing to remove comes back byte-identical
+// (the zero-deletion contract must survive BOM handling).
+func TestRemoveTOMLSectionsWithURL_BOM(t *testing.T) {
+	in := "\uFEFF[mcp_servers.exa]\nurl = \"http://127.0.0.1:15721/mcp/exa\"\n[keep]\nx = 1\n"
+	out := removeTOMLSectionsWithURL(in, "127.0.0.1:15721/mcp/", map[string]bool{"mcp_servers.exa": true})
+	if strings.Contains(out, "mcp/exa") {
+		t.Errorf("BOM'd stale MCP section not removed:\n%s", out)
+	}
+	if !strings.HasPrefix(out, "\uFEFF") || !strings.Contains(out, "[keep]") {
+		t.Errorf("BOM / unrelated section lost:\n%s", out)
+	}
+
+	noMatch := "\uFEFF[mcp_servers.user]\nurl = \"https://elsewhere\"\n"
+	if out := removeTOMLSectionsWithURL(noMatch, "127.0.0.1:15721/mcp/", map[string]bool{"mcp_servers.exa": true}); out != noMatch {
+		t.Errorf("zero-deletion run must stay byte-identical:\nin:  %q\nout: %q", noMatch, out)
+	}
+}
+
+// TestTakeoverKimiDottedKeyConflictFailsClosed: the dotted-key spelling of
+// the managed table is the inline/dotted counterpart of the [[array]]
+// conflict — takeover must refuse (file untouched) instead of appending a
+// header that redefines the key and bricks the client config.
+func TestTakeoverKimiDottedKeyConflictFailsClosed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".kimi-code"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgTOML := filepath.Join(home, ".kimi-code", "config.toml")
+	original := "default_model = \"glm-5.3-flash\"\nproviders.\"model-proxy\" = { type = \"openai\" }\n"
+	if err := os.WriteFile(cfgTOML, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:15721",
+		Providers: map[string]configdomain.Provider{
+			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.3-flash"}},
+		},
+	}
+	err := RunTakeover(cfg, "kimi", filepath.Join(home, ".mp"), ModelFacts{SourceDefault: -1}, home, ModeUnified)
+	if err == nil {
+		t.Fatal("takeover over a dotted-key definition of the managed table must fail closed")
+	}
+	if !strings.Contains(err.Error(), `providers."model-proxy"`) {
+		t.Errorf("error must name the conflicting key line: %v", err)
+	}
+	data, rerr := os.ReadFile(cfgTOML)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if string(data) != original {
+		t.Errorf("failed takeover rewrote the client config:\n%s", data)
+	}
+}

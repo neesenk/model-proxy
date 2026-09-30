@@ -236,6 +236,27 @@ func codexModelCatalog(models []ExposedModel) []map[string]any {
 	return out
 }
 
+// stripTOMBOM splits a leading UTF-8 BOM (U+FEFF) off text. strings.TrimSpace
+// does not treat U+FEFF as whitespace, so without this every line-oriented
+// matcher is blind to a BOM'd first line: a Windows "UTF-8 with BOM" client
+// config (mainstream TOML parsers accept it) would slip past all header/key
+// matching and re-takeover would stack duplicate sections onto it. Every TOML
+// editor pairs this with restoreTOMBOM so a no-op rewrite stays
+// byte-identical and an edited file keeps its BOM.
+func stripTOMBOM(text string) (string, bool) {
+	if strings.HasPrefix(text, "\uFEFF") {
+		return text[len("\uFEFF"):], true
+	}
+	return text, false
+}
+
+func restoreTOMBOM(text string, hadBOM bool) string {
+	if hadBOM && text != "" {
+		return "\uFEFF" + text
+	}
+	return text
+}
+
 // SetTOMLTopKey sets a top-level bare key (placed before any [section]).
 // The match is SEMANTIC and whitespace/quoting-tolerant: a pre-existing
 // `key="x"` line, `'key' = "x"`, or a dotted spelling the client normalized
@@ -249,7 +270,10 @@ func codexModelCatalog(models []ExposedModel) []map[string]any {
 // ("""...""" strings, arrays spanning lines) are content, not key lines —
 // they are never matched, and a `[`-prefixed content line does not count as
 // the first section (tomlStructuralLines).
-func SetTOMLTopKey(text, key, val string) string {
+func SetTOMLTopKey(text, key, val string) (result string) {
+	text, hadBOM := stripTOMBOM(text)
+	defer func() { result = restoreTOMBOM(result, hadBOM) }()
+
 	target, ok := parseTOMLKeyPath(key)
 	if !ok {
 		target = []string{key}
@@ -321,11 +345,23 @@ func SetTOMLTopKey(text, key, val string) string {
 // stacking copies. Header-shaped lines inside multi-line strings/arrays are
 // content and never match (tomlStructuralLines).
 //
-// Fail-closed: if the file declares an ARRAY of tables with the same key
-// path (`[[providers."model-proxy"]]`), the write is refused with an error
-// — appending `[providers."model-proxy"]` would define the key twice, which
-// TOML rejects with a parse error, bricking the client config.
-func ReplaceOrAppendTOMLSection(text, sectionHeader, section string) (string, error) {
+// Fail-closed on redefinitions: the write is refused with an error — leaving
+// the file byte-identical — if the table is already declared in a form the
+// header matcher cannot replace:
+//   - an ARRAY of tables with the same key path
+//     (`[[providers."model-proxy"]]`): appending the plain table would define
+//     the key twice;
+//   - a KEY line that defines (or implicitly creates) the same table:
+//     `providers.model-proxy = {…}` / `providers.model-proxy.base_url = 1` /
+//     a parent `providers = {…}` inline value all collide with the header
+//     per TOML's table-definition rules (see keyLineTableConflictLine).
+//
+// In every case a blind append would leave a document TOML rejects with a
+// parse error, bricking the client config.
+func ReplaceOrAppendTOMLSection(text, sectionHeader, section string) (result string, err error) {
+	text, hadBOM := stripTOMBOM(text)
+	defer func() { result = restoreTOMBOM(result, hadBOM) }()
+
 	target, ok := parseTOMLKeyPath(sectionHeader)
 	if !ok {
 		// Structurally broken template name: keep the legacy exact-match
@@ -336,6 +372,9 @@ func ReplaceOrAppendTOMLSection(text, sectionHeader, section string) (string, er
 	structural := tomlStructuralLines(lines)
 	if i := arrayTableConflictLine(lines, structural, target); i >= 0 {
 		return "", fmt.Errorf("toml section [%s]: conflicts with existing array table %s (line %d) — a plain table and an array of tables cannot share a key; refusing to rewrite", sectionHeader, strings.TrimSpace(lines[i]), i+1)
+	}
+	if i := keyLineTableConflictLine(lines, structural, target); i >= 0 {
+		return "", fmt.Errorf("toml section [%s]: conflicts with existing key %s (line %d) — a key/inline-table line defines (or implicitly creates) the same table, and appending the header would redefine it; refusing to rewrite", sectionHeader, strings.TrimSpace(lines[i]), i+1)
 	}
 	matches := sectionMatchIndices(lines, structural, target)
 	if len(matches) > 0 {
@@ -382,6 +421,107 @@ func arrayTableConflictLine(lines []string, structural []bool, target []string) 
 	return -1
 }
 
+// keyLineTableConflictLine returns the line index of a structural key line
+// whose full path — enclosing plain-section header plus dotted key parts —
+// collides with target under TOML's table-definition rules:
+//   - the key path IS the target path (`glm = {…}` inside `[models]` vs
+//     appending `[models.glm]`): redefinition;
+//   - the target is a proper prefix of the key path and the key line lives in
+//     a SHALLOWER section (`[fruit]` + `apple.color = "red"` vs appending
+//     `[fruit.apple]`): a dotted key implicitly creates the table, and the
+//     header would redefine it — the spec's `[fruit.apple] # INVALID` case.
+//     Inside the target's own (or a deeper) section the same shape is an
+//     ordinary body key and never conflicts;
+//   - the key path is a proper prefix of the target (top-level
+//     `providers = {…}` vs appending `[providers."model-proxy"]`): inline
+//     tables and scalars are closed, sub-tables cannot attach from outside.
+//
+// Key lines under an `[[array]]` header belong to an array element, not the
+// named table, and are skipped: flagging them would refuse writes TOML
+// still accepts (arrayTableConflictLine covers the exact-name array case).
+func keyLineTableConflictLine(lines []string, structural []bool, target []string) int {
+	// section tracks the enclosing plain header's key path ([] = top level);
+	// nil means "inside an [[array]] body", whose key lines belong to an
+	// array element rather than the named table.
+	section := []string{}
+	for i, l := range lines {
+		if !structural[i] {
+			continue
+		}
+		trimmed := strings.TrimSpace(l)
+		if strings.HasPrefix(trimmed, "[") {
+			parts, isArray, ok := tomlHeaderPath(trimmed)
+			if !ok {
+				continue
+			}
+			if isArray {
+				section = nil
+			} else {
+				section = parts
+			}
+			continue
+		}
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || section == nil {
+			continue
+		}
+		eq := strings.IndexByte(trimmed, '=')
+		if eq < 0 {
+			continue
+		}
+		parts, ok := parseTOMLKeyPath(strings.TrimSpace(trimmed[:eq]))
+		if !ok || len(parts) == 0 {
+			continue
+		}
+		full := parts
+		if len(section) > 0 {
+			full = append(append([]string{}, section...), parts...)
+		}
+		switch classifyKeyPath(full, target) {
+		case keyPathEqual, keyPathContained:
+			return i
+		case keyPathExtends:
+			// Only a dotted key crossing the target from a shallower section
+			// creates the target implicitly; body keys of the target's own or
+			// deeper sections are ordinary content.
+			if len(section) < len(target) {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+type keyPathRelation int
+
+const (
+	keyPathDisjoint keyPathRelation = iota
+	keyPathEqual
+	keyPathExtends   // target is a proper prefix of full
+	keyPathContained // full is a proper prefix of target
+)
+
+// classifyKeyPath classifies two key paths that share a root: element-wise
+// comparison (never substring — `mcp_servers_exa` is not `mcp_servers`).
+func classifyKeyPath(full, target []string) keyPathRelation {
+	n := len(full)
+	if len(target) < n {
+		n = len(target)
+	}
+	for i := 0; i < n; i++ {
+		if full[i] != target[i] {
+			return keyPathDisjoint
+		}
+	}
+	switch {
+	case len(full) == len(target):
+		return keyPathEqual
+	case len(full) > len(target):
+		return keyPathExtends
+	default:
+		return keyPathContained
+	}
+}
+
 // sectionMatchIndices maps line indices of headers semantically equal to
 // target (plain tables only) for quick lookup while rebuilding the file.
 // Content lines (multi-line strings/arrays) never match: a header-shaped
@@ -421,7 +561,10 @@ func sectionEnd(lines []string, structural []bool, start int) int {
 // mistaken for a header (tomlStructuralLines), so a header-shaped line
 // inside a user's """...""" value survives and cannot truncate the body
 // scan.
-func removeTOMLSection(text, sectionHeader string) string {
+func removeTOMLSection(text, sectionHeader string) (result string) {
+	text, hadBOM := stripTOMBOM(text)
+	defer func() { result = restoreTOMBOM(result, hadBOM) }()
+
 	target, ok := parseTOMLKeyPath(sectionHeader)
 	if !ok {
 		target = []string{sectionHeader}
@@ -465,7 +608,10 @@ func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
 // string/array content is skipped for header and boundary detection, so a
 // `[`-prefixed array element cannot truncate the body scan and hide a stale
 // URL, and a header-shaped string line is never a cleanup target.
-func removeTOMLSectionsWithURL(text, needle string, generatedSections map[string]bool) string {
+func removeTOMLSectionsWithURL(text, needle string, generatedSections map[string]bool) (result string) {
+	text, hadBOM := stripTOMBOM(text)
+	defer func() { result = restoreTOMBOM(result, hadBOM) }()
+
 	// Normalize the generated namespace to semantic key paths: the client may
 	// have rewritten our quoted headers (`mcp_servers."x"` → mcp_servers.x),
 	// and a stale proxy section that no longer matches its original spelling

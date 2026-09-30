@@ -165,8 +165,9 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
   只清零 `BadRuns`，保留 latch target。
 - **与 band 的优先级**：先查 latch，latch 生效时跳过 bands；latch 过期/不存在时才走 bands。
   latch 目标不在当前 ordered 集（能力过滤剔除或 operator disable）时 latch 同样不生效——
-  顺序不变、不记录 `source=latch`，照常走 bands/selector（与 graded 路径
-  `resolveLatchGrade` 对不可解析目标返回 false 同一严格度）。
+  顺序不变、不记录 `source=latch`，照常走 bands/selector。graded 路径 `resolveLatchGrade`
+  同一严格度：目标不可解析到档、**或档在当前过滤后集合中无代表**（`gradeGroupHasTargets`
+  检查，与非 graded 路径的 TargetIndex 检查对称）均视为不生效，且不抑制 selector。
 - **与硬选择的优先级**：pin / `x-mp-force-provider` 生效时整条策略（含 latch）跳过，与 bands 同一规则。
 - **响应 cache**：启用 escalation 的 route 必须绕过响应 cache（与 force-provider/pin 同语义），
   否则已升级会话可能命中便宜档缓存。
