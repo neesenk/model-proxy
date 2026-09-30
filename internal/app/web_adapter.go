@@ -538,13 +538,7 @@ func (p *Proxy) adminPorts(
 			// virtual's credentials, so the probe must use the same impl.
 			p.mu.RLock()
 			defer p.mu.RUnlock()
-			impl := p.providers[name]
-			if impl == nil {
-				if vids := p.poolIndex[name]; len(vids) > 0 {
-					impl = p.providers[vids[0]]
-				}
-			}
-			return impl
+			return implOrFirstPooled(p.providers, p.poolIndex, name)
 		},
 		ProbeMCP:             p.probeMCP,
 		LocateGuardHits:      p.locateGuardHits,
@@ -560,13 +554,8 @@ func (p *Proxy) adminPorts(
 			// probe pass: the model list is per-upstream, not per-account.
 			p.mu.RLock()
 			cfg := p.cfg
-			impl := p.providers[name]
+			impl := implOrFirstPooled(p.providers, p.poolIndex, name)
 			vids := p.poolIndex[name]
-			if impl == nil {
-				if len(vids) > 0 {
-					impl = p.providers[vids[0]]
-				}
-			}
 			p.mu.RUnlock()
 			return admin.ModelRefreshRuntime{
 				Config: cfg, Provider: impl,

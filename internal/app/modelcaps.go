@@ -209,12 +209,7 @@ func (p *Proxy) probeAllModelCaps(ctx context.Context) {
 				continue
 			}
 		}
-		impl := provs[name]
-		if impl == nil {
-			if vids := poolIndex[name]; len(vids) > 0 {
-				impl = provs[vids[0]]
-			}
-		}
+		impl := implOrFirstPooled(provs, poolIndex, name)
 		if impl == nil {
 			continue // not logged in / not built — nothing to probe with
 		}

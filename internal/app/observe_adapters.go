@@ -145,13 +145,7 @@ func (p *Proxy) statsFlushLoop(stop <-chan struct{}) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() {
-		select {
-		case <-stop:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
+	bindStopToCancel(ctx, cancel, stop)
 	for {
 		timer := time.NewTimer(observestats.UntilNextMinute(time.Now()))
 		select {

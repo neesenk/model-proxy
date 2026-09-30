@@ -16,6 +16,19 @@ import (
 	"model-proxy/internal/pricing"
 )
 
+// normalizeGranularity defaults empty to "day" and rejects values outside the
+// closed set shared by the analytics-style read endpoints.
+func normalizeGranularity(g string) (string, bool) {
+	if g == "" {
+		return "day", true
+	}
+	switch g {
+	case "minute", "hour", "day", "week", "month":
+		return g, true
+	}
+	return "", false
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	v := s.reads.Dashboard(time.Now())
 	writeJSON(w, http.StatusOK, map[string]any{"uptime": v.Uptime, "version": s.version, "listen": v.Listen, "health": v.Health, "model_locks": v.ModelLocks, "quota": v.Quota, "schedule": v.Schedule, "counters": v.Counters, "cache": v.Cache, "warnings": v.Warnings, "credential_store": v.CredentialStore})
@@ -145,12 +158,8 @@ func (s *Server) handleMCPAnalytics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	g := q.Get("granularity")
-	if g == "" {
-		g = "day"
-	}
-	switch g {
-	case "minute", "hour", "day", "week", "month":
-	default:
+	g, ok := normalizeGranularity(g)
+	if !ok {
 		writeJSONErr(w, http.StatusBadRequest, "granularity must be minute, hour, day, week or month")
 		return
 	}
@@ -508,12 +517,8 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	g := q.Get("granularity")
-	if g == "" {
-		g = "day"
-	}
-	switch g {
-	case "minute", "hour", "day", "week", "month":
-	default:
+	g, ok := normalizeGranularity(g)
+	if !ok {
 		writeJSONErr(w, http.StatusBadRequest, "granularity must be minute, hour, day, week or month")
 		return
 	}

@@ -2,6 +2,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"model-proxy/internal/accounts"
@@ -188,6 +189,33 @@ type Proxy struct {
 // Sources cache their token files internally (webauth cacheTTL), so swapping
 // here only re-points at (possibly changed) paths. Caller holds p.mu on
 // reload; the constructor calls it before serving.
+// implOrFirstPooled resolves name's runtime impl from the given maps, falling
+// back to the first pooled virtual's impl: the forward path binds the first
+// virtual's credentials, so probe/refresh passes must use the same impl.
+func implOrFirstPooled(provs map[string]provider.Provider, poolIndex map[string][]string, name string) provider.Provider {
+	impl := provs[name]
+	if impl == nil {
+		if vids := poolIndex[name]; len(vids) > 0 {
+			impl = provs[vids[0]]
+		}
+	}
+	return impl
+}
+
+// bindStopToCancel cancels ctx when the stop channel closes (or ctx finishes
+// by other means); the watcher goroutine exits on either arm, so nothing
+// leaks. Callers needing a shutdown grace window keep their own watcher (the
+// shadow leg).
+func bindStopToCancel(ctx context.Context, cancel context.CancelFunc, stop <-chan struct{}) {
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+}
+
 func (p *Proxy) applyAuthSources(cfg *configdomain.Config) {
 	p.adminAuth.Store(webauth.NewSource(cfg.Web.Auth.AdminTokenFile))
 	p.apiKeys.Store(webauth.NewSource(cfg.Web.Auth.APIKeysFile))

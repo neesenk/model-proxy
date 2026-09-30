@@ -134,14 +134,7 @@ func (p *Proxy) freezeHealth(name string, known []string) (frozen []string) {
 // every down reason is rate-limit/quota class (the honest terminal status is
 // then 429, not 502); earliest = soonest recovery across targets.
 func (p *Proxy) cooldownState(targets []configdomain.RouteTarget, now time.Time, quotaMaxAge time.Duration) (allDown, allRateLimited bool, earliest time.Time) {
-	runtimeTargets := make([]runtimestate.Target, len(targets))
-	for index, target := range targets {
-		runtimeTargets[index] = runtimestate.Target{
-			Provider: target.Provider,
-			Model:    target.Model,
-		}
-	}
-	return p.runtimeState.CooldownState(runtimeTargets, now, quotaMaxAge)
+	return p.runtimeState.CooldownState(runtimeTargetsBare(targets), now, quotaMaxAge)
 }
 
 // hasRecoveredUntried reports the TOCTOU case: a target is available now but was
@@ -153,14 +146,7 @@ func (p *Proxy) cooldownState(targets []configdomain.RouteTarget, now time.Time,
 // forward (≤2 retries) bounds the loop. Quota-exhausted (skipped) targets never
 // count as recovered.
 func (p *Proxy) hasRecoveredUntried(targets []configdomain.RouteTarget, tried map[string]bool, now time.Time, quotaMaxAge time.Duration) bool {
-	runtimeTargets := make([]runtimestate.Target, len(targets))
-	for index, target := range targets {
-		runtimeTargets[index] = runtimestate.Target{
-			Provider: target.Provider,
-			Model:    target.Model,
-		}
-	}
-	return p.runtimeState.HasRecoveredUntried(runtimeTargets, tried, now, quotaMaxAge)
+	return p.runtimeState.HasRecoveredUntried(runtimeTargetsBare(targets), tried, now, quotaMaxAge)
 }
 
 // latchValue reads the (session, route) latch from the runtime Manager and
@@ -434,31 +420,11 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 	if sessionKey != "" {
 		out["session_key"] = sessionKey
 	}
-	runtimeTargets := make([]runtimestate.Target, len(targets))
-	for i, t := range targets {
-		pconf, _ := configdomain.ProviderConfig(cfg, parentOf, t.Provider)
-		runtimeTargets[i] = runtimestate.Target{
-			Provider:       t.Provider,
-			Parent:         parentOf[t.Provider],
-			Model:          t.Model,
-			Priority:       t.Priority,
-			PeakMultiplier: pconf.PeakMultiplier(now),
-			Billing:        declaredBillingClass(pconf),
-		}
-	}
-	decision := dash.PreviewOrder(runtimestate.ScheduleInput{
-		Exposed:           exposed,
-		SessionKey:        sessionKey,
-		Targets:           runtimeTargets,
-		RouteKeys:         routeKeys,
-		Dwell:             cfg.Scheduling.Dwell(),
-		SwitchMargin:      cfg.Scheduling.SwitchMargin(),
-		Now:               now,
-		QuotaMaxAge:       3 * cfg.Scheduling.PollInterval(),
-		QualityErrWeight:  cfg.Scheduling.QualityErrorWeightValue(),
-		QualityTTFTWeight: cfg.Scheduling.QualityTTFTWeightValue(),
-		Generation:        dash.Generation,
-	})
+	input := scheduleInput(cfg, exposed, fullRuntimeTargets(cfg, parentOf, targets, now), routeKeys, now)
+	input.SessionKey = sessionKey
+	input.QuotaMaxAge = 3 * cfg.Scheduling.PollInterval()
+	input.Generation = dash.Generation
+	decision := dash.PreviewOrder(input)
 
 	// Per-target fit verdicts against the request profile — the same facts
 	// planner.Apply uses to narrow the route.

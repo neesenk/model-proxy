@@ -103,14 +103,7 @@ var wireProbePassBudget = 4 * time.Second
 func (p *Proxy) wireProbePassContext() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), wireProbePassBudget)
 	if p.quota != nil {
-		stopCh := p.quota.StopChannel()
-		go func() {
-			select {
-			case <-stopCh:
-				cancel()
-			case <-ctx.Done():
-			}
-		}()
+		bindStopToCancel(ctx, cancel, p.quota.StopChannel())
 	}
 	return ctx, cancel
 }
@@ -167,12 +160,7 @@ func (p *Proxy) probeAllWireCaps(ctx context.Context) {
 		}
 		// Resolve the implementation like providerImplFor, but from the live
 		// maps (pooled parent → first virtual's impl).
-		impl := provs[name]
-		if impl == nil {
-			if vids := poolIndex[name]; len(vids) > 0 {
-				impl = provs[vids[0]]
-			}
-		}
+		impl := implOrFirstPooled(provs, poolIndex, name)
 		if impl == nil {
 			continue // not logged in / not built — nothing to probe with
 		}

@@ -111,6 +111,53 @@ func (p *Proxy) listPins() map[string]pinEntry {
 	return out
 }
 
+// fullRuntimeTargets projects config route targets into the runtime
+// scheduling view INCLUDING per-parent metadata (priority, peak multiplier,
+// declared billing class) resolved via ProviderConfig — the shape
+// DecideOrder/PreviewOrder rank on. parentOf resolves pooled virtual ids to
+// their parent's config (billing/peak are parent-level, not per-account).
+func fullRuntimeTargets(cfg *configdomain.Config, parentOf map[string]string, targets []configdomain.RouteTarget, now time.Time) []runtimestate.Target {
+	out := make([]runtimestate.Target, len(targets))
+	for i, t := range targets {
+		pconf, _ := configdomain.ProviderConfig(cfg, parentOf, t.Provider)
+		out[i] = runtimestate.Target{
+			Provider:       t.Provider,
+			Parent:         parentOf[t.Provider],
+			Model:          t.Model,
+			Priority:       t.Priority,
+			PeakMultiplier: pconf.PeakMultiplier(now),
+			Billing:        declaredBillingClass(pconf),
+		}
+	}
+	return out
+}
+
+// runtimeTargetsBare projects just provider+model: the cooldown/recovery
+// checks key on the provider alone — no parent link, no scheduling metadata.
+func runtimeTargetsBare(targets []configdomain.RouteTarget) []runtimestate.Target {
+	out := make([]runtimestate.Target, len(targets))
+	for i, t := range targets {
+		out[i] = runtimestate.Target{Provider: t.Provider, Model: t.Model}
+	}
+	return out
+}
+
+// scheduleInput fills the cfg-derived fields shared by every DecideOrder/
+// PreviewOrder call site; callers overlay Exposed/SessionKey/Commit/
+// QuotaMaxAge/Generation (each site differs on exactly those).
+func scheduleInput(cfg *configdomain.Config, exposed string, targets []runtimestate.Target, routeKeys map[string]bool, now time.Time) runtimestate.ScheduleInput {
+	return runtimestate.ScheduleInput{
+		Exposed:           exposed,
+		Targets:           targets,
+		RouteKeys:         routeKeys,
+		Dwell:             cfg.Scheduling.Dwell(),
+		SwitchMargin:      cfg.Scheduling.SwitchMargin(),
+		Now:               now,
+		QualityErrWeight:  cfg.Scheduling.QualityErrorWeightValue(),
+		QualityTTFTWeight: cfg.Scheduling.QualityTTFTWeightValue(),
+	}
+}
+
 // pinForces reports whether an active pin for `exposed` is in effect over the
 // given ordered targets (i.e. decideOrder narrowed to the pinned provider). When
 // true, forward treats the route as pinned-exclusive: request-aware routing is
@@ -136,32 +183,12 @@ func (p *Proxy) pinForces(exposed string, ordered []configdomain.RouteTarget, pa
 // (billing/peak are parent-level, not per-account) AND drives per-parent
 // round-robin assignment of new sessions.
 func (p *Proxy) decideOrder(cfg *configdomain.Config, parentOf map[string]string, exposed, sessionKey string, targets []configdomain.RouteTarget, now time.Time, commit bool, routeKeys map[string]bool, generations ...uint64) (ordered []configdomain.RouteTarget, stickyToSet string) {
-	runtimeTargets := make([]runtimestate.Target, len(targets))
-	for index, target := range targets {
-		pconf, _ := configdomain.ProviderConfig(cfg, parentOf, target.Provider)
-		runtimeTargets[index] = runtimestate.Target{
-			Provider:       target.Provider,
-			Parent:         parentOf[target.Provider],
-			Model:          target.Model,
-			Priority:       target.Priority,
-			PeakMultiplier: pconf.PeakMultiplier(now),
-			Billing:        declaredBillingClass(pconf),
-		}
-	}
-	result := p.runtimeState.DecideOrder(runtimestate.ScheduleInput{
-		Exposed:           exposed,
-		SessionKey:        sessionKey,
-		Targets:           runtimeTargets,
-		RouteKeys:         routeKeys,
-		Dwell:             cfg.Scheduling.Dwell(),
-		SwitchMargin:      cfg.Scheduling.SwitchMargin(),
-		Now:               now,
-		QuotaMaxAge:       p.quotaFreshnessMaxAge(cfg),
-		QualityErrWeight:  cfg.Scheduling.QualityErrorWeightValue(),
-		QualityTTFTWeight: cfg.Scheduling.QualityTTFTWeightValue(),
-		Commit:            commit,
-		Generation:        runtimestate.GenerationArg(generations),
-	})
+	input := scheduleInput(cfg, exposed, fullRuntimeTargets(cfg, parentOf, targets, now), routeKeys, now)
+	input.SessionKey = sessionKey
+	input.QuotaMaxAge = p.quotaFreshnessMaxAge(cfg)
+	input.Commit = commit
+	input.Generation = runtimestate.GenerationArg(generations)
+	result := p.runtimeState.DecideOrder(input)
 	ordered = make([]configdomain.RouteTarget, 0, len(result.Order))
 	for _, index := range result.Order {
 		ordered = append(ordered, targets[index])
@@ -260,18 +287,7 @@ func scheduleStatusFromSnapshot(
 		routeKeys[k] = true
 	}
 	for exposed, targets := range expanded {
-		runtimeTargets := make([]runtimestate.Target, len(targets))
-		for index, target := range targets {
-			pconf, _ := configdomain.ProviderConfig(cfg, parentOf, target.Provider)
-			runtimeTargets[index] = runtimestate.Target{
-				Provider:       target.Provider,
-				Parent:         parentOf[target.Provider],
-				Model:          target.Model,
-				Priority:       target.Priority,
-				PeakMultiplier: pconf.PeakMultiplier(now),
-				Billing:        declaredBillingClass(pconf),
-			}
-		}
+		runtimeTargets := fullRuntimeTargets(cfg, parentOf, targets, now)
 		// Operator disabled-model override: a route whose EVERY target is
 		// disabled is hidden from /v1/models and cannot be served — listing it
 		// here would render an empty chain block on the Status→Schedule page.
@@ -280,18 +296,9 @@ func scheduleStatusFromSnapshot(
 		if RuntimeSnapshot.RouteFullyDisabled(runtimeTargets) {
 			continue
 		}
-		baseInput := runtimestate.ScheduleInput{
-			Exposed:           exposed,
-			Targets:           runtimeTargets,
-			RouteKeys:         routeKeys,
-			Dwell:             cfg.Scheduling.Dwell(),
-			SwitchMargin:      cfg.Scheduling.SwitchMargin(),
-			Now:               now,
-			QuotaMaxAge:       3 * cfg.Scheduling.PollInterval(),
-			QualityErrWeight:  cfg.Scheduling.QualityErrorWeightValue(),
-			QualityTTFTWeight: cfg.Scheduling.QualityTTFTWeightValue(),
-			Generation:        RuntimeSnapshot.Generation,
-		}
+		baseInput := scheduleInput(cfg, exposed, runtimeTargets, routeKeys, now)
+		baseInput.QuotaMaxAge = 3 * cfg.Scheduling.PollInterval()
+		baseInput.Generation = RuntimeSnapshot.Generation
 		// Surface an active manual pin (hot-switch) so /debug/schedule shows WHY
 		// a route is narrowed to one provider, plus its expiry. The pin is
 		// OVERLAID on the default scheduling chain rather than replacing it:

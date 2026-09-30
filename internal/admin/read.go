@@ -454,6 +454,19 @@ func (s *Service) Accounts() []appapi.ProviderAccounts {
 // to <= 0 is the cumulative hot-counter view; any bound > 0 aggregates
 // persisted minute buckets (Requests is the persisted token_requests count
 // there).
+func tokenUsageRow(provider, model string, in, out, cc, cr, requests uint64) appapi.TokenUsage {
+	return appapi.TokenUsage{
+		Provider:      provider,
+		Model:         model,
+		Input:         in,
+		Output:        out,
+		CacheCreation: cc,
+		CacheRead:     cr,
+		Total:         in + out + cc + cr,
+		Requests:      requests,
+	}
+}
+
 func (s *Service) Tokens(from, to int64) ([]appapi.TokenUsage, error) {
 	if from > 0 || to > 0 {
 		snapshot, err := s.ports.TokenUsageRange(from, to)
@@ -465,16 +478,8 @@ func (s *Service) Tokens(from, to int64) ([]appapi.TokenUsage, error) {
 			if obscounters.IsVirtualProvider(key.Provider) {
 				continue
 			}
-			out = append(out, appapi.TokenUsage{
-				Provider:      key.Provider,
-				Model:         key.Model,
-				Input:         counters.Input,
-				Output:        counters.Output,
-				CacheCreation: counters.CacheCreation,
-				CacheRead:     counters.CacheRead,
-				Total:         counters.Input + counters.Output + counters.CacheCreation + counters.CacheRead,
-				Requests:      counters.TokenRequests,
-			})
+			out = append(out, tokenUsageRow(key.Provider, key.Model,
+				counters.Input, counters.Output, counters.CacheCreation, counters.CacheRead, counters.TokenRequests))
 		}
 		return out, nil
 	}
@@ -484,16 +489,8 @@ func (s *Service) Tokens(from, to int64) ([]appapi.TokenUsage, error) {
 		if obscounters.IsVirtualProvider(key.Provider) {
 			continue
 		}
-		out = append(out, appapi.TokenUsage{
-			Provider:      key.Provider,
-			Model:         key.Model,
-			Input:         usage.Input,
-			Output:        usage.Output,
-			CacheCreation: usage.CacheCreation,
-			CacheRead:     usage.CacheRead,
-			Total:         usage.Input + usage.Output + usage.CacheCreation + usage.CacheRead,
-			Requests:      usage.Requests,
-		})
+		out = append(out, tokenUsageRow(key.Provider, key.Model,
+			usage.Input, usage.Output, usage.CacheCreation, usage.CacheRead, usage.Requests))
 	}
 	return out, nil
 }

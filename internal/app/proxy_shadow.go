@@ -327,13 +327,7 @@ func (p *Proxy) judgeEvalPair(
 	// shadowShutdownGrace to finish a nearly-done generation), a judge call
 	// is a small decisions request that is safe to cut immediately. The
 	// watcher goroutine exits with ctx in every path, so nothing leaks.
-	go func() {
-		select {
-		case <-stop:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
+	bindStopToCancel(ctx, cancel, stop)
 	out := forward.CallEvalJudge(p.forwardServices(), ctx, forward.EvalJudgeInput{
 		Runtime:     runtime,
 		Target:      judge,
