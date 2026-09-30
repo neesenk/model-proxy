@@ -1,7 +1,6 @@
 package provider
 
 import (
-	crand "crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"model-proxy/internal/display"
@@ -169,9 +168,9 @@ func (p *ZCodeProvider) ExtraHeaders(req *http.Request, body []byte, sessionID s
 	// distinct conversations stay distinct on the wire — the real CLI mints
 	// these itself (query_<uuid>/sess_<uuid>) and strips the internal prefixes
 	// before sending, so the wire values are bare UUIDs either way.
-	req.Header.Set("X-Request-Id", newZCodeUUID())
+	req.Header.Set("X-Request-Id", newRequestID())
 	req.Header.Set("X-ZCode-Session-Type", "main")
-	req.Header.Set("X-ZCode-Trace-Id", newZCodeUUID())
+	req.Header.Set("X-ZCode-Trace-Id", newRequestID())
 	req.Header.Set("X-Query-Id", zcodeQueryID(req))
 	req.Header.Set("X-Session-Id", p.zcodeSessionID(req, body, sessionID))
 	req.Header.Set("X-Platform", nodePlatform(runtime.GOOS)+"-"+nodeArch(runtime.GOARCH))
@@ -214,18 +213,6 @@ func (p *ZCodeProvider) Usage() error {
 
 // ---- fingerprint helpers (Node-name mappings + printable guards) ----
 
-// newZCodeUUID returns an RFC 4122 v4 UUID string (crypto/rand). Hand-rolled:
-// google/uuid is only an indirect dep and promoting it for two headers is not
-// worth it. On the (unreachable in practice) rand error the bytes stay zeroed
-// but the string remains well-formed.
-func newZCodeUUID() string {
-	var b [16]byte
-	_, _ = crand.Read(b[:])
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
-
 // zcodeSessionID returns the X-Session-Id value for this request. ZCode's CLI
 // mints one session id per CLI session (createSessionId = sess_<uuid>) and
 // strips the internal prefix before putting it on the wire, so the observable
@@ -262,7 +249,7 @@ func (p *ZCodeProvider) zcodeSessionID(req *http.Request, body []byte, sessionID
 	p.sessionMu.Lock()
 	defer p.sessionMu.Unlock()
 	if p.sessionID == "" {
-		p.sessionID = newZCodeUUID()
+		p.sessionID = newRequestID()
 	}
 	return p.sessionID
 }
@@ -277,7 +264,7 @@ func zcodeQueryID(req *http.Request) string {
 	if v := printableASCII(req.Header.Get("X-Interaction-Id")); v != "" {
 		return zcodeUUIDFromKey("query:" + v)
 	}
-	return newZCodeUUID()
+	return newRequestID()
 }
 
 // zcodeUUIDFromKey derives a stable RFC 4122 *v4-shaped* UUID from an opaque

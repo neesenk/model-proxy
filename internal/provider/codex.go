@@ -134,7 +134,7 @@ func (p *CodexProvider) FetchModelsContext(ctx context.Context) ([]string, error
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("fetch codex models: HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 200))
+		return nil, fmt.Errorf("fetch codex models: HTTP %d: %s", resp.StatusCode, display.Truncate(string(body), 200))
 	}
 	var v struct {
 		Models []struct {

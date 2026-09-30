@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"model-proxy/internal/display"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -407,11 +408,11 @@ func TestFetchModelsBearer_Errors(t *testing.T) {
 // --- P21: truncateStr ---
 
 func TestTruncateStr(t *testing.T) {
-	if got := truncateStr("short", 10); got != "short" {
-		t.Errorf("truncateStr(short)=%q want short", got)
+	if got := display.Truncate("short", 10); got != "short" {
+		t.Errorf("display.Truncate(short)=%q want short", got)
 	}
-	if got := truncateStr("abcdef", 3); got != "abc..." {
-		t.Errorf("truncateStr(abcdef,3)=%q want abc...", got)
+	if got := display.Truncate("abcdef", 3); got != "abc..." {
+		t.Errorf("display.Truncate(abcdef,3)=%q want abc...", got)
 	}
 }
 

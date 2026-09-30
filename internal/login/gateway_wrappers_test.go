@@ -1,6 +1,7 @@
 package login
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -80,7 +81,7 @@ func TestAqpConvenienceWrappersRoundTrip(t *testing.T) {
 	if authed.EmployeeEmail != "dev@example.test" || !authed.HasAccess {
 		t.Fatalf("PollSession data = %+v", authed)
 	}
-	if again, err := client.CheckSessionAt(aqp.URL + AqpAuthInfoPath); err != nil || again.EmployeeEmail != "dev@example.test" {
+	if again, err := client.CheckSessionAtContext(context.Background(), aqp.URL+AqpAuthInfoPath); err != nil || again.EmployeeEmail != "dev@example.test" {
 		t.Fatalf("CheckSessionAt = (%+v, %v)", again, err)
 	}
 	key, err := client.FetchAPIKey()

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"model-proxy/internal/display"
 	"net/http"
 	"regexp"
 	"time"
@@ -211,7 +212,7 @@ func getAFPUsage(ak, sk string) (*AfpUsage, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("GetAFPUsage HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 300))
+		return nil, fmt.Errorf("GetAFPUsage HTTP %d: %s", resp.StatusCode, display.Truncate(string(body), 300))
 	}
 	var wrap struct {
 		ResponseMetadata struct {

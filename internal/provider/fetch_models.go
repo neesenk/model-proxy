@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"model-proxy/internal/display"
 	"model-proxy/internal/upstreamproxy"
 	"net/http"
 	"strings"
@@ -86,7 +87,7 @@ func fetchModelInfosBearerURL(ctx context.Context, url string, auth func(*http.R
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("fetch models: HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 200))
+		return nil, fmt.Errorf("fetch models: HTTP %d: %s", resp.StatusCode, display.Truncate(string(body), 200))
 	}
 	var v struct {
 		Data []struct {
@@ -102,11 +103,4 @@ func fetchModelInfosBearerURL(ctx context.Context, url string, auth func(*http.R
 		infos = append(infos, ModelInfo{ID: m.ID, DisplayName: m.DisplayName})
 	}
 	return infos, nil
-}
-
-func truncateStr(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }

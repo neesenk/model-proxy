@@ -64,8 +64,9 @@ func NewAqpClient(storePath string) *AqpClient {
 
 // cookieHeader moved to the provider package (provider.CookieHeader).
 
-// AuthInfoResponse mirrors compass-api/v1/auth/info.
-type AuthInfoResponse struct {
+// retcodeEnvelope mirrors compass-api's {retcode, message, data} wrapper —
+// auth/info and api_key/get_or_generate share the same shape.
+type retcodeEnvelope struct {
 	Retcode int             `json:"retcode"`
 	Message string          `json:"message"`
 	Data    json.RawMessage `json:"data"`
@@ -97,11 +98,6 @@ func (c *AqpClient) BootstrapLoginURL() (string, error) {
 // cancellation of the bootstrap HTTP request.
 func (c *AqpClient) BootstrapLoginURLContext(ctx context.Context) (string, error) {
 	return c.BootstrapAtContext(ctx, c.Base+AqpAuthLoginPath)
-}
-
-// bootstrapAt is the URL-parametrized core, used by tests with a mock server.
-func (c *AqpClient) BootstrapAt(endpoint string) (string, error) {
-	return c.BootstrapAtContext(context.Background(), endpoint)
 }
 
 func (c *AqpClient) BootstrapAtContext(ctx context.Context, endpoint string) (string, error) {
@@ -141,10 +137,6 @@ func (c *AqpClient) PollSessionContext(ctx context.Context, timeout time.Duratio
 	return c.PollAtContext(ctx, c.Base+AqpAuthInfoPath, timeout)
 }
 
-func (c *AqpClient) PollAt(endpoint string, timeout time.Duration) (*AuthInfoData, error) {
-	return c.PollAtContext(context.Background(), endpoint, timeout)
-}
-
 func (c *AqpClient) PollAtContext(ctx context.Context, endpoint string, timeout time.Duration) (*AuthInfoData, error) {
 	pollCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -178,10 +170,6 @@ func (c *AqpClient) PollAtContext(ctx context.Context, endpoint string, timeout 
 	}
 }
 
-func (c *AqpClient) CheckSessionAt(endpoint string) (*AuthInfoData, error) {
-	return c.CheckSessionAtContext(context.Background(), endpoint)
-}
-
 func (c *AqpClient) CheckSessionAtContext(ctx context.Context, endpoint string) (*AuthInfoData, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -210,7 +198,7 @@ func (c *AqpClient) CheckSessionAtContext(ctx context.Context, endpoint string) 
 		return nil, fmt.Errorf("aqp sso session check failed: status=%d body=%s",
 			resp.StatusCode, display.Truncate(string(body), 200))
 	}
-	var air AuthInfoResponse
+	var air retcodeEnvelope
 	if err := json.Unmarshal(body, &air); err != nil {
 		return nil, fmt.Errorf("aqp auth info response parse failed: %w", err)
 	}
@@ -254,13 +242,6 @@ func (c *AqpClient) PublicCookies() []*http.Cookie {
 	return c.Jar.Cookies(u)
 }
 
-// APIKeyResponse mirrors api_key/get_or_generate.
-type APIKeyResponse struct {
-	Retcode int             `json:"retcode"`
-	Message string          `json:"message"`
-	Data    json.RawMessage `json:"data"`
-}
-
 // APIKeyData is the data payload of get_or_generate. It returns the full identity
 // (api_key + project_id + employee_*) without needing a project_id input.
 type APIKeyData struct {
@@ -283,11 +264,6 @@ func (c *AqpClient) FetchAPIKey() (*APIKeyData, error) {
 // fetchAPIKeyContext is fetchAPIKey with caller-controlled cancellation.
 func (c *AqpClient) FetchAPIKeyContext(ctx context.Context) (*APIKeyData, error) {
 	return c.FetchAPIKeyAtContext(ctx, c.Base+AqpAPIKeyGetGenPath)
-}
-
-// fetchAPIKeyAt is the URL-parametrized core, used by tests with a mock server.
-func (c *AqpClient) FetchAPIKeyAt(endpoint string) (*APIKeyData, error) {
-	return c.FetchAPIKeyAtContext(context.Background(), endpoint)
 }
 
 func (c *AqpClient) FetchAPIKeyAtContext(ctx context.Context, endpoint string) (*APIKeyData, error) {
@@ -317,7 +293,7 @@ func (c *AqpClient) FetchAPIKeyAtContext(ctx context.Context, endpoint string) (
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	var ar APIKeyResponse
+	var ar retcodeEnvelope
 	if err := json.Unmarshal(body, &ar); err != nil {
 		return nil, fmt.Errorf("aqp api key response parse failed: %w", err)
 	}

@@ -1,6 +1,7 @@
 package login
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -24,7 +25,7 @@ func TestPollAt_TimesOut(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := NewAqpClient(filepath.Join(t.TempDir(), "store.json"))
-	_, err := c.PollAt(srv.URL, 1*time.Millisecond)
+	_, err := c.PollAtContext(context.Background(), srv.URL, 1*time.Millisecond)
 	if err == nil {
 		t.Error("pollAt always-401: want error, got nil")
 	}

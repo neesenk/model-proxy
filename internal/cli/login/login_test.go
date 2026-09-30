@@ -1,6 +1,7 @@
 package login
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/cookiejar"
@@ -70,7 +71,7 @@ func TestLogin_FullFlowWithMockAqp(t *testing.T) {
 	}
 
 	// 1. Bootstrap: get the login URL (401 + result).
-	loginURL, err := c.BootstrapAt(aqp.URL + "/compass-api/v1/auth/login")
+	loginURL, err := c.BootstrapAtContext(context.Background(), aqp.URL+"/compass-api/v1/auth/login")
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
@@ -105,7 +106,7 @@ func TestLogin_FullFlowWithMockAqp(t *testing.T) {
 	}
 
 	// 3. Poll session (jar carries SSO_A; mock upgrades to SSO_C).
-	data, err := c.PollAt(aqp.URL+"/compass-api/v1/auth/info", 10*time.Second)
+	data, err := c.PollAtContext(context.Background(), aqp.URL+"/compass-api/v1/auth/info", 10*time.Second)
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -122,7 +123,7 @@ func TestLogin_FullFlowWithMockAqp(t *testing.T) {
 	if err := provider.SaveAqpAccount(storePath, a); err != nil {
 		t.Fatal(err)
 	}
-	key, err := c.FetchAPIKeyAt(aqp.URL + "/api/v1/cqp/ccswitch/api_key/get_or_generate")
+	key, err := c.FetchAPIKeyAtContext(context.Background(), aqp.URL+"/api/v1/cqp/ccswitch/api_key/get_or_generate")
 	if err != nil {
 		t.Fatalf("fetch key: %v", err)
 	}
@@ -152,7 +153,7 @@ func TestBootstrap_MissingLoginURL(t *testing.T) {
 	defer aqp.Close()
 	jar, _ := cookiejar.New(nil)
 	c := &logincore.AqpClient{HTTP: &http.Client{Jar: jar}, Jar: jar, StorePath: t.TempDir() + "/g.json"}
-	_, err := c.BootstrapAt(aqp.URL + "/compass-api/v1/auth/login")
+	_, err := c.BootstrapAtContext(context.Background(), aqp.URL+"/compass-api/v1/auth/login")
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "missing login url") {
 		t.Errorf("err=%v", err)
 	}
