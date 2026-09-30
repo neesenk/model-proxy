@@ -40,16 +40,11 @@ func TestConvertFault_SameProtocolPassthrough(t *testing.T) {
 	pA.providers["ant"] = &testProv{key: "k"}
 	pxA := httptest.NewServer(http.HandlerFunc(pA.Handler))
 	defer pxA.Close()
-	resp, err := http.Post(pxA.URL+"/v1/messages", "application/json", strings.NewReader(antBody))
-	if err != nil {
-		t.Fatal(err)
-	}
-	bodyA, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_, bodyA := post(t, pxA.URL+"/v1/messages", antBody)
 	if gotAnt != antBody {
 		t.Errorf("anthropic request not byte-identical: got %s want %s", gotAnt, antBody)
 	}
-	if string(bodyA) != antResp {
+	if bodyA != antResp {
 		t.Errorf("anthropic response not byte-identical: got %s want %s", bodyA, antResp)
 	}
 
@@ -73,16 +68,11 @@ func TestConvertFault_SameProtocolPassthrough(t *testing.T) {
 	pR.providers["cdx"] = &testProv{key: "k"}
 	pxR := httptest.NewServer(http.HandlerFunc(pR.Handler))
 	defer pxR.Close()
-	resp2, err := http.Post(pxR.URL+"/v1/responses", "application/json", strings.NewReader(rspBody))
-	if err != nil {
-		t.Fatal(err)
-	}
-	bodyR, _ := io.ReadAll(resp2.Body)
-	resp2.Body.Close()
+	_, bodyR := post(t, pxR.URL+"/v1/responses", rspBody)
 	if gotRsp != rspBody {
 		t.Errorf("responses request not byte-identical: got %s want %s", gotRsp, rspBody)
 	}
-	if string(bodyR) != rspResp {
+	if bodyR != rspResp {
 		t.Errorf("responses response not byte-identical: got %s want %s", bodyR, rspResp)
 	}
 }
@@ -110,16 +100,11 @@ func TestConvertFault_NonStream64MiBCap(t *testing.T) {
 	p.providers["oai"] = &testProv{key: "k"}
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
+	code, body := post(t, px.URL+"/v1/messages", `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", code)
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("status = %d, want 502", resp.StatusCode)
-	}
-	if bytes.Contains(body, bytes.Repeat([]byte{'x'}, 1<<20)) {
+	if strings.Contains(body, strings.Repeat("x", 1<<20)) {
 		t.Errorf("client received raw upstream bytes")
 	}
 }
@@ -177,17 +162,12 @@ func TestConvertFault_SniffSSEMissingContentType(t *testing.T) {
 	p.providers["cdx"] = &testProv{key: "k"}
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}],"stream":true}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d: %s", resp.StatusCode, body)
+	code, body := post(t, px.URL+"/v1/messages", `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d: %s", code, body)
 	}
 	for _, want := range []string{"event: message_start", `"text":"hi"`, "event: message_stop"} {
-		if !strings.Contains(string(body), want) {
+		if !strings.Contains(body, want) {
 			t.Errorf("sniffed stream missing %q:\n%s", want, body)
 		}
 	}
@@ -241,13 +221,8 @@ func TestForwardRetries413AfterImageCompression(t *testing.T) {
 
 	request := `{"model":"claude-x","max_tokens":16,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` +
 		strings.TrimPrefix(url, "data:image/png;base64,") + `"}}]}]}`
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(request))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if body, _ := io.ReadAll(resp.Body); resp.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	if code, body := post(t, px.URL+"/v1/messages", request); code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", code, body)
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("upstream calls = %d, want 2", calls.Load())

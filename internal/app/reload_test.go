@@ -54,10 +54,7 @@ func TestReloadAppliedWarningMessageContract(t *testing.T) {
 }
 
 func TestReload_PersistFailureReturnsAppliedWarning(t *testing.T) {
-	cfg1Path := writeConfigFile(t, `listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-`)
+	cfg1Path := writeConfigFile(t, testConfigYAML())
 	cfg2Path := writeConfigFile(t, `listen: 127.0.0.1:0
 providers:
   deepseek: {provider_id: deepseek, openai_base_url: https://y}
@@ -86,10 +83,7 @@ providers:
 // Quota.)
 func TestReload_PersistsClearedHealth(t *testing.T) {
 	setPoolHome(t, t.TempDir())
-	cfg1Path := writeConfigFile(t, `listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-`)
+	cfg1Path := writeConfigFile(t, testConfigYAML())
 	cfg2Path := writeConfigFile(t, `listen: 127.0.0.1:0
 providers:
   deepseek: {provider_id: deepseek, openai_base_url: https://y}
@@ -258,12 +252,7 @@ func assertPersistedGeneration(t *testing.T, p *Proxy, providerName string, empt
 // contain only that generation's provider keys.
 func TestReload_PersistedSnapshotMatchesGeneration(t *testing.T) {
 	setPoolHome(t, t.TempDir())
-	cfg1Path := writeConfigFile(t, `listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-routes:
-  m: [{provider: zhipu, model: m}]
-`)
+	cfg1Path := writeConfigFile(t, testConfigYAML("routes:\n  m: [{provider: zhipu, model: m}]\n"))
 	cfg2Path := writeConfigFile(t, `listen: 127.0.0.1:0
 providers:
   deepseek: {provider_id: deepseek, openai_base_url: https://y}

@@ -5,7 +5,6 @@ import (
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -131,11 +130,11 @@ func TestScheduleStatus_NoPoolWhenSingle(t *testing.T) {
 // cooldownCfg builds a two-target route over the given upstreams with the
 // wait-retry knobs set for fast tests (retry_wait 10s = real default; short
 // backoffs elsewhere).
-func cooldownCfg(primary, fallback *httptest.Server, retryWait string) *configdomain.Config {
+func cooldownCfg(primary, fallback *fakeUpstream, retryWait string) *configdomain.Config {
 	return &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"primary":  {OpenAIBaseURL: primary.srv.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -162,10 +161,8 @@ func TestCooldownWait_ShortCooldownSucceeds(t *testing.T) {
 			return 200, `{"ok":true}`, nil, 0
 		}
 	}
-	primary, pHits := newHitServer(once429())
-	defer primary.Close()
-	fallback, fHits := newHitServer(once429())
-	defer fallback.Close()
+	primary := newHitFakeUpstream(t, hitScript(once429()))
+	fallback := newHitFakeUpstream(t, hitScript(once429()))
 	cfg := cooldownCfg(primary, fallback, "10s")
 	_, px := newModelLockProxy(t, cfg)
 
@@ -178,10 +175,10 @@ func TestCooldownWait_ShortCooldownSucceeds(t *testing.T) {
 	if elapsed < 900*time.Millisecond {
 		t.Errorf("elapsed = %v, want ≥ ~1s (the cooldown was waited out)", elapsed)
 	}
-	if got := pHits.Load(); got != 2 {
+	if got := primary.hits(); got != 2 {
 		t.Errorf("primary hits = %d, want 2 (429 then recovered probe)", got)
 	}
-	if got := fHits.Load(); got != 1 {
+	if got := fallback.hits(); got != 1 {
 		t.Errorf("fallback hits = %d, want 1 (only the first pass)", got)
 	}
 }
@@ -192,10 +189,8 @@ func TestCooldownWait_LongCooldown429(t *testing.T) {
 	always429 := func(int) (int, string, http.Header, time.Duration) {
 		return 429, `{"e":"rate"}`, intHdr("Retry-After", "60"), 0
 	}
-	primary, _ := newHitServer(always429)
-	defer primary.Close()
-	fallback, _ := newHitServer(always429)
-	defer fallback.Close()
+	primary := newHitFakeUpstream(t, hitScript(always429))
+	fallback := newHitFakeUpstream(t, hitScript(always429))
 	cfg := cooldownCfg(primary, fallback, "10s")
 	_, px := newModelLockProxy(t, cfg)
 
@@ -221,14 +216,12 @@ func TestCooldownWait_LongCooldown429(t *testing.T) {
 // TestCooldownWait_MixedFailures502: a hard-failing target (500) mixed with a
 // rate-limited one → NOT a pure rate-limit situation → terminal stays 502.
 func TestCooldownWait_MixedFailures502(t *testing.T) {
-	primary, _ := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 500, `{"e":"broken"}`, nil, 0
-	})
-	defer primary.Close()
-	fallback, _ := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 429, `{"e":"rate"}`, intHdr("Retry-After", "60"), 0
-	})
-	defer fallback.Close()
+	}))
 	cfg := cooldownCfg(primary, fallback, "10s")
 	_, px := newModelLockProxy(t, cfg)
 
@@ -243,10 +236,8 @@ func TestCooldownWait_Disabled(t *testing.T) {
 	always429 := func(int) (int, string, http.Header, time.Duration) {
 		return 429, `{"e":"rate"}`, intHdr("Retry-After", "1"), 0
 	}
-	primary, pHits := newHitServer(always429)
-	defer primary.Close()
-	fallback, _ := newHitServer(always429)
-	defer fallback.Close()
+	primary := newHitFakeUpstream(t, hitScript(always429))
+	fallback := newHitFakeUpstream(t, hitScript(always429))
 	cfg := cooldownCfg(primary, fallback, "0")
 	_, px := newModelLockProxy(t, cfg)
 
@@ -259,7 +250,7 @@ func TestCooldownWait_Disabled(t *testing.T) {
 	if elapsed > time.Second {
 		t.Errorf("elapsed = %v, want no waiting (retry_wait disabled)", elapsed)
 	}
-	if got := pHits.Load(); got != 1 {
+	if got := primary.hits(); got != 1 {
 		t.Errorf("primary hits = %d, want 1 (no retry rounds)", got)
 	}
 }
@@ -273,10 +264,8 @@ func TestCooldownWait_RetriesExhausted(t *testing.T) {
 	always429 := func(int) (int, string, http.Header, time.Duration) {
 		return 429, `{"e":"rate"}`, intHdr("Retry-After", "1"), 0
 	}
-	primary, pHits := newHitServer(always429)
-	defer primary.Close()
-	fallback, fHits := newHitServer(always429)
-	defer fallback.Close()
+	primary := newHitFakeUpstream(t, hitScript(always429))
+	fallback := newHitFakeUpstream(t, hitScript(always429))
 	cfg := cooldownCfg(primary, fallback, "10s")
 	_, px := newModelLockProxy(t, cfg)
 
@@ -304,12 +293,12 @@ func TestCooldownWait_RetriesExhausted(t *testing.T) {
 		t.Errorf("elapsed = %v, exceeds the total wait budget", elapsed)
 	}
 	// At least one retry round must have happened (initial 2 hits + ≥2 more).
-	if got := pHits.Load() + fHits.Load(); got < 4 {
+	if got := primary.hits() + fallback.hits(); got < 4 {
 		t.Errorf("total hits = %d, want ≥ 4 (initial pass + retry rounds)", got)
 	}
 	// Upper bound: initial 2 hits + ≤2 retry rounds × 2 targets = ≤6. Catches a
 	// retry-budget off-by-one (e.g. round < 5) that the lower bound can't.
-	if got := pHits.Load() + fHits.Load(); got > 6 {
+	if got := primary.hits() + fallback.hits(); got > 6 {
 		t.Errorf("total hits = %d, want ≤ 6 (initial pass + ≤2 retry rounds)", got)
 	}
 }
@@ -318,24 +307,22 @@ func TestCooldownWait_RetriesExhausted(t *testing.T) {
 // re-arming its 429 while the other recovers — the recovered target must be
 // tried (zero-wait re-schedule), never skipped to a premature 502/429.
 func TestCooldownWait_RecoveredTargetGetsAChance(t *testing.T) {
-	primary, _ := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 429, `{"e":"rate"}`, intHdr("Retry-After", "1"), 0 // never recovers
-	})
-	defer primary.Close()
-	fallback, fHits := newHitServer(func(c int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(c int) (int, string, http.Header, time.Duration) {
 		if c == 1 {
 			return 429, `{"e":"rate"}`, intHdr("Retry-After", "1"), 0
 		}
 		return 200, `{"ok":true}`, nil, 0 // recovers after the first 429
-	})
-	defer fallback.Close()
+	}))
 	cfg := cooldownCfg(primary, fallback, "10s")
 	_, px := newModelLockProxy(t, cfg)
 
 	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`); st != 200 {
 		t.Errorf("status = %d, want 200 (recovered fallback must be tried)", st)
 	}
-	if got := fHits.Load(); got < 2 {
+	if got := fallback.hits(); got < 2 {
 		t.Errorf("fallback hits = %d, want ≥ 2 (429, then the recovered serve)", got)
 	}
 }

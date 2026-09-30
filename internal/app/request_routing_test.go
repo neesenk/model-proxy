@@ -440,35 +440,14 @@ func TestForward_ForceProviderIncompatibleTargetDoesNotCrossRoute(t *testing.T) 
 
 // ---- routes_test.go ----
 
-// newCaptureUpstream returns a mock upstream that records the `model` field of
-// each request body and responds with the given status + body.
-func newCaptureUpstream(status int, body string) (*httptest.Server, *[]string) {
-	var seen []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		var m struct {
-			Model string `json:"model"`
-		}
-		json.Unmarshal(b, &m)
-		seen = append(seen, m.Model)
-		w.Header().Set("content-type", "application/json")
-		if status != 200 {
-			w.WriteHeader(status)
-		}
-		w.Write([]byte(body))
-	}))
-	return srv, &seen
-}
-
 // TestForward_ClaudeAliasRoute: a claude-* alias exposed as an explicit route
 // resolves for every protocol (routes are protocol-agnostic — the old
 // anthropic-only claude_mapping is gone); an unrouted name still 502s.
 func TestForward_ClaudeAliasRoute(t *testing.T) {
-	up, seen := newCaptureUpstream(200, `{}`)
-	defer up.Close()
+	up := newFakeUpstream(t, staticResponder(200, `{}`))
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"aqp": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: testProviderID},
+			"aqp": {OpenAIBaseURL: up.srv.URL, AnthropicBaseURL: up.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"glm-5.2":           {{Provider: "aqp", Model: "glm-5.2"}},
@@ -481,48 +460,41 @@ func TestForward_ClaudeAliasRoute(t *testing.T) {
 	defer px.Close()
 
 	// 1) anthropic claude-sonnet-4-6 → alias route → upstream sees glm-5.2.
-	*seen = nil
+	up.reset()
 	postOK(t, px.URL+"/v1/messages", `{"model":"claude-sonnet-4-6","messages":[]}`)
-	if len(*seen) != 1 || (*seen)[0] != "glm-5.2" {
-		t.Errorf("anthropic alias name: upstream model=%v, want [glm-5.2]", *seen)
+	if len(up.models()) != 1 || up.models()[0] != "glm-5.2" {
+		t.Errorf("anthropic alias name: upstream model=%v, want [glm-5.2]", up.models())
 	}
 
 	// 2) anthropic glm-5.2 (direct route) → upstream sees glm-5.2.
-	*seen = nil
+	up.reset()
 	postOK(t, px.URL+"/v1/messages", `{"model":"glm-5.2","messages":[]}`)
-	if len(*seen) != 1 || (*seen)[0] != "glm-5.2" {
-		t.Errorf("anthropic direct name: upstream model=%v, want [glm-5.2]", *seen)
+	if len(up.models()) != 1 || up.models()[0] != "glm-5.2" {
+		t.Errorf("anthropic direct name: upstream model=%v, want [glm-5.2]", up.models())
 	}
 
 	// 3) openai claude-sonnet-4-6 → alias route applies to openai too now.
-	*seen = nil
+	up.reset()
 	postOK(t, px.URL+"/v1/chat/completions", `{"model":"claude-sonnet-4-6","messages":[]}`)
-	if len(*seen) != 1 || (*seen)[0] != "glm-5.2" {
-		t.Errorf("openai alias name: upstream model=%v, want [glm-5.2]", *seen)
+	if len(up.models()) != 1 || up.models()[0] != "glm-5.2" {
+		t.Errorf("openai alias name: upstream model=%v, want [glm-5.2]", up.models())
 	}
 
 	// 4) an unrouted name still 502s.
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", stringReader(`{"model":"no-such-model","messages":[]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 502 {
-		t.Errorf("unrouted name: status=%d, want 502", resp.StatusCode)
+	if code, _ := post(t, px.URL+"/v1/chat/completions", `{"model":"no-such-model","messages":[]}`); code != 502 {
+		t.Errorf("unrouted name: status=%d, want 502", code)
 	}
 }
 
 // TestForward_Failover: when the primary target returns 5xx, the proxy fails
 // over to the next target and the client gets the fallback's 200.
 func TestForward_Failover(t *testing.T) {
-	primary, primarySeen := newCaptureUpstream(500, `{"error":"primary"}`)
-	defer primary.Close()
-	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
-	defer fallback.Close()
+	primary := newFakeUpstream(t, staticResponder(500, `{"error":"primary"}`))
+	fallback := newFakeUpstream(t, staticResponder(200, `{"ok":true}`))
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"primary":  {OpenAIBaseURL: primary.srv.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -537,23 +509,18 @@ func TestForward_Failover(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", stringReader(`{"model":"m1","messages":[]}`))
-	if err != nil {
-		t.Fatal(err)
+	code, body := post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+	if code != 200 {
+		t.Errorf("failover: status=%d body=%s, want 200 from fallback", code, body)
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Errorf("failover: status=%d body=%s, want 200 from fallback", resp.StatusCode, body)
-	}
-	if string(body) != `{"ok":true}` {
+	if body != `{"ok":true}` {
 		t.Errorf("failover: client body=%s, want the fallback's {\"ok\":true}", body)
 	}
-	if len(*primarySeen) != 1 {
-		t.Errorf("primary should be tried once, got %d", len(*primarySeen))
+	if len(primary.models()) != 1 {
+		t.Errorf("primary should be tried once, got %d", len(primary.models()))
 	}
-	if len(*fallbackSeen) != 1 {
-		t.Errorf("fallback should be tried once, got %d", len(*fallbackSeen))
+	if len(fallback.models()) != 1 {
+		t.Errorf("fallback should be tried once, got %d", len(fallback.models()))
 	}
 }
 

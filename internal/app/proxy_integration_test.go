@@ -29,13 +29,12 @@ func TestUC_FailoverAndCircuitSkipsOpenProvider(t *testing.T) {
 		w.Write([]byte(`{"e":"primary"}`))
 	}))
 	defer primary.Close()
-	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
-	defer fallback.Close()
+	fallback := newFakeUpstream(t, staticResponder(200, `{"ok":true}`))
 
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -51,28 +50,21 @@ func TestUC_FailoverAndCircuitSkipsOpenProvider(t *testing.T) {
 
 	// Call 1-2: primary 500 → failover to fallback. Primary circuit not yet open (threshold 3).
 	for i := 0; i < 2; i++ {
-		resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", stringReader(`{"model":"m1","messages":[]}`))
-		if err != nil {
-			t.Fatal(err)
+		if code, _ := post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`); code != 200 {
+			t.Errorf("call %d: status=%d want 200 (fallback)", i, code)
 		}
-		if resp.StatusCode != 200 {
-			t.Errorf("call %d: status=%d want 200 (fallback)", i, resp.StatusCode)
-		}
-		resp.Body.Close()
 	}
 
 	// Call 3-4: after 3 failures primary circuit opens; primary should NOT be hit again.
-	*fallbackSeen = nil
+	fallback.reset()
 	for i := 0; i < 2; i++ {
-		resp, _ := http.Post(px.URL+"/v1/chat/completions", "application/json", stringReader(`{"model":"m1","messages":[]}`))
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	}
 	if got := atomic.LoadInt32(&primaryHits); got != 3 {
 		t.Errorf("primary hits=%d, want exactly 3 (circuit opens AT the threshold, not before)", got)
 	}
-	if len(*fallbackSeen) != 2 {
-		t.Errorf("fallback hits=%d want 2 (open circuit routes straight to fallback)", len(*fallbackSeen))
+	if len(fallback.models()) != 2 {
+		t.Errorf("fallback hits=%d want 2 (open circuit routes straight to fallback)", len(fallback.models()))
 	}
 }
 
@@ -80,15 +72,14 @@ func TestUC_FailoverAndCircuitSkipsOpenProvider(t *testing.T) {
 
 func TestUC_401RefreshRetrySucceeds(t *testing.T) {
 	// First call 401, second call 200 (simulates refresh fixing the token).
-	up := scriptedUpstream(
+	up := newHitFakeUpstream(t, respondScripted(
 		respScript{status: 401, body: `{"e":"unauthorized"}`},
 		respScript{status: 200, body: `{"ok":true}`},
-	)
-	defer up.Close()
+	))
 
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"codex": {OpenAIBaseURL: up.URL, Provider: testProviderID},
+			"codex": {OpenAIBaseURL: up.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},
@@ -100,15 +91,9 @@ func TestUC_401RefreshRetrySucceeds(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/responses", "application/json", stringReader(`{"model":"gpt-5.5","input":[]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		t.Errorf("status=%d body=%s want 200 (401 should trigger refresh+retry)", resp.StatusCode, body)
+	code, body := post(t, px.URL+"/v1/responses", `{"model":"gpt-5.5","input":[]}`)
+	if code != 200 {
+		t.Errorf("status=%d body=%s want 200 (401 should trigger refresh+retry)", code, body)
 	}
 	if got := atomic.LoadInt32(&rp.refreshCalls); got != 1 {
 		t.Errorf("Refresh calls=%d want 1 (exactly one refresh after 401)", got)
@@ -118,18 +103,16 @@ func TestUC_401RefreshRetrySucceeds(t *testing.T) {
 // --- UC5: 401 → refresh → still 401 → failover to next provider ---
 
 func TestUC_401RefreshFailsFailover(t *testing.T) {
-	primary := scriptedUpstream(
+	primary := newHitFakeUpstream(t, respondScripted(
 		respScript{status: 401, body: `{"e":"bad"}`},
 		respScript{status: 401, body: `{"e":"bad"}`},
-	)
-	defer primary.Close()
-	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
-	defer fallback.Close()
+	))
+	fallback := newFakeUpstream(t, staticResponder(200, `{"ok":true}`))
 
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"primary":  {OpenAIBaseURL: primary.srv.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -145,20 +128,14 @@ func TestUC_401RefreshFailsFailover(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/responses", "application/json", stringReader(`{"model":"m1","input":[]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		t.Errorf("status=%d want 200 (should failover after 401-refresh fails)", resp.StatusCode)
+	if code, _ := post(t, px.URL+"/v1/responses", `{"model":"m1","input":[]}`); code != 200 {
+		t.Errorf("status=%d want 200 (should failover after 401-refresh fails)", code)
 	}
 	if got := atomic.LoadInt32(&rp.refreshCalls); got != 1 {
 		t.Errorf("Refresh calls=%d want 1 (401 → refresh → retry before failover)", got)
 	}
-	if len(*fallbackSeen) != 1 {
-		t.Errorf("fallback hits=%d want 1 (failover target after repeated 401)", len(*fallbackSeen))
+	if len(fallback.models()) != 1 {
+		t.Errorf("fallback hits=%d want 1 (failover target after repeated 401)", len(fallback.models()))
 	}
 }
 
@@ -173,13 +150,12 @@ func TestUC_429RetryAfterSkipsProvider(t *testing.T) {
 		w.Write([]byte(`{"e":"rate"}`))
 	}))
 	defer up.Close()
-	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
-	defer fallback.Close()
+	fallback := newFakeUpstream(t, staticResponder(200, `{"ok":true}`))
 
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: up.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -193,22 +169,18 @@ func TestUC_429RetryAfterSkipsProvider(t *testing.T) {
 	defer px.Close()
 
 	// Call 1: primary 429 → failover to fallback.
-	resp, _ := http.Post(px.URL+"/v1/responses", "application/json", stringReader(`{"model":"m1","input":[]}`))
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	post(t, px.URL+"/v1/responses", `{"model":"m1","input":[]}`)
 
 	// Call 2: primary still rate-limited (60s) → straight to fallback, no primary hit.
-	*fallbackSeen = nil
+	fallback.reset()
 	hitsBefore := atomic.LoadInt32(&hits)
-	resp, _ = http.Post(px.URL+"/v1/responses", "application/json", stringReader(`{"model":"m1","input":[]}`))
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	post(t, px.URL+"/v1/responses", `{"model":"m1","input":[]}`)
 
 	if got := atomic.LoadInt32(&hits) - hitsBefore; got != 0 {
 		t.Errorf("primary hits on call 2 = %d want 0 (Retry-After should skip it)", got)
 	}
-	if len(*fallbackSeen) != 1 {
-		t.Errorf("fallback hits on call 2 = %d want 1", len(*fallbackSeen))
+	if len(fallback.models()) != 1 {
+		t.Errorf("fallback hits on call 2 = %d want 1", len(fallback.models()))
 	}
 }
 
@@ -220,13 +192,12 @@ func TestUC_UpstreamTimeoutFailover(t *testing.T) {
 		w.Write([]byte(`{}`))
 	}))
 	defer slow.Close()
-	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
-	defer fallback.Close()
+	fallback := newFakeUpstream(t, staticResponder(200, `{"ok":true}`))
 
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
 			"slow":     {OpenAIBaseURL: slow.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -241,22 +212,17 @@ func TestUC_UpstreamTimeoutFailover(t *testing.T) {
 	defer px.Close()
 
 	start := time.Now()
-	resp, err := http.Post(px.URL+"/v1/responses", "application/json", stringReader(`{"model":"m1","input":[]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	code, _ := post(t, px.URL+"/v1/responses", `{"model":"m1","input":[]}`)
 	elapsed := time.Since(start)
 
-	if resp.StatusCode != 200 {
-		t.Errorf("status=%d want 200 (should failover after timeout)", resp.StatusCode)
+	if code != 200 {
+		t.Errorf("status=%d want 200 (should failover after timeout)", code)
 	}
 	if elapsed > 1500*time.Millisecond {
 		t.Errorf("elapsed=%v want <1.5s (timeout should fail fast, not wait full 2s)", elapsed)
 	}
-	if len(*fallbackSeen) != 1 {
-		t.Errorf("fallback hits=%d want 1", len(*fallbackSeen))
+	if len(fallback.models()) != 1 {
+		t.Errorf("fallback hits=%d want 1", len(fallback.models()))
 	}
 }
 
@@ -322,14 +288,12 @@ func TestUC_ClientDisconnectStopsUpstream(t *testing.T) {
 // --- UC9: all targets fail → 502 ---
 
 func TestUC_AllTargetsFailReturns502(t *testing.T) {
-	a, _ := newCaptureUpstream(500, `{}`)
-	defer a.Close()
-	b, _ := newCaptureUpstream(500, `{}`)
-	defer b.Close()
+	a := newFakeUpstream(t, staticResponder(500, `{}`))
+	b := newFakeUpstream(t, staticResponder(500, `{}`))
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"a": {OpenAIBaseURL: a.URL, Provider: testProviderID},
-			"b": {OpenAIBaseURL: b.URL, Provider: testProviderID},
+			"a": {OpenAIBaseURL: a.srv.URL, Provider: testProviderID},
+			"b": {OpenAIBaseURL: b.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -342,13 +306,8 @@ func TestUC_AllTargetsFailReturns502(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/responses", "application/json", stringReader(`{"model":"m1","input":[]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 502 {
-		t.Errorf("status=%d want 502 (all targets failed)", resp.StatusCode)
+	if code, _ := post(t, px.URL+"/v1/responses", `{"model":"m1","input":[]}`); code != 502 {
+		t.Errorf("status=%d want 502 (all targets failed)", code)
 	}
 }
 
@@ -358,37 +317,9 @@ func TestUC_AllTargetsFailReturns502(t *testing.T) {
 // the proxy), rather than by function. Each test drives a real HTTP request
 // through p.Handler against httptest upstreams and asserts the observable
 // outcome a user cares about. Shared helpers (testProv, post, stringReader,
-// newCaptureUpstream) live in proxy_routing_test.go / routes_test.go.
+// fakeUpstream) live in proxy_routing_test.go / fusion_test.go.
 
 // --- mock helpers specific to use cases ---
-
-// scriptedUpstream responds with a sequence of (status, body) per request,
-// letting a single server simulate "first 401 then 200 after refresh".
-func scriptedUpstream(scripts ...respScript) *httptest.Server {
-	var idx int32
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		i := int(atomic.AddInt32(&idx, 1)) - 1
-		if i >= len(scripts) {
-			i = len(scripts) - 1
-		}
-		s := scripts[i]
-		if s.headers != nil {
-			for k, v := range s.headers {
-				w.Header().Set(k, v)
-			}
-		}
-		if s.status != 200 {
-			w.WriteHeader(s.status)
-		}
-		w.Write([]byte(s.body))
-	}))
-}
-
-type respScript struct {
-	status  int
-	body    string
-	headers map[string]string
-}
 
 // recordingProv is a testProv that records calls to AuthHeaders/Refresh, so a
 // test can assert the 401-refresh-retry path actually invoked Refresh.

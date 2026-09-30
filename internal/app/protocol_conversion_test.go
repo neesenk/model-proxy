@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -43,17 +42,9 @@ func TestForward_AnthropicToOpenAI_NonStream(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-x","max_tokens":100,"system":"be nice","messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, readErr := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if readErr != nil {
-		t.Fatalf("read response: %v", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	code, body := post(t, px.URL+"/v1/messages", `{"model":"claude-x","max_tokens":100,"system":"be nice","messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", code, body)
 	}
 
 	// Backend received an OpenAI-format request (system message, /chat/completions).
@@ -61,7 +52,7 @@ func TestForward_AnthropicToOpenAI_NonStream(t *testing.T) {
 		t.Errorf("backend got non-OpenAI request: %s", gotOpenAIReq)
 	}
 	// Client received an Anthropic-format response.
-	bs := string(body)
+	bs := body
 	for _, want := range []string{`"type":"message"`, `"text":"hello world"`, `"stop_reason":"end_turn"`} {
 		if !strings.Contains(bs, want) {
 			t.Errorf("client response missing %q: %s", want, bs)
@@ -92,18 +83,13 @@ func TestForward_ConvertRequestFail_Closed(t *testing.T) {
 
 	// extractModel returns "claude-x" (fast path reads 3 tokens, ignores the
 	// rest), but the full JSON is malformed so convertRequest fails.
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json",
-		strings.NewReader(`{"model":"claude-x","messages":[BAD`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
+	code, _ := post(t, px.URL+"/v1/messages", `{"model":"claude-x","messages":[BAD`)
 
 	if upstreamHits != 0 {
 		t.Errorf("upstream hit %d time(s), want 0 (conversion failed → must not send the Anthropic body to the OpenAI endpoint)", upstreamHits)
 	}
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("status = %d, want 502 (fail-closed: no target served)", resp.StatusCode)
+	if code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 (fail-closed: no target served)", code)
 	}
 }
 
@@ -127,18 +113,12 @@ func TestForward_ConvertResponseFail_Closed(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json",
-		strings.NewReader(`{"model":"claude-x","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	code, body := post(t, px.URL+"/v1/messages", `{"model":"claude-x","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`)
 
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("status = %d, want 502 (conversion failed → must not return a wrong-protocol 2xx body)", resp.StatusCode)
+	if code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 (conversion failed → must not return a wrong-protocol 2xx body)", code)
 	}
-	if bytes.Contains(body, []byte("not valid json")) {
+	if strings.Contains(body, "not valid json") {
 		t.Errorf("client received the raw backend body (fail-open): %q", body)
 	}
 }
@@ -218,23 +198,15 @@ func TestForward_OpenAIToAnthropic_NonStream(t *testing.T) {
 
 	// OpenAI client → backend converted to Anthropic (system lifted to top-level,
 	// /v1/messages path, max_tokens carried).
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"gpt-x","messages":[{"role":"system","content":"s"},{"role":"user","content":"hi"}],"max_tokens":100}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, readErr := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if readErr != nil {
-		t.Fatalf("read response: %v", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	code, body := post(t, px.URL+"/v1/chat/completions", `{"model":"gpt-x","messages":[{"role":"system","content":"s"},{"role":"user","content":"hi"}],"max_tokens":100}`)
+	if code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", code, body)
 	}
 
 	if !strings.Contains(gotAnthropicReq, `"text":"s"`) || !strings.Contains(gotAnthropicReq, `"model":"claude"`) || !strings.Contains(gotAnthropicReq, `"max_tokens":100`) {
 		t.Errorf("backend got non-Anthropic request: %s", gotAnthropicReq)
 	}
-	bs := string(body)
+	bs := body
 	for _, want := range []string{`"object":"chat.completion"`, `"content":"reply"`, `"finish_reason":"stop"`, `"prompt_tokens":4`, `"total_tokens":5`} {
 		if !strings.Contains(bs, want) {
 			t.Errorf("client response missing %q: %s", want, bs)
@@ -313,22 +285,14 @@ func TestForward_Convert_LogsClientProtocolBody(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-x","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	clientBody, readErr := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if readErr != nil {
-		t.Fatalf("read response: %v", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, clientBody)
+	code, clientBody := post(t, px.URL+"/v1/messages", `{"model":"claude-x","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", code, clientBody)
 	}
 
 	// Client received the Anthropic conversion.
-	if !strings.Contains(string(clientBody), `"type":"message"`) || !strings.Contains(string(clientBody), `"text":"hello"`) {
-		t.Fatalf("client did not get anthropic body: %s", string(clientBody))
+	if !strings.Contains(clientBody, `"type":"message"`) || !strings.Contains(clientBody, `"text":"hello"`) {
+		t.Fatalf("client did not get anthropic body: %s", clientBody)
 	}
 	// The request log must record the SAME anthropic body the client got — NOT the
 	// openai `choices` shape, and NOT empty. The record is enqueued from the
@@ -650,18 +614,12 @@ func TestForward_UnsupportedConversionReturns400WithoutUpstream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer server.Close()
 
-	resp, err := http.Post(server.URL+"/v1/chat/completions", "application/json",
-		strings.NewReader(`{"model":"m","n":2,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
+	code, body := post(t, server.URL+"/v1/chat/completions", `{"model":"m","n":2,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusBadRequest || calls.Load() != 0 {
+		t.Fatalf("status=%d calls=%d body=%s", code, calls.Load(), body)
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusBadRequest || calls.Load() != 0 {
-		t.Fatalf("status=%d calls=%d body=%s", resp.StatusCode, calls.Load(), body)
-	}
-	if !strings.Contains(string(body), `"code":"unsupported_protocol_conversion"`) ||
-		!strings.Contains(string(body), "n=2") {
+	if !strings.Contains(body, `"code":"unsupported_protocol_conversion"`) ||
+		!strings.Contains(body, "n=2") {
 		t.Fatalf("body=%s", body)
 	}
 }
@@ -695,15 +653,9 @@ func TestForward_UnsupportedTargetFallsThroughToCompatibleProtocol(t *testing.T)
 	server := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer server.Close()
 
-	resp, err := http.Post(server.URL+"/v1/chat/completions", "application/json",
-		strings.NewReader(`{"model":"m","n":2,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK || anthropicCalls.Load() != 0 || !strings.Contains(string(body), `"content":"ok"`) {
-		t.Fatalf("status=%d anthropic_calls=%d body=%s", resp.StatusCode, anthropicCalls.Load(), body)
+	code, body := post(t, server.URL+"/v1/chat/completions", `{"model":"m","n":2,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusOK || anthropicCalls.Load() != 0 || !strings.Contains(body, `"content":"ok"`) {
+		t.Fatalf("status=%d anthropic_calls=%d body=%s", code, anthropicCalls.Load(), body)
 	}
 }
 

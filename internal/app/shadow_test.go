@@ -258,15 +258,10 @@ func TestShadow_LogsResult(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"glm","input":[]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_, body := post(t, px.URL+"/v1/responses", `{"model":"glm","input":[]}`)
 	// Client sees ONLY the primary response.
-	if !strings.Contains(string(body), `"primary":true`) {
-		t.Errorf("client response = %s, want the primary's body", string(body))
+	if !strings.Contains(body, `"primary":true`) {
+		t.Errorf("client response = %s, want the primary's body", body)
 	}
 
 	// Shadow admission is asynchronous with respect to the client observing
@@ -427,23 +422,15 @@ func TestShadow_PooledCrossProtocolPreservesVirtualIdentity(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", strings.NewReader(
-		`{"model":"alias","messages":[{"role":"user","content":"shadow user"}],"max_tokens":37}`))
-	if err != nil {
-		t.Fatal(err)
+	code, clientBody := post(t, px.URL+"/v1/chat/completions",
+		`{"model":"alias","messages":[{"role":"user","content":"shadow user"}],"max_tokens":37}`)
+	if code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200; body=%s", code, clientBody)
 	}
-	clientBody, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d, want 200; body=%s", resp.StatusCode, clientBody)
-	}
-	if got := string(clientBody); got != primaryBody {
+	if got := clientBody; got != primaryBody {
 		t.Fatalf("client body = %s, want exact primary response %s", got, primaryBody)
 	}
-	if strings.Contains(string(clientBody), "shadow") {
+	if strings.Contains(clientBody, "shadow") {
 		t.Fatalf("client response leaked shadow output: %s", clientBody)
 	}
 
@@ -691,12 +678,7 @@ func TestReload_ShadowDisabledStopsFiring(t *testing.T) {
 	defer px.Close()
 
 	send := func() {
-		resp, err := http.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"m","input":[]}`))
-		if err != nil {
-			t.Fatal(err)
-		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		post(t, px.URL+"/v1/responses", `{"model":"m","input":[]}`)
 	}
 	// 1) shadow enabled → the candidate IS hit (fire-and-forget, so poll).
 	send()
@@ -759,12 +741,7 @@ func TestShadow_PooledProvider(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"m","input":[]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	post(t, px.URL+"/v1/responses", `{"model":"m","input":[]}`)
 
 	// Shadow is fire-and-forget; poll for the hit.
 	deadline := time.Now().Add(2 * time.Second)
@@ -810,13 +787,7 @@ func TestShadow_ConvertFail_Closed(t *testing.T) {
 
 	// extractModel returns "m" (fast path reads 3 tokens), but the full JSON is
 	// malformed → the shadow's openai→anthropic convertRequest fails.
-	resp, err := http.Post(px.URL+"/v1/responses", "application/json",
-		strings.NewReader(`{"model":"m","input":[BAD`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	post(t, px.URL+"/v1/responses", `{"model":"m","input":[BAD`)
 
 	// Close waits for the admitted detached task, so the zero-hit assertion has
 	// no asynchronous timing window.

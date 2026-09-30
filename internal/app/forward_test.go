@@ -37,13 +37,12 @@ func TestForward_CommittedSSEStreamMidFailureIsNotRecalled(t *testing.T) {
 		panic("upstream died mid-stream")
 	}))
 	defer primary.Close()
-	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
-	defer fallback.Close()
+	fallback := newFakeUpstream(t, staticResponder(200, `{"ok":true}`))
 
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -78,8 +77,8 @@ func TestForward_CommittedSSEStreamMidFailureIsNotRecalled(t *testing.T) {
 	if got := pHits.Load(); got != 1 {
 		t.Errorf("primary hits = %d, want 1", got)
 	}
-	if len(*fallbackSeen) != 0 {
-		t.Errorf("fallback was hit %d time(s) after a COMMITTED stream died — commit must mean no recall", len(*fallbackSeen))
+	if len(fallback.models()) != 0 {
+		t.Errorf("fallback was hit %d time(s) after a COMMITTED stream died — commit must mean no recall", len(fallback.models()))
 	}
 
 	// The request still reaches its terminal state: one committed end event
@@ -132,13 +131,12 @@ func TestForward_DialRefusedFailsOver(t *testing.T) {
 	deadURL := dead.URL
 	dead.Close()
 
-	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
-	defer fallback.Close()
+	fallback := newFakeUpstream(t, staticResponder(200, `{"ok":true}`))
 
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
 			"primary":  {OpenAIBaseURL: deadURL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -156,8 +154,8 @@ func TestForward_DialRefusedFailsOver(t *testing.T) {
 	if code != 200 || body != `{"ok":true}` {
 		t.Fatalf("dial-refused failover: status=%d body=%s, want 200 with the fallback body", code, body)
 	}
-	if len(*fallbackSeen) != 1 {
-		t.Errorf("fallback seen %d time(s), want 1", len(*fallbackSeen))
+	if len(fallback.models()) != 1 {
+		t.Errorf("fallback seen %d time(s), want 1", len(fallback.models()))
 	}
 	h, ok := p.runtimeState.Dashboard(time.Now()).Providers["primary"]
 	if !ok {
@@ -179,12 +177,7 @@ func TestForward_DialRefusedFailsOver(t *testing.T) {
 // Non-LLM paths (proto=="") are the exception: they 502 without a live event,
 // so browser probes cannot pollute the Live view.
 func TestForward_EarlyEventsHaveRequestID(t *testing.T) {
-	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-routes:
-  glm: [{provider: zhipu, model: glm}]
-`))
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(testConfigYAML("routes:\n  glm: [{provider: zhipu, model: glm}]\n")))
 	p := newTestProxy(t, cfg)
 
 	eventCursor := 0

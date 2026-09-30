@@ -106,13 +106,8 @@ func TestForward_UnknownModel(t *testing.T) {
 	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
-	resp, err := http.Post(px.URL+"/v1/responses", "application/json", stringReader(`{"model":"unknown"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 502 {
-		t.Errorf("expected 502 for unknown model, got %d", resp.StatusCode)
+	if code, _ := post(t, px.URL+"/v1/responses", `{"model":"unknown"}`); code != 502 {
+		t.Errorf("expected 502 for unknown model, got %d", code)
 	}
 }
 
@@ -158,6 +153,21 @@ func postOK(t *testing.T, url, body string) {
 	if code != http.StatusOK {
 		t.Fatalf("post %s: status=%d body=%s, want 200", url, code, respBody)
 	}
+}
+
+// testConfigYAML assembles the canonical minimal test config shared across the
+// app-package tests — `listen` plus the zhipu provider stub — with any extra
+// YAML sections (routes, cache, guard, scheduling, ...) appended verbatim.
+// Every section string must be a complete YAML block ending in "\n". Tests
+// needing a different provider id/name, a dynamic base URL, or byte-exact
+// file fixtures (config-editor round trips) keep their own literals; only the
+// byte-identical prefix is centralized here.
+func testConfigYAML(sections ...string) string {
+	cfg := "listen: 127.0.0.1:0\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: https://x}\n"
+	for _, s := range sections {
+		cfg += s
+	}
+	return cfg
 }
 
 func stringReader(s string) io.Reader { return &stringReaderImpl{s: s} }
@@ -573,12 +583,11 @@ func TestUC_ModelsEndpointUnion(t *testing.T) {
 // --- UC11: /debug/schedule reports sticky + dwell remaining ---
 
 func TestUC_DebugScheduleReportsSticky(t *testing.T) {
-	up, _ := newCaptureUpstream(200, `{}`)
-	defer up.Close()
+	up := newFakeUpstream(t, staticResponder(200, `{}`))
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"a": {OpenAIBaseURL: up.URL, Provider: testProviderID},
-			"b": {OpenAIBaseURL: up.URL, Provider: testProviderID},
+			"a": {OpenAIBaseURL: up.srv.URL, Provider: testProviderID},
+			"b": {OpenAIBaseURL: up.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -820,14 +829,12 @@ func TestUC_UnknownPathAndHealth(t *testing.T) {
 	defer px.Close()
 
 	// Unknown path → 502.
-	resp, _ := http.Post(px.URL+"/v1/whatever", "application/json", stringReader(`{"model":"m1"}`))
-	resp.Body.Close()
-	if resp.StatusCode != 502 {
-		t.Errorf("unknown path status=%d want 502", resp.StatusCode)
+	if code, _ := post(t, px.URL+"/v1/whatever", `{"model":"m1"}`); code != 502 {
+		t.Errorf("unknown path status=%d want 502", code)
 	}
 
 	// /health → 200.
-	resp, _ = http.Get(px.URL + "/health")
+	resp, _ := http.Get(px.URL + "/health")
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Errorf("/health status=%d want 200", resp.StatusCode)
@@ -852,10 +859,8 @@ func TestUC_MissingModelField400(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, _ := http.Post(px.URL+"/v1/responses", "application/json", stringReader(`{"input":[]}`))
-	resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Errorf("missing model: status=%d want 400", resp.StatusCode)
+	if code, _ := post(t, px.URL+"/v1/responses", `{"input":[]}`); code != 400 {
+		t.Errorf("missing model: status=%d want 400", code)
 	}
 }
 
@@ -870,10 +875,8 @@ func TestUC_UnparseableBody400(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, _ := http.Post(px.URL+"/v1/responses", "application/json", stringReader(`not-json`))
-	resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Errorf("unparseable body: status=%d want 400", resp.StatusCode)
+	if code, _ := post(t, px.URL+"/v1/responses", `not-json`); code != 400 {
+		t.Errorf("unparseable body: status=%d want 400", code)
 	}
 }
 

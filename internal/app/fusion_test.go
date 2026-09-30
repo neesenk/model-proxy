@@ -417,16 +417,31 @@ func TestFusion_SynthesizerUpstream5xxIsHardEndpoint(t *testing.T) {
 
 // ---- fusion_test_helpers_test.go ----
 
-// fakeUpstream records every request body + path and answers with a
-// configurable responder.
+// fakeUpstream is the package's canonical fake upstream: it records every
+// request body, path and parsed `model` field, and answers with a configurable
+// responder. The former parallel variants all reduce to it — by-hit scripting
+// via newHitFakeUpstream/hitScript/respondScripted (newHitServer,
+// scriptedUpstream) and record-and-answer via newFakeUpstream+staticResponder
+// (newCaptureUpstream).
 type fakeUpstream struct {
-	srv    *httptest.Server
-	mu     sync.Mutex
-	bodies []string
-	paths  []string
+	srv        *httptest.Server
+	mu         sync.Mutex
+	bodies     []string
+	seenModels []string
+	paths      []string
 }
 
 func newFakeUpstream(t *testing.T, respond http.HandlerFunc) *fakeUpstream {
+	t.Helper()
+	return newHitFakeUpstream(t, func(_ int, w http.ResponseWriter, r *http.Request) {
+		respond(w, r)
+	})
+}
+
+// newHitFakeUpstream is newFakeUpstream for responders that also need the
+// 1-based hit count. Recording happens before the responder runs, so hit
+// already includes the request being answered ("first hit" = 1).
+func newHitFakeUpstream(t *testing.T, respond func(hit int, w http.ResponseWriter, r *http.Request)) *fakeUpstream {
 	t.Helper()
 	f := &fakeUpstream{}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -434,18 +449,48 @@ func newFakeUpstream(t *testing.T, respond http.HandlerFunc) *fakeUpstream {
 		r.Body.Close()
 		f.mu.Lock()
 		f.bodies = append(f.bodies, string(body))
+		f.seenModels = append(f.seenModels, modelOfBody(body))
 		f.paths = append(f.paths, r.URL.Path)
+		hit := len(f.bodies)
 		f.mu.Unlock()
-		respond(w, r)
+		respond(hit, w, r)
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// modelOfBody extracts the `model` field of a JSON request body ("" when the
+// body carried none or is not an object).
+func modelOfBody(body []byte) string {
+	var m struct {
+		Model string `json:"model"`
+	}
+	json.Unmarshal(body, &m)
+	return m.Model
 }
 
 func (f *fakeUpstream) hits() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.bodies)
+}
+
+// models returns a copy of the recorded per-request `model` fields (the old
+// capture helper exposed this as a shared *[]string).
+func (f *fakeUpstream) models() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.seenModels...)
+}
+
+// reset clears the recorded requests (the old capture helper let callers reset
+// by assigning nil through the shared *[]string).
+func (f *fakeUpstream) reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bodies = nil
+	f.seenModels = nil
+	f.paths = nil
 }
 
 func (f *fakeUpstream) lastBody() string {
@@ -464,6 +509,71 @@ func (f *fakeUpstream) lastPath() string {
 		return ""
 	}
 	return f.paths[len(f.paths)-1]
+}
+
+// staticResponder answers every request with the same status + body and a JSON
+// content type — the answering shape the former newCaptureUpstream used.
+func staticResponder(status int, body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if status != 200 {
+			w.WriteHeader(status)
+		}
+		w.Write([]byte(body))
+	}
+}
+
+// hitScript adapts the compact by-hit table (status/body/headers/delay per
+// 1-based hit) into a hit-aware responder — the answering shape the former
+// newHitServer used: the delay sleeps first, headers are added, content type
+// defaults to application/json, and WriteHeader is only issued for non-200
+// statuses.
+func hitScript(script func(hit int) (status int, body string, headers http.Header, delay time.Duration)) func(hit int, w http.ResponseWriter, r *http.Request) {
+	return func(hit int, w http.ResponseWriter, r *http.Request) {
+		status, body, headers, delay := script(hit)
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		for k, vs := range headers {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.Header().Set("content-type", "application/json")
+		if status != 200 {
+			w.WriteHeader(status)
+		}
+		w.Write([]byte(body))
+	}
+}
+
+// respScript is one step of a scripted answer sequence.
+type respScript struct {
+	status  int
+	body    string
+	headers map[string]string
+}
+
+// respondScripted answers with scripts[hit-1] (clamped to the last entry) —
+// the answering shape the former scriptedUpstream used for "first 401, then
+// 200 after refresh" sequences.
+func respondScripted(scripts ...respScript) func(hit int, w http.ResponseWriter, r *http.Request) {
+	return func(hit int, w http.ResponseWriter, r *http.Request) {
+		i := hit - 1
+		if i >= len(scripts) {
+			i = len(scripts) - 1
+		}
+		s := scripts[i]
+		if s.headers != nil {
+			for k, v := range s.headers {
+				w.Header().Set(k, v)
+			}
+		}
+		if s.status != 200 {
+			w.WriteHeader(s.status)
+		}
+		w.Write([]byte(s.body))
+	}
 }
 
 // --- responders ---

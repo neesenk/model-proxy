@@ -692,11 +692,7 @@ func TestLiveEvents_EarlyFailures(t *testing.T) {
 	defer px.Close()
 
 	expectEnd := func(body string, wantStatus int) {
-		resp, err := http.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(body))
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
+		post(t, px.URL+"/v1/responses", body)
 		for {
 			select {
 			case e := <-ch:
@@ -770,14 +766,9 @@ func TestLiveEvents_CacheHitAndAllFailed(t *testing.T) {
 	defer cancel2()
 	pxf := httptest.NewServer(http.HandlerFunc(pf2.Handler))
 	defer pxf.Close()
-	resp, err := http.Post(pxf.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"glm","input":[]}`))
-	if err != nil {
-		t.Fatal(err)
+	if code, _ := post(t, pxf.URL+"/v1/responses", `{"model":"glm","input":[]}`); code != http.StatusBadGateway {
+		t.Fatalf("all-failed status=%d want 502", code)
 	}
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("all-failed status=%d want 502", resp.StatusCode)
-	}
-	resp.Body.Close()
 	got502 := false
 	deadline2 := time.After(time.Second)
 	for !got502 {

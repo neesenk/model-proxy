@@ -373,18 +373,16 @@ func TestForwardMixedExhaustionPrefersLiveTarget(t *testing.T) {
 // TestProxy_QuotaRefreshOnRateLimit: a 429 on a provider triggers an async
 // quota refresh of that provider.
 func TestProxy_QuotaRefreshOnRateLimit(t *testing.T) {
-	primary, _ := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 429, `{}`, intHdr("Retry-After", "30"), 0
-	})
-	defer primary.Close()
-	fallback, _ := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
+	}))
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"primary":  {OpenAIBaseURL: primary.srv.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{"m1": {
 			{Provider: "primary", Model: "m1", Priority: 1},

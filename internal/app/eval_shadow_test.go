@@ -107,13 +107,8 @@ func TestEvalShadow_PairwiseJudgeLogsVerdict(t *testing.T) {
 		OpenAIBaseURL: primaryUpstream.URL,
 	}
 
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", strings.NewReader(
-		`{"model":"alias","messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	post(t, px.URL+"/v1/chat/completions",
+		`{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
 
 	// Wait for shadow + judge to finish and the log to drain.
 	time.Sleep(300 * time.Millisecond)
@@ -238,13 +233,8 @@ func TestEvalShadow_SkipsWhenNotSampled(t *testing.T) {
 		OpenAIBaseURL: primaryUpstream.URL,
 	}
 
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", strings.NewReader(
-		`{"model":"alias","messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	post(t, px.URL+"/v1/chat/completions",
+		`{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
 
 	time.Sleep(200 * time.Millisecond)
 	p.Close()
@@ -461,13 +451,8 @@ func TestEvalShadow_OmittedSampleRateDefaultsTo005(t *testing.T) {
 				OpenAIBaseURL: primaryUpstream.URL,
 			}
 
-			resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", strings.NewReader(
-				`{"model":"alias","messages":[{"role":"user","content":"hi"}]}`))
-			if err != nil {
-				t.Fatal(err)
-			}
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
+			post(t, px.URL+"/v1/chat/completions",
+				`{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
 
 			if tc.wantShadow {
 				select {

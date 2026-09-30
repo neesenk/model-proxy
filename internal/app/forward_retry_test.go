@@ -43,13 +43,12 @@ func TestUC_ClientCancelDuringHeadersStopsFailoverAndKeepsCircuitClosed(t *testi
 		atomic.AddInt32(&blockedHitsDone, 1)
 	}))
 	defer blocked.Close()
-	fallback, fallbackSeen := newCaptureUpstream(200, `{"ok":true}`)
-	defer fallback.Close()
+	fallback := newFakeUpstream(t, staticResponder(200, `{"ok":true}`))
 
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
 			"blocked":  {OpenAIBaseURL: blocked.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -109,20 +108,14 @@ func TestUC_ClientCancelDuringHeadersStopsFailoverAndKeepsCircuitClosed(t *testi
 	if got := atomic.LoadInt32(&blockedHitsDone); got != 3 {
 		t.Fatalf("blocked upstream handlers exited=%d, want 3", got)
 	}
-	if burned := len(*fallbackSeen); burned != 0 {
+	if burned := len(fallback.models()); burned != 0 {
 		t.Errorf("failover burned %d fallback calls on a dead request context", burned)
 	}
 
 	// No failure was ever recorded, so fallback must still serve immediately.
 	// Pre-fix its circuit was open after round 3 → 502.
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", stringReader(`{"model":"m2","messages":[]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		t.Errorf("status=%d want 200 (cancellations must not open circuits), body=%s", resp.StatusCode, body)
+	if code, body := post(t, px.URL+"/v1/chat/completions", `{"model":"m2","messages":[]}`); code != 200 {
+		t.Errorf("status=%d want 200 (cancellations must not open circuits), body=%s", code, body)
 	}
 }
 
@@ -644,34 +637,23 @@ func TestForward_StrictLossyRefusesAndAnswers400(t *testing.T) {
 	// equivalent → stop_dropped diagnostic).
 	body := `{"model":"glm","max_tokens":16,"stop_sequences":["END"],"messages":[{"role":"user","content":"hi"}]}`
 
-	resp, err := http.Post(newProxy(false).URL+"/v1/messages", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("strict off: status = %d, want 200 (lossy tolerated)", resp.StatusCode)
+	if code, _ := post(t, newProxy(false).URL+"/v1/messages", body); code != http.StatusOK {
+		t.Fatalf("strict off: status = %d, want 200 (lossy tolerated)", code)
 	}
 
-	resp, err = http.Post(newProxy(true).URL+"/v1/messages", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("strict on: status = %d, want 400: %s", resp.StatusCode, raw)
+	code, raw := post(t, newProxy(true).URL+"/v1/messages", body)
+	if code != http.StatusBadRequest {
+		t.Fatalf("strict on: status = %d, want 400: %s", code, raw)
 	}
 	var envelope struct {
 		Error struct {
 			Type string `json:"type"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal(raw, &envelope); err != nil {
+	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
 		t.Fatalf("400 body not an anthropic error envelope: %s", raw)
 	}
-	if !strings.Contains(string(raw), "strict_lossy") {
+	if !strings.Contains(raw, "strict_lossy") {
 		t.Fatalf("400 body lacks the strict_lossy feature marker: %s", raw)
 	}
 }
@@ -705,14 +687,9 @@ func TestForward_LearnsDeveloperRoleRename(t *testing.T) {
 	// Chat client speaking chat backend (passthrough): a developer-roled
 	// system message rides through byte-level.
 	body := `{"model":"m1","messages":[{"role":"developer","content":"be brief"},{"role":"user","content":"ping"}]}`
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", stringReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	rb, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("first request status = %d: %s", resp.StatusCode, rb)
+	code, rb := post(t, px.URL+"/v1/chat/completions", body)
+	if code != http.StatusOK {
+		t.Fatalf("first request status = %d: %s", code, rb)
 	}
 
 	if up.hits() != 2 {
@@ -727,14 +704,9 @@ func TestForward_LearnsDeveloperRoleRename(t *testing.T) {
 	firstRound := up.hits()
 
 	// Second request: pre-renamed on the way out (no reject round-trip).
-	resp2, err := http.Post(px.URL+"/v1/chat/completions", "application/json", stringReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	rb2, _ := io.ReadAll(resp2.Body)
-	resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK {
-		t.Fatalf("second request status = %d: %s", resp2.StatusCode, rb2)
+	code2, rb2 := post(t, px.URL+"/v1/chat/completions", body)
+	if code2 != http.StatusOK {
+		t.Fatalf("second request status = %d: %s", code2, rb2)
 	}
 	if up.hits() != firstRound+1 {
 		t.Errorf("upstream hits after second request = %d, want %d (no reject round-trip)", up.hits(), firstRound+1)
@@ -774,14 +746,9 @@ func TestForward_LearnsThinkingAdaptiveE2E(t *testing.T) {
 	defer px.Close()
 
 	body := `{"model":"m","max_tokens":100,"thinking":{"type":"enabled","budget_tokens":8000},"messages":[{"role":"user","content":"ping"}]}`
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", stringReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	rb, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("first request status = %d: %s", resp.StatusCode, rb)
+	code, rb := post(t, px.URL+"/v1/messages", body)
+	if code != http.StatusOK {
+		t.Fatalf("first request status = %d: %s", code, rb)
 	}
 	if up.hits() != 2 {
 		t.Fatalf("upstream hits = %d, want 2 (reject + adaptive retry)", up.hits())
@@ -793,14 +760,9 @@ func TestForward_LearnsThinkingAdaptiveE2E(t *testing.T) {
 		t.Error("thinking_adaptive lesson not persisted")
 	}
 
-	resp2, err := http.Post(px.URL+"/v1/messages", "application/json", stringReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	rb2, _ := io.ReadAll(resp2.Body)
-	resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK {
-		t.Fatalf("second request status = %d: %s", resp2.StatusCode, rb2)
+	code2, rb2 := post(t, px.URL+"/v1/messages", body)
+	if code2 != http.StatusOK {
+		t.Fatalf("second request status = %d: %s", code2, rb2)
 	}
 	if up.hits() != 3 {
 		t.Errorf("upstream hits after second request = %d, want 3 (no reject round-trip)", up.hits())
@@ -841,20 +803,14 @@ func TestForward_ErrorDegradationVisibleE2E(t *testing.T) {
 			px := httptest.NewServer(http.HandlerFunc(p.Handler))
 			defer px.Close()
 
-			resp, err := http.Post(px.URL+tc.clientPath, "application/json",
-				stringReader(`{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"ping"}]}`))
-			if err != nil {
-				t.Fatal(err)
+			code, rb := post(t, px.URL+tc.clientPath, `{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"ping"}]}`)
+			if code != http.StatusBadRequest {
+				t.Fatalf("status = %d (want the upstream 400 preserved, not a 502): %s", code, rb)
 			}
-			rb, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode != http.StatusBadRequest {
-				t.Fatalf("status = %d (want the upstream 400 preserved, not a 502): %s", resp.StatusCode, rb)
-			}
-			if !strings.Contains(string(rb), tc.wantBody) {
+			if !strings.Contains(rb, tc.wantBody) {
 				t.Errorf("client body lost the upstream diagnosis: %s", rb)
 			}
-			if !strings.Contains(string(rb), `"type":"error"`) {
+			if !strings.Contains(rb, `"type":"error"`) {
 				t.Errorf("no anthropic error envelope: %s", rb)
 			}
 		})
@@ -880,13 +836,7 @@ func TestForward_ModelDeniedNewWordingE2E(t *testing.T) {
 		px := httptest.NewServer(http.HandlerFunc(p.Handler))
 		defer px.Close()
 
-		resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json",
-			stringReader(`{"model":"m","messages":[{"role":"user","content":"ping"}]}`))
-		if err != nil {
-			t.Fatal(err)
-		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		post(t, px.URL+"/v1/chat/completions", `{"model":"m","messages":[{"role":"user","content":"ping"}]}`)
 
 		locked := p.modelLocked("s", "m", time.Now())
 		if locked != wantLocked {

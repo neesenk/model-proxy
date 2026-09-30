@@ -751,12 +751,7 @@ func TestWebAccountProbeUsesAdminCapabilityAndPreservesResponseShape(t *testing.
 // 413 BEFORE any routing work. The default cap (64 MiB) must keep ordinary
 // requests flowing; an explicit small cap must be honored.
 func TestForward_RequestBodyLimit(t *testing.T) {
-	base := `listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-routes:
-  glm: [{provider: zhipu, model: glm}]
-`
+	base := testConfigYAML("routes:\n  glm: [{provider: zhipu, model: glm}]\n")
 	newProxy := func(extra string) *Proxy {
 		cfg, err := configdomain.LoadConfigFromBytes("test", []byte(base+extra))
 		if err != nil {
@@ -884,10 +879,7 @@ func TestServeModels_NoRoutesReturnsEmpty(t *testing.T) {
 // default (falls through to the unknown-path 502) and served when the proxy
 // was constructed with MP_PPROF=1.
 func TestHandler_PprofEndpointIsOptIn(t *testing.T) {
-	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-`))
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(testConfigYAML()))
 	get := func(p *Proxy, path string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
 		p.Handler(rec, httptest.NewRequest(http.MethodGet, path, nil))

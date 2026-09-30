@@ -2,7 +2,6 @@ package app
 
 import (
 	"encoding/json"
-	"io"
 	configdomain "model-proxy/internal/config"
 	runtimestate "model-proxy/internal/runtime"
 	"net/http"
@@ -10,37 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // ---- health_test.go ----
-
-// newHitServer returns a mock upstream whose handler decides the response per
-// hit count (1-based) and increments an atomic counter on each hit.
-func newHitServer(h func(hit int) (status int, body string, headers http.Header, delay time.Duration)) (*httptest.Server, *atomic.Int32) {
-	var n atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.Copy(io.Discard, r.Body)
-		c := int(n.Add(1))
-		status, body, headers, delay := h(c)
-		if delay > 0 {
-			time.Sleep(delay)
-		}
-		for k, vs := range headers {
-			for _, v := range vs {
-				w.Header().Add(k, v)
-			}
-		}
-		w.Header().Set("content-type", "application/json")
-		if status != 200 {
-			w.WriteHeader(status)
-		}
-		w.Write([]byte(body))
-	}))
-	return srv, &n
-}
 
 func intHdr(k, v string) http.Header {
 	h := http.Header{}
@@ -62,18 +35,16 @@ func schedCfg(threshold int, cooldown, rateBackoff, timeout, dwell string) confi
 // TestCircuit_OpensAfter3Failures: 3 consecutive 5xx open the circuit; the 4th
 // request skips the (now-unavailable) primary and goes straight to the fallback.
 func TestCircuit_OpensAfter3Failures(t *testing.T) {
-	primary, pHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 500, `{"e":"primary"}`, nil, 0
-	})
-	defer primary.Close()
-	fallback, fHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
+	}))
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"primary":  {OpenAIBaseURL: primary.srv.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -92,10 +63,10 @@ func TestCircuit_OpensAfter3Failures(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	}
-	if got := pHits.Load(); got != 3 {
+	if got := primary.hits(); got != 3 {
 		t.Errorf("primary hits after circuit open: got %d, want 3 (4th request should skip primary)", got)
 	}
-	if got := fHits.Load(); got != 4 {
+	if got := fallback.hits(); got != 4 {
 		t.Errorf("fallback hits: got %d, want 4", got)
 	}
 }
@@ -104,21 +75,19 @@ func TestCircuit_OpensAfter3Failures(t *testing.T) {
 // expires, one probe is allowed; success closes the circuit (subsequent
 // requests use the primary again).
 func TestCircuit_HalfOpenClosesOnSuccess(t *testing.T) {
-	primary, pHits := newHitServer(func(c int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(c int) (int, string, http.Header, time.Duration) {
 		if c <= 3 {
 			return 500, `{"e":"primary"}`, nil, 0
 		}
 		return 200, `{"ok":true}`, nil, 0 // recovered
-	})
-	defer primary.Close()
-	fallback, fHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
+	}))
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"primary":  {OpenAIBaseURL: primary.srv.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -146,10 +115,10 @@ func TestCircuit_HalfOpenClosesOnSuccess(t *testing.T) {
 	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // probe: primary recovered → close
 	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // primary available again
 
-	if got := pHits.Load(); got != 5 {
+	if got := primary.hits(); got != 5 {
 		t.Errorf("primary hits: got %d, want 5 (3 failures + 2 successes after half-open close)", got)
 	}
-	if got := fHits.Load(); got != 3 {
+	if got := fallback.hits(); got != 3 {
 		t.Errorf("fallback hits: got %d, want 3 (only during the 3 failures)", got)
 	}
 }
@@ -157,18 +126,16 @@ func TestCircuit_HalfOpenClosesOnSuccess(t *testing.T) {
 // TestRateLimit_SkipsProvider: a 429 (with Retry-After) marks the provider
 // rate-limited; the next request skips it and uses the fallback.
 func TestRateLimit_SkipsProvider(t *testing.T) {
-	primary, pHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 429, `{"e":"rate"}`, intHdr("Retry-After", "30"), 0
-	})
-	defer primary.Close()
-	fallback, fHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
+	}))
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"primary":  {OpenAIBaseURL: primary.srv.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -187,10 +154,10 @@ func TestRateLimit_SkipsProvider(t *testing.T) {
 	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // 429 → rate-limit primary
 	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // primary skipped
 
-	if got := pHits.Load(); got != 1 {
+	if got := primary.hits(); got != 1 {
 		t.Errorf("primary hits: got %d, want 1 (rate-limited after the 429)", got)
 	}
-	if got := fHits.Load(); got != 2 {
+	if got := fallback.hits(); got != 2 {
 		t.Errorf("fallback hits: got %d, want 2", got)
 	}
 }
@@ -199,21 +166,19 @@ func TestRateLimit_SkipsProvider(t *testing.T) {
 // route stays on it for the sticky_dwell window even once the primary recovers;
 // after the dwell, it re-evaluates and returns to the (priority-1) primary.
 func TestStickyDwell_HoldsThenReEvaluates(t *testing.T) {
-	primary, pHits := newHitServer(func(c int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(c int) (int, string, http.Header, time.Duration) {
 		if c <= 3 {
 			return 500, `{"e":"primary"}`, nil, 0
 		}
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer primary.Close()
-	fallback, fHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
+	}))
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"primary":  {OpenAIBaseURL: primary.srv.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -233,7 +198,7 @@ func TestStickyDwell_HoldsThenReEvaluates(t *testing.T) {
 		post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	}
 	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // primary open → fallback, sticky=fallback
-	fbAfterFailover := fHits.Load()
+	fbAfterFailover := fallback.hits()
 	stickyFrom := time.Now()
 
 	// Wait for the cooldown to lapse (observable), not a fixed sleep: this
@@ -244,10 +209,10 @@ func TestStickyDwell_HoldsThenReEvaluates(t *testing.T) {
 		return ok && h.Available
 	})
 	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
-	if got := fHits.Load(); got != fbAfterFailover+1 {
+	if got := fallback.hits(); got != fbAfterFailover+1 {
 		t.Errorf("within dwell: fallback should still serve (sticky), got fHits %d→%d", fbAfterFailover, got)
 	}
-	if got := pHits.Load(); got != 3 {
+	if got := primary.hits(); got != 3 {
 		t.Errorf("within dwell: primary should not be retried yet, got pHits %d (want 3)", got)
 	}
 
@@ -257,7 +222,7 @@ func TestStickyDwell_HoldsThenReEvaluates(t *testing.T) {
 		time.Sleep(rest)
 	}
 	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
-	if got := pHits.Load(); got != 4 {
+	if got := primary.hits(); got != 4 {
 		t.Errorf("after dwell: primary should be re-evaluated (half-open probe), got pHits %d (want 4)", got)
 	}
 }
@@ -265,18 +230,16 @@ func TestStickyDwell_HoldsThenReEvaluates(t *testing.T) {
 // TestUpstreamTimeout_Failover: a hanging upstream exceeds upstream_timeout and
 // triggers failover to the next target.
 func TestUpstreamTimeout_Failover(t *testing.T) {
-	primary, pHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 200 * time.Millisecond // hangs past the timeout
-	})
-	defer primary.Close()
-	fallback, fHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
+	}))
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"primary":  {OpenAIBaseURL: primary.srv.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -293,24 +256,19 @@ func TestUpstreamTimeout_Failover(t *testing.T) {
 	defer px.Close()
 
 	start := time.Now()
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", stringReader(`{"model":"m1","messages":[]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	code, body := post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	elapsed := time.Since(start)
 
-	if resp.StatusCode != 200 {
-		t.Errorf("timeout failover: status=%d body=%s, want 200 from fallback", resp.StatusCode, body)
+	if code != 200 {
+		t.Errorf("timeout failover: status=%d body=%s, want 200 from fallback", code, body)
 	}
 	if elapsed > 1500*time.Millisecond {
 		t.Errorf("timeout failover was slow: %v (upstream_timeout=50ms should failover fast)", elapsed)
 	}
-	if got := pHits.Load(); got != 1 {
+	if got := primary.hits(); got != 1 {
 		t.Errorf("primary should be tried once (then timed out), got %d", got)
 	}
-	if got := fHits.Load(); got != 1 {
+	if got := fallback.hits(); got != 1 {
 		t.Errorf("fallback should serve after timeout, got %d", got)
 	}
 }
@@ -320,21 +278,19 @@ func TestUpstreamTimeout_Failover(t *testing.T) {
 // released (failure history kept) and the provider is available for the next
 // request. Before the fix, halfOpenInFlight stayed true forever (starvation).
 func TestHalfOpen_4xxReleasesSlot(t *testing.T) {
-	primary, pHits := newHitServer(func(c int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(c int) (int, string, http.Header, time.Duration) {
 		if c <= 3 {
 			return 500, `{"e":"broken"}`, nil, 0 // trip the circuit
 		}
 		return 400, `{"e":"bad request"}`, nil, 0 // half-open probe: client error
-	})
-	defer primary.Close()
-	fallback, _ := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
+	}))
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"primary":  {OpenAIBaseURL: primary.srv.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -378,12 +334,12 @@ func TestHalfOpen_4xxReleasesSlot(t *testing.T) {
 	}
 	// Next request reaches the primary again (single-flight freed). The
 	// upstream always answers 400 here, so the client sees the committed 400.
-	before := pHits.Load()
+	before := primary.hits()
 	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`); st != 400 {
 		t.Fatalf("post-release request: status = %d, want 400 (committed upstream client error)", st)
 	}
-	if pHits.Load() != before+1 {
-		t.Errorf("primary not retried after slot release: hits %d → %d", before, pHits.Load())
+	if primary.hits() != before+1 {
+		t.Errorf("primary not retried after slot release: hits %d → %d", before, primary.hits())
 	}
 }
 
@@ -393,18 +349,16 @@ func TestHalfOpen_4xxReleasesSlot(t *testing.T) {
 // hitting the dead primary or starve on a stuck slot. The unit-level manager
 // test covers the state transition; this is the HTTP-level end state.
 func TestHalfOpen_FailedProbeReopensCircuit(t *testing.T) {
-	primary, pHits := newHitServer(func(c int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(c int) (int, string, http.Header, time.Duration) {
 		return 500, `{"e":"broken"}`, nil, 0 // trips the circuit AND fails the probe
-	})
-	defer primary.Close()
-	fallback, _ := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
+	}))
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"primary":  {OpenAIBaseURL: primary.srv.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -431,11 +385,11 @@ func TestHalfOpen_FailedProbeReopensCircuit(t *testing.T) {
 
 	// The half-open probe goes to the primary, gets 500, and the request
 	// still succeeds via the fallback (client-visible outcome is a 200).
-	probeHits := pHits.Load()
+	probeHits := primary.hits()
 	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`); st != 200 {
 		t.Fatalf("probe request: status = %d, want 200 (fallback serves)", st)
 	}
-	if got := pHits.Load(); got != probeHits+1 {
+	if got := primary.hits(); got != probeHits+1 {
 		t.Fatalf("probe hits: primary %d → %d, want exactly one probe", probeHits, got)
 	}
 
@@ -453,12 +407,12 @@ func TestHalfOpen_FailedProbeReopensCircuit(t *testing.T) {
 	}
 
 	// While re-opened, the next request must skip the primary entirely.
-	before := pHits.Load()
+	before := primary.hits()
 	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`); st != 200 {
 		t.Fatalf("post-reopen request: status = %d, want 200", st)
 	}
-	if pHits.Load() != before {
-		t.Errorf("primary hit after circuit re-opened: %d → %d", before, pHits.Load())
+	if primary.hits() != before {
+		t.Errorf("primary hit after circuit re-opened: %d → %d", before, primary.hits())
 	}
 }
 

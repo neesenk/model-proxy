@@ -88,14 +88,8 @@ func TestExpandedRoutesDropAccountlessProviders(t *testing.T) {
 	if _, ok := schedule.Models["shared"]; !ok {
 		t.Fatal("schedule status lost the servable shared route")
 	}
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json",
-		stringReader(`{"model":"solo-ghost","messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatalf("client post: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("unservable model status = %d, want 502 not-found", resp.StatusCode)
+	if code, _ := post(t, px.URL+"/v1/chat/completions", `{"model":"solo-ghost","messages":[{"role":"user","content":"hi"}]}`); code != http.StatusBadGateway {
+		t.Fatalf("unservable model status = %d, want 502 not-found", code)
 	}
 
 	// The login seam: an impl for ghost (credential written → reload rebuild)

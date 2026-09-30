@@ -75,10 +75,7 @@ func TestNewProxy_DefaultStatePath(t *testing.T) {
 // test to the real models.dev endpoint and pollute the shared test HOME,
 // instead of failing a test.
 func TestReloadRefreshesCatalogThroughLoader(t *testing.T) {
-	cfg, err := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-`))
+	cfg, err := configdomain.LoadConfigFromBytes("test", []byte(testConfigYAML()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +92,7 @@ providers:
 		return catalog.New(map[string]catalog.Model{"glm-5": {Context: 128}}), nil
 	}
 	yamlPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(yamlPath, []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: https://x}\n"), 0o600); err != nil {
+	if err := os.WriteFile(yamlPath, []byte(testConfigYAML()), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.Reload(yamlPath); err != nil {
@@ -158,10 +155,7 @@ func TestQuotaPersist_ConcurrentTrackersNoRenameRace(t *testing.T) {
 // persist after the test (and its config generation) is gone. Close is
 // idempotent — a second call must not deadlock.
 func TestProxy_CloseStopsTracker(t *testing.T) {
-	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-`))
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(testConfigYAML()))
 	p := newTestProxy(t, cfg)
 	select {
 	case <-p.quota.StopChannel():

@@ -44,17 +44,9 @@ func TestForward_AnthropicToResponses_NonStream(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-x","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, readErr := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if readErr != nil {
-		t.Fatalf("read response: %v", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	code, body := post(t, px.URL+"/v1/messages", `{"model":"claude-x","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", code, body)
 	}
 
 	// Backend received a Responses-format request (input list, no `messages`).
@@ -100,24 +92,16 @@ func TestForward_AnthropicToResponses_AutoResolve(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"gpt-x","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, readErr := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if readErr != nil {
-		t.Fatalf("read response: %v", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	code, body := post(t, px.URL+"/v1/messages", `{"model":"gpt-x","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", code, body)
 	}
 
 	// Backend received a Responses body (input list) — conversion auto-activated.
 	if !strings.Contains(gotReq, `"input"`) || strings.Contains(gotReq, `"messages"`) {
 		t.Errorf("auto-resolve did not convert to responses; backend got: %s", gotReq)
 	}
-	if !strings.Contains(string(body), `"type":"message"`) {
+	if !strings.Contains(body, `"type":"message"`) {
 		t.Errorf("client did not get an anthropic response: %s", body)
 	}
 }
@@ -144,17 +128,9 @@ func TestForward_OpenAIToResponses_NonStream(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"gpt-x","messages":[{"role":"user","content":"hello"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, readErr := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if readErr != nil {
-		t.Fatalf("read response: %v", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	code, body := post(t, px.URL+"/v1/chat/completions", `{"model":"gpt-x","messages":[{"role":"user","content":"hello"}]}`)
+	if code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", code, body)
 	}
 
 	if !strings.Contains(gotReq, `"input"`) {
@@ -342,18 +318,9 @@ func TestForward_ResponsesToAnthropic_NonStream(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(
-		`{"model":"r-x","instructions":"be nice","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, readErr := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if readErr != nil {
-		t.Fatalf("read response: %v", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	code, body := post(t, px.URL+"/v1/responses", `{"model":"r-x","instructions":"be nice","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+	if code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", code, body)
 	}
 
 	// Backend received an Anthropic request: /v1/messages path (kept for
@@ -375,7 +342,7 @@ func TestForward_ResponsesToAnthropic_NonStream(t *testing.T) {
 
 	// Client received a Responses-shaped answer.
 	for _, want := range []string{`"object":"response"`, `"text":"hello back"`} {
-		if !strings.Contains(string(body), want) {
+		if !strings.Contains(body, want) {
 			t.Errorf("client response missing %q: %s", want, body)
 		}
 	}
@@ -652,15 +619,9 @@ func TestForward_ResponsesPreviousIDRestoresAcrossRestart(t *testing.T) {
 	p1 := newTestProxyAt(t, cfg, statePath)
 	p1.providers["p"] = &testProv{key: "k"}
 	px1 := httptest.NewServer(http.HandlerFunc(p1.Handler))
-	first, err := http.Post(px1.URL+"/v1/responses", "application/json",
-		strings.NewReader(`{"model":"g","input":"ping"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstBody, _ := io.ReadAll(first.Body)
-	first.Body.Close()
-	if first.StatusCode != 200 || !strings.Contains(string(firstBody), "chat_1") {
-		t.Fatalf("first instance response: %d %s", first.StatusCode, firstBody)
+	code1, firstBody := post(t, px1.URL+"/v1/responses", `{"model":"g","input":"ping"}`)
+	if code1 != 200 || !strings.Contains(firstBody, "chat_1") {
+		t.Fatalf("first instance response: %d %s", code1, firstBody)
 	}
 	// Drain instance one completely so instance two boots on a quiescent state
 	// file (persist is scheduled asynchronously; Close flushes it).
@@ -671,17 +632,11 @@ func TestForward_ResponsesPreviousIDRestoresAcrossRestart(t *testing.T) {
 	p2.providers["p"] = &testProv{key: "k"}
 	px2 := httptest.NewServer(http.HandlerFunc(p2.Handler))
 	defer px2.Close()
-	second, err := http.Post(px2.URL+"/v1/responses", "application/json",
-		strings.NewReader(`{"model":"g","previous_response_id":"chat_1","input":"pong"}`))
-	if err != nil {
-		t.Fatal(err)
+	code2, secondBody := post(t, px2.URL+"/v1/responses", `{"model":"g","previous_response_id":"chat_1","input":"pong"}`)
+	if code2 != 200 {
+		t.Fatalf("restart continuation status = %d body=%s", code2, secondBody)
 	}
-	secondBody, _ := io.ReadAll(second.Body)
-	second.Body.Close()
-	if second.StatusCode != 200 {
-		t.Fatalf("restart continuation status = %d body=%s", second.StatusCode, secondBody)
-	}
-	if !strings.Contains(string(secondBody), "restored") || hits.Load() != 2 {
+	if !strings.Contains(secondBody, "restored") || hits.Load() != 2 {
 		t.Fatalf("previous_response_id did not restore across restart: body=%s hits=%d", secondBody, hits.Load())
 	}
 }
@@ -705,18 +660,12 @@ func TestForward_Converted4xxUsesClientErrorEnvelope(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json",
-		strings.NewReader(`{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, body)
+	code, body := post(t, px.URL+"/v1/messages", `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", code, body)
 	}
 	var out map[string]any
-	if err := json.Unmarshal(body, &out); err != nil {
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
 		t.Fatal(err)
 	}
 	if out["type"] != "error" || strOf(asMap(out["error"])["message"]) != "unsupported field" {

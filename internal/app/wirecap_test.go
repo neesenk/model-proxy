@@ -252,17 +252,9 @@ func TestWireCap_Forward_AnthropicToResponses(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, readErr := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if readErr != nil {
-		t.Fatalf("read response: %v", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	code, body := post(t, px.URL+"/v1/messages", `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", code, body)
 	}
 
 	if gotPath != "/responses" {
@@ -274,7 +266,7 @@ func TestWireCap_Forward_AnthropicToResponses(t *testing.T) {
 	if !strings.Contains(gotBody, `"model":"gpt-x"`) {
 		t.Errorf("upstream model not rewritten: %s", gotBody)
 	}
-	if !strings.Contains(string(body), `"type":"message"`) {
+	if !strings.Contains(body, `"type":"message"`) {
 		t.Errorf("client did not get an anthropic response: %s", body)
 	}
 }
@@ -300,17 +292,9 @@ func TestWireCap_Forward_ResponsesToChatWhenNo(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"gpt-x","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, readErr := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if readErr != nil {
-		t.Fatalf("read response: %v", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	code, body := post(t, px.URL+"/v1/responses", `{"model":"gpt-x","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+	if code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", code, body)
 	}
 
 	if gotPath != "/chat/completions" {
@@ -352,17 +336,9 @@ func TestWireCap_Forward_AnthropicConvertsToChatWithoutAnthropicBase(t *testing.
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, readErr := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if readErr != nil {
-		t.Fatalf("read response: %v", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	code, body := post(t, px.URL+"/v1/messages", `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", code, body)
 	}
 	if gotPath != "/chat/completions" {
 		t.Errorf("upstream path = %q, want /chat/completions (converted, not passthrough)", gotPath)
@@ -370,7 +346,7 @@ func TestWireCap_Forward_AnthropicConvertsToChatWithoutAnthropicBase(t *testing.
 	if !strings.Contains(gotBody, `"messages"`) {
 		t.Errorf("upstream got non-chat body: %s", gotBody)
 	}
-	if !strings.Contains(string(body), `"type":"message"`) {
+	if !strings.Contains(body, `"type":"message"`) {
 		t.Errorf("client did not get an anthropic response: %s", body)
 	}
 }
@@ -408,13 +384,8 @@ func TestWireCap_Forward_404Correction(t *testing.T) {
 
 	// Request 1: verdict-driven → /responses → 404 (committed to the client;
 	// only one target).
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("request 1 client status = %d, want 404 (committed upstream verdict miss)", resp.StatusCode)
+	if code, _ := post(t, px.URL+"/v1/messages", `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`); code != http.StatusNotFound {
+		t.Fatalf("request 1 client status = %d, want 404 (committed upstream verdict miss)", code)
 	}
 	if len(bodies) != 1 || !strings.HasPrefix(bodies[0], "/responses ") {
 		t.Fatalf("request 1 upstream bodies = %v, want one /responses call", bodies)
@@ -433,22 +404,14 @@ func TestWireCap_Forward_404Correction(t *testing.T) {
 	}
 
 	// Request 2: verdict now no → converted to chat, upstream answers 200.
-	resp2, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body2, readErr2 := io.ReadAll(resp2.Body)
-	resp2.Body.Close()
-	if readErr2 != nil {
-		t.Fatalf("read response 2: %v", readErr2)
-	}
-	if resp2.StatusCode != http.StatusOK {
-		t.Fatalf("request 2 client status = %d, want 200: %s", resp2.StatusCode, body2)
+	code2, body2 := post(t, px.URL+"/v1/messages", `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`)
+	if code2 != http.StatusOK {
+		t.Fatalf("request 2 client status = %d, want 200: %s", code2, body2)
 	}
 	if len(bodies) != 2 || !strings.HasPrefix(bodies[1], "/chat/completions ") {
 		t.Fatalf("request 2 upstream bodies = %v, want a /chat/completions call", bodies)
 	}
-	if !strings.Contains(string(body2), `"type":"message"`) {
+	if !strings.Contains(body2, `"type":"message"`) {
 		t.Errorf("client did not get an anthropic response: %s", body2)
 	}
 }

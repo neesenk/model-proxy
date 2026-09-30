@@ -320,23 +320,11 @@ func TestForward_RequestLog_CapturesBodies_NonSSE(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(proxy.Handler))
 	defer server.Close()
 
-	response, err := http.Post(
-		server.URL+"/v1/responses",
-		"application/json",
-		strings.NewReader(requestBody),
-	)
-	if err != nil {
-		t.Fatal(err)
+	code, clientBody := post(t, server.URL+"/v1/responses", requestBody)
+	if code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200; body=%s", code, clientBody)
 	}
-	clientBody, readErr := io.ReadAll(response.Body)
-	_ = response.Body.Close()
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d, want 200; body=%s", response.StatusCode, clientBody)
-	}
-	if string(clientBody) != responseBody {
+	if clientBody != responseBody {
 		t.Fatalf("client body = %q, want %q", clientBody, responseBody)
 	}
 
@@ -438,23 +426,11 @@ func TestForward_RequestLog_CapturesBodies_SSE(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(proxy.Handler))
 	defer server.Close()
 
-	response, err := http.Post(
-		server.URL+"/v1/messages",
-		"application/json",
-		strings.NewReader(requestBody),
-	)
-	if err != nil {
-		t.Fatal(err)
+	code, clientBody := post(t, server.URL+"/v1/messages", requestBody)
+	if code != http.StatusOK {
+		t.Fatalf("client status = %d, want 200; body=%s", code, clientBody)
 	}
-	clientBody, readErr := io.ReadAll(response.Body)
-	_ = response.Body.Close()
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d, want 200; body=%s", response.StatusCode, clientBody)
-	}
-	if bytes.Equal(clientBody, []byte(backendStream)) {
+	if clientBody == backendStream {
 		t.Fatalf("client received unconverted backend stream:\n%s", clientBody)
 	}
 	for _, want := range []string{
@@ -463,11 +439,11 @@ func TestForward_RequestLog_CapturesBodies_SSE(t *testing.T) {
 		`"text":"hello"`,
 		"event: message_stop",
 	} {
-		if !bytes.Contains(clientBody, []byte(want)) {
+		if !strings.Contains(clientBody, want) {
 			t.Errorf("converted client stream missing %q:\n%s", want, clientBody)
 		}
 	}
-	events := parseSSE(string(clientBody))
+	events := parseSSE(clientBody)
 	if got := sseCount(events, "message_stop"); got != 1 {
 		t.Fatalf("converted message_stop count = %d, want 1:\n%s", got, clientBody)
 	}
@@ -539,23 +515,11 @@ func TestForward_RequestLog_NilLoggerPassThrough(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(proxy.Handler))
 	defer server.Close()
 
-	response, err := http.Post(
-		server.URL+"/v1/responses",
-		"application/json",
-		strings.NewReader(`{"model":"client-model","input":[]}`),
-	)
-	if err != nil {
-		t.Fatal(err)
+	code, body := post(t, server.URL+"/v1/responses", `{"model":"client-model","input":[]}`)
+	if code != http.StatusOK {
+		t.Errorf("status = %d, want 200 with request logging disabled", code)
 	}
-	body, readErr := io.ReadAll(response.Body)
-	_ = response.Body.Close()
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	if response.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want 200 with request logging disabled", response.StatusCode)
-	}
-	if string(body) != responseBody {
+	if body != responseBody {
 		t.Errorf("body = %q, want intact pass-through body %q", body, responseBody)
 	}
 	if proxy.reqLog != nil {
@@ -759,16 +723,11 @@ func TestRequestLog_SmallCapTruncatesBodiesEndToEnd(t *testing.T) {
 	defer px.Close()
 
 	bigBody := `{"model":"m","messages":[{"role":"user","content":"` + strings.Repeat("x", 4096) + `"}]}`
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", strings.NewReader(bigBody))
-	if err != nil {
-		t.Fatal(err)
-	}
-	clientBody, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	code, clientBody := post(t, px.URL+"/v1/chat/completions", bigBody)
 
 	// The live client response is NOT truncated by the log cap.
-	if resp.StatusCode != 200 || len(clientBody) < 4096 {
-		t.Fatalf("client response truncated by request-log cap: status=%d len=%d", resp.StatusCode, len(clientBody))
+	if code != 200 || len(clientBody) < 4096 {
+		t.Fatalf("client response truncated by request-log cap: status=%d len=%d", code, len(clientBody))
 	}
 
 	deadline := time.Now().Add(2 * time.Second)

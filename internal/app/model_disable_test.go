@@ -8,7 +8,6 @@ package app
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -52,29 +51,24 @@ func TestModelDisable_PartialDisableFailsOver(t *testing.T) {
 		w.Write([]byte(`{"ok":"primary"}`))
 	}))
 	defer primary.Close()
-	fallback, fSeen := newCaptureUpstream(200, `{"ok":"fallback"}`)
-	defer fallback.Close()
+	fallback := newFakeUpstream(t, staticResponder(200, `{"ok":"fallback"}`))
 
-	p := newTestProxy(t, modelDisableTestConfig(primary, fallback))
+	p := newTestProxy(t, modelDisableTestConfig(primary, fallback.srv))
 	p.providers["primary"] = &testProv{key: "p"}
 	p.providers["fallback"] = &testProv{key: "f"}
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	post := func(model string) *http.Response {
+	doPost := func(model string) int {
 		t.Helper()
-		resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json",
-			stringReader(`{"model":"`+model+`","messages":[{"role":"user","content":"hi"}]}`))
-		if err != nil {
-			t.Fatalf("client post: %v", err)
-		}
-		resp.Body.Close()
-		return resp
+		code, _ := post(t, px.URL+"/v1/chat/completions",
+			`{"model":"`+model+`","messages":[{"role":"user","content":"hi"}]}`)
+		return code
 	}
 
 	// Baseline: priority routes to primary.
-	if resp := post("m1"); resp.StatusCode != 200 {
-		t.Fatalf("baseline m1 status = %d, want 200", resp.StatusCode)
+	if code := doPost("m1"); code != 200 {
+		t.Fatalf("baseline m1 status = %d, want 200", code)
 	}
 	if pHits.Load() != 1 {
 		t.Fatalf("baseline primary hits = %d, want 1", pHits.Load())
@@ -83,14 +77,14 @@ func TestModelDisable_PartialDisableFailsOver(t *testing.T) {
 	// Disable (primary, m1): requests fail over to the sibling, the exposed
 	// name stays listed, and the sibling keeps answering after re-requests.
 	p.runtimeState.SetModelDisabled("primary", "m1", true)
-	if resp := post("m1"); resp.StatusCode != 200 {
-		t.Fatalf("disabled-primary m1 status = %d, want 200 via fallback", resp.StatusCode)
+	if code := doPost("m1"); code != 200 {
+		t.Fatalf("disabled-primary m1 status = %d, want 200 via fallback", code)
 	}
 	if pHits.Load() != 1 {
 		t.Fatalf("primary hits after disable = %d, want 1 (disabled target must not be scheduled)", pHits.Load())
 	}
-	if len(*fSeen) != 1 {
-		t.Fatalf("fallback requests = %v, want exactly one failover attempt", *fSeen)
+	if len(fallback.models()) != 1 {
+		t.Fatalf("fallback requests = %v, want exactly one failover attempt", fallback.models())
 	}
 	if ids := exposedModelIDs(t, px); !contains(ids, "m1") {
 		t.Fatalf("GET /v1/models = %v after partial disable, want m1 still listed", ids)
@@ -118,10 +112,9 @@ func TestModelDisable_FullyDisabledModelHidesAndAnswers404(t *testing.T) {
 		w.Write([]byte(`{}`))
 	}))
 	defer primary.Close()
-	fallback, _ := newCaptureUpstream(200, `{}`)
-	defer fallback.Close()
+	fallback := newFakeUpstream(t, staticResponder(200, `{}`))
 
-	p := newTestProxy(t, modelDisableTestConfig(primary, fallback))
+	p := newTestProxy(t, modelDisableTestConfig(primary, fallback.srv))
 	p.providers["primary"] = &testProv{key: "p"}
 	p.providers["fallback"] = &testProv{key: "f"}
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
@@ -140,17 +133,11 @@ func TestModelDisable_FullyDisabledModelHidesAndAnswers404(t *testing.T) {
 		t.Fatalf("GET /v1/models = %v after disable, want unrelated m1 still listed", ids)
 	}
 
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json",
-		stringReader(`{"model":"solo","messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatalf("client post: %v", err)
+	code, body := post(t, px.URL+"/v1/chat/completions", `{"model":"solo","messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusNotFound {
+		t.Fatalf("disabled model status = %d, want 404", code)
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("disabled model status = %d, want 404", resp.StatusCode)
-	}
-	if !strings.Contains(string(body), "is disabled") {
+	if !strings.Contains(body, "is disabled") {
 		t.Fatalf("disabled model body = %q, want it to name the disable", body)
 	}
 	if pHits.Load() != 0 {
@@ -158,27 +145,16 @@ func TestModelDisable_FullyDisabledModelHidesAndAnswers404(t *testing.T) {
 	}
 
 	// An unknown model keeps its distinct 502 not-found terminal.
-	resp2, err := http.Post(px.URL+"/v1/chat/completions", "application/json",
-		stringReader(`{"model":"nope","messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatalf("client post: %v", err)
-	}
-	resp2.Body.Close()
-	if resp2.StatusCode != http.StatusBadGateway {
-		t.Fatalf("unknown model status = %d, want 502", resp2.StatusCode)
+	if code, _ := post(t, px.URL+"/v1/chat/completions", `{"model":"nope","messages":[{"role":"user","content":"hi"}]}`); code != http.StatusBadGateway {
+		t.Fatalf("unknown model status = %d, want 502", code)
 	}
 
 	// /debug/route previews the disabled verdict without an upstream call.
-	prevResp, err := http.Post(px.URL+"/debug/route", "application/json",
-		stringReader(`{"model":"solo","messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatalf("route preview post: %v", err)
-	}
+	_, previewRaw := post(t, px.URL+"/debug/route", `{"model":"solo","messages":[{"role":"user","content":"hi"}]}`)
 	var preview map[string]any
-	if err := json.NewDecoder(prevResp.Body).Decode(&preview); err != nil {
+	if err := json.Unmarshal([]byte(previewRaw), &preview); err != nil {
 		t.Fatalf("decode preview: %v", err)
 	}
-	prevResp.Body.Close()
 	if preview["route_found"] != false {
 		t.Fatalf("preview route_found = %v, want false", preview["route_found"])
 	}
@@ -194,10 +170,9 @@ func TestModelDisable_FullyDisabledModelHidesAndAnswers404(t *testing.T) {
 func TestModelDisable_PreviewOrderAndPinInterplay(t *testing.T) {
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer primary.Close()
-	fallback, _ := newCaptureUpstream(200, `{}`)
-	defer fallback.Close()
+	fallback := newFakeUpstream(t, staticResponder(200, `{}`))
 
-	p := newTestProxy(t, modelDisableTestConfig(primary, fallback))
+	p := newTestProxy(t, modelDisableTestConfig(primary, fallback.srv))
 	p.providers["primary"] = &testProv{key: "p"}
 	p.providers["fallback"] = &testProv{key: "f"}
 
@@ -333,10 +308,9 @@ func TestModelDisable_APIModelsProjection(t *testing.T) {
 func TestModelDisable_ScheduleStatusOmitsFullyDisabledRoutes(t *testing.T) {
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer primary.Close()
-	fallback, _ := newCaptureUpstream(200, `{}`)
-	defer fallback.Close()
+	fallback := newFakeUpstream(t, staticResponder(200, `{}`))
 
-	p := newTestProxy(t, modelDisableTestConfig(primary, fallback))
+	p := newTestProxy(t, modelDisableTestConfig(primary, fallback.srv))
 	p.providers["primary"] = &testProv{key: "p"}
 	p.providers["fallback"] = &testProv{key: "f"}
 
@@ -412,15 +386,9 @@ func TestModelDisable_PersistedAcrossRestart(t *testing.T) {
 	if ids := exposedModelIDs(t, px); contains(ids, "glm-4.7") {
 		t.Fatalf("GET /v1/models = %v after restart, want glm-4.7 hidden", ids)
 	}
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json",
-		stringReader(`{"model":"glm-4.7","messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatalf("client post: %v", err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound || !strings.Contains(string(body), "is disabled") {
-		t.Fatalf("restored disable status = %d body = %q, want 404 is-disabled", resp.StatusCode, body)
+	code, body := post(t, px.URL+"/v1/chat/completions", `{"model":"glm-4.7","messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusNotFound || !strings.Contains(body, "is disabled") {
+		t.Fatalf("restored disable status = %d body = %q, want 404 is-disabled", code, body)
 	}
 
 	// Enable rewrites the file without the entry; the next process starts clean.

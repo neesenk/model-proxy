@@ -2,7 +2,6 @@ package app
 
 import (
 	"encoding/json"
-	"io"
 	"model-proxy/internal/appapi"
 	configdomain "model-proxy/internal/config"
 	"net/http"
@@ -102,13 +101,8 @@ func TestPin_NoFailoverWhenPinned(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"glm","input":[]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("pinned+failed status=%d want 502 (no failover off the pin)", resp.StatusCode)
+	if code, _ := post(t, px.URL+"/v1/responses", `{"model":"glm","input":[]}`); code != http.StatusBadGateway {
+		t.Errorf("pinned+failed status=%d want 502 (no failover off the pin)", code)
 	}
 	if zhipuHit {
 		t.Error("failover escaped the pin to zhipu — pin must be exclusive")
@@ -278,28 +272,18 @@ func TestPin_BypassesCache(t *testing.T) {
 
 	body := `{"model":"glm","input":[]}`
 	// Prime: a (priority 1) serves + caches.
-	resp, err := http.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	prime, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if !strings.Contains(string(prime), `"from":"a"`) {
-		t.Fatalf("prime: expected a, got %s", string(prime))
+	_, prime := post(t, px.URL+"/v1/responses", body)
+	if !strings.Contains(prime, `"from":"a"`) {
+		t.Fatalf("prime: expected a, got %s", prime)
 	}
 	// Pin b.
 	if !setPinForTest(p, "glm", "b", 0) {
 		t.Fatal("setPin b failed")
 	}
 	// Same request, now pinned to b → must bypass cache and hit b.
-	resp2, err := http.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	pinned, _ := io.ReadAll(resp2.Body)
-	resp2.Body.Close()
-	if !strings.Contains(string(pinned), `"from":"b"`) {
-		t.Errorf("pinned request returned %s, expected b (pin must bypass the a-cached answer)", string(pinned))
+	_, pinned := post(t, px.URL+"/v1/responses", body)
+	if !strings.Contains(pinned, `"from":"b"`) {
+		t.Errorf("pinned request returned %s, expected b (pin must bypass the a-cached answer)", pinned)
 	}
 	if bHits != 1 {
 		t.Errorf("bHits=%d want 1 (pin must reach b, not cache)", bHits)
@@ -376,15 +360,14 @@ func TestPin_TTLExpiryRestoresScheduling(t *testing.T) {
 		w.Write([]byte(`{"from":"a"}`))
 	}))
 	defer aUp.Close()
-	bUp, bHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	bUp := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 500, `{"e":"b broken"}`, nil, 0
-	})
-	defer bUp.Close()
+	}))
 
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
 			"a": {OpenAIBaseURL: aUp.URL, Provider: testProviderID},
-			"b": {OpenAIBaseURL: bUp.URL, Provider: testProviderID},
+			"b": {OpenAIBaseURL: bUp.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"glm": {
@@ -410,7 +393,7 @@ func TestPin_TTLExpiryRestoresScheduling(t *testing.T) {
 			t.Fatalf("pinned request %d: status = %d, want 502 (pinned 5xx, no failover)", i+1, st)
 		}
 	}
-	if got := bHits.Load(); got != 3 {
+	if got := bUp.hits(); got != 3 {
 		t.Fatalf("pinned b hits = %d, want 3", got)
 	}
 	if got := aHits.Load(); got != 0 {
@@ -438,7 +421,7 @@ func TestPin_TTLExpiryRestoresScheduling(t *testing.T) {
 	if got := aHits.Load(); got != 1 {
 		t.Errorf("a hits after expiry = %d, want 1 (scheduling restored)", got)
 	}
-	if got := bHits.Load(); got != 4 {
+	if got := bUp.hits(); got != 4 {
 		t.Errorf("b hits after expiry = %d, want 4 (unpinned b skipped via circuit)", got)
 	}
 }

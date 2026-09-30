@@ -125,11 +125,7 @@ func TestAPIStatusCacheField(t *testing.T) {
 	}
 
 	// Enabled path with one recorded hit + one stored entry.
-	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-cache: {enabled: true, ttl: 1h}
-`))
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(testConfigYAML("cache: {enabled: true, ttl: 1h}\n")))
 	p := newTestProxy(t, cfg)
 	if p.cache == nil {
 		t.Fatal("cache not created despite cache.enabled")
@@ -757,10 +753,7 @@ func TestWebServesUI(t *testing.T) {
 
 func newTestWeb(t *testing.T) (*WebServer, *Proxy) {
 	t.Helper()
-	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-`))
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(testConfigYAML()))
 	p := newTestProxy(t, cfg)
 	return NewWebServer(p, "test-config.yaml"), p
 }

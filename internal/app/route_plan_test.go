@@ -130,15 +130,9 @@ routes:
 // misses into the operational hit-rate stats (Peek, not Lookup) — a poller
 // watching the preview would otherwise grind the metrics down.
 func TestDebugRoute_PreviewCacheProbeIsReadOnly(t *testing.T) {
-	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-routes:
-  glm: [{provider: zhipu, model: glm}]
-cache:
-  enabled: true
-  ttl: 1m
-`))
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(testConfigYAML(
+		"routes:\n  glm: [{provider: zhipu, model: glm}]\n",
+		"cache:\n  enabled: true\n  ttl: 1m\n")))
 	loginAPIKeyFixtures(t, [2]string{"zhipu", "zhipu"})
 	p := newTestProxy(t, cfg)
 	if p.cache == nil {
@@ -179,14 +173,10 @@ cache:
 }
 
 func TestDebugRoute_PreviewAppliesGuardBeforeCache(t *testing.T) {
-	base := `listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-routes:
-  glm: [{provider: zhipu, model: glm}]
-cache: {enabled: true, ttl: 1m}
-guard: {secrets: %s, audit: false}
-`
+	base := testConfigYAML(
+		"routes:\n  glm: [{provider: zhipu, model: glm}]\n",
+		"cache: {enabled: true, ttl: 1m}\n",
+		"guard: {secrets: %s, audit: false}\n")
 	body := []byte(guardRequestBody())
 	preview := func(t *testing.T, action string, primeBody []byte) map[string]any {
 		t.Helper()
@@ -245,14 +235,10 @@ guard: {secrets: %s, audit: false}
 
 	t.Run("strong path block bypasses cache", func(t *testing.T) {
 		pathBody := []byte(`{"model":"glm","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"~/.ssh/id_rsa"}}]}]}`)
-		cfg, err := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-routes:
-  glm: [{provider: zhipu, model: glm}]
-cache: {enabled: true, ttl: 1m}
-guard: {secrets: off, paths: block, audit: false}
-`))
+		cfg, err := configdomain.LoadConfigFromBytes("test", []byte(testConfigYAML(
+			"routes:\n  glm: [{provider: zhipu, model: glm}]\n",
+			"cache: {enabled: true, ttl: 1m}\n",
+			"guard: {secrets: off, paths: block, audit: false}\n")))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -319,14 +305,8 @@ func TestDerivedRoute_ForwardsAliasedModel(t *testing.T) {
 
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json",
-		strings.NewReader(`{"model":"kimi-k3","messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("kimi-k3 (derived route) status=%d want 200", resp.StatusCode)
+	if code, _ := post(t, px.URL+"/v1/chat/completions", `{"model":"kimi-k3","messages":[{"role":"user","content":"hi"}]}`); code != 200 {
+		t.Fatalf("kimi-k3 (derived route) status=%d want 200", code)
 	}
 	if gotModel != "k3" {
 		t.Errorf("upstream received model=%q want real name k3", gotModel)

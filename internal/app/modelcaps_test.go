@@ -281,14 +281,9 @@ func TestModelCaps_Forward_ModelLevelResponsesVerdict(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d: %s", resp.StatusCode, body)
+	code, body := post(t, px.URL+"/v1/messages", `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusOK {
+		t.Fatalf("client status = %d: %s", code, body)
 	}
 	if gotPath != "/responses" {
 		t.Errorf("upstream path = %q, want /responses (model-level verdict)", gotPath)
@@ -318,14 +313,9 @@ func TestModelCaps_Forward_ModelLevelChatOnly(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d: %s", resp.StatusCode, body)
+	code, body := post(t, px.URL+"/v1/messages", `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusOK {
+		t.Fatalf("client status = %d: %s", code, body)
 	}
 	if gotPath != "/chat/completions" {
 		t.Errorf("upstream path = %q, want /chat/completions (model-level no beats provider-level yes)", gotPath)
@@ -359,13 +349,8 @@ func TestModelCaps_Forward_404CorrectionModelLevel(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("request 1 status = %d, want 404 (committed verdict miss)", resp.StatusCode)
+	if code, _ := post(t, px.URL+"/v1/messages", `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`); code != http.StatusNotFound {
+		t.Fatalf("request 1 status = %d, want 404 (committed verdict miss)", code)
 	}
 
 	mp, _ := p.modelCaps.Get("oai", "gpt-x")
@@ -383,13 +368,8 @@ func TestModelCaps_Forward_404CorrectionModelLevel(t *testing.T) {
 		t.Errorf("model locked %d time(s), want 0 (verdict miss is not a model failure)", locks)
 	}
 
-	resp2, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK {
-		t.Fatalf("request 2 status = %d, want 200 (chat fallback)", resp2.StatusCode)
+	if code, _ := post(t, px.URL+"/v1/messages", `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`); code != http.StatusOK {
+		t.Fatalf("request 2 status = %d, want 200 (chat fallback)", code)
 	}
 	if len(paths) != 2 || paths[0] != "/responses" || paths[1] != "/chat/completions" {
 		t.Errorf("upstream paths = %v, want [/responses /chat/completions]", paths)
@@ -459,14 +439,10 @@ func TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E(t *testing.T) {
 		t.Cleanup(px.Close)
 		return p, px
 	}
-	post := func(t *testing.T, px *httptest.Server) {
-		resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json",
-			strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"ping"}]}`))
-		if err != nil {
-			t.Fatal(err)
-		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+	// fire posts one client request; named fire (not post) so it does not
+	// shadow the package-level post() helper it delegates to.
+	fire := func(t *testing.T, px *httptest.Server) {
+		post(t, px.URL+"/v1/chat/completions", `{"model":"m","messages":[{"role":"user","content":"ping"}]}`)
 	}
 
 	t.Run("anthropic yes beats dead chat leg", func(t *testing.T) {
@@ -478,7 +454,7 @@ func TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E(t *testing.T) {
 		}))
 		defer up.Close()
 		_, px := makeProxy(t, up, runtimewire.ModelProtocols{Chat: triNo, Anthropic: triYes, Responses: triNo})
-		post(t, px)
+		fire(t, px)
 		if len(paths) != 1 || paths[0] != "/v1/messages" {
 			t.Errorf("upstream paths = %v, want one /v1/messages (converted off the dead chat leg)", paths)
 		}
@@ -493,7 +469,7 @@ func TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E(t *testing.T) {
 		}))
 		defer up.Close()
 		_, px := makeProxy(t, up, runtimewire.ModelProtocols{Chat: triNo, Anthropic: triUnknown, Responses: triNo})
-		post(t, px)
+		fire(t, px)
 		if len(paths) != 1 || paths[0] != "/v1/messages" {
 			t.Errorf("upstream paths = %v, want one /v1/messages (unknown leg tried before the dead one)", paths)
 		}
@@ -508,7 +484,7 @@ func TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E(t *testing.T) {
 		}))
 		defer up.Close()
 		_, px := makeProxy(t, up, runtimewire.ModelProtocols{Chat: triNo, Anthropic: triNo, Responses: triNo})
-		post(t, px)
+		fire(t, px)
 		if len(paths) != 1 || paths[0] != "/chat/completions" {
 			t.Errorf("upstream paths = %v, want one /chat/completions (error surfaced, no leg-hopping)", paths)
 		}

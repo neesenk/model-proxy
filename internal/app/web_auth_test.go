@@ -89,11 +89,7 @@ func TestAPISecurityDisabledOrEmpty(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-guard: {audit: false}
-`))
+	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(testConfigYAML("guard: {audit: false}\n")))
 	w := NewWebServer(newTestProxy(t, cfg), "test-config.yaml")
 	code, off := serveSecurity(t, w, "/api/security")
 	if code != http.StatusOK || off.Enabled || off.Records == nil || len(off.Records) != 0 || off.Skipped != 0 {
@@ -149,14 +145,8 @@ func TestForwardAuthRejectsMissingOrWrongKey(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	// No key → 401 before any upstream attempt.
-	res, err := http.Post(srv.URL+"/v1/chat/completions", "application/json",
-		strings.NewReader(`{"model":"m"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	res.Body.Close()
-	if res.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("no key = %d, want 401", res.StatusCode)
+	if code, _ := post(t, srv.URL+"/v1/chat/completions", `{"model":"m"}`); code != http.StatusUnauthorized {
+		t.Fatalf("no key = %d, want 401", code)
 	}
 	// Wrong key → 401.
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m"}`))

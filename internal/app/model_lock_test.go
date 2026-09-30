@@ -18,20 +18,15 @@ import (
 // upstream errors).
 func postStatus(t *testing.T, url, body string) int {
 	t.Helper()
-	resp, err := http.Post(url, "application/json", stringReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	return resp.StatusCode
+	code, _ := post(t, url, body)
+	return code
 }
 
-func modelLockCfg(primary, fallback *httptest.Server) *configdomain.Config {
+func modelLockCfg(primaryURL, fallbackURL string) *configdomain.Config {
 	return &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+			"primary":  {OpenAIBaseURL: primaryURL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallbackURL, Provider: testProviderID},
 		},
 		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
@@ -72,24 +67,22 @@ func (p *Proxy) modelLockState(provider, model string) (failures int, locked boo
 // over to the fallback (client still gets 200), locks ONLY (primary, m1), and
 // never touches the primary's circuit — its other model m2 keeps serving.
 func TestModelLock_404FailsOverWithoutCircuit(t *testing.T) {
-	primary, pHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 404, `{"error":"model not found"}`, nil, 0
-	})
-	defer primary.Close()
-	fallback, fHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
-	cfg := modelLockCfg(primary, fallback)
+	}))
+	cfg := modelLockCfg(primary.srv.URL, fallback.srv.URL)
 	p, px := newModelLockProxy(t, cfg)
 
 	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`); st != 200 {
 		t.Fatalf("m1 request: status = %d, want 200 (failover to fallback)", st)
 	}
-	if got := pHits.Load(); got != 1 {
+	if got := primary.hits(); got != 1 {
 		t.Errorf("primary hits = %d, want 1", got)
 	}
-	if got := fHits.Load(); got != 1 {
+	if got := fallback.hits(); got != 1 {
 		t.Errorf("fallback hits = %d, want 1", got)
 	}
 	failures, locked := p.modelLockState("primary", "m1")
@@ -104,10 +97,10 @@ func TestModelLock_404FailsOverWithoutCircuit(t *testing.T) {
 
 	// Next m1 request skips the locked model entirely.
 	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
-	if got := pHits.Load(); got != 1 {
+	if got := primary.hits(); got != 1 {
 		t.Errorf("primary hits after lock = %d, want 1 (locked model skipped)", got)
 	}
-	if got := fHits.Load(); got != 2 {
+	if got := fallback.hits(); got != 2 {
 		t.Errorf("fallback hits = %d, want 2", got)
 	}
 }
@@ -116,25 +109,23 @@ func TestModelLock_404FailsOverWithoutCircuit(t *testing.T) {
 // OTHER model m2 is still served by the primary (no account-level damage).
 // Uses a primary that 404s only m1 and serves m2.
 func TestModelLock_OtherModelUnaffected(t *testing.T) {
-	primary, pHits := newHitServer(func(c int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(c int) (int, string, http.Header, time.Duration) {
 		if c == 1 {
 			return 404, `{"error":"model not found"}`, nil, 0 // the m1 request
 		}
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer primary.Close()
-	fallback, _ := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
-	cfg := modelLockCfg(primary, fallback)
+	}))
+	cfg := modelLockCfg(primary.srv.URL, fallback.srv.URL)
 	_, px := newModelLockProxy(t, cfg)
 
 	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // 404 → lock (primary,m1)
 	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m2","messages":[]}`); st != 200 {
 		t.Fatalf("m2 request: status = %d, want 200 (primary still serves m2)", st)
 	}
-	if got := pHits.Load(); got != 2 {
+	if got := primary.hits(); got != 2 {
 		t.Errorf("primary hits = %d, want 2 (m2 must reach the primary despite the m1 lock)", got)
 	}
 }
@@ -143,21 +134,19 @@ func TestModelLock_OtherModelUnaffected(t *testing.T) {
 // upstream 404 commits unchanged (no opaque 502), while the lock is recorded
 // for subsequent requests.
 func TestModelLock_LastTargetCommitsUpstreamError(t *testing.T) {
-	primary, _ := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 404, `{"error":"model not found"}`, nil, 0
-	})
-	defer primary.Close()
-	fallback, fHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
-	cfg := modelLockCfg(primary, fallback)
+	}))
+	cfg := modelLockCfg(primary.srv.URL, fallback.srv.URL)
 	p, px := newModelLockProxy(t, cfg)
 
 	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m2","messages":[]}`); st != 404 {
 		t.Errorf("single-target 404: status = %d, want 404 (upstream error committed)", st)
 	}
-	if got := fHits.Load(); got != 0 {
+	if got := fallback.hits(); got != 0 {
 		t.Errorf("fallback hits = %d, want 0 (m2 routes only to primary)", got)
 	}
 	if _, locked := p.modelLockState("primary", "m2"); !locked {
@@ -168,18 +157,16 @@ func TestModelLock_LastTargetCommitsUpstreamError(t *testing.T) {
 // TestModelLock_ModelDenied400: a 400 "no access to model" locks the model and
 // fails over; an unrelated 400 (bad request) commits without locking.
 func TestModelLock_ModelDenied400(t *testing.T) {
-	primary, _ := newHitServer(func(c int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(c int) (int, string, http.Header, time.Duration) {
 		if c == 1 {
 			return 400, `{"error":"You do not have access to model m1"}`, nil, 0
 		}
 		return 400, `{"error":"max_tokens is too large"}`, nil, 0
-	})
-	defer primary.Close()
-	fallback, _ := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
-	cfg := modelLockCfg(primary, fallback)
+	}))
+	cfg := modelLockCfg(primary.srv.URL, fallback.srv.URL)
 	p, px := newModelLockProxy(t, cfg)
 
 	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`); st != 200 {
@@ -201,18 +188,16 @@ func TestModelLock_ModelDenied400(t *testing.T) {
 // TestModelLock_SuccessClears: after the lockout expires, a served response
 // from the same (provider, model) clears the lock.
 func TestModelLock_SuccessClears(t *testing.T) {
-	primary, _ := newHitServer(func(c int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(c int) (int, string, http.Header, time.Duration) {
 		if c == 1 {
 			return 404, `{"error":"model not found"}`, nil, 0
 		}
 		return 200, `{"ok":true}`, nil, 0 // recovered
-	})
-	defer primary.Close()
-	fallback, _ := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
-	cfg := modelLockCfg(primary, fallback)
+	}))
+	cfg := modelLockCfg(primary.srv.URL, fallback.srv.URL)
 	cfg.Scheduling.ModelLockout = "50ms"
 	p, px := newModelLockProxy(t, cfg)
 
@@ -235,21 +220,19 @@ func TestModelLock_SuccessClears(t *testing.T) {
 // BEFORE commit — the client gets the fallback's real answer, the model is
 // locked, and the account's circuit stays clean.
 func TestEmpty200_PreflightFailsOver(t *testing.T) {
-	primary, pHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	primary := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, ``, nil, 0 // Go serves this as Content-Length: 0
-	})
-	defer primary.Close()
-	fallback, fHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	}))
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
-	cfg := modelLockCfg(primary, fallback)
+	}))
+	cfg := modelLockCfg(primary.srv.URL, fallback.srv.URL)
 	p, px := newModelLockProxy(t, cfg)
 
 	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`); st != 200 {
 		t.Fatalf("status = %d, want 200 (fallback served)", st)
 	}
-	if got := fHits.Load(); got != 1 {
+	if got := fallback.hits(); got != 1 {
 		t.Errorf("fallback hits = %d, want 1 (empty 200 failed over)", got)
 	}
 	if _, locked := p.modelLockState("primary", "m1"); !locked {
@@ -262,7 +245,7 @@ func TestEmpty200_PreflightFailsOver(t *testing.T) {
 
 	// Next request skips the locked model.
 	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
-	if got := pHits.Load(); got != 1 {
+	if got := primary.hits(); got != 1 {
 		t.Errorf("primary hits = %d, want 1 (locked after empty 200)", got)
 	}
 }
@@ -282,17 +265,16 @@ func TestEmpty200_PostCommitLearned(t *testing.T) {
 		}
 	}))
 	defer primary.Close()
-	fallback, fHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
-	cfg := modelLockCfg(primary, fallback)
+	}))
+	cfg := modelLockCfg(primary.URL, fallback.srv.URL)
 	p, px := newModelLockProxy(t, cfg)
 
 	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`); st != 200 {
 		t.Fatalf("status = %d, want 200 (empty stream committed)", st)
 	}
-	if got := fHits.Load(); got != 0 {
+	if got := fallback.hits(); got != 0 {
 		t.Errorf("fallback hits = %d, want 0 (first empty stream commits)", got)
 	}
 	if _, locked := p.modelLockState("primary", "m1"); !locked {
@@ -303,7 +285,7 @@ func TestEmpty200_PostCommitLearned(t *testing.T) {
 	if got := pHits.Load(); got != 1 {
 		t.Errorf("primary hits = %d, want 1 (locked after post-commit learning)", got)
 	}
-	if got := fHits.Load(); got != 1 {
+	if got := fallback.hits(); got != 1 {
 		t.Errorf("fallback hits = %d, want 1", got)
 	}
 }
@@ -327,11 +309,10 @@ func TestParamStrip_LearnAndRetry(t *testing.T) {
 		w.Write([]byte(`{"ok":true}`))
 	}))
 	defer primary.Close()
-	fallback, _ := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
-	cfg := modelLockCfg(primary, fallback)
+	}))
+	cfg := modelLockCfg(primary.URL, fallback.srv.URL)
 	p, px := newModelLockProxy(t, cfg)
 
 	// First request: 400 → learn → strip → retry → 200.
@@ -399,11 +380,10 @@ func TestEmpty200_ClientCancelNoLock(t *testing.T) {
 		time.Sleep(500 * time.Millisecond) // outlast the client's 150ms timeout
 	}))
 	defer primary.Close()
-	fallback, _ := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
 		return 200, `{"ok":true}`, nil, 0
-	})
-	defer fallback.Close()
-	cfg := modelLockCfg(primary, fallback)
+	}))
+	cfg := modelLockCfg(primary.URL, fallback.srv.URL)
 	p, px := newModelLockProxy(t, cfg)
 
 	client := &http.Client{Timeout: 150 * time.Millisecond}
