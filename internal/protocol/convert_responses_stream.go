@@ -12,7 +12,6 @@
 package protocol
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"sort"
@@ -112,13 +111,10 @@ func takePendingArgs(buf map[string]string, itemID string, outIdx int) string {
 }
 
 type responsesSSEToAnthropicSSE struct {
-	sc          *bufio.Scanner
-	out         []byte
+	sseConverterCore
 	model, id   string
 	started     bool
-	done        bool
 	errored     bool
-	bomStripped bool
 	nextIdx     int
 	blocks      map[int]*rsBlock // responses output_index → block
 	curTextOut  int              // output_index of the open text block (-1 none)
@@ -136,14 +132,15 @@ type responsesSSEToAnthropicSSE struct {
 }
 
 func newResponsesToAnthropicSSE(r io.Reader, model string) *responsesSSEToAnthropicSSE {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), sseScanBuf)
-	return &responsesSSEToAnthropicSSE{
-		sc: sc, model: model, id: "msg_conv",
+	t := &responsesSSEToAnthropicSSE{
+		sseConverterCore: newSSEConverterCore(r, true),
+		model:            model, id: "msg_conv",
 		blocks: map[int]*rsBlock{}, curTextOut: -1, curThinkOut: -1,
 		pendArgs: map[string]string{},
 		idMap:    map[string]string{}, usedNorm: map[string]bool{},
 	}
+	t.self = t
+	return t
 }
 
 // normToolID sanitizes a Responses call_id into the anthropic tool_use id
@@ -295,22 +292,6 @@ func (t *responsesSSEToAnthropicSSE) materializeCompletedOutput(output any) {
 			t.emitDoneOnlyFunctionCall(item, "")
 		}
 	}
-}
-
-func (t *responsesSSEToAnthropicSSE) Read(p []byte) (int, error) {
-	if pumpSSEFrames(t, t.sc, &t.bomStripped, true) {
-		return 0, io.EOF
-	}
-	n := copy(p, t.out)
-	t.out = t.out[n:]
-	return n, nil
-}
-
-func (t *responsesSSEToAnthropicSSE) hasOutput() bool { return len(t.out) > 0 }
-func (t *responsesSSEToAnthropicSSE) isDone() bool    { return t.done }
-
-func (t *responsesSSEToAnthropicSSE) drainDone() (eof bool) {
-	return len(t.out) == 0
 }
 
 // emitPrematureEnd is shared by scanError and streamEnd: a responses stream
@@ -772,14 +753,12 @@ func (t *responsesSSEToAnthropicSSE) finish() {
 // ===========================================================================
 
 type responsesSSEToOpenAISSE struct {
-	sc           *bufio.Scanner
-	out          []byte
-	model, id    string
-	created      int64 // chat.completion.chunk created (unix seconds, stable for the whole stream)
+	sseConverterCore
+	model, id string
+	// created is the chat.completion.chunk created seconds (stable for the whole stream).
+	created      int64
 	started      bool
-	done         bool
 	errored      bool
-	bomStripped  bool
 	toolIdx      map[int]int       // responses output_index → chat tool_calls index
 	toolArgsSeen map[int]bool      // responses output_index → at least one arguments delta emitted
 	pendArgs     map[string]string // early arguments deltas (before added/done)
@@ -794,10 +773,10 @@ type responsesSSEToOpenAISSE struct {
 }
 
 func newResponsesToOpenAISSE(r io.Reader, model string) *responsesSSEToOpenAISSE {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), sseScanBuf)
-	return &responsesSSEToOpenAISSE{sc: sc, model: model, id: "chatcmpl-conv", created: time.Now().Unix(),
+	t := &responsesSSEToOpenAISSE{sseConverterCore: newSSEConverterCore(r, true), model: model, id: "chatcmpl-conv", created: time.Now().Unix(),
 		toolIdx: map[int]int{}, toolArgsSeen: map[int]bool{}, pendArgs: map[string]string{}, contentSeen: map[int]bool{}}
+	t.self = t
+	return t
 }
 
 // emitChunk appends one chat.completion.chunk frame, filling the required
@@ -828,22 +807,6 @@ func (t *responsesSSEToOpenAISSE) toolIndex(outIdx int) int {
 	i := len(t.toolIdx)
 	t.toolIdx[outIdx] = i
 	return i
-}
-
-func (t *responsesSSEToOpenAISSE) Read(p []byte) (int, error) {
-	if pumpSSEFrames(t, t.sc, &t.bomStripped, true) {
-		return 0, io.EOF
-	}
-	n := copy(p, t.out)
-	t.out = t.out[n:]
-	return n, nil
-}
-
-func (t *responsesSSEToOpenAISSE) hasOutput() bool { return len(t.out) > 0 }
-func (t *responsesSSEToOpenAISSE) isDone() bool    { return t.done }
-
-func (t *responsesSSEToOpenAISSE) drainDone() (eof bool) {
-	return len(t.out) == 0
 }
 
 // emitPrematureEnd is shared by scanError and streamEnd: a responses stream

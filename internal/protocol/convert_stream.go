@@ -28,25 +28,22 @@ const sseScanBuf = 8 * 1024 * 1024 // 8 MiB per line; oversized lines are warned
 // sequence) when tools interleave. usage from a trailing chunk (prompt+completion
 // tokens) is carried into the terminal message_delta.usage.
 type openaiSSEToAnthropicSSE struct {
-	sc          *bufio.Scanner
-	out         []byte
-	model       string
-	id          string
-	started     bool
-	closed      bool
-	done        bool
-	errored     bool
-	bomStripped bool
-	nextIdx     int                   // next anthropic content_block index
-	curKind     string                // "" / "text" (tools are buffered, never "current")
-	curIdx      int                   // anthropic index of the open text block
-	tools       map[int]*streamedTool // openai tool index → buffered call
-	toolOrder   []int                 // openai tool indices in first-seen order
-	outTok      int                   // completion_tokens from trailing usage
-	inTok       int                   // prompt_tokens from trailing usage
-	cachedTok   int                   // prompt_tokens_details.cached_tokens from trailing usage
-	createTok   int                   // cache write (cache_creation_input_tokens / cache_write_tokens)
-	stopRsn     string                // finish_reason mapped to stop_reason
+	sseConverterCore
+	model     string
+	id        string
+	started   bool
+	closed    bool
+	errored   bool
+	nextIdx   int                   // next anthropic content_block index
+	curKind   string                // "" / "text" (tools are buffered, never "current")
+	curIdx    int                   // anthropic index of the open text block
+	tools     map[int]*streamedTool // openai tool index → buffered call
+	toolOrder []int                 // openai tool indices in first-seen order
+	outTok    int                   // completion_tokens from trailing usage
+	inTok     int                   // prompt_tokens from trailing usage
+	cachedTok int                   // prompt_tokens_details.cached_tokens from trailing usage
+	createTok int                   // cache write (cache_creation_input_tokens / cache_write_tokens)
+	stopRsn   string                // finish_reason mapped to stop_reason
 }
 
 // streamedTool buffers one openai tool_call until the stream ends, so its
@@ -57,10 +54,52 @@ type streamedTool struct {
 }
 
 func newOpenAIToAnthropicSSE(r io.Reader, model string) *openaiSSEToAnthropicSSE {
+	t := &openaiSSEToAnthropicSSE{sseConverterCore: newSSEConverterCore(r, false),
+		model: model, id: "msg_conv", tools: map[int]*streamedTool{}}
+	t.self = t
+	return t
+}
+
+// sseConverterCore is the shared skeleton of the six streaming converters:
+// the SSE line scanner (package buffer sizes), the pending output buffer, and
+// the io.Reader contract on top of pumpSSEFrames. trackEvents selects the
+// pump's per-data-line event tracking (the responses-family dialects classify
+// folded event: lines; the chat↔anthropic pair does not). self is the
+// EMBEDDING converter wired in its constructor — the pump drives the outer
+// hooks (dispatch/streamEnd and the two real drainDone overrides), while
+// hasOutput/isDone/drainDone default here. done/bomStripped/out/sc are
+// promoted fields: converter bodies keep using t.out/t.done unchanged.
+type sseConverterCore struct {
+	sc          *bufio.Scanner
+	out         []byte
+	done        bool
+	bomStripped bool
+	trackEvents bool
+	self        sseFrameHooks
+}
+
+func newSSEConverterCore(r io.Reader, trackEvents bool) sseConverterCore {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), sseScanBuf)
-	return &openaiSSEToAnthropicSSE{sc: sc, model: model, id: "msg_conv", tools: map[int]*streamedTool{}}
+	return sseConverterCore{sc: sc, trackEvents: trackEvents}
 }
+
+func (t *sseConverterCore) Read(p []byte) (int, error) {
+	if pumpSSEFrames(t.self, t.sc, &t.bomStripped, t.trackEvents) {
+		return 0, io.EOF
+	}
+	n := copy(p, t.out)
+	t.out = t.out[n:]
+	return n, nil
+}
+
+func (t *sseConverterCore) hasOutput() bool { return len(t.out) > 0 }
+func (t *sseConverterCore) isDone() bool    { return t.done }
+
+// drainDone default: nothing to flush at the terminal — the buffer-empty
+// check is the EOF verdict. The chat↔anthropic pair overrides it with real
+// terminal-flush semantics.
+func (t *sseConverterCore) drainDone() (eof bool) { return len(t.out) == 0 }
 
 func (t *openaiSSEToAnthropicSSE) emit(event string, payload map[string]any) {
 	b, _ := sonic.Marshal(payload)
@@ -214,18 +253,6 @@ func (t *openaiSSEToAnthropicSSE) finish() {
 	t.emit("message_stop", map[string]any{"type": "message_stop"})
 	t.closed = true
 }
-
-func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
-	if pumpSSEFrames(t, t.sc, &t.bomStripped, false) {
-		return 0, io.EOF
-	}
-	n := copy(p, t.out)
-	t.out = t.out[n:]
-	return n, nil
-}
-
-func (t *openaiSSEToAnthropicSSE) hasOutput() bool { return len(t.out) > 0 }
-func (t *openaiSSEToAnthropicSSE) isDone() bool    { return t.done }
 
 // drainDone finishes the message (message_stop-shaped events) and reports
 // whether the buffer is empty afterwards (→ io.EOF).
@@ -418,19 +445,17 @@ func (t *openaiSSEToAnthropicSSE) dispatch(frameEvent string, dataEvents []strin
 // assigned 0,1,2… per tool_use block); input_json_delta partial_json fragments map
 // verbatim to the tool_call's function.arguments.
 type anthropicSSEToOpenAISSE struct {
-	sc           *bufio.Scanner
-	out          []byte
-	model        string
-	id           string
-	created      int64 // chat.completion.chunk created (unix seconds, constant per stream)
+	sseConverterCore
+	model string
+	id    string
+	// created is the chat.completion.chunk created seconds (constant per stream).
+	created      int64
 	roleSent     bool
-	done         bool
 	finished     bool
 	errored      bool // stream terminated via an error path — never emit usage/[DONE]
 	doneDelim    bool // an explicit data: [DONE] delimiter arrived (OpenRouter dialect): a clean terminal even without a stop_reason
 	usageSent    bool
 	doneSent     bool
-	bomStripped  bool
 	stopRsn      string       // non-empty when a message_delta with stop_reason arrived; finish emitted on message_stop/[DONE]
 	curBlock     int          // anthropic block index currently open
 	curType      string       // "text" / "tool_use" / ""
@@ -450,11 +475,11 @@ type anthropicSSEToOpenAISSE struct {
 }
 
 func newAnthropicToOpenAISSE(r io.Reader, model string) *anthropicSSEToOpenAISSE {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), sseScanBuf)
-	return &anthropicSSEToOpenAISSE{sc: sc, model: model, id: "chatcmpl-conv",
+	t := &anthropicSSEToOpenAISSE{sseConverterCore: newSSEConverterCore(r, false), model: model, id: "chatcmpl-conv",
 		created:     time.Now().Unix(),
 		toolCallIdx: map[int]int{}, toolArgsSeen: map[int]bool{}}
+	t.self = t
+	return t
 }
 
 // usagePayload builds the terminal chunk's usage: anthropic counts cache
@@ -509,18 +534,6 @@ func (t *anthropicSSEToOpenAISSE) ensureRole() {
 		t.roleSent = true
 	}
 }
-
-func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
-	if pumpSSEFrames(t, t.sc, &t.bomStripped, false) {
-		return 0, io.EOF
-	}
-	n := copy(p, t.out)
-	t.out = t.out[n:]
-	return n, nil
-}
-
-func (t *anthropicSSEToOpenAISSE) hasOutput() bool { return len(t.out) > 0 }
-func (t *anthropicSSEToOpenAISSE) isDone() bool    { return t.done }
 
 // drainDone emits the finish chunk (when message_stop hasn't), then the
 // usage chunk + data: [DONE]. The only clean terminal without an explicit

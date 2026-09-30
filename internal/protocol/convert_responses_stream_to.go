@@ -6,7 +6,6 @@
 package protocol
 
 import (
-	"bufio"
 	"encoding/json"
 	"io"
 	"sort"
@@ -28,12 +27,9 @@ type rsRevBlock struct {
 }
 
 type anthropicSSEToResponsesSSE struct {
-	sc          *bufio.Scanner
-	out         []byte
+	sseConverterCore
 	model, id   string
 	started     bool
-	done        bool
-	bomStripped bool
 	nextOutIdx  int
 	blocks      map[int]*rsRevBlock
 	doneItems   []map[string]any // completed output items (for response.completed.output)
@@ -51,9 +47,9 @@ func newAnthropicToResponsesSSE(r io.Reader, model string) *anthropicSSEToRespon
 }
 
 func newAnthropicToResponsesSSENS(r io.Reader, model string, r2c r2cCtx) *anthropicSSEToResponsesSSE {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), sseScanBuf)
-	return &anthropicSSEToResponsesSSE{sc: sc, model: model, id: "resp_conv", blocks: map[int]*rsRevBlock{}, r2c: r2c}
+	t := &anthropicSSEToResponsesSSE{sseConverterCore: newSSEConverterCore(r, true), model: model, id: "resp_conv", blocks: map[int]*rsRevBlock{}, r2c: r2c}
+	t.self = t
+	return t
 }
 
 func (t *anthropicSSEToResponsesSSE) emit(event string, payload map[string]any) {
@@ -76,22 +72,6 @@ func (t *anthropicSSEToResponsesSSE) ensureCreated() {
 			"model": t.model, "output": []any{},
 		},
 	})
-}
-
-func (t *anthropicSSEToResponsesSSE) Read(p []byte) (int, error) {
-	if pumpSSEFrames(t, t.sc, &t.bomStripped, true) {
-		return 0, io.EOF
-	}
-	n := copy(p, t.out)
-	t.out = t.out[n:]
-	return n, nil
-}
-
-func (t *anthropicSSEToResponsesSSE) hasOutput() bool { return len(t.out) > 0 }
-func (t *anthropicSSEToResponsesSSE) isDone() bool    { return t.done }
-
-func (t *anthropicSSEToResponsesSSE) drainDone() (eof bool) {
-	return len(t.out) == 0
 }
 
 // emitFailed emits the terminal response.failed event.
@@ -550,12 +530,9 @@ func itoa(i int) string {
 // ===========================================================================
 
 type openaiSSEToResponsesSSE struct {
-	sc              *bufio.Scanner
-	out             []byte
+	sseConverterCore
 	model, id       string
 	started         bool
-	done            bool
-	bomStripped     bool
 	nextOutIdx      int
 	textOut         int // output_index of the open message/text item (-1 none)
 	msgOpened       bool
@@ -599,12 +576,12 @@ func newOpenAIToResponsesSSE(r io.Reader, model string) *openaiSSEToResponsesSSE
 // restore + custom/freeform tool set, rebuilt from the original responses
 // request); zero value = no-op.
 func newOpenAIToResponsesSSENS(r io.Reader, model string, r2c r2cCtx) *openaiSSEToResponsesSSE {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), sseScanBuf)
-	return &openaiSSEToResponsesSSE{sc: sc, model: model, id: "resp_conv", textOut: -1, rsOut: -1,
+	t := &openaiSSEToResponsesSSE{sseConverterCore: newSSEConverterCore(r, true), model: model, id: "resp_conv", textOut: -1, rsOut: -1,
 		toolOut: map[int]int{}, toolIDs: map[int]string{}, toolNames: map[int]string{},
 		toolAcc: map[int]string{}, toolAdded: map[int]bool{}, toolDelta: map[int]int{},
 		toolCustom: map[int]bool{}, toolInSent: map[int]int{}, r2c: r2c}
+	t.self = t
+	return t
 }
 
 func (t *openaiSSEToResponsesSSE) emit(event string, payload map[string]any) {
