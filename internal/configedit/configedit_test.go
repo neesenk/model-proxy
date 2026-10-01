@@ -62,6 +62,36 @@ func TestScalarHelpers(t *testing.T) {
 		t.Error("ChildMap on scalar root must be nil")
 	}
 
+	// ChildMap promotes a bare null key in place instead of appending a
+	// duplicate top-level key (web route editor regression: `routes:` with
+	// only comments below produced "mapping key already defined").
+	nullDoc := &yaml.Node{}
+	if err := yaml.Unmarshal([]byte("routes:\n# comment\nother: 1\n"), nullDoc); err != nil {
+		t.Fatal(err)
+	}
+	routes := ChildMap(nullDoc, "routes")
+	if routes == nil || routes.Kind != yaml.MappingNode {
+		t.Fatalf("ChildMap must promote the null routes key, got %v", routes)
+	}
+	if again := ChildMap(nullDoc, "routes"); again != routes {
+		t.Error("ChildMap must reuse the promoted mapping")
+	}
+	SetChildNode(routes, "agent-free", MustEncode([]string{"opencode-go/space-bunny-free"}))
+	encoded, err := yaml.Marshal(MapNode(nullDoc))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var roundtrip map[string]any
+	if err := yaml.Unmarshal(encoded, &roundtrip); err != nil {
+		t.Fatalf("promoted document must stay valid (no duplicate keys): %v\n%s", err, encoded)
+	}
+	if _, ok := roundtrip["routes"].(map[string]any)["agent-free"]; !ok {
+		t.Errorf("agent-free route missing after roundtrip: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), "# comment") {
+		t.Errorf("comment under bare key must survive promotion: %s", encoded)
+	}
+
 	// SetChildScalar replace/append.
 	SetChildScalar(sched, "a", "1")
 	SetChildScalar(sched, "a", "9")

@@ -224,6 +224,45 @@ func TestEditConfigRoute(t *testing.T) {
 	}
 }
 
+// Bare `routes:` (null value, only comments below) must be promoted in place;
+// appending a second routes key used to fail validation with "mapping key
+// already defined".
+func TestEditConfigRouteBareNullRoutesKey(t *testing.T) {
+	path := writeTestConfig(t)
+	if err := os.WriteFile(path, []byte(`listen: 127.0.0.1:8080
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://example.test, models: [glm]}
+routes:
+# legacy commented examples stay below the bare key
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := editService(t, path, &reloadSpy{})
+	if err := service.EditConfig(appapi.EditRequest{
+		Kind: "route",
+		Name: "glm-air",
+		Data: map[string]any{"targets": []any{
+			map[string]any{"provider": "zhipu", "model": "glm-air"},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	content := readConfig(t, path)
+	if strings.Count(content, "\nroutes:")+boolToInt(strings.HasPrefix(content, "routes:")) != 1 {
+		t.Errorf("edited config must keep exactly one routes key:\n%s", content)
+	}
+	if !strings.Contains(content, "glm-air") || !strings.Contains(content, "# legacy commented examples") {
+		t.Errorf("edited config:\n%s", content)
+	}
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func TestEditConfigDelete(t *testing.T) {
 	path := writeTestConfig(t)
 	spy := &reloadSpy{}

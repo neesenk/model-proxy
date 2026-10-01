@@ -53,7 +53,9 @@ func SetScalar(root *yaml.Node, key, value string) {
 }
 
 // ChildMap returns the mapping node for key under parent (doc/mapping aware),
-// creating and appending an empty mapping when missing.
+// creating and appending an empty mapping when missing. A key present with a
+// null value (bare `key:` with only comments below) is promoted to a mapping
+// in place — appending a second key would produce a duplicate-key document.
 func ChildMap(root *yaml.Node, key string) *yaml.Node {
 	mapping := root
 	if root != nil && root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
@@ -63,9 +65,23 @@ func ChildMap(root *yaml.Node, key string) *yaml.Node {
 		return nil
 	}
 	for index := 0; index+1 < len(mapping.Content); index += 2 {
-		if mapping.Content[index].Value == key &&
-			mapping.Content[index+1].Kind == yaml.MappingNode {
-			return mapping.Content[index+1]
+		if mapping.Content[index].Value != key {
+			continue
+		}
+		value := mapping.Content[index+1]
+		if value.Kind == yaml.MappingNode {
+			return value
+		}
+		if value.Kind == yaml.ScalarNode && value.ShortTag() == "!!null" {
+			promoted := &yaml.Node{
+				Kind:        yaml.MappingNode,
+				Tag:         "!!map",
+				HeadComment: value.HeadComment,
+				LineComment: value.LineComment,
+				FootComment: value.FootComment,
+			}
+			mapping.Content[index+1] = promoted
+			return promoted
 		}
 	}
 	child := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
