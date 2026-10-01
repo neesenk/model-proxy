@@ -1,6 +1,7 @@
 package counters
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"os"
@@ -347,4 +348,90 @@ func TestMCPStats(t *testing.T) {
 		t.Errorf("after Reset: %v", s.RawSnapshot())
 	}
 	nilStats.Reset()
+}
+
+// TestUsageScannerPassthroughIsByteIdentical: the scanner must forward the
+// stream to the client byte-for-byte, including lines it cannot parse.
+func TestUsageScannerPassthroughIsByteIdentical(t *testing.T) {
+	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n\ndata: garbage\n\n")
+	var sink bytes.Buffer
+	tc := NewTokenCounter()
+	s := NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), TokenKey{Provider: "p", Model: "m"}, tc, nil)
+	if _, err := io.Copy(&sink, s); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(sink.Bytes(), stream) {
+		t.Errorf("passthrough not byte-identical:\nwant %q\ngot  %q", stream, sink.Bytes())
+	}
+}
+
+// TestUsageScannerOversizedLinePassthrough: an over-capacity line is skipped
+// for scanning but still reaches the client unmodified, and the scanner keeps
+// counting the frames after it.
+func TestUsageScannerOversizedLinePassthrough(t *testing.T) {
+	huge := bytes.Repeat([]byte("x"), 80_000)
+	stream := append([]byte("data: "), huge...)
+	stream = append(stream, []byte("\n\ndata: {\"usage\":{\"prompt_tokens\":3}}\n\n")...)
+	tc := NewTokenCounter()
+	var sink bytes.Buffer
+	s := NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), TokenKey{Provider: "p", Model: "m"}, tc, nil)
+	if _, err := io.Copy(&sink, s); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(sink.Bytes(), stream) {
+		t.Error("oversized passthrough mismatch")
+	}
+	if got := tc.Snapshot()[TokenKey{Provider: "p", Model: "m"}].Input; got != 3 {
+		t.Errorf("usage after oversized line = %d, want 3", got)
+	}
+}
+
+// TestTokenCounterConcurrent: 50 concurrent committers to the SAME key plus a
+// concurrent snapshot reader must not lose increments (and must be race-clean;
+// the pre-fix commit mutated TokenUsage fields after releasing tc.mu).
+func TestTokenCounterConcurrent(t *testing.T) {
+	tc := NewTokenCounter()
+	key := TokenKey{Provider: "p", Model: "m"}
+	const committers = 50
+
+	var snapDone sync.WaitGroup
+	snapDone.Add(1)
+	stopSnap := make(chan struct{})
+	go func() {
+		defer snapDone.Done()
+		for {
+			select {
+			case <-stopSnap:
+				return
+			default:
+				_ = tc.Snapshot()
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(committers)
+	start := make(chan struct{})
+	for i := 0; i < committers; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			tc.Commit(key, TokenUsage{Input: 1, Output: 1})
+		}()
+	}
+	close(start) // release all committers together to maximize contention
+	wg.Wait()
+	close(stopSnap)
+	snapDone.Wait()
+
+	got := tc.Snapshot()[key]
+	if got.Input != committers {
+		t.Errorf("Input = %d, want %d (lost increments)", got.Input, committers)
+	}
+	if got.Output != committers {
+		t.Errorf("Output = %d, want %d (lost increments)", got.Output, committers)
+	}
+	if got.Requests != committers {
+		t.Errorf("Requests = %d, want %d", got.Requests, committers)
+	}
 }

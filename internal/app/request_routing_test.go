@@ -6,7 +6,6 @@ import (
 	"io"
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/provider"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -532,22 +531,8 @@ func TestForward_Failover(t *testing.T) {
 
 // ---- route_warnings_test.go ----
 
-// TestProtocolHint: codex hints "responses" (it speaks the OpenAI Responses API,
-// and a real converter now exists); no other provider hints. No provider carries
-// a WireProtocolNote today (codex is now convertible, not "unconvertible").
-func TestProtocolHint(t *testing.T) {
-	if got := provider.ProtocolHint("codex", "gpt-5.6"); got != "responses" {
-		t.Errorf("ProtocolHint(codex) = %q, want \"responses\"", got)
-	}
-	for _, id := range []string{"zhipu", "deepseek", "volcengine", "aqp", "kimi-code", "static", ""} {
-		if got := provider.ProtocolHint(id, "m"); got != "" {
-			t.Errorf("ProtocolHint(%q) = %q, want \"\"", id, got)
-		}
-	}
-	if note := provider.WireProtocolNote("codex"); note != "" {
-		t.Errorf("codex wire note = %q, want \"\" (codex is now convertible to responses)", note)
-	}
-}
+// (TestProtocolHint moved to internal/provider/protocol_hint_test.go — owner
+// package; app keeps only composition-layer protocol selection coverage.)
 
 // TestNewProxy_RouteWarningsAppended: boot-time wiring — hazard warnings land
 // on p.routeWarnings (surfaced via /api/status + `models` CLI).

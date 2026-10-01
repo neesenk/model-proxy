@@ -6,7 +6,6 @@ import (
 	"io"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/counters"
-	"model-proxy/internal/targetexec"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -121,45 +120,8 @@ func TestUC_ClientCancelDuringHeadersStopsFailoverAndKeepsCircuitClosed(t *testi
 
 // ---- context_retry_test.go ----
 
-// TestIsContextOverflow: the 4xx body classifier — hits the context-overflow
-// shapes of the known backends, never an ordinary client error.
-func TestIsContextOverflow(t *testing.T) {
-	cases := []struct {
-		name   string
-		status int
-		body   string
-		want   bool
-	}{
-		{"openai context_length_exceeded", 400,
-			`{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 200001 tokens. Please reduce the length of the messages.","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}`, true},
-		{"deepseek maximum context length", 400,
-			`{"error":{"message":"This model's maximum context length is 65536 tokens. However, you requested 100000 tokens (100000 in the messages, 0 in the completion). Please reduce the length of the messages.","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}`, true},
-		{"anthropic prompt is too long", 400,
-			`{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 213432 tokens > 200000 maximum"}}`, true},
-		{"zhipu-style context length", 400,
-			`{"error":{"code":"1308","message":"prompt tokens exceed the model context length limit"}}`, true},
-		{"too many tokens", 400,
-			`{"error":{"message":"Request contains too many tokens: 300000"}}`, true},
-		{"case-insensitive", 400,
-			`{"error":{"code":"CONTEXT_LENGTH_EXCEEDED"}}`, true},
-		{"invalid api key", 401,
-			`{"error":{"message":"Incorrect API key provided","type":"invalid_request_error"}}`, false},
-		{"missing model field", 400,
-			`{"error":{"message":"Missing required field: model"}}`, false},
-		{"model not found", 400,
-			`{"error":{"message":"model 'foo' does not exist"}}`, false},
-		{"2xx never an overflow", 200,
-			`{"error":{"code":"context_length_exceeded"}}`, false},
-		{"5xx never an overflow", 500,
-			`context_length_exceeded`, false},
-		{"empty body", 400, ``, false},
-	}
-	for _, c := range cases {
-		if got := targetexec.IsContextOverflow(c.status, []byte(c.body)); got != c.want {
-			t.Errorf("%s: isContextOverflow(%d, body) = %v, want %v", c.name, c.status, got, c.want)
-		}
-	}
-}
+// (TestIsContextOverflow moved to internal/targetexec/classification_test.go —
+// pure classifier; the cross-route retry orchestration stays below.)
 
 // overflowServer returns an httptest.Server that always answers 400 with a
 // context-overflow error body carrying the given marker text.

@@ -570,29 +570,8 @@ const responsesTextSSE = "event: response.created\n" +
 
 // ---- protocol_capabilities_integration_test.go ----
 
-func TestWriteUnsupportedConversionError_ProtocolEnvelopes(t *testing.T) {
-	err := &protocol.UnsupportedError{
-		ClientProto: "openai", TargetProto: "anthropic",
-		Feature: "audio", Detail: "Chat Completions input_audio content",
-	}
-	for _, proto := range []protocol.Protocol{protocol.OpenAI, protocol.Responses, protocol.Anthropic} {
-		t.Run(string(proto), func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			protocol.WriteUnsupportedConversionError(rec, proto, err)
-			if rec.Code != http.StatusBadRequest || rec.Header().Get("content-type") != "application/json" {
-				t.Fatalf("status=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body.String())
-			}
-			body := unmarshalMap(t, rec.Body.Bytes())
-			if proto == protocol.Anthropic {
-				if body["type"] != "error" || asMap(body["error"])["type"] != "invalid_request_error" {
-					t.Fatalf("anthropic envelope = %v", body)
-				}
-			} else if asMap(body["error"])["code"] != "unsupported_protocol_conversion" {
-				t.Fatalf("openai envelope = %v", body)
-			}
-		})
-	}
-}
+// (TestWriteUnsupportedConversionError_ProtocolEnvelopes moved to
+// internal/protocol — owner package of the error-envelope writer.)
 
 func TestForward_UnsupportedConversionReturns400WithoutUpstream(t *testing.T) {
 	var calls atomic.Int32

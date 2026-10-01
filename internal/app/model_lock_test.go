@@ -2,7 +2,6 @@ package app
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 	configdomain "model-proxy/internal/config"
 	"net/http"
@@ -10,8 +9,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"model-proxy/internal/targetexec"
 )
 
 // postStatus is post() with the status code returned (for asserting committed
@@ -342,29 +339,7 @@ func TestParamStrip_LearnAndRetry(t *testing.T) {
 	}
 }
 
-// TestStripTopLevelParam: unit semantics of the best-effort stripper.
-func TestStripTopLevelParam(t *testing.T) {
-	out, did := targetexec.StripTopLevelParam([]byte(`{"model":"m","max_tokens":5,"messages":[]}`), "max_tokens")
-	if !did {
-		t.Fatal("expected did=true")
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(out, &obj); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := obj["max_tokens"]; ok {
-		t.Error("max_tokens not stripped")
-	}
-	if _, ok := obj["model"]; !ok {
-		t.Error("model must be preserved")
-	}
-	if _, did := targetexec.StripTopLevelParam([]byte(`{"model":"m"}`), "max_tokens"); did {
-		t.Error("absent key: did should be false")
-	}
-	if _, did := targetexec.StripTopLevelParam([]byte(`not-json`), "max_tokens"); did {
-		t.Error("non-JSON: did should be false")
-	}
-}
+// (TestStripTopLevelParam moved to internal/targetexec/classification_test.go.)
 
 // TestEmpty200_ClientCancelNoLock (P1-1c): a client that disconnects before
 // the first byte must NOT produce a model lock — zero bytes streamed in that
