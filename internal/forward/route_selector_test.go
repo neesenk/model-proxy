@@ -288,12 +288,10 @@ func TestServeRouteSelectorCalledOnceAcrossCooldownRetries(t *testing.T) {
 	snap.Cfg.Scheduling.RetryWait = "2s"
 	h.state.allDown = true
 	h.state.allRateLimited = true
-	// The recovery window must comfortably outlast one full pass under load:
-	// DecideFailure only waits while earliest-now stays positive, and a single
-	// round (two upstream 429s, race-instrumented, on a shared CI runner) can
-	// exceed a few ms — an expired window goes straight to the 429 terminal and
-	// the retry rounds these tests pin never happen (the CI flake).
-	h.state.earliest = time.Now().Add(150 * time.Millisecond)
+	// earliestIn anchors the recovery window at each DECISION (harness seam):
+	// the wait-retry branch holds by construction however long a round takes —
+	// the window is just the production sleep length under test.
+	h.state.earliestIn = 25 * time.Millisecond
 
 	w := h.serve(snap, "openai", "/v1/chat/completions", openaiChatBody(), nil)
 	if w.Code != http.StatusTooManyRequests {
@@ -326,12 +324,10 @@ func TestServeRouteGradeSelectorCalledOnceAcrossCooldownRetries(t *testing.T) {
 	snap.Cfg.Scheduling.RetryWait = "2s"
 	h.state.allDown = true
 	h.state.allRateLimited = true
-	// The recovery window must comfortably outlast one full pass under load:
-	// DecideFailure only waits while earliest-now stays positive, and a single
-	// round (two upstream 429s, race-instrumented, on a shared CI runner) can
-	// exceed a few ms — an expired window goes straight to the 429 terminal and
-	// the retry rounds these tests pin never happen (the CI flake).
-	h.state.earliest = time.Now().Add(150 * time.Millisecond)
+	// earliestIn anchors the recovery window at each DECISION (harness seam):
+	// the wait-retry branch holds by construction however long a round takes —
+	// the window is just the production sleep length under test.
+	h.state.earliestIn = 25 * time.Millisecond
 
 	w := h.serve(snap, "openai", "/v1/chat/completions", openaiChatBody(), nil)
 	if w.Code != http.StatusTooManyRequests {
@@ -478,12 +474,10 @@ func TestServeRouteSelectorRetryRoundWithoutPreferredReportsFallback(t *testing.
 	snap.Cfg.Scheduling.RetryWait = "2s"
 	h.state.allDown = true
 	h.state.allRateLimited = true
-	// The recovery window must comfortably outlast one full pass under load:
-	// DecideFailure only waits while earliest-now stays positive, and a single
-	// round (two upstream 429s, race-instrumented, on a shared CI runner) can
-	// exceed a few ms — an expired window goes straight to the 429 terminal and
-	// the retry rounds these tests pin never happen (the CI flake).
-	h.state.earliest = time.Now().Add(150 * time.Millisecond)
+	// earliestIn anchors the recovery window at each DECISION (harness seam):
+	// the wait-retry branch holds by construction however long a round takes —
+	// the window is just the production sleep length under test.
+	h.state.earliestIn = 25 * time.Millisecond
 	var scheduleCalls atomic.Int32
 	h.svc.Schedule = dropProviderOnLaterRounds(&scheduleCalls, "b")
 
@@ -524,12 +518,10 @@ func TestServeRouteGradeSelectorRetryRoundWithoutGradeReportsFallback(t *testing
 	snap.Cfg.Scheduling.RetryWait = "2s"
 	h.state.allDown = true
 	h.state.allRateLimited = true
-	// The recovery window must comfortably outlast one full pass under load:
-	// DecideFailure only waits while earliest-now stays positive, and a single
-	// round (two upstream 429s, race-instrumented, on a shared CI runner) can
-	// exceed a few ms — an expired window goes straight to the 429 terminal and
-	// the retry rounds these tests pin never happen (the CI flake).
-	h.state.earliest = time.Now().Add(150 * time.Millisecond)
+	// earliestIn anchors the recovery window at each DECISION (harness seam):
+	// the wait-retry branch holds by construction however long a round takes —
+	// the window is just the production sleep length under test.
+	h.state.earliestIn = 25 * time.Millisecond
 	var scheduleCalls atomic.Int32
 	h.svc.Schedule = dropProviderOnLaterRounds(&scheduleCalls, "b")
 

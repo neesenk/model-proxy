@@ -362,7 +362,7 @@ func TestServeRateLimitedTerminal429(t *testing.T) {
 	})
 	h := newHarness()
 	h.state.allRateLimited = true
-	h.state.earliest = time.Now().Add(2 * time.Minute)
+	h.state.earliestIn = 2 * time.Minute
 	cfg := &Config{
 		Providers:  map[string]Provider{"up": {OpenAIBaseURL: up.srv.URL, Provider: "test-static"}},
 		Routes:     map[string][]RouteTarget{"m": {{Provider: "up", Model: "real-model"}}},
@@ -396,7 +396,7 @@ func TestServeCooldownWaitRetryThenCommit(t *testing.T) {
 	h := newHarness()
 	h.state.allDown = true
 	h.state.allRateLimited = true
-	h.state.earliest = time.Now().Add(5 * time.Millisecond)
+	h.state.earliestIn = 25 * time.Millisecond
 	cfg := &Config{
 		Providers:  map[string]Provider{"up": {OpenAIBaseURL: up.srv.URL, Provider: "test-static"}},
 		Routes:     map[string][]RouteTarget{"m": {{Provider: "up", Model: "real-model"}}},
@@ -418,7 +418,7 @@ func TestServeClientGoneDuringCooldownWait(t *testing.T) {
 	h := newHarness()
 	h.state.allDown = true
 	h.state.allRateLimited = true
-	h.state.earliest = time.Now().Add(time.Minute)
+	h.state.earliestIn = time.Minute
 	cfg := &Config{
 		Providers:  map[string]Provider{"up": {OpenAIBaseURL: up.srv.URL, Provider: "test-static"}},
 		Routes:     map[string][]RouteTarget{"m": {{Provider: "up", Model: "real-model"}}},

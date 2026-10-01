@@ -198,11 +198,18 @@ var _ targetexec.Effects = (*fakeEffects)(nil)
 // dependency DAG; internal/app adapts between the two) — this TEST-only seam
 // is the narrow exception that keeps the tests honest.
 type fakeRouteState struct {
-	pins             map[string]bool
-	disabled         map[string]bool
-	allDown          bool
-	allRateLimited   bool
-	earliest         time.Time
+	pins           map[string]bool
+	disabled       map[string]bool
+	allDown        bool
+	allRateLimited bool
+	// earliestIn is the cooldown's remaining time reported to forward,
+	// anchored at the DECISION's now (see CooldownState): DecideFailure
+	// computes wait = earliest-now, so a decision-relative window makes the
+	// wait-retry branch true by construction. An absolute earliest set at
+	// test start instead decays while the in-flight round runs — on a slow,
+	// race-instrumented CI runner one round can exceed any fixed margin and
+	// flip the branch to the 429 terminal (the flake this seam prevents).
+	earliestIn       time.Duration
 	recoveredUntried bool
 	quotaMaxAge      time.Duration
 	// latch owns the (session, route) latch and repeat-turn window exactly
@@ -223,7 +230,7 @@ func (s *fakeRouteState) PinForces(exposed string, ordered []RouteTarget, parent
 	return s.pins[exposed]
 }
 func (s *fakeRouteState) CooldownState(targets []RouteTarget, now time.Time, quotaMaxAge time.Duration) (bool, bool, time.Time) {
-	return s.allDown, s.allRateLimited, s.earliest
+	return s.allDown, s.allRateLimited, now.Add(s.earliestIn)
 }
 func (s *fakeRouteState) HasRecoveredUntried(targets []RouteTarget, tried map[string]bool, now time.Time, quotaMaxAge time.Duration) bool {
 	return s.recoveredUntried
