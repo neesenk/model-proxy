@@ -190,6 +190,34 @@ func TestConvertOpenAIResponseToAnthropic_PartsContentAnnotations(t *testing.T) 
 	}
 }
 
+// The string-content sibling of the parts-array case above: message-level
+// annotations on a plain string content must fold into the same text block
+// as "Sources:" links (the two paths diverged once — keep both pinned).
+func TestConvertOpenAIResponseToAnthropic_StringContentAnnotations(t *testing.T) {
+	in := []byte(`{"id":"a","model":"g","choices":[{"message":{"role":"assistant","content":"hello","annotations":[{"type":"url_citation","url_citation":{"url":"https://s.example","title":"S","start_index":0,"end_index":5}}]},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	out, err := convertOpenAIResponseToAnthropic(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, _ := unmarshalMap(t, out)["content"].([]any)
+	if len(blocks) != 1 {
+		t.Fatalf("content = %v, want a single text block", blocks)
+	}
+	blk := asMap(blocks[0])
+	if blk["type"] != "text" {
+		t.Fatalf("block type = %v, want text", blk["type"])
+	}
+	// The links fold into ONE text block, not a fabricated structured
+	// citation (no encrypted_index exists to make one valid).
+	text := strOf(blk["text"])
+	if !strings.Contains(text, "hello") || !strings.Contains(text, "Sources: [S](https://s.example)") {
+		t.Errorf("text = %q, want content + appended source link", text)
+	}
+	if _, fabricated := blk["citations"]; fabricated {
+		t.Errorf("fabricated structured citation without encrypted_index: %#v", blk)
+	}
+}
+
 // TestOpenAIToAnthropicSSE_StringShapedError: a string-form error chunk
 // ({"error":"rate limited"} — small gateways emit this) must surface as an
 // anthropic error event, not be silently dropped by the object-only decoder.

@@ -113,14 +113,25 @@ func responsesAnnotationsToChat(raw any) []map[string]any {
 // Responses does not provide. Appending de-duplicated Markdown links is a
 // valid, user-visible fallback and avoids fabricating an invalid structured
 // Anthropic citation.
+//
+// part["annotations"] arrives in two shapes: JSON-decoded []any (responses
+// bodies) or the in-memory []map[string]any built by
+// chatAnnotationsToResponses (the chat→a string-content path). The assertion
+// used to accept only []any, silently dropping the typed slice — the
+// string-content path lost its citations.
 func responsesTextWithCitationLinks(part map[string]any) string {
 	text := firstNonEmpty(strOpt(part["text"]), strOpt(part["refusal"]))
-	raw, _ := part["annotations"].([]any)
-	annotations := make([]map[string]any, 0, len(raw))
-	for _, value := range raw {
-		if annotation := asMap(value); annotation != nil {
-			annotations = append(annotations, annotation)
+	var annotations []map[string]any
+	switch values := part["annotations"].(type) {
+	case []any:
+		annotations = make([]map[string]any, 0, len(values))
+		for _, value := range values {
+			if annotation := asMap(value); annotation != nil {
+				annotations = append(annotations, annotation)
+			}
 		}
+	case []map[string]any:
+		annotations = values
 	}
 	links := responsesCitationLinks(annotations, nil)
 	if links == "" {
