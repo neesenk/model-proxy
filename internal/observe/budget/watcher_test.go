@@ -345,7 +345,16 @@ func TestWatcher_Webhook5xxExhaustsRetries(t *testing.T) {
 // sleep both abort when lifecycle stop closes.
 func TestWatcher_WebhookRetryAbortsOnStop(t *testing.T) {
 	release := make(chan struct{})
+	parked := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// First attempt parks (recorded via parked, closed exactly once);
+		// retries find it already closed and park again — the abort test
+		// only ever needs the in-flight one.
+		select {
+		case <-parked:
+		default:
+			close(parked)
+		}
 		<-release
 	}))
 	defer server.Close()
@@ -361,8 +370,9 @@ func TestWatcher_WebhookRetryAbortsOnStop(t *testing.T) {
 		w.check(testNow, stop)
 		close(done)
 	}()
-	// Let the first POST park inside the hanging server, then stop.
-	time.Sleep(50 * time.Millisecond)
+	// Deterministic hand-off: stop only after the first POST has PARKED
+	// inside the hanging server (the in-flight branch), never a fixed sleep.
+	<-parked
 	close(stop)
 	select {
 	case <-done:

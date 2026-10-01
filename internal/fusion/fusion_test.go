@@ -149,18 +149,19 @@ func TestCollectResultsUsesOneGraceWindow(t *testing.T) {
 		}{successes, received}
 	}()
 
-	select {
-	case <-ctx.Done():
-		t.Fatal("collection cancelled before the grace window elapsed")
-	case <-time.After(5 * time.Millisecond):
+	// Join on the done channel, then assert a LOWER BOUND on the elapsed
+	// time: cancel() fires exactly at CollectResults' return (the grace
+	// branch), so "done no earlier than start+grace" proves BOTH that the
+	// grace window was fully served AND that the cancel did not fire early —
+	// no wall-clock race window needed (a scheduler-starved 5ms peek could
+	// previously miss ctx.Done() and misreport an early cancel).
+	started := time.Now()
+	got := <-done
+	if elapsed := time.Since(started); elapsed < 25*time.Millisecond {
+		t.Fatalf("collection returned after %v, want ≥ the 25ms grace window", elapsed)
 	}
-	select {
-	case got := <-done:
-		if len(got.successes) != 2 || len(got.received) != 2 {
-			t.Fatalf("collection after grace = %#v", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("collection did not finish after its grace window")
+	if len(got.successes) != 2 || len(got.received) != 2 {
+		t.Fatalf("collection after grace = %#v", got)
 	}
 	if ctx.Err() == nil {
 		t.Fatal("grace expiry did not cancel remaining leg")

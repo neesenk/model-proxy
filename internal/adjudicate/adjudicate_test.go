@@ -330,7 +330,14 @@ func TestMediumVerdict_RecordsWithoutBlocking(t *testing.T) {
 	// History echo of the same content replays the cached verdict: the sink
 	// is not called again at all, still no block.
 	s.Enqueue(testJob("sk-medium-ambiguous-aaaaaaaaaaaa"))
-	time.Sleep(50 * time.Millisecond)
+	// The cached replay's observable is the ring's second entry (apply()
+	// always records before any sink call): wait for the cached entry to
+	// land, then the no-second-sink-call assertion is settled by
+	// happens-before — no fixed sleep window.
+	waitFor(t, func() bool {
+		r := s.Recent() // newest first: the cached replay is r[0]
+		return len(r) == 2 && r[0].Cached && !r[1].Cached
+	})
 	sink.mu.Lock()
 	mediumCalls := len(sink.medium)
 	sink.mu.Unlock()
@@ -430,9 +437,15 @@ func TestVerdictCache_DedupesHistoryEcho(t *testing.T) {
 		t.Fatal("Enqueue refused")
 	}
 	// The cached LOW verdict consumes the job without a model call and
-	// without a sink re-emit (once per unique content); give the async
-	// apply a beat to prove nothing fires either.
-	time.Sleep(50 * time.Millisecond)
+	// without a sink re-emit (once per unique content). The ring's cached
+	// entry is the completion signal for the async apply — once it is
+	// visible, an erroneously-planned model call would already have
+	// started (the caller count is bumped before any apply), so both zero
+	// assertions are settled by happens-before.
+	waitFor(t, func() bool {
+		r := s2.Recent()
+		return len(r) == 1 && r[0].Cached
+	})
 	if caller2.count() != 0 {
 		t.Errorf("caller called %d times on a cached verdict, want 0", caller2.count())
 	}
@@ -578,12 +591,14 @@ func TestDisabledConfig_DropsSilently(t *testing.T) {
 	}}
 	sink := &fakeSink{}
 	s.Start(staticConfig{enabled: false}, caller, sink)
-	t.Cleanup(func() { s.Close(time.Second) })
 	if !s.Enqueue(testJob("sk-proj-abcdefghij1234567890")) {
 		t.Fatal("disabled Enqueue must consume (true), not fail-open")
 	}
-	waitFor(t, func() bool { h, _, _ := sink.counts(); return caller.count() == 0 && h == 0 })
-	time.Sleep(20 * time.Millisecond) // nothing asynchronous may fire either
+	// The disabled path never queues anything, so Close's drain is a pure
+	// join: a wrongly-queued job would be processed and counted BEFORE
+	// Close returns — one deterministic barrier instead of a sleep proving
+	// "nothing fired".
+	s.Close(time.Second)
 	if h, _, _ := sink.counts(); caller.count() != 0 || h != 0 {
 		t.Errorf("disabled channel must drop jobs silently")
 	}
@@ -777,12 +792,14 @@ func TestBlockStore_DrainRaceMerge(t *testing.T) {
 	}
 
 	b := loadBlockStore(path)
-	time.Sleep(5 * time.Millisecond)
 
-	// The predecessor drains and writes a NEW block after our load.
+	// The predecessor drains and writes a NEW block after our load. The
+	// "after" is explicit DATA — Ts strictly greater than the loader's
+	// loadedAt fence (the merge-side adoption condition) — not a wall-clock
+	// margin.
 	late := blockFile{Version: 1, Blocks: map[string]Block{
 		"pre-existing": {Kind: KindSecret, Rule: "r", Ts: 1000},
-		"late-write":   {Kind: KindSecret, Rule: "r2", Ts: time.Now().UnixMilli()},
+		"late-write":   {Kind: KindSecret, Rule: "r2", Ts: b.loadedAt.Add(time.Millisecond).UnixMilli()},
 	}}
 	if err := writeStateFile(path, late); err != nil {
 		t.Fatal(err)
