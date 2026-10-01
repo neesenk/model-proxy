@@ -95,6 +95,7 @@ providers:
       - gpt-6-astra
       - gpt-6-luna
       - gpt-6-sol
+      - gpt-6.1-sol
   # External provider (Zhipu BigModel — API key via `login zhipu`)
   # /models endpoint only lists 8 chat models; multimodal models exist but
   # must be added manually here (they use different API paths). Metadata
