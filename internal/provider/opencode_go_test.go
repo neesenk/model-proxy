@@ -110,6 +110,9 @@ func TestOpenCodeGoFetchModels(t *testing.T) {
 		if r.URL.Path != "/models" {
 			t.Errorf("path = %q, want /models", r.URL.Path)
 		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-opencode-go-list" {
+			t.Errorf("Authorization = %q, want Bearer <key>", got)
+		}
 		w.Write([]byte(`{"data":[{"id":"kimi-k3"},{"id":"glm-5.3"},{"id":"gpt-6-luna"}]}`))
 	}))
 	defer srv.Close()
@@ -410,6 +413,139 @@ func TestParseOpenCodeGoUsage_QuotedPercent(t *testing.T) {
 		t.Errorf("monthly scale: got used=%v remaining=%v, want 4/0.96",
 			s.Windows[0].Used, s.Windows[0].RemainingPct)
 	}
+}
+
+// A window at exactly 100% used is EXHAUSTED, not unmeasured: RemainingPct
+// must be exactly 0 (0 and the -1 "unmeasured" sentinel schedule differently)
+// and the snapshot stays BillingPlan (a full window is still a measured plan).
+func TestParseOpenCodeGoUsage_Percent100Exhausted(t *testing.T) {
+	body := `{"usage":{
+		"rolling":{"status":"ok","percent":100,"resetsAt":"2026-10-01T10:10:01.964Z"},
+		"monthly":{"status":"ok","percent":100,"resetsAt":"2026-10-27T17:35:19.000Z"}}}`
+	s, err := ParseOpenCodeGoUsage([]byte(body), "")
+	if err != nil || s == nil {
+		t.Fatalf("ParseOpenCodeGoUsage: err=%v s=%v", err, s)
+	}
+	if s.Billing != BillingPlan {
+		t.Errorf("Billing: got %v, want BillingPlan (100%% used is measured, not unmeasured)", s.Billing)
+	}
+	if s.RemainingPct != 0 {
+		t.Errorf("RemainingPct: got %v, want exactly 0 (exhausted)", s.RemainingPct)
+	}
+	if len(s.Windows) != 2 {
+		t.Fatalf("windows: got %d, want 2\n%+v", len(s.Windows), s.Windows)
+	}
+	for _, w := range s.Windows {
+		if w.Used != 100 || w.RemainingPct != 0 {
+			t.Errorf("%s: got used=%v remaining=%v, want 100/0 (exhausted, not degraded away)",
+				w.Label, w.Used, w.RemainingPct)
+		}
+	}
+	if !s.Windows[1].Ultimate {
+		t.Errorf("monthly window: got %+v, want Ultimate (still the scheduling base)", s.Windows[1])
+	}
+}
+
+// Over-limit traffic (percent > 100) clamps RemainingPct to 0 — exhausted —
+// never negative: a negative RemainingPct reads as the "unmeasured" sentinel
+// and hands the scheduler a neutral surplus. Same clamp as the volcengine
+// parser; Used keeps the raw over-limit percent for display.
+func TestParseOpenCodeGoUsage_OverLimitClampsToZero(t *testing.T) {
+	body := `{"usage":{
+		"rolling":{"status":"ok","percent":137,"resetsAt":"2026-10-01T10:10:01.964Z"},
+		"weekly":{"status":"ok","percent":100,"resetsAt":"2026-10-05T00:00:00.000Z"},
+		"monthly":{"status":"ok","percent":137,"resetsAt":"2026-10-27T17:35:19.000Z"}}}`
+	s, err := ParseOpenCodeGoUsage([]byte(body), "")
+	if err != nil || s == nil {
+		t.Fatalf("ParseOpenCodeGoUsage: err=%v s=%v", err, s)
+	}
+	if s.Billing != BillingPlan {
+		t.Errorf("Billing: got %v, want BillingPlan (over-limit is measured)", s.Billing)
+	}
+	if s.RemainingPct != 0 {
+		t.Errorf("RemainingPct: got %v, want exactly 0 (monthly ultimate clamped, never negative)", s.RemainingPct)
+	}
+	if len(s.Windows) != 3 {
+		t.Fatalf("windows: got %d, want 3\n%+v", len(s.Windows), s.Windows)
+	}
+	for _, w := range s.Windows {
+		if w.RemainingPct != 0 {
+			t.Errorf("%s: RemainingPct=%v, want 0 (over-limit clamps, never negative)", w.Label, w.RemainingPct)
+		}
+	}
+	// The raw over-limit percent is preserved for display (volcengine keeps
+	// Used raw too).
+	if s.Windows[0].Used != 137 || s.Windows[2].Used != 137 {
+		t.Errorf("used: got 5h=%v monthly=%v, want the raw 137 preserved", s.Windows[0].Used, s.Windows[2].Used)
+	}
+}
+
+// A non-numeric or absent `percent` must NEVER read as "0% used" (fully
+// available): an unparseable numeric field counts as absent (kimi-code parser
+// convention), so the whole window is skipped. Dropping the monthly window
+// drops the Ultimate and takes the existing BillingUnknown degrade path.
+func TestParseOpenCodeGoUsage_MalformedPercentSkipsWindow(t *testing.T) {
+	t.Run("quoted non-numeric rolling", func(t *testing.T) {
+		body := `{"usage":{
+			"rolling":{"status":"ok","percent":"abc","resetsAt":"2026-10-01T10:10:01.964Z"},
+			"weekly":{"status":"ok","percent":2,"resetsAt":"2026-10-05T00:00:00.000Z"},
+			"monthly":{"status":"ok","percent":1,"resetsAt":"2026-10-27T17:35:19.000Z"}}}`
+		s, err := ParseOpenCodeGoUsage([]byte(body), "")
+		if err != nil || s == nil {
+			t.Fatalf("ParseOpenCodeGoUsage: err=%v s=%v", err, s)
+		}
+		// The malformed window is gone; the parseable ones (and the scheduling
+		// base) are untouched.
+		if s.Billing != BillingPlan || s.RemainingPct != 0.99 {
+			t.Errorf("snapshot: got billing=%v remaining=%v, want BillingPlan/0.99", s.Billing, s.RemainingPct)
+		}
+		if len(s.Windows) != 2 {
+			t.Fatalf("windows: got %d, want 2 (rolling skipped)\n%+v", len(s.Windows), s.Windows)
+		}
+		for _, w := range s.Windows {
+			if w.Label == "5h limit" {
+				t.Errorf("malformed rolling window must be skipped, got %+v", w)
+			}
+		}
+	})
+	t.Run("absent percent", func(t *testing.T) {
+		body := `{"usage":{
+			"rolling":{"status":"ok","resetsAt":"2026-10-01T10:10:01.964Z"},
+			"monthly":{"status":"ok","percent":1,"resetsAt":"2026-10-27T17:35:19.000Z"}}}`
+		s, err := ParseOpenCodeGoUsage([]byte(body), "")
+		if err != nil || s == nil {
+			t.Fatalf("ParseOpenCodeGoUsage: err=%v s=%v", err, s)
+		}
+		if len(s.Windows) != 1 || s.Windows[0].Label != "Monthly limit" {
+			t.Fatalf("windows: got %+v, want only the monthly window (absent percent skipped, not 0%% used)", s.Windows)
+		}
+		if s.Windows[0].Used != 1 || s.Windows[0].RemainingPct != 0.99 {
+			t.Errorf("monthly scale: got used=%v remaining=%v, want 1/0.99",
+				s.Windows[0].Used, s.Windows[0].RemainingPct)
+		}
+	})
+	t.Run("malformed monthly degrades", func(t *testing.T) {
+		body := `{"usage":{
+			"rolling":{"status":"ok","percent":1,"resetsAt":"2026-10-01T10:10:01.964Z"},
+			"weekly":{"status":"ok","percent":2,"resetsAt":"2026-10-05T00:00:00.000Z"},
+			"monthly":{"status":"ok","percent":"n/a","resetsAt":"2026-10-27T17:35:19.000Z"}}}`
+		s, err := ParseOpenCodeGoUsage([]byte(body), "")
+		if err != nil || s == nil {
+			t.Fatalf("ParseOpenCodeGoUsage: err=%v s=%v", err, s)
+		}
+		if s.Billing != BillingUnknown {
+			t.Errorf("Billing: got %v, want BillingUnknown (Ultimate dropped with the malformed monthly)", s.Billing)
+		}
+		if s.RemainingPct != -1 {
+			t.Errorf("RemainingPct: got %v, want -1 (the unknown sentinel)", s.RemainingPct)
+		}
+		if len(s.Windows) != 2 {
+			t.Errorf("windows: got %d, want the 2 parseable windows", len(s.Windows))
+		}
+		if !strings.Contains(strings.Join(s.Notes, "\n"), opencodeGoConsoleURL) {
+			t.Errorf("Notes %v missing the console URL %s", s.Notes, opencodeGoConsoleURL)
+		}
+	})
 }
 
 // A window whose status isn't "ok" contributes a Note (label + status) while

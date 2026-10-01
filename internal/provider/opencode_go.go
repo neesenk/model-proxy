@@ -253,11 +253,13 @@ func (p *OpenCodeGoProvider) Usage() error {
 	return nil
 }
 
-// openCodeGoUsageWindow is one window object of the /usage envelope.
+// openCodeGoUsageWindow is one window object of the /usage envelope. Percent
+// is kept raw so a malformed value (quoted non-numeric, null, object, absent)
+// fails the per-window parse below instead of the whole-envelope decode.
 type openCodeGoUsageWindow struct {
-	Status   string      `json:"status"`
-	Percent  json.Number `json:"percent"`
-	ResetsAt string      `json:"resetsAt"`
+	Status   string          `json:"status"`
+	Percent  json.RawMessage `json:"percent"`
+	ResetsAt string          `json:"resetsAt"`
 }
 
 // ParseOpenCodeGoUsage parses the OpenCode Go /usage body into a
@@ -271,18 +273,21 @@ type openCodeGoUsageWindow struct {
 //	  "monthly":{"status":"ok","percent":1,"resetsAt":"2026-10-27T17:35:19.000Z"}}}
 //
 // `percent` is the USED percent (observed 0 → nonzero after a request), so
-// RemainingPct = (100 − percent)/100. Windows: rolling = 5h rate-cap → Short;
-// weekly = week (UTC Monday 00:00 reset) → Short; monthly = subscription
-// cycle (Duration = resetsAt − 1 month) → Ultimate (scheduling base). Every
-// window rides an abstract 0-100 scale (Total 100, Used percent) so
-// EstimateExhaustionEta's Δused/Δt works without the per-model dollar
+// RemainingPct = (100 − percent)/100; over-limit percent (>100) clamps
+// RemainingPct to 0 (exhausted — a negative would read as the "unmeasured"
+// sentinel; same clamp as the volcengine parser). Windows: rolling = 5h
+// rate-cap → Short; weekly = week (UTC Monday 00:00 reset) → Short; monthly =
+// subscription cycle (Duration = resetsAt − 1 month) → Ultimate (scheduling
+// base). Every window rides an abstract 0-100 scale (Total 100, Used percent)
+// so EstimateExhaustionEta's Δused/Δt works without the per-model dollar
 // amounts. A window whose `status` isn't "ok" contributes a Note (label +
-// status) instead of being silently trusted; a missing monthly window (no
-// Ultimate) degrades the snapshot to BillingUnknown with the console link
-// kept in Notes.
+// status) instead of being silently trusted; a window whose `percent` is
+// absent or non-numeric is SKIPPED (an unparseable numeric field counts as
+// absent — never read as "0% used"), so a monthly window that is missing or
+// unparseable drops the Ultimate and degrades the snapshot to BillingUnknown
+// with the console link kept in Notes.
 func ParseOpenCodeGoUsage(body []byte, account string) (*QuotaSnapshot, error) {
 	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber() // percent arrives as a number or a quoted string
 	var u struct {
 		Usage struct {
 			Rolling *openCodeGoUsageWindow `json:"rolling"`
@@ -304,19 +309,37 @@ func ParseOpenCodeGoUsage(body []byte, account string) (*QuotaSnapshot, error) {
 		Plan:    "OpenCode Go",
 		AsOf:    time.Now(),
 	}
-	window := func(w *openCodeGoUsageWindow, label string, duration time.Duration) QuotaWindow {
-		percent := numToFloat(w.Percent)
+	// window projects one usage window; ok=false when `percent` is absent or
+	// not a valid JSON number — quoted non-numeric strings, null, objects and
+	// out-of-range numbers all land there (kimi-code parser convention: an
+	// unparseable numeric field counts as absent, so the window is skipped and
+	// never read as "0% used"). Over-limit percent (>100) clamps RemainingPct
+	// to 0 — exhausted, never negative (a negative reads as the "unmeasured"
+	// sentinel; the volcengine parser clamps the same way).
+	window := func(w *openCodeGoUsageWindow, label string, duration time.Duration) (QuotaWindow, bool) {
+		var n json.Number // accepts a bare number or a quoted numeric string
+		if err := json.Unmarshal(w.Percent, &n); err != nil {
+			return QuotaWindow{}, false
+		}
+		percent, err := n.Float64()
+		if err != nil {
+			return QuotaWindow{}, false
+		}
+		rem := (100 - percent) / 100
+		if rem < 0 {
+			rem = 0
+		}
 		qw := QuotaWindow{
 			Label:        label,
 			Total:        100,
 			Used:         percent,
-			RemainingPct: (100 - percent) / 100,
+			RemainingPct: rem,
 			Duration:     duration,
 		}
 		if t, err := time.Parse(time.RFC3339Nano, w.ResetsAt); err == nil {
 			qw.ResetsAt = t
 		}
-		return qw
+		return qw, true
 	}
 	// statusNote records a non-ok window status for display instead of
 	// silently trusting its percent.
@@ -329,25 +352,28 @@ func ParseOpenCodeGoUsage(body []byte, account string) (*QuotaSnapshot, error) {
 	// Display order: Short rate-caps first (5h, weekly), Ultimate last
 	// (monthly) — the kimi-code layout.
 	if w := u.Usage.Rolling; w != nil {
-		qw := window(w, "5h limit", 5*time.Hour)
-		qw.Short = true
-		s.Windows = append(s.Windows, qw)
-		statusNote("5h limit", w)
+		if qw, ok := window(w, "5h limit", 5*time.Hour); ok {
+			qw.Short = true
+			s.Windows = append(s.Windows, qw)
+			statusNote("5h limit", w)
+		}
 	}
 	if w := u.Usage.Weekly; w != nil {
-		qw := window(w, "Weekly limit", 7*24*time.Hour)
-		qw.Short = true
-		s.Windows = append(s.Windows, qw)
-		statusNote("Weekly limit", w)
+		if qw, ok := window(w, "Weekly limit", 7*24*time.Hour); ok {
+			qw.Short = true
+			s.Windows = append(s.Windows, qw)
+			statusNote("Weekly limit", w)
+		}
 	}
 	if w := u.Usage.Monthly; w != nil {
-		qw := window(w, "Monthly limit", 0)
-		if !qw.ResetsAt.IsZero() {
-			qw.Duration = qw.ResetsAt.Sub(qw.ResetsAt.AddDate(0, -1, 0))
+		if qw, ok := window(w, "Monthly limit", 0); ok {
+			if !qw.ResetsAt.IsZero() {
+				qw.Duration = qw.ResetsAt.Sub(qw.ResetsAt.AddDate(0, -1, 0))
+			}
+			qw.Ultimate = true
+			s.Windows = append(s.Windows, qw)
+			statusNote("Monthly limit", w)
 		}
-		qw.Ultimate = true
-		s.Windows = append(s.Windows, qw)
-		statusNote("Monthly limit", w)
 	}
 
 	// No monthly (Ultimate) window → the subscription state is unmeasured:
