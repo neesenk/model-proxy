@@ -44,6 +44,11 @@ func (p *Proxy) Reload(configPath string) error {
 	// nothing usable (missing file — e.g. the boot pass has not persisted yet;
 	// malformed; version bump) the in-memory snapshot stays authoritative,
 	// matching the boot degradation.
+	// The re-read + re-baseline runs under the persist mutex (and outside
+	// p.mu — the file I/O): serialized against async persists, an in-flight
+	// persist cannot rename between this read and its baseline note, and this
+	// re-read cannot baseline a file a concurrent persist is about to replace.
+	p.modelCapsPersistMu.Lock()
 	modelCapsOnDisk, capsErr := runtimewire.LoadModelCapsFile(p.modelCapsPath)
 	if capsErr != nil {
 		logx.Warnf("[reload] ⚠ model_caps.json unreadable (%v); keeping in-memory verdicts", capsErr)
@@ -51,11 +56,12 @@ func (p *Proxy) Reload(configPath string) error {
 	if modelCapsOnDisk == nil {
 		modelCapsOnDisk = p.modelCaps.Snapshot()
 	}
-	// Re-baseline the async-persist skip guard at the just-read file state
-	// (outside p.mu — the stat is file I/O): persists from here on may write
-	// again, while a CLI refresh racing AHEAD of this read still counts as
-	// newer and is not clobbered by an in-flight older persist.
+	// Re-baseline the async-persist skip guard at the just-read file state:
+	// persists from here on may write again, while a CLI refresh racing AHEAD
+	// of this read still counts as newer and is not clobbered by an in-flight
+	// older persist.
 	p.noteModelCapsFileState()
+	p.modelCapsPersistMu.Unlock()
 	// AuthReady may read the credential store (file I/O, or the OS keychain
 	// under credentials: keychain) — evaluate it here, OUTSIDE the write lock,
 	// and hand the locked route compilation the precomputed set (same

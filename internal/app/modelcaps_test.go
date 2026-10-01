@@ -8,6 +8,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"io"
 	configdomain "model-proxy/internal/config"
 	"net/http"
@@ -996,5 +997,54 @@ func TestModelCaps_PoolVirtualDisabledNotProbed(t *testing.T) {
 	}
 	if _, ok := p.modelCaps.Get("zhipu", "m2"); ok {
 		t.Error("m2 probed despite the pool-virtual disable")
+	}
+}
+
+// TestModelCaps_ConcurrentPersistNeverRollsBackPuts: racing async persists
+// (the reload/SIGHUP storm pattern — every probe pass dispatches one) must
+// never adopt the daemon's OWN earlier file as an "external write" and Restore
+// it over in-memory verdicts. The rename→baseline-note lag used to make the
+// loser of two concurrent persists treat the winner's just-written file as
+// externally newer (a zero baseline accepts ANY file), and the resulting
+// Restore erased probe Puts that had landed between the two persists —
+// observed in CI as TestModelCaps_TransientFailureDoesNotFlapConcludedVerdict
+// losing m2 while m1 (Put after the Restore) survived.
+func TestModelCaps_ConcurrentPersistNeverRollsBackPuts(t *testing.T) {
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"p": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: testProviderID},
+		},
+		Routes: map[string][]configdomain.RouteTarget{},
+	}
+	p := newTestProxy(t, cfg)
+	now := time.Now()
+	yes := runtimewire.ModelProtocols{Chat: triYes, Anthropic: triYes, Responses: triYes}
+
+	// 40 rounds × 4 concurrent persists: each round lands a probe verdict,
+	// races the persist dispatch, and lands a second verdict mid-flight —
+	// exactly the CI interleaving. Directed repetition (time race, testing.md).
+	const rounds = 40
+	for r := 0; r < rounds; r++ {
+		model := fmt.Sprintf("m%d", r)
+		p.modelCaps.Put("p", "fp", model, yes, now)
+
+		var wg sync.WaitGroup
+		for i := 0; i < 4; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				p.persistModelCapsNow()
+			}()
+		}
+		// A probe result landing while the persists race (the recovery-pass
+		// Put in the CI failure).
+		p.modelCaps.Put("p", "fp", model+"-mid", yes, now)
+		wg.Wait()
+
+		for _, m := range []string{model, model + "-mid"} {
+			if mp, ok := p.modelCaps.Get("p", m); !ok || mp.Chat != triYes {
+				t.Fatalf("round %d: verdict for %s lost after concurrent persists (ok=%v mp=%+v) — a persist adopted the daemon's own earlier file and rolled back in-memory verdicts", r, m, ok, mp)
+			}
+		}
 	}
 }

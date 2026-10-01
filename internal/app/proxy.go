@@ -134,6 +134,18 @@ type processServices struct {
 	// split-brain the reload re-read fixed. Atomic: written by boot/reload
 	// (outside p.mu), read+updated by the quota-tracked persist goroutine.
 	modelCapsFileBaseline atomic.Int64
+	// modelCapsPersistMu serializes the daemon-side model_caps.json critical
+	// sections: persistModelCapsNow's stat→adopt/save→re-baseline, and
+	// reload's re-read+re-baseline. Two async persists interleaving could
+	// otherwise see the file written by their OWN earlier critical section as
+	// "newer than baseline" (the baseline note lags the rename; a zero
+	// baseline accepts any file) and adopt their own stale snapshot back over
+	// in-memory verdicts — erasing probe results that landed in between (the
+	// CI TransientFailure flake). Lock order: never acquire p.mu while holding
+	// this — the guarded sections touch only the file and atomics (the
+	// adoption path's cfgSnapshot takes p.mu.RLock; reload's guarded section
+	// runs before its p.mu.Lock).
+	modelCapsPersistMu sync.Mutex
 	// wireProbeMu serializes wire/model probe passes (TryLock/Lock in
 	// runWireProbePass). Rapid SIGHUP storms each dispatch a pass; unserialized
 	// passes probe the same rate-limited upstreams concurrently, stacking 429

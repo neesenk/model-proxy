@@ -168,8 +168,9 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			"wireCaps": true, "wireProbe": true, "wireProbeMu": true,
 			"wireProbePending": true,
 			"modelCaps":        true, "modelCapsPath": true, "modelCapsFileBaseline": true,
-			"cacheStatePath": true,
-			"cacheCounters":  true, "cachePersistMu": true,
+			"modelCapsPersistMu": true,
+			"cacheStatePath":     true,
+			"cacheCounters":      true, "cachePersistMu": true,
 			"disabledModelsPath": true, "disabledModelsMu": true,
 			"evalRand": true, "evalPrimaryBodies": true,
 		}

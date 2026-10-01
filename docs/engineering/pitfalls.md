@@ -181,6 +181,17 @@
     生产回归能全绿通过。测试需要生产状态机时直接用真实 owner（测试侧 import
     不破模块边界，archtest 只扫生产文件）；做不到时也绝不复制分支逻辑，改用
     窄 seam 注入。
+39. 「外部写采纳」必须与自家写互斥：model_caps.json 的异步 persist 以
+    `文件 mtime > baseline` 判定 CLI `models refresh` 外部写并采纳（Restore 回内存）。
+    但每次探测 pass 各起一个 quota-tracked persist goroutine，可并发——自家 persist A
+    rename 完成后、baseline 记账前，persist B 的 stat 会把 A 刚写的文件当成外部写，
+    用**旧快照整体替换**内存 verdicts，恰好落在某 pass 两个模型 Put 之间时，先落地的
+    探测结论被抹掉（Get 返回零值 unknown×3、无 inconclusive 日志——因为探测根本
+    没跑，是结果被回滚）。修复：`modelCapsPersistMu` 把 stat→采纳/写入→re-baseline
+    临界区化（reload 的重读+re-baseline 同锁），自家持久化串行后 mtime 必 ≤ baseline，
+    外部写检测不受影响。锁序约束：持该锁不得再取 p.mu（采纳路径的 cfgSnapshot
+    只拿 RLock，reload 的加锁段在 p.mu 之前）。回归：`TestModelCaps_ConcurrentPersistNeverRollsBackPuts`
+    （修复前 -cpu 1/2 可靠复现）。
 
 ## 回归要求
 

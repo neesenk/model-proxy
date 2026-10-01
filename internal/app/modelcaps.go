@@ -311,6 +311,12 @@ func (p *Proxy) persistModelCaps() {
 // processes; the check collapses the common case (an earlier-triggered
 // persist executing after the CLI's write).
 func (p *Proxy) persistModelCapsNow() {
+	// The stat→adopt/save→re-baseline section is a daemon-side critical
+	// section: without the mutex, a concurrent persist could stat the file
+	// this one just renamed (before its baseline note lands) and adopt the
+	// daemon's OWN snapshot as an external write.
+	p.modelCapsPersistMu.Lock()
+	defer p.modelCapsPersistMu.Unlock()
 	if fi, err := os.Stat(p.modelCapsPath); err == nil &&
 		fi.ModTime().UnixNano() > p.modelCapsFileBaseline.Load() {
 		if loaded, err := runtimewire.LoadModelCapsFile(p.modelCapsPath); err == nil && loaded != nil {
