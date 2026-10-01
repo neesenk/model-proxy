@@ -355,7 +355,15 @@ func (p *Proxy) mcpRouteEnsureSub(snap RuntimeSnapshot, srv configdomain.MCPServ
 			return mcpkg.SubSession{}, err
 		}
 		sub := mcpkg.SubSession{Server: server, Account: account, Protocol: "stdio", Initialized: true}
-		p.mcpSessions.RouteSubPut(sid, sub)
+		// The handshake can outlive the route session (LRU eviction races the
+		// initialize exchange): a lost put means the session is gone, its
+		// eviction event already fired BEFORE this child registered — nothing
+		// will ever kill it. Tear it down here instead of leaking it against
+		// the per-server cap until process close.
+		if !p.mcpSessions.RouteSubPut(sid, sub) {
+			p.mcpStdio.kill(key)
+			return mcpkg.SubSession{}, fmt.Errorf("route session %s expired during stdio initialize", sid)
+		}
 		return sub, nil
 	}
 	resp, _, err := p.mcpRoutePost(snap, srv, account, mcpRouteInitBody, "", "", inbound)

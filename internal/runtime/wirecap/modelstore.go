@@ -197,7 +197,7 @@ func (store *ModelStore) ReplaceProviderModels(parent, fingerprint string, model
 // after a verdict-selected /responses request receives a route-level 404.
 // No-op when the (parent, model) entry doesn't exist — a verdict-driven choice
 // implies one does.
-func (store *ModelStore) MarkResponsesUnsupported(parent, model string, now time.Time) {
+func (store *ModelStore) MarkResponsesUnsupported(parent, model, fingerprint string, now time.Time) {
 	if store == nil {
 		return
 	}
@@ -205,6 +205,14 @@ func (store *ModelStore) MarkResponsesUnsupported(parent, model string, now time
 	defer store.mu.Unlock()
 	entry, ok := store.caps[parent]
 	if !ok {
+		return
+	}
+	// Generation gate, same discipline as Put's expected-fingerprint guard:
+	// the 404 was observed against the requester's snapshot config, so a
+	// mismatching (already-reloaded) entry must not be flipped — model-level
+	// "no" outlives reloads and would pin the new generation to chat until
+	// its own fingerprint changes. An empty fingerprint is never attributed.
+	if fingerprint == "" || entry.Fingerprint != fingerprint {
 		return
 	}
 	mp, ok := entry.Models[model]

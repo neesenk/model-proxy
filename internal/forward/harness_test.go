@@ -369,7 +369,7 @@ func newHarness() *harness {
 		Agents:        counters.NewAgentCounter(),
 		Events:        events,
 		FusionReg:     fusion.NewRegistry(),
-		NewHealthGate: func(parentOf map[string]string) targetexec.HealthGate { return gate },
+		NewHealthGate: func(_ *configdomain.Config, parentOf map[string]string) targetexec.HealthGate { return gate },
 		NewEffects:    func(cfg *Config, generation uint64) targetexec.Effects { return fx },
 		Schedule:      passthroughSchedule,
 		ShadowDispatch: func(runtime Snapshot, proto, backendProto, calledModel, exposed string, primary RouteTarget, primaryRequestID, primaryAgent, primarySession string, commit *targetexec.Commit, routingDecision *RoutingDecision) {

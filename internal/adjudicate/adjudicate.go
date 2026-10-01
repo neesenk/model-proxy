@@ -507,12 +507,25 @@ func (s *Service) Block(sessionID string, b Block) { s.blocks.Block(sessionID, b
 // no cached high can resurrect them. It returns the removed entry for the
 // unblock audit record; false when the session was not blocked.
 func (s *Service) Unblock(sessionID string) (Block, bool) {
-	bl, ok := s.blocks.Unblock(sessionID)
+	// Dismantle the interdiction face FIRST, remove the session block LAST.
+	// The steps hold different locks, so the cascade has a window either way —
+	// but in THIS order a concurrent Enqueue racing through the window either
+	// re-judges for real (its cache hit was removed) and may re-block a
+	// session the operator's Unblock then releases (unblock wins, the intent
+	// of the call), whereas the old order let a racing cached verdict
+	// RE-block the session after the Unblock had already deleted it — the
+	// operator saw "unblock took effect" state that silently reverted.
+	bl, ok := s.blocks.Blocked(sessionID)
 	if !ok {
 		return Block{}, false
 	}
 	if len(bl.ContentHashes) == 0 && len(bl.CacheKeys) == 0 {
-		return bl, true // pre-cascade entry (or hash-less channel): session-only release
+		// pre-cascade entry (or hash-less channel): session-only release —
+		// still via the delete-last path for uniform semantics.
+		if _, ok := s.blocks.Unblock(sessionID); !ok {
+			return Block{}, false
+		}
+		return bl, true
 	}
 	now := s.opts.Now().UnixMilli()
 	for _, h := range bl.ContentHashes {
@@ -525,6 +538,9 @@ func (s *Service) Unblock(sessionID string) (Block, bool) {
 		s.allowedContent.AllowHash(h, ac)
 	}
 	s.cache.remove(bl.CacheKeys...)
+	if _, ok := s.blocks.Unblock(sessionID); !ok {
+		return Block{}, false
+	}
 	return bl, true
 }
 

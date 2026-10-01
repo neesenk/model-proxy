@@ -230,7 +230,7 @@ func (p pipeline) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag 
 	// bound to the REQUEST snapshot's parent projection (single-snapshot red
 	// line): the wire-verdict 404 correction below records under this
 	// generation's parent name.
-	gate := p.svc.NewHealthGate(fc.runtime.ParentOf)
+	gate := p.svc.NewHealthGate(fc.runtime.Cfg, fc.runtime.ParentOf)
 	if !gate.TakeHalfOpenSlot(m.Provider, fc.runtime.Generation) {
 		res.Err = errFusionLegUnavailable
 		return

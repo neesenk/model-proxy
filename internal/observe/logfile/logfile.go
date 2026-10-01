@@ -73,6 +73,12 @@ type Logger struct {
 	dropped     uint64
 	writeErrors uint64
 	stopOnce    sync.Once
+	// stopMu serializes Enqueue's closed-check+send against Run's exit
+	// close+drain: a bare select could still deliver into the queue AFTER the
+	// drain (both cases ready → random pick), stranding the record uncounted.
+	// Held only for a channel receive + non-blocking send (nanoseconds); Run
+	// holds it once for the close+drain at exit.
+	stopMu sync.Mutex
 	// writeLine is a test seam replacing the file writer; nil in production.
 	writeLine func(line []byte, now time.Time) error
 	// line is the reusable encode buffer; owned by the writer goroutine.
@@ -96,18 +102,35 @@ func New(opts Options) *Logger {
 }
 
 // Enqueue offers one record (as its encoder) without blocking the request
-// path; a full queue drops the record and counts it in Dropped.
+// path; a full queue drops the record and counts it in Dropped. Records
+// offered after the writer loop exited (a reload swapped this logger out, or
+// shutdown raced an in-flight request) are dropped the same way — counted,
+// not silently stranded in a queue nobody drains.
 func (l *Logger) Enqueue(encode EncodeFunc) {
 	if l == nil || encode == nil {
 		return
 	}
+	l.stopMu.Lock()
+	select {
+	case <-l.closed:
+		l.stopMu.Unlock()
+		l.countDropped("logger stopped")
+		return
+	default:
+	}
 	select {
 	case l.encodes <- encode:
+		l.stopMu.Unlock()
 	default:
-		n := atomic.AddUint64(&l.dropped, 1)
-		if n == 1 || n%1000 == 0 {
-			logx.Warnf("[%s] queue full, dropped %d records total", l.opts.Tag, n)
-		}
+		l.stopMu.Unlock()
+		l.countDropped("queue full")
+	}
+}
+
+func (l *Logger) countDropped(cause string) {
+	n := atomic.AddUint64(&l.dropped, 1)
+	if n == 1 || n%1000 == 0 {
+		logx.Warnf("[%s] %s, dropped %d records total", l.opts.Tag, cause, n)
 	}
 }
 
@@ -142,7 +165,22 @@ func (l *Logger) Run() {
 	if l == nil {
 		return
 	}
-	defer close(l.closed)
+	defer func() {
+		// Under stopMu: once the drain finishes, every later (or concurrent)
+		// Enqueue necessarily observes closed and counts itself dropped — no
+		// record can strand in a queue nobody drains.
+		l.stopMu.Lock()
+		defer l.stopMu.Unlock()
+		close(l.closed)
+		for {
+			select {
+			case <-l.encodes:
+				l.countDropped("logger stopped")
+			default:
+				return
+			}
+		}
+	}()
 	if err := EnsureDir(l.opts.Directory); err != nil {
 		logx.Warnf("[%s] mkdir %s: %v - logging disabled", l.opts.Tag, l.opts.Directory, err)
 		return

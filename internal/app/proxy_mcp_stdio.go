@@ -270,6 +270,17 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
+		// Concurrent LRU pressure can evict the freshly-Put session before the
+		// registry registration lands; the eviction's killPrefix then ran
+		// against a registry WITHOUT this key, so nothing would ever kill the
+		// child. Verify the session survived and tear the child down otherwise
+		// instead of leaking it against the per-server cap until process close.
+		if _, ok := p.mcpSessions.Get(sid); !ok {
+			p.mcpStdio.kill(sid)
+			http.Error(w, "mcp session expired during stdio initialize", http.StatusGatewayTimeout)
+			p.mcpLog(name, account, frame, r.Method, http.StatusGatewayTimeout, started, requestID, body, nil, 0, false, ident)
+			return
+		}
 		// Initialized notification: required by stateful servers.
 		conn.Call(r.Context(), mcpNotifInitBody) //nolint — best-effort
 		w.Header().Set("Content-Type", "application/json")

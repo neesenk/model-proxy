@@ -613,3 +613,25 @@ func TestAppendLineNarrowsStorageToOwnerOnly(t *testing.T) {
 		t.Errorf("file mode = %o, want 0600", got)
 	}
 }
+
+// TestEnqueueAfterRunStopsIsCounted: records offered after the writer loop
+// exited (reload swap / shutdown racing an in-flight request) must land in
+// Dropped — previously they vanished into a queue nobody drained, invisible
+// to the loss counter.
+func TestEnqueueAfterRunStopsIsCounted(t *testing.T) {
+	l := New(Options{Directory: t.TempDir(), FilePrefix: "mcp", MaxBytes: 1 << 20})
+	done := make(chan struct{})
+	go func() {
+		l.Run()
+		close(done)
+	}()
+	// The production stop seam (Shutdown -> stopOnce -> close(l.done)); call
+	// it from a goroutine since it waits for Run to finish.
+	go l.Shutdown()
+	<-done
+
+	l.Enqueue(func(_ time.Time, _ []byte) ([]byte, error) { return nil, nil })
+	if got := l.Dropped(); got != 1 {
+		t.Fatalf("Dropped = %d, want 1 (post-stop enqueue must be counted, not silently stranded)", got)
+	}
+}

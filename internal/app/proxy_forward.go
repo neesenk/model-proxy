@@ -41,8 +41,8 @@ func (p *Proxy) forwardServices() forward.Services {
 		FusionReg:      p.fusionReg,
 		ReqLog:         p.reqLog,
 		SessionHeaders: p.sessionHeaders(),
-		NewHealthGate: func(parentOf map[string]string) targetexec.HealthGate {
-			return proxyHealthGate{proxy: p, parentOf: parentOf}
+		NewHealthGate: func(cfg *configdomain.Config, parentOf map[string]string) targetexec.HealthGate {
+			return proxyHealthGate{proxy: p, cfg: cfg, parentOf: parentOf}
 		},
 		NewEffects: func(cfg *configdomain.Config, generation uint64) targetexec.Effects {
 			return targetExecutionEffects{proxy: p, cfg: cfg, generation: generation}

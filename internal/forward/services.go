@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	configdomain "model-proxy/internal/config"
+
 	"model-proxy/internal/fusion"
 	guardsession "model-proxy/internal/guard/session"
 	"model-proxy/internal/observe/counters"
@@ -49,7 +51,7 @@ type Services struct {
 	// (targetexec.HealthGate) to the request snapshot's pool-virtual→parent
 	// projection, so the wire-verdict 404 correction records under the
 	// request's own generation parent.
-	NewHealthGate func(parentOf map[string]string) targetexec.HealthGate
+	NewHealthGate func(cfg *configdomain.Config, parentOf map[string]string) targetexec.HealthGate
 	// NewEffects binds app-owned observation (metrics, request log, live
 	// events, tokens, agents, attempt quality) to one runtime generation.
 	// cfg is the request snapshot's config (same discipline as Schedule):

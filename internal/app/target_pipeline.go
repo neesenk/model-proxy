@@ -11,6 +11,7 @@ import (
 	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/providerbuild"
 	"model-proxy/internal/routing"
 	runtimestate "model-proxy/internal/runtime"
 	"model-proxy/internal/targetexec"
@@ -26,6 +27,7 @@ import (
 // re-reading reload-owned state on the request path.
 type proxyHealthGate struct {
 	proxy    *Proxy
+	cfg      *configdomain.Config
 	parentOf map[string]string
 }
 
@@ -64,7 +66,17 @@ func (g proxyHealthGate) NoteWireResponsesMiss(provider, model string) {
 	if par, ok := g.parentOf[provider]; ok {
 		parent = par
 	}
-	g.proxy.noteWireResponsesMiss(parent, model)
+	// The protocol fingerprint comes from the same request snapshot: a 404
+	// observed against generation N's base_url must not flip the verdict of a
+	// generation N+1 entry (model-level "no" has no TTL — a stale flip would
+	// pin the new generation to chat until its fingerprint changes again).
+	// An unresolvable config yields an empty fingerprint, which the store
+	// rejects (never write a correction you cannot attribute to a generation).
+	fp := ""
+	if provCfg, ok := g.cfg.Providers[parent]; ok {
+		fp = providerbuild.ProtocolConfigFingerprint(provCfg)
+	}
+	g.proxy.noteWireResponsesMiss(parent, model, fp)
 }
 
 // targetExecutionEffects maps semantic target-execution observations to the

@@ -193,6 +193,33 @@
     只拿 RLock，reload 的加锁段在 p.mu 之前）。回归：`TestModelCaps_ConcurrentPersistNeverRollsBackPuts`
     （修复前 -cpu 1/2 可靠复现）。
 
+40. 跨进程文件锁的「陈旧恢复」必须二次证据，不得只凭 mtime：账号池锁曾以
+    `mtime > 60s` 即 `Remove` 回收——但 `time.Since` 是墙钟运算，持有进程被
+    SIGSTOP/调试器挂起或 NTP 回拨 >60s 时心跳停摆而进程健在，锁被偷后两个
+    写者同入 load→modify→save，池文件丢账号；原持有者恢复后心跳还会打到
+    新锁文件上、退出时删掉新持有者的锁。修复：锁文件里已有持有者 PID，
+    Remove 前先 `Signal(0)` 探活，活着就继续等（deadline 兜底），死/无法解析
+    才回收（legacy 空文件退回 mtime 判定；Windows 无 signal-0 探活同样退回
+    旧行为，不劣化）。PID 复用只会导致「不回收→超时报错」，方向保守安全。
+    回归：TestWithPoolLock_StaleButAliveHolderIsNotStolen、TestLockHolderAlive、
+    StaleSteal 的死 PID 用真实退出子进程（硬编码 PID 机器相关会 flake）。
+    同型原则：凡「看起来死了」就破坏互斥的恢复路径，都需要存活证据。
+
+41. 池化/回调切片的 retain 必须拷贝，锁管不住所有权：bodycapture 的回调
+    切片契约明文「仅在回调期间有效，retain 必须拷贝」——Close 归还缓冲后，
+    并发请求复用同一 backing array。eval 采样路径曾把该切片直接存进
+    evalBodyCache：数据竞争 + **把别的请求响应正文泄漏进本请求的 judge
+    prompt**（锁维度审计不可见——cache 自身锁完全正确，违规在切片生命
+    周期）。同库三个调用方中 shadow/requestlog 都拷贝了，唯 eval 漏。审查
+    多 goroutine 共享时除了查锁，必须追**值的来源生命周期**（池、回调参数、
+    复用 buffer）。回归 TestMaybeStoreEvalPrimaryBodyCopiesPooledBuffer。
+    同批修复：wirecap 404 运行时纠正补 expected-fingerprint 门（旧代 404
+    不得翻转新代模型裁决，模型级 no 无 TTL）；MCP stdio initialize 与
+    LRU 逐出竞态的丢 put 必须 kill 子进程（否则泄漏到进程关闭）；adjudicate
+    Unblock 先拆拦截面后删 block（防并发缓存命中把刚解封的会话悄悄复原）；
+    logfile Run 退出后 Enqueue 计入 Dropped（stopMu 序列化 closed 检查与
+    close+drain）。
+
 ## 回归要求
 
 - 每个陷阱应有测试或明确的测试缺口。

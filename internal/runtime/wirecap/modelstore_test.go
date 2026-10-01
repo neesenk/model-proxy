@@ -51,7 +51,7 @@ func TestModelStorePutGetSnapshotRestore(t *testing.T) {
 		t.Error("nil ModelStore ProviderFingerprint succeeded")
 	}
 	nilStore.Put("a", "fp", "m", ModelProtocols{}, now)
-	nilStore.MarkResponsesUnsupported("a", "m", now)
+	nilStore.MarkResponsesUnsupported("a", "m", "fp", now)
 	nilStore.Restore(nil, nil)
 	if got := nilStore.Snapshot(); len(got) != 0 {
 		t.Errorf("nil ModelStore Snapshot = %+v", got)
@@ -127,16 +127,26 @@ func TestModelStoreMarkResponsesUnsupported(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	store := &ModelStore{}
 	store.Put("aqp", "fp", "m1", ModelProtocols{Chat: No, Anthropic: No, Responses: Yes}, now)
-	store.MarkResponsesUnsupported("aqp", "m1", now.Add(time.Minute))
+	store.MarkResponsesUnsupported("aqp", "m1", "fp", now.Add(time.Minute))
 	mp, ok := store.Get("aqp", "m1")
 	if !ok || mp.Responses != No {
 		t.Fatalf("after correction = %+v, ok=%v", mp, ok)
 	}
 	// No-ops on missing entries.
-	store.MarkResponsesUnsupported("aqp", "ghost", now)
-	store.MarkResponsesUnsupported("ghost", "m1", now)
+	store.MarkResponsesUnsupported("aqp", "ghost", "fp", now)
+	store.MarkResponsesUnsupported("ghost", "m1", "fp", now)
 	if _, ok := store.Get("ghost", "m1"); ok {
 		t.Error("correction created a phantom entry")
+	}
+	// No-ops on a fingerprint the requester cannot attribute: an empty
+	// fingerprint and a mismatching (already-reloaded) generation must both be
+	// dropped — a pre-reload in-flight 404 must never flip the new
+	// generation's verdict (model-level "no" has no TTL to expire it).
+	store.Put("aqp", "fp", "m2", ModelProtocols{Responses: Yes}, now)
+	store.MarkResponsesUnsupported("aqp", "m2", "", now)
+	store.MarkResponsesUnsupported("aqp", "m2", "other-fp", now)
+	if mp, _ := store.Get("aqp", "m2"); mp.Responses != Yes {
+		t.Fatalf("unattributable 404 flipped m2: %+v", mp)
 	}
 }
 
@@ -149,7 +159,7 @@ func TestModelStoreConcurrentAccess(t *testing.T) {
 			<-start
 			for iteration := 0; iteration < 100; iteration++ {
 				store.Put("p", "fp", "m", ModelProtocols{Chat: Yes, Responses: Yes}, time.Unix(int64(iteration), 0))
-				store.MarkResponsesUnsupported("p", "m", time.Now())
+				store.MarkResponsesUnsupported("p", "m", "fp", time.Now())
 				store.Get("p", "m")
 				store.Snapshot()
 			}

@@ -245,7 +245,7 @@ func (p *Proxy) persistWireCaps() {
 // their request snapshot (RuntimeSnapshot.ParentOf, nil-safe) so a pre-reload
 // in-flight request records the verdict under ITS generation's parent instead
 // of re-reading reload-owned state here (single-snapshot red line).
-func (p *Proxy) noteWireResponsesMiss(parent, model string) {
+func (p *Proxy) noteWireResponsesMiss(parent, model, fingerprint string) {
 	if model != "" {
 		// Flip the MODEL-level verdict when the model has an entry — the 404
 		// proves this model can't do /responses regardless of what the
@@ -253,7 +253,7 @@ func (p *Proxy) noteWireResponsesMiss(parent, model string) {
 		// provider). Without a model entry the choice was provider-driven, so
 		// the provider-level verdict is the one to correct.
 		if _, ok := p.modelCaps.Get(parent, model); ok {
-			p.modelCaps.MarkResponsesUnsupported(parent, model, time.Now())
+			p.modelCaps.MarkResponsesUnsupported(parent, model, fingerprint, time.Now())
 			p.persistModelCaps()
 			return
 		}

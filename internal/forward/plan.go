@@ -75,7 +75,7 @@ func (p pipeline) targetExecutor(runtime targetexec.Runtime, cfg *Config, parent
 	return targetexec.Executor{
 		Client: p.clientFor(cfg, parentOf, provider),
 		State: targetexec.GateState{
-			Gate:       p.svc.NewHealthGate(parentOf),
+			Gate:       p.svc.NewHealthGate(cfg, parentOf),
 			Runtime:    runtime,
 			Scheduling: runtime.Scheduling,
 		},

@@ -53,3 +53,17 @@ func TestSessionTable_RefreshUpstream_Unknown(t *testing.T) {
 		t.Fatalf("unknown id created a session, Len = %d", tbl.Len())
 	}
 }
+
+// TestRouteSubPutAfterSessionRemoval: once the route session is gone (LRU
+// eviction or DELETE), a late initialize's put MUST report false — the app
+// layer relies on exactly this verdict to kill the stdio child it just
+// registered (an eviction fired earlier against a registry without the key,
+// so a lost-put child would otherwise never be killed).
+func TestRouteSubPutAfterSessionRemoval(t *testing.T) {
+	tbl := NewSessionTable(8, time.Hour)
+	id := tbl.Put("srv", "acct", "")
+	tbl.Delete(id)
+	if tbl.RouteSubPut(id, SubSession{Server: "srv", Initialized: true}) {
+		t.Fatal("RouteSubPut succeeded for a removed session — late stdio initialize would leak its child")
+	}
+}
