@@ -2,10 +2,13 @@ package accounts
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -462,7 +465,14 @@ func TestWithPoolLock_StaleSteal(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(lockPath, []byte("99999\n"), 0o600); err != nil {
+	// A definitely-dead holder PID: spawn our own test binary running no
+	// tests and wait for it to exit, so the recorded PID belongs to no
+	// process (a hard-coded PID would be machine-dependent).
+	deadHolder := exec.Command(os.Args[0], "-test.run", "^$")
+	if out, err := deadHolder.CombinedOutput(); err != nil {
+		t.Fatalf("spawn dead holder process: %v (%s)", err, out)
+	}
+	if err := os.WriteFile(lockPath, []byte(fmt.Sprintf("%d\n", deadHolder.Process.Pid)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// Age the lockfile past poolLockStaleAge (60s) so it looks stranded.
@@ -527,7 +537,7 @@ func TestWithPoolLock_FreshLockIsBusy(t *testing.T) {
 			default:
 			}
 			<-retryWaiter
-		}, 0)
+		}, 0, 0)
 	}()
 	select {
 	case <-waiterBlocked:
@@ -630,7 +640,7 @@ func TestWithLockHeartbeatKeepsAgedLockFromBeingStolen(t *testing.T) {
 			close(holderEntered)
 			<-releaseHolder
 			return nil
-		}, time.Sleep, 5*time.Millisecond)
+		}, time.Sleep, 5*time.Millisecond, 0)
 	}()
 	<-holderEntered
 
@@ -657,16 +667,27 @@ func TestWithLockHeartbeatKeepsAgedLockFromBeingStolen(t *testing.T) {
 
 	contenderEntered := make(chan struct{}, 1)
 	contenderDone := make(chan error, 1)
+	var contenderPolls atomic.Int32
 	go func() {
 		contenderDone <- store.withLock(name, func() error {
 			contenderEntered <- struct{}{}
 			return nil
-		}, time.Sleep, 5*time.Millisecond)
+		}, func(time.Duration) { contenderPolls.Add(1) }, 0, 0)
 	}()
+	// Deterministic non-steal proof: each wait-seam call means the contender
+	// completed another full stat+staleness check WITHOUT stealing — after a
+	// handful of checks the verdict is settled, no wall-clock window needed.
+	pollDeadline := time.Now().Add(2 * time.Second)
+	for contenderPolls.Load() < 5 && time.Now().Before(pollDeadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if got := contenderPolls.Load(); got < 5 {
+		t.Fatalf("contender only performed %d lock checks, want ≥5", got)
+	}
 	select {
 	case <-contenderEntered:
 		t.Fatal("contender stole the lock while its holder was alive")
-	case <-time.After(100 * time.Millisecond):
+	default:
 	}
 
 	once.Do(func() { close(releaseHolder) })
@@ -682,5 +703,77 @@ func TestWithLockHeartbeatKeepsAgedLockFromBeingStolen(t *testing.T) {
 	}
 	if err := <-contenderDone; err != nil {
 		t.Fatalf("contender withLock: %v", err)
+	}
+}
+
+// TestLockHolderAlive: the PID probe's four verdicts — a live PID (this very
+// process) reads alive; unreadable, empty, and garbage lockfiles read
+// not-proven-alive (the caller then falls back to the mtime-only staleness
+// verdict for legacy files).
+func TestLockHolderAlive(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "pool.lock")
+
+	if err := os.WriteFile(p, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !lockHolderAlive(p) {
+		t.Fatal("own live PID reported dead — the probe would steal live locks")
+	}
+
+	for name, content := range map[string]string{
+		"empty":   "",
+		"garbage": "not-a-pid\n",
+		"zero":    "0\n",
+	} {
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if lockHolderAlive(p) {
+			t.Errorf("%s lockfile reported alive — unparseable content must fall back to the mtime verdict", name)
+		}
+	}
+
+	if lockHolderAlive(filepath.Join(dir, "missing.lock")) {
+		t.Fatal("missing lockfile reported alive")
+	}
+}
+
+// TestWithPoolLock_StaleButAliveHolderIsNotStolen: the regression this lock
+// just closed — a holder whose lockfile LOOKS stale (mtime aged past
+// poolLockStaleAge) but whose PID is alive (SIGSTOP / wall-clock jump while
+// the process is healthy) must NOT have its lock stolen. The waiter must run
+// out of its (test-shortened) deadline and leave the lockfile in place.
+func TestWithPoolLock_StaleButAliveHolderIsNotStolen(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestStore(t, dir)
+	const name = "zhipu"
+	lockPath := store.PoolPath(name) + ".lock"
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The "holder" is this test process: alive despite the aged mtime.
+	if err := os.WriteFile(lockPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-2 * poolLockStaleAge)
+	if err := os.Chtimes(lockPath, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	ran := false
+	err := store.withLock(name, func() error { ran = true; return nil },
+		time.Sleep, time.Millisecond, 150*time.Millisecond)
+	if err == nil {
+		t.Fatal("stale-looking but alive holder's lock was stolen")
+	}
+	if ran {
+		t.Fatal("fn ran under a stolen lock")
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Fatalf("live holder's lockfile was removed: %v", statErr)
+	}
+	if !strings.Contains(err.Error(), "locked by another process") {
+		t.Fatalf("waiter error = %v, want the deadline message", err)
 	}
 }

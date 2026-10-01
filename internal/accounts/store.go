@@ -5,12 +5,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"model-proxy/internal/credstore"
@@ -359,15 +362,15 @@ const (
 )
 
 func (s Store) WithLock(name string, fn func() error) error {
-	return s.withLock(name, fn, time.Sleep, poolLockBeatEvery)
+	return s.withLock(name, fn, time.Sleep, poolLockBeatEvery, poolLockMaxWait)
 }
 
 // withLock is the lock acquisition core. wait is supplied by the production
 // wrapper as time.Sleep; accepting it here lets concurrency tests observe a
 // real contention point and release the holder without timing assumptions.
-// beat is the heartbeat interval (non-positive → poolLockBeatEvery), also
-// relaxed by tests.
-func (s Store) withLock(name string, fn func() error, wait func(time.Duration), beat time.Duration) error {
+// beat is the heartbeat interval and maxWait the acquisition deadline
+// (non-positive → production defaults), both relaxed by tests.
+func (s Store) withLock(name string, fn func() error, wait func(time.Duration), beat, maxWait time.Duration) error {
 	lockPath := s.PoolPath(name) + ".lock"
 	// Ensure the parent (~/.model-proxy) exists before the O_CREATE below —
 	// O_CREATE does not create parent dirs, and on a first-ever login savePool
@@ -375,7 +378,10 @@ func (s Store) withLock(name string, fn func() error, wait func(time.Duration), 
 	if err := s.ensureDirectory(); err != nil {
 		return fmt.Errorf("pool %s lock dir: %w", name, err)
 	}
-	deadline := time.Now().Add(poolLockMaxWait)
+	if maxWait <= 0 {
+		maxWait = poolLockMaxWait
+	}
+	deadline := time.Now().Add(maxWait)
 	for {
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
@@ -400,8 +406,20 @@ func (s Store) withLock(name string, fn func() error, wait func(time.Duration), 
 		info, statErr := os.Stat(lockPath)
 		if statErr == nil {
 			if time.Since(info.ModTime()) > poolLockStaleAge {
-				_ = os.Remove(lockPath)
-				continue
+				// A stale mtime alone cannot break the mutex: a LIVE holder
+				// looks exactly this stale when the whole process was
+				// SIGSTOPped or the wall clock jumped backward past
+				// poolLockStaleAge (time.Since is wall-clock math). Stealing
+				// the lockfile then admits two writers into load→modify→save
+				// and the pool file loses accounts. Require the recorded PID
+				// to be gone as well; while it exists, keep waiting — the
+				// deadline bounds it. No parseable PID (legacy/empty file, or
+				// platforms without a signal-0 probe) falls back to the
+				// historical mtime-only verdict.
+				if !lockHolderAlive(lockPath) {
+					_ = os.Remove(lockPath)
+					continue
+				}
 			}
 		} else if os.IsNotExist(statErr) {
 			continue
@@ -441,6 +459,32 @@ func (s Store) withLock(name string, fn func() error, wait func(time.Duration), 
 		_ = os.Remove(lockPath)
 	}()
 	return fn()
+}
+
+// lockHolderAlive reports whether the PID recorded in the pool lockfile
+// still exists. Signal 0 is the existence probe: nil or EPERM means the
+// process is there (possibly another user's); ESRCH means it is gone. Any
+// unreadable or unparseable content means "not proven alive", so the caller
+// keeps its historical mtime-only staleness verdict for legacy lockfiles.
+func lockHolderAlive(lockPath string) bool {
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	switch err := proc.Signal(syscall.Signal(0)); {
+	case err == nil, errors.Is(err, syscall.EPERM), errors.Is(err, os.ErrPermission):
+		return true
+	default:
+		return false
+	}
 }
 
 // tryPoolLock attempts a NON-BLOCKING grab of the pool's cross-process lock,
