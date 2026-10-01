@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTestOpenCodeGo builds an OpenCodeGoProvider with a temp auth file so
@@ -298,68 +299,334 @@ func TestOpenCodeGoExtraHeaders_PassedSessionIDWins(t *testing.T) {
 	}
 }
 
-// Quota is unmeasured by design: Go's usage windows are console-only (docs:
-// "You can track your current usage in the console"). The snapshot must be
-// BillingUnknown carrying the console URL, and must NEVER claim a measured
-// (or zero) balance.
-func TestOpenCodeGoQuota_ConsoleOnlyUnknown(t *testing.T) {
+// usageURL derives the quota endpoint from openai_base_url + "/usage" (the
+// verified Go usage endpoint). UsageURL overrides the derived URL; a trailing
+// slash on the base must not double up.
+func TestOpenCodeGoUsageURL(t *testing.T) {
 	p := newTestOpenCodeGo(t, &Config{OpenAIBaseURL: "https://opencode.ai/zen/go/v1"})
-	s, err := p.Quota()
-	if err != nil {
-		t.Fatalf("Quota error: %v", err)
+	if got, want := p.usageURL(), "https://opencode.ai/zen/go/v1/usage"; got != want {
+		t.Errorf("usageURL: got %q, want %q", got, want)
 	}
-	if s.Billing != BillingUnknown {
-		t.Errorf("Billing = %v, want BillingUnknown (console-only)", s.Billing)
+	p.cfg.OpenAIBaseURL = "https://opencode.ai/zen/go/v1/"
+	if got, want := p.usageURL(), "https://opencode.ai/zen/go/v1/usage"; got != want {
+		t.Errorf("usageURL trailing slash: got %q, want %q", got, want)
 	}
-	if s.RemainingPct != -1 {
-		t.Errorf("RemainingPct = %v, want -1 (unmeasured)", s.RemainingPct)
+	p.cfg.UsageURL = "https://example.test/custom-usage"
+	if got, want := p.usageURL(), "https://example.test/custom-usage"; got != want {
+		t.Errorf("usageURL override: got %q, want %q", got, want)
 	}
-	if len(s.Windows) != 0 {
-		t.Errorf("windows = %+v, want none (no API-key usage endpoint)", s.Windows)
-	}
-	joined := strings.Join(s.Notes, "\n")
-	if !strings.Contains(joined, opencodeGoConsoleURL) {
-		t.Errorf("Notes %q missing console URL %s", joined, opencodeGoConsoleURL)
+	p.cfg.UsageURL = ""
+	p.cfg.OpenAIBaseURL = ""
+	if got := p.usageURL(); got != "" {
+		t.Errorf("usageURL unset: got %q, want empty (Quota treats as unmeasured)", got)
 	}
 }
 
-// Quota must not perform any HTTP call: a console-only provider that dialed
-// out would only fetch the marketing SPA. Pinning the no-network contract.
-func TestOpenCodeGoQuota_NoHTTPCall(t *testing.T) {
+// openCodeGoLiveUsageJSON is the live-observed /usage envelope (2026-10-01):
+// percent is the USED percent; resetsAt is RFC3339Nano.
+const openCodeGoLiveUsageJSON = `{"usage":{
+	"rolling":{"status":"ok","percent":1,"resetsAt":"2026-10-01T10:10:01.964Z"},
+	"weekly":{"status":"ok","percent":2,"resetsAt":"2026-10-05T00:00:00.000Z"},
+	"monthly":{"status":"ok","percent":1,"resetsAt":"2026-10-27T17:35:19.000Z"}}}`
+
+// ParseOpenCodeGoUsage projects the live shape with exact window markers:
+// rolling/weekly are Short rate-caps, monthly is the Ultimate scheduling base;
+// RemainingPct = (100 − used percent)/100 on the abstract 0-100 scale.
+func TestParseOpenCodeGoUsage_Windows(t *testing.T) {
+	s, err := ParseOpenCodeGoUsage([]byte(openCodeGoLiveUsageJSON), "acct-1")
+	if err != nil || s == nil {
+		t.Fatalf("ParseOpenCodeGoUsage: err=%v s=%v", err, s)
+	}
+	if s.Billing != BillingPlan {
+		t.Errorf("Billing: got %v, want BillingPlan", s.Billing)
+	}
+	if s.Plan != "OpenCode Go" || s.Account != "acct-1" {
+		t.Errorf("Plan/Account: got %q/%q, want OpenCode Go/acct-1", s.Plan, s.Account)
+	}
+	// Ultimate = monthly: (100-1)/100.
+	if got, want := s.RemainingPct, 0.99; got != want {
+		t.Errorf("RemainingPct: got %v, want %v", got, want)
+	}
+	if len(s.Windows) != 3 {
+		t.Fatalf("windows: got %d, want 3", len(s.Windows))
+	}
+	// Order: Short first (5h, weekly), Ultimate last (monthly).
+	rolling, weekly, monthly := s.Windows[0], s.Windows[1], s.Windows[2]
+	if rolling.Label != "5h limit" || !rolling.Short || rolling.Ultimate {
+		t.Errorf("rolling window: got %+v, want Short 5h limit", rolling)
+	}
+	if rolling.Duration != 5*time.Hour {
+		t.Errorf("rolling Duration: got %v, want 5h", rolling.Duration)
+	}
+	if rolling.Total != 100 || rolling.Used != 1 || rolling.RemainingPct != 0.99 {
+		t.Errorf("rolling scale: got total=%v used=%v remaining=%v, want 100/1/0.99",
+			rolling.Total, rolling.Used, rolling.RemainingPct)
+	}
+	if want := time.Date(2026, 10, 1, 10, 10, 1, 964000000, time.UTC); !rolling.ResetsAt.Equal(want) {
+		t.Errorf("rolling ResetsAt: got %v, want %v", rolling.ResetsAt, want)
+	}
+	if weekly.Label != "Weekly limit" || !weekly.Short || weekly.Ultimate {
+		t.Errorf("weekly window: got %+v, want Short Weekly limit", weekly)
+	}
+	if weekly.Duration != 7*24*time.Hour {
+		t.Errorf("weekly Duration: got %v, want 7d", weekly.Duration)
+	}
+	if weekly.Used != 2 || weekly.RemainingPct != 0.98 {
+		t.Errorf("weekly scale: got used=%v remaining=%v, want 2/0.98", weekly.Used, weekly.RemainingPct)
+	}
+	if want := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC); !weekly.ResetsAt.Equal(want) {
+		t.Errorf("weekly ResetsAt: got %v, want %v", weekly.ResetsAt, want)
+	}
+	if monthly.Label != "Monthly limit" || !monthly.Ultimate || monthly.Short {
+		t.Errorf("monthly window: got %+v, want Ultimate Monthly limit", monthly)
+	}
+	// Duration = resetsAt − 1 month (2026-09-27 → 2026-10-27 = 30d).
+	if monthly.Duration != 30*24*time.Hour {
+		t.Errorf("monthly Duration: got %v, want 30d (resetsAt − 1 month)", monthly.Duration)
+	}
+	if monthly.Used != 1 || monthly.RemainingPct != 0.99 {
+		t.Errorf("monthly scale: got used=%v remaining=%v, want 1/0.99", monthly.Used, monthly.RemainingPct)
+	}
+	if want := time.Date(2026, 10, 27, 17, 35, 19, 0, time.UTC); !monthly.ResetsAt.Equal(want) {
+		t.Errorf("monthly ResetsAt: got %v, want %v", monthly.ResetsAt, want)
+	}
+	if len(s.Notes) != 0 {
+		t.Errorf("Notes: got %v, want none (all windows ok)", s.Notes)
+	}
+}
+
+// ParseOpenCodeGoUsage accepts percent as a quoted string (the endpoint's
+// numeric fields may arrive in either shape; UseNumber handles both).
+func TestParseOpenCodeGoUsage_QuotedPercent(t *testing.T) {
+	s, err := ParseOpenCodeGoUsage(
+		[]byte(`{"usage":{"monthly":{"status":"ok","percent":"4","resetsAt":"2026-10-27T17:35:19.000Z"}}}`), "")
+	if err != nil || s == nil {
+		t.Fatalf("ParseOpenCodeGoUsage: err=%v s=%v (quoted percent must parse)", err, s)
+	}
+	if s.Billing != BillingPlan || len(s.Windows) != 1 {
+		t.Fatalf("got %+v, want a single-window BillingPlan snapshot", s)
+	}
+	if s.Windows[0].Used != 4 || s.Windows[0].RemainingPct != 0.96 {
+		t.Errorf("monthly scale: got used=%v remaining=%v, want 4/0.96",
+			s.Windows[0].Used, s.Windows[0].RemainingPct)
+	}
+}
+
+// A window whose status isn't "ok" contributes a Note (label + status) while
+// its percent is still projected.
+func TestParseOpenCodeGoUsage_NonOKStatusNote(t *testing.T) {
+	body := `{"usage":{
+		"rolling":{"status":"ok","percent":0,"resetsAt":"2026-10-01T10:10:01.964Z"},
+		"weekly":{"status":"rate_limited","percent":50,"resetsAt":"2026-10-05T00:00:00.000Z"},
+		"monthly":{"status":"ok","percent":10,"resetsAt":"2026-10-27T17:35:19.000Z"}}}`
+	s, err := ParseOpenCodeGoUsage([]byte(body), "")
+	if err != nil || s == nil {
+		t.Fatalf("ParseOpenCodeGoUsage: err=%v s=%v", err, s)
+	}
+	if len(s.Notes) != 1 || s.Notes[0] != "Weekly limit: status rate_limited" {
+		t.Errorf("Notes: got %v, want exactly [Weekly limit: status rate_limited]", s.Notes)
+	}
+	weekly := s.Windows[1]
+	if weekly.Used != 50 || weekly.RemainingPct != 0.5 {
+		t.Errorf("weekly despite non-ok status: got used=%v remaining=%v, want 50/0.5",
+			weekly.Used, weekly.RemainingPct)
+	}
+}
+
+// Missing monthly (no Ultimate) → BillingUnknown / RemainingPct -1, console
+// URL kept in Notes so `usage` stays actionable.
+func TestParseOpenCodeGoUsage_MissingMonthlyDegrades(t *testing.T) {
+	body := `{"usage":{
+		"rolling":{"status":"ok","percent":1,"resetsAt":"2026-10-01T10:10:01.964Z"},
+		"weekly":{"status":"ok","percent":2,"resetsAt":"2026-10-05T00:00:00.000Z"}}}`
+	s, err := ParseOpenCodeGoUsage([]byte(body), "")
+	if err != nil || s == nil {
+		t.Fatalf("ParseOpenCodeGoUsage: err=%v s=%v", err, s)
+	}
+	if s.Billing != BillingUnknown {
+		t.Errorf("Billing: got %v, want BillingUnknown (no Ultimate window)", s.Billing)
+	}
+	if s.RemainingPct != -1 {
+		t.Errorf("RemainingPct: got %v, want -1 (the unknown sentinel)", s.RemainingPct)
+	}
+	if len(s.Windows) != 2 {
+		t.Errorf("windows: got %d, want the 2 present windows", len(s.Windows))
+	}
+	if !strings.Contains(strings.Join(s.Notes, "\n"), opencodeGoConsoleURL) {
+		t.Errorf("Notes %v missing the console URL %s", s.Notes, opencodeGoConsoleURL)
+	}
+}
+
+// Foreign bodies return (nil, nil) so Quota reports "not opencode-go usage
+// format" instead of a bogus empty plan.
+func TestParseOpenCodeGoUsage_ForeignBody(t *testing.T) {
+	for _, body := range []string{`not-json`, `{"unrelated":true}`, `{"usage":{}}`, ``} {
+		s, err := ParseOpenCodeGoUsage([]byte(body), "")
+		if s != nil || err != nil {
+			t.Errorf("body %q: got (s=%+v, err=%v), want (nil, nil)", body, s, err)
+		}
+	}
+}
+
+// Quota fetches <openai_base_url>/usage with the chat key and parses the live
+// envelope (Bearer auth, JSON Accept, exact window fields).
+func TestOpenCodeGoQuota_FetchAndParse(t *testing.T) {
+	var gotPath, gotAuth, gotAccept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotAccept = r.Header.Get("Accept")
+		w.Write([]byte(openCodeGoLiveUsageJSON))
+	}))
+	defer srv.Close()
+	p := newTestOpenCodeGo(t, &Config{OpenAIBaseURL: srv.URL})
+	if err := p.SaveKey("sk-opencode-go-usage"); err != nil {
+		t.Fatalf("SaveKey: %v", err)
+	}
+	s, err := p.Quota()
+	if err != nil {
+		t.Fatalf("Quota: want nil error, got %v", err)
+	}
+	if gotPath != "/usage" {
+		t.Errorf("request path: got %q, want /usage", gotPath)
+	}
+	if gotAuth != "Bearer sk-opencode-go-usage" {
+		t.Errorf("request Authorization: got %q, want Bearer sk-opencode-go-usage", gotAuth)
+	}
+	if gotAccept != "application/json" {
+		t.Errorf("request Accept: got %q, want application/json", gotAccept)
+	}
+	if s.Billing != BillingPlan || s.Plan != "OpenCode Go" || s.RemainingPct != 0.99 {
+		t.Errorf("snapshot: got %+v, want Plan/0.99", s)
+	}
+	if s.Err != "" || !hasUltimate(s.Windows) || len(s.Windows) != 3 {
+		t.Errorf("snapshot windows/err: got %+v", s)
+	}
+}
+
+// Quota never returns a non-nil error: non-200s are BillingUnknown snapshots
+// with the exact status hints (401/403 auth, 404 unavailable, else bare).
+func TestOpenCodeGoQuota_HTTPErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		code    int
+		wantErr string
+	}{
+		{"401", 401, "HTTP 401 — check API key"},
+		{"403", 403, "HTTP 403 — check API key"},
+		{"404", 404, "HTTP 404 — usage endpoint unavailable"},
+		{"500", 500, "HTTP 500"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.code)
+			}))
+			defer srv.Close()
+			p := newTestOpenCodeGo(t, &Config{OpenAIBaseURL: srv.URL})
+			if err := p.SaveKey("sk-opencode-go-bad"); err != nil {
+				t.Fatalf("SaveKey: %v", err)
+			}
+			s, err := p.Quota()
+			if err != nil {
+				t.Fatalf("Quota: want nil error (contract), got %v", err)
+			}
+			if s.Billing != BillingUnknown || s.Err != tc.wantErr {
+				t.Errorf("got %+v, want BillingUnknown with Err %q", s, tc.wantErr)
+			}
+		})
+	}
+}
+
+// No key → the auth error rides as a BillingUnknown snapshot and no request
+// leaves the process.
+func TestOpenCodeGoQuota_NoKey(t *testing.T) {
 	dialed := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		dialed = true
-		w.Write([]byte(`{"usage":999}`))
 	}))
 	defer srv.Close()
-	// Any URL the provider might be tempted to poll points at the tripwire.
-	p := newTestOpenCodeGo(t, &Config{
-		OpenAIBaseURL: srv.URL,
-		UsageURL:      srv.URL + "/zen/go/v1/usage",
-	})
-	if err := p.SaveKey("sk-opencode-go-net"); err != nil {
-		t.Fatalf("SaveKey: %v", err)
+	p := newTestOpenCodeGo(t, &Config{OpenAIBaseURL: srv.URL})
+	s, err := p.Quota()
+	if err != nil {
+		t.Fatalf("Quota: want nil error, got %v", err)
 	}
-	if _, err := p.Quota(); err != nil {
-		t.Fatalf("Quota: %v", err)
+	const wantErr = "not logged in; run `model-proxy login` for this provider"
+	if s.Billing != BillingUnknown || s.Err != wantErr {
+		t.Errorf("got %+v, want BillingUnknown with Err %q", s, wantErr)
 	}
 	if dialed {
-		t.Error("Quota performed an HTTP call — console-only providers must not poll")
+		t.Error("Quota dialed out without a key")
 	}
 }
 
-// Usage() must print the "Provider: <name>" first line (the usage-display
-// contract), the console pointer + limit structure, and the config models.
-func TestOpenCodeGoUsage_PrintsProviderLine(t *testing.T) {
-	p := newTestOpenCodeGo(t, &Config{Models: []string{"kimi-k3"}})
+// No base URL and no override → unmeasured with the explicit reason (no
+// network call).
+func TestOpenCodeGoQuota_NoBaseURL(t *testing.T) {
+	p := newTestOpenCodeGo(t, &Config{})
+	s, err := p.Quota()
+	if err != nil {
+		t.Fatalf("Quota: want nil error, got %v", err)
+	}
+	if s.Billing != BillingUnknown || s.Err != "openai_base_url not set" {
+		t.Errorf("got %+v, want BillingUnknown/openai_base_url not set", s)
+	}
+	if len(s.Windows) != 0 {
+		t.Errorf("windows: got %+v, want none", s.Windows)
+	}
+}
+
+// A 200 body that isn't the Go usage shape → the format error (never a
+// non-nil error).
+func TestOpenCodeGoQuota_NotUsageFormat(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"unrelated":true}`))
+	}))
+	defer srv.Close()
+	p := newTestOpenCodeGo(t, &Config{OpenAIBaseURL: srv.URL})
+	if err := p.SaveKey("sk-opencode-go-other"); err != nil {
+		t.Fatalf("SaveKey: %v", err)
+	}
+	s, err := p.Quota()
+	if err != nil {
+		t.Fatalf("Quota: want nil error, got %v", err)
+	}
+	if s.Billing != BillingUnknown || s.Err != "not opencode-go usage format" {
+		t.Errorf("got %+v, want BillingUnknown/not opencode-go usage format", s)
+	}
+}
+
+// Usage prints the provider line + parsed windows on success, and falls back
+// to the console pointer + config models on fetch failure (never mute).
+func TestOpenCodeGoUsage_SuccessAndFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(openCodeGoLiveUsageJSON))
+	}))
+	defer srv.Close()
+	p := newTestOpenCodeGo(t, &Config{OpenAIBaseURL: srv.URL, Models: []string{"kimi-k3"}})
+	if err := p.SaveKey("sk-opencode-go-usage"); err != nil {
+		t.Fatalf("SaveKey: %v", err)
+	}
 	out := captureStdoutProvider(func() {
 		if err := p.Usage(); err != nil {
 			t.Fatalf("Usage: %v", err)
 		}
 	})
-	for _, want := range []string{"Provider:  ", "opencode-go", opencodeGoConsoleURL, "kimi-k3", "5h=20%"} {
+	for _, want := range []string{"Provider:  ", "opencode-go", "Plan:", "OpenCode Go", "5h limit", "Weekly limit", "Monthly limit"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("usage output missing %q:\n%s", want, out)
+		}
+	}
+
+	// Fallback: no cred file → Quota auth failure → console link + models.
+	p2 := newTestOpenCodeGo(t, &Config{OpenAIBaseURL: srv.URL, Models: []string{"kimi-k3"}})
+	out2 := captureStdoutProvider(func() {
+		if err := p2.Usage(); err != nil {
+			t.Fatalf("Usage fallback: %v", err)
+		}
+	})
+	for _, want := range []string{"not logged in", opencodeGoConsoleURL, "1 models", "kimi-k3"} {
+		if !strings.Contains(out2, want) {
+			t.Errorf("fallback output missing %q:\n%s", want, out2)
 		}
 	}
 }

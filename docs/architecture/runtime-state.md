@@ -18,7 +18,7 @@
 | deepseek | `/user/balance` | pay-as-you-go |
 | mimo | 无（控制台 cookie 鉴权，非 API key） | pay-as-you-go（BillingUnknown）|
 | openrouter | `api/v1/key`（花费窗口 + 可选 per-key cap） | pay-as-you-go |
-| opencode-go | 无（订阅限额仅控制台，无公开用量 API） | plan（BillingUnknown）|
+| opencode-go | `GET <openai_base_url>/usage`（rolling/weekly/monthly，percent=已用，端点未公开） | plan |
 
 最长周期窗口标记为 `Ultimate`，作为调度总预算和节奏基准；更短窗口标记为 `Short`，表示短期 rate-cap。短窗口不直接参与最终 `RemainingPct` 的 min。
 

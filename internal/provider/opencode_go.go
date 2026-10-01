@@ -1,8 +1,11 @@
 package provider
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"model-proxy/internal/display"
@@ -30,15 +33,18 @@ import (
 //
 // Billing (docs "Usage limits"): each model carries a monthly dollar limit
 // ($15/$30/$60 tiers) split into windows — 5h = 20%, weekly = 50%, monthly =
-// 100% of it. There is NO public usage API ("You can track your current usage
-// in the console"), so Quota() returns a BillingUnknown snapshot carrying the
-// console URL + the window structure (the qwen-plan pattern); window
-// exhaustion surfaces reactively as upstream 402/429 → cooldown + failover.
-// /models is PUBLIC and auth-ignoring (200 with an invalid Bearer) and there is
-// no usage_url, so login key validation cannot use it: login sends one minimal
-// real request instead (this provider's ProbeRequest = POST chat/completions,
-// first config model — see internal/login validateKeyByRealProbe), rejecting on
-// 401/403 / envelope auth failure / network error.
+// 100% of it. Quota is polled via GET <openai_base_url>/usage — an
+// undocumented endpoint (discovered via farion1231/cc-switch#6433) returning
+// the used percent + reset time per window; see Quota / ParseOpenCodeGoUsage.
+// Window exhaustion ALSO surfaces reactively as upstream 402/429 → cooldown +
+// failover. /models is PUBLIC and auth-ignoring (200 with an invalid Bearer)
+// and usage_url is deliberately left unconfigured, so login key validation
+// cannot use either endpoint: login sends one minimal real request instead
+// (this provider's ProbeRequest = POST chat/completions, first config model —
+// see internal/login validateKeyByRealProbe), rejecting on 401/403 / envelope
+// auth failure / network error. (Setting usage_url would flip login onto the
+// Bearer-GET path; the undocumented /usage endpoint is a quota poller, not a
+// verified key-validation signal.)
 type OpenCodeGoProvider struct {
 	*ApiKeyBase
 	baseProbe
@@ -164,36 +170,196 @@ func (p *OpenCodeGoProvider) ExtraHeaders(req *http.Request, body []byte, sessio
 	}
 }
 
-// Quota returns an unmeasured snapshot: Go's usage windows (per-model monthly
-// dollar limit split 5h/weekly/monthly) are console-only — there is no
-// API-key billing endpoint. The console URL rides in Notes so both the CLI
-// `usage` command and the Web UI (app.js renders snap.Notes) can link to the
-// real numbers (qwen-plan pattern). BillingUnknown → the surplus scheduler
-// ranks opencode-go by priority (neutral); window exhaustion is handled
-// reactively: the upstream blocks with 402/429, which targetexec already
-// classifies (quota-denied marker table / rate-limit parsing) → cooldown +
-// failover, no opencode-go-specific code. When the console's "Use balance"
-// option is on, over-limit traffic falls back to the separate Zen prepaid
-// balance instead of blocking.
-func (p *OpenCodeGoProvider) Quota() (*QuotaSnapshot, error) {
-	return &QuotaSnapshot{
-		Billing:      BillingUnknown,
-		RemainingPct: -1, // the documented "unknown" sentinel — 0 would read as "exhausted"
-		Notes: []string{
-			"OpenCode Go usage is viewable only in the console (no API-key usage endpoint)",
-			"Console & usage: " + opencodeGoConsoleURL,
-		},
-		AsOf: time.Now(),
-	}, nil
+// usageURL derives the quota endpoint from openai_base_url + "/usage" (the
+// endpoint verified live 2026-10; it is undocumented publicly — discovered
+// via farion1231/cc-switch#6433). cfg.UsageURL overrides it (test/mirror
+// seam). Returns "" when neither is set (not configured → Quota treats it as
+// unmeasured). Deliberately NOT wired into the config templates: login's
+// key-validation branch keys on ModelsAuthless && no usage_url (see the type
+// doc).
+func (p *OpenCodeGoProvider) usageURL() string {
+	if p.cfg.UsageURL != "" {
+		return p.cfg.UsageURL
+	}
+	if p.cfg.OpenAIBaseURL == "" {
+		return ""
+	}
+	return strings.TrimRight(p.cfg.OpenAIBaseURL, "/") + "/usage"
 }
 
-// Usage prints the console pointer, the documented limit structure, and the
-// config model list (qwen-plan pattern) so `usage opencode-go` is never mute.
+// Quota GETs /usage and parses the subscription quota envelope. On any failure
+// (auth, HTTP, non-usage body) returns a BillingUnknown snapshot carrying the
+// error (never a non-nil error) so the scheduler treats opencode-go as
+// unmeasured rather than crashing the poll. 401/403 → check-API-key hint;
+// 404 → usage endpoint unavailable (no Go subscription, or the endpoint
+// moved). Window exhaustion still surfaces reactively as upstream 402/429 →
+// targetexec's existing classification → cooldown + failover; when the
+// console's "Use balance" option is on, over-limit traffic falls back to the
+// separate Zen prepaid balance instead of blocking.
+func (p *OpenCodeGoProvider) Quota() (*QuotaSnapshot, error) {
+	url := p.usageURL()
+	if url == "" {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: "openai_base_url not set"}, nil
+	}
+	headers := map[string]string{"Accept": "application/json"}
+	for k, v := range p.cfg.Headers {
+		headers[k] = v
+	}
+	body, fail, ok := usageGet(url, p.AuthHeaders, headers, func(code int) string {
+		switch code {
+		case 404:
+			return "HTTP 404 — usage endpoint unavailable"
+		case 401, 403:
+			return fmt.Sprintf("HTTP %d — check API key", code)
+		}
+		return fmt.Sprintf("HTTP %d", code)
+	})
+	if !ok {
+		return fail, nil
+	}
+	s, _ := ParseOpenCodeGoUsage(body, "")
+	if s == nil {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: "not opencode-go usage format"}, nil
+	}
+	return s, nil
+}
+
+// Usage prints the parsed Go subscription windows (5h / weekly / monthly used
+// percent, the monthly Ultimate carrying the exhaustion ETA); on fetch/parse
+// failure it falls back to the console pointer + config model list (qwen-plan
+// pattern) so `usage opencode-go` is never mute.
 func (p *OpenCodeGoProvider) Usage() error {
 	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(p.providerName)))
-	fmt.Printf("%s $10/month subscription (per-model monthly dollar limit; 5h=20%% weekly=50%% monthly=100%%)\n", display.Dim("Billing:    "))
-	fmt.Printf("%s %s\n", display.Dim("Usage:      "), display.Gray("(console-only; no public usage API)"))
-	fmt.Printf("%s %s\n", display.Dim("Details:    "), display.Cyan(opencodeGoConsoleURL))
-	listConfigModels(p.cfg.Models)
+	s, err := p.Quota()
+	if err != nil || s == nil || s.Billing != BillingPlan {
+		why := "unavailable"
+		if s != nil && s.Err != "" {
+			why = s.Err
+		}
+		fmt.Printf("%s %s\n", display.Dim("Usage:      "), display.Red("("+why+")"))
+		fmt.Printf("%s check usage at %s\n", display.Dim("            "), display.Cyan(opencodeGoConsoleURL))
+		listConfigModels(p.cfg.Models)
+		return nil
+	}
+	fmt.Printf("%s %s\n", display.Dim("Plan:       "), display.Magenta(display.Or(s.Plan, "OpenCode Go subscription")))
+	DecorateExhaustionEta(p.providerName, s)
+	for _, w := range s.Windows {
+		line := formatQuotaWindowLine(w)
+		if w.Ultimate {
+			line += exhaustionHint(s.ExhaustionEta, time.Now())
+		}
+		fmt.Println(line)
+	}
 	return nil
+}
+
+// openCodeGoUsageWindow is one window object of the /usage envelope.
+type openCodeGoUsageWindow struct {
+	Status   string      `json:"status"`
+	Percent  json.Number `json:"percent"`
+	ResetsAt string      `json:"resetsAt"`
+}
+
+// ParseOpenCodeGoUsage parses the OpenCode Go /usage body into a
+// QuotaSnapshot. Returns (nil, nil) if the body isn't the Go usage format
+// (caller falls back to BillingUnknown). The response shape (undocumented
+// endpoint, discovered via farion1231/cc-switch#6433; verified live 2026-10):
+//
+//	{"usage":{
+//	  "rolling":{"status":"ok","percent":1,"resetsAt":"2026-10-01T10:10:01.964Z"},
+//	  "weekly": {"status":"ok","percent":2,"resetsAt":"2026-10-05T00:00:00.000Z"},
+//	  "monthly":{"status":"ok","percent":1,"resetsAt":"2026-10-27T17:35:19.000Z"}}}
+//
+// `percent` is the USED percent (observed 0 → nonzero after a request), so
+// RemainingPct = (100 − percent)/100. Windows: rolling = 5h rate-cap → Short;
+// weekly = week (UTC Monday 00:00 reset) → Short; monthly = subscription
+// cycle (Duration = resetsAt − 1 month) → Ultimate (scheduling base). Every
+// window rides an abstract 0-100 scale (Total 100, Used percent) so
+// EstimateExhaustionEta's Δused/Δt works without the per-model dollar
+// amounts. A window whose `status` isn't "ok" contributes a Note (label +
+// status) instead of being silently trusted; a missing monthly window (no
+// Ultimate) degrades the snapshot to BillingUnknown with the console link
+// kept in Notes.
+func ParseOpenCodeGoUsage(body []byte, account string) (*QuotaSnapshot, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber() // percent arrives as a number or a quoted string
+	var u struct {
+		Usage struct {
+			Rolling *openCodeGoUsageWindow `json:"rolling"`
+			Weekly  *openCodeGoUsageWindow `json:"weekly"`
+			Monthly *openCodeGoUsageWindow `json:"monthly"`
+		} `json:"usage"`
+	}
+	if err := dec.Decode(&u); err != nil {
+		return nil, nil
+	}
+	// All three windows absent → this isn't a Go usage payload (nil lets the
+	// caller fall back instead of reporting a bogus empty plan).
+	if u.Usage.Rolling == nil && u.Usage.Weekly == nil && u.Usage.Monthly == nil {
+		return nil, nil
+	}
+	s := &QuotaSnapshot{
+		Billing: BillingPlan,
+		Account: account,
+		Plan:    "OpenCode Go",
+		AsOf:    time.Now(),
+	}
+	window := func(w *openCodeGoUsageWindow, label string, duration time.Duration) QuotaWindow {
+		percent := numToFloat(w.Percent)
+		qw := QuotaWindow{
+			Label:        label,
+			Total:        100,
+			Used:         percent,
+			RemainingPct: (100 - percent) / 100,
+			Duration:     duration,
+		}
+		if t, err := time.Parse(time.RFC3339Nano, w.ResetsAt); err == nil {
+			qw.ResetsAt = t
+		}
+		return qw
+	}
+	// statusNote records a non-ok window status for display instead of
+	// silently trusting its percent.
+	statusNote := func(label string, w *openCodeGoUsageWindow) {
+		if w.Status != "" && w.Status != "ok" {
+			s.Notes = append(s.Notes, label+": status "+w.Status)
+		}
+	}
+
+	// Display order: Short rate-caps first (5h, weekly), Ultimate last
+	// (monthly) — the kimi-code layout.
+	if w := u.Usage.Rolling; w != nil {
+		qw := window(w, "5h limit", 5*time.Hour)
+		qw.Short = true
+		s.Windows = append(s.Windows, qw)
+		statusNote("5h limit", w)
+	}
+	if w := u.Usage.Weekly; w != nil {
+		qw := window(w, "Weekly limit", 7*24*time.Hour)
+		qw.Short = true
+		s.Windows = append(s.Windows, qw)
+		statusNote("Weekly limit", w)
+	}
+	if w := u.Usage.Monthly; w != nil {
+		qw := window(w, "Monthly limit", 0)
+		if !qw.ResetsAt.IsZero() {
+			qw.Duration = qw.ResetsAt.Sub(qw.ResetsAt.AddDate(0, -1, 0))
+		}
+		qw.Ultimate = true
+		s.Windows = append(s.Windows, qw)
+		statusNote("Monthly limit", w)
+	}
+
+	// No monthly (Ultimate) window → the subscription state is unmeasured:
+	// degrade to BillingUnknown so the scheduler falls back to priority
+	// ordering rather than a bogus surplus; the console link keeps `usage`
+	// actionable.
+	if !hasUltimate(s.Windows) {
+		s.Billing = BillingUnknown
+		s.RemainingPct = -1
+		s.Notes = append(s.Notes, "Console & usage: "+opencodeGoConsoleURL)
+		return s, nil
+	}
+	s.RemainingPct = ultimateRemaining(s.Windows)
+	return s, nil
 }

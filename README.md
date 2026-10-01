@@ -224,7 +224,7 @@ model-proxy usage qwen-plan        # 个人版 Credits 仅控制台可见（输�
 model-proxy usage step-plan        # Step Plan Credit 月池仅控制台可见（输出订阅页 URL + 列模型）
 model-proxy usage mimo             # 余额仅控制台可见（无 API key 计费接口；输出控制台 URL + 列模型）
 model-proxy usage openrouter       # GET /key：日/周/月花费 + 可选 per-key credit cap + free-model 每日请求数
-model-proxy usage opencode-go      # 订阅限额仅控制台可见（5h=20%/周=50%/月=100% 月度美元限额；输出控制台 URL + 列模型）
+model-proxy usage opencode-go      # GET <openai_base_url>/usage：5h/周/月已用百分比（5h=20%/周=50%/月=100% 月度美元限额；失败回退控制台 URL + 列模型）
 # 有 daemon 轮询历史时，配额窗口行尾会按当前消耗速率预测耗尽时间（"按当前速率 ~40m 后耗尽"）；
 # Web Status 配额卡同样展示。速率 ≤0、无历史基线或轮询断档（>3×quota_poll_interval）时不显示。
 

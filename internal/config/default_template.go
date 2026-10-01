@@ -305,13 +305,14 @@ providers:
   # models — Bearer), anthropic_base_url = /zen/go (proxy keeps the client
   # /v1/messages path — x-api-key only, verified live). Usage limits are
   # per-model monthly dollar amounts ($15/$30/$60 tiers) split into windows
-  # (5h=20%, weekly=50%, monthly=100%); console-only (no public usage API;
+  # (5h=20%, weekly=50%, monthly=100%); usage is polled via GET
+  # <openai_base_url>/usage (undocumented endpoint; percent = used percent).
   # ExtraHeaders mirrors the client session header into x-opencode-session
   # for Go's routing/prompt-cache affinity; agents without a session header
   # get a synthesized per-request mp-<uuid> — upstream 400s MissingSessionID
-  # otherwise). /models is public, so login
-  # validation cannot reject bad keys (a wrong key surfaces at first request
-  # as 401). Poolable (repeat 'login').
+  # otherwise). /models is public, so login validates the key with one
+  # minimal real chat/completions request instead (a bad key is rejected at
+  # login). Poolable (repeat 'login').
   opencode-go:
     openai_base_url: https://opencode.ai/zen/go/v1
     anthropic_base_url: https://opencode.ai/zen/go

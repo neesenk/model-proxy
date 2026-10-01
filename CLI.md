@@ -432,7 +432,7 @@ Provider:   <PROVNAME>
 | step-plan (`StepPlanProvider.Usage`) | `Billing:    Credit 月池 …`；`Usage:      (console-only; no public Credit API …)`；`Details:    <订阅页 URL>` + 列 config 模型（qwen-plan 同模式） |
 | mimo (`MiMoProvider.Usage`) | `Billing:    pay-as-you-go (no API-key billing endpoint)`；`Usage:` 两行 Notes（控制台 URL）+ 列 config 模型（qwen-plan/step-plan 同模式；余额端点走浏览器 SSO cookie，API key 拿不到） |
 | openrouter (`OpenRouterProvider.Usage`) | `Account:   <key label>`；`Billing:   prepaid credits (pay-as-you-go)`；窗口行：Key credit cap（可选，带剩余百分比）/ Spend (today|this week|this month)（带 UTC 重置倒计时）/ Free-model req/day；Notes：充值页 URL（+free tier 标记）。取自 `GET /api/v1/key` |
-| opencode-go (`OpenCodeGoProvider.Usage`) | `Billing:    $10/month subscription (per-model monthly dollar limit; 5h=20% weekly=50% monthly=100%)`；`Usage:      (console-only; no public usage API)`；`Details:    <控制台 URL>` + 列 config 模型（qwen-plan 同模式；订阅限额仅控制台） |
+| opencode-go (`OpenCodeGoProvider.Usage`) | `Plan:       OpenCode Go`；窗口行 `5h limit`/`Weekly limit`（Short，5h/7d）+ `Monthly limit`（Ultimate，带进度条/重置时间/耗尽 ETA）。取自 `GET <openai_base_url>/usage`（percent=已用百分比；端点未公开）。拉取失败：`Usage:      (unavailable: <ERR>)` + 控制台提示 + 列 config 模型 |
 
 重置时间格式：`<duration>(at <time>)`；`FormatResetAt`：今天显示 `HH:MM`，否则 `MM-DD HH:MM`。
 
