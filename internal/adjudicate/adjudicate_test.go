@@ -916,3 +916,24 @@ func TestEnqueueCloseRace_NoAcceptedJobLost(t *testing.T) {
 		}
 	}
 }
+
+// TestBlockStoreSnapshotEmptyAndOrdering: Snapshot on an empty table yields
+// no entries, and with entries it is newest-first — the admin/API list
+// surface depends on both (previously the empty-table branch was only reached
+// incidentally, leaving the coverage gate to drift on statement-count skew
+// between toolchains).
+func TestBlockStoreSnapshotEmptyAndOrdering(t *testing.T) {
+	b := loadBlockStore(filepath.Join(t.TempDir(), "guard_blocks.json"))
+	if got := b.Snapshot(); len(got) != 0 {
+		t.Fatalf("empty snapshot = %+v, want none", got)
+	}
+	b.Block("s-old", Block{Kind: KindSecret, Rule: "r", Ts: 1000})
+	b.Block("s-new", Block{Kind: KindSecret, Rule: "r", Ts: 2000})
+	got := b.Snapshot()
+	if len(got) != 2 || got[0].SessionID != "s-new" || got[1].SessionID != "s-old" {
+		t.Fatalf("snapshot = %+v, want newest-first [s-new s-old]", got)
+	}
+	if _, ok := b.Blocked("missing"); ok {
+		t.Error("Blocked reported a missing session")
+	}
+}
