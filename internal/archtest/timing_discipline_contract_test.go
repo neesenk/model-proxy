@@ -46,6 +46,10 @@ var prodSleepAllowlist = map[string]map[string]int{
 	"internal/accounts/store.go":       {"WithLock": 1},
 	"internal/cli/serve/supervisor.go": {"waitForProcessExit": 1},
 	"scripts/e2eguard/main.go":         {"poll": 1},
+	// testsyn is the shared provider of the sanctioned patterns themselves:
+	// waitUntil's sleep is the poll backoff (ordering from the predicate),
+	// SlowRound's is the injected adversarial latency (the phenomenon).
+	"internal/testsyn/testsyn.go": {"SlowRound": 1, "waitUntil": 1},
 }
 
 // prodModTimeAllowlist: file → func → allowed .ModTime references. Each entry

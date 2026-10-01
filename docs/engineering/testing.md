@@ -252,6 +252,42 @@ forward/Fusion/reload/HTTP/CLI/persistence/quota poll 编排；集成测试通�
   （protocol_fault 心跳节拍、lifecycle/loopback 非发生窥探、
   target_pipeline 收集窗、keepalive 静默期）为已审计快照。
 
+### 并发测试模式目录
+
+并发测试的先后顺序必须来自同步，不来自时间（§时序纪律契约划禁区和门禁，
+本节是正面目录——该用什么）。共享原语的权威提供者是 `internal/testsyn`
+（`WaitUntil`/`WaitUntilFor` 轮询、`SlowRound` 对抗性慢轮注入、
+`Goroutines`/`LeakCheck(For)` 泄漏核算）；新代码一律用它，各包存量
+helper 在被触及时顺手替换。八个模式（每条带本仓真实范例）：
+
+- **P1 轮询可观察量**：循环内先查谓词再退避（`WaitUntil`），顺序来自被轮询
+  的可观察状态。范例：`awaitCommitMetrics`、`awaitRouteStats`。
+- **P2 channel 交棒**：started/release/gate 门制造确定性交错，不睡出巧合。
+  范例：`blockingQuotaProv`、wirecap serialization 的 `wireProbePending` 轮询。
+- **P3 happens-before 断言**：等"完成信号物"落地（如 ring 的 `Cached` 条目、
+  end 事件）之后，非发生断言才被同一同步边结算。范例：adjudicate 三处
+  cached-replay 用例、`TestEmpty200_ClientCancelNoLock` 的 end 事件交棒。
+- **P4 决策相对窗口**：时间输入锚定在决策时刻（fake 返回 `now.Add(w)`），
+  分支在构造上为真，与在途轮次耗时解耦。范例：forward harness 的
+  `earliestIn`（pitfalls #36 之后的修正形态）。
+- **P5 下界断言**：join 之后断言耗时 ≥ 被测窗口——cancel 与 return 同点时，
+  一条断言同时证明"等满"与"未提前"。范例：fusion grace、probe latency。
+- **P6 join/barrier 汇合**：`wg.Wait`/channel close 之后再断言，绝不裸
+  goroutine 断言。
+- **P7 定向重复**：时序相关用例交付前 `go test -race -cpu 1,2 -count=N`
+  定向重复——`-cpu 1` 的 syscall 返回点调度两次抓到默认调度抓不到的竞态
+  （modelcaps persist 自采纳、forward 窗口）。
+- **P8 对抗性慢轮**：窗口类测试用 `testsyn.SlowRound(≫窗口)` 再跑一遍，
+  证明行为与轮次耗时无关。范例：selector CooldownRetries 的 300ms 验证。
+
+**回归红规则**：并发类 bugfix 的回归用例必须先在未修复代码上演示过失败
+（提交信息注明"修复前 -cpu X / 注入 Y 可靠复现"），与时序契约的 REGEN
+一样是显式动作——没有红过的回归用例无法证明自己有牙齿。
+
+**泄漏核算**：生命周期类测试（构造了带后台 owner 的组件）在构造前取
+`testsyn.Goroutines()` 基线，Close/drain 之后 `testsyn.LeakCheck`；当前在
+生命周期重组的用例中逐步推广（"不得遗留 goroutine"红线的机器检查）。
+
 ## 禁止的弱测试
 
 - 只有 `t.Logf`，没有断言；

@@ -552,7 +552,7 @@ application → serveAssembly → applicationRuntime → Proxy
 `internalRepositoryImportPolicy` 互为镜像——两处必须同步修改：
 
 - 叶子包（不得依赖其他 `model-proxy/*` 包）：`adjudicate`、`archtest`（纯测试包）、`cache`、
-  `configedit`、`credstore`、`daemonctl`、`display`、`guard`、`httpx`、`mcp`、
+  `configedit`、`credstore`、`daemonctl`、`display`、`guard`、`httpx`、`mcp`、`testsyn`、
   `observe/counters`、`observe/events`、`observe/logx`、`protocol/wire`、`runtime/wirecap`、
   `upstreamproxy`、`transport/bodycapture`、`webauth`；
 - `accounts → credstore`；

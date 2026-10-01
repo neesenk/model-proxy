@@ -69,6 +69,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/cli/clicommon": {"model-proxy/internal/display": true, "model-proxy/internal/appapi": true, "model-proxy/internal/daemonctl": true},
 		"model-proxy/internal/config":        {"model-proxy/internal/catalog": true, "model-proxy/internal/pricing": true, "model-proxy/internal/protocol/wire": true, "model-proxy/internal/upstreamproxy": true},
 		"model-proxy/internal/configedit":    nil,
+		"model-proxy/internal/testsyn":       nil, // shared test-only sync primitives (imports "testing"; imported only from _test.go)
 		"model-proxy/internal/credstore":     nil,
 		"model-proxy/internal/daemonctl":     nil,
 		"model-proxy/internal/display":       nil,

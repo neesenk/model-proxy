@@ -4,9 +4,14 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"model-proxy/internal/testsyn"
 )
 
 func TestLifecycleRunAndStop(t *testing.T) {
+	// Leak accounting pilot (testing.md §并发测试模式目录): every admitted
+	// task goroutine must have exited once BeginStop/Wait return.
+	baseline := testsyn.Goroutines()
 	l := NewLifecycle()
 	var ran atomic.Int32
 	for i := 0; i < 5; i++ {
@@ -27,6 +32,7 @@ func TestLifecycleRunAndStop(t *testing.T) {
 	default:
 		t.Error("StopChannel open after BeginStop")
 	}
+	testsyn.LeakCheck(t, baseline, "lifecycle tasks after BeginStop/Wait")
 }
 
 func TestLifecycleRunBeforeLogDrain(t *testing.T) {

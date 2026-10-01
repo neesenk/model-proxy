@@ -17,12 +17,19 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+
+	"model-proxy/internal/testsyn"
 	"time"
 )
 
 // ---- proxy_lifecycle_test.go ----
 
 func TestProxyCloseWaitsForOwnedTasksAndRejectsNewWork(t *testing.T) {
+	// Leak accounting pilot (testing.md §并发测试模式目录): a fully-wired
+	// Proxy's background owners (lifecycle, quota tracker, caches) must all
+	// be gone after Close — the machine check behind the "不得遗留
+	// goroutine" rule.
+	baseline := testsyn.Goroutines()
 	p := newTestProxy(t, &configdomain.Config{})
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -56,6 +63,7 @@ func TestProxyCloseWaitsForOwnedTasksAndRejectsNewWork(t *testing.T) {
 
 	// Idempotent: a second close must return immediately.
 	p.Close()
+	testsyn.LeakCheck(t, baseline, "Proxy background owners after Close")
 }
 
 // TestProxyRequestLogIndexLifecycle wires the request log the way
