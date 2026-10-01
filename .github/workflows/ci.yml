@@ -38,8 +38,10 @@ jobs:
           go vet ./...
           MP_REQUIRE_NODE=1 go test ./... -count=1
 
-      - name: race
-        run: go test -race ./... -count=1
+      - name: race (+shuffle, CPU matrix)
+        run: |
+          go test -race ./... -count=1 -shuffle=on
+          scripts/race.sh
 
       - name: coverage gate
         run: scripts/cover.sh

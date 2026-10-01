@@ -9,8 +9,11 @@
 # pre-commit / quick-check loop.
 #
 # Usage:
-#   scripts/race.sh                 # race the default concurrency-heavy set
-#   scripts/race.sh ./internal/foo  # race specific packages instead
+#   scripts/race.sh                 # race the default concurrency-heavy set,
+#                                   # then the CPU-sensitive subset under
+#                                   #   -cpu 1,2 -count=2 (directed repetition)
+#   scripts/race.sh ./internal/foo  # first pass only for the given packages
+#                                   #   (the CPU matrix still runs)
 #
 # Exit code is non-zero if any selected package fails or detects a race.
 set -euo pipefail
@@ -28,10 +31,32 @@ DEFAULT_PKGS=(
 	./internal/observe/...
 )
 
+# CPU-sensitive subset: the packages where races historically surfaced ONLY
+# under constrained scheduling (-cpu 1 turns syscall returns into preemption
+# points; it caught the modelcaps persist self-adoption and the forward
+# cooldown-window branch flip that default scheduling missed repeatedly).
+# docs/engineering/testing.md §并发测试模式目录, pattern P7.
+CPU_MATRIX_PKGS=(
+	./internal/app
+	./internal/runtime/...
+	./internal/forward
+	./internal/adjudicate
+	./internal/accounts
+	./internal/observe/stats
+	./internal/observe/requestlog
+	./internal/mcp
+)
+
 pkgs=("$@")
 if [ ${#pkgs[@]} -eq 0 ]; then
 	pkgs=("${DEFAULT_PKGS[@]}")
 fi
 
 echo "go test -race -count=1 ${pkgs[*]}"
-exec go test -race -count=1 "${pkgs[@]}"
+go test -race -count=1 "${pkgs[@]}"
+
+# The matrix pass runs the CPU-sensitive subset under -cpu 1,2 with a repeat
+# count: interleavings that need constrained scheduling are probabilistic, so
+# a single pass is a smoke, two directed repeats is the gate.
+echo "go test -race -cpu 1,2 -count=2 ${CPU_MATRIX_PKGS[*]}"
+go test -race -cpu 1,2 -count=2 "${CPU_MATRIX_PKGS[@]}"
