@@ -28,7 +28,15 @@ type Template struct {
 	Description string `yaml:"description"`
 	// File is the client config path ("~" expanded at load).
 	File string `yaml:"file"`
-	// Format: json | toml | env.
+	// Create allows takeover to write the client config even when File does
+	// not exist yet (stepcode: ~/.stepcode/models.json is optional — Step
+	// Code only creates it when the user customizes models). Instead of a
+	// content backup an EMPTY .bak with a created:true meta marks the
+	// takeover, and restore deletes the file again — the pre-takeover state
+	// was "no file". Batch mode (`all`) only creates when the parent
+	// directory exists (the agent is installed); a named client always does.
+	Create bool `yaml:"create"`
+	// Format: json | toml | env | yaml.
 	Format string `yaml:"format"`
 	// BaseURL: bare (default, proxy URL as-is) | v1 (append /v1).
 	BaseURL string `yaml:"base_url"`
@@ -55,6 +63,7 @@ type Template struct {
 	JSON   *JSONTemplate   `yaml:"json"`
 	TOML   *TOMLTemplate   `yaml:"toml"`
 	Env    *EnvTemplate    `yaml:"env"`
+	YAML   *YAMLTemplate   `yaml:"yaml"`
 	Models *ModelsTemplate `yaml:"models"`
 	// Variants declares the protocol variants of ONE multi-protocol agent in
 	// a single template document (opencode/pi: anthropic + openai +
@@ -103,6 +112,17 @@ type EnvTemplate struct {
 	Set map[string]string `yaml:"set"`
 }
 
+// YAMLTemplate patches a YAML mapping document: each Set entry is a dotted
+// path → value (nested maps/lists allowed; the same placeholders as json).
+// Editing is comment-preserving (yaml.v3 node surgery — hermes' config.yaml
+// is round-trip edited by the client itself); see yamlkeys.go.
+type YAMLTemplate struct {
+	Set map[string]any `yaml:"set"`
+	// DriftPath is the YAML path doctor reads to detect takeover drift; its
+	// expected value is the rendered base URL.
+	DriftPath string `yaml:"drift_path"`
+}
+
 // ModelsTemplate describes per-exposed-model output. Shape selects the Go-side
 // collection renderer (metadata defaults included); kimi renders one TOML
 // section per model instead of a JSON collection; codex renders a standalone
@@ -134,9 +154,13 @@ type ModelsTemplate struct {
 // (claude: ~/.claude.json next to the model takeover's ~/.claude/settings.json).
 // Empty renders into the template's main File. A separate File is backed up
 // and restored as its own unit (<template>-mcp marker), keeping one takeover
-// template = one client.
+// template = one client. Format selects the separate file's syntax: json
+// (default — claude's ~/.claude.json, kimi's mcp.json) | toml (stepcode's
+// ~/.stepcode/config.toml [mcp_servers] sections). Without File the main
+// template's own format decides and Format must stay empty.
 type MCPTemplate struct {
-	File string `yaml:"file"`
+	File   string `yaml:"file"`
+	Format string `yaml:"format"`
 	// JSONPath is where the rendered MCP object is stored (json format).
 	JSONPath string `yaml:"json_path"`
 	// JSONEntry is the per-entry value template (a YAML map/list/scalar;
@@ -173,6 +197,7 @@ type VariantSpec struct {
 	JSON        *JSONTemplate   `yaml:"json"`
 	TOML        *TOMLTemplate   `yaml:"toml"`
 	Env         *EnvTemplate    `yaml:"env"`
+	YAML        *YAMLTemplate   `yaml:"yaml"`
 	Models      *ModelsTemplate `yaml:"models"`
 }
 
@@ -221,7 +246,7 @@ func ParseTemplate(name, source string, data []byte) ([]*Template, error) {
 	// variants mode: the top level carries only shared fields — per-variant
 	// write blocks and identity live under variants:. (Checked before the
 	// entry count so a mixed document reports the real problem.)
-	if t.JSON != nil || t.TOML != nil || t.Env != nil || t.Models != nil ||
+	if t.JSON != nil || t.TOML != nil || t.Env != nil || t.YAML != nil || t.Models != nil ||
 		t.Protocol != "" || t.ProviderID != "" || t.BaseURL != "" || t.ProxyURL != "" || t.DisplayName != "" {
 		return nil, fmt.Errorf("template %s: variants templates keep protocol identity and write blocks (json/toml/env/models/protocol/base_url/provider_id) under each variant; the top level carries description/file/format/client, and may share the mcp block (its rendering does not depend on the variant)", name)
 	}
@@ -232,9 +257,9 @@ func ParseTemplate(name, source string, data []byte) ([]*Template, error) {
 		return nil, fmt.Errorf("template %s: file is required (client config path)", name)
 	}
 	switch t.Format {
-	case "json", "toml", "env":
+	case "json", "toml", "env", "yaml":
 	default:
-		return nil, fmt.Errorf("template %s: format must be json|toml|env, got %q", name, t.Format)
+		return nil, fmt.Errorf("template %s: format must be json|toml|env|yaml, got %q", name, t.Format)
 	}
 	t.File = expandHome(t.File)
 	seen := map[string]bool{}
@@ -252,6 +277,7 @@ func ParseTemplate(name, source string, data []byte) ([]*Template, error) {
 			Name:        v.Name,
 			Description: t.Description,
 			File:        t.File,
+			Create:      t.Create,
 			Format:      t.Format,
 			BaseURL:     v.BaseURL,
 			ProviderID:  v.ProviderID,
@@ -262,6 +288,7 @@ func ParseTemplate(name, source string, data []byte) ([]*Template, error) {
 			JSON:        v.JSON,
 			TOML:        v.TOML,
 			Env:         v.Env,
+			YAML:        v.YAML,
 			Models:      v.Models,
 			MCP:         t.MCP,
 			Source:      source,
@@ -286,9 +313,10 @@ func validateTemplate(t *Template) error {
 	switch t.Format {
 	case "json":
 		// json.set may be empty (or the whole json: block absent) when the
-		// template writes ONLY mcp entries.
+		// template writes ONLY mcp entries (into the main file, or into a
+		// separate mcp.file of either syntax).
 		hasSet := t.JSON != nil && len(t.JSON.Set) > 0
-		hasMCP := t.MCP != nil && t.MCP.JSONPath != ""
+		hasMCP := t.MCP != nil && (t.MCP.JSONPath != "" || t.MCP.File != "")
 		if !hasSet && !hasMCP {
 			return fmt.Errorf("template %s: format json requires non-empty json.set (or an mcp: block)", t.Name)
 		}
@@ -300,8 +328,16 @@ func validateTemplate(t *Template) error {
 		if t.Env == nil || len(t.Env.Set) == 0 {
 			return fmt.Errorf("template %s: format env requires non-empty env.set", t.Name)
 		}
+	case "yaml":
+		// yaml.set may be empty (or the whole yaml: block absent) when the
+		// template writes ONLY mcp entries.
+		hasSet := t.YAML != nil && len(t.YAML.Set) > 0
+		hasMCP := t.MCP != nil && (t.MCP.JSONPath != "" || t.MCP.File != "")
+		if !hasSet && !hasMCP {
+			return fmt.Errorf("template %s: format yaml requires non-empty yaml.set (or an mcp: block)", t.Name)
+		}
 	default:
-		return fmt.Errorf("template %s: format must be json|toml|env, got %q", t.Name, t.Format)
+		return fmt.Errorf("template %s: format must be json|toml|env|yaml, got %q", t.Name, t.Format)
 	}
 	if t.BaseURL != "" && t.BaseURL != "bare" && t.BaseURL != "v1" {
 		return fmt.Errorf("template %s: base_url must be bare|v1, got %q", t.Name, t.BaseURL)
@@ -320,6 +356,22 @@ func validateTemplate(t *Template) error {
 			if t.Models.JSONPath == "" {
 				return fmt.Errorf("template %s: models.json_path is required for shape %s", t.Name, t.Models.Shape)
 			}
+		case "zcode":
+			// zcode merges into provider_config.json's rule arrays in Go —
+			// no json_path; the api.type is derived from the variant's
+			// protocol, which therefore must be declared.
+			if t.Format != "json" {
+				return fmt.Errorf("template %s: models shape zcode requires format json", t.Name)
+			}
+			if _, err := zcodeAPIType(t.Protocol); err != nil {
+				return fmt.Errorf("template %s: %w", t.Name, err)
+			}
+		case "workbuddy":
+			// workbuddy merges the custom-model ARRAY in Go (vendor-marked
+			// upsert) — no json_path; chat-completions is the only wire.
+			if t.Format != "json" {
+				return fmt.Errorf("template %s: models shape workbuddy requires format json", t.Name)
+			}
 		case "kimi":
 			if t.Format != "toml" || t.Models.TOMLSection == "" || t.Models.TOMLBody == "" {
 				return fmt.Errorf("template %s: models shape kimi requires format toml + toml_section + toml_body", t.Name)
@@ -329,23 +381,37 @@ func validateTemplate(t *Template) error {
 				return fmt.Errorf("template %s: models shape codex requires format toml + catalog_file", t.Name)
 			}
 		default:
-			return fmt.Errorf("template %s: models.shape must be opencode|pi|kimi|codex, got %q", t.Name, t.Models.Shape)
+			return fmt.Errorf("template %s: models.shape must be opencode|pi|kimi|codex|zcode|workbuddy, got %q", t.Name, t.Models.Shape)
 		}
 	}
 	if t.MCP != nil {
 		if t.MCP.File != "" {
-			// A separate MCP storage file is JSON (every client that splits
-			// MCP out — claude's ~/.claude.json, kimi's ~/.kimi-code/mcp.json
-			// — uses the mcpServers JSON shape), regardless of the main
-			// config's format.
-			if t.MCP.JSONPath == "" || t.MCP.JSONEntry == nil {
-				return fmt.Errorf("template %s: mcp.file requires json_path + json_entry (the separate file is JSON)", t.Name)
+			// A separate MCP storage file has its own syntax, regardless of
+			// the main config's format: JSON (claude's ~/.claude.json, kimi's
+			// mcp.json) is the default; stepcode keeps MCP as [mcp_servers]
+			// sections in its TOML config.toml.
+			switch t.MCP.Format {
+			case "", "json":
+				if t.MCP.JSONPath == "" || t.MCP.JSONEntry == nil {
+					return fmt.Errorf("template %s: mcp.file with format json requires json_path + json_entry", t.Name)
+				}
+			case "toml":
+				if t.MCP.TOMLSection == "" || t.MCP.TOMLBody == "" {
+					return fmt.Errorf("template %s: mcp.file with format toml requires toml_section + toml_body", t.Name)
+				}
+			default:
+				return fmt.Errorf("template %s: mcp.format must be json|toml, got %q", t.Name, t.MCP.Format)
 			}
 		} else {
+			if t.MCP.Format != "" {
+				return fmt.Errorf("template %s: mcp.format is only meaningful with mcp.file (without it the main file's format decides)", t.Name)
+			}
 			switch t.Format {
-			case "json":
+			case "json", "yaml":
+				// yaml renders the same entry-as-map shape into the mapping
+				// document (hermes' mcp_servers), json into the JSON object.
 				if t.MCP.JSONPath == "" || t.MCP.JSONEntry == nil {
-					return fmt.Errorf("template %s: mcp requires json_path + json_entry for format json", t.Name)
+					return fmt.Errorf("template %s: mcp requires json_path + json_entry for format %s", t.Name, t.Format)
 				}
 			case "toml":
 				if t.MCP.TOMLSection == "" || t.MCP.TOMLBody == "" {
@@ -705,11 +771,19 @@ func (t *Template) RewriteOptsFiltered(cfg *configdomain.Config, meta map[string
 	}
 	switch t.Format {
 	case "json":
+		// workbuddy's models.json is an ARRAY-rooted custom-model list — it
+		// has its own renderer (rewriteWorkbuddy) instead of the map-based
+		// json path.
+		if t.Models != nil && t.Models.Shape == "workbuddy" {
+			return t.rewriteWorkbuddy(ctx, opts.Scope)
+		}
 		return t.rewriteJSON(ctx, opts.Scope)
 	case "toml":
 		return t.rewriteTOML(ctx, opts.Scope)
 	case "env":
 		return t.rewriteEnv(ctx, opts.Scope)
+	case "yaml":
+		return t.rewriteYAML(ctx, opts.Scope)
 	}
 	return fmt.Errorf("template %s: unknown format %q", t.Name, t.Format)
 }
@@ -719,12 +793,7 @@ func (t *Template) rewriteJSON(ctx renderContext, scope RewriteScope) error {
 	// config at all.
 	mcpDst := t.mcpFile()
 	if scope == ScopeMCP && mcpDst != "" && mcpDst != t.File {
-		mv, err := ReadJSONConfig(mcpDst)
-		if err != nil {
-			return err
-		}
-		mergeMCPIntoJSON(mv, t.MCP, ctx)
-		return WriteJSONConfig(mcpDst, mv)
+		return t.writeMCPAux(mcpDst, ctx)
 	}
 	v, err := ReadJSONConfig(t.File)
 	if err != nil {
@@ -736,7 +805,14 @@ func (t *Template) rewriteJSON(ctx renderContext, scope RewriteScope) error {
 				setDotted(v, strings.Split(ctx.substitute(path), "."), substituteValue(value, ctx.substitute))
 			}
 		}
-		if t.Models != nil {
+		if t.Models != nil && t.Models.Shape == "zcode" {
+			// zcode writes into provider_config.json's rule ARRAYS (provider
+			// + per-model rules + default selection) with upsert merge — the
+			// generic json_path collection write cannot express that.
+			if err := mergeZcodeProviderConfig(v, t, ctx); err != nil {
+				return err
+			}
+		} else if t.Models != nil {
 			setDotted(v, strings.Split(ctx.substitute(t.Models.JSONPath), "."), t.Models.renderCollection(ctx))
 		}
 	}
@@ -760,6 +836,44 @@ func (t *Template) rewriteJSON(ctx renderContext, scope RewriteScope) error {
 	}
 	if scope == ScopeModel {
 		return nil
+	}
+	return t.writeMCPAux(mcpDst, ctx)
+}
+
+// mcpAuxFormat returns the separate MCP storage file's syntax (default json).
+// Only consulted when the MCP block names its own File.
+func (t *Template) mcpAuxFormat() string {
+	if t.MCP.Format == "" {
+		return "json"
+	}
+	return t.MCP.Format
+}
+
+// writeMCPAux merges the gateway MCP surface into the separate MCP storage
+// file, in that file's own syntax. A missing TOML aux file whose merged
+// result is empty (no gateway surface, nothing stale) is left uncreated.
+func (t *Template) writeMCPAux(mcpDst string, ctx renderContext) error {
+	if t.mcpAuxFormat() == "toml" {
+		data, err := readFile(mcpDst)
+		missing := false
+		if err != nil {
+			if os.IsNotExist(err) {
+				missing = true
+			} else {
+				return err
+			}
+		}
+		text, err := t.mergeMCPIntoTOML(string(data), ctx)
+		if err != nil {
+			return err
+		}
+		if missing && strings.TrimSpace(text) == "" {
+			return nil
+		}
+		if err := os.MkdirAll(filepath.Dir(mcpDst), 0o755); err != nil {
+			return err
+		}
+		return atomicWriteFile(mcpDst, []byte(text), preserveMode(mcpDst, 0o600))
 	}
 	mv, err := ReadJSONConfig(mcpDst)
 	if err != nil {
@@ -923,43 +1037,49 @@ func (t *Template) rewriteTOML(ctx renderContext, scope RewriteScope) error {
 		// /model picker then shows exactly the proxy's exposed models.
 		text = SetTOMLTopKey(text, "model_catalog_json", strconv.Quote(catalogPath))
 	}
-	// A separate MCP storage file is JSON regardless of the main format
-	// (kimi: config.toml + ~/.kimi-code/mcp.json) — merge the gateway
-	// surface there and leave the TOML mcp rendering out entirely.
+	// A separate MCP storage file renders in its own syntax (kimi: TOML main
+	// config + JSON ~/.kimi-code/mcp.json) — merge the gateway surface there
+	// and leave the TOML mcp rendering out entirely.
 	if mcpDst := t.mcpFile(); t.MCP != nil && mcpDst != "" && mcpDst != t.File {
 		if scope != ScopeModel {
-			mv, err := ReadJSONConfig(mcpDst)
-			if err != nil {
-				return err
-			}
-			mergeMCPIntoJSON(mv, t.MCP, ctx)
-			if err := WriteJSONConfig(mcpDst, mv); err != nil {
+			if err := t.writeMCPAux(mcpDst, ctx); err != nil {
 				return err
 			}
 		}
 		return atomicWriteFile(t.File, []byte(text), preserveMode(t.File, 0o600))
 	}
 	if t.MCP != nil && scope != ScopeModel {
-		// Drop stale proxy mcp sections first (previous takeover leftovers):
-		// sections whose names are in the template-generated namespace and
-		// whose body carries this proxy's /mcp/ URL. The namespace is derived
-		// from the full gateway surface (ctx.mcpAll) so routed-member pruning
-		// or an explicit empty selection still cleans stale proxy entries.
-		generatedSections := make(map[string]bool, len(ctx.mcpAll))
-		for _, e := range ctx.mcpAll {
-			generatedSections[ctx.substituteMCP(t.MCP.TOMLSection, e)] = true
-		}
-		text = removeTOMLSectionsWithURL(text, ctx.proxyURL+"/mcp/", generatedSections)
-		for _, e := range ctx.mcp {
-			name := ctx.substituteMCP(t.MCP.TOMLSection, e)
-			body := "\n[" + name + "]\n" + ctx.substituteMCP(t.MCP.TOMLBody, e) + "\n"
-			text, err = ReplaceOrAppendTOMLSection(text, name, body)
-			if err != nil {
-				return err
-			}
+		text, err = t.mergeMCPIntoTOML(text, ctx)
+		if err != nil {
+			return err
 		}
 	}
 	return atomicWriteFile(t.File, []byte(text), preserveMode(t.File, 0o600))
+}
+
+// mergeMCPIntoTOML folds the gateway MCP surface into one TOML document.
+// Stale proxy mcp sections (previous takeover leftovers) are dropped first:
+// sections whose names are in the template-generated namespace and whose body
+// carries this proxy's /mcp/ URL. The namespace is derived from the full
+// gateway surface (ctx.mcpAll) so routed-member pruning or an explicit empty
+// selection still cleans stale proxy entries. Then the current surface is
+// written replace-or-append.
+func (t *Template) mergeMCPIntoTOML(text string, ctx renderContext) (string, error) {
+	generatedSections := make(map[string]bool, len(ctx.mcpAll))
+	for _, e := range ctx.mcpAll {
+		generatedSections[ctx.substituteMCP(t.MCP.TOMLSection, e)] = true
+	}
+	text = removeTOMLSectionsWithURL(text, ctx.proxyURL+"/mcp/", generatedSections)
+	var err error
+	for _, e := range ctx.mcp {
+		name := ctx.substituteMCP(t.MCP.TOMLSection, e)
+		body := "\n[" + name + "]\n" + ctx.substituteMCP(t.MCP.TOMLBody, e) + "\n"
+		text, err = ReplaceOrAppendTOMLSection(text, name, body)
+		if err != nil {
+			return "", err
+		}
+	}
+	return text, nil
 }
 
 // modelVars resolves the per-model placeholders for the TOML loop. Context
@@ -1046,6 +1166,69 @@ func substituteModel(s string, vars map[string]string, ctx renderContext) string
 		out = strings.ReplaceAll(out, k, v)
 	}
 	return out
+}
+
+// rewriteYAML renders the template into a YAML config file (hermes'
+// config.yaml), preserving comments and unrelated content (yamlkeys.go).
+// A models: collection has no YAML shape today — yaml templates write
+// yaml.set plus the MCP surface only.
+func (t *Template) rewriteYAML(ctx renderContext, scope RewriteScope) error {
+	// MCP-only scope against a separate aux file never touches the main
+	// config at all.
+	mcpDst := t.mcpFile()
+	if scope == ScopeMCP && mcpDst != "" && mcpDst != t.File {
+		return t.writeMCPAux(mcpDst, ctx)
+	}
+	data, err := readFile(t.File)
+	if err != nil {
+		if os.IsNotExist(err) {
+			data = nil
+		} else {
+			return err
+		}
+	}
+	doc, err := loadYAMLDoc(data)
+	if err != nil {
+		return fmt.Errorf("template %s: %s: %w", t.Name, t.File, err)
+	}
+	root := doc.Content[0]
+	if scope != ScopeMCP && t.YAML != nil {
+		for path, value := range t.YAML.Set {
+			if err := yamlSetDotted(root, strings.Split(ctx.substitute(path), "."), substituteValue(value, ctx.substitute)); err != nil {
+				return fmt.Errorf("template %s: %w", t.Name, err)
+			}
+		}
+	}
+	if mcpDst == "" || mcpDst == t.File {
+		// Single-file template (or no MCP block at all): the MCP block merges
+		// into the same document and everything is written once.
+		if scope != ScopeModel {
+			if err := mergeMCPIntoYAML(root, t.MCP, ctx); err != nil {
+				return fmt.Errorf("template %s: %w", t.Name, err)
+			}
+		}
+		return writeYAMLFile(t.File, doc)
+	}
+	// Separate MCP storage (json/toml aux): write the main config first, then
+	// merge the gateway surface into the aux file's own document.
+	if err := writeYAMLFile(t.File, doc); err != nil {
+		return err
+	}
+	if scope == ScopeModel {
+		return nil
+	}
+	return t.writeMCPAux(mcpDst, ctx)
+}
+
+func writeYAMLFile(file string, doc *yaml.Node) error {
+	out, err := encodeYAMLDoc(doc)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		return err
+	}
+	return atomicWriteFile(file, out, preserveMode(file, 0o600))
 }
 
 // rewriteEnv patches a KEY=VALUE file, replacing managed keys in place and
@@ -1137,7 +1320,7 @@ func (t *Template) Pointer(cfg *configdomain.Config) (current, expected string) 
 		if err := json.Unmarshal(data, &v); err != nil {
 			return "(unreadable: " + err.Error() + ")", expected
 		}
-		s, ok := nestedString(v, strings.Split(ctx.substitute(t.JSON.DriftPath), ".")...)
+		s, ok := nestedStringProviderAware(v, ctx.providerID, strings.Split(ctx.substitute(t.JSON.DriftPath), ".")...)
 		if !ok {
 			return "(missing)", expected
 		}
@@ -1176,6 +1359,20 @@ func (t *Template) Pointer(cfg *configdomain.Config) (current, expected string) 
 			}
 		}
 		return "(missing)", expected
+	case "yaml":
+		// yaml may be nil on mcp-only templates (no drift probe either way).
+		if t.YAML == nil || t.YAML.DriftPath == "" {
+			return "(no drift probe)", expected
+		}
+		doc, err := loadYAMLDoc(data)
+		if err != nil {
+			return "(unreadable: " + err.Error() + ")", expected
+		}
+		s, ok := yamlNestedString(doc.Content[0], strings.Split(ctx.substitute(t.YAML.DriftPath), ".")...)
+		if !ok {
+			return "(missing)", expected
+		}
+		return s, expected
 	}
 	return "(unknown format)", expected
 }

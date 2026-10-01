@@ -79,6 +79,8 @@ func runConfigInitWizard(in io.Reader, out io.Writer) error {
 	// Detection dedupes to one entry per client family — protocol variants
 	// of a family share the same config file, and the variant is chosen at
 	// takeover time against the written config (native-protocol selection).
+	// takeover.ClientInstalled owns the predicate (config file, or
+	// create:true + config dir).
 	var detected []takeover.ClientSpec
 	seenFamily := map[string]bool{}
 	if clients, err := takeover.ListClients(tpl, "all", ""); err == nil {
@@ -87,7 +89,7 @@ func runConfigInitWizard(in io.Reader, out io.Writer) error {
 			if seenFamily[family] {
 				continue
 			}
-			if _, err := os.Stat(c.File); err == nil {
+			if takeover.ClientInstalled(c.Template) {
 				seenFamily[family] = true
 				c.Name = family
 				detected = append(detected, c)

@@ -1,0 +1,16 @@
+description: workbuddy — models.json 自定义模型全量注入（vendor 标记 upsert 合并，用户自定义模型保留；WorkBuddy 只讲 OpenAI Chat Completions，url 自拼 /chat/completions）+ mcp.json 接管网关 MCP 面
+file: ~/.workbuddy/models.json
+create: true
+format: json
+protocol: openai
+base_url: v1
+json:
+  set: {}
+  drift_path: models.url
+mcp:
+  file: ~/.workbuddy/mcp.json
+  json_path: mcpServers
+  json_entry:
+    url: "{{mcp.url}}"
+models:
+  shape: workbuddy

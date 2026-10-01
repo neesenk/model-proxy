@@ -1,0 +1,41 @@
+description: zcode — provider_config.json personal provider 规则 + 全量模型规则 + 默认模型选择（ZCode 规则数组按 providerId upsert 合并，用户条目保留）；协议变体（anthropic/openai/responses）见 variants
+file: ~/.zcode/v2/provider_config.json
+create: true
+format: json
+client: zcode
+mcp:
+  file: ~/.zcode/cli/config.json
+  json_path: mcp.servers
+  json_entry:
+    type: http
+    url: "{{mcp.url}}"
+variants:
+  - name: zcode
+    protocol: anthropic
+    base_url: bare
+    json:
+      set:
+        schemaVersion: 1
+      drift_path: config.providerConfigRules.providerRules.config.api.baseUrl
+    models:
+      shape: zcode
+  - name: zcode-openai
+    protocol: openai
+    base_url: v1
+    provider_id: model-proxy-openai
+    json:
+      set:
+        schemaVersion: 1
+      drift_path: config.providerConfigRules.providerRules.config.api.baseUrl
+    models:
+      shape: zcode
+  - name: zcode-responses
+    protocol: responses
+    base_url: v1
+    provider_id: model-proxy-responses
+    json:
+      set:
+        schemaVersion: 1
+      drift_path: config.providerConfigRules.providerRules.config.api.baseUrl
+    models:
+      shape: zcode

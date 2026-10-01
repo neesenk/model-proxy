@@ -1,0 +1,53 @@
+description: stepcode — models.json provider 条目 + 全量暴露模型 + config.toml [mcp_servers] 接管网关 MCP 面（Step Code 派生自 pi，models.json 同 pi 形状）；协议变体（anthropic/openai/responses）见 variants
+file: ~/.stepcode/models.json
+create: true
+format: json
+client: stepcode
+mcp:
+  file: ~/.stepcode/config.toml
+  format: toml
+  toml_section: 'mcp_servers."{{mcp.name}}"'
+  toml_body: |
+    url = "{{mcp.url}}"
+variants:
+  - name: stepcode
+    protocol: anthropic
+    base_url: bare
+    json:
+      set:
+        providers.{{provider_id}}:
+          baseUrl: "{{base_url}}"
+          api: "anthropic-messages"
+          apiKey: "{{token}}"
+      drift_path: providers.{{provider_id}}.baseUrl
+    models:
+      shape: pi
+      json_path: providers.{{provider_id}}.models
+  - name: stepcode-openai
+    protocol: openai
+    base_url: v1
+    provider_id: model-proxy-openai
+    json:
+      set:
+        providers.{{provider_id}}:
+          baseUrl: "{{base_url}}"
+          api: "openai-completions"
+          apiKey: "{{token}}"
+      drift_path: providers.{{provider_id}}.baseUrl
+    models:
+      shape: pi
+      json_path: providers.{{provider_id}}.models
+  - name: stepcode-responses
+    protocol: responses
+    base_url: v1
+    provider_id: model-proxy-responses
+    json:
+      set:
+        providers.{{provider_id}}:
+          baseUrl: "{{base_url}}"
+          api: "openai-responses"
+          apiKey: "{{token}}"
+      drift_path: providers.{{provider_id}}.baseUrl
+    models:
+      shape: pi
+      json_path: providers.{{provider_id}}.models

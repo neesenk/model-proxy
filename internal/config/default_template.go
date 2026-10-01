@@ -456,9 +456,12 @@ providers:
 
 # takeover: client targets come from templates — embedded presets
 # (see 'model-proxy takeover list': claude/opencode/opencode-openai/opencode-responses/pi/pi-openai/
-# pi-responses/codex/kimi/gemini-cli) or your own YAML in
+# pi-responses/stepcode/stepcode-openai/stepcode-responses/zcode/zcode-openai/zcode-responses/
+# hermes/hermes-openai/hermes-responses/codex/kimi/gemini-cli/workbuddy) or your own YAML in
 # ~/.model-proxy/takeover-templates/<name>.yaml (same name overrides a preset).
-# Template fields: file (client config path), format (json|toml|env),
+# Template fields: file (client config path), create (take over even when the
+# file is absent — restore deletes it again; stepcode's optional models.json),
+# format (json|toml|env),
 # base_url (bare|v1), provider_id, proxy_url, json.set / toml.top_keys+sections /
 # env.set with {{base_url}}/{{token}}/{{provider_id}} placeholders, and an
 # optional models: block (per-exposed-model metadata shapes).

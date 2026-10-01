@@ -695,6 +695,10 @@ mcp:
   context7: {url: 'https://mcp.context7.com/mcp', auth: none}
   deepwiki: {url: 'https://mcp.deepwiki.com/mcp', auth: none}
   grep-app: {url: 'https://mcp.grep.app', auth: none}
+  kimi-data: # Kimi Code managed plugin kimi-datasource (plugin-kimi-datasource:data):
+    transport: stdio # local node child; self-loads the Kimi Code login token from
+    command: [node, /Users/neesenk/.kimi-code/plugins/managed/kimi-datasource/bin/kimi-datasource.mjs] # $KIMI_CODE_HOME/credentials (falls back to ~/.kimi-code),
+    # so no provider:/env: injection here — anonymous stdio like a credential-free backend
   vision: # generic name: any vision-capable backend can land here
     transport: stdio
     provider: zhipu
@@ -706,10 +710,19 @@ mcp_routes:
   # so they are NOT one failover set), read+clean (zhipu reader, firecrawl
   # scrape and stepfun web_fetch share the url parameter and DO fail over),
   # batch clean fetch, and document parsing.
+  # Datasource: professional data queries. kimi-data (Kimi Code kimi-datasource
+  # plugin — Wind/S&P/EDGAR, macro, CN gov/corporate/academic/legal) is the
+  # desc-then-call meta surface; dataset_search (volcengine dataPro) covers
+  # stock/finance/corporate-risk/auto in one direct call. NOT one failover set —
+  # different shapes; split out of web-research.
+  datasource:
+    targets:
+      - {mcp: kimi-data, tools: {apidoc: get_data_source_desc, # step 1: fetch one source's API doc
+          api_call: call_data_source_tool}} # step 2: structured api_name+params call per that doc
+      - {mcp: ark-datapro, tools: {ask: dataPro_search}} # fast path: one-shot natural-language question, no doc step
   web-research:
     targets:
       - {mcp: zhipu-search, tools: {web_search: web_search_prime}} # general/cn-optimized search (search_query)
-      - {mcp: ark-datapro, tools: {dataset_search: dataPro_search}} # professional dataset search (volcengine datapro)
       - {mcp: exa, tools: {web_search_semantic: web_search_exa, # semantic search (query+objective, required both)
           url_fetch_batch: web_fetch_exa}} # batch clean text (urls[])
       - {mcp: firecrawl, tools: {web_search_domain: firecrawl_search, # filtered search (domains/categories/tbs)

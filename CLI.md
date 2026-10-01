@@ -195,7 +195,7 @@ takeover <client>   # client = 模板名（takeover list 查看）| all
 takeover list       # 可用模板:内置预设 + ~/.model-proxy/takeover-templates 覆盖
 ```
 
-逻辑（`internal/takeover/takeover.go` 的 `RunTakeover`）：备份每个客户端配置（verbatim + sha256 meta，幂等）到 `<configDir>/.model-proxy/`，再按**模板**改写指向代理。客户端集合来自模板解析（`internal/takeover` 的内嵌 presets + `~/.model-proxy/takeover-templates/<name>.yaml` 用户覆盖/新增，同名覆盖预设），不再读 config 的 `takeover:` 块（已移除，残留即报迁移错误）。模板声明：目标 `file`、`format`（json|toml|env）、`base_url`（bare|v1）、`provider_id`、`proxy_url`（默认 http://<listen>）、格式专属补丁（json.set / toml.top_keys+sections / env.set，支持 `{{base_url}}/{{token}}/{{provider_id}}/{{display_name}}/{{proxy_url}}` 占位）与可选 `models:` 块（opencode/pi/kimi 三种模型元数据形状，hydrate models.dev）。未知 client 名是硬错误（列出可用模板）。
+逻辑（`internal/takeover/takeover.go` 的 `RunTakeover`）：备份每个客户端配置（verbatim + sha256 meta，幂等）到 `<configDir>/.model-proxy/`，再按**模板**改写指向代理。客户端集合来自模板解析（`internal/takeover` 的内嵌 presets + `~/.model-proxy/takeover-templates/<name>.yaml` 用户覆盖/新增，同名覆盖预设），不再读 config 的 `takeover:` 块（已移除，残留即报迁移错误）。模板声明：目标 `file`、`format`（json|toml|env）、`create`（文件不存在也接管，restore 删回不存在——stepcode 的可选 models.json、zcode 的 provider_config.json）、`base_url`（bare|v1）、`provider_id`、`proxy_url`（默认 http://<listen>）、格式专属补丁（json.set / toml.top_keys+sections / env.set，支持 `{{base_url}}/{{token}}/{{provider_id}}/{{display_name}}/{{proxy_url}}` 占位）与可选 `models:` 块（opencode/pi/kimi/zcode 等模型元数据形状，hydrate models.dev）。未知 client 名是硬错误（列出可用模板）。
 
 ### 输出
 
@@ -209,7 +209,7 @@ takeover list       # 可用模板:内置预设 + ~/.model-proxy/takeover-templa
   ```
     ~ <client> skipped (config not present: <FILE>)
   ```
-  `restore all` 对应：`  ~ <client> skipped (no backup in <BAKDIR>/)`。单客户端（`takeover <client>`）缺文件仍是硬错误。
+  `restore all` 对应：`  ~ <client> skipped (no backup in <BAKDIR>/)`。单客户端（`takeover <client>`）缺文件仍是硬错误——`create: true` 模板（stepcode 的可选 models.json、zcode 的 provider_config.json）例外：缺文件也接管，以空 `.bak` + `created: true` meta 标记代替内容备份，restore 把文件删回"不存在"（`all` 仅当父目录存在即 agent 已安装时才创建）。
 - **stderr 告警**（仅带 models: 块的模板，某个模型无 models.dev 元数据时，每个模型一行）：
   ```
   warning: model <MODEL> at <PROVIDER>: no models.dev metadata - wrote defaults (ctx=200000 out=16384 text-only)
@@ -524,7 +524,7 @@ config init|print|check
 
 **交互式向导**（仅当 stdin 是真实 TTY；管道/重定向/`/dev/null` 保持上面的静态模板行为不变，脚本无感）：依次做四件事——
 
-1. 探测本机已安装的编程客户端（claude/opencode/codex/pi 的 config 路径存在性，复用 takeover 包的路径知识），列出探测结果；
+1. 探测本机已安装的编程客户端（各 takeover 模板声明的 config 路径存在性——预设含 claude/opencode/codex/pi/stepcode/kimi/gemini-cli，复用 takeover 包的路径知识），列出探测结果；
 2. 逐个询问启用哪些 provider（清单 = 内置模板 providers ∩ provider 注册表，不硬编码第二份），提示形如 `Enable zhipu (provider=zhipu, 10 models)? [y/N] `（一律默认 N，EOF = N）；
 3. 写出**最小 config.yaml**：只含选中 provider 的块（routes 全部自动推导）；落盘前重新 validate（fail-closed）。一个都没选 -> stderr `no providers selected — config.yaml not written` + exit 1；
 4. 探测到客户端时询问 `Take over detected client configs now (...)? [y/N] `，确认则当场执行 takeover（幂等备份机制与 `takeover` 命令相同）；最后打印下一步命令：每个选中 provider 的 `model-proxy login <name>`、（未执行 takeover 时）每个探测到客户端的 `model-proxy takeover <client>`、`model-proxy serve`、`model-proxy test <model>`（首个选中 provider 的首个模型，暴露名含 alias）。
@@ -875,7 +875,7 @@ Takeover
 - 结论区按严重度排序：✗ route 全灭 -> ⚠（pin / 配额将尽 / warnings / takeover 漂移）-> ✓ 健康 route 落点；无 ✗/⚠ 时首行 `✓ no problems found`。
 - route 全灭判定：schedule `ordered` 中 `available=true` 数为 0。daemon 的 decideOrder 只返回当前可调度目标（全灭时 `ordered` 为空），故 target 数与恢复时间候选由 CLI 端从生效路由表（推导 + 显式 routes）+ 池展开推导；`<CAUSE>` = `quota cooldown` / `daily cooldown` / `rate-limit cooldown` / `circuit breaker` / `model lock`，跨目标取最早恢复（模型锁按 target 的 model 精确匹配，数据源为 `/api/status` 的 `model_locks`）。
 - `request_log` 未开启时 Recent failures 节是一行 dim 提示（`request_log disabled — …`），不算错误；无任何失败记录时显示 `none recorded`。
-- takeover 三态：`not taken over`（无 .bak）/ `✓`（指针相符）/ `✗ drift`（指针不符、文件丢失或不可读；漂移细节进结论区）。漂移检查覆盖全部 takeover 模板，各 client 期望值与 takeover 写入完全一致：claude `env.ANTHROPIC_BASE_URL`、opencode `provider[<pid>].options.baseURL`（含 `/v1` 后缀）、codex `model_provider` + `[model_providers."<pid>"]` 的 `base_url`、pi `providers[<pid>].baseUrl`、gemini-cli `GOOGLE_GEMINI_BASE_URL`（带 `/v1` 后缀）、kimi（`~/.kimi-code/config.toml`）`providers."<pid>".base_url`；mcp-only 模板（claude-mcp）无漂移探针，豁免漂移判定（`(no drift probe)`）。
+- takeover 三态：`not taken over`（无 .bak）/ `✓`（指针相符）/ `✗ drift`（指针不符、文件丢失或不可读；漂移细节进结论区）。漂移检查覆盖全部 takeover 模板，各 client 期望值与 takeover 写入完全一致：claude `env.ANTHROPIC_BASE_URL`、opencode `provider[<pid>].options.baseURL`（含 `/v1` 后缀）、codex `model_provider` + `[model_providers."<pid>"]` 的 `base_url`、pi/stepcode `providers[<pid>].baseUrl`（同 pi 形状）、zcode 规则数组里按 providerId 匹配到的 provider 规则的 `config.api.baseUrl`、hermes（`~/.hermes/config.yaml`）`providers.<pid>.base_url`、workbuddy 自定义模型数组里按 vendor 匹配到的条目 `url`、gemini-cli `GOOGLE_GEMINI_BASE_URL`（带 `/v1` 后缀）、kimi（`~/.kimi-code/config.toml`）`providers."<pid>".base_url`；mcp-only 模板（claude-mcp）无漂移探针，豁免漂移判定（`(no drift probe)`）。
 - 漂移审计：`guard.audit` 开启（默认）时，每个漂移 client 追加一条 `kind=drift`、`agent=doctor` 的安全审计记录（`seclog.AppendSync`），`detail` 只含 `client=<名> expected=<期望host> actual=<实际host>`——`net/url` 解析取 `Host`，永不含 URL 路径与查询串；无 scheme 的指针（`evil-host:8317/v1` 会被误解析为 scheme）回退取第一个 `/` 前的部分（过滤控制字符），非 URL 占位值（含空格/括号的 `(file missing)` 等）归一为 `(no-url)`。**同一 client 当天已有 drift 记录则不重复追加**（漂移通常持续到用户修复；去重查询失败不阻断追加）。`guard.audit: false` 不写；append 失败只降级为 stderr `⚠ security audit append failed: <ERR>`，doctor 输出与 exit code 不变。
 
 ### 失败（stderr `✗ <ERR>` + exit 1）

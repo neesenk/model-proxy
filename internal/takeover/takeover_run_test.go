@@ -308,3 +308,178 @@ func TestRunRestore_AllSkipsMissingBackup(t *testing.T) {
 		t.Errorf("claude not restored from backup: %s", b)
 	}
 }
+
+// --- create:true templates (stepcode's optional models.json) ---
+
+// TestRunTakeover_CreateMissingConfig: a named create:true client whose
+// config file does not exist gets it created (no hard error): an empty .bak
+// with created:true meta stands in for the content backup, and restore
+// deletes the file again — the pre-takeover state was "no file".
+func TestRunTakeover_CreateMissingConfig(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	// Step Code is installed (config dir exists) but the user never
+	// customized models — models.json does not exist.
+	if err := os.MkdirAll(filepath.Join(fakeHome, ".stepcode"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	modelsJSON := filepath.Join(fakeHome, ".stepcode", "models.json")
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:15721",
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {OpenAIBaseURL: "http://z/v1", Provider: "zhipu", Models: []string{"glm-5.3"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{"glm-5.3": {{Provider: "zhipu", Model: "glm-5.3"}}},
+	}
+	bakDir := filepath.Join(fakeHome, ".mp")
+	facts := takeover.ModelFacts{
+		SourceDefault: -1,
+		Routes:        map[string][]configdomain.RouteTarget{"glm-5.3": {{Provider: "zhipu", Model: "glm-5.3"}}},
+	}
+
+	if err := takeover.RunTakeover(cfg, "stepcode", bakDir, facts, "", takeover.ModeUnified); err != nil {
+		t.Fatalf("named create:true takeover with missing config must succeed: %v", err)
+	}
+	rewritten, err := os.ReadFile(modelsJSON)
+	if err != nil {
+		t.Fatalf("takeover did not create models.json: %v", err)
+	}
+	if !strings.Contains(string(rewritten), `"model-proxy-openai"`) || !strings.Contains(string(rewritten), `"glm-5.3"`) {
+		t.Errorf("created models.json missing provider/models: %s", rewritten)
+	}
+	// The openai variant was auto-selected (openai-native provider) — its
+	// backup is an empty file with a created:true meta.
+	bak := filepath.Join(bakDir, "stepcode-openai.bak")
+	bakData, err := os.ReadFile(bak)
+	if err != nil {
+		t.Fatalf("created marker backup missing: %v", err)
+	}
+	if len(bakData) != 0 {
+		t.Errorf("created marker backup must be empty, got %d bytes", len(bakData))
+	}
+	meta, err := os.ReadFile(bak + ".meta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(meta), `"created": true`) {
+		t.Errorf("meta must mark created:true: %s", meta)
+	}
+
+	// Re-takeover keeps the created marker (the original pre-takeover state —
+	// "no file" — stays restorable).
+	if err := takeover.RunTakeover(cfg, "stepcode", bakDir, facts, "", takeover.ModeUnified); err != nil {
+		t.Fatal(err)
+	}
+	meta2, _ := os.ReadFile(bak + ".meta")
+	if !strings.Contains(string(meta2), `"created": true`) {
+		t.Errorf("re-takeover overwrote the created marker: %s", meta2)
+	}
+
+	// Restore deletes the created file and the markers.
+	if err := takeover.RunRestore(cfg, "stepcode", bakDir, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(modelsJSON); !os.IsNotExist(err) {
+		t.Errorf("restore of a created file must delete it: %v", err)
+	}
+	if _, err := os.Stat(bak); !os.IsNotExist(err) {
+		t.Errorf("restore must remove the backup marker: %v", err)
+	}
+}
+
+// TestRunTakeover_AllCreatesOnlyWhenInstalled: batch mode (`all`) creates a
+// missing create:true config only when the agent's config directory exists —
+// it must not materialize configs for agents the user never ran.
+func TestRunTakeover_AllCreatesOnlyWhenInstalled(t *testing.T) {
+	md := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{"zhipuai":{"models":{"glm-5.3":{"limit":{"context":128000,"output":8192}}}}}`)
+	}))
+	defer md.Close()
+	t.Setenv("MP_MODELSDEV_URL", md.URL)
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:15721",
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {OpenAIBaseURL: "http://z/v1", Provider: "zhipu", Models: []string{"glm-5.3"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{"glm-5.3": {{Provider: "zhipu", Model: "glm-5.3"}}},
+	}
+	bakDir := filepath.Join(fakeHome, ".mp")
+	modelsJSON := filepath.Join(fakeHome, ".stepcode", "models.json")
+
+	// No ~/.stepcode at all: stepcode is skipped like every uninstalled agent.
+	report, err := takeover.RunTakeoverReport(cfg, "all", bakDir, takeover.ModelFacts{SourceDefault: -1}, "", takeover.ModeUnified, takeover.ScopeAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(modelsJSON); !os.IsNotExist(err) {
+		t.Fatalf("batch mode created a config for an uninstalled agent: %v", err)
+	}
+	foundSkip := false
+	for _, s := range report.Skipped {
+		if s == "stepcode-openai" || s == "stepcode" {
+			foundSkip = true
+		}
+	}
+	if !foundSkip {
+		t.Errorf("uninstalled stepcode must be reported skipped, got applied=%v skipped=%v", report.Applied, report.Skipped)
+	}
+
+	// ~/.stepcode exists (Step Code ran once): batch takeover creates
+	// models.json.
+	if err := os.MkdirAll(filepath.Join(fakeHome, ".stepcode"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := takeover.RunTakeoverReport(cfg, "all", bakDir, takeover.ModelFacts{SourceDefault: -1}, "", takeover.ModeUnified, takeover.ScopeAll); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(modelsJSON); err != nil {
+		t.Fatalf("batch mode did not create models.json for an installed agent: %v", err)
+	}
+}
+
+// TestClientInstalled: the single authoritative installed-detection shared by
+// the config-init wizard, `takeover all` batch creation and the Web surface —
+// config file present, or create:true + config directory present.
+func TestClientInstalled(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// workbuddy (create:true): absent dir → not installed; dir present → installed.
+	wb, err := takeover.TemplateByName("workbuddy", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if takeover.ClientInstalled(wb) {
+		t.Error("workbuddy installed without ~/.workbuddy")
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".workbuddy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !takeover.ClientInstalled(wb) {
+		t.Error("workbuddy not detected with ~/.workbuddy present")
+	}
+
+	// claude (no create): only the config file counts.
+	cl, err := takeover.TemplateByName("claude", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if takeover.ClientInstalled(cl) {
+		t.Error("claude installed without settings.json")
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if takeover.ClientInstalled(cl) {
+		t.Error("claude must not count a bare ~/.claude dir (not create:true)")
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !takeover.ClientInstalled(cl) {
+		t.Error("claude not detected with settings.json present")
+	}
+}

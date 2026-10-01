@@ -25,7 +25,11 @@
 ```yaml
 description: 人类可读描述(takeover list 显示)
 file: ~/.claude/settings.json     # 客户端配置文件(~ 展开),必填
-format: json                       # json | toml | env,必填
+create: true                       # 可选(默认 false):文件不存在时也接管——空 .bak + created:true
+                                   # meta 标记代替内容备份,restore 把文件删回"不存在"
+                                   # (stepcode 的可选 models.json、zcode 的 provider_config.json);
+                                   # `all` 仅当父目录存在(agent 已安装)时才创建,单独指定客户端总是创建
+format: json                       # json | toml | env | yaml,必填
 client: claude                     # 客户端族(默认 = 模板名,即单变体族)
 protocol: anthropic                # anthropic | openai | responses;多变体族必填且互不相同
 base_url: bare                     # bare(默认) | v1(追加 /v1)
@@ -60,9 +64,16 @@ variants:                          # 多协议 agent 单文档声明(opencode/pi
 env:                               # format=env:KEY=VALUE 文件(注释/未管键保留)
   set: {GOOGLE_GEMINI_BASE_URL: "{{base_url}}", GEMINI_API_KEY: "{{token}}"}
 
+yaml:                              # format=yaml:dotted.path → 值(嵌套 map/list 皆可)——
+  set:                             #   注释保留的 YAML 编辑(yaml.v3 节点手术,hermes 的
+    model.provider: "{{provider_id}}"   #   config.yaml 自身就是 round-trip 写回;
+    providers.{{provider_id}}.base_url: "{{base_url}}"   # 重复键收敛、缺失键追加)
+  drift_path: providers.{{provider_id}}.base_url   # 漂移探针(map 路径,期望值 = base_url)
+
 models:                            # 可选:按暴露模型逐个输出元数据
-  shape: opencode | pi | kimi      # 集合渲染器(含元数据默认值)
-  json_path: provider.{{provider_id}}.models   # opencode/pi:集合注入点
+  shape: opencode | pi | kimi | zcode | workbuddy  # 集合渲染器(含元数据默认值);
+                                   #   zcode/workbuddy 是 Go 侧数组 upsert 合并(见预设表)
+  json_path: provider.{{provider_id}}.models   # opencode/pi:集合注入点(zcode 不用——数组合并在 Go 侧)
   toml_section: 'models."{{model.id}}"'        # kimi:每模型段名
   toml_body: |                     # 支持 {{model.id}} {{model.context}} {{model.output}} {{provider_id}}
     provider = "{{provider_id}}"               #   及 kimi 能力块 {{model.capabilities}} {{model.efforts}}
@@ -71,8 +82,9 @@ models:                            # 可选:按暴露模型逐个输出元数据
   also_remove: 'models.{{model.id}}'           # 可选:写前清理旧段(如未加引号的遗留块)
 
 mcp:                               # 可选:把网关 mcp:/mcp_routes: 面写成客户端 MCP 配置
-  file: ~/.claude.json             # 可选:MCP 存于独立 JSON 文件时(claude/kimi/pi;缺省写主文件,如 opencode/codex)——独立备份单元 <name>-mcp,与主文件格式无关(mcp 块按 JSON 语义校验/渲染)
-  json_path: mcpServers            # json:对象注入点(claude 的 ~/.claude.json;opencode: mcp)
+  file: ~/.claude.json             # 可选:MCP 存于独立文件时(claude/kimi/pi/stepcode;缺省写主文件,如 opencode/codex)——独立备份单元 <name>-mcp,与主文件格式无关
+  format: json                     # 独立文件的语法:json(默认,mcpServers 形状) | toml(stepcode 的 config.toml [mcp_servers] 段);不带 file 时省略(主文件 format 决定)
+  json_path: mcpServers            # json/yaml:对象注入点(claude 的 ~/.claude.json;opencode: mcp;hermes: mcp_servers)
   json_entry: {type: http, url: "{{mcp.url}}"}  # 每条目值模板(占位符见下)
   toml_section: 'mcp_servers."{{mcp.name}}"'   # toml:每条目段名
   include_routed_members: false    # 可选(默认 false):被 mcp_routes 聚合的成员 server 不再单独写条目——route 是规范入口,成员直连会造成客户端工具重叠;true 恢复全量投影
@@ -93,19 +105,23 @@ mcp:                               # 可选:把网关 mcp:/mcp_routes: 面写成
 `{{model.efforts}}`（`support_efforts` + `default_effort` 两行块，模型无 effort
 档位时渲染为空——写空档位会破坏 kimi-cli 的 effort 选择器）。
 
-mcp 渲染是**合并语义**：先清理指向本代理 `/mcp/` 的陈旧条目（JSON 按 url 前缀、TOML 按
+mcp 渲染是**合并语义**：先清理指向本代理 `/mcp/` 的陈旧条目（JSON/YAML 按 url 前缀、TOML 按
 段名前缀+正文 URL 匹配），再写入当前面；用户自有 MCP 条目保留；网关面无条目时不动客户端
-配置。env 格式不支持 mcp 块（校验拒绝）。接管前不存在的独立 mcp 文件（pi 的
+配置。env 格式不支持 mcp 块（校验拒绝）。独立 mcp 文件按其 `format:` 渲染（json 默认 /
+toml），接管前不存在的独立 mcp 文件（pi 的
 `~/.pi/agent/mcp.json` 常见——只有 pi-mcp-adapter 写过设置才会存在）无备份可做，takeover
-创建它；restore 因无 `<name>-mcp.bak` 不动它（删除可能丢失客户端接管后写入的状态），
-残留的网关条目随代理下线自然失效。
+创建它（toml 独立文件仅在网关面非空时创建，空面不落空文件）；restore 因无 `<name>-mcp.bak`
+不动它（删除可能丢失客户端接管后写入的状态），残留的网关条目随代理下线自然失效。
 
 ## 协议感知变体选择
 
 单协议 agent（claude、codex、gemini-cli）只有一种写法，按它支持的协议写。
-多协议 agent（pi、opencode）每种协议一个模板变体，用 `client:` 归族、
+多协议 agent（pi、opencode、stepcode、zcode、hermes）每种协议一个模板变体，用 `client:` 归族、
 `protocol:` 标注（pi 族：pi=anthropic / pi-openai=openai / pi-responses=responses；
-opencode 族：opencode=anthropic / opencode-openai=openai / opencode-responses=responses）。**takeover 的目标是让 agent 用 provider 原生
+opencode 族：opencode=anthropic / opencode-openai=openai / opencode-responses=responses；
+stepcode 族同 pi 命名：stepcode=anthropic / stepcode-openai=openai / stepcode-responses=responses；
+zcode 族同命名：zcode=anthropic / zcode-openai=openai / zcode-responses=responses；
+hermes 族同命名：hermes=anthropic / hermes-openai=openai / hermes-responses=responses）。**takeover 的目标是让 agent 用 provider 原生
 协议直连模型**——协议与上游一致时是字节级透传，不一致才走
 `internal/protocol` 转换（开销与兼容性边界见
 `docs/architecture/protocol-conversion.md`）。`--mode` 决定多协议族怎么写：
@@ -170,6 +186,10 @@ opencode-go、凭据池 0 账号墓碑、构建失败）整体剔除——这些
 | claude | `~/.claude/settings.json` | json | env 注入 `ANTHROPIC_BASE_URL`(bare)+ `ANTHROPIC_AUTH_TOKEN`；Claude Code 自拼 `/v1/messages`。**同一模板还接管 MCP**：`mcp.file: ~/.claude.json`（Claude Code 的 user-scope MCP 存在与主配置不同的文件）——一次 takeover 同时落两个文件，各自独立备份单元（`claude.bak` / `claude-mcp.bak`），restore 一并恢复 |
 | opencode(单文档 3 变体) | `~/.config/opencode/opencode.json` | json | 变体 = 协议档位:`@ai-sdk/anthropic`(自拼 `/messages`)/ `@ai-sdk/openai-compatible`(Chat Completions,provider_id `model-proxy-openai`)/ `@ai-sdk/openai`(Responses,provider_id `model-proxy-responses`),base_url 均 /v1 + 全量模型(opencode 形状)+ 顶层共享 mcp 块 |
 | pi(单文档 3 变体) | `~/.pi/agent/models.json` | json | 变体 = 协议档位:`anthropic-messages`(base_url 裸,pi 自拼 `/v1/messages`)/ `openai-completions` / `openai-responses`(base_url 带 /v1,独立 provider_id)+ 全量模型(pi 形状)。**同一模板还接管 MCP**:`mcp.file: ~/.pi/agent/mcp.json`(pi 核心无内建 MCP,靠扩展读该 Pi 全局文件;条目 `{type: http, url}` ——主流 pi-mcp-adapter 忽略 type 按 url 判别、pi-mcp-client 显式校验 type;勿用 `transport` 字段:严格实现会拒绝未知字段整文件报错)——顶层共享 mcp 块,变体间共享一个 aux 文件,独立备份单元 `<variant>-mcp.bak`,restore 一并恢复 |
+| stepcode(单文档 3 变体) | `~/.stepcode/models.json` | json | Step Code 派生自 pi,models.json 同 pi 形状(`providers.<id>` + baseUrl/api/apiKey/models,compat 字段同 schema)。变体 = 协议档位:`anthropic-messages`(base_url 裸)/ `openai-completions` / `openai-responses`(base_url 带 /v1,独立 provider_id)+ 全量模型(pi 形状)。**`create: true`**:models.json 是 Step Code 的可选文件(只有自定义模型才存在),文件不存在也接管,restore 删回不存在。**同一模板还接管 MCP**:`mcp.file: ~/.stepcode/config.toml` + `format: toml`——Step Code 的统一 TOML 配置,MCP 在 `[mcp_servers."<name>"]` 段(url 条目,HTTP transport);根表设置与用户条目保留,独立备份单元 `<variant>-mcp.bak`,restore 一并恢复 |
+| zcode(单文档 3 变体) | `~/.zcode/v2/provider_config.json` | json | ZCode(zai-org/ZCode)的 personal provider 层:`schemaVersion: 1` 规则文档,`config.providerConfigRules.providerRules` 一条 provider 规则(api-key 占位 + `personalModelIds`/`modelOrder` 全量模型)+ `config.modelConfigRules.providerModelRules` 每模型一条规则(contextWindow/输入模态/tool_call/effort 档位来自 models.dev;reasoning map 由 ZCode 内置 per-api-type 规则供给,只写 values/max)+ `config.defaultModelSelection` 指向主模型(effort 档取最高)。**数组按 providerId upsert 合并**:我们 id 的旧条目删除重排,用户在 UI 里加的其他 personal provider/规则原样保留(形状 zcode 的 Go 侧合并,json.set 的整组替换表达不了)。变体 = 协议档位:`anthropic-messages`(base_url 裸)/ `openai-chat-completions` / `openai-responses`(base_url 带 /v1,独立 provider_id)——api.type 从变体 `protocol:` 派生,故 zcode 形状强制声明 protocol。**`create: true`**。漂移探针穿越规则数组按 providerId 匹配(不靠位置索引)。**同一模板还接管 MCP**:`mcp.file: ~/.zcode/cli/config.json`,`mcp.servers` 嵌套键写 `{type: http, url}` 条目,独立备份单元 `<variant>-mcp.bak` |
+| hermes(单文档 3 变体) | `~/.hermes/config.yaml` | yaml | Nous Research 的 Hermes Agent:`providers.<id>` 命名 provider(base_url/api_key 占位/api_mode 按协议档位:`anthropic_messages`(base_url 裸,Anthropic SDK 自拼 `/v1/messages`)/ `chat_completions` / `codex_responses`(base_url 带 /v1))+ `model.provider`/`model.default` 选择器(指向主模型)+ 条目级 `session_affinity_header: x-session-id`(hermes 每请求带会话 id,代理默认允许列表直接归因)。**format=yaml 是注释保留编辑**(hermes 自身用 ruamel round-trip 写回该文件)。模型目录不落盘——hermes 按 `{base_url}/models` 实时发现(代理的 `/v1/models` 即全量暴露面)。hermes 同时只能选中一个 provider:unified 是正常模式,split 下多个命名条目共存、选择器后写者胜。**同一模板还接管 MCP**:顶层 `mcp_servers` map 写 `{url}` 条目(hermes 按 url 判别 HTTP transport),与主文件同文档合并 |
+| workbuddy | `~/.workbuddy/models.json` | json | 腾讯 WorkBuddy 桌面端的本地自定义模型:**数组按 vendor 标记 upsert 合并**(形状 workbuddy 的 Go 侧渲染;数组根文件提升为 `{models: [...]}` 写回——app 两种都收)——`vendor = provider_id` 标记我们的条目(重接管删除重排,URL 变更/模型收缩同步),用户自加的自定义模型原样保留。条目:id/name(暴露名)、url(`/v1`——agent 归一化自拼 `/chat/completions`,WorkBuddy 自定义模型只讲 OpenAI Chat)、apiKey 占位、maxInputTokens/maxOutputTokens、supportsToolCall/supportsImages/supportsReasoning 来自 models.dev(无元数据不写该能力)。单协议族(chat 唯一 wire)。**`create: true`**。**同一模板还接管 MCP**:`mcp.file: ~/.workbuddy/mcp.json`,`mcpServers` 写 `{url}` 条目(runtime 自动 streamableHttp→sse 回退),独立备份单元 `workbuddy-mcp.bak` |
 | codex | `~/.codex/config.toml` | toml | `[model_providers."<id>"]`(wire_api=responses,base_url 带 /v1——codex 拼 base_url+/responses)+ 顶层 `model_provider` 选择器 + **模型目录**：`~/.codex/model-proxy-models.json`(shape codex,每暴露模型一条 ModelInfo：visibility=list、context/effort 档位/输入模态来自 models.dev)+ 顶层 `model_catalog_json` 指向它——codex 加载后**替换**内置目录，/model 选择器即列出全部代理模型；restore 一并删除目录文件 |
 | kimi | `~/.kimi-code/config.toml` | toml | `[providers."<id>"]`(`openai`,带 /v1——kimi-cli 2.x 移除了 `openai_legacy` 运行时类型,模型 wire protocol 从 provider type 解析,缺失即报 `must declare a wire protocol`)+ 每模型 `[models."<name>"]`(provider/model/max_context_size/capabilities,可选 support_efforts+default_effort;点号名必须引号;无元数据回退 `routing.DefaultModelMetadata.Context`)。**同一模板还接管 MCP**:`mcp.file: ~/.kimi-code/mcp.json`(Kimi Code 的 MCP 配置独立于 config.toml,`mcpServers`/`url` 条目)——独立备份单元 `kimi-mcp.bak`,restore 一并恢复 |
 | gemini-cli | `~/.gemini/.env` | env | `GOOGLE_GEMINI_BASE_URL`(带 /v1)+ `GEMINI_API_KEY` 占位 |
@@ -183,7 +203,11 @@ opencode-go、凭据池 0 账号墓碑、构建失败）整体剔除——这些
 （openai-responses 默认就发）。`piModelsCollection` 给每个模型写入
 `compat: {sendSessionAffinityHeaders: true}`,因此 takeover 后的 pi 请求带会话
 UUID，代理据此填请求日志 `session_id` 与 live 事件 `session_id`（见
-`docs/web-api.md` 的 `/api/events`、Live 会话分析）。
+`docs/web-api.md` 的 `/api/events`、Live 会话分析）。stepcode 复用同一 pi 形状渲染
+（其 models.json compat schema 与 pi 一致），会话归因同样开箱即用。zcode 客户端
+原生发 `x-session-id`（在代理默认 `session_headers` 允许列表内，实测见
+`internal/provider/testdata/zcode-wire/` 的真实 CLI 捕获），takeover 后无需任何
+配置即获得会话归因。
 
 **无会话头客户端的归因（spec body 字段）**：严格按 OpenAI/Anthropic API spec
 实现的 agent（Kimi Code、Codex）不发自定义会话头，而是把稳定会话 id 放在
@@ -217,6 +241,16 @@ takeover 把它们翻译成各客户端的模型能力声明——**没有元数
   元数据已有；缺 `reasoning` 会让 pi 把思考模型当纯聊天模型（既有行为已覆盖）。
 - **opencode**：模型 schema 的 `reasoning`/`tool_call` 布尔 + `modalities` 照写；
   缺失会让 opencode 隐藏思考/工具能力。
+- **zcode**：`providerModelRules` 每模型 `properties`（contextWindow、inputFormat
+  逐模态、supportsToolCall）+ `optionSpecs`（maxOutputTokens.max、reasoning 模型的
+  effort 档位 values；无档位写 `["disabled","enabled"]` 开关——ZCode 内置规则同款；
+  非 reasoning 模型不写 reasoningLevel）。reasoning effort → wire 参数的 map 由 ZCode
+  内置的 per-api-type 规则（`modelApiRules`，匹配 `.*`）供给，takeover 不重复生成。
+  默认模型选择的 reasoningLevel 取主模型最高档（无档位但有 reasoning 取 `enabled`，
+  非 reasoning 省略 options——写了模型不支持的档位会过不了 selection 校验）。
+- **workbuddy**：`maxInputTokens`/`maxOutputTokens` 照写（缺元数据回退保守默认），
+  `supportsToolCall`/`supportsImages`/`supportsReasoning` 只在 models.dev 断言时写
+  （app 对可选布尔只做类型检查，缺失即不支持——与"不虚构能力"同义）。
 - **claude / codex / gemini-cli**：配置 schema 无逐模型能力声明（claude 只有 env、
   codex 的 `model_reasoning_effort` 是用户偏好而非能力声明、gemini-cli 是 env 键），
   无需也无处可写——复查确认。
@@ -229,7 +263,7 @@ Catalog）后生效。
 ## 机制契约（与模板机制无关的部分不变）
 
 - 备份位于 `<configDir>/.model-proxy/<client>.bak`(+ sha256 meta)；
-- `takeover all` / `restore all` 遇到未安装客户端时跳过并继续；单独指定客户端而文件不存在时返回硬错误；未知模板/族名是硬错误（列出可用模板与族）；`takeover all` 每族只应用自动选中的一个变体（见上文协议感知变体选择）；
+- `takeover all` / `restore all` 遇到未安装客户端时跳过并继续；单独指定客户端而文件不存在时返回硬错误（`create: true` 模板例外：文件不存在也接管——空 `.bak` + `created: true` meta 标记代替内容备份，restore 把文件删回"不存在"；`all` 仅当父目录存在即 agent 已安装时才创建）；未知模板/族名是硬错误（列出可用模板与族）；`takeover all` 每族只应用自动选中的一个变体（见上文协议感知变体选择）；
 - takeover 前必须备份，restore 后不得保留代理专属残片；
 - 对**已接管**客户端再次 takeover 是受支持的一等操作（CLI 直接重复 `takeover <client>`，
   Web 的 Re-takeover 按钮走同一 `RunTakeover`）：幂等备份保留**原始**备份不被覆盖，
@@ -263,4 +297,7 @@ Catalog）后生效。
   toml 漂移探针同样按语义找段，客户端改拼法不误报；
 - 漂移探针模板驱动：json 用 `drift_path`，toml 有 `model_provider` top_key 时
   codex 式（选择器 + 段 base_url）否则 kimi 式（首个段 base_url），env 取渲染值
-  等于 base_url 的键；无探针信息的自定义模板显示 `(no drift probe)`。
+  等于 base_url 的键；无探针信息的自定义模板显示 `(no drift probe)`。json 探针
+  穿越数组时按元素的 `providerId`（zcode 规则数组）或 `vendor`（workbuddy 自定义
+  模型）匹配我们管理的条目——UI 可能重排，不靠位置索引；workbuddy 的全部自有条目
+  共享同一 url，首个 vendor 命中即正确探针。纯 map 路径行为不变。

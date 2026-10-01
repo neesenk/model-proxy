@@ -74,6 +74,59 @@ func Backup(file, bakDir, name string) error {
 	return backup(file, bakDir, name, ScopeAll)
 }
 
+// MarkCreated records a takeover of a config file that did NOT exist (a
+// create:true template — stepcode's optional models.json): an empty .bak
+// plus a created:true meta. The .bak keeps drift's "taken over" marker
+// working; restore reads created:true and deletes the file again instead of
+// writing empty bytes back — the pre-takeover state was "no file". An
+// existing backup (created marker or real content) is never overwritten, so
+// a re-takeover keeps the original pre-takeover state restorable.
+func MarkCreated(file, bakDir, name string, scope RewriteScope) error {
+	if err := os.MkdirAll(bakDir, 0o700); err != nil {
+		return fmt.Errorf("create backup dir %s: %w", bakDir, err)
+	}
+	bak := filepath.Join(bakDir, name+".bak")
+	if _, err := os.Stat(bak); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat backup %s: %w", bak, err)
+	}
+	if err := atomicWriteFile(bak, nil, 0o600); err != nil {
+		return err
+	}
+	meta := map[string]any{
+		"backed_up_at": time.Now().Format(time.RFC3339),
+		"sha256":       Sha256hex(nil),
+		"path":         file,
+		"created":      true,
+	}
+	if scope != ScopeAll {
+		meta["scope"] = string(scope)
+	}
+	mb, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(bak+".meta", mb, 0o600)
+}
+
+// backupCreated reports whether the backup meta marks a created-file
+// takeover (see MarkCreated). Meta problems degrade to false — a real
+// (content) backup restores as content, as before.
+func backupCreated(bak string) bool {
+	mb, err := os.ReadFile(bak + ".meta")
+	if err != nil {
+		return false
+	}
+	var meta struct {
+		Created bool `json:"created"`
+	}
+	if err := json.Unmarshal(mb, &meta); err != nil {
+		return false
+	}
+	return meta.Created
+}
+
 func backup(file, bakDir, name string, scope RewriteScope) error {
 	if _, err := os.Stat(file); err != nil {
 		if os.IsNotExist(err) {
@@ -134,6 +187,10 @@ func backup(file, bakDir, name string, scope RewriteScope) error {
 // marker) reports the client as not taken over, and a later takeover takes a
 // fresh backup instead of keeping a stale one. Marker removal failures are
 // non-fatal — the config is already restored — and only warned about.
+// A created:true backup (MarkCreated — the file did not exist before the
+// takeover) restores by DELETING the file: the pre-takeover state was "no
+// file", and writing the empty backup back would leave an invalid config
+// behind.
 func Restore(file, bakDir, name string) error {
 	bak := filepath.Join(bakDir, name+".bak")
 	data, err := os.ReadFile(bak)
@@ -146,7 +203,14 @@ func Restore(file, bakDir, name string) error {
 	if err := verifyBackupIntegrity(bak, data); err != nil {
 		return err
 	}
-	if err := atomicWriteFile(file, data, preserveMode(file, 0o600)); err != nil {
+	if backupCreated(bak) {
+		// Created-file takeover (MarkCreated): the pre-takeover state was
+		// "no file", so restore deletes it instead of writing the empty
+		// backup back — no proxy-specific fragment survives the restore.
+		if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("restore %s: could not remove takeover-created file: %w", file, err)
+		}
+	} else if err := atomicWriteFile(file, data, preserveMode(file, 0o600)); err != nil {
 		return err
 	}
 	for _, marker := range []string{bak, bak + ".meta"} {
@@ -406,12 +470,29 @@ func RunTakeoverReportOpts(cfg *configdomain.Config, which, bakDir string, facts
 			logx.Infof("  %s", c.Note)
 		}
 		if err := BackupScoped(c.File, bakDir, c.Name, opts.Scope); err != nil {
-			if batch && errors.Is(err, ErrNoFile) {
+			createOK := errors.Is(err, ErrNoFile) && c.Template != nil && c.Template.Create
+			if createOK && batch {
+				// Batch mode only creates a missing config when the agent is
+				// installed — `all` must not materialize configs for agents
+				// the user never ran.
+				createOK = ClientInstalled(c.Template)
+			}
+			switch {
+			case createOK:
+				// create:true template (stepcode's optional models.json): no
+				// content to back up — a created marker stands in so restore
+				// deletes the file again.
+				if err := MarkCreated(c.File, bakDir, c.Name, opts.Scope); err != nil {
+					return report, fmt.Errorf("%s backup: %w", c.Name, err)
+				}
+				logx.Infof("  ~ %s config not present — creating %s", c.Name, c.File)
+			case batch && errors.Is(err, ErrNoFile):
 				logx.Infof("  ~ %s skipped (config not present: %s)", c.Name, c.File)
 				report.Skipped = append(report.Skipped, c.Name)
 				continue
+			default:
+				return report, fmt.Errorf("%s backup: %w", c.Name, err)
 			}
-			return report, fmt.Errorf("%s backup: %w", c.Name, err)
 		}
 		if aux := mcpAuxFile(c.Template); aux != "" {
 			// A separate MCP storage file is part of the same takeover — its
@@ -565,6 +646,29 @@ type ClientSpec struct {
 	// this variant from a multi-template family ("" for exact-name or
 	// single-variant resolution). RunTakeover logs it.
 	Note string
+}
+
+// ClientInstalled reports whether the agent a template targets is present on
+// this machine: its config file exists, or — for create:true templates whose
+// config file is OPTIONAL (stepcode's models.json, zcode's
+// provider_config.json, workbuddy's models.json — the agent creates them
+// only when the user customizes) — the agent's config directory exists.
+// This is the single authoritative installed-detection: the config-init
+// wizard, `takeover all` batch creation and the Web surface projection all
+// share it.
+func ClientInstalled(t *Template) bool {
+	if t == nil {
+		return false
+	}
+	if _, err := os.Stat(t.File); err == nil {
+		return true
+	}
+	if t.Create {
+		if st, err := os.Stat(filepath.Dir(t.File)); err == nil && st.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // ListClients resolves the client set for which ("" / "all" = every template,

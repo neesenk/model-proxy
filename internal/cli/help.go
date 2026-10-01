@@ -104,8 +104,8 @@ Options:
   the auto-selected variant of each family with *.
 
 Clients:
-  claude | opencode | pi | codex | kimi | gemini-cli | all
-  (variants: opencode-openai | opencode-responses | pi-openai | pi-responses)`,
+  claude | opencode | pi | stepcode | zcode | hermes | codex | kimi | gemini-cli | workbuddy | all
+  (variants: opencode-openai | opencode-responses | pi-openai | pi-responses | stepcode-openai | stepcode-responses | zcode-openai | zcode-responses | hermes-openai | hermes-responses)`,
 
 	"restore": `restore <client> [--config PATH]
 

@@ -510,3 +510,285 @@ func TestMCPTOMLCRLFAndCustomPrefixSection(t *testing.T) {
 		t.Fatalf("unrelated user section dropped or its line endings rewritten:\n%q", text)
 	}
 }
+
+// TestMCPStepcodeTOMLAuxRendering: the stepcode preset writes models into
+// ~/.stepcode/models.json (pi shape, same as pi) and the gateway MCP surface
+// as [mcp_servers."<name>"] sections into the SEPARATE ~/.stepcode/config.toml
+// — Step Code's unified TOML config, the first mcp.file in TOML syntax.
+// Root settings and user MCP servers survive; stale proxy sections are
+// cleaned; the whole render is idempotent.
+func TestMCPStepcodeTOMLAuxRendering(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	main := filepath.Join(home, ".stepcode", "models.json")
+	aux := filepath.Join(home, ".stepcode", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(main), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Seed config.toml like a real Step Code install: root settings, a user
+	// MCP server, and a stale proxy entry from an old run (old proxy port).
+	if err := os.WriteFile(aux, []byte("theme = \"dark\"\n\n[mcp_servers.keep-me]\nurl = \"https://other.example/mcp\"\n\n[mcp_servers.exa]\nurl = \"http://127.0.0.1:9999/mcp/exa\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := takeover.TemplateByName("stepcode", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := cfgWithMCP()
+	routes := map[string][]configdomain.RouteTarget{
+		"glm-5.3": {{Provider: "zhipu", Model: "glm-5.3", Priority: 1}},
+	}
+	if err := tmpl.Rewrite(cfg, nil, routes); err != nil {
+		t.Fatal(err)
+	}
+
+	// models.json: provider entry + pi-shaped model collection.
+	mdata, err := os.ReadFile(main)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mv map[string]any
+	if err := json.Unmarshal(mdata, &mv); err != nil {
+		t.Fatal(err)
+	}
+	providers, _ := mv["providers"].(map[string]any)
+	prov, ok := providers["model-proxy"].(map[string]any)
+	if !ok {
+		t.Fatalf("providers.model-proxy missing: %s", mdata)
+	}
+	if prov["baseUrl"] != "http://127.0.0.1:15721" || prov["api"] != "anthropic-messages" || prov["apiKey"] != "PROXY_MANAGED" {
+		t.Fatalf("provider entry = %v", prov)
+	}
+	models, _ := prov["models"].([]any)
+	if len(models) != 1 {
+		t.Fatalf("models collection = %v", models)
+	}
+	if m0, _ := models[0].(map[string]any); m0["id"] != "glm-5.3" {
+		t.Fatalf("model entry = %v", m0)
+	}
+
+	// config.toml: root settings + user server survive, stale proxy section
+	// cleaned, current surface written (route + unrouted server only).
+	text, err := os.ReadFile(aux)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(text)
+	if !strings.Contains(s, `theme = "dark"`) {
+		t.Fatalf("root settings dropped:\n%s", s)
+	}
+	if !strings.Contains(s, "[mcp_servers.keep-me]") {
+		t.Fatalf("user mcp server dropped:\n%s", s)
+	}
+	if strings.Contains(s, "http://127.0.0.1:9999/mcp/exa") {
+		t.Fatalf("stale proxy URL not cleaned:\n%s", s)
+	}
+	for _, name := range []string{"exa", "web-search"} {
+		if !strings.Contains(s, `[mcp_servers."`+name+`"]`) {
+			t.Fatalf("missing section %s:\n%s", name, s)
+		}
+		if !strings.Contains(s, `url = "http://127.0.0.1:15721/mcp/`+name+`"`) {
+			t.Fatalf("missing URL for %s:\n%s", name, s)
+		}
+	}
+	if strings.Contains(s, `[mcp_servers."zhipu-search"]`) {
+		t.Fatalf("routed member rendered separately (prune broken):\n%s", s)
+	}
+
+	// Idempotent: rendering converges to a fixed point (the first render may
+	// leave a blank line where the stale section was cleaned — same semantic
+	// idempotency contract as the codex TOML main-file rendering: no
+	// duplicate sections, no further changes once converged).
+	if err := tmpl.Rewrite(cfg, nil, routes); err != nil {
+		t.Fatal(err)
+	}
+	text2, _ := os.ReadFile(aux)
+	if err := tmpl.Rewrite(cfg, nil, routes); err != nil {
+		t.Fatal(err)
+	}
+	text3, _ := os.ReadFile(aux)
+	if string(text3) != string(text2) {
+		t.Fatalf("render did not converge:\n%s\n---\n%s", text2, text3)
+	}
+	for _, header := range []string{`[mcp_servers."exa"]`, `[mcp_servers."web-search"]`, "[mcp_servers.keep-me]"} {
+		if strings.Count(string(text3), header) != 1 {
+			t.Fatalf("duplicate or missing section %s after re-render:\n%s", header, text3)
+		}
+	}
+	mdata2, _ := os.ReadFile(main)
+	if string(mdata2) != string(mdata) {
+		t.Fatal("second render changed models.json")
+	}
+
+	// The openai variant shares the same TOML aux file.
+	openai, err := takeover.TemplateByName("stepcode-openai", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := openai.Rewrite(cfg, nil, routes); err != nil {
+		t.Fatal(err)
+	}
+	text4, _ := os.ReadFile(aux)
+	if string(text4) != string(text3) {
+		t.Fatalf("variant rewrite changed the shared aux file:\n%s", text4)
+	}
+}
+
+// TestMCPTOMLAuxEmptySurfaceSkips: with no gateway MCP surface the TOML aux
+// file is left byte-identical (user sections — even proxy-looking ones — are
+// preserved because the template has no namespace to clean), and a missing
+// aux file is NOT created.
+func TestMCPTOMLAuxEmptySurfaceSkips(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	aux := filepath.Join(home, ".stepcode", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(aux), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := "theme = \"dark\"\n\n[mcp_servers.exa]\nurl = \"http://127.0.0.1:15721/mcp/exa\"\n"
+	if err := os.WriteFile(aux, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := takeover.TemplateByName("stepcode", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tmpl.Rewrite(cfgWith(nil, nil), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(aux)
+	if string(data) != original {
+		t.Fatalf("empty gateway surface rewrote config.toml:\n%s", data)
+	}
+
+	// Missing aux + empty surface: still no file afterwards.
+	if err := os.Remove(aux); err != nil {
+		t.Fatal(err)
+	}
+	if err := tmpl.Rewrite(cfgWith(nil, nil), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(aux); !os.IsNotExist(err) {
+		t.Fatalf("empty surface created an aux file: %v", err)
+	}
+}
+
+// TestMCPTOMLAuxScopes: ScopeMCP writes only the TOML aux (models.json not
+// created); ScopeModel writes only models.json (config.toml untouched).
+func TestMCPTOMLAuxScopes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	main := filepath.Join(home, ".stepcode", "models.json")
+	aux := filepath.Join(home, ".stepcode", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(main), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := takeover.TemplateByName("stepcode", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := cfgWithMCP()
+	if err := tmpl.RewriteScoped(cfg, nil, nil, takeover.ScopeMCP); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(main); !os.IsNotExist(err) {
+		t.Fatalf("ScopeMCP created the main models.json: %v", err)
+	}
+	text, err := os.ReadFile(aux)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(text), `[mcp_servers."web-search"]`) {
+		t.Fatalf("ScopeMCP did not write the aux surface:\n%s", text)
+	}
+
+	if err := os.Remove(aux); err != nil {
+		t.Fatal(err)
+	}
+	if err := tmpl.RewriteScoped(cfg, nil, nil, takeover.ScopeModel); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(main); err != nil {
+		t.Fatalf("ScopeModel did not write models.json: %v", err)
+	}
+	if _, err := os.Stat(aux); !os.IsNotExist(err) {
+		t.Fatalf("ScopeModel created the aux config.toml: %v", err)
+	}
+}
+
+// TestMCPTOMLAuxExplicitEmptySelectionClears: an explicit empty MCP selection
+// clears proxy-managed sections in the generated namespace while preserving
+// the user's own servers and root settings.
+func TestMCPTOMLAuxExplicitEmptySelectionClears(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	aux := filepath.Join(home, ".stepcode", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(aux), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(aux, []byte("theme = \"dark\"\n[mcp_servers.\"exa\"]\nurl = \"http://127.0.0.1:15721/mcp/exa\"\n[mcp_servers.\"same-prefix-user\"]\nurl = \"http://127.0.0.1:15721/mcp/same-prefix-user\"\n[mcp_servers.\"keep-me\"]\nurl = \"https://other.example/mcp\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := takeover.TemplateByName("stepcode", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := cfgWithMCP()
+	if err := tmpl.RewriteOptsFiltered(cfg, nil, nil, nil, takeover.TakeoverOptions{MCP: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	text, _ := os.ReadFile(aux)
+	s := string(text)
+	if strings.Contains(s, `[mcp_servers."exa"]`) {
+		t.Fatalf("explicit empty selection left proxy section exa:\n%s", s)
+	}
+	if strings.Contains(s, `[mcp_servers."web-search"]`) {
+		t.Fatalf("explicit empty selection left proxy section web-search:\n%s", s)
+	}
+	for _, keep := range []string{`theme = "dark"`, `[mcp_servers."keep-me"]`, `[mcp_servers."same-prefix-user"]`} {
+		if !strings.Contains(s, keep) {
+			t.Fatalf("explicit empty selection dropped %q:\n%s", keep, s)
+		}
+	}
+}
+
+// TestMCPTOMLAuxValidation: mcp.file + format toml requires toml_section +
+// toml_body; mcp.format without mcp.file is rejected (the main file's format
+// decides); unknown mcp.format values are rejected.
+func TestMCPTOMLAuxValidation(t *testing.T) {
+	if _, err := takeover.ParseTemplate("bad", "test", []byte(`
+file: /tmp/x.json
+format: json
+json:
+  set: {a: b}
+mcp:
+  file: /tmp/x.toml
+  format: toml
+  toml_section: 'mcp_servers."{{mcp.name}}"'
+`)); err == nil || !strings.Contains(err.Error(), "toml_body") {
+		t.Fatalf("toml aux without toml_body must fail: %v", err)
+	}
+	if _, err := takeover.ParseTemplate("bad2", "test", []byte(`
+file: /tmp/x.json
+format: json
+json:
+  set: {a: b}
+mcp:
+  format: toml
+  toml_section: 'mcp_servers."{{mcp.name}}"'
+  toml_body: 'url = "{{mcp.url}}"'
+`)); err == nil || !strings.Contains(err.Error(), "mcp.file") {
+		t.Fatalf("mcp.format without mcp.file must fail: %v", err)
+	}
+	if _, err := takeover.ParseTemplate("bad3", "test", []byte(`
+file: /tmp/x.json
+format: json
+json:
+  set: {a: b}
+mcp:
+  file: /tmp/x.txt
+  format: ini
+`)); err == nil || !strings.Contains(err.Error(), "mcp.format") {
+		t.Fatalf("unknown mcp.format must fail: %v", err)
+	}
+}

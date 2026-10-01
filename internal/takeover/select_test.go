@@ -130,10 +130,10 @@ func TestResolveClients_AllCollapsesToOnePerFamily(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveClients(all): %v", err)
 	}
-	// 10 preset templates collapse to 6 families: claude (model+mcp merged),
-	// codex, gemini-cli, kimi, opencode, pi.
-	if len(clients) != 6 {
-		t.Fatalf("ResolveClients(all) = %v, want one per family (6)", namesOf(clients))
+	// 20 preset templates collapse to 10 families: claude (model+mcp merged),
+	// codex, gemini-cli, hermes, kimi, opencode, pi, stepcode, workbuddy, zcode.
+	if len(clients) != 10 {
+		t.Fatalf("ResolveClients(all) = %v, want one per family (10)", namesOf(clients))
 	}
 	seen := map[string]int{}
 	for _, c := range clients {
@@ -144,13 +144,13 @@ func TestResolveClients_AllCollapsesToOnePerFamily(t *testing.T) {
 			t.Errorf("family %s resolved to %d variants, want exactly 1", family, n)
 		}
 	}
-	// The openai-native config must pull the openai variants of both
+	// The openai-native config must pull the openai variants of all
 	// multi-protocol families.
 	got := map[string]bool{}
 	for _, c := range clients {
 		got[c.Name] = true
 	}
-	if !got["pi-openai"] || !got["opencode-openai"] {
+	if !got["pi-openai"] || !got["opencode-openai"] || !got["stepcode-openai"] {
 		t.Errorf("openai-native config should select openai variants, got %v", namesOf(clients))
 	}
 }
@@ -488,9 +488,9 @@ json:
 }
 
 func TestResolveClients_ProtocolModeAllMixesPinAndFallback(t *testing.T) {
-	// `all --mode openai`: pi/opencode pin their openai variants;
-	// single-protocol families (claude, codex, kimi, gemini-cli) have no
-	// choice to make and stay on their one template.
+	// `all --mode openai`: pi/opencode/stepcode/zcode/hermes pin their openai
+	// variants; single-protocol families (claude, codex, kimi, gemini-cli)
+	// have no choice to make and stay on their one template.
 	clients, err := takeover.ResolveClientsMode(mixedNativeCfg(), "all", t.TempDir(), "openai")
 	if err != nil {
 		t.Fatalf("ResolveClientsMode(all, openai): %v", err)
@@ -499,12 +499,12 @@ func TestResolveClients_ProtocolModeAllMixesPinAndFallback(t *testing.T) {
 	for _, c := range clients {
 		got[c.Name] = true
 	}
-	for _, want := range []string{"pi-openai", "opencode-openai", "claude", "codex", "kimi", "gemini-cli"} {
+	for _, want := range []string{"pi-openai", "opencode-openai", "stepcode-openai", "zcode-openai", "hermes-openai", "claude", "codex", "kimi", "gemini-cli"} {
 		if !got[want] {
 			t.Errorf("all --mode openai missing %s in %v", want, namesOf(clients))
 		}
 	}
-	if got["pi"] || got["opencode"] {
+	if got["pi"] || got["opencode"] || got["stepcode"] || got["zcode"] || got["hermes"] {
 		t.Errorf("families with an openai variant must pin it, got %v", namesOf(clients))
 	}
 }

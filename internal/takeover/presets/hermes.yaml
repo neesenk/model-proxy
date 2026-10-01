@@ -1,0 +1,50 @@
+description: hermes — config.yaml 命名 provider(providers.<id>,api_mode 按协议档位)+ model 选择器 + mcp_servers 接管网关 MCP 面；协议变体（anthropic/openai/responses）见 variants
+file: ~/.hermes/config.yaml
+format: yaml
+client: hermes
+mcp:
+  json_path: mcp_servers
+  json_entry:
+    url: "{{mcp.url}}"
+variants:
+  - name: hermes
+    protocol: anthropic
+    base_url: bare
+    yaml:
+      set:
+        model.default: "{{model.primary}}"
+        model.provider: "{{provider_id}}"
+        providers.{{provider_id}}.base_url: "{{base_url}}"
+        providers.{{provider_id}}.api_key: "{{token}}"
+        providers.{{provider_id}}.api_mode: anthropic_messages
+        providers.{{provider_id}}.model: "{{model.primary}}"
+        providers.{{provider_id}}.session_affinity_header: x-session-id
+      drift_path: providers.{{provider_id}}.base_url
+  - name: hermes-openai
+    protocol: openai
+    base_url: v1
+    provider_id: model-proxy-openai
+    yaml:
+      set:
+        model.default: "{{model.primary}}"
+        model.provider: "{{provider_id}}"
+        providers.{{provider_id}}.base_url: "{{base_url}}"
+        providers.{{provider_id}}.api_key: "{{token}}"
+        providers.{{provider_id}}.api_mode: chat_completions
+        providers.{{provider_id}}.model: "{{model.primary}}"
+        providers.{{provider_id}}.session_affinity_header: x-session-id
+      drift_path: providers.{{provider_id}}.base_url
+  - name: hermes-responses
+    protocol: responses
+    base_url: v1
+    provider_id: model-proxy-responses
+    yaml:
+      set:
+        model.default: "{{model.primary}}"
+        model.provider: "{{provider_id}}"
+        providers.{{provider_id}}.base_url: "{{base_url}}"
+        providers.{{provider_id}}.api_key: "{{token}}"
+        providers.{{provider_id}}.api_mode: codex_responses
+        providers.{{provider_id}}.model: "{{model.primary}}"
+        providers.{{provider_id}}.session_affinity_header: x-session-id
+      drift_path: providers.{{provider_id}}.base_url

@@ -121,7 +121,7 @@ func (s *Service) TakeoverSurface(mode string) (appapi.TakeoverSurface, error) {
 			Source:       takeoverTemplateSource(c.Template.Source),
 			Description:  c.Template.Description,
 			File:         c.File,
-			Installed:    fileExists(c.File),
+			Installed:    takeover.ClientInstalled(c.Template),
 			TakenOver:    d.Taken,
 			DriftOK:      !d.Taken || d.OK,
 			AutoSelected: selected[c.Name],
@@ -144,11 +144,6 @@ func takeoverTemplateSource(source string) string {
 		return "preset"
 	}
 	return "user"
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 // RunTakeover executes a takeover run (the daemon twin of the CLI command).
