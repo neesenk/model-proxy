@@ -1417,8 +1417,9 @@ func TestAdminAuthGatesDataButServesUIBootstrap(t *testing.T) {
 	req = httptest.NewRequest("GET", "/api/status", nil)
 	req.Header.Set("x-api-key", "adm-secret")
 	serveWebRequest(s, rec, req)
-	if rec.Code == http.StatusUnauthorized {
-		t.Error("x-api-key admin token rejected")
+	// Exact 200: `!= 401` would also pass a 500 from a broken handler.
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /api/status with x-api-key = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
 }
 

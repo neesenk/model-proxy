@@ -49,19 +49,19 @@ func TestLevelFilterMatrix(t *testing.T) {
 		want  []string // substrings that must appear
 		drop  []string // substrings that must NOT appear
 	}{
-		{"debug", []string{"d", "i", "w", "e"}, nil},
-		{"info", []string{"i", "w", "e"}, []string{"d"}},
-		{"warn", []string{"w", "e"}, []string{"d", "i"}},
-		{"error", []string{"e"}, []string{"d", "i", "w"}},
-		{"", []string{"i", "w", "e"}, []string{"d"}}, // empty = info
+		{"debug", []string{"dbg-token", "inf-token", "wrn-token", "err-token"}, nil},
+		{"info", []string{"inf-token", "wrn-token", "err-token"}, []string{"dbg-token"}},
+		{"warn", []string{"wrn-token", "err-token"}, []string{"dbg-token", "inf-token"}},
+		{"error", []string{"err-token"}, []string{"dbg-token", "inf-token", "wrn-token"}},
+		{"", []string{"inf-token", "wrn-token", "err-token"}, []string{"dbg-token"}}, // empty = info
 	}
 	for _, tc := range cases {
 		out := capture(t, func() {
 			SetLevel(tc.level)
-			Debugf("d")
-			Infof("i")
-			Warnf("w")
-			Errorf("e")
+			Debugf("dbg-token")
+			Infof("inf-token")
+			Warnf("wrn-token")
+			Errorf("err-token")
 		})
 		for _, want := range tc.want {
 			if !strings.Contains(out, want) {

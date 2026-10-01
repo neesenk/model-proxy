@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -525,6 +526,9 @@ func TestAddPreset(t *testing.T) {
 		ConfigFile: func() string { return path },
 		Reload:     spy.fn(),
 	})
+	// The fixture already carries a zhipu provider block, so this is the
+	// documented idempotent skip. With a single configured provider no model is
+	// served by another provider, so the ambiguity warning list must be empty.
 	warnings, reloadWarning, err := service.AddPreset("zhipu")
 	if err != nil {
 		t.Fatal(err)
@@ -532,18 +536,109 @@ func TestAddPreset(t *testing.T) {
 	if reloadWarning != "" {
 		t.Errorf("reloadWarning = %q", reloadWarning)
 	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %v, want none (no other provider serves zhipu models)", warnings)
+	}
 	if len(spy.calls) != 1 || spy.calls[0] != path {
 		t.Errorf("reload calls = %v", spy.calls)
 	}
-	_ = warnings // ambiguity model names depend on the merged catalog shape
 	merged, err := os.ReadFile(path)
 	if err != nil || !strings.Contains(string(merged), "zhipu") {
 		t.Errorf("merged config missing preset block: %v %s", err, merged)
 	}
 
+	// Second add: the block already exists, so the merge is skipped again — no
+	// duplicate block and a byte-identical config — while the mutation still
+	// hot-reloads (login proceeds against the merged file).
+	warnings2, reloadWarning2, err := service.AddPreset("zhipu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloadWarning2 != "" || len(warnings2) != 0 {
+		t.Errorf("repeat add = (warnings %v, reloadWarning %q), want none", warnings2, reloadWarning2)
+	}
+	if len(spy.calls) != 2 || spy.calls[1] != path {
+		t.Errorf("reload calls after repeat add = %v, want two calls for %s", spy.calls, path)
+	}
+	merged2, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(merged2) != string(merged) {
+		t.Errorf("repeat add rewrote the config:\nfirst:\n%s\nsecond:\n%s", merged, merged2)
+	}
+	cfg, err := configdomain.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Providers) != 1 || len(cfg.Providers["zhipu"].Models) != 1 || cfg.Providers["zhipu"].Models[0] != "glm" {
+		t.Errorf("providers after repeat add = %+v, want the untouched fixture zhipu/glm", cfg.Providers)
+	}
+
 	if _, _, err := service.AddPreset("no-such-preset"); err == nil ||
 		!strings.Contains(err.Error(), `unknown preset "no-such-preset"`) {
 		t.Errorf("unknown preset err = %v", err)
+	}
+}
+
+// TestAddPresetWarnsOnAmbiguousMergedModels pins the POST /api/presets warnings
+// contract (docs/web-api.md): after a real merge the warnings name the preset
+// models that another configured provider also serves and no explicit route
+// covers; an explicitly routed model is not reported. The repeat call is the
+// documented idempotent skip.
+func TestAddPresetWarnsOnAmbiguousMergedModels(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`listen: 127.0.0.1:8080
+providers:
+  clone:
+    provider_id: deepseek
+    openai_base_url: https://clone.test/v1
+    usage_url: https://clone.test/v1/usage
+    models: [glm-4.6, glm-5.3-flash]
+routes:
+  glm-4.6: [{provider: clone, model: glm-4.6, priority: 1}]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spy := &reloadSpy{}
+	service := New(Ports{
+		ConfigFile: func() string { return path },
+		Reload:     spy.fn(),
+	})
+
+	warnings, reloadWarning, err := service.AddPreset("zhipu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloadWarning != "" {
+		t.Errorf("reloadWarning = %q", reloadWarning)
+	}
+	if len(warnings) != 1 || warnings[0] != "glm-5.3-flash" {
+		t.Errorf("warnings = %v, want [glm-5.3-flash] (glm-4.6 is explicitly routed)", warnings)
+	}
+	if len(spy.calls) != 1 {
+		t.Errorf("reload calls = %v, want 1", spy.calls)
+	}
+	merged, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Repeat: the preset block now exists → merge skipped, identical file and
+	// warning list.
+	warnings2, _, err := service.AddPreset("zhipu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings2) != 1 || warnings2[0] != "glm-5.3-flash" {
+		t.Errorf("repeat warnings = %v, want [glm-5.3-flash]", warnings2)
+	}
+	merged2, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(merged2) != string(merged) {
+		t.Errorf("repeat add rewrote the config:\nfirst:\n%s\nsecond:\n%s", merged, merged2)
 	}
 }
 

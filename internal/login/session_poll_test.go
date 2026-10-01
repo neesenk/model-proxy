@@ -10,26 +10,33 @@ import (
 	"time"
 )
 
-// --- PollSession via pollAt with a mock (covers PollSession's 1-line delegate) ---
-// PollSession() calls pollAt(aqpAuthInfo, ...) — the real URL. We can't
-// redirect it (no URL-param variant on PollSession). Instead cover pollAt +
-// checkSessionAt directly (already 72.7%/83.3%), and exercise the timeout
-// path of pollAt with a mock that always fails.
+// TestPollAt_TimesOut drives the production wrapper chain (PollSessionContext
+// → PollAtContext with AqpClient.Base) against a gateway that answers
+// auth/info with 401 every time. The poll deadline expires between retries, so
+// the terminal verdict must be the session-check failure wrapping the last 401
+// — not nil and not an unrelated error.
 
 func TestPollAt_TimesOut(t *testing.T) {
-	// A mock that returns 401 every time → pollAt loops until the deadline,
-	// then returns the last error.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(401)
-		w.Write([]byte(`{"retcode":1,"message":"pending"}`))
+		if r.URL.Path != AqpAuthInfoPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"retcode":1,"message":"pending"}`))
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+
 	c := NewAqpClient(filepath.Join(t.TempDir(), "store.json"))
-	_, err := c.PollAtContext(context.Background(), srv.URL, 1*time.Millisecond)
+	c.Base = srv.URL
+	_, err := c.PollSessionContext(context.Background(), 100*time.Millisecond)
 	if err == nil {
-		t.Error("pollAt always-401: want error, got nil")
+		t.Fatal("PollSessionContext against an always-401 gateway: want terminal error, got nil")
+	}
+	if !strings.Contains(err.Error(), "aqp sso session check failed") {
+		t.Fatalf("error = %v, want the session-check failure verdict", err)
+	}
+	if !strings.Contains(err.Error(), "status=401") {
+		t.Fatalf("error = %v, want the last 401 failure wrapped in the verdict", err)
 	}
 }
-
-// keep imports referenced.
-var _ = strings.Contains

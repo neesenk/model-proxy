@@ -2,6 +2,7 @@ package diag
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,14 +87,32 @@ func TestCmdRoutingReport_WeakLabelsAndCost(t *testing.T) {
 		t.Errorf("missing WEAK_OK column:\n%s", out)
 	}
 	// Cost: cheap records cost per 1M tokens: input $1, output $2.
-	// req-1/req-2 each 100in/50out -> $0.0002 each -> $0.0004 actual for cheap.
-	// req-3/req-4 strong 10in/5out -> $0.00005 each -> $0.0001 actual for strong.
+	// req-1/req-2 each 100in/50out -> $0.0001 + $0.0001 = $0.0002 each -> $0.0004 for cheap.
+	// req-3/req-4 strong 10in/5out -> $0.00005 + $0.00005 = $0.0001 each -> $0.0002 for strong.
 	// Baseline for all four at strong max price (input $5, output $10 per 1M):
 	// req-1/2: 100*5e-6 + 50*10e-6 = $0.001 each -> $0.002
 	// req-3/4: 10*5e-6 + 5*10e-6 = $0.0001 each -> $0.0002
-	// total baseline $0.0022, actual $0.0005 -> savings ~77%.
-	if !strings.Contains(out, "$0.00") {
-		t.Errorf("expected dollar cost output:\n%s", out)
+	// total baseline $0.0022, actual $0.0006 -> savings 72.7%.
+	if !strings.Contains(out, "savings vs baseline: 72.7%") {
+		t.Errorf("expected exact savings line:\n%s", out)
+	}
+	// The text renderer rounds to cents; pin the sub-cent figures through the
+	// JSON projection of the same report.
+	jsonOut := clitest.GrabStdout(t, func() {
+		CmdRoutingReport([]string{"--since", base.Add(-time.Hour).Format(time.RFC3339), "--retry-window", "5m", "--json"}, cfg)
+	})
+	var report routingReport
+	if err := json.Unmarshal([]byte(jsonOut), &report); err != nil {
+		t.Fatalf("JSON parse: %v\n%s", err, jsonOut)
+	}
+	if math.Abs(report.Cost.ActualUSD-0.0006) > 1e-9 {
+		t.Errorf("ActualUSD = %v, want 0.0006", report.Cost.ActualUSD)
+	}
+	if math.Abs(report.Cost.BaselineUSD-0.0022) > 1e-9 {
+		t.Errorf("BaselineUSD = %v, want 0.0022", report.Cost.BaselineUSD)
+	}
+	if math.Abs(report.Cost.SavingsPct-72.72727272727273) > 1e-9 {
+		t.Errorf("SavingsPct = %v, want 72.727...", report.Cost.SavingsPct)
 	}
 	if !strings.Contains(out, "Decision overhead") {
 		t.Errorf("missing decision overhead section:\n%s", out)
@@ -278,11 +297,25 @@ func TestCmdRoutingReport_GradeBaselineFromConfig(t *testing.T) {
 	out := clitest.GrabStdout(t, func() { CmdRoutingReport([]string{"--since", base.Add(-time.Hour).Format(time.RFC3339)}, cfg) })
 	// Actual: 1000*1e-6*1 + 500*1e-6*2 = $0.002
 	// Baseline (strong-model): 1000*1e-6*10 + 500*1e-6*20 = $0.02
-	if !strings.Contains(out, "$0.00") {
-		t.Errorf("expected cost output:\n%s", out)
+	// savings = (0.02 - 0.002) / 0.02 = 90%.
+	if !strings.Contains(out, "savings vs baseline: 90.0%") {
+		t.Errorf("expected exact savings line:\n%s", out)
 	}
-	if !strings.Contains(out, "savings vs baseline") {
-		t.Errorf("expected savings line:\n%s", out)
+	jsonOut := clitest.GrabStdout(t, func() {
+		CmdRoutingReport([]string{"--since", base.Add(-time.Hour).Format(time.RFC3339), "--json"}, cfg)
+	})
+	var report routingReport
+	if err := json.Unmarshal([]byte(jsonOut), &report); err != nil {
+		t.Fatalf("JSON parse: %v\n%s", err, jsonOut)
+	}
+	if math.Abs(report.Cost.ActualUSD-0.002) > 1e-9 {
+		t.Errorf("ActualUSD = %v, want 0.002", report.Cost.ActualUSD)
+	}
+	if math.Abs(report.Cost.BaselineUSD-0.02) > 1e-9 {
+		t.Errorf("BaselineUSD = %v, want 0.02", report.Cost.BaselineUSD)
+	}
+	if math.Abs(report.Cost.SavingsPct-90.0) > 1e-9 {
+		t.Errorf("SavingsPct = %v, want 90", report.Cost.SavingsPct)
 	}
 }
 

@@ -3,6 +3,7 @@ package logfile
 import (
 	"bytes"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -556,8 +557,24 @@ func TestWriterOpenErrorIsReportedNotPanicked(t *testing.T) {
 func TestSweepReportsUnreadableDirectory(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	logger := New(Options{Directory: missing, FilePrefix: testPrefix, Retention: time.Hour, Tag: "test"})
-	// Must not panic; readdir failure is a warning, not an error.
+
+	// The readdir failure must not panic: it surfaces as a tagged warning that
+	// names the unreadable directory.
+	var buf bytes.Buffer
+	savedWriter := log.Writer()
+	savedFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(savedWriter)
+		log.SetFlags(savedFlags)
+	})
 	logger.sweep(time.Now(), "")
+
+	got := buf.String()
+	if want := "[test] sweep readdir " + missing + ":"; !strings.Contains(got, want) {
+		t.Errorf("sweep warning = %q, want it to name %q", got, want)
+	}
 }
 
 func TestEnsureDirRejectsFileCollision(t *testing.T) {
