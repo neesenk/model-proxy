@@ -186,7 +186,7 @@ providers:
   # All listed models are auto-exposed as routes (see routes: below).
   volcengine:
     provider_id: volcengine
-    priority: 2
+    priority: 0
     billing: plan
     openai_base_url: https://ark.cn-beijing.volces.com/api/plan/v3
     anthropic_base_url: https://ark.cn-beijing.volces.com/api/plan
@@ -471,6 +471,16 @@ providers:
 #  claude-sonnet-4-6: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-v4-pro]
 #  sonnet: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-v4-pro]
 routes:
+  agent-free:
+    - model: space-bunny-free
+      priority: 1
+      provider: opencode-go
+    - model: stealth/space-bunny-alpha
+      priority: 2
+      provider: openrouter
+    - model: longcat-2.5-preview-free
+      priority: 3
+      provider: opencode-go
 # deepseek-v4-pro: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-flash]
 # deepseek-v4-flash: [aqp/deepseek-v4-flash, volcengine/deepseek-v4-flash, shopee/deepseek-v4-flash, deepseek/deepseek-flash]
 
