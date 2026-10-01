@@ -454,7 +454,9 @@ func TestWireCap_MissVerdictUsesRequestSnapshotParent(t *testing.T) {
 	// The in-flight (generation-1) request's 404 correction resolves the
 	// parent through its own snapshot — this is the gate targetExecutor binds
 	// at assembly from RuntimeSnapshot.ParentOf.
-	gate := proxyHealthGate{proxy: p, parentOf: snap.ParentOf}
+	// cfg binds the request's own snapshot config (the new fingerprint gate
+	// attributes the 404 to this generation).
+	gate := proxyHealthGate{proxy: p, cfg: snap.Cfg, parentOf: snap.ParentOf}
 	gate.NoteWireResponsesMiss("v", "")
 
 	caps, ok := p.wireVerdict("parent-old")

@@ -277,7 +277,7 @@ func TestModelCaps_Forward_ModelLevelResponsesVerdict(t *testing.T) {
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
-	p.modelCaps.Put("oai", "fp", "gpt-x",
+	p.modelCaps.Put("oai", providerbuild.ProtocolConfigFingerprint(cfg.Providers["oai"]), "gpt-x",
 		runtimewire.ModelProtocols{Chat: triYes, Anthropic: triNo, Responses: triYes}, time.Now())
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
@@ -309,7 +309,7 @@ func TestModelCaps_Forward_ModelLevelChatOnly(t *testing.T) {
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
 	p.setWireCaps("oai", wireCaps{BaseURL: up.URL, Responses: triYes, Chat: triYes, ProbedAt: time.Now()})
-	p.modelCaps.Put("oai", "fp", "old-m",
+	p.modelCaps.Put("oai", providerbuild.ProtocolConfigFingerprint(cfg.Providers["oai"]), "old-m",
 		runtimewire.ModelProtocols{Chat: triYes, Anthropic: triNo, Responses: triNo}, time.Now())
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
@@ -345,7 +345,7 @@ func TestModelCaps_Forward_404CorrectionModelLevel(t *testing.T) {
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
-	p.modelCaps.Put("oai", "fp", "gpt-x",
+	p.modelCaps.Put("oai", providerbuild.ProtocolConfigFingerprint(cfg.Providers["oai"]), "gpt-x",
 		runtimewire.ModelProtocols{Chat: triYes, Anthropic: triNo, Responses: triYes}, time.Now())
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()

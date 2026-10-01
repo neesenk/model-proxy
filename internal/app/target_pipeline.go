@@ -73,8 +73,10 @@ func (g proxyHealthGate) NoteWireResponsesMiss(provider, model string) {
 	// An unresolvable config yields an empty fingerprint, which the store
 	// rejects (never write a correction you cannot attribute to a generation).
 	fp := ""
-	if provCfg, ok := g.cfg.Providers[parent]; ok {
-		fp = providerbuild.ProtocolConfigFingerprint(provCfg)
+	if g.cfg != nil {
+		if provCfg, ok := g.cfg.Providers[parent]; ok {
+			fp = providerbuild.ProtocolConfigFingerprint(provCfg)
+		}
 	}
 	g.proxy.noteWireResponsesMiss(parent, model, fp)
 }
