@@ -282,7 +282,7 @@ func TestRequestLogQueriesFallback(t *testing.T) {
 // port delegates to it (the reconciled index answers, not the raw directory).
 func TestRequestLogQueriesIndexDelegation(t *testing.T) {
 	dir := t.TempDir()
-	lines := `{"ts":"2026-07-29T12:00:00Z","request_id":"r1","called_model":"m","exposed":"m","provider":"p","status":200,"latency_ms":5}
+	lines := `{"ts":"2026-07-29T12:00:00Z","request_id":"r1","called_model":"m","exposed":"m","provider":"p","status":200,"latency_ms":5,"session_id":"s1"}
 ` +
 		`{"ts":"2026-07-29T12:00:01Z","request_id":"shadow-r1","provider":"sp","status":200,"latency_ms":8,"shadow":true}
 `
@@ -330,6 +330,22 @@ func TestRequestLogQueriesIndexDelegation(t *testing.T) {
 		}
 		if err := indexer.WaitReconciled(ctx); err != nil {
 			t.Fatal("index-delegated shadow report never saw the pair")
+		}
+	}
+	// Session summaries delegate to the same index (the q.index branch of the
+	// SessionSummaries port): the s1 session aggregates the one LLM row —
+	// the shadow row carries no session id and must not create a session.
+	for {
+		sessions, err := queries.SessionSummaries(2000, 50, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sessions) == 1 && sessions[0].SessionID == "s1" && sessions[0].Requests == 1 &&
+			sessions[0].ShadowRequests == 0 && len(sessions[0].Providers) == 1 && sessions[0].Providers[0] == "p" {
+			break
+		}
+		if err := indexer.WaitReconciled(ctx); err != nil {
+			t.Fatal("index-delegated session summary never saw the record")
 		}
 	}
 }

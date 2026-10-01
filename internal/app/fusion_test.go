@@ -1151,3 +1151,84 @@ func TestFusion_InstructionOverride(t *testing.T) {
 		t.Errorf("default instruction should be replaced: %q", synth.System)
 	}
 }
+
+// TestFusion_DispatchKeepsCapturedReloadGeneration: a request whose panel legs
+// are in flight when a reload swaps the fusion recipe must complete against the
+// CAPTURED generation (old panel members), never the reloaded recipe — the
+// runtime snapshot is the single per-request capture point (red line 1), and
+// Fusion is the async branch where a violation would silently mix drafts from
+// two different panels into one synthesis.
+func TestFusion_DispatchKeepsCapturedReloadGeneration(t *testing.T) {
+	paStarted := make(chan struct{})
+	releasePA := make(chan struct{})
+	pa := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		close(paStarted)
+		<-releasePA
+		w.Write([]byte(`{"id":"a","content":[{"type":"text","text":"draft-A"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	})
+	pb := newFakeUpstream(t, anthropicDraftResponder("draft-B"))
+	pc := newFakeUpstream(t, anthropicDraftResponder("draft-C"))
+	ps := newFakeUpstream(t, anthropicSSEResponder("final answer"))
+	recipe := configdomain.FusionConfig{
+		Panel: []configdomain.RouteTarget{
+			{Provider: "pa", Model: "ma"},
+			{Provider: "pb", Model: "mb"},
+		},
+		Synthesizer: configdomain.RouteTarget{Provider: "ps", Model: "ms"},
+	}
+	proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "pc": pc, "ps": ps})
+
+	requestDone := make(chan string, 1)
+	go func() {
+		requestDone <- postAnthropic(t, px, fusionClientBody)
+	}()
+	select {
+	case <-paStarted:
+		// The request already captured the old runtime snapshot (panel
+		// pa+pb); reload now swaps the recipe to panel pc only.
+	case out := <-requestDone:
+		close(releasePA)
+		t.Fatalf("request finished before reaching panel member pa: %s", out)
+	case <-time.After(2 * time.Second):
+		close(releasePA)
+		t.Fatal("panel fan-out did not reach member pa")
+	}
+
+	// Mirror reload's atomic swap: build fresh maps and replace the pointers.
+	newRecipe := configdomain.FusionConfig{
+		Panel:       []configdomain.RouteTarget{{Provider: "pc", Model: "mc"}},
+		Synthesizer: configdomain.RouteTarget{Provider: "ps", Model: "ms"},
+	}
+	providers := map[string]configdomain.Provider{}
+	for name, prov := range proxy.cfg.Providers {
+		providers[name] = prov
+	}
+	fusions := map[string]configdomain.FusionConfig{"recipe": newRecipe}
+	proxy.mu.Lock()
+	proxy.cfg = &configdomain.Config{
+		Listen:    proxy.cfg.Listen,
+		Providers: providers,
+		Routes:    proxy.cfg.Routes,
+		Fusion:    fusions,
+	}
+	proxy.mu.Unlock()
+
+	close(releasePA)
+	var out string
+	select {
+	case out = <-requestDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fusion request did not finish after release")
+	}
+	if !strings.Contains(out, "final answer") {
+		t.Fatalf("client body missing synthesizer answer: %s", out)
+	}
+	// The captured generation's panel served the drafts: pa+pb once each, and
+	// the RELOADED member pc was never consulted for this request.
+	if pa.hits() != 1 || pb.hits() != 1 {
+		t.Fatalf("old-panel hits = pa:%d pb:%d, want 1/1 (captured generation must finish its own panel)", pa.hits(), pb.hits())
+	}
+	if pc.hits() != 0 {
+		t.Fatalf("reloaded panel member pc hit %d time(s) by the in-flight request — recipe was re-read after capture", pc.hits())
+	}
+}

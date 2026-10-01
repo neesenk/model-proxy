@@ -439,10 +439,12 @@ func TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E(t *testing.T) {
 		t.Cleanup(px.Close)
 		return p, px
 	}
-	// fire posts one client request; named fire (not post) so it does not
-	// shadow the package-level post() helper it delegates to.
-	fire := func(t *testing.T, px *httptest.Server) {
-		post(t, px.URL+"/v1/chat/completions", `{"model":"m","messages":[{"role":"user","content":"ping"}]}`)
+	// fire posts one client request and returns the client-visible terminal
+	// state; named fire (not post) so it does not shadow the package-level
+	// post() helper it delegates to. The E2E contract row is "让错误浮现"/leg
+	// hit — both the wire path AND the client outcome must be asserted.
+	fire := func(t *testing.T, px *httptest.Server) (int, string) {
+		return post(t, px.URL+"/v1/chat/completions", `{"model":"m","messages":[{"role":"user","content":"ping"}]}`)
 	}
 
 	t.Run("anthropic yes beats dead chat leg", func(t *testing.T) {
@@ -454,9 +456,15 @@ func TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E(t *testing.T) {
 		}))
 		defer up.Close()
 		_, px := makeProxy(t, up, runtimewire.ModelProtocols{Chat: triNo, Anthropic: triYes, Responses: triNo})
-		fire(t, px)
+		code, body := fire(t, px)
 		if len(paths) != 1 || paths[0] != "/v1/messages" {
 			t.Errorf("upstream paths = %v, want one /v1/messages (converted off the dead chat leg)", paths)
+		}
+		if code != 200 {
+			t.Errorf("client status = %d body=%s, want 200 (converted leg must serve the client)", code, body)
+		}
+		if !strings.Contains(body, "pong") {
+			t.Errorf("client body = %s, want the converted response text", body)
 		}
 	})
 
@@ -469,9 +477,15 @@ func TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E(t *testing.T) {
 		}))
 		defer up.Close()
 		_, px := makeProxy(t, up, runtimewire.ModelProtocols{Chat: triNo, Anthropic: triUnknown, Responses: triNo})
-		fire(t, px)
+		code, body := fire(t, px)
 		if len(paths) != 1 || paths[0] != "/v1/messages" {
 			t.Errorf("upstream paths = %v, want one /v1/messages (unknown leg tried before the dead one)", paths)
+		}
+		if code != 200 {
+			t.Errorf("client status = %d body=%s, want 200 (unknown leg must serve the client)", code, body)
+		}
+		if !strings.Contains(body, "pong") {
+			t.Errorf("client body = %s, want the converted response text", body)
 		}
 	})
 
@@ -484,9 +498,15 @@ func TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E(t *testing.T) {
 		}))
 		defer up.Close()
 		_, px := makeProxy(t, up, runtimewire.ModelProtocols{Chat: triNo, Anthropic: triNo, Responses: triNo})
-		fire(t, px)
+		code, body := fire(t, px)
 		if len(paths) != 1 || paths[0] != "/chat/completions" {
 			t.Errorf("upstream paths = %v, want one /chat/completions (error surfaced, no leg-hopping)", paths)
+		}
+		if code != http.StatusBadRequest {
+			t.Errorf("client status = %d body=%s, want 400 (upstream error must surface, never a 502)", code, body)
+		}
+		if !strings.Contains(body, "40403") && !strings.Contains(body, "Model not supported") {
+			t.Errorf("client body = %s, want the upstream rejection detail to remain visible", body)
 		}
 	})
 }

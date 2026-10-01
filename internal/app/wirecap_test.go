@@ -35,13 +35,13 @@ import (
 // (ProtocolHint-covered) is skipped; a fresh verdict is not re-probed.
 // Anthropic is NOT probed — it's config-declared via anthropic_base_url.
 func TestWireCap_ProbeProviders(t *testing.T) {
-	type hit struct{ path, body string }
+	type hit struct{ path, body, auth string }
 	var hits []hit
 	var hitsMu sync.Mutex
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		hitsMu.Lock()
-		hits = append(hits, hit{r.URL.Path, string(b)})
+		hits = append(hits, hit{r.URL.Path, string(b), r.Header.Get("Authorization")})
 		hitsMu.Unlock()
 		if r.URL.Path == "/responses" {
 			w.Header().Set("content-type", "application/json")
@@ -94,6 +94,12 @@ func TestWireCap_ProbeProviders(t *testing.T) {
 		}
 		if h.path != "/responses" && h.path != "/chat/completions" {
 			t.Errorf("unexpected probe path %q", h.path)
+		}
+		// Probe requests must carry the provider's credentials (testing.md
+		// "认证/header" for the app-layer probe pass): losing the AuthHeaders
+		// wiring would only surface as real-upstream 401s.
+		if h.auth != "Bearer k" {
+			t.Errorf("probe leg %s carried Authorization %q, want Bearer k (provider credential not applied)", h.path, h.auth)
 		}
 	}
 	// codex skipped (hint-covered).
@@ -853,3 +859,56 @@ func TestWireProbePass_CoalescesStormDispatches(t *testing.T) {
 	}
 }
 
+// TestReload_DispatchesWireProbePass pins the DISPATCH wiring (proxy_reload's
+// startWireCapProbe call): a reload must trigger a real probe pass without any
+// test driving probeAllWireCaps directly — observable as probe legs arriving
+// at the provider's upstream and a recorded verdict. Deleting the reload-side
+// dispatch must fail this test, not just the synchronous probe suites.
+func TestReload_DispatchesWireProbePass(t *testing.T) {
+	var legs atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		legs.Add(1)
+		if r.URL.Path == "/responses" {
+			w.Header().Set("content-type", "application/json")
+			w.Write([]byte(`{"id":"r1","status":"completed","output":[]}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer up.Close()
+
+	cfgYAML := "listen: 127.0.0.1:0\nproviders:\n  p: {provider_id: deepseek, openai_base_url: " + up.URL + "}\n"
+	cfgPath := writeConfigFile(t, cfgYAML)
+	cfg, err := configdomain.LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Credential pool fixture: Reload rebuilds providers from the YAML, so the
+	// probe pass needs a real runnable impl for provider p (the pool-backed
+	// DeepSeekProvider carries the fixture key — no real credentials involved).
+	loginAPIKeyFixtures(t, [2]string{"p", "deepseek"})
+	p := newTestProxy(t, cfg)
+	// Mirror the production constructor (proxy.go): probing on, dispatch via
+	// the quota-tracked one-shot. newTestProxy's injectable constructor leaves
+	// it off so synchronous suites stay hermetic.
+	p.wireProbe = true
+	if got := legs.Load(); got != 0 {
+		t.Fatalf("pre-reload probe legs = %d, want 0 (constructor path not dispatched here)", got)
+	}
+
+	if err := p.Reload(cfgPath); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	// The pass is dispatched asynchronously through the quota tracker — poll
+	// for its observable effects (both provider legs + a recorded verdict).
+	waitUntil(t, "reload-dispatched probe pass to reach the upstream", func() bool {
+		return legs.Load() >= 2
+	})
+	waitUntil(t, "wire verdict to be recorded after the reload pass", func() bool {
+		_, ok := p.wireVerdict("p")
+		return ok
+	})
+	if got := legs.Load(); got != 2 {
+		t.Errorf("probe legs = %d, want exactly 2 (chat+responses provider legs)", got)
+	}
+}

@@ -124,6 +124,35 @@ func TestKimiCodeUsagesURL(t *testing.T) {
 	}
 }
 
+// kimiWindowSeconds converts a {duration, timeUnit} pair to seconds; MINUTE
+// (both spellings) and DAY are already exercised end-to-end by the parser tests
+// below — this table pins the remaining branches directly: HOUR, SECOND,
+// non-positive duration, and unknown/absent unit (→ 0, the caller's cue to
+// fall back to name-based 5h detection and "Limit" labels).
+func TestKimiWindowSeconds_Units(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		duration int
+		unit     string
+		want     int64
+	}{
+		{"hour", 5, "HOUR", 5 * 3600},
+		{"hour enum spelling", 2, "TIME_UNIT_HOUR", 2 * 3600},
+		{"hour lowercase", 1, "hour", 3600},
+		{"second", 90, "SECOND", 90},
+		{"zero duration", 0, "HOUR", 0},
+		{"negative duration", -3, "MINUTE", 0},
+		{"unknown unit", 7, "WEEK", 0},
+		{"empty unit", 7, "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := kimiWindowSeconds(tc.duration, tc.unit); got != tc.want {
+				t.Errorf("kimiWindowSeconds(%d, %q) = %d, want %d", tc.duration, tc.unit, got, tc.want)
+			}
+		})
+	}
+}
+
 // ParseKimiCodeQuota: the summary `usage` is the Ultimate weekly window; the 5h
 // limit is the Short rate-cap; the booster wallet is a display-only money window.
 // Asserts exact Ultimate/Short/Duration/RemainingPct per the quota-marker contract.

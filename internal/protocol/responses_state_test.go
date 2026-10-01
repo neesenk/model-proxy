@@ -134,6 +134,17 @@ func TestResponsesState_RecordsOnlyReplaySafeIncomplete(t *testing.T) {
 	}`)) {
 		t.Fatal("max_output_tokens incomplete response was not cached")
 	}
+	// The token-limit reason has vendor-specific spellings — every accepted
+	// alias must keep caching the incomplete response, or follow-up turns on
+	// that vendor silently degrade to orphan repair.
+	for _, alias := range []string{"max_tokens", "length"} {
+		body := `{"id":"alias-` + alias + `","status":"incomplete",` +
+			`"incomplete_details":{"reason":"` + alias + `"},` +
+			`"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"partial"}]}]}`
+		if !s.recordJSON("sess", history, []byte(body)) {
+			t.Fatalf("incomplete reason %q (token-limit alias) was not cached for replay", alias)
+		}
+	}
 	_, expanded, hit, err := s.expand([]byte(`{
 		"model":"g","previous_response_id":"limited","input":"continue"
 	}`), "sess")

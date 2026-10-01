@@ -1,6 +1,7 @@
 package seclog
 
 import (
+	"encoding/json"
 	"fmt"
 	"model-proxy/internal/observe/logfile"
 	"os"
@@ -642,5 +643,79 @@ func TestNilLoggerIsSafe(t *testing.T) {
 	logger.Shutdown()
 	if logger.Dropped() != 0 || logger.Directory() != "" {
 		t.Error("nil logger must be a no-op")
+	}
+}
+
+// TestNewStoreUnavailableDegradesToJSONLTrailOnly pins the documented fail-soft
+// contract of New: when the queryable SQLite half cannot be opened (security.db
+// occupied by a directory), New still returns a logger, every enqueued record
+// lands in the full-fidelity JSONL trail, nothing is dropped, and the offline
+// query surface fails closed on the broken artifact — then reports a plain
+// empty store once the artifact is gone. The guard's raw trail must not stop
+// because the queryable half is unavailable.
+func TestNewStoreUnavailableDegradesToJSONLTrailOnly(t *testing.T) {
+	dir := t.TempDir()
+	// Occupy the database file location with a directory: openStore fails at
+	// Ping/migrate without the test reaching into SQLite internals.
+	if err := os.Mkdir(filepath.Join(dir, storeFileName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	logger, err := New(dir, Options{})
+	if err != nil {
+		t.Fatalf("New must degrade to JSONL-only, got %v", err)
+	}
+	if logger.store != nil {
+		t.Fatal("degraded logger must carry a nil queryable store")
+	}
+
+	go logger.Run()
+	t.Cleanup(logger.Shutdown)
+	const total = 5
+	for i := 0; i < total; i++ {
+		logger.Enqueue(&Record{
+			Ts: int64(i + 1), Kind: KindSecret,
+			RequestID: fmt.Sprintf("r-%d", i), Action: "log",
+		})
+	}
+	logger.Shutdown()
+
+	if got := logger.Dropped(); got != 0 {
+		t.Fatalf("dropped = %d, want 0 (the JSONL half must keep draining)", got)
+	}
+	lines := jsonlLines(t, dir)
+	if len(lines) != total {
+		t.Fatalf("JSONL trail lines = %d, want %d", len(lines), total)
+	}
+	for i, line := range lines {
+		var record Record
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("trail line %d: %v", i, err)
+		}
+		if record.Kind != KindSecret || record.RequestID != fmt.Sprintf("r-%d", i) ||
+			record.Ts != int64(i+1) {
+			t.Errorf("trail line %d = %+v, want the full-fidelity r-%d record", i, record, i)
+		}
+	}
+
+	// The unopenable store fails the offline query closed — an error, not a
+	// panic and not a silently empty result over a broken database.
+	if _, err := Query(dir, Filter{}); err == nil {
+		t.Fatal("Query over an unopenable security.db must fail, not report success")
+	}
+	// Once the broken artifact is gone the query surface is a plain empty
+	// store (no records, no error, and no database file recreated by a query).
+	if err := os.RemoveAll(filepath.Join(dir, storeFileName)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Query(dir, Filter{})
+	if err != nil {
+		t.Fatalf("Query after the broken store was removed: %v", err)
+	}
+	if len(result.Records) != 0 || result.Truncated || result.Skipped != 0 {
+		t.Fatalf("empty-store query = %+v, want no records", result)
+	}
+	if _, err := os.Stat(filepath.Join(dir, storeFileName)); !os.IsNotExist(err) {
+		t.Errorf("a query must never recreate the database: stat = %v", err)
 	}
 }

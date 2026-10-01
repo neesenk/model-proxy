@@ -395,3 +395,14 @@ func TestQuotaTrackerFreshnessMaxAgeFrozenAtStart(t *testing.T) {
 		t.Fatalf("post-Start FreshnessMaxAge = %v, want frozen 15m despite hot change to 1m", got)
 	}
 }
+
+// TestNewQuotaTrackerNilManagerPanics: a nil runtime Manager must fail loudly
+// at construction (fail-closed contract), not at first use.
+func TestNewQuotaTrackerNilManagerPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("NewQuotaTracker(nil manager) did not panic")
+		}
+	}()
+	NewQuotaTracker("", nil, nil, nil)
+}

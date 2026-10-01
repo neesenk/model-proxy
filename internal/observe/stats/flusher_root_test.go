@@ -9,17 +9,6 @@ import (
 	"time"
 )
 
-// openFlusherTestStore opens a fresh Store in a temp dir with no retention.
-func openFlusherTestStore(t *testing.T) *Store {
-	t.Helper()
-	ss, err := Open(Options{Path: filepath.Join(t.TempDir(), "stats.db")})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { ss.Close() })
-	return ss
-}
-
 func TestDiffCountersClampsAndOmits(t *testing.T) {
 	prev := map[Key]Counters{
 		{Provider: "a", Model: "x"}: {Requests: 5, Input: 10, LastRequestAt: 100},
@@ -60,7 +49,7 @@ func TestDiffCountersClampsAndOmits(t *testing.T) {
 // distinct buckets whose deltas sum to the cumulative total. Exercises the
 // flusher diff + lastBucket monotonic guard.
 func TestStatsFlushTwoMinutes(t *testing.T) {
-	ss := openFlusherTestStore(t)
+	ss := newTestStore(t, 0)
 	m := obscounters.NewMetricsStore()
 	tc := obscounters.NewTokenCounter()
 	f := NewFlusher(ss, m, tc, obscounters.NewAgentCounter(), map[Key]Counters{}, nil)
@@ -182,7 +171,7 @@ func TestLegacyTokensPath(t *testing.T) {
 // TestStatsFlushEmptyIsNoop verifies a flush with no activity writes nothing and
 // reports false (the idle-proxy path).
 func TestStatsFlushEmptyIsNoop(t *testing.T) {
-	ss := openFlusherTestStore(t)
+	ss := newTestStore(t, 0)
 	f := NewFlusher(ss, obscounters.NewMetricsStore(), obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), map[Key]Counters{}, nil)
 	if f.Flush(time.Now()) {
 		t.Error("flush with no deltas should report false")
@@ -197,7 +186,7 @@ func TestStatsFlushEmptyIsNoop(t *testing.T) {
 // failure must retain the failed minute batch. Recovery persists that batch in
 // its original minute before the new minute, without loss or duplication.
 func TestFlush_DefersBaselineOnFlushError(t *testing.T) {
-	ss := openFlusherTestStore(t)
+	ss := newTestStore(t, 0)
 	sink := &failOnceStatsSink{Store: ss}
 	metrics := obscounters.NewMetricsStore()
 	f := NewFlusher(sink, metrics, obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), nil, nil)
@@ -244,6 +233,137 @@ func TestFlush_DefersBaselineOnFlushError(t *testing.T) {
 	}
 }
 
+// failOnceMCPSink wraps a Store and fails the next name-level and tool-level
+// MCP flush once each — the transient-failure seam for the MCP retry test
+// (test-side only; the production package carries no test hooks).
+type failOnceMCPSink struct {
+	*Store
+	failNameNext bool
+	failToolNext bool
+}
+
+func (sink *failOnceMCPSink) FlushMCPBucketsContext(
+	ctx context.Context,
+	minute int64,
+	deltas []MCPBucketDelta,
+) error {
+	if sink.failNameNext {
+		sink.failNameNext = false
+		return fmt.Errorf("injected MCP flush failure")
+	}
+	return sink.Store.FlushMCPBucketsContext(ctx, minute, deltas)
+}
+
+func (sink *failOnceMCPSink) FlushMCPToolBucketsContext(
+	ctx context.Context,
+	minute int64,
+	deltas []MCPToolBucketDelta,
+) error {
+	if sink.failToolNext {
+		sink.failToolNext = false
+		return fmt.Errorf("injected MCP tool flush failure")
+	}
+	return sink.Store.FlushMCPToolBucketsContext(ctx, minute, deltas)
+}
+
+// TestFlush_MCPDefersBaselineOnFlushError is the MCP counterpart of
+// TestFlush_DefersBaselineOnFlushError: a transient Store failure on either
+// MCP pipeline must retain the failed minute batch; recovery persists each
+// batch in its original minute, without loss or duplication.
+func TestFlush_MCPDefersBaselineOnFlushError(t *testing.T) {
+	ss := newTestStore(t, 0)
+	sink := &failOnceMCPSink{Store: ss}
+	mcp := obscounters.NewMCPStats()
+	kind := func(name string) (MCPKind, bool) {
+		if name == "srv" {
+			return MCPKindServer, true
+		}
+		return "", false
+	}
+	f := NewFlusher(
+		sink,
+		obscounters.NewMetricsStore(),
+		obscounters.NewTokenCounter(),
+		obscounters.NewAgentCounter(),
+		nil, nil,
+		WithMCPStats(mcp, kind),
+	)
+
+	record := func(calls int) {
+		for i := 0; i < calls; i++ {
+			mcp.Record("srv", 200, 100)
+			mcp.RecordTool("srv", "search", 200, 100)
+		}
+	}
+
+	// Period 1: 2 calls → flush succeeds at minute 60.
+	record(2)
+	if !f.Flush(time.Unix(60, 0)) {
+		t.Fatal("first flush should write deltas")
+	}
+
+	// Period 2: +3 calls. One Store-port failure on each MCP pipeline.
+	record(3)
+	sink.failNameNext = true
+	sink.failToolNext = true
+	if f.Flush(time.Unix(120, 0)) {
+		t.Error("failed flush reported a durable write")
+	}
+
+	// Period 3: +1 call → flush succeeds and drains the retained batches.
+	record(1)
+	if !f.Flush(time.Unix(180, 0)) {
+		t.Fatal("recovery flush should write deltas")
+	}
+
+	rows, err := ss.QueryMCPBuckets(0, 240, "minute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("mcp rows = %d, want 3: %+v", len(rows), rows)
+	}
+	byMinute := map[int64]MCPBucketRow{}
+	for _, row := range rows {
+		byMinute[row.Bucket] = row
+	}
+	for minute, wantCalls := range map[int64]uint64{60: 2, 120: 3, 180: 1} {
+		row, ok := byMinute[minute]
+		if !ok {
+			t.Fatalf("mcp minute %d missing from %+v", minute, rows)
+		}
+		if row.Name != "srv" || row.Kind != "server" ||
+			row.Calls != wantCalls || row.Errors != 0 ||
+			row.LatencyMsSum != 100*wantCalls {
+			t.Errorf("mcp minute %d = %+v, want srv/server calls=%d errors=0 latency=%d",
+				minute, row, wantCalls, 100*wantCalls)
+		}
+	}
+
+	toolRows, err := ss.QueryMCPToolBuckets(0, 240, "minute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toolRows) != 3 {
+		t.Fatalf("mcp tool rows = %d, want 3: %+v", len(toolRows), toolRows)
+	}
+	toolByMinute := map[int64]MCPToolBucketRow{}
+	for _, row := range toolRows {
+		toolByMinute[row.Bucket] = row
+	}
+	for minute, wantCalls := range map[int64]uint64{60: 2, 120: 3, 180: 1} {
+		row, ok := toolByMinute[minute]
+		if !ok {
+			t.Fatalf("mcp tool minute %d missing from %+v", minute, toolRows)
+		}
+		if row.Name != "srv" || row.Tool != "search" ||
+			row.Calls != wantCalls || row.LatencyMsSum != 100*wantCalls {
+			t.Errorf("mcp tool minute %d = %+v, want srv/search calls=%d latency=%d",
+				minute, row, wantCalls, 100*wantCalls)
+		}
+	}
+}
+
 type alwaysFailStatsSink struct {
 	*Store
 }
@@ -264,8 +384,24 @@ func (sink *alwaysFailStatsSink) FlushAgentsContext(
 	return fmt.Errorf("injected persistent agent failure")
 }
 
+func (sink *alwaysFailStatsSink) FlushMCPBucketsContext(
+	context.Context,
+	int64,
+	[]MCPBucketDelta,
+) error {
+	return fmt.Errorf("injected persistent MCP failure")
+}
+
+func (sink *alwaysFailStatsSink) FlushMCPToolBucketsContext(
+	context.Context,
+	int64,
+	[]MCPToolBucketDelta,
+) error {
+	return fmt.Errorf("injected persistent MCP tool failure")
+}
+
 func TestStatsPendingBacklogIsBoundedWithoutLosingTotals(t *testing.T) {
-	store := openFlusherTestStore(t)
+	store := newTestStore(t, 0)
 	sink := &alwaysFailStatsSink{Store: store}
 	metrics := obscounters.NewMetricsStore()
 	agents := obscounters.NewAgentCounter()
@@ -331,7 +467,7 @@ func TestStatsPendingBacklogIsBoundedWithoutLosingTotals(t *testing.T) {
 }
 
 func TestStatsPendingDrainIsBoundedPerCycle(t *testing.T) {
-	store := openFlusherTestStore(t)
+	store := newTestStore(t, 0)
 	flusher := NewFlusher(
 		store,
 		obscounters.NewMetricsStore(),
@@ -362,6 +498,246 @@ func TestStatsPendingDrainIsBoundedPerCycle(t *testing.T) {
 	if len(rows) != MaxStatsBatchesPerFlush {
 		t.Errorf("persisted rows = %d, want per-cycle limit %d",
 			len(rows), MaxStatsBatchesPerFlush)
+	}
+}
+
+// TestStatsPendingMCPBacklogIsBoundedWithoutLosingTotals is the MCP/tool
+// counterpart of TestStatsPendingBacklogIsBoundedWithoutLosingTotals: under a
+// persistently failing Store port both MCP queues cap at
+// MaxPendingStatsBatches, the oldest folded batch keeps the earliest completed
+// minute, and coalescing never loses calls/errors/latency totals.
+func TestStatsPendingMCPBacklogIsBoundedWithoutLosingTotals(t *testing.T) {
+	sink := &alwaysFailStatsSink{Store: newTestStore(t, 0)}
+	mcp := obscounters.NewMCPStats()
+	kind := func(name string) (MCPKind, bool) {
+		switch name {
+		case "srv":
+			return MCPKindServer, true
+		case "rt":
+			return MCPKindRoute, true
+		default:
+			return "", false
+		}
+	}
+	flusher := NewFlusher(
+		sink,
+		obscounters.NewMetricsStore(),
+		obscounters.NewTokenCounter(),
+		obscounters.NewAgentCounter(),
+		nil, nil,
+		WithMCPStats(mcp, kind),
+	)
+
+	const overflow = 25
+	total := MaxPendingStatsBatches + overflow
+	lastCallAt := make([]int64, 0, total)
+	for index := 0; index < total; index++ {
+		// Per iteration: srv 2 calls / 1 error / 140ms, rt 1 call, one tool call.
+		mcp.Record("srv", 200, 100)
+		mcp.Record("srv", 500, 40)
+		mcp.Record("rt", 200, 10)
+		mcp.RecordTool("srv", "search", 200, 30)
+		lastCallAt = append(lastCallAt, mcp.RawSnapshot()["srv"].LastCallAt)
+		flusher.Flush(time.Unix(int64(index+2)*60, 0))
+	}
+
+	if len(flusher.mcpQueue) != MaxPendingStatsBatches ||
+		len(flusher.mcpToolQueue) != MaxPendingStatsBatches {
+		t.Fatalf(
+			"bounded queues = mcp:%d mcpTool:%d, want %d each",
+			len(flusher.mcpQueue), len(flusher.mcpToolQueue), MaxPendingStatsBatches,
+		)
+	}
+	if flusher.mcpCoalesced != overflow || flusher.mcpToolCoalesced != overflow {
+		t.Errorf(
+			"coalesced counts = mcp:%d mcpTool:%d, want %d each",
+			flusher.mcpCoalesced, flusher.mcpToolCoalesced, overflow,
+		)
+	}
+
+	var srvCalls, srvErrors, srvLatency, rtCalls, toolCalls uint64
+	for _, batch := range flusher.mcpQueue {
+		for _, delta := range batch.deltas {
+			switch delta.Name {
+			case "srv":
+				srvCalls += delta.Calls
+				srvErrors += delta.Errors
+				srvLatency += delta.LatencyMsSum
+			case "rt":
+				rtCalls += delta.Calls
+			}
+		}
+	}
+	for _, batch := range flusher.mcpToolQueue {
+		for _, delta := range batch.deltas {
+			toolCalls += delta.Calls
+		}
+	}
+	if srvCalls != 2*uint64(total) || srvErrors != uint64(total) ||
+		srvLatency != 140*uint64(total) {
+		t.Errorf(
+			"queued srv totals = calls:%d errors:%d latency:%d, want %d/%d/%d (lossless coalescing)",
+			srvCalls, srvErrors, srvLatency, 2*total, total, 140*total,
+		)
+	}
+	if rtCalls != uint64(total) {
+		t.Errorf("queued rt calls = %d, want %d", rtCalls, total)
+	}
+	if toolCalls != uint64(total) {
+		t.Errorf("queued tool calls = %d, want %d", toolCalls, total)
+	}
+
+	// The earliest boundary stays at the first completed minute (60) and the
+	// folded oldest batch carries exactly overflow+1 iterations of traffic.
+	if got := flusher.mcpQueue[0].minute; got != 60 {
+		t.Errorf("oldest mcp batch minute = %d, want earliest boundary 60", got)
+	}
+	if got := flusher.mcpToolQueue[0].minute; got != 60 {
+		t.Errorf("oldest mcp tool batch minute = %d, want earliest boundary 60", got)
+	}
+	wantFolded := uint64(overflow + 1)
+	folded := mcpQueueDelta(flusher.mcpQueue[0].deltas, "srv")
+	if folded == nil {
+		t.Fatal("oldest mcp batch lost the srv delta")
+	}
+	if folded.Calls != 2*wantFolded || folded.Errors != wantFolded ||
+		folded.LatencyMsSum != 140*wantFolded {
+		t.Errorf(
+			"oldest folded srv delta = %+v, want calls:%d errors:%d latency:%d",
+			folded, 2*wantFolded, wantFolded, 140*wantFolded,
+		)
+	}
+	// LastCallAt survives coalescing as the max over the folded window. Record
+	// stamps unix seconds, so a fast host produces equal timestamps; the exact
+	// max-not-first semantics are pinned in
+	// TestStatsMCPCoalescingKeepsOldestMinuteAndMaxLastCallAt below.
+	wantLastCallAt := lastCallAt[0]
+	for _, ts := range lastCallAt[1 : overflow+1] {
+		if ts > wantLastCallAt {
+			wantLastCallAt = ts
+		}
+	}
+	if folded.LastCallAt != wantLastCallAt {
+		t.Errorf(
+			"oldest folded srv last_call_at = %d, want max over the first %d iterations = %d",
+			folded.LastCallAt, overflow+1, wantLastCallAt,
+		)
+	}
+}
+
+func mcpQueueDelta(deltas []MCPBucketDelta, name string) *MCPBucketDelta {
+	for i := range deltas {
+		if deltas[i].Name == name {
+			return &deltas[i]
+		}
+	}
+	return nil
+}
+
+func mcpToolQueueDelta(deltas []MCPToolBucketDelta, name, tool string) *MCPToolBucketDelta {
+	for i := range deltas {
+		if deltas[i].Name == name && deltas[i].Tool == tool {
+			return &deltas[i]
+		}
+	}
+	return nil
+}
+
+// TestStatsMCPCoalescingKeepsOldestMinuteAndMaxLastCallAt pins the enqueue
+// merge semantics directly — they differ from the provider queue's
+// MergeDeltas: enqueueMCP folds the two oldest batches with per-name map
+// accumulation, keeps the OLDEST minute, and takes the MAX last_call_at of
+// the folded pair (not the first batch's value). The tool merge accumulates
+// per (name, tool) key and never crosses keys. Hand-built batches give each
+// minute a distinct last_call_at, which Record's second-granularity clock
+// cannot guarantee.
+func TestStatsMCPCoalescingKeepsOldestMinuteAndMaxLastCallAt(t *testing.T) {
+	flusher := NewFlusher(
+		newTestStore(t, 0),
+		obscounters.NewMetricsStore(),
+		obscounters.NewTokenCounter(),
+		obscounters.NewAgentCounter(),
+		nil, nil,
+	)
+	for index := 0; index < MaxPendingStatsBatches; index++ {
+		minute := int64(index+1) * 60 // doubles as the delta's last_call_at: strictly increasing
+		flusher.enqueueMCP(MCPBatch{minute: minute, deltas: []MCPBucketDelta{
+			{Name: "srv", Kind: MCPKindServer, Calls: 1, LatencyMsSum: 10, LastCallAt: minute},
+		}})
+		flusher.enqueueMCPTool(MCPToolBatch{minute: minute, deltas: []MCPToolBucketDelta{
+			{Name: "srv", Tool: "search", Kind: MCPKindServer, Calls: 1, LatencyMsSum: 10, LastCallAt: minute},
+			{Name: "srv", Tool: "fetch", Kind: MCPKindServer, Calls: 5, LatencyMsSum: 50, LastCallAt: minute},
+		}})
+	}
+	// One batch past the cap folds the two oldest batches (minute 60 into 120).
+	overflowMinute := int64(MaxPendingStatsBatches+1) * 60
+	flusher.enqueueMCP(MCPBatch{minute: overflowMinute, deltas: []MCPBucketDelta{
+		{Name: "srv", Kind: MCPKindServer, Calls: 7, Errors: 2, LatencyMsSum: 70, LastCallAt: overflowMinute},
+	}})
+	flusher.enqueueMCPTool(MCPToolBatch{minute: overflowMinute, deltas: []MCPToolBucketDelta{
+		{Name: "srv", Tool: "search", Kind: MCPKindServer, Calls: 3, LatencyMsSum: 30, LastCallAt: overflowMinute},
+	}})
+
+	if len(flusher.mcpQueue) != MaxPendingStatsBatches || flusher.mcpCoalesced != 1 {
+		t.Fatalf(
+			"mcp queue = %d batches after %d folds, want %d batches after exactly 1 fold",
+			len(flusher.mcpQueue), flusher.mcpCoalesced, MaxPendingStatsBatches,
+		)
+	}
+	if len(flusher.mcpToolQueue) != MaxPendingStatsBatches || flusher.mcpToolCoalesced != 1 {
+		t.Fatalf(
+			"mcp tool queue = %d batches after %d folds, want %d batches after exactly 1 fold",
+			len(flusher.mcpToolQueue), flusher.mcpToolCoalesced, MaxPendingStatsBatches,
+		)
+	}
+
+	folded := mcpQueueDelta(flusher.mcpQueue[0].deltas, "srv")
+	if folded == nil {
+		t.Fatal("folded mcp batch lost the srv delta")
+	}
+	if flusher.mcpQueue[0].minute != 60 {
+		t.Errorf("folded mcp batch minute = %d, want the OLDEST boundary 60",
+			flusher.mcpQueue[0].minute)
+	}
+	if folded.Calls != 2 || folded.LatencyMsSum != 20 {
+		t.Errorf("folded srv delta = %+v, want calls=2 (1+1) latency=20 (10+10)", folded)
+	}
+	if folded.LastCallAt != 120 {
+		t.Errorf(
+			"folded srv last_call_at = %d, want 120 (max of the folded pair 60/120, not the first batch's 60)",
+			folded.LastCallAt,
+		)
+	}
+	// The neighbor batch is untouched: its own minute and single call remain.
+	if flusher.mcpQueue[1].minute != 180 {
+		t.Errorf("neighbor mcp batch minute = %d, want 180", flusher.mcpQueue[1].minute)
+	}
+	if neighbor := mcpQueueDelta(flusher.mcpQueue[1].deltas, "srv"); neighbor == nil || neighbor.Calls != 1 {
+		t.Errorf("neighbor mcp batch srv delta = %+v, want calls=1", neighbor)
+	}
+	// The overflow batch itself sits at the tail, unmerged.
+	tail := flusher.mcpQueue[len(flusher.mcpQueue)-1]
+	if tail.minute != overflowMinute {
+		t.Errorf("tail mcp batch minute = %d, want %d", tail.minute, overflowMinute)
+	}
+	if tailDelta := mcpQueueDelta(tail.deltas, "srv"); tailDelta == nil || tailDelta.Calls != 7 {
+		t.Errorf("tail mcp batch srv delta = %+v, want calls=7", tailDelta)
+	}
+
+	// Tool merge: search folds 1+1 with the max last_call_at; fetch (absent
+	// from the overflow batch) stays at its two folded windows' total and
+	// never receives search's contribution.
+	if flusher.mcpToolQueue[0].minute != 60 {
+		t.Errorf("folded tool batch minute = %d, want the OLDEST boundary 60",
+			flusher.mcpToolQueue[0].minute)
+	}
+	if search := mcpToolQueueDelta(flusher.mcpToolQueue[0].deltas, "srv", "search"); search == nil ||
+		search.Calls != 2 || search.LatencyMsSum != 20 || search.LastCallAt != 120 {
+		t.Errorf("folded search delta = %+v, want calls=2 latency=20 last_call_at=120 (max)", search)
+	}
+	if fetch := mcpToolQueueDelta(flusher.mcpToolQueue[0].deltas, "srv", "fetch"); fetch == nil ||
+		fetch.Calls != 10 || fetch.LatencyMsSum != 100 || fetch.LastCallAt != 120 {
+		t.Errorf("folded fetch delta = %+v, want calls=10 latency=100 last_call_at=120 (key-isolated)", fetch)
 	}
 }
 
@@ -468,7 +844,7 @@ func TestMergeAgentDeltas(t *testing.T) {
 // TestFlusherResetClearsEverything covers the in-package reset path: durable
 // rows, runtime baselines, and pending queues all clear atomically.
 func TestFlusherResetClearsEverything(t *testing.T) {
-	ss := openFlusherTestStore(t)
+	ss := newTestStore(t, 0)
 	m := obscounters.NewMetricsStore()
 	tc := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
@@ -497,7 +873,7 @@ func TestFlusherResetClearsEverything(t *testing.T) {
 
 // TestPendingCountsContext covers the context-aware pending probe.
 func TestPendingCountsContext(t *testing.T) {
-	ss := openFlusherTestStore(t)
+	ss := newTestStore(t, 0)
 	m := obscounters.NewMetricsStore()
 	f := NewFlusher(ss, m, obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), nil, nil)
 	m.Inc("a", "x", obscounters.EvRequests)
@@ -541,7 +917,7 @@ func (sink *failOnceSink) FlushContext(
 // TestFlushForShutdownDrainsPending covers the shutdown retry loop: a sink
 // that fails once must still be drained within the retry window.
 func TestFlushForShutdownDrainsPending(t *testing.T) {
-	ss := openFlusherTestStore(t)
+	ss := newTestStore(t, 0)
 	sink := &failOnceSink{Store: ss, failNext: true}
 	m := obscounters.NewMetricsStore()
 	f := NewFlusher(sink, m, obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), nil, nil)
@@ -561,7 +937,7 @@ func TestFlushForShutdownDrainsPending(t *testing.T) {
 // including the reset case where a counter's current value is lower than the
 // previous snapshot.
 func TestFlusherMCPPath(t *testing.T) {
-	ss := openFlusherTestStore(t)
+	ss := newTestStore(t, 0)
 	mcp := obscounters.NewMCPStats()
 	kind := func(name string) (MCPKind, bool) {
 		switch name {
@@ -646,7 +1022,7 @@ func TestFlusherMCPPath(t *testing.T) {
 // per-tool MCP counters, including the reset case where a counter's current
 // value is lower than the previous snapshot.
 func TestFlusherMCPToolPath(t *testing.T) {
-	ss := openFlusherTestStore(t)
+	ss := newTestStore(t, 0)
 	mcp := obscounters.NewMCPStats()
 	kind := func(name string) (MCPKind, bool) {
 		switch name {

@@ -14,10 +14,19 @@ import (
 )
 
 // TestHelperProcess is the subprocess entry for os.Exit-ing command paths,
-// and doubles as the fake MCP stdio child when MCP_STDIO_CHILD=1.
+// and doubles as the fake MCP stdio child when MCP_STDIO_CHILD is set ("1" =
+// well-behaved child; "no-proto" = a child whose initialize response carries
+// no protocolVersion — the malformed-peer error path). MP_CLI_HELPER=1 marks
+// the clitest COMMAND subprocess (which inherits MCP_STDIO_CHILD from the
+// test process) — that one must run the handler, not child mode; the real
+// fake child is spawned with ResolveMCPStdioEnv's minimal env, which does not
+// carry MP_CLI_HELPER.
 func TestHelperProcess(t *testing.T) {
-	if os.Getenv("MCP_STDIO_CHILD") == "1" {
-		os.Exit(runStdioChild())
+	switch os.Getenv("MCP_STDIO_CHILD") {
+	case "1", "no-proto":
+		if os.Getenv("MP_CLI_HELPER") != "1" {
+			os.Exit(runStdioChild())
+		}
 	}
 	clitest.HelperProcess(t, map[string]func([]string){"mcp": RunMCP})
 }
@@ -37,6 +46,13 @@ func runStdioChild() int {
 		}
 		switch v.Method {
 		case "initialize":
+			if os.Getenv("MCP_STDIO_CHILD") == "no-proto" {
+				// A response frame (id + result) whose result lacks
+				// protocolVersion: delivered to the caller, rejected by the
+				// parser.
+				fmt.Fprintf(writer, `{"jsonrpc":"2.0","id":%s,"result":{}}`+"\n", v.ID)
+				break
+			}
 			fmt.Fprintf(writer, `{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"fake-stdio","version":"3.1"}}}`+"\n", v.ID)
 		case "tools/list":
 			fmt.Fprintf(writer, `{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"image_analysis","inputSchema":{"type":"object"}}]}}`+"\n", v.ID)

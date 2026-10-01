@@ -212,3 +212,29 @@ func TestAutoTransportSharedInstance(t *testing.T) {
 		t.Fatal("AutoTransport() returned distinct transports; call sites cannot share the pool")
 	}
 }
+
+// TestAutoTransportBadDefaultFailsClosed: load-time validation normally
+// rejects malformed config proxy values, but a bad value that still reaches
+// SetDefaultProxy must surface as an error from the transport's Proxy func —
+// silently dropping the proxy policy would route maintenance traffic direct
+// against the operator's intent.
+func TestAutoTransportBadDefaultFailsClosed(t *testing.T) {
+	clearProxyEnv(t)
+	SetDefaultProxy("http://") // parseable URL, empty host → missing host
+	defer SetDefaultProxy("")
+
+	req, err := http.NewRequest(http.MethodGet, "https://example.com/metrics", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := AutoTransport().Proxy(req)
+	if err == nil {
+		t.Fatalf("Proxy with bad default = (%v, nil), want a non-nil error — the bad value must not silently disable the proxy policy", proxy)
+	}
+	if !strings.Contains(err.Error(), "missing host") {
+		t.Errorf("Proxy err = %v, want the missing-host parse failure", err)
+	}
+	if proxy != nil {
+		t.Errorf("Proxy returned a URL (%v) alongside the error, want nil", proxy)
+	}
+}

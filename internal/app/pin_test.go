@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"io"
 	"model-proxy/internal/appapi"
 	configdomain "model-proxy/internal/config"
 	"net/http"
@@ -423,5 +424,58 @@ func TestPin_TTLExpiryRestoresScheduling(t *testing.T) {
 	}
 	if got := bUp.hits(); got != 4 {
 		t.Errorf("b hits after expiry = %d, want 4 (unpinned b skipped via circuit)", got)
+	}
+}
+
+// TestForceProvider_NoFailoverWhenForced: force-provider (the request-header
+// twin of pin) equally disables failover — the forced provider's 5xx must NOT
+// fall over to the route's other target (red line 4 applies to both hard
+// selections; pin has its mirror above).
+func TestForceProvider_NoFailoverWhenForced(t *testing.T) {
+	var siblingHits atomic.Int32
+	siblingUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siblingHits.Add(1)
+		w.Write([]byte(`{}`))
+	}))
+	defer siblingUp.Close()
+	forcedUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+		w.Write([]byte(`boom`))
+	}))
+	defer forcedUp.Close()
+
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"sibling": {OpenAIBaseURL: siblingUp.URL, Provider: testProviderID},
+			"forced":  {OpenAIBaseURL: forcedUp.URL, Provider: testProviderID},
+		},
+		Routes: map[string][]configdomain.RouteTarget{
+			"glm": {
+				{Provider: "sibling", Model: "glm", Priority: 1},
+				{Provider: "forced", Model: "glm", Priority: 2},
+			},
+		},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["sibling"] = &testProv{key: "s"}
+	p.providers["forced"] = &testProv{key: "f"}
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/responses",
+		strings.NewReader(`{"model":"glm","input":[]}`))
+	req.Header.Set("x-mp-force-provider", "forced")
+	req.Header.Set("content-type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("forced+failed status=%d body=%s want 502 (no failover off a forced provider)", resp.StatusCode, body)
+	}
+	if got := siblingHits.Load(); got != 0 {
+		t.Errorf("sibling target hit %d time(s) — force-provider must be exclusive like pin", got)
 	}
 }

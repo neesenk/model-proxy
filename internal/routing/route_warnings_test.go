@@ -134,6 +134,49 @@ func TestConfigRoutingWarnings_GradeBandUnknownGrade(t *testing.T) {
 	}
 }
 
+// TestConfigRoutingWarnings_NonGradedBandTargetNotServed: in a non-graded
+// policy a band target must simply be served by the route — the provider
+// existing is NOT enough (config-side band validation only checks provider
+// presence), so a typo'd model surfaces at startup as exactly one
+// "not served by this route" warning; a correctly served band target stays
+// silent.
+func TestConfigRoutingWarnings_NonGradedBandTargetNotServed(t *testing.T) {
+	newCfg := func(bandTarget configdomain.RouteTarget) *configdomain.Config {
+		return &configdomain.Config{
+			Providers: map[string]configdomain.Provider{
+				"zhipu": {Provider: "zhipu", OpenAIBaseURL: "https://x", Models: []string{"glm-5.3", "glm-5.3-air"}},
+			},
+			Routes: map[string][]configdomain.RouteTarget{
+				"coding": {{Provider: "zhipu", Model: "glm-5.3"}},
+			},
+			RoutePolicies: map[string]configdomain.RoutePolicy{
+				"coding": {
+					Bands: []configdomain.RouteBand{
+						{When: configdomain.BandWhen{FollowUp: boolp(true)}, Target: bandTarget},
+					},
+				},
+			},
+		}
+	}
+	expanded := map[string][]configdomain.RouteTarget{
+		"coding": {{Provider: "zhipu", Model: "glm-5.3"}},
+	}
+
+	// Existing provider, model not on the route: exactly one band warning
+	// naming the route, the band index and the unreachable target.
+	warns := ConfigRoutingWarnings(newCfg(configdomain.RouteTarget{Provider: "zhipu", Model: "glm-5.3-air"}), expanded)
+	if len(warns) != 1 ||
+		!containsStr(warns, `route_policy "coding" band 0: target zhipu/glm-5.3-air is not served by this route`) {
+		t.Errorf("warns = %v, want exactly the not-served band warning", warns)
+	}
+
+	// Band target the route serves: zero warnings.
+	warns = ConfigRoutingWarnings(newCfg(configdomain.RouteTarget{Provider: "zhipu", Model: "glm-5.3"}), expanded)
+	if len(warns) != 0 {
+		t.Errorf("served band target warns = %v, want none", warns)
+	}
+}
+
 func containsStr(ss []string, want string) bool {
 	for _, s := range ss {
 		if strings.Contains(s, want) {

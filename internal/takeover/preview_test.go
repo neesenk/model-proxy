@@ -473,6 +473,22 @@ json:
 		takeover.TakeoverOptions{Mode: takeover.ModeUnified}, takeover.ModelFacts{SourceDefault: -1}, true); err == nil {
 		t.Fatalf("invalid draft must be a parse error")
 	}
+
+	// A draft is per-template: the batch spellings ("", "all") are rejected —
+	// the editor previews exactly the template it is editing.
+	for _, which := range []string{"", "all"} {
+		if _, err := takeover.PreviewWritesDraft(cfg, which, draft,
+			takeover.TakeoverOptions{Mode: takeover.ModeUnified}, takeover.ModelFacts{SourceDefault: -1}, true); err == nil ||
+			!strings.Contains(err.Error(), "one template name") {
+			t.Errorf("PreviewWritesDraft(which=%q) err = %v, want the one-template-name rejection", which, err)
+		}
+	}
+	// An empty draft body is rejected before any rendering.
+	if _, err := takeover.PreviewWritesDraft(cfg, "claude-draft", "  \n",
+		takeover.TakeoverOptions{Mode: takeover.ModeUnified}, takeover.ModelFacts{SourceDefault: -1}, true); err == nil ||
+		!strings.Contains(err.Error(), "empty template body") {
+		t.Errorf("PreviewWritesDraft(empty draft) err = %v, want the empty-body rejection", err)
+	}
 }
 
 // TestPreviewWrites_EscapesRedirectedRealPath: when the real side-file path

@@ -252,6 +252,238 @@ func TestBuildBodiesAcrossProtocols(t *testing.T) {
 	if _, ok := BuildJudgeBody([]byte(`not json`), "anthropic", nil); ok {
 		t.Fatal("bad JSON must fail judge-body construction")
 	}
+
+	// Table-driven cross-product: judge + synthesis builders × three
+	// protocols × every original system/input shape. Each row locates the
+	// protocol's injection slot and the user's original text; the builder
+	// loop then pins that the whole section (instruction, judge report for
+	// synthesis, candidates in collection order) landed in that slot.
+	shapeRows := []struct {
+		name     string
+		protocol string
+		original string
+		// check returns the text of the slot the section was injected into and
+		// asserts its own original-preservation expectations for the shape.
+		check func(t *testing.T, body []byte) string
+	}{
+		{
+			name: "anthropic system nil", protocol: "anthropic", original: `{"messages":[]}`,
+			check: func(t *testing.T, body []byte) string {
+				var req struct {
+					System json.RawMessage `json:"system"`
+				}
+				if err := json.Unmarshal(body, &req); err != nil {
+					t.Fatal(err)
+				}
+				var s string
+				if err := json.Unmarshal(req.System, &s); err != nil || s == "" {
+					t.Fatalf("system = %s, want the injected section string", req.System)
+				}
+				if strings.Contains(s, "original") {
+					t.Fatalf("system-from-nil must carry only the section: %q", s)
+				}
+				return s
+			},
+		},
+		{
+			name: "anthropic system string", protocol: "anthropic", original: `{"system":"original","messages":[]}`,
+			check: func(t *testing.T, body []byte) string {
+				var req struct {
+					System string `json:"system"`
+				}
+				if err := json.Unmarshal(body, &req); err != nil {
+					t.Fatal(err)
+				}
+				if !strings.HasPrefix(req.System, "original\n\n") {
+					t.Fatalf("system = %q, want the original preserved before the section", req.System)
+				}
+				return req.System
+			},
+		},
+		{
+			name: "anthropic system array", protocol: "anthropic", original: `{"system":[{"type":"text","text":"original"}],"messages":[]}`,
+			check: func(t *testing.T, body []byte) string {
+				var req struct {
+					System []struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"system"`
+				}
+				if err := json.Unmarshal(body, &req); err != nil {
+					t.Fatal(err)
+				}
+				if len(req.System) != 2 || req.System[0].Type != "text" || req.System[0].Text != "original" {
+					t.Fatalf("system blocks = %+v, want the original block preserved verbatim", req.System)
+				}
+				if req.System[1].Type != "text" {
+					t.Fatalf("injected block = %+v, want a text block", req.System[1])
+				}
+				return req.System[1].Text
+			},
+		},
+		{
+			name: "responses input missing", protocol: "responses", original: `{"model":"m"}`,
+			check: func(t *testing.T, body []byte) string {
+				input := responsesInput(t, body)
+				if len(input) != 1 {
+					t.Fatalf("input = %+v, want a single injected message", input)
+				}
+				return responsesMessageText(t, input[0])
+			},
+		},
+		{
+			name: "responses input string", protocol: "responses", original: `{"input":"original"}`,
+			check: func(t *testing.T, body []byte) string {
+				input := responsesInput(t, body)
+				if len(input) != 2 {
+					t.Fatalf("input = %+v, want original-as-message plus the injected message", input)
+				}
+				if got := responsesMessageText(t, input[0]); got != "original" {
+					t.Fatalf("original input text = %q, want verbatim preservation", got)
+				}
+				return responsesMessageText(t, input[1])
+			},
+		},
+		{
+			name: "responses input empty string", protocol: "responses", original: `{"input":""}`,
+			check: func(t *testing.T, body []byte) string {
+				input := responsesInput(t, body)
+				if len(input) != 1 {
+					t.Fatalf("input = %+v, want the empty original dropped and only the section", input)
+				}
+				return responsesMessageText(t, input[0])
+			},
+		},
+		{
+			name: "responses input array", protocol: "responses", original: `{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"original"}]}]}`,
+			check: func(t *testing.T, body []byte) string {
+				input := responsesInput(t, body)
+				if len(input) != 2 {
+					t.Fatalf("input = %+v, want the original message preserved plus the injected one", input)
+				}
+				if got := responsesMessageText(t, input[0]); got != "original" {
+					t.Fatalf("original input text = %q, want verbatim preservation", got)
+				}
+				return responsesMessageText(t, input[1])
+			},
+		},
+		{
+			name: "chat messages missing", protocol: "openai", original: `{"model":"m"}`,
+			check: func(t *testing.T, body []byte) string {
+				messages := chatMessages(t, body)
+				if len(messages) != 1 || messages[0].Role != "user" {
+					t.Fatalf("messages = %+v, want a single injected user message", messages)
+				}
+				return messages[0].Content
+			},
+		},
+		{
+			name: "chat messages array", protocol: "openai", original: `{"messages":[{"role":"user","content":"original"},{"role":"assistant","content":"reply"}]}`,
+			check: func(t *testing.T, body []byte) string {
+				messages := chatMessages(t, body)
+				if len(messages) != 3 {
+					t.Fatalf("messages = %+v, want both originals preserved plus the injection", messages)
+				}
+				if messages[0].Content != "original" || messages[1].Content != "reply" {
+					t.Fatalf("original messages = %+v, want verbatim preservation", messages[:2])
+				}
+				if messages[2].Role != "user" {
+					t.Fatalf("injected message = %+v, want role user", messages[2])
+				}
+				return messages[2].Content
+			},
+		},
+	}
+	builders := []struct {
+		name    string
+		needles []string
+		build   func(original []byte, protocol string) ([]byte, bool)
+	}{
+		{
+			name:    "judge",
+			needles: []string{"c-first", "c-second"},
+			build: func(original []byte, protocol string) ([]byte, bool) {
+				return BuildJudgeBody(original, protocol, []string{"c-first", "c-second"})
+			},
+		},
+		{
+			name:    "synthesis",
+			needles: []string{"synth-instruction", "judge-report", "c-first", "c-second"},
+			build: func(original []byte, protocol string) ([]byte, bool) {
+				return BuildSynthesisBodyWithPermuter(original, protocol, []string{"c-first", "c-second"}, "judge-report", "synth-instruction", func(int) []int { return []int{0, 1} })
+			},
+		},
+	}
+	for _, builder := range builders {
+		for _, row := range shapeRows {
+			t.Run(builder.name+" "+row.name, func(t *testing.T) {
+				body, ok := builder.build([]byte(row.original), row.protocol)
+				if !ok {
+					t.Fatalf("%s build failed for %s", builder.name, row.original)
+				}
+				section := row.check(t, body)
+				for _, needle := range builder.needles {
+					if !strings.Contains(section, needle) {
+						t.Fatalf("injected section missing %q:\n%s", needle, section)
+					}
+				}
+				// Candidates ride in collection order — judge review has no
+				// shuffle, and the identity permuter must not reorder either.
+				if first, second := strings.Index(section, "c-first"), strings.Index(section, "c-second"); first < 0 || second < first {
+					t.Fatalf("candidate order broken in section:\n%s", section)
+				}
+			})
+		}
+	}
+}
+
+// responsesInputMsg is one decoded input item of a responses-protocol body.
+type responsesInputMsg struct {
+	Type    string `json:"type"`
+	Role    string `json:"role"`
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+// responsesInput decodes the input array of a responses-protocol body.
+func responsesInput(t *testing.T, body []byte) []responsesInputMsg {
+	t.Helper()
+	var req struct {
+		Input []responsesInputMsg `json:"input"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	return req.Input
+}
+
+func responsesMessageText(t *testing.T, message responsesInputMsg) string {
+	t.Helper()
+	if message.Type != "message" || message.Role != "user" ||
+		len(message.Content) != 1 || message.Content[0].Type != "input_text" {
+		t.Fatalf("responses message = %+v, want a user message with one input_text block", message)
+	}
+	return message.Content[0].Text
+}
+
+// chatMessages decodes the messages array of a chat-protocol body.
+func chatMessages(t *testing.T, body []byte) []struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+} {
+	t.Helper()
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	return req.Messages
 }
 
 func TestStripDraftFieldsAndTruncateRunes(t *testing.T) {

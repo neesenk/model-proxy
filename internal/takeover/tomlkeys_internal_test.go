@@ -196,8 +196,22 @@ func TestParseTOMLKeyPath(t *testing.T) {
 		{`plain`, []string{"plain"}, true},
 		{`"with\"quote"`, []string{"with\"quote"}, true},
 		{`"\u0041bc"`, []string{"Abc"}, true},
-		{`a..b`, nil, false},            // empty part
-		{`a."unterminated`, nil, false}, // unterminated quote
+		// The full basic-string escape set: if any short escape stops decoding,
+		// a client header spelled with it silently stops matching its managed
+		// section — the re-takeover duplicate-append incident class (9b8f949).
+		{`"a\tb"`, []string{"a\tb"}, true},
+		{`"a\bb"`, []string{"a\bb"}, true},
+		{`"a\nb"`, []string{"a\nb"}, true},
+		{`"a\fb"`, []string{"a\fb"}, true},
+		{`"a\rb"`, []string{"a\rb"}, true},
+		{`"a\\b"`, []string{`a\b`}, true},
+		{`"\u00e9"`, []string{"é"}, true},
+		{`"\U0001F680"`, []string{"\U0001F680"}, true}, // 8-digit \U
+		{`"trunc\u00"`, []string{`trunc\u00`}, true},   // truncated \u: verbatim, never mangling
+		{`"bad\q"`, []string{`bad\q`}, true},           // unknown escape: verbatim
+		{`'a\tb'`, []string{`a\tb`}, true},             // literal string keeps escapes verbatim
+		{`a..b`, nil, false},                           // empty part
+		{`a."unterminated`, nil, false},                // unterminated quote
 	}
 	for _, c := range cases {
 		got, ok := parseTOMLKeyPath(c.in)

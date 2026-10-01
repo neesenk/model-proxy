@@ -1,7 +1,6 @@
 package protocol
 
 import (
-	"io"
 	"strings"
 	"testing"
 )
@@ -154,20 +153,14 @@ func TestCitationStreamingMatrix(t *testing.T) {
 		``,
 	}, "\n")
 
-	toResponses, err := io.ReadAll(newAnthropicToResponsesSSE(strings.NewReader(anthropicSSE), "claude"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	toResponses := readAllChecked(t, newAnthropicToResponsesSSE(strings.NewReader(anthropicSSE), "claude"))
 	for _, want := range []string{`response.output_text.annotation.added`, `"type":"url_citation"`, `"annotations":[`} {
 		if !strings.Contains(string(toResponses), want) {
 			t.Fatalf("a→r citation SSE missing %q:\n%s", want, toResponses)
 		}
 	}
 
-	toChat, err := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(anthropicSSE), "claude"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	toChat := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(anthropicSSE), "claude"))
 	for _, want := range []string{`"annotations":[`, `"type":"url_citation"`, `https://example.test/weather`} {
 		if !strings.Contains(string(toChat), want) {
 			t.Fatalf("a→chat citation SSE missing %q:\n%s", want, toChat)
@@ -195,18 +188,12 @@ func TestCitationStreamingMatrix(t *testing.T) {
 		``,
 	}, "\n")
 
-	toAnthropic, err := io.ReadAll(newResponsesToAnthropicSSE(strings.NewReader(responsesSSE), "gpt"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	toAnthropic := readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(responsesSSE), "gpt"))
 	if !strings.Contains(string(toAnthropic), `[Forecast](https://example.test/weather)`) {
 		t.Fatalf("r→a citation SSE fallback missing:\n%s", toAnthropic)
 	}
 
-	toChatFromResponses, err := io.ReadAll(newResponsesToOpenAISSE(strings.NewReader(responsesSSE), "gpt"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	toChatFromResponses := readAllChecked(t, newResponsesToOpenAISSE(strings.NewReader(responsesSSE), "gpt"))
 	for _, want := range []string{`"annotations":[`, `"type":"url_citation"`, `https://example.test/weather`} {
 		if !strings.Contains(string(toChatFromResponses), want) {
 			t.Fatalf("r→chat citation SSE missing %q:\n%s", want, toChatFromResponses)
@@ -223,13 +210,119 @@ func TestCitationStreamingMatrix(t *testing.T) {
 		`data: [DONE]`,
 		``,
 	}, "\n")
-	toResponsesFromChat, err := io.ReadAll(newOpenAIToResponsesSSE(strings.NewReader(chatSSE), "gpt"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	toResponsesFromChat := readAllChecked(t, newOpenAIToResponsesSSE(strings.NewReader(chatSSE), "gpt"))
 	for _, want := range []string{`response.output_text.annotation.added`, `"annotations":[`, `https://example.test/weather`} {
 		if !strings.Contains(string(toResponsesFromChat), want) {
 			t.Fatalf("chat→r citation SSE missing %q:\n%s", want, toResponsesFromChat)
 		}
+	}
+
+	// chat→a: the streaming converter does not decode delta.annotations — a
+	// KNOWN asymmetry with the non-streaming path, which folds message-level
+	// annotations into "Sources: [title](url)" links on the text block
+	// (convert.go responsesTextWithCitationLinks, pinned non-stream in
+	// convert_test.go). Pin the current streaming degradation: the visible
+	// text survives verbatim and the stream finishes cleanly, but no citation
+	// shape (annotations array / url_citation / Sources link) may appear.
+	chatCitationSSE := strings.Join([]string{
+		`data: {"id":"c1","model":"gpt","choices":[{"index":0,"delta":{"role":"assistant","content":"Weather"},"finish_reason":null}]}`,
+		``,
+		`data: {"id":"c1","model":"gpt","choices":[{"index":0,"delta":{"annotations":[{"type":"url_citation","url_citation":{"start_index":0,"end_index":7,"title":"Forecast","url":"https://example.test/weather"}}]},"finish_reason":null}]}`,
+		``,
+		`data: {"id":"c1","model":"gpt","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	toAnthropicFromChat := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(chatCitationSSE), "gpt"))
+	if !strings.Contains(string(toAnthropicFromChat), `"text":"Weather"`) ||
+		!strings.Contains(string(toAnthropicFromChat), `"stop_reason":"end_turn"`) ||
+		!strings.Contains(string(toAnthropicFromChat), "event: message_stop") {
+		t.Fatalf("chat→a citation SSE lost the visible text or clean terminal:\n%s", toAnthropicFromChat)
+	}
+	for _, degraded := range []string{`"annotations":[`, `url_citation`, "Sources:", "https://example.test/weather"} {
+		if strings.Contains(string(toAnthropicFromChat), degraded) {
+			t.Fatalf("chat→a citation SSE must degrade the citation observably (no %q):\n%s", degraded, toAnthropicFromChat)
+		}
+	}
+}
+
+// TestCitationSSE_MultiDeltaOffsets pins the offset BASE bookkeeping in the
+// streaming citation paths: the a→r converter accumulates per-block text
+// (b.acc) for end_index, and the a→chat converter tracks the block's rune
+// start (curTextStart) for start_index. A single-delta fixture keeps both at
+// zero and cannot catch accumulation regressions, so this drives two text
+// deltas with multi-byte characters into a SECOND text block.
+func TestCitationSSE_MultiDeltaOffsets(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"m1","model":"claude","usage":{}}}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello "}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":0}`,
+		``,
+		`event: content_block_start`,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"天气"}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"晴朗"}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","cited_text":"Sunny","encrypted_index":"enc_1","title":"Forecast","url":"https://example.test/weather"}}}`,
+		``,
+		`event: content_block_stop`,
+		`data: {"type":"content_block_stop","index":1}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	// a→r: the annotation covers the cited block's own accumulated text
+	// ("天气晴朗" = 4 runes), from 0 — the multi-delta accumulation must land
+	// in end_index.
+	toResponses := drainSSE(t, newAnthropicToResponsesSSE(strings.NewReader(stream), "claude"))
+	added := sseFilter(toResponses, "response.output_text.annotation.added")
+	if len(added) != 1 {
+		t.Fatalf("annotation.added frames = %d, want 1:\n%s", len(added), sseEventTypes(toResponses))
+	}
+	annotation := asMap(sseDataMap(t, added[0])["annotation"])
+	if annotation["type"] != "url_citation" || annotation["url"] != "https://example.test/weather" {
+		t.Fatalf("a→r annotation = %#v", annotation)
+	}
+	if annotation["start_index"] != float64(0) || annotation["end_index"] != float64(4) {
+		t.Fatalf("a→r annotation offsets = [%v,%v], want [0,4] (4 runes accumulated across deltas)", annotation["start_index"], annotation["end_index"])
+	}
+
+	// a→chat: start_index must be the SECOND block's rune offset in the
+	// concatenated message ("hello " = 6 runes before it), end_index = 6+4.
+	toChat := drainSSE(t, newAnthropicToOpenAISSE(strings.NewReader(stream), "claude"))
+	var chatCitation map[string]any
+	for _, ev := range toChat {
+		if ev.data == "[DONE]" {
+			continue
+		}
+		delta := asMap(asMap(choices0(sseDataMap(t, ev)))["delta"])
+		for _, raw := range anySlice(delta["annotations"]) {
+			chatCitation = asMap(asMap(raw)["url_citation"])
+		}
+	}
+	if chatCitation == nil {
+		t.Fatalf("a→chat citation chunk missing:\n%s", sseEventTypes(toChat))
+	}
+	if chatCitation["start_index"] != float64(6) || chatCitation["end_index"] != float64(10) {
+		t.Fatalf("a→chat citation offsets = [%v,%v], want [6,10] (block start 6 runes in, 4 runes long)", chatCitation["start_index"], chatCitation["end_index"])
 	}
 }

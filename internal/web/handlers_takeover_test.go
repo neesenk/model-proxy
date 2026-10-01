@@ -115,8 +115,10 @@ func TestTakeoverRunHandler(t *testing.T) {
 
 func TestTakeoverRestoreHandler(t *testing.T) {
 	var gotClient string
+	var serviceCalls int
 	commands := &commandFake{
 		takeoverRest: func(client string) (appapi.TakeoverRestoreResult, error) {
+			serviceCalls++
 			gotClient = client
 			return appapi.TakeoverRestoreResult{Status: "restored", Restored: []string{"pi"}, Skipped: []string{}}, nil
 		},
@@ -129,6 +131,22 @@ func TestTakeoverRestoreHandler(t *testing.T) {
 	body := commandJSON(t, rec)
 	if body["status"] != "restored" || body["restored"].([]any)[0] != "pi" {
 		t.Errorf("body = %v", body)
+	}
+
+	// Malformed body → 400, never reaches the service.
+	calls := serviceCalls
+	rec = commandRequest(s, http.MethodPost, "/api/takeover/restore", `{`)
+	if rec.Code != http.StatusBadRequest || serviceCalls != calls {
+		t.Errorf("malformed = %d (service calls %d→%d), want 400 without a service call",
+			rec.Code, calls, serviceCalls)
+	}
+	// Backend failure (single client with no backup) → 400 with the message.
+	commands.takeoverRest = func(string) (appapi.TakeoverRestoreResult, error) {
+		return appapi.TakeoverRestoreResult{}, appapi.NewHTTPError(http.StatusBadRequest, "no backup for client \"pi\"")
+	}
+	rec = commandRequest(s, http.MethodPost, "/api/takeover/restore", `{"client":"pi"}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "no backup for client") {
+		t.Errorf("backend error = %d %s, want 400 with the message", rec.Code, rec.Body)
 	}
 }
 

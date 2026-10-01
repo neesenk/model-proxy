@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -208,5 +209,116 @@ func TestCacheStateReloadPreservesLiveCounters(t *testing.T) {
 	fresh := newTestProxyAt(t, p.cfg, p.quota.Path)
 	if got := fresh.cache.Stats(); got.Misses != 3 || got.Entries != 0 {
 		t.Fatalf("restart stats = %+v", got)
+	}
+}
+
+// TestCacheStateConcurrentSaveResetKeepsCounters: saveCacheState() racing
+// resetStats() (and concurrent lookups bumping the shared counters) must never
+// lose counts or persist a zeroed/corrupt state — reset deliberately keeps the
+// cache counters, and the persisted file must always reflect real totals.
+func TestCacheStateConcurrentSaveResetKeepsCounters(t *testing.T) {
+	home := t.TempDir()
+	qpath := filepath.Join(home, ".model-proxy", "quota_state.json")
+	t.Setenv("HOME", home)
+
+	cfg, err := configdomain.LoadConfigFromBytes("test", []byte(testConfigYAML("cache: {enabled: true, ttl: 1h}\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewProxyWithStatePath(cfg, qpath)
+	t.Cleanup(p.Close)
+	now := time.Now()
+	p.cache.Put("k", "glm-5.2", http.StatusOK, nil, []byte("x"), now)
+
+	const savers, resets, lookups = 4, 2, 4
+	const iterations = 25
+	var wg sync.WaitGroup
+	wg.Add(savers + resets + lookups)
+	for i := 0; i < savers; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				p.saveCacheState()
+			}
+		}()
+	}
+	for i := 0; i < resets; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				if err := p.resetStats(); err != nil {
+					t.Errorf("concurrent resetStats: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	for i := 0; i < lookups; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				// Deterministic miss count: each goroutine contributes exactly
+				// `iterations` misses on its own key.
+				p.cache.Lookup("miss", "kimi-k3", now)
+			}
+		}()
+	}
+	wg.Wait()
+
+	const wantMisses = lookups * iterations
+	got := p.cache.Stats()
+	if got.Hits != 0 || got.Misses != wantMisses {
+		t.Fatalf("in-memory counters after the storm = %+v, want hits=0 misses=%d (no lost lookups)", got, wantMisses)
+	}
+
+	// The final save must persist the complete totals (no interleaved
+	// zeroed/partial write survived the concurrent renames).
+	p.saveCacheState()
+	state := loadCacheState(p.cacheStatePath)
+	if state.Hits != 0 || state.Misses != wantMisses {
+		t.Fatalf("persisted state after the storm = %+v, want hits=0 misses=%d", state, wantMisses)
+	}
+}
+
+// TestCacheStateSaveFailureKeepsCounters: a failed write is best-effort — the
+// in-memory counters must survive untouched, and the next successful save
+// persists them. The unwritable path is a regular FILE occupying the parent
+// directory slot, so MkdirAll fails.
+func TestCacheStateSaveFailureKeepsCounters(t *testing.T) {
+	home := t.TempDir()
+	qpath := filepath.Join(home, ".model-proxy", "quota_state.json")
+	t.Setenv("HOME", home)
+
+	cfg, err := configdomain.LoadConfigFromBytes("test", []byte(testConfigYAML("cache: {enabled: true, ttl: 1h}\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewProxyWithStatePath(cfg, qpath)
+	t.Cleanup(p.Close)
+	now := time.Now()
+	p.cache.Put("k", "glm-5.2", http.StatusOK, nil, []byte("x"), now)
+	if _, ok := p.cache.Lookup("k", "glm-5.2", now); !ok {
+		t.Fatal("seeded entry should hit")
+	}
+	p.cache.Lookup("miss", "kimi-k3", now)
+
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p.cacheStatePath = filepath.Join(blocker, "nested", cacheStateFile)
+	p.saveCacheState() // must only log — no panic, no counter damage
+
+	if got := p.cache.Stats(); got.Hits != 1 || got.Misses != 1 || got.Entries != 1 {
+		t.Fatalf("counters after failed save = %+v, want untouched hits=1 misses=1 entries=1", got)
+	}
+
+	// Recovery: the next save to a writable path persists the full history.
+	goodPath := filepath.Join(t.TempDir(), cacheStateFile)
+	p.cacheStatePath = goodPath
+	p.saveCacheState()
+	state := loadCacheState(goodPath)
+	if state.Hits != 1 || state.Misses != 1 || len(state.Models) != 2 {
+		t.Fatalf("state after recovery save = %+v, want hits=1 misses=1 across 2 models", state)
 	}
 }

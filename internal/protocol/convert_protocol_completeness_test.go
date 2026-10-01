@@ -1,7 +1,6 @@
 package protocol
 
 import (
-	"io"
 	"strings"
 	"testing"
 )
@@ -103,20 +102,14 @@ func TestConvertHostedToolResponsesSSE(t *testing.T) {
 		"event: response.completed\n" +
 		`data: {"type":"response.completed","response":{"id":"r1","model":"m","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}` + "\n\n"
 
-	anthropic, err := io.ReadAll(newResponsesToAnthropicSSE(strings.NewReader(stream), "m"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	anthropic := readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(stream), "m"))
 	for _, want := range []string{`"type":"server_tool_use"`, `"type":"web_search_tool_result"`, `"name":"tool_search"`} {
 		if !strings.Contains(string(anthropic), want) {
 			t.Fatalf("r→a hosted SSE missing %s:\n%s", want, anthropic)
 		}
 	}
 
-	chat, err := io.ReadAll(newResponsesToOpenAISSE(strings.NewReader(stream), "m"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	chat := readAllChecked(t, newResponsesToOpenAISSE(strings.NewReader(stream), "m"))
 	for _, want := range []string{`"name":"web_search"`, `"name":"tool_search"`, `"finish_reason":"tool_calls"`} {
 		if !strings.Contains(string(chat), want) {
 			t.Fatalf("r→chat hosted SSE missing %s:\n%s", want, chat)
@@ -246,14 +239,72 @@ func TestConvertHostedToolsAndCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	back := unmarshalMap(t, backRaw)
-	var sawWeb bool
+	var webItem map[string]any
 	for _, raw := range anySlice(back["output"]) {
 		if asMap(raw)["type"] == "web_search_call" {
-			sawWeb = true
+			webItem = asMap(raw)
 		}
 	}
-	if !sawWeb {
+	if webItem == nil {
 		t.Fatalf("a→r web search response missing: %s", backRaw)
+	}
+	if webItem["id"] != "ws_1" || webItem["status"] != "completed" {
+		t.Fatalf("a→r web_search_call id/status = %#v", webItem)
+	}
+	if got := strOpt(asMap(webItem["action"])["query"]); got != "weather" {
+		t.Fatalf("a→r web_search_call action.query = %q, want weather (re-attached from the paired server_tool_use input)", got)
+	}
+	sources := anySlice(webItem["sources"])
+	if len(sources) != 1 ||
+		strOpt(asMap(sources[0])["url"]) != "https://example.test/f" ||
+		strOpt(asMap(sources[0])["title"]) != "Forecast" {
+		t.Fatalf("a→r web_search_call sources = %#v", sources)
+	}
+}
+
+// TestAnthropicToResponses_WebSearchHistoryReplay: an anthropic client
+// replaying a conversation that contains hosted web-search history (a
+// server_tool_use block paired with its web_search_tool_result by id) must
+// rebuild a real `web_search_call` input item on the Responses side — the
+// action re-attached from the paired server_tool_use input (id-keyed), and
+// the sources extracted from the result block's web_search_result entries.
+// Losing either makes the responses upstream reject or silently degrade the
+// follow-up turn.
+func TestAnthropicToResponses_WebSearchHistoryReplay(t *testing.T) {
+	in := []byte(`{"model":"claude","max_tokens":64,"messages":[
+		{"role":"user","content":"search the news"},
+		{"role":"assistant","content":[
+			{"type":"server_tool_use","id":"ws_1","name":"web_search","input":{"query":"news"}},
+			{"type":"web_search_tool_result","tool_use_id":"ws_1","content":[
+				{"type":"web_search_result","title":"Forecast","url":"https://example.test/n"},
+				{"type":"web_search_result","title":"Second","url":"https://example.test/s"}
+			]}
+		]}
+	]}`)
+	raw, err := convertAnthropicRequestToResponses(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := unmarshalMap(t, raw)
+	items := anySlice(body["input"])
+	if len(items) != 2 {
+		t.Fatalf("a→r input items = %#v, want the user message + the web_search_call item: %s", items, raw)
+	}
+	item := asMap(items[1])
+	if item["type"] != "web_search_call" {
+		t.Fatalf("second item = %#v, want web_search_call: %s", item, raw)
+	}
+	if item["id"] != "ws_1" || item["status"] != "completed" {
+		t.Fatalf("web_search_call id/status = %#v", item)
+	}
+	if got := strOpt(asMap(item["action"])["query"]); got != "news" {
+		t.Fatalf("web_search_call action.query = %q, want news (paired by server_tool_use id)", got)
+	}
+	sources := anySlice(item["sources"])
+	if len(sources) != 2 ||
+		strOpt(asMap(sources[0])["url"]) != "https://example.test/n" || strOpt(asMap(sources[0])["title"]) != "Forecast" ||
+		strOpt(asMap(sources[1])["url"]) != "https://example.test/s" || strOpt(asMap(sources[1])["title"]) != "Second" {
+		t.Fatalf("web_search_call sources = %#v", sources)
 	}
 }
 

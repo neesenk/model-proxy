@@ -9,6 +9,9 @@ import (
 	"time"
 )
 
+// newTestStore is the package's shared Store fixture: every test file opens its
+// per-test database through this helper, with retention as the only policy
+// knob (0 keeps history forever).
 func newTestStore(t *testing.T, retention time.Duration) *Store {
 	t.Helper()
 	store, err := Open(Options{

@@ -197,6 +197,72 @@ func TestConvertFault_ResponsesIncomplete(t *testing.T) {
 	}
 }
 
+// C5b: a non-spec responses gateway that terminates with `data: [DONE]`
+// BEFORE response.completed must fail closed in BOTH r→ directions — the
+// dispatch [DONE] prelude (the deliberately distinct per-converter part of
+// the shared fold-dispatch loop) emits one terminal error, and frames after
+// the [DONE] (a late response.completed carrying usage) must not be
+// processed: no clean terminal may follow the error, and its usage must not
+// leak into the client stream.
+func TestResponsesDoneBeforeCompletedFailsClosed(t *testing.T) {
+	in := "event: response.created\n" +
+		`data: {"type":"response.created","response":{"id":"r1","status":"in_progress"}}` + "\n\n" +
+		"event: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta","output_index":0,"delta":"partial"}` + "\n\n" +
+		"data: [DONE]\n\n" +
+		"event: response.completed\n" +
+		`data: {"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":7,"output_tokens":3}}}` + "\n\n"
+
+	t.Run("r→a", func(t *testing.T) {
+		events := drainSSE(t, newResponsesToAnthropicSSE(strings.NewReader(in), "gpt-x"))
+		if got := sseCount(events, "error"); got != 1 {
+			t.Fatalf("error events = %d, want 1:\n%s", got, sseEventTypes(events))
+		}
+		if got := sseCount(events, "message_stop"); got != 0 {
+			t.Fatalf("clean message_stop after [DONE]-before-completed = %d, want 0", got)
+		}
+		errPayload := sseDataMap(t, sseFilter(events, "error")[0])
+		if got := strOf(asMap(errPayload["error"])["message"]); got != "responses stream ended before response.completed" {
+			t.Fatalf("error message = %q", got)
+		}
+		// The post-[DONE] completed frame was never processed: its usage
+		// (input_tokens 7) must not appear anywhere — message_start carries 0.
+		for _, ev := range events {
+			if strings.Contains(ev.data, `"input_tokens":7`) {
+				t.Fatalf("usage from a post-[DONE] completed frame leaked: %s", ev.data)
+			}
+		}
+	})
+
+	t.Run("r→chat", func(t *testing.T) {
+		events := drainSSE(t, newResponsesToOpenAISSE(strings.NewReader(in), "gpt-x"))
+		errChunks := 0
+		for _, ev := range events {
+			if ev.data == "[DONE]" {
+				t.Fatalf("error terminal must not emit a [DONE] marker: %v", sseEventTypes(events))
+			}
+			m := sseDataMap(t, ev)
+			if asMap(m["error"]) != nil {
+				errChunks++
+				if got := strOf(asMap(m["error"])["message"]); got != "responses stream ended before response.completed" {
+					t.Fatalf("error message = %q", got)
+				}
+			}
+			for _, raw := range anySlice(m["choices"]) {
+				if strOpt(asMap(raw)["finish_reason"]) != "" {
+					t.Fatalf("clean finish chunk after [DONE]-before-completed: %s", ev.data)
+				}
+			}
+			if strings.Contains(ev.data, `"input_tokens":7`) || strings.Contains(ev.data, `"prompt_tokens":7`) {
+				t.Fatalf("usage from a post-[DONE] completed frame leaked: %s", ev.data)
+			}
+		}
+		if errChunks != 1 {
+			t.Fatalf("error chunks = %d, want 1:\n%s", errChunks, sseEventTypes(events))
+		}
+	})
+}
+
 // C5: a non-JSON function_call arguments string is wrapped recoverably as
 // {"raw": <text>} with a convertWarn (anthropic tool_use.input must be an
 // object — the raw text stays available to the tool instead of being lost).

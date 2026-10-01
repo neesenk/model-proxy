@@ -2,12 +2,14 @@ package provider
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // usage_test.go covers each provider's Usage() display method directly (the
@@ -336,5 +338,52 @@ func TestVolcengineUsage_GetAFPFailsFallsBack(t *testing.T) {
 	out := captureStdoutProvider(func() { _ = p.Usage() })
 	if !contains(out, "GetAFPUsage failed") || !contains(out, "1 models") {
 		t.Errorf("volcengine usage getafp-fails missing marker:\n%s", out)
+	}
+}
+
+// TestVolcengineUsage_AFPSuccess drives the success branch: bound dummy AK/SK +
+// a mocked 200 GetAFPUsage response render the Plan line and all four AFP
+// windows (5h/Daily/Weekly/Monthly), each with its own numbers, and never the
+// listConfigModels fallback (that belongs to the error/no-creds branches
+// covered above). Same volcengineOpenAPIBase→httptest technique as
+// TestValidateVolcengineAKSK / TestVolcengineUsage_GetAFPFailsFallsBack.
+func TestVolcengineUsage_AFPSuccess(t *testing.T) {
+	orig := volcengineOpenAPIBase
+	defer func() { volcengineOpenAPIBase = orig }()
+	reset5h := time.Now().Add(2 * time.Hour).UnixMilli()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("Action"); got != "GetAFPUsage" {
+			t.Errorf("GetAFPUsage Action query = %q, want GetAFPUsage", got)
+		}
+		w.Write([]byte(fmt.Sprintf(`{"ResponseMetadata":{},"Result":{`+
+			`"PlanType":"agent-plan",`+
+			`"AFPFiveHour":{"Quota":100,"Used":30,"ResetTime":%d},`+
+			`"AFPDaily":{"Quota":200,"Used":50,"ResetTime":0},`+
+			`"AFPWeekly":{"Quota":400,"Used":100,"ResetTime":0},`+
+			`"AFPMonthly":{"Quota":800,"Used":0,"ResetTime":0}}}`, reset5h)))
+	}))
+	defer srv.Close()
+	volcengineOpenAPIBase = srv.URL
+	p := &VolcengineProvider{cfg: &Config{ProviderName: "volcengine", AccessKey: "AK", SecretKey: "SK", Models: []string{"doubao"}}}
+	out := captureStdoutProvider(func() { _ = p.Usage() })
+	for _, want := range []string{
+		"Plan:", "agent-plan",
+		"5h:", "30.0 used / 100.0 quota, 70.0 remaining",
+		"Daily:", "50.0 used / 200.0 quota, 150.0 remaining",
+		"Weekly:", "100.0 used / 400.0 quota, 300.0 remaining",
+		"Monthly:", "0.0 used / 800.0 quota, 800.0 remaining",
+		// A future ResetTime on the 5h window must render the resets clause.
+		"· resets",
+	} {
+		if !contains(out, want) {
+			t.Errorf("volcengine usage afp-success missing %q:\n%s", want, out)
+		}
+	}
+	// The success branch must not run any fallback: no config model list, no
+	// error line, no AK/SK note.
+	for _, ban := range []string{"models (from config)", "GetAFPUsage failed", "Note:"} {
+		if contains(out, ban) {
+			t.Errorf("volcengine usage afp-success must not contain %q:\n%s", ban, out)
+		}
 	}
 }
