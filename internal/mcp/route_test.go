@@ -222,3 +222,31 @@ func TestSessionTableRouteOps(t *testing.T) {
 		t.Fatal("deleted session still serves sticky")
 	}
 }
+
+// TestSessionTableRouteToolsCopy: RouteToolsGet/RouteToolsPut are documented as
+// copy-under-lock. The lock serializes the copy; it does not make the slice
+// shared — mutating either side afterwards must leave the stored cache intact
+// (a caller that rewrites its own tools slice, or a later reader that edits
+// what it got back, must not corrupt the session's aggregate).
+func TestSessionTableRouteToolsCopy(t *testing.T) {
+	tbl := NewSessionTable(4, time.Minute)
+	id := tbl.PutRoute("web-search")
+
+	put := []ToolSpec{{Name: "web_search"}, {Name: "url_read"}}
+	if !tbl.RouteToolsPut(id, put) {
+		t.Fatal("RouteToolsPut failed")
+	}
+	// Mutating the caller's slice after Put must not alter the stored cache.
+	put[0].Name = "clobbered"
+	got, ok := tbl.RouteToolsGet(id)
+	if !ok || len(got) != 2 || got[0].Name != "web_search" || got[1].Name != "url_read" {
+		t.Fatalf("stored cache aliases the caller slice: %+v ok=%v", got, ok)
+	}
+	// Mutating the returned slice must not alter the stored cache either.
+	got[0].Name = "clobbered"
+	got[1].Name = "clobbered"
+	again, ok := tbl.RouteToolsGet(id)
+	if !ok || len(again) != 2 || again[0].Name != "web_search" || again[1].Name != "url_read" {
+		t.Fatalf("returned slice aliases the stored cache: %+v ok=%v", again, ok)
+	}
+}
