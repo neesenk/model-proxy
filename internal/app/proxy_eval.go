@@ -136,5 +136,12 @@ func (p *Proxy) maybeStoreEvalPrimaryBody(requestID string, evalConfigured bool,
 	if p == nil || p.evalPrimaryBodies == nil || isEvalRecursiveID(requestID) || len(body) == 0 || !evalConfigured {
 		return
 	}
+	// The captured slice is POOLED bodycapture memory, valid only inside the
+	// callback (reader.go contract): Close returns it to the free-list the
+	// moment this callback returns, and a concurrent request can reuse — and
+	// write — the same backing array while the detached eval-shadow task
+	// still reads it. Retaining it un-copied was a data race AND leaked one
+	// request's response body into another request's judge prompt.
+	body = append([]byte(nil), body...)
 	p.evalPrimaryBodies.Store(requestID, body)
 }

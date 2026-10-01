@@ -569,3 +569,32 @@ func TestJudgeEvalPairAbortsOnStop(t *testing.T) {
 		t.Fatal("judge did not return promptly after stop — it must not hold the drain window for the full judge budget")
 	}
 }
+
+// TestMaybeStoreEvalPrimaryBodyCopiesPooledBuffer: the body handed to the
+// store comes from bodycapture's POOLED callback slice — valid only inside
+// the callback (reader.go contract; Close frees it back to the shared
+// free-list right after). Retaining it un-copied was a data race and leaked
+// one request's response into another request's judge prompt: a concurrent
+// request reusing the buffer overwrote the stored body in place. This pins
+// the defensive copy.
+func TestMaybeStoreEvalPrimaryBodyCopiesPooledBuffer(t *testing.T) {
+	p := &Proxy{processServices: processServices{
+		evalPrimaryBodies: newEvalBodyCache(4, 1<<20),
+	}}
+	pooled := []byte(`{"choices":[{"message":{"content":"request A body"}}]}`)
+	p.maybeStoreEvalPrimaryBody("req-a", true, pooled)
+
+	// Simulate the buffer returning to the free-list and being reused by a
+	// concurrent request: the same backing array is overwritten in place.
+	for i := range pooled {
+		pooled[i] = 'X'
+	}
+
+	got := p.evalPrimaryBodies.Retrieve("req-a")
+	if got == nil {
+		t.Fatal("sampled body not retained")
+	}
+	if string(got) != `{"choices":[{"message":{"content":"request A body"}}]}` {
+		t.Fatalf("stored body was mutated through the pooled backing array: %q — judge prompts must never see another request's content", got)
+	}
+}
