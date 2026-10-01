@@ -229,6 +229,29 @@ generation 与内容不会混代。`internal/app` 只保留真实
 forward/Fusion/reload/HTTP/CLI/persistence/quota poll 编排；集成测试通过公开行为
 或 detached snapshot 断言，不得访问 Manager mutex 或恢复第二份内部 map。
 
+### 时序纪律契约
+
+时间不得作为同步原语。本节是政策的唯一权威定义，执行在
+`internal/archtest/timing_discipline_contract_test.go`（快照门禁，同
+`scripts/cover.sh` 的 floor 模式）：
+
+- **生产 `time.Sleep`** 只允许有界退避/节流（仲裁必须是信号、锁或 O_EXCL 等
+  同步原语），精确登记；新增即 FAIL。
+- **生产 `.ModTime`** 是文件状态观察值，不是互斥依据；凡「看起来陈旧就破坏
+  互斥」的恢复路径必须有存活证据（pitfalls #40 池锁 PID 探活先例）。新增
+  即 FAIL。
+- **测试 `time.Sleep`** 按（文件, 顶层函数）登记数量：增加即 FAIL——先改成
+  确定性同步（channel/barrier/轮询可观察量/决策相对窗口；被测延迟本身除外，
+  如 TTFT hold、节流阀输入、慢腿现象）；减少也要收紧快照防基线漂移。
+- 契约用 `MP_TIMING_REGEN=1 go test ./internal/archtest -run
+  TestTimingDisciplineContract -v` 再生成当前清单，diff 审查后粘回 allowlist；
+  新登记条目须附分类注释。采集器有合成正/负自控。
+- `time.After` 的短窗窥探（超时即通过/证明未发生）与 Sleep 同罪但不可靠
+  AST 判定，不在自动门禁内：新增亚秒级 `time.After` 窗口前先考虑确定性
+  替代（join 后断言顺序、生产锚点 + 容差、channel 交棒）；现存 5 处
+  （protocol_fault 心跳节拍、lifecycle/loopback 非发生窥探、
+  target_pipeline 收集窗、keepalive 静默期）为已审计快照。
+
 ## 禁止的弱测试
 
 - 只有 `t.Logf`，没有断言；
