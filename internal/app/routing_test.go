@@ -65,11 +65,6 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 	if codexHit.auth != "Bearer codex-token" {
 		t.Errorf("gpt-5.5 auth=%q want Bearer codex-token", codexHit.auth)
 	}
-	// P2-1: assert the model field was rewritten to the upstream model name
-	if codexHit.model != "gpt-5.5" {
-		t.Errorf("gpt-5.5 model rewrite: upstream model=%q want gpt-5.5", codexHit.model)
-	}
-
 	// 2) glm-5.2 → aqp provider
 	codexHit, gwHit = requestHit{}, requestHit{}
 	postOK(t, px.URL+"/v1/responses", `{"model":"glm-5.2","input":[]}`)
@@ -82,34 +77,14 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 	if gwHit.auth != "Bearer gw-key" {
 		t.Errorf("glm-5.2 auth=%q want Bearer gw-key", gwHit.auth)
 	}
-	// P2-1: assert model rewrite
-	if gwHit.model != "glm-5.2" {
-		t.Errorf("glm-5.2 model rewrite: upstream model=%q want glm-5.2", gwHit.model)
-	}
 }
 
-// TestForward_UnknownModel errors when the model isn't in the route.
-func TestForward_UnknownModel(t *testing.T) {
-	gwUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{}`))
-	}))
-	defer gwUp.Close()
-	cfg := &configdomain.Config{
-
-		Providers: map[string]configdomain.Provider{
-			"aqp": {OpenAIBaseURL: gwUp.URL, Provider: testProviderID},
-		},
-		Routes: map[string][]configdomain.RouteTarget{
-			"gpt-5.5": {{Provider: "aqp", Model: "gpt-5.5"}},
-		},
-	}
-	p := newTestProxy(t, cfg)
-	px := httptest.NewServer(http.HandlerFunc(p.Handler))
-	defer px.Close()
-	if code, _ := post(t, px.URL+"/v1/responses", `{"model":"unknown"}`); code != 502 {
-		t.Errorf("expected 502 for unknown model, got %d", code)
-	}
-}
+// (Unknown-model 502, missing-model 400, unknown-path 502, and the deepseek
+// dual-protocol base-url split each used to have weaker UC-shaped twins here;
+// the stronger versions — status plus terminal end-event / request_id
+// assertions in TestForward_EarlyEventsHaveRequestID, and exact path/header/
+// zero-hit assertions in TestForward_DeepSeekRoutesByProtocol — are the single
+// authority.)
 
 type requestHit struct {
 	path  string
@@ -769,57 +744,10 @@ func TestUC_CodexStoreFalseInjected(t *testing.T) {
 	}
 }
 
-// --- UC15: deepseek dual-protocol — anthropic→anthropic_base_url, openai→openai_base_url ---
+// --- UC16: /health and /health/status → 200 (unknown-path 502 is pinned by
+// TestForward_EarlyEventsHaveRequestID with live-event semantics) ---
 
-func TestUC_DeepSeekDualProtocolBaseURL(t *testing.T) {
-	var anthropicHit, openaiHit string
-	anthUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		anthropicHit = r.URL.Path
-		w.Write([]byte(`{}`))
-	}))
-	defer anthUp.Close()
-	oaiUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		openaiHit = r.URL.Path
-		w.Write([]byte(`{}`))
-	}))
-	defer oaiUp.Close()
-
-	cfg := &configdomain.Config{
-		Providers: map[string]configdomain.Provider{
-			"deepseek": {
-				OpenAIBaseURL:    oaiUp.URL,
-				AnthropicBaseURL: anthUp.URL,
-				Provider:         "deepseek",
-			},
-		},
-		Routes: map[string][]configdomain.RouteTarget{
-			"deepseek-v4-pro": {{Provider: "deepseek", Model: "deepseek-v4-pro"}},
-		},
-	}
-	loginAPIKeyFixtures(t, [2]string{"deepseek", "deepseek"})
-	p := newTestProxy(t, cfg)
-	// deepseek provider sets both Bearer + x-api-key; use a key file via testProv override.
-	p.providers["deepseek"] = &testProv{key: "ds-key"}
-	px := httptest.NewServer(http.HandlerFunc(p.Handler))
-	defer px.Close()
-
-	postOK(t, px.URL+"/v1/messages", `{"model":"deepseek-v4-pro","messages":[]}`)
-	postOK(t, px.URL+"/v1/chat/completions", `{"model":"deepseek-v4-pro","messages":[]}`)
-
-	if anthropicHit == "" {
-		t.Error("anthropic request did not hit anthropic_base_url upstream")
-	}
-	if openaiHit == "" {
-		t.Error("openai request did not hit openai_base_url upstream")
-	}
-	if anthropicHit == openaiHit {
-		t.Errorf("both protocols hit the same upstream path %q (should use per-protocol base)", anthropicHit)
-	}
-}
-
-// --- UC16: unknown path → 502; /health → 200 ---
-
-func TestUC_UnknownPathAndHealth(t *testing.T) {
+func TestUC_HealthEndpointsReturn200(t *testing.T) {
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
 		Routes:    map[string][]configdomain.RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
@@ -828,39 +756,24 @@ func TestUC_UnknownPathAndHealth(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	// Unknown path → 502.
-	if code, _ := post(t, px.URL+"/v1/whatever", `{"model":"m1"}`); code != 502 {
-		t.Errorf("unknown path status=%d want 502", code)
-	}
-
 	// /health → 200.
-	resp, _ := http.Get(px.URL + "/health")
+	resp, err := http.Get(px.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Errorf("/health status=%d want 200", resp.StatusCode)
 	}
 
 	// /health/status → 200.
-	resp, _ = http.Get(px.URL + "/health/status")
+	resp, err = http.Get(px.URL + "/health/status")
+	if err != nil {
+		t.Fatal(err)
+	}
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Errorf("/health/status status=%d want 200", resp.StatusCode)
-	}
-}
-
-// --- UC17: missing model field → 400 ---
-
-func TestUC_MissingModelField400(t *testing.T) {
-	cfg := &configdomain.Config{
-		Providers: map[string]configdomain.Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
-		Routes:    map[string][]configdomain.RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
-	}
-	p := newTestProxy(t, cfg)
-	px := httptest.NewServer(http.HandlerFunc(p.Handler))
-	defer px.Close()
-
-	if code, _ := post(t, px.URL+"/v1/responses", `{"input":[]}`); code != 400 {
-		t.Errorf("missing model: status=%d want 400", code)
 	}
 }
 

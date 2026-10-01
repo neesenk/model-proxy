@@ -1086,17 +1086,22 @@ func TestAPIMCPAnalyticsFromZeroIncludesMCPHistoryPredatingLLM(t *testing.T) {
 
 // ---- stats_test_support_test.go ----
 
-func openTestStatsStore(path string, retention time.Duration) (*observestats.Store, error) {
-	return observestats.Open(observestats.Options{Path: path, Retention: retention})
+// openTestStatsStore is the app package's single stats-store fixture: opens
+// with the given retention, fails the test on error, and closes via Cleanup
+// (Close is idempotent, so tests that reopen the same path after an explicit
+// Close are unaffected). It replaces the former openRuntimeStatsStore twin.
+func openTestStatsStore(t *testing.T, path string, retention time.Duration) *observestats.Store {
+	t.Helper()
+	ss, err := observestats.Open(observestats.Options{Path: path, Retention: retention})
+	if err != nil {
+		t.Fatalf("open stats store: %v", err)
+	}
+	t.Cleanup(func() { _ = ss.Close() })
+	return ss
 }
 
 // newTestStatsStore opens a fresh observestats.Store in a temp dir with no retention.
 func newTestStatsStore(t *testing.T) *observestats.Store {
 	t.Helper()
-	ss, err := openTestStatsStore(filepath.Join(t.TempDir(), "stats.db"), 0)
-	if err != nil {
-		t.Fatalf("openTestStatsStore: %v", err)
-	}
-	t.Cleanup(func() { ss.Close() })
-	return ss
+	return openTestStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
 }

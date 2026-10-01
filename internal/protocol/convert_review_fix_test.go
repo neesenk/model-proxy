@@ -154,6 +154,25 @@ func TestStreamEOFWithoutTerminalFailsClosed_AllDirections(t *testing.T) {
 			if !bytes.Contains(got, []byte(tt.want)) || bytes.Contains(got, []byte(tt.forbid)) {
 				t.Fatalf("unexpected stream:\n%s", got)
 			}
+			// The responses-target legs carry a structured terminal: exactly
+			// one response.failed whose response.status is "failed" (merged
+			// from TestResponsesSynthesis_EOF), never a bare or duplicated
+			// failure frame.
+			if strings.HasSuffix(tt.name, "-to-responses") {
+				events := parseSSE(string(got))
+				if n := sseCount(events, "response.failed"); n != 1 {
+					t.Fatalf("response.failed frames = %d, want 1:\n%s", n, got)
+				}
+				failed := asMap(sseDataMap(t, sseFilter(events, "response.failed")[0])["response"])
+				if failed["status"] != "failed" {
+					t.Fatalf("failed terminal response.status = %v, want failed:\n%s", failed["status"], got)
+				}
+				if tt.name == "anthropic-to-responses" {
+					// The a→r EOF terminal sequence is exactly created then
+					// failed — no stray frame between or after.
+					assertEventSequence(t, events, []string{"response.created", "response.failed"})
+				}
+			}
 		})
 	}
 }

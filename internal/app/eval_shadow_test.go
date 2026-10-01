@@ -110,8 +110,12 @@ func TestEvalShadow_PairwiseJudgeLogsVerdict(t *testing.T) {
 	post(t, px.URL+"/v1/chat/completions",
 		`{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
 
-	// Wait for shadow + judge to finish and the log to drain.
-	time.Sleep(300 * time.Millisecond)
+	// The detached shadow/judge tasks are admitted asynchronously after the
+	// client response returns; wait for their observable effects BEFORE Close
+	// (Close only waits for already-admitted tasks), then Close drains the
+	// request log so the on-disk assertions below are stable.
+	waitUntil(t, "shadow upstream hit", shadowHit.Load)
+	waitUntil(t, "judge upstream hit", judgeHit.Load)
 	p.Close()
 
 	if !shadowHit.Load() {
@@ -236,7 +240,9 @@ func TestEvalShadow_SkipsWhenNotSampled(t *testing.T) {
 	post(t, px.URL+"/v1/chat/completions",
 		`{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
 
-	time.Sleep(200 * time.Millisecond)
+	// The shadow dispatch decision (sample draw / force-provider policy) is
+	// synchronous on the forward goroutine, and Close waits for admitted
+	// detached tasks — no fixed sleep needed to prove the negative.
 	p.Close()
 
 	if shadowHit.Load() {
@@ -319,7 +325,9 @@ func TestEvalShadow_PinForceSkipsEval(t *testing.T) {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	time.Sleep(200 * time.Millisecond)
+	// The shadow dispatch decision (sample draw / force-provider policy) is
+	// synchronous on the forward goroutine, and Close waits for admitted
+	// detached tasks — no fixed sleep needed to prove the negative.
 	p.Close()
 
 	if shadowHit.Load() {

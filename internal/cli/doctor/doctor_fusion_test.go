@@ -1,10 +1,10 @@
 package doctor
 
 import (
-	"io"
-	"os"
 	"strings"
 	"testing"
+
+	"model-proxy/internal/cli/clitest"
 
 	configdomain "model-proxy/internal/config"
 )
@@ -38,30 +38,10 @@ routes:
 	if err != nil {
 		t.Fatalf("config rejected: %v", err)
 	}
-	out := grabStdout(t, func() { DoctorWithCfg(cfg) })
+	out := clitest.GrabStdout(t, func() { DoctorWithCfg(cfg) })
 	for _, want := range []string{"Fusion", "panel=2", "quorum=2", "synthesizer=s/ms", "budget=50/day", "first_turn_only", "judge=j/mj", "custom instruction"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("doctor output missing %q:\n%s", want, out)
 		}
 	}
-}
-
-// captureStdout captures os.Stdout during fn.
-func captureStdout(t *testing.T, fn func()) string {
-	t.Helper()
-	orig := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = w
-	defer func() { os.Stdout = orig }()
-	done := make(chan string)
-	go func() {
-		b, _ := io.ReadAll(r)
-		done <- string(b)
-	}()
-	fn()
-	w.Close()
-	return <-done
 }

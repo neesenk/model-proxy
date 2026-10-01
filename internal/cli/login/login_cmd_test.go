@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"model-proxy/internal/accounts"
+	"model-proxy/internal/cli/clitest"
 	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
 	configdomain "model-proxy/internal/config"
@@ -128,10 +129,10 @@ func TestRunApiKeyLogin_Validation401(t *testing.T) {
 // key always maps to the same id → the existing entry is overwritten in place.
 func TestRunApiKeyLoginWithInput_DedupSameKey(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	clitest.SetPoolHome(t, dir)
 	cfg := &configdomain.Config{Listen: "127.0.0.1:1", Providers: map[string]configdomain.Provider{"zhipu": {Provider: "zhipu"}}}
 	prov := cfg.Providers["zhipu"]
-	writePoolFile(t, "zhipu", "zhipu", "DUP-KEY")
+	clitest.WritePoolFile(t, "zhipu", "zhipu", "DUP-KEY")
 	RunApiKeyLoginWithInput(cfg, "zhipu", prov, "DUP-KEY", "renamed", true /*replace*/)
 	pool, err := accounts.NewStore(accounts.HomeDir()).Load("zhipu", "zhipu")
 	if err != nil {
@@ -154,10 +155,10 @@ func TestRunApiKeyLoginWithInput_DedupSameKey(t *testing.T) {
 // "login cancelled" (stdin says "n"). The pool is left untouched.
 func TestRunApiKeyLoginWithInput_DedupSameKey_NoReplace_Aborts(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	clitest.SetPoolHome(t, dir)
 	cfg := &configdomain.Config{Listen: "127.0.0.1:1", Providers: map[string]configdomain.Provider{"zhipu": {Provider: "zhipu"}}}
 	prov := cfg.Providers["zhipu"]
-	writePoolFile(t, "zhipu", "zhipu", "DUP-KEY")
+	clitest.WritePoolFile(t, "zhipu", "zhipu", "DUP-KEY")
 
 	// Redirect stdin to answer "n" to the replace prompt.
 	orig := os.Stdin
@@ -182,9 +183,9 @@ func TestRunApiKeyLoginWithInput_DedupSameKey_NoReplace_Aborts(t *testing.T) {
 // appends a fresh entry to the pool, with the provided label applied.
 func TestRunApiKeyLoginWithInput_DifferentKeyAppends(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	clitest.SetPoolHome(t, dir)
 	cfg := &configdomain.Config{Listen: "127.0.0.1:1", Providers: map[string]configdomain.Provider{"zhipu": {Provider: "zhipu"}}}
-	writePoolFile(t, "zhipu", "zhipu", "KEY-1")
+	clitest.WritePoolFile(t, "zhipu", "zhipu", "KEY-1")
 	RunApiKeyLoginWithInput(cfg, "zhipu", cfg.Providers["zhipu"], "KEY-2", "team", false)
 	pool, err := accounts.NewStore(accounts.HomeDir()).Load("zhipu", "zhipu")
 	if err != nil {
@@ -210,7 +211,7 @@ func TestRunApiKeyLoginWithInput_DifferentKeyAppends(t *testing.T) {
 // function prompts on stdin; we feed it an empty line.
 func TestRunApiKeyLoginWithInput_EmptyKey(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	clitest.SetPoolHome(t, dir)
 	orig := os.Stdin
 	r, w, _ := os.Pipe()
 	os.Stdin = r
@@ -229,7 +230,7 @@ func TestRunApiKeyLoginWithInput_EmptyKey(t *testing.T) {
 // is provided, the entry's label defaults to the account id.
 func TestRunApiKeyLoginWithInput_NoLabel_DefaultsToID(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	clitest.SetPoolHome(t, dir)
 	cfg := &configdomain.Config{Listen: "127.0.0.1:1", Providers: map[string]configdomain.Provider{"zhipu": {Provider: "zhipu"}}}
 	prov := cfg.Providers["zhipu"]
 	if err := RunApiKeyLoginWithInput(cfg, "zhipu", prov, "FRESH-KEY", "", false); err != nil {
@@ -271,7 +272,7 @@ func stubVolcengineValidator(t *testing.T) {
 // keying by api_key, turns this red.
 func TestRunVolcengineLoginWithInput_WritesPoolTriple(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	clitest.SetPoolHome(t, dir)
 	stubVolcengineValidator(t)
 	cfg := &configdomain.Config{Listen: "127.0.0.1:1", Providers: map[string]configdomain.Provider{"volcengine": {Provider: "volcengine"}}}
 	prov := cfg.Providers["volcengine"]
@@ -313,7 +314,7 @@ func TestRunVolcengineLoginWithInput_WritesPoolTriple(t *testing.T) {
 // api_key + secret_key in place (idempotent replace, not append).
 func TestRunVolcengineLoginWithInput_DedupByAccessKey(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	clitest.SetPoolHome(t, dir)
 	stubVolcengineValidator(t)
 	cfg := &configdomain.Config{Listen: "127.0.0.1:1", Providers: map[string]configdomain.Provider{"volcengine": {Provider: "volcengine"}}}
 	prov := cfg.Providers["volcengine"]
@@ -344,7 +345,7 @@ func TestRunVolcengineLoginWithInput_DedupByAccessKey(t *testing.T) {
 // --replace, stdin says "n" → "login cancelled", pool untouched.
 func TestRunVolcengineLoginWithInput_DedupNoReplace_Aborts(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	clitest.SetPoolHome(t, dir)
 	stubVolcengineValidator(t)
 	cfg := &configdomain.Config{Listen: "127.0.0.1:1", Providers: map[string]configdomain.Provider{"volcengine": {Provider: "volcengine"}}}
 	prov := cfg.Providers["volcengine"]
@@ -376,7 +377,7 @@ func TestRunVolcengineLoginWithInput_DedupNoReplace_Aborts(t *testing.T) {
 // appends a fresh entry to the pool.
 func TestRunVolcengineLoginWithInput_DifferentAccessKeyAppends(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	clitest.SetPoolHome(t, dir)
 	stubVolcengineValidator(t)
 	cfg := &configdomain.Config{Listen: "127.0.0.1:1", Providers: map[string]configdomain.Provider{"volcengine": {Provider: "volcengine"}}}
 	prov := cfg.Providers["volcengine"]
@@ -446,7 +447,7 @@ func TestHasFlagValue(t *testing.T) {
 // exists — the foreground/test case. We point --log-file at an empty temp dir
 // so resolveLogFile lands in a path with no pid file.
 func TestMaybeReloadDaemon_NoOpWithoutPidFile(t *testing.T) {
-	setPoolHome(t, t.TempDir())
+	clitest.SetPoolHome(t, t.TempDir())
 	defer func() {
 		if r := recover(); r != nil {
 			t.Fatalf("maybeReloadDaemon panicked: %v", r)

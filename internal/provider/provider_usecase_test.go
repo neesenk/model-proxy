@@ -248,49 +248,11 @@ func TestApiKeyBase_DeleteKeyIdempotent(t *testing.T) {
 	}
 }
 
-// --- P11: deepseek AuthHeaders sets BOTH Bearer and x-api-key ---
-
-func TestDeepSeekAuthHeaders_DualScheme(t *testing.T) {
-	dir := t.TempDir()
-	authFile := filepath.Join(dir, "ds.json")
-	os.WriteFile(authFile, mustMarshal(map[string]string{"api_key": "ds-key"}), 0o600)
-	p := &DeepSeekProvider{
-		ApiKeyBase: &ApiKeyBase{authFile: authFile},
-		cfg:        &Config{},
-	}
-	req, _ := http.NewRequest("GET", "https://x", nil)
-	if err := p.AuthHeaders(req); err != nil {
-		t.Fatal(err)
-	}
-	if got := req.Header.Get("Authorization"); got != "Bearer ds-key" {
-		t.Errorf("Authorization=%q want Bearer ds-key", got)
-	}
-	if got := req.Header.Get("x-api-key"); got != "ds-key" {
-		t.Errorf("x-api-key=%q want ds-key (deepseek dual-auth)", got)
-	}
-}
-
-// --- P12: volcengine AuthHeaders sets BOTH Bearer and x-api-key ---
-
-func TestVolcengineAuthHeaders_DualScheme(t *testing.T) {
-	dir := t.TempDir()
-	authFile := filepath.Join(dir, "vol.json")
-	os.WriteFile(authFile, mustMarshal(map[string]string{"api_key": "vol-key"}), 0o600)
-	p := &VolcengineProvider{
-		ApiKeyBase: &ApiKeyBase{authFile: authFile},
-		cfg:        &Config{},
-	}
-	req, _ := http.NewRequest("GET", "https://x", nil)
-	if err := p.AuthHeaders(req); err != nil {
-		t.Fatal(err)
-	}
-	if got := req.Header.Get("Authorization"); got != "Bearer vol-key" {
-		t.Errorf("Authorization=%q want Bearer vol-key", got)
-	}
-	if got := req.Header.Get("x-api-key"); got != "vol-key" {
-		t.Errorf("x-api-key=%q want vol-key (volcengine dual-auth)", got)
-	}
-}
+// --- P11/P12: deleted — exact twins of TestDeepSeekAuthHeaders_BothSchemes
+// (deepseek_test.go) and TestVolcengineAuthHeaders_BothSchemes
+// (volcengine_test.go): same production AuthHeaders, same exact-value
+// assertions. The keepers now cover BOTH protocol legs per the auth-header
+// contract (docs/engineering/testing.md). ---
 
 // --- P13: zhipu FetchModels hits the configured /models endpoint ---
 

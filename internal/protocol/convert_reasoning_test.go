@@ -216,14 +216,21 @@ func TestConvertReasoning_EffortMapping(t *testing.T) {
 	}
 
 	// r→a: effort → thinking config with the fixed budget ladder, clamped
-	// below the effective max_tokens (here the injected default 4096 → 4095;
-	// Anthropic requires budget_tokens < max_tokens).
+	// below the effective max_tokens. Without client max_output_tokens the
+	// injected anthropic default (4096) applies → 16384 clamps to 4095
+	// (Anthropic requires budget_tokens < max_tokens). The defaultless r→a
+	// clamp case lives only here — specfix keeps the small-cap and
+	// no-thinking cases (TestSpecFix_EffortBudgetClampedBelowMaxTokens).
 	in2 := `{"model":"gpt-x","reasoning":{"effort":"high"},"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
 	out2, err := convertResponsesRequestToAnthropic([]byte(in2), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	th := asMap(unmarshalMap(t, out2)["thinking"])
+	m2 := unmarshalMap(t, out2)
+	if m2["max_tokens"] != float64(defaultAnthropicMaxTokens) {
+		t.Errorf("injected default max_tokens = %v, want %d", m2["max_tokens"], defaultAnthropicMaxTokens)
+	}
+	th := asMap(m2["thinking"])
 	if th["type"] != "enabled" || th["budget_tokens"] != float64(4095) {
 		t.Errorf("effort high → thinking = %v, want enabled/4095 (16384 clamped below default max_tokens 4096)", th)
 	}

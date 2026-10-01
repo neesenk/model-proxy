@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"model-proxy/internal/accounts"
+	"model-proxy/internal/cli/clitest"
 	configdomain "model-proxy/internal/config"
 )
 
@@ -59,11 +60,11 @@ func redirectStdin(t *testing.T, input string) {
 // TestCmdLogin_NoProviderPrintsUsage covers the no-positional path: usage +
 // provider list on stdout, no login attempted, no exit.
 func TestCmdLogin_NoProviderPrintsUsage(t *testing.T) {
-	setPoolHome(t, t.TempDir())
+	clitest.SetPoolHome(t, t.TempDir())
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
 	defer up.Close()
 	cfgPath := writeLoginConfig(t, up.URL)
-	out := grabStdout(t, func() {
+	out := clitest.GrabStdout(t, func() {
 		CmdLogin([]string{"--config", cfgPath})
 	})
 	if !strings.Contains(out, "usage: model-proxy login") || !strings.Contains(out, "zhipu (provider=zhipu)") {
@@ -79,7 +80,7 @@ func TestCmdLogin_NoProviderPrintsUsage(t *testing.T) {
 // → credentials mode → apikey dispatch → stdin key prompt → pool save → daemon
 // nudge (no-op without a pid file).
 func TestCmdLogin_ApiKeyLoginSavesPool(t *testing.T) {
-	setPoolHome(t, t.TempDir())
+	clitest.SetPoolHome(t, t.TempDir())
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
 	defer up.Close()
 	cfgPath := writeLoginConfig(t, up.URL)
@@ -99,7 +100,7 @@ func TestCmdLogin_ApiKeyLoginSavesPool(t *testing.T) {
 // TestCmdLogin_FromEnvLogin covers the --from-env branch of the CmdLogin
 // dispatch (no stdin key prompt; key comes from the environment).
 func TestCmdLogin_FromEnvLogin(t *testing.T) {
-	setPoolHome(t, t.TempDir())
+	clitest.SetPoolHome(t, t.TempDir())
 	t.Setenv("MP_CMD_LOGIN_KEY", "sk-from-env-key")
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
 	defer up.Close()
@@ -120,7 +121,7 @@ func TestCmdLogin_FromEnvLogin(t *testing.T) {
 // of the provider dispatch: all three triple values are prompted on stdin when
 // not passed, then the pool-aware save runs.
 func TestRunProviderLogin_VolcengineDispatch(t *testing.T) {
-	setPoolHome(t, t.TempDir())
+	clitest.SetPoolHome(t, t.TempDir())
 	stubVolcengineValidator(t)
 	redirectStdin(t, "ark-key\nAK9\nSK9\n")
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"vol": {Provider: "volcengine"}}}
@@ -144,7 +145,7 @@ func TestRunProviderLogin_VolcengineDispatch(t *testing.T) {
 // TestRunProviderLogin_ApiKeyDispatch covers the default apikey branch of the
 // provider dispatch with the key passed directly (no prompt).
 func TestRunProviderLogin_ApiKeyDispatch(t *testing.T) {
-	setPoolHome(t, t.TempDir())
+	clitest.SetPoolHome(t, t.TempDir())
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"zhipu": {Provider: "zhipu"}}}
 
 	if err := RunProviderLogin(cfg, "zhipu", "sk-direct", "", false); err != nil {

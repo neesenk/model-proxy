@@ -20,7 +20,7 @@ import (
 // --- models refresh: no provider → usage + available providers ---
 
 func TestCLI_ModelsRefreshNoProvider(t *testing.T) {
-	cfg := clitest.WriteTempConfig(t, minimalConfig)
+	cfg := clitest.WriteTempConfig(t, clitest.MinimalConfig)
 	stdout, _, code := clitest.RunCLI(t, "models", cfg, "refresh")
 	if code != 0 {
 		t.Errorf("models refresh (no provider): exit=%d want 0", code)
@@ -33,7 +33,7 @@ func TestCLI_ModelsRefreshNoProvider(t *testing.T) {
 // --- models refresh <unknown> → non-zero ---
 
 func TestCLI_ModelsRefreshUnknownProvider(t *testing.T) {
-	cfg := clitest.WriteTempConfig(t, minimalConfig)
+	cfg := clitest.WriteTempConfig(t, clitest.MinimalConfig)
 	_, stderr, code := clitest.RunCLI(t, "models", cfg, "refresh", "nope")
 	if code == 0 {
 		t.Error("models refresh nope: exit=0 want non-zero")
@@ -216,6 +216,33 @@ func TestCLI_ModelsRefreshFallback_RouteProbe(t *testing.T) {
 
 // --- models refresh: idempotent when nothing new (no write) ---
 
+// TestCLI_ModelsRefreshFallback_NoCandidates pins the empty-candidate hint
+// (CLI.md §7): FetchModels fails AND no route targets the provider AND the
+// provider has no configured models -> the fallback has nothing to probe and
+// must say so (naming the remedy) instead of silently writing an empty list.
+func TestCLI_ModelsRefreshFallback_NoCandidates(t *testing.T) {
+	// A refused loopback port makes FetchModels fail deterministically without
+	// network access; the fresh temp HOME RunCLI pins has no credentials.
+	cfgBody := "listen: 127.0.0.1:15721\nproviders:\n  zhipu:\n    openai_base_url: http://127.0.0.1:1/api/paas/v4\n    provider_id: zhipu\n"
+	cfgPath := clitest.WriteTempConfig(t, cfgBody)
+	before, _ := os.ReadFile(cfgPath)
+
+	stdout, stderr, code := clitest.RunCLI(t, "models", cfgPath, "refresh", "zhipu")
+	if code != 0 {
+		t.Fatalf("exit=%d, want 0 (empty candidate set is not an error)\n--- stderr ---\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "no models to probe for zhipu (no /models endpoint and no routes target it); add routes targeting zhipu first") {
+		t.Errorf("stderr missing the no-candidates guidance:\n%s", stderr)
+	}
+	if !strings.Contains(stdout, "(no models)") {
+		t.Errorf("stdout should render the empty kept list:\n%s", stdout)
+	}
+	after, _ := os.ReadFile(cfgPath)
+	if string(before) != string(after) {
+		t.Errorf("config must stay untouched with no candidates:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
 func TestCLI_ModelsRefresh_IdempotentNothingNew(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
@@ -258,7 +285,7 @@ func TestCLI_ModelsPull_MockedEndpoint(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfgPath := clitest.WriteTempConfig(t, minimalConfig)
+	cfgPath := clitest.WriteTempConfig(t, clitest.MinimalConfig)
 	t.Setenv("MP_MODELSDEV_URL", srv.URL)
 	home := t.TempDir()
 	stdout, _, code := clitest.RunCLIWithHome(t, home, "models", cfgPath, "pull")

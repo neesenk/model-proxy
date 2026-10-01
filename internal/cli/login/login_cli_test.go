@@ -12,7 +12,7 @@ import (
 )
 
 func TestCLI_LoginNoProvider(t *testing.T) {
-	cfg := clitest.WriteTempConfig(t, minimalConfig)
+	cfg := clitest.WriteTempConfig(t, clitest.MinimalConfig)
 	stdout, _, code := clitest.RunCLI(t, "login", cfg)
 	if code != 0 {
 		t.Errorf("login (no provider): exit=%d want 0", code)
@@ -22,7 +22,7 @@ func TestCLI_LoginNoProvider(t *testing.T) {
 	}
 }
 func TestCLI_LoginUnknownProvider(t *testing.T) {
-	cfg := clitest.WriteTempConfig(t, minimalConfig)
+	cfg := clitest.WriteTempConfig(t, clitest.MinimalConfig)
 	_, stderr, code := clitest.RunCLI(t, "login", cfg, "nope")
 	if code == 0 {
 		t.Error("login nope: exit=0 want non-zero")

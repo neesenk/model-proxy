@@ -19,54 +19,9 @@ import (
 
 // ---- proxy_failure_integration_test.go ----
 
-// --- UC3: primary 5xx → failover to fallback, and circuit opens so 2nd call skips primary ---
-
-func TestUC_FailoverAndCircuitSkipsOpenProvider(t *testing.T) {
-	var primaryHits int32
-	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&primaryHits, 1)
-		w.WriteHeader(500)
-		w.Write([]byte(`{"e":"primary"}`))
-	}))
-	defer primary.Close()
-	fallback := newFakeUpstream(t, staticResponder(200, `{"ok":true}`))
-
-	cfg := &configdomain.Config{
-		Providers: map[string]configdomain.Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
-		},
-		Routes: map[string][]configdomain.RouteTarget{
-			"m1": {
-				{Provider: "primary", Model: "m1", Priority: 1},
-				{Provider: "fallback", Model: "m1", Priority: 2},
-			},
-		},
-		Scheduling: configdomain.Scheduling{CircuitThreshold: 3},
-	}
-	p := newProxyWithStatic(t, cfg, map[string]string{"primary": "p", "fallback": "f"})
-	px := httptest.NewServer(http.HandlerFunc(p.Handler))
-	defer px.Close()
-
-	// Call 1-2: primary 500 → failover to fallback. Primary circuit not yet open (threshold 3).
-	for i := 0; i < 2; i++ {
-		if code, _ := post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`); code != 200 {
-			t.Errorf("call %d: status=%d want 200 (fallback)", i, code)
-		}
-	}
-
-	// Call 3-4: after 3 failures primary circuit opens; primary should NOT be hit again.
-	fallback.reset()
-	for i := 0; i < 2; i++ {
-		post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
-	}
-	if got := atomic.LoadInt32(&primaryHits); got != 3 {
-		t.Errorf("primary hits=%d, want exactly 3 (circuit opens AT the threshold, not before)", got)
-	}
-	if len(fallback.models()) != 2 {
-		t.Errorf("fallback hits=%d want 2 (open circuit routes straight to fallback)", len(fallback.models()))
-	}
-}
+// (Failover/circuit, 429 Retry-After skip, and upstream-timeout failover used
+// to have weaker UC-shaped twins here; the stronger per-request assertions in
+// health_test.go are the single authority for those scenarios.)
 
 // --- UC4: 401 → refresh → retry same provider → success ---
 
@@ -136,93 +91,6 @@ func TestUC_401RefreshFailsFailover(t *testing.T) {
 	}
 	if len(fallback.models()) != 1 {
 		t.Errorf("fallback hits=%d want 1 (failover target after repeated 401)", len(fallback.models()))
-	}
-}
-
-// --- UC6: 429 with Retry-After → provider skipped on next call within the window ---
-
-func TestUC_429RetryAfterSkipsProvider(t *testing.T) {
-	var hits int32
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
-		w.Header().Set("Retry-After", "60")
-		w.WriteHeader(429)
-		w.Write([]byte(`{"e":"rate"}`))
-	}))
-	defer up.Close()
-	fallback := newFakeUpstream(t, staticResponder(200, `{"ok":true}`))
-
-	cfg := &configdomain.Config{
-		Providers: map[string]configdomain.Provider{
-			"primary":  {OpenAIBaseURL: up.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
-		},
-		Routes: map[string][]configdomain.RouteTarget{
-			"m1": {
-				{Provider: "primary", Model: "m1", Priority: 1},
-				{Provider: "fallback", Model: "m1", Priority: 2},
-			},
-		},
-	}
-	p := newProxyWithStatic(t, cfg, map[string]string{"primary": "p", "fallback": "f"})
-	px := httptest.NewServer(http.HandlerFunc(p.Handler))
-	defer px.Close()
-
-	// Call 1: primary 429 → failover to fallback.
-	post(t, px.URL+"/v1/responses", `{"model":"m1","input":[]}`)
-
-	// Call 2: primary still rate-limited (60s) → straight to fallback, no primary hit.
-	fallback.reset()
-	hitsBefore := atomic.LoadInt32(&hits)
-	post(t, px.URL+"/v1/responses", `{"model":"m1","input":[]}`)
-
-	if got := atomic.LoadInt32(&hits) - hitsBefore; got != 0 {
-		t.Errorf("primary hits on call 2 = %d want 0 (Retry-After should skip it)", got)
-	}
-	if len(fallback.models()) != 1 {
-		t.Errorf("fallback hits on call 2 = %d want 1", len(fallback.models()))
-	}
-}
-
-// --- UC7: upstream timeout → failover ---
-
-func TestUC_UpstreamTimeoutFailover(t *testing.T) {
-	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(2 * time.Second)
-		w.Write([]byte(`{}`))
-	}))
-	defer slow.Close()
-	fallback := newFakeUpstream(t, staticResponder(200, `{"ok":true}`))
-
-	cfg := &configdomain.Config{
-		Providers: map[string]configdomain.Provider{
-			"slow":     {OpenAIBaseURL: slow.URL, Provider: testProviderID},
-			"fallback": {OpenAIBaseURL: fallback.srv.URL, Provider: testProviderID},
-		},
-		Routes: map[string][]configdomain.RouteTarget{
-			"m1": {
-				{Provider: "slow", Model: "m1", Priority: 1},
-				{Provider: "fallback", Model: "m1", Priority: 2},
-			},
-		},
-		Scheduling: configdomain.Scheduling{UpstreamTimeout: "200ms"},
-	}
-	p := newProxyWithStatic(t, cfg, map[string]string{"slow": "s", "fallback": "f"})
-	px := httptest.NewServer(http.HandlerFunc(p.Handler))
-	defer px.Close()
-
-	start := time.Now()
-	code, _ := post(t, px.URL+"/v1/responses", `{"model":"m1","input":[]}`)
-	elapsed := time.Since(start)
-
-	if code != 200 {
-		t.Errorf("status=%d want 200 (should failover after timeout)", code)
-	}
-	if elapsed > 1500*time.Millisecond {
-		t.Errorf("elapsed=%v want <1.5s (timeout should fail fast, not wait full 2s)", elapsed)
-	}
-	if len(fallback.models()) != 1 {
-		t.Errorf("fallback hits=%d want 1", len(fallback.models()))
 	}
 }
 

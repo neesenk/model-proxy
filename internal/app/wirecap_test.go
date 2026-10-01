@@ -638,11 +638,18 @@ func TestWireCap_ProbePassesSerialized(t *testing.T) {
 		t.Fatalf("pass 1 sent %d requests, want the 2 provider legs blocked on the gate", got)
 	}
 
-	// Dispatch pass 2 while pass 1 is blocked: serialization means it must not
-	// send anything yet.
+	// Dispatch pass 2 while pass 1 is blocked: serialization means it registers
+	// as the queued follow-up (pending=true) and cannot send anything until it
+	// acquires the lock — observe the registration, not a fixed sleep.
 	wg.Add(1)
 	go func() { defer wg.Done(); p.runWireProbePass() }()
-	time.Sleep(150 * time.Millisecond)
+	deadline2 := time.Now().Add(5 * time.Second)
+	for !p.wireProbePending.Load() && time.Now().Before(deadline2) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !p.wireProbePending.Load() {
+		t.Fatal("pass 2 did not register as the queued follow-up while pass 1 was running")
+	}
 	if got := hits.Load(); got != 2 {
 		t.Fatalf("pass 2 sent requests while pass 1 was still running (hits=%d) — passes must serialize", got)
 	}
@@ -845,3 +852,4 @@ func TestWireProbePass_CoalescesStormDispatches(t *testing.T) {
 		t.Errorf("total hits = %d, want 10 (2 passes × 5 legs: in-flight + one coalesced follow-up)", got)
 	}
 }
+

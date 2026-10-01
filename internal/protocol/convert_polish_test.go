@@ -3,7 +3,6 @@ package protocol
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"log"
 	"strings"
 	"testing"
@@ -320,10 +319,7 @@ func TestStreaming_ThinkingDeltaPreserved(t *testing.T) {
 		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}\n\n" +
 		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-	raw, err := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(stream), "c"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(stream), "c"))
 	for _, want := range []string{`"reasoning_content":"hmm"`, `"type":"anthropic_thinking"`, `"signature":"sig"`} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("reasoning replay missing %s:\n%s", want, raw)

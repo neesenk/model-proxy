@@ -7,7 +7,6 @@ package protocol
 // added/done pairing — not substring matching.
 
 import (
-	"io"
 	"strings"
 	"testing"
 )
@@ -335,28 +334,10 @@ func TestResponsesSynthesis_ChatReasoning(t *testing.T) {
 }
 
 // A6: EOF without a terminal signal (no message_stop / finish / [DONE]) is a
-// truncated stream and must produce response.failed, never response.completed.
-func TestResponsesSynthesis_EOF(t *testing.T) {
-	// anthropic→responses: message_start then EOF.
-	inA := "event: message_start\n" +
-		`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-x"}}` + "\n\n"
-	eventsA := drainSSE(t, newAnthropicToResponsesSSE(strings.NewReader(inA), "claude-x"))
-	assertEventSequence(t, eventsA, []string{"response.created", "response.failed"})
-	failedA := asMap(sseDataMap(t, eventsA[1])["response"])
-	if failedA["status"] != "failed" {
-		t.Errorf("EOF failed status = %v", failedA["status"])
-	}
-
-	// chat→responses: one content chunk then EOF (no finish_reason, no [DONE]).
-	inC := "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
-	eventsC := drainSSE(t, newOpenAIToResponsesSSE(strings.NewReader(inC), "gpt-x"))
-	if got := sseCount(eventsC, "response.failed"); got != 1 {
-		t.Fatalf("chat EOF: response.failed count = %d, want 1: %v", got, sseEventTypes(eventsC))
-	}
-	if got := sseCount(eventsC, "response.completed"); got != 0 {
-		t.Errorf("chat EOF: response.completed count = %d, want 0", got)
-	}
-}
+// truncated stream and must produce response.failed, never response.completed
+// — covered for ALL six directions (with the structured-terminal and exact
+// a→r sequence assertions) by TestStreamEOFWithoutTerminalFailsClosed_AllDirections
+// in convert_review_fix_test.go.
 
 // A7: mid-stream upstream errors. anthropic error event → response.failed
 // (no response.completed); chat error chunk → response.failed too (never a
@@ -407,10 +388,7 @@ func TestResponsesSynthesis_ChatLateToolIdentity(t *testing.T) {
 		"data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_real\",\"function\":{\"name\":\"search\",\"arguments\":\"1}\"}}]}}]}\n\n" +
 		"data: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" +
 		"data: [DONE]\n\n"
-	raw, err := io.ReadAll(newOpenAIToResponsesSSE(strings.NewReader(in), "m"))
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
+	raw := readAllChecked(t, newOpenAIToResponsesSSE(strings.NewReader(in), "m"))
 	events := drainSSE(t, strings.NewReader(string(raw)))
 	types := sseEventTypes(events)
 

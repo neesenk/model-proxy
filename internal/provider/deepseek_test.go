@@ -32,20 +32,33 @@ func TestDeepSeekRewriteRequest_NoOp(t *testing.T) {
 	}
 }
 
-// One key must authenticate both endpoints: Bearer for OpenAI, x-api-key for Anthropic.
+// One key must authenticate BOTH protocol legs. The proxy selects the upstream
+// base by protocol — chat-family clients go to openai_base_url
+// (/chat/completions), anthropic clients to anthropic_base_url (/v1/messages) —
+// and AuthHeaders sets Bearer AND x-api-key on every request regardless of the
+// leg (the OpenAI endpoint ignores x-api-key; the Anthropic endpoint reads it).
+// Per docs/engineering/testing.md: both schemes asserted on both protocol
+// paths, exact values — deleting either Header.Set must fail a leg.
 func TestDeepSeekAuthHeaders_BothSchemes(t *testing.T) {
 	p := newTestDeepSeek(t)
 	if err := p.SaveKey("sk-test-123"); err != nil {
 		t.Fatalf("SaveKey: %v", err)
 	}
-	req, _ := http.NewRequest("POST", "https://api.deepseek.com/chat/completions", nil)
-	if err := p.AuthHeaders(req); err != nil {
-		t.Fatalf("AuthHeaders: %v", err)
-	}
-	if got := req.Header.Get("Authorization"); got != "Bearer sk-test-123" {
-		t.Errorf("Authorization: got %q, want %q", got, "Bearer sk-test-123")
-	}
-	if got := req.Header.Get("x-api-key"); got != "sk-test-123" {
-		t.Errorf("x-api-key: got %q, want %q", got, "sk-test-123")
+	for _, tc := range []struct{ name, url string }{
+		{"openai leg /chat/completions", "https://api.deepseek.com/chat/completions"},
+		{"anthropic leg /v1/messages", "https://api.deepseek.com/anthropic/v1/messages"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, _ := http.NewRequest("POST", tc.url, nil)
+			if err := p.AuthHeaders(req); err != nil {
+				t.Fatalf("AuthHeaders: %v", err)
+			}
+			if got := req.Header.Get("Authorization"); got != "Bearer sk-test-123" {
+				t.Errorf("Authorization: got %q, want %q", got, "Bearer sk-test-123")
+			}
+			if got := req.Header.Get("x-api-key"); got != "sk-test-123" {
+				t.Errorf("x-api-key: got %q, want %q", got, "sk-test-123")
+			}
+		})
 	}
 }

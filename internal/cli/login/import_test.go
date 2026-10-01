@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"model-proxy/internal/accounts"
+	"model-proxy/internal/cli/clitest"
 	configdomain "model-proxy/internal/config"
 	logincore "model-proxy/internal/login"
 	"model-proxy/internal/provider"
@@ -76,7 +77,7 @@ func TestRunCodexImport_OK(t *testing.T) {
 	t.Setenv("HOME", home)
 	writeCodexCLIAuthFile(t, home, validCodexCLIAuthJSON())
 
-	out := grabStdout(t, func() {
+	out := clitest.GrabStdout(t, func() {
 		if err := RunCodexImport("codex"); err != nil {
 			t.Fatalf("RunCodexImport: %v", err)
 		}
@@ -221,7 +222,7 @@ func TestEnvCredentials(t *testing.T) {
 }
 
 func TestRunFromEnvLogin_ApiKeyProvider(t *testing.T) {
-	setPoolHome(t, t.TempDir())
+	clitest.SetPoolHome(t, t.TempDir())
 	t.Setenv("MP_LOGIN_ZHIPU", "env-key-123")
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"zhipu": {Provider: "zhipu"}}}
 
@@ -266,7 +267,7 @@ func TestRunFromEnvLogin_FlagValidation(t *testing.T) {
 }
 
 func TestRunVolcengineLoginFromEnv_Triple(t *testing.T) {
-	setPoolHome(t, t.TempDir())
+	clitest.SetPoolHome(t, t.TempDir())
 	stubVolcengineValidator(t)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
 	defer up.Close()
@@ -290,7 +291,7 @@ func TestRunVolcengineLoginFromEnv_Triple(t *testing.T) {
 // prompts for AK/SK: a chat-only login (key only) must succeed with stdin
 // closed, and the AK/SK validator must not run.
 func TestRunVolcengineLoginFromEnv_NoAKSKPins(t *testing.T) {
-	setPoolHome(t, t.TempDir())
+	clitest.SetPoolHome(t, t.TempDir())
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
 	defer up.Close()
 	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n    usage_url: "+up.URL+"\n"))
@@ -319,7 +320,7 @@ func TestRunVolcengineLoginFromEnv_NoAKSKPins(t *testing.T) {
 }
 
 func TestRunVolcengineLoginFromEnv_PartialAKSKRejected(t *testing.T) {
-	setPoolHome(t, t.TempDir())
+	clitest.SetPoolHome(t, t.TempDir())
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"vol": {Provider: "volcengine"}}}
 	prov := cfg.Providers["vol"]
 	err := runVolcengineLoginFromEnv(cfg, "vol", prov, "ark-key", "AK9", "", "", false)
@@ -332,7 +333,7 @@ func TestRunVolcengineLoginFromEnv_PartialAKSKRejected(t *testing.T) {
 // interaction of the env path: an existing id with replace=false prompts
 // "[y/N]"; "y" confirms and the core overwrites the triple in place.
 func TestRunVolcengineLoginFromEnv_ReplaceConfirmPrompt(t *testing.T) {
-	setPoolHome(t, t.TempDir())
+	clitest.SetPoolHome(t, t.TempDir())
 	stubVolcengineValidator(t)
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"vol": {Provider: "volcengine"}}}
 	prov := cfg.Providers["vol"]

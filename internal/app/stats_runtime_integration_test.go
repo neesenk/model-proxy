@@ -21,24 +21,6 @@ import (
 	observestats "model-proxy/internal/observe/stats"
 )
 
-func openRuntimeStatsStore(
-	t *testing.T,
-	path string,
-	retention time.Duration,
-) *observestats.Store {
-	t.Helper()
-	store, err := observestats.Open(observestats.Options{
-		Path: path, Retention: retention,
-	})
-	if err != nil {
-		t.Fatalf("open stats store: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = store.Close()
-	})
-	return store
-}
-
 func addRuntimeStats(
 	metrics *obscounters.MetricsStore,
 	tokens *obscounters.TokenCounter,
@@ -173,7 +155,7 @@ func TestStatsResetSerializesWithFlushAndRebaselines(t *testing.T) {
 	oldProcs := runtime.GOMAXPROCS(1)
 	defer runtime.GOMAXPROCS(oldProcs)
 
-	store := openRuntimeStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
+	store := openTestStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
 	sink := &blockingStatsSink{
 		Store: store, entered: make(chan struct{}), release: make(chan struct{}),
 		resetEntered: make(chan struct{}),
@@ -277,7 +259,7 @@ func (sink *failAgentOnceSink) FlushAgentsContext(
 }
 
 func TestStatsFlusherRetriesPipelinesIndependently(t *testing.T) {
-	store := openRuntimeStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
+	store := openTestStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
 	sink := &failAgentOnceSink{Store: store, failAgent: true}
 	metrics := obscounters.NewMetricsStore()
 	agents := obscounters.NewAgentCounter()
@@ -319,8 +301,7 @@ func TestStatsFlusherRetriesPipelinesIndependently(t *testing.T) {
 
 func TestStatsFlusherPrunesDuringIdleMinute(t *testing.T) {
 	now := time.Unix(10_000, 0)
-	store := openRuntimeStatsStore(
-		t,
+	store := openTestStatsStore(t,
 		filepath.Join(t.TempDir(), "stats.db"),
 		time.Hour,
 	)
@@ -350,7 +331,7 @@ func TestStatsFlusherPrunesDuringIdleMinute(t *testing.T) {
 
 func TestProxyCloseFinalFlushesOnceAndClosesStatsStore(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "stats.db")
-	store := openRuntimeStatsStore(t, path, 0)
+	store := openTestStatsStore(t, path, 0)
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
@@ -409,7 +390,7 @@ func TestProxyCloseFinalFlushesOnceAndClosesStatsStore(t *testing.T) {
 
 func TestProxyCloseRetriesTransientFinalStatsFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "stats.db")
-	store := openRuntimeStatsStore(t, path, 0)
+	store := openTestStatsStore(t, path, 0)
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
@@ -467,7 +448,7 @@ func (sink *blockingShutdownStatsSink) FlushContext(
 }
 
 func TestStatsShutdownFlushHonorsContextDeadline(t *testing.T) {
-	store := openRuntimeStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
+	store := openTestStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
@@ -497,7 +478,7 @@ func TestStatsShutdownFlushHonorsContextDeadline(t *testing.T) {
 }
 
 func TestTokensResetClearsDurableStatsButNotResponseCache(t *testing.T) {
-	store := openRuntimeStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
+	store := openTestStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
@@ -558,7 +539,7 @@ func (sink *resetErrorSink) Reset() error {
 }
 
 func TestTokensResetFailurePreservesLiveState(t *testing.T) {
-	store := openRuntimeStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
+	store := openTestStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()

@@ -2,7 +2,8 @@
 // cache leaf (internal/cache) stays pure in-memory; this file owns the state
 // file: ~/.model-proxy/cache_state.json, loaded once at startup to seed the
 // process-lifetime counters shared by all stores, saved on a per-minute
-// lifecycle loop, once more on shutdown, and cleared by reset-stats.
+// lifecycle loop and once more on shutdown. reset-stats deliberately KEEPS
+// these counters (pinned by TestResetStatsKeepsCacheCounters).
 package app
 
 import (

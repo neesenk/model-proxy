@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -10,7 +9,6 @@ import (
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/counters"
 	obscounters "model-proxy/internal/observe/counters"
-	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
 	"net/http"
 	"net/http/httptest"
@@ -24,53 +22,9 @@ import (
 )
 
 // ---- metrics_test.go ----
-
-func TestMetricsCounters(t *testing.T) {
-	m := counters.NewMetricsStore()
-	m.Inc("zhipu", "m", counters.EvRequests)
-	m.Inc("zhipu", "m", counters.EvRequests)
-	m.Inc("zhipu", "m", counters.EvFailures)
-	m.Inc("deepseek", "d", counters.EvRateLimited429)
-	m.Inc("zhipu", "m", counters.EvFailovers)
-
-	snap := m.Snapshot()
-	zk := counters.PMKey{Provider: "zhipu", Model: "m"}
-	if snap[zk].Requests != 2 {
-		t.Errorf("zhipu/m requests = %d, want 2", snap[zk].Requests)
-	}
-	if snap[zk].Failures != 1 {
-		t.Errorf("zhipu/m failures = %d, want 1", snap[zk].Failures)
-	}
-	if snap[zk].Failovers != 1 {
-		t.Errorf("zhipu/m failovers = %d, want 1", snap[zk].Failovers)
-	}
-	dk := counters.PMKey{Provider: "deepseek", Model: "d"}
-	if snap[dk].RateLimited429 != 1 {
-		t.Errorf("deepseek/d 429 = %d, want 1", snap[dk].RateLimited429)
-	}
-	if snap[counters.PMKey{Provider: "missing", Model: "x"}].Requests != 0 { // unseen -> zero value
-		t.Errorf("missing key should be zero-valued")
-	}
-
-	// aggregateByProvider collapses the model dimension: zhipu has both metrics
-	// under model "m", deepseek under "d".
-	agg := m.AggregateByProvider()
-	if agg["zhipu"].Requests != 2 || agg["zhipu"].Failures != 1 || agg["zhipu"].Failovers != 1 {
-		t.Errorf("aggregate zhipu = %+v, want reqs=2 fail=1 failover=1", agg["zhipu"])
-	}
-	if agg["deepseek"].RateLimited429 != 1 {
-		t.Errorf("aggregate deepseek 429 = %d, want 1", agg["deepseek"].RateLimited429)
-	}
-}
-
-func TestMetricsStartedAt(t *testing.T) {
-	before := time.Now()
-	m := counters.NewMetricsStore()
-	sa := m.StartedAt()
-	if sa.Before(before) || sa.After(time.Now().Add(time.Second)) {
-		t.Errorf("startedAt %v not ~now", sa)
-	}
-}
+// (MetricsStore leaf behavior — counters, StartedAt, AddLatency sums — is
+// owned by internal/observe/counters; this file keeps only the forward-path
+// composition wiring.)
 
 // TestMetricsForwardWiring verifies the forward hot path bumps the right
 // counters, attributed to (provider, model). Each scenario uses a fresh Proxy so
@@ -190,34 +144,6 @@ routes:
 
 // ---- metrics_latency_test.go ----
 
-// TestMetricsAddLatency: addLatency accumulates into the sums the flusher diffs,
-// snapshot returns them, and seed round-trips them (the boot-restore path).
-func TestMetricsAddLatency(t *testing.T) {
-	m := counters.NewMetricsStore()
-	m.Inc("z", "glm", counters.EvRequests)
-	m.AddLatency("z", "glm", 100, 20)
-	m.AddLatency("z", "glm", 50, 10)
-	snap := m.Snapshot()[counters.PMKey{Provider: "z", Model: "glm"}]
-	if snap.Requests != 1 {
-		t.Errorf("requests=%d want 1", snap.Requests)
-	}
-	if snap.LatencySum != 150 || snap.TTFTSum != 30 {
-		t.Errorf("latency=%d ttft=%d want 150/30", snap.LatencySum, snap.TTFTSum)
-	}
-	// aggregateByProvider rolls the sums up across models.
-	agg := m.AggregateByProvider()["z"]
-	if agg.LatencySum != 150 || agg.TTFTSum != 30 {
-		t.Errorf("aggregate latency=%d ttft=%d want 150/30", agg.LatencySum, agg.TTFTSum)
-	}
-	// seed round-trips the sums (boot restore).
-	m2 := counters.NewMetricsStore()
-	m2.Seed(counters.PMKey{Provider: "z", Model: "glm"}, snap)
-	got := m2.Snapshot()[counters.PMKey{Provider: "z", Model: "glm"}]
-	if got.LatencySum != 150 || got.TTFTSum != 30 {
-		t.Errorf("seed round-trip latency=%d ttft=%d want 150/30", got.LatencySum, got.TTFTSum)
-	}
-}
-
 // TestForward_RecordsLatency: a served request records a non-zero total latency
 // and TTFT against its (provider, model) in the metrics store on the hot path.
 // The upstream deliberately delays before responding so latency is measurable.
@@ -275,256 +201,6 @@ func TestForward_RecordsLatency(t *testing.T) {
 }
 
 // ---- tokens_test.go ----
-
-// TestUsageScanner_AgentSink verifies that the agent attribution callback
-// receives the exact usage observed when the scanner commits.
-func TestUsageScanner_AgentSink(t *testing.T) {
-	tc := obscounters.NewTokenCounter()
-	var got obscounters.TokenUsage
-	stream := []byte("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":42}}}\n\n")
-	scanner := obscounters.NewUsageScanner(
-		io.NopCloser(bytes.NewReader(stream)),
-		obscounters.TokenKey{Provider: "z", Model: "m"},
-		tc,
-		func(usage obscounters.TokenUsage) {
-			got = usage
-		},
-	)
-	if _, err := io.Copy(io.Discard, scanner); err != nil {
-		t.Fatalf("copy usage stream: %v", err)
-	}
-	if err := scanner.Close(); err != nil {
-		t.Fatalf("close usage scanner: %v", err)
-	}
-	if got.Input != 42 {
-		t.Errorf("agent sink got input=%d want 42", got.Input)
-	}
-}
-
-func TestUsageScannerAnthropic(t *testing.T) {
-	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"cache_creation_input_tokens\":50,\"cache_read_input_tokens\":10}}}\n\n" +
-		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":200}}\n\n")
-	tc := obscounters.NewTokenCounter()
-	key := obscounters.TokenKey{Provider: "zhipu", Model: "glm-5"}
-	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), key, tc, nil)
-	io.Copy(io.Discard, sc)
-
-	got := tc.Snapshot()[key]
-	if got.Input != 100 || got.CacheCreation != 50 || got.CacheRead != 10 || got.Output != 200 {
-		t.Errorf("usage = %+v, want in=100 cc=50 cr=10 out=200", got)
-	}
-}
-
-// zhipu/aqp shape: message_start carries zero/null cache usage and the real
-// values arrive only in message_delta — the counter→stats path must still
-// attribute them.
-func TestUsageScannerAnthropicCacheInMessageDelta(t *testing.T) {
-	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":null}}}\n\n" +
-		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":112,\"output_tokens\":11,\"cache_read_input_tokens\":64}}\n\n")
-	tc := obscounters.NewTokenCounter()
-	key := obscounters.TokenKey{Provider: "aqp", Model: "glm-5.2"}
-	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), key, tc, nil)
-	io.Copy(io.Discard, sc)
-
-	got := tc.Snapshot()[key]
-	if got.Input != 112 || got.CacheRead != 64 || got.Output != 11 {
-		t.Errorf("usage = %+v, want in=112 cr=64 out=11", got)
-	}
-}
-
-// deepseek shape: cache_read_input_tokens repeated with the same cumulative
-// value in message_start AND message_delta must be counted once, not doubled.
-func TestUsageScannerAnthropicCacheRepeatedNotDoubled(t *testing.T) {
-	stream := []byte("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":39,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":256,\"output_tokens\":0}}}\n\n" +
-		"data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":39,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":256,\"output_tokens\":72}}\n\n")
-	tc := obscounters.NewTokenCounter()
-	key := obscounters.TokenKey{Provider: "deepseek", Model: "d"}
-	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), key, tc, nil)
-	io.Copy(io.Discard, sc)
-
-	if got := tc.Snapshot()[key]; got.CacheRead != 256 {
-		t.Errorf("cache_read = %d, want 256 (counted once, not doubled)", got.CacheRead)
-	}
-}
-
-func TestUsageScannerOpenAI(t *testing.T) {
-	stream := []byte("data: {\"id\":\"x\",\"choices\":[]}\n\ndata: {\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":13}}\n\n")
-	tc := obscounters.NewTokenCounter()
-	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), obscounters.TokenKey{Provider: "deepseek", Model: "d"}, tc, nil)
-	io.Copy(io.Discard, sc)
-	got := tc.Snapshot()[obscounters.TokenKey{Provider: "deepseek", Model: "d"}]
-	if got.Input != 7 || got.Output != 13 {
-		t.Errorf("usage = %+v, want in=7 out=13", got)
-	}
-}
-
-// Chat usage chunks carry cached prompt tokens in
-// prompt_tokens_details.cached_tokens — they must land in the CacheRead bucket.
-func TestUsageScannerOpenAICachedTokens(t *testing.T) {
-	stream := []byte("data: {\"id\":\"x\",\"choices\":[]}\n\ndata: {\"usage\":{\"prompt_tokens\":295,\"completion_tokens\":70,\"prompt_tokens_details\":{\"cached_tokens\":256}}}\n\n")
-	tc := obscounters.NewTokenCounter()
-	key := obscounters.TokenKey{Provider: "zhipu", Model: "glm-5"}
-	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), key, tc, nil)
-	io.Copy(io.Discard, sc)
-	got := tc.Snapshot()[key]
-	if got.Input != 295 || got.Output != 70 || got.CacheRead != 256 {
-		t.Errorf("usage = %+v, want in=295 out=70 cr=256", got)
-	}
-}
-
-// Split every usage payload byte-by-byte to prove the scanner reassembles across
-// arbitrarily small reads.
-func TestUsageScannerSplitBoundaries(t *testing.T) {
-	payload := []byte("data: {\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":99}}\n\n")
-	tc := obscounters.NewTokenCounter()
-	sc := obscounters.NewUsageScanner(io.NopCloser(&oneByteReader{b: payload}), obscounters.TokenKey{Provider: "p", Model: "m"}, tc, nil)
-	io.Copy(io.Discard, sc)
-	got := tc.Snapshot()[obscounters.TokenKey{Provider: "p", Model: "m"}]
-	if got.Input != 42 || got.Output != 99 {
-		t.Errorf("split-boundary usage = %+v, want in=42 out=99", got)
-	}
-}
-
-// Pass-through must be byte-identical.
-func TestUsageScannerPassthrough(t *testing.T) {
-	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n\ndata: garbage\n\n")
-	var sink bytes.Buffer
-	tc := obscounters.NewTokenCounter()
-	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), obscounters.TokenKey{Provider: "p", Model: "m"}, tc, nil)
-	io.Copy(&sink, sc)
-	if !bytes.Equal(sink.Bytes(), stream) {
-		t.Errorf("passthrough not byte-identical:\nwant %q\ngot  %q", stream, sink.Bytes())
-	}
-}
-
-// An oversized line is skipped for scanning but still passed through.
-func TestUsageScannerOversizedLine(t *testing.T) {
-	huge := bytes.Repeat([]byte("x"), 80_000)
-	stream := append([]byte("data: "), huge...)
-	stream = append(stream, []byte("\n\ndata: {\"usage\":{\"prompt_tokens\":3}}\n\n")...)
-	tc := obscounters.NewTokenCounter()
-	var sink bytes.Buffer
-	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), obscounters.TokenKey{Provider: "p", Model: "m"}, tc, nil)
-	io.Copy(&sink, sc)
-	if !bytes.Equal(sink.Bytes(), stream) {
-		t.Error("oversized passthrough mismatch")
-	}
-	if got := tc.Snapshot()[obscounters.TokenKey{Provider: "p", Model: "m"}].Input; got != 3 {
-		t.Errorf("usage after oversized line = %d, want 3", got)
-	}
-}
-
-func TestTokenCounterPersist(t *testing.T) {
-	// Persistence now lives in observestats.Store (SQLite), not a JSON file. Verify the
-	// flusher round-trip: commit tokens + bump metrics -> flush -> reopen the DB
-	// -> loadCumulative returns the exact same values (the boot restore path).
-	path := filepath.Join(t.TempDir(), "stats.db")
-	ss, err := openTestStatsStore(path, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ss.Close()
-	m := obscounters.NewMetricsStore()
-	tc := obscounters.NewTokenCounter()
-	f := observestats.NewFlusher(ss, m, tc, obscounters.NewAgentCounter(), map[observestats.Key]observestats.Counters{}, nil)
-
-	tc.Commit(obscounters.TokenKey{Provider: "z", Model: "m"}, obscounters.TokenUsage{Input: 10, Output: 20, Requests: 1})
-	m.Inc("z", "m", obscounters.EvRequests)
-	m.Inc("z", "m", obscounters.EvFailovers)
-	if !f.Flush(time.Now()) {
-		t.Fatal("flush reported no deltas despite pending commits")
-	}
-
-	// Reopen the same DB file (simulates a restart) and load the cumulative totals.
-	ss2, err := openTestStatsStore(path, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ss2.Close()
-	base, err := ss2.LoadCumulative()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(base) != 1 {
-		t.Fatalf("loadCumulative = %d keys, want 1", len(base))
-	}
-	got := base[observestats.Key{Provider: "z", Model: "m"}]
-	if got.Input != 10 || got.Output != 20 || got.TokenRequests != 1 {
-		t.Errorf("token round-trip = %+v, want in=10 out=20 token_reqs=1", got)
-	}
-	if got.Requests != 1 || got.Failovers != 1 {
-		t.Errorf("metrics round-trip = %+v, want reqs=1 failovers=1", got)
-	}
-}
-
-// oneByteReader yields one byte per Read to force split-boundary scanning.
-type oneByteReader struct {
-	b   []byte
-	off int
-}
-
-func (r *oneByteReader) Read(p []byte) (int, error) {
-	if r.off >= len(r.b) {
-		return 0, io.EOF
-	}
-	p[0] = r.b[r.off]
-	r.off++
-	return 1, nil
-}
-
-// TestTokenCounterConcurrent would race under -race before the fix (the old
-// commit mutated *obscounters.TokenUsage fields after releasing tc.mu inside entry()). It
-// spawns 50 concurrent committers to the SAME key plus a concurrent snapshot
-// reader; after the fix every increment lands (no lost updates) and -race is
-// clean. Final Input/Output must equal exactly the number of committers.
-func TestTokenCounterConcurrent(t *testing.T) {
-	tc := obscounters.NewTokenCounter()
-	key := obscounters.TokenKey{Provider: "p", Model: "m"}
-	const committers = 50
-
-	var snapDone sync.WaitGroup
-	snapDone.Add(1)
-	stopSnap := make(chan struct{})
-	// Concurrent reader: hammers snapshot during commits. Before the fix this
-	// read *obscounters.TokenUsage fields while commit mutated them unlocked -> -race.
-	go func() {
-		defer snapDone.Done()
-		for {
-			select {
-			case <-stopSnap:
-				return
-			default:
-				_ = tc.Snapshot()
-			}
-		}
-	}()
-
-	var wg sync.WaitGroup
-	wg.Add(committers)
-	start := make(chan struct{})
-	for i := 0; i < committers; i++ {
-		go func() {
-			defer wg.Done()
-			<-start
-			tc.Commit(key, obscounters.TokenUsage{Input: 1, Output: 1})
-		}()
-	}
-	close(start) // release all committers together to maximize contention
-	wg.Wait()
-	close(stopSnap)
-	snapDone.Wait()
-
-	got := tc.Snapshot()[key]
-	if got.Input != committers {
-		t.Errorf("Input = %d, want %d (lost increments)", got.Input, committers)
-	}
-	if got.Output != committers {
-		t.Errorf("Output = %d, want %d (lost increments)", got.Output, committers)
-	}
-	if got.Requests != committers {
-		t.Errorf("Requests = %d, want %d", got.Requests, committers)
-	}
-}
 
 // TestForwardCountsTokens verifies the proxy forward hot path wraps SSE response
 // bodies in a usageScanner keyed by the chosen (provider, model), committing
@@ -814,65 +490,6 @@ func TestPricingSnapshotSerializesConcurrentRefresh(t *testing.T) {
 	}
 	if got := requests.Load(); got != 1 {
 		t.Errorf("upstream refresh requests = %d, want 1", got)
-	}
-}
-
-// ---- agent_test.go ----
-
-// TestDetectAgent: each known client UA / header maps to a stable lowercase
-// label; order and specificity are exact (a bare UA is "other", no UA is
-// "unknown").
-func TestDetectAgent(t *testing.T) {
-	cases := []struct {
-		name string
-		ua   string
-		hdr  string // x-claude-code-session-id
-		want string
-	}{
-		{"claude-cli ua", "claude-cli/1.2.3", "", "claude-code"},
-		{"claude-code session header", "anything", "sess-123", "claude-code"},
-		{"codex ua", "codex_cli_rs/0.144.1", "", "codex"},
-		{"opencode ua", "opencode/0.5", "", "opencode"},
-		{"pi ua", "pi/1.0", "", "pi"},
-		{"pi ai ua", "pi (darwin 25.6.0; arm64)", "", "pi"},
-		{"unknown other ua", "curl/8.0", "", "curl"},
-		{"no ua", "", "", "unknown"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			req, _ := http.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
-			req.Header.Set("user-agent", c.ua)
-			if c.hdr != "" {
-				req.Header.Set("x-claude-code-session-id", c.hdr)
-			}
-			if got := counters.DetectAgent(req); got != c.want {
-				t.Errorf("counters.DetectAgent(ua=%q, hdr=%q) = %q want %q", c.ua, c.hdr, got, c.want)
-			}
-		})
-	}
-}
-
-// TestAgentCounter: incRequests + addTokens accumulate under the (agent,
-// provider, model) key; snapshot returns a detached copy.
-func TestAgentCounter(t *testing.T) {
-	a := counters.NewAgentCounter()
-	a.IncRequests("claude-code", "z", "glm")
-	a.IncRequests("claude-code", "z", "glm")
-	a.AddTokens("claude-code", "z", "glm", counters.TokenUsage{Input: 100, Output: 20})
-	a.IncRequests("codex", "z", "glm")
-	snap := a.Snapshot()
-	cc := snap[counters.AgentKey{Agent: "claude-code", Provider: "z", Model: "glm"}]
-	if cc.Requests != 2 || cc.Input != 100 || cc.Output != 20 {
-		t.Errorf("claude-code cell = %+v want reqs=2 in=100 out=20", cc)
-	}
-	cx := snap[counters.AgentKey{Agent: "codex", Provider: "z", Model: "glm"}]
-	if cx.Requests != 1 || cx.Input != 0 {
-		t.Errorf("codex cell = %+v want reqs=1 in=0", cx)
-	}
-	// reset clears all cells.
-	a.Reset()
-	if len(a.Snapshot()) != 0 {
-		t.Errorf("after reset, cells=%v want empty", a.Snapshot())
 	}
 }
 

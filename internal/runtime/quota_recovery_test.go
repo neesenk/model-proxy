@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,27 +22,6 @@ func recoveredSnapshot(now time.Time, remaining ...float64) *provider.QuotaSnaps
 	}
 	return s
 }
-
-// windowedProv is a minimal Provider serving a fixed windowed quota snapshot
-// (the package's snapshotProv carries no windows, and windowless snapshots
-// are deliberately NOT recovery evidence).
-type windowedProv struct{ snapshot *provider.QuotaSnapshot }
-
-func (w *windowedProv) AuthHeaders(*http.Request) error                        { return nil }
-func (w *windowedProv) Refresh() error                                         { return nil }
-func (w *windowedProv) RewriteRequest(string, []byte, string) (string, []byte) { return "", nil }
-func (w *windowedProv) Logout() error                                          { return nil }
-func (w *windowedProv) Usage() error                                           { return nil }
-func (w *windowedProv) FetchModels() ([]string, error)                         { return nil, nil }
-func (w *windowedProv) Quota() (*provider.QuotaSnapshot, error) {
-	s := *w.snapshot
-	return &s, nil
-}
-func (w *windowedProv) ProbeRequest(string) provider.ProbeRequest {
-	return provider.ProbeRequest{Method: http.MethodPost, Path: "/chat/completions"}
-}
-func (w *windowedProv) ExtraHeaders(*http.Request, []byte, string, string)   {}
-func (w *windowedProv) FilterModelIDs(ids []string) (kept, dropped []string) { return ids, nil }
 
 func TestQuotaRecoveredClearCooldownClearsStale429Prediction(t *testing.T) {
 	m := newTestManager(0)
@@ -147,7 +125,7 @@ func TestQuotaTrackerPollOneClearsCooldownWithRecoveredQuota(t *testing.T) {
 	tr := NewQuotaTracker("", func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider {
 			return map[string]provider.Provider{
-				"zhipu": &windowedProv{snapshot: recoveredSnapshot(time.Now(), 0.99, 0.57)},
+				"zhipu": fixedQuota(recoveredSnapshot(time.Now(), 0.99, 0.57)),
 			}
 		}, m)
 	m.RecordRateLimit("zhipu", time.Now().Add(80*time.Minute), Transient, 0)
@@ -167,8 +145,8 @@ func TestQuotaTrackerPollAllClearsCooldownWithRecoveredQuota(t *testing.T) {
 	tr := NewQuotaTracker("", func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider {
 			return map[string]provider.Provider{
-				"zhipu": &windowedProv{snapshot: recoveredSnapshot(time.Now(), 0.99)},
-				"aqp":   &windowedProv{snapshot: recoveredSnapshot(time.Now(), 0)},
+				"zhipu": fixedQuota(recoveredSnapshot(time.Now(), 0.99)),
+				"aqp":   fixedQuota(recoveredSnapshot(time.Now(), 0)),
 			}
 		}, m)
 	m.RecordRateLimit("zhipu", time.Now().Add(80*time.Minute), Transient, 0)
@@ -194,7 +172,7 @@ func TestQuotaTrackerRefreshOneKeepsCooldown(t *testing.T) {
 	tr := NewQuotaTracker("", func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider {
 			return map[string]provider.Provider{
-				"zhipu": &windowedProv{snapshot: recoveredSnapshot(now, 0.99)},
+				"zhipu": fixedQuota(recoveredSnapshot(now, 0.99)),
 			}
 		}, m)
 	m.RecordRateLimit("zhipu", now.Add(80*time.Minute), Transient, 0)
@@ -218,7 +196,8 @@ func TestQuotaTrackerRefreshOneKeepsCooldown(t *testing.T) {
 func TestPollAllSyncFailureKeepsLastSnapshotAndHasNoSideEffects(t *testing.T) {
 	cfg := &configdomain.Config{Scheduling: configdomain.Scheduling{QuotaPollInterval: "60s"}}
 	m := newTestManager(0)
-	prov := &windowedProv{snapshot: recoveredSnapshot(time.Now(), 0.8)}
+	snapshot := recoveredSnapshot(time.Now(), 0.8)
+	prov := &quotaFake{quota: func() (*provider.QuotaSnapshot, error) { cp := *snapshot; return &cp, nil }}
 	tr := NewQuotaTracker("", func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider {
 			return map[string]provider.Provider{"zhipu": prov}
@@ -233,7 +212,7 @@ func TestPollAllSyncFailureKeepsLastSnapshotAndHasNoSideEffects(t *testing.T) {
 	// The upstream starts 429-predicting a cooldown, then its usage endpoint
 	// breaks ("http 401" is a permanent fetch error: no retries).
 	m.RecordRateLimit("zhipu", time.Now().Add(80*time.Minute), Transient, 0)
-	prov.snapshot = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}
+	snapshot = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}
 	tr.PollAll(time.Now())
 
 	if kept := m.Quota("zhipu"); kept == nil || kept.Err != "" ||
@@ -245,7 +224,7 @@ func TestPollAllSyncFailureKeepsLastSnapshotAndHasNoSideEffects(t *testing.T) {
 	}
 
 	// Recovery: the next successful sync switches over and lifts the cooldown.
-	prov.snapshot = recoveredSnapshot(time.Now(), 0.8)
+	snapshot = recoveredSnapshot(time.Now(), 0.8)
 	tr.PollAll(time.Now())
 	if !m.TargetHealthy("zhipu", "glm-5.3", time.Now()) {
 		t.Fatal("successful sync must clear the stale cooldown again")
@@ -262,7 +241,8 @@ func TestPollAllSyncFailureKeepsLastSnapshotAndHasNoSideEffects(t *testing.T) {
 func TestPollOneSyncFailureKeepsLastSnapshot(t *testing.T) {
 	cfg := &configdomain.Config{Scheduling: configdomain.Scheduling{QuotaPollInterval: "60s"}}
 	m := newTestManager(0)
-	prov := &windowedProv{snapshot: recoveredSnapshot(time.Now(), 0.7)}
+	snapshot := recoveredSnapshot(time.Now(), 0.7)
+	prov := &quotaFake{quota: func() (*provider.QuotaSnapshot, error) { cp := *snapshot; return &cp, nil }}
 	tr := NewQuotaTracker("", func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider {
 			return map[string]provider.Provider{"zhipu": prov}
@@ -274,7 +254,7 @@ func TestPollOneSyncFailureKeepsLastSnapshot(t *testing.T) {
 	seeded := m.Quota("zhipu")
 
 	m.RecordRateLimit("zhipu", time.Now().Add(80*time.Minute), Transient, 0)
-	prov.snapshot = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 403"}
+	snapshot = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 403"}
 	if tr.PollOne("zhipu") {
 		t.Fatal("failed sync must not report a successful refresh — nothing was committed")
 	}
@@ -294,7 +274,8 @@ func TestPollOneSyncFailureKeepsLastSnapshot(t *testing.T) {
 func TestPollOneSyncFailureDoesNotPersist(t *testing.T) {
 	cfg := &configdomain.Config{Scheduling: configdomain.Scheduling{QuotaPollInterval: "60s"}}
 	m := newTestManager(0)
-	prov := &windowedProv{snapshot: recoveredSnapshot(time.Now(), 0.7)}
+	snapshot := recoveredSnapshot(time.Now(), 0.7)
+	prov := &quotaFake{quota: func() (*provider.QuotaSnapshot, error) { cp := *snapshot; return &cp, nil }}
 	path := filepath.Join(t.TempDir(), "quota_state.json")
 	tr := NewQuotaTracker(path, func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider {
@@ -319,7 +300,7 @@ func TestPollOneSyncFailureDoesNotPersist(t *testing.T) {
 		}
 	}
 
-	prov.snapshot = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}
+	snapshot = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}
 	if tr.PollOne("zhipu") {
 		t.Fatal("failed PollOne must report false")
 	}
@@ -339,7 +320,8 @@ func TestPollOneSyncFailureDoesNotPersist(t *testing.T) {
 func TestRefreshOneSyncFailureDoesNotDebounce(t *testing.T) {
 	cfg := &configdomain.Config{Scheduling: configdomain.Scheduling{QuotaPollInterval: "60s"}}
 	m := newTestManager(0)
-	prov := &windowedProv{snapshot: &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}}
+	snapshot := &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}
+	prov := &quotaFake{quota: func() (*provider.QuotaSnapshot, error) { cp := *snapshot; return &cp, nil }}
 	tr := NewQuotaTracker("", func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider {
 			return map[string]provider.Provider{"zhipu": prov}
@@ -354,7 +336,7 @@ func TestRefreshOneSyncFailureDoesNotDebounce(t *testing.T) {
 
 	// The upstream recovers; the very next refresh (well inside the 30s
 	// debounce half-interval) must commit — the failed one did not debounce.
-	prov.snapshot = recoveredSnapshot(time.Now(), 0.9)
+	snapshot = recoveredSnapshot(time.Now(), 0.9)
 	tr.RefreshOne("zhipu")
 	got := m.Quota("zhipu")
 	if got == nil || got.Err != "" || len(got.Windows) == 0 || got.Windows[0].RemainingPct != 0.9 {

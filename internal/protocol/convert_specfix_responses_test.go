@@ -14,28 +14,10 @@ import (
 // --- Fix 1: synthesized thinking.budget_tokens must stay < max_tokens ---
 
 func TestSpecFix_EffortBudgetClampedBelowMaxTokens(t *testing.T) {
-	// (a) r→a with effort high and NO max_output_tokens: the injected default
-	// max_tokens 4096 must clamp the 16384 ladder budget into [1024, 4095].
-	out, err := convertResponsesRequestToAnthropic([]byte(
-		`{"model":"gpt-x","reasoning":{"effort":"high"},"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := unmarshalMap(t, out)
-	if m["max_tokens"] != float64(defaultAnthropicMaxTokens) {
-		t.Errorf("max_tokens = %v, want injected default %d", m["max_tokens"], defaultAnthropicMaxTokens)
-	}
-	th := asMap(m["thinking"])
-	if th == nil {
-		t.Fatalf("no thinking config: %s", out)
-	}
-	budget := intOf(th["budget_tokens"])
-	if budget < 1024 || budget >= defaultAnthropicMaxTokens {
-		t.Errorf("budget_tokens = %d, want 1024 ≤ budget < %d", budget, defaultAnthropicMaxTokens)
-	}
-
-	// (b) chat→a with reasoning_effort medium and max_tokens 1500: the 8192
-	// ladder value clamps to 1499 (1024 ≤ budget < 1500).
+	// (a) chat→a with reasoning_effort medium and max_tokens 1500: the 8192
+	// ladder value clamps to 1499 (1024 ≤ budget < 1500). The defaultless
+	// r→a clamp case (injected max_tokens 4096 → 4095) lives in
+	// TestConvertReasoning_EffortMapping.
 	out2, err := convertOpenAIRequestToAnthropic([]byte(
 		`{"model":"g","reasoning_effort":"medium","max_tokens":1500,"messages":[{"role":"user","content":"hi"}]}`), nil)
 	if err != nil {
@@ -49,7 +31,7 @@ func TestSpecFix_EffortBudgetClampedBelowMaxTokens(t *testing.T) {
 		t.Errorf("budget_tokens = %d, want 1499 (medium 8192 clamped below max_tokens 1500)", b)
 	}
 
-	// (c) max_tokens 1000 ≤ 1024: thinking cannot be expressed legally — no
+	// (b) max_tokens 1000 ≤ 1024: thinking cannot be expressed legally — no
 	// thinking config at all (silent deterministic best-effort).
 	out3, err := convertOpenAIRequestToAnthropic([]byte(
 		`{"model":"g","reasoning_effort":"low","max_tokens":1000,"messages":[{"role":"user","content":"hi"}]}`), nil)

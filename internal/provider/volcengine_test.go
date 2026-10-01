@@ -31,22 +31,35 @@ func TestVolcengineRewriteRequest_NoOp(t *testing.T) {
 	}
 }
 
-// One key must authenticate both endpoints: Bearer for OpenAI, x-api-key for the
-// Anthropic-compatible endpoint.
+// One key must authenticate BOTH protocol legs. The proxy selects the upstream
+// base by protocol — chat-family clients go to openai_base_url
+// (/chat/completions on the Ark plan v3 endpoint), anthropic clients to
+// anthropic_base_url (/v1/messages) — and AuthHeaders sets Bearer AND x-api-key
+// on every request regardless of the leg (the OpenAI endpoint ignores
+// x-api-key; the Anthropic-compatible endpoint reads it). Per
+// docs/engineering/testing.md: both schemes asserted on both protocol paths,
+// exact values — deleting either Header.Set must fail a leg.
 func TestVolcengineAuthHeaders_BothSchemes(t *testing.T) {
 	p := newTestVolcengine(t)
 	if err := p.SaveKey("ark-test-key"); err != nil {
 		t.Fatalf("SaveKey: %v", err)
 	}
-	req, _ := http.NewRequest("POST", "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions", nil)
-	if err := p.AuthHeaders(req); err != nil {
-		t.Fatalf("AuthHeaders: %v", err)
-	}
-	if got := req.Header.Get("Authorization"); got != "Bearer ark-test-key" {
-		t.Errorf("Authorization: got %q, want Bearer ark-test-key", got)
-	}
-	if got := req.Header.Get("x-api-key"); got != "ark-test-key" {
-		t.Errorf("x-api-key: got %q, want ark-test-key", got)
+	for _, tc := range []struct{ name, url string }{
+		{"openai leg /chat/completions", "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"},
+		{"anthropic leg /v1/messages", "https://ark.cn-beijing.volces.com/api/plan/v1/messages"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, _ := http.NewRequest("POST", tc.url, nil)
+			if err := p.AuthHeaders(req); err != nil {
+				t.Fatalf("AuthHeaders: %v", err)
+			}
+			if got := req.Header.Get("Authorization"); got != "Bearer ark-test-key" {
+				t.Errorf("Authorization: got %q, want %q", got, "Bearer ark-test-key")
+			}
+			if got := req.Header.Get("x-api-key"); got != "ark-test-key" {
+				t.Errorf("x-api-key: got %q, want %q", got, "ark-test-key")
+			}
+		})
 	}
 }
 

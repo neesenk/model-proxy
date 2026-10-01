@@ -32,8 +32,8 @@ func TestCLI_TestOK(t *testing.T) {
 	defer srv.Close()
 
 	home := t.TempDir()
-	setPoolHome(t, home)
-	writePoolFile(t, "zhipu", "zhipu", "KEY-A")
+	clitest.SetPoolHome(t, home)
+	clitest.WritePoolFile(t, "zhipu", "zhipu", "KEY-A")
 	cfgPath := clitest.WriteTempConfig(t, testCLIConfig(srv.URL))
 
 	stdout, stderr, code := clitest.RunCLIWithHome(t, home, "test", cfgPath, "glm-test")
@@ -55,8 +55,8 @@ func TestCLI_TestAllFail(t *testing.T) {
 	defer srv.Close()
 
 	home := t.TempDir()
-	setPoolHome(t, home)
-	writePoolFile(t, "zhipu", "zhipu", "KEY-A")
+	clitest.SetPoolHome(t, home)
+	clitest.WritePoolFile(t, "zhipu", "zhipu", "KEY-A")
 	cfgPath := clitest.WriteTempConfig(t, testCLIConfig(srv.URL))
 
 	stdout, _, code := clitest.RunCLIWithHome(t, home, "test", cfgPath, "glm-test")
@@ -74,7 +74,7 @@ func TestCLI_TestAllFail(t *testing.T) {
 // TestCLI_TestNoRoute: an unrouted model exits 1 and lists the available routes.
 func TestCLI_TestNoRoute(t *testing.T) {
 	home := t.TempDir()
-	setPoolHome(t, home)
+	clitest.SetPoolHome(t, home)
 	cfgPath := clitest.WriteTempConfig(t, testCLIConfig("https://example.invalid"))
 
 	_, stderr, code := clitest.RunCLIWithHome(t, home, "test", cfgPath, "ghost-model")
@@ -100,8 +100,8 @@ func TestCLI_TestClaudeAliasRoute(t *testing.T) {
 	defer srv.Close()
 
 	home := t.TempDir()
-	setPoolHome(t, home)
-	writePoolFile(t, "zhipu", "zhipu", "KEY-A")
+	clitest.SetPoolHome(t, home)
+	clitest.WritePoolFile(t, "zhipu", "zhipu", "KEY-A")
 	cfgPath := clitest.WriteTempConfig(t, `listen: 127.0.0.1:0
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: `+srv.URL+`, models: [glm-5.2]}
@@ -133,9 +133,9 @@ func TestCLI_TestPriorityOrder(t *testing.T) {
 	defer badSrv.Close()
 
 	home := t.TempDir()
-	setPoolHome(t, home)
-	writePoolFile(t, "zhipu", "zhipu", "KEY-A")
-	writePoolFile(t, "deepseek", "deepseek", "KEY-B")
+	clitest.SetPoolHome(t, home)
+	clitest.WritePoolFile(t, "zhipu", "zhipu", "KEY-A")
+	clitest.WritePoolFile(t, "deepseek", "deepseek", "KEY-B")
 	cfgPath := clitest.WriteTempConfig(t, `listen: 127.0.0.1:0
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: `+okSrv.URL+`, models: [glm-5.2]}

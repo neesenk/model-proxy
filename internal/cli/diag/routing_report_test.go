@@ -2,13 +2,13 @@ package diag
 
 import (
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"model-proxy/internal/cli/clitest"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/requestlog"
 )
@@ -68,7 +68,9 @@ func TestCmdRoutingReport_WeakLabelsAndCost(t *testing.T) {
 	}
 	writeRoutingFixture(t, dir, records)
 
-	out := captureRoutingReport(t, cfg, []string{"--since", base.Add(-time.Hour).Format(time.RFC3339), "--retry-window", "5m"})
+	out := clitest.GrabStdout(t, func() {
+		CmdRoutingReport([]string{"--since", base.Add(-time.Hour).Format(time.RFC3339), "--retry-window", "5m"}, cfg)
+	})
 
 	if !strings.Contains(out, "Weak labels by route/grade") {
 		t.Fatalf("missing weak labels header:\n%s", out)
@@ -136,7 +138,7 @@ func TestCmdRoutingReport_SelectorMatrix(t *testing.T) {
 	}
 	writeRoutingFixture(t, dir, records)
 
-	out := captureRoutingReport(t, cfg, []string{"--since", base.Add(-time.Hour).Format(time.RFC3339)})
+	out := clitest.GrabStdout(t, func() { CmdRoutingReport([]string{"--since", base.Add(-time.Hour).Format(time.RFC3339)}, cfg) })
 	if !strings.Contains(out, "Selector enforce matrix") {
 		t.Fatalf("missing enforce matrix header:\n%s", out)
 	}
@@ -152,14 +154,14 @@ func TestCmdRoutingReport_EmptyAndDisabledPaths(t *testing.T) {
 	// Missing request-log directory.
 	missingDir := filepath.Join(t.TempDir(), "missing")
 	cfg := &configdomain.Config{RequestLog: configdomain.RequestLogConfig{Dir: missingDir}}
-	out := captureRoutingReport(t, cfg, nil)
+	out := clitest.GrabStdout(t, func() { CmdRoutingReport(nil, cfg) })
 	if !strings.Contains(out, "no request log directory") {
 		t.Errorf("expected no-log-dir hint, got:\n%s", out)
 	}
 
 	// Existing directory but no index yet.
 	cfg2 := &configdomain.Config{RequestLog: configdomain.RequestLogConfig{Dir: t.TempDir()}}
-	out = captureRoutingReport(t, cfg2, nil)
+	out = clitest.GrabStdout(t, func() { CmdRoutingReport(nil, cfg2) })
 	if !strings.Contains(out, "no request log index yet") {
 		t.Errorf("expected no-index hint, got:\n%s", out)
 	}
@@ -170,7 +172,7 @@ func TestCmdRoutingReport_EmptyAndDisabledPaths(t *testing.T) {
 	writeRoutingFixture(t, dir, []requestlog.Record{
 		{Ts: time.Now().UTC().Format(time.RFC3339), RequestID: "shadow-1", Shadow: true, Status: 200},
 	})
-	out = captureRoutingReport(t, cfg3, nil)
+	out = clitest.GrabStdout(t, func() { CmdRoutingReport(nil, cfg3) })
 	if !strings.Contains(out, "no routing business requests in range") {
 		t.Errorf("expected empty hint, got:\n%s", out)
 	}
@@ -190,7 +192,9 @@ func TestCmdRoutingReport_JSON(t *testing.T) {
 	}
 	writeRoutingFixture(t, dir, records)
 
-	out := captureRoutingReport(t, cfg, []string{"--since", base.Add(-time.Hour).Format(time.RFC3339), "--json"})
+	out := clitest.GrabStdout(t, func() {
+		CmdRoutingReport([]string{"--since", base.Add(-time.Hour).Format(time.RFC3339), "--json"}, cfg)
+	})
 	var report routingReport
 	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatalf("JSON parse: %v\n%s", err, out)
@@ -223,7 +227,7 @@ func TestCmdRoutingReport_DiagnosticsErrorBreaksWeakOK(t *testing.T) {
 	}
 	writeRoutingFixture(t, dir, records)
 
-	out := captureRoutingReport(t, cfg, []string{"--since", base.Add(-time.Hour).Format(time.RFC3339)})
+	out := clitest.GrabStdout(t, func() { CmdRoutingReport([]string{"--since", base.Add(-time.Hour).Format(time.RFC3339)}, cfg) })
 	if !strings.Contains(out, "WEAK_OK") {
 		t.Fatalf("missing WEAK_OK column:\n%s", out)
 	}
@@ -271,7 +275,7 @@ func TestCmdRoutingReport_GradeBaselineFromConfig(t *testing.T) {
 	}
 	writeRoutingFixture(t, dir, records)
 
-	out := captureRoutingReport(t, cfg, []string{"--since", base.Add(-time.Hour).Format(time.RFC3339)})
+	out := clitest.GrabStdout(t, func() { CmdRoutingReport([]string{"--since", base.Add(-time.Hour).Format(time.RFC3339)}, cfg) })
 	// Actual: 1000*1e-6*1 + 500*1e-6*2 = $0.002
 	// Baseline (strong-model): 1000*1e-6*10 + 500*1e-6*20 = $0.02
 	if !strings.Contains(out, "$0.00") {
@@ -311,25 +315,6 @@ func writeRoutingFixture(t *testing.T, dir string, records []requestlog.Record) 
 	indexer.Shutdown()
 }
 
-func captureRoutingReport(t *testing.T, cfg *configdomain.Config, args []string) string {
-	t.Helper()
-	orig := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = w
-	done := make(chan string)
-	go func() {
-		b, _ := io.ReadAll(r)
-		done <- string(b)
-	}()
-	CmdRoutingReport(args, cfg)
-	w.Close()
-	os.Stdout = orig
-	return <-done
-}
-
 // TestCmdRoutingReport_EvalVerdicts verifies that shadow records carrying
 // eval_verdict diagnostics are aggregated into the L2 eval verdict table.
 func TestCmdRoutingReport_EvalVerdicts(t *testing.T) {
@@ -367,7 +352,7 @@ func TestCmdRoutingReport_EvalVerdicts(t *testing.T) {
 	}
 	writeRoutingFixture(t, dir, records)
 
-	out := captureRoutingReport(t, cfg, []string{"--since", base.Add(-time.Hour).Format(time.RFC3339)})
+	out := clitest.GrabStdout(t, func() { CmdRoutingReport([]string{"--since", base.Add(-time.Hour).Format(time.RFC3339)}, cfg) })
 
 	if !strings.Contains(out, "L2 eval verdicts") {
 		t.Fatalf("missing L2 eval verdicts header:\n%s", out)

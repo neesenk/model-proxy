@@ -2,51 +2,16 @@ package runtime
 
 import (
 	"encoding/json"
-	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
 )
-
-// snapshotProv is a minimal Provider returning a fixed quota snapshot.
-type snapshotProv struct{ rem float64 }
-
-func (s *snapshotProv) AuthHeaders(*http.Request) error                        { return nil }
-func (s *snapshotProv) Refresh() error                                         { return nil }
-func (s *snapshotProv) RewriteRequest(string, []byte, string) (string, []byte) { return "", nil }
-func (s *snapshotProv) Logout() error                                          { return nil }
-func (s *snapshotProv) Usage() error                                           { return nil }
-func (s *snapshotProv) FetchModels() ([]string, error)                         { return nil, nil }
-func (s *snapshotProv) Quota() (*provider.QuotaSnapshot, error) {
-	return &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: s.rem, AsOf: time.Now()}, nil
-}
-func (s *snapshotProv) ProbeRequest(modelID string) provider.ProbeRequest {
-	return provider.ProbeRequest{Method: http.MethodPost, Path: "/chat/completions"}
-}
-func (s *snapshotProv) ExtraHeaders(*http.Request, []byte, string, string)   {}
-func (s *snapshotProv) FilterModelIDs(ids []string) (kept, dropped []string) { return ids, nil }
-
-// flakyProv fails transiently a fixed number of times before succeeding.
-type flakyProv struct {
-	snapshotProv
-	errs  []string
-	calls atomic.Int32
-}
-
-func (f *flakyProv) Quota() (*provider.QuotaSnapshot, error) {
-	call := int(f.calls.Add(1))
-	if call <= len(f.errs) {
-		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: f.errs[call-1]}, nil
-	}
-	return f.snapshotProv.Quota()
-}
 
 func TestCurrentGeneration(t *testing.T) {
 	tr := NewQuotaTracker("", nil, nil, newTestManager(0))
@@ -63,7 +28,7 @@ func TestPollAllMergesAndPersists(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "q.json")
 	tr := NewQuotaTracker(path,
 		func() *configdomain.Config { return &configdomain.Config{} },
-		func() map[string]provider.Provider { return map[string]provider.Provider{"x": &snapshotProv{rem: 0.5}} },
+		func() map[string]provider.Provider { return map[string]provider.Provider{"x": planQuota(0.5)} },
 		newTestManager(0))
 	tr.PollAll(time.Now())
 	if s := tr.Snapshot("x"); s == nil || s.RemainingPct != 0.5 {
@@ -77,7 +42,7 @@ func TestPollAllMergesAndPersists(t *testing.T) {
 	// forever and revive on every restart.
 	fresh := NewQuotaTracker(path,
 		func() *configdomain.Config { return &configdomain.Config{} },
-		func() map[string]provider.Provider { return map[string]provider.Provider{"x": &snapshotProv{rem: 0}} },
+		func() map[string]provider.Provider { return map[string]provider.Provider{"x": planQuota(0)} },
 		newTestManager(0))
 	fresh.Load()
 	if s := fresh.Snapshot("x"); s == nil || s.RemainingPct != 0.5 {
@@ -108,7 +73,7 @@ func TestPollOneUnknownKey(t *testing.T) {
 
 func TestPollOneCommits(t *testing.T) {
 	tr := NewQuotaTracker("", nil,
-		func() map[string]provider.Provider { return map[string]provider.Provider{"x": &snapshotProv{rem: 0.9}} },
+		func() map[string]provider.Provider { return map[string]provider.Provider{"x": planQuota(0.9)} },
 		newTestManager(0))
 	if !tr.PollOne("x") {
 		t.Fatal("PollOne returned false for live provider")
@@ -137,9 +102,9 @@ func TestPollAllPollsEveryProviderRegardlessOfBillingLabel(t *testing.T) {
 	tr := NewQuotaTracker("", func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider {
 			return map[string]provider.Provider{
-				"shopee":   &snapshotProv{rem: 0.5},
-				"zhipu":    &snapshotProv{rem: 0.8},
-				"deepseek": &snapshotProv{rem: -1},
+				"shopee":   planQuota(0.5),
+				"zhipu":    planQuota(0.8),
+				"deepseek": planQuota(-1),
 			}
 		}, mgr)
 	// Seed a stale snapshot to verify a poll REPLACES it (not drops the key).
@@ -166,8 +131,8 @@ func TestPollAllPoolsEveryProviderRegardlessOfBillingLabel(t *testing.T) {
 	tr := NewQuotaTracker("", func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider {
 			return map[string]provider.Provider{
-				"shopee#acc1": &snapshotProv{rem: 0.5},
-				"zhipu#acc1":  &snapshotProv{rem: 0.6},
+				"shopee#acc1": planQuota(0.5),
+				"zhipu#acc1":  planQuota(0.6),
 			}
 		}, newTestManager(0))
 	tr.PollAll(time.Now())
@@ -192,8 +157,8 @@ func TestPollOneAcceptsAnyLiveProviderKey(t *testing.T) {
 	tr := NewQuotaTracker("", func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider {
 			return map[string]provider.Provider{
-				"shopee":   &snapshotProv{rem: 0.5},
-				"deepseek": &snapshotProv{rem: -1},
+				"shopee":   planQuota(0.5),
+				"deepseek": planQuota(-1),
 			}
 		}, newTestManager(0))
 	if !tr.PollOne("shopee") {
@@ -242,9 +207,9 @@ func TestLoadRestoresEveryLiveProviderSnapshot(t *testing.T) {
 	tr := NewQuotaTracker(path, func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider {
 			return map[string]provider.Provider{
-				"shopee":   &snapshotProv{rem: 0.5},
-				"zhipu":    &snapshotProv{rem: 0.7},
-				"deepseek": &snapshotProv{rem: -1},
+				"shopee":   planQuota(0.5),
+				"zhipu":    planQuota(0.7),
+				"deepseek": planQuota(-1),
 			}
 		}, newTestManager(0))
 	tr.Load()
@@ -270,7 +235,7 @@ func TestPersistLoadRoundTripsNotes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "q.json")
 	tr := NewQuotaTracker(path, func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider {
-			return map[string]provider.Provider{"mimo": &snapshotProv{rem: -1}}
+			return map[string]provider.Provider{"mimo": planQuota(-1)}
 		}, newTestManager(0))
 	notes := []string{"console only", "Balance & recharge: https://example.com/console"}
 	tr.SetSnapshot("mimo", &provider.QuotaSnapshot{
@@ -281,7 +246,7 @@ func TestPersistLoadRoundTripsNotes(t *testing.T) {
 	}
 	fresh := NewQuotaTracker(path, func() *configdomain.Config { return cfg },
 		func() map[string]provider.Provider {
-			return map[string]provider.Provider{"mimo": &snapshotProv{rem: -1}}
+			return map[string]provider.Provider{"mimo": planQuota(-1)}
 		}, newTestManager(0))
 	fresh.Load()
 	got := fresh.Snapshot("mimo")
@@ -307,26 +272,41 @@ func TestCommitSnapshotGenerationGate(t *testing.T) {
 func TestFetchQuotaRetriesTransient(t *testing.T) {
 	tr := NewQuotaTracker("", nil, nil, newTestManager(0))
 	tr.SetRetryBackoff(time.Millisecond)
-	p := &flakyProv{snapshotProv: snapshotProv{rem: 0.3}, errs: []string{"timeout", "connection refused"}}
+	calls := 0
+	errs := []string{"timeout", "connection refused"}
+	p := &quotaFake{quota: func() (*provider.QuotaSnapshot, error) {
+		calls++
+		if calls <= len(errs) {
+			return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: errs[calls-1]}, nil
+		}
+		return &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.3, AsOf: time.Now()}, nil
+	}}
 	s := tr.FetchQuota(p, time.Now())
 	if s.Err != "" || s.RemainingPct != 0.3 {
 		t.Fatalf("FetchQuota = %+v, want recovered 0.3", s)
 	}
-	if p.calls.Load() != 3 {
-		t.Errorf("calls = %d, want 3", p.calls.Load())
+	if calls != 3 {
+		t.Errorf("calls = %d, want 3", calls)
 	}
 }
 
 func TestFetchQuotaNoRetryPermanent(t *testing.T) {
 	tr := NewQuotaTracker("", nil, nil, newTestManager(0))
 	tr.SetRetryBackoff(time.Millisecond)
-	p := &flakyProv{errs: []string{"http 401 unauthorized"}}
+	calls := 0
+	p := &quotaFake{quota: func() (*provider.QuotaSnapshot, error) {
+		calls++
+		if calls <= 1 {
+			return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401 unauthorized"}, nil
+		}
+		return nil, nil // unreachable in this test; second call never happens
+	}}
 	s := tr.FetchQuota(p, time.Now())
 	if s.Err == "" {
 		t.Fatal("permanent error must surface")
 	}
-	if p.calls.Load() != 1 {
-		t.Errorf("calls = %d, want 1 (no retry)", p.calls.Load())
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1 (no retry)", calls)
 	}
 }
 

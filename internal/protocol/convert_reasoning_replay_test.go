@@ -1,7 +1,6 @@
 package protocol
 
 import (
-	"io"
 	"strings"
 	"testing"
 
@@ -97,10 +96,7 @@ func TestAnthropicThinkingReplayStreamingToChat(t *testing.T) {
 		`data: {"type":"message_stop"}`,
 		``,
 	}, "\n")
-	raw, err := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(stream), "claude"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(stream), "claude"))
 	for _, want := range []string{`"reasoning_content":"Need weather."`, `"type":"anthropic_thinking"`, `"signature":"sig_123"`} {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("a→chat reasoning SSE missing %q:\n%s", want, raw)

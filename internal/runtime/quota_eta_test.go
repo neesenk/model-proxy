@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"net/http"
 	"testing"
 	"time"
 
@@ -14,36 +13,23 @@ import (
 // to the new Manager-held snapshot (PollAll/MergeQuotas and CommitSnapshot
 // paths). Rate math itself is covered in the provider package.
 
-// etaProv returns a plan snapshot with one ultimate window whose Used the test
-// advances between polls. AsOf is stamped by FetchQuota from the poll's now.
-type etaProv struct {
-	used float64
+// etaWindow serves the ETA fixture shape: one ultimate weekly window whose
+// Used the test advances between polls (rem = 1 − used/1000).
+func etaWindow(used *float64) func() (*provider.QuotaSnapshot, error) {
+	return func() (*provider.QuotaSnapshot, error) {
+		rem := 1 - *used/1000
+		return &provider.QuotaSnapshot{
+			Billing: provider.BillingPlan, RemainingPct: rem,
+			Windows: []provider.QuotaWindow{{
+				Label: "Weekly tokens", Kind: "tokens", Used: *used, Total: 1000,
+				RemainingPct: rem, Ultimate: true,
+				Duration: 7 * 24 * time.Hour, ResetsAt: time.Now().Add(7 * 24 * time.Hour),
+			}},
+		}, nil
+	}
 }
 
-func (e *etaProv) AuthHeaders(*http.Request) error                        { return nil }
-func (e *etaProv) Refresh() error                                         { return nil }
-func (e *etaProv) RewriteRequest(string, []byte, string) (string, []byte) { return "", nil }
-func (e *etaProv) Logout() error                                          { return nil }
-func (e *etaProv) Usage() error                                           { return nil }
-func (e *etaProv) FetchModels() ([]string, error)                         { return nil, nil }
-func (e *etaProv) Quota() (*provider.QuotaSnapshot, error) {
-	rem := 1 - e.used/1000
-	return &provider.QuotaSnapshot{
-		Billing: provider.BillingPlan, RemainingPct: rem,
-		Windows: []provider.QuotaWindow{{
-			Label: "Weekly tokens", Kind: "tokens", Used: e.used, Total: 1000,
-			RemainingPct: rem, Ultimate: true,
-			Duration: 7 * 24 * time.Hour, ResetsAt: time.Now().Add(7 * 24 * time.Hour),
-		}},
-	}, nil
-}
-func (e *etaProv) ProbeRequest(modelID string) provider.ProbeRequest {
-	return provider.ProbeRequest{Method: http.MethodPost, Path: "/chat/completions"}
-}
-func (e *etaProv) ExtraHeaders(*http.Request, []byte, string, string)   {}
-func (e *etaProv) FilterModelIDs(ids []string) (kept, dropped []string) { return ids, nil }
-
-func newEtaTracker(p *etaProv) *QuotaTracker {
+func newEtaTracker(p *quotaFake) *QuotaTracker {
 	return NewQuotaTracker("",
 		func() *configdomain.Config { return &configdomain.Config{} }, // default 5m poll interval → 15m max gap
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": p} },
@@ -51,7 +37,8 @@ func newEtaTracker(p *etaProv) *QuotaTracker {
 }
 
 func TestPollAll_ComputesExhaustionEta(t *testing.T) {
-	p := &etaProv{used: 100}
+	used := 100.0
+	p := &quotaFake{quota: etaWindow(&used)}
 	tr := newEtaTracker(p)
 	t0 := time.Date(2026, 8, 16, 10, 0, 0, 0, time.UTC)
 
@@ -62,7 +49,7 @@ func TestPollAll_ComputesExhaustionEta(t *testing.T) {
 	}
 
 	// Second poll 5m later, +100 used → rate 100/300s, remaining 800 → +40m.
-	p.used = 200
+	used = 200
 	t1 := t0.Add(5 * time.Minute)
 	tr.PollAll(t1)
 	s := tr.Snapshot("x")
@@ -74,14 +61,14 @@ func TestPollAll_ComputesExhaustionEta(t *testing.T) {
 	}
 
 	// Poll gap > 3×poll_interval (15m): stale baseline → no prediction.
-	p.used = 300
+	used = 300
 	tr.PollAll(t1.Add(20 * time.Minute))
 	if s := tr.Snapshot("x"); s == nil || !s.ExhaustionEta.IsZero() {
 		t.Errorf("gapped poll: snapshot = %+v, want zero ExhaustionEta", s)
 	}
 
 	// Flat usage (rate 0) → no prediction, and a valid in-gap baseline.
-	p.used = 300
+	used = 300
 	tr.PollAll(t1.Add(25 * time.Minute))
 	if s := tr.Snapshot("x"); s == nil || !s.ExhaustionEta.IsZero() {
 		t.Errorf("flat poll: snapshot = %+v, want zero ExhaustionEta", s)
@@ -90,12 +77,13 @@ func TestPollAll_ComputesExhaustionEta(t *testing.T) {
 
 // CommitSnapshot (PollOne / 429 RefreshOne path) attaches the ETA the same way.
 func TestCommitSnapshot_ComputesExhaustionEta(t *testing.T) {
-	p := &etaProv{used: 0}
+	used := 0.0
+	p := &quotaFake{quota: etaWindow(&used)}
 	tr := newEtaTracker(p)
 	t0 := time.Date(2026, 8, 16, 10, 0, 0, 0, time.UTC)
-	mk := func(used float64, asOf time.Time) *provider.QuotaSnapshot {
-		p.used = used
-		s, _ := p.Quota()
+	mk := func(u float64, asOf time.Time) *provider.QuotaSnapshot {
+		used = u
+		s, _ := p.quota()
 		s.AsOf = asOf
 		return s
 	}

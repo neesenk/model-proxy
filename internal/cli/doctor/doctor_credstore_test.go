@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"model-proxy/internal/cli/clitest"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/credstore"
 )
@@ -21,7 +22,7 @@ func TestDoctorShowsCredentialStoreBackend(t *testing.T) {
 	if got := credstore.ResolvedMode(); got != credstore.ModeFile {
 		t.Fatalf("test binary must resolve file mode (got %q) — the hermeticity guard broke", got)
 	}
-	out := captureStdout(t, func() { DoctorWithCfg(cfg) })
+	out := clitest.GrabStdout(t, func() { DoctorWithCfg(cfg) })
 	if !strings.Contains(out, "credentials: file") {
 		t.Errorf("doctor output missing credentials backend line:\n%s", out)
 	}

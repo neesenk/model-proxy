@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"io"
+	"model-proxy/internal/cli/clitest"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/probe"
 	"model-proxy/internal/protocol"
@@ -261,8 +262,8 @@ func TestProbeModelCallable_500RawBody(t *testing.T) {
 
 func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
-	writePoolFile(t, "zhipu", "zhipu", "KEY")
+	clitest.SetPoolHome(t, dir)
+	clitest.WritePoolFile(t, "zhipu", "zhipu", "KEY")
 
 	// Per (path, model) status table. The 3-leg probe hits /chat/completions and
 	// /responses on the openai base (the anthropic leg is unprobed - no
@@ -394,7 +395,7 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 
 func TestCheckProviderModels_NotLoggedInKeepsInconclusiveModel(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir) // no pool file, no singular file -> LoadKey will fail
+	clitest.SetPoolHome(t, dir) // no pool file, no singular file -> LoadKey will fail
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 	}))
@@ -556,7 +557,7 @@ func TestPrintKeptModels(t *testing.T) {
 	// "K2.8 Preview" as `kimi-for-coding`), and the upstream's own name is the
 	// only signal that surfaces the swap.
 	upstream := map[string]string{"kimi-k2.6": "K2.8 Preview"}
-	out := grabStdout(t, func() {
+	out := clitest.GrabStdout(t, func() {
 		PrintKeptModels("volcengine", []string{"glm-5.2", "kimi-k2.6"}, meta, sources, protocols, upstream)
 	})
 	if !strings.Contains(out, "glm-5.2") || !strings.Contains(out, "kimi-k2.6") {
@@ -593,7 +594,7 @@ func TestPrintKeptModels(t *testing.T) {
 }
 
 func TestPrintKeptModels_Empty(t *testing.T) {
-	out := grabStdout(t, func() { PrintKeptModels("x", nil, nil, nil, nil, nil) })
+	out := clitest.GrabStdout(t, func() { PrintKeptModels("x", nil, nil, nil, nil, nil) })
 	if !strings.Contains(out, "(no models)") {
 		t.Errorf("empty printKeptModels=%q want (no models)", out)
 	}
@@ -668,7 +669,7 @@ func TestProtocolsCell(t *testing.T) {
 
 func TestLoadModelCapsProjection(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	clitest.SetPoolHome(t, dir)
 
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
 		"zhipu": {Provider: "zhipu", OpenAIBaseURL: "https://o"},
@@ -699,14 +700,14 @@ func TestLoadModelCapsProjection(t *testing.T) {
 	}
 
 	// Missing file -> nil, no error surfaced.
-	setPoolHome(t, t.TempDir())
+	clitest.SetPoolHome(t, t.TempDir())
 	if got := loadModelCapsProjection(cfg); got != nil {
 		t.Errorf("missing file: projection=%v want nil", got)
 	}
 
 	// Malformed file -> nil, no error surfaced.
 	dir2 := t.TempDir()
-	setPoolHome(t, dir2)
+	clitest.SetPoolHome(t, dir2)
 	bad := filepath.Join(dir2, ".model-proxy", "model_caps.json")
 	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
@@ -724,7 +725,7 @@ func TestLoadModelCapsProjection(t *testing.T) {
 // where a refresh burst of 429s downgraded known-good legs on disk).
 func TestPersistModelCaps_UnknownRetainsConcludedFileVerdict(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	clitest.SetPoolHome(t, dir)
 
 	provCfg := configdomain.Provider{OpenAIBaseURL: "https://example.test/v1", Provider: "zcode"}
 	fp := providerbuild.ProtocolConfigFingerprint(provCfg)
@@ -793,8 +794,8 @@ func TestPersistModelCaps_UnknownRetainsConcludedFileVerdict(t *testing.T) {
 // never protected the single throttled model).
 func TestCheckProviderModels_RateLimitedModelNotDropped(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
-	writePoolFile(t, "zhipu", "zhipu", "KEY")
+	clitest.SetPoolHome(t, dir)
+	clitest.WritePoolFile(t, "zhipu", "zhipu", "KEY")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		model := protocol.ExtractModel(readAll(r.Body))
@@ -835,7 +836,7 @@ func TestCheckProviderModels_RateLimitedModelNotDropped(t *testing.T) {
 // data instead of the CLI's stale snapshot overwriting the daemon's.
 func TestPersistModelCaps_ReMergeOnConcurrentWrite(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	clitest.SetPoolHome(t, dir)
 
 	provCfg := configdomain.Provider{OpenAIBaseURL: "https://example.test/v1", Provider: "zcode"}
 	fp := providerbuild.ProtocolConfigFingerprint(provCfg)
@@ -899,8 +900,8 @@ func TestPersistModelCaps_ReMergeOnConcurrentWrite(t *testing.T) {
 // subset (disabled ids cannot mask a total probe outage).
 func TestCheckProviderModels_DisabledNotProbed(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
-	writePoolFile(t, "zhipu", "zhipu", "KEY")
+	clitest.SetPoolHome(t, dir)
+	clitest.WritePoolFile(t, "zhipu", "zhipu", "KEY")
 
 	var hits sync.Map // model -> count
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -970,7 +971,7 @@ func TestCheckProviderModels_DisabledNotProbed(t *testing.T) {
 // missing file degrades to probing everything.
 func TestSplitDisabledModelIDs(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	clitest.SetPoolHome(t, dir)
 	if err := runtimewire.SaveDisabledModelsFile(filepath.Join(dir, ".model-proxy", "disabled_models.json"),
 		map[string][]string{"zhipu": {"off-a", "off-b"}}); err != nil {
 		t.Fatal(err)
@@ -995,8 +996,8 @@ func TestSplitDisabledModelIDs(t *testing.T) {
 // must not probe it (daemon pass parity).
 func TestSplitDisabledModelIDs_PoolVirtualKey(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
-	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B")
+	clitest.SetPoolHome(t, dir)
+	clitest.WritePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B")
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
 		"zhipu": {Provider: "zhipu"},
 	}}

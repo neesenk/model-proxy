@@ -7,7 +7,7 @@ import (
 )
 
 func TestCLI_ModelsListsAll(t *testing.T) {
-	cfg := clitest.WriteTempConfig(t, minimalConfig)
+	cfg := clitest.WriteTempConfig(t, clitest.MinimalConfig)
 	stdout, _, code := clitest.RunCLI(t, "models", cfg)
 	if code != 0 {
 		t.Fatalf("models exit=%d want 0", code)
@@ -21,7 +21,7 @@ func TestCLI_ModelsListsAll(t *testing.T) {
 }
 
 func TestCLI_ModelsOneProvider(t *testing.T) {
-	cfg := clitest.WriteTempConfig(t, minimalConfig)
+	cfg := clitest.WriteTempConfig(t, clitest.MinimalConfig)
 	stdout, _, code := clitest.RunCLI(t, "models", cfg, "aqp")
 	if code != 0 {
 		t.Fatalf("models aqp exit=%d want 0", code)
@@ -32,7 +32,7 @@ func TestCLI_ModelsOneProvider(t *testing.T) {
 }
 
 func TestCLI_ModelsUnknownProviderExits(t *testing.T) {
-	cfg := clitest.WriteTempConfig(t, minimalConfig)
+	cfg := clitest.WriteTempConfig(t, clitest.MinimalConfig)
 	_, stderr, code := clitest.RunCLI(t, "models", cfg, "nope")
 	if code == 0 {
 		t.Error("models nope: exit=0 want non-zero")

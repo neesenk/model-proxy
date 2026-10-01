@@ -1,6 +1,7 @@
 package models
 
 import (
+	"model-proxy/internal/cli/clitest"
 	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
@@ -18,8 +19,8 @@ import (
 // (id-sorted) is sufficient.
 func TestRefreshProviderModelsOnceForPool(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
-	writePoolFile(t, "zhipu", "zhipu", "K1", "K2", "K3")
+	clitest.SetPoolHome(t, dir)
+	clitest.WritePoolFile(t, "zhipu", "zhipu", "K1", "K2", "K3")
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
@@ -46,7 +47,7 @@ func TestRefreshProviderModelsOnceForPool(t *testing.T) {
 // its plain name.
 func TestRefreshProviderModels_SingleAccount(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	clitest.SetPoolHome(t, dir)
 	// Write the legacy singular file (1 account → not pooled).
 	credDir := dir + "/.model-proxy"
 	if err := os.MkdirAll(credDir, 0o700); err != nil {
@@ -79,7 +80,7 @@ func TestRefreshProviderModels_SingleAccount(t *testing.T) {
 // TestRefreshProviderModels_Unknown asserts the unknown-provider error path.
 func TestRefreshProviderModels_Unknown(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	clitest.SetPoolHome(t, dir)
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"a": {Provider: "static"}}}
 	_, err := RefreshProviderModelInfos(cfg, "nope")
 	if err == nil || !strings.Contains(err.Error(), "unknown provider") {
@@ -91,8 +92,8 @@ func TestRefreshProviderModels_Unknown(t *testing.T) {
 // sorted virtual ids, and returns false for single-account / unknown providers.
 func TestPoolVirtuals(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
-	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-C", "KEY-B")
+	clitest.SetPoolHome(t, dir)
+	clitest.WritePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-C", "KEY-B")
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"zhipu": {Provider: "zhipu"}}}
 
 	vids, pooled := PoolVirtuals(cfg, "zhipu")

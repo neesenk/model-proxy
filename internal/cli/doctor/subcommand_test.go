@@ -7,7 +7,7 @@ import (
 )
 
 func TestCLI_DoctorValidConfig(t *testing.T) {
-	cfg := clitest.WriteTempConfig(t, minimalConfig)
+	cfg := clitest.WriteTempConfig(t, clitest.MinimalConfig)
 	stdout, _, code := clitest.RunCLI(t, "doctor", cfg)
 	if code != 0 {
 		t.Fatalf("doctor exit=%d want 0", code)
