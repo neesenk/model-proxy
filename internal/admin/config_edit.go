@@ -10,6 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"model-proxy/internal/appapi"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/configedit"
 )
 
@@ -226,10 +227,81 @@ func (s *Service) editStructured(kind, name string, data map[string]any) error {
 				}
 			}
 		case "route":
-			if targets, ok := data["targets"]; ok {
-				configedit.SetChildNode(configedit.ChildMap(root, "routes"), name, configedit.MustEncode(targets))
+			// data.strategy semantics (docs/web-api.md): absent = preserve the
+			// existing declaration (a targets-only edit must not reset strategy);
+			// null or "" = strip the declaration (back to the default quota);
+			// "quota" = explicit declaration, EXCEPT on a route that never
+			// declared one (the list form stays untouched — quota IS the
+			// default); "load_balance" = declare the rotation strategy.
+			targets, hasTargets := data["targets"]
+			strategyRaw, hasStrategy := data["strategy"]
+			strategy, _ := strategyRaw.(string) // null stays "" = strip
+			if !hasTargets && !hasStrategy {
+				break
 			}
+			routes := configedit.ChildMap(root, "routes")
+			existing := configedit.ChildNode(routes, name)
+			existingStrategy := routeDeclaredStrategy(existing)
+			if !hasTargets {
+				// Strategy-only edit: rewrite only the strategy declaration and
+				// keep the route's targets node verbatim (comments preserved).
+				if existing == nil {
+					return fmt.Errorf("route %q: not found — add targets first", name)
+				}
+				configedit.SetChildNode(routes, name, routeNodeWithStrategy(existing, strategy))
+				break
+			}
+			node := configedit.MustEncode(targets)
+			// Resolve the declaration the edited route carries.
+			declared := existingStrategy
+			if hasStrategy {
+				declared = strategy
+				if strategy == configdomain.RouteStrategyQuota && existingStrategy == "" {
+					declared = "" // quota on an undeclared route changes nothing
+				}
+			}
+			if declared != "" {
+				mapped := yaml.Node{Kind: yaml.MappingNode}
+				configedit.SetChildScalar(&mapped, "strategy", declared)
+				configedit.SetChildNode(&mapped, "targets", node)
+				node = &mapped
+			}
+			configedit.SetChildNode(routes, name, node)
 		}
 		return nil
 	})
+}
+
+// routeDeclaredStrategy reads a route node's declared scheduling strategy
+// ("" for the list form or a missing/empty strategy scalar).
+func routeDeclaredStrategy(node *yaml.Node) string {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return ""
+	}
+	if s := configedit.ChildNode(node, "strategy"); s != nil && s.Kind == yaml.ScalarNode && s.Value != "" {
+		return s.Value
+	}
+	return ""
+}
+
+// routeNodeWithStrategy rewrites ONLY the strategy declaration of an existing
+// route node, keeping its targets (and their comments) verbatim: map-form
+// routes get the strategy scalar set/removed in place; list-form routes are
+// wrapped into the map form around the untouched list.
+func routeNodeWithStrategy(existing *yaml.Node, strategy string) *yaml.Node {
+	if existing.Kind == yaml.MappingNode {
+		if strategy == "" {
+			configedit.DeleteKey(existing, "strategy")
+		} else {
+			configedit.SetChildScalar(existing, "strategy", strategy)
+		}
+		return existing
+	}
+	if strategy == "" {
+		return existing
+	}
+	mapped := yaml.Node{Kind: yaml.MappingNode}
+	configedit.SetChildScalar(&mapped, "strategy", strategy)
+	configedit.SetChildNode(&mapped, "targets", existing)
+	return &mapped
 }

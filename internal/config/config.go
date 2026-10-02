@@ -33,6 +33,13 @@ type Config struct {
 	LogFile   string                   `yaml:"log_file"`
 	Providers map[string]Provider      `yaml:"providers"`
 	Routes    map[string][]RouteTarget `yaml:"routes"`
+	// RouteStrategies holds per-route scheduling strategies declared inline
+	// in the routes: block (the map form `{strategy: <name>, targets: [...]}`),
+	// keyed by exposed route name. Absent entry = RouteStrategyQuota (the
+	// default quota-aware ranking). Populated by LoadConfigFromBytes from the
+	// same routes: block — never parsed from a separate YAML key, so a
+	// strategy can never reference a route that does not carry its targets.
+	RouteStrategies map[string]string `yaml:"-"`
 	// RoutePolicies holds the per-route tier policies (the top-level
 	// route_policy: block), keyed by exposed route name: declarative bands map
 	// request-profile signals to a preferred target. A route without an entry
@@ -1204,6 +1211,32 @@ func parseHHMM(value string) (int, bool) {
 	return hour*60 + minute, true
 }
 
+// Route scheduling-strategy names: the closed vocabulary a route's inline
+// `strategy:` accepts (the map form of a routes: entry). The quota strategy
+// is the default and reproduces the historical quota-aware ranking
+// (tier → priority → surplus); load_balance rotates evenly over the route's
+// available targets instead of ranking them (no session sticky). The runtime
+// scheduling core keys off these same values.
+const (
+	RouteStrategyQuota       = "quota"
+	RouteStrategyLoadBalance = "load_balance"
+)
+
+// RouteStrategyFor resolves the effective scheduling strategy for one
+// schedule key: the route's declared strategy, defaulting to quota. The
+// request-aware planner schedules cross-route pools under synthetic keys
+// ("<route>#req" / "<route>#ctx"); the suffix is stripped so those pools
+// keep the base route's strategy.
+func (c Config) RouteStrategyFor(scheduleKey string) string {
+	if base, _, found := strings.Cut(scheduleKey, "#"); found {
+		scheduleKey = base
+	}
+	if strategy := c.RouteStrategies[scheduleKey]; strategy != "" {
+		return strategy
+	}
+	return RouteStrategyQuota
+}
+
 // RouteTarget is one upstream destination for an exposed model name. A route maps
 // an exposed name to an ordered list of targets; the proxy picks one by scheduling
 // (by tier/quota band, peak folded into effective remaining) and fails over to the
@@ -1244,6 +1277,54 @@ func (t *RouteTarget) UnmarshalYAML(value *yaml.Node) error {
 	return value.Decode((*plain)(t))
 }
 
+// routeDefinition is one raw routes: value: the historical plain target
+// list, or the map form `{strategy: <name>, targets: [...]}` that selects a
+// scheduling strategy for the route. LoadConfigFromBytes normalizes both into
+// Config.Routes (+ Config.RouteStrategies when a strategy is declared), so
+// every other consumer keeps reading map[string][]RouteTarget unchanged and
+// the list form stays byte-for-byte compatible.
+type routeDefinition struct {
+	strategy string
+	targets  []RouteTarget
+}
+
+// UnmarshalYAML accepts both route forms:
+//
+//	routes:
+//	  model-a:              # list form — default (quota) strategy
+//	    - provider/model
+//	  model-b:              # map form — strategy + targets
+//	    strategy: load_balance
+//	    targets:
+//	      - provider/model
+//
+// The map form REQUIRES targets (strategy alone is not a route); the targeted
+// error beats yaml's opaque "cannot unmarshal" message. Strategy values are
+// validated by Config.Validate (unknown names fail config load).
+func (d *routeDefinition) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.SequenceNode:
+		return value.Decode(&d.targets)
+	case yaml.MappingNode:
+		type rawRouteDefinition struct {
+			Strategy string        `yaml:"strategy"`
+			Targets  []RouteTarget `yaml:"targets"`
+		}
+		var raw rawRouteDefinition
+		if err := value.Decode(&raw); err != nil {
+			return err
+		}
+		if raw.Targets == nil {
+			return fmt.Errorf("route map form must declare a targets: list — strategy alone is not a route")
+		}
+		d.strategy = strings.TrimSpace(raw.Strategy)
+		d.targets = raw.Targets
+		return nil
+	default:
+		return fmt.Errorf("route must be a target list or a {strategy, targets} map (got %s)", value.ShortTag())
+	}
+}
+
 // ExpandPath expands ~ and the env: prefix.
 func ExpandPath(p string) string {
 	if p == "" {
@@ -1280,11 +1361,11 @@ func LoadConfig(path string) (*Config, error) {
 func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg := &Config{}
 	type rawConfig struct {
-		Listen    string                   `yaml:"listen"`
-		LogLevel  string                   `yaml:"log_level"`
-		LogFile   string                   `yaml:"log_file"`
-		Providers map[string]Provider      `yaml:"providers"`
-		Routes    map[string][]RouteTarget `yaml:"routes"`
+		Listen    string                     `yaml:"listen"`
+		LogLevel  string                     `yaml:"log_level"`
+		LogFile   string                     `yaml:"log_file"`
+		Providers map[string]Provider        `yaml:"providers"`
+		Routes    map[string]routeDefinition `yaml:"routes"`
 		// Must mirror Config.RoutePolicies (same silent-drop trap as the
 		// shadow knobs: without it the file's route_policy: would be dropped).
 		RoutePolicies map[string]RoutePolicy `yaml:"route_policy"`
@@ -1357,7 +1438,19 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.LogLevel = raw.LogLevel
 	cfg.LogFile = raw.LogFile
 	cfg.Providers = raw.Providers
-	cfg.Routes = raw.Routes
+	// Normalize the routes block: both the historical list form and the map
+	// form ({strategy, targets}) land in the same two projections — targets
+	// for every consumer, strategies for the scheduling seam only.
+	routes := make(map[string][]RouteTarget, len(raw.Routes))
+	strategies := make(map[string]string, len(raw.Routes))
+	for name, definition := range raw.Routes {
+		routes[name] = definition.targets
+		if definition.strategy != "" {
+			strategies[name] = definition.strategy
+		}
+	}
+	cfg.Routes = routes
+	cfg.RouteStrategies = strategies
 	cfg.RoutePolicies = raw.RoutePolicies
 	cfg.Proxy = raw.Proxy
 	cfg.Scheduling = raw.Scheduling
@@ -1620,6 +1713,13 @@ func (c *Config) validate() error {
 			if !inModels {
 				return fmt.Errorf("provider %q: catalog_alias key %q is not in its models: list — likely a typo; add the model to models: or fix the key", name, model)
 			}
+		}
+	}
+	for exposed, strategy := range c.RouteStrategies {
+		switch strategy {
+		case RouteStrategyQuota, RouteStrategyLoadBalance:
+		default:
+			return fmt.Errorf("route %q: unknown strategy %q — must be %q or %q", exposed, strategy, RouteStrategyQuota, RouteStrategyLoadBalance)
 		}
 	}
 	for exposed, targets := range c.Routes {

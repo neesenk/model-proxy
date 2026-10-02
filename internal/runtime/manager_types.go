@@ -204,6 +204,9 @@ type DashboardSnapshot struct {
 
 	capturedAt time.Time
 	spread     map[string]uint64
+	// rr carries the load_balance per-route round-robin counters into the
+	// read-only PreviewOrder path (same detachment discipline as spread).
+	rr map[string]uint64
 	// disabled carries the operator disabled-model override into the
 	// read-only PreviewOrder path (same detachment discipline as spread).
 	disabled disabledModelSet
@@ -237,6 +240,16 @@ type ScheduleInput struct {
 	SwitchMargin float64
 	Now          time.Time
 	QuotaMaxAge  time.Duration
+	// Strategy selects the ordering policy (the route's inline `strategy:`,
+	// threaded by the app scheduling adapter): the empty string and
+	// configdomain.RouteStrategyQuota keep the quota ranking (tier →
+	// priority → surplus score, session sticky);
+	// configdomain.RouteStrategyLoadBalance rotates evenly over the available
+	// targets (per-route round-robin — sessions park on their assigned slot
+	// with the same sliding-dwell sticky mechanics, sessionless requests
+	// rotate per request). Pin narrowing, disabled-model filtering and
+	// availability gating apply identically under both strategies.
+	Strategy string
 	// Quality weights (surplus-units penalty per unit of decayed EWMA). Zero
 	// weights mean "no data / disabled" and reproduce the pre-quality ordering
 	// exactly.

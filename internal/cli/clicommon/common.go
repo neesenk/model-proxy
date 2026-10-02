@@ -47,6 +47,9 @@ func RenderScheduleRoutes(models map[string]appapi.StatusRoute, ind string) stri
 			}
 			fmt.Fprintf(&b, "%s    %s%s%s\n", ind, display.Yellow("pinned: "), ri.Pin, exp)
 		}
+		if ri.Strategy != "" {
+			fmt.Fprintf(&b, "%s    %s%s\n", ind, display.Dim("strategy: "), ri.Strategy)
+		}
 		for _, pool := range ri.Pools {
 			fmt.Fprintf(&b, "%s    %s %s (%d accounts, %d available)\n",
 				ind, display.Dim("pool:"), display.Bold(pool.Parent), pool.Accounts, pool.Available)

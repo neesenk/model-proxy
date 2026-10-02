@@ -147,7 +147,11 @@ func runtimeTargetsBare(targets []configdomain.RouteTarget) []runtimestate.Targe
 // QuotaMaxAge/Generation (each site differs on exactly those).
 func scheduleInput(cfg *configdomain.Config, exposed string, targets []runtimestate.Target, routeKeys map[string]bool, now time.Time) runtimestate.ScheduleInput {
 	return runtimestate.ScheduleInput{
-		Exposed:           exposed,
+		Exposed: exposed,
+		// The route's scheduling strategy (inline `strategy:` in the routes
+		// block; quota unless declared). Synthetic cross-route keys
+		// ("<route>#req"/"<route>#ctx") resolve to the base route's strategy.
+		Strategy:          cfg.RouteStrategyFor(exposed),
 		Targets:           targets,
 		RouteKeys:         routeKeys,
 		Dwell:             cfg.Scheduling.Dwell(),
@@ -267,7 +271,11 @@ func scheduleStatusFromSnapshot(
 		Available int    `json:"available"`
 	}
 	type routeInfo struct {
-		First      string     `json:"first"`
+		First string `json:"first"`
+		// Strategy is the route's scheduling strategy (the routes block's
+		// inline `strategy:`): present only when a route opts out of the
+		// default quota ranking ("load_balance" = even round-robin rotation).
+		Strategy   string     `json:"strategy,omitempty"`
 		Ordered    []provInfo `json:"ordered"`
 		Sticky     string     `json:"sticky,omitempty"`
 		DwellRem   float64    `json:"sticky_dwell_remaining_sec,omitempty"`
@@ -307,6 +315,12 @@ func scheduleStatusFromSnapshot(
 		// the pin-applied preview.
 		pin, pinned := RuntimeSnapshot.Pins[exposed]
 		ri := routeInfo{}
+		// Annotate only non-default strategies (the repo's schedule-JSON
+		// convention: default-state fields stay omitted; "quota" is the
+		// historical behavior and needs no annotation).
+		if strategy := cfg.RouteStrategyFor(exposed); strategy != configdomain.RouteStrategyQuota {
+			ri.Strategy = strategy
+		}
 		if pinned {
 			ri.Pin = pin.Provider
 			ri.PinExpires = pin.ExpiresLabel(now)

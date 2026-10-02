@@ -262,13 +262,17 @@ type ConfigProviderMeta struct {
 // ConfigDocument is the complete transport projection for GET /api/config.
 // Routes is the EFFECTIVE table (derived from provider model lists, explicit
 // routes: entries overriding per name), so every callable model appears.
+// RouteStrategies maps the explicit routes that declare a scheduling
+// strategy (routes: map form, including an explicit "quota") to it; a name
+// absent from the map uses the default quota ranking. Key set ⊆ Routes.
 type ConfigDocument struct {
-	YAML           string                         `json:"yaml"`
-	Summary        ConfigSummary                  `json:"summary"`
-	ProviderModels map[string][]string            `json:"provider_models"`
-	ProviderMeta   map[string]ConfigProviderMeta  `json:"provider_meta"`
-	Routes         map[string][]ConfigRouteTarget `json:"routes"`
-	Settings       ConfigSettings                 `json:"settings"`
+	YAML            string                         `json:"yaml"`
+	Summary         ConfigSummary                  `json:"summary"`
+	ProviderModels  map[string][]string            `json:"provider_models"`
+	ProviderMeta    map[string]ConfigProviderMeta  `json:"provider_meta"`
+	Routes          map[string][]ConfigRouteTarget `json:"routes"`
+	RouteStrategies map[string]string              `json:"route_strategies,omitempty"`
+	Settings        ConfigSettings                 `json:"settings"`
 }
 
 // ConfigSettings is the structured projection of the scalar config blocks the

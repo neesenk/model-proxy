@@ -1146,6 +1146,10 @@ func TestConfigDocument(t *testing.T) {
 	if len(targets) != 1 || targets[0].Provider != "zhipu" || targets[0].Model != "glm" || targets[0].Priority != 1 {
 		t.Errorf("routes = %v", document.Routes)
 	}
+	// A config without declared strategies projects an empty (omitted) map.
+	if len(document.RouteStrategies) != 0 {
+		t.Errorf("route_strategies = %v, want empty", document.RouteStrategies)
+	}
 	// Settings project the effective log level (loader default) and keep unset
 	// scheduling scalars as null pointers so the form can show the code default.
 	if document.Settings.LogLevel != "info" {

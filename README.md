@@ -26,7 +26,7 @@
 ```
 
 - **Provider 层**（`internal/provider/` 包）：每个上游后端是一个 Provider 实现，封装鉴权、请求改写、登录、用量查询
-- **Routes 层**：routes 自动推导 —— 每个 provider 的 models 按模型名聚合为「对外暴露名 → 一组 `provider/model` 目标」（provider 的 `alias` 可把上游模型改名统一暴露，`priority` 继承 provider 的 priority，lower wins）。调度先看非高峰（provider 的 `peak_hours`），再看 `priority`，失败逐一 failover。claude-* 别名就是普通的显式 `routes:` 条目（全协议生效），或在客户端配置里直接写目标模型名（takeover 模板方式）；请求模型名也支持 `provider/model` 前缀（如 `deepseek/deepseek-v4-pro`）按裸模型路由并钉到该 provider；显式 `routes:` 仅用于覆盖（fusion 目标、`protocol:` 协议转换、特殊排序、claude 别名）；调度后还会按请求内容（图片/工具/上下文长度）做请求感知路由。生效表只列有 runnable 账号的 provider（无凭据的 provider 不进调度链、不进 `GET /v1/models`，登录后 reload 自动回归）。查看：`model-proxy routes [model]`（配置真相）/ Web UI Config（配置真相）/ Status Schedule（生效表）
+- **Routes 层**：routes 自动推导 —— 每个 provider 的 models 按模型名聚合为「对外暴露名 → 一组 `provider/model` 目标」（provider 的 `alias` 可把上游模型改名统一暴露，`priority` 继承 provider 的 priority，lower wins）。调度先看非高峰（provider 的 `peak_hours`），再看 `priority`，失败逐一 failover。claude-* 别名就是普通的显式 `routes:` 条目（全协议生效），或在客户端配置里直接写目标模型名（takeover 模板方式）；请求模型名也支持 `provider/model` 前缀（如 `deepseek/deepseek-v4-pro`）按裸模型路由并钉到该 provider；显式 `routes:` 仅用于覆盖（fusion 目标、`protocol:` 协议转换、特殊排序、`strategy: load_balance` 负载均衡、claude 别名）；调度后还会按请求内容（图片/工具/上下文长度）做请求感知路由。生效表只列有 runnable 账号的 provider（无凭据的 provider 不进调度链、不进 `GET /v1/models`，登录后 reload 自动回归）。查看：`model-proxy routes [model]`（配置真相）/ Web UI Config（配置真相）/ Status Schedule（生效表）
 - 凭据由 `login <provider>` 管理，不落 config；config `credentials:` 统一选择 apikey 池与 codex/aqp OAuth store 的存储后端（`file` 默认 / `keychain`：秘密值进 OS keychain、池文件只留元数据），env `MP_CRED_STORE` 仅作为 OAuth 侧的显式 override
 
 ## 安装
@@ -104,6 +104,7 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 
 # routes 自动推导：每个 provider 的 models 按暴露名聚合（alias 可改名），
 # priority 继承 provider 的 priority（lower wins，失败逐一 failover）。
+# map 形式可给单个路由换调度策略（默认 quota；load_balance = 均摊轮转，见下文）。
 # 查看：model-proxy routes [model]
 
 # takeover: 接管客户端配置走模板（内置预设见 `model-proxy takeover list`；
@@ -300,7 +301,7 @@ model-proxy cache                  # 条目数 / 命中 / 未命中 / 命中率�
 代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。UI 为 v2 设计系统版（语义状态徽章、SVG 图标、亮暗双主题、可缩放字阶）。**默认开启；回环 `listen` 下无鉴权（本地可信，非回环需 `web.auth`，见「网络部署鉴权」）**。九个顶级标签页（Status / Config / Accounts / MCP / Takeover / Eval / Analytics / Requests / Security，另加 Requests 页内的 Live 实时子视图；Config 页含 Add provider preset 向导：选内置预设 → 合并+热重载 → Accounts 加凭据）：
 
 - **Status** — 实时面板：Dashboard 小节复用 Analytics 页的卡片与图表，窗口钉死**最近 1 小时 · 按分钟 · 按模型**（KPI chip 行含环比 Δ%，tokens 为四桶直合 in+out+cache 写读、tok/s 为**输出解码速度**（output÷完整调用时长）；+ metric 可切换的半透明柱趋势图 + 排行榜；数据源 `GET /api/analytics?granularity=minute&by=model`，随 Status 页 tick 刷新但至少间隔 30s，图表原地更新）；原 **Model Health** 小节已合并进排行榜——每行带 status 徽标（latency/ttft/tok-s 三维阈值打分 ok/warn/err），最差维度的颜色也标在对应数值单元格上；另有 uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择、请求计数器（含平均延迟）、观测到的 token 用量（按 provider×model）、按 agent 的用量卡片、响应缓存命中率、日志尾部。Models 小节展示启动期协议探测的每 provider×model 三协议能力矩阵（chat/anthropic/responses 的 yes/no/unknown，数据源 `GET /api/models`），每行带 Disable/Enable checkbox switch（`POST /api/models/disable`；禁用行默认隐藏，卡片头部 Show All 翻转列出）：禁用后该模型从 `GET /v1/models` 隐藏且不再被调度（多 provider 模型 failover 到剩余目标，全禁用模型终局 404）。状态持久化到 `~/.model-proxy/disabled_models.json`：reload 保留、重启与 `models refresh` 后回种恢复；持久化失败时内存开关照常生效并返回 500 告警（重启会丢这一次）。
-- **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(<configDir>/.model-proxy/back/<base>.<时间戳>.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route` / `guard`，通过 yaml.Node API **保留注释与键序**）+ **Guard rules 编辑器**（`extra_patterns` 行编辑 name/regex/literal、`extra_paths` 行编辑，整表提交走同一 edit 管线；`guard.adjudicate` 有意只留 YAML——内容外发的显式 opt-in）。
+- **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(<configDir>/.model-proxy/back/<base>.<时间戳>.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route`（含 per-route `strategy` 调度策略下拉）/ `guard`，通过 yaml.Node API **保留注释与键序**）+ **Guard rules 编辑器**（`extra_patterns` 行编辑 name/regex/literal、`extra_paths` 行编辑，整表提交走同一 edit 管线；`guard.adjudicate` 有意只留 YAML——内容外发的显式 opt-in）。
 - **Accounts** — 列出每个 provider 的账号（30s 自动刷新；测活/登录等操作进行中自动跳过）（`id` / `label` / `added_at`，aqp/codex 额外显示 email；**响应结构里根本没有 key 字段，secret 不可能被序列化出去**）；apikey 类 provider 可在 UI 添加/删除账号；**每个账号卡片有 Test 按钮**（真实最小请求测活，显示 HTTP 状态 + 延迟），多账号 provider 另有 **Test all**（逐个真实探测出结果矩阵，表头联动启动期三协议探测的模型能力计数，与 Status 页 Models 卡同源）；aqp/codex 走**异步登录**（浏览器完成 SSO / OAuth device flow → UI 轮询直到 `done`/`error`）。
 - **MCP** — MCP 网关管理面，拆成 Servers / Routes / Analytics 三个子标签（hash `#mcp/<sub>`）：servers 卡（Name/On/Transport/Auth/Endpoint/Sessions/Errors/MS + 行内 **Test** 按钮触发 `POST /api/mcp/test` 握手探测——ok/fail 徽章 + serverInfo/延迟 + 工具徽章，超 8 个折叠为计数，结果渲染在该 server 行正下方）与 routes 卡（Name/On/Targets 链/Sessions/Errors/MS）数据源 `GET /api/mcp`，用户触发渲染（tab 激活 / 子标签切换 / Refresh / Test）；**Analytics** 子标签消费 `GET /api/mcp/analytics`（server 级序列 + tool 维度，Server/Tool datalist 过滤、Calls/Errors/Avg ms 指标切换、server 父行 tool 子行的 Summary 表，时间选择器与 Analytics 页同款，Last 1h/Today live 窗口 30s 自动刷新）。配置见上文 `mcp:`/`mcp_routes:` 节。
 - **Takeover** — 客户端接管面（`model-proxy takeover`/`restore` 的 Web 等价物）：列出全部 takeover 模板（族/协议/格式/来源 preset|user/目标文件）与每个客户端的安装/接管/漂移状态（漂移行的 tooltip 给 current→expected 指针）；行内 Takeover/Re-takeover/Restore（已接管行显示 Re-takeover：无需先 Restore 即可同步新增的模型/MCP，幂等保留原始备份；Restore 有确认）、头部 Mode 选择器（unified/split/anthropic/openai/responses，与 CLI `--mode` 同语义）+ Takeover All / Restore All；执行结果（applied 含协议选择理由、skipped、warnings）就地展示。模板编辑器：preset 只读查看、Save As Override 写用户覆盖，user 模板可改可删，New Template 新增客户端——保存先经服务端整集校验（语法 + 多变体族 protocol 约束）才落盘。
@@ -640,6 +641,26 @@ scheduling:
 - **peak 只烧短窗口**：`peak_hours` 的 multiplier 只折算 provider 的短 rate-cap 窗口（5h 等）；没有短窗口的 provider（codex/aqp、未轮询的）高峰不打折。`peak_hours` 支持多段、每段独立 multiplier；multiplier=1 关闭。
 - **粘性切换**：路由停在一个 provider 至少 `sticky_dwell`（保 prompt cache）；到期后仅当另一 provider 在 **tier / priority / surplus 边际（`quota_switch_margin`，默认 15 pts）** 任一更优时才换 —— 既能短暂抖动后回首选，也能在他人明显领先时切换。
 - **质量打分**：每个 provider 的错误率与 TTFT 各维护一条 2m 半衰期 EWMA，折算成罚分从 surplus 中扣除（`quality_error_weight` 默认 100、`quality_ttft_weight` 默认 20，0 关闭）——持续报错/变慢的账号自动下沉，粘性账号恶化时经同一个 switch margin 逃逸；配额快照显示 ultimate 窗口已耗尽的 plan target 在粘性判定之前就被跳过（不再白挨一轮确定性 429）。
+
+### 负载均衡策略（`strategy: load_balance`）
+
+上面是默认策略（`strategy: quota`）。某个路由若想均摊流量而不是按配额择优，可在 `routes:` 里用 map 形式声明 `strategy: load_balance`：
+
+```yaml
+routes:
+  glm-5.3:
+    strategy: load_balance
+    targets: [zhipu/glm-5.3, aqp/glm-5.3, volcengine/glm-5.3]
+```
+
+行为差异（其余完全一致）：
+
+- **按会话均摊（保 prompt cache）**：均摊发生在**会话**粒度，不是请求粒度——新会话（客户端 session id）从轮转计数器取下一个可用目标（round-robin，计数器随 reload 重置），之后整个会话粘在该 provider 上（同一套 sliding-dwell `sticky` 机制：每请求刷新活跃时间，空闲超过 `sticky_dwell` 被逐出、回来重新轮转；provider 不可用时 failover 到下一槽位）。对话内上游 prompt cache 亲和与 quota 模式完全一致，新会话则均匀分摊到各目标。无 session id 的客户端退化为逐请求轮转（quota 模式会把全部匿名流量停在同一个 provider 上，那会完全破坏均摊）。
+- **不排序**：忽略 tier/priority/surplus 排序（这正是声明 load_balance 的意义）；失败沿轮转链 failover。会话粘滞优先于配额择优：粘在配额最差的目标上也保持（除非它不可用）。
+- **可用性门控不变**：熔断/限频/模型锁/配额已耗尽的目标照旧跳过；pin、`x-mp-force-provider`、禁用模型覆盖照先生效；请求感知改道（跨 route pool）沿用该 route 的 strategy。代理自身的响应缓存（exact-response cache）按请求内容键控、与 provider 无关，命中在调度之前，不受策略影响。
+- 未声明的路由、以及 `strategy: quota`，行为与今天完全一致（零变化）。
+
+设置/查看：Web UI Config 页 Routes 表单的 strategy 下拉（改完即存即 reload），或直接写 YAML；Status→Schedule 卡与 `model-proxy schedule` 对声明了策略的路由标注 `strategy: load_balance`。
 
 ```yaml
 providers:

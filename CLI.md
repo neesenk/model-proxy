@@ -651,6 +651,7 @@ schedule   # 查询运行中 daemon 的 GET /debug/schedule
 ```
 - `<EXTRA>`：不可用时追加 ` (unavailable)`（红）；peak 时追加 ` peak`（黄）。
 - 池化 provider 在 ordered 上方多一行：`    pool: <PARENT> (<N> accounts, <M> available)`。
+- route 声明了非默认调度策略时多一行：`    strategy: <NAME>`（如 `load_balance`；默认 quota 不标）。
 - 每路由块后一空行。
 - 无路由 -> stdout `(no routes)` + exit 0。
 

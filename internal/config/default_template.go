@@ -371,6 +371,14 @@ providers:
 #   protocol: anthropic|openai — declare when the target requires cross-protocol
 #     conversion, e.g. a Claude Code (anthropic) client hitting codex:
 #     gpt-5.5: [{provider: codex, model: gpt-5.5, protocol: openai}]
+#   strategy: quota|load_balance — per-route scheduling strategy (map form
+#     with strategy + targets). quota (default) is the tier/priority/surplus
+#     ranking above; load_balance spreads load at session granularity: each
+#     new session takes the next available target round-robin and parks on it
+#     (prompt-cache friendly); sessionless requests rotate per request, e.g.:
+#     glm-5.3:
+#       strategy: load_balance
+#       targets: [zhipu/glm-5.3, aqp/glm-5.3]
 #   {provider: fusion, model: <workflow>} — reference a fusion: workflow (see
 #     the fusion block at the bottom of this file).
 # routes:

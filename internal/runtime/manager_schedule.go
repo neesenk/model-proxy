@@ -4,6 +4,7 @@ import (
 	"sort"
 	"time"
 
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
 )
 
@@ -37,6 +38,7 @@ type scheduleState struct {
 	sticky          map[string]Sticky
 	pins            map[string]Pin
 	spread          map[string]uint64
+	rr              map[string]uint64
 	targetAvailable func(Target, time.Time) bool
 	// disabled excludes operator-disabled (provider, model) targets from the
 	// candidate set BEFORE pin narrowing: the disable override is the stronger
@@ -126,6 +128,7 @@ func (m *Manager) DecideOrder(input ScheduleInput) ScheduleResult {
 		sticky:  m.sticky,
 		pins:    m.pins,
 		spread:  m.spread,
+		rr:      m.rr,
 		targetAvailable: func(target Target, now time.Time) bool {
 			health := m.health[target.Provider]
 			return (health == nil || health.available(now)) &&
@@ -231,6 +234,15 @@ func decideOrder(input ScheduleInput, state scheduleState, commit bool) Schedule
 		}
 	}
 
+	// Strategy fork: load_balance replaces the quota ranking with an even
+	// per-route rotation over the already-filtered candidate set (sessions
+	// park on their assigned slot — see decideOrderLoadBalance). Everything
+	// above — disabled filtering, pin narrowing, availability gating — is
+	// strategy-independent operator/health intent.
+	if input.Strategy == configdomain.RouteStrategyLoadBalance {
+		return decideOrderLoadBalance(input, state, available, facts, commit)
+	}
+
 	sort.SliceStable(available, func(i, j int) bool {
 		left, right := available[i], available[j]
 		if left.tier != right.tier {
@@ -323,6 +335,79 @@ func decideOrder(input ScheduleInput, state scheduleState, commit bool) Schedule
 	return result
 }
 
+// decideOrderLoadBalance is the load_balance ordering core. Distribution is
+// SESSION-granular, not request-granular: a request carrying a client session
+// key assigns the session to the next rotation slot (the per-route counter
+// advances once per ASSIGNMENT) and then keeps that provider — the SAME
+// sliding-dwell sticky mechanics as quota mode (the caller refreshes
+// Sticky.Since on every request; an idle session's entry is evicted after
+// Dwell and re-rotates on its return; a provider that leaves the available
+// set re-assigns to the next slot) — so upstream prompt caches stay warm
+// across a conversation while NEW sessions spread evenly over targets.
+// Sessionless clients cannot be affinitized and rotate per request instead
+// (the counter then advances per commit and no sticky is written — quota
+// mode's route-keyed sticky fallback would park ALL anonymous traffic on one
+// provider, defeating the strategy). In both modes the failover chain is the
+// remaining rotation, and tier/priority/surplus ranking is deliberately
+// absent: the strategy exists to spread load, not to chase quota surplus.
+// Previews (commit=false) observe the next rotation without consuming it.
+func decideOrderLoadBalance(
+	input ScheduleInput,
+	state scheduleState,
+	available []scheduleCandidate,
+	facts []ScheduleFacts,
+	commit bool,
+) ScheduleResult {
+	if len(available) == 0 {
+		return ScheduleResult{Facts: facts}
+	}
+	head := 0
+	stickyProvider := ""
+	if input.SessionKey != "" {
+		// Session affinity first: an existing sticky entry whose provider is
+		// still in the available set keeps the session parked on it (prompt
+		// cache). No dwell check here — the eviction sweep at the top of
+		// decideOrder already removed idle entries, and the caller's SetSticky
+		// refresh keeps active sessions young.
+		if current, ok := state.sticky[input.SessionKey]; ok && current.Provider != "" {
+			for i, candidate := range available {
+				if candidate.target.Provider == current.Provider {
+					head = i
+					stickyProvider = current.Provider
+					break
+				}
+			}
+		}
+	}
+	if stickyProvider == "" {
+		// New assignment (new session, re-assignment after failover, or a
+		// sessionless request): take the next rotation slot.
+		if state.rr != nil {
+			head = int(state.rr[input.Exposed] % uint64(len(available)))
+			if commit {
+				state.rr[input.Exposed]++
+			}
+		}
+		// Sticky is written only for sessions — a sessionless request reports
+		// no sticky so the caller's SetSticky path stays a no-op.
+		if input.SessionKey != "" {
+			stickyProvider = available[head].target.Provider
+		}
+	}
+	ordered := make([]scheduleCandidate, 0, len(available))
+	ordered = append(ordered, available[head:]...)
+	ordered = append(ordered, available[:head]...)
+	result := ScheduleResult{
+		Order:          make([]int, 0, len(ordered)),
+		StickyProvider: stickyProvider,
+		Facts:          facts,
+	}
+	for _, candidate := range ordered {
+		result.Order = append(result.Order, candidate.index)
+	}
+	return result
+}
+
 func poolBandByID(
 	candidates []scheduleCandidate,
 	parent string,
@@ -363,6 +448,7 @@ func (m *Manager) Dashboard(now time.Time) DashboardSnapshot {
 		Quality:    quality,
 		capturedAt: now,
 		spread:     make(map[string]uint64, len(m.spread)),
+		rr:         make(map[string]uint64, len(m.rr)),
 	}
 	for name, state := range m.health {
 		circuitState := "closed"
@@ -413,6 +499,9 @@ func (m *Manager) Dashboard(now time.Time) DashboardSnapshot {
 	}
 	for parent, counter := range m.spread {
 		snapshot.spread[parent] = counter
+	}
+	for route, counter := range m.rr {
+		snapshot.rr[route] = counter
 	}
 	snapshot.disabled = cloneDisabledModels(m.disabledModels)
 	return snapshot
@@ -484,6 +573,7 @@ func (snapshot DashboardSnapshot) PreviewOrder(input ScheduleInput) ScheduleResu
 		sticky:  snapshot.Sticky,
 		pins:    pins,
 		spread:  snapshot.spread,
+		rr:      snapshot.rr,
 		targetAvailable: func(target Target, now time.Time) bool {
 			if status, ok := snapshot.Providers[target.Provider]; ok && !status.Available {
 				return false

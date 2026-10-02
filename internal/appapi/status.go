@@ -58,7 +58,11 @@ type StatusPool struct {
 }
 
 type StatusRoute struct {
-	First      string          `json:"first"`
+	First string `json:"first"`
+	// Strategy is the route's scheduling strategy when it opts out of the
+	// default quota ranking ("load_balance" = even round-robin rotation);
+	// empty = quota (the historical ranking).
+	Strategy   string          `json:"strategy,omitempty"`
 	Ordered    []StatusOrdered `json:"ordered"`
 	Sticky     string          `json:"sticky"`
 	DwellRem   float64         `json:"sticky_dwell_remaining_sec"`

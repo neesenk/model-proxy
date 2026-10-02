@@ -117,6 +117,79 @@ func TestAdminDashboardScheduleUsesCapturedRuntimeSnapshot(t *testing.T) {
 	}
 }
 
+// TestScheduleStatusAnnotatesRouteStrategy: the schedule projection surfaces
+// a route's declared scheduling strategy, and the production app scheduling
+// seam (config → scheduleInput → DecideOrder) actually rotates load_balance
+// routes across committed schedules.
+func TestScheduleStatusAnnotatesRouteStrategy(t *testing.T) {
+	now := time.Date(2026, 7, 29, 18, 0, 0, 0, time.UTC)
+	p := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"a": {Provider: testProviderID, OpenAIBaseURL: "https://a.test"},
+			"b": {Provider: testProviderID, OpenAIBaseURL: "https://b.test"},
+		},
+		Routes: map[string][]configdomain.RouteTarget{
+			"m": {{Provider: "a", Model: "m"}, {Provider: "b", Model: "m"}},
+		},
+		RouteStrategies: map[string]string{"m": configdomain.RouteStrategyLoadBalance},
+	})
+
+	p.mu.RLock()
+	cfg := p.cfg
+	expanded := p.expandedRoutes
+	parentOf := p.parentOf
+	poolIndex := p.poolIndex
+	snapshot := p.runtimeState.Dashboard(now)
+	p.mu.RUnlock()
+
+	type schedulePayload struct {
+		Models map[string]struct {
+			First    string `json:"first"`
+			Strategy string `json:"strategy"`
+		} `json:"models"`
+	}
+	var payload schedulePayload
+	if err := json.Unmarshal(
+		scheduleStatusFromSnapshot(cfg, expanded, parentOf, poolIndex, snapshot, now),
+		&payload,
+	); err != nil {
+		t.Fatalf("decode schedule: %v", err)
+	}
+	if got := payload.Models["m"]; got.Strategy != configdomain.RouteStrategyLoadBalance {
+		t.Fatalf("strategy annotation = %q, want %q", got.Strategy, configdomain.RouteStrategyLoadBalance)
+	}
+
+	targets := expanded["m"]
+	first, _ := p.decideOrder(cfg, parentOf, "m", "", targets, now, true, p.routeKeys, snapshot.Generation)
+	second, _ := p.decideOrder(cfg, parentOf, "m", "", targets, now, true, p.routeKeys, snapshot.Generation)
+	if len(first) == 0 || len(second) == 0 {
+		t.Fatalf("empty schedule: first=%v second=%v", first, second)
+	}
+	if first[0].Provider == second[0].Provider {
+		t.Fatalf("load_balance route did not rotate across commits: %s twice", first[0].Provider)
+	}
+
+	// Session affinity through the production schedule path: the first
+	// request assigns + commits sticky; the second request of the SAME
+	// session keeps the parked provider (prompt cache), while the counter
+	// keeps advancing for other sessions.
+	sessionFirst := p.schedule(cfg, parentOf, "m", "s1", targets, p.routeKeys, snapshot.Generation)
+	if len(sessionFirst) == 0 || sessionFirst[0].Provider != first[0].Provider {
+		t.Fatalf("session first schedule = %v, want head %q (rotation continues)", sessionFirst, first[0].Provider)
+	}
+	if parked, ok := p.runtimeState.Sticky("s1"); !ok || parked.Provider != sessionFirst[0].Provider {
+		t.Fatalf("sticky after session schedule = %+v (ok=%v), want %q", parked, ok, sessionFirst[0].Provider)
+	}
+	sessionSecond := p.schedule(cfg, parentOf, "m", "s1", targets, p.routeKeys, snapshot.Generation)
+	if len(sessionSecond) == 0 || sessionSecond[0].Provider != sessionFirst[0].Provider {
+		t.Fatalf("session second schedule = %v, want parked %q (affinity)", sessionSecond, sessionFirst[0].Provider)
+	}
+	other := p.schedule(cfg, parentOf, "m", "s2", targets, p.routeKeys, snapshot.Generation)
+	if len(other) == 0 || other[0].Provider == sessionFirst[0].Provider {
+		t.Fatalf("new session schedule = %v, want a different slot than %q", other, sessionFirst[0].Provider)
+	}
+}
+
 // TestAdminModelCapsPortProjectsDetachedSnapshot: the ModelCapsSnapshot port
 // reads the process-lifetime ModelStore (its own leaf lock, no p.mu) and
 // returns a detached deep copy the admin projection can map freely.

@@ -105,6 +105,18 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
 `Proxy.mu → runtime.Manager` 进入它：
 
 - `schedule` 跳过熔断、限频和模型锁定目标。
+- **调度策略（per-route `strategy:`，默认 `quota`）**：`quota` 按现有排序（tier →
+  priority → surplus，含会话 sticky 与质量罚分）；`load_balance` 在同一可用
+  性门控之后改为轮转分配——**会话粒度**：新会话从 per-route round-robin
+  计数器取下一槽位并粘住（与 quota 同一套 sliding-dwell sticky 机制，保
+  prompt cache；空闲超 dwell 逐出后重轮转，provider 不可用时重分配），
+  无 session id 的请求逐请求轮转且不写 sticky；不排序、不追逐 surplus，
+  但会话粘滞优先于一切排序信号。计数器仅 committed assignment 递增，
+  reload 重置；preview 不消耗。
+  disabled 过滤、pin 收窄、可用性门控、配额耗尽跳过对两种策略同等生效；
+  词汇表与 YAML 形式由 `internal/config`（`RouteStrategy*` 常量 +
+  `RouteStrategyFor`，含 `#req`/`#ctx` 跨路由 pool 键的后缀剥离）拥有，
+  `internal/runtime.decideOrder` 是唯一排序分叉点。
 - timeout、连接错误、5xx 和 refresh 后仍失败的 401 计入 provider 熔断。
 - **客户端取消不计熔断**：调用方断开（`exchange.Request.Context()` 取消，
   含调用方自身 deadline）不是上游判决——不记 `RecordFailure`、不计

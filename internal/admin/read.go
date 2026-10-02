@@ -1093,7 +1093,10 @@ func (s *Service) ConfigDocument() (appapi.ConfigDocument, error) {
 		ProviderModels: providerModels,
 		ProviderMeta:   providerMeta,
 		Routes:         routes,
-		Settings:       configSettings(config),
+		// Explicit per-route scheduling strategies (routes: map form). Derived
+		// routes never carry one; absent names use the default quota ranking.
+		RouteStrategies: config.RouteStrategies,
+		Settings:        configSettings(config),
 	}, nil
 }
 

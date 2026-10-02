@@ -6479,6 +6479,11 @@ function renderScheduleCard(target, st) {
       }
       meta += '<br>';
     }
+    // Non-default scheduling strategy (routes: `strategy:`): annotate the
+    // route's ordering mode the same way the CLI schedule output does.
+    if (info.strategy) {
+      meta += `strategy: <span class="mono">${esc(info.strategy)}</span><br>`;
+    }
     if (info.sticky) {
       meta += `sticky: <span class="mono">${esc(info.sticky)}</span>`;
       if (info.sticky_dwell_remaining_sec) {
@@ -7805,6 +7810,13 @@ function buildRouteForm(editorId) {
        <datalist id="route-list">${routeNames.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
        <span class="hint">Pick an existing route to edit, or type a new name to create one.</span>
      </div>
+     <div class="field"><label for="route-strategy">scheduling strategy</label>
+       <select id="route-strategy">
+         <option value="quota">quota — tier → priority → quota surplus (default)</option>
+         <option value="load_balance">load_balance — even session round-robin</option>
+       </select>
+       <span class="hint">quota ranks targets by billing tier, priority and remaining quota surplus (session-sticky). load_balance spreads new sessions round-robin over the available targets and parks each session on its target (prompt-cache friendly) — one strategy per route, set when the route is defined.</span>
+     </div>
      <div class="field"><label>targets</label>
        <div class="route-targets" id="route-targets"></div>
        <span class="hint">Each row is one failover target. Provider options come from configured providers; model options from that provider's models. Priority lower = tried first; empty = inherit the provider's priority.</span>
@@ -7881,6 +7893,9 @@ function addRouteTargetRow(t) {
 // syncRouteRowsFromConfig clears the rows and rebuilds them for the named route
 // if it exists in the cached config; otherwise leaves the current rows alone
 // (so typing a new name doesn't wipe in-progress edits — except on first load).
+// The strategy select follows the same rule: an existing route's declared
+// strategy (route_strategies, absent = quota default) is loaded; a new name
+// keeps whatever the user picked.
 function syncRouteRowsFromConfig(name) {
   const box = document.getElementById('route-targets');
   if (!box) return;
@@ -7889,6 +7904,11 @@ function syncRouteRowsFromConfig(name) {
   if (!targets || !targets.length) return; // not an existing route
   box.innerHTML = '';
   for (const t of targets) addRouteTargetRow(t);
+  const strategySel = document.getElementById('route-strategy');
+  if (strategySel) {
+    const strategies = (configCache && configCache.route_strategies) || {};
+    strategySel.value = strategies[name] || 'quota';
+  }
 }
 
 // collectRouteTargets reads #route-targets rows into [{provider,model,priority?}].
@@ -7924,8 +7944,10 @@ async function applyRouteEdit() {
   catch (e) { showMsg(msg, 'err', e.message); return; }
   btn.disabled = true;
   showMsg(msg, 'ok', 'saving…');
+  const strategySel = document.getElementById('route-strategy');
+  const strategy = strategySel ? strategySel.value : 'quota';
   try {
-    await apiPost('/api/config/edit', { kind: 'route', name, data: { targets } });
+    await apiPost('/api/config/edit', { kind: 'route', name, data: { targets, strategy } });
     await loadConfigAll();
     showMsg(msg, 'ok', 'saved & reloaded');
   } catch (e) {

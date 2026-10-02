@@ -31,7 +31,15 @@ type Manager struct {
 	// refreshes keep it too (RestoreDisabledModels is the seed path).
 	disabledModels map[ModelKey]bool
 	spread         map[string]uint64
-	quotas         map[string]*provider.QuotaSnapshot
+	// rr holds the per-route round-robin counters for load_balance
+	// scheduling, keyed by schedule key (the exposed route name, or the
+	// planner's synthetic "<route>#req"/"<route>#ctx" pool keys). Like
+	// spread it is generation-scoped routing state: reset by
+	// ReplaceGeneration, advanced only by committed schedules, and projected
+	// read-only into the dashboard snapshot so PreviewOrder reproduces the
+	// live rotation without consuming it.
+	rr     map[string]uint64
+	quotas map[string]*provider.QuotaSnapshot
 	// quality is copy-on-write: record paths (under m.mu) publish a NEW
 	// immutable map of providerQuality VALUES; readers load the pointer without
 	// the mutex so the scheduling critical section skips the decayed-status
@@ -69,6 +77,9 @@ func (m *Manager) ensureLocked() {
 	}
 	if m.spread == nil {
 		m.spread = make(map[string]uint64)
+	}
+	if m.rr == nil {
+		m.rr = make(map[string]uint64)
 	}
 	if m.quotas == nil {
 		m.quotas = make(map[string]*provider.QuotaSnapshot)
@@ -116,6 +127,7 @@ func (m *Manager) ReplaceGeneration(generation uint64, liveQuotaKeys map[string]
 	m.modelLocks = make(map[ModelKey]*modelLock)
 	m.paramBlock = make(map[ModelKey]map[string]bool)
 	m.spread = make(map[string]uint64)
+	m.rr = make(map[string]uint64)
 	for name := range m.quotas {
 		if !liveQuotaKeys[name] {
 			delete(m.quotas, name)

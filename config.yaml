@@ -460,6 +460,19 @@ providers:
 # needed when setting priority/protocol, e.g.:
 # routes:
 #   gpt-5.6: [{provider: codex, model: gpt-5.6, protocol: openai}]
+# A route can also pick its scheduling STRATEGY (map form with strategy +
+# targets): `strategy: quota` (the default, historical behavior) ranks targets
+# by tier → priority → quota surplus and keeps session sticky;
+# `strategy: load_balance` spreads load at SESSION granularity instead — each
+# new session (client session id) takes the next available target
+# round-robin and then parks on it (same sticky mechanics → prompt cache
+# stays warm within a conversation); sessionless requests rotate per request.
+# Availability gating is unchanged (circuit/rate-limit/quota-exhausted targets
+# are skipped; pin / disabled-model overrides still apply), e.g.:
+# routes:
+#   glm-5.3:
+#     strategy: load_balance
+#     targets: [zhipu/glm-5.3, aqp/glm-5.3, volcengine/glm-5.3]
 # claude-* aliases for anthropic clients are explicit routes too (the old
 # anthropic-only claude_mapping was removed). NOTE: an alias route applies to
 # EVERY protocol — claude-opus-4-8 / claude-haiku-4-5 are intentionally NOT

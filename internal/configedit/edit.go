@@ -140,6 +140,21 @@ func DeleteKey(mapping *yaml.Node, key string) {
 	mapping.Content = out
 }
 
+// ChildNode returns the value node for key in a mapping node, or nil when
+// the parent is not a mapping or the key is absent. Read-only counterpart to
+// SetChildNode for edits that must inspect (not replace) an existing entry.
+func ChildNode(parent *yaml.Node, key string) *yaml.Node {
+	if parent == nil || parent.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(parent.Content); index += 2 {
+		if parent.Content[index].Value == key {
+			return parent.Content[index+1]
+		}
+	}
+	return nil
+}
+
 // SetChildNode sets key to value in a mapping node (replace or append).
 func SetChildNode(parent *yaml.Node, key string, value *yaml.Node) {
 	if parent == nil {

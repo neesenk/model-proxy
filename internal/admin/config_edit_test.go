@@ -4,10 +4,12 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"model-proxy/internal/appapi"
+	configdomain "model-proxy/internal/config"
 )
 
 func TestSaveConfigWritesAndReloads(t *testing.T) {
@@ -256,11 +258,210 @@ routes:
 	}
 }
 
+// TestEditConfigRouteStrategy covers the data.strategy edit semantics: set
+// (list form → map form), switch back to quota (explicit), quota on an
+// undeclared route (list form untouched), strip via null, strategy-only edit
+// (targets node kept verbatim), and preservation on targets-only edits.
+func TestEditConfigRouteStrategy(t *testing.T) {
+	t.Run("set wraps list form into map form", func(t *testing.T) {
+		path := writeTestConfig(t) // glm: [{provider: zhipu, model: glm, priority: 1}]
+		service := editService(t, path, &reloadSpy{})
+		if err := service.EditConfig(appapi.EditRequest{
+			Kind: "route",
+			Name: "glm",
+			Data: map[string]any{
+				"strategy": configdomain.RouteStrategyLoadBalance,
+				"targets":  []any{map[string]any{"provider": "zhipu", "model": "glm"}},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := configdomain.LoadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.RouteStrategyFor("glm"); got != configdomain.RouteStrategyLoadBalance {
+			t.Fatalf("RouteStrategyFor(glm) = %q, want load_balance", got)
+		}
+		if content := readConfig(t, path); !strings.Contains(content, "strategy: load_balance") {
+			t.Errorf("map form not written:\n%s", content)
+		}
+	})
+
+	t.Run("switch back to quota writes explicit quota", func(t *testing.T) {
+		path := writeRouteStrategyConfig(t)
+		service := editService(t, path, &reloadSpy{})
+		if err := service.EditConfig(appapi.EditRequest{
+			Kind: "route",
+			Name: "glm",
+			Data: map[string]any{
+				"strategy": configdomain.RouteStrategyQuota,
+				"targets":  []any{map[string]any{"provider": "zhipu", "model": "glm"}},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := configdomain.LoadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.RouteStrategyFor("glm"); got != configdomain.RouteStrategyQuota {
+			t.Fatalf("RouteStrategyFor(glm) = %q, want quota", got)
+		}
+		if content := readConfig(t, path); !strings.Contains(content, "strategy: quota") {
+			t.Errorf("explicit quota not written:\n%s", content)
+		}
+	})
+
+	t.Run("quota on undeclared route keeps list form", func(t *testing.T) {
+		path := writeTestConfig(t)
+		service := editService(t, path, &reloadSpy{})
+		if err := service.EditConfig(appapi.EditRequest{
+			Kind: "route",
+			Name: "glm",
+			Data: map[string]any{
+				"strategy": configdomain.RouteStrategyQuota,
+				"targets":  []any{map[string]any{"provider": "zhipu", "model": "glm"}},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		content := readConfig(t, path)
+		if strings.Contains(content, "strategy") {
+			t.Errorf("quota on an undeclared route must not add a strategy key:\n%s", content)
+		}
+	})
+
+	t.Run("null strips the declaration", func(t *testing.T) {
+		path := writeRouteStrategyConfig(t)
+		service := editService(t, path, &reloadSpy{})
+		if err := service.EditConfig(appapi.EditRequest{
+			Kind: "route",
+			Name: "glm",
+			Data: map[string]any{
+				"strategy": nil,
+				"targets":  []any{map[string]any{"provider": "zhipu", "model": "glm"}},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := configdomain.LoadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.RouteStrategyFor("glm"); got != configdomain.RouteStrategyQuota {
+			t.Fatalf("RouteStrategyFor(glm) = %q, want default quota", got)
+		}
+		if content := readConfig(t, path); strings.Contains(content, "strategy") {
+			t.Errorf("null strategy must strip the declaration:\n%s", content)
+		}
+	})
+
+	t.Run("strategy-only edit keeps targets verbatim", func(t *testing.T) {
+		path := writeTestConfig(t)
+		service := editService(t, path, &reloadSpy{})
+		if err := service.EditConfig(appapi.EditRequest{
+			Kind: "route",
+			Name: "glm",
+			Data: map[string]any{"strategy": configdomain.RouteStrategyLoadBalance},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		content := readConfig(t, path)
+		if !strings.Contains(content, "strategy: load_balance") {
+			t.Errorf("strategy-only edit did not declare:\n%s", content)
+		}
+		// The original targets node (priority comment and all) stays verbatim.
+		if !strings.Contains(content, "priority: 1") {
+			t.Errorf("targets node was re-encoded:\n%s", content)
+		}
+		cfg, err := configdomain.LoadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if targets := cfg.Routes["glm"]; len(targets) != 1 || targets[0].Priority != 1 {
+			t.Errorf("targets after strategy-only edit = %v", targets)
+		}
+	})
+
+	t.Run("strategy-only edit on missing route errors", func(t *testing.T) {
+		path := writeTestConfig(t)
+		service := editService(t, path, &reloadSpy{})
+		err := service.EditConfig(appapi.EditRequest{
+			Kind: "route",
+			Name: "nope",
+			Data: map[string]any{"strategy": configdomain.RouteStrategyLoadBalance},
+		})
+		if err == nil || !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("strategy-only edit on missing route err = %v", err)
+		}
+	})
+}
+
+// writeRouteStrategyConfig seeds a config whose glm route already declares
+// the load_balance strategy (map form).
+func writeRouteStrategyConfig(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`listen: 127.0.0.1:8080
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://example.test, models: [glm]}
+routes:
+  glm:
+    strategy: load_balance
+    targets: [{provider: zhipu, model: glm}]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1
 	}
 	return 0
+}
+
+// A route in the map form ({strategy, targets}) must keep its declared
+// strategy when the structured editor rewrites the target list — re-encoding
+// a bare list would silently reset the route to the default quota strategy.
+func TestEditConfigRoutePreservesStrategy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`listen: 127.0.0.1:8080
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://example.test, models: [glm]}
+routes:
+  glm:
+    strategy: load_balance
+    targets: [{provider: zhipu, model: glm}]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := editService(t, path, &reloadSpy{})
+	if err := service.EditConfig(appapi.EditRequest{
+		Kind: "route",
+		Name: "glm",
+		Data: map[string]any{"targets": []any{
+			map[string]any{"provider": "zhipu", "model": "glm", "priority": 2},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	content := readConfig(t, path)
+	if !strings.Contains(content, "strategy: load_balance") {
+		t.Errorf("route edit dropped the declared strategy:\n%s", content)
+	}
+	if !strings.Contains(content, "priority: 2") {
+		t.Errorf("route edit did not apply the new targets:\n%s", content)
+	}
+	cfg, err := configdomain.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("reload edited config: %v", err)
+	}
+	if got := cfg.RouteStrategyFor("glm"); got != configdomain.RouteStrategyLoadBalance {
+		t.Fatalf("RouteStrategyFor(glm) = %q, want load_balance", got)
+	}
 }
 
 func TestEditConfigDelete(t *testing.T) {

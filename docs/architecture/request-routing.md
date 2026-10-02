@@ -63,7 +63,8 @@ provider config 的 `capabilities: {model: [image, tools]}` 优先。某 model �
 
 1. 在当前 route 内过滤满足能力和 context 的目标；
 2. 全部不匹配时进入跨 route pool；
-3. 跨 route pool 仍使用正常 schedule 排序；
+3. 跨 route pool 仍使用正常 schedule 排序（沿用该 route 声明的 `strategy:`，
+   未声明即默认 quota）；
 4. 二次 schedule 返回空时回落原 ordered，宁可尝试不匹配目标，也不能零尝试直接 502；
 5. pin 和 force-provider 禁止跨 route 改道。
 
