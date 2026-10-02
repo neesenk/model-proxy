@@ -119,6 +119,79 @@ func TestComputeTurnKeyFallsBackWhenNoUserText(t *testing.T) {
 	}
 }
 
+// TestComputeTurnKeySkipsAgentInjectedText is the kimi-code-cli Trace
+// regression: the CLI injects <git-context> at session start and appends
+// <system-reminder> envelopes (date, AGENTS.md, permission mode) as role:user
+// string messages throughout one conversational turn. Counting them as real
+// user text changed the key mid-turn (one segment per reminder) and let the
+// trailing reminder stand in for the human instruction. Injected envelopes
+// must not count and must not become the extracted text.
+func TestComputeTurnKeySkipsAgentInjectedText(t *testing.T) {
+	base := `{"messages":[
+		{"role":"system","content":"sys"},
+		{"role":"user","content":"<git-context>\nWorking directory: /repo\n</git-context>"},
+		{"role":"user","content":"fix the flaky test"},
+		{"role":"user","content":"<system-reminder>\nToday's date is 2026-10-01.\n</system-reminder>"}`
+	mid := base + `,
+		{"role":"assistant","content":"looking"},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"out"}]}`
+	full := mid + `,
+		{"role":"assistant","content":"more"},
+		{"role":"user","content":"<system-reminder>\nThe following AGENTS.md file(s) apply…\n</system-reminder>"}`
+	keys := map[string]bool{}
+	for _, body := range []string{base + `]}`, mid + `]}`, full + `]}`} {
+		k := ComputeTurnKey([]byte(body))
+		if k == "" {
+			t.Fatal("expected non-empty turn key with a real human instruction present")
+		}
+		keys[k] = true
+	}
+	if len(keys) != 1 {
+		t.Fatalf("injected reminders produced %d distinct keys, want 1 stable key", len(keys))
+	}
+	// The key must be derived from the human instruction alone: git-context
+	// and both reminders count for nothing.
+	want := hashTurnKey(1, "fix the flaky test")
+	for k := range keys {
+		if k != want {
+			t.Fatalf("turn key = %q, want %q (human instruction only)", k, want)
+		}
+	}
+}
+
+// TestComputeTurnKeyStripsReminderMixedWithRealText covers the claude-code
+// shape where the agent appends a reminder to the human's own message in one
+// string: the reminder is stripped and the real text still counts.
+func TestComputeTurnKeyStripsReminderMixedWithRealText(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"ship it\n\n<system-reminder>Auto mode is active.</system-reminder>"}]}`)
+	if got := ComputeTurnKey(body); got != hashTurnKey(1, "ship it") {
+		t.Fatalf("turn key = %q, want %q (reminder stripped)", got, hashTurnKey(1, "ship it"))
+	}
+	// Unclosed envelope runs to the end of the string.
+	body2 := []byte(`{"messages":[{"role":"user","content":"ship it\n\n<system-reminder>Auto mode is active."}]}`)
+	if got := ComputeTurnKey(body2); got != hashTurnKey(1, "ship it") {
+		t.Fatalf("unclosed envelope: turn key = %q, want %q", got, hashTurnKey(1, "ship it"))
+	}
+}
+
+// TestComputeTurnKeyEmptyWhenOnlyInjectedText: a body whose user messages are
+// all agent-injected envelopes carries no human text and must yield an empty
+// key, same as a body with no user text at all.
+func TestComputeTurnKeyEmptyWhenOnlyInjectedText(t *testing.T) {
+	body := []byte(`{"messages":[
+		{"role":"user","content":"<git-context>\nWorking directory: /repo\n</git-context>"},
+		{"role":"user","content":"<system-reminder>\nToday's date is 2026-10-01.\n</system-reminder>"}
+	]}`)
+	if got := ComputeTurnKey(body); got != "" {
+		t.Fatalf("injected-only body must yield empty turn key, got %q", got)
+	}
+	// Array-of-blocks shape with a reminder-only text block.
+	body2 := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"<system-reminder>note</system-reminder>"}]}]}`)
+	if got := ComputeTurnKey(body2); got != "" {
+		t.Fatalf("reminder-only text block must yield empty turn key, got %q", got)
+	}
+}
+
 func TestComputeTurnKeyOversizeBody(t *testing.T) {
 	body := make([]byte, 1500001)
 	for i := range body {

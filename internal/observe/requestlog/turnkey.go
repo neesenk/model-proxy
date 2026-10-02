@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"regexp"
 	"strings"
 )
 
@@ -14,6 +15,9 @@ import (
 //   - scan backward for the newest user message that carries actual text;
 //   - skip tool_result blocks (anthropic agentic turns report tool results as
 //     role:user content blocks);
+//   - strip agent-injected envelopes (<system-reminder>/<git-context>) so that
+//     reminders a coding agent appends as role:user text do not register as a
+//     new human turn;
 //   - hash the real-user-text message count plus the extracted text.
 //
 // The count is the number of user messages carrying actual text — NOT the
@@ -76,7 +80,7 @@ func ComputeTurnKey(body []byte) string {
 // anthropic coding-agent turn still surfaces the human instruction.
 func lastUserText(content any) string {
 	if s, ok := content.(string); ok {
-		return strings.TrimSpace(s)
+		return strings.TrimSpace(stripInjectedEnvelopes(s))
 	}
 	blocks, ok := content.([]any)
 	if !ok {
@@ -96,7 +100,7 @@ func lastUserText(content any) string {
 			continue
 		}
 		if t, ok := block["text"].(string); ok {
-			if s := strings.TrimSpace(t); s != "" {
+			if s := strings.TrimSpace(stripInjectedEnvelopes(t)); s != "" {
 				parts = append(parts, s)
 			}
 		}
@@ -105,6 +109,18 @@ func lastUserText(content any) string {
 		return ""
 	}
 	return strings.Join(parts, " ")
+}
+
+// injectedEnvelopeRE matches the machine-generated envelopes coding agents
+// (kimi-code-cli, claude code) append as role:user text: <system-reminder>
+// and <git-context> blocks, closed or running to the end of the string.
+// Without stripping, every appended reminder bumps the real-user-text count
+// or replaces the newest user text, splitting one conversational turn into
+// many Trace segments.
+var injectedEnvelopeRE = regexp.MustCompile(`(?s)<(?:system-reminder|git-context)(?:\s[^>]*)?>.*?(?:</(?:system-reminder|git-context)\s*>|$)`)
+
+func stripInjectedEnvelopes(s string) string {
+	return injectedEnvelopeRE.ReplaceAllString(s, " ")
 }
 
 func hashTurnKey(count int, text string) string {

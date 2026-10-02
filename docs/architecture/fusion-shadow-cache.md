@@ -129,7 +129,7 @@ Shadow 作为 `internal/runtime.Lifecycle` 的有限 log-producing task 接纳�
 
 ## Request log
 
-request log 是异步、非阻塞、owner-only 的 JSONL。每条记录可选地携带 `turn_key`——写入时从 request body 提取的对话轮次指纹（携带真实文本的 user 消息数 + 最后一条真实 user 文本的哈希；tool_result 块不算，因此 agentic 轮次内消息增长时指纹恒定），供 UI Trace 时间线按轮次分段；旧记录或无法提取 user 文本时为空/省略。
+request log 是异步、非阻塞、owner-only 的 JSONL。每条记录可选地携带 `turn_key`——写入时从 request body 提取的对话轮次指纹（携带真实文本的 user 消息数 + 最后一条真实 user 文本的哈希；tool_result 块不算，agent 注入的 `<system-reminder>`/`<git-context>` 信封会被剥离、既不计数也不作为提取文本，因此 agentic 轮次内消息增长或追加 reminder 时指纹恒定），供 UI Trace 时间线按轮次分段；旧记录或无法提取 user 文本时为空/省略。
 
 `routing` 是 route 级策略（`route_policy:` bands / latch / selector）的判定结果元数据，只含结构信息（档名/来源/候选 id/置信度/难度），不含请求/响应文本。JSON 形状：
 
