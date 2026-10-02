@@ -2361,6 +2361,30 @@ test('sessionTimeline segments by turn_key when both rows have one', () => {
   assert.equal(quickSwitch.segments.length, 2, 'turn boundary splits even under 2 minutes');
 });
 
+test('sessionTimeline does not zig-zag on interleaved concurrent branches', () => {
+  // Coding agents multiplex concurrent sub-agent conversations on one session
+  // id: adjacent rows alternate between branch keys. A key reappearing is a
+  // branch resuming, not a new turn — boundaries open only on first sight.
+  const interleaved = sessionTimeline([
+    { requestId: 'a1', ts: 0, latencyMs: 500, turnKey: 'turn-A' },
+    { requestId: 'b1', ts: 1000, latencyMs: 500, turnKey: 'turn-B' },
+    { requestId: 'a2', ts: 2000, latencyMs: 500, turnKey: 'turn-A' },
+    { requestId: 'b2', ts: 3000, latencyMs: 500, turnKey: 'turn-B' },
+    { requestId: 'a3', ts: 4000, latencyMs: 500, turnKey: 'turn-A' },
+    { requestId: 'b3', ts: 5000, latencyMs: 500, turnKey: 'turn-B' },
+  ], { fmt: (t) => String(t) });
+  assert.equal(interleaved.segments.length, 2, 'interleaved known keys do not re-split');
+  // A genuinely new turn still splits even after interleaving.
+  const newTurnAfter = sessionTimeline([
+    { requestId: 'a1', ts: 0, latencyMs: 500, turnKey: 'turn-A' },
+    { requestId: 'b1', ts: 1000, latencyMs: 500, turnKey: 'turn-B' },
+    { requestId: 'a2', ts: 2000, latencyMs: 500, turnKey: 'turn-A' },
+    { requestId: 'c1', ts: 3000, latencyMs: 500, turnKey: 'turn-C' },
+    { requestId: 'a3', ts: 4000, latencyMs: 500, turnKey: 'turn-A' },
+  ], { fmt: (t) => String(t) });
+  assert.equal(newTurnAfter.segments.length, 3, 'first sight of a new key still splits');
+});
+
 test('sessionTimeline keeps every segment inside the viewBox for many-turn sessions', () => {
   // Agentic sessions split one segment per turn; 100 turns must not push the
   // tail past the right edge — the compressed-gap strip shrinks instead of
@@ -2557,6 +2581,39 @@ test('requestExcerpt surfaces the newest human text across shapes and agents', (
   assert.equal(requestExcerpt(JSON.stringify({ messages: [{ role: 'assistant', content: 'no' }] }), 10), '');
   assert.equal(requestExcerpt('not json', 10), '');
   assert.equal(requestExcerpt('x'.repeat(1500001), 10), '');
+});
+
+test('requestExcerpt skips agent-injected system-reminder/git-context envelopes', () => {
+  // kimi-code-cli shape: git-context + trailing date reminder are role:user
+  // string messages; the human instruction must surface, not the reminder.
+  const kimi = JSON.stringify({ messages: [
+    { role: 'system', content: 'sys' },
+    { role: 'user', content: '<git-context>\nWorking directory: /repo\n</git-context>' },
+    { role: 'user', content: 'fix the flaky test' },
+    { role: 'user', content: '<system-reminder>\nToday\'s date is 2026-10-01.\n</system-reminder>' },
+  ] });
+  assert.equal(requestExcerpt(kimi, 50), 'fix the flaky test');
+  // Reminder appended to the human's own message keeps the real text.
+  const mixed = JSON.stringify({ messages: [
+    { role: 'user', content: 'ship it\n\n<system-reminder>Auto mode is active.</system-reminder>' },
+  ] });
+  assert.equal(requestExcerpt(mixed, 50), 'ship it');
+  // Unclosed envelope runs to end of string.
+  const unclosed = JSON.stringify({ messages: [
+    { role: 'user', content: 'ship it\n\n<system-reminder>Auto mode is active.' },
+  ] });
+  assert.equal(requestExcerpt(unclosed, 50), 'ship it');
+  // Injected-only conversation carries no human text.
+  const injectedOnly = JSON.stringify({ messages: [
+    { role: 'user', content: '<git-context>\nWorking directory: /repo\n</git-context>' },
+    { role: 'user', content: '<system-reminder>note</system-reminder>' },
+  ] });
+  assert.equal(requestExcerpt(injectedOnly, 50), '');
+  // Reminder-only text block in array content is skipped.
+  const blockOnly = JSON.stringify({ messages: [
+    { role: 'user', content: [{ type: 'text', text: '<system-reminder>note</system-reminder>' }] },
+  ] });
+  assert.equal(requestExcerpt(blockOnly, 50), '');
 });
 
 test('responseExcerpt falls back to tool/thinking/error markers on text-less turns', () => {

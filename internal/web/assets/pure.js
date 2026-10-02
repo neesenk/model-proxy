@@ -2633,16 +2633,34 @@ export function requestExcerpt(text, maxChars) {
     const m = msgs[i];
     if (!m || m.role !== 'user') continue;
     const c = m.content;
-    if (typeof c === 'string' && c.trim()) return clip(c, cap);
+    if (typeof c === 'string') {
+      const t = stripInjectedEnvelopes(c);
+      if (t) return clip(t, cap);
+      continue;
+    }
     if (Array.isArray(c)) {
       const texts = [];
       for (const p of c) {
-        if (p && typeof p === 'object' && typeof p.text === 'string') texts.push(p.text);
+        if (p && typeof p === 'object' && typeof p.text === 'string') {
+          const t = stripInjectedEnvelopes(p.text);
+          if (t) texts.push(t);
+        }
       }
       if (texts.length) return clip(texts.join(' '), cap);
     }
   }
   return '';
+}
+
+// INJECTED_ENVELOPE_RE matches the machine-generated envelopes coding agents
+// (kimi-code-cli, claude code) append as role:user text — <system-reminder>
+// and <git-context> blocks, closed or running to end of string. Stripping
+// keeps requestExcerpt aligned with the backend's ComputeTurnKey: agent
+// reminders are not human turns and must not surface as the excerpt.
+const INJECTED_ENVELOPE_RE = /<(?:system-reminder|git-context)(?:\s[^>]*)?>[\s\S]*?(?:<\/(?:system-reminder|git-context)\s*>|$)/g;
+
+function stripInjectedEnvelopes(s) {
+  return String(s).replace(INJECTED_ENVELOPE_RE, ' ').trim();
 }
 
 // clip collapses whitespace and caps a preview string with an ellipsis.
@@ -2772,9 +2790,15 @@ export function sessionTimeline(rows, opts) {
 
   // Segment the visible rows by conversational turn when possible, falling
   // back to the idle-gap heuristic for rows without a turn key (old records or
-  // bodies that yielded no user text). Each segment keeps its own time→x
+  // bodies that yielded no user text). A boundary opens only when the incoming
+  // key differs from the previous row's AND has never been seen in this
+  // window: coding agents multiplex concurrent sub-agent conversations on one
+  // session id, so adjacent keys zig-zag between branches — cutting on every
+  // change would degenerate to one segment per request. A key reappearing is
+  // a branch resuming, not a new turn. Each segment keeps its own time→x
   // mapping (piecewise-linear overall, monotonic).
   const segs = [];
+  const seenTurnKeys = new Set();
   let cur = null;
   let prev = null;
   for (const n of vis) {
@@ -2782,11 +2806,12 @@ export function sessionTimeline(rows, opts) {
     let newSeg = false;
     if (!cur) {
       newSeg = true;
-    } else if (n.turnKey && prev && prev.turnKey && n.turnKey !== prev.turnKey) {
+    } else if (n.turnKey && prev && prev.turnKey && n.turnKey !== prev.turnKey && !seenTurnKeys.has(n.turnKey)) {
       newSeg = true;
     } else if (!n.turnKey || !prev || !prev.turnKey) {
       if (n.ts - cur.t1 > GAP_MS) newSeg = true;
     }
+    if (n.turnKey) seenTurnKeys.add(n.turnKey);
     if (newSeg) {
       cur = { t0: n.ts, t1: nEnd, items: [] };
       segs.push(cur);
