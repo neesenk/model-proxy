@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
-	"model-proxy/internal/runtime"
 	runtimestate "model-proxy/internal/runtime"
 	"net/http"
 	"os"
@@ -431,10 +430,10 @@ func newStandaloneQuotaTracker(
 	path string,
 	cfg func() *configdomain.Config,
 	provs func() map[string]provider.Provider,
-) *runtime.QuotaTracker {
-	manager := &runtime.Manager{}
+) *runtimestate.QuotaTracker {
+	manager := &runtimestate.Manager{}
 	manager.ReplaceGeneration(0, nil)
-	return runtime.NewQuotaTracker(path, cfg, provs, manager)
+	return runtimestate.NewQuotaTracker(path, cfg, provs, manager)
 }
 
 // ---- quota_poll_test.go ----

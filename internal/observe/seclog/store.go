@@ -242,7 +242,7 @@ func Counts(dir string, filter Filter) (map[string]int64, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer s.Close() // nil-safe
+	defer func() { _ = s.Close() }() // nil-safe
 	if s == nil {
 		return map[string]int64{}, nil
 	}
@@ -333,7 +333,7 @@ func Query(dir string, filter Filter) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer s.Close() // nil-safe
+	defer func() { _ = s.Close() }() // nil-safe
 	if s == nil {
 		return &Result{}, nil
 	}
@@ -372,7 +372,7 @@ func QueryByRequestIDs(dir string, ids []string) (map[string][]*Record, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer s.Close() // nil-safe
+	defer func() { _ = s.Close() }() // nil-safe
 	if s == nil {
 		return out, nil
 	}

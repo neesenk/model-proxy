@@ -9,14 +9,15 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
 
-type commandFake struct {
-	mu sync.Mutex
+// requestCtxKey types the context value these tests attach to HTTP requests to
+// prove the transport forwards r.Context() into CommandAPI calls.
+type requestCtxKey string
 
+type commandFake struct {
 	resetStats     func() error
 	refresh        func(string) bool
 	quotaKnown     func(string) bool
@@ -567,7 +568,7 @@ func TestCommandAccountContract(t *testing.T) {
 		calls := 0
 		server := newCommandTestServer(t, &commandFake{add: func(ctx context.Context, gotProvider string, gotInput appapi.AccountInput) (appapi.MutationResult, error) {
 			calls++
-			provider, input, contextValue = gotProvider, gotInput, ctx.Value("request")
+			provider, input, contextValue = gotProvider, gotInput, ctx.Value(requestCtxKey("request"))
 			if gotProvider == "fail" {
 				return appapi.MutationResult{}, appapi.NewHTTPError(http.StatusConflict, "already exists")
 			}
@@ -582,7 +583,7 @@ func TestCommandAccountContract(t *testing.T) {
 		}
 		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp", "{"), http.StatusBadRequest, map[string]any{"error": "unexpected EOF"})
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPost, "/api/accounts/aqp", strings.NewReader(`{"api_key":"secret","label":"one","replace":true}`)).WithContext(context.WithValue(context.Background(), "request", "add-context"))
+		request := httptest.NewRequest(http.MethodPost, "/api/accounts/aqp", strings.NewReader(`{"api_key":"secret","label":"one","replace":true}`)).WithContext(context.WithValue(context.Background(), requestCtxKey("request"), "add-context"))
 		serveWebRequest(server, recorder, request)
 		requireCommandResponse(t, recorder, http.StatusOK, map[string]any{"id": "acct-1", "status": "added", "warning": "reload deferred"})
 		if provider != "aqp" || input.APIKey != "secret" || input.Label != "one" || !input.Replace || contextValue != "add-context" {
@@ -594,7 +595,7 @@ func TestCommandAccountContract(t *testing.T) {
 		var provider, id string
 		var contextValue any
 		server := newCommandTestServer(t, &commandFake{probe: func(ctx context.Context, gotProvider, gotID string) (appapi.ProbeResult, error) {
-			provider, id, contextValue = gotProvider, gotID, ctx.Value("request")
+			provider, id, contextValue = gotProvider, gotID, ctx.Value(requestCtxKey("request"))
 			if gotID == "missing" {
 				return appapi.ProbeResult{}, appapi.NewHTTPError(http.StatusGone, "deleted")
 			}
@@ -606,7 +607,7 @@ func TestCommandAccountContract(t *testing.T) {
 		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp/test", ""), http.StatusBadRequest, map[string]any{"error": "expected /api/accounts/<provider>/<id>/test"})
 		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp/failed/test", ""), http.StatusOK, map[string]any{"status": "failed", "reason": "rate limited", "http_status": float64(429), "latency_ms": float64(1750), "provider": "aqp", "account_id": "failed", "model": "m"})
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPost, "/api/accounts/aqp/one/test", nil).WithContext(context.WithValue(context.Background(), "request", "probe-context"))
+		request := httptest.NewRequest(http.MethodPost, "/api/accounts/aqp/one/test", nil).WithContext(context.WithValue(context.Background(), requestCtxKey("request"), "probe-context"))
 		serveWebRequest(server, recorder, request)
 		requireCommandResponse(t, recorder, http.StatusOK, map[string]any{"status": "ok", "http_status": float64(200), "latency_ms": float64(3), "provider": "aqp", "account_id": "one", "model": "m"})
 		if provider != "aqp" || id != "one" || contextValue != "probe-context" {

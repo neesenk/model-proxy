@@ -208,7 +208,8 @@ func TestIsLoopback(t *testing.T) {
 // call, so maintenance call sites share its connection pool instead of each
 // cloning and discarding one.
 func TestAutoTransportSharedInstance(t *testing.T) {
-	if AutoTransport() != AutoTransport() {
+	// Two separate calls must hand back the same instance (sync.OnceValue).
+	if first, second := AutoTransport(), AutoTransport(); first != second {
 		t.Fatal("AutoTransport() returned distinct transports; call sites cannot share the pool")
 	}
 }

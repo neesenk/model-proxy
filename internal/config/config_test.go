@@ -541,7 +541,7 @@ func TestPricingConfigDefaults(t *testing.T) {
 	if cfg.Pricing.ResolvedSourceURL() != "https://openrouter.ai/api/v1/models" {
 		t.Errorf("default source = %q", cfg.Pricing.ResolvedSourceURL())
 	}
-	if cfg.Prices != nil && len(cfg.Prices) != 0 {
+	if len(cfg.Prices) != 0 {
 		t.Errorf("prices should default empty, got %v", cfg.Prices)
 	}
 }

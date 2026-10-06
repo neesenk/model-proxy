@@ -35,17 +35,19 @@ func RunVolcengineLoginWithInput(cfg *configdomain.Config, provName string, prov
 	apiKey := strings.TrimSpace(inKey)
 	if apiKey == "" {
 		fmt.Printf("Ark API Key (对话用，控制台创建): ")
-		fmt.Scanln(&apiKey)
+		// EOF/parse errors leave the variable empty; the prompts below or the
+		// console step surface it — the login flow does not abort mid-prompt.
+		_, _ = fmt.Scanln(&apiKey)
 	}
 	ak := strings.TrimSpace(inAK)
 	if ak == "" {
 		fmt.Printf("Volcengine Access Key ID (GetAFPUsage 用，IAM 密钥): ")
-		fmt.Scanln(&ak)
+		_, _ = fmt.Scanln(&ak)
 	}
 	sk := strings.TrimSpace(inSK)
 	if sk == "" {
 		fmt.Printf("Volcengine Secret Access Key: ")
-		fmt.Scanln(&sk)
+		_, _ = fmt.Scanln(&sk)
 	}
 	if apiKey == "" {
 		return fmt.Errorf("API key is required")

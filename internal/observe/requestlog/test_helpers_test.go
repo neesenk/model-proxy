@@ -23,32 +23,6 @@ func writeRecordFile(t *testing.T, dir, name string, records []Record) {
 	}
 }
 
-func countJSONLLines(t *testing.T, path string) int {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	return bytes.Count(data, []byte{'\n'})
-}
-
-func firstJSONLineStringField(t *testing.T, path, field string) string {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	if newline := bytes.IndexByte(data, '\n'); newline >= 0 {
-		data = data[:newline]
-	}
-	var value map[string]any
-	if err := json.Unmarshal(data, &value); err != nil {
-		t.Fatalf("decode first line of %s: %v", path, err)
-	}
-	result, _ := value[field].(string)
-	return result
-}
-
 func requestLogFileNames(t *testing.T, dir string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)

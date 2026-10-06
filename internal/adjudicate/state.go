@@ -44,7 +44,7 @@ func writeStateFile(path string, v any) error {
 		return err
 	}
 	tmp := f.Name()
-	remove := func() { os.Remove(tmp) }
+	remove := func() { _ = os.Remove(tmp) }
 	if _, err := f.Write(data); err != nil {
 		f.Close()
 		remove()
@@ -840,9 +840,7 @@ func (r *resultRing) Snapshot() []Result {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]Result, len(r.buf))
-	for i, res := range r.buf {
-		out[i] = res
-	}
+	copy(out, r.buf)
 	// newest first
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]

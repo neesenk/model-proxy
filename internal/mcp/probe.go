@@ -98,7 +98,7 @@ func Probe(ctx context.Context, client *http.Client, url string, auth func(*http
 	// stateless ones tolerate it (202 or 200, either is fine — never fatal).
 	notif := []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 	if nresp, err := doRPC(ctx, client, url, auth, sessionID, notif); err == nil {
-		io.Copy(io.Discard, io.LimitReader(nresp.Body, probeBodyCap))
+		_, _ = io.Copy(io.Discard, io.LimitReader(nresp.Body, probeBodyCap))
 		nresp.Body.Close()
 	}
 	listBody := []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
@@ -163,7 +163,7 @@ func doRPC(ctx context.Context, client *http.Client, url string, auth func(*http
 	if resp.StatusCode >= 300 {
 		// Redirects are refused cross-origin by CheckNoCrossOriginRedirect; a
 		// terminal 3xx reaching here carries no MCP semantics.
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}

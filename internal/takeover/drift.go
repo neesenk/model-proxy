@@ -2,6 +2,7 @@ package takeover
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -69,4 +70,27 @@ func backupScope(metaPath string) RewriteScope {
 		return ScopeAll
 	}
 	return RewriteScope(meta.Scope)
+}
+
+// verifyRewrite is the post-write readback check (the readback half of
+// cc-switch's staging→read-back→commit discipline): immediately after a
+// client's rewrite, the template's drift probe must already read the value
+// the takeover intended. A mismatch means the editor/renderer silently
+// failed to land the managed keys (template bug, file shape conflict) —
+// without this check that class of failure only surfaces later as doctor
+// drift, after the agent has already talked to a dead endpoint. Templates
+// without a drift probe and MCP-scope runs (which never wrote the probed
+// pointer) are exempt — the same rule as CheckDrift.
+func verifyRewrite(c ClientSpec, cfg *configdomain.Config, scope RewriteScope) error {
+	if scope == ScopeMCP || c.Template == nil {
+		return nil
+	}
+	current, expected := c.Template.Pointer(cfg)
+	if current == "(no drift probe)" {
+		return nil
+	}
+	if current != expected {
+		return fmt.Errorf("%s verify: post-write readback reads %q, want %q — the rewrite did not land", c.Name, current, expected)
+	}
+	return nil
 }

@@ -8,7 +8,6 @@ import (
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/counters"
-	obscounters "model-proxy/internal/observe/counters"
 	"model-proxy/internal/pricing"
 	"net/http"
 	"net/http/httptest"
@@ -205,7 +204,7 @@ func TestForward_RecordsLatency(t *testing.T) {
 // TestForwardCountsTokens verifies the proxy forward hot path wraps SSE response
 // bodies in a usageScanner keyed by the chosen (provider, model), committing
 // observed anthropic usage (input_tokens from message_start, output_tokens from
-// message_delta) to the shared obscounters.TokenCounter. Non-SSE responses are not scanned.
+// message_delta) to the shared counters.TokenCounter. Non-SSE responses are not scanned.
 // HOME is pinned to a temp dir (with a dummy zhipu apikey) so NewProxy's
 // baseline load can't pick up the developer's real ~/.model-proxy/token_usage.json
 // and the provider can authenticate against the mock upstream.
@@ -235,7 +234,7 @@ func TestForwardCountsTokens(t *testing.T) {
 	p.Handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`)))
 	io.Copy(io.Discard, rec.Result().Body)
 	rec.Result().Body.Close()
-	got := p.tokens.Snapshot()[obscounters.TokenKey{Provider: "zhipu", Model: "glm-5"}]
+	got := p.tokens.Snapshot()[counters.TokenKey{Provider: "zhipu", Model: "glm-5"}]
 	if got.Input != 42 || got.Output != 8 {
 		t.Errorf("tokens = %+v, want in=42 out=8", got)
 	}
@@ -267,7 +266,7 @@ func TestForwardDoesNotScanNonSSE(t *testing.T) {
 	p.Handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m"}`)))
 	io.Copy(io.Discard, rec.Result().Body)
 	rec.Result().Body.Close()
-	got := p.tokens.Snapshot()[obscounters.TokenKey{Provider: "zhipu", Model: "glm-5"}]
+	got := p.tokens.Snapshot()[counters.TokenKey{Provider: "zhipu", Model: "glm-5"}]
 	if got.Input != 0 || got.Output != 0 || got.Requests != 0 {
 		t.Errorf("non-SSE tokens = %+v, want zero (non-SSE must not be scanned)", got)
 	}
@@ -333,7 +332,7 @@ func TestForwardCommitsOnDisconnect(t *testing.T) {
 	p := newTestProxy(t, cfg)
 	rec := &disconnectWriter{ResponseRecorder: httptest.NewRecorder()}
 	p.Handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`)))
-	got := p.tokens.Snapshot()[obscounters.TokenKey{Provider: "zhipu", Model: "m"}]
+	got := p.tokens.Snapshot()[counters.TokenKey{Provider: "zhipu", Model: "m"}]
 	if got.Input != 42 {
 		t.Errorf("input tokens after disconnect = %d, want 42 (observed usage must commit on client-cancel, not be silently dropped)", got.Input)
 	}

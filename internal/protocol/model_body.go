@@ -7,8 +7,9 @@ import (
 
 func ExtractModel(body []byte) string {
 	dec := json.NewDecoder(bytes.NewReader(body))
-	// Consume the opening {.
-	dec.Token()
+	// Consume the opening {. Malformed bodies fall through to the zero-Model
+	// result below — the token error carries no extra signal.
+	_, _ = dec.Token()
 	// model is the first top-level key in every known LLM client (Claude Code,
 	// codex, openai SDK, ...), so the fast path reads just 3 tokens (~40 bytes)
 	// and returns — it never touches the messages/tools/system content that makes
@@ -27,6 +28,7 @@ func ExtractModel(body []byte) string {
 	var v struct {
 		Model string `json:"model"`
 	}
-	json.Unmarshal(body, &v)
+	// Malformed body → zero Model, indistinguishable from "no model key".
+	_ = json.Unmarshal(body, &v)
 	return v.Model
 }

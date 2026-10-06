@@ -214,7 +214,7 @@ func zcodeDefaultReasoningLevel(ctx renderContext) string {
 	return ""
 }
 
-// nestedStringProviderAware walks v along path like nestedString, but when an
+// nestedStringProviderAware walks v along path, but when an
 // intermediate node is an ARRAY it selects the FIRST element whose provider
 // marker — "providerId" (ZCode's providerRules) or "vendor" (WorkBuddy's
 // custom models) — equals providerID. This keeps drift probes usable on

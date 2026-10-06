@@ -340,7 +340,11 @@ func (s *Service) writeProviderModelsAndReload(ctx context.Context, configFile, 
 		if err := enc.Encode(root); err != nil {
 			return err
 		}
-		enc.Close()
+		// Close flushes the final document into buf; an unchecked failure here
+		// could hand a truncated YAML to writeConfigValidated below.
+		if err := enc.Close(); err != nil {
+			return err
+		}
 		// Cancellation is honored up to this commit boundary. Once writing starts,
 		// finish save + reload (or rollback), even if the client disconnects.
 		if err := ctx.Err(); err != nil {

@@ -9,7 +9,6 @@ import (
 	clicommon "model-proxy/internal/cli/clicommon"
 	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/daemonctl"
 	"model-proxy/internal/display"
 	"os"
 	"sort"
@@ -231,10 +230,6 @@ func RenderQuota(st *StatusResp) string {
 	return b.String()
 }
 
-// daemonHTTPClient caps each request to the running daemon (used by serve status
-// and schedule) so a wedged listener fails fast instead of hanging the command.
-var daemonHTTPClient = daemonctl.Client
-
 // StatusGet fetches base+path via clicommon (shared daemon client).
 func StatusGet(base, path string) (body []byte, status int, err error) {
 	return clicommon.StatusGet(base, path)
@@ -286,7 +281,9 @@ func RenderStatus(listen string, opts StatusOpts) (string, error) {
 	}
 	var tok TokensResp
 	if len(tokensBody) > 0 {
-		json.Unmarshal(tokensBody, &tok)
+		if err := json.Unmarshal(tokensBody, &tok); err != nil {
+			return "", fmt.Errorf("parse tokens response: %v", err)
+		}
 	}
 
 	var b strings.Builder
@@ -301,7 +298,9 @@ func RenderStatus(listen string, opts StatusOpts) (string, error) {
 	AppendSection(&b, RenderTokens(&tok))
 	if logsOK {
 		var lg LogsResp
-		json.Unmarshal(logsBody, &lg)
+		if err := json.Unmarshal(logsBody, &lg); err != nil {
+			return "", fmt.Errorf("parse logs response: %v", err)
+		}
 		AppendSection(&b, RenderLogs(&lg))
 	}
 	return b.String(), nil

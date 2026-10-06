@@ -131,14 +131,14 @@ func Daemonize(env DaemonEnv, sa Args) error {
 	}
 	if _, err := fmt.Fprintf(placeholder, "%d\n", os.Getpid()); err != nil {
 		placeholder.Close()
-		os.Remove(pidPath)
+		_ = os.Remove(pidPath)
 		return fmt.Errorf("write pid file placeholder %s: %w", pidPath, err)
 	}
 	placeholder.Close()
 
 	lf, err := OpenLogFile(logFile)
 	if err != nil {
-		os.Remove(pidPath)
+		_ = os.Remove(pidPath)
 		return fmt.Errorf("open log file %s: %w", logFile, err)
 	}
 
@@ -150,7 +150,7 @@ func Daemonize(env DaemonEnv, sa Args) error {
 	cmd.SysProcAttr = SysProcAttrDetach() // setsid: detach from controlling terminal
 	if err := cmd.Start(); err != nil {
 		lf.Close()
-		os.Remove(pidPath)
+		_ = os.Remove(pidPath)
 		return fmt.Errorf("start supervisor: %w", err)
 	}
 	// The supervisor inherits the lf fd; the parent can close its copy now.
@@ -216,7 +216,7 @@ func runSupervisor(env DaemonEnv, sa Args, deps supervisorDeps) error {
 		pidWritten = true
 	}
 	if pidWritten {
-		defer os.Remove(pidPath)
+		defer func() { _ = os.Remove(pidPath) }()
 	}
 
 	logx.Infof("[supervisor] started pid=%d log=%s", deps.pid(), logFile)
@@ -363,7 +363,7 @@ func resolveDaemonPid(env DaemonEnv, sa Args, yellow, gray func(string) string) 
 	}
 	if err != nil {
 		// Process is gone — clean up the stale pid file.
-		os.Remove(pidPath)
+		_ = os.Remove(pidPath)
 		fmt.Println(yellow("Daemon not running.") + " (removed stale pid file " + gray(pidPath) + ")")
 		return nil, 0, pidPath, false
 	}
@@ -401,7 +401,7 @@ func stopDaemonProcess(proc *os.Process, pid int, pidPath string, graceful, kill
 	}
 	fmt.Fprintf(os.Stderr, "graceful stop timed out, sending SIGKILL to %d\n", pid)
 	_ = proc.Kill()
-	os.Remove(pidPath)
+	_ = os.Remove(pidPath)
 	if waitForProcessExit(proc, killExit) {
 		fmt.Println(green("✓ Killed."))
 		return

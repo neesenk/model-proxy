@@ -193,7 +193,7 @@ func (p *Proxy) probeMCPStdio(ctx context.Context, snap RuntimeSnapshot, srv con
 		result.LatencyMs = time.Since(start).Milliseconds()
 		return result, nil
 	}
-	conn.Call(ctx, mcpNotifInitBody) //nolint — best-effort
+	_, _ = conn.Call(ctx, mcpNotifInitBody) // best-effort notification
 	listResp, err := conn.Call(ctx, []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
 	if err != nil {
 		result.Error = fmt.Sprintf("tools/list: %v", err)

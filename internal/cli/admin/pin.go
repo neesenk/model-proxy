@@ -58,7 +58,7 @@ func CmdUnpin(args []string, cfg *configdomain.Config) {
 
 // emitPinResult prints a do*/listPins result line to stdout, or a ✗ error to
 // stderr + exit 1. Extracted so tests drive do* directly without os.Exit.
-func EmitPinResult(_ *os.File, stderr *os.File, out string, err error, listen string) {
+func EmitPinResult(_, stderr io.Writer, out string, err error, listen string) {
 	if err != nil {
 		if IsDaemonUnreachable(err) {
 			fmt.Fprintf(stderr, "%s cannot reach daemon at %s: %v\nis `model-proxy serve` running?\n", display.Red("✗"), listen, err)
@@ -88,7 +88,9 @@ func DoPin(base, route, provider string, ttl time.Duration) (string, error) {
 	var out struct {
 		ExpiresAt string `json:"expires_at"`
 	}
-	json.Unmarshal(rb, &out)
+	if err := json.Unmarshal(rb, &out); err != nil {
+		return "", fmt.Errorf("parse pin response: %v", err)
+	}
 	suffix := "no expiry (until unpin or restart)"
 	if out.ExpiresAt != "" {
 		suffix = "expires " + out.ExpiresAt
@@ -111,7 +113,9 @@ func DoUnpin(base, route string) (string, error) {
 	var out struct {
 		Removed bool `json:"removed"`
 	}
-	json.Unmarshal(rb, &out)
+	if err := json.Unmarshal(rb, &out); err != nil {
+		return "", fmt.Errorf("parse unpin response: %v", err)
+	}
 	if out.Removed {
 		return fmt.Sprintf("%s unpinned %s\n", display.Green("✓"), route), nil
 	}

@@ -38,7 +38,6 @@ type fakeMCPUpstream struct {
 	bodies    []string
 	sessionID string         // "" = stateless server (never issues a session)
 	failKeys  map[string]int // Authorization value → remaining 401 count
-	sseInit   bool
 	// reinitSessionID, when set, replaces sessionID on initialize requests that
 	// ALREADY carry an upstream session id (upstream-side id rotation).
 	reinitSessionID string

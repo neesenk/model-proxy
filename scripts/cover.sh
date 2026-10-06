@@ -11,9 +11,10 @@
 #   scripts/cover.sh --self-test     # parser + floor negative-contract checks
 #
 # Output:
-#   cov.out            — raw coverage profile
+#   cov.out            — raw coverage profile (count mode)
 #   coverage.html      — per-line HTML report (open in a browser)
-#   stdout             — per-package statement coverage + lowest-covered functions
+#   stdout             — per-package statement coverage + lowest-covered
+#                        functions + single-path block list (weak-branch signal)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -93,6 +94,32 @@ coverage_percent_from_line() {
   ' <<<"$1"
 }
 
+# The profile is count-mode: every covered block carries its execution count.
+# A block with count==1 is "covered" by exactly one test path — no independent
+# second witness pins its behavior. That is the closest measurable signal Go
+# offers to branch coverage (which the toolchain does not provide natively).
+# Profile lines: "path/file.go:start.col,end.col numStmts count"; the leading
+# "mode:" line has fewer fields and is excluded by the NF guard.
+weak_branch_summary() {
+  awk '
+    NF >= 3 {
+      total++
+      if ($3 == 1 && $2 > 0) { weak++; stmts += $2 }
+    }
+    END { printf "%d blocks, %d single-path (%d statements)\n", total, weak, stmts }
+  ' "$1"
+}
+
+weak_branch_files() {
+  awk '
+    NF >= 3 && $3 == 1 && $2 > 0 {
+      file = $1; sub(/:.*/, "", file)
+      blocks[file]++; stmts[file] += $2
+    }
+    END { for (f in blocks) printf "%3d blocks %5d stmts  %s\n", blocks[f], stmts[f], f }
+  ' "$1" | sort -rn | head -15
+}
+
 coverage_meets_floor() {
   local pkg="$1" pct="$2" floor
   floor="$(coverage_floor_for "$pkg")"
@@ -135,7 +162,29 @@ run_self_test() {
     echo "FAIL  ordinary package rejected exact 80% baseline" >&2
     return 1
   }
-  echo "✓ coverage parser and floor negative contracts passed."
+  # weak-branch parsers: mode line excluded, count==0 ignored (that is the
+  # coverage gap the package/function numbers already report), count==1 with
+  # zero statements ignored (no behavioral weight).
+  prof="$(mktemp)"
+  printf '%s\n' \
+    'mode: count' \
+    'm/a.go:1.2,2.10 2 1' \
+    'm/a.go:3.2,4.10 1 1' \
+    'm/a.go:5.2,6.10 1 5' \
+    'm/b.go:7.2,8.10 3 0' \
+    'm/c.go:9.2,9.9 0 1' >"$prof"
+  summary="$(weak_branch_summary "$prof")"
+  files="$(weak_branch_files "$prof")"
+  rm -f "$prof"
+  [ "$summary" = "5 blocks, 2 single-path (3 statements)" ] || {
+    echo "FAIL  weak-branch summary returned '$summary', want '5 blocks, 2 single-path (3 statements)'" >&2
+    return 1
+  }
+  [ "$files" = "  2 blocks     3 stmts  m/a.go" ] || {
+    echo "FAIL  weak-branch file list returned '$files', want the single m/a.go line" >&2
+    return 1
+  }
+  echo "✓ coverage parser, floor negative contracts and weak-branch parsers passed."
 }
 
 if [ "$self_test" -eq 1 ]; then
@@ -171,6 +220,12 @@ go tool cover -func=cov.out | awk -v t="$threshold" '
     pct=$NF; gsub(/%/,"",pct);
     if (pct+0 < t) print pct"%\t" $0
   }' | sort -n | head -30
+
+echo ""
+echo "=== Single-path blocks (count==1 — weak-branch signal, not a gate) ==="
+echo "covered exactly once: no independent second test pins these branches"
+weak_branch_summary cov.out
+weak_branch_files cov.out
 
 echo ""
 echo "=== HTML report ==="

@@ -114,13 +114,6 @@ func (f *fakeDaemon) Post(model, body, session string) (int, error) {
 	return 200, nil
 }
 
-func (f *fakeDaemon) lastID(session string) string {
-	if rows := f.summaries[session]; len(rows) > 0 {
-		return rows[0].RequestID
-	}
-	return ""
-}
-
 func (f *fakeDaemon) addRow(session string, status int, marks []guardMark) string {
 	id := fmt.Sprintf("req-%d", len(f.guard)+1)
 	f.guard[id] = marks

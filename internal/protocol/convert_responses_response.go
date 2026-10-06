@@ -544,7 +544,6 @@ func convertOpenAIResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, error)
 					"type": "reasoning", "status": "completed",
 					"summary": []map[string]any{{"type": "summary_text", "text": rc}},
 				})
-				rsSeq++
 			}
 			if tcs, ok := msg["tool_calls"].([]any); ok {
 				for _, tc := range tcs {

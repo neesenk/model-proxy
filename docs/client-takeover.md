@@ -190,7 +190,7 @@ opencode-go、凭据池 0 账号墓碑、构建失败）整体剔除——这些
 | zcode(单文档 3 变体) | `~/.zcode/v2/provider_config.json` | json | ZCode(zai-org/ZCode)的 personal provider 层:`schemaVersion: 1` 规则文档,`config.providerConfigRules.providerRules` 一条 provider 规则(api-key 占位 + `personalModelIds`/`modelOrder` 全量模型)+ `config.modelConfigRules.providerModelRules` 每模型一条规则(contextWindow/输入模态/tool_call/effort 档位来自 models.dev;reasoning map 由 ZCode 内置 per-api-type 规则供给,只写 values/max)+ `config.defaultModelSelection` 指向主模型(effort 档取最高)。**数组按 providerId upsert 合并**:我们 id 的旧条目删除重排,用户在 UI 里加的其他 personal provider/规则原样保留(形状 zcode 的 Go 侧合并,json.set 的整组替换表达不了)。变体 = 协议档位:`anthropic-messages`(base_url 裸)/ `openai-chat-completions` / `openai-responses`(base_url 带 /v1,独立 provider_id)——api.type 从变体 `protocol:` 派生,故 zcode 形状强制声明 protocol。**`create: true`**。漂移探针穿越规则数组按 providerId 匹配(不靠位置索引)。**同一模板还接管 MCP**:`mcp.file: ~/.zcode/cli/config.json`,`mcp.servers` 嵌套键写 `{type: http, url}` 条目,独立备份单元 `<variant>-mcp.bak` |
 | hermes(单文档 3 变体) | `~/.hermes/config.yaml` | yaml | Nous Research 的 Hermes Agent:`providers.<id>` 命名 provider(base_url/api_key 占位/api_mode 按协议档位:`anthropic_messages`(base_url 裸,Anthropic SDK 自拼 `/v1/messages`)/ `chat_completions` / `codex_responses`(base_url 带 /v1))+ `model.provider`/`model.default` 选择器(指向主模型)+ 条目级 `session_affinity_header: x-session-id`(hermes 每请求带会话 id,代理默认允许列表直接归因)。**format=yaml 是注释保留编辑**(hermes 自身用 ruamel round-trip 写回该文件)。模型目录不落盘——hermes 按 `{base_url}/models` 实时发现(代理的 `/v1/models` 即全量暴露面)。hermes 同时只能选中一个 provider:unified 是正常模式,split 下多个命名条目共存、选择器后写者胜。**同一模板还接管 MCP**:顶层 `mcp_servers` map 写 `{url}` 条目(hermes 按 url 判别 HTTP transport),与主文件同文档合并 |
 | workbuddy | `~/.workbuddy/models.json` | json | 腾讯 WorkBuddy 桌面端的本地自定义模型:**数组按 vendor 标记 upsert 合并**(形状 workbuddy 的 Go 侧渲染;数组根文件提升为 `{models: [...]}` 写回——app 两种都收)——`vendor = provider_id` 标记我们的条目(重接管删除重排,URL 变更/模型收缩同步),用户自加的自定义模型原样保留。条目:id/name(暴露名)、url(`/v1`——agent 归一化自拼 `/chat/completions`,WorkBuddy 自定义模型只讲 OpenAI Chat)、apiKey 占位、maxInputTokens/maxOutputTokens、supportsToolCall/supportsImages/supportsReasoning 来自 models.dev(无元数据不写该能力)。单协议族(chat 唯一 wire)。**`create: true`**。**同一模板还接管 MCP**:`mcp.file: ~/.workbuddy/mcp.json`,`mcpServers` 写 `{url}` 条目(runtime 自动 streamableHttp→sse 回退),独立备份单元 `workbuddy-mcp.bak` |
-| codex | `~/.codex/config.toml` | toml | `[model_providers."<id>"]`(wire_api=responses,base_url 带 /v1——codex 拼 base_url+/responses)+ 顶层 `model_provider` 选择器 + **模型目录**：`~/.codex/model-proxy-models.json`(shape codex,每暴露模型一条 ModelInfo：visibility=list、context/effort 档位/输入模态来自 models.dev)+ 顶层 `model_catalog_json` 指向它——codex 加载后**替换**内置目录，/model 选择器即列出全部代理模型；restore 一并删除目录文件 |
+| codex | `~/.codex/config.toml` | toml | `[model_providers."<id>"]`(wire_api=responses,base_url 带 /v1——codex 拼 base_url+/responses)+ 顶层 `model_provider` 选择器 + **模型目录**：`~/.codex/model-proxy-models.json`(shape codex,每暴露模型一条 ModelInfo：visibility=list、context/effort 档位/输入模态来自 models.dev)+ 顶层 `model_catalog_json` 指向它——codex 加载后**替换**内置目录，/model 选择器即列出全部代理模型；restore 一并删除目录文件。Codex 兼容不变量（回归钉死在 `codex_compat_test.go`，来自 cc-switch 3.20.x–4.0 的踩坑记录）：`auth.json` 永不被接管写入（非第三方凭据载体，凭据只在代理侧）；选择器 `model_provider` 与 provider 段名同源 `{{provider_id}}`（不得分叉）；段内 `requires_openai_auth = true`（Codex 第三方鉴权路由语义）；`mcp_servers` 条目不写 `type` 键（新版 Codex 拒绝未知键） |
 | kimi | `~/.kimi-code/config.toml` | toml | `[providers."<id>"]`(`openai`,带 /v1——kimi-cli 2.x 移除了 `openai_legacy` 运行时类型,模型 wire protocol 从 provider type 解析,缺失即报 `must declare a wire protocol`)+ 每模型 `[models."<name>"]`(provider/model/max_context_size/capabilities,可选 support_efforts+default_effort;点号名必须引号;无元数据回退 `routing.DefaultModelMetadata.Context`)。**同一模板还接管 MCP**:`mcp.file: ~/.kimi-code/mcp.json`(Kimi Code 的 MCP 配置独立于 config.toml,`mcpServers`/`url` 条目)——独立备份单元 `kimi-mcp.bak`,restore 一并恢复 |
 | gemini-cli | `~/.gemini/.env` | env | `GOOGLE_GEMINI_BASE_URL`(带 /v1)+ `GEMINI_API_KEY` 占位 |
 | （opencode 三变体） | 同上 | json | 附 `mcp` 块：`mcp` 节写 remote 型条目（enabled: true） |
@@ -275,6 +275,16 @@ Catalog）后生效。
 - 所有客户端写回（JSON 改写、TOML 改写、env 改写、restore）一律 temp+fsync+rename 原子写；
   **保留目标文件既有权限位**（这些文件常含真实 API key，硬编码 0644 会把 0600 放宽成全局可读），
   新建文件统一 0600；
+- **操作意图日志（op journal）**：takeover/restore 在首个 mutation 前把操作意图
+  （op、clients、将触及的文件、开始时间）原子写入 `<bakDir>/op-journal.json`（0600），
+  仅在全部成功完成后删除——进程中途退出（含 daemon 内 Web 触发的接管）会留下残留
+  journal，下一次 takeover/restore 检出后必须 warning 透出（CLI stderr + report.Warnings →
+  Web 警告条）再以新记录取代：备份幂等保留、改写幂等，重跑同一操作即收敛，无需单独 replay。
+  journal 写不进/读出错降级为 warning，不阻断操作（单文件原子写保证操作本身安全）；
+- **写后回读校验（readback）**：每个客户端改写完成后立即用该模板的 drift 探针重读目标
+  文件，探针读到的值不等于接管意图值即硬失败（`verify: post-write readback …`）——编辑器/
+  渲染器静默没落 key 这类失败必须当场暴露，不能等 doctor 事后报漂移；无 drift 探针的模板
+  与 mcp-scope 接管豁免（与 CheckDrift 同一规则）；
 - 渲染幂等：重复 takeover 不产生重复段/键（replace-or-append / key set）；
 - **重接管安全（语义匹配 + 去重）**：客户端会重写自己的配置文件（kimi-cli 把
   `[providers."model-proxy"]` 归一成 `[providers.model-proxy]`、手工编辑加 `export `

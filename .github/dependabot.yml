@@ -1,0 +1,39 @@
+# Dependabot keeps the dependency graph and CI actions fresh. Routine upgrade
+# PRs are exactly the kind of small, fully-gated change this repo's CI can
+# verify autonomously (static + vet + race + coverage). govulncheck only
+# catches vulnerabilities reachable from our own code; this covers the rest.
+
+version: 2
+updates:
+  - package-ecosystem: golang
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # Tool directives (staticcheck/errcheck/dupl/govulncheck) and their x/*
+      # dependencies move together; one PR per week keeps the matrix legible.
+      static-tools:
+        patterns:
+          - "honnef.co/go/tools"
+          - "github.com/kisielk/errcheck"
+          - "github.com/mibk/dupl"
+          - "golang.org/x/vuln"
+          - "golang.org/x/tools"
+      golang-x:
+        patterns:
+          - "golang.org/x/*"
+    # A tool bump that surfaces new checks must land together with the fixes
+    # (scripts/static.sh suppression policy) — still reviewable one group per PR.
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    # Actions are pinned by commit SHA in the workflows; Dependabot rewrites
+    # the pin and appends the version tag in a comment.
+    commit-message:
+      prefix: "chore(ci)"

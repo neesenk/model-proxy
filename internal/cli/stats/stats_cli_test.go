@@ -36,7 +36,7 @@ func TestRenderStatsCLI(t *testing.T) {
 		mu.Lock()
 		gotQuery = r.URL.RawQuery
 		mu.Unlock()
-		io.WriteString(w, string(raw))
+		w.Write(raw)
 	}))
 	defer up.Close()
 
@@ -509,7 +509,7 @@ func TestRenderAgentsCLI(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		io.WriteString(w, string(raw))
+		w.Write(raw)
 	}))
 	defer up.Close()
 	listen := strings.TrimPrefix(up.URL, "http://")

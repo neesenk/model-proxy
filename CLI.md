@@ -195,7 +195,7 @@ takeover <client>   # client = 模板名（takeover list 查看）| all
 takeover list       # 可用模板:内置预设 + ~/.model-proxy/takeover-templates 覆盖
 ```
 
-逻辑（`internal/takeover/takeover.go` 的 `RunTakeover`）：备份每个客户端配置（verbatim + sha256 meta，幂等）到 `<configDir>/.model-proxy/`，再按**模板**改写指向代理。客户端集合来自模板解析（`internal/takeover` 的内嵌 presets + `~/.model-proxy/takeover-templates/<name>.yaml` 用户覆盖/新增，同名覆盖预设），不再读 config 的 `takeover:` 块（已移除，残留即报迁移错误）。模板声明：目标 `file`、`format`（json|toml|env）、`create`（文件不存在也接管，restore 删回不存在——stepcode 的可选 models.json、zcode 的 provider_config.json）、`base_url`（bare|v1）、`provider_id`、`proxy_url`（默认 http://<listen>）、格式专属补丁（json.set / toml.top_keys+sections / env.set，支持 `{{base_url}}/{{token}}/{{provider_id}}/{{display_name}}/{{proxy_url}}` 占位）与可选 `models:` 块（opencode/pi/kimi/zcode 等模型元数据形状，hydrate models.dev）。未知 client 名是硬错误（列出可用模板）。
+逻辑（`internal/takeover/takeover.go` 的 `RunTakeover`）：备份每个客户端配置（verbatim + sha256 meta，幂等）到 `<configDir>/.model-proxy/`，再按**模板**改写指向代理。客户端集合来自模板解析（`internal/takeover` 的内嵌 presets + `~/.model-proxy/takeover-templates/<name>.yaml` 用户覆盖/新增，同名覆盖预设），不再读 config 的 `takeover:` 块（已移除，残留即报迁移错误）。模板声明：目标 `file`、`format`（json|toml|env）、`create`（文件不存在也接管，restore 删回不存在——stepcode 的可选 models.json、zcode 的 provider_config.json）、`base_url`（bare|v1）、`provider_id`、`proxy_url`（默认 http://<listen>）、格式专属补丁（json.set / toml.top_keys+sections / env.set，支持 `{{base_url}}/{{token}}/{{provider_id}}/{{display_name}}/{{proxy_url}}` 占位）与可选 `models:` 块（opencode/pi/kimi/zcode 等模型元数据形状，hydrate models.dev）。未知 client 名是硬错误（列出可用模板）。接管/还原在首个 mutation 前把操作意图写入 `<configDir>/.model-proxy/op-journal.json`（全部成功才删除；残留即上次中断，本次以 warning 透出并收敛），改写后按模板 drift 探针做回读校验（没落 key 当场报错）——契约细节见 `docs/client-takeover.md`「机制契约」。
 
 ### 输出
 

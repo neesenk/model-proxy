@@ -1,0 +1,10 @@
+// dupl ratchet baseline: the number of clone groups (dupl -threshold 120,
+// ./internal ./scripts) the repository currently carries. The gate fails when
+// the count GROWS past this number; after a dedup lands, lower it in the same
+// commit (same contract as coverage floors). The ~30 baseline groups are
+// mostly intentional per-provider test fixture twins; the known production
+// clone candidates (catalog/pricing fetch skeleton, admin/models_refresh vs
+// cli/models/check, provider kimi_code vs opencode_go quota parsing) are
+// listed in docs/engineering/testing.md as future dedup targets — they cross
+// owner boundaries and must be deduplicated deliberately, not as a drive-by.
+31

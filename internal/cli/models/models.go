@@ -377,7 +377,11 @@ func WriteProviderModels(configFile, provName string, names []string) error {
 		if err := enc.Encode(root); err != nil {
 			return err
 		}
-		enc.Close()
+		// Close flushes the final document into buf; an unchecked failure here
+		// could persist a truncated config.
+		if err := enc.Close(); err != nil {
+			return err
+		}
 		if _, err := writeConfigValidated(configFile, buf.String()); err != nil {
 			return fmt.Errorf("writing config: %w", err)
 		}

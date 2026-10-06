@@ -268,7 +268,6 @@ func ParseKimiCodeQuota(body []byte, account string) (*QuotaSnapshot, error) {
 			w.Kind = "tokens"
 			w.Duration = 7 * 24 * time.Hour
 			tws = append(tws, tw{w: w, dur: 7 * 24 * time.Hour, order: order})
-			order++
 		}
 	}
 	// Longest duration → Ultimate (hard limit); the rest → Short (soft rate-cap).

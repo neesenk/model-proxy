@@ -29,6 +29,8 @@ func postProviderOp(base, endpoint, provider string, out any) error {
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("%s", display.Truncate(strings.TrimSpace(string(rb)), 200))
 	}
-	json.Unmarshal(rb, out)
+	if err := json.Unmarshal(rb, out); err != nil {
+		return fmt.Errorf("parse daemon response: %v", err)
+	}
 	return nil
 }

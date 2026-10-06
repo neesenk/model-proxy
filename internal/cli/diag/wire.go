@@ -60,7 +60,9 @@ func CmdWireRecord(args []string, cfg *configdomain.Config) {
 	// kills the process on a perfectly valid command line.
 	flagArgs, pos := SplitWireRecordArgs(args)
 	flagArgs = StripGlobalFlags(flagArgs)
-	fs.Parse(flagArgs)
+	// ExitOnError makes Parse exit the process on bad flags; it never returns
+	// a non-nil error here.
+	_ = fs.Parse(flagArgs)
 	if len(pos) != 1 {
 		fmt.Fprintf(os.Stderr, "%s usage: model-proxy wire record <provider> [--model M] [--prompt P] [--out DIR]\n", display.Red("✗"))
 		os.Exit(1)

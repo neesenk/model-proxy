@@ -205,9 +205,9 @@ func (c *StdioConn) Close() {
 	if !c.closed.CompareAndSwap(false, true) {
 		return
 	}
-	c.stdin.Close()
+	_ = c.stdin.Close()
 	if c.cmd.Process != nil {
-		c.cmd.Process.Kill()
+		_ = c.cmd.Process.Kill()
 	}
 	c.reapChild()
 }

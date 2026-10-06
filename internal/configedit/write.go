@@ -34,7 +34,7 @@ func AtomicWrite(path string, data []byte) error {
 	temporary := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		os.Remove(temporary)
+		_ = os.Remove(temporary)
 		return err
 	}
 	// fsync before rename: a crash may otherwise persist the rename ahead of
@@ -42,15 +42,15 @@ func AtomicWrite(path string, data []byte) error {
 	// pattern as the provider/quota persistence paths).
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		os.Remove(temporary)
+		_ = os.Remove(temporary)
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(temporary)
+		_ = os.Remove(temporary)
 		return err
 	}
 	if err := os.Chmod(temporary, 0o644); err != nil {
-		os.Remove(temporary)
+		_ = os.Remove(temporary)
 		return err
 	}
 	return os.Rename(temporary, path)

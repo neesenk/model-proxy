@@ -432,6 +432,7 @@ func BuildOpts() BuildOptions {
 // (it must not borrow another account's), and when the legacy single-account
 // store has none either (missing/incomplete).
 func errVolcengineAKSKNeeded(provName string) error {
+	//lint:ignore ST1005 "Agent Plan" is a product noun and the message is a CLI action hint
 	return fmt.Errorf("Agent Plan model list needs AK/SK — run `model-proxy login %s`", provName)
 }
 

@@ -1,0 +1,31 @@
+// errcheck conventional-exclusion set (reviewed once, extended rarely).
+// Rationale per symbol:
+//   (io.ReadCloser).Close            — deferred close of HTTP/response bodies;
+//                                      the connection is already consumed or
+//                                      broken, nothing actionable remains.
+//   (*database/sql.Rows).Close       — deferred rows release; errors are not
+//   (*database/sql.Stmt).Close         actionable (SQLite busy-wait noise).
+//   (*os.File).Close                 — deferred read-side close; write paths
+//                                      that must observe flush errors check
+//                                      Close explicitly and stay flagged.
+//   (net/http.ResponseWriter).Write  — handler writes to a (possibly gone)
+//                                      client; the response is already
+//                                      committed, nothing actionable.
+//   io.WriteString(net/http.ResponseWriter) — same, SSE body writes.
+// Everything else must be handled or explicitly discarded with `_ =` (e.g.
+// best-effort cleanup os.Remove, drain io.Copy(io.Discard, ...) — the blank
+// assignment documents the intent at the call site).
+(io.ReadCloser).Close
+(*database/sql.Rows).Close
+(*database/sql.Stmt).Close
+(*os.File).Close
+(net/http.ResponseWriter).Write
+io.WriteString(net/http.ResponseWriter)
+fmt.Fprint(io.Writer)
+fmt.Fprintln(io.Writer)
+fmt.Fprintf(io.Writer)
+fmt.Fprint(net/http.ResponseWriter)
+fmt.Fprintln(net/http.ResponseWriter)
+fmt.Fprintf(net/http.ResponseWriter)
+(*database/sql.DB).Close
+fmt.Fprintf(hash.Hash)

@@ -594,9 +594,9 @@ func TestMCPRoute_QuotaExhaustedSkipsBackend(t *testing.T) {
 // tool is quota-skipped, the answer must say quota-exhausted (-32000), not
 // misreport -32602 "unknown tool". An undeclared tool still gets -32602.
 func TestMCPRoute_AllCandidatesQuotaExhausted(t *testing.T) {
-	zs, _, servers, routes := twoRouteBackends(t)
+	zs, _, servers, _ := twoRouteBackends(t)
 	// Single-target route: the zhipu backend alone declares web_search.
-	routes = map[string]configdomain.MCPRoute{
+	routes := map[string]configdomain.MCPRoute{
 		"web-search": {Targets: []configdomain.MCPRouteTarget{
 			{Server: "zs", Tools: map[string]string{"web_search": "web_search_prime"}},
 		}},

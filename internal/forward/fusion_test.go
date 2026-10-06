@@ -368,11 +368,11 @@ func TestCallFusionLegFailureClasses(t *testing.T) {
 	})
 	t.Run("404 after wire verdict flips verdict, model NOT locked", func(t *testing.T) {
 		up := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) })
-		h, p, fc, target := legHarness(t, up)
+		h, _, fc, target := legHarness(t, up)
 		h.svc.ResolveBackendProto = func(declared, provName string, provCfg Provider, model, clientProto string, parentOf map[string]string) (string, bool) {
 			return "responses", true // verdict-driven switch to /responses
 		}
-		p = pipeline{svc: h.svc, state: h.state}
+		p := pipeline{svc: h.svc, state: h.state}
 		// The /responses leg targets the provider's openai base.
 		provCfg := fc.runtime.Cfg.Providers["p"]
 		provCfg.OpenAIBaseURL = up.srv.URL

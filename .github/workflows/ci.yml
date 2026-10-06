@@ -33,6 +33,9 @@ jobs:
             echo "gofmt needed:"; echo "$unformatted"; exit 1
           fi
 
+      - name: static analysis (staticcheck + govulncheck)
+        run: scripts/static.sh
+
       - name: vet + tests (JS gates enforced)
         run: |
           go vet ./...

@@ -86,18 +86,6 @@ func yamlMapSet(m *yaml.Node, key string, value *yaml.Node) {
 	}
 }
 
-// yamlMapDelete removes every entry named key from mapping m.
-func yamlMapDelete(m *yaml.Node, key string) {
-	out := m.Content[:0]
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			continue
-		}
-		out = append(out, m.Content[i], m.Content[i+1])
-	}
-	m.Content = out
-}
-
 // yamlEnsureMapPath navigates root[path...] creating intermediate mappings.
 // A non-mapping value in the way is replaced (the template owns that subtree,
 // same contract as the JSON editor's dottedMap).

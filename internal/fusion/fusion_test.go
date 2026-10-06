@@ -16,7 +16,9 @@ import (
 func TestFusionRegistry_AdmitBudget(t *testing.T) {
 	now := time.Date(2026, 7, 29, 10, 0, 0, 0, time.Local)
 	r := NewRegistry()
-	if !r.Admit("w", 2, now) || !r.Admit("w", 2, now) || r.Admit("w", 2, now) {
+	// Admit is stateful: two identical calls are the two daily admissions.
+	first, second := r.Admit("w", 2, now), r.Admit("w", 2, now)
+	if !first || !second || r.Admit("w", 2, now) {
 		t.Fatal("daily workflow budget did not admit exactly two runs")
 	}
 	if !r.Admit("other", 1, now) || !r.Admit("w", 2, now.AddDate(0, 0, 1)) {
@@ -98,7 +100,8 @@ func TestFusionRegistry_RecordEvictAggregate(t *testing.T) {
 		t.Fatal("Snapshot returned aliases to registry state")
 	}
 
-	if !r.Admit("w", 5, now) || !r.Admit("w", 5, now) {
+	a, b := r.Admit("w", 5, now), r.Admit("w", 5, now)
+	if !a || !b {
 		t.Fatal("daily admissions failed")
 	}
 	statsAgain, _ = r.Snapshot("w", now)

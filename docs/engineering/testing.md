@@ -29,9 +29,26 @@ scripts/cover.sh
 scripts/race.sh
 ```
 
-`scripts/cover.sh [threshold] [--no-enforce]` 生成 `cov.out` 和 `coverage.html`，默认列出低于 60% 的函数，并按 80% package baseline gate。底层 `go test` 任一 package 失败、缺少预期 package 输出或缺少覆盖率百分比时，脚本必须非零退出，已有或不完整的 `cov.out` 不得形成假绿。无可覆盖语句的纯测试包（`[no statements]`，如 `internal/archtest`）是合法例外；有生产 statements 但无测试文件的包会打印裸 `coverage: 0.0%` 行，默认必须判失败，只有组合入口等确实无需包内单测的 package 才能显式列入 `scripts/cover.sh` 的 `no_test_exemptions`（当前仅根 package main）。历史上尚未达到 80% 的 package 不再使用可降到 0% 的 blanket exemption，而在 `coverage_floor_for` 中逐包记录明确 floor；低于 floor 必须失败，达到 floor 但低于 80% 显示 `gap`，新增可靠测试后同步提高 floor。`scripts/cover.sh --self-test` 校验 coverage 行解析、普通 package 的 80% 合同，以及所有历史 floor 都拒绝 0% 和 `floor - 0.1%`。
+`scripts/cover.sh [threshold] [--no-enforce]` 生成 `cov.out` 和 `coverage.html`，默认列出低于 60% 的函数，并按 80% package baseline gate；profile 为 count 模式，另附「单路径块」清单——执行次数恰为 1 的覆盖块按文件聚合（covered 但没有第二个独立测试钉住该分支，是 Go 无原生分支覆盖下最接近的信号），top 文件即分支欠测 triage 的首选目标。该清单是报告不是门禁，其解析器与 floor 一样受 `--self-test` 契约覆盖。底层 `go test` 任一 package 失败、缺少预期 package 输出或缺少覆盖率百分比时，脚本必须非零退出，已有或不完整的 `cov.out` 不得形成假绿。无可覆盖语句的纯测试包（`[no statements]`，如 `internal/archtest`）是合法例外；有生产 statements 但无测试文件的包会打印裸 `coverage: 0.0%` 行，默认必须判失败，只有组合入口等确实无需包内单测的 package 才能显式列入 `scripts/cover.sh` 的 `no_test_exemptions`（当前仅根 package main）。历史上尚未达到 80% 的 package 不再使用可降到 0% 的 blanket exemption，而在 `coverage_floor_for` 中逐包记录明确 floor；低于 floor 必须失败，达到 floor 但低于 80% 显示 `gap`，新增可靠测试后同步提高 floor。`scripts/cover.sh --self-test` 校验 coverage 行解析、普通 package 的 80% 合同，以及所有历史 floor 都拒绝 0% 和 `floor - 0.1%`。
 
 普通 package coverage 是包内测试视角；composition/integration 测试对 owner package 的执行归因需要按需使用 `go test -coverpkg=<owner packages> <test packages>` 复核，不能用跨包执行率替代逐包 floor。daemon process、浏览器 OAuth/SSO、交互 stdin 和真实上游 FetchModels 属于外部 I/O 路径；其控制状态机必须通过包内窄接口、可取消等待或受控 subprocess/fake 验证，不得为 coverage 向外暴露无约束 production hook，也不得向真实用户进程发送信号。
+
+## 静态分析门禁（staticcheck + errcheck + dupl + govulncheck）
+
+```bash
+scripts/static.sh
+```
+
+四个工具构成 `go vet`/`gofmt` 之外的静态门禁，全部由 go.mod 的 `tool` 指令锁版本、经 `go tool` 运行，无需全局安装（随 module graph 一起下载），CI 与本地同一条 `scripts/static.sh`：
+
+- **staticcheck**（bug 模式 SA\*、简化 S\*、重复导入 ST1019、死代码 U1000，含 `_test.go`）：发现即修复；确属有意行为才在精确位置 `//lint:ignore <CheckID> <reason>` 压制（如 ST1005：面向用户的 config 错误文案以 `:` 结尾复述 YAML 键名、带句号的完整句引导）。现有压制点集中在 `internal/config`、`internal/login`、`internal/providerbuild`，新增压制必须逐点带理由。U1000 是删除死代码的信号，不是静音检查的理由。
+- **errcheck**（未检查的错误返回）：只查生产代码（`-ignoretests`——测试桩的写入/解码由后续断言自证）；有意的忽略必须在调用点写成显式 `_ =` / `_, _ =`（drain 拷贝、best-effort 清理删除、fire-and-forget 通知）；约定俗成无可操作的符号集（deferred Body/Rows/Stmt/DB Close、handler 写已断连客户端、CLI 显示流 `io.Writer` 的 fmt 打印等）收在 `scripts/errcheck-excludes.txt`，逐符号带理由注释，极少扩充。errcheck 默认排除（Builder/Buffer 写、fmt 到 os.Stdout/stderr 字面量等）仍然生效。
+- **dupl**（copy/paste 重复，threshold 120 token）：ratchet 门禁——克隆组数不得超过 `scripts/dupl-baseline.txt`，去重落地后同提交降基线（同 coverage floor 契约）；刻意新增重复必须升基线并说明理由。已知生产克隆候选（后续专门去重，跨 owner 边界不顺手做）：`internal/catalog` vs `internal/pricing` 的抓取骨架、`internal/admin/models_refresh` vs `internal/cli/models/check` 的模型检查、`internal/provider` kimi_code vs opencode_go 的配额窗口解析、`internal/adjudicate/state` 与 `internal/protocol` 转换器内的成对分支。
+- **govulncheck**（符号级依赖漏洞扫描——本项目是应用不是库，只对自身代码可达的漏洞生效）：每次运行从 vuln.go.dev 拉取漏洞库。
+
+升级版本（`go get -tool <path>@<version>`）新增的检查必须与对应修复同一提交落地，不引入 baseline 文件之外的豁免或 check 级开关。
+
+依赖例行升级由 `.github/dependabot.yml` 驱动（golang + github-actions，weekly、分组开 PR）——govulncheck 只覆盖可达漏洞，例行升级 PR 恰好是本仓 CI 门禁可独立验证的最小变更单元。
 
 ## 构建验证
 
@@ -385,6 +402,28 @@ production key→high），判定漂移时场景 FAIL 并跳过依赖链（high 
 high）。`-only a,b` 选子集，`-token`/`MP_ADMIN_TOKEN` 过 admin auth。套件自身
 hermetic：`main_test.go` 用脚本化 fake daemon（guard 语义参考模型）+ httptest
 wire-shape + 错误注入三套测试覆盖 harness。
+
+## 模型覆盖度 triage（coding agent 契约，规则之外的托底层）
+
+确定性门禁只知道数字，不知道哪条单见证分支是承重的。这一层**不写代码**：数据管道复用确定性工具，语义判断由 coding agent 按本契约执行（开发期模型调用走指令契约；产品运行时的模型调用——guard 判定、Fusion judge——才进代码并受 fail-closed 契约约束，这是两类模型使用的分界线）。执行步骤：
+
+1. `scripts/cover.sh` 产出 `cov.out` 与单路径块清单（count==1 覆盖块，按文件聚合排序）——评审输入以这份确定性清单为准，不即兴挑选文件。
+2. 取清单 top 文件（默认 8 个），逐文件提取弱块精确位置（cov.out 路径带 `model-proxy/` 前缀，按文件名过滤）：
+
+   ```bash
+   awk '$3==1 && $2>0 {print}' cov.out | grep 'internal/config/config.go'
+   ```
+
+   行格式 `file.go:start.col,end.col 语句数 执行次数`（grep 用完整路径片段，避免 `config/config.go` 同时命中 `internal/cli/config/` 与 `internal/config/`）。
+3. 带上下文读源码（块前后到函数边界），必要时顺调用链查证该分支是否承重、拟建议的测试是否已存在——只看块内几行不足以定级。
+4. 按固定 rubric 分级输出报告：
+   - **HIGH**：承载仓库红线（AGENTS.md：fail-closed、单快照、锁序、pin 不 failover、凭据不进输出）或协议转换不变量（§协议转换的三层边界测试）、错误处理、用量/计费口径、锁与安全语义，且仅一个见证——必须点名第二个测试的名字及其要钉住的精确行为；
+   - **MEDIUM**：用户可见但爆炸半径有限（CLI 文案、校验报错、HTTP JSON 形状）——给一条廉价表测；
+   - **LOW**：一次性 init、纯排版、可证明良性——一句话说明理由，不展开。
+   报告结尾给 top 5「下一个测试」排序；源码未读到的块如实标注，不得臆造。
+5. 高价值项可直接闭环：按本文件的断言与回归红规则补第二个独立测试，复跑 `scripts/cover.sh` 证明单路径计数下降。
+
+边界：**advisory，绝不进 CI/门禁**——模型判断不阻塞构建；评审深度可随会话波动，但输入清单与 rubric 固定。
 
 ## soak 压测工具（`scripts/soak`，手动运行）
 

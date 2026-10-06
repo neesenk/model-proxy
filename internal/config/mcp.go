@@ -153,6 +153,7 @@ func (c *Config) validateMCPRoutes() error {
 				return fmt.Errorf("mcp_routes %q target %d: mcp is empty — reference an mcp: server name", name, i)
 			}
 			if _, ok := c.MCP[t.Server]; !ok {
+				//lint:ignore ST1005 trailing ':' echoes the YAML key mcp: in this user-facing config error
 				return fmt.Errorf("mcp_routes %q target %d: mcp %q is not defined under mcp:", name, i, t.Server)
 			}
 			if c.MCP[t.Server].Transport == "sse" {
@@ -217,6 +218,7 @@ func (c *Config) validateMCP() error {
 		}
 		if s.Provider != "" {
 			if _, ok := c.Providers[s.Provider]; !ok {
+				//lint:ignore ST1005 trailing ':' echoes the YAML key providers: in this user-facing config error
 				return fmt.Errorf("mcp %q: provider %q is not defined under providers:", name, s.Provider)
 			}
 			// Custom auth headers need the raw key, which only apikey-backed
@@ -416,6 +418,7 @@ func (c *Config) validateMCPStdio(name string, s MCPServer) error {
 	switch s.MCPAuthMode() {
 	case "provider":
 		if _, ok := c.Providers[s.Provider]; !ok {
+			//lint:ignore ST1005 trailing ':' echoes the YAML key providers: in this user-facing config error
 			return fmt.Errorf("mcp %q: provider %q is not defined under providers:", name, s.Provider)
 		}
 	case "none":

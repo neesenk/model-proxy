@@ -296,6 +296,7 @@ func (s *Service) RestoreTakeover(client string) (appapi.TakeoverRestoreResult, 
 	}
 	result.Restored = append(result.Restored, report.Restored...)
 	result.Skipped = append(result.Skipped, report.Skipped...)
+	result.Warnings = append(result.Warnings, report.Warnings...)
 	return result, nil
 }
 
@@ -359,7 +360,7 @@ func validateTemplateCandidate(templatesDir, name string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 	entries, err := os.ReadDir(templatesDir)
 	if err != nil && !os.IsNotExist(err) {
 		return err

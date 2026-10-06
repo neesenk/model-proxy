@@ -130,7 +130,8 @@ func Money(v float64) string { return fmt.Sprintf("$%.2f", v) }
 // "22500" -> "22,500"). Truncates decimals, adds thousands separators.
 func FormatCredits(s string) string {
 	f := 0.0
-	fmt.Sscanf(s, "%f", &f)
+	// Unparseable input formats as 0, same as before the check existed.
+	_, _ = fmt.Sscanf(s, "%f", &f)
 	return FormatWithCommas(int(f))
 }
 

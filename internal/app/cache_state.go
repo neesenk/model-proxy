@@ -106,7 +106,7 @@ func writeCacheState(path string, state persistedCacheState) error {
 		return err
 	}
 	tmp := f.Name()
-	remove := func() { os.Remove(tmp) }
+	remove := func() { _ = os.Remove(tmp) }
 	if _, err := f.Write(data); err != nil {
 		f.Close()
 		remove()

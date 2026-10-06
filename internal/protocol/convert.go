@@ -1581,7 +1581,9 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 		// content may be a string or null.
 		if len(c.Message.Content) > 0 && string(c.Message.Content) != "null" {
 			var cv any
-			sonic.Unmarshal(c.Message.Content, &cv)
+			// RawMessage carved out of an already-valid envelope cannot fail to
+			// re-decode; on garbage, cv stays nil and the string assert skips.
+			_ = sonic.Unmarshal(c.Message.Content, &cv)
 			if s, ok := cv.(string); ok {
 				part := map[string]any{"type": "output_text", "text": s}
 				if annotations := chatAnnotationsToResponses(c.Message.Annotations); len(annotations) > 0 {

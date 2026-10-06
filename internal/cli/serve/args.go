@@ -117,7 +117,7 @@ func ReleasePidFileIfOwned(path string) {
 	if err != nil || pid != os.Getpid() {
 		return
 	}
-	os.Remove(path)
+	_ = os.Remove(path)
 }
 
 // parsePidFileContents extracts the leading decimal pid from raw pid-file
@@ -181,7 +181,7 @@ func maybeReloadDaemon(args []string, cfg *configdomain.Config, signal func(*os.
 			return
 		}
 		// Stale pid file — clean it up so the next start isn't confused.
-		os.Remove(pidPath)
+		_ = os.Remove(pidPath)
 		return
 	}
 	if err := signal(proc, syscall.SIGHUP); err != nil {
@@ -218,7 +218,7 @@ func ReadLivePid(logFile string) int {
 			return pid
 		}
 		// Stale pid file — clean it up so the next start isn't confused.
-		os.Remove(pidPath)
+		_ = os.Remove(pidPath)
 		return 0
 	}
 	return pid

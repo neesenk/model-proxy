@@ -178,15 +178,15 @@ func writeConfigAtomic(cfgPath string, data []byte) error {
 	tmpName := tmp.Name()
 	if _, werr := tmp.Write(data); werr != nil {
 		tmp.Close()
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return werr
 	}
 	if cerr := tmp.Close(); cerr != nil {
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return cerr
 	}
 	if cerr := os.Chmod(tmpName, mode); cerr != nil {
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return cerr
 	}
 	return os.Rename(tmpName, cfgPath)

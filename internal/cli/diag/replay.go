@@ -44,7 +44,7 @@ func CmdReplay(args []string, cfg *configdomain.Config) {
 		fmt.Fprintf(os.Stderr, "%s %v\n", display.Red("✗"), err)
 		os.Exit(1)
 	}
-	os.Stdout.Write(body)
+	_, _ = os.Stdout.Write(body)
 }
 
 // doReplay fetches the stored request by id, re-sends it to the proxy with a

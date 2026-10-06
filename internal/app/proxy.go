@@ -15,7 +15,6 @@ import (
 	guardsession "model-proxy/internal/guard/session"
 	mcpkg "model-proxy/internal/mcp"
 	"model-proxy/internal/observe/budget"
-	"model-proxy/internal/observe/counters"
 	obscounters "model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/observe/logx"
@@ -371,14 +370,14 @@ func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 	// and swaps the scanner in place, generation-consistent. Lifecycle-admitted
 	// like the other loops: stopped and waited by Close.
 	p.lifecycle.Run(p.guardSecretRefreshLoop)
-	p.metrics = counters.NewMetricsStore()
+	p.metrics = obscounters.NewMetricsStore()
 	// SSE token counter. Persistence (baseline restore + per-minute flush) is
 	// projected by statsFlusher into internal/observe/stats.Store, opened only
 	// by lifecycle services so direct-NewProxy tests stay in-memory.
-	p.tokens = counters.NewTokenCounter()
+	p.tokens = obscounters.NewTokenCounter()
 	// Per-agent counters (detected from the client UA). Flushed alongside the
 	// minute buckets by the same flusher; nil-stats tests keep them in-memory.
-	p.agents = counters.NewAgentCounter()
+	p.agents = obscounters.NewAgentCounter()
 	// Exact-match response cache. nil unless cache.enabled is set in config, so
 	// the default (off) path and direct-NewProxy tests pay zero overhead.
 	// Seeded from cache_state.json so restarts continue the hit/miss history.

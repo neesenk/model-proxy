@@ -30,13 +30,6 @@ import (
 // nothing on the daemon; the only disk write is the security-audit record for
 // a drifted client (guard.audit on, see auditTakeoverDrift).
 
-// statusModelLock decodes one entry of /api/status model_locks. The field is
-// decoded here (not in serve_status.go) because only doctor --live reads it.
-type statusModelLock struct {
-	Model string `json:"model"`
-	Until string `json:"until"` // RFC3339, lockout horizon
-}
-
 // doctorRequestsResp decodes the parts of /api/requests doctor --live reads.
 type doctorRequestsResp struct {
 	Enabled bool `json:"enabled"`

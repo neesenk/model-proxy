@@ -47,8 +47,6 @@ type fakeSink struct {
 	medium       []Job
 	low          []Job
 	fails        []Job
-	mediumCached int
-	lowCached    int
 	lastEvidence string
 }
 

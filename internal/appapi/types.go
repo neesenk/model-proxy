@@ -809,6 +809,10 @@ type TakeoverRestoreResult struct {
 	Status   string   `json:"status"`
 	Restored []string `json:"restored"`
 	Skipped  []string `json:"skipped"`
+	// Warnings carries the op-journal notices (an interrupted previous op,
+	// or a journal that could not be written/cleared) — same rendering as
+	// the takeover run warnings.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // TakeoverPreviewWrite is one client config file a takeover would write

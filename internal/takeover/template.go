@@ -1388,23 +1388,6 @@ func (t *Template) driftEnvKey(ctx renderContext) string {
 	return sortedKeys(t.Env.Set)[0]
 }
 
-// nestedString walks v along path and returns the terminal string.
-func nestedString(v map[string]any, path ...string) (string, bool) {
-	cur := v
-	for i, k := range path {
-		if i == len(path)-1 {
-			s, ok := cur[k].(string)
-			return s, ok
-		}
-		next, ok := cur[k].(map[string]any)
-		if !ok {
-			return "", false
-		}
-		cur = next
-	}
-	return "", false
-}
-
 // tomlTopKeyValue reads a top-level TOML string key (before any [section]).
 // The key match is exact ("model" must not hit "model_provider") and any line
 // after the first "[" belongs to a table, not the top level.

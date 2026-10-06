@@ -204,7 +204,8 @@ func (p *CodexProvider) Usage() error {
 			} `json:"individual_limit"`
 		} `json:"spend_control"`
 	}
-	json.Unmarshal(body, &u)
+	// Display-only view: an unparseable body renders "(unknown)" fields.
+	_ = json.Unmarshal(body, &u)
 	fmt.Printf("%s %s\n", display.Dim("Account:   "), display.Bold(display.Cyan(display.Or(u.Email, "(unknown)"))))
 	fmt.Printf("%s %s\n", display.Dim("Plan:      "), display.Magenta(display.Or(u.PlanType, "(unknown)")))
 	if u.Credits != nil {

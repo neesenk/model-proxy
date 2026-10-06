@@ -33,20 +33,20 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return err
 	}
 	if err := os.Chmod(tmpName, perm); err != nil {
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return err
 	}
 	return os.Rename(tmpName, path)
@@ -333,6 +333,7 @@ type TakeoverReport struct {
 type RestoreReport struct {
 	Restored []string
 	Skipped  []string
+	Warnings []string
 }
 
 func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFacts, templatesDir string, mode ResolveMode) error {
@@ -432,6 +433,16 @@ func RunTakeoverReportOpts(cfg *configdomain.Config, which, bakDir string, facts
 	if err != nil {
 		return report, err
 	}
+	// Intent journal BEFORE the first mutation (see journal.go): an
+	// interrupted previous run is surfaced, then superseded by this record.
+	if interrupted, jerr := beginOp(bakDir, "takeover", clients); jerr != nil {
+		logx.Warnf("takeover: %v (continuing with degraded crash recovery)", jerr)
+		report.Warnings = append(report.Warnings, "op journal unavailable: "+jerr.Error())
+	} else if interrupted != nil {
+		w := interruptedWarning(interrupted)
+		logx.Warnf("takeover: %s", w)
+		report.Warnings = append(report.Warnings, w)
+	}
 	routes := facts.Routes
 	meta := facts.Meta
 	if facts.DisabledStoreWarning != "" {
@@ -509,8 +520,15 @@ func RunTakeoverReportOpts(cfg *configdomain.Config, which, bakDir string, facts
 		if err := c.RewriteOpts(cfg, meta, routes, opts); err != nil {
 			return report, fmt.Errorf("%s rewrite: %w", c.Name, err)
 		}
+		if err := verifyRewrite(c, cfg, opts.Scope); err != nil {
+			return report, err
+		}
 		logx.Infof("  ✓ %s done", c.Name)
 		report.Applied = append(report.Applied, AppliedClient{Name: c.Name, Note: c.Note})
+	}
+	if err := finishOp(bakDir); err != nil {
+		logx.Warnf("takeover: %v", err)
+		report.Warnings = append(report.Warnings, err.Error())
 	}
 	return report, nil
 }
@@ -557,6 +575,15 @@ func RunRestoreReport(cfg *configdomain.Config, which, bakDir, templatesDir stri
 	if err != nil {
 		return report, err
 	}
+	// Same intent journal as takeover (see journal.go).
+	if interrupted, jerr := beginOp(bakDir, "restore", clients); jerr != nil {
+		logx.Warnf("restore: %v (continuing with degraded crash recovery)", jerr)
+		report.Warnings = append(report.Warnings, "op journal unavailable: "+jerr.Error())
+	} else if interrupted != nil {
+		w := interruptedWarning(interrupted)
+		logx.Warnf("restore: %s", w)
+		report.Warnings = append(report.Warnings, w)
+	}
 	for _, c := range clients {
 		logx.Infof("restore %s: %s (from %s/)", c.Name, c.File, bakDir)
 		if err := Restore(c.File, bakDir, c.Name); err != nil {
@@ -585,6 +612,10 @@ func RunRestoreReport(cfg *configdomain.Config, which, bakDir, templatesDir stri
 		}
 		logx.Infof("  ✓ %s restored", c.Name)
 		report.Restored = append(report.Restored, c.Name)
+	}
+	if err := finishOp(bakDir); err != nil {
+		logx.Warnf("restore: %v", err)
+		report.Warnings = append(report.Warnings, err.Error())
 	}
 	return report, nil
 }

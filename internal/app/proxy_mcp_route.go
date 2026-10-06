@@ -279,7 +279,7 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 			continue
 		}
 		if mcpkg.FailoverStatus(resp.StatusCode) {
-			io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
 			if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusUnauthorized {
@@ -349,7 +349,7 @@ func (p *Proxy) mcpRouteEnsureSub(snap RuntimeSnapshot, srv configdomain.MCPServ
 			conn.Close()
 			return mcpkg.SubSession{}, fmt.Errorf("stdio initialize: %w", err)
 		}
-		conn.Call(inbound.Context(), mcpNotifInitBody) //nolint — best-effort
+		_, _ = conn.Call(inbound.Context(), mcpNotifInitBody) // best-effort notification
 		if err := p.mcpStdio.put(key, server, conn); err != nil {
 			conn.Close()
 			return mcpkg.SubSession{}, err
@@ -393,7 +393,7 @@ func (p *Proxy) mcpRouteEnsureSub(snap RuntimeSnapshot, srv configdomain.MCPServ
 	}
 	// Initialized notification: required by stateful servers, tolerated by all.
 	if nresp, _, err := p.mcpRoutePost(snap, srv, account, mcpNotifInitBody, upSID, protocol, inbound); err == nil {
-		io.Copy(io.Discard, io.LimitReader(nresp.Body, 4096))
+		_, _ = io.Copy(io.Discard, io.LimitReader(nresp.Body, 4096))
 		nresp.Body.Close()
 	}
 	sub := mcpkg.SubSession{Server: server, Account: account, UpstreamID: upSID, Protocol: protocol, Initialized: true}
@@ -453,12 +453,12 @@ func (p *Proxy) mcpRouteFanOut(snap RuntimeSnapshot, route configdomain.MCPRoute
 		}
 		if sub.Protocol == "stdio" {
 			if conn, ok := p.mcpStdio.get(mcpRouteStdioKey(sid, sub.Server)); ok {
-				conn.Call(inbound.Context(), body) //nolint — fire-and-forget
+				_, _ = conn.Call(inbound.Context(), body) // fire-and-forget
 			}
 			continue
 		}
 		if resp, _, err := p.mcpRoutePost(snap, srv, sub.Account, body, sub.UpstreamID, sub.Protocol, inbound); err == nil {
-			io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 		}
 	}
@@ -477,7 +477,7 @@ func (p *Proxy) mcpTerminateSub(snap RuntimeSnapshot, srv configdomain.MCPServer
 		clientHeaders: inbound.Header,
 	})
 	if err == nil {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
 	}
 }

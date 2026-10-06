@@ -261,7 +261,7 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 	if err == nil && resp.StatusCode == http.StatusUnauthorized && !hasSess && len(accounts) > 1 {
 		// One-shot rotation on a sessionless 401 (mirrors BufferedLeg's
 		// one-time 401 refresh): the next account may hold a valid key.
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
 		account = mcpNextAccount(accounts, account)
 		resp, upstreamBodyCap, err = p.mcpRoundTrip(snap, name, srv, account, sess.UpstreamID, r, body)

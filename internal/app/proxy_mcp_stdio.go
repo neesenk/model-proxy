@@ -282,7 +282,7 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 			return
 		}
 		// Initialized notification: required by stateful servers.
-		conn.Call(r.Context(), mcpNotifInitBody) //nolint — best-effort
+		_, _ = conn.Call(r.Context(), mcpNotifInitBody) // best-effort notification
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Mcp-Session-Id", sid)
 		w.WriteHeader(http.StatusOK)

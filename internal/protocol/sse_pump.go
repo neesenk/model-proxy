@@ -52,10 +52,7 @@ func pumpSSEFrames(h sseFrameHooks, sc *bufio.Scanner, bomStripped *bool, trackE
 	var pendEvents []string
 	for !h.hasOutput() {
 		if h.isDone() {
-			if h.drainDone() {
-				return true
-			}
-			return false
+			return h.drainDone()
 		}
 		line := ""
 		if sc.Scan() {

@@ -29,8 +29,9 @@ func requestWantsStream(body []byte) bool {
 		return false
 	}
 	// node.Bool() coerces ("true", 1 -> true); the old map-unmarshal semantics
-	// accepted only a literal boolean true, so compare the node TYPE instead.
-	return node.Type() == ast.V_TRUE
+	// accepted only a literal boolean true, so compare the node TYPE instead
+	// (TypeSafe: Node.Type is deprecated as not concurrent-safe).
+	return node.TypeSafe() == ast.V_TRUE
 }
 
 func parseWireSSE(raw []byte) ([]wireSSEEvent, error) {

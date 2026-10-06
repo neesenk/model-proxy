@@ -67,7 +67,7 @@ func PreviewWritesDraft(cfg *configdomain.Config, which, draft string, opts Take
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 	if err := os.WriteFile(filepath.Join(tmp, which+".yaml"), []byte(draft), 0o600); err != nil {
 		return nil, err
 	}
@@ -92,7 +92,7 @@ func PreviewWritesOpts(cfg *configdomain.Config, which, templatesDir string, opt
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 	// Redirect every unique client file to a private copy. The redirect MUST
 	// precede any Rewrite call — a spec writing its real File would mutate the
 	// user's config, which is exactly what a preview must never do.

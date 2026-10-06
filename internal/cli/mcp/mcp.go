@@ -187,7 +187,7 @@ func cmdTestStdio(cfg *configdomain.Config, name string, srv configdomain.MCPSer
 		fmt.Fprintf(os.Stderr, "%s %s — initialize: no protocolVersion in response (%s)\n", display.Red("✗"), name, lat())
 		os.Exit(1)
 	}
-	conn.Call(probeCtx, []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)) //nolint — best-effort
+	_, _ = conn.Call(probeCtx, []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)) // best-effort notification
 	listResp, err := conn.Call(probeCtx, []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s %s — tools/list: %v (%s)\n", display.Red("✗"), name, err, lat())

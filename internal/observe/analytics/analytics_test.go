@@ -10,8 +10,6 @@ import (
 
 func almostEqual(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
-func ptr(v float64) *float64 { return &v }
-
 var pricedCatalog = &pricing.Catalog{ByModel: map[string]pricing.Entry{
 	"priced": {Prompt: .001, Completion: .002, CacheRead: .003, CacheWrite: .004},
 }}

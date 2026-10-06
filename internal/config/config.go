@@ -1774,6 +1774,7 @@ func (c *Config) validate() error {
 		}
 		prov, ok := c.Providers[sh.Provider]
 		if !ok {
+			//lint:ignore ST1005 trailing ':' echoes the YAML key providers: in this user-facing config error
 			return fmt.Errorf("shadow %q: provider %q not defined under providers:", route, sh.Provider)
 		}
 		if sh.Protocol != "" {
@@ -1921,6 +1922,7 @@ func (c *Config) validate() error {
 			}
 			prov, ok := c.Providers[sel.Target.Provider]
 			if !ok {
+				//lint:ignore ST1005 trailing ':' echoes the YAML key providers: in this user-facing config error
 				return fmt.Errorf("%s: provider %q not defined under providers:", what, sel.Target.Provider)
 			}
 			if sel.Target.Protocol != "decisions" {
@@ -2154,6 +2156,7 @@ func (c *Config) checkFusionTarget(recipe, where string, t RouteTarget) error {
 	}
 	prov, ok := c.Providers[t.Provider]
 	if !ok {
+		//lint:ignore ST1005 trailing ':' echoes the YAML key providers: in this user-facing config error
 		return fmt.Errorf("%s: provider %q not defined under providers:", what, t.Provider)
 	}
 	if t.Model == "" {
@@ -2239,6 +2242,7 @@ func (c *Config) validateRoutePolicyGrades(route string, policy RoutePolicy) err
 				return fmt.Errorf("route_policy %q grades: grade %q target %d: fusion targets are not allowed inside grades", route, name, i)
 			}
 			if _, ok := c.Providers[t.Provider]; !ok {
+				//lint:ignore ST1005 trailing ':' echoes the YAML key providers: in this user-facing config error
 				return fmt.Errorf("route_policy %q grades: grade %q target %d: provider %q not defined under providers:", route, name, i, t.Provider)
 			}
 			if len(routeTargets) > 0 && !routeTargets[t.Provider+"/"+t.Model] {
@@ -2390,6 +2394,7 @@ func (c *Config) validateRoutePolicyEval(route string, policy RoutePolicy) error
 	}
 	prov, ok := c.Providers[eval.Judge.Provider]
 	if !ok {
+		//lint:ignore ST1005 trailing ':' echoes the YAML key providers: in this user-facing config error
 		return fmt.Errorf("route_policy %q eval: judge provider %q not defined under providers:", route, eval.Judge.Provider)
 	}
 	if eval.Judge.Protocol != "decisions" {

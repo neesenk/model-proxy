@@ -274,7 +274,7 @@ func TestArchitectureBoundaryChecker(t *testing.T) {
 
 	// The Web field-set check must reject a retained application owner while
 	// accepting the reviewed transport ports.
-	f, fset = parse(`type WebServer struct {
+	f, _ = parse(`type WebServer struct {
 	reads proxyReadView
 	admin proxyAdminCommands
 	backend *Proxy
@@ -1536,34 +1536,6 @@ func expressionPath(expr ast.Expr) string {
 	default:
 		return ""
 	}
-}
-
-// namedCallWithArgsCount counts calls shaped exactly as
-// name(firstIdent, selectorBase.selectorField). It guards assembly code against
-// replacing a build-derived value with a fresh storage-dependent computation
-// while retaining the same callee and therefore fooling a call-count check.
-func namedCallWithArgsCount(n ast.Node, name, firstIdent, selectorBase, selectorField string) int {
-	count := 0
-	ast.Inspect(n, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok || callableName(call.Fun) != name || len(call.Args) != 2 {
-			return true
-		}
-		first, ok := call.Args[0].(*ast.Ident)
-		if !ok || first.Name != firstIdent {
-			return true
-		}
-		second, ok := call.Args[1].(*ast.SelectorExpr)
-		if !ok || second.Sel.Name != selectorField {
-			return true
-		}
-		base, ok := second.X.(*ast.Ident)
-		if ok && base.Name == selectorBase {
-			count++
-		}
-		return true
-	})
-	return count
 }
 
 // chainedCallCount finds `receiverFactory(...).terminal(...)` calls. It is

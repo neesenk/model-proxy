@@ -53,7 +53,8 @@ func TestSanitizeToolUseID(t *testing.T) {
 	if e1 == e2 || !strings.HasPrefix(e1, "toolu_empty_") || !strings.HasPrefix(e2, "toolu_empty_") {
 		t.Errorf("empty ids = %q/%q want distinct toolu_empty_<n>", e1, e2)
 	}
-	if sanitizeToolUseID("functions.Bash:0") != sanitizeToolUseID("functions.Bash:0") {
+	// Two separate calls with the same raw id must agree (deterministic map).
+	if a, b := sanitizeToolUseID("functions.Bash:0"), sanitizeToolUseID("functions.Bash:0"); a != b {
 		t.Error("same raw id must always map to the same sanitized id")
 	}
 }

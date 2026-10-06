@@ -276,6 +276,7 @@ func (c *AqpClient) FetchAPIKeyAtContext(ctx context.Context, endpoint string) (
 		cookie = a.SSOSessionCookie
 	}
 	if cookie == "" {
+		//lint:ignore ST1005 full-sentence user guidance; the trailing period is deliberate
 		return nil, fmt.Errorf("not logged in. Please login with your company Google account first.")
 	}
 	// The AQP endpoint returns the full identity without needing project_id

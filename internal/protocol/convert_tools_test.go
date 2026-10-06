@@ -343,7 +343,7 @@ func TestStreaming_OpenAIInterleavedParallelTools(t *testing.T) {
 	out := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(stream), "gpt"))
 	s := string(out)
 	// Both tools present, complete, in index order (fa before fb).
-	if strings.Index(s, `"name":"fa"`) < 0 || strings.Index(s, `"name":"fb"`) < 0 {
+	if !strings.Contains(s, `"name":"fa"`) || !strings.Contains(s, `"name":"fb"`) {
 		t.Errorf("missing a tool_use block:\n%s", s)
 	}
 	if strings.Index(s, `"name":"fa"`) > strings.Index(s, `"name":"fb"`) {

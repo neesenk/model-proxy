@@ -388,7 +388,7 @@ func (s Store) withLock(name string, fn func() error, wait func(time.Duration), 
 			// PID is diagnostic (a human inspecting a stranded lockfile); O_EXCL
 			// is the real arbiter, so a write error does not fail the lock. Close
 			// immediately so the (deferred) Remove works on Windows too.
-			fmt.Fprintf(f, "%d\n", os.Getpid())
+			_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
 			f.Close()
 			break
 		}
@@ -503,7 +503,8 @@ func (s Store) tryPoolLock(name string) (release func(), ok bool) {
 	if err != nil {
 		return nil, false
 	}
-	fmt.Fprintf(f, "%d\n", os.Getpid())
+	// PID is diagnostic; O_EXCL is the real arbiter (same as poolLock).
+	_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
 	f.Close()
 	return func() { _ = os.Remove(lockPath) }, true
 }

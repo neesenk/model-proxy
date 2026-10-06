@@ -2,6 +2,7 @@ package shadow
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -413,7 +414,7 @@ func TestExecutePreparationAndTransportErrors(t *testing.T) {
 			BackendProtocol: protocol.OpenAI,
 			ClientPath:      "/v1/chat/completions",
 		})
-		result := runtime.Execute(nil, Job{Plan: plan, Body: []byte(`{}`)})
+		result := runtime.Execute(context.TODO(), Job{Plan: plan, Body: []byte(`{}`)})
 		if !errors.Is(result.Err, transportErr) || result.Request == nil || result.Response != nil || result.Started.IsZero() {
 			t.Fatalf("transport result = %+v, want prepared exchange with exact error", result)
 		}
