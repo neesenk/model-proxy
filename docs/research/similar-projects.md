@@ -1,6 +1,6 @@
 # 同类开源项目调研与方向建议
 
-> 状态：调研报告（非实现契约）。事实基准：2026-08 第一轮（GitHub 元数据快照，star 数仅用于量级判断）+ 2026-09 第二轮增量（各家官网/README/changelog 一手来源；其中的性能与成本数字多为厂商自述，未经第三方验证）。
+> 状态：调研报告（非实现契约）。事实基准：2026-08 第一轮（GitHub 元数据快照，star 数仅用于量级判断）+ 2026-09 第二轮增量（各家官网/README/changelog 一手来源；其中的性能与成本数字多为厂商自述，未经第三方验证）+ 2026-10 第三轮增量（GitHub releases/官方 changelog 一手来源，覆盖 2026-09-01 → 2026-10-05 窗口）。
 > 本文档只做竞品分析与方向建议；实现契约仍以 `docs/architecture/` 各专题为准。
 
 ## 1. 调研范围
@@ -77,6 +77,24 @@
 
 6. **评测从"平台"走向"自动闭环"**。TensorZero 把推理+反馈落自有 DB → SFT/RLHF/GEPA 自动 prompt 工程/dynamic ICL/best-of-N，bandits 自适应 A/B，2026 的 Autopilot 自动分析观测数据、建 eval、优化 prompt 再跑 A/B（[repo](https://github.com/tensorzero/tensorzero)）；Braintrust Loop 从生产 trace 自动生成数据集与 scorer，在线打分支持 trace/span/group 三种范围 + 采样 + rewind（[score-online](https://www.braintrust.dev/docs/evaluate/score-online)）；Langfuse 2026-09 上线用 TypeSafe Jev 做 judge（类型化问题 + 概率答案 + 校准置信度，[changelog](https://langfuse.com/changelog/2026-09-22-jev-as-a-judge)）；Arize Phoenix 提供 OpenAI 兼容代理 + `/mcp` 端点让编码 agent 直接查 trace（[repo](https://github.com/Arize-ai/phoenix)）。
 
+### 2.4 第三轮增量要点（2026-10）
+
+窗口 2026-09-01 → 2026-10-05，四路调研（企业网关 / 编码 agent 控制面 / MCP 与基础设施 / 评测与安全），全部一手来源核实。
+
+1. **会话粘滞×熔断的交互语义成为代理层新竞争面**。Bifrost 9 月连发 v2.2.2–2.2.4 专修这块：粘滞绑定在 (provider, key/model) 组合上而非仅 provider；provider 级会话粘滞直接读 Claude Code/Codex/OpenCode 自带 session header（`x-bf-session-id`），只重排当前路由链、**绝不复活已因失败/冷却被排除的账号**，被判失败的绑定主动丢弃；被静默跳过的 fallback 写入 routing log；fallback 引用从 `provider/model` 字符串改为路由时刻解析（修重启/重载后失效）（[releases](https://github.com/maximhq/bifrost/releases)）。两个值得直接借鉴的发现：①Claude Code 的 server-side thread 绑定上游账号，多 key 轮询下无法存活——对这类会话要么粘死同一账号，要么像 Bifrost 一样返回可识别错误（`thread_unsupported_request`）让客户端整轮重发，不要静默失败；②LiteLLM v1.103 在 fallback 目标上复核预算（[release notes](https://docs.litellm.ai/release_notes/)）——failover 选下一账号时必须复核其配额状态，避免打进已耗尽账号。
+
+2. **takeover 写入被做成"引擎"**。cc-switch 4.0.0（10/4）的关键字段写入引擎：只替换 endpoint/凭据/模型/协议字段，其余 key、注释、顺序逐字节保留；staging + 回读比对 + rename；`live-state.json` 记录操作意图、崩溃后恢复；首写字节级备份；live 文件 0600（[CHANGELOG](https://github.com/farion1231/cc-switch/blob/main/CHANGELOG.md)）。同版的 Aggregation（Stack）模式把多 provider 模型以 `ccs-<key>/<model>` 前缀并进同一客户端选择器，且带前缀请求明确定义为绕过路由/熔断——"聚合 ≠ 路由"的取舍可参考。Codex 兼容新坑（cc-switch 3.20.x/4.0 持续跟进）：`auth.json` 不再作为第三方凭据载体、官方路由不能换 `model_provider`（否则会话历史分桶丢失）。另有一条协议转换硬教训：会话中途注入的 system 消息必须原位保留，重排会让上游 radix cache 命中率从 99% 崩到 20%（cc-switch #6941）。
+
+3. **MCP 2026-07-28 无状态 spec 进入落地期**。mcphub 双栈迁移最激进：`X-MCPHub-State-Id` 显式状态句柄（客户端 UUIDv4，绑定凭据+用户+路由，空闲 30 分钟过期，多副本需 sticky）、`ttlMs`/`cacheScope` 保守缓存（TTL = 上游 discovery 有效期 ∩ 网关 5s 预算，不确定则 0）、按每请求 clientCapabilities 门控 MCP Apps、legacy HTTP+SSE 进入 12 个月弃用窗口（[releases](https://github.com/samanhappy/mcphub/releases)）；ContextForge v1.0.11 迁 MCP SDK 2.x 且现代协议协商**默认 legacy、显式开关切 auto**；agentgateway v1.5 用 CEL 派生 session key 做跨副本确定性亲和。安全教训（回归清单级）：mcphub v1.0.37 CRITICAL——禁用工具只在 tools/list 过滤、tools/call 仍可执行（可被注入绕过），**allowlist 必须在执行路径生效**；Docker/agentgateway 的远程 URL 默认 SSRF fail-closed + 显式逃生阀。Cloudflare Workers OAuth Provider v1（10/1）完整支持 MCP 2026-07-28 authorization spec（CIMD、RFC 9728、step-up）。
+
+4. **结构化判定（decision-model as judge）是本月最强跨项目信号**。Langfuse（09-22）、Braintrust JS SDK（09-17）、Phoenix evals 2.6.0（09-22）、GPTCache（09-20，未发版）四家同月接入 TypeSafe Jev：固定选项输出 + 置信度 + 各选项概率，无自由文本。GPTCache 的 JevEvaluation 用它做语义缓存命中判定：任务同一性/上下文/格式/新鲜度/缺失上下文五维检查取最小分、全过阈（0.70）才复用。配套动作：Langfuse evaluator 历史回填（09-07，新 judge 可追溯打历史 observation）与 evaluator 告警（09-02）；Braintrust span customizers 上传前脱敏、customizer 失败则整批扣住（fail-closed）；Phoenix 新增 DECISION span kind（10-01）与 trace 树内评测结果（09-30）；NeMo Guardrails v0.24 的 `/v1/checks`（单独跑 rail、不产生新响应）与 rail manifest 声明式能力描述。
+
+5. **fail-closed 卫生成为标配**。LiteLLM v1.104（10/3）：master key 未设置/为空/公开默认值时拒绝启动；guardrail 逐 choice 扫描流式工具调用参数（`delta.partial_json`）；spend log 剥离请求体凭据；泄露密码检测（[release](https://github.com/BerriAI/litellm/releases/tag/v1.104.0)）。Bifrost v2.2.5（10/2）：首启动 Setup Token（新装实例不再对全网开放）。new-api rc.32 的模型修饰符协议 `model@thinking:on|off|adaptive|<budget>`、`@effort:`、`@temperature:`——按请求覆盖模型参数，右侧优先、未知键 400，但后缀解析限定已知模型家族（保护 `kimi-k2-thinking` 这类真实 ID）；rc.38 的请求策略（请求检查/会话与重试/渠道健康）并在使用日志留策略决策记录。
+
+6. **生态集中化加速，本地细分定位反而更稳**。Helicone 被 Mintlify 收购后进入维护模式（[官方博客](https://www.helicone.ai/blog/joining-mintlify)）；TensorZero 已归档停维（2026-06）；Portkey 并入 Palo Alto（Prisma AIRS）；Invariant 开源部分停更（归 Snyk）；MetaMCP 半年无活动；Envoy AI Gateway 改名 Agent Router 转入 Agentic AI Foundation（[公告](https://theagentrouter.ai/blog/envoy-ai-gateway-is-now-agent-router/)）；LiteLLM 宣布迁 Rust——头部网关都在向高性能原生/单二进制靠拢，与我们的 Go 单二进制路线同向。同赛道对手仍高频迭代：CLIProxyAPI 9 月 40+ 个 release（v8 配置 API、OAuth 渠道按渠道模型覆盖、auth 终态未授权保持不重试、UUIDv7 request ID、管理面暴露凭据冷却快照）、CCR v3.1.x（profile 凭据池、聚合错误带每次尝试详情）、cc-switch 3.20.x–4.0。
+
+7. **路由决策可解释性与基准化**。Switchyard v0.3.0（09-22）：Advisor Gate（执行模型 + 更强 advisor 做 review/approve/redo，带会话审阅预算与停滞检查点）、composite routing（LLM 分类器 + stage router）、decision endpoint（只路由不执行）、路由结果带 `selected_model_ids` + 决策元数据 + OTel evidence（[release](https://github.com/NVIDIA-NeMo/Switchyard/releases/tag/v0.3.0)）。OpenRouter 发布 Model Router Benchmarks（10-02）：横向评测 7 个 router，提出 Router Index（0–10，默认质量 60% / 耗时 20% / 成本 20%，权重可调），并明确指出路由器的固有难点——**切模型要重建 input cache**、prompt 信息不足以判断复杂度（[blog](https://openrouter.ai/blog/announcements/model-router-benchmarks/)）。
+
 ## 3. 业界动向总结
 
 1. **赛道分化完成**：「服务端网关」（new-api/LiteLLM/Portkey/Higress，卷计费与企业治理）vs「编码 agent 本地控制面」（CCR/cc-switch/CLIProxyAPI，卷易用性与 agent 覆盖）。我们在后者的深水区（配额感知调度、订阅账号池、评测），前者不做也不该做。
@@ -89,6 +107,9 @@
 8. **缓存叙事换轨（2026-09 补充）**：语义缓存成为网关标配，但在 agent 多轮场景被自家文档劝退；增量转向 prompt-cache/KV-cache 亲和与协议级粘性（Responses 加密 reasoning 项、Anthropic `cache_control` 自动注入）。
 9. **治理面从「模型 + 密钥」扩到「agent + 工具」（2026-09 补充）**：A2A 数据面、MCP 网关的沙箱/策略/用户级 OAuth、工具调用级 guardrail 成为新竞争面。
 10. **评测走向自动闭环（2026-09 补充）**：trace → 自动数据集/scorer → 自动优化 prompt 与模型；评测平台与网关的边界在模糊（Phoenix、Braintrust 都推出了自己的网关）。
+11. **粘滞×熔断×配额的交互语义成为代理层新竞争面（2026-10 补充）**：Bifrost 三个版本连修粘滞（绑定粒度、失败绑定不复活、跳过进日志、路由时刻解析），说明"会话粘滞 + 账号池 + 熔断"的组合语义是各家共同的痛点；server-side 会话（Claude Code thread、Responses 加密 reasoning）正在把粘滞从优化变成正确性问题。
+12. **MCP 进入无状态化迁移期（2026-10 补充）**：2026-07-28 spec 删除协议级会话，生态用显式状态句柄 + 保守缓存 TTL + 每请求能力协商承接；legacy SSE 进入 12 个月弃用窗口。迁移期默认 legacy、显式切新的双栈姿势（ContextForge）是最稳路径。
+13. **评测判定结构化 + 独立网关集中化（2026-10 补充）**：decision-model as judge（Jev）同月被 Langfuse/Braintrust/Phoenix/GPTCache 四家采用，结构化判定取代自由文本 judge 成趋势；Helicone/TensorZero/Portkey/Invariant 相继被收购或停维，独立通用网关赛道集中化，本地优先 + 订阅账号池的细分定位验证更稳。
 
 ## 4. 我们的定位（不变）
 
@@ -102,6 +123,8 @@
 > **落地进展（2026-08 第二轮）**：S1 已实现（含 volcengine 接入与 doctor/status 可见性）；S2 已实现（`internal/webauth` + validate 门槛 + 双面鉴权）；S3 已实现（CLI + Web 向导 + FetchModels 交集校验）；S4 已实现 kimi（Gemini CLI 因代理不支持 Gemini wire 协议暂缓）；S5′ 已并入 doctor；S6 被 guard 审计提交超越；S7 已实现（`GET /metrics`）。细节见各设计文档的「实现记录」。
 >
 > **落地进展（2026-09 第三轮）**：S1–S7 状态不变；§2.3 第二轮增量对应的落地候选为 S8–S12（均为建议，未实现）。
+>
+> **落地进展（2026-10 第三轮增量调研）**：S1–S12 状态不变；§2.4 第三轮增量对应的落地候选为 S13–S16。**S14 已部分落地**（同日）：交互矩阵契约 + 行为回归（`internal/runtime` sticky×熔断/限频/模型锁用例）+ 部分链 `skipped` 可观测（`/api/status.schedule` + Web UI），权威契约见 `docs/architecture/routing-and-failure.md`「粘滞×可用性×配额 交互矩阵」；server-side 会话亲和（`rs_*`/thread）随 S8 继续。**S13 已落地**（次日）：op journal 意图日志 + 中断收敛 warning、写后回读校验（复用 drift 探针）、Codex 兼容不变量回归，契约见 `docs/client-takeover.md`「机制契约」。S15/S16 未实现。
 
 定位不变，按「安全性 → 易用性 → 生态位」排序。
 
@@ -132,7 +155,7 @@
 ### S5. 配置体检：`doctor` 子命令 + dry-run（易用性 P1）
 
 - **现状**：配置错误多在运行期才暴露；Switchyard 的 `--dry-run` validate 是好实践。
-- **方案**：`model-proxy doctor`：校验 config（含 route 可达性静态检查、claude_mapping 歧义、models.dev 匹配告警汇总）、凭据完整性、端口占用、daemon 健康、takeover 目标漂移检测；`serve --dry-run` 复用同一校验器输出后退出。Web UI Status 页展示同样的检查结果。
+- **方案**：`model-proxy doctor`：校验 config（含 route 可达性静态检查、别名路由歧义——claude_mapping 已废弃、claude-* 别名为显式 routes 且对全协议生效、models.dev 匹配告警汇总）、凭据完整性、端口占用、daemon 健康、takeover 目标漂移检测；`serve --dry-run` 复用同一校验器输出后退出。Web UI Status 页展示同样的检查结果。
 - **收益**：降低 issue 排查成本（用户自助率上升），也是"易用性"最便宜的高感知改进。
 
 ### S6. Guard 能力产品化（安全性 P2）
@@ -178,12 +201,39 @@
 - **方案**：越线时对指定 scope 生效 route 覆盖（走便宜目标，保留 failover；不用 pin——pin 是硬选择且绕过 cache），月内有效、下月自动解除，显式 opt-in。
 - **收益**：对标 Cloudflare spend limits 的自动降级；与既有 route override 机制天然一致。
 
+### S13. takeover 写入原子性强化 + Codex 兼容跟进（易用性/安全性 P1）
+
+- **现状**：takeover 模板已做关键字段写入（JSON dotted path / TOML 行编辑 / YAML 注释保留节点手术）与 `.bak` 备份、restore、漂移检测（见 `docs/client-takeover.md`）；但写入路径没有 staging + 回读比对的原子化流程，崩溃恢复依赖手工 restore。
+- **方案**：①写前 staging → 回读比对 → rename 的原子写路径（cc-switch 4.0 关键字段写入引擎同款）；②意图日志（`live-state.json` 模式）记录操作意图，启动时 settle 未完成操作（settle-before-acting）；③Codex 兼容清单进回归测试并持续跟进：`auth.json` 不作第三方凭据载体、官方路由不换 `model_provider`（否则会话历史分桶丢失）、`mcp_servers` 不写 `type` 键。
+- **收益**：把"写坏用户配置"的残余风险压到接近零；Codex 升级的高频踩坑点被系统性收割（竞品在这条线上每版本都在修）。
+- **落地记录（2026-10）**：已实现——op journal（`<bakDir>/op-journal.json` 意图日志，首个 mutation 前写入、成功才删除，残留中断在下一次 takeover/restore 以 warning 透出并收敛，CLI stderr + Web 警告条双通道）；写后回读校验（复用模板 drift 探针，没落 key 当场硬失败）；Codex 兼容不变量回归（`internal/takeover/codex_compat_test.go`：不写 auth.json、选择器与段名同源 provider_id、`requires_openai_auth`、mcp_servers 无 `type` 键）。契约见 `docs/client-takeover.md`「机制契约」。与 cc-switch 的有意差异：回读校验用语义探针（漂移探针）而非字节比对——我们的模板写入本来就是字段级合并而非整文件替换。
+
+### S14. 粘滞×熔断×配额交互语义矩阵（路由正确性 P1）
+
+- **现状**：会话粘滞优先于一切排序信号（sliding-dwell sticky），pin/force 是硬选择；但"粘滞目标被熔断/冷却后怎么办""failover 是否复核下一账号配额""被跳过的目标是否可观测"这组交互语义没有写成显式契约。Bifrost 在 9 月连修三个版本才把同一组语义修对。
+- **方案**：①把交互矩阵写成路由契约 + 行为回归：粘滞绑定粒度到 (provider, account)；失败绑定丢弃、绝不复活已排除账号；被跳过的 fallback 进 routing log；failover 选下一账号时复核其配额状态（LiteLLM v1.103 同款）；fallback 引用路由时刻解析，重启/重载不失效。②server-side 会话的正确性策略：Claude Code thread、Responses `rs_*` 加密 reasoning 这类绑定上游账号的会话，要么粘死原账号，要么返回可识别错误让客户端整轮重发（Bifrost `thread_unsupported_request` 语义），禁止静默失败。
+- **收益**：把"优化级"粘滞升级为"正确性级"契约；与 S8 的 `rs_*` 亲和是同一块的正确性半区。
+- **落地记录（2026-10）**：矩阵契约 + 行为回归 + `skipped` 可观测已实现（见 routing-and-failure.md「粘滞×可用性×配额 交互矩阵」；注意与其失败绑定即丢弃的有意差异——我们是 dwell 内 recover-and-return）；server-side 会话（`rs_*`/Claude thread 的强制粘回/可识别拒接）待 S8 的 producer 追踪落地后实现，目标契约已写入同一节。
+
+### S15. MCP 无状态化适配（生态 P2，扩展 S10）
+
+- **现状**：MCP 网关用隐式会话粘滞承接有状态工具；MCP 2026-07-28 spec 已删除协议级会话（无 initialize 握手、无 `Mcp-Session-Id`），生态进入迁移期（mcphub 双栈、ContextForge 默认 legacy 显式切新、legacy SSE 进入 12 个月弃用窗口）。
+- **方案**：①显式状态句柄（mcphub `X-MCPHub-State-Id` 模式：客户端 UUID，绑定凭据+用户+路由，空闲过期）作为会话粘滞的替代路径；②tools/list 聚合缓存按 `ttlMs`/`cacheScope` 落地，TTL = 上游 discovery 有效期 ∩ 网关预算，不确定则 0；③双栈姿势：默认 legacy、显式开关协商现代协议；④远程 MCP server 接入默认 SSRF fail-closed + 显式逃生阀（Docker/agentgateway 同款）；⑤若做工具禁用/allowlist，检查必须落在 tools/call 执行路径（mcphub v1.0.37 CRITICAL 教训：只在 tools/list 过滤可被注入绕过）。
+- **收益**：跟随 spec 迁移而非被动挨打；安全姿势对齐基础设施厂商。
+
+### S16. 结构化判定评测闭环（生态 P2，扩展 S11）
+
+- **现状**：shadow/replay 的 judge 打分无结构化约束；评测只对新流量生效；结果只在报表可见。同期 Langfuse/Braintrust/Phoenix/GPTCache 四家都接入了 decision-model 判定（TypeSafe Jev）。
+- **方案**：①judge 改结构化判定：定义问题 + 允许答案 → JSON schema 输出，带置信度与各选项概率，无自由文本；②新 judge 注册时对既有 request_log/shadow 记录做一次性历史回填，judge 版本留分数谱系（Langfuse evaluator backfill 同款）；③分数/成本超阈值发本地告警（live event/webhook）；④guard 加 dry-run 检查端点（NeMo `/v1/checks` 模式）：单独跑规则、不产生新响应，供 replay 回放扫描验证规则变更；⑤guard 判定记结构化 decision 节点进审计（Phoenix DECISION span 思路）。
+- **收益**：S11 从"自动采样"升级为完整闭环；guard 从运行时组件变成可独立验证的规则系统。
+
 ### 暂不建议做的（明确边界）
 
 - 多租户/令牌计费/充值体系（new-api 生境）：偏离定位且安全责任陡增。
 - LLM-classifier/stage 路由算法（Switchyard 方向）：先观察；fusion+请求感知已覆盖主要价值，classifier 引入额外延迟与成本。
 - 桌面 App 壳：中期候选（S1–S5 落地后，若增长瓶颈仍在触达，再评估 Tauri 壳包 CLI+UI，复用 web assets）。
-- 语义缓存（2026-09 补充）：LiteLLM 自家文档警告 agentic 多轮会 stale replay（见 §2.3-1），与本仓库 `cache` 的定位判断一致；降本走 S8 的前缀/协议级亲和，而不是语义近似。
+- 语义缓存（2026-09 补充）：LiteLLM 自家文档警告 agentic 多轮会 stale replay（见 §2.3-1），与本仓库 `cache` 的定位判断一致；降本走 S8 的前缀/协议级亲和，而不是语义近似。2026-10 补充：GPTCache 未发版的 JevEvaluation 证明若未来重访，"多维检查取最小分 + 全过阈才命中"是唯一可接受的门控设计，单向量相似度不可接受。
+- 错峰成本系数与 Router Index 报表口径（2026-10 补充，LiteLLM off-peak / Bifrost `off_peak_cost_multiplier` / OpenRouter Router Index）：观察项——配额调度引入时段系数、shadow 报表采用"质量/耗时/成本加权 0–10 分"都成立，但优先级低于 S13–S16；注意 OpenRouter 基准指出的切模型重建 input cache 成本会侵蚀路由收益。
 - A2A 数据面（2026-09 补充）：观察——等编码 agent 生态出现真实的 A2A 客户端需求（当前 agentgateway/Portkey 的服务对象是企业平台）再评估。
 - 通用插件机制（WASM/CGO 动态库，Bifrost/CLIProxyAPI 方向）：模块化单体 + 编译期 owner 边界（archtest 闭合契约）是架构红利，插件层会破坏它；确需扩展点优先走 config 声明式能力（如 guard `extra_patterns`）。
 
@@ -202,5 +252,13 @@
 | 近期 | S8 prompt-cache 亲和、S9 guard 工具调用规则 | 成本 + agent 安全 |
 | 中期 | S10 MCP 用户级 OAuth/限流、S11 评测数据飞轮 | 生态位巩固 |
 | 远期 | S12 预算动作化（可选）、A2A 观察项 | 按需 |
+
+第三轮（2026-10，对应 §2.4 增量）：
+
+| 阶段 | 内容 | 主线 |
+|---|---|---|
+| 近期 | S14 粘滞×熔断×配额语义矩阵、S13 takeover 原子写 | 路由正确性 + 接管可靠性 |
+| 中期 | S16 结构化判定评测闭环、S15 MCP 无状态化适配 | 评测 + MCP 生态 |
+| 远期 | 错峰成本系数、Router Index 报表口径（观察项） | 按需 |
 
 每项落地遵循仓库既有约定：行为回归用例进 owner package、跨模块 wiring 进 composition 测试、用户可见变化同步 README/config.yaml、内部契约进对应 `docs/architecture/` 专题。

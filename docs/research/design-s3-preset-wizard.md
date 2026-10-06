@@ -46,7 +46,7 @@ add zhipu
  ├─ 4. 路由建议              ← 单 provider：靠隐式路由即可，提示无需显式 route；
  │     多 provider 同模型冲突：展示歧义告警文案并给出建议显式 routes 片段（询问是否写入）
  ├─ 5. 测活                  ← 复用 test/probe 路径，失败给出结构化错误（401→重新 login 等）
- └─ 6. 询问 takeover         ← 复用 takeover 包；claude_mapping 别名建议一并展示
+ └─ 6. 询问 takeover         ← 复用 takeover 包；claude-* 别名建议（显式 routes 片段）一并展示
 ```
 
 - 非 TTY（脚本化）：`add --preset zhipu --api-key-env ZHIPU_KEY --yes`，跳过交互，第 4 步歧义时拒绝写入并退出非零（fail-closed，不猜）。
