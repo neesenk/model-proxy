@@ -472,6 +472,73 @@ func TestScheduleStatus_BlockedReasonsDisabledVsDown(t *testing.T) {
 	}
 }
 
+// TestScheduleStatus_SkippedReasonsOnPartialChain pins the partial-chain
+// counterpart of the empty-chain `blocked` explanation: targets the
+// availability filter (circuit / quota exhaustion) or an operator disable
+// left OUT of an otherwise servable chain are listed under `skipped` with
+// their reasons — a silently skipped fallback must be distinguishable from
+// a misconfigured route. Available targets never appear there, and the
+// empty-chain case keeps using `blocked` (never both).
+func TestScheduleStatus_SkippedReasonsOnPartialChain(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]configdomain.Provider{
+			"ok":        {Provider: testProviderID},
+			"down":      {Provider: testProviderID},
+			"exhausted": {Provider: testProviderID},
+		},
+		map[string][]configdomain.RouteTarget{"m": {
+			{Provider: "ok", Priority: 1},
+			{Provider: "down", Priority: 2},
+			{Provider: "exhausted", Priority: 3},
+		}})
+	// Circuit-open "down" (threshold 1: a single failure opens it) and spend
+	// "exhausted"'s ultimate window completely; "ok" stays servable.
+	p.runtimeState.RecordFailure("down", 1, time.Hour, 0)
+	staticSurplus(p, "exhausted", 0, 0)
+
+	var st struct {
+		Models map[string]struct {
+			Ordered []struct {
+				Provider string `json:"provider"`
+			} `json:"ordered"`
+			Blocked []struct {
+				Provider string `json:"provider"`
+			} `json:"blocked"`
+			Skipped []struct {
+				Provider string `json:"provider"`
+				Reason   string `json:"reason"`
+				Until    string `json:"until"`
+			} `json:"skipped"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(p.scheduleStatus(), &st); err != nil {
+		t.Fatal(err)
+	}
+	ri, ok := st.Models["m"]
+	if !ok {
+		t.Fatal("route m missing")
+	}
+	if len(ri.Ordered) != 1 || ri.Ordered[0].Provider != "ok" {
+		t.Fatalf("ordered = %+v, want only ok", ri.Ordered)
+	}
+	if len(ri.Blocked) != 0 {
+		t.Fatalf("blocked = %+v, want none on a partial chain", ri.Blocked)
+	}
+	if len(ri.Skipped) != 2 {
+		t.Fatalf("skipped = %+v, want entries for down and exhausted", ri.Skipped)
+	}
+	byProvider := map[string]string{}
+	for _, s := range ri.Skipped {
+		byProvider[s.Provider] = s.Reason
+	}
+	if byProvider["down"] != "circuit" {
+		t.Errorf("down reason = %q, want circuit", byProvider["down"])
+	}
+	if byProvider["exhausted"] != "quota-exhausted" {
+		t.Errorf("exhausted reason = %q, want quota-exhausted", byProvider["exhausted"])
+	}
+}
+
 // TestScheduleTierDeclaredBillingFallback pins the app wiring of the tier
 // rule "measurement wins, explicit `billing:` declaration fills the gap":
 // an unmeasured but declared-plan provider competes INSIDE the plan tier

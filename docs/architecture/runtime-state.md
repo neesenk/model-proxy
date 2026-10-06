@@ -314,7 +314,7 @@ availability 过滤（发生在 sticky 判定之前）除了熔断/限频/模型
 
 **耗尽信号必须传导到失败分类**（`Manager.CooldownState`/`HasRecoveredUntried` 消费同一 quotaExhaustedUntil 判定）：skip 意味着耗尽 target 永远收不到那记教会 health 的上游 429，若分类只看 health，全耗尽 route 会读成"全部可用"→ 终局 502 无 `Retry-After`，且 `hasRecoveredUntried` 空转重排。正确语义：quota 耗尽在分类中是 **rate-limit 类 down 原因**，恢复时间取 ultimate 窗口 `ResetsAt` 与快照失鲜边界（`AsOf+maxAge`）的**较早者**（失鲜后 fail-open 回落反应式 429 冷却，客户端按短周期回来重探而不是对着陈旧数据等一个可能很远的 reset）；与 health 限频/熔断并存时取较晚者（两因皆清才可用）。全耗尽 route 因此终局 **429 + `Retry-After`**，与 skip 之前客户端拿到的退避信号一致。
 
-session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 route key。session-keyed sticky 不落盘，route-keyed sticky 可落盘。session sticky 的 dwell 自**最近一次使用**起算（活跃会话每次请求刷新 since），因此连续活跃的会话会一直停留在当前 provider，直到闲置超过 `sticky_dwell` 或其失败熔断——"会话中不得仅因 quota surplus 边际变化迁移账号"（见 provider-pools.md）。
+session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 route key。session-keyed sticky 不落盘，route-keyed sticky 可落盘。session sticky 的 dwell 自**最近一次使用**起算（活跃会话每次请求刷新 since），因此连续活跃的会话会一直停留在当前 provider，直到闲置超过 `sticky_dwell` 或其失败熔断——"会话中不得仅因 quota surplus 边际变化迁移账号"（见 provider-pools.md）。sticky 与熔断/限频/模型锁/配额耗尽/operator 开关的完整交互矩阵（失败绑定不复活、recover-and-return、failover 复核配额）是路由正确性契约，权威定义在 `docs/architecture/routing-and-failure.md` 的「粘滞×可用性×配额 交互矩阵」一节。
 
 ## Pin
 

@@ -132,6 +132,57 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
 - 普通 4xx commit 必须释放半开槽，但不得清除失败历史。
 - runtime provider implementation 缺失时必须 fail-closed，禁止发送无认证请求。
 
+## 粘滞×可用性×配额 交互矩阵
+
+以下交互语义是路由正确性契约（回归锚点：`internal/runtime` 的
+`TestDecideOrderStickyHealthExclusionAndRecoverReturn`、
+`TestDecideOrderSkipsQuotaExhaustedStickyAccount`、load_balance 对应用例，以及
+`internal/app` 的 `TestScheduleStatus_SkippedReasonsOnPartialChain`）：
+
+| 粘滞目标的当前状态 | 进 ordered 链 | sticky 是否生效 | 恢复后（dwell 内） |
+|---|---|---|---|
+| 熔断（circuit open） | 否 | 否，按排序取次优 | 是，会话回归（recover-and-return） |
+| 限频冷却（429/quota/daily） | 否 | 否，同上 | 是，同上 |
+| 模型锁（仅该 (provider, model)） | 该 target 否 | 否，同上 | 锁过期后回归 |
+| 配额已知耗尽（新鲜 plan 快照 ultimate=0） | 否 | 否，同上 | 快照转好/失鲜后回归 |
+| operator disabled | 否（candidate 集整体剔除，先于 pin） | 否 | 重新启用后回归 |
+| operator frozen | 否 | 否 | unfreeze 后回归 |
+| 健康但 dwell 已过期且次优优势 < margin | 是 | 是（sub-margin 不切换） | — |
+
+- **失败绑定不复活**：availability 过滤（熔断/限频/模型锁/配额已知耗尽）先于
+  sticky 判定执行，`keepSticky` 只在粘滞目标仍处 available 集时成立——down 信号
+  存续期间，任何排序/粘滞逻辑都不得把该目标放回链中。
+- **recover-and-return 是有意语义**：sticky 条目在目标失败时**不删除**（仅由
+  committed 调用的 dwell 空闲清扫驱逐），目标在 dwell 内恢复则会话回到原账号——
+  保上游 prompt cache。这与 Bifrost 的「失败绑定即丢弃」是有意差异：他们的多 key
+  轮询场景里绑定即失败源，我们的账号池场景里熔断是瞬态信号。
+- **failover 复核配额**：ordered 链整体（而非仅首选）过同一 availability 过滤，
+  配额已知耗尽的账号不会出现在链的任何位置——failover 不可能把请求打进已知
+  耗尽的账号（LiteLLM「budgets re-checked on fallback targets」的等价语义在此
+  是结构性成立，不是事后补丁）。
+- **路由时刻解析**：routes 每个 config generation 从 config 重新展开，健康/粘滞/
+  模型锁按 generation 门控——reload/重启后不存在「引用已新增 provider 的失效
+  fallback 链」这一失效类别（Bifrost 曾修此 bug）；route 目标引用不存在的
+  provider 在展开/doctor 静态检查处暴露，不进入调度。
+- **跳过可观测**：空链由 `/api/status.schedule` 的 `blocked` 逐目标解释；部分链
+  被排除的目标由 `skipped` 透出（同形状同分类，字段契约见 `docs/web-api.md`）——
+  被静默跳过的 fallback 必须可与配置错误区分。请求级 failover 链由 request log
+  的同 id 多 attempt 行承载。
+
+### server-side 会话状态（目标契约）
+
+Claude Code server-side thread、Responses 加密 reasoning 项（`rs_*`）这类状态
+绑定产生它的上游账号。当前行为：session sticky 把会话粘在同一账号（正常路径
+连续性已保证）；粘滞目标中途熔断/限频时照常 failover，跨账号的加密 reasoning 项
+在新账号上无法解密，由上游错误（通常 400）浮现并进入正常失败分类。目标契约
+（随 prompt-cache 亲和落地，见 `docs/research/similar-projects.md` S8/S14）：
+
+1. 请求携带 `rs_*` 项时，把产生它的账号记为该会话的粘滞目标并强制粘回——
+   跨账号解密失败是确定性失败，不应消耗 failover 链；
+2. 无法粘回（目标熔断）时返回可识别错误让客户端整轮重发（Bifrost
+   `thread_unsupported_request` 语义），不得静默失败；
+3. 不得为兼容而静默丢弃/改写加密 reasoning 项。
+
 ## 429 分类
 
 429 分为：
@@ -237,3 +288,6 @@ body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`
 - SSE keepalive：静默期心跳帧、ttft 不被心跳标记、录制链/缓存无心跳、client gone 后 reader goroutine 释放。
 - cooldown 全部恢复、部分恢复、跨轮纯 429、混合硬失败。
 - request-aware/context retry 后的实际目标冷却判定。
+- 交互矩阵：quota 模式 sticky×熔断/限频/模型锁的排除、失败不复活、dwell 内
+  recover-and-return、dwell 过期后按 margin 切换；部分链 `skipped` 与空链
+  `blocked` 的原因分类（负载均衡策略的同类语义在 load_balance 用例覆盖）。

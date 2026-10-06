@@ -6411,6 +6411,15 @@ function protoVerdictPill(v) {
   return `<span class="pill ${esc(b.cls)}">${esc(b.glyph)} ${esc(b.label)}</span>`;
 }
 
+// routeDownNodeHTML renders one unschedulable route target — the single
+// implementation shared by the empty-chain `blocked` list and the
+// partial-chain `skipped` tail: provider · reason, recovery hint in text,
+// full timestamp in the tooltip.
+function routeDownNodeHTML(b) {
+  const hint = b.until ? untilHuman(b.until) : '';
+  return `<span class="route-node unavailable" title="${esc(b.provider)}: ${esc(b.reason)}${hint ? ` — recovers ${esc(b.until)}` : ''}">${esc(b.provider)} · ${esc(b.reason)}${esc(hint)}</span>`;
+}
+
 // renderScheduleCard builds the per-route schedule view: each route shows its
 // ordered provider chain with the first choice highlighted, sticky marker, and
 // pool summary. An active operator pin is OVERLAID on the default chain (the
@@ -6463,11 +6472,14 @@ function renderScheduleCard(target, st) {
     if (!chain) {
       const blocked = info.blocked || [];
       chain = blocked.length
-        ? blocked.map((b) => {
-            const hint = b.until ? untilHuman(b.until) : '';
-            return `<span class="route-node unavailable" title="${esc(b.provider)}: ${esc(b.reason)}${hint ? ` — recovers ${esc(b.until)}` : ''}">${esc(b.provider)} · ${esc(b.reason)}${esc(hint)}</span>`;
-          }).join('<span class="route-sep">·</span>')
+        ? blocked.map(routeDownNodeHTML).join('<span class="route-sep">·</span>')
         : '<span class="route-meta">No providers available</span>';
+    } else if (info.skipped && info.skipped.length) {
+      // Partial chain: append the targets the scheduler left OUT (cooldown /
+      // quota exhausted / operator disabled) with their reasons — a silently
+      // skipped fallback must be distinguishable from a misconfigured route.
+      chain += '<span class="route-sep">→</span>' +
+        info.skipped.map(routeDownNodeHTML).join('<span class="route-sep">·</span>');
     }
     let meta = '';
     if (info.pin) {
@@ -12019,7 +12031,7 @@ async function takeoverRestore(client) {
   renderTakeoverInto();
   try {
     const res = await apiPost('/api/takeover/restore', { client });
-    takeoverResult = { html: takeoverRestoreSummary(res), warnings: [], err: '' };
+    takeoverResult = { html: takeoverRestoreSummary(res), warnings: res.warnings || [], err: '' };
   } catch (e) {
     takeoverResult = { html: '', warnings: [], err: (e && e.message) || String(e) };
   }

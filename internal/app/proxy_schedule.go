@@ -287,6 +287,13 @@ func scheduleStatusFromSnapshot(
 		// Only present when ordered is empty; a route with servable targets
 		// never carries it.
 		Blocked []blockedInfo `json:"blocked,omitempty"`
+		// Skipped is the partial-chain counterpart of Blocked: one entry per
+		// route target the availability filter or an operator disable left
+		// OUT of the chain, with the same reason/until shape. Without it a
+		// silently skipped fallback is indistinguishable from a
+		// misconfigured route. Pin narrowing never produces entries (the
+		// preview chain is computed with pins ignored).
+		Skipped []blockedInfo `json:"skipped,omitempty"`
 	}
 
 	models := map[string]routeInfo{}
@@ -341,6 +348,26 @@ func scheduleStatusFromSnapshot(
 		// target) instead of leaving the UI to say just "no providers".
 		if len(ordered) == 0 {
 			ri.Blocked = blockedReasons(RuntimeSnapshot, runtimeTargets, now, 3*cfg.Scheduling.PollInterval())
+		} else {
+			// Partial chain: surface the targets left OUT of the chain with
+			// their reasons (availability filter / operator disable — the
+			// preview ignores pins, so pin narrowing never lands here). Every
+			// available non-disabled candidate is in decision.Order by
+			// construction, so not-in-Order ⟺ excluded with a classifiable
+			// reason.
+			inOrder := make([]bool, len(runtimeTargets))
+			for _, index := range decision.Order {
+				inOrder[index] = true
+			}
+			var skippedTargets []runtimestate.Target
+			for i, rt := range runtimeTargets {
+				if !inOrder[i] {
+					skippedTargets = append(skippedTargets, rt)
+				}
+			}
+			if len(skippedTargets) > 0 {
+				ri.Skipped = blockedReasons(RuntimeSnapshot, skippedTargets, now, 3*cfg.Scheduling.PollInterval())
+			}
 		}
 		// Track which parents appear in `ordered` so the route-level `pools`
 		// summary can be emitted. A parent may have more accounts in poolIndex

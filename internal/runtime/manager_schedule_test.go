@@ -179,6 +179,93 @@ func TestDecideOrderSkipsQuotaExhaustedStickyAccount(t *testing.T) {
 	}
 }
 
+// TestDecideOrderStickyHealthExclusionAndRecoverReturn pins the sticky×health
+// interaction matrix for quota mode (load_balance covers the same ground in
+// manager_load_balance_test.go): a sticky provider that is circuit-open,
+// rate-limited, or model-locked leaves the ordered chain ENTIRELY — the
+// availability filter runs before sticky is honored, so a down binding can
+// never be resurrected while its down signal lasts. The sticky ENTRY itself
+// is deliberately kept (not deleted on failure): once the provider recovers
+// inside the dwell window, the session returns to it — recover-and-return is
+// the intentional prompt-cache semantics, not a bug.
+func TestDecideOrderStickyHealthExclusionAndRecoverReturn(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 2, 9, 0, 0, 0, time.UTC)
+	m := newTestManager(11)
+	targets := []Target{
+		{Provider: "best", Model: "m1", Priority: 1},
+		{Provider: "current", Model: "m1", Priority: 1},
+	}
+	input := ScheduleInput{
+		Exposed: "route", SessionKey: "session", Targets: targets,
+		RouteKeys: map[string]bool{"route": true},
+		Dwell:     time.Hour, SwitchMargin: .15,
+		Now: now, QuotaMaxAge: time.Hour, Generation: 11,
+	}
+	m.SetSticky("session", Sticky{Provider: "current", Since: now}, 11)
+	// "best" carries a strictly better measured plan, so a dwell-EXPIRED
+	// sticky has a decisive reason to switch (an exact tie would legitimately
+	// keep the session parked — sub-margin switch prevention).
+	setScheduleQuota(t, m, "best", scheduleQuota(provider.BillingPlan, 1, now), 11)
+	setScheduleQuota(t, m, "current", scheduleQuota(provider.BillingPlan, .5, now), 11)
+
+	downStates := map[string]*providerHealth{
+		"circuit":      {circuitOpenUntil: now.Add(time.Hour)},
+		"rate-limited": {rateLimitedUntil: now.Add(time.Hour), rateLimitKind: Quota},
+	}
+	for name, state := range downStates {
+		m.mu.Lock()
+		m.health["current"] = state
+		m.mu.Unlock()
+
+		result := m.DecideOrder(input)
+		if !reflect.DeepEqual(result.Order, []int{0}) || result.StickyProvider != "best" {
+			t.Fatalf("%s: down sticky provider must leave the chain entirely: %+v", name, result)
+		}
+		if preview := m.Dashboard(now).PreviewOrder(input); !reflect.DeepEqual(preview.Order, []int{0}) {
+			t.Fatalf("%s: preview did not mirror the exclusion: %+v", name, preview)
+		}
+		// The sticky entry survives the failure (recover-and-return needs it),
+		// keyed on the session — it must NOT be deleted just because the
+		// provider is down.
+		if got := m.Dashboard(now).Sticky["session"].Provider; got != "current" {
+			t.Fatalf("%s: sticky entry deleted on failure (got %q) — recover-and-return impossible", name, got)
+		}
+	}
+
+	// Model lock is (provider, model)-granular: locking current/m1 excludes
+	// only that target, never best/m1.
+	m.mu.Lock()
+	delete(m.health, "current")
+	m.modelLocks[ModelKey{Provider: "current", Model: "m1"}] = &modelLock{failures: 1, lockedUntil: now.Add(time.Hour)}
+	m.mu.Unlock()
+	if result := m.DecideOrder(input); !reflect.DeepEqual(result.Order, []int{0}) || result.StickyProvider != "best" {
+		t.Fatalf("model-locked sticky target must leave the chain: %+v", result)
+	}
+
+	// Recovery inside the dwell window: the session returns to the sticky
+	// provider (prompt cache), outranking the scored order.
+	m.mu.Lock()
+	delete(m.modelLocks, ModelKey{Provider: "current", Model: "m1"})
+	m.mu.Unlock()
+	returned := input
+	returned.Now = now.Add(10 * time.Minute)
+	result := m.DecideOrder(returned)
+	if !reflect.DeepEqual(result.Order, []int{1, 0}) || result.StickyProvider != "current" {
+		t.Fatalf("recovered sticky provider must be returned to within dwell: %+v", result)
+	}
+
+	// ...but NOT after the dwell expired unused: the idle sweep evicts the
+	// entry on the next committed decision and the scored order takes over.
+	expired := input
+	expired.Now = now.Add(2 * time.Hour)
+	result = m.DecideOrder(expired)
+	if !reflect.DeepEqual(result.Order, []int{0, 1}) || result.StickyProvider != "best" {
+		t.Fatalf("dwell-expired sticky must not pin the session: %+v", result)
+	}
+}
+
 func TestDecideOrderUsesAtomicQuotaHealthPinAndStickyState(t *testing.T) {
 	t.Parallel()
 
