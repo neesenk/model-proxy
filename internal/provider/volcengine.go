@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"model-proxy/internal/display"
 	"net/http"
 	"regexp"
@@ -151,7 +152,12 @@ func ParseVolcengineQuota(u *AfpUsage) *QuotaSnapshot {
 		rem := -1.0
 		if w.Quota > 0 {
 			rem = (w.Quota - w.Used) / w.Quota
-			if rem < 0 {
+			// Absurd upstream magnitudes (e.g. hugely negative Used) overflow
+			// the ratio to ±Inf/NaN — that is "unmeasured", never a bogus cap
+			// or a +Inf scheduling base (found by FuzzParseVolcengineQuota).
+			if math.IsNaN(rem) || math.IsInf(rem, 0) {
+				rem = -1
+			} else if rem < 0 {
 				rem = 0 // over-quota -> exhausted (0), not a negative that'd read as "unmeasured"
 			}
 		}
