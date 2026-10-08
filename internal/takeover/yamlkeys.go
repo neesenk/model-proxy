@@ -2,8 +2,10 @@ package takeover
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -50,17 +52,46 @@ func encodeYAMLDoc(doc *yaml.Node) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// yamlScalarText returns a scalar node's logical text. yaml.v3 encodes
+// strings with invalid UTF-8 as !!binary and then carries the base64 TEXT in
+// Value — reading or matching such scalars by Value alone loses the original
+// bytes (found by FuzzYAMLSetGetRoundTrip). Decode binary-tagged scalars so
+// set→encode→reload→get round-trips arbitrary strings.
+func yamlScalarText(n *yaml.Node) string {
+	if n.Kind == yaml.ScalarNode && n.Tag == "!!binary" {
+		if raw, err := base64.StdEncoding.DecodeString(n.Value); err == nil {
+			return string(raw)
+		}
+	}
+	return n.Value
+}
+
 // yamlMapGet returns the value node for key in mapping m, or nil.
 func yamlMapGet(m *yaml.Node, key string) *yaml.Node {
 	if m == nil || m.Kind != yaml.MappingNode {
 		return nil
 	}
 	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
+		if yamlScalarText(m.Content[i]) == key {
 			return m.Content[i+1]
 		}
 	}
 	return nil
+}
+
+// yamlSafeScalar builds a scalar node for an arbitrary string whose
+// encode→reload is lossless. yaml.v3's default style picks a literal block
+// for newline-only strings (`|4+`), whose reparse DROPS the newline — force
+// double quotes (escape-complete) for valid-UTF-8 strings that contain
+// newlines. Invalid UTF-8 keeps the default style: the encoder emits
+// !!binary and yamlScalarText decodes it back on read. Everything else
+// keeps the pre-existing tagless node, so rendered output is unchanged.
+func yamlSafeScalar(s string) *yaml.Node {
+	n := &yaml.Node{Kind: yaml.ScalarNode, Value: s}
+	if utf8.ValidString(s) && strings.ContainsAny(s, "\n\r") {
+		n.Style = yaml.DoubleQuotedStyle
+	}
+	return n
 }
 
 // yamlMapSet assigns value to key in mapping m: the first matching key is
@@ -71,7 +102,7 @@ func yamlMapSet(m *yaml.Node, key string, value *yaml.Node) {
 	first := -1
 	out := m.Content[:0]
 	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
+		if yamlScalarText(m.Content[i]) == key {
 			if first < 0 {
 				first = i
 				out = append(out, m.Content[i], value)
@@ -82,7 +113,7 @@ func yamlMapSet(m *yaml.Node, key string, value *yaml.Node) {
 	}
 	m.Content = out
 	if first < 0 {
-		m.Content = append(m.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: key}, value)
+		m.Content = append(m.Content, yamlSafeScalar(key), value)
 	}
 }
 
@@ -103,10 +134,15 @@ func yamlEnsureMapPath(root *yaml.Node, path []string) *yaml.Node {
 }
 
 // yamlValueNode renders a decoded-YAML-template value (map/slice/scalar from
-// the template's yaml.set) as a node tree by re-marshalling it.
+// the template's yaml.set) as a node tree by re-marshalling it. Strings take
+// the direct scalar path: yaml.Marshal's block-scalar corner is lossy for
+// pure-newline strings (see yamlSafeScalar).
 func yamlValueNode(v any) (*yaml.Node, error) {
 	if n, ok := v.(*yaml.Node); ok {
 		return n, nil
+	}
+	if s, ok := v.(string); ok {
+		return yamlSafeScalar(s), nil
 	}
 	b, err := yaml.Marshal(v)
 	if err != nil {
@@ -149,7 +185,7 @@ func yamlNestedString(root *yaml.Node, path ...string) (string, bool) {
 			if v.Kind != yaml.ScalarNode {
 				return "", false
 			}
-			return v.Value, true
+			return yamlScalarText(v), true
 		}
 		m = v
 	}
