@@ -150,6 +150,13 @@ Provider 的 `Usage`、`Quota`、fetch/parse、认证和显示格式测试直接
 隐式空规则形成假绿，也不得使用 dot/blank repository import 绕过 matcher。依赖变更
 应缩小或保持边界；确需扩大时先更新权威架构契约并说明 owner 关系。
 
+外部依赖契约（`internal/archtest/architecture_external_imports_contract_test.go`）补上
+DAG 之外的两条边：`internal/` 下所有 `.go` 文件（含测试）的外部 import 必须命中
+闭合的 `externalImportAllowlist`（逐前缀带理由注释——depguard 的角色，仓内实现，
+防 coding agent 静默长出依赖图）；`internal/testsyn` 等测试专用包只能被 `_test.go`
+文件引用。stdlib 恒放行，`model-proxy/` 内部边归 DAG 管。守卫带合成正负对照
+（合法形状放行、禁入 import 与生产文件引 testsyn 必红）。
+
 架构交互 guard（`internal/archtest`）必须解析 Go AST/类型形状，断言构造器或 mutable owner 的精确生产
 callsite；不能用注释/字符串包含、只断言“至少一次”，也不能只检查预期文件而不扫描
 其他生产文件。受保护 owner 符号的引用必须保持已审查的直接形态：root 函数只允许
@@ -345,14 +352,7 @@ helper 在被触及时顺手替换。八个模式（每条带本仓真实范例�
 协议转换（`internal/protocol/convert*.go`）在普通单测之外有三层补充覆盖，修改转换器时按需运行：
 
 1. **黄金文件回放**（`internal/protocol/convert_golden_test.go` + `testdata/wire/<proto>_<provider|场景>.sse`）：目录下每个原始 SSE 流（按文件名前缀选源协议）喂给所有以该协议为源的转换器，断言不变量而非精确输出——不 panic、输出可解析为 SSE 帧、终态事件恰好一个、responses 目标 `output_item.added/done` 按 id+type 配对（failed 终态豁免）、无空 data 帧；以及**场景存活与语义断言**——输入流真实携带 tool call 或 reasoning 时，输出必须保留目标协议的对应形状；输入含非空正文或 reasoning 文本时，目标协议必须逐字保留；输入含正数 terminal usage 时，按各协议的 inclusive input/cache 口径归一后 input/output 必须精确相等，不允许按转换方向整体豁免。形状断言在压缩空白后匹配（zhipu 的 SSE JSON 带空格），标记精确化以防 `server_tool_use`、空 `tool_calls:[]` 误伤。种子为手写高保真流；真实上游流用 `model-proxy wire record <provider>` 录制进同一目录（每端点 text/_tool/_thinking 三场景；凭据来自 login，提交前人工审查脱敏，见 CLI.md §17）。
-2. **Fuzz**（`internal/protocol/convert_fuzz_test.go` + `internal/protocol/testdata/fuzz/`）：`FuzzConvertRequest`（12 个请求/响应 converter 不 panic）、`FuzzConvertSSE`（6 个流式 transformer 不 panic、输出有界 `128×len+16KiB`，且终态唯一、clean/error 不混发、Responses added/done 配对）、`FuzzParseToolArgs`（确定性）、`FuzzSanitizeToolUseID`（确定性 + 字符集 `^[a-zA-Z0-9_-]+$`；空 id 的计数器占位是设计例外）。普通 `go test` 跑种子语料；真 fuzz：
-
-   ```bash
-   go test -fuzz=FuzzConvertRequest -fuzztime=20s -run '^$' ./internal/protocol
-   go test -fuzz=FuzzConvertSSE -fuzztime=20s -run '^$' ./internal/protocol
-   go test -fuzz=FuzzParseToolArgs -fuzztime=15s -run '^$' ./internal/protocol
-   go test -fuzz=FuzzSanitizeToolUseID -fuzztime=15s -run '^$' ./internal/protocol
-   ```
+2. **Fuzz**（`internal/protocol/convert_fuzz_test.go` + `internal/protocol/testdata/fuzz/`）：`FuzzConvertRequest`（12 个请求/响应 converter 不 panic）、`FuzzConvertSSE`（6 个流式 transformer 不 panic、输出有界 `128×len+16KiB`，且终态唯一、clean/error 不混发、Responses added/done 配对）、`FuzzParseToolArgs`（确定性）、`FuzzSanitizeToolUseID`（确定性 + 字符集 `^[a-zA-Z0-9_-]+$`；空 id 的计数器占位是设计例外）。普通 `go test` 跑种子语料；真 fuzz 见「Fuzz 目标清单」。
 
 3. **差分测试**（`internal/protocol/convert_differential_test.go` + `internal/protocol/testdata/differential/`）：输入流逐字取自 opencodex 测试（fixture 顶部注释注明来源文件），断言语义等价；有意分歧处（`docs/decisions/intentional-behaviors.md` 第 10、11 条）按本仓语义断言并引用条目编号。
 
@@ -364,6 +364,24 @@ Fuzz 语料补充规则：`FuzzConvertSSE` 的 seed 阶段会从协议包读取�
 必须降级合成目标协议 envelope（携带截断原文），不得使转换失败（见下方 e2e 契约表）。
 
 协议能力和语义边界还必须覆盖：已知不支持字段的客户端原生 400 与 compatible-target failover；tool_search_output 的 discovered tools 物化；citation 非流式/SSE 六方向；signed/redacted reasoning replay；prompt cache key/retention；previous_response_id 命中、miss 修复、TTL、重启恢复及仅 token-limit incomplete 可缓存。
+
+## Fuzz 目标清单（`scripts/fuzz.sh`，手动定期）
+
+种子随常规 `go test ./...` 跑（免费回归，crasher 语料提交后永久钉死）；探索性真 fuzz 用一条命令全量跑，默认每 target 15 秒、发版前 `scripts/fuzz.sh 120`。**新增 target 必须同提交登记本表和 `scripts/fuzz.sh`**；crasher 落在 `testdata/fuzz/<Target>/`，最小化、修复、连同语料文件一起提交。不变量锚定各面既有单元契约，不凭空发明：
+
+| Target（包） | 锚定的不变量 |
+|---|---|
+| `FuzzConvertRequest`（protocol） | 12 个请求/响应 converter 任意输入不 panic |
+| `FuzzConvertSSE`（protocol） | 6 个流式 transformer：不 panic、输出有界 `128×len+16KiB`、终态唯一、added/done 配对 |
+| `FuzzParseToolArgs` / `FuzzSanitizeToolUseID`（protocol） | 确定性；sanitize 字符集 `^[a-zA-Z0-9_-]+$` |
+| `FuzzParseWireSSE`（protocol） | wire 帧解析：错误⇒零事件、确定性、event 名与单行 data 必须逐字来自输入（recover 只切分不改写） |
+| `FuzzExtractModelDifferential`（protocol） | sonic 流式快路径 == encoding/json 全量解析（有效且无重复 model 键的 body；重复键双方允许分歧） |
+| `FuzzRequestWantsStreamDifferential`（protocol） | 同上，`stream` 仅字面 true 计真 |
+| `FuzzScanSecretsAndPaths`（guard） | 任意字节不 panic、确定性、**任何报告通道与 redact 结果绝不携带已植入秘密**（凭据红线）、明文秘密必被 `known_secret` 检出并脱敏；探索跑同时充当 ReDoS 姿势检查（灾难回溯表现为 fuzz 超时而非断言失败） |
+| `FuzzParseVolcengineQuota`（provider） | 恒四窗、固定序、恰一 Ultimate/Short、remaining 有限且 ∈ {-1} ∪ [0,∞)、快照基数 == Ultimate 窗（首跑即抓到 ±Inf 溢出，已修） |
+| `FuzzYAMLSetGetRoundTrip`（takeover） | 敌意客户端配置：set→encode→reload 必须取回所设值、必可重载、顶层键零丢失 |
+
+kimi/zhipu 的配额解析内嵌在带 I/O 的 `Usage()` 里尚未纯函数化，暂未入列；如需覆盖先重构出纯解析函数。
 
 ## 转发管线端到端契约（forward e2e，app 包）
 
