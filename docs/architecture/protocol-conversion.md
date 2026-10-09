@@ -162,7 +162,17 @@ OpenAI/Responses → Anthropic 的 tool use id 必须满足 `^[a-zA-Z0-9_-]+$`�
 
 SSE 读取按规范折叠多行 `data:`（连续 `data:` 行在分派空行处以 `\n` 拼接为一个 payload，六个流式转换器与 `parseWireSSE` 聚合路径一致；无尾空行的尾帧在 EOF 分派）。LLM 上游实践全部单行，多行仅出现在方言网关。对漏写帧间空行、导致多个完整 JSON payload 被折叠到同一帧的非规范网关，解析器逐 data 行恢复；每个恢复帧使用该 data 行读取时对应的 `event:`，不能把最后一个 event 套给全部 payload，遇到协议终态后不再处理同一折叠帧中的后续数据。聚合路径 `parseWireSSE` 与流式 reader 同款逐行恢复（恢复时 convertWarn；恢复出的字面 `[DONE]` 行是显式终止符，其后行不再处理）。anthropic↔chat 流式 reader 额外：容忍流首一个 UTF-8 BOM；折叠帧中恢复出的 `[DONE]` 行判为终止符；chat→anthropic reader 识别 `event: error` 帧（payload 无 error 键时经 `chatSSEErrorOf` 提取 message/detail，cc-switch extract_chat_sse_error）。
 
-剩余有损项主要是尚未实现降级的 server tools（如 computer）、未知 role/content 和 chat `input_audio`。已知无法表达的请求特性优先由 capability scanner 拒绝；仅响应侧或可安全降级的差异使用 `convertWarn`。document/file、hosted web/tool search、tool_result 图片/错误标记、reasoning replay 和引用均已保留或采用明确降级。跨协议目标为 Anthropic 时，会在 system、最后一个 tool、最后一条 user content 注入 ephemeral cache breakpoint；原协议 cache_control 仍不逐点一一映射。
+剩余有损项主要是尚未实现降级的 server tools（如 computer）、未知 role/content 和 chat `input_audio`。
+
+### 能力矩阵的机器可读面
+
+上述拒绝/降级清单同时以机器可读形式暴露（`internal/protocol/capability_matrix.go`）：
+
+- **`ConversionCapabilities(from, to)`**：按 pair 查询 `Refused`（scanner 会 fail-closed 拒绝的特性名）与 `Lossy`（有损但可转换）两个列表；
+- **`ConversionDoctorLines(backend)`**：doctor 用的每入站协议一行摘要；
+- **`TestCapabilityMatrix*` 一致性测试**：钉死「声明 == 执行」——矩阵里声明的每条拒绝都拿最小 fixture 喂真实 scanner 验证确实被拒、feature 名一致；decisions 六组 stub 全部声明为整协议拒绝。若 scanner 行为变化而矩阵未更新，测试即红。
+
+这是 doctor 路由 dry-run 转换报告的数据源（`ConversionDoctorLines`），也是未来 Web UI 呈现转换能力的数据源——UI 或 CLI 需要展示「某个 pair 支持什么」时应消费此 API 而非硬编码。已知无法表达的请求特性优先由 capability scanner 拒绝；仅响应侧或可安全降级的差异使用 `convertWarn`。document/file、hosted web/tool search、tool_result 图片/错误标记、reasoning replay 和引用均已保留或采用明确降级。跨协议目标为 Anthropic 时，会在 system、最后一个 tool、最后一条 user content 注入 ephemeral cache breakpoint；原协议 cache_control 仍不逐点一一映射。
 
 涉及 responses 的方向（`internal/protocol/convert_responses.go`）：reasoning、citations、document/file、工具与 usage 按上述规则保留。多模态**输出**仍有损：Responses 协议没有通用 image output item，上游返回的图片输出会告警。`stop`/`stop_sequences`→r 和 `text.format`→a 无对应。`top_k`、`seed`、penalties、metadata、service_tier、store 等非核心提示不跨协议；其中 metadata.user_id 仅以哈希形式用于 `prompt_cache_key`。
 

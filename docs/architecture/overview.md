@@ -581,7 +581,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/config → accounts, cli/framework, config, display, provider, routing, takeover`（`config init|print|check`）；
 - `cli/diag → cli/framework, cli/models, config, daemonctl, display, observe/requestlog, pricing, probe, provider, upstreamproxy`（`wire`/`replay`/`shadow`/`routing report`）；
 - `cli/doctor → accounts, appapi, cli/clicommon, cli/framework,
-  cli/models, config, credstore, display, routing, takeover, observe/seclog, provider`；
+  cli/models, config, credstore, display, protocol, routing, takeover, observe/seclog, provider`；
 - `cli/framework → accounts, config`；
 - `cli/presets → cli/framework, cli/login, cli/serve, config, login, presets`；
 - `cli/stats → accounts, cli/framework, config, daemonctl, display, observe/stats, providerbuild`（`stats`/`usage`）；

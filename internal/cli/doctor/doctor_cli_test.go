@@ -91,17 +91,22 @@ routes:
     - {provider: oai, model: gpt-x, priority: 1, protocol: openai}
 `)
 	out := clitest.GrabStdout(t, func() { CmdDoctor([]string{"--config", cfgPath}, mustCfg(t, cfgPath), cfgPath) })
-	if !strings.Contains(out, "converts when client protocol differs") {
-		t.Errorf("doctor missing conversion note:\n%s", out)
-	}
-	if !strings.Contains(out, "protocol openai") {
-		t.Errorf("doctor missing the declared protocol:\n%s", out)
-	}
-	// Current residual-loss and newly-preserved items.
-	for _, want := range []string{"anthropic↔chat thinking", "unsupported server tools", "input_audio", "documents", "tool-result media"} {
+	// Matrix-driven conversion report: one line per inbound protocol that
+	// would convert to the declared backend protocol, with the scanner
+	// refusals (fail-closed) and the documented degradations.
+	for _, want := range []string{
+		"anthropic→openai: refuses mcp, hosted_tool, content_block",
+		"responses→openai: refuses logprobs, hosted_tool, input_item, audio",
+		"thinking (reasoning replay not implemented",
+		"multimodal output",
+	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("doctor missing lossy item %q:\n%s", want, out)
+			t.Errorf("doctor missing capability line %q:\n%s", want, out)
 		}
+	}
+	// The declared backend protocol stays visible per target.
+	if !strings.Contains(out, "protocol openai") && !strings.Contains(out, "→openai") {
+		t.Errorf("doctor missing the declared protocol:\n%s", out)
 	}
 }
 

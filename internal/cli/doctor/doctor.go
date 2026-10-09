@@ -11,6 +11,7 @@ import (
 
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/credstore"
+	"model-proxy/internal/protocol"
 	"model-proxy/internal/provider"
 	"model-proxy/internal/routing"
 )
@@ -98,11 +99,15 @@ func DoctorWithCfg(cfg *configdomain.Config) int {
 				warns++
 			} else if t.Protocol != "" {
 				// Protocol conversion (#11): a target declaring a backend protocol
-				// converts client↔backend when they differ. Surface it + the fixed
-				// set of fields conversion drops (so an operator wiring tools/images
-				// knows what's lossy before traffic flows).
-				fmt.Printf("        %s target protocol %s — converts when client protocol differs; remaining lossy: anthropic↔chat thinking, unsupported server tools, input_audio (cache breakpoints/documents/tool-result media preserved)\n",
-					display.Yellow("↔"), t.Protocol)
+				// converts client↔backend when they differ. Surface the declared
+				// capability matrix (per inbound protocol: what the scanner
+				// REFUSES fail-closed vs what converts with a documented
+				// degradation) so an operator wiring tools/images knows the
+				// contract before traffic flows. Authority:
+				// internal/protocol/capability_matrix.go + its conformance test.
+				for _, line := range protocol.ConversionDoctorLines(t.Protocol) {
+					fmt.Printf("        %s %s\n", display.Yellow("↔"), line)
+				}
 				// Reasoning-replay marker (#9): for models that REQUIRE reasoning
 				// content echoed back, the dropped thinking/reasoning is fatal to
 				// multi-turn tool calls, not just lossy.
