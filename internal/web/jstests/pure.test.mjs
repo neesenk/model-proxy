@@ -3032,6 +3032,23 @@ test('requestMetaHTML groups the record facts under labeled keys', () => {
   assert.ok(!sparse.includes('size'), sparse);
 });
 
+test('requestMetaHTML rides the scheduling engine beside the route (schedule.source)', () => {
+  // schedule.source vocabulary: quota/sticky/pin/load_balance/force — which
+  // engine produced this pass's try order (docs/web-api.md record fields).
+  const html = requestMetaHTML(
+    { ts: 't', method: 'POST', path: '/v1/messages', attempt: 1, status: 200, provider: 'zhipu', upstream_model: 'glm-5.3-flash', schedule: { source: 'sticky' } }, []);
+  assert.ok(html.includes('via sticky'), html);
+  assert.ok(html.includes('scheduling engine: sticky'), html);
+  // Absent/empty source (records before the field existed, or no schedulable
+  // chain): no via suffix at all.
+  const plain = requestMetaHTML(
+    { ts: 't', method: 'POST', path: '/v1/messages', attempt: 0, status: 200, provider: 'zhipu', upstream_model: 'glm-5.3-flash' }, []);
+  assert.ok(!plain.includes('via'), plain);
+  const empty = requestMetaHTML(
+    { ts: 't', method: 'POST', path: '/v1/messages', attempt: 0, status: 200, provider: 'zhipu', upstream_model: 'glm-5.3-flash', schedule: { source: '' } }, []);
+  assert.ok(!empty.includes('via'), empty);
+});
+
 test('requestMetaHTML rides the MCP tool beside the JSON-RPC method', () => {
   const html = requestMetaHTML(
     { ts: 't', method: 'tools/call', path: '/mcp/web-search', tool: 'search_videos', attempt: 0, status: 200 }, []);

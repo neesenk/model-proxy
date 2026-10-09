@@ -270,7 +270,7 @@ func scheduleFirst(p *Proxy, exposed, sessionKey string) string {
 	for k := range p.expandedRoutes {
 		routeKeys[k] = true
 	}
-	ordered := p.schedule(p.cfg, p.parentOf, exposed, sessionKey, p.expandedRoutes[exposed], routeKeys)
+	ordered, _ := p.schedule(p.cfg, p.parentOf, exposed, sessionKey, false, p.expandedRoutes[exposed], routeKeys)
 	if len(ordered) == 0 {
 		return ""
 	}

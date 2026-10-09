@@ -529,6 +529,8 @@ model-proxy test glm-5.2        # 逐 target 打印 ✓/✗ + HTTP 状态 + 原�
 model-proxy pin glm-5.2 zhipu --ttl 1h
 # pin 是硬独占：被钉的 provider 挂了直接 502 也不 failover；重启即失效
 # 单次请求级覆盖：请求头 x-mp-force-provider: <provider>（replay 用的就是这个）
+# 会话粘滞粒度：(会话, 路由) 独立绑定——同一会话换模型=新绑定，各自 dwell
+# 请求头 x-mp-sticky: off 可临时退出会话粘滞（本请求不粘/不写绑定）
 
 # replay —— 从请求历史里挑一条，用另一个后端重答（需 request_log.enabled）
 model-proxy replay 3fa9c2-118 --to kimi-code

@@ -149,6 +149,7 @@ func (x *Indexer) migrate() error {
 		response_size  INTEGER NOT NULL,
 		turn_key       TEXT NOT NULL DEFAULT '',
 		routing        TEXT,
+		schedule       TEXT,
 		shadow         INTEGER NOT NULL,
 		input          INTEGER NOT NULL,
 		output         INTEGER NOT NULL,
@@ -179,7 +180,8 @@ func (x *Indexer) migrate() error {
 // before it keep 0 = unknown. Same for turn_key, kind and tool (the MCP
 // tools/call name): pre-existing indexed rows keep the empty default until
 // the index is rebuilt from the JSONL files. routing stores the JSONL
-// routing decision object; pre-existing rows keep NULL.
+// routing decision object and schedule the scheduling-source object
+// ({"source":...}); pre-existing rows keep NULL.
 func (x *Indexer) ensureColumns() error {
 	rows, err := x.db.Query(`PRAGMA table_info(records)`)
 	if err != nil {
@@ -191,6 +193,7 @@ func (x *Indexer) ensureColumns() error {
 	hasKind := false
 	hasTool := false
 	hasRouting := false
+	hasSchedule := false
 	for rows.Next() {
 		var cid, notnull, pk int
 		var name, ctype string
@@ -209,6 +212,8 @@ func (x *Indexer) ensureColumns() error {
 			hasTool = true
 		case "routing":
 			hasRouting = true
+		case "schedule":
+			hasSchedule = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -236,6 +241,11 @@ func (x *Indexer) ensureColumns() error {
 	}
 	if !hasRouting {
 		if _, err := x.db.Exec(`ALTER TABLE records ADD COLUMN routing TEXT`); err != nil {
+			return err
+		}
+	}
+	if !hasSchedule {
+		if _, err := x.db.Exec(`ALTER TABLE records ADD COLUMN schedule TEXT`); err != nil {
 			return err
 		}
 	}
@@ -526,9 +536,9 @@ func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int6
 	stmt, err := tx.Prepare(`INSERT INTO records
 		(request_id, ts, ts_ms, session_id, agent, protocol, method, path, tool,
 		 called_model, upstream_model, exposed, provider, attempt, status,
-		 latency_ms, ttft_ms, request_size, response_size, turn_key, routing, kind, shadow,
+		 latency_ms, ttft_ms, request_size, response_size, turn_key, routing, schedule, kind, shadow,
 		 input, output, cache_read, cache_creation, file, "offset", length)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -544,13 +554,19 @@ func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int6
 				routingArg = string(b)
 			}
 		}
+		scheduleArg := any(nil)
+		if row.record.Schedule != nil && row.record.Schedule.Source != "" {
+			if b, err := json.Marshal(row.record.Schedule); err == nil {
+				scheduleArg = string(b)
+			}
+		}
 		if _, err := stmt.Exec(
 			row.record.RequestID, row.record.Ts, row.tsMs, row.record.SessionID,
 			row.record.Agent, row.record.Protocol, row.record.Method, row.record.Path, row.record.Tool,
 			row.record.CalledModel, row.record.UpstreamModel, row.record.Exposed,
 			row.record.Provider, row.record.Attempt, row.record.Status,
 			row.record.LatencyMs, row.record.TTFTMs, row.record.RequestSize, row.record.ResponseSize,
-			row.record.TurnKey, routingArg, row.record.Kind, shadow, row.usage.Input, row.usage.Output, row.usage.CacheRead,
+			row.record.TurnKey, routingArg, scheduleArg, row.record.Kind, shadow, row.usage.Input, row.usage.Output, row.usage.CacheRead,
 			row.usage.CacheCreation, row.file, row.offset, row.length,
 		); err != nil {
 			return err

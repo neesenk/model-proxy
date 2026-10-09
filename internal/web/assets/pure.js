@@ -3081,7 +3081,15 @@ export function requestMetaHTML(r, rel) {
     }
     g('result', result);
     const route = [r.provider, r.upstream_model].filter(Boolean).map((x) => esc(x)).join(' / ');
-    if (route) g('route', route);
+    if (route) {
+      // via names the scheduling engine that produced this pass's try order
+      // (quota/sticky/pin/load_balance/force) — orthogonal to the route-policy
+      // routing decision; see docs/architecture/routing-and-failure.md.
+      const via = r.schedule && r.schedule.source
+        ? ` <span class="req-meta-dim" title="scheduling engine: ${esc(r.schedule.source)}">via ${esc(r.schedule.source)}</span>`
+        : '';
+      g('route', route + via);
+    }
     if (r.request_size || r.response_size) {
       g('size', `req ${fmtNum(r.request_size)} <span class="req-meta-dim">→</span> resp ${fmtNum(r.response_size)}`);
     }

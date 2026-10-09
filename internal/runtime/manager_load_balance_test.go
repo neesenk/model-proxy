@@ -106,7 +106,7 @@ func TestDecideOrderLoadBalanceSessionAssignsByRotation(t *testing.T) {
 		}
 		// The session's next request keeps its provider (sticky was committed
 		// by the caller — mirror the production SetSticky refresh here).
-		m.SetSticky(session, Sticky{Provider: want, Since: now}, 1)
+		m.SetSticky(StickyKey(session, "m"), Sticky{Provider: want, Since: now}, 1)
 		result = m.DecideOrder(first)
 		if head := input.Targets[result.Order[0]].Provider; head != want {
 			t.Fatalf("session %s second head = %q, want sticky %q", session, head, want)
@@ -128,7 +128,7 @@ func TestDecideOrderLoadBalanceSessionKeepsStickyDespiteBetterQuota(t *testing.T
 	setScheduleQuota(t, m, "a", scheduleQuota(provider.BillingPayG, .01, now), 1)
 	setScheduleQuota(t, m, "b", scheduleQuota(provider.BillingPlan, .5, now), 1)
 	setScheduleQuota(t, m, "c", scheduleQuota(provider.BillingPlan, 1, now), 1)
-	m.SetSticky("session", Sticky{Provider: "a", Since: now}, 1)
+	m.SetSticky(StickyKey("session", "m"), Sticky{Provider: "a", Since: now}, 1)
 
 	input := loadBalanceInput("m", now, "a", "b", "c")
 	input.SessionKey = "session"
@@ -143,7 +143,7 @@ func TestDecideOrderLoadBalanceSessionKeepsStickyDespiteBetterQuota(t *testing.T
 	}
 	// The sticky entry itself is untouched by scheduling (only the caller's
 	// SetSticky refreshes it) and is never deleted while the session is active.
-	if current, ok := m.Sticky("session"); !ok || current.Provider != "a" {
+	if current, ok := m.Sticky(StickyKey("session", "m")); !ok || current.Provider != "a" {
 		t.Fatalf("sticky entry = %+v (ok=%v), want provider a", current, ok)
 	}
 }
@@ -156,7 +156,7 @@ func TestDecideOrderLoadBalanceSessionReassignsWhenStickyUnavailable(t *testing.
 
 	now := time.Date(2026, 7, 29, 15, 0, 0, 0, time.UTC)
 	m := newTestManager(1)
-	m.SetSticky("session", Sticky{Provider: "b", Since: now}, 1)
+	m.SetSticky(StickyKey("session", "m"), Sticky{Provider: "b", Since: now}, 1)
 	// b goes down after the session parked on it.
 	m.RecordRateLimit("b", now.Add(time.Hour), RateLimitTransient, 1)
 
@@ -184,7 +184,7 @@ func TestDecideOrderLoadBalanceSessionIdlePastDwellReRotates(t *testing.T) {
 	now := time.Date(2026, 7, 29, 15, 0, 0, 0, time.UTC)
 	m := newTestManager(1)
 	// Session parked on a long ago; idle for 2h with dwell 1h.
-	m.SetSticky("session", Sticky{Provider: "a", Since: now.Add(-2 * time.Hour)}, 1)
+	m.SetSticky(StickyKey("session", "m"), Sticky{Provider: "a", Since: now.Add(-2 * time.Hour)}, 1)
 	// Prime the rotation counter to 1 (next slot b) with a sessionless call.
 	if result := m.DecideOrder(loadBalanceInput("m", now, "a", "b", "c")); result.StickyProvider != "" {
 		t.Fatalf("sessionless prime StickyProvider = %q, want empty", result.StickyProvider)
@@ -199,7 +199,7 @@ func TestDecideOrderLoadBalanceSessionIdlePastDwellReRotates(t *testing.T) {
 	if result.StickyProvider != "b" {
 		t.Fatalf("returning idle session StickyProvider = %q, want b", result.StickyProvider)
 	}
-	if _, still := m.Sticky("session"); still {
+	if _, still := m.Sticky(StickyKey("session", "m")); still {
 		t.Fatal("idle sticky entry must be evicted by the sweep")
 	}
 }
@@ -282,7 +282,7 @@ func TestPreviewOrderLoadBalanceKeepsSessionAffinity(t *testing.T) {
 	if result := m.DecideOrder(assigned); result.StickyProvider != "a" {
 		t.Fatalf("assignment StickyProvider = %q, want a", result.StickyProvider)
 	}
-	m.SetSticky("s1", Sticky{Provider: "a", Since: now}, 1)
+	m.SetSticky(StickyKey("s1", "m"), Sticky{Provider: "a", Since: now}, 1)
 	// A sessionless schedule advances the counter past b — the session's
 	// preview must still show its parked provider a.
 	m.DecideOrder(input)

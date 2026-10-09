@@ -435,10 +435,10 @@ func TestServeRouteSelectorBeatsBand(t *testing.T) {
 // target set on the first round and drops provider from every later round —
 // the wait-retry round's re-scheduled set a cached selector preference is
 // re-applied to.
-func dropProviderOnLaterRounds(calls *atomic.Int32, provider string) func(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, generation uint64) []RouteTarget {
-	return func(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, generation uint64) []RouteTarget {
+func dropProviderOnLaterRounds(calls *atomic.Int32, provider string) func(cfg *Config, parentOf map[string]string, exposed, sessionKey string, stickyOff bool, targets []RouteTarget, routeKeys map[string]bool, generation uint64) ([]RouteTarget, string) {
+	return func(cfg *Config, parentOf map[string]string, exposed, sessionKey string, stickyOff bool, targets []RouteTarget, routeKeys map[string]bool, generation uint64) ([]RouteTarget, string) {
 		if calls.Add(1) == 1 {
-			return targets
+			return targets, ""
 		}
 		out := make([]RouteTarget, 0, len(targets))
 		for _, t := range targets {
@@ -446,7 +446,7 @@ func dropProviderOnLaterRounds(calls *atomic.Int32, provider string) func(cfg *C
 				out = append(out, t)
 			}
 		}
-		return out
+		return out, ""
 	}
 }
 

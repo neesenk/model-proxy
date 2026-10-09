@@ -80,10 +80,14 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		clientSession = protocol.SessionIDFromBody(origBody)
 	}
 	// The trusted session key used for security decisions (block table,
-	// repeat interception, session scan). Body-carried session identity
-	// (prompt_cache_key / metadata.user_id / client_metadata.session_id) is
-	// intentionally NOT accepted for these decisions.
-	sessionKey := r.Header.Get("x-claude-code-session-id")
+	// repeat interception, session scan) and the routing sticky key.
+	// Body-carried session identity (prompt_cache_key / metadata.user_id /
+	// client_metadata.session_id) is intentionally NOT accepted for these
+	// decisions. HeaderSessionID enforces opaque-token hygiene: a blank,
+	// oversized, or control/non-ASCII value counts as NO session (sticky falls
+	// back to the route key) — a mangled identity must not silently pin a
+	// session to a wrong grouping.
+	sessionKey := protocol.HeaderSessionID(r.Header.Get("x-claude-code-session-id"))
 
 	// TurnKey fingerprints one conversational turn for the repeat_turn escalation
 	// signal. It is computed once per request and checked against the session's
@@ -256,6 +260,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		routeKeys:      routeKeys,
 		force:          force,
 		forcedProvider: forcedProvider,
+		stickyOff:      StickyOverrideFromRequest(r),
 		cacheKey:       cacheKey,
 		origBody:       origBody,
 
@@ -511,6 +516,11 @@ type serveState struct {
 	// set during serveOnce and copied into the attempt's LogCtx so the request
 	// log can persist it. Never fails closed: a nil value simply omits the field.
 	routing *configdomain.RoutingDecision
+	// scheduleSource names the engine that produced this pass's try order
+	// (runtime.ScheduleSource* / ScheduleSourceForce). Re-computed each
+	// wait-retry round; copied into every attempt's LogCtx. Orthogonal to
+	// routing: the policy layer re-orders, the scheduler ordered.
+	scheduleSource string
 }
 
 // enqueueAdjudications is the pipeline convenience for the guard section: a
@@ -613,12 +623,18 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 	clientSession := req.clientSession
 	origBody := req.origBody
 
-	planner := requestRoutingPlanner(p, runtime, routeKeys)
+	planner := requestRoutingPlanner(p, runtime, routeKeys, req.stickyOff)
 	// Routing-decision overhead (scheduling + request-aware planning), observed
 	// separately from upstream latency under the virtual ("routing","decision")
 	// row — sum/requests there is the mean decision time per request.
 	routeStart := time.Now()
-	ordered := p.schedule(cfg, parentOf, exposed, sessionKey, targets, routeKeys, generation)
+	ordered, scheduleSource := p.schedule(cfg, parentOf, exposed, sessionKey, req.stickyOff, targets, routeKeys, generation)
+	// A force-provider override collapsed the chain BEFORE the scheduler ranked
+	// it — that narrowing, not any engine, is the decision of record.
+	if forcedProvider != "" {
+		scheduleSource = ScheduleSourceForce
+	}
+	st.scheduleSource = scheduleSource
 	// `force` (pin) was computed before the cache. A pin is EXCLUSIVE: it
 	// overrides request-aware routing (no cross-route reroute away from the pinned
 	// provider) and, via the `force` flag into the attempt, bypasses the circuit
@@ -761,7 +777,11 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 				convDiags = append(convDiags, targetexec.ConversionDiagnostic{Code: item.Code, Detail: item.Detail})
 			}
 		}
-		flc := LogCtx{RequestID: requestID, SessionID: clientSession, Attempt: st.attempt, Exposed: exposed, Agent: agent, OrigBody: origBody, Diagnostics: convDiags, Routing: st.routing}
+		var scheduleDecision *requestlog.ScheduleDecision
+		if st.scheduleSource != "" {
+			scheduleDecision = &requestlog.ScheduleDecision{Source: st.scheduleSource}
+		}
+		flc := LogCtx{RequestID: requestID, SessionID: clientSession, Attempt: st.attempt, Exposed: exposed, Agent: agent, OrigBody: origBody, Diagnostics: convDiags, Routing: st.routing, Schedule: scheduleDecision}
 		st.attempt++
 		// One-shot larger-context retry: when this target answers a
 		// context-overflow 400, the executor calls ctxRetry for a strictly-larger-
@@ -793,13 +813,14 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 				Agent:       agent,
 				CacheKey:    cacheKey,
 				Log: targetexec.LogContext{
-					RequestID:    flc.RequestID,
-					SessionID:    flc.SessionID,
-					Attempt:      flc.Attempt,
-					Exposed:      flc.Exposed,
-					OriginalBody: flc.OrigBody,
-					Diagnostics:  convDiags,
-					Routing:      flc.Routing,
+					RequestID:      flc.RequestID,
+					SessionID:      flc.SessionID,
+					Attempt:        flc.Attempt,
+					Exposed:        flc.Exposed,
+					OriginalBody:   flc.OrigBody,
+					Diagnostics:    convDiags,
+					Routing:        flc.Routing,
+					ScheduleSource: scheduleDecisionSource(scheduleDecision),
 				},
 				ResponseContext:  plan.ResponseContext(origBody),
 				ResponsesHistory: responsesHistory,
@@ -883,8 +904,11 @@ type serveRequest struct {
 	// forcedProvider is the request-scoped replay override. It is exclusive for
 	// routing, but unlike a pin it does not bypass circuit health.
 	forcedProvider string
-	cacheKey       string
-	origBody       []byte
+	// stickyOff is the x-mp-sticky: off per-request opt-out (see
+	// StickyOverrideFromRequest): no affinity read, no binding write.
+	stickyOff bool
+	cacheKey  string
+	origBody  []byte
 
 	writer  http.ResponseWriter
 	request *http.Request
@@ -1003,6 +1027,29 @@ func ForcedProviderFromRequest(request *http.Request) string {
 		return ""
 	}
 	return request.URL.Query().Get("force_provider")
+}
+
+// ScheduleSourceForce is the schedule-source value the forward layer stamps
+// when a force-provider override (header / "provider/model" prefix / query)
+// collapsed the route to one provider before the scheduler ever ranked it.
+// It must equal runtime.ScheduleSourceForce; forward cannot import runtime
+// (dependency direction), so the invariant is pinned by a composition test
+// in internal/app. The rest of the vocabulary (quota/sticky/pin/load_balance)
+// originates in the scheduler and reaches the log untouched.
+const ScheduleSourceForce = "force"
+
+// StickyOverrideFromRequest reports the per-request session-affinity opt-out
+// (x-mp-sticky: off): this one request ignores any existing sticky binding
+// (the engine picks fresh) and neither writes nor refreshes one — the caller
+// explicitly wants best-now routing (replays, probing, cache experiments).
+// Unknown values are ignored rather than rejected: the override is a hint
+// surface, and a typo must not break a working request. The header never
+// reaches the upstream (the executor forwards a fixed whitelist only).
+func StickyOverrideFromRequest(request *http.Request) bool {
+	if request == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(request.Header.Get("x-mp-sticky")), "off")
 }
 
 // expandFusionResponses mirrors forward's responses-state expansion for one

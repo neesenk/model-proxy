@@ -416,15 +416,25 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	out["cache"] = cacheState
 
-	sessionKey := r.Header.Get("x-claude-code-session-id")
+	// Same opaque-token hygiene as the forward path: an invalid header value
+	// previews as sessionless (route-keyed sticky), never a mangled identity.
+	sessionKey := protocol.HeaderSessionID(r.Header.Get("x-claude-code-session-id"))
 	if sessionKey != "" {
 		out["session_key"] = sessionKey
 	}
+	stickyOff := forward.StickyOverrideFromRequest(r)
+	if stickyOff {
+		out["sticky"] = "off"
+	}
 	input := scheduleInput(cfg, exposed, fullRuntimeTargets(cfg, parentOf, targets, now), routeKeys, now)
 	input.SessionKey = sessionKey
+	input.IgnoreSticky = stickyOff
 	input.QuotaMaxAge = 3 * cfg.Scheduling.PollInterval()
 	input.Generation = dash.Generation
 	decision := dash.PreviewOrder(input)
+	if decision.Source != "" {
+		out["schedule_source"] = decision.Source
+	}
 
 	// Per-target fit verdicts against the request profile — the same facts
 	// planner.Apply uses to narrow the route.

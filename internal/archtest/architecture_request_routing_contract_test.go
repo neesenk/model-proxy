@@ -57,6 +57,9 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 		want := map[string]bool{
 			"pipe": true, "config": true, "parentOf": true,
 			"routeKeys": true, "generation": true,
+			// The request's x-mp-sticky: off override rides the same frozen
+			// snapshot into cross-route reroutes (contract: Bifrost borrow).
+			"stickyOff": true,
 		}
 		if got := structContractViolations(schedulerFields, want, nil); len(got) != 0 {
 			t.Errorf("requestRoutingScheduler contract violations: %v", got)
@@ -146,7 +149,7 @@ func scheduleCallUsesCapturedGeneration(node ast.Node) bool {
 	var matched bool
 	ast.Inspect(node, func(candidate ast.Node) bool {
 		call, ok := candidate.(*ast.CallExpr)
-		if !ok || len(call.Args) != 7 {
+		if !ok || len(call.Args) != 8 {
 			return true
 		}
 		selector, ok := call.Fun.(*ast.SelectorExpr)
@@ -159,7 +162,7 @@ func scheduleCallUsesCapturedGeneration(node ast.Node) bool {
 			return true
 		}
 		wantFields := []string{
-			"config", "parentOf", "", "", "", "routeKeys", "generation",
+			"config", "parentOf", "", "", "stickyOff", "", "routeKeys", "generation",
 		}
 		for index, want := range wantFields {
 			if want == "" {
@@ -171,7 +174,7 @@ func scheduleCallUsesCapturedGeneration(node ast.Node) bool {
 				return true
 			}
 		}
-		for index, want := range map[int]string{2: "routeName", 3: "sessionKey", 4: "targets"} {
+		for index, want := range map[int]string{2: "routeName", 3: "sessionKey", 5: "targets"} {
 			argument, ok := call.Args[index].(*ast.Ident)
 			if !ok || argument.Name != want {
 				return true
@@ -208,12 +211,13 @@ func plannerConstructorUsesRuntimeSnapshot(node ast.Node) bool {
 		return false
 	}
 	schedulerFields := requestRoutingCompositeFields(scheduler)
-	return len(schedulerFields) == 5 &&
+	return len(schedulerFields) == 6 &&
 		requestRoutingExprPath(schedulerFields["pipe"]) == "p" &&
 		requestRoutingExprPath(schedulerFields["config"]) == "runtime.Cfg" &&
 		requestRoutingExprPath(schedulerFields["parentOf"]) == "runtime.ParentOf" &&
 		requestRoutingExprPath(schedulerFields["routeKeys"]) == "routeKeys" &&
-		requestRoutingExprPath(schedulerFields["generation"]) == "runtime.Generation"
+		requestRoutingExprPath(schedulerFields["generation"]) == "runtime.Generation" &&
+		requestRoutingExprPath(schedulerFields["stickyOff"]) == "stickyOff"
 }
 
 func requestRoutingCompositeFields(literal *ast.CompositeLit) map[string]ast.Expr {

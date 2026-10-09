@@ -6502,6 +6502,11 @@ function renderScheduleCard(target, st) {
         meta += ` · ${fmtDur(info.sticky_dwell_remaining_sec)} dwell left`;
       }
     }
+    // Live (session, route) bindings parked on this route — per-route sticky
+    // granularity (one session switching models holds one binding per route).
+    if (info.sticky_sessions) {
+      meta += `${info.sticky ? ' · ' : ''}<span title="sessions parked on this route (per-route sticky bindings), within dwell">${info.sticky_sessions} live session${info.sticky_sessions === 1 ? '' : 's'}</span>`;
+    }
     let pools = '';
     if (info.pools && info.pools.length) {
       pools = '<span class="route-meta">';

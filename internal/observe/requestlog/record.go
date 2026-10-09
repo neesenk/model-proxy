@@ -58,6 +58,11 @@ type Record struct {
 	// hard selection (pin/force-provider) skipped the policy, or when no
 	// policy step (latch/selector/band) matched.
 	Routing *configdomain.RoutingDecision `json:"routing,omitempty"`
+	// Schedule records which scheduling engine produced this pass's try order
+	// (schedule.source: quota/sticky/pin/load_balance/force). Orthogonal to
+	// Routing — the policy layer re-orders what the scheduler ordered.
+	// Omitted when no target was schedulable.
+	Schedule *ScheduleDecision `json:"schedule,omitempty"`
 	// ParsedUsage is a query-time projection of ResponseBody (ExtractUsage)
 	// for aggregate views that strip bodies as they read (Filter.UsageOnly).
 	// Never persisted: the JSONL encoder does not write it and json:"-"
@@ -69,6 +74,17 @@ type Record struct {
 type ConversionDiagnostic struct {
 	Code   string `json:"code"`
 	Detail string `json:"detail,omitempty"`
+}
+
+// ScheduleDecision captures which scheduling engine produced a pass's try
+// order. Source vocabulary: "quota" (tier→priority→surplus ranking),
+// "sticky" (an existing (session, route) binding held), "pin" (operator pin
+// narrowed the chain), "load_balance" (rotation slot), "force" (a
+// force-provider override collapsed the chain before ranking — stamped by
+// the forward layer). The runtime constants are the producing authority;
+// this struct is the persisted projection.
+type ScheduleDecision struct {
+	Source string `json:"source"`
 }
 
 // Input contains detached request/response facts used to build a Record.
@@ -97,6 +113,7 @@ type Input struct {
 	ResponseHeader    http.Header
 	Diagnostics       []ConversionDiagnostic
 	Routing           *configdomain.RoutingDecision
+	Schedule          *ScheduleDecision
 }
 
 const truncationMarker = "\n...[truncated by model-proxy request_log max_body_bytes]"
@@ -141,6 +158,7 @@ func (l *Logger) BuildRecord(in Input) *Record {
 		ResponseHeaders: responseHeaders(in.ResponseHeader),
 		Diagnostics:     in.Diagnostics,
 		Routing:         in.Routing,
+		Schedule:        in.Schedule,
 	}
 
 	rec.RequestSize = len(in.RequestBody)
@@ -261,6 +279,11 @@ func appendRecordLine(dst []byte, rec *Record) []byte {
 	if rec.Routing != nil {
 		dst = append(dst, `,"routing":`...)
 		dst = appendRoutingDecision(dst, rec.Routing)
+	}
+	if rec.Schedule != nil && rec.Schedule.Source != "" {
+		dst = append(dst, `,"schedule":{"source":`...)
+		dst = appendJSONString(dst, rec.Schedule.Source)
+		dst = append(dst, '}')
 	}
 	return append(dst, '}', '\n')
 }

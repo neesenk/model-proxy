@@ -279,7 +279,7 @@ func firstProvider(p *Proxy, model string) string {
 	for k := range p.cfg.Routes {
 		routeKeys[k] = true
 	}
-	ordered := p.schedule(p.cfg, p.parentOf, model, "", p.cfg.Routes[model], routeKeys)
+	ordered, _ := p.schedule(p.cfg, p.parentOf, model, "", false, p.cfg.Routes[model], routeKeys)
 	if len(ordered) == 0 {
 		return ""
 	}
@@ -385,13 +385,14 @@ func TestScheduleAdapter_ConfigBillingLabelDoesNotReachScheduler(t *testing.T) {
 		t.Fatalf("plan quota=%+v, want fresh plan snapshot", got)
 	}
 
-	ordered, _ := p.decideOrder(
+	ordered, _, _ := p.decideOrder(
 		p.cfg,
 		p.parentOf,
 		"m",
 		"",
 		targets,
 		now,
+		false,
 		false,
 		map[string]bool{"m": true},
 	)
@@ -419,16 +420,16 @@ func TestScheduleAdapter_DerivesQuotaMaxAgeFromPollInterval(t *testing.T) {
 	})
 
 	p.cfg.Scheduling.QuotaPollInterval = "2m" // max age = 3 × 2m = 6m
-	fresh, _ := p.decideOrder(
-		p.cfg, p.parentOf, "m", "", targets, now, false, map[string]bool{"m": true},
+	fresh, _, _ := p.decideOrder(
+		p.cfg, p.parentOf, "m", "", targets, now, false, false, map[string]bool{"m": true},
 	)
 	if len(fresh) != 2 || fresh[0].Provider != "candidate" {
 		t.Fatalf("6m max age order=%+v, want fresh plan candidate first", fresh)
 	}
 
 	p.cfg.Scheduling.QuotaPollInterval = "1m" // max age = 3m; snapshot is stale
-	stale, _ := p.decideOrder(
-		p.cfg, p.parentOf, "m", "", targets, now, false, map[string]bool{"m": true},
+	stale, _, _ := p.decideOrder(
+		p.cfg, p.parentOf, "m", "", targets, now, false, false, map[string]bool{"m": true},
 	)
 	if len(stale) != 2 || stale[0].Provider != "unknown" {
 		t.Fatalf("3m max age order=%+v, want stable unknown-first order", stale)

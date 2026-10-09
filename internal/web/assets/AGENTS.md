@@ -9,6 +9,39 @@
 - 纯函数单一事实源在 `pure.js`（含 v2 展示辅助：iconPin/iconRefresh/iconChevron/statusBadge*/kpiDeltaClass/logLineHTML），全部归 `jstests/pure.test.mjs` 行为覆盖；新增纯逻辑先进 pure.js 并补用例。
 - `node --check` 语法门禁与 `jstests/contract.test.mjs`（对 `docs/web-api.md` 的字段契约）覆盖 `app.js`/`pure.js`；样式漂移由 `jstests/registry.test.mjs` 门禁保护（见「模式注册表」）。
 
+## 后台 UI 契约总则
+
+优先级固定：信息密度、可读性、操作效率（v2 设计系统服务于此——rem 字阶、密集表格
+几何、badge 状态、单实现目录；装饰让位密度与扫读）。新增或重构页面必须逐条满足：
+
+1. **复用组件、布局与设计 Token**：先走「模式注册表」的决策路由消费唯一实现；设计
+   Token 即 `styles.css` `:root` 变量组（语义色、`--r-*` 圆角分级、海拔分层、rem 字阶），
+   写死色值/字号即违规（「样式约定」）。
+2. **页面骨架统一**：列表=数据表一族（`.table` 几何契约），筛选区=工具行控件
+   （`.req-input` + 时间维度选择器 + `.clearable`），详情=行内展开/弹层
+   （`detailRecordsHTML` 族），编辑表单=`.field`/`.route-target-row`，图表=注册表
+   「图表」行（uPlot 唯一实现）；同类页面不得另起骨架。
+3. **每页四态**（复用既有机制，不得另造）：加载=首次骨架、再次进入
+   stale-while-revalidate（「自动刷新与用户交互门」）；空数据=`No data` 类空态文案
+   （pure.js 惯例），不得渲染成空白或伪报错；错误=刷新失败保旧数据 +
+   `setRefreshError` 横幅、首次无数据才允许整页错误卡、mutation 错误显后端 message
+   （「边界」）；无权限=boot 401 弹 `admin-auth-modal`、会话内单 API 401 沿各部分
+   错误态显示，不得白屏/静默。
+4. **视图状态可恢复**：筛选、排序、分页状态在刷新/Back 后必须可恢复——主数据面
+   （Requests/Security/Live/MCP 子标签/Status section）走 URL hash
+   （`requestsFilterQuery`/`requestsFilterFromQuery` + `navHash`/`mirrorHash`，deep
+   link 可分享，契约细节见 `docs/frontend.md`「URL hash 视图状态」）；分析仪表盘的
+   持久偏好走 localStorage（`an-sort`、`mcpa-*`）。当前无分页控件（请求表虚拟滚动、
+   其余全量渲染）；未来引入分页时状态必须进 hash，不得只存内存。
+5. **指标标注**：指标必须注明单位（ms/s/%/$·per 1M/requests）、统计口径与时间范围
+   （窗口/粒度由时间维度选择器显式呈现，派生 KPI 的口径进 tooltip 或副标题）、数据
+   新鲜度（conn 指示 + 自动刷新 + stale 横幅承载）；不得只给裸数字。
+6. **完成门禁**：完成后跑「验证」全量——常规 `node --check` + `node --test` jstests +
+   `go test ./internal/web`（本项目前端为无构建 vanilla JS，无 TS/ESLint，静态等价物
+   是 `node --check` + registry/contract jstests 门禁）；UI 行为/布局改动必须追加浏览器
+   门禁 `MP_UI_E2E=1` 的 uie2e（关键交互行为流）+ uivisual（逐 tab 截图供人工复核），
+   即「用浏览器检查截图与关键交互」的项目内等价物。
+
 ## 模式注册表（单一实现目录）
 
 相似 UI 功能不得出现第二份实现。新 UI 元素的决策路由：① 翻 `styles.css` 的
@@ -22,6 +55,7 @@
 | 卡片面板 | `.card`/`.card-head`/`.card-body`，app.js `buildCard` | 所有 tab 的卡 |
 | 状态徽章 | `.badge` + pure.js `statusBadge` | 请求 status / guard verdict / pills |
 | KPI 瓦片 | `.kpi-grid`/`.kpi` | Dashboard / Analytics / Security |
+| 图表 | uPlot（vendor 唯一图表库）：pure.js `analyticsChartSeries`/`mcpAnalyticsChartSeries`（series→数组、零值/gap 语义），app.js `uplotAxisStyle` 主题轴样式、`dashRenderChart`/`destroyDashChart` 与 `destroyAnalyticsCharts` 实例生命周期 | jstests/pure.test.mjs（chart series 秒制/零值/gap 语义） |
 | 数据表 | `.table`（sticky th 用 `--sticky-top`） | 全部列表 |
 | 请求表（三表一份） | pure.js `requestTableHeadHTML`+`requestRowHTML` | Requests / Live 环 / Live 会话 |
 | 表格溢出 tooltip | app.js `reqTableCellTip`（仅真实截断时动态 `title`，`data-tip-dyn` 标记区分渲染器 title；三表单行省略样式在 styles.css 请求表区段，status 单元除外——badge 芯片不省略） | jstests/uie2e.test.mjs（长 agent 悬停出全文，renderer title 不被覆盖，status 芯片无 “200…” 假截断） |

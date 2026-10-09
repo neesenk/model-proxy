@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	configdomain "model-proxy/internal/config"
@@ -160,10 +161,7 @@ func projectQuality(state map[string]providerQuality, now time.Time) map[string]
 }
 
 func decideOrder(input ScheduleInput, state scheduleState, commit bool) ScheduleResult {
-	stickyKey := input.SessionKey
-	if stickyKey == "" {
-		stickyKey = input.Exposed
-	}
+	stickyKey := StickyKey(input.SessionKey, input.Exposed)
 	if commit {
 		for key, value := range state.sticky {
 			if input.RouteKeys[key] {
@@ -240,7 +238,7 @@ func decideOrder(input ScheduleInput, state scheduleState, commit bool) Schedule
 	// above — disabled filtering, pin narrowing, availability gating — is
 	// strategy-independent operator/health intent.
 	if input.Strategy == configdomain.RouteStrategyLoadBalance {
-		return decideOrderLoadBalance(input, state, available, facts, commit)
+		return decideOrderLoadBalance(input, state, available, facts, commit, pinned)
 	}
 
 	sort.SliceStable(available, func(i, j int) bool {
@@ -255,6 +253,12 @@ func decideOrder(input ScheduleInput, state scheduleState, commit bool) Schedule
 	})
 
 	current := state.sticky[stickyKey]
+	if input.IgnoreSticky {
+		// x-mp-sticky: off — read the binding as absent so the engine picks
+		// fresh; the write is suppressed below and the old entry is left to
+		// the dwell sweep.
+		current = Sticky{}
+	}
 	currentIndex := -1
 	for i, candidate := range available {
 		if candidate.target.Provider == current.Provider {
@@ -290,11 +294,13 @@ func decideOrder(input ScheduleInput, state scheduleState, commit bool) Schedule
 
 	ordered := make([]scheduleCandidate, 0, len(available))
 	stickyProvider := ""
+	source := ""
 	if keepSticky {
 		ordered = append(ordered, available[currentIndex])
 		if stickyKey != input.Exposed {
 			stickyProvider = current.Provider
 		}
+		source = ScheduleSourceSticky
 	} else if len(available) > 0 {
 		pick := available[0]
 		// Spread only within the already-winning pool rank. A lower-ranked pool
@@ -315,6 +321,17 @@ func decideOrder(input ScheduleInput, state scheduleState, commit bool) Schedule
 		}
 		ordered = append(ordered, pick)
 		stickyProvider = pick.target.Provider
+		source = ScheduleSourceQuota
+	}
+	// An operator pin narrowed the candidate set before any engine picked:
+	// the pin is the dominant decision (force > pin > sticky > engine).
+	if pinned && source != "" {
+		source = ScheduleSourcePin
+	}
+	// The off-override read the binding as absent; it must also leave the map
+	// untouched (no refresh, no new entry).
+	if input.IgnoreSticky {
+		stickyProvider = ""
 	}
 
 	for _, candidate := range available {
@@ -328,6 +345,7 @@ func decideOrder(input ScheduleInput, state scheduleState, commit bool) Schedule
 		Order:          make([]int, 0, len(ordered)),
 		StickyProvider: stickyProvider,
 		Facts:          facts,
+		Source:         source,
 	}
 	for _, candidate := range ordered {
 		result.Order = append(result.Order, candidate.index)
@@ -343,37 +361,43 @@ func decideOrder(input ScheduleInput, state scheduleState, commit bool) Schedule
 // Sticky.Since on every request; an idle session's entry is evicted after
 // Dwell and re-rotates on its return; a provider that leaves the available
 // set re-assigns to the next slot) — so upstream prompt caches stay warm
-// across a conversation while NEW sessions spread evenly over targets.
-// Sessionless clients cannot be affinitized and rotate per request instead
-// (the counter then advances per commit and no sticky is written — quota
-// mode's route-keyed sticky fallback would park ALL anonymous traffic on one
-// provider, defeating the strategy). In both modes the failover chain is the
-// remaining rotation, and tier/priority/surplus ranking is deliberately
-// absent: the strategy exists to spread load, not to chase quota surplus.
-// Previews (commit=false) observe the next rotation without consuming it.
+// across a conversation while NEW sessions spread evenly over targets. The
+// binding is keyed by (session, route) — StickyKey — exactly like quota mode,
+// so a session's binding on one route never drags another. Sessionless
+// clients cannot be affinitized and rotate per request instead (the counter
+// then advances per commit and no sticky is written — quota mode's route-keyed
+// sticky fallback would park ALL anonymous traffic on one provider, defeating
+// the strategy). In both modes the failover chain is the remaining rotation,
+// and tier/priority/surplus ranking is deliberately absent: the strategy
+// exists to spread load, not to chase quota surplus. Previews (commit=false)
+// observe the next rotation without consuming it.
 func decideOrderLoadBalance(
 	input ScheduleInput,
 	state scheduleState,
 	available []scheduleCandidate,
 	facts []ScheduleFacts,
 	commit bool,
+	pinned bool,
 ) ScheduleResult {
 	if len(available) == 0 {
 		return ScheduleResult{Facts: facts}
 	}
+	stickyKey := StickyKey(input.SessionKey, input.Exposed)
 	head := 0
 	stickyProvider := ""
-	if input.SessionKey != "" {
+	source := ""
+	if input.SessionKey != "" && !input.IgnoreSticky {
 		// Session affinity first: an existing sticky entry whose provider is
 		// still in the available set keeps the session parked on it (prompt
 		// cache). No dwell check here — the eviction sweep at the top of
 		// decideOrder already removed idle entries, and the caller's SetSticky
 		// refresh keeps active sessions young.
-		if current, ok := state.sticky[input.SessionKey]; ok && current.Provider != "" {
+		if current, ok := state.sticky[stickyKey]; ok && current.Provider != "" {
 			for i, candidate := range available {
 				if candidate.target.Provider == current.Provider {
 					head = i
 					stickyProvider = current.Provider
+					source = ScheduleSourceSticky
 					break
 				}
 			}
@@ -388,11 +412,21 @@ func decideOrderLoadBalance(
 				state.rr[input.Exposed]++
 			}
 		}
+		source = ScheduleSourceLoadBalance
 		// Sticky is written only for sessions — a sessionless request reports
 		// no sticky so the caller's SetSticky path stays a no-op.
 		if input.SessionKey != "" {
 			stickyProvider = available[head].target.Provider
 		}
+	}
+	// x-mp-sticky: off — rotate but leave the binding map untouched.
+	if input.IgnoreSticky {
+		stickyProvider = ""
+	}
+	// An operator pin narrowed the candidate set before the rotation picked:
+	// the pin is the dominant decision (force > pin > sticky > engine).
+	if pinned && source != "" {
+		source = ScheduleSourcePin
 	}
 	ordered := make([]scheduleCandidate, 0, len(available))
 	ordered = append(ordered, available[head:]...)
@@ -401,11 +435,29 @@ func decideOrderLoadBalance(
 		Order:          make([]int, 0, len(ordered)),
 		StickyProvider: stickyProvider,
 		Facts:          facts,
+		Source:         source,
 	}
 	for _, candidate := range ordered {
 		result.Order = append(result.Order, candidate.index)
 	}
 	return result
+}
+
+// CountRouteSessionSticky counts the (session, route) bindings still inside
+// their dwell for one route — the Status schedule card's per-route view into
+// the sticky map (the map itself stays runtime-private keying).
+func CountRouteSessionSticky(sticky map[string]Sticky, exposed string, now time.Time, dwell time.Duration) int {
+	suffix := stickySep + exposed
+	count := 0
+	for key, entry := range sticky {
+		if entry.Provider == "" || !strings.HasSuffix(key, suffix) {
+			continue
+		}
+		if now.Sub(entry.Since) < dwell {
+			count++
+		}
+	}
+	return count
 }
 
 func poolBandByID(

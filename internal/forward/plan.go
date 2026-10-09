@@ -94,30 +94,35 @@ type requestRoutingScheduler struct {
 	parentOf   map[string]string
 	routeKeys  map[string]bool
 	generation uint64
+	stickyOff  bool
 }
 
 func (scheduler requestRoutingScheduler) Schedule(
 	routeName, sessionKey string,
 	targets []RouteTarget,
 ) []RouteTarget {
-	return scheduler.pipe.schedule(
+	ordered, _ := scheduler.pipe.schedule(
 		scheduler.config,
 		scheduler.parentOf,
 		routeName,
 		sessionKey,
+		scheduler.stickyOff,
 		targets,
 		scheduler.routeKeys,
 		scheduler.generation,
 	)
+	return ordered
 }
 
 // requestRoutingPlanner projects one immutable runtime snapshot into the pure
 // policy package and binds only the narrow scheduler port that may mutate
-// sticky/round-robin state.
+// sticky/round-robin state. stickyOff is the request's x-mp-sticky: off
+// override — it applies to cross-route reroutes of the same request too.
 func requestRoutingPlanner(
 	p pipeline,
 	runtime Snapshot,
 	routeKeys map[string]bool,
+	stickyOff bool,
 ) routing.Planner {
 	return routing.NewPlanner(routing.PlannerInput{
 		Config:         runtime.Cfg,
@@ -130,6 +135,7 @@ func requestRoutingPlanner(
 			parentOf:   runtime.ParentOf,
 			routeKeys:  routeKeys,
 			generation: runtime.Generation,
+			stickyOff:  stickyOff,
 		},
 	})
 }

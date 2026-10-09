@@ -85,14 +85,14 @@ func TestDecideOrderStickyDwellAndSwitchMargin(t *testing.T) {
 	m := newTestManager(2)
 	setScheduleQuota(t, m, "best", scheduleQuota(provider.BillingPlan, 1, now), 2)
 	setScheduleQuota(t, m, "current", scheduleQuota(provider.BillingPlan, .7, now), 2)
-	m.SetSticky("session", Sticky{Provider: "current", Since: now.Add(-30 * time.Minute)}, 2)
+	m.SetSticky(StickyKey("session", "route"), Sticky{Provider: "current", Since: now.Add(-30 * time.Minute)}, 2)
 	result := m.DecideOrder(base)
 	if !reflect.DeepEqual(result.Order, []int{1, 0}) ||
 		result.StickyProvider != "current" {
 		t.Fatalf("sticky dwell result = %+v", result)
 	}
 
-	m.SetSticky("session", Sticky{Provider: "current", Since: now.Add(-2 * time.Hour)}, 2)
+	m.SetSticky(StickyKey("session", "route"), Sticky{Provider: "current", Since: now.Add(-2 * time.Hour)}, 2)
 	result = m.DecideOrder(base)
 	if !reflect.DeepEqual(result.Order, []int{1, 0}) ||
 		result.StickyProvider != "current" {
@@ -140,7 +140,7 @@ func TestDecideOrderSkipsQuotaExhaustedStickyAccount(t *testing.T) {
 	}
 	setScheduleQuota(t, m, "fresh", scheduleQuota(provider.BillingPlan, .5, now), 7)
 	setScheduleQuota(t, m, "exhausted", scheduleQuota(provider.BillingPlan, 0, now), 7)
-	m.SetSticky("session", Sticky{Provider: "exhausted", Since: now}, 7)
+	m.SetSticky(StickyKey("session", "route"), Sticky{Provider: "exhausted", Since: now}, 7)
 	input := ScheduleInput{
 		Exposed: "route", SessionKey: "session", Targets: targets,
 		RouteKeys: map[string]bool{"route": true},
@@ -203,7 +203,7 @@ func TestDecideOrderStickyHealthExclusionAndRecoverReturn(t *testing.T) {
 		Dwell:     time.Hour, SwitchMargin: .15,
 		Now: now, QuotaMaxAge: time.Hour, Generation: 11,
 	}
-	m.SetSticky("session", Sticky{Provider: "current", Since: now}, 11)
+	m.SetSticky(StickyKey("session", "route"), Sticky{Provider: "current", Since: now}, 11)
 	// "best" carries a strictly better measured plan, so a dwell-EXPIRED
 	// sticky has a decisive reason to switch (an exact tie would legitimately
 	// keep the session parked — sub-margin switch prevention).
@@ -229,7 +229,7 @@ func TestDecideOrderStickyHealthExclusionAndRecoverReturn(t *testing.T) {
 		// The sticky entry survives the failure (recover-and-return needs it),
 		// keyed on the session — it must NOT be deleted just because the
 		// provider is down.
-		if got := m.Dashboard(now).Sticky["session"].Provider; got != "current" {
+		if got := m.Dashboard(now).Sticky[StickyKey("session", "route")].Provider; got != "current" {
 			t.Fatalf("%s: sticky entry deleted on failure (got %q) — recover-and-return impossible", name, got)
 		}
 	}
@@ -611,5 +611,153 @@ func BenchmarkDecideOrder(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		m.DecideOrder(input)
+	}
+}
+
+// TestStickyKey pins the sticky-map key derivation: sessionless traffic parks
+// on the bare route key; a session's binding is scoped to (session, route) so
+// one model's binding never drags another.
+func TestStickyKey(t *testing.T) {
+	t.Parallel()
+	if got := StickyKey("", "route"); got != "route" {
+		t.Errorf("sessionless key = %q, want bare route", got)
+	}
+	if got := StickyKey("s1", "route"); got != "s1\x1froute" {
+		t.Errorf("session key = %q, want s1\\x1froute", got)
+	}
+}
+
+// TestDecideOrderStickyPerRouteBinding pins the (session, route) binding
+// granularity (Bifrost semantics: the binding is recorded against the model
+// the caller requested): a session parked on one route's provider starts an
+// INDEPENDENT binding when it calls another route — no dragging the previous
+// account across models — and each binding dwells and recovers on its own.
+func TestDecideOrderStickyPerRouteBinding(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	m := newTestManager(3)
+	// Route "alpha" ranks shared first, route "beta" has its own targets.
+	setScheduleQuota(t, m, "alpha-a", scheduleQuota(provider.BillingPlan, 1, now), 3)
+	setScheduleQuota(t, m, "alpha-b", scheduleQuota(provider.BillingPlan, .5, now), 3)
+	setScheduleQuota(t, m, "beta-best", scheduleQuota(provider.BillingPlan, 1, now), 3)
+	alpha := []Target{{Provider: "alpha-a", Priority: 1}, {Provider: "alpha-b", Priority: 1}}
+	beta := []Target{{Provider: "beta-best", Priority: 1}}
+	base := ScheduleInput{
+		SessionKey:  "sess",
+		RouteKeys:   map[string]bool{"alpha": true, "beta": true},
+		Dwell:       time.Hour,
+		Now:         now,
+		QuotaMaxAge: time.Hour,
+		Generation:  3,
+	}
+
+	first := base
+	first.Exposed, first.Targets = "alpha", alpha
+	if result := m.DecideOrder(first); result.StickyProvider != "alpha-a" || result.Source != ScheduleSourceQuota {
+		t.Fatalf("alpha first pick = %+v, want alpha-a/quota", result)
+	}
+	m.SetSticky(StickyKey("sess", "alpha"), Sticky{Provider: "alpha-a", Since: now}, 3)
+
+	// Same session, different route: fresh binding, unrelated provider set.
+	second := base
+	second.Exposed, second.Targets = "beta", beta
+	if result := m.DecideOrder(second); result.StickyProvider != "beta-best" || result.Source != ScheduleSourceQuota {
+		t.Fatalf("beta first pick = %+v, want beta-best/quota (no cross-route drag)", result)
+	}
+	m.SetSticky(StickyKey("sess", "beta"), Sticky{Provider: "beta-best", Since: now}, 3)
+
+	// Both bindings coexist and each route returns to its own within dwell.
+	returned := base
+	returned.Now = now.Add(10 * time.Minute)
+	returned.Exposed, returned.Targets = "alpha", alpha
+	if result := m.DecideOrder(returned); result.Order[0] != 0 || result.StickyProvider != "alpha-a" ||
+		result.Source != ScheduleSourceSticky {
+		t.Fatalf("alpha return = %+v, want alpha-a/sticky", result)
+	}
+	returned.Exposed, returned.Targets = "beta", beta
+	if result := m.DecideOrder(returned); result.Order[0] != 0 || result.StickyProvider != "beta-best" ||
+		result.Source != ScheduleSourceSticky {
+		t.Fatalf("beta return = %+v, want beta-best/sticky", result)
+	}
+	if got := CountRouteSessionSticky(m.Dashboard(now.Add(10*time.Minute)).Sticky, "alpha", now.Add(10*time.Minute), time.Hour); got != 1 {
+		t.Fatalf("alpha live session bindings = %d, want 1", got)
+	}
+	if got := CountRouteSessionSticky(m.Dashboard(now.Add(10*time.Minute)).Sticky, "beta", now.Add(10*time.Minute), time.Hour); got != 1 {
+		t.Fatalf("beta live session bindings = %d, want 1", got)
+	}
+	if got := CountRouteSessionSticky(m.Dashboard(now.Add(10*time.Minute)).Sticky, "gamma", now.Add(10*time.Minute), time.Hour); got != 0 {
+		t.Fatalf("gamma live session bindings = %d, want 0", got)
+	}
+}
+
+// TestDecideOrderIgnoreSticky pins the x-mp-sticky: off semantics: the
+// existing binding is read as absent (fresh pick), no binding is written or
+// refreshed, and the stale entry is left to the dwell sweep.
+func TestDecideOrderIgnoreSticky(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	m := newTestManager(5)
+	targets := []Target{{Provider: "best", Priority: 1}, {Provider: "parked", Priority: 1}}
+	setScheduleQuota(t, m, "best", scheduleQuota(provider.BillingPlan, 1, now), 5)
+	setScheduleQuota(t, m, "parked", scheduleQuota(provider.BillingPlan, .5, now), 5)
+	m.SetSticky(StickyKey("sess", "route"), Sticky{Provider: "parked", Since: now}, 5)
+
+	input := ScheduleInput{
+		Exposed: "route", SessionKey: "sess", Targets: targets,
+		RouteKeys: map[string]bool{"route": true},
+		Dwell:     time.Hour, Now: now, QuotaMaxAge: time.Hour, Generation: 5,
+	}
+	result := m.DecideOrder(input)
+	if result.Order[0] != 1 || result.StickyProvider != "parked" || result.Source != ScheduleSourceSticky {
+		t.Fatalf("affinity baseline = %+v, want parked/sticky", result)
+	}
+
+	input.IgnoreSticky = true
+	input.Now = now.Add(time.Minute)
+	result = m.DecideOrder(input)
+	if result.Order[0] != 0 || result.StickyProvider != "" || result.Source != ScheduleSourceQuota {
+		t.Fatalf("ignore-sticky result = %+v, want best/quota with no binding report", result)
+	}
+	// The pre-existing entry survives untouched (same Since), for the sweep.
+	if entry, ok := m.Sticky(StickyKey("sess", "route")); !ok || entry.Provider != "parked" || !entry.Since.Equal(now) {
+		t.Fatalf("binding after ignore = %+v (ok=%v), want parked untouched at %v", entry, ok, now)
+	}
+}
+
+// TestDecideOrderSources pins the schedule-source vocabulary: pin dominates
+// sticky, an all-blocked chain reports no source.
+func TestDecideOrderSources(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	m := newTestManager(9)
+	targets := []Target{{Provider: "best", Priority: 1}, {Provider: "parked", Priority: 1}}
+	setScheduleQuota(t, m, "best", scheduleQuota(provider.BillingPlan, 1, now), 9)
+	setScheduleQuota(t, m, "parked", scheduleQuota(provider.BillingPlan, .5, now), 9)
+	input := ScheduleInput{
+		Exposed: "route", Targets: targets,
+		RouteKeys: map[string]bool{"route": true},
+		Dwell:     time.Hour, Now: now, QuotaMaxAge: time.Hour, Generation: 9,
+	}
+	if result := m.DecideOrder(input); result.Source != ScheduleSourceQuota {
+		t.Fatalf("fresh pick source = %q, want quota", result.Source)
+	}
+
+	// Pin narrowing: operator intent outranks whatever the engines picked.
+	m.SetPin("route", Pin{Provider: "parked"})
+	if result := m.DecideOrder(input); result.Order[0] != 1 || result.Source != ScheduleSourcePin {
+		t.Fatalf("pinned source = %q (order %v), want pin on parked", result.Source, result.Order)
+	}
+	m.ClearPin("route")
+
+	// All targets blocked: no schedulable decision, no source.
+	m.mu.Lock()
+	m.health["best"] = &providerHealth{circuitOpenUntil: now.Add(time.Hour)}
+	m.health["parked"] = &providerHealth{circuitOpenUntil: now.Add(time.Hour)}
+	m.mu.Unlock()
+	if result := m.DecideOrder(input); len(result.Order) != 0 || result.Source != "" || result.StickyProvider != "" {
+		t.Fatalf("all-blocked result = %+v, want empty order and no source", result)
 	}
 }

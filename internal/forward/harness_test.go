@@ -387,8 +387,8 @@ func newHarness() *harness {
 }
 
 // passthroughSchedule keeps the route order (no health/quota filtering).
-func passthroughSchedule(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, generation uint64) []RouteTarget {
-	return targets
+func passthroughSchedule(cfg *Config, parentOf map[string]string, exposed, sessionKey string, stickyOff bool, targets []RouteTarget, routeKeys map[string]bool, generation uint64) ([]RouteTarget, string) {
+	return targets, ""
 }
 
 // snapshot builds a single-generation Snapshot over the given config; every

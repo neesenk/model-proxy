@@ -145,6 +145,8 @@ request log 是异步、非阻塞、owner-only 的 JSONL。每条记录可选地
 
 未配置 `route_policy` 的 route、pin/force-provider 路径、没有任何策略步骤命中时，该字段整体省略。索引侧把 `routing` 作为 JSON TEXT 列持久化，旧行保持 NULL，L0 查询侧不解 JSON。
 
+`schedule` 是调度器视角的补充元数据（每条 attempt 记录一层）：`source` 命名该 pass 的调度引擎（`quota`/`sticky`/`pin`/`load_balance`/`force`——`force` 标记请求被 force-provider 收窄到单 provider）。与 `routing`（route_policy 层）正交：`routing` 重排档位/候选，`schedule` 只说明调度器给出的基础顺序。索引侧同样作为 JSON TEXT 列持久化，旧行保持 NULL。
+
 **MCP 拆分流（`request_log.mcp_split`，默认关）**：开启后 `kind="mcp"` 记录写入
 独立的 `mcp-YYYYMMDD.log` 流（目录 `mcp_dir`，默认 `~/.model-proxy/log/mcp`，
 与 requests- 流共享 max_file_size/max_body_bytes/retention 策略；`requestlog.Options.FilePrefix`

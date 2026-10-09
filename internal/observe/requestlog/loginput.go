@@ -23,6 +23,9 @@ type LogCtx struct {
 	OrigBody    []byte
 	Diagnostics []ConversionDiagnostic
 	Routing     *configdomain.RoutingDecision
+	// Schedule names the engine that produced this pass's try order
+	// (ScheduleDecision). Nil omits the field.
+	Schedule *ScheduleDecision
 }
 
 // SessionID returns the first non-empty value among headers (an ordered
@@ -76,6 +79,7 @@ func BuildInput(
 		ResponseHeader: response.Header.Clone(),
 		Diagnostics:    context.Diagnostics,
 		Routing:        context.Routing,
+		Schedule:       context.Schedule,
 	}
 }
 

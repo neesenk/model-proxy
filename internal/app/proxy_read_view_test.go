@@ -160,8 +160,8 @@ func TestScheduleStatusAnnotatesRouteStrategy(t *testing.T) {
 	}
 
 	targets := expanded["m"]
-	first, _ := p.decideOrder(cfg, parentOf, "m", "", targets, now, true, p.routeKeys, snapshot.Generation)
-	second, _ := p.decideOrder(cfg, parentOf, "m", "", targets, now, true, p.routeKeys, snapshot.Generation)
+	first, _, _ := p.decideOrder(cfg, parentOf, "m", "", targets, now, true, false, p.routeKeys, snapshot.Generation)
+	second, _, _ := p.decideOrder(cfg, parentOf, "m", "", targets, now, true, false, p.routeKeys, snapshot.Generation)
 	if len(first) == 0 || len(second) == 0 {
 		t.Fatalf("empty schedule: first=%v second=%v", first, second)
 	}
@@ -173,18 +173,18 @@ func TestScheduleStatusAnnotatesRouteStrategy(t *testing.T) {
 	// request assigns + commits sticky; the second request of the SAME
 	// session keeps the parked provider (prompt cache), while the counter
 	// keeps advancing for other sessions.
-	sessionFirst := p.schedule(cfg, parentOf, "m", "s1", targets, p.routeKeys, snapshot.Generation)
+	sessionFirst, _ := p.schedule(cfg, parentOf, "m", "s1", false, targets, p.routeKeys, snapshot.Generation)
 	if len(sessionFirst) == 0 || sessionFirst[0].Provider != first[0].Provider {
 		t.Fatalf("session first schedule = %v, want head %q (rotation continues)", sessionFirst, first[0].Provider)
 	}
-	if parked, ok := p.runtimeState.Sticky("s1"); !ok || parked.Provider != sessionFirst[0].Provider {
+	if parked, ok := p.runtimeState.Sticky(runtimestate.StickyKey("s1", "m")); !ok || parked.Provider != sessionFirst[0].Provider {
 		t.Fatalf("sticky after session schedule = %+v (ok=%v), want %q", parked, ok, sessionFirst[0].Provider)
 	}
-	sessionSecond := p.schedule(cfg, parentOf, "m", "s1", targets, p.routeKeys, snapshot.Generation)
+	sessionSecond, _ := p.schedule(cfg, parentOf, "m", "s1", false, targets, p.routeKeys, snapshot.Generation)
 	if len(sessionSecond) == 0 || sessionSecond[0].Provider != sessionFirst[0].Provider {
 		t.Fatalf("session second schedule = %v, want parked %q (affinity)", sessionSecond, sessionFirst[0].Provider)
 	}
-	other := p.schedule(cfg, parentOf, "m", "s2", targets, p.routeKeys, snapshot.Generation)
+	other, _ := p.schedule(cfg, parentOf, "m", "s2", false, targets, p.routeKeys, snapshot.Generation)
 	if len(other) == 0 || other[0].Provider == sessionFirst[0].Provider {
 		t.Fatalf("new session schedule = %v, want a different slot than %q", other, sessionFirst[0].Provider)
 	}

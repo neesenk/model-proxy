@@ -77,11 +77,29 @@ func copyHeaderWhitelist(dst, src http.Header, keys ...string) {
 		// are legal multi-valued, and collapsing them to the first value
 		// silently drops beta-capability declarations.
 		for _, value := range src.Values(key) {
-			if value != "" {
+			// A value with control bytes can never be transmitted — net/http
+			// refuses the whole upstream request, turning one mangled client
+			// header (a session id with embedded NUL, say) into a 502. Skip
+			// the value instead: an invalid identity travels as absent, the
+			// same fail-identifiable rule the routing sticky key applies.
+			if value != "" && isTransmittableHeaderValue(value) {
 				dst.Add(key, value)
 			}
 		}
 	}
+}
+
+// isTransmittableHeaderValue reports whether net/http can send the value:
+// no control characters (field-content per RFC 9110 §5.5 — bytes 0x21–0x7E
+// plus SP and HTAB; HTAB is excluded here as header values carrying it have
+// no legitimate consumer and trimming ambiguity is worse than dropping).
+func isTransmittableHeaderValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if b := value[i]; b < 0x20 || b == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 type streamEnd int

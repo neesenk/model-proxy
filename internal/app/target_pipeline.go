@@ -138,6 +138,10 @@ func (effects targetExecutionEffects) CaptureResponse(
 ) io.ReadCloser {
 	logger := effects.proxy.reqLog
 	if logger != nil {
+		var schedule *requestlog.ScheduleDecision
+		if source := attempt.Scope.Log.ScheduleSource; source != "" {
+			schedule = &requestlog.ScheduleDecision{Source: source}
+		}
 		logContext := forward.LogCtx{
 			RequestID: attempt.Scope.Log.RequestID,
 			SessionID: attempt.Scope.Log.SessionID,
@@ -146,6 +150,7 @@ func (effects targetExecutionEffects) CaptureResponse(
 			Agent:     attempt.Scope.Agent,
 			OrigBody:  attempt.Scope.Log.OriginalBody,
 			Routing:   attempt.Scope.Log.Routing,
+			Schedule:  schedule,
 		}
 		input := forward.BuildRequestLogInput(
 			logContext,

@@ -94,7 +94,7 @@ func TestModelDisable_PartialDisableFailsOver(t *testing.T) {
 	// end-to-end request would still park on fallback — route sticky dwell —
 	// which is correct scheduling, not a disable leak.)
 	p.runtimeState.SetModelDisabled("primary", "m1", false)
-	ordered, _ := p.decideOrder(p.cfg, p.parentOf, "m1", "", p.expandedRoutes["m1"], time.Now(), false, p.routeKeys)
+	ordered, _, _ := p.decideOrder(p.cfg, p.parentOf, "m1", "", p.expandedRoutes["m1"], time.Now(), false, false, p.routeKeys)
 	if len(ordered) != 2 || (ordered[0].Provider != "primary" && ordered[1].Provider != "primary") {
 		t.Fatalf("re-enabled order = %v, want both targets back (primary schedulable again)", ordered)
 	}
@@ -182,7 +182,7 @@ func TestModelDisable_PreviewOrderAndPinInterplay(t *testing.T) {
 	p.runtimeState.SetModelDisabled("primary", "m1", true)
 
 	now := time.Now()
-	ordered, _ := p.decideOrder(p.cfg, p.parentOf, "m1", "", p.expandedRoutes["m1"], now, false, p.routeKeys)
+	ordered, _, _ := p.decideOrder(p.cfg, p.parentOf, "m1", "", p.expandedRoutes["m1"], now, false, false, p.routeKeys)
 	if len(ordered) != 1 || ordered[0].Provider != "fallback" {
 		t.Fatalf("pinned-but-disabled order = %v, want [fallback]", ordered)
 	}

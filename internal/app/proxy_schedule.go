@@ -39,25 +39,26 @@ type pinEntry struct {
 //
 // Sticky routing keeps the current provider for sticky_dwell (cache-friendly),
 // then re-selects the best unless the best's only edge is a sub-margin surplus gain
-// (priority beats surplus; surplus only matters at equal priority).
-func (p *Proxy) schedule(cfg *configdomain.Config, parentOf map[string]string, exposed, sessionKey string, targets []configdomain.RouteTarget, routeKeys map[string]bool, generations ...uint64) []configdomain.RouteTarget {
+// (priority beats surplus; surplus only matters at equal priority). The binding
+// is keyed by (session, route) — runtime.StickyKey — so a session switching
+// models starts an independent binding. The second return names the engine
+// that produced the first target (runtime.ScheduleSource*), threaded to the
+// request log; stickyOff (x-mp-sticky: off) suppresses affinity read/write
+// for this one request.
+func (p *Proxy) schedule(cfg *configdomain.Config, parentOf map[string]string, exposed, sessionKey string, stickyOff bool, targets []configdomain.RouteTarget, routeKeys map[string]bool, generations ...uint64) ([]configdomain.RouteTarget, string) {
 	now := time.Now()
-	ordered, stickyToSet := p.decideOrder(cfg, parentOf, exposed, sessionKey, targets, now, true, routeKeys, generations...)
+	ordered, stickyToSet, source := p.decideOrder(cfg, parentOf, exposed, sessionKey, targets, now, true, stickyOff, routeKeys, generations...)
 	if stickyToSet != "" {
-		// Commit sticky on the SESSION key (fallback to the exposed model for
-		// non-session clients), so one conversation parks on one provider and
-		// distinct conversations spread across the pool.
-		sk := sessionKey
-		if sk == "" {
-			sk = exposed
-		}
+		// Commit sticky on the (session, route) key (fallback to the exposed
+		// model for non-session clients), so one conversation parks on one
+		// provider and distinct conversations spread across the pool.
 		p.runtimeState.SetSticky(
-			sk,
+			runtimestate.StickyKey(sessionKey, exposed),
 			runtimestate.Sticky{Provider: stickyToSet, Since: now},
 			runtimestate.GenerationArg(generations),
 		)
 	}
-	return ordered
+	return ordered, source
 }
 
 // setPin installs a manual route→provider pin (hot-switch). ttl <= 0 means no
@@ -181,14 +182,15 @@ func (p *Proxy) pinForces(exposed string, ordered []configdomain.RouteTarget, pa
 // decideOrder computes the try-order for targets and the provider to park sticky
 // on ("" = leave the current sticky untouched), WITHOUT mutating sticky (the
 // counter bump when commit=true is the one exception — it advances the per-parent
-// round-robin, not sticky). schedule() commits the sticky on the SESSION key;
-// scheduleStatus() (the /debug/schedule endpoint) calls this with commit=false for
-// a read-only peek. parentOf resolves pooled virtual ids to their parent's config
-// (billing/peak are parent-level, not per-account) AND drives per-parent
+// round-robin, not sticky). schedule() commits the sticky on the (session, route)
+// key; scheduleStatus() (the /debug/schedule endpoint) calls this with commit=false
+// for a read-only peek. parentOf resolves pooled virtual ids to their parent's
+// config (billing/peak are parent-level, not per-account) AND drives per-parent
 // round-robin assignment of new sessions.
-func (p *Proxy) decideOrder(cfg *configdomain.Config, parentOf map[string]string, exposed, sessionKey string, targets []configdomain.RouteTarget, now time.Time, commit bool, routeKeys map[string]bool, generations ...uint64) (ordered []configdomain.RouteTarget, stickyToSet string) {
+func (p *Proxy) decideOrder(cfg *configdomain.Config, parentOf map[string]string, exposed, sessionKey string, targets []configdomain.RouteTarget, now time.Time, commit, stickyOff bool, routeKeys map[string]bool, generations ...uint64) (ordered []configdomain.RouteTarget, stickyToSet, source string) {
 	input := scheduleInput(cfg, exposed, fullRuntimeTargets(cfg, parentOf, targets, now), routeKeys, now)
 	input.SessionKey = sessionKey
+	input.IgnoreSticky = stickyOff
 	input.QuotaMaxAge = p.quotaFreshnessMaxAge(cfg)
 	input.Commit = commit
 	input.Generation = runtimestate.GenerationArg(generations)
@@ -197,7 +199,7 @@ func (p *Proxy) decideOrder(cfg *configdomain.Config, parentOf map[string]string
 	for _, index := range result.Order {
 		ordered = append(ordered, targets[index])
 	}
-	return ordered, result.StickyProvider
+	return ordered, result.StickyProvider, result.Source
 }
 
 // scheduleStatus builds a read-only JSON snapshot of what each route would
@@ -275,13 +277,17 @@ func scheduleStatusFromSnapshot(
 		// Strategy is the route's scheduling strategy (the routes block's
 		// inline `strategy:`): present only when a route opts out of the
 		// default quota ranking ("load_balance" = even round-robin rotation).
-		Strategy   string     `json:"strategy,omitempty"`
-		Ordered    []provInfo `json:"ordered"`
-		Sticky     string     `json:"sticky,omitempty"`
-		DwellRem   float64    `json:"sticky_dwell_remaining_sec,omitempty"`
-		Pools      []poolInfo `json:"pools,omitempty"`
-		Pin        string     `json:"pin,omitempty"`
-		PinExpires string     `json:"pin_expires,omitempty"`
+		Strategy string     `json:"strategy,omitempty"`
+		Ordered  []provInfo `json:"ordered"`
+		Sticky   string     `json:"sticky,omitempty"`
+		DwellRem float64    `json:"sticky_dwell_remaining_sec,omitempty"`
+		// StickySessions counts live (session, route) bindings parked on this
+		// route (each dwells independently); the sessionless `sticky` field
+		// above covers only the route-keyed fallback binding.
+		StickySessions int        `json:"sticky_sessions,omitempty"`
+		Pools          []poolInfo `json:"pools,omitempty"`
+		Pin            string     `json:"pin,omitempty"`
+		PinExpires     string     `json:"pin_expires,omitempty"`
 		// Blocked explains WHY the route currently schedules nothing (one
 		// entry per target, backend-derived — the UI never re-classifies).
 		// Only present when ordered is empty; a route with servable targets
@@ -418,6 +424,14 @@ func scheduleStatusFromSnapshot(
 			if rem := cfg.Scheduling.Dwell() - now.Sub(cur.Since); rem > 0 && rem < cfg.Scheduling.Dwell() {
 				ri.DwellRem = rem.Seconds()
 			}
+		}
+		// Session bindings are (session, route)-keyed (runtime.StickyKey);
+		// surface how many live conversations are parked on this route so
+		// per-route granularity is visible in the Status view.
+		if sessions := runtimestate.CountRouteSessionSticky(
+			RuntimeSnapshot.Sticky, exposed, now, cfg.Scheduling.Dwell(),
+		); sessions > 0 {
+			ri.StickySessions = sessions
 		}
 		models[exposed] = ri
 	}

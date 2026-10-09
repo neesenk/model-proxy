@@ -74,8 +74,8 @@ func (x scheduledExchange) exchange(ctx context.Context, snap forward.Snapshot, 
 	if len(targets) == 0 {
 		return exchangeResult{}, fmt.Errorf("adjudicate model %q has no route", model)
 	}
-	ordered := x.p.schedule(snap.Cfg, snap.ParentOf, model,
-		exchangeSessionKey("guard-adjudicate", model), targets, snap.RouteKeys, snap.Generation)
+	ordered, _ := x.p.schedule(snap.Cfg, snap.ParentOf, model,
+		exchangeSessionKey("guard-adjudicate", model), false, targets, snap.RouteKeys, snap.Generation)
 	// The exchange speaks the anthropic leg only: keep targets whose provider
 	// has an anthropic_base_url and a live impl, in scheduled order.
 	capable := make([]configdomain.RouteTarget, 0, len(ordered))

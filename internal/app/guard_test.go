@@ -8,6 +8,7 @@ import (
 	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/seclog"
 	"model-proxy/internal/providerbuild"
+	runtimestate "model-proxy/internal/runtime"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -911,8 +912,8 @@ func TestForwardThreadsSessionID(t *testing.T) {
 		t.Fatalf("forward status = %d, want %d", w.Code, http.StatusOK)
 	}
 
-	sticky, ok := p.runtimeState.Sticky("sess-XYZ")
+	sticky, ok := p.runtimeState.Sticky(runtimestate.StickyKey("sess-XYZ", "glm-5"))
 	if !ok || sticky.Provider != "zhipu" {
-		t.Fatalf("session sticky = %+v, present=%t; want provider zhipu for sess-XYZ", sticky, ok)
+		t.Fatalf("session sticky = %+v, present=%t; want provider zhipu for (sess-XYZ, glm-5)", sticky, ok)
 	}
 }

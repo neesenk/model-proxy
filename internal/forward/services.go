@@ -61,8 +61,11 @@ type Services struct {
 
 	// Schedule is the quota-aware scheduler (app: Proxy.schedule). The
 	// generation argument binds the sticky/round-robin mutation to the
-	// request's own snapshot generation.
-	Schedule func(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, generation uint64) []RouteTarget
+	// request's own snapshot generation. stickyOff (x-mp-sticky: off) opts
+	// this request out of session affinity; the second return names the
+	// engine that produced the first target (runtime.ScheduleSource*),
+	// threaded to the request log as schedule.source.
+	Schedule func(cfg *Config, parentOf map[string]string, exposed, sessionKey string, stickyOff bool, targets []RouteTarget, routeKeys map[string]bool, generation uint64) ([]RouteTarget, string)
 	// ShadowDispatch is the post-commit shadow hook (app:
 	// Proxy.dispatchShadowAfterCommit). Called only after a normal target
 	// commits, with that attempt's Commit and the primary request's resolved
@@ -131,8 +134,8 @@ type pipeline struct {
 }
 
 // schedule delegates to the injected scheduler port.
-func (p pipeline) schedule(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, generation uint64) []RouteTarget {
-	return p.svc.Schedule(cfg, parentOf, exposed, sessionKey, targets, routeKeys, generation)
+func (p pipeline) schedule(cfg *Config, parentOf map[string]string, exposed, sessionKey string, stickyOff bool, targets []RouteTarget, routeKeys map[string]bool, generation uint64) ([]RouteTarget, string) {
+	return p.svc.Schedule(cfg, parentOf, exposed, sessionKey, stickyOff, targets, routeKeys, generation)
 }
 
 // clientFor resolves the per-target upstream client, falling back to the

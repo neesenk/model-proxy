@@ -202,3 +202,28 @@ type errorReadCloser struct {
 
 func (reader *errorReadCloser) Read([]byte) (int, error) { return 0, reader.err }
 func (*errorReadCloser) Close() error                    { return nil }
+
+// TestCopyHeaderWhitelistSkipsUntransmittableValues pins the egress hygiene
+// rule: a whitelisted value carrying control bytes is dropped, not forwarded
+// — net/http would refuse the entire upstream request over it, turning one
+// mangled client header into a 502 (invalid identity travels as absent).
+func TestCopyHeaderWhitelistSkipsUntransmittableValues(t *testing.T) {
+	src := http.Header{}
+	src.Add("x-claude-code-session-id", "sess-ok")
+	src.Add("x-claude-code-session-id", "bad\x00session")
+	src.Add("x-session-id", "line\nbreak")
+	src.Add("accept", "application/json")
+
+	dst := http.Header{}
+	copyHeaderWhitelist(dst, src, "x-claude-code-session-id", "x-session-id", "accept")
+
+	if got := dst.Values("x-claude-code-session-id"); len(got) != 1 || got[0] != "sess-ok" {
+		t.Fatalf("session values = %v, want only the clean value", got)
+	}
+	if got := dst.Values("x-session-id"); len(got) != 0 {
+		t.Fatalf("session-id values = %v, want all dropped", got)
+	}
+	if got := dst.Get("accept"); got != "application/json" {
+		t.Fatalf("accept = %q, want passthrough", got)
+	}
+}

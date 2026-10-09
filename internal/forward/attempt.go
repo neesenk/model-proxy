@@ -24,6 +24,10 @@ type LogCtx struct {
 	Diagnostics []targetexec.ConversionDiagnostic
 	// Routing records the route-tier policy decision for this request.
 	Routing *configdomain.RoutingDecision
+	// Schedule names the engine that produced this pass's try order
+	// (requestlog.ScheduleDecision; runtime.ScheduleSource* vocabulary plus
+	// forward's force override). Nil omits the field.
+	Schedule *requestlog.ScheduleDecision
 }
 
 // newTargetAttempt is the single assembly point shared by normal routing and
@@ -54,6 +58,16 @@ func newTargetAttempt(
 	)
 }
 
+// scheduleDecisionSource projects the optional ScheduleDecision onto the
+// executor's plain-string log vocabulary (targetexec must not import the
+// observation package).
+func scheduleDecisionSource(d *requestlog.ScheduleDecision) string {
+	if d == nil {
+		return ""
+	}
+	return d.Source
+}
+
 // BuildRequestLogInput adapts the pipeline's LogCtx vocabulary to
 // requestlog.BuildInput.
 func BuildRequestLogInput(
@@ -70,6 +84,10 @@ func BuildRequestLogInput(
 	for _, d := range context.Diagnostics {
 		diags = append(diags, requestlog.ConversionDiagnostic{Code: d.Code, Detail: d.Detail})
 	}
+	var schedule *requestlog.ScheduleDecision
+	if context.Schedule != nil && context.Schedule.Source != "" {
+		schedule = &requestlog.ScheduleDecision{Source: context.Schedule.Source}
+	}
 	return requestlog.BuildInput(
 		requestlog.LogCtx{
 			RequestID:   context.RequestID,
@@ -80,6 +98,7 @@ func BuildRequestLogInput(
 			OrigBody:    context.OrigBody,
 			Diagnostics: diags,
 			Routing:     context.Routing,
+			Schedule:    schedule,
 		},
 		request,
 		protocol,

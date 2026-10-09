@@ -47,8 +47,8 @@ func (p *Proxy) forwardServices() forward.Services {
 		NewEffects: func(cfg *configdomain.Config, generation uint64) targetexec.Effects {
 			return targetExecutionEffects{proxy: p, cfg: cfg, generation: generation}
 		},
-		Schedule: func(cfg *configdomain.Config, parentOf map[string]string, exposed, sessionKey string, targets []configdomain.RouteTarget, routeKeys map[string]bool, generation uint64) []configdomain.RouteTarget {
-			return p.schedule(cfg, parentOf, exposed, sessionKey, targets, routeKeys, generation)
+		Schedule: func(cfg *configdomain.Config, parentOf map[string]string, exposed, sessionKey string, stickyOff bool, targets []configdomain.RouteTarget, routeKeys map[string]bool, generation uint64) ([]configdomain.RouteTarget, string) {
+			return p.schedule(cfg, parentOf, exposed, sessionKey, stickyOff, targets, routeKeys, generation)
 		},
 		ShadowDispatch:      p.dispatchShadowAfterCommit,
 		ResolveBackendProto: p.resolvedBackendProto,

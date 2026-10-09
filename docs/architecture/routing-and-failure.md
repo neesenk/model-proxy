@@ -134,10 +134,18 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
 
 ## 粘滞×可用性×配额 交互矩阵
 
+**绑定键 = `StickyKey(sessionKey, exposed)`**：会话粘滞以「(会话, 路由)」为粒度——同一会话在不同路由上的粘滞互相独立（会话粘滞键含路由名；同一会话访问不同模型各粘各的）。会话键异常（空/超长/含非法字符）时按无会话处理（`protocol.HeaderSessionID` 卫生化），粘滞落到路由键（等价于匿名请求的路由粘滞）。
+
+**同 provider 内 retry 不换账号**：executor 的参数级重试（剥参/缩图/role 改写/thinking 自适应等 in-place retry）留在原 provider；粘滞在 dwell 内保持指向该 provider。跨 provider 的移动只发生在 fallback（沿 ordered 链）与 wait-retry 重排（整轮重调度）。
+
 以下交互语义是路由正确性契约（回归锚点：`internal/runtime` 的
 `TestDecideOrderStickyHealthExclusionAndRecoverReturn`、
-`TestDecideOrderSkipsQuotaExhaustedStickyAccount`、load_balance 对应用例，以及
-`internal/app` 的 `TestScheduleStatus_SkippedReasonsOnPartialChain`）：
+`TestDecideOrderSkipsQuotaExhaustedStickyAccount`、
+`TestDecideOrderStickyPerRouteBinding`、`TestDecideOrderIgnoreSticky`、
+`TestDecideOrderSources`、load_balance 对应用例，以及
+`internal/app` 的 `TestScheduleStatus_SkippedReasonsOnPartialChain`、
+`TestScheduleSourceLogged`、`TestStickyOffOverrideComposition`、
+`TestInvalidSessionHeaderFallsBackToRouteKey`）：
 
 | 粘滞目标的当前状态 | 进 ordered 链 | sticky 是否生效 | 恢复后（dwell 内） |
 |---|---|---|---|
@@ -168,6 +176,34 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   被排除的目标由 `skipped` 透出（同形状同分类，字段契约见 `docs/web-api.md`）——
   被静默跳过的 fallback 必须可与配置错误区分。请求级 failover 链由 request log
   的同 id 多 attempt 行承载。
+- **绑定粒度 (会话, 路由)**：sticky 键是 `runtime.StickyKey(sessionKey, exposed)`
+  ——一个会话在每个路由上持有**独立绑定**（同会话换模型 = 新绑定，不把旧路由选中的
+  账号拖带到新路由，与 latchKey/repeat_turn 同粒度；Bifrost「绑定按请求的 model
+  分记」同义）。各自独立 dwell、独立 recover-and-return。会话键本身经
+  `protocol.HeaderSessionID` 做 opaque-token 卫生（trim、≤256、可打印 ASCII）：
+  无效/超长/含控制字节的值视为**无会话**（sticky 落到裸路由键）——宁可不粘也不粘
+  错。出口侧同规则：`copyHeaderWhitelist` 跳过含控制字节的值，一个畸变 header
+  不得毒化整个上游请求（net/http 会拒绝发送它）。
+- **retry 与账号移动**：同一 target 的 in-request retry（401 refresh、413 图片
+  缩压、400 剥参、developer-role 改写、thinking 自适应）在 executor 内**原账号**
+  重试，不重排、不换账号（锚点 `TestExecutorRetries401Then200`）；账号移动只发生
+  在沿 ordered 链的 failover（下一 target = 下一账号），wait-retry 是 round 级
+  整轮重排。绑定不因 retry/failover 删除（recover-and-return）。
+- **每请求覆盖 `x-mp-sticky: off`**：本请求退出会话亲和——读绑定时视为无绑定
+  （引擎按序新选），不写、不刷新绑定（旧条目留给 dwell 清扫）；同请求的跨路由
+  改道（context overflow / capability reroute）同规则。pin/force 与可用性门控
+  不受影响；未知取值忽略（打错字不得改变路由）。该 header 不在出站白名单内，
+  永不上行。
+- **调度决策出处 `schedule.source`**：每条 attempt 的 request log 携带
+  `schedule.source` 词表：`quota`（tier→priority→surplus 新选/切换）、`sticky`
+  （(会话, 路由) 绑定保持）、`pin`（操作员 pin 收窄）、`load_balance`（轮转分
+  配）、`force`（force-provider 收窄——由 forward 层盖章，调度器只看到收窄后的
+  目标集）。优先级 force > pin > sticky > 引擎。与 `routing` 字段（route_policy
+  层的 band/latch/selector/fallback）**正交**：`schedule` 记录调度器给出的基础
+  顺序，`routing` 记录策略层在其上的重排。`/debug/route` 预览同源带出
+  `schedule_source`。词表常量权威在 `internal/runtime`（`ScheduleSource*`），
+  forward 层的 force 常量与 runtime 的等值由
+  `TestScheduleSourceForceVocabulary` 钉住。
 
 ### server-side 会话状态（目标契约）
 

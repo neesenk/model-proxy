@@ -42,6 +42,9 @@ type LogContext struct {
 	// Routing records the route-tier policy decision that selected the target
 	// order. It is log metadata only; the executor does not act on it.
 	Routing *configdomain.RoutingDecision
+	// ScheduleSource names the scheduling engine that produced the try order
+	// (quota/sticky/pin/load_balance/force vocabulary). Log metadata only.
+	ScheduleSource string
 }
 
 // ConversionDiagnostic is the wire-independent projection of a protocol

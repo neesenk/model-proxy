@@ -54,6 +54,45 @@ type Sticky struct {
 	Since    time.Time `json:"since"`
 }
 
+// stickySep joins the session key and route in one sticky-map key. It can
+// appear in neither half: session keys pass protocol.HeaderSessionID
+// (printable ASCII, ≤256), route keys are config-defined model names.
+const stickySep = "\x1f"
+
+// StickyKey derives the sticky-map key for one (session, route) pair. A
+// session's binding is recorded PER ROUTE: switching models mid-session
+// starts an independent binding instead of dragging the account chosen for
+// the previous model (the binding is recorded against the model the caller
+// requested — same granularity as latchKey/repeat_turn). Sessionless traffic
+// parks on the bare route key.
+func StickyKey(sessionKey, exposed string) string {
+	if sessionKey == "" {
+		return exposed
+	}
+	return sessionKey + stickySep + exposed
+}
+
+// Schedule decision sources (ScheduleResult.Source): which engine made the
+// ordering decision, threaded to the request log as `schedule.source` so a
+// route's behavior stays explainable after the fact. When several could
+// claim it, the dominant one wins: force > pin > sticky > strategy engine.
+const (
+	// ScheduleSourceQuota: the default tier→priority→surplus ranking picked
+	// (fresh binding, dwell expiry, or margin switch).
+	ScheduleSourceQuota = "quota"
+	// ScheduleSourceSticky: an existing (session, route) binding held (dwell
+	// window, or the best's advantage stayed sub-margin).
+	ScheduleSourceSticky = "sticky"
+	// ScheduleSourcePin: an operator pin narrowed the chain.
+	ScheduleSourcePin = "pin"
+	// ScheduleSourceLoadBalance: the load_balance rotation assigned a slot.
+	ScheduleSourceLoadBalance = "load_balance"
+	// ScheduleSourceForce: a force-provider override (header/prefix/query)
+	// collapsed the chain to one provider. Set by the forward layer, which
+	// owns that narrowing — the scheduler only sees the narrowed targets.
+	ScheduleSourceForce = "force"
+)
+
 // Pin is an in-memory hard route constraint. A zero ExpiresAt never expires.
 type Pin struct {
 	Provider  string    `json:"provider"`
@@ -262,6 +301,12 @@ type ScheduleInput struct {
 	// the pin on the DEFAULT chain instead of showing the pin-narrowed chain,
 	// so operators can see what the pin overrides.
 	IgnorePins bool
+	// IgnoreSticky opts this one request out of session affinity (the
+	// x-mp-sticky: off override): an existing binding is read as absent (the
+	// engine picks fresh) and no binding is written or refreshed — the old
+	// entry is left to the dwell sweep. Pins and availability gating are
+	// unaffected.
+	IgnoreSticky bool
 }
 
 // ScheduleFacts is the quota projection used for one input target. Facts stays
@@ -279,4 +324,7 @@ type ScheduleResult struct {
 	Order          []int
 	StickyProvider string
 	Facts          []ScheduleFacts
+	// Source names the engine that produced Order[0] (see the
+	// ScheduleSource* constants). Empty when no target was schedulable.
+	Source string
 }

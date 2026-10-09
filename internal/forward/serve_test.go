@@ -17,8 +17,8 @@ import (
 // schedule port narrows to ["b"], so effectiveTargets must be ["b"].
 func TestServeOnce_EffectiveTargetsReflectsScheduledSet(t *testing.T) {
 	h := newHarness()
-	h.svc.Schedule = func(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, generation uint64) []RouteTarget {
-		return targets[1:] // "a" is cooling; only "b" is servable
+	h.svc.Schedule = func(cfg *Config, parentOf map[string]string, exposed, sessionKey string, stickyOff bool, targets []RouteTarget, routeKeys map[string]bool, generation uint64) ([]RouteTarget, string) {
+		return targets[1:], "" // "a" is cooling; only "b" is servable
 	}
 	cfg := &Config{
 		Providers: map[string]Provider{"a": {}, "b": {}},
@@ -110,10 +110,10 @@ func TestRequestRoutingSchedulerDelegates(t *testing.T) {
 	h := newHarness()
 	var gotGeneration uint64
 	var gotRoute string
-	h.svc.Schedule = func(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, generation uint64) []RouteTarget {
+	h.svc.Schedule = func(cfg *Config, parentOf map[string]string, exposed, sessionKey string, stickyOff bool, targets []RouteTarget, routeKeys map[string]bool, generation uint64) ([]RouteTarget, string) {
 		gotGeneration = generation
 		gotRoute = exposed
-		return targets
+		return targets, ""
 	}
 	p := pipeline{svc: h.svc, state: h.state}
 	snap := h.snapshot(&Config{Routes: map[string][]RouteTarget{"m": {{Provider: "a"}}}})
@@ -128,7 +128,7 @@ func TestRequestRoutingSchedulerDelegates(t *testing.T) {
 	}
 
 	// The planner constructor projects the same snapshot.
-	planner := requestRoutingPlanner(p, snap, snap.RouteKeys)
+	planner := requestRoutingPlanner(p, snap, snap.RouteKeys, false)
 	if got := planner.ApplyWithProfile("m", "sess", []RouteTarget{{Provider: "a"}}, routing.Profile{}); len(got) != 1 {
 		t.Errorf("planner apply = %+v, want passthrough for a fitting target", got)
 	}
