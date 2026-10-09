@@ -1,6 +1,7 @@
 package takeover
 
 import (
+	"reflect"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -40,6 +41,18 @@ func FuzzYAMLSetGetRoundTrip(f *testing.F) {
 		if err := yamlSetDotted(root, path, value); err != nil {
 			return
 		}
+		// Container values carry the fuzz string NESTED inside a map/slice:
+		// yaml.Marshal's block-scalar corner is lossy for newline-only strings
+		// and the walk (yamlMakeStringsSafe) must fix it at any depth, not
+		// just for top-level scalars.
+		container := map[string]any{
+			"inner": value,
+			"list":  []any{value},
+			"deep":  map[string]any{"leaf": value},
+		}
+		if err := yamlSetDotted(root, []string{"fuzznode2", seg}, container); err != nil {
+			return
+		}
 		out, err := encodeYAMLDoc(doc)
 		if err != nil {
 			t.Fatalf("encodeYAMLDoc failed after set: %v", err)
@@ -51,6 +64,17 @@ func FuzzYAMLSetGetRoundTrip(f *testing.F) {
 		got, ok := yamlNestedString(doc2.Content[0], path...)
 		if !ok || got != value {
 			t.Fatalf("round-trip lost the set value: got (%q, %v), want %q\nedited YAML:\n%s", got, ok, value, out)
+		}
+		setNode := yamlMapGet(yamlMapGet(doc2.Content[0], "fuzznode2"), seg)
+		if setNode == nil {
+			t.Fatalf("container value missing after reload\nedited YAML:\n%s", out)
+		}
+		var gotContainer any
+		if err := setNode.Decode(&gotContainer); err != nil {
+			t.Fatalf("container value no longer decodes: %v\nedited YAML:\n%s", err, out)
+		}
+		if !reflect.DeepEqual(gotContainer, container) {
+			t.Fatalf("nested container round-trip drifted:\ngot  %#v\nwant %#v\nedited YAML:\n%s", gotContainer, container, out)
 		}
 		after := topLevelYAMLKeys(doc2.Content[0])
 		for k := range before {

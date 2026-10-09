@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -133,17 +134,29 @@ func yamlEnsureMapPath(root *yaml.Node, path []string) *yaml.Node {
 	return m
 }
 
-// yamlValueNode renders a decoded-YAML-template value (map/slice/scalar from
-// the template's yaml.set) as a node tree by re-marshalling it. Strings take
-// the direct scalar path: yaml.Marshal's block-scalar corner is lossy for
-// pure-newline strings (see yamlSafeScalar).
-func yamlValueNode(v any) (*yaml.Node, error) {
-	if n, ok := v.(*yaml.Node); ok {
-		return n, nil
+// yamlMakeStringsSafe walks a freshly marshalled node tree and forces
+// double-quoted style on every string scalar containing newlines — including
+// ones nested inside maps/slices and mapping KEYS. Container values normally
+// bypass yaml.Marshal entirely (goToYAMLNode), so this only guards the Marshal
+// fallback path for scalar types it still serves.
+func yamlMakeStringsSafe(n *yaml.Node) {
+	if n == nil {
+		return
 	}
-	if s, ok := v.(string); ok {
-		return yamlSafeScalar(s), nil
+	if n.Kind == yaml.ScalarNode && n.Tag == "!!str" &&
+		utf8.ValidString(n.Value) && strings.ContainsAny(n.Value, "\n\r") {
+		n.Style = yaml.DoubleQuotedStyle
 	}
+	for _, c := range n.Content {
+		yamlMakeStringsSafe(c)
+	}
+}
+
+// marshalScalarNode renders one scalar through yaml.Marshal and re-parses it
+// into a node: Marshal makes the quoting decision (strings that would
+// otherwise reparse as numbers/bools/null get quoted — "0" must stay a
+// string), which direct node construction cannot know.
+func marshalScalarNode(v any) (*yaml.Node, error) {
 	b, err := yaml.Marshal(v)
 	if err != nil {
 		return nil, err
@@ -153,9 +166,82 @@ func yamlValueNode(v any) (*yaml.Node, error) {
 		return nil, err
 	}
 	if doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 {
-		return doc.Content[0], nil
+		out := doc.Content[0]
+		yamlMakeStringsSafe(out)
+		return out, nil
 	}
 	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null"}, nil
+}
+
+// yamlStringNode builds a scalar node for one template string whose
+// encode→reload is lossless AND type-faithful: newline-bearing strings force
+// double quotes (yamlSafeScalar — Marshal's block-scalar corner loses the
+// newline on reparse); everything else delegates the quoting decision to
+// yaml.Marshal.
+func yamlStringNode(s string) (*yaml.Node, error) {
+	if utf8.ValidString(s) && strings.ContainsAny(s, "\n\r") {
+		return yamlSafeScalar(s), nil
+	}
+	return marshalScalarNode(s)
+}
+
+// goToYAMLNode builds a node tree from a decoded template value without
+// round-tripping yaml.Marshal for containers: Marshal itself is lossy for
+// pure-newline strings nested in maps/slices (it emits a literal block whose
+// reparse drops the newline — found by FuzzYAMLSetGetRoundTrip), so the two
+// decoded container shapes (map[string]any / []any) construct nodes directly,
+// routing every string (values AND keys) through yamlStringNode. Map keys are
+// sorted to match Marshal's deterministic ordering (rendered output must be
+// byte-stable across renders). Non-string scalars fall back to a single-value
+// Marshal, which is lossless for them.
+func goToYAMLNode(v any) (*yaml.Node, error) {
+	switch t := v.(type) {
+	case string:
+		return yamlStringNode(t)
+	case map[string]any:
+		m := &yaml.Node{Kind: yaml.MappingNode}
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			keyNode, err := yamlStringNode(k)
+			if err != nil {
+				return nil, err
+			}
+			value, err := goToYAMLNode(t[k])
+			if err != nil {
+				return nil, err
+			}
+			m.Content = append(m.Content, keyNode, value)
+		}
+		return m, nil
+	case []any:
+		s := &yaml.Node{Kind: yaml.SequenceNode}
+		for _, e := range t {
+			value, err := goToYAMLNode(e)
+			if err != nil {
+				return nil, err
+			}
+			s.Content = append(s.Content, value)
+		}
+		return s, nil
+	default:
+		return marshalScalarNode(v)
+	}
+}
+
+// yamlValueNode renders a decoded-YAML-template value (map/slice/scalar from
+// the template's yaml.set) as a node tree. Strings at ANY depth take the
+// yamlSafeScalar path: yaml.Marshal's block-scalar corner is lossy for
+// pure-newline strings (see yamlSafeScalar), including nested inside
+// containers.
+func yamlValueNode(v any) (*yaml.Node, error) {
+	if n, ok := v.(*yaml.Node); ok {
+		return n, nil
+	}
+	return goToYAMLNode(v)
 }
 
 // yamlSetDotted assigns value at root[path...], creating intermediate maps.
