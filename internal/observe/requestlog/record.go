@@ -34,6 +34,7 @@ type Record struct {
 	Exposed       string `json:"exposed"`
 	Provider      string `json:"provider"`
 	Agent         string `json:"agent"`
+	APIKeyID      string `json:"api_key,omitempty"`
 	Attempt       int    `json:"attempt"`
 	Status        int    `json:"status"`
 	LatencyMs     int64  `json:"latency_ms"`
@@ -103,6 +104,7 @@ type Input struct {
 	Exposed           string
 	Provider          string
 	Agent             string
+	APIKeyID          string
 	Attempt           int
 	Status            int
 	TTFTMilliseconds  int64
@@ -150,6 +152,7 @@ func (l *Logger) BuildRecord(in Input) *Record {
 		Exposed:         in.Exposed,
 		Provider:        in.Provider,
 		Agent:           in.Agent,
+		APIKeyID:        in.APIKeyID,
 		Attempt:         in.Attempt,
 		Status:          in.Status,
 		LatencyMs:       latency,
@@ -234,6 +237,10 @@ func appendRecordLine(dst []byte, rec *Record) []byte {
 	dst = appendJSONString(dst, rec.Provider)
 	dst = append(dst, `,"agent":`...)
 	dst = appendJSONString(dst, rec.Agent)
+	if rec.APIKeyID != "" {
+		dst = append(dst, `,"api_key":`...)
+		dst = appendJSONString(dst, rec.APIKeyID)
+	}
 	dst = append(dst, `,"attempt":`...)
 	dst = strconv.AppendInt(dst, int64(rec.Attempt), 10)
 	dst = append(dst, `,"status":`...)

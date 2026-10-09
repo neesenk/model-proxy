@@ -193,6 +193,7 @@ func (x *Indexer) ensureColumns() error {
 	hasKind := false
 	hasTool := false
 	hasRouting := false
+	hasAPIKey := false
 	hasSchedule := false
 	for rows.Next() {
 		var cid, notnull, pk int
@@ -214,6 +215,8 @@ func (x *Indexer) ensureColumns() error {
 			hasRouting = true
 		case "schedule":
 			hasSchedule = true
+		case "api_key":
+			hasAPIKey = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -248,6 +251,14 @@ func (x *Indexer) ensureColumns() error {
 		if _, err := x.db.Exec(`ALTER TABLE records ADD COLUMN schedule TEXT`); err != nil {
 			return err
 		}
+	}
+	if !hasAPIKey {
+		if _, err := x.db.Exec(`ALTER TABLE records ADD COLUMN api_key TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if _, err := x.db.Exec(`CREATE INDEX IF NOT EXISTS idx_records_api_key ON records(api_key)`); err != nil {
+		return err
 	}
 	return nil
 }
@@ -537,8 +548,8 @@ func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int6
 		(request_id, ts, ts_ms, session_id, agent, protocol, method, path, tool,
 		 called_model, upstream_model, exposed, provider, attempt, status,
 		 latency_ms, ttft_ms, request_size, response_size, turn_key, routing, schedule, kind, shadow,
-		 input, output, cache_read, cache_creation, file, "offset", length)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		 input, output, cache_read, cache_creation, file, "offset", length, api_key)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -567,7 +578,7 @@ func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int6
 			row.record.Provider, row.record.Attempt, row.record.Status,
 			row.record.LatencyMs, row.record.TTFTMs, row.record.RequestSize, row.record.ResponseSize,
 			row.record.TurnKey, routingArg, scheduleArg, row.record.Kind, shadow, row.usage.Input, row.usage.Output, row.usage.CacheRead,
-			row.usage.CacheCreation, row.file, row.offset, row.length,
+			row.usage.CacheCreation, row.file, row.offset, row.length, row.record.APIKeyID,
 		); err != nil {
 			return err
 		}

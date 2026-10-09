@@ -9,6 +9,7 @@ import (
 	"time"
 
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/webauth"
 )
 
 // LogCtx carries stable request identity into target execution logging.
@@ -73,6 +74,7 @@ func BuildInput(
 		Exposed:        context.Exposed,
 		Provider:       target.Provider,
 		Agent:          context.Agent,
+		APIKeyID:       webauth.KeyIDFrom(request.Context()),
 		Attempt:        context.Attempt,
 		Status:         response.StatusCode,
 		RequestBody:    requestBody,

@@ -25,6 +25,7 @@ import (
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/webauth"
 )
 
 // mcpLiveWriter captures the committed status and committed provider of one
@@ -75,6 +76,9 @@ type mcpIdentity struct {
 	uaAgent   string
 	clientSID string
 	localSID  string
+	// apiKeyID is the gate-resolved forward-key identity ("" unauthenticated);
+	// rides the MCP request-log record's api_key dimension like LLM records.
+	apiKeyID string
 	// resolvedAgent/resolvedSession/resolvedTool carry mcpLog's final
 	// attribution back to serveMCP's deferred live end event (it publishes
 	// after the handler returned, so the write is visible there). Written
@@ -93,6 +97,7 @@ func (p *Proxy) mcpIdentityFor(r *http.Request, snap RuntimeSnapshot) *mcpIdenti
 		uaAgent:   counters.DetectAgent(r),
 		clientSID: requestlog.SessionID(r, snap.Cfg.RequestLog.ResolvedSessionHeaders()),
 		localSID:  r.Header.Get("Mcp-Session-Id"),
+		apiKeyID:  webauth.KeyIDFrom(r.Context()),
 	}
 }
 
@@ -668,6 +673,7 @@ func (p *Proxy) mcpLog(name, account string, frame mcpkg.Frame, httpMethod strin
 		RequestID:         requestID,
 		Kind:              "mcp",
 		Agent:             agent,
+		APIKeyID:          ident.apiKeyID,
 		SessionID:         session,
 		Protocol:          "mcp",
 		Method:            method,

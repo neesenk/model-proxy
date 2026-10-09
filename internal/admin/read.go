@@ -235,6 +235,15 @@ func (q requestLogQueries) ShadowReport(filter requestlog.Filter) ([]requestlog.
 	return requestlog.ShadowReport(q.dir, filter)
 }
 
+func (q requestLogQueries) KeyUsage(filter requestlog.Filter, keyID string) ([]requestlog.KeyUsageEntry, error) {
+	// LLM-stream aggregation: the key dimension only exists on /v1/* forward
+	// records, so the requests stream is the only source.
+	if q.index != nil {
+		return q.index.KeyUsage(filter, keyID)
+	}
+	return requestlog.KeyUsage(q.dir, filter, keyID)
+}
+
 func (q requestLogQueries) Detail(requestID, stream string) ([]requestlog.Record, error) {
 	// stream hint: an MCP-stream row drills straight into the split stream —
 	// its id is never in the requests index, and the hint-less URL first pays

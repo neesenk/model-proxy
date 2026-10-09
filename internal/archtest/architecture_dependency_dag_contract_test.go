@@ -77,7 +77,8 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/fusion":        {"model-proxy/internal/config": true, "model-proxy/internal/observe/logx": true},
 		"model-proxy/internal/forward": {
 			"model-proxy/internal/cache": true, "model-proxy/internal/catalog": true,
-			"model-proxy/internal/config": true, "model-proxy/internal/fusion": true,
+			"model-proxy/internal/webauth": true, // gate-resolved forward-key id rides the request context into the log inputs
+			"model-proxy/internal/config":  true, "model-proxy/internal/fusion": true,
 			"model-proxy/internal/guard": true, "model-proxy/internal/guard/session": true,
 			"model-proxy/internal/observe/counters": true, "model-proxy/internal/observe/events": true,
 			"model-proxy/internal/observe/logx": true, "model-proxy/internal/observe/requestlog": true,
@@ -96,7 +97,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/observe/events":        nil,
 		"model-proxy/internal/observe/logfile":       {"model-proxy/internal/observe/logx": true},
 		"model-proxy/internal/observe/logx":          nil,
-		"model-proxy/internal/observe/requestlog":    {"model-proxy/internal/config": true, "model-proxy/internal/observe/logfile": true, "model-proxy/internal/observe/logx": true},
+		"model-proxy/internal/observe/requestlog":    {"model-proxy/internal/config": true, "model-proxy/internal/observe/logfile": true, "model-proxy/internal/observe/logx": true, "model-proxy/internal/webauth": true},
 		"model-proxy/internal/observe/seclog":        {"model-proxy/internal/observe/logfile": true, "model-proxy/internal/observe/logx": true},
 		"model-proxy/internal/observe/stats":         {"model-proxy/internal/observe/counters": true, "model-proxy/internal/observe/logx": true},
 		"model-proxy/internal/pricing":               {"model-proxy/internal/upstreamproxy": true},

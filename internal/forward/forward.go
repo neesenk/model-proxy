@@ -19,6 +19,7 @@ import (
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/routing"
 	"model-proxy/internal/targetexec"
+	"model-proxy/internal/webauth"
 )
 
 // Serve runs the request-forwarding pipeline: it proxies a request to the
@@ -990,6 +991,7 @@ func (p pipeline) guardTerminal(w http.ResponseWriter, r *http.Request, rec guar
 			CalledModel: rec.calledModel,
 			Exposed:     rec.exposed,
 			Agent:       rec.agent,
+			APIKeyID:    webauth.KeyIDFrom(r.Context()),
 			Status:      http.StatusBadRequest,
 			RequestBody: rec.body,
 		}, []byte(rec.msg), int64(len(rec.msg)), false)
@@ -1563,6 +1565,7 @@ func (p pipeline) lookupResponseCache(cache *responsecache.Store, r *http.Reques
 					CalledModel: calledModel,
 					Exposed:     exposed,
 					Agent:       agent,
+					APIKeyID:    webauth.KeyIDFrom(r.Context()),
 					Provider:    "(cache)",
 					Status:      e.Status(),
 					RequestBody: origBody,

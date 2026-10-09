@@ -62,9 +62,17 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else if keys := p.apiKeys.Load(); keys != nil && keys.Enabled() {
-		if !keys.Accept(webauth.BearerFromRequest(r.Header.Get)) {
+		presented := webauth.BearerFromRequest(r.Header.Get)
+		if !keys.Accept(presented) {
 			http.Error(w, "unauthorized: unknown or missing API key", http.StatusUnauthorized)
 			return
+		}
+		// Attribute the call to the matched key (sha256 prefix, never the
+		// token): rides the request context into the forward pipeline and the
+		// request log's api_key dimension. Loopback deployments and the admin
+		// surface carry no key id.
+		if matched := webauth.Resolve(keys, presented); matched != "" {
+			r = r.WithContext(webauth.WithKeyID(r.Context(), webauth.KeyID(matched)))
 		}
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {

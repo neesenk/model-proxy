@@ -597,13 +597,13 @@ application → serveAssembly → applicationRuntime → Proxy
 - `fusion → config, observe/logx`；
 - `forward → cache, catalog, config, fusion, guard, guard/session, observe/counters,
   observe/events, observe/logx, observe/requestlog, observe/seclog, protocol, provider, routing,
-  shadow, targetexec`（请求转发管线：guard/cache/schedule/failover/Fusion 编排与 target
-  plan/executor 装配；不得回依赖 app/web/cli）；
+  shadow, targetexec, webauth`（请求转发管线：guard/cache/schedule/failover/Fusion 编排与 target
+  plan/executor 装配；webauth 是请求上下文里的 forward-key id；不得回依赖 app/web/cli）；
 - `observe/budget → config, observe/events, observe/logx, observe/stats, pricing`（config 是
   budgets 生效值所需的值类型，stats 是 analytics bucket 值类型与分钟对齐 seam）；
 - `observe/analytics → observe/stats, pricing`（统一派生指标包：tokens 四桶直合 / tok-s 解码速度 /
   cache 命中率 / err% / 加权延迟 / 等价成本，单一定义供 /api/analytics 的 totals/compare/series/point 折叠）；
-- `observe/requestlog → config, observe/logfile, observe/logx`（config 是生效值 accessor 所需的值类型；logfile 是共享持久化 sink）；
+- `observe/requestlog → config, observe/logfile, observe/logx, webauth`（config 是生效值 accessor 所需的值类型；logfile 是共享持久化 sink；webauth 是 BuildInput 从请求上下文取 forward-key id）；
 - `observe/seclog → observe/logfile, observe/logx`；
 - `observe/logfile → observe/logx`（共享轮转 JSONL sink 叶子包）；
 - `observe/stats → observe/counters, observe/logx`；
