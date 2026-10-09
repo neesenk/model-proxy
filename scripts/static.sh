@@ -43,7 +43,16 @@ go tool errcheck -exclude scripts/errcheck-excludes.txt -ignoretests ./...
 
 echo "==> dupl $(go list -m -f '{{.Version}}' github.com/mibk/dupl)"
 baseline=$(grep -E '^[0-9]+$' scripts/dupl-baseline.txt)
-groups=$(go tool dupl -threshold 120 ./internal ./scripts 2>/dev/null | grep -c '^found' || true)
+# The tool's exit status must be judged separately from the group count: a
+# failed dupl run that only loses its stderr must read as a failed gate, not
+# as "0 clone groups" (a false green the count comparison cannot catch).
+dupl_status=0
+dupl_out=$(go tool dupl -threshold 120 ./internal ./scripts) || dupl_status=$?
+if [ "$dupl_status" -ne 0 ]; then
+	echo "dupl: exited $dupl_status — gate fails; do not read missing output as zero clones" >&2
+	exit 1
+fi
+groups=$(printf '%s\n' "$dupl_out" | grep -c '^found' || true)
 if [ "$groups" -gt "$baseline" ]; then
 	echo "dupl: $groups clone groups exceed baseline $baseline (see scripts/dupl-baseline.txt);" >&2
 	echo "       dedup the new clones or, if deliberate, raise the baseline with justification." >&2
