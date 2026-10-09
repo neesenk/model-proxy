@@ -97,6 +97,11 @@ func DoReplay(base, id, provider string) ([]byte, error) {
 	req, _ := http.NewRequest(http.MethodPost, base+path, bytes.NewReader([]byte(rec.RequestBody)))
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("x-mp-force-provider", provider)
+	// A replay must not touch sticky state: forced traffic has one target, and
+	// letting the quota engine rebind the route's (anonymous) sticky key to
+	// the replay target would steer other session-less traffic there for the
+	// dwell window (routing-and-failure.md「x-mp-sticky 覆盖头」).
+	req.Header.Set("x-mp-sticky", "off")
 	resp, err := daemonctl.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("replay request failed: %v", err)

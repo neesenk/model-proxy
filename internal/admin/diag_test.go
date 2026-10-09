@@ -47,9 +47,10 @@ func replayRig(t *testing.T, srv *httptest.Server) (*Service, string) {
 }
 
 func TestReplayRoundTrip(t *testing.T) {
-	var gotProvider, gotBody string
+	var gotProvider, gotSticky, gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotProvider = r.Header.Get("x-mp-force-provider")
+		gotSticky = r.Header.Get("x-mp-sticky")
 		b, _ := io.ReadAll(r.Body)
 		gotBody = string(b)
 		w.Header().Set("content-type", "application/json")
@@ -67,6 +68,11 @@ func TestReplayRoundTrip(t *testing.T) {
 	}
 	if gotProvider != "deepseek" {
 		t.Errorf("force-provider header = %q, want deepseek", gotProvider)
+	}
+	// The forced replay opts out of sticky so it cannot rebind the route's
+	// anonymous sticky key to the replay target.
+	if gotSticky != "off" {
+		t.Errorf("x-mp-sticky header = %q, want off", gotSticky)
 	}
 	if !strings.Contains(gotBody, `"model":"m"`) {
 		t.Errorf("replayed body = %q", gotBody)

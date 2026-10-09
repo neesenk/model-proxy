@@ -29,6 +29,11 @@ func TestDoReplay(t *testing.T) {
 			if fp := r.Header.Get("x-mp-force-provider"); fp != "zhipu" {
 				t.Errorf("force-provider header=%q want zhipu", fp)
 			}
+			// ...and opts out of sticky so the forced replay cannot rebind the
+			// route's anonymous sticky key to the replay target.
+			if st := r.Header.Get("x-mp-sticky"); st != "off" {
+				t.Errorf("x-mp-sticky header=%q want off", st)
+			}
 			io.WriteString(w, `{"replayed":true}`)
 		default:
 			http.NotFound(w, r)

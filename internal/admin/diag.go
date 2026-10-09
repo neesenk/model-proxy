@@ -88,6 +88,9 @@ func (s *Service) Replay(ctx context.Context, id, providerName string) (appapi.R
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("x-mp-force-provider", providerName)
+	// Same sticky opt-out as the CLI replay: forced traffic must not rebind the
+	// route's anonymous sticky key to the replay target for the dwell window.
+	req.Header.Set("x-mp-sticky", "off")
 	client := &http.Client{Timeout: cfg.Scheduling.Timeout()}
 	start := time.Now()
 	resp, err := client.Do(req)
