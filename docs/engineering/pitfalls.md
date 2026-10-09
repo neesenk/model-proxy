@@ -158,12 +158,13 @@
     断言 commit 前效应（failures/failovers/guard 命中）或用
     `httptest.ResponseRecorder` 同步驱动 handler 的测试不受影响。注意 fake
     upstream 一次性 `Write` 的 "SSE" 同样带 Content-Length，不享流式豁免。
-35. 覆盖率口径以 CI 工具链为准：CI 经 `go-version-file: go.mod` 用 go1.27.1，
+35. 覆盖率口径以 CI 工具链为准：CI 经 `go-version-file: go.mod` 用 go1.27.2，
     本机更高版本的语句计数不同（实测 `internal/cli/models` 本地 63.4% vs CI
     60.3%，足以跌破 floor）。floor/baseline 验证用
-    `GOTOOLCHAIN=go1.27.1 scripts/cover.sh`；`go test` 结果缓存会掩盖重测，
+    `GOTOOLCHAIN=go1.27.2 scripts/cover.sh`；`go test` 结果缓存会掩盖重测，
     本地压测与复跑一律 `-count=1`。cover.sh 在本地工具链与 go.mod 不一致时
-    会打印漂移警告（不 fail，CI 口径仍是权威）。
+    会打印漂移警告（不 fail，CI 口径仍是权威）。go 指令升级（如 1.27.1→1.27.2
+    修 stdlib 漏洞让 govulncheck 回绿）时同步改本条版本号。
 36. `post()` 返回 ≠ post-commit dispatch 已执行：shadow 的
     `dispatchShadowAfterCommit`（`internal/forward/forward.go`）在响应写给
     客户端之后才在请求 goroutine 里同步跑，客户端返回时它可能还没执行。对
