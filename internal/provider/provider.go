@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 )
@@ -74,9 +75,9 @@ type QuotaSnapshot struct {
 //	surplus   = remaining − fLeft
 //
 // surplus > 0: under pace (budget would be wasted at reset → prioritize);
-// surplus < 0: over pace (will exhaust before reset → avoid);
-// surplus ≈ 0: on pace. Higher surplus sorts first. Returns 0 (neutral) when the
-// snapshot isn't a measured plan, or the ultimate window's reset cycle is unknown.
+// surplus < 0: over pace (will exhaust before reset → avoid); surplus ≈ 0: on
+// pace. Higher surplus sorts first. Returns 0 (neutral) when the snapshot isn't
+// a measured plan, or the ultimate window's reset cycle is unknown.
 func (s *QuotaSnapshot) Surplus(now time.Time, peakMult float64) float64 {
 	if s == nil || s.Billing != BillingPlan || s.RemainingPct < 0 {
 		return 0
@@ -112,6 +113,26 @@ func (s *QuotaSnapshot) Surplus(now time.Time, peakMult float64) float64 {
 		fLeft = 1
 	}
 	return remaining - fLeft
+}
+
+// remainingRatio normalizes one quota fraction (remaining/limit) with the
+// fail-closed semantics every provider parser shares: limit <= 0 is unmeasured
+// (-1); absurd upstream magnitudes that overflow the fraction to ±Inf/NaN read
+// as unmeasured (-1), never a +Inf scheduling base; a negative remaining clamps
+// to 0 (over-quota = exhausted, not a negative that would read "unmeasured").
+// Volcengine's fuzz seed (Quota 1e308 / Used -1e308) is the reference case.
+func remainingRatio(remaining, limit float64) float64 {
+	if limit <= 0 {
+		return -1
+	}
+	rem := remaining / limit
+	if math.IsNaN(rem) || math.IsInf(rem, 0) {
+		return -1
+	}
+	if rem < 0 {
+		return 0
+	}
+	return rem
 }
 
 // UsageWindow returns the start of the CURRENT billing period: the ultimate

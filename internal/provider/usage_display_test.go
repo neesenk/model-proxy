@@ -64,8 +64,14 @@ func TestPrintAFPWindow(t *testing.T) {
 		}
 	}
 	out2 := captureProv(t, func() { printAFPWindow("daily", AfpWindow{}) })
-	if !contains(out2, "0.0% used") {
-		t.Errorf("printAFPWindow zero-quota missing '0.0%% used':\n%s", out2)
+	// Zero quota is unmeasured, not "0.0% used" — the shared -1 convention
+	// (formatQuotaWindowLine renders the same "n/a unmeasured" style); a
+	// 0-of-0 bar would read as a real measurement of zero usage.
+	if !contains(out2, "unmeasured") {
+		t.Errorf("printAFPWindow zero-quota missing 'unmeasured':\n%s", out2)
+	}
+	if contains(out2, "0.0% used") {
+		t.Errorf("printAFPWindow zero-quota must not render a bogus '0.0%% used' bar:\n%s", out2)
 	}
 	if !contains(out2, "0.0 used / 0.0 quota, 0.0 remaining") {
 		t.Errorf("printAFPWindow zero-quota missing zero line:\n%s", out2)

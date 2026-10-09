@@ -324,10 +324,7 @@ func ParseKimiCodeQuota(body []byte, account string) (*QuotaSnapshot, error) {
 			if u.BoosterWallet.MonthlyChargeLimit.Currency != "" {
 				cur = u.BoosterWallet.MonthlyChargeLimit.Currency + " "
 			}
-			rem := -1.0
-			if limit > 0 {
-				rem = (limit - used) / limit
-			}
+			rem := remainingRatio(limit-used, limit)
 			s.Windows = append(s.Windows, QuotaWindow{
 				Label: "Monthly cap " + cur, Kind: "money",
 				Total: limit, Used: used, RemainingPct: rem,

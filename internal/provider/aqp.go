@@ -213,10 +213,7 @@ func aqpMonthlyReset(year, month int) (resetsAt time.Time, duration time.Duratio
 // The monthly window is Ultimate (total budget); remaining = balance/total.
 func ParseAqpQuota(mu *MonthlyProjectUsage, account string) *QuotaSnapshot {
 	s := &QuotaSnapshot{Billing: BillingPlan, Account: account, Plan: mu.Plan, AsOf: time.Now()}
-	rem := -1.0
-	if mu.TotalAmount > 0 {
-		rem = mu.Balance / mu.TotalAmount
-	}
+	rem := remainingRatio(mu.Balance, mu.TotalAmount)
 	resetsAt, dur := aqpMonthlyReset(mu.SelectedYear, mu.SelectedMonth)
 	s.Windows = append(s.Windows, QuotaWindow{
 		Label: "Monthly", Kind: "money",

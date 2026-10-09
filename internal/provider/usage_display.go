@@ -68,20 +68,29 @@ func formatQuotaWindowLine(w QuotaWindow) string {
 
 // printAFPWindow renders one Volcengine AFP quota window.
 func printAFPWindow(label string, w AfpWindow) {
-	remaining := w.Quota - w.Used
-	pct := 0.0
-	if w.Quota > 0 {
-		pct = w.Used / w.Quota * 100
+	rem := remainingRatio(w.Quota-w.Used, w.Quota)
+	var bar, pctStr string
+	if rem < 0 {
+		// Unmeasured (no quota, or an upstream magnitude that overflows the
+		// ratio) renders as the shared "n/a / unmeasured" style instead of a
+		// bogus "0.0% used" bar.
+		bar = display.Gray("n/a")
+		pctStr = display.Gray("unmeasured")
+	} else {
+		usedPct := (1 - rem) * 100
+		if usedPct < 0 {
+			usedPct = 0
+		}
+		bar = display.ProgressBar(int(usedPct), 16)
+		pctStr = display.UsageRatioColor(rem, 1, fmt.Sprintf("%.1f%% used", usedPct))
 	}
-	bar := display.ProgressBar(int(pct), 16)
-	pctStr := display.UsageRatioColor(float64(100-pct), 100, fmt.Sprintf("%.1f%% used", pct))
 	reset := "-"
 	if w.ResetTime > 0 {
 		dur := display.FormatDuration(int((w.ResetTime - time.Now().UnixMilli()) / 1000))
 		reset = dur + "(at " + display.FormatResetAt(w.ResetTime) + ")"
 	}
 	fmt.Printf("%s %s  %s · resets %s  (%.1f used / %.1f quota, %.1f remaining)\n",
-		display.Dim(display.Pad(label+":", 12)), bar, pctStr, display.Gray(reset), w.Used, w.Quota, remaining)
+		display.Dim(display.Pad(label+":", 12)), bar, pctStr, display.Gray(reset), w.Used, w.Quota, w.Quota-w.Used)
 }
 
 // aqpUsageLine renders the aqp monthly-usage line (content after "Usage:"):

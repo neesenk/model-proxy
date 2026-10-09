@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"model-proxy/internal/display"
 	"net/http"
 	"regexp"
@@ -149,18 +148,10 @@ type AfpUsage struct {
 func ParseVolcengineQuota(u *AfpUsage) *QuotaSnapshot {
 	s := &QuotaSnapshot{Billing: BillingPlan, Plan: u.PlanType, AsOf: time.Now()}
 	add := func(label string, w AfpWindow, ultimate, short bool, dur time.Duration) {
-		rem := -1.0
-		if w.Quota > 0 {
-			rem = (w.Quota - w.Used) / w.Quota
-			// Absurd upstream magnitudes (e.g. hugely negative Used) overflow
-			// the ratio to ±Inf/NaN — that is "unmeasured", never a bogus cap
-			// or a +Inf scheduling base (found by FuzzParseVolcengineQuota).
-			if math.IsNaN(rem) || math.IsInf(rem, 0) {
-				rem = -1
-			} else if rem < 0 {
-				rem = 0 // over-quota -> exhausted (0), not a negative that'd read as "unmeasured"
-			}
-		}
+		// remainingRatio fails closed on absurd magnitudes (±Inf/NaN → -1
+		// unmeasured) and clamps over-quota to 0 (found by
+		// FuzzParseVolcengineQuota).
+		rem := remainingRatio(w.Quota-w.Used, w.Quota)
 		var reset time.Time
 		if w.ResetTime > 0 {
 			reset = time.UnixMilli(w.ResetTime)

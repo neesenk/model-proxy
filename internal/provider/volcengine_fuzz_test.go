@@ -10,8 +10,9 @@ import (
 // FuzzParseVolcengineQuota pins the pure quota parser's structural contract
 // on arbitrary (possibly malformed) upstream JSON: exactly four windows in
 // fixed order, exactly one Ultimate (monthly) and one Short (5h), remaining
-// percentages are either -1 (unmeasured) or clamped to [0,1] — never NaN/Inf
-// or negative — and the snapshot's scheduling base equals the Ultimate
+// percentages are finite and either -1 (unmeasured) or >= 0 — never NaN/Inf
+// or negative (over-quota clamps to 0; a finite negative Used may legitimately
+// exceed 1) — and the snapshot's scheduling base equals the Ultimate
 // window's remaining.
 func FuzzParseVolcengineQuota(f *testing.F) {
 	seeds := []string{

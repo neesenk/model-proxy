@@ -147,7 +147,7 @@ func ParseOpenRouterKeyQuota(body []byte, now time.Time) *QuotaSnapshot {
 		}
 		if rem := k.Data.LimitRemaining; rem != nil && *rem >= 0 {
 			w.Used = *lim - *rem
-			w.RemainingPct = *rem / *lim
+			w.RemainingPct = remainingRatio(*rem, *lim)
 		}
 		if k.Data.LimitReset != "" {
 			w.Label = "Key credit cap (" + k.Data.LimitReset + " reset)"
@@ -163,7 +163,7 @@ func ParseOpenRouterKeyQuota(body []byte, now time.Time) *QuotaSnapshot {
 	if f := k.Data.FreeModelDaily; f != nil && f.Limit > 0 {
 		s.Windows = append(s.Windows, QuotaWindow{
 			Label: "Free-model req/day", Kind: "requests",
-			Used: f.Used, Total: f.Limit, RemainingPct: f.Remaining / f.Limit,
+			Used: f.Used, Total: f.Limit, RemainingPct: remainingRatio(f.Remaining, f.Limit),
 			ResetsAt: nextDay, Duration: 24 * time.Hour,
 		})
 	}
