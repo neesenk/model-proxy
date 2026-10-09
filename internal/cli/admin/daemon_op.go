@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,7 +19,7 @@ import (
 // daemon's truncated message as the error. Shared by freeze/unfreeze.
 func postProviderOp(base, endpoint, provider string, out any) error {
 	raw, _ := json.Marshal(map[string]string{"provider": provider})
-	resp, err := daemonctl.Client.Post(base+endpoint, "application/json", bytes.NewReader(raw))
+	resp, err := daemonctl.PostJSON(base, endpoint, raw)
 	if err != nil {
 		return err
 	}

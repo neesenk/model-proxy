@@ -156,3 +156,33 @@ func BearerFromRequest(header func(string) string) string {
 	}
 	return ""
 }
+
+// ReadTokens returns every valid token line of one token file (same format
+// authority as the serving gates: one token per line, blank lines and
+// #-comments ignored). A missing or unreadable file yields nil — callers that
+// PRESENT a credential (the daemon-loopback replay call, takeover's client
+// key embedding) must treat that as "no credential available", never fall
+// back to a guessable default. This is a display-adjacent read: never log
+// the returned values.
+func ReadTokens(path string) []string {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	toks, err := loadTokens([]string{path})
+	if err != nil {
+		return nil
+	}
+	return toks
+}
+
+// FirstToken returns the first token of one token file, or "" when the file
+// is unconfigured, missing, or holds no tokens. The daemon-side loopback
+// callers use it to pick a presentable credential; rotation note: it reads
+// the CURRENT file, so a rotated-away first line invalidates outstanding
+// embeds on their next render (the serving gate's own TTL is 10s).
+func FirstToken(path string) string {
+	if toks := ReadTokens(path); len(toks) > 0 {
+		return toks[0]
+	}
+	return ""
+}

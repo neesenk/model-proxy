@@ -18,6 +18,10 @@ func RunDoctor(args []string) {
 		fmt.Println("✗ config invalid: " + err.Error())
 		os.Exit(1)
 	}
+	// doctor handles an invalid config as a diagnostic line instead of
+	// log.Fatal, so it loads on its own — the process-wide daemon credentials
+	// still must be wired (doctor --live talks to the daemon's /api/*).
+	cliframework.ApplyProcessConfig(cfg)
 	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
 	CmdDoctor(args, cfg, cliframework.ConfigPath(args))
 }

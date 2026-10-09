@@ -14,7 +14,12 @@ import (
 // which provider each model is currently scheduled to (first-choice + ordered
 // list + sticky state). The daemon (`model-proxy serve`) must be running.
 func CmdSchedule(args []string, cfg *configdomain.Config) {
-	resp, err := daemonctl.Client.Get("http://" + cfg.Listen + "/debug/schedule")
+	req, err := daemonctl.NewGet("http://"+cfg.Listen, "/debug/schedule")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s bad schedule request: %v\n", display.Red("✗"), err)
+		os.Exit(1)
+	}
+	resp, err := daemonctl.Client.Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s cannot reach daemon at %s: %v\nis `model-proxy serve` running?\n",
 			display.Red("✗"), cfg.Listen, err)

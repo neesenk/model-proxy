@@ -4,7 +4,6 @@
 package admin
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -76,7 +75,7 @@ func DoPin(base, route, provider string, ttl time.Duration) (string, error) {
 	raw, _ := json.Marshal(map[string]any{
 		"route": route, "provider": provider, "ttl_seconds": int64(ttl.Seconds()),
 	})
-	resp, err := daemonctl.Client.Post(base+"/api/pin", "application/json", bytes.NewReader(raw))
+	resp, err := daemonctl.PostJSON(base, "/api/pin", raw)
 	if err != nil {
 		return "", err
 	}
@@ -101,7 +100,7 @@ func DoPin(base, route, provider string, ttl time.Duration) (string, error) {
 // doUnpin removes a pin via DELETE /api/pin?route= and returns the result line.
 func DoUnpin(base, route string) (string, error) {
 	req, _ := http.NewRequest(http.MethodDelete, base+"/api/pin?"+url.Values{"route": {route}}.Encode(), nil)
-	resp, err := daemonctl.Client.Do(req)
+	resp, err := daemonctl.DoRaw(req)
 	if err != nil {
 		return "", err
 	}
@@ -125,7 +124,11 @@ func DoUnpin(base, route string) (string, error) {
 // doListPins fetches GET /api/pin and returns the rendered pin table (or the
 // "(no active pins)" line).
 func DoListPins(base string) (string, error) {
-	resp, err := daemonctl.Client.Get(base + "/api/pin")
+	req, err := daemonctl.NewGet(base, "/api/pin")
+	if err != nil {
+		return "", err
+	}
+	resp, err := daemonctl.Client.Do(req)
 	if err != nil {
 		return "", err
 	}

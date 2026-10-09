@@ -5,18 +5,28 @@ import (
 
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/daemonctl"
 )
 
-// LoadCmdConfig loads the CLI config or exits. It also applies the configured
-// credentials mode (`credentials:`) to this process's account stores AND OAuth
-// blob store, so every command that reads credentials (usage/logout/models/
-// doctor/...) sees the same backend without threading cfg through each call
-// site.
+// ApplyProcessConfig applies the process-wide settings derived from a loaded
+// config: the credentials mode (`credentials:`) for this process's account
+// stores AND OAuth blob store, and the S2 auth token files for the shared
+// daemon client (a non-loopback deployment demands credentials on both
+// surfaces and the CLI's own daemon calls — status/doctor --live/replay/…
+// — must present them).
+func ApplyProcessConfig(cfg *configdomain.Config) {
+	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
+	daemonctl.SetAuthFiles(cfg.Web.Auth.AdminTokenFile, cfg.Web.Auth.APIKeysFile)
+}
+
+// LoadCmdConfig loads the CLI config or exits. Commands with custom error
+// handling for an invalid config (doctor's diagnostic line) load on their own
+// and must still call ApplyProcessConfig.
 func LoadCmdConfig(args []string) *configdomain.Config {
 	cfg, err := configdomain.LoadConfig(ConfigPath(args))
 	if err != nil {
 		log.Fatal(err)
 	}
-	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
+	ApplyProcessConfig(cfg)
 	return cfg
 }

@@ -36,7 +36,12 @@ func CmdShadow(args []string, cfg *configdomain.Config) {
 func CmdShadowReport(args []string, cfg *configdomain.Config) {
 	base := "http://" + cfg.Listen
 	q := MakeURLQuery(args)
-	resp, err := daemonctl.Client.Get(base + "/api/shadow-report?" + q.Encode())
+	req, err := daemonctl.NewGet(base, "/api/shadow-report?"+q.Encode())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s bad shadow report request: %v\n", display.Red("✗"), err)
+		os.Exit(1)
+	}
+	resp, err := daemonctl.Client.Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s cannot reach daemon at %s: %v\nis `model-proxy serve` running?\n", display.Red("✗"), cfg.Listen, err)
 		os.Exit(1)

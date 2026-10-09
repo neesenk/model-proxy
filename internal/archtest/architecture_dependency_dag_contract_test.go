@@ -33,6 +33,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 			"model-proxy/internal/probe": true, "model-proxy/internal/provider": true,
 			"model-proxy/internal/routing": true, "model-proxy/internal/runtime": true,
 			"model-proxy/internal/runtime/wirecap": true, "model-proxy/internal/takeover": true,
+			"model-proxy/internal/webauth": true,
 		},
 		"model-proxy/internal/archtest":      nil,
 		"model-proxy/internal/cache":         nil,
@@ -40,7 +41,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/cli/doctor":    {"model-proxy/internal/display": true, "model-proxy/internal/accounts": true, "model-proxy/internal/appapi": true, "model-proxy/internal/cli/clicommon": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/config": true, "model-proxy/internal/credstore": true, "model-proxy/internal/protocol": true, "model-proxy/internal/routing": true, "model-proxy/internal/takeover": true, "model-proxy/internal/observe/seclog": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/adjudicate":    nil,
 		"model-proxy/internal/cli/serve":     {"model-proxy/internal/config": true, "model-proxy/internal/observe/logx": true},
-		"model-proxy/internal/cli/framework": {"model-proxy/internal/accounts": true, "model-proxy/internal/config": true},
+		"model-proxy/internal/cli/framework": {"model-proxy/internal/accounts": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true},
 		"model-proxy/internal/cli/login":     {"model-proxy/internal/display": true, "model-proxy/internal/accounts": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/serve": true, "model-proxy/internal/config": true, "model-proxy/internal/login": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/cli/mcp":       {"model-proxy/internal/accounts": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/config": true, "model-proxy/internal/display": true, "model-proxy/internal/mcp": true, "model-proxy/internal/provider": true, "model-proxy/internal/providerbuild": true, "model-proxy/internal/upstreamproxy": true},
 		"model-proxy/internal/cli/models":    {"model-proxy/internal/display": true, "model-proxy/internal/cli/serve": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/accounts": true, "model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/configedit": true, "model-proxy/internal/probe": true, "model-proxy/internal/provider": true, "model-proxy/internal/providerbuild": true, "model-proxy/internal/routing": true, "model-proxy/internal/runtime/wirecap": true, "model-proxy/internal/upstreamproxy": true},
@@ -71,7 +72,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/configedit":    nil,
 		"model-proxy/internal/testsyn":       nil, // shared test-only sync primitives (imports "testing"; imported only from _test.go)
 		"model-proxy/internal/credstore":     nil,
-		"model-proxy/internal/daemonctl":     nil,
+		"model-proxy/internal/daemonctl":     {"model-proxy/internal/webauth": true}, // CLI-side S2 credential attach reuses the token-file format authority
 		"model-proxy/internal/display":       nil,
 		"model-proxy/internal/fusion":        {"model-proxy/internal/config": true, "model-proxy/internal/observe/logx": true},
 		"model-proxy/internal/forward": {
@@ -109,7 +110,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/runtime":               {"model-proxy/internal/config": true, "model-proxy/internal/runtime/wirecap": true, "model-proxy/internal/provider": true, "model-proxy/internal/observe/logx": true},
 		"model-proxy/internal/runtime/wirecap":       nil,
 		"model-proxy/internal/shadow":                {"model-proxy/internal/targetexec": true, "model-proxy/internal/transport/bodycapture": true},
-		"model-proxy/internal/takeover":              {"model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/routing": true, "model-proxy/internal/observe/logx": true, "model-proxy/internal/providerbuild": true, "model-proxy/internal/runtime/wirecap": true},
+		"model-proxy/internal/takeover":              {"model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/routing": true, "model-proxy/internal/observe/logx": true, "model-proxy/internal/providerbuild": true, "model-proxy/internal/runtime/wirecap": true, "model-proxy/internal/webauth": true},
 		"model-proxy/internal/targetexec":            {"model-proxy/internal/cache": true, "model-proxy/internal/config": true, "model-proxy/internal/protocol": true, "model-proxy/internal/transport/bodycapture": true, "model-proxy/internal/provider": true, "model-proxy/internal/observe/logx": true},
 		"model-proxy/internal/transport/bodycapture": nil,
 		"model-proxy/internal/upstreamproxy":         nil,

@@ -552,10 +552,11 @@ application → serveAssembly → applicationRuntime → Proxy
 `internalRepositoryImportPolicy` 互为镜像——两处必须同步修改：
 
 - 叶子包（不得依赖其他 `model-proxy/*` 包）：`adjudicate`、`archtest`（纯测试包）、`cache`、
-  `configedit`、`credstore`、`daemonctl`、`display`、`guard`、`httpx`、`mcp`、`testsyn`、
+  `configedit`、`credstore`、`display`、`guard`、`httpx`、`mcp`、`testsyn`、
   `observe/counters`、`observe/events`、`observe/logx`、`protocol/wire`、`runtime/wirecap`、
   `upstreamproxy`、`transport/bodycapture`、`webauth`；
 - `accounts → credstore`；
+- `daemonctl → webauth`（CLI 侧凭据附着复用 token 文件格式权威）；
 - `guard/session → guard`；
 - `app → accounts, adjudicate, admin, appapi, cache, catalog,
   config, display, forward, fusion, guard, guard/session, httpx, login, mcp, observe/budget,
@@ -564,7 +565,7 @@ application → serveAssembly → applicationRuntime → Proxy
   targetexec, transport/bodycapture, upstreamproxy, web, webauth`；
 - `admin → accounts, appapi, cache, catalog, config, configedit, credstore, fusion, login,
   observe/counters, observe/logx, observe/requestlog, observe/seclog, observe/stats, presets, pricing, probe,
-  provider, routing, runtime, runtime/wirecap, takeover`（Web admin 应用服务；不得回依赖 app/web/cli；
+  provider, routing, runtime, runtime/wirecap, takeover, webauth`（Web admin 应用服务；不得回依赖 app/web/cli；
   takeover 边是 takeover/restore 与模板管理的 daemon 孪生）；
 - `appapi → adjudicate, fusion, observe/requestlog, observe/stats, presets, pricing`
   （adjudicate 仅为其 BlockEntry/Result 快照类型提供 DTO 别名，见 appapi/types.go）；
@@ -582,7 +583,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/diag → cli/framework, cli/models, config, daemonctl, display, observe/requestlog, pricing, probe, provider, upstreamproxy`（`wire`/`replay`/`shadow`/`routing report`）；
 - `cli/doctor → accounts, appapi, cli/clicommon, cli/framework,
   cli/models, config, credstore, display, protocol, routing, takeover, observe/seclog, provider`；
-- `cli/framework → accounts, config`；
+- `cli/framework → accounts, config, daemonctl`（LoadCmdConfig 进程级接线 S2 凭据）；
 - `cli/presets → cli/framework, cli/login, cli/serve, config, login, presets`；
 - `cli/stats → accounts, cli/framework, config, daemonctl, display, observe/stats, providerbuild`（`stats`/`usage`）；
 - `cli/status → appapi, cli/clicommon, cli/framework, config, daemonctl, display, routing`（`serve status`/`schedule`/`routes`/`cache`）；
@@ -614,7 +615,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `providerbuild → accounts, config, display, provider, observe/logx, upstreamproxy`；
 - `routing → catalog, config, protocol, provider`（均为值类型消费）；
 - `runtime → config, runtime/wirecap, provider, observe/logx`；
-- `takeover → catalog, config, routing, observe/logx, providerbuild, runtime/wirecap`；
+- `takeover → catalog, config, routing, observe/logx, providerbuild, runtime/wirecap, webauth`；
 - `shadow → targetexec, transport/bodycapture`；
 - `targetexec → cache, config, protocol, transport/bodycapture, provider, observe/logx`；
 - `web → appapi, observe/analytics, observe/logx, observe/requestlog, observe/stats, pricing, webauth`。

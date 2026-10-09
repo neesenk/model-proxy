@@ -81,6 +81,20 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
 - `--log-file <PATH>` — 仅 `serve`：覆盖 config 的 `log_file`。
 - `-h, --help` — 打印帮助（顶层或 `model-proxy <cmd> -h` 打印 `cmdHelp[cmd]`）。
 
+### daemon 鉴权（S2，非回环部署）
+
+`listen` 非 loopback 时 daemon 两个面都要求凭据（`web.auth`，见
+`docs/web-api.md`）。CLI 与 daemon 通信（`status`/`doctor --live`/`schedule`/
+`replay`/`pin`/`shadow report`/`stats`/`models pull`/…）由共享客户端
+`internal/daemonctl` **自动附带**：命令加载 config 时（`cliframework.LoadCmdConfig`
+→ `ApplyProcessConfig`；`doctor` 自管错误处理、单独调用同一接线）读取
+`web.auth.admin_token_file` / `api_keys_file` 的首个 token，按请求路径选择面——
+`/api`、`/metrics`、`/debug` 带 admin token，`/v1`、`/mcp` 带 forward key，其余
+（`/health`）不附。文件未配置（回环部署）保持无头历史行为；配置但读不到时**不附
+任何凭据**（daemon 401 如实报错，绝不猜占位值）；调用方已设 Authorization/
+x-api-key 时永不覆盖。`replay` 的回环 `/v1/*` 转发（CLI 与 `/api/replay` 孪生）
+同样附带 forward key。
+
 ---
 
 ## 1. `serve` — 启动代理
