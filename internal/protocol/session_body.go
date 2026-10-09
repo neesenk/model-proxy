@@ -103,3 +103,15 @@ func bodySessionToken(v any) string {
 	}
 	return s
 }
+
+// HeaderSessionID applies the same opaque-token hygiene as bodySessionToken to
+// a session header's raw value — the routing sticky key's source
+// (x-claude-code-session-id). A value that is blank, oversized, or carries
+// control/non-ASCII bytes yields "": an invalid identity counts as NO session
+// rather than being clamped or truncated, because grouping requests under a
+// mangled id — or splitting one session across a truncated prefix — is worse
+// than not grouping at all. The caller then falls back to its sessionless
+// behavior (route-keyed sticky).
+func HeaderSessionID(raw string) string {
+	return bodySessionToken(raw)
+}

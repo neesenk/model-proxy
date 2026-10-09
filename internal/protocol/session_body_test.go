@@ -111,3 +111,30 @@ func TestSessionIDFromBodyCapBoundary(t *testing.T) {
 		t.Errorf("257-char id: got %d chars, want rejected", len(got))
 	}
 }
+
+// TestHeaderSessionID pins the header variant's hygiene for the routing
+// sticky key's source (x-claude-code-session-id): an invalid identity counts
+// as no session — never truncated, never grouped under a mangled id.
+func TestHeaderSessionID(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "uuid passes", raw: "01a0b26d-fde4-4f6f-8bd5-58cb9a0f8b1e", want: "01a0b26d-fde4-4f6f-8bd5-58cb9a0f8b1e"},
+		{name: "surrounding whitespace trimmed", raw: "  sess-1 \t", want: "sess-1"},
+		{name: "empty", raw: "", want: ""},
+		{name: "whitespace only", raw: "   ", want: ""},
+		{name: "oversized ignored", raw: strings.Repeat("a", 257), want: ""},
+		{name: "cap boundary passes", raw: strings.Repeat("a", 256), want: strings.Repeat("a", 256)},
+		{name: "control byte rejected", raw: "sess\x00-1", want: ""},
+		{name: "newline rejected", raw: "sess\n1", want: ""},
+		{name: "non-ascii rejected", raw: "会话-1", want: ""},
+		{name: "del byte rejected", raw: "sess\x7f1", want: ""},
+	}
+	for _, tc := range cases {
+		if got := HeaderSessionID(tc.raw); got != tc.want {
+			t.Errorf("%s: HeaderSessionID(%q) = %q, want %q", tc.name, tc.raw, got, tc.want)
+		}
+	}
+}
