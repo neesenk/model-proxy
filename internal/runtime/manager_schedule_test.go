@@ -761,3 +761,35 @@ func TestDecideOrderSources(t *testing.T) {
 		t.Fatalf("all-blocked result = %+v, want empty order and no source", result)
 	}
 }
+
+// TestCountRouteSessionStickyExactRouteMatch pins the count's route matching
+// to the EXACT route half of the composite key (split at the first
+// separator): a route whose name itself contains the separator byte must not
+// absorb another route's bindings (the pre-fix suffix match did), and bare
+// sessionless parking keys stay uncounted. Residual: a route NAME containing
+// the separator byte is inherently ambiguous in the composite encoding — its
+// bare parking key still parses as (session, route) — which cannot happen
+// for real config model names.
+func TestCountRouteSessionStickyExactRouteMatch(t *testing.T) {
+	now := time.Now()
+	odd := "x" + stickySep + "eA" // pathological route name containing the separator
+	sticky := map[string]Sticky{
+		StickyKey("sess", odd):      {Provider: "p-odd", Since: now},                       // counts ONLY for the odd route
+		StickyKey("sess", "eA"):     {Provider: "p-eA", Since: now},                        // not absorbed by the odd route
+		"plain":                     {Provider: "p-bare", Since: now},                      // bare sessionless parking: uncounted
+		StickyKey("sess2", "eA"):    {Provider: "", Since: now},                            // empty provider: uncounted
+		StickyKey("sess3", "other"): {Provider: "p-other", Since: now.Add(-2 * time.Hour)}, // outside dwell
+	}
+	if got := CountRouteSessionSticky(sticky, odd, now, time.Hour); got != 1 {
+		t.Errorf("odd route bindings = %d, want 1 (its own session only)", got)
+	}
+	if got := CountRouteSessionSticky(sticky, "eA", now, time.Hour); got != 1 {
+		t.Errorf("eA route bindings = %d, want 1 (odd route's session not absorbed)", got)
+	}
+	if got := CountRouteSessionSticky(sticky, "plain", now, time.Hour); got != 0 {
+		t.Errorf("plain route bindings = %d, want 0 (bare parking key uncounted)", got)
+	}
+	if got := CountRouteSessionSticky(sticky, "other", now, time.Hour); got != 0 {
+		t.Errorf("other route bindings = %d, want 0 (outside dwell)", got)
+	}
+}

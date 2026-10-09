@@ -445,12 +445,22 @@ func decideOrderLoadBalance(
 
 // CountRouteSessionSticky counts the (session, route) bindings still inside
 // their dwell for one route — the Status schedule card's per-route view into
-// the sticky map (the map itself stays runtime-private keying).
+// the sticky map (the map itself stays runtime-private keying). The route
+// half is matched EXACTLY (split at the first separator — session keys are
+// printable ASCII, so it is the true one), never by suffix: a route name
+// that itself contains the separator byte must not absorb another route's
+// bindings.
 func CountRouteSessionSticky(sticky map[string]Sticky, exposed string, now time.Time, dwell time.Duration) int {
-	suffix := stickySep + exposed
 	count := 0
 	for key, entry := range sticky {
-		if entry.Provider == "" || !strings.HasSuffix(key, suffix) {
+		if entry.Provider == "" {
+			continue
+		}
+		i := strings.Index(key, stickySep)
+		if i < 0 {
+			continue // bare route key: sessionless parking, not a (session, route) binding
+		}
+		if key[i+len(stickySep):] != exposed {
 			continue
 		}
 		if now.Sub(entry.Since) < dwell {
