@@ -661,24 +661,31 @@ func TestRunApiKeyLogin_KimiCode_Validation401(t *testing.T) {
 // TestDefaultsHaveValidationURLs parses both user-facing default configs and
 // asserts the URLs on their exact provider entries. A raw substring check can
 // pass when a URL survives only in a comment or is attached to the wrong key.
+// The wants are per source: the repo config.yaml is the live shipped example
+// (volcengine parked — commented out while its Agent Plan is unused, so it is
+// pinned ABSENT there), while the `config init` template still ships it
+// active with its validation URL.
 func TestDefaultsHaveValidationURLs(t *testing.T) {
+	const (
+		kimiUsageURL       = "https://api.kimi.com/coding/v1/usages"
+		volcengineUsageURL = "https://ark.cn-beijing.volces.com/api/plan/v3/models"
+	)
 	sources := []struct {
-		name string
-		yaml []byte
+		name  string
+		yaml  []byte
+		wants map[string]string
 	}{
-		{name: "config.yaml", yaml: readLoginRepositoryFile(t, "config.yaml")},
-		{name: "config init template", yaml: []byte(configdomain.DefaultConfigYAML)},
-	}
-	wants := map[string]string{
-		"kimi-code":  "https://api.kimi.com/coding/v1/usages",
-		"volcengine": "https://ark.cn-beijing.volces.com/api/plan/v3/models",
+		{name: "config.yaml", yaml: readLoginRepositoryFile(t, "config.yaml"),
+			wants: map[string]string{"kimi-code": kimiUsageURL}},
+		{name: "config init template", yaml: []byte(configdomain.DefaultConfigYAML),
+			wants: map[string]string{"kimi-code": kimiUsageURL, "volcengine": volcengineUsageURL}},
 	}
 	for _, source := range sources {
 		cfg, err := configdomain.LoadConfigFromBytes(source.name, source.yaml)
 		if err != nil {
 			t.Fatalf("parse %s: %v", source.name, err)
 		}
-		for providerName, wantURL := range wants {
+		for providerName, wantURL := range source.wants {
 			prov, ok := cfg.Providers[providerName]
 			if !ok {
 				t.Errorf("%s: provider %q missing", source.name, providerName)
@@ -686,6 +693,11 @@ func TestDefaultsHaveValidationURLs(t *testing.T) {
 			}
 			if prov.UsageURL != wantURL {
 				t.Errorf("%s: provider %q usage_url = %q, want %q", source.name, providerName, prov.UsageURL, wantURL)
+			}
+		}
+		if source.name == "config.yaml" {
+			if _, parked := cfg.Providers["volcengine"]; parked {
+				t.Error("config.yaml: volcengine is parked (commented out) — if it comes back, restore its usage_url pin in source.wants")
 			}
 		}
 	}

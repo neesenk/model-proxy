@@ -180,36 +180,36 @@ providers:
     models:
       - deepseek-flash
       - deepseek-v4-pro
-  # Volcengine Ark (火山方舟, including "Agent Plan"). API key via `login volcengine`.
-  # Two protocol bases: openai_base_url = Ark OpenAI base, anthropic_base_url =
-  # Ark Anthropic-compatible base (no /v1; proxy keeps /v1/messages).
-  # All listed models are auto-exposed as routes (see routes: below).
-  volcengine:
-    provider_id: volcengine
-    priority: 0
-    billing: plan
-    openai_base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-    anthropic_base_url: https://ark.cn-beijing.volces.com/api/plan
+      # Volcengine Ark (火山方舟, including "Agent Plan"). API key via `login volcengine`.
+      # Two protocol bases: openai_base_url = Ark OpenAI base, anthropic_base_url =
+      # Ark Anthropic-compatible base (no /v1; proxy keeps /v1/messages).
+      # All listed models are auto-exposed as routes (see routes: below).
+      # volcengine:
+      #  provider_id: volcengine
+      #  priority: 0
+      #  billing: plan
+      #  openai_base_url: https://ark.cn-beijing.volces.com/api/plan/v3
+      #  anthropic_base_url: https://ark.cn-beijing.volces.com/api/plan
     # usage_url is the login-time key-validation endpoint: `login volcengine` GETs it
     # with Authorization: Bearer <Ark API Key> and rejects on 401/403. The Agent Plan
     # base exposes /models over Bearer (unlike the signed GetAFPUsage, which needs
     # AK/SK). Runtime `usage volcengine` still uses GetAFPUsage (AK/SK), not this URL.
-    usage_url: https://ark.cn-beijing.volces.com/api/plan/v3/models
-    models:
-      - deepseek-v4-flash
-      - deepseek-v4-pro
-      - deepseek-v4.1-flash
-      - doubao-embedding-vision
-      - doubao-seed-2.1-pro
-      - doubao-seed-2.1-turbo
-      - doubao-seed-evolving
-      - doubao-seedream-5.0-lite
-      - glm-5.3
-      - glm-5.3-flash
-      - kimi-k2.7-code
-      - kimi-k2.8-preview
-      - kimi-k3
-      - minimax-m3
+  #  usage_url: https://ark.cn-beijing.volces.com/api/plan/v3/models
+  #  models:
+  #    - deepseek-v4-flash
+  #    - deepseek-v4-pro
+  #    - deepseek-v4.1-flash
+  #    - doubao-embedding-vision
+  #    - doubao-seed-2.1-pro
+  #    - doubao-seed-2.1-turbo
+  #    - doubao-seed-evolving
+  #    - doubao-seedream-5.0-lite
+  #    - glm-5.3
+  #    - glm-5.3-flash
+  #    - kimi-k2.7-code
+  #    - kimi-k2.8-preview
+  #    - kimi-k3
+  #    - minimax-m3
   shopee:
     provider_id: static
     priority: 3
@@ -391,6 +391,7 @@ providers:
     priority: 1
     billing: plan
     models:
+      - claude-haiku-5-5
       - deepseek-flash
       - deepseek-v4-flash
       - deepseek-v4-flash-vision-exp
@@ -402,6 +403,7 @@ providers:
       - glm-5.3-flash
       - gpt-5.6-luna
       - gpt-6-luna
+      - grok-4.6
       - grok-4.7
       - hy3
       - hy4-preview
@@ -425,7 +427,9 @@ providers:
       - qwen3.7-plus
       - qwen3.8-flash
       - qwen3.8-max
+      - space-bunny
       - space-bunny-free
+      - step-5-preview-free
 # Qianwen Token Plan 个人版 (千问 AI Token Plan personal edition). API key via
 # `login qwen-plan` (from the Token Plan console; key format sk-sp-…). Two
 # protocol bases: openai_base_url = OpenAI-compatible base, anthropic_base_url
@@ -712,7 +716,7 @@ mcp:
   zhipu-search: {provider: zhipu, url: 'https://open.bigmodel.cn/api/mcp/web_search_prime/mcp'}
   zhipu-reader: {provider: zhipu, url: 'https://open.bigmodel.cn/api/mcp/web_reader/mcp'}
   zhipu-zread: {provider: zhipu, url: 'https://open.bigmodel.cn/api/mcp/zread/mcp'}
-  ark-datapro: {provider: volcengine, url: 'https://datapro.hqd.cn-beijing.volces.com/mcp', auth_header: X-Agent-Plan-Key}
+  # ark-datapro: {provider: volcengine, url: 'https://datapro.hqd.cn-beijing.volces.com/mcp', auth_header: X-Agent-Plan-Key}
   exa: {url: 'https://mcp.exa.ai/mcp', auth: none}
   firecrawl: {url: 'https://mcp.firecrawl.dev/v2/mcp', auth: none}
   context7: {url: 'https://mcp.context7.com/mcp', auth: none}
@@ -741,8 +745,8 @@ mcp_routes:
   datasource:
     targets:
       - {mcp: kimi-data, tools: {apidoc: get_data_source_desc, # step 1: fetch one source's API doc
-          api_call: call_data_source_tool}} # step 2: structured api_name+params call per that doc
-      - {mcp: ark-datapro, tools: {ask: dataPro_search}} # fast path: one-shot natural-language question, no doc step
+          api_call: call_data_source_tool},} # step 2: structured api_name+params call per that doc
+      #- {mcp: ark-datapro, tools: {ask: dataPro_search}} # fast path: one-shot natural-language question, no doc step
   web-research:
     targets:
       - {mcp: zhipu-search, tools: {web_search: web_search_prime}} # general/cn-optimized search (search_query)
