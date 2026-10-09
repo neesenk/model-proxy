@@ -31,7 +31,7 @@ import {
   fmtCompact,
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
   CLIENT_GONE_STATUS, notLoggedHint,
-  quotaErrKind, accountUsageState, accountRemainingLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta,
+  quotaErrKind, accountUsageState, accountRemainingLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta, keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
   securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML, SECURITY_RANGES, securityRangeFromSecs,
   securityFilterQuery, securityFilterFromQuery, explainCacheKey,
@@ -3846,4 +3846,53 @@ test('mcpHash builds #mcp/<sub> for valid sub-tabs and bare #mcp otherwise', () 
   assert.equal(mcpHash(''), '#mcp');
   assert.equal(mcpHash('bogus'), '#mcp');
   assert.equal(mcpHash(null), '#mcp');
+});
+
+// ---------- Keys page (forward-key allocation & per-key usage) ----------
+
+test('keysTableHTML: rows, prefix-only display, relative last-use, empty state', () => {
+  const now = Date.now();
+  const html = keysTableHTML([
+    { id: 'abcd1234', label: 'phone', prefix: 'mp-key-475c…', created_at: '2026-10-09T12:00:00Z', last_used_ms: now - 90_000, requests_24h: 12 },
+    { id: 'ffff0000', label: '', prefix: 'mp-key-bbbb…', created_at: '', last_used_ms: 0, requests_24h: 0 },
+  ], now);
+  assert.ok(html.includes('phone'), html);
+  // The full token never appears — only the prefix shape.
+  assert.ok(!/[0-9a-f]{40}/.test(html), 'full token leaked into list');
+  assert.ok(html.includes('1m ago'), html);
+  assert.ok(html.includes('&lt;unlabeled&gt;'), 'empty label renders the escaped placeholder');
+  assert.ok(html.includes('never'), 'unused key must read "never"');
+  assert.ok(html.includes('data-key-usage="abcd1234"') && html.includes('data-key-revoke="ffff0000"'), html);
+  // Empty list is a hint, not an empty table.
+  assert.ok(keysTableHTML([]).includes('no keys yet'));
+});
+
+test('keyUsageTableHTML: per-model rows with failure badge and empty window', () => {
+  const html = keyUsageTableHTML([
+    { model: 'glm-5.3', provider: 'zhipu', requests: 41, failures: 2, input: 9100, output: 3300 },
+    { model: 'kimi-k3', provider: 'kimi', requests: 5, failures: 0, input: 100, output: 50 },
+  ]);
+  assert.ok(html.includes('glm-5.3') && html.includes('kimi-k3'), html);
+  assert.ok(html.includes('<span class="badge err">2</span>'), 'failures must badge');
+  assert.ok(!html.includes('badge err">0<'), 'zero failures must not badge');
+  assert.ok(keyUsageTableHTML([]).includes('no calls in this window'));
+});
+
+test('keyCreatedBannerHTML: one-time full token, escaped, with copy action', () => {
+  const html = keyCreatedBannerHTML({ token: 'mp-key-abcdef1234', label: 'ci <bot>' });
+  assert.ok(html.includes('mp-key-abcdef1234'), 'creation is the one surface showing the full token');
+  assert.ok(html.includes('ci &lt;bot&gt;'), 'label must be escaped');
+  assert.ok(html.includes('data-key-copy="mp-key-abcdef1234"'), html);
+  assert.ok(html.includes('never shown again'), html);
+  assert.equal(keyCreatedBannerHTML({}), '');
+  assert.equal(keyCreatedBannerHTML(null), '');
+});
+
+test('keyRelTime: buckets from seconds to days', () => {
+  const now = 1_000_000_000_000;
+  assert.equal(keyRelTime(0, now), '');
+  assert.equal(keyRelTime(now - 30_000, now), '30s ago');
+  assert.equal(keyRelTime(now - 120_000, now), '2m ago');
+  assert.equal(keyRelTime(now - 7_200_000, now), '2h ago');
+  assert.equal(keyRelTime(now - 3 * 86_400_000, now), '3d ago');
 });

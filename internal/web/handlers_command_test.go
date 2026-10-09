@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"model-proxy/internal/appapi"
+	"model-proxy/internal/observe/requestlog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -43,6 +44,15 @@ type commandFake struct {
 	replay         func(context.Context, string, string) (appapi.ReplayResult, error)
 	routeTest      func(context.Context, string) (appapi.RouteTestResult, error)
 	catalogPull    func(context.Context) (appapi.ModelsCatalogPull, error)
+}
+
+func (fake *commandFake) APIKeys() (appapi.KeysResult, error) { return appapi.KeysResult{}, nil }
+func (fake *commandFake) CreateAPIKey(string) (appapi.APIKeyCreated, error) {
+	return appapi.APIKeyCreated{}, nil
+}
+func (fake *commandFake) RevokeAPIKey(string) error { return nil }
+func (fake *commandFake) APIKeyUsage(string, time.Time, time.Time) ([]requestlog.KeyUsageEntry, error) {
+	return nil, nil
 }
 
 func (fake *commandFake) ResetStats() error {

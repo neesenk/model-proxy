@@ -297,6 +297,14 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleTakeoverTemplatePut(w, r)
 	case strings.HasPrefix(p, "/api/takeover/templates/") && r.Method == http.MethodDelete:
 		s.handleTakeoverTemplateDelete(w, r)
+	case p == "/api/keys" && r.Method == http.MethodGet:
+		s.handleAPIKeys(w, r)
+	case p == "/api/keys" && r.Method == http.MethodPost:
+		s.handleAPIKeyCreate(w, r)
+	case strings.HasPrefix(p, "/api/keys/") && strings.HasSuffix(p, "/usage") && r.Method == http.MethodGet:
+		s.handleAPIKeyUsage(w, r, strings.TrimSuffix(strings.TrimPrefix(p, "/api/keys/"), "/usage"))
+	case strings.HasPrefix(p, "/api/keys/") && r.Method == http.MethodDelete:
+		s.handleAPIKeyRevoke(w, strings.TrimPrefix(p, "/api/keys/"))
 	case p == "/api/sessions" && r.Method == http.MethodGet:
 		s.handleSessions(w, r)
 	case p == "/api/security" && r.Method == http.MethodGet:

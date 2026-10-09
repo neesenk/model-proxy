@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"model-proxy/internal/fusion"
+	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/presets"
 )
@@ -77,7 +78,13 @@ func (fakeReads) ModelsDocument() ModelsDocument { return ModelsDocument{} }
 
 type fakeCommands struct{}
 
-func (fakeCommands) ResetStats() error                         { return nil }
+func (fakeCommands) ResetStats() error                          { return nil }
+func (fakeCommands) APIKeys() (KeysResult, error)               { return KeysResult{}, nil }
+func (fakeCommands) CreateAPIKey(string) (APIKeyCreated, error) { return APIKeyCreated{}, nil }
+func (fakeCommands) RevokeAPIKey(string) error                  { return nil }
+func (fakeCommands) APIKeyUsage(string, time.Time, time.Time) ([]requestlog.KeyUsageEntry, error) {
+	return nil, nil
+}
 func (fakeCommands) RefreshQuota(string) bool                  { return false }
 func (fakeCommands) QuotaProviderKnown(string) bool            { return true }
 func (fakeCommands) ResetHealth(string) ([]string, int, error) { return nil, 0, nil }

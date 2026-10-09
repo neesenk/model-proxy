@@ -12,6 +12,7 @@ import (
 
 	"model-proxy/internal/appapi"
 	"model-proxy/internal/fusion"
+	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/presets"
 	"model-proxy/internal/pricing"
@@ -84,7 +85,15 @@ type testCommandAPI struct {
 	begin func(context.Context, string) (appapi.LoginStart, error)
 }
 
-func (testCommandAPI) ResetStats() error                         { return nil }
+func (testCommandAPI) ResetStats() error                   { return nil }
+func (testCommandAPI) APIKeys() (appapi.KeysResult, error) { return appapi.KeysResult{}, nil }
+func (testCommandAPI) CreateAPIKey(string) (appapi.APIKeyCreated, error) {
+	return appapi.APIKeyCreated{}, nil
+}
+func (testCommandAPI) RevokeAPIKey(string) error { return nil }
+func (testCommandAPI) APIKeyUsage(string, time.Time, time.Time) ([]requestlog.KeyUsageEntry, error) {
+	return nil, nil
+}
 func (testCommandAPI) RefreshQuota(string) bool                  { return true }
 func (testCommandAPI) QuotaProviderKnown(string) bool            { return true }
 func (testCommandAPI) ResetHealth(string) ([]string, int, error) { return nil, 0, nil }

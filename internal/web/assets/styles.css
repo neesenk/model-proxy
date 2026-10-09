@@ -2663,3 +2663,6 @@ dialog.tk-fixed .modal-body { max-height: calc(100vh - 150px); }
 .cv-fold[open] > summary::before { content: '▾ '; }
 .cv-fold > summary:hover { color: var(--accent); }
 .cv-fold > .cv-text, .cv-fold > .cv-args { margin-top: 4px; }
+/* Keys page: the one-time full-token row (creation banner). */
+.key-token-row { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+.key-token-row code { font-size: 0.8rem; word-break: break-all; }

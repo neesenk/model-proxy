@@ -42,6 +42,7 @@ import {
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
   detailFetchState, CLIENT_GONE_STATUS, notLoggedHint, quotaErrKind, accountUsageState,
   accountRemainingLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta,
+  keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML,
   SECURITY_RANGES, securityRangeFromSecs, securityFilterQuery, securityFilterFromQuery, explainCacheKey,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText, modelsRefreshResultHTML,
@@ -272,6 +273,7 @@ const panels = {
   mcp: document.getElementById('tab-mcp'),
   eval: document.getElementById('tab-eval'),
   security: document.getElementById('tab-security'),
+  keys: document.getElementById('tab-keys'),
 };
 let activeTab = 'status';
 
@@ -302,7 +304,7 @@ function parseHash() {
   const raw = (location.hash || '').replace(/^#\/?/, ''); // drop leading "#"/"#/"
   const [path, queryRaw] = raw.split('?');
   const [tab, ...rest] = path.split('/');
-  if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics' || tab === 'requests' || tab === 'mcp' || tab === 'security' || tab === 'takeover' || tab === 'eval') {
+  if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics' || tab === 'requests' || tab === 'mcp' || tab === 'security' || tab === 'takeover' || tab === 'eval' || tab === 'keys') {
     // decodeURIComponent so provider/section names with special chars
     // round-trip; a malformed sequence decodes to "" (treated as "no sub" ->
     // first provider / default section). For #status/<section>, sub is the
@@ -543,6 +545,7 @@ function activateTab(name) {
   if (name === 'takeover') renderTakeoverTab();
   if (name === 'eval') renderEvalTab();
   if (name === 'security') renderSecurityTab();
+  if (name === 'keys') renderKeysTab();
   // Reflect the tab in the URL. A tab switch is a navigation the user may want
   // to Back out of, so push a history entry. Accounts used to skip this
   // (its provider segment was replaceState) — excluding it meant Back from a
@@ -692,6 +695,7 @@ function activateTabSilent(name) {
   if (name === 'takeover') renderTakeoverTab();
   if (name === 'eval') renderEvalTab();
   if (name === 'security') renderSecurityTab();
+  if (name === 'keys') renderKeysTab();
 }
 
 // ---------- Requests tab: four pages over shared engines ----------
@@ -6476,8 +6480,10 @@ function renderScheduleCard(target, st) {
         : '<span class="route-meta">No providers available</span>';
     } else if (info.skipped && info.skipped.length) {
       // Partial chain: append the targets the scheduler left OUT (cooldown /
-      // quota exhausted / operator disabled) with their reasons — a silently
-      // skipped fallback must be distinguishable from a misconfigured route.
+      // quota exhausted) with their reasons — a silently skipped fallback
+      // must be distinguishable from a misconfigured route. Operator-
+      // disabled targets never arrive here (backend omits them from the
+      // schedule projection; their state lives in Status→Models).
       chain += '<span class="route-sep">→</span>' +
         info.skipped.map(routeDownNodeHTML).join('<span class="route-sep">·</span>');
     }
@@ -12353,3 +12359,126 @@ function evalFusionCardHTML(data) {
 }
 
 boot();
+
+// ---------- Keys tab: forward-key allocation & per-key usage ----------
+//
+// GET /api/keys lists (sha256 id + prefix only — the full token appears once,
+// in the creation banner); POST mints; DELETE revokes (file edit, gate TTL
+// 10s); GET /api/keys/<id>/usage aggregates the key's per-model call volume
+// from the request-log index. Auth-off (loopback) deployments get the empty
+// state instead of a list.
+
+let keysUsageOpen = null; // key id whose usage row is expanded
+let keysUsageDays = 7;
+
+async function renderKeysTab() {
+  const panel = panels.keys;
+  if (!panel) return;
+  panel.innerHTML = `
+  <div class="card">
+    <header class="card-head"><span class="card-head-title"><h2>API keys</h2><span class="meta">forward surface (/v1 /mcp) · sha256 id · full token shown once at creation</span></span>
+      <span class="card-head-side">
+        <input id="keys-new-label" class="req-input" placeholder="label (e.g. phone, ci)" maxlength="64">
+        <button id="keys-new" class="btn">New key</button>
+      </span>
+    </header>
+    <div class="card-body">
+      <div id="keys-created"></div>
+      <div id="keys-list"><span class="hint">loading…</span></div>
+      <div id="keys-usage"></div>
+    </div>
+  </div>`;
+  document.getElementById('keys-new').addEventListener('click', createAPIKey);
+  document.getElementById('keys-new-label').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') createAPIKey();
+  });
+  await refreshKeysList();
+}
+
+async function refreshKeysList() {
+  const box = document.getElementById('keys-list');
+  if (!box) return;
+  try {
+    const res = await apiGet('/api/keys');
+    keysListCache = res;
+    if (!res.enabled) {
+      box.innerHTML = '<p class="hint">forward-surface auth is off (loopback deployment, no web.auth.api_keys_file) — every client is accepted. Set the file to manage keys here.</p>';
+      return;
+    }
+    box.innerHTML = keysTableHTML(res.keys);
+    for (const b of box.querySelectorAll('[data-key-usage]')) {
+      b.addEventListener('click', () => toggleKeyUsage(b.dataset.keyUsage));
+    }
+    for (const b of box.querySelectorAll('[data-key-revoke]')) {
+      b.addEventListener('click', () => revokeAPIKey(b.dataset.keyRevoke, b.dataset.keyLabel));
+    }
+    if (keysUsageOpen) renderKeyUsage(keysUsageOpen); // keep expansion across refreshes
+  } catch (e) {
+    box.innerHTML = `<p class="msg err">${esc(String(e.message || e))}</p>`;
+  }
+}
+
+let keysListCache = null;
+
+async function createAPIKey() {
+  const labelEl = document.getElementById('keys-new-label');
+  const label = (labelEl && labelEl.value.trim()) || '';
+  try {
+    const created = await apiPost('/api/keys', { label });
+    const banner = document.getElementById('keys-created');
+    if (banner) {
+      banner.innerHTML = keyCreatedBannerHTML(created);
+      const copy = banner.querySelector('[data-key-copy]');
+      if (copy) copy.addEventListener('click', () => {
+        navigator.clipboard?.writeText(copy.dataset.keyCopy).then(() => { copy.textContent = 'Copied'; });
+      });
+    }
+    if (labelEl) labelEl.value = '';
+    await refreshKeysList();
+  } catch (e) {
+    const banner = document.getElementById('keys-created');
+    if (banner) banner.innerHTML = `<p class="msg err">${esc(String(e.message || e))}</p>`;
+  }
+}
+
+async function revokeAPIKey(id, label) {
+  if (!confirm(`Revoke key ${label}? Clients presenting it get 401 within ~10s. This cannot be undone.`)) return;
+  try {
+    await apiDel(`/api/keys/${encodeURIComponent(id)}`);
+    if (keysUsageOpen === id) keysUsageOpen = null;
+    await refreshKeysList();
+  } catch (e) {
+    alert(`revoke failed: ${e.message || e}`);
+  }
+}
+
+async function toggleKeyUsage(id) {
+  if (keysUsageOpen === id) {
+    keysUsageOpen = null;
+    renderKeyUsage(null);
+    return;
+  }
+  keysUsageOpen = id;
+  renderKeyUsage(id);
+}
+
+async function renderKeyUsage(id) {
+  const box = document.getElementById('keys-usage');
+  if (!box) return;
+  if (!id) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div class="card"><header class="card-head"><span class="card-head-title"><h3>Usage — ${esc(id)}</h3>
+    <span class="meta">per model · shadow evaluations excluded</span></span>
+    <span class="card-head-side">${[1, 7, 30].map((d) => `<button class="btn small${d === keysUsageDays ? ' primary' : ''}" data-key-days="${d}">${d}d</button>`).join('')}</span></header>
+    <div class="card-body" id="keys-usage-body"><span class="hint">loading…</span></div></div>`;
+  for (const b of box.querySelectorAll('[data-key-days]')) {
+    b.addEventListener('click', () => { keysUsageDays = Number(b.dataset.keyDays); renderKeyUsage(id); });
+  }
+  try {
+    const res = await apiGet(`/api/keys/${encodeURIComponent(id)}/usage?days=${keysUsageDays}`);
+    const body = document.getElementById('keys-usage-body');
+    if (body) body.innerHTML = keyUsageTableHTML(res.models);
+  } catch (e) {
+    const body = document.getElementById('keys-usage-body');
+    if (body) body.innerHTML = `<p class="msg err">${esc(String(e.message || e))}</p>`;
+  }
+}

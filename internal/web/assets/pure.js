@@ -133,12 +133,46 @@ export function providerNames(models, health) {
 
 // quotaErrKind classifies a quota snapshot error into a short token for UI
 // presentation. Exported so app.js and accountUsageState share one definition.
+// The source is the STORED error (snap.Err, a first observation that failed)
+// or — when a last-known-good snapshot is being kept — the tracker-side record
+// of the most recent FAILED sync (snap.SyncErr; see /api/status quota fields).
+// Substrings mirror runtime.CredentialErrClass, the Go twin.
 export function quotaErrKind(snap) {
-  if (!snap || !snap.Err) return '';
-  const e = snap.Err.toLowerCase();
+  if (!snap) return '';
+  const e = (snap.Err || snap.SyncErr || '').toLowerCase();
+  if (!e) return '';
   if (e.includes('session expired')) return 'session-expired';
-  if (e.includes('not logged in')) return 'not-logged-in';
+  if (e.includes('not logged in') || e.includes('no project_id')) return 'not-logged-in';
+  if (e.includes('auth') || e.includes('http 401') || e.includes('http 403') || e.includes('unauthorized')) return 'auth';
   return 'error';
+}
+
+// syncErrLabel renders the user-facing label for one quotaErrKind token of a
+// failed sync: credential classes keep specific wording so the Accounts pill /
+// usage banner say what to DO (re-login); anything else is an honest
+// "Sync error" without blaming the credential.
+export function syncErrLabel(kind) {
+  switch (kind) {
+    case 'session-expired': return 'Session expired';
+    case 'not-logged-in': return 'Not logged in';
+    case 'auth': return 'Auth error';
+    case 'error': return 'Sync error';
+    default: return '';
+  }
+}
+
+// scheduleCredentialLabel renders the Schedule chain-node badge text for a
+// credential-class sync failure (backend classifies via
+// runtime.CredentialErrClass; values "session-expired" | "not-logged-in" |
+// "auth"). Empty string = no badge — non-credential failures (network, 5xx)
+// are deliberately not badged as credential issues.
+export function scheduleCredentialLabel(c) {
+  switch (c) {
+    case 'session-expired': return 'session expired';
+    case 'not-logged-in': return 'not logged in';
+    case 'auth': return 'auth error';
+    default: return '';
+  }
 }
 
 // scheduleTierLabel renders one schedule-chain node's tier for display. The
@@ -204,7 +238,13 @@ export function scheduleRouteStickyMeta(info) {
 // snapshot (app.js wraps it in the pill + color class). Pure so the
 // measurement-honesty rule is unit-tested:
 //   - no snapshot                -> 'No data'
-//   - Err                        -> by error kind
+//   - Err                        -> by error kind (first observation failed —
+//                                   nothing good to show)
+//   - SyncErr (Err empty)        -> by error kind, same classes — a kept
+//                                   last-known-good snapshot must not render as
+//                                   fresh numbers when the credential syncing it
+//                                   is dead (the pill says why; the Usage
+//                                   section below still shows the stale windows)
 //   - ultimate window measured   -> 'X% left'
 //   - Plan label                 -> the plan name
 //   - windows but none ultimate  -> 'Available' (a pay-as-you-go balance IS the
@@ -214,10 +254,9 @@ export function scheduleRouteStickyMeta(info) {
 //                                   (console-only providers land here)
 export function accountRemainingLabel(snap) {
   if (!snap) return 'No data';
-  if (snap.Err) {
-    const k = quotaErrKind(snap);
-    return k === 'session-expired' ? 'Session expired'
-      : k === 'not-logged-in' ? 'Not logged in' : 'Error';
+  if (snap.Err || snap.SyncErr) {
+    const label = syncErrLabel(quotaErrKind(snap));
+    return label || 'Error';
   }
   const windows = snap.Windows || [];
   const ult = windows.find((w) => w.Ultimate);
@@ -4426,4 +4465,79 @@ export function mcpSubTabFromHash(sub) {
 export function mcpHash(sub) {
   if (VALID_MCP_SUB_TABS.includes(sub)) return '#mcp/' + sub;
   return '#mcp';
+}
+
+// ---------- Keys page (forward-key allocation & per-key usage) ----------
+//
+// The full key value appears exactly once — in keyCreatedBannerHTML right
+// after creation. Every other surface (list rows, usage tables) carries only
+// the sha256 id and a display-safe prefix.
+
+// keyRelTime renders how long ago a ms timestamp was; '' for never.
+export function keyRelTime(ms, nowMs = Date.now()) {
+  if (!ms) return '';
+  const s = Math.max(0, Math.floor((nowMs - ms) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
+// keysTableHTML renders the key list. Rows carry data-key-id for the
+// usage/revoke wiring; the last cell holds the actions.
+export function keysTableHTML(keys, nowMs = Date.now()) {
+  if (!keys || !keys.length) {
+    return '<p class="hint">no keys yet — create one below; clients present it as Authorization: Bearer or x-api-key</p>';
+  }
+  const rows = keys.map((k) => `
+    <tr data-key-id="${esc(k.id)}">
+      <td>${esc(k.label || '<unlabeled>')}</td>
+      <td class="mono">${esc(k.prefix)}</td>
+      <td>${esc((k.created_at || '').slice(0, 10))}</td>
+      <td>${esc(keyRelTime(k.last_used_ms, nowMs)) || '<span class="hint">never</span>'}</td>
+      <td class="num">${fmtNum(k.requests_24h || 0)}</td>
+      <td>
+        <button class="btn small" data-key-usage="${esc(k.id)}">Usage</button>
+        <button class="btn small danger" data-key-revoke="${esc(k.id)}" data-key-label="${esc(k.label || k.prefix)}">Revoke</button>
+      </td>
+    </tr>`).join('');
+  return `<table class="table">
+    <thead><tr><th>label</th><th>key</th><th>created</th><th>last used</th><th class="num">24h calls</th><th></th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+// keyUsageTableHTML renders one key's per-model call volume.
+export function keyUsageTableHTML(rows) {
+  if (!rows || !rows.length) {
+    return '<p class="hint">no calls in this window</p>';
+  }
+  const body = rows.map((r) => `
+    <tr>
+      <td class="mono">${esc(r.model)}</td>
+      <td>${esc(r.provider)}</td>
+      <td class="num">${fmtNum(r.requests)}</td>
+      <td class="num">${r.failures ? `<span class="badge err">${fmtNum(r.failures)}</span>` : '0'}</td>
+      <td class="num">${fmtNum(r.input)}</td>
+      <td class="num">${fmtNum(r.output)}</td>
+    </tr>`).join('');
+  return `<table class="table">
+    <thead><tr><th>model</th><th>provider</th><th class="num">calls</th><th class="num">fails</th><th class="num">tok in</th><th class="num">tok out</th></tr></thead>
+    <tbody>${body}</tbody>
+  </table>`;
+}
+
+// keyCreatedBannerHTML is the ONE-TIME full-token display after creation:
+// mono block + copy button + the never-shown-again warning.
+export function keyCreatedBannerHTML(created) {
+  if (!created || !created.token) return '';
+  return `<div class="msg ok" data-key-created>
+    <div><strong>Key created${created.label ? ` — ${esc(created.label)}` : ''}.</strong> Copy it now — it is never shown again:</div>
+    <div class="key-token-row"><code class="mono">${esc(created.token)}</code>
+      <button class="btn small" data-key-copy="${esc(created.token)}">Copy</button></div>
+    <div class="hint">clients send it as <code>Authorization: Bearer &lt;key&gt;</code> or <code>x-api-key</code></div>
+  </div>`;
 }

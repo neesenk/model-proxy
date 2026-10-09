@@ -58,6 +58,7 @@
 | 图表 | uPlot（vendor 唯一图表库）：pure.js `analyticsChartSeries`/`mcpAnalyticsChartSeries`（series→数组、零值/gap 语义），app.js `uplotAxisStyle` 主题轴样式、`dashRenderChart`/`destroyDashChart` 与 `destroyAnalyticsCharts` 实例生命周期 | jstests/pure.test.mjs（chart series 秒制/零值/gap 语义） |
 | 数据表 | `.table`（sticky th 用 `--sticky-top`） | 全部列表 |
 | 请求表（三表一份） | pure.js `requestTableHeadHTML`+`requestRowHTML` | Requests / Live 环 / Live 会话 |
+| Keys 页（转发 key 分配/用量） | pure.js `keysTableHTML`/`keyUsageTableHTML`/`keyCreatedBannerHTML`/`keyRelTime`（列表只出 sha256 id + 前缀；创建横幅是完整 token 的**唯一**显示面，含 Copy；用量表按 model×provider 聚合并对 failures>0 出 badge）+ app.js `renderKeysTab`/`refreshKeysList`/`createAPIKey`/`revokeAPIKey`/`toggleKeyUsage`（共享 fetch helpers，usage 窗口 1/7/30d），样式 `.key-token-row` | jstests/pure.test.mjs（行/前缀不漏全量/相对时间桶/一次性 token 横幅转义/空态/失败徽章） |
 | 表格溢出 tooltip | app.js `reqTableCellTip`（仅真实截断时动态 `title`，`data-tip-dyn` 标记区分渲染器 title；三表单行省略样式在 styles.css 请求表区段，status 单元除外——badge 芯片不省略） | jstests/uie2e.test.mjs（长 agent 悬停出全文，renderer title 不被覆盖，status 芯片无 “200…” 假截断） |
 | 请求详情 | app.js `detailRecordsHTML`（`requestMetaHTML`/`guardMarksDetailHTML`/`chatViewHTML`） | 行内展开 / Live 弹层 |
 | guard 徽标 | pure.js `guardMarksHTML` | 请求表 model 单元 |

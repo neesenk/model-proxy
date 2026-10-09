@@ -70,6 +70,10 @@ func (r *readAPIStub) RequestLogQueries() appapi.RequestLogQueries {
 // index-backed equivalence lives in internal/observe/requestlog.
 type dirRequestLogQueries struct{ dir string }
 
+func (dirRequestLogQueries) KeyUsage(requestlog.Filter, string) ([]requestlog.KeyUsageEntry, error) {
+	return nil, nil
+}
+
 func (d dirRequestLogQueries) SummariesWithFacets(f requestlog.Filter) ([]requestlog.Summary, requestlog.Facets, error) {
 	return requestlog.QuerySummariesWithFacets(d.dir, f)
 }

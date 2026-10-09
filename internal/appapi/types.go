@@ -900,6 +900,10 @@ type RequestLogQueries interface {
 	// the requests store first and falls through to the split stream.
 	Detail(requestID, stream string) ([]requestlog.Record, error)
 	SessionSummaries(scanLimit, limit int, costOf func(provider, model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error)
+	// KeyUsage aggregates per-forward-key usage (LLM records, shadow
+	// excluded); keyID "" = every key. Index-backed when available, JSONL
+	// scan fallback otherwise — same twin semantics as ShadowReport.
+	KeyUsage(filter requestlog.Filter, keyID string) ([]requestlog.KeyUsageEntry, error)
 	GuardAnnotations(requestIDs []string) map[string][]requestlog.GuardMark
 }
 
@@ -986,7 +990,44 @@ type MCPStatsSinceReader interface {
 
 // CommandAPI is the complete mutation/active-probe capability consumed by the
 // Web transport.
+// APIKey is one forward key in the management view. The token itself never
+// appears here: ID is sha256(token)[:8] and Prefix is a display-safe head.
+type APIKey struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	Prefix      string `json:"prefix"`
+	CreatedAt   string `json:"created_at,omitempty"`
+	LastUsedMs  int64  `json:"last_used_ms,omitempty"`
+	Requests24h int64  `json:"requests_24h"`
+}
+
+// APIKeyCreated is the create response: the FULL token appears exactly once,
+// here — never in listings.
+type APIKeyCreated struct {
+	APIKey
+	Token string `json:"token"`
+}
+
+// KeysResult is the GET /api/keys response: Enabled=false means auth is off
+// (loopback deployment) and the page shows its empty state instead of a list.
+type KeysResult struct {
+	Enabled bool     `json:"enabled"`
+	Keys    []APIKey `json:"keys"`
+}
+
 type CommandAPI interface {
+	// APIKeys lists the forward keys with usage enrichment (last use and
+	// 24h request count from the request-log index). Enabled=false (the
+	// KeysResult shape) covers loopback deployments with no api_keys_file.
+	APIKeys() (KeysResult, error)
+	// CreateAPIKey mints a new forward key with the given label and appends
+	// it to the configured api_keys file.
+	CreateAPIKey(label string) (APIKeyCreated, error)
+	// RevokeAPIKey removes the key whose sha256 id matches; the file edit
+	// takes effect on the serving gate within its TTL (10s).
+	RevokeAPIKey(id string) error
+	// APIKeyUsage aggregates one key's model call volume over the window.
+	APIKeyUsage(id string, from, to time.Time) ([]requestlog.KeyUsageEntry, error)
 	ResetStats() error
 	RefreshQuota(provider string) bool
 	// QuotaProviderKnown tells an unknown quota key (404) apart from a failed
