@@ -41,7 +41,7 @@ import {
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
   detailFetchState, CLIENT_GONE_STATUS, notLoggedHint, quotaErrKind, accountUsageState,
-  accountRemainingLabel, scheduleTierLabel, scheduleTierTitle,
+  accountRemainingLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML,
   SECURITY_RANGES, securityRangeFromSecs, securityFilterQuery, securityFilterFromQuery, explainCacheKey,
   POPUP_OPEN_SEL, INTERACTIVE_CONTROL_SEL, refreshHoldReason, staleDataText, modelsRefreshResultHTML,
@@ -6496,17 +6496,9 @@ function renderScheduleCard(target, st) {
     if (info.strategy) {
       meta += `strategy: <span class="mono">${esc(info.strategy)}</span><br>`;
     }
-    if (info.sticky) {
-      meta += `sticky: <span class="mono">${esc(info.sticky)}</span>`;
-      if (info.sticky_dwell_remaining_sec) {
-        meta += ` · ${fmtDur(info.sticky_dwell_remaining_sec)} dwell left`;
-      }
-    }
-    // Live (session, route) bindings parked on this route — per-route sticky
-    // granularity (one session switching models holds one binding per route).
-    if (info.sticky_sessions) {
-      meta += `${info.sticky ? ' · ' : ''}<span title="sessions parked on this route (per-route sticky bindings), within dwell">${info.sticky_sessions} live session${info.sticky_sessions === 1 ? '' : 's'}</span>`;
-    }
+    // Sticky annotation (parked provider + dwell + live session bindings) is
+    // pure.js-owned: scheduleRouteStickyMeta.
+    meta += scheduleRouteStickyMeta(info);
     let pools = '';
     if (info.pools && info.pools.length) {
       pools = '<span class="route-meta">';

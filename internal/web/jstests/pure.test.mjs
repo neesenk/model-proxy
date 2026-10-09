@@ -31,7 +31,7 @@ import {
   fmtCompact,
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
   CLIENT_GONE_STATUS, notLoggedHint,
-  quotaErrKind, accountUsageState, accountRemainingLabel, scheduleTierLabel, scheduleTierTitle,
+  quotaErrKind, accountUsageState, accountRemainingLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
   securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML, SECURITY_RANGES, securityRangeFromSecs,
   securityFilterQuery, securityFilterFromQuery, explainCacheKey,
@@ -1773,6 +1773,28 @@ test('scheduleTierLabel: measured classes verbatim, unknown -> unmeasured', () =
   assert.equal(scheduleTierLabel(undefined, 'plan'), 'plan (unmeasured)');
   assert.match(scheduleTierTitle('unknown', 'plan'), /config declares billing: plan/);
   assert.match(scheduleTierTitle('unknown'), /defaults to plan/);
+});
+
+test('scheduleRouteStickyMeta: parked provider, dwell countdown, live session count', () => {
+  // Parked provider only.
+  assert.equal(
+    scheduleRouteStickyMeta({ sticky: 'zhipu-a' }),
+    'sticky: <span class="mono">zhipu-a</span>');
+  // Parked provider + dwell countdown rides after a separator.
+  assert.match(
+    scheduleRouteStickyMeta({ sticky: 'zhipu-a', sticky_dwell_remaining_sec: 3000 }),
+    /zhipu-a<\/span> · 50m 0s dwell left$/);
+  // Live (session, route) bindings: pluralized, separated when sticky exists…
+  assert.match(
+    scheduleRouteStickyMeta({ sticky: 'zhipu-a', sticky_sessions: 3 }),
+    /zhipu-a<\/span> · <span title="sessions parked on this route \(per-route sticky bindings\), within dwell">3 live sessions<\/span>$/);
+  // …singular, and NEVER a leading separator when it stands alone.
+  assert.equal(
+    scheduleRouteStickyMeta({ sticky_sessions: 1 }),
+    '<span title="sessions parked on this route (per-route sticky bindings), within dwell">1 live session</span>');
+  // Neither: empty string (the caller omits the meta line entirely).
+  assert.equal(scheduleRouteStickyMeta({}), '');
+  assert.equal(scheduleRouteStickyMeta({ sticky_dwell_remaining_sec: 10 }), '');
 });
 
 test('accountRemainingLabel: no measurement never claims Available', () => {

@@ -179,6 +179,27 @@ export function scheduleTierTitle(tier, declared) {
   return `tier ${label}`;
 }
 
+// scheduleRouteStickyMeta renders one Schedule-card route's sticky annotation:
+// the parked provider with its dwell countdown, plus the count of live
+// (session, route) bindings — per-route sticky granularity (one session
+// switching models holds one binding per route; docs/web-api.md
+// schedule.models[route].sticky_sessions). Returns '' when the route has
+// neither, and the count never carries a leading separator when it stands
+// alone.
+export function scheduleRouteStickyMeta(info) {
+  let meta = '';
+  if (info.sticky) {
+    meta += `sticky: <span class="mono">${esc(info.sticky)}</span>`;
+    if (info.sticky_dwell_remaining_sec) {
+      meta += ` · ${fmtDur(info.sticky_dwell_remaining_sec)} dwell left`;
+    }
+  }
+  if (info.sticky_sessions) {
+    meta += `${info.sticky ? ' · ' : ''}<span title="sessions parked on this route (per-route sticky bindings), within dwell">${info.sticky_sessions} live session${info.sticky_sessions === 1 ? '' : 's'}</span>`;
+  }
+  return meta;
+}
+
 // accountRemainingLabel is the Status-page per-account pill label for one quota
 // snapshot (app.js wraps it in the pill + color class). Pure so the
 // measurement-honesty rule is unit-tested:
