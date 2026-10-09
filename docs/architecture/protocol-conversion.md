@@ -170,13 +170,13 @@ SSE 读取按规范折叠多行 `data:`（连续 `data:` 行在分派空行处�
 
 - **`ConversionCapabilities(from, to)`**：按 pair 查询 `Refused`（scanner 会 fail-closed 拒绝的特性名）与 `Lossy`（有损但可转换）两个列表；
 - **`ConversionDoctorLines(backend)`**：doctor 用的每入站协议一行摘要；
-- **`TestCapabilityMatrix*` 一致性测试**：钉死「声明 == 执行」——矩阵里声明的每条拒绝都拿最小 fixture 喂真实 scanner 验证确实被拒、feature 名一致；decisions 六组 stub 全部声明为整协议拒绝。若 scanner 行为变化而矩阵未更新，测试即红。
+- **`TestCapabilityMatrix*` 一致性测试**：钉死「声明 == 执行」且**双向**——矩阵里声明的每条拒绝都拿最小 fixture 喂真实 scanner 验证确实被拒、feature 名一致；反向测试遍历每个 pair × scanner 全部拒绝特性（fixture 词汇表由源码守卫 `TestRefusedFixtureVocabularyIsClosed` 钉死与 `convert_capabilities.go` 的发射集一致，新增拒绝面先在那里红），漏报（scanner 拒了矩阵没声明）与虚报（矩阵声明了 scanner 放行）都失败；decisions 六组 stub 全部声明为整协议拒绝。若 scanner 行为变化而矩阵未更新，测试即红。
 
 这是 doctor 路由 dry-run 转换报告的数据源（`ConversionDoctorLines`），也是未来 Web UI 呈现转换能力的数据源——UI 或 CLI 需要展示「某个 pair 支持什么」时应消费此 API 而非硬编码。已知无法表达的请求特性优先由 capability scanner 拒绝；仅响应侧或可安全降级的差异使用 `convertWarn`。document/file、hosted web/tool search、tool_result 图片/错误标记、reasoning replay 和引用均已保留或采用明确降级。跨协议目标为 Anthropic 时，会在 system、最后一个 tool、最后一条 user content 注入 ephemeral cache breakpoint；原协议 cache_control 仍不逐点一一映射。
 
 涉及 responses 的方向（`internal/protocol/convert_responses.go`）：reasoning、citations、document/file、工具与 usage 按上述规则保留。多模态**输出**仍有损：Responses 协议没有通用 image output item，上游返回的图片输出会告警。`stop`/`stop_sequences`→r 和 `text.format`→a 无对应。`top_k`、`seed`、penalties、metadata、service_tier、store 等非核心提示不跨协议；其中 metadata.user_id 仅以哈希形式用于 `prompt_cache_key`。
 
-reasoner/thinking/MiMo 等需要 reasoning replay 的模型在 anthropic↔openai-chat 转换路由上仍会丢 thinking（replay cache 未实现）；经 responses 方向可保 reasoning。`ConfigRoutingWarnings` 只负责警告，不代表已实现 replay cache。
+reasoner/thinking/MiMo 等需要 reasoning replay 的模型在 anthropic↔openai-chat 转换路由上仍会丢 thinking（replay **cache** 未实现；replay **envelope** 已有——签名块经 `reasoning_details` 扩展往返，客户端不回放该扩展时才丢，能力矩阵 Lossy 条目按此措辞）；anthropic↔responses 方向 signature↔encrypted_content 双射可保 reasoning，**chat↔responses 方向只保文本**：reasoning 文本经 `reasoning_content` 存活、签名/encrypted_content 双向丢弃（矩阵 o↔r 条目已声明）。`ConfigRoutingWarnings` 只负责警告，不代表已实现 replay cache。
 
 ## 结构化转换诊断（diagnostics.go）
 

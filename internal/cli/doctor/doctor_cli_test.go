@@ -97,7 +97,7 @@ routes:
 	for _, want := range []string{
 		"anthropic→openai: refuses mcp, hosted_tool, content_block",
 		"responses→openai: refuses logprobs, hosted_tool, input_item, audio",
-		"thinking (reasoning replay not implemented",
+		"thinking (signed replay rides the reasoning_details extension",
 		"multimodal output",
 	} {
 		if !strings.Contains(out, want) {

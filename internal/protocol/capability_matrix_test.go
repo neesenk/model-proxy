@@ -6,6 +6,8 @@
 package protocol
 
 import (
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -119,6 +121,87 @@ func TestCapabilityMatrixDirectionalConditionals(t *testing.T) {
 	}
 	if err := validateConversionCapabilities([]byte(custom), "responses", "anthropic"); err == nil {
 		t.Error("responses→anthropic must refuse custom/freeform tools")
+	}
+}
+
+// TestCapabilityMatrixRefusalsBidirectional closes the loop the
+// declared→enforced walk above cannot: for every conversion pair and every
+// feature the scanner CAN refuse (the refusedFixtures vocabulary), the
+// scanner's actual verdict must match the matrix exactly. A refusal the
+// scanner enforces but the matrix does not declare is a silent refusal
+// surface (doctor under-reports); a declared refusal the scanner does not
+// enforce is a phantom capability. Direction-conditional refusals
+// (cache_retention/custom_tool toward anthropic only) fall out of the same
+// loop: the fixture converts toward the other backend, so the matrix must
+// not declare it there.
+func TestCapabilityMatrixRefusalsBidirectional(t *testing.T) {
+	for _, client := range []wire.Protocol{protocolAnthropic, protocolOpenAI, protocolResponses} {
+		for _, backend := range []wire.Protocol{protocolAnthropic, protocolOpenAI, protocolResponses} {
+			if client == backend {
+				continue
+			}
+			pair := conversionPair{client: client, backend: backend}
+			declared := map[string]bool{}
+			for _, f := range conversionCapabilityMatrix[pair].Refused {
+				declared[f] = true
+			}
+			for key, fixture := range refusedFixtures {
+				protoFeature := strings.SplitN(key, "|", 2)
+				if wire.Protocol(protoFeature[0]) != client {
+					continue
+				}
+				feature := protoFeature[1]
+				err := validateConversionCapabilities([]byte(fixture), string(client), string(backend))
+				unsupported, refused := asUnsupportedConversion(err)
+				if refused && unsupported.Feature != feature {
+					t.Errorf("%s→%s: fixture for %s triggered refusal of a different feature %q — fixture drift", client, backend, feature, unsupported.Feature)
+					continue
+				}
+				if refused && !declared[feature] {
+					t.Errorf("scanner refuses %s on %s→%s but the matrix does not declare it", feature, client, backend)
+				}
+				if !refused && declared[feature] {
+					t.Errorf("matrix declares %s refused on %s→%s but the scanner lets the fixture through", feature, client, backend)
+				}
+			}
+		}
+	}
+}
+
+// TestRefusedFixtureVocabularyIsClosed pins the scanner's closed feature
+// vocabulary to the fixture table: every unsupportedFeature literal emitted in
+// convert_capabilities.go must have a fixture, and no fixture may name a
+// feature the scanner no longer emits. This is the seam that keeps the
+// bidirectional test self-maintaining — a new scanner refusal without a
+// fixture (and matrix declaration) turns this red first. Source-scanning is
+// warranted here because the emission vocabulary cannot be enumerated through
+// behavior alone (an unknown feature has no fixture to probe with); the
+// pattern pins the exact unsupportedFeature call sites.
+func TestRefusedFixtureVocabularyIsClosed(t *testing.T) {
+	src, err := os.ReadFile("convert_capabilities.go")
+	if err != nil {
+		t.Fatalf("read scanner source: %v", err)
+	}
+	emitted := map[string]bool{}
+	for _, m := range regexp.MustCompile(`unsupportedFeature\(\s*"[a-z]+",\s*targetProto,\s*"([a-z_]+)"`).FindAllStringSubmatch(string(src), -1) {
+		emitted[m[1]] = true
+	}
+	if len(emitted) == 0 {
+		t.Fatal("feature extraction matched nothing — the call-shape anchor in convert_capabilities.go changed; update the pattern")
+	}
+	have := map[string]bool{}
+	for key := range refusedFixtures {
+		have[strings.SplitN(key, "|", 2)[1]] = true
+	}
+	for feature := range emitted {
+		if !have[feature] {
+			t.Errorf("scanner emits refusal feature %q with no refusedFixtures entry — add one so the bidirectional test covers it", feature)
+		}
+	}
+	for feature := range have {
+		if !emitted[feature] {
+			t.Errorf("refusedFixtures carries feature %q the scanner never emits — stale fixture", feature)
+		}
 	}
 }
 

@@ -23,9 +23,10 @@ type PairCapabilities struct {
 	// represented without data or execution-semantics loss). The sentinel
 	// "*" marks a whole-protocol refusal (the decisions stubs).
 	Refused []string
-	// Lossy lists documented degradations that convert WITH diagnostics or
-	// warnings (stable diag codes; see protocol-conversion.md「有损字段」).
-	// These are advisory, not refusals.
+	// Lossy lists documented degradations that convert rather than refuse —
+	// advisory summaries pointing at the protocol-conversion.md mapping notes
+	// (request-side drops that emit diagnostics carry their stable diag codes
+	// there; see「结构化转换诊断」).
 	Lossy []string
 }
 
@@ -40,15 +41,16 @@ func caps(refused []string, lossy ...string) PairCapabilities {
 var conversionCapabilityMatrix = map[conversionPair]PairCapabilities{
 	{client: protocolOpenAI, backend: protocolAnthropic}: caps(
 		[]string{"cache_retention", "multi_choice", "logprobs", "audio", "hosted_tool"},
-		"thinking (reasoning replay not implemented — reasoner/thinking models lose it on this pair)",
+		"thinking (signed replay rides the reasoning_details extension — clients that do not echo it lose thinking; replay cache not implemented)",
 	),
 	{client: protocolAnthropic, backend: protocolOpenAI}: caps(
 		[]string{"mcp", "hosted_tool", "content_block"},
-		"thinking (reasoning replay not implemented — reasoner/thinking models lose it on this pair)",
+		"thinking (signed replay rides the reasoning_details extension — clients that do not echo it lose thinking; replay cache not implemented)",
 	),
 	{client: protocolOpenAI, backend: protocolResponses}: caps(
 		[]string{"multi_choice", "logprobs", "audio", "hosted_tool"},
 		"multimodal output (no generic image output item)",
+		"thinking signatures (chat carries no signed reasoning — encrypted_content dropped; reasoning text survives as reasoning_content)",
 	),
 	{client: protocolResponses, backend: protocolAnthropic}: caps(
 		[]string{"cache_retention", "logprobs", "custom_tool", "hosted_tool", "input_item", "audio"},
@@ -57,6 +59,7 @@ var conversionCapabilityMatrix = map[conversionPair]PairCapabilities{
 	{client: protocolResponses, backend: protocolOpenAI}: caps(
 		[]string{"logprobs", "hosted_tool", "input_item", "audio"},
 		"multimodal output (no generic image output item)",
+		"thinking signatures (responses encrypted_content dropped — reasoning text survives as reasoning_content)",
 	),
 	{client: protocolAnthropic, backend: protocolResponses}: caps(
 		[]string{"mcp", "hosted_tool", "content_block"},
