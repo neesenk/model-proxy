@@ -4,11 +4,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"model-proxy/internal/cli/clitest"
+	"model-proxy/internal/daemonctl"
 	"model-proxy/internal/observe/requestlog"
 )
 
@@ -16,6 +19,8 @@ import (
 // force-provider header, return the new backend's body. Errors: missing id (404)
 // and empty body.
 func TestDoReplay(t *testing.T) {
+	daemonctl.SetAuthFiles("", writeReplayKeyFile(t))
+	t.Cleanup(func() { daemonctl.SetAuthFiles("", "") })
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/requests/ghost":
@@ -33,6 +38,11 @@ func TestDoReplay(t *testing.T) {
 			// route's anonymous sticky key to the replay target.
 			if st := r.Header.Get("x-mp-sticky"); st != "off" {
 				t.Errorf("x-mp-sticky header=%q want off", st)
+			}
+			// ...and presents the forward key when api_keys_file is configured
+			// (the S2 loopback-forward boundary).
+			if ak := r.Header.Get("Authorization"); ak != "Bearer k1" {
+				t.Errorf("Authorization header=%q want Bearer k1", ak)
 			}
 			io.WriteString(w, `{"replayed":true}`)
 		default:
@@ -112,4 +122,13 @@ func TestDoReplay_RejectsNonV1Path(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "/v1/") {
 		t.Errorf("non-/v1/ path replay err=%v, want a /v1/ refusal", err)
 	}
+}
+
+func writeReplayKeyFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "keys.txt")
+	if err := os.WriteFile(path, []byte("k1\nk2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

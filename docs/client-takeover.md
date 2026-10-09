@@ -92,7 +92,7 @@ mcp:                               # 可选:把网关 mcp:/mcp_routes: 面写成
     url = "{{mcp.url}}"
 ```
 
-占位符：`{{proxy_url}}` `{{base_url}}` `{{token}}`(= `PROXY_MANAGED`)
+占位符：`{{proxy_url}}` `{{base_url}}` `{{token}}`(配置了 `web.auth.api_keys_file` 时 = `webauth.FirstToken` 取到的**首个真实 forward key**——非回环部署的转发面要求真实 key；未配置时 = `PROXY_MANAGED`)
 `{{provider_id}}` `{{display_name}}`；模型循环内另有 `{{model.id}}`
 `{{model.context}}` `{{model.output}}`；mcp 条目循环内另有 `{{mcp.name}}` `{{mcp.url}}`
 （url = `<proxy>/mcp/<name>`，按名排序）。**默认面 = 全部 route + 未被任何启用 route
@@ -196,7 +196,9 @@ opencode-go、凭据池 0 账号墓碑、构建失败）整体剔除——这些
 | （opencode 三变体） | 同上 | json | 附 `mcp` 块：`mcp` 节写 remote 型条目（enabled: true） |
 | （codex） | 同上 | toml | 附 `mcp` 块：`[mcp_servers."<name>"]` 段写网关条目 |
 
-凭据一律占位符 `PROXY_MANAGED`,真实 key 只在代理侧。
+凭据在回环部署（未配 `web.auth.api_keys_file`）一律占位符 `PROXY_MANAGED`，真实 key 只在代理侧；**非回环部署**（api_keys_file 已配）写入首个真实 key（`renderContext.managedToken`，zcode/workbuddy 内嵌 preset 同款），否则客户端会被转发面 401。preview/确认对话框等**显示面**把真实 key 脱敏回 `PROXY_MANAGED` 并加注记（`PreviewWritesOpts`），落盘内容仍为真实 key。
+
+**MCP 条目边界**：`/mcp/*` 走与 `/v1/*` 相同的 api-key 门禁，而各客户端 MCP 条目模板暂不写鉴权头——非回环部署下经代理的 MCP 调用会 401，直到模板族逐个补齐各自配置形状支持的 auth header（后续批次）；回环部署不受影响。codex 的凭据不经 `{{token}}`（auth.json/import 通道），非回环部署需按 codex 自身配置手工带 key。
 
 **pi 会话归因**：pi 的 anthropic-messages 与 openai-completions 路径只在
 `model.compat.sendSessionAffinityHeaders` 为 true 时才发 `x-session-affinity`

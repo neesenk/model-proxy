@@ -14,6 +14,7 @@ import (
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/probe"
 	"model-proxy/internal/routing"
+	"model-proxy/internal/webauth"
 )
 
 // diag.go — the Web admin diagnostics commands: the daemon twins of
@@ -91,6 +92,12 @@ func (s *Service) Replay(ctx context.Context, id, providerName string) (appapi.R
 	// Same sticky opt-out as the CLI replay: forced traffic must not rebind the
 	// route's anonymous sticky key to the replay target for the dwell window.
 	req.Header.Set("x-mp-sticky", "off")
+	// The loopback POST enters through the forward surface: when api keys are
+	// configured (non-loopback deployments) it must carry one, or the exchange
+	// would report a 401 instead of the replayed answer.
+	if key := webauth.FirstToken(cfg.Web.Auth.APIKeysFile); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
 	client := &http.Client{Timeout: cfg.Scheduling.Timeout()}
 	start := time.Now()
 	resp, err := client.Do(req)

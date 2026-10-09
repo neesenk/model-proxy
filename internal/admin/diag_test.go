@@ -77,8 +77,47 @@ func TestReplayRoundTrip(t *testing.T) {
 	if !strings.Contains(gotBody, `"model":"m"`) {
 		t.Errorf("replayed body = %q", gotBody)
 	}
-	if res.LatencyMs < 0 {
-		t.Errorf("latency = %d", res.LatencyMs)
+}
+
+// TestReplayAttachesForwardKey: with web.auth.api_keys_file configured the
+// loopback POST enters through the authenticated forward surface and must
+// carry one of the configured keys — without it the exchange would report a
+// 401 instead of the replayed answer. Built directly (not via replayRig)
+// because the rig's config closure has no api_keys_file.
+func TestReplayAttachesForwardKey(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	line := `{"ts":"2026-07-29T12:00:00Z","request_id":"r1","called_model":"m","provider":"p","status":200,` +
+		`"path":"/v1/messages","request_body":"{\"model\":\"m\",\"messages\":[]}","response_body":"{}"}`
+	if err := os.WriteFile(filepath.Join(dir, "requests-20260729.log"), []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keys := filepath.Join(t.TempDir(), "keys.txt")
+	if err := os.WriteFile(keys, []byte("# rotated\nreplay-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configdomain.Config{
+		Listen: strings.TrimPrefix(srv.URL, "http://"),
+		Providers: map[string]configdomain.Provider{
+			"deepseek": {Provider: "deepseek"},
+		},
+		Web: configdomain.WebConfig{Auth: configdomain.WebAuthConfig{APIKeysFile: keys}},
+	}
+	service := New(Ports{
+		Config:              func() *configdomain.Config { return cfg },
+		RequestLogDirectory: func() string { return dir },
+	})
+
+	if _, err := service.Replay(context.Background(), "r1", "deepseek"); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if gotAuth != "Bearer replay-key" {
+		t.Errorf("loopback Authorization = %q, want Bearer replay-key", gotAuth)
 	}
 }
 

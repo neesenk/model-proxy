@@ -105,7 +105,7 @@ func workbuddyModelEntries(ctx renderContext) []any {
 			"name":            m.Exposed,
 			"vendor":          ctx.providerID,
 			"url":             ctx.baseURL,
-			"apiKey":          "PROXY_MANAGED",
+			"apiKey":          ctx.managedToken(),
 			"maxInputTokens":  contextN,
 			"maxOutputTokens": output,
 		}

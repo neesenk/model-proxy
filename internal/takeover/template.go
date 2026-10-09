@@ -12,6 +12,7 @@ import (
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/routing"
+	"model-proxy/internal/webauth"
 
 	"gopkg.in/yaml.v3"
 )
@@ -537,6 +538,22 @@ type renderContext struct {
 	mcpAll []mcpEntry
 	meta   map[string]map[string]catalog.Model
 	routes map[string][]configdomain.RouteTarget
+	// apiKey is the first forward-surface key (web.auth.api_keys_file) when
+	// the daemon authenticates /v1/* — client configs must then carry a REAL
+	// key, not the PROXY_MANAGED sentinel. "" keeps the sentinel (loopback
+	// deployments, where the daemon accepts anything).
+	apiKey string
+}
+
+// managedToken is the credential written into client configs: the real
+// forward key when the daemon authenticates, the PROXY_MANAGED sentinel
+// otherwise. Never called on a path that displays the result (preview masks
+// the real value back to the sentinel — see PreviewWritesOpts).
+func (c renderContext) managedToken() string {
+	if c.apiKey != "" {
+		return c.apiKey
+	}
+	return "PROXY_MANAGED"
 }
 
 // mcpEntry is one gateway MCP surface entry (server or route) rendered into
@@ -585,6 +602,7 @@ func (t *Template) contextFor(cfg *configdomain.Config, meta map[string]map[stri
 		mcpAll:      mcpAll,
 		meta:        meta,
 		routes:      routes,
+		apiKey:      webauth.FirstToken(cfg.Web.Auth.APIKeysFile),
 	}
 }
 
@@ -668,7 +686,7 @@ func (c renderContext) substitute(s string) string {
 	return strings.NewReplacer(
 		"{{proxy_url}}", c.proxyURL,
 		"{{base_url}}", c.baseURL,
-		"{{token}}", "PROXY_MANAGED",
+		"{{token}}", c.managedToken(),
 		"{{provider_id}}", c.providerID,
 		"{{display_name}}", c.displayName,
 		"{{model.primary}}", c.primary,

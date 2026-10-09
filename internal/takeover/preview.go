@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/webauth"
 )
 
 // preview.go — dry-run rendering for the Web takeover confirmation dialog.
@@ -258,6 +259,19 @@ func PreviewWritesOpts(cfg *configdomain.Config, which, templatesDir string, opt
 	}
 	for i := range out {
 		out[i].Content = replaceRedirectedPaths(out[i].Content, out[i].format, pathRedirect)
+	}
+	// Mask the forward-surface key: the render embedded the REAL key (the
+	// daemon authenticates /v1/*), but a preview is a DISPLAY surface — every
+	// configured key is replaced with the PROXY_MANAGED sentinel so the
+	// confirmation dialog and template editor never show the secret. The
+	// actual takeover write keeps the real key; the note says so.
+	if keys := webauth.ReadTokens(cfg.Web.Auth.APIKeysFile); len(keys) > 0 {
+		for i := range out {
+			for _, k := range keys {
+				out[i].Content = strings.ReplaceAll(out[i].Content, k, "PROXY_MANAGED")
+			}
+			out[i].Notes = append(out[i].Notes, "real forward key embedded on write (masked in preview — web.auth.api_keys_file)")
+		}
 	}
 	return out, nil
 }

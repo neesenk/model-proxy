@@ -94,7 +94,10 @@ func DoReplay(base, id, provider string) ([]byte, error) {
 	if path == "" {
 		path = "/v1/responses"
 	}
-	req, _ := http.NewRequest(http.MethodPost, base+path, bytes.NewReader([]byte(rec.RequestBody)))
+	req, err := daemonctl.NewRequest(http.MethodPost, base+path, "", bytes.NewReader([]byte(rec.RequestBody)))
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("x-mp-force-provider", provider)
 	// A replay must not touch sticky state: forced traffic has one target, and
@@ -102,6 +105,9 @@ func DoReplay(base, id, provider string) ([]byte, error) {
 	// the replay target would steer other session-less traffic there for the
 	// dwell window (routing-and-failure.md「x-mp-sticky 覆盖头」).
 	req.Header.Set("x-mp-sticky", "off")
+	// daemonctl.NewRequest pre-attached the forward-surface API key for the
+	// /v1/* path when web.auth.api_keys_file is configured (non-loopback
+	// deployments); without it the loopback-forwarded replay would 401.
 	resp, err := daemonctl.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("replay request failed: %v", err)

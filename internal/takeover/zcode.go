@@ -117,7 +117,7 @@ func zcodeProviderRule(apiType string, ctx renderContext) map[string]any {
 			"group": "standard-personal",
 			"access": map[string]any{
 				"type":   "api-key",
-				"apiKey": "PROXY_MANAGED",
+				"apiKey": ctx.managedToken(),
 			},
 			"api": map[string]any{
 				"type":    apiType,
