@@ -238,8 +238,9 @@ Flags:
 	"doctor": `doctor [--live] [--config PATH]
 
   Offline scheduling diagnostic from config alone (no daemon needed): per-provider
-  tier/quota source/peak_hours, per-route dry-run order (no live quota → tier then
-  priority), and warnings (route with no plan provider, plan provider that will be
+  tier/quota source/peak_hours, per-route dry-run order (no live quota → priority
+  order; the tier is a runtime measurement, see doctor --live), and warnings
+  (route with no plan provider, plan provider that will be
   unknown at runtime).
 
   --live   Live diagnosis against the running daemon instead — why an agent is

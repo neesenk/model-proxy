@@ -74,6 +74,39 @@ func TestCmdDoctor_SingleProviderNoPool(t *testing.T) {
 	}
 }
 
+// TestCmdDoctor_PayGoWarningConditional pins the "no plan provider" warning to
+// the config billing label: a route whose only target is plan-billed (or leaves
+// billing unset, the plan default) must NOT warn, a pay-as-you-go target must.
+// Regression: 77826e3 removed the tier column and with it the hasPlan
+// assignment, making the warning (and the exit-code warning count) unconditional.
+func TestCmdDoctor_PayGoWarningConditional(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	os.MkdirAll(home+"/.model-proxy", 0o700)
+	run := func(billing string) string {
+		cfgPath := clitest.WriteTempConfig(t, `listen: 127.0.0.1:1
+providers:
+  zhipu:
+    openai_base_url: https://x.invalid
+    provider_id: zhipu
+    billing: `+billing+`
+routes:
+  glm:
+    - {provider: zhipu, model: glm-5.2, priority: 1}
+`)
+		out := clitest.GrabStdout(t, func() { CmdDoctor([]string{"--config", cfgPath}, mustCfg(t, cfgPath), cfgPath) })
+		return out
+	}
+	for _, billing := range []string{"plan", `""`} {
+		if out := run(billing); strings.Contains(out, "no plan provider") {
+			t.Errorf("billing %q: unexpected 'no plan provider' warning:\n%s", billing, out)
+		}
+	}
+	if out := run("pay-as-you-go"); !strings.Contains(out, "no plan provider — only pay-as-you-go") {
+		t.Errorf("pay-as-you-go: missing 'no plan provider' warning:\n%s", out)
+	}
+}
+
 // TestCmdDoctor_ConversionReport: a route target declaring a backend protocol is
 // surfaced in the doctor report with its protocol + the fixed lossy-items list.
 func TestCmdDoctor_ConversionReport(t *testing.T) {

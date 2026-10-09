@@ -18,7 +18,8 @@ import (
 
 // cmdDoctor runs an OFFLINE diagnostic of the scheduling setup from config (no
 // daemon needed): per-provider tier/quota source/peak_hours, per-route dry-run
-// order (no live quota → all unknown → tier then priority), and warnings.
+// order (no live quota → priority order; tier is a runtime measurement, see
+// doctor --live), and warnings.
 // Credential pools (≥2 accounts) are expanded inline: the parent is shown with
 // its account count + the per-account virtual ids, plus a note that new sessions
 // round-robin across the pool (offline: no live quota → falls back to priority).
@@ -87,6 +88,12 @@ func DoctorWithCfg(cfg *configdomain.Config) int {
 		hasPlan := false
 		for _, t := range DryRunOrder(cfg, targets) {
 			prov := cfg.Providers[t.Provider]
+			// Cost advisory only: "any plan-billed target?" reads the config
+			// billing label — the same metadata the Providers section displays.
+			// It is NOT the scheduling tier, which offline doctor cannot measure.
+			if prov.Billing != "pay-as-you-go" {
+				hasPlan = true
+			}
 			// No tier column: offline there is no measurement, and the config
 			// billing label must not impersonate one.
 			fmt.Printf("    %s p%d\n", display.Pad(t.Provider, 12), t.Priority)

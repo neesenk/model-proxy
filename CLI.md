@@ -803,26 +803,28 @@ doctor [--live]
 
 ```
 ✓ config valid
+credentials: <BACKEND> (0600 files under ~/.model-proxy | OS keychain)                            # 非 keychain 后端为灰显；keychain 绿显
 
 Providers
   <NAME(12)> <TIER(13)>  quota=<SOURCE>  peak=<PEAK>[  pool: <N> accounts]
 
-Routes (dry-run: no live quota -> tier then priority)
+Routes (dry-run: no live quota → priority order; tier is a runtime measurement — see doctor --live)
   <EXPOSED>
-    <PROVIDER(12)> <TIER(13)>  p<PRIORITY>
-        pool: <N> accounts (round-robin session-sticky; no live quota -> falls back to priority)   # 池化时
-        <VIRTUAL_ID>                                                                              # 每个虚拟 id
-    ⚠ no plan provider - only pay-as-you-go                                                       # 该路由无 plan provider 时
-        ↔ target protocol <P> — converts when client protocol differs; lossy: …                    # target 声明 protocol: 时
-        ⚠ reasoning-required model behind openai-chat conversion — … (replay cache not implemented) # reasoning 模型 + openai-chat 转换时（计入 warning 数）
+    <PROVIDER(12)>  p<PRIORITY>
+        ↔ <INBOUND>→<P>: refuses <F1, F2, …>[; lossy: <降级清单>]                                  # target 声明 protocol: 时，每个需转换的入站协议一行（能力矩阵驱动：refuses=scanner fail-closed 拒绝面，lossy=文档化降级）
+        ↔ <INBOUND>→<P>: refused (no conversion exists)                                            # 整协议拒绝（decisions 对）
+        ⚠ reasoning-required model behind openai-chat conversion — … (replay cache not implemented) # reasoning 模型 + openai-chat 转换时（计入 warning 数；responses 目标不警告——signature↔encrypted_content 可保）
         ⚠ no protocol: declared, but <ID> speaks <P> — …; add protocol: <P>                        # 缺 protocol: 且 provider 有协议 hint 时（计入 warning 数）
+        pool: <N> accounts (round-robin session-sticky; no live quota → falls back to priority)    # 池化时
+        <VIRTUAL_ID>                                                                               # 每个虚拟 id
+    ⚠ no plan provider — only pay-as-you-go                                                        # 该路由全部 target 的 billing=pay-as-you-go 时（计入 warning 数；billing 未设按 plan 默认）
 
 Scheduling
   sticky_dwell=<D>  quota_poll_interval=<D>  quota_switch_margin=<N> pts  circuit=(threshold <T>, cooldown <D>)
 
 <⚠ N warning(s) | ✓ no warnings>
 ```
-- `<TIER>` = `plan` / `pay-as-you-go`。
+- `<TIER>` = `plan` / `pay-as-you-go`。路由行**没有** tier 列：离线没有测量，config billing 标签不得冒充测量（tier 看 `doctor --live`）。
 - `<SOURCE>` = `quotaSourceLabel(provider_id)`：aqp=`monthly_usage`、codex=`wham/usage`、zhipu=`quota/limit`、zcode=`quota/limit`、volcengine=`GetAFPUsage (AK/SK)`、deepseek=`user/balance`、kimi-code=`usages`、其他=`(none -> unknown at runtime)`。
 - `<PEAK>` = `peakSummary`：`09:00-12:00(×2), 14:00-18:00(×2)` 或 `-`。
 - 末行：`⚠ <N> warning(s)`（黄）或 `✓ no warnings`（绿）。返回值 = warning 数。
