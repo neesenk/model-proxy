@@ -378,7 +378,9 @@ web:
 - 浏览器可直接打开 `http://<LAN-IP>:15721/ui/`（或 config `listen` 指定的同名 hostname:port）：静态 UI 是无秘密 bootstrap，首次访问会要求 admin token，并换取 `HttpOnly`、`SameSite=Strict`、仅限 `/api` 的会话 cookie，Live/EventSource 也可正常使用。其他 DNS Host 仍被拒绝以防 DNS rebinding；反向代理应把上游 Host 固定为配置的 listen host 或 IP/loopback。直接 HTTP 无法防同网段窃听，团队部署优先 VPN、SSH tunnel 或 TLS。
 - 密钥比较 constant-time；文件编辑（换 key/撤销）≤10s 生效，无需重启。
 - 回环部署也可以单独开启任一面（例如本地也想给转发加 key）。
-- **takeover 注意**：开启 api_keys 后客户端配置里的 `PROXY_MANAGED` 占位符会被拒绝——把 takeover 写入的 key 换成 `api_keys_file` 中的一行。
+- **takeover 自动带真实 key**：开启 api_keys 后 takeover 直接把 `api_keys_file` 的首个 key 写入客户端配置（不再是会被 401 的 `PROXY_MANAGED` 占位符；preview 显示面脱敏回占位符）。例外：MCP 条目暂不写鉴权头——经代理的 MCP 调用在非回环部署下会 401（模板族逐步补齐中）；codex 凭据不走 `{{token}}`，需按其配置手工带 key。
+- **CLI 自动鉴权**：`status`/`doctor --live`/`schedule`/`replay`/`pin`/`shadow report` 等与 daemon 通信的命令按请求面自动附带对应 token（admin token / forward key），无需手工传；`replay` 的回环转发同款。
+- **Tailscale 部署形态**：`listen: 100.x.y.z:PORT`（本机 Tailscale IP）——本机进程连自己的 100.x 地址不出机器，tailnet 内其他设备经加密隧道可达，物理 LAN 不暴露（比 `0.0.0.0` 面更小）；浏览器开 `http://100.x.y.z:PORT/ui/` 输 admin token 建会话。
 
 `GET /metrics` 输出 Prometheus 文本指标（随 `web.enabled`）：`model_proxy_{requests,failures,failovers,rate_limited_429}_total` 与 `model_proxy_{latency,ttft}_milliseconds_sum`，按 `provider` 标签聚合（虚拟键 guard/attempts/fusion/routing 与 `/api/stats` 同语义）。
 

@@ -1,7 +1,7 @@
 # model-proxy config — standalone, portable to Linux.
 # Paths support ~ expansion. env:ENV_VAR reads an environment variable.
 
-listen: 127.0.0.1:15722
+listen: 100.81.1.4:15722
 log_level: info # debug | info | warn | error
 # Runtime log + pid file. Default when unset: /tmp/model-proxy.log (pid: /tmp/model-proxy.pid).
 # Uncomment to override:
@@ -612,13 +612,11 @@ request_log:
   # session_headers: [x-claude-code-session-id, x-session-affinity]
 # Web admin UI + JSON API (/ui/ + /api/). Enabled by default. Without the
 # optional auth below, listen must stay loopback (enforced at startup);
-# configuring both auth files allows a non-loopback listen. Uncomment to
-# disable, or to enable auth:
-# web:
-#   enabled: false
-#   auth:
-#     admin_token_file: ~/.model-proxy/admin_token
-#     api_keys_file: ~/.model-proxy/api_keys
+# configuring both auth files allows a non-loopback listen.
+web:
+  auth:
+    admin_token_file: ~/.model-proxy/admin_token
+    api_keys_file: ~/.model-proxy/api_keys
 
 # Call statistics (SQLite; per provider×model×minute buckets incl. latency/TTFT
 # and per-agent dims; powers the `stats` CLI and Web UI Analytics/Requests
