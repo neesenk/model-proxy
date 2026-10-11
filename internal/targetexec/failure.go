@@ -3,8 +3,11 @@ package targetexec
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"regexp"
+	"syscall"
 )
 
 var contextOverflowMarkers = [][]byte{
@@ -249,4 +252,20 @@ func RewriteThinkingAdaptive(body []byte) ([]byte, bool) {
 		return body, false
 	}
 	return out, true
+}
+
+// IsFastFailConnError reports whether err is a connection-level failure that
+// came back in milliseconds — the peer closed or reset an established
+// connection mid-exchange, or refused the dial. These are the signature of an
+// external-path hiccup (proxy chain recycle, LB roll, node switch) rather than
+// a dead provider, and a redispatch on a fresh connection is cheap and usually
+// succeeds. Timeouts are deliberately excluded: their wall-time budget is
+// already spent, and retrying would double the caller's wait for the same
+// answer. The error is normally *url.Error-wrapped; errors.Is unwraps it.
+func IsFastFailConnError(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNREFUSED)
 }

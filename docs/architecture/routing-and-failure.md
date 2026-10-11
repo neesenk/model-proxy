@@ -118,6 +118,8 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   `RouteStrategyFor`，含 `#req`/`#ctx` 跨路由 pool 键的后缀剥离）拥有，
   `internal/runtime.decideOrder` 是唯一排序分叉点。
 - timeout、连接错误、5xx 和 refresh 后仍失败的 401 计入 provider 熔断。
+- **连接类快失败先重派再计数**（`targetexec.IsFastFailConnError`）：`unexpected EOF`/`EOF`/`ECONNRESET`/`EPIPE`/`ECONNREFUSED` 这类毫秒级返回的错误先在同一 target 上重派一次（新连接）；重派成功记 success、首跳**不**记失败。对外网络（代理链回收、LB 滚动）一次事件杀 N 条在途连接是常态噪音，重派把它从熔断视野里滤掉；超时不重派（时间预算已烧掉，重试等于翻倍等待），客户端断开照旧 `OutcomeClientGone`。重派不占 401 refresh 的 retry slot。
+- **熔断需要 streak 持续**（`circuit_persist`，默认 6s，`"0"` 关闭）：连续失败除了达到 `circuit_threshold`，还必须**跨至少 persist 窗口**才开熔断——"N 连败"从"N 次尝试碰噪音"升级为"N 次新鲜连接确认不可达持续了一段时间"。persist 只延迟**新请求**不再考虑该 provider 的时刻；单个请求的 failover 照旧立即发生，重派后的失败也照常计数。成功重置 streak 起点与计数。
 - **客户端取消不计熔断**：调用方断开（`exchange.Request.Context()` 取消，
   含调用方自身 deadline）不是上游判决——不记 `RecordFailure`、不计
   `evFailures`，executor 返回 `OutcomeClientGone`，`serveOnce` 立即终止
@@ -136,7 +138,7 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
 
 **绑定键 = `StickyKey(sessionKey, exposed)`**：会话粘滞以「(会话, 路由)」为粒度——同一会话在不同路由上的粘滞互相独立（会话粘滞键含路由名；同一会话访问不同模型各粘各的）。会话键异常（空/超长/含非法字符）时按无会话处理（`protocol.HeaderSessionID` 卫生化），粘滞落到路由键（等价于匿名请求的路由粘滞）。
 
-**同 provider 内 retry 不换账号**：executor 的参数级重试（剥参/缩图/role 改写/thinking 自适应等 in-place retry）留在原 provider；粘滞在 dwell 内保持指向该 provider。跨 provider 的移动只发生在 fallback（沿 ordered 链）与 wait-retry 重排（整轮重调度）。
+**同 provider 内 retry 不换账号**：executor 的参数级重试（剥参/缩图/role 改写/thinking 自适应、连接快失败重派等 in-place retry）留在原 provider；粘滞在 dwell 内保持指向该 provider。跨 provider 的移动只发生在 fallback（沿 ordered 链）与 wait-retry 重排（整轮重调度）。
 
 以下交互语义是路由正确性契约（回归锚点：`internal/runtime` 的
 `TestDecideOrderStickyHealthExclusionAndRecoverReturn`、
@@ -175,7 +177,7 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
 - **跳过可观测**：空链由 `/api/status.schedule` 的 `blocked` 逐目标解释；部分链
   被排除的目标由 `skipped` 透出（同形状同分类，字段契约见 `docs/web-api.md`）——
   被静默跳过的 fallback 必须可与配置错误区分。请求级 failover 链由 request log
-  的同 id 多 attempt 行承载。
+  的同 id 多 attempt 行承载：未 commit 的 failover 中间跳（429/5xx/认证/传输错误，且其后确有下一跳）各落一行 `attempt_only` 请求日志——同 request id、同 attempt 序号、带上游状态与 8KB 错误体 peek，api_key 照记；`attempt_only` 行被 KeyUsage 与 session 聚合排除（路由遥测，不是客户端流量），最后一跳失败且全链终态时沿用终态行、不重复落中间行。
 - **绑定粒度 (会话, 路由)**：sticky 键是 `runtime.StickyKey(sessionKey, exposed)`
   ——一个会话在每个路由上持有**独立绑定**（同会话换模型 = 新绑定，不把旧路由选中的
   账号拖带到新路由，与 latchKey/repeat_turn 同粒度；Bifrost「绑定按请求的 model
@@ -185,10 +187,11 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   错。出口侧同规则：`copyHeaderWhitelist` 跳过含控制字节的值，一个畸变 header
   不得毒化整个上游请求（net/http 会拒绝发送它）。
 - **retry 与账号移动**：同一 target 的 in-request retry（401 refresh、413 图片
-  缩压、400 剥参、developer-role 改写、thinking 自适应）在 executor 内**原账号**
-  重试，不重排、不换账号（锚点 `TestExecutorRetries401Then200`）；账号移动只发生
-  在沿 ordered 链的 failover（下一 target = 下一账号），wait-retry 是 round 级
-  整轮重排。绑定不因 retry/failover 删除（recover-and-return）。
+  缩压、400 剥参、developer-role 改写、thinking 自适应、连接快失败重派）在
+  executor 内**原账号**重试，不重排、不换账号（锚点 `TestExecutorRetries401Then200`、
+  `TestExecutorRedispatchesFastFailConnThen200`）；账号移动只发生在沿 ordered 链的
+  failover（下一 target = 下一账号），wait-retry 是 round 级整轮重排。绑定不因
+  retry/failover 删除（recover-and-return）。
 - **每请求覆盖 `x-mp-sticky: off`**：本请求退出会话亲和——读绑定时视为无绑定
   （引擎按序新选），不写、不刷新绑定（旧条目留给 dwell 清扫）；同请求的跨路由
   改道（context overflow / capability reroute）同规则。pin/force 与可用性门控
