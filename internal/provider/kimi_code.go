@@ -111,7 +111,7 @@ func (p *KimiCodeProvider) Quota() (*QuotaSnapshot, error) {
 	for k, v := range p.cfg.Headers {
 		headers[k] = v
 	}
-	body, fail, ok := usageGet(url, p.AuthHeaders, headers, func(code int) string {
+	body, fail, ok := usageGet(url, p.cfg.ProxyURL, p.AuthHeaders, headers, func(code int) string {
 		switch code {
 		case 404:
 			return "HTTP 404 — usage endpoint unavailable (no Kimi Code membership?)"

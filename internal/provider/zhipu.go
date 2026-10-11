@@ -51,7 +51,7 @@ func (p *ZhipuProvider) FetchModels() ([]string, error) {
 // failure (auth, HTTP, non-zhipu body) returns a BillingUnknown snapshot
 // carrying the error (never a non-nil error) so the poll stays alive.
 func (p *ZhipuProvider) Quota() (*QuotaSnapshot, error) {
-	return bigmodelQuota(p.cfg.UsageURL, p.AuthHeaders, p.cfg.Headers)
+	return bigmodelQuota(p.cfg.UsageURL, p.cfg.ProxyURL, p.AuthHeaders, p.cfg.Headers)
 }
 
 // ParseZhipuQuota parses Zhipu BigModel's /api/monitor/usage/quota/limit body into

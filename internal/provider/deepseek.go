@@ -67,7 +67,7 @@ func (p *DeepSeekProvider) FetchModels() ([]string, error) {
 // DeepSeek is pay-as-you-go: no windowed budget (RemainingPct=-1). On any
 // failure returns a BillingUnknown snapshot carrying the error.
 func (p *DeepSeekProvider) Quota() (*QuotaSnapshot, error) {
-	body, fail, ok := usageGet(p.cfg.UsageURL, p.AuthHeaders, nil, nil)
+	body, fail, ok := usageGet(p.cfg.UsageURL, p.cfg.ProxyURL, p.AuthHeaders, nil, nil)
 	if !ok {
 		return fail, nil
 	}

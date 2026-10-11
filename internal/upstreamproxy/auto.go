@@ -1,13 +1,17 @@
 // auto.go — the process-wide automatic chain (config global → env → system →
-// direct) used by non-forwarding outbound calls (usage/quota/models fetches,
-// login, pricing). The composition root publishes the config-level default
-// with SetDefaultProxy on startup and every reload; AutoTransport reads it
+// direct) used by non-forwarding outbound calls that carry no provider
+// override (pricing, login, and provider maintenance calls whose proxy_url is
+// unset). The composition root publishes the config-level default with
+// SetDefaultProxy on startup and every reload; AutoTransport reads it
 // atomically per request, so reloads take effect without rebuilding clients.
+// Provider-scoped maintenance calls resolve through ProviderTransport below.
 package upstreamproxy
 
 import (
 	"net/http"
 	"net/url"
+	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -77,4 +81,46 @@ func autoProxyFunc(req *http.Request) (*url.URL, error) {
 		return loopbackBypassProxy(u)(req)
 	}
 	return nil, nil
+}
+
+// providerTransports pools the per-provider maintenance transports (usage /
+// quota / mint / models fetches) keyed by the raw proxy_url setting — same
+// pooling rationale as the process-shared autoTransport, extended to one slot
+// per distinct provider override. Empty setting shares the auto chain.
+var (
+	providerTransportsMu sync.Mutex
+	providerTransports   = map[string]*http.Transport{}
+)
+
+// ProviderTransport returns the shared transport for ONE provider's
+// account-maintenance calls: a non-empty proxy_url (URL or `off`) resolves
+// exactly like the forward path's per-provider override, and an empty one
+// falls to the automatic chain (config global proxy → env → system →
+// direct). Load-time validation rejects bad values, so parse failures here
+// degrade to the automatic chain rather than failing closed mid-request.
+func ProviderTransport(perProvider string) *http.Transport {
+	setting := strings.TrimSpace(perProvider)
+	if setting == "" {
+		return autoTransport
+	}
+	providerTransportsMu.Lock()
+	defer providerTransportsMu.Unlock()
+	if t, ok := providerTransports[setting]; ok {
+		return t
+	}
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConnsPerHost = 16
+	switch {
+	case isOff(setting):
+		t.Proxy = nil
+	default:
+		u, err := parseProxyURL(setting)
+		if err != nil {
+			providerTransports[setting] = autoTransport
+			return autoTransport
+		}
+		t.Proxy = staticProxy(u)
+	}
+	providerTransports[setting] = t
+	return t
 }

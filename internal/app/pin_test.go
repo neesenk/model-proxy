@@ -328,7 +328,7 @@ func TestPin_ForcesThroughCircuit(t *testing.T) {
 		t.Fatal("setPin b failed")
 	}
 	// Open b's circuit (3 consecutive failures → circuit_threshold default 3).
-	sched := configdomain.Scheduling{} // threshold()=3, cooldown()=10m
+	sched := configdomain.Scheduling{CircuitPersist: "0"} // threshold()=3, cooldown()=10m
 	for i := 0; i < 3; i++ {
 		p.recordFailure("b", sched)
 	}
@@ -376,7 +376,7 @@ func TestPin_TTLExpiryRestoresScheduling(t *testing.T) {
 				{Provider: "b", Model: "glm", Priority: 2},
 			},
 		},
-		Scheduling: configdomain.Scheduling{CircuitThreshold: 3, RetryWait: "0"},
+		Scheduling: configdomain.Scheduling{CircuitThreshold: 3, CircuitPersist: "0", RetryWait: "0"},
 	}
 	p := newProxyWithStatic(t, cfg, map[string]string{"a": "ka", "b": "kb"})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))

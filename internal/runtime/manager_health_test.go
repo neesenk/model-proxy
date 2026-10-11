@@ -40,9 +40,9 @@ func TestPinsResetAndResolverHelpers(t *testing.T) {
 		t.Fatal("ClearPin result did not distinguish present and absent pins")
 	}
 
-	m.RecordFailure("direct", 1, time.Hour, 4)
-	m.RecordFailure("pool#a", 1, time.Hour, 4)
-	m.RecordFailure("other", 1, time.Hour, 4)
+	m.RecordFailure("direct", 1, time.Hour, 0, 4)
+	m.RecordFailure("pool#a", 1, time.Hour, 0, 4)
+	m.RecordFailure("other", 1, time.Hour, 0, 4)
 	m.RecordModelFailure("direct", "z", time.Hour, 4)
 	m.RecordModelFailure("pool#a", "a", time.Hour, 4)
 	m.RecordModelFailure("other", "m", time.Hour, 4)
@@ -161,12 +161,12 @@ func TestHealthCircuitHalfOpenAndSuccess(t *testing.T) {
 		t.Fatalf("success state = %+v, want reset circuit/model with preserved rate limit", status)
 	}
 
-	m.RecordFailure("threshold", 2, time.Hour, 9)
+	m.RecordFailure("threshold", 2, time.Hour, 0, 9)
 	first := m.Dashboard(now).Providers["threshold"]
 	if first.ConsecutiveFailures != 1 || first.CircuitState != "closed" {
 		t.Fatalf("first failure opened circuit: %+v", first)
 	}
-	m.RecordFailure("threshold", 2, time.Hour, 9)
+	m.RecordFailure("threshold", 2, time.Hour, 0, 9)
 	second := m.Dashboard(now).Providers["threshold"]
 	if second.ConsecutiveFailures != 2 || second.CircuitState != "open" {
 		t.Fatalf("threshold failure did not open circuit: %+v", second)
@@ -174,7 +174,7 @@ func TestHealthCircuitHalfOpenAndSuccess(t *testing.T) {
 
 	// A failed half-open probe must release the only probe slot as it reopens
 	// the circuit; otherwise every later request would remain blocked forever.
-	m.RecordFailure("half", 1, time.Hour, 9)
+	m.RecordFailure("half", 1, time.Hour, 0, 9)
 	half := m.Dashboard(time.Now()).Providers["half"]
 	if half.ConsecutiveFailures != 1 || half.CircuitState != "open" ||
 		half.HalfOpenInFlight || half.CircuitOpenUntil.Before(time.Now()) {
@@ -464,7 +464,7 @@ func TestFreezeHealthSchedulingAndLifecycle(t *testing.T) {
 	}
 
 	// Freeze preserves every other state dimension on the entry.
-	m.RecordFailure("a", 3, time.Hour, 7) // quality signal + failure count
+	m.RecordFailure("a", 3, time.Hour, 0, 7) // quality signal + failure count
 	m.RecordModelFailure("a", "m1", time.Hour, 7)
 	m.SetQuota("a", &provider.QuotaSnapshot{Plan: "paid"}, 7)
 	m.SetSticky("route", Sticky{Provider: "a", Since: now}, 7)
@@ -481,7 +481,7 @@ func TestFreezeHealthSchedulingAndLifecycle(t *testing.T) {
 	// is recorded on m0 so the m1 model lock — cleared by RecordSuccess on the
 	// SAME model by long-standing design — survives for the assertion below.)
 	m.RecordSuccess("a", "m0", 7)
-	m.RecordFailure("a", 1, time.Minute, 7)
+	m.RecordFailure("a", 1, time.Minute, 0, 7)
 	m.RecordRateLimit("a", now.Add(time.Minute), Transient, 7)
 	if !m.Dashboard(now).Providers["a"].Frozen || m.TargetHealthy("a", "other-model", now) {
 		t.Fatal("recording cleared the operator freeze")
@@ -604,5 +604,88 @@ func TestFrozenHealthPersistRoundTrip(t *testing.T) {
 	late := restoredLate.Dashboard(later).Providers
 	if !late["frozen-circuit"].Frozen || late["frozen-circuit"].CircuitState != "closed" {
 		t.Errorf("late restore = %+v, want frozen with expired circuit shed", late["frozen-circuit"])
+	}
+}
+
+// TestRecordFailurePersistGate pins the external-network noise tolerance: a
+// burst of failures inside the persist window (one event killing N in-flight
+// connections) must not read as N independent provider deaths; the circuit
+// opens only once the streak has ALSO spanned the persist window.
+func TestRecordFailurePersistGate(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 10, 9, 19, 43, 0, 0, time.UTC)
+	clock := base
+	m := newTestManager(4)
+	m.now = func() time.Time { return clock }
+
+	// Burst: 9 failures within 50ms (the measured shape of the compass EOF
+	// wave), threshold 3, persist 6s → streak reaches the threshold but the
+	// circuit stays closed.
+	for i := range 9 {
+		clock = base.Add(time.Duration(i) * 6 * time.Millisecond)
+		m.RecordFailure("aqp", 3, 10*time.Minute, 6*time.Second, 4)
+	}
+	if !m.TargetHealthy("aqp", "m", clock) {
+		t.Fatal("burst inside the persist window opened the circuit")
+	}
+
+	// The streak persists past the window: the next failure (span ≥ 6s) opens.
+	clock = base.Add(7 * time.Second)
+	m.RecordFailure("aqp", 3, 10*time.Minute, 6*time.Second, 4)
+	if m.TargetHealthy("aqp", "m", clock) {
+		t.Fatal("streak spanning the persist window did not open the circuit")
+	}
+
+	// persist 0 keeps the pure-count semantics: the threshold alone opens.
+	m2 := newTestManager(4)
+	clock2 := base
+	m2.now = func() time.Time { return clock2 }
+	for i := range 3 {
+		clock2 = base.Add(time.Duration(i) * time.Millisecond)
+		m2.RecordFailure("shopee", 3, 10*time.Minute, 0, 4)
+	}
+	if m2.TargetHealthy("shopee", "m", clock2) {
+		t.Fatal("persist 0 did not open on the threshold alone")
+	}
+}
+
+// TestRecordFailurePersistGateSuccessResetsStreak: a committed success mid-
+// window restarts the streak clock — failures before it must not count toward
+// the span of failures after it.
+func TestRecordFailurePersistGateSuccessResetsStreak(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 10, 9, 19, 43, 0, 0, time.UTC)
+	clock := base
+	m := newTestManager(4)
+	m.now = func() time.Time { return clock }
+
+	clock = base
+	m.RecordFailure("aqp", 3, 10*time.Minute, 6*time.Second, 4)
+	clock = base.Add(2 * time.Second)
+	m.RecordFailure("aqp", 3, 10*time.Minute, 6*time.Second, 4)
+	if !m.TargetHealthy("aqp", "m", clock) {
+		t.Fatal("two sub-threshold failures opened the circuit")
+	}
+
+	clock = base.Add(3 * time.Second)
+	m.RecordSuccess("aqp", "m", 4)
+
+	// Post-success streak: three more failures well after the first streak
+	// began, but only 30ms into the NEW streak → still closed.
+	clock = base.Add(30 * time.Second)
+	for i := range 3 {
+		clock = base.Add(30*time.Second + time.Duration(i)*10*time.Millisecond)
+		m.RecordFailure("aqp", 3, 10*time.Minute, 6*time.Second, 4)
+	}
+	if !m.TargetHealthy("aqp", "m", clock) {
+		t.Fatal("post-success burst inside its own window opened the circuit")
+	}
+	// That streak persisting past 6s from ITS start opens.
+	clock = base.Add(40 * time.Second)
+	m.RecordFailure("aqp", 3, 10*time.Minute, 6*time.Second, 4)
+	if m.TargetHealthy("aqp", "m", clock) {
+		t.Fatal("persisted post-success streak did not open the circuit")
 	}
 }

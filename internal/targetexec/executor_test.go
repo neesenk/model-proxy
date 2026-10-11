@@ -2,9 +2,12 @@ package targetexec
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"syscall"
 	"testing"
 	"time"
 
@@ -33,15 +36,25 @@ func (*executorTestProvider) FilterModelIDs(ids []string) ([]string, []string)  
 
 type sequenceDoer struct {
 	responses []*http.Response
-	bodies    [][]byte
-	calls     int
+	// errors, when non-nil at a call index, makes that call fail with the
+	// error instead of returning the (then unused) response slot.
+	errors []error
+	bodies [][]byte
+	calls  int
 }
 
 func (d *sequenceDoer) Do(request *http.Request) (*http.Response, error) {
 	body, _ := io.ReadAll(request.Body)
 	d.bodies = append(d.bodies, body)
+	var err error
+	if d.calls < len(d.errors) {
+		err = d.errors[d.calls]
+	}
 	response := d.responses[d.calls]
 	d.calls++
+	if err != nil {
+		return nil, err
+	}
 	return response, nil
 }
 
@@ -546,3 +559,107 @@ func (reader *dataThenErrorReadCloser) Read(buffer []byte) (int, error) {
 }
 
 func (*dataThenErrorReadCloser) Close() error { return nil }
+
+// fastFailConnError builds the production error shape: *url.Error wrapping the
+// connection-level sentinel, exactly what http.Client.Do surfaces when the
+// peer severs an established connection mid-exchange.
+func fastFailConnError(unwrapped error) error {
+	return &url.Error{Op: "Post", URL: "https://upstream.test/v1/chat/completions", Err: unwrapped}
+}
+
+// TestExecutorRedispatchesFastFailConnThen200: one unexpected-EOF on an
+// established connection is absorbed by a same-target redispatch — committed
+// 200, two Do calls, and NO failure recorded (the breaker must not see the
+// blip at all when the fresh connection succeeds).
+func TestExecutorRedispatchesFastFailConnThen200(t *testing.T) {
+	provider := &executorTestProvider{}
+	attempt, writer := testAttempt(provider, `{"model":"model"}`, Policy{LastTarget: true})
+	doer := &sequenceDoer{
+		errors:    []error{fastFailConnError(io.ErrUnexpectedEOF), nil},
+		responses: []*http.Response{nil, testResponse(200, `{"ok":true}`)},
+	}
+	state := &executorState{}
+	effects := &executorEffects{}
+	result := (Executor{Client: doer, State: state, Effects: effects}).Execute(attempt)
+	if !result.Committed || doer.calls != 2 || provider.refreshes != 0 ||
+		state.success != 1 || state.failures != 0 || state.releases != 0 ||
+		effects.failures != 0 || effects.failovers != 0 || effects.commits != 1 || writer.Code != 200 {
+		t.Fatalf("result=%+v calls=%d state=%+v effects=%+v status=%d",
+			result, doer.calls, state, effects, writer.Code)
+	}
+	if string(doer.bodies[0]) != string(doer.bodies[1]) {
+		t.Fatalf("redispatch mutated the body: %q vs %q", doer.bodies[0], doer.bodies[1])
+	}
+}
+
+// TestExecutorFastFailConnTwiceCountsOnceAndFailsOver: when the redispatch
+// also fast-fails, the whole exchange counts as ONE failure (not two) and the
+// request fails over.
+func TestExecutorFastFailConnTwiceCountsOnceAndFailsOver(t *testing.T) {
+	provider := &executorTestProvider{}
+	attempt, _ := testAttempt(provider, `{"model":"model"}`, Policy{LastTarget: true})
+	doer := &sequenceDoer{
+		errors: []error{
+			fastFailConnError(io.ErrUnexpectedEOF),
+			fastFailConnError(syscall.ECONNRESET),
+		},
+		responses: []*http.Response{nil, nil},
+	}
+	state := &executorState{}
+	effects := &executorEffects{}
+	result := (Executor{Client: doer, State: state, Effects: effects}).Execute(attempt)
+	if result.Committed || result.Outcome != OutcomeFailedHard || doer.calls != 2 ||
+		state.failures != 1 || state.success != 0 ||
+		effects.failovers != 1 || effects.failures != 1 || effects.commits != 0 {
+		t.Fatalf("result=%+v calls=%d state=%+v effects=%+v",
+			result, doer.calls, state, effects)
+	}
+}
+
+// TestExecutorTimeoutErrorNotRedispatched: timeouts never take the fast-fail
+// path — their wall-time budget is already spent, retrying would double the
+// caller's wait. Single Do call, straight to failure + failover.
+func TestExecutorTimeoutErrorNotRedispatched(t *testing.T) {
+	provider := &executorTestProvider{}
+	attempt, _ := testAttempt(provider, `{"model":"model"}`, Policy{LastTarget: true})
+	doer := &sequenceDoer{
+		errors:    []error{fastFailConnError(context.DeadlineExceeded)},
+		responses: []*http.Response{nil},
+	}
+	state := &executorState{}
+	effects := &executorEffects{}
+	result := (Executor{Client: doer, State: state, Effects: effects}).Execute(attempt)
+	if result.Committed || result.Outcome != OutcomeFailedHard || doer.calls != 1 ||
+		state.failures != 1 || effects.failovers != 1 || effects.failures != 1 {
+		t.Fatalf("result=%+v calls=%d state=%+v effects=%+v",
+			result, doer.calls, state, effects)
+	}
+}
+
+// TestExecutorFastFailConnDoesNotConsume401Slot: the redispatch is an
+// independent retry slot — a connection blip followed by a stale-key 401 still
+// gets its refresh retry, and the request commits.
+func TestExecutorFastFailConnDoesNotConsume401Slot(t *testing.T) {
+	provider := &executorTestProvider{}
+	attempt, writer := testAttempt(provider, `{"model":"model"}`, Policy{LastTarget: true})
+	doer := &sequenceDoer{
+		errors: []error{
+			fastFailConnError(io.ErrUnexpectedEOF),
+			nil,
+			nil,
+		},
+		responses: []*http.Response{
+			nil,
+			testResponse(401, "stale key"),
+			testResponse(200, `{"ok":true}`),
+		},
+	}
+	state := &executorState{}
+	effects := &executorEffects{}
+	result := (Executor{Client: doer, State: state, Effects: effects}).Execute(attempt)
+	if !result.Committed || doer.calls != 3 || provider.refreshes != 1 ||
+		state.success != 1 || state.failures != 0 || effects.commits != 1 || writer.Code != 200 {
+		t.Fatalf("result=%+v calls=%d refresh=%d state=%+v effects=%+v status=%d",
+			result, doer.calls, provider.refreshes, state, effects, writer.Code)
+	}
+}

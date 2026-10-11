@@ -322,6 +322,7 @@ type ConfigGuardPattern struct {
 type ConfigScheduling struct {
 	CircuitThreshold   *int   `json:"circuit_threshold"`
 	CircuitCooldown    string `json:"circuit_cooldown"`
+	CircuitPersist     string `json:"circuit_persist"`
 	RateLimitBackoff   string `json:"rate_limit_backoff"`
 	QuotaCooldown      string `json:"quota_cooldown"`
 	ModelLockout       string `json:"model_lockout"`

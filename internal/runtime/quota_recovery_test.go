@@ -74,7 +74,7 @@ func TestQuotaRecoveredClearCooldownSparesFrozenAndCircuit(t *testing.T) {
 	// are budget-independent signals.
 	m := newTestManager(0)
 	m.FreezeHealth("zhipu", nil, []string{"zhipu"})
-	m.RecordFailure("zhipu", 1, time.Hour, 0) // threshold 1 → circuit open
+	m.RecordFailure("zhipu", 1, time.Hour, 0, 0) // threshold 1 → circuit open
 	m.SetQuota("zhipu", recoveredSnapshot(now, 1), 0)
 
 	if cleared := m.QuotaRecoveredClearCooldown([]string{"zhipu"}, now, time.Minute, 0); len(cleared) != 0 {

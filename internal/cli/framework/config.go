@@ -6,6 +6,7 @@ import (
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/daemonctl"
+	"model-proxy/internal/upstreamproxy"
 )
 
 // ApplyProcessConfig applies the process-wide settings derived from a loaded
@@ -17,6 +18,11 @@ import (
 func ApplyProcessConfig(cfg *configdomain.Config) {
 	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
 	daemonctl.SetAuthFiles(cfg.Web.Auth.AdminTokenFile, cfg.Web.Auth.APIKeysFile)
+	// The global `proxy` chain head is process state (the daemon publishes it
+	// at startup/reload; see proxy.go). One-shot CLI commands that make real
+	// upstream calls (test/probe/refresh/login) share AutoTransport — without
+	// this they silently fall to env/system proxy, ignoring `proxy: off`.
+	upstreamproxy.SetDefaultProxy(cfg.Proxy)
 }
 
 // LoadCmdConfig loads the CLI config or exits. Commands with custom error

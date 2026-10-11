@@ -7,10 +7,18 @@ import (
 
 type providerHealth struct {
 	consecutiveFailures int
-	circuitOpenUntil    time.Time
-	rateLimitedUntil    time.Time
-	rateLimitKind       RateLimitKind
-	halfOpenInFlight    bool
+	// streakStartedAt is when the current failure streak began (the failure
+	// that took consecutiveFailures from 0 to 1). The circuit only opens when
+	// the streak has ALSO persisted for Scheduling.Persist(): one external-
+	// network event (proxy chain recycle, LB roll) kills N in-flight requests
+	// within milliseconds, and without the span gate that single event reads
+	// as N independent provider-death observations. Zero value means "no
+	// streak yet" — a later RecordFailure stamps it on the 0→1 transition.
+	streakStartedAt  time.Time
+	circuitOpenUntil time.Time
+	rateLimitedUntil time.Time
+	rateLimitKind    RateLimitKind
+	halfOpenInFlight bool
 	// frozen is the operator-set freeze (CLI freeze / POST /api/health/freeze):
 	// the provider is excluded from scheduling until ResetHealth (unfreeze)
 	// clears the entry. Success/failure/rate-limit recording never clears it.
@@ -172,6 +180,7 @@ func (m *Manager) RecordSuccess(name, model string, generation uint64) {
 	}
 	if state := m.health[name]; state != nil {
 		state.consecutiveFailures = 0
+		state.streakStartedAt = time.Time{}
 		state.circuitOpenUntil = time.Time{}
 		state.halfOpenInFlight = false
 	}
@@ -179,8 +188,13 @@ func (m *Manager) RecordSuccess(name, model string, generation uint64) {
 	m.recordQualityLocked(name, 0, time.Now())
 }
 
-func (m *Manager) RecordFailure(name string, threshold int, cooldown time.Duration, generation uint64) {
-	now := time.Now()
+// RecordFailure increments a provider's consecutive-failure streak and opens
+// the circuit once the streak reaches threshold AND has persisted for the
+// persist window (0 = the threshold alone opens it). persist is a span gate,
+// not a rate limit: each individual request still fails over immediately; the
+// gate only delays when NEW requests stop considering this provider.
+func (m *Manager) RecordFailure(name string, threshold int, cooldown, persist time.Duration, generation uint64) {
+	now := m.nowTime()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureLocked()
@@ -193,8 +207,11 @@ func (m *Manager) RecordFailure(name string, threshold int, cooldown time.Durati
 		m.health[name] = state
 	}
 	state.consecutiveFailures++
+	if state.consecutiveFailures == 1 {
+		state.streakStartedAt = now
+	}
 	state.halfOpenInFlight = false
-	if state.consecutiveFailures >= threshold {
+	if state.consecutiveFailures >= threshold && now.Sub(state.streakStartedAt) >= persist {
 		state.circuitOpenUntil = now.Add(cooldown)
 	}
 	m.recordQualityLocked(name, 1, now)

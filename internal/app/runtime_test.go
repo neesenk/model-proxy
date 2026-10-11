@@ -292,6 +292,7 @@ func seedRuntimeCircuit(
 		1,
 		time.Hour,
 		0,
+		0,
 	)
 }
 

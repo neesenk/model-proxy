@@ -78,7 +78,7 @@ func newExchangeProxy(t *testing.T, providers map[string]configdomain.Provider, 
 	cfg := &configdomain.Config{
 		Providers:  providers,
 		Routes:     map[string][]configdomain.RouteTarget{"judge": targets},
-		Scheduling: configdomain.Scheduling{CircuitThreshold: 1, CircuitCooldown: "10m"},
+		Scheduling: configdomain.Scheduling{CircuitThreshold: 1, CircuitCooldown: "10m", CircuitPersist: "0"},
 	}
 	keys := make(map[string]string, len(providers))
 	for name, prov := range providers {

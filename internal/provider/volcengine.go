@@ -180,12 +180,12 @@ type volcengineCredsFile struct {
 
 // getAFPUsage calls the Volcengine signed OpenAPI GetAFPUsage and returns the
 // 5h/daily/weekly/monthly AFP quota windows.
-func getAFPUsage(ak, sk string) (*AfpUsage, error) {
+func getAFPUsage(ak, sk, proxyURL string) (*AfpUsage, error) {
 	req, err := volcengineGet("GetAFPUsage", "2024-01-01", ak, sk, time.Now(), "")
 	if err != nil {
 		return nil, err
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.ProviderTransport(proxyURL)}).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("GetAFPUsage: %w", err)
 	}
@@ -221,7 +221,7 @@ func getAFPUsage(ak, sk string) (*AfpUsage, error) {
 // endpoint unreachable). Used by `login volcengine` to validate the AK/SK half of
 // the triple before saving (the Ark API Key is validated separately via /models).
 func ValidateVolcengineAKSK(ak, sk string) error {
-	_, err := getAFPUsage(ak, sk)
+	_, err := getAFPUsage(ak, sk, "")
 	return err
 }
 
@@ -269,7 +269,7 @@ func (p *VolcengineProvider) Quota() (*QuotaSnapshot, error) {
 	if err != nil {
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: "AK/SK not configured"}, nil
 	}
-	u, err := getAFPUsage(ak, sk)
+	u, err := getAFPUsage(ak, sk, p.cfg.ProxyURL)
 	if err != nil {
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
 	}

@@ -104,6 +104,7 @@ func TestAdminDashboardScheduleUsesCapturedRuntimeSnapshot(t *testing.T) {
 		parentOf,
 		poolIndex,
 		captured,
+		nil,
 		now,
 	))
 	if got := old.Models["m"]; got.First != "a" || got.Pin != "a" {
@@ -150,7 +151,7 @@ func TestScheduleStatusAnnotatesRouteStrategy(t *testing.T) {
 	}
 	var payload schedulePayload
 	if err := json.Unmarshal(
-		scheduleStatusFromSnapshot(cfg, expanded, parentOf, poolIndex, snapshot, now),
+		scheduleStatusFromSnapshot(cfg, expanded, parentOf, poolIndex, snapshot, nil, now),
 		&payload,
 	); err != nil {
 		t.Fatalf("decode schedule: %v", err)

@@ -13,13 +13,13 @@ import (
 	"time"
 
 	"model-proxy/internal/catalog"
+	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/probe"
 	"model-proxy/internal/provider"
 	"model-proxy/internal/providerbuild"
 	"model-proxy/internal/routing"
 	runtimewire "model-proxy/internal/runtime/wirecap"
-	"model-proxy/internal/upstreamproxy"
 )
 
 // models_check.go implements the endpoint probe used by `models refresh`: after
@@ -90,7 +90,11 @@ func CheckProviderModels(cfg *configdomain.Config, provName string, ids, disable
 		}
 	}
 
-	client := &http.Client{Timeout: cfg.Scheduling.Timeout(), Transport: upstreamproxy.AutoTransport()}
+	// Per-provider client: proxy_url must win over the global chain, matching
+	// the daemon forward path (a global `proxy: off` must not force a
+	// proxy-scoped provider's refresh probes to direct).
+	client := cliframework.ProviderClient(cfg, &provCfg)
+	client.Timeout = cfg.Scheduling.Timeout()
 
 	// Decisions-protocol providers (typesafe): the hinted protocol has no leg
 	// in the chat matrix (and no chat bases to probe against) — the matrix

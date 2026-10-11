@@ -59,7 +59,7 @@ func TestUC_ClientCancelDuringHeadersStopsFailoverAndKeepsCircuitClosed(t *testi
 		// Threshold 3: pre-fix, three cancelled requests recorded 3 failures
 		// per provider → both circuits open. retry_wait 0 keeps the terminal
 		// contrast immediate (no cooldown-wait rounds).
-		Scheduling: configdomain.Scheduling{CircuitThreshold: 3, RetryWait: "0"},
+		Scheduling: configdomain.Scheduling{CircuitThreshold: 3, CircuitPersist: "0", RetryWait: "0"},
 	}
 	p := newProxyWithStatic(t, cfg, map[string]string{"blocked": "b", "fallback": "f"})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))

@@ -50,7 +50,7 @@ func TestForward_CommittedSSEStreamMidFailureIsNotRecalled(t *testing.T) {
 				{Provider: "fallback", Model: "m1", Priority: 2},
 			},
 		},
-		Scheduling: configdomain.Scheduling{CircuitThreshold: 3},
+		Scheduling: configdomain.Scheduling{CircuitThreshold: 3, CircuitPersist: "0"},
 	}
 	p, dir, shutdown := newReqLogProxy(t, cfg)
 	defer shutdown()
@@ -144,7 +144,7 @@ func TestForward_DialRefusedFailsOver(t *testing.T) {
 				{Provider: "fallback", Model: "m1", Priority: 2},
 			},
 		},
-		Scheduling: configdomain.Scheduling{CircuitThreshold: 3, RetryWait: "0"},
+		Scheduling: configdomain.Scheduling{CircuitThreshold: 3, CircuitPersist: "0", RetryWait: "0"},
 	}
 	p := newProxyWithStatic(t, cfg, map[string]string{"primary": "p", "fallback": "f"})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))

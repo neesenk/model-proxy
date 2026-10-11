@@ -22,8 +22,8 @@ import (
 // quotaHTTPClient is the shared client for usage/quota GETs: 30s budget, and
 // the automatic proxy chain (env → system → direct) used by every
 // non-forwarding outbound call.
-func quotaHTTPClient() *http.Client {
-	return &http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}
+func quotaHTTPClient(proxyURL string) *http.Client {
+	return &http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.ProviderTransport(proxyURL)}
 }
 
 // usageGet issues the usage/quota GET shared by the billing providers:
@@ -32,7 +32,7 @@ func quotaHTTPClient() *http.Client {
 // BillingUnknown snapshot and the caller must return it (never a non-nil
 // error — the Quota() contract). A non-200 status is formatted by statusHint
 // (nil → bare "HTTP %d").
-func usageGet(url string, auth func(*http.Request) error, headers map[string]string, statusHint func(int) string) (body []byte, fail *QuotaSnapshot, ok bool) {
+func usageGet(url, proxyURL string, auth func(*http.Request) error, headers map[string]string, statusHint func(int) string) (body []byte, fail *QuotaSnapshot, ok bool) {
 	req, _ := http.NewRequest("GET", url, nil)
 	if err := auth(req); err != nil {
 		return nil, &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, false
@@ -40,7 +40,7 @@ func usageGet(url string, auth func(*http.Request) error, headers map[string]str
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := quotaHTTPClient().Do(req)
+	resp, err := quotaHTTPClient(proxyURL).Do(req)
 	if err != nil {
 		return nil, &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, false
 	}
@@ -60,7 +60,7 @@ func usageGet(url string, auth func(*http.Request) error, headers map[string]str
 // printed in the shared CLI shape (not-logged-in hint on auth failure, red
 // error lines otherwise) and ok == false means the caller must return nil.
 // loginName completes the "Run: model-proxy login <loginName>" hint.
-func usageGetForDisplay(url, loginName string, auth func(*http.Request) error, headers map[string]string) (body []byte, ok bool) {
+func usageGetForDisplay(url, proxyURL, loginName string, auth func(*http.Request) error, headers map[string]string) (body []byte, ok bool) {
 	req, _ := http.NewRequest("GET", url, nil)
 	if err := auth(req); err != nil {
 		fmt.Println(display.Yellow("Not logged in.") + " Run: " + display.Cyan("model-proxy login "+loginName))
@@ -69,7 +69,7 @@ func usageGetForDisplay(url, loginName string, auth func(*http.Request) error, h
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := quotaHTTPClient().Do(req)
+	resp, err := quotaHTTPClient(proxyURL).Do(req)
 	if err != nil {
 		fmt.Println(display.Red("Error: usage request: " + err.Error()))
 		return nil, false
@@ -86,8 +86,8 @@ func usageGetForDisplay(url, loginName string, auth func(*http.Request) error, h
 // bigmodelQuota fetches and parses the BigModel quota envelope shared by
 // zhipu and zcode (zcode IS BigModel — same envelope). Follows the Quota()
 // failure contract via usageGet.
-func bigmodelQuota(url string, auth func(*http.Request) error, headers map[string]string) (*QuotaSnapshot, error) {
-	body, fail, ok := usageGet(url, auth, headers, nil)
+func bigmodelQuota(url, proxyURL string, auth func(*http.Request) error, headers map[string]string) (*QuotaSnapshot, error) {
+	body, fail, ok := usageGet(url, proxyURL, auth, headers, nil)
 	if !ok {
 		return fail, nil
 	}

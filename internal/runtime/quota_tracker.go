@@ -20,7 +20,7 @@ import (
 // scheduler. Quota values live in the shared runtime Manager; the tracker mutex
 // only deduplicates refresh work.
 type QuotaTracker struct {
-	mu        sync.Mutex // guards RefreshGuard only; quota values live in runtime
+	mu        sync.Mutex // guards RefreshGuard + syncErrs; quota values live in runtime
 	runtime   *Manager
 	Path      string
 	cfg       func() *configdomain.Config
@@ -53,6 +53,14 @@ type QuotaTracker struct {
 	// coalesces concurrent ones; last debounces ones that just ran), so a 429
 	// storm doesn't fire N upstream Quota() calls + N persists. Guarded by mu.
 	RefreshGuard map[string]*RefreshState
+	// syncErrs records each quota key's most recent FAILED sync (cleared by the
+	// next successful one). The Manager keeps the last-known-good snapshot on a
+	// failed sync — correct for scheduling, but it erases every trace of the
+	// failure from the data surface (the Accounts pill keeps showing the aging
+	// good numbers). This tracker-side record is what /api/status surfaces as
+	// SyncErr/SyncErrAt so an expired credential stays visible. Memory-only:
+	// observational state, deliberately NOT persisted. Guarded by mu.
+	syncErrs map[string]QuotaSyncError
 	// loadedSticky is populated by load() on boot; NewProxy restores it through
 	// the runtime Manager.
 	LoadedSticky map[string]Sticky
@@ -86,6 +94,14 @@ type RefreshState struct {
 	inFlight bool
 }
 
+// QuotaSyncError is one quota key's most recent failed-sync record (the raw
+// provider error + when it happened). Detached copies only — SyncErrors never
+// hands out the live entry.
+type QuotaSyncError struct {
+	Err string
+	At  time.Time
+}
+
 func NewQuotaTracker(
 	path string,
 	cfg func() *configdomain.Config,
@@ -98,6 +114,7 @@ func NewQuotaTracker(
 	return &QuotaTracker{
 		runtime:            runtimeManager,
 		RefreshGuard:       map[string]*RefreshState{},
+		syncErrs:           map[string]QuotaSyncError{},
 		Path:               path,
 		cfg:                cfg,
 		provs:              provs,
@@ -269,7 +286,7 @@ func (t *QuotaTracker) PollAllGeneration(now time.Time, generation uint64) {
 		go func(n string, p provider.Provider) {
 			defer wg.Done()
 			s := t.FetchQuota(p, now) // fetchQuota retries transient errors
-			t.warnSyncFailed(n, s)
+			t.recordSyncOutcome(n, s, now)
 			resultsMu.Lock()
 			results[n] = s
 			resultsMu.Unlock()
@@ -311,25 +328,61 @@ func (t *QuotaTracker) PollAllGeneration(now time.Time, generation uint64) {
 
 // clearForGeneration drops quota snapshots owned by the previous config. The
 // The caller changes the runtime Manager generation first; stale clears are
-// rejected by the same generation gate as poll commits.
+// rejected by the same generation gate as poll commits. The tracker-side sync
+// error records prune to the new provider set too — a provider removed by the
+// reload must not keep advertising a failure. provs() is read BEFORE t.mu so no
+// tracker-mu → caller-lock order is ever taken.
 func (t *QuotaTracker) ClearForGeneration(generation uint64) {
 	t.runtime.ClearQuotas(generation)
+	live := t.provs()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for key := range t.syncErrs {
+		if live[key] != nil {
+			continue
+		}
+		delete(t.syncErrs, key)
+	}
 }
 
-// warnSyncFailed surfaces a failed quota sync in the daemon log. The
-// Manager keeps the previous snapshot (quotaSyncFailedKeepsExisting — a
-// failed sync must not mutate state), so without this line a provider whose
-// upstream usage endpoint is down would silently serve an aging snapshot
-// with no operator-visible trace of WHY it is aging.
-func (t *QuotaTracker) warnSyncFailed(name string, s *provider.QuotaSnapshot) {
+// recordSyncOutcome is the single choke point every fetch path (pollAll,
+// pollOne, refreshOne) reports through: a failed sync is logged AND recorded in
+// the tracker's syncErrs (the surface /api_status reads — the Manager keeps the
+// previous snapshot on failure, quotaSyncFailedKeepsExisting, so without this
+// record a provider whose upstream usage endpoint is down would silently serve
+// an aging snapshot with no operator-visible trace of WHY it is aging); a
+// successful sync clears the record. The log lines are unchanged.
+func (t *QuotaTracker) recordSyncOutcome(name string, s *provider.QuotaSnapshot, now time.Time) {
 	if s == nil || s.Err == "" {
+		t.mu.Lock()
+		delete(t.syncErrs, name)
+		t.mu.Unlock()
 		return
 	}
+	t.mu.Lock()
+	t.syncErrs[name] = QuotaSyncError{Err: s.Err, At: now}
+	t.mu.Unlock()
 	if prev := t.runtime.Quota(name); prev != nil {
 		logx.Warnf("[quota] %s sync failed (%s); keeping last snapshot from %s", name, s.Err, prev.AsOf.UTC().Format(time.RFC3339))
 		return
 	}
 	logx.Warnf("[quota] %s sync failed: %s", name, s.Err)
+}
+
+// SyncErrors returns a detached copy of every quota key's most recent failed
+// sync (empty map when none). Nil-receiver-safe: a quota-disabled Proxy has no
+// tracker and no failures to show.
+func (t *QuotaTracker) SyncErrors() map[string]QuotaSyncError {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make(map[string]QuotaSyncError, len(t.syncErrs))
+	for k, v := range t.syncErrs {
+		out[k] = v
+	}
+	return out
 }
 
 // pollOne re-polls a single provider by its quota key (a config name or a
@@ -352,8 +405,9 @@ func (t *QuotaTracker) PollOne(key string) bool {
 	if p == nil {
 		return false
 	}
-	s := t.FetchQuota(p, time.Now())
-	t.warnSyncFailed(key, s)
+	now := time.Now()
+	s := t.FetchQuota(p, now)
+	t.recordSyncOutcome(key, s, now)
 	if t.commitSnapshot(generation, key, s) != QuotaCommitApplied {
 		return false
 	}
@@ -404,8 +458,9 @@ func (t *QuotaTracker) RefreshOne(name string, generations ...uint64) {
 
 	refreshed := false
 	if p := t.provs()[name]; p != nil {
-		s := t.FetchQuota(p, time.Now())
-		t.warnSyncFailed(name, s)
+		fetchNow := time.Now()
+		s := t.FetchQuota(p, fetchNow)
+		t.recordSyncOutcome(name, s, fetchNow)
 		if t.commitSnapshot(generation, name, s) == QuotaCommitApplied {
 			if err := t.Persist(); err != nil {
 				logx.Warnf("[quota] persist after refreshOne(%s) failed: %v", name, err)
@@ -555,6 +610,31 @@ func IsTransientQuotaErr(err string) bool {
 		}
 	}
 	return true
+}
+
+// CredentialErrClass classifies a quota-sync error string as a CREDENTIAL
+// problem for display surfaces (the Schedule node badge and the Accounts pill):
+// "session-expired" (SSO cookie aged out — re-login fixes it),
+// "not-logged-in" (no credential stored / incomplete login) or "auth" (key
+// rejected: mint failures, 401/403 usage endpoints). "" = not a credential
+// problem (network blip, 5xx, parse) — display surfaces must NOT badge those
+// as credential issues. Substring matching mirrors the shared vocabulary of
+// provider error strings (see aqp fetchMonthlyUsage, AqpKeyProvider mint,
+// IsTransientQuotaErr's permanent list); the JS twin is quotaErrKind.
+func CredentialErrClass(errStr string) string {
+	if errStr == "" {
+		return ""
+	}
+	e := strings.ToLower(errStr)
+	switch {
+	case strings.Contains(e, "session expired"):
+		return "session-expired"
+	case strings.Contains(e, "not logged in"), strings.Contains(e, "no project_id"), strings.Contains(e, "not-logged-in"):
+		return "not-logged-in"
+	case strings.Contains(e, "auth"), strings.Contains(e, "http 401"), strings.Contains(e, "http 403"), strings.Contains(e, "unauthorized"):
+		return "auth"
+	}
+	return ""
 }
 
 type PersistedQuotaSnapshot struct {

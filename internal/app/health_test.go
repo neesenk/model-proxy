@@ -22,10 +22,14 @@ func intHdr(k, v string) http.Header {
 }
 
 // schedCfg returns a Scheduling with short durations for fast tests.
+// schedCfg pins the count-based circuit semantics (persist "0") — these
+// tests assert threshold/cooldown behavior; the persist span gate is covered
+// deterministically (fake clock) by runtime TestRecordFailurePersistGate*.
 func schedCfg(threshold int, cooldown, rateBackoff, timeout, dwell string) configdomain.Scheduling {
 	return configdomain.Scheduling{
 		CircuitThreshold: threshold,
 		CircuitCooldown:  cooldown,
+		CircuitPersist:   "0",
 		RateLimitBackoff: rateBackoff,
 		UpstreamTimeout:  timeout,
 		StickyDwell:      dwell,

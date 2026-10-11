@@ -275,6 +275,9 @@ export function accountRemainingLabel(snap) {
 // Branches:
 //   - snap == null                    -> hint 'no data',     collapsed
 //   - snap.Err                        -> hint by error kind, open (login/error visible)
+//   - snap.SyncErr (Err empty)        -> hint by error kind, open — the kept
+//     last-known-good snapshot is stale, so the section opens on the failure
+//     banner (the stale windows below carry their own as-of)
 //   - empty Windows + Notes, no Err   -> hint 'console only', OPEN — the notes
 //     (the provider's own console/usage URL) are the section's entire content
 //     for console-only providers (mimo/qwen-plan/step-plan/static), so hiding
@@ -285,10 +288,8 @@ export function accountUsageState(snap) {
   if (!snap) {
     return { hint: 'No data', open: false };
   }
-  if (snap.Err) {
-    const k = quotaErrKind(snap);
-    const hint = k === 'session-expired' ? 'Session expired'
-      : k === 'not-logged-in' ? 'Not logged in' : 'Error';
+  if (snap.Err || snap.SyncErr) {
+    const hint = syncErrLabel(quotaErrKind(snap)) || 'Error';
     return { hint, open: true };
   }
   const windows = snap.Windows || [];

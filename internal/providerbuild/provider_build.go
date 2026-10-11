@@ -330,6 +330,7 @@ func BuildOne(cfg *configdomain.Config, opts BuildOptions, name string, prov con
 		DecisionsBaseURL: prov.DecisionsBaseURL,
 		Headers:          prov.Headers,
 		UsageURL:         prov.UsageURL,
+		ProxyURL:         prov.ProxyURL,
 		AqpMintURL:       prov.AqpMintURL, // aqp: without this the key mint POSTs to ""
 		BoundAPIKey:      cred.APIKey,     // binding point #1 (forward path)
 		Models:           prov.Models,     // for the usage-display fallback (listConfigModels)

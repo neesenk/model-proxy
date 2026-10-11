@@ -583,7 +583,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/diag → cli/framework, cli/models, config, daemonctl, display, observe/requestlog, pricing, probe, provider, upstreamproxy`（`wire`/`replay`/`shadow`/`routing report`）；
 - `cli/doctor → accounts, appapi, cli/clicommon, cli/framework,
   cli/models, config, credstore, display, protocol, routing, takeover, observe/seclog, provider`；
-- `cli/framework → accounts, config, daemonctl`（LoadCmdConfig 进程级接线 S2 凭据）；
+- `cli/framework → accounts, config, daemonctl, upstreamproxy`（LoadCmdConfig 进程级接线：S2 凭据 + credentials 模式 + 全局 `proxy` 链头发布——不发则一次性 CLI 命令静默落到 env/系统代理、无视 `proxy: off`；per-provider 探测 client 也在此解析）；
 - `cli/presets → cli/framework, cli/login, cli/serve, config, login, presets`；
 - `cli/stats → accounts, cli/framework, config, daemonctl, display, observe/stats, providerbuild`（`stats`/`usage`）；
 - `cli/status → appapi, cli/clicommon, cli/framework, config, daemonctl, display, routing`（`serve status`/`schedule`/`routes`/`cache`）；

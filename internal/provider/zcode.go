@@ -188,14 +188,14 @@ func (p *ZCodeProvider) ExtraHeaders(req *http.Request, body []byte, sessionID s
 // BillingUnknown snapshot carrying the error (never a non-nil error), mirroring
 // ZhipuProvider.Quota so the scheduler poll stays alive.
 func (p *ZCodeProvider) Quota() (*QuotaSnapshot, error) {
-	return bigmodelQuota(p.cfg.UsageURL, p.AuthHeaders, p.cfg.Headers)
+	return bigmodelQuota(p.cfg.UsageURL, p.cfg.ProxyURL, p.AuthHeaders, p.cfg.Headers)
 }
 
 // Usage prints "Provider:  zcode" first (interface contract), then the parsed
 // quota snapshot — the shared BigModel view (same backend as zhipu); zcode has
 // no model-list/raw-JSON fallbacks, so a non-BigModel body is the notice.
 func (p *ZCodeProvider) Usage() error {
-	if _, rendered := bigmodelUsageHeaderAndQuota(p.providerName, p.cfg.UsageURL, p.AuthHeaders, p.cfg.Headers); !rendered {
+	if _, rendered := bigmodelUsageHeaderAndQuota(p.providerName, p.cfg.UsageURL, p.cfg.ProxyURL, p.AuthHeaders, p.cfg.Headers); !rendered {
 		fmt.Println(display.Yellow("Quota unavailable (not BigModel format)."))
 	}
 	return nil

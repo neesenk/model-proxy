@@ -31,7 +31,7 @@ import {
   fmtCompact,
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
   CLIENT_GONE_STATUS, notLoggedHint,
-  quotaErrKind, accountUsageState, accountRemainingLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta, keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
+  quotaErrKind, accountUsageState, accountRemainingLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta, scheduleCredentialLabel, syncErrLabel, keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
   securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML, SECURITY_RANGES, securityRangeFromSecs,
   securityFilterQuery, securityFilterFromQuery, explainCacheKey,
@@ -1725,7 +1725,36 @@ test('quotaErrKind classifies quota snapshot errors', () => {
   assert.equal(quotaErrKind({}), '');
   assert.equal(quotaErrKind({ Err: 'Session expired, please re-login' }), 'session-expired');
   assert.equal(quotaErrKind({ Err: 'not logged in' }), 'not-logged-in');
+  assert.equal(quotaErrKind({ Err: 'no project_id in store; run login' }), 'not-logged-in');
+  assert.equal(quotaErrKind({ Err: 'auth: mint aqp key: HTTP 401: denied' }), 'auth');
+  assert.equal(quotaErrKind({ Err: 'monthly usage HTTP 403: forbidden' }), 'auth');
   assert.equal(quotaErrKind({ Err: 'HTTP 500' }), 'error');
+});
+
+// A failed sync that kept a last-known-good snapshot carries the failure on
+// SyncErr (tracker-side record; the stored snapshot stays clean) — the kind
+// must classify from either source, stored Err taking precedence.
+test('quotaErrKind classifies tracker-side SyncErr (kept last-known-good)', () => {
+  assert.equal(quotaErrKind({ SyncErr: 'session expired (HTTP 401): Session expired' }), 'session-expired');
+  assert.equal(quotaErrKind({ SyncErr: 'not logged in' }), 'not-logged-in');
+  assert.equal(quotaErrKind({ SyncErr: 'monthly usage HTTP 500: boom' }), 'error');
+  assert.equal(quotaErrKind({ Err: 'session expired', SyncErr: 'HTTP 500' }), 'session-expired');
+});
+
+test('syncErrLabel renders kind-specific labels, generic otherwise', () => {
+  assert.equal(syncErrLabel('session-expired'), 'Session expired');
+  assert.equal(syncErrLabel('not-logged-in'), 'Not logged in');
+  assert.equal(syncErrLabel('auth'), 'Auth error');
+  assert.equal(syncErrLabel('error'), 'Sync error');
+  assert.equal(syncErrLabel(''), '');
+});
+
+test('scheduleCredentialLabel: credential classes badge, others do not', () => {
+  assert.equal(scheduleCredentialLabel('session-expired'), 'session expired');
+  assert.equal(scheduleCredentialLabel('not-logged-in'), 'not logged in');
+  assert.equal(scheduleCredentialLabel('auth'), 'auth error');
+  assert.equal(scheduleCredentialLabel(''), '');
+  assert.equal(scheduleCredentialLabel(undefined), '');
 });
 
 test('accountUsageState: null snapshot is collapsed "no data"', () => {
@@ -1736,7 +1765,24 @@ test('accountUsageState: null snapshot is collapsed "no data"', () => {
 test('accountUsageState: error snapshots stay open', () => {
   assert.deepEqual(accountUsageState({ Err: 'Session expired' }), { hint: 'Session expired', open: true });
   assert.deepEqual(accountUsageState({ Err: 'not logged in' }), { hint: 'Not logged in', open: true });
-  assert.deepEqual(accountUsageState({ Err: 'HTTP 500' }), { hint: 'Error', open: true });
+  // Generic failures say "Sync error" (was "Error") — the failure is always a
+  // quota sync; the wording no longer implies a crash.
+  assert.deepEqual(accountUsageState({ Err: 'HTTP 500' }), { hint: 'Sync error', open: true });
+});
+
+// A kept last-known-good snapshot with a failed latest sync must not render
+// as fresh numbers: the section opens on the failure hint (the stale windows
+// below carry their own as-of), and the pill mirrors it.
+test('accountUsageState + accountRemainingLabel: SyncErr outranks stale windows', () => {
+  const stale = {
+    SyncErr: 'session expired (HTTP 401): Session expired',
+    Windows: [{ Label: 'Monthly', Ultimate: true, RemainingPct: 0.4 }],
+    AsOf: '2026-10-01T00:00:00Z',
+  };
+  assert.deepEqual(accountUsageState(stale), { hint: 'Session expired', open: true });
+  assert.equal(accountRemainingLabel(stale), 'Session expired');
+  assert.equal(accountRemainingLabel({ SyncErr: 'monthly usage HTTP 500: boom', Windows: [] }), 'Sync error');
+  assert.equal(accountRemainingLabel({ SyncErr: 'auth: mint aqp key: HTTP 401: denied' }), 'Auth error');
 });
 
 test('accountUsageState: empty windows without error is collapsed unmeasured', () => {

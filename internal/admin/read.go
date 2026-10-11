@@ -26,6 +26,17 @@ import (
 	"model-proxy/internal/routing"
 )
 
+// quotaSnapshotWithSyncErr serializes one quota entry whose most recent sync
+// FAILED while a last-known-good snapshot is being kept: the plain snapshot
+// fields (embedded, unchanged shape) plus SyncErr/SyncErrAt describing the
+// failure. Defined at the projection boundary so the provider-layer
+// QuotaSnapshot type stays free of tracker-owned observational fields.
+type quotaSnapshotWithSyncErr struct {
+	provider.QuotaSnapshot
+	SyncErr   string
+	SyncErrAt time.Time
+}
+
 // Dashboard projects the captured generation-consistent state into the
 // detached transport DTO. The port owns the lock capture; this method owns
 // only the presentation mapping.
@@ -77,6 +88,20 @@ func (s *Service) Dashboard(now time.Time) appapi.Dashboard {
 				// zero UsageFrom = not resolvable.
 				cp := *snapshot
 				cp.UsageFrom, _ = snapshot.UsageWindow(now)
+				// A FAILED sync keeps the last-known-good snapshot in Runtime
+				// (quotaSyncFailedKeepsExisting), so the failure is attached
+				// here instead — same JSON shape plus SyncErr/SyncErrAt, so the
+				// UI can badge an expired credential next to the aging numbers
+				// instead of rendering them as fresh. Keys without a recorded
+				// failure serialize exactly as before.
+				if syncErr, failed := state.QuotaSyncErrs[key]; failed && syncErr.Err != "" {
+					quota[key] = quotaSnapshotWithSyncErr{
+						QuotaSnapshot: cp,
+						SyncErr:       syncErr.Err,
+						SyncErrAt:     syncErr.At,
+					}
+					continue
+				}
 				quota[key] = cp
 			}
 		}
@@ -1119,6 +1144,7 @@ func configSettings(config *configdomain.Config) appapi.ConfigSettings {
 		Scheduling: appapi.ConfigScheduling{
 			CircuitThreshold:   optionalInt(config.Scheduling.CircuitThreshold),
 			CircuitCooldown:    config.Scheduling.CircuitCooldown,
+			CircuitPersist:     config.Scheduling.CircuitPersist,
 			RateLimitBackoff:   config.Scheduling.RateLimitBackoff,
 			QuotaCooldown:      config.Scheduling.QuotaCooldown,
 			ModelLockout:       config.Scheduling.ModelLockout,

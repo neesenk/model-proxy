@@ -338,8 +338,8 @@ func TestScheduleAdapter_AppliesQualityWeights(t *testing.T) {
 		p.quota.SetSnapshot("steady", quota)
 		// Two failures: below the circuit threshold (3), so the provider stays
 		// available — only the quality penalty can reorder.
-		p.runtimeState.RecordFailure("flaky", 3, time.Minute, 0)
-		p.runtimeState.RecordFailure("flaky", 3, time.Minute, 0)
+		p.runtimeState.RecordFailure("flaky", 3, time.Minute, 0, 0)
+		p.runtimeState.RecordFailure("flaky", 3, time.Minute, 0, 0)
 		return p
 	}
 

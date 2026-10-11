@@ -34,7 +34,9 @@ func (p *CodexProvider) AuthReady() bool {
 
 func init() {
 	Register("codex", func(cfg *Config, providerName string) (Provider, error) {
-		return &CodexProvider{cfg: cfg, auth: cfg.authOrDefault(NewCodexOAuthProvider(cfg.OAuthAuthFile))}, nil
+		oauth := NewCodexOAuthProvider(cfg.OAuthAuthFile)
+		oauth.proxyURL = cfg.ProxyURL
+		return &CodexProvider{cfg: cfg, auth: cfg.authOrDefault(oauth)}, nil
 	})
 }
 
@@ -73,7 +75,7 @@ func (p *CodexProvider) Logout() error { return removeAuthFile(p.cfg.OAuthAuthFi
 // unmeasured rather than crashing the poll.
 func (p *CodexProvider) Quota() (*QuotaSnapshot, error) {
 	usageURL := strings.TrimSuffix(p.cfg.OpenAIBaseURL, "/codex") + "/wham/usage"
-	body, fail, ok := usageGet(usageURL, p.AuthHeaders, nil, nil)
+	body, fail, ok := usageGet(usageURL, p.cfg.ProxyURL, p.AuthHeaders, nil, nil)
 	if !ok {
 		return fail, nil
 	}
@@ -127,7 +129,7 @@ func (p *CodexProvider) FetchModelsContext(ctx context.Context) ([]string, error
 	if err := p.AuthHeaders(req); err != nil {
 		return nil, fmt.Errorf("codex models auth: %w", err)
 	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
+	resp, err := (&http.Client{Timeout: 10 * time.Second, Transport: upstreamproxy.ProviderTransport(p.cfg.ProxyURL)}).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch codex models: %w", err)
 	}

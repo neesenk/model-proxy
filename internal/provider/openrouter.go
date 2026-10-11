@@ -87,7 +87,7 @@ func (p *OpenRouterProvider) ExtraHeaders(req *http.Request, _ []byte, _ string,
 // any failure returns a BillingUnknown snapshot carrying the error (never a
 // non-nil error) so the poll stays alive.
 func (p *OpenRouterProvider) Quota() (*QuotaSnapshot, error) {
-	body, fail, ok := usageGet(p.cfg.UsageURL, p.AuthHeaders, nil, nil)
+	body, fail, ok := usageGet(p.cfg.UsageURL, p.cfg.ProxyURL, p.AuthHeaders, nil, nil)
 	if !ok {
 		return fail, nil
 	}
@@ -198,7 +198,7 @@ func monthLength(now time.Time) time.Duration {
 // shared quota-window rendering (bars, resets, absolute used lines).
 func (p *OpenRouterProvider) Usage() error {
 	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(p.providerName)))
-	body, ok := usageGetForDisplay(p.cfg.UsageURL, p.providerName, p.AuthHeaders, nil)
+	body, ok := usageGetForDisplay(p.cfg.UsageURL, p.cfg.ProxyURL, p.providerName, p.AuthHeaders, nil)
 	if !ok {
 		return nil
 	}

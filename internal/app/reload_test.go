@@ -462,7 +462,7 @@ func TestReload_RejectsAllDirectOldGenerationMutations(t *testing.T) {
 
 	currentGeneration := p.configGeneration.Load()
 	for range 7 {
-		p.runtimeState.RecordFailure("p", 1, -time.Second, currentGeneration)
+		p.runtimeState.RecordFailure("p", 1, -time.Second, 0, currentGeneration)
 	}
 	if !p.runtimeState.TakeHalfOpenSlot("p", currentGeneration) {
 		t.Fatal("failed to seed current-generation half-open slot")

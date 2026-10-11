@@ -67,12 +67,12 @@ func fetchModelInfosBearer(cfg *Config, auth func(*http.Request) error) ([]Model
 }
 
 func fetchModelInfosBearerContext(ctx context.Context, cfg *Config, auth func(*http.Request) error) ([]ModelInfo, error) {
-	return fetchModelInfosBearerURL(ctx, strings.TrimRight(cfg.OpenAIBaseURL, "/")+"/models", auth)
+	return fetchModelInfosBearerURL(ctx, strings.TrimRight(cfg.OpenAIBaseURL, "/")+"/models", cfg.ProxyURL, auth)
 }
 
 // fetchModelInfosBearerURL is the URL-explicit variant for providers whose
 // /models lives on a non-openai base (typesafe: decisions_base_url).
-func fetchModelInfosBearerURL(ctx context.Context, url string, auth func(*http.Request) error) ([]ModelInfo, error) {
+func fetchModelInfosBearerURL(ctx context.Context, url, proxyURL string, auth func(*http.Request) error) ([]ModelInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -80,7 +80,7 @@ func fetchModelInfosBearerURL(ctx context.Context, url string, auth func(*http.R
 	if err := auth(req); err != nil {
 		return nil, fmt.Errorf("auth: %w", err)
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.ProviderTransport(proxyURL)}).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch models: %w", err)
 	}

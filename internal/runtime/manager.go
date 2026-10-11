@@ -6,6 +6,7 @@ package runtime
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"model-proxy/internal/provider"
 )
@@ -48,6 +49,19 @@ type Manager struct {
 	// size. Readers revalidate the loaded pointer after taking m.mu so a
 	// concurrent publication cannot cross a generation boundary unnoticed.
 	quality atomic.Pointer[map[string]providerQuality]
+	// now is the clock seam for failure-streak timing (RecordFailure's persist
+	// gate). nil = wall clock; in-package tests inject a fake so streak spans
+	// are advanced deterministically instead of sleeping. Struct-literal
+	// construction stays valid via nowTime.
+	now func() time.Time
+}
+
+// nowTime returns the injected clock, or the wall clock when unset.
+func (m *Manager) nowTime() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
 }
 
 func (m *Manager) ensureLocked() {

@@ -73,6 +73,10 @@ func removeAuthFile(path string) error {
 type AqpKeyProvider struct {
 	mintURL  string
 	authFile string
+	// proxyURL routes the mint POST through this provider's own upstream
+	// proxy override (set by the Register constructor from Config.ProxyURL);
+	// empty = the automatic chain.
+	proxyURL string
 
 	mu        sync.Mutex
 	cached    string
@@ -177,7 +181,7 @@ func (p *AqpKeyProvider) mintLocked() (string, error) {
 	req.Header.Set("content-type", "application/json")
 	// sso_session_cookie value already includes the SSO_C= prefix; use it as the whole Cookie header.
 	req.Header.Set("Cookie", cookie)
-	client := &http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}
+	client := &http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.ProviderTransport(p.proxyURL)}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("mint aqp key: %w", err)
@@ -248,6 +252,10 @@ const (
 type CodexOAuthProvider struct {
 	authFile string
 	tokenURL string // override for tests; defaults to CodexOAuthTokenURL
+	// proxyURL routes the oauth refresh POST through this provider's own
+	// upstream proxy override (set by the Register constructor from
+	// Config.ProxyURL); empty = the automatic chain.
+	proxyURL string
 
 	mu        sync.Mutex
 	cached    string    // access_token
@@ -477,7 +485,7 @@ func (p *CodexOAuthProvider) refreshLocked(af *CodexAuthFile) error {
 	}
 	req, _ := http.NewRequest(http.MethodPost, u, strings.NewReader(body))
 	req.Header.Set("content-type", "application/x-www-form-urlencoded")
-	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.ProviderTransport(p.proxyURL)}).Do(req)
 	if err != nil {
 		return fmt.Errorf("codex oauth refresh: %w", err)
 	}

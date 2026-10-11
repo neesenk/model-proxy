@@ -62,6 +62,16 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
 - 副作用侧：失败的同步不参与 `QuotaRecoveredClearCooldown`（pollAll 的 `polled`
   集与 PollOne 的判定都以 `Err == ""` 为前提）——no-op 同步不得用陈旧观测推翻
   新鲜的 429 预测。
+- **失败可见性（tracker 侧 syncErrs）**：kept-last-known-good 会把失败从数据面
+  完全抹掉（存量快照无 Err，Accounts 药丸继续显示老数字），因此 tracker 在
+  `recordSyncOutcome`（pollAll/PollOne/RefreshOne 的共同咽喉，兼打上文的 warn 日志）
+  里记录每 key 最近一次失败同步 `{Err, At}`（`SyncErrors()` 脱离式副本，nil-tracker
+  安全），成功即清除，`ClearForGeneration` 随 reload 剪枝到新 provider 集。内存态、
+  不持久化（观测元数据，重启后首轮 poll 重建）。消费面：admin Dashboard 把它附到
+  `/api/status` 的 `quota[name].SyncErr/SyncErrAt`（Accounts 药丸/Usage 横幅 + SSO
+  Re-login 按钮）；组合根把它经 `runtime.CredentialErrClass` 分类
+  （session-expired / not-logged-in / auth；网络/5xx 不是凭据问题，不徽标）后作为
+  Schedule 链节点的 `credential` 徽标——**只解释不重排**，排名仍按 last-known-good。
 - reload 侧（`ReplaceGeneration`）：quota cache 跨 generation 存活，只在同一临界区
   内对 live key 集合（config 名 + 池化虚拟 `name#<accountID>`）剪枝——被移除的
   provider/登出的账号原子丢弃，存活者继续用 cache 直到 reload 后的 `PollAsync`
@@ -382,7 +392,11 @@ Disable/Enable）是 (provider, model) 粒度的 operator 覆盖，状态归
   多 provider 模型照常列出并 failover）；forward 路由查找在 pin/cache 之前
   同样过滤，全禁用模型终局 404 `model … is disabled`（与未知模型的 502
   not-found 分开）；`/debug/route` 预览同步反映；`/api/status.schedule` 与
-  `/debug/schedule` 的 route 列表**整条跳过全禁用 route**（空链块不输出）；
+  `/debug/schedule` 的 route 列表**整条跳过全禁用 route**（空链块不输出），
+  部分禁用 route 的 `blocked`/`skipped` 归因也**不列被禁 target**
+  （`blockedReasons` 头部剔除——禁用是显式可逆的 operator 状态，
+  Status→Models 已可见并可切回，调度面不划线复述；非全禁 route 至少保有一个
+  未禁 target，Blocked 不会被剔空）；
   精确匹配响应 cache 不受影响
   （禁用阻断的是新的上游工作，不禁已缓存答案的回放）；
   takeover 同一剔除（`takeover.PruneDisabledRoutes`）：模型列表/Web 对话框 chip/
@@ -437,6 +451,10 @@ Disable/Enable）是 (provider, model) 粒度的 operator 覆盖，状态归
   过期 latch 删除后读取/升级语义不变。
 - quotaTracker 的并发 poll/manual refresh/429 refresh 去重、停止接纳和文件单写
   正确性；不得通过 tracker 内部 quota map 断言。
+- 失败同步可见性：syncErrs 记录/成功清除/ClearForGeneration 剪枝/nil-tracker
+  安全（`TestSyncErrorsRecordedClearedPruned`）、`CredentialErrClass` 分类
+  （`TestCredentialErrClass`）、Schedule `credential` 徽标只解释不重排
+  （`TestScheduleStatus_CredentialBadge`）。
 - 多 tracker 同 path、进程退出、测试 TempDir cleanup。
 - lifecycle 关闭时拒绝新任务、等待已接纳任务、drain request logger，重复 Close
   不阻塞。
@@ -447,4 +465,7 @@ Disable/Enable）是 (provider, model) 粒度的 operator 覆盖，状态归
   reload clear、pin 跨 reload 保留、mutation 后立即重启。
 - pin、force、unfreeze/freeze 与 cache/failover 的交互。
 - disabled models：decideOrder/PreviewOrder 剔除（含父名键与 pin 回落）、Resolver.Pick 拒答、
-  /v1/models 隐藏与 forward 404、部分禁用 failover、ReplaceGeneration 保留、fail-closed 校验。
+  /v1/models 隐藏与 forward 404、部分禁用 failover、ReplaceGeneration 保留、fail-closed 校验、
+  schedule 投影 blocked/skipped 不列被禁 target（`TestScheduleStatus_BlockedReasonsDisabledVsDown`、
+  `TestScheduleStatus_SkippedReasonsOnPartialChain`、
+  `TestModelDisable_ScheduleStatusOmitsFullyDisabledRoutes`）。

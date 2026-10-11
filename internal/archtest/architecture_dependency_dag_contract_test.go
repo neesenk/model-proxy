@@ -35,13 +35,18 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 			"model-proxy/internal/runtime/wirecap": true, "model-proxy/internal/takeover": true,
 			"model-proxy/internal/webauth": true,
 		},
-		"model-proxy/internal/archtest":      nil,
-		"model-proxy/internal/cache":         nil,
-		"model-proxy/internal/catalog":       {"model-proxy/internal/upstreamproxy": true},
-		"model-proxy/internal/cli/doctor":    {"model-proxy/internal/display": true, "model-proxy/internal/accounts": true, "model-proxy/internal/appapi": true, "model-proxy/internal/cli/clicommon": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/config": true, "model-proxy/internal/credstore": true, "model-proxy/internal/protocol": true, "model-proxy/internal/routing": true, "model-proxy/internal/takeover": true, "model-proxy/internal/observe/seclog": true, "model-proxy/internal/provider": true},
-		"model-proxy/internal/adjudicate":    nil,
-		"model-proxy/internal/cli/serve":     {"model-proxy/internal/config": true, "model-proxy/internal/observe/logx": true},
-		"model-proxy/internal/cli/framework": {"model-proxy/internal/accounts": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true},
+		"model-proxy/internal/archtest":   nil,
+		"model-proxy/internal/cache":      nil,
+		"model-proxy/internal/catalog":    {"model-proxy/internal/upstreamproxy": true},
+		"model-proxy/internal/cli/doctor": {"model-proxy/internal/display": true, "model-proxy/internal/accounts": true, "model-proxy/internal/appapi": true, "model-proxy/internal/cli/clicommon": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/config": true, "model-proxy/internal/credstore": true, "model-proxy/internal/protocol": true, "model-proxy/internal/routing": true, "model-proxy/internal/takeover": true, "model-proxy/internal/observe/seclog": true, "model-proxy/internal/provider": true},
+		"model-proxy/internal/adjudicate": nil,
+		"model-proxy/internal/cli/serve":  {"model-proxy/internal/config": true, "model-proxy/internal/observe/logx": true},
+		// framework applies a loaded config's PROCESS-WIDE settings to their
+		// state owners: accounts (credentials mode), daemonctl (CLI-side auth
+		// files) and upstreamproxy (the global `proxy` chain head — without the
+		// publish, one-shot CLI commands silently fall to env/system proxy and
+		// ignore `proxy: off`). Same publish pattern, three leaf owners.
+		"model-proxy/internal/cli/framework": {"model-proxy/internal/accounts": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/upstreamproxy": true},
 		"model-proxy/internal/cli/login":     {"model-proxy/internal/display": true, "model-proxy/internal/accounts": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/serve": true, "model-proxy/internal/config": true, "model-proxy/internal/login": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/cli/mcp":       {"model-proxy/internal/accounts": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/config": true, "model-proxy/internal/display": true, "model-proxy/internal/mcp": true, "model-proxy/internal/provider": true, "model-proxy/internal/providerbuild": true, "model-proxy/internal/upstreamproxy": true},
 		"model-proxy/internal/cli/models":    {"model-proxy/internal/display": true, "model-proxy/internal/cli/serve": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/accounts": true, "model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/configedit": true, "model-proxy/internal/probe": true, "model-proxy/internal/provider": true, "model-proxy/internal/providerbuild": true, "model-proxy/internal/routing": true, "model-proxy/internal/runtime/wirecap": true, "model-proxy/internal/upstreamproxy": true},

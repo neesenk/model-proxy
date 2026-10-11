@@ -136,8 +136,8 @@ func TestQualityLifecycle(t *testing.T) {
 	m := newTestManager(5)
 
 	// Record* funnels move the error EWMA.
-	m.RecordFailure("p", 3, time.Minute, 5)
-	m.RecordFailure("p", 3, time.Minute, 5)
+	m.RecordFailure("p", 3, time.Minute, 0, 5)
+	m.RecordFailure("p", 3, time.Minute, 0, 5)
 	m.RecordSuccess("p", "m", 5)
 	if got := m.qualitySnapshot()["p"].errRate; got <= 0 || got >= 1 {
 		t.Fatalf("errRate after fail/fail/success = %v", got)
@@ -159,13 +159,13 @@ func TestQualityLifecycle(t *testing.T) {
 	}
 
 	// Generation replace drops quality like the rest of the routing state.
-	m.RecordFailure("q", 3, time.Minute, 5)
+	m.RecordFailure("q", 3, time.Minute, 0, 5)
 	m.ReplaceGeneration(6, nil)
 	if len(m.qualitySnapshot()) != 0 {
 		t.Fatalf("ReplaceGeneration kept quality: %+v", m.qualitySnapshot())
 	}
 	// Stale-generation mutations are rejected.
-	m.RecordFailure("q", 3, time.Minute, 5)
+	m.RecordFailure("q", 3, time.Minute, 0, 5)
 	if len(m.qualitySnapshot()) != 0 {
 		t.Fatalf("stale generation mutated quality: %+v", m.qualitySnapshot())
 	}

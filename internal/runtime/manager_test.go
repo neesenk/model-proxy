@@ -76,7 +76,7 @@ func TestZeroValueAndGenerationReplacement(t *testing.T) {
 	if !m.SetSticky("route", Sticky{Provider: "old"}, 1) {
 		t.Fatal("current sticky rejected")
 	}
-	m.RecordFailure("old", 1, time.Hour, 1)
+	m.RecordFailure("old", 1, time.Hour, 0, 1)
 	m.RecordModelFailure("old", "m", time.Hour, 1)
 	if !m.LearnParamBlock("old", "m", "temperature", 1) {
 		t.Fatal("parameter was not learned")
@@ -139,7 +139,7 @@ func TestGenerationGatesStaleMutations(t *testing.T) {
 	if m.LearnParamBlock("stale", "m", "temperature", 7) {
 		t.Fatal("stale param mutation committed")
 	}
-	m.RecordFailure("stale", 1, time.Hour, 7)
+	m.RecordFailure("stale", 1, time.Hour, 0, 7)
 	m.RecordModelFailure("stale", "m", time.Hour, 7)
 	m.RecordRateLimit("stale", time.Now().Add(time.Hour), Daily, 7)
 

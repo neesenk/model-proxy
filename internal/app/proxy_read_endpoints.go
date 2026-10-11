@@ -64,12 +64,14 @@ func (p *Proxy) recordAttemptQuality(name string, ttft time.Duration, generation
 }
 
 // recordFailure increments a provider's consecutive failures and opens the
-// circuit (for cooldown) once the threshold is reached. Clears any half-open slot.
+// circuit (for cooldown) once the streak reaches the threshold AND has
+// persisted for Scheduling.Persist. Clears any half-open slot.
 func (p *Proxy) recordFailure(name string, sched configdomain.Scheduling, generations ...uint64) {
 	p.runtimeState.RecordFailure(
 		name,
 		sched.Threshold(),
 		sched.Cooldown(),
+		sched.Persist(),
 		runtimestate.GenerationArg(generations),
 	)
 }

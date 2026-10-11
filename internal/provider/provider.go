@@ -250,6 +250,15 @@ type Config struct {
 	DecisionsBaseURL string
 	Headers          map[string]string
 	UsageURL         string
+	// ProxyURL is this provider's own upstream-proxy override
+	// (providers.<name>.proxy_url). It governs the provider's
+	// ACCOUNT-MAINTENANCE calls here (usage/quota/mint/models fetches) in
+	// addition to the forward path (which resolves it separately in
+	// internal/app proxy_transport.go) — a provider only reachable via its
+	// proxy (codex via mihomo under a global `proxy: off`) must not have its
+	// maintenance calls silently forced onto the global chain. Empty = the
+	// automatic chain (config global → env → system → direct).
+	ProxyURL string
 
 	// ClientVersion is the codex /models client_version query param, resolved
 	// by the main package (config > codex CLI > ~/.codex cache > constant) and

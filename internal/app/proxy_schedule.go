@@ -228,21 +228,42 @@ func (p *Proxy) scheduleStatus() []byte {
 		parentOf,
 		poolIndex,
 		RuntimeSnapshot,
+		credentialErrClasses(p.quota.SyncErrors()),
 		now,
 	)
+}
+
+// credentialErrClasses projects the tracker's raw sync-error records into the
+// provider → credential-class map the schedule preview badges nodes with
+// (nil-safe on a nil map / quota-disabled Proxy: nothing to badge).
+func credentialErrClasses(errs map[string]runtimestate.QuotaSyncError) map[string]string {
+	if len(errs) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(errs))
+	for key, e := range errs {
+		if class := runtimestate.CredentialErrClass(e.Err); class != "" {
+			out[key] = class
+		}
+	}
+	return out
 }
 
 // scheduleStatusFromSnapshot is deliberately pure with respect to Proxy and
 // Manager state. Both /debug/schedule and /api/status pass one dashboard
 // snapshot captured alongside one config generation; the displayed ordering,
 // health, quota facts, pin, sticky, and spread position therefore cannot mix
-// independent runtime reads.
+// independent runtime reads. credErrs is the tracker-side credential-class
+// projection of failed quota syncs (credentialErrClasses): ranking still uses
+// the last-known-good snapshots by design, so the badge is the display's way
+// of saying "this node's credential is dead even though it ranks here".
 func scheduleStatusFromSnapshot(
 	cfg *configdomain.Config,
 	expanded map[string][]configdomain.RouteTarget,
 	parentOf map[string]string,
 	poolIndex map[string][]string,
 	RuntimeSnapshot runtimestate.DashboardSnapshot,
+	credErrs map[string]string,
 	now time.Time,
 ) []byte {
 	avail := func(name string) bool {
@@ -261,6 +282,15 @@ func scheduleStatusFromSnapshot(
 		QualityPenalty float64 `json:"quality_penalty"`
 		Available      bool    `json:"available"`
 		Peak           bool    `json:"peak"`
+		// Credential badges a node whose most recent quota sync failed with a
+		// CREDENTIAL-class error ("session-expired" / "not-logged-in" /
+		// "auth", classified by runtime.CredentialErrClass from the tracker's
+		// sync-error record — NOT from the kept snapshot, which by design
+		// still carries the last-known-good numbers). Ranking is unchanged:
+		// the badge explains why a top-ranked node keeps failing over, it
+		// does not re-rank. Omitted when the last sync succeeded or failed
+		// non-credential (network blip, 5xx).
+		Credential string `json:"credential,omitempty"`
 		// BillingDeclared is the config `billing:` label (metadata only — the
 		// scheduling tier above stays measured-only by design). Surfaced so the
 		// UI can annotate unmeasured nodes with their declared billing class
@@ -289,16 +319,20 @@ func scheduleStatusFromSnapshot(
 		Pin            string     `json:"pin,omitempty"`
 		PinExpires     string     `json:"pin_expires,omitempty"`
 		// Blocked explains WHY the route currently schedules nothing (one
-		// entry per target, backend-derived — the UI never re-classifies).
-		// Only present when ordered is empty; a route with servable targets
-		// never carries it.
+		// entry per servable target, backend-derived — the UI never
+		// re-classifies). Only present when ordered is empty; a route with
+		// servable targets never carries it. Operator-disabled targets never
+		// appear here — disable is deliberate, reversible operator state
+		// (Status→Models), not a scheduling anomaly needing explanation.
 		Blocked []blockedInfo `json:"blocked,omitempty"`
 		// Skipped is the partial-chain counterpart of Blocked: one entry per
-		// route target the availability filter or an operator disable left
-		// OUT of the chain, with the same reason/until shape. Without it a
-		// silently skipped fallback is indistinguishable from a
-		// misconfigured route. Pin narrowing never produces entries (the
-		// preview chain is computed with pins ignored).
+		// route target the availability filter (circuit / quota exhaustion /
+		// rate limit / freeze) left OUT of the chain, with the same
+		// reason/until shape. Without it a silently skipped fallback is
+		// indistinguishable from a misconfigured route. Operator-disabled
+		// targets never appear here either (same rationale as Blocked); pin
+		// narrowing never produces entries (the preview chain is computed
+		// with pins ignored).
 		Skipped []blockedInfo `json:"skipped,omitempty"`
 	}
 
@@ -351,16 +385,18 @@ func scheduleStatusFromSnapshot(
 			ri.First = ordered[0].Provider
 		}
 		// Empty chain: explain why (quota exhaustion / cooldown / freeze per
-		// target) instead of leaving the UI to say just "no providers".
+		// servable target — operator-disabled targets are omitted by
+		// blockedReasons) instead of leaving the UI to say just "no
+		// providers".
 		if len(ordered) == 0 {
 			ri.Blocked = blockedReasons(RuntimeSnapshot, runtimeTargets, now, 3*cfg.Scheduling.PollInterval())
 		} else {
 			// Partial chain: surface the targets left OUT of the chain with
-			// their reasons (availability filter / operator disable — the
-			// preview ignores pins, so pin narrowing never lands here). Every
-			// available non-disabled candidate is in decision.Order by
-			// construction, so not-in-Order ⟺ excluded with a classifiable
-			// reason.
+			// their reasons (availability filter — the preview ignores pins,
+			// so pin narrowing never lands here; operator-disabled targets are
+			// omitted by blockedReasons). Every available non-disabled
+			// candidate is in decision.Order by construction, so
+			// not-in-Order ⟺ excluded with a classifiable reason.
 			inOrder := make([]bool, len(runtimeTargets))
 			for _, index := range decision.Order {
 				inOrder[index] = true
@@ -396,6 +432,7 @@ func scheduleStatusFromSnapshot(
 				QualityPenalty:  decision.Facts[targetIndex].QualityPenalty,
 				Available:       avail(t.Provider),
 				Peak:            pconf.PeakMultiplier(now) > 1,
+				Credential:      credErrs[t.Provider],
 				BillingDeclared: pconf.Billing,
 			})
 		}
@@ -452,24 +489,31 @@ func billingClassName(b provider.BillingClass) string {
 }
 
 // blockedInfo is one target's down classification for the empty-chain
-// schedule case, most-explanatory reason first: operator-disabled > frozen >
-// rate-limited > quota-exhausted > circuit > model-locked > unavailable.
-// Derived from the same detached dashboard snapshot the schedule preview used.
+// schedule case, most-explanatory reason first: frozen > rate-limited >
+// quota-exhausted > circuit > model-locked > unavailable. Derived from the
+// same detached dashboard snapshot the schedule preview used.
 type blockedInfo struct {
 	Provider string `json:"provider"`
 	Reason   string `json:"reason"`
 	Until    string `json:"until,omitempty"` // RFC3339 recovery hint when known
 }
 
-// blockedReasons classifies every target of a route that PreviewOrder could
-// not schedule (the empty-chain case) so the Status→Schedule view can show WHY
-// instead of a bare "no providers" — the same facts the availability filter
-// used (operator disabled / frozen / rate-limit / quota exhaustion / circuit /
-// model lock), read from the same detached dashboard snapshot (single source,
-// no second lock).
+// blockedReasons classifies every SERVABLE target a route could not schedule
+// (the empty-chain Blocked list and the partial-chain Skipped tail share it)
+// so the Status→Schedule view can show WHY instead of a bare "no providers" —
+// the same facts the availability filter used (frozen / rate-limit / quota
+// exhaustion / circuit / model lock), read from the same detached dashboard
+// snapshot (single source, no second lock). Operator-disabled targets are
+// dropped entirely: the disable is deliberate, reversible operator state
+// surfaced in Status→Models, not a scheduling anomaly the chain should
+// re-advertise; a not-fully-disabled route always keeps at least one
+// non-disabled target, so Blocked is never emptied by this filter.
 func blockedReasons(snapshot runtimestate.DashboardSnapshot, targets []runtimestate.Target, now time.Time, quotaMaxAge time.Duration) []blockedInfo {
 	out := make([]blockedInfo, 0, len(targets))
 	for _, target := range targets {
+		if snapshot.TargetDisabledSnapshot(target) {
+			continue
+		}
 		info := blockedInfo{Provider: target.Provider, Reason: "unavailable"}
 		state, hasState := snapshot.Providers[target.Provider]
 		until := func(t time.Time) string {
@@ -479,8 +523,6 @@ func blockedReasons(snapshot runtimestate.DashboardSnapshot, targets []runtimest
 			return t.UTC().Format(time.RFC3339)
 		}
 		switch {
-		case snapshot.TargetDisabledSnapshot(target):
-			info.Reason = "operator-disabled"
 		case hasState && state.Frozen:
 			info.Reason = "frozen"
 		case hasState && now.Before(state.RateLimitedUntil):

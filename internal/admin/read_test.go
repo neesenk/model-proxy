@@ -1177,6 +1177,7 @@ providers:
 scheduling:
   circuit_threshold: 5
   circuit_cooldown: 2m
+  circuit_persist: 7s
   quality_error_weight: 0
 request_log:
   enabled: true
@@ -1204,6 +1205,9 @@ cache:
 	}
 	if settings.Scheduling.CircuitCooldown != "2m" {
 		t.Errorf("circuit_cooldown = %q", settings.Scheduling.CircuitCooldown)
+	}
+	if settings.Scheduling.CircuitPersist != "7s" {
+		t.Errorf("circuit_persist = %q", settings.Scheduling.CircuitPersist)
 	}
 	// An explicit 0 must survive as a non-nil pointer (it disables the signal).
 	if settings.Scheduling.QualityErrorWeight == nil || *settings.Scheduling.QualityErrorWeight != 0 {

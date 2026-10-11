@@ -318,7 +318,10 @@ func (p *Proxy) adminPorts(
 			// Capture reload-owned values and the Manager dashboard under the
 			// repository lock order so config and generation-scoped state
 			// cannot cross generations; the schedule preview derives from the
-			// same capture (shared with /debug/schedule).
+			// same capture (shared with /debug/schedule). The tracker's
+			// sync-error records are read OUTSIDE p.mu (own mutex, no lock
+			// order with Proxy.mu): observational metadata, not
+			// generation-scoped state.
 			p.mu.RLock()
 			cfg := p.cfg
 			warnings := append([]string(nil), p.routeWarnings...)
@@ -328,6 +331,7 @@ func (p *Proxy) adminPorts(
 			poolIndex := p.poolIndex
 			runtimeSnapshot := p.runtimeState.Dashboard(now)
 			p.mu.RUnlock()
+			syncErrs := p.quota.SyncErrors()
 			return admin.DashboardState{
 				Listen:        cfg.Listen,
 				RouteWarnings: warnings,
@@ -336,12 +340,14 @@ func (p *Proxy) adminPorts(
 				QuotaEnabled:  p.quota != nil,
 				StartedAt:     p.metrics.StartedAt(),
 				Counters:      p.metrics.AggregateByProvider(),
+				QuotaSyncErrs: syncErrs,
 				Schedule: scheduleStatusFromSnapshot(
 					cfg,
 					expanded,
 					parentOf,
 					poolIndex,
 					runtimeSnapshot,
+					credentialErrClasses(syncErrs),
 					now,
 				),
 			}

@@ -790,6 +790,10 @@ dialog.live-detail-pop .modal-body { overflow: auto; }
 .route-node.sticky { border-style: dashed; }
 .route-node.pinned { border-color: var(--warn); color: var(--warn-fg); background: var(--warn-bg); }
 .route-node.unavailable { text-decoration: line-through; color: var(--muted); }
+/* Credential-class sync-failure badge inside a Schedule chain node (the node
+   itself still ranks — the badge names the dead credential, not a down node). */
+.route-cred { color: var(--err); font-weight: 500; }
+.route-cred::before { content: ' · '; color: var(--muted); font-weight: 400; }
 .route-pin { color: var(--warn-fg); font-weight: 500; }
 .route-pin-wrap { position: relative; margin-left: 4px; }
 .route-pin-menu {

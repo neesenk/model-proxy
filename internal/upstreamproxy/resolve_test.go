@@ -239,3 +239,28 @@ func TestAutoTransportBadDefaultFailsClosed(t *testing.T) {
 		t.Errorf("Proxy returned a URL (%v) alongside the error, want nil", proxy)
 	}
 }
+
+// TestProviderTransportResolvesPerProviderSetting pins the maintenance-call
+// half of the per-provider proxy override: empty shares the auto chain, off
+// forces direct, a URL pins that proxy, and identical settings share one
+// pooled transport.
+func TestProviderTransportResolvesPerProviderSetting(t *testing.T) {
+	if ProviderTransport("") != AutoTransport() {
+		t.Fatal("empty setting must share the automatic-chain transport")
+	}
+	if ProviderTransport("off").Proxy != nil {
+		t.Fatal("off setting must resolve direct (nil Proxy)")
+	}
+	if ProviderTransport("direct").Proxy != nil {
+		t.Fatal("direct setting must resolve direct (nil Proxy)")
+	}
+	req, _ := http.NewRequest(http.MethodGet, "https://upstream.test/v1/models", nil)
+	transport := ProviderTransport("http://127.0.0.1:7897")
+	proxy, err := transport.Proxy(req)
+	if err != nil || proxy == nil || proxy.String() != "http://127.0.0.1:7897" {
+		t.Fatalf("URL setting Proxy = (%v, %v), want the configured URL", proxy, err)
+	}
+	if ProviderTransport("http://127.0.0.1:7897") != transport {
+		t.Fatal("identical settings must share one pooled transport")
+	}
+}

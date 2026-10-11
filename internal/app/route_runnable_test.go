@@ -37,7 +37,7 @@ func runnableTestConfig() *configdomain.Config {
 			"live":  {OpenAIBaseURL: "http://live.example", Provider: testProviderID, Models: []string{"shared", "solo-live"}},
 			"ghost": {OpenAIBaseURL: "http://ghost.example", Provider: testProviderID, Models: []string{"shared", "solo-ghost"}},
 		},
-		Scheduling: configdomain.Scheduling{CircuitThreshold: 3},
+		Scheduling: configdomain.Scheduling{CircuitThreshold: 3, CircuitPersist: "0"},
 	}
 }
 

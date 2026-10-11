@@ -57,7 +57,7 @@ func (p *TypeSafeProvider) FetchModels() ([]string, error) {
 }
 
 func (p *TypeSafeProvider) FetchModelsContext(ctx context.Context) ([]string, error) {
-	infos, err := fetchModelInfosBearerURL(ctx, p.decisionsURL("/models"), p.AuthHeaders)
+	infos, err := fetchModelInfosBearerURL(ctx, p.decisionsURL("/models"), p.cfg.ProxyURL, p.AuthHeaders)
 	if err != nil {
 		return nil, err
 	}

@@ -406,3 +406,100 @@ func TestNewQuotaTrackerNilManagerPanics(t *testing.T) {
 	}()
 	NewQuotaTracker("", nil, nil, nil)
 }
+
+// TestSyncErrorsRecordedClearedPruned pins the tracker-side failed-sync
+// record — the only surface where a failed sync stays visible (the Manager
+// keeps the last-known-good snapshot, quotaSyncFailedKeepsExisting): a failed
+// PollOne records Err+At while the stored snapshot stays untouched, the next
+// successful poll clears the record, and ClearForGeneration prunes keys the
+// current provider set no longer has. Nil-receiver SyncErrors stays nil-safe
+// (a quota-disabled Proxy has no tracker).
+func TestSyncErrorsRecordedClearedPruned(t *testing.T) {
+	expired := "session expired (HTTP 401): Session expired - re-login: `model-proxy login aqp`"
+	errSnapshot := func() (*provider.QuotaSnapshot, error) {
+		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: expired}, nil
+	}
+	okSnapshot := func() (*provider.QuotaSnapshot, error) {
+		return &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.9, AsOf: time.Now()}, nil
+	}
+	// One fake per provider so flipping aqp to success never touches ghost.
+	aqpFake := &quotaFake{quota: errSnapshot}
+	ghostFake := &quotaFake{quota: errSnapshot}
+	live := map[string]provider.Provider{"aqp": aqpFake, "ghost": ghostFake}
+	provs := func() map[string]provider.Provider { return live }
+	tr := NewQuotaTracker("", nil, provs, newTestManager(0))
+	// Seed last-known-good so the failed sync keeps it (the kept-snapshot
+	// contract) instead of storing the error snapshot.
+	tr.SetSnapshot("aqp", &provider.QuotaSnapshot{
+		Billing: provider.BillingPlan, RemainingPct: 0.4, AsOf: time.Now(),
+	})
+
+	if tr.PollOne("aqp") {
+		t.Fatal("PollOne with a failed sync must return false (last-known-good kept)")
+	}
+	errs := tr.SyncErrors()
+	if errs["aqp"].Err != expired || errs["aqp"].At.IsZero() {
+		t.Fatalf("SyncErrors[aqp] = %+v, want the recorded failure with a timestamp", errs["aqp"])
+	}
+	if s := tr.Snapshot("aqp"); s == nil || s.Err != "" || s.RemainingPct != 0.4 {
+		t.Fatalf("stored snapshot = %+v, want the untouched last-known-good 0.4", s)
+	}
+
+	// A successful sync clears the record.
+	aqpFake.quota = okSnapshot
+	if !tr.PollOne("aqp") {
+		t.Fatal("PollOne with a successful sync must return true")
+	}
+	if _, still := tr.SyncErrors()["aqp"]; still {
+		t.Fatal("successful sync did not clear the failed-sync record")
+	}
+
+	// Reload drops the ghost provider: its record must not keep advertising a
+	// failure for a key nothing will ever sync again. (Ghost has no stored
+	// snapshot, so its failed sync is a first observation — the error snapshot
+	// commits and PollOne reports true; the record is what we assert on.)
+	if !tr.PollOne("ghost") {
+		t.Fatal("ghost's failed FIRST observation commits (no last-known-good to keep)")
+	}
+	if _, still := tr.SyncErrors()["ghost"]; !still {
+		t.Fatal("ghost record missing before the prune check")
+	}
+	delete(live, "ghost") // reload: the new provider set no longer has ghost
+	tr.ClearForGeneration(0)
+	if _, still := tr.SyncErrors()["ghost"]; still {
+		t.Fatal("ClearForGeneration did not prune the removed provider's sync-error record")
+	}
+
+	// Nil-receiver safety: a quota-disabled Proxy calls SyncErrors on a nil
+	// tracker and must get nothing, not a panic.
+	var disabled *QuotaTracker
+	if errs := disabled.SyncErrors(); errs != nil {
+		t.Fatalf("nil tracker SyncErrors = %v, want nil", errs)
+	}
+}
+
+// TestCredentialErrClass pins the credential classification shared by the
+// Schedule badge and the Accounts pill: credential classes name themselves,
+// everything else (network blip, 5xx, parse) must NOT be badged as a
+// credential problem.
+func TestCredentialErrClass(t *testing.T) {
+	cases := []struct {
+		err  string
+		want string
+	}{
+		{"session expired (HTTP 401): Session expired - re-login: `model-proxy login aqp`", "session-expired"},
+		{"not logged in", "not-logged-in"},
+		{"no project_id in store; run `model-proxy login aqp` (or --import) to populate it", "not-logged-in"},
+		{"auth: mint aqp key: HTTP 401: {\"message\":\"denied\"}", "auth"},
+		{"monthly usage HTTP 403: forbidden", "auth"},
+		{"zhipu usage unauthorized", "auth"},
+		{"monthly usage request failed: context deadline exceeded", ""},
+		{"monthly usage HTTP 500: boom", ""},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := CredentialErrClass(c.err); got != c.want {
+			t.Errorf("CredentialErrClass(%q) = %q, want %q", c.err, got, c.want)
+		}
+	}
+}

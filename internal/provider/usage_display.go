@@ -176,7 +176,7 @@ func (p *AqpProvider) Usage() error {
 func (p *CodexProvider) Usage() error {
 	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue("codex")))
 	usageURL := strings.TrimSuffix(p.cfg.OpenAIBaseURL, "/codex") + "/wham/usage"
-	body, ok := usageGetForDisplay(usageURL, "codex", p.AuthHeaders, nil)
+	body, ok := usageGetForDisplay(usageURL, p.cfg.ProxyURL, "codex", p.AuthHeaders, nil)
 	if !ok {
 		return nil
 	}
@@ -277,9 +277,9 @@ func (p *CodexProvider) Usage() error {
 // body was fetched but was not BigModel format (zhipu then falls through to
 // its model-list / raw-JSON views, zcode prints the unavailable notice), or
 // the fetch itself failed (usageGetForDisplay already reported it).
-func bigmodelUsageHeaderAndQuota(providerName, usageURL string, auth func(*http.Request) error, headers map[string]string) (body []byte, renderedQuota bool) {
+func bigmodelUsageHeaderAndQuota(providerName, usageURL, proxyURL string, auth func(*http.Request) error, headers map[string]string) (body []byte, renderedQuota bool) {
 	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(providerName)))
-	body, ok := usageGetForDisplay(usageURL, providerName, auth, headers)
+	body, ok := usageGetForDisplay(usageURL, proxyURL, providerName, auth, headers)
 	if !ok {
 		return nil, false
 	}
@@ -295,7 +295,7 @@ func bigmodelUsageHeaderAndQuota(providerName, usageURL string, auth func(*http.
 }
 
 func (p *ZhipuProvider) Usage() error {
-	body, rendered := bigmodelUsageHeaderAndQuota(p.providerName, p.cfg.UsageURL, p.AuthHeaders, p.cfg.Headers)
+	body, rendered := bigmodelUsageHeaderAndQuota(p.providerName, p.cfg.UsageURL, p.cfg.ProxyURL, p.AuthHeaders, p.cfg.Headers)
 	if rendered {
 		return nil
 	}
@@ -328,7 +328,7 @@ func (p *ZhipuProvider) Usage() error {
 
 func (p *DeepSeekProvider) Usage() error {
 	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(p.cfg.ProviderName)))
-	body, ok := usageGetForDisplay(p.cfg.UsageURL, p.cfg.ProviderName, p.AuthHeaders, nil)
+	body, ok := usageGetForDisplay(p.cfg.UsageURL, p.cfg.ProxyURL, p.cfg.ProviderName, p.AuthHeaders, nil)
 	if !ok {
 		return nil
 	}
@@ -372,7 +372,7 @@ func (p *VolcengineProvider) Usage() error {
 		listConfigModels(p.cfg.Models)
 		return nil
 	}
-	u, err := getAFPUsage(ak, sk)
+	u, err := getAFPUsage(ak, sk, p.cfg.ProxyURL)
 	if err != nil {
 		fmt.Printf("%s GetAFPUsage failed: %v\n", display.Dim("Error:      "), err)
 		listConfigModels(p.cfg.Models)

@@ -37,7 +37,7 @@ func modelDisableTestConfig(primary, fallback *httptest.Server) *configdomain.Co
 				{Provider: "primary", Model: "solo", Priority: 1},
 			},
 		},
-		Scheduling: configdomain.Scheduling{CircuitThreshold: 3},
+		Scheduling: configdomain.Scheduling{CircuitThreshold: 3, CircuitPersist: "0"},
 	}
 }
 
@@ -304,7 +304,8 @@ func TestModelDisable_APIModelsProjection(t *testing.T) {
 // Schedule projection: a route whose every target is operator-disabled is
 // omitted from schedule.models entirely (it is hidden from /v1/models and
 // unservable — an empty chain block is noise); a partially disabled route
-// keeps listing with its remaining chain.
+// keeps listing with its remaining chain and the disabled target appears
+// NOWHERE — not ordered, and not re-advertised in the skipped tail.
 func TestModelDisable_ScheduleStatusOmitsFullyDisabledRoutes(t *testing.T) {
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer primary.Close()
@@ -325,6 +326,9 @@ func TestModelDisable_ScheduleStatusOmitsFullyDisabledRoutes(t *testing.T) {
 			Ordered []struct {
 				Provider string `json:"provider"`
 			} `json:"ordered"`
+			Skipped []struct {
+				Provider string `json:"provider"`
+			} `json:"skipped"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(p.scheduleStatus(), &st); err != nil {
@@ -339,6 +343,9 @@ func TestModelDisable_ScheduleStatusOmitsFullyDisabledRoutes(t *testing.T) {
 	}
 	if len(ri.Ordered) != 1 || ri.Ordered[0].Provider != "fallback" {
 		t.Fatalf("m1 ordered = %+v, want the non-disabled fallback only", ri.Ordered)
+	}
+	if len(ri.Skipped) != 0 {
+		t.Fatalf("m1 skipped = %+v, want the disabled primary omitted entirely", ri.Skipped)
 	}
 }
 

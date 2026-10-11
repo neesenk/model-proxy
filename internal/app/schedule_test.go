@@ -434,10 +434,11 @@ func TestScheduleStatus_BlockedReasonsOnEmptyChain(t *testing.T) {
 
 // TestScheduleStatus_BlockedReasonsDisabledVsDown pins that on a partially
 // disabled route whose remaining targets are all down, the empty-chain
-// blocked entries classify the operator-disabled target as
-// "operator-disabled" (it IS a routing target — just toggled off) instead of
-// the misleading default "unavailable" that the down classification would
-// fall through to.
+// blocked entries list only the SERVABLE targets' reasons — the
+// operator-disabled target is omitted entirely (disable is deliberate
+// operator state surfaced in Status→Models, not a scheduling anomaly), and
+// the down target keeps its own classification instead of the fallback
+// "unavailable".
 func TestScheduleStatus_BlockedReasonsDisabledVsDown(t *testing.T) {
 	p := newQuotaProxy(t,
 		map[string]configdomain.Provider{"a": {Provider: testProviderID}, "b": {Provider: testProviderID}},
@@ -460,41 +461,43 @@ func TestScheduleStatus_BlockedReasonsDisabledVsDown(t *testing.T) {
 	if !ok {
 		t.Fatal("route m missing: a partially disabled route stays listed")
 	}
-	byProvider := map[string]string{}
-	for _, b := range ri.Blocked {
-		byProvider[b.Provider] = b.Reason
+	if len(ri.Blocked) != 1 {
+		t.Fatalf("blocked = %+v, want only the servable target b", ri.Blocked)
 	}
-	if byProvider["a"] != "operator-disabled" {
-		t.Errorf("a reason = %q, want operator-disabled", byProvider["a"])
-	}
-	if byProvider["b"] != "quota-exhausted" {
-		t.Errorf("b reason = %q, want quota-exhausted", byProvider["b"])
+	if ri.Blocked[0].Provider != "b" || ri.Blocked[0].Reason != "quota-exhausted" {
+		t.Fatalf("blocked entry = %+v, want b/quota-exhausted", ri.Blocked[0])
 	}
 }
 
 // TestScheduleStatus_SkippedReasonsOnPartialChain pins the partial-chain
 // counterpart of the empty-chain `blocked` explanation: targets the
-// availability filter (circuit / quota exhaustion) or an operator disable
-// left OUT of an otherwise servable chain are listed under `skipped` with
-// their reasons — a silently skipped fallback must be distinguishable from
-// a misconfigured route. Available targets never appear there, and the
-// empty-chain case keeps using `blocked` (never both).
+// availability filter (circuit / quota exhaustion) left OUT of an otherwise
+// servable chain are listed under `skipped` with their reasons — a silently
+// skipped fallback must be distinguishable from a misconfigured route. An
+// operator-disabled target appears NOWHERE (not ordered, not skipped): the
+// disable is deliberate operator state, not a scheduling anomaly. Available
+// targets never appear there, and the empty-chain case keeps using `blocked`
+// (never both).
 func TestScheduleStatus_SkippedReasonsOnPartialChain(t *testing.T) {
 	p := newQuotaProxy(t,
 		map[string]configdomain.Provider{
 			"ok":        {Provider: testProviderID},
 			"down":      {Provider: testProviderID},
 			"exhausted": {Provider: testProviderID},
+			"dis":       {Provider: testProviderID},
 		},
 		map[string][]configdomain.RouteTarget{"m": {
 			{Provider: "ok", Priority: 1},
 			{Provider: "down", Priority: 2},
 			{Provider: "exhausted", Priority: 3},
+			{Provider: "dis", Model: "m", Priority: 4},
 		}})
 	// Circuit-open "down" (threshold 1: a single failure opens it) and spend
-	// "exhausted"'s ultimate window completely; "ok" stays servable.
-	p.runtimeState.RecordFailure("down", 1, time.Hour, 0)
+	// "exhausted"'s ultimate window completely; "ok" stays servable, "dis" is
+	// operator-disabled.
+	p.runtimeState.RecordFailure("down", 1, time.Hour, 0, 0)
 	staticSurplus(p, "exhausted", 0, 0)
+	p.runtimeState.SetModelDisabled("dis", "m", true)
 
 	var st struct {
 		Models map[string]struct {
@@ -525,11 +528,14 @@ func TestScheduleStatus_SkippedReasonsOnPartialChain(t *testing.T) {
 		t.Fatalf("blocked = %+v, want none on a partial chain", ri.Blocked)
 	}
 	if len(ri.Skipped) != 2 {
-		t.Fatalf("skipped = %+v, want entries for down and exhausted", ri.Skipped)
+		t.Fatalf("skipped = %+v, want entries for down and exhausted only (dis omitted)", ri.Skipped)
 	}
 	byProvider := map[string]string{}
 	for _, s := range ri.Skipped {
 		byProvider[s.Provider] = s.Reason
+	}
+	if byProvider["dis"] != "" {
+		t.Errorf("operator-disabled dis listed in skipped as %q; want omitted entirely", byProvider["dis"])
 	}
 	if byProvider["down"] != "circuit" {
 		t.Errorf("down reason = %q, want circuit", byProvider["down"])
@@ -573,5 +579,59 @@ func TestScheduleTierDeclaredBillingFallback(t *testing.T) {
 	}
 	if got := firstProvider(p, "payg-vs-unknown"); got != "undeclared" {
 		t.Fatalf("payg-vs-unknown first = %q, want undeclared (declared payg ranks in the payg tier)", got)
+	}
+}
+
+// TestScheduleStatus_CredentialBadge pins the credential-class sync-failure
+// badge on schedule chain nodes: a provider whose most recent quota sync
+// failed with a credential error (the tracker-side record — the kept
+// last-known-good snapshot says nothing about it) carries `credential` with
+// the classified token on every route it appears in, ranking is UNCHANGED
+// (the badge explains, it does not re-rank), and non-credential failures or
+// clean providers carry no badge at all.
+func TestScheduleStatus_CredentialBadge(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]configdomain.Provider{
+			"dead":    {Provider: testProviderID},
+			"blip":    {Provider: testProviderID},
+			"healthy": {Provider: testProviderID},
+		},
+		map[string][]configdomain.RouteTarget{"m": {
+			{Provider: "dead", Priority: 1},
+			{Provider: "blip", Priority: 2},
+			{Provider: "healthy", Priority: 3},
+		}})
+	now := time.Now()
+	p.mu.RLock()
+	cfg := p.cfg
+	expanded := p.expandedRoutes
+	parentOf := p.parentOf
+	poolIndex := p.poolIndex
+	snapshot := p.runtimeState.Dashboard(now)
+	p.mu.RUnlock()
+
+	var st struct {
+		Models map[string]struct {
+			Ordered []struct {
+				Provider   string `json:"provider"`
+				Credential string `json:"credential"`
+			} `json:"ordered"`
+		} `json:"models"`
+	}
+	data := scheduleStatusFromSnapshot(cfg, expanded, parentOf, poolIndex, snapshot,
+		map[string]string{"dead": "session-expired", "blip": ""}, now)
+	if err := json.Unmarshal(data, &st); err != nil {
+		t.Fatal(err)
+	}
+	ordered := st.Models["m"].Ordered
+	if len(ordered) != 3 || ordered[0].Provider != "dead" {
+		t.Fatalf("ordered = %+v, want dead first (badge must not re-rank)", ordered)
+	}
+	if ordered[0].Credential != "session-expired" {
+		t.Errorf("dead credential = %q, want session-expired", ordered[0].Credential)
+	}
+	if ordered[1].Credential != "" || ordered[2].Credential != "" {
+		t.Errorf("blip/healthy credential = %q/%q, want none (non-credential failure / clean)",
+			ordered[1].Credential, ordered[2].Credential)
 	}
 }

@@ -36,7 +36,9 @@ func (p *AqpProvider) AuthReady() bool {
 
 func init() {
 	Register("aqp", func(cfg *Config, providerName string) (Provider, error) {
-		return &AqpProvider{cfg: cfg, auth: cfg.authOrDefault(NewAqpKeyProvider(cfg.AqpMintURL, cfg.OAuthAuthFile))}, nil
+		key := NewAqpKeyProvider(cfg.AqpMintURL, cfg.OAuthAuthFile)
+		key.proxyURL = cfg.ProxyURL
+		return &AqpProvider{cfg: cfg, auth: cfg.authOrDefault(key)}, nil
 	})
 }
 
@@ -98,7 +100,7 @@ func (p *AqpProvider) fetchMonthlyUsage() (*MonthlyProjectUsage, error) {
 	req, _ := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
 	req.Header.Set("Cookie", CookieHeader(a.SSOSessionCookie))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.ProviderTransport(p.cfg.ProxyURL)}).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("monthly usage request failed: %w", err)
 	}

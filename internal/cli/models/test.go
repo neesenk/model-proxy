@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"model-proxy/internal/display"
-	"net/http"
 	"os"
 	"sort"
 	"time"
@@ -13,16 +12,11 @@ import (
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/probe"
 	"model-proxy/internal/routing"
-	"model-proxy/internal/upstreamproxy"
 )
 
 // CmdTest implements `model-proxy test <model>`: probe each route target once.
 func CmdTest(args []string) {
-	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s %s\n", display.Red("✗"), err)
-		os.Exit(1)
-	}
+	cfg := cliframework.LoadCmdConfig(args)
 	model := cliframework.Positional(args)
 	if model == "" {
 		fmt.Fprintf(os.Stderr, "%s usage: model-proxy test <model> [--config PATH]\n", display.Red("✗"))
@@ -33,10 +27,9 @@ func CmdTest(args []string) {
 		fmt.Fprintf(os.Stderr, "%s no route for model %q; available routes: %s\n", display.Red("✗"), model, cfg.RouteNames())
 		os.Exit(1)
 	}
-	client := &http.Client{Timeout: cfg.Scheduling.Timeout(), Transport: upstreamproxy.AutoTransport()}
 	anyOK := false
 	for _, t := range targets {
-		ok, status, reason, latency := probeRouteTarget(client, cfg, t)
+		ok, status, reason, latency := probeRouteTarget(cfg, t)
 		lat := latency.Round(time.Millisecond)
 		if ok {
 			anyOK = true
@@ -74,7 +67,7 @@ func testTargetsFor(cfg *configdomain.Config, model string) []configdomain.Route
 // (ok, httpStatus, reason, latency). The implementation comes from
 // providerImplFor — the first pooled virtual for a pooled provider, mirroring
 // the forward path's credential binding.
-func probeRouteTarget(client *http.Client, cfg *configdomain.Config, t configdomain.RouteTarget) (ok bool, status int, reason string, latency time.Duration) {
+func probeRouteTarget(cfg *configdomain.Config, t configdomain.RouteTarget) (ok bool, status int, reason string, latency time.Duration) {
 	provCfg, ok := cfg.Providers[t.Provider]
 	if !ok {
 		return false, 0, "provider not in config", 0
@@ -83,6 +76,10 @@ func probeRouteTarget(client *http.Client, cfg *configdomain.Config, t configdom
 	if err != nil {
 		return false, 0, err.Error(), 0
 	}
+	// Per-provider client: proxy_url must win over the global chain (codex via
+	// mihomo under a global `proxy: off`), mirroring the daemon forward path.
+	client := cliframework.ProviderClient(cfg, &provCfg)
+	client.Timeout = cfg.Scheduling.Timeout()
 	r := probe.Exchange(context.Background(), client, provCfg, impl, t.Model)
 	return r.OK, r.Status, r.Reason, r.Latency
 }

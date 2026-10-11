@@ -68,8 +68,8 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 			}
 		}
 		s := cfg.Scheduling
-		fmt.Printf("  scheduling: threshold=%d cooldown=%s rate_backoff=%s timeout=%s dwell=%s\n",
-			s.Threshold(), s.Cooldown(), s.RateBackoff(), s.Timeout(), s.Dwell())
+		fmt.Printf("  scheduling: threshold=%d cooldown=%s persist=%s rate_backoff=%s timeout=%s dwell=%s\n",
+			s.Threshold(), s.Cooldown(), s.Persist(), s.RateBackoff(), s.Timeout(), s.Dwell())
 		pools, oauth := accounts.CredentialModes(cfg.Credentials)
 		fmt.Printf("  credentials: pools=%s (%s) oauth=%s (%s)\n", pools.Mode, pools.Source, oauth.Mode, oauth.Source)
 		if note := accounts.CredentialMismatchNote(cfg.Credentials); note != "" {

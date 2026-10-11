@@ -528,3 +528,50 @@ func TestCodexOAuthProvider_ReportSecrets(t *testing.T) {
 		t.Fatalf("post-load ReportSecrets = %v, want the cached access_token", got)
 	}
 }
+
+// TestAqpKeyProviderMintHonorsProviderProxy pins the account-maintenance half
+// of providers.<name>.proxy_url: with the override set, the mint POST must
+// travel via that proxy (absolute-form request to the proxy host) and the
+// direct mint endpoint must see no traffic. Without the override the mint
+// still goes direct.
+func TestAqpKeyProviderMintHonorsProviderProxy(t *testing.T) {
+	var directHits atomic.Int32
+	mint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		directHits.Add(1)
+		json.NewEncoder(w).Encode(map[string]any{
+			"retcode": 0,
+			"data":    map[string]any{"api_key": "direct-key", "project_id": "p1"},
+		})
+	}))
+	defer mint.Close()
+
+	var proxyHits atomic.Int32
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits.Add(1)
+		if !strings.HasPrefix(r.URL.String(), mint.URL) {
+			t.Errorf("proxy saw request for %q, want the mint endpoint", r.URL.String())
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"retcode": 0,
+			"data":    map[string]any{"api_key": "proxied-key", "project_id": "p1"},
+		})
+	}))
+	defer proxySrv.Close()
+
+	dir := t.TempDir()
+	store := filepath.Join(dir, "store.json")
+	writeSSOCookie(t, store, "SSO_C=x")
+
+	proxied := NewAqpKeyProvider(mint.URL, store)
+	proxied.proxyURL = proxySrv.URL
+	req, _ := http.NewRequest("POST", "http://x", nil)
+	if err := proxied.Inject(req); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer proxied-key" {
+		t.Fatalf("proxied mint Authorization=%q", got)
+	}
+	if proxyHits.Load() != 1 || directHits.Load() != 0 {
+		t.Fatalf("hits: proxy=%d direct=%d, want 1/0", proxyHits.Load(), directHits.Load())
+	}
+}

@@ -61,6 +61,7 @@ func (s *Service) editScheduling(data map[string]any) error {
 		for _, key := range []string{
 			"circuit_threshold",
 			"circuit_cooldown",
+			"circuit_persist",
 			"rate_limit_backoff",
 			"quota_cooldown",
 			"model_lockout",

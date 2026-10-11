@@ -268,6 +268,13 @@ type DashboardState struct {
 	// Schedule is the schedule preview JSON derived from Runtime by the
 	// composition root (shared with /debug/schedule).
 	Schedule []byte
+	// QuotaSyncErrs is the quota tracker's record of each key's most recent
+	// FAILED sync (nil when none / quota disabled). The Runtime snapshot keeps
+	// the last-known-good quotas on failure, so this is the only place the
+	// failure itself is visible; Dashboard attaches it to the quota entries as
+	// SyncErr/SyncErrAt, and the composition root feeds its credential-class
+	// projection into the schedule preview.
+	QuotaSyncErrs map[string]runtimestate.QuotaSyncError
 }
 
 // PinState is the detached projection of one active route pin.
