@@ -611,13 +611,14 @@ routes:
 
 每个对外模型可配多个 `provider/model` 目标。代理按下面的规则选目标、失败逐一 failover，并对持续出错的 provider 熔断，避免每请求都去撞一个挂掉的上游：
 
-- **熔断**（超时 / 5xx / 连接错误 / 401 刷新后仍失败）：连续 `circuit_threshold`（默认 3）次 → 开路 `circuit_cooldown`（默认 10m），后半开放 1 个探针请求，成功关、失败再开。开路期间该 provider 被跳过。
+- **熔断**（超时 / 5xx / 连接错误 / 401 刷新后仍失败）：连续 `circuit_threshold`（默认 3）次**且 streak 跨至少 `circuit_persist`（默认 6s，`"0"` 关闭）**→ 开路 `circuit_cooldown`（默认 10m），后半开放 1 个探针请求，成功关、失败再开。开路期间该 provider 被跳过。持续门槛是对外网络噪音容忍：代理链回收/LB 滚动一次杀 N 条在途连接，不应被读成 N 个独立的 provider 死亡证据；单请求的 failover 不受影响、立即发生。
+- **连接快失败重派**：`unexpected EOF`/`EOF`/`connection reset`/`broken pipe`/`connection refused` 这类毫秒级返回的连接错误先在同一 target 重派一次（新连接），成功即吸收（记 success、首跳不记失败），仍失败才计数进熔断并 failover。超时（时间预算已烧掉）与客户端断开不重派；重派不占 401 refresh 的重试名额。
 - **限频跳过**（429，三维分类）：先采纳响应里的精确重置时间（body 文本 "reset after 2h5m"/"Resets in 164h"/RFC3339，上限 7 天），其次 `Retry-After` 头；都没有时按分类退避——日配额锁到本地次日 0 点、配额耗尽（余额/套餐窗口）等 `quota_cooldown`（默认 1h）、普通频率限制等 `rate_limit_backoff`（默认 60s）。不计入熔断。分类（transient/quota/daily）在 `serve status`（`rl:quota`/`rl:daily`）和 Web UI 健康 pill 上可见。
 - **模型级锁定**（`model_lockout`，默认 10m）：上游 404（模型被移除）、400/403「模型不可用/无权限」、空 200（`Content-Length: 0` 直接 failover；流式零字节本次难免、下次 failover）→ 只锁 `(provider, model)`，**不毒化整个账号**——同账号的其他模型照常服务。单目标路由的末 target 仍把上游原始错误（404/400）原样回给客户端。
 - **400 自动剥参**：上游 400 报「Unsupported parameter: 'xxx'」时，自动把该顶层参数记入 per-provider blocklist，当次剥离重试一次、后续请求预防性剥离（`model`/`messages` 等关键字段永不剥）。
 - **冻结态持久化 + unfreeze/freeze**：限频/熔断冷却、模型锁、剥参 blocklist 随 `quota_state.json` 落盘，重启后按 config 指纹匹配恢复（防串配置）。异常边界（账号已充值、429 误分类、上游提前重置）用 `model-proxy unfreeze [provider]` 或 Web UI Providers 卡的 unfreeze 按钮立即解冻重试；反向地，`model-proxy freeze <provider>` 或 Providers 卡的 freeze 按钮把 provider 显式冻结（调度排除、无到期、成功/失败记录不解冻，必须指定 provider——无 freeze-all，同样按指纹落盘恢复），直到 unfreeze。
 - **全冷却等待重试**（`retry_wait`，默认 10s，`"0"` 关闭）：当路由的**所有**目标都在冷却（限频/熔断）且最早到期 ≤ 预算时，代理静默等到期后整体重试，最多 2 次——代替立即报错让客户端走自己的重试循环；某目标在调度和终局之间恢复但本轮未被试，则**零等待立即重排**一次（仍在 2 次预算内）；客户端断开立即中止。重试耗尽或冷却超预算时按**跨轮失败类别**给出诚实终局：**纯限频 → 429 + `Retry-After`**，含硬失败/熔断成分 → 502（`x-mp-force-provider` 一次性覆盖不参与等待）。
-- **粘性驻留**（`sticky_dwell`，默认 10m）：每个路由「停」在一个 provider 上，在驻留窗口内优先用它（保 prompt cache，不为已恢复的高优先 provider 频繁回切）；只有它熔断/限频或驻留到期才换。10m ≈ 2× 缓存 TTL（~5m）：够保住活跃会话缓存、扛过短暂抖动，又能在有限时间内回到首选 provider。
+- **粘性驻留**（`sticky_dwell`，默认 1m）：每个路由「停」在一个 provider 上，在驻留窗口内优先用它（保 prompt cache，不为已恢复的高优先 provider 频繁回切）；只有它熔断/限频或驻留到期才换。到期语义按绑定键分两类：**带 session 头**的客户端绑定在 (会话, 路由) 组合键上、每次请求刷新驻留（活跃会话持续粘住，闲置超过 dwell 才重估）；**无 session 头**的客户端（body 字段推导的会话 id 不进 sticky 键）绑定在路由键上、驻留自绑定写入起算且不随请求刷新——连续流量下 dwell 到期同样重估回首选。默认 1m：failover 抖动被挤到次优 provider 的流量最多一分钟即重估回归，而不是被钉住十分钟。
 - **上游超时**（`upstream_timeout`，默认 1800s）：每个上游请求带超时，挂起的上游在超时后失败进入熔断/failover，而不是无限拖住请求；默认 1800s 以容纳长 thinking 流与超长输出，需要更快 failover 可调小。
 - **流式保活**（`stream_keepalive`，默认 15s，`"0"` 关闭）：客户端 SSE 流在上游静默（如大上下文 prefill 导致分钟级 TTFT）期间，每间隔向客户端写一帧 SSE 注释心跳（`: ping`，各官方 SDK 都会跳过），防止客户端/边缘 idle 超时掐断连接。心跳只在收到上游响应头之后才开始——之前的连接失败仍完整保留透明 failover；心跳帧不计入 TTFT、不进 request log/响应缓存。
 
@@ -625,13 +626,14 @@ routes:
 scheduling:
   circuit_threshold: 3
   circuit_cooldown: 10m
+  circuit_persist: 6s         # streak 持续门槛（"0" 关闭）
   rate_limit_backoff: 60s
   quota_cooldown: 1h          # 429 配额耗尽（无重置提示时）
   model_lockout: 10m          # 模型级失败锁定时长
   retry_wait: 10s             # 全冷却时等待重试预算（"0" 关闭）
   upstream_timeout: 1800s
   stream_keepalive: 15s       # SSE 静默心跳间隔（"0" 关闭）
-  sticky_dwell: 10m
+  sticky_dwell: 1m
   quota_poll_interval: 5m   # 后台 Quota() 轮询周期
   quota_switch_margin: 15   # 切换 provider 的 quota 边际（百分点）
 ```

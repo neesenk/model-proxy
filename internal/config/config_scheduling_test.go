@@ -53,8 +53,8 @@ func TestScheduling_DefaultsAndInvalid(t *testing.T) {
 	if s.Keepalive() != 15*time.Second {
 		t.Errorf("default keepalive=%v want 15s", s.Keepalive())
 	}
-	if s.Dwell() != 10*time.Minute {
-		t.Errorf("default dwell=%v want 10m", s.Dwell())
+	if s.Dwell() != time.Minute {
+		t.Errorf("default dwell=%v want 1m", s.Dwell())
 	}
 	if s.PollInterval() != 5*time.Minute {
 		t.Errorf("default pollInterval=%v want 5m", s.PollInterval())
@@ -115,8 +115,8 @@ func TestScheduling_DefaultsAndInvalid(t *testing.T) {
 	if bad.Keepalive() != 15*time.Second {
 		t.Errorf("invalid keepalive fallback=%v want 15s", bad.Keepalive())
 	}
-	if bad.Dwell() != 10*time.Minute {
-		t.Errorf("invalid dwell fallback=%v want 10m", bad.Dwell())
+	if bad.Dwell() != time.Minute {
+		t.Errorf("invalid dwell fallback=%v want 1m", bad.Dwell())
 	}
 	if bad.PollInterval() != 5*time.Minute {
 		t.Errorf("invalid pollInterval fallback=%v want 5m", bad.PollInterval())

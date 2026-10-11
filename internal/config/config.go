@@ -877,13 +877,14 @@ func (c CacheConfig) MaxBodyBytesValue() int {
 type Scheduling struct {
 	CircuitThreshold  int    `yaml:"circuit_threshold"`   // consecutive failures → open circuit (default 3)
 	CircuitCooldown   string `yaml:"circuit_cooldown"`    // circuit open duration, then half-open 1 probe (default 10m)
+	CircuitPersist    string `yaml:"circuit_persist"`     // consecutive failures must ALSO span at least this long before the circuit opens — external-network noise tolerance: one event that kills N in-flight connections must not read as N independent provider deaths (default 6s; "0" = open on threshold alone)
 	RateLimitBackoff  string `yaml:"rate_limit_backoff"`  // 429 with no Retry-After/hint, transient class: skip this long, then probe (default 60s)
 	QuotaCooldown     string `yaml:"quota_cooldown"`      // 429 classified quota-exhausted with no reset hint: skip this long (default 1h; daily class locks to midnight)
 	ModelLockout      string `yaml:"model_lockout"`       // model-level failure (404 / model-denied / empty 200): lock (provider,model) this long (default 10m)
 	RetryWait         string `yaml:"retry_wait"`          // all targets cooling down: wait ≤ this for the earliest expiry and retry (≤2×) instead of an immediate error (default 10s; "0" disables)
 	UpstreamTimeout   string `yaml:"upstream_timeout"`    // per-upstream-request timeout (default 1800s)
 	StreamKeepalive   string `yaml:"stream_keepalive"`    // SSE comment heartbeat into client-facing streams after this much upstream silence (default 15s; "0" disables)
-	StickyDwell       string `yaml:"sticky_dwell"`        // min time on the chosen provider before re-evaluating (default 10m)
+	StickyDwell       string `yaml:"sticky_dwell"`        // min time on the chosen provider before re-evaluating (default 1m)
 	QuotaPollInterval string `yaml:"quota_poll_interval"` // background poll cadence (default 5m)
 	QuotaSwitchMargin int    `yaml:"quota_switch_margin"` // switch if another plan provider's effective remaining beats current by ≥ this many pct points (default 15)
 	// Quality scoring: per-provider error-rate / TTFT EWMAs (2m half-life,
@@ -906,6 +907,12 @@ func (s Scheduling) Cooldown() time.Duration {
 		return d
 	}
 	return 10 * time.Minute
+}
+func (s Scheduling) Persist() time.Duration {
+	if d, err := time.ParseDuration(s.CircuitPersist); err == nil {
+		return d
+	}
+	return 6 * time.Second
 }
 func (s Scheduling) RateBackoff() time.Duration {
 	if d, err := time.ParseDuration(s.RateLimitBackoff); err == nil {
@@ -947,7 +954,7 @@ func (s Scheduling) Dwell() time.Duration {
 	if d, err := time.ParseDuration(s.StickyDwell); err == nil {
 		return d
 	}
-	return 10 * time.Minute
+	return time.Minute
 }
 func (s Scheduling) PollInterval() time.Duration {
 	if d, err := time.ParseDuration(s.QuotaPollInterval); err == nil {
@@ -991,11 +998,15 @@ type Provider struct {
 	AnthropicBaseURL string `yaml:"anthropic_base_url"`
 	DecisionsBaseURL string `yaml:"decisions_base_url"`
 	Provider         string `yaml:"provider_id"`
-	// ProxyURL overrides the top-level proxy for this provider's forwarded
-	// traffic (http/https/socks5 URL, or "off" to force direct). Empty =
-	// follow the global chain. Applies to forward/fusion/shadow upstream
-	// requests; account-maintenance calls (usage/quota/login) follow the
-	// global chain only.
+	// ProxyURL overrides the top-level proxy for this provider (http/https/
+	// socks5 URL, or "off" to force direct). Empty = follow the global chain.
+	// Governs BOTH the forwarded traffic (forward/fusion/shadow, resolved in
+	// internal/app proxy_transport.go) and this provider's account-maintenance
+	// calls (usage/quota/mint/models fetches, resolved via
+	// upstreamproxy.ProviderTransport) — a provider only reachable through its
+	// own proxy must not have its maintenance calls forced onto the global
+	// chain. The interactive `login` flows are the remaining global-only
+	// surface.
 	ProxyURL      string            `yaml:"proxy_url"`
 	AqpMintURL    string            `yaml:"aqp_mint_url"` // aqp only
 	ClientVersion string            `yaml:"client_version,omitempty"`
@@ -2111,6 +2122,7 @@ func (c *Config) validate() error {
 	}{
 		{"scheduling.upstream_timeout", c.Scheduling.UpstreamTimeout, false},
 		{"scheduling.circuit_cooldown", c.Scheduling.CircuitCooldown, false},
+		{"scheduling.circuit_persist", c.Scheduling.CircuitPersist, true},
 		{"scheduling.rate_limit_backoff", c.Scheduling.RateLimitBackoff, false},
 		{"scheduling.quota_cooldown", c.Scheduling.QuotaCooldown, false},
 		{"scheduling.model_lockout", c.Scheduling.ModelLockout, false},

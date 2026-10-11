@@ -27,9 +27,10 @@ log_level: info            # debug | info | warn | error
 # system proxy) bypass loopback destinations; an explicitly configured proxy
 # URL applies to loopback too (e.g. a local debugging proxy). The OS system
 # proxy is detected once per process
-# (restart after changing it); PAC/WPAD is not evaluated. Account-maintenance
-# calls (usage/quota/login) follow this global chain only — a provider's
-# proxy_url applies to its forwarded traffic (forward/fusion/shadow).
+# (restart after changing it); PAC/WPAD is not evaluated. A provider's
+# proxy_url overrides this chain for BOTH its forwarded traffic AND its
+# account-maintenance calls (usage/quota/mint/models); only the interactive
+# "login" flows follow the global chain alone.
 # proxy: http://127.0.0.1:7890
 
 # credentials: file         # file (default) | keychain — where credential secret
@@ -450,13 +451,14 @@ providers:
 # scheduling:
 #   circuit_threshold: 3        # (default 3)  consecutive failover-eligible failures -> open circuit
 #   circuit_cooldown: 10m       # (default 10m) circuit open duration, then half-open (1 probe)
+#   circuit_persist: 6s         # (default 6s; "0" disables) failures must also span this long before the circuit opens (external-network noise tolerance)
 #   rate_limit_backoff: 60s     # (default 60s) transient 429 with no reset hint/Retry-After: skip this long, then probe
 #   quota_cooldown: 1h          # (default 1h)  429 classified quota-exhausted (balance/plan window) with no reset hint
 #   model_lockout: 10m          # (default 10m) model-level failure (404 / model-denied / empty 200): lock (provider,model)
 #   retry_wait: 10s             # (default 10s; "0" disables) all targets cooling down: wait ≤ this for the earliest expiry and retry (≤2×)
 #   upstream_timeout: 1800s     # (default 1800s) per-upstream-request timeout
 #   stream_keepalive: 15s       # (default 15s; "0" disables) SSE comment heartbeat into client streams after this much upstream silence
-#   sticky_dwell: 10m           # (default 10m) min time on the chosen provider before re-evaluating
+#   sticky_dwell: 1m            # (default 1m) min time on the chosen provider before re-evaluating
 #   quota_poll_interval: 5m     # (default 5m)  background quota poll cadence
 #   quota_switch_margin: 15     # (default 15)  switch provider if another's effective remaining beats current by >= this many pct points
 #   quality_error_weight: 100   # (default 100) penalty per unit error-rate EWMA (2m half-life), subtracted from surplus; 0 disables

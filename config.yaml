@@ -17,11 +17,16 @@ log_level: info # debug | info | warn | error
 # system proxy) bypass loopback destinations; an explicitly configured proxy
 # URL applies to loopback too (e.g. a local debugging proxy). The OS system
 # proxy is detected once per process
-# (restart after changing it); PAC/WPAD is not evaluated. Account-maintenance
-# calls (usage/quota/login) follow this global chain only — a provider's
-# proxy_url applies to its forwarded traffic (forward/fusion/shadow).
+# (restart after changing it); PAC/WPAD is not evaluated. A provider's
+# proxy_url overrides this chain for BOTH its forwarded traffic AND its
+# account-maintenance calls (usage/quota/mint/models); only the interactive
+# `login` flows follow the global chain alone.
 # proxy: http://127.0.0.1:7890
-
+# 2026-10-10: compass.llm.shopee.io 只在此网络直连可达且更快更稳;mihomo 的 compass
+# 链路是当日多波 unexpected EOF 的抖动源。全局 off = 所有出站(模型转发 + mint/quota
+# 账号维护)直连、忽略系统代理。openrouter 直连可达性受影响时再把本行改回或按
+# provider 配 proxy_url。
+proxy: off
 # Protocol conversion. strict_lossy (default false) refuses lossy-but-degradable
 # request conversions: the converting target is skipped (capability-scanner
 # semantics) and a route with no non-lossy target answers 400 instead of
@@ -84,6 +89,7 @@ providers:
     provider_id: codex
     priority: 2
     billing: plan
+    proxy_url: http://127.0.0.1:7897
     openai_base_url: https://chatgpt.com/backend-api/codex
     # gpt-5.4 omitted: upstream rejects it for ChatGPT-account Codex access
     # ("The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account").
@@ -343,30 +349,6 @@ providers:
       - mimo-v2.6-flash
       - mimo-v2.6-pro
       - mimo-v2.6-pro-ultraspeed
-  # OpenRouter (https://openrouter.ai — aggregated model gateway, prepaid
-  # credits). API key via `login openrouter` (openrouter.ai/settings/keys).
-  # One key (Authorization: Bearer) serves both protocols: openai_base_url =
-  # /api/v1 (chat/completions, responses, models, key), anthropic_base_url =
-  # /api (proxy keeps the client /v1/messages path — OpenRouter's Anthropic
-  # Messages endpoint is /api/v1/messages). Model ids are VENDOR-PREFIXED
-  # (anthropic/claude-*, openai/gpt-*, z-ai/glm-*, plus :free/:batch variants
-  # — see openrouter.ai/models) and do NOT match models.dev's bare-name
-  # metadata; declare capabilities: per model when the request-aware router
-  # needs it. usage_url polls GET /key (day/week/month spend + optional
-  # per-key credit cap); credit exhaustion surfaces as upstream 402.
-  # Chat reasoning shape is the native reasoning:{effort} object. Poolable
-  # (repeat `login`). Also a preset: `model-proxy add openrouter`.
-  openrouter:
-    openai_base_url: https://openrouter.ai/api/v1
-    anthropic_base_url: https://openrouter.ai/api
-    provider_id: openrouter
-    priority: 3
-    billing: pay-as-you-go
-    usage_url: https://openrouter.ai/api/v1/key
-    alias:
-      stealth/space-bunny-alpha: space-bunny-free
-    models:
-      - stealth/space-bunny-alpha
   # OpenCode Go (https://opencode.ai/go — the OpenCode team's $10/month
   # SUBSCRIPTION for curated open coding models; NOT the pay-as-you-go Zen
   # gateway at /zen). API key via `login opencode-go` (opencode.ai/auth →
@@ -430,6 +412,24 @@ providers:
       - space-bunny
       - space-bunny-free
       - step-5-preview-free
+  # openrouter:
+  #  openai_base_url: https://openrouter.ai/api/v1
+  #  anthropic_base_url: https://openrouter.ai/api
+  #  provider_id: openrouter
+  #  priority: 3
+  #  billing: pay-as-you-go
+  #  usage_url: https://openrouter.ai/api/v1/key
+  #  models:
+  #    - anthropic/claude-opus-5.5
+  #    - anthropic/claude-sonnet-5
+  #    - openai/gpt-6-luna
+  #    - openai/gpt-5.5
+  #    - deepseek/deepseek-v4-pro
+  #    - z-ai/glm-5.3
+  #    - moonshotai/kimi-k3
+  #    - qwen/qwen3.8-flash
+  #    - google/gemini-3.8-flash
+  #    - x-ai/grok-4.7
 # Qianwen Token Plan 个人版 (千问 AI Token Plan personal edition). API key via
 # `login qwen-plan` (from the Token Plan console; key format sk-sp-…). Two
 # protocol bases: openai_base_url = OpenAI-compatible base, anthropic_base_url
@@ -487,17 +487,7 @@ providers:
 #  opus: [zhipu/glm-5.3, aqp/glm-5.3, volcengine/glm-5.3, shopee/glm-5.3]
 #  claude-sonnet-4-6: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-v4-pro]
 #  sonnet: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-v4-pro]
-routes:
-  agent-free:
-    - model: space-bunny-free
-      priority: 1
-      provider: opencode-go
-    - model: stealth/space-bunny-alpha
-      priority: 2
-      provider: openrouter
-    - model: longcat-2.5-preview-free
-      priority: 3
-      provider: opencode-go
+routes: {}
 # deepseek-v4-pro: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-flash]
 # deepseek-v4-flash: [aqp/deepseek-v4-flash, volcengine/deepseek-v4-flash, shopee/deepseek-v4-flash, deepseek/deepseek-flash]
 
@@ -561,17 +551,21 @@ routes:
 # scheduling:
 #   circuit_threshold: 3 # (default 3) consecutive failover-eligible failures -> open circuit
 #   circuit_cooldown: 10m # (default 10m) circuit open duration, then half-open (1 probe)
+#   circuit_persist: 6s # (default 6s; "0" disables) failures must ALSO span at least this long before the circuit opens — external-network tolerance: one event killing N in-flight connections (proxy chain recycle, LB roll) must not read as N independent provider deaths; per-request failover is unaffected
 #   rate_limit_backoff: 60s # (default 60s) transient 429 with no reset hint/Retry-After: skip this long, then probe
 #   quota_cooldown: 1h # (default 1h) 429 classified quota-exhausted (balance/plan window) with no reset hint
 #   model_lockout: 10m # (default 10m) model-level failure (404 / model-denied / empty 200): lock (provider,model)
 #   retry_wait: 10s # (default 10s; "0" disables) all targets cooling down: wait ≤ this for the earliest expiry and retry (≤2×)
 #   upstream_timeout: 1800s # (default 1800s) per-upstream-request timeout
 #   stream_keepalive: 15s # (default 15s; "0" disables) SSE comment heartbeat into client streams after this much upstream silence
-#   sticky_dwell: 10m # (default 10m) min time on the chosen provider before re-evaluating
+#   sticky_dwell: 1m # (default 1m) min time on the chosen provider before re-evaluating
 #   quota_poll_interval: 5m # (default 5m) background quota poll cadence
 #   quota_switch_margin: 15 # (default 15) switch provider if another's effective remaining beats current by >= this many pct points
 #   quality_error_weight: 100 # (default 100 = 1.0) penalty per unit error-rate EWMA (2m half-life), subtracted from surplus; 0 disables
 #   quality_ttft_weight: 20 # (default 20 = 0.2) penalty per unit normalized TTFT EWMA (10s reference); 0 disables
+# Active override (defaults in the commented block above apply to the rest):
+scheduling:
+  sticky_dwell: 1m # idle sessions return to the preferred provider after 1m instead of 10m
 # takeover: client targets come from templates now — embedded presets
 # (`model-proxy takeover list`) or your own YAML in
 # ~/.model-proxy/takeover-templates/<name>.yaml (same name overrides a preset;
@@ -617,7 +611,6 @@ web:
   auth:
     admin_token_file: ~/.model-proxy/admin_token
     api_keys_file: ~/.model-proxy/api_keys
-
 # Call statistics (SQLite; per provider×model×minute buckets incl. latency/TTFT
 # and per-agent dims; powers the `stats` CLI and Web UI Analytics/Requests
 # pages). Defaults shown; omit the block to accept them.
