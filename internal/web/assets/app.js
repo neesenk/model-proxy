@@ -42,6 +42,7 @@ import {
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
   detailFetchState, CLIENT_GONE_STATUS, notLoggedHint, quotaErrKind, accountUsageState,
   accountRemainingLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta,
+  scheduleCredentialLabel, syncErrLabel,
   keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML,
   SECURITY_RANGES, securityRangeFromSecs, securityFilterQuery, securityFilterFromQuery, explainCacheKey,
@@ -3802,6 +3803,12 @@ function renderLiveCard(target, query) {
 // value paint is skipped — a programmatic value write would clobber the
 // user's typed query (the option splice alone is always safe: attachCombo
 // filters at open time); the blur handler retries once the user is done.
+// Burst callers (applyLiveEventDOM, once per SSE event) must go through
+// scheduleLiveSessionOptions instead: the SSE handshake replays the hub's
+// recent ring — up to 2000 events in ~1s — and a synchronous O(rows)
+// filter+sort per event froze the page under batch-scale event floods. The
+// direct-call paths are user- or load-driven (blur, render, fetch landing),
+// never event-driven.
 function refreshLiveSessionOptions() {
   const sel = document.getElementById('live-session');
   if (!sel) return;
@@ -3827,6 +3834,20 @@ function refreshLiveSessionOptions() {
   }
   if (key === S.optionsKey) return;
   S.optionsKey = key;
+}
+
+// scheduleLiveSessionOptions coalesces session-combobox rebuilds from the
+// SSE event path: at most one trailing refresh per window no matter how many
+// events arrived (the replay burst delivers thousands). When the timer fires
+// after the Live view went away, refreshLiveSessionOptions' own guards
+// (missing #live-session / activeLiveState) make it a no-op.
+let liveSessionOptionsTimer = 0;
+function scheduleLiveSessionOptions() {
+  if (liveSessionOptionsTimer) return;
+  liveSessionOptionsTimer = setTimeout(() => {
+    liveSessionOptionsTimer = 0;
+    refreshLiveSessionOptions();
+  }, 200);
 }
 
 // (v2: liveSessionLabel — the 8…4 session-id abbreviation — was removed;
@@ -4817,23 +4838,26 @@ function prependLiveRows(tbl, tbody, rows) {
 // session's events. start and eventOnly rows are prepended; end/guard events
 // update the existing row in place; progress events only feed the detail
 // popover (via the onmessage hook), the summary row does not change.
+// Session-options upkeep goes through scheduleLiveSessionOptions — this runs
+// once per SSE event and the replay burst delivers thousands in ~1s, so the
+// O(rows) options rebuild must not run synchronously per event.
 function applyLiveEventDOM(e) {
   if (activeLiveState() && activeLiveState().session) {
     // Session mode: only the selected session's events change the panel;
     // unrelated events must not rebuild it. The dropdown still picks up new
-    // sessions cheaply.
+    // sessions cheaply (coalesced — see scheduleLiveSessionOptions).
     const owner = e.request_id && liveByReq[e.request_id];
     const sess = activeLiveState().session;
     const relevant = e.session_id === sess ||
       (owner && owner.session === sess);
     if (!relevant) {
-      refreshLiveSessionOptions();
+      scheduleLiveSessionOptions();
       return;
     }
     renderLiveTable();
     return;
   }
-  refreshLiveSessionOptions();
+  scheduleLiveSessionOptions();
   const tbl = document.getElementById('live-table');
   if (!tbl) return;
   // Stream gate: the other stream's rows are not in this table — a miss must
@@ -6448,12 +6472,16 @@ function renderScheduleCard(target, st) {
       if (!p.available) classes.push('unavailable');
       const pinned = info.pin && (info.pin === p.provider || info.pin === p.pool_parent);
       if (pinned) classes.push('pinned');
+      // Credential-class sync failure (backend badge; see
+      // runtime.CredentialErrClass): the node still ranks here, but its
+      // credential is dead — say so instead of letting it look healthy.
+      const cred = p.credential ? scheduleCredentialLabel(p.credential) : '';
       const peak = p.peak ? ' · peak' : '';
       const tier = ` · ${esc(scheduleTierLabel(p.tier, p.billing_declared))}`;
       const parent = p.pool_parent ? ` (${esc(p.pool_parent)})` : '';
-      const title = `priority ${p.priority} · ${esc(scheduleTierTitle(p.tier, p.billing_declared))} · surplus ${(p.surplus || 0).toFixed(2)}${peak}${pinned ? ' · pinned (no failover)' : ''}`;
-      chain += `<span class="${classes.join(' ')}" title="${esc(title)}">${pinned ? iconPin() : ''}${esc(p.provider)}${esc(parent)}${tier}</span>`;
-      if (i < ordered.length - 1) chain += `<span class="route-sep">→</span>`;
+      const title = `priority ${p.priority} · ${esc(scheduleTierTitle(p.tier, p.billing_declared))} · surplus ${(p.surplus || 0).toFixed(2)}${peak}${pinned ? ' · pinned (no failover)' : ''}${cred ? ` · credential: ${cred}` : ''}`;
+      chain += `<span class="${classes.join(' ')}" title="${esc(title)}">${pinned ? iconPin() : ''}${esc(p.provider)}${esc(parent)}${tier}${cred ? `<span class="route-cred">${esc(cred)}</span>` : ''}</span>`;
+      if (i < ordered.length - 1) chain += '<span class="route-sep">→</span>';
     });
     // Unpinned routes get a pin button opening a small popover menu of the
     // route's own chain providers (pinning anything else is a no-op
@@ -8017,6 +8045,10 @@ const SETTINGS_GROUPS = [
         help: 'How long the circuit stays open before a single half-open probe.',
       },
       {
+        key: 'circuit_persist', label: 'circuit_persist', type: 'text', def: '6s',
+        help: 'Consecutive failures must also span at least this long before the circuit opens — one event killing N in-flight connections must not read as N provider deaths. Per-request failover is unaffected; "0" disables.',
+      },
+      {
         key: 'rate_limit_backoff', label: 'rate_limit_backoff', type: 'text', def: '60s',
         help: 'Skip duration after a transient 429 with no reset hint or Retry-After, then probe.',
       },
@@ -8740,9 +8772,17 @@ async function refreshAccountUsage(btn, p) {
     selectProviderMirror(accountsSelectedProvider);
   } catch (e) {
     // On failure the pane was NOT re-rendered, so reset the clicked button.
+    // The 502 body is intentionally generic ("quota sync failed; kept
+    // last-known-good"); the real reason rides on the tracker-side SyncErr the
+    // failed poll just recorded — fetch status and append it so the message
+    // matches what `usage <provider>` prints on the CLI.
     btn.disabled = false;
     btn.textContent = orig;
-    showMsg(document.getElementById('acc-msg'), 'err', 'refresh failed: ' + e.message);
+    let msg = 'refresh failed: ' + e.message;
+    const st = await apiGet('/api/status').catch(() => null);
+    const se = st && st.quota && st.quota[key] && st.quota[key].SyncErr;
+    if (se) msg += ` — ${se}`;
+    showMsg(document.getElementById('acc-msg'), 'err', msg);
   }
 }
 
@@ -9122,6 +9162,22 @@ function renderAccountUsage(p, snap) {
   }
   const windows = snap.Windows || [];
   let bars = '';
+  // A kept last-known-good snapshot with a FAILED latest sync (snap.SyncErr,
+  // Err empty) renders its stale windows BELOW an honest failure banner — the
+  // numbers may be days old, and the failure says why (an expired credential
+  // names the fix; SSO providers get the Re-login button, same as the
+  // first-observation Err branch above).
+  let syncBanner = '';
+  if (snap.SyncErr && !snap.Err) {
+    const k = quotaErrKind(snap);
+    const label = syncErrLabel(k) || 'Sync error';
+    const canRelogin = p && (p.provider_id === 'aqp' || p.provider_id === 'codex');
+    const relogin = canRelogin && (k === 'session-expired' || k === 'not-logged-in')
+      ? ` - <button type="button" class="link-btn" data-relogin>${k === 'session-expired' ? 'Re-login' : 'Sign in'}</button>`
+      : '';
+    const asOf = snap.AsOf ? ` · numbers as of ${esc(fmtReset(snap.AsOf))}` : '';
+    syncBanner = `<div class="acct-empty acct-err">${esc(label)}${relogin}${asOf}</div>`;
+  }
   for (const w of windows) {
     const p = (w.RemainingPct != null && w.RemainingPct >= 0) ? w.RemainingPct : null;
     const fillCls = p == null ? '' : (p > 0.3 ? 'ok' : (p > 0.1 ? 'warn' : 'err'));
@@ -9149,7 +9205,7 @@ function renderAccountUsage(p, snap) {
     }
   }
   if (!bars) bars = `<div class="acct-empty">no quota windows</div>`;
-  return head + notes + bars;
+  return syncBanner + head + notes + bars;
 }
 
 // renderAccountTokens renders the per-account token table (sorted by model)
