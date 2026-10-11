@@ -435,3 +435,34 @@ func TestTokenCounterConcurrent(t *testing.T) {
 		t.Errorf("Requests = %d, want %d", got.Requests, committers)
 	}
 }
+
+// Gateways exist that repeat the CUMULATIVE usage counters on every
+// usage-bearing SSE frame (step-plan emits openai usage per chunk). Totals
+// must equal the LAST snapshot, never the sum — summation once inflated a
+// single request into hundreds of millions of tokens in the stats buckets.
+func TestUsageScannerRepeatedCumulativeChunks(t *testing.T) {
+	var logged TokenUsage
+	tc := NewTokenCounter()
+	body := io.NopCloser(strings.NewReader(
+		"data: {\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10}}\n\n" +
+			"data: {\"usage\":{\"prompt_tokens\":150000,\"completion_tokens\":800}}\n\n" +
+			"data: {\"usage\":{\"prompt_tokens\":187654,\"completion_tokens\":1050}}\n\n"))
+	s := NewUsageScanner(body, TokenKey{Provider: "p", Model: "m"}, tc, func(u TokenUsage) { logged = u })
+	_, _ = io.ReadAll(io.MultiReader(s))
+	_ = s.Close()
+	if logged.Input != 187654 || logged.Output != 1050 {
+		t.Fatalf("cumulative chunks must merge by last/max, got in=%d out=%d", logged.Input, logged.Output)
+	}
+	// anthropic message_delta repetition: same rule.
+	var logged2 TokenUsage
+	body2 := io.NopCloser(strings.NewReader(
+		"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":900}}}\n\n" +
+			"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":42}}\n\n" +
+			"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4242}}\n\n"))
+	s2 := NewUsageScanner(body2, TokenKey{Provider: "p", Model: "m"}, NewTokenCounter(), func(u TokenUsage) { logged2 = u })
+	_, _ = io.ReadAll(io.MultiReader(s2))
+	_ = s2.Close()
+	if logged2.Input != 900 || logged2.Output != 4242 {
+		t.Fatalf("anthropic repeated delta frames must merge by last/max, got in=%d out=%d", logged2.Input, logged2.Output)
+	}
+}

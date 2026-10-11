@@ -95,7 +95,10 @@ type UsageScanner struct {
 	onAgent func(TokenUsage) // optional: attribute the same usage to an agent (parallel agent pipeline)
 	line    []byte           // current incomplete line (bounded by scanLineCap)
 	acc     TokenUsage
-	done    bool
+	// anth/oai carry the per-shape snapshot-vs-delta merge state (see
+	// usageShapeState); responses snapshots merge by max inline.
+	anth, oai usageShapeState
+	done      bool
 
 	// Non-stream fallback: when the first payload byte is '{' the body is a
 	// plain JSON response (not SSE), so it is retained (capped) for one whole-
@@ -189,6 +192,40 @@ func (s *UsageScanner) observe(chunk []byte) {
 	}
 }
 
+// usageShapeState applies one merge rule per wire shape (anthropic frames vs
+// openai usage chunks vs responses snapshots): a value that does not decrease
+// is a CUMULATIVE snapshot — it replaces the running total; a decrease is a
+// DELTA — it adds. Gateways exist that repeat cumulative counters on every
+// usage-bearing frame (step-plan emits openai usage per chunk — plain
+// addition inflated one request into hundreds of millions of tokens), while
+// converted routes emit genuine per-shape deltas. Cross-shape totals still
+// sum (an anthropic message_start input plus an openai trailing chunk are
+// separate reports).
+type usageShapeState struct {
+	lastIn, lastOut uint64
+}
+
+// mergeField folds one frame's counters into the running accumulators.
+// Zero-valued fields are skipped (frames routinely carry only some fields).
+func (st *usageShapeState) mergeField(inAcc *uint64, in uint64, outAcc *uint64, out uint64) {
+	if in > 0 {
+		if in >= st.lastIn {
+			*inAcc = in - st.lastIn + *inAcc // snapshot: replace the increment
+		} else {
+			*inAcc += in // delta
+		}
+		st.lastIn = in
+	}
+	if out > 0 {
+		if out >= st.lastOut {
+			*outAcc = out - st.lastOut + *outAcc
+		} else {
+			*outAcc += out
+		}
+		st.lastOut = out
+	}
+}
+
 // parseLine inspects one SSE data line for a usage payload.
 func (s *UsageScanner) parseLine(line []byte) {
 	trimmed := bytes.TrimLeft(line, " \t")
@@ -224,19 +261,19 @@ func (s *UsageScanner) parseLine(line []byte) {
 	if json.Unmarshal(payload, &anth) == nil {
 		if anth.Type == "message_start" {
 			s.sseUsage = true
-			s.acc.Input += anth.Message.Usage.InputTokens
+			s.anth.mergeField(&s.acc.Input, anth.Message.Usage.InputTokens, nil, 0)
 			s.acc.CacheCreation = max(s.acc.CacheCreation, anth.Message.Usage.CacheCreationTokens)
 			s.acc.CacheRead = max(s.acc.CacheRead, anth.Message.Usage.CacheReadTokens)
 		}
 		if anth.Type == "message_delta" {
 			s.sseUsage = true
-			s.acc.Output += anth.Usage.OutputTokens
+			s.anth.mergeField(nil, 0, &s.acc.Output, anth.Usage.OutputTokens)
 			// A native anthropic stream carries only output_tokens here, but the
 			// protocol-conversion transformer (openai→anthropic) emits input_tokens
 			// in message_delta too (openai delivers prompt_tokens at the trailing
 			// chunk, after message_start fired). Read it here so converted routes
 			// attribute input tokens (otherwise they'd be permanently 0).
-			s.acc.Input += anth.Usage.InputTokens
+			s.anth.mergeField(&s.acc.Input, anth.Usage.InputTokens, nil, 0)
 			// Cache buckets merge by per-field MAX, never +=: dialects deliver
 			// the real values only here (zhipu/aqp/shopee/kimi-code send zero or
 			// null cache usage in message_start), while others repeat the same
@@ -259,8 +296,7 @@ func (s *UsageScanner) parseLine(line []byte) {
 	}
 	if json.Unmarshal(payload, &oai) == nil && oai.Usage != nil {
 		s.sseUsage = true
-		s.acc.Input += oai.Usage.PromptTokens
-		s.acc.Output += oai.Usage.CompletionTokens
+		s.oai.mergeField(&s.acc.Input, oai.Usage.PromptTokens, &s.acc.Output, oai.Usage.CompletionTokens)
 		// Cached prompt tokens ride in prompt_tokens_details (openai contract);
 		// deepseek additionally spells them prompt_cache_hit_tokens — details win
 		// when both are present. Max-merge like the anthropic cache buckets: a
