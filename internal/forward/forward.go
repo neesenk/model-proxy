@@ -517,6 +517,10 @@ type serveState struct {
 	// set during serveOnce and copied into the attempt's LogCtx so the request
 	// log can persist it. Never fails closed: a nil value simply omits the field.
 	routing *configdomain.RoutingDecision
+	// fitNote explains a request-aware reroute (see describeFitReroute): set
+	// when ApplyWithProfile dropped in-route targets or replaced the chain
+	// cross-route, copied into the request log's ScheduleDecision.Note.
+	fitNote string
 	// scheduleSource names the engine that produced this pass's try order
 	// (runtime.ScheduleSource* / ScheduleSourceForce). Re-computed each
 	// wait-retry round; copied into every attempt's LogCtx. Orthogonal to
@@ -645,7 +649,14 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 		// that fit the request (image capability + context window); if none in the
 		// route fit, fall back to a cross-route capable+fitting pool ranked by the
 		// normal scheduling policy. No-op when everything already fits.
+		beforeFit := ordered
 		ordered = planner.ApplyWithProfile(exposed, sessionKey, ordered, p.requestProfile(st, cat, origBody))
+		if note, replaced := planner.DescribeFitReroute(beforeFit, ordered, p.requestProfile(st, cat, origBody)); replaced {
+			st.fitNote = note
+			// Header must land before the first body write; routing happens
+			// pre-upstream, so this is always early enough even for streams.
+			req.writer.Header().Set("x-mp-reroute", note)
+		}
 		// Route-tier policy (route_policy): precedence is latch > selector >
 		// bands > static order. The latch is session-scoped runtime state and
 		// wins outright; otherwise bands set a deterministic baseline and a
@@ -779,8 +790,8 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 			}
 		}
 		var scheduleDecision *requestlog.ScheduleDecision
-		if st.scheduleSource != "" {
-			scheduleDecision = &requestlog.ScheduleDecision{Source: st.scheduleSource}
+		if st.scheduleSource != "" || st.fitNote != "" {
+			scheduleDecision = &requestlog.ScheduleDecision{Source: st.scheduleSource, Note: st.fitNote}
 		}
 		flc := LogCtx{RequestID: requestID, SessionID: clientSession, Attempt: st.attempt, Exposed: exposed, Agent: agent, OrigBody: origBody, Diagnostics: convDiags, Routing: st.routing, Schedule: scheduleDecision}
 		st.attempt++

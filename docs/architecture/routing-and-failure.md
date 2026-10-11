@@ -177,7 +177,22 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
 - **跳过可观测**：空链由 `/api/status.schedule` 的 `blocked` 逐目标解释；部分链
   被排除的目标由 `skipped` 透出（同形状同分类，字段契约见 `docs/web-api.md`）——
   被静默跳过的 fallback 必须可与配置错误区分。请求级 failover 链由 request log
-  的同 id 多 attempt 行承载：未 commit 的 failover 中间跳（429/5xx/认证/传输错误，且其后确有下一跳）各落一行 `attempt_only` 请求日志——同 request id、同 attempt 序号、带上游状态与 8KB 错误体 peek，api_key 照记；`attempt_only` 行被 KeyUsage 与 session 聚合排除（路由遥测，不是客户端流量），最后一跳失败且全链终态时沿用终态行、不重复落中间行。
+  的同 id 多 attempt 行承载（attempt 行语义见下一段）。request-aware 路由
+  （planner.ApplyWithProfile 的能力/上下文裁剪与跨路由兜底）**必须留痕**：
+  目标集被裁剪或整链被跨路由替换时，请求日志该请求的 `schedule.note`
+  记录每个被裁目标的 fit 判词与替换头（如 `request-aware: dropped
+  zcode/glm-5.3: model metadata lacks image modality → cross-route
+  step-plan/step-5-preview`），响应头带 `x-mp-reroute`（写于首个 body 字节
+  之前，流式也可见）；未变化时不产生任何开销（`DescribeFitReroute` 先做
+  集合比对）。跨路由托底池的选择按**阶梯**：先取**本路由 provider** 内
+  合适的目标（路由已信任的 provider 上的兄弟模型，无视 tier 领先），组内
+  及其余池再按调度序（tier plan→pay → priority → 余量）——`preferRouteProviders`
+  对调度结果做稳定分区实现，`#req`（能力/上下文兜底）与 `#ctx`（溢出重试）
+  两条路径共用。token 用量聚合（observe/counters 的 UsageScanner）按
+  **形态内快照-或-增量**合并：同 wire 形态内单调不降的 usage 值视为累计
+  快照取末值（存在逐 chunk 重复累计值的网关，曾把单请求膨胀成上亿 token
+  统计），下降视为增量相加；跨形态（anthropic 帧与 openai chunk）仍求和。
+  同 id 多 attempt 行语义：未 commit 的 failover 中间跳（429/5xx/认证/传输错误，且其后确有下一跳）各落一行 `attempt_only` 请求日志——同 request id、同 attempt 序号、带上游状态与 8KB 错误体 peek，api_key 照记；`attempt_only` 行被 KeyUsage 与 session 聚合排除（路由遥测，不是客户端流量），最后一跳失败且全链终态时沿用终态行、不重复落中间行。
 - **绑定粒度 (会话, 路由)**：sticky 键是 `runtime.StickyKey(sessionKey, exposed)`
   ——一个会话在每个路由上持有**独立绑定**（同会话换模型 = 新绑定，不把旧路由选中的
   账号拖带到新路由，与 latchKey/repeat_turn 同粒度；Bifrost「绑定按请求的 model

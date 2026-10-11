@@ -90,6 +90,11 @@ type ConversionDiagnostic struct {
 // this struct is the persisted projection.
 type ScheduleDecision struct {
 	Source string `json:"source"`
+	// Note explains a request-aware reroute: the per-target fit verdicts that
+	// emptied (or narrowed) the route and the cross-route replacement chosen.
+	// Empty on ordinary scheduling. Surfaced on the record's `schedule` field
+	// and (as x-mp-reroute) on the response header.
+	Note string `json:"note,omitempty"`
 }
 
 // Input contains detached request/response facts used to build a Record.
@@ -296,9 +301,13 @@ func appendRecordLine(dst []byte, rec *Record) []byte {
 		dst = append(dst, `,"routing":`...)
 		dst = appendRoutingDecision(dst, rec.Routing)
 	}
-	if rec.Schedule != nil && rec.Schedule.Source != "" {
+	if rec.Schedule != nil && (rec.Schedule.Source != "" || rec.Schedule.Note != "") {
 		dst = append(dst, `,"schedule":{"source":`...)
 		dst = appendJSONString(dst, rec.Schedule.Source)
+		if rec.Schedule.Note != "" {
+			dst = append(dst, `,"note":`...)
+			dst = appendJSONString(dst, rec.Schedule.Note)
+		}
 		dst = append(dst, '}')
 	}
 	return append(dst, '}', '\n')

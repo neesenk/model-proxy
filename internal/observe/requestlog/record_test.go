@@ -319,3 +319,18 @@ func TestBuildRecordAttemptOnly(t *testing.T) {
 		t.Fatal("attempt_only lost through the JSONL line")
 	}
 }
+
+// The schedule note (request-aware reroute trace) must survive the JSONL line.
+func TestBuildRecordScheduleNote(t *testing.T) {
+	rec := (&Logger{maxBodyBytes: 1 << 20}).BuildRecord(Input{
+		RequestID: "r2", Provider: "step-plan", Status: 200,
+		Schedule: &ScheduleDecision{Source: "sticky", Note: "request-aware: dropped zcode/glm-5.3: model metadata lacks image modality → cross-route step-plan/step-5-preview"},
+	})
+	var back Record
+	if err := json.Unmarshal(appendRecordLine(nil, rec), &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Schedule == nil || back.Schedule.Note == "" || !strings.Contains(back.Schedule.Note, "cross-route step-plan/step-5-preview") {
+		t.Fatalf("schedule note lost: %+v", back.Schedule)
+	}
+}

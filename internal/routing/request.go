@@ -276,6 +276,39 @@ func NewPlanner(input PlannerInput) Planner {
 	}
 }
 
+// preferRouteProviders applies the fallback ladder's first rule: targets on
+// the original route's providers — a fitting sibling model on a provider the
+// route already trusts — come before everything else, regardless of tier.
+// Within each group the scheduler's own order (tier plan→pay, then priority,
+// then quota surplus) is preserved: a stable partition of the scheduled list,
+// no scheduler semantics touched.
+func preferRouteProviders(scheduled []configdomain.RouteTarget, routeProviders map[string]bool) []configdomain.RouteTarget {
+	if len(scheduled) < 2 || len(routeProviders) == 0 {
+		return scheduled
+	}
+	same := make([]configdomain.RouteTarget, 0, len(scheduled))
+	rest := make([]configdomain.RouteTarget, 0, len(scheduled))
+	for _, t := range scheduled {
+		if routeProviders[t.Provider] {
+			same = append(same, t)
+		} else {
+			rest = append(rest, t)
+		}
+	}
+	if len(same) == 0 || len(rest) == 0 {
+		return scheduled
+	}
+	return append(same, rest...)
+}
+
+func routeProviderSet(targets []configdomain.RouteTarget) map[string]bool {
+	set := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		set[t.Provider] = true
+	}
+	return set
+}
+
 // ApplyWithProfile narrows ordered to in-route targets that fit a pre-computed
 // request profile: the forward path profiles the (immutable) request body once
 // and reuses it across the wait-retry rounds and the context-overflow retry
@@ -323,7 +356,55 @@ func (planner Planner) ApplyWithProfile(
 	if len(scheduled) == 0 {
 		return ordered
 	}
-	return scheduled
+	return preferRouteProviders(scheduled, routeProviderSet(ordered))
+}
+
+// DescribeFitReroute reports whether request-aware routing changed the
+// target set and, if so, builds the trace for the request log: the fit verdict
+// of every dropped in-route target, plus the cross-route replacement head when
+// the whole chain was replaced. ("", false) when the set survived unchanged —
+// the overwhelmingly common case pays one slice compare, no verdicts.
+func (planner Planner) DescribeFitReroute(before, after []configdomain.RouteTarget, profile Profile) (string, bool) {
+	if len(after) == len(before) {
+		same := true
+		for i := range before {
+			if before[i].Provider != after[i].Provider || before[i].Model != after[i].Model {
+				same = false
+				break
+			}
+		}
+		if same {
+			return "", false
+		}
+	}
+	kept := make(map[string]bool, len(after))
+	for _, t := range after {
+		kept[t.Provider+"/"+t.Model] = true
+	}
+	var reasons []string
+	for _, t := range before {
+		if kept[t.Provider+"/"+t.Model] {
+			continue
+		}
+		_, why := FitVerdict(
+			planner.catalog,
+			CapabilitiesFor(planner.config, planner.parentOf, t),
+			t.Model,
+			profile,
+		)
+		if why == "" {
+			why = "unfit"
+		}
+		reasons = append(reasons, t.Provider+"/"+t.Model+": "+why)
+	}
+	if len(reasons) == 0 {
+		return "", false // reordering only: same target set, no fit verdicts to trace
+	}
+	note := "request-aware: dropped " + strings.Join(reasons, "; ")
+	if !kept[before[0].Provider+"/"+before[0].Model] && len(after) > 0 {
+		note += fmt.Sprintf(" → cross-route %s/%s", after[0].Provider, after[0].Model)
+	}
+	return note, true
 }
 
 // ContextOverflowRetryWithProfile schedules, over a shared pre-computed
@@ -363,7 +444,7 @@ func (planner Planner) ContextOverflowRetryWithProfile(
 			)
 		},
 	)
-	return planner.schedule(exposed+"#ctx", sessionKey, pool)
+	return preferRouteProviders(planner.schedule(exposed+"#ctx", sessionKey, pool), routeProviderSet(tried))
 }
 
 func (planner Planner) schedule(
