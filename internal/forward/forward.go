@@ -871,6 +871,33 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 			continue
 		}
 		logx.Warnf("[proto=%s model=%s] target %d (%s/%s) failed; trying next", proto, exposed, ti, t.Provider, t.Model)
+		// Attempt row for the failed leg: same request id and attempt number
+		// as the eventual committed row, attempt_only-marked so usage/session
+		// aggregates keep counting committed calls. Without it the failover
+		// chain leaves no request-log trace (only the "trying next" warn line)
+		// — a 429 storm that re-routed a whole session was unobservable.
+		if p.svc.ReqLog != nil && ti < len(ordered)-1 {
+			status := result.AttemptStatus
+			if status == 0 {
+				status = http.StatusBadGateway
+			}
+			requestlog.Complete(p.svc.ReqLog, requestlog.Input{
+				StartedAt:   time.Now(),
+				RequestID:   req.requestID,
+				SessionID:   flc.SessionID,
+				Protocol:    proto,
+				Method:      req.request.Method,
+				Path:        req.request.URL.Path,
+				CalledModel: calledModel,
+				Exposed:     exposed,
+				Agent:       agent,
+				APIKeyID:    webauth.KeyIDFrom(req.request.Context()),
+				Provider:    t.Provider,
+				Attempt:     flc.Attempt,
+				Status:      status,
+				AttemptOnly: true,
+			}, result.AttemptBody, int64(len(result.AttemptBody)), false)
+		}
 	}
 	// Record the target set actually considered this pass (post scheduling /
 	// request-aware narrowing / context retry) so forward's cooldown + TOCTOU

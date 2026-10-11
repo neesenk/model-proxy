@@ -142,4 +142,10 @@ type Result struct {
 	Retried   []configdomain.RouteTarget
 	Outcome   Outcome
 	Commit    *Commit
+	// AttemptStatus/AttemptBody carry the observed status and a bounded body
+	// peek of a NON-committed failover leg (429 / >=500 / auth / transport
+	// error), so the pipeline can write an attempt_only request-log row for
+	// the leg. Zero status = no observation (synthesize upstream-side).
+	AttemptStatus int
+	AttemptBody   []byte
 }

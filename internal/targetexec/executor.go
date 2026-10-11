@@ -102,7 +102,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 	ctx, cancel := context.WithTimeout(exchange.Request.Context(), runtime.Scheduling.Timeout())
 	defer cancel()
 	body := exchange.Body
-	strippedParam, renamedRole, adaptedThinking, retriedImages := false, false, false, false
+	strippedParam, renamedRole, adaptedThinking, retriedImages, retriedConn := false, false, false, false, false
 	clientWantsStream := protocol.WantsStream(body)
 	for authAttempt := 0; authAttempt < 2; authAttempt++ {
 		targetURL := strings.TrimRight(plan.BaseURL(), "/") + plan.UpstreamPath()
@@ -149,9 +149,26 @@ func (executor Executor) Execute(attempt Attempt) Result {
 				executor.release(target.Provider)
 				return Result{Outcome: OutcomeClientGone}
 			}
+			// Fast-fail connection error (EOF/reset/refused, returned in
+			// milliseconds): one same-target redispatch on a fresh connection
+			// before counting the failure. External-path hiccups (proxy chain
+			// recycle, LB roll) kill existing connections while new ones work —
+			// the redispatch absorbs the blip invisibly and, on success, the
+			// first attempt never reaches RecordFailure, so the breaker's
+			// "consecutive failures" keeps meaning "confirmed unreachable on a
+			// fresh connection". Like the param-strip family, the redispatch
+			// does not consume the 401 refresh slot. Timeouts never take this
+			// path (their time budget is already spent).
+			if IsFastFailConnError(err) && !retriedConn {
+				retriedConn = true
+				logx.Infof("[proto=%s provider=%s] fast-fail connection error (%v) — redispatching once on a fresh connection",
+					plan.ClientProtocol(), target.Provider, err)
+				authAttempt--
+				continue
+			}
 			logx.Warnf("[proto=%s provider=%s] upstream error: %v", plan.ClientProtocol(), target.Provider, err)
 			executor.failure(target, true)
-			return Result{Outcome: OutcomeFailedHard}
+			return Result{Outcome: OutcomeFailedHard, AttemptStatus: http.StatusBadGateway, AttemptBody: []byte(err.Error())}
 		}
 		dto := AttemptDTO{
 			Target:               target,
@@ -174,7 +191,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 				}
 			}
 			executor.failure(target, false)
-			return Result{Outcome: OutcomeFailedHard}
+			return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode}
 		}
 		if response.StatusCode == http.StatusTooManyRequests {
 			peek := peekResponseBody(response, 8<<10)
@@ -188,12 +205,13 @@ func (executor Executor) Execute(attempt Attempt) Result {
 				}
 			}
 			executor.rateLimited(target)
-			return Result{Outcome: OutcomeRateLimited}
+			return Result{Outcome: OutcomeRateLimited, AttemptStatus: response.StatusCode, AttemptBody: peek}
 		}
 		if response.StatusCode >= 500 {
+			peek := peekResponseBody(response, 8<<10)
 			response.Body.Close()
 			executor.failure(target, true)
-			return Result{Outcome: OutcomeFailedHard}
+			return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: peek}
 		}
 		if response.StatusCode >= 400 {
 			var peek []byte

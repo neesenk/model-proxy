@@ -300,3 +300,22 @@ func TestRecordRoutingRoundTrip(t *testing.T) {
 		t.Fatal("routing leaked into a record without one")
 	}
 }
+
+// Attempt rows (non-committed failover legs) must round-trip their marker so
+// consumers can exclude them from usage/session aggregates.
+func TestBuildRecordAttemptOnly(t *testing.T) {
+	rec := (&Logger{maxBodyBytes: 1 << 20}).BuildRecord(Input{
+		RequestID: "r1", Provider: "aqp", Status: 429, AttemptOnly: true,
+		Attempt: 0, APIKeyID: "k1",
+	})
+	if !rec.AttemptOnly {
+		t.Fatal("BuildRecord dropped AttemptOnly")
+	}
+	var back Record
+	if err := json.Unmarshal(appendRecordLine(nil, rec), &back); err != nil {
+		t.Fatalf("round-trip: %v", err)
+	}
+	if !back.AttemptOnly {
+		t.Fatal("attempt_only lost through the JSONL line")
+	}
+}

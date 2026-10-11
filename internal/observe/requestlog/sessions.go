@@ -224,6 +224,9 @@ func aggregateSessions(records []Record, limit int, costOf func(provider, model 
 	// records arrive newest-first: the first record seen per session sets
 	// LastTs; every later one refreshes FirstTs.
 	for _, r := range records {
+		if r.AttemptOnly {
+			continue // failover legs are routing telemetry, not session traffic
+		}
 		if r.SessionID == "" {
 			continue
 		}

@@ -192,3 +192,16 @@ func stringContains(s, sub string) bool {
 	}
 	return false
 }
+
+// Failover attempt rows (attempt_only) are routing telemetry, not client
+// traffic: the JSONL twin must not count them as key usage.
+func TestKeyUsageExcludesAttemptOnlyRows(t *testing.T) {
+	records := []Record{
+		{APIKeyID: "k1", CalledModel: "m", Provider: "p", Status: 429, AttemptOnly: true},
+		{APIKeyID: "k1", CalledModel: "m", Provider: "p", Status: 200},
+	}
+	out := aggregateKeyUsage(records, "")
+	if len(out) != 1 || out[0].Requests != 1 {
+		t.Fatalf("attempt_only row leaked into usage: %+v", out)
+	}
+}

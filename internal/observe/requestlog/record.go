@@ -15,6 +15,10 @@ import (
 type Record struct {
 	Ts     string `json:"ts"`
 	Shadow bool   `json:"shadow,omitempty"`
+	// AttemptOnly marks a non-committed failover leg (429/5xx/auth/transport):
+	// same request id + attempt number as the committed row; excluded from
+	// usage and session aggregates.
+	AttemptOnly bool `json:"attempt_only,omitempty"`
 	// Kind separates traffic classes sharing the log: empty = LLM forward
 	// traffic (the historical default, kept empty for back-compat), "mcp" =
 	// MCP gateway exchanges (/mcp/<name>).
@@ -108,6 +112,7 @@ type Input struct {
 	Attempt           int
 	Status            int
 	TTFTMilliseconds  int64
+	AttemptOnly       bool
 	RequestBody       []byte
 	ResponseBody      []byte
 	ResponseSize      int64
@@ -154,6 +159,7 @@ func (l *Logger) BuildRecord(in Input) *Record {
 		Agent:           in.Agent,
 		APIKeyID:        in.APIKeyID,
 		Attempt:         in.Attempt,
+		AttemptOnly:     in.AttemptOnly,
 		Status:          in.Status,
 		LatencyMs:       latency,
 		TTFTMs:          in.TTFTMilliseconds,
@@ -208,6 +214,9 @@ func appendRecordLine(dst []byte, rec *Record) []byte {
 	dst = appendJSONString(dst, rec.Ts)
 	if rec.Shadow {
 		dst = append(dst, `,"shadow":true`...)
+	}
+	if rec.AttemptOnly {
+		dst = append(dst, `,"attempt_only":true`...)
 	}
 	if rec.Kind != "" {
 		dst = append(dst, `,"kind":`...)

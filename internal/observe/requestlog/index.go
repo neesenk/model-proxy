@@ -151,6 +151,7 @@ func (x *Indexer) migrate() error {
 		routing        TEXT,
 		schedule       TEXT,
 		shadow         INTEGER NOT NULL,
+		attempt_only   INTEGER NOT NULL DEFAULT 0,
 		input          INTEGER NOT NULL,
 		output         INTEGER NOT NULL,
 		cache_read     INTEGER NOT NULL,
@@ -256,6 +257,9 @@ func (x *Indexer) ensureColumns() error {
 		if _, err := x.db.Exec(`ALTER TABLE records ADD COLUMN api_key TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
+	}
+	if _, err := x.db.Exec(`ALTER TABLE records ADD COLUMN attempt_only INTEGER NOT NULL DEFAULT 0`); err != nil {
+		_ = err // already present on a newer schema — not an error
 	}
 	if _, err := x.db.Exec(`CREATE INDEX IF NOT EXISTS idx_records_api_key ON records(api_key)`); err != nil {
 		return err
@@ -547,9 +551,9 @@ func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int6
 	stmt, err := tx.Prepare(`INSERT INTO records
 		(request_id, ts, ts_ms, session_id, agent, protocol, method, path, tool,
 		 called_model, upstream_model, exposed, provider, attempt, status,
-		 latency_ms, ttft_ms, request_size, response_size, turn_key, routing, schedule, kind, shadow,
+		 latency_ms, ttft_ms, request_size, response_size, turn_key, routing, schedule, kind, shadow, attempt_only,
 		 input, output, cache_read, cache_creation, file, "offset", length, api_key)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -558,6 +562,10 @@ func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int6
 		shadow := 0
 		if row.record.Shadow {
 			shadow = 1
+		}
+		attemptOnly := 0
+		if row.record.AttemptOnly {
+			attemptOnly = 1
 		}
 		routingArg := any(nil)
 		if row.record.Routing != nil {
@@ -577,7 +585,7 @@ func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int6
 			row.record.CalledModel, row.record.UpstreamModel, row.record.Exposed,
 			row.record.Provider, row.record.Attempt, row.record.Status,
 			row.record.LatencyMs, row.record.TTFTMs, row.record.RequestSize, row.record.ResponseSize,
-			row.record.TurnKey, routingArg, scheduleArg, row.record.Kind, shadow, row.usage.Input, row.usage.Output, row.usage.CacheRead,
+			row.record.TurnKey, routingArg, scheduleArg, row.record.Kind, shadow, attemptOnly, row.usage.Input, row.usage.Output, row.usage.CacheRead,
 			row.usage.CacheCreation, row.file, row.offset, row.length, row.record.APIKeyID,
 		); err != nil {
 			return err

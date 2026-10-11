@@ -49,7 +49,7 @@ func aggregateKeyUsage(records []Record, keyID string) []KeyUsageEntry {
 	cells := map[string]*cell{}
 	for i := range records {
 		rec := &records[i]
-		if rec.APIKeyID == "" || rec.Shadow {
+		if rec.APIKeyID == "" || rec.Shadow || rec.AttemptOnly {
 			continue
 		}
 		if keyID != "" && rec.APIKeyID != keyID {
@@ -96,7 +96,7 @@ func (x *Indexer) KeyUsage(filter Filter, keyID string) ([]KeyUsageEntry, error)
 	if x == nil {
 		return nil, nil
 	}
-	where := ` WHERE kind = '' AND shadow = 0 AND api_key != ''`
+	where := ` WHERE kind = '' AND shadow = 0 AND attempt_only = 0 AND api_key != ''`
 	args := []any{}
 	if keyID != "" {
 		where += ` AND api_key = ?`
