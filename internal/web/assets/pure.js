@@ -3154,6 +3154,21 @@ export function requestMetaHTML(r, rel) {
     if (r.request_size || r.response_size) {
       g('size', `req ${fmtNum(r.request_size)} <span class="req-meta-dim">→</span> resp ${fmtNum(r.response_size)}`);
     }
+    if (r.profile) {
+      // Context composition (the log's profile field — magpie's context-grid
+      // insight as a meta strip): what the request carried, at a glance.
+      const bits = [];
+      if (Number(r.profile.est_tokens) > 0) bits.push(`${fmtNum(r.profile.est_tokens)} tok est`);
+      if (r.profile.image) bits.push('image');
+      if (r.profile.tools) bits.push('tools');
+      if (r.profile.follow_up) bits.push('follow-up');
+      const roles = r.profile.roles || {};
+      const roleBits = [
+        ['system', 'sys'], ['user', 'usr'], ['assistant', 'asst'], ['tool', 'tool'],
+      ].filter(([k]) => Number(roles[k]) > 0).map(([k, label]) => `${fmtNum(roles[k])} ${label}`);
+      if (roleBits.length) bits.push(roleBits.join(' · '));
+      if (bits.length) g('profile', bits.join(' <span class="req-meta-dim">·</span> '));
+    }
   }
   return `<div class="req-meta">${groups.join('')}</div>`;
 }

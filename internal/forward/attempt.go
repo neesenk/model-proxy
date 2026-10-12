@@ -28,6 +28,10 @@ type LogCtx struct {
 	// (requestlog.ScheduleDecision; runtime.ScheduleSource* vocabulary plus
 	// forward's force override). Nil omits the field.
 	Schedule *requestlog.ScheduleDecision
+	// Profile is the request-derived routing profile for the request log
+	// (targetexec vocabulary; BuildRequestLogInput projects it onto the
+	// persisted requestlog shape). Nil omits the field.
+	Profile *targetexec.RequestProfile
 }
 
 // newTargetAttempt is the single assembly point shared by normal routing and
@@ -88,6 +92,21 @@ func BuildRequestLogInput(
 	if context.Schedule != nil && context.Schedule.Source != "" {
 		schedule = &requestlog.ScheduleDecision{Source: context.Schedule.Source}
 	}
+	var profile *requestlog.RequestProfile
+	if context.Profile != nil {
+		profile = &requestlog.RequestProfile{
+			EstimatedTokens: context.Profile.EstimatedTokens,
+			Image:           context.Profile.Image,
+			Tools:           context.Profile.Tools,
+			FollowUp:        context.Profile.FollowUp,
+			Roles: requestlog.RoleCounts{
+				System:    context.Profile.System,
+				User:      context.Profile.User,
+				Assistant: context.Profile.Assistant,
+				Tool:      context.Profile.Tool,
+			},
+		}
+	}
 	return requestlog.BuildInput(
 		requestlog.LogCtx{
 			RequestID:   context.RequestID,
@@ -99,6 +118,7 @@ func BuildRequestLogInput(
 			Diagnostics: diags,
 			Routing:     context.Routing,
 			Schedule:    schedule,
+			Profile:     profile,
 		},
 		request,
 		protocol,

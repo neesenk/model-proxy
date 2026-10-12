@@ -27,6 +27,8 @@ type LogCtx struct {
 	// Schedule names the engine that produced this pass's try order
 	// (ScheduleDecision). Nil omits the field.
 	Schedule *ScheduleDecision
+	// Profile is the request-derived routing profile (nil omits the field).
+	Profile *RequestProfile
 }
 
 // SessionID returns the first non-empty value among headers (an ordered
@@ -82,6 +84,7 @@ func BuildInput(
 		Diagnostics:    context.Diagnostics,
 		Routing:        context.Routing,
 		Schedule:       context.Schedule,
+		Profile:        context.Profile,
 	}
 }
 

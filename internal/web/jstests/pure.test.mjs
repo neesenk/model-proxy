@@ -3942,3 +3942,22 @@ test('keyRelTime: buckets from seconds to days', () => {
   assert.equal(keyRelTime(now - 7_200_000, now), '2h ago');
   assert.equal(keyRelTime(now - 3 * 86_400_000, now), '3d ago');
 });
+
+test('requestMetaHTML renders the context-composition profile strip', () => {
+  const html = requestMetaHTML(
+    { ts: 't', method: 'POST', path: '/v1/messages', attempt: 0, status: 200, provider: 'zhipu', upstream_model: 'glm-5.3-flash',
+      profile: { est_tokens: 12345, image: true, tools: true, follow_up: true, roles: { system: 1, user: 5, assistant: 4, tool: 7 } } }, []);
+  assert.ok(html.includes('<div class="req-meta-k">profile</div>'), html);
+  assert.ok(html.includes('12,345 tok est'), html);
+  assert.ok(html.includes('image'), html);
+  assert.ok(html.includes('follow-up'), html);
+  assert.ok(html.includes('1 sys · 5 usr · 4 asst · 7 tool'), html);
+  // Records before the field existed (or attempt legs) render no strip.
+  const legacy = requestMetaHTML({ ts: 't', method: 'POST', status: 200, provider: 'zhipu', upstream_model: 'glm-5.3-flash' }, []);
+  assert.ok(!legacy.includes('req-meta-k">profile'), legacy);
+  // A profile with every bucket empty renders nothing rather than a bare
+  // label (the encoder always writes roles:{} — the strip tolerates it).
+  const empty = requestMetaHTML(
+    { ts: 't', method: 'POST', status: 200, provider: 'zhipu', upstream_model: 'glm-5.3-flash', profile: { est_tokens: 0, roles: {} } }, []);
+  assert.ok(!empty.includes('req-meta-k">profile'), empty);
+});

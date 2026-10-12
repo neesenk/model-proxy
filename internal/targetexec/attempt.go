@@ -45,6 +45,9 @@ type LogContext struct {
 	// ScheduleSource names the scheduling engine that produced the try order
 	// (quota/sticky/pin/load_balance/force vocabulary). Log metadata only.
 	ScheduleSource string
+	// Profile is the request-derived routing profile (see RequestProfile).
+	// Log metadata only; nil omits the field.
+	Profile *RequestProfile
 }
 
 // ConversionDiagnostic is the wire-independent projection of a protocol
@@ -52,6 +55,24 @@ type LogContext struct {
 type ConversionDiagnostic struct {
 	Code   string
 	Detail string
+}
+
+// RequestProfile is the log projection of the request's routing profile:
+// the body-derived facts the scheduler's request-aware filtering used
+// (estimated input tokens, image/tools presence, follow-up turn) plus the
+// conversation role composition — one glance answers "what filled this
+// context window" without opening the body. Wire-independent vocabulary like
+// ConversionDiagnostic; the producing authority is internal/routing and the
+// persisted authority is internal/observe/requestlog.
+type RequestProfile struct {
+	EstimatedTokens int64
+	Image           bool
+	Tools           bool
+	FollowUp        bool
+	System          int
+	User            int
+	Assistant       int
+	Tool            int
 }
 
 // Scope contains request identity and protocol state that is neither target

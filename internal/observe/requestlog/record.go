@@ -68,6 +68,9 @@ type Record struct {
 	// Routing — the policy layer re-orders what the scheduler ordered.
 	// Omitted when no target was schedulable.
 	Schedule *ScheduleDecision `json:"schedule,omitempty"`
+	// Profile is the request-derived routing profile (see RequestProfile).
+	// Omitted from the JSONL line when nil (attempt legs, pre-field records).
+	Profile *RequestProfile `json:"profile,omitempty"`
 	// ParsedUsage is a query-time projection of ResponseBody (ExtractUsage)
 	// for aggregate views that strip bodies as they read (Filter.UsageOnly).
 	// Never persisted: the JSONL encoder does not write it and json:"-"
@@ -95,6 +98,32 @@ type ScheduleDecision struct {
 	// Empty on ordinary scheduling. Surfaced on the record's `schedule` field
 	// and (as x-mp-reroute) on the response header.
 	Note string `json:"note,omitempty"`
+}
+
+// RoleCounts is the persisted projection of the request's message-role
+// composition (see internal/routing.CountRoles — the producing authority).
+// Tool counts the tool-position forms of all three client protocols: openai
+// tool/function roles and anthropic tool_result blocks.
+type RoleCounts struct {
+	System    int `json:"system,omitempty"`
+	User      int `json:"user,omitempty"`
+	Assistant int `json:"assistant,omitempty"`
+	Tool      int `json:"tool,omitempty"`
+}
+
+// RequestProfile is the request-derived routing profile persisted with the
+// record: the same facts the scheduler's request-aware filtering used
+// (estimated input tokens, image/tools presence, follow-up turn), plus the
+// conversation composition — one glance answers "what filled this context
+// window" without opening the body (the magpie context-grid insight, landed
+// as a log field). Omitted on records written before the field existed, on
+// attempt-only failover legs, and when request logging is disabled.
+type RequestProfile struct {
+	EstimatedTokens int64      `json:"est_tokens"`
+	Image           bool       `json:"image,omitempty"`
+	Tools           bool       `json:"tools,omitempty"`
+	FollowUp        bool       `json:"follow_up,omitempty"`
+	Roles           RoleCounts `json:"roles"`
 }
 
 // Input contains detached request/response facts used to build a Record.
@@ -126,6 +155,7 @@ type Input struct {
 	Diagnostics       []ConversionDiagnostic
 	Routing           *configdomain.RoutingDecision
 	Schedule          *ScheduleDecision
+	Profile           *RequestProfile
 }
 
 const truncationMarker = "\n...[truncated by model-proxy request_log max_body_bytes]"
@@ -173,6 +203,7 @@ func (l *Logger) BuildRecord(in Input) *Record {
 		Diagnostics:     in.Diagnostics,
 		Routing:         in.Routing,
 		Schedule:        in.Schedule,
+		Profile:         in.Profile,
 	}
 
 	rec.RequestSize = len(in.RequestBody)
@@ -309,6 +340,39 @@ func appendRecordLine(dst []byte, rec *Record) []byte {
 			dst = appendJSONString(dst, rec.Schedule.Note)
 		}
 		dst = append(dst, '}')
+	}
+	if rec.Profile != nil {
+		dst = append(dst, `,"profile":{"est_tokens":`...)
+		dst = strconv.AppendInt(dst, rec.Profile.EstimatedTokens, 10)
+		if rec.Profile.Image {
+			dst = append(dst, `,"image":true`...)
+		}
+		if rec.Profile.Tools {
+			dst = append(dst, `,"tools":true`...)
+		}
+		if rec.Profile.FollowUp {
+			dst = append(dst, `,"follow_up":true`...)
+		}
+		dst = append(dst, `,"roles":{`...)
+		first := true
+		appendRole := func(name string, n int) {
+			if n == 0 {
+				return
+			}
+			if !first {
+				dst = append(dst, ',')
+			}
+			first = false
+			dst = append(dst, '"')
+			dst = append(dst, name...)
+			dst = append(dst, `":`...)
+			dst = strconv.AppendInt(dst, int64(n), 10)
+		}
+		appendRole("system", rec.Profile.Roles.System)
+		appendRole("user", rec.Profile.Roles.User)
+		appendRole("assistant", rec.Profile.Roles.Assistant)
+		appendRole("tool", rec.Profile.Roles.Tool)
+		dst = append(dst, '}', '}')
 	}
 	return append(dst, '}', '\n')
 }

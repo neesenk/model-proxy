@@ -150,6 +150,18 @@ request log 是异步、非阻塞、owner-only 的 JSONL。每条记录可选地
 
 未配置 `route_policy` 的 route、pin/force-provider 路径、没有任何策略步骤命中时，该字段整体省略。索引侧把 `routing` 作为 JSON TEXT 列持久化，旧行保持 NULL，L0 查询侧不解 JSON。
 
+`profile` 是请求画像与上下文构成的持久化投影（committed 记录与 `(cache)` 命中记录携带；
+attempt-only 失败腿与字段存在前的旧记录省略）。产生权威在 `internal/routing`
+（`ProfileRequest`/`CountRoles`——与 request-aware 路由用的是同一组 body 事实），
+经 `targetexec.RequestProfile` 词表投到日志形状（`forward.BuildRequestLogInput` 是唯一
+映射点）。字段：`est_tokens`（输入 token 估算，口径同路由画像：CJK 每字符 1 token、
+其余约 4 字节 1 token、base64 长段排除）、`image`/`tools`/`follow_up`（布尔，省略假值）、
+`roles`（对话构成计数：`system`〔含 openai developer role 与 anthropic 顶层 system 字段〕/
+`user`/`assistant`/`tool`〔openai tool+function role 与 anthropic tool_result 块〕）。
+UI Requests 详情的 meta 条渲染为一行（magpie context 网格的日志字段版：不打开 body
+即可回答"这次请求的窗口被什么填满"）。计数是 marker 级扫描，只在 request_log 开启时
+为已提交请求付费，且每请求至多一次（`serveState` 缓存）。
+
 `schedule` 是调度器视角的补充元数据（每条 attempt 记录一层）：`source` 命名该 pass 的调度引擎（`quota`/`sticky`/`pin`/`load_balance`/`force`——`force` 标记请求被 force-provider 收窄到单 provider）。与 `routing`（route_policy 层）正交：`routing` 重排档位/候选，`schedule` 只说明调度器给出的基础顺序。索引侧同样作为 JSON TEXT 列持久化，旧行保持 NULL。
 
 **MCP 拆分流（`request_log.mcp_split`，默认关）**：开启后 `kind="mcp"` 记录写入

@@ -33,6 +33,71 @@ func ProfileRequest(body []byte) Profile {
 	}
 }
 
+// RoleCounts tallies the message-role composition of a request body — the
+// observability projection behind the request log's context-composition line
+// (which slice of a conversation the request carries). Tool counts the
+// tool-position forms of all three protocols: the openai tool/function roles
+// and anthropic tool_result blocks (anthropic has no tool role; its tool
+// results ride user messages as typed content blocks).
+type RoleCounts struct {
+	System    int `json:"system,omitempty"`
+	User      int `json:"user,omitempty"`
+	Assistant int `json:"assistant,omitempty"`
+	Tool      int `json:"tool,omitempty"`
+}
+
+// roleMarker pairs one counted spelling (compact and spaced JSON) with its
+// bucket. Marker-based like the other body facts: no JSON parse, counts are
+// non-overlapping occurrences of disjoint literals.
+type roleMarker struct {
+	marker []byte
+	add    func(*RoleCounts, int)
+}
+
+// countRolesMarkers is the closed marker table; built once, read-only.
+var countRolesMarkers = buildRoleMarkers()
+
+func buildRoleMarkers() []roleMarker {
+	pair := func(role string, add func(*RoleCounts, int)) []roleMarker {
+		return []roleMarker{
+			{[]byte(`"role":"` + role + `"`), add},
+			{[]byte(`"role": "` + role + `"`), add},
+		}
+	}
+	markers := []roleMarker{}
+	markers = append(markers, pair("system", func(r *RoleCounts, n int) { r.System += n })...)
+	// The openai developer role is system-phrased guidance; count it as system.
+	markers = append(markers, pair("developer", func(r *RoleCounts, n int) { r.System += n })...)
+	// Anthropic carries no system role: guidance rides the top-level "system"
+	// field (string or content-block array). These spellings would only
+	// false-positive on content that embeds a literal `"system":` JSON key —
+	// rare enough for an observability count.
+	markers = append(markers,
+		roleMarker{[]byte(`"system":"`), func(r *RoleCounts, n int) { r.System += n }},
+		roleMarker{[]byte(`"system": [`), func(r *RoleCounts, n int) { r.System += n }},
+	)
+	markers = append(markers, pair("user", func(r *RoleCounts, n int) { r.User += n })...)
+	markers = append(markers, pair("assistant", func(r *RoleCounts, n int) { r.Assistant += n })...)
+	markers = append(markers, pair("tool", func(r *RoleCounts, n int) { r.Tool += n })...)
+	markers = append(markers, pair("function", func(r *RoleCounts, n int) { r.Tool += n })...)
+	markers = append(markers,
+		roleMarker{[]byte(`"type":"tool_result"`), func(r *RoleCounts, n int) { r.Tool += n }},
+		roleMarker{[]byte(`"type": "tool_result"`), func(r *RoleCounts, n int) { r.Tool += n }},
+	)
+	return markers
+}
+
+// CountRoles counts the role composition of body: one SIMD sweep per marker.
+func CountRoles(body []byte) RoleCounts {
+	var counts RoleCounts
+	for _, entry := range countRolesMarkers {
+		if n := bytes.Count(body, entry.marker); n > 0 {
+			entry.add(&counts, n)
+		}
+	}
+	return counts
+}
+
 // assistantMarkers are the byte forms of an assistant-role message across the
 // three client protocols (anthropic/openai messages, responses input). Spacing
 // variants are listed explicitly — same style as imageMarkers.

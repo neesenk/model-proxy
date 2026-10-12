@@ -151,6 +151,7 @@ func (effects targetExecutionEffects) CaptureResponse(
 			OrigBody:  attempt.Scope.Log.OriginalBody,
 			Routing:   attempt.Scope.Log.Routing,
 			Schedule:  schedule,
+			Profile:   attempt.Scope.Log.Profile,
 		}
 		input := forward.BuildRequestLogInput(
 			logContext,

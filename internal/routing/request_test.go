@@ -567,3 +567,43 @@ func TestConvertFixup_ImageOKForTarget(t *testing.T) {
 		t.Error("capabilities override (image) must beat catalog text-only")
 	}
 }
+
+func TestCountRoles(t *testing.T) {
+	anthropic := `{"model":"m","system":"be brief","messages":[
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]},
+		{"role":"assistant","content":[{"type":"tool_use","id":"t1"}]},
+		{"role":"user","content":"hi"},
+		{"role":"user","content":"again"}]}`
+	got := CountRoles([]byte(anthropic))
+	if got.System != 1 || got.User != 3 || got.Assistant != 1 || got.Tool != 1 {
+		t.Errorf("anthropic counts = %+v", got)
+	}
+	openai := `{"messages":[
+		{"role":"system","content":"s"},
+		{"role": "user","content":"u"},
+		{"role":"assistant","content":"a"},
+		{"role":"tool","tool_call_id":"x"},
+		{"role":"function","name":"f"}]}`
+	got = CountRoles([]byte(openai))
+	if got.System != 1 || got.User != 1 || got.Assistant != 1 || got.Tool != 2 {
+		t.Errorf("openai counts = %+v", got)
+	}
+	responses := `{"input":[
+		{"type":"message","role":"user","content":"u"},
+		{"type":"function_call","name":"f"},
+		{"type":"function_call_output","output":"o"},
+		{"type":"message","role":"assistant","content":"a"}]}`
+	got = CountRoles([]byte(responses))
+	if got.User != 1 || got.Assistant != 1 || got.Tool != 0 {
+		t.Errorf("responses counts = %+v", got)
+	}
+	// The openai developer role and a responses-style system string count as
+	// system guidance.
+	got = CountRoles([]byte(`{"instructions":"x","input":[{"role":"developer","content":"d"},{"role":"user","content":"u"}]}`))
+	if got.System != 1 || got.User != 1 {
+		t.Errorf("developer/instructions counts = %+v", got)
+	}
+	if got := CountRoles([]byte(`{}`)); got != (RoleCounts{}) {
+		t.Errorf("empty body counts = %+v", got)
+	}
+}

@@ -505,6 +505,11 @@ type serveState struct {
 	attempt           int  // monotonic target-attempt index for the request log (ti resets on a context retry)
 	profiled          bool // request profile computed (see requestProfile)
 	profile           routing.Profile
+	// logProfile caches the request-log projection of the profile plus the
+	// role composition: paid at most once per request, only when the request
+	// log is enabled (the sweep is log-only value, not routing value).
+	logProfiled bool
+	logProfile  *targetexec.RequestProfile
 	// selectorComputed caches the route-tier selector outcome across wait-retry
 	// rounds: the decisions call is paid at most once per request (see
 	// routeSelector / applyRoutePolicyGrades), later rounds re-apply the cached
@@ -562,6 +567,55 @@ func (p pipeline) rawProfile(st *serveState, body []byte) routing.Profile {
 		st.profiled = true
 	}
 	return st.profile
+}
+
+// newRequestLogProfile projects a routing profile plus the role composition
+// onto the executor's log vocabulary (magpie's context-grid insight, landed
+// as a log field: one glance answers "what filled this context window").
+func newRequestLogProfile(profile routing.Profile, roles routing.RoleCounts) *targetexec.RequestProfile {
+	return &targetexec.RequestProfile{
+		EstimatedTokens: profile.EstimatedTokens,
+		Image:           profile.HasImage,
+		Tools:           profile.HasTools,
+		FollowUp:        profile.FollowUp,
+		System:          roles.System,
+		User:            roles.User,
+		Assistant:       roles.Assistant,
+		Tool:            roles.Tool,
+	}
+}
+
+// projectLogProfile maps the executor vocabulary onto the persisted
+// requestlog shape. Single mapping site: BuildRequestLogInput shares it with
+// the cache-hit record path, so the executor vocabulary and the JSONL shape
+// can never drift apart.
+func projectLogProfile(profile *targetexec.RequestProfile) *requestlog.RequestProfile {
+	if profile == nil {
+		return nil
+	}
+	return &requestlog.RequestProfile{
+		EstimatedTokens: profile.EstimatedTokens,
+		Image:           profile.Image,
+		Tools:           profile.Tools,
+		FollowUp:        profile.FollowUp,
+		Roles: requestlog.RoleCounts{
+			System:    profile.System,
+			User:      profile.User,
+			Assistant: profile.Assistant,
+			Tool:      profile.Tool,
+		},
+	}
+}
+
+// requestLogProfile computes the projection once per request, cached on
+// serveState like rawProfile; the sweep runs only for logged requests
+// (attempt legs and request-log-off deployments never pay it).
+func (p pipeline) requestLogProfile(st *serveState, body []byte) *targetexec.RequestProfile {
+	if !st.logProfiled {
+		st.logProfile = newRequestLogProfile(p.rawProfile(st, body), routing.CountRoles(body))
+		st.logProfiled = true
+	}
+	return st.logProfile
 }
 
 // serveResult is the outcome of one serveOnce pass: where the request was
@@ -706,12 +760,16 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 				logx.Warnf("[proto=%s model=%s] target %d: fusion recipe %q not defined, skipping", proto, exposed, ti, t.Model)
 				continue
 			}
+			fusionLogCtx := LogCtx{RequestID: requestID, SessionID: clientSession, Attempt: st.attempt, Exposed: exposed, Agent: agent, OrigBody: origBody}
+			if p.svc.ReqLog != nil {
+				fusionLogCtx.Profile = p.requestLogProfile(st, origBody)
+			}
 			fc := fusionCtx{
 				runtime: runtime,
 				proto:   proto, calledModel: calledModel, upPath: upPath, agent: agent,
 				sessionKey: sessionKey,
 				origBody:   origBody,
-				flc:        LogCtx{RequestID: requestID, SessionID: clientSession, Attempt: st.attempt, Exposed: exposed, Agent: agent, OrigBody: origBody},
+				flc:        fusionLogCtx,
 			}
 			st.attempt++
 			res.tried[t.Provider] = true
@@ -793,7 +851,11 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 		if st.scheduleSource != "" || st.fitNote != "" {
 			scheduleDecision = &requestlog.ScheduleDecision{Source: st.scheduleSource, Note: st.fitNote}
 		}
-		flc := LogCtx{RequestID: requestID, SessionID: clientSession, Attempt: st.attempt, Exposed: exposed, Agent: agent, OrigBody: origBody, Diagnostics: convDiags, Routing: st.routing, Schedule: scheduleDecision}
+		var logProfile *targetexec.RequestProfile
+		if p.svc.ReqLog != nil {
+			logProfile = p.requestLogProfile(st, origBody)
+		}
+		flc := LogCtx{RequestID: requestID, SessionID: clientSession, Attempt: st.attempt, Exposed: exposed, Agent: agent, OrigBody: origBody, Diagnostics: convDiags, Routing: st.routing, Schedule: scheduleDecision, Profile: logProfile}
 		st.attempt++
 		// One-shot larger-context retry: when this target answers a
 		// context-overflow 400, the executor calls ctxRetry for a strictly-larger-
@@ -833,6 +895,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 					Diagnostics:    convDiags,
 					Routing:        flc.Routing,
 					ScheduleSource: scheduleDecisionSource(scheduleDecision),
+					Profile:        flc.Profile,
 				},
 				ResponseContext:  plan.ResponseContext(origBody),
 				ResponsesHistory: responsesHistory,
@@ -1607,6 +1670,10 @@ func (p pipeline) lookupResponseCache(cache *responsecache.Store, r *http.Reques
 					Provider:    "(cache)",
 					Status:      e.Status(),
 					RequestBody: origBody,
+					// Cache hits predate the serveState cache (the lookup runs
+					// before routing); compute directly — one body sweep, paid
+					// only on the logged-hit path.
+					Profile: projectLogProfile(newRequestLogProfile(routing.ProfileRequest(origBody), routing.CountRoles(origBody))),
 				}, body, int64(len(body)), false)
 			}
 			w.Header().Set("x-mp-cache", "hit")

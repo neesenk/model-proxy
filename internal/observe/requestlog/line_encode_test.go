@@ -56,6 +56,20 @@ func TestAppendRecordLineMatchesJSONMarshal(t *testing.T) {
 		Ts: "2026-08-16T10:00:00Z", RequestID: "rid-diag", SessionID: "s",
 		Diagnostics: []ConversionDiagnostic{{Code: "stop_dropped", Detail: "dropping stop"}},
 	})
+	// Profile encodes through the hand-rolled path: full projection with all
+	// role buckets, and a zero-role projection (roles must still appear as an
+	// empty object to match encoding/json's struct handling).
+	records = append(records, &Record{
+		Ts: "2026-08-16T10:00:00Z", RequestID: "rid-profile", SessionID: "s",
+		Profile: &RequestProfile{
+			EstimatedTokens: 1234, Image: true, Tools: true, FollowUp: true,
+			Roles: RoleCounts{System: 1, User: 5, Assistant: 4, Tool: 7},
+		},
+	})
+	records = append(records, &Record{
+		Ts: "2026-08-16T10:00:00Z", RequestID: "rid-profile-zero", SessionID: "s",
+		Profile: &RequestProfile{EstimatedTokens: 10},
+	})
 	// TurnKey is written between response_headers and diagnostics when present.
 	records = append(records, &Record{
 		Ts: "2026-08-16T10:00:00Z", RequestID: "rid-turn", SessionID: "s", TurnKey: "0123456789abcdef",
