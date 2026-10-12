@@ -36,6 +36,18 @@ func TestConfig_ProviderBaseURLs(t *testing.T) {
 			})
 			continue
 		}
+		if prov.OpenAIBaseURL == "" && prov.AnthropicBaseURL != "" {
+			// Anthropic-only provider (e.g. a subscription gateway leg that
+			// must never receive openai-protocol traffic): the anthropic URL
+			// is the join point — validate it instead of demanding a chat leg.
+			t.Run(name+"/anthropic-only", func(t *testing.T) {
+				upstream := strings.TrimRight(prov.AnthropicBaseURL, "/") + "/v1/messages"
+				if strings.Contains(upstream, "/v1/v1") {
+					t.Errorf("anthropic URL has double /v1: %s (anthropic_base_url should NOT end with /v1)", upstream)
+				}
+			})
+			continue
+		}
 		t.Run(name+"/openai", func(t *testing.T) {
 			if prov.OpenAIBaseURL == "" {
 				t.Fatalf("openai_base_url is empty")
