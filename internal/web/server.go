@@ -118,6 +118,56 @@ func GuardAdminBrowserOrigin(w http.ResponseWriter, r *http.Request, authEnabled
 	return guardBrowserOrigin(w, r, authEnabled, trustedHostPort)
 }
 
+// GuardForwardBrowserOrigin guards the QUOTA-SPENDING forward surface (the
+// /v1/* LLM protocol paths and /mcp/* gateway paths dispatched by the proxy
+// handler) against browser-origin abuse. Non-browser clients (CLI tools,
+// SDKs, curl) send no Origin/Sec-Fetch-Site and pass untouched.
+//
+// The threat the admin guard does not cover: on the default loopback
+// deployment the forward surface carries no credential, yet a cross-site
+// page in ANY browser can post a CORS "simple request" (text/plain body) to
+// http://127.0.0.1:<port>/v1/messages and silently spend subscription quota
+// (the LLM-API equivalent of CSRF — magpie ships the same rule and later
+// re-fixed its DNS-rebinding variant; see docs/web-api.md). Rules:
+//
+//   - Sec-Fetch-Site: cross-site is rejected unconditionally — no legitimate
+//     browser client of this proxy is cross-site, key or no key;
+//   - authenticated callers (api-keys enabled and the key already accepted)
+//     pass: they presented a credential, whatever origin they ride;
+//   - otherwise the request must look like it belongs to this machine:
+//     a loopback (or configured-listen) Host header — DNS rebinding serves
+//     attacker hostnames that resolve here, and only the Host check sees
+//     through it — and, when an Origin is present, a loopback/
+//     configured-listen/same-host origin, so a same-machine browser tool
+//     (localhost:3000 → localhost:<proxy-port>) keeps working while pages
+//     served from other machines do not.
+func GuardForwardBrowserOrigin(w http.ResponseWriter, r *http.Request, keyAuthEnabled bool, trustedHostPort string) bool {
+	origin := r.Header.Get("Origin")
+	fetchSite := r.Header.Get("Sec-Fetch-Site")
+	if origin == "" && fetchSite == "" {
+		return true
+	}
+	if strings.EqualFold(fetchSite, "cross-site") {
+		http.Error(w, "cross-site request rejected", http.StatusForbidden)
+		return false
+	}
+	if keyAuthEnabled {
+		return true
+	}
+	if !isLoopbackHostHeader(r.Host) && !sameHostPort(r.Host, trustedHostPort) {
+		http.Error(w, "forward API host must be loopback or the configured listen address", http.StatusForbidden)
+		return false
+	}
+	if origin != "" {
+		originHost := originHostPort(origin)
+		if !isLoopbackHostHeader(originHost) && !sameHostPort(originHost, trustedHostPort) && !strings.EqualFold(originHost, r.Host) {
+			http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+			return false
+		}
+	}
+	return true
+}
+
 // guardBrowserOrigin enforces the loopback trust boundary for the browser-
 // reachable admin surface (this transport's routes plus the proxy-owned
 // endpoints reached via GuardAdminBrowserOrigin). Local CLI/curl clients send

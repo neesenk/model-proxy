@@ -376,6 +376,7 @@ web:
 
 - 两个面独立鉴权：管理 API/metrics 校验 `admin_token_file`；转发端点（`/v1/*`、`/messages`、`/v1/models`）校验 `api_keys_file`。`Authorization: Bearer` 与 `x-api-key` 均接受。`/health` 保持开放（存活探针）。
 - 浏览器可直接打开 `http://<LAN-IP>:15721/ui/`（或 config `listen` 指定的同名 hostname:port）：静态 UI 是无秘密 bootstrap，首次访问会要求 admin token，并换取 `HttpOnly`、`SameSite=Strict`、仅限 `/api` 的会话 cookie，Live/EventSource 也可正常使用。其他 DNS Host 仍被拒绝以防 DNS rebinding；反向代理应把上游 Host 固定为配置的 listen host 或 IP/loopback。直接 HTTP 无法防同网段窃听，团队部署优先 VPN、SSH tunnel 或 TLS。
+- **转发端点（`/v1/*`、`/mcp/*`）也有浏览器防线**：携带浏览器身份头（`Origin`/`Sec-Fetch-Site`）的请求中，跨站一律 403、未带 key 认证时 Origin/Host 必须是 loopback 或 config `listen`——防止任意网页借你的浏览器向本机代理发 CORS simple request 静默烧掉订阅配额（LLM API 的 CSRF 面），本机浏览器工具（如 localhost 前端应用）不受影响；CLI/SDK 不带这些头，行为不变。
 - 密钥比较 constant-time；文件编辑（换 key/撤销）≤10s 生效，无需重启。
 - 回环部署也可以单独开启任一面（例如本地也想给转发加 key）。
 - **takeover 自动带真实 key**：开启 api_keys 后 takeover 直接把 `api_keys_file` 的首个 key 写入客户端配置（不再是会被 401 的 `PROXY_MANAGED` 占位符；preview 显示面脱敏回占位符）。例外：MCP 条目暂不写鉴权头——经代理的 MCP 调用在非回环部署下会 401（模板族逐步补齐中）；codex 凭据不走 `{{token}}`，需按其配置手工带 key。

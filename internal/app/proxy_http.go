@@ -61,18 +61,40 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-	} else if keys := p.apiKeys.Load(); keys != nil && keys.Enabled() {
-		presented := webauth.BearerFromRequest(r.Header.Get)
-		if !keys.Accept(presented) {
-			http.Error(w, "unauthorized: unknown or missing API key", http.StatusUnauthorized)
-			return
+	} else {
+		// Forward-surface auth (api-keys file when configured) plus the
+		// browser-origin guard. Both read one captured config boundary: the
+		// key source swap and the listen address must not be observed from
+		// different reload generations.
+		p.mu.RLock()
+		forwardListen := ""
+		if p.cfg != nil {
+			forwardListen = p.cfg.Listen
 		}
-		// Attribute the call to the matched key (sha256 prefix, never the
-		// token): rides the request context into the forward pipeline and the
-		// request log's api_key dimension. Loopback deployments and the admin
-		// surface carry no key id.
-		if matched := webauth.Resolve(keys, presented); matched != "" {
-			r = r.WithContext(webauth.WithKeyID(r.Context(), webauth.KeyID(matched)))
+		p.mu.RUnlock()
+		keys := p.apiKeys.Load()
+		keysEnabled := keys != nil && keys.Enabled()
+		if keysEnabled {
+			presented := webauth.BearerFromRequest(r.Header.Get)
+			if !keys.Accept(presented) {
+				http.Error(w, "unauthorized: unknown or missing API key", http.StatusUnauthorized)
+				return
+			}
+			// Attribute the call to the matched key (sha256 prefix, never the
+			// token): rides the request context into the forward pipeline and
+			// the request log's api_key dimension. Loopback deployments and the
+			// admin surface carry no key id.
+			if matched := webauth.Resolve(keys, presented); matched != "" {
+				r = r.WithContext(webauth.WithKeyID(r.Context(), webauth.KeyID(matched)))
+			}
+		}
+		// The unauthenticated loopback forward surface is still a browser
+		// CSRF/DNS-rebinding face (a cross-site page can post a CORS simple
+		// request and spend subscription quota); authenticated callers passed
+		// above and are exempt. CLI/SDK clients send no browser headers and
+		// never see this check.
+		if !webtransport.GuardForwardBrowserOrigin(w, r, keysEnabled, forwardListen) {
+			return
 		}
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {

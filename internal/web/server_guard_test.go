@@ -94,3 +94,69 @@ func TestGuardServesUIDenyListing(t *testing.T) {
 		t.Errorf("ui via rebinding: status=%d, want 403", recorder.Code)
 	}
 }
+
+// GuardForwardBrowserOrigin: the quota-spending forward surface (/v1/*, /mcp/*)
+// carries no credential on the default loopback deployment, so a cross-site
+// page's CORS simple request must not spend subscription quota, and DNS
+// rebinding must not ride a non-loopback Host.
+func TestGuardForwardBrowserOrigin(t *testing.T) {
+	pass := func(name string, request *http.Request, keyAuthEnabled bool, trusted string) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		if !GuardForwardBrowserOrigin(recorder, request, keyAuthEnabled, trusted) {
+			t.Errorf("%s: rejected, want pass (status=%d)", name, recorder.Code)
+		} else if recorder.Code != 200 {
+			t.Errorf("%s: pass but status written = %d", name, recorder.Code)
+		}
+	}
+	reject := func(name string, request *http.Request, keyAuthEnabled bool, trusted string) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		if GuardForwardBrowserOrigin(recorder, request, keyAuthEnabled, trusted) || recorder.Code != http.StatusForbidden {
+			t.Errorf("%s: status=%d allowed=%v, want 403 reject", name, recorder.Code, recorder.Code == 200)
+		}
+	}
+	forwardRequest := func(origin, site, host string) *http.Request {
+		request := httptest.NewRequest(http.MethodPost, "http://proxy.invalid/v1/messages", strings.NewReader(`{}`))
+		if origin != "" {
+			request.Header.Set("Origin", origin)
+		}
+		if site != "" {
+			request.Header.Set("Sec-Fetch-Site", site)
+		}
+		if host != "" {
+			request.Host = host
+		}
+		return request
+	}
+
+	// Non-browser clients never see this check, whatever their Host.
+	pass("cli client", forwardRequest("", "", "example.com:443"), false, "")
+	// Same-machine browser tool: loopback origin, different port than the proxy.
+	pass("loopback browser tool", forwardRequest("http://localhost:3000", "", "127.0.0.1:8425"), false, "")
+	pass("ipv6 loopback origin", forwardRequest("http://[::1]:3000", "", "[::1]:8425"), false, "")
+	// Same-origin browser (UI-style) fetch.
+	pass("same-origin browser", forwardRequest("http://127.0.0.1:8425", "", "127.0.0.1:8425"), false, "")
+	// LAN deployment on the configured listen: browser from the same address.
+	pass("configured listen origin", forwardRequest("http://100.81.1.4:8425", "", "100.81.1.4:8425"), false, "100.81.1.4:8425")
+
+	// Cross-site page on the attacker's own site: the LLM-CSRF shape.
+	reject("cross-site page", forwardRequest("http://evil.example", "cross-site", "127.0.0.1:8425"), false, "")
+	reject("cross-site without origin", forwardRequest("", "cross-site", "127.0.0.1:8425"), false, "")
+	// A browser page served from another machine on the LAN.
+	reject("lan origin", forwardRequest("http://192.168.1.5:8080", "", "127.0.0.1:8425"), false, "")
+	// DNS rebinding: page origin equals the attacker hostname that now resolves
+	// here; only the Host check sees through it.
+	reject("dns rebinding", forwardRequest("http://attacker.rebound:8425", "", "attacker.rebound:8425"), false, "")
+	// "null" origin (sandboxed frame) is not a loopback identity either.
+	reject("null origin", forwardRequest("null", "", "127.0.0.1:8425"), false, "")
+
+	// Authenticated callers presented a key: they pass the origin/Host shape
+	// checks (a LAN-served browser tool holding a key is legitimate). The
+	// cross-site rejection above stays unconditional — no legitimate browser
+	// client of this proxy is ever cross-site, key or no key (a cross-site
+	// page cannot attach the key header without a preflight this proxy never
+	// grants).
+	pass("key-authed browser", forwardRequest("http://192.168.1.5:8080", "", "attacker.rebound:8425"), true, "")
+	reject("key-authed cross-site still rejected", forwardRequest("http://evil.example", "cross-site", "127.0.0.1:8425"), true, "")
+}
