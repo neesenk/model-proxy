@@ -192,6 +192,11 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   **形态内快照-或-增量**合并：同 wire 形态内单调不降的 usage 值视为累计
   快照取末值（存在逐 chunk 重复累计值的网关，曾把单请求膨胀成上亿 token
   统计），下降视为增量相加；跨形态（anthropic 帧与 openai chunk）仍求和。
+  四桶账本归一化为 anthropic 口径（input 不含 cache）：inclusive 计数器
+  （openai `prompt_tokens`、responses `input_tokens` 自带 cached 份额）
+  入桶前先扣减该份额（钳零）并记入 cache_read——否则同一份额同时落 input
+  与 cache_read，曾把 analytics 命中率压到真实值的一半并双重计费
+  （与 requestlog.ExtractUsage、fusion.ParseUsage 同一账本）。
   同 id 多 attempt 行语义：未 commit 的 failover 中间跳（429/5xx/认证/传输错误，且其后确有下一跳）各落一行 `attempt_only` 请求日志——同 request id、同 attempt 序号、带上游状态与 8KB 错误体 peek，api_key 照记；`attempt_only` 行被 KeyUsage 与 session 聚合排除（路由遥测，不是客户端流量），最后一跳失败且全链终态时沿用终态行、不重复落中间行。
 - **绑定粒度 (会话, 路由)**：sticky 键是 `runtime.StickyKey(sessionKey, exposed)`
   ——一个会话在每个路由上持有**独立绑定**（同会话换模型 = 新绑定，不把旧路由选中的
@@ -342,6 +347,9 @@ body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`
 - SSE keepalive：静默期心跳帧、ttft 不被心跳标记、录制链/缓存无心跳、client gone 后 reader goroutine 释放。
 - cooldown 全部恢复、部分恢复、跨轮纯 429、混合硬失败。
 - request-aware/context retry 后的实际目标冷却判定。
+- usage 账本归一化：inclusive wire（openai `prompt_tokens` / responses
+  `input_tokens`）cached 份额扣减入桶、真实录制 wire 形态（含 aqp/kimi-k3
+  事故形态）与逐 chunk 重复累计值的合并。
 - 交互矩阵：quota 模式 sticky×熔断/限频/模型锁的排除、失败不复活、dwell 内
   recover-and-return、dwell 过期后按 margin 切换；部分链 `skipped` 与空链
   `blocked` 的原因分类（负载均衡策略的同类语义在 load_balance 用例覆盖）。

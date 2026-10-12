@@ -42,15 +42,15 @@ func TestUsageScannerJSONFallback(t *testing.T) {
 	t.Run("openai shape", func(t *testing.T) {
 		body := `{"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":40}}}`
 		u := scanBody(key, body, 7)
-		if u.Input != 100 || u.Output != 20 || u.CacheRead != 40 {
-			t.Errorf("usage = %+v", u)
+		if u.Input != 60 || u.Output != 20 || u.CacheRead != 40 {
+			t.Errorf("usage = %+v, want input=60 (100−40 inclusive share)", u)
 		}
 	})
 	t.Run("responses shape", func(t *testing.T) {
 		body := `{"id":"resp_1","output":[],"usage":{"input_tokens":88,"output_tokens":11,"input_tokens_details":{"cached_tokens":22}}}`
 		u := scanBody(key, body, 1024)
-		if u.Input != 88 || u.Output != 11 || u.CacheRead != 22 {
-			t.Errorf("usage = %+v", u)
+		if u.Input != 66 || u.Output != 11 || u.CacheRead != 22 {
+			t.Errorf("usage = %+v, want input=66 (88−22 inclusive share)", u)
 		}
 	})
 	t.Run("leading whitespace still detects JSON", func(t *testing.T) {

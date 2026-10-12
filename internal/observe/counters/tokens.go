@@ -296,7 +296,6 @@ func (s *UsageScanner) parseLine(line []byte) {
 	}
 	if json.Unmarshal(payload, &oai) == nil && oai.Usage != nil {
 		s.sseUsage = true
-		s.oai.mergeField(&s.acc.Input, oai.Usage.PromptTokens, &s.acc.Output, oai.Usage.CompletionTokens)
 		// Cached prompt tokens ride in prompt_tokens_details (openai contract);
 		// deepseek additionally spells them prompt_cache_hit_tokens — details win
 		// when both are present. Max-merge like the anthropic cache buckets: a
@@ -306,10 +305,19 @@ func (s *UsageScanner) parseLine(line []byte) {
 			cached = oai.Usage.PromptDetails.CachedTokens
 		}
 		s.acc.CacheRead = max(s.acc.CacheRead, cached)
+		// prompt_tokens INCLUDES the cached share while the buckets are
+		// anthropic-normalized (input excludes cache — the same ledger as
+		// requestlog.ExtractUsage and fusion.ParseUsage), so the share is
+		// subtracted before the snapshot/delta merge; landing it in both
+		// Input and CacheRead deflated the analytics cache-hit rate and
+		// double-billed cost.
+		s.oai.mergeField(&s.acc.Input, subClamped(oai.Usage.PromptTokens, cached), &s.acc.Output, oai.Usage.CompletionTokens)
 	}
 	// /v1/responses client streams carry one cumulative snapshot in
 	// response.completed (usage is null on in_progress frames); every field
-	// merges by max, mirroring extractSSEUsage.
+	// merges by max, mirroring extractSSEUsage. input_tokens is inclusive of
+	// the cached share (the convention the converters emit), so the details
+	// share is subtracted before it lands in Input.
 	var resp struct {
 		Response *struct {
 			Usage *struct {
@@ -323,21 +331,25 @@ func (s *UsageScanner) parseLine(line []byte) {
 	}
 	if json.Unmarshal(payload, &resp) == nil && resp.Response != nil && resp.Response.Usage != nil {
 		s.sseUsage = true
-		s.acc.Input = max(s.acc.Input, resp.Response.Usage.InputTokens)
-		s.acc.Output = max(s.acc.Output, resp.Response.Usage.OutputTokens)
+		cached := uint64(0)
 		if resp.Response.Usage.InputDetails != nil {
-			s.acc.CacheRead = max(s.acc.CacheRead, resp.Response.Usage.InputDetails.CachedTokens)
+			cached = resp.Response.Usage.InputDetails.CachedTokens
+		}
+		s.acc.Input = max(s.acc.Input, subClamped(resp.Response.Usage.InputTokens, cached))
+		s.acc.Output = max(s.acc.Output, resp.Response.Usage.OutputTokens)
+		if cached > 0 {
+			s.acc.CacheRead = max(s.acc.CacheRead, cached)
 		}
 	}
 }
 
 // parseJSONUsage is the Commit-time fallback for NON-stream responses: the
 // whole (capped) body is parsed once for a usage object. Ledger semantics
-// mirror the SSE path exactly: openai input is prompt_tokens inclusive of the
-// cached share (cache reads reported separately via the details object);
-// anthropic/responses/decisions read input_tokens/output_tokens with per-field
-// max cache merges. Anything unparseable or usage-less is a silent no-op
-// (error envelopes, truncated bodies, streams without usage events).
+// mirror the SSE path exactly: the buckets are anthropic-normalized (input
+// excludes cache), so the cached share riding inside inclusive counters
+// (openai prompt_tokens, responses input_tokens) is subtracted, clamped at
+// zero. Anything unparseable or usage-less is a silent no-op (error
+// envelopes, truncated bodies, streams without usage events).
 func (s *UsageScanner) parseJSONUsage() {
 	if len(s.raw) == 0 {
 		return
@@ -363,18 +375,39 @@ func (s *UsageScanner) parseJSONUsage() {
 	}
 	u := doc.Usage
 	if u.PromptTokens > 0 || u.CompletionTokens > 0 {
-		s.acc.Input += u.PromptTokens
-		s.acc.Output += u.CompletionTokens
+		cached := uint64(0)
 		if u.PromptDetails != nil {
-			s.acc.CacheRead = max(s.acc.CacheRead, u.PromptDetails.CachedTokens)
+			cached = u.PromptDetails.CachedTokens
+		}
+		s.acc.Input += subClamped(u.PromptTokens, cached)
+		s.acc.Output += u.CompletionTokens
+		if cached > 0 {
+			s.acc.CacheRead = max(s.acc.CacheRead, cached)
 		}
 		return
 	}
-	s.acc.Input += u.InputTokens
 	s.acc.Output += u.OutputTokens
 	s.acc.CacheCreation = max(s.acc.CacheCreation, u.CacheCreation)
 	s.acc.CacheRead = max(s.acc.CacheRead, u.CacheRead)
+	// input_tokens is exclusive on anthropic bodies but inclusive of the
+	// input_tokens_details share on responses bodies — only the details
+	// share is subtracted, so both dialects keep one ledger.
 	if u.InputDetails != nil {
-		s.acc.CacheRead = max(s.acc.CacheRead, u.InputDetails.CachedTokens)
+		s.acc.Input += subClamped(u.InputTokens, u.InputDetails.CachedTokens)
+		if u.InputDetails.CachedTokens > 0 {
+			s.acc.CacheRead = max(s.acc.CacheRead, u.InputDetails.CachedTokens)
+		}
+	} else {
+		s.acc.Input += u.InputTokens
 	}
+}
+
+// subClamped returns a−b floored at zero: the inclusive wire counters (openai
+// prompt_tokens, responses input_tokens) overlap the cached share, which the
+// normalized buckets already carry in CacheRead.
+func subClamped(a, b uint64) uint64 {
+	if b > a {
+		return 0
+	}
+	return a - b
 }
