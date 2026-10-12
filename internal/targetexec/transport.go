@@ -29,6 +29,26 @@ func peekResponseBody(response *http.Response, limit int) []byte {
 	return peek
 }
 
+// peekHead performs exactly ONE bounded Read from the response body and
+// replays what it returned: the commit path still sees a complete byte
+// stream. One read — never a fill loop — is what makes it safe on the SUCCESS
+// path: a partial first chunk (an upstream that streams, or blocks mid-answer
+// waiting for the client) is a complete input for a byte-0 prefix verdict,
+// and waiting for more bytes would deadlock a passthrough stream whose
+// upstream is blocked until the client acks. A 0-byte read (nothing buffered
+// yet, or EOF/error) means "undecided", never "empty body": the caller
+// treats undecided as not-a-verdict and proceeds to commit.
+func peekHead(response *http.Response, limit int) []byte {
+	buf := make([]byte, limit)
+	n, _ := response.Body.Read(buf)
+	head := buf[:n]
+	response.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(head), response.Body), response.Body}
+	return head
+}
+
 func sniffSSEFraming(response *http.Response) bool {
 	const window = 16
 	buf := make([]byte, window)

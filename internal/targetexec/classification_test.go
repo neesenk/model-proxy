@@ -126,3 +126,41 @@ func TestStripTopLevelParam(t *testing.T) {
 		t.Error("non-JSON: did should be false")
 	}
 }
+
+func TestIsFakeAPIReply(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+		head        string
+		want        bool
+	}{
+		{"content type html", "text/html; charset=utf-8", "", true},
+		{"content type html uppercase", "Text/HTML", "", true},
+		{"doctype prefix", "application/json", "<!DOCTYPE html>", true},
+		{"html prefix lowercased", "", "<html lang=\"en\">", true},
+		{"leading whitespace", "application/json", "\r\n\n  <head>", true},
+		{"json body", "application/json", `{"id":"chatcmpl"}`, false},
+		{"sse body", "text/event-stream", "event: message\n", false},
+		{"empty peek undecided", "application/json", "", false},
+		{"partial prefix undecided", "application/json", "<ht", false},
+		{"json mentioning html later", "application/json", `{"content":"<html>"}`, false},
+		{"xml not html", "application/xml", "<?xml version=\"1.0\"?>", false},
+	}
+	for _, tc := range cases {
+		if got := IsFakeAPIReply(tc.contentType, []byte(tc.head)); got != tc.want {
+			t.Errorf("%s: IsFakeAPIReply(%q, %q) = %v, want %v", tc.name, tc.contentType, tc.head, got, tc.want)
+		}
+	}
+}
+
+func TestHTMLTitle(t *testing.T) {
+	if got := HTMLTitle([]byte("<html><head><title>Just a moment...</title></head>")); got != "Just a moment..." {
+		t.Errorf("title = %q", got)
+	}
+	if got := HTMLTitle([]byte(`<html><title>O'Brien &amp; Co</title>`)); got != "O'Brien &amp; Co" {
+		t.Errorf("entity passthrough = %q", got)
+	}
+	if got := HTMLTitle([]byte("<!DOCTYPE html><html>")); got != "" {
+		t.Errorf("no title = %q", got)
+	}
+}

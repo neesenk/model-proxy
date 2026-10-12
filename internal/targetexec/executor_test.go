@@ -663,3 +663,54 @@ func TestExecutorFastFailConnDoesNotConsume401Slot(t *testing.T) {
 			result, doer.calls, provider.refreshes, state, effects, writer.Code)
 	}
 }
+
+// 2xx + HTML is a relay/WAW fake success: it must fail over with 5xx-style
+// provider accounting (breaker tick, failure metric, failover effect) instead
+// of committing markup to the client. Both detection arms — Content-Type
+// text/html and a JSON-typed body that opens with an HTML prefix.
+func TestExecutorFakeAPIReplyFailsOver(t *testing.T) {
+	loginPage := "<!DOCTYPE html><html><head><title>Sign in to relay</title></head><body>login</body></html>"
+	cases := []struct {
+		name        string
+		contentType string
+		body        string
+	}{
+		{"content type html", "text/html; charset=utf-8", loginPage},
+		{"html body with json content type", "application/json", loginPage},
+	}
+	for _, tc := range cases {
+		provider := &executorTestProvider{}
+		attempt, writer := testAttempt(provider, `{}`, Policy{LastTarget: true})
+		response := testResponse(200, tc.body)
+		response.Header.Set("Content-Type", tc.contentType)
+		state := &executorState{}
+		effects := &executorEffects{}
+		result := (Executor{Client: &sequenceDoer{responses: []*http.Response{response}}, State: state, Effects: effects}).Execute(attempt)
+		if result.Committed || result.Outcome != OutcomeFailedHard || result.AttemptStatus != http.StatusBadGateway ||
+			state.failures != 1 || state.modelFailures != 0 || state.success != 0 ||
+			effects.failures != 1 || effects.failovers != 1 || effects.commits != 0 ||
+			writer.Body.Len() != 0 || !bytes.Contains(result.AttemptBody, []byte("Sign in to relay")) {
+			t.Fatalf("%s: result=%+v state=%+v effects=%+v written=%q body=%q",
+				tc.name, result, state, effects, writer.Body.String(), result.AttemptBody)
+		}
+	}
+}
+
+// The head peek must not disturb real commits: a plain JSON 200 still commits
+// byte-identically, and a JSON body that merely mentions HTML later is not a
+// verdict.
+func TestExecutorRealAPIReplyCommitsAfterPeek(t *testing.T) {
+	provider := &executorTestProvider{}
+	attempt, writer := testAttempt(provider, `{}`, Policy{LastTarget: true})
+	body := `{"id":"x","choices":[{"message":{"content":"<html> docs"}}]}`
+	response := testResponse(200, body)
+	response.Header.Set("Content-Type", "application/json")
+	state := &executorState{}
+	effects := &executorEffects{}
+	result := (Executor{Client: &sequenceDoer{responses: []*http.Response{response}}, State: state, Effects: effects}).Execute(attempt)
+	if !result.Committed || state.failures != 0 || effects.failovers != 0 || state.success != 1 ||
+		writer.Code != 200 || writer.Body.String() != body {
+		t.Fatalf("result=%+v state=%+v effects=%+v status=%d body=%q",
+			result, state, effects, writer.Code, writer.Body.String())
+	}
+}

@@ -282,6 +282,23 @@ body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`
 
 客户端断开、写错误、上游 read error 都不得学习为空响应。最后一个 target 的 404/400 仍原样 commit 给客户端，但模型锁继续记录，供后续请求跳过。
 
+## 上游伪成功（2xx HTML）
+
+中转网关在凭据过期或被 WAF 拦截时答「200 + HTML 登录页/挑战页」——把它当成功流出，
+客户端拿到的是一段 markup 而不是 JSON/SSE。`targetexec.IsFakeAPIReply` 判定后按 502 语义
+处理：走 failover、计入 provider 级熔断（`RecordFailure` + failure metric），永不 commit、
+永不下沉到模型锁。两条判定臂都不得破坏 pre-commit 语义：
+
+- **Content-Type `text/html`**：仅凭响应头判定（peek 2KiB 只为提取 `<title>` 进诊断），适用于
+  流式请求——这条臂不读 body，慢 TTFT 流的 SSE keepalive 契约不受影响；
+- **文档前缀 peek**（`<!doctype`/`<html`/`<head`/`<body`/`<title`/`<script>`，大小写不敏感）：
+  单次有界读 ≤64B 并原样回放（`peekHead`），**只对非流式调用方**执行——流式调用方在首字节
+  前的任何阻塞读都会吃掉心跳窗口（keepalive 用例钉住）。声明 JSON 却以 HTML 开头的 body 也
+  被此臂捕获。
+
+attempt 腿的诊断只带状态与页面标题（`upstream answered 200 with an HTML page: <title>`），
+不落页面原文。
+
 ## Unsupported parameter 学习
 
 `paramBlock` 按 `(provider, model)` 隔离：
@@ -335,6 +352,8 @@ body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`
 ## 回归测试
 
 - half-open 的成功、5xx、429、普通 4xx 生命周期。
+- 2xx-HTML 伪成功：两臂判定、502 语义 failover+熔断、标题进诊断、真实 JSON 提交不受
+  peek 影响、流式请求不做 body peek（keepalive 契约）。
 - transient/quota/daily 及 body/header reset 优先级。
 - 普通 target 与 Fusion leg 的 429 kind/horizon、metric、quota refresh 一致。
 - 同 provider 不同 model 的锁和 paramBlock 隔离。

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strings"
 	"syscall"
 )
 
@@ -252,6 +253,58 @@ func RewriteThinkingAdaptive(body []byte) ([]byte, bool) {
 		return body, false
 	}
 	return out, true
+}
+
+// htmlPrefixes are the document-opening byte forms every HTML page starts
+// with (case-insensitive, after whitespace). A JSON or SSE API reply can
+// never begin with any of them.
+var htmlPrefixes = [][]byte{
+	[]byte("<!doctype"),
+	[]byte("<html"),
+	[]byte("<head"),
+	[]byte("<body"),
+	[]byte("<title"),
+	[]byte("<script"),
+}
+
+// IsFakeAPIReply reports whether a 2xx response is actually an HTML page
+// rather than an API reply: the Content-Type already says text/html, or the
+// body opens with an HTML document prefix. Relay gateways answer "200 + login
+// page / WAF challenge page" on expired credentials and intercepted traffic;
+// committing that streams markup to a JSON/SSE client. The caller reinterprets
+// the verdict as 502 so it fails over and cools down like any upstream
+// failure (magpie notAnAPIReply semantics). head may be empty or partial —
+// an undecided peek must read as "not HTML", never as a verdict.
+func IsFakeAPIReply(contentType string, head []byte) bool {
+	if strings.Contains(strings.ToLower(contentType), "text/html") {
+		return true
+	}
+	lower := bytes.ToLower(bytes.TrimSpace(head))
+	for _, prefix := range htmlPrefixes {
+		if bytes.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// htmlTitleRE extracts a bounded <title> value for the failover error line —
+// the page title names the login wall / challenge ("Just a moment...",
+// "Sign in to ...") far better than a raw markup prefix.
+var htmlTitleRE = regexp.MustCompile(`(?is)<title[^>]*>([^<]{0,120})`)
+
+// HTMLTitle returns the first <title> text in body, or "" when the peek
+// carried none (prefix-only verdicts). Used for diagnostics only.
+func HTMLTitle(body []byte) string {
+	match := htmlTitleRE.FindSubmatch(body)
+	if match == nil {
+		return ""
+	}
+	title := strings.TrimSpace(string(match[1]))
+	if len(title) > 120 {
+		title = title[:120]
+	}
+	return title
 }
 
 // IsFastFailConnError reports whether err is a connection-level failure that

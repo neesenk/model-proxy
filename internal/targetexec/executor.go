@@ -319,6 +319,30 @@ func (executor Executor) Execute(attempt Attempt) Result {
 				}
 			}
 		}
+		// 2xx carrying an HTML page is a relay/WAF fake success (login wall,
+		// challenge page) — committing it streams markup to a JSON/SSE client.
+		// Reinterpret as 502 so it fails over and cools down like any upstream
+		// failure; unlike the zero-byte case this is provider-level (the
+		// gateway is answering, just not with an API reply), so it never
+		// reaches RecordModelFailure. Two arms, both pre-commit-safe:
+		// Content-Type text/html settles from headers alone (covers streamed
+		// requests without touching the body — a blocking read here would
+		// defeat the SSE keepalive contract for slow-TTFT streams), and the
+		// document-prefix peek runs only for non-stream callers, whose body
+		// read is about to happen anyway.
+		if response.StatusCode < 300 {
+			if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/html") {
+				peek := peekResponseBody(response, 2<<10)
+				executor.fakeAPIReply(target, plan, peek)
+				return Result{Outcome: OutcomeFailedHard, AttemptStatus: http.StatusBadGateway, AttemptBody: fakeAPIReplyBody(peek)}
+			}
+			if !clientWantsStream {
+				if head := peekHead(response, 64); IsFakeAPIReply("", head) {
+					executor.fakeAPIReply(target, plan, head)
+					return Result{Outcome: OutcomeFailedHard, AttemptStatus: http.StatusBadGateway, AttemptBody: fakeAPIReplyBody(head)}
+				}
+			}
+		}
 		if response.StatusCode < 300 && response.Header.Get("Content-Length") == "0" {
 			if executor.State != nil {
 				executor.State.RecordModelFailure(target)
@@ -781,6 +805,32 @@ func (executor Executor) failure(target configdomain.RouteTarget, observeFailure
 	}
 	executor.failover(target)
 }
+
+// fakeAPIReply records the provider-level failure for a 2xx-that-was-HTML:
+// one circuit-breaker tick + failure metric + failover effect, exactly the
+// 5xx accounting, so the gateway stops receiving dispatches while it keeps
+// answering with pages.
+func (executor Executor) fakeAPIReply(target configdomain.RouteTarget, plan Plan, peek []byte) {
+	title := HTMLTitle(peek)
+	if title == "" {
+		title = "html document"
+	}
+	logx.Warnf("[proto=%s provider=%s] 2xx answered an HTML page (%q) — reinterpreted as 502 for failover and cooldown",
+		plan.ClientProtocol(), target.Provider, title)
+	executor.failure(target, true)
+}
+
+// fakeAPIReplyBody builds the bounded diagnostic carried on the failover leg
+// (request-log attempt row / terminal error): status + page title, never the
+// page itself.
+func fakeAPIReplyBody(peek []byte) []byte {
+	title := HTMLTitle(peek)
+	if title == "" {
+		title = "html document"
+	}
+	return []byte("upstream answered 200 with an HTML page: " + title)
+}
+
 func (executor Executor) rateLimited(target configdomain.RouteTarget) {
 	if executor.Effects != nil {
 		executor.Effects.RateLimited(target)
