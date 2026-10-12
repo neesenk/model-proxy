@@ -62,6 +62,7 @@ var (
 	retryAfterRe    = regexp.MustCompile(`(?i)retry[ -]?after[^0-9]{0,20}(\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)`)
 	resetInRe       = regexp.MustCompile(`(?i)resets?\s*(?:after|in)[^0-9]{0,20}((?:\d+\s*[hms]\s*){1,3})`)
 	resetInWordsRe  = regexp.MustCompile(`(?i)resets?\s*(?:after|in)[^0-9]{0,20}(\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)`)
+	cnResetHintRe   = regexp.MustCompile(`(\d+)\s*(个)?\s*(天|小时|时|分钟|分|秒)\s*(?:之)?后\s*(?:再)?(?:重试|重发|重置|恢复|尝试|再试|试|开放)`)
 	rfc3339KeyedRe  = regexp.MustCompile(`(?i)(?:reset|retry)[^\n]{0,40}?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:?\d{2}))`)
 	durationTokenRe = regexp.MustCompile(`(\d+)\s*([hms])`)
 )
@@ -178,6 +179,13 @@ func parseResetHint(body []byte, now time.Time) (time.Time, bool) {
 		}
 	}
 	if until.IsZero() {
+		if m := cnResetHintRe.FindSubmatch(body); m != nil {
+			if d, ok := cnHintDuration(m[1], m[3]); ok {
+				until = now.Add(d)
+			}
+		}
+	}
+	if until.IsZero() {
 		if m := rfc3339KeyedRe.FindSubmatch(body); m != nil {
 			if parsed, err := time.Parse(time.RFC3339, string(m[1])); err == nil {
 				until = parsed
@@ -194,6 +202,30 @@ func parseResetHint(body []byte, now time.Time) (time.Time, bool) {
 		return max, true
 	}
 	return until, true
+}
+
+// cnHintDuration is hintDuration for the Chinese unit words of cnResetHintRe
+// (天/小时/时/分钟/分/秒). Same clamp rules as hintDuration.
+func cnHintDuration(number, unit []byte) (time.Duration, bool) {
+	n, err := strconv.Atoi(string(number))
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	var scale time.Duration
+	switch string(unit) {
+	case "天":
+		scale = 24 * time.Hour
+	case "小时", "时":
+		scale = time.Hour
+	case "分钟", "分":
+		scale = time.Minute
+	default: // 秒
+		scale = time.Second
+	}
+	if n > int(math.MaxInt64/int64(scale)) {
+		return maxResetHint, true
+	}
+	return time.Duration(n) * scale, true
 }
 
 func hintDuration(number, unit []byte) (time.Duration, bool) {

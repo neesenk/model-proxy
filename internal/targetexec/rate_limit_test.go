@@ -84,6 +84,16 @@ func TestParseResetHint(t *testing.T) {
 		{`{"error":"Resets in 164h27m24s"}`, 164*time.Hour + 27*time.Minute + 24*time.Second, true},
 		{`{"error":"reset in 2 hours"}`, 2 * time.Hour, true},
 		{`{"error":"reset_at":"2026-07-21T13:30:00Z"}`, 90 * time.Minute, true},
+		// Chinese phrasings: rate-limit and quota bodies of GLM/Qwen/Kimi
+		// answer with 数字+单位+后+动词. magpie shipped the same family
+		// (#1669): without it these fall back to the short transient backoff
+		// even when the vendor stated the exact window.
+		{`{"error":{"message":"请求过于频繁，请 30 秒后重试","code":"429"}}`, 30 * time.Second, true},
+		{`{"error":{"code":"1302","message":"您的额度将在 2 小时后重置"}}`, 2 * time.Hour, true},
+		{`{"error":{"message":"触发限流，请在 5分钟 后重试一次"}}`, 5 * time.Minute, true},
+		{`{"error":{"message":"已达到今日上限，12小时后再试"}}`, 12 * time.Hour, true},
+		{`{"error":{"message":"服务繁忙，请 1 个小时后重试"}}`, time.Hour, true},
+		{`{"error":{"message":"请求过于频繁，请稍后重试"}}`, 0, false},
 		{`{"error":"too many requests"}`, 0, false},
 		{``, 0, false},
 	}

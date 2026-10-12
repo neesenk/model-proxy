@@ -253,7 +253,9 @@ Claude Code server-side thread、Responses 加密 reasoning 项（`rs_*`）这�
 2. `Retry-After`；
 3. 分类默认值。
 
-body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`（`days?|d|hours?|minutes?|seconds?` 等单位）和 reset/retry 关键词邻近的 RFC3339。上限 7 天；duration 在乘法前必须 clamp，防止溢出。
+body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`（`days?|d|hours?|minutes?|seconds?` 等单位）、reset/retry 关键词邻近的 RFC3339，以及中文
+`N 秒/分钟/小时/天 后重试/重置/再试`（`cnResetHintRe`，`个` 可选插入、动词词族收尾——GLM/Qwen/Kimi
+的 429/配额 body 实测形态；无数字的「请稍后重试」仍非 hint）。上限 7 天；duration 在乘法前必须 clamp，防止溢出。
 
 非 429 状态码携带配额耗尽证据时走同一分类器：`targetexec.ParseQuotaDenied`（body 命中 quota/daily 措辞即采纳，否则返回 false 保持通用 4xx 路径）复用 `ParseRateLimit` 的 kind/horizon 计算，executor 对 403 调用它并记 `RecordRateLimit` + failover（kimi-code 把 5 小时套餐窗口耗尽答成 403 "You've reached your 5-hour usage limit"，此前它落入普通 4xx commit：不冷却、不 failover，路由继续把流量派进已耗尽的账号）。
 
