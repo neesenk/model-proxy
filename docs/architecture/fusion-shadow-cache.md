@@ -12,8 +12,13 @@ request log、`internal/cache`、
 缓存默认关闭：`cache.enabled/ttl/max_entries/max_body_bytes`，默认 TTL 10m、1000 条、单 body 256 KiB。
 
 - key 是 method、path、原始 query、白名单 header（`anthropic-beta`、
-  `accept-language`）与原始请求 body 的 SHA-256，各字段长度前缀编码
-  （body 是任意字节，裸分隔符拼接存在理论碰撞）；
+  `accept-language`）、**调用方 key 身份**（`webauth.KeyIDFrom`，api-keys 启用时的
+  sha256 前缀 id）与原始请求 body 的 SHA-256，各字段长度前缀编码
+  （body 是任意字节，裸分隔符拼接存在理论碰撞）。按调用方分桶：api-keys 部署下一个
+  key 缓存的响应绝不再重放给另一个 key（凭据归属的信息流边界；Bifrost 语义缓存按
+  virtual key 隔离的同款修复）。空 caller（loopback 默认）不写入任何字节——编码与
+  历史 key 逐字节一致（金色值测试钉住），单租户部署升级后缓存不冷启动；
+- 只缓存 `<300`、完整读到 EOF、未超过 body cap 的响应；
 - 只缓存 `<300`、完整读到 EOF、未超过 body cap 的响应；
 - 客户端断开或半截响应不得入缓存。流式响应的"半截"按协议终态序列判定
   （`protocol.StreamTerminalComplete`，在 `targetexec` commit 的 cache Put 前执行）：

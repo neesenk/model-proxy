@@ -408,7 +408,10 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 		// polled, and Lookup books a miss (and lazily evicts) on every probe,
 		// grinding the operational hit-rate metrics down.
 		cacheRequest := routePreviewCacheRequest(r, proto)
-		if cache.Peek(responsecache.Key(cacheRequest, body), now) {
+		// "" caller: the preview rides the admin surface with no API-key
+		// context, so it approximates the unauthenticated loopback
+		// composition — the same as a no-keys deployment.
+		if cache.Peek(responsecache.Key(cacheRequest, body, ""), now) {
 			cacheState = "hit"
 		} else {
 			cacheState = "miss"

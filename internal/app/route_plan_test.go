@@ -157,7 +157,7 @@ func TestDebugRoute_PreviewCacheProbeIsReadOnly(t *testing.T) {
 	// ?proto control query must never participate in the key.
 	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
 		keyReq := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
-		p.cache.Put(responsecache.Key(keyReq, []byte(body)), "m", http.StatusOK,
+		p.cache.Put(responsecache.Key(keyReq, []byte(body), ""), "m", http.StatusOK,
 			http.Header{"Content-Type": {"application/json"}}, []byte(`{}`), time.Now())
 	}
 	for _, query := range []string{"", "?proto=openai", "?proto=responses"} {
@@ -187,7 +187,7 @@ func TestDebugRoute_PreviewAppliesGuardBeforeCache(t *testing.T) {
 		loginAPIKeyFixtures(t, [2]string{"zhipu", "zhipu"})
 		p := newTestProxy(t, cfg)
 		keyReq := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(primeBody)))
-		p.cache.Put(responsecache.Key(keyReq, primeBody), "m", http.StatusOK,
+		p.cache.Put(responsecache.Key(keyReq, primeBody, ""), "m", http.StatusOK,
 			http.Header{"Content-Type": {"application/json"}}, []byte(`{}`), time.Now())
 		req := httptest.NewRequest(http.MethodPost, "/debug/route", strings.NewReader(string(body)))
 		rec := httptest.NewRecorder()
@@ -245,7 +245,7 @@ func TestDebugRoute_PreviewAppliesGuardBeforeCache(t *testing.T) {
 		loginAPIKeyFixtures(t, [2]string{"zhipu", "zhipu"})
 		p := newTestProxy(t, cfg)
 		keyReq := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(pathBody)))
-		p.cache.Put(responsecache.Key(keyReq, pathBody), "m", http.StatusOK,
+		p.cache.Put(responsecache.Key(keyReq, pathBody, ""), "m", http.StatusOK,
 			http.Header{"Content-Type": {"application/json"}}, []byte(`{}`), time.Now())
 		req := httptest.NewRequest(http.MethodPost, "/debug/route", strings.NewReader(string(pathBody)))
 		rec := httptest.NewRecorder()

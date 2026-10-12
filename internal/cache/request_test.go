@@ -21,8 +21,8 @@ func TestKeySeparatesResponseAffectingInputs(t *testing.T) {
 		}
 		return result
 	}
-	base := Key(request("/v1/responses", "", nil), body)
-	if got := Key(request("/v1/responses", "", nil), body); got != base {
+	base := Key(request("/v1/responses", "", nil), body, "")
+	if got := Key(request("/v1/responses", "", nil), body, ""); got != base {
 		t.Errorf("identical request key = %q, want %q", got, base)
 	}
 	cases := []struct {
@@ -38,12 +38,12 @@ func TestKeySeparatesResponseAffectingInputs(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			if got := Key(test.request, test.body); got == base {
+			if got := Key(test.request, test.body, ""); got == base {
 				t.Errorf("response-affecting %s produced base key %q", test.name, got)
 			}
 		})
 	}
-	if got := Key(request("/v1/responses", "", map[string]string{"x-custom": "ignored"}), body); got != base {
+	if got := Key(request("/v1/responses", "", map[string]string{"x-custom": "ignored"}), body, ""); got != base {
 		t.Errorf("non-response-affecting header changed key: got %q, want %q", got, base)
 	}
 }
@@ -57,9 +57,30 @@ func TestKeyEncodingIsStable(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.Header.Set("anthropic-beta", "output-128k")
-	got := Key(request, []byte(`{"model":"glm","stream":false}`))
+	got := Key(request, []byte(`{"model":"glm","stream":false}`), "")
 	const want = "8706438aff82a079d4a41b968dcbb5438cbaa520548a28a068d0396cfe1b880b"
 	if got != want {
 		t.Errorf("Key = %q, want %q", got, want)
+	}
+}
+
+// TestKeySeparatesCallers pins per-caller bucketing: with api-keys enabled,
+// an entry cached under one key id must never replay to another caller with
+// an identical body. The empty caller (loopback default) keeps the legacy
+// composition and equals the golden encoding above.
+func TestKeySeparatesCallers(t *testing.T) {
+	body := []byte(`{"model":"glm","input":[]}`)
+	request, err := http.NewRequest(http.MethodPost, "http://example.invalid/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := Key(request, body, "")
+	keyA := Key(request, body, "a1b2c3d4")
+	keyB := Key(request, body, "e5f6a7b8")
+	if keyA == base || keyB == base || keyA == keyB {
+		t.Fatalf("caller bucketing collapsed: base=%s a=%s b=%s", base, keyA, keyB)
+	}
+	if Key(request, body, "a1b2c3d4") != keyA {
+		t.Error("same caller must be stable across calls")
 	}
 }

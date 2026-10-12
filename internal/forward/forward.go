@@ -1573,7 +1573,7 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 // cache-hit contract).
 func (p pipeline) lookupResponseCache(cache *responsecache.Store, r *http.Request, origBody []byte, calledModel, proto, exposed, agent, clientSession, requestID string, w http.ResponseWriter, bypass bool) (cacheKey string, hit bool) {
 	if cache != nil && !bypass {
-		cacheKey = responsecache.Key(r, origBody)
+		cacheKey = responsecache.Key(r, origBody, webauth.KeyIDFrom(r.Context()))
 		if e, ok := cache.Lookup(cacheKey, calledModel, time.Now()); ok {
 			// Live monitor (#6): a cache hit skips the normal start/end flow, so
 			// emit an end event explicitly — otherwise the live view is blind to
