@@ -210,6 +210,20 @@ func (executor Executor) Execute(attempt Attempt) Result {
 		if response.StatusCode >= 500 {
 			peek := peekResponseBody(response, 8<<10)
 			response.Body.Close()
+			// A 5xx whose body proves a CONTENT refusal (safety filter /
+			// response protection / moderation) is request-attributable, not a
+			// provider fault: fail over to the next target (another provider's
+			// policy may serve the same request) but never tick the circuit
+			// breaker or failure metric — the account is healthy (magpie's
+			// content-refusal bucket; mis-reading it once silently benched all
+			// its accounts for days).
+			if IsContentRefusal(peek) {
+				logx.Infof("[proto=%s provider=%s] %d proved a content refusal — failing over without cooldown accounting",
+					plan.ClientProtocol(), target.Provider, response.StatusCode)
+				executor.release(target.Provider)
+				executor.failover(target)
+				return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: peek}
+			}
 			executor.failure(target, true)
 			return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: peek}
 		}

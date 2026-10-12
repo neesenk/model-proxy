@@ -714,3 +714,25 @@ func TestExecutorRealAPIReplyCommitsAfterPeek(t *testing.T) {
 			result, state, effects, writer.Code, writer.Body.String())
 	}
 }
+
+// A 5xx whose body proves a content refusal fails over WITHOUT provider
+// failure accounting: no breaker tick, no failure metric — the account is
+// healthy, the request content is the problem (magpie content-refusal bucket;
+// its misreading once silently benched every account for days).
+func TestExecutorContentRefusal5xxFailsOverWithoutCooldown(t *testing.T) {
+	provider := &executorTestProvider{}
+	attempt, _ := testAttempt(provider, `{}`, Policy{LastTarget: true})
+	refusal := `{"error":{"message":"Output blocked by content filtering policy","type":"server_error"}}`
+	state := &executorState{}
+	effects := &executorEffects{}
+	result := (Executor{
+		Client:  &sequenceDoer{responses: []*http.Response{testResponse(http.StatusBadGateway, refusal)}},
+		State:   state,
+		Effects: effects,
+	}).Execute(attempt)
+	if result.Committed || result.Outcome != OutcomeFailedHard || result.AttemptStatus != http.StatusBadGateway ||
+		state.failures != 0 || state.releases != 1 || effects.failures != 0 || effects.failovers != 1 ||
+		!bytes.Equal(result.AttemptBody, []byte(refusal)) {
+		t.Fatalf("result=%+v state=%+v effects=%+v", result, state, effects)
+	}
+}

@@ -299,6 +299,15 @@ body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`
 attempt 腿的诊断只带状态与页面标题（`upstream answered 200 with an HTML page: <title>`），
 不落页面原文。
 
+## 内容性拒绝不熔断
+
+5xx body 证明是**内容性拒绝**（厂商安全过滤器/response protection/内容审核措辞，
+`targetexec.IsContentRefusal`，保守多词匹配，中英双语）时，失败归属于**请求内容**而非
+provider：照常 failover（换一家策略不同的 provider 可能可服务同一请求），但**不计熔断、
+不计失败指标**、不触发任何冷却——账号本身是健康的。反面教训：把「unapproved channel」
+误判为账号故障曾让 magpie 静默封禁全部账号 5 天。普通 500 错误页绝不许误分类（裸通用词
+不进 marker 表）。4xx 拒绝本就走原样 commit 路径（无冷却无 failover），不在此例。
+
 ## Unsupported parameter 学习
 
 `paramBlock` 按 `(provider, model)` 隔离：
@@ -354,6 +363,7 @@ attempt 腿的诊断只带状态与页面标题（`upstream answered 200 with an
 - half-open 的成功、5xx、429、普通 4xx 生命周期。
 - 2xx-HTML 伪成功：两臂判定、502 语义 failover+熔断、标题进诊断、真实 JSON 提交不受
   peek 影响、流式请求不做 body peek（keepalive 契约）。
+- 内容性拒绝 5xx：failover 但零冷却记账（熔断/失败指标/releases 各就各位）、普通 5xx 仍记账。
 - transient/quota/daily 及 body/header reset 优先级。
 - 普通 target 与 Fusion leg 的 429 kind/horizon、metric、quota refresh 一致。
 - 同 provider 不同 model 的锁和 paramBlock 隔离。

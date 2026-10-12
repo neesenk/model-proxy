@@ -255,6 +255,50 @@ func RewriteThinkingAdaptive(body []byte) ([]byte, bool) {
 	return out, true
 }
 
+// contentRefusalMarkers are multi-word phrases that prove a 5xx body is a
+// CONTENT verdict, not a provider outage: vendor safety filters and response
+// protection layers answer with these on refused prompts (OpenAI's safety
+// system message, ChatGPT's 502 "response protection", moderation layers, and
+// the Chinese phrasings of GLM/Qwen/Kimi). A request-attributable refusal
+// must not tick the provider's circuit breaker or cool anything down — the
+// same request on another provider may be perfectly servable, and the account
+// itself is healthy. Single generic words are deliberately excluded (a real
+// 500 error page must never misclassify).
+var contentRefusalMarkers = [][]byte{
+	[]byte("content policy"),
+	[]byte("content_policy"),
+	[]byte("content filter"),
+	[]byte("content_filter"),
+	[]byte("content filtering"),
+	[]byte("content moderation"),
+	[]byte("safety system"),
+	[]byte("output blocked"),
+	[]byte("blocked by content"),
+	[]byte("response protection"),
+	[]byte("flagged as sensitive"),
+	[]byte("内容安全"),
+	[]byte("内容审核"),
+	[]byte("敏感内容"),
+	[]byte("安全策略"),
+	[]byte("不符合相关法律法规"),
+}
+
+// IsContentRefusal reports whether a 5xx body proves the failure is a content
+// refusal rather than a provider fault. Callers gate it on status >= 500: 4xx
+// refusals already take the plain-commit path with no cooldown accounting.
+func IsContentRefusal(peek []byte) bool {
+	if len(peek) == 0 {
+		return false
+	}
+	lower := bytes.ToLower(peek)
+	for _, marker := range contentRefusalMarkers {
+		if bytes.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // htmlPrefixes are the document-opening byte forms every HTML page starts
 // with (case-insensitive, after whitespace). A JSON or SSE API reply can
 // never begin with any of them.

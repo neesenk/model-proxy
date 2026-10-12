@@ -164,3 +164,29 @@ func TestHTMLTitle(t *testing.T) {
 		t.Errorf("no title = %q", got)
 	}
 }
+
+func TestIsContentRefusal(t *testing.T) {
+	positive := []string{
+		`{"error":{"message":"Your request was rejected as a result of our safety system.","type":"server_error"}}`,
+		`{"error":"Output blocked by content filtering policy"}`,
+		`{"message":"response protection triggered","code":502}`,
+		`{"error":{"message":"您的输入包含敏感内容，无法处理"}}`,
+		`{"error":{"code":"1301","message":" content_policy_violation "}}`,
+	}
+	for _, body := range positive {
+		if !IsContentRefusal([]byte(body)) {
+			t.Errorf("IsContentRefusal(%s) = false, want true", body)
+		}
+	}
+	negative := []string{
+		`{"error":"upstream connect error"}`,
+		`{"error":"internal server error: model timed out"}`,
+		`{"error":"bad gateway"}`,
+		"",
+	}
+	for _, body := range negative {
+		if IsContentRefusal([]byte(body)) {
+			t.Errorf("IsContentRefusal(%s) = true, want false", body)
+		}
+	}
+}
