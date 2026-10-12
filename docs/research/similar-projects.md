@@ -1,6 +1,6 @@
 # 同类开源项目调研与方向建议
 
-> 状态：调研报告（非实现契约）。事实基准：2026-08 第一轮（GitHub 元数据快照，star 数仅用于量级判断）+ 2026-09 第二轮增量（各家官网/README/changelog 一手来源；其中的性能与成本数字多为厂商自述，未经第三方验证）+ 2026-10 第三轮增量（GitHub releases/官方 changelog 一手来源，覆盖 2026-09-01 → 2026-10-05 窗口）+ 2026-10-08 Bifrost 专项深读（repo/releases + 官方 docs 一手来源，升级为一等跟踪对象，见 §1 表与 §2.2-6）+ 2026-10-08 magpie 专项深读（repo 源码 + 子系统工程文档一手来源；2026-09-23 创建、两周 ~6.3k star，本地控制面同赛道最直接竞品，升级为一等跟踪对象，见 §1 表与 §2.2-7）。
+> 状态：调研报告（非实现契约）。事实基准：2026-08 第一轮（GitHub 元数据快照，star 数仅用于量级判断）+ 2026-09 第二轮增量（各家官网/README/changelog 一手来源；其中的性能与成本数字多为厂商自述，未经第三方验证）+ 2026-10 第三轮增量（GitHub releases/官方 changelog 一手来源，覆盖 2026-09-01 → 2026-10-05 窗口）+ 2026-10-08 Bifrost 专项深读（repo/releases + 官方 docs 一手来源，升级为一等跟踪对象，见 §1 表与 §2.2-6）+ 2026-10-08 magpie 专项深读（repo 源码 + 子系统工程文档一手来源；2026-09-23 创建、两周 ~6.3k star，本地控制面同赛道最直接竞品，升级为一等跟踪对象，见 §1 表与 §2.2-7）+ 2026-10-12 第四轮增量（GitHub releases/官方 docs/commits 一手来源，覆盖 2026-10-05 → 2026-10-12 窗口，见 §2.5）。
 > 本文档只做竞品分析与方向建议；实现契约仍以 `docs/architecture/` 各专题为准。
 
 ## 1. 调研范围
@@ -114,6 +114,17 @@
 
 7. **路由决策可解释性与基准化**。Switchyard v0.3.0（09-22）：Advisor Gate（执行模型 + 更强 advisor 做 review/approve/redo，带会话审阅预算与停滞检查点）、composite routing（LLM 分类器 + stage router）、decision endpoint（只路由不执行）、路由结果带 `selected_model_ids` + 决策元数据 + OTel evidence（[release](https://github.com/NVIDIA-NeMo/Switchyard/releases/tag/v0.3.0)）。OpenRouter 发布 Model Router Benchmarks（10-02）：横向评测 7 个 router，提出 Router Index（0–10，默认质量 60% / 耗时 20% / 成本 20%，权重可调），并明确指出路由器的固有难点——**切模型要重建 input cache**、prompt 信息不足以判断复杂度（[blog](https://openrouter.ai/blog/announcements/model-router-benchmarks/)）。
 
+### 2.5 第四轮增量要点（2026-10-12）
+
+窗口 2026-10-05 → 2026-10-12，三路调研（企业网关 / 本地控制面 / 路由-MCP-评测），全部一手来源核实（GitHub releases、官方 docs/blog、spec 仓库；两处页面抓取受限经 gh CLI 交叉补齐）。
+
+1. **管理面与浏览器面安全成为主战场**。LiteLLM v1.104.3→v1.105.0（10-11）连发：SSO debug 默认关、Sentry PII 擦除、422 不带请求体；v1.106.0-rc.1 立 MCP 红线「绝不把调用方 key 转发给 MCP 服务器」、dev.1 默认禁用 stdio MCP。magpie 本周连环修 redact 协议位置漏洞（thinking 块/tool args 未脱敏外发）并复现修复了文档点名的 DNS-rebinding（10-10）。one-api 确认停更（2026 年零发布，new-api 是唯一后继）；Portkey OSS 网关近 9 个月无 release。→ 管理面引导鉴权、浏览器面 CSRF/rebinding 防护、脱敏按协议位置设计已是行业基线。
+2. **调度语义收敛向「配额冷却 × 条件化会话亲和 × 语言无关限频解析」**。CLIProxyAPI v8.0.16→v8.0.25（10 release）新增 `session-affinity-rebind-on`（条件重绑）、`credential_quota` 等同 cooldown；magpie 落地中文 retry-after 解析（#1669，10-11）、到期 run 释放并发槽（#1667）、每 usage window 独立 cap。三家同窗汇合到同一目标形态。
+3. **「配置写入不破坏用户手改」进入键级粒度**。cc-switch 4.0.x 八连发（4.0.0→4.0.9）全在关键字段替换地基上修协议错配（Codex 线程 400、xAI Responses 422、双格式鉴权头）+ 新增「连接地址」显式建模客户端所在机器（WSL2/局域网）；magpie LESSONS 归因「用户自设值被覆盖」四连修=缺「保留用户已设值」测试。
+4. **模型目录把缓存能力与定价结构化为一等字段**。models.dev 2026-10-07 上 experimental v2 API、10-08 v2 cache capabilities schema（隐式/显式缓存、cache 目标、时长），小时级自动同步；agentgateway v1.6.0（10-02）内置目录默认定价使 USD 预算/CEL 自动生效、流式 guardrails 默认 fail-closed、Messages→Responses 成首选转换。→ 「成本感知默认开 + 安全默认 fail-closed」重定行业出厂值；外部目录源需做 v0→v2 schema 适配。
+5. **MCP 无状态化进入补丁深水区**。mcphub v1.1.1–v1.1.3（10-07/08/11）三连修集中在状态关联兜底（OpenAI session metadata 回退）与出口安全（CIDR allowlist、CGNAT 误拦修正、JWKS forward auth）；IBM ContextForge 完成 inbound MCP era negotiation；官方 TS SDK v2.3.1（10-05）`requireBearerAuth` 增 audience 校验、Python SDK v2.3.0（10-02）把非法 `x-mcp-header` 从静默丢弃改为注册期 fail-fast。
+6. **上游伪成功与内容性拒绝的失败语义持续精化**。magpie 本周继续在该域迭代（Gemini 截断流显式终结 #1643、循环复读终止为可行动错误 #1359、429 中文解析 #1669）；Bifrost 主干 10-05 恢复 billing header 剥离、anthropic→openai 缓存标记 tool 级翻译（#8012）。窗口内 Bifrost 无新 release（v2.2.6 实际发布日为 10-06，前文 10-02 系 v2.2.5——勘误），Edge 仍 alpha（edge-v0.9.2，10-02：Cursor MCP 插件只读同步、后台服务加固）。LiteLLM prompt caching 持续精细化（Anthropic `/v1/messages` 断点注入默认 implicit lookup、tool_result 保留）。
+
 ## 3. 业界动向总结
 
 1. **赛道分化完成**：「服务端网关」（new-api/LiteLLM/Portkey/Higress，卷计费与企业治理）vs「编码 agent 本地控制面」（CCR/cc-switch/CLIProxyAPI，卷易用性与 agent 覆盖）。我们在后者的深水区（配额感知调度、订阅账号池、评测），前者不做也不该做。
@@ -148,6 +159,7 @@
 > **落地进展（2026-10-08 Bifrost 借鉴批次）**：粘滞绑定升级为 (会话, 路由) 粒度（`runtime.StickyKey`，同会话换模型=独立新绑定，各 dwell 各 recover-and-return；Bifrost「绑定按请求 model 分记」语义）；会话键入口卫生化（`protocol.HeaderSessionID`：trim/≤256/可打印 ASCII，异常=无会话，宁可不粘也不粘错；出口白名单同步跳过含控制字节的值）；新增每请求覆盖头 `x-mp-sticky: off`（本请求退出会话亲和，不写不刷绑定，跨路由改道同规则）；request log 每条 attempt 新增 `schedule.source`（quota/sticky/pin/load_balance/force，`/debug/route` 同源）+ `/api/status.schedule` 每路由 `sticky_sessions` 计数；协议转换能力矩阵机器可读化（`protocol/capability_matrix.go` + 声明==执行一致性测试，doctor 路由 dry-run 改为矩阵驱动输出）。S2/S8 的 auto-inject 与安全清单仍未动（明确留待后续）。
 > **落地进展（2026-10 第三轮增量调研）**：S1–S12 状态不变；§2.4 第三轮增量对应的落地候选为 S13–S16。**S14 已部分落地**（同日）：交互矩阵契约 + 行为回归（`internal/runtime` sticky×熔断/限频/模型锁用例）+ 部分链 `skipped` 可观测（`/api/status.schedule` + Web UI），权威契约见 `docs/architecture/routing-and-failure.md`「粘滞×可用性×配额 交互矩阵」；server-side 会话亲和（`rs_*`/thread）随 S8 继续。**S13 已落地**（次日）：op journal 意图日志 + 中断收敛 warning、写后回读校验（复用 drift 探针）、Codex 兼容不变量回归，契约见 `docs/client-takeover.md`「机制契约」。S15/S16 未实现。
 >
+> **落地进展（2026-10-12 第四轮批次，competitor-2026-10-12 分支）**：S18① 上游伪成功检测已实现（2xx-HTML 两臂判定→502 参与 failover/熔断；CT-text/html 臂不读 body 保 SSE keepalive pre-commit 契约、前缀 peek 单次读只对非流式调用方——keepalive 用例先红钉住 peek 阻塞回归）；S14 增量之「内容性拒绝不封禁」已实现（5xx 安全过滤措辞→failover 零冷却记账；另两条——rest 封顶已有（maxResetHint 7d）、模型级 rest 已有（modelLocks））；S2 增量之浏览器面防护已实现（`GuardForwardBrowserOrigin`：cross-site 一律 403、未鉴权要求 loopback/listen 的 Host 与 Origin——管理面 guard 语义不动）；响应缓存 key 绑定调用方身份（Bifrost semanticcache v1.6.9 同款，空 caller 编码不变保单租户缓存）；429/配额 body 中文 reset 提示解析（magpie #1669 同族）；请求画像+上下文构成落 request log 并进 Requests 详情（magpie context 网格的日志字段版）。
 > **落地决策（2026-10-08 magpie 深读批次，用户裁定）**：采纳——A 批测试/工程纪律（CI 门禁事故出处注释、阴性不变量/跨 vendor 断言、真实字面 fixture、评审回滚验证先红、`-race -count=20` 判 flake）、S18①上游伪成功检测、浏览器面防护（并入 S2）、S14 增量三条（rest 上限/模型级 rest/内容性拒绝不封禁）、S3 保留 preset 向导（**砍竞品导入扫描**；models.dev 元数据已接）。否决——S17 学习-重试课程扩展、S18② reasoning 持有。**产品主线定为 S19 takeover 常驻控制面化**（易用性为当前最短板），S4 只管扩客户端。
 
 定位不变，按「安全性 → 易用性 → 生态位」排序。
