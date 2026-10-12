@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/webauth"
 )
@@ -68,7 +69,7 @@ func readAPIKeyRecords(t *testing.T, logDir string) []requestlog.Record {
 // TestAPIKeyTaggedInRequestLog: the authenticated request's record carries
 // api_key = sha256(rig-key-1)[:8]; the token itself never appears.
 func TestAPIKeyTaggedInRequestLog(t *testing.T) {
-	_, base, logDir := apiKeyFixture(t)
+	p, base, logDir := apiKeyFixture(t)
 	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
 
 	req, _ := http.NewRequest(http.MethodPost, base+"/v1/chat/completions", strings.NewReader(body))
@@ -83,6 +84,15 @@ func TestAPIKeyTaggedInRequestLog(t *testing.T) {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
 
+	// The record completes at response-body Close inside the commit path —
+	// a Content-Length client can finish reading first, and the logger drains
+	// to disk asynchronously. Deterministic barrier: wait for the commit
+	// metrics (recorded after the record is enqueued), then Shutdown() the
+	// logger, which drains every accepted record before returning. Reading
+	// without the barrier was a standing flake ("no request-log records
+	// written" under -count>1 / load).
+	awaitCommitMetrics(t, p, counters.PMKey{Provider: "a", Model: "m"})
+	p.reqLog.Shutdown()
 	records := readAPIKeyRecords(t, logDir)
 	if len(records) == 0 {
 		t.Fatal("no request-log records written")
