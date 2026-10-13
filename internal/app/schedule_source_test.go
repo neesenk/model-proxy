@@ -6,6 +6,7 @@
 package app
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/provider"
 	runtimestate "model-proxy/internal/runtime"
+	"model-proxy/internal/testsyn"
 )
 
 // scheduleSourceFixture builds a proxy with one route over two providers and
@@ -87,6 +89,19 @@ func postScheduleProbe(t *testing.T, url, body, session, stickyHeader string) in
 	return resp.StatusCode
 }
 
+// awaitRecordCount waits until the async request-log writer has flushed at
+// least n records. Records are enqueued after the response is delivered to
+// the client; on a slow CI runner the next request's record can overtake the
+// previous one's flush (overtaking reorders the JSONL and inverts
+// file-order assertions), so tests that read records in request order must
+// let each request's record land before issuing the next request.
+func awaitRecordCount(t *testing.T, dir string, n int) {
+	t.Helper()
+	testsyn.WaitUntil(t, fmt.Sprintf("%d request-log records flushed", n), func() bool {
+		return len(allRecords(t, dir)) >= n
+	})
+}
+
 // TestScheduleSourceLogged: the request log records which scheduling engine
 // produced the try order — quota for a fresh binding, sticky for a held
 // (session, route) binding, force when a force-provider override collapsed
@@ -99,6 +114,7 @@ func TestScheduleSourceLogged(t *testing.T) {
 		if code := postScheduleProbe(t, base+"/v1/chat/completions", body, "s1", ""); code != 200 {
 			t.Fatalf("request %d status = %d, want 200", i, code)
 		}
+		awaitRecordCount(t, p.reqLog.Directory(), i+1)
 	}
 	force, _ := http.NewRequest(http.MethodPost, base+"/v1/chat/completions", strings.NewReader(body))
 	force.Header.Set("Content-Type", "application/json")
@@ -112,6 +128,7 @@ func TestScheduleSourceLogged(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("forced request status = %d, want 200", resp.StatusCode)
 	}
+	awaitRecordCount(t, p.reqLog.Directory(), 4)
 
 	records := allRecords(t, p.reqLog.Directory())
 	if len(records) != 4 {
@@ -137,6 +154,7 @@ func TestStickyOffOverrideComposition(t *testing.T) {
 	if code := postScheduleProbe(t, base+"/v1/chat/completions", body, "s1", ""); code != 200 {
 		t.Fatalf("parking request status = %d, want 200", code)
 	}
+	awaitRecordCount(t, p.reqLog.Directory(), 1)
 	key := runtimestate.StickyKey("s1", "m")
 	parked, ok := p.runtimeState.Sticky(key)
 	if !ok || parked.Provider == "" {
@@ -147,6 +165,7 @@ func TestStickyOffOverrideComposition(t *testing.T) {
 	if code := postScheduleProbe(t, base+"/v1/chat/completions", body, "s1", "off"); code != 200 {
 		t.Fatalf("override request status = %d, want 200", code)
 	}
+	awaitRecordCount(t, p.reqLog.Directory(), 2)
 
 	// The override request must NOT report the sticky engine.
 	records := allRecords(t, p.reqLog.Directory())
@@ -171,11 +190,13 @@ func TestStickyOffOverrideUnknownValueIgnored(t *testing.T) {
 	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
 
 	if code := postScheduleProbe(t, base+"/v1/chat/completions", body, "s1", ""); code != 200 {
-		t.Fatalf("parking request status = %d", code)
+		t.Fatalf("parking request status = %d, want 200", code)
 	}
+	awaitRecordCount(t, p.reqLog.Directory(), 1)
 	if code := postScheduleProbe(t, base+"/v1/chat/completions", body, "s1", "no"); code != 200 {
-		t.Fatalf("typo request status = %d", code)
+		t.Fatalf("typo request status = %d, want 200", code)
 	}
+	awaitRecordCount(t, p.reqLog.Directory(), 2)
 	records := allRecords(t, p.reqLog.Directory())
 	if len(records) != 2 {
 		t.Fatalf("records = %d, want 2", len(records))
