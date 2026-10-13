@@ -36,18 +36,26 @@ func TestConfig_ProviderBaseURLs(t *testing.T) {
 			})
 			continue
 		}
-		t.Run(name+"/openai", func(t *testing.T) {
-			if prov.OpenAIBaseURL == "" {
-				t.Fatalf("openai_base_url is empty")
+		if prov.OpenAIBaseURL == "" {
+			// Anthropic-only provider (zcode ultra gateway: the openai leg is
+			// pay-per-use, so config keeps it off that protocol): no chat
+			// endpoint to join — only the anthropic check below applies. A
+			// provider with no protocol base URL at all is a config bug.
+			if prov.AnthropicBaseURL == "" {
+				t.Errorf("%s has no openai/decisions/anthropic base URL", name)
+				continue
 			}
-			// Openai: proxy strips /v1 from client path, appends remainder.
-			// Simulate: client sends /v1/chat/completions → stripped to /chat/completions
-			upstream := strings.TrimRight(prov.OpenAIBaseURL, "/") + "/chat/completions"
-			// Should not have double /v1
-			if strings.Contains(upstream, "/v1/v1") {
-				t.Errorf("openai URL has double /v1: %s (openai_base_url should NOT end with /v1)", upstream)
-			}
-		})
+		} else {
+			t.Run(name+"/openai", func(t *testing.T) {
+				// Openai: proxy strips /v1 from client path, appends remainder.
+				// Simulate: client sends /v1/chat/completions → stripped to /chat/completions
+				upstream := strings.TrimRight(prov.OpenAIBaseURL, "/") + "/chat/completions"
+				// Should not have double /v1
+				if strings.Contains(upstream, "/v1/v1") {
+					t.Errorf("openai URL has double /v1: %s (openai_base_url should NOT end with /v1)", upstream)
+				}
+			})
+		}
 
 		if prov.AnthropicBaseURL != "" {
 			t.Run(name+"/anthropic", func(t *testing.T) {
