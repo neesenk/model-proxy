@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	// Deterministic IANA zone loading for the DST calendar tests on hosts
+	// without a system tz database.
+	_ "time/tzdata"
 )
 
 func TestQueryRangeAggregationFiltersAndLosslessStorage(t *testing.T) {
@@ -580,6 +583,135 @@ func TestAverageMillisecondsAndLocalCalendarStartFailures(t *testing.T) {
 	}
 	if got := localCalendarStart("x", "2006-01", "month"); got != 0 {
 		t.Errorf("short invalid month = %d, want 0", got)
+	}
+}
+
+// TestAnalyticsBucketLabelCalendarSemantics pins the Go-side labeler's
+// equivalence with the SQLite strftime/date(...,'localtime') bucketing it
+// replaced: the DST spring-forward hour has no label, the fall-back hour
+// labels twice (two UTC hours, one local bucket), half-hour-offset zones
+// bucket on local walls, weeks fold to Monday, and months to the first.
+func TestAnalyticsBucketLabelCalendarSemantics(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("load America/New_York: %v", err)
+	}
+	hour := func(label string) string {
+		return analyticsBucketLabel(mustUnix(t, label, ny), "hour", ny)
+	}
+
+	// Spring forward 2026-03-08: local 02:00 does not exist — 01:59 EST is
+	// followed by 03:00 EDT, so no "02:00" bucket label can occur.
+	if got := hour("2026-03-08T01:59:00"); got != "2026-03-08 01:00" {
+		t.Errorf("spring-forward before = %q, want 2026-03-08 01:00", got)
+	}
+	if got := hour("2026-03-08T03:00:00"); got != "2026-03-08 03:00" {
+		t.Errorf("spring-forward after = %q, want 2026-03-08 03:00", got)
+	}
+
+	// Fall back 2026-11-01: local 01:00 happens twice (01:xx EDT, then 01:xx
+	// EST an hour later in UTC) — identical labels, so one merged bucket.
+	first01 := time.Date(2026, 11, 1, 5, 0, 0, 0, time.UTC)  // 01:00 EDT
+	second01 := time.Date(2026, 11, 1, 6, 0, 0, 0, time.UTC) // 01:00 EST
+	if got := analyticsBucketLabel(first01.Unix(), "hour", ny); got != "2026-11-01 01:00" {
+		t.Errorf("fall-back first pass = %q, want 2026-11-01 01:00", got)
+	}
+	if got := analyticsBucketLabel(second01.Unix(), "hour", ny); got != "2026-11-01 01:00" {
+		t.Errorf("fall-back second pass = %q, want the same 2026-11-01 01:00 label", got)
+	}
+
+	// Half-hour offset (UTC+5:30): local hour walls sit on :30 — UTC hour
+	// boundaries land in consecutive local buckets.
+	kolkata := time.FixedZone("IST", 5*3600+1800)
+	if got := analyticsBucketLabel(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Unix(), "hour", kolkata); got != "2026-01-01 05:00" {
+		t.Errorf("half-hour zone hour = %q, want 2026-01-01 05:00", got)
+	}
+	if got := analyticsBucketLabel(time.Date(2026, 1, 1, 0, 30, 0, 0, time.UTC).Unix(), "hour", kolkata); got != "2026-01-01 06:00" {
+		t.Errorf("half-hour zone next hour = %q, want 2026-01-01 06:00", got)
+	}
+
+	// Weeks fold to the local Monday (Wednesday 2026-07-01 and that week's
+	// Sunday 2026-07-05 share 2026-06-29); months label as the first.
+	if got := analyticsBucketLabel(mustUnix(t, "2026-07-01T10:00:00", ny), "week", ny); got != "2026-06-29" {
+		t.Errorf("week label = %q, want 2026-06-29", got)
+	}
+	if got := analyticsBucketLabel(mustUnix(t, "2026-07-05T10:00:00", ny), "week", ny); got != "2026-06-29" {
+		t.Errorf("sunday week label = %q, want the same 2026-06-29", got)
+	}
+	if got := analyticsBucketLabel(mustUnix(t, "2026-07-15T10:00:00", ny), "month", ny); got != "2026-07-01" {
+		t.Errorf("month label = %q, want 2026-07-01", got)
+	}
+	if got := analyticsBucketLabel(mustUnix(t, "2026-07-01T10:05:00", ny), "minute", ny); got != "2026-07-01 10:05" {
+		t.Errorf("minute label = %q, want 2026-07-01 10:05", got)
+	}
+}
+
+func mustUnix(t *testing.T, label string, loc *time.Location) int64 {
+	t.Helper()
+	parsed, err := time.ParseInLocation("2006-01-02T15:04:05", label, loc)
+	if err != nil {
+		t.Fatalf("parse %s: %v", label, err)
+	}
+	return parsed.Unix() / 60 * 60
+}
+
+// TestQueryAnalyticsFoldsDSTFallBackHour pins the Go-side calendar fold (the
+// GROUP BY label merge): the two UTC hours that share one fall-back local
+// label aggregate into a single bucket, and across spring-forward the skipped
+// hour simply never appears.
+func TestQueryAnalyticsFoldsDSTFallBackHour(t *testing.T) {
+	store := newTestStore(t, 0)
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("load America/New_York: %v", err)
+	}
+	first01 := time.Date(2026, 11, 1, 5, 0, 0, 0, time.UTC).Unix() / 60 * 60  // 01:00 EDT
+	second01 := time.Date(2026, 11, 1, 6, 0, 0, 0, time.UTC).Unix() / 60 * 60 // 01:00 EST
+	key := Key{Provider: "p", Model: "m"}
+	if err := store.Flush(first01, map[Key]Counters{key: {Requests: 2, Input: 10, LastRequestAt: 100}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Flush(second01, map[Key]Counters{key: {Requests: 3, Input: 15, LastRequestAt: 200}}); err != nil {
+		t.Fatal(err)
+	}
+
+	buckets, err := store.queryAnalyticsIn(first01-60, second01+60, "p", "m", "hour", ny)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 1 {
+		t.Fatalf("fall-back hour buckets = %d, want 1 (both passes fold): %+v", len(buckets), buckets)
+	}
+	if buckets[0].Requests != 5 || buckets[0].Input != 25 || buckets[0].LastRequestAt != 200 {
+		t.Errorf("folded fall-back bucket = %+v, want requests 5/input 25/last 200", buckets[0])
+	}
+	if want := localCalendarStart("2026-11-01 01:00", "2006-01-02 15:04", "hour"); buckets[0].Bucket != want {
+		t.Errorf("folded bucket start = %d, want %d", buckets[0].Bucket, want)
+	}
+
+	// Spring forward 2026-03-08: 01:59 EST then 03:00 EDT — two buckets, no
+	// 02:00 anywhere.
+	springBefore := time.Date(2026, 3, 8, 6, 59, 0, 0, time.UTC).Unix() / 60 * 60 // 01:59 EST
+	springAfter := time.Date(2026, 3, 8, 7, 0, 0, 0, time.UTC).Unix() / 60 * 60   // 03:00 EDT
+	springStore := newTestStore(t, 0)
+	if err := springStore.Flush(springBefore, map[Key]Counters{key: {Requests: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := springStore.Flush(springAfter, map[Key]Counters{key: {Requests: 4}}); err != nil {
+		t.Fatal(err)
+	}
+	spring, err := springStore.queryAnalyticsIn(springBefore-60, springAfter+60, "p", "m", "hour", ny)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spring) != 2 || spring[0].Requests != 1 || spring[1].Requests != 4 {
+		t.Fatalf("spring-forward buckets = %+v, want two (1 req then 4 reqs)", spring)
+	}
+	for _, bucket := range spring {
+		bucketUnix := time.Unix(bucket.Bucket, 0).In(ny).Format("2006-01-02 15:04")
+		if bucketUnix == "2026-03-08 02:00" {
+			t.Errorf("nonexistent spring-forward hour bucketed: %+v", bucket)
+		}
 	}
 }
 

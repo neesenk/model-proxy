@@ -980,3 +980,81 @@ func TestScanTailForIDNonPositiveLimitCollectsNothing(t *testing.T) {
 		t.Fatalf("limit 1 = %d records err = %v, want exactly 1", len(records), err)
 	}
 }
+
+// TestRowFromLineBlanksBodies pins the index row's body-blanking guard: the
+// usage projection survives (parsed once at index time), but neither body
+// string is retained — a batch holding full multi-MB bodies was the daemon's
+// GB-scale heap spike during large-body catch-ups, and the index never
+// persists bodies anyway (Detail seeks the JSONL file by coordinates).
+func TestRowFromLineBlanksBodies(t *testing.T) {
+	line := []byte(`{"ts":"2026-07-29T12:00:00Z","request_id":"r1","request_body":"` +
+		strings.Repeat("A", 4096) +
+		`","response_body":"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}"}`)
+	row, ok := rowFromLine("requests-20260729.log", line, 0, int64(len(line)))
+	if !ok {
+		t.Fatal("rowFromLine rejected a decodable record")
+	}
+	if row.record.RequestBody != "" || row.record.ResponseBody != "" {
+		t.Errorf("index row retained bodies: request %d bytes, response %d bytes",
+			len(row.record.RequestBody), len(row.record.ResponseBody))
+	}
+	if row.usage.Input != 7 || row.usage.Output != 2 {
+		t.Errorf("usage projection = %+v, want input 7 output 2", row.usage)
+	}
+	if row.record.RequestID != "r1" {
+		t.Errorf("metadata lost: request id = %q", row.record.RequestID)
+	}
+}
+
+// TestIndexerBatchFlushesOnByteCap pins the byte-capped batch flush: with the
+// per-batch line-byte cap set below two records, a catch-up still indexes
+// every row (across multiple smaller transactions) and advances the file
+// cursor to EOF — the cap bounds retention, never correctness.
+func TestIndexerBatchFlushesOnByteCap(t *testing.T) {
+	dir := t.TempDir()
+	records := make([]Record, 4)
+	for i := range records {
+		records[i] = Record{
+			Ts:           time.Date(2026, 7, 29, 12, i, 0, 0, time.UTC).Format(time.RFC3339),
+			RequestID:    fmt.Sprintf("cap-%d", i),
+			Protocol:     "anthropic",
+			Method:       "POST",
+			Path:         "/v1/messages",
+			CalledModel:  "m",
+			Provider:     "p",
+			Status:       200,
+			RequestBody:  strings.Repeat("x", 12<<10),
+			ResponseBody: `{"usage":{"input_tokens":10,"output_tokens":5}}`,
+		}
+	}
+	writeRecordFile(t, dir, "requests-20260729.log", records)
+	indexer := newTestIndexer(t, dir)
+	// Each line is >12KB; a 13KB cap flushes after every single record.
+	indexer.batchMaxBytes = 13000
+	mustReconcile(t, indexer)
+
+	summaries, _, err := indexer.SummariesWithFacets(Filter{Limit: 100, UsageOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != len(records) {
+		t.Fatalf("indexed summaries = %d, want %d", len(summaries), len(records))
+	}
+	for _, summary := range summaries {
+		if summary.Input != 10 || summary.Output != 5 {
+			t.Errorf("summary %s usage = %d/%d, want 10/5", summary.RequestID, summary.Input, summary.Output)
+		}
+	}
+	var cursor int64
+	if err := indexer.db.QueryRow(`SELECT size_indexed FROM files WHERE path = ?`,
+		"requests-20260729.log").Scan(&cursor); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "requests-20260729.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor != info.Size() {
+		t.Errorf("indexed cursor = %d, want full file size %d", cursor, info.Size())
+	}
+}

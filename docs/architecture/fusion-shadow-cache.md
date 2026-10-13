@@ -175,7 +175,10 @@ Close-once 回调，日志 schema、入队与 replay 判断不进入 transport �
 (file, offset, length) 坐标入库，body 仍只留在 JSONL 文件。索引是**派生视图**：
 文件消失（retention sweep）对应行删除；文件 size 回退（截断/轮转重建）该文件
 行清零并从 0 重索引；index.db 丢失或损坏时删库重建、全量重尾随自愈。reconcile
-每 ~250ms 一轮，单事务批量插入（每批 500 行），尾部不完整行留到下一轮；
+每 ~250ms 一轮，单事务批量插入（每批至多 500 行**或 64MiB 行字节，先到为准**），
+尾部不完整行留到下一轮；`rowFromLine` 在 `ExtractUsage` 之后立刻置空
+request/response body 字符串——索引行只驻留元数据（历史上整批 500 行持有完整
+multi-MB body 曾把堆峰值顶到数 GB，字节封顶与置空 body 是它的双层防护）。
 Shutdown 在 log writer drain 之后跑一次 final reconcile（final flush）。
 写热路径（forward commit → Enqueue）不碰 SQLite。查询与扫描版语义逐字段一致：
 `SummariesWithFacets`（WHERE 映射 Filter，facets 在 filter 之前对全部已索引行

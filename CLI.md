@@ -199,6 +199,11 @@ supervisor 或占 pidfile 的前台 serve，pidfile 由 config `log_file:` 派�
   `http://127.0.0.1:<LISTEN>/debug/pprof/`(与 `/debug/schedule` 同一浏览器来源
   防护)。默认关闭:heap profile 可能携带请求数据采样,仅调试时开启,配合
   `go tool pprof` 使用。
+- serve 进程在 `GOMEMLIMIT` 未设置时默认套 1GiB 软 GC 上限
+  (`internal/cli/serve/memlimit.go`,启动日志可见);操作者显式设置的
+  `GOMEMLIMIT`(含经 supervisor 继承的)永远优先。常驻堆仅数十 MB,正常流量
+  完全碰不到上限;它是历史堆失控(request-log indexer 整批持有 body、analytics
+  逐行时区加载把 RSS 顶到数 GB)的保险丝——逼近时 GC 更勤快而非进程 OOM。
 
 ---
 

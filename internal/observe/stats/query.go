@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 )
 
@@ -203,49 +204,84 @@ func averageMilliseconds(sum, requests uint64) float64 {
 	return math.Round(average*10) / 10
 }
 
-// analyticsBucketing validates the granularity and returns the SQLite label
-// expression (with its positional args) plus the Go layout that turns the
-// label back into a unix instant in time.Local. The label — not a strftime
-// '%s' epoch — is the source of truth because '%s' reinterprets the local
-// date as UTC and shifts the bucket by one timezone offset.
-func analyticsBucketing(granularity string) (labelExpr string, labelArgs []any, layout string, err error) {
+// analyticsLayout validates the granularity and returns the Go layout that
+// turns a bucket label back into a unix instant in time.Local. The label —
+// not a strftime '%s' epoch — is the source of truth because '%s' reinterprets
+// the local date as UTC and shifts the bucket by one timezone offset.
+func analyticsLayout(granularity string) (string, error) {
+	switch granularity {
+	case "minute", "hour":
+		return "2006-01-02 15:04", nil
+	case "day", "week", "month":
+		return "2006-01-02", nil
+	default:
+		return "", fmt.Errorf("granularity must be minute, hour, day, week or month, got %q", granularity)
+	}
+}
+
+// analyticsBucketLabel renders one source minute's local-time bucket label,
+// byte-identical to the SQLite expressions it replaced
+// (strftime('%Y-%m-%d %H:%M', minute, 'unixepoch', 'localtime') and the
+// date(...,'localtime',...) forms). Calendar bucketing happens in Go, not in
+// SQL, because the pure-Go SQLite driver reloads the whole timezone for every
+// 'localtime' evaluation — one allocation-heavy libc call per scanned row per
+// expression, which dominated the daemon's allocation rate under analytics
+// polling. Semantics are exactly the old GROUP BY's: two source minutes share
+// one bucket iff their local labels match (the DST fall-back hour folds two
+// UTC hours into one bucket; the spring-forward gap never has its label).
+func analyticsBucketLabel(minute int64, granularity string, loc *time.Location) string {
+	local := time.Unix(minute, 0).In(loc)
 	switch granularity {
 	case "minute":
-		return `strftime('%Y-%m-%d %H:%M', minute, 'unixepoch', 'localtime')`, nil, "2006-01-02 15:04", nil
+		return local.Format("2006-01-02 15:04")
 	case "hour":
-		return `strftime('%Y-%m-%d %H:00', minute, 'unixepoch', 'localtime')`, nil, "2006-01-02 15:04", nil
+		return local.Format("2006-01-02 15") + ":00"
 	case "day":
-		return `date(minute,'unixepoch','localtime',?)`, []any{"start of day"}, "2006-01-02", nil
+		return local.Format("2006-01-02")
 	case "week":
-		// 'weekday 0' advances to the next Sunday (staying put on Sunday),
-		// then '-6 days' lands on that week's Monday — local-time weeks start
-		// Monday, matching the UI's week granularity.
-		return `date(minute,'unixepoch','localtime','weekday 0','-6 days')`, nil, "2006-01-02", nil
+		// Local weeks start Monday: the old SQL's 'weekday 0','-6 days'.
+		back := (int(local.Weekday()) + 6) % 7
+		return time.Date(local.Year(), local.Month(), local.Day()-back, 0, 0, 0, 0, loc).Format("2006-01-02")
 	case "month":
-		return `date(minute,'unixepoch','localtime',?)`, []any{"start of month"}, "2006-01-02", nil
+		return time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, loc).Format("2006-01-02")
 	default:
-		return "", nil, "", fmt.Errorf("granularity must be minute, hour, day, week or month, got %q", granularity)
+		return ""
 	}
 }
 
 // QueryAnalytics returns local calendar-hour/day/month aggregates over
-// minute_buckets, grouped by (provider, model). Every counter column is an
-// additive SUM (latency/ttft sums included, so callers derive averages with
-// the same requests-weighted semantics as QueryRange).
+// minute_buckets, grouped by (provider, model). Every counter column is
+// additive across the folded minutes (latency/ttft sums included, so callers
+// derive averages with the same requests-weighted semantics as QueryRange).
+// SQL fetches raw per-minute PK rows (upserts already accumulated them) and
+// the local-calendar merge happens in Go (analyticsBucketLabel) — see
+// queryAnalyticsIn.
 func (s *Store) QueryAnalytics(from, to int64, provider, model, granularity string) ([]AnalyticsBucket, error) {
-	labelExpr, labelArgs, layout, err := analyticsBucketing(granularity)
+	return s.queryAnalyticsIn(from, to, provider, model, granularity, time.Local)
+}
+
+// queryAnalyticsIn is QueryAnalytics with an injected timezone (the labeler
+// seam tests use for DST determinism; production always passes time.Local,
+// the zone SQLite's 'localtime' used to resolve).
+//
+// SQL fetches raw primary-key rows — each (provider, model, minute) row IS
+// already that minute's accumulated totals (FlushMCP-style upserts add in
+// place), so a SQL GROUP BY over the PK would re-sort 25k+ rows through a
+// temp B-tree to return the exact same rows. Calendar folding happens in Go
+// (analyticsBucketLabel); no ORDER BY either — the Go fold sorts by
+// (dims, label) itself.
+func (s *Store) queryAnalyticsIn(from, to int64, provider, model, granularity string, loc *time.Location) ([]AnalyticsBucket, error) {
+	layout, err := analyticsLayout(granularity)
 	if err != nil {
 		return nil, err
 	}
 
-	query := `SELECT provider, model,
-		` + labelExpr + ` AS d,
-		SUM(requests), SUM(failovers), SUM(rate_limited_429), SUM(failures),
-		SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read),
-		MAX(last_request_at), SUM(latency_ms_sum), SUM(ttft_ms_sum), SUM(duration_ms_sum)
+	query := `SELECT provider, model, minute,
+		requests, failovers, rate_limited_429, failures,
+		input, output, cache_creation, cache_read,
+		last_request_at, latency_ms_sum, ttft_ms_sum, duration_ms_sum
 		FROM minute_buckets WHERE minute >= ? AND minute <= ?`
-	args := append([]any{}, labelArgs...)
-	args = append(args, from, to)
+	args := []any{from, to}
 	if provider != "" {
 		query += ` AND provider = ?`
 		args = append(args, provider)
@@ -254,66 +290,123 @@ func (s *Store) QueryAnalytics(from, to int64, provider, model, granularity stri
 		query += ` AND model = ?`
 		args = append(args, model)
 	}
-	query += ` GROUP BY provider, model, ` + labelExpr + ` ORDER BY provider, model, d`
-	args = append(args, labelArgs...)
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var buckets []AnalyticsBucket
+	type groupKey struct {
+		provider, model, label string
+	}
+	groups := map[groupKey]*AnalyticsBucket{}
+	labeler := minuteLabeler{granularity: granularity, loc: loc}
 	for rows.Next() {
 		var (
 			bucket AnalyticsBucket
-			date   string
+			minute int64
 		)
 		if err := rows.Scan(
-			&bucket.Provider,
-			&bucket.Model,
-			&date,
-			&bucket.Requests,
-			&bucket.Failovers,
-			&bucket.RateLimited429,
-			&bucket.Failures,
-			&bucket.Input,
-			&bucket.Output,
-			&bucket.CacheCreation,
-			&bucket.CacheRead,
-			&bucket.LastRequestAt,
-			&bucket.LatencySum,
-			&bucket.TTFTSum,
-			&bucket.DurationSum,
+			&bucket.Provider, &bucket.Model, &minute,
+			&bucket.Requests, &bucket.Failovers, &bucket.RateLimited429, &bucket.Failures,
+			&bucket.Input, &bucket.Output, &bucket.CacheCreation, &bucket.CacheRead,
+			&bucket.LastRequestAt, &bucket.LatencySum, &bucket.TTFTSum, &bucket.DurationSum,
 		); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
-		bucket.Bucket = localCalendarStart(date, layout, granularity)
+		key := groupKey{bucket.Provider, bucket.Model, labeler.bucketLabel(minute)}
+		if dst, ok := groups[key]; ok {
+			mergeAnalyticsBucket(dst, &bucket)
+		} else {
+			groups[key] = &bucket
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+
+	ordered := make([]groupKey, 0, len(groups))
+	for key := range groups {
+		ordered = append(ordered, key)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		if a.provider != b.provider {
+			return a.provider < b.provider
+		}
+		if a.model != b.model {
+			return a.model < b.model
+		}
+		return a.label < b.label
+	})
+	var buckets []AnalyticsBucket
+	for _, key := range ordered {
+		bucket := groups[key]
+		bucket.Bucket = localCalendarStart(key.label, layout, granularity)
 		bucket.AvgLatencyMs = averageMilliseconds(bucket.LatencySum, bucket.Requests)
 		bucket.AvgTtftMs = averageMilliseconds(bucket.TTFTSum, bucket.Requests)
 		bucket.AvgDurationMs = averageMilliseconds(bucket.DurationSum, bucket.Requests)
-		buckets = append(buckets, bucket)
+		buckets = append(buckets, *bucket)
 	}
-	return buckets, rows.Err()
+	return buckets, nil
+}
+
+// minuteLabeler memoizes the bucket label of the current minute. The
+// idx_minute range scans deliver rows minute-ascending, so every (dims) row
+// of one minute reuses one label computation (and one shared string) instead
+// of recomputing time.Unix+In+Format per row.
+type minuteLabeler struct {
+	granularity string
+	loc         *time.Location
+	minute      int64
+	label       string
+}
+
+func (m *minuteLabeler) bucketLabel(minute int64) string {
+	if minute != m.minute {
+		m.minute = minute
+		m.label = analyticsBucketLabel(minute, m.granularity, m.loc)
+	}
+	return m.label
+}
+
+// mergeAnalyticsBucket folds one (provider, model, minute) partial bucket into
+// its calendar bucket: counters add, LastRequestAt keeps the max (the old
+// SQL's MAX over the group is the max of the per-minute MAXes).
+func mergeAnalyticsBucket(dst, src *AnalyticsBucket) {
+	dst.Requests += src.Requests
+	dst.Failovers += src.Failovers
+	dst.RateLimited429 += src.RateLimited429
+	dst.Failures += src.Failures
+	dst.Input += src.Input
+	dst.Output += src.Output
+	dst.CacheCreation += src.CacheCreation
+	dst.CacheRead += src.CacheRead
+	if src.LastRequestAt > dst.LastRequestAt {
+		dst.LastRequestAt = src.LastRequestAt
+	}
+	dst.LatencySum += src.LatencySum
+	dst.TTFTSum += src.TTFTSum
+	dst.DurationSum += src.DurationSum
 }
 
 // QueryAnalyticsAgents is the agent-dimension form of QueryAnalytics:
 // calendar buckets grouped by (agent, provider, model) over agent_buckets.
-// agent_buckets carries no failover/429/ttft counters, so those stay zero.
+// agent_buckets carries no failover/429 counters, so those stay zero.
 func (s *Store) QueryAnalyticsAgents(from, to int64, agent, provider, model, granularity string) ([]AnalyticsBucket, error) {
-	labelExpr, labelArgs, layout, err := analyticsBucketing(granularity)
+	layout, err := analyticsLayout(granularity)
 	if err != nil {
 		return nil, err
 	}
 
-	query := `SELECT agent, provider, model,
-		` + labelExpr + ` AS d,
-		SUM(requests), SUM(failures),
-		SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read),
-		SUM(latency_ms_sum), SUM(ttft_ms_sum), SUM(duration_ms_sum)
+	query := `SELECT agent, provider, model, minute,
+		requests, failures,
+		input, output, cache_creation, cache_read,
+		latency_ms_sum, ttft_ms_sum, duration_ms_sum
 		FROM agent_buckets WHERE minute >= ? AND minute <= ?`
-	args := append([]any{}, labelArgs...)
-	args = append(args, from, to)
+	args := []any{from, to}
 	if agent != "" {
 		query += ` AND agent = ?`
 		args = append(args, agent)
@@ -326,45 +419,70 @@ func (s *Store) QueryAnalyticsAgents(from, to int64, agent, provider, model, gra
 		query += ` AND model = ?`
 		args = append(args, model)
 	}
-	query += ` GROUP BY agent, provider, model, ` + labelExpr + ` ORDER BY agent, provider, model, d`
-	args = append(args, labelArgs...)
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var buckets []AnalyticsBucket
+	type groupKey struct {
+		agent, provider, model, label string
+	}
+	groups := map[groupKey]*AnalyticsBucket{}
+	labeler := minuteLabeler{granularity: granularity, loc: time.Local}
 	for rows.Next() {
 		var (
 			bucket AnalyticsBucket
-			date   string
+			minute int64
 		)
 		if err := rows.Scan(
-			&bucket.Agent,
-			&bucket.Provider,
-			&bucket.Model,
-			&date,
-			&bucket.Requests,
-			&bucket.Failures,
-			&bucket.Input,
-			&bucket.Output,
-			&bucket.CacheCreation,
-			&bucket.CacheRead,
-			&bucket.LatencySum,
-			&bucket.TTFTSum,
-			&bucket.DurationSum,
+			&bucket.Agent, &bucket.Provider, &bucket.Model, &minute,
+			&bucket.Requests, &bucket.Failures,
+			&bucket.Input, &bucket.Output, &bucket.CacheCreation, &bucket.CacheRead,
+			&bucket.LatencySum, &bucket.TTFTSum, &bucket.DurationSum,
 		); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
-		bucket.Bucket = localCalendarStart(date, layout, granularity)
+		key := groupKey{bucket.Agent, bucket.Provider, bucket.Model, labeler.bucketLabel(minute)}
+		if dst, ok := groups[key]; ok {
+			mergeAnalyticsBucket(dst, &bucket)
+		} else {
+			groups[key] = &bucket
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+
+	ordered := make([]groupKey, 0, len(groups))
+	for key := range groups {
+		ordered = append(ordered, key)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		if a.agent != b.agent {
+			return a.agent < b.agent
+		}
+		if a.provider != b.provider {
+			return a.provider < b.provider
+		}
+		if a.model != b.model {
+			return a.model < b.model
+		}
+		return a.label < b.label
+	})
+	var buckets []AnalyticsBucket
+	for _, key := range ordered {
+		bucket := groups[key]
+		bucket.Bucket = localCalendarStart(key.label, layout, granularity)
 		bucket.AvgLatencyMs = averageMilliseconds(bucket.LatencySum, bucket.Requests)
 		bucket.AvgTtftMs = averageMilliseconds(bucket.TTFTSum, bucket.Requests)
 		bucket.AvgDurationMs = averageMilliseconds(bucket.DurationSum, bucket.Requests)
-		buckets = append(buckets, bucket)
+		buckets = append(buckets, *bucket)
 	}
-	return buckets, rows.Err()
+	return buckets, nil
 }
 
 // QueryAgentNames lists the distinct agents with traffic in the window

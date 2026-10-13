@@ -78,6 +78,10 @@ func (assembly serveAssembly) runProxy(sa cliserve.Args) {
 // runProxyProcess owns one foreground/worker process lifetime. It returns errors
 // to runProxy so deferred signal and pid-file cleanup runs before log.Fatal.
 func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
+	// Soft GC ceiling before anything allocates: operator GOMEMLIMIT wins.
+	if cliserve.ApplyDefaultMemoryLimit() {
+		logx.Infof("model-proxy: GOMEMLIMIT unset, defaulting to %dMiB soft GC ceiling", cliserve.DefaultMemoryLimitBytes>>20)
+	}
 	cfg, err := configdomain.LoadConfig(sa.Config)
 	if err != nil {
 		return err

@@ -2,6 +2,8 @@ package stats
 
 import (
 	"context"
+	"sort"
+	"time"
 
 	obscounters "model-proxy/internal/observe/counters"
 )
@@ -100,48 +102,84 @@ func (s *Store) QueryMCPBucketsContext(
 	from, to int64,
 	granularity string,
 ) ([]MCPBucketRow, error) {
-	labelExpr, labelArgs, layout, err := analyticsBucketing(granularity)
+	layout, err := analyticsLayout(granularity)
 	if err != nil {
 		return nil, err
 	}
 
-	query := `SELECT name, kind,
-		` + labelExpr + ` AS d,
-		SUM(calls), SUM(errors), SUM(latency_ms_sum), MAX(last_call_at)
+	// Raw PK rows (upserts already accumulated in place); calendar folding in
+	// Go — see queryAnalyticsIn.
+	query := `SELECT name, kind, minute,
+		calls, errors, latency_ms_sum, last_call_at
 		FROM mcp_buckets WHERE minute >= ? AND minute <= ?`
-	args := append([]any{}, labelArgs...)
-	args = append(args, from, to)
-	query += ` GROUP BY name, kind, ` + labelExpr + ` ORDER BY name, kind, d`
-	args = append(args, labelArgs...)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, query, from, to)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var buckets []MCPBucketRow
+	type groupKey struct {
+		name, kind, label string
+	}
+	groups := map[groupKey]*MCPBucketRow{}
+	labeler := minuteLabeler{granularity: granularity, loc: time.Local}
 	for rows.Next() {
 		var (
-			row  MCPBucketRow
-			date string
+			row    MCPBucketRow
+			minute int64
 		)
 		if err := rows.Scan(
-			&row.Name,
-			&row.Kind,
-			&date,
-			&row.Calls,
-			&row.Errors,
-			&row.LatencyMsSum,
-			&row.LastCallAt,
+			&row.Name, &row.Kind, &minute,
+			&row.Calls, &row.Errors, &row.LatencyMsSum, &row.LastCallAt,
 		); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
-		row.Bucket = localCalendarStart(date, layout, granularity)
-		row.AvgLatencyMs = averageMilliseconds(row.LatencyMsSum, row.Calls)
-		buckets = append(buckets, row)
+		key := groupKey{row.Name, row.Kind, labeler.bucketLabel(minute)}
+		if dst, ok := groups[key]; ok {
+			mergeMCPBucketRow(dst, &row)
+		} else {
+			groups[key] = &row
+		}
 	}
-	return buckets, rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+
+	ordered := make([]groupKey, 0, len(groups))
+	for key := range groups {
+		ordered = append(ordered, key)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		if a.name != b.name {
+			return a.name < b.name
+		}
+		if a.kind != b.kind {
+			return a.kind < b.kind
+		}
+		return a.label < b.label
+	})
+	var buckets []MCPBucketRow
+	for _, key := range ordered {
+		row := groups[key]
+		row.Bucket = localCalendarStart(key.label, layout, granularity)
+		row.AvgLatencyMs = averageMilliseconds(row.LatencyMsSum, row.Calls)
+		buckets = append(buckets, *row)
+	}
+	return buckets, nil
+}
+
+// mergeMCPBucketRow folds one (name, kind, minute) partial row into its
+// calendar bucket: counters add, LastCallAt keeps the max.
+func mergeMCPBucketRow(dst, src *MCPBucketRow) {
+	dst.Calls += src.Calls
+	dst.Errors += src.Errors
+	dst.LatencyMsSum += src.LatencyMsSum
+	if src.LastCallAt > dst.LastCallAt {
+		dst.LastCallAt = src.LastCallAt
+	}
 }
 
 // mcpDeltaField returns the delta between current and previous counters. If the
@@ -278,49 +316,87 @@ func (s *Store) QueryMCPToolBucketsContext(
 	from, to int64,
 	granularity string,
 ) ([]MCPToolBucketRow, error) {
-	labelExpr, labelArgs, layout, err := analyticsBucketing(granularity)
+	layout, err := analyticsLayout(granularity)
 	if err != nil {
 		return nil, err
 	}
 
-	query := `SELECT name, tool, kind,
-		` + labelExpr + ` AS d,
-		SUM(calls), SUM(errors), SUM(latency_ms_sum), MAX(last_call_at)
+	// Raw PK rows (upserts already accumulated in place); calendar folding in
+	// Go — see queryAnalyticsIn.
+	query := `SELECT name, tool, kind, minute,
+		calls, errors, latency_ms_sum, last_call_at
 		FROM mcp_tool_buckets WHERE minute >= ? AND minute <= ?`
-	args := append([]any{}, labelArgs...)
-	args = append(args, from, to)
-	query += ` GROUP BY name, tool, ` + labelExpr + ` ORDER BY name, tool, d`
-	args = append(args, labelArgs...)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, query, from, to)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var buckets []MCPToolBucketRow
+	type groupKey struct {
+		name, tool, kind, label string
+	}
+	groups := map[groupKey]*MCPToolBucketRow{}
+	labeler := minuteLabeler{granularity: granularity, loc: time.Local}
 	for rows.Next() {
 		var (
-			row  MCPToolBucketRow
-			date string
+			row    MCPToolBucketRow
+			minute int64
 		)
 		if err := rows.Scan(
-			&row.Name,
-			&row.Tool,
-			&row.Kind,
-			&date,
-			&row.Calls,
-			&row.Errors,
-			&row.LatencyMsSum,
-			&row.LastCallAt,
+			&row.Name, &row.Tool, &row.Kind, &minute,
+			&row.Calls, &row.Errors, &row.LatencyMsSum, &row.LastCallAt,
 		); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
-		row.Bucket = localCalendarStart(date, layout, granularity)
-		row.AvgLatencyMs = averageMilliseconds(row.LatencyMsSum, row.Calls)
-		buckets = append(buckets, row)
+		key := groupKey{row.Name, row.Tool, row.Kind, labeler.bucketLabel(minute)}
+		if dst, ok := groups[key]; ok {
+			mergeMCPToolBucketRow(dst, &row)
+		} else {
+			groups[key] = &row
+		}
 	}
-	return buckets, rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+
+	ordered := make([]groupKey, 0, len(groups))
+	for key := range groups {
+		ordered = append(ordered, key)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		if a.name != b.name {
+			return a.name < b.name
+		}
+		if a.tool != b.tool {
+			return a.tool < b.tool
+		}
+		if a.kind != b.kind {
+			return a.kind < b.kind
+		}
+		return a.label < b.label
+	})
+	var buckets []MCPToolBucketRow
+	for _, key := range ordered {
+		row := groups[key]
+		row.Bucket = localCalendarStart(key.label, layout, granularity)
+		row.AvgLatencyMs = averageMilliseconds(row.LatencyMsSum, row.Calls)
+		buckets = append(buckets, *row)
+	}
+	return buckets, nil
+}
+
+// mergeMCPToolBucketRow folds one (name, tool, kind, minute) partial row into
+// its calendar bucket: counters add, LastCallAt keeps the max.
+func mergeMCPToolBucketRow(dst, src *MCPToolBucketRow) {
+	dst.Calls += src.Calls
+	dst.Errors += src.Errors
+	dst.LatencyMsSum += src.LatencyMsSum
+	if src.LastCallAt > dst.LastCallAt {
+		dst.LastCallAt = src.LastCallAt
+	}
 }
 
 // DiffMCPTools turns two cumulative (name, tool) snapshots into deltas. Names

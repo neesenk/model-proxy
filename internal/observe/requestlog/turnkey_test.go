@@ -235,3 +235,99 @@ func TestSummarizeCarriesTurnKey(t *testing.T) {
 		t.Fatalf("Summarize TurnKey = %q, want abc123", s.TurnKey)
 	}
 }
+
+// TestComputeTurnKeyStreamingDecodeEdgeCases pins the streaming decoder's
+// equivalence with the original map[string]any decode: duplicate top-level
+// keys keep the last occurrence, an input string wins over (and suppresses)
+// any messages array, non-array/non-string values count as absent, malformed
+// bodies and trailing garbage fail closed, and content arrays skip
+// non-object/tool_result blocks instead of failing wholesale.
+func TestComputeTurnKeyStreamingDecodeEdgeCases(t *testing.T) {
+	userText := func(text string) string {
+		return `{"role":"user","content":"` + text + `"}`
+	}
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			"input string wins over messages",
+			`{"input":"hello","messages":[` + userText("other") + `]}`,
+			hashTurnKey(0, "hello"),
+		},
+		{
+			"input string suppresses messages even when empty",
+			`{"input":"","messages":[` + userText("x") + `]}`,
+			"",
+		},
+		{
+			"duplicate input: later string replaces earlier array",
+			`{"input":[` + userText("a") + `],"input":"b"}`,
+			hashTurnKey(0, "b"),
+		},
+		{
+			"duplicate input: later array replaces earlier string",
+			`{"input":"b","input":[` + userText("a") + `]}`,
+			hashTurnKey(1, "a"),
+		},
+		{
+			"duplicate input: later null clears earlier string",
+			`{"input":"b","input":null}`,
+			"",
+		},
+		{
+			"duplicate messages: later array wins",
+			`{"messages":[` + userText("first") + `],"messages":[` + userText("second") + `]}`,
+			hashTurnKey(1, "second"),
+		},
+		{
+			"messages as string counts as absent, input array answers",
+			`{"messages":"junk","input":[` + userText("go") + `]}`,
+			hashTurnKey(1, "go"),
+		},
+		{
+			"input as number counts as absent",
+			`{"input":42}`,
+			"",
+		},
+		{
+			"trailing garbage fails the parse",
+			`{"input":"x"} trailing`,
+			"",
+		},
+		{
+			"top-level array is not a turn document",
+			`[{"role":"user","content":"x"}]`,
+			"",
+		},
+		{
+			"content blocks skip non-object, tool_result and non-text blocks",
+			`{"messages":[{"role":"user","content":["plain",` +
+				`{"type":"tool_result","content":"res"},` +
+				`{"type":"image","source":"..."},` +
+				`{"type":"text","text":"keep"},` +
+				`{"type":"text","text":"also"}]}]}`,
+			hashTurnKey(1, "keep also"),
+		},
+		{
+			"object content counts as no text",
+			`{"messages":[{"role":"user","content":{"type":"text","text":"no"}}]}`,
+			"",
+		},
+		{
+			"non-user roles and tool_results never count",
+			`{"messages":[{"role":"assistant","content":"ai"},` +
+				`{"role":"user","content":[{"type":"tool_result","content":"res"}]},` +
+				userText("real") + `]}`,
+			hashTurnKey(1, "real"),
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := ComputeTurnKey([]byte(testCase.body)); got != testCase.want {
+				t.Errorf("ComputeTurnKey = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}

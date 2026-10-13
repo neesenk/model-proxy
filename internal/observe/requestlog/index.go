@@ -28,6 +28,12 @@ const (
 	// indexBatchLines bounds one insert transaction so the single SQLite
 	// connection stays responsive to web queries during a large catch-up.
 	indexBatchLines = 500
+	// indexBatchMaxBytes bounds one insert batch by the JSONL line bytes it
+	// retained: a burst catch-up of large-body records must not hold a whole
+	// 500-line batch of multi-MB lines (with bodies blanked post-parse the
+	// retention is metadata-only, this cap is the belt-and-braces bound on
+	// any future field growth).
+	indexBatchMaxBytes = 64 << 20
 	// defaultReconcileInterval is the tailing tick: how often the indexer
 	// picks up appended lines, rotations, truncations and retention deletes.
 	defaultReconcileInterval = 250 * time.Millisecond
@@ -55,6 +61,9 @@ type Indexer struct {
 	dir  string
 	db   *sql.DB
 	tick time.Duration
+	// batchMaxBytes bounds one insert batch by retained line bytes
+	// (indexBatchMaxBytes; a test seam for byte-cap coverage).
+	batchMaxBytes int64
 
 	done     chan struct{}
 	closed   chan struct{}
@@ -88,12 +97,13 @@ func NewIndexer(dir string) (*Indexer, error) {
 	// not create).
 	_ = os.Chmod(path, 0o600)
 	indexer := &Indexer{
-		dir:        dir,
-		db:         db,
-		tick:       defaultReconcileInterval,
-		done:       make(chan struct{}),
-		closed:     make(chan struct{}),
-		reconciled: make(chan struct{}, 1),
+		dir:           dir,
+		db:            db,
+		tick:          defaultReconcileInterval,
+		batchMaxBytes: indexBatchMaxBytes,
+		done:          make(chan struct{}),
+		closed:        make(chan struct{}),
+		reconciled:    make(chan struct{}, 1),
 	}
 	if err := indexer.migrate(); err != nil {
 		_ = db.Close()
@@ -474,8 +484,9 @@ func (x *Indexer) appendFile(name string, cursor, mtime int64) error {
 	offset := cursor
 	for {
 		var batch []recordRow
+		batchBytes := 0
 		eof := false
-		for len(batch) < indexBatchLines && !eof {
+		for len(batch) < indexBatchLines && batchBytes < int(x.batchMaxBytes) && !eof {
 			line, readErr := reader.ReadBytes('\n')
 			if readErr != nil {
 				if readErr != io.EOF {
@@ -491,6 +502,7 @@ func (x *Indexer) appendFile(name string, cursor, mtime int64) error {
 			if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 {
 				if row, ok := rowFromLine(name, trimmed, lineOffset, int64(len(line))); ok {
 					batch = append(batch, row)
+					batchBytes += len(line)
 				}
 			}
 		}
@@ -521,7 +533,11 @@ type recordRow struct {
 
 // rowFromLine decodes one JSONL line into its index row. The usage columns are
 // the ExtractUsage projection of the response body, parsed once here so the
-// sessions aggregation never re-parses bodies. Unparseable timestamps index as
+// sessions aggregation never re-parses bodies. Bodies themselves are blanked
+// before the row joins a batch: the index persists only metadata plus the
+// (file, offset, length) coordinates (Detail seeks the JSONL file), and a
+// 500-line batch retaining full multi-MB bodies was the daemon's GB-scale heap
+// spike during large-body catch-ups. Unparseable timestamps index as
 // ts_ms = 0 (Filter.matches drops them whenever a time bound is present; the
 // SQL mapping below does the same).
 func rowFromLine(file string, line []byte, offset, length int64) (recordRow, bool) {
@@ -529,9 +545,11 @@ func rowFromLine(file string, line []byte, offset, length int64) (recordRow, boo
 	if err := json.Unmarshal(line, &record); err != nil {
 		return recordRow{}, false
 	}
+	usage := ExtractUsage(record.ResponseBody)
+	record.RequestBody, record.ResponseBody = "", ""
 	row := recordRow{
 		record: record,
-		usage:  ExtractUsage(record.ResponseBody),
+		usage:  usage,
 		file:   file,
 		offset: offset,
 		length: length,
