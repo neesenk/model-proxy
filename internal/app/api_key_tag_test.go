@@ -16,6 +16,7 @@ import (
 
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/requestlog"
+	"model-proxy/internal/testsyn"
 	"model-proxy/internal/webauth"
 )
 
@@ -83,10 +84,15 @@ func TestAPIKeyTaggedInRequestLog(t *testing.T) {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
 
-	records := readAPIKeyRecords(t, logDir)
-	if len(records) == 0 {
-		t.Fatal("no request-log records written")
-	}
+	// The record is enqueued after the streamed response reaches the client
+	// (forward's post-commit path); wait for it via the sanctioned poll —
+	// under -race a single immediate read otherwise loses that race and sees
+	// no records.
+	var records []requestlog.Record
+	testsyn.WaitUntil(t, "request-log record for the forwarded request", func() bool {
+		records = readAPIKeyRecords(t, logDir)
+		return len(records) > 0
+	})
 	wantID := webauth.KeyID("rig-key-1")
 	tagged := false
 	for _, rec := range records {
