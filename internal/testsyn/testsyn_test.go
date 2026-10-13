@@ -62,11 +62,27 @@ func TestSettleGoroutinesDetectsLeak(t *testing.T) {
 	go func() { <-done }()
 	close(done)
 
-	// A goroutine that outlives the (shortened) settle budget: the leak must
-	// be REPORTED, then released so the test itself does not leak.
+	// Goroutines that outlive the (shortened) settle budget: the leak must
+	// be REPORTED, then released so the test itself does not leak. Their
+	// starts are synchronized (both are counted before settle runs), and
+	// there are TWO of them: under -shuffle a sibling test's deferred
+	// goroutine release (e.g. TestLeakCheckFatalPath's) can still be exiting
+	// when this test captures its baseline, and one such transient inside
+	// the baseline masks exactly one surplus when it exits inside the settle
+	// window — the count comparison cannot tell "leak gone" from
+	// "unrelated exit". Masking two live leaks needs two unrelated exits
+	// racing the same 50ms budget, which is not a plausible scheduling
+	// outcome.
 	leaked := make(chan struct{})
 	defer close(leaked)
-	go func() { <-leaked }()
+	var started [2]chan struct{}
+	for i := range started {
+		started[i] = make(chan struct{})
+		go func(started chan struct{}) { close(started); <-leaked }(started[i])
+	}
+	for _, s := range started {
+		<-s
+	}
 
 	if err := settleGoroutines(baseline, 50*time.Millisecond, pollBackoff); err == nil {
 		t.Fatal("leaked goroutine not detected")
