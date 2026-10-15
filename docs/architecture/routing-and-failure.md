@@ -118,7 +118,7 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   `RouteStrategyFor`，含 `#req`/`#ctx` 跨路由 pool 键的后缀剥离）拥有，
   `internal/runtime.decideOrder` 是唯一排序分叉点。
 - timeout、连接错误、5xx 和 refresh 后仍失败的 401 计入 provider 熔断。
-- **连接类快失败先重派再计数**（`targetexec.IsFastFailConnError`）：`unexpected EOF`/`EOF`/`ECONNRESET`/`EPIPE`/`ECONNREFUSED` 这类毫秒级返回的错误先在同一 target 上重派一次（新连接）；重派成功记 success、首跳**不**记失败。对外网络（代理链回收、LB 滚动）一次事件杀 N 条在途连接是常态噪音，重派把它从熔断视野里滤掉；超时不重派（时间预算已烧掉，重试等于翻倍等待），客户端断开照旧 `OutcomeClientGone`。重派不占 401 refresh 的 retry slot。
+- **连接类快失败先重派再计数**（`targetexec.IsFastFailConnError`）：`unexpected EOF`/`EOF`/`ECONNRESET`/`EPIPE`/`ECONNREFUSED` 这类毫秒级返回的错误先在同一 target 上重派一次（新连接）；重派成功记 success、首跳**不**记失败。对外网络（代理链回收、LB 滚动）一次事件杀 N 条在途连接是常态噪音，重派把它从熔断视野里滤掉；超时不重派（时间预算已烧掉，重试等于翻倍等待），客户端断开照旧 `OutcomeClientGone`。重派不占 401 refresh 的 retry slot。**服务端主动 GOAWAY 同属快失败**：HTTP/2 网关按 stream 预算优雅回收连接（实测 compass 周期性 `LastStreamID≈2000, ErrCode=NO_ERROR`），`http.Client.Do` 层面浮出的 GOAWAY 意味着本 stream id 已过 LastStreamID——服务端从未处理该请求，同 target 重派不是重复请求（net/http 的 goAwayError 未导出，按稳定错误文案识别）；已 commit 的响应 body 中途断流不在此列（commit 后无法重派）。
 - **熔断需要 streak 持续**（`circuit_persist`，默认 6s，`"0"` 关闭）：连续失败除了达到 `circuit_threshold`，还必须**跨至少 persist 窗口**才开熔断——"N 连败"从"N 次尝试碰噪音"升级为"N 次新鲜连接确认不可达持续了一段时间"。persist 只延迟**新请求**不再考虑该 provider 的时刻；单个请求的 failover 照旧立即发生，重派后的失败也照常计数。成功重置 streak 起点与计数。
 - **客户端取消不计熔断**：调用方断开（`exchange.Request.Context()` 取消，
   含调用方自身 deadline）不是上游判决——不记 `RecordFailure`、不计

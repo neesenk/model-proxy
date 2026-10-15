@@ -1,7 +1,12 @@
 package targetexec
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"net/url"
+	"syscall"
 	"testing"
 )
 
@@ -31,6 +36,39 @@ func TestIsModelDenied(t *testing.T) {
 	for _, test := range cases {
 		if got := IsModelDenied(test.status, []byte(test.body)); got != test.want {
 			t.Errorf("IsModelDenied(%d, %q) = %v, want %v", test.status, test.body, got, test.want)
+		}
+	}
+}
+
+// TestIsFastFailConnError: the fast-fail classifier's closed set — connection
+// sentinels plus the server-initiated HTTP/2 GOAWAY message (net/http's
+// goAwayError is unexported; the message is the only observable contract).
+// Negatives matter as much as positives: timeouts and arbitrary 5xx-worded
+// errors must NOT redispatch (their budget is spent / they are not
+// connection-class).
+func TestIsFastFailConnError(t *testing.T) {
+	goAway := errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=1999, ErrCode=NO_ERROR, debug=""`)
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"unexpected EOF", io.ErrUnexpectedEOF, true},
+		{"EOF", io.EOF, true},
+		{"ECONNRESET", syscall.ECONNRESET, true},
+		{"EPIPE", syscall.EPIPE, true},
+		{"ECONNREFUSED", syscall.ECONNREFUSED, true},
+		{"http2 GOAWAY", goAway, true},
+		{"url.Error-wrapped GOAWAY", &url.Error{Op: "Post", Err: goAway}, true},
+		{"timeout excluded", context.DeadlineExceeded, false},
+		{"canceled excluded", context.Canceled, false},
+		{"plain error excluded", errors.New("upstream said no"), false},
+		{"GOAWAY-like wording but not GOAWAY", errors.New("client sent GOAWAY and we liked it"), false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		if got := IsFastFailConnError(c.err); got != c.want {
+			t.Errorf("%s: IsFastFailConnError(%v) = %v, want %v", c.name, c.err, got, c.want)
 		}
 	}
 }
