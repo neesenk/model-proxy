@@ -694,10 +694,13 @@ func TestWithLockHeartbeatKeepsAgedLockFromBeingStolen(t *testing.T) {
 	if err := <-holderDone; err != nil {
 		t.Fatalf("holder withLock: %v", err)
 	}
+	// Wait for ENTRY first, then the result: with both channels ready at once
+	// (the contender races through fn on a fast/loaded machine) a two-case
+	// select picks randomly and can report "returned without acquiring" for a
+	// contender that DID acquire — its entered signal is still in the buffer.
+	// Sequential waits keep the proof deterministic.
 	select {
 	case <-contenderEntered:
-	case err := <-contenderDone:
-		t.Fatalf("contender returned without acquiring: %v", err)
 	case <-time.After(2 * time.Second):
 		t.Fatal("contender did not acquire after the holder released")
 	}
