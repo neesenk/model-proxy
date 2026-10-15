@@ -189,7 +189,9 @@ func (p *Proxy) initStats(config configdomain.StatsConfig) {
 	p.mu.RUnlock()
 	ledgerIndex := ""
 	if fullCfg != nil && fullCfg.RequestLog.Enabled {
-		ledgerIndex = filepath.Join(fullCfg.RequestLog.Dir, "index.db")
+		// RequestLog.Dir may carry ~ / env: prefixes — expand the same way the
+		// logger itself resolves its directory (config.ExpandPath).
+		ledgerIndex = filepath.Join(configdomain.ExpandPath(fullCfg.RequestLog.Dir), "index.db")
 	}
 	result := observestats.Bootstrap(
 		config.ResolvedDBPath(),
