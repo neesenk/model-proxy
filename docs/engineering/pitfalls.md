@@ -235,7 +235,12 @@
     三方一致性由 `internal/app/usage_ledger_test.go`（同一批 wire 样本喂三个
     解析器断言同值）钉住，历史脏数据由
     `observestats.Store.RebuildTokenLedger`（启动时按请求日志索引重写 cutoff
-    前分钟桶，带 count 防御）修正。
+    前分钟桶，带 count 防御）修正。**请求数口径**：EvRequests/attempts.ok/
+    平均延迟只计 **2xx commit**——上游终局 4xx（客户端坏 body 风暴，实测单日
+    10,753 条零 token 400 vs 3,484 条真实调用）是"服务了的响应"不是"成功请求"，
+    控制台请求数=计费成功数；修复前 4xx 也无条件计入（与 attempts.ok 注释
+    "committed 2xx" 相悖的存量 bug），requests 列历史由同一重建按索引 2xx 数
+    修复（防御区间 [n200, n]，幂等）。
 
 ## 回归要求
 
