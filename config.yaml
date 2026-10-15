@@ -856,10 +856,10 @@ mcp_routes:
 # matched snippet plus masked context is sent to this model for judgment.
 guard:
   adjudicate:
-    enabled: true
+    enabled: false
     model: glm-5.3-flash # judging model (derived route; zhipu/volcengine/
     # shopee/aqp all carry anthropic_base_url)
-    block_session: true
+    block_session: false
 
 # Shadow evaluation: after the primary response commits, re-send the same request
 # to a shadow backend, record-only — never affects the client, circuit breakers,
