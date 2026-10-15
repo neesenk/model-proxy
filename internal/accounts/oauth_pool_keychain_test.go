@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"encoding/json"
+	"model-proxy/internal/credstore"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -219,5 +220,44 @@ func TestOAuthPoolMetadataSaveKeepsOAuthEntries(t *testing.T) {
 	}
 	if data := readPoolFile(t, store, "aqp"); !strings.Contains(string(data), "SSO_C=one") {
 		t.Fatalf("plaintext pool after save: %s", data)
+	}
+}
+
+// TestOAuthPoolKeychainPartialRestoreReportsRelogin: a keychain→file switch
+// with one account's keychain entry missing serves the RESTORABLE accounts and
+// reports the missing one via ReloginNeeded (its metadata survives); removing
+// an account from a pool-less provider is the documented no-op.
+func TestOAuthPoolKeychainPartialRestoreReportsRelogin(t *testing.T) {
+	keyring.MockInit()
+	t.Cleanup(keyring.MockInit)
+	seed := NewStoreWithBackend(t.TempDir(), BackendKeychain)
+	if err := seed.Save("aqp", "aqp", oauthPoolFixture(seed)); err != nil {
+		t.Fatal(err)
+	}
+	// Drop one account's blob entry (the "missing keychain entry" case).
+	if err := credstore.KeychainDelete(keychainKey("aqp", OAuthAccountID("two@x.com"), keychainFieldOAuth)); err != nil {
+		t.Fatal(err)
+	}
+	file := NewStoreWithBackend(t.TempDir(), BackendFile)
+	if err := os.MkdirAll(filepath.Dir(file.PoolPath("aqp")), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file.PoolPath("aqp"), readPoolFile(t, seed, "aqp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := file.LoadSnapshot("aqp", "aqp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Pool.Accounts) != 1 || snapshot.Pool.Accounts[0].ID != OAuthAccountID("one@x.com") {
+		t.Fatalf("restored accounts = %+v, want only the entry with its keychain blob", snapshot.Pool.Accounts)
+	}
+	if len(snapshot.ReloginNeeded) != 1 || snapshot.ReloginNeeded[0].ID != OAuthAccountID("two@x.com") {
+		t.Fatalf("ReloginNeeded = %+v, want the account whose entry is gone", snapshot.ReloginNeeded)
+	}
+
+	// Pool-less provider removal: the documented no-op (nothing to remove).
+	if err := file.RemoveAccount("absent-prov", "zhipu", "nope"); err != nil {
+		t.Fatalf("pool-less RemoveAccount must be a no-op, got %v", err)
 	}
 }
