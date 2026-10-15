@@ -3,6 +3,7 @@ package accounts
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -144,4 +145,79 @@ func readPoolFile(t *testing.T, store Store, name string) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+// TestOAuthPoolKeychainRestoreToFile covers the keychain→file switch for OAuth
+// pools: a metadata-only pool hydrates its blobs from the per-account keychain
+// entries and rewrites the plaintext pool (platform-independent — the mock
+// keyring behaves the same everywhere; contrast the oversize-fallback test,
+// which needs a backend with an entry ceiling).
+func TestOAuthPoolKeychainRestoreToFile(t *testing.T) {
+	keyring.MockInit()
+	t.Cleanup(keyring.MockInit)
+	// Seed through a keychain-mode save, then read the SAME store with the
+	// file backend (the config `credentials:` switch).
+	seed := NewStoreWithBackend(t.TempDir(), BackendKeychain)
+	if err := seed.Save("aqp", "aqp", oauthPoolFixture(seed)); err != nil {
+		t.Fatal(err)
+	}
+	file := NewStoreWithBackend(t.TempDir(), BackendFile)
+	// Copy the metadata-only pool file over (the switch leaves it in place).
+	data := readPoolFile(t, seed, "aqp")
+	if err := os.MkdirAll(filepath.Dir(file.PoolPath("aqp")), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file.PoolPath("aqp"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// But the keychain entries live under the seed store's namespace — copy
+	// them by re-saving through the file-backend view after hydration.
+	snapshot, err := file.LoadSnapshot("aqp", "aqp")
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if len(snapshot.Pool.Accounts) != 2 {
+		t.Fatalf("restored pool = %+v (keychain entries are global under the mock; both accounts must hydrate)", snapshot.Pool)
+	}
+	for _, a := range snapshot.Pool.Accounts {
+		if len(a.OAuth) == 0 {
+			t.Fatalf("restore left %s without its blob", a.ID)
+		}
+	}
+	// A full restore rewrites the pool as plaintext.
+	if data := readPoolFile(t, file, "aqp"); !strings.Contains(string(data), "SSO_C=") {
+		t.Fatalf("full restore must rewrite the plaintext pool, got: %s", data)
+	}
+}
+
+// TestOAuthPoolMetadataSaveKeepsOAuthEntries guards the file-mode Save
+// transition from a keychain metadata pool: OAuth entries pass the
+// canonical-id precheck by PRESENCE (ids are anchored, not credential-derived)
+// and the save writes the restored plaintext pool.
+func TestOAuthPoolMetadataSaveKeepsOAuthEntries(t *testing.T) {
+	store := NewStoreWithBackend(t.TempDir(), BackendFile)
+	// Hand-write a metadata-only OAuth pool (the keychain-mode on-disk shape).
+	meta := Pool{Version: 1, Accounts: []Account{
+		{ID: OAuthAccountID("one@x.com"), Kind: AccountKindOAuth, Label: "one", Email: "one@x.com", AddedAt: "2026-07-15T00:00:00Z"},
+	}}
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(store.PoolPath("aqp")), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.PoolPath("aqp"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Save the fully-restored view (blob re-attached): the metadata guard must
+	// accept the anchored OAuth id without a credential re-derivation.
+	pool := meta
+	pool.Accounts[0].OAuth = []byte(`{"account_id":"one@x.com","sso_session_cookie":"SSO_C=one"}`)
+	if err := store.Save("aqp", "aqp", pool); err != nil {
+		t.Fatalf("file save from oauth metadata pool: %v", err)
+	}
+	if data := readPoolFile(t, store, "aqp"); !strings.Contains(string(data), "SSO_C=one") {
+		t.Fatalf("plaintext pool after save: %s", data)
+	}
 }
