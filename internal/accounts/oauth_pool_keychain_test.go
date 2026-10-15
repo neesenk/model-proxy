@@ -3,6 +3,7 @@ package accounts
 import (
 	"encoding/json"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -76,6 +77,14 @@ func TestOAuthPoolKeychainRoundTrip(t *testing.T) {
 // contract: a blob exceeding the keychain entry ceiling stays INLINE in the
 // 0600 pool file (the codex-archive precedent) instead of failing the pool.
 func TestOAuthPoolKeychainOversizeFallsBackInline(t *testing.T) {
+	// External precondition: the fallback branch is only reachable on backends
+	// with an entry ceiling (darwin ~3000B command-line budget, windows 2560B).
+	// Linux/BSD secret service has no practical limit, so ErrEntryTooLarge
+	// cannot occur there — the normal keychain roundtrip is that platform's
+	// behavior (covered by TestOAuthPoolKeychainRoundTrip).
+	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+		t.Skip("platform keychain backend has no entry ceiling")
+	}
 	keyring.MockInit()
 	t.Cleanup(keyring.MockInit)
 	store := NewStoreWithBackend(t.TempDir(), BackendKeychain)
