@@ -27,9 +27,15 @@ type usageProbe struct {
 		CompletionToken uint64 `json:"completion_tokens"`
 		CacheCreation   uint64 `json:"cache_creation_input_tokens"`
 		CacheRead       uint64 `json:"cache_read_input_tokens"`
+		PromptCacheHit  uint64 `json:"prompt_cache_hit_tokens"`
 		PromptDetails   *struct {
-			CachedTokens uint64 `json:"cached_tokens"`
+			CachedTokens    uint64 `json:"cached_tokens"`
+			CacheWriteToken uint64 `json:"cache_write_tokens"`
 		} `json:"prompt_tokens_details"`
+		InputDetails *struct {
+			CachedTokens    uint64 `json:"cached_tokens"`
+			CacheWriteToken uint64 `json:"cache_write_tokens"`
+		} `json:"input_tokens_details"`
 	} `json:"usage"`
 	Message *struct {
 		Usage *struct {
@@ -41,10 +47,12 @@ type usageProbe struct {
 	} `json:"message"`
 	Response *struct {
 		Usage *struct {
-			InputTokens  uint64 `json:"input_tokens"`
-			OutputTokens uint64 `json:"output_tokens"`
-			InputDetails *struct {
-				CachedTokens uint64 `json:"cached_tokens"`
+			InputTokens     uint64 `json:"input_tokens"`
+			OutputTokens    uint64 `json:"output_tokens"`
+			CacheCreationIn uint64 `json:"cache_creation_input_tokens"`
+			InputDetails    *struct {
+				CachedTokens    uint64 `json:"cached_tokens"`
+				CacheWriteToken uint64 `json:"cache_write_tokens"`
 			} `json:"input_tokens_details"`
 		} `json:"usage"`
 	} `json:"response"`
@@ -90,32 +98,52 @@ func usageFrom(p *usageProbe) Usage {
 			CacheCreation: p.Message.Usage.CacheCreation,
 			CacheRead:     p.Message.Usage.CacheRead,
 		}
-	case p.Usage != nil && (p.Usage.InputTokens > 0 || p.Usage.OutputTokens > 0 || p.Usage.PromptTokens > 0):
+	case p.Usage != nil && (p.Usage.InputTokens > 0 || p.Usage.OutputTokens > 0 || p.Usage.PromptTokens > 0 || p.Usage.PromptCacheHit > 0):
 		u := Usage{
 			Input:         p.Usage.InputTokens,
 			Output:        p.Usage.OutputTokens,
 			CacheCreation: p.Usage.CacheCreation,
 			CacheRead:     p.Usage.CacheRead,
 		}
-		if p.Usage.PromptTokens > 0 {
-			cached := uint64(0)
+		if p.Usage.PromptTokens > 0 || p.Usage.PromptCacheHit > 0 {
+			// chat dialect: prompt_tokens is inclusive of both cache shares;
+			// hits ride in prompt_tokens_details.cached_tokens (openai) or
+			// prompt_cache_hit_tokens (deepseek), writes in
+			// details.cache_write_tokens (converter convention) or the
+			// anthropic direct spelling.
+			cached, written := uint64(0), uint64(0)
 			if p.Usage.PromptDetails != nil {
 				cached = p.Usage.PromptDetails.CachedTokens
+				written = p.Usage.PromptDetails.CacheWriteToken
 			}
-			u.Input = subClamped(p.Usage.PromptTokens, cached)
+			cached = maxU(cached, p.Usage.PromptCacheHit)
+			written = maxU(written, p.Usage.CacheCreation)
+			u.Input = subClamped2(p.Usage.PromptTokens, cached, written)
 			u.Output = p.Usage.CompletionToken
 			u.CacheRead = cached
+			u.CacheCreation = written
+			return u
+		}
+		// Top-level responses usage (non-stream /v1/responses): input_tokens
+		// is inclusive of the input_tokens_details shares.
+		if p.Usage.InputDetails != nil {
+			u.Input = subClamped2(p.Usage.InputTokens, p.Usage.InputDetails.CachedTokens, p.Usage.InputDetails.CacheWriteToken)
+			u.CacheRead = maxU(u.CacheRead, p.Usage.InputDetails.CachedTokens)
+			u.CacheCreation = maxU(u.CacheCreation, p.Usage.InputDetails.CacheWriteToken)
 		}
 		return u
 	case p.Response != nil && p.Response.Usage != nil:
-		cached := uint64(0)
+		cached, written := uint64(0), uint64(0)
 		if p.Response.Usage.InputDetails != nil {
 			cached = p.Response.Usage.InputDetails.CachedTokens
+			written = p.Response.Usage.InputDetails.CacheWriteToken
 		}
+		written = maxU(written, p.Response.Usage.CacheCreationIn)
 		return Usage{
-			Input:     subClamped(p.Response.Usage.InputTokens, cached),
-			Output:    p.Response.Usage.OutputTokens,
-			CacheRead: cached,
+			Input:         subClamped2(p.Response.Usage.InputTokens, cached, written),
+			Output:        p.Response.Usage.OutputTokens,
+			CacheRead:     cached,
+			CacheCreation: written,
 		}
 	}
 	return Usage{}
@@ -126,6 +154,19 @@ func subClamped(a, b uint64) uint64 {
 		return 0
 	}
 	return a - b
+}
+
+// subClamped2 subtracts two shares (cache hit + cache write) from an
+// inclusive counter, floored at zero.
+func subClamped2(a, hit, write uint64) uint64 {
+	return subClamped(subClamped(a, hit), write)
+}
+
+func maxU(a, b uint64) uint64 {
+	if b > a {
+		return b
+	}
+	return a
 }
 
 // extractSSEUsage walks an SSE text body frame by frame and merges every

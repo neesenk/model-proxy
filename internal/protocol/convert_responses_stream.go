@@ -767,6 +767,7 @@ type responsesSSEToOpenAISSE struct {
 	inTok        int
 	outTok       int
 	cachedTok    int // input_tokens_details.cached_tokens from response.completed
+	createTok    int // cache write: cache_creation_input_tokens (direct) or input_tokens_details.cache_write_tokens
 	reasoningTok int // output_tokens_details.reasoning_tokens from response.completed
 	finishReason string
 	hasToolUse   bool
@@ -1135,6 +1136,10 @@ func (t *responsesSSEToOpenAISSE) readUsage(resp map[string]any) {
 	t.inTok = intOf(u["input_tokens"])
 	t.outTok = intOf(u["output_tokens"])
 	t.cachedTok = intOf(asMap(u["input_tokens_details"])["cached_tokens"])
+	t.createTok = intOf(u["cache_creation_input_tokens"])
+	if t.createTok == 0 {
+		t.createTok = intOf(asMap(u["input_tokens_details"])["cache_write_tokens"])
+	}
 	t.reasoningTok = intOf(asMap(u["output_tokens_details"])["reasoning_tokens"])
 }
 
@@ -1158,8 +1163,15 @@ func (t *responsesSSEToOpenAISSE) emitFinish() {
 	}
 	if !t.errored {
 		usage := map[string]any{"prompt_tokens": t.inTok, "completion_tokens": t.outTok, "total_tokens": t.inTok + t.outTok}
+		details := map[string]any{}
 		if t.cachedTok > 0 {
-			usage["prompt_tokens_details"] = map[string]any{"cached_tokens": t.cachedTok}
+			details["cached_tokens"] = t.cachedTok
+		}
+		if t.createTok > 0 {
+			details["cache_write_tokens"] = t.createTok
+		}
+		if len(details) > 0 {
+			usage["prompt_tokens_details"] = details
 		}
 		if t.reasoningTok > 0 {
 			usage["completion_tokens_details"] = map[string]any{"reasoning_tokens": t.reasoningTok}

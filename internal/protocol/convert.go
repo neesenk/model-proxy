@@ -1760,8 +1760,18 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 		"completion_tokens": src.Usage.OutputTokens,
 		"total_tokens":      promptTok + src.Usage.OutputTokens,
 	}
+	// Both cache shares ride inside the inclusive prompt_tokens; the details
+	// spelling surfaces them so the usage scanners can split the buckets back
+	// out (cache_write_tokens mirrors the converters' read-side convention).
+	details := map[string]any{}
 	if src.Usage.CacheReadInputTokens > 0 {
-		usage["prompt_tokens_details"] = map[string]any{"cached_tokens": src.Usage.CacheReadInputTokens}
+		details["cached_tokens"] = src.Usage.CacheReadInputTokens
+	}
+	if src.Usage.CacheCreationInputTokens > 0 {
+		details["cache_write_tokens"] = src.Usage.CacheCreationInputTokens
+	}
+	if len(details) > 0 {
+		usage["prompt_tokens_details"] = details
 	}
 	out := map[string]any{
 		"id":      strings.TrimPrefix(src.ID, "msg_"),

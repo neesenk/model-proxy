@@ -289,29 +289,38 @@ func (s *UsageScanner) parseLine(line []byte) {
 			PromptTokens     uint64 `json:"prompt_tokens"`
 			CompletionTokens uint64 `json:"completion_tokens"`
 			PromptDetails    *struct {
-				CachedTokens uint64 `json:"cached_tokens"`
+				CachedTokens    uint64 `json:"cached_tokens"`
+				CacheWriteToken uint64 `json:"cache_write_tokens"`
 			} `json:"prompt_tokens_details"`
-			PromptCacheHit uint64 `json:"prompt_cache_hit_tokens"`
+			PromptCacheHit  uint64 `json:"prompt_cache_hit_tokens"`
+			CacheCreationIn uint64 `json:"cache_creation_input_tokens"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal(payload, &oai) == nil && oai.Usage != nil {
 		s.sseUsage = true
-		// Cached prompt tokens ride in prompt_tokens_details (openai contract);
-		// deepseek additionally spells them prompt_cache_hit_tokens — details win
-		// when both are present. Max-merge like the anthropic cache buckets: a
-		// usage chunk repeats cumulative counters, never deltas.
-		cached := oai.Usage.PromptCacheHit
+		// Cache shares ride inside the inclusive prompt_tokens and are split
+		// out before merging — the buckets are anthropic-normalized (input
+		// excludes cache; the same ledger as requestlog.ExtractUsage and
+		// fusion.ParseUsage). Hit spellings: prompt_tokens_details.cached_tokens
+		// (openai contract) and prompt_cache_hit_tokens (deepseek dialect) are
+		// max-merged — same source, same value; write spellings:
+		// prompt_tokens_details.cache_write_tokens (the converter emission
+		// convention, mirrored from convert_stream.go's read side) and the
+		// anthropic direct spelling.
+		cached, written := uint64(0), uint64(0)
 		if oai.Usage.PromptDetails != nil {
 			cached = oai.Usage.PromptDetails.CachedTokens
+			written = oai.Usage.PromptDetails.CacheWriteToken
 		}
+		cached = max(cached, oai.Usage.PromptCacheHit)
+		written = max(written, oai.Usage.CacheCreationIn)
 		s.acc.CacheRead = max(s.acc.CacheRead, cached)
-		// prompt_tokens INCLUDES the cached share while the buckets are
-		// anthropic-normalized (input excludes cache — the same ledger as
-		// requestlog.ExtractUsage and fusion.ParseUsage), so the share is
-		// subtracted before the snapshot/delta merge; landing it in both
-		// Input and CacheRead deflated the analytics cache-hit rate and
+		s.acc.CacheCreation = max(s.acc.CacheCreation, written)
+		// Max-merge the shares like the anthropic cache buckets: a usage chunk
+		// repeats cumulative counters, never deltas. Landing the shares in both
+		// Input and the cache buckets deflated the analytics cache-hit rate and
 		// double-billed cost.
-		s.oai.mergeField(&s.acc.Input, subClamped(oai.Usage.PromptTokens, cached), &s.acc.Output, oai.Usage.CompletionTokens)
+		s.oai.mergeField(&s.acc.Input, subClamped2(oai.Usage.PromptTokens, cached, written), &s.acc.Output, oai.Usage.CompletionTokens)
 	}
 	// /v1/responses client streams carry one cumulative snapshot in
 	// response.completed (usage is null on in_progress frames); every field
@@ -321,25 +330,28 @@ func (s *UsageScanner) parseLine(line []byte) {
 	var resp struct {
 		Response *struct {
 			Usage *struct {
-				InputTokens  uint64 `json:"input_tokens"`
-				OutputTokens uint64 `json:"output_tokens"`
-				InputDetails *struct {
-					CachedTokens uint64 `json:"cached_tokens"`
+				InputTokens     uint64 `json:"input_tokens"`
+				OutputTokens    uint64 `json:"output_tokens"`
+				CacheCreationIn uint64 `json:"cache_creation_input_tokens"`
+				InputDetails    *struct {
+					CachedTokens    uint64 `json:"cached_tokens"`
+					CacheWriteToken uint64 `json:"cache_write_tokens"`
 				} `json:"input_tokens_details"`
 			} `json:"usage"`
 		} `json:"response"`
 	}
 	if json.Unmarshal(payload, &resp) == nil && resp.Response != nil && resp.Response.Usage != nil {
 		s.sseUsage = true
-		cached := uint64(0)
+		cached, written := uint64(0), uint64(0)
 		if resp.Response.Usage.InputDetails != nil {
 			cached = resp.Response.Usage.InputDetails.CachedTokens
+			written = resp.Response.Usage.InputDetails.CacheWriteToken
 		}
-		s.acc.Input = max(s.acc.Input, subClamped(resp.Response.Usage.InputTokens, cached))
+		written = max(written, resp.Response.Usage.CacheCreationIn)
+		s.acc.Input = max(s.acc.Input, subClamped2(resp.Response.Usage.InputTokens, cached, written))
 		s.acc.Output = max(s.acc.Output, resp.Response.Usage.OutputTokens)
-		if cached > 0 {
-			s.acc.CacheRead = max(s.acc.CacheRead, cached)
-		}
+		s.acc.CacheRead = max(s.acc.CacheRead, cached)
+		s.acc.CacheCreation = max(s.acc.CacheCreation, written)
 	}
 }
 
@@ -362,11 +374,14 @@ func (s *UsageScanner) parseJSONUsage() {
 			CompletionTokens uint64 `json:"completion_tokens"`
 			CacheCreation    uint64 `json:"cache_creation_input_tokens"`
 			CacheRead        uint64 `json:"cache_read_input_tokens"`
+			PromptCacheHit   uint64 `json:"prompt_cache_hit_tokens"`
 			PromptDetails    *struct {
-				CachedTokens uint64 `json:"cached_tokens"`
+				CachedTokens    uint64 `json:"cached_tokens"`
+				CacheWriteToken uint64 `json:"cache_write_tokens"`
 			} `json:"prompt_tokens_details"`
 			InputDetails *struct {
-				CachedTokens uint64 `json:"cached_tokens"`
+				CachedTokens    uint64 `json:"cached_tokens"`
+				CacheWriteToken uint64 `json:"cache_write_tokens"`
 			} `json:"input_tokens_details"`
 		} `json:"usage"`
 	}
@@ -374,16 +389,18 @@ func (s *UsageScanner) parseJSONUsage() {
 		return
 	}
 	u := doc.Usage
-	if u.PromptTokens > 0 || u.CompletionTokens > 0 {
-		cached := uint64(0)
+	if u.PromptTokens > 0 || u.CompletionTokens > 0 || u.PromptCacheHit > 0 {
+		cached, written := uint64(0), uint64(0)
 		if u.PromptDetails != nil {
 			cached = u.PromptDetails.CachedTokens
+			written = u.PromptDetails.CacheWriteToken
 		}
-		s.acc.Input += subClamped(u.PromptTokens, cached)
+		cached = max(cached, u.PromptCacheHit)
+		written = max(written, u.CacheCreation)
+		s.acc.Input += subClamped2(u.PromptTokens, cached, written)
 		s.acc.Output += u.CompletionTokens
-		if cached > 0 {
-			s.acc.CacheRead = max(s.acc.CacheRead, cached)
-		}
+		s.acc.CacheRead = max(s.acc.CacheRead, cached)
+		s.acc.CacheCreation = max(s.acc.CacheCreation, written)
 		return
 	}
 	s.acc.Output += u.OutputTokens
@@ -393,10 +410,9 @@ func (s *UsageScanner) parseJSONUsage() {
 	// input_tokens_details share on responses bodies — only the details
 	// share is subtracted, so both dialects keep one ledger.
 	if u.InputDetails != nil {
-		s.acc.Input += subClamped(u.InputTokens, u.InputDetails.CachedTokens)
-		if u.InputDetails.CachedTokens > 0 {
-			s.acc.CacheRead = max(s.acc.CacheRead, u.InputDetails.CachedTokens)
-		}
+		s.acc.Input += subClamped2(u.InputTokens, u.InputDetails.CachedTokens, u.InputDetails.CacheWriteToken)
+		s.acc.CacheRead = max(s.acc.CacheRead, u.InputDetails.CachedTokens)
+		s.acc.CacheCreation = max(s.acc.CacheCreation, u.InputDetails.CacheWriteToken)
 	} else {
 		s.acc.Input += u.InputTokens
 	}
@@ -405,6 +421,13 @@ func (s *UsageScanner) parseJSONUsage() {
 // subClamped returns a−b floored at zero: the inclusive wire counters (openai
 // prompt_tokens, responses input_tokens) overlap the cached share, which the
 // normalized buckets already carry in CacheRead.
+// subClamped2 subtracts two shares (cache hit + cache write) from an
+// inclusive counter, floored at zero — the hit share lands in CacheRead, the
+// write share in CacheCreation.
+func subClamped2(a, hit, write uint64) uint64 {
+	return subClamped(subClamped(a, hit), write)
+}
+
 func subClamped(a, b uint64) uint64 {
 	if b > a {
 		return 0

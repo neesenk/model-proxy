@@ -271,7 +271,7 @@ func TestConvertResponse_CacheTokens_Stream(t *testing.T) {
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 	out3 := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(rev), "c"))
 	s3 := string(out3)
-	for _, want := range []string{`"prompt_tokens":10`, `"completion_tokens":4`, `"total_tokens":14`, `"prompt_tokens_details":{"cached_tokens":3}`} {
+	for _, want := range []string{`"prompt_tokens":10`, `"completion_tokens":4`, `"total_tokens":14`, `"cached_tokens":3`, `"cache_write_tokens":2`} {
 		if !strings.Contains(s3, want) {
 			t.Errorf("a→o stream missing %q:\n%s", want, s3)
 		}
@@ -286,7 +286,7 @@ func TestConvertResponse_CacheTokens_Stream(t *testing.T) {
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 	out4 := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(revTerminal), "c"))
 	s4 := string(out4)
-	for _, want := range []string{`"prompt_tokens":95`, `"completion_tokens":4`, `"total_tokens":99`, `"prompt_tokens_details":{"cached_tokens":93}`} {
+	for _, want := range []string{`"prompt_tokens":95`, `"completion_tokens":4`, `"total_tokens":99`, `"cached_tokens":93`, `"cache_write_tokens":2`} {
 		if !strings.Contains(s4, want) {
 			t.Errorf("a→o terminal usage override missing %q:\n%s", want, s4)
 		}

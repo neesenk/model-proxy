@@ -221,6 +221,22 @@
     logfile Run 退出后 Enqueue 计入 Dropped（stopMu 序列化 closed 检查与
     close+drain）。
 
+42. **usage 账本有三条独立解析路径，必须逐字段同口径**（热路径 UsageScanner →
+    分钟桶/Accounts/Analytics、requestlog.ExtractUsage → Keys 用量/会话聚合、
+    fusion.ParseUsage → 编排腿）：anthropic 口径（input 不含 cache，hit/write
+    单列），inclusive wire 计数器（openai prompt_tokens、responses
+    input_tokens）入桶前扣减钳零；hit 双拼写 max 合并
+    （prompt_tokens_details.cached_tokens / deepseek prompt_cache_hit_tokens），
+    write 双拼写（details.cache_write_tokens / cache_creation_input_tokens
+    直拼）——转换器发射侧与消费侧必须成对补拼写（cache_write_tokens 是转换器
+    家族的发射约定，消费侧不解析则 write 全额落 input、成本按全价低估）。历史
+    教训：89630e1 前缓存命中双重计入 input+cache_read（deepseek 控制台对账
+    差值恰=命中量）、2537235 前网关逐 chunk 重复累计把单请求膨胀上亿 token；
+    三方一致性由 `internal/app/usage_ledger_test.go`（同一批 wire 样本喂三个
+    解析器断言同值）钉住，历史脏数据由
+    `observestats.Store.RebuildTokenLedger`（启动时按请求日志索引重写 cutoff
+    前分钟桶，带 count 防御）修正。
+
 ## 回归要求
 
 - 每个陷阱应有测试或明确的测试缺口。

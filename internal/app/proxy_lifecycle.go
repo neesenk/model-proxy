@@ -15,6 +15,10 @@ import (
 // startRuntimeServices initializes and starts process-owned optional services.
 // Direct NewProxy callers stay lightweight until this method is called.
 func (p *Proxy) StartRuntimeServices(cfg *configdomain.Config) {
+	// Rewrite the pre-cutoff token columns from the request-log ledger BEFORE
+	// Bootstrap restores the cumulative baseline — the historical buckets carry
+	// the pre-89630e1 mis-ledgers (cache double count, chunk repetition).
+	p.rebuildUsageLedger(cfg)
 	p.initStats(cfg.Stats)
 	p.lifecycle.Run(func(stop <-chan struct{}) {
 		p.statsFlushLoop(stop)

@@ -317,10 +317,15 @@ func responsesUsageToOpenAI(u any) map[string]any {
 	um := asMap(u)
 	in, out := 0, 0
 	cached, reasoning := 0, 0
+	created := 0
 	if um != nil {
 		in = intOf(um["input_tokens"])
 		out = intOf(um["output_tokens"])
 		cached = intOf(asMap(um["input_tokens_details"])["cached_tokens"])
+		created = intOf(um["cache_creation_input_tokens"])
+		if created == 0 {
+			created = intOf(asMap(um["input_tokens_details"])["cache_write_tokens"])
+		}
 		reasoning = intOf(asMap(um["output_tokens_details"])["reasoning_tokens"])
 	}
 	m := map[string]any{
@@ -328,8 +333,15 @@ func responsesUsageToOpenAI(u any) map[string]any {
 		"completion_tokens": out,
 		"total_tokens":      in + out,
 	}
+	details := map[string]any{}
 	if cached > 0 {
-		m["prompt_tokens_details"] = map[string]any{"cached_tokens": cached}
+		details["cached_tokens"] = cached
+	}
+	if created > 0 {
+		details["cache_write_tokens"] = created
+	}
+	if len(details) > 0 {
+		m["prompt_tokens_details"] = details
 	}
 	if reasoning > 0 {
 		m["completion_tokens_details"] = map[string]any{"reasoning_tokens": reasoning}
@@ -653,8 +665,17 @@ func anthropicUsageToResponses(u any) map[string]any {
 	}
 	total := in + cached + created
 	m := map[string]any{"input_tokens": total, "output_tokens": out, "total_tokens": total + out}
+	// Both cache shares ride inside the inclusive input_tokens; the details
+	// spelling surfaces them for the usage scanners (converter convention).
+	details := map[string]any{}
 	if cached > 0 {
-		m["input_tokens_details"] = map[string]any{"cached_tokens": cached}
+		details["cached_tokens"] = cached
+	}
+	if created > 0 {
+		details["cache_write_tokens"] = created
+	}
+	if len(details) > 0 {
+		m["input_tokens_details"] = details
 	}
 	return m
 }
@@ -663,15 +684,27 @@ func openAIUsageToResponses(u any) map[string]any {
 	um := asMap(u)
 	in, out := 0, 0
 	cached, reasoning := 0, 0
+	created := 0
 	if um != nil {
 		in = intOf(um["prompt_tokens"])
 		out = intOf(um["completion_tokens"])
 		cached = intOf(asMap(um["prompt_tokens_details"])["cached_tokens"])
+		created = intOf(asMap(um["prompt_tokens_details"])["cache_write_tokens"])
+		if created == 0 {
+			created = intOf(um["cache_creation_input_tokens"])
+		}
 		reasoning = intOf(asMap(um["completion_tokens_details"])["reasoning_tokens"])
 	}
 	m := map[string]any{"input_tokens": in, "output_tokens": out, "total_tokens": in + out}
+	details := map[string]any{}
 	if cached > 0 {
-		m["input_tokens_details"] = map[string]any{"cached_tokens": cached}
+		details["cached_tokens"] = cached
+	}
+	if created > 0 {
+		details["cache_write_tokens"] = created
+	}
+	if len(details) > 0 {
+		m["input_tokens_details"] = details
 	}
 	if reasoning > 0 {
 		m["output_tokens_details"] = map[string]any{"reasoning_tokens": reasoning}
