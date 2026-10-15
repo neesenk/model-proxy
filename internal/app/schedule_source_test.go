@@ -162,7 +162,7 @@ func TestStickyOffOverrideComposition(t *testing.T) {
 	}
 	parkedSince := parked.Since
 
-	if code := postScheduleProbe(t, base+"/v1/chat/completions", body, "s1", "off"); code != 200 {
+	if code := postScheduleProbe(t, base+"/v1/chat/completions", strings.Replace(body, "hi", "hi-override", 1), "s1", "off"); code != 200 {
 		t.Fatalf("override request status = %d, want 200", code)
 	}
 	awaitRecordCount(t, p.reqLog.Directory(), 2)
@@ -172,7 +172,7 @@ func TestStickyOffOverrideComposition(t *testing.T) {
 	if len(records) != 2 {
 		t.Fatalf("records = %d, want 2", len(records))
 	}
-	overridden := records[len(records)-1] // chronological latest
+	overridden := recordContaining(t, records, "hi-override")
 	if overridden.Schedule == nil || overridden.Schedule.Source != "quota" {
 		t.Fatalf("override record schedule = %+v, want source quota (affinity opted out)", overridden.Schedule)
 	}
@@ -181,6 +181,22 @@ func TestStickyOffOverrideComposition(t *testing.T) {
 	if !ok || !entry.Since.Equal(parkedSince) {
 		t.Fatalf("binding after override = %+v (ok=%v), want Since unchanged at %v", entry, ok, parkedSince)
 	}
+}
+
+
+// recordContaining picks the record whose request body carries marker — two
+// requests of one test can land in the SAME second, and the query's timestamp
+// sort is not stable for equal keys, so records[len-1] is a coin flip between
+// them. Addressing by content removes the order dependence.
+func recordContaining(t *testing.T, records []requestlog.Record, marker string) requestlog.Record {
+	t.Helper()
+	for _, r := range records {
+		if strings.Contains(r.RequestBody, marker) {
+			return r
+		}
+	}
+	t.Fatalf("no record carries marker %q in %d records", marker, len(records))
+	return requestlog.Record{}
 }
 
 // TestStickyOffOverrideUnknownValueIgnored: only the exact value "off" (any
@@ -193,7 +209,7 @@ func TestStickyOffOverrideUnknownValueIgnored(t *testing.T) {
 		t.Fatalf("parking request status = %d, want 200", code)
 	}
 	awaitRecordCount(t, p.reqLog.Directory(), 1)
-	if code := postScheduleProbe(t, base+"/v1/chat/completions", body, "s1", "no"); code != 200 {
+	if code := postScheduleProbe(t, base+"/v1/chat/completions", strings.Replace(body, "hi", "hi-typo", 1), "s1", "no"); code != 200 {
 		t.Fatalf("typo request status = %d, want 200", code)
 	}
 	awaitRecordCount(t, p.reqLog.Directory(), 2)
@@ -201,7 +217,7 @@ func TestStickyOffOverrideUnknownValueIgnored(t *testing.T) {
 	if len(records) != 2 {
 		t.Fatalf("records = %d, want 2", len(records))
 	}
-	latest := records[len(records)-1]
+	latest := recordContaining(t, records, "hi-typo")
 	if latest.Schedule == nil || latest.Schedule.Source != "sticky" {
 		t.Fatalf("typo record schedule = %+v, want sticky (unknown override values are ignored)", latest.Schedule)
 	}
