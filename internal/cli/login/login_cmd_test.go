@@ -575,20 +575,6 @@ func loginFuncBody(t *testing.T, relativePath, functionName string) *ast.BlockSt
 	return nil
 }
 
-func containsOAuthAuthSuffix(call *ast.CallExpr) bool {
-	found := false
-	for _, arg := range call.Args {
-		ast.Inspect(arg, func(node ast.Node) bool {
-			literal, ok := node.(*ast.BasicLit)
-			if ok && strings.Contains(literal.Value, "oauth_auth") {
-				found = true
-			}
-			return !found
-		})
-	}
-	return found
-}
-
 // TestRunApiKeyLogin_KimiCode_Validation401 pins that kimi-code login now
 // validates the key (it routes through the generic addApikeyAccount, which gates
 // on usage_url). A 401 from the usage endpoint rejects before the pool is written.

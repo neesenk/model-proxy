@@ -55,21 +55,6 @@ func validCodexCLIAuthJSON() string {
 }`
 }
 
-// readWrittenCodexAuth loads the proxy-side oauth auth file written by the
-// import (credstore resolves to plain files in test binaries).
-func readWrittenCodexAuth(t *testing.T, path string) provider.CodexAuthFile {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read written auth file: %v", err)
-	}
-	var af provider.CodexAuthFile
-	if err := json.Unmarshal(data, &af); err != nil {
-		t.Fatalf("parse written auth file: %v", err)
-	}
-	return af
-}
-
 // readWrittenCodexPoolBlob loads the codex OAuth pool under home and returns
 // the single account's blob parsed as CodexAuthFile.
 func readWrittenCodexPoolBlob(t *testing.T, home, provName string) *provider.CodexAuthFile {

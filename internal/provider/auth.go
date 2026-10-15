@@ -333,10 +333,6 @@ func NewCodexOAuthProviderWithStore(authFile string, store OAuthBlobStore) *Code
 	return &CodexOAuthProvider{authFile: authFile, store: store, tokenURL: CodexOAuthTokenURL}
 }
 
-// codexCred derives the credential store ref from authFile at call time so
-// struct-literal construction (tests, ad-hoc instances) stays correct.
-func (p *CodexOAuthProvider) codexCred() credstore.Ref { return credstore.NewRef(p.authFile) }
-
 // CodexAuthFile is the on-disk format of codex_oauth_auth.json.
 type CodexAuthFile struct {
 	AuthMode string `json:"auth_mode"`
