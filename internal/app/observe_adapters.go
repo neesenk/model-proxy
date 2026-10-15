@@ -166,6 +166,9 @@ func (p *Proxy) statsFlushLoop(stop <-chan struct{}) {
 // history → pooled virtual keys) are derived from the current generation and
 // applied inside Bootstrap BEFORE the cumulative baseline restore, so the
 // seeded in-memory counters and the persisted buckets agree on the new keys.
+// The same pre-baseline slot rewrites the pre-cutoff token columns from the
+// request-log index (usage ledger rebuild) — pass its path only when the
+// request log is enabled.
 func (p *Proxy) initStats(config configdomain.StatsConfig) {
 	mcpKind := func(name string) (observestats.MCPKind, bool) {
 		cfg := p.cfgSnapshot()
@@ -182,7 +185,12 @@ func (p *Proxy) initStats(config configdomain.StatsConfig) {
 	}
 	p.mu.RLock()
 	poolAccounts := p.poolAccounts
+	fullCfg := p.cfg
 	p.mu.RUnlock()
+	ledgerIndex := ""
+	if fullCfg != nil && fullCfg.RequestLog.Enabled {
+		ledgerIndex = filepath.Join(fullCfg.RequestLog.Dir, "index.db")
+	}
 	result := observestats.Bootstrap(
 		config.ResolvedDBPath(),
 		config.RetentionDuration(),
@@ -191,6 +199,7 @@ func (p *Proxy) initStats(config configdomain.StatsConfig) {
 		p.tokens,
 		p.agents,
 		providerKeyRenames(poolAccounts),
+		ledgerIndex,
 		observestats.WithMCPStats(p.mcpStats, mcpKind),
 	)
 	p.stats = result.Store

@@ -34,12 +34,23 @@ func Bootstrap(
 	tokens *obscounters.TokenCounter,
 	agents *obscounters.AgentCounter,
 	providerRenames map[string]string,
+	ledgerIndex string,
 	opts ...FlusherOption,
 ) BootstrapResult {
 	store, err := Open(Options{Path: path, Retention: retention})
 	if err != nil {
 		logx.Warnf("[stats] open failed (%s): %v - running without persisted stats", path, err)
 		return BootstrapResult{}
+	}
+
+	// Rewrite the pre-cutoff token columns from the request-log ledger BEFORE
+	// the baseline restore: the historical buckets carry the pre-89630e1
+	// mis-ledgers, and the seeded in-memory counters must land on the corrected
+	// values. Failures degrade to keeping the committed values (logged).
+	if ledgerIndex != "" {
+		if _, _, err := store.RebuildTokenLedger(ledgerIndex); err != nil {
+			logx.Warnf("[stats] usage ledger rebuild failed: %v (historical token buckets keep their committed values)", err)
+		}
 	}
 
 	if count, err := store.ImportLegacyTokens(LegacyTokensPath(homeDir)); err != nil {
