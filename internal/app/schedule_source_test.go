@@ -183,7 +183,6 @@ func TestStickyOffOverrideComposition(t *testing.T) {
 	}
 }
 
-
 // recordContaining picks the record whose request body carries marker — two
 // requests of one test can land in the SAME second, and the query's timestamp
 // sort is not stable for equal keys, so records[len-1] is a coin flip between
