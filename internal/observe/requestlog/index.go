@@ -698,7 +698,7 @@ func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) 
 	where, args := filterSQL(filter)
 	query := `SELECT ts, request_id, session_id, protocol, method, path, tool, exposed,
 		called_model, upstream_model, provider, agent, attempt, status, latency_ms, ttft_ms,
-		request_size, response_size, turn_key, kind, input, output, cache_read, cache_creation, shadow
+		request_size, response_size, turn_key, kind, input, output, cache_read, cache_creation, shadow, attempt_only
 		FROM records` + where + ` ORDER BY ts DESC, rowid DESC`
 	if filter.Limit > 0 {
 		query += ` LIMIT ?`
@@ -711,8 +711,9 @@ func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) 
 	summaries := make([]Summary, 0)
 	for rows.Next() {
 		var (
-			summary Summary
-			shadow  int
+			summary     Summary
+			shadow      int
+			attemptOnly int
 		)
 		if err := rows.Scan(
 			&summary.Ts, &summary.RequestID, &summary.SessionID, &summary.Protocol,
@@ -720,12 +721,13 @@ func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) 
 			&summary.UpstreamModel, &summary.Provider, &summary.Agent, &summary.Attempt,
 			&summary.Status, &summary.LatencyMs, &summary.TTFTMs, &summary.RequestSize, &summary.ResponseSize,
 			&summary.TurnKey, &summary.Kind, &summary.Input, &summary.Output, &summary.CacheRead, &summary.CacheCreation,
-			&shadow,
+			&shadow, &attemptOnly,
 		); err != nil {
 			_ = rows.Close()
 			return nil, Facets{}, err
 		}
 		summary.Shadow = shadow != 0
+		summary.AttemptOnly = attemptOnly != 0
 		if !filter.UsageOnly {
 			summary.Input, summary.Output, summary.CacheRead, summary.CacheCreation = 0, 0, 0, 0
 		}

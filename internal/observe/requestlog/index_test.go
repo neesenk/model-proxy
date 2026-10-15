@@ -92,6 +92,51 @@ func indexRowCount(t *testing.T, indexer *Indexer) int {
 	return count
 }
 
+// TestSummariesCarryAttemptOnly pins the attempt_only projection end to end
+// on BOTH query paths: the directory scan (Summarize) and the SQLite index
+// (SELECT column) must surface the leg marker. A failover leg that renders
+// as an ordinary failed request — empty request body plus an error-text
+// response — is exactly the misreading the marker exists to prevent
+// (docs/web-api.md /api/requests summary fields).
+func TestSummariesCarryAttemptOnly(t *testing.T) {
+	dir := t.TempDir()
+	records := []Record{
+		{Ts: "2026-07-30T01:04:03Z", RequestID: "r-leg", SessionID: "sess-b", Protocol: "chat", Method: "POST", Path: "/v1/chat/completions", CalledModel: "model-x", Provider: "provider-y", Agent: "agent-b", Attempt: 0, Status: 502, AttemptOnly: true, RequestBody: "", ResponseBody: `Post "https://up.test": read: connection reset by peer`},
+		{Ts: "2026-07-30T01:05:03Z", RequestID: "r-ok", SessionID: "sess-b", Protocol: "chat", Method: "POST", Path: "/v1/chat/completions", CalledModel: "model-x", Provider: "provider-z", Agent: "agent-b", Attempt: 1, Status: 200},
+	}
+	writeRecordFile(t, dir, "requests-20260730.log", records)
+
+	byID := func(summaries []Summary) map[string]Summary {
+		out := make(map[string]Summary, len(summaries))
+		for _, s := range summaries {
+			out[s.RequestID] = s
+		}
+		return out
+	}
+
+	scan, err := QuerySummaries(dir, Filter{Limit: 10})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	scanByID := byID(scan)
+	if !scanByID["r-leg"].AttemptOnly {
+		t.Errorf("scan summary lost attempt_only: %+v", scanByID["r-leg"])
+	}
+	if scanByID["r-ok"].AttemptOnly {
+		t.Errorf("scan summary invented attempt_only on a committed row: %+v", scanByID["r-ok"])
+	}
+
+	indexer := newTestIndexer(t, dir)
+	mustReconcile(t, indexer)
+	indexed, _, err := indexer.SummariesWithFacets(Filter{Limit: 10})
+	if err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	if !reflect.DeepEqual(indexed, scan) {
+		t.Errorf("index/scan summaries diverge:\nindex: %+v\nscan:  %+v", indexed, scan)
+	}
+}
+
 // TestIndexSummariesEquivalenceVsScan pins the index query against the file
 // scan field-by-field across the filter matrix. Facets are compared only on
 // the unbounded filter: the scan's facets are bounded by its file-level early

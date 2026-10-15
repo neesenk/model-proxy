@@ -59,6 +59,11 @@ type Summary struct {
 	CacheRead     uint64 `json:"cache_read,omitempty"`
 	CacheCreation uint64 `json:"cache_creation,omitempty"`
 	Shadow        bool   `json:"shadow,omitempty"`
+	// AttemptOnly marks an uncommitted failover leg (429/5xx/auth/transport
+	// error with a following hop): same request id as the committed row,
+	// request body intentionally not logged (the response body carries the
+	// failure evidence), excluded from usage and session aggregates.
+	AttemptOnly bool `json:"attempt_only,omitempty"`
 	// TurnKey is the conversational-turn fingerprint persisted with the record.
 	// Empty on records written before the field existed or when no user text
 	// could be extracted.
@@ -80,7 +85,7 @@ func Summarize(record Record) Summary {
 		TTFTMs: record.TTFTMs, RequestSize: record.RequestSize, ResponseSize: record.ResponseSize,
 		Input: record.ParsedUsage.Input, Output: record.ParsedUsage.Output,
 		CacheRead: record.ParsedUsage.CacheRead, CacheCreation: record.ParsedUsage.CacheCreation,
-		Shadow: record.Shadow, TurnKey: record.TurnKey,
+		Shadow: record.Shadow, AttemptOnly: record.AttemptOnly, TurnKey: record.TurnKey,
 	}
 }
 
