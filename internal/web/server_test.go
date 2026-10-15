@@ -118,7 +118,10 @@ func (testCommandAPI) ProbeAccount(context.Context, string, string) (appapi.Prob
 func (testCommandAPI) RemoveAccount(string, string) (appapi.MutationResult, error) {
 	return appapi.MutationResult{}, nil
 }
-func (api testCommandAPI) BeginLogin(ctx context.Context, name string) (appapi.LoginStart, error) {
+func (testCommandAPI) RenameAccount(string, string, string) (appapi.MutationResult, error) {
+	return appapi.MutationResult{}, nil
+}
+func (api testCommandAPI) BeginLogin(ctx context.Context, name, accountID string) (appapi.LoginStart, error) {
 	if api.begin == nil {
 		return appapi.LoginStart{}, errors.New("not implemented")
 	}

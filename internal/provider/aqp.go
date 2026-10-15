@@ -30,13 +30,33 @@ func (p *AqpProvider) AuthReady() bool {
 	if p.cfg.Auth != nil {
 		return true
 	}
-	a, err := LoadAqpAccount(p.cfg.OAuthAuthFile)
+	a, err := p.loadAccount()
 	return err == nil && a != nil && a.SSOSessionCookie != ""
+}
+
+// loadAccount reads the SSO account through the seam (pooled virtual) or the
+// legacy single-account file.
+func (p *AqpProvider) loadAccount() (*AqpAccountData, error) {
+	if p.cfg.OAuthStore != nil {
+		blob, err := p.cfg.OAuthStore.Load()
+		if err != nil {
+			return nil, err
+		}
+		if len(blob) == 0 {
+			return nil, nil
+		}
+		var a AqpAccountData
+		if err := json.Unmarshal(blob, &a); err != nil {
+			return nil, fmt.Errorf("parse aqp oauth store: %w", err)
+		}
+		return &a, nil
+	}
+	return LoadAqpAccount(p.cfg.OAuthAuthFile)
 }
 
 func init() {
 	Register("aqp", func(cfg *Config, providerName string) (Provider, error) {
-		key := NewAqpKeyProvider(cfg.AqpMintURL, cfg.OAuthAuthFile)
+		key := NewAqpKeyProviderWithStore(cfg.AqpMintURL, cfg.OAuthAuthFile, cfg.OAuthStore)
 		key.proxyURL = cfg.ProxyURL
 		return &AqpProvider{cfg: cfg, auth: cfg.authOrDefault(key)}, nil
 	})
@@ -69,7 +89,15 @@ func (p *AqpProvider) RewriteRequest(targetURL string, body []byte, path string)
 	}
 	return targetURL, body
 }
-func (p *AqpProvider) Logout() error                  { return removeAuthFile(p.cfg.OAuthAuthFile) }
+
+// Logout removes this account's OAuth store: the seam's own slot for pooled
+// virtuals, the legacy single-account file otherwise. Absence is success.
+func (p *AqpProvider) Logout() error {
+	if p.cfg.OAuthStore != nil {
+		return p.cfg.OAuthStore.Delete()
+	}
+	return removeAuthFile(p.cfg.OAuthAuthFile)
+}
 func (p *AqpProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg, p.AuthHeaders) }
 
 // aqpBaseURL returns the compass backend base URL for the monthly_usage fetch:
@@ -88,7 +116,7 @@ func (p *AqpProvider) aqpBaseURL() string {
 // Owned by the provider since Stage 2 of the aqp-fetch migration (was a main
 // callback AqpMonthlyUsage wired to AqpClient.MonthlyUsage).
 func (p *AqpProvider) fetchMonthlyUsage() (*MonthlyProjectUsage, error) {
-	a, err := LoadAqpAccount(p.cfg.OAuthAuthFile)
+	a, err := p.loadAccount()
 	if err != nil || a == nil || a.SSOSessionCookie == "" {
 		return nil, fmt.Errorf("not logged in")
 	}

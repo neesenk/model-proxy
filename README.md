@@ -195,6 +195,11 @@ model-proxy login typesafe         # TypeSafe API key（console.typesafe.ai；�
 model-proxy login openrouter       # OpenRouter API key（openrouter.ai/settings/keys；可重复 -> 多账号）
 model-proxy login opencode-go      # OpenCode Go 套餐 key（opencode.ai/auth 订阅 Go 后复制；可重复 -> 多账号）
 model-proxy login zhipu --label work --replace   # 命名账号 / 覆盖已存在的同 id 账号
+# 账号身份与用量归属：每个池账号按稳定内部 id 关联（用量/quota 历史跟账号走，
+# 加删兄弟账号不断档）；显示名用 --label 或 Web Accounts 页的 Rename 随时改（纯命名，
+# 不影响路由与历史）。Web 各视图把池账号显示为 "provider · 账号名"。
+model-proxy login aqp            # aqp/codex 同样支持多账号：重复 login 追加/重新授权
+model-proxy login codex          # （同账号重新登录 = 原地刷新凭据，账号名与历史不变）
 # 免粘贴导入（值不回显、不落日志；成功输出只有掩码账号 id）
 model-proxy login codex --from-codex             # 复用官方 codex CLI 登录态（~/.codex/auth.json，access_token 过期会自动 refresh）
 model-proxy login zhipu --from-env ZHIPU_KEY     # 从环境变量读 API key（等价交互输入，支持 --label/--replace）

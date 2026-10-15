@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -186,6 +187,102 @@ func TestAddAccountUnknownProvider(t *testing.T) {
 	if httpErrorStatus(t, err) != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", httpErrorStatus(t, err))
 	}
+}
+
+// TestRenameAccount covers the label-rename contract: metadata-only success
+// (no reload follows), OAuth rejection, unknown provider, and fail-closed
+// store errors mapped to 400.
+func TestRenameAccount(t *testing.T) {
+	t.Run("unknown provider", func(t *testing.T) {
+		service := New(Ports{
+			ProviderConfig: func(string) (configdomain.Provider, bool) { return configdomain.Provider{}, false },
+		})
+		if _, err := service.RenameAccount("nope", "id", "l"); httpErrorStatus(t, err) != http.StatusNotFound {
+			t.Errorf("status = %d, want 404", httpErrorStatus(t, err))
+		}
+	})
+	t.Run("oauth pool account renames too", func(t *testing.T) {
+		setTestHome(t)
+		id := accounts.OAuthAccountID("someone@x.com")
+		blob := []byte(`{"account_id":"someone@x.com","sso_session_cookie":"SSO_C=x"}`)
+		if err := accounts.NewStore(accounts.HomeDir()).Save("aqp", "aqp", accounts.Pool{Accounts: []accounts.Account{{
+			ID: id, Kind: accounts.AccountKindOAuth, Label: "someone@x.com", Email: "someone@x.com",
+			OAuth: blob, AddedAt: "2026-07-15T00:00:00Z",
+		}}}); err != nil {
+			t.Fatal(err)
+		}
+		service := New(Ports{
+			ProviderConfig: func(string) (configdomain.Provider, bool) {
+				return configdomain.Provider{Provider: "aqp"}, true
+			},
+		})
+		if _, err := service.RenameAccount("aqp", id, "work horse"); err != nil {
+			t.Fatal(err)
+		}
+		pool, err := accounts.NewStore(accounts.HomeDir()).Load("aqp", "aqp")
+		if err != nil || len(pool.Accounts) != 1 {
+			t.Fatalf("pool = %+v, %v", pool, err)
+		}
+		entry := pool.Accounts[0]
+		if entry.Label != "work horse" || entry.ID != id || entry.Email != "someone@x.com" {
+			t.Errorf("renamed oauth entry = %+v (id/email must be untouched)", entry)
+		}
+		var stored struct {
+			AccountID        string `json:"account_id"`
+			SSOSessionCookie string `json:"sso_session_cookie"`
+		}
+		if err := json.Unmarshal(entry.OAuth, &stored); err != nil ||
+			stored.AccountID != "someone@x.com" || stored.SSOSessionCookie != "SSO_C=x" {
+			t.Errorf("renamed oauth blob = %s (credential must be untouched)", entry.OAuth)
+		}
+	})
+	t.Run("success persists label without reload", func(t *testing.T) {
+		setTestHome(t)
+		id := accounts.AccountID("zhipu", accounts.Credentials{APIKey: "k"})
+		if err := accounts.NewStore(accounts.HomeDir()).Save("zhipu", "zhipu", accounts.Pool{Accounts: []accounts.Account{
+			{ID: id, Label: "old", APIKey: "k", AddedAt: "2026-07-15T00:00:00Z"},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		service := New(Ports{
+			ProviderConfig: func(string) (configdomain.Provider, bool) {
+				return configdomain.Provider{Provider: "zhipu"}, true
+			},
+			Reload: func(string) error {
+				t.Error("rename is metadata-only and must not reload")
+				return nil
+			},
+		})
+		result, err := service.RenameAccount("zhipu", id, "new name")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.ID != id || result.Warning != "" {
+			t.Errorf("result = %+v", result)
+		}
+		pool, err := accounts.NewStore(accounts.HomeDir()).Load("zhipu", "zhipu")
+		if err != nil || len(pool.Accounts) != 1 || pool.Accounts[0].Label != "new name" ||
+			pool.Accounts[0].ID != id || pool.Accounts[0].APIKey != "k" {
+			t.Errorf("persisted pool = %+v, %v (id and credential must be untouched)", pool, err)
+		}
+	})
+	t.Run("store failure maps to 400", func(t *testing.T) {
+		setTestHome(t)
+		if err := accounts.NewStore(accounts.HomeDir()).Save("zhipu", "zhipu", accounts.Pool{Accounts: []accounts.Account{
+			{ID: "real", Label: "l", APIKey: "k", AddedAt: "2026-07-15T00:00:00Z"},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		service := New(Ports{
+			ProviderConfig: func(string) (configdomain.Provider, bool) {
+				return configdomain.Provider{Provider: "zhipu"}, true
+			},
+		})
+		_, err := service.RenameAccount("zhipu", "ghost", "l")
+		if httpErrorStatus(t, err) != http.StatusBadRequest || !strings.Contains(err.Error(), "unknown account") {
+			t.Errorf("err = %v, want unknown-account 400", err)
+		}
+	})
 }
 
 func TestAddAccountOAuthProviderRejected(t *testing.T) {
@@ -467,7 +564,8 @@ func TestProbeAccountSuccess(t *testing.T) {
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
 		"up": {Provider: "zhipu", OpenAIBaseURL: upstream.URL, Models: []string{"configured-model"}},
 	}}
-	service := New(probePorts(cfg, map[string]provider.Provider{"up": fakeProbeImpl{}}))
+	// A plural pool keys by virtual id regardless of pool size.
+	service := New(probePorts(cfg, map[string]provider.Provider{"up#" + accountID: fakeProbeImpl{}}))
 	result, err := service.ProbeAccount(context.Background(), "up", accountID)
 	if err != nil {
 		t.Fatal(err)

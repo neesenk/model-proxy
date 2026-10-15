@@ -1,10 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/zalando/go-keyring"
 	"model-proxy/internal/accounts"
@@ -386,12 +386,19 @@ func TestAqpLoginFlow(t *testing.T) {
 	if state.Result != "u@x.com" {
 		t.Errorf("poll result=%q want u@x.com", state.Result)
 	}
-	account, err := provider.LoadAqpAccount(accounts.AuthFilePath("aqp", "oauth_auth"))
-	if err != nil {
-		t.Fatalf("load persisted AQP account: %v", err)
+	// The login lands in the OAuth POOL: one oauth-kind entry anchored on the
+	// employee email, blob = the AqpAccountData.
+	pool, err := accounts.NewStore(accounts.HomeDir()).Load("aqp", "aqp")
+	if err != nil || len(pool.Accounts) != 1 {
+		t.Fatalf("persisted aqp pool = %+v, %v", pool, err)
 	}
-	if account == nil {
-		t.Fatal("aqp account file not written")
+	entry := pool.Accounts[0]
+	if !accounts.IsOAuthAccount(entry) || entry.ID != accounts.OAuthAccountID("u@x.com") {
+		t.Fatalf("pool entry = %+v, want oauth-kind anchored on u@x.com", entry)
+	}
+	var account provider.AqpAccountData
+	if err := json.Unmarshal(entry.OAuth, &account); err != nil {
+		t.Fatalf("blob unreadable: %v", err)
 	}
 	if account.Email != "u@x.com" {
 		t.Errorf("persisted email=%q want u@x.com", account.Email)
@@ -606,14 +613,29 @@ func TestCodexLoginFlow(t *testing.T) {
 	if state.Result != "acct-1" {
 		t.Errorf("poll result=%q want acct-1", state.Result)
 	}
-	// codex auth file must exist (written 0600 by the goroutine).
-	path := accounts.AuthFilePath("codex", "oauth_auth")
-	info, err := os.Stat(path)
+	// The login lands in the OAuth POOL: one oauth-kind entry anchored on the
+	// chatgpt_account_id from the fake id_token, blob = the exchanged tokens.
+	pool, err := accounts.NewStore(accounts.HomeDir()).Load("codex", "codex")
+	if err != nil || len(pool.Accounts) != 1 {
+		t.Fatalf("persisted codex pool = %+v, %v", pool, err)
+	}
+	entry := pool.Accounts[0]
+	if !accounts.IsOAuthAccount(entry) || entry.ID != accounts.OAuthAccountID("acct-1") {
+		t.Fatalf("pool entry = %+v, want oauth-kind anchored on acct-1", entry)
+	}
+	var af provider.CodexAuthFile
+	if err := json.Unmarshal(entry.OAuth, &af); err != nil {
+		t.Fatalf("blob unreadable: %v", err)
+	}
+	if af.Tokens.AccessToken != "at" || af.Tokens.RefreshToken != "rt" {
+		t.Errorf("tokens = %+v", af.Tokens)
+	}
+	info, err := os.Stat(accounts.NewStore(accounts.HomeDir()).PoolPath("codex"))
 	if err != nil {
-		t.Fatalf("codex auth file not written: %v", err)
+		t.Fatalf("codex pool file not written: %v", err)
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Errorf("codex auth file perm=%o want 0600", perm)
+		t.Errorf("codex pool file perm=%o want 0600", perm)
 	}
 }
 
@@ -622,9 +644,8 @@ func TestCodexLoginFlowKeychainCommitAndDelete(t *testing.T) {
 	keyring.MockInit()
 	t.Cleanup(keyring.MockInit)
 	t.Setenv("MP_CRED_STORE", string(credstore.ModeKeychain))
-	credstore.SetProcessMode(credstore.ModeFile)
+	credstore.SetProcessMode(credstore.ModeKeychain)
 	t.Cleanup(func() { credstore.SetProcessMode(credstore.ModeFile) })
-
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-keychain"}}`))
 	fakeIDToken := "h." + payload + ".s"
 	mux := http.NewServeMux()
@@ -641,6 +662,12 @@ func TestCodexLoginFlowKeychainCommitAndDelete(t *testing.T) {
 	defer up.Close()
 
 	w, p := newTestWeb(t)
+	// The OAuth POOL also runs on the keychain backend: blobs live as
+	// per-account keychain entries, the pool file stays metadata-only. Set
+	// AFTER construction — newTestWeb applies the (pool-less) test config,
+	// which resets the process backend to file.
+	accounts.SetProcessBackend(accounts.BackendKeychain)
+	t.Cleanup(func() { accounts.SetProcessBackend(accounts.BackendFile) })
 	p.mu.Lock()
 	p.cfg.Providers["codex"] = configdomain.Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
@@ -662,32 +689,81 @@ func TestCodexLoginFlowKeychainCommitAndDelete(t *testing.T) {
 		SessionID string `json:"session_id"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &start); err != nil {
-		t.Fatalf("parse start response: %v", err)
+		t.Fatalf("parse start response: %v", rec.Body.String())
 	}
 	state := waitForLoginDone(t, w, start.SessionID)
 	if state.Result != "acct-keychain" {
 		t.Fatalf("poll result=%q want acct-keychain", state.Result)
 	}
 
-	path := accounts.AuthFilePath("codex", "oauth_auth")
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("keychain-mode Web login created plaintext auth file: %v", err)
-	}
-	auth, err := provider.LoadCodexAuthFile(path)
+	// Plaintext never lands on disk: the pool file is metadata-only and the
+	// legacy single-account file was never written.
+	poolData, err := os.ReadFile(accounts.NewStore(accounts.HomeDir()).PoolPath("codex"))
 	if err != nil {
-		t.Fatalf("load keychain auth after Web login: %v", err)
+		t.Fatalf("pool file not written: %v", err)
 	}
-	if auth.Tokens.AccountID != "acct-keychain" {
-		t.Fatalf("keychain auth account id = %q, want acct-keychain", auth.Tokens.AccountID)
+	if bytes.Contains(poolData, []byte(`"access_token":"at"`)) || bytes.Contains(poolData, []byte(`"refresh_token"`)) {
+		t.Fatalf("keychain-mode Web login leaked plaintext tokens into the pool file: %s", poolData)
+	}
+	if _, err := os.Stat(accounts.AuthFilePath("codex", "oauth_auth")); !os.IsNotExist(err) {
+		t.Fatalf("keychain-mode Web login created a plaintext legacy auth file: %v", err)
+	}
+	// Hydration reads the blob back from the keychain.
+	snapshot, err := accounts.NewStore(accounts.HomeDir()).LoadSnapshot("codex", "codex")
+	if err != nil || len(snapshot.Pool.Accounts) != 1 || !accounts.IsOAuthAccount(snapshot.Pool.Accounts[0]) {
+		t.Fatalf("hydrated pool = %+v, %v", snapshot.Pool, err)
+	}
+	var af provider.CodexAuthFile
+	if err := json.Unmarshal(snapshot.Pool.Accounts[0].OAuth, &af); err != nil {
+		t.Fatalf("blob unreadable: %v", err)
+	}
+	if got := provider.AccountIDFromTokens(af.Tokens.IDToken, af.Tokens.AccountID); got != "acct-keychain" {
+		t.Fatalf("keychain blob account id = %q, want acct-keychain", got)
+	}
+
+	// Delete by the id /api/accounts reports (the anchored hash): pool empties
+	// and the keychain namespace is cleaned.
+	list := httptest.NewRecorder()
+	serveWeb(w, list, httptest.NewRequest(http.MethodGet, "/api/accounts", nil))
+	if list.Code != http.StatusOK {
+		t.Fatalf("accounts list status=%d", list.Code)
+	}
+	var listed struct {
+		Providers []struct {
+			Name     string `json:"name"`
+			Pooled   bool   `json:"pooled"`
+			Accounts []struct {
+				ID string `json:"id"`
+			} `json:"accounts"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("parse accounts: %v", err)
+	}
+	var accountID string
+	for _, prov := range listed.Providers {
+		if prov.Name == "codex" {
+			if !prov.Pooled || len(prov.Accounts) != 1 {
+				t.Fatalf("codex accounts = %+v (want pooled with one account)", prov)
+			}
+			accountID = prov.Accounts[0].ID
+		}
+	}
+	if accountID == "" {
+		t.Fatal("codex account missing from /api/accounts")
 	}
 
 	deleted := httptest.NewRecorder()
-	serveWeb(w, deleted, httptest.NewRequest(http.MethodDelete, "/api/accounts/codex/acct-keychain", nil))
+	serveWeb(w, deleted, httptest.NewRequest(http.MethodDelete, "/api/accounts/codex/"+accountID, nil))
 	if deleted.Code != http.StatusOK {
 		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
 	}
-	if _, err := provider.LoadCodexAuthFile(path); !errors.Is(err, credstore.ErrNotFound) {
-		t.Fatalf("keychain credential survived Web delete: %v", err)
+	snapshot, err = accounts.NewStore(accounts.HomeDir()).LoadSnapshot("codex", "codex")
+	if err != nil {
+		t.Fatalf("reload pool after delete: %v", err)
+	}
+	if len(snapshot.Pool.Accounts) != 0 {
+		t.Fatalf("keychain credential survived Web delete: %+v", snapshot.Pool.Accounts)
 	}
 }
 
@@ -700,7 +776,6 @@ type loginPollState struct {
 
 // waitForLoginTerminal polls until the login session reaches ANY terminal
 // state ("done" or "error") and returns it — for tests that assert the error
-// resolution itself.
 func waitForLoginTerminal(t *testing.T, server *WebServer, sessionID string) loginPollState {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

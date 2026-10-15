@@ -145,7 +145,7 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			"cache": true, "guardScanner": true,
 			"guardPoolSecrets": true, "guardOAuthSecrets": true,
 			"secLog": true, "secLogRunning": true,
-			"poolIndex": true, "parentOf": true,
+			"poolIndex": true, "parentOf": true, "poolAccounts": true,
 			"expandedRoutes": true, "routeKeys": true,
 			"derivedRoutes": true, "routeWarnings": true,
 			"shadow": true, "adminAuth": true, "apiKeys": true,

@@ -196,7 +196,12 @@ func (s Store) prepareMetadataToFileSave(name, providerID string, next Pool) err
 	markerPool := Pool{Version: 1, Accounts: make([]Account, 0, len(old.Accounts))}
 	for _, metadata := range old.Accounts {
 		restored, ok := byID[metadata.ID]
-		if !ok || AccountID(providerID, restored.Credentials()) != metadata.ID {
+		if !ok {
+			return fmt.Errorf("save pool %s: keychain metadata accounts remain unresolved; restore every original account id or remove it explicitly first", name)
+		}
+		// OAuth ids are anchored (not credential-derived): presence with the
+		// blob restored is the whole invariant.
+		if !IsOAuthAccount(metadata) && AccountID(providerID, restored.Credentials()) != metadata.ID {
 			return fmt.Errorf("save pool %s: keychain metadata accounts remain unresolved; restore every original account id or remove it explicitly first", name)
 		}
 		markerPool.Accounts = append(markerPool.Accounts, Account{ID: metadata.ID})

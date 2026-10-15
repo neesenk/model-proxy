@@ -77,7 +77,9 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
   provider/登出的账号原子丢弃，存活者继续用 cache 直到 reload 后的 `PollAsync`
   成功切换。旧实现整表清空曾把未声明 `billing:` 的实测 plan provider 在轮询窗口内
   降为 unknown 档，让声明 plan 的 provider 越过更高优先级的目标（opencode-go/zcode
-  档位翻转事故）。boot 路径不变：磁盘恢复仍受 config fingerprint 门控。
+  档位翻转事故）。boot 路径不变：磁盘恢复仍受 config fingerprint 门控；启动键迁移
+  （provider-pools.md）在 tracker Load 之前把 quota_state.json 的裸父名条目改键到
+  虚拟键，历史 last-known-good 快照因此不被 live-key 过滤丢弃。
 
 轮询范围 = **全部已构建 provider**（含池化虚拟账号 `name#<accountID>`）。`Quota()`
 能服务什么由 provider 实现决定：配了 `usage_url` 的做 HTTP 查询（deepseek 的

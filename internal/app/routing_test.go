@@ -8,6 +8,7 @@ import (
 	"model-proxy/internal/provider"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -246,10 +247,13 @@ func TestRouteExpansionFansOutPool(t *testing.T) {
 		}
 	}
 
-	// Non-pooled provider passes through unchanged (single-account providers
-	// keep the plain-name target after expansion — needs a credential now: an
-	// unlogged provider's targets are dropped from the effective table).
-	writePoolFile(t, "z", "zhipu", "KEY-Z")
+	// Non-pooled provider passes through unchanged: a LEGACY SINGULAR file is
+	// the only non-pooled source with a credential (every plural pool unrolls
+	// to virtual ids now); its plain-name target must survive expansion — an
+	// unlogged provider's targets are dropped from the effective table.
+	if err := os.WriteFile(legacyPoolPath("z"), []byte(`{"api_key":"KEY-Z"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cfg2 := &configdomain.Config{
 		Listen:    "127.0.0.1:1",
 		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},

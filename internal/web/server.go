@@ -361,6 +361,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleAnalytics(w, r)
 	case strings.HasPrefix(p, "/api/accounts/") && strings.HasSuffix(p, "/test") && r.Method == http.MethodPost:
 		s.handleAccountTest(w, r)
+	case strings.HasPrefix(p, "/api/accounts/") && strings.HasSuffix(p, "/label") && r.Method == http.MethodPost:
+		s.handleAccountLabel(w, r)
 	case strings.HasPrefix(p, "/api/accounts/") && r.Method == http.MethodPost:
 		s.handleAccountAdd(w, r)
 	case strings.HasPrefix(p, "/api/accounts/") && r.Method == http.MethodDelete:

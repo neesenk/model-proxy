@@ -76,7 +76,7 @@ func TestAddApikeyAccountCore(t *testing.T) {
 		t.Fatalf("dup-no-replace should error 'cancelled', got %v", err)
 	}
 	// Remove: pool empties.
-	if err := RemoveApikeyAccount("zhipu", "zhipu", id); err != nil {
+	if err := RemoveAccount("zhipu", "zhipu", id); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	pool3, _ := accounts.NewStore(accounts.HomeDir()).Load("zhipu", "zhipu")
@@ -143,7 +143,7 @@ func TestAddVolcengineAccountCore(t *testing.T) {
 	if pool2.Accounts[0].APIKey != "ark2" || pool2.Accounts[0].SecretKey != "SK-new" || pool2.Accounts[0].Label != "renamed" {
 		t.Fatalf("replace did not overwrite triple/label: %+v", pool2.Accounts[0])
 	}
-	if err := RemoveApikeyAccount("vol", "volcengine", id); err != nil {
+	if err := RemoveAccount("vol", "volcengine", id); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	pool3, _ := accounts.NewStore(accounts.HomeDir()).Load("vol", "volcengine")
@@ -171,7 +171,7 @@ func TestRemoveApikeyAccountCleansRestoredKeychainEntry(t *testing.T) {
 	accountStoreEnv = func() accounts.Store { return fileStore }
 	t.Cleanup(func() { accountStoreEnv = originalStoreEnv })
 
-	if err := RemoveApikeyAccount("prov", "zhipu", id); err != nil {
+	if err := RemoveAccount("prov", "zhipu", id); err != nil {
 		t.Fatalf("RemoveApikeyAccount: %v", err)
 	}
 	if _, err := keyring.Get("model-proxy", "prov/"+id+"/api_key"); !errors.Is(err, keyring.ErrNotFound) {

@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -18,6 +19,11 @@ type aqpLoginJob struct {
 	name    string
 	client  *login.AqpClient
 	detail  string
+	// accountID, when non-empty, is a TARGETED re-login: the completed SSO
+	// flow must re-authorize exactly this pooled account (same upstream
+	// identity); landing on a different account is surfaced as an error
+	// instead of silently adding a sibling.
+	accountID string
 }
 
 func (job *aqpLoginJob) Run(ctx context.Context) appapi.LoginUpdate {
@@ -45,11 +51,16 @@ func (job *aqpLoginJob) Run(ctx context.Context) appapi.LoginUpdate {
 	if err := ctx.Err(); err != nil {
 		return fail(err)
 	}
-	if err := provider.SaveAqpAccount(
-		accounts.AuthFilePath(job.name, "oauth_auth"),
-		account,
-	); err != nil {
+	seed, err := login.AqpOAuthSeed(account)
+	if err != nil {
 		return fail(err)
+	}
+	id, err := login.AddOAuthAccount(job.name, "aqp", seed)
+	if err != nil {
+		return fail(err)
+	}
+	if job.accountID != "" && id != job.accountID {
+		return fail(fmt.Errorf("re-login authorized a different account (id %s); the original account is unchanged", maskAccountID(id)))
 	}
 	return appapi.LoginUpdate{
 		State:   "done",
@@ -59,11 +70,22 @@ func (job *aqpLoginJob) Run(ctx context.Context) appapi.LoginUpdate {
 	}
 }
 
+// maskAccountID keeps login errors free of full identifiers while still
+// letting the operator tell two accounts apart (first 2 + … + last 2).
+func maskAccountID(id string) string {
+	if len(id) <= 4 {
+		return id
+	}
+	return id[:2] + "…" + id[len(id)-2:]
+}
+
 type codexLoginJob struct {
 	service *Service
 	name    string
 	state   codexLoginState
 	detail  string
+	// accountID is the targeted re-login contract (see aqpLoginJob).
+	accountID string
 }
 
 // codexLoginState is application-owned device-flow state. The Web transport
@@ -106,16 +128,25 @@ func (job *codexLoginJob) Run(ctx context.Context) appapi.LoginUpdate {
 	if err := ctx.Err(); err != nil {
 		return fail(err)
 	}
-	if err := provider.WriteCodexAuthFile(
-		accounts.AuthFilePath(job.name, "oauth_auth"),
-		authFile,
-	); err != nil {
+	seed, err := login.CodexOAuthSeed(authFile)
+	if err != nil {
 		return fail(err)
+	}
+	id, err := login.AddOAuthAccount(job.name, "codex", seed)
+	if err != nil {
+		return fail(err)
+	}
+	if job.accountID != "" && id != job.accountID {
+		return fail(fmt.Errorf("re-login authorized a different account (id %s); the original account is unchanged", maskAccountID(id)))
+	}
+	result := seed.Email
+	if result == "" {
+		result = seed.UpstreamID
 	}
 	return appapi.LoginUpdate{
 		State:   "done",
 		Detail:  job.detail,
-		Result:  authFile.Tokens.AccountID,
+		Result:  result,
 		Warning: job.service.reloadAfterMutation(),
 	}
 }
@@ -123,6 +154,7 @@ func (job *codexLoginJob) Run(ctx context.Context) appapi.LoginUpdate {
 func (s *Service) BeginLogin(
 	ctx context.Context,
 	name string,
+	accountID string,
 ) (appapi.LoginStart, error) {
 	providerConfig, ok := s.ports.ProviderConfig(name)
 	if !ok {
@@ -130,6 +162,24 @@ func (s *Service) BeginLogin(
 			http.StatusNotFound,
 			"unknown provider: "+name,
 		)
+	}
+	// A targeted re-login must name an existing pooled account — fail fast
+	// instead of running a whole SSO/device flow that cannot land on it.
+	if accountID != "" {
+		snapshot, _ := accounts.NewStore(accounts.HomeDir()).LoadSnapshot(name, providerConfig.Provider)
+		found := false
+		for _, a := range snapshot.Pool.Accounts {
+			if a.ID == accountID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return appapi.LoginStart{}, appapi.NewHTTPError(
+				http.StatusBadRequest,
+				"unknown account: "+accountID,
+			)
+		}
 	}
 	switch providerConfig.Provider {
 	case "aqp":
@@ -145,10 +195,11 @@ func (s *Service) BeginLogin(
 			Provider: "aqp",
 			LoginURL: loginURL,
 			Job: &aqpLoginJob{
-				service: s,
-				name:    name,
-				client:  client,
-				detail:  loginURL,
+				service:   s,
+				name:      name,
+				client:    client,
+				detail:    loginURL,
+				accountID: accountID,
 			},
 		}, nil
 	case "codex":
@@ -179,7 +230,8 @@ func (s *Service) BeginLogin(
 					interval:     intervalSeconds,
 					opts:         options,
 				},
-				detail: detail,
+				detail:    detail,
+				accountID: accountID,
 			},
 		}, nil
 	default:

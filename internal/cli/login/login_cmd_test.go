@@ -1,6 +1,7 @@
 package login
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -476,7 +477,13 @@ func readLoginRepositoryFile(t *testing.T, relativePath string) []byte {
 	return src
 }
 
-func TestAqpCodexLogin_UsesConfigNameForAuthFile(t *testing.T) {
+// TestAqpCodexLogin_PoolsUnderConfigName re-anchors the credential-identity
+// guard on the POOL contract: OAuth logins land in <provName>_apikeys.json
+// (keyed by the config top-level name), so a renamed instance (codex-work)
+// keeps its own account pool. The path-shape assertions stay for the legacy
+// file helper (still the absorption/fallback source), plus AST wiring guards
+// on the two production flows that are impractical to run as unit tests.
+func TestAqpCodexLogin_PoolsUnderConfigName(t *testing.T) {
 	home := filepath.Join("test-home", "user")
 	for _, providerName := range []string{"aqp-work", "codex-work"} {
 		want := filepath.Join(home, ".model-proxy", providerName+"_oauth_auth.json")
@@ -484,33 +491,48 @@ func TestAqpCodexLogin_UsesConfigNameForAuthFile(t *testing.T) {
 			t.Errorf("oauthAuthFilePath(%q, %q) = %q, want %q", home, providerName, got, want)
 		}
 	}
-	assertLoginUsesOAuthAuthFilePath(t, "internal/cli/login/login.go", "RunLogin", "storePath")
-	assertCodexLoginFlowUsesOAuthAuthFilePath(t, "internal/cli/login/login.go", "RunProviderLogin")
+	assertLoginPoolsUnderConfigName(t, "internal/cli/login/login.go", "RunLogin", "aqp")
+	assertCodexFlowPoolsUnderConfigName(t, "internal/cli/login/login.go", "RunProviderLogin")
 }
 
-// assertCodexLoginFlowUsesOAuthAuthFilePath re-anchors the codex half of the
-// wiring guard on the production dispatch: the runCodexLoginFlow call inside
-// functionName must pass exactly oauthAuthFilePath(HomeDir(), provName) as its
-// auth file (a renamed instance keeps writing <provName>_oauth_auth.json),
-// never a directly constructed path.
-func assertCodexLoginFlowUsesOAuthAuthFilePath(t *testing.T, relativePath, functionName string) {
+// assertLoginPoolsUnderConfigName requires every AddOAuthAccount call inside
+// functionName to name the provider config key (provName) as its pool key.
+func assertLoginPoolsUnderConfigName(t *testing.T, relativePath, functionName, providerID string) {
 	t.Helper()
-	src := readLoginRepositoryFile(t, relativePath)
-	file, err := parser.ParseFile(token.NewFileSet(), relativePath, src, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", relativePath, err)
-	}
-	var body *ast.BlockStmt
-	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if ok && fn.Name.Name == functionName {
-			body = fn.Body
-			break
+	body := loginFuncBody(t, relativePath, functionName)
+	poolCalls := 0
+	ast.Inspect(body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
 		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "AddOAuthAccount" {
+			return true
+		}
+		poolCalls++
+		if len(call.Args) < 2 {
+			t.Errorf("%s %s: AddOAuthAccount args = %d, want ≥2", relativePath, functionName, len(call.Args))
+			return true
+		}
+		if arg, ok := call.Args[0].(*ast.Ident); !ok || arg.Name != "provName" {
+			t.Errorf("%s %s: AddOAuthAccount must pool under the config name provName", relativePath, functionName)
+		}
+		if lit, ok := call.Args[1].(*ast.BasicLit); !ok || lit.Value != fmt.Sprintf("%q", providerID) {
+			t.Errorf("%s %s: AddOAuthAccount provider id must be %q", relativePath, functionName, providerID)
+		}
+		return true
+	})
+	if poolCalls != 1 {
+		t.Errorf("%s %s: AddOAuthAccount calls = %d, want exactly 1", relativePath, functionName, poolCalls)
 	}
-	if body == nil {
-		t.Fatalf("%s: function %s not found", relativePath, functionName)
-	}
+}
+
+// assertCodexFlowPoolsUnderConfigName requires the runCodexLoginFlow dispatch
+// to pass the provider config key (provName) — the flow pools under it.
+func assertCodexFlowPoolsUnderConfigName(t *testing.T, relativePath, functionName string) {
+	t.Helper()
+	body := loginFuncBody(t, relativePath, functionName)
 	flowCalls := 0
 	ast.Inspect(body, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
@@ -522,8 +544,12 @@ func assertCodexLoginFlowUsesOAuthAuthFilePath(t *testing.T, relativePath, funct
 			return true
 		}
 		flowCalls++
-		if len(call.Args) != 1 || !isExactOAuthAuthFilePathCall(call.Args[0]) {
-			t.Errorf("%s %s: runCodexLoginFlow auth file must be oauthAuthFilePath(HomeDir(), provName)", relativePath, functionName)
+		if len(call.Args) != 1 {
+			t.Errorf("%s %s: runCodexLoginFlow args = %d, want 1", relativePath, functionName, len(call.Args))
+			return true
+		}
+		if arg, ok := call.Args[0].(*ast.Ident); !ok || arg.Name != "provName" {
+			t.Errorf("%s %s: runCodexLoginFlow must receive the config name provName", relativePath, functionName)
 		}
 		return true
 	})
@@ -532,87 +558,21 @@ func assertCodexLoginFlowUsesOAuthAuthFilePath(t *testing.T, relativePath, funct
 	}
 }
 
-// assertLoginUsesOAuthAuthFilePath is a structural wiring guard around the two
-// interactive flows that are impractical to run as unit tests. It scopes the
-// assertion to one function AST, requires the credential variable's sole
-// assignment to use oauthAuthFilePath(HomeDir(), provName), and rejects the old
-// direct path constructors. Comments and dead strings cannot satisfy it.
-func assertLoginUsesOAuthAuthFilePath(t *testing.T, relativePath, functionName, variableName string) {
+func loginFuncBody(t *testing.T, relativePath, functionName string) *ast.BlockStmt {
 	t.Helper()
 	src := readLoginRepositoryFile(t, relativePath)
 	file, err := parser.ParseFile(token.NewFileSet(), relativePath, src, 0)
 	if err != nil {
 		t.Fatalf("parse %s: %v", relativePath, err)
 	}
-	var body *ast.BlockStmt
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if ok && fn.Name.Name == functionName {
-			body = fn.Body
-			break
+			return fn.Body
 		}
 	}
-	if body == nil {
-		t.Fatalf("%s: function %s not found", relativePath, functionName)
-	}
-
-	helperCalls := 0
-	variableAssignments := 0
-	directAuthPath := false
-	ast.Inspect(body, func(node ast.Node) bool {
-		switch n := node.(type) {
-		case *ast.AssignStmt:
-			for _, lhs := range n.Lhs {
-				if ident, ok := lhs.(*ast.Ident); ok && ident.Name == variableName {
-					variableAssignments++
-					if len(n.Rhs) != 1 || !isExactOAuthAuthFilePathCall(n.Rhs[0]) {
-						t.Errorf("%s %s: %s assignment must be oauthAuthFilePath(HomeDir(), provName)", relativePath, functionName, variableName)
-					}
-				}
-			}
-		case *ast.CallExpr:
-			if ident, ok := n.Fun.(*ast.Ident); ok && ident.Name == "oauthAuthFilePath" {
-				helperCalls++
-			}
-			if selector, ok := n.Fun.(*ast.SelectorExpr); ok {
-				pkg, _ := selector.X.(*ast.Ident)
-				if pkg != nil && pkg.Name == "filepath" && selector.Sel.Name == "Join" && containsOAuthAuthSuffix(n) {
-					directAuthPath = true
-				}
-				if selector.Sel.Name == "AuthFilePath" {
-					directAuthPath = true
-				}
-			}
-		}
-		return true
-	})
-	if helperCalls != 1 {
-		t.Errorf("%s %s: oauthAuthFilePath calls = %d, want exactly 1", relativePath, functionName, helperCalls)
-	}
-	if variableAssignments != 1 {
-		t.Errorf("%s %s: %s assignments = %d, want exactly 1", relativePath, functionName, variableName, variableAssignments)
-	}
-	if directAuthPath {
-		t.Errorf("%s %s: constructs an OAuth auth path directly instead of using oauthAuthFilePath", relativePath, functionName)
-	}
-}
-
-func isExactOAuthAuthFilePathCall(expr ast.Expr) bool {
-	call, ok := expr.(*ast.CallExpr)
-	if !ok || len(call.Args) != 2 {
-		return false
-	}
-	fn, ok := call.Fun.(*ast.Ident)
-	if !ok || fn.Name != "oauthAuthFilePath" {
-		return false
-	}
-	homeCall, ok := call.Args[0].(*ast.CallExpr)
-	if !ok || len(homeCall.Args) != 0 {
-		return false
-	}
-	homeFn, ok := homeCall.Fun.(*ast.Ident)
-	providerName, providerOK := call.Args[1].(*ast.Ident)
-	return ok && homeFn.Name == "HomeDir" && providerOK && providerName.Name == "provName"
+	t.Fatalf("%s: function %s not found", relativePath, functionName)
+	return nil
 }
 
 func containsOAuthAuthSuffix(call *ast.CallExpr) bool {

@@ -140,7 +140,10 @@ func TestReload_KeepsQuotaCacheAcrossGeneration(t *testing.T) {
 	p.quota.Stop()
 	asOf := time.Now().Add(-time.Minute)
 	generation := p.configGeneration.Load()
-	if !p.runtimeState.SetQuota("p", &provider.QuotaSnapshot{
+	// Quota lives under the pool's virtual key — the same key before and after
+	// the reload (only the base URL changed, not the account set).
+	poolKey := staticPoolVID("p")
+	if !p.runtimeState.SetQuota(poolKey, &provider.QuotaSnapshot{
 		Billing: provider.BillingPlan, RemainingPct: 0.5, AsOf: asOf,
 	}, generation) {
 		t.Fatal("seed quota rejected")
@@ -154,7 +157,7 @@ func TestReload_KeepsQuotaCacheAcrossGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	kept := p.runtimeState.Quota("p")
+	kept := p.runtimeState.Quota(poolKey)
 	if kept == nil || kept.Billing != provider.BillingPlan || kept.RemainingPct != 0.5 || !kept.AsOf.Equal(asOf) {
 		t.Fatalf("reload dropped/mutated the quota cache: %+v", kept)
 	}
@@ -164,7 +167,7 @@ func TestReload_KeepsQuotaCacheAcrossGeneration(t *testing.T) {
 	// The synchronous post-swap persist carries the cache under the NEW
 	// fingerprint: a crash right after reload keeps serving the measured tier.
 	state := readPersistedRuntimeState(t, p.quota.Path)
-	if state.Providers["p"].Billing != provider.BillingPlan {
+	if state.Providers[poolKey].Billing != provider.BillingPlan {
 		t.Fatalf("persisted quota cache after reload: %+v", state.Providers)
 	}
 	if _, still := state.Providers["ghost"]; still {

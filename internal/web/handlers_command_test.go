@@ -33,6 +33,7 @@ type commandFake struct {
 	add            func(context.Context, string, appapi.AccountInput) (appapi.MutationResult, error)
 	probe          func(context.Context, string, string) (appapi.ProbeResult, error)
 	remove         func(string, string) (appapi.MutationResult, error)
+	rename         func(string, string, string) (appapi.MutationResult, error)
 	begin          func(context.Context, string) (appapi.LoginStart, error)
 	refreshMdls    func(context.Context, string) (appapi.ModelsRefreshResult, error)
 	setModelDisabl func(string, string, bool) error
@@ -154,7 +155,14 @@ func (fake *commandFake) RemoveAccount(provider, id string) (appapi.MutationResu
 	return appapi.MutationResult{}, nil
 }
 
-func (fake *commandFake) BeginLogin(ctx context.Context, provider string) (appapi.LoginStart, error) {
+func (fake *commandFake) RenameAccount(provider, id, label string) (appapi.MutationResult, error) {
+	if fake.rename != nil {
+		return fake.rename(provider, id, label)
+	}
+	return appapi.MutationResult{}, nil
+}
+
+func (fake *commandFake) BeginLogin(ctx context.Context, provider, accountID string) (appapi.LoginStart, error) {
 	if fake.begin != nil {
 		return fake.begin(ctx, provider)
 	}
@@ -649,6 +657,29 @@ func TestCommandAccountContract(t *testing.T) {
 			t.Fatalf("RemoveAccount args=(%q,%q)", provider, id)
 		}
 		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/accounts/aqp/fail", ""), http.StatusBadRequest, map[string]any{"error": "cannot remove"})
+	})
+	t.Run("rename routing and errors", func(t *testing.T) {
+		var provider, id, label string
+		calls := 0
+		server := newCommandTestServer(t, &commandFake{rename: func(gotProvider, gotID, gotLabel string) (appapi.MutationResult, error) {
+			calls++
+			provider, id, label = gotProvider, gotID, gotLabel
+			if gotID == "fail" {
+				return appapi.MutationResult{}, errors.New("unknown account")
+			}
+			return appapi.MutationResult{ID: gotID}, nil
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp/label", `{}`), http.StatusBadRequest, map[string]any{"error": "expected /api/accounts/<provider>/<id>/label"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp//label", `{}`), http.StatusBadRequest, map[string]any{"error": "expected /api/accounts/<provider>/<id>/label"})
+		if calls != 0 {
+			t.Fatalf("RenameAccount calls=%d want no malformed-path mutation", calls)
+		}
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp/one/label", "{"), http.StatusBadRequest, map[string]any{"error": "unexpected EOF"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp/one/label", `{"label":"work"}`), http.StatusOK, map[string]any{"id": "one", "status": "renamed"})
+		if provider != "aqp" || id != "one" || label != "work" {
+			t.Fatalf("RenameAccount args=(%q,%q,%q)", provider, id, label)
+		}
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp/fail/label", `{"label":"x"}`), http.StatusBadRequest, map[string]any{"error": "unknown account"})
 	})
 }
 

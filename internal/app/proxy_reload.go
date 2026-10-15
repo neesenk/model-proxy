@@ -90,6 +90,7 @@ func (p *Proxy) Reload(configPath string) error {
 	// the read lock) see a consistent cfg/providers/poolIndex/expandedRoutes.
 	p.poolIndex = built.PoolIndex
 	p.parentOf = built.ParentOf
+	p.poolAccounts = built.PoolAccounts
 	p.derivedRoutes = newDerived
 	p.expandedRoutes = p.buildExpandedRoutes(notReady)
 	p.routeKeys = routeKeySet(p.expandedRoutes)

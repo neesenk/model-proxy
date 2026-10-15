@@ -507,8 +507,10 @@ func TestWebAssetsRequestsSessionContract(t *testing.T) {
 		"dropRawBodies(tbl);",
 		// Detail structure: labeled meta strip leads each record, the guard
 		// trail card rides the first record via opts.guard (server-joined
-		// annotations — the frontend never re-derives them).
-		"${requestMetaHTML(r, rel)}${guardCard}",
+		// annotations — the frontend never re-derives them). The meta strip
+		// folds pooled provider keys via providerLabel (account display
+		// convention; docs/frontend.md 账号身份显示与改名).
+		"${requestMetaHTML(r, rel, { providerLabel: displayProvider })}${guardCard}",
 		"detailRecordsHTML(cached, { ...relOpts, guard: requestsGuardCache.get(id) })",
 		"detailRecordsHTML(recs, { ...requestRelTimeOpts(id), guard })",
 		// The chat history expands to a FLAT chunked transcript (parse once,

@@ -109,7 +109,10 @@ func (fakeCommands) ProbeAccount(context.Context, string, string) (ProbeResult, 
 func (fakeCommands) RemoveAccount(string, string) (MutationResult, error) {
 	return MutationResult{}, nil
 }
-func (fakeCommands) BeginLogin(context.Context, string) (LoginStart, error) {
+func (fakeCommands) RenameAccount(string, string, string) (MutationResult, error) {
+	return MutationResult{}, nil
+}
+func (fakeCommands) BeginLogin(context.Context, string, string) (LoginStart, error) {
 	return LoginStart{}, nil
 }
 

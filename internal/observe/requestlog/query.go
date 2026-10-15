@@ -199,7 +199,7 @@ func (c *facetCollector) add(record Record) {
 		model = record.CalledModel
 	}
 	if record.Provider != "" {
-		c.providers[record.Provider] = true
+		c.providers[facetProviderName(record.Provider)] = true
 	}
 	if model != "" {
 		c.models[model] = true
@@ -208,11 +208,24 @@ func (c *facetCollector) add(record Record) {
 		c.agents[record.Agent] = true
 	}
 	if record.Provider != "" && model != "" {
-		if c.byProvider[record.Provider] == nil {
-			c.byProvider[record.Provider] = map[string]bool{}
+		provider := facetProviderName(record.Provider)
+		if c.byProvider[provider] == nil {
+			c.byProvider[provider] = map[string]bool{}
 		}
-		c.byProvider[record.Provider][model] = true
+		c.byProvider[provider][model] = true
 	}
+}
+
+// facetProviderName folds a runtime provider key to its operator-facing facet
+// name: pooled records carry the virtual "name#<accountID>" key, but the
+// provider dropdown offers the PARENT name (the id hash is correlation-only
+// and never user-facing). The provider FILTER stays substring-based, so
+// picking the parent matches every account's rows.
+func facetProviderName(provider string) string {
+	if i := strings.IndexByte(provider, '#'); i >= 0 {
+		return provider[:i]
+	}
+	return provider
 }
 
 func (c *facetCollector) facets() Facets {

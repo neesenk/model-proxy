@@ -62,7 +62,9 @@ routes:
 		io.Copy(io.Discard, rec.Result().Body)
 		rec.Result().Body.Close()
 	}
-	zk := counters.PMKey{Provider: "zhipu", Model: "glm-5"}
+	// The pool's single account unrolls to a virtual runtime key; metrics are
+	// committed under it.
+	zk := counters.PMKey{Provider: "zhipu#" + accounts.AccountID("zhipu", accounts.Credentials{APIKey: "KEY-A"}), Model: "glm-5"}
 
 	t.Run("2xx bumps Requests", func(t *testing.T) {
 		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -31,30 +31,39 @@ import (
 // only wires the remaining callback (FetchModelsFn: volcengine's V4-signed
 // ListArkAgentPlanModel) + the per-provider config fields.
 //
-// A provider whose credential snapshot has ≥2 accounts is UNROLLED into
-// one virtual provider per account, keyed "name#<accountID>"; the parent name
-// is NOT a key (only the virtuals are). A 1-entry PLURAL pool (the file `login`
-// writes) is bound in-memory under the plain name. Only the no-plural-file /
+// A provider whose credential snapshot has accounts is UNROLLED into one
+// virtual provider per account, keyed "name#<accountID>", regardless of pool
+// size — the account id is the stable identity, so adding or removing sibling
+// accounts never rewrites an account's key (usage stats, quota snapshots and
+// request-log attribution all keep following the same account). The parent
+// name is NOT a key (only the virtuals are). Only the no-plural-file /
 // not-logged-in case stays file-backed (reading the legacy singular
 // <name>_apikey.json via Store.LoadSnapshot's fallback) — binding the cred
 // there would break the embedded ApiKeyBase, which reads the (non-existent)
 // singular file.
 //
 // It also derives the credential-pool index maps in the SAME pass:
-//   - poolIndex[parent] = its sorted virtual ids ("name#<accountID>")
-//   - parentOf[vid]    = the parent name
+//   - poolIndex[parent]     = its sorted virtual ids ("name#<accountID>")
+//   - parentOf[vid]         = the parent name
+//   - poolAccounts[parent]  = per-account identity metadata (id, added_at)
 //
 // Loading the pool once (rather than separately in buildPoolIndex) closes a
 // TOCTOU window across reload and guarantees the index only references virtual
 // ids that actually exist in the returned providers map: a virtual whose
 // BuildOne returned nil (provider.New error) is skipped in BOTH the providers
-// map AND the index. Single-account / not-logged-in providers appear in
-// neither index map (their id == the plain name).
+// map AND the index. Not-logged-in (file-backed) providers appear in none of
+// the index maps (their id == the plain name).
 type Build struct {
 	Providers map[string]provider.Provider
 	PoolIndex map[string][]string
 	ParentOf  map[string]string
 	Eligible  map[string]bool
+	// PoolAccounts carries each pooled parent's account identity metadata (no
+	// credential material) for the consumers that must attribute history to a
+	// specific account: the startup key migration (bare parent-era stats/quota
+	// rows follow the earliest-added account) and display layers. Only
+	// runnable virtuals are listed (same rule as PoolIndex).
+	PoolAccounts map[string][]PoolAccount
 	// Secrets are the proxy-managed credential values collected in the SAME
 	// pass (pool APIKey/AccessKey/SecretKey + codex/aqp OAuth tokens), handed
 	// to the guard known-secret scanner. Each carries a source LABEL — the
@@ -73,6 +82,14 @@ type Build struct {
 	// so this is the only part of Secrets that can change WITHOUT a reload —
 	// the guard refresh loop re-collects it on the quota-poll beat.
 	OAuthSecrets []Secret
+}
+
+// PoolAccount is one pooled account's identity metadata as carried on Build.
+// It deliberately carries no credential material (virtual ids and metadata
+// surface in logs and persisted state — credential red line).
+type PoolAccount struct {
+	ID      string
+	AddedAt string
 }
 
 // BuildOptions carries the process-environment seams BuildProviders needs:
@@ -95,20 +112,12 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 	poolIndex := map[string][]string{}
 	parentOf := map[string]string{}
 	eligible := map[string]bool{}
+	poolAccounts := map[string][]PoolAccount{}
 	var poolSecrets, oauthSecrets []Secret
 	for name, prov := range cfg.Providers {
-		if prov.Provider == "aqp" || prov.Provider == "codex" {
-			// OAuth/SSO providers own separate auth stores and never consult the
-			// API-key account pool namespace. Their tokens still join the guard
-			// known-secret set (best-effort, memory only).
-			oauthSecrets = append(oauthSecrets, collectOAuthSecrets(opts, name, prov.Provider)...)
-			if p := BuildOne(cfg, opts, name, prov, accounts.Credentials{}); p != nil {
-				m[name] = p
-			}
-			continue
-		}
-		// One storage read decides both credentials and authority. An unreadable
-		// plural file is never downgraded to the legacy singular key.
+		// One storage read decides both credentials and authority for every
+		// provider kind (API-key AND OAuth pools). An unreadable plural file is
+		// never downgraded to the legacy singular key.
 		snapshot, poolErr := store.LoadSnapshot(name, prov.Provider)
 		if poolErr != nil {
 			logx.Warnf("[proxy] pool %s unreadable: %v; disabling provider", name, poolErr)
@@ -123,6 +132,72 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 			}
 			logx.Warnf("[proxy] pool %s: %d account(s) kept as metadata only after keychain→file switch (keychain entries missing); login again to re-add: %s",
 				name, len(labels), strings.Join(labels, ", "))
+		}
+		if prov.Provider == "aqp" || prov.Provider == "codex" {
+			// OAuth/SSO providers pool like API-key providers: every account
+			// unrolls to a virtual "name#<accountID>" bound to its OWN pool
+			// slot through the OAuth blob seam (token/cookie reads and refresh
+			// write-backs hit that slot, with the pool's cross-process lock
+			// serializing codex's rotating refresh_token against parallel
+			// logins and sibling refreshes). Without a plural pool the
+			// historical single-account <name>_oauth_auth.json stays the
+			// bare-name instance (SourceLegacy semantics live at the provider
+			// layer: its AuthReady reads the file directly).
+			if snapshot.Source == accounts.SourcePlural && len(snapshot.Pool.Accounts) > 0 {
+				// An OAuth provider's pool must be entirely OAuth entries — a
+				// stray API-key-shaped pool (operator mistake) is a corrupt
+				// authority: fail-closed rather than building instances bound
+				// to meaningless slots.
+				oauthShaped := true
+				for _, a := range snapshot.Pool.Accounts {
+					if !accounts.IsOAuthAccount(a) {
+						oauthShaped = false
+						break
+					}
+				}
+				if !oauthShaped {
+					logx.Warnf("[proxy] pool %s has non-oauth accounts under an oauth provider; disabling provider (remove the pool file or re-login)", name)
+					continue
+				}
+				vids := make([]string, 0, len(snapshot.Pool.Accounts))
+				accts := make([]PoolAccount, 0, len(snapshot.Pool.Accounts))
+				for _, a := range snapshot.Pool.Accounts {
+					vid := name + "#" + a.ID
+					slot := poolOAuthStore{store: store, name: name, providerID: prov.Provider, id: a.ID}
+					p := BuildOneWithStore(cfg, opts, name, prov, slot)
+					if p == nil {
+						// provider.New failed for this account — skip it in BOTH
+						// the providers map and the index (same rule as the
+						// API-key unroll).
+						continue
+					}
+					m[vid] = p
+					vids = append(vids, vid)
+					accts = append(accts, PoolAccount{ID: a.ID, AddedAt: a.AddedAt})
+					parentOf[vid] = name
+					oauthSecrets = append(oauthSecrets, oauthAccountSecrets(name, vid, prov.Provider, a.OAuth)...)
+				}
+				if len(vids) > 0 {
+					sort.Strings(vids)
+					poolIndex[name] = vids
+					poolAccounts[name] = accts
+					eligible[name] = true
+				}
+				continue
+			}
+			if snapshot.Source == accounts.SourcePlural {
+				// An empty plural file is an authoritative credential tombstone.
+				logx.Warnf("[proxy] pool %s exists but has 0 accounts; disabling provider", name)
+				continue
+			}
+			// No plural pool: the legacy single-account OAuth file (missing =
+			// not logged in). Tokens still join the guard known-secret set
+			// (best-effort, memory only).
+			oauthSecrets = append(oauthSecrets, collectOAuthSecrets(opts, name, prov.Provider)...)
+			if p := BuildOne(cfg, opts, name, prov, accounts.Credentials{}); p != nil {
+				m[name] = p
+			}
+			continue
 		}
 		pool := snapshot.Pool
 		// Guard known-secret collection: every account credential the proxy
@@ -163,18 +238,8 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 			logx.Warnf("[proxy] pool %s exists but has 0 accounts; disabling provider", name)
 			continue
 		}
-		if len(pool.Accounts) == 1 {
-			// 1-entry PLURAL pool (from `login`): bind the account's cred under
-			// the plain name, no virtuals. The singular file does not exist in
-			// this case, so binding in-memory is required for the provider to
-			// authenticate at all.
-			if p := BuildOne(cfg, opts, name, prov, pool.Accounts[0].Credentials()); p != nil {
-				m[name] = p
-				eligible[name] = true
-			}
-			continue
-		}
 		vids := make([]string, 0, len(pool.Accounts))
+		accts := make([]PoolAccount, 0, len(pool.Accounts))
 		for _, a := range pool.Accounts {
 			vid := name + "#" + a.ID
 			p := BuildOne(cfg, opts, name, prov, a.Credentials())
@@ -187,19 +252,22 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 			}
 			m[vid] = p
 			vids = append(vids, vid)
+			accts = append(accts, PoolAccount{ID: a.ID, AddedAt: a.AddedAt})
 			parentOf[vid] = name
 		}
 		if len(vids) > 0 {
 			sort.Strings(vids)
 			poolIndex[name] = vids
+			poolAccounts[name] = accts
 			eligible[name] = true
 		}
 	}
 	return Build{
-		Providers: m,
-		PoolIndex: poolIndex,
-		ParentOf:  parentOf,
-		Eligible:  eligible,
+		Providers:    m,
+		PoolIndex:    poolIndex,
+		ParentOf:     parentOf,
+		Eligible:     eligible,
+		PoolAccounts: poolAccounts,
 		// Fresh slices: the caller stores PoolSecrets/OAuthSecrets as
 		// reload-owned state and later concatenates them for scanner rebuilds,
 		// so Secrets must not share a backing array with either subset.
@@ -209,18 +277,30 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 	}
 }
 
-// CollectOAuthSecrets re-reads every codex/aqp provider's OAuth auth file and
+// CollectOAuthSecrets re-reads every codex/aqp provider's OAuth credentials and
 // returns the current token/cookie values. It is the refreshable counterpart
 // of the OAuth pass inside BuildProviders: OAuth providers rotate their tokens
 // in place during serve, so the guard refresh loop calls this on a beat to
-// re-sync the known-secret set without a full provider rebuild. Best-effort
-// like collectOAuthSecrets — missing/corrupt files contribute nothing.
+// re-sync the known-secret set without a full provider rebuild. Pooled
+// providers enumerate their pool entries (each account's blob, labeled by
+// virtual id); pool-less providers read the legacy single-account file.
+// Best-effort like collectOAuthSecrets — missing/corrupt stores contribute
+// nothing.
 func CollectOAuthSecrets(cfg *configdomain.Config, opts BuildOptions) []Secret {
 	var out []Secret
+	store := accounts.NewStore(opts.HomeDir)
 	for name, prov := range cfg.Providers {
-		if prov.Provider == "aqp" || prov.Provider == "codex" {
-			out = append(out, collectOAuthSecrets(opts, name, prov.Provider)...)
+		if prov.Provider != "aqp" && prov.Provider != "codex" {
+			continue
 		}
+		snapshot, err := store.LoadSnapshot(name, prov.Provider)
+		if err == nil && snapshot.Source == accounts.SourcePlural {
+			for _, a := range snapshot.Pool.Accounts {
+				out = append(out, oauthAccountSecrets(name, name+"#"+a.ID, prov.Provider, a.OAuth)...)
+			}
+			continue
+		}
+		out = append(out, collectOAuthSecrets(opts, name, prov.Provider)...)
 	}
 	return out
 }
@@ -323,6 +403,17 @@ func collectOAuthSecrets(opts BuildOptions, name, providerID string) []Secret {
 // When cred is empty all three fall back to the legacy file-backed behavior
 // (identical to the pre-pool BuildProviders).
 func BuildOne(cfg *configdomain.Config, opts BuildOptions, name string, prov configdomain.Provider, cred accounts.Credentials) provider.Provider {
+	return buildOne(cfg, opts, name, prov, cred, nil)
+}
+
+// BuildOneWithStore is BuildOne for a pooled aqp/codex account: the OAuth
+// blob seam binds the instance to that account's pool slot (reads and refresh
+// write-backs stay inside the slot; the legacy file is never consulted).
+func BuildOneWithStore(cfg *configdomain.Config, opts BuildOptions, name string, prov configdomain.Provider, store provider.OAuthBlobStore) provider.Provider {
+	return buildOne(cfg, opts, name, prov, accounts.Credentials{}, store)
+}
+
+func buildOne(cfg *configdomain.Config, opts BuildOptions, name string, prov configdomain.Provider, cred accounts.Credentials, oauthStore provider.OAuthBlobStore) provider.Provider {
 	pcfg := &provider.Config{
 		ProviderID:       prov.Provider,
 		ProviderName:     name,
@@ -335,6 +426,7 @@ func BuildOne(cfg *configdomain.Config, opts BuildOptions, name string, prov con
 		BoundAPIKey:      cred.APIKey,     // binding point #1 (forward path)
 		Models:           prov.Models,     // for the usage-display fallback (listConfigModels)
 		OAuthAuthFile:    filepath.Join(opts.HomeDir, ".model-proxy", name+"_oauth_auth.json"),
+		OAuthStore:       oauthStore, // pooled aqp/codex binding point (nil = the file above)
 	}
 	// Wire callbacks by provider type. aqp needs none: its Quota/Usage fetch
 	// monthly_usage directly (AqpProvider.fetchMonthlyUsage reads the SSO-cookie

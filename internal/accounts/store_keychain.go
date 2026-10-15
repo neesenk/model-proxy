@@ -25,6 +25,10 @@ const (
 	keychainFieldAPIKey    = "api_key"
 	keychainFieldAccessKey = "access_key"
 	keychainFieldSecretKey = "secret_key"
+	// keychainFieldOAuth holds an OAuth account's whole credential blob
+	// (aqp/codex) as one entry — the blob rotates in place, so a per-field
+	// split would churn the namespace on every token refresh.
+	keychainFieldOAuth = "oauth"
 )
 
 // keychainKey names one secret field of one pooled account:
@@ -38,21 +42,27 @@ func keychainKey(providerName, accountID, field string) string {
 // schema stays identical to file mode (empty strings, not omitted fields), so
 // a pool file is parseable by either backend and validatePool's "api_key is
 // empty" error doubles as the "you are reading a keychain-mode pool with the
-// file backend" signal.
-func metadataOnly(p Pool) Pool {
+// file backend" signal. inlineOAuth lists OAuth account ids whose blob stays
+// INLINE (the oversize fallback — the keychain backend rejected it), so the
+// metadata file remains the credential's only copy.
+func metadataOnly(p Pool, inlineOAuth map[string]bool) Pool {
 	out := p
 	out.Accounts = make([]Account, len(p.Accounts))
 	for i, a := range p.Accounts {
 		a.APIKey, a.AccessKey, a.SecretKey = "", "", ""
+		if IsOAuthAccount(a) && !inlineOAuth[a.ID] {
+			a.OAuth = nil
+		}
 		out.Accounts[i] = a
 	}
 	return out
 }
 
 // writeMetadataFile persists the metadata-only pool via the same atomic
-// 0600 write as file mode.
+// 0600 write as file mode. Callers that migrated every secret pass a nil
+// inlineOAuth set.
 func (s Store) writeMetadataFile(name string, p Pool) error {
-	data, err := json.MarshalIndent(metadataOnly(p), "", "  ")
+	data, err := json.MarshalIndent(metadataOnly(p, nil), "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal pool %s: %w", name, err)
 	}
@@ -74,8 +84,42 @@ func (s Store) loadSnapshotKeychain(name, providerID string) (Snapshot, error) {
 		return Snapshot{Source: SourcePlural}, fmt.Errorf("parse %s: %w", s.PoolPath(name), err)
 	}
 	migrated := false
+	// inlineOAuth collects OAuth accounts whose blob the keychain rejected as
+	// oversize (codex token archives): the metadata file stays their only
+	// copy, so the post-migration rewrite must NOT strip them.
+	var inlineOAuth map[string]bool
 	for i := range p.Accounts {
 		a := &p.Accounts[i]
+		if IsOAuthAccount(*a) {
+			if len(a.OAuth) > 0 {
+				// Lazy migration: an inline blob (file-mode history) moves into
+				// the keychain under its ANCHORED id.
+				inline, err := s.migrateOAuthBlob(name, a.ID, a.OAuth)
+				if err != nil {
+					return Snapshot{Source: SourcePlural}, err
+				}
+				if inline {
+					if inlineOAuth == nil {
+						inlineOAuth = map[string]bool{}
+					}
+					inlineOAuth[a.ID] = true
+					continue
+				}
+				migrated = true
+				continue
+			}
+			blob, kerr := s.keychainGetOAuthBlob(name, a.ID)
+			if kerr != nil {
+				return Snapshot{Source: SourcePlural}, kerr
+			}
+			if len(blob) == 0 {
+				return Snapshot{Source: SourcePlural}, fmt.Errorf("keychain read for pool %s: missing oauth entry for account", s.PoolPath(name))
+			}
+			a.OAuth = blob
+			// OAuth ids are anchored at add time, not credential-derived —
+			// no canonical-id recheck (token rotation must not drift them).
+			continue
+		}
 		if a.APIKey != "" {
 			// Lazy migration: plaintext values move into the keychain under the
 			// NORMALIZED id (the same derivation normalizePool applies), then
@@ -138,11 +182,47 @@ func (s Store) loadSnapshotKeychain(name, providerID string) (Snapshot, error) {
 			return Snapshot{Pool: p, Source: SourcePlural}, nil
 		}
 		defer release()
-		if err := s.writeMetadataFile(name, p); err != nil {
+		data, err := json.MarshalIndent(metadataOnly(p, inlineOAuth), "", "  ")
+		if err != nil {
+			return Snapshot{Source: SourcePlural}, fmt.Errorf("marshal pool %s: %w", s.PoolPath(name), err)
+		}
+		if err := credstore.AtomicWriteFile(s.PoolPath(name), data, 0o600); err != nil {
 			return Snapshot{Source: SourcePlural}, fmt.Errorf("rewrite pool %s metadata-only: %w", s.PoolPath(name), err)
 		}
 	}
 	return Snapshot{Pool: p, Source: SourcePlural}, nil
+}
+
+// migrateOAuthBlob copies one OAuth account's inline blob into the keychain.
+// An oversize blob (ErrEntryTooLarge, pre-checked before the backend is ever
+// touched) returns inline=true — the documented codex fallback: the blob
+// stays in the 0600 pool file instead of failing the whole pool.
+func (s Store) migrateOAuthBlob(name, id string, blob []byte) (inline bool, err error) {
+	if err := credstore.KeychainSet(keychainKey(name, id, keychainFieldOAuth), string(blob)); err != nil {
+		if errors.Is(err, credstore.ErrEntryTooLarge) {
+			// Silent fallback, matching the credstore Ref precedent for
+			// oversized codex OAuth archives: the blob stays inline in the
+			// 0600 pool file. accounts keeps no logging dependency by DAG
+			// policy — the inline blob in the file IS the visible signal.
+			return true, nil
+		}
+		return false, fmt.Errorf("keychain migration for pool %s: %w", s.PoolPath(name), err)
+	}
+	return false, nil
+}
+
+// keychainGetOAuthBlob reads one OAuth account's blob. ErrNotFound degrades
+// to a nil blob (the caller decides whether that is fatal); other errors
+// propagate — optional VALUE, not optional backend.
+func (s *Store) keychainGetOAuthBlob(name, id string) ([]byte, error) {
+	value, err := credstore.KeychainGet(keychainKey(name, id, keychainFieldOAuth))
+	if err != nil {
+		if errors.Is(err, credstore.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("keychain read for pool %s: %w", s.PoolPath(name), err)
+	}
+	return []byte(value), nil
 }
 
 // migrateSecrets copies one account's plaintext credential tuple into the
@@ -240,13 +320,32 @@ func (s Store) saveKeychain(name, providerID string, p Pool) error {
 	// In keychain mode the persisted id is also the secret namespace. Reject a
 	// noncanonical pool before the first backend write; otherwise Save could
 	// succeed but the next Load would either change identity in memory or leave
-	// the secret stranded under an unowned namespace.
+	// the secret stranded under an unowned namespace. OAuth ids are ANCHORED
+	// (not credential-derived), so only API-key accounts take this check.
 	for i, a := range p.Accounts {
+		if IsOAuthAccount(a) {
+			continue
+		}
 		if AccountID(providerID, a.Credentials()) != a.ID {
 			return fmt.Errorf("validate pool %s: accounts[%d] credentials do not match metadata identity", name, i)
 		}
 	}
+	// Oversize OAuth blobs stay inline (the documented codex fallback); the
+	// metadata write below must preserve them as the only copy.
+	inlineOAuth := map[string]bool{}
 	for _, a := range p.Accounts {
+		if IsOAuthAccount(a) {
+			if err := credstore.KeychainSet(keychainKey(name, a.ID, keychainFieldOAuth), string(a.OAuth)); err != nil {
+				if errors.Is(err, credstore.ErrEntryTooLarge) {
+					// Same explicit-fallback contract as migrateOAuthBlob: the
+					// 0600 pool file keeps this blob as its only copy.
+					inlineOAuth[a.ID] = true
+					continue
+				}
+				return fmt.Errorf("keychain write for pool %s: %w", s.PoolPath(name), err)
+			}
+			continue
+		}
 		if err := credstore.KeychainSet(keychainKey(name, a.ID, keychainFieldAPIKey), a.APIKey); err != nil {
 			return fmt.Errorf("keychain write for pool %s: %w", s.PoolPath(name), err)
 		}
@@ -275,7 +374,11 @@ func (s Store) saveKeychain(name, providerID string, p Pool) error {
 	if err := s.deleteRemovedEntries(name, providerID, p); err != nil {
 		return err
 	}
-	if err := s.writeMetadataFile(name, p); err != nil {
+	data, err := json.MarshalIndent(metadataOnly(p, inlineOAuth), "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal pool %s: %w", name, err)
+	}
+	if err := credstore.AtomicWriteFile(s.PoolPath(name), data, 0o600); err != nil {
 		return fmt.Errorf("write pool %s: %w", s.PoolPath(name), err)
 	}
 	// Move any stale legacy plaintext aside: its secret is either in the
@@ -339,7 +442,7 @@ func (s Store) deleteKeychainAccounts(name string, ids map[string]struct{}) erro
 }
 
 func (s Store) deleteKeychainAccount(name, id string) error {
-	for _, field := range []string{keychainFieldAPIKey, keychainFieldAccessKey, keychainFieldSecretKey} {
+	for _, field := range []string{keychainFieldAPIKey, keychainFieldAccessKey, keychainFieldSecretKey, keychainFieldOAuth} {
 		if err := credstore.KeychainDelete(keychainKey(name, id, field)); err != nil && !errors.Is(err, credstore.ErrNotFound) {
 			return fmt.Errorf("keychain delete for pool %s: %w", s.PoolPath(name), err)
 		}

@@ -904,9 +904,9 @@ routes:
 `))
 	loginAPIKeyFixtures(t, [2]string{"zhipu", "zhipu"})
 	p := newTestProxy(t, cfg)
-	p.mu.Lock()
-	p.providers["zhipu"] = &testProv{key: "z"}
-	p.mu.Unlock()
+	// The pool's single account unrolls to a virtual runtime key; freezing the
+	// parent name (the operator-facing identity) freezes every virtual.
+	vid := fixturePoolVID("zhipu", "zhipu")
 	w := NewWebServer(p, "test-config.yaml")
 	mux := http.NewServeMux()
 	w.Register(mux)
@@ -939,8 +939,8 @@ routes:
 
 	before := getStatus()
 	ordered := before.Schedule.Models["glm-5.2"].Ordered
-	if len(ordered) != 1 || ordered[0].Provider != "zhipu" {
-		t.Fatalf("precondition: zhipu should be in the schedule chain: %+v", ordered)
+	if len(ordered) != 1 || ordered[0].Provider != vid {
+		t.Fatalf("precondition: %s should be in the schedule chain: %+v", vid, ordered)
 	}
 
 	rec := httptest.NewRecorder()
@@ -950,13 +950,13 @@ routes:
 	}
 
 	after := getStatus()
-	entry, ok := after.Health["zhipu"]
+	entry, ok := after.Health[vid]
 	if !ok || !entry.Frozen || entry.Available {
 		t.Errorf("frozen provider missing from /api/status health: %+v (frozen=%v available=%v)",
 			after.Health, entry.Frozen, entry.Available)
 	}
 	for _, o := range after.Schedule.Models["glm-5.2"].Ordered {
-		if o.Provider == "zhipu" {
+		if o.Provider == vid {
 			t.Error("frozen provider must be excluded from the schedule chain")
 		}
 	}

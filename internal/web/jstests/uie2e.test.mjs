@@ -1022,6 +1022,41 @@ test('accounts 页 Token usage 时间范围选择器驱动窗口化拉取 (弹�
   assert.deepEqual(await ctx.pageErrors(), [], 'accounts 时间选择器不得有 JS 错误');
 });
 
+test('accounts 页行内改名账号：label 即时生效、id 不变 (mutation 族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  await ctx.ev(`(() => {
+    if (!document.getElementById('tab-accounts').classList.contains('active'))
+      document.querySelector('[data-tab="accounts"]').click();
+    return true;
+  })()`);
+  await ctx.waitFor('accounts active', () => ctx.ev(
+    `document.getElementById('tab-accounts').classList.contains('active')`));
+  await ctx.waitFor('provider nav', () => ctx.ev(
+    `[...document.querySelectorAll('.acct-nav-item')].some(b => b.innerText.includes('dummy'))`));
+  await ctx.ev(`[...document.querySelectorAll('.acct-nav-item')]
+    .find(b => b.innerText.includes('dummy')).click()`);
+  await ctx.waitFor('rename button', () => ctx.ev(`!!document.querySelector('[data-rename]')`));
+  await ctx.ev(`document.querySelector('[data-rename]').click()`);
+  await ctx.waitFor('inline rename strip', () => ctx.ev(
+    `!!document.querySelector('.acct-rename input')`));
+  await ctx.ev(`(() => {
+    const i = document.querySelector('.acct-rename input');
+    i.value = 'renamed-e2e';
+    return true;
+  })()`);
+  await ctx.ev(`document.querySelector('.acct-rename .btn.primary').click()`);
+  await ctx.waitFor('label applied in UI', () => ctx.ev(
+    `(document.querySelector('.acct-main')?.innerText || '').includes('renamed-e2e')`));
+  // Server fact first: the pool carries the new label with the SAME account
+  // id (rename is display metadata; the identity keys usage history).
+  const accs = await fetch(`${ctx.baseUrl}/api/accounts`).then((r) => r.json());
+  const dummy = accs.providers.find((p) => p.name === 'dummy');
+  assert.equal(dummy.pooled, true, 'dummy runs a plural pool');
+  assert.equal(dummy.accounts.length, 1);
+  assert.equal(dummy.accounts[0].label, 'renamed-e2e');
+  assert.deepEqual(await ctx.pageErrors(), [], 'rename flow 不得有 JS 错误');
+});
+
 test('takeover 页：模板表渲染与真实 takeover/restore 闭环 (mutation 族)', async (t) => {
   if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
   // Install a fake claude config inside the sandbox HOME — the proxy process

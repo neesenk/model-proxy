@@ -70,6 +70,21 @@ func readWrittenCodexAuth(t *testing.T, path string) provider.CodexAuthFile {
 	return af
 }
 
+// readWrittenCodexPoolBlob loads the codex OAuth pool under home and returns
+// the single account's blob parsed as CodexAuthFile.
+func readWrittenCodexPoolBlob(t *testing.T, home, provName string) *provider.CodexAuthFile {
+	t.Helper()
+	pool, err := accounts.NewStore(home).Load(provName, "codex")
+	if err != nil || len(pool.Accounts) != 1 || !accounts.IsOAuthAccount(pool.Accounts[0]) {
+		t.Fatalf("codex pool = %+v, %v (want one oauth-kind account)", pool, err)
+	}
+	var af provider.CodexAuthFile
+	if err := json.Unmarshal(pool.Accounts[0].OAuth, &af); err != nil {
+		t.Fatalf("blob unreadable: %v", err)
+	}
+	return &af
+}
+
 // --- --from-codex ---
 
 func TestRunCodexImport_OK(t *testing.T) {
@@ -83,7 +98,9 @@ func TestRunCodexImport_OK(t *testing.T) {
 		}
 	})
 
-	af := readWrittenCodexAuth(t, oauthAuthFilePath(home, "codex"))
+	// The import lands in the OAuth POOL: one oauth-kind entry whose blob is
+	// the CodexAuthFile.
+	af := readWrittenCodexPoolBlob(t, home, "codex")
 	if af.AuthMode != "chatgpt" {
 		t.Errorf("auth_mode = %q, want chatgpt", af.AuthMode)
 	}
@@ -118,8 +135,9 @@ func TestRunCodexImport_RenamedProviderWritesConfigNameFile(t *testing.T) {
 	if err := RunCodexImport("codex-work"); err != nil {
 		t.Fatalf("RunCodexImport: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".model-proxy", "codex-work_oauth_auth.json")); err != nil {
-		t.Fatalf("renamed instance must write codex-work_oauth_auth.json: %v", err)
+	// A renamed instance pools under ITS config name (codex-work_apikeys.json).
+	if _, err := os.Stat(filepath.Join(home, ".model-proxy", "codex-work_apikeys.json")); err != nil {
+		t.Fatalf("renamed instance must pool as codex-work_apikeys.json: %v", err)
 	}
 }
 

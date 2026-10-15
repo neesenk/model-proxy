@@ -61,7 +61,10 @@ routes:
 		t.Fatalf("ordered = %v, want both route targets", out["ordered"])
 	}
 	first := ordered[0].(map[string]any)
-	if first["provider"] != "zhipu" || first["model"] != "glm" {
+	// Route targets fan out to the pool's virtual keys; the ordered entry
+	// carries the virtual runtime key (with pool_parent reporting the config
+	// name).
+	if first["provider"] != fixturePoolVID("zhipu", "zhipu") || first["model"] != "glm" {
 		t.Errorf("first ordered target = %v", first)
 	}
 	if _, has := first["fits"]; !has {
@@ -75,7 +78,7 @@ routes:
 		t.Fatalf("provider-prefixed preview = %v", out)
 	}
 	ordered = out["ordered"].([]any)
-	if len(ordered) != 1 || ordered[0].(map[string]any)["provider"] != "deepseek" {
+	if len(ordered) != 1 || ordered[0].(map[string]any)["provider"] != fixturePoolVID("deepseek", "deepseek") {
 		t.Fatalf("provider-prefixed ordered = %v", out["ordered"])
 	}
 
@@ -94,7 +97,7 @@ routes:
 	// force-provider participates; a typo'd provider is surfaced, not fatal.
 	out = post(`{"model":"glm","messages":[]}`, map[string]string{"x-mp-force-provider": "deepseek"})
 	ordered = out["ordered"].([]any)
-	if len(ordered) != 1 || ordered[0].(map[string]any)["provider"] != "deepseek" {
+	if len(ordered) != 1 || ordered[0].(map[string]any)["provider"] != fixturePoolVID("deepseek", "deepseek") {
 		t.Fatalf("forced preview ordered = %v", out["ordered"])
 	}
 	out = post(`{"model":"glm","messages":[]}`, map[string]string{"x-mp-force-provider": "typo"})

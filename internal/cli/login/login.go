@@ -84,7 +84,7 @@ func oauthAuthFilePath(homeDir, providerName string) string {
 	return filepath.Join(homeDir, ".model-proxy", providerName+"_oauth_auth.json")
 }
 
-func RunLogin(cfg *configdomain.Config, provName string) error {
+func RunLogin(cfg *configdomain.Config, provName, label string) error {
 	storePath := oauthAuthFilePath(HomeDir(), provName)
 	c := logincore.NewAqpClient(storePath)
 
@@ -158,7 +158,12 @@ After logging in, the browser will try to redirect back to this machine:
 		SSOSessionCookie: ssoCookie,
 		LastRefreshAt:    time.Now().Unix(),
 	}
-	if err := provider.SaveAqpAccount(storePath, a); err != nil {
+	seed, err := logincore.AqpOAuthSeed(a)
+	if err != nil {
+		return fmt.Errorf("failed to persist account: %w", err)
+	}
+	seed.Label = label
+	if _, err := logincore.AddOAuthAccount(provName, "aqp", seed); err != nil {
 		return fmt.Errorf("failed to persist account: %w", err)
 	}
 
@@ -184,9 +189,9 @@ func RunProviderLogin(cfg *configdomain.Config, provName, keyIn, label string, r
 	prov := cfg.Providers[provName]
 	switch prov.Provider {
 	case "aqp":
-		return RunLogin(cfg, provName)
+		return RunLogin(cfg, provName, label)
 	case "codex":
-		return runCodexLoginFlow(oauthAuthFilePath(HomeDir(), provName))
+		return runCodexLoginFlow(provName)
 	case "zcode":
 		fmt.Println("Opening BigModel login to fetch a Coding Plan API key…")
 		if err := OpenBrowser("https://bigmodel.cn/login"); err != nil {

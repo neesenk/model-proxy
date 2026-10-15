@@ -714,7 +714,9 @@ func TestWebAccountProbeUsesAdminCapabilityAndPreservesResponseShape(t *testing.
 		},
 	})
 	p.mu.Lock()
-	p.providers = map[string]provider.Provider{"up": &fakeProviderImpl{}}
+	// The pool is plural, so the probe resolves the account's virtual key —
+	// inject the fake impl under it.
+	p.providers = map[string]provider.Provider{"up#" + accountID: &fakeProviderImpl{}}
 	p.mu.Unlock()
 
 	w := NewWebServer(p, "test-config.yaml")

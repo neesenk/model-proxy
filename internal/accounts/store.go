@@ -34,8 +34,30 @@ type Account struct {
 	APIKey    string `json:"api_key"`
 	AccessKey string `json:"access_key,omitempty"` // volcengine
 	SecretKey string `json:"secret_key,omitempty"` // volcengine
-	AddedAt   string `json:"added_at"`
+	// Email is display metadata for OAuth accounts (aqp/codex) — the upstream
+	// account's address, never a secret. Empty for API-key accounts.
+	Email string `json:"email,omitempty"`
+	// Kind marks the credential shape: "" (default) = API-key account,
+	// "oauth" = aqp/codex OAuth-blob account. Explicit in the metadata so a
+	// keychain-mode metadata-only entry is unambiguous about which keychain
+	// field to hydrate.
+	Kind string `json:"kind,omitempty"`
+	// OAuth carries one OAuth account's credential blob (aqp/codex): the
+	// provider package's own JSON shape (AqpAccountData / CodexAuthFile),
+	// opaque to the accounts package. Mutually exclusive with the API-key
+	// credential fields. Unlike api_key, the blob ROTATES in place (token
+	// refresh) and never feeds the account id — ids are anchored once at add
+	// time (see OAuthAccountID).
+	OAuth   json.RawMessage `json:"oauth,omitempty"`
+	AddedAt string          `json:"added_at"`
 }
+
+// AccountKindOAuth marks aqp/codex pool accounts (credential blob in Account.OAuth).
+const AccountKindOAuth = "oauth"
+
+// IsOAuthAccount reports whether the entry is an OAuth-blob account (kind is
+// authoritative even when the blob itself is stripped from metadata).
+func IsOAuthAccount(a Account) bool { return a.Kind == AccountKindOAuth }
 
 type Pool struct {
 	Version  int       `json:"version"`
@@ -260,11 +282,17 @@ func (s Store) LoadSnapshot(name, providerID string) (Snapshot, error) {
 // so entries colliding after normalization are the same identity — the first
 // wins. The pool file itself is rewritten with normalized ids on the next
 // Save; loading alone never writes.
+//
+// OAuth accounts are exempt: their id is ANCHORED once at add time
+// (OAuthAccountID over the upstream account identity) and the credential blob
+// rotates in place, so re-deriving would drift the id on every token refresh.
 func normalizePool(providerID string, pool Pool) Pool {
 	normalized := make([]Account, 0, len(pool.Accounts))
 	seen := make(map[string]struct{}, len(pool.Accounts))
 	for _, account := range pool.Accounts {
-		account.ID = AccountID(providerID, account.Credentials())
+		if !IsOAuthAccount(account) {
+			account.ID = AccountID(providerID, account.Credentials())
+		}
 		if _, duplicate := seen[account.ID]; duplicate {
 			continue
 		}
@@ -284,16 +312,34 @@ func validatePool(providerID string, pool Pool) error {
 		if strings.Contains(account.ID, "#") {
 			return fmt.Errorf("accounts[%d].id contains reserved '#'", i)
 		}
-		if strings.TrimSpace(account.APIKey) == "" {
-			return fmt.Errorf("accounts[%d].api_key is empty", i)
-		}
 		if _, duplicate := seen[account.ID]; duplicate {
 			// Do not echo the identifier into startup/reload logs.
 			return fmt.Errorf("accounts[%d].id duplicates an earlier account", i)
 		}
 		seen[account.ID] = struct{}{}
-		if providerID == "volcengine" && (account.AccessKey == "") != (account.SecretKey == "") {
-			return fmt.Errorf("accounts[%d] must set both access_key and secret_key", i)
+		switch {
+		case IsOAuthAccount(account):
+			// OAuth accounts (aqp/codex) carry their credential blob instead of
+			// API-key fields. Mixing both shapes in one entry would make the
+			// backend (file/keychain) and the runtime disagree about which
+			// credential to serve. Keychain-mode METADATA (blob stripped) never
+			// reaches validatePool — isMetadataOnly routes it to hydration
+			// first — so a hydrated OAuth entry must carry its blob.
+			if account.APIKey != "" || account.AccessKey != "" || account.SecretKey != "" {
+				return fmt.Errorf("accounts[%d] carries both oauth and api-key credentials", i)
+			}
+			if len(account.OAuth) == 0 {
+				return fmt.Errorf("accounts[%d].oauth is empty", i)
+			}
+		case account.Kind != "":
+			return fmt.Errorf("accounts[%d].kind %q is not a known account kind", i, account.Kind)
+		default:
+			if strings.TrimSpace(account.APIKey) == "" {
+				return fmt.Errorf("accounts[%d].api_key is empty", i)
+			}
+			if providerID == "volcengine" && (account.AccessKey == "") != (account.SecretKey == "") {
+				return fmt.Errorf("accounts[%d] must set both access_key and secret_key", i)
+			}
 		}
 	}
 	return nil
@@ -520,6 +566,17 @@ func AccountID(providerID string, c Credentials) string {
 		return hashID(c.AccessKey)
 	}
 	return hashID(c.APIKey)
+}
+
+// OAuthAccountID anchors an OAuth (aqp/codex) account id over its UPSTREAM
+// account identity — the aqp employee email or the codex chatgpt_account_id —
+// hashed like every other id. It is derived ONCE at add time and stored; the
+// credential blob rotates (token refresh) but the id must never drift, so
+// normalizePool does not re-derive OAuth ids. When no upstream identity is
+// discoverable, callers may fall back to hashing a stable credential of their
+// choosing (same "hash, never raw" rule).
+func OAuthAccountID(upstreamAccountID string) string {
+	return hashID(upstreamAccountID)
 }
 
 func hashID(material string) string {

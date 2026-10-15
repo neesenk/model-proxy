@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -64,10 +65,10 @@ func TestBeginLoginUnknownAndNonAsync(t *testing.T) {
 			return configdomain.Provider{}, false
 		},
 	})
-	if _, err := service.BeginLogin(context.Background(), "nope"); httpErrorStatus(t, err) != http.StatusNotFound {
+	if _, err := service.BeginLogin(context.Background(), "nope", ""); httpErrorStatus(t, err) != http.StatusNotFound {
 		t.Errorf("unknown provider status = %d", httpErrorStatus(t, err))
 	}
-	_, err := service.BeginLogin(context.Background(), "zhipu")
+	_, err := service.BeginLogin(context.Background(), "zhipu", "")
 	if httpErrorStatus(t, err) != http.StatusBadRequest ||
 		!strings.Contains(err.Error(), "has no async login flow") {
 		t.Errorf("non-async err = %v", err)
@@ -79,7 +80,7 @@ func TestAqpLoginFlow(t *testing.T) {
 	spy := &reloadSpy{}
 	service := aqpService(aqpMock(t, http.StatusOK), spy)
 
-	start, err := service.BeginLogin(context.Background(), "aqp")
+	start, err := service.BeginLogin(context.Background(), "aqp", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,12 +94,28 @@ func TestAqpLoginFlow(t *testing.T) {
 	if update.Detail != "https://soup.shopee.io/login" {
 		t.Errorf("detail = %q", update.Detail)
 	}
-	account, err := provider.LoadAqpAccount(accounts.AuthFilePath("aqp", "oauth_auth"))
-	if err != nil || account == nil {
-		t.Fatalf("persisted aqp account = %+v, %v", account, err)
+	// The login lands in the OAuth POOL (<name>_apikeys.json): one OAuth-kind
+	// entry whose blob is the AqpAccountData.
+	pool, err := accounts.NewStore(accounts.HomeDir()).Load("aqp", "aqp")
+	if err != nil || len(pool.Accounts) != 1 {
+		t.Fatalf("persisted aqp pool = %+v, %v", pool, err)
+	}
+	entry := pool.Accounts[0]
+	if !accounts.IsOAuthAccount(entry) {
+		t.Fatalf("pool entry is not oauth-kind: %+v", entry)
+	}
+	var account provider.AqpAccountData
+	if err := json.Unmarshal(entry.OAuth, &account); err != nil {
+		t.Fatalf("blob unreadable: %v", err)
 	}
 	if account.Email != "u@x.com" || account.ProjectID != "proj" || account.SSOSessionCookie == "" {
 		t.Errorf("account = %+v", account)
+	}
+	if entry.ID != accounts.OAuthAccountID("u@x.com") {
+		t.Errorf("entry id = %q, want the upstream-identity anchor", entry.ID)
+	}
+	if entry.Email != "u@x.com" {
+		t.Errorf("entry email = %q", entry.Email)
 	}
 	if len(spy.calls) != 1 {
 		t.Errorf("reload calls = %v", spy.calls)
@@ -110,7 +127,7 @@ func TestAqpLoginReloadWarningSurfacesInUpdate(t *testing.T) {
 	spy := &reloadSpy{err: &ReloadAppliedWarning{Err: errors.New("state degraded")}}
 	service := aqpService(aqpMock(t, http.StatusOK), spy)
 
-	start, err := service.BeginLogin(context.Background(), "aqp")
+	start, err := service.BeginLogin(context.Background(), "aqp", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +147,7 @@ func TestAqpLoginBootstrapFailure(t *testing.T) {
 	defer up.Close()
 	service := aqpService(up, &reloadSpy{})
 
-	_, err := service.BeginLogin(context.Background(), "aqp")
+	_, err := service.BeginLogin(context.Background(), "aqp", "")
 	if httpErrorStatus(t, err) != http.StatusBadGateway {
 		t.Errorf("bootstrap failure status = %d, want 502", httpErrorStatus(t, err))
 	}
@@ -140,7 +157,7 @@ func TestAqpLoginJobProvisioningError(t *testing.T) {
 	setTestHome(t)
 	service := aqpService(aqpMock(t, http.StatusInternalServerError), &reloadSpy{})
 
-	start, err := service.BeginLogin(context.Background(), "aqp")
+	start, err := service.BeginLogin(context.Background(), "aqp", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +213,7 @@ func TestCodexLoginFlow(t *testing.T) {
 	spy := &reloadSpy{}
 	service := codexService(codexMock(t, http.StatusOK), spy)
 
-	start, err := service.BeginLogin(context.Background(), "codex")
+	start, err := service.BeginLogin(context.Background(), "codex", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,12 +225,29 @@ func TestCodexLoginFlow(t *testing.T) {
 	if update.State != "done" || update.Result != "acct-1" || update.Warning != "" {
 		t.Fatalf("update = %+v", update)
 	}
-	info, err := os.Stat(accounts.AuthFilePath("codex", "oauth_auth"))
+	// The login lands in the OAuth POOL: one OAuth-kind entry anchored on the
+	// chatgpt_account_id from the id_token, blob = the exchanged tokens.
+	pool, err := accounts.NewStore(accounts.HomeDir()).Load("codex", "codex")
+	if err != nil || len(pool.Accounts) != 1 {
+		t.Fatalf("persisted codex pool = %+v, %v", pool, err)
+	}
+	entry := pool.Accounts[0]
+	if !accounts.IsOAuthAccount(entry) || entry.ID != accounts.OAuthAccountID("acct-1") {
+		t.Fatalf("pool entry = %+v, want oauth-kind anchored on acct-1", entry)
+	}
+	var af provider.CodexAuthFile
+	if err := json.Unmarshal(entry.OAuth, &af); err != nil {
+		t.Fatalf("blob unreadable: %v", err)
+	}
+	if af.Tokens.AccessToken != "at" || af.Tokens.RefreshToken != "rt" {
+		t.Errorf("tokens = %+v", af.Tokens)
+	}
+	info, err := os.Stat(accounts.NewStore(accounts.HomeDir()).PoolPath("codex"))
 	if err != nil {
-		t.Fatalf("codex auth file not written: %v", err)
+		t.Fatalf("codex pool file not written: %v", err)
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Errorf("codex auth file perm = %o, want 0600", perm)
+		t.Errorf("codex pool file perm = %o, want 0600", perm)
 	}
 	if len(spy.calls) != 1 {
 		t.Errorf("reload calls = %v", spy.calls)
@@ -234,7 +268,7 @@ func TestCodexLoginUserCodeFailure(t *testing.T) {
 			return options
 		},
 	})
-	_, err := service.BeginLogin(context.Background(), "codex")
+	_, err := service.BeginLogin(context.Background(), "codex", "")
 	if httpErrorStatus(t, err) != http.StatusBadGateway {
 		t.Errorf("user-code failure status = %d, want 502", httpErrorStatus(t, err))
 	}
@@ -244,7 +278,7 @@ func TestCodexLoginJobExchangeError(t *testing.T) {
 	setTestHome(t)
 	service := codexService(codexMock(t, http.StatusInternalServerError), &reloadSpy{})
 
-	start, err := service.BeginLogin(context.Background(), "codex")
+	start, err := service.BeginLogin(context.Background(), "codex", "")
 	if err != nil {
 		t.Fatal(err)
 	}

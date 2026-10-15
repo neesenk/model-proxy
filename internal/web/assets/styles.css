@@ -1675,6 +1675,11 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .acct-card .acct-label { font-weight: 500; font-size: 0.8125rem; }
 .acct-card .acct-sub { font-size: 0.6875rem; color: var(--muted); font-family: var(--mono); }
 .acct-card .acct-mail { font-size: 0.75rem; color: var(--muted); }
+/* inline rename strip (account card head): input + Rename/Cancel + inline
+   backend error message. */
+.acct-rename { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 2px 0; }
+.acct-rename .req-input { width: 220px; }
+.acct-rename .acct-rename-err { font-size: 0.6875rem; font-style: italic; }
 .acct-sections { padding: 4px 0; }
 
 /* collapsible Usage / Token usage sections — v2 chevron icon. */

@@ -238,13 +238,19 @@ func availableAlt(ri appapi.StatusRoute, first string) string {
 	return ""
 }
 
-// quotaFixHint suggests the right quota remedy: pool providers (everything
-// except the aqp/codex single-file logins) gain headroom from an extra
-// account via login; single-account providers need a config change (more
-// route targets) or must wait out the reset.
+// quotaFixHint suggests the right quota remedy: every credential POOL (API-key
+// and OAuth alike — aqp/codex pool too once they have a plural pool file)
+// gains headroom from an extra account via login; pool-less OAuth providers
+// (still on the legacy single-account file) and everything else need a config
+// change (more route targets) or must wait out the reset.
 func quotaFixHint(cfg *configdomain.Config, parent, route string) string {
-	if prov, ok := cfg.Providers[parent]; ok && prov.Provider != "aqp" && prov.Provider != "codex" {
-		return "[需要凭据] model-proxy login " + parent + "（账号池 provider 可再加一个账号分担配额）"
+	if prov, ok := cfg.Providers[parent]; ok {
+		if _, pooled := climodels.PoolVirtuals(cfg, parent); pooled {
+			return "[需要凭据] model-proxy login " + parent + "（账号池 provider 可再加一个账号分担配额）"
+		}
+		if prov.Provider != "aqp" && prov.Provider != "codex" {
+			return "[需要凭据] model-proxy login " + parent + "（登录后进账号池）"
+		}
 	}
 	return "[需要改配置] config.yaml 的 routes." + route + " 增加备用 target，或等待配额重置"
 }

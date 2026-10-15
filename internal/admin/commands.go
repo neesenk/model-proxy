@@ -288,30 +288,57 @@ func (s *Service) RemoveAccount(name, id string) (appapi.MutationResult, error) 
 			"unknown provider: "+name,
 		)
 	}
-	switch providerConfig.Provider {
-	case "aqp":
-		if err := provider.ClearAqpAccount(accounts.AuthFilePath(name, "oauth_auth")); err != nil {
-			return appapi.MutationResult{}, appapi.NewHTTPError(
-				http.StatusInternalServerError,
-				err.Error(),
-			)
-		}
-	case "codex":
-		if err := provider.ClearCodexAccount(accounts.AuthFilePath(name, "oauth_auth")); err != nil {
-			return appapi.MutationResult{}, appapi.NewHTTPError(
-				http.StatusInternalServerError,
-				err.Error(),
-			)
-		}
-	default:
-		if err := login.RemoveApikeyAccount(name, providerConfig.Provider, id); err != nil {
-			return appapi.MutationResult{}, appapi.NewHTTPError(
-				http.StatusBadRequest,
-				err.Error(),
-			)
+	// All account kinds funnel through the pool store (the OAuth pools own
+	// their blob entries; RemoveAccount also clears any keychain namespace).
+	// A provider still on the LEGACY single-account OAuth file (no pool yet)
+	// is removed through its provider-owned file boundary.
+	if providerConfig.Provider == "aqp" || providerConfig.Provider == "codex" {
+		snapshot, _ := accounts.NewStore(accounts.HomeDir()).LoadSnapshot(name, providerConfig.Provider)
+		if snapshot.Source != accounts.SourcePlural {
+			var err error
+			switch providerConfig.Provider {
+			case "aqp":
+				err = provider.ClearAqpAccount(accounts.AuthFilePath(name, "oauth_auth"))
+			case "codex":
+				err = provider.ClearCodexAccount(accounts.AuthFilePath(name, "oauth_auth"))
+			}
+			if err != nil {
+				return appapi.MutationResult{}, appapi.NewHTTPError(
+					http.StatusInternalServerError,
+					err.Error(),
+				)
+			}
+			return appapi.MutationResult{Warning: s.reloadAfterMutation()}, nil
 		}
 	}
+	if err := login.RemoveAccount(name, providerConfig.Provider, id); err != nil {
+		return appapi.MutationResult{}, appapi.NewHTTPError(
+			http.StatusBadRequest,
+			err.Error(),
+		)
+	}
 	return appapi.MutationResult{Warning: s.reloadAfterMutation()}, nil
+}
+
+// RenameAccount changes an account's display label (API-key and OAuth pool
+// accounts alike). The label is metadata only — the account ID, the virtual
+// runtime key and all usage-history attribution stay untouched — so no reload
+// follows (the Web layer refetches the account list).
+func (s *Service) RenameAccount(name, id, label string) (appapi.MutationResult, error) {
+	providerConfig, ok := s.ports.ProviderConfig(name)
+	if !ok {
+		return appapi.MutationResult{}, appapi.NewHTTPError(
+			http.StatusNotFound,
+			"unknown provider: "+name,
+		)
+	}
+	if err := login.RenameApikeyAccount(name, providerConfig.Provider, id, label); err != nil {
+		return appapi.MutationResult{}, appapi.NewHTTPError(
+			http.StatusBadRequest,
+			err.Error(),
+		)
+	}
+	return appapi.MutationResult{ID: id}, nil
 }
 
 // reloadAfterMutation hot-reloads after a credential/config mutation and
@@ -387,30 +414,37 @@ func (s *Service) accountProbe(ctx context.Context, name, id string) (accountPro
 	}
 
 	// Resolve the account id to the runtime provider key. These sources mirror
-	// the account-list API: OAuth providers are single-account; API-key
-	// providers use a virtual name only when their pool has at least two rows.
+	// the build contract: plural pools (API-key AND OAuth) key by virtual
+	// "name#<accountID>" regardless of pool size; legacy single-file providers
+	// keep the plain name. Keying follows the pool SOURCE (not the runtime
+	// map's sync state) so an unavailable account still reports under its own
+	// virtual key.
 	key := name
 	switch prov.Provider {
-	case "aqp":
-		account, _ := provider.LoadAqpAccount(accounts.AuthFilePath(name, "oauth_auth"))
-		if account == nil || account.AccountID != id {
-			return accountProbeResult{}, &accountProbeError{
-				kind: accountProbeUnknownAccount,
-				msg:  "unknown account: " + id,
+	case "aqp", "codex":
+		// A pool-less OAuth provider still runs on the legacy single-account
+		// file; its account id is the upstream identity (aqp email / codex
+		// chatgpt_account_id), matching what /api/accounts reports.
+		accountID := ""
+		if prov.Provider == "aqp" {
+			if account, _ := provider.LoadAqpAccount(accounts.AuthFilePath(name, "oauth_auth")); account != nil {
+				accountID = account.AccountID
+			}
+		} else {
+			if account, _ := provider.LoadCodexAccount(accounts.AuthFilePath(name, "oauth_auth")); account != nil {
+				accountID = account.AccountID
 			}
 		}
-	case "codex":
-		account, _ := provider.LoadCodexAccount(accounts.AuthFilePath(name, "oauth_auth"))
-		if account == nil || account.AccountID != id {
+		if accountID == "" || accountID != id {
 			return accountProbeResult{}, &accountProbeError{
 				kind: accountProbeUnknownAccount,
 				msg:  "unknown account: " + id,
 			}
 		}
 	default:
-		pool, _ := accounts.NewStore(accounts.HomeDir()).Load(name, prov.Provider)
+		snapshot, _ := accounts.NewStore(accounts.HomeDir()).LoadSnapshot(name, prov.Provider)
 		found := false
-		for _, account := range pool.Accounts {
+		for _, account := range snapshot.Pool.Accounts {
 			if account.ID == id {
 				found = true
 				break
@@ -422,7 +456,7 @@ func (s *Service) accountProbe(ctx context.Context, name, id string) (accountPro
 				msg:  "unknown account: " + id,
 			}
 		}
-		if len(pool.Accounts) >= 2 {
+		if snapshot.Source == accounts.SourcePlural {
 			key = name + "#" + id
 		}
 	}

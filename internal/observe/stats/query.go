@@ -283,8 +283,11 @@ func (s *Store) queryAnalyticsIn(from, to int64, provider, model, granularity st
 		FROM minute_buckets WHERE minute >= ? AND minute <= ?`
 	args := []any{from, to}
 	if provider != "" {
-		query += ` AND provider = ?`
-		args = append(args, provider)
+		// Pooled rows live under virtual "name#<accountID>" keys; filtering by
+		// the parent name matches the provider's every account (exact compare
+		// on the pre-# segment — no LIKE wildcards in provider names).
+		query += ` AND (provider = ? OR (instr(provider, '#') > 0 AND substr(provider, 1, instr(provider, '#') - 1) = ?))`
+		args = append(args, provider, provider)
 	}
 	if model != "" {
 		query += ` AND model = ?`
@@ -412,8 +415,10 @@ func (s *Store) QueryAnalyticsAgents(from, to int64, agent, provider, model, gra
 		args = append(args, agent)
 	}
 	if provider != "" {
-		query += ` AND provider = ?`
-		args = append(args, provider)
+		// Same parent-name semantics as QueryAnalytics: a pooled provider's
+		// rows live under virtual "name#<accountID>" keys.
+		query += ` AND (provider = ? OR (instr(provider, '#') > 0 AND substr(provider, 1, instr(provider, '#') - 1) = ?))`
+		args = append(args, provider, provider)
 	}
 	if model != "" {
 		query += ` AND model = ?`

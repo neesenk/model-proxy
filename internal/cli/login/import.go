@@ -98,17 +98,15 @@ func RunCodexImport(provName string) error {
 	if err != nil {
 		return err
 	}
-	authFile := oauthAuthFilePath(HomeDir(), provName)
-	if err := os.MkdirAll(logincore.DirOf(authFile), 0o700); err != nil {
+	seed, err := logincore.CodexOAuthSeed(af)
+	if err != nil {
 		return err
 	}
-	if err := provider.WriteCodexAuthFile(authFile, af); err != nil {
-		return err
+	id, err := logincore.AddOAuthAccount(provName, "codex", seed)
+	if err != nil {
+		return fmt.Errorf("failed to persist account: %w", err)
 	}
-	fmt.Printf("✓ Imported codex CLI credentials → %s\n", authFile)
-	if af.Tokens.AccountID != "" {
-		fmt.Printf("  account_id: %s\n", accounts.Mask(af.Tokens.AccountID))
-	}
+	fmt.Printf("✓ Imported codex CLI credentials → pool %s (account %s)\n", provName, accounts.Mask(id))
 	fmt.Println("Note: the imported access_token may already be expired — the proxy refreshes it on demand while the refresh_token is valid.")
 	return nil
 }

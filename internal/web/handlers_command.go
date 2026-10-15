@@ -300,13 +300,38 @@ func (s *Server) handleAccountRemove(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "removed", "warning": result.Warning})
 }
 
+// handleAccountLabel renames an account's display label (metadata only — no
+// reload; the client refetches the account list).
+func (s *Server) handleAccountLabel(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/accounts/"), "/label")
+	parts := strings.SplitN(strings.Trim(rest, "/"), "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		writeJSONErr(w, http.StatusBadRequest, "expected /api/accounts/<provider>/<id>/label")
+		return
+	}
+	var in struct {
+		Label string `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSONErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	result, err := s.commands.RenameAccount(parts[0], parts[1], in.Label)
+	if err != nil {
+		writePortErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": result.ID, "status": "renamed"})
+}
+
 func (s *Server) handleLoginStart(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/login/"), "/start")
 	if name == "" || strings.Contains(name, "/") {
 		writeJSONErr(w, http.StatusBadRequest, "expected /api/login/<provider>/start")
 		return
 	}
-	start, err := s.commands.BeginLogin(r.Context(), name)
+	// ?account=<id> = targeted re-login of one pooled OAuth account.
+	start, err := s.commands.BeginLogin(r.Context(), name, r.URL.Query().Get("account"))
 	if err != nil {
 		writePortErr(w, http.StatusBadGateway, err)
 		return
