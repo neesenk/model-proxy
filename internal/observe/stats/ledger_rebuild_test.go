@@ -42,7 +42,7 @@ func seedLedgerFixture(t *testing.T) (*Store, string) {
 	}
 	t.Cleanup(func() { _ = idx.Close() })
 	schema := `CREATE TABLE records (
-		ts TEXT NOT NULL, provider TEXT, model TEXT, agent TEXT,
+		ts TEXT NOT NULL, provider TEXT, upstream_model TEXT, agent TEXT,
 		input INTEGER DEFAULT 0, output INTEGER DEFAULT 0,
 		cache_read INTEGER DEFAULT 0, cache_creation INTEGER DEFAULT 0,
 		attempt_only INTEGER DEFAULT 0)`
@@ -53,7 +53,7 @@ func seedLedgerFixture(t *testing.T) (*Store, string) {
 	// the repetition inflation (30). Three records in the same minute.
 	for i := 0; i < 3; i++ {
 		if _, err := idx.Exec(`INSERT INTO records
-			(ts, provider, model, agent, input, output, cache_read, cache_creation, attempt_only)
+			(ts, provider, upstream_model, agent, input, output, cache_read, cache_creation, attempt_only)
 			VALUES (?, 'deepseek', 'm', 'claude-code', 100, 10, 66, 5, 0)`,
 			"2026-10-09T12:33:"+itoa2(i)+"+08:00"); err != nil {
 			t.Fatal(err)

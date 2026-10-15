@@ -112,7 +112,7 @@ func (s *Store) RebuildTokenLedger(indexDBPath string) (rebuilt, skipped int64, 
 // guard column, and per-(agent, provider, model, minute). attempt_only legs
 // are excluded (never committed to the buckets).
 func readLedgerAggregates(idx *sql.DB) ([]ledgerMinute, []ledgerAgentRow, error) {
-	rows, err := idx.Query(`SELECT provider, model,
+	rows, err := idx.Query(`SELECT provider, upstream_model AS model,
 			(CAST(strftime('%s', ts) AS INTEGER)/60)*60 AS minute,
 			SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read), COUNT(*)
 		FROM records
@@ -134,7 +134,7 @@ func readLedgerAggregates(idx *sql.DB) ([]ledgerMinute, []ledgerAgentRow, error)
 		return nil, nil, err
 	}
 
-	arows, err := idx.Query(`SELECT agent, provider, model,
+	arows, err := idx.Query(`SELECT agent, provider, upstream_model AS model,
 			(CAST(strftime('%s', ts) AS INTEGER)/60)*60 AS minute,
 			SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read)
 		FROM records
