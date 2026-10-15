@@ -133,17 +133,24 @@ func TestWaitUntilForFatalPath(t *testing.T) {
 
 func TestLeakCheckFatalPath(t *testing.T) {
 	stub := &stubTB{T: t}
-	// A goroutine that is RUNNING (synchronized via started, so the counter
-	// already includes it) and outlives the settle budget.
+	// TWO goroutines that are RUNNING (synchronized via started, so the counter
+	// already includes them) and outlive the settle budget. The doubled leak
+	// keeps the check decisive even with ±1 foreign goroutine churn under
+	// shuffle: a leftover from an earlier test exiting inside the settle
+	// window still leaves the count above baseline (same hardening as
+	// TestLeakCheck's dual-leak self-test, 09e85d9).
 	leaked := make(chan struct{})
 	defer close(leaked)
-	started := make(chan struct{})
-	go func() {
-		close(started)
-		<-leaked
-	}()
+	started := make(chan struct{}, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			started <- struct{}{}
+			<-leaked
+		}()
+	}
 	<-started
-	baseline := Goroutines() - 1
+	<-started
+	baseline := Goroutines() - 2
 	func() {
 		defer func() { _ = recover() }()
 		LeakCheckFor(stub, baseline, 30*time.Millisecond, "pilot scenario")
