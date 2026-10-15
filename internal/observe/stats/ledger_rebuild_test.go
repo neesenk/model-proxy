@@ -43,6 +43,7 @@ func seedLedgerFixture(t *testing.T) (*Store, string) {
 	t.Cleanup(func() { _ = idx.Close() })
 	schema := `CREATE TABLE records (
 		ts TEXT NOT NULL, provider TEXT, upstream_model TEXT, agent TEXT,
+		status INTEGER DEFAULT 200,
 		input INTEGER DEFAULT 0, output INTEGER DEFAULT 0,
 		cache_read INTEGER DEFAULT 0, cache_creation INTEGER DEFAULT 0,
 		attempt_only INTEGER DEFAULT 0)`
@@ -50,14 +51,26 @@ func seedLedgerFixture(t *testing.T) (*Store, string) {
 		t.Fatal(err)
 	}
 	// The correct ledger: input EXCLUDES the cache hit (300), output without
-	// the repetition inflation (30). Three records in the same minute.
+	// the repetition inflation (30). Three 200s + one 400 (the bad-body storm
+	// shape: served but not a successful request) in the same minute.
 	for i := 0; i < 3; i++ {
 		if _, err := idx.Exec(`INSERT INTO records
-			(ts, provider, upstream_model, agent, input, output, cache_read, cache_creation, attempt_only)
-			VALUES (?, 'deepseek', 'm', 'claude-code', 100, 10, 66, 5, 0)`,
+			(ts, provider, upstream_model, agent, status, input, output, cache_read, cache_creation, attempt_only)
+			VALUES (?, 'deepseek', 'm', 'claude-code', 200, 100, 10, 66, 5, 0)`,
 			"2026-10-09T12:33:"+itoa2(i)+"+08:00"); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if _, err := idx.Exec(`INSERT INTO records
+		(ts, provider, upstream_model, agent, status, input, output, cache_read, cache_creation, attempt_only)
+		VALUES ('2026-10-09T12:33:30+08:00', 'deepseek', 'm', 'claude-code', 400, 0, 0, 0, 0, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	// The committed bucket carries the legacy double counts AND the 4xx-inclusive
+	// request count (4 records counted as 4 requests; token_requests stays 3 —
+	// the usage counter only ever counted token-bearing commits).
+	if _, err := store.db.Exec(`UPDATE minute_buckets SET requests = 4, token_requests = 3`); err != nil {
+		t.Fatal(err)
 	}
 	return store, idxPath
 }
@@ -84,6 +97,9 @@ func TestRebuildTokenLedgerRewritesPreCutoffBuckets(t *testing.T) {
 	if got.Input != 300 || got.Output != 30 || got.CacheRead != 198 || got.CacheCreation != 15 {
 		t.Fatalf("rebuilt bucket = input=%d output=%d cr=%d cc=%d, want 300/30/198/15",
 			got.Input, got.Output, got.CacheRead, got.CacheCreation)
+	}
+	if got.Requests != 3 {
+		t.Fatalf("rebuilt bucket requests = %d, want 3 (2xx-only; the 400 leg no longer counts)", got.Requests)
 	}
 	agents, err := store.QueryAgents(0, 1791600000, "claude-code", "", "", 0)
 	if err != nil {

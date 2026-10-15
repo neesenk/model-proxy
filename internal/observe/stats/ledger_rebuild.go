@@ -3,6 +3,7 @@ package stats
 import (
 	"database/sql"
 	"fmt"
+	"time"
 
 	"model-proxy/internal/observe/logx"
 )
@@ -22,7 +23,8 @@ type ledgerMinute struct {
 	minute          int64
 	inTok, outTok   int64
 	ccTok, crTok    int64
-	n               int64
+	n               int64 // all non-attempt-only records (≈ the legacy EvRequests count, 4xx storms included)
+	n200            int64 // 2xx records only (the console-aligned request count)
 }
 
 type ledgerAgentRow struct {
@@ -33,13 +35,18 @@ type ledgerAgentRow struct {
 }
 
 // RebuildTokenLedger rewrites the token columns (input/output/cache_creation/
-// cache_read) of minute_buckets AND agent_buckets from the request-log index,
-// for buckets committed before the ledger cutoff. Idempotent: a rebuilt bucket
-// equals its aggregate, so reruns rewrite the same values. Defensive: a minute
-// bucket whose request-log record count diverges from its committed
+// cache_read) of minute_buckets AND agent_buckets from the request-log index
+// for buckets committed before the ledger cutoff, AND repairs the minute
+// requests column across ALL history (2xx-only count: committed terminal 4xx
+// responses were counted as requests until the success-only fix — a
+// bad-body 400 storm inflated one provider-day 4x). Idempotent: a rebuilt
+// bucket equals its aggregate, so reruns rewrite the same values. Defensive:
+// a minute bucket whose request-log record count diverges from its committed
 // token_requests count by more than 10% is left untouched (a log gap must not
-// zero out real counters) and counted as skipped. The index is read over its
-// own connection; the rewrites run in one transaction on the stats store.
+// zero out real counters) and counted as skipped; the requests repair only
+// fires when the ALL-record count matches the committed requests within 10%
+// (the legacy counter included 4xx). The index is read over its own
+// connection; the rewrites run in one transaction on the stats store.
 // Returns (rebuiltBuckets, skippedMinuteBuckets).
 func (s *Store) RebuildTokenLedger(indexDBPath string) (rebuilt, skipped int64, err error) {
 	if s == nil || s.db == nil || indexDBPath == "" {
@@ -65,22 +72,44 @@ func (s *Store) RebuildTokenLedger(indexDBPath string) (rebuilt, skipped int64, 
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	cutoffEpoch := int64(0)
+	if t, err := time.Parse(time.RFC3339, ledgerCutoffISO); err == nil {
+		cutoffEpoch = t.Unix()
+	}
 	for _, m := range minutes {
+		if m.minute >= cutoffEpoch {
+			// Post-cutoff buckets already carry the corrected token ledger —
+			// only the requests repair applies to them.
+			resR, err := tx.Exec(`UPDATE minute_buckets SET requests = ?
+				WHERE provider = ? AND model = ? AND minute = ?
+				  AND requests != ?
+				  AND requests BETWEEN ? * 0.9 AND ? * 1.1`,
+				m.n200, m.provider, m.model, m.minute, m.n200, m.n200, m.n)
+			if err != nil {
+				return 0, 0, fmt.Errorf("repair minute requests: %w", err)
+			}
+			nr, _ := resR.RowsAffected()
+			rebuilt += nr
+			continue
+		}
 		res, err := tx.Exec(`UPDATE minute_buckets SET
-			input = ?, output = ?, cache_creation = ?, cache_read = ?
+			input = ?, output = ?, cache_creation = ?, cache_read = ?, requests = ?
 			WHERE provider = ? AND model = ? AND minute = ?
-			  AND ? BETWEEN token_requests * 0.9 AND token_requests * 1.1`,
-			m.inTok, m.outTok, m.ccTok, m.crTok, m.provider, m.model, m.minute, m.n)
+			  AND ? BETWEEN token_requests * 0.9 AND token_requests * 1.1
+			  AND requests BETWEEN ? * 0.9 AND ? * 1.1`,
+			m.inTok, m.outTok, m.ccTok, m.crTok, m.n200, m.provider, m.model, m.minute, m.n200, m.n200, m.n)
 		if err != nil {
 			return 0, 0, fmt.Errorf("rebuild minute bucket: %w", err)
 		}
 		n, _ := res.RowsAffected()
 		rebuilt += n
+		if n == 0 {
+			// A pre-cutoff aggregate that did not rewrite its bucket: the
+			// count defense rejected it (or the bucket vanished) — the
+			// committed values stand.
+			skipped++
+		}
 	}
-	// Every pre-cutoff aggregate that did NOT rewrite a bucket is reported as
-	// a skip (count-defense mismatch, or the bucket vanished): the committed
-	// values stand.
-	skipped = int64(len(minutes)) - rebuilt
 
 	stmtA, err := tx.Prepare(`UPDATE agent_buckets SET
 		input = ?, output = ?, cache_creation = ?, cache_read = ?
@@ -114,10 +143,11 @@ func (s *Store) RebuildTokenLedger(indexDBPath string) (rebuilt, skipped int64, 
 func readLedgerAggregates(idx *sql.DB) ([]ledgerMinute, []ledgerAgentRow, error) {
 	rows, err := idx.Query(`SELECT provider, upstream_model AS model,
 			(CAST(strftime('%s', ts) AS INTEGER)/60)*60 AS minute,
-			SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read), COUNT(*)
+			SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read), COUNT(*),
+			SUM(CASE WHEN status < 400 THEN 1 ELSE 0 END)
 		FROM records
-		WHERE attempt_only = 0 AND ts < ?
-		GROUP BY 1, 2, 3`, ledgerCutoffISO)
+		WHERE attempt_only = 0
+		GROUP BY 1, 2, 3`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("aggregate request-log ledger: %w", err)
 	}
@@ -125,7 +155,7 @@ func readLedgerAggregates(idx *sql.DB) ([]ledgerMinute, []ledgerAgentRow, error)
 	var minutes []ledgerMinute
 	for rows.Next() {
 		var m ledgerMinute
-		if err := rows.Scan(&m.provider, &m.model, &m.minute, &m.inTok, &m.outTok, &m.ccTok, &m.crTok, &m.n); err != nil {
+		if err := rows.Scan(&m.provider, &m.model, &m.minute, &m.inTok, &m.outTok, &m.ccTok, &m.crTok, &m.n, &m.n200); err != nil {
 			return nil, nil, err
 		}
 		minutes = append(minutes, m)
