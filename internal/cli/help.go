@@ -46,6 +46,7 @@ Commands:
   guard                List/unblock adjudicated session blocks; manage content overrides
   test <model>         End-to-end probe of a model's route targets (real upstream calls)
   mcp [list|test]      Manage MCP gateway servers (mcp: config; test runs the handshake)
+  mcp-server <name>    Run a bundled MCP tool server over stdio (gateway child; not interactive)
   replay <id> --to P   Re-answer a logged request with a different backend
   shadow report       Shadow-evaluation aggregation (primary vs shadow compare)
   routing report      Offline route-policy reconciliation (weak labels + selector matrix + cost)
@@ -307,6 +308,22 @@ Subcommands:
   list              List configured MCP servers (name, enabled, auth, provider, url).
   test <name>       Run the MCP handshake (initialize + tools/list) against one
                     server through its configured credentials.`,
+
+	"mcp-server": `mcp-server <name>
+
+  Run one of the binary's bundled MCP tool servers over stdio
+  (newline-delimited JSON-RPC on stdin/stdout — the gateway's
+  transport: stdio child contract). Spawned by the daemon via
+  mcp: command: [<path>/model-proxy, mcp-server, <name>] with
+  credentials injected through env: templates; running it by hand is
+  only for debugging (export the credential env yourself).
+
+Servers:
+  deepseek-search    DeepSeek Web Search/Fetch API as MCP tools:
+                    web_search (query/count/need_content) and url_fetch (url).
+                    Env: DEEPSEEK_API_KEY (required, calls fail closed
+                    without it), DEEPSEEK_BASE_URL (default
+                    https://api.deepseek.com).`,
 
 	"stats": `stats [flags] [--config PATH]
 

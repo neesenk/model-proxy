@@ -49,6 +49,9 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/cli/framework": {"model-proxy/internal/accounts": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/upstreamproxy": true},
 		"model-proxy/internal/cli/login":     {"model-proxy/internal/display": true, "model-proxy/internal/accounts": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/serve": true, "model-proxy/internal/config": true, "model-proxy/internal/login": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/cli/mcp":       {"model-proxy/internal/accounts": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/config": true, "model-proxy/internal/display": true, "model-proxy/internal/mcp": true, "model-proxy/internal/provider": true, "model-proxy/internal/providerbuild": true, "model-proxy/internal/upstreamproxy": true},
+		// mcpserver serves the bundled stdio MCP children (deepseek-search):
+		// JSON-RPC handling and tool specs reuse the mcp leaf package only.
+		"model-proxy/internal/cli/mcpserver": {"model-proxy/internal/mcp": true},
 		"model-proxy/internal/cli/models":    {"model-proxy/internal/display": true, "model-proxy/internal/cli/serve": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/accounts": true, "model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/configedit": true, "model-proxy/internal/probe": true, "model-proxy/internal/provider": true, "model-proxy/internal/providerbuild": true, "model-proxy/internal/routing": true, "model-proxy/internal/runtime/wirecap": true, "model-proxy/internal/upstreamproxy": true},
 		"model-proxy/internal/cli": {
 			"model-proxy/internal/display": true, "model-proxy/internal/cli/framework": true,
@@ -57,7 +60,8 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 			"model-proxy/internal/cli/guard": true,
 			"model-proxy/internal/cli/diag":  true, "model-proxy/internal/cli/doctor": true,
 			"model-proxy/internal/cli/login": true, "model-proxy/internal/cli/mcp": true, "model-proxy/internal/cli/models": true,
-			"model-proxy/internal/cli/presets": true, "model-proxy/internal/cli/stats": true,
+			"model-proxy/internal/cli/mcpserver": true,
+			"model-proxy/internal/cli/presets":   true, "model-proxy/internal/cli/stats": true,
 			"model-proxy/internal/cli/status": true,
 			"model-proxy/internal/config":     true, "model-proxy/internal/takeover": true,
 			"model-proxy/internal/observe/logx": true,

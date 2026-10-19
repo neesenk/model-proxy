@@ -726,11 +726,17 @@ mcp:
     command: [npx, -y, "@z_ai/mcp-server"]
     env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU} # literals OK for benign keys; credential-shaped names (…_KEY/TOKEN/…)
     # still require indirection
+  deepseek-search: # DeepSeek Web Search/Fetch API as a bundled MCP child — the deployed
+    transport: stdio # binary serves it itself (`mcp-server deepseek-search`, CLI.md §13c);
+    provider: deepseek # ¥0.005/call per successful search/fetch, account-level 5 QPS each
+    command: [/Users/neesenk/model-proxy/model-proxy, mcp-server, deepseek-search] # needs a binary built with the subcommand
+    env: {DEEPSEEK_API_KEY: "${account.api_key}"} # key injected from this pool; schema violations fail pre-egress (unbilled)
 mcp_routes:
-  # Web research: search (four engines by scenario — parameter shapes differ,
+  # Web research: search (five engines by scenario — parameter shapes differ,
   # so they are NOT one failover set), read+clean (zhipu reader, firecrawl
-  # scrape and stepfun web_fetch share the url parameter and DO fail over),
-  # batch clean fetch, and document parsing.
+  # scrape, stepfun web_fetch and deepseek url_fetch share the url parameter
+  # and DO fail over; deepseek is the billed last leg), batch clean fetch,
+  # and document parsing.
   # Datasource: professional data queries. kimi-data (Kimi Code kimi-datasource
   # plugin — Wind/S&P/EDGAR, macro, CN gov/corporate/academic/legal) is the
   # desc-then-call meta surface; dataset_search (volcengine dataPro) covers
@@ -753,6 +759,9 @@ mcp_routes:
       - {mcp: zhipu-reader, tools: {url_read: webReader}} # fast markdown read (url) — schema baseline for url_read
       - {mcp: stepfun-search, tools: {web_search_category: web_search, # category-filtered search: query+category programming|research|gov|business (+use_common_search fallback toggle); ¥0.04/call as Step Plan Credit)
           url_read: web_fetch}} # free clean fetch (url) — extra url_read failover leg
+      - {mcp: deepseek-search, tools: {web_search_deepseek: web_search, # DeepSeek general search (query+count+need_content; rerank-scored, CN+global)
+          # own canonical — the web_search failover set keeps zhipu's search_query shape
+          url_read: url_fetch}} # billed last-resort read leg (url param, same shape as the free legs)
   code-search:
     targets:
       - {mcp: grep-app, tools: {code_search: searchGitHub}}

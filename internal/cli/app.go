@@ -12,6 +12,7 @@ import (
 	cliguard "model-proxy/internal/cli/guard"
 	clilogin "model-proxy/internal/cli/login"
 	climcp "model-proxy/internal/cli/mcp"
+	climcpserver "model-proxy/internal/cli/mcpserver"
 	climodels "model-proxy/internal/cli/models"
 	clipresets "model-proxy/internal/cli/presets"
 	clistats "model-proxy/internal/cli/stats"
@@ -54,10 +55,13 @@ func NewApplication(serve func(args []string)) *Application {
 		"guard":    ProcessCommand(cliguard.RunGuard),
 		"test":     ProcessCommand(climodels.CmdTest),
 		"mcp":      ProcessCommand(climcp.RunMCP),
-		"replay":   ProcessCommand(clidiag.RunReplay),
-		"shadow":   ProcessCommand(clidiag.RunShadow),
-		"routing":  ProcessCommand(clidiag.RunRouting),
-		"wire":     ProcessCommand(clidiag.RunWire),
+		// Stream contract on purpose (no ProcessCommand adapter): the bundled
+		// server speaks MCP stdio on the injected stdin/stdout.
+		"mcp-server": climcpserver.RunServer,
+		"replay":     ProcessCommand(clidiag.RunReplay),
+		"shadow":     ProcessCommand(clidiag.RunShadow),
+		"routing":    ProcessCommand(clidiag.RunRouting),
+		"wire":       ProcessCommand(clidiag.RunWire),
 	}
 	return app
 }

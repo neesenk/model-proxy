@@ -3,7 +3,8 @@
 ## 适用范围
 
 修改 config `mcp:` / `mcp_routes:` 节、`internal/mcp`、`internal/app/proxy_mcp*.go`、
-`internal/cli/mcp`、request log 的 `kind` 字段、`/mcp/` 端点行为、takeover 的 mcp
+`internal/cli/mcp`、`internal/cli/mcpserver`（内置 stdio 子服务器）、request log 的
+`kind` 字段、`/mcp/` 端点行为、takeover 的 mcp
 模板块或 Web MCP 面时必读。设计背景与实测结论见
 `docs/research/design-mcp-gateway.md`；Web 字段契约见 `docs/web-api.md`。
 
@@ -157,6 +158,18 @@ stdio 交换同样受 `timeout:` 约束：`StdioConn.Call(ctx, ...)` 监听 ctx�
 不再永久阻塞调用方（pinned 转发/握手、路由子会话、probe、CLI 全接线）。
 http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验拒绝；反之
 `command`/`env` 只对 stdio 有效，出现在 streamable/sse 服务器上时校验失败。
+
+**内置子服务器（`internal/cli/mcpserver`）**：二进制自带 `mcp-server <name>`
+子命令，按同一 stdio 契约在 stdin/stdout 上服务 MCP——config 用
+`command: [<已部署 model-proxy 路径>, mcp-server, <name>]` 引用**同一份二进制**，
+不引入 npx/node 外部运行时，普通重建即随车更新。它是唯一合法的流式直绑 CLI 命令
+（不经 `ProcessCommand` 适配器，直接持有注入流；交互契约测试持白名单）。现有：
+`deepseek-search`（DeepSeek `/v1/tools/search` + `/v1/tools/fetch` → `web_search`
+/`url_fetch` 工具；`DEEPSEEK_API_KEY` 必需、缺失时调用 fail-closed，
+`DEEPSEEK_BASE_URL` 默认 `https://api.deepseek.com`；按成功调用计费、账号级各
+5 QPS）。语义要点：参数契约违规在任何出站前答 -32602（不计费）；上游失败答
+`isError:true` 的正常 tools/call 结果，路由 failover（只认传输层故障）不会重试
+已到达 DeepSeek 的计费调用。契约细节见 `CLI.md` §13c。
 
 ### 出站扫描与静态头
 

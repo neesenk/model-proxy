@@ -163,6 +163,11 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 #     env: {Z_AI_API_KEY: "${account.api_key}", Z_AI_MODE: ZHIPU}
 #                           # env 值：${account.api_key} / env:VAR 间接形式，或良性键的字面量；凭据形键名（…_KEY/TOKEN/SECRET/…）拒绝字面量
 #                           # command 与 env 仅对 transport: stdio 有效，配在 streamable/sse 上会被校验拒绝
+#   deepseek-search:        # 内置子进程：二进制自带 `mcp-server deepseek-search`（DeepSeek
+#     transport: stdio      # web_search/url_fetch 工具），command 指向已部署的 model-proxy 本体即可
+#     provider: deepseek
+#     command: [/path/to/model-proxy, mcp-server, deepseek-search]
+#     env: {DEEPSEEK_API_KEY: "${account.api_key}"}
 #   exa:                    # auth: none：匿公共端点
 #     url: https://mcp.exa.ai/mcp
 #     auth: none            # 自定义鉴权头：auth_header: X-Agent-Plan-Key（火山 datapro 形态，apikey provider 限定）

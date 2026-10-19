@@ -956,6 +956,37 @@ notifications/initialized + tools/list，JSON 与 SSE 分帧响应都支持）�
 
 ---
 
+## 13c. `mcp-server` — 内置 stdio MCP 工具服务器（网关子进程，非交互）
+
+```
+mcp-server <name>
+```
+
+随二进制内置的 MCP 工具服务器，按 stdio 传输契约运行（stdin/stdout 上的换行分隔
+JSON-RPC 2.0）。设计用途是网关的 `transport: stdio` 子进程：config 以
+`command: [<model-proxy 路径>, mcp-server, <name>]` 引用**同一份已部署二进制**，
+凭据经 `env: {…: "${account.api_key}"}` 模板注入——不引入 npx/node 外部运行时，
+普通二进制重建即随车更新。实现：`internal/cli/mcpserver`；它直接持有注入的
+stdin/stdout（不经 `ProcessCommand` 适配器，网关交互契约测试对这类流式绑定持显式
+白名单）。
+
+### 服务器清单
+
+| name | 工具 | 上游 | env |
+|---|---|---|---|
+| `deepseek-search` | `web_search`（query/count/need_content）、`url_fetch`（url） | DeepSeek `/v1/tools/search`、`/v1/tools/fetch`（Bearer；按成功次数计费，账号级各 5 QPS） | `DEEPSEEK_API_KEY`（必需，缺失时调用 fail-closed 报工具错误）、`DEEPSEEK_BASE_URL`（默认 `https://api.deepseek.com`，不带 `/v1`） |
+
+工具语义：参数契约违规（缺 query、count 越界、非法 url 等）在**任何出站前**答
+JSON-RPC `-32602`（不计费的失败）；上游失败（402/429/5xx、网络错误）答
+`isError: true` 的正常 tools/call 结果——failover 语义与每 server 子进程上限归
+`docs/architecture/mcp.md`。`initialize` 回显客户端 protocolVersion；
+ping/tools/list 本地应答。
+
+手动运行仅用于排障：自行 export 凭据 env 后 `echo '<initialize JSON>' |
+model-proxy mcp-server deepseek-search`。未知 `<name>` exit 1；stdin EOF 正常退出 0。
+
+---
+
 ## 14. `pin` / `unpin` — 手动钉住路由 provider（热切换，需 daemon + web.enabled）
 
 ```
@@ -1222,7 +1253,8 @@ decision tokens: N (X.XX% of all tokens)
 - `internal/cli/audit/audit_cli_test.go`：`audit` 表格/`--json` 输出、flag 与时间解析错误文案；`internal/cli/doctor/doctor_drift_audit_test.go`：漂移审计记录（host-only detail、当日去重、audit 关闭）。
 - `internal/cli/diag/shadow_report_render_test.go`：`shadow report` 表头/数据列/截断/紧凑数字与 disabled/empty 提示文案；`internal/cli/diag/shadow_report_cmd_test.go`：`--from`/`--to` query 透传（`MakeURLQuery`）。
 - `internal/cli/diag/routing_report_test.go`：`routing report` 弱标签聚合、selector 混淆矩阵、成本基线、判定开销、空窗/无数据路径、`--json` 结构。
-- `internal/cli/status/routes_cmd_test.go`：`routes` 列表/详情/未知模型输出；`internal/cli/help_sync_test.go`：命令注册表 ↔ `-h` 清单/`Help` map/CLI.md 章节/测试子进程分发的双向同步契约；`internal/archtest` 的 `NewApplication` 注册数 ↔ `Commands` 字面量条目数自洽契约。
+- `internal/cli/status/routes_cmd_test.go`：`routes` 列表/详情/未知模型输出；`internal/cli/help_sync_test.go`：命令注册表 ↔ `-h` 清单/`Help` map/CLI.md 章节/测试子进程分发的双向同步契约；`internal/archtest` 的 `NewApplication` 注册数 ↔ `Commands` 字面量条目数自洽契约（ProcessCommand 均匀绑定 + 流式直绑白名单 `streamBoundCommands`）。
+- `internal/cli/mcpserver/deepseek_test.go`：deepseek-search 工具面、参数契约违规 -32602 且零出站、上游失败 isError 文案、凭据 env 契约；`deepseek_child_test.go`：自孵化子进程端到端（initialize/通知静默/tools/call + `${account.api_key}` 注入键直达 API 的 Authorization）。
 - `internal/app/web_config_test.go` + `internal/web/jstests/contract.test.mjs`：`GET /api/config` 文档键 ↔ `appapi.ConfigDocument` 字段 ↔ 前端 `configCache` 读取字段的同步契约。
 
 新增列/字段允许（追加式，向后兼容）；改动既有列宽、既有文案、退出码、stdout/stderr 归属**需先与用户确认**。
