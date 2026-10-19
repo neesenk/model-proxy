@@ -35,8 +35,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSessions serves GET /api/sessions: per-session aggregates (span,
-// requests/errors, providers/models, token totals, equivalent USD cost) from
-// the request log's newest records. Requires request_log to be enabled.
+// requests/errors, providers/models, token totals, equivalent USD cost). The
+// index path aggregates each kept session over its whole retained history
+// (the same rows /api/requests?session= lists); the no-index scan fallback
+// keeps a bounded newest-records window. Requires request_log to be enabled.
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	queries := s.reads.RequestLogQueries()
 	if queries == nil {
@@ -63,7 +65,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		return pricing.ComputeCost(usage.Input, usage.Output, usage.CacheRead, usage.CacheCreation, entry)
 	}
-	sessions, err := queries.SessionSummaries(2000, limit, costOf)
+	sessions, err := queries.SessionSummaries(limit, costOf)
 	if err != nil {
 		// The underlying error may embed local paths; log it server-side and
 		// return only a generic message to the client.

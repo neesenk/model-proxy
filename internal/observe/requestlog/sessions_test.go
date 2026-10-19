@@ -24,7 +24,7 @@ func TestSessionSummariesAggregatesAndCosts(t *testing.T) {
 			ResponseBody: `{"usage":{"input_tokens":9999,"output_tokens":9999}}`},
 	})
 
-	sessions, err := SessionSummaries(dir, 100, 10, func(provider, model string, u Usage) float64 {
+	sessions, err := SessionSummaries(dir, 10, func(provider, model string, u Usage) float64 {
 		// Deterministic stub: $1 per input token, $2 per output token.
 		return float64(u.Input) + 2*float64(u.Output)
 	})
@@ -67,7 +67,7 @@ func TestSessionSummariesAggregatesAndCosts(t *testing.T) {
 	}
 
 	// Limit cut keeps the most active session.
-	limited, err := SessionSummaries(dir, 100, 1, nil)
+	limited, err := SessionSummaries(dir, 1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestSessionSummariesAgents(t *testing.T) {
 		{Ts: "2026-08-01T10:04:00Z", RequestID: "5", SessionID: "sess-c", Provider: "zhipu", UpstreamModel: "glm-4.7", Status: 200},
 	})
 
-	sessions, err := SessionSummaries(dir, 100, 10, nil)
+	sessions, err := SessionSummaries(dir, 10, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

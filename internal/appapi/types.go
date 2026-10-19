@@ -906,7 +906,13 @@ type RequestLogQueries interface {
 	// slow index-miss fallback), "llm" reads the requests store, "" tries
 	// the requests store first and falls through to the split stream.
 	Detail(requestID, stream string) ([]requestlog.Record, error)
-	SessionSummaries(scanLimit, limit int, costOf func(provider, model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error)
+	// SessionSummaries aggregates per-session traffic over the request log.
+	// The index path answers exactly — every retained record of a kept session
+	// counts, matching the un-windowed /api/requests?session= drill-down; the
+	// directory-scan fallback (index unavailable) keeps a bounded newest-N
+	// window and can under-report sessions older than it. limit keeps the
+	// most recently active sessions.
+	SessionSummaries(limit int, costOf func(provider, model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error)
 	// KeyUsage aggregates per-forward-key usage (LLM records, shadow
 	// excluded); keyID "" = every key. Index-backed when available, JSONL
 	// scan fallback otherwise — same twin semantics as ShadowReport.

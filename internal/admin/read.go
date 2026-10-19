@@ -301,11 +301,11 @@ func (q requestLogQueries) Detail(requestID, stream string) ([]requestlog.Record
 	return requestlog.QueryRecordsIn(q.mcpDir, requestlog.MCPFilePrefix, requestlog.Filter{RequestID: requestID, Limit: 50})
 }
 
-func (q requestLogQueries) SessionSummaries(scanLimit, limit int, costOf func(provider, model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error) {
+func (q requestLogQueries) SessionSummaries(limit int, costOf func(provider, model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error) {
 	if q.index != nil {
-		return q.index.SessionSummaries(scanLimit, limit, costOf)
+		return q.index.SessionSummaries(limit, costOf)
 	}
-	return requestlog.SessionSummaries(q.dir, scanLimit, limit, costOf)
+	return requestlog.SessionSummaries(q.dir, limit, costOf)
 }
 
 // GuardAnnotations on the raw port: the request log store itself knows

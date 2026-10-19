@@ -230,27 +230,38 @@ type SessionSummary struct {
 	CostUSD        float64  `json:"cost_usd"`
 }
 
-// SessionSummaries groups the newest scanLimit records by session id and
-// keeps the limit most-recently-active sessions. costOf (nil = CostUSD stays
-// zero) receives the provider, the upstream model and per-session usage;
-// mirrors the analytics cost path (pricing.ResolveAliased + ComputeCost at
-// the caller).
-func SessionSummaries(dir string, scanLimit, limit int, costOf func(provider, model string, usage Usage) float64) ([]SessionSummary, error) {
+// sessionScanWindow bounds the file-scan fallback's aggregation pass: the
+// scan reads newest-first and cannot afford the whole retained history on
+// every call. The index path aggregates exactly; on this path a session whose
+// records all fall outside the window is missing from the result, and one
+// straddling it reports only its newest records — the degradation the index
+// exists to avoid.
+const sessionScanWindow = 2000
+
+// SessionSummaries groups the log's newest records by session id and keeps
+// the limit most-recently-active sessions. It is the directory-scan fallback
+// used when the tailing index is unavailable: the aggregation window is
+// bounded to the newest sessionScanWindow records (see the const), so a
+// session older than that window is under-reported here while the index path
+// answers exactly. costOf (nil = CostUSD stays zero) receives the provider,
+// the upstream model and per-session usage; mirrors the analytics cost path
+// (pricing.ResolveAliased + ComputeCost at the caller).
+func SessionSummaries(dir string, limit int, costOf func(provider, model string, usage Usage) float64) ([]SessionSummary, error) {
 	// UsageOnly: usage is parsed as each line is read and the bodies are
 	// dropped before the top-K heap retains the record — scanning 2000
 	// records must not pin 2000 full (up-to-5MiB-each) bodies in memory.
-	records, err := query(dir, filePrefix, Filter{Limit: scanLimit, UsageOnly: true}, false, nil)
+	records, err := query(dir, filePrefix, Filter{Limit: sessionScanWindow, UsageOnly: true}, false, nil)
 	if err != nil {
 		return nil, err
 	}
 	return aggregateSessions(records, limit, costOf), nil
 }
 
-// aggregateSessions is the shared grouping behind the file-scan
-// SessionSummaries and the index-backed Indexer.SessionSummaries: records must
-// arrive newest-first with ParsedUsage populated, and the index path must
-// apply the same top-K window (newest scanLimit rows, session-less rows
-// included) before calling this.
+// aggregateSessions is the file-scan fallback's grouping: records must arrive
+// newest-first with ParsedUsage populated. The index path (Indexer.
+// SessionSummaries) aggregates in SQL instead and no longer shares this code —
+// it answers over each kept session's whole retained history, which a
+// window-bounded record list cannot express.
 func aggregateSessions(records []Record, limit int, costOf func(provider, model string, usage Usage) float64) []SessionSummary {
 	type modelKey struct {
 		provider, model string

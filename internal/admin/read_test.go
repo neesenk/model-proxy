@@ -263,7 +263,7 @@ func TestRequestLogQueriesFallback(t *testing.T) {
 	if err != nil || len(records) != 1 || records[0].RequestBody != "body" {
 		t.Fatalf("fallback detail = (%+v, %v)", records, err)
 	}
-	sessions, err := queries.SessionSummaries(2000, 50, nil)
+	sessions, err := queries.SessionSummaries(50, nil)
 	if err != nil || len(sessions) != 1 || sessions[0].SessionID != "s1" || sessions[0].Usage.Input != 3 {
 		t.Fatalf("fallback sessions = (%+v, %v)", sessions, err)
 	}
@@ -336,7 +336,7 @@ func TestRequestLogQueriesIndexDelegation(t *testing.T) {
 	// SessionSummaries port): the s1 session aggregates the one LLM row —
 	// the shadow row carries no session id and must not create a session.
 	for {
-		sessions, err := queries.SessionSummaries(2000, 50, nil)
+		sessions, err := queries.SessionSummaries(50, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -688,9 +688,11 @@ func TestIndexUsageParity(t *testing.T) {
 	}
 }
 
-// TestIndexSessionSummariesEquivalence: the index-backed session aggregation
-// equals the file-scan aggregation row for row, including shadow counting,
-// error counting and the cost callback.
+// TestIndexSessionSummariesEquivalence: for data inside the file-scan window
+// the index-backed session aggregation equals the file-scan aggregation row
+// for row, including shadow counting, error counting and the cost callback.
+// (Beyond that window the two deliberately diverge — see
+// TestIndexSessionSummariesExactBeyondScanWindow.)
 func TestIndexSessionSummariesEquivalence(t *testing.T) {
 	dir := t.TempDir()
 	writeIndexFixture(t, dir)
@@ -700,37 +702,194 @@ func TestIndexSessionSummariesEquivalence(t *testing.T) {
 	costOf := func(provider, model string, usage Usage) float64 {
 		return float64(len(provider)+len(model)) + float64(usage.Input+usage.Output)/1000
 	}
-	want, err := SessionSummaries(dir, 2000, 50, costOf)
+	want, err := SessionSummaries(dir, 50, costOf)
 	if err != nil {
 		t.Fatalf("scan sessions: %v", err)
 	}
-	got, err := indexer.SessionSummaries(2000, 50, costOf)
+	got, err := indexer.SessionSummaries(50, costOf)
 	if err != nil {
 		t.Fatalf("index sessions: %v", err)
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("sessions differ:\nindex: %+v\nscan:  %+v", got, want)
 	}
-	// ScanLimit bounds the window on both paths: with scanLimit 1 only the
-	// newest record participates (r4, session-less) → no sessions at all.
-	got, err = indexer.SessionSummaries(1, 50, costOf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, err = SessionSummaries(dir, 1, 50, costOf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(got, want) || len(got) != 0 {
-		t.Fatalf("scanLimit=1 sessions: index %+v vs scan %+v", got, want)
-	}
 	// limit caps the kept sessions (most recently active first).
-	got, err = indexer.SessionSummaries(2000, 1, costOf)
+	got, err = indexer.SessionSummaries(1, costOf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 || got[0].SessionID != "sess-b" {
 		t.Fatalf("limit=1 sessions = %+v, want only sess-b", got)
+	}
+}
+
+// TestIndexSessionSummariesExactBeyondScanWindow pins the 12-vs-2 session
+// summary bug: the summary must cover a kept session's WHOLE retained
+// history, because the drill-down table (/api/requests?session=) is
+// un-windowed — a global newest-N aggregate window truncated any session
+// whose older records fell out of it, so a session active today but started
+// days ago reported only its newest requests (and the matching token/cost
+// subset). The index path answers exactly over the whole retained set; the
+// file-scan fallback keeps its bounded newest-sessionScanWindow pass, so the
+// same fixture underreports there by design — that degradation is the
+// documented reason the index is the default read path.
+func TestIndexSessionSummariesExactBeyondScanWindow(t *testing.T) {
+	dir := t.TempDir()
+	// One session's two records at the START of history...
+	writeRecordFile(t, dir, "requests-20260701.log", []Record{
+		{Ts: "2026-07-01T00:00:00Z", RequestID: "o1", SessionID: "s-old", Provider: "zhipu", UpstreamModel: "glm-4.7", Agent: "claude-code", Status: 200, ResponseBody: `{"usage":{"input_tokens":11,"output_tokens":2}}`},
+		{Ts: "2026-07-01T00:01:00Z", RequestID: "o2", SessionID: "s-old", Provider: "zhipu", UpstreamModel: "glm-4.7", Agent: "claude-code", Status: 200, ResponseBody: `{"usage":{"input_tokens":5,"output_tokens":7}}`},
+	})
+	// ...then session-less filler newer than the scan window, pushing both
+	// s-old records out of any newest-2000 pass.
+	filler := make([]Record, sessionScanWindow+10)
+	for i := range filler {
+		filler[i] = Record{
+			Ts:        fmt.Sprintf("2026-07-02T%02d:%02d:%02dZ", i/3600, i/60%60, i%60),
+			RequestID: fmt.Sprintf("filler-%d", i),
+			Status:    200,
+		}
+	}
+	writeRecordFile(t, dir, "requests-20260702.log", filler)
+
+	indexer := newTestIndexer(t, dir)
+	mustReconcile(t, indexer)
+	got, err := indexer.SessionSummaries(50, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].SessionID != "s-old" {
+		t.Fatalf("index sessions = %+v, want exactly s-old", got)
+	}
+	s := got[0]
+	if s.Requests != 2 || s.FirstTs != "2026-07-01T00:00:00Z" || s.LastTs != "2026-07-01T00:01:00Z" {
+		t.Fatalf("s-old summary = %+v, want both records and their span", s)
+	}
+	if s.Usage.Input != 16 || s.Usage.Output != 9 {
+		t.Fatalf("s-old usage = %+v, want in=16 out=9 (both records, not just the newest)", s.Usage)
+	}
+	if len(s.Providers) != 1 || s.Providers[0] != "zhipu" || len(s.Agents) != 1 || s.Agents[0] != "claude-code" {
+		t.Fatalf("s-old identity = providers %v agents %v", s.Providers, s.Agents)
+	}
+	// The scan fallback on the same directory keeps its bounded window: the
+	// fillers crowd s-old out entirely. Pinned as the documented degradation
+	// (make the scan exact and this assertion flips — update it consciously).
+	scan, err := SessionSummaries(dir, 50, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scan) != 0 {
+		t.Fatalf("scan sessions = %+v, want none (s-old is outside the bounded scan window)", scan)
+	}
+}
+
+// TestIndexSessionSummariesIncrementalCache pins the incremental aggregate
+// cache: the folded state (reconcile commits appending records) must equal
+// the from-scratch SQL computation across appends AFTER a session is already
+// cached, truncation re-index (no double counting) and retention deletes
+// (vanished files). SessionSummaries with limit <= 0 is the uncached
+// from-scratch path, so the differential is the public method against itself.
+func TestIndexSessionSummariesIncrementalCache(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "requests-20260701.log")
+	costOf := func(provider, model string, usage Usage) float64 {
+		return float64(usage.Input + usage.Output)
+	}
+	s1a := Record{Ts: "2026-07-01T00:00:00Z", RequestID: "a1", SessionID: "s1", Provider: "p1", UpstreamModel: "m1", Agent: "ag1", Status: 200, ResponseBody: `{"usage":{"input_tokens":10,"output_tokens":2}}`}
+	s1b := Record{Ts: "2026-07-01T00:01:00Z", RequestID: "a2", SessionID: "s1", Provider: "p2", UpstreamModel: "m1", Agent: "ag1", Status: 500}
+	appendRecordLines(t, path, s1a, s1b)
+	indexer := newTestIndexer(t, dir)
+	mustReconcile(t, indexer)
+
+	diff := func(stage string) {
+		t.Helper()
+		fromScratch, err := indexer.SessionSummaries(-1, costOf)
+		if err != nil {
+			t.Fatalf("%s: scratch: %v", stage, err)
+		}
+		cached, err := indexer.SessionSummaries(10, costOf)
+		if err != nil {
+			t.Fatalf("%s: cached: %v", stage, err)
+		}
+		if !reflect.DeepEqual(fromScratch, cached) {
+			t.Fatalf("%s: folded cache diverged from SQL:\ncache:  %+v\nscratch: %+v", stage, cached, fromScratch)
+		}
+	}
+
+	diff("initial commit")
+	// Prime the cache, then append records the fold path must absorb.
+	if _, err := indexer.SessionSummaries(10, costOf); err != nil {
+		t.Fatal(err)
+	}
+	appendRecordLines(t, path,
+		Record{Ts: "2026-07-01T00:02:00Z", RequestID: "a3", SessionID: "s1", Provider: "p3", UpstreamModel: "m2", Agent: "ag2", Status: 200, ResponseBody: `{"usage":{"input_tokens":7,"output_tokens":1}}`},
+		// Attempt legs and session-less rows must fold into nothing.
+		Record{Ts: "2026-07-01T00:02:30Z", RequestID: "a3", SessionID: "s1", Provider: "p1", UpstreamModel: "m1", Status: 502, AttemptOnly: true},
+		Record{Ts: "2026-07-01T00:02:40Z", RequestID: "x1", Provider: "p1", Status: 200},
+	)
+	mustReconcile(t, indexer)
+	diff("append after cache primed")
+
+	// A second, newer file with its own session — ranking and per-session
+	// states must both survive the fold.
+	other := filepath.Join(dir, "requests-20260702.log")
+	appendRecordLines(t, other, Record{Ts: "2026-07-02T00:00:00Z", RequestID: "b1", SessionID: "s2", Provider: "p1", UpstreamModel: "m1", Agent: "ag1", Status: 200, Shadow: true, ResponseBody: `{"usage":{"input_tokens":3,"output_tokens":4}}`})
+	mustReconcile(t, indexer)
+	diff("second file")
+	got, err := indexer.SessionSummaries(10, costOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].SessionID != "s2" || got[1].SessionID != "s1" {
+		t.Fatalf("ranking = %+v, want s2 (newest) then s1", got)
+	}
+	s1 := got[1]
+	if s1.Requests != 3 || s1.Errors != 1 || s1.ShadowRequests != 0 {
+		t.Fatalf("s1 folded counters = %+v (attempt leg must not count)", s1)
+	}
+	if s1.Usage.Input != 17 || s1.Usage.Output != 3 || s1.CostUSD != 20 {
+		t.Fatalf("s1 folded usage/cost = %+v, want in 17 out 3 cost 20", s1)
+	}
+	if len(s1.Providers) != 3 || s1.Providers[0] != "p3" || s1.Providers[1] != "p2" || s1.Providers[2] != "p1" {
+		t.Fatalf("s1 providers = %v, want newest-first [p3 p2 p1]", s1.Providers)
+	}
+	if len(s1.Agents) != 2 || s1.Agents[0] != "ag2" || s1.Agents[1] != "ag1" {
+		t.Fatalf("s1 agents = %v, want [ag2 ag1]", s1.Agents)
+	}
+
+	// Truncation re-index: rewriting the first file smaller drops its rows
+	// and re-reads from zero — the fold must not double-count.
+	short := `{"ts":"2026-07-01T00:00:30Z","request_id":"a0","session_id":"s1","provider":"p1","upstream_model":"m1","agent":"ag1","status":200,"response_body":"{\"usage\":{\"input_tokens\":100,\"output_tokens\":9}}"}
+`
+	if err := os.WriteFile(path, []byte(short), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustReconcile(t, indexer)
+	diff("truncation re-index")
+	got, err = indexer.SessionSummaries(10, costOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]SessionSummary{}
+	for _, s := range got {
+		byID[s.SessionID] = s
+	}
+	if s := byID["s1"]; s.Requests != 1 || s.Usage.Input != 100 || s.FirstTs != "2026-07-01T00:00:30Z" {
+		t.Fatalf("post-truncation s1 = %+v, want only the rewritten row (1 request, in 100)", s)
+	}
+
+	// Retention sweep: the vanished file's sessions drop out, s1 recomputes.
+	if err := os.Remove(other); err != nil {
+		t.Fatal(err)
+	}
+	mustReconcile(t, indexer)
+	diff("retention delete")
+	got, err = indexer.SessionSummaries(10, costOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].SessionID != "s1" {
+		t.Fatalf("post-retention sessions = %+v, want only s1", got)
 	}
 }
 
@@ -816,7 +975,7 @@ func TestIndexConcurrentReconcileAndQueries(t *testing.T) {
 					t.Errorf("concurrent summaries: %v", err)
 					return
 				}
-				if _, err := indexer.SessionSummaries(2000, 50, nil); err != nil {
+				if _, err := indexer.SessionSummaries(50, nil); err != nil {
 					t.Errorf("concurrent sessions: %v", err)
 					return
 				}

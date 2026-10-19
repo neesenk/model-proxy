@@ -189,8 +189,11 @@ cursor 之后」的未索引字节：一个 reconcile tick 内刚 commit、index
 记录不会误报 not logged，而从未落盘的 id（任何 pre-commit 终局，如 live 视图的
 client-gone 499）保持毫秒级 miss，不再是全目录秒级扫描。从未 reconcile 过的文件
 〔索引重建中〕cursor 为 0、整个文件都是尾部；截断/替换文件在 reconcile 回卷 cursor
-之前没有可读尾部）、`SessionSummaries`（索引列供给
-usage，聚合复用扫描版同一 Go 代码）。`/api/shadow-report` 的配对只需要 metadata
+之前没有可读尾部）、`SessionSummaries`（**对每个入列 session 的全部留存历史精确聚合**，
+与 `/api/requests?session=` 下钻同口径——排名走 `idx_records_ts_session` 部分覆盖索引的
+newest-first 游标，聚合由 Indexer 内增量 per-session 缓存供给：缺失子集一次分组 SQL 算齐、
+插入批次逐条折叠、行删除按 session 失效；扫描回退路径保持有界窗口，老 session 在降级下
+少计，详见 `docs/web-api.md` 的会话成本汇总节）。`/api/shadow-report` 的配对只需要 metadata
 （request_id/shadow 标志/provider/status/latency/response_size，不需要 body），同样
 走索引：`ShadowReport`（索引列供给配对元数据，聚合复用扫描版同一 Go 代码，
 Limit 同为配对前的新到旧 top-K）；索引不可用回落目录扫描，语义一致。indexer 由 `internal/app/observe_adapters.go initRequestLog`

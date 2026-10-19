@@ -86,8 +86,8 @@ func (d dirRequestLogQueries) Detail(id, stream string) ([]requestlog.Record, er
 	}
 	return requestlog.QueryRecords(d.dir, requestlog.Filter{RequestID: id, Limit: 50})
 }
-func (d dirRequestLogQueries) SessionSummaries(scanLimit, limit int, costOf func(string, string, requestlog.Usage) float64) ([]requestlog.SessionSummary, error) {
-	return requestlog.SessionSummaries(d.dir, scanLimit, limit, costOf)
+func (d dirRequestLogQueries) SessionSummaries(limit int, costOf func(string, string, requestlog.Usage) float64) ([]requestlog.SessionSummary, error) {
+	return requestlog.SessionSummaries(d.dir, limit, costOf)
 }
 
 // The raw directory adapter has no guard sources; the correlation join lives
