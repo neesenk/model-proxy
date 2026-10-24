@@ -12,6 +12,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { bootUiE2E } from './uiboot.mjs';
 
@@ -2582,4 +2583,60 @@ test('MCP Servers 行点击展开详情：自动 probe + tools 表 + Test 自动
   } finally {
     await ctx.ev(`window.fetch = window.__origFetch3; delete window.__origFetch3; delete window.__mcpProbeCalls;`);
   }
+});
+
+// Regression (2026-10-24): a page refresh landing DIRECTLY on #analytics must
+// fold pooled provider keys to "name · <label>" on the FIRST render. The
+// label index (providerLabels) used to be filled only by the Status and
+// Accounts tabs' /api/accounts fetches, so a fresh landing on analytics
+// showed the 8-char internal id fallback ("dummy · <id8>/m1") until one of
+// those tabs was visited — and a refresh brought the short ids back. Fixed
+// by the one-shot ensureAccountLabels prefetch (boot + analytics render).
+// Placed last: the reload below resets the SPA, so earlier tests' in-page
+// state must already be done with.
+test('analytics landing folds pooled provider keys to account labels', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // Real traffic through the sandbox's single-account pool gives the
+  // analytics series a pooled key "dummy#<id>" (pool fixture in uiboot.mjs).
+  // /api/analytics reads only durable minute buckets, which the flusher
+  // commits at the NEXT minute boundary — so wait SERVER-SIDE for the series
+  // before reloading (driveRequest's pattern), otherwise the UI's first
+  // render races an empty window for up to a minute.
+  await driveRequest(1, 0);
+  const analyticsHasDummy = async () => {
+    const to = Math.floor(Date.now() / 1000);
+    const r = await fetch(`${ctx.baseUrl}/api/analytics?from=${to - 3600}&to=${to}&granularity=minute&by=model`);
+    if (!r.ok) return false;
+    const data = await r.json();
+    return (data.series || []).some((s) => String(s.provider || '').startsWith('dummy#'));
+  };
+  await ctx.waitFor('analytics series committed', analyticsHasDummy, 90000);
+  // The label is read from the live account state, not hardcoded: an earlier
+  // test renames the pool account ('e2e' → 'renamed-e2e') and this test must
+  // assert the fold, not one specific label value.
+  const acc = await (await fetch(`${ctx.baseUrl}/api/accounts`)).json();
+  const label = ((acc.providers || []).find((p) => p.name === 'dummy') || {})
+    .accounts?.[0]?.label || '';
+  assert.ok(label, 'sandbox pool account must carry a label');
+  // Switch the SPA to analytics, then RELOAD — the exact bug path. A CDP
+  // Page.navigate to a URL differing only by hash is a same-document jump
+  // (no reload; the boot's default Status tab would have filled the label
+  // caches already) — location.reload() is the real "F5 on #analytics".
+  await ctx.ev(`location.hash = '#analytics'`);
+  await ctx.waitFor('analytics tab active', () => ctx.ev(
+    `document.getElementById('tab-analytics').classList.contains('active')`));
+  await ctx.ev(`location.reload()`);
+  await ctx.waitFor('real UI document reloaded (analytics landing)', () => ctx.ev(
+    `location.hash.startsWith('#analytics') && document.readyState === 'complete'
+     && !!document.querySelector('.tab-panel.active')`), 20000);
+  // The leaderboard must carry the folded label on first paint.
+  await ctx.waitFor('analytics table shows folded label', () => ctx.ev(
+    `(document.getElementById('an-table')?.innerText || '').includes(${JSON.stringify('dummy · ' + label)})`));
+  // …and must not fall back to the 8-char internal id prefix. id derives
+  // exactly like uiboot's pool fixture: sha256('STATIC-TEST-KEY')[:16].
+  const id8 = crypto.createHash('sha256').update('STATIC-TEST-KEY').digest('hex').slice(0, 8);
+  assert.equal(await ctx.ev(
+    `(document.getElementById('an-table')?.innerText || '').includes(${JSON.stringify(id8)})`),
+    false, 'fresh analytics landing must not show the internal account id');
+  assert.deepEqual(await ctx.pageErrors(), [], 'navigation must not raise JS errors');
 });

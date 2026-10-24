@@ -9130,6 +9130,27 @@ function renderProviderDetail(p, quota, tokens) {
 // pool size, and display layers fold that key back to the user-provided
 // account label.
 
+// ensureAccountLabels is the one-shot best-effort /api/accounts prefetch
+// backing providerLabels on tabs that render pooled provider keys without
+// owning an accounts fetch (analytics chart/table, request detail meta).
+// The two sources below are filled by the Status and Accounts tabs only, so
+// a page refresh landing anywhere else folded "name#<id>" keys to the 8-char
+// id fallback until one of those tabs happened to be visited. The result
+// feeds statusCache.accounts — the same payload renderStatusTab maintains,
+// later fetch wins. Concurrent callers share the in-flight promise; a failure
+// re-arms so the next render retries. Never rejects (best-effort).
+let accountLabelsPromise = null;
+function ensureAccountLabels() {
+  if (!accountLabelsPromise) {
+    accountLabelsPromise = apiGet('/api/accounts')
+      .then((data) => {
+        if (data && Array.isArray(data.providers)) statusCache.accounts = data.providers;
+      })
+      .catch(() => { accountLabelsPromise = null; });
+  }
+  return accountLabelsPromise;
+}
+
 // providerLabels builds the virtual-key → account-label index consumed by
 // providerDisplayName. Both caches carry /api/accounts payloads (the Status
 // panel's snapshot and the Accounts tab's own fetch); the later assignment
@@ -9958,8 +9979,12 @@ async function renderAnalyticsTab(background = false) {
   // renders from it on every full render, not just quota-pinned ones).
   // Failure keeps the last known quota — an unresolvable preset degrades to
   // all-time below, and the stale banner carries the analytics fetch itself.
+  // The account-labels prefetch rides the same await (it never rejects):
+  // pooled series keys must fold to "name · <label>" on the FIRST render —
+  // without it, a refresh landing on #analytics showed the 8-char id
+  // fallback until the Status or Accounts tab was visited.
   try {
-    const st = await apiGet('/api/status');
+    const [st] = await Promise.all([apiGet('/api/status'), ensureAccountLabels()]);
     if (st && st.quota) anQuota = st.quota;
   } catch (_) { /* keep last known quota */ }
   // Window bounds drive both the query and the granularity gating — computed
@@ -10934,7 +10959,13 @@ async function boot() {
   // #requests/<stream>_live?session=… is consumed by renderRequestsTab/renderLiveCard
   // (the deterministic post-mount point); nothing to apply here.
   // Update the header connection indicator regardless of the landing tab,
-  // then keep it ticking on every tab (see maybeConnRefresh).
+  // then keep it ticking on every tab (see maybeConnRefresh). The one-shot
+  // account-labels prefetch rides along: tabs that render pooled provider
+  // keys without owning an accounts fetch (analytics, requests detail) fold
+  // "name#<id>" keys via providerLabels, whose sources the Status and
+  // Accounts tabs fill — a refresh landing elsewhere would otherwise show
+  // the 8-char id fallback (see ensureAccountLabels).
+  ensureAccountLabels();
   refreshConnIndicator();
   maybeConnRefresh();
 }
