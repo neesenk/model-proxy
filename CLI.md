@@ -168,30 +168,46 @@ reload 结果在 daemon 的 **log 文件**里（`[reload] config reloaded succes
 开发机上 `model-proxy serve` 常同时是 coding agent 自己的 LLM 网关。把 kill 和
 start 拆到两次工具调用/两个终端步饗，中间的下线窗口会让依赖它的 agent 下一次
 模型调用直接 `Connection error`——连生成下一条重启命令都做不到，形成自锁
-（陷阱条目见 `docs/engineering/pitfalls.md` #24）。推荐用封装好的脚本（端口默认从
-config.yaml 的 `listen:` 解析，`--build` 先构建再切换）：
+（陷阱条目见 `docs/engineering/pitfalls.md` #24b）。推荐用封装好的脚本（端口默认从
+config.yaml 的 `listen:` 解析，`--build` 先构建再切换，拉起的是 **daemon**
+supervisor+worker，新二进制起不来时自动回滚到 `model-proxy.old` 再拉起并 exit 1）：
 
 ```sh
-scripts/restart_serve.sh --build          # 等价于下面两步：构建 + 原子切换
+scripts/restart_serve.sh --build          # 构建 + 快照(.old) + 切换 + daemon 重启 + 失败回滚
 ```
+
+脚本的完整顺序（一次调用内原子完成）：`go build -o model-proxy.new` →
+`cp model-proxy model-proxy.old`（回滚快照，仅换入新二进制时创建）→ `mv .new
+model-proxy`（unix inode rename，不动运行中的进程）→ `serve stop`（daemon
+supervisor 或占 pidfile 的前台 serve，优雅→SIGKILL；脚本自管的 `--log-file`
+pidfile 与 config `log_file:`/`$TMPDIR` 派生两处都探测）→ 端口残留 SIGINT→
+SIGKILL 兜底 → 等端口释放 → `serve daemon --log-file serve.log` → 等端口监听
+（含 1s settle 复查，防"绑定即崩"的假成功）。失败回滚：先 `serve stop` 掉起不来的
+新 daemon（否则 pidfile 存活会让回滚的 daemonize 拒绝启动）→ `mv model-proxy.old
+model-proxy` → 重新 daemon；回滚成功 **exit 1**（含义是"未部署"，网关在旧二进制上
+服务），双败则明确报 DOWN。因此 config 建议显式设置 `log_file:`（本仓为
+`~/model-proxy/serve.log`）：脚本 daemon、裸 `serve stop`/`serve status`、
+login/logout 的 SIGHUP 全部经 `<log>.pid` 找到同一个 daemon。
 
 手动等价做法仍是**单条命令**完成切换：
 
 ```sh
 # 1) 先构建（不动运行中的进程）：
-go build -o model-proxy.new . && mv model-proxy.new model-proxy
-# 2) 原子切换（停+等+启一体，下线窗口 <1s）：
-PIDS=$(lsof -tiTCP:<PORT> -sTCP:LISTEN); [ -n "$PIDS" ] && kill -INT $PIDS; \
+go build -o model-proxy.new . && cp model-proxy model-proxy.old && mv model-proxy.new model-proxy
+# 2) 原子切换（停+启一体，下线窗口 <1s；daemon 模式）：
+./model-proxy serve stop; \
+  PIDS=$(lsof -tiTCP:<PORT> -sTCP:LISTEN); [ -n "$PIDS" ] && kill -INT $PIDS; \
   while lsof -tiTCP:<PORT> -sTCP:LISTEN >/dev/null 2>&1; do sleep 0.1; done; \
-  nohup ./model-proxy serve >> serve.log 2>&1 & \
+  ./model-proxy serve daemon --log-file serve.log && \
   for i in $(seq 1 60); do lsof -tiTCP:<PORT> -sTCP:LISTEN >/dev/null 2>&1 && break; sleep 0.1; done
+# 3) 2) 失败（端口没回来）时回滚：
+./model-proxy serve stop; mv model-proxy.old model-proxy && ./model-proxy serve daemon --log-file serve.log
 ```
 
-SIGINT 触发上述优雅退出（drain + final flush）；端口按 config.yaml 的 `listen:` 替换
-（本仓开发机为 15722）。注意脚本在按端口 SIGINT 之前会先停 pidfile 属主（daemon 的
-supervisor 或占 pidfile 的前台 serve，pidfile 由 config `log_file:` 派生、缺省
-`$TMPDIR/model-proxy.pid`）——只杀端口监听者对 daemon 模式只杀掉 worker，supervisor
-约 1 秒后就会重拉它抢回端口（见 `docs/engineering/pitfalls.md` #24b）。
+`serve stop` 发 SIGTERM 触发优雅退出（supervisor 转发 worker：drain + final
+flush）；端口按 config.yaml 的 `listen:` 替换（本仓开发机为 15722）。只杀端口
+监听者对 daemon 模式只杀掉 worker，supervisor 约 1 秒后就会重拉它抢回端口（见
+`docs/engineering/pitfalls.md` #24b）——必须先停 pidfile 属主。
 
 ### 性能剖析（可选）
 

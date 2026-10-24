@@ -17,7 +17,11 @@ yarn-error.log*
 .playwright-mcp
 
 # Build artifacts (Go binaries built inside the source dir, repo root).
+# .new is restart_serve.sh's build target (swapped in on success); .old is its
+# rollback snapshot (the binary that ran before the last --build swap).
 /model-proxy
+/model-proxy.new
+/model-proxy.old
 /model-proxy-linux
 /model-proxy-linux-*
 /model-proxy.exe

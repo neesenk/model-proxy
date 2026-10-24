@@ -86,18 +86,22 @@
     `internal/cli/serve/detach_windows.go`）只提供 child detach 属性，HTTP drain primitive
     留在 `internal/cli/serve/shutdown.go`；不要恢复第二个顶层分发器。
 24b. 重启运行中的 `model-proxy serve` 时，停与启必须在**同一条 shell 命令内原子完成**
-    （停 pidfile 属主 → SIGINT 端口监听者 → 轮询等端口释放 → nohup 拉起 → 轮询等端口
-    重新监听；已封装为 `scripts/restart_serve.sh`（`--build` 先构建再切换），手动模板见
-    `CLI.md`「手动重启」）。把 kill 和 start 拆到两次工具调用/两个终端步饗，
-    中间的下线窗口会断掉一切依赖该代理的下游——典型是把它当 LLM 网关用的 coding
-    agent 本身：agent 的下一次模型调用直接 `Connection error`，连"生成下一条重启
-    命令"都做不到，形成自锁。换新二进制时先单独 `go build`（构建不动运行中的
-    进程），再用单命令切换。对 daemon 模式（supervisor+worker）的 serve 绝不允许只
-    SIGINT 端口监听者：那只是 worker，supervisor 约 1s 后退避会重拉它——要么旧
-    worker 抢回端口造成"重启成功但跑旧二进制"，要么脚本实例胜出后 supervisor 残留
-    并在新实例退出时让旧二进制复活。必须先停 pidfile 属主（supervisor 或占 pidfile 的
-    前台 serve），`restart_serve.sh` 已内置这一步（config `log_file:` 派生，缺省
-    `$TMPDIR/model-proxy.pid`，信号前校验进程身份防误杀复用 pid）。
+    （`scripts/restart_serve.sh` 已封装：`serve stop`（pidfile 属主——daemon supervisor
+    或占 pidfile 的前台 serve，优雅→SIGKILL）→ 端口残留 SIGINT→SIGKILL → 轮询等端口
+    释放 → `serve daemon` 拉起 supervised daemon → 轮询等端口监听（1s settle 复查）；
+    `--build` 先构建 `.new`、快照 `model-proxy.old` 再切换，新二进制起不来时**先 stop
+    再回滚旧二进制重新 daemon** 并 exit 1——pidfile 存活会让回滚的 daemonize 拒绝启动，
+    漏掉这步的回滚必然失败。手动模板见 `CLI.md`「手动重启」）。把 kill 和 start 拆到
+    两次工具调用/两个终端步饗，中间的下线窗口会断掉一切依赖该代理的下游——典型是把它
+    当 LLM 网关用的 coding agent 本身：agent 的下一次模型调用直接 `Connection error`，
+    连"生成下一条重启命令"都做不到，形成自锁。换新二进制时先单独 `go build`（构建不
+    动运行中的进程），再用单命令切换。对 daemon 模式（supervisor+worker）的 serve
+    绝不允许只 SIGINT 端口监听者：那只是 worker，supervisor 约 1s 后退避会重拉它——
+    要么旧 worker 抢回端口造成"重启成功但跑旧二进制"，要么脚本实例胜出后 supervisor
+    残留并在新实例退出时让旧二进制复活。pidfile 派生有多处（脚本 daemon 的
+    `--log-file` 旁、config `log_file:`、缺省 `$TMPDIR/model-proxy.pid`）：config
+    显式设置 `log_file:` 让所有派生收敛到同一位置，否则裸 `serve stop`/login-SIGHUP
+    会找错文件。
 
 ## 日志和持久化
 
