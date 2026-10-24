@@ -254,7 +254,12 @@ func stopDaemonOnCleanup(t *testing.T, dir string, port int) {
 	}
 	t.Cleanup(func() {
 		stopAll()
-		if pid, err := pidOnPort(port); err == nil && isTestBinary(pid, binary) {
+		// The listener is normally the suite build output (the sandbox
+		// symlink resolves through /proc/<pid>/exe on Linux), but the
+		// rollback test replaces the symlink with a REAL copy at the
+		// sandbox path — accept both so the last-resort port kill still
+		// recognizes it under Linux's exact-path comparison.
+		if pid, err := pidOnPort(port); err == nil && (isTestBinary(pid, binary) || isTestBinary(pid, bin)) {
 			if err := stopServeProcess(pid); err != nil {
 				t.Errorf("stop leftover listener pid %d: %v", pid, err)
 			}
@@ -301,11 +306,15 @@ func processGone(pid int) bool {
 }
 
 // isTestBinary verifies pid belongs to the model-proxy binary we built for
-// this suite. On Linux /proc/<pid>/exe is authoritative; on Darwin we fall back
-// to the process command name from ps. Darwin reports comm as argv[0]
-// VERBATIM — "./model-proxy" for the script-started serve, an absolute path
-// for startServe's child — so both sides are compared by base name; an exact
-// string match would silently skip the kill and leak the orphaned serve.
+// this suite. On Linux /proc/<pid>/exe is authoritative — and it RESOLVES
+// symlinks, so the expected path must be whichever one the kernel will
+// report: the build output for the sandbox's symlinked ./model-proxy, or the
+// sandbox path itself after a rollback mv placed a real copy there. On Darwin
+// we fall back to the process command name from ps. Darwin reports comm as
+// argv[0] VERBATIM — "./model-proxy" for the script-started serve, an
+// absolute path for startServe's child — so both sides are compared by base
+// name; an exact string match would silently skip the kill and leak the
+// orphaned serve.
 func isTestBinary(pid int, binary string) bool {
 	if exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)); err == nil {
 		return exe == binary
@@ -574,8 +583,13 @@ func TestRestartRollsBackFailedBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no listener after rollback: %v", err)
 	}
-	if !isTestBinary(pid, binary) {
-		t.Fatalf("listener pid %d is not the model-proxy binary (the broken binary ended up serving)", pid)
+	// The rollback restored a REAL file at the sandbox path (mv
+	// model-proxy.old → model-proxy — the original symlink died with the
+	// staged broken script), so Linux /proc/<pid>/exe names dir/model-proxy,
+	// NOT the suite's build output; Darwin's base-name comparison is
+	// insensitive to the difference (why this only failed on Linux CI).
+	if !isTestBinary(pid, filepath.Join(dir, "model-proxy")) {
+		t.Fatalf("listener pid %d is not the rolled-back model-proxy binary (the broken binary ended up serving)", pid)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "model-proxy.old")); !os.IsNotExist(err) {
 		t.Errorf("model-proxy.old still present after rollback (mv did not consume it): %v", err)
