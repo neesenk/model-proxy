@@ -185,6 +185,7 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 	var cands []candidate
 	declared := false // some enabled target declares this canonical tool
 	quotaBlocked := false
+	acctBlocked := false
 	for _, t := range route.Targets {
 		backendName, ok := t.Tools[canonical]
 		if !ok || backendName == "" {
@@ -202,6 +203,15 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 			quotaBlocked = true
 			continue
 		}
+		if srv.MCPAuthMode() == "provider" {
+			if picks, raw := p.mcpSchedulableAccounts(snap, srv); raw > 0 && len(picks) == 0 {
+				// Pre-emptive skip: every account of this backend's provider is
+				// operator-frozen or in cooldown (the same availability rule as
+				// LLM scheduling). Call-time failover stays the backstop.
+				acctBlocked = true
+				continue
+			}
+		}
 		cands = append(cands, candidate{t, srv})
 	}
 	if len(cands) == 0 {
@@ -209,6 +219,11 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 			// Every backend declaring the tool is quota-exhausted: say so
 			// instead of misreporting -32602 "unknown tool".
 			respBody := mcpkg.BuildErrorResponse(frame.ID, -32000, fmt.Sprintf("tools/call: all backends for tool %q are quota-exhausted (provider MCP-tool window) — retry after the window resets", canonical))
+			p.mcpRouteWriteJSON(w, frame, sid, http.StatusOK, respBody)
+			return
+		}
+		if declared && acctBlocked {
+			respBody := mcpkg.BuildErrorResponse(frame.ID, -32000, fmt.Sprintf("tools/call: all backends for tool %q have no schedulable account (frozen or in cooldown) — see `model-proxy status` / `model-proxy unfreeze`", canonical))
 			p.mcpRouteWriteJSON(w, frame, sid, http.StatusOK, respBody)
 			return
 		}
@@ -317,16 +332,27 @@ func mcpRouteStdioKey(routeSID, server string) string {
 // so this is benign. stdio spawns are singleflight per registry key — only
 // one child is forked and racers reuse it (lockSpawn + re-check).
 func (p *Proxy) mcpRouteEnsureSub(snap RuntimeSnapshot, srv configdomain.MCPServer, server, sid string, inbound *http.Request) (mcpkg.SubSession, error) {
+	// Reuse gate: an initialized sub-session survives UNLESS its account was
+	// operator-frozen after binding (the credential must stop being used;
+	// RouteSubDrop also lets the stdio registry's eviction kill the child).
+	// Transient cooldowns keep the binding — the call-time failover remains
+	// the backstop there.
 	if sub, ok := p.mcpSessions.RouteSubGet(sid, server); ok && sub.Initialized {
-		return sub, nil
+		if sub.Account == "" || !p.runtimeState.AccountFrozen(sub.Account) {
+			return sub, nil
+		}
+		p.mcpSessions.RouteSubDrop(sid, server)
 	}
 	account := ""
 	if srv.MCPAuthMode() == "provider" {
-		accounts := mcpAccounts(snap, srv)
-		if len(accounts) == 0 {
+		picks, raw := p.mcpSchedulableAccounts(snap, srv)
+		if raw == 0 {
 			return mcpkg.SubSession{}, errors.New(mcpNoAccountErr(srv))
 		}
-		account = accounts[int(p.mcpRR.Add(1))%len(accounts)]
+		if len(picks) == 0 {
+			return mcpkg.SubSession{}, errors.New(mcpNoSchedulableErr(srv))
+		}
+		account = picks[int(p.mcpRR.Add(1))%len(picks)]
 	}
 	if srv.MCPStdio() {
 		// stdio backend: one child per (route session, server); the canned
@@ -336,7 +362,10 @@ func (p *Proxy) mcpRouteEnsureSub(snap RuntimeSnapshot, srv configdomain.MCPServ
 		unlock := p.mcpStdio.lockSpawn(key)
 		defer unlock()
 		if sub, ok := p.mcpSessions.RouteSubGet(sid, server); ok && sub.Initialized {
-			return sub, nil // a racing caller just built it
+			if sub.Account == "" || !p.runtimeState.AccountFrozen(sub.Account) {
+				return sub, nil // a racing caller just built it
+			}
+			p.mcpSessions.RouteSubDrop(sid, server)
 		}
 		conn, err := p.mcpStdioStart(snap, srv, account)
 		if err != nil {

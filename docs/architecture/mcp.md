@@ -16,6 +16,8 @@ Codex 等）指向代理而不是直接持有服务商凭据。两类后端：
 
 - **provider 型**（`provider: <name>`）：复用该 provider 的账号池凭据，请求时从当次
   RuntimeSnapshot 的 providers 选择账号注入；多账号池展开为虚拟 provider 参与选择。
+  选号遵循与 LLM 调度相同的可用性规则（`freeze`/限速窗/熔断的账号不接新流量，
+  `Manager.AccountHealthy`）；operator freeze 额外打断既有绑定（见「会话与账号」）。
 - **匿类型**（`auth: none`，或无 provider 的默认）：不注入任何凭据，面向公共端点。
 
 凭据只存在于内存注入路径：不进 config、不进日志、不进事件。自定义鉴权头
@@ -55,11 +57,15 @@ MCP-Protocol-Version + 改写后的 Mcp-Session-Id），凭据与 hop-by-hop 永
   已建会话上 re-initialize 且上游**轮换**了自己的 id 时，绑定刷新到新 id
   （`SessionTable.RefreshUpstream`），否则后续请求拿陈旧 id 必 404。
 - 会话绑定 server：拿着 A server 的会话访问 B server 按未知会话 404。
-- 无会话请求：池内 round-robin（进程级计数器）；**401 时一次**账号轮换重试（镜像
-  `BufferedLeg` 的一次 401 语义），不写健康状态、不引入完整 failover。带会话的 401
-  不轮换（换账号上游会话必失效），原样回客户端。
+- 无会话请求：**可调度账号**（freeze/限速/熔断排除后）内 round-robin（进程级计数器）；
+  **401 时一次**账号轮换重试（镜像 `BufferedLeg` 的一次 401 语义，轮换候选同样只取
+  可调度账号），不写健康状态、不引入完整 failover。带会话的 401 不轮换（换账号上游
+  会话必失效），原样回客户端。池非空但无可调度账号 → 503，报文点名 frozen/cooldown
+  （区别于「未登录账号」的 503）。
 - reload 换代：条目存 account id；换代后账号仍在池内则继续，已移除则清会话并答
-  **410 Gone**（fail-closed，客户端重新 initialize），绝不漂移到其他凭据。
+  **410 Gone**（fail-closed，客户端重新 initialize），绝不漂移到其他凭据。会话绑定的
+  账号被 operator `freeze` 后同样清会话答 **410 Gone**（凭据必须完全停用；stdio 子
+  进程随会话回收一起 kill；瞬态限速/熔断**不**打断绑定）。
 
 ## 观测
 
@@ -99,7 +105,9 @@ initialize + tools/list，经 `internal/mcp.Probe`）为离线诊断，出站走
 （与 `test` 相同的维护类调用语义）。`mcp test` 不接受路由名（路由是虚拟聚合面，
 错误信息引导改测成员 server 或经 daemon 探测路由）；Web 的 `/api/mcp/test` 额外接受
 路由名，按同样规则逐个探测 enabled 成员并经 `MergeCanonicalTools` 合并出规范工具面
-（Routes 详情视图用），CLI 仍保持成员级。契约见 `CLI.md` §13b。
+（Routes 详情视图用），探测选号同样排除冻结/冷却账号——池全冻结时探测直接报
+frozen/cooldown；离线 CLI `mcp test` 不经 daemon，看不到运行时 freeze 状态。
+契约见 `CLI.md` §13b。
 
 ## 聚合路由（`mcp_routes:`）
 
@@ -126,7 +134,10 @@ initialize + tools/list，经 `internal/mcp.Probe`）为离线诊断，出站走
   （`mcp.FailoverStatus`：网络错误、401、404、429、5xx；401/404 同时 drop 子会话强制
   重建）；HTTP <300 的 JSON-RPC **业务错误原样返回、绝不 failover**。全部失败 502。
   候选集为空时区分两种语义：无人声明该工具 → -32602 unknown tool；声明者全部因
-  配额窗耗尽被预降权跳过 → -32000 quota-exhausted（而非误报 unknown tool）。
+  配额窗耗尽被预降权跳过 → -32000 quota-exhausted（而非误报 unknown tool）；声明者
+  全部因账号不可调度（freeze/限速/熔断）被预跳过 → -32000 frozen/cooldown 文案。
+  子会话建立同样只在可调度账号内选号；已绑定账号被 freeze 后子会话丢弃并在健康
+  同胞上重建（瞬态冷却不打断）。
 - `DELETE`：向所有已初始化子会话转发 DELETE 后清本地会话；notifications 向已初始化
   子会话广播（fire-and-forget，客户端恒 202）；`ping` 本地应答；其他方法 -32601。
 - 会话表路由态（子会话/粘滞/工具缓存）只能经 `SessionTable.RouteXxx` 方法访问
