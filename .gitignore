@@ -15,6 +15,8 @@ yarn-error.log*
 .env
 .env.*
 .playwright-mcp
+# daemon pidfiles (beside each serve log file, e.g. serve.pid)
+*.pid
 
 # Build artifacts (Go binaries built inside the source dir, repo root).
 # .new is restart_serve.sh's build target (swapped in on success); .old is its
