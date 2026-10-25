@@ -298,6 +298,9 @@ providers:
     provider_id: typesafe
     billing: pay-as-you-go
     priority: 4
+    # api.typesafe.ai is geo-blocked (451) from the direct egress; the local
+    # outbound proxy (same one codex uses) reaches it.
+    proxy_url: http://127.0.0.1:7897
     decisions_base_url: https://api.typesafe.ai/v1
     models:
       - jev-latest
