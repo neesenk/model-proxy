@@ -181,9 +181,9 @@ request/response body 字符串——索引行只驻留元数据（历史上整�
 multi-MB body 曾把堆峰值顶到数 GB，字节封顶与置空 body 是它的双层防护）。
 Shutdown 在 log writer drain 之后跑一次 final reconcile（final flush）。
 写热路径（forward commit → Enqueue）不碰 SQLite。查询与扫描版语义逐字段一致：
-`SummariesWithFacets`（WHERE 映射 Filter，facets 在 filter 之前对全部已索引行
+`SummariesWithFacets`（WHERE 映射 Filter + **failover 腿折叠**：已配对 `attempt_only` 行不出列、折入其已提交行的 `failed_hops`（attempt 升序元数据），未应答请求〔无已提交行，如客户端中途断开〕保留最新一腿独立成行——status/errors 过滤作用于存活行终态，扫描回退路径同语义折叠；facets 在 filter 之前对全部已索引行
 采集——例外是 `Kind`：它是流选择器而非数据 facet，llm/mcp 过滤同样收窄 facets，
-mcp server 名不会污染 LLM 视图的 model 下拉；usage 字段只在 `UsageOnly` 下填充）、`Detail`（按 (file, offset, length)
+mcp server 名不会污染 LLM 视图的 model 下拉；**attempt_only 行同样不进 facets**（下拉描述产出行的流量，腿已折叠）；usage 字段只在 `UsageOnly` 下填充）、`Detail`（按 (file, offset, length)
 seek 读回完整行；索引未命中或 seek 失败回落 `tailScan`——只流式读取各文件「已索引
 cursor 之后」的未索引字节：一个 reconcile tick 内刚 commit、indexer 尚未追上的
 记录不会误报 not logged，而从未落盘的 id（任何 pre-commit 终局，如 live 视图的

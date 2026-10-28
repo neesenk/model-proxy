@@ -250,7 +250,7 @@ func SessionSummaries(dir string, limit int, costOf func(provider, model string,
 	// UsageOnly: usage is parsed as each line is read and the bodies are
 	// dropped before the top-K heap retains the record — scanning 2000
 	// records must not pin 2000 full (up-to-5MiB-each) bodies in memory.
-	records, err := query(dir, filePrefix, Filter{Limit: sessionScanWindow, UsageOnly: true}, false, nil)
+	records, err := query(dir, filePrefix, Filter{Limit: sessionScanWindow, UsageOnly: true}, false, false, nil)
 	if err != nil {
 		return nil, err
 	}

@@ -37,7 +37,7 @@ import {
   HEAT_DAYS, analyticsHeatLevel, analyticsYearGrid, analyticsYearMonthSpans, analyticsHeatCellSize, analyticsHeatTip,
   analyticsRowSortKey, ANALYTICS_TABLE_SORT, analyticsSortRows,
   analyticsMetricOptions, analyticsMetricAllowed,
-  liveSessionSummary, liveSessionOrder, shortSessionId, linkedProviders, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary, guardMarksDetailHTML, requestMetaHTML,
+  liveSessionSummary, liveSessionOrder, shortSessionId, linkedProviders, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary, guardMarksDetailHTML, requestMetaHTML, orderDetailRecords, committedRecordOf,
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
@@ -2378,8 +2378,12 @@ function detailRecordsHTML(recs, opts) {
   const o = opts || {};
   wireBodyChunks();
   wireRawBodies();
+  // Attempt-ascending: the failover story reads chronologically — failed
+  // hops' evidence first, the committed answer last (the API's own order is
+  // newest-first; display order is a view concern).
+  const ordered = orderDetailRecords(recs);
   let html = '';
-  for (const r of recs) {
+  for (const r of ordered) {
     const ct = responseContentType(r);
     const histId = registerRawBody(r.request_body, '', 'chat-history');
     const chat = chatViewHTML(r.request_body, r.response_body, ct, { histKey: histId });
@@ -2455,9 +2459,10 @@ function replayStripHTML(id, model) {
 
 // replayModelOf picks the model a replay will ask for from the record set:
 // the exposed name (what the client called) with the upstream/called names
-// as fallbacks for pre-exposure records.
+// as fallbacks for pre-exposure records. The committed record leads —
+// attempt legs share the model but never the captured body.
 function replayModelOf(recs) {
-  const r = recs && recs[0];
+  const r = committedRecordOf(recs);
   if (!r) return '';
   return r.exposed || r.upstream_model || r.called_model || '';
 }
@@ -2557,7 +2562,9 @@ function replayResultHTML(id, res) {
   wireRawBodies();
   const body = res.body || '';
   const cached = requestsDetailCache.get(id);
-  const reqBody = (cached && cached.length && cached[0].request_body) || '';
+  // The committed record carries the captured request body; attempt legs
+  // intentionally log none (the fold's storage contract).
+  const reqBody = (cached && cached.length && committedRecordOf(cached).request_body) || '';
   const ct = /^data:/.test(body) ? 'text/event-stream' : 'application/json';
   const histId = registerRawBody(reqBody, '', 'chat-history');
   const chat = chatViewHTML(reqBody, body, ct, { histKey: histId });
@@ -4025,6 +4032,17 @@ function persistedSummaryRow(rec) {
     cacheCreation: rec.cache_creation || 0,
     shadow: !!rec.shadow,
     attemptOnly: !!rec.attempt_only,
+    // Folded failover hops (the list API folds paired legs into their
+    // committed row): {provider,status,attempt,latencyMs} metadata per hop,
+    // rendered as the ⟲N badge by requestRowHTML.
+    failedHops: Array.isArray(rec.failed_hops)
+      ? rec.failed_hops.map((h) => ({
+        provider: h.provider || '',
+        status: h.status || 0,
+        attempt: h.attempt || 0,
+        latencyMs: h.latency_ms != null ? h.latency_ms : null,
+      }))
+      : [],
     turnKey: rec.turn_key || '',
     inFlight: false,
     guardHits: [],
@@ -4305,9 +4323,12 @@ function showTlTip(bar, row) {
     cacheRequestDetail(id, recs);
     // Two unlabeled preview paragraphs: this turn's user input first, then
     // the assistant's response — styling (muted vs normal) tells them apart.
+    // The committed record carries both bodies; attempt legs log no request
+    // body and carry only failure evidence.
+    const committed = committedRecordOf(recs);
     const ex = {
-      in: requestExcerpt(recs[0].request_body, TL_TIP_EXCERPT_MAX),
-      out: responseExcerpt(recs[0].response_body, TL_TIP_EXCERPT_MAX),
+      in: requestExcerpt(committed.request_body, TL_TIP_EXCERPT_MAX),
+      out: responseExcerpt(committed.response_body, TL_TIP_EXCERPT_MAX),
     };
     if (tlExcerptCache.size >= TL_EXCERPT_CACHE_MAX) tlExcerptCache.delete(tlExcerptCache.keys().next().value);
     tlExcerptCache.set(id, ex);

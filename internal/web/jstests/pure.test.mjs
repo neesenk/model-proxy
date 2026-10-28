@@ -11,7 +11,7 @@ import {
   accountProviderKey, splitProviderKey, providerDisplayName,
   catalogMatchHTML, catalogMatchSummary, catalogMatchEditorHTML,
   ruleHitsLeaderboard,
-  sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, linkedProviders, sessionHealthSummary, guardMarksHTML, guardMarksDetailHTML, requestMetaHTML,
+  sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, linkedProviders, sessionHealthSummary, guardMarksHTML, guardMarksDetailHTML, requestMetaHTML, hopChainTitle, orderDetailRecords, committedRecordOf,
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   cacheHitRate, settingsDiff, settingsRestartKeys, configSummaryHTML,
@@ -2970,6 +2970,52 @@ test('unified request table: one head and row renderer for all three tables', ()
   assert.ok(leg.includes('subdue'), 'attempt-only row is subdued');
   const plain = requestRowHTML({ requestId: 'r6', ts: 1, agent: 'ssc', model: 'm', provider: 'p#1', status: 502, latencyMs: 5 }, { rowClass: 'req-row' });
   assert.ok(!plain.includes('failover leg') && !plain.includes('subdue'), 'ordinary 502 row carries no leg marker');
+});
+
+test('failover fold: hop badge, chain title, detail ordering, committed picker', () => {
+  // The committed row with folded hops renders ⟲N beside the status badge;
+  // the hover title is a metadata-only chain (provider/status/latency — no
+  // error text in lists), account-labeled when providerLabel is supplied.
+  const hops = [
+    { provider: 'shopee#fbc30eb0947c8e8e', status: 502, attempt: 0, latencyMs: 236 },
+    { provider: 'shopee#6bb61ee2b6256c38', status: 429, attempt: 1, latencyMs: 120 },
+  ];
+  const label = (p) => (p.includes('#') ? p.split('#')[0] + ' · acct' : p);
+  const folded = requestRowHTML({
+    requestId: 'r-fold', ts: 1, agent: 'ssc', model: 'm', provider: 'shopee#ok',
+    status: 200, latencyMs: 4700, failedHops: hops,
+  }, { rowClass: 'req-row', providerLabel: label });
+  assert.ok(folded.includes('⟲2'), 'folded row carries the hop-count badge');
+  const stCell = folded.match(/<td class="st">.*<\/td>/s)[0];
+  assert.ok(stCell.startsWith('<td class="st"><span class="badge ok">200</span><span class="badge muted" title="hop1 shopee · acct 502 · 236ms\nhop2 shopee · acct 429 · 120ms">⟲2</span></td>'), 'badge rides the status cell with the full chain in its title');
+  assert.equal(hopChainTitle(hops), 'hop1 shopee#fbc30eb0947c8e8e 502 · 236ms\nhop2 shopee#6bb61ee2b6256c38 429 · 120ms', 'raw chain without a label mapper');
+  assert.equal(hopChainTitle(null), '', 'no hops → empty title');
+  // Rows without hops and unanswered legs never render the badge — the leg
+  // keeps its own subdued rendering (the fold left it as the only row).
+  const noHop = requestRowHTML({ requestId: 'r-plain', ts: 1, status: 200 }, { rowClass: 'req-row' });
+  assert.ok(!noHop.includes('⟲'), 'ordinary row has no hop badge');
+  const unanswered = requestRowHTML({ requestId: 'r-leg2', ts: 1, status: 502, attemptOnly: true, failedHops: [] }, { rowClass: 'req-row' });
+  assert.ok(unanswered.includes('failover leg') && !unanswered.includes('⟲'), 'unanswered leg keeps the leg badge, no hop badge');
+
+  // Detail ordering: attempt-ascending so the failover story reads
+  // chronologically — failed hop evidence first, committed answer last —
+  // regardless of the API's newest-first order.
+  const api = [
+    { request_id: 'x', ts: 'T3', attempt: 2, status: 200, attempt_only: false },
+    { request_id: 'x', ts: 'T2', attempt: 1, status: 429, attempt_only: true },
+    { request_id: 'x', ts: 'T1', attempt: 0, status: 502, attempt_only: true },
+  ];
+  const ordered = orderDetailRecords(api);
+  assert.deepEqual(ordered.map((r) => r.attempt), [0, 1, 2], 'attempt-ascending');
+  assert.equal(api[0].attempt, 2, 'input order untouched (sorted copy)');
+  assert.deepEqual(orderDetailRecords(null), [], 'null-safe');
+
+  // The committed picker answers "which record holds the client-facing
+  // body" for excerpts and replay, not records[0] (a leg logs no body).
+  assert.equal(committedRecordOf(api).status, 200, 'picks the non-attempt_only record');
+  const legOnly = [{ request_id: 'y', ts: 'T1', attempt: 0, status: 502, attempt_only: true }];
+  assert.equal(committedRecordOf(legOnly).status, 502, 'falls back to the lone record');
+  assert.equal(committedRecordOf([]), undefined, 'empty set → undefined');
 });
 
 test('sessionHealthSummary derives health signals with gap/percentile guards', () => {

@@ -752,10 +752,21 @@ func filterSQL(filter Filter) (string, []any) {
 // termination; the index answers over the whole retained set).
 func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) {
 	where, args := filterSQL(filter)
+	// The fold (semantics pinned equal to the scan engine's foldLegs pass):
+	// committed rows always pass; a leg survives only when its request never
+	// committed (unanswered — the client disconnected mid-failover). Paired
+	// legs are re-attached below as the committed row's FailedHops. The
+	// correlated NOT EXISTS rides idx_records_request.
+	const fold = `(attempt_only = 0 OR NOT EXISTS (SELECT 1 FROM records c WHERE c.request_id = r.request_id AND c.attempt_only = 0))`
+	if where == "" {
+		where = ` WHERE ` + fold
+	} else {
+		where = ` WHERE ` + fold + ` AND ` + strings.TrimPrefix(where, " WHERE ")
+	}
 	query := `SELECT ts, request_id, session_id, protocol, method, path, tool, exposed,
 		called_model, upstream_model, provider, agent, attempt, status, latency_ms, ttft_ms,
 		request_size, response_size, turn_key, kind, input, output, cache_read, cache_creation, shadow, attempt_only
-		FROM records` + where + ` ORDER BY ts DESC, rowid DESC`
+		FROM records r` + where + ` ORDER BY ts DESC, rowid DESC`
 	if filter.Limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, filter.Limit)
@@ -795,11 +806,117 @@ func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) 
 	}
 	_ = rows.Close()
 
+	summaries, err = x.attachFailedHops(summaries)
+	if err != nil {
+		return nil, Facets{}, err
+	}
+
 	facets, err := x.queryFacets(filter)
 	if err != nil {
 		return nil, Facets{}, err
 	}
 	return summaries, facets, nil
+}
+
+// attachFailedHops completes the fold the SQL predicate started: the result
+// set can still hold several legs of one unanswered request (each passed the
+// fold's NOT EXISTS), so they collapse to the newest (first in the
+// newest-first order) with the older legs as its FailedHops; every committed
+// row then gains its legs' hop chain from a chunked lookup over the page's
+// ids (idx_records_request). Hops sort attempt-ascending with Ts as the
+// tie-break — the same order the scan engine's heldHops produces, so the
+// index==scan parity holds field for field.
+func (x *Indexer) attachFailedHops(summaries []Summary) ([]Summary, error) {
+	committedIdx := make(map[string]int, len(summaries)) // committed request id -> out index
+	seenLeg := make(map[string]int)                      // unanswered request id -> out index of its surviving leg
+	legHops := make(map[int][]Summary)
+	out := summaries[:0] // compact in place: a fold never adds rows, only drops
+	for i := range summaries {
+		if !summaries[i].AttemptOnly {
+			committedIdx[summaries[i].RequestID] = len(out)
+			out = append(out, summaries[i])
+			continue
+		}
+		if idx, dup := seenLeg[summaries[i].RequestID]; dup {
+			legHops[idx] = append(legHops[idx], summaries[i])
+			continue
+		}
+		seenLeg[summaries[i].RequestID] = len(out)
+		out = append(out, summaries[i])
+	}
+	for idx, older := range legHops {
+		out[idx].FailedHops = sortedHops(older)
+	}
+	ids := make([]string, 0, len(committedIdx))
+	for id := range committedIdx {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, chunk := range chunkIDs(ids, 500) {
+		placeholders := strings.Repeat("?,", len(chunk))
+		rows, err := x.db.Query(`SELECT request_id, provider, status, attempt, latency_ms, ts
+			FROM records WHERE attempt_only = 1 AND request_id IN (`+placeholders[:len(placeholders)-1]+`)
+			ORDER BY rowid`, idArgs(chunk)...)
+		if err != nil {
+			return nil, err
+		}
+		byID := make(map[string][]Summary, len(chunk))
+		for rows.Next() {
+			var s Summary
+			if err := rows.Scan(&s.RequestID, &s.Provider, &s.Status, &s.Attempt, &s.LatencyMs, &s.Ts); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			byID[s.RequestID] = append(byID[s.RequestID], s)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		_ = rows.Close()
+		for id, hops := range byID {
+			out[committedIdx[id]].FailedHops = sortedHops(hops)
+		}
+	}
+	return out, nil
+}
+
+// sortedHops projects summary-shaped leg rows into FailedHops, sorted by
+// (attempt, ts) ascending — the hop-chain order contract.
+func sortedHops(legs []Summary) []FailedHop {
+	sorted := make([]Summary, len(legs))
+	copy(sorted, legs)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Attempt != sorted[j].Attempt {
+			return sorted[i].Attempt < sorted[j].Attempt
+		}
+		return sorted[i].Ts < sorted[j].Ts
+	})
+	hops := make([]FailedHop, 0, len(sorted))
+	for _, leg := range sorted {
+		hops = append(hops, FailedHop{Provider: leg.Provider, Status: leg.Status, Attempt: leg.Attempt, LatencyMs: leg.LatencyMs})
+	}
+	return hops
+}
+
+func chunkIDs(ids []string, size int) [][]string {
+	var chunks [][]string
+	for start := 0; start < len(ids); start += size {
+		end := start + size
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunks = append(chunks, ids[start:end])
+	}
+	return chunks
+}
+
+func idArgs(ids []string) []any {
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	return args
 }
 
 // ShadowReport is requestlog.ShadowReport served from the index: the same
@@ -849,15 +966,17 @@ func (x *Indexer) queryFacets(filter Filter) (Facets, error) {
 	// (whose facets are deliberately collected before the filter so dropdowns
 	// cannot narrow themselves into a dead end), browsing one stream must not
 	// offer the other stream's values — mcp server names would pollute the
-	// model dropdown of an LLM-only view.
-	where, args := "", []any{}
+	// model dropdown of an LLM-only view. Legs are excluded like the scan's
+	// facet feed: the dropdowns describe the traffic that produces rows, and
+	// legs fold into their committed rows.
+	clauses := []string{`attempt_only = 0`}
 	switch filter.Kind {
 	case "mcp":
-		where = ` WHERE kind = 'mcp'`
+		clauses = append(clauses, `kind = 'mcp'`)
 	case "llm":
-		where = ` WHERE kind = ''`
+		clauses = append(clauses, `kind = ''`)
 	}
-	rows, err := x.db.Query(`SELECT DISTINCT provider, exposed, called_model, agent FROM records`+where, args...)
+	rows, err := x.db.Query(`SELECT DISTINCT provider, exposed, called_model, agent FROM records WHERE ` + strings.Join(clauses, ` AND `))
 	if err != nil {
 		return Facets{}, err
 	}

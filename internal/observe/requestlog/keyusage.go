@@ -33,7 +33,7 @@ func KeyUsage(dir string, filter Filter, keyID string) ([]KeyUsageEntry, error) 
 	filter.Kind = "llm"
 	filter.UsageOnly = true
 	filter.Limit = 0
-	records, err := query(dir, filePrefix, filter, false, nil)
+	records, err := query(dir, filePrefix, filter, false, false, nil)
 	if err != nil {
 		return nil, err
 	}

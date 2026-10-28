@@ -197,7 +197,7 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   入桶前先扣减该份额（钳零）并记入 cache_read——否则同一份额同时落 input
   与 cache_read，曾把 analytics 命中率压到真实值的一半并双重计费
   （与 requestlog.ExtractUsage、fusion.ParseUsage 同一账本）。
-  同 id 多 attempt 行语义：未 commit 的 failover 中间跳（429/5xx/认证/传输错误，且其后确有下一跳）各落一行 `attempt_only` 请求日志——同 request id、同 attempt 序号、带上游状态与 8KB 错误体 peek，api_key 照记；`attempt_only` 行被 KeyUsage 与 session 聚合排除（路由遥测，不是客户端流量），最后一跳失败且全链终态时沿用终态行、不重复落中间行。
+  同 id 多 attempt 行语义：未 commit 的 failover 中间跳（429/5xx/认证/传输错误，且其后确有下一跳）各落一行 `attempt_only` 请求日志——同 request id、同 attempt 序号、带上游状态与 8KB 错误体 peek，api_key 照记；`attempt_only` 行被 KeyUsage 与 session 聚合排除（路由遥测，不是客户端流量），最后一跳失败且全链终态时沿用终态行、不重复落中间行。存储语义之外的**查询折叠**：`/api/requests` 列表把已配对腿折入其已提交行的 `failed_hops`（未应答请求的最新一腿独立成行），status/errors 过滤看存活行终态、facets 排除腿——索引与扫描两路逐字段一致（见 `docs/web-api.md`）。
 - **绑定粒度 (会话, 路由)**：sticky 键是 `runtime.StickyKey(sessionKey, exposed)`
   ——一个会话在每个路由上持有**独立绑定**（同会话换模型 = 新绑定，不把旧路由选中的
   账号拖带到新路由，与 latchKey/repeat_turn 同粒度；Bifrost「绑定按请求的 model

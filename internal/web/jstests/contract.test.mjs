@@ -79,6 +79,30 @@ test('frontend modelsCache reads only documented /api/models fields', () => {
   );
 });
 
+test('frontend /api/requests record reads stay documented (fold fields)', () => {
+  const row = webApiDoc.split('\n').find((l) => l.includes('| GET |') && l.includes('`/api/requests?'));
+  assert.ok(row, 'docs/web-api.md has no `| GET | `/api/requests?…` |` row');
+  // persistedSummaryRow's record-field reads are the frontend's whole
+  // dependency on the summary shape — pin each against the row's prose.
+  const start = appJs.indexOf('function persistedSummaryRow(rec) {');
+  assert.ok(start >= 0, 'app.js has no persistedSummaryRow — contract is blind');
+  const end = appJs.indexOf('\n}', start);
+  const reads = new Set([...appJs.slice(start, end).matchAll(/rec\.([a-z_]+)/g)].map((m) => m[1]));
+  assert.ok(reads.size > 0, 'persistedSummaryRow reads no fields — contract is blind');
+  const missing = [...reads].filter((k) => !row.includes(`\`${k}\``)).sort();
+  assert.deepEqual(
+    missing,
+    [],
+    `persistedSummaryRow reads undocumented /api/requests field(s) ${missing.join(', ')} — document them in docs/web-api.md first`,
+  );
+  // The fold contract itself: both directions (the folded hop chain and the
+  // surviving-leg marker) must be documented words, or the UI drifts from
+  // the API with no doc to catch it.
+  for (const keyword of ['failed_hops', 'attempt_only']) {
+    assert.ok(row.includes(`\`${keyword}\``), `docs/web-api.md /api/requests row omits \`${keyword}\``);
+  }
+});
+
 test('settings form spec matches documented edit kinds and settings keys', () => {
   const start = appJs.indexOf('const SETTINGS_GROUPS = [');
   assert.ok(start >= 0, 'app.js has no SETTINGS_GROUPS spec');

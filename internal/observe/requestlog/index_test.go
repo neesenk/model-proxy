@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -92,48 +93,159 @@ func indexRowCount(t *testing.T, indexer *Indexer) int {
 	return count
 }
 
-// TestSummariesCarryAttemptOnly pins the attempt_only projection end to end
-// on BOTH query paths: the directory scan (Summarize) and the SQLite index
-// (SELECT column) must surface the leg marker. A failover leg that renders
-// as an ordinary failed request — empty request body plus an error-text
-// response — is exactly the misreading the marker exists to prevent
-// (docs/web-api.md /api/requests summary fields).
-func TestSummariesCarryAttemptOnly(t *testing.T) {
+// TestSummaryListFoldsFailoverLegs pins the summary-list fold on BOTH query
+// paths (scan engine and index SQL — they must answer identically): a paired
+// leg never surfaces as its own row, its evidence rides the committed row's
+// FailedHops in attempt order; an unanswered request (no committed row, e.g.
+// the client disconnecting mid-failover) keeps its leg as the only row with
+// the attempt_only marker; errors/status filters see the surviving row's
+// terminal status, not the folded hops; facets exclude legs. The misreading
+// this prevents: a burst of 502 "errors" that every client actually received
+// as 200s via failover (docs/web-api.md /api/requests summary fields).
+func TestSummaryListFoldsFailoverLegs(t *testing.T) {
 	dir := t.TempDir()
+	base := func(id, provider string, attempt int, status int, latency int64) Record {
+		return Record{RequestID: id, SessionID: "sess-1", Protocol: "chat", Method: "POST",
+			Path: "/v1/chat/completions", CalledModel: "deepseek", Provider: provider,
+			Agent: "ssc", Attempt: attempt, Status: status, LatencyMs: latency}
+	}
 	records := []Record{
-		{Ts: "2026-07-30T01:04:03Z", RequestID: "r-leg", SessionID: "sess-b", Protocol: "chat", Method: "POST", Path: "/v1/chat/completions", CalledModel: "model-x", Provider: "provider-y", Agent: "agent-b", Attempt: 0, Status: 502, AttemptOnly: true, RequestBody: "", ResponseBody: `Post "https://up.test": read: connection reset by peer`},
-		{Ts: "2026-07-30T01:05:03Z", RequestID: "r-ok", SessionID: "sess-b", Protocol: "chat", Method: "POST", Path: "/v1/chat/completions", CalledModel: "model-x", Provider: "provider-z", Agent: "agent-b", Attempt: 1, Status: 200},
+		func() Record {
+			r := base("req-a", "shopee-a", 0, 502, 300)
+			r.Ts = "2026-10-27T03:36:29Z"
+			r.AttemptOnly = true
+			r.ResponseBody = `read: operation timed out`
+			return r
+		}(),
+		func() Record {
+			r := base("req-a", "shopee-b", 1, 429, 120)
+			r.Ts = "2026-10-27T03:36:30Z"
+			r.AttemptOnly = true
+			return r
+		}(),
+		func() Record { r := base("req-a", "shopee-c", 2, 200, 4700); r.Ts = "2026-10-27T03:36:31Z"; return r }(),
+		func() Record {
+			r := base("req-b", "shopee-a", 0, 502, 240)
+			r.Ts = "2026-10-27T03:36:32Z"
+			r.AttemptOnly = true
+			r.ResponseBody = `read: operation timed out`
+			return r
+		}(),
+		func() Record { r := base("req-c", "zhipu", 0, 200, 90); r.Ts = "2026-10-27T03:36:33Z"; return r }(),
 	}
-	writeRecordFile(t, dir, "requests-20260730.log", records)
-
-	byID := func(summaries []Summary) map[string]Summary {
-		out := make(map[string]Summary, len(summaries))
-		for _, s := range summaries {
-			out[s.RequestID] = s
-		}
-		return out
-	}
-
-	scan, err := QuerySummaries(dir, Filter{Limit: 10})
-	if err != nil {
-		t.Fatalf("scan: %v", err)
-	}
-	scanByID := byID(scan)
-	if !scanByID["r-leg"].AttemptOnly {
-		t.Errorf("scan summary lost attempt_only: %+v", scanByID["r-leg"])
-	}
-	if scanByID["r-ok"].AttemptOnly {
-		t.Errorf("scan summary invented attempt_only on a committed row: %+v", scanByID["r-ok"])
-	}
+	writeRecordFile(t, dir, "requests-20261027.log", records)
 
 	indexer := newTestIndexer(t, dir)
 	mustReconcile(t, indexer)
-	indexed, _, err := indexer.SummariesWithFacets(Filter{Limit: 10})
+
+	assertBaseline := func(t *testing.T, summaries []Summary) {
+		t.Helper()
+		if len(summaries) != 3 {
+			t.Fatalf("baseline rows = %d (%+v), want 3 (paired legs folded)", len(summaries), summaries)
+		}
+		byID := make(map[string]Summary, len(summaries))
+		for _, s := range summaries {
+			byID[s.RequestID] = s
+		}
+		a := byID["req-a"]
+		if a.AttemptOnly {
+			t.Errorf("req-a committed row marked attempt_only: %+v", a)
+		}
+		wantHops := []FailedHop{
+			{Provider: "shopee-a", Status: 502, Attempt: 0, LatencyMs: 300},
+			{Provider: "shopee-b", Status: 429, Attempt: 1, LatencyMs: 120},
+		}
+		if !reflect.DeepEqual(a.FailedHops, wantHops) {
+			t.Errorf("req-a FailedHops = %+v, want %+v (attempt-ascending)", a.FailedHops, wantHops)
+		}
+		b := byID["req-b"]
+		if !b.AttemptOnly {
+			t.Errorf("unanswered req-b lost its attempt_only marker: %+v", b)
+		}
+		if b.FailedHops != nil {
+			t.Errorf("unanswered req-b carry hops: %+v", b.FailedHops)
+		}
+		if _, ok := byID["req-c"]; !ok || byID["req-c"].FailedHops != nil {
+			t.Errorf("quiet req-c wrong: %+v", byID["req-c"])
+		}
+	}
+
+	scan, scanFacets, err := QuerySummariesWithFacets(dir, Filter{Limit: 10, UsageOnly: true})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	assertBaseline(t, scan)
+	indexed, indexFacets, err := indexer.SummariesWithFacets(Filter{Limit: 10, UsageOnly: true})
 	if err != nil {
 		t.Fatalf("index: %v", err)
 	}
+	assertBaseline(t, indexed)
 	if !reflect.DeepEqual(indexed, scan) {
-		t.Errorf("index/scan summaries diverge:\nindex: %+v\nscan:  %+v", indexed, scan)
+		t.Errorf("index/scan baseline diverge:\nindex: %+v\nscan:  %+v", indexed, scan)
+	}
+	if !reflect.DeepEqual(indexFacets, scanFacets) {
+		t.Errorf("index/scan facets diverge:\nindex: %+v\nscan:  %+v", indexFacets, scanFacets)
+	}
+	for _, provider := range []string{"shopee-a", "shopee-b"} {
+		if slices.Contains(scanFacets.Providers, provider) {
+			t.Errorf("facets offer leg-only provider %s: %+v", provider, scanFacets.Providers)
+		}
+	}
+	if !slices.Contains(scanFacets.Providers, "shopee-c") || !slices.Contains(scanFacets.Providers, "zhipu") {
+		t.Errorf("facets lost committed providers: %+v", scanFacets.Providers)
+	}
+
+	// errors filter: terminal status only — the folded 200-with-hops and the
+	// quiet 200 stay out; the unanswered leg (its request's terminal record)
+	// stays in.
+	for name, query := range map[string]struct {
+		scan  func() ([]Summary, error)
+		index func() ([]Summary, Facets, error)
+	}{
+		"errors only": {
+			func() ([]Summary, error) {
+				return QuerySummaries(dir, Filter{Limit: 10, ErrorsOnly: true, UsageOnly: true})
+			},
+			func() ([]Summary, Facets, error) {
+				return indexer.SummariesWithFacets(Filter{Limit: 10, ErrorsOnly: true, UsageOnly: true})
+			},
+		},
+		"provider filter": {
+			func() ([]Summary, error) {
+				return QuerySummaries(dir, Filter{Limit: 10, Provider: "shopee-c", UsageOnly: true})
+			},
+			func() ([]Summary, Facets, error) {
+				return indexer.SummariesWithFacets(Filter{Limit: 10, Provider: "shopee-c", UsageOnly: true})
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			want, err := query.scan()
+			if err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			got, _, err := query.index()
+			if err != nil {
+				t.Fatalf("index: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("index/scan diverge:\nindex: %+v\nscan:  %+v", got, want)
+			}
+			if len(want) != 1 {
+				t.Fatalf("rows = %+v, want exactly the one surviving row", want)
+			}
+			if name == "errors only" {
+				if want[0].RequestID != "req-b" {
+					t.Errorf("errors-only row = %+v, want unanswered req-b", want[0])
+				}
+			} else {
+				// The hop chain rides along even though its providers do not
+				// match the provider filter — the filter selects the answer.
+				if want[0].RequestID != "req-a" || len(want[0].FailedHops) != 2 {
+					t.Errorf("provider-filter row = %+v, want req-a with both hops", want[0])
+				}
+			}
+		})
 	}
 }
 
@@ -146,6 +258,13 @@ func TestSummariesCarryAttemptOnly(t *testing.T) {
 func TestIndexSummariesEquivalenceVsScan(t *testing.T) {
 	dir := t.TempDir()
 	writeIndexFixture(t, dir)
+	// Fold coverage inside the matrix: a paired leg under r1 (fails, next
+	// hop commits) and an unanswered leg of its own — the fold must hold
+	// field-for-field across every filter, not just the baseline.
+	appendRecordLines(t, filepath.Join(dir, "requests-20260729.log"),
+		Record{Ts: "2026-07-29T11:59:57Z", RequestID: "r1", SessionID: "sess-a", Protocol: "anthropic", Method: "POST", Path: "/v1/messages", CalledModel: "Model-X", UpstreamModel: "up-x", Exposed: "exposed-x", Provider: "provider-leg", Agent: "agent-a", Attempt: 0, Status: 429, LatencyMs: 5, AttemptOnly: true, ResponseBody: `{"error":"rate limited"}`},
+		Record{Ts: "2026-07-29T12:01:30Z", RequestID: "r-leg-solo", SessionID: "sess-a", Protocol: "anthropic", Method: "POST", Path: "/v1/messages", CalledModel: "Model-X", Provider: "provider-leg", Agent: "agent-a", Attempt: 0, Status: 502, LatencyMs: 7, AttemptOnly: true},
+	)
 	indexer := newTestIndexer(t, dir)
 	mustReconcile(t, indexer)
 

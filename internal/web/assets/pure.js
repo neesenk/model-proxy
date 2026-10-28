@@ -3337,17 +3337,57 @@ export function requestRowHTML(row, opts) {
   // pooled virtual keys "name#<id>" render as "name · <label>" (the
   // user-provided account name), so the opaque hash id never surfaces.
   const providerCell = r.inFlight ? '…' : (r.provider || '—');
+  // Folded hop badge: this committed answer was reached over N failed hops
+  // (metadata only — the failure evidence lives in the expanded detail's
+  // leg records). Rows without hops and unanswered legs render nothing.
+  const hopBadge = r.failedHops && r.failedHops.length
+    ? `<span class="badge muted" title="${esc(hopChainTitle(r.failedHops, o))}">⟲${r.failedHops.length}</span>`
+    : '';
   return `<tr class="${esc(o.rowClass || '')}" data-id="${esc(r.requestId)}"${o.liveKey ? ` data-live-key="${esc(r.requestId)}"` : ''}>
     <td class="mono${dim}">${esc(t)}</td>
     <td class="mono${dim}">${esc(r.agent || '—')}</td>
     ${sess}
-    <td class="st">${statusBadgeHTML(r.inFlight ? null : r.status, r.inFlight)}${r.attemptOnly ? '<span class="badge muted">failover leg</span>' : ''}</td>
+    <td class="st">${statusBadgeHTML(r.inFlight ? null : r.status, r.inFlight)}${hopBadge}${r.attemptOnly ? '<span class="badge muted">failover leg</span>' : ''}</td>
     <td class="cell-model" title="${esc(r.model || '')}">${esc(r.model || '—')}${o.modelNote || ''}${guardMarksHTML(r.guardMarks)}</td>
     ${toolCell}
     <td class="mono${dim}">${esc(o.providerLabel ? o.providerLabel(r.provider || '') : providerCell)}${r.shadow ? ' <span class="badge muted">shadow</span>' : ''}</td>
     <td class="num${slow ? ' warn' : ''}">${lat}</td>
     ${o.mcp ? '' : `<td class="num"${tkTitle ? ` title="${esc(tkTitle)}"` : ''}>${tk}</td>`}
   </tr>`;
+}
+
+// hopChainTitle renders the ⟲N badge's hover chain: one line per folded hop,
+// account-labeled when providerLabel is supplied (the row renderer's pooled
+// virtual key mapper). Metadata only by contract — no error text in lists.
+export function hopChainTitle(hops, o) {
+  const label = (o && o.providerLabel) || ((p) => p);
+  return (hops || []).map((h, i) => {
+    const lat = Number.isFinite(Number(h.latencyMs)) && h.latencyMs != null ? ` · ${fmtNum(h.latencyMs)}ms` : '';
+    return `hop${i + 1} ${label(h.provider || '—')} ${h.status}${lat}`;
+  }).join('\n');
+}
+
+// orderDetailRecords sorts one request id's records attempt-ascending (Ts as
+// the tie-break) so the expanded detail reads chronologically: the failed
+// hops' evidence first, the committed answer the client received last. The
+// API returns newest-first (its Detail contract); ordering for display is a
+// view concern, done on a copy.
+export function orderDetailRecords(recs) {
+  const out = (recs || []).slice();
+  out.sort((a, b) => ((Number(a.attempt) || 0) - (Number(b.attempt) || 0))
+    || String(a.ts || '').localeCompare(String(b.ts || '')));
+  return out;
+}
+
+// committedRecordOf picks the record that carries the client-facing answer
+// (the non-attempt_only row) out of one request id's records; the fallback
+// covers single-record sets (unanswered legs) and older data.
+export function committedRecordOf(recs) {
+  const list = recs || [];
+  for (const r of list) {
+    if (r && !r.attempt_only) return r;
+  }
+  return list[0];
 }
 
 // ---------- virtualized request table ----------

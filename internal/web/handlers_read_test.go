@@ -536,6 +536,67 @@ func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
 	}
 }
 
+// TestRequestsListFoldsFailoverLegs pins the /api/requests fold at the
+// transport layer: paired legs fold into their committed row's failed_hops
+// (attempt-ascending, metadata only — no leg evidence text in the list), an
+// unanswered request keeps its newest leg as the only row, the errors filter
+// sees surviving terminal statuses, and leg-only providers stay out of the
+// facets (docs/web-api.md /api/requests).
+func TestRequestsListFoldsFailoverLegs(t *testing.T) {
+	tmp := t.TempDir()
+	writeReadLog(t, tmp,
+		requestlog.Record{Ts: "2026-10-27T03:36:29Z", RequestID: "req-a", CalledModel: "m", Provider: "pool-a", Agent: "ssc", Attempt: 0, Status: 502, LatencyMs: 300, AttemptOnly: true, ResponseBody: `read: operation timed out`},
+		requestlog.Record{Ts: "2026-10-27T03:36:30Z", RequestID: "req-a", CalledModel: "m", Provider: "pool-b", Agent: "ssc", Attempt: 1, Status: 429, LatencyMs: 120, AttemptOnly: true},
+		requestlog.Record{Ts: "2026-10-27T03:36:31Z", RequestID: "req-a", CalledModel: "m", Provider: "pool-c", Agent: "ssc", Attempt: 2, Status: 200, LatencyMs: 4700, RequestBody: "secret-req", ResponseBody: "reply"},
+		requestlog.Record{Ts: "2026-10-27T03:36:32Z", RequestID: "req-b", CalledModel: "m", Provider: "pool-a", Agent: "ssc", Attempt: 0, Status: 502, LatencyMs: 240, AttemptOnly: true, ResponseBody: `read: operation timed out`},
+	)
+	reads := &readAPIStub{logFile: "ignored", queries: dirRequestLogQueries{tmp}}
+	s := newReadServer(t, reads)
+
+	list := serveRead(t, s, http.MethodGet, "/api/requests")
+	var got struct {
+		Enabled bool                 `json:"enabled"`
+		Records []requestlog.Summary `json:"records"`
+		Facets  requestlog.Facets    `json:"facets"`
+	}
+	decodeReadJSON(t, list, &got)
+	if list.Code != http.StatusOK || !got.Enabled || len(got.Records) != 2 {
+		t.Fatalf("folded list = (%d, %#v), want the committed row and the unanswered leg", list.Code, got.Records)
+	}
+	byID := map[string]requestlog.Summary{}
+	for _, r := range got.Records {
+		byID[r.RequestID] = r
+	}
+	a := byID["req-a"]
+	if a.AttemptOnly || a.Status != 200 || len(a.FailedHops) != 2 ||
+		a.FailedHops[0] != (requestlog.FailedHop{Provider: "pool-a", Status: 502, Attempt: 0, LatencyMs: 300}) ||
+		a.FailedHops[1] != (requestlog.FailedHop{Provider: "pool-b", Status: 429, Attempt: 1, LatencyMs: 120}) {
+		t.Fatalf("committed row fold = %#v", a)
+	}
+	b := byID["req-b"]
+	if !b.AttemptOnly || b.FailedHops != nil {
+		t.Fatalf("unanswered leg row = %#v", b)
+	}
+	if !strings.Contains(list.Body.String(), `"failed_hops"`) {
+		t.Fatalf("wire shape lost the failed_hops key: %s", list.Body.String())
+	}
+	if strings.Contains(list.Body.String(), "operation timed out") || strings.Contains(list.Body.String(), "secret-req") {
+		t.Fatalf("list leaked leg evidence or bodies: %s", list.Body.String())
+	}
+	if len(got.Facets.Providers) != 1 || got.Facets.Providers[0] != "pool-c" {
+		t.Fatalf("facets providers = %#v, want the committed provider only (legs excluded)", got.Facets.Providers)
+	}
+
+	errs := serveRead(t, s, http.MethodGet, "/api/requests?errors=1")
+	var gotErrs struct {
+		Records []requestlog.Summary `json:"records"`
+	}
+	decodeReadJSON(t, errs, &gotErrs)
+	if errs.Code != http.StatusOK || len(gotErrs.Records) != 1 || gotErrs.Records[0].RequestID != "req-b" {
+		t.Fatalf("errors-only = (%d, %#v), want the unanswered terminal only", errs.Code, gotErrs.Records)
+	}
+}
+
 func TestReadLogsAndRequestLogEndpoints(t *testing.T) {
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "daemon.log")
