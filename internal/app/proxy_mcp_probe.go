@@ -8,6 +8,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -155,11 +156,14 @@ func (p *Proxy) probeMCPHTTP(ctx context.Context, snap RuntimeSnapshot, srv conf
 func (p *Proxy) probeMCPStdio(ctx context.Context, snap RuntimeSnapshot, srv configdomain.MCPServer) (appapi.MCPProbeResult, []mcpkg.ToolSpec) {
 	accountKey := ""
 	if srv.MCPAuthMode() == "provider" {
-		accounts := mcpAccounts(snap, srv)
-		if len(accounts) == 0 {
+		picks, raw := p.mcpSchedulableAccounts(snap, srv)
+		if raw == 0 {
 			return appapi.MCPProbeResult{OK: false, Error: fmt.Sprintf("provider %q has no logged-in account — run `model-proxy login %s`", srv.Provider, srv.Provider)}, nil
 		}
-		prov := snap.Providers[accounts[0]]
+		if len(picks) == 0 {
+			return appapi.MCPProbeResult{OK: false, Error: mcpNoSchedulableErr(srv)}, nil
+		}
+		prov := snap.Providers[picks[0]]
 		kr, ok := prov.(provider.KeyReporter)
 		if !ok {
 			return appapi.MCPProbeResult{OK: false, Error: fmt.Sprintf("provider %q cannot supply a raw API key (apikey providers only)", srv.Provider)}, nil
@@ -217,14 +221,15 @@ func (p *Proxy) probeMCPStdio(ctx context.Context, snap RuntimeSnapshot, srv con
 	return result, tools
 }
 
-// mcpProbeAccount picks the probe's account (first live pool account; "" for
-// auth: none).
+// mcpProbeAccount picks the probe's account (first schedulable pool account;
+// "" for auth: none or when none is schedulable — the caller's own gate owns
+// the empty-pool/unschedulable error message).
 func (p *Proxy) mcpProbeAccount(snap RuntimeSnapshot, srv configdomain.MCPServer) string {
-	accounts := mcpAccounts(snap, srv)
-	if len(accounts) == 0 {
+	picks, _ := p.mcpSchedulableAccounts(snap, srv)
+	if len(picks) == 0 {
 		return ""
 	}
-	return accounts[0]
+	return picks[0]
 }
 
 // mcpProbeAuth builds the credential injector for one probe (provider
@@ -237,11 +242,14 @@ func (p *Proxy) mcpProbeAuth(snap RuntimeSnapshot, srv configdomain.MCPServer) (
 	var account string
 	var prov provider.Provider
 	if srv.MCPAuthMode() == "provider" {
-		accounts := mcpAccounts(snap, srv)
-		if len(accounts) == 0 {
+		picks, raw := p.mcpSchedulableAccounts(snap, srv)
+		if raw == 0 {
 			return nil, fmt.Errorf("provider %q has no logged-in account — run `model-proxy login %s`", srv.Provider, srv.Provider)
 		}
-		account = accounts[0]
+		if len(picks) == 0 {
+			return nil, errors.New(mcpNoSchedulableErr(srv))
+		}
+		account = picks[0]
 		prov = snap.Providers[account]
 		if prov == nil {
 			return nil, fmt.Errorf("provider %q account %q is not runnable", srv.Provider, account)

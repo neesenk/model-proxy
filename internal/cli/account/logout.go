@@ -44,11 +44,13 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 	}
 	providerID := prov.Provider
 
-	// aqp/codex keep their existing single-file logout (oauth_auth.json). An
-	// apikey provider with NO plural pool file but a legacy singular file also
-	// goes through the singular removal path (backward compat: the legacy
-	// singular <name>_apikey.json is removed by clearApiKey).
-	if providerID == "aqp" || providerID == "codex" || !hasPoolFile(provName) {
+	// A provider with NO plural pool file falls back to the single-credential
+	// removal path: OAuth providers (aqp/codex) delete their legacy
+	// <name>_oauth_auth.json via provider.Logout; an apikey provider with only
+	// a legacy singular <name>_apikey.json is removed by clearApiKey. The
+	// moment a pool EXISTS (OAuth providers pool too), the pool-aware path
+	// below owns removal.
+	if !hasPoolFile(provName) {
 		provMap := providerbuild.BuildProviders(cfg, accountStore(), providerbuild.BuildOpts()).Providers
 		p := provMap[provName]
 		if p == nil {

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
 )
 
@@ -29,6 +30,13 @@ func loginAPIKeyFixtures(t *testing.T, pairs ...[2]string) {
 	for _, p := range pairs {
 		writePoolFile(t, p[0], p[1], "sk-fixture-"+p[0])
 	}
+}
+
+// fixturePoolVID is the virtual runtime key the 1-entry pool written by
+// loginAPIKeyFixtures unrolls to — pools key by "name#<accountID>" regardless
+// of pool size.
+func fixturePoolVID(name, providerID string) string {
+	return name + "#" + accounts.AccountID(providerID, accounts.Credentials{APIKey: "sk-fixture-" + name})
 }
 
 // loginOAuthFixture writes an OAuth store fixture (aqp SSO cookie / codex

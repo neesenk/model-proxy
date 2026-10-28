@@ -24,6 +24,7 @@ import {
   esc, linkifyEsc, fmtNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
   verdictBadge, modelCapMatrix, visibleModelRows, providerCapsSummary, providerFrozen, providerNames, cacheHitRate,
+  accountProviderKey, splitProviderKey, providerDisplayName,
   catalogMatchHTML, catalogMatchEditorHTML,
   settingsDiff, settingsRestartKeys, configSummaryHTML, TOKEN_RANGES, tokensRangeQuery, tokenRangeLabel,
   tokenRangeTriggerLabel, parseLocalDate, tokenRangeBounds, tokenCustomBounds, tokenRangePickerHTML,
@@ -36,7 +37,7 @@ import {
   HEAT_DAYS, analyticsHeatLevel, analyticsYearGrid, analyticsYearMonthSpans, analyticsHeatCellSize, analyticsHeatTip,
   analyticsRowSortKey, ANALYTICS_TABLE_SORT, analyticsSortRows,
   analyticsMetricOptions, analyticsMetricAllowed,
-  liveSessionSummary, liveSessionOrder, shortSessionId, linkedProviders, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary, guardMarksDetailHTML, requestMetaHTML,
+  liveSessionSummary, liveSessionOrder, shortSessionId, linkedProviders, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary, guardMarksDetailHTML, requestMetaHTML, orderDetailRecords, committedRecordOf,
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
@@ -1977,6 +1978,7 @@ function reqRowNode(v, i) {
   holder.innerHTML = requestRowHTML(persistedSummaryRow(rec), {
     rowClass: 'req-row' + (rec.status >= 400 ? ' req-row-err' : ''),
     fmtTime,
+    providerLabel: displayProvider,
     ...activeRequestsPage().table,
   });
   tr = holder.firstElementChild;
@@ -2376,8 +2378,12 @@ function detailRecordsHTML(recs, opts) {
   const o = opts || {};
   wireBodyChunks();
   wireRawBodies();
+  // Attempt-ascending: the failover story reads chronologically — failed
+  // hops' evidence first, the committed answer last (the API's own order is
+  // newest-first; display order is a view concern).
+  const ordered = orderDetailRecords(recs);
   let html = '';
-  for (const r of recs) {
+  for (const r of ordered) {
     const ct = responseContentType(r);
     const histId = registerRawBody(r.request_body, '', 'chat-history');
     const chat = chatViewHTML(r.request_body, r.response_body, ct, { histKey: histId });
@@ -2403,7 +2409,7 @@ function detailRecordsHTML(recs, opts) {
     // request this is), then the security outcome for it.
     const guardCard = html === '' && o.guard ? guardMarksDetailHTML(o.guard) : '';
     html += `<div class="req-rec">
-      ${requestMetaHTML(r, rel)}${guardCard}
+      ${requestMetaHTML(r, rel, { providerLabel: displayProvider })}${guardCard}
       ${chat}
       <details class="raw-body" data-raw="${esc(reqId)}"><summary>raw request body (${fmtNum(r.request_size)} bytes · ${esc(rawBodyLabel(r.request_body, '', 'request'))})</summary><div class="raw-body-host"><span class="hint">renders on first expand</span></div></details>
       <details class="raw-body" data-raw="${esc(resId)}"><summary>raw response body (${fmtNum(r.response_size)} bytes · ${esc(rawBodyLabel(r.response_body, ct, 'response'))})</summary><div class="raw-body-host"><span class="hint">renders on first expand</span></div></details>
@@ -2453,9 +2459,10 @@ function replayStripHTML(id, model) {
 
 // replayModelOf picks the model a replay will ask for from the record set:
 // the exposed name (what the client called) with the upstream/called names
-// as fallbacks for pre-exposure records.
+// as fallbacks for pre-exposure records. The committed record leads —
+// attempt legs share the model but never the captured body.
 function replayModelOf(recs) {
-  const r = recs && recs[0];
+  const r = committedRecordOf(recs);
   if (!r) return '';
   return r.exposed || r.upstream_model || r.called_model || '';
 }
@@ -2555,7 +2562,9 @@ function replayResultHTML(id, res) {
   wireRawBodies();
   const body = res.body || '';
   const cached = requestsDetailCache.get(id);
-  const reqBody = (cached && cached.length && cached[0].request_body) || '';
+  // The committed record carries the captured request body; attempt legs
+  // intentionally log none (the fold's storage contract).
+  const reqBody = (cached && cached.length && committedRecordOf(cached).request_body) || '';
   const ct = /^data:/.test(body) ? 'text/event-stream' : 'application/json';
   const histId = registerRawBody(reqBody, '', 'chat-history');
   const chat = chatViewHTML(reqBody, body, ct, { histKey: histId });
@@ -4022,6 +4031,18 @@ function persistedSummaryRow(rec) {
     cacheRead: rec.cache_read || 0,
     cacheCreation: rec.cache_creation || 0,
     shadow: !!rec.shadow,
+    attemptOnly: !!rec.attempt_only,
+    // Folded failover hops (the list API folds paired legs into their
+    // committed row): {provider,status,attempt,latencyMs} metadata per hop,
+    // rendered as the ⟲N badge by requestRowHTML.
+    failedHops: Array.isArray(rec.failed_hops)
+      ? rec.failed_hops.map((h) => ({
+        provider: h.provider || '',
+        status: h.status || 0,
+        attempt: h.attempt || 0,
+        latencyMs: h.latency_ms != null ? h.latency_ms : null,
+      }))
+      : [],
     turnKey: rec.turn_key || '',
     inFlight: false,
     guardHits: [],
@@ -4091,9 +4112,12 @@ function sessionSummaryHTML(s, opts, health) {
   const item = (k, vals) => (vals && vals.length)
     ? `<span class="sess-meta-item"><span class="sess-meta-k">${esc(k)}</span><span class="sess-meta-v">${esc(vals.join(', '))}</span></span>`
     : '';
+  // Pooled keys fold to the account label in the identity footer (same
+  // convention as the table rows below).
+  const providers = (s.providers || []).map(displayProvider);
   const meta = mcp
-    ? item('server', s.models) + item('account', s.providers)
-    : item('provider', s.providers) + item('model', s.models);
+    ? item('server', s.models) + item('account', providers)
+    : item('provider', providers) + item('model', s.models);
   return `<div class="live-session-summary">${chips}</div>${sessionHealthChipsHTML(health)}${meta ? `<div class="sess-meta">${meta}</div>` : ''}`;
 }
 
@@ -4283,7 +4307,7 @@ function showTlTip(bar, row) {
   const id = bar.dataset.id || '';
   tlTipSeq++;
   const seq = tlTipSeq;
-  const lines = sessionBarSummary(row, (t) => fmtTimeSafe(t));
+  const lines = sessionBarSummary(row, (t) => fmtTimeSafe(t), { providerLabel: displayProvider });
   const el = tlTip();
   el.innerHTML = `<div class="tl-tip-meta">${lines.length ? lines.map((l) => `<div>${esc(l)}</div>`).join('') : esc(id)}</div><div class="tl-tip-ex tl-tip-in" hidden></div><div class="tl-tip-ex tl-tip-out" hidden></div>`;
   el.hidden = false;
@@ -4299,9 +4323,12 @@ function showTlTip(bar, row) {
     cacheRequestDetail(id, recs);
     // Two unlabeled preview paragraphs: this turn's user input first, then
     // the assistant's response — styling (muted vs normal) tells them apart.
+    // The committed record carries both bodies; attempt legs log no request
+    // body and carry only failure evidence.
+    const committed = committedRecordOf(recs);
     const ex = {
-      in: requestExcerpt(recs[0].request_body, TL_TIP_EXCERPT_MAX),
-      out: responseExcerpt(recs[0].response_body, TL_TIP_EXCERPT_MAX),
+      in: requestExcerpt(committed.request_body, TL_TIP_EXCERPT_MAX),
+      out: responseExcerpt(committed.response_body, TL_TIP_EXCERPT_MAX),
     };
     if (tlExcerptCache.size >= TL_EXCERPT_CACHE_MAX) tlExcerptCache.delete(tlExcerptCache.keys().next().value);
     tlExcerptCache.set(id, ex);
@@ -4654,6 +4681,7 @@ function liveSummaryRowHTML(r, open) {
     liveKey: true,
     modelNote: guard,
     fmtTime: fmtTimeSafe,
+    providerLabel: displayProvider,
     ...activeRequestsPage().table,
   });
 }
@@ -5050,7 +5078,7 @@ function fillLiveDetailPop(dialog, row) {
     fmtTimeSafe(row.ts),
     row.agent || '',
     row.model || '',
-    row.provider || '',
+    row.provider ? displayProvider(row.provider) : '',
     row.inFlight ? 'in flight' : (row.status || ''),
     (!row.inFlight && row.latencyMs != null) ? row.latencyMs + 'ms' : '',
     (row.input || row.output) ? `${fmtNum(row.input)} in / ${fmtNum(row.output)} out` : '',
@@ -5706,7 +5734,7 @@ function dashRenderChart(host, legendHost) {
   // The window grid comes from the response's echoed from/to (not the local
   // clock) so the axis covers exactly what was queried.
   const grid = analyticsWindowGrid(resp && resp.from, resp && resp.to, 'minute');
-  const data = analyticsChartSeries(resp && resp.series, dashMetric, grid);
+  const data = analyticsChartSeries(resp && resp.series, dashMetric, grid, displayProvider);
   if (!data.x.length || !data.labels.length) {
     destroyDashChart();
     host.innerHTML = '<div class="empty-state">No traffic in the last hour.</div>';
@@ -5773,8 +5801,9 @@ function dashRenderChart(host, legendHost) {
 function dashRenderTable(host) {
   if (!host) return;
   const resp = dashData;
-  const rows = analyticsTableRows(resp && resp.series);
-  const health = new Map(modelHealthFromSeries(resp && resp.series).map((r) => [r.label, r]));
+  const rows = analyticsTableRows(resp && resp.series, displayProvider);
+  const labelMap = displayAnalyticsLabels(resp && resp.series);
+  const health = new Map(modelHealthFromSeries(resp && resp.series).map((r) => [labelMap[r.label] || r.label, r]));
   const totalCost = rows.reduce((sum, r) => sum + (r.cost || 0), 0);
   rows.sort((a, b) => analyticsRowSortKey(b, dashMetric) - analyticsRowSortKey(a, dashMetric));
   const gradeBadge = (g) => g == null ? '<span class="badge muted">n/a</span>'
@@ -5920,8 +5949,10 @@ function renderProvidersCard(target, st) {
     const action = frozen
       ? ` <button class="btn small danger-solid" data-unfreeze="${esc(name)}" title="Clear circuit/rate-limit cooldowns + model locks">Unfreeze</button>`
       : ` <button class="btn small" data-freeze="${esc(name)}" title="Exclude from scheduling until unfreeze">Freeze</button>`;
+    // Pooled rows are virtual runtime keys; display folds them to
+    // "parent · <account label>" (raw key kept on the title tooltip).
     rows += `<tr>
-      <td class="mono">${esc(name)}${action}</td>
+      <td class="mono" title="${esc(name)}">${esc(displayProvider(name))}${action}</td>
       <td>${healthPill(health[name])}</td>
       <td class="num">${fmtNum(c.requests)}</td>
       <td class="num">${fmtNum(c.failovers)}</td>
@@ -5931,19 +5962,24 @@ function renderProvidersCard(target, st) {
       <td class="num subdue">${esc(fmtUnix(c.last_request_at))}</td>
     </tr>`;
     // Per-account expanded list: one sub-row spanning all columns, showing each
-    // account's label/email + remaining-amount pill.
-    const p = acctByName[name];
-    const accs = (p && p.accounts) || [];
+    // account's label/email + remaining-amount pill. A pooled row IS one
+    // virtual account key — the sub-row lists that account only; plain-name
+    // rows list every account of the provider.
+    const { parent, accountId } = splitProviderKey(name);
+    const p = acctByName[accountId === null ? name : parent];
+    let accs = (p && p.accounts) || [];
+    if (accountId !== null) accs = accs.filter((x) => x.id === accountId);
     if (accs.length) {
       const isOAuth = p.provider_id === 'aqp' || p.provider_id === 'codex';
       const items = accs.map((a, i) => {
         const key = accountProviderKey(p, a);
         // OAuth accounts (aqp/codex) are SSO logins identified by email;
-        // apikey accounts (zhipu/deepseek/volcengine) have no email, so they
-        // are identified by `id: <id>` (with an optional label suffix).
+        // API-key pool accounts show the user-provided label (the internal
+        // id stays correlation-only — full id on the sub line below the fold
+        // in the Accounts tab).
         const ident = isOAuth
           ? (a.email || a.label || a.id)
-          : `id: ${a.id || '-'}${a.label ? ' · ' + a.label : ''}`;
+          : (a.label || a.id);
         const slot = i % 4;
         return `<div class="prov-account prov-acct-c${slot}">
           <span class="prov-acct-label">${esc(ident)}</span>
@@ -6445,7 +6481,8 @@ function protoVerdictPill(v) {
 // full timestamp in the tooltip.
 function routeDownNodeHTML(b) {
   const hint = b.until ? untilHuman(b.until) : '';
-  return `<span class="route-node unavailable" title="${esc(b.provider)}: ${esc(b.reason)}${hint ? ` — recovers ${esc(b.until)}` : ''}">${esc(b.provider)} · ${esc(b.reason)}${esc(hint)}</span>`;
+  const shown = displayProvider(b.provider);
+  return `<span class="route-node unavailable" title="${esc(b.provider)}: ${esc(b.reason)}${hint ? ` — recovers ${esc(b.until)}` : ''}">${esc(shown)} · ${esc(b.reason)}${esc(hint)}</span>`;
 }
 
 // renderScheduleCard builds the per-route schedule view: each route shows its
@@ -6478,9 +6515,14 @@ function renderScheduleCard(target, st) {
       const cred = p.credential ? scheduleCredentialLabel(p.credential) : '';
       const peak = p.peak ? ' · peak' : '';
       const tier = ` · ${esc(scheduleTierLabel(p.tier, p.billing_declared))}`;
-      const parent = p.pool_parent ? ` (${esc(p.pool_parent)})` : '';
-      const title = `priority ${p.priority} · ${esc(scheduleTierTitle(p.tier, p.billing_declared))} · surplus ${(p.surplus || 0).toFixed(2)}${peak}${pinned ? ' · pinned (no failover)' : ''}${cred ? ` · credential: ${cred}` : ''}`;
-      chain += `<span class="${classes.join(' ')}" title="${esc(title)}">${pinned ? iconPin() : ''}${esc(p.provider)}${esc(parent)}${tier}${cred ? `<span class="route-cred">${esc(cred)}</span>` : ''}</span>`;
+      // Pooled nodes fold to "name · <label>" (the account-display
+      // convention); the raw virtual key rides the title for log/CLI
+      // correlation. The old "(pool_parent)" suffix is gone — the folded
+      // form already leads with the parent name.
+      const folded = displayProvider(p.provider);
+      const keyTitle = folded !== p.provider ? `${esc(p.provider)} · ` : '';
+      const title = `${keyTitle}priority ${p.priority} · ${esc(scheduleTierTitle(p.tier, p.billing_declared))} · surplus ${(p.surplus || 0).toFixed(2)}${peak}${pinned ? ' · pinned (no failover)' : ''}${cred ? ` · credential: ${cred}` : ''}`;
+      chain += `<span class="${classes.join(' ')}" title="${esc(title)}">${pinned ? iconPin() : ''}${esc(folded)}${tier}${cred ? `<span class="route-cred">${esc(cred)}</span>` : ''}</span>`;
       if (i < ordered.length - 1) chain += '<span class="route-sep">→</span>';
     });
     // Unpinned routes get a pin button opening a small popover menu of the
@@ -6489,8 +6531,10 @@ function renderScheduleCard(target, st) {
     // floats over the card (absolute in .route-pin-wrap) — not an in-flow
     // banner, not a native <select>.
     if (!info.pin && ordered.length) {
+      // Menu text folds to the account label; data-pin-provider stays the RAW
+      // key — the mutation targets the runtime provider identity.
       const items = ordered.map((p) =>
-        `<button class="route-pin-item" data-pin-route="${esc(route)}" data-pin-provider="${esc(p.provider)}">${esc(p.provider)}${p.pool_parent ? ` <span class="route-meta">(${esc(p.pool_parent)})</span>` : ''}</button>`,
+        `<button class="route-pin-item" data-pin-route="${esc(route)}" data-pin-provider="${esc(p.provider)}">${esc(displayProvider(p.provider))}</button>`,
       ).join('');
       chain += `<span class="route-pin-wrap">` +
         `<button class="btn small" data-pin-toggle="${esc(route)}" title="pin ${esc(route)} to one provider (no failover)">${iconPin()}pin</button>` +
@@ -6518,10 +6562,10 @@ function renderScheduleCard(target, st) {
     let meta = '';
     if (info.pin) {
       const exp = info.pin_expires ? ` · expires ${esc(info.pin_expires)}` : ' · no expiry';
-      meta += `<span class="route-pin">pinned: <span class="mono">${esc(info.pin)}</span>${exp}</span> `;
+      meta += `<span class="route-pin">pinned: <span class="mono" title="${esc(info.pin)}">${esc(displayProvider(info.pin))}</span>${exp}</span> `;
       meta += `<button class="btn small" data-unpin-route="${esc(route)}">unpin</button>`;
       if (info.first && info.first !== info.pin) {
-        meta += ` <span class="route-meta">effective: ${esc(info.first)} (pool account of ${esc(info.pin)})</span>`;
+        meta += ` <span class="route-meta">effective: ${esc(displayProvider(info.first))} (pool account of ${esc(displayProvider(info.pin))})</span>`;
       }
       meta += '<br>';
     }
@@ -6532,7 +6576,7 @@ function renderScheduleCard(target, st) {
     }
     // Sticky annotation (parked provider + dwell + live session bindings) is
     // pure.js-owned: scheduleRouteStickyMeta.
-    meta += scheduleRouteStickyMeta(info);
+    meta += scheduleRouteStickyMeta(info, displayProvider);
     let pools = '';
     if (info.pools && info.pools.length) {
       pools = '<span class="route-meta">';
@@ -6611,7 +6655,7 @@ async function testRouteTargets(card, route, btn) {
       const badge = t.ok ? '<span class="badge ok">✓</span>' : '<span class="badge err">✗</span>';
       const status = t.http_status ? `HTTP ${t.http_status}` : '';
       const reason = t.reason ? ` — ${esc(t.reason)}` : '';
-      return `<div>${badge} <span class="mono">${esc(t.provider)}</span> (${esc(t.model)}) ${status}${reason} <span class="hint">${fmtNum(t.latency_ms)} ms</span></div>`;
+      return `<div>${badge} <span class="mono" title="${esc(t.provider)}">${esc(displayProvider(t.provider))}</span> (${esc(t.model)}) ${status}${reason} <span class="hint">${fmtNum(t.latency_ms)} ms</span></div>`;
     }).join('');
     routeTestResults.set(route, { html: lines || '<span class="hint">no targets</span>', busy: false });
   } catch (e) {
@@ -6690,7 +6734,7 @@ function renderTokensCard(target, usage) {
   for (const u of sorted) {
     totalReqs += Number(u.requests || 0);
     rows += `<tr>
-      <td class="mono">${esc(u.provider)}</td>
+      <td class="mono" title="${esc(u.provider)}">${esc(displayProvider(u.provider))}</td>
       <td class="mono">${esc(u.model)}</td>
       <td class="num">${fmtNum(u.requests)}</td>
       <td class="num">${fmtNum(u.input)}</td>
@@ -6913,7 +6957,7 @@ function renderAgentsCard(target, agents) {
     </tr>`;
     for (const m of (a.models || [])) {
       rows += `<tr class="agent-model">
-        <td class="mono">${esc(m.provider)}/${esc(m.model)}</td>
+        <td class="mono" title="${esc(m.provider)}/${esc(m.model)}">${esc(displayProvider(m.provider))}/${esc(m.model)}</td>
         <td class="num">${fmtNum(m.requests)}</td>
         <td class="num">${fmtNum(m.input)}</td>
         <td class="num">${fmtNum(m.output)}</td>
@@ -8980,6 +9024,12 @@ function selectProviderSilent(name) {
   });
   const add = main.querySelector('[data-add]');
   if (add) add.addEventListener('click', () => openAddFor(p));
+  main.querySelectorAll('[data-rename]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const account = (p.accounts || []).find((x) => x.id === b.dataset.rename);
+      if (account) renameAccount(b, p, account);
+    });
+  });
   main.querySelectorAll('[data-remove]').forEach((b) => {
     b.addEventListener('click', () => removeAccount(b.dataset.provider, b.dataset.remove, b.dataset.label));
   });
@@ -8997,15 +9047,75 @@ function selectProviderSilent(name) {
   const testAll = main.querySelector('[data-test-all]');
   if (testAll) testAll.addEventListener('click', () => testAllAccounts(testAll, p));
   // Re-login buttons appear on session-expired / not-logged-in aqp/codex
-  // accounts - they reuse the same async login flow as Add account (aqp is
-  // single-credential, so re-login overwrites the stale SSO cookie in place).
+  // account cards - a TARGETED re-login: the completed flow re-authorizes
+  // exactly this account (the card's virtual key carries its id; a pool-less
+  // provider falls back to the plain add flow).
   main.querySelectorAll('[data-relogin]').forEach((b) => {
-    b.addEventListener('click', () => startAsyncLogin(p.name, p.provider_id));
+    b.addEventListener('click', () => {
+      const acctKey = b.closest('details.acct-section')?.dataset.acct || '';
+      const accountId = splitProviderKey(acctKey).accountId;
+      startAsyncLogin(p.name, p.provider_id, accountId || undefined);
+    });
   });
   // A provider switch re-resolves the 'quota' default against the new
   // provider's plan window (zhipu 7d ↔ codex 30d): when the derived window no
   // longer matches the fetched payload, refresh exactly once.
   accountsMaybeRefetchRange();
+}
+
+// renameAccount swaps the card's label line for an inline edit strip
+// (input + Rename/Cancel) and POSTs the new label. The rename is display-only
+// metadata: the account id, its virtual provider key and all usage-history
+// attribution stay unchanged, so success just refetches the accounts view (no
+// reload banner). While the input holds focus the auto-refresh gate defers
+// pane re-renders; errors surface inline from the backend message.
+function renameAccount(btn, p, a) {
+  const labelEl = btn.closest('.acct-card-head')?.querySelector('.acct-label');
+  if (!labelEl) return;
+  const strip = document.createElement('div');
+  strip.className = 'acct-rename';
+  strip.innerHTML = `
+    <input class="req-input" maxlength="64" value="${esc(a.label || '')}" aria-label="Account name" spellcheck="false">
+    <button class="btn small primary" type="button">Rename</button>
+    <button class="btn small" type="button">Cancel</button>
+    <span class="acct-rename-err muted"></span>`;
+  labelEl.replaceWith(strip);
+  const [input, save, cancel, err] = strip.children;
+  const restore = () => strip.replaceWith(labelEl);
+  const submit = async () => {
+    const label = input.value.trim();
+    if (!label) {
+      err.textContent = 'name is empty';
+      return;
+    }
+    if (label === (a.label || '')) {
+      restore();
+      return;
+    }
+    save.disabled = true;
+    try {
+      await apiPost(`/api/accounts/${encodeURIComponent(p.name)}/${encodeURIComponent(a.id)}/label`, { label });
+      // Release the input's focus BEFORE the refresh: loadAccountsData(true)
+      // commits through the interaction gate, which defers while an editable
+      // control holds focus — the strip would pin the pane on the old render.
+      strip.remove();
+      await loadAccountsData(true);
+    } catch (e) {
+      save.disabled = false;
+      err.textContent = e.message;
+    }
+  };
+  save.addEventListener('click', submit);
+  cancel.addEventListener('click', restore);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submit();
+    }
+    if (e.key === 'Escape') restore();
+  });
+  input.focus();
+  input.select();
 }
 
 // renderProviderDetail builds the right pane: a toolbar (provider name + meta +
@@ -9036,19 +9146,71 @@ function renderProviderDetail(p, quota, tokens) {
     <div class="acct-list">${body}</div>`;
 }
 
-// accountProviderKey maps an account to the provider key under which its quota
-// (status.quota) and token usage (/api/tokens) are recorded. aqp/codex are
-// single-credential (plain name); a pooled provider with >=2 accounts keys each
-// as "name#<accountId>" (virtual id); a 1-entry pool uses the plain name.
-// Mirrors buildProviders (proxy.go) + the token-commit key (t.Provider).
-function accountProviderKey(p, a) {
-  const pooled = p.provider_id !== 'aqp' && p.provider_id !== 'codex';
-  if (pooled && (p.accounts || []).length >= 2) return p.name + '#' + a.id;
-  return p.name;
+// accountProviderKey, splitProviderKey and providerDisplayName live in
+// pure.js: pooled providers key by virtual id "name#<accountId>" regardless of
+// pool size, and display layers fold that key back to the user-provided
+// account label.
+
+// ensureAccountLabels is the one-shot best-effort /api/accounts prefetch
+// backing providerLabels on tabs that render pooled provider keys without
+// owning an accounts fetch (analytics chart/table, request detail meta).
+// The two sources below are filled by the Status and Accounts tabs only, so
+// a page refresh landing anywhere else folded "name#<id>" keys to the 8-char
+// id fallback until one of those tabs happened to be visited. The result
+// feeds statusCache.accounts — the same payload renderStatusTab maintains,
+// later fetch wins. Concurrent callers share the in-flight promise; a failure
+// re-arms so the next render retries. Never rejects (best-effort).
+let accountLabelsPromise = null;
+function ensureAccountLabels() {
+  if (!accountLabelsPromise) {
+    accountLabelsPromise = apiGet('/api/accounts')
+      .then((data) => {
+        if (data && Array.isArray(data.providers)) statusCache.accounts = data.providers;
+      })
+      .catch(() => { accountLabelsPromise = null; });
+  }
+  return accountLabelsPromise;
 }
 
-// accountCard renders one account: the existing info row (label / id / added /
-// email / Remove) plus two collapsible <details> sections - Usage (the polled
+// providerLabels builds the virtual-key → account-label index consumed by
+// providerDisplayName. Both caches carry /api/accounts payloads (the Status
+// panel's snapshot and the Accounts tab's own fetch); the later assignment
+// wins, so whichever fetch landed most recently is what the display folds to.
+function providerLabels() {
+  const labels = {};
+  const sources = [];
+  if (Array.isArray(statusCache.accounts)) sources.push(statusCache.accounts);
+  if (accountsCache && Array.isArray(accountsCache.providers)) sources.push(accountsCache.providers);
+  for (const providers of sources) {
+    for (const p of providers) {
+      for (const a of (p.accounts || [])) {
+        labels[p.name + '#' + a.id] = a.label || '';
+      }
+    }
+  }
+  return labels;
+}
+
+// displayProvider is the per-key display mapper handed to the shared table
+// renderers: pooled virtual keys render as "name · <label>", raw keys as-is.
+function displayProvider(key) {
+  return providerDisplayName(key, providerLabels());
+}
+
+// displayAnalyticsLabels maps each series' RAW "provider/model" label to its
+// display form (provider folded). modelHealthFromSeries keys by the raw
+// label; re-keying through this map keeps health badges joined to the folded
+// table rows.
+function displayAnalyticsLabels(series) {
+  const map = {};
+  for (const s of (series || [])) {
+    if (!s.agent) map[`${s.provider}/${s.model}`] = `${displayProvider(s.provider)}/${s.model}`;
+  }
+  return map;
+}
+
+// accountCard renders one account: the info row (label / id / added / email /
+// Rename / Remove) plus two collapsible <details> sections - Usage (the polled
 // quota snapshot) and Token usage (per-model counters) - both scoped to this
 // account's provider key.
 function accountCard(p, a, quota, tokens) {
@@ -9059,6 +9221,13 @@ function accountCard(p, a, quota, tokens) {
   const mail = a.email ? `<div class="acct-mail">${esc(a.email)}</div>` : '';
   const snap = quota ? quota[key] : null;
   const tokRows = (tokens || []).filter((t) => t.provider === key);
+  // Any POOLED account carries a user-provided label (API-key and OAuth
+  // alike); pool-less OAuth providers are identified by their SSO email with
+  // no label to edit.
+  const renameBtn = p.pooled
+    ? `<button class="btn small" data-rename="${esc(a.id)}"
+              title="Rename this account (display name only — routing and usage history are unaffected)">Rename</button>`
+    : '';
   // Every provider has a Quota() to poll (measured windows, or the
   // implementation's own console-only snapshot), so Refresh usage is always
   // meaningful. The `billing` label deliberately plays no part here: it is
@@ -9075,6 +9244,7 @@ function accountCard(p, a, quota, tokens) {
       <div class="row-actions">
         <button class="btn small" data-test="${esc(a.id)}"
                 title="Send a real end-to-end probe request through this account">Test</button>
+        ${renameBtn}
         ${refreshBtn}
         <button class="btn danger small" data-remove="${esc(a.id)}"
                 data-provider="${esc(p.name)}" data-label="${esc(label)}">Remove</button>
@@ -9406,11 +9576,12 @@ function closeLoginModal() {
 // startAsyncLogin drives the aqp SSO or codex device flow:
 //   POST /api/login/<provider>/start → {session_id, login_url} (aqp) or {session_id, verify_url, user_code} (codex)
 //   poll GET /api/login/<session_id>/poll every ~1.5s until state is done|error.
-async function startAsyncLogin(providerName, providerId) {
+async function startAsyncLogin(providerName, providerId, accountId) {
   openLoginModal(`Sign in — ${providerName}`);
   let sessionId = null;
   try {
-    const start = await apiPost(`/api/login/${encodeURIComponent(providerName)}/start`);
+    const accountQuery = accountId ? `?account=${encodeURIComponent(accountId)}` : '';
+    const start = await apiPost(`/api/login/${encodeURIComponent(providerName)}/start${accountQuery}`);
     sessionId = start.session_id;
     if (!sessionId) throw new Error('no session_id from server');
     if (providerId === 'codex') {
@@ -9829,8 +10000,12 @@ async function renderAnalyticsTab(background = false) {
   // renders from it on every full render, not just quota-pinned ones).
   // Failure keeps the last known quota — an unresolvable preset degrades to
   // all-time below, and the stale banner carries the analytics fetch itself.
+  // The account-labels prefetch rides the same await (it never rejects):
+  // pooled series keys must fold to "name · <label>" on the FIRST render —
+  // without it, a refresh landing on #analytics showed the 8-char id
+  // fallback until the Status or Accounts tab was visited.
   try {
-    const st = await apiGet('/api/status');
+    const [st] = await Promise.all([apiGet('/api/status'), ensureAccountLabels()]);
     if (st && st.quota) anQuota = st.quota;
   } catch (_) { /* keep last known quota */ }
   // Window bounds drive both the query and the granularity gating — computed
@@ -10138,10 +10313,14 @@ function destroyAnalyticsCharts() {
 const analyticsFacetModels = new Map();
 const analyticsFacetAgents = new Set();
 function analyticsFillDatalists(panel, resp, provider) {
+  // Facet providers fold to the PARENT name: pooled series carry virtual
+  // "name#<id>" keys whose hash is never user-facing, and the backend's
+  // provider filter matches a parent name against every account's rows.
   for (const s of ((resp && resp.series) || [])) {
     if (!s || !s.provider) continue;
-    let set = analyticsFacetModels.get(s.provider);
-    if (!set) { set = new Set(); analyticsFacetModels.set(s.provider, set); }
+    const facet = splitProviderKey(s.provider).parent || s.provider;
+    let set = analyticsFacetModels.get(facet);
+    if (!set) { set = new Set(); analyticsFacetModels.set(facet, set); }
     set.add(s.model);
     if (s.agent) analyticsFacetAgents.add(s.agent);
   }
@@ -10321,7 +10500,7 @@ function analyticsRenderCharts(panel, resp, metricId, gran) {
   // The window grid comes from the response's echoed from/to (not the local
   // clock) so the axis covers exactly what was queried.
   const grid = analyticsWindowGrid(resp && resp.from, resp && resp.to, gran);
-  const data = analyticsChartSeries(resp && resp.series, metric.id, grid);
+  const data = analyticsChartSeries(resp && resp.series, metric.id, grid, displayProvider);
   if (!data.x.length || !data.labels.length) {
     host.innerHTML = '<div class="empty-state">No series in range</div>';
     return;
@@ -10658,12 +10837,15 @@ function analyticsSortState() {
 function analyticsRenderTable(panel, resp, metricId) {
   const host = panel.querySelector('#an-table');
   if (!host) return;
-  const rows = analyticsTableRows(resp && resp.series);
+  const rows = analyticsTableRows(resp && resp.series, displayProvider);
   // v2: identical table shape to Status→Dashboard — health status badge,
   // ttft column, graded latency/ttft/tok-s cells, $/1M tok as a cost-cell
   // hover note, cost share as a plain number. The two views differ only in
   // their window (Analytics = selected range, Dashboard = fixed 1h).
-  const health = new Map(modelHealthFromSeries(resp && resp.series).map((r) => [r.label, r]));
+  // modelHealthFromSeries keys by the RAW provider label; the badge join
+  // re-keys through the display mapping so folded rows still find their entry.
+  const labelMap = displayAnalyticsLabels(resp && resp.series);
+  const health = new Map(modelHealthFromSeries(resp && resp.series).map((r) => [labelMap[r.label] || r.label, r]));
   const totalCost = rows.reduce((sum, r) => sum + (r.cost || 0), 0);
   // Join the sort-only fields onto each row (analyticsSortRows reads them):
   // the health score keys by the same label as the badge join, and the cost
@@ -10798,7 +10980,13 @@ async function boot() {
   // #requests/<stream>_live?session=… is consumed by renderRequestsTab/renderLiveCard
   // (the deterministic post-mount point); nothing to apply here.
   // Update the header connection indicator regardless of the landing tab,
-  // then keep it ticking on every tab (see maybeConnRefresh).
+  // then keep it ticking on every tab (see maybeConnRefresh). The one-shot
+  // account-labels prefetch rides along: tabs that render pooled provider
+  // keys without owning an accounts fetch (analytics, requests detail) fold
+  // "name#<id>" keys via providerLabels, whose sources the Status and
+  // Accounts tabs fill — a refresh landing elsewhere would otherwise show
+  // the 8-char id fallback (see ensureAccountLabels).
+  ensureAccountLabels();
   refreshConnIndicator();
   maybeConnRefresh();
 }
@@ -12372,7 +12560,7 @@ function evalShadowCardHTML(data) {
   if (!entries.length) {
     return buildCard('Shadow Report', '24h', '<span class="hint">No shadow pairs in the last 24h.</span>', '', refreshBtn);
   }
-  const rows = entries.map((e) => `<tr><td class="mono">${esc(e.route)}</td><td>${esc(e.primary_provider)}</td><td>${esc(e.shadow_provider)}</td>` +
+  const rows = entries.map((e) => `<tr><td class="mono">${esc(e.route)}</td><td title="${esc(e.primary_provider)}">${esc(displayProvider(e.primary_provider))}</td><td title="${esc(e.shadow_provider)}">${esc(displayProvider(e.shadow_provider))}</td>` +
     `<td class="num">${fmtNum(e.samples)}</td><td>${shadowMatchBadge(e.status_match_rate)}</td>` +
     `<td class="num">${fmtNum(e.primary_latency_ms)}</td><td class="num">${fmtNum(e.shadow_latency_ms)}</td>` +
     `<td class="num">${e.latency_diff_ms > 0 ? '+' : ''}${fmtNum(e.latency_diff_ms)}</td></tr>`).join('');
@@ -12401,7 +12589,7 @@ function evalFusionCardHTML(data) {
   if (runs.length) {
     const rows = runs.map((r) => {
       const legs = (r.legs || []);
-      const legsTip = legs.map((l) => `${l.provider}/${l.model} ${l.status}${l.err ? ' — ' + l.err : ''}`).join('\n');
+      const legsTip = legs.map((l) => `${displayProvider(l.provider)}/${l.model} ${l.status}${l.err ? ' — ' + l.err : ''}`).join('\n');
       const quorum = r.quorum ? '<span class="badge ok">quorum</span>' : `<span class="badge warn">${esc(r.degraded || 'partial')}</span>`;
       const synth = r.synth_committed ? `<span class="badge ok">${r.synth_status || 'ok'}</span>` : '<span class="badge muted">—</span>';
       return `<tr><td class="mono">${esc(fmtTimeSafe(r.ts) || '')}</td><td class="mono">${esc(r.workflow)}</td><td class="mono">${esc(r.route)}</td>` +
@@ -12532,7 +12720,10 @@ async function renderKeyUsage(id) {
   try {
     const res = await apiGet(`/api/keys/${encodeURIComponent(id)}/usage?days=${keysUsageDays}`);
     const body = document.getElementById('keys-usage-body');
-    if (body) body.innerHTML = keyUsageTableHTML(res.models);
+    // Fold pooled virtual keys to "parent · label" for display (the raw hash
+    // key is correlation-only).
+    if (body) body.innerHTML = keyUsageTableHTML(
+      (res.models || []).map((r) => ({ ...r, provider: displayProvider(r.provider) })));
   } catch (e) {
     const body = document.getElementById('keys-usage-body');
     if (body) body.innerHTML = `<p class="msg err">${esc(String(e.message || e))}</p>`;

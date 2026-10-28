@@ -11,6 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/configedit"
@@ -391,11 +392,11 @@ func WriteProviderModels(configFile, provName string, names []string) error {
 
 // refreshProviderModels fetches the live model list for a provider exactly once,
 // with presentation names when the upstream reports them. If `provName` is a
-// pooled parent (≥2 accounts in its credential pool) it uses the pool's first
-// virtual by account-id order; else it uses the plain provider name. The model
-// list is per-upstream, not per-account, so one fetch is correct and sufficient
-// — fanning out across the pool would multiply upstream calls without changing
-// the result.
+// pooled parent (a plural credential pool) it uses the pool's first virtual by
+// account-id order; a legacy singular / not-logged-in provider uses the plain
+// provider name. The model list is per-upstream, not per-account, so one fetch
+// is correct and sufficient — fanning out across the pool would multiply
+// upstream calls without changing the result.
 //
 // Providers implementing provider.ModelInfoLister return display names
 // (Kimi Code: "K2.8 Preview"); the rest degrade to plain ids with empty names.
@@ -427,22 +428,24 @@ func RefreshProviderModelInfos(cfg *configdomain.Config, provName string) ([]pro
 }
 
 // poolVirtuals returns the sorted virtual ids ("name#<accountID>") for a pooled
-// parent and true when the provider has ≥2 accounts in its credential pool; or
-// (nil, false) for a single-account / not-logged-in / unknown provider. It reads
-// the pool file directly via loadPool (no Proxy required) so `models refresh`
-// and `doctor` can resolve the pool without a running daemon. The returned ids
-// are sorted so callers can deterministically pick the "first" virtual.
+// parent and true when the provider has a PLURAL credential pool with at least
+// one account (pools key by virtual id regardless of size); or (nil, false) for
+// a legacy singular / not-logged-in / unknown provider (those keep the plain
+// name). It reads the pool file directly via LoadSnapshot (no Proxy required)
+// so `models refresh` and `doctor` can resolve the pool without a running
+// daemon. The returned ids are sorted so callers can deterministically pick
+// the "first" virtual.
 func PoolVirtuals(cfg *configdomain.Config, name string) ([]string, bool) {
 	prov, ok := cfg.Providers[name]
 	if !ok {
 		return nil, false
 	}
-	pool, _ := accountStore().Load(name, prov.Provider)
-	if len(pool.Accounts) < 2 {
+	snapshot, _ := accountStore().LoadSnapshot(name, prov.Provider)
+	if snapshot.Source != accounts.SourcePlural || len(snapshot.Pool.Accounts) == 0 {
 		return nil, false
 	}
-	vids := make([]string, 0, len(pool.Accounts))
-	for _, a := range pool.Accounts {
+	vids := make([]string, 0, len(snapshot.Pool.Accounts))
+	for _, a := range snapshot.Pool.Accounts {
 		vids = append(vids, name+"#"+a.ID)
 	}
 	sort.Strings(vids)

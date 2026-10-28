@@ -3,6 +3,7 @@ package targetexec
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -590,6 +591,41 @@ func TestExecutorRedispatchesFastFailConnThen200(t *testing.T) {
 	if string(doer.bodies[0]) != string(doer.bodies[1]) {
 		t.Fatalf("redispatch mutated the body: %q vs %q", doer.bodies[0], doer.bodies[1])
 	}
+}
+
+// TestExecutorRedispatchesGoAwayThen200: a server-initiated HTTP/2 GOAWAY
+// (upstream connection recycle) takes the same fast-fail redispatch path —
+// the stream was past LastStreamID, the server never processed the request,
+// so one fresh-connection redispatch on the SAME target is safe. Observed
+// live as periodic LastStreamID≈2000 ErrCode=NO_ERROR recycles killing every
+// in-flight request at once (2026-10-14); without this, GOAWAY burned a
+// failover hop plus a circuit tick for a routine connection recycle.
+func TestExecutorRedispatchesGoAwayThen200(t *testing.T) {
+	provider := &executorTestProvider{}
+	attempt, writer := testAttempt(provider, `{"model":"model"}`, Policy{LastTarget: true})
+	doer := &sequenceDoer{
+		errors: []error{
+			fastFailConnError(goAwayTestError()),
+			nil,
+		},
+		responses: []*http.Response{nil, testResponse(200, `{"ok":true}`)},
+	}
+	state := &executorState{}
+	effects := &executorEffects{}
+	result := (Executor{Client: doer, State: state, Effects: effects}).Execute(attempt)
+	if !result.Committed || doer.calls != 2 || provider.refreshes != 0 ||
+		state.success != 1 || state.failures != 0 ||
+		effects.failures != 0 || effects.failovers != 0 || effects.commits != 1 || writer.Code != 200 {
+		t.Fatalf("result=%+v calls=%d state=%+v effects=%+v status=%d",
+			result, doer.calls, state, effects, writer.Code)
+	}
+}
+
+// goAwayTestError reproduces the production error shape: *url.Error wrapping
+// net/http's HTTP/2 goAwayError message verbatim as captured from the live
+// daemon log (2026/10/15 00:10:32).
+func goAwayTestError() error {
+	return errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=1999, ErrCode=NO_ERROR, debug=""`)
 }
 
 // TestExecutorFastFailConnTwiceCountsOnceAndFailsOver: when the redispatch

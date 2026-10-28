@@ -1,13 +1,14 @@
 // Package restartserve is a test-only package: the real end-to-end contract
 // for scripts/restart_serve.sh. It builds the actual model-proxy binary, boots
-// a real `serve` process in a sandbox (temp HOME+TMPDIR, loopback port, static
+// real serve processes in a sandbox (temp HOME+TMPDIR, loopback port, static
 // provider), then runs the script and asserts the observable restart
-// semantics: old listener SIGINTed and gone, port re-listening under a new
-// pid, fresh-start path, listen-port parsing from config.yaml, and the
-// pidfile-owner stop (a daemon's supervisor must be stopped, never left to
-// respawn its killed worker).
+// semantics: the old listener is stopped (daemon supervisor included — never
+// left to respawn its killed worker) and the port re-listens under a
+// SUPERVISED daemon started by the script; the fresh-start path parses the
+// port from config.yaml; and a binary that cannot serve triggers the rollback
+// contract (previous binary restored and serving, exit 1).
 //
-// External precondition: lsof + nohup (unix); the suite skips on windows.
+// External precondition: lsof + sh (unix); the suite skips on windows.
 package restartserve
 
 import (
@@ -212,36 +213,59 @@ func startServe(t *testing.T, dir string, port int) (int, <-chan error) {
 
 func runScript(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	out, err := runScriptExit(t, dir, args...)
+	if err != nil {
+		t.Fatalf("restart_serve.sh %v failed: %v\n%s", args, err, out)
+	}
+	return out
+}
+
+// runScriptExit runs the script and returns its combined output plus the
+// process error (nil on exit 0) so rollback tests can assert the exit code.
+func runScriptExit(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
 	full := append([]string{scriptPath(t), "--dir", dir, "--log", filepath.Join(dir, "serve.log")}, args...)
 	cmd := exec.Command("sh", full...)
 	cmd.Env = envFor(dir)
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("restart_serve.sh %v failed: %v\n%s", args, err, out)
-	}
-	return string(out)
+	return string(out), err
 }
 
-// killPortOnCleanup SIGINTs the expected listener on test teardown. When
-// expectedPID is non-zero it is killed directly; otherwise the port is used as
-// a fallback but the process is verified to be the model-proxy test binary
-// before any signal is sent, so an unrelated listener cannot be killed.
-func killPortOnCleanup(t *testing.T, port int, binary string, expectedPID int) {
+// stopDaemonOnCleanup tears down whatever the script may have left behind:
+// the script-managed daemon (pidfile beside --log), a config/TMPDIR-derived
+// daemon or pidfile-owning foreground serve, and finally the raw
+// identity-checked port kill. `serve stop` must run BEFORE any port-based
+// kill: SIGINTing a daemon's worker alone makes the supervisor respawn it
+// ~1s later (pitfalls #24b), leaking a still-listening serve past teardown.
+func stopDaemonOnCleanup(t *testing.T, dir string, port int) {
 	t.Helper()
+	bin := filepath.Join(dir, "model-proxy")
+	logFlag := filepath.Join(dir, "serve.log")
+	stopAll := func() {
+		for _, args := range [][]string{
+			{"serve", "stop", "--log-file", logFlag},
+			{"serve", "stop"},
+		} {
+			cmd := exec.Command(bin, args...)
+			cmd.Dir = dir
+			cmd.Env = envFor(dir)
+			_ = cmd.Run()
+		}
+	}
 	t.Cleanup(func() {
-		pid := expectedPID
-		if pid == 0 {
-			found, err := pidOnPort(port)
-			if err != nil {
-				return
+		stopAll()
+		// The listener is normally the suite build output (the sandbox
+		// symlink resolves through /proc/<pid>/exe on Linux), but the
+		// rollback test replaces the symlink with a REAL copy at the
+		// sandbox path — accept both so the last-resort port kill still
+		// recognizes it under Linux's exact-path comparison.
+		if pid, err := pidOnPort(port); err == nil && (isTestBinary(pid, binary) || isTestBinary(pid, bin)) {
+			if err := stopServeProcess(pid); err != nil {
+				t.Errorf("stop leftover listener pid %d: %v", pid, err)
 			}
-			pid = found
-		}
-		if !isTestBinary(pid, binary) {
-			return
-		}
-		if err := stopServeProcess(pid); err != nil {
-			t.Errorf("stop serve pid %d: %v", pid, err)
+			// The worker kill may have left a supervisor: stop it or it
+			// respawns the worker and re-takes the port.
+			stopAll()
 		}
 	})
 }
@@ -282,11 +306,15 @@ func processGone(pid int) bool {
 }
 
 // isTestBinary verifies pid belongs to the model-proxy binary we built for
-// this suite. On Linux /proc/<pid>/exe is authoritative; on Darwin we fall back
-// to the process command name from ps. Darwin reports comm as argv[0]
-// VERBATIM — "./model-proxy" for the script-started serve, an absolute path
-// for startServe's child — so both sides are compared by base name; an exact
-// string match would silently skip the kill and leak the orphaned serve.
+// this suite. On Linux /proc/<pid>/exe is authoritative — and it RESOLVES
+// symlinks, so the expected path must be whichever one the kernel will
+// report: the build output for the sandbox's symlinked ./model-proxy, or the
+// sandbox path itself after a rollback mv placed a real copy there. On Darwin
+// we fall back to the process command name from ps. Darwin reports comm as
+// argv[0] VERBATIM — "./model-proxy" for the script-started serve, an
+// absolute path for startServe's child — so both sides are compared by base
+// name; an exact string match would silently skip the kill and leak the
+// orphaned serve.
 func isTestBinary(pid int, binary string) bool {
 	if exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)); err == nil {
 		return exe == binary
@@ -313,8 +341,9 @@ func exitedYet(exited <-chan error) bool {
 func TestHotRestartReplacesListener(t *testing.T) {
 	dir, port := sandbox(t)
 	pid1, exited1 := startServe(t, dir, port)
-	// 覆盖脚本拉起的新实例；pid1 由 startServe 自己清理。binary 已由 sandbox 构建。
-	killPortOnCleanup(t, port, binary, 0)
+	// Covers the script-started daemon; pid1 is cleaned by startServe itself.
+	// binary 已由 sandbox 构建。
+	stopDaemonOnCleanup(t, dir, port)
 
 	out := runScript(t, dir, "--port", strconv.Itoa(port))
 
@@ -330,8 +359,15 @@ func TestHotRestartReplacesListener(t *testing.T) {
 		t.Errorf("listener pid unchanged (%d) — old process was not replaced", pid1)
 	}
 	// The old process may briefly outlive port release (drain + final flush);
-	// it must still exit promptly after SIGINT.
+	// it must still exit promptly after the stop signal.
 	waitFor(t, "old process exit", 15*time.Second, func() bool { return exitedYet(exited1) })
+
+	// The restart is a SUPERVISED daemon: its pidfile sits beside the log the
+	// script passed (--log serve.log → serve.pid), so a later bare `serve
+	// stop` finds it without flags in this sandbox (config log_file unset).
+	if _, err := os.Stat(filepath.Join(dir, "serve.pid")); err != nil {
+		t.Errorf("script daemon pidfile serve.pid missing: %v", err)
+	}
 
 	// New instance actually serves, not just holds the socket.
 	logBytes, err := os.ReadFile(filepath.Join(dir, "serve.log"))
@@ -350,8 +386,8 @@ func TestColdStartParsesPortFromConfig(t *testing.T) {
 
 	// Register BEFORE runScript: if the script fails (t.Fatalf inside
 	// runScript), a cleanup registered after it would never run and the
-	// nohup'd serve would leak. binary 已由 sandbox 构建。
-	killPortOnCleanup(t, port, binary, 0)
+	// script-started daemon would leak. binary 已由 sandbox 构建。
+	stopDaemonOnCleanup(t, dir, port)
 	out := runScript(t, dir) // no --port: exercise the config.yaml parser
 
 	if !strings.Contains(out, fmt.Sprintf("restarted on port %d", port)) {
@@ -475,10 +511,10 @@ func TestRestartStopsDaemonSupervisor(t *testing.T) {
 		t.Fatalf("parse daemon pidfile %q: %v", pidBytes, err)
 	}
 
-	// Safety nets (LIFO: port cleanup first, supervisor SIGKILL as last
+	// Safety nets (LIFO: daemon stop first, supervisor SIGKILL as last
 	// resort) so a failed assertion can never orphan the daemon.
 	t.Cleanup(func() { _ = syscall.Kill(supervisorPID, syscall.SIGKILL) })
-	killPortOnCleanup(t, port, binary, 0)
+	stopDaemonOnCleanup(t, dir, port)
 
 	out := runScript(t, dir, "--port", strconv.Itoa(port))
 	if !strings.Contains(out, fmt.Sprintf("restarted on port %d", port)) {
@@ -489,6 +525,11 @@ func TestRestartStopsDaemonSupervisor(t *testing.T) {
 	// re-listened by a new pid — never by a supervisor-respawned worker.
 	waitFor(t, "supervisor exit", 15*time.Second, func() bool { return processGone(supervisorPID) })
 	waitFor(t, "old worker exit", 15*time.Second, func() bool { return processGone(workerPID) })
+	// The dead supervisor removed its own pidfile on exit — no stale daemon.pid
+	// that a later `serve stop` would signal a reused pid over.
+	if _, err := os.Stat(filepath.Join(dir, "daemon.pid")); !os.IsNotExist(err) {
+		t.Errorf("old daemon pidfile daemon.pid still present after supervisor exit: %v", err)
+	}
 	waitFor(t, "port re-listening", 15*time.Second, func() bool { return listening(port) })
 	newPID, err := pidOnPort(port)
 	if err != nil {
@@ -496,5 +537,61 @@ func TestRestartStopsDaemonSupervisor(t *testing.T) {
 	}
 	if newPID == supervisorPID || newPID == workerPID {
 		t.Errorf("listener pid %d was not replaced (supervisor=%d worker=%d)", newPID, supervisorPID, workerPID)
+	}
+}
+
+// TestRestartRollsBackFailedBinary pins the rollback contract: when the binary
+// on disk cannot serve, one invocation must restore model-proxy.old, bring the
+// daemon back up on the PREVIOUS binary, and exit 1 ("not deployed") — never
+// leave the gateway down on a broken binary. The broken binary is staged by
+// hand (the script only snapshots model-proxy.old itself while swapping in a
+// model-proxy.new, i.e. on a --build run).
+func TestRestartRollsBackFailedBinary(t *testing.T) {
+	dir, port := sandbox(t)
+	stopDaemonOnCleanup(t, dir, port)
+
+	if err := os.Remove(filepath.Join(dir, "model-proxy")); err != nil {
+		t.Fatal(err)
+	}
+	broken := "#!/bin/sh\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "model-proxy"), []byte(broken), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The rollback snapshot a prior --build run would have left: the working
+	// binary.
+	if out, err := exec.Command("cp", binary, filepath.Join(dir, "model-proxy.old")).CombinedOutput(); err != nil {
+		t.Fatalf("stage model-proxy.old: %v\n%s", err, out)
+	}
+
+	out, exitErr := runScriptExit(t, dir, "--port", strconv.Itoa(port))
+	code := 0
+	if exitErr != nil {
+		ee, ok := exitErr.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("run script: %v\n%s", exitErr, out)
+		}
+		code = ee.ExitCode()
+	}
+	if code != 1 {
+		t.Fatalf("script exit = %d, want 1 (rolled back — new binary not deployed):\n%s", code, out)
+	}
+	if !strings.Contains(out, "rolled back") {
+		t.Errorf("script output %q missing rollback line", out)
+	}
+	waitFor(t, "rolled-back daemon to listen", 15*time.Second, func() bool { return listening(port) })
+	pid, err := pidOnPort(port)
+	if err != nil {
+		t.Fatalf("no listener after rollback: %v", err)
+	}
+	// The rollback restored a REAL file at the sandbox path (mv
+	// model-proxy.old → model-proxy — the original symlink died with the
+	// staged broken script), so Linux /proc/<pid>/exe names dir/model-proxy,
+	// NOT the suite's build output; Darwin's base-name comparison is
+	// insensitive to the difference (why this only failed on Linux CI).
+	if !isTestBinary(pid, filepath.Join(dir, "model-proxy")) {
+		t.Fatalf("listener pid %d is not the rolled-back model-proxy binary (the broken binary ended up serving)", pid)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "model-proxy.old")); !os.IsNotExist(err) {
+		t.Errorf("model-proxy.old still present after rollback (mv did not consume it): %v", err)
 	}
 }

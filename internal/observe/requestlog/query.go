@@ -136,13 +136,13 @@ func rawPrefilter(line []byte, filter Filter) bool {
 // letting an older-named file hold newer records) stays tolerated: every file
 // is peeked independently.
 func QueryRecords(dir string, filter Filter) ([]Record, error) {
-	return query(dir, filePrefix, filter, false, nil)
+	return query(dir, filePrefix, filter, false, false, nil)
 }
 
 // QueryRecordsIn is QueryRecords for a non-default stream: only files named
 // <prefix>*.log in dir are scanned (e.g. the split MCP stream's mcp- files).
 func QueryRecordsIn(dir, prefix string, filter Filter) ([]Record, error) {
-	return query(dir, prefix, filter, false, nil)
+	return query(dir, prefix, filter, false, false, nil)
 }
 
 // Facets are the distinct providers, models and agents observed in the scanned
@@ -199,7 +199,7 @@ func (c *facetCollector) add(record Record) {
 		model = record.CalledModel
 	}
 	if record.Provider != "" {
-		c.providers[record.Provider] = true
+		c.providers[facetProviderName(record.Provider)] = true
 	}
 	if model != "" {
 		c.models[model] = true
@@ -208,11 +208,24 @@ func (c *facetCollector) add(record Record) {
 		c.agents[record.Agent] = true
 	}
 	if record.Provider != "" && model != "" {
-		if c.byProvider[record.Provider] == nil {
-			c.byProvider[record.Provider] = map[string]bool{}
+		provider := facetProviderName(record.Provider)
+		if c.byProvider[provider] == nil {
+			c.byProvider[provider] = map[string]bool{}
 		}
-		c.byProvider[record.Provider][model] = true
+		c.byProvider[provider][model] = true
 	}
+}
+
+// facetProviderName folds a runtime provider key to its operator-facing facet
+// name: pooled records carry the virtual "name#<accountID>" key, but the
+// provider dropdown offers the PARENT name (the id hash is correlation-only
+// and never user-facing). The provider FILTER stays substring-based, so
+// picking the parent matches every account's rows.
+func facetProviderName(provider string) string {
+	if i := strings.IndexByte(provider, '#'); i >= 0 {
+		return provider[:i]
+	}
+	return provider
 }
 
 func (c *facetCollector) facets() Facets {
@@ -329,7 +342,14 @@ func peekFirstRecordTs(path string) (string, bool) {
 	return record.Ts, true
 }
 
-func query(dir, prefix string, filter Filter, metadataOnly bool, facets *facetCollector) ([]Record, error) {
+// query streams the prefix's files newest-first. metadataOnly strips bodies
+// as records match; foldLegs switches the summary-list fold on: attempt_only
+// legs stop competing for row slots — paired legs attach to their committed
+// row's FailedHops instead, and an unanswered request (no committed row,
+// e.g. the client disconnecting mid-failover) keeps its newest leg as its
+// only row. The fold must stay semantics-identical to the index SQL's fold
+// predicate in Indexer.SummariesWithFacets (pinned by index==scan tests).
+func query(dir, prefix string, filter Filter, metadataOnly, foldLegs bool, facets *facetCollector) ([]Record, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -350,6 +370,17 @@ func query(dir, prefix string, filter Filter, metadataOnly bool, facets *facetCo
 	var newest *timestampMinHeap
 	if filter.Limit > 0 {
 		newest = &timestampMinHeap{}
+	}
+	// Fold state: legs are held per request id as hop telemetry (bypassing
+	// filter.matches and the top-K — the index fold's hop subquery ignores
+	// the filter the same way), and every decoded committed id is tracked
+	// pre-filter so a filtered-out commit (e.g. ErrorsOnly dropping the 200)
+	// still folds its legs away.
+	var legsByID map[string][]Record
+	var committedIDs map[string]struct{}
+	if foldLegs {
+		legsByID = make(map[string][]Record)
+		committedIDs = make(map[string]struct{})
 	}
 	found := false
 	for i := len(names) - 1; i >= 0 && !found; i-- {
@@ -391,10 +422,30 @@ func query(dir, prefix string, filter Filter, metadataOnly bool, facets *facetCo
 			if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 && rawPrefilter(trimmed, filter) {
 				var record Record
 				if json.Unmarshal(trimmed, &record) == nil {
-					if facets != nil {
+					// Legs never feed the facets: the dropdowns describe the
+					// traffic that produces rows, and legs fold away.
+					if facets != nil && !record.AttemptOnly {
 						facets.add(record)
 					}
-					if filter.matches(record) {
+					legRow := false
+					if foldLegs && record.AttemptOnly {
+						// Hold every leg as hop telemetry, bodies stripped.
+						// Files stream newest-first and a commit is written
+						// after its legs, so a paired leg's commit has been
+						// decoded already; an unanswered leg is final (the
+						// end-of-scan fold drops stragglers under disorder).
+						record.RequestBody, record.ResponseBody, record.ResponseHeaders = "", "", ""
+						legsByID[record.RequestID] = append(legsByID[record.RequestID], record)
+						if _, answered := committedIDs[record.RequestID]; !answered {
+							legRow = true
+						}
+					} else if foldLegs {
+						committedIDs[record.RequestID] = struct{}{}
+					}
+					// Row candidacy: everything except paired legs — a paired
+					// leg's evidence rides its committed row's FailedHops.
+					rowCandidate := !foldLegs || !record.AttemptOnly || legRow
+					if rowCandidate && filter.matches(record) {
 						if metadataOnly || filter.UsageOnly {
 							if filter.UsageOnly {
 								record.ParsedUsage = ExtractUsage(record.ResponseBody)
@@ -431,7 +482,69 @@ func query(dir, prefix string, filter Filter, metadataOnly bool, facets *facetCo
 		records = *newest
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Ts > records[j].Ts })
+	if foldLegs {
+		records = foldHeldLegs(records, legsByID, committedIDs)
+	}
 	return records, nil
+}
+
+// foldHeldLegs finishes the summary-list fold on the newest-first row set:
+// paired legs never surface as rows (their evidence rides the committed
+// row's FailedHops), and an unanswered request keeps exactly one row — its
+// newest leg, carrying the earlier legs as FailedHops. The survivor dedupe
+// walks newest-first, so the first leg per id is the survivor; the committed
+// drop also covers the disorder case where a commit decoded after its legs.
+func foldHeldLegs(records []Record, legsByID map[string][]Record, committedIDs map[string]struct{}) []Record {
+	out := make([]Record, 0, len(records))
+	seenLeg := make(map[string]struct{})
+	for _, rec := range records {
+		if rec.AttemptOnly {
+			if _, answered := committedIDs[rec.RequestID]; answered {
+				continue
+			}
+			if _, dup := seenLeg[rec.RequestID]; dup {
+				continue
+			}
+			seenLeg[rec.RequestID] = struct{}{}
+			rec.FailedHops = heldHops(legsByID[rec.RequestID], rec)
+			out = append(out, rec)
+			continue
+		}
+		rec.FailedHops = heldHops(legsByID[rec.RequestID], Record{})
+		out = append(out, rec)
+	}
+	return out
+}
+
+// heldHops projects a request's held legs into FailedHops, attempt-ascending
+// (write order; Ts as the tie-break). exclude drops the survivor leg itself
+// from an unanswered request's own hop chain (zero Record excludes nothing).
+func heldHops(legs []Record, exclude Record) []FailedHop {
+	if len(legs) == 0 {
+		return nil
+	}
+	sorted := make([]Record, len(legs))
+	copy(sorted, legs)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Attempt != sorted[j].Attempt {
+			return sorted[i].Attempt < sorted[j].Attempt
+		}
+		return sorted[i].Ts < sorted[j].Ts
+	})
+	hops := make([]FailedHop, 0, len(sorted))
+	for _, leg := range sorted {
+		if exclude.RequestID != "" && leg.Attempt == exclude.Attempt && leg.Ts == exclude.Ts {
+			continue
+		}
+		hops = append(hops, FailedHop{
+			Provider: leg.Provider, Status: leg.Status,
+			Attempt: leg.Attempt, LatencyMs: leg.LatencyMs,
+		})
+	}
+	if len(hops) == 0 {
+		return nil
+	}
+	return hops
 }
 
 type timestampMinHeap []Record

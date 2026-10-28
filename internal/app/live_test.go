@@ -615,8 +615,8 @@ func TestForward_LiveEndEventCarriesStreamUsage(t *testing.T) {
 	if start.RequestID == "" || end.RequestID != start.RequestID ||
 		end.Agent != "claude-code" || end.Protocol != "openai" ||
 		end.Exposed != "glm" || end.Provider != "z" || end.UpstreamModel != "gpt-x" || end.Status != http.StatusOK ||
-		end.Input != 17 || end.Output != 9 || end.CacheRead != 5 || end.CacheCreation != 0 || end.LatencyMs < 0 {
-		t.Errorf("start=%+v terminal=%+v, want matching request id; claude-code/openai/glm/z/gpt-x/200; usage 17/9 cache-read 5; non-negative latency", start, end)
+		end.Input != 12 || end.Output != 9 || end.CacheRead != 5 || end.CacheCreation != 0 || end.LatencyMs < 0 {
+		t.Errorf("start=%+v terminal=%+v, want matching request id; claude-code/openai/glm/z/gpt-x/200; usage 12/9 (17−5 cached) cache-read 5; non-negative latency", start, end)
 	}
 }
 

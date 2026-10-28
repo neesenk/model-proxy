@@ -40,7 +40,7 @@ func TestAgentRestoreOnBoot(t *testing.T) {
 	m2 := obscounters.NewMetricsStore()
 	tc2 := obscounters.NewTokenCounter()
 	agents2 := obscounters.NewAgentCounter()
-	res := Bootstrap(path, 0, t.TempDir(), m2, tc2, agents2)
+	res := Bootstrap(path, 0, t.TempDir(), m2, tc2, agents2, nil, "")
 	if res.Store == nil || res.Flusher == nil {
 		t.Fatal("bootstrap failed to open store")
 	}

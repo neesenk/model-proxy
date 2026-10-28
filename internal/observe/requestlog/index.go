@@ -28,6 +28,12 @@ const (
 	// indexBatchLines bounds one insert transaction so the single SQLite
 	// connection stays responsive to web queries during a large catch-up.
 	indexBatchLines = 500
+	// indexBatchMaxBytes bounds one insert batch by the JSONL line bytes it
+	// retained: a burst catch-up of large-body records must not hold a whole
+	// 500-line batch of multi-MB lines (with bodies blanked post-parse the
+	// retention is metadata-only, this cap is the belt-and-braces bound on
+	// any future field growth).
+	indexBatchMaxBytes = 64 << 20
 	// defaultReconcileInterval is the tailing tick: how often the indexer
 	// picks up appended lines, rotations, truncations and retention deletes.
 	defaultReconcileInterval = 250 * time.Millisecond
@@ -55,6 +61,9 @@ type Indexer struct {
 	dir  string
 	db   *sql.DB
 	tick time.Duration
+	// batchMaxBytes bounds one insert batch by retained line bytes
+	// (indexBatchMaxBytes; a test seam for byte-cap coverage).
+	batchMaxBytes int64
 
 	done     chan struct{}
 	closed   chan struct{}
@@ -64,6 +73,9 @@ type Indexer struct {
 	// reconciled is signaled (non-blocking) after every finished reconcile
 	// pass — a test seam for observing the background loop without sleeps.
 	reconciled chan struct{}
+	// sessions is the incremental per-session aggregate cache behind
+	// SessionSummaries (see sessionAggCache).
+	sessions sessionAggCache
 }
 
 // NewIndexer opens (or creates) the index at <dir>/index.db and applies the
@@ -88,12 +100,13 @@ func NewIndexer(dir string) (*Indexer, error) {
 	// not create).
 	_ = os.Chmod(path, 0o600)
 	indexer := &Indexer{
-		dir:        dir,
-		db:         db,
-		tick:       defaultReconcileInterval,
-		done:       make(chan struct{}),
-		closed:     make(chan struct{}),
-		reconciled: make(chan struct{}, 1),
+		dir:           dir,
+		db:            db,
+		tick:          defaultReconcileInterval,
+		batchMaxBytes: indexBatchMaxBytes,
+		done:          make(chan struct{}),
+		closed:        make(chan struct{}),
+		reconciled:    make(chan struct{}, 1),
 	}
 	if err := indexer.migrate(); err != nil {
 		_ = db.Close()
@@ -264,6 +277,12 @@ func (x *Indexer) ensureColumns() error {
 	if _, err := x.db.Exec(`CREATE INDEX IF NOT EXISTS idx_records_api_key ON records(api_key)`); err != nil {
 		return err
 	}
+	// Covering index for rankRecentSessions' newest-first session walk. It
+	// must be created here, after the attempt_only ALTER: on a pre-column
+	// database the partial-index WHERE clause cannot reference the column yet.
+	if _, err := x.db.Exec(`CREATE INDEX IF NOT EXISTS idx_records_ts_session ON records(ts, session_id) WHERE attempt_only = 0`); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -377,6 +396,35 @@ func (x *Indexer) reconcile() error {
 	return nil
 }
 
+// deleteFileRows removes one file's indexed rows and returns the session ids
+// they belonged to, so the caller can drop those sessions from the
+// incremental aggregate cache (recompute-on-demand keeps the cache a derived
+// view, never a source of truth). Shared by both delete sites: vanished
+// files (retention sweep) and truncation re-index.
+func deleteFileRows(tx *sql.Tx, path string) ([]string, error) {
+	rows, err := tx.Query(`DELETE FROM records WHERE file = ? RETURNING session_id`, path)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+	return ids, nil
+}
+
 // dropVanished deletes the rows of indexed files that no longer exist on disk.
 func (x *Indexer) dropVanished(present map[string]fileState) error {
 	rows, err := x.db.Query(`SELECT path FROM files`)
@@ -407,15 +455,22 @@ func (x *Indexer) dropVanished(present map[string]fileState) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var droppedSessions []string
 	for _, path := range stale {
-		if _, err := tx.Exec(`DELETE FROM records WHERE file = ?`, path); err != nil {
+		ids, err := deleteFileRows(tx, path)
+		if err != nil {
 			return err
 		}
+		droppedSessions = append(droppedSessions, ids...)
 		if _, err := tx.Exec(`DELETE FROM files WHERE path = ?`, path); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	x.sessions.dropSessions(droppedSessions)
+	return nil
 }
 
 // syncFile tails one file: a size below the indexed cursor means the file was
@@ -436,7 +491,8 @@ func (x *Indexer) syncFile(name string, size, mtime int64) error {
 			return err
 		}
 		defer func() { _ = tx.Rollback() }()
-		if _, err := tx.Exec(`DELETE FROM records WHERE file = ?`, name); err != nil {
+		droppedSessions, err := deleteFileRows(tx, name)
+		if err != nil {
 			return err
 		}
 		if _, err := tx.Exec(
@@ -449,6 +505,10 @@ func (x *Indexer) syncFile(name string, size, mtime int64) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		// The re-index re-inserts this file's rows from zero and folds them
+		// back in as they arrive; dropping first is what keeps the fold from
+		// double-counting the pre-truncation rows.
+		x.sessions.dropSessions(droppedSessions)
 		cursor = 0
 	}
 	if size == cursor {
@@ -474,8 +534,9 @@ func (x *Indexer) appendFile(name string, cursor, mtime int64) error {
 	offset := cursor
 	for {
 		var batch []recordRow
+		batchBytes := 0
 		eof := false
-		for len(batch) < indexBatchLines && !eof {
+		for len(batch) < indexBatchLines && batchBytes < int(x.batchMaxBytes) && !eof {
 			line, readErr := reader.ReadBytes('\n')
 			if readErr != nil {
 				if readErr != io.EOF {
@@ -491,6 +552,7 @@ func (x *Indexer) appendFile(name string, cursor, mtime int64) error {
 			if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 {
 				if row, ok := rowFromLine(name, trimmed, lineOffset, int64(len(line))); ok {
 					batch = append(batch, row)
+					batchBytes += len(line)
 				}
 			}
 		}
@@ -521,7 +583,11 @@ type recordRow struct {
 
 // rowFromLine decodes one JSONL line into its index row. The usage columns are
 // the ExtractUsage projection of the response body, parsed once here so the
-// sessions aggregation never re-parses bodies. Unparseable timestamps index as
+// sessions aggregation never re-parses bodies. Bodies themselves are blanked
+// before the row joins a batch: the index persists only metadata plus the
+// (file, offset, length) coordinates (Detail seeks the JSONL file), and a
+// 500-line batch retaining full multi-MB bodies was the daemon's GB-scale heap
+// spike during large-body catch-ups. Unparseable timestamps index as
 // ts_ms = 0 (Filter.matches drops them whenever a time bound is present; the
 // SQL mapping below does the same).
 func rowFromLine(file string, line []byte, offset, length int64) (recordRow, bool) {
@@ -529,9 +595,11 @@ func rowFromLine(file string, line []byte, offset, length int64) (recordRow, boo
 	if err := json.Unmarshal(line, &record); err != nil {
 		return recordRow{}, false
 	}
+	usage := ExtractUsage(record.ResponseBody)
+	record.RequestBody, record.ResponseBody = "", ""
 	row := recordRow{
 		record: record,
-		usage:  ExtractUsage(record.ResponseBody),
+		usage:  usage,
 		file:   file,
 		offset: offset,
 		length: length,
@@ -598,7 +666,13 @@ func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int6
 	); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// Only after the commit are the rows queryable, so only then may the
+	// incremental session aggregates fold them in.
+	x.sessions.foldBatch(batch)
+	return nil
 }
 
 // filterSQL maps Filter onto SQL with the exact matches() semantics: model is
@@ -678,10 +752,21 @@ func filterSQL(filter Filter) (string, []any) {
 // termination; the index answers over the whole retained set).
 func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) {
 	where, args := filterSQL(filter)
+	// The fold (semantics pinned equal to the scan engine's foldLegs pass):
+	// committed rows always pass; a leg survives only when its request never
+	// committed (unanswered — the client disconnected mid-failover). Paired
+	// legs are re-attached below as the committed row's FailedHops. The
+	// correlated NOT EXISTS rides idx_records_request.
+	const fold = `(attempt_only = 0 OR NOT EXISTS (SELECT 1 FROM records c WHERE c.request_id = r.request_id AND c.attempt_only = 0))`
+	if where == "" {
+		where = ` WHERE ` + fold
+	} else {
+		where = ` WHERE ` + fold + ` AND ` + strings.TrimPrefix(where, " WHERE ")
+	}
 	query := `SELECT ts, request_id, session_id, protocol, method, path, tool, exposed,
 		called_model, upstream_model, provider, agent, attempt, status, latency_ms, ttft_ms,
-		request_size, response_size, turn_key, kind, input, output, cache_read, cache_creation, shadow
-		FROM records` + where + ` ORDER BY ts DESC, rowid DESC`
+		request_size, response_size, turn_key, kind, input, output, cache_read, cache_creation, shadow, attempt_only
+		FROM records r` + where + ` ORDER BY ts DESC, rowid DESC`
 	if filter.Limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, filter.Limit)
@@ -693,8 +778,9 @@ func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) 
 	summaries := make([]Summary, 0)
 	for rows.Next() {
 		var (
-			summary Summary
-			shadow  int
+			summary     Summary
+			shadow      int
+			attemptOnly int
 		)
 		if err := rows.Scan(
 			&summary.Ts, &summary.RequestID, &summary.SessionID, &summary.Protocol,
@@ -702,12 +788,13 @@ func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) 
 			&summary.UpstreamModel, &summary.Provider, &summary.Agent, &summary.Attempt,
 			&summary.Status, &summary.LatencyMs, &summary.TTFTMs, &summary.RequestSize, &summary.ResponseSize,
 			&summary.TurnKey, &summary.Kind, &summary.Input, &summary.Output, &summary.CacheRead, &summary.CacheCreation,
-			&shadow,
+			&shadow, &attemptOnly,
 		); err != nil {
 			_ = rows.Close()
 			return nil, Facets{}, err
 		}
 		summary.Shadow = shadow != 0
+		summary.AttemptOnly = attemptOnly != 0
 		if !filter.UsageOnly {
 			summary.Input, summary.Output, summary.CacheRead, summary.CacheCreation = 0, 0, 0, 0
 		}
@@ -719,11 +806,117 @@ func (x *Indexer) SummariesWithFacets(filter Filter) ([]Summary, Facets, error) 
 	}
 	_ = rows.Close()
 
+	summaries, err = x.attachFailedHops(summaries)
+	if err != nil {
+		return nil, Facets{}, err
+	}
+
 	facets, err := x.queryFacets(filter)
 	if err != nil {
 		return nil, Facets{}, err
 	}
 	return summaries, facets, nil
+}
+
+// attachFailedHops completes the fold the SQL predicate started: the result
+// set can still hold several legs of one unanswered request (each passed the
+// fold's NOT EXISTS), so they collapse to the newest (first in the
+// newest-first order) with the older legs as its FailedHops; every committed
+// row then gains its legs' hop chain from a chunked lookup over the page's
+// ids (idx_records_request). Hops sort attempt-ascending with Ts as the
+// tie-break — the same order the scan engine's heldHops produces, so the
+// index==scan parity holds field for field.
+func (x *Indexer) attachFailedHops(summaries []Summary) ([]Summary, error) {
+	committedIdx := make(map[string]int, len(summaries)) // committed request id -> out index
+	seenLeg := make(map[string]int)                      // unanswered request id -> out index of its surviving leg
+	legHops := make(map[int][]Summary)
+	out := summaries[:0] // compact in place: a fold never adds rows, only drops
+	for i := range summaries {
+		if !summaries[i].AttemptOnly {
+			committedIdx[summaries[i].RequestID] = len(out)
+			out = append(out, summaries[i])
+			continue
+		}
+		if idx, dup := seenLeg[summaries[i].RequestID]; dup {
+			legHops[idx] = append(legHops[idx], summaries[i])
+			continue
+		}
+		seenLeg[summaries[i].RequestID] = len(out)
+		out = append(out, summaries[i])
+	}
+	for idx, older := range legHops {
+		out[idx].FailedHops = sortedHops(older)
+	}
+	ids := make([]string, 0, len(committedIdx))
+	for id := range committedIdx {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, chunk := range chunkIDs(ids, 500) {
+		placeholders := strings.Repeat("?,", len(chunk))
+		rows, err := x.db.Query(`SELECT request_id, provider, status, attempt, latency_ms, ts
+			FROM records WHERE attempt_only = 1 AND request_id IN (`+placeholders[:len(placeholders)-1]+`)
+			ORDER BY rowid`, idArgs(chunk)...)
+		if err != nil {
+			return nil, err
+		}
+		byID := make(map[string][]Summary, len(chunk))
+		for rows.Next() {
+			var s Summary
+			if err := rows.Scan(&s.RequestID, &s.Provider, &s.Status, &s.Attempt, &s.LatencyMs, &s.Ts); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			byID[s.RequestID] = append(byID[s.RequestID], s)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		_ = rows.Close()
+		for id, hops := range byID {
+			out[committedIdx[id]].FailedHops = sortedHops(hops)
+		}
+	}
+	return out, nil
+}
+
+// sortedHops projects summary-shaped leg rows into FailedHops, sorted by
+// (attempt, ts) ascending — the hop-chain order contract.
+func sortedHops(legs []Summary) []FailedHop {
+	sorted := make([]Summary, len(legs))
+	copy(sorted, legs)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Attempt != sorted[j].Attempt {
+			return sorted[i].Attempt < sorted[j].Attempt
+		}
+		return sorted[i].Ts < sorted[j].Ts
+	})
+	hops := make([]FailedHop, 0, len(sorted))
+	for _, leg := range sorted {
+		hops = append(hops, FailedHop{Provider: leg.Provider, Status: leg.Status, Attempt: leg.Attempt, LatencyMs: leg.LatencyMs})
+	}
+	return hops
+}
+
+func chunkIDs(ids []string, size int) [][]string {
+	var chunks [][]string
+	for start := 0; start < len(ids); start += size {
+		end := start + size
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunks = append(chunks, ids[start:end])
+	}
+	return chunks
+}
+
+func idArgs(ids []string) []any {
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	return args
 }
 
 // ShadowReport is requestlog.ShadowReport served from the index: the same
@@ -773,15 +966,17 @@ func (x *Indexer) queryFacets(filter Filter) (Facets, error) {
 	// (whose facets are deliberately collected before the filter so dropdowns
 	// cannot narrow themselves into a dead end), browsing one stream must not
 	// offer the other stream's values — mcp server names would pollute the
-	// model dropdown of an LLM-only view.
-	where, args := "", []any{}
+	// model dropdown of an LLM-only view. Legs are excluded like the scan's
+	// facet feed: the dropdowns describe the traffic that produces rows, and
+	// legs fold into their committed rows.
+	clauses := []string{`attempt_only = 0`}
 	switch filter.Kind {
 	case "mcp":
-		where = ` WHERE kind = 'mcp'`
+		clauses = append(clauses, `kind = 'mcp'`)
 	case "llm":
-		where = ` WHERE kind = ''`
+		clauses = append(clauses, `kind = ''`)
 	}
-	rows, err := x.db.Query(`SELECT DISTINCT provider, exposed, called_model, agent FROM records`+where, args...)
+	rows, err := x.db.Query(`SELECT DISTINCT provider, exposed, called_model, agent FROM records WHERE ` + strings.Join(clauses, ` AND `))
 	if err != nil {
 		return Facets{}, err
 	}
@@ -991,45 +1186,404 @@ func (x *Indexer) readRecordAt(file string, offset, length int64) (Record, error
 	return record, nil
 }
 
-// SessionSummaries is SessionSummaries served from the index: the newest
-// scanLimit rows (session-less rows included, matching the scan's top-K
-// window) with usage read from the index columns, aggregated by the same Go
-// code the file-scan version uses.
-func (x *Indexer) SessionSummaries(scanLimit, limit int, costOf func(provider, model string, usage Usage) float64) ([]SessionSummary, error) {
-	query := `SELECT ts, session_id, shadow, status, provider, upstream_model,
-		called_model, agent, input, output, cache_read, cache_creation
-		FROM records ORDER BY ts DESC, rowid DESC`
-	var args []any
-	if scanLimit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, scanLimit)
-	}
-	rows, err := x.db.Query(query, args...)
+// sessionAggregateGroupsSQL aggregates sessions' whole retained history in
+// one grouped pass (session×provider×model×agent), so a computed session's
+// summary always covers all of its records — never a newest-N window. Each
+// group carries its per-dimension MIN/MAX so session span and provider/agent
+// first-seen order fold newest-first, matching aggregateSessions. Used with
+// an IN bound for the cache's compute pass, or bare (every session) for the
+// limit <= 0 path.
+const sessionAggregateGroupsSQL = `SELECT r.session_id, MIN(r.ts), MAX(r.ts), r.provider,
+	COALESCE(NULLIF(r.upstream_model, ''), r.called_model) AS model,
+	NULLIF(r.agent, '') AS agent,
+	COUNT(*), SUM(CASE WHEN r.status >= 400 THEN 1 ELSE 0 END), SUM(r.shadow),
+	SUM(r.input), SUM(r.output), SUM(r.cache_read), SUM(r.cache_creation),
+	MAX(r.ts_ms)
+	FROM records r
+	WHERE r.session_id != '' AND r.attempt_only = 0`
+
+// sessionRankScanCap bounds the newest-first ranking walk (rankRecentSessions):
+// the limit most-recently-active sessions are collected by walking records
+// newest-first until limit distinct ids appear, and this cap keeps a single
+// runaway session from making that walk unbounded. A session newer than the
+// cap's window is still aggregated exactly once listed — only the listing
+// itself can come up short under pathological single-session domination.
+const sessionRankScanCap = 100000
+
+// rankRecentSessions lists up to limit session ids in true last-activity
+// order: a newest-first covering-index walk over idx_records_ts_session
+// (session-less and attempt-only rows skipped by predicate/projection), the
+// k-th distinct id being the k-th most recently active session. The walk is
+// bounded by sessionRankScanCap rows.
+func (x *Indexer) rankRecentSessions(limit int) ([]string, error) {
+	rows, err := x.db.Query(`SELECT session_id FROM records
+		WHERE attempt_only = 0 AND session_id != ''
+		ORDER BY ts DESC LIMIT ?`, sessionRankScanCap)
 	if err != nil {
 		return nil, err
 	}
-	records := make([]Record, 0)
+	ids := make([]string, 0, limit)
+	seen := make(map[string]bool, limit)
 	for rows.Next() {
-		var (
-			record Record
-			shadow int
-		)
-		if err := rows.Scan(
-			&record.Ts, &record.SessionID, &shadow, &record.Status, &record.Provider,
-			&record.UpstreamModel, &record.CalledModel, &record.Agent,
-			&record.ParsedUsage.Input, &record.ParsedUsage.Output,
-			&record.ParsedUsage.CacheRead, &record.ParsedUsage.CacheCreation,
-		); err != nil {
+		var id string
+		if err := rows.Scan(&id); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
-		record.Shadow = shadow != 0
-		records = append(records, record)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+		if len(ids) == limit {
+			break
+		}
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
 		return nil, err
 	}
 	_ = rows.Close()
-	return aggregateSessions(records, limit, costOf), nil
+	return ids, nil
+}
+
+// sessionRecency is one provider's/agent's/model-group's newest-record key
+// (millisecond ts, second-precision ts text as tiebreak) — used to rebuild
+// the newest-first first-seen lists aggregateSessions produces walking
+// records newest-first.
+type sessionRecency struct {
+	ms int64
+	ts string
+}
+
+func (r sessionRecency) after(o sessionRecency) bool {
+	if r.ms != o.ms {
+		return r.ms > o.ms
+	}
+	return r.ts > o.ts
+}
+
+// recencyOrder lists the seen keys newest-first by their newest record (the
+// name tiebreak keeps it deterministic on exact ties).
+func recencyOrder(seen map[string]sessionRecency) []string {
+	out := make([]string, 0, len(seen))
+	for key := range seen {
+		out = append(out, key)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if seen[out[i]].ms != seen[out[j]].ms {
+			return seen[out[i]].ms > seen[out[j]].ms
+		}
+		if seen[out[i]].ts != seen[out[j]].ts {
+			return seen[out[i]].ts > seen[out[j]].ts
+		}
+		return out[i] < out[j]
+	})
+	return out
+}
+
+type sessionModelKey struct{ provider, model string }
+
+// sessionAggState is one session's folded aggregate: the counters behind
+// SessionSummary (requests/errors/shadow, usage totals and per-(provider,
+// model) splits for cost, provider/agent/model identity, session span). It
+// is maintained two ways that must stay equivalent: computed from scratch by
+// one grouped SQL pass (sessionAggStates) and folded record-by-record as the
+// indexer inserts new rows (fold). Cost is NOT folded — pricing is resolved
+// per request at render time.
+type sessionAggState struct {
+	requests, errors, shadow int
+	usage                    Usage
+	firstTs, lastTs          string
+	byModel                  map[sessionModelKey]Usage
+	provSeen                 map[string]sessionRecency
+	agentSeen                map[string]sessionRecency
+}
+
+// fold merges one indexed record (already filtered: session-bearing,
+// non-attempt). Mirrors the SQL grouping exactly.
+func (s *sessionAggState) fold(rec Record, usage Usage, tsMs int64) {
+	s.requests++
+	if rec.Status >= 400 {
+		s.errors++
+	}
+	if rec.Shadow {
+		s.shadow++
+	}
+	s.usage.Input += usage.Input
+	s.usage.Output += usage.Output
+	s.usage.CacheRead += usage.CacheRead
+	s.usage.CacheCreation += usage.CacheCreation
+	model := rec.UpstreamModel
+	if model == "" {
+		model = rec.CalledModel
+	}
+	mk := sessionModelKey{provider: rec.Provider, model: model}
+	u := s.byModel[mk]
+	u.Input += usage.Input
+	u.Output += usage.Output
+	u.CacheRead += usage.CacheRead
+	u.CacheCreation += usage.CacheCreation
+	s.byModel[mk] = u
+	last := sessionRecency{ms: tsMs, ts: rec.Ts}
+	if last.after(s.provSeen[rec.Provider]) {
+		s.provSeen[rec.Provider] = last
+	}
+	if rec.Agent != "" && last.after(s.agentSeen[rec.Agent]) {
+		s.agentSeen[rec.Agent] = last
+	}
+	// RFC3339 fixed-width text compares chronologically.
+	if rec.Ts < s.firstTs || s.firstTs == "" {
+		s.firstTs = rec.Ts
+	}
+	if rec.Ts > s.lastTs {
+		s.lastTs = rec.Ts
+	}
+}
+
+// render applies the per-call pricing callback and projects the API shape.
+func (s *sessionAggState) render(id string, costOf func(provider, model string, usage Usage) float64) SessionSummary {
+	out := SessionSummary{
+		SessionID:      id,
+		FirstTs:        s.firstTs,
+		LastTs:         s.lastTs,
+		Requests:       s.requests,
+		ShadowRequests: s.shadow,
+		Errors:         s.errors,
+		Usage:          s.usage,
+		Providers:      recencyOrder(s.provSeen),
+		Agents:         recencyOrder(s.agentSeen),
+	}
+	modelSeen := map[string]bool{}
+	keys := make([]sessionModelKey, 0, len(s.byModel))
+	for mk := range s.byModel {
+		keys = append(keys, mk)
+		if !modelSeen[mk.model] {
+			modelSeen[mk.model] = true
+			out.Models = append(out.Models, mk.model)
+		}
+	}
+	sort.Strings(out.Models)
+	if costOf != nil {
+		// Deterministic order so cost float summation is reproducible
+		// (aggregateSessions iterated a map — same terms, random order).
+		sort.Slice(keys, func(i, j int) bool {
+			if keys[i].provider != keys[j].provider {
+				return keys[i].provider < keys[j].provider
+			}
+			return keys[i].model < keys[j].model
+		})
+		for _, mk := range keys {
+			out.CostUSD += costOf(mk.provider, mk.model, s.byModel[mk])
+		}
+	}
+	return out
+}
+
+// sessionCacheMax bounds the incremental aggregate cache. Crossing it resets
+// the map wholesale: sessions are recomputed from SQL on demand, so the cap
+// trades one cold pass for unbounded memory in a months-long uptime.
+const sessionCacheMax = 16384
+
+// sessionAggCache is the Indexer's incremental per-session aggregate cache:
+// entries are computed from SQL on first request, then kept exact by folding
+// every inserted record (foldBatch, after the insert transaction commits)
+// and dropping sessions whose rows were deleted (dropSessions, retention
+// sweep and truncation re-index). Never a source of truth — dropping is
+// always safe, recompute is always available.
+type sessionAggCache struct {
+	mu   sync.Mutex
+	byID map[string]*sessionAggState
+}
+
+func (c *sessionAggCache) foldBatch(batch []recordRow) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.byID) == 0 {
+		return
+	}
+	for _, row := range batch {
+		rec := row.record
+		if rec.AttemptOnly || rec.SessionID == "" {
+			continue
+		}
+		if st := c.byID[rec.SessionID]; st != nil {
+			st.fold(rec, row.usage, row.tsMs)
+		}
+	}
+}
+
+func (c *sessionAggCache) dropSessions(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, id := range ids {
+		delete(c.byID, id)
+	}
+}
+
+// sessionAggStates computes the grouped-SQL aggregate for exactly ids (one
+// pass). A session with no retained rows is absent from the result.
+func (x *Indexer) sessionAggStates(ids []string) (map[string]*sessionAggState, error) {
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	query := sessionAggregateGroupsSQL +
+		` AND r.session_id IN (` + strings.Join(placeholders, ",") + `)` +
+		` GROUP BY r.session_id, r.provider, model, agent`
+	return x.scanSessionAggStates(x.db.Query(query, args...))
+}
+
+// scanSessionAggStates folds grouped SQL rows into per-session states.
+func (x *Indexer) scanSessionAggStates(rows *sql.Rows, err error) (map[string]*sessionAggState, error) {
+	if err != nil {
+		return nil, err
+	}
+	bySession := map[string]*sessionAggState{}
+	for rows.Next() {
+		var (
+			sessionID, firstTs, lastTs, provider, model string
+			agent                                       sql.NullString
+			requests, errors, shadow                    int64
+			input, output, cacheRead, cacheCreation     int64
+			lastMs                                      int64
+		)
+		if err := rows.Scan(
+			&sessionID, &firstTs, &lastTs, &provider, &model, &agent,
+			&requests, &errors, &shadow, &input, &output, &cacheRead, &cacheCreation,
+			&lastMs,
+		); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		s := bySession[sessionID]
+		if s == nil {
+			s = &sessionAggState{
+				firstTs:   firstTs,
+				lastTs:    lastTs,
+				byModel:   map[sessionModelKey]Usage{},
+				provSeen:  map[string]sessionRecency{},
+				agentSeen: map[string]sessionRecency{},
+			}
+			bySession[sessionID] = s
+		}
+		// first/last ts arrive per (provider,model,agent) group — fold to the
+		// session span.
+		if firstTs < s.firstTs {
+			s.firstTs = firstTs
+		}
+		if lastTs > s.lastTs {
+			s.lastTs = lastTs
+		}
+		s.requests += int(requests)
+		s.errors += int(errors)
+		s.shadow += int(shadow)
+		s.usage.Input += uint64(input)
+		s.usage.Output += uint64(output)
+		s.usage.CacheRead += uint64(cacheRead)
+		s.usage.CacheCreation += uint64(cacheCreation)
+		mk := sessionModelKey{provider: provider, model: model}
+		u := s.byModel[mk]
+		u.Input += uint64(input)
+		u.Output += uint64(output)
+		u.CacheRead += uint64(cacheRead)
+		u.CacheCreation += uint64(cacheCreation)
+		s.byModel[mk] = u
+		last := sessionRecency{ms: lastMs, ts: lastTs}
+		if last.after(s.provSeen[provider]) {
+			s.provSeen[provider] = last
+		}
+		if agent.Valid && agent.String != "" && last.after(s.agentSeen[agent.String]) {
+			s.agentSeen[agent.String] = last
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+	return bySession, nil
+}
+
+// SessionSummaries serves exact per-session aggregates from the index: every
+// retained record of a kept session counts (attempt legs and session-less
+// rows excluded, like the scan), not just a newest-N window. The session
+// drill-down table (/api/requests?session=) answers over the whole retained
+// set, so the summary must not be window-truncated either — a global
+// newest-records window made a session that started days ago but is active
+// today report only its newest requests (2 of 12 with the matching token
+// subset). Sessions rank by last activity via a bounded newest-first walk
+// (rankRecentSessions); their aggregates are served from the incremental
+// cache, the missing subset computed in one grouped SQL pass with the cache
+// lock held (so a concurrent reconcile fold can neither race the store nor
+// be lost). limit <= 0 keeps every session — that path skips the cache and
+// ranks the whole grouped result in Go (tests only). Bounded-window
+// aggregation exists only on the file-scan fallback (package SessionSummaries).
+func (x *Indexer) SessionSummaries(limit int, costOf func(provider, model string, usage Usage) float64) ([]SessionSummary, error) {
+	if limit <= 0 {
+		states, err := x.scanSessionAggStates(x.db.Query(sessionAggregateGroupsSQL + ` GROUP BY r.session_id, r.provider, model, agent`))
+		if err != nil {
+			return nil, err
+		}
+		out := make([]SessionSummary, 0, len(states))
+		for id, s := range states {
+			out = append(out, s.render(id, costOf))
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].LastTs > out[j].LastTs })
+		return out, nil
+	}
+	ids, err := x.rankRecentSessions(limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return []SessionSummary{}, nil
+	}
+	// Hold the cache lock across the compute-and-store so folds from
+	// reconcile commits serialize against it (blocked folds simply run after;
+	// their rows are already in the SQL the compute reads, or arrive after
+	// the state is stored and fold on top — either way no delta is lost).
+	x.sessions.mu.Lock()
+	defer x.sessions.mu.Unlock()
+	states := make([]*sessionAggState, len(ids))
+	var missing []string
+	for i, id := range ids {
+		if st := x.sessions.byID[id]; st != nil {
+			states[i] = st
+		} else {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		computed, err := x.sessionAggStates(missing)
+		if err != nil {
+			return nil, err
+		}
+		if x.sessions.byID == nil || len(x.sessions.byID)+len(computed) > sessionCacheMax {
+			x.sessions.byID = make(map[string]*sessionAggState, len(computed))
+		}
+		for id, st := range computed {
+			x.sessions.byID[id] = st
+		}
+		for i, id := range ids {
+			if states[i] == nil {
+				states[i] = computed[id]
+			}
+		}
+	}
+	out := make([]SessionSummary, 0, len(ids))
+	for i, id := range ids {
+		// A session whose rows vanished between walk and compute (retention
+		// sweep) simply drops out of the listing.
+		if states[i] == nil {
+			continue
+		}
+		out = append(out, states[i].render(id, costOf))
+	}
+	return out, nil
 }

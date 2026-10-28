@@ -20,6 +20,12 @@ type BootstrapResult struct {
 // generations, so the caller (Proxy runtime services) owns the returned
 // instances across reloads. On open failure it logs and returns zero values —
 // the proxy keeps running with in-memory-only counters.
+//
+// providerRenames re-keys persisted history BEFORE the baseline restore (see
+// RenameProviderKey): both the buckets on disk and the seeded in-memory
+// counters then live under the new keys, so the cumulative /api/tokens view
+// and range queries agree. Rename failures degrade to keeping history under
+// the old key (logged), never abort the store.
 func Bootstrap(
 	path string,
 	retention time.Duration,
@@ -27,6 +33,8 @@ func Bootstrap(
 	metrics *obscounters.MetricsStore,
 	tokens *obscounters.TokenCounter,
 	agents *obscounters.AgentCounter,
+	providerRenames map[string]string,
+	ledgerIndex string,
 	opts ...FlusherOption,
 ) BootstrapResult {
 	store, err := Open(Options{Path: path, Retention: retention})
@@ -35,10 +43,31 @@ func Bootstrap(
 		return BootstrapResult{}
 	}
 
+	// Rewrite the pre-cutoff token columns from the request-log ledger BEFORE
+	// the baseline restore: the historical buckets carry the pre-89630e1
+	// mis-ledgers, and the seeded in-memory counters must land on the corrected
+	// values. Failures degrade to keeping the committed values (logged).
+	if ledgerIndex != "" {
+		if _, _, err := store.RebuildTokenLedger(ledgerIndex); err != nil {
+			logx.Warnf("[stats] usage ledger rebuild failed: %v (historical token buckets keep their committed values)", err)
+		}
+	}
+
 	if count, err := store.ImportLegacyTokens(LegacyTokensPath(homeDir)); err != nil {
 		logx.Warnf("[stats] legacy token_usage.json migration failed: %v", err)
 	} else if count > 0 {
 		logx.Infof("[stats] imported %d entries from legacy token_usage.json", count)
+	}
+
+	for from, to := range providerRenames {
+		moved, err := store.RenameProviderKey(from, to)
+		if err != nil {
+			logx.Warnf("[stats] provider key migration %s → %s failed: %v (history stays under %s)", from, to, err, from)
+			continue
+		}
+		if moved > 0 {
+			logx.Infof("[stats] migrated %d bucket row(s) from provider key %s → %s", moved, from, to)
+		}
 	}
 
 	baseline, err := store.LoadCumulative()

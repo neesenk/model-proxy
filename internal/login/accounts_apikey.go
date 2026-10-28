@@ -223,11 +223,19 @@ func validateKeyByRealProbe(name string, prov configdomain.Provider, key string)
 	return nil
 }
 
-// RemoveApikeyAccount removes the account with the given id from the named
-// pool under the cross-process lock. No-op if the id is absent (no error). No
-// stdin, no stdout — symmetric with AddApikeyAccount, reused by the web layer.
-func RemoveApikeyAccount(name, providerID, id string) error {
+// RemoveAccount removes the account with the given id from the named pool
+// under the cross-process lock (API-key and OAuth entries alike). No-op if
+// the id is absent (no error). No stdin, no stdout — shared by CLI and web.
+func RemoveAccount(name, providerID, id string) error {
 	return accountStoreEnv().RemoveAccount(name, providerID, id)
+}
+
+// RenameApikeyAccount renames the account's display label under the
+// cross-process pool lock. Label is metadata only — the account ID (and with
+// it the virtual runtime key and all usage history attribution) is unchanged,
+// so no reload follows. Mirrors Add/Remove as the CLI/Web-shared core.
+func RenameApikeyAccount(name, providerID, id, label string) error {
+	return accountStoreEnv().SetLabel(name, providerID, id, label)
 }
 
 // ApiKeyLike reports whether the provider's login flow is apikey-pool based

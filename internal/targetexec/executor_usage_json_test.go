@@ -45,11 +45,11 @@ func TestExecutorCountsUsageForNonStreamJSON(t *testing.T) {
 		t.Fatalf("result=%+v status=%d", result, writer.Code)
 	}
 	usage := effects.tc.Snapshot()[effects.key]
-	if usage.Input != 100 || usage.Output != 20 || usage.CacheRead != 40 || usage.Requests != 1 {
-		t.Errorf("token counter = %+v, want the non-stream usage counted", usage)
+	if usage.Input != 60 || usage.Output != 20 || usage.CacheRead != 40 || usage.Requests != 1 {
+		t.Errorf("token counter = %+v, want input=60 (100−40 inclusive share)", usage)
 	}
 	commit := effects.lastCommit
-	if commit.Usage.Input != 100 || commit.Usage.Output != 20 {
+	if commit.Usage.Input != 60 || commit.Usage.Output != 20 {
 		t.Errorf("attempt usage = %+v, want the observe callback fed", commit.Usage)
 	}
 }

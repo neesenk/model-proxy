@@ -35,6 +35,13 @@
 13. 新顶层配置字段必须六步同步：`internal/config.Config` → `rawConfig` → 拷贝段 → validate → 该包的 YAML 加载测试（yaml.v3 会静默忽略未知键，不能只直接构造 Config）→ 示例与文档（`config.yaml` 模板/README）。根包不承载字段或默认值逻辑（`config_compat.go` 已删除）。
 14. duration 字段除明确允许的 `retry_wait: "0"`（关闭等待重试）与 `stream_keepalive: "0"`（关闭 SSE 心跳）外应验证为正数；任何允许零/负数的字段都要写入契约。
 15. `BillingClass` iota 不是调度顺序，必须通过独立 `schedulingTier` 映射 `plan < unknown < payg`。
+43. config 引用「随二进制内置的 stdio 子命令」（`command: [<path>/model-proxy, mcp-server,
+    <name>]`）存在部署先后窗口：旧二进制 + 新 config **不会启动失败**（校验只看
+    argv 形状，不解析子命令），而是该 server 的 initialize 时子进程秒退（CLI 前门答
+    `unknown command`）、网关回 502——降级只限该 server，daemon 其余面不受影响。按
+    惯例（`scripts/restart_serve.sh` + 已提交 HEAD 构建，见 24b 与 `CLI.md`「手动重启」）
+    先换二进制再 reload config 即无窗口。`/mcp/<name>` initialize 502 + 子进程
+    stderr 带 `unknown command` 即此症，勿当成上游故障排查。
 
 ## 并发与生命周期
 
@@ -79,18 +86,22 @@
     `internal/cli/serve/detach_windows.go`）只提供 child detach 属性，HTTP drain primitive
     留在 `internal/cli/serve/shutdown.go`；不要恢复第二个顶层分发器。
 24b. 重启运行中的 `model-proxy serve` 时，停与启必须在**同一条 shell 命令内原子完成**
-    （停 pidfile 属主 → SIGINT 端口监听者 → 轮询等端口释放 → nohup 拉起 → 轮询等端口
-    重新监听；已封装为 `scripts/restart_serve.sh`（`--build` 先构建再切换），手动模板见
-    `CLI.md`「手动重启」）。把 kill 和 start 拆到两次工具调用/两个终端步饗，
-    中间的下线窗口会断掉一切依赖该代理的下游——典型是把它当 LLM 网关用的 coding
-    agent 本身：agent 的下一次模型调用直接 `Connection error`，连"生成下一条重启
-    命令"都做不到，形成自锁。换新二进制时先单独 `go build`（构建不动运行中的
-    进程），再用单命令切换。对 daemon 模式（supervisor+worker）的 serve 绝不允许只
-    SIGINT 端口监听者：那只是 worker，supervisor 约 1s 后退避会重拉它——要么旧
-    worker 抢回端口造成"重启成功但跑旧二进制"，要么脚本实例胜出后 supervisor 残留
-    并在新实例退出时让旧二进制复活。必须先停 pidfile 属主（supervisor 或占 pidfile 的
-    前台 serve），`restart_serve.sh` 已内置这一步（config `log_file:` 派生，缺省
-    `$TMPDIR/model-proxy.pid`，信号前校验进程身份防误杀复用 pid）。
+    （`scripts/restart_serve.sh` 已封装：`serve stop`（pidfile 属主——daemon supervisor
+    或占 pidfile 的前台 serve，优雅→SIGKILL）→ 端口残留 SIGINT→SIGKILL → 轮询等端口
+    释放 → `serve daemon` 拉起 supervised daemon → 轮询等端口监听（1s settle 复查）；
+    `--build` 先构建 `.new`、快照 `model-proxy.old` 再切换，新二进制起不来时**先 stop
+    再回滚旧二进制重新 daemon** 并 exit 1——pidfile 存活会让回滚的 daemonize 拒绝启动，
+    漏掉这步的回滚必然失败。手动模板见 `CLI.md`「手动重启」）。把 kill 和 start 拆到
+    两次工具调用/两个终端步饗，中间的下线窗口会断掉一切依赖该代理的下游——典型是把它
+    当 LLM 网关用的 coding agent 本身：agent 的下一次模型调用直接 `Connection error`，
+    连"生成下一条重启命令"都做不到，形成自锁。换新二进制时先单独 `go build`（构建不
+    动运行中的进程），再用单命令切换。对 daemon 模式（supervisor+worker）的 serve
+    绝不允许只 SIGINT 端口监听者：那只是 worker，supervisor 约 1s 后退避会重拉它——
+    要么旧 worker 抢回端口造成"重启成功但跑旧二进制"，要么脚本实例胜出后 supervisor
+    残留并在新实例退出时让旧二进制复活。pidfile 派生有多处（脚本 daemon 的
+    `--log-file` 旁、config `log_file:`、缺省 `$TMPDIR/model-proxy.pid`）：config
+    显式设置 `log_file:` 让所有派生收敛到同一位置，否则裸 `serve stop`/login-SIGHUP
+    会找错文件。
 
 ## 日志和持久化
 
@@ -220,6 +231,27 @@
     Unblock 先拆拦截面后删 block（防并发缓存命中把刚解封的会话悄悄复原）；
     logfile Run 退出后 Enqueue 计入 Dropped（stopMu 序列化 closed 检查与
     close+drain）。
+
+42. **usage 账本有三条独立解析路径，必须逐字段同口径**（热路径 UsageScanner →
+    分钟桶/Accounts/Analytics、requestlog.ExtractUsage → Keys 用量/会话聚合、
+    fusion.ParseUsage → 编排腿）：anthropic 口径（input 不含 cache，hit/write
+    单列），inclusive wire 计数器（openai prompt_tokens、responses
+    input_tokens）入桶前扣减钳零；hit 双拼写 max 合并
+    （prompt_tokens_details.cached_tokens / deepseek prompt_cache_hit_tokens），
+    write 双拼写（details.cache_write_tokens / cache_creation_input_tokens
+    直拼）——转换器发射侧与消费侧必须成对补拼写（cache_write_tokens 是转换器
+    家族的发射约定，消费侧不解析则 write 全额落 input、成本按全价低估）。历史
+    教训：89630e1 前缓存命中双重计入 input+cache_read（deepseek 控制台对账
+    差值恰=命中量）、2537235 前网关逐 chunk 重复累计把单请求膨胀上亿 token；
+    三方一致性由 `internal/app/usage_ledger_test.go`（同一批 wire 样本喂三个
+    解析器断言同值）钉住，历史脏数据由
+    `observestats.Store.RebuildTokenLedger`（启动时按请求日志索引重写 cutoff
+    前分钟桶，带 count 防御）修正。**请求数口径**：EvRequests/attempts.ok/
+    平均延迟只计 **2xx commit**——上游终局 4xx（客户端坏 body 风暴，实测单日
+    10,753 条零 token 400 vs 3,484 条真实调用）是"服务了的响应"不是"成功请求"，
+    控制台请求数=计费成功数；修复前 4xx 也无条件计入（与 attempts.ok 注释
+    "committed 2xx" 相悖的存量 bug），requests 列历史由同一重建按索引 2xx 数
+    修复（防御区间 [n200, n]，幂等）。
 
 ## 回归要求
 

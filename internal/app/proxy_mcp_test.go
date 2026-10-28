@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
 	observeevents "model-proxy/internal/observe/events"
 )
@@ -629,7 +630,9 @@ func TestMCPGateway_RequestLogKind(t *testing.T) {
 	if !strings.Contains(content, `"tool":"search"`) {
 		t.Errorf("request log missing the tools/call tool name\n%s", content)
 	}
-	if !strings.Contains(content, `"provider":"zhipu"`) {
+	// The provider projection carries the pool's virtual runtime key
+	// ("name#<accountID>") — the account id, never the credential.
+	if !strings.Contains(content, `"provider":"zhipu#`+accounts.AccountID("zhipu", accounts.Credentials{APIKey: "k-A"})+`"`) {
 		t.Errorf("request log missing account projection\n%s", content)
 	}
 	// Credentials must never reach the log.
@@ -1115,7 +1118,9 @@ func TestMCPGateway_LiveEvents(t *testing.T) {
 			case "start":
 				starts = append(starts, e.RequestID+":"+e.Exposed)
 			case "end":
-				if e.Exposed != "zs" || e.Status != 200 || e.Provider != "zhipu" {
+				// The provider field is the pool's virtual runtime key.
+				if e.Exposed != "zs" || e.Status != 200 ||
+					e.Provider != "zhipu#"+accounts.AccountID("zhipu", accounts.Credentials{APIKey: "k-A"}) {
 					t.Fatalf("end event = %+v", e)
 				}
 				ends = append(ends, e.RequestID)

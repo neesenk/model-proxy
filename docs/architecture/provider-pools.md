@@ -83,8 +83,9 @@ Save 时写回；metadata-only 池的 ID 同时是现有 keychain namespace，�
 remove 后重新 login。
 
 API-key provider（当前包括 static、zhipu、zcode、deepseek、volcengine、
-kimi-code、mimo、qwen-plan、step-plan、openrouter、opencode-go、typesafe）支持池化；aqp、codex 使用各自 OAuth/SSO 单账号文件，
-不进入 API-key pool。login 按 id 去重，支持 label/replace，成功后触发热 reload。
+kimi-code、mimo、qwen-plan、step-plan、openrouter、opencode-go、typesafe）与
+OAuth provider（aqp、codex）都支持池化（见下「OAuth 账号池」）。login 按 id
+去重，支持 label/replace，成功后触发热 reload。
 
 ## 构建期展开
 
@@ -94,6 +95,12 @@ kimi-code、mimo、qwen-plan、step-plan、openrouter、opencode-go、typesafe�
 <parent>#<accountID>
 ```
 
+**plural 凭据池按虚拟键展开，与池大小无关**——单账号池同样展开为
+`parent#<accountID>`，父名不是任何运行时键（只有 legacy 单文件/未登录的
+file-backed 实例保持裸名）。账号 id 是稳定身份：兄弟账号增删不改变本账号的
+键，token 用量、quota 快照与 request log 归属因此跨账号变更连续。历史版本
+单账号池绑裸名，跨越该边界的旧数据由键迁移重键（见下「键迁移（启动与 reload）」）。
+
 每个虚拟实例必须把自己的 API key 绑定到 `provider.Config.BoundAPIKey`；同一
 provider 实例的 `AuthHeaders` 为 forward 以及采用该通用认证入口的
 FetchModels、Usage/Quota 提供认证。volcengine 还必须把该账号的
@@ -101,9 +108,71 @@ AccessKey/SecretKey 绑定到同一实例，供 V4-signed quota 调用；FetchMo
 （ListArkAgentPlanModel）同样用该虚拟自己的 AK/SK 签名（残留边界见
 「已知边界」）。不得恢复一套独立的 `cfg.Auth` 分支。
 
-单账号池文件也必须 bind；不能因为只有一条记录而退回运行期文件读取。
-
 volcengine 每账号包含 `{api_key, access_key, secret_key}`。绑定凭据存在时，`resolveAKSK` 必须排他使用该账号，不得回落到兄弟账号文件。chat-only 虚拟（`BoundAPIKey` 非空、无 AK/SK）是合法形态：Quota 与 FetchModels 都必须直接报 AK/SK 未配置，不得回读 legacy 单账号文件——legacy 回读仅保留给未绑定的单账号实例，且经 credstore Ref 读取（keychain 模式同样覆盖）。
+
+## OAuth 账号池（aqp/codex）
+
+aqp/codex 复用同一套池文件（`<name>_apikeys.json`）与机制（锁、原子写、
+SourcePlural 权威、虚拟键展开、spread/sticky、用量归属、键迁移），差异在
+凭据形态与身份锚定：
+
+- **凭据 blob**：每账号的 OAuth 凭据整体存于 `Account.OAuth`（对 accounts 包
+  透明的 JSON：aqp=`AqpAccountData`，codex=`CodexAuthFile`），`Account.Kind=
+  "oauth"` 标记形态（metadata-only 时仍可辨识），与 api_key/access/secret 互斥。
+  keychain 模式下 blob 为每账号一个 keychain 条目（`<name>/<id>/oauth`），超
+  平台上限时按 codex 单文件先例显式回落 inline（0600 池文件）。
+- **id 锚定**：`OAuthAccountID(upstream)` = sha256(上游账号身份)[:16]——aqp 用
+  employee email、codex 用 chatgpt_account_id（缺失时回落 refresh_token 哈希）。
+  id 在添加时一次性锚定，**token 轮换不重算**（normalizePool 跳过 OAuth 条目）。
+- **provider 存储缝**：`provider.OAuthBlobStore`（Load/Save/Delete）——池化实例
+  绑定 `poolOAuthStore`（providerbuild）：读走原子池读，**写（codex refresh 的
+  轮换 refresh_token）在池跨进程锁内 load→替换本条目→save**；无池时回落
+  `FileOAuthStore`（legacy 单文件路径，即历史行为）。
+- **登录**：`login.AddOAuthAccount` 在锁内 upsert——同上游身份 = **静默替换**
+  （重新授权；label/added_at 保留），首次建池时把 legacy 单账号文件吸收为条目
+  #1（见「凭据文件」节的 plural 权威规则）。Web Re-login 可带 `account=<id>`
+  定向替换（授权到别的账号时报错，不改原账号）。
+- **畸形池 fail-closed**：OAuth provider 名下的 plural 池若含非 OAuth 条目
+  （手误写入 API-key 池），整个 provider 禁用并 warn。
+- legacy `<name>_oauth_auth.json` 只在无池时生效（裸名单实例）；guard 已知密钥
+  集按账号枚举（标签 `oauth:<name>#<id>`）。
+
+## 账号 label（显示名）
+
+`Account.Label` 是用户提供的显示名：login/添加账号时给定（缺省为 id），Web
+Accounts 页可随时改名（`POST /api/accounts/<provider>/<id>/label` →
+`accounts.Store.SetLabel`，跨进程锁内重读改写；trim 后非空、≤64 字符）。
+label 是纯元数据——不参与账号 ID 推导、虚拟键或任何凭据路径，改名不触发
+reload。运行时键里的 `#<accountID>` 哈希是关联用途，不做用户面显示：Web 各
+视图（Status Providers/Token usage、Requests 表、Analytics、Keys 用量）把
+虚拟键折叠为 `parent · <label>`（pure.js `providerDisplayName`），仅 Accounts
+页的 `id:` 副行展示完整 id 供删除/排查对号。
+
+## 键迁移（启动与 reload）
+
+历史版本把单账号 plural 池绑在裸父名下：这些数据（stats.db 分钟桶、
+quota_state.json 快照）在池恒虚拟键后必须跟随账号迁移，否则首次加账号/
+升级后全部视图失去历史。裸名 → 虚拟键的重键在两个时机执行
+（`internal/app/provider_key_migration.go` 派生 from→to，归属规则共用）：
+
+- **归属**：裸名历史记在池只有单账号的年代，归属 `added_at` 最早的现存账号
+  （不可解析/缺失按最新处理，id 作确定性 tie-break）；
+- **启动**（NewProxy 构建后、quota tracker Load 前）：
+  - **stats.db**：`Store.RenameProviderKey` 在 Bootstrap 内、基线恢复**之前**
+    执行——`minute_buckets`/`agent_buckets` 的裸名行与目标虚拟键行按桶合并
+    （计数加和、`last_request_at` 取 max），内存累计计数器随基线 seed 到新键；
+  - **quota_state.json**：`providers` 段的裸名条目改名为虚拟键（目标已存在时
+    丢弃较旧的裸名条目），sticky/health 短时效状态不迁移；
+- **reload**（`Proxy.Reload`）：OAuth re-login 首次转池发生在任意运行时刻，
+  不能等重启（2026-10-28 aqp 事故：转池到重启之间 token usage 全空）。quota
+  快照在 generation 交换**前**经 `runtime.Manager.RenameQuotaKeys` 搬到虚拟键
+  （同一「目标已存在则更新鲜」语义），stats 侧在交换**后**经
+  `stats.Flusher.RenameProviderKeyLive`：磁盘行、累计计数器、flusher diff
+  基线、pending 批次四者同迁，累计视图（/api/tokens）与区间查询当场一致，
+  不重启、不双计。交换后仍在途的旧代请求会把计数落回裸名键——量级为在途
+  请求个位数，下一次迁移（重启或再 reload）幂等吸收；
+- 迁移幂等（无裸名行即 no-op）、失败降级为 warning（历史留在旧键下），不阻塞
+  启动/reload；legacy 单文件 provider 不在迁移范围（无 plural 池）。
 
 ## Resolver
 
@@ -144,7 +213,18 @@ volcengine `FetchModels` 已按账号绑定：每个虚拟用自己的 AK/SK 签
 
 ## 回归测试
 
-- 单账号池、多账号池和 legacy fallback。
+- 单账号池、多账号池和 legacy fallback；单账号 plural 池同样展开虚拟键
+  （`TestBuildProviders_SingleEntryPluralPoolBindsVirtualKey`）。
+- 键迁移：裸名 stats/quota 历史重键到最早账号的虚拟键（启动与 reload 双时机，含合并与幂等，
+  `TestStartupProviderKeyMigration_*`、stats 层 `TestRenameProviderKeyMergesBuckets`）；
+  无 plural 池的 provider 不迁移。
+- label 改名：持久化生效、账号 ID/凭据不动、未知 id 与非法 label fail-closed
+  （`accounts.TestSetLabel`、`admin.TestRenameAccount`）。
+- OAuth 池：展开虚拟键（`providerbuild.TestBuildProviders_UnrollsOAuthPool`）、
+  畸形池禁用、legacy 裸名单保持；`poolOAuthStore` 写回只动本账号
+  （`TestPoolOAuthStore_SaveReplacesOnlyOwnAccount`）；codex refresh 经 seam 落
+  池（`provider.TestCodexOAuth_RefreshWritesBackThroughSeam`）；upsert 静默替换
+  保留 label/added_at、legacy 吸收为条目 #1（`login.TestAddOAuthAccount_*`）。
 - plural 与 legacy 并存时只用 plural；损坏/空 plural 必须零上游请求。
 - 空 key、空/重复/含 `#` 的账号 ID 和不完整 Volcengine AK/SK 必须拒绝。
 - keychain→file 的 Volcengine AK/SK 缺半、非 canonical ID、部分恢复、逐个重新

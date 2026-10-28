@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-// TestCLI_UsageSingleAccount covers the composition-root branch that turns a
-// one-account credential pool into a plain provider implementation and
-// dispatches Usage with that account's bound credential. Provider-specific
-// fetch, parse, and display behavior belongs to provider/*_test.go.
+// TestCLI_UsageSingleAccount covers the composition-root branch that dispatches
+// Usage per pool account (a one-account plural pool builds one bound
+// implementation for that account). Provider-specific fetch, parse, and
+// display behavior belongs to provider/*_test.go.
 func TestCLI_UsageSingleAccount(t *testing.T) {
 	seenAuth := make(chan string, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

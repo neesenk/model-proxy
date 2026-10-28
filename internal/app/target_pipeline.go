@@ -258,7 +258,18 @@ func (effects targetExecutionEffects) CaptureUsage(
 
 func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 	target := attempt.Target
-	if attempt.Response.StatusCode < 300 {
+	// Success-counted commit (2xx only): the request/latency counters mirror
+	// the provider consoles' request semantics (successful billed calls), and
+	// a committed TERMINAL 4xx — the upstream answered and the proxy relayed
+	// the error body — is a served response but not a successful request.
+	// Counting it here inflated the request totals 4x during a client-side
+	// bad-body storm (10,753 zero-token 400s on one day vs 3,484 real calls)
+	// and dragged the average latency toward the fast-fail floor; the 4xx
+	// evidence stays queryable in the request log. attempts.ok keeps its
+	// documented "committed 2xx" meaning, and failures/attempts.hard already
+	// carry the failure side.
+	success := attempt.Response.StatusCode < 300
+	if success {
 		// Successful (2xx) commit: fold TTFT into the scheduling quality EWMA
 		// — "committed 2xx only", matching manager_quality and
 		// runtime-state.md (a committed 3xx is not a generation result).
@@ -269,7 +280,7 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 			effects.generation,
 		)
 	}
-	if effects.proxy.metrics != nil {
+	if effects.proxy.metrics != nil && success {
 		effects.proxy.metrics.Inc(target.Provider, target.Model, counters.EvRequests)
 		effects.proxy.metrics.Inc("attempts", "ok", counters.EvAttemptOK)
 		effects.proxy.metrics.AddLatency(
@@ -287,7 +298,7 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 			uint64(attempt.TotalMilliseconds),
 		)
 	}
-	if effects.proxy.agents != nil && attempt.Scope.Agent != "" {
+	if effects.proxy.agents != nil && success && attempt.Scope.Agent != "" {
 		effects.proxy.agents.IncRequests(attempt.Scope.Agent, target.Provider, target.Model)
 		effects.proxy.agents.AddLatency(
 			attempt.Scope.Agent,

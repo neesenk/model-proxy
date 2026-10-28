@@ -27,9 +27,15 @@ type usageProbe struct {
 		CompletionToken uint64 `json:"completion_tokens"`
 		CacheCreation   uint64 `json:"cache_creation_input_tokens"`
 		CacheRead       uint64 `json:"cache_read_input_tokens"`
+		PromptCacheHit  uint64 `json:"prompt_cache_hit_tokens"`
 		PromptDetails   *struct {
-			CachedTokens uint64 `json:"cached_tokens"`
+			CachedTokens    uint64 `json:"cached_tokens"`
+			CacheWriteToken uint64 `json:"cache_write_tokens"`
 		} `json:"prompt_tokens_details"`
+		InputDetails *struct {
+			CachedTokens    uint64 `json:"cached_tokens"`
+			CacheWriteToken uint64 `json:"cache_write_tokens"`
+		} `json:"input_tokens_details"`
 	} `json:"usage"`
 	Message *struct {
 		Usage *struct {
@@ -41,10 +47,12 @@ type usageProbe struct {
 	} `json:"message"`
 	Response *struct {
 		Usage *struct {
-			InputTokens  uint64 `json:"input_tokens"`
-			OutputTokens uint64 `json:"output_tokens"`
-			InputDetails *struct {
-				CachedTokens uint64 `json:"cached_tokens"`
+			InputTokens     uint64 `json:"input_tokens"`
+			OutputTokens    uint64 `json:"output_tokens"`
+			CacheCreationIn uint64 `json:"cache_creation_input_tokens"`
+			InputDetails    *struct {
+				CachedTokens    uint64 `json:"cached_tokens"`
+				CacheWriteToken uint64 `json:"cache_write_tokens"`
 			} `json:"input_tokens_details"`
 		} `json:"usage"`
 	} `json:"response"`
@@ -90,32 +98,52 @@ func usageFrom(p *usageProbe) Usage {
 			CacheCreation: p.Message.Usage.CacheCreation,
 			CacheRead:     p.Message.Usage.CacheRead,
 		}
-	case p.Usage != nil && (p.Usage.InputTokens > 0 || p.Usage.OutputTokens > 0 || p.Usage.PromptTokens > 0):
+	case p.Usage != nil && (p.Usage.InputTokens > 0 || p.Usage.OutputTokens > 0 || p.Usage.PromptTokens > 0 || p.Usage.PromptCacheHit > 0):
 		u := Usage{
 			Input:         p.Usage.InputTokens,
 			Output:        p.Usage.OutputTokens,
 			CacheCreation: p.Usage.CacheCreation,
 			CacheRead:     p.Usage.CacheRead,
 		}
-		if p.Usage.PromptTokens > 0 {
-			cached := uint64(0)
+		if p.Usage.PromptTokens > 0 || p.Usage.PromptCacheHit > 0 {
+			// chat dialect: prompt_tokens is inclusive of both cache shares;
+			// hits ride in prompt_tokens_details.cached_tokens (openai) or
+			// prompt_cache_hit_tokens (deepseek), writes in
+			// details.cache_write_tokens (converter convention) or the
+			// anthropic direct spelling.
+			cached, written := uint64(0), uint64(0)
 			if p.Usage.PromptDetails != nil {
 				cached = p.Usage.PromptDetails.CachedTokens
+				written = p.Usage.PromptDetails.CacheWriteToken
 			}
-			u.Input = subClamped(p.Usage.PromptTokens, cached)
+			cached = maxU(cached, p.Usage.PromptCacheHit)
+			written = maxU(written, p.Usage.CacheCreation)
+			u.Input = subClamped2(p.Usage.PromptTokens, cached, written)
 			u.Output = p.Usage.CompletionToken
 			u.CacheRead = cached
+			u.CacheCreation = written
+			return u
+		}
+		// Top-level responses usage (non-stream /v1/responses): input_tokens
+		// is inclusive of the input_tokens_details shares.
+		if p.Usage.InputDetails != nil {
+			u.Input = subClamped2(p.Usage.InputTokens, p.Usage.InputDetails.CachedTokens, p.Usage.InputDetails.CacheWriteToken)
+			u.CacheRead = maxU(u.CacheRead, p.Usage.InputDetails.CachedTokens)
+			u.CacheCreation = maxU(u.CacheCreation, p.Usage.InputDetails.CacheWriteToken)
 		}
 		return u
 	case p.Response != nil && p.Response.Usage != nil:
-		cached := uint64(0)
+		cached, written := uint64(0), uint64(0)
 		if p.Response.Usage.InputDetails != nil {
 			cached = p.Response.Usage.InputDetails.CachedTokens
+			written = p.Response.Usage.InputDetails.CacheWriteToken
 		}
+		written = maxU(written, p.Response.Usage.CacheCreationIn)
 		return Usage{
-			Input:     subClamped(p.Response.Usage.InputTokens, cached),
-			Output:    p.Response.Usage.OutputTokens,
-			CacheRead: cached,
+			Input:         subClamped2(p.Response.Usage.InputTokens, cached, written),
+			Output:        p.Response.Usage.OutputTokens,
+			CacheRead:     cached,
+			CacheCreation: written,
 		}
 	}
 	return Usage{}
@@ -126,6 +154,19 @@ func subClamped(a, b uint64) uint64 {
 		return 0
 	}
 	return a - b
+}
+
+// subClamped2 subtracts two shares (cache hit + cache write) from an
+// inclusive counter, floored at zero.
+func subClamped2(a, hit, write uint64) uint64 {
+	return subClamped(subClamped(a, hit), write)
+}
+
+func maxU(a, b uint64) uint64 {
+	if b > a {
+		return b
+	}
+	return a
 }
 
 // extractSSEUsage walks an SSE text body frame by frame and merges every
@@ -189,27 +230,38 @@ type SessionSummary struct {
 	CostUSD        float64  `json:"cost_usd"`
 }
 
-// SessionSummaries groups the newest scanLimit records by session id and
-// keeps the limit most-recently-active sessions. costOf (nil = CostUSD stays
-// zero) receives the provider, the upstream model and per-session usage;
-// mirrors the analytics cost path (pricing.ResolveAliased + ComputeCost at
-// the caller).
-func SessionSummaries(dir string, scanLimit, limit int, costOf func(provider, model string, usage Usage) float64) ([]SessionSummary, error) {
+// sessionScanWindow bounds the file-scan fallback's aggregation pass: the
+// scan reads newest-first and cannot afford the whole retained history on
+// every call. The index path aggregates exactly; on this path a session whose
+// records all fall outside the window is missing from the result, and one
+// straddling it reports only its newest records — the degradation the index
+// exists to avoid.
+const sessionScanWindow = 2000
+
+// SessionSummaries groups the log's newest records by session id and keeps
+// the limit most-recently-active sessions. It is the directory-scan fallback
+// used when the tailing index is unavailable: the aggregation window is
+// bounded to the newest sessionScanWindow records (see the const), so a
+// session older than that window is under-reported here while the index path
+// answers exactly. costOf (nil = CostUSD stays zero) receives the provider,
+// the upstream model and per-session usage; mirrors the analytics cost path
+// (pricing.ResolveAliased + ComputeCost at the caller).
+func SessionSummaries(dir string, limit int, costOf func(provider, model string, usage Usage) float64) ([]SessionSummary, error) {
 	// UsageOnly: usage is parsed as each line is read and the bodies are
 	// dropped before the top-K heap retains the record — scanning 2000
 	// records must not pin 2000 full (up-to-5MiB-each) bodies in memory.
-	records, err := query(dir, filePrefix, Filter{Limit: scanLimit, UsageOnly: true}, false, nil)
+	records, err := query(dir, filePrefix, Filter{Limit: sessionScanWindow, UsageOnly: true}, false, false, nil)
 	if err != nil {
 		return nil, err
 	}
 	return aggregateSessions(records, limit, costOf), nil
 }
 
-// aggregateSessions is the shared grouping behind the file-scan
-// SessionSummaries and the index-backed Indexer.SessionSummaries: records must
-// arrive newest-first with ParsedUsage populated, and the index path must
-// apply the same top-K window (newest scanLimit rows, session-less rows
-// included) before calling this.
+// aggregateSessions is the file-scan fallback's grouping: records must arrive
+// newest-first with ParsedUsage populated. The index path (Indexer.
+// SessionSummaries) aggregates in SQL instead and no longer shares this code —
+// it answers over each kept session's whole retained history, which a
+// window-bounded record list cannot express.
 func aggregateSessions(records []Record, limit int, costOf func(provider, model string, usage Usage) float64) []SessionSummary {
 	type modelKey struct {
 		provider, model string

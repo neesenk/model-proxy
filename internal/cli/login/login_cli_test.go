@@ -2,6 +2,7 @@ package login
 
 import (
 	"encoding/json"
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/cli/clitest"
 	"net/http"
 	"net/http/httptest"
@@ -122,9 +123,13 @@ func TestCLI_LoginFromCodex(t *testing.T) {
 			t.Errorf("output leaks fixture material:\nstdout=%s\nstderr=%s", stdout, stderr)
 		}
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".model-proxy", "codex_oauth_auth.json"))
-	if err != nil {
-		t.Fatalf("oauth auth file not written: %v", err)
+	pool, err := accounts.NewStore(home).Load("codex", "codex")
+	if err != nil || len(pool.Accounts) != 1 || !accounts.IsOAuthAccount(pool.Accounts[0]) {
+		t.Fatalf("codex pool = %+v, %v (want one oauth-kind account)", pool, err)
+	}
+	data := pool.Accounts[0].OAuth
+	if len(data) == 0 {
+		t.Fatal("pool entry carries no oauth blob")
 	}
 	var af struct {
 		AuthMode string `json:"auth_mode"`

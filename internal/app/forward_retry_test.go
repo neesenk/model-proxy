@@ -356,10 +356,11 @@ func TestForward_ContextOverflowRetry_Ordinary400(t *testing.T) {
 	if smallHits != 1 || bigHits != 0 {
 		t.Errorf("small=%d big=%d, want small only (an ordinary 400 never retries)", smallHits, bigHits)
 	}
-	// Same commit-metrics race as above: wait for the server-side Committed
-	// effect before asserting the snapshot.
-	m := awaitCommitMetrics(t, p, counters.PMKey{Provider: "small-prov", Model: "small"})
-	if s := m[counters.PMKey{Provider: "small-prov", Model: "small"}]; s.Failovers != 0 {
+	// A committed terminal 4xx no longer bumps ANY success metric (request
+	// counters are 2xx-only — see Committed), so there is no signal to await:
+	// assert directly. Failovers only ever increments on an actual failover,
+	// which an ordinary 400 never triggers.
+	if s := p.metrics.Snapshot()[counters.PMKey{Provider: "small-prov", Model: "small"}]; s.Failovers != 0 {
 		t.Errorf("small metrics = %+v, want failovers=0 (committed 4xx)", s)
 	}
 }

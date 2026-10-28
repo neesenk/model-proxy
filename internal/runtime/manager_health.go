@@ -132,6 +132,29 @@ func (m *Manager) TargetHealthy(providerName, model string, now time.Time) bool 
 	return (state == nil || state.available(now)) && !m.modelLockedLocked(providerName, model, now)
 }
 
+// AccountHealthy reports whether a provider or pool virtual account may take
+// NEW work: no operator freeze, rate-limit window, or open circuit — the
+// availability half of TargetHealthy without the model lock (the MCP gateway
+// picks accounts with no model dimension). Absent state is healthy, matching
+// the scheduling default.
+func (m *Manager) AccountHealthy(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state := m.health[name]
+	return state == nil || state.available(m.nowTime())
+}
+
+// AccountFrozen reports the operator freeze alone. Freeze must additionally
+// break established MCP sessions pinned to the account (the credential has to
+// stop being used entirely), while the transient cooldowns behind
+// AccountHealthy must not — hence the split read.
+func (m *Manager) AccountFrozen(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state := m.health[name]
+	return state != nil && state.frozen
+}
+
 // TakeHalfOpenSlot uses the current clock to preserve the existing request-path
 // API. A stale request is allowed to finish but cannot mutate the new state.
 func (m *Manager) TakeHalfOpenSlot(name string, generation uint64) bool {

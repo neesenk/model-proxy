@@ -491,8 +491,19 @@ func (t *anthropicSSEToOpenAISSE) usagePayload() map[string]any {
 		"prompt_tokens": prompt, "completion_tokens": t.outputTokens,
 		"total_tokens": prompt + t.outputTokens,
 	}
+	// Both cache shares ride inside the inclusive prompt_tokens; the details
+	// spelling surfaces them so the usage scanners can split the buckets back
+	// out (cache_write_tokens is the converter emission convention — see
+	// openaiSSEToAnthropicSSE's read side).
+	details := map[string]any{}
 	if t.cacheRead > 0 {
-		u["prompt_tokens_details"] = map[string]any{"cached_tokens": t.cacheRead}
+		details["cached_tokens"] = t.cacheRead
+	}
+	if t.cacheCreate > 0 {
+		details["cache_write_tokens"] = t.cacheCreate
+	}
+	if len(details) > 0 {
+		u["prompt_tokens_details"] = details
 	}
 	return u
 }

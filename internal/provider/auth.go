@@ -73,6 +73,10 @@ func removeAuthFile(path string) error {
 type AqpKeyProvider struct {
 	mintURL  string
 	authFile string
+	// store is the per-account OAuth blob seam: non-nil for pooled virtuals
+	// (SSO cookie reads go to the account's own pool slot); nil = the legacy
+	// file at authFile.
+	store OAuthBlobStore
 	// proxyURL routes the mint POST through this provider's own upstream
 	// proxy override (set by the Register constructor from Config.ProxyURL);
 	// empty = the automatic chain.
@@ -105,6 +109,12 @@ func (p *AqpKeyProvider) nowTime() time.Time {
 // NewAqpKeyProvider builds an AqpKeyProvider from the mint URL + SSO store path.
 func NewAqpKeyProvider(mintURL, authFile string) *AqpKeyProvider {
 	return &AqpKeyProvider{mintURL: mintURL, authFile: authFile}
+}
+
+// NewAqpKeyProviderWithStore builds an AqpKeyProvider whose SSO cookie reads
+// go through the per-account OAuth blob seam (pooled virtuals).
+func NewAqpKeyProviderWithStore(mintURL, authFile string, store OAuthBlobStore) *AqpKeyProvider {
+	return &AqpKeyProvider{mintURL: mintURL, authFile: authFile, store: store}
 }
 
 func (p *AqpKeyProvider) Inject(req *http.Request) error {
@@ -169,7 +179,7 @@ func (p *AqpKeyProvider) keyLocked() (string, error) {
 // mintLocked performs the network mint (caller holds p.mu); keyLocked
 // negative-caches its failures for refreshFailureTTL.
 func (p *AqpKeyProvider) mintLocked() (string, error) {
-	cookie, err := ReadSSOCookie(p.authFile)
+	cookie, err := p.readCookie()
 	if err != nil {
 		return "", fmt.Errorf("read sso cookie: %w", err)
 	}
@@ -235,6 +245,31 @@ func ReadSSOCookie(path string) (string, error) {
 	return v.SSOSessionCookie, nil
 }
 
+// readCookie resolves the SSO cookie through the seam (pooled virtual) or the
+// legacy file path, sharing ReadSSOCookie's parsing and error semantics.
+func (p *AqpKeyProvider) readCookie() (string, error) {
+	if p.store == nil {
+		return ReadSSOCookie(p.authFile)
+	}
+	blob, err := p.store.Load()
+	if err != nil {
+		return "", err
+	}
+	if len(blob) == 0 {
+		return "", fmt.Errorf("sso cookie store empty")
+	}
+	var v struct {
+		SSOSessionCookie string `json:"sso_session_cookie"`
+	}
+	if err := json.Unmarshal(blob, &v); err != nil {
+		return "", fmt.Errorf("parse aqp oauth store: %w", err)
+	}
+	if v.SSOSessionCookie == "" {
+		return "", fmt.Errorf("sso_session_cookie empty in aqp oauth store")
+	}
+	return v.SSOSessionCookie, nil
+}
+
 // ---- codex OAuth provider (chatgpt.com backend) ----
 
 const (
@@ -251,6 +286,10 @@ const (
 // refresh_token and writes new tokens back.
 type CodexOAuthProvider struct {
 	authFile string
+	// store is the per-account OAuth blob seam: non-nil for pooled virtuals
+	// (reads/refresh-writebacks go to the account's own pool slot under the
+	// pool's cross-process lock); nil = the legacy file at authFile.
+	store    OAuthBlobStore
 	tokenURL string // override for tests; defaults to CodexOAuthTokenURL
 	// proxyURL routes the oauth refresh POST through this provider's own
 	// upstream proxy override (set by the Register constructor from
@@ -287,9 +326,12 @@ func NewCodexOAuthProvider(authFile string) *CodexOAuthProvider {
 	return &CodexOAuthProvider{authFile: authFile, tokenURL: CodexOAuthTokenURL}
 }
 
-// codexCred derives the credential store ref from authFile at call time so
-// struct-literal construction (tests, ad-hoc instances) stays correct.
-func (p *CodexOAuthProvider) codexCred() credstore.Ref { return credstore.NewRef(p.authFile) }
+// NewCodexOAuthProviderWithStore builds a CodexOAuthProvider on the per-account
+// OAuth blob seam (pooled virtuals). authFile stays as the diagnostic name for
+// error messages.
+func NewCodexOAuthProviderWithStore(authFile string, store OAuthBlobStore) *CodexOAuthProvider {
+	return &CodexOAuthProvider{authFile: authFile, store: store, tokenURL: CodexOAuthTokenURL}
+}
 
 // CodexAuthFile is the on-disk format of codex_oauth_auth.json.
 type CodexAuthFile struct {
@@ -417,11 +459,12 @@ func AccountIDFromTokens(idToken, stored string) string {
 	return c.Auth.AccountID
 }
 
-// emailFromIDToken parses the `email` claim from an id_token JWT (best-effort,
+// EmailFromIDToken parses the `email` claim from an id_token JWT (best-effort,
 // no validation). The codex device flow requests the `openid profile email`
 // scope, so the id_token carries the user's email - used as the account label
 // in the Web UI (codex does not persist email at the top level like aqp does).
-func emailFromIDToken(idToken string) string {
+// Exported for the login layer, which stores it as pool display metadata.
+func EmailFromIDToken(idToken string) string {
 	b := decodeJWTPayload(idToken)
 	if b == nil {
 		return ""
@@ -436,14 +479,14 @@ func emailFromIDToken(idToken string) string {
 }
 
 func (p *CodexOAuthProvider) load() (*CodexAuthFile, error) {
-	data, err := p.codexCred().Load()
+	data, err := oauthStoreOrDefault(p.store, p.authFile).Load()
 	if err != nil {
-		if errors.Is(err, credstore.ErrNotFound) {
-			// Preserve the historical os.ReadFile-style sentinel so callers
-			// can still distinguish "never logged in" from parse errors.
-			return nil, &fsNotFoundError{path: p.authFile}
-		}
 		return nil, err
+	}
+	if len(data) == 0 {
+		// Preserve the historical os.ReadFile-style sentinel so callers
+		// can still distinguish "never logged in" from parse errors.
+		return nil, &fsNotFoundError{path: p.authFile}
 	}
 	var af CodexAuthFile
 	if err := json.Unmarshal(data, &af); err != nil {
@@ -552,6 +595,13 @@ func ClearCodexAccount(path string) error {
 }
 
 func (p *CodexOAuthProvider) save(af *CodexAuthFile) error {
+	if p.store != nil {
+		b, err := json.MarshalIndent(af, "", "  ")
+		if err != nil {
+			return err
+		}
+		return p.store.Save(b)
+	}
 	return WriteCodexAuthFile(p.authFile, af)
 }
 
@@ -590,7 +640,7 @@ func LoadCodexAccount(path string) (*CodexAccountInfo, error) {
 	}
 	return &CodexAccountInfo{
 		AccountID: AccountIDFromTokens(af.Tokens.IDToken, af.Tokens.AccountID),
-		Email:     emailFromIDToken(af.Tokens.IDToken),
+		Email:     EmailFromIDToken(af.Tokens.IDToken),
 	}, nil
 }
 

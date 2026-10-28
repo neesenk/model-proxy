@@ -214,17 +214,17 @@ func TestLoadCodexAccount(t *testing.T) {
 // TestEmailFromIDToken covers the email-claim parser directly: present claim,
 // absent claim, and malformed JWT.
 func TestEmailFromIDToken(t *testing.T) {
-	if got := emailFromIDToken(idTokenWithEmail(t, "a@b.com", "x")); got != "a@b.com" {
+	if got := EmailFromIDToken(idTokenWithEmail(t, "a@b.com", "x")); got != "a@b.com" {
 		t.Errorf("got %q want a@b.com", got)
 	}
 	noEmail := "head." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"s"}`)) + ".sig"
-	if got := emailFromIDToken(noEmail); got != "" {
+	if got := EmailFromIDToken(noEmail); got != "" {
 		t.Errorf("absent email: got %q want empty", got)
 	}
-	if got := emailFromIDToken("not-a-jwt"); got != "" {
+	if got := EmailFromIDToken("not-a-jwt"); got != "" {
 		t.Errorf("malformed: got %q want empty", got)
 	}
-	if got := emailFromIDToken(""); got != "" {
+	if got := EmailFromIDToken(""); got != "" {
 		t.Errorf("empty: got %q want empty", got)
 	}
 }

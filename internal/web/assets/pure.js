@@ -131,6 +131,41 @@ export function providerNames(models, health) {
   return Array.from(names).sort();
 }
 
+// accountProviderKey maps an account to the runtime provider key under which
+// its quota (status.quota) and token usage (/api/tokens) are recorded.
+// Pooled providers (p.pooled, from /api/accounts — a plural credential pool)
+// key each account by virtual id "name#<accountId>" regardless of pool size:
+// the account id is the stable identity, so sibling accounts coming and going
+// never re-keys an account's history. OAuth (aqp/codex) and legacy-singular
+// providers are single-credential plain names. Mirrors buildProviders
+// (providerbuild) + the token-commit key (t.Provider).
+export function accountProviderKey(p, a) {
+  if (p.pooled) return p.name + '#' + a.id;
+  return p.name;
+}
+
+// splitProviderKey splits a runtime provider key into its parent name and
+// pooled account id. Non-pooled keys (no '#') return a null accountId. The
+// account id part is opaque (a credential hash) — display layers must never
+// show it whole (see providerDisplayName).
+export function splitProviderKey(key) {
+  const i = String(key || '').indexOf('#');
+  if (i < 0) return { parent: key || '', accountId: null };
+  return { parent: String(key).slice(0, i), accountId: String(key).slice(i + 1) };
+}
+
+// providerDisplayName renders a runtime provider key for humans: a pooled
+// virtual key "name#<id>" becomes "name · <label>" — the user-provided account
+// name — falling back to "name · <8-char id prefix>" when the account has no
+// label (or is no longer in the pool). Non-pooled keys pass through as-is.
+// labels is a map from virtual key to account label (built from /api/accounts).
+export function providerDisplayName(key, labels) {
+  const { parent, accountId } = splitProviderKey(key);
+  if (accountId === null) return key;
+  const label = (labels || {})[key] || accountId.slice(0, 8);
+  return `${parent} · ${label}`;
+}
+
 // quotaErrKind classifies a quota snapshot error into a short token for UI
 // presentation. Exported so app.js and accountUsageState share one definition.
 // The source is the STORED error (snap.Err, a first observation that failed)
@@ -217,13 +252,15 @@ export function scheduleTierTitle(tier, declared) {
 // the parked provider with its dwell countdown, plus the count of live
 // (session, route) bindings — per-route sticky granularity (one session
 // switching models holds one binding per route; docs/web-api.md
-// schedule.models[route].sticky_sessions). Returns '' when the route has
+// schedule.models[route].sticky_sessions). providerLabel (optional) folds the
+// parked pooled key to "name · <label>". Returns '' when a route has
 // neither, and the count never carries a leading separator when it stands
 // alone.
-export function scheduleRouteStickyMeta(info) {
+export function scheduleRouteStickyMeta(info, providerLabel) {
   let meta = '';
   if (info.sticky) {
-    meta += `sticky: <span class="mono">${esc(info.sticky)}</span>`;
+    const parked = providerLabel ? providerLabel(info.sticky) : info.sticky;
+    meta += `sticky: <span class="mono"${parked !== info.sticky ? ` title="${esc(info.sticky)}"` : ''}>${esc(parked)}</span>`;
     if (info.sticky_dwell_remaining_sec) {
       meta += ` · ${fmtDur(info.sticky_dwell_remaining_sec)} dwell left`;
     }
@@ -1356,7 +1393,9 @@ export function analyticsPointValue(p, kind) {
 // series[i], labels[i] names it (agent-dimension series label by agent).
 // Gap metrics keep null for missing/undefined buckets; requests/tokens
 // zero-fill an absent bucket. Returns {x, ys, labels}.
-export function analyticsChartSeries(series, kind, xGrid) {
+// providerLabel (optional) maps a raw runtime provider key to its display
+// form for the series label (same contract as analyticsTableRows).
+export function analyticsChartSeries(series, kind, xGrid, providerLabel) {
   const list = Array.isArray(series) ? series : [];
   const dataX = list.flatMap((s) => (s.points || []).map((p) => p.bucket));
   const x = [...new Set((Array.isArray(xGrid) && xGrid.length ? xGrid : []).concat(dataX))].sort((a, b) => a - b);
@@ -1365,7 +1404,8 @@ export function analyticsChartSeries(series, kind, xGrid) {
   const metric = ANALYTICS_METRICS.find((m) => m.id === kind);
   const zeroFill = metric ? !metric.gap : false;
   for (const s of list) {
-    labels.push(s.agent ? `${s.agent}/${s.model}` : `${s.provider}/${s.model}`);
+    const providerDisplay = providerLabel ? providerLabel(s.provider) : s.provider;
+    labels.push(s.agent ? `${s.agent}/${s.model}` : `${providerDisplay}/${s.model}`);
     const by = Object.fromEntries((s.points || []).map((p) => [p.bucket, p]));
     ys.push(x.map((t) => {
       const v = analyticsPointValue(by[t], kind);
@@ -1405,14 +1445,19 @@ export function analyticsTickLabel(v, tickSpanSec, tickPx) {
 // definitions as the window totals / compare / KPI cards — the frontend
 // never re-derives a metric). costPerMTok is the blended payg unit price
 // over the four-bucket billable volume (cost ÷ tokens × 1M).
-export function analyticsTableRows(series) {
+// providerLabel (optional) maps a raw runtime provider key to its display
+// form for the Series label ("name#<id>" → "name · <label>"); the row's
+// provider field keeps the RAW key — drill-down filters and backend queries
+// match on it.
+export function analyticsTableRows(series, providerLabel) {
   const rows = [];
   for (const s of (Array.isArray(series) ? series : [])) {
     const t = (s && s.totals) || {};
     const cost = t.cost == null ? null : Number(t.cost);
     const tokens = Number(t.tokens || 0);
+    const providerDisplay = providerLabel ? providerLabel(s.provider) : s.provider;
     rows.push({
-      label: s.agent ? `${s.agent}/${s.model}` : `${s.provider}/${s.model}`,
+      label: s.agent ? `${s.agent}/${s.model}` : `${providerDisplay}/${s.model}`,
       agent: s.agent || '',
       provider: s.provider,
       model: s.model,
@@ -2583,8 +2628,9 @@ function logTokensHTML(text) {
 //   <model> → <provider>
 //   <status> · <latency> · in <n> / out <n> tok · cache <n>
 //   in flight · attempt n+1 (failover)
-export function sessionBarSummary(row, fmt) {
+export function sessionBarSummary(row, fmt, o) {
   if (!row) return [];
+  const provLabel = o && o.providerLabel;
   const lines = [];
   const toMs = (v) => {
     const n = typeof v === 'number' ? v : Date.parse(v);
@@ -2594,7 +2640,8 @@ export function sessionBarSummary(row, fmt) {
   const when = t != null && fmt ? fmt(t) : (row.ts != null ? String(row.ts) : '');
   const head = [when, row.agent].filter(Boolean).join(' · ');
   if (head) lines.push(head);
-  const mp = [row.model, row.provider].filter(Boolean).join(' → ');
+  const prov = provLabel ? provLabel(row.provider) : row.provider;
+  const mp = [row.model, prov].filter(Boolean).join(' → ');
   if (mp) lines.push(mp);
   const bits = [];
   if (row.status) bits.push(String(row.status));
@@ -3120,7 +3167,8 @@ export function guardMarksHTML(marks) {
   return ' ' + parts.join(' ');
 }
 
-export function requestMetaHTML(r, rel) {
+export function requestMetaHTML(r, rel, o) {
+  const provLabel = o && o.providerLabel;
   const groups = [];
   const g = (k, v) => {
     if (v == null || v === '') return;
@@ -3140,8 +3188,23 @@ export function requestMetaHTML(r, rel) {
       result += ` ${fmtNum(r.latency_ms)}ms`;
       if (r.ttft_ms) result += ` <span class="req-meta-dim">· ttft ${fmtNum(r.ttft_ms)}ms</span>`;
     }
+    if (r.attempt_only) {
+      result += ' <span class="badge muted">failover leg</span>';
+    }
     g('result', result);
-    const route = [r.provider, r.upstream_model].filter(Boolean).map((x) => esc(x)).join(' / ');
+    if (r.attempt_only) {
+      // The empty request body on attempt-only rows is a storage contract,
+      // not data loss — say so where the reader is looking.
+      g('leg', 'uncommitted failover hop · request body intentionally not logged, the response body holds the failure evidence (upstream error peek / transport error text) — the committed row of this request id carries the full request body');
+    }
+    // Pooled provider keys fold to "name · <label>" (providerLabel, the same
+    // mapper the request table rows use); the raw virtual key rides the
+    // title for correlation with logs/CLI.
+    const prov = provLabel ? provLabel(r.provider) : r.provider;
+    const provCell = provLabel && prov !== r.provider
+      ? `<span title="${esc(r.provider)}">${esc(prov)}</span>`
+      : esc(prov);
+    const route = [provCell, r.upstream_model].filter(Boolean).join(' / ');
     if (route) {
       // via names the scheduling engine that produced this pass's try order
       // (quota/sticky/pin/load_balance/force) — orthogonal to the route-policy
@@ -3248,7 +3311,10 @@ function fmtMsLocal(ts) {
 export function requestRowHTML(row, opts) {
   const o = opts || {};
   const r = row || {};
-  const dim = r.inFlight ? ' subdue' : '';
+  // Attempt-only rows (uncommitted failover legs) render subdued with a
+  // badge — they are routing telemetry, not client-facing answers, and read
+  // as "a failed request with a weird response" without the marker.
+  const dim = (r.inFlight || r.attemptOnly) ? ' subdue' : '';
   const lat = (r.inFlight || r.latencyMs == null) ? '' : fmtNum(r.latencyMs);
   const slow = !r.inFlight && r.latencyMs != null && r.latencyMs > 10000;
   let tk = '';
@@ -3282,17 +3348,61 @@ export function requestRowHTML(row, opts) {
     ? `<td class="cell-model${dim}" title="${esc(r.tool || '')}">${r.inFlight ? '…' : esc(r.tool || '—')}</td>`
     : '';
   const t = o.fmtTime ? o.fmtTime(r.ts) : String(r.ts != null ? r.ts : '');
+  // providerLabel (optional) maps the raw runtime key to its display form —
+  // pooled virtual keys "name#<id>" render as "name · <label>" (the
+  // user-provided account name), so the opaque hash id never surfaces.
+  const providerCell = r.inFlight ? '…' : (r.provider || '—');
+  // Folded hop badge: this committed answer was reached over N failed hops
+  // (metadata only — the failure evidence lives in the expanded detail's
+  // leg records). Rows without hops and unanswered legs render nothing.
+  const hopBadge = r.failedHops && r.failedHops.length
+    ? `<span class="badge muted" title="${esc(hopChainTitle(r.failedHops, o))}">⟲${r.failedHops.length}</span>`
+    : '';
   return `<tr class="${esc(o.rowClass || '')}" data-id="${esc(r.requestId)}"${o.liveKey ? ` data-live-key="${esc(r.requestId)}"` : ''}>
     <td class="mono${dim}">${esc(t)}</td>
     <td class="mono${dim}">${esc(r.agent || '—')}</td>
     ${sess}
-    <td class="st">${statusBadgeHTML(r.inFlight ? null : r.status, r.inFlight)}</td>
+    <td class="st">${statusBadgeHTML(r.inFlight ? null : r.status, r.inFlight)}${hopBadge}${r.attemptOnly ? '<span class="badge muted">failover leg</span>' : ''}</td>
     <td class="cell-model" title="${esc(r.model || '')}">${esc(r.model || '—')}${o.modelNote || ''}${guardMarksHTML(r.guardMarks)}</td>
     ${toolCell}
-    <td class="mono${dim}">${esc(r.inFlight ? '…' : (r.provider || '—'))}${r.shadow ? ' <span class="badge muted">shadow</span>' : ''}</td>
+    <td class="mono${dim}">${esc(o.providerLabel ? o.providerLabel(r.provider || '') : providerCell)}${r.shadow ? ' <span class="badge muted">shadow</span>' : ''}</td>
     <td class="num${slow ? ' warn' : ''}">${lat}</td>
     ${o.mcp ? '' : `<td class="num"${tkTitle ? ` title="${esc(tkTitle)}"` : ''}>${tk}</td>`}
   </tr>`;
+}
+
+// hopChainTitle renders the ⟲N badge's hover chain: one line per folded hop,
+// account-labeled when providerLabel is supplied (the row renderer's pooled
+// virtual key mapper). Metadata only by contract — no error text in lists.
+export function hopChainTitle(hops, o) {
+  const label = (o && o.providerLabel) || ((p) => p);
+  return (hops || []).map((h, i) => {
+    const lat = Number.isFinite(Number(h.latencyMs)) && h.latencyMs != null ? ` · ${fmtNum(h.latencyMs)}ms` : '';
+    return `hop${i + 1} ${label(h.provider || '—')} ${h.status}${lat}`;
+  }).join('\n');
+}
+
+// orderDetailRecords sorts one request id's records attempt-ascending (Ts as
+// the tie-break) so the expanded detail reads chronologically: the failed
+// hops' evidence first, the committed answer the client received last. The
+// API returns newest-first (its Detail contract); ordering for display is a
+// view concern, done on a copy.
+export function orderDetailRecords(recs) {
+  const out = (recs || []).slice();
+  out.sort((a, b) => ((Number(a.attempt) || 0) - (Number(b.attempt) || 0))
+    || String(a.ts || '').localeCompare(String(b.ts || '')));
+  return out;
+}
+
+// committedRecordOf picks the record that carries the client-facing answer
+// (the non-attempt_only row) out of one request id's records; the fallback
+// covers single-record sets (unanswered legs) and older data.
+export function committedRecordOf(recs) {
+  const list = recs || [];
+  for (const r of list) {
+    if (r && !r.attempt_only) return r;
+  }
+  return list[0];
 }
 
 // ---------- virtualized request table ----------

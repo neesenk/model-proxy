@@ -2,9 +2,9 @@ package login
 
 import (
 	"fmt"
-	"os"
 	"strconv"
 
+	"model-proxy/internal/accounts"
 	logincore "model-proxy/internal/login"
 	"model-proxy/internal/provider"
 )
@@ -20,7 +20,7 @@ import (
 // This is the CLI wrapper: it owns stdout progress printing around the
 // transport-neutral device-flow steps in internal/login (RequestUserCode →
 // PollForToken → ExchangeCodeForTokens).
-func runCodexLoginFlow(authFile string) error {
+func runCodexLoginFlow(provName string) error {
 	opts := &logincore.CodexLoginServerOptions{}
 	opts.Defaults()
 
@@ -43,13 +43,15 @@ func runCodexLoginFlow(authFile string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(logincore.DirOf(authFile), 0o700); err != nil {
+	seed, err := logincore.CodexOAuthSeed(af)
+	if err != nil {
 		return err
 	}
-	if err := provider.WriteCodexAuthFile(authFile, af); err != nil {
-		return err
+	id, err := logincore.AddOAuthAccount(provName, "codex", seed)
+	if err != nil {
+		return fmt.Errorf("failed to persist account: %w", err)
 	}
-	fmt.Printf("✓ codex OAuth tokens saved to %s\n", authFile)
+	fmt.Printf("✓ codex OAuth account saved (pool %s, id %s)\n", provName, accounts.Mask(id))
 	if af.Tokens.AccountID != "" {
 		fmt.Printf("  account_id: %s\n", af.Tokens.AccountID)
 	}

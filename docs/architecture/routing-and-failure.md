@@ -118,7 +118,7 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   `RouteStrategyFor`，含 `#req`/`#ctx` 跨路由 pool 键的后缀剥离）拥有，
   `internal/runtime.decideOrder` 是唯一排序分叉点。
 - timeout、连接错误、5xx 和 refresh 后仍失败的 401 计入 provider 熔断。
-- **连接类快失败先重派再计数**（`targetexec.IsFastFailConnError`）：`unexpected EOF`/`EOF`/`ECONNRESET`/`EPIPE`/`ECONNREFUSED` 这类毫秒级返回的错误先在同一 target 上重派一次（新连接）；重派成功记 success、首跳**不**记失败。对外网络（代理链回收、LB 滚动）一次事件杀 N 条在途连接是常态噪音，重派把它从熔断视野里滤掉；超时不重派（时间预算已烧掉，重试等于翻倍等待），客户端断开照旧 `OutcomeClientGone`。重派不占 401 refresh 的 retry slot。
+- **连接类快失败先重派再计数**（`targetexec.IsFastFailConnError`）：`unexpected EOF`/`EOF`/`ECONNRESET`/`EPIPE`/`ECONNREFUSED` 这类毫秒级返回的错误先在同一 target 上重派一次（新连接）；重派成功记 success、首跳**不**记失败。对外网络（代理链回收、LB 滚动）一次事件杀 N 条在途连接是常态噪音，重派把它从熔断视野里滤掉；超时不重派（时间预算已烧掉，重试等于翻倍等待），客户端断开照旧 `OutcomeClientGone`。重派不占 401 refresh 的 retry slot。**服务端主动 GOAWAY 同属快失败**：HTTP/2 网关按 stream 预算优雅回收连接（实测 compass 周期性 `LastStreamID≈2000, ErrCode=NO_ERROR`），`http.Client.Do` 层面浮出的 GOAWAY 意味着本 stream id 已过 LastStreamID——服务端从未处理该请求，同 target 重派不是重复请求（net/http 的 goAwayError 未导出，按稳定错误文案识别）；已 commit 的响应 body 中途断流不在此列（commit 后无法重派）。
 - **熔断需要 streak 持续**（`circuit_persist`，默认 6s，`"0"` 关闭）：连续失败除了达到 `circuit_threshold`，还必须**跨至少 persist 窗口**才开熔断——"N 连败"从"N 次尝试碰噪音"升级为"N 次新鲜连接确认不可达持续了一段时间"。persist 只延迟**新请求**不再考虑该 provider 的时刻；单个请求的 failover 照旧立即发生，重派后的失败也照常计数。成功重置 streak 起点与计数。
 - **客户端取消不计熔断**：调用方断开（`exchange.Request.Context()` 取消，
   含调用方自身 deadline）不是上游判决——不记 `RecordFailure`、不计
@@ -192,7 +192,12 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   **形态内快照-或-增量**合并：同 wire 形态内单调不降的 usage 值视为累计
   快照取末值（存在逐 chunk 重复累计值的网关，曾把单请求膨胀成上亿 token
   统计），下降视为增量相加；跨形态（anthropic 帧与 openai chunk）仍求和。
-  同 id 多 attempt 行语义：未 commit 的 failover 中间跳（429/5xx/认证/传输错误，且其后确有下一跳）各落一行 `attempt_only` 请求日志——同 request id、同 attempt 序号、带上游状态与 8KB 错误体 peek，api_key 照记；`attempt_only` 行被 KeyUsage 与 session 聚合排除（路由遥测，不是客户端流量），最后一跳失败且全链终态时沿用终态行、不重复落中间行。
+  四桶账本归一化为 anthropic 口径（input 不含 cache）：inclusive 计数器
+  （openai `prompt_tokens`、responses `input_tokens` 自带 cached 份额）
+  入桶前先扣减该份额（钳零）并记入 cache_read——否则同一份额同时落 input
+  与 cache_read，曾把 analytics 命中率压到真实值的一半并双重计费
+  （与 requestlog.ExtractUsage、fusion.ParseUsage 同一账本）。
+  同 id 多 attempt 行语义：未 commit 的 failover 中间跳（429/5xx/认证/传输错误，且其后确有下一跳）各落一行 `attempt_only` 请求日志——同 request id、同 attempt 序号、带上游状态与 8KB 错误体 peek，api_key 照记；`attempt_only` 行被 KeyUsage 与 session 聚合排除（路由遥测，不是客户端流量），最后一跳失败且全链终态时沿用终态行、不重复落中间行。存储语义之外的**查询折叠**：`/api/requests` 列表把已配对腿折入其已提交行的 `failed_hops`（未应答请求的最新一腿独立成行），status/errors 过滤看存活行终态、facets 排除腿——索引与扫描两路逐字段一致（见 `docs/web-api.md`）。
 - **绑定粒度 (会话, 路由)**：sticky 键是 `runtime.StickyKey(sessionKey, exposed)`
   ——一个会话在每个路由上持有**独立绑定**（同会话换模型 = 新绑定，不把旧路由选中的
   账号拖带到新路由，与 latchKey/repeat_turn 同粒度；Bifrost「绑定按请求的 model
@@ -373,6 +378,9 @@ provider：照常 failover（换一家策略不同的 provider 可能可服务�
 - SSE keepalive：静默期心跳帧、ttft 不被心跳标记、录制链/缓存无心跳、client gone 后 reader goroutine 释放。
 - cooldown 全部恢复、部分恢复、跨轮纯 429、混合硬失败。
 - request-aware/context retry 后的实际目标冷却判定。
+- usage 账本归一化：inclusive wire（openai `prompt_tokens` / responses
+  `input_tokens`）cached 份额扣减入桶、真实录制 wire 形态（含 aqp/kimi-k3
+  事故形态）与逐 chunk 重复累计值的合并。
 - 交互矩阵：quota 模式 sticky×熔断/限频/模型锁的排除、失败不复活、dwell 内
   recover-and-return、dwell 过期后按 margin 切换；部分链 `skipped` 与空链
   `blocked` 的原因分类（负载均衡策略的同类语义在 load_balance 用例覆盖）。

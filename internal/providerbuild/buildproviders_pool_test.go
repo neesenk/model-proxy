@@ -99,21 +99,38 @@ func TestBuildProviders_UnrollsMultiAccountPool(t *testing.T) {
 	if len(built.OAuthSecrets) != 0 {
 		t.Errorf("OAuthSecrets = %d values, want 0 (no OAuth providers)", len(built.OAuthSecrets))
 	}
+	if accts := built.PoolAccounts["zhipu"]; len(accts) != 3 {
+		t.Errorf("poolAccounts[zhipu] = %d entries, want 3", len(accts))
+	}
 }
 
-// TestBuildProviders_SingleEntryPluralPoolBindsPlainName: a 1-entry PLURAL
-// pool (what `login` writes) binds the key in-memory under the plain name.
-func TestBuildProviders_SingleEntryPluralPoolBindsPlainName(t *testing.T) {
+// TestBuildProviders_SingleEntryPluralPoolBindsVirtualKey: a 1-entry PLURAL
+// pool (what `login` writes) unrolls to the virtual "name#<accountID>" like
+// every other pool — the account id is the stable identity, so gaining or
+// losing sibling accounts never rewrites this account's runtime key (and with
+// it its usage/quota history attribution).
+func TestBuildProviders_SingleEntryPluralPoolBindsVirtualKey(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	writePool(t, "zhipu", "zhipu", "ONLY")
 
 	built := BuildProviders(poolConfig("zhipu"), poolStore(t), testBuildOpts())
-	p := built.Providers["zhipu"]
-	if p == nil {
-		t.Fatal("1-entry plural pool must keep the plain name runnable")
+	if p := built.Providers["zhipu"]; p != nil {
+		t.Fatal("parent zhipu must not be a runnable provider key when pooled")
 	}
-	if len(built.PoolIndex) != 0 || len(built.ParentOf) != 0 {
-		t.Fatalf("1-entry pool must not populate poolIndex/parentOf: %v / %v", built.PoolIndex, built.ParentOf)
+	id := accounts.AccountID("zhipu", accounts.Credentials{APIKey: "ONLY"})
+	vid := "zhipu#" + id
+	p := built.Providers[vid]
+	if p == nil {
+		t.Fatalf("1-entry plural pool must bind its account under the virtual key %s", vid)
+	}
+	if vids := built.PoolIndex["zhipu"]; len(vids) != 1 || vids[0] != vid {
+		t.Fatalf("poolIndex[zhipu] = %v, want [%s]", vids, vid)
+	}
+	if built.ParentOf[vid] != "zhipu" {
+		t.Fatalf("parentOf[%s] = %q, want zhipu", vid, built.ParentOf[vid])
+	}
+	if accts := built.PoolAccounts["zhipu"]; len(accts) != 1 || accts[0].ID != id {
+		t.Fatalf("poolAccounts[zhipu] = %+v, want one entry with id %s", accts, id)
 	}
 	if !built.Eligible["zhipu"] {
 		t.Error("1-entry plural pool must be eligible")

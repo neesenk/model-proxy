@@ -28,13 +28,38 @@ func (p *CodexProvider) AuthReady() bool {
 	if p.cfg.Auth != nil {
 		return true
 	}
-	af, err := LoadCodexAuthFile(p.cfg.OAuthAuthFile)
+	af, err := p.loadAuthFile()
 	return err == nil && af != nil && (af.Tokens.AccessToken != "" || af.Tokens.RefreshToken != "")
+}
+
+// loadAuthFile reads the OAuth store through the seam (pooled virtual) or the
+// legacy single-account file.
+func (p *CodexProvider) loadAuthFile() (*CodexAuthFile, error) {
+	if p.cfg.OAuthStore != nil {
+		blob, err := p.cfg.OAuthStore.Load()
+		if err != nil {
+			return nil, err
+		}
+		if len(blob) == 0 {
+			return nil, nil
+		}
+		var af CodexAuthFile
+		if err := json.Unmarshal(blob, &af); err != nil {
+			return nil, fmt.Errorf("parse codex oauth store: %w", err)
+		}
+		return &af, nil
+	}
+	return LoadCodexAuthFile(p.cfg.OAuthAuthFile)
 }
 
 func init() {
 	Register("codex", func(cfg *Config, providerName string) (Provider, error) {
-		oauth := NewCodexOAuthProvider(cfg.OAuthAuthFile)
+		var oauth *CodexOAuthProvider
+		if cfg.OAuthStore != nil {
+			oauth = NewCodexOAuthProviderWithStore(cfg.OAuthAuthFile, cfg.OAuthStore)
+		} else {
+			oauth = NewCodexOAuthProvider(cfg.OAuthAuthFile)
+		}
 		oauth.proxyURL = cfg.ProxyURL
 		return &CodexProvider{cfg: cfg, auth: cfg.authOrDefault(oauth)}, nil
 	})
@@ -66,7 +91,15 @@ func (p *CodexProvider) RewriteRequest(targetURL string, body []byte, path strin
 	body = ensureJSONArrayItem(body, "include", "reasoning.encrypted_content")
 	return targetURL, body
 }
-func (p *CodexProvider) Logout() error { return removeAuthFile(p.cfg.OAuthAuthFile) }
+
+// Logout removes this account's OAuth store: the seam's own slot for pooled
+// virtuals, the legacy single-account file otherwise. Absence is success.
+func (p *CodexProvider) Logout() error {
+	if p.cfg.OAuthStore != nil {
+		return p.cfg.OAuthStore.Delete()
+	}
+	return removeAuthFile(p.cfg.OAuthAuthFile)
+}
 
 // Quota GETs /backend-api/wham/usage (derived from OpenAIBaseURL by stripping
 // the trailing /codex) with Bearer + originator + account-id (set by

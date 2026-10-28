@@ -76,6 +76,11 @@ type Record struct {
 	// Never persisted: the JSONL encoder does not write it and json:"-"
 	// keeps decoded lines from populating it.
 	ParsedUsage Usage `json:"-"`
+	// FailedHops is the fold projection of summary list queries: this
+	// request's failover legs, attached by the scan engine (or set directly
+	// on the Summary by the index path) so paired legs stop appearing as
+	// standalone rows. Never persisted; json:"-" keeps decoded lines clean.
+	FailedHops []FailedHop `json:"-"`
 }
 
 // ConversionDiagnostic is the log projection of one conversion diagnostic.

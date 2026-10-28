@@ -52,15 +52,19 @@ type generationState struct {
 	secLog            *seclog.Logger         // security audit log (guard hit records); reload-owned, swapped by reconcileSecLog; nil = audit off for this generation
 	secLogRunning     bool                   // current generation's secLog Run goroutine is live (lifecycle-admitted); guards Close's drain
 
-	// Credential-pool unrolling (buildProviders). For a multi-account parent,
+	// Credential-pool unrolling (buildProviders). For a pooled parent,
 	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
-	// the inverse. Single-account / not-logged-in providers appear in neither
-	// map (their id == the plain name). Guards: same as generationState —
-	// poolIndex and parentOf are rebuilt on reload under p.mu; pool spread is
-	// owned by runtimeState.
-	poolIndex      map[string][]string        // parent name → sorted virtual ids (only multi-account parents)
-	parentOf       map[string]string          // virtual id → parent name
-	expandedRoutes map[string][]configdomain. // exposed model → expanded targets (explicit + derived)
+	// the inverse; poolAccounts[parent] carries the per-account identity
+	// metadata (id, added_at — no credential material) used to attribute
+	// legacy bare-name history to an account (startup key migration).
+	// Not-logged-in (file-backed) providers appear in none of these maps
+	// (their id == the plain name). Guards: same as generationState — all
+	// three are rebuilt on reload under p.mu; pool spread is owned by
+	// runtimeState.
+	poolIndex      map[string][]string                    // parent name → sorted virtual ids
+	parentOf       map[string]string                      // virtual id → parent name
+	poolAccounts   map[string][]providerbuild.PoolAccount // parent name → runnable account metadata
+	expandedRoutes map[string][]configdomain.             // exposed model → expanded targets (explicit + derived)
 			RouteTarget
 	routeKeys     map[string]bool            // key set of expandedRoutes; generation-owned, shared by the scheduling hot path
 	derivedRoutes map[string][]configdomain. // exposed model → targets auto-aggregated from provider model lists (for names not in cfg.Routes)
@@ -259,6 +263,11 @@ func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 	// (usage/quota/login/pricing). Reload re-publishes it per generation.
 	upstreamproxy.SetDefaultProxy(cfg.Proxy)
 	built := providerbuild.BuildProviders(cfg, accounts.NewStore(accounts.HomeDir()), providerbuild.BuildOpts())
+	// Re-key legacy bare-name history onto the pool's virtual keys before any
+	// state consumer loads: the quota tracker's Load filters to the live key
+	// set (see migrateLegacyProviderKeys), and runtime services' Bootstrap
+	// renames stats rows before restoring the cumulative baseline.
+	migrateLegacyProviderKeys(built, qpath)
 	// Same scanner entry point as Reload: startup and reload build identical
 	// generations. An error is only reachable with an unvalidated Config
 	// (validate rejects bad guard.extra_patterns at load) — degrade to the
@@ -294,10 +303,11 @@ func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 	transport.MaxIdleConnsPerHost = 100
 	p := &Proxy{
 		generationState: generationState{
-			cfg:       cfg,
-			providers: built.Providers,
-			poolIndex: built.PoolIndex,
-			parentOf:  built.ParentOf,
+			cfg:          cfg,
+			providers:    built.Providers,
+			poolIndex:    built.PoolIndex,
+			parentOf:     built.ParentOf,
+			poolAccounts: built.PoolAccounts,
 		},
 		processServices: processServices{
 			lifecycle:         runtimestate.NewLifecycle(),

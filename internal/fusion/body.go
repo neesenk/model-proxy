@@ -192,13 +192,16 @@ func ParseUsage(body []byte) Usage {
 			CacheRead        uint64 `json:"cache_read_input_tokens"`
 			PromptTokens     uint64 `json:"prompt_tokens"`
 			CompletionTokens uint64 `json:"completion_tokens"`
-			// OpenAI chat shape; prompt_tokens includes the cached share.
+			PromptCacheHit   uint64 `json:"prompt_cache_hit_tokens"`
+			// OpenAI chat shape; prompt_tokens includes both cache shares.
 			PromptTokensDetails struct {
-				CachedTokens uint64 `json:"cached_tokens"`
+				CachedTokens    uint64 `json:"cached_tokens"`
+				CacheWriteToken uint64 `json:"cache_write_tokens"`
 			} `json:"prompt_tokens_details"`
-			// Responses shape; input_tokens includes the cached share.
+			// Responses shape; input_tokens includes both cache shares.
 			InputTokensDetails struct {
-				CachedTokens uint64 `json:"cached_tokens"`
+				CachedTokens    uint64 `json:"cached_tokens"`
+				CacheWriteToken uint64 `json:"cache_write_tokens"`
 			} `json:"input_tokens_details"`
 		} `json:"usage"`
 	}
@@ -206,20 +209,36 @@ func ParseUsage(body []byte) Usage {
 		return Usage{}
 	}
 	u := response.Usage
-	// Anthropic's cache_read_input_tokens and the inclusive-shape details
-	// spellings report the same bucket; merge by max like the SSE scanner.
-	cacheRead := max(u.CacheRead, u.PromptTokensDetails.CachedTokens, u.InputTokensDetails.CachedTokens)
+	// Hit spellings (anthropic direct, chat details, deepseek prompt_cache_hit_tokens,
+	// responses details) report the same bucket; merge by max like the SSE
+	// scanner. Writes: anthropic direct + the details cache_write spellings.
+	cacheRead := max(u.CacheRead, u.PromptTokensDetails.CachedTokens, u.PromptCacheHit, u.InputTokensDetails.CachedTokens)
+	cacheWrite := max(u.CacheCreation, u.PromptTokensDetails.CacheWriteToken, u.InputTokensDetails.CacheWriteToken)
 	// Anthropic input_tokens is already cache-exclusive; the OpenAI/Responses
-	// totals are inclusive, so each shape's cached share is deducted from its
-	// own inclusive total (clamped at zero), never from the anthropic field.
-	prompt := u.PromptTokens - min(u.PromptTokensDetails.CachedTokens, u.PromptTokens)
-	input := u.InputTokens - min(u.InputTokensDetails.CachedTokens, u.InputTokens)
+	// totals are inclusive, so each shape's shares are deducted from its own
+	// inclusive total (clamped at zero), never from the anthropic field.
+	prompt := clampSub2(u.PromptTokens, max(u.PromptTokensDetails.CachedTokens, u.PromptCacheHit), u.PromptTokensDetails.CacheWriteToken)
+	input := clampSub2(u.InputTokens, u.InputTokensDetails.CachedTokens, u.InputTokensDetails.CacheWriteToken)
 	return Usage{
 		Input:         prompt + input,
 		Output:        u.OutputTokens + u.CompletionTokens,
-		CacheCreation: u.CacheCreation,
+		CacheCreation: cacheWrite,
 		CacheRead:     cacheRead,
 	}
+}
+
+// clampSub2 subtracts two shares from a total, floored at zero (same ledger
+// as the scanner's subClamped2).
+func clampSub2(total, a, b uint64) uint64 {
+	if a > total {
+		total = 0
+	} else {
+		total -= a
+	}
+	if b > total {
+		return 0
+	}
+	return total - b
 }
 
 // TruncateRunes caps text by Unicode code points rather than bytes.

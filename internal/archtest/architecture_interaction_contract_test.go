@@ -208,10 +208,17 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 		app, _ := parseGoFile(t, "internal/cli/app.go")
 		constructor := namedFunction(t, app, "NewApplication")
 		// Every entry in the Commands registry literal must carry exactly one
-		// ProcessCommand binding and vice versa — the count is derived from the
-		// literal itself so adding/removing a command cannot drift past this
-		// check via a stale hardcoded number.
+		// binding and vice versa. The uniform binding is ProcessCommand
+		// (stream-agnostic handlers); streamBoundCommands may instead bind the
+		// handler DIRECTLY — the only sanctioned shape for handlers that
+		// consume the injected streams (bundled stdio MCP servers, whose
+		// transport IS the stream pair — ProcessCommand would discard it).
+		// Extending that allowlist is an architectural decision, made here
+		// consciously rather than by silent drift.
+		streamBoundCommands := map[string]bool{"mcp-server": true}
 		registryEntries := 0
+		directBindings := 0
+		var unbound []string
 		ast.Inspect(constructor.Body, func(n ast.Node) bool {
 			lit, ok := n.(*ast.CompositeLit)
 			if !ok || len(lit.Elts) == 0 {
@@ -221,16 +228,41 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 			if !ok {
 				return true
 			}
-			if ident, ok := mt.Value.(*ast.Ident); ok && ident.Name == "Command" {
-				registryEntries = len(lit.Elts)
+			if ident, ok := mt.Value.(*ast.Ident); !ok || ident.Name != "Command" {
+				return true
+			}
+			registryEntries = len(lit.Elts)
+			for _, elt := range lit.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					unbound = append(unbound, "<unnamed>")
+					continue
+				}
+				name := ""
+				if key, ok := kv.Key.(*ast.BasicLit); ok {
+					name = strings.Trim(key.Value, `"`)
+				}
+				if call, ok := kv.Value.(*ast.CallExpr); ok {
+					if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "ProcessCommand" {
+						continue // the uniform binding
+					}
+				}
+				if streamBoundCommands[name] {
+					directBindings++
+					continue
+				}
+				unbound = append(unbound, name)
 			}
 			return true
 		})
 		if registryEntries == 0 {
 			t.Fatal("no Commands map literal found in NewApplication — registry-count contract is blind")
 		}
-		if got := namedCallCountInNode(constructor.Body, "ProcessCommand"); got != registryEntries {
-			t.Errorf("newApplication: %d ProcessCommand registrations for %d Commands registry entries — every registered command needs a binding and vice versa", got, registryEntries)
+		if got := namedCallCountInNode(constructor.Body, "ProcessCommand"); got != registryEntries-directBindings {
+			t.Errorf("newApplication: %d ProcessCommand registrations for %d Commands registry entries (%d direct stream bindings) — every registered command needs a binding and vice versa", got, registryEntries, directBindings)
+		}
+		if len(unbound) > 0 {
+			t.Errorf("newApplication: registry entries %v lack a sanctioned binding — use ProcessCommand, or extend streamBoundCommands deliberately for stream-consuming handlers", unbound)
 		}
 
 		sites := rootFunctionReferenceSites(t, "newApplication")

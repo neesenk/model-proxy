@@ -405,7 +405,12 @@ func TestExecutorKeepaliveStripsUpstreamContentLength(t *testing.T) {
 		}
 		return writer
 	}
-	if got := run(t, "10ms").Header().Get("Content-Length"); got != "" {
+	// A keepalive interval far beyond the test's lifetime: the STRIPPING logic
+	// is what this assertion covers (interval parsing + header removal), and a
+	// short interval makes the passthrough assertion above racy — on a loaded
+	// CI runner the gap between the two SSE writes can exceed it and inject
+	// ": ping" comments into a body asserted byte-exact.
+	if got := run(t, "10m").Header().Get("Content-Length"); got != "" {
 		t.Fatalf("keepalive stream forwarded Content-Length %q, want it stripped", got)
 	}
 	if got := run(t, "0").Header().Get("Content-Length"); got != "999" {

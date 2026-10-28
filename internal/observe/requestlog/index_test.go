@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -92,6 +93,162 @@ func indexRowCount(t *testing.T, indexer *Indexer) int {
 	return count
 }
 
+// TestSummaryListFoldsFailoverLegs pins the summary-list fold on BOTH query
+// paths (scan engine and index SQL — they must answer identically): a paired
+// leg never surfaces as its own row, its evidence rides the committed row's
+// FailedHops in attempt order; an unanswered request (no committed row, e.g.
+// the client disconnecting mid-failover) keeps its leg as the only row with
+// the attempt_only marker; errors/status filters see the surviving row's
+// terminal status, not the folded hops; facets exclude legs. The misreading
+// this prevents: a burst of 502 "errors" that every client actually received
+// as 200s via failover (docs/web-api.md /api/requests summary fields).
+func TestSummaryListFoldsFailoverLegs(t *testing.T) {
+	dir := t.TempDir()
+	base := func(id, provider string, attempt int, status int, latency int64) Record {
+		return Record{RequestID: id, SessionID: "sess-1", Protocol: "chat", Method: "POST",
+			Path: "/v1/chat/completions", CalledModel: "deepseek", Provider: provider,
+			Agent: "ssc", Attempt: attempt, Status: status, LatencyMs: latency}
+	}
+	records := []Record{
+		func() Record {
+			r := base("req-a", "shopee-a", 0, 502, 300)
+			r.Ts = "2026-10-27T03:36:29Z"
+			r.AttemptOnly = true
+			r.ResponseBody = `read: operation timed out`
+			return r
+		}(),
+		func() Record {
+			r := base("req-a", "shopee-b", 1, 429, 120)
+			r.Ts = "2026-10-27T03:36:30Z"
+			r.AttemptOnly = true
+			return r
+		}(),
+		func() Record { r := base("req-a", "shopee-c", 2, 200, 4700); r.Ts = "2026-10-27T03:36:31Z"; return r }(),
+		func() Record {
+			r := base("req-b", "shopee-a", 0, 502, 240)
+			r.Ts = "2026-10-27T03:36:32Z"
+			r.AttemptOnly = true
+			r.ResponseBody = `read: operation timed out`
+			return r
+		}(),
+		func() Record { r := base("req-c", "zhipu", 0, 200, 90); r.Ts = "2026-10-27T03:36:33Z"; return r }(),
+	}
+	writeRecordFile(t, dir, "requests-20261027.log", records)
+
+	indexer := newTestIndexer(t, dir)
+	mustReconcile(t, indexer)
+
+	assertBaseline := func(t *testing.T, summaries []Summary) {
+		t.Helper()
+		if len(summaries) != 3 {
+			t.Fatalf("baseline rows = %d (%+v), want 3 (paired legs folded)", len(summaries), summaries)
+		}
+		byID := make(map[string]Summary, len(summaries))
+		for _, s := range summaries {
+			byID[s.RequestID] = s
+		}
+		a := byID["req-a"]
+		if a.AttemptOnly {
+			t.Errorf("req-a committed row marked attempt_only: %+v", a)
+		}
+		wantHops := []FailedHop{
+			{Provider: "shopee-a", Status: 502, Attempt: 0, LatencyMs: 300},
+			{Provider: "shopee-b", Status: 429, Attempt: 1, LatencyMs: 120},
+		}
+		if !reflect.DeepEqual(a.FailedHops, wantHops) {
+			t.Errorf("req-a FailedHops = %+v, want %+v (attempt-ascending)", a.FailedHops, wantHops)
+		}
+		b := byID["req-b"]
+		if !b.AttemptOnly {
+			t.Errorf("unanswered req-b lost its attempt_only marker: %+v", b)
+		}
+		if b.FailedHops != nil {
+			t.Errorf("unanswered req-b carry hops: %+v", b.FailedHops)
+		}
+		if _, ok := byID["req-c"]; !ok || byID["req-c"].FailedHops != nil {
+			t.Errorf("quiet req-c wrong: %+v", byID["req-c"])
+		}
+	}
+
+	scan, scanFacets, err := QuerySummariesWithFacets(dir, Filter{Limit: 10, UsageOnly: true})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	assertBaseline(t, scan)
+	indexed, indexFacets, err := indexer.SummariesWithFacets(Filter{Limit: 10, UsageOnly: true})
+	if err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	assertBaseline(t, indexed)
+	if !reflect.DeepEqual(indexed, scan) {
+		t.Errorf("index/scan baseline diverge:\nindex: %+v\nscan:  %+v", indexed, scan)
+	}
+	if !reflect.DeepEqual(indexFacets, scanFacets) {
+		t.Errorf("index/scan facets diverge:\nindex: %+v\nscan:  %+v", indexFacets, scanFacets)
+	}
+	for _, provider := range []string{"shopee-a", "shopee-b"} {
+		if slices.Contains(scanFacets.Providers, provider) {
+			t.Errorf("facets offer leg-only provider %s: %+v", provider, scanFacets.Providers)
+		}
+	}
+	if !slices.Contains(scanFacets.Providers, "shopee-c") || !slices.Contains(scanFacets.Providers, "zhipu") {
+		t.Errorf("facets lost committed providers: %+v", scanFacets.Providers)
+	}
+
+	// errors filter: terminal status only — the folded 200-with-hops and the
+	// quiet 200 stay out; the unanswered leg (its request's terminal record)
+	// stays in.
+	for name, query := range map[string]struct {
+		scan  func() ([]Summary, error)
+		index func() ([]Summary, Facets, error)
+	}{
+		"errors only": {
+			func() ([]Summary, error) {
+				return QuerySummaries(dir, Filter{Limit: 10, ErrorsOnly: true, UsageOnly: true})
+			},
+			func() ([]Summary, Facets, error) {
+				return indexer.SummariesWithFacets(Filter{Limit: 10, ErrorsOnly: true, UsageOnly: true})
+			},
+		},
+		"provider filter": {
+			func() ([]Summary, error) {
+				return QuerySummaries(dir, Filter{Limit: 10, Provider: "shopee-c", UsageOnly: true})
+			},
+			func() ([]Summary, Facets, error) {
+				return indexer.SummariesWithFacets(Filter{Limit: 10, Provider: "shopee-c", UsageOnly: true})
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			want, err := query.scan()
+			if err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			got, _, err := query.index()
+			if err != nil {
+				t.Fatalf("index: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("index/scan diverge:\nindex: %+v\nscan:  %+v", got, want)
+			}
+			if len(want) != 1 {
+				t.Fatalf("rows = %+v, want exactly the one surviving row", want)
+			}
+			if name == "errors only" {
+				if want[0].RequestID != "req-b" {
+					t.Errorf("errors-only row = %+v, want unanswered req-b", want[0])
+				}
+			} else {
+				// The hop chain rides along even though its providers do not
+				// match the provider filter — the filter selects the answer.
+				if want[0].RequestID != "req-a" || len(want[0].FailedHops) != 2 {
+					t.Errorf("provider-filter row = %+v, want req-a with both hops", want[0])
+				}
+			}
+		})
+	}
+}
+
 // TestIndexSummariesEquivalenceVsScan pins the index query against the file
 // scan field-by-field across the filter matrix. Facets are compared only on
 // the unbounded filter: the scan's facets are bounded by its file-level early
@@ -101,6 +258,13 @@ func indexRowCount(t *testing.T, indexer *Indexer) int {
 func TestIndexSummariesEquivalenceVsScan(t *testing.T) {
 	dir := t.TempDir()
 	writeIndexFixture(t, dir)
+	// Fold coverage inside the matrix: a paired leg under r1 (fails, next
+	// hop commits) and an unanswered leg of its own — the fold must hold
+	// field-for-field across every filter, not just the baseline.
+	appendRecordLines(t, filepath.Join(dir, "requests-20260729.log"),
+		Record{Ts: "2026-07-29T11:59:57Z", RequestID: "r1", SessionID: "sess-a", Protocol: "anthropic", Method: "POST", Path: "/v1/messages", CalledModel: "Model-X", UpstreamModel: "up-x", Exposed: "exposed-x", Provider: "provider-leg", Agent: "agent-a", Attempt: 0, Status: 429, LatencyMs: 5, AttemptOnly: true, ResponseBody: `{"error":"rate limited"}`},
+		Record{Ts: "2026-07-29T12:01:30Z", RequestID: "r-leg-solo", SessionID: "sess-a", Protocol: "anthropic", Method: "POST", Path: "/v1/messages", CalledModel: "Model-X", Provider: "provider-leg", Agent: "agent-a", Attempt: 0, Status: 502, LatencyMs: 7, AttemptOnly: true},
+	)
 	indexer := newTestIndexer(t, dir)
 	mustReconcile(t, indexer)
 
@@ -643,9 +807,11 @@ func TestIndexUsageParity(t *testing.T) {
 	}
 }
 
-// TestIndexSessionSummariesEquivalence: the index-backed session aggregation
-// equals the file-scan aggregation row for row, including shadow counting,
-// error counting and the cost callback.
+// TestIndexSessionSummariesEquivalence: for data inside the file-scan window
+// the index-backed session aggregation equals the file-scan aggregation row
+// for row, including shadow counting, error counting and the cost callback.
+// (Beyond that window the two deliberately diverge — see
+// TestIndexSessionSummariesExactBeyondScanWindow.)
 func TestIndexSessionSummariesEquivalence(t *testing.T) {
 	dir := t.TempDir()
 	writeIndexFixture(t, dir)
@@ -655,37 +821,194 @@ func TestIndexSessionSummariesEquivalence(t *testing.T) {
 	costOf := func(provider, model string, usage Usage) float64 {
 		return float64(len(provider)+len(model)) + float64(usage.Input+usage.Output)/1000
 	}
-	want, err := SessionSummaries(dir, 2000, 50, costOf)
+	want, err := SessionSummaries(dir, 50, costOf)
 	if err != nil {
 		t.Fatalf("scan sessions: %v", err)
 	}
-	got, err := indexer.SessionSummaries(2000, 50, costOf)
+	got, err := indexer.SessionSummaries(50, costOf)
 	if err != nil {
 		t.Fatalf("index sessions: %v", err)
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("sessions differ:\nindex: %+v\nscan:  %+v", got, want)
 	}
-	// ScanLimit bounds the window on both paths: with scanLimit 1 only the
-	// newest record participates (r4, session-less) → no sessions at all.
-	got, err = indexer.SessionSummaries(1, 50, costOf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, err = SessionSummaries(dir, 1, 50, costOf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(got, want) || len(got) != 0 {
-		t.Fatalf("scanLimit=1 sessions: index %+v vs scan %+v", got, want)
-	}
 	// limit caps the kept sessions (most recently active first).
-	got, err = indexer.SessionSummaries(2000, 1, costOf)
+	got, err = indexer.SessionSummaries(1, costOf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 || got[0].SessionID != "sess-b" {
 		t.Fatalf("limit=1 sessions = %+v, want only sess-b", got)
+	}
+}
+
+// TestIndexSessionSummariesExactBeyondScanWindow pins the 12-vs-2 session
+// summary bug: the summary must cover a kept session's WHOLE retained
+// history, because the drill-down table (/api/requests?session=) is
+// un-windowed — a global newest-N aggregate window truncated any session
+// whose older records fell out of it, so a session active today but started
+// days ago reported only its newest requests (and the matching token/cost
+// subset). The index path answers exactly over the whole retained set; the
+// file-scan fallback keeps its bounded newest-sessionScanWindow pass, so the
+// same fixture underreports there by design — that degradation is the
+// documented reason the index is the default read path.
+func TestIndexSessionSummariesExactBeyondScanWindow(t *testing.T) {
+	dir := t.TempDir()
+	// One session's two records at the START of history...
+	writeRecordFile(t, dir, "requests-20260701.log", []Record{
+		{Ts: "2026-07-01T00:00:00Z", RequestID: "o1", SessionID: "s-old", Provider: "zhipu", UpstreamModel: "glm-4.7", Agent: "claude-code", Status: 200, ResponseBody: `{"usage":{"input_tokens":11,"output_tokens":2}}`},
+		{Ts: "2026-07-01T00:01:00Z", RequestID: "o2", SessionID: "s-old", Provider: "zhipu", UpstreamModel: "glm-4.7", Agent: "claude-code", Status: 200, ResponseBody: `{"usage":{"input_tokens":5,"output_tokens":7}}`},
+	})
+	// ...then session-less filler newer than the scan window, pushing both
+	// s-old records out of any newest-2000 pass.
+	filler := make([]Record, sessionScanWindow+10)
+	for i := range filler {
+		filler[i] = Record{
+			Ts:        fmt.Sprintf("2026-07-02T%02d:%02d:%02dZ", i/3600, i/60%60, i%60),
+			RequestID: fmt.Sprintf("filler-%d", i),
+			Status:    200,
+		}
+	}
+	writeRecordFile(t, dir, "requests-20260702.log", filler)
+
+	indexer := newTestIndexer(t, dir)
+	mustReconcile(t, indexer)
+	got, err := indexer.SessionSummaries(50, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].SessionID != "s-old" {
+		t.Fatalf("index sessions = %+v, want exactly s-old", got)
+	}
+	s := got[0]
+	if s.Requests != 2 || s.FirstTs != "2026-07-01T00:00:00Z" || s.LastTs != "2026-07-01T00:01:00Z" {
+		t.Fatalf("s-old summary = %+v, want both records and their span", s)
+	}
+	if s.Usage.Input != 16 || s.Usage.Output != 9 {
+		t.Fatalf("s-old usage = %+v, want in=16 out=9 (both records, not just the newest)", s.Usage)
+	}
+	if len(s.Providers) != 1 || s.Providers[0] != "zhipu" || len(s.Agents) != 1 || s.Agents[0] != "claude-code" {
+		t.Fatalf("s-old identity = providers %v agents %v", s.Providers, s.Agents)
+	}
+	// The scan fallback on the same directory keeps its bounded window: the
+	// fillers crowd s-old out entirely. Pinned as the documented degradation
+	// (make the scan exact and this assertion flips — update it consciously).
+	scan, err := SessionSummaries(dir, 50, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scan) != 0 {
+		t.Fatalf("scan sessions = %+v, want none (s-old is outside the bounded scan window)", scan)
+	}
+}
+
+// TestIndexSessionSummariesIncrementalCache pins the incremental aggregate
+// cache: the folded state (reconcile commits appending records) must equal
+// the from-scratch SQL computation across appends AFTER a session is already
+// cached, truncation re-index (no double counting) and retention deletes
+// (vanished files). SessionSummaries with limit <= 0 is the uncached
+// from-scratch path, so the differential is the public method against itself.
+func TestIndexSessionSummariesIncrementalCache(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "requests-20260701.log")
+	costOf := func(provider, model string, usage Usage) float64 {
+		return float64(usage.Input + usage.Output)
+	}
+	s1a := Record{Ts: "2026-07-01T00:00:00Z", RequestID: "a1", SessionID: "s1", Provider: "p1", UpstreamModel: "m1", Agent: "ag1", Status: 200, ResponseBody: `{"usage":{"input_tokens":10,"output_tokens":2}}`}
+	s1b := Record{Ts: "2026-07-01T00:01:00Z", RequestID: "a2", SessionID: "s1", Provider: "p2", UpstreamModel: "m1", Agent: "ag1", Status: 500}
+	appendRecordLines(t, path, s1a, s1b)
+	indexer := newTestIndexer(t, dir)
+	mustReconcile(t, indexer)
+
+	diff := func(stage string) {
+		t.Helper()
+		fromScratch, err := indexer.SessionSummaries(-1, costOf)
+		if err != nil {
+			t.Fatalf("%s: scratch: %v", stage, err)
+		}
+		cached, err := indexer.SessionSummaries(10, costOf)
+		if err != nil {
+			t.Fatalf("%s: cached: %v", stage, err)
+		}
+		if !reflect.DeepEqual(fromScratch, cached) {
+			t.Fatalf("%s: folded cache diverged from SQL:\ncache:  %+v\nscratch: %+v", stage, cached, fromScratch)
+		}
+	}
+
+	diff("initial commit")
+	// Prime the cache, then append records the fold path must absorb.
+	if _, err := indexer.SessionSummaries(10, costOf); err != nil {
+		t.Fatal(err)
+	}
+	appendRecordLines(t, path,
+		Record{Ts: "2026-07-01T00:02:00Z", RequestID: "a3", SessionID: "s1", Provider: "p3", UpstreamModel: "m2", Agent: "ag2", Status: 200, ResponseBody: `{"usage":{"input_tokens":7,"output_tokens":1}}`},
+		// Attempt legs and session-less rows must fold into nothing.
+		Record{Ts: "2026-07-01T00:02:30Z", RequestID: "a3", SessionID: "s1", Provider: "p1", UpstreamModel: "m1", Status: 502, AttemptOnly: true},
+		Record{Ts: "2026-07-01T00:02:40Z", RequestID: "x1", Provider: "p1", Status: 200},
+	)
+	mustReconcile(t, indexer)
+	diff("append after cache primed")
+
+	// A second, newer file with its own session — ranking and per-session
+	// states must both survive the fold.
+	other := filepath.Join(dir, "requests-20260702.log")
+	appendRecordLines(t, other, Record{Ts: "2026-07-02T00:00:00Z", RequestID: "b1", SessionID: "s2", Provider: "p1", UpstreamModel: "m1", Agent: "ag1", Status: 200, Shadow: true, ResponseBody: `{"usage":{"input_tokens":3,"output_tokens":4}}`})
+	mustReconcile(t, indexer)
+	diff("second file")
+	got, err := indexer.SessionSummaries(10, costOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].SessionID != "s2" || got[1].SessionID != "s1" {
+		t.Fatalf("ranking = %+v, want s2 (newest) then s1", got)
+	}
+	s1 := got[1]
+	if s1.Requests != 3 || s1.Errors != 1 || s1.ShadowRequests != 0 {
+		t.Fatalf("s1 folded counters = %+v (attempt leg must not count)", s1)
+	}
+	if s1.Usage.Input != 17 || s1.Usage.Output != 3 || s1.CostUSD != 20 {
+		t.Fatalf("s1 folded usage/cost = %+v, want in 17 out 3 cost 20", s1)
+	}
+	if len(s1.Providers) != 3 || s1.Providers[0] != "p3" || s1.Providers[1] != "p2" || s1.Providers[2] != "p1" {
+		t.Fatalf("s1 providers = %v, want newest-first [p3 p2 p1]", s1.Providers)
+	}
+	if len(s1.Agents) != 2 || s1.Agents[0] != "ag2" || s1.Agents[1] != "ag1" {
+		t.Fatalf("s1 agents = %v, want [ag2 ag1]", s1.Agents)
+	}
+
+	// Truncation re-index: rewriting the first file smaller drops its rows
+	// and re-reads from zero — the fold must not double-count.
+	short := `{"ts":"2026-07-01T00:00:30Z","request_id":"a0","session_id":"s1","provider":"p1","upstream_model":"m1","agent":"ag1","status":200,"response_body":"{\"usage\":{\"input_tokens\":100,\"output_tokens\":9}}"}
+`
+	if err := os.WriteFile(path, []byte(short), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustReconcile(t, indexer)
+	diff("truncation re-index")
+	got, err = indexer.SessionSummaries(10, costOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]SessionSummary{}
+	for _, s := range got {
+		byID[s.SessionID] = s
+	}
+	if s := byID["s1"]; s.Requests != 1 || s.Usage.Input != 100 || s.FirstTs != "2026-07-01T00:00:30Z" {
+		t.Fatalf("post-truncation s1 = %+v, want only the rewritten row (1 request, in 100)", s)
+	}
+
+	// Retention sweep: the vanished file's sessions drop out, s1 recomputes.
+	if err := os.Remove(other); err != nil {
+		t.Fatal(err)
+	}
+	mustReconcile(t, indexer)
+	diff("retention delete")
+	got, err = indexer.SessionSummaries(10, costOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].SessionID != "s1" {
+		t.Fatalf("post-retention sessions = %+v, want only s1", got)
 	}
 }
 
@@ -771,7 +1094,7 @@ func TestIndexConcurrentReconcileAndQueries(t *testing.T) {
 					t.Errorf("concurrent summaries: %v", err)
 					return
 				}
-				if _, err := indexer.SessionSummaries(2000, 50, nil); err != nil {
+				if _, err := indexer.SessionSummaries(50, nil); err != nil {
 					t.Errorf("concurrent sessions: %v", err)
 					return
 				}
@@ -978,5 +1301,83 @@ func TestScanTailForIDNonPositiveLimitCollectsNothing(t *testing.T) {
 	records, err := scanTailForID(dir, "day.jsonl", 0, "r1", 1)
 	if err != nil || len(records) != 1 {
 		t.Fatalf("limit 1 = %d records err = %v, want exactly 1", len(records), err)
+	}
+}
+
+// TestRowFromLineBlanksBodies pins the index row's body-blanking guard: the
+// usage projection survives (parsed once at index time), but neither body
+// string is retained — a batch holding full multi-MB bodies was the daemon's
+// GB-scale heap spike during large-body catch-ups, and the index never
+// persists bodies anyway (Detail seeks the JSONL file by coordinates).
+func TestRowFromLineBlanksBodies(t *testing.T) {
+	line := []byte(`{"ts":"2026-07-29T12:00:00Z","request_id":"r1","request_body":"` +
+		strings.Repeat("A", 4096) +
+		`","response_body":"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}"}`)
+	row, ok := rowFromLine("requests-20260729.log", line, 0, int64(len(line)))
+	if !ok {
+		t.Fatal("rowFromLine rejected a decodable record")
+	}
+	if row.record.RequestBody != "" || row.record.ResponseBody != "" {
+		t.Errorf("index row retained bodies: request %d bytes, response %d bytes",
+			len(row.record.RequestBody), len(row.record.ResponseBody))
+	}
+	if row.usage.Input != 7 || row.usage.Output != 2 {
+		t.Errorf("usage projection = %+v, want input 7 output 2", row.usage)
+	}
+	if row.record.RequestID != "r1" {
+		t.Errorf("metadata lost: request id = %q", row.record.RequestID)
+	}
+}
+
+// TestIndexerBatchFlushesOnByteCap pins the byte-capped batch flush: with the
+// per-batch line-byte cap set below two records, a catch-up still indexes
+// every row (across multiple smaller transactions) and advances the file
+// cursor to EOF — the cap bounds retention, never correctness.
+func TestIndexerBatchFlushesOnByteCap(t *testing.T) {
+	dir := t.TempDir()
+	records := make([]Record, 4)
+	for i := range records {
+		records[i] = Record{
+			Ts:           time.Date(2026, 7, 29, 12, i, 0, 0, time.UTC).Format(time.RFC3339),
+			RequestID:    fmt.Sprintf("cap-%d", i),
+			Protocol:     "anthropic",
+			Method:       "POST",
+			Path:         "/v1/messages",
+			CalledModel:  "m",
+			Provider:     "p",
+			Status:       200,
+			RequestBody:  strings.Repeat("x", 12<<10),
+			ResponseBody: `{"usage":{"input_tokens":10,"output_tokens":5}}`,
+		}
+	}
+	writeRecordFile(t, dir, "requests-20260729.log", records)
+	indexer := newTestIndexer(t, dir)
+	// Each line is >12KB; a 13KB cap flushes after every single record.
+	indexer.batchMaxBytes = 13000
+	mustReconcile(t, indexer)
+
+	summaries, _, err := indexer.SummariesWithFacets(Filter{Limit: 100, UsageOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != len(records) {
+		t.Fatalf("indexed summaries = %d, want %d", len(summaries), len(records))
+	}
+	for _, summary := range summaries {
+		if summary.Input != 10 || summary.Output != 5 {
+			t.Errorf("summary %s usage = %d/%d, want 10/5", summary.RequestID, summary.Input, summary.Output)
+		}
+	}
+	var cursor int64
+	if err := indexer.db.QueryRow(`SELECT size_indexed FROM files WHERE path = ?`,
+		"requests-20260729.log").Scan(&cursor); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "requests-20260729.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor != info.Size() {
+		t.Errorf("indexed cursor = %d, want full file size %d", cursor, info.Size())
 	}
 }

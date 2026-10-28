@@ -28,13 +28,15 @@ import (
 //     a hand-edited or half-written file, not a mode switch.
 
 // isMetadataOnly reports whether every account in p lacks secret values — the
-// on-disk shape saveKeychain writes. An empty pool is just an empty pool.
+// on-disk shape saveKeychain writes. An inline OAuth blob counts as a secret
+// value (keychain mode strips it into its own entry); an empty pool is just an
+// empty pool.
 func isMetadataOnly(p Pool) bool {
 	if len(p.Accounts) == 0 {
 		return false
 	}
 	for _, a := range p.Accounts {
-		if a.APIKey != "" || a.AccessKey != "" || a.SecretKey != "" {
+		if a.APIKey != "" || a.AccessKey != "" || a.SecretKey != "" || len(a.OAuth) > 0 {
 			return false
 		}
 	}
@@ -47,6 +49,25 @@ func (s Store) restoreFromKeychain(name, providerID string, p Pool) (Snapshot, e
 	restored := make([]Account, 0, len(p.Accounts))
 	var relogin []Account
 	for _, a := range p.Accounts {
+		if len(a.OAuth) > 0 {
+			// Already carries its blob inline (oversize fallback or hand
+			// edit) — nothing to hydrate.
+			restored = append(restored, a)
+			continue
+		}
+		if IsOAuthAccount(a) {
+			// OAuth account without its inline blob: the credential lives in
+			// one keychain entry. No canonical-id recheck — OAuth ids are
+			// anchored, not credential-derived.
+			blob, err := s.keychainGetOAuthBlob(name, a.ID)
+			if err != nil || len(blob) == 0 {
+				relogin = append(relogin, a)
+				continue
+			}
+			a.OAuth = blob
+			restored = append(restored, a)
+			continue
+		}
 		apiKey, err := credstore.KeychainGet(keychainKey(name, a.ID, keychainFieldAPIKey))
 		if err != nil || apiKey == "" {
 			// Missing entry OR unreachable backend: the user chose file mode,

@@ -506,7 +506,9 @@ daemon/supervisor 的 signal 与 pid/probe 编排。child process detach 属性�
 `cli/stats`（stats/usage）、`cli/audit`（audit）、`cli/status`（serve
 status/schedule/routes/cache）、`cli/admin`（pin/unpin/unfreeze/freeze）、`cli/guard`（guard blocks/unblock）、`cli/diag`
 （wire/replay/shadow）、`cli/config`（config init|print|check）、
-`cli/account`（logout）、`cli/mcp`（mcp list/test）、`cli/serve`（daemon/stop/reload 编排）。
+`cli/account`（logout）、`cli/mcp`（mcp list/test）、`cli/mcpserver`
+（`mcp-server`：随二进制内置的 stdio MCP 工具服务器，供网关 `transport: stdio`
+子进程引用）、`cli/serve`（daemon/stop/reload 编排）。
 `cli/clitest` 是纯测试支撑包：拥有子进程 harness（TestHelperProcess 分发）与共享
 fixture，只被各命令包的测试 import。
 
@@ -570,7 +572,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `appapi → adjudicate, fusion, observe/requestlog, observe/stats, presets, pricing`
   （adjudicate 仅为其 BlockEntry/Result 快照类型提供 DTO 别名，见 appapi/types.go）；
 - `cli → cli/account, cli/admin, cli/audit, cli/config, cli/diag, cli/doctor,
-  cli/framework, cli/guard, cli/login, cli/mcp, cli/models, cli/presets, cli/stats, cli/status, config, display, takeover,
+  cli/framework, cli/guard, cli/login, cli/mcp, cli/mcpserver, cli/models, cli/presets, cli/stats, cli/status, config, display, takeover,
   observe/logx`（registry + 进程级 shell：调度循环、help、takeover/restore）；
 - `catalog → upstreamproxy`；
 - `cli/account → accounts, cli/framework, cli/serve, config, display, login, providerbuild`（`logout`）；
@@ -590,6 +592,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/serve → config, observe/logx`；
 - `cli/login → accounts, cli/framework, cli/serve, config, display, login, provider`；
 - `cli/mcp → accounts, cli/framework, config, display, mcp, provider, providerbuild, upstreamproxy`（`mcp list`/`mcp test`）；
+- `cli/mcpserver → mcp`（`mcp-server` 内置 stdio MCP 工具服务器：deepseek-search，JSON-RPC 帧解析与响应构装复用 mcp 叶子包）；
 - `cli/models → cli/serve, cli/framework, accounts, catalog, config,
   configedit, display, probe, provider, providerbuild, routing, runtime/wirecap, upstreamproxy`；
 - `login → accounts, config, display, probe, provider, observe/logx, upstreamproxy`（probe/provider：无 usage_url 且 /models 免鉴权的 provider 登录时以最小真实请求探测 key 有效性）；

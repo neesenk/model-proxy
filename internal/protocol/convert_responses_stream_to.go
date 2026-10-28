@@ -448,8 +448,18 @@ func (t *anthropicSSEToResponsesSSE) finish() {
 	// anthropic→chat prompt_tokens).
 	input := t.inTok + t.cacheRead + t.cacheCreate
 	usage := map[string]any{"input_tokens": input, "output_tokens": t.outTok, "total_tokens": input + t.outTok}
+	// Both cache shares ride inside the inclusive input_tokens; the details
+	// spelling surfaces them so the usage scanners can split the buckets back
+	// out (cache_write_tokens is the converter emission convention).
+	details := map[string]any{}
 	if t.cacheRead > 0 {
-		usage["input_tokens_details"] = map[string]any{"cached_tokens": t.cacheRead}
+		details["cached_tokens"] = t.cacheRead
+	}
+	if t.cacheCreate > 0 {
+		details["cache_write_tokens"] = t.cacheCreate
+	}
+	if len(details) > 0 {
+		usage["input_tokens_details"] = details
 	}
 	resp := map[string]any{
 		"id": t.id, "object": "response", "status": status, "model": t.model, "output": doneItemsOutput(t.doneItems),
@@ -560,6 +570,7 @@ type openaiSSEToResponsesSSE struct {
 	inTok           int
 	outTok          int
 	cachedTok       int    // prompt_tokens_details.cached_tokens from the usage chunk
+	createTok       int    // cache write: prompt_tokens_details.cache_write_tokens or the direct spelling
 	rsTok           int    // completion_tokens_details.reasoning_tokens from the usage chunk
 	finishRsn       string // raw chat finish_reason
 	hasToolUse      bool
@@ -774,6 +785,10 @@ func (t *openaiSSEToResponsesSSE) handle(event string, data map[string]any) {
 		t.inTok = intOf(u["prompt_tokens"])
 		t.outTok = intOf(u["completion_tokens"])
 		t.cachedTok = intOf(asMap(u["prompt_tokens_details"])["cached_tokens"])
+		t.createTok = intOf(asMap(u["prompt_tokens_details"])["cache_write_tokens"])
+		if t.createTok == 0 {
+			t.createTok = intOf(u["cache_creation_input_tokens"])
+		}
 		t.rsTok = intOf(asMap(u["completion_tokens_details"])["reasoning_tokens"])
 	}
 	// OpenAI error chunk (data: {"error":{...}} — or the string form some
@@ -1105,8 +1120,15 @@ func (t *openaiSSEToResponsesSSE) finish() {
 	t.closeItems()
 	status, incReason := openAIFinishToResponsesDetail(t.finishRsn)
 	usage := map[string]any{"input_tokens": t.inTok, "output_tokens": t.outTok, "total_tokens": t.inTok + t.outTok}
+	details := map[string]any{}
 	if t.cachedTok > 0 {
-		usage["input_tokens_details"] = map[string]any{"cached_tokens": t.cachedTok}
+		details["cached_tokens"] = t.cachedTok
+	}
+	if t.createTok > 0 {
+		details["cache_write_tokens"] = t.createTok
+	}
+	if len(details) > 0 {
+		usage["input_tokens_details"] = details
 	}
 	if t.rsTok > 0 {
 		usage["output_tokens_details"] = map[string]any{"reasoning_tokens": t.rsTok}

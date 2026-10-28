@@ -537,12 +537,19 @@ func TestBuildProvidersSingleEntryPluralPoolBindsKey(t *testing.T) {
 		},
 	}
 	p := newTestProxy(t, cfg)
-	// Plain name is the runnable provider; no virtuals.
-	if _, ok := p.providers["zhipu"]; !ok {
-		t.Fatal("1-entry plural pool must keep plain name zhipu")
+	// The pool's single account unrolls to its virtual key and the parent name
+	// is not runnable — the account id is the stable identity, so gaining or
+	// losing sibling accounts never rewrites this account's runtime key.
+	id := accounts.AccountID("zhipu", accounts.Credentials{APIKey: "ONLY"})
+	vid := "zhipu#" + id
+	if _, ok := p.providers[vid]; !ok {
+		t.Fatalf("1-entry plural pool must bind its account under the virtual key %s", vid)
 	}
-	if len(p.poolIndex) != 0 || len(p.parentOf) != 0 {
-		t.Fatalf("1-entry pool should not populate poolIndex/parentOf, got %v / %v", p.poolIndex, p.parentOf)
+	if _, ok := p.providers["zhipu"]; ok {
+		t.Fatal("parent zhipu must not be a runnable key when pooled")
+	}
+	if vids := p.poolIndex["zhipu"]; len(vids) != 1 || vids[0] != vid {
+		t.Fatalf("poolIndex[zhipu] = %v, want [%s]", vids, vid)
 	}
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
@@ -721,8 +728,12 @@ func TestBuildProviders_StaticProviderUsesPluralCredentialWithoutLegacyFile(t *t
 	upstream := newCredentialBoundaryUpstream(t)
 	cfg := credentialBoundaryConfig(name, "static", upstream.server.URL)
 	p := newTestProxy(t, cfg)
-	if _, ok := p.providers[name]; !ok {
-		t.Fatal("single plural static account must bind to the plain provider name")
+	vid := name + "#" + accounts.AccountID("static", accounts.Credentials{APIKey: "STATIC-POOL"})
+	if _, ok := p.providers[vid]; !ok {
+		t.Fatalf("single plural static account must bind to its virtual key %s", vid)
+	}
+	if _, ok := p.providers[name]; ok {
+		t.Fatal("parent name must not be runnable for a pooled static provider")
 	}
 	proxyServer := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer proxyServer.Close()
@@ -806,7 +817,12 @@ func TestBuildProviders_FailedProviderConstructionIsNotRouteEligible(t *testing.
 	assertCredentialBoundaryUnavailable(t, p, upstream, name)
 }
 
-func TestBuildProviders_OAuthProviderIgnoresAccountPoolFiles(t *testing.T) {
+// TestBuildProviders_OAuthPoolWithApiKeyEntriesFailsClosed pins the pool
+// authority contract for OAuth providers: a plural pool under an aqp/codex
+// provider must be entirely OAuth-kind entries. A stray API-key-shaped pool
+// (operator mistake) is a corrupt authority — the provider is disabled rather
+// than building instances bound to meaningless slots.
+func TestBuildProviders_OAuthPoolWithApiKeyEntriesFailsClosed(t *testing.T) {
 	setPoolHome(t, t.TempDir())
 	const name = "codex-work"
 	writePoolFile(t, name, "codex", "UNRELATED-API-KEY")
@@ -817,8 +833,8 @@ func TestBuildProviders_OAuthProviderIgnoresAccountPoolFiles(t *testing.T) {
 		},
 	}
 	p := newTestProxy(t, cfg)
-	if _, ok := p.providers[name]; !ok {
-		t.Fatal("OAuth provider must ignore unrelated API-key pool files")
+	if len(p.providers) != 0 {
+		t.Fatalf("a non-oauth pool under an oauth provider must disable it, got %v", p.providers)
 	}
 }
 

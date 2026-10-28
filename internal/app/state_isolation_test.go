@@ -2,6 +2,8 @@ package app
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,6 +13,7 @@ import (
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/upstreamproxy"
 )
 
 // TestMain redirects HOME to a throwaway dir for the whole package so no test
@@ -50,7 +53,51 @@ func newTestProxyAt(t testing.TB, cfg *configdomain.Config, statePath string) *P
 	// set p.catalog directly.
 	p.catalogLoader = func(string, bool) (*catalog.Catalog, error) { return nil, nil }
 	t.Cleanup(p.Close)
+	// NewProxyWithStatePath publishes cfg.Proxy into the process-global
+	// automatic chain (upstreamproxy.SetDefaultProxy — right for the
+	// one-proxy-per-process production lifecycle, but a test proxy whose
+	// cfg.Proxy names its own httptest server must not leak it past the
+	// test: the server closes at cleanup while the global keeps pointing at
+	// the dead port, and every later AutoTransport fetch — pricing's catalog
+	// refresh included, which an EXPLICIT proxy captures even on loopback —
+	// dies there. See TestNewTestProxyResetsGlobalProxyAfterTest.
+	t.Cleanup(func() { upstreamproxy.SetDefaultProxy("") })
 	return p
+}
+
+// TestNewTestProxyResetsGlobalProxyAfterTest pins the isolation contract
+// above. CI flake 2026-10-24 (race+shuffle seed 1792864658660205949):
+// TestClientForGlobalProxyAndOffOverride leaked its (now closed) httptest
+// proxy URL into the process-global chain, and the immediately following
+// TestAPIAnalyticsUsesCatalogThenDetachedOverride — a literal &Proxy{}, so no
+// helper constructor to re-publish "" — saw its pricing catalog fetch die on
+// the dead proxy and rendered analytics unpriced. Default order never showed
+// it because the tests in between each publish an empty cfg.Proxy. The
+// subtest's cleanups (including the reset) run before the parent's
+// assertion, emulating the poisoned-test → next-test pair.
+func TestNewTestProxyResetsGlobalProxyAfterTest(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer origin.Close()
+
+	t.Run("global proxy test", func(t *testing.T) {
+		cfg := proxyTestConfig("http://127.0.0.1:1")
+		cfg.Proxy = "http://127.0.0.1:1" // a proxy port that is already dead
+		_ = newTestProxy(t, cfg)
+	})
+
+	// The next test: any AutoTransport loopback fetch (pricing's FetchHTTP
+	// included) must not be captured by the leaked explicit proxy.
+	client := &http.Client{Transport: upstreamproxy.AutoTransport(), Timeout: 5 * time.Second}
+	resp, err := client.Get(origin.URL)
+	if err != nil {
+		t.Fatalf("AutoTransport loopback fetch failed (leaked global proxy?): %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("origin status = %d, want 200", resp.StatusCode)
+	}
 }
 
 // TestNewProxy_DefaultStatePath is the deliberate exception to the test-helper

@@ -60,9 +60,12 @@ func PrintProviderUsage(cfg *configdomain.Config, provName string) {
 	if !ok {
 		return
 	}
-	pool, _ := accountStore().Load(provName, prov.Provider)
-	if len(pool.Accounts) >= 2 {
-		for ai, a := range pool.Accounts {
+	// A plural pool keys usage by account (virtual runtime keys) regardless of
+	// size; a legacy singular file / not-logged-in provider keeps the plain
+	// name. The snapshot source — not the account count — decides.
+	snapshot, _ := accountStore().LoadSnapshot(provName, prov.Provider)
+	if snapshot.Source == accounts.SourcePlural && len(snapshot.Pool.Accounts) > 0 {
+		for ai, a := range snapshot.Pool.Accounts {
 			if ai > 0 {
 				fmt.Println(display.Dim(UsageDivider))
 			}
@@ -76,7 +79,7 @@ func PrintProviderUsage(cfg *configdomain.Config, provName string) {
 		}
 		return
 	}
-	// Single-account / non-pooled / aqp / codex: build one provider + call Usage.
+	// Legacy singular / non-pooled / aqp / codex: build one provider + call Usage.
 	provMap := providerbuild.BuildProviders(cfg, accountStore(), providerbuild.BuildOpts()).Providers
 	p := provMap[provName]
 	if p == nil {

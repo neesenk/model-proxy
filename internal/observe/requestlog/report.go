@@ -27,6 +27,16 @@ type GuardMark struct {
 	Source string `json:"source,omitempty"`
 }
 
+// FailedHop is one folded failover leg's metadata: which pool account was
+// tried, how it failed (status) and how long it took. Bodies stay out (the
+// failure evidence lives on the leg's own record, reachable via Detail).
+type FailedHop struct {
+	Provider  string `json:"provider"`
+	Status    int    `json:"status"`
+	Attempt   int    `json:"attempt"`
+	LatencyMs int64  `json:"latency_ms"`
+}
+
 // Summary is the metadata-only list API projection.
 type Summary struct {
 	Ts        string `json:"ts"`
@@ -59,6 +69,18 @@ type Summary struct {
 	CacheRead     uint64 `json:"cache_read,omitempty"`
 	CacheCreation uint64 `json:"cache_creation,omitempty"`
 	Shadow        bool   `json:"shadow,omitempty"`
+	// AttemptOnly marks an uncommitted failover leg (429/5xx/auth/transport
+	// error with a following hop): same request id as the committed row,
+	// request body intentionally not logged (the response body carries the
+	// failure evidence), excluded from usage and session aggregates.
+	AttemptOnly bool `json:"attempt_only,omitempty"`
+	// FailedHops lists the failover legs folded into this row by the summary
+	// list queries (index SQL and scan engine, identical semantics): the
+	// hops that preceded the committed answer, in attempt order. Empty on
+	// rows without failed hops and on unanswered legs themselves — except
+	// the surviving (newest) leg of an unanswered request, which carries its
+	// earlier hops. Metadata only: no error bodies (list-safe).
+	FailedHops []FailedHop `json:"failed_hops,omitempty"`
 	// TurnKey is the conversational-turn fingerprint persisted with the record.
 	// Empty on records written before the field existed or when no user text
 	// could be extracted.
@@ -80,14 +102,15 @@ func Summarize(record Record) Summary {
 		TTFTMs: record.TTFTMs, RequestSize: record.RequestSize, ResponseSize: record.ResponseSize,
 		Input: record.ParsedUsage.Input, Output: record.ParsedUsage.Output,
 		CacheRead: record.ParsedUsage.CacheRead, CacheCreation: record.ParsedUsage.CacheCreation,
-		Shadow: record.Shadow, TurnKey: record.TurnKey,
+		Shadow: record.Shadow, AttemptOnly: record.AttemptOnly, TurnKey: record.TurnKey,
+		FailedHops: record.FailedHops,
 	}
 }
 
 // QuerySummaries returns list-safe metadata. Bodies and response headers are
 // discarded before top-K retention, so memory is bounded by metadata size.
 func QuerySummaries(dir string, filter Filter) ([]Summary, error) {
-	records, err := query(dir, filePrefix, filter, true, nil)
+	records, err := query(dir, filePrefix, filter, true, true, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +124,7 @@ func QuerySummaries(dir string, filter Filter) ([]Summary, error) {
 // QuerySummariesIn is QuerySummaries for a non-default stream (only
 // <prefix>*.log files are scanned — the split MCP stream's read path).
 func QuerySummariesIn(dir, prefix string, filter Filter) ([]Summary, error) {
-	records, err := query(dir, prefix, filter, true, nil)
+	records, err := query(dir, prefix, filter, true, true, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +142,7 @@ func QuerySummariesIn(dir, prefix string, filter Filter) ([]Summary, error) {
 // applied, so the dropdowns never narrow themselves into a dead end.
 func QuerySummariesWithFacets(dir string, filter Filter) ([]Summary, Facets, error) {
 	collector := newFacetCollector(filter.Kind)
-	records, err := query(dir, filePrefix, filter, true, collector)
+	records, err := query(dir, filePrefix, filter, true, true, collector)
 	if err != nil {
 		return nil, Facets{}, err
 	}
@@ -136,7 +159,7 @@ func QuerySummariesWithFacets(dir string, filter Filter) ([]Summary, Facets, err
 // stream's files).
 func QuerySummariesWithFacetsIn(dir, prefix string, filter Filter) ([]Summary, Facets, error) {
 	collector := newFacetCollector(filter.Kind)
-	records, err := query(dir, prefix, filter, true, collector)
+	records, err := query(dir, prefix, filter, true, true, collector)
 	if err != nil {
 		return nil, Facets{}, err
 	}
@@ -164,7 +187,7 @@ type ShadowReportEntry struct {
 // ShadowReport pairs primary records with shadow-<request-id> records and
 // aggregates them by route and provider pair.
 func ShadowReport(dir string, filter Filter) ([]ShadowReportEntry, error) {
-	records, err := query(dir, filePrefix, filter, true, nil)
+	records, err := query(dir, filePrefix, filter, true, false, nil)
 	if err != nil {
 		return nil, err
 	}

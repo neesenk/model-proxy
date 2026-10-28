@@ -151,6 +151,34 @@ func (m *Manager) ReplaceGeneration(generation uint64, liveQuotaKeys map[string]
 	m.quality.Store(&empty)
 }
 
+// RenameQuotaKeys carries quota snapshots across provider key renames (legacy
+// bare-name → pooled virtual key) at a RELOAD boundary, complementing the
+// startup file rename (renameQuotaStateProviderKeys in the composition root):
+// without it, the swap's live-key pruning drops the bare entry and the account
+// runs at the unmeasured tier until the next successful poll. Same winner
+// semantics as the startup file rename — when `to` already holds an entry it
+// is the fresher observation for the same account and wins; `from` is dropped
+// either way (ReplaceGeneration prunes it against the live key set
+// regardless).
+func (m *Manager) RenameQuotaKeys(renames map[string]string) {
+	if len(renames) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureLocked()
+	for from, to := range renames {
+		entry, ok := m.quotas[from]
+		if !ok {
+			continue
+		}
+		delete(m.quotas, from)
+		if _, exists := m.quotas[to]; !exists {
+			m.quotas[to] = entry
+		}
+	}
+}
+
 // GenerationArg keeps compatibility with callers that omit a generation while
 // letting request-scoped paths bind runtime mutations to their captured reload
 // generation.

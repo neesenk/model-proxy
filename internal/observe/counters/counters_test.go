@@ -258,14 +258,16 @@ func TestUsageScannerAnthropicCacheWireShapes(t *testing.T) {
 // TestUsageScannerChatCachedTokensWireShapes pins cache accounting on real
 // recorded chat-protocol streams: cached prompt tokens ride in
 // usage.prompt_tokens_details.cached_tokens (deepseek also spells them
-// prompt_cache_hit_tokens).
+// prompt_cache_hit_tokens). Input keeps the anthropic-normalized ledger —
+// prompt_tokens INCLUDES the cached share, so the share is subtracted and
+// never lands in both Input and CacheRead.
 func TestUsageScannerChatCachedTokensWireShapes(t *testing.T) {
 	cases := []struct {
 		fixture string
 		want    TokenUsage
 	}{
-		{"chat_deepseek_tool.sse", TokenUsage{Input: 295, Output: 70, CacheRead: 256, Requests: 1}},
-		{"chat_shopee.sse", TokenUsage{Input: 11, Output: 3, CacheRead: 4, Requests: 1}},
+		{"chat_deepseek_tool.sse", TokenUsage{Input: 39, Output: 70, CacheRead: 256, Requests: 1}},
+		{"chat_shopee.sse", TokenUsage{Input: 7, Output: 3, CacheRead: 4, Requests: 1}},
 		// prompt_tokens_details present with cached_tokens 0 → no cache credit.
 		{"chat_zhipu.sse", TokenUsage{Input: 12, Output: 389, Requests: 1}},
 	}
@@ -277,7 +279,8 @@ func TestUsageScannerChatCachedTokensWireShapes(t *testing.T) {
 }
 
 // prompt_cache_hit_tokens without prompt_tokens_details still counts (the
-// deepseek spelling, details preferred when both are present).
+// deepseek spelling, details preferred when both are present); its share is
+// likewise deducted from Input.
 func TestUsageScannerChatPromptCacheHitFallback(t *testing.T) {
 	stream := "data: {\"choices\":[]}\n\n" +
 		"data: {\"usage\":{\"prompt_tokens\":300,\"completion_tokens\":10,\"prompt_cache_hit_tokens\":128}}\n\n"
@@ -287,26 +290,54 @@ func TestUsageScannerChatPromptCacheHitFallback(t *testing.T) {
 	if _, err := io.Copy(io.Discard, s); err != nil {
 		t.Fatal(err)
 	}
-	if got := tc.Snapshot()[k]; got.CacheRead != 128 || got.Input != 300 {
-		t.Errorf("committed = %+v, want cache_read=128 input=300", got)
+	if got := tc.Snapshot()[k]; got.CacheRead != 128 || got.Input != 172 {
+		t.Errorf("committed = %+v, want cache_read=128 input=172 (300−128)", got)
 	}
 }
 
 // TestUsageScannerResponsesWireShapes pins usage accounting for /v1/responses
 // client streams: one cumulative snapshot in response.completed (usage null on
-// in_progress frames), cached input in input_tokens_details.cached_tokens.
+// in_progress frames), cached input in input_tokens_details.cached_tokens —
+// inclusive of the input_tokens total, so the share is deducted from Input.
 func TestUsageScannerResponsesWireShapes(t *testing.T) {
 	cases := []struct {
 		fixture string
 		want    TokenUsage
 	}{
-		{"responses_shopee.sse", TokenUsage{Input: 11, Output: 3, CacheRead: 4, Requests: 1}},
+		{"responses_shopee.sse", TokenUsage{Input: 7, Output: 3, CacheRead: 4, Requests: 1}},
 		{"responses_aqp.sse", TokenUsage{Input: 19, Output: 144, Requests: 1}},
 	}
 	for _, c := range cases {
 		if got := scanWireFixture(t, c.fixture); got != c.want {
 			t.Errorf("%s: committed = %+v, want %+v", c.fixture, got, c.want)
 		}
+	}
+}
+
+// TestUsageScannerInclusiveInputSplitIsRegressionOfHitRateBug: the recorded
+// aqp/kimi-k3 incident shape — one openai usage chunk whose prompt is almost
+// entirely cached. Before the normalization the cached share landed in BOTH
+// Input and CacheRead, so the analytics hit rate (cache_read over the full
+// prompt workload) read ~50% while the request log's normalized buckets read
+// ~99.8%; cost double-billed the share at the full prompt rate too. Repeated
+// cumulative chunks must merge to the last snapshot's uncached share.
+func TestUsageScannerInclusiveInputSplitIsRegressionOfHitRateBug(t *testing.T) {
+	k := TokenKey{Provider: "aqp", Model: "kimi-k3"}
+	chat := "data: {\"usage\":{\"completion_tokens\":527,\"prompt_tokens\":335426,\"total_tokens\":335953,\"prompt_tokens_details\":{\"cached_tokens\":334848}}}\n\n"
+	u := scanBody(k, chat, 64)
+	if u != (TokenUsage{Input: 578, Output: 527, CacheRead: 334848, Requests: 1}) {
+		t.Errorf("chat: committed = %+v, want input=578 (335426−334848) output=527 cache_read=334848", u)
+	}
+	resp := "data: {\"response\":{\"usage\":{\"input_tokens\":335426,\"output_tokens\":527,\"input_tokens_details\":{\"cached_tokens\":334848}}}}\n\n"
+	u = scanBody(k, resp, 64)
+	if u != (TokenUsage{Input: 578, Output: 527, CacheRead: 334848, Requests: 1}) {
+		t.Errorf("responses: committed = %+v, want input=578 output=527 cache_read=334848", u)
+	}
+	repeat := "data: {\"usage\":{\"prompt_tokens\":1500,\"completion_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":600}}}\n\n" +
+		"data: {\"usage\":{\"prompt_tokens\":1500,\"completion_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":600}}}\n\n"
+	u = scanBody(k, repeat, 64)
+	if u != (TokenUsage{Input: 900, Output: 10, CacheRead: 600, Requests: 1}) {
+		t.Errorf("repeated cumulative: committed = %+v, want input=900 output=10 cache_read=600", u)
 	}
 }
 

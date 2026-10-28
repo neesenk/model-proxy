@@ -168,30 +168,46 @@ reload 结果在 daemon 的 **log 文件**里（`[reload] config reloaded succes
 开发机上 `model-proxy serve` 常同时是 coding agent 自己的 LLM 网关。把 kill 和
 start 拆到两次工具调用/两个终端步饗，中间的下线窗口会让依赖它的 agent 下一次
 模型调用直接 `Connection error`——连生成下一条重启命令都做不到，形成自锁
-（陷阱条目见 `docs/engineering/pitfalls.md` #24）。推荐用封装好的脚本（端口默认从
-config.yaml 的 `listen:` 解析，`--build` 先构建再切换）：
+（陷阱条目见 `docs/engineering/pitfalls.md` #24b）。推荐用封装好的脚本（端口默认从
+config.yaml 的 `listen:` 解析，`--build` 先构建再切换，拉起的是 **daemon**
+supervisor+worker，新二进制起不来时自动回滚到 `model-proxy.old` 再拉起并 exit 1）：
 
 ```sh
-scripts/restart_serve.sh --build          # 等价于下面两步：构建 + 原子切换
+scripts/restart_serve.sh --build          # 构建 + 快照(.old) + 切换 + daemon 重启 + 失败回滚
 ```
+
+脚本的完整顺序（一次调用内原子完成）：`go build -o model-proxy.new` →
+`cp model-proxy model-proxy.old`（回滚快照，仅换入新二进制时创建）→ `mv .new
+model-proxy`（unix inode rename，不动运行中的进程）→ `serve stop`（daemon
+supervisor 或占 pidfile 的前台 serve，优雅→SIGKILL；脚本自管的 `--log-file`
+pidfile 与 config `log_file:`/`$TMPDIR` 派生两处都探测）→ 端口残留 SIGINT→
+SIGKILL 兜底 → 等端口释放 → `serve daemon --log-file serve.log` → 等端口监听
+（含 1s settle 复查，防"绑定即崩"的假成功）。失败回滚：先 `serve stop` 掉起不来的
+新 daemon（否则 pidfile 存活会让回滚的 daemonize 拒绝启动）→ `mv model-proxy.old
+model-proxy` → 重新 daemon；回滚成功 **exit 1**（含义是"未部署"，网关在旧二进制上
+服务），双败则明确报 DOWN。因此 config 建议显式设置 `log_file:`（本仓为
+`~/model-proxy/serve.log`）：脚本 daemon、裸 `serve stop`/`serve status`、
+login/logout 的 SIGHUP 全部经 `<log>.pid` 找到同一个 daemon。
 
 手动等价做法仍是**单条命令**完成切换：
 
 ```sh
 # 1) 先构建（不动运行中的进程）：
-go build -o model-proxy.new . && mv model-proxy.new model-proxy
-# 2) 原子切换（停+等+启一体，下线窗口 <1s）：
-PIDS=$(lsof -tiTCP:<PORT> -sTCP:LISTEN); [ -n "$PIDS" ] && kill -INT $PIDS; \
+go build -o model-proxy.new . && cp model-proxy model-proxy.old && mv model-proxy.new model-proxy
+# 2) 原子切换（停+启一体，下线窗口 <1s；daemon 模式）：
+./model-proxy serve stop; \
+  PIDS=$(lsof -tiTCP:<PORT> -sTCP:LISTEN); [ -n "$PIDS" ] && kill -INT $PIDS; \
   while lsof -tiTCP:<PORT> -sTCP:LISTEN >/dev/null 2>&1; do sleep 0.1; done; \
-  nohup ./model-proxy serve >> serve.log 2>&1 & \
+  ./model-proxy serve daemon --log-file serve.log && \
   for i in $(seq 1 60); do lsof -tiTCP:<PORT> -sTCP:LISTEN >/dev/null 2>&1 && break; sleep 0.1; done
+# 3) 2) 失败（端口没回来）时回滚：
+./model-proxy serve stop; mv model-proxy.old model-proxy && ./model-proxy serve daemon --log-file serve.log
 ```
 
-SIGINT 触发上述优雅退出（drain + final flush）；端口按 config.yaml 的 `listen:` 替换
-（本仓开发机为 15722）。注意脚本在按端口 SIGINT 之前会先停 pidfile 属主（daemon 的
-supervisor 或占 pidfile 的前台 serve，pidfile 由 config `log_file:` 派生、缺省
-`$TMPDIR/model-proxy.pid`）——只杀端口监听者对 daemon 模式只杀掉 worker，supervisor
-约 1 秒后就会重拉它抢回端口（见 `docs/engineering/pitfalls.md` #24b）。
+`serve stop` 发 SIGTERM 触发优雅退出（supervisor 转发 worker：drain + final
+flush）；端口按 config.yaml 的 `listen:` 替换（本仓开发机为 15722）。只杀端口
+监听者对 daemon 模式只杀掉 worker，supervisor 约 1 秒后就会重拉它抢回端口（见
+`docs/engineering/pitfalls.md` #24b）——必须先停 pidfile 属主。
 
 ### 性能剖析（可选）
 
@@ -199,6 +215,11 @@ supervisor 或占 pidfile 的前台 serve，pidfile 由 config `log_file:` 派�
   `http://127.0.0.1:<LISTEN>/debug/pprof/`(与 `/debug/schedule` 同一浏览器来源
   防护)。默认关闭:heap profile 可能携带请求数据采样,仅调试时开启,配合
   `go tool pprof` 使用。
+- serve 进程在 `GOMEMLIMIT` 未设置时默认套 1GiB 软 GC 上限
+  (`internal/cli/serve/memlimit.go`,启动日志可见);操作者显式设置的
+  `GOMEMLIMIT`(含经 supervisor 继承的)永远优先。常驻堆仅数十 MB,正常流量
+  完全碰不到上限;它是历史堆失控(request-log indexer 整批持有 body、analytics
+  逐行时区加载把 RSS 顶到数 GB)的保险丝——逼近时 GC 更勤快而非进程 OOM。
 
 ---
 
@@ -951,6 +972,37 @@ notifications/initialized + tools/list，JSON 与 SSE 分帧响应都支持）�
 
 ---
 
+## 13c. `mcp-server` — 内置 stdio MCP 工具服务器（网关子进程，非交互）
+
+```
+mcp-server <name>
+```
+
+随二进制内置的 MCP 工具服务器，按 stdio 传输契约运行（stdin/stdout 上的换行分隔
+JSON-RPC 2.0）。设计用途是网关的 `transport: stdio` 子进程：config 以
+`command: [<model-proxy 路径>, mcp-server, <name>]` 引用**同一份已部署二进制**，
+凭据经 `env: {…: "${account.api_key}"}` 模板注入——不引入 npx/node 外部运行时，
+普通二进制重建即随车更新。实现：`internal/cli/mcpserver`；它直接持有注入的
+stdin/stdout（不经 `ProcessCommand` 适配器，网关交互契约测试对这类流式绑定持显式
+白名单）。
+
+### 服务器清单
+
+| name | 工具 | 上游 | env |
+|---|---|---|---|
+| `deepseek-search` | `web_search`（query/count/need_content）、`url_fetch`（url） | DeepSeek `/v1/tools/search`、`/v1/tools/fetch`（Bearer；按成功次数计费，账号级各 5 QPS） | `DEEPSEEK_API_KEY`（必需，缺失时调用 fail-closed 报工具错误）、`DEEPSEEK_BASE_URL`（默认 `https://api.deepseek.com`，不带 `/v1`） |
+
+工具语义：参数契约违规（缺 query、count 越界、非法 url 等）在**任何出站前**答
+JSON-RPC `-32602`（不计费的失败）；上游失败（402/429/5xx、网络错误）答
+`isError: true` 的正常 tools/call 结果——failover 语义与每 server 子进程上限归
+`docs/architecture/mcp.md`。`initialize` 回显客户端 protocolVersion；
+ping/tools/list 本地应答。
+
+手动运行仅用于排障：自行 export 凭据 env 后 `echo '<initialize JSON>' |
+model-proxy mcp-server deepseek-search`。未知 `<name>` exit 1；stdin EOF 正常退出 0。
+
+---
+
 ## 14. `pin` / `unpin` — 手动钉住路由 provider（热切换，需 daemon + web.enabled）
 
 ```
@@ -1035,7 +1087,7 @@ freeze <provider> [--config PATH]
 
 逻辑（`internal/cli/admin/unfreeze.go` 的 `CmdUnfreeze`）：经 `POST /api/health/reset`（`internal/web` transport 的 `CommandAPI`）清 daemon 内存里的**冻结运行态**——熔断开路冷却、429 限频冷却（含 quota/daily 类的长冷却）、模型级锁定（model lockout）——目标 provider 下次请求立即重试，不再等冷却到期。不带参数清全部 provider；池化父名清其全部虚拟账号（同 pin 的匹配语义）。**不清** sticky、pin、已学习的剥参 blocklist（请求体知识，非冻结态）。用于异常边界：账号已充值、429 误分类、上游窗口提前重置等。请求体为空=清全部；**畸形 JSON 返回 400（防误清全部）**；清理后**同步落盘成功才返回 200**（否则 500）——持久化在 `quota_state.json` 的冻结态同步被清后状态覆盖，不会在下轮配额落盘前因重启复活。
 
-`freeze`（`internal/cli/admin/freeze.go` 的 `CmdFreeze`，经 `POST /api/health/freeze`）是反向操作：把 provider 显式标记为 operator-frozen，调度永远跳过它，直到 `unfreeze` 清除。与熔断/限频不同，该冻结**无到期时间、成功/失败/限频记录均不清除**，并随 `quota_state.json` 的 `health` 段（`frozen: true`）落盘、按同一 config 指纹门控跨重启恢复。**freeze 必须显式指定 provider**（池化父名冻结其全部虚拟账号）——没有 freeze-all（全冻结路由 = 自我断供，逃生口 unfreeze 才保留 no-arg = all）；不带参数是 usage 错误（exit 1），API 空/缺 `provider` 返回 400 `provider is required`。从未失败过的 provider（无 health 条目）也可冻结（惰性建条目）。**不动** sticky、pin、quota、模型锁与剥参 blocklist；unknown provider 名匹配为空。与 unfreeze 同样：畸形 JSON 返回 400，落盘成功才返回 200（否则 500，内存态已生效但持久化滞后）。全冻结路由的请求按既有 all-down 分类终局 502（frozen 不是 rate-limit 类 down 原因，无等待重试）。
+`freeze`（`internal/cli/admin/freeze.go` 的 `CmdFreeze`，经 `POST /api/health/freeze`）是反向操作：把 provider 显式标记为 operator-frozen，调度永远跳过它，直到 `unfreeze` 清除。与熔断/限频不同，该冻结**无到期时间、成功/失败/限频记录均不清除**，并随 `quota_state.json` 的 `health` 段（`frozen: true`）落盘、按同一 config 指纹门控跨重启恢复。**freeze 必须显式指定 provider**（池化父名冻结其全部虚拟账号；也可直接冻结单个虚拟账号 `provider#id`）——没有 freeze-all（全冻结路由 = 自我断供，逃生口 unfreeze 才保留 no-arg = all）；不带参数是 usage 错误（exit 1），API 空/缺 `provider` 返回 400 `provider is required`。从未失败过的 provider（无 health 条目）也可冻结（惰性建条目）。**不动** sticky、pin、quota、模型锁与剥参 blocklist；unknown provider 名匹配为空。与 unfreeze 同样：畸形 JSON 返回 400，落盘成功才返回 200（否则 500，内存态已生效但持久化滞后）。全冻结路由的请求按既有 all-down 分类终局 502（frozen 不是 rate-limit 类 down 原因，无等待重试）。**MCP 网关同一语义**：`provider:` 型 server / 路由 target / Web 探测的账号选号都排除冻结账号（限速/熔断同样排除新流量）；已绑定会话的账号被冻结 → 清会话答 410 重新 initialize（瞬态冷却不打断绑定）；池全冻结答 503、路由工具声明者全冻结答 -32000（均点名 frozen，详见 `docs/architecture/mcp.md`）。
 
 ### stdout
 
@@ -1217,7 +1269,8 @@ decision tokens: N (X.XX% of all tokens)
 - `internal/cli/audit/audit_cli_test.go`：`audit` 表格/`--json` 输出、flag 与时间解析错误文案；`internal/cli/doctor/doctor_drift_audit_test.go`：漂移审计记录（host-only detail、当日去重、audit 关闭）。
 - `internal/cli/diag/shadow_report_render_test.go`：`shadow report` 表头/数据列/截断/紧凑数字与 disabled/empty 提示文案；`internal/cli/diag/shadow_report_cmd_test.go`：`--from`/`--to` query 透传（`MakeURLQuery`）。
 - `internal/cli/diag/routing_report_test.go`：`routing report` 弱标签聚合、selector 混淆矩阵、成本基线、判定开销、空窗/无数据路径、`--json` 结构。
-- `internal/cli/status/routes_cmd_test.go`：`routes` 列表/详情/未知模型输出；`internal/cli/help_sync_test.go`：命令注册表 ↔ `-h` 清单/`Help` map/CLI.md 章节/测试子进程分发的双向同步契约；`internal/archtest` 的 `NewApplication` 注册数 ↔ `Commands` 字面量条目数自洽契约。
+- `internal/cli/status/routes_cmd_test.go`：`routes` 列表/详情/未知模型输出；`internal/cli/help_sync_test.go`：命令注册表 ↔ `-h` 清单/`Help` map/CLI.md 章节/测试子进程分发的双向同步契约；`internal/archtest` 的 `NewApplication` 注册数 ↔ `Commands` 字面量条目数自洽契约（ProcessCommand 均匀绑定 + 流式直绑白名单 `streamBoundCommands`）。
+- `internal/cli/mcpserver/deepseek_test.go`：deepseek-search 工具面、参数契约违规 -32602 且零出站、上游失败 isError 文案、凭据 env 契约；`deepseek_child_test.go`：自孵化子进程端到端（initialize/通知静默/tools/call + `${account.api_key}` 注入键直达 API 的 Authorization）。
 - `internal/app/web_config_test.go` + `internal/web/jstests/contract.test.mjs`：`GET /api/config` 文档键 ↔ `appapi.ConfigDocument` 字段 ↔ 前端 `configCache` 读取字段的同步契约。
 
 新增列/字段允许（追加式，向后兼容）；改动既有列宽、既有文案、退出码、stdout/stderr 归属**需先与用户确认**。

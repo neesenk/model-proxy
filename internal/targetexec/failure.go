@@ -353,16 +353,31 @@ func HTMLTitle(body []byte) string {
 
 // IsFastFailConnError reports whether err is a connection-level failure that
 // came back in milliseconds — the peer closed or reset an established
-// connection mid-exchange, or refused the dial. These are the signature of an
-// external-path hiccup (proxy chain recycle, LB roll, node switch) rather than
-// a dead provider, and a redispatch on a fresh connection is cheap and usually
-// succeeds. Timeouts are deliberately excluded: their wall-time budget is
-// already spent, and retrying would double the caller's wait for the same
-// answer. The error is normally *url.Error-wrapped; errors.Is unwraps it.
+// connection mid-exchange, refused the dial, or gracefully recycled an
+// HTTP/2 connection via GOAWAY past this stream. These are the signature of
+// an external-path hiccup (proxy chain recycle, LB roll, node switch) rather
+// than a dead provider, and a redispatch on a fresh connection is cheap and
+// usually succeeds. Timeouts are deliberately excluded: their wall-time
+// budget is already spent, and retrying would double the caller's wait for
+// the same answer. The error is normally *url.Error-wrapped; errors.Is
+// unwraps it.
 func IsFastFailConnError(err error) bool {
-	return errors.Is(err, io.ErrUnexpectedEOF) ||
+	if errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, io.EOF) ||
 		errors.Is(err, syscall.ECONNRESET) ||
 		errors.Is(err, syscall.EPIPE) ||
-		errors.Is(err, syscall.ECONNREFUSED)
+		errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	// Server-initiated GOAWAY (upstream gateways recycle HTTP/2 connections
+	// after a stream budget — observed live as periodic LastStreamID≈2000
+	// ErrCode=NO_ERROR recycles). A GOAWAY surfaced by http.Client.Do means
+	// this stream id was PAST LastStreamID: the server never processed the
+	// request, so a redispatch is safe, not a duplicate. net/http's goAwayError
+	// is unexported inside the h2 bundle, so the message is the only externally
+	// observable contract.
+	return err != nil && strings.Contains(err.Error(), goAwayMessage)
 }
+
+// goAwayMessage is the stable error text of net/http's HTTP/2 goAwayError.
+const goAwayMessage = "server sent GOAWAY"

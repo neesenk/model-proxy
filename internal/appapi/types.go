@@ -59,6 +59,12 @@ type Account struct {
 type ProviderAccounts struct {
 	Name       string `json:"name"`
 	ProviderID string `json:"provider_id"`
+	// Pooled reports whether this provider runs on a plural credential pool
+	// (runtime keys are virtual "name#<accountID>" per account). False for the
+	// OAuth providers (aqp/codex, single credential) and for legacy singular
+	// file-backed providers (plain-name key). The UI derives each account's
+	// quota/usage key from this flag.
+	Pooled bool `json:"pooled"`
 	// Billing is payment-method metadata only (what the upstream charges). It
 	// is NOT a quota-query or scheduling input: whether a provider's quota can
 	// be polled/displayed is decided by the provider implementation (a
@@ -900,7 +906,13 @@ type RequestLogQueries interface {
 	// slow index-miss fallback), "llm" reads the requests store, "" tries
 	// the requests store first and falls through to the split stream.
 	Detail(requestID, stream string) ([]requestlog.Record, error)
-	SessionSummaries(scanLimit, limit int, costOf func(provider, model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error)
+	// SessionSummaries aggregates per-session traffic over the request log.
+	// The index path answers exactly — every retained record of a kept session
+	// counts, matching the un-windowed /api/requests?session= drill-down; the
+	// directory-scan fallback (index unavailable) keeps a bounded newest-N
+	// window and can under-report sessions older than it. limit keeps the
+	// most recently active sessions.
+	SessionSummaries(limit int, costOf func(provider, model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error)
 	// KeyUsage aggregates per-forward-key usage (LLM records, shadow
 	// excluded); keyID "" = every key. Index-backed when available, JSONL
 	// scan fallback otherwise — same twin semantics as ShadowReport.
@@ -1064,7 +1076,14 @@ type CommandAPI interface {
 	AddAccount(context.Context, string, AccountInput) (MutationResult, error)
 	ProbeAccount(context.Context, string, string) (ProbeResult, error)
 	RemoveAccount(string, string) (MutationResult, error)
-	BeginLogin(context.Context, string) (LoginStart, error)
+	// RenameAccount changes an account's display label (metadata only — no
+	// credential, key or reload semantics). OAuth providers (aqp/codex) reject
+	// the rename (their label is the SSO email).
+	RenameAccount(string, string, string) (MutationResult, error)
+	// BeginLogin starts the async aqp/codex login. accountID, when non-empty,
+	// is a TARGETED re-login of that pooled account: the completed flow must
+	// authorize the same upstream identity (an empty string = plain add).
+	BeginLogin(context.Context, string, string) (LoginStart, error)
 	// AddPreset merges a preset's template provider block into the live
 	// config (fail-closed on validation) and hot-reloads; warnings are the
 	// implicit-routing ambiguity model names for the UI to surface, and a

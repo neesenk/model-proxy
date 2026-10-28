@@ -8,9 +8,10 @@ import {
   esc, linkifyEsc, fmtNum, fmtCompactNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
   verdictBadge, modelCapMatrix, visibleModelRows, modelsRefreshResultHTML, providerCapsSummary, providerFrozen, providerNames,
+  accountProviderKey, splitProviderKey, providerDisplayName,
   catalogMatchHTML, catalogMatchSummary, catalogMatchEditorHTML,
   ruleHitsLeaderboard,
-  sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, linkedProviders, sessionHealthSummary, guardMarksHTML, guardMarksDetailHTML, requestMetaHTML,
+  sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, linkedProviders, sessionHealthSummary, guardMarksHTML, guardMarksDetailHTML, requestMetaHTML, hopChainTitle, orderDetailRecords, committedRecordOf,
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   cacheHitRate, settingsDiff, settingsRestartKeys, configSummaryHTML,
@@ -184,6 +185,41 @@ test('providerFrozen covers operator freeze, circuit, and rate-limit cooldown', 
   assert.equal(providerFrozen({ rate_limited_until: 'garbage' }, now), false);
   // A lapsed cooldown + closed circuit renders not frozen even with an entry.
   assert.equal(providerFrozen({ circuit_state: 'closed', rate_limited_until: '2026-08-28T00:00:00.000Z' }, now), false);
+});
+
+test('accountProviderKey: pooled providers key by virtual id regardless of pool size', () => {
+  // A plural pool (pooled: true from /api/accounts) keys EVERY account by
+  // "name#<accountId>" — including a 1-entry pool, so adding a sibling never
+  // re-keys an account's usage history.
+  const pooled = { name: 'shopee', provider_id: 'static', pooled: true, accounts: [{ id: 'b38457ea40c610bd' }] };
+  assert.equal(accountProviderKey(pooled, pooled.accounts[0]), 'shopee#b38457ea40c610bd');
+  // OAuth providers are single-credential plain names.
+  assert.equal(accountProviderKey({ name: 'aqp', provider_id: 'aqp', pooled: false }, { id: 'x' }), 'aqp');
+  // Legacy-singular providers keep the plain name (pooled absent/false).
+  assert.equal(accountProviderKey({ name: 'zhipu', provider_id: 'zhipu' }, { id: 'abc' }), 'zhipu');
+  assert.equal(accountProviderKey({ name: 'zhipu', provider_id: 'zhipu', pooled: false }, { id: 'abc' }), 'zhipu');
+});
+
+test('splitProviderKey splits pooled keys, passes plain keys through', () => {
+  assert.deepEqual(splitProviderKey('shopee#b38457ea40c610bd'), { parent: 'shopee', accountId: 'b38457ea40c610bd' });
+  assert.deepEqual(splitProviderKey('zhipu'), { parent: 'zhipu', accountId: null });
+  assert.deepEqual(splitProviderKey(''), { parent: '', accountId: null });
+  assert.deepEqual(splitProviderKey(null), { parent: '', accountId: null });
+});
+
+test('providerDisplayName folds pooled keys to the account label', () => {
+  const labels = { 'shopee#b38457ea40c610bd': 'old workhorse', 'shopee#fbc30eb0947c8e8e': '' };
+  assert.equal(providerDisplayName('shopee#b38457ea40c610bd', labels), 'shopee · old workhorse');
+  // Empty label falls back to the id's 8-char prefix — the full hash never
+  // surfaces.
+  assert.equal(providerDisplayName('shopee#fbc30eb0947c8e8e', labels), 'shopee · fbc30eb0');
+  // Unknown account (removed, or labels not loaded) also degrades to the
+  // short prefix instead of leaking the whole id.
+  assert.equal(providerDisplayName('shopee#deadbeefdeadbeef', labels), 'shopee · deadbeef');
+  // Plain keys pass through untouched; missing labels map is tolerated.
+  assert.equal(providerDisplayName('zhipu', labels), 'zhipu');
+  assert.equal(providerDisplayName('zhipu', null), 'zhipu');
+  assert.equal(providerDisplayName('shopee#b38457ea40c610bd', null), 'shopee · b38457ea');
 });
 
 test('YAML_EDITOR_MIN_HEIGHT is the documented 480px floor', () => {
@@ -2926,6 +2962,60 @@ test('unified request table: one head and row renderer for all three tables', ()
   assert.ok(shadow.includes('shadow'), 'shadow badge');
   const guard = requestRowHTML({ requestId: 'r4', ts: 1, status: 200 }, { rowClass: 'live-row', modelNote: ' <span class="badge warn">⚑ guard</span>' });
   assert.ok(/⚑ guard<\/span><\/td>/.test(guard), 'guard note sits in the model cell');
+  // Attempt-only rows (uncommitted failover legs): subdued + a leg badge in
+  // the status cell; regular rows never render the marker.
+  const leg = requestRowHTML({ requestId: 'r5', ts: 1, agent: 'ssc', model: 'm', provider: 'p#1', status: 502, latencyMs: 0, attemptOnly: true }, { rowClass: 'req-row' });
+  assert.ok(leg.includes('failover leg'), 'attempt-only badge');
+  assert.ok(/st[^>]*>.*badge muted">failover leg/.test(leg.replace(/\n/g, '')), 'badge rides the status cell');
+  assert.ok(leg.includes('subdue'), 'attempt-only row is subdued');
+  const plain = requestRowHTML({ requestId: 'r6', ts: 1, agent: 'ssc', model: 'm', provider: 'p#1', status: 502, latencyMs: 5 }, { rowClass: 'req-row' });
+  assert.ok(!plain.includes('failover leg') && !plain.includes('subdue'), 'ordinary 502 row carries no leg marker');
+});
+
+test('failover fold: hop badge, chain title, detail ordering, committed picker', () => {
+  // The committed row with folded hops renders ⟲N beside the status badge;
+  // the hover title is a metadata-only chain (provider/status/latency — no
+  // error text in lists), account-labeled when providerLabel is supplied.
+  const hops = [
+    { provider: 'shopee#fbc30eb0947c8e8e', status: 502, attempt: 0, latencyMs: 236 },
+    { provider: 'shopee#6bb61ee2b6256c38', status: 429, attempt: 1, latencyMs: 120 },
+  ];
+  const label = (p) => (p.includes('#') ? p.split('#')[0] + ' · acct' : p);
+  const folded = requestRowHTML({
+    requestId: 'r-fold', ts: 1, agent: 'ssc', model: 'm', provider: 'shopee#ok',
+    status: 200, latencyMs: 4700, failedHops: hops,
+  }, { rowClass: 'req-row', providerLabel: label });
+  assert.ok(folded.includes('⟲2'), 'folded row carries the hop-count badge');
+  const stCell = folded.match(/<td class="st">.*<\/td>/s)[0];
+  assert.ok(stCell.startsWith('<td class="st"><span class="badge ok">200</span><span class="badge muted" title="hop1 shopee · acct 502 · 236ms\nhop2 shopee · acct 429 · 120ms">⟲2</span></td>'), 'badge rides the status cell with the full chain in its title');
+  assert.equal(hopChainTitle(hops), 'hop1 shopee#fbc30eb0947c8e8e 502 · 236ms\nhop2 shopee#6bb61ee2b6256c38 429 · 120ms', 'raw chain without a label mapper');
+  assert.equal(hopChainTitle(null), '', 'no hops → empty title');
+  // Rows without hops and unanswered legs never render the badge — the leg
+  // keeps its own subdued rendering (the fold left it as the only row).
+  const noHop = requestRowHTML({ requestId: 'r-plain', ts: 1, status: 200 }, { rowClass: 'req-row' });
+  assert.ok(!noHop.includes('⟲'), 'ordinary row has no hop badge');
+  const unanswered = requestRowHTML({ requestId: 'r-leg2', ts: 1, status: 502, attemptOnly: true, failedHops: [] }, { rowClass: 'req-row' });
+  assert.ok(unanswered.includes('failover leg') && !unanswered.includes('⟲'), 'unanswered leg keeps the leg badge, no hop badge');
+
+  // Detail ordering: attempt-ascending so the failover story reads
+  // chronologically — failed hop evidence first, committed answer last —
+  // regardless of the API's newest-first order.
+  const api = [
+    { request_id: 'x', ts: 'T3', attempt: 2, status: 200, attempt_only: false },
+    { request_id: 'x', ts: 'T2', attempt: 1, status: 429, attempt_only: true },
+    { request_id: 'x', ts: 'T1', attempt: 0, status: 502, attempt_only: true },
+  ];
+  const ordered = orderDetailRecords(api);
+  assert.deepEqual(ordered.map((r) => r.attempt), [0, 1, 2], 'attempt-ascending');
+  assert.equal(api[0].attempt, 2, 'input order untouched (sorted copy)');
+  assert.deepEqual(orderDetailRecords(null), [], 'null-safe');
+
+  // The committed picker answers "which record holds the client-facing
+  // body" for excerpts and replay, not records[0] (a leg logs no body).
+  assert.equal(committedRecordOf(api).status, 200, 'picks the non-attempt_only record');
+  const legOnly = [{ request_id: 'y', ts: 'T1', attempt: 0, status: 502, attempt_only: true }];
+  assert.equal(committedRecordOf(legOnly).status, 502, 'falls back to the lone record');
+  assert.equal(committedRecordOf([]), undefined, 'empty set → undefined');
 });
 
 test('sessionHealthSummary derives health signals with gap/percentile guards', () => {
@@ -3115,6 +3205,54 @@ test('requestMetaHTML rides the scheduling engine beside the route (schedule.sou
   const empty = requestMetaHTML(
     { ts: 't', method: 'POST', path: '/v1/messages', attempt: 0, status: 200, provider: 'zhipu', upstream_model: 'glm-5.3-flash', schedule: { source: '' } }, []);
   assert.ok(!empty.includes('via'), empty);
+});
+
+test('requestMetaHTML explains attempt-only legs where the empty body would mislead', () => {
+  // Attempt-only rows log no request body by design (routing telemetry, the
+  // response body is the failure evidence). The detail must say so instead
+  // of letting an empty body read as data loss.
+  const html = requestMetaHTML(
+    { ts: 't', method: 'POST', path: '/v1/chat/completions', attempt: 0, status: 502, latency_ms: 0, provider: 'shopee#f', upstream_model: 'm', request_size: 0, response_size: 151, attempt_only: true }, []);
+  assert.ok(html.includes('failover leg'), 'result line carries the leg badge');
+  assert.ok(html.includes('<div class="req-meta-k">leg</div>'), html);
+  assert.ok(html.includes('intentionally not logged'), html);
+  assert.ok(html.includes("request id carries the full request body"), html);
+  const plain = requestMetaHTML(
+    { ts: 't', method: 'POST', path: '/v1/chat/completions', attempt: 0, status: 502, latency_ms: 3, provider: 'shopee#f', upstream_model: 'm', request_size: 10, response_size: 20 }, []);
+  assert.ok(!plain.includes('req-meta-k">leg'), 'ordinary records get no leg group');
+  assert.ok(!plain.includes('failover leg'), plain);
+});
+
+test('requestMetaHTML folds pooled provider keys via providerLabel (raw key on title)', () => {
+  const rec = { ts: 't', method: 'POST', path: '/v1/messages', attempt: 0, status: 200, provider: 'shopee#b38457ea40c610bd', upstream_model: 'glm-5.3' };
+  const folded = requestMetaHTML(rec, [], { providerLabel: (k) => `shopee · ${k.slice(7, 15)}` });
+  assert.ok(folded.includes('>shopee · b38457ea</span> / glm-5.3'), folded);
+  assert.ok(folded.includes('title="shopee#b38457ea40c610bd"'), 'raw virtual key rides the title');
+  // Without the opt the raw key shows (back-compat for direct callers).
+  const raw = requestMetaHTML(rec, []);
+  assert.ok(raw.includes('shopee#b38457ea40c610bd / glm-5.3'), raw);
+  // Non-pooled keys pass through the mapper untouched.
+  const plain = requestMetaHTML({ ts: 't', method: 'POST', status: 200, provider: 'zhipu', upstream_model: 'glm-5.3' }, [], { providerLabel: (k) => k });
+  assert.ok(plain.includes('zhipu / glm-5.3'), plain);
+});
+
+test('sessionBarSummary folds the provider line via providerLabel', () => {
+  const row = { ts: '2026-10-14T15:21:46Z', agent: 'ssc-analysis', model: 'deepseek-v4.1-flash', provider: 'shopee#fbc30eb0947c8e8e', status: 502, latencyMs: 0 };
+  const lines = sessionBarSummary(row, null, { providerLabel: (k) => 'shopee · workhorse' });
+  assert.ok(lines.some((l) => l === 'deepseek-v4.1-flash → shopee · workhorse'), lines.join('|'));
+  const raw = sessionBarSummary(row, null);
+  assert.ok(raw.some((l) => l.includes('shopee#fbc30eb0947c8e8e')), 'no opt keeps the raw key');
+});
+
+test('scheduleRouteStickyMeta folds the parked key via providerLabel', () => {
+  const info = { sticky: 'shopee#b38457ea40c610bd', sticky_dwell_remaining_sec: 42 };
+  const html = scheduleRouteStickyMeta(info, (k) => 'shopee · old workhorse');
+  assert.ok(html.includes('sticky: <span class="mono" title="shopee#b38457ea40c610bd">shopee · old workhorse</span>'), html);
+  assert.ok(html.includes('42s dwell left') || html.includes('dwell left'), html);
+  // No mapper: raw key, no title (back-compat).
+  const raw = scheduleRouteStickyMeta(info);
+  assert.ok(raw.includes('>shopee#b38457ea40c610bd</span>'), raw);
+  assert.ok(!raw.includes('title='), raw);
 });
 
 test('requestMetaHTML rides the MCP tool beside the JSON-RPC method', () => {

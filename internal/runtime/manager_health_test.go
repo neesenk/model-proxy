@@ -689,3 +689,43 @@ func TestRecordFailurePersistGateSuccessResetsStreak(t *testing.T) {
 		t.Fatal("persisted post-success streak did not open the circuit")
 	}
 }
+
+// TestAccountHealthyAndFrozenReads pins the split availability reads the MCP
+// gateway consumes: AccountHealthy is the freeze+rate-limit+circuit gate for
+// NEW work (absent state healthy), AccountFrozen isolates the operator freeze
+// that must additionally break established MCP session bindings — transient
+// cooldowns must never read as frozen.
+func TestAccountHealthyAndFrozenReads(t *testing.T) {
+	t.Parallel()
+
+	m := newTestManager(8)
+	parentOf := map[string]string{"pool#a": "pool", "pool#b": "pool"}
+	known := []string{"pool#a", "pool#b", "clean"}
+
+	if !m.AccountHealthy("clean") || m.AccountFrozen("clean") {
+		t.Fatal("absent state must read healthy and not frozen")
+	}
+
+	m.FreezeHealth("pool#a", parentOf, known)
+	if m.AccountHealthy("pool#a") || !m.AccountFrozen("pool#a") {
+		t.Fatal("frozen account must read unhealthy via both gates")
+	}
+	if !m.AccountHealthy("pool#b") {
+		t.Fatal("sibling account must stay healthy")
+	}
+
+	// A rate-limit window is a transient cooldown: unhealthy for new work but
+	// NOT frozen (established MCP sessions keep their binding).
+	m.RecordRateLimit("pool#b", time.Now().Add(time.Minute), RateLimitQuota, 8)
+	if m.AccountHealthy("pool#b") {
+		t.Fatal("rate-limited account must read unhealthy")
+	}
+	if m.AccountFrozen("pool#b") {
+		t.Fatal("rate-limit must not read as operator-frozen")
+	}
+
+	m.ResetHealth("pool#a", parentOf)
+	if !m.AccountHealthy("pool#a") || m.AccountFrozen("pool#a") {
+		t.Fatal("unfreeze must restore healthy and clear the frozen read")
+	}
+}

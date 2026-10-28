@@ -169,6 +169,10 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		buildFields := namedStructFields(t, buildPackage, "Build")
 		wantBuildFields := map[string]bool{
 			"Providers": true, "PoolIndex": true, "ParentOf": true, "Eligible": true,
+			// PoolAccounts: per-account identity metadata (id, added_at — no
+			// credential material) for history attribution (startup key
+			// migration) and display layers.
+			"PoolAccounts": true,
 			// Secrets: proxy-managed credential values collected in the same
 			// LoadSnapshot pass (+ best-effort OAuth auth files) for the guard
 			// known-secret scanner. Memory only.

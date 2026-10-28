@@ -274,8 +274,13 @@ type Config struct {
 	BoundAPIKey string
 
 	// Auth-specific fields (only relevant to certain providers).
-	OAuthAuthFile string // aqp/codex: the <name>_oauth_auth.json store path
-	AqpMintURL    string // aqp: the api_key/get_or_generate endpoint
+	OAuthAuthFile string // aqp/codex: the <name>_oauth_auth.json legacy store path
+	// OAuthStore binds a per-account OAuth credential seam (pooled aqp/codex
+	// virtuals): token/cookie reads and refresh write-backs go to the account's
+	// OWN pool slot under the pool's cross-process lock. nil = the legacy
+	// single-account file at OAuthAuthFile (FileOAuthStore).
+	OAuthStore OAuthBlobStore
+	AqpMintURL string // aqp: the api_key/get_or_generate endpoint
 
 	// Volcengine signing keys for GetAFPUsage (the Agent Plan quota endpoint,
 	// V4-signed, needs AK/SK not the Bearer chat key). Bound per virtual from

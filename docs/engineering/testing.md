@@ -471,7 +471,7 @@ ok/err/错误率/p50/p95/p99/流式 TTFT/状态码分布，`-max-error-rate` 超
 
 ## 重启脚本 e2e（`scripts/restartserve`，真实二进制，常规矩阵）
 
-`scripts/restart_serve.sh` 的端到端契约由 `scripts/restartserve/`（纯测试包）承载：构建真实 model-proxy 二进制，在沙箱（`t.TempDir` HOME、loopback 空闲端口、static provider）启动真实 `serve` 进程，再运行脚本并断言可观察语义——**热切换**（旧进程 SIGINT 后退出、端口换 pid 重新监听、脚本日志出现新实例 listening 行）与**冷启动**（无监听者时从 config.yaml 的 `listen:` 解析端口并拉起）。旧进程退出用 cmd.Wait 回收后的 channel 判定（未回收的僵尸会让 kill(2) 假阳性）；并发/等待一律用轮询条件，不用固定 Sleep 赌时序。外部前置条件：lsof + nohup（unix-only），Windows 明确 Skip。进入常规 `go test ./...` 与 race 矩阵。
+`scripts/restart_serve.sh` 的端到端契约由 `scripts/restartserve/`（纯测试包）承载：构建真实 model-proxy 二进制，在沙箱（`t.TempDir` HOME+TMPDIR、loopback 空闲端口、static provider）启动真实 serve 进程，再运行脚本并断言可观察语义——**热切换**（旧进程被停、端口换 pid 由脚本拉起的 **supervised daemon** 重新监听、`serve.pid` 落在 `--log-file` 旁、脚本管理的日志出现新实例 listening 行）与**冷启动**（无监听者时从 config.yaml 的 `listen:` 解析端口并拉起 daemon）、**daemon supervisor 停止**（旧 supervisor/worker 退出且旧 pidfile 被清除，绝不留下 supervisor 复活 worker）、**回滚**（坏二进制 → 恢复 `model-proxy.old`、旧二进制重新 daemon 并服务、exit 1「未部署」、`.old` 被消费）。测试清理先 `serve stop`（两处 pidfile 派生都探测）再按端口杀——只杀 worker 会被 supervisor 约 1s 后复活（pitfalls #24b）。旧进程退出用 cmd.Wait 回收后的 channel 判定（未回收的僵尸会让 kill(2) 假阳性）；并发/等待一律用轮询条件，不用固定 Sleep 赌时序。外部前置条件：lsof（unix-only），Windows 明确 Skip。进入常规 `go test ./...` 与 race 矩阵。
 
 ## UI 浏览器 e2e（`internal/web/jstests/uie2e.test.mjs` / `uivisual.test.mjs`，按需门禁）
 

@@ -95,6 +95,7 @@ func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 		"login",
 		"logout",
 		"mcp",
+		"mcp-server",
 		"models",
 		"pin",
 		"presets",
@@ -216,33 +217,37 @@ func TestRunCLIArgsDispatchContract(t *testing.T) {
 
 func TestCLICommandRegistryIsExhaustive(t *testing.T) {
 	wantTargets := map[string]string{
-		"add":      "clipresets.RunAdd",
-		"audit":    "cliaudit.RunAudit",
-		"cache":    "clistatus.RunCache",
-		"presets":  "clipresets.RunPresets",
-		"config":   "cliconfig.CmdConfigRun",
-		"doctor":   "clidoctor.RunDoctor",
-		"freeze":   "cliadmin.RunFreeze",
-		"guard":    "cliguard.RunGuard",
-		"login":    "clilogin.CmdLogin",
-		"logout":   "cliaccount.RunLogout",
-		"mcp":      "climcp.RunMCP",
-		"models":   "climodels.RunModels",
-		"pin":      "cliadmin.RunPin",
-		"replay":   "clidiag.RunReplay",
-		"restore":  "RunRestore",
-		"schedule": "clistatus.RunSchedule",
-		"serve":    "app.Serve",
-		"shadow":   "clidiag.RunShadow",
-		"stats":    "clistats.RunStats",
-		"takeover": "RunTakeover",
-		"test":     "climodels.CmdTest",
-		"unfreeze": "cliadmin.RunUnfreeze",
-		"unpin":    "cliadmin.RunUnpin",
-		"usage":    "clistats.RunUsage",
-		"routes":   "clistatus.RunRoutes",
-		"routing":  "clidiag.RunRouting",
-		"wire":     "clidiag.RunWire",
+		"add":     "clipresets.RunAdd",
+		"audit":   "cliaudit.RunAudit",
+		"cache":   "clistatus.RunCache",
+		"presets": "clipresets.RunPresets",
+		"config":  "cliconfig.CmdConfigRun",
+		"doctor":  "clidoctor.RunDoctor",
+		"freeze":  "cliadmin.RunFreeze",
+		"guard":   "cliguard.RunGuard",
+		"login":   "clilogin.CmdLogin",
+		"logout":  "cliaccount.RunLogout",
+		"mcp":     "climcp.RunMCP",
+		// Stream-bound direct binding (no ProcessCommand adapter): the
+		// bundled stdio MCP server consumes the injected stdin/stdout. The
+		// archtest interaction contract keeps the explicit allowlist.
+		"mcp-server": "climcpserver.RunServer",
+		"models":     "climodels.RunModels",
+		"pin":        "cliadmin.RunPin",
+		"replay":     "clidiag.RunReplay",
+		"restore":    "RunRestore",
+		"schedule":   "clistatus.RunSchedule",
+		"serve":      "app.Serve",
+		"shadow":     "clidiag.RunShadow",
+		"stats":      "clistats.RunStats",
+		"takeover":   "RunTakeover",
+		"test":       "climodels.CmdTest",
+		"unfreeze":   "cliadmin.RunUnfreeze",
+		"unpin":      "cliadmin.RunUnpin",
+		"usage":      "clistats.RunUsage",
+		"routes":     "clistatus.RunRoutes",
+		"routing":    "clidiag.RunRouting",
+		"wire":       "clidiag.RunWire",
 	}
 	app := NewApplication(serveStub)
 	gotCommands := make([]string, 0, len(app.Commands))
@@ -300,13 +305,14 @@ func parseApplicationCommandTargets(t *testing.T) map[string]string {
 				t.Fatalf("NewApplication app.Commands key = %T, want string literal", entry.Key)
 			}
 			command := strings.Trim(key.Value, `"`)
-			call, ok := entry.Value.(*ast.CallExpr)
-			if !ok || len(call.Args) != 1 || !identIs(call.Fun, "ProcessCommand") {
-				t.Fatalf("NewApplication().commands[%q] value = %T, want ProcessCommand(handler)", command, entry.Value)
+			if call, ok := entry.Value.(*ast.CallExpr); ok && len(call.Args) == 1 && identIs(call.Fun, "ProcessCommand") {
+				entry.Value = call.Args[0]
+			} else if _, ok := entry.Value.(*ast.SelectorExpr); !ok {
+				t.Fatalf("NewApplication().commands[%q] value = %T, want ProcessCommand(handler) or a direct stream-bound handler selector", command, entry.Value)
 			}
-			handler := expressionName(call.Args[0])
+			handler := expressionName(entry.Value)
 			if handler == "" {
-				t.Fatalf("NewApplication().commands[%q] handler = %T, want concrete handler", command, call.Args[0])
+				t.Fatalf("NewApplication().commands[%q] handler = %T, want concrete handler", command, entry.Value)
 			}
 			if previous, exists := targets[command]; exists {
 				t.Fatalf("duplicate NewApplication().commands[%q]: %s and %s", command, previous, handler)

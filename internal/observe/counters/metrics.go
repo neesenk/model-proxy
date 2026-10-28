@@ -248,3 +248,53 @@ func (s *MetricsStore) Reset() {
 	defer s.mu.Unlock()
 	s.m = map[PMKey]*ProviderMetrics{}
 }
+
+// adoptProviderKey re-keys every (from, model) entry onto the matching
+// (to, model) key, ADDING values into any existing target entry — the
+// in-memory half of a runtime provider-key rename (legacy bare name → pooled
+// virtual key) on a live pipeline. It returns the number of entries moved.
+// Callers run it at reload boundaries where from-key writers have stopped
+// (the generation swap precedes it); a straggler increment racing the move
+// lands on the detached from-entry and is lost — the same degradation the
+// durable rename tolerates for in-flight old-generation commits.
+func (s *MetricsStore) AdoptProviderKey(from, to string) int {
+	if from == "" || to == "" || from == to {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	moved := 0
+	for k, src := range s.m {
+		if k.Provider != from {
+			continue
+		}
+		delete(s.m, k)
+		dstKey := PMKey{Provider: to, Model: k.Model}
+		dst := s.m[dstKey]
+		if dst == nil {
+			dst = &ProviderMetrics{}
+			s.m[dstKey] = dst
+		}
+		dst.Requests.Add(src.Requests.Load())
+		dst.Failovers.Add(src.Failovers.Load())
+		dst.RateLimited429.Add(src.RateLimited429.Load())
+		dst.Failures.Add(src.Failures.Load())
+		// LastRequestAt is a unix timestamp, not a sum: keep the max. A plain
+		// Store could regress it behind a concurrent hot-path Store of "now",
+		// so take it with a CAS loop.
+		for {
+			old := dst.LastRequestAt.Load()
+			if src.LastRequestAt.Load() <= old {
+				break
+			}
+			if dst.LastRequestAt.CompareAndSwap(old, src.LastRequestAt.Load()) {
+				break
+			}
+		}
+		dst.LatencySum.Add(src.LatencySum.Load())
+		dst.TTFTSum.Add(src.TTFTSum.Load())
+		dst.DurationSum.Add(src.DurationSum.Load())
+		moved++
+	}
+	return moved
+}

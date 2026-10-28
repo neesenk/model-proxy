@@ -301,11 +301,11 @@ func (q requestLogQueries) Detail(requestID, stream string) ([]requestlog.Record
 	return requestlog.QueryRecordsIn(q.mcpDir, requestlog.MCPFilePrefix, requestlog.Filter{RequestID: requestID, Limit: 50})
 }
 
-func (q requestLogQueries) SessionSummaries(scanLimit, limit int, costOf func(provider, model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error) {
+func (q requestLogQueries) SessionSummaries(limit int, costOf func(provider, model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error) {
 	if q.index != nil {
-		return q.index.SessionSummaries(scanLimit, limit, costOf)
+		return q.index.SessionSummaries(limit, costOf)
 	}
-	return requestlog.SessionSummaries(q.dir, scanLimit, limit, costOf)
+	return requestlog.SessionSummaries(q.dir, limit, costOf)
 }
 
 // GuardAnnotations on the raw port: the request log store itself knows
@@ -449,35 +449,44 @@ func (s *Service) Accounts() []appapi.ProviderAccounts {
 			Billing:    config.Billing,
 			Accounts:   []appapi.Account{},
 		}
-		switch config.Provider {
-		case "aqp":
-			account, _ := provider.LoadAqpAccount(accounts.AuthFilePath(name, "oauth_auth"))
-			if account != nil && account.AccountID != "" {
-				item.Accounts = append(item.Accounts, appapi.Account{
-					ID:      account.AccountID,
-					Label:   account.Email,
-					AddedAt: time.Unix(account.CreatedAt, 0).UTC().Format(time.RFC3339),
-					Email:   account.Email,
-				})
+		snapshot, _ := accounts.NewStore(accounts.HomeDir()).LoadSnapshot(name, config.Provider)
+		if (config.Provider == "aqp" || config.Provider == "codex") && snapshot.Source != accounts.SourcePlural {
+			// Pool-less OAuth provider: the legacy single-account file IS the
+			// account list (one card, plain-name key, upstream identity as id).
+			if config.Provider == "aqp" {
+				account, _ := provider.LoadAqpAccount(accounts.AuthFilePath(name, "oauth_auth"))
+				if account != nil && account.AccountID != "" {
+					item.Accounts = append(item.Accounts, appapi.Account{
+						ID:      account.AccountID,
+						Label:   account.Email,
+						AddedAt: time.Unix(account.CreatedAt, 0).UTC().Format(time.RFC3339),
+						Email:   account.Email,
+					})
+				}
+			} else {
+				account, _ := provider.LoadCodexAccount(accounts.AuthFilePath(name, "oauth_auth"))
+				if account != nil && account.AccountID != "" {
+					item.Accounts = append(item.Accounts, appapi.Account{
+						ID:    account.AccountID,
+						Label: account.Email,
+						Email: account.Email,
+					})
+				}
 			}
-		case "codex":
-			account, _ := provider.LoadCodexAccount(accounts.AuthFilePath(name, "oauth_auth"))
-			if account != nil && account.AccountID != "" {
-				item.Accounts = append(item.Accounts, appapi.Account{
-					ID:    account.AccountID,
-					Label: account.Email,
-					Email: account.Email,
-				})
-			}
-		default:
-			pool, _ := accounts.NewStore(accounts.HomeDir()).Load(name, config.Provider)
-			for _, account := range pool.Accounts {
+		} else {
+			for _, account := range snapshot.Pool.Accounts {
 				item.Accounts = append(item.Accounts, appapi.Account{
 					ID:      account.ID,
 					Label:   account.Label,
 					AddedAt: account.AddedAt,
+					Email:   account.Email,
 				})
 			}
+			// A plural pool keys runtime state by virtual id per account
+			// (API-key and OAuth alike); legacy-singular / not-logged-in
+			// providers keep the plain name. The UI derives quota/usage keys
+			// from this flag.
+			item.Pooled = snapshot.Source == accounts.SourcePlural
 		}
 		out = append(out, item)
 	}

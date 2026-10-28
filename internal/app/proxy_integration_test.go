@@ -365,3 +365,9 @@ func useStaticProviderPools(t *testing.T, names ...string) {
 		writePoolFile(t, name, "static", "STATIC-TEST-KEY")
 	}
 }
+
+// staticPoolVID is the runtime key a useStaticProviderPools provider unrolls
+// to: pools key by virtual id ("name#<accountID>") regardless of pool size.
+func staticPoolVID(name string) string {
+	return name + "#" + accounts.AccountID("static", accounts.Credentials{APIKey: "STATIC-TEST-KEY"})
+}

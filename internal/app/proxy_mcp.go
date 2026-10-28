@@ -239,12 +239,20 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Account selection: session-pinned, else round-robin over the provider's
-	// pool. auth: none servers have no account at all.
-	accounts := mcpAccounts(snap, srv)
+	// schedulable pool (operator-frozen / rate-limited / circuit-open accounts
+	// are excluded — the same availability rule as LLM scheduling). auth: none
+	// servers have no account at all.
+	var picks []string
 	account := ""
 	if srv.MCPAuthMode() == "provider" {
-		if len(accounts) == 0 {
+		var raw int
+		picks, raw = p.mcpSchedulableAccounts(snap, srv)
+		if raw == 0 {
 			http.Error(w, fmt.Sprintf("mcp %q: %s", name, mcpNoAccountErr(srv)), http.StatusServiceUnavailable)
+			return
+		}
+		if len(picks) == 0 {
+			http.Error(w, fmt.Sprintf("mcp %q: %s", name, mcpNoSchedulableErr(srv)), http.StatusServiceUnavailable)
 			return
 		}
 		if hasSess {
@@ -257,18 +265,28 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "mcp: session account no longer available — re-initialize", http.StatusGone)
 				return
 			}
+			if p.runtimeState.AccountFrozen(account) {
+				// Operator freeze must stop the credential entirely — including
+				// sessions bound to it (eviction kills the stdio child, if any),
+				// so the client re-initializes onto a schedulable account.
+				// Transient cooldowns do NOT take this path: only the explicit
+				// operator freeze breaks a binding.
+				p.mcpSessions.Delete(localSID)
+				http.Error(w, "mcp: session account is operator-frozen — re-initialize", http.StatusGone)
+				return
+			}
 		} else {
-			account = accounts[int(p.mcpRR.Add(1))%len(accounts)]
+			account = picks[int(p.mcpRR.Add(1))%len(picks)]
 		}
 	}
 
 	resp, upstreamBodyCap, err := p.mcpRoundTrip(snap, name, srv, account, sess.UpstreamID, r, body)
-	if err == nil && resp.StatusCode == http.StatusUnauthorized && !hasSess && len(accounts) > 1 {
+	if err == nil && resp.StatusCode == http.StatusUnauthorized && !hasSess && len(picks) > 1 {
 		// One-shot rotation on a sessionless 401 (mirrors BufferedLeg's
 		// one-time 401 refresh): the next account may hold a valid key.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
-		account = mcpNextAccount(accounts, account)
+		account = mcpNextAccount(picks, account)
 		resp, upstreamBodyCap, err = p.mcpRoundTrip(snap, name, srv, account, sess.UpstreamID, r, body)
 	}
 	if srv.MCPAuthMode() == "provider" {
@@ -538,17 +556,47 @@ func mcpNoAccountErr(srv configdomain.MCPServer) string {
 	return fmt.Sprintf("provider %q has no logged-in account — run `model-proxy login %s`", srv.Provider, srv.Provider)
 }
 
-// mcpAccountGate picks a round-robin account for a provider-backed server and
-// tags the response with the live-provider header; ok=false after writing the
-// empty-pool 503 terminal response. Callers own the MCPAuthMode gate —
-// auth: none servers have no account at all.
-func (p *Proxy) mcpAccountGate(w http.ResponseWriter, snap RuntimeSnapshot, name string, srv configdomain.MCPServer) (account string, ok bool) {
+// mcpNoSchedulableErr is the twin of mcpNoAccountErr for a pool whose accounts
+// all exist but none may take new work (operator-frozen or in cooldown).
+func mcpNoSchedulableErr(srv configdomain.MCPServer) string {
+	return fmt.Sprintf("provider %q has no schedulable account (frozen or in cooldown) — see `model-proxy status` / `model-proxy unfreeze`", srv.Provider)
+}
+
+// mcpSchedulableAccounts resolves the provider's live account set (mcpAccounts)
+// and filters it to accounts that may take NEW work: operator-frozen,
+// rate-limited, and circuit-open accounts are excluded — the same availability
+// rule LLM scheduling applies (TargetHealthy without the model dimension).
+// The raw count is returned alongside so callers distinguish "no account at
+// all" from "accounts exist but none is schedulable".
+func (p *Proxy) mcpSchedulableAccounts(snap RuntimeSnapshot, srv configdomain.MCPServer) ([]string, int) {
 	accounts := mcpAccounts(snap, srv)
 	if len(accounts) == 0 {
+		return nil, 0
+	}
+	picks := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		if p.runtimeState.AccountHealthy(a) {
+			picks = append(picks, a)
+		}
+	}
+	return picks, len(accounts)
+}
+
+// mcpAccountGate picks a round-robin account for a provider-backed server and
+// tags the response with the live-provider header; ok=false after writing the
+// empty-pool or all-unschedulable 503 terminal response. Callers own the
+// MCPAuthMode gate — auth: none servers have no account at all.
+func (p *Proxy) mcpAccountGate(w http.ResponseWriter, snap RuntimeSnapshot, name string, srv configdomain.MCPServer) (account string, ok bool) {
+	picks, raw := p.mcpSchedulableAccounts(snap, srv)
+	if raw == 0 {
 		http.Error(w, fmt.Sprintf("mcp %q: %s", name, mcpNoAccountErr(srv)), http.StatusServiceUnavailable)
 		return "", false
 	}
-	account = accounts[int(p.mcpRR.Add(1))%len(accounts)]
+	if len(picks) == 0 {
+		http.Error(w, fmt.Sprintf("mcp %q: %s", name, mcpNoSchedulableErr(srv)), http.StatusServiceUnavailable)
+		return "", false
+	}
+	account = picks[int(p.mcpRR.Add(1))%len(picks)]
 	mcpSetLiveProvider(w, account)
 	return account, true
 }
