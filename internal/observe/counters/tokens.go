@@ -76,6 +76,39 @@ func (tc *TokenCounter) Reset() {
 	tc.m = map[TokenKey]*TokenUsage{}
 }
 
+// AdoptProviderKey re-keys every (from, model) entry onto the matching
+// (to, model) key, ADDING into any existing target entry — the in-memory
+// half of a runtime provider-key rename on a live pipeline (see
+// MetricsStore.AdoptProviderKey for the concurrency contract). Returns the
+// number of entries moved.
+func (tc *TokenCounter) AdoptProviderKey(from, to string) int {
+	if from == "" || to == "" || from == to {
+		return 0
+	}
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	moved := 0
+	for k, src := range tc.m {
+		if k.Provider != from {
+			continue
+		}
+		delete(tc.m, k)
+		dstKey := TokenKey{Provider: to, Model: k.Model}
+		dst := tc.m[dstKey]
+		if dst == nil {
+			dst = &TokenUsage{}
+			tc.m[dstKey] = dst
+		}
+		dst.Input += src.Input
+		dst.Output += src.Output
+		dst.CacheCreation += src.CacheCreation
+		dst.CacheRead += src.CacheRead
+		dst.Requests += src.Requests
+		moved++
+	}
+	return moved
+}
+
 const scanLineCap = 64 * 1024
 
 // jsonBodyCap bounds the retained body used by the non-stream JSON usage

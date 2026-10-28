@@ -304,3 +304,136 @@ func TestStartupProviderKeyMigration_NoPoolNoRename(t *testing.T) {
 		t.Fatalf("legacy-singular history must stay under the bare name: %+v", rows)
 	}
 }
+
+// TestReloadProviderKeyMigration_ConvertsLegacySingularWithoutRestart is the
+// runtime counterpart of the startup migration: a provider whose history lives
+// under the bare name converts to a POOL mid-process (what the first OAuth
+// re-login or Add-account writes) and the reload must move every view onto the
+// virtual key WITHOUT a restart — persisted buckets, cumulative counters, the
+// flusher's diff baseline (a post-reload flush must neither resurrect the bare
+// key nor double-count the adopted history), and the quota last-known-good
+// snapshot. Motivating incident: 2026-10-28 aqp re-login blanked token usage
+// until the next serve restart.
+func TestReloadProviderKeyMigration_ConvertsLegacySingularWithoutRestart(t *testing.T) {
+	home := t.TempDir()
+	setPoolHome(t, home)
+	// Legacy singular era (zhipu keeps the file-backed path; static is
+	// plural-only, so a bare-key era needs a real API-key provider): bare-name
+	// stats + quota history on disk.
+	if err := os.WriteFile(legacyPoolPath("zhipu"), []byte(`{"api_key":"SOLO"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(home, ".model-proxy", "stats.db")
+	store, err := observestats.Open(observestats.Options{Path: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Flush(1791900000, map[observestats.Key]observestats.Counters{
+		{Provider: "zhipu", Model: "glm-5"}: {Requests: 82242, Input: 100, Output: 50, TokenRequests: 82242, LastRequestAt: 1791900060},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	quotaPath := filepath.Join(home, ".model-proxy", "quota_state.json")
+	if err := os.WriteFile(quotaPath, []byte(`{"providers":{"zhipu":{"billing":1,"remaining_pct":0.42,"as_of":"2026-10-13T00:00:00Z"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(home, "config.yaml")
+	cfgYAML := "listen: 127.0.0.1:1\n" +
+		"providers:\n  zhipu:\n    openai_base_url: http://127.0.0.1:1\n    provider_id: zhipu\n    models: [glm-5]\n" +
+		"stats:\n  db_path: " + dbPath + "\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := configdomain.LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newTestProxyAt(t, cfg, quotaPath)
+	p.StartRuntimeServices(cfg)
+	// Stop the quota poller so Reload's PollAsync no-ops (Stopped check) and
+	// the carried snapshot is asserted deterministically instead of racing the
+	// first real quota sync.
+	p.quota.Stop()
+
+	// Pre-conversion sanity: the process is live under the bare key — the
+	// provider is built and the quota entry survived the tracker's live-key
+	// load filter.
+	if snap := p.tokens.Snapshot()[counters.PMKey{Provider: "zhipu", Model: "glm-5"}]; snap.Requests != 82242 {
+		t.Fatalf("bare-era cumulative counter = %+v, want 82242", snap)
+	}
+	if q := p.runtimeState.Quota("zhipu"); q == nil || q.RemainingPct != 0.42 {
+		t.Fatalf("bare-era quota entry missing before conversion: %+v", q)
+	}
+
+	// The conversion event: the provider's FIRST plural pool (what an OAuth
+	// re-login / Add-account writes — the legacy singular key becomes pool
+	// entry #1) + reload.
+	writePoolFile(t, "zhipu", "zhipu", "SOLO")
+	if err := os.Remove(legacyPoolPath("zhipu")); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Reload(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+
+	poolKey := "zhipu#" + accounts.AccountID("zhipu", accounts.Credentials{APIKey: "SOLO"})
+	until := time.Now().Add(time.Hour).Unix()
+
+	// Persisted buckets follow without a restart.
+	rows, err := p.stats.QueryRange(0, until, poolKey, "glm-5", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Requests != 82242 {
+		t.Fatalf("post-reload buckets = %+v, want one %s row with 82242 requests", rows, poolKey)
+	}
+	if bare, err := p.stats.QueryRange(0, until, "zhipu", "glm-5", 0); err != nil || len(bare) != 0 {
+		t.Fatalf("bare rows survived the reload migration: %+v (err=%v)", bare, err)
+	}
+	// Cumulative in-memory view (the /api/tokens side) agrees.
+	if snap := p.tokens.Snapshot()[counters.PMKey{Provider: poolKey, Model: "glm-5"}]; snap.Requests != 82242 || snap.Input != 100 {
+		t.Fatalf("cumulative counter = %+v, want 82242 requests / 100 input under %s", snap, poolKey)
+	}
+	if _, bare := p.tokens.Snapshot()[counters.PMKey{Provider: "zhipu", Model: "glm-5"}]; bare {
+		t.Error("bare cumulative entry survived the reload migration")
+	}
+	// Quota last-known-good carried ahead of the generation swap's pruning.
+	quota := p.runtimeState.Quota(poolKey)
+	if quota == nil || quota.RemainingPct != 0.42 {
+		t.Fatalf("carried quota snapshot = %+v, want remaining 0.42 under %s", quota, poolKey)
+	}
+	if leaked := p.runtimeState.Quota("zhipu"); leaked != nil {
+		t.Fatalf("bare quota key survived: %+v", leaked)
+	}
+
+	// The flusher's baseline moved too: post-reload traffic + a flush cycle
+	// must not resurrect the bare key nor re-persist the adopted history.
+	p.metrics.Inc(poolKey, "glm-5", counters.EvRequests)
+	p.tokens.Commit(counters.PMKey{Provider: poolKey, Model: "glm-5"}, counters.TokenUsage{Input: 1})
+	p.flusher.Flush(time.Now())
+	rows, err = p.stats.QueryRange(0, until, poolKey, "glm-5", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var totalReqs, totalIn uint64
+	for _, r := range rows {
+		totalReqs += r.Requests
+		totalIn += r.Input
+	}
+	if totalReqs != 82243 || totalIn != 101 {
+		t.Fatalf("post-flush buckets = %+v, want 82243 total requests / 101 input (82242+100 adopted, 1 new, no double count)", rows)
+	}
+	if bare, err := p.stats.QueryRange(0, until, "zhipu", "glm-5", 0); err != nil || len(bare) != 0 {
+		t.Fatalf("bare rows resurrected by post-reload flush: %+v (err=%v)", bare, err)
+	}
+	ts := p.tokens.Snapshot()[counters.PMKey{Provider: poolKey, Model: "glm-5"}]
+	if ts.Requests != 82243 || ts.Input != 101 {
+		t.Fatalf("cumulative tokens = %+v, want requests=82243 input=101", ts)
+	}
+	if got := p.metrics.Snapshot()[counters.PMKey{Provider: poolKey, Model: "glm-5"}].Requests; got != 82243 {
+		t.Fatalf("cumulative metrics requests = %d, want 82243", got)
+	}
+}

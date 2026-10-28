@@ -35,6 +35,14 @@ func (p *Proxy) Reload(configPath string) error {
 		logx.Warnf("[reload] ⚠ %s", note)
 	}
 	built := providerbuild.BuildProviders(cfg, accounts.NewStore(accounts.HomeDir()), providerbuild.BuildOpts())
+	// Provider-key renames (legacy bare-name history → pooled virtual keys)
+	// apply at RELOAD time too, not only at startup: the conversion point of
+	// an OAuth provider is its first re-login, which happens at an arbitrary
+	// runtime moment. Quota snapshots carry over BEFORE the generation swap
+	// prunes the bare key; the stats pipeline rename runs after the swap
+	// (below), once bare-key writers have stopped.
+	renames := providerKeyRenames(built.PoolAccounts)
+	p.runtimeState.RenameQuotaKeys(renames)
 	// Re-read model_caps.json from disk BEFORE the lock (file I/O must not
 	// happen under p.mu — red line 2). The CLI `models refresh` writes fresh
 	// verdicts to this file directly; reloading from the daemon's own snapshot
@@ -141,6 +149,24 @@ func (p *Proxy) Reload(configPath string) error {
 	// the running daemon on the refresh-triggered SIGHUP.
 	p.modelCaps.Restore(modelCapsOnDisk, protocolFingerprints(cfg))
 	p.mu.Unlock()
+	// Stats-side of the reload key migration (see the renames comment above):
+	// durable buckets, cumulative counters, diff baselines, and pending
+	// batches move together so /api/tokens and range queries agree on the new
+	// key without a restart. In-flight old-generation commits that land on the
+	// bare key after this point are absorbed by the next rename pass
+	// (idempotent).
+	if p.stats != nil && p.flusher != nil {
+		for from, to := range renames {
+			moved, err := p.flusher.RenameProviderKeyLive(p.stats, from, to)
+			if err != nil {
+				logx.Warnf("[reload] ⚠ stats provider key migration %s → %s failed: %v (history stays under %s until the next pass)", from, to, err, from)
+				continue
+			}
+			if moved > 0 {
+				logx.Infof("[reload] stats migrated %d bucket row(s) from provider key %s → %s", moved, from, to)
+			}
+		}
+	}
 	// Re-publish the config-level global proxy for the automatic chain used by
 	// non-forwarding outbound calls (see NewProxyWithStatePath).
 	upstreamproxy.SetDefaultProxy(cfg.Proxy)

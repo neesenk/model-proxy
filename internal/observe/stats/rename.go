@@ -100,3 +100,114 @@ func (s *Store) renameProviderKeyContext(ctx context.Context, from, to string) (
 	}
 	return moved + agentMoved, tx.Commit()
 }
+
+// RenameProviderKeyLive is the runtime (reload-time) variant of the startup
+// rename: it moves one provider's durable rows AND, under the flusher's lock,
+// the three in-memory projections the startup path rebuilds via Bootstrap —
+// cumulative counters, diff baselines, and pending batches — so the
+// /api/tokens cumulative view, minute-range queries, and subsequent flush
+// diffs all agree on the new key WITHOUT a restart.
+//
+// The durable rename runs first under f.mu: on failure nothing in-memory has
+// moved and the old key fully owns its history (the documented degradation of
+// the startup pass). Counter adoption may lose a straggler increment on an
+// already-detached from-entry — callers run it after the generation swap
+// stopped from-key writers. Pending batches carry per-minute deltas keyed at
+// diff time; rewriting their keys makes the retained backlog flush
+// additively into the renamed history, exactly what the durable merge
+// produces for already-persisted rows.
+func (f *Flusher) RenameProviderKeyLive(store *Store, from, to string) (int64, error) {
+	if f == nil || store == nil || from == "" || to == "" || from == to {
+		return 0, nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	moved, err := store.RenameProviderKey(from, to)
+	if err != nil {
+		return 0, err
+	}
+	if f.metrics != nil {
+		f.metrics.AdoptProviderKey(from, to)
+	}
+	if f.tokens != nil {
+		f.tokens.AdoptProviderKey(from, to)
+	}
+	if f.agents != nil {
+		f.agents.AdoptProviderKey(from, to)
+	}
+
+	for k, v := range f.prev {
+		if k.Provider != from {
+			continue
+		}
+		delete(f.prev, k)
+		if v == (Counters{}) {
+			continue
+		}
+		dstKey := Key{Provider: to, Model: k.Model}
+		dst := f.prev[dstKey]
+		dst.Requests += v.Requests
+		dst.Failovers += v.Failovers
+		dst.RateLimited429 += v.RateLimited429
+		dst.Failures += v.Failures
+		dst.Input += v.Input
+		dst.Output += v.Output
+		dst.CacheCreation += v.CacheCreation
+		dst.CacheRead += v.CacheRead
+		dst.TokenRequests += v.TokenRequests
+		if v.LastRequestAt > dst.LastRequestAt {
+			dst.LastRequestAt = v.LastRequestAt
+		}
+		dst.LatencySum += v.LatencySum
+		dst.TTFTSum += v.TTFTSum
+		dst.DurationSum += v.DurationSum
+		f.prev[dstKey] = dst
+	}
+	for k, v := range f.agentPrev {
+		if k.Provider != from {
+			continue
+		}
+		delete(f.agentPrev, k)
+		if v == (AgentCounters{}) {
+			continue
+		}
+		dstKey := AgentKey{Agent: k.Agent, Provider: to, Model: k.Model}
+		dst := f.agentPrev[dstKey]
+		dst.Requests += v.Requests
+		dst.Input += v.Input
+		dst.Output += v.Output
+		dst.CacheCreation += v.CacheCreation
+		dst.CacheRead += v.CacheRead
+		dst.LatencySum += v.LatencySum
+		dst.TTFTSum += v.TTFTSum
+		dst.DurationSum += v.DurationSum
+		dst.Failures += v.Failures
+		f.agentPrev[dstKey] = dst
+	}
+
+	// Retained backlog: rewrite per-minute deltas so a later (possibly
+	// out-of-order) drain lands under the new key instead of resurrecting
+	// bare-name rows after the durable rename.
+	for i := range f.pending {
+		deltas := f.pending[i].deltas
+		for k, v := range deltas {
+			if k.Provider != from {
+				continue
+			}
+			delete(deltas, k)
+			MergeDeltas(deltas, map[Key]Counters{{Provider: to, Model: k.Model}: v})
+		}
+	}
+	for i := range f.agentQueue {
+		deltas := f.agentQueue[i].deltas
+		for k, v := range deltas {
+			if k.Provider != from {
+				continue
+			}
+			delete(deltas, k)
+			MergeAgentDeltas(deltas, map[AgentKey]AgentCounters{{Agent: k.Agent, Provider: to, Model: k.Model}: v})
+		}
+	}
+	return moved, nil
+}

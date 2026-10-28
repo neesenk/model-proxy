@@ -99,7 +99,7 @@ OAuth provider（aqp、codex）都支持池化（见下「OAuth 账号池」）�
 `parent#<accountID>`，父名不是任何运行时键（只有 legacy 单文件/未登录的
 file-backed 实例保持裸名）。账号 id 是稳定身份：兄弟账号增删不改变本账号的
 键，token 用量、quota 快照与 request log 归属因此跨账号变更连续。历史版本
-单账号池绑裸名，跨越该边界的旧数据由启动迁移重键（见下「启动键迁移」）。
+单账号池绑裸名，跨越该边界的旧数据由键迁移重键（见下「键迁移（启动与 reload）」）。
 
 每个虚拟实例必须把自己的 API key 绑定到 `provider.Config.BoundAPIKey`；同一
 provider 实例的 `AuthHeaders` 为 forward 以及采用该通用认证入口的
@@ -113,7 +113,7 @@ volcengine 每账号包含 `{api_key, access_key, secret_key}`。绑定凭据存
 ## OAuth 账号池（aqp/codex）
 
 aqp/codex 复用同一套池文件（`<name>_apikeys.json`）与机制（锁、原子写、
-SourcePlural 权威、虚拟键展开、spread/sticky、用量归属、启动键迁移），差异在
+SourcePlural 权威、虚拟键展开、spread/sticky、用量归属、键迁移），差异在
 凭据形态与身份锚定：
 
 - **凭据 blob**：每账号的 OAuth 凭据整体存于 `Account.OAuth`（对 accounts 包
@@ -148,22 +148,31 @@ reload。运行时键里的 `#<accountID>` 哈希是关联用途，不做用户�
 虚拟键折叠为 `parent · <label>`（pure.js `providerDisplayName`），仅 Accounts
 页的 `id:` 副行展示完整 id 供删除/排查对号。
 
-## 启动键迁移
+## 键迁移（启动与 reload）
 
 历史版本把单账号 plural 池绑在裸父名下：这些数据（stats.db 分钟桶、
 quota_state.json 快照）在池恒虚拟键后必须跟随账号迁移，否则首次加账号/
-升级后全部视图失去历史。启动时（`internal/app/provider_key_migration.go`，
-NewProxy 构建后、quota tracker Load 前）对每个池化父名执行一次重键：
+升级后全部视图失去历史。裸名 → 虚拟键的重键在两个时机执行
+（`internal/app/provider_key_migration.go` 派生 from→to，归属规则共用）：
 
 - **归属**：裸名历史记在池只有单账号的年代，归属 `added_at` 最早的现存账号
   （不可解析/缺失按最新处理，id 作确定性 tie-break）；
-- **stats.db**：`Store.RenameProviderKey` 在 Bootstrap 内、基线恢复**之前**
-  执行——`minute_buckets`/`agent_buckets` 的裸名行与目标虚拟键行按桶合并
-  （计数加和、`last_request_at` 取 max），内存累计计数器随基线 seed 到新键；
-- **quota_state.json**：`providers` 段的裸名条目改名为虚拟键（目标已存在时
-  丢弃较旧的裸名条目），sticky/health 短时效状态不迁移；
+- **启动**（NewProxy 构建后、quota tracker Load 前）：
+  - **stats.db**：`Store.RenameProviderKey` 在 Bootstrap 内、基线恢复**之前**
+    执行——`minute_buckets`/`agent_buckets` 的裸名行与目标虚拟键行按桶合并
+    （计数加和、`last_request_at` 取 max），内存累计计数器随基线 seed 到新键；
+  - **quota_state.json**：`providers` 段的裸名条目改名为虚拟键（目标已存在时
+    丢弃较旧的裸名条目），sticky/health 短时效状态不迁移；
+- **reload**（`Proxy.Reload`）：OAuth re-login 首次转池发生在任意运行时刻，
+  不能等重启（2026-10-28 aqp 事故：转池到重启之间 token usage 全空）。quota
+  快照在 generation 交换**前**经 `runtime.Manager.RenameQuotaKeys` 搬到虚拟键
+  （同一「目标已存在则更新鲜」语义），stats 侧在交换**后**经
+  `stats.Flusher.RenameProviderKeyLive`：磁盘行、累计计数器、flusher diff
+  基线、pending 批次四者同迁，累计视图（/api/tokens）与区间查询当场一致，
+  不重启、不双计。交换后仍在途的旧代请求会把计数落回裸名键——量级为在途
+  请求个位数，下一次迁移（重启或再 reload）幂等吸收；
 - 迁移幂等（无裸名行即 no-op）、失败降级为 warning（历史留在旧键下），不阻塞
-  启动；legacy 单文件 provider 不在迁移范围（无 plural 池）。
+  启动/reload；legacy 单文件 provider 不在迁移范围（无 plural 池）。
 
 ## Resolver
 
@@ -206,7 +215,7 @@ volcengine `FetchModels` 已按账号绑定：每个虚拟用自己的 AK/SK 签
 
 - 单账号池、多账号池和 legacy fallback；单账号 plural 池同样展开虚拟键
   （`TestBuildProviders_SingleEntryPluralPoolBindsVirtualKey`）。
-- 启动键迁移：裸名 stats/quota 历史重键到最早账号的虚拟键（含合并与幂等，
+- 键迁移：裸名 stats/quota 历史重键到最早账号的虚拟键（启动与 reload 双时机，含合并与幂等，
   `TestStartupProviderKeyMigration_*`、stats 层 `TestRenameProviderKeyMergesBuckets`）；
   无 plural 池的 provider 不迁移。
 - label 改名：持久化生效、账号 ID/凭据不动、未知 id 与非法 label fail-closed

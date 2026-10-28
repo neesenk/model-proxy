@@ -238,6 +238,43 @@ func (a *AgentCounter) Reset() {
 	a.m = map[AgentKey]*AgentCount{}
 }
 
+// AdoptProviderKey re-keys every (agent, from, model) entry onto the matching
+// (agent, to, model) key, ADDING into any existing target entry — the
+// in-memory half of a runtime provider-key rename on a live pipeline (see
+// MetricsStore.AdoptProviderKey for the concurrency contract). Returns the
+// number of entries moved.
+func (a *AgentCounter) AdoptProviderKey(from, to string) int {
+	if from == "" || to == "" || from == to {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	moved := 0
+	for k, src := range a.m {
+		if k.Provider != from {
+			continue
+		}
+		delete(a.m, k)
+		dstKey := AgentKey{Agent: k.Agent, Provider: to, Model: k.Model}
+		dst := a.m[dstKey]
+		if dst == nil {
+			dst = &AgentCount{}
+			a.m[dstKey] = dst
+		}
+		dst.Requests += src.Requests
+		dst.Input += src.Input
+		dst.Output += src.Output
+		dst.CacheCreation += src.CacheCreation
+		dst.CacheRead += src.CacheRead
+		dst.LatencySum += src.LatencySum
+		dst.TTFTSum += src.TTFTSum
+		dst.DurationSum += src.DurationSum
+		dst.Failures += src.Failures
+		moved++
+	}
+	return moved
+}
+
 // AgentFromMCPClient maps an MCP initialize frame's clientInfo.name onto the
 // agent label set — the MCP-side attribution seam (the gateway stamps it on
 // request-log records when the User-Agent signal is absent or generic).
