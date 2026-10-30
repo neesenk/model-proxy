@@ -133,11 +133,21 @@ var developerRoleRejectionREs = []*regexp.Regexp{
 	regexp.MustCompile(`角色信息不正确`),
 }
 
-// IsDeveloperRoleRejection reports whether a 400 body is a chat-dialect
+// requestShapeStatus reports whether an upstream status carries a
+// request-shape rejection body worth sniffing for self-healing lessons
+// (unsupported param, developer-role rename): 400 Bad Request and 422
+// Unprocessable Entity. Most chat dialects spell these rejections 400, but
+// deepseek's serde errors ("unknown variant", "unknown field") answer 422 —
+// the same lesson families must fire on both.
+func requestShapeStatus(status int) bool {
+	return status == http.StatusBadRequest || status == http.StatusUnprocessableEntity
+}
+
+// IsDeveloperRoleRejection reports whether a 400/422 body is a chat-dialect
 // rejection of the developer role specifically (mentions developer, or zhipu's
 // generic role wording).
 func IsDeveloperRoleRejection(status int, peek []byte) bool {
-	if status != http.StatusBadRequest || len(peek) == 0 {
+	if !requestShapeStatus(status) || len(peek) == 0 {
 		return false
 	}
 	for _, re := range developerRoleRejectionREs {

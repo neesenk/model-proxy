@@ -217,6 +217,13 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   改道（context overflow / capability reroute）同规则。pin/force 与可用性门控
   不受影响；未知取值忽略（打错字不得改变路由）。该 header 不在出站白名单内，
   永不上行。
+- **force-provider 不参与亲和**：`x-mp-force-provider` 收窄后的目标集仍经调度器
+  排序，但该请求**不读、不写任何 sticky 槽**（与 `x-mp-sticky: off` 同一抑制路径，
+  由 forward 层在调度前合成）。force 是"这一笔"的一次性意图，不是引擎决策：若
+  写入 sticky，被 force 的提供方会占用共享槽（会话键或无 session 客户端共用的裸
+  路由键）整整一个 dwell，把全部匿名流量拖到被 force 的提供方上（实测：force 探测
+  落到按量付费官方 API，把整个分析风暴拖离 plan 池）。锚点
+  `TestForceProviderDoesNotWriteSticky`。
 - **调度决策出处 `schedule.source`**：每条 attempt 的 request log 携带
   `schedule.source` 词表：`quota`（tier→priority→surplus 新选/切换）、`sticky`
   （(会话, 路由) 绑定保持）、`pin`（操作员 pin 收窄）、`load_balance`（轮转分
@@ -319,15 +326,15 @@ provider：照常 failover（换一家策略不同的 provider 可能可服务�
 
 `paramBlock` 按 `(provider, model)` 隔离：
 
-1. 400 body 命中已知 unsupported/unknown parameter 形式；
+1. **400/422** body 命中已知 unsupported/unknown parameter 形式（deepseek 的 serde 反序列化错误以 422 应答同一类拒绝——"unknown field"/"unknown variant"，两拼写都触发）；
 2. 提取违规顶层字段；
 3. 当次剥离并重试一次；
 4. 后续请求在 `RewriteRequest` 后预防性剥离。
 
 同一学习-重试家族还有两条**改写型**课程（`internal/targetexec/failure.go`，只在本上游真的拒绝后才改写——接受该形状的上游永不被碰）：
 
-- `developer_role`：chat 方言拒绝 OpenAI `developer` role（volcengine "invalid value: \`developer\`"、deepseek "unknown variant"、kimi-code "not a valid role"、zhipu "角色信息不正确"）→ 把 `messages[].role` 的 `developer` 改写为 `system` 后重试一次。
-- `thinking_adaptive`：anthropic 方言拒绝 budget 式 thinking（shopee claude 网关 "thinking.type.enabled is not supported … Use thinking.type.adaptive"）→ 把 `thinking` 改写为 `{"type":"adaptive"}` 后重试一次。
+- `developer_role`：chat 方言拒绝 OpenAI `developer` role（volcengine "invalid value: \`developer\`"、deepseek "unknown variant"——**400 与 422 两种拼写**、kimi-code "not a valid role"、zhipu "角色信息不正确"）→ 把 `messages[].role` 的 `developer` 改写为 `system` 后重试一次。
+- `thinking_adaptive`：anthropic 方言拒绝 budget 式 thinking（shopee claude 网关 400 "thinking.type.enabled is not supported … Use thinking.type.adaptive"）→ 把 `thinking` 改写为 `{"type":"adaptive"}` 后重试一次。
 
 两条课程与剥参一样持久化在 `(provider, model)` 的 paramBlock 里，经 `applyParamBlock` 在后续请求上预先应用。
 

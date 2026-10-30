@@ -679,6 +679,48 @@ func TestForward_LearnsDeveloperRoleRename(t *testing.T) {
 	}
 }
 
+// TestForward_LearnsDeveloperRoleRename422 pins the 422 spelling of the same
+// lesson: api.deepseek.com's serde deserializer rejects the developer role
+// with 422 Unprocessable Entity ("unknown variant `developer`", expected-role
+// list even carrying deepseek-only roles) where the historical observation
+// was 400. The rename-retry must fire on 422 too, or every developer-roled
+// request forced onto that dialect terminates as a raw 422.
+func TestForward_LearnsDeveloperRoleRename422(t *testing.T) {
+	var up *fakeUpstream
+	up = newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		if up.hits() == 1 {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			io.WriteString(w, `{"error":{"message":"Failed to deserialize the JSON body into the target type: messages[0].role: unknown variant `+"`developer`"+`, expected one of `+"`system`"+`, `+"`user`"+`, `+"`assistant`"+`, `+"`tool`"+`, `+"`latest_reminder`"+` at line 1 column 57 (request_id: 3de22a22-cc5c-4084-8eb0-6f218037816c)","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}`)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		io.WriteString(w, `{"id":"c1","choices":[{"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	})
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{"v": {OpenAIBaseURL: up.srv.URL, Provider: testProviderID}},
+		Routes:    map[string][]configdomain.RouteTarget{"m1": {{Provider: "v", Model: "m1"}}},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["v"] = &testProv{key: "k"}
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+
+	body := `{"model":"m1","messages":[{"role":"developer","content":"be brief"},{"role":"user","content":"ping"}]}`
+	code, rb := post(t, px.URL+"/v1/chat/completions", body)
+	if code != http.StatusOK {
+		t.Fatalf("first request status = %d: %s", code, rb)
+	}
+	if up.hits() != 2 {
+		t.Fatalf("upstream hits = %d, want 2 (422 reject + renamed retry)", up.hits())
+	}
+	if !strings.Contains(up.lastBody(), `"system"`) || strings.Contains(up.lastBody(), `"developer"`) {
+		t.Errorf("retry body not renamed: %s", up.lastBody())
+	}
+	if !p.runtimeState.ParamBlocked("v", "m1", "developer_role") {
+		t.Error("developer_role lesson not persisted from the 422 rejection")
+	}
+}
+
 // TestForward_LearnsThinkingAdaptiveE2E pins the thinking_adaptive lesson end
 // to end through the full forward pipeline: an anthropic upstream that
 // rejects budget-based thinking (shopee's wording) gets the request retried

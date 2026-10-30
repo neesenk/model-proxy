@@ -341,6 +341,51 @@ func TestParamStrip_LearnAndRetry(t *testing.T) {
 
 // (TestStripTopLevelParam moved to internal/targetexec/classification_test.go.)
 
+// TestParamStrip_LearnAndRetry422: deepseek's serde deserializer reports
+// unknown fields as 422 ("Failed to deserialize the JSON body into the target
+// type: unknown field `store`") where other dialects answer 400 — the
+// strip-retry must fire on that spelling too, or every first request with a
+// modern-only param terminates as a raw 422.
+func TestParamStrip_LearnAndRetry422(t *testing.T) {
+	var hits atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		hits.Add(1)
+		w.Header().Set("content-type", "application/json")
+		if bytes.Contains(b, []byte(`"store"`)) {
+			w.WriteHeader(422)
+			w.Write([]byte(`{"error":{"message":"Failed to deserialize the JSON body into the target type: unknown field ` + "`store`" + `, expected one of ` + "`model`" + ` at line 1 column 42 (request_id: 3de22a22)","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}`))
+			return
+		}
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer primary.Close()
+	fallback := newHitFakeUpstream(t, hitScript(func(int) (int, string, http.Header, time.Duration) {
+		return 200, `{"ok":true}`, nil, 0
+	}))
+	cfg := modelLockCfg(primary.URL, fallback.srv.URL)
+	p, px := newModelLockProxy(t, cfg)
+
+	// First request: 422 → learn → strip store → retry → 200.
+	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[],"store":true}`); st != 200 {
+		t.Fatalf("status = %d, want 200 (strip-retry served)", st)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Errorf("primary hits = %d, want 2 (422 + stripped retry)", got)
+	}
+	if !p.runtimeState.ParamBlocked("primary", "m1", "store") {
+		t.Error("store should be in primary's learned blocklist")
+	}
+
+	// Second request: stripped preemptively — no 422 round-trip.
+	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[],"store":true}`); st != 200 {
+		t.Fatalf("status = %d, want 200", st)
+	}
+	if got := hits.Load(); got != 3 {
+		t.Errorf("primary hits = %d, want 3 (preemptive strip, no retry)", got)
+	}
+}
+
 // TestEmpty200_ClientCancelNoLock (P1-1c): a client that disconnects before
 // the first byte must NOT produce a model lock — zero bytes streamed in that
 // case means "client gone", not "empty upstream body".

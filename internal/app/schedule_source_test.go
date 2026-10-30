@@ -222,6 +222,68 @@ func TestStickyOffOverrideUnknownValueIgnored(t *testing.T) {
 	}
 }
 
+// TestForceProviderDoesNotWriteSticky: a force-provider override is a one-shot
+// intent for THIS request, never an affinity signal. Scheduling a
+// force-narrowed chain must not commit the forced provider into any sticky
+// slot: the session-keyed one (a forced probe would hijack the conversation's
+// binding) nor the route-keyed fallback (sessionless force traffic shares that
+// slot with every other sessionless client — the write would drag them all
+// onto the forced provider for a full dwell).
+func TestForceProviderDoesNotWriteSticky(t *testing.T) {
+	p, base := scheduleSourceFixture(t)
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+
+	// Park a session binding first (fixture quotas rank provider b first).
+	if code := postScheduleProbe(t, base+"/v1/chat/completions", body, "s1", ""); code != 200 {
+		t.Fatalf("parking request status = %d, want 200", code)
+	}
+	awaitRecordCount(t, p.reqLog.Directory(), 1)
+	key := runtimestate.StickyKey("s1", "m")
+	parked, ok := p.runtimeState.Sticky(key)
+	if !ok || parked.Provider == "" {
+		t.Fatalf("session binding after first request = %+v (ok=%v), want a committed park", parked, ok)
+	}
+	parkedSince := parked.Since
+
+	// Forced request carrying that session: the binding must survive
+	// untouched — same provider, same Since, no hijack onto "a".
+	forced, _ := http.NewRequest(http.MethodPost, base+"/v1/chat/completions", strings.NewReader(strings.Replace(body, "hi", "hi-forced", 1)))
+	forced.Header.Set("Content-Type", "application/json")
+	forced.Header.Set("x-claude-code-session-id", "s1")
+	forced.Header.Set("x-mp-force-provider", "a")
+	resp, err := http.DefaultClient.Do(forced)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("session forced request status = %d, want 200", resp.StatusCode)
+	}
+	awaitRecordCount(t, p.reqLog.Directory(), 2)
+	entry, ok := p.runtimeState.Sticky(key)
+	if !ok || entry.Provider != parked.Provider || !entry.Since.Equal(parkedSince) {
+		t.Fatalf("session binding after forced request = %+v (ok=%v), want unchanged %+v (no hijack onto forced provider)", entry, ok, parked)
+	}
+
+	// Sessionless forced request: must not create the route-key binding at all
+	// — that slot is shared with every sessionless client on the route.
+	forcedAnon, _ := http.NewRequest(http.MethodPost, base+"/v1/chat/completions", strings.NewReader(strings.Replace(body, "hi", "hi-anon-forced", 1)))
+	forcedAnon.Header.Set("Content-Type", "application/json")
+	forcedAnon.Header.Set("x-mp-force-provider", "a")
+	resp2, err := http.DefaultClient.Do(forcedAnon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		t.Fatalf("sessionless forced request status = %d, want 200", resp2.StatusCode)
+	}
+	awaitRecordCount(t, p.reqLog.Directory(), 3)
+	if entry, ok := p.runtimeState.Sticky("m"); ok {
+		t.Fatalf("route-key sticky written by the forced request: %+v — sessionless force traffic must not park the shared slot on the forced provider", entry)
+	}
+}
+
 // TestScheduleSourceForceVocabulary: forward cannot import runtime, so its
 // force constant is pinned equal here — the two vocabularies must never
 // drift apart.

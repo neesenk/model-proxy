@@ -77,10 +77,11 @@ func TestCommitExposesOnlyPreparedRequestBody(t *testing.T) {
 }
 
 // TestDeveloperRoleRejectionDetection covers the observed 400 wordings of
-// chat upstreams that predate the OpenAI developer role.
+// chat upstreams that predate the OpenAI developer role, and the 422 spellings
+// (deepseek's serde deserializer answers the same rejection with 422).
 func TestDeveloperRoleRejectionDetection(t *testing.T) {
 	volc := "{\"code\":\"InvalidParameter\",\"message\":\"The parameter `messages.role` specified in the request are not valid: invalid value: `developer`, supported values are [system user assistant tool]\"}"
-	deepseek := "{\"message\":\"Failed to deserialize the JSON body into the target type: messages[0].role: unknown variant `developer`, expected one of `system`, `user`\"}"
+	deepseek := "{\"message\":\"Failed to deserialize the JSON body into the target type: messages[0].role: unknown variant `developer`, expected one of `system`, `user`, `assistant`, `tool`, `latest_reminder`\"}"
 	kimi := "{\"message\":\"role 'developer' is not a valid role\"}"
 	zhipu := "{\"code\":\"1214\",\"message\":\"角色信息不正确\"}"
 	for name, body := range map[string]string{
@@ -93,17 +94,31 @@ func TestDeveloperRoleRejectionDetection(t *testing.T) {
 			t.Errorf("%s: not detected", name)
 		}
 	}
+	// deepseek's api.deepseek.com reports the identical role rejection as 422
+	// Unprocessable Entity — the rename-retry must fire on that spelling too.
+	for name, body := range map[string]string{
+		"deepseek 422 unknown variant": deepseek,
+		"volcengine 422 invalid value": volc,
+	} {
+		if !IsDeveloperRoleRejection(422, []byte(body)) {
+			t.Errorf("%s: not detected", name)
+		}
+	}
 	for name, body := range map[string]string{
 		"param not supported": "Unsupported parameter: 'max_tokens' is not supported",
 		"model not found":     "Model not found: m1",
 		"empty":               "",
+		"422 unrelated body":  "{\"error\":{\"message\":\"content too long\",\"type\":\"invalid_request_error\"}}",
 	} {
 		if IsDeveloperRoleRejection(400, []byte(body)) {
 			t.Errorf("%s: false positive", name)
 		}
 	}
+	if IsDeveloperRoleRejection(422, []byte("Unsupported parameter: 'max_tokens' is not supported")) {
+		t.Error("unrelated 422 body must not trigger")
+	}
 	if IsDeveloperRoleRejection(500, []byte(kimi)) {
-		t.Error("non-400 status must not trigger")
+		t.Error("non-400/422 status must not trigger")
 	}
 }
 

@@ -687,7 +687,15 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 	// separately from upstream latency under the virtual ("routing","decision")
 	// row — sum/requests there is the mean decision time per request.
 	routeStart := time.Now()
-	ordered, scheduleSource := p.schedule(cfg, parentOf, exposed, sessionKey, req.stickyOff, targets, routeKeys, generation)
+	// A force-provider override is a one-shot intent for THIS request, not an
+	// affinity signal: it must not read or write the sticky binding. The write
+	// is the dangerous half — scheduling a force-narrowed chain used to commit
+	// the forced provider into the shared (session or route-key) sticky slot,
+	// dragging every sessionless client on the route onto the forced provider
+	// for a full dwell (observed: force probes onto a pay-as-you-go official
+	// API pulled a whole analysis storm off the plan pool).
+	forcedAffinityOff := req.stickyOff || forcedProvider != ""
+	ordered, scheduleSource := p.schedule(cfg, parentOf, exposed, sessionKey, forcedAffinityOff, targets, routeKeys, generation)
 	// A force-provider override collapsed the chain BEFORE the scheduler ranked
 	// it — that narrowing, not any engine, is the decision of record.
 	if forcedProvider != "" {

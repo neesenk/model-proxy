@@ -229,7 +229,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 		}
 		if response.StatusCode >= 400 {
 			var peek []byte
-			if policy.ContextRetry != nil || response.StatusCode == 400 || response.StatusCode == 402 || response.StatusCode == 403 || response.StatusCode == 404 {
+			if policy.ContextRetry != nil || response.StatusCode == 400 || response.StatusCode == 402 || response.StatusCode == 403 || response.StatusCode == 404 || response.StatusCode == 422 {
 				peek = peekResponseBody(response, contextOverflowPeek)
 			}
 			// kimi-code answers the exhausted 5-hour coding-plan window with
@@ -284,7 +284,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 					return Result{Outcome: OutcomeFailedHard}
 				}
 			}
-			if response.StatusCode == http.StatusBadRequest && !strippedParam {
+			if requestShapeStatus(response.StatusCode) && !strippedParam {
 				if parameter, ok := ParseUnsupportedParam(peek); ok {
 					if executor.State != nil {
 						executor.State.LearnParamBlock(target, parameter)
@@ -299,13 +299,13 @@ func (executor Executor) Execute(attempt Attempt) Result {
 				}
 			}
 			// Same learning-retry family, different lesson: an upstream whose
-			// chat dialect rejects the developer role (400 naming the role or
-			// zhipu's generic role wording) learns ParamDeveloperRole and the
-			// request retries once with developer renamed to system. Like the
-			// param strip, this only fires after THIS upstream actually
+			// chat dialect rejects the developer role (400/422 naming the role
+			// or zhipu's generic role wording) learns ParamDeveloperRole and
+			// the request retries once with developer renamed to system. Like
+			// the param strip, this only fires after THIS upstream actually
 			// rejected the role — OpenAI-proper backends that accept developer
 			// are never rewritten.
-			if response.StatusCode == http.StatusBadRequest && !renamedRole && IsDeveloperRoleRejection(response.StatusCode, peek) {
+			if requestShapeStatus(response.StatusCode) && !renamedRole && IsDeveloperRoleRejection(response.StatusCode, peek) {
 				if shaped, changed := RenameDeveloperRole(body); changed {
 					if executor.State != nil {
 						executor.State.LearnParamBlock(target, ParamDeveloperRole)
