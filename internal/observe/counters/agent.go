@@ -221,7 +221,8 @@ func (a *AgentCounter) AddLatency(agent, provider, model string, ms, ttftMs uint
 }
 
 // addDuration records the FULL call wall-clock (send → end of the streamed
-// body) for one (agent, provider, model) — the tok/s denominator (see
+// body) for one (agent, provider, model) — the basis of the tok/s denominator
+// (the analytics block subtracts TTFT for the generation window; see
 // MetricsStore.AddDuration).
 func (a *AgentCounter) AddDuration(agent, provider, model string, totalMs uint64) {
 	a.mutate(agent, provider, model, func(c *AgentCount) { c.DurationSum += totalMs })

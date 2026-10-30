@@ -289,8 +289,9 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 			uint64(attempt.UpstreamMilliseconds),
 			uint64(attempt.TTFTMilliseconds),
 		)
-		// Full call wall-clock (send → end of streamed body) — the tok/s
-		// denominator; header-arrival latency above deliberately excludes the
+		// Full call wall-clock (send → end of streamed body) — the basis of the
+		// tok/s denominator (analytics subtracts TTFT for the generation
+		// window); header-arrival latency above deliberately excludes the
 		// generation tail.
 		effects.proxy.metrics.AddDuration(
 			target.Provider,

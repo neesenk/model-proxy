@@ -1415,13 +1415,13 @@ test('modelHealthFromSeries scores latency/ttft/tok-s, worst first', () => {
   // × requests rebuilds each bucket's sums, same as the folding in
   // analyticsTableRows).
   const series = [
-    // Healthy: fast ttft, solid decode speed (long calls at ~67 out-tok/s
+    // Healthy: fast ttft, solid decode speed (long calls at ~68 out-tok/s
     // still fail the latency dim — same tradeoff the old Model Health card
     // showed).
     { provider: 'zhipu', model: 'glm-5.3', points: [
       { bucket: 100, requests: 10, failures: 0, input: 40000, output: 20000, avg_ttft_ms: 800, avg_duration_ms: 30000 },
     ] },
-    // Degraded: 6s ttft, 9s calls, ~11 out-tok/s.
+    // Degraded: 6s ttft, 9s calls, ~8 out-tok/s.
     { provider: 'aqp', model: 'slow-model', points: [
       { bucket: 100, requests: 4, failures: 0, input: 100, output: 100, avg_ttft_ms: 6000, avg_duration_ms: 9000 },
     ] },
@@ -1440,7 +1440,7 @@ test('modelHealthFromSeries scores latency/ttft/tok-s, worst first', () => {
   assert.equal(good.grade, 'ok');
   assert.equal(good.ttftMs, 800);
   assert.equal(good.latencyMs, 30000);
-  assert.equal(good.tokSec, 20000 / 300); // 20k output tokens / 300s
+  assert.equal(good.tokSec, 20000 / 292); // 20k output tokens over the 292s generation window (300s calls − 8s TTFT)
   assert.equal(good.dims.latency.grade, 'err'); // 30s calls fail latency even at 200 tok/s
 });
 
@@ -3033,7 +3033,7 @@ test('sessionHealthSummary derives health signals with gap/percentile guards', (
   assert.equal(h.p95Ms, 9000, 'p95 clamps to the max');
   assert.equal(h.failovers, 1);
   assert.equal(h.cacheHitPct, 70, 'cache read share of read+input (800/1150)');
-  assert.equal(h.tokPerSec, Math.round((120 / 15) * 10) / 10, 'output tokens over summed latency');
+  assert.equal(h.tokPerSec, Math.round((120 / 15) * 10) / 10, 'output tokens over summed generation time');
   assert.deepEqual(h.models.map((m) => m.model + '×' + m.n), ['m1×2', 'm2×2'], 'model distribution sorted by count');
   assert.equal(h.shadow, 1);
   // Degenerate inputs: empty, single row (no interval), zero denominators.
@@ -3045,6 +3045,13 @@ test('sessionHealthSummary derives health signals with gap/percentile guards', (
   assert.equal(noLat.p50Ms, null);
   assert.equal(noLat.cacheHitPct, null, 'zero denominator guarded');
   assert.equal(noLat.tokPerSec, null);
+  // tok/s excludes the pre-first-token wait per row: two 1s calls with 100ms
+  // TTFT each divide 20 output tokens by 1.8s, not 2s.
+  const withTtft = sessionHealthSummary([
+    { ts: 0, latencyMs: 1000, ttftMs: 100, output: 10 },
+    { ts: 1000, latencyMs: 1000, ttftMs: 100, output: 10 },
+  ]);
+  assert.equal(withTtft.tokPerSec, Math.round((20 / 1.8) * 10) / 10);
 });
 
 test('requestRowHTML cache badge shows the hit share and highlights at 80%', () => {

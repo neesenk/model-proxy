@@ -746,17 +746,17 @@ func TestMergeStatsDeltasPreservesAllCounters(t *testing.T) {
 	destination := map[Key]Counters{key: {
 		Requests: 1, Failovers: 2, RateLimited429: 3, Failures: 4,
 		Input: 5, Output: 6, CacheCreation: 7, CacheRead: 8,
-		TokenRequests: 9, LastRequestAt: 200, LatencySum: 10, TTFTSum: 11,
+		TokenRequests: 9, LastRequestAt: 200, LatencySum: 10, TTFTSum: 11, DurationSum: 40,
 	}}
 	MergeDeltas(destination, map[Key]Counters{key: {
 		Requests: 11, Failovers: 12, RateLimited429: 13, Failures: 14,
 		Input: 15, Output: 16, CacheCreation: 17, CacheRead: 18,
-		TokenRequests: 19, LastRequestAt: 100, LatencySum: 20, TTFTSum: 21,
+		TokenRequests: 19, LastRequestAt: 100, LatencySum: 20, TTFTSum: 21, DurationSum: 41,
 	}})
 	want := Counters{
 		Requests: 12, Failovers: 14, RateLimited429: 16, Failures: 18,
 		Input: 20, Output: 22, CacheCreation: 24, CacheRead: 26,
-		TokenRequests: 28, LastRequestAt: 200, LatencySum: 30, TTFTSum: 32,
+		TokenRequests: 28, LastRequestAt: 200, LatencySum: 30, TTFTSum: 32, DurationSum: 81,
 	}
 	if got := destination[key]; got != want {
 		t.Errorf("merged counters = %+v, want %+v", got, want)
@@ -833,10 +833,11 @@ func TestDiffAgent(t *testing.T) {
 // batches coalesce.
 func TestMergeAgentDeltas(t *testing.T) {
 	key := AgentKey{Agent: "a", Provider: "z", Model: "m"}
-	dst := map[AgentKey]AgentCounters{key: {Requests: 1, Input: 2, Output: 3, CacheCreation: 4, CacheRead: 5, LatencySum: 6, Failures: 7}}
-	MergeAgentDeltas(dst, map[AgentKey]AgentCounters{key: {Requests: 10, Input: 20, Output: 30, CacheCreation: 40, CacheRead: 50, LatencySum: 60, Failures: 70}})
+	dst := map[AgentKey]AgentCounters{key: {Requests: 1, Input: 2, Output: 3, CacheCreation: 4, CacheRead: 5, LatencySum: 6, TTFTSum: 8, DurationSum: 9, Failures: 7}}
+	MergeAgentDeltas(dst, map[AgentKey]AgentCounters{key: {Requests: 10, Input: 20, Output: 30, CacheCreation: 40, CacheRead: 50, LatencySum: 60, TTFTSum: 80, DurationSum: 90, Failures: 70}})
 	if got := dst[key]; got.Requests != 11 || got.Input != 22 || got.Output != 33 ||
-		got.CacheCreation != 44 || got.CacheRead != 55 || got.LatencySum != 66 || got.Failures != 77 {
+		got.CacheCreation != 44 || got.CacheRead != 55 || got.LatencySum != 66 ||
+		got.TTFTSum != 88 || got.DurationSum != 99 || got.Failures != 77 {
 		t.Errorf("merged agent delta = %+v", got)
 	}
 }

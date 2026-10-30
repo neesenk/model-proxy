@@ -303,6 +303,7 @@ func (s *Store) FlushAgentsContext(
 			cache_read = cache_read + excluded.cache_read,
 			latency_ms_sum = latency_ms_sum + excluded.latency_ms_sum,
 			ttft_ms_sum = ttft_ms_sum + excluded.ttft_ms_sum,
+			duration_ms_sum = duration_ms_sum + excluded.duration_ms_sum,
 			failures = failures + excluded.failures`)
 	if err != nil {
 		return err

@@ -30,10 +30,11 @@ func TestFoldTotalsDerivesUnifiedMetrics(t *testing.T) {
 	if got.Tokens != 18 {
 		t.Errorf("Tokens = %d, want 18", got.Tokens)
 	}
-	// tok/s = 5 output / 4s call time; latency/ttft requests-weighted over
+	// tok/s = 5 output over the 3.94s generation window (4s call time minus
+	// the 60ms pre-first-token wait); latency/ttft requests-weighted over
 	// BOTH buckets ((600+0)/3, (60+0)/3); err% 0 with requests.
-	if got.TokSec == nil || !almostEqual(*got.TokSec, 1.25) {
-		t.Errorf("TokSec = %v, want 1.25", got.TokSec)
+	if got.TokSec == nil || !almostEqual(*got.TokSec, 5.0/3.94) {
+		t.Errorf("TokSec = %v, want 5/3.94", got.TokSec)
 	}
 	if got.AvgLatencyMs == nil || !almostEqual(*got.AvgLatencyMs, 200) || got.AvgTtftMs == nil || !almostEqual(*got.AvgTtftMs, 20) {
 		t.Errorf("averages = %v/%v, want 200/20", got.AvgLatencyMs, got.AvgTtftMs)
@@ -76,10 +77,35 @@ func TestFoldTotalsNullsMeanNoData(t *testing.T) {
 	}
 }
 
+func TestDecodeSecondsExcludesTTFT(t *testing.T) {
+	// The tok/s denominator is the generation window: TTFT is time with no
+	// output token, so it must not dilute the rate.
+	if got := decodeSeconds(4000, 1000); !almostEqual(got, 3) {
+		t.Errorf("decodeSeconds(4000,1000) = %v, want 3", got)
+	}
+	// No TTFT recorded (old rows, or a provider that never stamps one): the
+	// full call time stays the denominator.
+	if got := decodeSeconds(4000, 0); !almostEqual(got, 4) {
+		t.Errorf("decodeSeconds(4000,0) = %v, want 4", got)
+	}
+	// TTFT swallowing the whole call (buffered/non-streamed response stamps
+	// its first client byte at completion) also falls back to the call time —
+	// never a zero/negative denominator.
+	if got := decodeSeconds(4000, 4000); !almostEqual(got, 4) {
+		t.Errorf("decodeSeconds(4000,4000) = %v, want 4", got)
+	}
+	if got := decodeSeconds(4000, 9000); !almostEqual(got, 4) {
+		t.Errorf("decodeSeconds(4000,9000) = %v, want 4", got)
+	}
+	if got := decodeSeconds(0, 500); got != 0 {
+		t.Errorf("decodeSeconds(0,500) = %v, want 0", got)
+	}
+}
+
 func TestNewPointCarriesDerivedFields(t *testing.T) {
 	b := observestats.AnalyticsBucket{Provider: "p", Model: "priced", Bucket: 60, Requests: 2, Input: 10, Output: 5, CacheRead: 2, CacheCreation: 1, LatencySum: 600, TTFTSum: 60, DurationSum: 4000, AvgLatencyMs: 300, AvgTtftMs: 30, AvgDurationMs: 2000}
 	p := NewPoint(b, nil, pricedCatalog, nil)
-	if p.Tokens != 18 || p.TokSec == nil || !almostEqual(*p.TokSec, 1.25) ||
+	if p.Tokens != 18 || p.TokSec == nil || !almostEqual(*p.TokSec, 5.0/3.94) ||
 		p.CacheHitPct == nil || !almostEqual(*p.CacheHitPct, 200.0/13) || p.ErrPct == nil || *p.ErrPct != 0 {
 		t.Fatalf("derived point = %+v", p)
 	}

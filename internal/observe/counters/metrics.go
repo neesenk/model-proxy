@@ -85,8 +85,9 @@ type ProviderMetrics struct {
 	// COMMITTED (served) responses; avg = sum/requests. Latency = upstream
 	// response-HEADER arrival (send → headers; excludes the streamed body and
 	// client slow-read); TTFT = send → first byte written to the client;
-	// Duration = full call wall-clock (send → end of streamed body) — the
-	// honest denominator for token-per-second speed.
+	// Duration = full call wall-clock (send → end of streamed body); the
+	// analytics tok/s denominator is the generation window, Duration minus
+	// TTFT.
 	LatencySum  atomic.Uint64
 	TTFTSum     atomic.Uint64
 	DurationSum atomic.Uint64
@@ -173,7 +174,8 @@ func (s *MetricsStore) AddLatency(provider, model string, latencyMs, ttftMs uint
 // addDuration records one served response's FULL call wall-clock (send → end
 // of the streamed body, milliseconds) — distinct from AddLatency's
 // header-arrival latency, which excludes the generation tail. This is the
-// denominator for token-per-second speed.
+// basis of the token-per-second denominator (the analytics block subtracts
+// TTFT for the generation window).
 func (s *MetricsStore) AddDuration(provider, model string, totalMs uint64) {
 	pm := s.Entry(PMKey{Provider: provider, Model: model})
 	pm.DurationSum.Add(totalMs)

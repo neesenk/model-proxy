@@ -34,7 +34,7 @@ type Totals struct {
 	Tokens         uint64   `json:"tokens"`         // four-bucket total
 	AvgLatencyMs   *float64 `json:"avg_latency_ms"` // null when no requests
 	AvgTtftMs      *float64 `json:"avg_ttft_ms"`    // null when no requests
-	TokSec         *float64 `json:"tok_sec"`        // output / full call seconds; null without call time
+	TokSec         *float64 `json:"tok_sec"`        // output / generation seconds (call time minus TTFT); null without call time
 	CacheHitPct    *float64 `json:"cache_hit_pct"`  // reads / full prompt workload; null without reads
 	Cost           *float64 `json:"cost"`           // nil when nothing in the window is priced
 }
@@ -57,7 +57,7 @@ type Point struct {
 	AvgLatencyMs   float64  `json:"avg_latency_ms"`
 	AvgTtftMs      float64  `json:"avg_ttft_ms"`
 	AvgDurationMs  float64  `json:"avg_duration_ms"`
-	TokSec         *float64 `json:"tok_sec"`
+	TokSec         *float64 `json:"tok_sec"` // output / generation seconds (call time minus TTFT); null without call time
 	CacheHitPct    *float64 `json:"cache_hit_pct"`
 	ErrPct         *float64 `json:"err_pct"`
 	Cost           *float64 `json:"cost"`
@@ -74,6 +74,24 @@ type Series struct {
 	Totals   Totals  `json:"totals"`
 }
 
+// decodeSeconds is the tok/s denominator: the generation window, i.e. the
+// full-call wall clock minus the pre-first-token wait. TTFT is time with no
+// output token yet, so counting it as decode time understates the rate. When
+// TTFT is absent (old rows) or swallows the whole call (buffered/non-streamed
+// responses stamp the first client byte only once the body is complete), the
+// full call time is the defined fallback — a purely buffered bucket hits it.
+// In a bucket mixing streamed and buffered calls the summed subtraction is
+// exact only for the streamed ones (buffered calls contribute TTFT == call).
+func decodeSeconds(durationMs, ttftMs uint64) float64 {
+	if durationMs == 0 {
+		return 0
+	}
+	if ttftMs < durationMs {
+		return float64(durationMs-ttftMs) / 1000
+	}
+	return float64(durationMs) / 1000
+}
+
 // NewPoint projects one store bucket into a Point, pricing it with the same
 // per-bucket path as FoldTotals (unknown price → Cost nil, Priced false —
 // never fabricated).
@@ -86,8 +104,8 @@ func NewPoint(b observestats.AnalyticsBucket, overrides map[string]pricing.Overr
 		Tokens:       b.Input + b.Output + b.CacheCreation + b.CacheRead,
 		AvgLatencyMs: b.AvgLatencyMs, AvgTtftMs: b.AvgTtftMs, AvgDurationMs: b.AvgDurationMs,
 	}
-	if callSec := float64(b.DurationSum) / 1000; callSec > 0 {
-		tokSec := float64(b.Output) / callSec
+	if genSec := decodeSeconds(b.DurationSum, b.TTFTSum); genSec > 0 {
+		tokSec := float64(b.Output) / genSec
 		p.TokSec = &tokSec
 	}
 	if denom := b.Input + b.CacheCreation + b.CacheRead; denom > 0 {
@@ -138,8 +156,8 @@ func FoldTotals(buckets []observestats.AnalyticsBucket, overrides map[string]pri
 		ttft := math.Round(float64(ttftSum)/float64(t.Requests)*10) / 10
 		t.ErrPct, t.AvgLatencyMs, t.AvgTtftMs = &errPct, &lat, &ttft
 	}
-	if durationSum > 0 {
-		tokSec := float64(t.Output) / (float64(durationSum) / 1000)
+	if genSec := decodeSeconds(durationSum, ttftSum); genSec > 0 {
+		tokSec := float64(t.Output) / genSec
 		t.TokSec = &tokSec
 	}
 	if denom := t.Input + t.CacheCreation + t.CacheRead; denom > 0 {

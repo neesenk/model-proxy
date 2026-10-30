@@ -398,6 +398,7 @@ func MergeDeltas(
 		}
 		current.LatencySum += add.LatencySum
 		current.TTFTSum += add.TTFTSum
+		current.DurationSum += add.DurationSum
 		destination[key] = current
 	}
 }
@@ -413,6 +414,8 @@ func MergeAgentDeltas(
 		current.CacheCreation += add.CacheCreation
 		current.CacheRead += add.CacheRead
 		current.LatencySum += add.LatencySum
+		current.TTFTSum += add.TTFTSum
+		current.DurationSum += add.DurationSum
 		current.Failures += add.Failures
 		destination[key] = current
 	}

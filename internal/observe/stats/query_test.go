@@ -170,7 +170,8 @@ func TestQueryAnalyticsHourBucketsAndWidenedCounters(t *testing.T) {
 		t.Errorf("first hour counters = %+v", buckets[0])
 	}
 	// Averages are requests-weighted over the whole bucket: (300+500)/4 = 200
-	// latency, (1000+1400)/4 = 600 full-call duration (the tok/s denominator).
+	// latency, (1000+1400)/4 = 600 full-call duration (the tok/s
+	// generation-window basis).
 	if buckets[0].AvgLatencyMs != 200 || buckets[0].AvgTtftMs != 20 || buckets[0].AvgDurationMs != 600 {
 		t.Errorf("hour averages = %.1f/%.1f/%.1f, want 200/20/600", buckets[0].AvgLatencyMs, buckets[0].AvgTtftMs, buckets[0].AvgDurationMs)
 	}
@@ -289,6 +290,35 @@ func TestQueryAnalyticsAgents(t *testing.T) {
 	if _, err := store.QueryAnalyticsAgents(0, 1, "", "", "", "year"); err == nil ||
 		!strings.Contains(err.Error(), "minute, hour, day, week or month") {
 		t.Fatalf("invalid granularity error = %v", err)
+	}
+}
+
+// TestFlushAgentsAccumulatesDurationOnConflict pins the agent_buckets upsert:
+// a second flush into the SAME minute must add duration_ms_sum (the tok/s
+// denominator) and ttft_ms_sum. Keeping only the first insert's values
+// silently skews the agent-dimension decode rate.
+func TestFlushAgentsAccumulatesDurationOnConflict(t *testing.T) {
+	store := newTestStore(t, 0)
+	key := AgentKey{Agent: "a", Provider: "p", Model: "m"}
+	if err := store.FlushAgents(60, map[AgentKey]AgentCounters{
+		key: {Requests: 1, Output: 10, LatencySum: 100, TTFTSum: 50, DurationSum: 900},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FlushAgents(60, map[AgentKey]AgentCounters{
+		key: {Requests: 2, Output: 30, LatencySum: 200, TTFTSum: 70, DurationSum: 1100},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	buckets, err := store.QueryAnalyticsAgents(0, 600, "", "", "", "minute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 1 {
+		t.Fatalf("buckets = %d, want 1: %+v", len(buckets), buckets)
+	}
+	if b := buckets[0]; b.Requests != 3 || b.Output != 40 || b.LatencySum != 300 || b.TTFTSum != 120 || b.DurationSum != 2000 {
+		t.Errorf("same-minute fold = %+v, want reqs=3 out=40 lat=300 ttft=120 dur=2000", b)
 	}
 }
 

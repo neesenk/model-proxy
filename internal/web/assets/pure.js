@@ -1841,13 +1841,15 @@ export function modelHealthFromSeries(series) {
     if (!a.requests) continue;
     // duration is the honest call time; before it has accumulated (fresh
     // migration) the header-time latency is the fallback. tok/s counts
-    // OUTPUT tokens only — the decoder's speed (fresh input arrives at
-    // prefix speed and would inflate it).
-    const timeSum = a.durationSum > 0 ? a.durationSum : a.latencySum;
+    // OUTPUT tokens over the GENERATION window — full call minus the
+    // pre-first-token wait (the server's decodeSeconds rule); an absent TTFT,
+    // or one swallowing the call, falls back to the full call time.
+    const durationSum = a.durationSum > 0 ? a.durationSum : a.latencySum;
+    const genSum = a.durationSum > a.ttftSum ? a.durationSum - a.ttftSum : durationSum;
     const values = {
-      latency: timeSum > 0 ? timeSum / a.requests : null,
+      latency: durationSum > 0 ? durationSum / a.requests : null,
       ttft: a.ttftSum > 0 ? a.ttftSum / a.requests : null,
-      toksec: timeSum > 0 ? a.output / (timeSum / 1000) : null,
+      toksec: genSum > 0 ? a.output / (genSum / 1000) : null,
     };
     const dims = {};
     let wsum = 0, score = 0;
@@ -2103,9 +2105,17 @@ export function sessionHealthSummary(rows) {
   const input = list.reduce((s, r) => s + r.input, 0);
   const denom = cacheRead + input;
   if (denom > 0) out.cacheHitPct = Math.round((cacheRead / denom) * 100);
-  const output = list.reduce((s, r) => s + r.output, 0);
-  const latSum = lats.reduce((s, v) => s + v, 0);
-  if (latSum > 0 && output > 0) out.tokPerSec = Math.round((output / (latSum / 1000)) * 10) / 10;
+  // tok/s over the GENERATION window: per row, call time minus the
+  // pre-first-token wait; output is counted over the same rows (a row whose
+  // TTFT is absent or swallows the call contributes its full call time).
+  let output = 0, genMs = 0;
+  for (const r of list) {
+    if (!(Number.isFinite(r.latencyMs) && r.latencyMs > 0)) continue;
+    const ttft = Number.isFinite(r.ttftMs) && r.ttftMs > 0 && r.ttftMs < r.latencyMs ? r.ttftMs : 0;
+    output += r.output || 0;
+    genMs += r.latencyMs - ttft;
+  }
+  if (genMs > 0 && output > 0) out.tokPerSec = Math.round((output / (genMs / 1000)) * 10) / 10;
   const counts = new Map();
   for (const r of list) if (r.model) counts.set(r.model, (counts.get(r.model) || 0) + 1);
   out.models = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([model, n]) => ({ model, n }));
