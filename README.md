@@ -396,7 +396,7 @@ web:
 - **转发端点（`/v1/*`、`/mcp/*`）也有浏览器防线**：携带浏览器身份头（`Origin`/`Sec-Fetch-Site`）的请求中，跨站一律 403、未带 key 认证时 Origin/Host 必须是 loopback 或 config `listen`——防止任意网页借你的浏览器向本机代理发 CORS simple request 静默烧掉订阅配额（LLM API 的 CSRF 面），本机浏览器工具（如 localhost 前端应用）不受影响；CLI/SDK 不带这些头，行为不变。
 - 密钥比较 constant-time；文件编辑（换 key/撤销）≤10s 生效，无需重启。
 - 回环部署也可以单独开启任一面（例如本地也想给转发加 key）。
-- **takeover 自动带真实 key**：开启 api_keys 后 takeover 直接把 `api_keys_file` 的首个 key 写入客户端配置（不再是会被 401 的 `PROXY_MANAGED` 占位符；preview 显示面脱敏回占位符）。例外：MCP 条目暂不写鉴权头——经代理的 MCP 调用在非回环部署下会 401（模板族逐步补齐中）；codex 凭据不走 `{{token}}`，需按其配置手工带 key。
+- **takeover 自动带真实 key**：开启 api_keys 后 takeover 直接把 `api_keys_file` 的首个 key 写入客户端配置（不再是会被 401 的 `PROXY_MANAGED` 占位符；preview 显示面脱敏回占位符）。网关 MCP 条目同路嵌入 `Authorization: Bearer` 头（pi/claude/kimi/zcode/opencode 的 JSON `headers` 字段、codex/stepcode 的 TOML `http_headers`）——`/mcp/*` 与 `/v1/*` 同门禁，MCP 条目无凭据会被 401（部分客户端会误弹「需要 login」）。例外：workbuddy/hermes 的 MCP 条目暂不嵌（schema 未实证支持 header）；codex 的 LLM 凭据不走 `{{token}}`，需按其配置手工带 key（MCP 头不受影响）。
 - **CLI 自动鉴权**：`status`/`doctor --live`/`schedule`/`replay`/`pin`/`shadow report` 等与 daemon 通信的命令按请求面自动附带对应 token（admin token / forward key），无需手工传；`replay` 的回环转发同款。
 - **Tailscale 部署形态**：`listen: 100.x.y.z:PORT`（本机 Tailscale IP）——本机进程连自己的 100.x 地址不出机器，tailnet 内其他设备经加密隧道可达，物理 LAN 不暴露（比 `0.0.0.0` 面更小）；浏览器开 `http://100.x.y.z:PORT/ui/` 输 admin token 建会话。
 

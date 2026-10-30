@@ -9,6 +9,10 @@ mcp:
   json_entry:
     type: http
     url: "{{mcp.url}}"
+    # ZCode http server headers — the forward-surface key the gateway's
+    # /mcp/ endpoints share with /v1/* ({{token}} = real key or sentinel).
+    headers:
+      Authorization: "Bearer {{token}}"
 variants:
   - name: zcode
     protocol: anthropic

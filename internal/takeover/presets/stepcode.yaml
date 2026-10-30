@@ -9,6 +9,10 @@ mcp:
   toml_section: 'mcp_servers."{{mcp.name}}"'
   toml_body: |
     url = "{{mcp.url}}"
+    # stepcode resolveHttpHeaders reads http_headers — the forward-surface key
+    # the gateway's /mcp/ endpoints share with /v1/* ({{token}} = real key or
+    # sentinel).
+    http_headers = { Authorization = "Bearer {{token}}" }
 variants:
   - name: stepcode
     protocol: anthropic

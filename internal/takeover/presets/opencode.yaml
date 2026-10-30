@@ -8,6 +8,10 @@ mcp:
     type: remote
     url: "{{mcp.url}}"
     enabled: true
+    # opencode remote MCP headers — the forward-surface key the gateway's
+    # /mcp/ endpoints share with /v1/* ({{token}} = real key or sentinel).
+    headers:
+      Authorization: "Bearer {{token}}"
 variants:
   - name: opencode
     protocol: anthropic

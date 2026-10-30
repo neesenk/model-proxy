@@ -16,6 +16,11 @@ mcp:
   json_path: mcpServers
   json_entry:
     url: "{{mcp.url}}"
+    # Kimi Code McpServerHttpConfigSchema.headers — the forward-surface key
+    # the gateway's /mcp/ endpoints share with /v1/* ({{token}} = real key
+    # or sentinel).
+    headers:
+      Authorization: "Bearer {{token}}"
 models:
   shape: kimi
   toml_section: 'models."{{model.id}}"'
