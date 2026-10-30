@@ -183,15 +183,16 @@ func runAdd(args, pos []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		msg := fmt.Sprintf("model(s) %s are also served by other configured providers without explicit routes — "+
 			"implicit routing picks alphabetically. Use --priority or routes: to control failover.",
 			strings.Join(ambiguous, ", "))
-		interactive := stdinIsInteractive(stdin)
 		switch {
-		case interactive && !framework.HasFlagValue(args, "--yes"):
+		case framework.HasFlagValue(args, "--yes"):
+			// Explicit proceed (scriptable): surface the note, keep going —
+			// same contract as `presets add --yes`.
+			_, _ = fmt.Fprintf(stdout, "! %s\n", msg)
+		case stdinIsInteractive(stdin):
 			if !askYesNo(stdin, stdout, "Proceed anyway? [y/N] ") {
 				_, _ = fmt.Fprintln(stderr, "aborted")
 				return 1
 			}
-			_, _ = fmt.Fprintf(stdout, "! %s\n", msg)
-		case interactive:
 			_, _ = fmt.Fprintf(stdout, "! %s\n", msg)
 		default:
 			_, _ = fmt.Fprintf(stderr, "✗ %s\nre-run with --yes to proceed\n", msg)
