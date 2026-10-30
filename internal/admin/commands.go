@@ -15,7 +15,10 @@ import (
 	domainpresets "model-proxy/internal/presets"
 	"model-proxy/internal/probe"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/providerstore"
 	"model-proxy/internal/routing"
+
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -150,14 +153,42 @@ func (s *Service) SaveConfig(data []byte) error {
 }
 
 // ValidateConfig lints candidate config bytes via the shared
-// internal/config pipeline without touching disk or runtime state.
+// internal/config pipeline without touching disk or runtime state. Providers
+// resolve EFFECTIVELY (provider.json store, with any providers: block in the
+// linted draft winning per-entry) — the Raw YAML editor lints a
+// post-migration yaml without a providers: section clean instead of failing
+// "no providers configured". A store that cannot be read falls back to the
+// strict lint (its failure is the more urgent signal).
 func (s *Service) ValidateConfig(data []byte) []appapi.ValidationIssue {
 	issues := configdomain.ValidateYAML(data)
+	if providers := s.lintProviders(data); providers != nil {
+		issues = configdomain.ValidateYAMLEffective(data, providers)
+	}
 	out := make([]appapi.ValidationIssue, 0, len(issues))
 	for _, issue := range issues {
 		out = append(out, appapi.ValidationIssue{Line: issue.Line, Message: issue.Message})
 	}
 	return out
+}
+
+// lintProviders merges the store's provider set with the linted draft's own
+// providers: block (draft entries win) — the same yaml-wins merge an
+// absorbing reload would apply to a save. nil means "no effective view" (no
+// store readable), which keeps the strict lint.
+func (s *Service) lintProviders(data []byte) map[string]configdomain.Provider {
+	store, err := providerstore.Load(providerstore.PathUnder(s.homeDir()))
+	if err != nil {
+		return nil
+	}
+	var probe struct {
+		Providers map[string]configdomain.Provider `yaml:"providers"`
+	}
+	if yaml.Unmarshal(data, &probe) == nil {
+		for name, p := range probe.Providers {
+			store[name] = p
+		}
+	}
+	return store
 }
 
 func (s *Service) EditConfig(request appapi.EditRequest) error {
@@ -517,12 +548,15 @@ func (s *Service) AddPreset(name string) (warnings []string, reloadWarning strin
 		return nil, "", fmt.Errorf("unknown preset %q", name)
 	}
 	cfgPath := s.currentConfigFile()
-	written, err := domainpresets.MergeBlock(cfgPath, name)
+	storePath := providerstore.PathUnder(s.homeDir())
+	written, err := domainpresets.MergeBlock(cfgPath, storePath, name)
 	if err != nil {
 		return nil, "", err
 	}
-	_ = written // idempotent: an existing block is fine, login still proceeds
-	merged, err := configdomain.LoadConfig(cfgPath)
+	_ = written // idempotent: an existing entry is fine, login still proceeds
+	// The would-be merged effective config (store + yaml) drives the ambiguity
+	// warnings — the same merge MergeBlock just persisted.
+	_, merged, err := domainpresets.PreviewMergeBlock(cfgPath, storePath, name)
 	if err != nil {
 		return nil, "", fmt.Errorf("reload merged config: %w", err)
 	}

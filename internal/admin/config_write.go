@@ -6,6 +6,7 @@ import (
 
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/configedit"
+	"model-proxy/internal/providerstore"
 )
 
 // saveAndReload serializes every whole-document config replacement against
@@ -22,10 +23,7 @@ func (s *Service) saveAndReload(data []byte) error {
 // hot-reloads the config; on reload failure the previous file is restored from
 // the backup. The caller must hold configFile's configedit lock.
 func (s *Service) saveAndReloadUnderLock(configFile string, data []byte) error {
-	backup, err := configedit.WriteConfigValidated(configFile, string(data), func(path string, raw []byte) error {
-		_, err := configdomain.LoadConfigFromBytes(path, raw)
-		return err
-	})
+	backup, err := configedit.WriteConfigValidated(configFile, string(data), s.validateYAMLWithStore)
 	if err != nil {
 		return err
 	}
@@ -40,4 +38,18 @@ func (s *Service) saveAndReloadUnderLock(configFile string, data []byte) error {
 		return err
 	}
 	return nil
+}
+
+// validateYAMLWithStore validates candidate config bytes against the
+// provider.json store: a post-migration config.yaml carries no providers:
+// section, so raw-YAML saves must validate against the store's set instead of
+// the yaml's own (empty) one. Providers pasted INTO the yaml validate as the
+// yaml-wins merge — exactly what the next absorbing reload would persist.
+func (s *Service) validateYAMLWithStore(path string, raw []byte) error {
+	providers, err := providerstore.Resolve(path, providerstore.PathUnder(s.homeDir()))
+	if err != nil {
+		return err
+	}
+	_, err = configdomain.LoadConfigEffective(path, raw, providers)
+	return err
 }

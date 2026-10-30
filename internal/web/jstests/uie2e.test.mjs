@@ -731,7 +731,7 @@ test('config 页 editor 折叠组开合，表单与 YAML 填充真实配置 (点
   await ctx.waitFor('config active', () => ctx.ev(
     `document.getElementById('tab-config').classList.contains('active')`));
   // 折叠组初始闭合，点击 summary 展开并异步填充表单（不再是 loading…）。
-  for (const id of ['ed-provider', 'ed-settings']) {
+  for (const id of ['ed-route', 'ed-settings']) {
     assert.ok(await ctx.ev(`!document.getElementById('${id}').open`), `${id} 应初始闭合`);
     await ctx.ev(`document.querySelector('#${id} summary').click()`);
     await ctx.waitFor(`#${id} 展开且填充`, () => ctx.ev(
@@ -739,9 +739,12 @@ test('config 页 editor 折叠组开合，表单与 YAML 填充真实配置 (点
         && !document.querySelector('#${id} .editor-body').innerText.startsWith('loading')
         && document.querySelector('#${id} .editor-body').innerText.length > 20`));
   }
-  // Raw YAML 编辑器（CodeMirror 5）加载真实配置文本。
-  await ctx.waitFor('YAML 含 dummy provider', () => ctx.ev(
-    `(document.querySelector('#yaml-editor .CodeMirror')?.innerText || '').includes('dummy')`));
+  // Raw YAML 编辑器（CodeMirror 5）加载真实配置文本：providers: 已被吸收进
+  // provider.json store（boot 时迁移并剥离 yaml 段），yaml 里不再有 dummy，
+  // 但 provider 表单经 effective 解析照常预填（上面的填充断言已覆盖）。
+  await ctx.waitFor('YAML 已加载且 providers 段已被吸收', () => ctx.ev(
+    `(document.querySelector('#yaml-editor .CodeMirror')?.innerText || '').includes('listen:')
+      && !(document.querySelector('#yaml-editor .CodeMirror')?.innerText || '').includes('dummy')`));
   assert.deepEqual(await ctx.pageErrors(), [], 'config 展开不得有 JS 错误');
 });
 
@@ -2639,4 +2642,86 @@ test('analytics landing folds pooled provider keys to account labels', async (t)
     `(document.getElementById('an-table')?.innerText || '').includes(${JSON.stringify(id8)})`),
     false, 'fresh analytics landing must not show the internal account id');
   assert.deepEqual(await ctx.pageErrors(), [], 'navigation must not raise JS errors');
+});
+
+
+// Accounts 页 Add Provider：static 模式 + Fetch 预览勾选 + token 落账号池
+// （modal 族 + mutation 族）。POST /api/providers 全链路：store 写入、账号
+// 创建、热 reload 后侧栏出现新 provider，模型 = 勾选 ∪ 手动行。
+test('accounts 页 Add Provider：static + Fetch 预览 + token 建号 (modal 族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  await ctx.ev(`document.querySelector('[data-tab="accounts"]').click()`);
+  await ctx.waitFor('accounts tab active', () => ctx.ev(
+    `document.getElementById('tab-accounts').classList.contains('active')`));
+  await ctx.waitFor('+ Add button present', () => ctx.ev(
+    `!!document.getElementById('acct-add-provider')`));
+  await ctx.ev(`document.getElementById('acct-add-provider').click()`);
+  await ctx.waitFor('provider-add modal open', () => ctx.ev(
+    `document.getElementById('provider-add-modal').open === true`));
+
+  // The preset dropdown leads the form; name starts EMPTY (no prefill), and
+  // option labels carry names only (no model counts).
+  assert.equal(await ctx.ev(`document.getElementById('pa-name').value`), '',
+    'name must not be prefilled on open');
+  assert.ok(await ctx.ev(`(() => {
+    const preset = document.getElementById('pa-preset');
+    const name = document.getElementById('pa-name');
+    return preset.compareDocumentPosition(name) & Node.DOCUMENT_POSITION_FOLLOWING; })()`),
+    'preset dropdown must come before name');
+  assert.ok(await ctx.ev(`![...document.getElementById('pa-preset').options].some((o) => o.textContent.includes('models'))`),
+    'option labels must be names only');
+
+  // Picking a preset prefills the editable fields (never the typed name).
+  await ctx.waitFor('preset options loaded', () => ctx.ev(
+    `[...document.getElementById('pa-preset').options].some((o) => o.value === 'zhipu')`));
+  await ctx.ev(`(() => {
+    document.getElementById('pa-preset').value = 'zhipu';
+    document.getElementById('pa-preset').dispatchEvent(new Event('change')); })()`);
+  await ctx.waitFor('preset prefill applied', () => ctx.ev(
+    `document.getElementById('pa-openai-url').value.includes('bigmodel')
+      && document.getElementById('pa-usage-url').value.includes('bigmodel')
+      && document.getElementById('pa-models').value.includes('glm')
+      && document.getElementById('pa-priority').value === '2'`));
+  assert.equal(await ctx.ev(`document.getElementById('pa-name').value`), '',
+    'preset pick must not fill the name (user picks the config key)');
+
+  // Back to custom: the prefilled values stay editable for the static flow.
+  await ctx.ev(`(() => {
+    document.getElementById('pa-preset').value = '';
+    document.getElementById('pa-preset').dispatchEvent(new Event('change')); })()`);
+  const upstreamPort = ctx.upstream.address().port;
+  await ctx.ev(`(() => {
+    document.getElementById('pa-name').value = 'e2e-addprov';
+    document.getElementById('pa-openai-url').value = 'http://127.0.0.1:${upstreamPort}/v1';
+    document.getElementById('pa-token').value = 'e2e-static-key-000000000';
+  })()`);
+
+  // Fetch preview: the stub lists stub-m1/stub-m2; untick stub-m2 and add a
+  // manual line — the final model set is the checked ∪ manual merge.
+  await ctx.ev(`document.getElementById('pa-fetch').click()`);
+  await ctx.waitFor('fetch preview renders picks', () => ctx.ev(
+    `document.querySelectorAll('#pa-fetch-list input[data-pa-model]').length === 2`));
+  await ctx.ev(`(() => {
+    document.querySelector('#pa-fetch-list input[data-pa-model="stub-m2"]').checked = false;
+    document.getElementById('pa-models').value = 'manual-x';
+  })()`);
+
+  await ctx.ev(`document.getElementById('pa-submit').click()`);
+  await ctx.waitFor('modal closes after add', () => ctx.ev(
+    `document.getElementById('provider-add-modal').open === false`));
+  await ctx.waitFor('new provider appears in sidebar', () => ctx.ev(
+    `!!document.querySelector('.acct-nav-item[data-provider="e2e-addprov"]')`));
+  // The token created the first account (badge 1 on the new item).
+  await ctx.waitFor('token created the first account', () => ctx.ev(
+    `(() => { const b = document.querySelector('.acct-nav-item[data-provider="e2e-addprov"] .badge');
+      return b && b.textContent === '1'; })()`));
+  // The effective config serves the merged model set (checked ∪ manual).
+  const cfg = await ctx.ev(`fetch('/api/config').then((r) => r.json())`);
+  const models = (cfg.provider_models || {})['e2e-addprov'] || [];
+  assert.deepEqual([...models].sort(), ['manual-x', 'stub-m1'],
+    `provider_models[e2e-addprov] = ${JSON.stringify(models)}`);
+  // The yaml absorbed into provider.json — the raw yaml text carries no
+  // providers section for the new entry.
+  assert.ok(!(cfg.yaml || '').includes('e2e-addprov'), 'yaml must not carry the new provider');
+  assert.deepEqual(await ctx.pageErrors(), [], 'add provider 不得有 JS 错误');
 });

@@ -761,6 +761,14 @@ func TestCommandLoginContract(t *testing.T) {
 
 func (*commandFake) AddPreset(string) ([]string, string, error) { return nil, "", nil }
 
+func (*commandFake) AddProvider(context.Context, appapi.ProviderAddRequest) (appapi.ProviderAddResult, error) {
+	return appapi.ProviderAddResult{}, nil
+}
+
+func (*commandFake) PreviewProviderModels(context.Context, appapi.ProviderModelsPreviewRequest) ([]string, error) {
+	return nil, nil
+}
+
 func (fake *commandFake) RefreshModels(ctx context.Context, provider string) (appapi.ModelsRefreshResult, error) {
 	if fake.refreshMdls != nil {
 		return fake.refreshMdls(ctx, provider)

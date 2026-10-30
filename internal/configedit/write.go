@@ -24,6 +24,12 @@ func BackupConfig(path, backup string) {
 // shared ".tmp" name let one process rename away another's half-written file
 // (docs/engineering/pitfalls.md #18).
 func AtomicWrite(path string, data []byte) error {
+	return AtomicWriteMode(path, data, 0o644)
+}
+
+// AtomicWriteMode is AtomicWrite with an explicit file mode — for state files
+// that are not config.yaml-grade (e.g. the 0600 provider.json store).
+func AtomicWriteMode(path string, data []byte, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -49,7 +55,7 @@ func AtomicWrite(path string, data []byte) error {
 		_ = os.Remove(temporary)
 		return err
 	}
-	if err := os.Chmod(temporary, 0o644); err != nil {
+	if err := os.Chmod(temporary, mode); err != nil {
 		_ = os.Remove(temporary)
 		return err
 	}

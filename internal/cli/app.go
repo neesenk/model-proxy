@@ -15,6 +15,7 @@ import (
 	climcpserver "model-proxy/internal/cli/mcpserver"
 	climodels "model-proxy/internal/cli/models"
 	clipresets "model-proxy/internal/cli/presets"
+	cliprovider "model-proxy/internal/cli/provider"
 	clistats "model-proxy/internal/cli/stats"
 	clistatus "model-proxy/internal/cli/status"
 )
@@ -38,6 +39,7 @@ func NewApplication(serve func(args []string)) *Application {
 		"login":    ProcessCommand(clilogin.CmdLogin),
 		"add":      ProcessCommand(clipresets.RunAdd),
 		"presets":  ProcessCommand(clipresets.RunPresets),
+		"provider": ProcessCommand(cliprovider.RunProvider),
 		"logout":   ProcessCommand(cliaccount.RunLogout),
 		"usage":    ProcessCommand(clistats.RunUsage),
 		"models":   ProcessCommand(climodels.RunModels),

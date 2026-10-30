@@ -6,6 +6,7 @@ import (
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/daemonctl"
+	"model-proxy/internal/providerstore"
 	"model-proxy/internal/upstreamproxy"
 )
 
@@ -27,9 +28,11 @@ func ApplyProcessConfig(cfg *configdomain.Config) {
 
 // LoadCmdConfig loads the CLI config or exits. Commands with custom error
 // handling for an invalid config (doctor's diagnostic line) load on their own
-// and must still call ApplyProcessConfig.
+// and must still call ApplyProcessConfig. Providers resolve through the
+// provider.json store (read-only — one-shot CLI commands never rewrite the
+// user's files; the daemon boot/reload performs the absorbing migration).
 func LoadCmdConfig(args []string) *configdomain.Config {
-	cfg, err := configdomain.LoadConfig(ConfigPath(args))
+	cfg, err := providerstore.LoadEffectiveConfig(ConfigPath(args), false)
 	if err != nil {
 		log.Fatal(err)
 	}

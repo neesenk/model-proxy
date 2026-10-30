@@ -1,14 +1,40 @@
 package presets
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
-	"strings"
+	"reflect"
 	"testing"
 
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/providerstore"
 )
+
+// mergeFixture returns a config path plus a hermetic provider-store path: the
+// store lives under a temp HOME so preset merges never touch ~/.model-proxy.
+func mergeFixture(t *testing.T) (cfgPath, storePath string) {
+	t.Helper()
+	return writeMinimalConfig(t), providerstore.PathUnder(t.TempDir())
+}
+
+// effectiveLoad validates cfgPath against a store's provider set — the same
+// effective merge every loader applies post-migration.
+func effectiveLoad(t *testing.T, cfgPath, storePath string) *configdomain.Config {
+	t.Helper()
+	providers, err := providerstore.Load(storePath)
+	if err != nil {
+		t.Fatalf("load store: %v", err)
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := configdomain.LoadConfigEffective(cfgPath, data, providers)
+	if err != nil {
+		t.Fatalf("effective load: %v", err)
+	}
+	return cfg
+}
 
 func TestList_DerivesFromTemplateAndFiltersUnregistered(t *testing.T) {
 	catalog, err := List()
@@ -53,12 +79,12 @@ func TestList_EveryPresetBlockValidates(t *testing.T) {
 	}
 	for _, p := range catalog {
 		t.Run(p.Name, func(t *testing.T) {
-			cfgPath := writeMinimalConfig(t)
-			if _, err := MergeBlock(cfgPath, p.Name); err != nil {
+			cfgPath, storePath := mergeFixture(t)
+			if _, err := MergeBlock(cfgPath, storePath, p.Name); err != nil {
 				t.Fatalf("MergeBlock: %v", err)
 			}
-			if _, err := configdomain.LoadConfig(cfgPath); err != nil {
-				t.Fatalf("merged config for %s does not validate: %v", p.Name, err)
+			if cfg := effectiveLoad(t, cfgPath, storePath); cfg.Providers[p.Name].Provider == "" {
+				t.Fatalf("merged config for %s lost the preset entry", p.Name)
 			}
 		})
 	}
@@ -79,59 +105,77 @@ func writeMinimalConfig(t *testing.T) string {
 
 // --- MergeBlock ---
 
-func TestMergePresetBlock_WritesProviderAndStaysValid(t *testing.T) {
-	path := writeMinimalConfig(t)
-	written, err := MergeBlock(path, "deepseek")
+func TestMergePresetBlock_WritesStoreEntryAndStaysValid(t *testing.T) {
+	cfgPath, storePath := mergeFixture(t)
+	before, _ := os.ReadFile(cfgPath)
+	written, err := MergeBlock(cfgPath, storePath, "deepseek")
 	if err != nil || !written {
 		t.Fatalf("first merge: written=%v err=%v", written, err)
 	}
-	data, _ := os.ReadFile(path)
-	if !strings.Contains(string(data), "deepseek:") || !strings.Contains(string(data), "providers:") {
-		t.Fatalf("merged config missing deepseek provider block:\n%s", data)
+	store, err := providerstore.Load(storePath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := configdomain.LoadConfig(path); err != nil {
-		t.Fatalf("merged config invalid: %v", err)
+	if _, ok := store["deepseek"]; !ok {
+		t.Fatalf("store after merge = %#v, want the deepseek preset entry", store)
+	}
+	if after, _ := os.ReadFile(cfgPath); string(after) != string(before) {
+		t.Fatalf("merge must not rewrite the yaml (providers live in the store):\n%s", after)
+	}
+	if cfg := effectiveLoad(t, cfgPath, storePath); len(cfg.Providers) != 1 {
+		t.Fatalf("effective providers = %#v, want exactly deepseek", cfg.Providers)
 	}
 }
 
 func TestMergePresetBlock_IdempotentSecondRunIsNoop(t *testing.T) {
-	path := writeMinimalConfig(t)
-	if _, err := MergeBlock(path, "zhipu"); err != nil {
+	cfgPath, storePath := mergeFixture(t)
+	if _, err := MergeBlock(cfgPath, storePath, "zhipu"); err != nil {
 		t.Fatalf("first merge: %v", err)
 	}
-	before, _ := os.ReadFile(path)
-	written, err := MergeBlock(path, "zhipu")
+	before, err := providerstore.Load(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	written, err := MergeBlock(cfgPath, storePath, "zhipu")
 	if err != nil {
 		t.Fatalf("second merge: %v", err)
 	}
 	if written {
 		t.Fatal("second merge of an existing preset must be a no-op")
 	}
-	after, _ := os.ReadFile(path)
-	if !bytes.Equal(before, after) {
-		t.Fatal("no-op merge rewrote the config file")
+	after, err := providerstore.Load(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("no-op merge rewrote the store")
 	}
 }
 
 func TestMergePresetBlock_UnknownPresetFailsClosed(t *testing.T) {
-	path := writeMinimalConfig(t)
-	before, _ := os.ReadFile(path)
-	if _, err := MergeBlock(path, "nonexistent"); err == nil {
+	cfgPath, storePath := mergeFixture(t)
+	before, _ := os.ReadFile(cfgPath)
+	if _, err := MergeBlock(cfgPath, storePath, "nonexistent"); err == nil {
 		t.Fatal("unknown preset must fail with an error")
 	}
-	after, _ := os.ReadFile(path)
-	if !bytes.Equal(before, after) {
+	after, _ := os.ReadFile(cfgPath)
+	if string(before) != string(after) {
 		t.Fatal("failed merge must not touch the config file")
+	}
+	if _, err := os.Stat(storePath); !os.IsNotExist(err) {
+		t.Fatalf("failed merge must not create the store (stat err = %v)", err)
 	}
 }
 
-func TestMergePresetBlock_CreatesProvidersMapWhenMissing(t *testing.T) {
-	path := writeMinimalConfig(t)
-	if _, err := MergeBlock(path, "zhipu"); err != nil {
+// A config that never carried a providers: section (the post-migration
+// normal form) merges straight into the store.
+func TestMergePresetBlock_MinimalConfigWithoutProviders(t *testing.T) {
+	cfgPath, storePath := mergeFixture(t)
+	if _, err := MergeBlock(cfgPath, storePath, "zhipu"); err != nil {
 		t.Fatalf("merge without providers: key: %v", err)
 	}
-	if _, err := configdomain.LoadConfig(path); err != nil {
-		t.Fatalf("merged config invalid: %v", err)
+	if cfg := effectiveLoad(t, cfgPath, storePath); cfg.Providers["zhipu"].Provider != "zhipu" {
+		t.Fatalf("effective providers = %#v", cfg.Providers)
 	}
 }
 
@@ -142,34 +186,37 @@ func TestMergePresetBlock_CreatesProvidersMapWhenMissing(t *testing.T) {
 // itself never touches the file (the CLI add ambiguity gate relies on the
 // latter: refusing the gate must leave config.yaml byte-identical).
 func TestPreviewMergeBlock_DryRunMatchesWrite(t *testing.T) {
-	path := writeMinimalConfig(t)
-	before, _ := os.ReadFile(path)
+	cfgPath, storePath := mergeFixture(t)
+	before, _ := os.ReadFile(cfgPath)
 
-	changed, preview, err := PreviewMergeBlock(path, "deepseek")
+	changed, preview, err := PreviewMergeBlock(cfgPath, storePath, "deepseek")
 	if err != nil || !changed {
 		t.Fatalf("preview: changed=%v err=%v", changed, err)
 	}
-	if _, err := configdomain.LoadConfigFromBytes(path, preview); err != nil {
-		t.Fatalf("preview content invalid: %v", err)
+	if _, ok := preview.Providers["deepseek"]; !ok {
+		t.Fatalf("preview config lost the preset entry: %#v", preview.Providers)
 	}
-	after, _ := os.ReadFile(path)
-	if !bytes.Equal(before, after) {
+	after, _ := os.ReadFile(cfgPath)
+	if string(before) != string(after) {
 		t.Fatal("preview must not touch the config file")
 	}
+	if _, err := os.Stat(storePath); !os.IsNotExist(err) {
+		t.Fatal("preview must not create the store")
+	}
 
-	written, err := MergeBlock(path, "deepseek")
+	written, err := MergeBlock(cfgPath, storePath, "deepseek")
 	if err != nil || !written {
 		t.Fatalf("merge after preview: written=%v err=%v", written, err)
 	}
-	onDisk, _ := os.ReadFile(path)
-	if !bytes.Equal(preview, onDisk) {
-		t.Fatal("MergeBlock must write exactly the previewed content")
+	merged := effectiveLoad(t, cfgPath, storePath)
+	if _, ok := merged.Providers["deepseek"]; !ok {
+		t.Fatal("MergeBlock must persist the previewed preset entry")
 	}
 
-	// The block now exists: preview is a no-op, like MergeBlock.
-	changed, merged, err := PreviewMergeBlock(path, "deepseek")
-	if err != nil || changed || merged != nil {
-		t.Fatalf("preview of existing block: changed=%v merged=%v err=%v", changed, merged, err)
+	// The entry now exists: preview reports a no-op, like MergeBlock.
+	changed, again, err := PreviewMergeBlock(cfgPath, storePath, "deepseek")
+	if err != nil || changed || again == nil {
+		t.Fatalf("preview of existing entry: changed=%v cfg=%v err=%v", changed, again, err)
 	}
 }
 
@@ -251,6 +298,31 @@ providers:
 	}
 }
 
+// TestListCarriesPrefillFields pins the Add Provider prefill contract: the
+// catalog entry carries the template's editable fields (anthropic base,
+// priority) so the form's prefilled inputs match what the backend template
+// would persist.
+func TestListCarriesPrefillFields(t *testing.T) {
+	catalog, err := List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	byName := map[string]Preset{}
+	for _, p := range catalog {
+		byName[p.Name] = p
+	}
+	zhipu, ok := byName["zhipu"]
+	if !ok {
+		t.Fatal("zhipu preset missing")
+	}
+	if zhipu.AnthropicBaseURL != "https://open.bigmodel.cn/api/anthropic" {
+		t.Errorf("zhipu anthropic_base_url = %q", zhipu.AnthropicBaseURL)
+	}
+	if zhipu.Priority != 2 {
+		t.Errorf("zhipu priority = %d, want the template's 2", zhipu.Priority)
+	}
+}
+
 func TestLookup(t *testing.T) {
 	if _, ok := Lookup("zhipu"); !ok {
 		t.Fatal("Lookup(zhipu) must resolve")
@@ -272,13 +344,13 @@ func TestMergePresetBlock_RejectsNonMappingConfig(t *testing.T) {
 	if err := os.WriteFile(path, []byte("- just\n- a\n- list\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := MergeBlock(path, "zhipu"); err == nil {
+	if _, err := MergeBlock(path, providerstore.PathUnder(t.TempDir()), "zhipu"); err == nil {
 		t.Fatal("non-mapping config must fail")
 	}
 }
 
 func TestMergePresetBlock_MissingConfigFileFails(t *testing.T) {
-	if _, err := MergeBlock(filepath.Join(t.TempDir(), "absent.yaml"), "zhipu"); err == nil {
+	if _, err := MergeBlock(filepath.Join(t.TempDir(), "absent.yaml"), providerstore.PathUnder(t.TempDir()), "zhipu"); err == nil {
 		t.Fatal("missing config file must fail")
 	}
 }

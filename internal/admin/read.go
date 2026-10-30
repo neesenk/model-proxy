@@ -23,6 +23,7 @@ import (
 	observestats "model-proxy/internal/observe/stats"
 	domainpresets "model-proxy/internal/presets"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/providerstore"
 	"model-proxy/internal/routing"
 )
 
@@ -1100,7 +1101,15 @@ func (s *Service) ConfigDocument() (appapi.ConfigDocument, error) {
 	if err != nil {
 		return appapi.ConfigDocument{}, err
 	}
-	config, err := configdomain.LoadConfigFromBytes(path, data)
+	// Parse EFFECTIVELY (provider.json store over the yaml): post-migration
+	// the yaml carries no providers: section and a strict parse would reject
+	// it ("no providers configured"), breaking the whole Config page. The
+	// returned YAML text stays the raw disk bytes — the editor edits the yaml.
+	providers, err := providerstore.Resolve(path, providerstore.PathUnder(s.homeDir()))
+	if err != nil {
+		return appapi.ConfigDocument{}, err
+	}
+	config, err := configdomain.LoadConfigEffective(path, data, providers)
 	if err != nil {
 		return appapi.ConfigDocument{}, err
 	}

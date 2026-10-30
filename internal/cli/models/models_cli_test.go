@@ -14,6 +14,7 @@ import (
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/providerbuild"
+	"model-proxy/internal/providerstore"
 	runtimewire "model-proxy/internal/runtime/wirecap"
 )
 
@@ -96,17 +97,30 @@ func TestCLI_ModelsRefresh_PersistsNewModels(t *testing.T) {
 	if !strings.Contains(stderr, "glm-new-model") || !strings.Contains(stderr, "added") {
 		t.Errorf("refresh should report the new model:\n%s", stderr)
 	}
+	// The refreshed model list lands in the provider.json store (the yaml's
+	// providers: block was absorbed and stripped by the same write).
+	store, err := providerstore.Load(filepath.Join(home, ".model-proxy", "provider.json"))
+	if err != nil {
+		t.Fatalf("load provider store: %v", err)
+	}
+	zhipu, ok := store["zhipu"]
+	if !ok {
+		t.Fatalf("store after refresh = %#v, want the absorbed zhipu entry", store)
+	}
+	if !containsAll(zhipu.Models, "glm-5.2", "glm-new-model") {
+		t.Errorf("store models = %v, want glm-5.2 + glm-new-model", zhipu.Models)
+	}
+	// Routes stay in the yaml; the providers section is gone.
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := string(data)
-	if !strings.Contains(cfg, "- glm-new-model") {
-		t.Errorf("config should now list glm-new-model:\n%s", cfg)
+	if !strings.Contains(cfg, "routes:") {
+		t.Errorf("config lost routes:\n%s", cfg)
 	}
-	// existing model + routes + the comment-free structure preserved
-	if !strings.Contains(cfg, "- glm-5.2") || !strings.Contains(cfg, "routes:") {
-		t.Errorf("config lost existing model or routes:\n%s", cfg)
+	if strings.Contains(cfg, "providers:") {
+		t.Errorf("providers section must be stripped into the store:\n%s", cfg)
 	}
 	// The fresh 3-protocol matrix was persisted to model_caps.json (sibling of
 	// quota_state.json under the isolated HOME), fingerprinted with the
@@ -134,6 +148,42 @@ func TestCLI_ModelsRefresh_PersistsNewModels(t *testing.T) {
 		if mp.Chat != runtimewire.Yes || mp.Responses != runtimewire.Yes || mp.Anthropic != runtimewire.No {
 			t.Errorf("caps %s = chat:%s ant:%s resp:%s, want yes/no/yes", id, mp.Chat, mp.Anthropic, mp.Responses)
 		}
+	}
+}
+
+// --- models peek: read-only live /models fetch (nothing persists) ---
+
+func TestCLI_ModelsPeek(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"object":"list","data":[{"id":"glm-5.2"},{"id":"glm-new","display_name":"GLM New"}]}`))
+	}))
+	defer srv.Close()
+
+	cfgPath := clitest.WriteTempConfig(t, "listen: 127.0.0.1:15721\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: "+srv.URL+", models: [glm-5.2]}\n")
+	home := t.TempDir()
+	credDir := filepath.Join(home, ".model-proxy")
+	os.MkdirAll(credDir, 0o700)
+	os.WriteFile(filepath.Join(credDir, "zhipu_apikey.json"), []byte(`{"api_key":"test-key"}`), 0o600)
+
+	stdout, _, code := clitest.RunCLIWithHome(t, home, "models", cfgPath, "peek", "zhipu")
+	if code != 0 {
+		t.Fatalf("peek exit=%d stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "glm-5.2") || !strings.Contains(stdout, "glm-new") {
+		t.Errorf("peek output missing ids:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "read-only") {
+		t.Errorf("peek output missing the read-only note:\n%s", stdout)
+	}
+	// Nothing persisted: no provider store, config byte-identical.
+	if _, err := os.Stat(filepath.Join(home, ".model-proxy", "provider.json")); !os.IsNotExist(err) {
+		t.Errorf("peek must not create the provider store (stat err=%v)", err)
+	}
+
+	// Unknown provider is a 400-style refusal naming the provider.
+	_, stderr, code := clitest.RunCLIWithHome(t, home, "models", cfgPath, "peek", "ghost")
+	if code == 0 || !strings.Contains(stderr, "unknown provider") {
+		t.Errorf("peek unknown = (%d, %q)", code, stderr)
 	}
 }
 
@@ -198,20 +248,33 @@ func TestCLI_ModelsRefreshFallback_RouteProbe(t *testing.T) {
 	if !strings.Contains(stderr, "config: removed 1 -> [drop-b]") {
 		t.Errorf("stderr should report drop-b removed:\n%s", stderr)
 	}
+	store, err := providerstore.Load(filepath.Join(home, ".model-proxy", "provider.json"))
+	if err != nil {
+		t.Fatalf("load provider store: %v", err)
+	}
+	if got := store["zhipu"].Models; !containsAll(got, "keep-a", "route-c") || containsAll(got, "drop-b") {
+		t.Errorf("store models = %v, want the callable subset [keep-a route-c] without drop-b", got)
+	}
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := string(data)
-	if !strings.Contains(cfg, "- keep-a") || !strings.Contains(cfg, "- route-c") {
-		t.Errorf("config should list the callable subset (keep-a, route-c):\n%s", cfg)
-	}
-	if strings.Contains(cfg, "- drop-b") {
-		t.Errorf("config should have dropped non-callable drop-b:\n%s", cfg)
-	}
-	if !strings.Contains(cfg, "routes:") {
+	if cfg := string(data); !strings.Contains(cfg, "routes:") {
 		t.Errorf("config should preserve routes + structure:\n%s", cfg)
 	}
+}
+
+func containsAll(list []string, want ...string) bool {
+	set := map[string]bool{}
+	for _, id := range list {
+		set[id] = true
+	}
+	for _, w := range want {
+		if !set[w] {
+			return false
+		}
+	}
+	return true
 }
 
 // --- models refresh: idempotent when nothing new (no write) ---

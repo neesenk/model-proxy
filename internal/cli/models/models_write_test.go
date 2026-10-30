@@ -3,23 +3,32 @@ package models
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
-	"gopkg.in/yaml.v3"
+	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/providerstore"
 )
 
-// TestWriteProviderModelsRewritesModelsSequence: the locked load→mutate→write
-// replaces only providers.<name>.models, preserving comments and every other
-// section, and leaves a timestamped .bak of the previous file.
+// TestWriteProviderModelsRewritesStoreEntry: the locked load→mutate→write
+// replaces only the provider's models in the provider.json store (absorbing
+// and stripping the yaml's providers: section in the same mutation),
+// preserving every other yaml section and comment.
 func TestWriteProviderModelsRewritesModelsSequence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	configFile := filepath.Join(t.TempDir(), "config.yaml")
 	original := `# top comment
+listen: 127.0.0.1:15721
 providers:
   aqp:
-    base_url: https://example.com # keep this comment
+    provider_id: aqp # keep this comment
+    openai_base_url: https://example.com
     models: [old-a, old-b]
   other:
+    provider_id: static
+    openai_base_url: https://other.example.com
     models: [untouched]
 routes:
   glm: [{provider: aqp, model: old-a}]
@@ -32,51 +41,54 @@ routes:
 		t.Fatalf("WriteProviderModels: %v", err)
 	}
 
+	store, err := providerstore.Load(providerstore.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store["aqp"].Models; !reflect.DeepEqual(got, []string{"new-b", "new-a"}) {
+		t.Errorf("aqp models = %v, want [new-b new-a] in caller order", got)
+	}
+	if got := store["aqp"].OpenAIBaseURL; got != "https://example.com" {
+		t.Errorf("aqp base url = %q, want preserved", got)
+	}
+	if got := store["other"].Models; !reflect.DeepEqual(got, []string{"untouched"}) {
+		t.Errorf("other provider models = %v, want untouched", got)
+	}
+
+	// The yaml keeps every non-provider section (comments included) and loses
+	// the absorbed providers: block.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "# keep this comment") || !strings.Contains(string(data), "# top comment") {
-		t.Errorf("comments lost in rewrite:\n%s", data)
+	if !strings.Contains(string(data), "# top comment") || !strings.Contains(string(data), "routes:") {
+		t.Errorf("comments/routes lost in rewrite:\n%s", data)
 	}
-	var decoded struct {
-		Providers map[string]struct {
-			BaseURL string   `yaml:"base_url"`
-			Models  []string `yaml:"models"`
-		} `yaml:"providers"`
-		Routes map[string]any `yaml:"routes"`
-	}
-	if err := yaml.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("rewritten config does not parse: %v", err)
-	}
-	if got := decoded.Providers["aqp"].Models; len(got) != 2 || got[0] != "new-b" || got[1] != "new-a" {
-		t.Errorf("aqp models = %v, want [new-b new-a] in caller order", got)
-	}
-	if got := decoded.Providers["aqp"].BaseURL; got != "https://example.com" {
-		t.Errorf("aqp base_url = %q, want preserved", got)
-	}
-	if got := decoded.Providers["other"].Models; len(got) != 1 || got[0] != "untouched" {
-		t.Errorf("other provider models = %v, want untouched", got)
-	}
-	if len(decoded.Routes) != 1 {
-		t.Errorf("routes = %v, want preserved", decoded.Routes)
+	if strings.Contains(string(data), "providers:") {
+		t.Errorf("providers section must be stripped into the store:\n%s", data)
 	}
 
-	// BackupPath embeds a second-resolution timestamp captured inside the
-	// write; recomputing it here can land one second later. Glob the back dir
-	// instead - the assertion (exactly one .bak of the previous file) is the
-	// same, without the second-boundary flake.
+	// The strip that absorbed the yaml section left a timestamped backup of
+	// the pre-absorption yaml (the section's comments are lossy otherwise).
 	baks, err := filepath.Glob(filepath.Join(filepath.Dir(configFile), ".model-proxy", "back", "config.yaml.*.bak"))
 	if err != nil || len(baks) != 1 {
-		t.Errorf("want exactly 1 backup of previous config, got %v (err=%v)", baks, err)
+		t.Fatalf("want exactly 1 yaml backup of the absorption, got %v (err=%v)", baks, err)
+	}
+	bak, err := os.ReadFile(baks[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bak), "openai_base_url: https://example.com") {
+		t.Errorf("backup does not hold the pre-absorption providers section:\n%s", bak)
 	}
 }
 
 // TestWriteProviderModelsUnknownProvider: rewriting a provider absent from the
-// config fails without touching the file.
+// effective set fails without touching the yaml or creating a store.
 func TestWriteProviderModelsUnknownProvider(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	configFile := filepath.Join(t.TempDir(), "config.yaml")
-	original := "providers:\n  aqp:\n    models: [m1]\n"
+	original := "listen: 127.0.0.1:15721\nproviders:\n  aqp: {provider_id: aqp, openai_base_url: https://example.com, models: [m1]}\n"
 	if err := os.WriteFile(configFile, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -89,11 +101,15 @@ func TestWriteProviderModelsUnknownProvider(t *testing.T) {
 	if string(data) != original {
 		t.Errorf("config modified on failure:\n%s", data)
 	}
+	if _, statErr := os.Stat(providerstore.Path()); !os.IsNotExist(statErr) {
+		t.Errorf("store created on failure: stat err = %v", statErr)
+	}
 }
 
 // TestWriteProviderModelsMissingConfig: a missing config file surfaces the
 // read error instead of creating one from scratch.
 func TestWriteProviderModelsMissingConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	configFile := filepath.Join(t.TempDir(), "config.yaml")
 	err := WriteProviderModels(configFile, "aqp", []string{"m1"})
 	if err == nil {
@@ -101,5 +117,41 @@ func TestWriteProviderModelsMissingConfig(t *testing.T) {
 	}
 	if _, statErr := os.Stat(configFile); !os.IsNotExist(statErr) {
 		t.Errorf("config file created from scratch: stat err = %v", statErr)
+	}
+}
+
+// TestWriteProviderModelsRejectsInvalidResult: a would-be store state that
+// violates the provider rules (alias key outside models) is refused and
+// nothing hits disk.
+func TestWriteProviderModelsRejectsInvalidResult(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configFile := filepath.Join(t.TempDir(), "config.yaml")
+	// No providers in the yaml: the store is the authority here, so the
+	// seeded alias survives into the mutation (yaml entries would win over
+	// the store and drop it).
+	if err := os.WriteFile(configFile, []byte("listen: 127.0.0.1:15721\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Seed an alias whose key the new model list no longer contains.
+	storePath := providerstore.Path()
+	if err := providerstore.Save(storePath, map[string]configdomain.Provider{
+		"aqp": {Provider: "aqp", OpenAIBaseURL: "https://example.com", Models: []string{"m1"}, Alias: map[string]string{"m1": "m1x"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	yamlBefore, _ := os.ReadFile(configFile)
+	if err := WriteProviderModels(configFile, "aqp", []string{"m2"}); err == nil {
+		t.Fatal("expected validation error (alias key m1 no longer in models)")
+	}
+	if after, _ := os.ReadFile(configFile); string(after) != string(yamlBefore) {
+		t.Error("rejected write touched the yaml")
+	}
+	store, err := providerstore.Load(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store["aqp"].Models; !reflect.DeepEqual(got, []string{"m1"}) {
+		t.Errorf("rejected write changed the store: %v", got)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	cliframework "model-proxy/internal/cli/framework"
@@ -10,6 +11,7 @@ import (
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/display"
 	"model-proxy/internal/observe/logx"
+	"model-proxy/internal/providerstore"
 	"net"
 	"net/http"
 	"os"
@@ -61,9 +63,19 @@ func (assembly serveAssembly) command(args []string) {
 	}
 }
 
-// daemonEnv wires the production process seams for the daemon paths.
+// daemonEnv wires the production process seams for the daemon paths. The
+// config seam resolves providers through the provider.json store over yaml
+// (read-only — the WORKER boot performs the absorbing migration; the
+// supervisor only pre-flights the config).
 func daemonEnv() cliserve.DaemonEnv {
-	return cliserve.DaemonEnv{LoadConfig: configdomain.LoadConfig, Executable: os.Args[0], Stdout: os.Stdout, Stderr: os.Stderr}
+	return cliserve.DaemonEnv{
+		LoadConfig: func(path string) (*configdomain.Config, error) {
+			return providerstore.LoadEffectiveConfig(path, false)
+		},
+		Executable: os.Args[0],
+		Stdout:     os.Stdout,
+		Stderr:     os.Stderr,
+	}
 }
 
 // runProxy loads the config and runs the proxy inline (used by the worker and
@@ -82,9 +94,17 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 	if cliserve.ApplyDefaultMemoryLimit() {
 		logx.Infof("model-proxy: GOMEMLIMIT unset, defaulting to %dMiB soft GC ceiling", cliserve.DefaultMemoryLimitBytes>>20)
 	}
-	cfg, err := configdomain.LoadConfig(sa.Config)
+	// Providers resolve through the provider.json store; worker boot ABSORBS
+	// (yaml `providers:` entries migrate into the store, yaml gets stripped).
+	// A strip failure is a warning — the merged cfg is live and the next
+	// reload retries idempotently.
+	cfg, err := providerstore.LoadEffectiveConfig(sa.Config, true)
 	if err != nil {
-		return err
+		var strip *providerstore.StripWarning
+		if !errors.As(err, &strip) {
+			return err
+		}
+		logx.Warnf("model-proxy: ⚠ %v", err)
 	}
 	// log_level is startup-only (reload does not re-read it): apply it once
 	// here, before any runtime log line is emitted.

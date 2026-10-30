@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -90,8 +91,13 @@ func TestSaveConfigAppliedWarningKeepsNewFile(t *testing.T) {
 
 func editService(t *testing.T, path string, spy *reloadSpy) *Service {
 	t.Helper()
+	// HomeDir keeps the provider.json store hermetic — provider edits persist
+	// there, never against the real ~/.model-proxy. One stable dir per service:
+	// t.TempDir() inside the closure would return a NEW dir on every call.
+	home := t.TempDir()
 	return New(Ports{
 		ConfigFile: func() string { return path },
+		HomeDir:    func() string { return home },
 		Reload:     spy.fn(),
 	})
 }
@@ -155,16 +161,57 @@ func TestEditConfigProvider(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	content := readConfig(t, path)
-	if !strings.Contains(content, "billing: plan") || !strings.Contains(content, "glm-air") {
-		t.Errorf("edited config:\n%s", content)
+	// Provider edits land in the provider.json store (the yaml fixture's
+	// providers: block is absorbed and stripped by the same mutation).
+	store := readProviderStore(t, service)
+	zhipu, ok := store["zhipu"]
+	if !ok || zhipu.Billing != "plan" || len(zhipu.Models) != 2 || zhipu.Models[1] != "glm-air" {
+		t.Errorf("store after edit = %+v", store)
+	}
+	if content := readConfig(t, path); strings.Contains(content, "providers:") {
+		t.Errorf("yaml must have its providers: section stripped after absorption:\n%s", content)
+	}
+}
+
+// TestEditConfigProviderAddDefaultsToStatic: the structured editor's form no
+// longer submits provider_id — a NEW provider defaults to the static
+// implementation, and an edit that omits the key keeps the existing one's
+// implementation untouched.
+func TestEditConfigProviderAddDefaultsToStatic(t *testing.T) {
+	path := writeTestConfig(t)
+	spy := &reloadSpy{}
+	service := editService(t, path, spy)
+	if err := service.EditConfig(appapi.EditRequest{
+		Kind: "provider",
+		Name: "gateway2",
+		Data: map[string]any{"openai_base_url": "https://gw2.example.com/v1", "models": []any{"m1"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store := readProviderStore(t, service)
+	if got := store["gateway2"].Provider; got != "static" {
+		t.Fatalf("new provider provider_id = %q, want the static default", got)
+	}
+	if err := service.EditConfig(appapi.EditRequest{
+		Kind: "provider",
+		Name: "zhipu",
+		Data: map[string]any{"billing": "pay-as-you-go"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store = readProviderStore(t, service)
+	if got := store["zhipu"].Provider; got != "zhipu" {
+		t.Fatalf("existing provider implementation = %q, want unchanged zhipu", got)
+	}
+	if store["zhipu"].Billing != "pay-as-you-go" {
+		t.Fatalf("billing edit lost: %+v", store["zhipu"])
 	}
 }
 
 // TestEditConfigProviderCatalogAlias pins the Model Matching write path: the
-// mapping lands as a yaml map under the provider (validate accepts it because
-// the key names a configured model), and sending an empty map removes the key
-// entirely instead of leaving an empty mapping node.
+// mapping lands in the provider.json store (validate accepts it because the
+// key names a configured model), and sending an empty map clears the override
+// instead of leaving an empty mapping behind.
 func TestEditConfigProviderCatalogAlias(t *testing.T) {
 	path := writeTestConfig(t)
 	spy := &reloadSpy{}
@@ -176,13 +223,13 @@ func TestEditConfigProviderCatalogAlias(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	content := readConfig(t, path)
-	if !strings.Contains(content, "catalog_alias") || !strings.Contains(content, "glm: glm-4.6") {
-		t.Errorf("catalog_alias write missing:\n%s", content)
+	if got := readProviderStore(t, service)["zhipu"].CatalogAlias; len(got) != 1 || got["glm"] != "glm-4.6" {
+		t.Errorf("catalog_alias write missing: %+v", got)
 	}
 	// A key that is not in the provider's models list is rejected by validate
-	// and must not touch the file.
-	before := readConfig(t, path)
+	// and must not touch the store.
+	before := readProviderStore(t, service)
+	beforeYAML := readConfig(t, path)
 	err := service.EditConfig(appapi.EditRequest{
 		Kind: "provider",
 		Name: "zhipu",
@@ -191,7 +238,10 @@ func TestEditConfigProviderCatalogAlias(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not in its models: list") {
 		t.Errorf("typo key: want validate error, got %v", err)
 	}
-	if readConfig(t, path) != before {
+	if after := readProviderStore(t, service); !reflect.DeepEqual(after, before) {
+		t.Error("rejected catalog_alias edit changed the provider store")
+	}
+	if readConfig(t, path) != beforeYAML {
 		t.Error("rejected catalog_alias edit changed the config file")
 	}
 	// Empty map deletes the key.
@@ -202,8 +252,8 @@ func TestEditConfigProviderCatalogAlias(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if content := readConfig(t, path); strings.Contains(content, "catalog_alias") {
-		t.Errorf("empty catalog_alias map must delete the key:\n%s", content)
+	if got := readProviderStore(t, service)["zhipu"].CatalogAlias; len(got) != 0 {
+		t.Errorf("empty catalog_alias map must clear the override: %+v", got)
 	}
 }
 

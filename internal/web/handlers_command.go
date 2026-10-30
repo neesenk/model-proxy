@@ -382,6 +382,41 @@ func (s *Server) handlePresetsList(w http.ResponseWriter, r *http.Request) {
 // failed reload rides in a separate reload_warning field — warnings stays
 // model-name-only. The credential step happens through the existing
 // account/login endpoints.
+// handleProviderAdd serves POST /api/providers: the Accounts-page Add
+// Provider form (preset or static + optional token + optional models). The
+// request body may carry a token — it is forwarded to the admin service and
+// must never appear in logs or responses.
+func (s *Server) handleProviderAdd(w http.ResponseWriter, r *http.Request) {
+	var req appapi.ProviderAddRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONErr(w, http.StatusBadRequest, "malformed JSON body: "+err.Error())
+		return
+	}
+	result, err := s.commands.AddProvider(r.Context(), req)
+	if err != nil {
+		writePortErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleProviderModelsPreview serves POST /api/providers/models-preview: the
+// form's Fetch button — a read-only upstream /models fetch with the form's
+// transient fields (nothing persists, nothing reloads).
+func (s *Server) handleProviderModelsPreview(w http.ResponseWriter, r *http.Request) {
+	var req appapi.ProviderModelsPreviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONErr(w, http.StatusBadRequest, "malformed JSON body: "+err.Error())
+		return
+	}
+	models, err := s.commands.PreviewProviderModels(r.Context(), req)
+	if err != nil {
+		writePortErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": models})
+}
+
 func (s *Server) handlePresetAdd(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/api/presets/")
 	if name == "" || strings.Contains(name, "/") {

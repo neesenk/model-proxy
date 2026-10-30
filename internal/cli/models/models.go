@@ -1,7 +1,6 @@
 package models
 
 import (
-	"bytes"
 	"fmt"
 	"log"
 	"model-proxy/internal/display"
@@ -9,14 +8,12 @@ import (
 	"sort"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/configedit"
 	"model-proxy/internal/provider"
 	"model-proxy/internal/providerbuild"
+	"model-proxy/internal/providerstore"
 	"model-proxy/internal/routing"
 	runtimewire "model-proxy/internal/runtime/wirecap"
 )
@@ -39,8 +36,39 @@ type ModelEntry struct {
 //	models <provider>   — list models for one provider
 //	models pull         — force-refresh the models.dev catalog cache
 //	models refresh <provider> — fetch live model list from a provider's server
+//	models peek <provider> — read-only live /models fetch (the Web Add Provider
+//	                        Fetch preview's CLI twin: nothing writes, nothing reloads)
 func CmdModels(args []string, cfg *configdomain.Config, configFile string) {
 	rest := NonFlagArgs(args)
+	if len(rest) > 0 && rest[0] == "peek" {
+		// models peek <provider> — read-only upstream /models fetch.
+		if len(rest) < 2 {
+			fmt.Println("usage: model-proxy models peek <provider>")
+			fmt.Println("available providers:")
+			for name := range cfg.Providers {
+				fmt.Printf("  %s\n", name)
+			}
+			return
+		}
+		provName := rest[1]
+		if _, ok := cfg.Providers[provName]; !ok {
+			log.Fatalf("unknown provider %q; available: %s", provName, cfg.ProviderNames())
+		}
+		entries, err := FetchProviderModels(cfg, provName)
+		if err != nil {
+			log.Fatalf("models endpoint unavailable for %s: %v (not logged in? no /models endpoint?)", provName, err)
+		}
+		fmt.Printf("%d models served upstream by %s (read-only — nothing written):\n", len(entries), provName)
+		for _, e := range entries {
+			if e.DisplayName != "" && e.DisplayName != e.ID {
+				fmt.Printf("  %-34s %s\n", e.ID, e.DisplayName)
+			} else {
+				fmt.Printf("  %s\n", e.ID)
+			}
+		}
+		fmt.Println("write the callable subset with: model-proxy models refresh " + provName)
+		return
+	}
 	if len(rest) > 0 && rest[0] == "pull" {
 		// models pull — force-refresh the global models.dev catalog cache.
 		cat, ferr := configdomain.LoadModelsCatalog(homeDir(), true)
@@ -353,39 +381,20 @@ func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 	return nil
 }
 
-// writeProviderModels rewrites providers.<provName>.models to `names` in
-// configFile, preserving comments/order elsewhere via a yaml.Node round-trip
-// (only the models sequence is re-encoded). Validates the result before writing
-// and takes a best-effort .bak. The caller (cmdModels refresh) hot-reloads a
-// running daemon via maybeReloadDaemon so the new names take effect for implicit
-// routing without a manual `serve reload`.
+// WriteProviderModels rewrites the provider's models list in the provider.json
+// store (the single provider authority — providerstore.Mutate runs the locked
+// RMW with whole-effective-config validation fail-closed). The caller
+// (cmdModels refresh) hot-reloads a running daemon via maybeReloadDaemon so
+// the new names take effect for implicit routing without a manual
+// `serve reload`.
 func WriteProviderModels(configFile, provName string, names []string) error {
-	// Locked load→mutate→write: the daemon's web config editor and preset
-	// merges RMW the same config.yaml concurrently.
-	return configedit.WithConfigLock(configFile, func() error {
-		root, err := loadConfigNode(configFile)
-		if err != nil {
-			return err
+	return providerstore.Mutate(configFile, providerstore.Path(), func(providers map[string]configdomain.Provider) error {
+		p, ok := providers[provName]
+		if !ok {
+			return fmt.Errorf("provider %q not found", provName)
 		}
-		p := childMap(childMap(root, "providers"), provName)
-		if p == nil {
-			return fmt.Errorf("provider %q not found in %s", provName, configFile)
-		}
-		setChildNode(p, "models", mustEncode(names))
-		var buf bytes.Buffer
-		enc := yaml.NewEncoder(&buf)
-		enc.SetIndent(2)
-		if err := enc.Encode(root); err != nil {
-			return err
-		}
-		// Close flushes the final document into buf; an unchecked failure here
-		// could persist a truncated config.
-		if err := enc.Close(); err != nil {
-			return err
-		}
-		if _, err := writeConfigValidated(configFile, buf.String()); err != nil {
-			return fmt.Errorf("writing config: %w", err)
-		}
+		p.Models = names
+		providers[provName] = p
 		return nil
 	})
 }

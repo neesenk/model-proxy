@@ -994,10 +994,13 @@ type Provider struct {
 	// same base as chat). OpenAI/Decisions bases must include their version
 	// segment (e.g. .../v1) since the proxy strips the client's /v1; the
 	// anthropic base must NOT (the proxy keeps the client's /v1/messages path).
-	OpenAIBaseURL    string `yaml:"openai_base_url"`
-	AnthropicBaseURL string `yaml:"anthropic_base_url"`
-	DecisionsBaseURL string `yaml:"decisions_base_url"`
-	Provider         string `yaml:"provider_id"`
+	// json tags mirror the yaml names for the provider.json store
+	// (internal/providerstore): one struct, two serializations, no duplicate
+	// schema to keep in sync.
+	OpenAIBaseURL    string `yaml:"openai_base_url" json:"openai_base_url,omitempty"`
+	AnthropicBaseURL string `yaml:"anthropic_base_url" json:"anthropic_base_url,omitempty"`
+	DecisionsBaseURL string `yaml:"decisions_base_url" json:"decisions_base_url,omitempty"`
+	Provider         string `yaml:"provider_id" json:"provider_id,omitempty"`
 	// ProxyURL overrides the top-level proxy for this provider (http/https/
 	// socks5 URL, or "off" to force direct). Empty = follow the global chain.
 	// Governs BOTH the forwarded traffic (forward/fusion/shadow, resolved in
@@ -1007,35 +1010,35 @@ type Provider struct {
 	// own proxy must not have its maintenance calls forced onto the global
 	// chain. The interactive `login` flows are the remaining global-only
 	// surface.
-	ProxyURL      string            `yaml:"proxy_url"`
-	AqpMintURL    string            `yaml:"aqp_mint_url"` // aqp only
-	ClientVersion string            `yaml:"client_version,omitempty"`
-	Headers       map[string]string `yaml:"headers"`
-	UsageURL      string            `yaml:"usage_url"`
+	ProxyURL      string            `yaml:"proxy_url" json:"proxy_url,omitempty"`
+	AqpMintURL    string            `yaml:"aqp_mint_url" json:"aqp_mint_url,omitempty"` // aqp only
+	ClientVersion string            `yaml:"client_version,omitempty" json:"client_version,omitempty"`
+	Headers       map[string]string `yaml:"headers" json:"headers,omitempty"`
+	UsageURL      string            `yaml:"usage_url" json:"usage_url,omitempty"`
 	// Models is the list of real model names this provider serves — a managed
 	// whitelist (kept in sync by `models refresh`). Metadata (context/output/
 	// modalities) is NOT stored here; it is sourced at runtime from models.dev
 	// (or conservative defaults) by hydrateModels.
-	Models []string `yaml:"models"`
+	Models []string `yaml:"models" json:"models,omitempty"`
 	// Priority is the provider-wide route-target priority inherited by every
 	// model this provider serves (lower = tried first within a tier/quota
 	// band). Auto-derived routes always use it; an explicit route target that
 	// omits its own priority falls back to it as well.
-	Priority int `yaml:"priority"`
+	Priority int `yaml:"priority" json:"priority,omitempty"`
 	// Alias renames one real model for routing: key = a model name in Models,
 	// value = the exposed name clients call. The route target still forwards
 	// the real upstream model name, so providers that name the same model
 	// differently (e.g. kimi-code's "k3" vs everyone else's "kimi-k3") can be
 	// aggregated under one exposed name. Responses are normalized back to the
 	// exposed name before commit (docs/architecture/protocol-conversion.md).
-	Alias map[string]string `yaml:"alias"`
+	Alias map[string]string `yaml:"alias" json:"alias,omitempty"`
 	// CatalogAlias maps a real model id (key, must appear in Models) to the
 	// models.dev catalog id used for metadata lookup — the escape hatch for
 	// providers whose upstream model id doesn't match the catalog's global
 	// name (e.g. a reseller's "kimi-k2" vs the catalog's "kimi-k2-0905-preview").
 	// Unlike Alias it never changes routing or the names clients see; it only
 	// steers HydrateModels' catalog lookup (docs/architecture/request-routing.md).
-	CatalogAlias map[string]string `yaml:"catalog_alias"`
+	CatalogAlias map[string]string `yaml:"catalog_alias" json:"catalog_alias,omitempty"`
 	// Capabilities is a manual per-model capability override — the escape hatch
 	// for models the models.dev catalog doesn't know (codex/aqp/volcengine blind
 	// spots). Keys are model names (validate requires them to appear in Models);
@@ -1043,20 +1046,20 @@ type Provider struct {
 	// check follows this list exactly ([image] = image yes, tools no), ignoring
 	// the catalog; undeclared models keep catalog behavior. Context-window checks
 	// always come from the catalog (capabilities declare no window).
-	Capabilities map[string][]string `yaml:"capabilities"`
+	Capabilities map[string][]string `yaml:"capabilities" json:"capabilities,omitempty"`
 	// PeakHours is this provider's set of peak segments (each "HH:MM-HH:MM" in
 	// local time). Peak is folded into effective remaining quota: the per-segment
 	// multiplier discounts a provider's remaining quota while it is inside a peak
 	// window, so a peak provider is deprioritized (scheduled later within its
 	// tier/quota band) rather than tried in a separate group.
-	PeakHours PeakConfig `yaml:"peak_hours"`
+	PeakHours PeakConfig `yaml:"peak_hours" json:"peak_hours,omitempty"`
 	// Billing is "plan" (default, quota-bound) or "pay-as-you-go" (strict
 	// last-resort: used only when all plan providers are unavailable). A
 	// fresh quota MEASUREMENT always decides the scheduling tier; this label
 	// only fills the tier gap when no measurement exists (an unmeasured but
 	// declared plan/payg ranks with its real class instead of a middling
 	// "unknown" tier) — it never overrides a measurement.
-	Billing string `yaml:"billing"`
+	Billing string `yaml:"billing" json:"billing,omitempty"`
 }
 
 // ExposedModelName returns the name a model of this provider is exposed as:
@@ -1117,8 +1120,8 @@ func (c *Config) ProviderNames() string {
 
 // PeakSegment is one peak-hours window with its consumption multiplier.
 type PeakSegment struct {
-	Window     string  `yaml:"window"`
-	Multiplier float64 `yaml:"multiplier"` // 0 → default (2.0) at validate time
+	Window     string  `yaml:"window" json:"window"`
+	Multiplier float64 `yaml:"multiplier" json:"multiplier,omitempty"` // 0 → default (2.0) at validate time
 }
 
 // PeakConfig is a provider's set of peak segments. It unmarshals from three
@@ -1370,6 +1373,20 @@ func LoadConfig(path string) (*Config, error) {
 // messages + relative-path resolution only). Shared by LoadConfig (disk) and
 // the web layer's validate-before-write (in-memory YAML edit).
 func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
+	cfg, err := parseConfigBytes(path, data)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// parseConfigBytes is the parse+normalize half without validation, shared by
+// LoadConfigFromBytes and LoadConfigEffective (which swaps in the store's
+// provider set before validating).
+func parseConfigBytes(path string, data []byte) (*Config, error) {
 	cfg := &Config{}
 	type rawConfig struct {
 		Listen    string                     `yaml:"listen"`
@@ -1499,6 +1516,24 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.Credentials = raw.Credentials
 	cfg.Conversion = raw.Conversion
 	cfg.LogFile = ExpandPath(cfg.LogFile)
+	return cfg, nil
+}
+
+// LoadConfigEffective parses config bytes with the providers map REPLACED by
+// external (the provider.json store's resolved set — already the
+// yaml-over-store merge) before validation. This is how a post-migration
+// config.yaml (providers stripped into the store) still validates as a whole:
+// cross-provider checks (routes/shadow referencing providers, the
+// at-least-one-provider rule) run against the effective set. external may be
+// nil for a strict-equivalent load.
+func LoadConfigEffective(path string, data []byte, external map[string]Provider) (*Config, error) {
+	cfg, err := parseConfigBytes(path, data)
+	if err != nil {
+		return nil, err
+	}
+	if external != nil {
+		cfg.Providers = external
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -1585,7 +1620,19 @@ func (c *Config) validate() error {
 	if err := upstreamproxy.ValidateSetting(c.Proxy); err != nil {
 		return fmt.Errorf("proxy: %w", err)
 	}
-	for name, p := range c.Providers {
+	if err := ValidateProviders(c.Providers); err != nil {
+		return err
+	}
+	return c.validateRouting()
+}
+
+// ValidateProviders applies every per-provider rule (base URLs, provider_id
+// enum, URL shapes, header indirection, proxy_url, peak_hours, billing, and
+// alias/capabilities/catalog_alias key hygiene). Exported for the provider.json
+// store (internal/providerstore), which must enforce the same contract on
+// write; config.validate() runs it for yaml-loaded sets.
+func ValidateProviders(providers map[string]Provider) error {
+	for name, p := range providers {
 		// A provider needs at least one upstream base URL. openai_base_url is the
 		// default (same-protocol openai forwarding); anthropic_base_url is used by
 		// anthropic same-protocol forwarding AND protocol:anthropic conversion
@@ -1726,6 +1773,14 @@ func (c *Config) validate() error {
 			}
 		}
 	}
+	return nil
+}
+
+// validateRouting is validate()'s tail: the cross-referential checks that read
+// the merged provider set (route strategies/targets, shadow, ...). Split from
+// validate so ValidateProviders can be its own function without moving the
+// provider rule body around the file.
+func (c *Config) validateRouting() error {
 	for exposed, strategy := range c.RouteStrategies {
 		switch strategy {
 		case RouteStrategyQuota, RouteStrategyLoadBalance:

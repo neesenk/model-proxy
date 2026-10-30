@@ -16,6 +16,7 @@ import (
 
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/providerstore"
 )
 
 // runApiKeyLoginWithInput performs a pool-aware apikey login. The key may be
@@ -207,7 +208,7 @@ func RunProviderLogin(cfg *configdomain.Config, provName, keyIn, label string, r
 }
 
 func CmdLogin(args []string) {
-	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args))
+	cfg, err := providerstore.LoadEffectiveConfig(cliframework.ConfigPath(args), false)
 	if err != nil {
 		log.Fatal(err)
 	}

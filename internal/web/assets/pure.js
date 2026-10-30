@@ -4667,3 +4667,40 @@ export function keyCreatedBannerHTML(created) {
     <div class="hint">clients send it as <code>Authorization: Bearer &lt;key&gt;</code> or <code>x-api-key</code></div>
   </div>`;
 }
+
+// parseModelLines turns a one-model-per-line textarea into the id list the
+// provider models field accepts: trimmed, blank lines dropped, duplicates
+// removed (first occurrence wins — the same merge the backend applies).
+export function parseModelLines(text) {
+  const seen = new Set();
+  const out = [];
+  for (const line of String(text || '').split('\n')) {
+    const id = line.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+// mergeFetchedModels folds an Add Provider form's model sources into the
+// final list sent to POST /api/providers: the checked subset of a fetched
+// preview (fetched order), then manual lines (parsed with parseModelLines,
+// deduped against the checked set). An empty selection and no manual lines
+// yield [] — the backend then falls back to the preset defaults.
+export function mergeFetchedModels(fetched, checkedById, manualText) {
+  const checked = new Set(checkedById || []);
+  const out = [];
+  const seen = new Set();
+  for (const id of fetched || []) {
+    if (!checked.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  for (const id of parseModelLines(manualText)) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}

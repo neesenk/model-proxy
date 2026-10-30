@@ -39,7 +39,15 @@ func (p *StaticProvider) Logout() error {
 func (p *StaticProvider) Usage() error {
 	return errNotSupported
 }
-func (p *StaticProvider) FetchModels() ([]string, error) { return nil, errNotSupported }
+
+// FetchModels lists models from the OpenAI-compatible /models endpoint on the
+// configured base with the pool-bound Bearer key — most static endpoints
+// (OpenAI-compatible gateways) serve it. A gateway that hides the list
+// errors, and the callers (models refresh / the Web add-provider preview)
+// fall back to their configured/probed sets.
+func (p *StaticProvider) FetchModels() ([]string, error) {
+	return fetchModelsBearer(p.cfg, p.AuthHeaders)
+}
 
 // Quota: static providers have no measurable quota - always BillingUnknown.
 // The Note is implementation-owned knowledge (this provider has no usage

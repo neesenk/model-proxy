@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"io"
 	cliframework "model-proxy/internal/cli/framework"
-	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/display"
+	"model-proxy/internal/providerstore"
 	"sort"
 )
 
@@ -30,6 +30,10 @@ Commands:
   models <provider>    List models for one provider
   models refresh <provider>  Fetch live model list from a provider
   models pull         Force-refresh the models.dev metadata cache
+  models peek <provider>  Read-only live /models fetch (nothing written)
+  provider add <name> --base-url URL   Add a custom (static) provider + optional login
+  provider rm <name>   Remove a provider (credential pool kept)
+  provider set <name>  Edit provider fields (base/billing/priority/models)
   config init          Generate a config.yaml template
   config print         Print the effective config
   config check         Validate config and print a summary
@@ -151,6 +155,29 @@ Flags:
 
 See also: presets list`,
 
+	"provider": `provider <add|rm|set> ... [--config PATH]
+
+  Manage providers in the provider.json store (custom static endpoints;
+  vendor presets keep their own ` + "`model-proxy add <preset>`" + `).
+
+Subcommands:
+  provider add <name> --base-url URL [--anthropic-url URL] [--usage-url URL]
+               [--billing plan|pay-as-you-go] [--priority N] [--model M ...]
+               [--api-key-env VAR] [--no-login]
+      Add a custom OpenAI-compatible endpoint (provider_id static). The
+      token is optional: --api-key-env for scripts, an interactive prompt on
+      a terminal, or skip and ` + "`model-proxy login <name>`" + ` later.
+  provider rm <name> [--yes]
+      Remove a provider. Fails closed while any route still references it;
+      the credential pool is kept (` + "`logout`" + ` owns credentials).
+  provider set <name> [--base-url URL] [--anthropic-url URL] [--usage-url URL]
+               [--billing B] [--priority N] [--model M ...]
+      Edit an existing provider: only the flags you pass change the entry;
+      --model replaces the whole model list.
+
+Every change validates the whole effective config and hot-reloads a running
+daemon (same pipeline as the Web UI).`,
+
 	"presets": `presets list [--config PATH]
 
   List the built-in provider presets available to ` + "`model-proxy add`" + `.`,
@@ -172,6 +199,7 @@ Usage:
   models              List all models from all providers (from config).
   models <provider>   List models for one provider.
   models refresh <provider>  Fetch live model list from a provider's server.
+  models peek <provider>     Read-only live /models fetch (nothing written).
   models pull         Force-refresh the models.dev metadata cache.`,
 
 	"config": `config <subcommand> [--config PATH]
@@ -405,7 +433,7 @@ Flags:
 // whose -h help should list the providers defined in config.yaml.
 func TakesProvider(cmd string) bool {
 	switch cmd {
-	case "login", "logout", "usage":
+	case "login", "logout", "usage", "provider":
 		return true
 	}
 	return false
@@ -415,7 +443,7 @@ func TakesProvider(cmd string) bool {
 // providers defined under providers:, so the user knows what to pass as
 // <provider>. Silently skips if no config is available or it has no providers.
 func PrintConfigProvidersTo(out io.Writer, args []string) {
-	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args))
+	cfg, err := providerstore.LoadEffectiveConfig(cliframework.ConfigPath(args), false)
 	if err != nil || len(cfg.Providers) == 0 {
 		return
 	}

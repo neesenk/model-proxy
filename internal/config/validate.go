@@ -23,13 +23,31 @@ type ValidationIssue struct {
 // the bytes are a valid config. The path argument of LoadConfigFromBytes only
 // feeds error messages / relative-path resolution, so validation passes "".
 func ValidateYAML(data []byte) []ValidationIssue {
+	return validateYAML(data, nil)
+}
+
+// ValidateYAMLEffective validates bytes with the provider set REPLACED by
+// external (the provider.json store's resolved set) before validation — the
+// lint twin of LoadConfigEffective, so a post-migration yaml without a
+// providers: section lints clean against the store instead of failing
+// "no providers configured". nil external = strict-equivalent.
+func ValidateYAMLEffective(data []byte, external map[string]Provider) []ValidationIssue {
+	return validateYAML(data, external)
+}
+
+func validateYAML(data []byte, external map[string]Provider) []ValidationIssue {
 	// Parse into a yaml.Node tree once: on success its key locations pin
 	// semantic errors to a line; on failure the parse error itself carries the
 	// line and the tree is simply unused.
 	var doc yaml.Node
 	_ = yaml.Unmarshal(data, &doc)
 
-	_, err := LoadConfigFromBytes("", data)
+	var err error
+	if external != nil {
+		_, err = LoadConfigEffective("", data, external)
+	} else {
+		_, err = LoadConfigFromBytes("", data)
+	}
 	if err == nil {
 		return nil
 	}

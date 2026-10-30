@@ -140,6 +140,12 @@ func (fakeCommands) SecurityUnblock(string) error  { return nil }
 func (fakeCommands) SecurityDisallow(string) error { return nil }
 
 func (fakeCommands) AddPreset(string) ([]string, string, error) { return nil, "", nil }
+func (fakeCommands) AddProvider(context.Context, ProviderAddRequest) (ProviderAddResult, error) {
+	return ProviderAddResult{}, nil
+}
+func (fakeCommands) PreviewProviderModels(context.Context, ProviderModelsPreviewRequest) ([]string, error) {
+	return nil, nil
+}
 func (fakeCommands) RefreshModels(context.Context, string) (ModelsRefreshResult, error) {
 	return ModelsRefreshResult{}, nil
 }

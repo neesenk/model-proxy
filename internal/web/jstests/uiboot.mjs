@@ -75,6 +75,14 @@ export async function bootUiE2E(opts = {}) {
   // GET /models.dev serves a minimal valid catalog so the models.dev cache
   // refresh (Model Catalog card) stays hermetic via MP_MODELSDEV_URL below.
   ctx.upstream = http.createServer((req, res) => {
+    // OpenAI-style /models for the Accounts Add Provider live preview (the
+    // static provider's Fetch button). Only this path is a models list; every
+    // other GET keeps falling through to the chat.completion default.
+    if (req.method === 'GET' && req.url === '/v1/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ object: 'list', data: [{ id: 'stub-m1' }, { id: 'stub-m2' }] }));
+      return;
+    }
     if (req.method === 'GET' && req.url === '/models.dev') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({

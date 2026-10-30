@@ -25,7 +25,7 @@ import {
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
   verdictBadge, modelCapMatrix, visibleModelRows, providerCapsSummary, providerFrozen, providerNames, cacheHitRate,
   accountProviderKey, splitProviderKey, providerDisplayName,
-  catalogMatchHTML, catalogMatchEditorHTML,
+  catalogMatchHTML, catalogMatchEditorHTML, parseModelLines, mergeFetchedModels,
   settingsDiff, settingsRestartKeys, configSummaryHTML, TOKEN_RANGES, tokensRangeQuery, tokenRangeLabel,
   tokenRangeTriggerLabel, parseLocalDate, tokenRangeBounds, tokenCustomBounds, tokenRangePickerHTML,
   quotaUsageFromSec, quotaWindowFromSec, quotaWindowForProvider,
@@ -7444,17 +7444,6 @@ async function renderConfigTab() {
   if (await retainTab(panel, '#config-summary .card-head', loadConfigData)) return;
   panel.innerHTML =
     `<div id="config-summary" class="card"><div class="card-body"><span class="msg">loading…</span></div></div>
-     <div class="card" id="preset-card">
-       <header class="card-head"><h2>Add provider preset</h2></header>
-       <div class="card-body">
-         <div class="row-actions preset-row">
-           <select id="preset-select" class="req-input" aria-label="Provider preset"></select>
-           <button class="btn small" id="btn-preset-add">Add &amp; reload</button>
-         </div>
-         <div id="preset-msg" aria-live="polite"></div>
-       </div>
-     </div>
-     <details class="editor" id="ed-provider"><summary>${iconChevron()}Provider scalars</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <details class="editor" id="ed-route"><summary>${iconChevron()}Routes</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <details class="editor" id="ed-guard-rules"><summary>${iconChevron()}Guard rules (extra patterns / paths)</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <details class="editor" id="ed-settings"><summary>${iconChevron()}Settings (log / scheduling / request log / stats / cache / guard)</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
@@ -7488,7 +7477,6 @@ async function renderConfigTab() {
   scheduleYamlEditorResize();
   document.getElementById('btn-yaml-reload').addEventListener('click', loadConfigYAML);
   document.getElementById('btn-yaml-save').addEventListener('click', saveConfigYAML);
-  document.getElementById('btn-preset-add').addEventListener('click', addPresetFromWizard);
 
   await loadConfigData();
 }
@@ -7506,64 +7494,6 @@ async function loadConfigData() {
   }
 }
 
-// --- Add provider preset wizard (S3) ---
-
-// loadPresetSelect fills the wizard dropdown from GET /api/presets. Options
-// carry the preset's model count; already-configured providers are marked so
-// the wizard reads honestly (adding is still allowed — it's idempotent and
-// the credential step may still be pending).
-async function loadPresetSelect() {
-  const sel = document.getElementById('preset-select');
-  if (!sel) return;
-  try {
-    const data = await apiGet('/api/presets');
-    const presets = (data && data.presets) || [];
-    const configured = new Set(Object.keys((configCache && configCache.provider_models) || {}));
-    sel.innerHTML = presets.map(p => {
-      const known = configured.has(p.name) ? ' (already in config)' : '';
-      return `<option value="${esc(p.name)}">${esc(p.name)} — ${p.models.length} models${known}</option>`;
-    }).join('') || '<option value="">(no presets)</option>';
-  } catch (e) {
-    sel.innerHTML = '<option value="">(presets unavailable)</option>';
-  }
-}
-
-// addPresetFromWizard POSTs /api/presets/<name>, surfaces the server's
-// ambiguity warnings verbatim (backend message is authoritative), renders a
-// reload failure as its own sentence (reload_warning is an error string,
-// never a model name), then refreshes the whole Config tab (summary + YAML
-// baseline + provider editors) so the merged block shows up everywhere at
-// once.
-async function addPresetFromWizard() {
-  const sel = document.getElementById('preset-select');
-  const msg = document.getElementById('preset-msg');
-  const btn = document.getElementById('btn-preset-add');
-  if (!sel || !sel.value) return;
-  btn.disabled = true;
-  try {
-    const res = await apiPost('/api/presets/' + encodeURIComponent(sel.value));
-    const warns = (res && res.warnings) || [];
-    const reloadWarn = (res && res.reload_warning) || '';
-    const parts = [];
-    if (warns.length) {
-      parts.push(`these models are now served by multiple providers: ${warns.join(', ')} — set each provider's priority to control failover order.`);
-    }
-    if (reloadWarn) {
-      parts.push(`hot-reload failed: ${reloadWarn} — the block is saved; the daemon picks it up once config.yaml is fixed and reloaded.`);
-    }
-    if (parts.length) {
-      showMsg(msg, 'warn', `Added, but ${parts.join(' Also, ')}`);
-    } else {
-      showMsg(msg, 'ok', `Preset ${sel.value} added. Next: add its credential in Accounts (or login).`);
-    }
-    await loadConfigAll();
-  } catch (e) {
-    showMsg(msg, 'err', e.message);
-  } finally {
-    btn.disabled = false;
-  }
-}
-
 async function loadConfigAll() {
   // The MCP gateway surface is an independent read: a failure must not break
   // the Config tab, so it degrades to null and the Summary's mcp item renders
@@ -7573,9 +7503,6 @@ async function loadConfigAll() {
     apiGet('/api/mcp').catch(() => null),
   ]);
   configCache = cfg;
-  // Fill the preset wizard select in the same pass (independent of the
-  // config body; failures leave the select empty without breaking the tab).
-  loadPresetSelect();
   document.getElementById('config-summary').outerHTML =
     `<div id="config-summary" class="card">
        <header class="card-head"><h2>Summary</h2></header>
@@ -7591,9 +7518,6 @@ async function loadConfigAll() {
   updateYamlSaveState();
   const meta = document.getElementById('yaml-meta');
   if (meta) meta.textContent = `${(cfg.yaml || '').length} bytes`;
-
-  // Provider scalars form
-  buildProviderForm('ed-provider');
 
   // Route form
   buildRouteForm('ed-route');
@@ -7720,172 +7644,6 @@ async function saveGuardRules() {
   }
 }
 
-// buildProviderForm: choose a provider → edit base URLs / usage_url / billing, or delete.
-function buildProviderForm(editorId) {
-  const ed = document.getElementById(editorId);
-  if (!ed) return;
-  ed.querySelector('.editor-body').innerHTML =
-    `<div class="section-title">Provider scalars</div>
-     <div class="field">
-       <label for="prov-name">provider name</label>
-       <input id="prov-name" name="name" type="text" list="prov-list" autocomplete="off">
-       <datalist id="prov-list"></datalist>
-       <span class="hint">Pick an existing provider to edit, or type a new name to add one.</span>
-     </div>
-     <div class="field">
-       <label for="fld-provider_id">provider_id</label>
-       <select id="fld-provider_id" name="provider_id">
-         <option value=""></option>
-         <option value="aqp">aqp</option>
-         <option value="codex">codex</option>
-         <option value="zhipu">zhipu</option>
-         <option value="deepseek">deepseek</option>
-         <option value="volcengine">volcengine</option>
-         <option value="static">static</option>
-       </select>
-       <span class="hint">Required for a new provider. Selects the auth/rewrite implementation. static = no login (put the key in \`headers\` in the YAML editor).</span>
-     </div>
-     <div class="field"><label for="fld-openai_base_url">openai_base_url</label><input id="fld-openai_base_url" name="openai_base_url" type="text"></div>
-     <div class="field"><label for="fld-anthropic_base_url">anthropic_base_url</label><input id="fld-anthropic_base_url" name="anthropic_base_url" type="text" placeholder="optional override for /v1/messages"></div>
-     <div class="field"><label for="fld-usage_url">usage_url</label><input id="fld-usage_url" name="usage_url" type="text"></div>
-     <div class="field"><label for="fld-billing">billing</label>
-       <select id="fld-billing" name="billing">
-         <option value="plan">plan</option>
-         <option value="pay-as-you-go">pay-as-you-go</option>
-       </select>
-     </div>
-     <div class="field"><label for="fld-models">models</label>
-       <textarea id="fld-models" name="models" rows="4" placeholder="one model per line (the upstream's real model id)&#10;e.g. glm-4.6&#10;glm-4.5-air"></textarea>
-       <span class="hint">The provider's model whitelist (matches \`models:\` in config). Empty = leave unchanged. Prefer \`models refresh <provider>\` to auto-fetch.</span>
-     </div>
-     <div class="row-actions">
-       <button class="btn danger small" id="btn-prov-delete">Delete provider</button>
-       <span class="spacer"></span>
-       <button class="btn primary small" id="btn-prov-save">Apply</button>
-     </div>
-     <div class="msg" id="prov-msg"></div>`;
-  populateProviderDatalist();
-  document.getElementById('btn-prov-save').addEventListener('click', applyProviderEdit);
-  document.getElementById('btn-prov-delete').addEventListener('click', deleteProvider);
-}
-
-// providerAccounts caches /api/accounts providers so the provider form can
-// (a) detect an existing vs. new name and (b) prefill provider_id/billing when
-// editing. Refreshed by populateProviderDatalist on each form build.
-let providerAccounts = [];
-
-async function populateProviderDatalist() {
-  try {
-    const [st, acc] = await Promise.all([
-      apiGet('/api/status').catch(() => null),
-      apiGet('/api/accounts').catch(() => null),
-    ]);
-    providerAccounts = (acc && acc.providers) || [];
-    const names = new Set();
-    if (st && st.health) Object.keys(st.health).forEach((n) => names.add(n));
-    providerAccounts.forEach((p) => names.add(p.name));
-    const dl = document.getElementById('prov-list');
-    if (dl) dl.innerHTML = Array.from(names).sort().map((n) => `<option value="${esc(n)}">`).join('');
-    // Prefill provider_id/billing when the name input already matches an
-    // existing provider (e.g. the datalist was picked). Fires on every keystroke
-    // so the fields track the selected name.
-    const nameInp = document.getElementById('prov-name');
-    if (nameInp && !nameInp.dataset.wired) {
-      nameInp.dataset.wired = '1';
-      nameInp.addEventListener('input', prefillProviderForm);
-      attachClearable(nameInp);
-    }
-    prefillProviderForm();
-  } catch (_) { /* best-effort */ }
-}
-
-// providerExists reports whether `name` is a configured provider (per the cached
-// /api/accounts list). Used to decide whether provider_id is required.
-function providerExists(name) {
-  return providerAccounts.some((p) => p.name === name);
-}
-
-// prefillProviderForm loads an existing provider's provider_id + billing + models
-// into the form fields when its name is entered, and clears them for a new name
-// so the user must pick a provider_id. Base URLs / usage_url aren't exposed by
-// /api/accounts, so those stay manual (the YAML editor covers full edits).
-// models come from /api/config's provider_models (cached in configCache).
-function prefillProviderForm() {
-  const name = (document.getElementById('prov-name').value || '').trim();
-  const p = providerAccounts.find((x) => x.name === name);
-  const pidSel = document.getElementById('fld-provider_id');
-  const billSel = document.getElementById('fld-billing');
-  const modelsInp = document.getElementById('fld-models');
-  if (pidSel) pidSel.value = p ? (p.provider_id || '') : '';
-  if (billSel) billSel.value = p ? (p.billing || 'plan') : 'plan';
-  if (modelsInp) {
-    const list = (configCache && configCache.provider_models && configCache.provider_models[name]) || [];
-    modelsInp.value = list.join('\n');
-  }
-}
-
-async function applyProviderEdit() {
-  const msg = document.getElementById('prov-msg');
-  const btn = document.getElementById('btn-prov-save');
-  const name = (document.getElementById('prov-name').value || '').trim();
-  if (!name) { showMsg(msg, 'err', 'provider name required'); return; }
-  const data = {};
-  // provider_id (select) + scalar text/select fields. provider_id is required
-  // for a new provider (config.validate rejects an empty provider_id); for an
-  // existing one it can be left unchanged, so we only send it when set.
-  const pidInp = document.getElementById('fld-provider_id');
-  const pid = (pidInp ? pidInp.value : '').trim();
-  if (pid) data.provider_id = pid;
-  const isNew = !providerExists(name);
-  if (isNew && !pid) {
-    showMsg(msg, 'err', 'provider_id is required for a new provider');
-    return;
-  }
-  for (const fld of ['openai_base_url', 'anthropic_base_url', 'usage_url', 'billing']) {
-    const inp = document.getElementById('fld-' + fld);
-    const v = (inp ? inp.value : '').trim();
-    if (v) data[fld] = v;
-  }
-  // models: textarea -> string array (one per line, blanks dropped). Only sent
-  // when non-empty so an untouched/blank field leaves the existing list intact
-  // (the prefill loads the current list, so editing is non-destructive). To
-  // clear a provider's models, use the YAML editor.
-  const modelsInp = document.getElementById('fld-models');
-  if (modelsInp) {
-    const models = modelsInp.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    if (models.length) data.models = models;
-  }
-  btn.disabled = true;
-  showMsg(msg, 'ok', 'saving…');
-  try {
-    await apiPost('/api/config/edit', { kind: 'provider', name, data });
-    await loadConfigAll();
-    showMsg(msg, 'ok', 'saved & reloaded');
-  } catch (e) {
-    showMsg(msg, 'err', e.message);
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-async function deleteProvider() {
-  const msg = document.getElementById('prov-msg');
-  const name = (document.getElementById('prov-name').value || '').trim();
-  if (!name) { showMsg(msg, 'err', 'provider name required'); return; }
-  if (!window.confirm(`Delete provider "${name}"? This removes its block from config.yaml (credentials on disk are unaffected).`)) return;
-  try {
-    await apiPost('/api/config/edit', { kind: 'provider', name, data: { delete: true } });
-    await loadConfigAll();
-    showMsg(msg, 'ok', `deleted ${name}`);
-  } catch (e) {
-    showMsg(msg, 'err', e.message);
-  }
-}
-
-// buildRouteForm: pick an existing route (or type a new name) → edit its targets
-// as structured rows [provider ▾ | model ▾ | priority]. Replaces the old free-text
-// "provider/model per line" textarea. Provider options = configured providers
-// (keys of provider_models); model options = that provider's models list.
 function buildRouteForm(editorId) {
   const ed = document.getElementById(editorId);
   if (!ed) return;
@@ -8941,12 +8699,15 @@ function renderAccountsNav(providers) {
   const main = document.querySelector('.acct-main');
   if (sorted.length === 0) {
     nav.innerHTML = `<div class="acct-nav-title">Providers</div>
-      <div class="acct-empty">No providers configured. Add one in <code>config.yaml</code> first.</div>`;
+      <div class="acct-empty">No providers configured yet. Use <strong>+ Add</strong> to create one (or run <code>model-proxy presets add &lt;name&gt;</code>).</div>`;
     if (main) main.innerHTML = '';
     accountsSelectedProvider = null;
+    wireAccountsNavActions(nav);
     return;
   }
-  nav.innerHTML = `<div class="acct-nav-title">Providers</div>` +
+  nav.innerHTML = `<div class="acct-nav-title acct-nav-head">Providers
+      <button type="button" class="btn small" id="acct-add-provider" title="Add a provider (preset or static endpoint)">+ Add</button>
+    </div>` +
     sorted.map((p) => {
       const n = (p.accounts || []).length;
       const active = p.name === accountsSelectedProvider ? ' active' : '';
@@ -8958,6 +8719,7 @@ function renderAccountsNav(providers) {
   nav.querySelectorAll('.acct-nav-item').forEach((b) => {
     b.addEventListener('click', () => selectProvider(b.dataset.provider));
   });
+  wireAccountsNavActions(nav);
   if (!accountsSelectedProvider || !sorted.some((p) => p.name === accountsSelectedProvider)) {
     accountsSelectedProvider = sorted[0].name;
   }
@@ -9541,6 +9303,274 @@ async function submitAdd(providerName) {
       if (m && m.open) m.close();
       renderAccountsTab();
     }, 350);
+  } catch (e) {
+    showMsg(msg, 'err', e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---------- #provider-add-modal: Accounts 页 Add Provider ----------
+
+// wireAccountsNavActions binds the sidebar's + Add button (the sidebar is
+// re-rendered on data refreshes; the empty state shares the wiring).
+function wireAccountsNavActions(nav) {
+  const btn = nav.querySelector('#acct-add-provider');
+  if (btn) btn.addEventListener('click', openProviderAddModal);
+}
+
+// paPresetCatalog caches the preset list for the prefill handler (keyed by
+// name) — the select's option labels carry names only.
+let paPresetCatalog = {};
+
+// paIsOAuth reports whether the SELECTED PRESET authenticates via OAuth
+// (SSO/device flow): those add accounts through login, not a token. provider_id
+// is not a form input — the preset template carries it (custom entries are
+// static and never OAuth).
+function paIsOAuth() {
+  const tpl = paPresetCatalog[document.getElementById('pa-preset').value];
+  return !!tpl && (tpl.provider_id === 'aqp' || tpl.provider_id === 'codex');
+}
+
+// paSyncCredentialVisibility hides the token field and the live Fetch row for
+// OAuth providers (their /models needs the logged-in account, not a bearer
+// key) and shows the login hint in their place.
+function paSyncCredentialVisibility() {
+  const oauth = paIsOAuth();
+  const tokenField = document.getElementById('pa-token-field');
+  const fetchField = document.getElementById('pa-fetch-field');
+  const note = document.getElementById('pa-oauth-note');
+  if (tokenField) tokenField.hidden = oauth;
+  if (fetchField) fetchField.hidden = oauth;
+  if (note) note.hidden = !oauth;
+}
+
+// paApplyPreset prefills the form from the selected catalog entry: picking a
+// preset is the fast path — every template field lands in its editable input
+// (name only while still empty, never overwriting typed text); the custom
+// option leaves the form as-is for hand-filling a static endpoint.
+function paApplyPreset() {
+  const sel = document.getElementById('pa-preset');
+  const tpl = paPresetCatalog[sel.value];
+  if (!tpl) {
+    paSyncCredentialVisibility();
+    return;
+  }
+  // The name is never auto-filled: it is the config key the user picks
+  // (my-zhipu, acme-gateway, …) — every other field prefill comes from the
+  // template (provider_id included: it rides the preset, not a form input).
+  document.getElementById('pa-openai-url').value = tpl.base_url || '';
+  document.getElementById('pa-anthropic-url').value = tpl.anthropic_base_url || '';
+  document.getElementById('pa-usage-url').value = tpl.usage_url || '';
+  document.getElementById('pa-billing').value = tpl.billing || '';
+  document.getElementById('pa-priority').value = tpl.priority > 0 ? String(tpl.priority) : '';
+  document.getElementById('pa-models').value = (tpl.models || []).join('\n');
+  const listEl = document.getElementById('pa-fetch-list');
+  listEl.hidden = true;
+  listEl.innerHTML = '';
+  const hint = document.getElementById('pa-fetch-hint');
+  if (hint) hint.textContent = 'Pull the live /models list with the fields above, then pick.';
+  paSyncCredentialVisibility();
+}
+
+// openProviderAddModal builds the Accounts-page Add Provider dialog: the
+// preset dropdown leads (picking one prefills every editable field), the
+// custom option leaves them blank for any OpenAI-compatible endpoint; the
+// token field is write-only (stored in the account pool, never provider.json
+// — same rule as #add-modal) and hidden for OAuth providers together with the
+// live Fetch row; models come from the Fetch preview and/or manual lines.
+async function openProviderAddModal() {
+  const modal = document.getElementById('provider-add-modal');
+  if (!modal) return;
+  modal.setAttribute('aria-labelledby', 'pa-title');
+  modal.innerHTML =
+    `<form method="dialog">
+      <header class="modal-head">
+        <h2 id="pa-title">Add provider</h2>
+        <button type="button" class="link-btn" id="pa-cancel" aria-label="Close">Close</button>
+      </header>
+      <div class="modal-body">
+        <div class="field">
+          <label for="pa-preset">preset</label>
+          <select id="pa-preset" class="req-input"><option value="">custom — fill in below</option></select>
+          <span class="hint">Pick a preset to prefill every field (protocol, base URL, models — all still editable); custom is a generic OpenAI-compatible endpoint. Need a vendor protocol on your own URL? Pick its preset, then edit the URL.</span>
+        </div>
+        <div class="field">
+          <label for="pa-name">name</label>
+          <input id="pa-name" type="text" placeholder="e.g. my-zhipu / acme-gateway" autocomplete="off" required>
+          <span class="hint">The config providers key and the sidebar entry.</span>
+        </div>
+        <div class="field">
+          <label for="pa-openai-url">openai_base_url</label>
+          <input id="pa-openai-url" type="text" placeholder="api.example.com/v1" autocomplete="off">
+          <span class="hint">Include the version segment (…/v1) — the proxy strips the client's /v1.</span>
+        </div>
+        <div class="field">
+          <label for="pa-anthropic-url">anthropic_base_url (optional)</label>
+          <input id="pa-anthropic-url" type="text" placeholder="api.example.com" autocomplete="off">
+          <span class="hint">No trailing /v1 — the proxy keeps the client's /v1/messages path.</span>
+        </div>
+        <div class="field">
+          <label for="pa-usage-url">usage_url (optional)</label>
+          <input id="pa-usage-url" type="text" placeholder="api.example.com/v1/usage" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="pa-billing">billing</label>
+          <select id="pa-billing" class="req-input">
+            <option value="">plan (default)</option>
+            <option value="pay-as-you-go">pay-as-you-go</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="pa-priority">priority (optional)</label>
+          <input id="pa-priority" type="number" min="0" step="1" placeholder="0 = unset — lower is tried first">
+          <span class="hint">Provider-wide route-target priority; a target's own priority overrides it.</span>
+        </div>
+        <div class="field" id="pa-token-field">
+          <label for="pa-token">token (optional)</label>
+          <input id="pa-token" type="password" autocomplete="off" placeholder="API key — stored in ~/.model-proxy, never logged">
+          <span class="hint">Creates the first account immediately.</span>
+        </div>
+        <div class="hint" id="pa-oauth-note" hidden>OAuth provider — add it first, then log in from its account page (no token here).</div>
+        <div class="field" id="pa-fetch-field">
+          <label>live model list</label>
+          <div class="row-actions preset-row">
+            <button type="button" class="btn small" id="pa-fetch">Fetch models</button>
+            <span class="hint" id="pa-fetch-hint">Pull the live /models list with the fields above, then pick.</span>
+          </div>
+          <div id="pa-fetch-list" class="pa-model-list" hidden></div>
+        </div>
+        <div class="field">
+          <label for="pa-models">models — one per line</label>
+          <textarea id="pa-models" rows="4" placeholder="glm-5.2&#10;kimi-k3"></textarea>
+          <span class="hint">A preset pick prefills this; the Fetch list above adds on top (deduped, fetched order first).</span>
+        </div>
+        <div class="row-actions">
+          <span class="spacer"></span>
+          <button type="button" class="btn primary small" id="pa-submit">Add provider</button>
+        </div>
+        <div class="msg" id="pa-msg"></div>
+      </div>
+    </form>`;
+  modal.showModal();
+  document.getElementById('pa-cancel').addEventListener('click', () => modal.close());
+  document.getElementById('pa-fetch').addEventListener('click', providerAddFetchModels);
+  document.getElementById('pa-submit').addEventListener('click', submitProviderAdd);
+  // Preset catalog fill (same source as the Config-page wizard): option
+  // labels carry the NAME only — counts and details live in the prefill.
+  const sel = document.getElementById('pa-preset');
+  sel.addEventListener('change', paApplyPreset);
+  try {
+    const data = await apiGet('/api/presets');
+    const presets = (data && data.presets) || [];
+    paPresetCatalog = {};
+    for (const p of presets) paPresetCatalog[p.name] = p;
+    sel.innerHTML = '<option value="">custom — fill in below</option>' +
+      presets.map((p) => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+  } catch (e) {
+    sel.innerHTML = '<option value="">(presets unavailable)</option>';
+  }
+}
+
+// providerAddPayloadBase reads the dialog's fields into the request payload
+// skeleton (without the token — callers add it explicitly).
+function providerAddPayloadBase() {
+  const body = {
+    name: (document.getElementById('pa-name').value || '').trim(),
+    billing: document.getElementById('pa-billing').value || undefined,
+  };
+  const preset = document.getElementById('pa-preset').value;
+  if (preset) body.preset = preset;
+  const openai = (document.getElementById('pa-openai-url').value || '').trim();
+  if (openai) body.openai_base_url = openai;
+  const anthropic = (document.getElementById('pa-anthropic-url').value || '').trim();
+  if (anthropic) body.anthropic_base_url = anthropic;
+  const usage = (document.getElementById('pa-usage-url').value || '').trim();
+  if (usage) body.usage_url = usage;
+  const priority = parseInt(document.getElementById('pa-priority').value, 10);
+  if (Number.isFinite(priority) && priority > 0) body.priority = priority;
+  return body;
+}
+
+// providerAddFetchModels runs the read-only preview against the CURRENT form
+// fields + token and renders a checked-by-default pick list.
+async function providerAddFetchModels() {
+  const msg = document.getElementById('pa-msg');
+  const btn = document.getElementById('pa-fetch');
+  const listEl = document.getElementById('pa-fetch-list');
+  const hint = document.getElementById('pa-fetch-hint');
+  const base = providerAddPayloadBase();
+  const body = {
+    preset: base.preset,
+    provider_id: base.provider_id,
+    openai_base_url: base.openai_base_url,
+    anthropic_base_url: base.anthropic_base_url,
+    token: (document.getElementById('pa-token').value || '').trim() || undefined,
+  };
+  btn.disabled = true;
+  hint.textContent = 'fetching…';
+  try {
+    const data = await apiPost('/api/providers/models-preview', body);
+    const models = (data && data.models) || [];
+    if (!models.length) {
+      listEl.hidden = true;
+      listEl.innerHTML = '';
+      hint.textContent = 'upstream returned an empty list — add models manually below.';
+      return;
+    }
+    listEl.innerHTML = models.map((m) =>
+      `<label class="pa-model-item"><input type="checkbox" data-pa-model="${esc(m)}" checked> ${esc(m)}</label>`).join('');
+    listEl.hidden = false;
+    hint.textContent = `${models.length} models fetched — untick to exclude; manual lines below are added on top.`;
+  } catch (e) {
+    listEl.hidden = true;
+    hint.textContent = 'fetch failed — add models manually below.';
+    showMsg(msg, 'err', e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// submitProviderAdd POSTs /api/providers, surfaces warnings (ambiguity,
+// reload, account) verbatim, clears the token field, and refreshes the tab.
+async function submitProviderAdd() {
+  const msg = document.getElementById('pa-msg');
+  const btn = document.getElementById('pa-submit');
+  const body = providerAddPayloadBase();
+  if (!body.name) {
+    showMsg(msg, 'err', 'name is required');
+    return;
+  }
+  const token = (document.getElementById('pa-token').value || '').trim();
+  if (token) body.token = token;
+  // Models: checked fetch picks + manual lines (deduped, fetched order first).
+  const listEl = document.getElementById('pa-fetch-list');
+  const boxes = Array.from(listEl.querySelectorAll('input[data-pa-model]'));
+  const models = mergeFetchedModels(
+    boxes.map((i) => i.dataset.paModel),
+    boxes.filter((i) => i.checked).map((i) => i.dataset.paModel),
+    document.getElementById('pa-models').value,
+  );
+  if (models.length) body.models = models;
+
+  btn.disabled = true;
+  showMsg(msg, 'ok', 'adding…');
+  try {
+    const data = await apiPost('/api/providers', body);
+    // Clear secrets from the DOM immediately (the token never comes back).
+    document.getElementById('pa-token').value = '';
+    const notes = [];
+    if (data && Array.isArray(data.warnings) && data.warnings.length) {
+      notes.push(`ambiguous models: ${data.warnings.join(', ')}`);
+    }
+    if (data && data.reload_warning) notes.push(`reload: ${data.reload_warning}`);
+    if (data && data.account_warning) notes.push(`account: ${data.account_warning}`);
+    showMsg(msg, notes.length ? 'warn' : 'ok', notes.length ? `Added, with notes — ${notes.join(' · ')}` : 'added — reloading');
+    setTimeout(() => {
+      const m = document.getElementById('provider-add-modal');
+      if (m && m.open) m.close();
+      renderAccountsTab();
+    }, notes.length ? 900 : 350);
   } catch (e) {
     showMsg(msg, 'err', e.message);
   } finally {

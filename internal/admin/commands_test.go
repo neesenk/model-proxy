@@ -16,6 +16,7 @@ import (
 	"model-proxy/internal/appapi"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/providerstore"
 )
 
 func TestResetStatsPassThrough(t *testing.T) {
@@ -169,6 +170,7 @@ func TestSetAndClearPin(t *testing.T) {
 }
 
 func TestValidateConfig(t *testing.T) {
+	// HomeDir-less service = strict lint (no store view).
 	service := New(Ports{})
 	if issues := service.ValidateConfig([]byte("listen: 127.0.0.1:0\nproviders:\n  up: {provider_id: zhipu, openai_base_url: https://x}\n")); len(issues) != 0 {
 		t.Errorf("valid config issues = %v", issues)
@@ -176,6 +178,39 @@ func TestValidateConfig(t *testing.T) {
 	issues := service.ValidateConfig([]byte("providers: ["))
 	if len(issues) == 0 || issues[0].Message == "" {
 		t.Errorf("invalid config issues = %v", issues)
+	}
+}
+
+// TestValidateConfigEffectiveLint pins the Raw YAML editor's lint contract
+// post-migration: a provider-less yaml lints CLEAN when the provider.json
+// store holds the set (the "no providers configured" false alarm the Config
+// page used to show), a providers: block in the DRAFT wins per-entry over
+// the store (the merge an absorbing reload would apply), and a genuinely
+// empty effective set still fails.
+func TestValidateConfigEffectiveLint(t *testing.T) {
+	home := t.TempDir()
+	service := New(Ports{HomeDir: func() string { return home }})
+	if err := providerstore.Save(providerstore.PathUnder(home), map[string]configdomain.Provider{
+		"zhipu": {Provider: "zhipu", OpenAIBaseURL: "https://open.bigmodel.cn/api/paas/v4", Models: []string{"glm-5.2"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Post-migration normal form: no providers: section in the yaml at all.
+	if issues := service.ValidateConfig([]byte("listen: 127.0.0.1:8080\nlog_level: info\n")); len(issues) != 0 {
+		t.Fatalf("provider-less yaml must lint clean against the store, got %v", issues)
+	}
+
+	// A draft providers: block wins per-entry (bad entry must surface).
+	issues := service.ValidateConfig([]byte("listen: 127.0.0.1:8080\nproviders:\n  broken: {provider_id: no-such-id, openai_base_url: https://x}\n"))
+	if len(issues) == 0 || !strings.Contains(issues[0].Message, "unknown provider_id") {
+		t.Fatalf("draft provider entry must lint, got %v", issues)
+	}
+
+	// No store + no providers: section still fails fail-closed.
+	empty := New(Ports{HomeDir: func() string { return t.TempDir() }})
+	if issues := empty.ValidateConfig([]byte("listen: 127.0.0.1:8080\n")); len(issues) == 0 || !strings.Contains(issues[0].Message, "no providers configured") {
+		t.Fatalf("empty effective set must fail, got %v", issues)
 	}
 }
 
@@ -620,13 +655,16 @@ func TestReloadAppliedWarningErrorShape(t *testing.T) {
 func TestAddPreset(t *testing.T) {
 	path := writeTestConfig(t)
 	spy := &reloadSpy{}
+	home := t.TempDir()
 	service := New(Ports{
 		ConfigFile: func() string { return path },
+		HomeDir:    func() string { return home },
 		Reload:     spy.fn(),
 	})
-	// The fixture already carries a zhipu provider block, so this is the
-	// documented idempotent skip. With a single configured provider no model is
-	// served by another provider, so the ambiguity warning list must be empty.
+	// The fixture already carries a zhipu provider block, so the preset entry
+	// exists after the absorbing merge — the documented idempotent skip. With a
+	// single configured provider no model is served by another provider, so
+	// the ambiguity warning list must be empty.
 	warnings, reloadWarning, err := service.AddPreset("zhipu")
 	if err != nil {
 		t.Fatal(err)
@@ -640,37 +678,43 @@ func TestAddPreset(t *testing.T) {
 	if len(spy.calls) != 1 || spy.calls[0] != path {
 		t.Errorf("reload calls = %v", spy.calls)
 	}
-	merged, err := os.ReadFile(path)
-	if err != nil || !strings.Contains(string(merged), "zhipu") {
-		t.Errorf("merged config missing preset block: %v %s", err, merged)
+	// The idempotent skip does not rewrite anything: the yaml fixture keeps
+	// its zhipu block (absorption happens on the next real mutation, not on
+	// a no-op).
+	if content := readTestFile(t, path); !strings.Contains(content, "zhipu:") {
+		t.Fatalf("skip path must leave the yaml untouched:\n%s", content)
 	}
 
-	// Second add: the block already exists, so the merge is skipped again — no
-	// duplicate block and a byte-identical config — while the mutation still
-	// hot-reloads (login proceeds against the merged file).
-	warnings2, reloadWarning2, err := service.AddPreset("zhipu")
+	// A NEW preset performs the absorbing merge: deepseek lands in the store
+	// AND the yaml's zhipu block is absorbed into the store in the same
+	// mutation (stripped from the yaml).
+	if _, _, err := service.AddPreset("deepseek"); err != nil {
+		t.Fatalf("AddPreset(deepseek): %v", err)
+	}
+	store := readProviderStore(t, service)
+	if _, ok := store["deepseek"]; !ok {
+		t.Fatalf("store after add = %+v, want the deepseek preset entry", store)
+	}
+	zhipu, ok := store["zhipu"]
+	if !ok || len(zhipu.Models) != 1 || zhipu.Models[0] != "glm" {
+		t.Fatalf("store after add = %+v, want the absorbed fixture zhipu/glm", store)
+	}
+	if content := readTestFile(t, path); strings.Contains(content, "providers:") {
+		t.Fatalf("yaml must be stripped after the absorbing merge:\n%s", content)
+	}
+
+	// Repeat: the store entry already exists, so the merge is skipped
+	// again — a byte-identical store — while the mutation still hot-reloads
+	// (login proceeds against the merged set).
+	warnings2, reloadWarning2, err := service.AddPreset("deepseek")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if reloadWarning2 != "" || len(warnings2) != 0 {
 		t.Errorf("repeat add = (warnings %v, reloadWarning %q), want none", warnings2, reloadWarning2)
 	}
-	if len(spy.calls) != 2 || spy.calls[1] != path {
-		t.Errorf("reload calls after repeat add = %v, want two calls for %s", spy.calls, path)
-	}
-	merged2, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(merged2) != string(merged) {
-		t.Errorf("repeat add rewrote the config:\nfirst:\n%s\nsecond:\n%s", merged, merged2)
-	}
-	cfg, err := configdomain.LoadConfig(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cfg.Providers) != 1 || len(cfg.Providers["zhipu"].Models) != 1 || cfg.Providers["zhipu"].Models[0] != "glm" {
-		t.Errorf("providers after repeat add = %+v, want the untouched fixture zhipu/glm", cfg.Providers)
+	if len(spy.calls) != 3 {
+		t.Errorf("reload calls after repeat add = %v, want 3", spy.calls)
 	}
 
 	if _, _, err := service.AddPreset("no-such-preset"); err == nil ||
@@ -699,8 +743,10 @@ routes:
 		t.Fatal(err)
 	}
 	spy := &reloadSpy{}
+	home := t.TempDir()
 	service := New(Ports{
 		ConfigFile: func() string { return path },
+		HomeDir:    func() string { return home },
 		Reload:     spy.fn(),
 	})
 
@@ -717,12 +763,21 @@ routes:
 	if len(spy.calls) != 1 {
 		t.Errorf("reload calls = %v, want 1", spy.calls)
 	}
-	merged, err := os.ReadFile(path)
+	// The preset merge persists through the provider store; the yaml's
+	// clone block was absorbed in the same mutation and stripped.
+	store, err := readStoreForHome(t, service)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, ok := store["clone"]; !ok {
+		t.Errorf("store = %+v, want the absorbed clone fixture", store)
+	}
+	if _, ok := store["zhipu"]; !ok {
+		t.Errorf("store = %+v, want the merged zhipu preset", store)
+	}
+	yamlAfterFirst := readTestFile(t, path)
 
-	// Repeat: the preset block now exists → merge skipped, identical file and
+	// Repeat: the store entry now exists → merge skipped, identical store and
 	// warning list.
 	warnings2, _, err := service.AddPreset("zhipu")
 	if err != nil {
@@ -731,12 +786,8 @@ routes:
 	if len(warnings2) != 1 || warnings2[0] != "glm-5.3-flash" {
 		t.Errorf("repeat warnings = %v, want [glm-5.3-flash]", warnings2)
 	}
-	merged2, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(merged2) != string(merged) {
-		t.Errorf("repeat add rewrote the config:\nfirst:\n%s\nsecond:\n%s", merged, merged2)
+	if readTestFile(t, path) != yamlAfterFirst {
+		t.Errorf("repeat add rewrote the config:\nfirst:\n%s\nsecond:\n%s", yamlAfterFirst, readTestFile(t, path))
 	}
 }
 

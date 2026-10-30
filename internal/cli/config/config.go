@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/providerstore"
 )
 
 func CmdConfig(args []string, cfg *configdomain.Config) {
@@ -123,7 +124,7 @@ func CmdConfigRun(args []string) {
 		CmdConfig(args, nil)
 		return
 	}
-	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args))
+	cfg, err := providerstore.LoadEffectiveConfig(cliframework.ConfigPath(args), false)
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -235,6 +235,14 @@ func TestServerLoginTransport(t *testing.T) {
 
 func (testCommandAPI) AddPreset(string) ([]string, string, error) { return nil, "", nil }
 
+func (testCommandAPI) AddProvider(context.Context, appapi.ProviderAddRequest) (appapi.ProviderAddResult, error) {
+	return appapi.ProviderAddResult{}, nil
+}
+
+func (testCommandAPI) PreviewProviderModels(context.Context, appapi.ProviderModelsPreviewRequest) ([]string, error) {
+	return nil, nil
+}
+
 func (testCommandAPI) RefreshModels(context.Context, string) (appapi.ModelsRefreshResult, error) {
 	return appapi.ModelsRefreshResult{}, nil
 }

@@ -19,6 +19,7 @@ import (
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/login"
 	domainpresets "model-proxy/internal/presets"
+	"model-proxy/internal/providerstore"
 )
 
 // CmdPresets implements `presets list` (the only subcommand today).
@@ -90,21 +91,12 @@ func CmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	// 1. Compute the would-be-merged config WITHOUT writing: the ambiguity
 	// gate below runs against the merged result BEFORE anything hits disk,
-	// so refusing the gate leaves config.yaml byte-identical (a credential-
-	// less provider block must never reach the next reload).
-	changed, mergedYAML, merr := domainpresets.PreviewMergeBlock(cfgPath, presetName)
+	// so refusing the gate leaves the provider store untouched (a credential-
+	// less provider entry must never reach the next reload).
+	storePath := providerstore.Path()
+	_, merged, merr := domainpresets.PreviewMergeBlock(cfgPath, storePath, presetName)
 	if merr != nil {
 		fmt.Fprintf(stderr, "✗ merge %s into %s: %v\n", presetName, filepath.Base(cfgPath), merr)
-		return 1
-	}
-	var merged *configdomain.Config
-	if changed {
-		merged, merr = configdomain.LoadConfigFromBytes(cfgPath, mergedYAML)
-	} else {
-		merged, merr = configdomain.LoadConfig(cfgPath)
-	}
-	if merr != nil {
-		fmt.Fprintf(stderr, "✗ reload merged config: %v\n", merr)
 		return 1
 	}
 	if _, ok := merged.Providers[presetName]; !ok {
@@ -137,15 +129,15 @@ func CmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 
-	// 3. The gate passed — NOW persist the merged block (idempotent no-op
-	// when the block already existed).
-	written, werr := domainpresets.MergeBlock(cfgPath, presetName)
+	// 3. The gate passed — NOW persist the merged entry into the provider
+	// store (idempotent no-op when the entry already existed).
+	written, werr := domainpresets.MergeBlock(cfgPath, storePath, presetName)
 	if werr != nil {
 		fmt.Fprintf(stderr, "✗ merge %s into %s: %v\n", presetName, filepath.Base(cfgPath), werr)
 		return 1
 	}
 	if written && len(ambiguous) == 0 {
-		fmt.Fprintf(stdout, "✓ added provider %s to %s (%d models)\n", presetName, filepath.Base(cfgPath), len(tplProv.Models))
+		fmt.Fprintf(stdout, "✓ added provider %s to the provider store (%d models)\n", presetName, len(tplProv.Models))
 	}
 
 	// 4. Login (key from env for scripts; prompt/stdin flow interactively).

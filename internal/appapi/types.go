@@ -680,6 +680,46 @@ type MutationResult struct {
 	Warning string
 }
 
+// ProviderAddRequest is the Accounts-page Add Provider form: a preset
+// template or a static definition, an optional token (routed to the account
+// store — it must never land in provider.json), and an optional model list.
+// The token must never be logged or returned.
+type ProviderAddRequest struct {
+	Name             string   `json:"name"`
+	Preset           string   `json:"preset,omitempty"`
+	ProviderID       string   `json:"provider_id,omitempty"`
+	OpenAIBaseURL    string   `json:"openai_base_url,omitempty"`
+	AnthropicBaseURL string   `json:"anthropic_base_url,omitempty"`
+	UsageURL         string   `json:"usage_url,omitempty"`
+	Billing          string   `json:"billing,omitempty"`
+	ProxyURL         string   `json:"proxy_url,omitempty"`
+	Priority         int      `json:"priority,omitempty"`
+	Token            string   `json:"token,omitempty"`
+	Models           []string `json:"models,omitempty"`
+}
+
+// ProviderAddResult reports a durable provider-add plus the follow-up
+// account creation (when a token was supplied).
+type ProviderAddResult struct {
+	Name           string   `json:"name"`
+	Status         string   `json:"status"`
+	Warnings       []string `json:"warnings"`
+	ReloadWarning  string   `json:"reload_warning,omitempty"`
+	AccountID      string   `json:"account_id,omitempty"`
+	AccountWarning string   `json:"account_warning,omitempty"`
+}
+
+// ProviderModelsPreviewRequest carries the Add Provider form's transient
+// fields for a read-only model-list fetch. The token must never be logged or
+// returned.
+type ProviderModelsPreviewRequest struct {
+	Preset           string `json:"preset,omitempty"`
+	ProviderID       string `json:"provider_id,omitempty"`
+	OpenAIBaseURL    string `json:"openai_base_url,omitempty"`
+	AnthropicBaseURL string `json:"anthropic_base_url,omitempty"`
+	Token            string `json:"token,omitempty"`
+}
+
 // ProbeResult is one active account probe projection.
 type ProbeResult struct {
 	OK         bool
@@ -1091,6 +1131,16 @@ type CommandAPI interface {
 	// block is already persisted). Credentials are added afterwards through
 	// AddAccount/BeginLogin as usual.
 	AddPreset(name string) (warnings []string, reloadWarning string, err error)
+	// AddProvider is the Accounts-page Add Provider form: a preset template
+	// or a static definition persisted into the provider.json store (the
+	// yaml providers: section is absorbed by the same mutation), followed by
+	// an optional token routed into the account store. The token never
+	// reaches provider.json and never comes back in the result.
+	AddProvider(ctx context.Context, request ProviderAddRequest) (ProviderAddResult, error)
+	// PreviewProviderModels fetches the upstream /models list for the Add
+	// Provider form's transient fields WITHOUT persisting anything — no
+	// provider is created, nothing reloads.
+	PreviewProviderModels(ctx context.Context, request ProviderModelsPreviewRequest) ([]string, error)
 	// RefreshModels is the daemon twin of `model-proxy models refresh
 	// <provider>`: fetch the provider's live model list, probe every candidate
 	// with the 3-protocol matrix, overwrite providers.<name>.models with the

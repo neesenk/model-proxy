@@ -13,12 +13,14 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/cli/clitest"
 	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
 	configdomain "model-proxy/internal/config"
 	logincore "model-proxy/internal/login"
+	"sort"
 )
 
 // login_cmd_test.go covers cmdLogin's error/help paths (subprocess) and
@@ -616,35 +618,40 @@ func TestDefaultsHaveValidationURLs(t *testing.T) {
 		kimiUsageURL       = "https://api.kimi.com/coding/v1/usages"
 		volcengineUsageURL = "https://ark.cn-beijing.volces.com/api/plan/v3/models"
 	)
-	sources := []struct {
-		name  string
-		yaml  []byte
-		wants map[string]string
-	}{
-		{name: "config.yaml", yaml: readLoginRepositoryFile(t, "config.yaml"),
-			wants: map[string]string{"kimi-code": kimiUsageURL}},
-		{name: "config init template", yaml: []byte(configdomain.DefaultConfigYAML),
-			wants: map[string]string{"kimi-code": kimiUsageURL, "volcengine": volcengineUsageURL}},
+	// Providers moved out of the repo example into the provider.json store:
+	// the example must carry NO providers (its new invariant), and the shipped
+	// defaults the URL pins protect are the `config init` template's.
+	// Tolerant providers-only probe: the provider-free example no longer
+	// passes whole-config validation (its providers live in the store).
+	example := readLoginRepositoryFile(t, "config.yaml")
+	var probe struct {
+		Providers map[string]configdomain.Provider `yaml:"providers"`
 	}
-	for _, source := range sources {
-		cfg, err := configdomain.LoadConfigFromBytes(source.name, source.yaml)
-		if err != nil {
-			t.Fatalf("parse %s: %v", source.name, err)
+	if err := yaml.Unmarshal(example, &probe); err != nil {
+		t.Fatalf("parse config.yaml: %v", err)
+	}
+	if len(probe.Providers) != 0 {
+		names := make([]string, 0, len(probe.Providers))
+		for name := range probe.Providers {
+			names = append(names, name)
 		}
-		for providerName, wantURL := range source.wants {
-			prov, ok := cfg.Providers[providerName]
-			if !ok {
-				t.Errorf("%s: provider %q missing", source.name, providerName)
-				continue
-			}
-			if prov.UsageURL != wantURL {
-				t.Errorf("%s: provider %q usage_url = %q, want %q", source.name, providerName, prov.UsageURL, wantURL)
-			}
+		sort.Strings(names)
+		t.Fatalf("config.yaml carries %d providers (%v) — the example must stay provider-free (provider.json owns them)", len(probe.Providers), names)
+	}
+
+	tpl, err := configdomain.LoadConfigFromBytes("config init template", []byte(configdomain.DefaultConfigYAML))
+	if err != nil {
+		t.Fatalf("parse template: %v", err)
+	}
+	wants := map[string]string{"kimi-code": kimiUsageURL, "volcengine": volcengineUsageURL}
+	for providerName, wantURL := range wants {
+		prov, ok := tpl.Providers[providerName]
+		if !ok {
+			t.Errorf("template: provider %q missing", providerName)
+			continue
 		}
-		if source.name == "config.yaml" {
-			if _, parked := cfg.Providers["volcengine"]; parked {
-				t.Error("config.yaml: volcengine is parked (commented out) — if it comes back, restore its usage_url pin in source.wants")
-			}
+		if prov.UsageURL != wantURL {
+			t.Errorf("template: provider %q usage_url = %q, want %q", providerName, prov.UsageURL, wantURL)
 		}
 	}
 }

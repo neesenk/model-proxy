@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,7 +10,25 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// TestConfig_ProviderBaseURLs validates the repository config.yaml's base URLs
+// TestConfig_ExampleHasNoProviders pins the post-migration normal form of the
+// repository example: providers live in ~/.model-proxy/provider.json, so the
+// example yaml must NOT carry a providers: section (the boot absorbs any
+// straggler entries — a lingering section here means the example drifted).
+func TestConfig_ExampleHasNoProviders(t *testing.T) {
+	example, rerr := os.ReadFile(filepath.Join("..", "..", "config.yaml"))
+	if rerr != nil {
+		t.Skipf("repo example unreadable in this checkout: %v", rerr)
+	}
+	cfg, err := parseConfigBytes("config.yaml", example)
+	if err != nil {
+		t.Fatalf("parse repo example: %v", err)
+	}
+	if len(cfg.Providers) != 0 {
+		t.Fatalf("repo config.yaml carries %d providers (%v) — the example must stay provider-free (provider.json owns them)", len(cfg.Providers), cfg.ProviderNames())
+	}
+}
+
+// TestConfig_ProviderBaseURLs validates the template's base URLs
 // against the two path-construction mistakes the proxy's URL joining can hit:
 //   - openai_base_url ending in /v1 (the proxy already strips the client's /v1
 //     and would append onto it → double path)
@@ -18,9 +37,16 @@ import (
 // It does NOT validate version-segment presence in general (e.g. zhipu's
 // /api/paas/v4 has its own shape) — only the doubling regressions above.
 func TestConfig_ProviderBaseURLs(t *testing.T) {
-	cfg, err := LoadConfig(filepath.Join("..", "..", "config.yaml"))
+	// Providers moved out of the repo example into the provider.json store
+	// (internal/providerstore) — the shipped DEFAULTS the URL guard protects
+	// are the `config init` template's. The example file's new invariant
+	// (no providers: section) is pinned by TestConfig_ExampleHasNoProviders.
+	cfg, err := LoadConfigFromBytes("template", []byte(DefaultConfigYAML))
 	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
+		t.Fatalf("parse template: %v", err)
+	}
+	if len(cfg.Providers) == 0 {
+		t.Fatal("template carries no providers — template drift")
 	}
 
 	for name, prov := range cfg.Providers {
@@ -78,9 +104,9 @@ func TestConfig_ProviderBaseURLs(t *testing.T) {
 // TestConfig_RouteTargets verifies the derived route table is non-empty and
 // every target references an existing provider with a non-empty model name.
 func TestConfig_RouteTargets(t *testing.T) {
-	cfg, err := LoadConfig(filepath.Join("..", "..", "config.yaml"))
+	cfg, err := LoadConfigFromBytes("template", []byte(DefaultConfigYAML))
 	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
+		t.Fatalf("parse template: %v", err)
 	}
 	exposedNames := cfg.RouteExposedNames()
 	if len(exposedNames) == 0 {

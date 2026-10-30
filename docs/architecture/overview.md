@@ -528,6 +528,9 @@ analytics adapter → internal/pricing
 config (models.dev endpoint/cache policy) / routing → internal/catalog
 request routing adapter → internal/routing → internal/catalog / internal/config / internal/protocol / internal/provider
 accounts adapter / login / provider builder → internal/accounts
+daemon boot / mutation flows / CLI 读路径 → internal/providerstore（provider 定义权威：~/.model-proxy/provider.json；
+  加载注入 effective cfg——全部 cfg.Providers 读方零改动；boot/mutation 吸收 config.yaml 残留 providers: 段并剥离；
+  Reload 只读合并不写文件，吸收收敛在 boot/mutation 的锁内 span，避免与 mutation 持锁 reload 嵌套死锁）
 live-event publishers / SSE adapter → internal/observe/events
 forward → internal/guard
 forward 分片检测会话窗口 → internal/guard/session → internal/guard
@@ -563,16 +566,16 @@ application → serveAssembly → applicationRuntime → Proxy
 - `app → accounts, adjudicate, admin, appapi, cache, catalog,
   config, display, forward, fusion, guard, guard/session, httpx, login, mcp, observe/budget,
   observe/counters, observe/events, observe/logx, observe/requestlog, observe/seclog, observe/stats,
-  pricing, probe, protocol, provider, providerbuild, routing, runtime, runtime/wirecap, shadow,
+  pricing, probe, protocol, provider, providerbuild, providerstore, routing, runtime, runtime/wirecap, shadow,
   targetexec, transport/bodycapture, upstreamproxy, web, webauth`；
 - `admin → accounts, appapi, cache, catalog, config, configedit, credstore, fusion, login,
   observe/counters, observe/logx, observe/requestlog, observe/seclog, observe/stats, presets, pricing, probe,
-  provider, routing, runtime, runtime/wirecap, takeover, webauth`（Web admin 应用服务；不得回依赖 app/web/cli；
+  provider, providerstore, routing, runtime, runtime/wirecap, takeover, webauth`（Web admin 应用服务；不得回依赖 app/web/cli；
   takeover 边是 takeover/restore 与模板管理的 daemon 孪生）；
 - `appapi → adjudicate, fusion, observe/requestlog, observe/stats, presets, pricing`
   （adjudicate 仅为其 BlockEntry/Result 快照类型提供 DTO 别名，见 appapi/types.go）；
 - `cli → cli/account, cli/admin, cli/audit, cli/config, cli/diag, cli/doctor,
-  cli/framework, cli/guard, cli/login, cli/mcp, cli/mcpserver, cli/models, cli/presets, cli/stats, cli/status, config, display, takeover,
+  cli/framework, cli/guard, cli/login, cli/mcp, cli/mcpserver, cli/models, cli/presets, cli/provider, cli/stats, cli/status, config, display, providerstore, takeover,
   observe/logx`（registry + 进程级 shell：调度循环、help、takeover/restore）；
 - `catalog → upstreamproxy`；
 - `cli/account → accounts, cli/framework, cli/serve, config, display, login, providerbuild`（`logout`）；
@@ -581,22 +584,26 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/audit → cli/framework, config, observe/seclog`（`audit`）；
 - `cli/clicommon → appapi, daemonctl, display`；
 - `cli/clitest → accounts`（纯测试支撑：子进程 harness 与共享 fixture，生产代码不得依赖）；
-- `cli/config → accounts, cli/framework, config, display, provider, routing, takeover`（`config init|print|check`）；
+- `cli/config → accounts, cli/framework, config, display, provider, providerstore, routing, takeover`（`config init|print|check`）；
 - `cli/diag → cli/framework, cli/models, config, daemonctl, display, observe/requestlog, pricing, probe, provider, upstreamproxy`（`wire`/`replay`/`shadow`/`routing report`）；
 - `cli/doctor → accounts, appapi, cli/clicommon, cli/framework,
-  cli/models, config, credstore, display, protocol, routing, takeover, observe/seclog, provider`；
-- `cli/framework → accounts, config, daemonctl, upstreamproxy`（LoadCmdConfig 进程级接线：S2 凭据 + credentials 模式 + 全局 `proxy` 链头发布——不发则一次性 CLI 命令静默落到 env/系统代理、无视 `proxy: off`；per-provider 探测 client 也在此解析）；
-- `cli/presets → cli/framework, cli/login, cli/serve, config, login, presets`；
+  cli/models, config, credstore, display, protocol, providerstore, routing, takeover, observe/seclog, provider`；
+- `cli/framework → accounts, config, daemonctl, providerstore, upstreamproxy`（LoadCmdConfig 进程级接线：S2 凭据 + credentials 模式 + 全局 `proxy` 链头发布——不发则一次性 CLI 命令静默落到 env/系统代理、无视 `proxy: off`；per-provider 探测 client 也在此解析）；
+- `cli/presets → cli/framework, cli/login, cli/serve, config, login, presets, providerstore`；
+- `cli/provider → cli/framework, cli/login, cli/serve, config, presets, providerstore`（`provider add/rm/set`：custom static provider 的 CLI 添加/删除/编辑，与 Web 同一 store mutation 管线）；
 - `cli/stats → accounts, cli/framework, config, daemonctl, display, observe/stats, providerbuild`（`stats`/`usage`）；
 - `cli/status → appapi, cli/clicommon, cli/framework, config, daemonctl, display, routing`（`serve status`/`schedule`/`routes`/`cache`）；
 - `cli/serve → config, observe/logx`；
-- `cli/login → accounts, cli/framework, cli/serve, config, display, login, provider`；
+- `cli/login → accounts, cli/framework, cli/serve, config, display, login, provider, providerstore`；
 - `cli/mcp → accounts, cli/framework, config, display, mcp, provider, providerbuild, upstreamproxy`（`mcp list`/`mcp test`）；
 - `cli/mcpserver → mcp`（`mcp-server` 内置 stdio MCP 工具服务器：deepseek-search，JSON-RPC 帧解析与响应构装复用 mcp 叶子包）；
 - `cli/models → cli/serve, cli/framework, accounts, catalog, config,
-  configedit, display, probe, provider, providerbuild, routing, runtime/wirecap, upstreamproxy`；
+  configedit, display, probe, provider, providerbuild, providerstore, routing, runtime/wirecap, upstreamproxy`；
 - `login → accounts, config, display, probe, provider, observe/logx, upstreamproxy`（probe/provider：无 usage_url 且 /models 免鉴权的 provider 登录时以最小真实请求探测 key 有效性）；
 - `config → catalog, pricing, protocol/wire, upstreamproxy`；
+- `providerstore → accounts, config, configedit`（provider.json 权威 store：
+  ~/.model-proxy/provider.json 的 schema/原子写/备份与 config.yaml `providers:` 段的
+  吸收迁移——yaml 条目并入 store 后从 config.yaml 剥离；凭据不进该文件，归 accounts；写路径统一挂 config.yaml flock）；
 - `fusion → config, observe/logx`；
 - `forward → cache, catalog, config, fusion, guard, guard/session, observe/counters,
   observe/events, observe/logx, observe/requestlog, observe/seclog, protocol, provider, routing,
@@ -610,7 +617,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `observe/seclog → observe/logfile, observe/logx`；
 - `observe/logfile → observe/logx`（共享轮转 JSONL sink 叶子包）；
 - `observe/stats → observe/counters, observe/logx`；
-- `presets → config, configedit, provider`；
+- `presets → config, provider, providerstore`；
 - `probe → config, provider`；
 - `protocol → observe/logx, protocol/wire`；
 - `pricing → upstreamproxy`；

@@ -922,6 +922,30 @@ dialog.live-detail-pop .modal-body { overflow: auto; }
 .field.check { grid-template-columns: auto 1fr; align-items: center; gap: 8px; }
 .field.check input { width: auto; }
 
+/* Add Provider：宽弹窗（字段多）与 Fetch 预览勾选列表（有界滚动、
+   复选行自带几何——不受宿主 .field input width:100% 影响） */
+dialog.provider-add-wide { max-width: min(720px, calc(100vw - 48px)); }
+dialog.provider-add-wide .modal-body { overflow: auto; max-height: calc(100vh - 160px); }
+.pa-model-list {
+  display: grid;
+  gap: 2px;
+  max-height: 148px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px 8px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-chip);
+}
+.pa-model-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  min-height: 20px;
+}
+.pa-model-item input { width: auto; flex: none; }
+
 .settings-grid .field { margin-bottom: 0; }
 .settings-note { font-size: 0.6875rem; color: var(--muted); margin: 8px 0 0; }
 .settings-group { padding: 16px 0; border-top: 1px solid var(--border-2); }
@@ -1381,6 +1405,10 @@ input[type="checkbox"] { accent-color: var(--accent); }
   max-height: calc(100vh - var(--topbar-h) - 36px);
   overflow: auto;
 }
+/* Accounts 侧栏标题行带 + Add 按钮时：标题居左、按钮贴右（共享的
+   .acct-nav-title 排版不动——Requests 侧栏无按钮） */
+.acct-nav-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
 .acct-nav-title, .req-nav-title {
   font-size: 0.6875rem;
   text-transform: uppercase;

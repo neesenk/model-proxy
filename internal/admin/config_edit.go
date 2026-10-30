@@ -188,45 +188,20 @@ func scalarString(value any) string {
 }
 
 func (s *Service) editStructured(kind, name string, data map[string]any) error {
+	// Providers live in the provider.json store, not config.yaml — the whole
+	// kind routes to the store mutation (validate → save → hot-reload →
+	// rollback on a failed reload, the same contract the yaml kinds keep).
+	if kind == "provider" {
+		return s.editProvider(name, data)
+	}
 	if data["delete"] == true {
 		return s.editConfigNode(func(root *yaml.Node) error {
-			switch kind {
-			case "provider":
-				configedit.DeleteKey(configedit.ChildMap(root, "providers"), name)
-			case "route":
-				configedit.DeleteKey(configedit.ChildMap(root, "routes"), name)
-			}
+			configedit.DeleteKey(configedit.ChildMap(root, "routes"), name)
 			return nil
 		})
 	}
 	return s.editConfigNode(func(root *yaml.Node) error {
 		switch kind {
-		case "provider":
-			providerConfig := configedit.ChildMap(configedit.ChildMap(root, "providers"), name)
-			for _, key := range []string{
-				"provider_id",
-				"openai_base_url",
-				"anthropic_base_url",
-				"usage_url",
-				"billing",
-			} {
-				if value, ok := data[key]; ok {
-					configedit.SetChildScalar(providerConfig, key, fmt.Sprint(value))
-				}
-			}
-			if models, ok := data["models"]; ok {
-				configedit.SetChildNode(providerConfig, "models", configedit.MustEncode(models))
-			}
-			// catalog_alias: full-map replace (the client sends the provider's
-			// complete desired map); an empty map deletes the key so the YAML
-			// doesn't retain an empty mapping node.
-			if catalogAlias, ok := data["catalog_alias"]; ok {
-				if m, isMap := catalogAlias.(map[string]any); isMap && len(m) == 0 {
-					configedit.DeleteKey(providerConfig, "catalog_alias")
-				} else {
-					configedit.SetChildNode(providerConfig, "catalog_alias", configedit.MustEncode(catalogAlias))
-				}
-			}
 		case "route":
 			// data.strategy semantics (docs/web-api.md): absent = preserve the
 			// existing declaration (a targets-only edit must not reset strategy);

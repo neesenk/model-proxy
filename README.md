@@ -71,6 +71,13 @@ log_level: info                # debug|info|warn|error 级别过滤（低于所�
                                # 系统代理由 internal/upstreamproxy 每进程探测一次，自动来源(env/系统)对 loopback 恒绕过，
                                # 显式配置的代理 URL 对 loopback 同样生效；PAC/WPAD 不解析
 
+# providers 的权威存储是 ~/.model-proxy/provider.json（internal/providerstore）。
+# config.yaml 里的 providers: 条目在 serve 启动/reload 时被吸收迁移（并入
+# provider.json 后从本文件剥离，时间戳备份在 <config目录>/.model-proxy/back/）；
+# 手改 config.yaml 再 reload 也会被同样吸收。新增 provider 走 Web UI Accounts 页
+# "+ Add"（预置/静态 + token + Fetch 模型预览）、CLI `presets add <name>`（预置）
+# 或 `provider add <name> --base-url ...`（自定义端点；`provider rm/set` 增删改）。
+# 凭据永远不入 provider.json/config.yaml（`login`/账号池文件/钥匙串）。
 providers:
   aqp:
     provider_id: aqp
@@ -708,7 +715,7 @@ scheduling:
    - `ExtraHeaders(req, body, sessionID, path)` -- 每次请求（转发 + 探测）都要的专属头（如 aqp 的 `anthropic-version` + `x-compass-request-id`）；`sessionID` 是 forward 从原始请求解析的客户端会话 id（头白名单 → body spec 字段），probe/shadow 等无会话路径为空串，需要会话亲和的 provider（opencode-go/zcode）优先使用它再回落 body 提取
    - `FilterModelIDs(ids)` -- `models refresh` 的静态策略过滤（如 volcengine 剔除 `*-latest`/lite/mini）
 2. `init()` 里 `Register("xxx", constructor)`
-3. config 加 `provider_id: xxx`
+3. provider 定义加 `provider_id: xxx`（provider.json store——UI/CLI/presets 均写入；`models refresh` 也写这里）
 4. plan 类 provider 还应实现 `Quota()`（在 `buildProviders` 里 wire `QuotaFn`），否则会被当作 `unknown`（按 priority 排）；按量计费的设 `billing: pay-as-you-go`
 
 provider 专属的探测/过滤/请求头知识全部收敛在 `internal/provider/xxx.go`，不写进 main 包的 switch/if。不改 proxy/login/logout/usage/models 的代码。

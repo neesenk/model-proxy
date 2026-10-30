@@ -48,3 +48,7 @@ func (p *OpenRouterProvider) FetchModelsContext(ctx context.Context) ([]string, 
 func (p *StepPlanProvider) FetchModelsContext(ctx context.Context) ([]string, error) {
 	return fetchModelsBearerContext(ctx, p.cfg, p.AuthHeaders)
 }
+
+func (p *StaticProvider) FetchModelsContext(ctx context.Context) ([]string, error) {
+	return fetchModelsBearerContext(ctx, p.cfg, p.AuthHeaders)
+}

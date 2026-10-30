@@ -384,7 +384,7 @@ add <preset> [--config PATH] [--label NAME] [--replace]
 逻辑（`internal/cli/presets/presets.go`）：
 
 - 目录**派生自内置注释模板**（`configdomain.DefaultConfigYAML`），过滤到已注册实现的 provider_id；`aqp` 因内网 SSO 端点不进公共目录。模板即权威，无第二份 endpoint/模型知识。
-- `add`：① 干跑合并——经 `configedit` 算出"模板 `providers.<preset>` 块并入用户 config 后"的结果（`PreviewMergeBlock`，与 `MergeBlock` 同一合并逻辑）并 `LoadConfigFromBytes` 校验，**不落盘**；② 歧义门——对合并后配置计算：preset 模型同时出现在其他已配置 provider 且无显式 `routes:` 条目时，非 TTY 拒绝 exit 1（提示 `--yes`），TTY 询问 y/N；拒绝时 config.yaml 字节不变（无凭据的 provider 块绝不能进入下一次 reload）；③ 门通过才经 `MergeBlock` 原子写回（保结构/注释/文件权限；块已存在则跳过，幂等）；④ 复用 `login.RunProviderLogin` 登录；⑤ `MaybeReloadDaemon` 热重载；⑥ 打印 `model-proxy test <首个模型>` 下一步。
+- `add`：① 干跑合并——算出"模板 provider 条目并入 provider store 后"的 effective 配置（`PreviewMergeBlock`，与 `MergeBlock` 同一合并逻辑）并校验，**不落盘**；② 歧义门——对合并后 effective 配置计算：preset 模型同时出现在其他已配置 provider 且无显式 `routes:` 条目时，非 TTY 拒绝 exit 1（提示 `--yes`），TTY 询问 y/N；拒绝时 store 与 config.yaml 都字节不变（无凭据的 provider 条目绝不能进入下一次 reload）；③ 门通过才经 `MergeBlock` 写入 provider.json store（同一 mutation 吸收并剥离 config.yaml 残留的 `providers:` 段；条目已存在则跳过，幂等）；④ 复用 `login.RunProviderLogin` 登录；⑤ `MaybeReloadDaemon` 热重载；⑥ 打印 `model-proxy test <首个模型>` 下一步。
 - `--api-key-env ENV`：从环境变量读 API key（脚本化，不落 stdin 历史）。变量为空 -> stderr 报错 exit 1。
 - 未知 preset -> stderr 列出全部可用 preset + exit 1。config.yaml 不存在 -> 提示 `config init` + exit 1。
 
@@ -491,6 +491,10 @@ PROVIDER       MODEL ID               NAME                 CTX         OUTPUT   
 
 - 未知 provider -> stderr `unknown provider "<NAME>"; available: <providerNames>` + exit 1。
 
+### `models peek <provider>`（只读拉取上游 /models，不落盘）
+
+`FetchProviderModels` 一次真实拉取（凭据/代理与 refresh 同路径），stdout 逐行输出上游 id（上游自报 display name 时附加在右侧），尾部提示 `models refresh` 写回可调用子集。**不写 store、不探测、不 reload**——Web Add Provider 表单 Fetch 预览（`POST /api/providers/models-preview`）的 CLI 孪生。未知 provider → stderr `unknown provider` + exit 1；上游不可达（未登录/无 /models 端点/网络）→ stderr 原因 + exit 1。
+
 ### `models pull`（强制刷新 models.dev 缓存）
 
 stdout：`models.dev catalog refreshed: <N> unique models, etag <ETAG>`。网络错误、
@@ -498,6 +502,11 @@ stdout：`models.dev catalog refreshed: <N> unique models, etag <ETAG>`。网络
 使用旧值；无可用 cache 时 stderr + exit 1（`log.Fatal`），且不会写入坏响应。
 
 ### `models refresh <provider>`（`cmdModels` refresh 分支 + `probeAndWriteModels`）
+
+写回目标：`~/.model-proxy/provider.json`（provider store，`WriteProviderModels` →
+`providerstore.Mutate`——锁内 RMW + 整体 effective 校验 fail-closed）。同一 mutation 会
+吸收 config.yaml 残留的 `providers:` 段（并入 store 后剥离，时间戳备份），随后
+`maybeReloadDaemon` 热重载。
 
 候选集：`FetchModels()` 成功 -> `mergeModelIDs(existing, fetched)`；**`FetchModels` 失败（无 `/models` 端点 / 未登录 / 网络错）-> fallback**：stderr 通知 + `mergeStringIDs(existing, routeModelsForProvider(cfg, prov))`。然后统一走 `probeAndWriteModels`。
 
@@ -1254,6 +1263,28 @@ decision tokens: N (X.XX% of all tokens)
 - 索引查询失败：`query request log index: <ERR>`
 
 锁定测试：`internal/cli/diag/routing_report_test.go`（弱标签聚合、混淆矩阵、成本基线、空窗/无数据路径、JSON 结构）。
+
+---
+
+## 23. `provider` — provider.json store 的增删改（离线写 + daemon 热重载）
+
+```
+provider add <name> --base-url URL [--anthropic-url URL] [--usage-url URL]
+               [--billing plan|pay-as-you-go] [--priority N] [--model M ...]
+               [--api-key-env VAR] [--no-login] [--yes]
+provider rm <name> [--yes]
+provider set <name> [--base-url URL] [--anthropic-url URL] [--usage-url URL]
+               [--billing B] [--priority N] [--model M ...]
+```
+
+逻辑（`internal/cli/provider`）：custom OpenAI 兼容端点的一等添加面（provider_id 恒 `static`——厂商协议走 `presets add`/模板；与 Web Accounts 页 Add Provider 的 custom 模式同底座）。
+
+- **add**：写 provider.json store（`providerstore.Mutate`：锁内 RMW + 整体 effective 校验 fail-closed + 吸收 config.yaml 残留 `providers:` 段）→ 凭据步骤（`--api-key-env VAR` 脚本式 / TTY 交互 prompt（复用 `login` 流程）/ 非 TTY 无凭据时提示后跳过，`--no-login` 显式跳过）→ `MaybeReloadDaemon` 热重载。歧义门与 `presets add` 同款：新模型与既有 provider 重叠且无显式 route 时，非 TTY 需 `--yes`、TTY 询问 y/N。重名报错并指向 `provider set`。`--model` 可重复。
+- **rm**：确认（TTY y/N / 非 TTY 需 `--yes`）后从 store 删除；有 route 仍引用该 provider 时整体校验拒绝（错误原文指出具体 route）。**凭据池保留**（`logout <name>` 才清凭据），退出提示说明。
+- **set**：只改显式给出的 flag；`--model M ...` 整体替换模型列表（`models refresh` 之外的程序化维护口）。
+- 全部子命令落盘后 best-effort `serve reload`（daemon 未运行则下次启动生效）。
+
+stdout/stderr 归属：交互提示与结果走 stdout；✗ 错误走 stderr + exit 1。
 
 ---
 

@@ -99,6 +99,7 @@ func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 		"models",
 		"pin",
 		"presets",
+		"provider",
 		"replay",
 		"restore",
 		"routes",
@@ -124,6 +125,10 @@ func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 	}
 
 	configFile := clitest.WriteTempConfig(t, clitest.MinimalConfig)
+	// The provider appendix resolves providers through the provider.json
+	// store (HOME-anchored): pin HOME so the machine's real store can never
+	// leak into the expected output.
+	t.Setenv("HOME", t.TempDir())
 	providerAppendix := fmt.Sprintf(
 		"\nProviders (from config):\n  %-14s  provider=%-12s  %s\n",
 		"aqp",
@@ -217,17 +222,18 @@ func TestRunCLIArgsDispatchContract(t *testing.T) {
 
 func TestCLICommandRegistryIsExhaustive(t *testing.T) {
 	wantTargets := map[string]string{
-		"add":     "clipresets.RunAdd",
-		"audit":   "cliaudit.RunAudit",
-		"cache":   "clistatus.RunCache",
-		"presets": "clipresets.RunPresets",
-		"config":  "cliconfig.CmdConfigRun",
-		"doctor":  "clidoctor.RunDoctor",
-		"freeze":  "cliadmin.RunFreeze",
-		"guard":   "cliguard.RunGuard",
-		"login":   "clilogin.CmdLogin",
-		"logout":  "cliaccount.RunLogout",
-		"mcp":     "climcp.RunMCP",
+		"add":      "clipresets.RunAdd",
+		"audit":    "cliaudit.RunAudit",
+		"cache":    "clistatus.RunCache",
+		"presets":  "clipresets.RunPresets",
+		"provider": "cliprovider.RunProvider",
+		"config":   "cliconfig.CmdConfigRun",
+		"doctor":   "clidoctor.RunDoctor",
+		"freeze":   "cliadmin.RunFreeze",
+		"guard":    "cliguard.RunGuard",
+		"login":    "clilogin.CmdLogin",
+		"logout":   "cliaccount.RunLogout",
+		"mcp":      "climcp.RunMCP",
 		// Stream-bound direct binding (no ProcessCommand adapter): the
 		// bundled stdio MCP server consumes the injected stdin/stdout. The
 		// archtest interaction contract keeps the explicit allowlist.

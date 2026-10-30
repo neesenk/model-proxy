@@ -2,37 +2,35 @@
 // concern: the catalog DERIVED from the annotated built-in template
 // (configdomain.DefaultConfigYAML — the single authoritative source for
 // provider endpoints and default models), the merge of a template provider
-// block into a user config.yaml (via configedit, preserving structure), and
-// the implicit-routing ambiguity computation. Both serving surfaces build on
-// it: the CLI `add` command (internal/cli/presets, which adds login + reload
-// orchestration) and the Web preset endpoints (internal/app via appapi).
+// entry into the user's provider store (provider.json, the single provider
+// authority), and the implicit-routing ambiguity computation. Both serving
+// surfaces build on it: the CLI `add` command (internal/cli/presets, which
+// adds login + reload orchestration) and the Web preset endpoints
+// (internal/app via appapi).
 package presets
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/configedit"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/providerstore"
 )
 
 // Preset is one catalog entry: a ready-to-use config providers block.
 type Preset struct {
 	// Name is the preset id AND the config providers: key.
-	Name       string   `json:"name"`
-	ProviderID string   `json:"provider_id"`
-	BaseURL    string   `json:"base_url"`
-	UsageURL   string   `json:"usage_url,omitempty"`
-	Billing    string   `json:"billing,omitempty"`
-	Models     []string `json:"models"`
+	Name             string   `json:"name"`
+	ProviderID       string   `json:"provider_id"`
+	BaseURL          string   `json:"base_url"`
+	AnthropicBaseURL string   `json:"anthropic_base_url,omitempty"`
+	UsageURL         string   `json:"usage_url,omitempty"`
+	Billing          string   `json:"billing,omitempty"`
+	Priority         int      `json:"priority,omitempty"`
+	Models           []string `json:"models"`
 }
 
 // excludedPresets are template entries that must not surface in the public
@@ -66,12 +64,14 @@ func List() ([]Preset, error) {
 			baseURL = p.DecisionsBaseURL // pure-decisions provider (typesafe)
 		}
 		out = append(out, Preset{
-			Name:       name,
-			ProviderID: p.Provider,
-			BaseURL:    baseURL,
-			UsageURL:   p.UsageURL,
-			Billing:    p.Billing,
-			Models:     models,
+			Name:             name,
+			ProviderID:       p.Provider,
+			BaseURL:          baseURL,
+			AnthropicBaseURL: p.AnthropicBaseURL,
+			UsageURL:         p.UsageURL,
+			Billing:          p.Billing,
+			Priority:         p.Priority,
+			Models:           models,
 		})
 	}
 	return out, nil
@@ -98,130 +98,60 @@ func Lookup(name string) (configdomain.Provider, bool) {
 	return p, true
 }
 
-// MergeBlock copies the template's providers.<preset> node into the user
-// config (creating the providers: mapping when missing), validates the merged
-// YAML before writing (fail-closed), and writes back preserving file mode.
-// Idempotent: an existing block is left untouched. Returns whether a write
-// happened.
-func MergeBlock(cfgPath, presetName string) (bool, error) {
-	// Preview + write run as ONE locked read-modify-write: the daemon's web
-	// config editor RMWs the same config.yaml (from another process for the
-	// CLI `add` path) — an unlocked preview-then-write would let a concurrent
-	// writer's change be silently discarded by the rename.
+// MergeBlock copies the preset's template provider entry into the provider
+// store (the single provider authority), validating the resulting effective
+// config before writing (fail-closed — providerstore.Mutate enforces this).
+// Idempotent: an existing store entry is left untouched. Returns whether a
+// write happened.
+func MergeBlock(cfgPath, storePath, presetName string) (bool, error) {
 	var changed bool
-	err := configedit.WithConfigLock(cfgPath, func() error {
-		merged, merr := []byte(nil), error(nil)
-		changed, merged, merr = PreviewMergeBlock(cfgPath, presetName)
-		if merr != nil || !changed {
-			return merr
+	err := providerstore.Mutate(cfgPath, storePath, func(providers map[string]configdomain.Provider) error {
+		if _, exists := providers[presetName]; exists {
+			return nil // already configured — nothing to merge
 		}
-		return writeConfigAtomic(cfgPath, merged)
+		tpl, ok := Lookup(presetName)
+		if !ok {
+			return fmt.Errorf("unknown preset %q", presetName)
+		}
+		providers[presetName] = tpl
+		changed = true
+		return nil
 	})
 	return changed, err
 }
 
-// PreviewMergeBlock is the dry-run form of MergeBlock: the SAME merge and
-// validation, returned as the would-be config content without touching the
-// file. changed=false (merged nil) means the preset block already exists and
-// MergeBlock would be a no-op. Callers that gate on the merged result (the
-// CLI add ambiguity gate) preview first, then persist via MergeBlock only
-// after the gate passes — a refusal must leave config.yaml byte-identical.
-func PreviewMergeBlock(cfgPath, presetName string) (changed bool, merged []byte, err error) {
-	userRoot, err := configedit.LoadNode(cfgPath)
+// PreviewMergeBlock is the dry-run form of MergeBlock: the SAME store merge
+// and effective-config validation, returned as the would-be merged config
+// without touching disk. changed=false means the preset entry already exists
+// and MergeBlock would be a no-op. Callers that gate on the merged result
+// (the CLI add ambiguity gate) preview first, then persist via MergeBlock
+// only after the gate passes — a refusal must leave the store untouched.
+func PreviewMergeBlock(cfgPath, storePath, presetName string) (changed bool, merged *configdomain.Config, err error) {
+	effective, err := providerstore.Resolve(cfgPath, storePath)
 	if err != nil {
 		return false, nil, err
 	}
-	if configedit.MapNode(userRoot) == nil {
-		return false, nil, errors.New("config is not a YAML mapping")
+	proposed := effective
+	if _, exists := proposed[presetName]; !exists {
+		tpl, ok := Lookup(presetName)
+		if !ok {
+			return false, nil, fmt.Errorf("unknown preset %q", presetName)
+		}
+		proposed = providerstore.Clone(effective)
+		proposed[presetName] = tpl
+		changed = true
 	}
-	providersMap := configedit.ChildMap(userRoot, "providers")
-
-	existing := configedit.LookupChildMap(providersMap, presetName)
-	if existing != nil {
-		return false, nil, nil // already configured — nothing to merge
+	data, rerr := os.ReadFile(cfgPath)
+	if rerr != nil {
+		return false, nil, rerr
 	}
-
-	tplNode, err := loadTemplateProviderNode(presetName)
-	if err != nil {
-		return false, nil, err
-	}
-	configedit.SetChildNode(providersMap, presetName, tplNode)
-
-	var buffer bytes.Buffer
-	encoder := yaml.NewEncoder(&buffer)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(userRoot); err != nil {
-		return true, nil, err
-	}
-	if err := encoder.Close(); err != nil {
-		return true, nil, err
-	}
-	// Validate: a merged config that fails to load must never hit disk
+	// Validate: a merged set that fails to load must never reach the store
 	// (fail-closed) — MergeBlock writes only what passed this check.
-	if _, verr := configdomain.LoadConfigFromBytes(cfgPath, buffer.Bytes()); verr != nil {
-		return true, nil, fmt.Errorf("merged config invalid: %w", verr)
+	cfg, verr := configdomain.LoadConfigEffective(cfgPath, data, proposed)
+	if verr != nil {
+		return changed, nil, fmt.Errorf("merged config invalid: %w", verr)
 	}
-	return true, buffer.Bytes(), nil
-}
-
-// writeConfigAtomic persists merged config content via a same-directory temp
-// file + rename, preserving the original file mode.
-func writeConfigAtomic(cfgPath string, data []byte) error {
-	mode := os.FileMode(0o644)
-	if info, serr := os.Stat(cfgPath); serr == nil {
-		mode = info.Mode().Perm()
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(cfgPath), "."+filepath.Base(cfgPath)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	if _, werr := tmp.Write(data); werr != nil {
-		tmp.Close()
-		_ = os.Remove(tmpName)
-		return werr
-	}
-	if cerr := tmp.Close(); cerr != nil {
-		_ = os.Remove(tmpName)
-		return cerr
-	}
-	if cerr := os.Chmod(tmpName, mode); cerr != nil {
-		_ = os.Remove(tmpName)
-		return cerr
-	}
-	return os.Rename(tmpName, cfgPath)
-}
-
-// loadTemplateProviderNode extracts providers.<preset> from the built-in
-// template as a deep-copied yaml.Node (round-trip through bytes — yaml.Node
-// has no Clone). The node carries the template's structure for that block.
-func loadTemplateProviderNode(presetName string) (*yaml.Node, error) {
-	var root yaml.Node
-	if err := yaml.Unmarshal([]byte(configdomain.DefaultConfigYAML), &root); err != nil {
-		return nil, fmt.Errorf("parse built-in template: %w", err)
-	}
-	mapping := root.Content[0]
-	for i := 0; i+1 < len(mapping.Content); i += 2 {
-		if mapping.Content[i].Value != "providers" || mapping.Content[i+1].Kind != yaml.MappingNode {
-			continue
-		}
-		providers := mapping.Content[i+1]
-		for j := 0; j+1 < len(providers.Content); j += 2 {
-			if providers.Content[j].Value == presetName {
-				block := providers.Content[j+1]
-				encoded, err := yaml.Marshal(block)
-				if err != nil {
-					return nil, err
-				}
-				var clone yaml.Node
-				if err := yaml.Unmarshal(encoded, &clone); err != nil {
-					return nil, err
-				}
-				return clone.Content[0], nil
-			}
-		}
-	}
-	return nil, fmt.Errorf("preset %q not found in built-in template", presetName)
+	return changed, cfg, nil
 }
 
 // AmbiguousModels returns the preset's models that appear in OTHER configured

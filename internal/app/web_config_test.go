@@ -8,6 +8,7 @@ import (
 	"model-proxy/internal/appapi"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/providerstore"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -166,6 +167,8 @@ func TestConfigEditUnknownKind(t *testing.T) {
 }
 
 func TestConfigEditProviderBilling(t *testing.T) {
+	// Per-test HOME: provider edits persist into the provider.json store.
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"
 	os.WriteFile(cfgPath, []byte("providers:\n  deepseek:\n    provider_id: deepseek\n    openai_base_url: https://api.deepseek.com\n"), 0o644)
@@ -177,9 +180,12 @@ func TestConfigEditProviderBilling(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	got, _ := os.ReadFile(cfgPath)
-	if !strings.Contains(string(got), "billing: plan") {
-		t.Errorf("billing not set:\n%s", got)
+	store, err := providerstore.Load(providerstore.Path())
+	if err != nil {
+		t.Fatalf("load store: %v", err)
+	}
+	if store["deepseek"].Billing != "plan" {
+		t.Errorf("store billing = %q, want plan (store: %+v)", store["deepseek"].Billing, store)
 	}
 }
 
@@ -187,6 +193,7 @@ func TestConfigEditProviderBilling(t *testing.T) {
 // models: sequence (one entry per array element) under providers.<name>, and
 // that an absent models key leaves an existing list untouched.
 func TestConfigEditProviderModels(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"
 	os.WriteFile(cfgPath, []byte("providers:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n    models:\n      - glm-4.5\n"), 0o644)
@@ -200,16 +207,9 @@ func TestConfigEditProviderModels(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	got, _ := os.ReadFile(cfgPath)
-	gs := string(got)
-	// Both new models present, the dropped one gone.
-	for _, want := range []string{"- glm-4.6", "- glm-4.5-air"} {
-		if !strings.Contains(gs, want) {
-			t.Errorf("models missing %q:\n%s", want, gs)
-		}
-	}
-	if strings.Contains(gs, "- glm-4.5\n") {
-		t.Errorf("old model glm-4.5 should have been replaced:\n%s", gs)
+	store := loadProviderStoreForTest(t)
+	if got := store["zhipu"].Models; len(got) != 2 || got[0] != "glm-4.6" || got[1] != "glm-4.5-air" {
+		t.Errorf("store models = %v, want [glm-4.6 glm-4.5-air]", got)
 	}
 
 	// An edit WITHOUT models must leave the list intact (non-destructive).
@@ -219,10 +219,19 @@ func TestConfigEditProviderModels(t *testing.T) {
 	if rec2.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec2.Code, rec2.Body.String())
 	}
-	got2, _ := os.ReadFile(cfgPath)
-	if !strings.Contains(string(got2), "- glm-4.6") {
-		t.Errorf("models dropped by a models-less edit:\n%s", got2)
+	store = loadProviderStoreForTest(t)
+	if got := store["zhipu"].Models; len(got) != 2 || got[0] != "glm-4.6" {
+		t.Errorf("models dropped by a models-less edit: %v", got)
 	}
+}
+
+func loadProviderStoreForTest(t *testing.T) map[string]configdomain.Provider {
+	t.Helper()
+	store, err := providerstore.Load(providerstore.Path())
+	if err != nil {
+		t.Fatalf("load provider store: %v", err)
+	}
+	return store
 }
 
 // TestConfigGetProviderModels asserts /api/config surfaces provider_models
@@ -295,6 +304,7 @@ func TestConfigGetRoutes(t *testing.T) {
 // rejects an empty one) and openai_base_url. Pre-fix editStructured never wrote
 // provider_id, so adding a provider always 400'd with "provider_id is empty".
 func TestConfigEditProviderAddWithProviderID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"
 	// Minimal valid config: one existing provider + listen.
@@ -307,24 +317,28 @@ func TestConfigEditProviderAddWithProviderID(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	got, _ := os.ReadFile(cfgPath)
-	gs := string(got)
-	// The new provider block must set provider_id + openai_base_url (validates).
-	for _, want := range []string{"zhipu-work:", "provider_id: zhipu", "openai_base_url: https://open.bigmodel.cn/api/paas/v4", "billing: plan"} {
-		if !strings.Contains(gs, want) {
-			t.Errorf("config missing %q:\n%s", want, gs)
-		}
+	store := loadProviderStoreForTest(t)
+	added := store["zhipu-work"]
+	// The new entry must set provider_id + openai_base_url (validates) and
+	// carry the requested billing.
+	if added.Provider != "zhipu" || added.OpenAIBaseURL != "https://open.bigmodel.cn/api/paas/v4" || added.Billing != "plan" {
+		t.Errorf("added entry = %+v", added)
 	}
-	// The existing provider must survive.
-	if !strings.Contains(gs, "deepseek:") {
-		t.Errorf("existing provider dropped:\n%s", gs)
+	// The existing provider must survive (absorbed into the store).
+	if _, ok := store["deepseek"]; !ok {
+		t.Errorf("existing provider dropped: %+v", store)
 	}
 }
 
 // TestConfigEditProviderAddMissingProviderID asserts that adding a provider
 // WITHOUT provider_id still fails validation (the guard the Web UI relies on),
 // and that the on-disk config is unchanged.
-func TestConfigEditProviderAddMissingProviderID(t *testing.T) {
+// TestConfigEditProviderAddRequiresBaseURL pins the fail-closed guard now
+// that provider_id is no longer a form input (a NEW provider defaults to
+// static — TestEditConfigProviderAddDefaultsToStatic): an entry with NO
+// upstream base URL is still rejected 400 and nothing is written.
+func TestConfigEditProviderAddRequiresBaseURL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"
 	original := []byte("listen: 127.0.0.1:17000\nproviders:\n  deepseek:\n    provider_id: deepseek\n    openai_base_url: https://api.deepseek.com\n")
@@ -333,12 +347,12 @@ func TestConfigEditProviderAddMissingProviderID(t *testing.T) {
 	w.configFile = cfgPath
 	rec := httptest.NewRecorder()
 	serveWeb(w, rec, httptest.NewRequest("POST", "/api/config/edit",
-		strings.NewReader(`{"kind":"provider","name":"ghost","data":{"openai_base_url":"https://x"}}`)))
+		strings.NewReader(`{"kind":"provider","name":"ghost","data":{"billing":"plan"}}`)))
 	if rec.Code != 400 {
-		t.Fatalf("status=%d want 400 (provider_id missing), body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("status=%d want 400 (no base URL), body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "provider_id is empty") {
-		t.Errorf("error should mention provider_id, got: %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "base_url") {
+		t.Errorf("error should name the base URL requirement, got: %s", rec.Body.String())
 	}
 	got, _ := os.ReadFile(cfgPath)
 	if !bytes.Equal(got, original) {
@@ -494,17 +508,19 @@ func TestWebPresetsListAndAdd(t *testing.T) {
 		t.Fatal("catalog missing zhipu preset")
 	}
 
-	// AddPreset merges the block into the real config file.
+	// AddPreset merges the preset into the provider store (the yaml's own
+	// providers block is absorbed by the same mutation).
+	t.Setenv("HOME", t.TempDir())
 	genBefore := p.configGeneration.Load()
 	if _, _, err := w.api.AddPreset("zhipu"); err != nil {
 		t.Fatalf("AddPreset(zhipu): %v", err)
 	}
-	merged, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatalf("read merged config: %v", err)
+	store := loadProviderStoreForTest(t)
+	if _, ok := store["zhipu"]; !ok {
+		t.Fatalf("store after AddPreset = %+v, want the zhipu preset entry", store)
 	}
-	if m := string(merged); !strings.Contains(m, "zhipu:") || !strings.Contains(m, "deepseek:") {
-		t.Fatalf("config file after AddPreset missing provider block:\n%s", m)
+	if _, ok := store["deepseek"]; !ok {
+		t.Fatalf("store after AddPreset = %+v, want the absorbed deepseek fixture", store)
 	}
 
 	// Regression: AddPreset must hot-reload like every other mutation path —

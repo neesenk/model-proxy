@@ -33,6 +33,7 @@ import {
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
   CLIENT_GONE_STATUS, notLoggedHint,
   quotaErrKind, accountUsageState, accountRemainingLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta, scheduleCredentialLabel, syncErrLabel, keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
+  parseModelLines, mergeFetchedModels,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
   securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML, SECURITY_RANGES, securityRangeFromSecs,
   securityFilterQuery, securityFilterFromQuery, explainCacheKey,
@@ -4098,4 +4099,27 @@ test('requestMetaHTML renders the context-composition profile strip', () => {
   const empty = requestMetaHTML(
     { ts: 't', method: 'POST', status: 200, provider: 'zhipu', upstream_model: 'glm-5.3-flash', profile: { est_tokens: 0, roles: {} } }, []);
   assert.ok(!empty.includes('req-meta-k">profile'), empty);
+});
+
+
+
+// ---------- Add Provider 表单的模型解析与合并 ----------
+
+test('parseModelLines: trims, drops blanks and duplicates (first wins)', () => {
+  assert.deepEqual(parseModelLines('  glm-5.2 \n\nkimi-k3\nglm-5.2\n   \nglm-4.6'), ['glm-5.2', 'kimi-k3', 'glm-4.6']);
+  assert.deepEqual(parseModelLines(''), []);
+  assert.deepEqual(parseModelLines(null), []);
+  assert.deepEqual(parseModelLines('\n \n'), []);
+});
+
+test('mergeFetchedModels: checked subset in fetched order, manual lines deduped on top', () => {
+  const fetched = ['zz-1', 'zz-2', 'zz-3'];
+  const checked = ['zz-3', 'zz-1']; // selection order must NOT reorder output
+  const merged = mergeFetchedModels(fetched, checked, 'zz-2\nmanual-x\nzz-1');
+  assert.deepEqual(merged, ['zz-1', 'zz-3', 'zz-2', 'manual-x']);
+});
+
+test('mergeFetchedModels: empty selection and no manual lines yield [] (backend keeps preset defaults)', () => {
+  assert.deepEqual(mergeFetchedModels(['a', 'b'], [], ''), []);
+  assert.deepEqual(mergeFetchedModels([], [], 'x\nx'), ['x']);
 });

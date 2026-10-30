@@ -80,8 +80,12 @@ type refreshHarness struct {
 func newRefreshHarness(t *testing.T, cfg *configdomain.Config, configFile string, impl provider.Provider) *refreshHarness {
 	t.Helper()
 	h := &refreshHarness{reload: &reloadSpy{}}
+	// One stable store dir: the refresh write path persists providers.<name>.
+	// models into the provider.json store (HomeDir-anchored), never the yaml.
+	home := t.TempDir()
 	h.service = New(Ports{
 		ConfigFile: func() string { return configFile },
+		HomeDir:    func() string { return home },
 		Config:     func() *configdomain.Config { return cfg },
 		ModelRefreshRuntime: func(string) ModelRefreshRuntime {
 			return ModelRefreshRuntime{Config: cfg, Provider: impl, Fingerprint: "captured", Client: http.DefaultClient}
@@ -129,14 +133,12 @@ func refreshTestConfig(baseURL string, models []string) *configdomain.Config {
 	}
 }
 
-// configModels reads providers.zp.models back from the written config file.
-func configModels(t *testing.T, path string) []string {
+// configModels reads providers.zp.models back from the harness's provider
+// store — the write target of the refresh path (the yaml fixture's providers:
+// block is absorbed and stripped by the same mutation).
+func (h *refreshHarness) configModels(t *testing.T, name string) []string {
 	t.Helper()
-	cfg, err := configdomain.LoadConfig(path)
-	if err != nil {
-		t.Fatalf("written config does not load: %v", err)
-	}
-	return cfg.Providers["zp"].Models
+	return readProviderStore(t, h.service)[name].Models
 }
 
 // bodyRulesUpstream answers probe legs by scanning the request body for model
@@ -184,7 +186,7 @@ func TestRefreshModelsFetchesProbesWrites(t *testing.T) {
 	if !result.ConfigUpdated {
 		t.Error("ConfigUpdated = false, want true (model set changed)")
 	}
-	if got := configModels(t, configFile); !reflect.DeepEqual(got, []string{"glm-new"}) {
+	if got := h.configModels(t, "zp"); !reflect.DeepEqual(got, []string{"glm-new"}) {
 		t.Errorf("config models = %v, want [glm-new]", got)
 	}
 	if len(h.reload.calls) != 1 || h.reload.calls[0] != configFile {
@@ -253,7 +255,7 @@ func TestRefreshModelsAllProbeInconclusiveKeepsModels(t *testing.T) {
 	if len(result.ProbeDropped) != 0 {
 		t.Errorf("probe dropped = %+v, want none (no probed leg concluded No)", result.ProbeDropped)
 	}
-	if got := configModels(t, configFile); !reflect.DeepEqual(got, []string{"glm-new", "glm-old"}) {
+	if got := h.configModels(t, "zp"); !reflect.DeepEqual(got, []string{"glm-new", "glm-old"}) {
 		t.Errorf("config models = %v, want the merged set (never wiped)", got)
 	}
 	matrix, n := h.replacedMatrix()
@@ -288,7 +290,7 @@ func TestRefreshModelsImplUnavailable(t *testing.T) {
 	if !strings.Contains(result.Warning, "unvalidated") {
 		t.Errorf("warning = %q, want a not-available warning", result.Warning)
 	}
-	if got := configModels(t, configFile); !reflect.DeepEqual(got, []string{"glm", "glm2"}) {
+	if got := h.configModels(t, "zp"); !reflect.DeepEqual(got, []string{"glm", "glm2"}) {
 		t.Errorf("config models = %v, want [glm glm2]", got)
 	}
 	if _, n := h.replacedMatrix(); n != 0 {
@@ -322,7 +324,7 @@ func TestRefreshModelsReloadFailureRestoresConfig(t *testing.T) {
 	if _, err := h.service.RefreshModels(context.Background(), "zp"); err == nil {
 		t.Fatal("reload failure returned nil error")
 	}
-	if got := configModels(t, configFile); !reflect.DeepEqual(got, []string{"glm-old"}) {
+	if got := h.configModels(t, "zp"); !reflect.DeepEqual(got, []string{"glm-old"}) {
 		t.Errorf("config models after failed reload = %v, want restored [glm-old]", got)
 	}
 }
@@ -409,7 +411,7 @@ func TestRefreshModelsCancellationAfterCommitFinishesReload(t *testing.T) {
 	defer cancel()
 	h.service.ports.Reload = func(path string) error {
 		cancel()
-		if got := configModels(t, path); !reflect.DeepEqual(got, []string{"new"}) {
+		if got := h.configModels(t, "zp"); !reflect.DeepEqual(got, []string{"new"}) {
 			t.Fatalf("commit models = %v", got)
 		}
 		return nil
@@ -487,7 +489,7 @@ func TestRefreshModels_DisabledNotProbed(t *testing.T) {
 		t.Error("probed-but-dropped model lost its matrix entry")
 	}
 	// Config keeps the disabled model too.
-	if got := configModels(t, configFile); !reflect.DeepEqual(sortedCopy(got), []string{"live", "off"}) {
+	if got := h.configModels(t, "zp"); !reflect.DeepEqual(sortedCopy(got), []string{"live", "off"}) {
 		t.Errorf("config models = %v, want [live off]", got)
 	}
 }
@@ -607,7 +609,13 @@ func TestRefreshModels_InconclusiveModelNotDropped(t *testing.T) {
 	if result.ConfigUpdated {
 		t.Error("ConfigUpdated = true, want false (nothing removed)")
 	}
-	if got := configModels(t, configFile); !reflect.DeepEqual(sortedCopy(got), []string{"flaky", "glm-good"}) {
+	// No mutation ran → the yaml fixture was never absorbed/stripped; the
+	// retained set is still the yaml's own.
+	cfgKept, err := configdomain.LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("untouched config does not load: %v", err)
+	}
+	if got := cfgKept.Providers["zp"].Models; !reflect.DeepEqual(sortedCopy(got), []string{"flaky", "glm-good"}) {
 		t.Errorf("config models = %v, want both models retained", got)
 	}
 	matrix, n := h.replacedMatrix()
@@ -678,11 +686,7 @@ func TestRefreshModels_LegacyProviderFetchesLiveList(t *testing.T) {
 	if !reflect.DeepEqual(sortedCopy(result.Added), []string{"mimo-brand-new"}) {
 		t.Errorf("added = %v, want [mimo-brand-new]", result.Added)
 	}
-	written, err := configdomain.LoadConfig(configFile)
-	if err != nil {
-		t.Fatalf("written config does not load: %v", err)
-	}
-	if got := written.Providers["mimo"].Models; !reflect.DeepEqual(sortedCopy(got), []string{"mimo-brand-new", "mimo-existing"}) {
-		t.Errorf("config models = %v, want the live list written", got)
+	if got := h.configModels(t, "mimo"); !reflect.DeepEqual(sortedCopy(got), []string{"mimo-brand-new", "mimo-existing"}) {
+		t.Errorf("store models = %v, want the live list written", got)
 	}
 }

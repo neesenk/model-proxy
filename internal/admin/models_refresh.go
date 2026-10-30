@@ -20,26 +20,21 @@ package admin
 // concluded verdicts to "? unknown".
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
 
 	"model-proxy/internal/appapi"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/configedit"
 	"model-proxy/internal/probe"
 	"model-proxy/internal/provider"
 	"model-proxy/internal/routing"
 	runtimewire "model-proxy/internal/runtime/wirecap"
-
-	"gopkg.in/yaml.v3"
 )
 
 // refreshProbeConcurrency bounds concurrent model probes per refresh. Probes
@@ -308,69 +303,29 @@ func refreshLegErrorReason(body []byte) string {
 	return ""
 }
 
-// writeProviderModelsAndReload rewrites providers.<name>.models under the
-// shared config lock (comment-preserving yaml.Node round-trip, validated
-// atomic write), then hot-reloads. A reload that failed to apply restores the
-// backup; an applied-with-warning reload keeps the new file and reports the
+// writeProviderModelsAndReload rewrites the provider's models list in the
+// provider.json store (the single provider authority) under the shared config
+// lock, then hot-reloads. A reload that failed to apply restores the previous
+// store; an applied-with-warning reload keeps the new store and reports the
 // warning — the saveAndReloadUnderLock contract.
 func (s *Service) writeProviderModelsAndReload(ctx context.Context, configFile, name string, expected configdomain.Provider, models []string) (reloadWarning string, err error) {
-	err = configedit.WithConfigLockContext(ctx, configFile, func() error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		current, err := configdomain.LoadConfig(configFile)
-		if err != nil {
-			return err
-		}
-		if actual, ok := current.Providers[name]; !ok || !reflect.DeepEqual(actual, expected) {
+	err = s.mutateProvidersAndReload(ctx, func(providers map[string]configdomain.Provider) error {
+		actual, ok := providers[name]
+		if !ok || !reflect.DeepEqual(actual, expected) {
 			return appapi.NewHTTPError(http.StatusConflict, "provider changed during model refresh; retry")
 		}
-		root, err := configedit.LoadNode(configFile)
-		if err != nil {
-			return err
-		}
-		prov := configedit.LookupChildMap(configedit.LookupChildMap(root, "providers"), name)
-		if prov == nil || prov.Kind != yaml.MappingNode {
-			return fmt.Errorf("provider %q not found in %s", name, configFile)
-		}
-		configedit.SetChildNode(prov, "models", configedit.MustEncode(models))
-		var buf bytes.Buffer
-		enc := yaml.NewEncoder(&buf)
-		enc.SetIndent(2)
-		if err := enc.Encode(root); err != nil {
-			return err
-		}
-		// Close flushes the final document into buf; an unchecked failure here
-		// could hand a truncated YAML to writeConfigValidated below.
-		if err := enc.Close(); err != nil {
-			return err
-		}
-		// Cancellation is honored up to this commit boundary. Once writing starts,
-		// finish save + reload (or rollback), even if the client disconnects.
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		backup, err := configedit.WriteConfigValidated(configFile, buf.String(), func(path string, raw []byte) error {
-			_, err := configdomain.LoadConfigFromBytes(path, raw)
-			return err
-		})
-		if err != nil {
-			return err
-		}
-		if err := s.ports.Reload(configFile); err != nil {
-			var applied *ReloadAppliedWarning
-			if errors.As(err, &applied) {
-				reloadWarning = applied.Err.Error()
-				return nil
-			}
-			if original, readErr := os.ReadFile(backup); readErr == nil {
-				_ = configedit.AtomicWrite(configFile, original)
-			}
-			return err
-		}
+		actual.Models = models
+		providers[name] = actual
 		return nil
 	})
-	return reloadWarning, err
+	if err != nil {
+		var applied *ReloadAppliedWarning
+		if errors.As(err, &applied) {
+			return applied.Err.Error(), nil
+		}
+		return "", err
+	}
+	return "", nil
 }
 
 // mergeIDs returns existing first, then any fetched ids not already present

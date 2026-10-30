@@ -7,7 +7,36 @@ import (
 	"testing"
 
 	"model-proxy/internal/appapi"
+	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/providerstore"
 )
+
+// readProviderStore loads the service-under-test's provider.json store (the
+// HomeDir the test injected) for assertions on provider mutations.
+func readProviderStore(t *testing.T, service *Service) map[string]configdomain.Provider {
+	t.Helper()
+	store, err := readStoreForHome(t, service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+func readStoreForHome(t *testing.T, service *Service) (map[string]configdomain.Provider, error) {
+	t.Helper()
+	return providerstore.Load(providerstore.PathUnder(service.homeDir()))
+}
+
+// readTestFile returns a config file's bytes as a string for stability
+// comparisons across mutations.
+func readTestFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
 
 // setTestHome points accounts/credstore home lookups at a temp dir.
 func setTestHome(t *testing.T) string {

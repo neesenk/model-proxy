@@ -46,11 +46,10 @@ func TestFetchModelsContextCapabilities(t *testing.T) {
 	if _, err := FetchModelsContext(ctx, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("pre-canceled fetch = %v", err)
 	}
-	if _, err := FetchModelsContext(context.Background(), &StaticProvider{}); !errors.Is(err, errNotSupported) {
-		t.Fatalf("unsupported fetch = %v", err)
-	}
-	// Every HTTP-capable implementation must supply the cancellable capability.
-	for _, impl := range []Provider{&AqpProvider{}, &ZhipuProvider{}, &ZCodeProvider{}, &DeepSeekProvider{}, &KimiCodeProvider{}, &QwenPlanProvider{}, &CodexProvider{}, &VolcengineProvider{}} {
+	// static now serves the OpenAI-style /models fetch too (the Web
+	// add-provider preview and `models refresh` depend on it) — it must carry
+	// the cancellable capability like every HTTP-capable implementation.
+	for _, impl := range []Provider{&AqpProvider{}, &ZhipuProvider{}, &ZCodeProvider{}, &DeepSeekProvider{}, &KimiCodeProvider{}, &QwenPlanProvider{}, &CodexProvider{}, &VolcengineProvider{}, &StaticProvider{}} {
 		if _, ok := impl.(interface {
 			FetchModelsContext(context.Context) ([]string, error)
 		}); !ok {
@@ -68,8 +67,7 @@ func TestFetchModelsContextCapabilities(t *testing.T) {
 // opencode-go / openrouter / step-plan gap). The walk is driven by the
 // package registry itself, so a newly registered provider cannot ship
 // without the capability and stay green: it must either implement
-// FetchModelsContext or carry an explicit, justified exception below
-// (static: no /models endpoint at all; both paths return errNotSupported).
+// FetchModelsContext or carry an explicit, justified exception below.
 func TestFetchModelsContext_ProviderCoverage(t *testing.T) {
 	build := func(providerID string) Provider {
 		t.Helper()
@@ -79,9 +77,7 @@ func TestFetchModelsContext_ProviderCoverage(t *testing.T) {
 		}
 		return impl
 	}
-	exceptions := map[string]string{
-		"static": "no /models endpoint at all (errNotSupported by design)",
-	}
+	exceptions := map[string]string{}
 	for providerID := range registry {
 		if reason, ok := exceptions[providerID]; ok {
 			if _, ok := build(providerID).(interface {

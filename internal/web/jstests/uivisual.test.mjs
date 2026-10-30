@@ -53,7 +53,9 @@ const TAB_MARKERS = {
   requests: { sel: '#req-table tbody tr:not(.req-spacer)', text: 'm1', refresh: true },
   security: { sel: '#sec-kpis .kpi' },
   analytics: { sel: '#an-kpis .kpi' },
-  config: { sel: '#yaml-editor .CodeMirror, #yaml-editor-fallback', text: 'dummy' },
+  // config：providers: 已被吸收进 provider.json（boot 迁移剥离 yaml 段），
+  // 真实数据文本锚定 yaml 仍持有的 listen 行。
+  config: { sel: '#yaml-editor .CodeMirror, #yaml-editor-fallback', text: 'listen:' },
   accounts: { sel: '.acct-nav-item', text: 'dummy' },
   takeover: { sel: '#tab-takeover .table', text: 'claude' },
   mcp: { sel: '.mcp-host' },

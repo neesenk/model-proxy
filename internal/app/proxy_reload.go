@@ -8,6 +8,7 @@ import (
 	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/provider"
 	"model-proxy/internal/providerbuild"
+	"model-proxy/internal/providerstore"
 	"model-proxy/internal/routing"
 	runtimewire "model-proxy/internal/runtime/wirecap"
 	"model-proxy/internal/shadow"
@@ -24,7 +25,14 @@ func (e *ReloadAppliedWarning) Error() string { return "reload applied with warn
 func (e *ReloadAppliedWarning) Unwrap() error { return e.Err }
 
 func (p *Proxy) Reload(configPath string) error {
-	cfg, err := configdomain.LoadConfig(configPath)
+	// Providers resolve through the provider.json store (read-only merge —
+	// yaml entries win, matching what the next absorbing write persists).
+	// Reload deliberately does NOT absorb: admin/CLI mutations already absorb
+	// inside their own config-lock span, and a nested lock here would
+	// deadlock against a mutation flow that holds the lock across its reload
+	// callback. Unabsorbed yaml entries still take effect immediately (they
+	// win the merge) and converge into the store at the next boot/mutation.
+	cfg, err := providerstore.LoadEffectiveConfig(configPath, false)
 	if err != nil {
 		return err
 	}

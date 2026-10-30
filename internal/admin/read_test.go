@@ -1126,7 +1126,10 @@ func writeGuardJoinRequestLog(t *testing.T, dir string, records ...requestlog.Re
 
 func TestConfigDocument(t *testing.T) {
 	path := writeTestConfig(t)
-	service := New(Ports{ConfigFile: func() string { return path }})
+	// HomeDir keeps the effective provider merge hermetic — ConfigDocument
+	// resolves providers through the provider.json store, and without the
+	// port it would read the machine's real store.
+	service := New(Ports{ConfigFile: func() string { return path }, HomeDir: func() string { return t.TempDir() }})
 
 	document, err := service.ConfigDocument()
 	if err != nil {
