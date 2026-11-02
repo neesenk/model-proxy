@@ -301,6 +301,7 @@ model-proxy stats --json           # 原始 JSON（便于 jq）
 model-proxy shadow report          # 影子聚合对比：样本数/状态一致率/延迟差/大小比
 model-proxy replay <request_id> --to kimi-code   # 用另一个后端重答历史中任意一条请求
 model-proxy routing report         # 路由策略离线对账（离线只读 index.db）：弱标签成功率/selector 混淆矩阵/成本基线/判定开销
+model-proxy prune 7               # 一次性清理 request log（只保留最近 7 天；--dry-run 预览；不改 retention 配置）
 
 # 安全审计（离线直读审计日志，不需 daemon）
 model-proxy audit                  # 最近的 guard 命中（秘密/路径）与 takeover 漂移记录

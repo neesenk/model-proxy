@@ -1288,6 +1288,14 @@ stdout/stderr 归属：交互提示与结果走 stdout；✗ 错误走 stderr + 
 
 ---
 
+## 24. `prune` — 一次性清理 request log（离线，不需 daemon）
+
+`prune <days> [--dry-run] [--config PATH]`
+
+一次性删除 request log 目录（`request_log.dir` 与 `request_log.mcp_dir`，存在即清理）里 mtime 早于 N 天的轮转文件（`requests-*` / `mcp-*`），语义与 daemon 自动 retention sweep 相同：当天活跃文件永不删，`index.db` 及非日志文件不碰。**不影响配置**——不读也不改 `request_log.retention`，自动清理照常运行；这是手动的一次性空间回收。尾部 SQLite 索引自行一致：daemon 的 reconcile（或下次启动重建）会删掉已消失文件对应的行。`--dry-run` 只列出待删文件与体积，不删除。days 必须为正整数；request-log 目录不存在时 exit 1。
+
+---
+
 ## 契约改动清单（改动时须核对）
 
 改契约时，除更新本文档外，还需同步这些测试断言（`strings.Contains` 精确文案）：

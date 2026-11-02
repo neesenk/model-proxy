@@ -22,6 +22,7 @@ import (
 	"model-proxy/internal/observe/logx"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -272,6 +273,59 @@ func (l *Logger) Shutdown() {
 
 func isLogFile(name, prefix string) bool {
 	return strings.HasPrefix(name, prefix) && strings.HasSuffix(name, fileExtension)
+}
+
+// PruneTarget names one rotated log file eligible for one-shot cleanup.
+type PruneTarget struct {
+	Name string
+	Size int64
+}
+
+// Prunable returns the rotated log files in dir whose mtime is before cutoff,
+// oldest first — the candidate set of a one-shot cleanup. It deletes nothing
+// and applies the same invariants as the retention sweep: only files matching
+// prefix*.log are considered, the active file (prefix + today's date) is never
+// listed, and unrelated entries (index.db, other streams) are ignored.
+func Prunable(dir, filePrefix string, cutoff, now time.Time) ([]PruneTarget, error) {
+	activeName := filePrefix + now.Format(dayFileLayout) + fileExtension
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var targets []PruneTarget
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !isLogFile(name, filePrefix) || name == activeName {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			targets = append(targets, PruneTarget{Name: name, Size: info.Size()})
+		}
+	}
+	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
+	return targets, nil
+}
+
+// Prune deletes the files Prunable would list and returns what it removed.
+// A failing removal aborts the pass; the names removed so far are still
+// returned alongside the error.
+func Prune(dir, filePrefix string, cutoff, now time.Time) ([]PruneTarget, error) {
+	targets, err := Prunable(dir, filePrefix, cutoff, now)
+	if err != nil {
+		return nil, err
+	}
+	removed := make([]PruneTarget, 0, len(targets))
+	for _, tgt := range targets {
+		if err := os.Remove(filepath.Join(dir, tgt.Name)); err != nil {
+			return removed, err
+		}
+		removed = append(removed, tgt)
+	}
+	return removed, nil
 }
 
 // EnsureDir creates dir with owner-only permissions and narrows a

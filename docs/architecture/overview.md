@@ -504,7 +504,7 @@ daemon/supervisor 的 signal 与 pid/probe 编排。child process detach 属性�
 不得回依赖根 `cli`（DAG guard 强制）：`cli/login`（login/import）、
 `cli/models`（models/test）、`cli/doctor`（doctor）、`cli/presets`（add/presets）、
 `cli/stats`（stats/usage）、`cli/audit`（audit）、`cli/status`（serve
-status/schedule/routes/cache）、`cli/admin`（pin/unpin/unfreeze/freeze）、`cli/guard`（guard blocks/unblock）、`cli/diag`
+status/schedule/routes/cache）、`cli/admin`（pin/unpin/unfreeze/freeze）、`cli/guard`（guard blocks/unblock）、`cli/prune`（prune：一次性 request log 清理）、`cli/diag`
 （wire/replay/shadow）、`cli/config`（config init|print|check）、
 `cli/account`（logout）、`cli/mcp`（mcp list/test）、`cli/mcpserver`
 （`mcp-server`：随二进制内置的 stdio MCP 工具服务器，供网关 `transport: stdio`
@@ -575,12 +575,13 @@ application → serveAssembly → applicationRuntime → Proxy
 - `appapi → adjudicate, fusion, observe/requestlog, observe/stats, presets, pricing`
   （adjudicate 仅为其 BlockEntry/Result 快照类型提供 DTO 别名，见 appapi/types.go）；
 - `cli → cli/account, cli/admin, cli/audit, cli/config, cli/diag, cli/doctor,
-  cli/framework, cli/guard, cli/login, cli/mcp, cli/mcpserver, cli/models, cli/presets, cli/provider, cli/stats, cli/status, config, display, providerstore, takeover,
+  cli/framework, cli/guard, cli/login, cli/mcp, cli/mcpserver, cli/models, cli/presets, cli/provider, cli/prune, cli/stats, cli/status, config, display, providerstore, takeover,
   observe/logx`（registry + 进程级 shell：调度循环、help、takeover/restore）；
 - `catalog → upstreamproxy`；
 - `cli/account → accounts, cli/framework, cli/serve, config, display, login, providerbuild`（`logout`）；
 - `cli/admin → cli/framework, config, daemonctl, display`（`pin`/`unpin`/`unfreeze`/`freeze`）；
 - `cli/guard → appapi, cli/framework, config, daemonctl, display`（`guard blocks`/`guard unblock`）；
+- `cli/prune → cli/framework, config, display, observe/logfile, observe/requestlog`（`prune`：一次性 request log 清理，mtime 语义同 retention sweep）；
 - `cli/audit → cli/framework, config, observe/seclog`（`audit`）；
 - `cli/clicommon → appapi, daemonctl, display`；
 - `cli/clitest → accounts`（纯测试支撑：子进程 harness 与共享 fixture，生产代码不得依赖）；

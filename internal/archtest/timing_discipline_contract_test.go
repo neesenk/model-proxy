@@ -73,7 +73,7 @@ var prodModTimeAllowlist = map[string]map[string]int{
 	"internal/accounts/store.go":           {"Store.withLock": 1},
 	"internal/observe/requestlog/index.go": {"(*Indexer).reconcile": 1},
 	"internal/observe/stats/legacy.go":     {"(*Store).ImportLegacyTokens": 1},
-	"internal/observe/logfile/logfile.go":  {"(*Logger).sweep": 1},
+	"internal/observe/logfile/logfile.go":  {"(*Logger).sweep": 1, "Prunable": 1},
 }
 
 // testSleepSnapshot: file → top-level func → allowed time.Sleep references.

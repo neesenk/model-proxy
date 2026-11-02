@@ -16,6 +16,7 @@ import (
 	climodels "model-proxy/internal/cli/models"
 	clipresets "model-proxy/internal/cli/presets"
 	cliprovider "model-proxy/internal/cli/provider"
+	cliprune "model-proxy/internal/cli/prune"
 	clistats "model-proxy/internal/cli/stats"
 	clistatus "model-proxy/internal/cli/status"
 )
@@ -55,6 +56,7 @@ func NewApplication(serve func(args []string)) *Application {
 		"doctor":   ProcessCommand(clidoctor.RunDoctor),
 		"audit":    ProcessCommand(cliaudit.RunAudit),
 		"guard":    ProcessCommand(cliguard.RunGuard),
+		"prune":    ProcessCommand(cliprune.RunPrune),
 		"test":     ProcessCommand(climodels.CmdTest),
 		"mcp":      ProcessCommand(climcp.RunMCP),
 		// Stream contract on purpose (no ProcessCommand adapter): the bundled

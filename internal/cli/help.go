@@ -48,6 +48,7 @@ Commands:
   doctor               Offline scheduling diagnostic (config only, no daemon)
   audit                Show the security audit log (offline, no daemon)
   guard                List/unblock adjudicated session blocks; manage content overrides
+  prune <days>         One-shot request-log cleanup (keep the last N days; dry-run supported)
   test <model>         End-to-end probe of a model's route targets (real upstream calls)
   mcp [list|test]      Manage MCP gateway servers (mcp: config; test runs the handshake)
   mcp-server <name>    Run a bundled MCP tool server over stdio (gateway child; not interactive)
@@ -318,6 +319,19 @@ Subcommands:
   allowed --json         raw JSON for jq
   disallow <hash>        revoke one override — the content returns to
                          fresh adjudication on its next occurrence`,
+
+	"prune": `prune <days> [--dry-run] [--config PATH]
+
+  One-shot request-log cleanup: delete rotated requests-/mcp- log files older
+  than <days> days (mtime, same rule as the automatic retention sweep) in the
+  configured request_log dir and mcp_dir. The active (today's) files and
+  index.db are never touched. This is a manual, one-time cleanup — it does not
+  read or change request_log.retention and the daemon's automatic sweep keeps
+  running as configured. The trailing SQLite index reconciles on its own: the
+  daemon (or its next startup) drops the rows of deleted files.
+
+  prune 7         delete files older than 7 days
+  prune 30 --dry-run   list what would be deleted, delete nothing`,
 
 	"test": `test <model> [--config PATH]
 
