@@ -283,6 +283,13 @@ func (x *Indexer) ensureColumns() error {
 	if _, err := x.db.Exec(`CREATE INDEX IF NOT EXISTS idx_records_ts_session ON records(ts, session_id) WHERE attempt_only = 0`); err != nil {
 		return err
 	}
+	// filterSQL expresses the From/To window on ts_ms while the only time
+	// index was the TEXT ts — a historical window (the UI's minute filter)
+	// walked every newer row via idx_records_ts testing ts_ms per visit. This
+	// index lets the planner serve the window range directly.
+	if _, err := x.db.Exec(`CREATE INDEX IF NOT EXISTS idx_records_ts_ms ON records(ts_ms)`); err != nil {
+		return err
+	}
 	return nil
 }
 

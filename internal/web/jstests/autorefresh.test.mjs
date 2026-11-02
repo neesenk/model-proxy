@@ -134,11 +134,13 @@ test('the Security and Accounts 30s ticks gate, guard and stop cleanly', () => {
 });
 
 test('every transient popup layer carries data-popup', () => {
-  // .tr-popover: the single pure.js builder `tokenRangePickerHTML` serves
-  // the tokens / analytics / accounts pickers — the popover must declare
-  // data-popup there, and app.js must not grow popover markup beside it.
-  assert.equal(count(pureJs, 'class="tr-popover" data-popup'), 1,
-    'the shared time-range popover must declare data-popup for the gate');
+  // .tr-popover: two pure.js builders own the popover markup —
+  // `tokenRangePickerHTML` (tokens / analytics / accounts pickers) and
+  // `requestTimePickerHTML` (the Requests log pages' minute filter). Both
+  // must declare data-popup, and app.js must not grow popover markup beside
+  // them.
+  assert.equal(count(pureJs, 'class="tr-popover" data-popup'), 2,
+    'both shared time-range popovers must declare data-popup for the gate');
   assert.equal(count(appJs, 'class="tr-popover"'), 0,
     'time-range popover markup must come from pure.js tokenRangePickerHTML');
   assert.ok(appJs.includes('class="route-pin-menu" data-popup'),

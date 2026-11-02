@@ -700,6 +700,88 @@ test('native select filter applies (下拉表单)', async (t) => {
   assert.deepEqual(await ctx.pageErrors(), [], 'select filter must not raise JS errors');
 });
 
+test('Requests 分钟级时间筛选：日历+级联下拉驱动窗口且随 hash 保持 (弹层族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // Drive two fresh records (distinct seconds) so the newest local minute is
+  // a known non-empty window; the cascade picks (day/hour/minute) come from
+  // the newest record's committed ts — page and node share the machine's
+  // local timezone, and picking the record's OWN minute is boundary-race
+  // free (the window is anchored to data, not to now()).
+  await driveRequest(2, 30);
+  const recs = (await fetch(`${ctx.baseUrl}/api/requests?limit=5`).then((r) => r.json())).records;
+  const newest = new Date(recs[0].ts); // RFC3339 UTC → local
+  const pad = (n) => String(n).padStart(2, '0');
+  const dayYmd = `${newest.getFullYear()}-${pad(newest.getMonth() + 1)}-${pad(newest.getDate())}`;
+  const hour = newest.getHours();
+  const minute = newest.getMinutes();
+  // Server truth for the minute window — the UI table must match it exactly.
+  const fromSec = Math.floor(new Date(newest.getFullYear(), newest.getMonth(), newest.getDate(), hour, minute).getTime() / 1000);
+  const truth = (await fetch(`${ctx.baseUrl}/api/requests?from=${fromSec}&to=${fromSec + 59}&limit=1000`).then((r) => r.json())).records.length;
+  assert.ok(truth >= 1, 'the driven records must land inside the picked minute');
+
+  await gotoRequestsWithRows();
+  const hashHas = (needle) => ctx.ev(`decodeURIComponent(location.hash).includes(${JSON.stringify(needle)})`);
+  try {
+    // Trigger opens the popover: single-month calendar + cascade selects; with
+    // no day applied the hour select is disabled (cascade can't skip a level).
+    await ctx.ev(`document.querySelector('#req-time-wrap .tr-trigger').click()`);
+    await ctx.waitFor('time popover open, hour gated', () => ctx.ev(`(() => {
+      const p = document.querySelector('#req-time-wrap .tr-popover:not([hidden])');
+      return !!p && p.querySelectorAll('td .tr-day').length > 0
+        && p.querySelector('[data-rt-hour]') && p.querySelector('[data-rt-hour]').disabled === true;
+    })()`));
+    // Pick the day → instant apply: hash carries the day, hour unlocks, and the
+    // popover STAYS open (the cascade is completed in one visit).
+    await ctx.ev(`document.querySelector('#req-time-wrap [data-rt-day="${dayYmd}"]').click()`);
+    await ctx.waitFor('day applied', async () =>
+      (await hashHas(`time=${dayYmd}`)) && await ctx.ev(`!document.querySelector('#req-time-wrap [data-rt-hour]').disabled`));
+    await ctx.waitFor('popover stays open after day pick', () => ctx.ev(
+      `!!document.querySelector('#req-time-wrap .tr-popover:not([hidden])')`));
+    // Hour then minute: each pick re-applies. The minute window's observable
+    // is the mounted rows' time cells — every displayed row must sit inside
+    // the picked local minute (the exact record count is viewport-coupled
+    // under the virtual scroll; the window semantics live in Go/pure tests).
+    await ctx.ev(`(() => {
+      const s = document.querySelector('#req-time-wrap [data-rt-hour]');
+      s.value = '${hour}';
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await ctx.waitFor('hour applied, minute unlocked', async () =>
+      (await hashHas(`time=${dayYmd}T${pad(hour)}`)) && await ctx.ev(`!document.querySelector('#req-time-wrap [data-rt-minute]').disabled`));
+    await ctx.ev(`(() => {
+      const s = document.querySelector('#req-time-wrap [data-rt-minute]');
+      s.value = '${minute}';
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    const minutePrefix = `${pad(hour)}:${pad(minute)}:`;
+    await ctx.waitFor('every mounted row sits inside the picked minute', () => ctx.ev(`(() => {
+      const rows = [...document.querySelectorAll(
+        '#req-table tbody tr:not(.req-spacer):not(.req-detail-row)')];
+      if (!rows.length || rows.length > ${truth}) return false;
+      return rows.every((r) => (r.querySelector('td:first-child')?.textContent || '').startsWith('${minutePrefix}'));
+    })()`));
+    assert.ok(await hashHas(`time=${dayYmd}T${pad(hour)}:${pad(minute)}`), 'hash carries the full cascade value');
+    // The popover is STILL OPEN after the cascade (one-visit design): Esc
+    // must close it WITHOUT changing the applied filter.
+    await ctx.ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+    await ctx.waitFor('Esc closed, filter intact', async () =>
+      (await ctx.ev(`!document.querySelector('#req-time-wrap .tr-popover:not([hidden])')`)) && await hashHas(`time=${dayYmd}T${pad(hour)}:${pad(minute)}`));
+    // Reopen → Clear → unfiltered list back, hash drops the time key.
+    await ctx.ev(`document.querySelector('#req-time-wrap .tr-trigger').click()`);
+    await ctx.waitFor('popover reopened for clear', () => ctx.ev(`!!document.querySelector('#req-time-wrap .tr-popover:not([hidden])')`));
+    await ctx.ev(`document.querySelector('#req-time-wrap [data-rt-clear]').click()`);
+    await ctx.waitFor('cleared to All', async () =>
+      (await ctx.ev(`!decodeURIComponent(location.hash).includes('time=')`)) && await ctx.ev(
+        `document.querySelector('#req-time-wrap .tr-value').textContent.trim() === 'All'`));
+  } finally {
+    // A failed step must not leave the minute filter applied for every later
+    // test sharing this page (their row waits would stall on a window with
+    // no records): reset to the bare segment unconditionally.
+    await ctx.ev(`location.hash = '#requests/model_all'`);
+  }
+  assert.deepEqual(await ctx.pageErrors(), [], '时间筛选不得有 JS 错误');
+});
+
 test('requests virtual scroll loads older pages near the bottom (滚动加载)', async (t) => {
   if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
   // 超过首页 50 条：滚到底必须按需拉回更旧一页（reqLoadOlder）。

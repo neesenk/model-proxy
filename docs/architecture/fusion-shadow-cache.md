@@ -198,8 +198,8 @@ request/response body 字符串——索引行只驻留元数据（历史上整�
 multi-MB body 曾把堆峰值顶到数 GB，字节封顶与置空 body 是它的双层防护）。
 Shutdown 在 log writer drain 之后跑一次 final reconcile（final flush）。
 写热路径（forward commit → Enqueue）不碰 SQLite。查询与扫描版语义逐字段一致：
-`SummariesWithFacets`（WHERE 映射 Filter + **failover 腿折叠**：已配对 `attempt_only` 行不出列、折入其已提交行的 `failed_hops`（attempt 升序元数据），未应答请求〔无已提交行，如客户端中途断开〕保留最新一腿独立成行——status/errors 过滤作用于存活行终态，扫描回退路径同语义折叠；facets 在 filter 之前对全部已索引行
-采集——例外是 `Kind`：它是流选择器而非数据 facet，llm/mcp 过滤同样收窄 facets，
+`SummariesWithFacets`（WHERE 映射 Filter——From/To 时间窗作用于 `ts_ms`，`ensureColumns` 建的 `idx_records_ts_ms` 让历史窗口（UI 分钟级时间筛选）免于沿 TEXT `ts` 索引逐行过滤所有更新行 + **failover 腿折叠**：已配对 `attempt_only` 行不出列、折入其已提交行的 `failed_hops`（attempt 升序元数据），未应答请求〔无已提交行，如客户端中途断开〕保留最新一腿独立成行——status/errors 过滤作用于存活行终态，扫描回退路径同语义折叠；facets 在 filter 之前对全部已索引行
+采集（扫描回退路径的 facets 受其文件级提前终止窗约束，From/To/Limit 压力下可比索引侧窄——两路径都是「先采集后过滤」，差异只在扫描能整文件跳过）——例外是 `Kind`：它是流选择器而非数据 facet，llm/mcp 过滤同样收窄 facets，
 mcp server 名不会污染 LLM 视图的 model 下拉；**attempt_only 行同样不进 facets**（下拉描述产出行的流量，腿已折叠）；usage 字段只在 `UsageOnly` 下填充）、`Detail`（按 (file, offset, length)
 seek 读回完整行；索引未命中或 seek 失败回落 `tailScan`——只流式读取各文件「已索引
 cursor 之后」的未索引字节：一个 reconcile tick 内刚 commit、indexer 尚未追上的
@@ -218,7 +218,7 @@ Limit 同为配对前的新到旧 top-K）；索引不可用回落目录扫描�
 web 读路径经 `appapi.RequestLogQueries` 端口回落目录扫描（admin 适配层负责
 nil-index 退化）。
 
-扫描 `requests-*.log` 时不假设文件名顺序等于 record timestamp 严格顺序（孤儿 active 文件或时钟纠正可能让旧名文件持有新记录），单行用 `bufio.Reader.ReadBytes`（不用 Scanner，避免默认 token cap 丢尾）。查询带**文件级提前终止**：单 writer 向同一文件按 Ts 非降序追加，因此文件最后一条可采纳记录是全文件上界——top-K 堆满后，最新记录仍严格老于堆底的文件不可能改变结果，直接跳过不流式读取；最新记录老于 From 下界（含边界，matches 只丢严格小于 From 的记录）的文件同理无命中。该顺序前提**逐文件验证而非假设**：每个文件独立 peek 首条（头部 128KiB）与末条（尾部 128KiB）记录，首条晚于末条（手工构造/损坏文件）或任何异常（打不开、行超长、JSON 解析失败）都回退为完整流式扫描；跨文件乱序仍被容忍。按 `request_id`/`session_id` 查询另有**行级提前终止**：`rawPrefilter` 先做字节包含检查，行内不含该值就跳过 `json.Unmarshal`（避免为多 MB body 反复分配/解析），命中唯一 request_id 后立即停止扫描——多 GB 活动日志下打开一条记录从秒级降到几十毫秒，唯一性保证早停不改变结果（body 里恰好出现该字符串的假命中仍由 `Filter.matches` 精确校验）。
+扫描 `requests-*.log` 时不假设文件名顺序等于 record timestamp 严格顺序（孤儿 active 文件或时钟纠正可能让旧名文件持有新记录），单行用 `bufio.Reader.ReadBytes`（不用 Scanner，避免默认 token cap 丢尾）。查询带**文件级提前终止**：单 writer 向同一文件按 Ts 非降序追加，因此文件最后一条可采纳记录是全文件上界——top-K 堆满后，最新记录仍严格老于堆底的文件不可能改变结果，直接跳过不流式读取；最新记录老于 From 下界（含边界，matches 只丢严格小于 From 的记录）的文件同理无命中；**To 上界有镜像规则**——文件按新到旧迭代，历史窗口查询（UI 的分钟级时间筛选）会先撞到整体晚于 To 的文件，首条（最旧）记录晚于 To（含边界，matches 只丢严格晚于 To 的记录）即整文件跳过，否则选一个老分钟要把该分钟之后的全部记录流式解码一遍。该顺序前提**逐文件验证而非假设**：每个文件独立 peek 首条（头部 128KiB）与末条（尾部 128KiB）记录，首条晚于末条（手工构造/损坏文件）或任何异常（打不开、行超长、JSON 解析失败）都回退为完整流式扫描；跨文件乱序仍被容忍。按 `request_id`/`session_id` 查询另有**行级提前终止**：`rawPrefilter` 先做字节包含检查，行内不含该值就跳过 `json.Unmarshal`（避免为多 MB body 反复分配/解析），命中唯一 request_id 后立即停止扫描——多 GB 活动日志下打开一条记录从秒级降到几十毫秒，唯一性保证早停不改变结果（body 里恰好出现该字符串的假命中仍由 `Filter.matches` 精确校验）。
 
 JSONL schema、Record 编码、查询 heap、Summary 与 Shadow 聚合由
 `internal/observe/requestlog` 拥有；非阻塞队列、单 writer、按天命名+size 轮转、retention 与

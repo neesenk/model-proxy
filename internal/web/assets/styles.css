@@ -1274,17 +1274,19 @@ details.cat-match .table { margin-top: 8px; }
 .req-controls > label { display: inline-flex; align-items: center; gap: 4px; }
 
 /* v2 Requests toolbar widths — the whole filter row holds on ONE line at
-   default resolutions (agent + session + provider + model + errors +
-   refresh ≈ the ~928px card width left by the 210px sidebar): the agent
-   select keeps its intrinsic width, and the three combos (session /
+   default resolutions (agent + session + provider + model + time picker +
+   errors + refresh ≈ the ~928px card width left by the 210px sidebar): the
+   agent select keeps its intrinsic width, and the three combos (session /
    provider / model) flex to absorb whatever the container has left
-   (floored at their 7rem prefix-filter width, capped at 12rem so ultrawide
-   windows don't stretch them silly; long session ids ellipsize in the
-   closed box, the themed popup shows the full id and the title tooltip
-   carries it). Narrower windows still wrap gracefully (flex-wrap on the
-   container). Scoped to this toolbar only (Security/Live rows keep the
-   .req-input defaults). */
-.req-controls .combo { flex: 1 1 7rem; min-width: 0; max-width: 12rem; }
+   (floored at their 6.5rem prefix-filter width, capped at 11rem so
+   ultrawide windows don't stretch them silly; long session ids ellipsize
+   in the closed box, the themed popup shows the full id and the title
+   tooltip carries it). The floor leaves room for the time picker's full
+   minute label ("Time Nov 2 14:35") without wrapping — the Errors label is
+   correspondingly short (title carries "errors only"). Narrower windows
+   still wrap gracefully (flex-wrap on the container). Scoped to this
+   toolbar only (Security/Live rows keep the .req-input defaults). */
+.req-controls .combo { flex: 1 1 6.5rem; min-width: 0; max-width: 11rem; }
 .req-controls .combo > .req-input { width: 100%; max-width: none; }
 
 /* Searchable combobox dropdown. */
@@ -1845,6 +1847,14 @@ input[type="checkbox"] { accent-color: var(--accent); }
 }
 .tr-nav:hover:not(:disabled) { color: var(--text); }
 .tr-nav:disabled { opacity: .3; cursor: default; }
+/* Requests 分钟级时间筛选：工具栏里去掉 tr-wrap 的独立块下边距；popover 改
+   纵向布局（单月日历在上、Hour/Minute/Clear 行在下）——触发钮位于工具行
+   中部，共享 .tr-popover 的横向双栏（预设|双月日历）会顶出视口右缘。 */
+.req-controls .tr-wrap { margin-bottom: 0; }
+.req-controls .tr-popover { flex-direction: column; gap: 10px; max-height: calc(100vh - 20px); overflow: auto; }
+.tr-time-col { display: flex; align-items: center; gap: 8px; }
+.tr-time-field { display: flex; align-items: center; gap: 6px; font-size: 0.8125rem; color: var(--muted); }
+.tr-time-select { width: 4.25rem; padding: 3px 6px; }
 
 .account-row {
   display: grid;

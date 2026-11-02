@@ -40,6 +40,7 @@ import {
   liveSessionSummary, liveSessionOrder, shortSessionId, linkedProviders, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary, guardMarksDetailHTML, requestMetaHTML, orderDetailRecords, committedRecordOf,
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
+  parseRequestTimeValue, requestTimeValue, requestTimeBounds, requestTimePickerHTML,
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
   detailFetchState, CLIENT_GONE_STATUS, notLoggedHint, quotaErrKind, accountUsageState,
   accountRemainingLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta,
@@ -452,6 +453,10 @@ function syncRequestsFreeControls() {
   }
   const e = document.getElementById('req-errors');
   if (e) e.checked = !!requestsFilter.errors;
+  // The time filter's value is state-owned (not a free-form control): the
+  // trigger/popover re-render IS the sync — after a hash-driven change
+  // (back/forward) the label must follow, or it would show a stale window.
+  renderRequestTimePicker();
   requestsFilter.shadow = '';
 }
 
@@ -772,9 +777,12 @@ function activeRequestsPage() {
 // resumes where the user left it.
 function newLogPageState() {
   return {
-    filters: { session: '', agent: '', model: '', provider: '', errors: false, shadow: '' },
+    filters: { session: '', agent: '', model: '', provider: '', errors: false, shadow: '', time: '' },
     combos: { providerOptions: [], modelOptions: [], sessionOptions: [], facetState: { providerModels: {}, agents: [] }, sessions: [], lastRecords: [], sessionPool: [] },
     drill: null,
+    // 时间筛选弹层 UI 态（open + 日历视图月），按页独立；生效值在
+    // filters.time（hash 持久化），这里只管开合与翻月。
+    timePicker: { open: false, view: null },
   };
 }
 function newLivePageState() {
@@ -803,6 +811,11 @@ function activeLiveState() { return livePageState[activeRequestsPageKey] || null
 // longer exists — the page key owns the stream (pure.js query functions
 // never see it).
 let requestsFilter = logPageState.model_all.filters;
+// Active log page's time-picker popover UI state ({open, view}) + the active
+// mount's refresh closure (the picker applies instantly like every filter
+// control). Both are rebound at navigation, right after requestsFilter.
+let requestsTimePicker = logPageState.model_all.timePicker;
+let requestTimeRefresh = null;
 let requestsCombos = logPageState.model_all.combos;
 let requestDrill = null;
 
@@ -1007,7 +1020,12 @@ function navigateRequestsPageInner(page, opts) {
   if (page.view === 'log') {
     // Bind the log engine's seams to THIS page's state before anything reads.
     const st = logPageState[key];
+    // Drop the outgoing page's live popover listeners first (an open popover
+    // leaves document-level keydown/click handlers behind; the new page
+    // re-renders its own closed wrap).
+    requestTimePickerClose();
     requestsFilter = st.filters;
+    requestsTimePicker = st.timePicker;
     requestsCombos = st.combos;
     requestDrill = st.drill;
   }
@@ -1079,7 +1097,8 @@ function mountLogPage(page, query) {
       <span class="combo"><input id="req-session" placeholder="All Sessions" value="${esc(st.filters.session)}" class="req-input" title="filter by session (Model: client session header; MCP: the exchange's session id) — type to search the session list; the committed filter is an exact session-id match, not a substring"/></span>
       <span class="combo"><input id="req-provider" placeholder="All Providers" value="${esc(st.filters.provider)}" class="req-input"/></span>
       <span class="combo"><input id="req-model" placeholder="${esc(page.modelPlaceholder)}" value="${esc(st.filters.model)}" class="req-input"/></span>
-      <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="req-errors" ${st.filters.errors ? 'checked' : ''}/> Errors Only</label>
+      <span id="req-time-wrap"></span>
+      <label style="display:flex;align-items:center;gap:4px;" title="errors only"><input type="checkbox" id="req-errors" ${st.filters.errors ? 'checked' : ''}/> Errors</label>
       <button id="req-refresh" class="btn">${iconRefresh()}Refresh</button>
     </div>
     <div id="req-session-summary" class="sess-sticky" style="margin-bottom:12px" hidden></div>
@@ -1154,6 +1173,10 @@ function mountLogPage(page, query) {
   // provider/model. Options are repainted in place by
   // renderRequestSelectors (combos.sessionOptions).
   attachCombo(document.getElementById('req-session'), combos.sessionOptions, onSessionSelect);
+  // Minute-precision time filter: state-owned value (filters.time) — the
+  // trigger/popover paint from it and each selection calls refresh directly.
+  requestTimeRefresh = refresh;
+  renderRequestTimePicker();
   // Paint the retained agent/session selections into the freshly rendered
   // controls BEFORE the first fetch: refresh() reads the filter back out of
   // the DOM, so an empty control would otherwise clear a filter that
@@ -1165,6 +1188,131 @@ function mountLogPage(page, query) {
   // remounts land here right after Back) — the guard re-asserts the page
   // state's values for a short window.
   scheduleFormRestoreGuard();
+}
+
+// ---- 分钟级时间筛选（Requests 日志页） ----
+// requestTimePickerClose closes the popover and drops the document-level
+// Esc/outside-click listeners. Closing never changes the applied filter
+// (same contract as the Status tokens range picker) — only an explicit
+// selection or Clear rewrites requestsFilter.time.
+function requestTimePickerClose() {
+  if (!requestsTimePicker) return;
+  requestsTimePicker.open = false;
+  requestsTimePicker.view = null;
+  document.removeEventListener('keydown', requestTimePickerOnKey);
+  document.removeEventListener('click', requestTimePickerOnOutside, true);
+}
+
+function requestTimePickerOnKey(e) {
+  if (e.key !== 'Escape') return;
+  requestTimePickerClose();
+  renderRequestTimePicker();
+}
+
+function requestTimePickerOnOutside(e) {
+  if (e.target && e.target.closest && e.target.closest('#req-time-wrap')) return;
+  requestTimePickerClose();
+  renderRequestTimePicker();
+}
+
+// renderRequestTimePicker paints the trigger + popover into #req-time-wrap
+// from the ACTIVE page's state (requestsFilter.time + requestsTimePicker) and
+// wires its events. Markup comes from the single pure.js builder
+// requestTimePickerHTML (tr-* look shared with the 时间维度 picker). Every
+// change — day click, hour/minute select, Clear — rewrites requestsFilter.time
+// and calls the mount's refresh closure (instant-apply, like every filter
+// control); the popover STAYS OPEN across selections so the day→hour→minute
+// cascade can be completed in one visit. Esc/outside click only close.
+function renderRequestTimePicker() {
+  const wrap = document.getElementById('req-time-wrap');
+  if (!wrap || !requestsTimePicker) return;
+  const picker = requestsTimePicker;
+  const apply = () => {
+    updateRequestsHash();
+    if (requestTimeRefresh) requestTimeRefresh();
+  };
+  wrap.innerHTML = requestTimePickerHTML(requestsFilter.time, picker);
+  // Viewport flip: .tr-popover anchors at the wrap's left edge, but this
+  // trigger sits MID-toolbar (the Status/Analytics pickers live at their
+  // toolbars' left edge) — near the right edge that anchor pushes the
+  // popover off-screen. When it would overflow, re-anchor on the wrap's
+  // right edge (opening leftward), the same clamping idea as the body-level
+  // combobox menus. Re-measured on every repaint (open, month nav).
+  const pop = wrap.querySelector('.tr-popover');
+  if (pop && picker.open) {
+    pop.style.left = pop.style.right = pop.style.top = pop.style.bottom = '';
+    const rect = pop.getBoundingClientRect();
+    if (rect.right > window.innerWidth - 8 && rect.left > rect.width) {
+      pop.style.left = 'auto';
+      pop.style.right = '0';
+    }
+    // Same flip vertically: when the popover would run past the bottom edge
+    // and the space above the trigger fits it, open upward.
+    const wrapTop = wrap.getBoundingClientRect().top;
+    if (rect.bottom > window.innerHeight - 8 && wrapTop >= rect.height + 14) {
+      pop.style.top = 'auto';
+      pop.style.bottom = 'calc(100% + 6px)';
+    }
+  }
+  const trigger = wrap.querySelector('.tr-trigger');
+  if (trigger) trigger.addEventListener('click', () => {
+    if (picker.open) {
+      requestTimePickerClose();
+      renderRequestTimePicker();
+      return;
+    }
+    // Open on the applied day's month (a fresh pick usually revisits it),
+    // else the month containing today.
+    const parsed = parseRequestTimeValue(requestsFilter.time);
+    const anchor = (parsed && parseLocalDate(parsed.day)) || new Date();
+    picker.open = true;
+    picker.view = { year: anchor.getFullYear(), month: anchor.getMonth() };
+    document.addEventListener('keydown', requestTimePickerOnKey);
+    document.addEventListener('click', requestTimePickerOnOutside, true);
+    renderRequestTimePicker();
+  });
+  wrap.querySelectorAll('[data-rt-day]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      // A new day keeps the hour/minute selections — they stay meaningful
+      // across days and re-picking them is the common browse pattern.
+      const parsed = parseRequestTimeValue(requestsFilter.time);
+      requestsFilter.time = requestTimeValue(btn.dataset.rtDay, parsed ? parsed.hour : null, parsed ? parsed.minute : null);
+      renderRequestTimePicker();
+      apply();
+    });
+  });
+  wrap.querySelectorAll('[data-rt-nav]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const v = picker.view || {};
+      picker.view = shiftMonth(v.year, v.month, Number(btn.dataset.rtNav));
+      renderRequestTimePicker();
+    });
+  });
+  const hourSel = wrap.querySelector('[data-rt-hour]');
+  if (hourSel) hourSel.addEventListener('change', () => {
+    const parsed = parseRequestTimeValue(requestsFilter.time);
+    const hour = hourSel.value === '' ? null : Number(hourSel.value);
+    // Dropping the hour drops the minute too — the cascade cannot skip a
+    // level (a minute without an hour has no window meaning).
+    const minute = hour == null ? null : (parsed ? parsed.minute : null);
+    requestsFilter.time = requestTimeValue(parsed ? parsed.day : '', hour, minute);
+    renderRequestTimePicker();
+    apply();
+  });
+  const minuteSel = wrap.querySelector('[data-rt-minute]');
+  if (minuteSel) minuteSel.addEventListener('change', () => {
+    const parsed = parseRequestTimeValue(requestsFilter.time);
+    if (!parsed || parsed.hour == null) return;
+    requestsFilter.time = requestTimeValue(parsed.day, parsed.hour, minuteSel.value === '' ? null : Number(minuteSel.value));
+    renderRequestTimePicker();
+    apply();
+  });
+  const clearBtn = wrap.querySelector('[data-rt-clear]');
+  if (clearBtn) clearBtn.addEventListener('click', () => {
+    requestsFilter.time = '';
+    renderRequestTimePicker();
+    apply();
+  });
 }
 
 // scheduleFormRestoreGuard re-applies the page's control values shortly
@@ -1233,6 +1381,7 @@ function clearLogFilters(st) {
   st.filters.provider = '';
   st.filters.errors = false;
   st.filters.shadow = '';
+  st.filters.time = '';
 }
 
 function applyLogQuery(query) {
@@ -1795,6 +1944,13 @@ function reqFilterParams() {
   if (requestsFilter.model) q.set('model', requestsFilter.model);
   if (requestsFilter.provider) q.set('provider', requestsFilter.provider);
   if (requestsFilter.errors) q.set('errors', '1');
+  // 分钟级时间筛选：级联值换算 from/to 闭区间（unix 秒，本地时区起算 ——
+  // docs/web-api.md 的 from/to 语义）。
+  const bounds = requestTimeBounds(requestsFilter.time);
+  if (bounds) {
+    q.set('from', String(bounds.from));
+    q.set('to', String(bounds.to));
+  }
   return q;
 }
 
@@ -2155,6 +2311,11 @@ async function reqLoadOlder(v) {
   v.err = '';
   reqHint(v);
   const q = reqFilterParams();
+  // Keyset cursor. With a time window active, every loaded record lies inside
+  // [from, to], so the oldest loaded second is always ≤ the window's to —
+  // overwriting the window to here only TIGHTENS the bound, and the from
+  // riding along in reqFilterParams ends paging once a short page hits the
+  // window's start.
   const to = oldestTsSec(v.recs);
   if (to != null) q.set('to', String(to));
   q.set('limit', String(v.pageSize));

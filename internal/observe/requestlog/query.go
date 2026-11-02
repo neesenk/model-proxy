@@ -411,6 +411,17 @@ func query(dir, prefix string, filter Filter, metadataOnly, foldLegs bool, facet
 					continue
 				}
 			}
+			// Mirror image on the OLDEST record: files iterate newest-first,
+			// so a historical To window (the UI's minute filter) meets every
+			// file ENTIRELY newer than To before it reaches the window's own
+			// files — skipping them keeps the scan from streaming and
+			// JSON-decoding all records logged since that minute. To is an
+			// inclusive upper bound (matches drops only timestamps after To).
+			if !filter.To.IsZero() {
+				if t, err := time.Parse(time.RFC3339, firstTs); err == nil && t.After(filter.To) {
+					continue
+				}
+			}
 		}
 		file, err := os.Open(path)
 		if err != nil {

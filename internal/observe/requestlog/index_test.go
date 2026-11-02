@@ -93,6 +93,39 @@ func indexRowCount(t *testing.T, indexer *Indexer) int {
 	return count
 }
 
+// TestIndexMigrateIndexes pins the additive index schema a fresh migrate must
+// leave behind. idx_records_ts_ms is load-bearing for the UI's minute filter:
+// filterSQL expresses the From/To window on ts_ms, and without this index a
+// historical window walks every newer row via the TEXT ts index testing
+// ts_ms per visit.
+func TestIndexMigrateIndexes(t *testing.T) {
+	indexer := newTestIndexer(t, t.TempDir())
+	rows, err := indexer.db.Query(`SELECT name FROM sqlite_master WHERE type = 'index'`)
+	if err != nil {
+		t.Fatalf("list indexes: %v", err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan index name: %v", err)
+		}
+		got[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("list indexes: %v", err)
+	}
+	for _, name := range []string{
+		"idx_records_ts", "idx_records_session", "idx_records_request",
+		"idx_records_api_key", "idx_records_ts_session", "idx_records_ts_ms",
+	} {
+		if !got[name] {
+			t.Errorf("migrate is missing index %s (have %v)", name, got)
+		}
+	}
+}
+
 // TestSummaryListFoldsFailoverLegs pins the summary-list fold on BOTH query
 // paths (scan engine and index SQL — they must answer identically): a paired
 // leg never surfaces as its own row, its evidence rides the committed row's
@@ -254,7 +287,7 @@ func TestSummaryListFoldsFailoverLegs(t *testing.T) {
 // the unbounded filter: the scan's facets are bounded by its file-level early
 // termination window, the index answers over the whole retained set (both are
 // "collected before the filter"; the divergence only shows with a limit or a
-// From bound that lets the scan skip whole files).
+// From/To bound that lets the scan skip whole files).
 func TestIndexSummariesEquivalenceVsScan(t *testing.T) {
 	dir := t.TempDir()
 	writeIndexFixture(t, dir)
@@ -312,11 +345,13 @@ func TestIndexSummariesEquivalenceVsScan(t *testing.T) {
 				t.Errorf("summaries differ:\nindex: %+v\nscan:  %+v", gotSummaries, wantSummaries)
 			}
 			// Facets: only where the scan cannot narrow its collection — no
-			// early-termination pressure (limit heap, From bound) and no
-			// rawPrefilter gating (RequestID/Session skip undecoded lines,
-			// which also skips their facet contribution on the scan path).
+			// early-termination pressure (limit heap, From/To bound — both
+			// let the scan skip whole files, taking their facet contribution
+			// with them) and no rawPrefilter gating (RequestID/Session skip
+			// undecoded lines, which also skips their facet contribution on
+			// the scan path).
 			bounded := (filter.Limit > 0 && filter.Limit < len(indexFixtureRecords())) ||
-				!filter.From.IsZero() || filter.RequestID != "" || filter.Session != ""
+				!filter.From.IsZero() || !filter.To.IsZero() || filter.RequestID != "" || filter.Session != ""
 			if !bounded && !reflect.DeepEqual(gotFacets, wantFacets) {
 				t.Errorf("facets differ:\nindex: %+v\nscan:  %+v", gotFacets, wantFacets)
 			}

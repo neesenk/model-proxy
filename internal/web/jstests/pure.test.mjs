@@ -14,6 +14,7 @@ import {
   sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, linkedProviders, sessionHealthSummary, guardMarksHTML, guardMarksDetailHTML, requestMetaHTML, hopChainTitle, orderDetailRecords, committedRecordOf,
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
+  parseRequestTimeValue, requestTimeValue, requestTimeBounds, requestTimeLabel, requestTimePickerHTML,
   cacheHitRate, settingsDiff, settingsRestartKeys, configSummaryHTML,
   TOKEN_RANGES, tokenRangeBounds, tokenRangeLabel, tokensRangeQuery,
   tokenCustomBounds, parseLocalDate,
@@ -2873,30 +2874,140 @@ test('requests filter hash round-trips, omitting defaults and dropping junk', ()
   // (#requests/<stream>_<view>, app.js requestsViewKey), so it neither emits
   // nor parses here (a stray legacy ?stream= is absorbed by
   // normalizeRequestsHash before FromQuery ever runs).
-  assert.equal(requestsFilterQuery({ stream: '', session: '', agent: '', model: '', provider: '', errors: false, shadow: '' }), '');
-  assert.equal(requestsFilterQuery({ stream: 'mcp', session: '', agent: '', model: '', provider: '', errors: false, shadow: '' }), '');
-  const q = requestsFilterQuery({ stream: '', session: 'sess demo/1', agent: 'pi', model: '', provider: 'zhipu', errors: true, shadow: 'only' });
+  assert.equal(requestsFilterQuery({ stream: '', session: '', agent: '', model: '', provider: '', errors: false, shadow: '', time: '' }), '');
+  assert.equal(requestsFilterQuery({ stream: 'mcp', session: '', agent: '', model: '', provider: '', errors: false, shadow: '', time: '' }), '');
+  const q = requestsFilterQuery({ stream: '', session: 'sess demo/1', agent: 'pi', model: '', provider: 'zhipu', errors: true, shadow: 'only', time: '' });
   assert.equal(q, 'session=sess+demo%2F1&agent=pi&provider=zhipu&errors=1&shadow=only');
   // Round-trip through hashQueryParams + fromQuery.
   const back = requestsFilterFromQuery(hashQueryParams(q));
-  assert.deepEqual(back, { stream: '', session: 'sess demo/1', agent: 'pi', model: '', provider: 'zhipu', errors: true, shadow: 'only' });
-  const mcp = requestsFilterQuery({ stream: 'mcp', session: '', agent: 'codex', model: '', provider: '', errors: false, shadow: '' });
+  assert.deepEqual(back, { stream: '', session: 'sess demo/1', agent: 'pi', model: '', provider: 'zhipu', errors: true, shadow: 'only', time: '' });
+  const mcp = requestsFilterQuery({ stream: 'mcp', session: '', agent: 'codex', model: '', provider: '', errors: false, shadow: '', time: '' });
   assert.equal(mcp, 'agent=codex');
-  assert.deepEqual(requestsFilterFromQuery(hashQueryParams(mcp)), { stream: '', session: '', agent: 'codex', model: '', provider: '', errors: false, shadow: '' });
+  assert.deepEqual(requestsFilterFromQuery(hashQueryParams(mcp)), { stream: '', session: '', agent: 'codex', model: '', provider: '', errors: false, shadow: '', time: '' });
+  // The time filter rides as the user-intent cascade value; ':' URL-encodes
+  // and decodes back losslessly (derived from/to never enter the hash).
+  const tq = requestsFilterQuery({ stream: '', session: '', agent: '', model: '', provider: '', errors: false, shadow: '', time: '2026-11-02T14:35' });
+  assert.equal(tq, 'time=2026-11-02T14%3A35');
+  assert.deepEqual(requestsFilterFromQuery(hashQueryParams(tq)), { stream: '', session: '', agent: '', model: '', provider: '', errors: false, shadow: '', time: '2026-11-02T14:35' });
   // A stream-only query is not a filter key: null (segment-only hash must
   // not clobber an in-memory filter).
   assert.equal(requestsFilterFromQuery({ stream: 'mcp' }), null);
   assert.equal(requestsFilterFromQuery({ stream: 'bogus' }), null);
+  // Junk time drops the whole key: a query whose ONLY key is a bad time is
+  // the unfiltered list (null), and a bad time alongside valid keys simply
+  // doesn't survive.
+  assert.equal(requestsFilterFromQuery({ time: 'not-a-date' }), null);
+  assert.equal(requestsFilterFromQuery({ time: '2026-02-30' }), null);
+  assert.equal(requestsFilterFromQuery({ time: '2026-11-02T24' }), null);
+  assert.equal(requestsFilterFromQuery({ time: '2026-11-02T10:60' }), null);
+  assert.equal(requestsFilterFromQuery({ time: '2026-11-02T:35' }), null);
+  assert.deepEqual(requestsFilterFromQuery({ agent: 'pi', time: 'junk' }), { stream: '', session: '', agent: 'pi', model: '', provider: '', errors: false, shadow: '', time: '' });
   // Junk shadow falls back to the tri-state default; truthy errors spellings
   // other than 1/true normalize to false.
   const junk = requestsFilterFromQuery({ session: 's', shadow: 'bogus', errors: 'yes' });
-  assert.deepEqual(junk, { stream: '', session: 's', agent: '', model: '', provider: '', errors: false, shadow: '' });
+  assert.deepEqual(junk, { stream: '', session: 's', agent: '', model: '', provider: '', errors: false, shadow: '', time: '' });
   // No filter keys → null (a bare #requests must not clobber live state);
   // null/undefined params normalize to null.
   assert.equal(requestsFilterFromQuery({}), null);
   assert.equal(requestsFilterFromQuery(null), null);
   assert.equal(requestsFilterFromQuery(hashQueryParams('')), null);
   assert.deepEqual(hashQueryParams(null), {});
+});
+
+test('request minute filter: parse/value/bounds/label cascade semantics', () => {
+  // Parse: the three cascade levels, zero-padded and range-checked. Hour and
+  // minute are null until picked (cascade can't skip a level — minute without
+  // hour has no window meaning).
+  assert.deepEqual(parseRequestTimeValue('2026-11-02'), { day: '2026-11-02', hour: null, minute: null });
+  assert.deepEqual(parseRequestTimeValue('2026-11-02T14'), { day: '2026-11-02', hour: 14, minute: null });
+  assert.deepEqual(parseRequestTimeValue('2026-11-02T14:35'), { day: '2026-11-02', hour: 14, minute: 35 });
+  assert.equal(parseRequestTimeValue(''), null);
+  assert.equal(parseRequestTimeValue(null), null);
+  assert.equal(parseRequestTimeValue('2026-11-2'), null, 'zero-padded only');
+  assert.equal(parseRequestTimeValue('2026-13-01'), null, 'month range');
+  assert.equal(parseRequestTimeValue('2026-11-02T14:35:00'), null, 'seconds not part of the cascade');
+  assert.equal(parseRequestTimeValue('2026-11-02 14:35'), null, 'T separator only');
+  // Builder is the exact inverse (day required; hour gates minute).
+  assert.equal(requestTimeValue('2026-11-02', null, null), '2026-11-02');
+  assert.equal(requestTimeValue('2026-11-02', 9, null), '2026-11-02T09');
+  assert.equal(requestTimeValue('2026-11-02', 9, 5), '2026-11-02T09:05');
+  assert.equal(requestTimeValue('', 9, 5), '');
+  assert.equal(requestTimeValue('2026-11-02', null, 5), '2026-11-02', 'minute without hour is dropped by the builder');
+  for (const [v, day, h, m] of [['2026-11-02', '2026-11-02', null, null], ['2026-11-02T14', '2026-11-02', 14, null], ['2026-11-02T14:35', '2026-11-02', 14, 35]]) {
+    const p = parseRequestTimeValue(v);
+    assert.equal(requestTimeValue(p.day, p.hour, p.minute), v, `round-trip ${v}`);
+    assert.equal(day && true, true);
+    assert.equal(p.hour, h);
+    assert.equal(p.minute, m);
+  }
+  // Bounds: closed inclusive LOCAL-time windows — day 00:00:00..23:59:59,
+  // hour ..:59:59, minute ..:59. Local time is the app-wide convention
+  // (client == daemon machine; server treats from/to as plain unix seconds).
+  const day = requestTimeBounds('2026-11-02');
+  assert.equal(day.from, Math.floor(new Date(2026, 10, 2).getTime() / 1000));
+  assert.equal(day.to, day.from + 86399);
+  const hour = requestTimeBounds('2026-11-02T14');
+  assert.equal(hour.from, Math.floor(new Date(2026, 10, 2, 14).getTime() / 1000));
+  assert.equal(hour.to, hour.from + 3599);
+  const minute = requestTimeBounds('2026-11-02T14:35');
+  assert.equal(minute.from, Math.floor(new Date(2026, 10, 2, 14, 35).getTime() / 1000));
+  assert.equal(minute.to, minute.from + 59);
+  // The last second of a window is INSIDE it (both server bounds are
+  // inclusive) and the first second of the next unit is OUTSIDE.
+  assert.equal(minute.to, minute.from + 59);
+  assert.equal(minute.to + 1, minute.from + 60);
+  assert.equal(requestTimeBounds('junk'), null);
+  assert.equal(requestTimeBounds(''), null);
+  // Labels: cascade-aware trigger value, 'All' when unfiltered/invalid.
+  assert.equal(requestTimeLabel(''), 'All');
+  assert.equal(requestTimeLabel('2026-11-02'), 'Nov 2');
+  assert.equal(requestTimeLabel('2026-11-02T14'), 'Nov 2 14:00');
+  assert.equal(requestTimeLabel('2026-11-02T14:05'), 'Nov 2 14:05');
+  assert.equal(requestTimeLabel('garbage'), 'All');
+});
+
+test('requestTimePickerHTML: trigger + popover cascade markup', () => {
+  const now = new Date(2026, 10, 2, 15, 0).getTime();
+  // Closed: trigger only, popover hidden but present (data-popup contract).
+  const closed = requestTimePickerHTML('', { open: false, view: null }, 'rt', { now });
+  assert.ok(closed.includes('class="tr-wrap"'));
+  assert.ok(closed.includes('aria-expanded="false"'));
+  assert.ok(/tr-popover" data-popup hidden/.test(closed));
+  assert.ok(closed.includes('>All</span>'), "unfiltered trigger shows 'All'");
+  // Open on the current month: calendar days, cascade selects, Clear. With no
+  // day applied both selects are disabled and Clear is disabled.
+  const open = requestTimePickerHTML('', { open: true, view: { year: 2026, month: 10 } }, 'rt', { now });
+  assert.ok(open.includes('aria-expanded="true"'));
+  assert.ok(!/tr-popover" data-popup hidden/.test(open));
+  assert.ok(open.includes('November 2026'));
+  assert.ok(open.includes('data-rt-day="2026-11-02"'));
+  assert.ok(!open.includes('data-rt-day="2026-11-02" disabled'), 'today is selectable');
+  assert.ok(open.includes('data-rt-day="2026-11-20" disabled'), 'future day is disabled');
+  assert.ok(/data-rt-hour[^>]* disabled/.test(open), 'hour disabled without a day');
+  assert.ok(/data-rt-minute[^>]* disabled/.test(open), 'minute disabled without an hour');
+  assert.ok(/data-rt-clear disabled/.test(open), 'Clear disabled with no filter');
+  // Applied day+hour+minute: selected day circle, selected options, enabled
+  // cascade, next-month nav disabled on the current month.
+  const applied = requestTimePickerHTML('2026-11-02T14:35', { open: true, view: { year: 2026, month: 10 } }, 'rt', { now });
+  assert.ok(/data-rt-day="2026-11-02"><\/td>|tr-day tr-day-selected" data-rt-day="2026-11-02"/.test(applied));
+  assert.ok(applied.includes('<option value="14" selected>14</option>'));
+  assert.ok(applied.includes('<option value="35" selected>35</option>'));
+  assert.ok(!/data-rt-hour[^>]* disabled/.test(applied));
+  assert.ok(!/data-rt-minute[^>]* disabled/.test(applied));
+  assert.ok(!/data-rt-clear disabled/.test(applied));
+  assert.ok(/data-rt-nav="1"[^>]*disabled/.test(applied), 'no months after the current one');
+  // Viewing an older month: next-month nav enabled, prev enabled.
+  const old = requestTimePickerHTML('', { open: true, view: { year: 2026, month: 9 } }, 'rt', { now });
+  assert.ok(!/data-rt-nav="1"[^>]*disabled/.test(old));
+  assert.ok(!/data-rt-nav="-1"[^>]*disabled/.test(old));
+  // Full option grids: 24 hour options + 60 minute options + the All pair.
+  assert.equal((open.match(/data-rt-hour[\s\S]*?<\/select>/) || [''])[0].match(/<option/g).length, 25);
+  assert.equal((open.match(/data-rt-minute[\s\S]*?<\/select>/) || [''])[0].match(/<option/g).length, 61);
+  // Day-only: hour enabled, minute still disabled (cascade gate).
+  const dayOnly = requestTimePickerHTML('2026-11-02', { open: true, view: { year: 2026, month: 10 } }, 'rt', { now });
+  assert.ok(!/data-rt-hour[^>]* disabled/.test(dayOnly));
+  assert.ok(/data-rt-minute[^>]* disabled/.test(dayOnly));
+  assert.ok(dayOnly.includes('>Nov 2</span>'));
 });
 
 test('unified request table: one head and row renderer for all three tables', () => {

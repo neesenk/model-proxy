@@ -486,6 +486,84 @@ func TestQueryRecordsEarlyTerminationPeekFallback(t *testing.T) {
 	}
 }
 
+// TestQueryRecordsToWindowSkipsNewerFiles pins the To-side file-level skip:
+// files iterate newest-first, so a historical window (the UI's minute filter)
+// must skip every file whose OLDEST record is after To instead of streaming
+// and decoding it — while files the window STRADDLES still stream in full.
+// A wrongly aggressive skip (wrong boundary record or direction) drops
+// in-window records and fails these spans; the exact-To == first-record case
+// pins inclusivity (To drops only strictly-after timestamps).
+func TestQueryRecordsToWindowSkipsNewerFiles(t *testing.T) {
+	dir := t.TempDir()
+	timestamp := func(second int64) string {
+		return time.Unix(second, 0).UTC().Format(time.RFC3339)
+	}
+	write := func(name string, count, baseTimestamp int64) {
+		t.Helper()
+		var buffer bytes.Buffer
+		encoder := json.NewEncoder(&buffer)
+		for i := int64(0); i < count; i++ {
+			if err := encoder.Encode(Record{RequestID: name, Ts: timestamp(baseTimestamp + i)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), buffer.Bytes(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("requests-20260701-000000.log", 50, 1000)
+	write("requests-20260702-000000.log", 50, 2000)
+	write("requests-20260703-000000.log", 200, 3000)
+
+	// To inside the middle file's span: the newest file (oldest record 3000 >
+	// To) is skippable; the straddled middle file streams and contributes its
+	// in-window tail; the fully-older first file streams entirely.
+	records, err := QueryRecords(dir, Filter{To: time.Unix(2020, 0).UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 71 {
+		t.Fatalf("To=2020 records = %d, want 71 (50 old + 21 straddle)", len(records))
+	}
+	if records[0].Ts != timestamp(2020) || records[len(records)-1].Ts != timestamp(1000) {
+		t.Errorf("To=2020 span = %q..%q, want %q..%q",
+			records[0].Ts, records[len(records)-1].Ts, timestamp(2020), timestamp(1000))
+	}
+
+	// To exactly the newest file's first record: that file must NOT be
+	// skipped (inclusive bound — To drops only strictly-after timestamps)
+	// and still contributes its newest in-window record to the top-K.
+	records, err = QueryRecords(dir, Filter{To: time.Unix(3000, 0).UTC(), Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 3 || records[0].Ts != timestamp(3000) {
+		t.Fatalf("To=3000 top-3 = %d records, newest %q, want 3 newest %q", len(records), records[0].Ts, timestamp(3000))
+	}
+
+	// A closed minute-style window inside the oldest file: both newer files
+	// are skippable, the window's six inclusive seconds all survive.
+	records, err = QueryRecords(dir, Filter{
+		From: time.Unix(1030, 0).UTC(),
+		To:   time.Unix(1035, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 6 {
+		t.Fatalf("minute window records = %d, want 6 (1030..1035 inclusive)", len(records))
+	}
+	if records[0].Ts != timestamp(1035) || records[len(records)-1].Ts != timestamp(1030) {
+		t.Errorf("minute window span = %q..%q, want %q..%q",
+			records[0].Ts, records[len(records)-1].Ts, timestamp(1035), timestamp(1030))
+	}
+	for _, record := range records {
+		if record.RequestID != "requests-20260701-000000.log" {
+			t.Errorf("minute window returned %q from a newer file", record.RequestID)
+		}
+	}
+}
+
 // TestRawPrefilter pins the cheap byte gate that lets a RequestID/Session query
 // skip json.Unmarshal on lines that cannot match.
 func TestRawPrefilter(t *testing.T) {

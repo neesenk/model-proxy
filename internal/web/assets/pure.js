@@ -970,6 +970,128 @@ export function tokenRangePickerHTML(range, picker, ns, opts = {}) {
   </div>`;
 }
 
+// ---- Requests 页分钟级时间筛选 (request log minute picker) ----
+// 与 tokenRangePickerHTML 同族的 tr-* 弹层，但语义是"选到哪级生效到哪级"
+// 的级联单点选择（非范围）：日 → 整天，日+时 → 整小时，日+时+分 → 该分钟。
+// 编码值是本地时间字符串 'YYYY-MM-DD' / '…THH' / '…THH:MM'（零填充，URL
+// 安全；URLSearchParams 会把 ':' 编为 %3A，读回时解码，往返无损）。
+
+// parseRequestTimeValue 解析级联时间值 → {day:'YYYY-MM-DD', hour:0-23|null,
+// minute:0-59|null}。日期部分走 parseLocalDate（拒绝 2026-02-30 这类不可能
+// 日期），分钟必须伴随小时；任何垃圾输入返回 null（调用方整键丢弃）。
+export function parseRequestTimeValue(v) {
+  const m = /^(\d{4}-\d{2}-\d{2})(?:T(\d{2})(?::(\d{2}))?)?$/.exec(v || '');
+  if (!m) return null;
+  if (!parseLocalDate(m[1])) return null;
+  if (m[2] != null && Number(m[2]) > 23) return null;
+  if (m[3] != null && Number(m[3]) > 59) return null;
+  return {
+    day: m[1],
+    hour: m[2] == null ? null : Number(m[2]),
+    minute: m[3] == null ? null : Number(m[3]),
+  };
+}
+
+// requestTimeValue 是 parseRequestTimeValue 的逆：把 picker 各级选择编回
+// 紧凑字符串（hour 为 null 时 minute 必须也为 null，级联不允许跳级）。
+export function requestTimeValue(day, hour, minute) {
+  if (!day) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  let v = day;
+  if (hour != null) {
+    v += `T${pad(hour)}`;
+    if (minute != null) v += `:${pad(minute)}`;
+  }
+  return v;
+}
+
+// requestTimeBounds 把级联值换算成 /api/requests from/to 闭区间（unix 秒，
+// 本地时间起算 —— 与全 App 时间控件同一约定：客户端与 daemon 同机，服务端
+// 把 from/to 当裸 unix 秒）。宽度按已选粒度：整天 86399 / 整小时 3599 /
+// 该分钟 59（两端都含边界秒）。非法输入返回 null（调用方不得发请求）。
+export function requestTimeBounds(v) {
+  const p = parseRequestTimeValue(v);
+  if (!p) return null;
+  const d = parseLocalDate(p.day);
+  const from = Math.floor(new Date(d.getFullYear(), d.getMonth(), d.getDate(), p.hour ?? 0, p.minute ?? 0).getTime() / 1000);
+  const span = p.minute != null ? 59 : p.hour != null ? 3599 : 86399;
+  return { from, to: from + span };
+}
+
+// requestTimeLabel 渲染触发按钮的值半边：'Nov 2' / 'Nov 2 14:00' /
+// 'Nov 2 14:35'；无选择（或垃圾值，防御）显示 'All'。
+export function requestTimeLabel(v) {
+  const p = parseRequestTimeValue(v);
+  if (!p) return 'All';
+  const d = parseLocalDate(p.day);
+  const pad = (n) => String(n).padStart(2, '0');
+  const base = `${MONTHS_SHORT[d.getMonth()]} ${d.getDate()}`;
+  if (p.minute != null) return `${base} ${pad(p.hour)}:${pad(p.minute)}`;
+  if (p.hour != null) return `${base} ${pad(p.hour)}:00`;
+  return base;
+}
+
+// requestTimePickerHTML 是 Requests 日志页时间筛选的单一 markup 源：
+// tr-trigger 按钮 + tr-popover（单月日历 + 时/分级联列）。日历复用
+// tokenRangePickerHTML 的全部部件（calendarMonthGrid/ymd/isFutureDay/
+// monthTitle/WEEKDAYS，未来日禁用，单日点选 tr-day-selected）；小时下拉在
+// 未选日期时禁用，分钟下拉在未选小时时禁用（级联不允许跳级）。
+// timeValue 是 st.filters.time 的编码值；picker 是弹层 UI 态
+// {open, view:{year, month}}；ns 是 data-属性命名空间（'rt'）。
+// opts.now (ms) 可注入用于测试。
+export function requestTimePickerHTML(timeValue, picker, ns = 'rt', opts = {}) {
+  const now = opts.now ?? Date.now();
+  const parsed = parseRequestTimeValue(timeValue);
+  const pad = (n) => String(n).padStart(2, '0');
+  let body = '';
+  if (picker.open) {
+    const { year, month } = picker.view;
+    const weeks = calendarMonthGrid(year, month).map((week) => `<tr>${week.map((day) => {
+      if (day === null) return '<td class="tr-blank"></td>';
+      const dayYmd = ymd(year, month, day);
+      const future = isFutureDay(year, month, day, now);
+      const selected = !!parsed && parsed.day === dayYmd;
+      const cls = ['tr-day'];
+      if (selected) cls.push('tr-day-selected');
+      return `<td><button class="${cls.join(' ')}" data-${ns}-day="${dayYmd}"${future ? ' disabled' : ''}>${day}</button></td>`;
+    }).join('')}</tr>`).join('');
+    const header = WEEKDAYS.map((w) => `<th>${w}</th>`).join('');
+    // 下个月禁用：视图已到当前月时右侧 › 熄灭（未来无日志，与
+    // tokenRangePickerHTML 的导航约束一致）。
+    const thisMonth = (() => { const d = new Date(now); return d.getFullYear() * 12 + d.getMonth(); })();
+    const viewIdx = year * 12 + month;
+    const hourOptions = ['<option value="">All</option>']
+      .concat(Array.from({ length: 24 }, (_, h) => `<option value="${h}"${parsed && parsed.hour === h ? ' selected' : ''}>${pad(h)}</option>`))
+      .join('');
+    const minuteOptions = ['<option value="">All</option>']
+      .concat(Array.from({ length: 60 }, (_, m) => `<option value="${m}"${parsed && parsed.minute === m ? ' selected' : ''}>${pad(m)}</option>`))
+      .join('');
+    const hourDisabled = parsed ? '' : ' disabled';
+    const minuteDisabled = parsed && parsed.hour != null ? '' : ' disabled';
+    body = `<div class="tr-cal">
+      <button class="tr-nav tr-prev" data-${ns}-nav="-1" aria-label="previous month">‹</button>
+      <div class="tr-months"><div class="tr-month">
+        <div class="tr-month-title">${esc(monthTitle(year, month))}</div>
+        <table class="tr-grid"><thead><tr>${header}</tr></thead><tbody>${weeks}</tbody></table>
+      </div></div>
+      <button class="tr-nav tr-next" data-${ns}-nav="1" aria-label="next month" ${viewIdx >= thisMonth ? 'disabled' : ''}>›</button>
+    </div>
+    <div class="tr-time-col">
+      <label class="tr-time-field">Hour <select class="req-input tr-time-select" data-${ns}-hour aria-label="hour"${hourDisabled}>${hourOptions}</select></label>
+      <label class="tr-time-field">Minute <select class="req-input tr-time-select" data-${ns}-minute aria-label="minute"${minuteDisabled}>${minuteOptions}</select></label>
+      <button class="btn small" data-${ns}-clear${parsed ? '' : ' disabled'}>Clear</button>
+    </div>`;
+  }
+  return `<div class="tr-wrap">
+    <button class="btn small tr-trigger" type="button" aria-haspopup="true" aria-expanded="${picker.open}">
+      <span class="tr-caption">Time</span>
+      <span class="tr-value">${esc(requestTimeLabel(timeValue))}</span>
+      <span class="tr-chevron">▾</span>
+    </button>
+    <div class="tr-popover" data-popup ${picker.open ? '' : 'hidden'}>${body}</div>
+  </div>`;
+}
+
 // quotaUsageFromSec reads the admin-projected current billing period start
 // (QuotaSnapshot.UsageFrom — the provider layer's UsageWindow derivation:
 // the ultimate window's ResetsAt − Duration, so 7d vs 30d cycles are
@@ -3931,14 +4053,20 @@ export function requestsFilterQuery(f) {
   if (f.provider) q.set('provider', f.provider);
   if (f.errors) q.set('errors', '1');
   if (f.shadow) q.set('shadow', f.shadow);
+  // time 只存用户意图（级联编码值），from/to 在请求时由
+  // requestTimeBounds 派生 —— 派生值不进 hash。
+  if (f.time) q.set('time', f.time);
   return q.toString();
 }
 
 export function requestsFilterFromQuery(params) {
   if (!params) return null;
+  // time 经 parseRequestTimeValue 校验：垃圾值整键丢弃（一个只有坏 time
+  // 的 query 视为无过滤键 → null → 调用方 clearLogFilters）。
+  const time = parseRequestTimeValue(params.time || '') ? (params.time || '') : '';
   const has =
     params.session || params.agent || params.model ||
-    params.provider || params.errors || params.shadow;
+    params.provider || params.errors || params.shadow || time;
   if (!has) return null;
   return {
     // stream is segment-owned (it stays '' here — the hashchange/boot
@@ -3950,6 +4078,7 @@ export function requestsFilterFromQuery(params) {
     provider: params.provider || '',
     errors: params.errors === '1' || params.errors === 'true',
     shadow: params.shadow === 'only' || params.shadow === 'exclude' ? params.shadow : '',
+    time,
   };
 }
 
