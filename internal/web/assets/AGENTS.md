@@ -73,8 +73,8 @@
 | Markdown 子集渲染 | pure.js `miniMarkdownHTML`（工具描述等第三方 markdown：标题/段落/列表〔含嵌套〕/代码块/引用/粗斜体/行内码/链接；先转义再只输出自产标签，链接仅 http(s)，单换行 `<br>`），样式 `.md-p`/`.md-h`/`.md-ul`/`.md-ol`/`.md-li`/`.md-code`/`.md-pre`/`.md-quote`/`.md-hr`/`.md-a` | jstests/pure.test.mjs（转义/注入/列表嵌套/代码块/链接协议/换行） |
 | 筛选输入清除 | `.clearable`/`.clear-x`，app.js `attachClearable`（契约见 `docs/frontend.md`） | combobox / datalist 筛选输入、带 All 默认项的筛选 select |
 | 目录匹配列表 | `details.cat-match` + pure.js `catalogMatchHTML`/`catalogMatchEditorHTML` + app.js `saveCatalogMatch`（契约见 `docs/frontend.md`） | Status Model Catalog 卡 |
-| 模态 | `<dialog>`（`.live-detail-pop`） | Live 详情 / confirm |
-| 表单控件 | `.field`/`.req-input`/`.route-target-row` | 全部表单与工具行 |
+| 模态 | `<dialog>`（`.live-detail-pop`） | Live 详情 / confirm / Add provider / provider models 编辑（`provider-models-wide`） |
+| 表单控件 | `.field`/`.req-input`/`.route-target-row` | 全部表单与工具行；`.alias-row`（Status→Models provider 编辑器的 上游模型→暴露名 行，pure.js `aliasRowHTML`/`providerModelsEditorHTML` + app.js `openProviderModelsEditor`/`saveProviderModels`） |
 | 按钮 | `.btn`（`.small`/`.primary`/`.danger`） | 全部动作 |
 | 状态开关 | `.switch`（原生 checkbox 语义 + appearance:none 轨道/滑块；macOS 风格：蓝=on 中性灰=off；styles.css switch 区段） | Status→Models 模型行；交互链（cancel 回退 / 500 持久化失败告警不回退）钉在 jstests/uie2e.test.mjs switch 族 |
 | 日志行 | `.log-line` + app.js `bindLogSelection` | Logs 卡 |

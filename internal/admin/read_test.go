@@ -767,8 +767,8 @@ func TestModelsDocumentEmptyStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != `{"providers":{},"catalog":{"count":0},"match":[],"disabled":{}}` {
-		t.Errorf("empty store JSON = %s, want {\"providers\":{},\"catalog\":{\"count\":0},\"match\":[],\"disabled\":{}}", data)
+	if string(data) != `{"providers":{},"catalog":{"count":0},"match":[],"disabled":{},"unprobed":{}}` {
+		t.Errorf("empty store JSON = %s, want {\"providers\":{},\"catalog\":{\"count\":0},\"match\":[],\"disabled\":{},\"unprobed\":{}}", data)
 	}
 
 	// A missing ModelCapsSnapshot port degrades to the same empty document.
@@ -907,6 +907,61 @@ func TestModelsDocumentMatch(t *testing.T) {
 	}).ModelsDocument()
 	if empty.Match == nil || len(empty.Match) != 0 {
 		t.Errorf("nil-config match = %+v, want empty slice", empty.Match)
+	}
+}
+
+// TestModelsDocumentUnprobed pins the unprobed projection: configured models
+// (provider models ∪ route targets — the same HydrateModels traversal Match
+// uses) that have no probe-store record, per provider, sorted; providers with
+// no gap are omitted; no config → empty map. A model disabled before its
+// first probe appears here and nowhere in Providers — the reconciliation gap
+// the field exists to close.
+func TestModelsDocumentUnprobed(t *testing.T) {
+	probed := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"up":    {Models: []string{"m1", "m2", "m3"}},
+			"down":  {Models: []string{"d1"}},
+			"quiet": {Models: []string{"q1"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{
+			// route-only target joins the configured set of its provider
+			"extra": {{Provider: "up", Model: "m4"}},
+		},
+	}
+	service := New(Ports{
+		ModelCapsSnapshot: func() map[string]runtimewire.ProviderModelCaps {
+			return map[string]runtimewire.ProviderModelCaps{
+				"up": {Fingerprint: "0123456789abcdef", ProbedAt: probed, Models: map[string]runtimewire.ModelProtocols{
+					"m1": {Chat: runtimewire.Yes},
+					// m2 has a store record even with zero verdicts — key
+					// presence is the boundary, not Concluded.
+					"m2": {},
+				}},
+				// quiet is fully probed → omitted from unprobed entirely.
+				"quiet": {Fingerprint: "fedcba9876543210", ProbedAt: probed, Models: map[string]runtimewire.ModelProtocols{
+					"q1": {Chat: runtimewire.No},
+				}},
+			}
+		},
+		Config:  func() *configdomain.Config { return cfg },
+		HomeDir: func() string { return t.TempDir() },
+	})
+	document := service.ModelsDocument()
+	if got := document.Unprobed["up"]; len(got) != 2 || got[0] != "m3" || got[1] != "m4" {
+		t.Errorf(`unprobed["up"] = %v, want [m3 m4] (m1/m2 stored, m4 route-only)`, got)
+	}
+	if got := document.Unprobed["down"]; len(got) != 1 || got[0] != "d1" {
+		t.Errorf(`unprobed["down"] = %v, want [d1] (provider absent from the store)`, got)
+	}
+	if _, ok := document.Unprobed["quiet"]; ok {
+		t.Errorf(`unprobed["quiet"] present, want omitted (fully probed)`)
+	}
+
+	// Nil config → empty (never nil) map.
+	bare := New(Ports{HomeDir: func() string { return t.TempDir() }}).ModelsDocument()
+	if bare.Unprobed == nil || len(bare.Unprobed) != 0 {
+		t.Errorf("nil-config unprobed = %+v, want empty non-nil map", bare.Unprobed)
 	}
 }
 

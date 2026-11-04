@@ -1412,6 +1412,86 @@ test('status 页 schedule route test 与 models catalog refresh (mutation 族)',
   assert.deepEqual(await ctx.pageErrors(), [], 'status diagnostics must not raise JS errors');
 });
 
+// Provider models + alias 编辑器（卡片头 Edit）：models 全量替换 + alias 改名
+// 经 /api/config/edit 写回 provider.json 并热 reload；预填来自 /api/config
+// （配置真相，而非探测矩阵）；后端 fail-closed 校验消息在弹窗内 verbatim
+// 展示且弹窗不关。结束时恢复 sandbox（models=[m1]、无 alias）。
+test('status 页 provider models 编辑器：models+alias 全量替换与 fail-closed 校验（editor 族）', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  await ctx.ev(`document.querySelector('[data-tab="status"]').click()`);
+  await ctx.waitFor('status nav', () => ctx.ev(`!!document.querySelector('[data-section="models"]')`));
+  await ctx.ev(`document.querySelector('[data-section="models"]').click()`);
+  await ctx.waitFor('dummy card edit button', () => ctx.ev(`!!document.querySelector('[data-models-edit="dummy"]')`));
+  await ctx.ev(`document.querySelector('[data-models-edit="dummy"]').click()`);
+  await ctx.waitFor('editor modal open, prefilled from /api/config', () => ctx.ev(
+    `(() => { const m = document.getElementById('provider-models-modal'); const ta = document.getElementById('pmm-models'); return m && m.open && ta && ta.value.trim() === 'm1'; })()`));
+  // Append a model and an alias rename row (stub-m2 → m-two).
+  await ctx.ev(`(() => {
+    const ta = document.getElementById('pmm-models');
+    ta.value = 'm1\\nstub-m2';
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await ctx.waitFor('alias datalist rebuilt from the parsed models', () => ctx.ev(
+    `[...document.querySelectorAll('#pmm-model-list option')].some((o) => o.value === 'stub-m2')`));
+  await ctx.ev(`document.getElementById('pmm-add-alias').click()`);
+  await ctx.ev(`(() => {
+    const rows = document.querySelectorAll('.alias-row');
+    const last = rows[rows.length - 1];
+    last.querySelector('[data-pmm-alias-key]').value = 'stub-m2';
+    last.querySelector('[data-pmm-alias-value]').value = 'm-two';
+  })()`);
+  await ctx.ev(`document.getElementById('pmm-save').click()`);
+  await ctx.waitFor('modal closed after save', () => ctx.ev(
+    `!document.getElementById('provider-models-modal').open`));
+  // The card re-rendered from a fresh /api/models: stub-m2 is configured, so
+  // its row appears (verdict pills or "not probed" — both are correct states
+  // depending on how far the reload's probe pass got; the row is the point).
+  await ctx.waitFor('stub-m2 row appears on the dummy card', () => ctx.ev(
+    `(() => { const tb = document.querySelector('.model-caps table tbody'); return tb && tb.textContent.includes('stub-m2'); })()`));
+  // The rename took effect in the config-truth routes: m-two → dummy/stub-m2.
+  const cfg = await ctx.ev(`fetch('/api/config').then((r) => r.json())`);
+  assert.ok(cfg.routes && cfg.routes['m-two'],
+    `renamed route missing in /api/config routes (got ${JSON.stringify({ routes: cfg.routes, provider_models: cfg.provider_models })})`);
+  assert.ok(JSON.stringify(cfg.routes['m-two']).includes('stub-m2'),
+    'renamed route must keep the upstream id as its target');
+  // Error path: an alias key outside the models list is rejected by the
+  // backend's fail-closed validate — the message renders verbatim in the
+  // modal's msg box and the modal stays open (nothing persisted).
+  await ctx.ev(`document.querySelector('[data-models-edit="dummy"]').click()`);
+  await ctx.waitFor('editor reopened with the saved state', () => ctx.ev(
+    `(() => { const m = document.getElementById('provider-models-modal'); const ta = document.getElementById('pmm-models'); return m && m.open && ta && ta.value.includes('stub-m2') && document.querySelectorAll('.alias-row').length === 1; })()`));
+  await ctx.ev(`document.getElementById('pmm-add-alias').click()`);
+  await ctx.ev(`(() => {
+    const rows = document.querySelectorAll('.alias-row');
+    const last = rows[rows.length - 1];
+    last.querySelector('[data-pmm-alias-key]').value = 'not-a-model';
+    last.querySelector('[data-pmm-alias-value]').value = 'x';
+  })()`);
+  await ctx.ev(`document.getElementById('pmm-save').click()`);
+  await ctx.waitFor('backend validate message shown verbatim', () => ctx.ev(
+    `(() => { const msg = document.getElementById('pmm-msg'); return msg && msg.textContent.includes('not in its models: list'); })()`));
+  assert.ok(await ctx.ev(`document.getElementById('provider-models-modal').open`),
+    'modal must stay open on rejection');
+  // Restore the sandbox: drop every alias row (the bad one AND the stub-m2
+  // rename — its key must vanish together with the model or validate rejects
+  // the payload), shrink back to m1, save.
+  await ctx.ev(`(() => {
+    document.querySelectorAll('.alias-row [data-pmm-del]').forEach((del) => del.click());
+    const ta = document.getElementById('pmm-models');
+    ta.value = 'm1';
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await ctx.ev(`document.getElementById('pmm-save').click()`);
+  await ctx.waitFor('modal closed after restore save', () => ctx.ev(
+    `!document.getElementById('provider-models-modal').open`));
+  await ctx.waitFor('card back to m1 only', () => ctx.ev(
+    `(() => { const tb = document.querySelector('.model-caps table tbody'); return tb && tb.textContent.includes('m1') && !tb.textContent.includes('stub-m2'); })()`));
+  const restored = await ctx.ev(`fetch('/api/config').then((r) => r.json())`);
+  assert.ok(!restored.routes['m-two'] && ((restored.provider_models || {}).dummy || []).join(',') === 'm1',
+    `sandbox restore failed (got ${JSON.stringify({ routes: restored.routes, dummy: restored.provider_models && restored.provider_models.dummy })})`);
+  assert.deepEqual(await ctx.pageErrors(), [], 'editor flow must not raise JS errors');
+});
+
 // Models 行开关的交互链本身（不是 fetch 直驱）：浏览器在 change 事件前已
 // 视觉翻转 checkbox,取消确认必须把它回退到服务器真相,行不变暗、后端不变。
 // __sw 固定的是 toggleModel 实际处理的那个元素——即使 5s Status tick 中途

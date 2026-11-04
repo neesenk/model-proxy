@@ -9,7 +9,7 @@ import {
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
   verdictBadge, modelCapMatrix, visibleModelRows, modelsRefreshResultHTML, providerCapsSummary, providerFrozen, providerNames,
   accountProviderKey, splitProviderKey, providerDisplayName,
-  catalogMatchHTML, catalogMatchSummary, catalogMatchEditorHTML,
+  catalogMatchHTML, catalogMatchSummary, catalogMatchEditorHTML, aliasRowHTML, providerModelsEditorHTML,
   ruleHitsLeaderboard,
   sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, linkedProviders, sessionHealthSummary, guardMarksHTML, guardMarksDetailHTML, requestMetaHTML, hopChainTitle, orderDetailRecords, committedRecordOf,
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
@@ -290,6 +290,76 @@ test('modelCapMatrix tolerates empty and malformed providers maps', () => {
   // never mark unrelated providers' models.
   const [q] = modelCapMatrix({ up: { models: { m: null } } }, { up: 'nope', other: ['m'] });
   assert.equal(q.models[0].disabled, false);
+});
+
+test('modelCapMatrix merges unprobed ids into the sorted rows with a flag', () => {
+  const matrix = modelCapMatrix(
+    { up: { fingerprint: 'fp', probed_at: '2026-09-01T10:00:00Z', models: { 'm-a': { chat: 'yes' } } } },
+    { up: ['m-c'] },
+    { up: ['m-c', 'm-b'], other: ['x-1'] },
+  );
+  assert.deepEqual(matrix.map((p) => p.name), ['other', 'up']);
+  // m-b/m-c interleave alphabetically with the probed row and carry the
+  // unprobed flag; m-c also carries disabled (the two dimensions stack).
+  assert.deepEqual(matrix[1].models, [
+    { id: 'm-a', chat: 'yes', anthropic: undefined, responses: undefined, disabled: false },
+    { id: 'm-b', disabled: false, unprobed: true },
+    { id: 'm-c', disabled: true, unprobed: true },
+  ]);
+  // A provider present only in unprobed (never probed at all) still gets an
+  // entry, with no fingerprint/probed_at to show.
+  assert.deepEqual(matrix[0], { name: 'other', fingerprint: '', probedAt: '', models: [{ id: 'x-1', disabled: false, unprobed: true }] });
+  // An id recorded in both maps is a verdict row — the store is the truth.
+  const [dup] = modelCapMatrix({ up: { models: { m: { chat: 'no' } } } }, null, { up: ['m'] });
+  assert.deepEqual(dup.models, [{ id: 'm', chat: 'no', anthropic: undefined, responses: undefined, disabled: false }]);
+  // Malformed unprobed payloads (non-array) never throw and add nothing.
+  const [junk] = modelCapMatrix({ up: { models: {} } }, null, { up: 'nope' });
+  assert.deepEqual(junk.models, []);
+});
+
+test('visibleModelRows treats unprobed rows like any other row', () => {
+  const models = [
+    { id: 'm-live', disabled: false },
+    { id: 'm-new', disabled: false, unprobed: true },
+    { id: 'm-off-new', disabled: true, unprobed: true },
+  ];
+  // Default view: an enabled unprobed model is servable (it rides /v1/models),
+  // only the disabled one hides — unprobed is orthogonal to the filter.
+  assert.deepEqual(visibleModelRows(models, false),
+    { rows: [models[0], models[1]], hidden: 1 });
+  assert.deepEqual(visibleModelRows(models, true), { rows: models, hidden: 0 });
+});
+
+test('providerModelsEditorHTML prefills models and sorted alias rows, escaping everything', () => {
+  const html = providerModelsEditorHTML('zi<hru&p', ['glm-5.2', 'kimi-k3'], { k3: 'kimi-<k3>', 'a-k': 'exposed-a' });
+  // Provider name escaped in the title.
+  assert.ok(html.includes('Edit zi&lt;hru&amp;p models'));
+  // Models prefill: one per line, escaped.
+  assert.ok(html.includes('>glm-5.2\nkimi-k3</textarea>'));
+  // Alias rows sorted by upstream key (a-k before k3) with escaped values.
+  const rows = html.split('alias-row');
+  assert.ok(rows.findIndex((s) => s.includes('value="a-k"')) < rows.findIndex((s) => s.includes('value="k3"')));
+  assert.ok(html.includes('value="kimi-&lt;k3&gt;"'));
+  // Editor contract anchors: the datalist host, add-row button, save button
+  // and the msg box (app.js wiring depends on these ids).
+  for (const anchor of ['id="pmm-model-list"', 'id="pmm-add-alias"', 'id="pmm-save"', 'id="pmm-msg"', 'id="pmm-models"']) {
+    assert.ok(html.includes(anchor), `missing ${anchor}`);
+  }
+  // No aliases → no alias rows, everything else intact.
+  const bare = providerModelsEditorHTML('up', ['m1'], {});
+  assert.ok(!bare.includes('class="alias-row"'));
+  assert.ok(bare.includes('id="pmm-models"'));
+  assert.ok(bare.includes('>m1</textarea>'));
+});
+
+test('aliasRowHTML renders one upstream→exposed row with escape-safe values', () => {
+  const row = aliasRowHTML('k"3', 'kimi &<k3>');
+  assert.ok(row.includes('data-pmm-alias-key'));
+  assert.ok(row.includes('data-pmm-alias-value'));
+  assert.ok(row.includes('list="pmm-model-list"'));
+  assert.ok(row.includes('value="k&quot;3"'));
+  assert.ok(row.includes('value="kimi &amp;&lt;k3&gt;"'));
+  assert.ok(row.includes('data-pmm-del'));
 });
 
 test('visibleModelRows hides disabled rows by default, Show All keeps them', () => {

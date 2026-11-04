@@ -60,9 +60,9 @@ func (s *Service) mutateProvidersAndReload(ctx context.Context, fn func(provider
 
 // editProvider applies the structured editor's provider payload to the store:
 // the same field whitelist the yaml path exposed (provider_id, base URLs,
-// usage_url, billing, models, catalog_alias) plus delete. Creating a provider
-// starts from an empty entry — the effective-config validation inside the
-// mutation rejects one without a base URL or provider_id.
+// usage_url, billing, models, alias, catalog_alias) plus delete. Creating a
+// provider starts from an empty entry — the effective-config validation inside
+// the mutation rejects one without a base URL or provider_id.
 func (s *Service) editProvider(name string, data map[string]any) error {
 	return s.mutateProvidersAndReload(context.Background(), func(providers map[string]configdomain.Provider) error {
 		if data["delete"] == true {
@@ -84,6 +84,13 @@ func (s *Service) editProvider(name string, data map[string]any) error {
 		}
 		if models, present := data["models"]; present {
 			entry.Models = stringSlice(models)
+		}
+		// alias: full-map replace (upstream real model id → exposed name); an
+		// empty map clears the override. Keys must be in the models list and
+		// exposed names must stay unique per provider — enforced fail-closed by
+		// ValidateProviders inside providerstore.Save.
+		if alias, present := data["alias"]; present {
+			entry.Alias = stringMap(alias)
 		}
 		// catalog_alias: full-map replace; an empty map clears the override.
 		if catalogAlias, present := data["catalog_alias"]; present {

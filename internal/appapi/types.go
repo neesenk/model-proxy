@@ -412,16 +412,22 @@ type ModelMatchEntry struct {
 // on-disk status, the configured-model match list against that cache, and the
 // sorted catalog id list for the match picker. Providers with no probe data
 // are omitted; an empty store projects
-// `{"providers":{},"catalog":{"count":0},"match":[],"disabled":{}}`.
+// `{"providers":{},"catalog":{"count":0},"match":[],"disabled":{},"unprobed":{}}`.
 // CatalogIDs is empty when no cache has been pulled. Disabled is the operator
 // disabled-model override (provider → sorted model ids) — those models are
-// hidden from GET /v1/models and never scheduled.
+// hidden from GET /v1/models and never scheduled. Unprobed lists, per
+// provider, the configured models (provider models ∪ explicit route targets —
+// the same HydrateModels traversal Match uses) that have NO record in the
+// probe store: disabled models are never probed, so a model disabled before
+// its first probe appears here and nowhere in Providers — the field lets the
+// UI reconcile its list with the configured set (provider.json).
 type ModelsDocument struct {
 	Providers  map[string]ProviderModelCaps `json:"providers"`
 	Catalog    ModelsCatalogStatus          `json:"catalog"`
 	Match      []ModelMatchEntry            `json:"match"`
 	CatalogIDs []string                     `json:"catalog_ids,omitempty"`
 	Disabled   map[string][]string          `json:"disabled"`
+	Unprobed   map[string][]string          `json:"unprobed"`
 }
 
 // ModelsRefreshDrop is one model dropped by the models-refresh endpoint probe,

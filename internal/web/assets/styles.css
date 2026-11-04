@@ -946,6 +946,40 @@ dialog.provider-add-wide .modal-body { overflow: auto; max-height: calc(100vh - 
 }
 .pa-model-item input { width: auto; flex: none; }
 
+/* Provider models + alias 编辑弹窗（Status→Models 卡片头 Edit）：宽度与
+   Add Provider 同族；alias 行 = 上游模型 → 暴露名 两输入 + ✕ 删除，
+   几何沿用 .route-target-row 的行内编辑约定 */
+dialog.provider-models-wide { max-width: min(640px, calc(100vw - 48px)); }
+dialog.provider-models-wide .modal-body { overflow: auto; max-height: calc(100vh - 160px); }
+.alias-row {
+  display: grid;
+  grid-template-columns: 1fr 24px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.alias-row input {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-control);
+  padding: 6px 10px;
+  font-size: 0.8125rem;
+  color: var(--text);
+}
+.alias-row input:focus {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: -1px;
+  border-color: var(--accent);
+}
+.alias-arrow { color: var(--muted); text-align: center; }
+.alias-row .btn.danger { padding: 6px 10px; line-height: 1; }
+@media (max-width: 560px) {
+  .alias-row { grid-template-columns: 1fr 1fr; }
+  .alias-arrow { display: none; }
+  .alias-row .btn.danger { grid-column: 2; justify-self: end; }
+}
+
 .settings-grid .field { margin-bottom: 0; }
 .settings-note { font-size: 0.6875rem; color: var(--muted); margin: 8px 0 0; }
 .settings-group { padding: 16px 0; border-top: 1px solid var(--border-2); }

@@ -488,20 +488,40 @@ export function verdictBadge(v) {
 // `disabled` is the same response's top-level disabled map (provider →
 // model ids carrying the operator disable override); each model entry gets
 // a boolean `disabled` flag so rows can render the state + toggle without
-// re-deriving membership.
-export function modelCapMatrix(providers, disabled) {
+// re-deriving membership. `unprobed` is the response's top-level unprobed
+// map (provider → configured model ids with no probe record — disabled
+// models are never probed, so a model disabled before its first probe only
+// exists there): those ids join the same sorted rows with an `unprobed`
+// flag and no verdicts, and a provider present only in `unprobed` (never
+// probed at all) still gets an entry — the union reconciles the card with
+// the configured set (provider.json).
+export function modelCapMatrix(providers, disabled, unprobed) {
   const disabledSets = {};
   for (const [name, models] of Object.entries(disabled || {})) {
     disabledSets[name] = new Set(Array.isArray(models) ? models : []);
   }
+  const unprobedSets = {};
+  for (const [name, models] of Object.entries(unprobed || {})) {
+    unprobedSets[name] = new Set(Array.isArray(models) ? models : []);
+  }
+  const names = new Set([...Object.keys(providers || {}), ...Object.keys(unprobedSets)]);
   const out = [];
-  for (const name of Object.keys(providers || {}).sort()) {
-    const caps = providers[name] || {};
+  for (const name of [...names].sort()) {
+    const caps = (providers || {})[name] || {};
     const off = disabledSets[name] || new Set();
     const models = [];
+    const seen = new Set();
+    const push = (id, extra) => {
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      models.push({ id, disabled: off.has(id), ...extra });
+    };
     for (const id of Object.keys(caps.models || {}).sort()) {
       const mp = caps.models[id] || {};
-      models.push({ id, chat: mp.chat, anthropic: mp.anthropic, responses: mp.responses, disabled: off.has(id) });
+      push(id, { chat: mp.chat, anthropic: mp.anthropic, responses: mp.responses });
+    }
+    for (const id of [...(unprobedSets[name] || new Set())].sort()) {
+      push(id, { unprobed: true });
     }
     out.push({ name, fingerprint: caps.fingerprint || '', probedAt: caps.probed_at || '', models });
   }
@@ -623,6 +643,59 @@ export function catalogMatchEditorHTML(currentId) {
     <button class="btn small primary" data-cat-match-save>Save</button>
     <button class="btn small" data-cat-match-cancel>Cancel</button>
   </span>`;
+}
+
+// aliasRowHTML renders one alias mapping row for the provider models editor:
+// upstream real model id (datalist pmm-model-list, rebuilt by app.js from the
+// parsed models textarea) → the exposed name clients call. The ✕ removes the
+// row (app.js data-pmm-del wiring).
+export function aliasRowHTML(key, value) {
+  return `<div class="alias-row">
+    <input class="req-input" type="text" list="pmm-model-list" autocomplete="off" spellcheck="false" placeholder="upstream model" value="${esc(key || '')}" data-pmm-alias-key>
+    <span class="alias-arrow" aria-hidden="true">→</span>
+    <input class="req-input" type="text" autocomplete="off" spellcheck="false" placeholder="exposed name" value="${esc(value || '')}" data-pmm-alias-value>
+    <button type="button" class="btn small danger" data-pmm-del title="Remove this alias">✕</button>
+  </div>`;
+}
+
+// providerModelsEditorHTML renders the Status→Models provider editor dialog:
+// the full models list (one per line) plus alias rename rows. The payload is a
+// full replacement POSTed to /api/config/edit {kind:'provider'} — prefill MUST
+// come from GET /api/config (provider_models + provider_meta.alias), never
+// from the probe matrix, so disabled and never-probed models are editable
+// too. `alias` keys sort by upstream id for a stable diff between opens.
+export function providerModelsEditorHTML(name, models, alias) {
+  const rows = Object.entries(alias || {})
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+    .map(([key, value]) => aliasRowHTML(key, value))
+    .join('');
+  return `<form method="dialog">
+    <header class="modal-head">
+      <h2 id="pmm-title">Edit ${esc(name)} models</h2>
+      <button type="button" class="link-btn" id="pmm-cancel" aria-label="Close">Close</button>
+    </header>
+    <div class="modal-body">
+      <datalist id="pmm-model-list"></datalist>
+      <div class="field">
+        <label for="pmm-models">models — one per line</label>
+        <textarea id="pmm-models" rows="8" spellcheck="false" placeholder="glm-5.2&#10;kimi-k3">${esc((models || []).join('\n'))}</textarea>
+        <span class="hint">Real upstream model ids this provider serves (the provider.json models whitelist models refresh keeps in sync). Saves as a full-list replace.</span>
+      </div>
+      <div class="field">
+        <label>alias — rename a model for routing</label>
+        <div id="pmm-alias-rows">${rows}</div>
+        <div class="row-actions preset-row">
+          <button type="button" class="btn small" id="pmm-add-alias">+ alias</button>
+          <span class="hint">upstream model → exposed name; requests are rewritten to the upstream id and responses normalized back. The key must be in the models list; one exposed name maps to one upstream model.</span>
+        </div>
+      </div>
+      <div class="row-actions">
+        <span class="spacer"></span>
+        <button type="button" class="btn primary small" id="pmm-save">Save & reload</button>
+      </div>
+      <div class="msg" id="pmm-msg"></div>
+    </div>
+  </form>`;
 }
 
 // cacheHitRate derives the exact-response cache hit rate (GET /api/status

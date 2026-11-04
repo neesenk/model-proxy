@@ -25,7 +25,7 @@ import {
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
   verdictBadge, modelCapMatrix, visibleModelRows, providerCapsSummary, providerFrozen, providerNames, cacheHitRate,
   accountProviderKey, splitProviderKey, providerDisplayName,
-  catalogMatchHTML, catalogMatchEditorHTML, parseModelLines, mergeFetchedModels,
+  catalogMatchHTML, catalogMatchEditorHTML, parseModelLines, mergeFetchedModels, aliasRowHTML, providerModelsEditorHTML,
   settingsDiff, settingsRestartKeys, configSummaryHTML, TOKEN_RANGES, tokensRangeQuery, tokenRangeLabel,
   tokenRangeTriggerLabel, parseLocalDate, tokenRangeBounds, tokenCustomBounds, tokenRangePickerHTML,
   quotaUsageFromSec, quotaWindowFromSec, quotaWindowForProvider,
@@ -6266,7 +6266,7 @@ function renderModelsCard(target, providers) {
       if (clearBtn) { saveCatalogMatch(clearBtn.dataset.provider, clearBtn.dataset.model, '', clearBtn); }
     });
   }
-  const entries = modelCapMatrix(providers, modelsCache && modelsCache.disabled);
+  const entries = modelCapMatrix(providers, modelsCache && modelsCache.disabled, modelsCache && modelsCache.unprobed);
   if (!entries.length) {
     target.insertAdjacentHTML('beforeend', buildCard('Models', '',
       '<div class="model-caps-empty">no probe data yet — provider models are probed for protocol support at daemon startup</div>'));
@@ -6289,11 +6289,16 @@ function renderModelsCard(target, providers) {
       // the state; the row just renders it, and the switch's checked flag
       // comes from the server response, never local echo.
       const action = `<input type="checkbox" class="switch" data-model-toggle="${esc(p.name)}" data-model="${esc(m.id)}" aria-label="Route ${esc(m.id)} on ${esc(p.name)}" title="${m.disabled ? 'Disabled — hidden from /v1/models and never routed (persists in disabled_models.json across reload, restart and models refresh). Click to re-enable.' : 'Routed and exposed in /v1/models. Click to disable.'}"${m.disabled ? '' : ' checked'}>`;
+      // An unprobed model (configured in provider.json but with no probe
+      // record — disabled models are never probed) renders one muted cell
+      // across the three protocol columns: no verdict exists to badge, and
+      // "not probed" must not read as the probe's "? unknown" (inconclusive).
+      const verdictCells = m.unprobed
+        ? '<td class="subdue" colspan="3">not probed</td>'
+        : `<td>${protoVerdictPill(m.chat)}</td><td>${protoVerdictPill(m.anthropic)}</td><td>${protoVerdictPill(m.responses)}</td>`;
       rows += `<tr class="${m.disabled ? 'model-off' : ''}">
         <td class="mono">${esc(m.id)}</td>
-        <td>${protoVerdictPill(m.chat)}</td>
-        <td>${protoVerdictPill(m.anthropic)}</td>
-        <td>${protoVerdictPill(m.responses)}</td>
+        ${verdictCells}
         <td class="model-caps-action">${action}</td>
       </tr>`;
     }
@@ -6315,6 +6320,10 @@ function renderModelsCard(target, providers) {
       `<button class="btn small model-caps-refresh" data-models-refresh="${esc(p.name)}"${refreshRes && refreshRes.busy ? ' disabled' : ''}>${refreshRes && refreshRes.busy ? 'refreshing…' : 'Refresh'}</button>` +
       `<div class="models-refresh-pop" data-popup data-models-refresh-pop="${esc(p.name)}"${refreshRes ? '' : ' hidden'}>${refreshRes ? refreshRes.html : ''}</div>` +
       `</span>`;
+    // Edit opens the provider models + alias editor (provider.json — the
+    // structured replacement for hand-editing the store, the way the config
+    // yaml editor reached providers before they moved out of config.yaml).
+    const editBtn = `<button class="btn small" data-models-edit="${esc(p.name)}" title="Edit this provider's models list and alias renames — writes provider.json and hot-reloads.">Edit</button> `;
     target.insertAdjacentHTML('beforeend', buildCard(
       p.name,
       `fp ${p.fingerprint || '—'} · probed ${fmtTimeSafe(p.probedAt) || '—'}`,
@@ -6323,7 +6332,7 @@ function renderModelsCard(target, providers) {
         <tbody>${rows}</tbody>
       </table>`,
       'flush model-caps',
-      `${visibilityBtn}${refreshBtn}`));
+      `${visibilityBtn}${editBtn}${refreshBtn}`));
   }
   wireModelsRefreshPopGlobals();
   target.querySelectorAll('[data-models-refresh]').forEach((btn) => {
@@ -6338,6 +6347,9 @@ function renderModelsCard(target, providers) {
       modelsShowDisabled = !modelsShowDisabled;
       renderStatusSection('models');
     });
+  });
+  target.querySelectorAll('[data-models-edit]').forEach((btn) => {
+    btn.addEventListener('click', () => openProviderModelsEditor(btn.dataset.modelsEdit));
   });
   target.querySelectorAll('[data-model-toggle]').forEach((el) => {
     // The browser flips the checkbox visually before the change event fires;
@@ -6624,6 +6636,87 @@ async function saveCatalogMatch(provider, model, catalogId, btn) {
   } catch (e) {
     if (btn) btn.disabled = false;
     window.alert('catalog match failed: ' + ((e && e.message) || String(e)));
+  }
+}
+
+// rebuildPmmModelList refreshes the alias rows' upstream-model datalist from
+// the models textarea's current content — the suggestion list must follow the
+// list being edited, and the alias key rule ("must be in models") is exactly
+// what the suggestions present.
+function rebuildPmmModelList(modal) {
+  const list = modal.querySelector('#pmm-model-list');
+  if (!list) return;
+  const ids = parseModelLines(modal.querySelector('#pmm-models').value);
+  list.innerHTML = ids.map((id) => `<option value="${esc(id)}">`).join('');
+}
+
+// openProviderModelsEditor opens the provider models + alias editor (the
+// Status→Models card head Edit button). Prefill comes from GET /api/config —
+// provider_models + provider_meta.alias, the same config truth the Config
+// page edits — never from the probe matrix, so disabled and never-probed
+// models are editable too. Saving is a full replacement through
+// /api/config/edit {kind:'provider'}; the daemon hot-reloads, and the card
+// re-renders from a fresh /api/models (newly added models appear as "not
+// probed" rows until the next probe pass records verdicts).
+async function openProviderModelsEditor(name) {
+  const modal = document.getElementById('provider-models-modal');
+  if (!modal) return;
+  let models = [];
+  let alias = {};
+  try {
+    const data = await apiGet('/api/config');
+    models = ((data && data.provider_models) || {})[name] || [];
+    alias = (((data && data.provider_meta) || {})[name] || {}).alias || {};
+  } catch (e) {
+    window.alert('load provider config failed: ' + ((e && e.message) || String(e)));
+    return;
+  }
+  modal.setAttribute('aria-labelledby', 'pmm-title');
+  modal.innerHTML = providerModelsEditorHTML(name, models, alias);
+  modal.showModal();
+  modal.querySelector('#pmm-cancel').addEventListener('click', () => modal.close());
+  rebuildPmmModelList(modal);
+  modal.querySelector('#pmm-models').addEventListener('input', () => rebuildPmmModelList(modal));
+  // Alias rows: delegated remove (✕) + the + alias inserter focus the new
+  // upstream input so the datalist opens on first keystroke.
+  const aliasRows = modal.querySelector('#pmm-alias-rows');
+  aliasRows.addEventListener('click', (event) => {
+    const del = event.target.closest('[data-pmm-del]');
+    if (del) del.closest('.alias-row').remove();
+  });
+  modal.querySelector('#pmm-add-alias').addEventListener('click', () => {
+    aliasRows.insertAdjacentHTML('beforeend', aliasRowHTML('', ''));
+    const added = aliasRows.querySelector('.alias-row:last-child [data-pmm-alias-key]');
+    if (added) added.focus();
+  });
+  modal.querySelector('#pmm-save').addEventListener('click', () => saveProviderModels(name, modal));
+}
+
+// saveProviderModels posts the editor's full replacement (models + alias) to
+// /api/config/edit. Blank alias rows are skipped client-side; every other
+// rule (alias key in models, one exposed name per upstream model) is the
+// backend's fail-closed validate — its message renders verbatim in the
+// modal's msg box and the store is untouched on rejection.
+async function saveProviderModels(name, modal) {
+  const models = parseModelLines(modal.querySelector('#pmm-models').value);
+  const alias = {};
+  for (const row of modal.querySelectorAll('.alias-row')) {
+    const key = (row.querySelector('[data-pmm-alias-key]').value || '').trim();
+    const value = (row.querySelector('[data-pmm-alias-value]').value || '').trim();
+    if (!key && !value) continue; // entirely blank row: ignored, not an error
+    alias[key] = value;
+  }
+  const btn = modal.querySelector('#pmm-save');
+  const msg = modal.querySelector('#pmm-msg');
+  btn.disabled = true;
+  showMsg(msg, 'ok', 'saving…');
+  try {
+    await apiPost('/api/config/edit', { kind: 'provider', name, data: { models, alias } });
+    modal.close();
+    await renderStatusTab();
+  } catch (e) {
+    btn.disabled = false;
+    showMsg(msg, 'err', (e && e.message) || String(e));
   }
 }
 

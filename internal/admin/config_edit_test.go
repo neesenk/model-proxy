@@ -257,6 +257,76 @@ func TestEditConfigProviderCatalogAlias(t *testing.T) {
 	}
 }
 
+// TestEditConfigProviderAlias pins the Status→Models provider editor's alias
+// write path: the rename mapping lands in the provider.json store (validate
+// accepts it because the key names a configured model and the exposed name is
+// unique), a typo key is rejected without touching the store, an exposed-name
+// collision inside one provider is rejected, and an empty map clears the
+// override.
+func TestEditConfigProviderAlias(t *testing.T) {
+	path := writeTestConfig(t)
+	spy := &reloadSpy{}
+	service := editService(t, path, spy)
+	if err := service.EditConfig(appapi.EditRequest{
+		Kind: "provider",
+		Name: "zhipu",
+		Data: map[string]any{
+			"models": []any{"glm", "glm-air"},
+			"alias":  map[string]any{"glm": "glm-4.6"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readProviderStore(t, service)["zhipu"].Alias; len(got) != 1 || got["glm"] != "glm-4.6" {
+		t.Fatalf("alias write missing: %+v", got)
+	}
+	// A key that is not in the provider's models list is rejected by validate
+	// and must not touch the store.
+	before := readProviderStore(t, service)
+	beforeYAML := readConfig(t, path)
+	err := service.EditConfig(appapi.EditRequest{
+		Kind: "provider",
+		Name: "zhipu",
+		Data: map[string]any{"alias": map[string]any{"typo-model": "glm-4.6"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "not in its models: list") {
+		t.Errorf("typo key: want validate error, got %v", err)
+	}
+	if after := readProviderStore(t, service); !reflect.DeepEqual(after, before) {
+		t.Error("rejected alias edit changed the provider store")
+	}
+	if readConfig(t, path) != beforeYAML {
+		t.Error("rejected alias edit changed the config file")
+	}
+	// An exposed name that collides with a sibling model's native name is
+	// rejected: one exposed name must map to one upstream model.
+	err = service.EditConfig(appapi.EditRequest{
+		Kind: "provider",
+		Name: "zhipu",
+		Data: map[string]any{
+			"models": []any{"glm", "glm-air"},
+			"alias":  map[string]any{"glm": "glm-air"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "one exposed name must map to one upstream model") {
+		t.Errorf("exposed collision: want validate error, got %v", err)
+	}
+	if after := readProviderStore(t, service); !reflect.DeepEqual(after, before) {
+		t.Error("rejected collision edit changed the provider store")
+	}
+	// Empty map deletes the key.
+	if err := service.EditConfig(appapi.EditRequest{
+		Kind: "provider",
+		Name: "zhipu",
+		Data: map[string]any{"models": []any{"glm", "glm-air"}, "alias": map[string]any{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readProviderStore(t, service)["zhipu"].Alias; len(got) != 0 {
+		t.Errorf("empty alias map must clear the override: %+v", got)
+	}
+}
+
 func TestEditConfigRoute(t *testing.T) {
 	path := writeTestConfig(t)
 	spy := &reloadSpy{}

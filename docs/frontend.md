@@ -87,8 +87,15 @@ Disable 方向过
 `toggle warning: ` 前缀告警后端 message 原文。开关 title 说明当前态与生命周期：**持久化**
 （`disabled_models.json`）——reload 保留、重启与 `models refresh` 后仍生效
 （与 pin 的 memory-only 契约不同）；持久化失败时后端报错（内存开关已生效）。纯函数
-`modelCapMatrix(providers, disabled)` 同时接收响应顶层
-`disabled` map，行视图带 `disabled` 布尔。
+`modelCapMatrix(providers, disabled, unprobed)` 同时接收响应顶层
+`disabled` 与 `unprobed` map，行视图带 `disabled` 布尔与 `unprobed` 布尔。
+
+**Models 卡未探测行**（`unprobed` map）：配置里存在但探测 store 无记录的模型
+（禁用模型从不探测，故「先禁用、从未探测过」的模型只出现在这里）并入同一张表，
+按 id 与有 verdict 的行混排，三个协议列合并为一格 subdue 的 “not probed”——与探测
+自己的 “? unknown”（未结论，下轮重探）严格区分；带同样的禁用开关。只有 unprobed
+条目、整 provider 从未被探测的，也照常出卡（fp/probed 显示 “—”）。这让 Show All
+= 全量配置集合（provider.json），默认视图仍是可服务集合（启用行，含未探测但启用的）。
 
 **Models 卡禁用行默认隐藏**（`visibleModelRows` + `modelsShowDisabled`）：禁用模型行
 默认从表里隐藏（默认视图列的就是 `/v1/models` 实际服务的集合——与 takeover 的
@@ -99,6 +106,19 @@ operator 禁用面同源同语义）；有禁用行的 provider 卡头（Refresh
 模块级全局（`modelsShowDisabled`，与 `catMatchOpen` 同契约）：一次 Show All 对全部
 provider 卡生效，5s Status tick 从该标志重渲染、不把行重新藏回去；点击是用户发起
 的渲染（直接从 `modelsCache` 重渲染本区，不发请求），按契约绕过刷新门。
+
+**Models 区每 provider 卡的 models + alias 编辑器**（卡头 `Edit` 按钮，
+`openProviderModelsEditor`）：`<dialog id="provider-models-modal">` 弹窗内编辑该
+provider 的完整 models 列表（textarea 每行一个，`parseModelLines` 解析）与 alias
+改名行（`.alias-row`：上游模型 datalist 输入 → 暴露名输入 + ✕ 删除 + “+ alias”
+追加，markup 由 pure.js `providerModelsEditorHTML`/`aliasRowHTML` 生成）。预填来自
+`GET /api/config`（`provider_models` + `provider_meta.alias`——配置真相而非探测
+矩阵，禁用/未探测模型同样可编辑）。Save 把 `{models, alias}` **整体替换** POST 到
+`/api/config/edit`（kind=provider；空 alias map 清键），daemon 热 reload 后
+`renderStatusTab()` 重取 `/api/models`——新增模型先以 “not probed” 行出现，探测
+pass 补上 verdict。后端 fail-closed 校验（alias key 必须在 models、同 provider 一个
+暴露名一个上游模型）失败时 message verbatim 显示在弹窗 `#pmm-msg` 且弹窗不关、
+store 不动；保存期间按钮禁用 + “saving…”。
 
 **Model Matching 折叠列表**（同一卡内，`details.cat-match`，默认折叠）：展示
 `/api/models` 的 `match` 清单——每个已配置模型的目录匹配状态（matched 用 `.badge ok`、

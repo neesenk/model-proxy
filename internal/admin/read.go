@@ -743,9 +743,11 @@ func (s *Service) Pins() []appapi.Pin {
 // The match list mirrors routing.HydrateModels on the live config against that
 // same cache (catalog_alias applied), so the card shows exactly the metadata
 // source the next reload/takeover will use; catalog_ids is the sorted picker
-// list for assigning aliases to unmatched models.
+// list for assigning aliases to unmatched models. The same single
+// HydrateModels traversal also feeds the unprobed projection (see
+// unprobedProjection).
 func (s *Service) ModelsDocument() appapi.ModelsDocument {
-	document := appapi.ModelsDocument{Providers: map[string]appapi.ProviderModelCaps{}, Match: []appapi.ModelMatchEntry{}, Disabled: map[string][]string{}}
+	document := appapi.ModelsDocument{Providers: map[string]appapi.ProviderModelCaps{}, Match: []appapi.ModelMatchEntry{}, Disabled: map[string][]string{}, Unprobed: map[string][]string{}}
 	if s.ports.ModelCapsSnapshot != nil {
 		for name, caps := range s.ports.ModelCapsSnapshot() {
 			models := make(map[string]appapi.ModelProtocols, len(caps.Models))
@@ -774,7 +776,14 @@ func (s *Service) ModelsDocument() appapi.ModelsDocument {
 	if s.ports.Config != nil {
 		cfg = s.ports.Config()
 	}
-	document.Match = modelsMatchProjection(cfg, cat)
+	// One HydrateModels traversal feeds both projections: the match list and
+	// the configured set the unprobed gap is measured against.
+	var sources map[string]map[string]routing.ModelSource
+	if cfg != nil {
+		_, sources = routing.HydrateModels(cfg, cat)
+	}
+	document.Match = modelsMatchProjection(cfg, sources)
+	document.Unprobed = unprobedProjection(document.Providers, sources)
 	if cat != nil && cat.Count() > 0 {
 		document.CatalogIDs = cat.Names()
 	}
@@ -807,13 +816,15 @@ func modelsCatalogStatus(cat *catalog.Catalog) appapi.ModelsCatalogStatus {
 // models ∪ route targets, deduplicated per provider) with its catalog-match
 // state. The matched flag reuses HydrateModels' own source verdict so the card
 // can never disagree with runtime hydration; catalog_id is the effective lookup
-// id (catalog_alias target when set, else the model id).
-func modelsMatchProjection(cfg *configdomain.Config, cat *catalog.Catalog) []appapi.ModelMatchEntry {
+// id (catalog_alias target when set, else the model id). The HydrateModels
+// traversal itself is hoisted to the caller (ModelsDocument) so the same pass
+// also feeds unprobedProjection — pass a nil sources map alongside a non-nil
+// cfg only when the match list is deliberately empty.
+func modelsMatchProjection(cfg *configdomain.Config, sources map[string]map[string]routing.ModelSource) []appapi.ModelMatchEntry {
 	out := []appapi.ModelMatchEntry{}
 	if cfg == nil {
 		return out
 	}
-	_, sources := routing.HydrateModels(cfg, cat)
 	providers := make([]string, 0, len(sources))
 	for name := range sources {
 		providers = append(providers, name)
@@ -838,6 +849,32 @@ func modelsMatchProjection(cfg *configdomain.Config, cat *catalog.Catalog) []app
 			}
 			out = append(out, entry)
 		}
+	}
+	return out
+}
+
+// unprobedProjection lists, per provider, the configured models with no record
+// in the probe store: the HydrateModels configured set (provider models ∪
+// route targets) minus the stored verdict keys. Disabled models are never
+// probed, so a model disabled before its first successful probe appears here
+// and nowhere in Providers — the field lets the UI reconcile its model list
+// with the configured set (provider.json). Providers with no gap are omitted;
+// nil sources (no live config) yields an empty map.
+func unprobedProjection(providers map[string]appapi.ProviderModelCaps, sources map[string]map[string]routing.ModelSource) map[string][]string {
+	out := map[string][]string{}
+	for name, configured := range sources {
+		stored := providers[name].Models
+		gap := make([]string, 0, len(configured))
+		for model := range configured {
+			if _, ok := stored[model]; !ok {
+				gap = append(gap, model)
+			}
+		}
+		if len(gap) == 0 {
+			continue
+		}
+		sort.Strings(gap)
+		out[name] = gap
 	}
 	return out
 }
