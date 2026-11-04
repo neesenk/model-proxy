@@ -34,7 +34,7 @@ type Totals struct {
 	Tokens         uint64   `json:"tokens"`         // four-bucket total
 	AvgLatencyMs   *float64 `json:"avg_latency_ms"` // null when no requests
 	AvgTtftMs      *float64 `json:"avg_ttft_ms"`    // null when no requests
-	TokSec         *float64 `json:"tok_sec"`        // output / generation seconds (call time minus TTFT); null without call time
+	TokSec         *float64 `json:"tok_sec"`        // output / generation-window seconds (streamed: duration−TTFT; bulk arrival: full call); null without call time
 	CacheHitPct    *float64 `json:"cache_hit_pct"`  // reads / full prompt workload; null without reads
 	Cost           *float64 `json:"cost"`           // nil when nothing in the window is priced
 }
@@ -57,7 +57,7 @@ type Point struct {
 	AvgLatencyMs   float64  `json:"avg_latency_ms"`
 	AvgTtftMs      float64  `json:"avg_ttft_ms"`
 	AvgDurationMs  float64  `json:"avg_duration_ms"`
-	TokSec         *float64 `json:"tok_sec"` // output / generation seconds (call time minus TTFT); null without call time
+	TokSec         *float64 `json:"tok_sec"` // output / generation-window seconds (streamed: duration−TTFT; bulk arrival: full call); null without call time
 	CacheHitPct    *float64 `json:"cache_hit_pct"`
 	ErrPct         *float64 `json:"err_pct"`
 	Cost           *float64 `json:"cost"`
@@ -74,22 +74,22 @@ type Series struct {
 	Totals   Totals  `json:"totals"`
 }
 
-// decodeSeconds is the tok/s denominator: the generation window, i.e. the
-// full-call wall clock minus the pre-first-token wait. TTFT is time with no
-// output token yet, so counting it as decode time understates the rate. When
-// TTFT is absent (old rows) or swallows the whole call (buffered/non-streamed
-// responses stamp the first client byte only once the body is complete), the
-// full call time is the defined fallback — a purely buffered bucket hits it.
-// In a bucket mixing streamed and buffered calls the summed subtraction is
-// exact only for the streamed ones (buffered calls contribute TTFT == call).
-func decodeSeconds(durationMs, ttftMs uint64) float64 {
-	if durationMs == 0 {
-		return 0
+// generationMs is the tok/s denominator for one bucket: the summed per-call
+// generation windows when the rows carry them (gen_ms_sum; classified at
+// commit time — stats.GenerationWindowMs), else the legacy reconstruction
+// over the duration/ttft sums (stats.LegacyGenerationWindowMs). Both legs
+// meet the same definition: observed window when the body arrived streamed,
+// full call time when it arrived in bulk. GenSum also passes the sum-level
+// plausibility bound: an upgrade-minute bucket can mix gen-carrying new rows
+// with legacy rows whose output would otherwise ride the new rows' windows.
+func generationMs(b observestats.AnalyticsBucket) uint64 {
+	if b.GenSum > 0 {
+		if b.Output*1000 <= b.GenSum*observestats.MaxPlausibleTokensPerSecond {
+			return b.GenSum
+		}
+		return observestats.LegacyGenerationWindowMs(b.DurationSum, b.TTFTSum, b.Output)
 	}
-	if ttftMs < durationMs {
-		return float64(durationMs-ttftMs) / 1000
-	}
-	return float64(durationMs) / 1000
+	return observestats.LegacyGenerationWindowMs(b.DurationSum, b.TTFTSum, b.Output)
 }
 
 // NewPoint projects one store bucket into a Point, pricing it with the same
@@ -104,7 +104,7 @@ func NewPoint(b observestats.AnalyticsBucket, overrides map[string]pricing.Overr
 		Tokens:       b.Input + b.Output + b.CacheCreation + b.CacheRead,
 		AvgLatencyMs: b.AvgLatencyMs, AvgTtftMs: b.AvgTtftMs, AvgDurationMs: b.AvgDurationMs,
 	}
-	if genSec := decodeSeconds(b.DurationSum, b.TTFTSum); genSec > 0 {
+	if genSec := float64(generationMs(b)) / 1000; genSec > 0 {
 		tokSec := float64(b.Output) / genSec
 		p.TokSec = &tokSec
 	}
@@ -128,7 +128,8 @@ func NewPoint(b observestats.AnalyticsBucket, overrides map[string]pricing.Overr
 // averageMilliseconds convention as the store's per-bucket projection).
 func FoldTotals(buckets []observestats.AnalyticsBucket, overrides map[string]pricing.Override, catalog *pricing.Catalog, aliases map[string]string) Totals {
 	var t Totals
-	var latencySum, ttftSum, durationSum uint64
+	var latencySum, ttftSum uint64
+	var genSum uint64
 	for _, b := range buckets {
 		t.Requests += b.Requests
 		t.Failovers += b.Failovers
@@ -140,7 +141,9 @@ func FoldTotals(buckets []observestats.AnalyticsBucket, overrides map[string]pri
 		t.CacheRead += b.CacheRead
 		latencySum += b.LatencySum
 		ttftSum += b.TTFTSum
-		durationSum += b.DurationSum
+		// Per-bucket windows (never a cross-bucket subtraction): the bulk
+		// fallback is not linear, so each bucket classifies on its own sums.
+		genSum += generationMs(b)
 		if entry, ok := pricing.ResolveAliased(overrides, catalog, aliases, b.Provider, b.Model); ok {
 			x := pricing.ComputeCost(b.Input, b.Output, b.CacheRead, b.CacheCreation, entry)
 			if t.Cost == nil {
@@ -156,7 +159,7 @@ func FoldTotals(buckets []observestats.AnalyticsBucket, overrides map[string]pri
 		ttft := math.Round(float64(ttftSum)/float64(t.Requests)*10) / 10
 		t.ErrPct, t.AvgLatencyMs, t.AvgTtftMs = &errPct, &lat, &ttft
 	}
-	if genSec := decodeSeconds(durationSum, ttftSum); genSec > 0 {
+	if genSec := float64(genSum) / 1000; genSec > 0 {
 		tokSec := float64(t.Output) / genSec
 		t.TokSec = &tokSec
 	}

@@ -77,28 +77,64 @@ func TestFoldTotalsNullsMeanNoData(t *testing.T) {
 	}
 }
 
-func TestDecodeSecondsExcludesTTFT(t *testing.T) {
-	// The tok/s denominator is the generation window: TTFT is time with no
-	// output token, so it must not dilute the rate.
-	if got := decodeSeconds(4000, 1000); !almostEqual(got, 3) {
-		t.Errorf("decodeSeconds(4000,1000) = %v, want 3", got)
+func TestGenerationMsClassifiesBulkAndStreamed(t *testing.T) {
+	// Rows carrying per-call windows (gen_ms_sum) use them directly — the
+	// commit-time classification is the authority, whatever the sums say.
+	if got := generationMs(observestats.AnalyticsBucket{DurationSum: 4000, TTFTSum: 1000, GenSum: 3000, Output: 5}); got != 3000 {
+		t.Errorf("gen with GenSum = %d, want 3000", got)
 	}
-	// No TTFT recorded (old rows, or a provider that never stamps one): the
-	// full call time stays the denominator.
-	if got := decodeSeconds(4000, 0); !almostEqual(got, 4) {
-		t.Errorf("decodeSeconds(4000,0) = %v, want 4", got)
+	// Upgrade-minute mix: new rows carry exact windows while legacy rows
+	// (written by the old binary seconds earlier) have none — their output
+	// must not ride the new rows' windows. The live restart minute read
+	// 60,143 tok/s before this sum-level guard existed; here the bucket
+	// falls back to the legacy reconstruction, whose own guard caps it
+	// (legacy window 10s at 60000 tokens > the bound → full 12s → 5000
+	// bounded, never 60000/3s = 20000).
+	mixedMinute := NewPoint(observestats.AnalyticsBucket{
+		Requests: 6, DurationSum: 12000, TTFTSum: 2000, GenSum: 3000, Output: 60000,
+	}, nil, nil, nil)
+	if mixedMinute.TokSec == nil || *mixedMinute.TokSec > 60000.0/12 {
+		t.Errorf("upgrade-mix tok/s = %v, want the guarded fallback (≤ %v)", mixedMinute.TokSec, 60000.0/12)
 	}
-	// TTFT swallowing the whole call (buffered/non-streamed response stamps
-	// its first client byte at completion) also falls back to the call time —
-	// never a zero/negative denominator.
-	if got := decodeSeconds(4000, 4000); !almostEqual(got, 4) {
-		t.Errorf("decodeSeconds(4000,4000) = %v, want 4", got)
+	// Legacy streamed rows (GenSum 0): the window survives when the implied
+	// rate is plausible.
+	if got := generationMs(observestats.AnalyticsBucket{DurationSum: 4000, TTFTSum: 1000, Output: 5}); got != 3000 {
+		t.Errorf("streamed legacy window = %d, want 3000", got)
 	}
-	if got := decodeSeconds(4000, 9000); !almostEqual(got, 4) {
-		t.Errorf("decodeSeconds(4000,9000) = %v, want 4", got)
+	// No TTFT recorded: the full call time stays the denominator.
+	if got := generationMs(observestats.AnalyticsBucket{DurationSum: 4000, Output: 5}); got != 4000 {
+		t.Errorf("missing-ttft fallback = %d, want 4000", got)
 	}
-	if got := decodeSeconds(0, 500); got != 0 {
-		t.Errorf("decodeSeconds(0,500) = %v, want 0", got)
+	// Regression fixtures from the live database (rows that read as
+	// hundreds of thousands of tok/s): a near-miss bulk arrival's residual
+	// window is transfer time, not decode time — the full call is the
+	// denominator instead.
+	// volcengine/glm-5.3-flash: 415379ms call, TTFT 415375ms, 20596 output
+	// (was 5,149,000 tok/s; now 20596/415.379s ≈ 49.6).
+	glm := NewPoint(observestats.AnalyticsBucket{Provider: "volcengine", Model: "glm-5.3-flash", Requests: 1, DurationSum: 415379, TTFTSum: 415375, Output: 20596}, nil, nil, nil)
+	if glm.TokSec == nil || *glm.TokSec > 100 {
+		t.Errorf("glm-5.3-flash tok/s = %v, want the full-call fallback (≈49.6), not %v", glm.TokSec, glm.TokSec)
+	}
+	// opencode-go/grok-4.6: 3210ms call, TTFT 3209ms, 112 output
+	// (was 112,000 tok/s; now ≈34.9).
+	grok := NewPoint(observestats.AnalyticsBucket{Requests: 1, DurationSum: 3210, TTFTSum: 3209, Output: 112}, nil, nil, nil)
+	if grok.TokSec == nil || *grok.TokSec > 100 {
+		t.Errorf("grok-4.6 tok/s = %v, want ≈34.9", grok.TokSec)
+	}
+	// The poisoned shopee aggregate day: 112M output tokens over a 0.4%
+	// window (≈11k tok/s implied) — the fold falls back per bucket.
+	poisoned := FoldTotals([]observestats.AnalyticsBucket{{Requests: 90625, DurationSum: 2490000000, TTFTSum: 2480000000, Output: 112285767}}, nil, nil, nil)
+	if poisoned.TokSec == nil || *poisoned.TokSec > 2000 {
+		t.Errorf("poisoned aggregate tok/s = %v, want the full-call fallback (≈45)", poisoned.TokSec)
+	}
+	// A mixed fold (one legacy bulk bucket + one new-row bucket with exact
+	// windows) sums the per-bucket windows instead of subtracting across.
+	mixed := FoldTotals([]observestats.AnalyticsBucket{
+		{Requests: 1, DurationSum: 3210, TTFTSum: 3209, Output: 112},             // legacy bulk → 3210ms
+		{Requests: 1, DurationSum: 4000, TTFTSum: 1000, GenSum: 3000, Output: 5}, // exact window
+	}, nil, nil, nil)
+	if mixed.TokSec == nil || !almostEqual(*mixed.TokSec, 117.0/6.21) {
+		t.Errorf("mixed fold tok/s = %v, want 117/6.21", mixed.TokSec)
 	}
 }
 

@@ -81,16 +81,18 @@ type ProviderMetrics struct {
 	RateLimited429 atomic.Uint64
 	Failures       atomic.Uint64
 	LastRequestAt  atomic.Int64 // unix seconds
-	// LatencySum/TTFTSum/DurationSum are cumulative millisecond sums over
-	// COMMITTED (served) responses; avg = sum/requests. Latency = upstream
-	// response-HEADER arrival (send → headers; excludes the streamed body and
-	// client slow-read); TTFT = send → first byte written to the client;
-	// Duration = full call wall-clock (send → end of streamed body); the
-	// analytics tok/s denominator is the generation window, Duration minus
-	// TTFT.
-	LatencySum  atomic.Uint64
-	TTFTSum     atomic.Uint64
-	DurationSum atomic.Uint64
+	// LatencySum/TTFTSum/DurationSum/GenerationSum are cumulative millisecond
+	// sums over COMMITTED (served) responses; avg = sum/requests. Latency =
+	// upstream response-HEADER arrival (send → headers; excludes the streamed
+	// body and client slow-read); TTFT = send → first byte written to the
+	// client; Duration = full call wall-clock (send → end of streamed body);
+	// Generation = the per-call generation window (stats.GenerationWindowMs —
+	// duration minus TTFT, full call when the body arrived in bulk), the
+	// analytics tok/s denominator.
+	LatencySum    atomic.Uint64
+	TTFTSum       atomic.Uint64
+	DurationSum   atomic.Uint64
+	GenerationSum atomic.Uint64
 }
 
 // ProviderMetricsSnapshot is the JSON-friendly, lock-acquired copy.
@@ -103,6 +105,7 @@ type ProviderMetricsSnapshot struct {
 	LatencySum     uint64 `json:"latency_ms_sum"`
 	TTFTSum        uint64 `json:"ttft_ms_sum"`
 	DurationSum    uint64 `json:"duration_ms_sum"`
+	GenerationSum  uint64 `json:"generation_ms_sum"`
 }
 
 type MetricsStore struct {
@@ -181,6 +184,15 @@ func (s *MetricsStore) AddDuration(provider, model string, totalMs uint64) {
 	pm.DurationSum.Add(totalMs)
 }
 
+// addGeneration records one served response's generation window (milliseconds)
+// — stats.GenerationWindowMs output, classified per call at commit time
+// (streamed → duration−TTFT; bulk arrival → full duration). Analytics divides
+// output tokens by the summed windows; see generation.go for the definition.
+func (s *MetricsStore) AddGeneration(provider, model string, genMs uint64) {
+	pm := s.Entry(PMKey{Provider: provider, Model: model})
+	pm.GenerationSum.Add(genMs)
+}
+
 // snapshot returns a detached per-(provider,model) copy. Callers may read the
 // returned map without holding the lock. Entries are read UNDER the lock: a
 // concurrent Reset between key collection and a re-creating Entry lookup used
@@ -199,6 +211,7 @@ func (s *MetricsStore) Snapshot() map[PMKey]ProviderMetricsSnapshot {
 			LatencySum:     pm.LatencySum.Load(),
 			TTFTSum:        pm.TTFTSum.Load(),
 			DurationSum:    pm.DurationSum.Load(),
+			GenerationSum:  pm.GenerationSum.Load(),
 		}
 	}
 	return out
@@ -219,6 +232,7 @@ func (s *MetricsStore) AggregateByProvider() map[string]ProviderMetricsSnapshot 
 		cur.LatencySum += snap.LatencySum
 		cur.TTFTSum += snap.TTFTSum
 		cur.DurationSum += snap.DurationSum
+		cur.GenerationSum += snap.GenerationSum
 		if snap.LastRequestAt > cur.LastRequestAt {
 			cur.LastRequestAt = snap.LastRequestAt
 		}
@@ -240,6 +254,7 @@ func (s *MetricsStore) Seed(k PMKey, snap ProviderMetricsSnapshot) {
 	pm.LatencySum.Store(snap.LatencySum)
 	pm.TTFTSum.Store(snap.TTFTSum)
 	pm.DurationSum.Store(snap.DurationSum)
+	pm.GenerationSum.Store(snap.GenerationSum)
 }
 
 // reset zeroes every counter (in-memory). The SQLite history is cleared
@@ -296,6 +311,7 @@ func (s *MetricsStore) AdoptProviderKey(from, to string) int {
 		dst.LatencySum.Add(src.LatencySum.Load())
 		dst.TTFTSum.Add(src.TTFTSum.Load())
 		dst.DurationSum.Add(src.DurationSum.Load())
+		dst.GenerationSum.Add(src.GenerationSum.Load())
 		moved++
 	}
 	return moved

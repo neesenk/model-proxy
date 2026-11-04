@@ -82,6 +82,7 @@ func Bootstrap(
 			RateLimited429: base.RateLimited429, Failures: base.Failures,
 			LastRequestAt: base.LastRequestAt, LatencySum: base.LatencySum,
 			TTFTSum: base.TTFTSum, DurationSum: base.DurationSum,
+			GenerationSum: base.GenSum,
 		})
 		tokens.Seed(runtimeKey, obscounters.TokenUsage{
 			Input: base.Input, Output: base.Output,
@@ -100,12 +101,13 @@ func Bootstrap(
 				Requests: base.Requests, Input: base.Input, Output: base.Output,
 				CacheCreation: base.CacheCreation, CacheRead: base.CacheRead,
 				LatencySum: base.LatencySum, Failures: base.Failures,
-				// TTFT/Duration must ride the seed too: the flusher's diff
-				// baseline (LoadCumulativeAgents) carries them, and a counter
-				// seeded without them restarts at zero — every post-restart
-				// agent delta would clamp to zero until the in-memory total
-				// catches up with the whole history.
+				// TTFT/Duration/Generation must ride the seed too: the
+				// flusher's diff baseline (LoadCumulativeAgents) carries them,
+				// and a counter seeded without them restarts at zero — every
+				// post-restart agent delta would clamp to zero until the
+				// in-memory total catches up with the whole history.
 				TTFTSum: base.TTFTSum, DurationSum: base.DurationSum,
+				GenerationSum: base.GenSum,
 			})
 	}
 	return BootstrapResult{

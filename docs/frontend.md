@@ -25,7 +25,7 @@ Status 5s（整页重渲染，双门）、Analytics 30s（仅 live 窗口——1
 
 ## 会话视图（单一实现）
 
-**会话视图是单一份实现**（`sessionViewHTML` + `wireSessionTimeline`：汇总 chips + Trace 时间线）：Live 会话面板与 Requests 会话汇总共用，改动一处两页同时生效；两页只各自拥有表格本体与详情打开方式（Live 弹层 / Requests 行内展开 + `scrollIntoView` 定位闪烁），新会话级展示一律进共享视图而不是某页私有。健康度 chips（第二行）全在 pure.js `sessionHealthSummary` 一处计算（跨度/活跃——空闲 >2min 不计、p50/p95、ttft p50、failovers、缓存命中率、tok/s、模型分布、shadow；tok/s = output ÷ 生成时长（逐行 `latencyMs − ttftMs` 求和，ttft 缺失/≥调用时算整通）），输入是折叠后的已提交行（`attempt>0` 即该请求发生过 failover，与 `failed_hops` 计数同源；未应答腿按 `status≥400` 计入 errors、不计 failovers）；providers/models 合并单行 hint；TTFT 源自记录的 `ttft_ms`（代理首读已提交响应体），live 事件不带该字段、由持久化行回填。
+**会话视图是单一份实现**（`sessionViewHTML` + `wireSessionTimeline`：汇总 chips + Trace 时间线）：Live 会话面板与 Requests 会话汇总共用，改动一处两页同时生效；两页只各自拥有表格本体与详情打开方式（Live 弹层 / Requests 行内展开 + `scrollIntoView` 定位闪烁），新会话级展示一律进共享视图而不是某页私有。健康度 chips（第二行）全在 pure.js `sessionHealthSummary` 一处计算（跨度/活跃——空闲 >2min 不计、p50/p95、ttft p50、failovers、缓存命中率、tok/s、模型分布、shadow；tok/s = output ÷ 生成时长，逐行 `latencyMs − ttftMs`，镜像服务端 `stats/generation.go` 的 legacy 规则——ttft 缺失/≥调用、或窗口隐含速率 >2000 tok/s（传输尾巴）时算整通；`(cache)` 回放行无生成、token 与窗口都不计入），输入是折叠后的已提交行（`attempt>0` 即该请求发生过 failover，与 `failed_hops` 计数同源；未应答腿按 `status≥400` 计入 errors、不计 failovers）；providers/models 合并单行 hint；TTFT 源自记录的 `ttft_ms`（代理首读已提交响应体），live 事件不带该字段、由持久化行回填。
 
 ## Trace 时间线几何与 sticky
 

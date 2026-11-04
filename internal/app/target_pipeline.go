@@ -10,6 +10,7 @@ import (
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/observe/requestlog"
+	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/provider"
 	"model-proxy/internal/providerbuild"
 	"model-proxy/internal/routing"
@@ -269,6 +270,17 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 	// documented "committed 2xx" meaning, and failures/attempts.hard already
 	// carry the failure side.
 	success := attempt.Response.StatusCode < 300
+	// Generation window (duration minus the pre-first-token wait; the FULL
+	// call when the body arrived in bulk — see stats.GenerationWindowMs) — the
+	// single per-call classification that survives bucket aggregation; the
+	// metrics and agent sinks below both accumulate it, and analytics divides
+	// output tokens by the summed windows for tok/s.
+	genMs := observestats.GenerationWindowMs(
+		uint64(attempt.TotalMilliseconds),
+		uint64(attempt.TTFTMilliseconds),
+		attempt.BodyReads,
+		attempt.Usage.Output,
+	)
 	if success {
 		// Successful (2xx) commit: fold TTFT into the scheduling quality EWMA
 		// — "committed 2xx only", matching manager_quality and
@@ -289,15 +301,15 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 			uint64(attempt.UpstreamMilliseconds),
 			uint64(attempt.TTFTMilliseconds),
 		)
-		// Full call wall-clock (send → end of streamed body) — the basis of the
-		// tok/s denominator (analytics subtracts TTFT for the generation
-		// window); header-arrival latency above deliberately excludes the
-		// generation tail.
+		// Full call wall-clock (send → end of streamed body) — the basis of
+		// the tok/s denominator; header-arrival latency above deliberately
+		// excludes the generation tail.
 		effects.proxy.metrics.AddDuration(
 			target.Provider,
 			target.Model,
 			uint64(attempt.TotalMilliseconds),
 		)
+		effects.proxy.metrics.AddGeneration(target.Provider, target.Model, genMs)
 	}
 	if effects.proxy.agents != nil && success && attempt.Scope.Agent != "" {
 		effects.proxy.agents.IncRequests(attempt.Scope.Agent, target.Provider, target.Model)
@@ -314,6 +326,7 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 			target.Model,
 			uint64(attempt.TotalMilliseconds),
 		)
+		effects.proxy.agents.AddGeneration(attempt.Scope.Agent, target.Provider, target.Model, genMs)
 	}
 	if effects.proxy.events != nil {
 		effects.proxy.events.Publish(observeevents.Event{

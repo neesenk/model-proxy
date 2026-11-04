@@ -17,6 +17,21 @@ import (
 // the pre-cutoff token columns from that index.
 const ledgerCutoffISO = "2026-10-13T03:36:31Z"
 
+// Physical per-request ceilings for the impossible-ledger sweep: no model
+// emits >128k output tokens or reads a >2M-token prompt in one request
+// (largest context windows are ≤2M). A committed ledger beyond these bounds
+// is scanner-era corruption, not usage — the pre-2537235 additive merge
+// inflated one 16-request day (2026-10-11, step-plan/step-5-preview) into
+// 116M output and 2.24B input tokens; the rebuild's count guard skipped
+// those buckets and the request-log source rows have since been rotated
+// away, so repairImpossibleLedgers zeroes their token columns (requests and
+// timings stay true) instead of leaving the phantom totals poisoning
+// cumulative usage, cost and tok/s.
+const (
+	maxOutputTokensPerRequest = 128 << 10
+	maxInputTokensPerRequest  = 2 << 20
+)
+
 // ledgerMinute is one aggregated (provider, model, minute) bucket candidate.
 type ledgerMinute struct {
 	provider, model string
@@ -49,12 +64,21 @@ type ledgerAgentRow struct {
 // connection; the rewrites run in one transaction on the stats store.
 // Returns (rebuiltBuckets, skippedMinuteBuckets).
 func (s *Store) RebuildTokenLedger(indexDBPath string) (rebuilt, skipped int64, err error) {
-	if s == nil || s.db == nil || indexDBPath == "" {
+	if s == nil || s.db == nil {
 		return 0, 0, nil
+	}
+	// The impossible-ledger sweep needs no request-log source and runs even
+	// when the index is unavailable or empty (its rows may be long gone).
+	reset, err := s.repairImpossibleLedgers()
+	if err != nil {
+		return 0, 0, err
+	}
+	if indexDBPath == "" {
+		return reset, 0, nil
 	}
 	idx, err := sql.Open("sqlite", indexDBPath)
 	if err != nil {
-		return 0, 0, fmt.Errorf("open request-log index: %w", err)
+		return reset, 0, fmt.Errorf("open request-log index: %w", err)
 	}
 	defer idx.Close()
 
@@ -63,7 +87,10 @@ func (s *Store) RebuildTokenLedger(indexDBPath string) (rebuilt, skipped int64, 
 		return 0, 0, err
 	}
 	if len(minutes) == 0 && len(agents) == 0 {
-		return 0, 0, nil
+		if reset > 0 {
+			logx.Infof("[stats] reset %d impossible ledger bucket(s) (per-request physical bounds; no request-log rows to rebuild from)", reset)
+		}
+		return reset, 0, nil
 	}
 
 	tx, err := s.db.Begin()
@@ -130,10 +157,46 @@ func (s *Store) RebuildTokenLedger(indexDBPath string) (rebuilt, skipped int64, 
 	if err := tx.Commit(); err != nil {
 		return 0, 0, err
 	}
-	if rebuilt > 0 || skipped > 0 {
-		logx.Infof("[stats] rebuilt %d historical token bucket(s) from the request-log ledger (%d skipped on count mismatch; cutoff %s)", rebuilt, skipped, ledgerCutoffISO)
+	if rebuilt > 0 || skipped > 0 || reset > 0 {
+		logx.Infof("[stats] rebuilt %d historical token bucket(s) from the request-log ledger (%d skipped on count mismatch; %d impossible ledger bucket(s) reset; cutoff %s)", rebuilt, skipped, reset, ledgerCutoffISO)
 	}
-	return rebuilt, skipped, nil
+	return rebuilt + reset, skipped, nil
+}
+
+// repairImpossibleLedgers zeroes the token columns of buckets whose committed
+// ledger is beyond physical per-request bounds (see maxOutputTokensPerRequest
+// / maxInputTokensPerRequest) in BOTH dimensions. Idempotent: a zeroed bucket
+// no longer exceeds any bound, so reruns are no-ops. Requests, token_requests
+// and the timing sums are preserved — only the phantom token ledger goes.
+func (s *Store) repairImpossibleLedgers() (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// 64-bit safe: requests is bounded by real traffic; requests×2M ≪ 2^63.
+	resM, err := tx.Exec(`UPDATE minute_buckets SET
+			input = 0, output = 0, cache_creation = 0, cache_read = 0
+		WHERE requests > 0 AND (
+			output > requests * ? OR input > requests * ?)`,
+		maxOutputTokensPerRequest, maxInputTokensPerRequest)
+	if err != nil {
+		return 0, fmt.Errorf("reset impossible minute ledgers: %w", err)
+	}
+	reset, _ := resM.RowsAffected()
+
+	resA, err := tx.Exec(`UPDATE agent_buckets SET
+			input = 0, output = 0, cache_creation = 0, cache_read = 0
+		WHERE requests > 0 AND (
+			output > requests * ? OR input > requests * ?)`,
+		maxOutputTokensPerRequest, maxInputTokensPerRequest)
+	if err != nil {
+		return 0, fmt.Errorf("reset impossible agent ledgers: %w", err)
+	}
+	n, _ := resA.RowsAffected()
+	reset += n
+	return reset, tx.Commit()
 }
 
 // readLedgerAggregates pulls the pre-cutoff usage ledger out of the

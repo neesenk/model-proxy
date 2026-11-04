@@ -140,6 +140,7 @@ func (f *Flusher) collect() map[Key]Counters {
 			counters.LatencySum = metrics.LatencySum
 			counters.TTFTSum = metrics.TTFTSum
 			counters.DurationSum = metrics.DurationSum
+			counters.GenSum = metrics.GenerationSum
 			snapshot[statsKey] = counters
 		}
 	}
@@ -171,7 +172,8 @@ func (f *Flusher) collectAgents() map[AgentKey]AgentCounters {
 			Requests: counters.Requests, Input: counters.Input, Output: counters.Output,
 			CacheCreation: counters.CacheCreation, CacheRead: counters.CacheRead,
 			LatencySum: counters.LatencySum, TTFTSum: counters.TTFTSum,
-			DurationSum: counters.DurationSum, Failures: counters.Failures,
+			DurationSum: counters.DurationSum, GenSum: counters.GenerationSum,
+			Failures: counters.Failures,
 		}
 	}
 	return snapshot
@@ -213,13 +215,15 @@ func DiffCounters(
 			LatencySum:     SubtractCounter(currentCounters.LatencySum, previousCounters.LatencySum),
 			TTFTSum:        SubtractCounter(currentCounters.TTFTSum, previousCounters.TTFTSum),
 			DurationSum:    SubtractCounter(currentCounters.DurationSum, previousCounters.DurationSum),
+			GenSum:         SubtractCounter(currentCounters.GenSum, previousCounters.GenSum),
 		}
 		if delta.Requests == 0 && delta.Failovers == 0 &&
 			delta.RateLimited429 == 0 && delta.Failures == 0 &&
 			delta.Input == 0 && delta.Output == 0 &&
 			delta.CacheCreation == 0 && delta.CacheRead == 0 &&
 			delta.TokenRequests == 0 && delta.LatencySum == 0 &&
-			delta.TTFTSum == 0 && delta.DurationSum == 0 {
+			delta.TTFTSum == 0 && delta.DurationSum == 0 &&
+			delta.GenSum == 0 {
 			continue
 		}
 		deltas[key] = delta
@@ -242,12 +246,13 @@ func DiffAgent(
 			LatencySum:    SubtractCounter(currentCounters.LatencySum, previousCounters.LatencySum),
 			TTFTSum:       SubtractCounter(currentCounters.TTFTSum, previousCounters.TTFTSum),
 			DurationSum:   SubtractCounter(currentCounters.DurationSum, previousCounters.DurationSum),
+			GenSum:        SubtractCounter(currentCounters.GenSum, previousCounters.GenSum),
 			Failures:      SubtractCounter(currentCounters.Failures, previousCounters.Failures),
 		}
 		if delta.Requests == 0 && delta.Input == 0 && delta.Output == 0 &&
 			delta.CacheCreation == 0 && delta.CacheRead == 0 &&
 			delta.LatencySum == 0 && delta.TTFTSum == 0 &&
-			delta.DurationSum == 0 && delta.Failures == 0 {
+			delta.DurationSum == 0 && delta.GenSum == 0 && delta.Failures == 0 {
 			continue
 		}
 		deltas[key] = delta
@@ -399,6 +404,7 @@ func MergeDeltas(
 		current.LatencySum += add.LatencySum
 		current.TTFTSum += add.TTFTSum
 		current.DurationSum += add.DurationSum
+		current.GenSum += add.GenSum
 		destination[key] = current
 	}
 }
@@ -416,6 +422,7 @@ func MergeAgentDeltas(
 		current.LatencySum += add.LatencySum
 		current.TTFTSum += add.TTFTSum
 		current.DurationSum += add.DurationSum
+		current.GenSum += add.GenSum
 		current.Failures += add.Failures
 		destination[key] = current
 	}

@@ -246,7 +246,11 @@
     三方一致性由 `internal/app/usage_ledger_test.go`（同一批 wire 样本喂三个
     解析器断言同值）钉住，历史脏数据由
     `observestats.Store.RebuildTokenLedger`（启动时按请求日志索引重写 cutoff
-    前分钟桶，带 count 防御）修正。**请求数口径**：EvRequests/attempts.ok/
+    前分钟桶，带 count 防御）修正；count 防御跳过、且请求日志源行已被轮转
+    删掉的桶无法逐笔重建——物理不可能账本（output>128k/笔 或 input>2M/笔，
+    见 `repairImpossibleLedgers`）token 四列清零（requests/timings 保留），
+    2026-10-11 step-plan 16 笔 116M output/2.24B input 的 pocket 即此修法。
+    **请求数口径**：EvRequests/attempts.ok/
     平均延迟只计 **2xx commit**——上游终局 4xx（客户端坏 body 风暴，实测单日
     10,753 条零 token 400 vs 3,484 条真实调用）是"服务了的响应"不是"成功请求"，
     控制台请求数=计费成功数；修复前 4xx 也无条件计入（与 attempts.ok 注释

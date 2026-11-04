@@ -295,18 +295,19 @@ func TestQueryAnalyticsAgents(t *testing.T) {
 
 // TestFlushAgentsAccumulatesDurationOnConflict pins the agent_buckets upsert:
 // a second flush into the SAME minute must add duration_ms_sum (the tok/s
-// denominator) and ttft_ms_sum. Keeping only the first insert's values
-// silently skews the agent-dimension decode rate.
+// denominator), ttft_ms_sum and gen_ms_sum (the per-call generation windows).
+// Keeping only the first insert's values silently skews the agent-dimension
+// decode rate.
 func TestFlushAgentsAccumulatesDurationOnConflict(t *testing.T) {
 	store := newTestStore(t, 0)
 	key := AgentKey{Agent: "a", Provider: "p", Model: "m"}
 	if err := store.FlushAgents(60, map[AgentKey]AgentCounters{
-		key: {Requests: 1, Output: 10, LatencySum: 100, TTFTSum: 50, DurationSum: 900},
+		key: {Requests: 1, Output: 10, LatencySum: 100, TTFTSum: 50, DurationSum: 900, GenSum: 800},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FlushAgents(60, map[AgentKey]AgentCounters{
-		key: {Requests: 2, Output: 30, LatencySum: 200, TTFTSum: 70, DurationSum: 1100},
+		key: {Requests: 2, Output: 30, LatencySum: 200, TTFTSum: 70, DurationSum: 1100, GenSum: 900},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -317,8 +318,64 @@ func TestFlushAgentsAccumulatesDurationOnConflict(t *testing.T) {
 	if len(buckets) != 1 {
 		t.Fatalf("buckets = %d, want 1: %+v", len(buckets), buckets)
 	}
-	if b := buckets[0]; b.Requests != 3 || b.Output != 40 || b.LatencySum != 300 || b.TTFTSum != 120 || b.DurationSum != 2000 {
-		t.Errorf("same-minute fold = %+v, want reqs=3 out=40 lat=300 ttft=120 dur=2000", b)
+	if b := buckets[0]; b.Requests != 3 || b.Output != 40 || b.LatencySum != 300 || b.TTFTSum != 120 || b.DurationSum != 2000 || b.GenSum != 1700 {
+		t.Errorf("same-minute fold = %+v, want reqs=3 out=40 lat=300 ttft=120 dur=2000 gen=1700", b)
+	}
+}
+
+// TestFlushPersistsGenWindows pins the gen_ms_sum pipeline end to end on the
+// provider dimension: same-minute flushes accumulate, QueryAnalytics and
+// LoadCumulative both project the column, and the rename migration carries it
+// onto the new key.
+func TestFlushPersistsGenWindows(t *testing.T) {
+	store := newTestStore(t, 0)
+	key := Key{Provider: "p", Model: "m"}
+	flush := func(minute int64, c Counters) {
+		t.Helper()
+		if err := store.Flush(minute, map[Key]Counters{key: c}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	flush(60, Counters{Requests: 1, Output: 5, DurationSum: 4000, TTFTSum: 1000, GenSum: 3000})
+	flush(60, Counters{Requests: 1, Output: 5, DurationSum: 4000, TTFTSum: 1000, GenSum: 3000})
+	flush(120, Counters{Requests: 2, Output: 8, DurationSum: 6000, TTFTSum: 0, GenSum: 6000})
+
+	buckets, err := store.QueryAnalytics(0, 600, "", "", "minute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("buckets = %d, want 2: %+v", len(buckets), buckets)
+	}
+	if buckets[0].GenSum != 6000 || buckets[1].GenSum != 6000 {
+		t.Errorf("per-minute gen sums = %d/%d, want 6000/6000", buckets[0].GenSum, buckets[1].GenSum)
+	}
+
+	cumulative, err := store.LoadCumulative()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := cumulative[key]; c.GenSum != 12000 || c.DurationSum != 14000 {
+		t.Errorf("cumulative gen/duration = %d/%d, want 12000/14000", c.GenSum, c.DurationSum)
+	}
+
+	agentCumulative, err := store.LoadCumulativeAgents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agentCumulative) != 0 {
+		t.Errorf("agent cumulative = %+v, want empty", agentCumulative)
+	}
+
+	if _, err := store.RenameProviderKey("p", "q"); err != nil {
+		t.Fatal(err)
+	}
+	renamed, err := store.LoadCumulative()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := renamed[Key{Provider: "q", Model: "m"}]; c.GenSum != 12000 {
+		t.Errorf("renamed gen sum = %d, want 12000 carried onto the new key", c.GenSum)
 	}
 }
 

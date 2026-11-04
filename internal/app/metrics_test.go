@@ -199,6 +199,76 @@ func TestForward_RecordsLatency(t *testing.T) {
 	if snap.TTFTSum < snap.LatencySum {
 		t.Errorf("ttft=%d < latency=%d (impossible: first client byte precedes upstream headers)", snap.TTFTSum, snap.LatencySum)
 	}
+	// Buffered JSON body (one write, arrives in ≤3 reads): the generation
+	// window is unobservable, so it falls back to the FULL call duration.
+	if snap.GenerationSum != snap.DurationSum {
+		t.Errorf("buffered gen=%d want duration=%d (bulk arrival falls back to the full call)", snap.GenerationSum, snap.DurationSum)
+	}
+}
+
+// TestForward_RecordsGenerationWindow pins the commit-time window
+// classification (stats.GenerationWindowMs) through the forward path: a
+// response body delivered in spread-out SSE chunks counts its decode window
+// (duration − TTFT), a body that lands in bulk keeps the full call as the
+// tok/s denominator. The bulk leg is the regression this pins — a near-miss
+// arrival (first byte a few ms before the last) used to leave a millisecond
+// "window" behind and produce six-figure tok/s readings.
+func TestForward_RecordsGenerationWindow(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.Header().Set("cache-control", "no-cache")
+		flusher := w.(http.Flusher)
+		// First chunk after a wait (the TTFT), then the body spread across
+		// five flushed reads — a genuinely streamed arrival shape (a body
+		// landing in fewer reads is, by definition, a bulk arrival).
+		time.Sleep(40 * time.Millisecond)
+		for _, chunk := range []string{
+			"data: {\"delta\":\"a\"}\n\n",
+			"data: {\"delta\":\"b\"}\n\n",
+			"data: {\"delta\":\"c\"}\n\n",
+			"data: {\"delta\":\"d\"}\n\n",
+			"data: [DONE]\n\n",
+		} {
+			io.WriteString(w, chunk)
+			flusher.Flush()
+			time.Sleep(40 * time.Millisecond)
+		}
+	}))
+	defer up.Close()
+
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"z": {OpenAIBaseURL: up.URL, Provider: testProviderID},
+		},
+		Routes: map[string][]configdomain.RouteTarget{
+			"glm": {{Provider: "z", Model: "glm-rt"}},
+		},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["z"] = &testProv{key: "z-key"}
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/chat/completions",
+		strings.NewReader(`{"model":"glm","stream":true,"messages":[]}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	key := counters.PMKey{Provider: "z", Model: "glm-rt"}
+	snap := awaitCommitMetrics(t, p, key)[key]
+	if snap.DurationSum == 0 || snap.TTFTSum == 0 {
+		t.Fatalf("timings missing: %+v", snap)
+	}
+	if snap.GenerationSum >= snap.DurationSum {
+		t.Errorf("streamed gen=%d must be < duration=%d (the TTFT wait is excluded)", snap.GenerationSum, snap.DurationSum)
+	}
+	if want := snap.DurationSum - snap.TTFTSum; snap.GenerationSum != want {
+		t.Errorf("streamed gen=%d want duration−ttft=%d", snap.GenerationSum, want)
+	}
 }
 
 // ---- tokens_test.go ----

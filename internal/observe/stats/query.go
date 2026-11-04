@@ -26,7 +26,7 @@ func (s *Store) LoadCumulativeRange(from, to int64) (map[Key]Counters, error) {
 	rows, err := s.db.Query(`SELECT provider, model,
 		SUM(requests), SUM(failovers), SUM(rate_limited_429), SUM(failures),
 		SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read), SUM(token_requests),
-		MAX(last_request_at), SUM(latency_ms_sum), SUM(ttft_ms_sum), SUM(duration_ms_sum)
+		MAX(last_request_at), SUM(latency_ms_sum), SUM(ttft_ms_sum), SUM(duration_ms_sum), SUM(gen_ms_sum)
 		FROM minute_buckets WHERE minute >= ? AND minute <= ? GROUP BY provider, model`,
 		max(from, 0), to)
 	if err != nil {
@@ -56,6 +56,7 @@ func (s *Store) LoadCumulativeRange(from, to int64) (map[Key]Counters, error) {
 			&counters.LatencySum,
 			&counters.TTFTSum,
 			&counters.DurationSum,
+			&counters.GenSum,
 		); err != nil {
 			return nil, err
 		}
@@ -82,7 +83,7 @@ func (s *Store) LoadCumulativeAgentsRange(from, to int64) (map[AgentKey]AgentCou
 	}
 	rows, err := s.db.Query(`SELECT agent, provider, model,
 		SUM(requests), SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read),
-		SUM(latency_ms_sum), SUM(ttft_ms_sum), SUM(duration_ms_sum), SUM(failures)
+		SUM(latency_ms_sum), SUM(ttft_ms_sum), SUM(duration_ms_sum), SUM(gen_ms_sum), SUM(failures)
 		FROM agent_buckets WHERE minute >= ? AND minute <= ? GROUP BY agent, provider, model`,
 		max(from, 0), to)
 	if err != nil {
@@ -108,6 +109,7 @@ func (s *Store) LoadCumulativeAgentsRange(from, to int64) (map[AgentKey]AgentCou
 			&counters.LatencySum,
 			&counters.TTFTSum,
 			&counters.DurationSum,
+			&counters.GenSum,
 			&counters.Failures,
 		); err != nil {
 			return nil, err
@@ -279,7 +281,7 @@ func (s *Store) queryAnalyticsIn(from, to int64, provider, model, granularity st
 	query := `SELECT provider, model, minute,
 		requests, failovers, rate_limited_429, failures,
 		input, output, cache_creation, cache_read,
-		last_request_at, latency_ms_sum, ttft_ms_sum, duration_ms_sum
+		last_request_at, latency_ms_sum, ttft_ms_sum, duration_ms_sum, gen_ms_sum
 		FROM minute_buckets WHERE minute >= ? AND minute <= ?`
 	args := []any{from, to}
 	if provider != "" {
@@ -313,6 +315,7 @@ func (s *Store) queryAnalyticsIn(from, to int64, provider, model, granularity st
 			&bucket.Requests, &bucket.Failovers, &bucket.RateLimited429, &bucket.Failures,
 			&bucket.Input, &bucket.Output, &bucket.CacheCreation, &bucket.CacheRead,
 			&bucket.LastRequestAt, &bucket.LatencySum, &bucket.TTFTSum, &bucket.DurationSum,
+			&bucket.GenSum,
 		); err != nil {
 			_ = rows.Close()
 			return nil, err
@@ -393,6 +396,7 @@ func mergeAnalyticsBucket(dst, src *AnalyticsBucket) {
 	dst.LatencySum += src.LatencySum
 	dst.TTFTSum += src.TTFTSum
 	dst.DurationSum += src.DurationSum
+	dst.GenSum += src.GenSum
 }
 
 // QueryAnalyticsAgents is the agent-dimension form of QueryAnalytics:
@@ -407,7 +411,7 @@ func (s *Store) QueryAnalyticsAgents(from, to int64, agent, provider, model, gra
 	query := `SELECT agent, provider, model, minute,
 		requests, failures,
 		input, output, cache_creation, cache_read,
-		latency_ms_sum, ttft_ms_sum, duration_ms_sum
+		latency_ms_sum, ttft_ms_sum, duration_ms_sum, gen_ms_sum
 		FROM agent_buckets WHERE minute >= ? AND minute <= ?`
 	args := []any{from, to}
 	if agent != "" {
@@ -444,6 +448,7 @@ func (s *Store) QueryAnalyticsAgents(from, to int64, agent, provider, model, gra
 			&bucket.Requests, &bucket.Failures,
 			&bucket.Input, &bucket.Output, &bucket.CacheCreation, &bucket.CacheRead,
 			&bucket.LatencySum, &bucket.TTFTSum, &bucket.DurationSum,
+			&bucket.GenSum,
 		); err != nil {
 			_ = rows.Close()
 			return nil, err
@@ -547,10 +552,10 @@ func localCalendarStart(label, layout, granularity string) int64 {
 // range. bucketSecs <= 60 preserves each raw minute row; wider buckets sum and
 // floor exactly like QueryRange.
 func (s *Store) QueryAgents(from, to int64, agent, provider, model string, bucketSecs int64) ([]AgentBucket, error) {
-	selectColumns := "agent, provider, model, minute, requests, input, output, cache_creation, cache_read, latency_ms_sum, ttft_ms_sum, duration_ms_sum, failures"
+	selectColumns := "agent, provider, model, minute, requests, input, output, cache_creation, cache_read, latency_ms_sum, ttft_ms_sum, duration_ms_sum, gen_ms_sum, failures"
 	groupClause := ""
 	if bucketSecs > 60 {
-		selectColumns = "agent, provider, model, (minute / ?) * ? AS minute, SUM(requests), SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read), SUM(latency_ms_sum), SUM(ttft_ms_sum), SUM(duration_ms_sum), SUM(failures)"
+		selectColumns = "agent, provider, model, (minute / ?) * ? AS minute, SUM(requests), SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read), SUM(latency_ms_sum), SUM(ttft_ms_sum), SUM(duration_ms_sum), SUM(gen_ms_sum), SUM(failures)"
 		groupClause = " GROUP BY agent, provider, model, (minute / ?) * ?"
 	}
 
@@ -599,6 +604,7 @@ func (s *Store) QueryAgents(from, to int64, agent, provider, model string, bucke
 			&bucket.LatencySum,
 			&bucket.TTFTSum,
 			&bucket.DurationSum,
+			&bucket.GenSum,
 			&bucket.Failures,
 		); err != nil {
 			return nil, err

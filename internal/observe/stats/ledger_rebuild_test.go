@@ -144,3 +144,95 @@ func TestRebuildTokenLedgerSkipsCountMismatch(t *testing.T) {
 		t.Fatalf("mismatched bucket must keep committed values, got %+v", rows[0])
 	}
 }
+
+// TestRepairImpossibleLedgers pins the physical-bounds sweep: a committed
+// ledger beyond per-request physical ceilings is scanner-era corruption with
+// no surviving per-request source (the real 2026-10-11 step-plan pocket —
+// 16 requests inflated into 116M output / 2.24B input, mirrored in
+// agent_buckets), so the token columns are zeroed while requests,
+// token_requests and the timing sums stay true. Boundary ledgers and sane
+// buckets are untouched, and the sweep runs even with no request-log index.
+func TestRepairImpossibleLedgers(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(Options{Path: filepath.Join(dir, "stats.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	minute := int64(1791676800) // 2026-10-11T00:00:00Z
+	if err := store.Flush(minute, map[Key]Counters{
+		// The corrupted pocket, verbatim from the live database.
+		{Provider: "step-plan#d151c3f7a315314f", Model: "step-5-preview"}: {
+			Requests: 16, Input: 2243199733, Output: 116467934,
+			CacheCreation: 1048576, CacheRead: 2097152, TokenRequests: 16,
+			LatencySum: 160000, TTFTSum: 80000, DurationSum: 320000, GenSum: 240000,
+		},
+		// Boundary ledger: output exactly requests×128k — impossible is a
+		// STRICT bound; this stays untouched.
+		{Provider: "p", Model: "boundary"}: {
+			Requests: 16, Output: 16 * maxOutputTokensPerRequest, TokenRequests: 16,
+		},
+		// Sane heavy ledger.
+		{Provider: "p", Model: "sane"}: {
+			Requests: 1000, Input: 2000000, Output: 2000000, TokenRequests: 1000,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FlushAgents(minute, map[AgentKey]AgentCounters{
+		{Agent: "kimi-code-cli", Provider: "step-plan#d151c3f7a315314f", Model: "step-5-preview"}: {
+			Requests: 16, Input: 2243199733, Output: 116467934, LatencySum: 160000,
+		},
+		{Agent: "codex", Provider: "p", Model: "sane"}: {Requests: 5, Output: 9000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// No request-log index at all: the sweep still repairs.
+	reset, skipped, err := store.RebuildTokenLedger("")
+	if err != nil || skipped != 0 || reset != 2 {
+		t.Fatalf("sweep-only rebuild = (%d, %d, %v), want resets minute+agent: (2, 0, nil)", reset, skipped, err)
+	}
+
+	rows, err := store.QueryRange(0, minute+60, "", "", 0)
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("rows = %d, %v", len(rows), err)
+	}
+	byModel := map[string]Bucket{}
+	for _, r := range rows {
+		byModel[r.Model] = r
+	}
+	corrupt := byModel["step-5-preview"]
+	if corrupt.Input != 0 || corrupt.Output != 0 || corrupt.CacheCreation != 0 || corrupt.CacheRead != 0 {
+		t.Errorf("corrupt pocket tokens = %+v, want zeroed", corrupt)
+	}
+	if corrupt.Requests != 16 || corrupt.LatencySum != 160000 || corrupt.TTFTSum != 80000 || corrupt.DurationSum != 320000 {
+		t.Errorf("corrupt pocket truth columns must survive = %+v", corrupt)
+	}
+	if b := byModel["boundary"]; b.Output != 16*maxOutputTokensPerRequest || b.Requests != 16 {
+		t.Errorf("boundary ledger must stay untouched, got %+v", b)
+	}
+	if s := byModel["sane"]; s.Output != 2000000 || s.Input != 2000000 {
+		t.Errorf("sane ledger must stay untouched, got %+v", s)
+	}
+
+	agents, err := store.QueryAgents(0, minute+60, "", "", "", 0)
+	if err != nil || len(agents) != 2 {
+		t.Fatalf("agent rows = %+v, %v", agents, err)
+	}
+	for _, a := range agents {
+		if a.Agent == "kimi-code-cli" {
+			if a.Input != 0 || a.Output != 0 || a.Requests != 16 || a.LatencySum != 160000 {
+				t.Errorf("corrupt agent pocket = %+v, want tokens zeroed, truth intact", a)
+			}
+		} else if a.Output != 9000 {
+			t.Errorf("sane agent row must stay untouched, got %+v", a)
+		}
+	}
+
+	// Idempotent: a zeroed ledger no longer exceeds any bound.
+	if reset, _, err := store.RebuildTokenLedger(""); err != nil || reset != 0 {
+		t.Fatalf("second sweep = (%d, %v), want (0, nil)", reset, err)
+	}
+}

@@ -40,10 +40,10 @@ func (s *Store) renameProviderKeyContext(ctx context.Context, from, to string) (
 	if _, err := tx.ExecContext(ctx, `INSERT INTO minute_buckets
 		(provider, model, minute, requests, failovers, rate_limited_429, failures,
 		 input, output, cache_creation, cache_read, token_requests, last_request_at,
-		 latency_ms_sum, ttft_ms_sum, duration_ms_sum)
+		 latency_ms_sum, ttft_ms_sum, duration_ms_sum, gen_ms_sum)
 		SELECT ?2, model, minute, requests, failovers, rate_limited_429, failures,
 		 input, output, cache_creation, cache_read, token_requests, last_request_at,
-		 latency_ms_sum, ttft_ms_sum, duration_ms_sum
+		 latency_ms_sum, ttft_ms_sum, duration_ms_sum, gen_ms_sum
 		FROM minute_buckets WHERE provider = ?1
 		ON CONFLICT(provider, model, minute) DO UPDATE SET
 			requests = requests + excluded.requests,
@@ -58,7 +58,8 @@ func (s *Store) renameProviderKeyContext(ctx context.Context, from, to string) (
 			last_request_at = MAX(last_request_at, excluded.last_request_at),
 			latency_ms_sum = latency_ms_sum + excluded.latency_ms_sum,
 			ttft_ms_sum = ttft_ms_sum + excluded.ttft_ms_sum,
-			duration_ms_sum = duration_ms_sum + excluded.duration_ms_sum`,
+			duration_ms_sum = duration_ms_sum + excluded.duration_ms_sum,
+			gen_ms_sum = gen_ms_sum + excluded.gen_ms_sum`,
 		from, to); err != nil {
 		return 0, err
 	}
@@ -73,8 +74,8 @@ func (s *Store) renameProviderKeyContext(ctx context.Context, from, to string) (
 	}
 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_buckets
-		(agent, provider, model, minute, requests, input, output, cache_creation, cache_read, latency_ms_sum, ttft_ms_sum, duration_ms_sum, failures)
-		SELECT agent, ?2, model, minute, requests, input, output, cache_creation, cache_read, latency_ms_sum, ttft_ms_sum, duration_ms_sum, failures
+		(agent, provider, model, minute, requests, input, output, cache_creation, cache_read, latency_ms_sum, ttft_ms_sum, duration_ms_sum, gen_ms_sum, failures)
+		SELECT agent, ?2, model, minute, requests, input, output, cache_creation, cache_read, latency_ms_sum, ttft_ms_sum, duration_ms_sum, gen_ms_sum, failures
 		FROM agent_buckets WHERE provider = ?1
 		ON CONFLICT(agent, provider, model, minute) DO UPDATE SET
 			requests = requests + excluded.requests,
@@ -85,6 +86,7 @@ func (s *Store) renameProviderKeyContext(ctx context.Context, from, to string) (
 			latency_ms_sum = latency_ms_sum + excluded.latency_ms_sum,
 			ttft_ms_sum = ttft_ms_sum + excluded.ttft_ms_sum,
 			duration_ms_sum = duration_ms_sum + excluded.duration_ms_sum,
+			gen_ms_sum = gen_ms_sum + excluded.gen_ms_sum,
 			failures = failures + excluded.failures`,
 		from, to); err != nil {
 		return 0, err
@@ -162,6 +164,7 @@ func (f *Flusher) RenameProviderKeyLive(store *Store, from, to string) (int64, e
 		dst.LatencySum += v.LatencySum
 		dst.TTFTSum += v.TTFTSum
 		dst.DurationSum += v.DurationSum
+		dst.GenSum += v.GenSum
 		f.prev[dstKey] = dst
 	}
 	for k, v := range f.agentPrev {
@@ -182,6 +185,7 @@ func (f *Flusher) RenameProviderKeyLive(store *Store, from, to string) (int64, e
 		dst.LatencySum += v.LatencySum
 		dst.TTFTSum += v.TTFTSum
 		dst.DurationSum += v.DurationSum
+		dst.GenSum += v.GenSum
 		dst.Failures += v.Failures
 		f.agentPrev[dstKey] = dst
 	}

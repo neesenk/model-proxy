@@ -31,6 +31,7 @@ type Counters struct {
 	LatencySum     uint64
 	TTFTSum        uint64
 	DurationSum    uint64
+	GenSum         uint64
 }
 
 // AgentKey identifies an agent/provider/model counter stream.
@@ -50,6 +51,7 @@ type AgentCounters struct {
 	LatencySum    uint64
 	TTFTSum       uint64
 	DurationSum   uint64
+	GenSum        uint64
 	Failures      uint64
 }
 
@@ -80,25 +82,29 @@ type Bucket struct {
 // (AnalyticsBucket.Agent set) reads agent_buckets, which has no
 // failover/429 columns — those stay zero there.
 type AnalyticsBucket struct {
-	Provider       string  `json:"provider"`
-	Model          string  `json:"model"`
-	Agent          string  `json:"agent,omitempty"`
-	Bucket         int64   `json:"bucket"`
-	Requests       uint64  `json:"requests"`
-	Failovers      uint64  `json:"failovers"`
-	RateLimited429 uint64  `json:"rate_limited_429"`
-	Failures       uint64  `json:"failures"`
-	Input          uint64  `json:"input"`
-	Output         uint64  `json:"output"`
-	CacheCreation  uint64  `json:"cache_creation"`
-	CacheRead      uint64  `json:"cache_read"`
-	LatencySum     uint64  `json:"latency_ms_sum"`
-	TTFTSum        uint64  `json:"ttft_ms_sum"`
-	DurationSum    uint64  `json:"duration_ms_sum"`
-	LastRequestAt  int64   `json:"last_request_at"`
-	AvgLatencyMs   float64 `json:"avg_latency_ms"`
-	AvgTtftMs      float64 `json:"avg_ttft_ms"`
-	AvgDurationMs  float64 `json:"avg_duration_ms"`
+	Provider       string `json:"provider"`
+	Model          string `json:"model"`
+	Agent          string `json:"agent,omitempty"`
+	Bucket         int64  `json:"bucket"`
+	Requests       uint64 `json:"requests"`
+	Failovers      uint64 `json:"failovers"`
+	RateLimited429 uint64 `json:"rate_limited_429"`
+	Failures       uint64 `json:"failures"`
+	Input          uint64 `json:"input"`
+	Output         uint64 `json:"output"`
+	CacheCreation  uint64 `json:"cache_creation"`
+	CacheRead      uint64 `json:"cache_read"`
+	LatencySum     uint64 `json:"latency_ms_sum"`
+	TTFTSum        uint64 `json:"ttft_ms_sum"`
+	DurationSum    uint64 `json:"duration_ms_sum"`
+	// GenerationSum carries per-call generation windows (summed; 0 on rows
+	// written before the column existed — readers fall back to
+	// LegacyGenerationWindowMs over the duration/ttft sums).
+	GenSum        uint64  `json:"generation_ms_sum"`
+	LastRequestAt int64   `json:"last_request_at"`
+	AvgLatencyMs  float64 `json:"avg_latency_ms"`
+	AvgTtftMs     float64 `json:"avg_ttft_ms"`
+	AvgDurationMs float64 `json:"avg_duration_ms"`
 }
 
 // AgentBucket is one agent/provider/model time bucket returned by QueryAgents.
@@ -115,5 +121,6 @@ type AgentBucket struct {
 	LatencySum    uint64 `json:"latency_ms_sum"`
 	TTFTSum       uint64 `json:"ttft_ms_sum"`
 	DurationSum   uint64 `json:"duration_ms_sum"`
+	GenSum        uint64 `json:"generation_ms_sum"`
 	Failures      uint64 `json:"failures"`
 }

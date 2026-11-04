@@ -48,8 +48,12 @@ type AttemptDTO struct {
 	UpstreamMilliseconds int64
 	TotalMilliseconds    int64
 	TTFTMilliseconds     int64
-	Usage                Usage
-	Scope                Scope
+	// BodyReads counts the distinct body reads served to the client — the
+	// streamed-vs-bulk arrival shape for the generation-window classification
+	// (stats.GenerationWindowMs).
+	BodyReads int
+	Usage     Usage
+	Scope     Scope
 }
 
 // Usage is deliberately independent of root metrics/token types.
@@ -622,6 +626,7 @@ func (executor Executor) commit(
 	if timedWriter.hasFirstByte {
 		dto.TTFTMilliseconds = timedWriter.firstByte.Sub(dto.Started).Milliseconds()
 	}
+	dto.BodyReads = counting.Reads
 	if executor.Effects != nil {
 		executor.Effects.Committed(dto)
 	}

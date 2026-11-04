@@ -135,6 +135,7 @@ func (s *Store) migrate() error {
 		{"cache_read", "INTEGER NOT NULL DEFAULT 0"},
 		{"ttft_ms_sum", "INTEGER NOT NULL DEFAULT 0"},
 		{"duration_ms_sum", "INTEGER NOT NULL DEFAULT 0"},
+		{"gen_ms_sum", "INTEGER NOT NULL DEFAULT 0"},
 	}); err != nil {
 		return fmt.Errorf("migrate stats schema: %w", err)
 	}
@@ -142,6 +143,7 @@ func (s *Store) migrate() error {
 		{"latency_ms_sum", "INTEGER NOT NULL DEFAULT 0"},
 		{"ttft_ms_sum", "INTEGER NOT NULL DEFAULT 0"},
 		{"duration_ms_sum", "INTEGER NOT NULL DEFAULT 0"},
+		{"gen_ms_sum", "INTEGER NOT NULL DEFAULT 0"},
 	}); err != nil {
 		return fmt.Errorf("migrate stats schema: %w", err)
 	}
@@ -225,8 +227,8 @@ func (s *Store) FlushContext(
 	stmt, err := tx.PrepareContext(ctx, `INSERT INTO minute_buckets
 		(provider, model, minute, requests, failovers, rate_limited_429, failures,
 		 input, output, cache_creation, cache_read, token_requests, last_request_at,
-		 latency_ms_sum, ttft_ms_sum, duration_ms_sum)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 latency_ms_sum, ttft_ms_sum, duration_ms_sum, gen_ms_sum)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(provider, model, minute) DO UPDATE SET
 			requests = requests + excluded.requests,
 			failovers = failovers + excluded.failovers,
@@ -240,7 +242,8 @@ func (s *Store) FlushContext(
 			last_request_at = MAX(last_request_at, excluded.last_request_at),
 			latency_ms_sum = latency_ms_sum + excluded.latency_ms_sum,
 			ttft_ms_sum = ttft_ms_sum + excluded.ttft_ms_sum,
-			duration_ms_sum = duration_ms_sum + excluded.duration_ms_sum`)
+			duration_ms_sum = duration_ms_sum + excluded.duration_ms_sum,
+			gen_ms_sum = gen_ms_sum + excluded.gen_ms_sum`)
 	if err != nil {
 		return err
 	}
@@ -265,6 +268,7 @@ func (s *Store) FlushContext(
 			delta.LatencySum,
 			delta.TTFTSum,
 			delta.DurationSum,
+			delta.GenSum,
 		); err != nil {
 			return err
 		}
@@ -293,8 +297,8 @@ func (s *Store) FlushAgentsContext(
 	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.PrepareContext(ctx, `INSERT INTO agent_buckets
-		(agent, provider, model, minute, requests, input, output, cache_creation, cache_read, latency_ms_sum, ttft_ms_sum, duration_ms_sum, failures)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+		(agent, provider, model, minute, requests, input, output, cache_creation, cache_read, latency_ms_sum, ttft_ms_sum, duration_ms_sum, gen_ms_sum, failures)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(agent, provider, model, minute) DO UPDATE SET
 			requests = requests + excluded.requests,
 			input = input + excluded.input,
@@ -304,6 +308,7 @@ func (s *Store) FlushAgentsContext(
 			latency_ms_sum = latency_ms_sum + excluded.latency_ms_sum,
 			ttft_ms_sum = ttft_ms_sum + excluded.ttft_ms_sum,
 			duration_ms_sum = duration_ms_sum + excluded.duration_ms_sum,
+			gen_ms_sum = gen_ms_sum + excluded.gen_ms_sum,
 			failures = failures + excluded.failures`)
 	if err != nil {
 		return err
@@ -325,6 +330,7 @@ func (s *Store) FlushAgentsContext(
 			delta.LatencySum,
 			delta.TTFTSum,
 			delta.DurationSum,
+			delta.GenSum,
 			delta.Failures,
 		); err != nil {
 			return err

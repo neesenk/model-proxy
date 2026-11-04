@@ -133,11 +133,18 @@ const (
 type countingReadCloser struct {
 	io.ReadCloser
 	Count int64
+	// Reads counts distinct Read calls that returned bytes — the arrival
+	// shape the committed generation-window classification keys on (a body
+	// spread over many reads streamed; 1-3 reads arrived in bulk).
+	Reads int
 }
 
 func (reader *countingReadCloser) Read(buffer []byte) (int, error) {
 	count, err := reader.ReadCloser.Read(buffer)
 	reader.Count += int64(count)
+	if count > 0 {
+		reader.Reads++
+	}
 	return count, err
 }
 

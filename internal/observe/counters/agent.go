@@ -138,6 +138,7 @@ type AgentCount struct {
 	LatencySum    uint64 // cumulative upstream latency ms (commit-only)
 	TTFTSum       uint64 // cumulative upstream first-byte ms (commit-only; streaming responses)
 	DurationSum   uint64 // cumulative full call wall-clock ms, send → end of body (commit-only)
+	GenerationSum uint64 // cumulative per-call generation window ms (stats.GenerationWindowMs; commit-only)
 	Failures      uint64 // all-targets-failed 502 count
 }
 
@@ -228,6 +229,14 @@ func (a *AgentCounter) AddDuration(agent, provider, model string, totalMs uint64
 	a.mutate(agent, provider, model, func(c *AgentCount) { c.DurationSum += totalMs })
 }
 
+// addGeneration records the per-call generation window (milliseconds) — the
+// stats.GenerationWindowMs classification computed once at commit — for one
+// (agent, provider, model). Agent-dimension tok/s divides output tokens by
+// the summed windows, mirroring MetricsStore.AddGeneration.
+func (a *AgentCounter) AddGeneration(agent, provider, model string, genMs uint64) {
+	a.mutate(agent, provider, model, func(c *AgentCount) { c.GenerationSum += genMs })
+}
+
 // incFailure bumps the failure count (all-targets-failed 502) for an agent.
 func (a *AgentCounter) IncFailure(agent, provider, model string) {
 	a.mutate(agent, provider, model, func(c *AgentCount) { c.Failures++ })
@@ -270,6 +279,7 @@ func (a *AgentCounter) AdoptProviderKey(from, to string) int {
 		dst.LatencySum += src.LatencySum
 		dst.TTFTSum += src.TTFTSum
 		dst.DurationSum += src.DurationSum
+		dst.GenerationSum += src.GenerationSum
 		dst.Failures += src.Failures
 		moved++
 	}

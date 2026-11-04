@@ -2003,8 +2003,9 @@ function healthDimScore(dim, v) {
 // modelHealthFromSeries scores each /api/analytics series (one provider/model
 // over the queried window — the Status→Dashboard's fixed last-1h · by-model
 // view) from three dimensions — call latency (full duration when recorded,
-// else the header-time latency as a fallback), TTFT, and tok/s (tokens over
-// full call duration, falling back like latency) — plus the raw error rate
+// else the header-time latency as a fallback), TTFT, and tok/s (read straight
+// from the server's totals.tok_sec — output ÷ generation window with bulk
+// arrivals falling back to the full call) — plus the raw error rate
 // for display. Same thresholds and weighting as MODEL_HEALTH_DIMS. Returns
 // one row per series with requests>0, worst grade first (ties by requests
 // desc). "Worst first" is the actionable order: the degraded model an
@@ -2015,7 +2016,7 @@ export function modelHealthFromSeries(series) {
   const agg = [];
   for (const s of (Array.isArray(series) ? series : [])) {
     if (!s || !s.provider || !s.model) continue;
-    const a = { provider: s.provider, model: s.model, label: `${s.provider}/${s.model}`, requests: 0, failures: 0, input: 0, output: 0, latencySum: 0, ttftSum: 0, durationSum: 0 };
+    const a = { provider: s.provider, model: s.model, label: `${s.provider}/${s.model}`, requests: 0, failures: 0, input: 0, output: 0, latencySum: 0, ttftSum: 0, durationSum: 0, tokSec: null };
     for (const p of (s.points || [])) {
       const reqs = Number(p.requests || 0);
       a.requests += reqs;
@@ -2028,6 +2029,11 @@ export function modelHealthFromSeries(series) {
       a.ttftSum += Number(p.avg_ttft_ms || 0) * reqs;
       a.durationSum += Number(p.avg_duration_ms || 0) * reqs;
     }
+    // The series' own Totals block (same fold as the Analytics page) is the
+    // tok/s authority; per-point folding only rebuilds latency/ttft.
+    const t = s.totals || {};
+    const tokSec = Number(t.tok_sec);
+    a.tokSec = Number.isFinite(tokSec) ? tokSec : null;
     agg.push(a);
   }
   const rank = { err: 0, warn: 1, ok: 2 };
@@ -2035,16 +2041,15 @@ export function modelHealthFromSeries(series) {
   for (const a of agg) {
     if (!a.requests) continue;
     // duration is the honest call time; before it has accumulated (fresh
-    // migration) the header-time latency is the fallback. tok/s counts
-    // OUTPUT tokens over the GENERATION window — full call minus the
-    // pre-first-token wait (the server's decodeSeconds rule); an absent TTFT,
-    // or one swallowing the call, falls back to the full call time.
+    // migration) the header-time latency is the fallback. tok/s reads the
+    // server's unified totals.tok_sec directly (output ÷ generation window,
+    // bulk arrivals falling back to the full call — the one definition in
+    // stats/generation.go) instead of a client-side re-derivation.
     const durationSum = a.durationSum > 0 ? a.durationSum : a.latencySum;
-    const genSum = a.durationSum > a.ttftSum ? a.durationSum - a.ttftSum : durationSum;
     const values = {
       latency: durationSum > 0 ? durationSum / a.requests : null,
       ttft: a.ttftSum > 0 ? a.ttftSum / a.requests : null,
-      toksec: genSum > 0 ? a.output / (genSum / 1000) : null,
+      toksec: a.tokSec,
     };
     const dims = {};
     let wsum = 0, score = 0;
@@ -2270,6 +2275,7 @@ export function sessionHealthSummary(rows) {
         input: Number(r.input) || 0,
         output: Number(r.output) || 0,
         cacheRead: Number(r.cacheRead) || 0,
+        provider: String(r.provider || '').trim(),
         model: String(r.model || '').trim(),
         shadow: !!r.shadow,
       };
@@ -2301,14 +2307,21 @@ export function sessionHealthSummary(rows) {
   const denom = cacheRead + input;
   if (denom > 0) out.cacheHitPct = Math.round((cacheRead / denom) * 100);
   // tok/s over the GENERATION window: per row, call time minus the
-  // pre-first-token wait; output is counted over the same rows (a row whose
-  // TTFT is absent or swallows the call contributes its full call time).
+  // pre-first-token wait; output is counted over the same rows. Mirrors the
+  // server's stats/generation.go rule (LegacyGenerationWindowMs): a row whose
+  // TTFT is absent or swallows the call contributes its full call time, and a
+  // window implying an implausible decode rate (>2000 tok/s — a transfer
+  // tail, not decode) does too. Cache-replay rows ("(cache)") replay stored
+  // bytes in ~1ms with no generation behind them — they contribute neither
+  // tokens nor window.
   let output = 0, genMs = 0;
   for (const r of list) {
     if (!(Number.isFinite(r.latencyMs) && r.latencyMs > 0)) continue;
-    const ttft = Number.isFinite(r.ttftMs) && r.ttftMs > 0 && r.ttftMs < r.latencyMs ? r.ttftMs : 0;
+    if (r.provider === '(cache)') continue;
+    let win = Number.isFinite(r.ttftMs) && r.ttftMs > 0 && r.ttftMs < r.latencyMs ? r.latencyMs - r.ttftMs : r.latencyMs;
+    if (r.output > 0 && win > 0 && r.output / (win / 1000) > 2000) win = r.latencyMs;
     output += r.output || 0;
-    genMs += r.latencyMs - ttft;
+    genMs += win;
   }
   if (genMs > 0 && output > 0) out.tokPerSec = Math.round((output / (genMs / 1000)) * 10) / 10;
   const counts = new Map();

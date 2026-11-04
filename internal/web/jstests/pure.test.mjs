@@ -1484,18 +1484,19 @@ test('analyticsValueText formats per metric and null-safes', () => {
 test('modelHealthFromSeries scores latency/ttft/tok-s, worst first', () => {
   // /api/analytics series shape: requests-weighted per-bucket averages (avg
   // × requests rebuilds each bucket's sums, same as the folding in
-  // analyticsTableRows).
+  // analyticsTableRows) plus the series' own totals block — the tok/s
+  // authority, read as-is (server fold: output ÷ generation window).
   const series = [
     // Healthy: fast ttft, solid decode speed (long calls at ~68 out-tok/s
     // still fail the latency dim — same tradeoff the old Model Health card
     // showed).
     { provider: 'zhipu', model: 'glm-5.3', points: [
       { bucket: 100, requests: 10, failures: 0, input: 40000, output: 20000, avg_ttft_ms: 800, avg_duration_ms: 30000 },
-    ] },
+    ], totals: { tok_sec: 20000 / 292 } },
     // Degraded: 6s ttft, 9s calls, ~8 out-tok/s.
     { provider: 'aqp', model: 'slow-model', points: [
       { bucket: 100, requests: 4, failures: 0, input: 100, output: 100, avg_ttft_ms: 6000, avg_duration_ms: 9000 },
-    ] },
+    ], totals: { tok_sec: 8 } },
   ];
   const rows = modelHealthFromSeries(series);
   assert.equal(rows.length, 2);
@@ -1511,23 +1512,36 @@ test('modelHealthFromSeries scores latency/ttft/tok-s, worst first', () => {
   assert.equal(good.grade, 'ok');
   assert.equal(good.ttftMs, 800);
   assert.equal(good.latencyMs, 30000);
-  assert.equal(good.tokSec, 20000 / 292); // 20k output tokens over the 292s generation window (300s calls − 8s TTFT)
+  assert.equal(good.tokSec, 20000 / 292); // straight from totals.tok_sec (300s calls − 8s TTFT window)
   assert.equal(good.dims.latency.grade, 'err'); // 30s calls fail latency even at 200 tok/s
 });
 
-test('modelHealthFromSeries falls back to header latency and tolerates empty input', () => {
-  // No duration recorded yet: latency (header time) becomes the call-time
-  // fallback for both the latency dimension and tok/s.
-  const rows = modelHealthFromSeries([
+test('modelHealthFromSeries reads tok/s from totals, never re-derives', () => {
+  // No totals block (older server / empty window): tok/s stays null instead
+  // of a client-side guess — the score drops the dimension rather than
+  // grading a fabricated rate.
+  const bare = modelHealthFromSeries([
     { provider: 'p', model: 'm', points: [
-      { bucket: 1, requests: 2, failures: 1, input: 300, output: 100, avg_latency_ms: 4000, avg_ttft_ms: 1000 },
+      { bucket: 1, requests: 2, failures: 0, input: 300, output: 100, avg_latency_ms: 4000, avg_ttft_ms: 1000 },
     ] },
   ]);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].latencyMs, 4000);
-  assert.equal(rows[0].tokSec, 12.5); // 100 output tokens over the 8s summed call time
-  assert.equal(rows[0].errPct, 50);
-  assert.ok(rows[0].dims.toksec.grade); // dimension graded from fallback data
+  assert.equal(bare.length, 1);
+  assert.equal(bare[0].tokSec, null);
+  assert.equal(bare[0].dims.toksec.score, null);
+  // The latency dim still grades from the folded averages.
+  assert.equal(bare[0].latencyMs, 4000);
+  assert.ok(bare[0].dims.latency.grade);
+  // Latency (header time) stays the call-time fallback when duration never
+  // accumulated.
+  const headerOnly = modelHealthFromSeries([
+    { provider: 'p', model: 'm', points: [
+      { bucket: 1, requests: 2, failures: 1, input: 300, output: 100, avg_latency_ms: 4000, avg_ttft_ms: 1000 },
+    ], totals: { tok_sec: 12.5 } },
+  ]);
+  assert.equal(headerOnly[0].latencyMs, 4000);
+  assert.equal(headerOnly[0].tokSec, 12.5);
+  assert.equal(headerOnly[0].errPct, 50);
+  assert.ok(headerOnly[0].dims.toksec.grade); // dimension graded from the server value
   // Aggregates several points into one series row.
   const multi = modelHealthFromSeries([
     { provider: 'p', model: 'm', points: [
@@ -3233,6 +3247,27 @@ test('sessionHealthSummary derives health signals with gap/percentile guards', (
     { ts: 1000, latencyMs: 1000, ttftMs: 100, output: 10 },
   ]);
   assert.equal(withTtft.tokPerSec, Math.round((20 / 1.8) * 10) / 10);
+  // A near-miss bulk arrival (first byte a few ms before the last) leaves a
+  // transfer-tail "window" implying an absurd rate — the row falls back to
+  // its full call time, mirroring stats/generation.go. 112 tokens over a 1ms
+  // tail would read 112,000 tok/s; over the 3210ms call it reads ~34.9.
+  const bulkTail = sessionHealthSummary([
+    { ts: 0, latencyMs: 3210, ttftMs: 3209, output: 112 },
+  ]);
+  assert.equal(bulkTail.tokPerSec, Math.round((112 / 3.21) * 10) / 10);
+  // A plausible fast decode keeps its window: 745 tokens over a 761ms
+  // generation window (~979 tok/s < the 2000 bound).
+  const fastStream = sessionHealthSummary([
+    { ts: 0, latencyMs: 10447, ttftMs: 9686, output: 745 },
+  ]);
+  assert.equal(fastStream.tokPerSec, Math.round((745 / 0.761) * 10) / 10);
+  // Cache-replay rows replay stored bytes in ~1ms with no generation behind
+  // them: they contribute neither tokens nor window.
+  const withCache = sessionHealthSummary([
+    { ts: 0, latencyMs: 2000, ttftMs: 500, output: 100 },
+    { ts: 2500, latencyMs: 3, output: 20000, provider: '(cache)' },
+  ]);
+  assert.equal(withCache.tokPerSec, Math.round((100 / 1.5) * 10) / 10);
 });
 
 test('requestRowHTML cache badge shows the hit share and highlights at 80%', () => {
