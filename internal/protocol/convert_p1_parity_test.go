@@ -60,14 +60,21 @@ func TestParity_SSEParserRobustness(t *testing.T) {
 		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"héllo ☃\"}}\n\n" +
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-	want := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(in), "m"))
+	// Independent converters otherwise capture time.Now().Unix(); crossing a
+	// wall-clock second must not masquerade as a framing difference.
+	newConverter := func(r io.Reader) *anthropicSSEToOpenAISSE {
+		converter := newAnthropicToOpenAISSE(r, "m")
+		converter.created = 1700000000
+		return converter
+	}
+	want := readAllChecked(t, newConverter(strings.NewReader(in)))
 
 	oneByte := &oneByteReader{r: strings.NewReader(in)}
-	got := readAllChecked(t, newAnthropicToOpenAISSE(oneByte, "m"))
+	got := readAllChecked(t, newConverter(oneByte))
 	assertSemanticallyEqualSSE(t, "1-byte chunked feed", string(want), string(got))
 
 	crlf := strings.ReplaceAll(in, "\n", "\r\n")
-	gotCRLF := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(crlf), "m"))
+	gotCRLF := readAllChecked(t, newConverter(strings.NewReader(crlf)))
 	assertSemanticallyEqualSSE(t, "CRLF feed", string(want), string(gotCRLF))
 }
 
