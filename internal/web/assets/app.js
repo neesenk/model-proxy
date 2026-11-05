@@ -8952,7 +8952,9 @@ function renderAccountsNav(providers) {
   const sorted = providers.slice().sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   const main = document.querySelector('.acct-main');
   if (sorted.length === 0) {
-    nav.innerHTML = `<div class="acct-nav-title">Providers</div>
+    nav.innerHTML = `<div class="acct-nav-title acct-nav-head">Providers
+        <button type="button" class="btn small" id="acct-add-provider" title="Add a provider (preset or static endpoint)">+ Add</button>
+      </div>
       <div class="acct-empty">No providers configured yet. Use <strong>+ Add</strong> to create one (or run <code>model-proxy presets add &lt;name&gt;</code>).</div>`;
     if (main) main.innerHTML = '';
     accountsSelectedProvider = null;

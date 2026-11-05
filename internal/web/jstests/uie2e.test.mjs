@@ -1684,8 +1684,12 @@ test('takeover 确认对话框：变体切换驱动预览与执行单位 (表单
   assert.equal(await ctx.ev(`document.getElementById('tk-run-modal').open`), false);
 
   // Variant rows are gone entirely — one row per family, no stray templates.
-  assert.equal(await ctx.ev(`document.querySelectorAll('#tab-takeover tbody tr').length`), 6,
-    'exactly one row per family');
+  const familyRows = await ctx.ev(`[...document.querySelectorAll('#tab-takeover tbody tr')]
+    .map((tr) => tr.querySelector('.tk-fam-name')?.textContent || '(missing family)')`);
+  assert.deepEqual(familyRows, [
+    'claude', 'codex', 'gemini-cli', 'hermes', 'kimi',
+    'opencode', 'pi', 'stepcode', 'workbuddy', 'zcode',
+  ], 'exactly one row per built-in family, with no variant or duplicate rows');
   assert.deepEqual(await ctx.pageErrors(), [], 'dialog flow must not raise JS errors');
 });
 
@@ -2804,6 +2808,44 @@ test('analytics landing folds pooled provider keys to account labels', async (t)
     `(document.getElementById('an-table')?.innerText || '').includes(${JSON.stringify(id8)})`),
     false, 'fresh analytics landing must not show the internal account id');
   assert.deepEqual(await ctx.pageErrors(), [], 'navigation must not raise JS errors');
+});
+
+
+test('accounts 空 provider 状态仍提供可用的 + Add 入口 (modal 族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  await ctx.ev(`(() => {
+    window.__accountsRealFetch = window.fetch;
+    window.fetch = (input, init) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.endsWith('/api/accounts')) {
+        return Promise.resolve(new Response(JSON.stringify({ providers: [] }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        }));
+      }
+      return window.__accountsRealFetch(input, init);
+    };
+  })()`);
+  try {
+    await ctx.ev(`document.querySelector('[data-tab="accounts"]').click()`);
+    await ctx.waitFor('empty accounts state', () => ctx.ev(
+      `(document.querySelector('.acct-empty')?.textContent || '').includes('No providers configured')`));
+    await ctx.waitFor('empty-state + Add button', () => ctx.ev(
+      `!!document.getElementById('acct-add-provider')`), 5000);
+    await ctx.ev(`document.getElementById('acct-add-provider').click()`);
+    await ctx.waitFor('empty-state add modal opens', () => ctx.ev(
+      `document.getElementById('provider-add-modal').open === true`));
+    await ctx.ev(`document.getElementById('pa-cancel').click()`);
+  } finally {
+    await ctx.ev(`(() => {
+      window.fetch = window.__accountsRealFetch;
+      delete window.__accountsRealFetch;
+      document.querySelector('[data-tab="status"]').click();
+      document.querySelector('[data-tab="accounts"]').click();
+    })()`);
+    await ctx.waitFor('real accounts restored', () => ctx.ev(
+      `!!document.querySelector('.acct-nav-item[data-provider="dummy"]')`));
+  }
+  assert.deepEqual(await ctx.pageErrors(), [], 'empty accounts state 不得有 JS 错误');
 });
 
 

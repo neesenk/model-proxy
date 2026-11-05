@@ -102,9 +102,15 @@ func CmdPrune(args []string, cfg *configdomain.Config, stdout, stderr io.Writer)
 // value are consumed by the config loader, not here; unknown flags and a
 // missing/non-positive day count are errors.
 func parseArgs(args []string) (days int, dryRun bool, err error) {
-	for _, a := range args {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		switch {
-		case a == "--config" || a == "-config" || strings.HasPrefix(a, "--config="):
+		case a == "--config" || a == "-config":
+			if i+1 >= len(args) {
+				return 0, false, fmt.Errorf("%s requires a path", a)
+			}
+			i++ // consumed by cliframework.ConfigPath
+		case strings.HasPrefix(a, "--config="):
 			// consumed by cliframework.ConfigPath
 		case a == "--dry-run":
 			dryRun = true

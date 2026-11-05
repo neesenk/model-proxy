@@ -2032,7 +2032,7 @@ export function modelHealthFromSeries(series) {
     // The series' own Totals block (same fold as the Analytics page) is the
     // tok/s authority; per-point folding only rebuilds latency/ttft.
     const t = s.totals || {};
-    const tokSec = Number(t.tok_sec);
+    const tokSec = t.tok_sec == null ? null : Number(t.tok_sec);
     a.tokSec = Number.isFinite(tokSec) ? tokSec : null;
     agg.push(a);
   }

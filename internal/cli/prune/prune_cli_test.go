@@ -129,7 +129,7 @@ func TestCmdPruneMissingMCPDirIsFine(t *testing.T) {
 // TestCmdPruneUsageErrors pins argument validation: missing/non-positive/
 // non-integer days and unknown flags exit 1 with usage on stderr.
 func TestCmdPruneUsageErrors(t *testing.T) {
-	cases := [][]string{nil, {"0"}, {"-3"}, {"abc"}, {"7", "9"}, {"7", "--bogus"}}
+	cases := [][]string{nil, {"0"}, {"-3"}, {"abc"}, {"7", "9"}, {"7", "--bogus"}, {"7", "--config"}}
 	for _, args := range cases {
 		var out, errb bytes.Buffer
 		if code := CmdPrune(args, testCfg(t.TempDir(), t.TempDir()), &out, &errb); code != 1 {
@@ -137,6 +137,21 @@ func TestCmdPruneUsageErrors(t *testing.T) {
 		}
 		if !strings.Contains(errb.String(), "usage: model-proxy prune") {
 			t.Errorf("CmdPrune(%q) stderr = %q, want usage line", args, errb.String())
+		}
+	}
+}
+
+func TestCmdPruneAcceptsConfigPathForms(t *testing.T) {
+	cases := [][]string{
+		{"7", "--config", "custom.yaml"},
+		{"--config", "custom.yaml", "7"},
+		{"7", "--config=custom.yaml"},
+	}
+	for _, args := range cases {
+		args = append(args, "--dry-run")
+		var out, errb bytes.Buffer
+		if code := CmdPrune(args, testCfg(t.TempDir(), t.TempDir()), &out, &errb); code != 0 {
+			t.Errorf("CmdPrune(%q) exit = %d, stderr = %q, want success", args, code, errb.String())
 		}
 	}
 }

@@ -1531,6 +1531,14 @@ test('modelHealthFromSeries reads tok/s from totals, never re-derives', () => {
   // The latency dim still grades from the folded averages.
   assert.equal(bare[0].latencyMs, 4000);
   assert.ok(bare[0].dims.latency.grade);
+  const nullWindow = modelHealthFromSeries([
+    { provider: 'p', model: 'm', points: [
+      { bucket: 1, requests: 2, failures: 0, input: 300, output: 100, avg_latency_ms: 4000, avg_ttft_ms: 1000 },
+    ], totals: { tok_sec: null } },
+  ]);
+  assert.equal(nullWindow[0].tokSec, null);
+  assert.equal(nullWindow[0].dims.toksec.score, null);
+  assert.equal(nullWindow[0].score, bare[0].score);
   // Latency (header time) stays the call-time fallback when duration never
   // accumulated.
   const headerOnly = modelHealthFromSeries([

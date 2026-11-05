@@ -16,10 +16,7 @@ import (
 func TestSaveConfigWritesAndReloads(t *testing.T) {
 	path := writeTestConfig(t)
 	spy := &reloadSpy{}
-	service := New(Ports{
-		ConfigFile: func() string { return path },
-		Reload:     spy.fn(),
-	})
+	service := editService(t, path, spy)
 	next := []byte("listen: 127.0.0.1:9090\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: https://example.test}\n")
 	if err := service.SaveConfig(next); err != nil {
 		t.Fatal(err)
@@ -33,14 +30,34 @@ func TestSaveConfigWritesAndReloads(t *testing.T) {
 	}
 }
 
+func TestSaveConfigValidatesProvidersFromDraft(t *testing.T) {
+	path := writeTestConfig(t)
+	spy := &reloadSpy{}
+	service := editService(t, path, spy)
+	next := []byte(`listen: 127.0.0.1:9090
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://example.test, models: [glm]}
+  acme: {provider_id: static, openai_base_url: https://acme.example.test/v1}
+routes:
+  glm: [{provider: zhipu, model: glm}]
+  acme-model: [{provider: acme, model: acme-m}]
+`)
+	if err := service.SaveConfig(next); err != nil {
+		t.Fatalf("draft with a new provider and its route must save: %v", err)
+	}
+	if len(spy.calls) != 1 || spy.calls[0] != path {
+		t.Errorf("reload calls = %v, want one reload of %s", spy.calls, path)
+	}
+	if got := readConfig(t, path); got != string(next) {
+		t.Errorf("saved config differs from draft:\n%s", got)
+	}
+}
+
 func TestSaveConfigInvalidSkipsReloadAndWrite(t *testing.T) {
 	path := writeTestConfig(t)
 	before, _ := os.ReadFile(path)
 	spy := &reloadSpy{}
-	service := New(Ports{
-		ConfigFile: func() string { return path },
-		Reload:     spy.fn(),
-	})
+	service := editService(t, path, spy)
 	if err := service.SaveConfig([]byte("providers: [")); err == nil {
 		t.Fatal("invalid config must error")
 	}
@@ -57,10 +74,7 @@ func TestSaveConfigReloadFailureRestoresBackup(t *testing.T) {
 	path := writeTestConfig(t)
 	before, _ := os.ReadFile(path)
 	spy := &reloadSpy{err: errors.New("build failed")}
-	service := New(Ports{
-		ConfigFile: func() string { return path },
-		Reload:     spy.fn(),
-	})
+	service := editService(t, path, spy)
 	next := []byte("listen: 127.0.0.1:9090\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: https://example.test}\n")
 	if err := service.SaveConfig(next); err == nil || err.Error() != "build failed" {
 		t.Fatalf("SaveConfig err = %v", err)
@@ -74,10 +88,7 @@ func TestSaveConfigReloadFailureRestoresBackup(t *testing.T) {
 func TestSaveConfigAppliedWarningKeepsNewFile(t *testing.T) {
 	path := writeTestConfig(t)
 	spy := &reloadSpy{err: &ReloadAppliedWarning{Err: errors.New("quota persist failed")}}
-	service := New(Ports{
-		ConfigFile: func() string { return path },
-		Reload:     spy.fn(),
-	})
+	service := editService(t, path, spy)
 	next := []byte("listen: 127.0.0.1:9090\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: https://example.test}\n")
 	err := service.SaveConfig(next)
 	if err == nil || err.Error() != "reload applied with warning: quota persist failed" {

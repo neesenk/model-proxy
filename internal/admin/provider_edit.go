@@ -12,50 +12,50 @@ import (
 	"fmt"
 
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/configedit"
 	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/providerstore"
 )
 
-// mutateProvidersAndReload runs a provider-store mutation under the shared
-// config lock (yaml entries absorbed over the store first, so a stale yaml
-// copy cannot clobber the edit at the next reload), then hot-reloads. A
-// reload that failed to apply rolls the store back so disk matches the
-// still-running generation; an applied-with-warning reload keeps the new
-// store and returns the ReloadAppliedWarning for the caller to surface —
-// the saveAndReloadUnderLock contract, retargeted at the store.
+// mutateProvidersAndReload runs the provider-store mutation, hot-reload and
+// any rollback under one shared config-lock span. A reload that failed to
+// apply rolls the store back before another writer can commit; an
+// applied-with-warning reload keeps the new store and returns the warning.
 func (s *Service) mutateProvidersAndReload(ctx context.Context, fn func(providers map[string]configdomain.Provider) error) error {
 	configFile := s.currentConfigFile()
 	if configFile == "" {
 		return fmt.Errorf("config file path is unavailable; cannot mutate providers")
 	}
 	storePath := providerstore.PathUnder(s.homeDir())
-	var previous map[string]configdomain.Provider
-	err := providerstore.MutateContext(ctx, configFile, storePath, func(providers map[string]configdomain.Provider) error {
-		previous = providerstore.Clone(providers)
-		return fn(providers)
-	})
-	if err != nil {
-		var strip *providerstore.StripWarning
-		if !errors.As(err, &strip) {
-			return err
-		}
-		// The store was persisted; only the yaml strip failed (it retries on
-		// the next load). Reload anyway and surface the degradation.
-		logx.Warnf("[admin] ⚠ %v", err)
-	}
-	if err := s.ports.Reload(configFile); err != nil {
-		var applied *ReloadAppliedWarning
-		if errors.As(err, &applied) {
-			return err
-		}
-		if previous != nil {
-			if rollbackErr := providerstore.Save(storePath, previous); rollbackErr != nil {
-				return fmt.Errorf("%w (provider store rollback failed: %v)", err, rollbackErr)
+	return configedit.WithConfigLockContext(ctx, configFile, func() error {
+		var previous map[string]configdomain.Provider
+		err := providerstore.MutateContextUnderLock(ctx, configFile, storePath, func(providers map[string]configdomain.Provider) error {
+			previous = providerstore.Clone(providers)
+			return fn(providers)
+		})
+		if err != nil {
+			var strip *providerstore.StripWarning
+			if !errors.As(err, &strip) {
+				return err
 			}
+			// The store was persisted; only the yaml strip failed (it retries on
+			// the next load). Reload anyway and surface the degradation.
+			logx.Warnf("[admin] ⚠ %v", err)
 		}
-		return err
-	}
-	return nil
+		if err := s.ports.Reload(configFile); err != nil {
+			var applied *ReloadAppliedWarning
+			if errors.As(err, &applied) {
+				return err
+			}
+			if previous != nil {
+				if rollbackErr := providerstore.Save(storePath, previous); rollbackErr != nil {
+					return fmt.Errorf("%w (provider store rollback failed: %v)", err, rollbackErr)
+				}
+			}
+			return err
+		}
+		return nil
+	})
 }
 
 // editProvider applies the structured editor's provider payload to the store:

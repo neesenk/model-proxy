@@ -66,56 +66,62 @@ func Mutate(configPath, storePath string, fn func(providers map[string]config.Pr
 // even if the client disconnects — same contract as the admin yaml writers.
 func MutateContext(ctx context.Context, configPath, storePath string, fn func(providers map[string]config.Provider) error) error {
 	return configedit.WithConfigLockContext(ctx, configPath, func() error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		yamlProviders, err := readYAMLProviders(configPath)
-		if err != nil {
-			return err
-		}
-		store, err := Load(storePath)
-		if err != nil {
-			return err
-		}
-		// effective starts as a COPY of the absorbed state (yaml entries over
-		// the store): fn mutates it in place, and the no-op guard below
-		// compares it against the same absorbed baseline — aliasing the store
-		// (or comparing against the store alone) would make the guard
-		// always-equal during the yaml→store transition window and silently
-		// drop edits.
-		effective := mergeOver(store, yamlProviders)
-		baseline := Clone(effective)
-		if err := fn(effective); err != nil {
-			return err
-		}
-		if reflect.DeepEqual(baseline, effective) {
-			return nil
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		// Whole-config validation with the new provider set: cross-provider
-		// rules (routes/shadow targets, protocol-vs-base) must hold for the
-		// state that the next reload will serve. A missing config file is an
-		// error here (fail-closed, like the yaml writers this replaces);
-		// only Absorb/Resolve tolerate absence for the read paths.
-		data, rerr := os.ReadFile(configPath)
-		if rerr != nil {
-			return fmt.Errorf("read config %s: %w", configPath, rerr)
-		}
-		if _, verr := config.LoadConfigEffective(configPath, data, effective); verr != nil {
-			return fmt.Errorf("refusing invalid provider change: %w", verr)
-		}
-		if err := Save(storePath, effective); err != nil {
-			return err
-		}
-		if len(yamlProviders) > 0 {
-			if err := stripYAMLProviders(configPath); err != nil {
-				return &StripWarning{Err: err}
-			}
-		}
-		return nil
+		return MutateContextUnderLock(ctx, configPath, storePath, fn)
 	})
+}
+
+// MutateContextUnderLock is MutateContext for callers that already hold the
+// config.yaml flock and must keep it through a subsequent reload or rollback.
+func MutateContextUnderLock(ctx context.Context, configPath, storePath string, fn func(providers map[string]config.Provider) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	yamlProviders, err := readYAMLProviders(configPath)
+	if err != nil {
+		return err
+	}
+	store, err := Load(storePath)
+	if err != nil {
+		return err
+	}
+	// effective starts as a COPY of the absorbed state (yaml entries over
+	// the store): fn mutates it in place, and the no-op guard below
+	// compares it against the same absorbed baseline — aliasing the store
+	// (or comparing against the store alone) would make the guard
+	// always-equal during the yaml→store transition window and silently
+	// drop edits.
+	effective := mergeOver(store, yamlProviders)
+	baseline := Clone(effective)
+	if err := fn(effective); err != nil {
+		return err
+	}
+	if reflect.DeepEqual(baseline, effective) {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Whole-config validation with the new provider set: cross-provider
+	// rules (routes/shadow targets, protocol-vs-base) must hold for the
+	// state that the next reload will serve. A missing config file is an
+	// error here (fail-closed, like the yaml writers this replaces);
+	// only Absorb/Resolve tolerate absence for the read paths.
+	data, rerr := os.ReadFile(configPath)
+	if rerr != nil {
+		return fmt.Errorf("read config %s: %w", configPath, rerr)
+	}
+	if _, verr := config.LoadConfigEffective(configPath, data, effective); verr != nil {
+		return fmt.Errorf("refusing invalid provider change: %w", verr)
+	}
+	if err := Save(storePath, effective); err != nil {
+		return err
+	}
+	if len(yamlProviders) > 0 {
+		if err := stripYAMLProviders(configPath); err != nil {
+			return &StripWarning{Err: err}
+		}
+	}
+	return nil
 }
 
 // Clone deep-copies a provider map — callers that need to roll the store back

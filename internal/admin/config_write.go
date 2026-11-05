@@ -6,7 +6,6 @@ import (
 
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/configedit"
-	"model-proxy/internal/providerstore"
 )
 
 // saveAndReload serializes every whole-document config replacement against
@@ -46,7 +45,7 @@ func (s *Service) saveAndReloadUnderLock(configFile string, data []byte) error {
 // the yaml's own (empty) one. Providers pasted INTO the yaml validate as the
 // yaml-wins merge — exactly what the next absorbing reload would persist.
 func (s *Service) validateYAMLWithStore(path string, raw []byte) error {
-	providers, err := providerstore.Resolve(path, providerstore.PathUnder(s.homeDir()))
+	providers, err := s.draftProviders(raw)
 	if err != nil {
 		return err
 	}

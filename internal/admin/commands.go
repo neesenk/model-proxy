@@ -171,24 +171,33 @@ func (s *Service) ValidateConfig(data []byte) []appapi.ValidationIssue {
 	return out
 }
 
-// lintProviders merges the store's provider set with the linted draft's own
-// providers: block (draft entries win) — the same yaml-wins merge an
-// absorbing reload would apply to a save. nil means "no effective view" (no
-// store readable), which keeps the strict lint.
+// lintProviders returns the draft's effective provider set, or nil when the
+// store or draft cannot be parsed so ValidateConfig keeps its strict result.
 func (s *Service) lintProviders(data []byte) map[string]configdomain.Provider {
-	store, err := providerstore.Load(providerstore.PathUnder(s.homeDir()))
+	providers, err := s.draftProviders(data)
 	if err != nil {
 		return nil
+	}
+	return providers
+}
+
+// draftProviders merges the provider store with the candidate document's own
+// providers block (draft entries win), for both lint and validate-before-save.
+func (s *Service) draftProviders(data []byte) (map[string]configdomain.Provider, error) {
+	store, err := providerstore.Load(providerstore.PathUnder(s.homeDir()))
+	if err != nil {
+		return nil, err
 	}
 	var probe struct {
 		Providers map[string]configdomain.Provider `yaml:"providers"`
 	}
-	if yaml.Unmarshal(data, &probe) == nil {
-		for name, p := range probe.Providers {
-			store[name] = p
-		}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return nil, err
 	}
-	return store
+	for name, p := range probe.Providers {
+		store[name] = p
+	}
+	return store, nil
 }
 
 func (s *Service) EditConfig(request appapi.EditRequest) error {
