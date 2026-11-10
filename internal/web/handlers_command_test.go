@@ -34,6 +34,7 @@ type commandFake struct {
 	probe          func(context.Context, string, string) (appapi.ProbeResult, error)
 	remove         func(string, string) (appapi.MutationResult, error)
 	rename         func(string, string, string) (appapi.MutationResult, error)
+	setKeyLabel    func(string, string) error
 	begin          func(context.Context, string) (appapi.LoginStart, error)
 	refreshMdls    func(context.Context, string) (appapi.ModelsRefreshResult, error)
 	setModelDisabl func(string, string, bool) error
@@ -52,6 +53,12 @@ func (fake *commandFake) CreateAPIKey(string) (appapi.APIKeyCreated, error) {
 	return appapi.APIKeyCreated{}, nil
 }
 func (fake *commandFake) RevokeAPIKey(string) error { return nil }
+func (fake *commandFake) SetAPIKeyLabel(id, label string) error {
+	if fake.setKeyLabel != nil {
+		return fake.setKeyLabel(id, label)
+	}
+	return nil
+}
 func (fake *commandFake) APIKeyUsage(string, time.Time, time.Time) ([]requestlog.KeyUsageEntry, error) {
 	return nil, nil
 }
@@ -680,6 +687,38 @@ func TestCommandAccountContract(t *testing.T) {
 			t.Fatalf("RenameAccount args=(%q,%q,%q)", provider, id, label)
 		}
 		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp/fail/label", `{"label":"x"}`), http.StatusBadRequest, map[string]any{"error": "unknown account"})
+	})
+}
+
+func TestCommandKeysContract(t *testing.T) {
+	t.Run("key label routing and errors", func(t *testing.T) {
+		var id, label string
+		calls := 0
+		server := newCommandTestServer(t, &commandFake{setKeyLabel: func(gotID, gotLabel string) error {
+			calls++
+			id, label = gotID, gotLabel
+			if gotID == "fail" {
+				return appapi.NewHTTPError(http.StatusNotFound, "no forward key with id fail")
+			}
+			return nil
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/keys//label", `{}`), http.StatusBadRequest, map[string]any{"error": "key id is required"})
+		if calls != 0 {
+			t.Fatalf("SetAPIKeyLabel calls=%d want no id-less mutation", calls)
+		}
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/keys/one/label", "{"), http.StatusBadRequest, map[string]any{"error": "malformed JSON body: unexpected EOF"})
+		// The handler is a thin decode/classify layer: the label reaches the
+		// service verbatim (admin owns the trim + clear semantics).
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/keys/one/label", `{"label":"  phone  "}`), http.StatusOK, map[string]any{"id": "one", "status": "renamed"})
+		if id != "one" || label != "  phone  " {
+			t.Fatalf("SetAPIKeyLabel args=(%q,%q)", id, label)
+		}
+		// Empty body label (field omitted) routes as the clear path.
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/keys/one/label", `{}`), http.StatusOK, map[string]any{"id": "one", "status": "renamed"})
+		if label != "" {
+			t.Fatalf("omitted label = %q, want empty", label)
+		}
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/keys/fail/label", `{"label":"x"}`), http.StatusNotFound, map[string]any{"error": "no forward key with id fail"})
 	})
 }
 

@@ -11260,6 +11260,8 @@ async function boot() {
     activateTabSilent('eval');
   } else if (bootTab === 'security') {
     activateTabSilent('security');
+  } else if (bootTab === 'keys') {
+    activateTabSilent('keys');
   } else {
     activateTabSilent('status');
   }
@@ -12910,6 +12912,7 @@ async function renderKeysTab() {
       <span class="card-head-side">
         <input id="keys-new-label" class="req-input" placeholder="label (e.g. phone, ci)" maxlength="64">
         <button id="keys-new" class="btn">New key</button>
+        <span id="keys-new-err" class="hint"></span>
       </span>
     </header>
     <div class="card-body">
@@ -12921,6 +12924,10 @@ async function renderKeysTab() {
   document.getElementById('keys-new').addEventListener('click', createAPIKey);
   document.getElementById('keys-new-label').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') createAPIKey();
+  });
+  document.getElementById('keys-new-label').addEventListener('input', () => {
+    const errEl = document.getElementById('keys-new-err');
+    if (errEl) errEl.textContent = '';
   });
   await refreshKeysList();
 }
@@ -12936,6 +12943,9 @@ async function refreshKeysList() {
       return;
     }
     box.innerHTML = keysTableHTML(res.keys);
+    for (const b of box.querySelectorAll('[data-key-relabel]')) {
+      b.addEventListener('click', () => relabelKey(b));
+    }
     for (const b of box.querySelectorAll('[data-key-usage]')) {
       b.addEventListener('click', () => toggleKeyUsage(b.dataset.keyUsage));
     }
@@ -12952,7 +12962,19 @@ let keysListCache = null;
 
 async function createAPIKey() {
   const labelEl = document.getElementById('keys-new-label');
+  const errEl = document.getElementById('keys-new-err');
   const label = (labelEl && labelEl.value.trim()) || '';
+  // Empty label would mint an unlabeled key — prompt for input instead of
+  // silently creating one the operator can't tell apart (the same guard the
+  // account rename uses). Clearing a label later stays possible via the
+  // row's inline edit.
+  if (!label) {
+    if (errEl) errEl.textContent = 'type a label first (e.g. phone, ci)';
+    labelEl?.focus();
+    labelEl?.select();
+    return;
+  }
+  if (errEl) errEl.textContent = '';
   try {
     const created = await apiPost('/api/keys', { label });
     const banner = document.getElementById('keys-created');
@@ -12980,6 +13002,60 @@ async function revokeAPIKey(id, label) {
   } catch (e) {
     alert(`revoke failed: ${e.message || e}`);
   }
+}
+
+// relabelKey swaps the row's label cell for an inline edit strip (input +
+// Save/Cancel, same strip as the Accounts rename) and POSTs the new label.
+// The label is display-only metadata — the key id, the gate and all usage
+// attribution stay unchanged — so success just refetches the list. Unlike the
+// account rename, an EMPTY submit is valid: it clears the label (back to
+// <unlabeled>). No-op submits (unchanged label) cancel in place.
+function relabelKey(btn) {
+  const cell = btn.closest('tr')?.querySelector('td');
+  if (!cell) return;
+  const id = btn.dataset.keyRelabel;
+  const current = btn.dataset.keyRelabelValue || '';
+  const prevHTML = cell.innerHTML;
+  const strip = document.createElement('div');
+  strip.className = 'acct-rename';
+  strip.innerHTML = `
+    <input class="req-input" maxlength="64" value="${esc(current)}" placeholder="label (empty clears)" aria-label="Key label" spellcheck="false">
+    <button class="btn small primary" type="button">Save</button>
+    <button class="btn small" type="button">Cancel</button>
+    <span class="acct-rename-err muted"></span>`;
+  cell.innerHTML = '';
+  cell.appendChild(strip);
+  const [input, save, cancel, err] = strip.children;
+  const restore = () => { cell.innerHTML = prevHTML; };
+  const submit = async () => {
+    const label = input.value.trim();
+    if (label === current) {
+      restore();
+      return;
+    }
+    save.disabled = true;
+    try {
+      await apiPost(`/api/keys/${encodeURIComponent(id)}/label`, { label });
+      // Release the input's focus BEFORE the refresh: refreshKeysList
+      // rebuilds the whole table and the strip must not pin the old row.
+      strip.remove();
+      await refreshKeysList();
+    } catch (e) {
+      save.disabled = false;
+      err.textContent = e.message || e;
+    }
+  };
+  save.addEventListener('click', submit);
+  cancel.addEventListener('click', restore);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submit();
+    }
+    if (e.key === 'Escape') restore();
+  });
+  input.focus();
+  input.select();
 }
 
 async function toggleKeyUsage(id) {

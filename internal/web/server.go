@@ -351,6 +351,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleAPIKeys(w, r)
 	case p == "/api/keys" && r.Method == http.MethodPost:
 		s.handleAPIKeyCreate(w, r)
+	case strings.HasPrefix(p, "/api/keys/") && strings.HasSuffix(p, "/label") && r.Method == http.MethodPost:
+		s.handleAPIKeyLabel(w, r, strings.TrimSuffix(strings.TrimPrefix(p, "/api/keys/"), "/label"))
 	case strings.HasPrefix(p, "/api/keys/") && strings.HasSuffix(p, "/usage") && r.Method == http.MethodGet:
 		s.handleAPIKeyUsage(w, r, strings.TrimSuffix(strings.TrimPrefix(p, "/api/keys/"), "/usage"))
 	case strings.HasPrefix(p, "/api/keys/") && r.Method == http.MethodDelete:

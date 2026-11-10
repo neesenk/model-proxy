@@ -4838,7 +4838,9 @@ export function keyRelTime(ms, nowMs = Date.now()) {
 }
 
 // keysTableHTML renders the key list. Rows carry data-key-id for the
-// usage/revoke wiring; the last cell holds the actions.
+// usage/relabel/revoke wiring; the last cell holds the actions. The relabel
+// button carries the current label (data-key-relabel-value) so the inline
+// edit strip prefills and can skip no-op submits.
 export function keysTableHTML(keys, nowMs = Date.now()) {
   if (!keys || !keys.length) {
     return '<p class="hint">no keys yet — create one below; clients present it as Authorization: Bearer or x-api-key</p>';
@@ -4851,6 +4853,7 @@ export function keysTableHTML(keys, nowMs = Date.now()) {
       <td>${esc(keyRelTime(k.last_used_ms, nowMs)) || '<span class="hint">never</span>'}</td>
       <td class="num">${fmtNum(k.requests_24h || 0)}</td>
       <td>
+        <button class="btn small" data-key-relabel="${esc(k.id)}" data-key-relabel-value="${esc(k.label || '')}" title="Edit this key's label (empty clears it)">Label</button>
         <button class="btn small" data-key-usage="${esc(k.id)}">Usage</button>
         <button class="btn small danger" data-key-revoke="${esc(k.id)}" data-key-label="${esc(k.label || k.prefix)}">Revoke</button>
       </td>

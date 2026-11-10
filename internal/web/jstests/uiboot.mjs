@@ -45,7 +45,9 @@ async function waitFor(desc, fn, timeoutMs = 30000) {
 // bootUiE2E boots the sandboxed proxy + browser. opts.adminToken, when set,
 // additionally enables web.auth (admin_token_file) so auth-gated UI paths
 // (e.g. the admin-auth modal) are exercisable; the token is returned on
-// ctx.adminToken.
+// ctx.adminToken. opts.apiKeys enables web.auth.api_keys_file (empty file,
+// loopback) so the Keys tab is the managed surface instead of the auth-off
+// empty state; the forward surface of that instance requires keys by design.
 export async function bootUiE2E(opts = {}) {
   const ctx = { skipReason: null, waitFor, shutdown: async () => {} };
   // 耗时的浏览器 e2e 是按需门禁，不进每次修改的默认矩阵：MP_UI_E2E=1 才启动
@@ -112,12 +114,18 @@ export async function bootUiE2E(opts = {}) {
   if (opts.adminToken) {
     const tokFile = path.join(ctx.sandbox, 'admin_token');
     writeFileSync(tokFile, `${opts.adminToken}\n`, { mode: 0o600 });
-    authBlock = `web:
-  auth:
-    admin_token_file: ${tokFile}
-`;
+    authBlock += `    admin_token_file: ${tokFile}\n`;
     ctx.adminToken = opts.adminToken;
   }
+  if (opts.apiKeys) {
+    const keysFile = path.join(ctx.sandbox, 'api_keys');
+    writeFileSync(keysFile, '', { mode: 0o600 });
+    authBlock += `    api_keys_file: ${keysFile}\n`;
+    ctx.apiKeysFile = keysFile;
+  }
+  if (authBlock) authBlock = `web:
+  auth:
+${authBlock}`;
   writeFileSync(path.join(ctx.sandbox, 'config.yaml'), `listen: 127.0.0.1:${ctx.port}
 providers:
   dummy:

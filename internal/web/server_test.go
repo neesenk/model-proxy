@@ -90,7 +90,8 @@ func (testCommandAPI) APIKeys() (appapi.KeysResult, error) { return appapi.KeysR
 func (testCommandAPI) CreateAPIKey(string) (appapi.APIKeyCreated, error) {
 	return appapi.APIKeyCreated{}, nil
 }
-func (testCommandAPI) RevokeAPIKey(string) error { return nil }
+func (testCommandAPI) SetAPIKeyLabel(string, string) error { return nil }
+func (testCommandAPI) RevokeAPIKey(string) error           { return nil }
 func (testCommandAPI) APIKeyUsage(string, time.Time, time.Time) ([]requestlog.KeyUsageEntry, error) {
 	return nil, nil
 }

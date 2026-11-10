@@ -81,6 +81,7 @@ type fakeCommands struct{}
 func (fakeCommands) ResetStats() error                          { return nil }
 func (fakeCommands) APIKeys() (KeysResult, error)               { return KeysResult{}, nil }
 func (fakeCommands) CreateAPIKey(string) (APIKeyCreated, error) { return APIKeyCreated{}, nil }
+func (fakeCommands) SetAPIKeyLabel(string, string) error        { return nil }
 func (fakeCommands) RevokeAPIKey(string) error                  { return nil }
 func (fakeCommands) APIKeyUsage(string, time.Time, time.Time) ([]requestlog.KeyUsageEntry, error) {
 	return nil, nil

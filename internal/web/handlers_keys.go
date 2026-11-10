@@ -1,9 +1,9 @@
 package web
 
 // handlers_keys.go — the forward-key management endpoints: list (usage-
-// enriched), create (full token returned exactly once), revoke, and one key's
-// per-model usage. Semantics live in internal/admin; these handlers decode,
-// classify, and encode.
+// enriched), create (full token returned exactly once), relabel, revoke, and
+// one key's per-model usage. Semantics live in internal/admin; these handlers
+// decode, classify, and encode.
 
 import (
 	"encoding/json"
@@ -38,6 +38,28 @@ func (s *Server) handleAPIKeyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// handleAPIKeyLabel serves POST /api/keys/<id>/label {label} — change one
+// key's label; empty clears it. Metadata only: no reload, the client
+// refetches the list.
+func (s *Server) handleAPIKeyLabel(w http.ResponseWriter, r *http.Request, id string) {
+	if id == "" {
+		writeJSONErr(w, http.StatusBadRequest, "key id is required")
+		return
+	}
+	var req struct {
+		Label string `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONErr(w, http.StatusBadRequest, "malformed JSON body: "+err.Error())
+		return
+	}
+	if err := s.commands.SetAPIKeyLabel(id, req.Label); err != nil {
+		writePortErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": "renamed"})
 }
 
 // handleAPIKeyRevoke serves DELETE /api/keys/<id>.

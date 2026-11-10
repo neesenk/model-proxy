@@ -1,14 +1,15 @@
 package admin
 
 // keys.go — forward-key management over the configured api_keys file: list
-// with usage enrichment, mint+append, revoke by key id. The file stays the
-// single source of truth (hand edits and `takeover`'s first-key embed read
-// the same file); the serving gate's 10s TTL picks up writes without a
-// reload. The full token is returned exactly once, at creation — listings
-// carry only the sha256 id and a display-safe prefix.
+// with usage enrichment, mint+append, relabel, revoke by key id. The file
+// stays the single source of truth (hand edits and `takeover`'s first-key
+// embed read the same file); the serving gate's 10s TTL picks up writes
+// without a reload. The full token is returned exactly once, at creation —
+// listings carry only the sha256 id and a display-safe prefix.
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"model-proxy/internal/appapi"
@@ -68,6 +69,29 @@ func (s *Service) CreateAPIKey(label string) (appapi.APIKeyCreated, error) {
 		},
 		Token: token,
 	}, nil
+}
+
+// SetAPIKeyLabel changes one key's label (metadata only: the token — hence
+// the sha256 id, the gate and all usage attribution — and the created stamp
+// stay untouched). An empty label clears it back to the unlabeled display;
+// the atomic rewrite preserves every other entry and hand edits.
+func (s *Service) SetAPIKeyLabel(id, label string) error {
+	path := s.keyFilePath()
+	if path == "" {
+		return appapi.NewHTTPError(http.StatusConflict, "web.auth.api_keys_file is not configured")
+	}
+	entries := webauth.ReadKeyEntries(path)
+	found := false
+	for i := range entries {
+		if webauth.KeyID(entries[i].Token) == id {
+			entries[i].Label = strings.TrimSpace(label)
+			found = true
+		}
+	}
+	if !found {
+		return appapi.NewHTTPError(http.StatusNotFound, "no forward key with id "+id)
+	}
+	return webauth.WriteKeyEntries(path, entries)
 }
 
 // RevokeAPIKey removes the key whose sha256 id matches. Unknown ids are a 404

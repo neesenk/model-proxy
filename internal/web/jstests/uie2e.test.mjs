@@ -1143,6 +1143,86 @@ test('accounts 页行内改名账号：label 即时生效、id 不变 (mutation 
   assert.deepEqual(await ctx.pageErrors(), [], 'rename flow 不得有 JS 错误');
 });
 
+test('keys 页：创建带 label → 行内改 label → 清空回 <unlabeled> (mutation 族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // Dedicated instance: api_keys_file enabled (loopback) so the Keys tab is
+  // the managed surface, not the auth-off empty state. That instance's
+  // forward surface requires keys by design — no test dials /v1 on it.
+  const kc = await bootUiE2E({ apiKeys: true });
+  if (kc.skipReason) { t.skip(kc.skipReason); return; }
+  try {
+    await kc.ev(`document.querySelector('[data-tab="keys"]').click()`);
+    await kc.waitFor('keys tab active', () => kc.ev(
+      `document.getElementById('tab-keys').classList.contains('active')`));
+    await kc.waitFor('keys empty state (managed, no keys yet)', () => kc.ev(
+      `(document.getElementById('keys-list')?.innerText || '').includes('no keys yet')`));
+    // Empty submit must NOT mint: New key with a blank label prompts for
+    // input instead of silently creating an unlabeled key.
+    await kc.ev(`document.getElementById('keys-new').click()`);
+    await kc.waitFor('empty-submit prompt visible', () => kc.ev(
+      `(document.getElementById('keys-new-err')?.textContent || '').includes('label first')`));
+    const stillEmpty = await fetch(`${kc.baseUrl}/api/keys`).then((r) => r.json());
+    assert.equal(stillEmpty.keys.length, 0, 'empty submit must not mint a key');
+    // Creation WITH a label — the header input feeds the key minted by New
+    // key; the banner and the row must both carry it.
+    await kc.ev(`(() => {
+      const i = document.getElementById('keys-new-label');
+      i.value = 'ci-probe';
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    await kc.waitFor('prompt cleared by typing', () => kc.ev(
+      `(document.getElementById('keys-new-err')?.textContent || '') === ''`));
+    await kc.ev(`document.getElementById('keys-new').click()`);
+    await kc.waitFor('banner shows the one-time token labeled', () => kc.ev(
+      `(document.querySelector('[data-key-created]')?.innerText || '').includes('ci-probe')`));
+    await kc.waitFor('row carries the creation label', () => kc.ev(
+      `[...document.querySelectorAll('#keys-list tr')].some((r) => r.innerText.includes('ci-probe'))`));
+    // Inline relabel: Label button → strip → Save.
+    await kc.ev(`document.querySelector('[data-key-relabel]').click()`);
+    await kc.waitFor('inline label strip', () => kc.ev(
+      `!!document.querySelector('#keys-list .acct-rename input')`));
+    await kc.ev(`(() => {
+      const i = document.querySelector('#keys-list .acct-rename input');
+      i.value = 'phone-main';
+      return true;
+    })()`);
+    await kc.ev(`document.querySelector('#keys-list .acct-rename .btn.primary').click()`);
+    await kc.waitFor('relabel applied in UI', () => kc.ev(
+      `[...document.querySelectorAll('#keys-list tr')].some((r) => r.innerText.includes('phone-main'))`));
+    const before = await fetch(`${kc.baseUrl}/api/keys`).then((r) => r.json());
+    assert.equal(before.keys.length, 1);
+    assert.equal(before.keys[0].label, 'phone-main');
+    const keyId = before.keys[0].id;
+    // Clear: EMPTY submit is valid — the label goes back to <unlabeled>.
+    await kc.ev(`document.querySelector('[data-key-relabel]').click()`);
+    await kc.waitFor('inline label strip (clear pass)', () => kc.ev(
+      `!!document.querySelector('#keys-list .acct-rename input')`));
+    await kc.ev(`(() => {
+      const i = document.querySelector('#keys-list .acct-rename input');
+      i.value = '';
+      return true;
+    })()`);
+    await kc.ev(`document.querySelector('#keys-list .acct-rename .btn.primary').click()`);
+    await kc.waitFor('cleared back to <unlabeled>', () => kc.ev(
+      `(document.getElementById('keys-list')?.innerText || '').includes('<unlabeled>')`));
+    const after = await fetch(`${kc.baseUrl}/api/keys`).then((r) => r.json());
+    assert.equal(after.keys[0].label, '');
+    assert.equal(after.keys[0].id, keyId, 'relabel must not rotate the key id');
+    // Refresh regression: a reload while on #keys must boot back into the
+    // Keys tab (the boot chain used to fall through to Status for keys).
+    await kc.cdp.send('Page.reload', {}, kc.tab);
+    await kc.waitFor('reload lands on the keys tab', () => kc.ev(
+      `document.readyState === 'complete'
+       && document.getElementById('tab-keys').classList.contains('active')
+       && !document.getElementById('tab-status').classList.contains('active')
+       && !!document.getElementById('keys-new')`));
+    assert.deepEqual(await kc.pageErrors(), [], 'keys label flow 不得有 JS 错误');
+  } finally {
+    await kc.shutdown();
+  }
+});
+
 test('takeover 页：模板表渲染与真实 takeover/restore 闭环 (mutation 族)', async (t) => {
   if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
   // Install a fake claude config inside the sandbox HOME — the proxy process

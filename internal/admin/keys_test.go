@@ -1,8 +1,9 @@
 package admin
 
-// keys_test.go — the forward-key management service: list/create/revoke over
-// the real key file, usage enrichment from a real request-log index, and the
-// auth-off empty shape. The full token appears only in the create result.
+// keys_test.go — the forward-key management service: list/create/relabel/
+// revoke over the real key file, usage enrichment from a real request-log
+// index, and the auth-off empty shape. The full token appears only in the
+// create result.
 
 import (
 	"context"
@@ -100,6 +101,59 @@ func TestAPIKeysListCreateRevoke(t *testing.T) {
 	var httpErr *appapi.HTTPError
 	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusNotFound {
 		t.Errorf("unknown id error = %v, want 404", err)
+	}
+}
+
+// TestAPIKeysSetLabel: relabeling is metadata-only — the token (hence the
+// sha256 id and the gate), the created stamp and neighboring hand-edited
+// entries survive; an empty label clears back to <unlabeled>.
+func TestAPIKeysSetLabel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "api_keys")
+	if err := os.WriteFile(path, []byte("# @label seed\n# @created 2026-11-01T00:00:00Z\nseed-key-0\nbare-key-1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := keysService(t, path)
+
+	// Set: whitespace-trimmed label lands, created stamp and the bare
+	// neighbor entry survive the atomic rewrite.
+	if err := s.SetAPIKeyLabel(webauth.KeyID("seed-key-0"), " phone "); err != nil {
+		t.Fatal(err)
+	}
+	entries := webauth.ReadKeyEntries(path)
+	if len(entries) != 2 {
+		t.Fatalf("file after set = %+v", entries)
+	}
+	if entries[0].Label != "phone" || entries[0].Created != "2026-11-01T00:00:00Z" || entries[0].Token != "seed-key-0" {
+		t.Errorf("relabel drifted the entry: %+v", entries[0])
+	}
+	if entries[1].Token != "bare-key-1" || entries[1].Label != "" {
+		t.Errorf("neighbor drifted: %+v", entries[1])
+	}
+	if !webauth.NewSource(path).Accept("seed-key-0") {
+		t.Error("gate stopped accepting the relabeled key")
+	}
+
+	// Clear: empty (whitespace-only) label removes the metadata but keeps
+	// the created stamp.
+	if err := s.SetAPIKeyLabel(webauth.KeyID("seed-key-0"), "   "); err != nil {
+		t.Fatal(err)
+	}
+	entries = webauth.ReadKeyEntries(path)
+	if entries[0].Label != "" || entries[0].Created != "2026-11-01T00:00:00Z" {
+		t.Fatalf("file after clear = %+v", entries)
+	}
+
+	// Unknown id is a 404-shaped error, not a silent success.
+	err := s.SetAPIKeyLabel("deadbeef", "x")
+	var httpErr *appapi.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusNotFound {
+		t.Errorf("unknown id error = %v, want 404", err)
+	}
+	// No api_keys_file configured → 409, same family as create/revoke.
+	err = keysService(t, "").SetAPIKeyLabel("a", "x")
+	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusConflict {
+		t.Errorf("set without api_keys_file = %v, want 409", err)
 	}
 }
 

@@ -4279,6 +4279,10 @@ test('keysTableHTML: rows, prefix-only display, relative last-use, empty state',
   assert.ok(html.includes('&lt;unlabeled&gt;'), 'empty label renders the escaped placeholder');
   assert.ok(html.includes('never'), 'unused key must read "never"');
   assert.ok(html.includes('data-key-usage="abcd1234"') && html.includes('data-key-revoke="ffff0000"'), html);
+  // Every row carries the inline relabel wiring: button keyed by id + the
+  // current label for strip prefill and no-op detection (empty for unlabeled).
+  assert.ok(html.includes('data-key-relabel="abcd1234"') && html.includes('data-key-relabel-value="phone"'), html);
+  assert.ok(html.includes('data-key-relabel="ffff0000"') && html.includes('data-key-relabel-value=""'), html);
   // Empty list is a hint, not an empty table.
   assert.ok(keysTableHTML([]).includes('no keys yet'));
 });

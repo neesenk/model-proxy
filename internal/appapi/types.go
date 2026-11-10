@@ -1082,6 +1082,11 @@ type CommandAPI interface {
 	// CreateAPIKey mints a new forward key with the given label and appends
 	// it to the configured api_keys file.
 	CreateAPIKey(label string) (APIKeyCreated, error)
+	// SetAPIKeyLabel changes one forward key's label (metadata only — the
+	// token, its sha256 id and all usage attribution stay untouched; the
+	// serving gate never reads labels). An empty label clears it (back to
+	// the unlabeled display).
+	SetAPIKeyLabel(id, label string) error
 	// RevokeAPIKey removes the key whose sha256 id matches; the file edit
 	// takes effect on the serving gate within its TTL (10s).
 	RevokeAPIKey(id string) error
