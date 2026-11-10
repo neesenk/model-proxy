@@ -307,16 +307,21 @@ func processGone(pid int) bool {
 
 // isTestBinary verifies pid belongs to the model-proxy binary we built for
 // this suite. On Linux /proc/<pid>/exe is authoritative — and it RESOLVES
-// symlinks, so the expected path must be whichever one the kernel will
-// report: the build output for the sandbox's symlinked ./model-proxy, or the
-// sandbox path itself after a rollback mv placed a real copy there. On Darwin
-// we fall back to the process command name from ps. Darwin reports comm as
-// argv[0] VERBATIM — "./model-proxy" for the script-started serve, an
-// absolute path for startServe's child — so both sides are compared by base
-// name; an exact string match would silently skip the kill and leak the
-// orphaned serve.
+// symlinks, so the expected path is run through EvalSymlinks FIRST: both
+// sides then speak the kernel's canonical dialect no matter which spelling
+// the caller holds (the build output for the sandbox's symlinked
+// ./model-proxy, the sandbox path itself after a rollback mv placed a real
+// copy there, or a distro where the binary sits behind /bin→/usr/bin style
+// links). On Darwin we fall back to the process command name from ps. Darwin
+// reports comm as argv[0] VERBATIM — "./model-proxy" for the script-started
+// serve, an absolute path for startServe's child — so both sides are
+// compared by base name; an exact string match would silently skip the kill
+// and leak the orphaned serve.
 func isTestBinary(pid int, binary string) bool {
 	if exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)); err == nil {
+		if resolved, err := filepath.EvalSymlinks(binary); err == nil {
+			binary = resolved
+		}
 		return exe == binary
 	}
 	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
