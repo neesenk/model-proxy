@@ -267,6 +267,28 @@ h3 { font-size: 0.8125rem; }
 }
 .tab:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent); outline-offset: -2px; }
 
+/* Global credential banner (registry: 全局凭据横幅): the warn strip directly
+   under the topbar, present on every tab. Deliberately NOT sticky — sticky
+   table headers ride --sticky-top under the topbar, and a second sticky band
+   would have to shift that geometry; landing visible on every tab is the
+   contract. Hidden entirely (not emptied) when no alert, so it never takes
+   layout space in the healthy case. */
+.cred-banner {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 8px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+}
+.cred-banner-line {
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.cred-banner-line + .cred-banner-line { margin-top: 2px; }
+.cred-banner-line code { font-family: var(--mono); font-size: 0.75rem; }
+
 /* ---------- layout ---------- */
 main {
   max-width: 1240px;
@@ -489,6 +511,10 @@ main {
 .req-meta-v { font-size: 0.8125rem; font-family: var(--mono); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .req-meta-v .badge { flex: none; }
 .req-meta-dim { color: var(--muted); }
+/* Failover-leg failure evidence (first line of the recorded response body)
+   rides the RESULT group — warn-toned, not muted: it is the answer to "why
+   did this hop fail", the 2026-11-11 blind spot. */
+.leg-evidence { color: var(--warn-fg); overflow-wrap: anywhere; }
 .req-meta-guard .req-meta-v { flex-direction: column; align-items: flex-start; gap: 2px; }
 .req-guard-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .req-guard-row .badge { flex: none; }

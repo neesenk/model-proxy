@@ -830,3 +830,54 @@ func TestEvaluateRequestGuard(t *testing.T) {
 func TestAuditGuardHitNilLogger(t *testing.T) {
 	AuditGuardHit(nil, GuardAuditHit{Kind: "secret", Names: []string{"known_secret"}, Action: "log", RequestID: "r", Agent: "a", Proto: "openai", Exposed: "m"})
 }
+
+// TestServeFailoverLegCarriesFailureEvidence pins the 2026-11-11 incident
+// contract end to end: a target whose upstream answers 401 must leave a
+// request-log leg row carrying the OBSERVED status (401, not a synthetic
+// 502) and the upstream denial body as response_body. Before the fix the leg
+// serialized an empty body and a gateway-synthesized 502, so an aqp session
+// expiry was indistinguishable from a server fault on the Requests page.
+func TestServeFailoverLegCarriesFailureEvidence(t *testing.T) {
+	bad := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":{"message":"Session expired"}}`))
+	})
+	good := newFakeUpstream(t, openaiOKResponder("fallback"))
+	h := newHarness()
+	logDir := t.TempDir()
+	reqLog := requestlog.New(requestlog.Options{Directory: logDir, MaxBodyBytes: 1 << 20})
+	go reqLog.Run()
+	t.Cleanup(reqLog.Shutdown)
+	h.svc.ReqLog = reqLog
+
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"bad":  {OpenAIBaseURL: bad.srv.URL, Provider: "test-static"},
+			"good": {OpenAIBaseURL: good.srv.URL, Provider: "test-static"},
+		},
+		Routes: map[string][]RouteTarget{"m": {{Provider: "bad", Model: "x"}, {Provider: "good", Model: "y"}}},
+	}
+	w := h.serve(h.snapshot(cfg), "openai", "/v1/chat/completions", openaiChatBody(), nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "fallback") {
+		t.Fatalf("status = %d body = %s, want the fallback commit", w.Code, w.Body.String())
+	}
+	reqLog.Shutdown()
+
+	detail, err := requestlog.QueryRecords(logDir, requestlog.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Committed-row logging is app-owned (internal/app target pipeline) and
+	// outside this harness — the leg row written by forward is the contract
+	// under test here.
+	if len(detail) != 1 || !detail[0].AttemptOnly || detail[0].Provider != "bad" {
+		t.Fatalf("records = %+v, want exactly the bad-target leg", detail)
+	}
+	leg := detail[0]
+	if leg.Status != http.StatusUnauthorized {
+		t.Errorf("leg status = %d, want 401 (the observed upstream status)", leg.Status)
+	}
+	if !strings.Contains(leg.ResponseBody, "Session expired") {
+		t.Errorf("leg response_body = %q, want the upstream denial as evidence", leg.ResponseBody)
+	}
+}

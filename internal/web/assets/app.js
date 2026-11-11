@@ -25,6 +25,7 @@ import {
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
   verdictBadge, modelCapMatrix, visibleModelRows, providerCapsSummary, providerFrozen, providerNames, cacheHitRate,
   accountProviderKey, splitProviderKey, providerDisplayName,
+  credentialBannerHTML,
   catalogMatchHTML, catalogMatchEditorHTML, parseModelLines, mergeFetchedModels, aliasRowHTML, providerModelsEditorHTML,
   settingsDiff, settingsRestartKeys, configSummaryHTML, TOKEN_RANGES, tokensRangeQuery, tokenRangeLabel,
   tokenRangeTriggerLabel, parseLocalDate, tokenRangeBounds, tokenCustomBounds, tokenRangePickerHTML,
@@ -5431,11 +5432,38 @@ async function refreshConnIndicator() {
   try {
     const st = await apiGet('/api/status');
     setConn('ok', `v${st.version || '?'} · ${st.uptime || '-'} · ${st.listen || ''}`);
+    renderCredBanner(st);
   } catch (e) {
     setConn('err', 'connection lost');
   } finally {
     connInflight = false;
   }
+}
+
+// renderCredBanner keeps the global credential banner (the strip under the
+// topbar, present on every tab) in sync with /api/status
+// credential_alerts — fed by BOTH /api/status pollers (this file's conn tick
+// on non-Status tabs, renderStatusTab's own dashboard tick while Status is
+// active), so the banner updates within one 5s tick wherever the operator
+// is. Like setConn it only swaps one chrome element outside any panel, so it
+// shares the conn tick's documented interaction-gate exemption (no panel DOM
+// is rebuilt). Semantics: persistent until the backend record clears (the
+// next successful quota sync) — never dismissible, an expired credential is
+// an actionable incident, not a notice. A failed fetch keeps the last
+// content (stale-while-revalidate); account labels are best-effort — when no
+// /api/accounts payload landed yet the pooled key folds to the 8-char id
+// fallback and the next tick re-renders with labels once the prefetch lands.
+function renderCredBanner(st) {
+  const el = document.getElementById('cred-banner');
+  if (!el) return;
+  const html = credentialBannerHTML(st && st.credential_alerts, providerLabels());
+  if (!html) {
+    if (!el.hidden) { el.hidden = true; el.innerHTML = ''; }
+    return;
+  }
+  if (el.hidden) ensureAccountLabels();
+  el.hidden = false;
+  el.innerHTML = html;
 }
 
 // maybeConnRefresh arms the header-meta tick that keeps the brand-meta
@@ -5518,7 +5546,13 @@ async function renderStatusTab(background = false) {
     // permanent "refresh failed" banner on screen long after service is back.
     // Every other panel already clears on its successful background refresh
     // (accounts/security/MCP); status was the one that didn't.
-    if (stR.ok) setRefreshError(panels.status, null);
+    if (stR.ok) {
+      setRefreshError(panels.status, null);
+      // The Status tab's own /api/status fetch feeds the global credential
+      // banner too (the conn tick skips while Status is active — no duplicate
+      // request, same freshness).
+      renderCredBanner(stR.data);
+    }
     if (!stR.ok) {
       // Core snapshot failed with data already on screen: keep the render,
       // report via the banner (no re-render churn needed).

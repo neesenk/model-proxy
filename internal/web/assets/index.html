@@ -35,6 +35,11 @@
     </div>
   </header>
 
+  <!-- Global credential banner (registry: 全局凭据横幅). Filled/hidden by
+       app.js renderCredBanner from /api/status credential_alerts; persistent
+       until the credential recovers, never dismissible. -->
+  <div id="cred-banner" class="cred-banner" hidden></div>
+
   <main>
     <section id="tab-status"   class="tab-panel active" role="tabpanel" aria-label="Status"></section>
     <section id="tab-config"   class="tab-panel"        role="tabpanel" aria-label="Config"></section>

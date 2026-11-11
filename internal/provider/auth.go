@@ -35,6 +35,35 @@ import (
 // provider for as long as its auth keeps erroring.
 const refreshFailureTTL = 15 * time.Second
 
+// HTTPStatusError wraps the HTTP status a provider's auth endpoint actually
+// observed (aqp key mint, codex OAuth refresh). Auth-layer failures carry no
+// upstream-model response, so without it the failover leg's status collapses
+// to the synthetic 502 and hides the real 401/403 from the request log;
+// targetexec extracts it via the HTTPStatus method (behavioral errors.As —
+// its architecture contract keeps executor leaves free of provider imports)
+// so the leg row records the observed status next to the error text.
+// Rendering ("HTTP 401") keeps the wrapped error strings byte-identical to
+// the pre-type format.
+type HTTPStatusError struct{ Code int }
+
+func (e HTTPStatusError) Error() string { return fmt.Sprintf("HTTP %d", e.Code) }
+
+// HTTPStatus satisfies `interface{ HTTPStatus() int }`, the behavioral
+// contract consumers (targetexec, tests) extract errors.As against.
+func (e HTTPStatusError) HTTPStatus() int { return e.Code }
+
+// AuthHTTPStatus extracts the observed auth-endpoint HTTP status from an
+// AuthHeaders/Refresh error chain. 0 = the failure carried no HTTP status
+// (network error, parse failure) — the caller's leg then falls back to the
+// synthetic 502.
+func AuthHTTPStatus(err error) int {
+	var s interface{ HTTPStatus() int }
+	if errors.As(err, &s) {
+		return s.HTTPStatus()
+	}
+	return 0
+}
+
 // authInjector is the internal contract a provider's auth field satisfies. The
 // concrete types (AqpKeyProvider, CodexOAuthProvider) implement it; tests inject
 // fakes (fakeAuth/errAuth). The constructor wires the real injector.
@@ -200,8 +229,9 @@ func (p *AqpKeyProvider) mintLocked() (string, error) {
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
 		// Truncated like the codex refresh error: the body may be a large
-		// error page and must not flood logs/errors.
-		return "", fmt.Errorf("mint aqp key: HTTP %d: %s", resp.StatusCode, display.Truncate(string(rb), 200))
+		// error page and must not flood logs/errors. authHTTPStatus keeps the
+		// observed status extractable for the failover leg's status field.
+		return "", fmt.Errorf("mint aqp key: %w: %s", HTTPStatusError{resp.StatusCode}, display.Truncate(string(rb), 200))
 	}
 	var parsed struct {
 		Retcode int `json:"retcode"`
@@ -535,7 +565,7 @@ func (p *CodexOAuthProvider) refreshLocked(af *CodexAuthFile) error {
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("codex oauth refresh: HTTP %d: %s", resp.StatusCode, display.Truncate(string(rb), 200))
+		return fmt.Errorf("codex oauth refresh: %w: %s", HTTPStatusError{resp.StatusCode}, display.Truncate(string(rb), 200))
 	}
 	var tok struct {
 		AccessToken  string `json:"access_token"`

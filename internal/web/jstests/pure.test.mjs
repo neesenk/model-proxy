@@ -51,6 +51,7 @@ takeoverRunSummary, takeoverRestoreSummary, takeoverVariantLabel,
   mcpAnalyticsSummaryTableHTML, mcpAnalyticsEmptyHTML, mcpAnalyticsSkeletonHTML,
   mcpToolsTableHTML, miniMarkdownHTML,
   VALID_MCP_SUB_TABS, mcpSubTabFromHash, mcpHash,
+  credentialBannerHTML, legFailureSummary,
 } from '../assets/pure.js';
 
 test('esc escapes all five HTML-significant chars', () => {
@@ -4357,4 +4358,71 @@ test('mergeFetchedModels: checked subset in fetched order, manual lines deduped 
 test('mergeFetchedModels: empty selection and no manual lines yield [] (backend keeps preset defaults)', () => {
   assert.deepEqual(mergeFetchedModels(['a', 'b'], [], ''), []);
   assert.deepEqual(mergeFetchedModels([], [], 'x\nx'), ['x']);
+});
+
+// ---------- 全局凭据横幅（/api/status credential_alerts → 文案） ----------
+
+test('credentialBannerHTML: empty inputs render no banner', () => {
+  assert.equal(credentialBannerHTML(undefined, null), '');
+  assert.equal(credentialBannerHTML([], null), '');
+  assert.equal(credentialBannerHTML([null, {}], null), '');
+});
+
+test('credentialBannerHTML: session-expired folds the pooled key and names the re-login command', () => {
+  const html = credentialBannerHTML(
+    [{ key: 'aqp#71e0ea4fa4d06266', class: 'session-expired', err: 'session expired (HTTP 401): Session expired', since: 1762857510 }],
+    { 'aqp#71e0ea4fa4d06266': 'zy' },
+  );
+  assert.match(html, /<strong>aqp · zy<\/strong>/);
+  assert.match(html, /session expired/);
+  assert.match(html, /<code>model-proxy login aqp<\/code>/);
+  // Raw error rides the title for correlation; never rendered as body text.
+  assert.match(html, /title="session expired \(HTTP 401\): Session expired"/);
+});
+
+test('credentialBannerHTML: label-less pooled keys fall back to the 8-char id prefix', () => {
+  const html = credentialBannerHTML(
+    [{ key: 'aqp#71e0ea4fa4d06266', class: 'auth', err: 'mint key rejected' }],
+    null,
+  );
+  assert.match(html, /<strong>aqp · 71e0ea4f<\/strong>/);
+  assert.match(html, /credential rejected/);
+  // auth class must NOT suggest a re-login (the key, not the session, is dead).
+  assert.ok(!html.includes('login'));
+});
+
+test('credentialBannerHTML: multiple alerts render one line each, keys escaped', () => {
+  const html = credentialBannerHTML([
+    { key: 'a#1', class: 'session-expired' },
+    { key: 'b#2', class: 'auth', err: 'x < y' },
+  ], null);
+  assert.equal(html.match(/<div class="cred-banner-line"/g).length, 2);
+  assert.ok(html.includes('x &lt; y'));
+});
+
+test('requestMetaHTML: failover leg RESULT group carries the evidence first line', () => {
+  const r = {
+    ts: '2026-11-11T07:35:19Z', method: 'POST', path: '/v1/chat/completions', attempt: 0,
+    status: 401, latency_ms: 0, attempt_only: true, provider: 'aqp#71e0ea4fa4d06266',
+    response_body: 'mint aqp key: HTTP 401: {"message":"Session expired"}',
+  };
+  const html = requestMetaHTML(r, [], {});
+  assert.ok(html.includes('class="leg-evidence"'), 'evidence span must render in the RESULT group');
+  assert.ok(html.includes('Session expired'), 'evidence text must be the response-body first line');
+  assert.ok(html.includes('failover leg'), 'the leg badge stays');
+  // No recorded evidence (legacy rows) → no empty span, no fabricated reason.
+  const bare = requestMetaHTML({ ...r, response_body: '' }, [], {});
+  assert.ok(!bare.includes('leg-evidence'), 'empty body renders no evidence span');
+});
+
+test('legFailureSummary: first line, whitespace-collapsed, 160-char cap, empty-safe', () => {
+  assert.equal(legFailureSummary(''), '');
+  assert.equal(legFailureSummary(null), '');
+  assert.equal(legFailureSummary('   \n  \n '), '');
+  assert.equal(legFailureSummary('mint aqp key: HTTP 401: {\"message\":\"Session expired\"}\nsecond line'), 'mint aqp key: HTTP 401: {"message":"Session expired"}');
+  const long = 'x'.repeat(300);
+  const capped = legFailureSummary(long);
+  assert.equal(capped.length, 160);
+  assert.ok(capped.endsWith('…'));
+  assert.equal(legFailureSummary('a\t b\n   c'), 'a b');
 });

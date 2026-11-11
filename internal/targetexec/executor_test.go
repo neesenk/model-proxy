@@ -169,6 +169,15 @@ func TestExecutorExhausted401RecordsFailoverWithoutFailureMetric(t *testing.T) {
 		t.Fatalf("result=%+v calls=%d refresh=%d state=%+v effects=%+v",
 			result, doer.calls, provider.refreshes, state, effects)
 	}
+	// The terminal 401 must carry the upstream's denial body as the leg's
+	// failure evidence (same peek discipline as 429/5xx) — a bare 401 with an
+	// empty body leaves the Requests page nothing to explain the failover.
+	if result.AttemptStatus != http.StatusUnauthorized {
+		t.Errorf("AttemptStatus = %d, want 401", result.AttemptStatus)
+	}
+	if body := string(result.AttemptBody); body != "second" {
+		t.Errorf("AttemptBody = %q, want the second (terminal) 401 body", body)
+	}
 }
 
 func TestExecutorUnsupportedParamDoesNotConsume401Retry(t *testing.T) {

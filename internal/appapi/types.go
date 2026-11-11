@@ -31,6 +31,18 @@ type Metrics struct {
 	TTFTSum        uint64 `json:"ttft_ms_sum"`
 }
 
+// CredentialAlert is one quota key whose most recent sync failed with a
+// credential error severe enough to raise the global Web banner — the
+// session-expired/auth subset of CredentialErrClass (see
+// runtime.CredentialAlertClass; not-logged-in and non-credential failures are
+// excluded). Sorted by Key at the projection boundary.
+type CredentialAlert struct {
+	Key   string `json:"key"`
+	Class string `json:"class"`
+	Err   string `json:"err"`
+	Since int64  `json:"since"`
+}
+
 // Dashboard is one detached, generation-consistent status snapshot.
 type Dashboard struct {
 	Uptime     string
@@ -42,6 +54,9 @@ type Dashboard struct {
 	Counters   map[string]Metrics
 	Cache      map[string]any
 	Warnings   []string
+	// CredentialAlerts surfaces banner-class credential failures (nil/empty
+	// when the last sync succeeded for every key — recovery clears it).
+	CredentialAlerts []CredentialAlert
 	// CredentialStore names the resolved credstore backend ("keychain" or
 	// "file") so the Status surface shows where credentials live at rest.
 	CredentialStore string

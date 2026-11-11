@@ -166,11 +166,15 @@ test('the header 5s tick keeps the brand-meta live off the Status tab (gate-exem
   assert.ok(tick.includes('refreshConnIndicator();'),
     'the header tick must go through the shared header refresh helper');
   // Documented exemption: setConn swaps only the dot class + one text node in
-  // the topbar chrome — no panel DOM is rebuilt, so no popup, selection, or
-  // input can be disrupted and the interaction gate must NOT be wired here.
+  // the topbar chrome, and renderCredBanner swaps the one global credential
+  // strip directly under the header (outside every panel) — no panel DOM is
+  // rebuilt, so no popup, selection, or input can be disrupted and the
+  // interaction gate must NOT be wired here.
   const fn = fnBody(appJs, 'refreshConnIndicator');
   assert.ok(fn.includes('setConn('),
     'the header refresh must write only through setConn');
+  assert.ok(fn.includes('renderCredBanner('),
+    'the credential banner rides the header refresh (chrome-only, same exemption)');
   assert.ok(!fn.includes('deferAutoRefresh'),
     'a text-only header update rebuilds no panel DOM — the gate does not apply');
 });

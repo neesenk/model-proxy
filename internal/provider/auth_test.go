@@ -3,6 +3,7 @@ package provider
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -318,6 +319,51 @@ func TestAqpKeyProvider_Non200(t *testing.T) {
 	}
 	if got := len(err.Error()); got > len("mint aqp key: HTTP 500: ")+200+3 {
 		t.Errorf("error length %d exceeds 200-byte body cap", got)
+	}
+	if got := AuthHTTPStatus(err); got != 500 {
+		t.Errorf("AuthHTTPStatus = %d, want 500 (the observed mint status)", got)
+	}
+}
+
+// TestAqpKeyProvider_Mint401CarriesObservedStatus pins the session-expiry
+// contract end of the typed error: the 401 the auth endpoint observed must be
+// extractable so the failover leg records 401 (not a synthetic 502) next to
+// the "Session expired" evidence.
+func TestAqpKeyProvider_Mint401CarriesObservedStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"message":"Session expired"}`))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	store := filepath.Join(dir, "store.json")
+	writeSSOCookie(t, store, "SSO_C=x")
+	p := NewAqpKeyProvider(srv.URL, store)
+	req, _ := http.NewRequest("POST", "http://x", nil)
+	err := p.Inject(req)
+	if err == nil {
+		t.Fatal("expected error on mint HTTP 401")
+	}
+	if !strings.HasPrefix(err.Error(), "mint aqp key: HTTP 401: ") || !strings.Contains(err.Error(), "Session expired") {
+		t.Errorf("error %q must keep the documented mint format and carry the body", err.Error())
+	}
+	if got := AuthHTTPStatus(err); got != http.StatusUnauthorized {
+		t.Errorf("AuthHTTPStatus = %d, want 401", got)
+	}
+}
+
+// TestAuthHTTPStatusExtraction: 0 on status-less errors, unwrap through %w
+// chains.
+func TestAuthHTTPStatusExtraction(t *testing.T) {
+	if got := AuthHTTPStatus(errors.New("dial tcp: connection refused")); got != 0 {
+		t.Errorf("plain error: AuthHTTPStatus = %d, want 0", got)
+	}
+	if got := AuthHTTPStatus(nil); got != 0 {
+		t.Errorf("nil: AuthHTTPStatus = %d, want 0", got)
+	}
+	wrapped := fmt.Errorf("outer: %w", HTTPStatusError{Code: http.StatusForbidden})
+	if got := AuthHTTPStatus(wrapped); got != http.StatusForbidden {
+		t.Errorf("wrapped: AuthHTTPStatus = %d, want 403", got)
 	}
 }
 

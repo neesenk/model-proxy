@@ -31,7 +31,9 @@ func normalizeGranularity(g string) (string, bool) {
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	v := s.reads.Dashboard(time.Now())
-	writeJSON(w, http.StatusOK, map[string]any{"uptime": v.Uptime, "version": s.version, "listen": v.Listen, "health": v.Health, "model_locks": v.ModelLocks, "quota": v.Quota, "schedule": v.Schedule, "counters": v.Counters, "cache": v.Cache, "warnings": v.Warnings, "credential_store": v.CredentialStore})
+	// credential_alerts: nil renders as null, matching the absent-warnings
+	// convention; the UI treats null and [] identically.
+	writeJSON(w, http.StatusOK, map[string]any{"uptime": v.Uptime, "version": s.version, "listen": v.Listen, "health": v.Health, "model_locks": v.ModelLocks, "quota": v.Quota, "schedule": v.Schedule, "counters": v.Counters, "cache": v.Cache, "warnings": v.Warnings, "credential_alerts": v.CredentialAlerts, "credential_store": v.CredentialStore})
 }
 
 // handleSessions serves GET /api/sessions: per-session aggregates (span,

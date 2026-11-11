@@ -60,7 +60,7 @@
 | 请求表（三表一份） | pure.js `requestTableHeadHTML`+`requestRowHTML` | Requests / Live 环 / Live 会话 |
 | Keys 页（转发 key 分配/label/用量） | pure.js `keysTableHTML`/`keyUsageTableHTML`/`keyCreatedBannerHTML`/`keyRelTime`（列表只出 sha256 id + 前缀；创建横幅是完整 token 的**唯一**显示面，含 Copy；用量表按 model×provider 聚合并对 failures>0 出 badge）+ app.js `renderKeysTab`/`refreshKeysList`/`createAPIKey`/`relabelKey`/`revokeAPIKey`/`toggleKeyUsage`（共享 fetch helpers，usage 窗口 1/7/30d；创建空 label 不铸——`keys-new-err` 提示输入；label 行内编辑复用 Accounts 的 `.acct-rename` 条——空提交=清除回 `<unlabeled>`，端点 POST /api/keys/<id>/label），样式 `.key-token-row` | jstests/pure.test.mjs（行/前缀不漏全量/相对时间桶/一次性 token 横幅转义/空态/失败徽章/relabel 按钮携带现值）、uie2e.test.mjs（创建带 label → 行内改 → 清空 mutation 族） |
 | 表格溢出 tooltip | app.js `reqTableCellTip`（仅真实截断时动态 `title`，`data-tip-dyn` 标记区分渲染器 title；三表单行省略样式在 styles.css 请求表区段，status 单元除外——badge 芯片不省略） | jstests/uie2e.test.mjs（长 agent 悬停出全文，renderer title 不被覆盖，status 芯片无 “200…” 假截断） |
-| 请求详情 | app.js `detailRecordsHTML`（`requestMetaHTML`/`guardMarksDetailHTML`/`chatViewHTML`） | 行内展开 / Live 弹层 |
+| 请求详情 | app.js `detailRecordsHTML`（`requestMetaHTML`/`guardMarksDetailHTML`/`chatViewHTML`）+ pure.js `legFailureSummary`（failover 腿 RESULT 区失败证据首行，≤160 字符折叠，全文在 raw response body 面板） | 行内展开 / Live 弹层 |
 | guard 徽标 | pure.js `guardMarksHTML` | 请求表 model 单元 |
 | 会话视图 | app.js `sessionViewHTML`+`wireSessionTimeline`，pure.js `sessionHealthSummary` | Live 会话 / Requests 汇总 |
 | 时间线 tooltip | app.js `showTlTip`/`hideTlTip`，pure.js `sessionBarSummary` | 会话时间线 |
@@ -82,6 +82,7 @@
 | 刷新门 | app.js `deferAutoRefresh`+`cancelAutoRefreshHold` | 全部 tick/SSE 渲染 |
 | tab 保留 | app.js `retainTab` | 全部 tab |
 | stale 横幅 | app.js `setRefreshError` + pure.js `staleDataText` | 刷新失败路径 |
+| 全局凭据横幅 | index.html `cred-banner` 容器 + pure.js `credentialBannerHTML`（/api/status `credential_alerts` → 文案；池键经 `providerDisplayName` 折叠、label 未落地回退 8 字符 id；session-expired 给 re-login 命令、auth 提示换 key；原始错误进 title）+ app.js `renderCredBanner`（搭 conn tick 与 Status tab 两个既有 /api/status 轮询，chrome 级豁免交互门），样式 `.cred-banner`/`.cred-banner-line`（topbar 区段，非 sticky——不与 `--sticky-top` 表头几何耦合）；常驻至凭据恢复（后端同步成功自清）、不可关闭 | jstests/pure.test.mjs（文案映射/label 折叠/空态/转义）、autorefresh.test.mjs（chrome 豁免钉）、uie2e（出现/消失路径） |
 | 视图状态 | pure.js `requestsFilterQuery`/`requestsFilterFromQuery`/`mcpSubTabFromHash`/`mcpHash`，app.js `statusHash` | URL hash |
 
 样式漂移门禁（`jstests/registry.test.mjs`，随 `node --test` 与 `go test ./internal/web` 跑）：

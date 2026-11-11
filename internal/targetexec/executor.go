@@ -3,6 +3,7 @@ package targetexec
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"model-proxy/internal/observe/logx"
@@ -16,6 +17,19 @@ import (
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/transport/bodycapture"
 )
+
+// authErrHTTPStatus extracts the HTTP status an auth-layer failure actually
+// observed (provider auth endpoints signal it by satisfying
+// interface{ HTTPStatus() int } — see provider.HTTPStatusError). Behavioral
+// errors.As keeps this file free of provider imports (the architecture
+// contract pins executor.go to execution leaves). 0 = no observed status.
+func authErrHTTPStatus(err error) int {
+	var s interface{ HTTPStatus() int }
+	if errors.As(err, &s) {
+		return s.HTTPStatus()
+	}
+	return 0
+}
 
 // Doer is the subset of http.Client used by one target execution.
 type Doer interface {
@@ -122,7 +136,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			logx.Warnf("[proto=%s provider=%s] build upstream req: %v", plan.ClientProtocol(), target.Provider, err)
 			executor.release(target.Provider)
 			executor.failover(target)
-			return Result{Outcome: OutcomeFailedHard}
+			return Result{Outcome: OutcomeFailedHard, AttemptBody: []byte(err.Error())}
 		}
 		copyHeaderWhitelist(req.Header, exchange.Request.Header, upstreamHeaderWhitelist...)
 		req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
@@ -130,13 +144,19 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			logx.Warnf("[proto=%s provider=%s] auth error: %v", plan.ClientProtocol(), target.Provider, err)
 			executor.release(target.Provider)
 			executor.failover(target)
-			return Result{Outcome: OutcomeFailedHard}
+			// Auth-layer failure: no upstream-model response exists, but the
+			// auth endpoint's observed status (e.g. aqp mint 401 "Session
+			// expired") is extractable — record it so the failover leg shows
+			// the real status instead of the synthetic 502, with the error
+			// text as the body evidence. 0 (network/parse failure, no
+			// observed status) keeps forward's 502 fallback.
+			return Result{Outcome: OutcomeFailedHard, AttemptStatus: authErrHTTPStatus(err), AttemptBody: []byte(err.Error())}
 		}
 		if err := plan.ApplyConfiguredHeaders(req.Header); err != nil {
 			logx.Warnf("[proto=%s provider=%s] header resolve error: %v", plan.ClientProtocol(), target.Provider, err)
 			executor.release(target.Provider)
 			executor.failover(target)
-			return Result{Outcome: OutcomeFailedHard}
+			return Result{Outcome: OutcomeFailedHard, AttemptBody: []byte(err.Error())}
 		}
 		providerImpl.ExtraHeaders(req, body, scope.Log.SessionID, plan.UpstreamPath())
 		started := time.Now()
@@ -185,17 +205,23 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			Scope:                scope,
 		}
 		if response.StatusCode == http.StatusUnauthorized {
-			response.Body.Close()
 			if authAttempt == 0 {
 				logx.Debugf("[proto=%s provider=%s] 401, refreshing auth", plan.ClientProtocol(), target.Provider)
 				if refreshErr := providerImpl.Refresh(); refreshErr == nil {
+					response.Body.Close()
 					continue
 				} else {
 					logx.Warnf("[proto=%s provider=%s] auth refresh failed: %v", plan.ClientProtocol(), target.Provider, refreshErr)
 				}
 			}
+			// The upstream 401 body is the failure evidence (bearer rejected,
+			// tenant mismatch, session expired) — same bounded peek discipline
+			// as the 429/5xx branches. Without it the failover leg serializes
+			// an empty response body and the request log shows a bare 401.
+			peek := peekResponseBody(response, 8<<10)
+			response.Body.Close()
 			executor.failure(target, false)
-			return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode}
+			return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: peek}
 		}
 		if response.StatusCode == http.StatusTooManyRequests {
 			peek := peekResponseBody(response, 8<<10)

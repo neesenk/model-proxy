@@ -637,6 +637,21 @@ func CredentialErrClass(errStr string) string {
 	return ""
 }
 
+// CredentialAlertClass narrows CredentialErrClass to the classes that raise
+// the global Web banner (/api/status credential_alerts): "session-expired"
+// and "auth" — both need an operator fix (re-login / replace the key) and
+// neither self-heals. "not-logged-in" is deliberately excluded: a configured
+// but never-logged-in provider is a deliberate setup state, not an incident;
+// it keeps its Accounts pill and schedule badge but must not banner every
+// tab. "" = no banner. Same input vocabulary as CredentialErrClass.
+func CredentialAlertClass(errStr string) string {
+	switch class := CredentialErrClass(errStr); class {
+	case "session-expired", "auth":
+		return class
+	}
+	return ""
+}
+
 type PersistedQuotaSnapshot struct {
 	Billing      provider.BillingClass  `json:"billing"`
 	RemainingPct float64                `json:"remaining_pct"`

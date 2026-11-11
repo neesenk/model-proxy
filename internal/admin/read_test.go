@@ -1637,3 +1637,56 @@ func TestSecurityCountsAggregation(t *testing.T) {
 		t.Errorf("narrow counts = %+v, want high=0 error=1", nc)
 	}
 }
+
+// TestDashboardCredentialAlerts pins the /api/status credential_alerts
+// projection: only banner-class credential failures (session-expired / auth)
+// surface, sorted by key; not-logged-in (deliberate setup state) and
+// non-credential sync failures (network blip) stay off the banner, and a
+// tracker with no failures projects an empty slice (recovery self-clears).
+func TestDashboardCredentialAlerts(t *testing.T) {
+	now := time.Date(2026, 11, 11, 10, 38, 30, 0, time.UTC)
+	state := DashboardState{
+		Listen: "127.0.0.1:8080",
+		Cache:  responsecache.New(responsecache.Options{}),
+		Runtime: runtimestate.DashboardSnapshot{
+			Providers: map[string]runtimestate.ProviderStatus{
+				"aqp#acc1": {CircuitState: "closed", Available: true},
+			},
+		},
+		QuotaEnabled: true,
+		StartedAt:    now.Add(-time.Minute),
+		Schedule:     []byte(`{"models":{}}`),
+		QuotaSyncErrs: map[string]runtimestate.QuotaSyncError{
+			"aqp#acc1":  {Err: "session expired (HTTP 401): Session expired - re-login: `model-proxy login aqp`", At: now},
+			"zkey#acc2": {Err: "auth: mint key rejected: HTTP 401: unauthorized", At: now.Add(-time.Minute)},
+			"bkey#acc3": {Err: "not logged in", At: now},
+			"ckey":      {Err: "dial tcp: connection refused", At: now},
+		},
+	}
+	service := New(Ports{DashboardState: func(time.Time) DashboardState { return state }})
+
+	alerts := service.Dashboard(now).CredentialAlerts
+
+	if len(alerts) != 2 {
+		t.Fatalf("alerts = %+v, want exactly the session-expired and auth entries", alerts)
+	}
+	if alerts[0].Key != "aqp#acc1" || alerts[0].Class != "session-expired" ||
+		!strings.Contains(alerts[0].Err, "Session expired") || alerts[0].Since != now.Unix() {
+		t.Errorf("alerts[0] = %+v, want aqp#acc1 session-expired with err+since", alerts[0])
+	}
+	if alerts[1].Key != "zkey#acc2" || alerts[1].Class != "auth" {
+		t.Errorf("alerts[1] = %+v, want zkey#acc2 auth (sorted after aqp)", alerts[1])
+	}
+	for _, a := range alerts {
+		if a.Class == "not-logged-in" {
+			t.Errorf("alerts = %+v, not-logged-in must not banner", alerts)
+		}
+	}
+
+	// Recovery: no recorded sync failures → empty projection, never nil-map
+	// undefined behavior.
+	state.QuotaSyncErrs = nil
+	if got := service.Dashboard(now).CredentialAlerts; len(got) != 0 {
+		t.Errorf("recovered alerts = %+v, want empty", got)
+	}
+}

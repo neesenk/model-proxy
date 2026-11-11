@@ -25,6 +25,7 @@ import (
 	"model-proxy/internal/provider"
 	"model-proxy/internal/providerstore"
 	"model-proxy/internal/routing"
+	runtimestate "model-proxy/internal/runtime"
 )
 
 // quotaSnapshotWithSyncErr serializes one quota entry whose most recent sync
@@ -108,6 +109,23 @@ func (s *Service) Dashboard(now time.Time) appapi.Dashboard {
 		}
 	}
 
+	// Banner-class credential failures (session-expired / auth), sorted by
+	// key for a deterministic response. Same QuotaSyncErrs source as the
+	// quota SyncErr projection above — a successful sync clears the record
+	// there, so this slice self-clears on recovery with no extra state.
+	credentialAlerts := make([]appapi.CredentialAlert, 0, len(state.QuotaSyncErrs))
+	for key, syncErr := range state.QuotaSyncErrs {
+		if class := runtimestate.CredentialAlertClass(syncErr.Err); class != "" {
+			credentialAlerts = append(credentialAlerts, appapi.CredentialAlert{
+				Key:   key,
+				Class: class,
+				Err:   syncErr.Err,
+				Since: syncErr.At.Unix(),
+			})
+		}
+	}
+	sort.Slice(credentialAlerts, func(i, j int) bool { return credentialAlerts[i].Key < credentialAlerts[j].Key })
+
 	cacheInfo := map[string]any{"enabled": false}
 	if stats := state.Cache.Stats(); stats.Entries > 0 || stats.Hits > 0 || state.Cache != nil {
 		models := make([]map[string]any, 0, len(stats.Models))
@@ -147,16 +165,17 @@ func (s *Service) Dashboard(now time.Time) appapi.Dashboard {
 	return appapi.Dashboard{
 		// Truncate to whole seconds: Go's Duration.String() would render
 		// nanosecond precision ("4m26.428520875s") — noise for a header label.
-		Uptime:          time.Since(state.StartedAt).Truncate(time.Second).String(),
-		Listen:          state.Listen,
-		Health:          health,
-		ModelLocks:      modelLocks,
-		Quota:           quota,
-		Schedule:        append(json.RawMessage(nil), state.Schedule...),
-		Counters:        counters,
-		Cache:           cacheInfo,
-		Warnings:        append([]string(nil), state.RouteWarnings...),
-		CredentialStore: string(credstore.ResolvedMode()),
+		Uptime:           time.Since(state.StartedAt).Truncate(time.Second).String(),
+		Listen:           state.Listen,
+		Health:           health,
+		ModelLocks:       modelLocks,
+		Quota:            quota,
+		Schedule:         append(json.RawMessage(nil), state.Schedule...),
+		Counters:         counters,
+		Cache:            cacheInfo,
+		Warnings:         append([]string(nil), state.RouteWarnings...),
+		CredentialAlerts: credentialAlerts,
+		CredentialStore:  string(credstore.ResolvedMode()),
 	}
 }
 

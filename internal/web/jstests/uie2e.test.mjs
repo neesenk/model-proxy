@@ -3023,3 +3023,73 @@ test('accounts 页 Add Provider：static + Fetch 预览 + token 建号 (modal �
   assert.ok(!(cfg.yaml || '').includes('e2e-addprov'), 'yaml must not carry the new provider');
   assert.deepEqual(await ctx.pageErrors(), [], 'add provider 不得有 JS 错误');
 });
+
+// 全局凭据横幅：/api/status credential_alerts 出现 → 所有 tab 常驻（含
+// re-login 命令与 title 原文）；alerts 清空（凭据恢复）→ 横幅移除。fetch 打桩
+// 只替换 /api/status 一个面（同 switch-500 族的 window.fetch 覆盖手法），其余
+// 请求原样透传，真实 daemon fixture 不需要真的造一个过期账号。
+test('全局凭据横幅随 /api/status credential_alerts 出现与消失 (横幅族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // 起点先钉住"健康态无横幅"（hidden + 不占布局）。
+  await ctx.waitFor('banner hidden when healthy', () => ctx.ev(
+    `document.getElementById('cred-banner').hidden === true`));
+  await ctx.ev(`(() => {
+    window.__credAlerts = [{ key: 'aqp#71e0ea4fa4d06266', class: 'session-expired',
+      err: 'session expired (HTTP 401): Session expired', since: 1762857510 }];
+    window.__origFetchCb = window.fetch;
+    window.fetch = (url, ...rest) => {
+      if (String(url).endsWith('/api/status')) {
+        return window.__origFetchCb('/api/status', ...rest).then((r) => r.json()).then((body) => {
+          body.credential_alerts = window.__credAlerts;
+          return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+        });
+      }
+      return window.__origFetchCb(url, ...rest);
+    };
+  })()`);
+  try {
+    // Status tab 自己的 /api/status tick 立即驱动横幅（无需等 5s conn tick）。
+    await ctx.ev(`document.querySelector('[data-tab="status"]').click()`);
+    await ctx.waitFor('banner visible with re-login hint', () => ctx.ev(
+      `(() => {
+        const el = document.getElementById('cred-banner');
+        if (!el || el.hidden) return false;
+        const text = el.textContent;
+        return text.includes('session expired') && text.includes('model-proxy login aqp')
+          && el.textContent.includes('71e0ea4f');
+      })()`));
+    const title = await ctx.ev(`document.querySelector('.cred-banner-line').getAttribute('title')`);
+    assert.ok(String(title).includes('Session expired'), '原始错误必须进 title 供排查');
+    // 可见性不只是 DOM 存在：渲染后的横幅必须有非零几何且不被样式隐藏
+    // （uivisual 的健康 fixture 截不到告警态，可见性在此钉住）。
+    const geo = await ctx.ev(`(() => {
+      const el = document.getElementById('cred-banner');
+      const r = el.getBoundingClientRect();
+      const cs = getComputedStyle(el);
+      return { h: r.height, w: r.width, display: cs.display, visibility: cs.visibility };
+    })()`);
+    assert.ok(geo.h > 0 && geo.w > 0, `banner must render with non-zero geometry, got ${JSON.stringify(geo)}`);
+    assert.equal(geo.display !== 'none' && geo.visibility !== 'hidden', true);
+    // 横幅属于全局 chrome：切到 Requests tab 仍在（conn tick 数据已缓存渲染）。
+    await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
+    await ctx.waitFor('requests tab active', () => ctx.ev(
+      `document.getElementById('tab-requests').classList.contains('active')`));
+    assert.equal(await ctx.ev(`document.getElementById('cred-banner').hidden`), false,
+      '横幅必须跨 tab 常驻');
+    // 恢复：alerts 清空（同步成功）→ 下一次 /api/status 落地后横幅移除。
+    await ctx.ev(`window.__credAlerts = []`);
+    await ctx.ev(`document.querySelector('[data-tab="status"]').click()`);
+    await ctx.waitFor('banner removed after recovery', () => ctx.ev(
+      `document.getElementById('cred-banner').hidden === true`));
+  } finally {
+    await ctx.ev(`(() => {
+      window.fetch = window.__origFetchCb; delete window.__origFetchCb; delete window.__credAlerts;
+    })()`);
+    // 桩已卸：真实 /api/status（无 alerts）再刷一次，把横幅钉回健康态给后续用例。
+    await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
+    await ctx.ev(`document.querySelector('[data-tab="status"]').click()`);
+    await ctx.waitFor('banner back to healthy truth', () => ctx.ev(
+      `document.getElementById('cred-banner').hidden === true`));
+  }
+  assert.deepEqual(await ctx.pageErrors(), [], '横幅路径不得有 JS 错误');
+});

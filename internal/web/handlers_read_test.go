@@ -352,6 +352,7 @@ func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
 			ModelLocks: map[string][]map[string]any{"r": {{"provider": "p"}}}, Quota: map[string]any{"p": 99},
 			Schedule: json.RawMessage(`{"enabled":true}`), Counters: map[string]appapi.Metrics{"p": {Requests: 2}},
 			Cache: map[string]any{"hits": 1}, Warnings: []string{"watch quota"},
+			CredentialAlerts: []appapi.CredentialAlert{{Key: "aqp#acc1", Class: "session-expired", Err: "session expired (HTTP 401): Session expired", Since: 1762857510}},
 		},
 		accounts:   []appapi.ProviderAccounts{{Name: "upstream", ProviderID: "p", Billing: "metered", Accounts: []appapi.Account{{ID: "a", Label: "primary"}}}},
 		tokens:     []appapi.TokenUsage{{Provider: "p", Model: "m", Input: 3, Output: 4, CacheCreation: 1, CacheRead: 2, Total: 10, Requests: 1}},
@@ -373,20 +374,24 @@ func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
 
 	status := serveRead(t, s, http.MethodGet, "/api/status")
 	var gotStatus struct {
-		Uptime   string                      `json:"uptime"`
-		Version  string                      `json:"version"`
-		Listen   string                      `json:"listen"`
-		Warnings []string                    `json:"warnings"`
-		Counters map[string]appapi.Metrics   `json:"counters"`
-		Schedule json.RawMessage             `json:"schedule"`
-		Health   map[string]any              `json:"health"`
-		Cache    map[string]any              `json:"cache"`
-		Quota    map[string]any              `json:"quota"`
-		Locks    map[string][]map[string]any `json:"model_locks"`
+		Uptime           string                      `json:"uptime"`
+		Version          string                      `json:"version"`
+		Listen           string                      `json:"listen"`
+		Warnings         []string                    `json:"warnings"`
+		Counters         map[string]appapi.Metrics   `json:"counters"`
+		Schedule         json.RawMessage             `json:"schedule"`
+		Health           map[string]any              `json:"health"`
+		Cache            map[string]any              `json:"cache"`
+		Quota            map[string]any              `json:"quota"`
+		Locks            map[string][]map[string]any `json:"model_locks"`
+		CredentialAlerts []appapi.CredentialAlert    `json:"credential_alerts"`
 	}
 	decodeReadJSON(t, status, &gotStatus)
 	if status.Code != http.StatusOK || gotStatus.Uptime != "1m" || gotStatus.Version != "v-test" || gotStatus.Listen != "127.0.0.1:8317" || gotStatus.Counters["p"].Requests != 2 || gotStatus.Health["p"] != "healthy" || gotStatus.Quota["p"] != float64(99) || gotStatus.Cache["hits"] != float64(1) || len(gotStatus.Locks["r"]) != 1 || string(gotStatus.Schedule) != `{"enabled":true}` || strings.Join(gotStatus.Warnings, ",") != "watch quota" {
 		t.Fatalf("unexpected status projection: %#v", gotStatus)
+	}
+	if len(gotStatus.CredentialAlerts) != 1 || gotStatus.CredentialAlerts[0].Key != "aqp#acc1" || gotStatus.CredentialAlerts[0].Class != "session-expired" || gotStatus.CredentialAlerts[0].Since != 1762857510 {
+		t.Fatalf("credential_alerts = %#v, want the aqp session-expired entry", gotStatus.CredentialAlerts)
 	}
 
 	accounts := serveRead(t, s, http.MethodGet, "/api/accounts")

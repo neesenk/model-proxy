@@ -196,6 +196,42 @@ export function syncErrLabel(kind) {
   }
 }
 
+// credentialBannerHTML renders the global credential banner's lines from
+// /api/status credential_alerts (backend pre-filtered: session-expired and
+// auth only — not-logged-in never banners, non-credential sync failures are
+// noise). Each line folds the pooled key via providerDisplayName (labels may
+// be null: the "name · <8-char id>" fallback) and states the operator fix;
+// the raw error rides the title attribute. Empty string when there is
+// nothing to show — the caller then hides the container. Persistent by
+// design: the backend record clears on the next successful quota sync, so
+// the banner disappears exactly when the credential recovers; it is
+// deliberately not dismissible.
+export function credentialBannerHTML(alerts, labels) {
+  if (!Array.isArray(alerts) || alerts.length === 0) return '';
+  return alerts.map((a) => {
+    if (!a || !a.key) return '';
+    const name = providerDisplayName(a.key, labels);
+    const parent = splitProviderKey(a.key).parent;
+    const title = a.err ? ` title="${esc(a.err)}"` : '';
+    if (a.class === 'session-expired') {
+      return `<div class="cred-banner-line"${title}>⚠ <strong>${esc(name)}</strong> session expired — run <code>model-proxy login ${esc(parent)}</code> to re-login</div>`;
+    }
+    return `<div class="cred-banner-line"${title}>⚠ <strong>${esc(name)}</strong> credential rejected — update this account's key</div>`;
+  }).filter(Boolean).join('');
+}
+
+// legFailureSummary extracts the one-line failure evidence from a failover
+// leg's response body (auth error text, upstream error peek, transport
+// error). Whitespace-collapsed and capped at 160 chars — the full body stays
+// in the raw response body panel. '' when the leg recorded no evidence.
+export function legFailureSummary(body) {
+  if (!body) return '';
+  const line = String(body).split('\n').map((s) => s.trim()).filter(Boolean)[0] || '';
+  const flat = line.replace(/\s+/g, ' ');
+  if (!flat) return '';
+  return flat.length > 160 ? flat.slice(0, 159) + '…' : flat;
+}
+
 // scheduleCredentialLabel renders the Schedule chain-node badge text for a
 // credential-class sync failure (backend classifies via
 // runtime.CredentialErrClass; values "session-expired" | "not-logged-in" |
@@ -3408,6 +3444,12 @@ export function requestMetaHTML(r, rel, o) {
     }
     if (r.attempt_only) {
       result += ' <span class="badge muted">failover leg</span>';
+      // Failure evidence first line (auth error text / upstream peek /
+      // transport error) right in the RESULT group — a bare status with an
+      // empty body is exactly how a session expiry masqueraded as a server
+      // fault (2026-11-11). Full body stays in the raw response panel.
+      const ev = legFailureSummary(r.response_body);
+      if (ev) result += ` <span class="leg-evidence">${esc(ev)}</span>`;
     }
     g('result', result);
     if (r.attempt_only) {

@@ -92,6 +92,10 @@ type StatusResp struct {
 	Counters   map[string]StatusCounters    `json:"counters"`
 	Cache      *CacheStats                  `json:"cache"`
 	Warnings   []string                     `json:"warnings"`
+	// CredentialAlerts mirrors /api/status `credential_alerts` (the global
+	// banner source); the CLI DTO keeps --json passthrough complete — no
+	// dedicated terminal section is rendered (banner is a Web-only surface).
+	CredentialAlerts []CredentialAlert `json:"credential_alerts"`
 }
 
 // CacheStats mirrors the documented /api/status `cache` object
