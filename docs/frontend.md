@@ -69,7 +69,7 @@ pure.js `modelsRefreshResultHTML` 生成），失败显示后端 message，不�
 状态存模块级 `modelsRefreshResults` map（provider → {html, busy, timer}）：成功后的
 `renderStatusTab()` 重建本区，浮层靠该 map 在每次渲染时回填（同 Schedule 卡
 `routeTestResults` 的存活模式）；进行中（busy）的浮层不可关闭，结果浮层点击外部、
-Esc 或 20s 自动关闭。
+Esc 或 20s 自动关闭。浮层打开时 provider 卡允许溢出并提升层级，避免模型较少时被卡片边界裁切或被后续卡片遮挡；长结果在浮层内有界滚动。
 
 **Models 区每 provider 卡的模型行状态开关**（`toggleModel`）：每行末列是一个
 `input[type=checkbox].switch` 状态开关（macOS 风格：勾选 = 蓝色轨道+白色滑块靠右，

@@ -1486,6 +1486,20 @@ test('status 页 schedule route test 与 models catalog refresh (mutation 族)',
       return p && !p.hidden && p.hasAttribute('data-popup') && p.textContent.includes('model kept'); })()`));
   await ctx.waitFor('refresh button re-enabled after the verdict', () => ctx.ev(
     `(() => { const b = document.querySelector('[data-models-refresh="dummy"]'); return b && !b.disabled && b.textContent === 'Refresh'; })()`));
+  assert.equal(await ctx.ev(`(() => {
+    const p = document.querySelector('[data-models-refresh-pop="dummy"]');
+    p.textContent = Array.from({length: 80}, (_, i) => 'Result ' + i).join('\\n');
+    p.style.whiteSpace = 'pre-line';
+    const card = p.closest('.card');
+    card.scrollIntoView({block: 'start'});
+    const r = p.getBoundingClientRect();
+    const c = card.getBoundingClientRect();
+    const style = getComputedStyle(card);
+    const x = r.left + 10, y = Math.min(r.bottom - 5, innerHeight - 5);
+    return r.bottom > c.bottom && style.overflowY === 'visible'
+      && p.scrollHeight > p.clientHeight
+      && p.contains(document.elementFromPoint(x, y));
+  })()`), true, 'long refresh results escape a short provider card and remain scrollable and unobscured');
   await ctx.ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
   await ctx.waitFor('Escape dismisses the refresh popover', () => ctx.ev(
     `(() => { const p = document.querySelector('[data-models-refresh-pop="dummy"]'); return !p || p.hidden; })()`));

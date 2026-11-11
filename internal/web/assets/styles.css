@@ -1612,6 +1612,13 @@ input[type="checkbox"] { accent-color: var(--accent); }
    holds while it's open); content re-fills from app.js modelsRefreshResults
    across the post-refresh re-render. Anchored to the card head's right edge,
    so it aligns right instead of clipping the viewport. */
+/* The result can be taller than a provider's model table. Keep it outside
+   the card's clipping box and above subsequent provider cards. */
+.card:has(.models-refresh-pop:not([hidden])) {
+  overflow: visible;
+  position: relative;
+  z-index: 30;
+}
 .models-refresh-wrap { position: relative; margin-left: 4px; }
 .models-refresh-pop {
   position: absolute;
@@ -1621,7 +1628,9 @@ input[type="checkbox"] { accent-color: var(--accent); }
   display: grid;
   gap: 4px;
   width: max-content;
-  max-width: 340px;
+  max-width: min(340px, calc(100vw - 32px));
+  max-height: 60vh;
+  overflow: auto;
   padding: 8px 10px;
   background: var(--surface);
   border: 1px solid var(--border);
