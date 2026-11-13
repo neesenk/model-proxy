@@ -1546,21 +1546,27 @@ export function linkedAgents(session, sessions, agentFacets) {
 // analyticsPointValue; label/axis drive the segmented control and the uPlot
 // y-axis. gap=true means "no data" renders as a missing bar (a bucket with
 // no requests has no error rate or latency, and an unpriced series has no
-// cost). Every metric renders as translucent columns (analyticsBarPaths):
-// each is one aggregate per bucket, where a line would imply traffic
-// between sparse buckets. tokens is the four-bucket total (the server's
-// unified `tokens` field — the same definition everywhere).
+// cost). stack=true marks the additive metrics — quantities that sum across
+// series — which render as stacked columns (each series is one cumulative
+// segment of the bucket's total; rates/averages keep overlapping columns,
+// since summing percentages or latencies across series distorts them).
+// Every metric renders as columns (analyticsBarPaths): each is one aggregate
+// per bucket, where a line would imply traffic between sparse buckets.
+// tokens is the four-bucket total (the server's unified `tokens` field —
+// the same definition everywhere); errors is the server's `failures` count
+// (additive, so it stacks), and errpct keeps the ratio view (err_pct).
 export const ANALYTICS_METRICS = [
-  { id: 'tokens', label: 'Tokens', axis: 'tokens', gap: false },
-  { id: 'toksec', label: 'Tok/s', axis: 'tok/s', gap: true },
-  { id: 'cache', label: 'Cache', axis: 'cache hit %', gap: true },
-  { id: 'latency', label: 'Latency', axis: 'avg ms', gap: true },
-  { id: 'ttft', label: 'TTFT', axis: 'avg ms', gap: true },
-  { id: 'requests', label: 'Requests', axis: 'requests', gap: false },
-  { id: 'failovers', label: 'Failovers', axis: 'failovers', gap: false },
-  { id: 'rate429', label: '429s', axis: '429s', gap: false },
-  { id: 'errors', label: 'Errors', axis: 'error %', gap: true },
-  { id: 'cost', label: 'Cost', axis: 'USD', gap: true },
+  { id: 'tokens', label: 'Tokens', axis: 'tokens', gap: false, stack: true },
+  { id: 'toksec', label: 'Tok/s', axis: 'tok/s', gap: true, stack: false },
+  { id: 'cache', label: 'Cache', axis: 'cache hit %', gap: true, stack: false },
+  { id: 'latency', label: 'Latency', axis: 'avg ms', gap: true, stack: false },
+  { id: 'ttft', label: 'TTFT', axis: 'avg ms', gap: true, stack: false },
+  { id: 'requests', label: 'Requests', axis: 'requests', gap: false, stack: true },
+  { id: 'failovers', label: 'Failovers', axis: 'failovers', gap: false, stack: true },
+  { id: 'rate429', label: '429s', axis: '429s', gap: false, stack: true },
+  { id: 'errors', label: 'Errors', axis: 'errors', gap: false, stack: true },
+  { id: 'errpct', label: 'Err %', axis: 'error %', gap: true, stack: false },
+  { id: 'cost', label: 'Cost', axis: 'USD', gap: true, stack: true },
 ];
 
 // analyticsMetricOptions returns the metric segment's option list for the
@@ -1590,9 +1596,11 @@ export function analyticsMetricAllowed(metricId, by, agent) {
 // by the SERVER (the unified interface — one definition, see the handler's
 // foldTotals/derivedPoint); this is a thin reader, not a second formula:
 // - tokens: four-bucket total (server field; zero-fills as a count metric)
+// - errors: server `failures` count (additive — the stacking chart metric);
+//   zero-fills like the other counters
+// - errpct: server err_pct, null = no data (gap metric draws a uPlot gap)
 // - cost: null for unpriced points (no configured price — never fabricated)
-// - errors/toksec/cache: server err_pct/tok_sec/cache_hit_pct, null = no
-//   data (gap metrics draw a uPlot gap)
+// - toksec/cache: server tok_sec/cache_hit_pct, null = no data
 // - latency/ttft: bucket averages (requests-weighted server-side), null
 //   without requests
 export function analyticsPointValue(p, kind) {
@@ -1603,7 +1611,8 @@ export function analyticsPointValue(p, kind) {
     case 'requests': return Number(p.requests || 0);
     case 'failovers': return Number(p.failovers || 0);
     case 'rate429': return Number(p.rate_limited_429 || 0);
-    case 'errors': return p.err_pct == null ? null : Number(p.err_pct);
+    case 'errors': return Number(p.failures || 0);
+    case 'errpct': return p.err_pct == null ? null : Number(p.err_pct);
     case 'latency': return p.requests ? Number(p.avg_latency_ms || 0) : null;
     case 'ttft': return p.requests ? Number(p.avg_ttft_ms || 0) : null;
     case 'toksec': return p.tok_sec == null ? null : Number(p.tok_sec);
@@ -1720,7 +1729,8 @@ export function analyticsRowSortKey(r, metricId) {
     case 'requests': return r.requests;
     case 'failovers': return r.failovers;
     case 'rate429': return r.rateLimited;
-    case 'errors': return r.errPct == null ? -1 : r.errPct;
+    case 'errors': return r.failures;
+    case 'errpct': return r.errPct == null ? -1 : r.errPct;
     case 'latency': return r.latencyMs == null ? -1 : r.latencyMs;
     case 'ttft': return r.ttftMs == null ? -1 : r.ttftMs;
     case 'toksec': return r.tokSec == null ? -1 : r.tokSec;
@@ -1796,20 +1806,46 @@ export function analyticsSortRows(rows, metricId, sort) {
 }
 
 // analyticsValueText renders one metric value for display (chart tooltip,
-// live legend): metric-aware units, null/NaN → em dash. tokens/requests use
-// fmtCompact; cost keeps 4 decimals (per-bucket sums are small); rates keep
-// one decimal; latency rounds to ms.
+// live legend): metric-aware units, null/NaN → em dash. tokens/requests/
+// errors use fmtCompact (errors is a count); cost keeps 4 decimals
+// (per-bucket sums are small); rates keep one decimal; latency rounds to ms.
 export function analyticsValueText(metricId, v) {
   if (v == null || !isFinite(v)) return '—';
   switch (metricId) {
     case 'cost': return '$' + v.toFixed(4);
-    case 'errors':
+    case 'errpct':
     case 'cache': return v.toFixed(1) + '%';
     case 'latency':
     case 'ttft': return Math.round(v) + 'ms';
     case 'toksec': return v.toFixed(1) + ' t/s';
     default: return fmtCompact(v);
   }
+}
+
+// analyticsTipOrder returns the VISIBLE series indices (0-based into the
+// caller's per-series arrays) in tooltip row order. Stacked metrics mirror
+// the column: the topmost segment is series N, so rows run index-descending —
+// the tooltip reads top-to-bottom exactly like the bucket's stacked blocks.
+// Rate/average metrics (no stack) sort by the hovered bucket's value,
+// largest first (null/NaN "no data" rows last, ties stable by index).
+// hidden[i] marks legend-toggled series, excluded from both the order and
+// the column itself.
+export function analyticsTipOrder(values, hidden, stacked) {
+  const vals = Array.isArray(values) ? values : [];
+  const idx = [];
+  for (let i = 0; i < vals.length; i++) {
+    if (hidden && hidden[i]) continue;
+    idx.push(i);
+  }
+  if (stacked) return idx.reverse();
+  return idx.sort((a, b) => {
+    const va = vals[a], vb = vals[b];
+    const na = va == null || !isFinite(va), nb = vb == null || !isFinite(vb);
+    if (na && nb) return a - b;
+    if (na) return 1;
+    if (nb) return -1;
+    return (vb - va) || (a - b);
+  });
 }
 
 // pctDelta returns the percent change from prev to cur ((cur-prev)/prev*100,
@@ -4554,10 +4590,12 @@ export function shadowMatchBadge(rate) {
 // Metric switcher options for the MCP Analytics trend chart. The granularity
 // switcher reuses ANALYTICS_GRAN_OPTIONS (the analyticsGranularity window
 // gating) — this MCP view intentionally shares that single implementation.
+// stack follows ANALYTICS_METRICS' semantics: the additive counters (calls/
+// errors) stack; the latency average does not.
 export const MCP_ANALYTICS_METRICS = [
-  { id: 'calls', label: 'Calls', axis: 'calls', gap: false },
-  { id: 'errors', label: 'Errors', axis: 'errors', gap: false },
-  { id: 'avg_ms', label: 'Avg ms', axis: 'ms', gap: true },
+  { id: 'calls', label: 'Calls', axis: 'calls', gap: false, stack: true },
+  { id: 'errors', label: 'Errors', axis: 'errors', gap: false, stack: true },
+  { id: 'avg_ms', label: 'Avg ms', axis: 'ms', gap: true, stack: false },
 ];
 
 // mcpAnalyticsMetricOptions returns the metric segment's option list for the

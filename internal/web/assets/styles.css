@@ -2323,6 +2323,9 @@ dialog.tk-fixed .modal-body { max-height: calc(100vh - 150px); }
   flex-wrap: wrap;
   margin-bottom: 8px;
 }
+/* The metric segment holds 11 options (incl. Err %); let it wrap to a
+   second row on narrow windows instead of overflowing the card. */
+.an-chart-head .an-seg { flex-wrap: wrap; }
 .an-chart { min-width: 0; }
 .an-chart .uplot {
   font-family: var(--mono);
@@ -2541,6 +2544,9 @@ dialog.tk-fixed .modal-body { max-height: calc(100vh - 150px); }
 .an-tip .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .an-tip .lab { max-width: 150px; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
 .an-tip .row span:last-child { margin-left: auto; padding-left: 12px; }
+/* Stacked-metric total row: set off from the per-series rows it sums. */
+.an-tip .row.tot { border-top: 1px solid var(--border); margin-top: 3px; padding-top: 3px; }
+.an-tip .row.tot .lab { color: var(--text); }
 
 .dash-wrap .kpi-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 /* Dashboard pane header: names the fixed window so the numbers are readable

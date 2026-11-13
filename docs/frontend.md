@@ -273,7 +273,9 @@ tab 重入经 `retainTab` 守卫。
   `tool_series`），UI 契约与 **Analytics 页同款**——同一 `tokenRangePickerHTML` 时间选择器
   （无 Quota Window 预设）、同一 auto 粒度分段钮（`analyticsGranOptions` 跨度 gating、
   切范围重置 auto、all-time 锚定重发）、同一 X 轴标签密度降级（`analyticsXAxisValues`）、
-  柱形图 + 拖选缩放（Reset Zoom）+ tooltip + 可点击 legend chip。默认窗口 Last 1h；
+  柱形图 + 拖选缩放（Reset Zoom）+ tooltip + 可点击 legend chip；柱形渲染同款堆叠语义
+  （加性指标 Calls/Errors 每序列堆为当桶总量的一个累计段、tooltip 带 Total 行；
+  Avg ms 均值不堆、保持重叠柱——见 `internal/web/assets/AGENTS.md` 图表行）。默认窗口 Last 1h；
   **Last 1h/Today 为 live 窗口，30s 自动刷新**（tick 走 `deferAutoRefresh` 入口/提交
   双门；切子标签停止、进入重新武装，`mcpShowSubTab` 负责）。
   并发守卫：响应落地用 seq 比对防旧数据覆盖新筛选；在途 loading 标志同样只有

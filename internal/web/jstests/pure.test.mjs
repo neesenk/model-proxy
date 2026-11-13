@@ -26,7 +26,7 @@ import {
   fmtGuardDetail, fmtProgressBytes, analyticsChartSeries, analyticsPointValue, analyticsTableRows, analyticsTickLabel,
   ANALYTICS_METRICS, pctDelta, analyticsGranularity, analyticsGranOptions, analyticsValueText,
   HEAT_DAYS, analyticsHeatLevel, analyticsYearGrid, analyticsYearMonthSpans, analyticsHeatCellSize, analyticsHeatTip,
-  analyticsRowSortKey, ANALYTICS_TABLE_SORT, analyticsTableSortValue, analyticsSortRows,
+  analyticsRowSortKey, ANALYTICS_TABLE_SORT, analyticsTableSortValue, analyticsSortRows, analyticsTipOrder,
   analyticsMetricOptions, analyticsMetricAllowed,
   modelHealthFromSeries, modelHealthGrade, MODEL_HEALTH_DIMS, liveSessionSummary,
   liveSessionOrder, shortSessionId,
@@ -1282,7 +1282,7 @@ test('analyticsChartSeries keeps null cost for unpriced and missing buckets', ()
 test('analyticsChartSeries spans the caller grid: zero-fill counts, gap rates', () => {
   const series = [
     { provider: 'aqp', model: 'glm', points: [
-      { bucket: 200, requests: 3, tokens: 15, avg_latency_ms: 0, err_pct: 0 },
+      { bucket: 200, requests: 3, tokens: 15, avg_latency_ms: 0, err_pct: 0, failures: 2 },
     ] },
   ];
   // Window grid covers 100..300 but only bucket 200 has traffic.
@@ -1293,8 +1293,12 @@ test('analyticsChartSeries spans the caller grid: zero-fill counts, gap rates', 
   // Bucket 200 carries avg_latency_ms 0 with requests → 0; empty buckets
   // stay null ("no data", not 0ms).
   assert.deepEqual(lat.ys, [[null, 0, null]]);
-  const err = analyticsChartSeries(series, 'errors', [100, 200, 300]);
-  assert.deepEqual(err.ys, [[null, 0, null]]); // server 0% with requests, gaps around
+  const errs = analyticsChartSeries(series, 'errors', [100, 200, 300]);
+  // errors is the additive failure count: zero-fills like requests.
+  assert.deepEqual(errs.ys, [[0, 2, 0]]);
+  const errpct = analyticsChartSeries(series, 'errpct', [100, 200, 300]);
+  // errpct keeps gap semantics: server 0% with requests, gaps around.
+  assert.deepEqual(errpct.ys, [[null, 0, null]]);
   // Buckets outside the grid (e.g. rounding at the window edge) still show.
   const union = analyticsChartSeries(series, 'tokens', [150]);
   assert.deepEqual(union.x, [150, 200]);
@@ -1332,18 +1336,21 @@ test('analyticsTickLabel anchors dates at midnight and month starts', () => {
 test('analyticsChartSeries derives the gap/count metrics and agent labels', () => {
   const series = [
     { agent: 'codex', provider: 'aqp', model: 'glm', points: [
-      // Server-derived fields: 50% err, 300ms latency, 75% cache hit.
-      { bucket: 100, requests: 2, tokens: 24, err_pct: 50, avg_latency_ms: 300, avg_ttft_ms: 30, cache_hit_pct: 75 },
+      // Server-derived fields: 50% err (1 of 2 failed), 300ms latency, 75% cache hit.
+      { bucket: 100, requests: 2, tokens: 24, err_pct: 50, failures: 1, avg_latency_ms: 300, avg_ttft_ms: 30, cache_hit_pct: 75 },
       // No requests → rate/latency are null ("no data"), not zero.
-      { bucket: 200, requests: 0, tokens: 0, err_pct: null, avg_latency_ms: 0, avg_ttft_ms: 0, cache_hit_pct: null },
+      { bucket: 200, requests: 0, tokens: 0, err_pct: null, failures: 0, avg_latency_ms: 0, avg_ttft_ms: 0, cache_hit_pct: null },
     ] },
     { provider: 'zhipu', model: 'glm', points: [
-      { bucket: 100, requests: 4, tokens: 16, err_pct: 0, avg_latency_ms: 100, avg_ttft_ms: 10, cache_hit_pct: 0 },
+      { bucket: 100, requests: 4, tokens: 16, err_pct: 0, failures: 3, avg_latency_ms: 100, avg_ttft_ms: 10, cache_hit_pct: 0 },
     ] },
   ];
   const errs = analyticsChartSeries(series, 'errors');
   assert.deepEqual(errs.labels, ['codex/glm', 'zhipu/glm']);
-  assert.deepEqual(errs.ys, [[50, null], [0, null]]); // missing bucket gaps too
+  // errors is the failure count: zero-fills missing buckets.
+  assert.deepEqual(errs.ys, [[1, 0], [3, 0]]);
+  const errpct = analyticsChartSeries(series, 'errpct');
+  assert.deepEqual(errpct.ys, [[50, null], [0, null]]); // missing bucket gaps too
   const lat = analyticsChartSeries(series, 'latency');
   assert.deepEqual(lat.ys, [[300, null], [100, null]]);
   const ttft = analyticsChartSeries(series, 'ttft');
@@ -1358,12 +1365,17 @@ test('analyticsChartSeries derives the gap/count metrics and agent labels', () =
 test('analyticsPointValue reads server fields and never fabricates', () => {
   assert.equal(analyticsPointValue({ cost: null }, 'cost'), null);
   assert.equal(analyticsPointValue(null, 'tokens'), null);
-  assert.equal(analyticsPointValue({ err_pct: null }, 'errors'), null);
+  assert.equal(analyticsPointValue({ err_pct: null }, 'errpct'), null);
   assert.equal(analyticsPointValue({ cache_hit_pct: null }, 'cache'), null);
   // tokens is the server's four-bucket total (a count: absent → 0).
   assert.equal(analyticsPointValue({ tokens: 14 }, 'tokens'), 14);
   assert.equal(analyticsPointValue({}, 'tokens'), 0);
-  assert.equal(analyticsPointValue({ err_pct: 25 }, 'errors'), 25);
+  // errors is the server's additive failure count (absent → 0); errpct is
+  // the ratio view and keeps null = "no data".
+  assert.equal(analyticsPointValue({ failures: 4 }, 'errors'), 4);
+  assert.equal(analyticsPointValue({}, 'errors'), 0);
+  assert.equal(analyticsPointValue(null, 'errors'), null);
+  assert.equal(analyticsPointValue({ err_pct: 25 }, 'errpct'), 25);
   assert.equal(analyticsPointValue({ cache_hit_pct: 75 }, 'cache'), 75);
   // tok/s: the server's OUTPUT-decode-speed field (output ÷ full call
   // seconds); null without call time.
@@ -1374,26 +1386,38 @@ test('analyticsPointValue reads server fields and never fabricates', () => {
 
 test('ANALYTICS_METRICS covers exactly the chart metric ids', () => {
   assert.deepEqual(ANALYTICS_METRICS.map((m) => m.id),
-    ['tokens', 'toksec', 'cache', 'latency', 'ttft', 'requests', 'failovers', 'rate429', 'errors', 'cost']);
+    ['tokens', 'toksec', 'cache', 'latency', 'ttft', 'requests', 'failovers', 'rate429', 'errors', 'errpct', 'cost']);
   for (const m of ANALYTICS_METRICS) {
     assert.ok(m.label && m.axis, `metric ${m.id} needs label+axis`);
     assert.equal(typeof m.gap, 'boolean', `metric ${m.id} needs a gap flag`);
+    assert.equal(typeof m.stack, 'boolean', `metric ${m.id} needs a stack flag`);
   }
-  // failovers/429s are additive attempt counts: zero-fill like requests,
+  // failovers/429s/errors are additive counts: zero-fill like requests,
   // never uPlot gaps.
   assert.equal(ANALYTICS_METRICS.find((m) => m.id === 'failovers').gap, false);
   assert.equal(ANALYTICS_METRICS.find((m) => m.id === 'rate429').gap, false);
+  assert.equal(ANALYTICS_METRICS.find((m) => m.id === 'errors').gap, false);
+  // stack marks exactly the additive metrics (quantities that sum across
+  // series into one cumulative column); rates/averages/percentages never
+  // stack — summing them across series would distort them.
+  assert.deepEqual(
+    ANALYTICS_METRICS.filter((m) => m.stack).map((m) => m.id),
+    ['tokens', 'requests', 'failovers', 'rate429', 'errors', 'cost']);
 });
 
 test('failover/429 metrics disable on agent-dimension reads', () => {
   // by=agent and any agent filter both reroute to agent_buckets, which has
   // no failover/429 columns — the metrics are structurally absent, not zero.
+  // errors/errpct stay enabled there: agent_buckets carries failures (and
+  // the server derives err_pct from it).
   const model = analyticsMetricOptions('model', '');
   assert.ok(model.every((o) => !o.disabled), 'model dimension: all metrics enabled');
   const byAgent = analyticsMetricOptions('agent', '');
   assert.equal(byAgent.find((o) => o.value === 'failovers').disabled, true);
   assert.equal(byAgent.find((o) => o.value === 'rate429').disabled, true);
   assert.equal(byAgent.find((o) => o.value === 'tokens').disabled, false);
+  assert.equal(byAgent.find((o) => o.value === 'errors').disabled, false);
+  assert.equal(byAgent.find((o) => o.value === 'errpct').disabled, false);
   const agentFilter = analyticsMetricOptions('model', 'codex');
   assert.equal(agentFilter.find((o) => o.value === 'failovers').disabled, true);
   // The allowed-pick gate: an unavailable stored pick falls back (caller
@@ -1402,6 +1426,7 @@ test('failover/429 metrics disable on agent-dimension reads', () => {
   assert.equal(analyticsMetricAllowed('failovers', 'agent', ''), false);
   assert.equal(analyticsMetricAllowed('rate429', 'model', 'codex'), false);
   assert.equal(analyticsMetricAllowed('tokens', 'agent', 'codex'), true);
+  assert.equal(analyticsMetricAllowed('errpct', 'agent', 'codex'), true);
 });
 
 test('failover/429 read as count metrics from points and totals', () => {
@@ -1472,7 +1497,8 @@ test('analyticsValueText formats per metric and null-safes', () => {
   assert.equal(analyticsValueText('tokens', 30268), '30.3K');
   assert.equal(analyticsValueText('requests', 999), '999');
   assert.equal(analyticsValueText('cost', 0.01234), '$0.0123');
-  assert.equal(analyticsValueText('errors', 12.25), '12.3%');
+  assert.equal(analyticsValueText('errors', 1225), '1.2K'); // count, not %
+  assert.equal(analyticsValueText('errpct', 12.25), '12.3%');
   assert.equal(analyticsValueText('cache', 0), '0.0%');
   assert.equal(analyticsValueText('latency', 1234.5), '1235ms');
   assert.equal(analyticsValueText('ttft', 320.4), '320ms');
@@ -3852,12 +3878,31 @@ test('analyticsTableSortValue reads columns and null-safes', () => {
   assert.equal(analyticsTableSortValue(bare, 'requests'), 0); // count metrics zero, not null
 });
 
+test('analyticsTipOrder mirrors the chart: stacked top-down, rates by value', () => {
+  // Stacked metrics: rows read top-to-bottom like the column's blocks —
+  // series index DESCENDING (the first series sits at the column's bottom).
+  // Hidden (legend-toggled) series drop out of both the column and the tip.
+  assert.deepEqual(analyticsTipOrder([30, 20, 10], [false, false, false], true), [2, 1, 0]);
+  assert.deepEqual(analyticsTipOrder([30, 20, 10], [false, true, false], true), [2, 0]);
+  // Rate/average metrics: the hovered bucket's value, largest first; null
+  // ("no data") rows sort last; ties stay stable by series index.
+  assert.deepEqual(analyticsTipOrder([30, 20, 10], null, false), [0, 1, 2]);
+  assert.deepEqual(analyticsTipOrder([20, 30, 10], null, false), [1, 0, 2]);
+  assert.deepEqual(analyticsTipOrder([20, 30, 10], [true, false, false], false), [1, 2]);
+  assert.deepEqual(analyticsTipOrder([null, 30, 10], null, false), [1, 2, 0]);
+  assert.deepEqual(analyticsTipOrder([5, 5, 8], null, false), [2, 0, 1]);
+  assert.deepEqual(analyticsTipOrder([], null, true), []);
+  assert.deepEqual(analyticsTipOrder(null, null, false), []);
+});
+
 test('analyticsRowSortKey survives the move to pure.js unchanged', () => {
   // Shared with the Status→Dashboard leaderboard: metric-key mapping with
-  // null sentinels.
+  // null sentinels. errors sorts by the failure count; errpct keeps the
+  // ratio's null sentinel.
   assert.equal(analyticsRowSortKey({ requests: 2 }, 'requests'), 2);
   assert.equal(analyticsRowSortKey({ tokens: 7 }, 'tokens'), 7);
-  assert.equal(analyticsRowSortKey({ errPct: null }, 'errors'), -1);
+  assert.equal(analyticsRowSortKey({ failures: 3 }, 'errors'), 3);
+  assert.equal(analyticsRowSortKey({ errPct: null }, 'errpct'), -1);
   assert.equal(analyticsRowSortKey({ cost: null }, 'cost'), -1);
 });
 
@@ -4025,6 +4070,11 @@ test('takeoverClientLabel renders family names, not variant ids', () => {
 test('MCP_ANALYTICS_METRICS lists calls/errors/avg_ms', () => {
   assert.deepEqual(MCP_ANALYTICS_METRICS.map((m) => m.id), ['calls', 'errors', 'avg_ms']);
   assert.ok(MCP_ANALYTICS_METRICS.every((m) => m.label && m.axis));
+  // Same stacking semantics as ANALYTICS_METRICS: the additive counters
+  // stack, the latency average does not.
+  assert.deepEqual(
+    MCP_ANALYTICS_METRICS.filter((m) => m.stack).map((m) => m.id),
+    ['calls', 'errors']);
 });
 
 test('mcpAnalyticsMetricOptions exposes the three metrics', () => {

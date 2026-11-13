@@ -36,7 +36,7 @@ import {
   analyticsChartSeries, analyticsTableRows, ANALYTICS_METRICS, pctDelta, analyticsTickLabel,
   analyticsGranularity, analyticsGranOptions, analyticsValueText, modelHealthFromSeries, fmtCompact,
   HEAT_DAYS, analyticsHeatLevel, analyticsYearGrid, analyticsYearMonthSpans, analyticsHeatCellSize, analyticsHeatTip,
-  analyticsRowSortKey, ANALYTICS_TABLE_SORT, analyticsSortRows,
+  analyticsRowSortKey, ANALYTICS_TABLE_SORT, analyticsSortRows, analyticsTipOrder,
   analyticsMetricOptions, analyticsMetricAllowed,
   liveSessionSummary, liveSessionOrder, shortSessionId, linkedProviders, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary, guardMarksDetailHTML, requestMetaHTML, orderDetailRecords, committedRecordOf,
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
@@ -5912,13 +5912,13 @@ function uplotAxisStyle() {
 }
 
 // dashRenderChart draws the dashboard's metric trend chart with uPlot — the
-// same translucent per-bucket columns, tooltip and legend chips as the
-// Analytics tab (shared helpers), but with the x window pinned to the
-// trailing hour and no drag-zoom: this is an at-a-glance live view, the
-// Analytics tab remains the deep-dive tool. The y scale keeps the 0 baseline
-// (all metrics are non-negative; auto-zoom would magnify noise). Updates the
-// existing instance in place (u.setData + sliding x window) when the series
-// set is unchanged so a refresh neither flickers nor resets hover.
+// same per-bucket columns (stacked for the additive metrics), tooltip and
+// legend chips as the Analytics tab (shared helpers), but with the x window
+// pinned to the trailing hour and no drag-zoom: this is an at-a-glance live
+// view, the Analytics tab remains the deep-dive tool. The y scale keeps the
+// 0 baseline (all metrics are non-negative; auto-zoom would magnify noise).
+// Updates the existing instance in place (u.setData + sliding x window) when
+// the series set is unchanged so a refresh neither flickers nor resets hover.
 function dashRenderChart(host, legendHost) {
   if (!host || !legendHost) return;
   if (typeof uPlot === 'undefined') { // vendored script failed to load
@@ -5958,7 +5958,7 @@ function dashRenderChart(host, legendHost) {
   const uSeries = [{ label: 'time' }];
   data.labels.forEach((label, i) => {
     const stroke = colors[i % colors.length];
-    uSeries.push({ label, stroke, width: 1, fill: withAlpha(stroke, 0.55), paths: analyticsBarPaths(), points: { show: false } });
+    uSeries.push({ label, stroke, width: 1, fill: withAlpha(stroke, 0.55), paths: analyticsBarPaths(metric.stack), points: { show: false } });
   });
   const axis = uplotAxisStyle();
   try {
@@ -5971,11 +5971,12 @@ function dashRenderChart(host, legendHost) {
         // The x window is derived from the live data on every (re)autscale,
         // so it slides with each fetch's trailing-hour slice; the padded
         // range keeps edge columns unclipped (see analyticsXRange). y keeps
-        // the 0 baseline (all metrics are non-negative).
+        // the 0 baseline (all metrics are non-negative; stacked metrics cap
+        // at the largest visible-series column sum, analyticsYRange).
         x: { time: true, range: (u, min, max) => (u.data[0] && u.data[0].length ? analyticsXRange(u.data[0]) : [min, max]) },
-        y: { range: (_u, min, max) => [0, Math.max(max, min || 0, 1)] },
+        y: { range: analyticsYRange(metric.stack) },
       },
-      plugins: [analyticsTooltip(dashMetric, 'minute')],
+      plugins: [analyticsTooltip(dashMetric, 'minute', metric.stack)],
       axes: [
         { ...axis, values: analyticsXAxisValues },
         { label: metric.axis, size: 60, ...axis, values: (_u, splits) => splits.map((v) => (v == null ? '' : fmtCompact(v))) },
@@ -10723,13 +10724,18 @@ function withAlpha(color, a) {
 
 // analyticsBarPaths returns a per-series uPlot path builder that draws one
 // column per bucket instead of a connecting line — the honest rendering for
-// the additive metrics (tokens/cost/requests): an empty bucket has NO bar
-// (not a zero-line), and a lone bucket is a single column (not a long
-// interpolating diagonal). Columns span 70% of the smallest gap between
-// adjacent x ticks (the window grid is complete, so the gap is the bucket
-// step) and overlap translucently across series; the legend's
-// click-to-toggle isolates a noisy series.
-function analyticsBarPaths() {
+// bucket aggregates: an empty bucket has NO bar (not a zero-line), and a
+// lone bucket is a single column (not a long interpolating diagonal).
+// Columns span 70% of the smallest gap between adjacent x ticks (the window
+// grid is complete, so the gap is the bucket step). With stacked=true (the
+// additive metrics — tokens/requests/failovers/429s/error counts/cost) each
+// column segment sits on the sum of the VISIBLE series below it, so one
+// column's height reads the bucket total and each color its per-series
+// share; a legend toggle re-runs every path builder, so hiding a series
+// re-stacks the remainder. Without it (rates/averages — values that cannot
+// be summed across series) columns keep overlapping translucently from the
+// 0 baseline, and the legend's click-to-toggle isolates a noisy series.
+function analyticsBarPaths(stacked) {
   return (u, sidx, i0, i1) => {
     const p = new Path2D();
     const xs = u.data[0];
@@ -10741,27 +10747,94 @@ function analyticsBarPaths() {
     }
     if (!isFinite(step)) step = 3600; // single bucket: hour-wide default
     const wSec = step * 0.35; // half-width → 70% total span
-    const yBase = u.valToPos(0, 'y', true);
+    // The stacked segment's floor: the bucket's sum over the series BELOW
+    // this one that the legend still shows (a hidden series contributes to
+    // neither the floor nor the total). Unstacked charts floor at 0.
+    const below = stacked
+      ? (i) => {
+          let sum = 0;
+          for (let j = 1; j < sidx; j++) {
+            if (u.series[j].show === false) continue;
+            const v = u.data[j][i];
+            if (v != null) sum += v;
+          }
+          return sum;
+        }
+      : () => 0;
     for (let i = i0; i <= i1; i++) {
       const v = ys[i];
       if (v == null) continue;
-      const yV = u.valToPos(v, 'y', true);
-      if (yBase - yV < 0.5) continue; // zero-height column = no usage
+      const base = below(i);
+      const y0 = u.valToPos(base, 'y', true);
+      const yV = u.valToPos(base + v, 'y', true);
+      if (y0 - yV < 0.5) continue; // zero-height segment = no usage
       const x0 = u.valToPos(xs[i] - wSec, 'x', true);
       const x1 = u.valToPos(xs[i] + wSec, 'x', true);
-      p.rect(x0, yV, x1 - x0, yBase - yV);
+      p.rect(x0, yV, x1 - x0, y0 - yV);
     }
     return { stroke: p, fill: p };
   };
 }
 
+// analyticsYRange builds the trend charts' y scale range callback. Every
+// chart metric is non-negative, so the floor stays pinned at 0 (auto-zoom
+// would magnify noise and drop the columns' shared baseline). For stacked
+// metrics the ceiling must come from the largest VISIBLE-series column SUM
+// in the current x window — uPlot's data-derived max only sees per-series
+// values, so a stacked column would otherwise overflow the plot top. The
+// callback re-runs on redraws (legend toggles, drag-zoom re-fits), reading
+// live visibility each time. Unstacked metrics keep uPlot's own max.
+function analyticsYRange(stacked) {
+  return (u, min, max) => {
+    if (!stacked) return [0, Math.max(max, min || 0, 1)];
+    const xs = u.data[0] || [];
+    let xMin = -Infinity, xMax = Infinity;
+    try {
+      if (u.scales.x && u.scales.x.min != null && u.scales.x.max != null) {
+        xMin = u.scales.x.min;
+        xMax = u.scales.x.max;
+      }
+    } catch (_) { /* fall back to the whole window */ }
+    let top = 0;
+    for (let i = 0; i < xs.length; i++) {
+      if (xs[i] < xMin || xs[i] > xMax) continue;
+      let sum = 0;
+      for (let j = 1; j < u.series.length; j++) {
+        if (u.series[j].show === false) continue;
+        const v = u.data[j][i];
+        if (v != null) sum += v;
+      }
+      if (sum > top) top = sum;
+    }
+    return [0, Math.max(top, 1)];
+  };
+}
+
+// stackTotalRow composes the tooltip's trailing Total row for stacked
+// metrics: the bucket's sum over VISIBLE series, formatted by the caller's
+// metric formatter (the same exclusion the stacked column itself applies).
+// Returns '' when fewer than two visible series carry values — a lone
+// series' bar already reads as its own total.
+function stackTotalRow(u, idx, fmt) {
+  let sum = 0, n = 0;
+  for (let i = 1; i < u.series.length; i++) {
+    if (u.series[i].show === false) continue;
+    const v = u.data[i][idx];
+    if (v != null) { sum += v; n++; }
+  }
+  return n >= 2 ? `<div class="row tot"><span class="lab">Total</span><span>${esc(fmt(sum))}</span></div>` : '';
+}
+
 // analyticsTooltip builds a uPlot plugin rendering a floating tooltip at the
 // cursor: the bucket's local time plus one row per VISIBLE series (color dot,
-// label, metric-formatted value — legend-toggled series are skipped). The tip
-// lives inside u.over so it clips with the plot; pointer-events: none keeps
-// it from swallowing the cursor. Flips to the left of the cursor near the
-// right edge.
-function analyticsTooltip(metricId, gran) {
+// label, metric-formatted value — legend-toggled series are skipped), and a
+// trailing Total row for stacked metrics (the column's full height). Row
+// order mirrors the chart (analyticsTipOrder): stacked metrics read
+// top-to-bottom like the column's blocks, rate metrics by value descending.
+// The tip lives inside u.over so it clips with the plot; pointer-events:
+// none keeps it from swallowing the cursor. Flips to the left of the cursor
+// near the right edge.
+function analyticsTooltip(metricId, gran, stacked) {
   return {
     hooks: {
       init: (u) => {
@@ -10780,14 +10853,24 @@ function analyticsTooltip(metricId, gran) {
           return;
         }
         const t = u.data[0][idx];
+        // Row order mirrors the chart (analyticsTipOrder): stacked metrics
+        // read top-to-bottom like the column's blocks, rate metrics by the
+        // bucket's value descending.
+        const seriesIdx = [];
+        for (let i = 1; i < u.series.length; i++) seriesIdx.push(i);
+        const values = seriesIdx.map((i) => u.data[i][idx]);
+        const hidden = seriesIdx.map((i) => u.series[i].show === false);
         let rows = '';
-        for (let i = 1; i < u.series.length; i++) {
-          if (u.series[i].show === false) continue; // legend-toggled off
-          const v = u.data[i][idx];
-          const stroke = u.series[i].stroke;
+        for (const k of analyticsTipOrder(values, hidden, stacked)) {
+          const i = seriesIdx[k];
+          // uPlot normalizes stroke into a function at init — evaluate it to
+          // get the color (the raw property is never a string at runtime).
+          const raw = u.series[i].stroke;
+          const stroke = typeof raw === 'function' ? raw(u, i) : raw;
           const dot = typeof stroke === 'string' ? ` style="background:${stroke}"` : '';
-          rows += `<div class="row"><i class="dot"${dot}></i><span class="lab">${esc(u.series[i].label)}</span><span>${esc(analyticsValueText(metricId, v))}</span></div>`;
+          rows += `<div class="row"><i class="dot"${dot}></i><span class="lab">${esc(u.series[i].label)}</span><span>${esc(analyticsValueText(metricId, values[k]))}</span></div>`;
         }
+        if (stacked) rows += stackTotalRow(u, idx, (v) => analyticsValueText(metricId, v));
         tip.innerHTML = `<div class="t">${esc(analyticsBucketLabel(t, gran))}</div>${rows}`;
         tip.hidden = false;
         // Position next to the cursor, flipping near the right edge.
@@ -10829,11 +10912,13 @@ function analyticsRenderCharts(panel, resp, metricId, gran) {
   const fullRange = analyticsXRange(data.x);
   const series = [{ label: 'time' }];
   data.labels.forEach((label, i) => {
-    // Every metric renders as translucent columns (one aggregate per
-    // bucket): a connecting line would imply traffic between sparse
-    // buckets, and isolated points read as scatter, not as levels.
+    // Every metric renders as columns (one aggregate per bucket): a
+    // connecting line would imply traffic between sparse buckets, and
+    // isolated points read as scatter, not as levels. Additive metrics
+    // stack (each series one cumulative segment of the bucket total);
+    // rates/averages overlap translucently (analyticsBarPaths).
     const stroke = colors[i % colors.length];
-    series.push({ label, stroke, width: 1, fill: withAlpha(stroke, 0.55), paths: analyticsBarPaths(), points: { show: false } });
+    series.push({ label, stroke, width: 1, fill: withAlpha(stroke, 0.55), paths: analyticsBarPaths(metric.stack), points: { show: false } });
   });
   // Canvas-drawn axis text/ticks/grid don't inherit CSS: forward the theme
   // colors (same helper as the Status→Dashboard charts) so the axes stay
@@ -10847,14 +10932,15 @@ function analyticsRenderCharts(panel, resp, metricId, gran) {
     series,
     // Every metric here is a non-negative quantity, so the y scale is pinned
     // to a 0 baseline: uPlot's auto-zoom would magnify noise (a 5%→8% error
-    // rate as a full-height cliff) and drop the bar columns' shared floor.
-    // The x scale pads both edges (see analyticsXRange) so edge columns
-    // render at full width with breathing room at the right — and defers to
-    // an active drag-zoom selection, which auto-refresh re-renders must
-    // preserve instead of resetting.
+    // rate as a full-height cliff) and drop the bar columns' shared floor —
+    // and stacked metrics cap at the largest visible-series column sum
+    // (analyticsYRange). The x scale pads both edges (see analyticsXRange)
+    // so edge columns render at full width with breathing room at the
+    // right — and defers to an active drag-zoom selection, which
+    // auto-refresh re-renders must preserve instead of resetting.
     scales: {
       x: { time: true, range: () => (anZoom ? [anZoom.from, anZoom.to] : fullRange) },
-      y: { range: (_u, min, max) => [0, Math.max(max, min || 0, 1)] },
+      y: { range: analyticsYRange(metric.stack) },
     },
     cursor: { drag: { x: true, y: false, setScale: true } },
     hooks: {
@@ -10869,7 +10955,7 @@ function analyticsRenderCharts(panel, resp, metricId, gran) {
         }
       }],
     },
-    plugins: [analyticsTooltip(metric.id, gran)],
+    plugins: [analyticsTooltip(metric.id, gran, metric.stack)],
     axes: [
       { ...axis, values: analyticsXAxisValues },
       { label: metric.axis, size: 60, ...axis, values: (_u, splits) => splits.map((v) => (v == null ? '' : fmtCompact(v))) },
@@ -12092,7 +12178,7 @@ function mcpAnalyticsRenderChart(view, series, metricId, gran) {
   const uSeries = [{ label: 'time' }];
   data.labels.forEach((label, i) => {
     const stroke = colors[i % colors.length];
-    uSeries.push({ label, stroke, width: 1, fill: withAlpha(stroke, 0.55), paths: analyticsBarPaths(), points: { show: false } });
+    uSeries.push({ label, stroke, width: 1, fill: withAlpha(stroke, 0.55), paths: analyticsBarPaths(metric.stack), points: { show: false } });
   });
   const axis = uplotAxisStyle();
   const opts = {
@@ -12102,7 +12188,7 @@ function mcpAnalyticsRenderChart(view, series, metricId, gran) {
     series: uSeries,
     scales: {
       x: { time: true, range: () => (mcpAnalyticsZoom ? [mcpAnalyticsZoom.from, mcpAnalyticsZoom.to] : fullRange) },
-      y: { range: (_u, min, max) => [0, Math.max(max, min || 0, 1)] },
+      y: { range: analyticsYRange(metric.stack) },
     },
     cursor: { drag: { x: true, y: false, setScale: true } },
     hooks: {
@@ -12117,7 +12203,7 @@ function mcpAnalyticsRenderChart(view, series, metricId, gran) {
         }
       }],
     },
-    plugins: [mcpAnalyticsChartTooltip(metric.id, gran)],
+    plugins: [mcpAnalyticsChartTooltip(metric.id, gran, metric.stack)],
     axes: [
       { ...axis, values: analyticsXAxisValues },
       { label: metric.axis, size: 60, ...axis, values: (_u, splits) => splits.map((v) => (v == null ? '' : fmtCompact(v))) },
@@ -12151,9 +12237,9 @@ function mcpAnalyticsZoomControls(view) {
 }
 
 // mcpAnalyticsChartTooltip is the MCP Analytics variant of analyticsTooltip:
-// same floating bucket label + series rows, but values formatted by the active
-// MCP metric (calls/errors/avg_ms).
-function mcpAnalyticsChartTooltip(metricId, gran) {
+// same floating bucket label + series rows + stacked Total row, but values
+// formatted by the active MCP metric (calls/errors/avg_ms).
+function mcpAnalyticsChartTooltip(metricId, gran, stacked) {
   return {
     hooks: {
       init: (u) => {
@@ -12172,14 +12258,24 @@ function mcpAnalyticsChartTooltip(metricId, gran) {
           return;
         }
         const t = u.data[0][idx];
+        // Row order mirrors the chart (analyticsTipOrder, shared with the
+        // Analytics tooltip): stacked metrics top-to-bottom like the column,
+        // rate metrics by the bucket's value descending.
+        const seriesIdx = [];
+        for (let i = 1; i < u.series.length; i++) seriesIdx.push(i);
+        const values = seriesIdx.map((i) => u.data[i][idx]);
+        const hidden = seriesIdx.map((i) => u.series[i].show === false);
         let rows = '';
-        for (let i = 1; i < u.series.length; i++) {
-          if (u.series[i].show === false) continue;
-          const v = u.data[i][idx];
-          const stroke = u.series[i].stroke;
+        for (const k of analyticsTipOrder(values, hidden, stacked)) {
+          const i = seriesIdx[k];
+          // uPlot normalizes stroke into a function at init — evaluate it to
+          // get the color (the raw property is never a string at runtime).
+          const raw = u.series[i].stroke;
+          const stroke = typeof raw === 'function' ? raw(u, i) : raw;
           const dot = typeof stroke === 'string' ? ` style="background:${stroke}"` : '';
-          rows += `<div class="row"><i class="dot"${dot}></i><span class="lab">${esc(u.series[i].label)}</span><span>${esc(mcpAnalyticsValueText(metricId, v))}</span></div>`;
+          rows += `<div class="row"><i class="dot"${dot}></i><span class="lab">${esc(u.series[i].label)}</span><span>${esc(mcpAnalyticsValueText(metricId, values[k]))}</span></div>`;
         }
+        if (stacked) rows += stackTotalRow(u, idx, (v) => mcpAnalyticsValueText(metricId, v));
         tip.innerHTML = `<div class="t">${esc(analyticsBucketLabel(t, gran))}</div>${rows}`;
         tip.hidden = false;
         const w = tip.offsetWidth, h = tip.offsetHeight;
