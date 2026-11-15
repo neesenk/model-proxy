@@ -204,9 +204,10 @@ func TestStartupProviderKeyMigration_MovesBareHistoryOntoVirtualKey(t *testing.T
 	}
 	bareKey := observestats.Key{Provider: "shopee", Model: "glm-5"}
 	vidKey := observestats.Key{Provider: "shopee#" + oldID, Model: "glm-5"}
-	if err := store.Flush(1791900000, map[observestats.Key]observestats.Counters{
-		bareKey: {Requests: 82242, Input: 100, Output: 50, TokenRequests: 82242, LastRequestAt: 1791900060},
-		vidKey:  {Requests: 3, Input: 7, Output: 4, TokenRequests: 3, LastRequestAt: 1791900070},
+	at := seedMinute(t)
+	if err := store.Flush(at, map[observestats.Key]observestats.Counters{
+		bareKey: {Requests: 82242, Input: 100, Output: 50, TokenRequests: 82242, LastRequestAt: at + 60},
+		vidKey:  {Requests: 3, Input: 7, Output: 4, TokenRequests: 3, LastRequestAt: at + 70},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -276,8 +277,8 @@ func TestStartupProviderKeyMigration_NoPoolNoRename(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Flush(1791900000, map[observestats.Key]observestats.Counters{
-		{Provider: "zhipu", Model: "glm-5"}: {Requests: 5, TokenRequests: 5, LastRequestAt: 1791900060},
+	if err := store.Flush(seedMinute(t), map[observestats.Key]observestats.Counters{
+		{Provider: "zhipu", Model: "glm-5"}: {Requests: 5, TokenRequests: 5, LastRequestAt: seedMinute(t) + 60},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -328,8 +329,9 @@ func TestReloadProviderKeyMigration_ConvertsLegacySingularWithoutRestart(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Flush(1791900000, map[observestats.Key]observestats.Counters{
-		{Provider: "zhipu", Model: "glm-5"}: {Requests: 82242, Input: 100, Output: 50, TokenRequests: 82242, LastRequestAt: 1791900060},
+	at := seedMinute(t)
+	if err := store.Flush(at, map[observestats.Key]observestats.Counters{
+		{Provider: "zhipu", Model: "glm-5"}: {Requests: 82242, Input: 100, Output: 50, TokenRequests: 82242, LastRequestAt: at + 60},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -436,4 +438,17 @@ func TestReloadProviderKeyMigration_ConvertsLegacySingularWithoutRestart(t *test
 	if got := p.metrics.Snapshot()[counters.PMKey{Provider: poolKey, Model: "glm-5"}].Requests; got != 82243 {
 		t.Fatalf("cumulative metrics requests = %d, want 82243", got)
 	}
+}
+
+// seedMinute returns the minute timestamp used to seed legacy-era bucket
+// history. It must stay RELATIVE to wall-clock time: the proxy's stats store
+// prunes minute buckets older than the (default 30-day) retention on every
+// flusher cycle, so a fixed historical epoch turns these fixtures into time
+// bombs — 1791900000 (2026-10-13) aged out of the window on 2026-11-12 and
+// TestReloadProviderKeyMigration_ConvertsLegacySingularWithoutRestart began
+// losing its adopted row to the mid-test p.flusher.Flush prune. Two hours old
+// is comfortably inside any plausible retention window and before `until`.
+func seedMinute(t *testing.T) int64 {
+	t.Helper()
+	return time.Now().Add(-2*time.Hour).Unix() / 60 * 60
 }
