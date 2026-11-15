@@ -65,6 +65,8 @@ scripts/build.sh --strip all       # 全矩阵（linux/darwin/windows），-s -w
 ```yaml
 listen: 127.0.0.1:15721    # 默认回环；非回环需配置 web.auth（admin_token_file + api_keys_file），否则 validate 拒绝
 log_level: info                # debug|info|warn|error 级别过滤（低于所配级别的日志被丢弃）；非法值启动报错；startup-only，改后需重启
+log_rotate_max_size: 134217728 # 运行日志(serve.log)轮转上限，copy+truncate 语义（缺省 128MB；0=不轮转）；startup-only
+log_rotate_keep: 4             # 轮转归档保留份数（缺省 4）
 # proxy: http://127.0.0.1:7890   # 全局上游代理：http/https/socks5 URL 或 off（强制直连）。
                                # 留空 = 自动链：环境变量(HTTPS_PROXY/HTTP_PROXY/NO_PROXY) → 系统代理 → 直连。
                                # providers.<name>.proxy_url 可逐 provider 覆盖（作用于转发/fusion/shadow 流量）；
@@ -134,6 +136,9 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 #   mcp_split: true         # MCP 网关交换单独成流（mcp-*.log，目录 mcp_dir 默认
 #                           # ~/.model-proxy/log/mcp，同样需绝对路径）；Requests 页回到 LLM-only，
 #                           # /api/requests?kind=mcp 读拆分流。默认关，重启生效
+#   disk_guard:             # 磁盘护栏（缺省 enabled/50GiB/95%，可不写）：卷空闲 <min_free_bytes
+#     min_free_bytes: 53687091200  # 或使用率 >=max_used_percent 时，每小时 sweep 按最旧优先
+#     max_used_percent: 95         # 删轮转文件至条件解除；活动文件与 index.db 永不删
 # guard:                    # 出站安全扫描（DLP，转发前扫描请求 body；详见下文「出站安全扫描与审计」）
 #   secrets: log            # 秘密扫描动作：log（默认，放行 + 告警）| redact（替换 [REDACTED] 后放行）
 #                           # | block（400 拒绝）| off（不扫）

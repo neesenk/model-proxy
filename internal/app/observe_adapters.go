@@ -3,6 +3,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/logx"
@@ -19,22 +20,34 @@ func (p *Proxy) initRequestLog(config configdomain.RequestLogConfig) {
 	if !config.Enabled {
 		return
 	}
+	// The disk guard's armed conditions, resolved once and shared by both
+	// streams' options and the announcement line (one source of truth).
+	var guardMinFree int64
+	var guardMaxUsed int
+	if config.DiskGuard.GuardArmed() {
+		guardMinFree = config.DiskGuard.MinFreeBytes
+		guardMaxUsed = config.DiskGuard.MaxUsedPercent
+	}
 	p.reqLog = requestlog.New(requestlog.Options{
-		Directory:    config.ResolvedDir(),
-		MaxFileSize:  config.MaxFileSizeBytes(),
-		MaxBodyBytes: config.MaxBodyBytesValue(),
-		Retention:    config.RetentionDuration(),
+		Directory:      config.ResolvedDir(),
+		MaxFileSize:    config.MaxFileSizeBytes(),
+		MaxBodyBytes:   config.MaxBodyBytesValue(),
+		Retention:      config.RetentionDuration(),
+		MinFreeBytes:   guardMinFree,
+		MaxUsedPercent: guardMaxUsed,
 	})
 	// The split MCP stream: same policy values (size/body cap/retention), its
 	// own directory and mcp- file prefix. Restart-only like reqLog; no tailing
 	// index follows it (web kind=mcp reads fall back to directory scans).
 	if config.MCPSplit {
 		p.mcpReqLog = requestlog.New(requestlog.Options{
-			Directory:    config.ResolvedMCPDir(),
-			FilePrefix:   requestlog.MCPFilePrefix,
-			MaxFileSize:  config.MaxFileSizeBytes(),
-			MaxBodyBytes: config.MaxBodyBytesValue(),
-			Retention:    config.RetentionDuration(),
+			Directory:      config.ResolvedMCPDir(),
+			FilePrefix:     requestlog.MCPFilePrefix,
+			MaxFileSize:    config.MaxFileSizeBytes(),
+			MaxBodyBytes:   config.MaxBodyBytesValue(),
+			Retention:      config.RetentionDuration(),
+			MinFreeBytes:   guardMinFree,
+			MaxUsedPercent: guardMaxUsed,
 		})
 	}
 	// The tailing index is a derived view of the same directory: an open
@@ -47,12 +60,17 @@ func (p *Proxy) initRequestLog(config configdomain.RequestLogConfig) {
 	} else {
 		p.reqLogIndex = indexer
 	}
+	guardNote := ""
+	if guardMinFree > 0 || guardMaxUsed > 0 {
+		guardNote = fmt.Sprintf(", disk guard min_free=%d max_used=%d%%", guardMinFree, guardMaxUsed)
+	}
 	logx.Infof(
-		"[request_log] enabled -> %s (max_file_size %d bytes, max_body %d bytes, retention %s)",
+		"[request_log] enabled -> %s (max_file_size %d bytes, max_body %d bytes, retention %s%s)",
 		config.ResolvedDir(),
 		config.MaxFileSizeBytes(),
 		config.MaxBodyBytesValue(),
 		config.RetentionDuration(),
+		guardNote,
 	)
 	if p.mcpReqLog != nil {
 		logx.Infof("[request_log] mcp_split on -> mcp records to %s", config.ResolvedMCPDir())

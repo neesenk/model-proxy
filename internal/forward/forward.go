@@ -952,7 +952,12 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 			ti = -1 // restart at the first replacement target (post-statement ti++ → 0)
 			continue
 		}
-		logx.Warnf("[proto=%s model=%s] target %d (%s/%s) failed; trying next", proto, exposed, ti, t.Provider, t.Model)
+		// The status is the leg's observed upstream answer (429/401/5xx…);
+		// 0 means a transport-level failure whose own "upstream error" line
+		// sits directly above. Without it, plain 429/502 legs leave no reason
+		// in serve.log — only the request-log attempt row knows.
+		logx.Warnf("[proto=%s model=%s] target %d (%s/%s) failed (status %d); trying next",
+			proto, exposed, ti, t.Provider, t.Model, result.AttemptStatus)
 		// Attempt row for the failed leg: same request id and attempt number
 		// as the eventual committed row, attempt_only-marked so usage/session
 		// aggregates keep counting committed calls. Without it the failover

@@ -28,11 +28,19 @@ import (
 const FusionProvider = "fusion"
 
 type Config struct {
-	Listen    string                   `yaml:"listen"`
-	LogLevel  string                   `yaml:"log_level"`
-	LogFile   string                   `yaml:"log_file"`
-	Providers map[string]Provider      `yaml:"providers"`
-	Routes    map[string][]RouteTarget `yaml:"routes"`
+	Listen   string `yaml:"listen"`
+	LogLevel string `yaml:"log_level"`
+	LogFile  string `yaml:"log_file"`
+	// LogRotateMaxSize caps the serve log's size before copy+truncate
+	// rotation (startup-only, like log_level); 0 disables rotation. Absent
+	// keys default to DefaultLogRotateMaxSize — rawConfig's pointer field
+	// distinguishes "unset" from an explicit 0.
+	LogRotateMaxSize int64 `yaml:"-"`
+	// LogRotateKeep is how many rotated serve-log archives to retain; an
+	// absent key defaults to DefaultLogRotateKeep at parse time.
+	LogRotateKeep int                      `yaml:"-"`
+	Providers     map[string]Provider      `yaml:"providers"`
+	Routes        map[string][]RouteTarget `yaml:"routes"`
 	// RouteStrategies holds per-route scheduling strategies declared inline
 	// in the routes: block (the map form `{strategy: <name>, targets: [...]}`),
 	// keyed by exposed route name. Absent entry = RouteStrategyQuota (the
@@ -759,6 +767,42 @@ type RequestLogConfig struct {
 	// `session_id` and live /api/events `session_id`). Defaults to
 	// DefaultSessionHeaders.
 	SessionHeaders []string `yaml:"session_headers"`
+	// DiskGuard bounds this block's streams' disk usage; see DiskGuardConfig.
+	// Defaults to the armed built-ins (rawConfig presets them like the guard
+	// bools, so an absent block guards while `enabled: false` opts out).
+	DiskGuard DiskGuardConfig `yaml:"disk_guard"`
+}
+
+// DiskGuardConfig arms the request-log disk-space guard: when the volume
+// holding a stream's directory drops below MinFreeBytes free bytes or its
+// used share reaches MaxUsedPercent, the hourly sweep deletes that stream's
+// rotated files oldest-first until the condition clears. The active file and
+// index.db are never deleted; the trailing index drops vanished files on its
+// next reconcile (the prune contract). A condition <= 0 disarms that
+// condition; Enabled false disarms the guard.
+type DiskGuardConfig struct {
+	Enabled        bool  `yaml:"enabled"`
+	MinFreeBytes   int64 `yaml:"min_free_bytes"`
+	MaxUsedPercent int   `yaml:"max_used_percent"`
+}
+
+// Built-in disk-guard defaults: a 50GiB free floor and a 95% usage ceiling.
+// A burst logging day (~95GiB observed on 2026-11-12) outruns any age window;
+// the floor is what keeps the volume alive.
+const (
+	DefaultDiskGuardMinFreeBytes   = 50 << 30
+	DefaultDiskGuardMaxUsedPercent = 95
+)
+
+// Built-in serve.log rotation defaults: rotate at 128MiB, keep 4 archives.
+const (
+	DefaultLogRotateMaxSize = 128 << 20
+	DefaultLogRotateKeep    = 4
+)
+
+// GuardArmed reports whether the disk guard should run for a stream.
+func (d DiskGuardConfig) GuardArmed() bool {
+	return d.Enabled && (d.MinFreeBytes > 0 || d.MaxUsedPercent > 0)
 }
 
 // DefaultSessionHeaders is the built-in session-header allowlist, tried in
@@ -1389,11 +1433,16 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 func parseConfigBytes(path string, data []byte) (*Config, error) {
 	cfg := &Config{}
 	type rawConfig struct {
-		Listen    string                     `yaml:"listen"`
-		LogLevel  string                     `yaml:"log_level"`
-		LogFile   string                     `yaml:"log_file"`
-		Providers map[string]Provider        `yaml:"providers"`
-		Routes    map[string]routeDefinition `yaml:"routes"`
+		Listen   string `yaml:"listen"`
+		LogLevel string `yaml:"log_level"`
+		LogFile  string `yaml:"log_file"`
+		// Pointers distinguish an absent rotate key (default applies) from an
+		// explicit 0 (rotation off) — the same values would collapse in a
+		// plain int64.
+		LogRotateMaxSize *int64                     `yaml:"log_rotate_max_size"`
+		LogRotateKeep    *int                       `yaml:"log_rotate_keep"`
+		Providers        map[string]Provider        `yaml:"providers"`
+		Routes           map[string]routeDefinition `yaml:"routes"`
 		// Must mirror Config.RoutePolicies (same silent-drop trap as the
 		// shadow knobs: without it the file's route_policy: would be dropped).
 		RoutePolicies map[string]RoutePolicy `yaml:"route_policy"`
@@ -1438,6 +1487,11 @@ func parseConfigBytes(path string, data []byte) (*Config, error) {
 		LogLevel: "info",
 		Web:      WebConfig{Enabled: true},
 		Pricing:  PricingConfig{Enabled: true},
+		RequestLog: RequestLogConfig{DiskGuard: DiskGuardConfig{
+			Enabled:        true,
+			MinFreeBytes:   DefaultDiskGuardMinFreeBytes,
+			MaxUsedPercent: DefaultDiskGuardMaxUsedPercent,
+		}},
 		// Guard bools default to true; yaml only overwrites fields present in
 		// the file, so an unset field keeps the default while an explicit
 		// false is honored (same pattern as Web.Enabled above). Adjudicate
@@ -1465,6 +1519,24 @@ func parseConfigBytes(path string, data []byte) (*Config, error) {
 	cfg.Listen = raw.Listen
 	cfg.LogLevel = raw.LogLevel
 	cfg.LogFile = raw.LogFile
+	// Rotation keys: absent -> built-in default, explicit 0 max -> rotation
+	// off, negative -> configuration error naming the key.
+	if raw.LogRotateMaxSize != nil {
+		if *raw.LogRotateMaxSize < 0 {
+			return nil, fmt.Errorf("log_rotate_max_size must be >= 0 (0 disables serve.log rotation), got %d", *raw.LogRotateMaxSize)
+		}
+		cfg.LogRotateMaxSize = *raw.LogRotateMaxSize
+	} else {
+		cfg.LogRotateMaxSize = DefaultLogRotateMaxSize
+	}
+	if raw.LogRotateKeep != nil {
+		if *raw.LogRotateKeep < 0 {
+			return nil, fmt.Errorf("log_rotate_keep must be >= 0 (0 keeps no archive), got %d", *raw.LogRotateKeep)
+		}
+		cfg.LogRotateKeep = *raw.LogRotateKeep
+	} else {
+		cfg.LogRotateKeep = DefaultLogRotateKeep
+	}
 	cfg.Providers = raw.Providers
 	// Normalize the routes block: both the historical list form and the map
 	// form ({strategy, targets}) land in the same two projections — targets

@@ -62,6 +62,14 @@ type Options struct {
 	QueueCapacity int
 	// Tag names the component in logx warnings (e.g. "seclog").
 	Tag string
+	// MinFreeBytes and MaxUsedPercent arm the disk-space guard: when the
+	// volume holding Directory drops below MinFreeBytes free bytes, or its
+	// used share reaches MaxUsedPercent, each hourly sweep deletes this
+	// stream's rotated files oldest-first until the condition clears. The
+	// active file and non-log entries (index.db) are never deleted. A
+	// condition <= 0 disarms that condition; both <= 0 disable the guard.
+	MinFreeBytes   int64
+	MaxUsedPercent int
 }
 
 // Logger owns the non-blocking queue and its single JSONL writer goroutine.
@@ -82,6 +90,10 @@ type Logger struct {
 	stopMu sync.Mutex
 	// writeLine is a test seam replacing the file writer; nil in production.
 	writeLine func(line []byte, now time.Time) error
+	// freeSpace is the volume-query seam behind the disk guard: production
+	// uses the platform implementation; tests inject deterministic values so
+	// no test fills a real disk.
+	freeSpace func(dir string) (free, total int64, err error)
 	// line is the reusable encode buffer; owned by the writer goroutine.
 	line []byte
 }
@@ -95,10 +107,11 @@ func New(opts Options) *Logger {
 		opts.MaxBytes = DefaultMaxBytes
 	}
 	return &Logger{
-		opts:    opts,
-		encodes: make(chan EncodeFunc, opts.QueueCapacity),
-		done:    make(chan struct{}),
-		closed:  make(chan struct{}),
+		opts:      opts,
+		encodes:   make(chan EncodeFunc, opts.QueueCapacity),
+		done:      make(chan struct{}),
+		closed:    make(chan struct{}),
+		freeSpace: volumeFreeSpace,
 	}
 }
 
@@ -190,13 +203,13 @@ func (l *Logger) Run() {
 	defer writer.Close()
 	ticker := time.NewTicker(SweepInterval)
 	defer ticker.Stop()
-	l.sweep(time.Now(), writer.Path())
+	l.sweepAndGuard(time.Now(), writer.Path())
 	for {
 		select {
 		case encode := <-l.encodes:
 			l.write(writer, encode, time.Now())
 		case <-ticker.C:
-			l.sweep(time.Now(), writer.Path())
+			l.sweepAndGuard(time.Now(), writer.Path())
 		case <-l.done:
 			for {
 				select {
@@ -209,6 +222,15 @@ func (l *Logger) Run() {
 			}
 		}
 	}
+}
+
+// sweepAndGuard runs one retention pass followed by the disk-space guard on
+// the same tick: the guard is the floor retention cannot provide — a burst
+// day can outrun any age window, and the fix is oldest-first deletion until
+// the volume recovers, not a younger cutoff.
+func (l *Logger) sweepAndGuard(now time.Time, activePath string) {
+	l.sweep(now, activePath)
+	l.guard(activePath)
 }
 
 func (l *Logger) write(writer *Writer, encode EncodeFunc, now time.Time) {
@@ -260,6 +282,95 @@ func (l *Logger) sweep(now time.Time, activePath string) {
 			}
 		}
 	}
+}
+
+// guard enforces the disk-space floor: while the volume holding Directory is
+// below MinFreeBytes free or at/above MaxUsedPercent used, delete this
+// stream's rotated files oldest-first. The active file and non-log entries
+// (index.db) are never deleted; deletion stops as soon as the projected free
+// space clears every armed condition (each removed file's size is added to
+// the observed free — no per-file re-query). Index consistency is the prune
+// contract: the daemon's reconcile (or the next startup's rebuild) drops the
+// rows of vanished files.
+func (l *Logger) guard(activePath string) {
+	if l.opts.MinFreeBytes <= 0 && l.opts.MaxUsedPercent <= 0 {
+		return
+	}
+	free, total, err := l.freeSpace(l.opts.Directory)
+	if err != nil {
+		logx.Warnf("[%s] disk guard: volume stats %s: %v", l.opts.Tag, l.opts.Directory, err)
+		return
+	}
+	if !l.guardTriggered(free, total) {
+		return
+	}
+	candidates, err := rotatedFiles(l.opts.Directory, l.opts.FilePrefix, filepath.Base(activePath))
+	if err != nil {
+		logx.Warnf("[%s] disk guard: list %s: %v", l.opts.Tag, l.opts.Directory, err)
+		return
+	}
+	var removed []PruneTarget
+	var freed int64
+	for _, tgt := range candidates {
+		if !l.guardTriggered(free, total) {
+			break
+		}
+		if err := os.Remove(filepath.Join(l.opts.Directory, tgt.Name)); err != nil {
+			logx.Warnf("[%s] disk guard: remove %s: %v", l.opts.Tag, tgt.Name, err)
+			break
+		}
+		removed = append(removed, tgt)
+		freed += tgt.Size
+		free += tgt.Size
+	}
+	if len(removed) == 0 {
+		logx.Warnf("[%s] disk guard: triggered but no rotated file is deletable (the active file and index are never removed)", l.opts.Tag)
+		return
+	}
+	logx.Infof("[%s] disk guard: deleted %d rotated file(s) (%s), volume free now ~%s",
+		l.opts.Tag, len(removed), formatGiB(freed), formatGiB(free))
+}
+
+// guardTriggered reports whether either armed condition holds for the given
+// (free, total) volume snapshot.
+func (l *Logger) guardTriggered(free, total int64) bool {
+	if l.opts.MinFreeBytes > 0 && free < l.opts.MinFreeBytes {
+		return true
+	}
+	if l.opts.MaxUsedPercent > 0 && total > 0 && (total-free)*100 >= total*int64(l.opts.MaxUsedPercent) {
+		return true
+	}
+	return false
+}
+
+// rotatedFiles lists the stream's rotated log files (prefix*.log except the
+// active file), oldest first by name — the deletion candidates of the disk
+// guard. Day/sequence-stamped rotation names sort chronologically, the same
+// ordering Prunable relies on.
+func rotatedFiles(dir, filePrefix, activeName string) ([]PruneTarget, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var targets []PruneTarget
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !isLogFile(name, filePrefix) || name == activeName {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		targets = append(targets, PruneTarget{Name: name, Size: info.Size()})
+	}
+	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
+	return targets, nil
+}
+
+// formatGiB renders a byte count in binary GiB for guard log lines.
+func formatGiB(n int64) string {
+	return fmt.Sprintf("%.1fGiB", float64(n)/(1<<30))
 }
 
 // Shutdown drains accepted records and waits for Run to close the file.

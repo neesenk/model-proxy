@@ -221,9 +221,14 @@ nil-index 退化）。
 扫描 `requests-*.log` 时不假设文件名顺序等于 record timestamp 严格顺序（孤儿 active 文件或时钟纠正可能让旧名文件持有新记录），单行用 `bufio.Reader.ReadBytes`（不用 Scanner，避免默认 token cap 丢尾）。查询带**文件级提前终止**：单 writer 向同一文件按 Ts 非降序追加，因此文件最后一条可采纳记录是全文件上界——top-K 堆满后，最新记录仍严格老于堆底的文件不可能改变结果，直接跳过不流式读取；最新记录老于 From 下界（含边界，matches 只丢严格小于 From 的记录）的文件同理无命中；**To 上界有镜像规则**——文件按新到旧迭代，历史窗口查询（UI 的分钟级时间筛选）会先撞到整体晚于 To 的文件，首条（最旧）记录晚于 To（含边界，matches 只丢严格晚于 To 的记录）即整文件跳过，否则选一个老分钟要把该分钟之后的全部记录流式解码一遍。该顺序前提**逐文件验证而非假设**：每个文件独立 peek 首条（头部 128KiB）与末条（尾部 128KiB）记录，首条晚于末条（手工构造/损坏文件）或任何异常（打不开、行超长、JSON 解析失败）都回退为完整流式扫描；跨文件乱序仍被容忍。按 `request_id`/`session_id` 查询另有**行级提前终止**：`rawPrefilter` 先做字节包含检查，行内不含该值就跳过 `json.Unmarshal`（避免为多 MB body 反复分配/解析），命中唯一 request_id 后立即停止扫描——多 GB 活动日志下打开一条记录从秒级降到几十毫秒，唯一性保证早停不改变结果（body 里恰好出现该字符串的假命中仍由 `Filter.matches` 精确校验）。
 
 JSONL schema、Record 编码、查询 heap、Summary 与 Shadow 聚合由
-`internal/observe/requestlog` 拥有；非阻塞队列、单 writer、按天命名+size 轮转、retention 与
-owner-only 权限等持久化机制由共享 sink `internal/observe/logfile` 拥有（seclog 同一模式；
-活动文件按天命名，同日重启追加同一文件，size 轮转改名，首次写入才懒建文件）；
+`internal/observe/requestlog` 拥有；非阻塞队列、单 writer、按天命名+size 轮转、retention、
+**磁盘护栏**与 owner-only 权限等持久化机制由共享 sink `internal/observe/logfile` 拥有
+（seclog 同一模式但护栏未接线；活动文件按天命名，同日重启追加同一文件，size 轮转改名，
+首次写入才懒建文件）。磁盘护栏（`request_log.disk_guard`，缺省 enabled/50GiB/95%）是
+retention 之上的空间下限：每小时 sweep 在时龄删除后检查日志目录所在卷，空闲低于
+`min_free_bytes` 或使用率 ≥ `max_used_percent`（unix Statfs / windows GetDiskFreeSpaceEx，
+包内 seam 可注入测试）时按名序删最旧轮转文件至条件解除；活动文件与 `index.db` 永不删，
+条件值 0 关闭该条件，索引一致性沿用 prune 契约（reconcile/启动重建丢弃消失文件的行）。
 `internal/app/observe_adapters.go` 只完成 config
 和执行上下文到纯值 Input 的映射（外加 Indexer 的创建——索引 schema、reconcile 与
 索引侧查询仍归 requestlog）。通用 stream capture 留在

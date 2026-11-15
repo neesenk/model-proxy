@@ -257,6 +257,18 @@
     "committed 2xx" 相悖的存量 bug），requests 列历史由同一重建按索引 2xx 数
     修复（防御区间 [n200, n]，幂等）。
 
+44. **多写者共享继承 fd 的日志文件只能 copy+truncate 轮转，不能 rename**：
+    serve.log 由 supervisor/worker 经 exec 继承的同一个 O_APPEND fd 写入（前台镜像
+    再开一个），rename 轮转会把后续写入留在旧 inode——所有写者继续写"归档"、
+    新建的活跃文件永远为空。`internal/cli/serve/logrotate.go` 用快照副本 + 原文件
+    truncate 归零（inode 不变，O_APPEND 自动续写新末尾），代价是 copy 与 truncate
+    之间写入的行丢失（copytruncate 标准语义，面向人的运行日志可接受；无损轮转属于
+    单写者的 logfile sink，见 fusion-shadow-cache.md）。同理，时龄 retention 防不住
+    突发写满盘——2026-11-12 单日 94.5GB 的 request-log 证明 30d 窗口在突发速率下
+    只是慢动作溢出；`request_log.disk_guard`（缺省 enabled/50GiB/95%）在每小时
+    sweep 上按最旧优先删轮转文件至卷空闲恢复，活动文件与 index.db 永不删
+    （索引一致性沿用 prune 的 reconcile 契约）。
+
 ## 回归要求
 
 - 每个陷阱应有测试或明确的测试缺口。

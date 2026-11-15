@@ -52,6 +52,15 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
   serve 系命令启动时显式 `log.SetFlags(LstdFlags|Lmicroseconds)` 覆盖该判定，运行日志
   恒带时间戳。
 - 例外：`takeover`/`restore` 的逐客户端进度走 `log.Printf`（stderr）；`models refresh` 的 diff 行（`config: added/removed ...`）和 fallback 通知走 stderr；`doctor` 的 `✗ config invalid` 走 **stdout**（`fmt.Println`，见 §12）。
+- **serve.log 轮转**：顶层 `log_rotate_max_size`（缺省 134217728=128MB；显式 `0` 关闭）与
+  `log_rotate_keep`（缺省 4）在 serve 进程内做 copy+truncate 轮转——supervisor/worker 共享
+  继承的 O_APPEND fd，rename 会把写入留在旧 inode，故归档为 `serve-YYYYMMDD-HHMMSS.log`
+  快照、原文件 truncate 归零；copy 与 truncate 之间写入的行会丢（copytruncate 语义，面向人的
+  运行日志可接受）。startup-only 同 `log_level`；`serve.log` 文件名不变，pidfile 派生与
+  restart 脚本不受影响。failover 警告行携带失败腿状态：
+  `target N (<provider>/<model>) failed (status 429); trying next`（status 0 = 传输层错误，
+  上方有 `upstream error:` 行）。request-log 磁盘护栏见 `request_log.disk_guard`
+  （缺省 enabled/50GiB/95%），契约在 `docs/architecture/fusion-shadow-cache.md`。
 
 ### 着色
 

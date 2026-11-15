@@ -19,6 +19,10 @@ log_level: info            # debug | info | warn | error
 # Runtime log + pid file. Default when unset: /tmp/model-proxy.log (pid: /tmp/model-proxy.pid).
 # Uncomment to override:
 # log_file: /var/log/model-proxy/model-proxy.log
+# Size-based rotation of the runtime log (copy+truncate; startup-only like log_level).
+# Defaults when absent: rotate at 128MiB, keep 4 archives. Explicit 0 disables.
+# log_rotate_max_size: 134217728
+# log_rotate_keep: 4
 
 # Upstream proxy. Resolution chain per request: providers.<name>.proxy_url ->
 # this global setting -> HTTPS_PROXY/HTTP_PROXY env (+ NO_PROXY) -> OS system
@@ -487,6 +491,15 @@ providers:
 #   max_file_size: 1073741824           # 1G per file (rotate on size or day)
 #   max_body_bytes: 5242880             # 5MB cap per body (truncates past it)
 #   retention: 720h                     # 30d; delete rotated files older than this; 0 = forever
+#   # Disk-space guard on top of retention: when the volume holding the log
+#   # directory drops below min_free_bytes or reaches max_used_percent, the
+#   # hourly sweep deletes this block's rotated files oldest-first until the
+#   # condition clears (active file + index.db are never deleted). Defaults
+#   # when the block is absent: enabled/50GiB/95%. 0 disarms one condition.
+#   # disk_guard:
+#   #   enabled: true
+#   #   min_free_bytes: 53687091200
+#   #   max_used_percent: 95
 #   # Client session-id header allowlist (ordered; first non-empty wins); drives
 #   # the request-log session_id + live /api/events session_id. Default:
 #   # [x-claude-code-session-id, x-session-affinity, x-session-id, x-opencode-session]

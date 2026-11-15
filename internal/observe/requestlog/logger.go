@@ -16,12 +16,16 @@ const (
 // Options contains already-resolved request-log policy values. FilePrefix
 // selects the stream's file naming ("" = requests-; requestlog.MCPFilePrefix
 // for the split MCP stream) — the query side must scan with the same prefix.
+// MinFreeBytes/MaxUsedPercent arm the underlying logfile sink's disk guard
+// (both <= 0 = unarmed).
 type Options struct {
-	Directory    string
-	FilePrefix   string
-	MaxFileSize  int64
-	MaxBodyBytes int
-	Retention    time.Duration
+	Directory      string
+	FilePrefix     string
+	MaxFileSize    int64
+	MaxBodyBytes   int
+	Retention      time.Duration
+	MinFreeBytes   int64
+	MaxUsedPercent int
 }
 
 // Logger owns the non-blocking queue and its single JSONL writer goroutine.
@@ -42,11 +46,13 @@ func New(options Options) *Logger {
 	}
 	return &Logger{
 		sink: logfile.New(logfile.Options{
-			Directory:  options.Directory,
-			FilePrefix: prefix,
-			MaxBytes:   options.MaxFileSize,
-			Retention:  options.Retention,
-			Tag:        "request_log",
+			Directory:      options.Directory,
+			FilePrefix:     prefix,
+			MaxBytes:       options.MaxFileSize,
+			Retention:      options.Retention,
+			MinFreeBytes:   options.MinFreeBytes,
+			MaxUsedPercent: options.MaxUsedPercent,
+			Tag:            "request_log",
 		}),
 		maxBodyBytes: options.MaxBodyBytes,
 	}

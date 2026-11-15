@@ -110,12 +110,16 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 	// here, before any runtime log line is emitted.
 	logx.SetLevel(cfg.LogLevel)
 	pidPath := "" // foreground-only pid file (login/logout SIGHUP); removed on exit
+	// One resolution for every consumer of the run-log path: the foreground
+	// mirror below, its pid file, and the size rotator (which runs in BOTH
+	// worker and foreground — the worker's stdio IS this file).
+	logFile := cliserve.ResolveLogFile(sa, cfg)
 	// In true foreground mode (no role env), mirror logs to the configured file.
 	// The worker's stdio is already the log file (set by the supervisor), so it
 	// must NOT reopen/mirror — that would double every line.
 	if os.Getenv(cliserve.EnvRole) == "" {
-		if lf := cliserve.ResolveLogFile(sa, cfg); lf != "" {
-			if f, err := cliserve.OpenLogFile(lf); err == nil {
+		if logFile != "" {
+			if f, err := cliserve.OpenLogFile(logFile); err == nil {
 				log.SetOutput(io.MultiWriter(os.Stderr, f))
 				// Logs now land in a file too → disable color so escape codes
 				// don't pollute the file (logColorEnabled was set at init from
@@ -126,7 +130,7 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 				// Not fatal, but never silent: the operator asked for a log
 				// file and would otherwise discover the loss only when the
 				// file is empty or missing after a crash.
-				logx.Warnf("model-proxy: could not open log file %s: %v (logging to stderr only)", lf, err)
+				logx.Warnf("model-proxy: could not open log file %s: %v (logging to stderr only)", logFile, err)
 			}
 			// Write a pid file so `login`/`logout` can SIGHUP this foreground
 			// serve to hot-reload new credentials. The daemon supervisor writes
@@ -135,12 +139,23 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 			// already owns the file, DON'T take it over — overwriting would
 			// point stop/reload at us, and our exit cleanup would delete the
 			// daemon's pid file and orphan it.
-			pidPath = cliserve.ClaimForegroundPidFile(lf)
+			pidPath = cliserve.ClaimForegroundPidFile(logFile)
 		}
 	}
 	defer cliserve.ReleasePidFileIfOwned(pidPath)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	runtime := newApplicationRuntime(cfg, sa)
+
+	// serve.log size rotation (copy+truncate so inherited O_APPEND fds keep
+	// writing the same inode; see internal/cli/serve/logrotate.go). Startup-only
+	// like log_level — changing the cap/keep requires a restart. cfg 0 = off.
+	if cfg.LogRotateMaxSize > 0 && logFile != "" {
+		rotateMax := cfg.LogRotateMaxSize
+		rotateKeep := cfg.LogRotateKeep
+		runtime.TransportTasks = append(runtime.TransportTasks, func(stop <-chan struct{}) {
+			cliserve.RunLogRotatorLoop(stop, logFile, rotateMax, rotateKeep, 0)
+		})
+	}
 
 	// SIGHUP reload is transport/process work: shutdown stops accepting reloads
 	// before the HTTP drain and waits for an already-running reload before

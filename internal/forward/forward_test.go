@@ -1,8 +1,10 @@
 package forward
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -837,6 +839,40 @@ func TestAuditGuardHitNilLogger(t *testing.T) {
 // 502) and the upstream denial body as response_body. Before the fix the leg
 // serialized an empty body and a gateway-synthesized 502, so an aqp session
 // expiry was indistinguishable from a server fault on the Requests page.
+// TestServeFailoverWarnCarriesAttemptStatus: the failover warn line must
+// carry the failed leg's HTTP status — a plain 429/5xx leg produces no
+// provider-level error line in serve.log, so without the status here a
+// serve-log-only investigation cannot answer "why did this target fail".
+func TestServeFailoverWarnCarriesAttemptStatus(t *testing.T) {
+	bad := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"error":{"message":"rate limited"}}`)
+	})
+	good := newFakeUpstream(t, openaiOKResponder("fallback"))
+	h := newHarness()
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"bad":  {OpenAIBaseURL: bad.srv.URL, Provider: "test-static"},
+			"good": {OpenAIBaseURL: good.srv.URL, Provider: "test-static"},
+		},
+		Routes: map[string][]RouteTarget{"m": {{Provider: "bad", Model: "x"}, {Provider: "good", Model: "y"}}},
+	}
+
+	var logs bytes.Buffer
+	original := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(original)
+	w := h.serve(h.snapshot(cfg), "openai", "/v1/chat/completions", openaiChatBody(), nil)
+	log.SetOutput(original)
+
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "fallback") {
+		t.Fatalf("status = %d body = %s, want the fallback commit", w.Code, w.Body.String())
+	}
+	if !strings.Contains(logs.String(), `failed (status 429); trying next`) {
+		t.Errorf("failover warn missing the leg status:\n%s", logs.String())
+	}
+}
+
 func TestServeFailoverLegCarriesFailureEvidence(t *testing.T) {
 	bad := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
