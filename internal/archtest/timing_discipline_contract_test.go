@@ -60,7 +60,10 @@ var prodSleepAllowlist = map[string]map[string]int{
 //   - cli/models check conflict re-stat (cross-process, pitfalls #33);
 //   - accounts pool-lock staleness — now backed by the PID liveness probe
 //     (pitfalls #40: mtime alone must not break the mutex);
-//   - requestlog index fileState columns (SQLite-serialized);
+//   - requestlog index listLogFiles: the files-table mtime column plus the
+//     reconcile loop's unchanged-stat skip (single reconcile goroutine; a
+//     change is an observation that triggers a head-verified pass, never an
+//     ordering decision);
 //   - stats legacy import minute floor (boot-only, single goroutine);
 //   - logfile retention cutoff (single writer goroutine).
 var prodModTimeAllowlist = map[string]map[string]int{
@@ -68,12 +71,12 @@ var prodModTimeAllowlist = map[string]map[string]int{
 		"(*Proxy).persistModelCapsNow":    1,
 		"(*Proxy).noteModelCapsFileState": 1,
 	},
-	"internal/catalog/disccache.go":        {"(*DiskCache).Load": 2},
-	"internal/cli/models/check.go":         {"persistModelCaps": 2},
-	"internal/accounts/store.go":           {"Store.withLock": 1},
-	"internal/observe/requestlog/index.go": {"(*Indexer).reconcile": 1},
-	"internal/observe/stats/legacy.go":     {"(*Store).ImportLegacyTokens": 1},
-	"internal/observe/logfile/logfile.go":  {"(*Logger).sweep": 1, "Prunable": 1},
+	"internal/catalog/disccache.go":              {"(*DiskCache).Load": 2},
+	"internal/cli/models/check.go":               {"persistModelCaps": 2},
+	"internal/accounts/store.go":                 {"Store.withLock": 1},
+	"internal/observe/requestlog/index_files.go": {"(*Indexer).listLogFiles": 1},
+	"internal/observe/stats/legacy.go":           {"(*Store).ImportLegacyTokens": 1},
+	"internal/observe/logfile/logfile.go":        {"(*Logger).sweep": 1, "Prunable": 1},
 }
 
 // testSleepSnapshot: file → top-level func → allowed time.Sleep references.

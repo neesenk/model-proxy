@@ -70,6 +70,12 @@ func TestAppendRecordLineMatchesJSONMarshal(t *testing.T) {
 		Ts: "2026-08-16T10:00:00Z", RequestID: "rid-profile-zero", SessionID: "s",
 		Profile: &RequestProfile{EstimatedTokens: 10},
 	})
+	// response_aggregated is written right after response_body when set.
+	records = append(records, &Record{
+		Ts: "2026-08-16T10:00:00Z", RequestID: "rid-aggregated", SessionID: "s",
+		ResponseBody: `{"object":"chat.completion"}`, ResponseAggregated: true,
+		ResponseHeaders: `{"content-type":"text/event-stream"}`,
+	})
 	// TurnKey is written between response_headers and diagnostics when present.
 	records = append(records, &Record{
 		Ts: "2026-08-16T10:00:00Z", RequestID: "rid-turn", SessionID: "s", TurnKey: "0123456789abcdef",

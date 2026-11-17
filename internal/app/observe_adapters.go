@@ -10,9 +10,24 @@ import (
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/observe/seclog"
 	observestats "model-proxy/internal/observe/stats"
+	"model-proxy/internal/protocol"
 	"path/filepath"
 	"time"
 )
+
+// aggregateLoggedStream is the request logger's stream aggregator when
+// request_log.aggregate_streams is on (nil keeps raw streams): the protocol
+// package's SSE fold, the same one that answers non-stream clients from
+// stream-only upstreams. The logger owns when it applies (see
+// requestlog.Logger.aggregateStream).
+func aggregateLoggedStream(enabled bool) func(string, []byte) ([]byte, error) {
+	if !enabled {
+		return nil
+	}
+	return func(clientProtocol string, body []byte) ([]byte, error) {
+		return protocol.AggregateSSE(body, protocol.Protocol(clientProtocol))
+	}
+}
 
 // initRequestLog adapts resolved configuration values into the process-owned
 // logger. The goroutine itself remains owned by proxyLifecycle.
@@ -28,13 +43,30 @@ func (p *Proxy) initRequestLog(config configdomain.RequestLogConfig) {
 		guardMinFree = config.DiskGuard.MinFreeBytes
 		guardMaxUsed = config.DiskGuard.MaxUsedPercent
 	}
+	// The tailing index is a derived view of the same directory: an open
+	// failure degrades the web read path to directory scans (warned once
+	// here) instead of failing startup. Started/stopped with the logger in
+	// StartRuntimeServices/closeRuntimeServices; restart-only like reqLog.
+	// Built first so the logger's change hook can wake it: the logger is the
+	// directory's only writer, so the index tails on notification and its
+	// idle passes stay rare.
+	var notifyIndex func()
+	indexer, err := requestlog.NewIndexer(config.ResolvedDir())
+	if err != nil {
+		logx.Warnf("[request_log] index unavailable: %v — /api/requests falls back to directory scans", err)
+	} else {
+		p.reqLogIndex = indexer
+		notifyIndex = indexer.Notify
+	}
 	p.reqLog = requestlog.New(requestlog.Options{
-		Directory:      config.ResolvedDir(),
-		MaxFileSize:    config.MaxFileSizeBytes(),
-		MaxBodyBytes:   config.MaxBodyBytesValue(),
-		Retention:      config.RetentionDuration(),
-		MinFreeBytes:   guardMinFree,
-		MaxUsedPercent: guardMaxUsed,
+		Directory:       config.ResolvedDir(),
+		MaxFileSize:     config.MaxFileSizeBytes(),
+		MaxBodyBytes:    config.MaxBodyBytesValue(),
+		Retention:       config.RetentionDuration(),
+		MinFreeBytes:    guardMinFree,
+		MaxUsedPercent:  guardMaxUsed,
+		OnChange:        notifyIndex,
+		AggregateStream: aggregateLoggedStream(config.AggregateStreams),
 	})
 	// The split MCP stream: same policy values (size/body cap/retention), its
 	// own directory and mcp- file prefix. Restart-only like reqLog; no tailing
@@ -49,16 +81,6 @@ func (p *Proxy) initRequestLog(config configdomain.RequestLogConfig) {
 			MinFreeBytes:   guardMinFree,
 			MaxUsedPercent: guardMaxUsed,
 		})
-	}
-	// The tailing index is a derived view of the same directory: an open
-	// failure degrades the web read path to directory scans (warned once
-	// here) instead of failing startup. Started/stopped with the logger in
-	// StartRuntimeServices/closeRuntimeServices; restart-only like reqLog.
-	indexer, err := requestlog.NewIndexer(config.ResolvedDir())
-	if err != nil {
-		logx.Warnf("[request_log] index unavailable: %v — /api/requests falls back to directory scans", err)
-	} else {
-		p.reqLogIndex = indexer
 	}
 	guardNote := ""
 	if guardMinFree > 0 || guardMaxUsed > 0 {

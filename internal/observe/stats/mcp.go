@@ -53,6 +53,7 @@ func (s *Store) FlushMCPBucketsContext(
 	if len(deltas) == 0 {
 		return nil
 	}
+	defer s.noteMutation()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -265,6 +266,7 @@ func (s *Store) FlushMCPToolBucketsContext(
 	if len(deltas) == 0 {
 		return nil
 	}
+	defer s.noteMutation()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

@@ -756,3 +756,72 @@ func TestRequestLog_SmallCapTruncatesBodiesEndToEnd(t *testing.T) {
 		t.Errorf("response body not marker-terminated: %q…", rec.ResponseBody[:min(64, len(rec.ResponseBody))])
 	}
 }
+
+// TestForward_RequestLog_AggregatesCompletedStreams: with
+// request_log.aggregate_streams the composition root wires the protocol
+// aggregator into the request logger. The client still receives the stream
+// byte-for-byte; the log stores the completed stream as its aggregated chat
+// completion (flagged response_aggregated, wire size kept).
+func TestForward_RequestLog_AggregatesCompletedStreams(t *testing.T) {
+	const backendStream = "data: {\"id\":\"c1\",\"model\":\"backend-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hel\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c1\",\"model\":\"backend-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n" +
+		"data: [DONE]\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = io.WriteString(w, backendStream)
+	}))
+	defer upstream.Close()
+	proxy := newTestProxy(t, &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"backend": {OpenAIBaseURL: upstream.URL, Provider: testProviderID},
+		},
+		Routes: map[string][]configdomain.RouteTarget{
+			"backend-model": {{Provider: "backend", Model: "backend-model", Protocol: "openai"}},
+		},
+	})
+	proxy.providers["backend"] = &testProv{key: "test-token"}
+	dir := t.TempDir()
+	proxy.initRequestLog(configdomain.RequestLogConfig{Enabled: true, Dir: dir, AggregateStreams: true})
+	proxy.reqLogStarted = proxy.lifecycle.Run(func(<-chan struct{}) { proxy.reqLog.Run() })
+	proxy.reqLogIndexStarted = proxy.lifecycle.Run(func(<-chan struct{}) { proxy.reqLogIndex.Run() })
+	server := httptest.NewServer(http.HandlerFunc(proxy.Handler))
+	defer server.Close()
+
+	code, clientBody := post(t, server.URL+"/v1/chat/completions",
+		`{"model":"backend-model","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusOK || clientBody != backendStream {
+		t.Fatalf("client = (%d, %q), want the upstream stream byte-for-byte", code, clientBody)
+	}
+	awaitCommitMetrics(t, proxy, counters.PMKey{Provider: "backend", Model: "backend-model"})
+	proxy.Close() // drains the request logger
+
+	records := allRecords(t, dir)
+	if len(records) != 1 {
+		t.Fatalf("request log record count = %d, want 1", len(records))
+	}
+	record := records[0]
+	if !record.ResponseAggregated || record.ResponseSize != int64(len(backendStream)) {
+		t.Fatalf("record aggregated=%v size=%d, want aggregated with wire size %d", record.ResponseAggregated, record.ResponseSize, len(backendStream))
+	}
+	var completion struct {
+		Object  string `json:"object"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(record.ResponseBody), &completion); err != nil {
+		t.Fatalf("logged body is not the aggregated JSON: %v (%q)", err, record.ResponseBody)
+	}
+	if completion.Object != "chat.completion" || len(completion.Choices) != 1 ||
+		completion.Choices[0].Message.Content != "hello" || completion.Choices[0].FinishReason != "stop" ||
+		completion.Usage.PromptTokens != 5 || completion.Usage.CompletionTokens != 2 {
+		t.Errorf("aggregated completion = %+v (%s)", completion, record.ResponseBody)
+	}
+}

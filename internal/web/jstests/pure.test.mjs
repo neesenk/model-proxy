@@ -11,7 +11,7 @@ import {
   accountProviderKey, splitProviderKey, providerDisplayName,
   catalogMatchHTML, catalogMatchSummary, catalogMatchEditorHTML, aliasRowHTML, providerModelsEditorHTML,
   ruleHitsLeaderboard,
-  sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, linkedProviders, sessionHealthSummary, guardMarksHTML, guardMarksDetailHTML, requestMetaHTML, hopChainTitle, orderDetailRecords, committedRecordOf,
+  sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, responseContentType, readableValue, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, linkedProviders, sessionHealthSummary, guardMarksHTML, guardMarksDetailHTML, requestMetaHTML, hopChainTitle, orderDetailRecords, committedRecordOf,
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   parseRequestTimeValue, requestTimeValue, requestTimeBounds, requestTimeLabel, requestTimePickerHTML,
@@ -4475,4 +4475,29 @@ test('legFailureSummary: first line, whitespace-collapsed, 160-char cap, empty-s
   assert.equal(capped.length, 160);
   assert.ok(capped.endsWith('…'));
   assert.equal(legFailureSummary('a\t b\n   c'), 'a b');
+});
+
+test('responseContentType: allowlisted header, aggregated stream records read as JSON', () => {
+  assert.equal(responseContentType({ response_headers: '{"content-type":"text/event-stream"}' }), 'text/event-stream');
+  assert.equal(responseContentType({ response_headers: '{"Content-Type":"application/json"}' }), 'application/json');
+  // request_log.aggregate_streams stores a completed stream as its JSON
+  // answer while response_headers keeps the wire's event-stream type.
+  assert.equal(
+    responseContentType({ response_headers: '{"content-type":"text/event-stream"}', response_aggregated: true }),
+    'application/json',
+  );
+  assert.equal(responseContentType({ response_headers: 'not json' }), '');
+  assert.equal(responseContentType({}), '');
+  assert.equal(responseContentType(null), '');
+});
+
+test('chatViewHTML renders an aggregated stream record as its JSON answer', () => {
+  const record = {
+    response_headers: '{"content-type":"text/event-stream"}',
+    response_aggregated: true,
+    response_body: '{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hello there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}',
+  };
+  const html = chatViewHTML('{"messages":[{"role":"user","content":"hi"}]}', record.response_body, responseContentType(record));
+  assert.ok(html.includes('cv-assistant') && html.includes('hello there'), html);
+  assert.ok(html.includes('in 5 · out 2'), html);
 });

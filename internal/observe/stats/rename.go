@@ -29,6 +29,7 @@ func (s *Store) RenameProviderKey(from, to string) (int64, error) {
 }
 
 func (s *Store) renameProviderKeyContext(ctx context.Context, from, to string) (int64, error) {
+	defer s.noteMutation()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err

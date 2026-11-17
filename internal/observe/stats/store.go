@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver; registers as "sqlite" with database/sql
@@ -23,6 +24,13 @@ const (
 type Store struct {
 	db        *sql.DB
 	retention time.Duration
+
+	// mutations is the mutation generation (see range_memo.go): every
+	// mutation method advances it after its transaction ends, retiring the
+	// cumulative range memos below.
+	mutations      atomic.Uint64
+	providerRanges rangeMemo[map[Key]Counters]
+	agentRanges    rangeMemo[map[AgentKey]AgentCounters]
 }
 
 // Open opens or creates a stats database and applies additive migrations.
@@ -218,6 +226,7 @@ func (s *Store) FlushContext(
 	if len(deltas) == 0 {
 		return nil
 	}
+	defer s.noteMutation()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -290,6 +299,7 @@ func (s *Store) FlushAgentsContext(
 	if len(deltas) == 0 {
 		return nil
 	}
+	defer s.noteMutation()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -350,6 +360,7 @@ func (s *Store) PruneContext(ctx context.Context, now time.Time) error {
 	if s.retention <= 0 {
 		return nil
 	}
+	defer s.noteMutation()
 	cutoff := now.Add(-s.retention).Unix() / 60 * 60
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -389,6 +400,7 @@ func (s *Store) PruneContext(ctx context.Context, now time.Time) error {
 
 // Reset removes all persisted provider/model and agent history.
 func (s *Store) Reset() error {
+	defer s.noteMutation()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err

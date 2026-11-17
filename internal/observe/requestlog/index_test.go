@@ -119,6 +119,7 @@ func TestIndexMigrateIndexes(t *testing.T) {
 	for _, name := range []string{
 		"idx_records_ts", "idx_records_session", "idx_records_request",
 		"idx_records_api_key", "idx_records_ts_session", "idx_records_ts_ms",
+		"idx_records_file",
 	} {
 		if !got[name] {
 			t.Errorf("migrate is missing index %s (have %v)", name, got)

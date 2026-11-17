@@ -35,6 +35,8 @@ type readAPIStub struct {
 	agentRows         []appapi.AgentUsage
 	tokensFrom        int64
 	agentsFrom        int64
+	tokensTo          int64
+	agentsTo          int64
 	statsSince        int64
 	stats             func(appapi.StatsQuery) ([]observestats.Bucket, error)
 	agents            func(appapi.AgentStatsQuery) ([]observestats.AgentBucket, error)
@@ -97,11 +99,11 @@ func (d dirRequestLogQueries) GuardAnnotations([]string) map[string][]requestlog
 }
 func (r *readAPIStub) Accounts() []appapi.ProviderAccounts { return r.accounts }
 func (r *readAPIStub) Tokens(from, to int64) ([]appapi.TokenUsage, error) {
-	r.tokensFrom = from
+	r.tokensFrom, r.tokensTo = from, to
 	return r.tokens, nil
 }
 func (r *readAPIStub) Agents(from, to int64) ([]appapi.AgentUsage, error) {
-	r.agentsFrom = from
+	r.agentsFrom, r.agentsTo = from, to
 	return r.agentRows, nil
 }
 func (r *readAPIStub) StatsSince() int64 { return r.statsSince }
@@ -472,6 +474,28 @@ func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
 	if reads.tokensFrom != 1788874500 || reads.agentsFrom != 1788874500 {
 		t.Errorf("from=1788874517 truncated to %d/%d, want minute boundary 1788874500",
 			reads.tokensFrom, reads.agentsFrom)
+	}
+	// A to inside a minute selects exactly the buckets of its minute floor
+	// (storage is minute-aligned: bucket start <= to), so the query receives
+	// the floor — the Status tab's 5s ticks within one minute then ask the
+	// stats store for one identical range it can answer from its memo — while
+	// the response echoes the requested to. A to whose floor would be 0 (the
+	// "unbounded" sentinel) is passed through unchanged.
+	insideMinute := serveRead(t, s, http.MethodGet, "/api/tokens?from=1788874517&to=1788878125")
+	var insideMinuteBody struct {
+		To int64 `json:"to"`
+	}
+	decodeReadJSON(t, insideMinute, &insideMinuteBody)
+	if insideMinute.Code != http.StatusOK || insideMinuteBody.To != 1788878125 {
+		t.Errorf("mid-minute to echo = (%d, %d), want (200, 1788878125)", insideMinute.Code, insideMinuteBody.To)
+	}
+	if reads.tokensTo != 1788878100 || reads.agentsTo != 1788878100 {
+		t.Errorf("mid-minute to queried as %d/%d, want the minute floor 1788878100", reads.tokensTo, reads.agentsTo)
+	}
+	if rec := serveRead(t, s, http.MethodGet, "/api/tokens?to=30"); rec.Code != http.StatusOK ||
+		reads.tokensTo != 30 || reads.agentsTo != 30 {
+		t.Errorf("to=30 = (%d, %d/%d), want 200 with to kept at 30 (a 0 floor would mean unbounded)",
+			rec.Code, reads.tokensTo, reads.agentsTo)
 	}
 	rfc := serveRead(t, s, http.MethodGet, "/api/tokens?from=2026-09-08T00:00:00Z")
 	if rfc.Code != http.StatusOK || reads.tokensFrom != 1788825600 {

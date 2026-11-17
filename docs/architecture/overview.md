@@ -231,7 +231,7 @@ retention/owner-only 权限由共享 `observe/logfile` sink 拥有（文件按�
 `docs/architecture/fusion-shadow-cache.md` 的 Request log 节）；流式 top-K 查询（带文件级提前终止：peek 文件末尾记录
 Ts 为上界，堆满或越 From 下界的文件整文件跳过，peek 异常回退全量流扫）、list-safe
 Summary 和 Shadow 聚合仍归本包。尾随 SQLite 索引同样归本包（`index.go` 的
-`Indexer`：<dir>/index.db 派生视图、250ms reconcile、失效自愈、(file,offset,length)
+`Indexer`：<dir>/index.db 派生视图、logger 写入通知驱动的 reconcile（250ms 拍、无通知时 5s 兜底；head 指纹识别轮转改名搬行而非重解析）、失效自愈、(file,offset,length)
 seek 与索引侧查询；详见 `docs/architecture/fusion-shadow-cache.md` Request log 节）；
 web 读路径经 `appapi.RequestLogQueries` 端口消费，索引不可用由 admin 适配层回落
 目录扫描。应用层 `internal/app/observe_adapters.go` 只把 `RequestLogConfig` 生效值

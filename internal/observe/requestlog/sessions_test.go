@@ -2,6 +2,7 @@ package requestlog
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -224,5 +225,62 @@ func TestQueryUsageOnlyStripsBodies(t *testing.T) {
 	line := appendRecordLine(nil, &records[0])
 	if bytes.Contains(line, []byte("parsed")) {
 		t.Errorf("ParsedUsage leaked into the JSONL encoding: %s", line)
+	}
+}
+
+// TestExtractUsageKeySpellingsDecodedLikeEncodingJSON pins the frame
+// pre-filter as exact: encoding/json maps an object key onto the usage field
+// by strings.EqualFold (so "Usage", "USAGE" and "uſage" — U+017F folds to
+// 's' — all decode) and a key may spell any character with a \u escape. A
+// frame is skipped only when no such spelling can be present, so every
+// variant below must still be counted — alongside CRLF framing, an
+// unterminated final frame and whole-body JSON with leading whitespace.
+func TestExtractUsageKeySpellingsDecodedLikeEncodingJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want Usage
+	}{
+		{"title case", "data: {\"Usage\":{\"output_tokens\":4}}\n\n", Usage{Output: 4}},
+		{"upper case", "data: {\"USAGE\":{\"output_tokens\":5}}\n\n", Usage{Output: 5}},
+		{"long s", "data: {\"u\u017fage\":{\"output_tokens\":6}}\n\n", Usage{Output: 6}},
+		{"unicode escape", "data: {\"\\u0075sage\":{\"output_tokens\":7}}\n\n", Usage{Output: 7}},
+		{"crlf framing", "data: {\"x\":1}\r\n\r\ndata: {\"usage\":{\"output_tokens\":8}}\r\n\r\n", Usage{Output: 8}},
+		{"unterminated final frame", "data: {\"x\":1}\n\ndata: {\"usage\":{\"output_tokens\":9}}", Usage{Output: 9}},
+		{"value not key", "data: {\"note\":\"usage\"}\n\n", Usage{}},
+		{"whole body json with leading space", " \n{\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}", Usage{Input: 3, Output: 1}},
+		{"whole body null", "null", Usage{}},
+	}
+	for _, tc := range cases {
+		if got := ExtractUsage(tc.body); got != tc.want {
+			t.Errorf("%s: ExtractUsage(%q) = %+v, want %+v", tc.name, tc.body, got, tc.want)
+		}
+	}
+}
+
+// TestExtractUsageAllocationsDoNotScaleWithDeltaFrames: the indexer runs
+// ExtractUsage on every logged response, and a long stream is thousands of
+// plain delta frames around one usage frame. Frames that cannot carry a
+// usage key must cost no allocation: doubling the deltas (1500 → 3000) adds
+// no allocation.
+func TestExtractUsageAllocationsDoNotScaleWithDeltaFrames(t *testing.T) {
+	stream := func(deltas int) string {
+		var b strings.Builder
+		for i := 0; i < deltas; i++ {
+			fmt.Fprintf(&b, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"tok%d\"},\"finish_reason\":null}]}\n\n", i)
+		}
+		b.WriteString("data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7}}\n\ndata: [DONE]\n\n")
+		return b.String()
+	}
+	half, full := stream(1500), stream(3000)
+	if got, want := ExtractUsage(full), (Usage{Input: 11, Output: 7}); got != want {
+		t.Fatalf("ExtractUsage(long stream) = %+v, want %+v", got, want)
+	}
+	halfAllocs := testing.AllocsPerRun(20, func() { ExtractUsage(half) })
+	fullAllocs := testing.AllocsPerRun(20, func() { ExtractUsage(full) })
+	// The rate, not exact equality: the race detector's runtime allocates
+	// sporadically (±1 per run); a per-frame allocation shows as >= 1500.
+	if (fullAllocs-halfAllocs)/1500 >= 0.01 {
+		t.Errorf("allocations: 3000 delta frames = %v, 1500 delta frames = %v; want no per-frame allocation", fullAllocs, halfAllocs)
 	}
 }

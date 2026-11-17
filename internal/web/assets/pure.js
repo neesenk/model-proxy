@@ -4153,6 +4153,23 @@ export function chatTurnsSliceHTML(messages, from, to) {
 // then the response turn and its usage line. Everything text-bearing is
 // capped, and the history never enters the DOM until expanded — a
 // thousand-turn session opens as fast as a two-turn one.
+// responseContentType extracts content-type from a request-log record's
+// allowlisted response_headers JSON ({"content-type":…}); empty when
+// absent/unparseable. A record flagged response_aggregated stores its
+// completed stream as the aggregated JSON answer while response_headers keeps
+// the wire's text/event-stream, so its body reads as application/json.
+export function responseContentType(record) {
+  if (!record) return '';
+  if (record.response_aggregated) return 'application/json';
+  if (!record.response_headers) return '';
+  try {
+    const headers = JSON.parse(record.response_headers);
+    return String((headers && (headers['content-type'] || headers['Content-Type'])) || '');
+  } catch (_) {
+    return '';
+  }
+}
+
 export function chatViewHTML(requestText, responseText, responseContentType, opts) {
   const o = opts || {};
   const req = parseRequestChat(parseJSONBounded(requestText));

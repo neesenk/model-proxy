@@ -771,6 +771,12 @@ type RequestLogConfig struct {
 	// Defaults to the armed built-ins (rawConfig presets them like the guard
 	// bools, so an absent block guards while `enabled: false` opts out).
 	DiskGuard DiskGuardConfig `yaml:"disk_guard"`
+	// AggregateStreams stores a completed 2xx SSE answer as its aggregated
+	// JSON response (flagged response_aggregated) instead of the raw stream —
+	// a streamed answer is ~100 bytes of chunk envelope per output token.
+	// Truncated, non-2xx, unterminated or in-stream-error streams keep the
+	// raw bytes. Restart-only like the rest of the block. Default off.
+	AggregateStreams bool `yaml:"aggregate_streams"`
 }
 
 // DiskGuardConfig arms the request-log disk-space guard: when the volume

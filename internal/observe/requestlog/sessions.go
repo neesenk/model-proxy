@@ -1,7 +1,6 @@
 package requestlog
 
 import (
-	"bufio"
 	"encoding/json"
 	"sort"
 	"strings"
@@ -73,11 +72,59 @@ type usageProbe struct {
 // cached count is subtracted from Input (clamped at zero) — ComputeCost
 // prices the buckets independently and would otherwise bill cached input at
 // both the full and the cache rate.
+//
+// Cost shape (the indexer calls this for every logged response): the
+// whole-body decode is only attempted when the body opens a JSON object —
+// an object probe accepts nothing else but null, which yields the zero Usage
+// either way — so an SSE body never pays a failed whole-body decode and its
+// []byte copy; and an SSE frame is decoded only when it could spell a usage
+// key at all (usageKeyCandidate), so plain delta frames cost no allocation.
 func ExtractUsage(body string) Usage {
-	if p, ok := parseUsageJSON(body); ok {
-		return usageFrom(p)
+	if opensJSONObject(body) {
+		if p, ok := parseUsageJSON(body); ok {
+			return usageFrom(p)
+		}
 	}
 	return extractSSEUsage(body)
+}
+
+// opensJSONObject reports whether the first non-whitespace byte (JSON's
+// insignificant whitespace set) is '{'.
+func opensJSONObject(body string) bool {
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case ' ', '\t', '\n', '\r':
+			continue
+		case '{':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// usageKeyCandidate reports whether a frame payload could decode a usage
+// field under encoding/json's key matching: keys match by strings.EqualFold
+// (ASCII case variants, plus U+017F 'ſ' folding to 's' — the only non-ASCII
+// rune folding onto a letter of "usage"), and a \u escape can spell any key
+// character. A payload with no escape, no 'ſ' and no quoted five-character
+// token folding to "usage" holds no such key, so skipping its decode is
+// exact (a "usage" string VALUE still passes; the decode then finds no key).
+func usageKeyCandidate(payload string) bool {
+	if strings.Contains(payload, `\u`) || strings.Contains(payload, "\u017f") {
+		return true
+	}
+	for rest := payload; ; {
+		i := strings.IndexByte(rest, '"')
+		if i < 0 || len(rest)-i < 7 {
+			return false
+		}
+		if rest[i+6] == '"' && strings.EqualFold(rest[i+1:i+6], "usage") {
+			return true
+		}
+		rest = rest[i+1:]
+	}
 }
 
 func parseUsageJSON(doc string) (*usageProbe, bool) {
@@ -179,8 +226,11 @@ func extractSSEUsage(body string) Usage {
 		if len(data) == 0 {
 			return
 		}
-		payload := strings.Join(data, "\n")
+		payload := strings.Join(data, "\n") // a single data line is returned as-is
 		data = data[:0]
+		if !usageKeyCandidate(payload) {
+			return
+		}
 		if p, ok := parseUsageJSON(payload); ok {
 			frame := usageFrom(p)
 			u.Input = max(u.Input, frame.Input)
@@ -189,12 +239,17 @@ func extractSSEUsage(body string) Usage {
 			u.CacheCreation = max(u.CacheCreation, frame.CacheCreation)
 		}
 	}
-	sc := bufio.NewScanner(strings.NewReader(body))
-	// A single SSE data line can carry an entire content delta; the cap is
-	// the body itself so no line can overflow.
-	sc.Buffer(make([]byte, 0, 64<<10), len(body)+1)
-	for sc.Scan() {
-		line := sc.Text()
+	// Lines are substrings of body (no per-line copy), split exactly like
+	// bufio.ScanLines: on '\n', one trailing '\r' dropped, a final
+	// unterminated line kept when non-empty.
+	for rest := body; len(rest) > 0; {
+		line := rest
+		if i := strings.IndexByte(rest, '\n'); i >= 0 {
+			line, rest = rest[:i], rest[i+1:]
+		} else {
+			rest = ""
+		}
+		line = strings.TrimSuffix(line, "\r")
 		switch {
 		case line == "":
 			merge()

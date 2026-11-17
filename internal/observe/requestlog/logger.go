@@ -2,6 +2,7 @@ package requestlog
 
 import (
 	"model-proxy/internal/observe/logfile"
+	"strings"
 	"time"
 )
 
@@ -26,6 +27,14 @@ type Options struct {
 	Retention      time.Duration
 	MinFreeBytes   int64
 	MaxUsedPercent int
+	// OnChange is the sink's directory-change hook (logfile.Options.OnChange):
+	// the composition root wires the tailing index's Notify here.
+	OnChange func()
+	// AggregateStream, when set (request_log.aggregate_streams), folds a
+	// completed SSE response of the given client protocol into its JSON
+	// response; the composition root injects the protocol package's
+	// aggregator (this package does not depend on it). See aggregateStream.
+	AggregateStream func(protocol string, body []byte) ([]byte, error)
 }
 
 // Logger owns the non-blocking queue and its single JSONL writer goroutine.
@@ -36,6 +45,7 @@ type Options struct {
 type Logger struct {
 	sink         *logfile.Logger
 	maxBodyBytes int
+	aggregate    func(protocol string, body []byte) ([]byte, error)
 }
 
 // New returns a logger. Run must be started exactly once before Shutdown.
@@ -53,8 +63,10 @@ func New(options Options) *Logger {
 			MinFreeBytes:   options.MinFreeBytes,
 			MaxUsedPercent: options.MaxUsedPercent,
 			Tag:            "request_log",
+			OnChange:       options.OnChange,
 		}),
 		maxBodyBytes: options.MaxBodyBytes,
+		aggregate:    options.AggregateStream,
 	}
 }
 
@@ -65,8 +77,44 @@ func (l *Logger) Enqueue(record *Record) {
 		return
 	}
 	l.sink.Enqueue(func(_ time.Time, buf []byte) ([]byte, error) {
+		l.aggregateStream(record)
 		return appendRecordLine(buf[:0], record), nil
 	})
+}
+
+// aggregateStream stores a completed LLM stream as its aggregated JSON
+// response when an aggregator is wired. It runs on the writer goroutine (the
+// fold is CPU work the request path never pays) and only replaces bytes that
+// are not evidence: a 2xx, untruncated, LLM (not MCP) SSE body the aggregator
+// folds cleanly (it rejects streams with no terminal or an in-stream error),
+// and only when the fold yields the same usage the index and session costs
+// derive from the body. Anything else keeps the raw stream.
+func (l *Logger) aggregateStream(record *Record) {
+	if l.aggregate == nil || record.Kind != "" || record.Status < 200 || record.Status >= 300 ||
+		record.responseTruncated || !looksLikeSSE(record.ResponseBody) {
+		return
+	}
+	folded, err := l.aggregate(record.Protocol, []byte(record.ResponseBody))
+	if err != nil || len(folded) == 0 {
+		return
+	}
+	if ExtractUsage(string(folded)) != ExtractUsage(record.ResponseBody) {
+		return
+	}
+	record.ResponseBody = string(folded)
+	record.ResponseAggregated = true
+}
+
+// looksLikeSSE reports whether a body opens with an SSE field line (after
+// leading whitespace) — a JSON response never does.
+func looksLikeSSE(body string) bool {
+	body = strings.TrimLeft(body, " \t\r\n")
+	for _, field := range []string{"data:", "event:", "id:", "retry:", ":"} {
+		if strings.HasPrefix(body, field) {
+			return true
+		}
+	}
+	return false
 }
 
 // Run drains queued records until Shutdown asks it to finish.

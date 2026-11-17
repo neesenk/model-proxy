@@ -354,12 +354,22 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 		writeJSONErr(w, http.StatusBadRequest, "from must be <= to")
 		return
 	}
-	usage, err := s.reads.Tokens(from, to)
+	// Storage is minute-aligned, so a to inside a minute selects exactly the
+	// buckets of its minute floor. Querying with the floor makes every tick of
+	// a sliding "…→now" range within one minute the same range, which the
+	// stats store answers from its memo until the next flush; the response
+	// still echoes the requested to. A floor of 0 would read as "unbounded",
+	// so a to below one minute is passed through as-is.
+	queryTo := to
+	if floor := to / 60 * 60; floor > 0 {
+		queryTo = floor
+	}
+	usage, err := s.reads.Tokens(from, queryTo)
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "token usage query: "+err.Error())
 		return
 	}
-	agents, err := s.reads.Agents(from, to)
+	agents, err := s.reads.Agents(from, queryTo)
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "agent usage query: "+err.Error())
 		return

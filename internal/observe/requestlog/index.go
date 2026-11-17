@@ -34,9 +34,16 @@ const (
 	// retention is metadata-only, this cap is the belt-and-braces bound on
 	// any future field growth).
 	indexBatchMaxBytes = 64 << 20
-	// defaultReconcileInterval is the tailing tick: how often the indexer
-	// picks up appended lines, rotations, truncations and retention deletes.
+	// defaultReconcileInterval is the tailing tick: how soon after the log
+	// writer reports a change (Notify) the indexer picks up appended lines,
+	// rotations, truncations and retention deletes.
 	defaultReconcileInterval = 250 * time.Millisecond
+	// idleReconcileTicks bounds how many beats pass without a change
+	// notification before a pass runs anyway — external edits to the
+	// directory (an operator deleting files) are picked up within this bound
+	// (5s at the default tick) while an idle directory is not re-listed four
+	// times a second.
+	idleReconcileTicks = 20
 	// indexDetailLimit bounds the indexed locations one Detail id may seek
 	// (mirrors the scan-side detail filter's Limit 50).
 	indexDetailLimit = 50
@@ -76,6 +83,14 @@ type Indexer struct {
 	// sessions is the incremental per-session aggregate cache behind
 	// SessionSummaries (see sessionAggCache).
 	sessions sessionAggCache
+	// tracks mirrors the files table for the reconcile loop (index_files.go);
+	// nil until the first pass loads it, and after a failed pass.
+	tracks map[string]*fileTrack
+	// changed is raised by Notify (the log writer's change hook) and consumed
+	// by the next beat; idleTicks counts beats since the last pass. Both are
+	// what lets an idle beat skip its pass (tickReconcile).
+	changed   atomic.Bool
+	idleTicks int
 }
 
 // NewIndexer opens (or creates) the index at <dir>/index.db and applies the
@@ -290,7 +305,46 @@ func (x *Indexer) ensureColumns() error {
 	if _, err := x.db.Exec(`CREATE INDEX IF NOT EXISTS idx_records_ts_ms ON records(ts_ms)`); err != nil {
 		return err
 	}
-	return nil
+	// Retention deletes, replaced-file re-indexes and rotation moves address
+	// rows by file; without this index each of them walks the whole table
+	// once per rotated or deleted file.
+	if _, err := x.db.Exec(`CREATE INDEX IF NOT EXISTS idx_records_file ON records(file)`); err != nil {
+		return err
+	}
+	return x.ensureFileHeadColumn()
+}
+
+// ensureFileHeadColumn adds files.head (the file identity fingerprint, see
+// index_files.go) to an index created before it existed; rows keep NULL
+// until the next reconcile pass backfills them.
+func (x *Indexer) ensureFileHeadColumn() error {
+	rows, err := x.db.Query(`PRAGMA table_info(files)`)
+	if err != nil {
+		return err
+	}
+	hasHead := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == "head" {
+			hasHead = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+	if hasHead {
+		return nil
+	}
+	_, err = x.db.Exec(`ALTER TABLE files ADD COLUMN head BLOB`)
+	return err
 }
 
 // Run reconciles immediately and then on the tailing tick until Shutdown. The
@@ -307,12 +361,36 @@ func (x *Indexer) Run() {
 	for {
 		select {
 		case <-ticker.C:
-			x.runReconcile()
+			x.tickReconcile()
 		case <-x.done:
 			x.runReconcile()
 			return
 		}
 	}
+}
+
+// Notify reports that the log directory changed (a line written, a file
+// rotated or swept). Safe from any goroutine and non-blocking: the log
+// writer calls it on every write, and the next beat runs a pass.
+func (x *Indexer) Notify() {
+	if x != nil {
+		x.changed.Store(true)
+	}
+}
+
+// tickReconcile is one ticker beat of the Run loop: it runs a pass when a
+// change was notified since the last pass, or when idleReconcileTicks beats
+// passed without one, and reports whether it did. The flag is consumed
+// before the pass, so a change notified while the pass runs is never lost —
+// it triggers the next beat.
+func (x *Indexer) tickReconcile() bool {
+	x.idleTicks++
+	if !x.changed.Swap(false) && x.idleTicks < idleReconcileTicks {
+		return false
+	}
+	x.idleTicks = 0
+	x.runReconcile()
+	return true
 }
 
 // Shutdown stops the loop, waits for Run's final reconcile and closes the
@@ -362,47 +440,6 @@ type fileState struct {
 	mtime int64
 }
 
-// reconcile brings the index in line with the directory: vanished files drop
-// their rows (retention sweep), shrunk files are re-indexed from zero
-// (truncation/rotation replace), and every file is tailed from its indexed
-// cursor. Only newline-terminated lines are consumed; a trailing partial line
-// (a record the writer has not finished) waits for the next pass.
-func (x *Indexer) reconcile() error {
-	entries, err := os.ReadDir(x.dir)
-	if err != nil {
-		return fmt.Errorf("readdir: %w", err)
-	}
-	present := map[string]fileState{}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasPrefix(name, filePrefix) || !strings.HasSuffix(name, ".log") {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		present[name] = fileState{size: info.Size(), mtime: info.ModTime().UnixNano()}
-	}
-	if err := x.dropVanished(present); err != nil {
-		return err
-	}
-	names := make([]string, 0, len(present))
-	for name := range present {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if err := x.syncFile(name, present[name].size, present[name].mtime); err != nil {
-			return fmt.Errorf("index %s: %w", name, err)
-		}
-	}
-	return nil
-}
-
 // deleteFileRows removes one file's indexed rows and returns the session ids
 // they belonged to, so the caller can drop those sessions from the
 // incremental aggregate cache (recompute-on-demand keeps the cache a derived
@@ -432,113 +469,25 @@ func deleteFileRows(tx *sql.Tx, path string) ([]string, error) {
 	return ids, nil
 }
 
-// dropVanished deletes the rows of indexed files that no longer exist on disk.
-func (x *Indexer) dropVanished(present map[string]fileState) error {
-	rows, err := x.db.Query(`SELECT path FROM files`)
-	if err != nil {
-		return err
-	}
-	var stale []string
-	for rows.Next() {
-		var path string
-		if err := rows.Scan(&path); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		if _, ok := present[path]; !ok {
-			stale = append(stale, path)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	_ = rows.Close()
-	if len(stale) == 0 {
-		return nil
-	}
-	tx, err := x.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	var droppedSessions []string
-	for _, path := range stale {
-		ids, err := deleteFileRows(tx, path)
-		if err != nil {
-			return err
-		}
-		droppedSessions = append(droppedSessions, ids...)
-		if _, err := tx.Exec(`DELETE FROM files WHERE path = ?`, path); err != nil {
-			return err
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	x.sessions.dropSessions(droppedSessions)
-	return nil
-}
-
-// syncFile tails one file: a size below the indexed cursor means the file was
-// truncated or replaced (rotation rename + recreate), so its rows are dropped
-// and the cursor rewinds; new bytes beyond the cursor are parsed and inserted
-// in bounded batches, one transaction per batch.
-func (x *Indexer) syncFile(name string, size, mtime int64) error {
-	var cursor int64
-	err := x.db.QueryRow(`SELECT size_indexed FROM files WHERE path = ?`, name).Scan(&cursor)
-	if err == sql.ErrNoRows {
-		cursor = 0
-	} else if err != nil {
-		return err
-	}
-	if size < cursor {
-		tx, err := x.db.Begin()
-		if err != nil {
-			return err
-		}
-		defer func() { _ = tx.Rollback() }()
-		droppedSessions, err := deleteFileRows(tx, name)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO files (path, size_indexed, mtime) VALUES (?, 0, ?)
-			 ON CONFLICT(path) DO UPDATE SET size_indexed = 0, mtime = excluded.mtime`,
-			name, mtime,
-		); err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		// The re-index re-inserts this file's rows from zero and folds them
-		// back in as they arrive; dropping first is what keeps the fold from
-		// double-counting the pre-truncation rows.
-		x.sessions.dropSessions(droppedSessions)
-		cursor = 0
-	}
-	if size == cursor {
-		return nil
-	}
-	return x.appendFile(name, cursor, mtime)
-}
-
-// appendFile indexes the newline-terminated lines in (cursor, EOF). A line
-// that fails to decode (a torn write or foreign content after a same-name
-// recreate) is skipped but still advances the cursor — the file scan query
-// path skips unparseable lines the same way.
-func (x *Indexer) appendFile(name string, cursor, mtime int64) error {
+// appendFile indexes the newline-terminated lines in (track.cursor, EOF),
+// advancing the track (and recording the file's head fingerprint from its
+// first line) as each batch commits. A line that fails to decode (a torn
+// write or foreign content after a same-name recreate) is skipped but still
+// advances the cursor — the file scan query path skips unparseable lines the
+// same way.
+func (x *Indexer) appendFile(name string, track *fileTrack, mtime int64) error {
 	file, err := os.Open(filepath.Join(x.dir, name))
 	if err != nil {
 		return err
 	}
 	defer func() { _ = file.Close() }()
+	cursor := track.cursor
 	if _, err := file.Seek(cursor, io.SeekStart); err != nil {
 		return err
 	}
 	reader := bufio.NewReaderSize(file, 256<<10)
 	offset := cursor
+	head := track.head
 	for {
 		var batch []recordRow
 		batchBytes := 0
@@ -556,6 +505,10 @@ func (x *Indexer) appendFile(name string, cursor, mtime int64) error {
 			}
 			lineOffset := offset
 			offset += int64(len(line))
+			if lineOffset == 0 && head == nil {
+				// Cloned: the fingerprint must not pin a multi-MB line.
+				head = bytes.Clone(headOf(line))
+			}
 			if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 {
 				if row, ok := rowFromLine(name, trimmed, lineOffset, int64(len(line))); ok {
 					batch = append(batch, row)
@@ -568,9 +521,10 @@ func (x *Indexer) appendFile(name string, cursor, mtime int64) error {
 		// consumed), otherwise reconcile would re-read the same garbage
 		// forever.
 		if len(batch) > 0 || (eof && offset != cursor) {
-			if err := x.insertBatch(name, batch, offset, mtime); err != nil {
+			if err := x.insertBatch(name, batch, offset, mtime, head); err != nil {
 				return err
 			}
+			track.cursor, track.head = offset, head
 		}
 		if eof {
 			return nil
@@ -617,7 +571,7 @@ func rowFromLine(file string, line []byte, offset, length int64) (recordRow, boo
 	return row, true
 }
 
-func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int64) error {
+func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int64, head []byte) error {
 	tx, err := x.db.Begin()
 	if err != nil {
 		return err
@@ -667,9 +621,9 @@ func (x *Indexer) insertBatch(name string, batch []recordRow, cursor, mtime int6
 		}
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO files (path, size_indexed, mtime) VALUES (?,?,?)
-		 ON CONFLICT(path) DO UPDATE SET size_indexed = excluded.size_indexed, mtime = excluded.mtime`,
-		name, cursor, mtime,
+		`INSERT INTO files (path, size_indexed, mtime, head) VALUES (?,?,?,?)
+		 ON CONFLICT(path) DO UPDATE SET size_indexed = excluded.size_indexed, mtime = excluded.mtime, head = excluded.head`,
+		name, cursor, mtime, head,
 	); err != nil {
 		return err
 	}

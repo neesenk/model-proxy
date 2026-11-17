@@ -190,12 +190,38 @@ Close-once 回调，日志 schema、入队与 replay 判断不进入 transport �
 `<request_log.dir>/index.db`（SQLite，DSN/WAL/单连接与 stats store 同纪律）——
 每行记录的元数据、`ExtractUsage` 投影（索引时解析一次）与原始行的
 (file, offset, length) 坐标入库，body 仍只留在 JSONL 文件。索引是**派生视图**：
-文件消失（retention sweep）对应行删除；文件 size 回退（截断/轮转重建）该文件
-行清零并从 0 重索引；index.db 丢失或损坏时删库重建、全量重尾随自愈。reconcile
-每 ~250ms 一轮，单事务批量插入（每批至多 500 行**或 64MiB 行字节，先到为准**），
+`files` 表（`size_indexed` cursor + `head`）是权威，reconcile 循环只持有它的内存镜像
+（`index_files.go` 的 `fileTrack`）。**文件身份 = head 指纹**：首行前 ≤256 字节（记录行以
+ts + request_id 开头，足以唯一标识文件）。每轮：stat 与上一轮相同的文件直接跳过（零 SQL、
+零读取——一个月的轮转文件不再每轮逐个查表）；变化的文件读 head 比对——head 相同且 size 不低于
+cursor 才是同一文件增长（从 cursor 尾随），否则其已索引内容已离开该名字（替换/截断——**包括
+被更大内容替换**，旧实现只看 size 回退会从旧 cursor 读进无关字节）；消失或被替换的名字是
+**rename 源**：新出现的文件若 head 相同且 size ≥ 源 cursor，即源文件被改名（writer 的 size 轮转
+把活动文件改名为归档名），行与 cursor 一条 `UPDATE records SET file` 搬过去，不再把最大 1GiB
+的归档从 0 重读重解析；未被认领的消失文件删行（retention sweep），未被认领的替换文件删行并从 0
+重索引；之后所有文件从 cursor 尾随。升级前建的索引（`head` 为 NULL）首轮按 size 规则回填 head。
+按文件删除/搬迁走 `idx_records_file`（无该索引时每次轮转/删除都全表扫描）。index.db 丢失或损坏时
+删库重建、全量重尾随自愈。**节拍**：ticker 每 ~250ms 一拍，但只有在 log writer 报告目录变化
+（`Indexer.Notify`，经 `logfile.Options.OnChange` 在每次写行/轮转与每次 retention/disk-guard 之后
+触发；daemon 的 logger 是该目录唯一写者）后的下一拍才跑一轮，否则每 20 拍（~5s）兜底一轮以拾取
+外部改动；单事务批量插入（每批至多 500 行**或 64MiB 行字节，先到为准**），
 尾部不完整行留到下一轮；`rowFromLine` 在 `ExtractUsage` 之后立刻置空
 request/response body 字符串——索引行只驻留元数据（历史上整批 500 行持有完整
 multi-MB body 曾把堆峰值顶到数 GB，字节封顶与置空 body 是它的双层防护）。
+**流应答聚合落盘**（`request_log.aggregate_streams`，默认关、restart-only）：流式应答每输出 token 约 100 字节
+chunk 信封（2026-11-12 峰值日 94.5GB 请求日志里约 80% 是响应流），开启后已完成的应答以聚合后的 JSON
+响应落盘、记录带 `response_aggregated:true`，`response_size`/`response_headers` 仍描述线上字节，客户端字节
+不受影响。聚合在 log writer goroutine 的 encode 闭包里做（`Logger.aggregateStream`，请求路径不付这份
+CPU），折叠器由组合根注入（`internal/app/observe_adapters.go aggregateLoggedStream` = `protocol.AggregateSSE`，
+与 stream-only 上游应答非流式客户端的是同一折叠；requestlog 不依赖 protocol 包）。只替换不是证据的字节：
+2xx、未截断、LLM（非 MCP）、以 SSE 字段行开头的 body，折叠器干净折叠（无终止信号或流内报错的流它拒绝），
+且折叠结果的 `ExtractUsage` 与原流**逐值相等**（索引 usage 列与会话成本从 body 派生，不能因落盘形态改变）；
+其余一律保留原始 SSE。成本权衡：`AggregateSSE` 每流约 5ms/12MB 分配，与它省下的行编码 + 索引重解析大致
+相抵——这项开关的收益是磁盘写入与留存（典型 20-40 倍）而不是 CPU。
+`ExtractUsage` 的成本形态：只有 body 以 `{` 开头才尝试整体 JSON 解码（其余形态整体解码必败，
+还白付一次整 body 拷贝）；SSE 按行切子串（无逐行拷贝），一帧只有可能拼出 usage 键时才解码——
+encoding/json 以 `strings.EqualFold` 匹配键（ASCII 大小写变体 + `ſ`(U+017F)→`s`）且键可用 `\u`
+转义，`usageKeyCandidate` 只跳过不可能含这种拼写的帧，结果与逐帧全解码逐值相同，普通 delta 帧零分配。
 Shutdown 在 log writer drain 之后跑一次 final reconcile（final flush）。
 写热路径（forward commit → Enqueue）不碰 SQLite。查询与扫描版语义逐字段一致：
 `SummariesWithFacets`（WHERE 映射 Filter——From/To 时间窗作用于 `ts_ms`，`ensureColumns` 建的 `idx_records_ts_ms` 让历史窗口（UI 分钟级时间筛选）免于沿 TEXT `ts` 索引逐行过滤所有更新行 + **failover 腿折叠**：已配对 `attempt_only` 行不出列、折入其已提交行的 `failed_hops`（attempt 升序元数据），未应答请求〔无已提交行，如客户端中途断开〕保留最新一腿独立成行——status/errors 过滤作用于存活行终态，扫描回退路径同语义折叠；facets 在 filter 之前对全部已索引行

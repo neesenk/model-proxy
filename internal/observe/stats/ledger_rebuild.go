@@ -67,6 +67,7 @@ func (s *Store) RebuildTokenLedger(indexDBPath string) (rebuilt, skipped int64, 
 	if s == nil || s.db == nil {
 		return 0, 0, nil
 	}
+	defer s.noteMutation()
 	// The impossible-ledger sweep needs no request-log source and runs even
 	// when the index is unavailable or empty (its rows may be long gone).
 	reset, err := s.repairImpossibleLedgers()

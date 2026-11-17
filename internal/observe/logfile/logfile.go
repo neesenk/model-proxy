@@ -70,6 +70,11 @@ type Options struct {
 	// condition <= 0 disarms that condition; both <= 0 disable the guard.
 	MinFreeBytes   int64
 	MaxUsedPercent int
+	// OnChange, when set, is called on the writer goroutine after each
+	// change to the directory became visible: every line write (a rotation
+	// happens inside a write) and every retention/disk-guard pass. It lets a
+	// tailing reader wait for changes instead of polling; it must not block.
+	OnChange func()
 }
 
 // Logger owns the non-blocking queue and its single JSONL writer goroutine.
@@ -217,6 +222,7 @@ func (l *Logger) Run() {
 					l.write(writer, encode, time.Now())
 				default:
 					l.sweep(time.Now(), writer.Path())
+					l.changed()
 					return
 				}
 			}
@@ -231,6 +237,14 @@ func (l *Logger) Run() {
 func (l *Logger) sweepAndGuard(now time.Time, activePath string) {
 	l.sweep(now, activePath)
 	l.guard(activePath)
+	l.changed()
+}
+
+// changed fires the OnChange hook, if any.
+func (l *Logger) changed() {
+	if l.opts.OnChange != nil {
+		l.opts.OnChange()
+	}
 }
 
 func (l *Logger) write(writer *Writer, encode EncodeFunc, now time.Time) {
@@ -250,6 +264,8 @@ func (l *Logger) write(writer *Writer, encode EncodeFunc, now time.Time) {
 			logx.Warnf("[%s] write failed (lost %d records total): %v", l.opts.Tag, n, err)
 		}
 	}
+	// Even a failed write may have rotated the file first.
+	l.changed()
 }
 
 // sweep removes rotated files older than the retention window. The active

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"io"
 	"math/rand"
@@ -90,13 +91,23 @@ func TestProxyRequestLogIndexLifecycle(t *testing.T) {
 	if !p.reqLogStarted || !p.reqLogIndexStarted {
 		t.Fatal("request log loops were not started")
 	}
+	// The record must arrive AFTER the indexer's boot pass, so only a later
+	// pass can index it.
+	bootCtx, cancelBoot := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelBoot()
+	if err := p.reqLogIndex.WaitReconciled(bootCtx); err != nil {
+		t.Fatalf("indexer boot pass: %v", err)
+	}
 
 	p.reqLog.Enqueue(p.reqLog.BuildRecord(requestlog.Input{
 		Timestamp: time.Date(2026, 7, 28, 1, 0, 0, 0, time.UTC),
 		RequestID: "indexed-live", ResponseBody: []byte(`{"usage":{"input_tokens":2,"output_tokens":1}}`),
 	}))
-	// Poll (bounded): the running indexer reconciles on its own tick.
-	deadline := time.Now().Add(5 * time.Second)
+	// Poll (bounded): the logger's change hook wakes the running indexer on
+	// its next beat. The bound stays below the indexer's idle bound (20 beats
+	// = 5s): a logger whose writes do not notify the index would only be
+	// picked up by the idle pass, and fails here instead of passing slowly.
+	deadline := time.Now().Add(3 * time.Second)
 	for {
 		summaries, _, err := p.reqLogIndex.SummariesWithFacets(requestlog.Filter{Limit: 10, UsageOnly: true})
 		if err != nil {

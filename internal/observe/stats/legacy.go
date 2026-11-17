@@ -25,6 +25,7 @@ func (s *Store) ImportLegacyTokens(path string) (int, error) {
 	if !empty {
 		return 0, nil
 	}
+	defer s.noteMutation()
 
 	data, err := os.ReadFile(path)
 	if err != nil {

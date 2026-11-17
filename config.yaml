@@ -189,6 +189,13 @@ request_log:
     enabled: true
     min_free_bytes: 53687091200 # 50GiB
     max_used_percent: 95
+  # Store a completed 2xx SSE answer as its aggregated JSON response (flagged
+  # response_aggregated; the client still receives the stream byte-for-byte).
+  # A streamed answer is ~100 bytes of chunk envelope per output token — the
+  # 2026-11-12 peak wrote 94.5GB of request log, ~80% of it response streams;
+  # the aggregate is typically 20-40x smaller. Truncated, non-2xx, unterminated
+  # or in-stream-error streams keep the raw SSE. Restart-only. Default false.
+  aggregate_streams: true
   # MCP gateway exchanges (kind="mcp") go to their OWN stream instead of
   # polluting the LLM request log: mcp-YYYYMMDD.log files under mcp_dir
   # (default ~/.model-proxy/log/mcp), sharing the size/body/retention policy

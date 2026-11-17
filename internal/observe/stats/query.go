@@ -3,6 +3,7 @@ package stats
 import (
 	"database/sql"
 	"fmt"
+	"maps"
 	"math"
 	"sort"
 	"time"
@@ -19,16 +20,30 @@ func (s *Store) LoadCumulative() (map[Key]Counters, error) {
 // Buckets are minute-aligned: callers truncate the window start DOWN to the
 // minute boundary so the whole boundary minute counts, and a to inside a
 // minute includes that minute's bucket (bucket start <= to).
+//
+// Repeats of a range are answered from the range memo until the next Store
+// mutation (range_memo.go); the returned map is always the caller's own.
 func (s *Store) LoadCumulativeRange(from, to int64) (map[Key]Counters, error) {
-	if to <= 0 {
-		to = math.MaxInt64
+	key := normalizeRange(from, to)
+	generation := s.mutations.Load()
+	if cached, ok := s.providerRanges.get(key, generation); ok {
+		return maps.Clone(cached), nil
 	}
+	cumulative, err := s.queryCumulativeRange(key)
+	if err != nil {
+		return nil, err
+	}
+	s.providerRanges.put(key, generation, cumulative)
+	return maps.Clone(cumulative), nil
+}
+
+func (s *Store) queryCumulativeRange(key rangeKey) (map[Key]Counters, error) {
 	rows, err := s.db.Query(`SELECT provider, model,
 		SUM(requests), SUM(failovers), SUM(rate_limited_429), SUM(failures),
 		SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read), SUM(token_requests),
 		MAX(last_request_at), SUM(latency_ms_sum), SUM(ttft_ms_sum), SUM(duration_ms_sum), SUM(gen_ms_sum)
 		FROM minute_buckets WHERE minute >= ? AND minute <= ? GROUP BY provider, model`,
-		max(from, 0), to)
+		key.from, key.to)
 	if err != nil {
 		return nil, err
 	}
@@ -77,15 +92,27 @@ func (s *Store) LoadCumulativeAgents() (map[AgentKey]AgentCounters, error) {
 // LoadCumulativeAgentsRange is LoadCumulativeAgents restricted to buckets with
 // from <= minute <= to (either bound <= 0 unbounded) — the range counterpart
 // used by the token-usage time selector.
+// Memoized exactly like LoadCumulativeRange.
 func (s *Store) LoadCumulativeAgentsRange(from, to int64) (map[AgentKey]AgentCounters, error) {
-	if to <= 0 {
-		to = math.MaxInt64
+	key := normalizeRange(from, to)
+	generation := s.mutations.Load()
+	if cached, ok := s.agentRanges.get(key, generation); ok {
+		return maps.Clone(cached), nil
 	}
+	cumulative, err := s.queryCumulativeAgentsRange(key)
+	if err != nil {
+		return nil, err
+	}
+	s.agentRanges.put(key, generation, cumulative)
+	return maps.Clone(cumulative), nil
+}
+
+func (s *Store) queryCumulativeAgentsRange(key rangeKey) (map[AgentKey]AgentCounters, error) {
 	rows, err := s.db.Query(`SELECT agent, provider, model,
 		SUM(requests), SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read),
 		SUM(latency_ms_sum), SUM(ttft_ms_sum), SUM(duration_ms_sum), SUM(gen_ms_sum), SUM(failures)
 		FROM agent_buckets WHERE minute >= ? AND minute <= ? GROUP BY agent, provider, model`,
-		max(from, 0), to)
+		key.from, key.to)
 	if err != nil {
 		return nil, err
 	}

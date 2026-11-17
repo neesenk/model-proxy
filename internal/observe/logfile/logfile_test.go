@@ -652,3 +652,46 @@ func TestEnqueueAfterRunStopsIsCounted(t *testing.T) {
 		t.Fatalf("Dropped = %d, want 1 (post-stop enqueue must be counted, not silently stranded)", got)
 	}
 }
+
+// TestLoggerOnChangeFollowsWritesAndSweeps: OnChange is the directory-change
+// signal a tailing reader (the request-log index) waits on instead of polling.
+// It must fire after the change is visible on disk: after a written line has
+// reached the file, and after a retention pass has removed an expired file.
+func TestLoggerOnChangeFollowsWritesAndSweeps(t *testing.T) {
+	dir := testDir(t)
+	expired := filepath.Join(dir, "test-20200101--010000-1.log")
+	if err := os.WriteFile(expired, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expiredTime := time.Now().Add(-40 * 24 * time.Hour)
+	if err := os.Chtimes(expired, expiredTime, expiredTime); err != nil {
+		t.Fatal(err)
+	}
+	active := filepath.Join(dir, testPrefix+time.Now().Format(dayFileLayout)+fileExtension)
+	var mu sync.Mutex
+	sawSweep, sawLine := false, false
+	logger := New(Options{
+		Directory: dir, FilePrefix: testPrefix, Retention: 30 * 24 * time.Hour, Tag: "test",
+		OnChange: func() {
+			mu.Lock()
+			defer mu.Unlock()
+			if _, err := os.Stat(expired); os.IsNotExist(err) {
+				sawSweep = true
+			}
+			if data, err := os.ReadFile(active); err == nil && bytes.Count(data, []byte{'\n'}) == 1 {
+				sawLine = true
+			}
+		},
+	})
+	go logger.Run()
+	logger.Enqueue(func(_ time.Time, buf []byte) ([]byte, error) { return append(buf[:0], "{}"...), nil })
+	logger.Shutdown()
+	mu.Lock()
+	defer mu.Unlock()
+	if !sawSweep {
+		t.Error("no change notification observed the boot sweep's removal of the expired file")
+	}
+	if !sawLine {
+		t.Error("no change notification observed the written line on disk")
+	}
+}

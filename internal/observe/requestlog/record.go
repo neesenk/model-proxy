@@ -45,12 +45,16 @@ type Record struct {
 	// TTFTMs is time-to-first-byte of the committed response body (proxy
 	// pipeline's first read). Streams ≈ first token; buffered conversions ≈
 	// total. 0 = unknown (records written before the field existed).
-	TTFTMs          int64  `json:"ttft_ms,omitempty"`
-	RequestSize     int    `json:"request_size"`
-	ResponseSize    int64  `json:"response_size"`
-	RequestBody     string `json:"request_body"`
-	ResponseBody    string `json:"response_body"`
-	ResponseHeaders string `json:"response_headers,omitempty"`
+	TTFTMs       int64  `json:"ttft_ms,omitempty"`
+	RequestSize  int    `json:"request_size"`
+	ResponseSize int64  `json:"response_size"`
+	RequestBody  string `json:"request_body"`
+	ResponseBody string `json:"response_body"`
+	// ResponseAggregated marks a completed SSE answer stored as its
+	// aggregated JSON response (request_log.aggregate_streams) instead of the
+	// raw stream; ResponseSize and ResponseHeaders still describe the wire.
+	ResponseAggregated bool   `json:"response_aggregated,omitempty"`
+	ResponseHeaders    string `json:"response_headers,omitempty"`
 	// TurnKey is a fingerprint of this request's conversational turn. Empty on
 	// records written before the field existed or when the body carries no user
 	// text; omitted from the JSONL line when empty.
@@ -81,6 +85,10 @@ type Record struct {
 	// on the Summary by the index path) so paired legs stop appearing as
 	// standalone rows. Never persisted; json:"-" keeps decoded lines clean.
 	FailedHops []FailedHop `json:"-"`
+	// responseTruncated: the capture hit max_body_bytes (BuildRecord appended
+	// the truncation marker). Not serialized; an incomplete stream is never
+	// aggregated.
+	responseTruncated bool
 }
 
 // ConversionDiagnostic is the log projection of one conversion diagnostic.
@@ -220,6 +228,7 @@ func (l *Logger) BuildRecord(in Input) *Record {
 	rec.ResponseBody = string(in.ResponseBody)
 	if in.ResponseTruncated {
 		rec.ResponseBody += truncationMarker
+		rec.responseTruncated = true
 	}
 	rec.TurnKey = ComputeTurnKey(in.RequestBody)
 	return rec
@@ -309,6 +318,9 @@ func appendRecordLine(dst []byte, rec *Record) []byte {
 	dst = appendJSONString(dst, rec.RequestBody)
 	dst = append(dst, `,"response_body":`...)
 	dst = appendJSONString(dst, rec.ResponseBody)
+	if rec.ResponseAggregated {
+		dst = append(dst, `,"response_aggregated":true`...)
+	}
 	if rec.ResponseHeaders != "" {
 		dst = append(dst, `,"response_headers":`...)
 		dst = appendJSONString(dst, rec.ResponseHeaders)

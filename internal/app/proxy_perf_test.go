@@ -651,3 +651,132 @@ func TestProxy_SSE_FirstByte(t *testing.T) {
 		t.Errorf("remaining SSE stream missing DONE: %q", rest)
 	}
 }
+
+// claudeCodeBody builds a Claude-Code-shaped Anthropic Messages request: a
+// system prompt, a tool table, then `turns` assistant tool_use / user
+// tool_result round-trips carrying source code. This is the shape whose
+// body-wide passes (guard scan, request profile, role counts) a uniform
+// padding body hides — structure, quotes and identifiers drive their cost.
+// model is the first key, as real clients write it.
+func claudeCodeBody(turns int) []byte {
+	const code = "func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {\n" +
+		"\tordered, decision := p.svc.Schedule(req.runtime.Cfg, req.exposed, req.sessionKey)\n" +
+		"\tfor index, target := range ordered {\n\t\tplan, err := planTarget(req.runtime, target, req.proto)\n" +
+		"\t\tif err != nil {\n\t\t\treturn serveResult{planningErr: true}\n\t\t}\n\t\t_, _, _ = index, plan, decision\n\t}\n" +
+		"\treturn serveResult{} // 中文注释：转发管线\n}\n"
+	var b bytes.Buffer
+	b.WriteString(`{"model":"claude-opus-4-7","max_tokens":32000,"stream":false,"system":[{"type":"text","text":`)
+	fmt.Fprintf(&b, "%q", strings.Repeat("Follow the repository rules and cite file_path:line_number. ", 200))
+	b.WriteString(`}],"tools":[`)
+	for i := 0; i < 24; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"name":"Tool%d","description":%q,"input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer"}},"required":["file_path"]}}`,
+			i, strings.Repeat("Perform one workspace operation with the documented parameters. ", 8))
+	}
+	b.WriteString(`],"messages":[{"role":"user","content":[{"type":"text","text":"analyze the forward pipeline"}]}`)
+	for t := 0; t < turns; t++ {
+		fmt.Fprintf(&b, `,{"role":"assistant","content":[{"type":"text","text":"Reading step %d."},{"type":"tool_use","id":"toolu_%024d","name":"Read","input":{"file_path":"/work/repo/internal/forward/f%d.go","offset":%d}}]}`, t, t, t, t*10)
+		fmt.Fprintf(&b, `,{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_%024d","content":%q}]}`, t, strings.Repeat(code, 2+t%3))
+	}
+	b.WriteString(`]}`)
+	return b.Bytes()
+}
+
+// BenchmarkProxy_Forward_ClaudeCodeBody_1MB measures the request side on a
+// realistic ~1MB coding-agent request through a same-protocol (anthropic)
+// target: the default guard scan (secrets + paths), the request-log profile
+// and role projection, and the capture. The upstream answers a tiny JSON, so
+// the body-wide passes dominate.
+func BenchmarkProxy_Forward_ClaudeCodeBody_1MB(b *testing.B) {
+	silenceLog(b)
+	up := newUpstream(jsonOK)
+	defer up.Close()
+	p := newTestProxy(b, &configdomain.Config{
+		Listen: "127.0.0.1:0",
+		Providers: map[string]configdomain.Provider{
+			"t": {AnthropicBaseURL: up.URL, Provider: testProviderID, Models: []string{"claude-opus-4-7"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{"claude-opus-4-7": {{Provider: "t", Model: "claude-opus-4-7"}}},
+		Guard:  configdomain.GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true, Paths: "log"},
+	})
+	logger := requestlog.New(requestlog.Options{Directory: b.TempDir(), MaxFileSize: 1 << 30, MaxBodyBytes: 5 << 20})
+	go logger.Run()
+	defer logger.Shutdown()
+	p.reqLog = logger
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+	body := claudeCodeBody(260)
+	cli := &http.Client{Timeout: 10 * time.Second}
+
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp, err := cli.Post(px.URL+"/v1/messages", "application/json", bytes.NewReader(body))
+		if err != nil {
+			b.Fatal(err)
+		}
+		answer, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || !bytes.Contains(answer, []byte(`"pong"`)) {
+			b.Fatalf("forward = (%d, %q), want the upstream's 200 answer", resp.StatusCode, answer)
+		}
+	}
+}
+
+// BenchmarkProxy_Forward_SSE_AliasedLongStream measures the dominant
+// production response path: a long openai chat stream (3000 chunks) whose
+// route target model differs from the exposed name, so every chunk passes
+// the model normalizer, the terminal watcher, the usage scanner and the
+// request-log capture (aggregated on write, request_log.aggregate_streams).
+func BenchmarkProxy_Forward_SSE_AliasedLongStream(b *testing.B) {
+	silenceLog(b)
+	var stream bytes.Buffer
+	for i := 0; i < 3000; i++ {
+		fmt.Fprintf(&stream, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"up-1017\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"tok%d \"},\"finish_reason\":null}]}\n\n", i)
+	}
+	stream.WriteString("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"up-1017\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":3000}}\n\ndata: [DONE]\n\n")
+	up := newUpstream(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write(stream.Bytes())
+	})
+	defer up.Close()
+	p := newTestProxy(b, &configdomain.Config{
+		Listen: "127.0.0.1:0",
+		Providers: map[string]configdomain.Provider{
+			"t": {OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"up-1017"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{"alias-model": {{Provider: "t", Model: "up-1017"}}},
+	})
+	logger := requestlog.New(requestlog.Options{
+		Directory: b.TempDir(), MaxFileSize: 1 << 30, MaxBodyBytes: 5 << 20,
+		AggregateStream: aggregateLoggedStream(true),
+	})
+	go logger.Run()
+	defer logger.Shutdown()
+	p.reqLog = logger
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+	body := []byte(`{"model":"alias-model","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	cli := &http.Client{Timeout: 30 * time.Second}
+
+	b.SetBytes(int64(stream.Len()))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp, err := cli.Post(px.URL+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+		if err != nil {
+			b.Fatal(err)
+		}
+		answer, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			b.Fatalf("forward returned %d", resp.StatusCode)
+		}
+		if i == 0 && (bytes.Count(answer, []byte(`"model":"alias-model"`)) != 3001 || bytes.Contains(answer, []byte("up-1017"))) {
+			b.Fatalf("client stream not normalized to the exposed model: %.300q", answer)
+		}
+	}
+}

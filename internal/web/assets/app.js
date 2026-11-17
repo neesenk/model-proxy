@@ -38,7 +38,7 @@ import {
   HEAT_DAYS, analyticsHeatLevel, analyticsYearGrid, analyticsYearMonthSpans, analyticsHeatCellSize, analyticsHeatTip,
   analyticsRowSortKey, ANALYTICS_TABLE_SORT, analyticsSortRows, analyticsTipOrder,
   analyticsMetricOptions, analyticsMetricAllowed,
-  liveSessionSummary, liveSessionOrder, shortSessionId, linkedProviders, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary, guardMarksDetailHTML, requestMetaHTML, orderDetailRecords, committedRecordOf,
+  liveSessionSummary, liveSessionOrder, shortSessionId, linkedProviders, ruleHitsLeaderboard, sessionTimeline, sessionBarSummary, responseExcerpt, requestExcerpt, chatViewHTML, responseContentType, parseChatRequest, chatTurnsSliceHTML, CHAT_RECENT, requestRowHTML, requestTableHeadHTML, sessionHealthSummary, guardMarksDetailHTML, requestMetaHTML, orderDetailRecords, committedRecordOf,
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   parseRequestTimeValue, requestTimeValue, requestTimeBounds, requestTimePickerHTML,
@@ -2574,7 +2574,7 @@ function detailRecordsHTML(recs, opts) {
       ${requestMetaHTML(r, rel, { providerLabel: displayProvider })}${guardCard}
       ${chat}
       <details class="raw-body" data-raw="${esc(reqId)}"><summary>raw request body (${fmtNum(r.request_size)} bytes · ${esc(rawBodyLabel(r.request_body, '', 'request'))})</summary><div class="raw-body-host"><span class="hint">renders on first expand</span></div></details>
-      <details class="raw-body" data-raw="${esc(resId)}"><summary>raw response body (${fmtNum(r.response_size)} bytes · ${esc(rawBodyLabel(r.response_body, ct, 'response'))})</summary><div class="raw-body-host"><span class="hint">renders on first expand</span></div></details>
+      <details class="raw-body" data-raw="${esc(resId)}"><summary>raw response body (${fmtNum(r.response_size)} bytes · ${esc(r.response_aggregated ? 'aggregated from SSE' : rawBodyLabel(r.response_body, ct, 'response'))})</summary><div class="raw-body-host"><span class="hint">renders on first expand</span></div></details>
     </div>`;
   }
   return html;
@@ -2904,18 +2904,6 @@ const BODY_HIGHLIGHT_MAX = 256 * 1024;
 // BODY_LINE_MAX caps per-line rendering; a longer body falls back to the
 // chunked viewer.
 const BODY_LINE_MAX = 5000;
-
-// responseContentType extracts content-type from the record's allowlisted
-// response_headers JSON ({"content-type":…}); empty when absent/unparseable.
-function responseContentType(record) {
-  if (!record || !record.response_headers) return '';
-  try {
-    const headers = JSON.parse(record.response_headers);
-    return String((headers && (headers['content-type'] || headers['Content-Type'])) || '');
-  } catch (_) {
-    return '';
-  }
-}
 
 // capturedBodyView renders one captured body and returns {label, html}. The
 // label feeds the <details> summary; the html is already escaped/safe:

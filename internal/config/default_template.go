@@ -500,6 +500,12 @@ providers:
 #   #   enabled: true
 #   #   min_free_bytes: 53687091200
 #   #   max_used_percent: 95
+#   # Store a completed 2xx SSE answer as its aggregated JSON response
+#   # (flagged response_aggregated; the client's bytes are unchanged). A
+#   # streamed answer is ~100 bytes of chunk envelope per output token, the
+#   # aggregate typically 20-40x smaller. Truncated, non-2xx, unterminated or
+#   # in-stream-error streams keep the raw SSE. Default false.
+#   # aggregate_streams: true
 #   # Client session-id header allowlist (ordered; first non-empty wins); drives
 #   # the request-log session_id + live /api/events session_id. Default:
 #   # [x-claude-code-session-id, x-session-affinity, x-session-id, x-opencode-session]
