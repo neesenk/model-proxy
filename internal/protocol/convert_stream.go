@@ -262,7 +262,11 @@ func (t *openaiSSEToAnthropicSSE) drainDone() (eof bool) {
 }
 
 func (t *openaiSSEToAnthropicSSE) scanError(err error) {
-	convertWarn("SSE scanner error (line too long?): " + err.Error())
+	// No "(line too long?)" guess prefix: the scanner surfaces network read
+	// errors (connection reset / operation timed out) far more often than
+	// bufio's length limit, and a wrong guess in the warning misattributes the
+	// failure (2026-11-17 audit). err.Error() names the real cause.
+	convertWarn("openai SSE scanner error: " + err.Error())
 	t.ensureStart()
 	t.closeBlock()
 	t.emit("error", map[string]any{"type": "error", "error": map[string]any{
@@ -595,7 +599,7 @@ func (t *anthropicSSEToOpenAISSE) emitStreamErrorChunk(message string) {
 }
 
 func (t *anthropicSSEToOpenAISSE) scanError(err error) {
-	convertWarn("SSE scanner error (line too long?): " + err.Error())
+	convertWarn("anthropic SSE scanner error: " + err.Error())
 	t.emitStreamErrorChunk("upstream stream terminated unexpectedly")
 	t.finished = true
 	t.errored = true

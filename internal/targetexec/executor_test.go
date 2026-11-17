@@ -360,6 +360,44 @@ func TestExecutor403PlainBodyCommits(t *testing.T) {
 	}
 }
 
+// A 403 whose body is an HTML page is a gateway/WAF block verdict, not an API
+// envelope (the compass gateway answered every shopee AND aqp dispatch with the
+// same nginx "403 Forbidden" page for ~10 hours on 2026-11-17: the block hit
+// the gateway, not any one account). Committing it kept feeding the blocked
+// gateway — the same provider-level fact as the 2xx HTML fake reply, so it must
+// take the same circuit-breaker tick + failover path (never RecordModelFailure,
+// never a model lock), keeping the observed 403 status with a title-only
+// diagnostic on the leg. Both detection arms: Content-Type text/html, and an
+// HTML-document body prefix under a JSON content type.
+func TestExecutor403HTMLGatewayBlockFailsOver(t *testing.T) {
+	nginxBlock := "<html>\n<head><title>403 Forbidden</title></head>\n<body>\n<center><h1>403 Forbidden</h1></center>\n<hr><center>nginx</center>\n</body>\n</html>\n"
+	cases := []struct {
+		name        string
+		contentType string
+	}{
+		{"content type html", "text/html"},
+		{"html body under json content type", "application/json"},
+	}
+	for _, tc := range cases {
+		provider := &executorTestProvider{}
+		attempt, writer := testAttempt(provider, `{}`, Policy{LastTarget: true})
+		response := testResponse(403, nginxBlock)
+		response.Header.Set("Content-Type", tc.contentType)
+		state := &executorState{}
+		effects := &executorEffects{}
+		result := (Executor{Client: &sequenceDoer{responses: []*http.Response{response}}, State: state, Effects: effects}).Execute(attempt)
+		if result.Committed || result.Outcome != OutcomeFailedHard || result.AttemptStatus != http.StatusForbidden ||
+			state.failures != 1 || state.modelFailures != 0 || state.rateLimits != 0 ||
+			effects.failures != 1 || effects.failovers != 1 || effects.commits != 0 ||
+			writer.Body.Len() != 0 ||
+			!bytes.Contains(result.AttemptBody, []byte("403 Forbidden")) ||
+			bytes.Contains(result.AttemptBody, []byte("<html")) {
+			t.Fatalf("%s: result=%+v state=%+v effects=%+v written=%q body=%q",
+				tc.name, result, state, effects, writer.Body.String(), result.AttemptBody)
+		}
+	}
+}
+
 func TestExecutorCommitUsesShapedBody(t *testing.T) {
 	provider := &executorTestProvider{}
 	attempt, _ := testAttempt(provider, `{"model":"model","store":false}`, Policy{LastTarget: true})

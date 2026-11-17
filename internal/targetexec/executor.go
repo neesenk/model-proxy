@@ -281,6 +281,22 @@ func (executor Executor) Execute(attempt Attempt) Result {
 					executor.rateLimited(target)
 					return Result{Outcome: OutcomeRateLimited}
 				}
+				// A 403 whose response is an HTML page is a gateway/WAF block,
+				// not an API envelope: the page answers dispatch itself, so the
+				// block is provider-level (2026-11-17: the compass gateway's
+				// nginx "403 Forbidden" page hit every shopee AND aqp account
+				// alike for ~10h; committing each one kept feeding the blocked
+				// gateway with no cooldown and no failover). Same accounting as
+				// the 2xx HTML fake reply — circuit tick + failure metric +
+				// failover, never RecordModelFailure — and the leg keeps the
+				// observed 403 with a title-only diagnostic, never the page.
+				if response.StatusCode == http.StatusForbidden && IsFakeAPIReply(response.Header.Get("Content-Type"), peek) {
+					response.Body.Close()
+					logx.Warnf("[proto=%s provider=%s] 403 answered an HTML page (%q) — gateway block, failing over with cooldown accounting",
+						plan.ClientProtocol(), target.Provider, HTMLTitle(peek))
+					executor.failure(target, true)
+					return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: fakeAPIReplyBody(response.StatusCode, peek)}
+				}
 			}
 			if response.StatusCode == http.StatusRequestEntityTooLarge && !retriedImages {
 				if smaller, changed := protocol.ShrinkImages(body, 1<<20, 2048); changed {
@@ -378,12 +394,12 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/html") {
 				peek := peekResponseBody(response, 2<<10)
 				executor.fakeAPIReply(target, plan, peek)
-				return Result{Outcome: OutcomeFailedHard, AttemptStatus: http.StatusBadGateway, AttemptBody: fakeAPIReplyBody(peek)}
+				return Result{Outcome: OutcomeFailedHard, AttemptStatus: http.StatusBadGateway, AttemptBody: fakeAPIReplyBody(response.StatusCode, peek)}
 			}
 			if !clientWantsStream {
 				if head := peekHead(response, 64); IsFakeAPIReply("", head) {
 					executor.fakeAPIReply(target, plan, head)
-					return Result{Outcome: OutcomeFailedHard, AttemptStatus: http.StatusBadGateway, AttemptBody: fakeAPIReplyBody(head)}
+					return Result{Outcome: OutcomeFailedHard, AttemptStatus: http.StatusBadGateway, AttemptBody: fakeAPIReplyBody(response.StatusCode, head)}
 				}
 			}
 		}
@@ -886,12 +902,12 @@ func (executor Executor) fakeAPIReply(target configdomain.RouteTarget, plan Plan
 // fakeAPIReplyBody builds the bounded diagnostic carried on the failover leg
 // (request-log attempt row / terminal error): status + page title, never the
 // page itself.
-func fakeAPIReplyBody(peek []byte) []byte {
+func fakeAPIReplyBody(status int, peek []byte) []byte {
 	title := HTMLTitle(peek)
 	if title == "" {
 		title = "html document"
 	}
-	return []byte("upstream answered 200 with an HTML page: " + title)
+	return []byte(fmt.Sprintf("upstream answered %d with an HTML page: %s", status, title))
 }
 
 func (executor Executor) rateLimited(target configdomain.RouteTarget) {

@@ -128,7 +128,7 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   `DeadlineExceeded`（父 ctx 仍存活）照常计入熔断。
 - exhausted 401 的观测只记 failover，不记 `evFailures`；熔断状态与请求 metric
   是不同语义，普通执行器和 Fusion leg 必须保持一致。
-- 429 进入 provider 限频冷却，不计熔断；**403 且 body 证明配额耗尽**（`targetexec.ParseQuotaDenied`，kimi-code 的 5 小时套餐窗口耗尽即此形态）同路：记限频冷却 + failover，终局按限频类分类。
+- 429 进入 provider 限频冷却，不计熔断；**403 且 body 证明配额耗尽**（`targetexec.ParseQuotaDenied`，kimi-code 的 5 小时套餐窗口耗尽即此形态）同路：记限频冷却 + failover，终局按限频类分类。**403 且响应是 HTML 页**（`IsFakeAPIReply`：Content-Type `text/html` 或文档前缀；网关/WAF 拦截页，如 compass 前面的 nginx "403 Forbidden" 页——2026-11-17 它拦截了 shopee 与 aqp 的全部账号约 10 小时）是与 2xx 伪成功同类的 provider 级事实：计熔断 + 失败指标 + failover（`RecordFailure`，永不 `RecordModelFailure`），腿携带观察到的 403 与标题级诊断；无配额措辞的 JSON 403 仍走原样 commit。
 - 404、model-denied、空 200 只锁 `(provider, model)`。
 - 半开状态使用 `halfOpenInFlight` 单飞。
 - 普通 4xx commit 必须释放半开槽，但不得清除失败历史。
@@ -310,8 +310,16 @@ body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`
   前的任何阻塞读都会吃掉心跳窗口（keepalive 用例钉住）。声明 JSON 却以 HTML 开头的 body 也
   被此臂捕获。
 
-attempt 腿的诊断只带状态与页面标题（`upstream answered 200 with an HTML page: <title>`），
+attempt 腿的诊断只带状态与页面标题（`upstream answered <status> with an HTML page: <title>`），
 不落页面原文。
+
+**4xx 中的同型臂——403 HTML 网关拦截页**：`IsFakeAPIReply` 同一判定（Content-Type 臂 +
+文档前缀臂，读的是 403 分支本来就取的 64KiB evidence peek）作用于 403：网关前面的 WAF/nginx
+拦截页不是 API 信封，拦截是 provider 级事实而非请求形状问题（2026-11-17 compass 拦截风暴中
+shopee×3 与 aqp 全部账号同页同拦约 10 小时）。命中时与 2xx 伪成功同一记账（`RecordFailure` +
+failure metric + failover，永不 `RecordModelFailure`/模型锁），腿保留观察到的 403 状态码与
+标题级诊断；配额措辞 403 仍先走 `ParseQuotaDenied` 限频路，无配额措辞的 JSON 403 仍原样
+commit（裁定不变）。
 
 ## 内容性拒绝不熔断
 
