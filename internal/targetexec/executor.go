@@ -111,10 +111,10 @@ func (executor Executor) Execute(attempt Attempt) Result {
 	}
 	now := time.Now()
 	if executor.State != nil && !policy.Force && executor.State.ModelLocked(target, now) {
-		return Result{}
+		return Result{Outcome: OutcomeSkipped, SkipReason: "model locked", AttemptBody: []byte("skipped before dispatch: model locked (earlier zero-byte 200)")}
 	}
 	if executor.State != nil && !policy.Force && !executor.State.TakeHalfOpenSlot(target.Provider) {
-		return Result{}
+		return Result{Outcome: OutcomeSkipped, SkipReason: "circuit open (no half-open probe slot)", AttemptBody: []byte("skipped before dispatch: circuit open (no half-open probe slot)")}
 	}
 
 	ctx, cancel := context.WithTimeout(exchange.Request.Context(), runtime.Scheduling.Timeout())
@@ -311,7 +311,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 					response.Body.Close()
 					executor.release(target.Provider)
 					executor.failover(target)
-					return Result{Outcome: OutcomeFailedHard}
+					return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: peek}
 				}
 			}
 			if requestShapeStatus(response.StatusCode) && !strippedParam {
@@ -395,7 +395,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 				response.Body.Close()
 				executor.release(target.Provider)
 				executor.failover(target)
-				return Result{Outcome: OutcomeFailedHard}
+				return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: []byte("upstream 2xx carried a zero-length body")}
 			}
 		}
 		if response.StatusCode < 300 {
@@ -405,7 +405,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 		} else {
 			executor.release(target.Provider)
 		}
-		return executor.commit(runtime.Cache, runtime.Scheduling.Keepalive(), plan, exchange, scope, dto, timedWriter, clientWantsStream)
+		return executor.commit(ctx, runtime.Cache, runtime.Scheduling.Keepalive(), plan, exchange, scope, dto, timedWriter, clientWantsStream)
 	}
 	executor.release(target.Provider)
 	executor.failover(target)
@@ -413,6 +413,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 }
 
 func (executor Executor) commit(
+	ctx context.Context,
 	cache *responsecache.Store,
 	keepalive time.Duration,
 	plan Plan,
@@ -632,8 +633,25 @@ func (executor Executor) commit(
 			plan.ClientProtocol(), dto.Target.Provider)
 	}
 	if terminalWatch != nil && terminalWatch.Synthesized() {
-		logx.Warnf("[proto=%s provider=%s] upstream stream ended before its terminal sequence — synthesized a protocol-native error terminal for the client (delivered, never cached)",
-			plan.ClientProtocol(), dto.Target.Provider)
+		// Attribution: the watcher only sees that the upstream body ended
+		// without a terminal — not WHY. A caller that walks away cancels the
+		// caller-owned request context, and that interrupt reaches the parked
+		// upstream Read as a context error shaped exactly like a provider
+		// abandoning its generation. The 2026-11-16 logs carried 132 such
+		// warns, most of them client-side subagent aborts, each claiming an
+		// upstream fault (and delivery to a client that was already gone) —
+		// misattributed evidence for every later incident investigation.
+		switch {
+		case end == streamClientGone || exchange.Request.Context().Err() != nil:
+			logx.Infof("[proto=%s provider=%s] client disconnected mid-stream — synthesized terminal not delivered; not an upstream fault",
+				plan.ClientProtocol(), dto.Target.Provider)
+		case ctx.Err() != nil:
+			logx.Warnf("[proto=%s provider=%s] scheduling timeout ended the stream before its terminal sequence — synthesized terminal delivered",
+				plan.ClientProtocol(), dto.Target.Provider)
+		default:
+			logx.Warnf("[proto=%s provider=%s] upstream stream ended before its terminal sequence — synthesized a protocol-native error terminal for the client (delivered, never cached)",
+				plan.ClientProtocol(), dto.Target.Provider)
+		}
 	}
 	if recorder != nil && recorder.Complete() && len(recorder.Body()) > 0 {
 		// A clean EOF alone does not make a stream complete: upstreams can

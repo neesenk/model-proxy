@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"model-proxy/internal/display"
@@ -10,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	sonic "github.com/bytedance/sonic"
 )
 
 // zcodeAppVersion is the ZCode client version whose fingerprint this provider
@@ -112,9 +115,38 @@ func (p *ZCodeProvider) Refresh() error { return p.ApiKeyBase.Refresh() }
 // Logout removes the apikey file/pool entry (mirrors ZhipuProvider.Logout).
 func (p *ZCodeProvider) Logout() error { return p.DeleteKey() }
 
-// RewriteRequest is a no-op: zcode is same-protocol Anthropic passthrough.
+// zcodeMaxTokensCap is BigModel's anthropic-endpoint max_tokens ceiling
+// (observed live 2026-11-16: max_tokens 262144 answered 400 [1210]
+// "max_tokens参数非法：限制数值范围[1,131072]"). The limit is target-relative —
+// the same openai body can be valid on every other route target — so a
+// fan-out leg that only breaches THIS ceiling is clamped down instead of
+// failing the request terminally on the route.
+const zcodeMaxTokensCap = 131072
+
+// RewriteRequest clamps an over-limit max_tokens to the zcode ceiling; every
+// other byte of the (same-protocol Anthropic passthrough) body passes through
+// untouched, and bodies at or below the cap (or without the field) stay
+// byte-identical.
 func (p *ZCodeProvider) RewriteRequest(targetURL string, body []byte, path string) (string, []byte) {
-	return targetURL, body
+	if !bytes.Contains(body, []byte(`"max_tokens"`)) {
+		return targetURL, body
+	}
+	var probe struct {
+		MaxTokens *int64 `json:"max_tokens"`
+	}
+	if err := sonic.Unmarshal(body, &probe); err != nil || probe.MaxTokens == nil || *probe.MaxTokens <= zcodeMaxTokensCap {
+		return targetURL, body
+	}
+	var rewritten map[string]any
+	if err := sonic.Unmarshal(body, &rewritten); err != nil {
+		return targetURL, body
+	}
+	rewritten["max_tokens"] = zcodeMaxTokensCap
+	out, err := sonic.Marshal(rewritten)
+	if err != nil {
+		return targetURL, body
+	}
+	return targetURL, out
 }
 
 // FetchModels lists models via the OpenAI base (/models), Bearer-authed.

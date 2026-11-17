@@ -924,6 +924,9 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 			res.sawCooldown = true
 		case targetexec.OutcomeClientGone:
 			res.clientGone = true
+		case targetexec.OutcomeSkipped:
+			// Pre-dispatch gate denial (model lock / open circuit): routing
+			// telemetry, not a provider verdict — no terminal flags.
 		}
 		if res.clientGone {
 			break
@@ -953,11 +956,18 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 			continue
 		}
 		// The status is the leg's observed upstream answer (429/401/5xx…);
-		// 0 means a transport-level failure whose own "upstream error" line
-		// sits directly above. Without it, plain 429/502 legs leave no reason
-		// in serve.log — only the request-log attempt row knows.
-		logx.Warnf("[proto=%s model=%s] target %d (%s/%s) failed (status %d); trying next",
-			proto, exposed, ti, t.Provider, t.Model, result.AttemptStatus)
+		// a transport-level failure carries 502 with its own "upstream error:"
+		// line directly above, and a pre-dispatch gate denial (model lock /
+		// open circuit) is an OutcomeSkipped result whose reason prints below.
+		// Without the status, plain 429/502 legs leave no reason in serve.log
+		// — only the request-log attempt row knows.
+		if result.Outcome == targetexec.OutcomeSkipped {
+			logx.Warnf("[proto=%s model=%s] target %d (%s/%s) skipped (%s); trying next",
+				proto, exposed, ti, t.Provider, t.Model, result.SkipReason)
+		} else {
+			logx.Warnf("[proto=%s model=%s] target %d (%s/%s) failed (status %d); trying next",
+				proto, exposed, ti, t.Provider, t.Model, result.AttemptStatus)
+		}
 		// Attempt row for the failed leg: same request id and attempt number
 		// as the eventual committed row, attempt_only-marked so usage/session
 		// aggregates keep counting committed calls. Without it the failover

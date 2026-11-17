@@ -917,3 +917,49 @@ func TestServeFailoverLegCarriesFailureEvidence(t *testing.T) {
 		t.Errorf("leg response_body = %q, want the upstream denial as evidence", leg.ResponseBody)
 	}
 }
+
+// TestServeModelLockedTargetSkipsWithReason: a target whose model is locked
+// (an earlier zero-byte 200 recorded the lock) is denied by the pre-dispatch
+// model-lock gate. Before the fix that denial logged a bare "failed (status
+// 0); trying next" — no reason, and the promised "upstream error:" line never
+// exists for gate denials (transport errors carry 502 and log it). The skip
+// must name its gate so serve.log answers "why did this target not serve"
+// without joining the request log.
+func TestServeModelLockedTargetSkipsWithReason(t *testing.T) {
+	locked := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	})
+	good := newFakeUpstream(t, openaiOKResponder("fallback"))
+	h := newHarness()
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"locked": {OpenAIBaseURL: locked.srv.URL, Provider: "test-static"},
+			"good":   {OpenAIBaseURL: good.srv.URL, Provider: "test-static"},
+		},
+		Routes: map[string][]RouteTarget{"m": {{Provider: "locked", Model: "x"}, {Provider: "good", Model: "y"}}},
+	}
+	h.gate.mu.Lock()
+	h.gate.modelLockedSet["locked/x"] = true // the real manager sets this from a zero-byte 200
+	h.gate.mu.Unlock()
+
+	var logs bytes.Buffer
+	original := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(original)
+	w := h.serve(h.snapshot(cfg), "openai", "/v1/chat/completions", openaiChatBody(), nil)
+	log.SetOutput(original)
+
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "fallback") {
+		t.Fatalf("status = %d (body %s); want 200 served by the fallback", w.Code, w.Body.String())
+	}
+	if locked.hits() != 0 {
+		t.Fatalf("locked upstream hits = %d; the gate must deny before dispatch", locked.hits())
+	}
+	if !strings.Contains(logs.String(), "skipped (model locked)") {
+		t.Fatalf("skip line missing the model-lock reason:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "failed (status 0)") {
+		t.Fatalf("gate denial logged as a status-0 failure:\n%s", logs.String())
+	}
+}

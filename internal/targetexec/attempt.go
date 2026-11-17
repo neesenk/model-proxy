@@ -137,6 +137,14 @@ const (
 	// the failover loop instead of burning the remaining targets on a dead
 	// request context.
 	OutcomeClientGone
+	// OutcomeSkipped: a pre-dispatch gate denied the target (model lock from
+	// an earlier zero-byte 200, or an open circuit refusing a half-open probe
+	// slot). No network contact happened and no provider verdict exists — no
+	// circuit tick, no failure count — so this is routing telemetry, not a
+	// failure. SkipReason names the gate for serve.log and the request-log
+	// leg row; without it the leg surfaces as a bare status 0 that no log
+	// line explains (observed live 2026-11-16: 57 such legs).
+	OutcomeSkipped
 )
 
 // Commit is the only post-commit datum orchestration needs for Shadow: the
@@ -169,4 +177,8 @@ type Result struct {
 	// the leg. Zero status = no observation (synthesize upstream-side).
 	AttemptStatus int
 	AttemptBody   []byte
+	// SkipReason names the denying gate for an OutcomeSkipped result ("model
+	// locked", "circuit open (no half-open probe slot)"). It rides the leg's
+	// serve.log line and request-log evidence body; empty for other outcomes.
+	SkipReason string
 }
