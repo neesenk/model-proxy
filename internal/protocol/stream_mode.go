@@ -23,8 +23,13 @@ type wireSSEEvent struct {
 // messages/tools value boxed). SearchByPath locates the one key without
 // materializing the rest of the body. Semantics match the old
 // `root["stream"] == true`: only a literal boolean true counts.
+//
+// The search reads the body in place (sonic's []byte entry point converts
+// without copying): a string(body) conversion copied the whole — often
+// multi-MB — request on every forwarded attempt. ValidateJSON is the
+// NewSearcher default, kept explicitly.
 func requestWantsStream(body []byte) bool {
-	node, err := ast.NewSearcher(string(body)).GetByPath("stream")
+	node, err := sonic.GetWithOptions(body, ast.SearchOptions{ValidateJSON: true}, "stream")
 	if err != nil {
 		return false
 	}

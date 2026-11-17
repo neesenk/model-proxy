@@ -24,13 +24,57 @@ type Profile struct {
 }
 
 // ProfileRequest derives the routing profile from a raw client request body.
+// The three marker flags come from one pass (scanProfileMarkers) instead of a
+// full-body search per marker spelling.
 func ProfileRequest(body []byte) Profile {
+	markers := scanProfileMarkers(body)
 	return Profile{
-		HasImage:        requestHasImage(body),
-		HasTools:        RequestHasTools(body),
+		HasImage:        markers.image,
+		HasTools:        markers.tools,
 		EstimatedTokens: EstimateInputTokens(body),
-		FollowUp:        requestFollowUp(body),
+		FollowUp:        markers.followUp,
 	}
+}
+
+// profileMarkers are the literal-existence facts of a body.
+type profileMarkers struct{ image, tools, followUp bool }
+
+// scanProfileMarkers reports whether any image marker, any tools marker and
+// any assistant-role marker (a follow-up turn) occurs in body — literal
+// existence checks, as RequestHasTools does for its markers, in ONE pass:
+// every marker opens with a quote, so the scan visits each quote once, tests
+// the marker sets by the byte after it, and stops once all three are found.
+func scanProfileMarkers(body []byte) profileMarkers {
+	var found profileMarkers
+	hasAny := func(at int, markers [][]byte) bool {
+		for _, marker := range markers {
+			if bytes.HasPrefix(body[at:], marker) {
+				return true
+			}
+		}
+		return false
+	}
+	for i := 0; !(found.image && found.tools && found.followUp); {
+		q := bytes.IndexByte(body[i:], '"')
+		if q < 0 {
+			break
+		}
+		at := i + q
+		i = at + 1
+		if i >= len(body) {
+			break
+		}
+		switch body[i] {
+		case 't':
+			found.image = found.image || hasAny(at, imageMarkers)
+			found.tools = found.tools || hasAny(at, toolsMarkers)
+		case 's':
+			found.image = found.image || hasAny(at, imageMarkers)
+		case 'r':
+			found.followUp = found.followUp || hasAny(at, assistantMarkers)
+		}
+	}
+	return found
 }
 
 // RoleCounts tallies the message-role composition of a request body — the
@@ -84,18 +128,44 @@ func buildRoleMarkers() []roleMarker {
 		roleMarker{[]byte(`"type":"tool_result"`), func(r *RoleCounts, n int) { r.Tool += n }},
 		roleMarker{[]byte(`"type": "tool_result"`), func(r *RoleCounts, n int) { r.Tool += n }},
 	)
+	for _, entry := range markers {
+		// CountRoles' single pass visits quote positions only.
+		if len(entry.marker) < 2 || entry.marker[0] != '"' {
+			panic("routing: role marker must open with a quote: " + string(entry.marker))
+		}
+	}
 	return markers
 }
 
-// CountRoles counts the role composition of body: one SIMD sweep per marker.
+// CountRoles counts the role composition of body in ONE pass. Every marker
+// opens with a quote, so the scan visits each quote once and tests only the
+// markers whose second byte matches the byte after it. Counting stays
+// per-marker and non-overlapping (a marker may not start inside its own
+// previous match; different markers may share bytes) — exactly what one
+// bytes.Count per marker computed, without sixteen full-body sweeps that all
+// key on the most frequent byte in JSON.
 func CountRoles(body []byte) RoleCounts {
 	var counts RoleCounts
-	for _, entry := range countRolesMarkers {
-		if n := bytes.Count(body, entry.marker); n > 0 {
-			entry.add(&counts, n)
+	nextFree := make([]int, len(countRolesMarkers))
+	for i := 0; ; {
+		q := bytes.IndexByte(body[i:], '"')
+		if q < 0 {
+			return counts
+		}
+		at := i + q
+		i = at + 1
+		if i >= len(body) {
+			return counts
+		}
+		second := body[i]
+		for m, entry := range countRolesMarkers {
+			if entry.marker[1] != second || at < nextFree[m] || !bytes.HasPrefix(body[at:], entry.marker) {
+				continue
+			}
+			entry.add(&counts, 1)
+			nextFree[m] = at + len(entry.marker)
 		}
 	}
-	return counts
 }
 
 // assistantMarkers are the byte forms of an assistant-role message across the
@@ -104,16 +174,6 @@ func CountRoles(body []byte) RoleCounts {
 var assistantMarkers = [][]byte{
 	[]byte(`"role":"assistant"`),
 	[]byte(`"role": "assistant"`),
-}
-
-// requestFollowUp reports whether the body already contains an assistant turn.
-func requestFollowUp(body []byte) bool {
-	for _, marker := range assistantMarkers {
-		if bytes.Contains(body, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 // Fits reports whether model can serve profile according to an authoritative
@@ -203,23 +263,49 @@ func ImageOKForTarget(
 
 // RequestHasTools reports whether body contains a top-level tools definition.
 func RequestHasTools(body []byte) bool {
-	return bytes.Contains(body, []byte(`"tools":[`)) ||
-		bytes.Contains(body, []byte(`"tools": [`))
+	for _, marker := range toolsMarkers {
+		if bytes.Contains(body, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// toolsMarkers are the spellings of a non-empty-or-empty tools array.
+var toolsMarkers = [][]byte{
+	[]byte(`"tools":[`),
+	[]byte(`"tools": [`),
 }
 
 // EstimateInputTokens returns the request-routing prompt-size estimate. CJK
 // runes count as one token, other bytes as roughly one token per four bytes,
 // and long base64 runs are excluded.
+//
+// Linear: a base64 run is measured ONCE from the scan position and then
+// skipped whole (>= base64RunMin characters: encoded payload) or counted
+// whole (shorter: each character is one ASCII byte) — exactly what checking
+// the remaining run at every byte decided, without re-scanning it per byte.
+// The run is measured from the scan position, not from the run's start, so a
+// multi-byte lead byte that consumed the head of a run (invalid UTF-8) leaves
+// the remainder judged on its own, as before.
 func EstimateInputTokens(body []byte) int64 {
-	if len(body) == 0 {
-		return 0
-	}
 	var cjkRunes, otherBytes int64
 	for index := 0; index < len(body); {
-		if isBase64Run(body, index) {
-			for index < len(body) && isBase64Char(body[index]) {
-				index++
+		c := body[index]
+		if base64Chars[c] {
+			end := index + 1
+			for end < len(body) && base64Chars[body[end]] {
+				end++
 			}
+			if end-index < base64RunMin {
+				otherBytes += int64(end - index)
+			}
+			index = end
+			continue
+		}
+		if c < 0x80 {
+			otherBytes++
+			index++
 			continue
 		}
 		decoded, size := decodeRune(body, index)
@@ -232,6 +318,14 @@ func EstimateInputTokens(body []byte) int64 {
 	}
 	return cjkRunes + otherBytes/4
 }
+
+// base64Chars is isBase64Char as a lookup table for the estimator's hot loop.
+var base64Chars = func() (table [256]bool) {
+	for c := 0; c < 256; c++ {
+		table[c] = isBase64Char(byte(c))
+	}
+	return table
+}()
 
 // FilterTargetsByProvider narrows targets to provider, matching pooled virtual
 // targets by either their virtual ID or parent provider name.
@@ -554,15 +648,6 @@ var imageMarkers = [][]byte{
 	[]byte(`"source":{"type":"base64"`),
 }
 
-func requestHasImage(body []byte) bool {
-	for _, marker := range imageMarkers {
-		if bytes.Contains(body, marker) {
-			return true
-		}
-	}
-	return false
-}
-
 func decodeRune(body []byte, index int) (int32, int) {
 	first := body[index]
 	if first&0x80 == 0 {
@@ -600,10 +685,7 @@ func isBase64Char(value byte) bool {
 		value == '='
 }
 
-func isBase64Run(body []byte, index int) bool {
-	end := index
-	for end < len(body) && end-index < 120 && isBase64Char(body[end]) {
-		end++
-	}
-	return end-index >= 100
-}
+// base64RunMin is the length from which a run of base64 characters counts as
+// encoded payload (an inline image, a blob) rather than prose, and is left
+// out of the token estimate.
+const base64RunMin = 100

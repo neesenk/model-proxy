@@ -90,10 +90,12 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	// session to a wrong grouping.
 	sessionKey := protocol.HeaderSessionID(r.Header.Get("x-claude-code-session-id"))
 
-	// TurnKey fingerprints one conversational turn for the repeat_turn escalation
-	// signal. It is computed once per request and checked against the session's
-	// recent turn window at outcome time.
-	turnKey := requestlog.ComputeTurnKey(origBody)
+	// The repeat_turn escalation signal fingerprints the conversational turn
+	// of the body AS RECEIVED (before any guard redaction). The fingerprint
+	// walks the whole body, so it is computed only at outcome time and only
+	// for a route whose escalation watches repeat_turn — never on the path
+	// to the upstream's first byte (recordLatchOutcome).
+	turnBody := origBody
 
 	calledModel := protocol.ExtractModel(origBody)
 	if calledModel == "" {
@@ -253,7 +255,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		sessionKey:  sessionKey,
 		agent:       agent,
 		requestID:   requestID,
-		turnKey:     turnKey,
+		turnBody:    turnBody,
 
 		clientSession: clientSession,
 
@@ -422,8 +424,9 @@ func (p pipeline) recordLatchOutcome(req serveRequest, res serveResult) {
 	// repeat_turn: the client resent the same turn within the dwell window.
 	// This signal attributes the bad run to the PREVIOUS turn, so it is evaluated
 	// after the current outcome and added even if the current request committed.
-	if req.turnKey != "" && signalSet["repeat_turn"] {
-		if p.state.CheckRepeatTurn(sessionKey, req.exposed, req.turnKey, now, escalation.DwellDuration(), req.runtime.Generation) {
+	if signalSet["repeat_turn"] {
+		if turnKey := requestlog.ComputeTurnKey(req.turnBody); turnKey != "" &&
+			p.state.CheckRepeatTurn(sessionKey, req.exposed, turnKey, now, escalation.DwellDuration(), req.runtime.Generation) {
 			badCount++
 		}
 	}
@@ -1016,9 +1019,10 @@ type serveRequest struct {
 	sessionKey  string
 	agent       string
 	requestID   string
-	// turnKey fingerprints one conversational turn for the repeat_turn escalation
-	// signal. Empty when the body carries no textual user content.
-	turnKey string
+	// turnBody is the request body as received (pre-redaction): the input of
+	// the repeat_turn signal's turn fingerprint (requestlog.ComputeTurnKey),
+	// computed lazily at outcome time.
+	turnBody []byte
 	// clientSession is the observability session id (header allowlist), distinct
 	// from sessionKey (the routing sticky key).
 	clientSession string

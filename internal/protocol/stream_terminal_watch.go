@@ -37,7 +37,6 @@ package protocol
 import (
 	"bytes"
 	"io"
-	"strings"
 
 	sonic "github.com/bytedance/sonic"
 )
@@ -101,10 +100,15 @@ type TerminalWatcher struct {
 	proto Protocol
 
 	// Shadow-scanner state (operates on copies; never blocks forwarding).
+	// Lines are classified as subslices of pend and copied out at once, so
+	// pend, payload and frameEvent are reused buffers: a long stream costs no
+	// allocation per line or frame.
 	pend       []byte // trailing partial line of the bytes scanned so far
+	pendBuf    []byte // pend's backing array from its start (see compactPend)
 	dataOpen   bool   // a data: line opened the frame in progress
-	dataLines  []string
-	frameEvent string // latest event: line since the frame opened
+	payload    []byte // the frame's data lines folded with '\n'
+	dataLines  int    // data lines folded into payload
+	frameEvent []byte // latest event: line since the frame opened
 	sawData    bool   // any data: line reached the scanner (stream began)
 	terminal   bool   // client-acceptable terminal sequence seen
 	sawError   bool   // protocol-native error terminal seen upstream
@@ -191,7 +195,11 @@ func (w *TerminalWatcher) scan(chunk []byte) {
 	if w.gaveUp {
 		return
 	}
+	// pend always starts at its backing array's start here (compactPend),
+	// so after the append pendBuf re-anchors to that array — grown or not.
 	w.pend = append(w.pend, chunk...)
+	w.pendBuf = w.pend[:0]
+	defer w.compactPend()
 	for {
 		idx := bytes.IndexByte(w.pend, '\n')
 		if idx < 0 {
@@ -210,31 +218,47 @@ func (w *TerminalWatcher) scan(chunk []byte) {
 			convertWarn("passthrough terminal watcher: SSE line exceeds 8 MiB — terminal detection disabled for this stream")
 			return
 		}
-		line := strings.TrimRight(string(w.pend[:idx]), "\r")
+		line := bytes.TrimRight(w.pend[:idx], "\r")
 		w.pend = w.pend[idx+1:]
 		w.line(line)
 	}
+}
+
+// compactPend moves the unconsumed partial line to the front of pend's
+// backing array (scan slides pend forward line by line), so the next chunk
+// appends into the same array instead of growing a fresh one.
+func (w *TerminalWatcher) compactPend() {
+	if w.gaveUp {
+		w.pend, w.pendBuf = nil, nil
+		return
+	}
+	w.pend = w.pendBuf[:copy(w.pendBuf[:len(w.pend)], w.pend)]
 }
 
 // line classifies one complete SSE line. It mirrors the frame semantics of
 // the shared pump (sse_pump.go): only a blank line dispatches a frame, data:
 // lines fold, and an event: line names the frame in progress. Classification
 // drives terminal detection only — the forwarded bytes are never touched.
-func (w *TerminalWatcher) line(line string) {
+func (w *TerminalWatcher) line(line []byte) {
 	switch {
-	case strings.HasPrefix(line, "data:"):
+	case bytes.HasPrefix(line, []byte("data:")):
 		w.dataOpen = true
-		w.dataLines = append(w.dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
-		w.sawData = true
-	case line == "":
-		if w.dataOpen {
-			w.dispatch(strings.Join(w.dataLines, "\n"))
-			w.dataOpen = false
-			w.dataLines = nil
+		if w.dataLines > 0 {
+			w.payload = append(w.payload, '\n')
 		}
-		w.frameEvent = ""
-	case strings.HasPrefix(line, "event:"):
-		w.frameEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		w.payload = append(w.payload, bytes.TrimSpace(line[len("data:"):])...)
+		w.dataLines++
+		w.sawData = true
+	case len(line) == 0:
+		if w.dataOpen {
+			w.dispatch(w.payload)
+			w.dataOpen = false
+			w.payload = w.payload[:0]
+			w.dataLines = 0
+		}
+		w.frameEvent = w.frameEvent[:0]
+	case bytes.HasPrefix(line, []byte("event:")):
+		w.frameEvent = append(w.frameEvent[:0], bytes.TrimSpace(line[len("event:"):])...)
 	}
 }
 
@@ -246,18 +270,21 @@ func (w *TerminalWatcher) line(line string) {
 // frames all the same, mirroring the chat converters' dispatch fallback.
 // Parse failures are ignored — garbage frames are forwarded untouched and
 // merely escape terminal detection.
-func (w *TerminalWatcher) dispatch(payload string) {
+func (w *TerminalWatcher) dispatch(payload []byte) {
 	switch w.proto {
 	case Anthropic:
+		if !anthropicVerdictCandidate(payload, w.frameEvent) {
+			return
+		}
 		var frame struct {
 			Type string `json:"type"`
 		}
 		frameType := ""
-		if sonic.UnmarshalString(payload, &frame) == nil {
+		if sonic.UnmarshalString(string(payload), &frame) == nil {
 			frameType = frame.Type
 		}
 		if frameType == "" {
-			frameType = w.frameEvent
+			frameType = string(w.frameEvent)
 		}
 		switch frameType {
 		case "message_stop":
@@ -266,12 +293,15 @@ func (w *TerminalWatcher) dispatch(payload string) {
 			w.sawError = true
 		}
 	case OpenAI:
-		if payload == "[DONE]" {
+		if bytes.Equal(payload, []byte("[DONE]")) {
 			w.terminal = true
 			return
 		}
-		if w.frameEvent == "error" {
+		if string(w.frameEvent) == "error" {
 			w.sawError = true
+			return
+		}
+		if !openAIVerdictCandidate(payload) {
 			return
 		}
 		var frame struct {
@@ -280,7 +310,7 @@ func (w *TerminalWatcher) dispatch(payload string) {
 				FinishReason *string `json:"finish_reason"`
 			} `json:"choices"`
 		}
-		if sonic.UnmarshalString(payload, &frame) != nil {
+		if sonic.UnmarshalString(string(payload), &frame) != nil {
 			return
 		}
 		if frame.Error != nil {
@@ -299,9 +329,9 @@ func (w *TerminalWatcher) dispatch(payload string) {
 				ID string `json:"id"`
 			} `json:"response"`
 		}
-		_ = sonic.UnmarshalString(payload, &frame)
+		_ = sonic.UnmarshalString(string(payload), &frame)
 		if frame.Type == "" {
-			frame.Type = w.frameEvent
+			frame.Type = string(w.frameEvent)
 		}
 		if frame.Type == "" {
 			return
@@ -314,6 +344,55 @@ func (w *TerminalWatcher) dispatch(payload string) {
 			w.terminal = true
 		case "response.failed":
 			w.sawError = true
+		}
+	}
+}
+
+// anthropicVerdictCandidate reports whether decoding an anthropic frame could
+// change the verdict. The type VALUE must decode to exactly "message_stop" or
+// "error" (spelled literally, or through a \u escape), or the frame falls
+// back to an event: name that is one of them. A frame with none of these is a
+// no-op whatever it decodes to, so skipping its decode is exact.
+func anthropicVerdictCandidate(payload, frameEvent []byte) bool {
+	if string(frameEvent) == "message_stop" || string(frameEvent) == "error" {
+		return true
+	}
+	return bytes.Contains(payload, []byte("message_stop")) ||
+		bytes.Contains(payload, []byte("error")) ||
+		bytes.Contains(payload, []byte(`\u`))
+}
+
+// openAIVerdictCandidate reports whether decoding an openai chunk could
+// change the verdict: it needs an error member, or a finish_reason member
+// whose value is not null. The decode matches keys ASCII-case-insensitively
+// and decodes \u escapes, so a chunk is skipped only when it holds no \u
+// escape (nor 'ſ', in case a decoder folds it to 's'), no quoted token
+// folding to "error", and every quoted token folding to "finish_reason" is a
+// member whose value is the null literal — the shape of every delta chunk.
+func openAIVerdictCandidate(payload []byte) bool {
+	if bytes.Contains(payload, []byte(`\u`)) || bytes.Contains(payload, []byte("\u017f")) {
+		return true
+	}
+	for i := 0; ; {
+		q := bytes.IndexByte(payload[i:], '"')
+		if q < 0 {
+			return false
+		}
+		rest := payload[i+q+1:]
+		i += q + 1
+		if len(rest) > 5 && rest[5] == '"' && bytes.EqualFold(rest[:5], []byte("error")) {
+			return true
+		}
+		if len(rest) > 13 && rest[13] == '"' && bytes.EqualFold(rest[:13], []byte("finish_reason")) {
+			k := skipJSONSpace(rest, 14)
+			if k < len(rest) && rest[k] == ':' {
+				k = skipJSONSpace(rest, k+1)
+				if bytes.HasPrefix(rest[k:], []byte("null")) {
+					i += k + len("null")
+					continue
+				}
+			}
+			return true
 		}
 	}
 }

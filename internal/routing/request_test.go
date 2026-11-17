@@ -607,3 +607,85 @@ func TestCountRoles(t *testing.T) {
 		t.Errorf("empty body counts = %+v", got)
 	}
 }
+
+// TestEstimateInputTokensBase64RunBoundaries pins the estimator's exact
+// counting at the base64-run boundaries (hand-computed): a run of >= 100
+// base64 characters is skipped whole, a shorter one counts byte-wise, and a
+// multi-byte lead byte (even an invalid one) consumes its continuation bytes
+// before the run check — so a run it eats into is judged by what remains.
+func TestEstimateInputTokensBase64RunBoundaries(t *testing.T) {
+	a := func(n int) string { return strings.Repeat("a", n) }
+	cases := []struct {
+		name string
+		body string
+		want int64
+	}{
+		{"99-char run counts", a(99), 24},
+		{"100-char run skipped", a(100), 0},
+		{"150-char run skipped whole", a(150), 0},
+		{"run framed by non-base64 bytes", "!!!!" + a(100) + "!!!!", 2},
+		{"broken run counts", a(60) + "-" + a(60), 30},
+		{"plus slash equals are base64", strings.Repeat("+/=", 34), 0},
+		{"lead byte eats into a run", "\xe4" + a(101), 25},
+		{"cjk runes count one each", "你好" + a(10), 4},
+	}
+	for _, tc := range cases {
+		if got := EstimateInputTokens([]byte(tc.body)); got != tc.want {
+			t.Errorf("%s: EstimateInputTokens = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestCountRolesMarkerSemantics pins CountRoles as per-marker,
+// non-overlapping literal counting (the bytes.Count semantics it was built
+// on), hand-derived: each spelling of each marker counts independently (two
+// different markers may share bytes), a marker never overlaps ITSELF, and
+// only the exact lower-case role names with a closing quote count.
+func TestCountRolesMarkerSemantics(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want RoleCounts
+	}{
+		{"spaced system array", `{"system": [{"type":"text","text":"x"}]}`, RoleCounts{System: 1}},
+		{"marker never overlaps itself", `"system":"system":"`, RoleCounts{System: 1}},
+		{"both role spellings", `{"role": "assistant"},{"role":"assistant"}`, RoleCounts{Assistant: 2}},
+		{"spaced tool_result", `{"type": "tool_result"}`, RoleCounts{Tool: 1}},
+		{"case and suffix mismatches", `{"role":"User"},{"role":"users"},{"role":"tooling"}`, RoleCounts{}},
+		{"different markers share bytes", `{"role":"system":"x"}`, RoleCounts{System: 2}},
+		{"escaped markers inside text", `{"text":"{\"role\":\"user\",\"system\":\"s\"}"}`, RoleCounts{}},
+	}
+	for _, tc := range cases {
+		if got := CountRoles([]byte(tc.body)); got != tc.want {
+			t.Errorf("%s: CountRoles(%s) = %+v, want %+v", tc.name, tc.body, got, tc.want)
+		}
+	}
+}
+
+// TestProfileRequestMarkerFlags pins the profile's marker flags as literal
+// existence checks (hand-derived): any spelling of any image marker, either
+// tools spelling, either assistant-role spelling — wherever it sits, and
+// never inside escaped text.
+func TestProfileRequestMarkerFlags(t *testing.T) {
+	cases := []struct {
+		name                   string
+		body                   string
+		image, tools, followUp bool
+	}{
+		{"none", `{"model":"m","messages":[{"role":"user","content":"hi"}]}`, false, false, false},
+		{"anthropic image + tools", `{"tools":[{"name":"t"}],"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"x"}}]}]}`, true, true, false},
+		{"spaced image_url + spaced tools", `{"tools": [],"messages":[{"role":"user","content":[{"type": "image_url"}]}]}`, true, true, false},
+		{"responses input_image", `{"input":[{"type":"input_image","image_url":"u"}]}`, true, false, false},
+		{"base64 source alone", `{"x":{"source":{"type":"base64"}}}`, true, false, false},
+		{"follow-up both spellings", `{"messages":[{"role": "assistant","content":"a"}]}`, false, false, true},
+		{"escaped markers in text", `{"text":"{\"type\":\"image\",\"tools\":[],\"role\":\"assistant\"}"}`, false, false, false},
+		{"near misses", `{"type":"images","tool":[],"role":"assistants"}`, false, false, false},
+	}
+	for _, tc := range cases {
+		got := ProfileRequest([]byte(tc.body))
+		if got.HasImage != tc.image || got.HasTools != tc.tools || got.FollowUp != tc.followUp {
+			t.Errorf("%s: ProfileRequest = image %v tools %v followUp %v, want %v %v %v",
+				tc.name, got.HasImage, got.HasTools, got.FollowUp, tc.image, tc.tools, tc.followUp)
+		}
+	}
+}

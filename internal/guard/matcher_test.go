@@ -123,3 +123,90 @@ func TestPrefilterCoversAllNeedles(t *testing.T) {
 		}
 	}
 }
+
+// TestACMatchesBruteForceSpec checks the automaton against the definition of
+// its output on random needle sets (fixed seed): the emitted (id, end) pairs
+// are exactly those with body[end-len(needle):end] == needle — every
+// occurrence, overlaps and duplicate needles included — and each needle's
+// occurrences arrive in increasing end order. The alphabet includes a high
+// byte and a byte no needle uses.
+func TestACMatchesBruteForceSpec(t *testing.T) {
+	alphabet := []byte{'a', 'b', 'c', 0xff, '-'}
+	state := uint64(0x9e3779b97f4a7c15)
+	next := func(n int) int {
+		state ^= state << 13
+		state ^= state >> 7
+		state ^= state << 17
+		return int(state % uint64(n))
+	}
+	randomBytes := func(n int, letters []byte) []byte {
+		out := make([]byte, n)
+		for i := range out {
+			out[i] = letters[next(len(letters))]
+		}
+		return out
+	}
+	for round := 0; round < 400; round++ {
+		needles := make([][]byte, 1+next(8))
+		for i := range needles {
+			needles[i] = randomBytes(1+next(5), alphabet[:4]) // '-' never in a needle
+		}
+		b := newACBuilder()
+		for id, needle := range needles {
+			b.add(needle, id)
+		}
+		m := b.compile()
+		body := randomBytes(next(80), alphabet)
+
+		want := map[[2]int]bool{}
+		for end := 1; end <= len(body); end++ {
+			for id, needle := range needles {
+				if len(needle) <= end && bytes.Equal(body[end-len(needle):end], needle) {
+					want[[2]int{id, end}] = true
+				}
+			}
+		}
+		got := map[[2]int]bool{}
+		lastEnd := map[int]int{}
+		m.search(body, func(id, end int) {
+			key := [2]int{id, end}
+			if got[key] {
+				t.Fatalf("round %d: (%d,%d) emitted twice", round, id, end)
+			}
+			got[key] = true
+			if end <= lastEnd[id] {
+				t.Fatalf("round %d: needle %d ends not increasing (%d after %d)", round, id, end, lastEnd[id])
+			}
+			lastEnd[id] = end
+		})
+		if len(got) != len(want) {
+			t.Fatalf("round %d: needles %q body %q: got %d matches, want %d (%v vs %v)", round, needles, body, len(got), len(want), got, want)
+		}
+		for key := range want {
+			if !got[key] {
+				t.Fatalf("round %d: needles %q body %q: missing match %v", round, needles, body, key)
+			}
+		}
+	}
+}
+
+// TestACFullByteAlphabet: needles may use every byte value (known secrets
+// and their encodings are arbitrary bytes); the class table must not wrap.
+func TestACFullByteAlphabet(t *testing.T) {
+	b := newACBuilder()
+	for c := 0; c < 256; c++ {
+		b.add([]byte{byte(c), byte(255 - c)}, c)
+	}
+	m := b.compile()
+	var got []int
+	m.search([]byte{0, 255, 7, 248, 255, 0}, func(id, end int) { got = append(got, id*1000+end) })
+	want := []int{0*1000 + 2, 7*1000 + 4, 255*1000 + 6}
+	if len(got) != len(want) {
+		t.Fatalf("matches = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("matches = %v, want %v", got, want)
+		}
+	}
+}

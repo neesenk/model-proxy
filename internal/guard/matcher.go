@@ -28,22 +28,24 @@ type acNode struct {
 	dict int
 }
 
-// edge returns the transition for c, if any.
-func (n *acNode) edge(c byte) (int, bool) {
-	for _, e := range n.edges {
-		if e.c == c {
-			return e.to, true
-		}
-	}
-	return 0, false
-}
-
-// acMatcher is a compiled Aho-Corasick automaton over byte needles. root is
-// the dense first-level transition table (the hot path: most bytes of a body
-// are scanned while the automaton sits at the root).
+// acMatcher is a compiled Aho-Corasick automaton over byte needles. The trie
+// (nodes: edges, fail and dictionary-suffix links, outputs) is kept, and the
+// fail links are folded into a full DFA transition table for the search:
+// delta[state*classes+class[c]] is the state the classic walk (edge, else
+// follow fail links, else the root's first-level edge) reaches on byte c —
+// one table lookup per body byte instead of a fail-chain walk over sparse
+// edge lists. Bytes no needle contains share class 0 (always back to root).
 type acMatcher struct {
 	nodes []acNode
 	root  [256]int // 0 = no transition (stay at root)
+
+	class   [256]uint16 // byte → alphabet class (up to 256 + class 0); 0 = in no needle
+	classes int         // row stride of delta
+	// delta is the states × classes transition table. An entry holds the
+	// TARGET state's row offset (state*classes), negated when that state
+	// emits (carries an output or a dictionary-suffix link), so the search
+	// loop is one load per byte; the root (offset 0) never emits.
+	delta []int32
 }
 
 // acBuilder accumulates needles before compile.
@@ -127,12 +129,14 @@ func (b *acBuilder) compile() *acMatcher {
 	// Computed in BFS order so fail ancestors (always shallower, enqueued
 	// earlier) are finalized first.
 	queue = queue[:0]
+	var order []int // BFS order of the non-root states
 	for _, u := range b.next[0] {
 		queue = append(queue, u)
 	}
 	for len(queue) > 0 {
 		v := queue[0]
 		queue = queue[1:]
+		order = append(order, v)
 		f := fail[v]
 		if len(b.out[f]) > 0 {
 			m.nodes[v].dict = f
@@ -143,30 +147,63 @@ func (b *acBuilder) compile() *acMatcher {
 			queue = append(queue, u)
 		}
 	}
+	m.compileDFA(order)
 	return m
+}
+
+// compileDFA folds the fail links into the full transition table. order is
+// the BFS order of the non-root states: a state's fail target is strictly
+// shallower, so its row is complete before the state's own row borrows it.
+func (m *acMatcher) compileDFA(order []int) {
+	var used [256]bool
+	for _, nd := range m.nodes {
+		for _, e := range nd.edges {
+			used[e.c] = true
+		}
+	}
+	var symbols []byte // class k (k >= 1) stands for byte symbols[k-1]
+	for c := 0; c < 256; c++ {
+		if used[c] {
+			symbols = append(symbols, byte(c))
+			m.class[c] = uint16(len(symbols))
+		}
+	}
+	m.classes = len(symbols) + 1
+	m.delta = make([]int32, len(m.nodes)*m.classes)
+	for k, c := range symbols {
+		m.delta[k+1] = int32(m.root[c]) // the root row; class 0 stays 0
+	}
+	for _, v := range order {
+		row := m.delta[v*m.classes : (v+1)*m.classes]
+		copy(row, m.delta[m.nodes[v].fail*m.classes:(m.nodes[v].fail+1)*m.classes])
+		for _, e := range m.nodes[v].edges {
+			row[m.class[e.c]] = int32(e.to)
+		}
+	}
+	// Re-encode the targets (state ids so far) as signed row offsets.
+	for i, target := range m.delta {
+		offset := target * int32(m.classes)
+		if nd := &m.nodes[target]; target != 0 && (len(nd.out) > 0 || nd.dict >= 0) {
+			offset = -offset
+		}
+		m.delta[i] = offset
+	}
 }
 
 // search walks body once, calling fn(id, end) for every needle occurrence,
 // where end is the exclusive end offset (occurrence = body[end-len(needle):end]).
 // Calls for one needle arrive in increasing end order.
 func (m *acMatcher) search(body []byte, fn func(id, end int)) {
-	v := 0
+	delta, class := m.delta, &m.class
+	offset := int32(0)
 	for i, c := range body {
-		advanced := false
-		for v != 0 {
-			if to, ok := m.nodes[v].edge(c); ok {
-				v = to
-				advanced = true
-				break
-			}
-			v = m.nodes[v].fail
+		next := delta[offset+int32(class[c])]
+		if next >= 0 {
+			offset = next
+			continue
 		}
-		if !advanced {
-			v = m.root[c]
-			if v == 0 {
-				continue
-			}
-		}
+		offset = -next
+		v := int(offset) / m.classes
 		if len(m.nodes[v].out) > 0 {
 			for _, id := range m.nodes[v].out {
 				fn(id, i+1)

@@ -487,3 +487,72 @@ func TestTerminalWatcher_OversizedLineDisablesDetectionWithoutRewrite(t *testing
 		t.Fatal("Synthesized() = true after the scanner gave up on an oversized line")
 	}
 }
+
+// TestTerminalWatcher_KeySpellingsDecodedLikeTheFrameParse pins what the
+// frame decode accepts as the terminal/error fields — ASCII case variants of
+// the keys and \u escapes in keys and values all count — so a pre-filter that
+// skips decoding frames which cannot carry them must keep these outcomes.
+func TestTerminalWatcher_KeySpellingsDecodedLikeTheFrameParse(t *testing.T) {
+	cases := []struct {
+		name            string
+		proto           Protocol
+		body            string
+		terminal, error bool
+	}{
+		{"openai title-case finish_reason", OpenAI, "data: {\"choices\":[{\"Finish_Reason\":\"stop\"}]}\n\n", true, false},
+		{"openai escaped finish_reason key", OpenAI, "data: {\"choices\":[{\"finish\\u005freason\":\"stop\"}]}\n\n", true, false},
+		{"openai spaced finish_reason", OpenAI, "data: {\"choices\":[{\"finish_reason\" : \"length\"}]}\n\n", true, false},
+		{"openai null finish_reason", OpenAI, "data: {\"choices\":[{\"finish_reason\":null}]}\n\n", false, false},
+		{"openai upper-case error", OpenAI, "data: {\"ERROR\":{\"message\":\"x\"}}\n\n", false, true},
+		{"openai null error", OpenAI, "data: {\"error\":null,\"choices\":[]}\n\n", false, false},
+		{"anthropic title-case type", Anthropic, "event: x\ndata: {\"Type\":\"message_stop\"}\n\n", true, false},
+		{"anthropic escaped type value", Anthropic, "event: x\ndata: {\"type\":\"message\\u005fstop\"}\n\n", true, false},
+		{"anthropic event fallback", Anthropic, "event: message_stop\ndata: {\"no_type\":1}\n\n", true, false},
+		{"anthropic delta mentioning error", Anthropic, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"error\"}}\n\n", false, false},
+	}
+	for _, tc := range cases {
+		watcher := WatchStreamTerminal(io.NopCloser(strings.NewReader(tc.body)), tc.proto)
+		if _, err := io.ReadAll(watcher); err != nil {
+			t.Fatalf("%s: read: %v", tc.name, err)
+		}
+		if watcher.terminal != tc.terminal || watcher.sawError != tc.error {
+			t.Errorf("%s: terminal=%v sawError=%v, want terminal=%v sawError=%v", tc.name, watcher.terminal, watcher.sawError, tc.terminal, tc.error)
+		}
+	}
+}
+
+// TestTerminalWatcher_AllocationsDoNotScaleWithFrames: the watcher shadows
+// every chunk of every same-protocol stream. Line splitting must not copy,
+// and an openai delta chunk whose finish_reason is null (and carries no
+// error key) cannot change the verdict, so it is not decoded: doubling a
+// stream past its buffer warm-up (1500 → 3000 chunks) adds no per-chunk allocation.
+func TestTerminalWatcher_AllocationsDoNotScaleWithFrames(t *testing.T) {
+	stream := func(chunks int) string {
+		var b strings.Builder
+		for i := 0; i < chunks; i++ {
+			b.WriteString("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"tok\"},\"finish_reason\":null}]}\n\n")
+		}
+		b.WriteString("data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+		return b.String()
+	}
+	// A caller-owned copy buffer, and wrappers hiding ReaderFrom/WriterTo:
+	// io.Discard's ReadFrom draws pooled buffers, and the race detector
+	// randomly drops sync.Pool items — an allocation outside the watcher.
+	buf := make([]byte, 8<<10)
+	allocs := func(raw string) float64 {
+		return testing.AllocsPerRun(10, func() {
+			watcher := WatchStreamTerminal(io.NopCloser(strings.NewReader(raw)), OpenAI)
+			if _, err := io.CopyBuffer(struct{ io.Writer }{io.Discard}, struct{ io.Reader }{watcher}, buf); err != nil {
+				t.Fatal(err)
+			}
+			if watcher.Synthesized() {
+				t.Fatal("complete stream synthesized a terminal")
+			}
+		})
+	}
+	// The rate, not exact equality: the race detector's runtime allocates
+	// sporadically (±1 per run); a per-chunk allocation shows as >= 1500.
+	if half, full := allocs(stream(1500)), allocs(stream(3000)); (full-half)/1500 >= 0.01 {
+		t.Errorf("allocations: 3000 chunks = %v, 1500 chunks = %v; want no per-chunk allocation", full, half)
+	}
+}

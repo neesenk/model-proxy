@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -145,5 +146,25 @@ func TestChatJSONToSSEBackfillsCreated(t *testing.T) {
 	}
 	if !strings.Contains(string(stream), `"created":`) {
 		t.Fatalf("created was not backfilled:\n%s", stream)
+	}
+}
+
+// TestWantsStreamDoesNotCopyTheBody: the stream flag is read on every
+// forwarded attempt; the searcher must read the body in place instead of
+// converting a (possibly multi-MB) body into a fresh string first.
+func TestWantsStreamDoesNotCopyTheBody(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"` + strings.Repeat("x", 1<<20) + `"}],"stream":true}`)
+	if !WantsStream(body) {
+		t.Fatal("WantsStream = false, want true")
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	const calls = 20
+	for i := 0; i < calls; i++ {
+		WantsStream(body)
+	}
+	runtime.ReadMemStats(&after)
+	if perCall := (after.TotalAlloc - before.TotalAlloc) / calls; perCall > 64<<10 {
+		t.Errorf("WantsStream allocated %d bytes per call on a %d-byte body; want no body copy", perCall, len(body))
 	}
 }

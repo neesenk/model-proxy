@@ -198,3 +198,85 @@ func TestSpliceTopLevelStringValue(t *testing.T) {
 		t.Fatal("missing key must not splice")
 	}
 }
+
+// TestNormalizeSSEModelStreamFoldedDataLinesStayValidSSE: a JSON payload may
+// span several data: lines (legal SSE — the lines fold with '\n'). The
+// rewrite must keep every line a data: line; folding the rewritten payload
+// into one data: line left its continuation lines without the field name, so
+// the client saw a truncated (invalid) JSON payload.
+func TestNormalizeSSEModelStreamFoldedDataLinesStayValidSSE(t *testing.T) {
+	raw := "data: {\"id\":\"c1\",\n" + "data: \"model\":\"k3\",\"choices\":[]}\n\n"
+	out := readAllStream(t, io.NopCloser(strings.NewReader(raw)), OpenAI, "kimi-k3")
+	want := "data: {\"id\":\"c1\",\n" + "data: \"model\":\"kimi-k3\",\"choices\":[]}\n\n"
+	if out != want {
+		t.Fatalf("out = %q, want %q", out, want)
+	}
+}
+
+// TestNormalizeResponseModelDecoderSemantics pins the splice's JSON semantics
+// — those of a decoder walk of the top-level object, which a fast byte-level
+// path must reproduce exactly: the FIRST member named exactly "model" (key
+// escapes decoded, no case folding) whose value is a JSON string is spliced;
+// a malformed member BEFORE it fails the splice, bytes after it are never
+// examined, and members whose values are containers are walked over.
+func TestNormalizeResponseModelDecoderSemantics(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{"model after nested containers", `{"a":{"b":[1,{"c":"model"}]},"model":"k3","z":1}`, `{"a":{"b":[1,{"c":"model"}]},"model":"kimi","z":1}`},
+		{"escaped key", `{"model":"k3"}`, `{"model":"kimi"}`},
+		{"escaped value", `{"model":"k3"}`, `{"model":"kimi"}`},
+		{"first of duplicate keys", `{"model":"k3","model":"k4"}`, `{"model":"kimi","model":"k4"}`},
+		{"numbers and literals before", `{"n":-1.5e+3,"t":true,"f":false,"z":null,"model":"k3"}`, `{"n":-1.5e+3,"t":true,"f":false,"z":null,"model":"kimi"}`},
+		{"garbage after the value is not examined", `{"model":"k3",}`, `{"model":"kimi",}`},
+		{"case-different key is not the model", `{"Model":"k3"}`, `{"Model":"k3"}`},
+		{"invalid number before", `{"created":01,"model":"k3"}`, `{"created":01,"model":"k3"}`},
+		{"invalid literal before", `{"x":truex,"model":"k3"}`, `{"x":truex,"model":"k3"}`},
+		{"raw control byte in an earlier value", "{\"x\":\"a\x01b\",\"model\":\"k3\"}", "{\"x\":\"a\x01b\",\"model\":\"k3\"}"},
+		{"non-string model", `{"model":["k3"]}`, `{"model":["k3"]}`},
+		{"leading whitespace", " \n{\"model\" :\t\"k3\"}", " \n{\"model\" :\t\"kimi\"}"},
+	}
+	for _, tc := range cases {
+		if got := string(NormalizeResponseModel([]byte(tc.body), OpenAI, "kimi")); got != tc.want {
+			t.Errorf("%s: NormalizeResponseModel(%q) = %q, want %q", tc.name, tc.body, got, tc.want)
+		}
+	}
+}
+
+// TestNormalizeSSEModelStreamAllocationsDoNotScaleWithFrames: the openai
+// normalizer runs on every chunk of every aliased stream (thousands of chunks
+// per long answer, tens of concurrent streams). Frame assembly, the rewrite
+// and the model encoding must reuse per-stream buffers: doubling a stream
+// past its buffer warm-up (1500 → 3000 chunks) adds no per-chunk allocation.
+func TestNormalizeSSEModelStreamAllocationsDoNotScaleWithFrames(t *testing.T) {
+	stream := func(chunks int) string {
+		var b strings.Builder
+		for i := 0; i < chunks; i++ {
+			b.WriteString("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"up-1017\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"tok\"},\"finish_reason\":null}]}\n\n")
+		}
+		b.WriteString("data: [DONE]\n\n")
+		return b.String()
+	}
+	// A caller-owned copy buffer, and wrappers hiding ReaderFrom/WriterTo:
+	// io.Discard's ReadFrom draws pooled buffers, and the race detector
+	// randomly drops sync.Pool items — an allocation outside the normalizer.
+	buf := make([]byte, 8<<10)
+	allocs := func(raw string) float64 {
+		return testing.AllocsPerRun(10, func() {
+			normalized := NormalizeSSEModelStream(io.NopCloser(strings.NewReader(raw)), OpenAI, "alias")
+			if _, err := io.CopyBuffer(struct{ io.Writer }{io.Discard}, struct{ io.Reader }{normalized}, buf); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	long := stream(3000)
+	out := readAllStream(t, io.NopCloser(strings.NewReader(long)), OpenAI, "alias")
+	if got := strings.Count(out, `"model":"alias"`); got != 3000 {
+		t.Fatalf("normalized chunks = %d, want 3000", got)
+	}
+	// The rate, not exact equality: the race detector's runtime allocates
+	// sporadically (±1 per run); a per-chunk allocation shows as >= 1500.
+	if half, full := allocs(stream(1500)), allocs(long); (full-half)/1500 >= 0.01 {
+		t.Errorf("allocations: 3000 chunks = %v, 1500 chunks = %v; want no per-chunk allocation", full, half)
+	}
+}

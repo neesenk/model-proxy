@@ -15,6 +15,11 @@ catalog、context overflow retry、route derivation（隐式路由的继任者�
 - `EstimatedTokens`：CJK 每 rune 约 1 token，其他文本约 bytes/4，跳过长度
   ≥100 字符的 base64 run。
 
+成本约束（每次请求都在发往上游之前同步执行）：图片/tools/follow-up 三个标记位由一趟
+引号位置扫描得出（`scanProfileMarkers`），估算对每个 base64 run 只测一次长度、整段计入或
+跳过（线性，不在每个字节位置重扫剩余 run）；`CountRoles` 同样一趟扫描、按 marker 保持
+`bytes.Count` 的不重叠计数语义。
+
 ## 模块边界
 
 `internal/routing` 是无状态策略包，只允许依赖 `internal/catalog`、
@@ -157,6 +162,8 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
     只按最终客户端字节计数，不误判带空 `content` 或纯 `tool_use` 的合法 JSON/JSON 帧。
   - `repeat_turn`：同一 `TurnKey`（`requestlog.ComputeTurnKey`，request log 与该信号的唯一权威来源）
     在同一 session+route 的 `escalation.dwell` 滑窗内再次出现，说明客户端在重发同一轮。
+    指纹取自**收到时**（guard 改写前）的 body，但只在 outcome 时、且仅当该 route 的 escalation
+    监听 `repeat_turn` 时才计算（指纹要走完整个 body，不能落在发往上游之前的路径上）。
     状态由 `runtime.Manager` 持有，generation 门控、内存 only、 bounded。
 - **触发**：任一配置的坏信号贡献一次坏运行；多个信号可在同一次 outcome 中叠加。
   连续 `consecutive` 个坏运行（默认读取侧不处理 0；配置校验要求 ≥1）后，`Target` 设为
