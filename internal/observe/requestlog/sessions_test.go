@@ -284,3 +284,20 @@ func TestExtractUsageAllocationsDoNotScaleWithDeltaFrames(t *testing.T) {
 		t.Errorf("allocations: 3000 delta frames = %v, 1500 delta frames = %v; want no per-frame allocation", fullAllocs, halfAllocs)
 	}
 }
+
+// TestExtractUsageChatPerChunkUsageKeepsOneFrame: gateways that repeat
+// cumulative chat usage on EVERY chunk (step-plan) omit the cache detail on
+// early chunks. The chat dialect's input/cache split must come from one frame
+// — the latest frame with the largest prompt_tokens — never a per-field max
+// across frames, which paired the early uncached input with the later cache
+// read and billed the cached share twice (observed: prompt 42750, cached
+// 1536 extracted as input 42750 + cache read 1536).
+func TestExtractUsageChatPerChunkUsageKeepsOneFrame(t *testing.T) {
+	stream := "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}],\"usage\":{\"prompt_tokens\":42750,\"completion_tokens\":1}}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}],\"usage\":{\"prompt_tokens\":42750,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":1536}}}\n\n" +
+		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":42750,\"completion_tokens\":3725,\"prompt_tokens_details\":{\"cached_tokens\":1536}}}\n\n" +
+		"data: [DONE]\n\n"
+	if got, want := ExtractUsage(stream), (Usage{Input: 41214, Output: 3725, CacheRead: 1536}); got != want {
+		t.Errorf("ExtractUsage = %+v, want %+v", got, want)
+	}
+}

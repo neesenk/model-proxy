@@ -62,7 +62,8 @@ type usageProbe struct {
 // (prompt_tokens_details cached), responses response.usage.*. Streaming
 // (SSE) bodies — the shape every streaming request records — are parsed
 // frame by frame (data lines joined per the spec, dispatched on blank
-// lines) and merged per field by maximum: usage frames repeat with
+// lines) and merged per field by maximum (chat-dialect frames excepted: their
+// input/cache split comes from one frame, see extractSSEUsage): usage frames repeat with
 // cumulative counters (anthropic message_delta, per-chunk chat usage), so
 // the maximum across frames is the stream's final usage. Bodies without a
 // usage object (errors, truncation) yield the zero Usage.
@@ -220,7 +221,9 @@ func maxU(a, b uint64) uint64 {
 // frame's usage by per-field maximum (see ExtractUsage). Only reached when
 // the whole body is not a JSON document, i.e. genuine stream text.
 func extractSSEUsage(body string) Usage {
-	var u Usage
+	var u, chat Usage
+	var chatPrompt uint64
+	sawChat := false
 	var data []string
 	merge := func() {
 		if len(data) == 0 {
@@ -233,6 +236,18 @@ func extractSSEUsage(body string) Usage {
 		}
 		if p, ok := parseUsageJSON(payload); ok {
 			frame := usageFrom(p)
+			if prompt, isChat := chatPromptTokens(p); isChat {
+				// Chat dialect: input and its cache shares are one split of
+				// prompt_tokens — take them from a single frame (the latest
+				// with the largest prompt_tokens), never field by field.
+				if prompt >= chatPrompt {
+					chatPrompt = prompt
+					chat.Input, chat.CacheRead, chat.CacheCreation = frame.Input, frame.CacheRead, frame.CacheCreation
+				}
+				chat.Output = max(chat.Output, frame.Output)
+				sawChat = true
+				return
+			}
 			u.Input = max(u.Input, frame.Input)
 			u.Output = max(u.Output, frame.Output)
 			u.CacheRead = max(u.CacheRead, frame.CacheRead)
@@ -260,7 +275,26 @@ func extractSSEUsage(body string) Usage {
 		}
 	}
 	merge() // EOF dispatches a trailing unterminated frame
+	if sawChat {
+		u.Input = max(u.Input, chat.Input)
+		u.Output = max(u.Output, chat.Output)
+		u.CacheRead = max(u.CacheRead, chat.CacheRead)
+		u.CacheCreation = max(u.CacheCreation, chat.CacheCreation)
+	}
 	return u
+}
+
+// chatPromptTokens reports whether a frame's usage is the chat dialect
+// (prompt_tokens / prompt_cache_hit_tokens — the shape usageFrom splits into
+// input + cache shares) and its raw prompt_tokens.
+func chatPromptTokens(p *usageProbe) (uint64, bool) {
+	if p.Message != nil && p.Message.Usage != nil {
+		return 0, false
+	}
+	if p.Usage == nil || (p.Usage.PromptTokens == 0 && p.Usage.PromptCacheHit == 0) {
+		return 0, false
+	}
+	return p.Usage.PromptTokens, true
 }
 
 // SessionSummary aggregates one client session's committed requests: time
