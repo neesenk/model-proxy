@@ -192,8 +192,17 @@ func Or(s, fallback string) string {
 	return s
 }
 
-// Truncate caps s at n bytes (trailing "...").
+// truncateNewlineRuns collapses every newline run (\r\n, lone \n, lone \r) to a
+// single space. Every Truncate caller embeds the snippet in a one-line error
+// or log message; a raw multi-line body (gateway/WAF HTML page, e.g. the nginx
+// "403 Forbidden" storm of 2026-11-18) would otherwise spill as unprefixed log
+// lines.
+var truncateNewlineRuns = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ")
+
+// Truncate caps s at n bytes (trailing "..."). Newline runs collapse to a
+// single space first, so the result is always single-line.
 func Truncate(s string, n int) string {
+	s = truncateNewlineRuns.Replace(s)
 	if len(s) <= n {
 		return s
 	}

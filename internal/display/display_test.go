@@ -1,6 +1,9 @@
 package display
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // These helpers are implemented in this package. Keep their branch assertions
 // here so removing a caller-side wrapper cannot silently discard coverage of
@@ -94,6 +97,22 @@ func TestTruncate(t *testing.T) {
 	}
 	if got := Truncate("exact", 5); got != "exact" {
 		t.Errorf("Truncate(exact,5)=%q want exact", got)
+	}
+}
+
+// 2026-11-18 audit: every caller embeds a Truncate'd body snippet into a
+// one-line error/log message. A gateway/WAF HTML page (nginx "403 Forbidden")
+// kept its \r\n runs and spilled as unprefixed log lines; the snippet must
+// come out single-line.
+func TestTruncateCollapsesNewlines(t *testing.T) {
+	page := "<html>\r\n<head><title>403 Forbidden</title></head>\r\n</html>"
+	got := Truncate(page, 120)
+	if strings.ContainsAny(got, "\r\n") {
+		t.Errorf("Truncate(newline body)=%q must be single-line", got)
+	}
+	long := strings.Repeat("<p>line</p>\r\n", 40)
+	if got := Truncate(long, 50); strings.ContainsAny(got, "\r\n") {
+		t.Errorf("Truncate(long newline body)=%q must be single-line", got)
 	}
 }
 

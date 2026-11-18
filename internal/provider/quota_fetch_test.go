@@ -387,6 +387,39 @@ func TestAqpProvider_Quota_Parsed(t *testing.T) {
 	}
 }
 
+// 2026-11-18 audit: the compass gateway WAF answered monthly_usage with the
+// nginx "403 Forbidden" page for hours; the body snippet embedded in the sync
+// error kept its \r\n runs, so the [quota] ... sync failed log line spilled the
+// raw HTML page as unprefixed log lines. The error must stay single-line while
+// keeping status + title evidence.
+func TestAqpProvider_Quota_Gateway403ErrorSingleLine(t *testing.T) {
+	page := "<html>\r\n<head><title>403 Forbidden</title></head>\r\n<body>\r\n<center><h1>403 Forbidden</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(page))
+	}))
+	defer srv.Close()
+	store := filepath.Join(t.TempDir(), "aqp_oauth_auth.json")
+	writeAqpStore(t, store, "proj-1")
+	p := &AqpProvider{cfg: &Config{OAuthAuthFile: store, AqpBaseURL: srv.URL}}
+	s, err := p.Quota()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Billing != BillingUnknown {
+		t.Errorf("Billing=%v want BillingUnknown", s.Billing)
+	}
+	for _, want := range []string{"403", "403 Forbidden"} {
+		if !strings.Contains(s.Err, want) {
+			t.Errorf("Err=%q missing %q", s.Err, want)
+		}
+	}
+	if strings.ContainsAny(s.Err, "\r\n") {
+		t.Errorf("Err must be single-line, got %q", s.Err)
+	}
+}
+
 // --- volcengine ---
 
 func TestVolcengineProvider_Quota_NoCreds(t *testing.T) {
