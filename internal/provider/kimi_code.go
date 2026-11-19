@@ -125,7 +125,7 @@ func (p *KimiCodeProvider) Quota() (*QuotaSnapshot, error) {
 	}
 	s, _ := ParseKimiCodeQuota(body, "")
 	if s == nil {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: "not kimi-code usages format"}, nil
+		return quotaFormatSnapshot("not kimi-code usages format", body), nil
 	}
 	return s, nil
 }

@@ -712,7 +712,9 @@ func TestOpenCodeGoQuota_NoBaseURL(t *testing.T) {
 }
 
 // A 200 body that isn't the Go usage shape → the format error (never a
-// non-nil error).
+// non-nil error), carrying the body as single-line evidence (2026-11-19
+// audit: the bare format string left kimi-code-style upstream flaps
+// unattributable — same evidence rule as aqp).
 func TestOpenCodeGoQuota_NotUsageFormat(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"unrelated":true}`))
@@ -726,8 +728,8 @@ func TestOpenCodeGoQuota_NotUsageFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Quota: want nil error, got %v", err)
 	}
-	if s.Billing != BillingUnknown || s.Err != "not opencode-go usage format" {
-		t.Errorf("got %+v, want BillingUnknown/not opencode-go usage format", s)
+	if s.Billing != BillingUnknown || s.Err != `not opencode-go usage format: {"unrelated":true}` {
+		t.Errorf("got %+v, want BillingUnknown with evidence-bearing format error", s)
 	}
 }
 

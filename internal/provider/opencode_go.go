@@ -219,7 +219,7 @@ func (p *OpenCodeGoProvider) Quota() (*QuotaSnapshot, error) {
 	}
 	s, _ := ParseOpenCodeGoUsage(body, "")
 	if s == nil {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: "not opencode-go usage format"}, nil
+		return quotaFormatSnapshot("not opencode-go usage format", body), nil
 	}
 	return s, nil
 }

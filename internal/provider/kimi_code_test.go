@@ -124,6 +124,50 @@ func TestKimiCodeUsagesURL(t *testing.T) {
 	}
 }
 
+// 2026-11-19 audit: kimi-code /usages flapped for ~2h (one 401, then fifteen
+// 200-with-non-usages-body failures interleaved with successes before it
+// self-healed). The bare "not kimi-code usages format" left no way to tell a
+// gateway HTML page from an error envelope from an empty body — the sync
+// error must carry a single-line truncated body snippet (aqp pattern via
+// display.Truncate, whose newline folding keeps an HTML page on one line).
+func TestKimiCodeQuota_NotUsagesFormatCarriesEvidence(t *testing.T) {
+	page := "<html>\r\n<head><title>403 Forbidden</title></head>\r\n</html>"
+	cases := []struct {
+		name    string
+		body    string
+		wantSub string
+	}{
+		{"gateway HTML page", page, "403 Forbidden"},
+		{"error envelope", `{"error":{"message":"membership required"}}`, "membership required"},
+		{"empty body", "", "empty body"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			p := &KimiCodeProvider{ApiKeyBase: NewApiKeyBaseWithKey("kimi-code", "k"), cfg: &Config{UsageURL: srv.URL}}
+			s, err := p.Quota()
+			if err != nil {
+				t.Fatalf("Quota: want nil error, got %v", err)
+			}
+			if s.Billing != BillingUnknown {
+				t.Errorf("Billing=%v want Unknown", s.Billing)
+			}
+			if !strings.HasPrefix(s.Err, "not kimi-code usages format: ") {
+				t.Errorf("Err=%q, want 'not kimi-code usages format: ' prefix", s.Err)
+			}
+			if !strings.Contains(s.Err, tc.wantSub) {
+				t.Errorf("Err=%q, want body evidence %q", s.Err, tc.wantSub)
+			}
+			if strings.ContainsAny(s.Err, "\r\n") {
+				t.Errorf("Err=%q must stay single-line", s.Err)
+			}
+		})
+	}
+}
+
 // kimiWindowSeconds converts a {duration, timeUnit} pair to seconds; MINUTE
 // (both spellings) and DAY are already exercised end-to-end by the parser tests
 // below — this table pins the remaining branches directly: HOUR, SECOND,

@@ -176,8 +176,8 @@ func TestZhipuProvider_Quota_NotZhipuFormat(t *testing.T) {
 	defer srv.Close()
 	p := &ZhipuProvider{ApiKeyBase: NewApiKeyBaseWithKey("zhipu", "k"), cfg: &Config{UsageURL: srv.URL}}
 	s, _ := p.Quota()
-	if s.Billing != BillingUnknown || s.Err != "not zhipu quota format" {
-		t.Errorf("got %+v want BillingUnknown/not-zhipu-format", s)
+	if s.Billing != BillingUnknown || s.Err != `not zhipu quota format: {"object":"list","data":[]}` {
+		t.Errorf("got %+v want BillingUnknown/not-zhipu-format with body evidence", s)
 	}
 }
 

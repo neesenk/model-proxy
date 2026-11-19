@@ -101,9 +101,24 @@ func bigmodelQuota(url, proxyURL string, auth func(*http.Request) error, headers
 		if msg := bigmodelErrorMessage(body); msg != "" {
 			return &QuotaSnapshot{Billing: BillingUnknown, Err: "zhipu quota upstream error: " + msg}, nil
 		}
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: "not zhipu quota format"}, nil
+		return quotaFormatSnapshot("not zhipu quota format", body), nil
 	}
 	return s, nil
+}
+
+// quotaFormatSnapshot builds the "not X format" parse failure with the
+// response body as evidence: a truncated, single-line snippet (display.Truncate
+// collapses newline runs, so a gateway/WAF HTML page can't spill as unprefixed
+// log lines — the 2026-11-18 aqp incident). The 2026-11-19 kimi-code /usages
+// flap (one 401, then fifteen 200-with-foreign-body failures) proved the bare
+// format string unattributable: an empty body is called out explicitly instead
+// of producing a dangling "format: " suffix.
+func quotaFormatSnapshot(formatErr string, body []byte) *QuotaSnapshot {
+	snippet := display.Truncate(string(body), 120)
+	if snippet == "" {
+		snippet = "empty body"
+	}
+	return &QuotaSnapshot{Billing: BillingUnknown, Err: formatErr + ": " + snippet}
 }
 
 // bigmodelErrorMessage extracts the message from a BigModel error envelope
