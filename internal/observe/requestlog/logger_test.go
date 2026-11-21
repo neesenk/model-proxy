@@ -1,11 +1,14 @@
 package requestlog
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"model-proxy/internal/observe/logfile"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -121,6 +124,49 @@ func TestLoggerPassesHotRetentionToSink(t *testing.T) {
 	var nilLogger *Logger
 	if got := nilLogger.HotRetention(); got != 0 {
 		t.Fatalf("nil HotRetention() = %v, want 0", got)
+	}
+}
+
+// TestLoggerWritesOneJSONLinePerRecord pins the on-disk JSONL contract at the
+// sink boundary: exactly one newline per record. The encoder must not append
+// its own trailing newline because logfile.Writer.WriteLine adds one — a 2026-09
+// regression double-newlined every record for two months unnoticed (in-process
+// readers TrimSpace away blank lines; external line-based tooling does not).
+func TestLoggerWritesOneJSONLinePerRecord(t *testing.T) {
+	dir := t.TempDir()
+	logger := New(Options{Directory: dir, MaxFileSize: 1 << 30, MaxBodyBytes: 4096})
+	go logger.Run()
+	for i := 0; i < 3; i++ {
+		logger.Enqueue(&Record{
+			Ts: "2026-11-22T01:02:03Z", RequestID: fmt.Sprintf("line-%d", i), Status: 200,
+		})
+	}
+	logger.Shutdown()
+
+	names := requestLogFileNames(t, dir)
+	if len(names) != 1 {
+		t.Fatalf("files = %v, want exactly one per-day file", names)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, names[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasSuffix(raw, []byte{'\n'}) {
+		t.Fatal("final record lacks a newline")
+	}
+	if blank := strings.Count(string(raw), "\n\n"); blank != 0 {
+		t.Errorf("file contains %d blank line(s) between records; the sink owns the trailing newline: %q", blank, raw)
+	}
+	var ids []string
+	for _, line := range bytes.Split(bytes.TrimSuffix(raw, []byte{'\n'}), []byte{'\n'}) {
+		var record Record
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("line %q is not valid JSONL: %v", line, err)
+		}
+		ids = append(ids, record.RequestID)
+	}
+	if len(ids) != 3 {
+		t.Fatalf("records persisted = %d, want 3 (one per line)", len(ids))
 	}
 }
 

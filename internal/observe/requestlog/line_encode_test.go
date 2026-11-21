@@ -105,7 +105,6 @@ func TestAppendRecordLineMatchesJSONMarshal(t *testing.T) {
 		if err != nil {
 			t.Fatalf("marshal record %d: %v", i, err)
 		}
-		want = append(want, '\n')
 		got := appendRecordLine(nil, rec)
 		if string(got) == string(want) {
 			continue
@@ -139,7 +138,6 @@ func TestAppendRecordLineReusesBuffer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = append(want, '\n')
 	if string(got) != string(want) {
 		t.Errorf("reused buffer row = %q, want %q", got, want)
 	}

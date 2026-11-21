@@ -254,8 +254,10 @@ func responseHeaders(header http.Header) string {
 	return string(data)
 }
 
-// appendRecordLine appends the JSONL encoding of rec to dst. The output is
-// byte-identical to json.Marshal(rec) followed by a newline; encoding by hand
+// appendRecordLine appends the JSONL encoding of rec to dst, without the
+// trailing newline — logfile.Writer.WriteLine owns that newline (see its
+// WriteLine contract). The output is byte-identical to json.Marshal(rec);
+// encoding by hand
 // lets the single writer encode onto its retained line buffer instead of
 // paying json.Marshal's per-record buffer allocation and copy for large
 // bodies. Field order and omitempty rules mirror the Record struct tags.
@@ -391,7 +393,7 @@ func appendRecordLine(dst []byte, rec *Record) []byte {
 		appendRole("tool", rec.Profile.Roles.Tool)
 		dst = append(dst, '}', '}')
 	}
-	return append(dst, '}', '\n')
+	return append(dst, '}')
 }
 
 // appendRoutingDecision appends a JSON object for RoutingDecision.
