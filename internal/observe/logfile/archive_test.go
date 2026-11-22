@@ -1,8 +1,10 @@
 package logfile
 
 import (
+	"bytes"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -652,5 +654,76 @@ func TestGuardReclaimsZstdWithoutDayStamp(t *testing.T) {
 	l.guard(filepath.Join(dir, "requests-20261122.log"))
 	if _, err := os.Stat(stray); !os.IsNotExist(err) {
 		t.Fatalf("guard left the .zst without a day stamp in place: %v", err)
+	}
+}
+
+// TestArchiveWorkerSilentOnVanishedSource: an archive whose source vanished
+// (duplicate offer after success, or retention/guard deleted it mid-flight)
+// is expected, not a failure — no warning, no OnChange.
+func TestArchiveWorkerSilentOnVanishedSource(t *testing.T) {
+	dir := t.TempDir()
+	gone := filepath.Join(dir, "requests-20260101.log")
+	l := New(Options{Directory: dir, Tag: "t"})
+	l.archiveFn = func(p string) error {
+		return &os.PathError{Op: "open", Path: p, Err: os.ErrNotExist}
+	}
+	changes := make(chan struct{}, 1)
+	l.opts.OnChange = func() { changes <- struct{}{} }
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	go func() { l.archive <- gone; close(l.archive) }()
+	l.archiveWorker()
+	if strings.Contains(buf.String(), "archive") {
+		t.Fatalf("vanished source must be silent, got: %s", buf.String())
+	}
+	select {
+	case <-changes:
+		t.Fatal("OnChange fired for a vanished source")
+	default:
+	}
+}
+
+// TestArchiveZstdOpenFailure: a vanished source surfaces the open error.
+func TestArchiveZstdOpenFailure(t *testing.T) {
+	if err := archiveZstd(filepath.Join(t.TempDir(), "requests-20260101.log")); err == nil {
+		t.Fatal("opening a nonexistent source must fail")
+	}
+}
+
+// TestDispatchArchiveReapsOrphanTmp: a leftover .zst.tmp whose source .log
+// is gone is garbage from a dead run and is reaped; a tmp with its source
+// present belongs to a live/retryable compression and stays.
+func TestDispatchArchiveReapsOrphanTmp(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	write := func(name string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	write("requests-20260101.log")                   // hot-window source: keeps its tmp
+	live := write("requests-20260101.log.zst.tmp")   // source present → kept
+	orphan := write("requests-20260102.log.zst.tmp") // source absent → reaped
+	write("requests-20260103.log.zst")               // finished archive…
+	zombie := write("requests-20260103.log.zst.tmp") // …whose tmp outlived it → reaped
+	if err := os.WriteFile(filepath.Join(dir, "other-20260101.log.zst.tmp"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := New(Options{Directory: dir, FilePrefix: "requests-", HotRetention: time.Hour})
+	l.dispatchArchive(now, filepath.Join(dir, "requests-20261122.log"))
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("tmp with source present must stay: %v", err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("orphan tmp must be reaped: %v", err)
+	}
+	if _, err := os.Stat(zombie); !os.IsNotExist(err) {
+		t.Fatalf("tmp past its finished archive must be reaped: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "other-20260101.log.zst.tmp")); err != nil {
+		t.Fatalf("foreign-prefix tmp is none of this stream's business: %v", err)
 	}
 }

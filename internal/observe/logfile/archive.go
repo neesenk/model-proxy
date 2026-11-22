@@ -18,6 +18,10 @@ import (
 // data (zstd -d | jq), never an online read path.
 const zstdSuffix = ".zst"
 
+// zstdTmpSuffix marks an archive still being written. Nothing lists a tmp as
+// deletable, so the dispatch pass reaps those whose source is already gone.
+const zstdTmpSuffix = ".zst.tmp"
+
 // archiveQueueDepth bounds how many cold files one sweep tick may hand to
 // the worker; a fuller queue retries on the next sweep.
 const archiveQueueDepth = 16
@@ -48,7 +52,9 @@ func archiveDay(name, prefix string) (time.Time, bool) {
 // write src+".zst.tmp" → rename to ".zst" → remove src. It is idempotent
 // across crashes: when the ".zst" already exists (a crash between rename
 // and remove), only src is removed; a leftover ".tmp" is replaced
-// (O_TRUNC) by the next run. A failed compression takes its ".tmp" back.
+// (O_TRUNC) by the next run. A failed compression or rename takes its
+// ".tmp" back; a crashed run's tmp whose source later vanished is reaped
+// by the dispatch pass.
 func archiveZstd(src string) error {
 	dst := src + zstdSuffix
 	if _, statErr := os.Stat(dst); statErr == nil {
@@ -68,6 +74,8 @@ func archiveZstd(src string) error {
 		return err
 	}
 	if err := os.Rename(tmp, dst); err != nil {
+		// Same orphan risk as a failed compression; same best-effort takeback.
+		_ = os.Remove(tmp)
 		return err
 	}
 	return os.Remove(src)
@@ -130,6 +138,17 @@ func (l *Logger) dispatchArchive(now time.Time, activePath string) {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
+		// Reap leftover tmp archives whose source .log is already gone —
+		// garbage from a dead run (crash mid-write or mid-rename). A tmp
+		// with its source present belongs to a live or retryable
+		// compression (the next attempt O_TRUNCs it) and stays.
+		if strings.HasPrefix(name, l.opts.FilePrefix) && strings.HasSuffix(name, zstdTmpSuffix) {
+			srcName := strings.TrimSuffix(strings.TrimSuffix(name, ".tmp"), zstdSuffix)
+			if _, statErr := os.Stat(filepath.Join(l.opts.Directory, srcName)); os.IsNotExist(statErr) {
+				_ = os.Remove(filepath.Join(l.opts.Directory, name))
+			}
+			continue
+		}
 		if entry.IsDir() || !isLogFile(name, l.opts.FilePrefix) {
 			continue
 		}
@@ -177,6 +196,13 @@ func (l *Logger) archiveWorker() {
 			default:
 			}
 			if err := l.archiveFn(src); err != nil {
+				if os.IsNotExist(err) {
+					// The source vanished under us — a duplicate offer
+					// after a finished archive removed it, or the
+					// retention sweep / disk guard deleted it
+					// mid-compression. Expected, not a failure.
+					continue
+				}
 				logx.Warnf("[%s] archive %s failed (kept plain; retried next sweep): %v",
 					l.opts.Tag, filepath.Base(src), err)
 				continue

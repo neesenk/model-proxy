@@ -477,30 +477,25 @@ func Prunable(dir, filePrefix string, cutoff, now time.Time) ([]PruneTarget, err
 	var targets []PruneTarget
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || !(isLogFile(name, filePrefix) || isZstdFile(name, filePrefix)) || name == activeName {
-			continue
-		}
-		var aged bool
-		switch {
-		case isLogFile(name, filePrefix):
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			aged = info.ModTime().Before(cutoff)
-		case isZstdFile(name, filePrefix):
-			// A .zst's mtime is compression time, not content age.
-			if day, ok := archiveDay(name, filePrefix); ok {
-				aged = day.Before(cutoff)
-			}
-		default:
-			continue
-		}
-		if !aged {
+		if entry.IsDir() || name == activeName {
 			continue
 		}
 		info, err := entry.Info()
 		if err != nil {
+			continue
+		}
+		var aged bool
+		if isLogFile(name, filePrefix) {
+			aged = info.ModTime().Before(cutoff)
+		} else if isZstdFile(name, filePrefix) {
+			// A .zst's mtime is compression time, not content age.
+			if day, ok := archiveDay(name, filePrefix); ok {
+				aged = day.Before(cutoff)
+			}
+		} else {
+			continue
+		}
+		if !aged {
 			continue
 		}
 		targets = append(targets, PruneTarget{Name: name, Size: info.Size()})
