@@ -825,3 +825,55 @@ func TestForward_RequestLog_AggregatesCompletedStreams(t *testing.T) {
 		t.Errorf("aggregated completion = %+v (%s)", completion, record.ResponseBody)
 	}
 }
+
+// TestInitRequestLogWiresHotRetention: request_log.hot_retention is resolved
+// once and shared by both streams — the default (unset → 168h) and an explicit
+// window must reach the LLM logger and, when mcp_split is on, the MCP logger,
+// and the announcement line broadcasts the window; "0" keeps every file plain
+// and stays silent.
+func TestInitRequestLogWiresHotRetention(t *testing.T) {
+	var output syncLogBuffer
+	originalWriter := log.Writer()
+	originalFlags := log.Flags()
+	log.SetOutput(&output)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(originalWriter)
+		log.SetFlags(originalFlags)
+	}()
+
+	proxy := newTestProxy(t, &configdomain.Config{})
+	proxy.initRequestLog(configdomain.RequestLogConfig{Enabled: true, Dir: t.TempDir()})
+	if got := proxy.reqLog.HotRetention(); got != 168*time.Hour {
+		t.Fatalf("default-wired reqLog hot retention = %v, want 168h", got)
+	}
+	if !strings.Contains(output.String(), "hot window 168h") {
+		t.Errorf("announcement missing the default hot-window note:\n%s", output.String())
+	}
+
+	split := newTestProxy(t, &configdomain.Config{})
+	split.initRequestLog(configdomain.RequestLogConfig{
+		Enabled:      true,
+		Dir:          t.TempDir(),
+		MCPDir:       t.TempDir(),
+		HotRetention: "48h",
+		MCPSplit:     true,
+	})
+	if got := split.reqLog.HotRetention(); got != 48*time.Hour {
+		t.Fatalf("reqLog hot retention = %v, want 48h", got)
+	}
+	if got := split.mcpReqLog.HotRetention(); got != 48*time.Hour {
+		t.Fatalf("mcpReqLog hot retention = %v, want 48h (shared window)", got)
+	}
+
+	var coldOutput syncLogBuffer
+	log.SetOutput(&coldOutput)
+	cold := newTestProxy(t, &configdomain.Config{})
+	cold.initRequestLog(configdomain.RequestLogConfig{Enabled: true, Dir: t.TempDir(), HotRetention: "0"})
+	if got := cold.reqLog.HotRetention(); got != 0 {
+		t.Fatalf(`hot retention "0" wired %v, want 0 (archiving disabled)`, got)
+	}
+	if strings.Contains(coldOutput.String(), "hot window") {
+		t.Errorf(`announcement added a hot-window note despite hot_retention "0":\n%s`, coldOutput.String())
+	}
+}

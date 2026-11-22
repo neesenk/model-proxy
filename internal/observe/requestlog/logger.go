@@ -35,6 +35,11 @@ type Options struct {
 	// response; the composition root injects the protocol package's
 	// aggregator (this package does not depend on it). See aggregateStream.
 	AggregateStream func(protocol string, body []byte) ([]byte, error)
+	// HotRetention, when > 0, zstd-archives rotated files older than the
+	// window (see logfile.Options.HotRetention): indexed queries, the scan
+	// fallback and the Requests page then cover hot files only — archives
+	// are offline analysis data. 0 keeps all files plain. Restart-only.
+	HotRetention time.Duration
 }
 
 // Logger owns the non-blocking queue and its single JSONL writer goroutine.
@@ -60,6 +65,7 @@ func New(options Options) *Logger {
 			FilePrefix:     prefix,
 			MaxBytes:       options.MaxFileSize,
 			Retention:      options.Retention,
+			HotRetention:   options.HotRetention,
 			MinFreeBytes:   options.MinFreeBytes,
 			MaxUsedPercent: options.MaxUsedPercent,
 			Tag:            "request_log",
@@ -163,4 +169,12 @@ func (l *Logger) MaxBodyBytes() int {
 		return 0
 	}
 	return l.maxBodyBytes
+}
+
+// HotRetention returns the configured hot window (0 = archiving disabled).
+func (l *Logger) HotRetention() time.Duration {
+	if l == nil {
+		return 0
+	}
+	return l.sink.HotRetention()
 }

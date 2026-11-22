@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func TestLoggerEnqueueDropsWhenQueueIsFull(t *testing.T) {
@@ -102,6 +103,24 @@ func TestLoggerShutdownDrainsEveryAcceptedUniqueRecord(t *testing.T) {
 				t.Errorf("%s mode = %o, want 0600", name, got)
 			}
 		}
+	}
+}
+
+// TestLoggerPassesHotRetentionToSink pins the Options.HotRetention →
+// logfile.Options.HotRetention pass-through: the composition root resolves
+// request_log.hot_retention once and shares it between both streams, and the
+// accessor reports the sink's window (0 = archiving disabled; nil logger = 0).
+func TestLoggerPassesHotRetentionToSink(t *testing.T) {
+	logger := New(Options{Directory: t.TempDir(), HotRetention: 48 * time.Hour})
+	if got := logger.HotRetention(); got != 48*time.Hour {
+		t.Fatalf("HotRetention() = %v, want 48h", got)
+	}
+	if got := New(Options{Directory: t.TempDir()}).HotRetention(); got != 0 {
+		t.Fatalf("default HotRetention() = %v, want 0 (disabled)", got)
+	}
+	var nilLogger *Logger
+	if got := nilLogger.HotRetention(); got != 0 {
+		t.Fatalf("nil HotRetention() = %v, want 0", got)
 	}
 }
 

@@ -63,6 +63,7 @@ func (p *Proxy) initRequestLog(config configdomain.RequestLogConfig) {
 		MaxFileSize:     config.MaxFileSizeBytes(),
 		MaxBodyBytes:    config.MaxBodyBytesValue(),
 		Retention:       config.RetentionDuration(),
+		HotRetention:    config.HotRetentionDuration(),
 		MinFreeBytes:    guardMinFree,
 		MaxUsedPercent:  guardMaxUsed,
 		OnChange:        notifyIndex,
@@ -78,6 +79,7 @@ func (p *Proxy) initRequestLog(config configdomain.RequestLogConfig) {
 			MaxFileSize:    config.MaxFileSizeBytes(),
 			MaxBodyBytes:   config.MaxBodyBytesValue(),
 			Retention:      config.RetentionDuration(),
+			HotRetention:   config.HotRetentionDuration(),
 			MinFreeBytes:   guardMinFree,
 			MaxUsedPercent: guardMaxUsed,
 		})
@@ -86,13 +88,18 @@ func (p *Proxy) initRequestLog(config configdomain.RequestLogConfig) {
 	if guardMinFree > 0 || guardMaxUsed > 0 {
 		guardNote = fmt.Sprintf(", disk guard min_free=%d max_used=%d%%", guardMinFree, guardMaxUsed)
 	}
+	hotNote := ""
+	if hot := config.HotRetentionDuration(); hot > 0 {
+		hotNote = fmt.Sprintf(", hot window %s (older rotated files zstd-archived, offline-only)", hot)
+	}
 	logx.Infof(
-		"[request_log] enabled -> %s (max_file_size %d bytes, max_body %d bytes, retention %s%s)",
+		"[request_log] enabled -> %s (max_file_size %d bytes, max_body %d bytes, retention %s%s%s)",
 		config.ResolvedDir(),
 		config.MaxFileSizeBytes(),
 		config.MaxBodyBytesValue(),
 		config.RetentionDuration(),
 		guardNote,
+		hotNote,
 	)
 	if p.mcpReqLog != nil {
 		logx.Infof("[request_log] mcp_split on -> mcp records to %s", config.ResolvedMCPDir())
