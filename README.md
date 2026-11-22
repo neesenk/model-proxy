@@ -136,15 +136,15 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 #   mcp_split: true         # MCP 网关交换单独成流（mcp-*.log，目录 mcp_dir 默认
 #                           # ~/.model-proxy/log/mcp，同样需绝对路径）；Requests 页回到 LLM-only，
 #                           # /api/requests?kind=mcp 读拆分流。默认关，重启生效
+#   hot_retention: 168h     # 热窗（默认 7d，重启生效）：滚出热窗的轮转文件压缩为 <名>.log.zst
+#                           # 离线归档——Requests 页与 /api/requests 的可查窗口即热窗，更早记录只能
+#                           # 离线读取（zstd -d < 文件.log.zst | jq）。须 < retention，"0" 关闭归档
 #   disk_guard:             # 磁盘护栏（缺省 enabled/50GiB/95%，可不写）：卷空闲 <min_free_bytes
 #     min_free_bytes: 53687091200  # 或使用率 >=max_used_percent 时，每小时 sweep 按最旧优先
 #     max_used_percent: 95         # 删轮转文件至条件解除；活动文件与 index.db 永不删
 #   aggregate_streams: true # 已完成的 2xx SSE 应答按聚合后的 JSON 落盘（标 response_aggregated，
 #                           # 客户端字节不变；流式应答每输出 token 约 100 字节 chunk 信封，聚合后
 #                           # 通常小 20-40 倍）。截断/非 2xx/无终止/流内报错的流保留原始 SSE。默认关，重启生效
-#   hot_retention: 168h     # 热窗（默认 7d，重启生效）：滚出热窗的轮转文件压缩为 <名>.log.zst
-#                           # 离线归档——Requests 页与 /api/requests 的可查窗口即热窗，更早记录只能
-#                           # 离线读取（zstd -d < 文件.log.zst | jq）。须 < retention，"0" 关闭归档
 # guard:                    # 出站安全扫描（DLP，转发前扫描请求 body；详见下文「出站安全扫描与审计」）
 #   secrets: log            # 秘密扫描动作：log（默认，放行 + 告警）| redact（替换 [REDACTED] 后放行）
 #                           # | block（400 拒绝）| off（不扫）
