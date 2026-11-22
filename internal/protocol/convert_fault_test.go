@@ -6,6 +6,7 @@ package protocol
 // same-protocol byte-identical passthrough, and image mapping.
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -362,6 +363,38 @@ func TestConvertFault_OversizedLineWarns(t *testing.T) {
 	})
 	if !strings.Contains(logs, "SSE scanner error") {
 		t.Errorf("oversized line did not warn, log = %q", logs)
+	}
+}
+
+// errReader fails every read with err (a network cancel / shutdown abort),
+// driving the SSE scanner-error path with a cause that is NOT a length limit.
+type errReader struct{ err error }
+
+func (r *errReader) Read([]byte) (int, error) { return 0, r.err }
+
+// C8b (2026-11-18 audit): serve.log carried "SSE scanner error (line too
+// long?): context canceled" — a cancelled context (client disconnect / drain
+// abort) mislabeled as a scanner length limit. The warning must name the real
+// cause and must not hardcode the guess, in both conversion directions.
+func TestConvertFault_ScannerErrorNamesRealCause(t *testing.T) {
+	logs := captureConvertLog(t, func() {
+		io.Copy(io.Discard, newOpenAIToAnthropicSSE(&errReader{context.Canceled}, "gpt"))
+	})
+	if !strings.Contains(logs, "context canceled") {
+		t.Errorf("warning must name the real scanner cause, log = %q", logs)
+	}
+	if strings.Contains(logs, "line too long") {
+		t.Errorf("warning misattributes a context cancellation as a length limit, log = %q", logs)
+	}
+
+	logs = captureConvertLog(t, func() {
+		io.Copy(io.Discard, newAnthropicToOpenAISSE(&errReader{context.Canceled}, "claude"))
+	})
+	if !strings.Contains(logs, "context canceled") {
+		t.Errorf("anthropic direction must name the real cause, log = %q", logs)
+	}
+	if strings.Contains(logs, "line too long") {
+		t.Errorf("anthropic direction misattributes the cause, log = %q", logs)
 	}
 }
 
