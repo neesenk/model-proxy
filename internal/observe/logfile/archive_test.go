@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -296,6 +297,72 @@ func openDescriptorCount(t *testing.T) int {
 	return 0
 }
 
+// TestArchiveZstdTakesItsTmpBackWhenCompressionFails: an attempt that errors
+// leaves nothing at the tmp path. No deletable set lists a ".zst.tmp" — the
+// sweep, the disk guard and Prune all pass over it as an archive still being
+// written — so a tmp that outlives its source is never reclaimed: a full disk
+// fails the compression, then has the guard delete the plain file on a later
+// tick, and the partial blob is orphaned for good. Both points of failure:
+// after the tmp was created (the copy fails) and before it (the tmp path is
+// blocked).
+func TestArchiveZstdTakesItsTmpBackWhenCompressionFails(t *testing.T) {
+	t.Run("copy fails after the tmp was created", func(t *testing.T) {
+		dir := t.TempDir()
+		src := filepath.Join(dir, "requests-20260101.log")
+		// A directory as the source is the seam-free way to fail the copy
+		// once the tmp exists: Open accepts it, the tmp is created, and the
+		// first read fails.
+		if err := os.Mkdir(src, 0o700); err != nil {
+			t.Fatal(err)
+		}
+
+		err := archiveZstd(src)
+
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) || pathErr.Op != "read" || pathErr.Path != src {
+			t.Errorf("archiveZstd error = %v, want the copy's read on %s to fail (the tmp exists by then)", err, src)
+		}
+		assertFailedArchiveLeftNothing(t, src)
+	})
+
+	t.Run("tmp path is blocked", func(t *testing.T) {
+		dir := t.TempDir()
+		src := filepath.Join(dir, "requests-20260101.log")
+		if err := os.WriteFile(src, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(src+".zst.tmp", 0o700); err != nil { // OpenFile on a directory fails
+			t.Fatal(err)
+		}
+
+		err := archiveZstd(src)
+
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) || pathErr.Path != src+".zst.tmp" {
+			t.Errorf("archiveZstd error = %v, want one naming the blocked tmp", err)
+		}
+		assertFailedArchiveLeftNothing(t, src)
+		if data, err := os.ReadFile(src); err != nil || string(data) != "{}\n" {
+			t.Errorf("plain file = %q, %v; want kept untouched", data, err)
+		}
+	})
+}
+
+// assertFailedArchiveLeftNothing checks what a failed archiveZstd must leave:
+// nothing at the tmp path, no archive, and the source where it was.
+func assertFailedArchiveLeftNothing(t *testing.T, src string) {
+	t.Helper()
+	if _, err := os.Stat(src + ".zst.tmp"); !os.IsNotExist(err) {
+		t.Errorf("tmp left behind by the failed archive: %v", err)
+	}
+	if _, err := os.Stat(src + ".zst"); !os.IsNotExist(err) {
+		t.Errorf("archive created despite the failure: %v", err)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("source did not survive the failed archive: %v", err)
+	}
+}
+
 // TestLoggerHotRetentionAccessor: the hot window is reported as configured;
 // 0 means archiving is disabled, which is the default.
 func TestLoggerHotRetentionAccessor(t *testing.T) {
@@ -370,6 +437,76 @@ func TestShutdownAbandonsQueuedButFinishesInFlight(t *testing.T) {
 				t.Fatalf("round %d: queued offer %s was started at shutdown, want it left plain: %v", round, filepath.Base(p), err)
 			}
 		}
+	}
+}
+
+// TestRunArchivesColdRotatedFileOnTheStartupSweep drives the production path
+// end to end with no seam replaced: Run's first sweep tick → dispatchArchive
+// → the archive worker → New's default archiveZstd. The dispatch call in
+// sweepAndGuard and the archiveFn default in New each live at a single call
+// site no other test depends on; the unit tests around them stay green when
+// one is dropped, this one goes red.
+//
+// Order comes from channels and a bounded poll, never from a sleep. OnChange
+// may run on the writer and on the worker at once: the test waits for a call
+// that already sees the plain file gone — the change the tailing index is
+// told about — before it asks for shutdown, whose exit path signals too.
+func TestRunArchivesColdRotatedFileOnTheStartupSweep(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	// A rotated file that fell out of the hot window an hour ago. Its name
+	// day sits well inside total retention, so the sweep before the dispatch
+	// keeps it.
+	plain := filepath.Join(dir, "requests-"+now.AddDate(0, 0, -2).Format(dayFileLayout)+".log")
+	if err := os.WriteFile(plain, []byte("{\"n\":1}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cold := now.Add(-time.Hour)
+	if err := os.Chtimes(plain, cold, cold); err != nil {
+		t.Fatal(err)
+	}
+	var notifyOnce sync.Once
+	notified := make(chan struct{})
+	l := New(Options{
+		Directory: dir, FilePrefix: "requests-", Tag: "t",
+		HotRetention: time.Minute, Retention: 30 * 24 * time.Hour,
+		OnChange: func() {
+			if _, err := os.Stat(plain); os.IsNotExist(err) {
+				notifyOnce.Do(func() { close(notified) })
+			}
+		},
+	})
+	go l.Run()
+	defer l.Shutdown() // a failed wait must not leave Run behind
+
+	// The startup tick dispatches before Run enters its loop; the worker
+	// then needs a moment. A bounded wait on an observable, not a timing
+	// proof: the deadline only ever delays a failure.
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	deadline := time.After(5 * time.Second)
+	for {
+		if _, err := os.Stat(plain + zstdSuffix); err == nil {
+			break
+		}
+		select {
+		case <-poll.C:
+		case <-deadline:
+			t.Fatalf("the .zst never appeared; the directory holds %v", logFileNames(t, dir))
+		}
+	}
+	select {
+	case <-notified:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnChange never fired for the archived-away file")
+	}
+	l.Shutdown()
+
+	if _, err := os.Stat(plain); !os.IsNotExist(err) {
+		t.Fatalf("plain file after Run = %v, want removed by the archive", err)
+	}
+	if info, err := os.Stat(plain + zstdSuffix); err != nil || info.Size() == 0 {
+		t.Fatalf("archive after Run = %v, %v; want a non-empty .zst", info, err)
 	}
 }
 

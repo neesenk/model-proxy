@@ -48,7 +48,7 @@ func archiveDay(name, prefix string) (time.Time, bool) {
 // write src+".zst.tmp" → rename to ".zst" → remove src. It is idempotent
 // across crashes: when the ".zst" already exists (a crash between rename
 // and remove), only src is removed; a leftover ".tmp" is replaced
-// (O_TRUNC) by the next run.
+// (O_TRUNC) by the next run. A failed compression takes its ".tmp" back.
 func archiveZstd(src string) error {
 	dst := src + zstdSuffix
 	if _, statErr := os.Stat(dst); statErr == nil {
@@ -58,6 +58,13 @@ func archiveZstd(src string) error {
 	}
 	tmp := dst + ".tmp"
 	if err := compressZstd(src, tmp); err != nil {
+		// Take the unfinished tmp back. Nothing lists a ".zst.tmp" as
+		// deletable — sweep, disk guard and Prune all pass over it as an
+		// archive still being written — so once its source is gone (a full
+		// disk fails the compression, then has the guard delete the plain
+		// file) the partial blob would be orphaned for good. Best effort:
+		// the compression error is the one to report.
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, dst); err != nil {
