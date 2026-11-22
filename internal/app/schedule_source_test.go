@@ -89,12 +89,7 @@ func postScheduleProbe(t *testing.T, url, body, session, stickyHeader string) in
 	return resp.StatusCode
 }
 
-// awaitRecordCount waits until the async request-log writer has flushed at
-// least n records. Records are enqueued after the response is delivered to
-// the client; on a slow CI runner the next request's record can overtake the
-// previous one's flush (overtaking reorders the JSONL and inverts
-// file-order assertions), so tests that read records in request order must
-// let each request's record land before issuing the next request.
+// awaitRecordCount waits for visibility in the asynchronous request log.
 func awaitRecordCount(t *testing.T, dir string, n int) {
 	t.Helper()
 	testsyn.WaitUntil(t, fmt.Sprintf("%d request-log records flushed", n), func() bool {
@@ -108,40 +103,64 @@ func awaitRecordCount(t *testing.T, dir string, n int) {
 // the chain before ranking.
 func TestScheduleSourceLogged(t *testing.T) {
 	p, base := scheduleSourceFixture(t)
-	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
-
-	for i := 0; i < 3; i++ {
-		if code := postScheduleProbe(t, base+"/v1/chat/completions", body, "s1", ""); code != 200 {
-			t.Fatalf("request %d status = %d, want 200", i, code)
+	cases := []struct{ marker, source, provider string }{
+		{"schedule-fresh", "quota", "b"},
+		{"schedule-repeat-one", "sticky", "b"},
+		{"schedule-repeat-two", "sticky", "b"},
+		{"schedule-forced", "force", "a"},
+	}
+	for _, tc := range cases {
+		body := fmt.Sprintf(`{"model":"m","messages":[{"role":"user","content":%q}]}`, tc.marker)
+		req, err := http.NewRequest(http.MethodPost, base+"/v1/chat/completions", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
 		}
-		awaitRecordCount(t, p.reqLog.Directory(), i+1)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-claude-code-session-id", "s1")
+		if tc.source == "force" {
+			req.Header.Set("x-mp-force-provider", tc.provider)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status=%d, want 200", tc.marker, resp.StatusCode)
+		}
 	}
-	force, _ := http.NewRequest(http.MethodPost, base+"/v1/chat/completions", strings.NewReader(body))
-	force.Header.Set("Content-Type", "application/json")
-	force.Header.Set("x-claude-code-session-id", "s1")
-	force.Header.Set("x-mp-force-provider", "a")
-	resp, err := http.DefaultClient.Do(force)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("forced request status = %d, want 200", resp.StatusCode)
-	}
-	awaitRecordCount(t, p.reqLog.Directory(), 4)
-
+	awaitRecordCount(t, p.reqLog.Directory(), len(cases))
 	records := allRecords(t, p.reqLog.Directory())
-	if len(records) != 4 {
-		t.Fatalf("records = %d, want 4 (one per attempt)", len(records))
-	}
-	// allRecords walks the JSONL chronologically (oldest first).
-	wantSources := []string{"quota", "sticky", "sticky", "force"}
-	for i, want := range wantSources {
-		rec := records[i]
-		if rec.Schedule == nil || rec.Schedule.Source != want {
-			t.Fatalf("attempt %d schedule = %+v, want source %q", i, rec.Schedule, want)
+	check := func(t *testing.T, records []requestlog.Record) {
+		t.Helper()
+		if len(records) != len(cases) {
+			t.Fatalf("got %d records, want one per request (%d)", len(records), len(cases))
+		}
+		for _, tc := range cases {
+			rec := recordContaining(t, records, tc.marker)
+			if rec.Schedule == nil || rec.Schedule.Source != tc.source || rec.Provider != tc.provider {
+				t.Fatalf("%s: got schedule=%+v provider=%q, want %s/%s", tc.marker, rec.Schedule, rec.Provider, tc.source, tc.provider)
+			}
 		}
 	}
+	check(t, records)
+
+	t.Run("cross-second", func(t *testing.T) {
+		// Replay the real records in submission order with the fresh request
+		// just before a second boundary. Only the timestamps are synthetic.
+		var rows []requestlog.Record
+		for i, tc := range cases {
+			rec := recordContaining(t, records, tc.marker)
+			rec.Ts = "2026-01-01T00:00:01Z"
+			if i == 0 {
+				rec.Ts = "2026-01-01T00:00:00Z"
+			}
+			rows = append(rows, rec)
+		}
+		dir := t.TempDir()
+		writeReqLog(t, dir, "requests-20260101.log", rows)
+		check(t, allRecords(t, dir))
+	})
 }
 
 // TestStickyOffOverrideComposition: x-mp-sticky: off makes the request pick
