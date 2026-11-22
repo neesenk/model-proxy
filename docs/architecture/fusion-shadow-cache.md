@@ -211,7 +211,8 @@ multi-MB body 曾把堆峰值顶到数 GB，字节封顶与置空 body 是它的
 **冷层归档**（`request_log.hot_retention`，默认 168h、`0` 禁用、restart-only）：sweep tick 在 retention
 删除与磁盘护栏之后，把滚出热窗的轮转 `.log`（mtime 基准）交给 logfile 的旁路压缩 worker（独立
 goroutine——压缩耗时不得阻塞写路径；owner/stop/wait/final flush 由 Logger 生命周期承担）。worker 以
-`X.log.zst.tmp` → rename `X.log.zst` → 删原文件的原子序列落盘（崩溃后 `.zst` 已在则只删原文件，幂等），
+`X.log.zst.tmp` → rename `X.log.zst` → 删原文件的原子序列落盘（崩溃后 `.zst` 已在则只删原文件，幂等；
+压缩失败时顺手清掉 `.zst.tmp`——否则源文件随后被护栏/retention 删走后，孤儿 tmp 不属于任何可删集合），
 完成即触发 OnChange 让 indexer 走现有「未认领消失文件删行」路径清索引行并按 session 失效缓存。
 `.zst` 后缀使 indexer 认领/reconcile/查询扫描三处 `.log` 精确匹配天然不认领——归档是纯离线数据
 （`zstd -d | jq`），没有在线读路径，查询与 Requests 页的可查窗口即热窗。retention/disk-guard/prune 的
