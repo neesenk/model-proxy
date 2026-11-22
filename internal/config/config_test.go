@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -824,4 +825,147 @@ func TestPricingConfigSourceURL_Precedence(t *testing.T) {
 			t.Errorf("default wrong: got %q, want %q", got, def)
 		}
 	})
+}
+
+// --- request_log.hot_retention: hot-window resolver + fail-closed cross-check ---
+
+func TestRequestLogHotRetentionDuration(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"", 168 * time.Hour},               // default 7d
+		{"0", 0},                            // disable archiving
+		{"48h", 48 * time.Hour},             // explicit
+		{"not-a-duration", 168 * time.Hour}, // malformed falls back
+	}
+	for _, tc := range cases {
+		got := RequestLogConfig{HotRetention: tc.raw}.HotRetentionDuration()
+		if got != tc.want {
+			t.Errorf("HotRetentionDuration(%q) = %v, want %v", tc.raw, got, tc.want)
+		}
+	}
+}
+
+func TestLoadRejectsHotRetentionNotInsideRetention(t *testing.T) {
+	// validate() rejects a provider-less document ("no providers configured")
+	// before any request_log rule runs, so the fixture carries one provider
+	// (the minimal scaffold TestPricingConfigDefaults uses).
+	base := "providers:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://example.com/api/v1\n" +
+		"request_log:\n  enabled: true\n  retention: %s\n  hot_retention: %s\n"
+	cases := []struct {
+		retention, hot, wantErr string
+	}{
+		{"720h", "168h", ""}, // ok: hot < retention
+		{"720h", "720h", "must be < request_log.retention"}, // boundary: equal is outside
+		{"720h", "1000h", "must be < request_log.retention"},
+		{"48h", "168h", "must be < request_log.retention"}, // default hot outside a short retention
+		{"0", "168h", ""}, // keep-forever retention: any hot ok
+		{"720h", "0", ""}, // archiving disabled: always ok
+	}
+	for _, tc := range cases {
+		_, err := LoadConfigFromBytes("config.yaml", []byte(fmt.Sprintf(base, tc.retention, tc.hot)))
+		if tc.wantErr == "" {
+			if err != nil {
+				t.Errorf("retention=%s hot=%s: unexpected error %v", tc.retention, tc.hot, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("retention=%s hot=%s: error = %v, want containing %q", tc.retention, tc.hot, err, tc.wantErr)
+		}
+	}
+}
+
+// hotRetentionLoadBase is the smallest document that reaches the request_log
+// rules: validate() rejects a provider-less document first.
+const hotRetentionLoadBase = "providers:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://example.com/api/v1\n" +
+	"request_log:\n  enabled: true\n%s"
+
+// TestLoadHotRetentionUnsetDefaultStillCrossChecked pins the adjudicated
+// fail-closed rule: an ABSENT hot_retention resolves to its 168h default and
+// that default takes part in the cross-check like a written value, so a
+// retention shorter than 7 days is rejected instead of silently shrinking the
+// hot window. The user never wrote the failing key, so the error must name the
+// default (likewise retention's 720h default when only hot_retention is set).
+// The loadable rows double as the yaml decode check (pitfalls #13): yaml.v3
+// drops unknown keys silently, so constructing Config directly proves nothing
+// about the `hot_retention:` key reaching the field.
+func TestLoadHotRetentionUnsetDefaultStillCrossChecked(t *testing.T) {
+	cases := []struct {
+		name    string
+		request string // request_log body appended to hotRetentionLoadBase
+		wantRaw string // decoded RequestLog.HotRetention for loadable rows
+		wantHot time.Duration
+		wantSub string // "" = must load; else a substring of the error
+	}{
+		{"both unset keep defaults", "", "", 168 * time.Hour, ""},
+		{"unset hot sits inside long retention", "  retention: 720h\n", "", 168 * time.Hour, ""},
+		{"unset hot with keep-forever retention", `  retention: "0"` + "\n", "", 168 * time.Hour, ""},
+		{"explicit hot decodes from yaml", "  retention: 720h\n  hot_retention: 48h\n", "48h", 48 * time.Hour, ""},
+		{"explicit zero hot decodes from yaml", "  hot_retention: 0\n", "0", 0, ""},
+		{"unset hot outside short retention", "  retention: 48h\n", "", 0,
+			"request_log.hot_retention (unset, default 168h) must be < request_log.retention (48h)"},
+		{"hot beyond the unset retention default", "  hot_retention: 1000h\n", "", 0,
+			"request_log.hot_retention (1000h) must be < request_log.retention (unset, default 720h)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadConfigFromBytes("config.yaml", []byte(fmt.Sprintf(hotRetentionLoadBase, tc.request)))
+			if tc.wantSub == "" {
+				if err != nil {
+					t.Fatalf("load: %v", err)
+				}
+				if cfg.RequestLog.HotRetention != tc.wantRaw {
+					t.Errorf("RequestLog.HotRetention = %q, want %q", cfg.RequestLog.HotRetention, tc.wantRaw)
+				}
+				if got := cfg.RequestLog.HotRetentionDuration(); got != tc.wantHot {
+					t.Errorf("HotRetentionDuration() = %v, want %v", got, tc.wantHot)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("load err = %v, want containing %q", err, tc.wantSub)
+			}
+		})
+	}
+}
+
+// TestLoadEffectiveRejectsHotRetentionNotInsideRetention: the daemon and the
+// Web config editor load through LoadConfigEffective (providers come from the
+// store, not the yaml), so the cross-check must sit on the validate() path the
+// two loaders share — a check private to LoadConfigFromBytes would let a Web
+// edit save a hot window outside retention. The conforming control proves the
+// rejection is the cross-check, not the provider swap.
+func TestLoadEffectiveRejectsHotRetentionNotInsideRetention(t *testing.T) {
+	const doc = "listen: 127.0.0.1:15721\nrequest_log:\n  retention: 720h\n  hot_retention: %s\n"
+	providers := map[string]Provider{"zhipu": {Provider: "zhipu", OpenAIBaseURL: "https://example.com/api/v1"}}
+	_, err := LoadConfigEffective("config.yaml", []byte(fmt.Sprintf(doc, "720h")), providers)
+	if err == nil || !strings.Contains(err.Error(), "must be < request_log.retention") {
+		t.Fatalf("LoadConfigEffective err = %v, want the hot-retention cross-check error", err)
+	}
+	cfg, err := LoadConfigEffective("config.yaml", []byte(fmt.Sprintf(doc, "168h")), providers)
+	if err != nil {
+		t.Fatalf("LoadConfigEffective (hot inside retention): %v", err)
+	}
+	if cfg.RequestLog.HotRetentionDuration() != 168*time.Hour {
+		t.Errorf("HotRetentionDuration() = %v, want 168h", cfg.RequestLog.HotRetentionDuration())
+	}
+}
+
+// TestLoadDurationErrorsPrecedeHotRetentionCrossCheck: the cross-check runs
+// after the duration checks on purpose. Both accessors fall back to their
+// defaults on a malformed value, so a cross-check that ran first would compare
+// against the fallback and blame a valid hot_retention for a retention typo
+// ("hot_retention (800h) must be < request_log.retention (30d)": 30d is not a
+// Go duration and never became 720h).
+func TestLoadDurationErrorsPrecedeHotRetentionCrossCheck(t *testing.T) {
+	_, err := LoadConfigFromBytes("config.yaml", []byte(fmt.Sprintf(hotRetentionLoadBase,
+		"  retention: 30d\n  hot_retention: 800h\n")))
+	if err == nil || !strings.Contains(err.Error(), `request_log.retention: invalid duration "30d"`) {
+		t.Fatalf("load err = %v, want the retention duration error", err)
+	}
+	if strings.Contains(err.Error(), "hot_retention") {
+		t.Errorf("load err = %v, want the retention typo reported before the cross-check", err)
+	}
 }

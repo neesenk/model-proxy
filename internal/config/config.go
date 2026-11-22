@@ -758,6 +758,13 @@ type RequestLogConfig struct {
 	MaxFileSize  int64  `yaml:"max_file_size"`
 	MaxBodyBytes int    `yaml:"max_body_bytes"`
 	Retention    string `yaml:"retention"`
+	// HotRetention is the hot window after which rotated files are
+	// zstd-archived (requests-*.log.zst, offline-only: indexed queries and
+	// the Requests page cover hot files only; decompress with
+	// `zstd -d < file.zst | jq`). Default "168h" (7 days); "0" keeps every
+	// file plain for its whole retention. Must be < retention (or retention
+	// "0" = keep forever); restart-only like the rest of the block.
+	HotRetention string `yaml:"hot_retention"`
 	// MCPSplit moves kind="mcp" records to a dedicated mcp- stream under
 	// MCPDir instead of mixing them into the requests- files.
 	MCPSplit bool   `yaml:"mcp_split"`
@@ -880,6 +887,19 @@ func (r RequestLogConfig) RetentionDuration() time.Duration {
 		return d
 	}
 	return 720 * time.Hour
+}
+
+// HotRetentionDuration returns the hot window after which rotated files are
+// zstd-archived, defaulting to 7 days. "0" or a zero duration keeps every
+// file plain for its whole retention (archiving disabled).
+func (r RequestLogConfig) HotRetentionDuration() time.Duration {
+	if r.HotRetention == "" {
+		return 168 * time.Hour
+	}
+	if d, err := time.ParseDuration(r.HotRetention); err == nil {
+		return d
+	}
+	return 168 * time.Hour
 }
 
 // CacheConfig configures the exact-match response cache.
@@ -2245,9 +2265,10 @@ func (c *Config) validateRouting() error {
 	// Duration strings (pitfalls #14): apart from fields whose contract
 	// explicitly allows "0" (retry_wait disables the cooldown wait;
 	// stream_keepalive disables the SSE heartbeat; stats / request_log
-	// retention "0" keeps history forever), a SET duration must
-	// parse and be positive — e.g. upstream_timeout: "0s" would silently
-	// remove the only timeout bound on upstream and shadow requests.
+	// retention "0" keeps history forever; request_log hot_retention "0"
+	// disables archiving), a SET duration must parse and be positive — e.g.
+	// upstream_timeout: "0s" would silently remove the only timeout bound on
+	// upstream and shadow requests.
 	durationChecks := []struct {
 		field     string
 		value     string
@@ -2267,6 +2288,7 @@ func (c *Config) validateRouting() error {
 		{"pricing.ttl", c.Pricing.TTL, false},
 		{"stats.retention", c.Stats.Retention, true},
 		{"request_log.retention", c.RequestLog.Retention, true},
+		{"request_log.hot_retention", c.RequestLog.HotRetention, true},
 	}
 	for _, check := range durationChecks {
 		if check.value == "" {
@@ -2282,6 +2304,33 @@ func (c *Config) validateRouting() error {
 				note = ` (or "0")`
 			}
 			return fmt.Errorf("%s: duration %q must be positive%s", check.field, check.value, note)
+		}
+	}
+	// The hot window must sit strictly inside total retention: an archive
+	// transition at/after the retention cutoff would compress files the
+	// retention sweep is about to delete. hot_retention "0" (archiving
+	// disabled) is always valid; retention "0" (keep forever) bounds
+	// nothing. An unset hot_retention takes its 168h default here on purpose
+	// (fail-closed over silently shrinking the window), so a retention
+	// shorter than the default is rejected until hot_retention is set
+	// explicitly. Runs after the duration checks, which is what makes both
+	// accessors trustworthy: each falls back to its default on a value the
+	// loop above already rejected.
+	if hot := c.RequestLog.HotRetentionDuration(); hot > 0 {
+		if retention := c.RequestLog.RetentionDuration(); retention > 0 && hot >= retention {
+			// An unset key fails the check through its default; name that
+			// default instead of showing empty parens for a key the user
+			// never wrote.
+			hotKey, retentionKey := c.RequestLog.HotRetention, c.RequestLog.Retention
+			if hotKey == "" {
+				hotKey = "unset, default 168h"
+			}
+			if retentionKey == "" {
+				retentionKey = "unset, default 720h"
+			}
+			return fmt.Errorf(
+				"request_log.hot_retention (%s) must be < request_log.retention (%s); use \"0\" to disable archiving",
+				hotKey, retentionKey)
 		}
 	}
 	return nil

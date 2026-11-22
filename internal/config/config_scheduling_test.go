@@ -177,8 +177,9 @@ func TestScheduling_DefaultsAndInvalid(t *testing.T) {
 // Regression (pitfalls #14): zero/negative durations used to pass validation
 // and flow into the runtime — upstream_timeout: "0s" disabled the ONLY
 // timeout bound on upstream and shadow requests. Only the fields whose
-// contract documents "0" (retry_wait, stats/request_log retention) may be
-// zero; everything else must parse and be positive.
+// contract documents "0" (retry_wait, stats/request_log retention,
+// request_log hot_retention) may be zero; everything else must parse and be
+// positive.
 func TestValidate_RejectsNonPositiveDurations(t *testing.T) {
 	base := func() *Config {
 		return &Config{
@@ -202,6 +203,12 @@ func TestValidate_RejectsNonPositiveDurations(t *testing.T) {
 		{"pricing.ttl", "-1h"},
 		{"stats.retention", "-720h"},
 		{"request_log.retention", "-1h"},
+		// hot_retention: a negative parses, and HotRetentionDuration() would
+		// hand it to the runtime as "archiving off"; a typo ("3d") would fall
+		// back to the 168h default. Both are silent window changes.
+		{"request_log.hot_retention", "-1h"},
+		{"request_log.hot_retention", "not-a-duration"},
+		{"request_log.hot_retention", "3d"},
 		{"scheduling.circuit_cooldown", "not-a-duration"},
 	} {
 		cfg := base()
@@ -232,6 +239,8 @@ func TestValidate_RejectsNonPositiveDurations(t *testing.T) {
 			cfg.Stats.Retention = field.value
 		case field.name == "request_log.retention":
 			cfg.RequestLog.Retention = field.value
+		case field.name == "request_log.hot_retention":
+			cfg.RequestLog.HotRetention = field.value
 		}
 		if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), field.name) {
 			t.Errorf("%s=%q: want validation error naming the field, got %v", field.name, field.value, err)
@@ -244,6 +253,7 @@ func TestValidate_RejectsNonPositiveDurations(t *testing.T) {
 		func(c *Config) { c.Scheduling.StreamKeepalive = "0" },
 		func(c *Config) { c.Stats.Retention = "0" },
 		func(c *Config) { c.RequestLog.Retention = "0" },
+		func(c *Config) { c.RequestLog.HotRetention = "0" },
 		func(c *Config) { c.Scheduling.UpstreamTimeout = "30m" },
 	} {
 		cfg := base()
