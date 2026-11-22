@@ -276,3 +276,34 @@ func TestIndexTickReconcilesOnChangeOrIdleBound(t *testing.T) {
 		t.Error("a second beat ran a pass although nothing changed since the notified one")
 	}
 }
+
+// TestReconcileDropsRowsWhenPlainFileZstdArchived: the archive transition
+// writes <name>.zst and removes the plain .log. The indexer must never
+// claim the .zst (suffix contract) and must evict the vanished plain
+// file's rows — the existing unclaimed-file deletion path — leaving the
+// archived ids a graceful Detail miss, not an error.
+func TestReconcileDropsRowsWhenPlainFileZstdArchived(t *testing.T) {
+	dir := t.TempDir()
+	active := filepath.Join(dir, "requests-20260730.log")
+	appendRecordLines(t, active,
+		Record{Ts: "2026-07-30T01:00:00Z", RequestID: "r1", SessionID: "s", Provider: "p", Status: 200},
+		Record{Ts: "2026-07-30T01:01:00Z", RequestID: "r2", SessionID: "s", Provider: "p", Status: 200},
+	)
+	indexer := newTestIndexer(t, dir)
+	mustReconcile(t, indexer)
+	assertIndexedFiles(t, indexer, map[string]string{
+		"r1": "requests-20260730.log",
+		"r2": "requests-20260730.log",
+	})
+	if err := os.WriteFile(active+".zst", []byte("compressed bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(active); err != nil {
+		t.Fatal(err)
+	}
+	mustReconcile(t, indexer)
+	assertIndexedFiles(t, indexer, map[string]string{})
+	if records, err := indexer.Detail("r1"); err != nil || len(records) != 0 {
+		t.Fatalf("Detail(r1) after archive = %+v, %v; want graceful empty", records, err)
+	}
+}

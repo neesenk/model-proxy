@@ -707,3 +707,23 @@ func TestQuerySummariesWithFacets(t *testing.T) {
 		t.Errorf("deepseek models = %v", facets.ProviderModels["deepseek"])
 	}
 }
+
+// TestQueryScanSkipsZstdArchives: the scan fallback matches the exact .log
+// suffix — a .zst archive (or its .tmp) is never opened, let alone parsed.
+func TestQueryScanSkipsZstdArchives(t *testing.T) {
+	dir := t.TempDir()
+	appendRecordLines(t, filepath.Join(dir, "requests-20260730.log"),
+		Record{Ts: "2026-07-30T01:00:00Z", RequestID: "r1", SessionID: "s", Provider: "p", Status: 200})
+	for _, name := range []string{"requests-20260729.log.zst", "requests-20260729.log.zst.tmp"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("not json, must never be read"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	records, err := QueryRecordsIn(dir, "requests-", Filter{})
+	if err != nil {
+		t.Fatalf("QueryRecordsIn: %v", err)
+	}
+	if len(records) != 1 || records[0].RequestID != "r1" {
+		t.Fatalf("records = %+v, want exactly r1 from the plain .log", records)
+	}
+}
