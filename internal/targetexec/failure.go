@@ -37,10 +37,9 @@ func IsContextOverflow(status int, peek []byte) bool {
 var modelDeniedMarkers = [][]byte{
 	[]byte("model not found"),
 	// shopee gateway: {"retcode":40403,"message":"Model not supported by this endpoint"}
-	[]byte("not supported by this endpoint"),
+	[]byte("model not supported by this endpoint"),
 	[]byte("model_not_found"),
 	[]byte("model does not exist"),
-	[]byte("does not exist"),
 	[]byte("no such model"),
 	[]byte("model is not available"),
 	[]byte("model unavailable"),
@@ -57,6 +56,9 @@ var modelDeniedMarkers = [][]byte{
 	[]byte("没有该模型的访问权限"),
 }
 
+// A named model may appear between "model" and "does not exist".
+var missingModel = regexp.MustCompile(`\bmodel ['"]?[a-z0-9_./:-]+['"]? does not exist\b`)
+
 func IsModelDenied(status int, peek []byte) bool {
 	if status != 400 && status != 403 || len(peek) == 0 {
 		return false
@@ -67,7 +69,31 @@ func IsModelDenied(status int, peek []byte) bool {
 			return true
 		}
 	}
+	return missingModel.Match(lower)
+}
+
+// Only an account-scoped machine code in the error envelope supports applying
+// the existing auth circuit to every model on this resolved account.
+func accountDisabled(body []byte) bool {
+	var envelope struct {
+		Error struct{ Code string } `json:"error"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return false
+	}
+	switch envelope.Error.Code {
+	case "account_disabled", "account_deactivated", "account_suspended":
+		return true
+	}
 	return false
+}
+
+// Match the stock nginx denial document observed in the incident. A server
+// banner or an HTML Content-Type alone says nothing about the refusal.
+var nginxForbidden = regexp.MustCompile(`(?i)^\s*<html>\s*<head><title>403 Forbidden</title></head>\s*<body>\s*<center><h1>403 Forbidden</h1></center>\s*<hr><center>nginx(?:/[0-9.]+)?</center>\s*</body>\s*</html>\s*$`)
+
+func gatewayRefused(header http.Header, body []byte) bool {
+	return strings.EqualFold(header.Get("Cf-Mitigated"), "challenge") || nginxForbidden.Match(body)
 }
 
 var (

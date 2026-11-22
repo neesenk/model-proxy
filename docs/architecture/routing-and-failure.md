@@ -310,8 +310,15 @@ body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`
   前的任何阻塞读都会吃掉心跳窗口（keepalive 用例钉住）。声明 JSON 却以 HTML 开头的 body 也
   被此臂捕获。
 
-attempt 腿的诊断只带状态与页面标题（`upstream answered 200 with an HTML page: <title>`），
+attempt 腿的诊断只带状态与页面标题（`upstream answered <status> with an HTML page: <title>`），
 不落页面原文。
+
+**普通转发的 403 归因**：先沿用配额耗尽和模型拒绝的分类。结构化错误的 `error.code` 为
+`account_disabled`、`account_deactivated` 或 `account_suspended` 时，按当前解析到的账号
+记录一次认证失败并 failover，熔断门槛同 401。标准 nginx 403 文档或带
+`Cf-Mitigated: challenge` 的拒绝响应，有下一候选就释放半开槽并换目标，腿记录 403
+和固定原因；最后一个候选保留原始 403。单次网关拒绝不累计账号或模型失败。
+只有 HTML 类型、标题或笼统权限提示时沿用普通 4xx 语义。
 
 ## 内容性拒绝不熔断
 

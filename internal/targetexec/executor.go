@@ -313,6 +313,18 @@ func (executor Executor) Execute(attempt Attempt) Result {
 					executor.failover(target)
 					return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: peek}
 				}
+			} else if response.StatusCode == http.StatusForbidden {
+				if accountDisabled(peek) {
+					response.Body.Close()
+					executor.failure(target, false) // Auth failure, like an exhausted 401.
+					return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: []byte("upstream denied the account")}
+				}
+				if !policy.LastTarget && gatewayRefused(response.Header, peek) {
+					response.Body.Close()
+					executor.release(target.Provider)
+					executor.failover(target)
+					return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: []byte("upstream gateway refused the request")}
+				}
 			}
 			if requestShapeStatus(response.StatusCode) && !strippedParam {
 				if parameter, ok := ParseUnsupportedParam(peek); ok {
@@ -378,12 +390,12 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/html") {
 				peek := peekResponseBody(response, 2<<10)
 				executor.fakeAPIReply(target, plan, peek)
-				return Result{Outcome: OutcomeFailedHard, AttemptStatus: http.StatusBadGateway, AttemptBody: fakeAPIReplyBody(peek)}
+				return Result{Outcome: OutcomeFailedHard, AttemptStatus: http.StatusBadGateway, AttemptBody: fakeAPIReplyBody(response.StatusCode, peek)}
 			}
 			if !clientWantsStream {
 				if head := peekHead(response, 64); IsFakeAPIReply("", head) {
 					executor.fakeAPIReply(target, plan, head)
-					return Result{Outcome: OutcomeFailedHard, AttemptStatus: http.StatusBadGateway, AttemptBody: fakeAPIReplyBody(head)}
+					return Result{Outcome: OutcomeFailedHard, AttemptStatus: http.StatusBadGateway, AttemptBody: fakeAPIReplyBody(response.StatusCode, head)}
 				}
 			}
 		}
@@ -886,12 +898,12 @@ func (executor Executor) fakeAPIReply(target configdomain.RouteTarget, plan Plan
 // fakeAPIReplyBody builds the bounded diagnostic carried on the failover leg
 // (request-log attempt row / terminal error): status + page title, never the
 // page itself.
-func fakeAPIReplyBody(peek []byte) []byte {
+func fakeAPIReplyBody(status int, peek []byte) []byte {
 	title := HTMLTitle(peek)
 	if title == "" {
 		title = "html document"
 	}
-	return []byte("upstream answered 200 with an HTML page: " + title)
+	return []byte(fmt.Sprintf("upstream answered %d with an HTML page: %s", status, title))
 }
 
 func (executor Executor) rateLimited(target configdomain.RouteTarget) {
