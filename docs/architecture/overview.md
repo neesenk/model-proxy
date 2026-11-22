@@ -581,7 +581,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/account → accounts, cli/framework, cli/serve, config, display, login, providerbuild`（`logout`）；
 - `cli/admin → cli/framework, config, daemonctl, display`（`pin`/`unpin`/`unfreeze`/`freeze`）；
 - `cli/guard → appapi, cli/framework, config, daemonctl, display`（`guard blocks`/`guard unblock`）；
-- `cli/prune → cli/framework, config, display, observe/logfile, observe/requestlog`（`prune`：一次性 request log 清理，mtime 语义同 retention sweep）；
+- `cli/prune → cli/framework, config, display, observe/logfile, observe/requestlog`（`prune`：一次性 request log 清理，时龄语义同 retention sweep——`.log` 按 mtime、`.zst` 归档按文件名日戳）；
 - `cli/audit → cli/framework, config, observe/seclog`（`audit`）；
 - `cli/clicommon → appapi, daemonctl, display`；
 - `cli/clitest → accounts`（纯测试支撑：子进程 harness 与共享 fixture，生产代码不得依赖）；

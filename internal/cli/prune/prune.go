@@ -1,7 +1,9 @@
 // Package prune owns the `prune` command: a ONE-SHOT request-log cleanup that
 // keeps only the last N days of log files. It deletes rotated requests-/mcp-
-// files older than the window in both request-log directories (mtime
-// semantics, same as the daemon's retention sweep); the active (today's)
+// files and their .zst archives older than the window in both request-log
+// directories (age semantics same as the daemon's retention sweep: a plain
+// .log by its mtime, a .zst archive by the YYYYMMDD day stamp its name
+// carries — an archive's mtime is compression time); the active (today's)
 // files and index.db are never touched, request_log.retention is neither read
 // nor changed, and the daemon's automatic sweep is unaffected. The trailing
 // index stays consistent on its own: the daemon's reconcile (or the next

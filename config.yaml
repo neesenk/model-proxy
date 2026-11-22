@@ -180,6 +180,11 @@ request_log:
   max_file_size: 1073741824 # 1G per file (rotate on size or day)
   max_body_bytes: 5242880 # 5MB cap per body (truncates past it)
   retention: 720h # 30d; delete rotated files older than this; 0 = forever
+  # Hot window: rotated files older than this are zstd-archived
+  # (<name>.log.zst, offline-only — the Requests page, /api/requests and the
+  # index cover hot files only; read an archive with `zstd -d < f.zst | jq`).
+  # Must be < retention; "0" disables archiving. Restart-only. Default 168h.
+  hot_retention: 168h
   # Disk-space guard on top of retention: when the volume holding the log dir
   # drops below min_free_bytes or reaches max_used_percent, the hourly sweep
   # deletes this block's rotated files oldest-first until the condition clears
