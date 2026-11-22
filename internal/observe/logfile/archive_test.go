@@ -376,7 +376,9 @@ func TestShutdownAbandonsQueuedButFinishesInFlight(t *testing.T) {
 // TestSweepDeletesExpiredZstdByNameDateNotMtime pins the retention rule for
 // archives: an expired .zst is deleted on the day stamp its name carries, and
 // a .zst inside the window survives however old its mtime looks — compression
-// time says nothing about content age.
+// time says nothing about content age. Two neighbours that look deletable are
+// not touched: a .zst with no day stamp in its name has no age to compare,
+// and a .zst.tmp is an archive still being written.
 func TestSweepDeletesExpiredZstdByNameDateNotMtime(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
@@ -396,6 +398,18 @@ func TestSweepDeletesExpiredZstdByNameDateNotMtime(t *testing.T) {
 	if err := os.Chtimes(fresh, now.Add(-100*24*time.Hour), now.Add(-100*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
+	// No day stamp in the name, and a day already past retention still being
+	// compressed: both must be kept whatever their mtime says.
+	undatable := filepath.Join(dir, "requests-notadate.log.zst")
+	inFlight := filepath.Join(dir, "requests-20261020.log.zst.tmp")
+	for _, p := range []string{undatable, inFlight} {
+		if err := os.WriteFile(p, []byte("z"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, now.Add(-100*24*time.Hour), now.Add(-100*24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	l := New(Options{Directory: dir, FilePrefix: "requests-", Retention: 30 * 24 * time.Hour})
 	l.sweep(now, "")
 	if _, err := os.Stat(expired); !os.IsNotExist(err) {
@@ -403,6 +417,12 @@ func TestSweepDeletesExpiredZstdByNameDateNotMtime(t *testing.T) {
 	}
 	if _, err := os.Stat(fresh); err != nil {
 		t.Fatalf("fresh .zst deleted: %v", err)
+	}
+	if _, err := os.Stat(undatable); err != nil {
+		t.Fatalf(".zst without a day stamp deleted: %v", err)
+	}
+	if _, err := os.Stat(inFlight); err != nil {
+		t.Fatalf("in-flight .zst.tmp deleted: %v", err)
 	}
 }
 
@@ -440,7 +460,8 @@ func TestGuardDeletesZstdOldestFirst(t *testing.T) {
 
 // TestPrunableListsZstdByArchiveDay pins that the one-shot cleanup lists an
 // expired archive — by its name's day stamp, not by a fresh compression mtime
-// — and nothing inside the window.
+// — and nothing else: neither a file inside the window, nor a .zst whose name
+// carries no day stamp however old its mtime looks.
 func TestPrunableListsZstdByArchiveDay(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
@@ -455,11 +476,44 @@ func TestPrunableListsZstdByArchiveDay(t *testing.T) {
 	if err := os.WriteFile(logf, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// No day stamp in the name, mtime older than the cutoff.
+	undatable := filepath.Join(dir, "requests-notadate.log.zst")
+	if err := os.WriteFile(undatable, []byte("z"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(undatable, now.Add(-100*24*time.Hour), now.Add(-100*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 	targets, err := Prunable(dir, "requests-", now.Add(-30*24*time.Hour), now)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Exactly one target: this rejects the .log inside the window and the .zst
+	// without a day stamp alike.
 	if len(targets) != 1 || targets[0].Name != "requests-20261020.log.zst" {
 		t.Fatalf("targets = %+v, want only the old .zst", targets)
+	}
+}
+
+// TestGuardReclaimsZstdWithoutDayStamp pins the other half of the undatable
+// rule: sweep and Prunable keep a .zst whose name carries no day stamp (the
+// sweep and Prunable tests in this file pin that), so the disk guard is the
+// only automated path that can ever reclaim it. The guard lists every archive
+// of the stream by name order, dated or not — the treatment an oddly named
+// prefix*.log already gets.
+func TestGuardReclaimsZstdWithoutDayStamp(t *testing.T) {
+	dir := t.TempDir()
+	stray := filepath.Join(dir, "requests-notadate.log.zst")
+	if err := os.WriteFile(stray, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := New(Options{Directory: dir, FilePrefix: "requests-", MinFreeBytes: 1, MaxUsedPercent: 0})
+	// free=0 < 1 triggers; the 4 freed bytes clear the floor.
+	l.freeSpace = func(string) (free, total int64, err error) {
+		return 0, 0, nil
+	}
+	l.guard(filepath.Join(dir, "requests-20261122.log"))
+	if _, err := os.Stat(stray); !os.IsNotExist(err) {
+		t.Fatalf("guard left the .zst without a day stamp in place: %v", err)
 	}
 }
