@@ -360,41 +360,51 @@ func TestExecutor403PlainBodyCommits(t *testing.T) {
 	}
 }
 
-// A 403 whose body is an HTML page is a gateway/WAF block verdict, not an API
-// envelope (the compass gateway answered every shopee AND aqp dispatch with the
-// same nginx "403 Forbidden" page for ~10 hours on 2026-11-17: the block hit
-// the gateway, not any one account). Committing it kept feeding the blocked
-// gateway — the same provider-level fact as the 2xx HTML fake reply, so it must
-// take the same circuit-breaker tick + failover path (never RecordModelFailure,
-// never a model lock), keeping the observed 403 status with a title-only
-// diagnostic on the leg. Both detection arms: Content-Type text/html, and an
-// HTML-document body prefix under a JSON content type.
-func TestExecutor403HTMLGatewayBlockFailsOver(t *testing.T) {
-	nginxBlock := "<html>\n<head><title>403 Forbidden</title></head>\n<body>\n<center><h1>403 Forbidden</h1></center>\n<hr><center>nginx</center>\n</body>\n</html>\n"
+func TestExecutor403FailureScope(t *testing.T) {
+	const nginx = "<html>\n<head><title>403 Forbidden</title></head>\n<body>\n<center><h1>403 Forbidden</h1></center>\n<hr><center>nginx</center>\n</body>\n</html>"
+	const model = "<html><body>no access to model</body></html>"
+	const gatewayDiagnostic = "upstream gateway refused the request"
 	cases := []struct {
-		name        string
-		contentType string
+		name, body, contentType, challenge string
+		last, commit                       bool
+		accountFailures, modelFailures     int
+		evidence                           string
 	}{
-		{"content type html", "text/html"},
-		{"html body under json content type", "application/json"},
+		{name: "stock gateway", body: nginx, contentType: "text/html", evidence: gatewayDiagnostic},
+		{name: "gateway with wrong MIME", body: nginx, contentType: "application/json", evidence: gatewayDiagnostic},
+		{name: "last gateway", body: nginx, last: true, commit: true},
+		{name: "explicit challenge", body: "browser check", challenge: "challenge", evidence: gatewayDiagnostic},
+		{name: "model denial takes priority", body: model, challenge: "challenge", modelFailures: 1, evidence: model},
+		{name: "last model denial", body: model, last: true, commit: true, modelFailures: 1},
+		{name: "account disabled", body: `{"error":{"code":"account_disabled"}}`, accountFailures: 1, evidence: "upstream denied the account"},
+		{name: "last account suspended", body: `{"error":{"code":"account_suspended"}}`, last: true, accountFailures: 1, evidence: "upstream denied the account"},
+		{name: "generic HTML", body: "<html><title>403 Forbidden</title></html>", contentType: "text/html", commit: true},
+		{name: "unknown resource", body: "<html>resource does not exist</html>", commit: true},
+		{name: "incidental account code", body: `{"metadata":{"code":"account_disabled"}}`, commit: true},
+		{name: "endpoint permission", body: `{"error":{"code":"permission_denied","message":"operation not supported by this endpoint"}}`, commit: true},
 	}
 	for _, tc := range cases {
-		provider := &executorTestProvider{}
-		attempt, writer := testAttempt(provider, `{}`, Policy{LastTarget: true})
-		response := testResponse(403, nginxBlock)
-		response.Header.Set("Content-Type", tc.contentType)
-		state := &executorState{}
-		effects := &executorEffects{}
-		result := (Executor{Client: &sequenceDoer{responses: []*http.Response{response}}, State: state, Effects: effects}).Execute(attempt)
-		if result.Committed || result.Outcome != OutcomeFailedHard || result.AttemptStatus != http.StatusForbidden ||
-			state.failures != 1 || state.modelFailures != 0 || state.rateLimits != 0 ||
-			effects.failures != 1 || effects.failovers != 1 || effects.commits != 0 ||
-			writer.Body.Len() != 0 ||
-			!bytes.Contains(result.AttemptBody, []byte("403 Forbidden")) ||
-			bytes.Contains(result.AttemptBody, []byte("<html")) {
-			t.Fatalf("%s: result=%+v state=%+v effects=%+v written=%q body=%q",
-				tc.name, result, state, effects, writer.Body.String(), result.AttemptBody)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &executorTestProvider{}
+			attempt, writer := testAttempt(provider, "{}", Policy{LastTarget: tc.last})
+			resp := testResponse(http.StatusForbidden, tc.body)
+			resp.Header.Set("Content-Type", tc.contentType)
+			resp.Header.Set("Cf-Mitigated", tc.challenge)
+			state, effects := &executorState{}, &executorEffects{}
+			result := (Executor{Client: &sequenceDoer{responses: []*http.Response{resp}}, State: state, Effects: effects}).Execute(attempt)
+			if state.failures != tc.accountFailures || state.modelFailures != tc.modelFailures || state.rateLimits != 0 || effects.failures != 0 || provider.refreshes != 0 {
+				t.Fatalf("state=%+v effects=%+v refreshes=%d", state, effects, provider.refreshes)
+			}
+			if tc.commit {
+				if !result.Committed || writer.Code != 403 || writer.Body.String() != tc.body || effects.commits != 1 || effects.failovers != 0 || state.releases != 1 {
+					t.Fatalf("commit=%v status=%d body=%q effects=%+v releases=%d", result.Committed, writer.Code, writer.Body.String(), effects, state.releases)
+				}
+				return
+			}
+			if result.Committed || result.Outcome != OutcomeFailedHard || result.AttemptStatus != 403 || string(result.AttemptBody) != tc.evidence || effects.failovers != 1 || effects.commits != 0 || writer.Body.Len() != 0 || state.releases != 1-tc.accountFailures {
+				t.Fatalf("result=%+v effects=%+v releases=%d", result, effects, state.releases)
+			}
+		})
 	}
 }
 

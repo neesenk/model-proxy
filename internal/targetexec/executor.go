@@ -281,22 +281,6 @@ func (executor Executor) Execute(attempt Attempt) Result {
 					executor.rateLimited(target)
 					return Result{Outcome: OutcomeRateLimited}
 				}
-				// A 403 whose response is an HTML page is a gateway/WAF block,
-				// not an API envelope: the page answers dispatch itself, so the
-				// block is provider-level (2026-11-17: the compass gateway's
-				// nginx "403 Forbidden" page hit every shopee AND aqp account
-				// alike for ~10h; committing each one kept feeding the blocked
-				// gateway with no cooldown and no failover). Same accounting as
-				// the 2xx HTML fake reply — circuit tick + failure metric +
-				// failover, never RecordModelFailure — and the leg keeps the
-				// observed 403 with a title-only diagnostic, never the page.
-				if response.StatusCode == http.StatusForbidden && IsFakeAPIReply(response.Header.Get("Content-Type"), peek) {
-					response.Body.Close()
-					logx.Warnf("[proto=%s provider=%s] 403 answered an HTML page (%q) — gateway block, failing over with cooldown accounting",
-						plan.ClientProtocol(), target.Provider, HTMLTitle(peek))
-					executor.failure(target, true)
-					return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: fakeAPIReplyBody(response.StatusCode, peek)}
-				}
 			}
 			if response.StatusCode == http.StatusRequestEntityTooLarge && !retriedImages {
 				if smaller, changed := protocol.ShrinkImages(body, 1<<20, 2048); changed {
@@ -328,6 +312,18 @@ func (executor Executor) Execute(attempt Attempt) Result {
 					executor.release(target.Provider)
 					executor.failover(target)
 					return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: peek}
+				}
+			} else if response.StatusCode == http.StatusForbidden {
+				if accountDisabled(peek) {
+					response.Body.Close()
+					executor.failure(target, false) // Auth failure, like an exhausted 401.
+					return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: []byte("upstream denied the account")}
+				}
+				if !policy.LastTarget && gatewayRefused(response.Header, peek) {
+					response.Body.Close()
+					executor.release(target.Provider)
+					executor.failover(target)
+					return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: []byte("upstream gateway refused the request")}
 				}
 			}
 			if requestShapeStatus(response.StatusCode) && !strippedParam {
