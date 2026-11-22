@@ -30,6 +30,9 @@ func isZstdFile(name, prefix string) bool {
 // carries. A .zst's mtime is compression time, not content age, so every
 // age check on archives reads the name instead.
 func archiveDay(name, prefix string) (time.Time, bool) {
+	if len(name) < len(prefix) {
+		return time.Time{}, false
+	}
 	rest := name[len(prefix):]
 	if len(rest) < 8 {
 		return time.Time{}, false

@@ -305,8 +305,11 @@ func (l *Logger) write(writer *Writer, encode EncodeFunc, now time.Time) {
 	l.changed()
 }
 
-// sweep removes rotated files older than the retention window. The active
-// file is never removed. Retention <= 0 disables sweeping.
+// sweep removes rotated files older than the retention window — a plain .log
+// by its mtime, a .zst archive by the day stamp its name carries — and
+// nothing else: an archive in the making (.zst.tmp) and a .zst without a
+// readable day stamp are left alone. The active file is never removed.
+// Retention <= 0 disables sweeping.
 func (l *Logger) sweep(now time.Time, activePath string) {
 	if l.opts.Retention <= 0 {
 		return
@@ -318,20 +321,33 @@ func (l *Logger) sweep(now time.Time, activePath string) {
 		return
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || !isLogFile(entry.Name(), l.opts.FilePrefix) {
+		if entry.IsDir() {
 			continue
 		}
-		path := filepath.Join(l.opts.Directory, entry.Name())
+		name := entry.Name()
+		path := filepath.Join(l.opts.Directory, name)
 		if activePath != "" && path == activePath {
 			continue
 		}
-		info, err := entry.Info()
-		if err != nil {
+		var expired bool
+		switch {
+		case isLogFile(name, l.opts.FilePrefix):
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			expired = info.ModTime().Before(cutoff)
+		case isZstdFile(name, l.opts.FilePrefix):
+			// A .zst's mtime is compression time, not content age.
+			if day, ok := archiveDay(name, l.opts.FilePrefix); ok {
+				expired = day.Before(cutoff)
+			}
+		default:
 			continue
 		}
-		if info.ModTime().Before(cutoff) {
+		if expired {
 			if err := os.Remove(path); err != nil {
-				logx.Warnf("[%s] sweep remove %s: %v", l.opts.Tag, entry.Name(), err)
+				logx.Warnf("[%s] sweep remove %s: %v", l.opts.Tag, name, err)
 			}
 		}
 	}
@@ -396,10 +412,10 @@ func (l *Logger) guardTriggered(free, total int64) bool {
 	return false
 }
 
-// rotatedFiles lists the stream's rotated log files (prefix*.log except the
-// active file), oldest first by name — the deletion candidates of the disk
-// guard. Day/sequence-stamped rotation names sort chronologically, the same
-// ordering Prunable relies on.
+// rotatedFiles lists the stream's rotated log files (prefix*.log and
+// prefix*.log.zst except the active file), oldest first by name — the
+// deletion candidates of the disk guard. Day/sequence-stamped rotation names
+// sort chronologically, the same ordering Prunable relies on.
 func rotatedFiles(dir, filePrefix, activeName string) ([]PruneTarget, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -408,7 +424,7 @@ func rotatedFiles(dir, filePrefix, activeName string) ([]PruneTarget, error) {
 	var targets []PruneTarget
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || !isLogFile(name, filePrefix) || name == activeName {
+		if entry.IsDir() || !(isLogFile(name, filePrefix) || isZstdFile(name, filePrefix)) || name == activeName {
 			continue
 		}
 		info, err := entry.Info()
@@ -445,11 +461,13 @@ type PruneTarget struct {
 	Size int64
 }
 
-// Prunable returns the rotated log files in dir whose mtime is before cutoff,
-// oldest first — the candidate set of a one-shot cleanup. It deletes nothing
-// and applies the same invariants as the retention sweep: only files matching
-// prefix*.log are considered, the active file (prefix + today's date) is never
-// listed, and unrelated entries (index.db, other streams) are ignored.
+// Prunable returns the rotated log files and .zst archives in dir that are
+// older than cutoff — a .log by its mtime, a .zst by the day stamp its name
+// carries — oldest first: the candidate set of a one-shot cleanup. It deletes
+// nothing and applies the same invariants as the retention sweep: only files
+// matching prefix*.log and prefix*.log.zst are considered, the active file
+// (prefix + today's date) is never listed, and unrelated entries (index.db,
+// other streams) are ignored.
 func Prunable(dir, filePrefix string, cutoff, now time.Time) ([]PruneTarget, error) {
 	activeName := filePrefix + now.Format(dayFileLayout) + fileExtension
 	entries, err := os.ReadDir(dir)
@@ -459,16 +477,33 @@ func Prunable(dir, filePrefix string, cutoff, now time.Time) ([]PruneTarget, err
 	var targets []PruneTarget
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || !isLogFile(name, filePrefix) || name == activeName {
+		if entry.IsDir() || !(isLogFile(name, filePrefix) || isZstdFile(name, filePrefix)) || name == activeName {
+			continue
+		}
+		var aged bool
+		switch {
+		case isLogFile(name, filePrefix):
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			aged = info.ModTime().Before(cutoff)
+		case isZstdFile(name, filePrefix):
+			// A .zst's mtime is compression time, not content age.
+			if day, ok := archiveDay(name, filePrefix); ok {
+				aged = day.Before(cutoff)
+			}
+		default:
+			continue
+		}
+		if !aged {
 			continue
 		}
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
-		if info.ModTime().Before(cutoff) {
-			targets = append(targets, PruneTarget{Name: name, Size: info.Size()})
-		}
+		targets = append(targets, PruneTarget{Name: name, Size: info.Size()})
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
 	return targets, nil

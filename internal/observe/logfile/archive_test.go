@@ -229,6 +229,7 @@ func TestArchiveDayReadsTheNameStamp(t *testing.T) {
 	}{
 		{"requests-20261101.log.zst", november1, true},
 		{"requests-20261101--010000-1.log.zst", november1, true},
+		{"req", time.Time{}, false},                       // shorter than the prefix
 		{"requests-.zst", time.Time{}, false},             // 4 chars after the prefix
 		{"requests-202.zst", time.Time{}, false},          // 7 chars after the prefix
 		{"requests-archive.log.zst", time.Time{}, false},  // not a date stamp
@@ -369,5 +370,96 @@ func TestShutdownAbandonsQueuedButFinishesInFlight(t *testing.T) {
 				t.Fatalf("round %d: queued offer %s was started at shutdown, want it left plain: %v", round, filepath.Base(p), err)
 			}
 		}
+	}
+}
+
+// TestSweepDeletesExpiredZstdByNameDateNotMtime pins the retention rule for
+// archives: an expired .zst is deleted on the day stamp its name carries, and
+// a .zst inside the window survives however old its mtime looks — compression
+// time says nothing about content age.
+func TestSweepDeletesExpiredZstdByNameDateNotMtime(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	// Name-day old, mtime fresh (compressed recently): must be deleted.
+	expired := filepath.Join(dir, "requests-20261020.log.zst")
+	if err := os.WriteFile(expired, []byte("z"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(expired, now, now); err != nil {
+		t.Fatal(err)
+	}
+	// Name-day young, mtime ancient: must be kept.
+	fresh := filepath.Join(dir, "requests-20261121.log.zst")
+	if err := os.WriteFile(fresh, []byte("z"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(fresh, now.Add(-100*24*time.Hour), now.Add(-100*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	l := New(Options{Directory: dir, FilePrefix: "requests-", Retention: 30 * 24 * time.Hour})
+	l.sweep(now, "")
+	if _, err := os.Stat(expired); !os.IsNotExist(err) {
+		t.Fatalf("expired .zst kept: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("fresh .zst deleted: %v", err)
+	}
+}
+
+// TestGuardDeletesZstdOldestFirst pins that archives belong to the disk
+// guard's deletable set and share its oldest-first-by-name order: the oldest
+// entry goes whether it is a .zst or a .log, and the pass stops once the
+// floor is met.
+func TestGuardDeletesZstdOldestFirst(t *testing.T) {
+	dir := t.TempDir()
+	young := filepath.Join(dir, "requests-20261121.log")
+	oldZ := filepath.Join(dir, "requests-20261101.log.zst")
+	for _, p := range []string{young, oldZ} {
+		if err := os.WriteFile(p, []byte("data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l := New(Options{
+		Directory: dir, FilePrefix: "requests-",
+		MinFreeBytes: 4, MaxUsedPercent: 0,
+	})
+	// free=0 < 4 triggers; the guard deletes oldest-first by name, so the
+	// 20261101 .zst goes before the 20261121 .log, and the 4 freed bytes
+	// project free to 4 — no longer below the floor — stopping the pass.
+	l.freeSpace = func(string) (free, total int64, err error) {
+		return 0, 0, nil
+	}
+	l.guard(filepath.Join(dir, "requests-20261122.log"))
+	if _, err := os.Stat(oldZ); !os.IsNotExist(err) {
+		t.Fatalf("guard did not delete the oldest .zst: %v", err)
+	}
+	if _, err := os.Stat(young); err != nil {
+		t.Fatalf("guard deleted past the trigger: %v", err)
+	}
+}
+
+// TestPrunableListsZstdByArchiveDay pins that the one-shot cleanup lists an
+// expired archive — by its name's day stamp, not by a fresh compression mtime
+// — and nothing inside the window.
+func TestPrunableListsZstdByArchiveDay(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	z := filepath.Join(dir, "requests-20261020.log.zst")
+	if err := os.WriteFile(z, []byte("z"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(z, now, now); err != nil { // fresh mtime, old name-day
+		t.Fatal(err)
+	}
+	logf := filepath.Join(dir, "requests-20261121.log")
+	if err := os.WriteFile(logf, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := Prunable(dir, "requests-", now.Add(-30*24*time.Hour), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].Name != "requests-20261020.log.zst" {
+		t.Fatalf("targets = %+v, want only the old .zst", targets)
 	}
 }
