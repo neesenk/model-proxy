@@ -363,6 +363,7 @@ type ConfigRequestLog struct {
 	MaxFileSize  int64  `json:"max_file_size"`
 	MaxBodyBytes int    `json:"max_body_bytes"`
 	Retention    string `json:"retention"`
+	HotRetention string `json:"hot_retention"`
 	MCPSplit     bool   `json:"mcp_split"`
 	MCPDir       string `json:"mcp_dir"`
 }

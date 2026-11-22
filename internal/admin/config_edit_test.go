@@ -647,6 +647,7 @@ func TestEditConfigScalarBlocks(t *testing.T) {
 			"dir":           "~/requests",
 			"max_file_size": float64(1073741824),
 			"retention":     "720h",
+			"hot_retention": "120h",
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -666,7 +667,7 @@ func TestEditConfigScalarBlocks(t *testing.T) {
 	content := readConfig(t, path)
 	for _, want := range []string{
 		"request_log:", "enabled: true", "dir: ~/requests",
-		"max_file_size: 1073741824", "retention: 720h",
+		"max_file_size: 1073741824", "retention: 720h", "hot_retention: 120h",
 		"stats:", "retention: 720h",
 		"cache:", "enabled: false", "ttl: 60m", "max_entries: 6000",
 	} {

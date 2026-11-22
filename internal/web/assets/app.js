@@ -8194,6 +8194,10 @@ const SETTINGS_GROUPS = [
         help: 'Delete rotated files older than this (30d). 0 keeps them forever. The active file is never deleted.',
       },
       {
+        key: 'hot_retention', label: 'hot_retention', type: 'text', def: '168h',
+        help: 'Hot window: rotated files older than this are zstd-archived (<name>.log.zst, offline-only — read with zstd -d | jq). The Requests page covers hot files only. Must be < retention; 0 disables archiving.',
+      },
+      {
         key: 'mcp_split', label: 'mcp_split', type: 'checkbox', def: 'false',
         help: 'Route MCP gateway exchanges (kind="mcp") to their own mcp-*.log stream under mcp_dir instead of mixing them into the LLM request log. The Requests page goes back to LLM-only traffic; /api/requests?kind=mcp reads the split stream.',
       },

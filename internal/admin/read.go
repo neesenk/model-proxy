@@ -1236,6 +1236,7 @@ func configSettings(config *configdomain.Config) appapi.ConfigSettings {
 			MaxFileSize:  config.RequestLog.MaxFileSize,
 			MaxBodyBytes: config.RequestLog.MaxBodyBytes,
 			Retention:    config.RequestLog.Retention,
+			HotRetention: config.RequestLog.HotRetention,
 			MCPSplit:     config.RequestLog.MCPSplit,
 			MCPDir:       config.RequestLog.MCPDir,
 		},
