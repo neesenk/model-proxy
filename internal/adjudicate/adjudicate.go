@@ -201,8 +201,8 @@ type Service struct {
 	// bytes — the judge never re-litigates an operator decision.
 	allowedContent *allowedContentStore
 
-	stop chan struct{}
-	done chan struct{}
+	cancelWorkers context.CancelFunc
+	done          chan struct{}
 }
 
 // New builds the service and loads persisted state (best-effort: a missing
@@ -228,8 +228,6 @@ func New(opts Options) *Service {
 		opts:     opts,
 		queue:    make(chan Job, opts.MaxQueue),
 		inflight: make(map[string]bool),
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
 	}
 	s.cache = loadVerdictCache(statePath(opts.StateDir, "guard_verdicts.json"), opts.CacheMax)
 	s.blocks = loadBlockStore(statePath(opts.StateDir, "guard_blocks.json"))
@@ -244,40 +242,29 @@ func New(opts Options) *Service {
 // Start launches the workers. Exactly once; the returned service is not
 // usable before it.
 func (s *Service) Start(cfg RuntimeConfig, caller Caller, sink Sink) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
 	s.cfg, s.caller, s.sink = cfg, caller, sink
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancelWorkers = cancel
+	s.done = make(chan struct{})
 	go func() {
 		var wg sync.WaitGroup
 		for i := 0; i < s.opts.Workers; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				s.work()
-			}()
+			wg.Go(func() {
+				for j := range s.queue {
+					if ctx.Err() == nil {
+						s.process(ctx, j)
+					}
+				}
+			})
 		}
 		wg.Wait()
 		close(s.done)
 	}()
-}
-
-// work consumes jobs until stop. After stop it keeps draining the queue
-// until empty (bounded by the drain deadline in Close) so shutdown does not
-// silently drop already-accepted work.
-func (s *Service) work() {
-	for {
-		select {
-		case <-s.stop:
-			for {
-				select {
-				case j := <-s.queue:
-					s.process(j)
-				default:
-					return
-				}
-			}
-		case j := <-s.queue:
-			s.process(j)
-		}
-	}
 }
 
 // Enqueue offers one job. It returns false when the queue is full or the
@@ -322,10 +309,7 @@ func (s *Service) Enqueue(j Job) bool {
 		return true
 	}
 	s.inflight[key] = true
-	// Deliver under mu: the send is non-blocking (no deadlock), and keeping it
-	// inside the critical section closes the accept-after-drain window — once
-	// Close sets closed under the same mu, no accepted job can land in the
-	// queue behind the workers' drain check.
+	// Close shuts the queue under the same lock as this non-blocking send.
 	select {
 	case s.queue <- j:
 		s.mu.Unlock()
@@ -338,7 +322,7 @@ func (s *Service) Enqueue(j Job) bool {
 }
 
 // process runs on a worker for one queued job.
-func (s *Service) process(j Job) {
+func (s *Service) process(workerCtx context.Context, j Job) {
 	model, timeout, blockSession, enabled := s.cfg.AdjudicationConfig()
 	key := CacheKey(j, model)
 	defer func() {
@@ -353,7 +337,7 @@ func (s *Service) process(j Job) {
 		s.apply(j, v.Verdict, v.Reason, v.Evidence, model, blockSession, true)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(workerCtx, timeout)
 	verdict, reason, evidence, usage, err := s.caller.Adjudicate(ctx, model, j)
 	cancel()
 	s.statsMu.Lock()
@@ -449,31 +433,30 @@ func (s *Service) apply(j Job, verdict, reason, evidence, model string, blockSes
 	}
 }
 
-// Close stops intake and waits for the workers to drain the queue or the
-// deadline, whichever comes first, then waits for the cached-verdict applies
-// Enqueue spawned (applyWg). Jobs still queued past the deadline are
-// dropped (their Enqueue already returned true; the caller-side fail-open
-// contract covers only Enqueue=false — dropped-at-shutdown jobs are the
-// documented shutdown-loss window, same direction as seclog's drain).
+// Close allows queued work to drain for the grace period. On expiry it
+// cancels active calls and skips pending jobs. Always join workers and cached
+// applies before releasing ownership of state files and the audit sink.
 func (s *Service) Close(drain time.Duration) {
 	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		<-s.done
-		s.applyWg.Wait()
-		return
+	first := !s.closed
+	if first {
+		s.closed = true
+		close(s.queue)
+		clear(s.inflight) // no further intake needs deduplication
 	}
-	s.closed = true
+	done := s.done
 	s.mu.Unlock()
-	close(s.stop)
-	select {
-	case <-s.done:
-	case <-time.After(drain):
+	if done == nil {
+		return // never started
 	}
-	// The cached-verdict applies Enqueue spawned run outside the worker
-	// WaitGroup; Close returns only after every accepted one completed, so a
-	// late apply can never lose its audit record to the seclog drain that
-	// follows in the app's shutdown order.
+	if first {
+		select {
+		case <-done:
+		case <-time.After(drain):
+		}
+		s.cancelWorkers()
+	}
+	<-done
 	s.applyWg.Wait()
 }
 

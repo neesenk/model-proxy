@@ -88,7 +88,7 @@ var prodModTimeAllowlist = map[string]map[string]int{
 // docs/engineering/testing.md §「时序纪律契约」 for the classes.
 var testSleepSnapshot = map[string]map[string]int{
 	"internal/accounts/store_test.go":                     {"TestWithLockHeartbeatKeepsAgedLockFromBeingStolen": 3, "TestWithPoolLock_MutualExclusion": 1, "TestWithPoolLock_StaleButAliveHolderIsNotStolen": 1},
-	"internal/adjudicate/adjudicate_test.go":              {"TestBlockedContentIndex_Semantics": 1, "TestLLMUsageStats_CountsCallsNotCacheHits": 1, "waitFor": 1},
+	"internal/adjudicate/adjudicate_test.go":              {"TestBlockedContentIndex_Semantics": 1, "waitFor": 1},
 	"internal/app/forward_retry_test.go":                  {"TestUC_ClientCancelDuringHeadersStopsFailoverAndKeepsCircuitClosed": 2},
 	"internal/app/forward_test.go":                        {"TestForward_CommittedSSEStreamMidFailureIsNotRecalled": 1},
 	"internal/app/fusion_test.go":                         {"awaitFusionState": 1, "delayedResponder": 1, "hitScript": 1},

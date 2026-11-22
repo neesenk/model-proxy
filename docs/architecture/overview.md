@@ -334,7 +334,8 @@ sha256 与判定归属，path 命中不进索引，见
 排序 + 冷却/熔断跳过 + pin 生效，per-attempt 预算切片，成败/429 回写共享健康状态；
 传输仍 probe.Do），不进 forward transport 层（guard 自递归 / request log、cache、
 forward 统计污染，见 `internal/app/guard_adjudication.go`）；判定用量累计持久化
-（`guard_stats.json`，重启不清零）。
+（`guard_stats.json`，重启不清零）。关闭时先停止接单并排空队列；宽限期届满后取消在途模型调用、丢弃待派发任务。
+`Service.Close` 等待 worker 与缓存重放的落盘和审计回调全部结束，之后 app 才排空审计日志。
 
 `internal/forward` 是请求转发管线包：从「snapshot + HTTP 请求」到「响应 commit 或终态错误」
 的全部编排归它——body 读取与上限、route 解析、pin/force-provider 硬选择

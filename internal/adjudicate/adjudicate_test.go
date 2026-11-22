@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -79,6 +80,18 @@ func (f *fakeSink) counts() (high, low, fails int) {
 	return len(f.high), len(f.low), len(f.fails)
 }
 
+// highSignalSink notifies the test after the worker persists the verdict's
+// cache entry, content hash and session block and emits its High observation.
+type highSignalSink struct {
+	fakeSink
+	applied chan struct{}
+}
+
+func (s *highSignalSink) High(j Job, reason, evidence, model string) {
+	s.fakeSink.High(j, reason, evidence, model)
+	s.applied <- struct{}{}
+}
+
 // staticConfig is a fixed RuntimeConfig for tests.
 type staticConfig struct {
 	model        string
@@ -99,7 +112,7 @@ func (c staticConfig) AdjudicationConfig() (string, time.Duration, bool, bool) {
 func TestUnblockCascadesToContent(t *testing.T) {
 	dir := t.TempDir()
 	caller := &fakeCaller{}
-	sink := &fakeSink{}
+	sink := &highSignalSink{applied: make(chan struct{}, 1)}
 	s := New(Options{StateDir: dir})
 	s.Start(staticConfig{model: "judge", timeout: 5 * time.Second, blockSession: true, enabled: true}, caller, sink)
 	t.Cleanup(func() { s.Close(time.Second) })
@@ -109,7 +122,10 @@ func TestUnblockCascadesToContent(t *testing.T) {
 	if !s.Enqueue(testJob(hit)) {
 		t.Fatal("Enqueue refused a fresh job")
 	}
-	waitFor(t, func() bool { _, ok := s.Blocked("sess-1"); return ok })
+	<-sink.applied
+	if _, blocked := s.Blocked("sess-1"); !blocked {
+		t.Fatal("session not blocked after high verdict")
+	}
 	if _, blocked := s.ContentBlocked(hit); !blocked {
 		t.Fatal("content not in repeat index after high verdict")
 	}
@@ -136,12 +152,12 @@ func TestUnblockCascadesToContent(t *testing.T) {
 	}
 
 	// Same bytes again: accepted silently, never re-judged, never re-blocked.
-	callsBefore := len(caller.calls)
 	if !s.Enqueue(testJob(hit)) {
 		t.Fatal("Enqueue refused allowed content")
 	}
-	if got := len(caller.calls); got != callsBefore {
-		t.Errorf("judge calls = %d, want unchanged %d (allowed content is never re-judged)", got, callsBefore)
+	s.Close(time.Second)
+	if got := caller.count(); got != 1 {
+		t.Errorf("judge calls = %d, want 1 (allowed content is never re-judged)", got)
 	}
 	if _, ok := s.Blocked("sess-1"); ok {
 		t.Error("session re-blocked after operator override")
@@ -605,52 +621,84 @@ func TestDisabledConfig_DropsSilently(t *testing.T) {
 // TestLLMUsageStats_CountsCallsNotCacheHits: the usage accounting bills
 // real model calls only — cached verdicts and in-flight dedup are free.
 func TestLLMUsageStats_CountsCallsNotCacheHits(t *testing.T) {
-	s, caller, sink := newTestService(t, Options{})
-	caller.setAnswer(func(Job) (string, string, string, error) { return VerdictLow, "fixture", "", nil })
-	for i := 0; i < 4; i++ {
-		s.Enqueue(testJob("sk-usage-dummy-not-a-real-key-000" + string(rune('a'+i))))
-	}
-	// Wait until all four real low verdicts have landed before enqueueing the
-	// cached echo — otherwise the cache-hit apply can race ahead of a still-
-	// queued unique low and the cumulative count assertion becomes flaky.
-	waitFor(t, func() bool {
-		_, low, _ := sink.counts()
-		calls, _, _, _ := s.Stats()
-		return low == 4 && calls == 4
-	})
-	// Cache hit on identical content adds no call and no tokens.
-	j := testJob("sk-usage-dummy-not-a-real-key-000a")
-	s.Enqueue(j)
-	// Low verdicts accumulate per occurrence (4 unique lows + 1 cached echo).
-	// The shared 2s waitFor flaked under a fully parallel ./... run — a
-	// saturated machine starves the workers past any short wall budget — so
-	// poll with a roomier local deadline.
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, _, _, lows := s.Stats(); lows >= 5 {
-			break
+	synctest.Test(t, func(t *testing.T) {
+		s := New(Options{})
+		caller := &fakeCaller{answer: func(Job) (string, string, string, error) { return VerdictLow, "fixture", "", nil }}
+		sink := &fakeSink{}
+		s.Start(staticConfig{model: "judge", timeout: time.Second, enabled: true}, caller, sink)
+		defer s.Close(time.Second)
+		for i := 0; i < 4; i++ {
+			if !s.Enqueue(testJob(fmt.Sprintf("usage-fixture-%d", i))) {
+				t.Fatal("fresh job refused")
+			}
 		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	calls, in, out, _ := s.Stats()
-	if calls != int64(caller.count()) {
-		t.Errorf("stats calls = %d, caller calls = %d — must match 1:1", calls, caller.count())
-	}
-	if in <= 0 || out <= 0 {
-		t.Errorf("token accounting empty: in=%d out=%d (fake reports 100/20)", in, out)
-	}
-	if lows := sinkLowCount(sink); lows != 4 {
-		t.Errorf("sink low records = %d, want 4 (cached echo must not re-emit)", lows)
-	}
-	if _, _, _, lows := s.Stats(); lows < 5 {
-		t.Fatal("cumulative lows did not reach 5")
-	}
+		// Wait through process's deferred removal of its in-flight key.
+		// A sink notification alone can precede that removal.
+		synctest.Wait()
+		if !s.Enqueue(testJob("usage-fixture-0")) {
+			t.Fatal("cache hit refused")
+		}
+		synctest.Wait()
+		calls, in, out, lows := s.Stats()
+		if calls != 4 || in != 400 || out != 80 || lows != 5 || caller.count() != 4 {
+			t.Fatalf("calls=%d tokens=%d/%d lows=%d caller invocations=%d", calls, in, out, lows, caller.count())
+		}
+		if _, low, _ := sink.counts(); low != 4 {
+			t.Fatalf("sink low records=%d, want 4", low)
+		}
+	})
 }
 
-func sinkLowCount(s *fakeSink) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.low)
+// A drain deadline may cancel the caller but cannot release its sink or state
+// directory until the worker has returned. Hold the caller across that boundary.
+type heldCaller struct {
+	started chan context.Context
+	release chan struct{}
+}
+
+func (c *heldCaller) Adjudicate(ctx context.Context, _ string, _ Job) (string, string, string, Usage, error) {
+	c.started <- ctx
+	<-c.release
+	return "", "", "", Usage{}, ctx.Err()
+}
+
+func TestCloseDeadlineJoinsWorker(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := New(Options{Workers: 1, MaxQueue: 1})
+		caller := &heldCaller{started: make(chan context.Context, 2), release: make(chan struct{})}
+		sink := &fakeSink{}
+		s.Start(staticConfig{model: "judge", timeout: time.Hour, enabled: true}, caller, sink)
+		s.Enqueue(testJob("running"))
+		ctx := <-caller.started
+		if !s.Enqueue(testJob("queued")) {
+			t.Fatal("second job refused")
+		}
+		done := make(chan struct{})
+		started := time.Now()
+		go func() { s.Close(time.Second); close(done) }()
+		<-ctx.Done() // the bubble advances to the first timer when all goroutines block
+		if elapsed := time.Since(started); elapsed != time.Second {
+			t.Errorf("caller canceled after %s, want the one-second drain budget", elapsed)
+		}
+		synctest.Wait()
+		if ctx.Err() != context.Canceled {
+			t.Errorf("running caller context error = %v, want canceled", ctx.Err())
+		}
+		select {
+		case <-done:
+			t.Error("Close returned while caller still held")
+		default:
+		}
+		close(caller.release)
+		<-done
+		synctest.Wait()
+		if len(caller.started) != 0 {
+			t.Error("queued job dispatched after deadline")
+		}
+		if _, _, failed := sink.counts(); failed != 1 {
+			t.Errorf("failed observations=%d, want 1", failed)
+		}
+	})
 }
 
 func TestVerdictCacheLRU_EvictsOldest(t *testing.T) {
