@@ -24,6 +24,7 @@ import (
 // up in go.mod review regardless).
 var externalImportAllowlist = map[string]string{
 	"github.com/bytedance/sonic":    "JSON hot path (requestWantsStream/ExtractModel/converter wire parsing)",
+	"github.com/klauspost/compress": "pure-Go zstd archive of cold rotated log files (internal/observe/logfile)",
 	"github.com/mattn/go-isatty":    "CLI color detection (internal/display)",
 	"github.com/zalando/go-keyring": "OS keychain credential storage (internal/credstore)",
 	"golang.org/x/sys":              "windows registry for keyring + platform syscalls",

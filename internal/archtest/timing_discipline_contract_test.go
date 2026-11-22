@@ -65,7 +65,9 @@ var prodSleepAllowlist = map[string]map[string]int{
 //     change is an observation that triggers a head-verified pass, never an
 //     ordering decision);
 //   - stats legacy import minute floor (boot-only, single goroutine);
-//   - logfile retention cutoff (single writer goroutine).
+//   - logfile retention cutoff (single writer goroutine) and the hot-window
+//     archive cutoff (dispatchArchive: the same age observation feeding the
+//     archive queue — never a mutual-exclusion decision).
 var prodModTimeAllowlist = map[string]map[string]int{
 	"internal/app/modelcaps.go": {
 		"(*Proxy).persistModelCapsNow":    1,
@@ -76,6 +78,7 @@ var prodModTimeAllowlist = map[string]map[string]int{
 	"internal/accounts/store.go":                 {"Store.withLock": 1},
 	"internal/observe/requestlog/index_files.go": {"(*Indexer).listLogFiles": 1},
 	"internal/observe/stats/legacy.go":           {"(*Store).ImportLegacyTokens": 1},
+	"internal/observe/logfile/archive.go":        {"(*Logger).dispatchArchive": 1},
 	"internal/observe/logfile/logfile.go":        {"(*Logger).sweep": 1, "Prunable": 1},
 }
 

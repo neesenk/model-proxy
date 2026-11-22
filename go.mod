@@ -7,6 +7,7 @@ require (
 	// support (v1.15.2 silently falls back to encoding/json there). Replace
 	// with the tagged v1.15.3 release once it is out.
 	github.com/bytedance/sonic v1.15.3-0.20260730064818-2a36d6da63e2
+	github.com/klauspost/compress v1.20.5
 	github.com/mattn/go-isatty v0.0.20
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/sys v0.48.0

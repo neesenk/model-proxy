@@ -75,6 +75,12 @@ type Options struct {
 	// happens inside a write) and every retention/disk-guard pass. It lets a
 	// tailing reader wait for changes instead of polling; it must not block.
 	OnChange func()
+	// HotRetention, when > 0, zstd-archives rotated files whose mtime fell
+	// out of the window: the sweep tick hands them to a side goroutine that
+	// compresses them to <name>.zst (atomic tmp+rename) and removes the
+	// plain file. Archived files are offline-only: no query path matches
+	// the .zst suffix. 0 keeps every file plain for its whole retention.
+	HotRetention time.Duration
 }
 
 // Logger owns the non-blocking queue and its single JSONL writer goroutine.
@@ -101,6 +107,13 @@ type Logger struct {
 	freeSpace func(dir string) (free, total int64, err error)
 	// line is the reusable encode buffer; owned by the writer goroutine.
 	line []byte
+	// archive hands cold rotated files to the archive worker; archiveDone
+	// closes when the worker exits. Run's exit path closes the queue and
+	// waits on archiveDone before reporting closed — the final flush.
+	archive     chan string
+	archiveDone chan struct{}
+	// archiveFn is the compression seam; production uses archiveZstd.
+	archiveFn func(src string) error
 }
 
 // New returns a logger. Run must be started exactly once before Shutdown.
@@ -112,11 +125,14 @@ func New(opts Options) *Logger {
 		opts.MaxBytes = DefaultMaxBytes
 	}
 	return &Logger{
-		opts:      opts,
-		encodes:   make(chan EncodeFunc, opts.QueueCapacity),
-		done:      make(chan struct{}),
-		closed:    make(chan struct{}),
-		freeSpace: volumeFreeSpace,
+		opts:        opts,
+		encodes:     make(chan EncodeFunc, opts.QueueCapacity),
+		done:        make(chan struct{}),
+		closed:      make(chan struct{}),
+		freeSpace:   volumeFreeSpace,
+		archive:     make(chan string, archiveQueueDepth),
+		archiveDone: make(chan struct{}),
+		archiveFn:   archiveZstd,
 	}
 }
 
@@ -206,6 +222,14 @@ func (l *Logger) Run() {
 	}
 	writer := NewWriter(l.opts.Directory, l.opts.FilePrefix, l.opts.MaxBytes)
 	defer writer.Close()
+	// The archive worker owns compression I/O off the writer goroutine;
+	// only started when a hot window is configured (EnsureDir already
+	// succeeded above, so the worker's directory exists).
+	archiveStarted := false
+	if l.opts.HotRetention > 0 {
+		archiveStarted = true
+		go l.archiveWorker()
+	}
 	ticker := time.NewTicker(SweepInterval)
 	defer ticker.Stop()
 	l.sweepAndGuard(time.Now(), writer.Path())
@@ -223,6 +247,10 @@ func (l *Logger) Run() {
 				default:
 					l.sweep(time.Now(), writer.Path())
 					l.changed()
+					if archiveStarted {
+						close(l.archive)
+						<-l.archiveDone
+					}
 					return
 				}
 			}
@@ -230,13 +258,15 @@ func (l *Logger) Run() {
 	}
 }
 
-// sweepAndGuard runs one retention pass followed by the disk-space guard on
-// the same tick: the guard is the floor retention cannot provide — a burst
-// day can outrun any age window, and the fix is oldest-first deletion until
-// the volume recovers, not a younger cutoff.
+// sweepAndGuard runs one retention pass, then the disk-space guard, then
+// the hot-window archive dispatch on the same tick. Dispatch runs last so
+// files past total retention are deleted by the sweep instead of being
+// compressed pointlessly; a burst day can outrun any age window, and the
+// guard's oldest-first deletion is the floor retention cannot provide.
 func (l *Logger) sweepAndGuard(now time.Time, activePath string) {
 	l.sweep(now, activePath)
 	l.guard(activePath)
+	l.dispatchArchive(now, activePath)
 	l.changed()
 }
 
