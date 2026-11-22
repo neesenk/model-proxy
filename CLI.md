@@ -57,10 +57,18 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
   继承的 O_APPEND fd，rename 会把写入留在旧 inode，故归档为 `serve-YYYYMMDD-HHMMSS.log`
   快照、原文件 truncate 归零；copy 与 truncate 之间写入的行会丢（copytruncate 语义，面向人的
   运行日志可接受）。startup-only 同 `log_level`；`serve.log` 文件名不变，pidfile 派生与
-  restart 脚本不受影响。failover 警告行携带失败腿状态：
-  `target N (<provider>/<model>) failed (status 429); trying next`（status 0 = 传输层错误，
-  上方有 `upstream error:` 行）。request-log 磁盘护栏见 `request_log.disk_guard`
-  （缺省 enabled/50GiB/95%），契约在 `docs/architecture/fusion-shadow-cache.md`。
+  restart 脚本不受影响。failover 警告行携带失败腿状态（语义权威在
+  `docs/architecture/routing-and-failure.md`）：
+  `target N (<provider>/<model>) failed (status <code>); trying next`——传输层错误带
+  502（专属的 `upstream error:` 行就在上方），零字节 2xx / 模型拒答 / auth 错误带观测到的
+  真实状态；status 0 表示该腿未回填状态码（包括部分已识别的 402/403 配额耗尽路径），
+  request-log attempt 腿仍以 502 落档。派发前门禁拒绝（model lock / 熔断开路）另打
+  `target N (<provider>/<model>) skipped (<reason>); trying next`（无网络接触、无熔断
+  计数，attempt 腿以 502 + 原因文本落档）。流式应答中途终止另有三方归因行：client 断开
+  （Info：终态未送达、非上游故障）、调度超时（Warn：终态已送达）、上游流先于终止序列结束
+  （Warn：合成协议原生错误终态交付客户端、永不缓存）。request-log 磁盘护栏见
+  `request_log.disk_guard`（缺省 enabled/50GiB/95%），契约在
+  `docs/architecture/fusion-shadow-cache.md`。
 
 ### 着色
 
