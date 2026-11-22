@@ -70,10 +70,14 @@ type Options struct {
 	// condition <= 0 disarms that condition; both <= 0 disable the guard.
 	MinFreeBytes   int64
 	MaxUsedPercent int
-	// OnChange, when set, is called on the writer goroutine after each
-	// change to the directory became visible: every line write (a rotation
-	// happens inside a write) and every retention/disk-guard pass. It lets a
-	// tailing reader wait for changes instead of polling; it must not block.
+	// OnChange, when set, is called after each change to the directory became
+	// visible: every line write (a rotation happens inside a write), every
+	// retention/disk-guard pass, and every file the archive worker (see
+	// HotRetention) has compressed away. It lets a tailing reader wait for
+	// changes instead of polling. It is called from two goroutines — the
+	// writer and, when archiving is enabled, the archive worker, possibly at
+	// the same time — so it must not block and must be safe for concurrent
+	// calls.
 	OnChange func()
 	// HotRetention, when > 0, zstd-archives rotated files whose mtime fell
 	// out of the window: the sweep tick hands them to a side goroutine that
@@ -107,10 +111,12 @@ type Logger struct {
 	freeSpace func(dir string) (free, total int64, err error)
 	// line is the reusable encode buffer; owned by the writer goroutine.
 	line []byte
-	// archive hands cold rotated files to the archive worker; archiveDone
-	// closes when the worker exits. Run's exit path closes the queue and
+	// archive hands cold rotated files to the archive worker; closing
+	// archiveStop ends it after at most the offer in flight; archiveDone
+	// closes once it has exited. Run's exit path closes archiveStop and
 	// waits on archiveDone before reporting closed — the final flush.
 	archive     chan string
+	archiveStop chan struct{}
 	archiveDone chan struct{}
 	// archiveFn is the compression seam; production uses archiveZstd.
 	archiveFn func(src string) error
@@ -131,6 +137,7 @@ func New(opts Options) *Logger {
 		closed:      make(chan struct{}),
 		freeSpace:   volumeFreeSpace,
 		archive:     make(chan string, archiveQueueDepth),
+		archiveStop: make(chan struct{}),
 		archiveDone: make(chan struct{}),
 		archiveFn:   archiveZstd,
 	}
@@ -248,7 +255,7 @@ func (l *Logger) Run() {
 					l.sweep(time.Now(), writer.Path())
 					l.changed()
 					if archiveStarted {
-						close(l.archive)
+						close(l.archiveStop)
 						<-l.archiveDone
 					}
 					return

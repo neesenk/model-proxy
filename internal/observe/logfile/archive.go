@@ -46,19 +46,36 @@ func archiveDay(name, prefix string) (time.Time, bool) {
 // across crashes: when the ".zst" already exists (a crash between rename
 // and remove), only src is removed; a leftover ".tmp" is replaced
 // (O_TRUNC) by the next run.
-func archiveZstd(src string) (err error) {
+func archiveZstd(src string) error {
 	dst := src + zstdSuffix
 	if _, statErr := os.Stat(dst); statErr == nil {
 		return os.Remove(src)
 	} else if !os.IsNotExist(statErr) {
 		return statErr
 	}
+	tmp := dst + ".tmp"
+	if err := compressZstd(src, tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return err
+	}
+	return os.Remove(src)
+}
+
+// compressZstd writes src's content zstd-compressed to tmp and returns only
+// once both file handles are closed, on every path. That is what lets the
+// caller rename tmp and remove src afterwards: Go opens files on Windows
+// without FILE_SHARE_DELETE, so a read handle still open on src would make
+// that remove fail.
+func compressZstd(src, tmp string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
+	// The success path closes in explicitly below; the deferred close covers
+	// every error path in between.
 	defer in.Close()
-	tmp := dst + ".tmp"
 	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, logFileMode)
 	if err != nil {
 		return err
@@ -68,26 +85,22 @@ func archiveZstd(src string) (err error) {
 		_ = out.Close()
 		return err
 	}
-	if _, err = io.Copy(enc, in); err != nil {
+	if _, err := io.Copy(enc, in); err != nil {
 		_ = enc.Close()
 		_ = out.Close()
 		return err
 	}
-	if err = enc.Close(); err != nil {
+	// Last read done: src is released from here on, whatever happens next.
+	_ = in.Close()
+	if err := enc.Close(); err != nil {
 		_ = out.Close()
 		return err
 	}
-	if err = out.Sync(); err != nil {
+	if err := out.Sync(); err != nil {
 		_ = out.Close()
 		return err
 	}
-	if err = out.Close(); err != nil {
-		return err
-	}
-	if err = os.Rename(tmp, dst); err != nil {
-		return err
-	}
-	return os.Remove(src)
+	return out.Close()
 }
 
 // dispatchArchive offers rotated .log files whose mtime fell out of the hot
@@ -130,17 +143,36 @@ func (l *Logger) dispatchArchive(now time.Time, activePath string) {
 // archiveWorker drains the archive queue off the writer goroutine —
 // compressing a rotated file takes seconds and must never stall record
 // writes. Each finished archive fires OnChange so the tailing index sees
-// the vanished plain file on its next pass. Run's exit path closes the
-// queue and waits on archiveDone: the final flush.
+// the vanished plain file on its next pass.
+//
+// Stop is the final flush and nothing more: closing archiveStop ends the
+// loop, finishing at most the offer already in flight. The offers still
+// queued are abandoned, not drained — their files stay plain on disk and the
+// next run's sweep re-offers them — so a shutdown never waits on a backlog.
 func (l *Logger) archiveWorker() {
 	defer close(l.archiveDone)
-	for src := range l.archive {
-		if err := l.archiveFn(src); err != nil {
-			logx.Warnf("[%s] archive %s failed (kept plain; retried next sweep): %v",
-				l.opts.Tag, filepath.Base(src), err)
-			continue
+	for {
+		select {
+		case <-l.archiveStop:
+			return
+		case src, ok := <-l.archive:
+			if !ok {
+				return // a closed queue (how tests end the worker) ends the loop
+			}
+			// The select above may pick a queued offer although stop is
+			// already closed: that one must not be started.
+			select {
+			case <-l.archiveStop:
+				return
+			default:
+			}
+			if err := l.archiveFn(src); err != nil {
+				logx.Warnf("[%s] archive %s failed (kept plain; retried next sweep): %v",
+					l.opts.Tag, filepath.Base(src), err)
+				continue
+			}
+			l.changed()
 		}
-		l.changed()
 	}
 }
 

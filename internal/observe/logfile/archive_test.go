@@ -190,3 +190,184 @@ func TestRunShutdownWaitsForInFlightArchive(t *testing.T) {
 		t.Fatalf("Shutdown returned before the in-flight archive finished: %v", err)
 	}
 }
+
+// TestIsZstdFileMatchesOnlyThisStreamsArchives pins the archive matcher the
+// retention sweep, the disk guard and Prune delete by: this stream's prefix
+// plus the exact .zst suffix. An archive still being written is not one yet,
+// and another stream's archive is never this stream's.
+func TestIsZstdFileMatchesOnlyThisStreamsArchives(t *testing.T) {
+	const prefix = "requests-"
+	cases := []struct {
+		name  string
+		match bool
+	}{
+		{"requests-20261101.log.zst", true},           // per-day file, archived
+		{"requests-20261101--010000-1.log.zst", true}, // size-rotated file, archived
+		{"requests-20261101.log.zst.tmp", false},      // still being written
+		{"requests-20261101.log", false},              // plain file
+		{"security-20261101.log.zst", false},          // another stream's archive
+		{"requests.log.zst", false},                   // prefix is requests-, not requests
+	}
+	for _, tc := range cases {
+		if got := isZstdFile(tc.name, prefix); got != tc.match {
+			t.Errorf("isZstdFile(%q) = %v, want %v", tc.name, got, tc.match)
+		}
+	}
+}
+
+// TestArchiveDayReadsTheNameStamp pins where an archive's age comes from:
+// the YYYYMMDD day stamp its name carries right after the prefix (a .zst's
+// mtime is compression time). Anything else — too short, not a date, an
+// impossible date — reports no day rather than a guess.
+func TestArchiveDayReadsTheNameStamp(t *testing.T) {
+	const prefix = "requests-"
+	november1 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		want time.Time
+		ok   bool
+	}{
+		{"requests-20261101.log.zst", november1, true},
+		{"requests-20261101--010000-1.log.zst", november1, true},
+		{"requests-.zst", time.Time{}, false},             // 4 chars after the prefix
+		{"requests-202.zst", time.Time{}, false},          // 7 chars after the prefix
+		{"requests-archive.log.zst", time.Time{}, false},  // not a date stamp
+		{"requests-20261301.log.zst", time.Time{}, false}, // month out of range
+		{"requests-20261132.log.zst", time.Time{}, false}, // day out of range
+	}
+	for _, tc := range cases {
+		got, ok := archiveDay(tc.name, prefix)
+		if ok != tc.ok || !got.Equal(tc.want) {
+			t.Errorf("archiveDay(%q) = %v, %v; want %v, %v", tc.name, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+// TestArchiveZstdReleasesSourceWhenTmpIsBlocked: a failure after the source
+// was opened (its tmp path is taken by a directory) must report the error,
+// leave the plain file and no archive behind, and release the source handle.
+// The handle matters on Windows, where an open file cannot be removed: one
+// leaked by a failed attempt would still be open when a later attempt in the
+// same process removes the source.
+func TestArchiveZstdReleasesSourceWhenTmpIsBlocked(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "requests-20260101.log")
+	if err := os.WriteFile(src, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tmp := src + ".zst.tmp"
+	if err := os.Mkdir(tmp, 0o700); err != nil { // OpenFile on a directory fails
+		t.Fatal(err)
+	}
+	before := openDescriptorCount(t)
+
+	err := archiveZstd(src)
+
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) || pathErr.Path != tmp {
+		t.Fatalf("archiveZstd error = %v, want one naming the blocked tmp %s", err, tmp)
+	}
+	if got := openDescriptorCount(t); got != before {
+		t.Fatalf("open descriptors = %d after the failed archive, want %d: the source handle leaked", got, before)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil || string(data) != "{}\n" {
+		t.Fatalf("plain file = %q, %v; want kept untouched", data, err)
+	}
+	if _, err := os.Stat(src + ".zst"); !os.IsNotExist(err) {
+		t.Fatalf("archive created despite the failure: %v", err)
+	}
+}
+
+// openDescriptorCount reports how many file descriptors this process holds
+// open, so a test can prove a handle was released. It reads the process's
+// descriptor directory (Unix), which lists the handle used to read it, so
+// equal conditions give equal counts.
+func openDescriptorCount(t *testing.T) int {
+	t.Helper()
+	for _, dir := range []string{"/proc/self/fd", "/dev/fd"} {
+		entries, err := os.ReadDir(dir)
+		if err == nil {
+			return len(entries)
+		}
+	}
+	t.Skip("no descriptor directory (/proc/self/fd, /dev/fd): a released handle is not observable here")
+	return 0
+}
+
+// TestLoggerHotRetentionAccessor: the hot window is reported as configured;
+// 0 means archiving is disabled, which is the default.
+func TestLoggerHotRetentionAccessor(t *testing.T) {
+	if got := New(Options{Directory: t.TempDir()}).HotRetention(); got != 0 {
+		t.Fatalf("default HotRetention() = %v, want 0 (archiving disabled)", got)
+	}
+	if got := New(Options{Directory: t.TempDir(), HotRetention: 48 * time.Hour}).HotRetention(); got != 48*time.Hour {
+		t.Fatalf("HotRetention() = %v, want 48h", got)
+	}
+	var stopped *Logger
+	if got := stopped.HotRetention(); got != 0 {
+		t.Fatalf("nil HotRetention() = %v, want 0", got)
+	}
+}
+
+// TestShutdownAbandonsQueuedButFinishesInFlight: stop is the final flush and
+// nothing more. Shutdown must wait for the archive in flight and must not
+// start the offers still queued — those files stay plain on disk, for the
+// next run's sweep to re-offer.
+//
+// Ordered by channels only: the gate holds the first archive until Run's
+// exit path has closed the stop channel, so the worker cannot reach a queued
+// offer before stop is visible. The scenario is repeated because the worker's
+// re-check of stop is reached only when select hands it a queued offer
+// although stop is already closed — a fair coin per lifecycle. Run once, a
+// deleted re-check would fail this test only every other run.
+func TestShutdownAbandonsQueuedButFinishesInFlight(t *testing.T) {
+	const rounds = 32
+	for round := 0; round < rounds; round++ {
+		dir := t.TempDir()
+		var paths []string
+		for _, name := range []string{"requests-20260101.log", "requests-20260102.log", "requests-20260103.log"} {
+			p := filepath.Join(dir, name)
+			if err := os.WriteFile(p, []byte("{}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			paths = append(paths, p)
+		}
+		first, queued := paths[0], paths[1:]
+		l := New(Options{Directory: dir, FilePrefix: "requests-", HotRetention: time.Hour})
+		started := make(chan struct{})
+		release := make(chan struct{})
+		var calls atomic.Int32
+		l.archiveFn = func(p string) error {
+			if calls.Add(1) == 1 {
+				close(started)
+				<-release
+			}
+			return os.Rename(p, p+".done")
+		}
+		for _, p := range paths {
+			l.archive <- p
+		}
+		go l.Run()
+		<-started // the worker is inside the first archive
+		shutdownReturned := make(chan struct{})
+		go func() {
+			l.Shutdown()
+			close(shutdownReturned)
+		}()
+		<-l.archiveStop // Run's exit path has asked the worker to stop
+		close(release)  // the in-flight archive may now finish
+		<-shutdownReturned
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("round %d: archived %d file(s) at shutdown, want only the one in flight", round, got)
+		}
+		if _, err := os.Stat(first + ".done"); err != nil {
+			t.Fatalf("round %d: in-flight archive not finished before Shutdown returned: %v", round, err)
+		}
+		for _, p := range queued {
+			if _, err := os.Stat(p); err != nil {
+				t.Fatalf("round %d: queued offer %s was started at shutdown, want it left plain: %v", round, filepath.Base(p), err)
+			}
+		}
+	}
+}
