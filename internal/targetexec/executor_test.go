@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -18,9 +20,12 @@ import (
 	"model-proxy/internal/provider"
 )
 
-type executorTestProvider struct{ refreshes int }
+type executorTestProvider struct {
+	refreshes int
+	authErr   error
+}
 
-func (p *executorTestProvider) AuthHeaders(*http.Request) error { return nil }
+func (p *executorTestProvider) AuthHeaders(*http.Request) error { return p.authErr }
 func (p *executorTestProvider) Refresh() error                  { p.refreshes++; return nil }
 func (p *executorTestProvider) RewriteRequest(url string, body []byte, _ string) (string, []byte) {
 	return url, body
@@ -362,6 +367,12 @@ func TestExecutor403PlainBodyCommits(t *testing.T) {
 
 func TestExecutor403FailureScope(t *testing.T) {
 	const nginx = "<html>\n<head><title>403 Forbidden</title></head>\n<body>\n<center><h1>403 Forbidden</h1></center>\n<hr><center>nginx</center>\n</body>\n</html>"
+	// 2026-11-23 compass WAF incident: the gateway answered every shopee/aqp
+	// call with the stock nginx denial page over CRLF line endings (146
+	// bytes, observed verbatim in the request log) while the deployed build
+	// committed 2056 of them as terminal 403s. Both line-ending shapes of the
+	// same document must keep classifying as a gateway refusal.
+	const nginxCRLF = "<html>\r\n<head><title>403 Forbidden</title></head>\r\n<body>\r\n<center><h1>403 Forbidden</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n"
 	const model = "<html><body>no access to model</body></html>"
 	const gatewayDiagnostic = "upstream gateway refused the request"
 	cases := []struct {
@@ -371,6 +382,7 @@ func TestExecutor403FailureScope(t *testing.T) {
 		evidence                           string
 	}{
 		{name: "stock gateway", body: nginx, contentType: "text/html", evidence: gatewayDiagnostic},
+		{name: "stock gateway CRLF (2026-11-23 compass WAF)", body: nginxCRLF, contentType: "text/html", evidence: gatewayDiagnostic},
 		{name: "gateway with wrong MIME", body: nginx, contentType: "application/json", evidence: gatewayDiagnostic},
 		{name: "last gateway", body: nginx, last: true, commit: true},
 		{name: "explicit challenge", body: "browser check", challenge: "challenge", evidence: gatewayDiagnostic},
@@ -405,6 +417,34 @@ func TestExecutor403FailureScope(t *testing.T) {
 				t.Fatalf("result=%+v effects=%+v releases=%d", result, effects, state.releases)
 			}
 		})
+	}
+}
+
+// TestExecutorAuthLayerFailureKeepsObservedStatus pins the 2026-11-23 compass
+// WAF behavior: while the gateway blocked it, every aqp call failed in
+// AuthHeaders with "mint aqp key: HTTP 403: <html>" (521 legs over ~2h). The
+// leg must fail over immediately, carry the auth endpoint's observed 403 (not
+// the synthetic 502) with the error text as body evidence, and never dispatch
+// an upstream request nor tick the failure circuit.
+func TestExecutorAuthLayerFailureKeepsObservedStatus(t *testing.T) {
+	provider := &executorTestProvider{authErr: fmt.Errorf("mint aqp key: %w: %s",
+		provider.HTTPStatusError{Code: http.StatusForbidden}, "<html>")}
+	attempt, writer := testAttempt(provider, "{}", Policy{})
+	doer := &sequenceDoer{responses: []*http.Response{testResponse(200, "ok")}}
+	state, effects := &executorState{}, &executorEffects{}
+	result := (Executor{Client: doer, State: state, Effects: effects}).Execute(attempt)
+	if result.Committed || result.Outcome != OutcomeFailedHard || result.AttemptStatus != http.StatusForbidden ||
+		!strings.Contains(string(result.AttemptBody), "mint aqp key") || result.Retried != nil {
+		t.Fatalf("result=%+v", result)
+	}
+	if doer.calls != 0 {
+		t.Fatalf("auth failure must not dispatch upstream, calls=%d", doer.calls)
+	}
+	if effects.failovers != 1 || effects.failures != 0 || effects.commits != 0 || provider.refreshes != 0 || writer.Body.Len() != 0 {
+		t.Fatalf("effects=%+v refreshes=%d", effects, provider.refreshes)
+	}
+	if state.releases != 1 || state.failures != 0 || state.rateLimits != 0 {
+		t.Fatalf("state=%+v", state)
 	}
 }
 
