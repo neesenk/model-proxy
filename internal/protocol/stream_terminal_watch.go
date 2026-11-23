@@ -37,6 +37,8 @@ package protocol
 import (
 	"bytes"
 	"io"
+	"strings"
+	"unicode/utf8"
 
 	sonic "github.com/bytedance/sonic"
 )
@@ -112,6 +114,7 @@ type TerminalWatcher struct {
 	sawData    bool   // any data: line reached the scanner (stream began)
 	terminal   bool   // client-acceptable terminal sequence seen
 	sawError   bool   // protocol-native error terminal seen upstream
+	errExcerpt string // bounded single-line excerpt of the upstream error frame payload
 	respID     string // responses: response id tracked from the first event
 	// gaveUp: the scanner saw a single line exceed sseScanBuf (the shared SSE
 	// line cap). Terminal detection is disabled for the rest of the stream —
@@ -130,6 +133,58 @@ type TerminalWatcher struct {
 // upstream stream ended without its terminal sequence. Sticky: it stays true
 // after the synthesized bytes have been read out.
 func (w *TerminalWatcher) Synthesized() bool { return w.synthed }
+
+// TerminalSeen reports whether the upstream delivered a terminal — a
+// client-acceptable one or its own error terminal. Such a stream is complete
+// upstream even when the client-side copy fails afterwards, so nothing was cut
+// on the upstream side.
+func (w *TerminalWatcher) TerminalSeen() bool { return w.terminal || w.sawError }
+
+// UpstreamErrorTerminal reports that the upstream itself ended the stream with
+// a protocol-native error terminal (anthropic `error`, an openai error chunk,
+// responses `response.failed`). Those bytes are forwarded untouched and never
+// re-synthesized, so this — not Synthesized — is the watcher's failure signal.
+func (w *TerminalWatcher) UpstreamErrorTerminal() bool { return w.sawError }
+
+// UpstreamErrorEvidence returns a bounded single-line excerpt of the upstream
+// error frame's payload ("" when no error terminal was seen). The request log
+// keeps such a stream as a plain status 200, so this excerpt is the evidence a
+// serve.log line can carry.
+func (w *TerminalWatcher) UpstreamErrorEvidence() string { return w.errExcerpt }
+
+// watchErrorEvidenceCap bounds the upstream error-frame excerpt.
+const watchErrorEvidenceCap = 200
+
+// noteUpstreamError records the upstream error terminal together with a
+// bounded excerpt of its frame.
+func (w *TerminalWatcher) noteUpstreamError(payload []byte) {
+	w.sawError = true
+	w.errExcerpt = errorExcerpt(payload)
+}
+
+// errorExcerpt flattens an upstream error frame's folded data payload into one
+// bounded line: SSE data lines are folded with '\n' and a frame may be long, so
+// control characters become spaces, the cut backs off to a rune boundary, and
+// the result can never break a log line.
+func errorExcerpt(payload []byte) string {
+	if len(payload) > watchErrorEvidenceCap {
+		cut := watchErrorEvidenceCap
+		for cut > 0 && !utf8.RuneStart(payload[cut]) {
+			cut--
+		}
+		payload = payload[:cut]
+	}
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			return ' '
+		case r < 0x20 || r == 0x7f:
+			return -1
+		default:
+			return r
+		}
+	}, string(payload))
+}
 
 // Read forwards the upstream bytes untouched. On the upstream end it first
 // serves the synthesized terminal (when one was warranted), then the original
@@ -290,7 +345,7 @@ func (w *TerminalWatcher) dispatch(payload []byte) {
 		case "message_stop":
 			w.terminal = true
 		case "error":
-			w.sawError = true
+			w.noteUpstreamError(payload)
 		}
 	case OpenAI:
 		if bytes.Equal(payload, []byte("[DONE]")) {
@@ -298,7 +353,7 @@ func (w *TerminalWatcher) dispatch(payload []byte) {
 			return
 		}
 		if string(w.frameEvent) == "error" {
-			w.sawError = true
+			w.noteUpstreamError(payload)
 			return
 		}
 		if !openAIVerdictCandidate(payload) {
@@ -314,7 +369,7 @@ func (w *TerminalWatcher) dispatch(payload []byte) {
 			return
 		}
 		if frame.Error != nil {
-			w.sawError = true
+			w.noteUpstreamError(payload)
 			return
 		}
 		for _, choice := range frame.Choices {
@@ -343,7 +398,7 @@ func (w *TerminalWatcher) dispatch(payload []byte) {
 		case "response.completed", "response.incomplete":
 			w.terminal = true
 		case "response.failed":
-			w.sawError = true
+			w.noteUpstreamError(payload)
 		}
 	}
 }

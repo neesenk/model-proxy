@@ -55,6 +55,7 @@ func RunReloadLoop(stop <-chan struct{}, hup <-chan os.Signal, reload func()) {
 type TransportHandlerGate struct {
 	mu        sync.Mutex
 	accepting bool
+	inFlight  int // admitted handlers that have not returned yet
 	wg        sync.WaitGroup
 	next      http.Handler
 }
@@ -74,9 +75,26 @@ func (g *TransportHandlerGate) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	g.wg.Add(1)
+	g.inFlight++
 	g.mu.Unlock()
-	defer g.wg.Done()
+	defer g.done()
 	g.next.ServeHTTP(w, r)
+}
+
+// done releases one admitted handler.
+func (g *TransportHandlerGate) done() {
+	g.mu.Lock()
+	g.inFlight--
+	g.mu.Unlock()
+	g.wg.Done()
+}
+
+// inFlightHandlers reports how many admitted handlers have not returned — the
+// number a drain deadline is about to force-close.
+func (g *TransportHandlerGate) inFlightHandlers() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.inFlight
 }
 
 func (g *TransportHandlerGate) StopAccepting() {
@@ -94,7 +112,8 @@ func (g *TransportHandlerGate) wait() {
 //
 //  1. reject new transport-owned work (reload and internal/web tasks);
 //  2. stop accepting HTTP connections and drain in-flight handlers;
-//  3. on deadline, force-close connections so request contexts are cancelled;
+//  3. on deadline, force-close connections so request contexts are cancelled
+//     (the warn names how many handlers that cut);
 //  4. wait transport tasks, then close/final-flush Proxy-owned state.
 //
 // The explicit listener and closeProxy callback keep this sequence testable
@@ -164,7 +183,13 @@ func ServeHTTPUntilShutdown(
 	shutdownErr := server.Shutdown(ctx)
 	cancel()
 	if shutdownErr != nil {
-		logx.Warnf("[shutdown] HTTP drain exceeded %s (%v); forcing active connections closed", timeout, shutdownErr)
+		// The count is the blast radius: a force-close cuts every in-flight
+		// stream mid-generation, and downstream those streams only surface as
+		// per-request "client disconnected" lines (the executor cannot see who
+		// closed the connection). The 2026-11-22 restart cut 37 streams and the
+		// number took a request-log scan to establish.
+		logx.Warnf("[shutdown] HTTP drain exceeded %s (%v); forcing active connections closed (in-flight handlers: %d)",
+			timeout, shutdownErr, handlers.inFlightHandlers())
 		if closeErr := server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
 			logx.Warnf("[shutdown] force-close failed: %v", closeErr)
 		}

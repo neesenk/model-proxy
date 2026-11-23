@@ -64,9 +64,14 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
   真实状态；status 0 表示该腿未回填状态码（包括部分已识别的 402/403 配额耗尽路径），
   request-log attempt 腿仍以 502 落档。派发前门禁拒绝（model lock / 熔断开路）另打
   `target N (<provider>/<model>) skipped (<reason>); trying next`（无网络接触、无熔断
-  计数，attempt 腿以 502 + 原因文本落档）。流式应答中途终止另有三方归因行：client 断开
-  （Info：终态未送达、非上游故障）、调度超时（Warn：终态已送达）、上游流先于终止序列结束
-  （Warn：合成协议原生错误终态交付客户端、永不缓存）。request-log 磁盘护栏见
+  计数，attempt 腿以 502 + 原因文本落档）。流式应答中途终止另有归因行：client 断开
+  （Info，两种形态：watcher 已合成终态但未送达、或对端先于上游终态消失而拷贝循环
+  因写失败先行退出——两者都是"非上游故障"；上游已送达终态之后的写失败不算中途
+  终止、不打行）、调度超时（Warn：终态已送达）、上游流先于终止序列结束
+  （Warn：合成协议原生错误终态交付客户端、永不缓存）、上游自带错误终态结束流
+  （Warn：原样转发客户端、不重复合成，行内带单行有界摘录——该应答在 request log
+  里是普通 status 200，此行是唯一失败证据）。语义权威与判定边界在
+  `docs/architecture/protocol-conversion.md`。request-log 磁盘护栏见
   `request_log.disk_guard`（缺省 enabled/50GiB/95%），契约在
   `docs/architecture/fusion-shadow-cache.md`。
 
@@ -178,7 +183,10 @@ reload 结果在 daemon 的 **log 文件**里（`[reload] config reloaded succes
   轮询，再停止接入并最多等待 8 秒让在途请求完成；已进入凭据落盘 commit 的登录
   会完成 save+reload。随后 final flush request log、Responses state、stats 和
   quota，正常退出。8 秒内未 drain 时强制取消活动连接，并记录
-  `[shutdown] HTTP drain exceeded 8s (...)`; handler 完成退栈后继续 final flush。
+  `[shutdown] HTTP drain exceeded 8s (...); forcing active connections closed (in-flight handlers: N)`
+  （N = 被强关的在途 handler 数，即本次重启截断的流式应答数）；handler 完成退栈后
+  继续 final flush。被强关的流在 executor 侧只体现为上述 client 断开归因行
+  （executor 看不到连接由谁关闭）——重启窗口内的 client 断开行以本行的 N 为准。
 
 ### 手动重启（换二进制后）：停+启必须原子完成
 

@@ -644,24 +644,49 @@ func (executor Executor) commit(
 		logx.Warnf("[proto=%s provider=%s] 200 with zero-byte body — model locked post-commit; next request fails over",
 			plan.ClientProtocol(), dto.Target.Provider)
 	}
-	if terminalWatch != nil && terminalWatch.Synthesized() {
-		// Attribution: the watcher only sees that the upstream body ended
-		// without a terminal — not WHY. A caller that walks away cancels the
-		// caller-owned request context, and that interrupt reaches the parked
-		// upstream Read as a context error shaped exactly like a provider
-		// abandoning its generation. The 2026-11-16 logs carried 132 such
-		// warns, most of them client-side subagent aborts, each claiming an
-		// upstream fault (and delivery to a client that was already gone) —
-		// misattributed evidence for every later incident investigation.
+	if terminalWatch != nil {
 		switch {
-		case end == streamClientGone || exchange.Request.Context().Err() != nil:
-			logx.Infof("[proto=%s provider=%s] client disconnected mid-stream — synthesized terminal not delivered; not an upstream fault",
-				plan.ClientProtocol(), dto.Target.Provider)
-		case ctx.Err() != nil:
-			logx.Warnf("[proto=%s provider=%s] scheduling timeout ended the stream before its terminal sequence — synthesized terminal delivered",
-				plan.ClientProtocol(), dto.Target.Provider)
-		default:
-			logx.Warnf("[proto=%s provider=%s] upstream stream ended before its terminal sequence — synthesized a protocol-native error terminal for the client (delivered, never cached)",
+		case terminalWatch.Synthesized():
+			// Attribution: the watcher only sees that the upstream body ended
+			// without a terminal — not WHY. A caller that walks away cancels the
+			// caller-owned request context, and that interrupt reaches the parked
+			// upstream Read as a context error shaped exactly like a provider
+			// abandoning its generation. The 2026-11-16 logs carried 132 such
+			// warns, most of them client-side subagent aborts, each claiming an
+			// upstream fault (and delivery to a client that was already gone) —
+			// misattributed evidence for every later incident investigation.
+			switch {
+			case end == streamClientGone || exchange.Request.Context().Err() != nil:
+				logx.Infof("[proto=%s provider=%s] client disconnected mid-stream — synthesized terminal not delivered; not an upstream fault",
+					plan.ClientProtocol(), dto.Target.Provider)
+			case ctx.Err() != nil:
+				logx.Warnf("[proto=%s provider=%s] scheduling timeout ended the stream before its terminal sequence — synthesized terminal delivered",
+					plan.ClientProtocol(), dto.Target.Provider)
+			default:
+				logx.Warnf("[proto=%s provider=%s] upstream stream ended before its terminal sequence — synthesized a protocol-native error terminal for the client (delivered, never cached)",
+					plan.ClientProtocol(), dto.Target.Provider)
+			}
+		case terminalWatch.UpstreamErrorTerminal():
+			// The upstream itself failed the generation after commit. Its error
+			// terminal is the client's fail-closed signal (forwarded byte-identical,
+			// never re-synthesized), but the request log keeps the exchange as a
+			// plain status 200 — on 2026-11-22 forty zcode streams ended in
+			// "upstream stream terminated unexpectedly" with zero serve.log
+			// evidence. This line is that evidence; the excerpt is bounded and
+			// single-line by the watcher.
+			logx.Warnf("[proto=%s provider=%s] upstream error terminal ended the stream — forwarded to the client as-is, nothing synthesized: %s",
+				plan.ClientProtocol(), dto.Target.Provider, terminalWatch.UpstreamErrorEvidence())
+		case end == streamClientGone && !terminalWatch.TerminalSeen():
+			// The client-side write failed while the upstream was still
+			// streaming. The watcher only reports an upstream end it observed
+			// (EOF/read error); here the copy loop returned before any arrived —
+			// buffered upstream data trips the sticky write error first — so
+			// Synthesized() stays false and the branch above never fires. 51 such
+			// aborts on 2026-11-22 (35 cut by a restart's drain deadline, 16
+			// client disconnects) left no trace in serve.log. A terminal already
+			// seen means the upstream HAD finished and only trailing bytes were
+			// lost — not a mid-stream cut, and it stays unlogged.
+			logx.Infof("[proto=%s provider=%s] client disconnected mid-stream before its terminal — nothing synthesized; not an upstream fault",
 				plan.ClientProtocol(), dto.Target.Provider)
 		}
 	}

@@ -389,6 +389,7 @@ provider：照常 failover（换一家策略不同的 provider 可能可服务�
 - 普通 target 与 Fusion leg 的 429 kind/horizon、metric、quota refresh 一致。
 - 同 provider 不同 model 的锁和 paramBlock 隔离。
 - empty stream 的 EOF、client cancel、upstream read error。
+- 提交后流中止归因（`internal/targetexec/executor_stream_abort_test.go`）：对端写失败先于上游终态在普通与 keepalive 两条拷贝路径都打 client 断开行、不得误判上游截断；上游自带错误终态打 Warn 带摘录；上游已送达终态后的写失败与完整流不打行（契约在 `docs/architecture/protocol-conversion.md`「提交后流中止的归因日志」）。
 - SSE keepalive：静默期心跳帧、ttft 不被心跳标记、录制链/缓存无心跳、client gone 后 reader goroutine 释放。
 - cooldown 全部恢复、部分恢复、跨轮纯 429、混合硬失败。
 - request-aware/context retry 后的实际目标冷却判定。

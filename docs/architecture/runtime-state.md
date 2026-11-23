@@ -190,6 +190,12 @@ HTTP listener、在途 handler、SIGHUP reload loop，以及 `internal/web` task
 所有 handler 已经返回，必须以独立 admission gate/WaitGroup 证明 handler drain
 完成。8 秒 deadline 小于 supervisor 的 10 秒 worker hard-kill 窗口，为最终持久化
 留出时间。信号 goroutine 只发起 shutdown；不得在其中直接 `os.Exit` 绕过上述顺序。
+deadline 超时的 Warn 带上 gate 的在途 handler 计数（`forcing active connections
+closed (in-flight handlers: N)`）：强关截断的是**已提交的流式应答**，而 executor
+看不到连接由谁关闭，这些流在它那里与 client 断开同形——N 是重启影响面的唯一
+权威数字（11-22 21:14 重启强关 37 条流，当时只能靠扫 request log 反推）。长生成
+的 drain 存活率取决于 8 秒预算，批任务在跑时重启必然截断在途流。锁定测试
+`internal/cli/serve/shutdown_inflight_test.go`。
 
 ## 锁顺序
 
