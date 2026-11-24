@@ -597,8 +597,21 @@ func (executor Executor) commit(
 	// client's bytes, so a synthesized terminal keeps failing the cache gate)
 	// and ABOVE the model normalizer and responses-state capture, which must
 	// observe the raw upstream stream.
+	//
+	// A CONVERTED stream is terminated fail-closed by its converter (an error
+	// terminal in the client protocol), so it needs nothing appended — but its
+	// aborts need the same attribution, and the converters' only log is
+	// convertWarn: deduped per process per message, with neither provider nor
+	// cause. On 2026-11-24 thirteen zcode streams (openai clients reading an
+	// anthropic upstream) ended mid-generation and the whole day's serve.log
+	// evidence was one deduped line. The observer runs the same shadow scanner
+	// over the client-protocol bytes the converter produced and only reports.
 	var terminalWatch *protocol.TerminalWatcher
-	if !convert && upstreamStream {
+	convertedStream := convert && upstreamStream && converted == nil
+	if convertedStream {
+		terminalWatch = protocol.ObserveStreamTerminal(body, plan.ClientProtocol())
+		body = terminalWatch
+	} else if !convert && upstreamStream {
 		terminalWatch = protocol.WatchStreamTerminal(body, plan.ClientProtocol())
 		body = terminalWatch
 	}
@@ -666,14 +679,31 @@ func (executor Executor) commit(
 				logx.Warnf("[proto=%s provider=%s] upstream stream ended before its terminal sequence — synthesized a protocol-native error terminal for the client (delivered, never cached)",
 					plan.ClientProtocol(), dto.Target.Provider)
 			}
+		case terminalWatch.UpstreamErrorTerminal() && convertedStream:
+			// The converter appended its fail-closed terminal: the upstream read
+			// failed, the upstream sent an error event, or the request context
+			// was canceled under the parked Read. Same three-way attribution as
+			// the synthesized case above — a client that walked away is not an
+			// upstream fault — which the converters cannot make themselves.
+			switch {
+			case end == streamClientGone || exchange.Request.Context().Err() != nil:
+				logx.Infof("[proto=%s provider=%s] client disconnected mid-stream — converted error terminal not delivered; not an upstream fault",
+					plan.ClientProtocol(), dto.Target.Provider)
+			case ctx.Err() != nil:
+				logx.Warnf("[proto=%s provider=%s] scheduling timeout ended the converted stream — error terminal delivered",
+					plan.ClientProtocol(), dto.Target.Provider)
+			default:
+				logx.Warnf("[proto=%s provider=%s] converted stream (%s→%s) ended with an error terminal — delivered to the client, never cached: %s",
+					plan.ClientProtocol(), dto.Target.Provider, plan.BackendProtocol(), plan.ClientProtocol(), terminalWatch.UpstreamErrorEvidence())
+			}
 		case terminalWatch.UpstreamErrorTerminal():
 			// The upstream itself failed the generation after commit. Its error
 			// terminal is the client's fail-closed signal (forwarded byte-identical,
 			// never re-synthesized), but the request log keeps the exchange as a
-			// plain status 200 — on 2026-11-22 forty zcode streams ended in
-			// "upstream stream terminated unexpectedly" with zero serve.log
-			// evidence. This line is that evidence; the excerpt is bounded and
-			// single-line by the watcher.
+			// plain status 200. This line is that evidence; the excerpt is bounded
+			// and single-line by the watcher. (zcode's live shape on 2026-11-22 —
+			// forty streams ending in "upstream stream terminated unexpectedly" —
+			// is a CONVERTED stream and lands in the branch above.)
 			logx.Warnf("[proto=%s provider=%s] upstream error terminal ended the stream — forwarded to the client as-is, nothing synthesized: %s",
 				plan.ClientProtocol(), dto.Target.Provider, terminalWatch.UpstreamErrorEvidence())
 		case end == streamClientGone && !terminalWatch.TerminalSeen():

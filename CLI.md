@@ -70,7 +70,10 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
   终止、不打行）、调度超时（Warn：终态已送达）、上游流先于终止序列结束
   （Warn：合成协议原生错误终态交付客户端、永不缓存）、上游自带错误终态结束流
   （Warn：原样转发客户端、不重复合成，行内带单行有界摘录——该应答在 request log
-  里是普通 status 200，此行是唯一失败证据）。语义权威与判定边界在
+  里是普通 status 200，此行是唯一失败证据）；跨协议转换流（如 zcode：openai 客户端
+  读 anthropic 上游）同样逐事件落归因行——client 断开（Info）、调度超时（Warn）、
+  转换流以错误终态结束（Warn，行内带摘录），`[convert] WARN … scanner error` 仍按
+  进程去重、只记底层错误类别。语义权威与判定边界在
   `docs/architecture/protocol-conversion.md`。request-log 磁盘护栏见
   `request_log.disk_guard`（缺省 enabled/50GiB/95%），契约在
   `docs/architecture/fusion-shadow-cache.md`。

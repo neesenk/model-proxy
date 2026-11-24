@@ -95,6 +95,16 @@ func WatchStreamTerminal(body io.ReadCloser, proto Protocol) *TerminalWatcher {
 	return &TerminalWatcher{body: body, proto: proto}
 }
 
+// ObserveStreamTerminal wraps a stream whose termination another layer owns
+// — a protocol-converted one, whose converter already fails closed by
+// appending its own terminal — so that layer's owner can still attribute how
+// the stream ended. Same shadow scanner as WatchStreamTerminal; it never
+// appends anything, only reports which terminal the client-protocol bytes
+// carried (TerminalSeen / UpstreamErrorTerminal / UpstreamErrorEvidence).
+func ObserveStreamTerminal(body io.ReadCloser, proto Protocol) *TerminalWatcher {
+	return &TerminalWatcher{body: body, proto: proto, observe: true}
+}
+
 // TerminalWatcher is the passthrough terminal scanner. It is NOT a converter:
 // it never rewrites, reorders or drops upstream bytes.
 type TerminalWatcher struct {
@@ -121,6 +131,9 @@ type TerminalWatcher struct {
 	// the bytes still forward untouched, but no terminal is synthesized on a
 	// later end (the scanner can no longer prove one is missing).
 	gaveUp bool
+	// observe: report-only (ObserveStreamTerminal) — the stream is terminated
+	// fail-closed by the converter below it, so this watcher appends nothing.
+	observe bool
 
 	// Delivery state.
 	synth   []byte // pending synthesized terminal, served before the end
@@ -140,10 +153,13 @@ func (w *TerminalWatcher) Synthesized() bool { return w.synthed }
 // on the upstream side.
 func (w *TerminalWatcher) TerminalSeen() bool { return w.terminal || w.sawError }
 
-// UpstreamErrorTerminal reports that the upstream itself ended the stream with
-// a protocol-native error terminal (anthropic `error`, an openai error chunk,
-// responses `response.failed`). Those bytes are forwarded untouched and never
-// re-synthesized, so this — not Synthesized — is the watcher's failure signal.
+// UpstreamErrorTerminal reports that the stream ended with a protocol-native
+// error terminal (anthropic `error`, an openai error chunk, responses
+// `response.failed`). On a watched passthrough stream the upstream itself sent
+// it; those bytes are forwarded untouched and never re-synthesized, so this —
+// not Synthesized — is the watcher's failure signal. On an observed converted
+// stream it is the converter's own fail-closed terminal, which stands for the
+// upstream read failure or error event that made the converter give up.
 func (w *TerminalWatcher) UpstreamErrorTerminal() bool { return w.sawError }
 
 // UpstreamErrorEvidence returns a bounded single-line excerpt of the upstream
@@ -227,13 +243,14 @@ func (w *TerminalWatcher) Close() error { return w.body.Close() }
 
 // finish consumes the upstream end. Synthesis is warranted only when the
 // stream began (an empty 200 must keep the executor's zero-byte failure path),
-// no client-acceptable terminal and no upstream error terminal arrived, and
-// the scanner did not give up (a gave-up scanner cannot prove a terminal is
-// missing).
+// no client-acceptable terminal and no upstream error terminal arrived, the
+// scanner did not give up (a gave-up scanner cannot prove a terminal is
+// missing), and the watcher owns termination — an observing one never
+// synthesizes.
 func (w *TerminalWatcher) finish(err error) {
 	w.done = true
 	w.end = err
-	if !w.terminal && !w.sawError && w.sawData && !w.gaveUp {
+	if !w.observe && !w.terminal && !w.sawError && w.sawData && !w.gaveUp {
 		w.synth = w.synthesize()
 		w.synthed = true
 	}
