@@ -17,8 +17,10 @@ type Usage struct {
 
 // usageProbe parses the usage object of any of the three wire protocols out
 // of one JSON document — a whole non-streaming body, or one SSE data payload
-// (anthropic message_start wraps its usage inside "message").
+// (anthropic message_start wraps its usage inside "message"). Type is the
+// payload's own event name where it carries one (anthropic frames).
 type usageProbe struct {
+	Type  string `json:"type"`
 	Usage *struct {
 		InputTokens     uint64 `json:"input_tokens"`
 		OutputTokens    uint64 `json:"output_tokens"`
@@ -62,11 +64,13 @@ type usageProbe struct {
 // (prompt_tokens_details cached), responses response.usage.*. Streaming
 // (SSE) bodies — the shape every streaming request records — are parsed
 // frame by frame (data lines joined per the spec, dispatched on blank
-// lines) and merged per field by maximum (chat-dialect frames excepted: their
-// input/cache split comes from one frame, see extractSSEUsage): usage frames repeat with
-// cumulative counters (anthropic message_delta, per-chunk chat usage), so
-// the maximum across frames is the stream's final usage. Bodies without a
-// usage object (errors, truncation) yield the zero Usage.
+// lines). Untyped and responses usage frames merge per field by maximum
+// (usage frames repeat with cumulative counters); a chat-dialect frame's
+// input/cache split comes from one frame (see extractSSEUsage); and an
+// anthropic message stream is read off its terminal frame — a field
+// message_delta carries, explicit zero included, is final and message_start
+// supplies only what it omits (see anthropicTerminalUsage).
+// Bodies without a usage object (errors, truncation) yield the zero Usage.
 //
 // Cache accounting is normalized to anthropic buckets: openai's
 // prompt_tokens/input_tokens INCLUDE their cached_tokens detail, so the
@@ -217,13 +221,29 @@ func maxU(a, b uint64) uint64 {
 	return a
 }
 
-// extractSSEUsage walks an SSE text body frame by frame and merges every
-// frame's usage by per-field maximum (see ExtractUsage). Only reached when
-// the whole body is not a JSON document, i.e. genuine stream text.
+// anthropicTerminalUsage reports, per usage field, whether an anthropic
+// message_delta payload carries it. Presence is the whole point: a dialect
+// may report a field as an explicit zero (a cache bucket that stayed empty,
+// input tokens that all moved into cache_read), which a value probe cannot
+// tell from an omitted key.
+type anthropicTerminalUsage struct {
+	Usage *struct {
+		InputTokens   *uint64 `json:"input_tokens"`
+		OutputTokens  *uint64 `json:"output_tokens"`
+		CacheCreation *uint64 `json:"cache_creation_input_tokens"`
+		CacheRead     *uint64 `json:"cache_read_input_tokens"`
+	} `json:"usage"`
+}
+
+// extractSSEUsage walks an SSE text body frame by frame. Untyped and
+// responses usage frames merge per field by maximum (see ExtractUsage); a
+// chat-dialect frame's input/cache split comes from one frame; and an
+// anthropic message stream (message_start / message_delta frames) is read
+// off its terminal frame. Only reached when the whole body is not a JSON
+// document, i.e. genuine stream text.
 func extractSSEUsage(body string) Usage {
-	var u, chat Usage
+	var u, chat, anth Usage
 	var chatPrompt uint64
-	sawChat := false
 	var data []string
 	merge := func() {
 		if len(data) == 0 {
@@ -245,13 +265,46 @@ func extractSSEUsage(body string) Usage {
 					chat.Input, chat.CacheRead, chat.CacheCreation = frame.Input, frame.CacheRead, frame.CacheCreation
 				}
 				chat.Output = max(chat.Output, frame.Output)
-				sawChat = true
 				return
 			}
-			u.Input = max(u.Input, frame.Input)
-			u.Output = max(u.Output, frame.Output)
-			u.CacheRead = max(u.CacheRead, frame.CacheRead)
-			u.CacheCreation = max(u.CacheCreation, frame.CacheCreation)
+			switch {
+			case p.Message != nil && p.Message.Usage != nil:
+				// anthropic message_start: the opening figures. They stand
+				// only until a message_delta reports the field.
+				anth.Input = max(anth.Input, frame.Input)
+				anth.Output = max(anth.Output, frame.Output)
+				anth.CacheRead = max(anth.CacheRead, frame.CacheRead)
+				anth.CacheCreation = max(anth.CacheCreation, frame.CacheCreation)
+			case p.Type == "message_delta":
+				// The terminal usage frame. Dialects disagree on what
+				// message_start holds — step-plan reports the whole prompt as
+				// a placeholder split, kimi-code moves input into cache_read
+				// here — so per-field maximum across the two frames bills
+				// tokens twice (the 2026-11-24 ledger: 94,668 cache-read
+				// tokens indexed where the terminal frames said 60,160). A
+				// field this frame carries is final, explicit zero included;
+				// a native anthropic stream puts only output_tokens here and
+				// keeps its message_start figures. Same rule as the
+				// anthropic→openai streaming converter's read side.
+				var terminal anthropicTerminalUsage
+				if json.Unmarshal([]byte(payload), &terminal) == nil && terminal.Usage != nil {
+					if v := terminal.Usage.InputTokens; v != nil {
+						anth.Input = *v
+					}
+					if v := terminal.Usage.CacheRead; v != nil {
+						anth.CacheRead = *v
+					}
+					if v := terminal.Usage.CacheCreation; v != nil {
+						anth.CacheCreation = *v
+					}
+				}
+				anth.Output = max(anth.Output, frame.Output)
+			default:
+				u.Input = max(u.Input, frame.Input)
+				u.Output = max(u.Output, frame.Output)
+				u.CacheRead = max(u.CacheRead, frame.CacheRead)
+				u.CacheCreation = max(u.CacheCreation, frame.CacheCreation)
+			}
 		}
 	}
 	// Lines are substrings of body (no per-line copy), split exactly like
@@ -275,12 +328,12 @@ func extractSSEUsage(body string) Usage {
 		}
 	}
 	merge() // EOF dispatches a trailing unterminated frame
-	if sawChat {
-		u.Input = max(u.Input, chat.Input)
-		u.Output = max(u.Output, chat.Output)
-		u.CacheRead = max(u.CacheRead, chat.CacheRead)
-		u.CacheCreation = max(u.CacheCreation, chat.CacheCreation)
-	}
+	// One stream is one dialect; the cross-dialect merge only matters for a
+	// body mixing shapes, where the largest reading of each field is kept.
+	u.Input = max(u.Input, chat.Input, anth.Input)
+	u.Output = max(u.Output, chat.Output, anth.Output)
+	u.CacheRead = max(u.CacheRead, chat.CacheRead, anth.CacheRead)
+	u.CacheCreation = max(u.CacheCreation, chat.CacheCreation, anth.CacheCreation)
 	return u
 }
 

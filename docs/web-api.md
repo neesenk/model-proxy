@@ -299,7 +299,7 @@ pending 的会话；否则 UI 会在后台任务仍可能落盘时提前得到 4
 
 会话聚合输出每个 `session_id` 的时间跨度、请求数（含 shadow 单列）、错误数、providers/models、
 token 总量（`ExtractUsage` 兼容 anthropic/chat/responses 三种响应体形状；流式响应按记录的
-SSE 文本逐帧提取、按字段取最大值合并——usage 帧以累计计数重复出现（chat 方言例外：input 与 cache 份额是同一个 prompt_tokens 的拆分，取自单帧——prompt_tokens 最大的最新一帧；step-plan 每 chunk 重复 usage 且前段缺 cached_tokens，逐字段取最大会把缓存份额算两次）；cache read/creation
+SSE 文本逐帧提取、按字段取最大值合并——usage 帧以累计计数重复出现（两类方言例外：chat 的 input 与 cache 份额是同一个 prompt_tokens 的拆分，取自 prompt_tokens 最大的最新一帧；anthropic `message_start`/`message_delta` 按终帧读取——规则与方言依据见 `docs/architecture/protocol-conversion.md`）；cache read/creation
 单列，openai 形状的 `prompt_tokens`/`input_tokens` 内含 `cached_tokens`，提取时从 input 中
 扣除以免与 cache 桶双计）与等价 USD 成本。生产读路径走尾随索引
 （`Indexer.SessionSummaries`）：**对每个入列 session 的全部留存历史精确聚合**（留存＝热窗内的

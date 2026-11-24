@@ -222,11 +222,16 @@ func scanWireFixture(t *testing.T, name string) TokenUsage {
 	return tc.Snapshot()[k]
 }
 
-// TestUsageScannerAnthropicCacheWireShapes pins cache accounting on real
-// recorded anthropic-protocol streams: dialects that send zero/null cache
-// usage in message_start and the real values only in message_delta must still
-// count (zhipu, aqp, kimi-code), and a dialect repeating the same cumulative
-// cache_read in BOTH frames must count it once, not twice (deepseek).
+// TestUsageScannerAnthropicCacheWireShapes pins usage accounting on real
+// recorded anthropic-protocol streams. message_delta is the terminal usage
+// frame: a field it carries — including an explicit zero — is the stream's
+// final value, and message_start supplies only what it omits (same rule as
+// requestlog.ExtractUsage). Dialects that send zero/null usage in
+// message_start still count (zhipu, aqp); ones whose terminal frame replaces
+// the message_start figures are read off the terminal frame (kimi-code moves
+// input into cache_read, step-plan reports a placeholder split at
+// message_start — regression, serve audit 2026-11-24); and one repeating the
+// same cumulative values in BOTH frames counts them once (deepseek).
 func TestUsageScannerAnthropicCacheWireShapes(t *testing.T) {
 	cases := []struct {
 		fixture string
@@ -236,8 +241,12 @@ func TestUsageScannerAnthropicCacheWireShapes(t *testing.T) {
 		{"anthropic_zhipu.sse", TokenUsage{Input: 12, Output: 3, Requests: 1}},
 		// message_start cache fields null; message_delta cache_read 64.
 		{"anthropic_aqp_tool.sse", TokenUsage{Input: 112, Output: 11, CacheRead: 64, Requests: 1}},
-		// message_start input 222 / cache_read 0; message_delta cache_read 222.
-		{"anthropic_kimi-code_tool.sse", TokenUsage{Input: 222, Output: 82, CacheRead: 222, Requests: 1}},
+		// message_start input 222 / cache_read 0; message_delta input 0 /
+		// cache_read 222 — 222 prompt tokens, every one a cache read.
+		{"anthropic_kimi-code_tool.sse", TokenUsage{Output: 82, CacheRead: 222, Requests: 1}},
+		// message_start input 1 / cache_read 10533 (the whole prompt);
+		// message_delta input 5670 / cache_read 4864 (the real split).
+		{"anthropic_step-plan_tool.sse", TokenUsage{Input: 5670, Output: 672, CacheRead: 4864, Requests: 1}},
 	}
 	for _, c := range cases {
 		if got := scanWireFixture(t, c.fixture); got != c.want {
@@ -245,13 +254,11 @@ func TestUsageScannerAnthropicCacheWireShapes(t *testing.T) {
 		}
 	}
 
-	// deepseek repeats cache_read_input_tokens:256 in message_start AND
-	// message_delta — max-merge must count it once (naive += would give 512).
-	// (Input is 39+39=78 under the scanner's long-standing += semantics for
-	// converted-route input; only the cache merge rule is pinned here.)
+	// deepseek repeats the same cumulative values in message_start AND
+	// message_delta — they count once (naive += would give 512 cache reads).
 	got := scanWireFixture(t, "anthropic_deepseek_tool.sse")
-	if got.CacheRead != 256 || got.CacheCreation != 0 || got.Output != 72 {
-		t.Errorf("deepseek double-frame cache: committed = %+v, want cache_read=256 cache_creation=0 output=72", got)
+	if want := (TokenUsage{Input: 39, Output: 72, CacheRead: 256, Requests: 1}); got != want {
+		t.Errorf("deepseek double-frame usage: committed = %+v, want %+v", got, want)
 	}
 }
 

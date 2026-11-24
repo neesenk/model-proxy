@@ -131,7 +131,12 @@ type UsageScanner struct {
 	// anth/oai carry the per-shape snapshot-vs-delta merge state (see
 	// usageShapeState); responses snapshots merge by max inline.
 	anth, oai usageShapeState
-	done      bool
+	// anthAcc is the anthropic-frame contribution (message_start /
+	// message_delta). Its figures are not final until message_delta arrived —
+	// that frame replaces the message_start figures by field presence — so it
+	// is kept apart from acc and folded in at Commit.
+	anthAcc TokenUsage
+	done    bool
 
 	// Non-stream fallback: when the first payload byte is '{' the body is a
 	// plain JSON response (not SSE), so it is retained (capped) for one whole-
@@ -174,6 +179,13 @@ func (s *UsageScanner) Commit() {
 	if !s.sseUsage && s.jsonMode {
 		s.parseJSONUsage()
 	}
+	// Cross-shape totals still sum (an anthropic message_start input plus an
+	// openai trailing chunk are separate reports); the cache buckets are one
+	// bucket however many shapes reported them.
+	s.acc.Input += s.anthAcc.Input
+	s.acc.Output += s.anthAcc.Output
+	s.acc.CacheRead = max(s.acc.CacheRead, s.anthAcc.CacheRead)
+	s.acc.CacheCreation = max(s.acc.CacheCreation, s.anthAcc.CacheCreation)
 	s.tc.Commit(s.key, s.acc)
 	if s.onAgent != nil && (s.acc.Input > 0 || s.acc.Output > 0) {
 		s.onAgent(s.acc)
@@ -284,37 +296,55 @@ func (s *UsageScanner) parseLine(line []byte) {
 				CacheReadTokens     uint64 `json:"cache_read_input_tokens"`
 			} `json:"usage"`
 		} `json:"message"`
-		Usage struct {
-			InputTokens         uint64 `json:"input_tokens"`
-			OutputTokens        uint64 `json:"output_tokens"`
-			CacheCreationTokens uint64 `json:"cache_creation_input_tokens"`
-			CacheReadTokens     uint64 `json:"cache_read_input_tokens"`
+		// message_delta is the terminal usage frame and its fields are
+		// pointers because presence is the signal: an explicit zero is a
+		// final value (a cache bucket that stayed empty, input tokens that
+		// all moved into cache_read), not a missing one.
+		Usage *struct {
+			InputTokens         *uint64 `json:"input_tokens"`
+			OutputTokens        *uint64 `json:"output_tokens"`
+			CacheCreationTokens *uint64 `json:"cache_creation_input_tokens"`
+			CacheReadTokens     *uint64 `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal(payload, &anth) == nil {
-		if anth.Type == "message_start" {
+		switch anth.Type {
+		case "message_start":
 			s.sseUsage = true
-			s.anth.mergeField(&s.acc.Input, anth.Message.Usage.InputTokens, nil, 0)
-			s.acc.CacheCreation = max(s.acc.CacheCreation, anth.Message.Usage.CacheCreationTokens)
-			s.acc.CacheRead = max(s.acc.CacheRead, anth.Message.Usage.CacheReadTokens)
-		}
-		if anth.Type == "message_delta" {
+			// The opening figures; each stands only until a message_delta
+			// reports the same field.
+			s.anth.mergeField(&s.anthAcc.Input, anth.Message.Usage.InputTokens, nil, 0)
+			s.anthAcc.CacheCreation = max(s.anthAcc.CacheCreation, anth.Message.Usage.CacheCreationTokens)
+			s.anthAcc.CacheRead = max(s.anthAcc.CacheRead, anth.Message.Usage.CacheReadTokens)
+		case "message_delta":
 			s.sseUsage = true
-			s.anth.mergeField(nil, 0, &s.acc.Output, anth.Usage.OutputTokens)
-			// A native anthropic stream carries only output_tokens here, but the
-			// protocol-conversion transformer (openai→anthropic) emits input_tokens
-			// in message_delta too (openai delivers prompt_tokens at the trailing
-			// chunk, after message_start fired). Read it here so converted routes
-			// attribute input tokens (otherwise they'd be permanently 0).
-			s.anth.mergeField(&s.acc.Input, anth.Usage.InputTokens, nil, 0)
-			// Cache buckets merge by per-field MAX, never +=: dialects deliver
-			// the real values only here (zhipu/aqp/shopee/kimi-code send zero or
-			// null cache usage in message_start), while others repeat the same
-			// cumulative value in BOTH frames (deepseek cache_read:256 in
-			// message_start and message_delta) — addition would double-count.
-			// Same per-field-max rule as requestlog's extractSSEUsage.
-			s.acc.CacheCreation = max(s.acc.CacheCreation, anth.Usage.CacheCreationTokens)
-			s.acc.CacheRead = max(s.acc.CacheRead, anth.Usage.CacheReadTokens)
+			// Its counts are cumulative and final: a field it carries
+			// replaces the message_start figure, a field it omits (a native
+			// anthropic stream puts only output_tokens here) leaves it. A
+			// native stream that omits input_tokens here keeps the
+			// message_start input; a converted route (openai→anthropic)
+			// reports input only here, after message_start fired with zeros.
+			// Per-field MAX across both frames used to stand in for this and
+			// billed tokens twice: kimi-code moves input into cache_read at
+			// this event (input 222 → 0, cache_read 0 → 222), and step-plan
+			// reports the whole prompt at message_start as a placeholder
+			// split. Same rule as requestlog.ExtractUsage and the
+			// anthropic→openai converter's read side.
+			if anth.Usage != nil {
+				if anth.Usage.OutputTokens != nil {
+					s.anth.mergeField(nil, 0, &s.anthAcc.Output, *anth.Usage.OutputTokens)
+				}
+				if v := anth.Usage.InputTokens; v != nil {
+					s.anthAcc.Input = *v
+					s.anth.lastIn = *v
+				}
+				if v := anth.Usage.CacheCreationTokens; v != nil {
+					s.anthAcc.CacheCreation = *v
+				}
+				if v := anth.Usage.CacheReadTokens; v != nil {
+					s.anthAcc.CacheRead = *v
+				}
+			}
 		}
 	}
 	var oai struct {
