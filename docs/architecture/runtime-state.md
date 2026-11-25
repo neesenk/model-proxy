@@ -72,6 +72,13 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
   Re-login 按钮）；组合根把它经 `runtime.CredentialErrClass` 分类
   （session-expired / not-logged-in / auth；网络/5xx 不是凭据问题，不徽标）后作为
   Schedule 链节点的 `credential` 徽标——**只解释不重排**，排名仍按 last-known-good。
+- **失败文本即证据**：用量端点答 200 但 body 不是该 provider 的格式时（kimi-code
+  `/usages`、opencode-go `/usage`、zhipu/zcode 配额），错误串为
+  `not <provider> <endpoint> format: <片段>`——`provider.quotaFormatSnapshot` 取响应 body
+  的前 120 字节并折成单行，空 body 写 `empty body`。该串进 `[quota] … sync failed`
+  日志、`/api/status` 的 `SyncErr` 与 `usage` 输出，复发时据此区分网关 HTML、错误信封与
+  空 body。分类器（`IsTransientQuotaErr` / `CredentialErrClass`）对整串做子串匹配，片段
+  里的词同样参与分类。
 - reload 侧（`ReplaceGeneration`）：quota cache 跨 generation 存活，只在同一临界区
   内对 live key 集合（config 名 + 池化虚拟 `name#<accountID>`）剪枝——被移除的
   provider/登出的账号原子丢弃，存活者继续用 cache 直到 reload 后的 `PollAsync`
@@ -191,11 +198,12 @@ HTTP listener、在途 handler、SIGHUP reload loop，以及 `internal/web` task
 完成。8 秒 deadline 小于 supervisor 的 10 秒 worker hard-kill 窗口，为最终持久化
 留出时间。信号 goroutine 只发起 shutdown；不得在其中直接 `os.Exit` 绕过上述顺序。
 deadline 超时的 Warn 带上 gate 的在途 handler 计数（`forcing active connections
-closed (in-flight handlers: N)`）：强关截断的是**已提交的流式应答**，而 executor
-看不到连接由谁关闭，这些流在它那里与 client 断开同形——N 是重启影响面的唯一
-权威数字（11-22 21:14 重启强关 37 条流，当时只能靠扫 request log 反推）。长生成
-的 drain 存活率取决于 8 秒预算，批任务在跑时重启必然截断在途流。锁定测试
-`internal/cli/serve/shutdown_inflight_test.go`。
+closed (in-flight handlers: N)`）：N 是 deadline 时刻仍未返回的已接纳 handler 数——
+以已提交的流式应答为主，非流式在途请求与 `/api/events` 订阅同样计入，所以它是重启
+影响面的上界，不等于被截断的流数；executor 看不到连接由谁关闭，被截断的流在它
+那里与 client 断开同形（11-22 21:14 重启强关 37 条流，当时只能靠扫 request log
+反推）。长生成的 drain 存活率取决于 8 秒预算，批任务在跑时重启必然截断在途流。
+锁定测试 `internal/cli/serve/shutdown_inflight_test.go`。
 
 ## 锁顺序
 

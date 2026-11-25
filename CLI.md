@@ -94,7 +94,7 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
 | 函数 | 行为 |
 |---|---|
 | `mask(id)` | 账号 id 掩码：首 2 + `…` + 末 2（如 `ab…ef`）。账号 id 在 `logout`/`login` 确认行、`usage` 池化块头用。`/api/accounts` 返回**不掩码**的 id（UI 要用它删除）。 |
-| `truncate(s, n)` | `s[:n]+"..."`（n 之外截断），用于上游错误体摘录。 |
+| `truncate(s, n)` | 先把换行序列（`\r\n`/`\n`/`\r`）折成单个空格，再 `s[:n]+"..."`（n 之外截断）——结果恒为单行，用于嵌入单行错误/日志的上游错误体摘录。 |
 | `compactNum(n)` | 紧凑数字（千位 K / 百万 M），用于计数器列。 |
 | `pad(s, n)` | 左对齐补空格到 n 列；`len(s)>=n` 时原样（不截断）。 |
 | `providerNames(cfg)` | 配置里的 provider 名，逗号分隔，**已排序**。用于「unknown provider」错误。 |
@@ -187,9 +187,10 @@ reload 结果在 daemon 的 **log 文件**里（`[reload] config reloaded succes
   会完成 save+reload。随后 final flush request log、Responses state、stats 和
   quota，正常退出。8 秒内未 drain 时强制取消活动连接，并记录
   `[shutdown] HTTP drain exceeded 8s (...); forcing active connections closed (in-flight handlers: N)`
-  （N = 被强关的在途 handler 数，即本次重启截断的流式应答数）；handler 完成退栈后
-  继续 final flush。被强关的流在 executor 侧只体现为上述 client 断开归因行
-  （executor 看不到连接由谁关闭）——重启窗口内的 client 断开行以本行的 N 为准。
+  （N = deadline 时刻仍未返回的已接纳 handler 数——以 LLM 流式应答为主，非流式在途
+  请求、`/api/events` 订阅等同样计入，所以 N 不等于被截断的流数，是它的上界）；handler
+  完成退栈后继续 final flush。被强关的流在 executor 侧只体现为上述 client 断开归因行
+  （executor 看不到连接由谁关闭）——核对重启窗口内的 client 断开行时以本行的 N 为上界。
 
 ### 手动重启（换二进制后）：停+启必须原子完成
 
@@ -491,11 +492,11 @@ Provider:   <PROVNAME>
 | zhipu (`ZhipuProvider.Usage`) | 5h/weekly token 限额 + 月度时间限额（带进度条）；`TIME_LIMIT` 按 MCP 工具（search-prime/web-reader/zread）分解；回退：OpenAI 风格模型列表 |
 | deepseek (`DeepSeekProvider.Usage`) | `Available:  no (insufficient balance)`（余额不足时）；各币种 `total/granted/topped-up` 余额 |
 | volcengine (`VolcengineProvider.Usage`) | 无 AK/SK：`Note:` 说明 + 列 config 模型；有 AK/SK：`Plan: <PLAN_TYPE>` + `AFPFiveHour/Daily/Weekly/Monthly` 各窗口 Quota/Used/Remaining/ResetTime |
-| kimi-code (`KimiCodeProvider.Usage`) | `Plan:       Kimi Code membership`；`Weekly limit`（Ultimate，7d）+ `5h limit`（Short，5h）+ 其他限额窗口（带进度条/重置时间）+ `Extra usage`/`Monthly cap` 钱包窗口（`n/a`）。取自 `/usages`。拉取失败：`Usage:      (unavailable: <ERR>)` + 控制台提示 + 列 config 模型 |
+| kimi-code (`KimiCodeProvider.Usage`) | `Plan:       Kimi Code membership`；`Weekly limit`（Ultimate，7d）+ `5h limit`（Short，5h）+ 其他限额窗口（带进度条/重置时间）+ `Extra usage`/`Monthly cap` 钱包窗口（`n/a`）。取自 `/usages`。拉取失败：`Usage:      (<ERR>)`（红色；错误串为空时打印 `(unavailable)`) + 控制台提示 + 列 config 模型 |
 | step-plan (`StepPlanProvider.Usage`) | `Billing:    Credit 月池 …`；`Usage:      (console-only; no public Credit API …)`；`Details:    <订阅页 URL>` + 列 config 模型（qwen-plan 同模式） |
 | mimo (`MiMoProvider.Usage`) | `Billing:    pay-as-you-go (no API-key billing endpoint)`；`Usage:` 两行 Notes（控制台 URL）+ 列 config 模型（qwen-plan/step-plan 同模式；余额端点走浏览器 SSO cookie，API key 拿不到） |
 | openrouter (`OpenRouterProvider.Usage`) | `Account:   <key label>`；`Billing:   prepaid credits (pay-as-you-go)`；窗口行：Key credit cap（可选，带剩余百分比）/ Spend (today|this week|this month)（带 UTC 重置倒计时）/ Free-model req/day；Notes：充值页 URL（+free tier 标记）。取自 `GET /api/v1/key` |
-| opencode-go (`OpenCodeGoProvider.Usage`) | `Plan:       OpenCode Go`；窗口行 `5h limit`/`Weekly limit`（Short，5h/7d）+ `Monthly limit`（Ultimate，带进度条/重置时间/耗尽 ETA）。取自 `GET <openai_base_url>/usage`（percent=已用百分比；端点未公开）。拉取失败：`Usage:      (unavailable: <ERR>)` + 控制台提示 + 列 config 模型 |
+| opencode-go (`OpenCodeGoProvider.Usage`) | `Plan:       OpenCode Go`；窗口行 `5h limit`/`Weekly limit`（Short，5h/7d）+ `Monthly limit`（Ultimate，带进度条/重置时间/耗尽 ETA）。取自 `GET <openai_base_url>/usage`（percent=已用百分比；端点未公开）。拉取失败：`Usage:      (<ERR>)`（红色；错误串为空时打印 `(unavailable)`) + 控制台提示 + 列 config 模型 |
 
 重置时间格式：`<duration>(at <time>)`；`FormatResetAt`：今天显示 `HH:MM`，否则 `MM-DD HH:MM`。
 
@@ -1067,7 +1068,7 @@ unpin <route> [--config PATH]
 replay <id> --to <provider> [--config PATH]
 ```
 
-逻辑（`internal/cli/diag/replay.go` 的 `CmdReplay`）：从 daemon 的 `GET /api/requests/<id>` 取回原请求（method/path/body，需 `request_log.enabled`），再以 `x-mp-force-provider: <provider>` 头把同一 body 重发到 proxy（该头对**这一条请求**做一次性 provider 钉死，不动全局 pin），把新后端的响应写 stdout，用于并排对比。
+逻辑（`internal/cli/diag/replay.go` 的 `CmdReplay`）：从 daemon 的 `GET /api/requests/<id>` 取回原请求（method/path/body，需 `request_log.enabled`），再以 `x-mp-force-provider: <provider>` 头把同一 body 重发到 proxy（该头对**这一条请求**做一次性 provider 钉死，不动全局 pin），把新后端的响应写 stdout，用于并排对比。只能重放仍在可查窗口内的记录（热窗 `request_log.hot_retention`，见 `docs/web-api.md` 的 `/api/requests` 行）；全链失败（代理回 502/429）的请求其终态行同样保存请求体，可以重放。
 
 ### stdout
 
@@ -1080,7 +1081,7 @@ replay <id> --to <provider> [--config PATH]
 ### 失败（stderr `✗ <ERR>` + exit 1）
 
 - 不可达：`cannot reach daemon: <ERR>`
-- 无日志：`no request log for id <ID> (is request_log.enabled on?)`（404）
+- 无日志：`no request log for id <ID> (is request_log.enabled on?)`（404——request_log 未开，或该记录已滚出热窗成为离线归档；提示文案不区分这两种成因）
 - 记录无 body：`record <ID> has no captured request body`
 - 上游 ≥400：`✗ <BODY_TRUNC_400>`
 
@@ -1245,7 +1246,7 @@ guard disallow <content-hash> [--config PATH]
 routing report [--route NAME] [--since DUR|TIME] [--retry-window DUR] [--json] [--config PATH]
 ```
 
-逻辑（`internal/cli/diag/routing_report.go` 的 `CmdRouting` -> `CmdRoutingReport`）：离线只读请求日志索引（`<request_log.dir>/index.db`），不访问 daemon。输出四类报告：
+逻辑（`internal/cli/diag/routing_report.go` 的 `CmdRouting` -> `CmdRoutingReport`）：离线只读请求日志索引（`<request_log.dir>/index.db`），不访问 daemon；索引只覆盖热窗（`request_log.hot_retention`），`--since` 超出热窗的部分没有数据。输出四类报告：
 
 1. **弱标签成功率**：按 (route, grade) 汇总 `ok`（HTTP 200 + response_size>0 + 无错误类 diagnostics）、`no_retry`（同 SessionID+TurnKey 在 retry-window 内无重发）、`no_escalation`（同 SessionID 后续未触发 latch 升级）；三者全过 = `weak_ok`。
 2. **Selector 混淆矩阵**：预测档（`routing.selector.choice`） vs 实际生效档（`routing.grade`），按 difficulty 分桶（low<0.3 / mid<0.7 / high≥0.7），`enforced=true` 与 shadow 分组。

@@ -238,7 +238,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	// disconnect aborts the wait. Skipped for one-shot force-provider overrides
 	// (replay wants the answer now).
 	retryWait := cfg.Scheduling.RetryWaitDuration()
-	var st serveState
+	st := serveState{dispatchStarted: time.Now()}
 	var sawHard, sawCool bool
 	// Count bytes written to the client so empty_ok can detect a 200 commit with
 	// a zero-byte final response body. The wrapper is request-scoped: only the
@@ -349,7 +349,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		}
 		// Terminal: every target failed across all passes — classify and answer.
 		p.recordLatchOutcome(execution, res)
-		p.writeAllTargetsFailed(w, r, requestID, proto, exposed, agent, clientSession, res, decision)
+		p.writeAllTargetsFailed(w, &execution, &st, res, decision)
 		return
 	}
 }
@@ -466,24 +466,26 @@ const statusClientGone = 499
 // verdict): pure rate-limit → 429 + Retry-After (the upstreams' own answer,
 // per RFC 9110); any hard failure → 502. Attribute the failure to the calling
 // agent so failing-only agents stay visible (first-tried target = where the
-// request WAS directed).
+// request WAS directed). The answer is also the request's terminal request-log
+// row (see logAllTargetsFailed): it was answered, so it must not read as an
+// unanswered request whose legs stand alone.
 func (p pipeline) writeAllTargetsFailed(
 	w http.ResponseWriter,
-	r *http.Request,
-	requestID, proto, exposed, agent, sessionID string,
+	req *serveRequest,
+	st *serveState,
 	res serveResult,
 	decision routing.FailureDecision,
 ) {
-	if p.svc.Agents != nil && agent != "" && res.firstTried.Provider != "" {
-		p.svc.Agents.IncRequests(agent, res.firstTried.Provider, res.firstTried.Model)
-		p.svc.Agents.IncFailure(agent, res.firstTried.Provider, res.firstTried.Model)
+	if p.svc.Agents != nil && req.agent != "" && res.firstTried.Provider != "" {
+		p.svc.Agents.IncRequests(req.agent, res.firstTried.Provider, res.firstTried.Model)
+		p.svc.Agents.IncFailure(req.agent, res.firstTried.Provider, res.firstTried.Model)
 	}
 	status := http.StatusBadGateway
-	msg := fmt.Sprintf("all targets failed for model %q", exposed)
+	msg := fmt.Sprintf("all targets failed for model %q", req.exposed)
 	if decision.RateLimited {
 		w.Header().Set("Retry-After", strconv.Itoa(decision.RetryAfterSeconds))
 		status = http.StatusTooManyRequests
-		msg = fmt.Sprintf("all providers for model %q are rate-limited; retry after %ds", exposed, decision.RetryAfterSeconds)
+		msg = fmt.Sprintf("all providers for model %q are rate-limited; retry after %ds", req.exposed, decision.RetryAfterSeconds)
 	}
 	// Live monitor (#6): every target failed → emit an end event so the live
 	// view surfaces the failure (a retry-looping agent that always errors is
@@ -491,19 +493,67 @@ func (p pipeline) writeAllTargetsFailed(
 	p.svc.Events.Publish(observeevents.Event{
 		Type:      "end",
 		Ts:        time.Now().UnixMilli(),
-		RequestID: requestID,
-		SessionID: sessionID,
-		Agent:     agent,
-		Protocol:  proto,
-		Exposed:   exposed,
+		RequestID: req.requestID,
+		SessionID: req.clientSession,
+		Agent:     req.agent,
+		Protocol:  req.proto,
+		Exposed:   req.exposed,
 		Status:    status,
 	})
 	http.Error(w, msg, status)
+	p.logAllTargetsFailed(req, st, w.Header(), []byte(msg+"\n"), status)
+}
+
+// terminalLogProvider is the provider of the all-targets-failed terminal row:
+// the proxy's own answer, not any upstream's — same convention as a cache
+// hit's "(cache)".
+const terminalLogProvider = "(failover)"
+
+// logAllTargetsFailed records the terminal answer just written to the client
+// as the request's non-attempt request-log row. Without it the failover chain
+// ended with legs only: the legs belong to a request that was in fact
+// answered, yet every surface that excludes attempt_only rows (key usage,
+// session aggregates, replay) never saw it, and the newest leg stood alone as
+// if the client had disconnected. http.Error appends the newline, so the body
+// and size logged here are the exact client bytes. The attempt index sits one
+// past the last leg, so the detail view orders every hop before the terminal.
+func (p pipeline) logAllTargetsFailed(req *serveRequest, st *serveState, header http.Header, body []byte, status int) {
+	if p.svc.ReqLog == nil {
+		return
+	}
+	var schedule *requestlog.ScheduleDecision
+	if st.scheduleSource != "" || st.fitNote != "" {
+		schedule = &requestlog.ScheduleDecision{Source: st.scheduleSource, Note: st.fitNote}
+	}
+	requestlog.Complete(p.svc.ReqLog, requestlog.Input{
+		StartedAt:      st.dispatchStarted,
+		RequestID:      req.requestID,
+		SessionID:      req.clientSession,
+		Protocol:       req.proto,
+		Method:         req.request.Method,
+		Path:           req.request.URL.Path,
+		CalledModel:    req.calledModel,
+		Exposed:        req.exposed,
+		Provider:       terminalLogProvider,
+		Agent:          req.agent,
+		APIKeyID:       webauth.KeyIDFrom(req.request.Context()),
+		Attempt:        st.attempt,
+		Status:         status,
+		RequestBody:    req.origBody,
+		ResponseHeader: header,
+		Routing:        st.routing,
+		Schedule:       schedule,
+		Profile:        projectLogProfile(p.requestLogProfile(st, req.origBody)),
+	}, body, int64(len(body)), false)
 }
 
 // serveState carries the per-request pieces of state that must survive a
 // cooldown wait-retry round (serveOnce is otherwise re-entrant).
 type serveState struct {
+	// dispatchStarted is when the first failover pass began; it is the
+	// latency clock of the all-targets-failed terminal row, which spans every
+	// pass and cooldown wait of the request.
+	dispatchStarted   time.Time
 	retriedForContext bool // the larger-context retry is one-shot per request
 	attempt           int  // monotonic target-attempt index for the request log (ti resets on a context retry)
 	profiled          bool // request profile computed (see requestProfile)
@@ -971,12 +1021,16 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 			logx.Warnf("[proto=%s model=%s] target %d (%s/%s) failed (status %d); trying next",
 				proto, exposed, ti, t.Provider, t.Model, result.AttemptStatus)
 		}
-		// Attempt row for the failed leg: same request id and attempt number
-		// as the eventual committed row, attempt_only-marked so usage/session
-		// aggregates keep counting committed calls. Without it the failover
+		// Attempt row for the failed leg: same request id as the request's
+		// committed or terminal row, attempt_only-marked so usage/session
+		// aggregates keep counting answered calls. Without it the failover
 		// chain leaves no request-log trace (only the "trying next" warn line)
-		// — a 429 storm that re-routed a whole session was unobservable.
-		if p.svc.ReqLog != nil && ti < len(ordered)-1 {
+		// — a 429 storm that re-routed a whole session was unobservable. Every
+		// hop is written, the last one included: it is the proximate cause of
+		// an all-targets-failed terminal, and its legs fold into that terminal
+		// row (or into a later pass's commit) like any paired leg. A client-
+		// gone hop never reaches this point.
+		if p.svc.ReqLog != nil {
 			status := result.AttemptStatus
 			if status == 0 {
 				status = http.StatusBadGateway

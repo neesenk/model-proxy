@@ -123,7 +123,7 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 #   enabled: true
 # stats:                    # 调用统计持久化（SQLite，默认开启，30 天保留）
 #   db_path: ~/.model-proxy/stats.db # 显式设置时需绝对路径（~ 展开）
-#   retention: 30d          # 0 = 永久
+#   retention: 720h         # 30d；"0" = 永久（须是 Go duration：h/m/s，不能写 30d）
 # cache:                    # 精确响应缓存（默认关；逐字节重复的请求直接命中，省上游配额）
 #   enabled: true
 #   ttl: 10m
@@ -138,7 +138,9 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 #                           # /api/requests?kind=mcp 读拆分流。默认关，重启生效
 #   hot_retention: 168h     # 热窗（默认 7d，重启生效）：滚出热窗的轮转文件压缩为 <名>.log.zst
 #                           # 离线归档——Requests 页与 /api/requests 的可查窗口即热窗，更早记录只能
-#                           # 离线读取（zstd -d < 文件.log.zst | jq）。须 < retention，"0" 关闭归档
+#                           # 离线读取（zstd -d < 文件.log.zst | jq）。须 < retention，"0" 关闭归档。
+#                           # 未配置时按默认 168h 参与校验：retention ≤ 7d 的配置必须显式设置
+#                           # 本键（或设 "0"），否则启动被拒
 #   disk_guard:             # 磁盘护栏（缺省 enabled/50GiB/95%，可不写）：卷空闲 <min_free_bytes
 #     min_free_bytes: 53687091200  # 或使用率 >=max_used_percent 时，每小时 sweep 按最旧优先
 #     max_used_percent: 95         # 删轮转文件至条件解除；活动文件与 index.db 永不删
@@ -310,7 +312,7 @@ model-proxy stats --json           # 原始 JSON（便于 jq）
 
 # 影子评测与重放（需 request_log.enabled）
 model-proxy shadow report          # 影子聚合对比：样本数/状态一致率/延迟差/大小比
-model-proxy replay <request_id> --to kimi-code   # 用另一个后端重答历史中任意一条请求
+model-proxy replay <request_id> --to kimi-code   # 用另一个后端重答热窗内的任意一条请求（含全链失败的）
 model-proxy routing report         # 路由策略离线对账（离线只读 index.db）：弱标签成功率/selector 混淆矩阵/成本基线/判定开销
 model-proxy prune 7               # 一次性清理 request log（只保留最近 7 天；--dry-run 预览；不改 retention 配置）
 
@@ -641,10 +643,10 @@ routes:
 
 每个对外模型可配多个 `provider/model` 目标。代理按下面的规则选目标、失败逐一 failover，并对持续出错的 provider 熔断，避免每请求都去撞一个挂掉的上游：
 
-- **熔断**（超时 / 5xx / 连接错误 / 401 刷新后仍失败）：连续 `circuit_threshold`（默认 3）次**且 streak 跨至少 `circuit_persist`（默认 6s，`"0"` 关闭）**→ 开路 `circuit_cooldown`（默认 10m），后半开放 1 个探针请求，成功关、失败再开。开路期间该 provider 被跳过。持续门槛是对外网络噪音容忍：代理链回收/LB 滚动一次杀 N 条在途连接，不应被读成 N 个独立的 provider 死亡证据；单请求的 failover 不受影响、立即发生。
+- **熔断**（超时 / 5xx / 连接错误 / 401 刷新后仍失败 / 账号停用 403）：连续 `circuit_threshold`（默认 3）次**且 streak 跨至少 `circuit_persist`（默认 6s，`"0"` 关闭）**→ 开路 `circuit_cooldown`（默认 10m），后半开放 1 个探针请求，成功关、失败再开。开路期间该 provider 被跳过。持续门槛是对外网络噪音容忍：代理链回收/LB 滚动一次杀 N 条在途连接，不应被读成 N 个独立的 provider 死亡证据；单请求的 failover 不受影响、立即发生。
 - **连接快失败重派**：`unexpected EOF`/`EOF`/`connection reset`/`broken pipe`/`connection refused` 这类毫秒级返回的连接错误先在同一 target 重派一次（新连接），成功即吸收（记 success、首跳不记失败），仍失败才计数进熔断并 failover。超时（时间预算已烧掉）与客户端断开不重派；重派不占 401 refresh 的重试名额。
 - **限频跳过**（429，三维分类）：先采纳响应里的精确重置时间（body 文本 "reset after 2h5m"/"Resets in 164h"/RFC3339，上限 7 天），其次 `Retry-After` 头；都没有时按分类退避——日配额锁到本地次日 0 点、配额耗尽（余额/套餐窗口）等 `quota_cooldown`（默认 1h）、普通频率限制等 `rate_limit_backoff`（默认 60s）。不计入熔断。分类（transient/quota/daily）在 `serve status`（`rl:quota`/`rl:daily`）和 Web UI 健康 pill 上可见。
-- **上游 403**：明确的账号停用错误计入该账号的熔断；识别出的网关挑战可以换下一候选，普通权限拒绝保留原响应。分类细节见 `docs/architecture/routing-and-failure.md`。
+- **上游 403**（普通转发；Fusion panel/judge 腿不在此列）：明确的账号停用错误计入该账号的熔断并换下一候选——末候选也不例外，回 502 而不透传账号错误；识别出的网关挑战可以换下一候选（末候选保留原始 403），普通权限拒绝保留原响应。分类细节见 `docs/architecture/routing-and-failure.md`。
 - **模型级锁定**（`model_lockout`，默认 10m）：上游 404（模型被移除）、400/403「模型不可用/无权限」、空 200（`Content-Length: 0` 直接 failover；流式零字节本次难免、下次 failover）→ 只锁 `(provider, model)`，**不毒化整个账号**——同账号的其他模型照常服务。单目标路由的末 target 仍把上游原始错误（404/400）原样回给客户端。
 - **400 自动剥参**：上游 400 报「Unsupported parameter: 'xxx'」时，自动把该顶层参数记入 per-provider blocklist，当次剥离重试一次、后续请求预防性剥离（`model`/`messages` 等关键字段永不剥）。
 - **冻结态持久化 + unfreeze/freeze**：限频/熔断冷却、模型锁、剥参 blocklist 随 `quota_state.json` 落盘，重启后按 config 指纹匹配恢复（防串配置）。异常边界（账号已充值、429 误分类、上游提前重置）用 `model-proxy unfreeze [provider]` 或 Web UI Providers 卡的 unfreeze 按钮立即解冻重试；反向地，`model-proxy freeze <provider>` 或 Providers 卡的 freeze 按钮把 provider 显式冻结（调度排除、无到期、成功/失败记录不解冻，必须指定 provider——无 freeze-all，同样按指纹落盘恢复），直到 unfreeze。

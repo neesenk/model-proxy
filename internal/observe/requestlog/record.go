@@ -15,9 +15,10 @@ import (
 type Record struct {
 	Ts     string `json:"ts"`
 	Shadow bool   `json:"shadow,omitempty"`
-	// AttemptOnly marks a non-committed failover leg (429/5xx/auth/transport):
-	// same request id + attempt number as the committed row; excluded from
-	// usage and session aggregates.
+	// AttemptOnly marks a non-committed failover leg (every hop of the
+	// chain, the last one included): same request id as the request's
+	// committed row or all-targets-failed terminal row, its own attempt
+	// number; excluded from usage and session aggregates.
 	AttemptOnly bool `json:"attempt_only,omitempty"`
 	// Kind separates traffic classes sharing the log: empty = LLM forward
 	// traffic (the historical default, kept empty for back-compat), "mcp" =

@@ -166,7 +166,8 @@ UI Requests 详情的 meta 条渲染为一行（magpie context 网格的日志�
 
 **MCP 拆分流（`request_log.mcp_split`，默认关）**：开启后 `kind="mcp"` 记录写入
 独立的 `mcp-YYYYMMDD.log` 流（目录 `mcp_dir`，默认 `~/.model-proxy/log/mcp`，
-与 requests- 流共享 max_file_size/max_body_bytes/retention 策略；`requestlog.Options.FilePrefix`
+与 requests- 流共享 max_file_size/max_body_bytes/retention/hot_retention 策略（拆分流同样按热窗
+压缩为 `mcp-*.log.zst`，`kind=mcp` 视图的可查窗口即热窗）；`requestlog.Options.FilePrefix`
 参数化流前缀，查询侧用 `QueryRecordsIn`/`QuerySummariesWithFacetsIn` 按前缀扫描）。
 requests- 流与尾随索引回到 LLM-only；admin 适配层把 `kind=mcp` 查询路由到拆分流
 （目录扫描，无索引），其余查询钉在 LLM 行（`kind ""` 等价 `"llm"`，旧文件里的历史
@@ -208,16 +209,22 @@ cursor 才是同一文件增长（从 cursor 尾随），否则其已索引内�
 尾部不完整行留到下一轮；`rowFromLine` 在 `ExtractUsage` 之后立刻置空
 request/response body 字符串——索引行只驻留元数据（历史上整批 500 行持有完整
 multi-MB body 曾把堆峰值顶到数 GB，字节封顶与置空 body 是它的双层防护）。
-**冷层归档**（`request_log.hot_retention`，默认 168h、`0` 禁用、restart-only）：sweep tick 在 retention
-删除与磁盘护栏之后，把滚出热窗的轮转 `.log`（mtime 基准）交给 logfile 的旁路压缩 worker（独立
+**冷层归档**（`request_log.hot_retention`，默认 168h、`0` 禁用、restart-only）：未配置时也按
+168h 参与加载期交叉校验——`hot_retention ≥ retention`（两者都 > 0）即拒绝加载，且不看
+`request_log.enabled`，所以 `retention ≤ 168h` 的配置必须显式设置本键或设 `0`（`retention: "0"`
+永久保留不构成上界）。启动与每小时的 sweep 在 retention 删除与磁盘护栏之后，把滚出热窗的轮转
+`.log`（mtime 基准）交给 logfile 的旁路压缩 worker（独立
 goroutine——压缩耗时不得阻塞写路径；owner/stop/wait/final flush 由 Logger 生命周期承担）。worker 以
 `X.log.zst.tmp` → rename `X.log.zst` → 删原文件的原子序列落盘（崩溃后 `.zst` 已在则只删原文件，幂等；
 压缩或 rename 失败时顺手清掉 `.zst.tmp`——否则源文件随后被护栏/retention 删走后，孤儿 tmp 不属于任何可删
 集合；崩溃残留的 tmp 在其源 `.log` 消失后由派发步的回收清扫，源还在的 tmp 属于在途/可重试压缩、不动），
+每拍至多派发 16 个文件，队列满或压缩失败时告警、文件保持明文并在下一拍重试（期间仍可查）；
+停机只收尾在途的一项，排队项原样留给下次运行（关停那次 sweep 只做 retention 清理）。
 完成即触发 OnChange 让 indexer 走现有「未认领消失文件删行」路径清索引行并按 session 失效缓存。
 `.zst` 后缀使 indexer 认领/reconcile/查询扫描三处 `.log` 精确匹配天然不认领——归档是纯离线数据
 （`zstd -d | jq`），没有在线读路径，查询与 Requests 页的可查窗口即热窗。retention/disk-guard/prune 的
-可删集合包含 `.zst`；`.zst` 时龄取文件名 YYYYMMDD 日戳（其 mtime 是压缩时刻）。
+可删集合包含 `.zst`；`.zst` 时龄取文件名 YYYYMMDD 日戳（其 mtime 是压缩时刻），日戳不可解析的
+`.zst` 不被 retention/prune 按时龄删除、只有磁盘护栏按名序回收；在途的 `.zst.tmp` 三处都不删。
 **流应答聚合落盘**（`request_log.aggregate_streams`，默认关、restart-only）：流式应答每输出 token 约 100 字节
 chunk 信封（2026-11-12 峰值日 94.5GB 请求日志里约 80% 是响应流），开启后已完成的应答以聚合后的 JSON
 响应落盘、记录带 `response_aggregated:true`，`response_size`/`response_headers` 仍描述线上字节，客户端字节
@@ -234,7 +241,7 @@ encoding/json 以 `strings.EqualFold` 匹配键（ASCII 大小写变体 + `ſ`(U
 转义，`usageKeyCandidate` 只跳过不可能含这种拼写的帧，结果与逐帧全解码逐值相同，普通 delta 帧零分配。
 Shutdown 在 log writer drain 之后跑一次 final reconcile（final flush）。
 写热路径（forward commit → Enqueue）不碰 SQLite。查询与扫描版语义逐字段一致：
-`SummariesWithFacets`（WHERE 映射 Filter——From/To 时间窗作用于 `ts_ms`，`ensureColumns` 建的 `idx_records_ts_ms` 让历史窗口（UI 分钟级时间筛选）免于沿 TEXT `ts` 索引逐行过滤所有更新行 + **failover 腿折叠**：已配对 `attempt_only` 行不出列、折入其已提交行的 `failed_hops`（attempt 升序元数据），未应答请求〔无已提交行，如客户端中途断开〕保留最新一腿独立成行——status/errors 过滤作用于存活行终态，扫描回退路径同语义折叠；facets 在 filter 之前对全部已索引行
+`SummariesWithFacets`（WHERE 映射 Filter——From/To 时间窗作用于 `ts_ms`，`ensureColumns` 建的 `idx_records_ts_ms` 让历史窗口（UI 分钟级时间筛选）免于沿 TEXT `ts` 索引逐行过滤所有更新行 + **failover 腿折叠**：已配对 `attempt_only` 行不出列、折入其已提交行的 `failed_hops`（attempt 升序元数据），未应答请求〔既无已提交行也无全链失败终态行，即客户端中途断开〕保留最新一腿独立成行——status/errors 过滤作用于存活行终态，扫描回退路径同语义折叠；facets 在 filter 之前对全部已索引行
 采集（扫描回退路径的 facets 受其文件级提前终止窗约束，From/To/Limit 压力下可比索引侧窄——两路径都是「先采集后过滤」，差异只在扫描能整文件跳过）——例外是 `Kind`：它是流选择器而非数据 facet，llm/mcp 过滤同样收窄 facets，
 mcp server 名不会污染 LLM 视图的 model 下拉；**attempt_only 行同样不进 facets**（下拉描述产出行的流量，腿已折叠）；usage 字段只在 `UsageOnly` 下填充）、`Detail`（按 (file, offset, length)
 seek 读回完整行；索引未命中或 seek 失败回落 `tailScan`——只流式读取各文件「已索引
@@ -295,7 +302,10 @@ catalog/config。
 panel/judge 在此共享 plan 上执行非流式、tool-free 分支，并应用与普通目标一致的
 half-open、401 refresh、paramBlock 预应用及即时学习重试、429/5xx、
 model-denied/404、empty-200 模型锁、metrics、usage、live event 和 request log
-策略。leg 的发送循环（URL 构建、provider rewrite、paramBlock 预应用、POST、
+策略。**403 归因不在其中**：panel/judge 腿不走普通执行器的账号停用/网关拒绝分类，
+非 model-denied 的 403 按客户端类错误处理（leg 失败、不记熔断、记一次 failure
+metric）——普通执行器的处置见 `docs/architecture/routing-and-failure.md` 的「普通转发的
+403 归因」。leg 的发送循环（URL 构建、provider rewrite、paramBlock 预应用、POST、
 一次性 401 refresh / 400 参数 learn-strip 重试、响应上限读取）由
 `targetexec.BufferedLeg` 拥有——Executor 的 headless 非流式对应物；circuit、
 metrics、rate-limit 记录与 request log 仍留在 `internal/forward/fusion.go`（最终

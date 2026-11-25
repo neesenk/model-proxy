@@ -184,6 +184,8 @@ request_log:
   # (<name>.log.zst, offline-only — the Requests page, /api/requests and the
   # index cover hot files only; read an archive with `zstd -d < f.zst | jq`).
   # Must be < retention; "0" disables archiving. Restart-only. Default 168h.
+  # An unset key is cross-checked as its 168h default: with retention <= 168h
+  # set this key explicitly (or to "0"), or the config is rejected at load.
   hot_retention: 120h # 5d hot window (user preference); default 168h
   # Disk-space guard on top of retention: when the volume holding the log dir
   # drops below min_free_bytes or reaches max_used_percent, the hourly sweep

@@ -69,8 +69,9 @@ type Summary struct {
 	CacheRead     uint64 `json:"cache_read,omitempty"`
 	CacheCreation uint64 `json:"cache_creation,omitempty"`
 	Shadow        bool   `json:"shadow,omitempty"`
-	// AttemptOnly marks an uncommitted failover leg (429/5xx/auth/transport
-	// error with a following hop): same request id as the committed row,
+	// AttemptOnly marks an uncommitted failover leg (every hop of the chain,
+	// the last one included): same request id as the request's committed row
+	// or all-targets-failed terminal row,
 	// request body intentionally not logged (the response body carries the
 	// failure evidence), excluded from usage and session aggregates.
 	AttemptOnly bool `json:"attempt_only,omitempty"`

@@ -877,3 +877,79 @@ func TestInitRequestLogWiresHotRetention(t *testing.T) {
 		t.Errorf(`announcement added a hot-window note despite hot_retention "0":\n%s`, coldOutput.String())
 	}
 }
+
+// TestForward_AllTargetsFailedFoldsLegsIntoTerminalRow: through the real
+// handler and logger, a request the proxy answers with its own 502 shows up
+// in the list as ONE row — the terminal answer, every failover hop folded
+// into its failed_hops — instead of a lone "failover leg" row that made an
+// answered request look unanswered. The terminal row carries no usage: it is
+// a failure, not a token-bearing answer.
+func TestForward_AllTargetsFailedFoldsLegsIntoTerminalRow(t *testing.T) {
+	a := newFakeUpstream(t, staticResponder(500, `{"error":"a exploded"}`))
+	b := newFakeUpstream(t, staticResponder(503, `{"error":"b unavailable"}`))
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"a": {OpenAIBaseURL: a.srv.URL, Provider: testProviderID},
+			"b": {OpenAIBaseURL: b.srv.URL, Provider: testProviderID},
+		},
+		Routes: map[string][]configdomain.RouteTarget{"m1": {
+			{Provider: "a", Model: "m1", Priority: 1},
+			{Provider: "b", Model: "m1", Priority: 2},
+		}},
+	}
+	proxy, dir, shutdown := newReqLogProxy(t, cfg)
+	proxy.providers["a"] = &testProv{key: "a"}
+	proxy.providers["b"] = &testProv{key: "b"}
+	server := httptest.NewServer(http.HandlerFunc(proxy.Handler))
+	defer server.Close()
+
+	const requestBody = `{"model":"m1","messages":[{"role":"user","content":"ping"}]}`
+	code, clientBody := post(t, server.URL+"/v1/chat/completions", requestBody)
+	if code != http.StatusBadGateway {
+		t.Fatalf("client status = %d (want the 502 terminal); body=%s", code, clientBody)
+	}
+	shutdown()
+
+	summaries, err := requestlog.QuerySummaries(dir, requestlog.Filter{})
+	if err != nil {
+		t.Fatalf("query summaries: %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("list rows = %+v, want exactly the terminal row (legs folded)", summaries)
+	}
+	row := summaries[0]
+	if row.AttemptOnly || row.Status != http.StatusBadGateway || row.Provider != "(failover)" {
+		t.Errorf("list row = attempt_only:%v status:%d provider:%q, want the terminal row: 502 from (failover)", row.AttemptOnly, row.Status, row.Provider)
+	}
+	wantHops := []requestlog.FailedHop{
+		{Provider: "a", Status: 500, Attempt: 0},
+		{Provider: "b", Status: 503, Attempt: 1},
+	}
+	if len(row.FailedHops) != len(wantHops) {
+		t.Fatalf("failed_hops = %+v, want both hops %+v", row.FailedHops, wantHops)
+	}
+	for i, want := range wantHops {
+		if got := row.FailedHops[i]; got.Provider != want.Provider || got.Status != want.Status || got.Attempt != want.Attempt {
+			t.Errorf("failed_hops[%d] = %+v, want %+v", i, got, want)
+		}
+	}
+	if row.Input != 0 || row.Output != 0 || row.CacheRead != 0 || row.CacheCreation != 0 {
+		t.Errorf("terminal row usage = %d/%d/%d/%d, want all zero", row.Input, row.Output, row.CacheRead, row.CacheCreation)
+	}
+
+	records := allRecords(t, dir)
+	var legs, terminal int
+	for _, record := range records {
+		if record.AttemptOnly {
+			legs++
+			continue
+		}
+		terminal++
+		if record.ResponseBody != clientBody || record.RequestBody != requestBody {
+			t.Errorf("terminal record bodies = request %q / response %q, want the client request and the exact client response", record.RequestBody, record.ResponseBody)
+		}
+	}
+	if legs != 2 || terminal != 1 {
+		t.Errorf("records = %d legs + %d terminal, want 2 + 1", legs, terminal)
+	}
+}

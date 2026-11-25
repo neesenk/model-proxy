@@ -117,7 +117,8 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   词汇表与 YAML 形式由 `internal/config`（`RouteStrategy*` 常量 +
   `RouteStrategyFor`，含 `#req`/`#ctx` 跨路由 pool 键的后缀剥离）拥有，
   `internal/runtime.decideOrder` 是唯一排序分叉点。
-- timeout、连接错误、5xx 和 refresh 后仍失败的 401 计入 provider 熔断。
+- timeout、连接错误、5xx、refresh 后仍失败的 401、`error.code` 证明账号停用的 403（见下文
+  「普通转发的 403 归因」）和 2xx HTML 伪成功（见下文）计入 provider 熔断。
 - **连接类快失败先重派再计数**（`targetexec.IsFastFailConnError`）：`unexpected EOF`/`EOF`/`ECONNRESET`/`EPIPE`/`ECONNREFUSED` 这类毫秒级返回的错误先在同一 target 上重派一次（新连接）；重派成功记 success、首跳**不**记失败。对外网络（代理链回收、LB 滚动）一次事件杀 N 条在途连接是常态噪音，重派把它从熔断视野里滤掉；超时不重派（时间预算已烧掉，重试等于翻倍等待），客户端断开照旧 `OutcomeClientGone`。重派不占 401 refresh 的 retry slot。**服务端主动 GOAWAY 同属快失败**：HTTP/2 网关按 stream 预算优雅回收连接（实测 compass 周期性 `LastStreamID≈2000, ErrCode=NO_ERROR`），`http.Client.Do` 层面浮出的 GOAWAY 意味着本 stream id 已过 LastStreamID——服务端从未处理该请求，同 target 重派不是重复请求（net/http 的 goAwayError 未导出，按稳定错误文案识别）；已 commit 的响应 body 中途断流不在此列（commit 后无法重派）。
 - **熔断需要 streak 持续**（`circuit_persist`，默认 6s，`"0"` 关闭）：连续失败除了达到 `circuit_threshold`，还必须**跨至少 persist 窗口**才开熔断——"N 连败"从"N 次尝试碰噪音"升级为"N 次新鲜连接确认不可达持续了一段时间"。persist 只延迟**新请求**不再考虑该 provider 的时刻；单个请求的 failover 照旧立即发生，重派后的失败也照常计数。成功重置 streak 起点与计数。
 - **客户端取消不计熔断**：调用方断开（`exchange.Request.Context()` 取消，
@@ -126,8 +127,8 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   failover 链（不再把剩余 target 在死掉的 ctx 上各烧一次）并以 499 结束
   live 事件。执行器自身 upstream timeout 触发的
   `DeadlineExceeded`（父 ctx 仍存活）照常计入熔断。
-- exhausted 401 的观测只记 failover，不记 `evFailures`；熔断状态与请求 metric
-  是不同语义，普通执行器和 Fusion leg 必须保持一致。
+- exhausted 401 的观测只记 failover，不记 `evFailures`；账号停用 403 同此（仅普通执行器）。
+  熔断状态与请求 metric 是不同语义，普通执行器和 Fusion leg 必须保持一致。
 - 429 进入 provider 限频冷却，不计熔断；**403 且 body 证明配额耗尽**（`targetexec.ParseQuotaDenied`，kimi-code 的 5 小时套餐窗口耗尽即此形态）同路：记限频冷却 + failover，终局按限频类分类。
 - 404、model-denied、空 200 只锁 `(provider, model)`。
 - 半开状态使用 `halfOpenInFlight` 单飞。
@@ -197,7 +198,18 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   入桶前先扣减该份额（钳零）并记入 cache_read——否则同一份额同时落 input
   与 cache_read，曾把 analytics 命中率压到真实值的一半并双重计费
   （与 requestlog.ExtractUsage、fusion.ParseUsage 同一账本）。
-  同 id 多 attempt 行语义：未 commit 的 failover 中间跳（429/5xx/认证/传输错误，且其后确有下一跳）各落一行 `attempt_only` 请求日志——同 request id、同 attempt 序号、带上游状态与 8KB 错误体 peek，api_key 照记；`attempt_only` 行被 KeyUsage 与 session 聚合排除（路由遥测，不是客户端流量），最后一跳失败且全链终态时沿用终态行、不重复落中间行。运行日志侧，forward 的 failover 警告行同源携带该跳状态：`[proto=… model=…] target N (<provider>/<model>) failed (status <code>); trying next`——传输层错误带 502 且其专属的 `upstream error:` 行就在上方，零字节 2xx 与模型拒答腿带观测到的真实状态；**派发前门禁拒绝**（model lock / 熔断开路）打 `skipped (<reason>); trying next`（`OutcomeSkipped`：无网络接触、无熔断计数，attempt 行以 502 + 原因文本落档），serve.log 单文件即可回答"这一跳为何失败/为何没派发"，无需 join 索引。存储语义之外的**查询折叠**：`/api/requests` 列表把已配对腿折入其已提交行的 `failed_hops`（未应答请求的最新一腿独立成行），status/errors 过滤看存活行终态、facets 排除腿——索引与扫描两路逐字段一致（见 `docs/web-api.md`）。
+  同 id 多 attempt 行语义：每个未 commit 的跳（429/5xx/认证/传输错误、模型拒绝、403
+  归因、派发前门禁跳过——最后一跳也在内；client 断开的跳不落）各落一行 `attempt_only`
+  请求日志——同 request id、各自递增的 attempt 序号、带该跳的观测状态与证据体（上游错误体
+  peek／传输错误文本／403 归因与门禁跳过的固定原因），api_key 照记；`attempt_only` 行被
+  KeyUsage 与 session 聚合排除（路由遥测，不是客户端流量）。**全链失败终态行**：forward
+  以代理自己的应答收尾（纯限频 429 + `Retry-After`，否则 502）时，该应答另落一行普通行
+  （`attempt_only` 不置位）：`provider` 为哨兵 `(failover)`——代理自己产生的行，不对应任何
+  上游，与缓存命中的 `(cache)` 同类；`upstream_model` 为空；status、response body 与
+  response headers 是客户端实际收到的字节（限频时含 `retry-after`）；request body 照常
+  落盘（全链失败的请求仍可 replay）；attempt 序号排在最后一跳之后；不携带 usage。该请求的
+  所有腿折入这一行，所以 `attempt_only` 独立成行的只剩未应答请求（终态写出前 client 断开，
+  live 事件 499）；client 断开与「无目标可试的转换错误 400」不落终态行。运行日志侧，forward 的 failover 警告行同源携带该跳状态：`[proto=… model=…] target N (<provider>/<model>) failed (status <code>); trying next`——传输层错误带 502 且其专属的 `upstream error:` 行就在上方，零字节 2xx、模型拒答与 403 归因腿带观测到的真实状态；**派发前门禁拒绝**（model lock / 熔断开路）打 `skipped (<reason>); trying next`（`OutcomeSkipped`：无网络接触、无熔断计数，attempt 行以 502 + 原因文本落档），serve.log 单文件即可回答"这一跳为何失败/为何没派发"，无需 join 索引。存储语义之外的**查询折叠**：`/api/requests` 列表把已配对腿折入其已提交行的 `failed_hops`（未应答请求的最新一腿独立成行），status/errors 过滤看存活行终态、facets 排除腿——索引与扫描两路逐字段一致（见 `docs/web-api.md`）。
 - **绑定粒度 (会话, 路由)**：sticky 键是 `runtime.StickyKey(sessionKey, exposed)`
   ——一个会话在每个路由上持有**独立绑定**（同会话换模型 = 新绑定，不把旧路由选中的
   账号拖带到新路由，与 latchKey/repeat_turn 同粒度；Bifrost「绑定按请求的 model
@@ -290,11 +302,13 @@ body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`
 会记录模型锁的情况：
 
 - 任意 404；
-- 400/403 且 `targetexec.IsModelDenied` 保守命中；
+- 400/403 且 `targetexec.IsModelDenied` 保守命中（措辞表 `modelDeniedMarkers` 与
+  `missingModel`：`does not exist` 只在 `model <名字> does not exist` 形态下算，
+  `not supported by this endpoint` 须带 `model ` 前缀——其余同名措辞是普通 4xx）；
 - `Content-Length: 0` 的成功响应；
 - 流式成功响应在 clean EOF、零字节且客户端仍连接时。
 
-客户端断开、写错误、上游 read error 都不得学习为空响应。最后一个 target 的 404/400 仍原样 commit 给客户端，但模型锁继续记录，供后续请求跳过。
+客户端断开、写错误、上游 read error 都不得学习为空响应。最后一个 target 的 404、模型拒绝的 400/403 仍原样 commit 给客户端，但模型锁继续记录，供后续请求跳过。
 
 ## 上游伪成功（2xx HTML）
 
@@ -313,12 +327,16 @@ body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`
 attempt 腿的诊断只带状态与页面标题（`upstream answered <status> with an HTML page: <title>`），
 不落页面原文。
 
-**普通转发的 403 归因**：先沿用配额耗尽和模型拒绝的分类。结构化错误的 `error.code` 为
-`account_disabled`、`account_deactivated` 或 `account_suspended` 时，按当前解析到的账号
-记录一次认证失败并 failover，熔断门槛同 401。标准 nginx 403 文档或带
-`Cf-Mitigated: challenge` 的拒绝响应，有下一候选就释放半开槽并换目标，腿记录 403
-和固定原因；最后一个候选保留原始 403。单次网关拒绝不累计账号或模型失败。
-只有 HTML 类型、标题或笼统权限提示时沿用普通 4xx 语义。
+**普通转发的 403 归因**（只接在普通执行器上；Fusion panel/judge 腿对 403 的处置不同，见
+`docs/architecture/fusion-shadow-cache.md`）：先沿用配额耗尽和模型拒绝的分类。结构化错误的
+`error.code` 为 `account_disabled`、`account_deactivated` 或 `account_suspended` 时，按当前
+解析到的账号记录一次认证失败并 failover，熔断门槛同 401、同样不记 failure metric；**末候选
+也不例外**——不透传账号错误，按全链失败回 502（单目标路由与 pin/force-provider 同此）。
+标准 nginx 403 文档或带 `Cf-Mitigated: challenge` 的拒绝响应，有下一候选就释放半开槽并
+换目标，腿记录 403 和固定原因；最后一个候选保留原始 403。单次网关拒绝不累计账号或模型
+失败。只有 HTML 类型、标题或笼统权限提示时沿用普通 4xx 语义。锁定测试：
+`TestForward_Upstream403AttributionE2E`（`internal/app`）与 `TestExecutor403FailureScope`
+（`internal/targetexec`）。
 
 ## 内容性拒绝不熔断
 
@@ -327,7 +345,8 @@ attempt 腿的诊断只带状态与页面标题（`upstream answered <status> wi
 provider：照常 failover（换一家策略不同的 provider 可能可服务同一请求），但**不计熔断、
 不计失败指标**、不触发任何冷却——账号本身是健康的。反面教训：把「unapproved channel」
 误判为账号故障曾让 magpie 静默封禁全部账号 5 天。普通 500 错误页绝不许误分类（裸通用词
-不进 marker 表）。4xx 拒绝本就走原样 commit 路径（无冷却无 failover），不在此例。
+不进 marker 表）。4xx 不在此例：内容无关的普通 4xx 走原样 commit 路径（无冷却无
+failover），带证据的 403/400 另按配额、模型拒绝或账号归因（见上文各节）。
 
 ## Unsupported parameter 学习
 
@@ -389,6 +408,13 @@ provider：照常 failover（换一家策略不同的 provider 可能可服务�
 - 普通 target 与 Fusion leg 的 429 kind/horizon、metric、quota refresh 一致。
 - 同 provider 不同 model 的锁和 paramBlock 隔离。
 - empty stream 的 EOF、client cancel、upstream read error。
+- 上游 403 归因（`internal/app/forward_403_attribution_test.go`、`internal/targetexec`
+  的 `TestExecutor403FailureScope`）：账号停用码换候选并记熔断、末候选终态 502；网关拒绝
+  换候选且零记账、末候选保留原始 403；通用 HTML 403 原样 commit。
+- 全链失败终态行与每跳落腿（`internal/forward/terminal_row_test.go`、`internal/app` 的
+  `TestForward_AllTargetsFailedFoldsLegsIntoTerminalRow`）：终态行字段逐一断言（哨兵
+  provider、客户端实际字节、请求体、attempt 序号、429 的 `Retry-After`）、最后一跳落腿、
+  client 断开不落行、列表折叠为一行终态且不贡献 token。
 - 提交后流中止归因（`internal/targetexec/executor_stream_abort_test.go`）：对端写失败先于上游终态在普通与 keepalive 两条拷贝路径都打 client 断开行、不得误判上游截断；上游自带错误终态打 Warn 带摘录；上游已送达终态后的写失败与完整流不打行（契约在 `docs/architecture/protocol-conversion.md`「提交后流中止的归因日志」）。
 - SSE keepalive：静默期心跳帧、ttft 不被心跳标记、录制链/缓存无心跳、client gone 后 reader goroutine 释放。
 - cooldown 全部恢复、部分恢复、跨轮纯 429、混合硬失败。
