@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	configdomain "model-proxy/internal/config"
-
 	"model-proxy/internal/fusion"
 	guardsession "model-proxy/internal/guard/session"
 	"model-proxy/internal/observe/counters"
@@ -38,10 +36,6 @@ type Services struct {
 	// request snapshot's GuardConfig). Also enforces persisted high-verdict
 	// session blocks.
 	Adjudicator Adjudicator
-	// SessionHeaders is the ordered client session-header allowlist
-	// (request_log.session_headers) used for the request log and live events.
-	SessionHeaders []string
-
 	// ClientFor resolves the upstream client for one route target from the
 	// request snapshot's config (app: Proxy.clientFor — per-provider proxy_url
 	// → global proxy → env → system → direct). Nil falls back to Client.
@@ -51,7 +45,7 @@ type Services struct {
 	// (targetexec.HealthGate) to the request snapshot's pool-virtual→parent
 	// projection, so the wire-verdict 404 correction records under the
 	// request's own generation parent.
-	NewHealthGate func(cfg *configdomain.Config, parentOf map[string]string) targetexec.HealthGate
+	NewHealthGate func(Snapshot) targetexec.HealthGate
 	// NewEffects binds app-owned observation (metrics, request log, live
 	// events, tokens, agents, attempt quality) to one runtime generation.
 	// cfg is the request snapshot's config (same discipline as Schedule):
@@ -73,10 +67,6 @@ type Services struct {
 	// probing its synthetic upstream request, which carries neither the
 	// client's UA nor its session headers).
 	ShadowDispatch func(runtime Snapshot, proto, backendProto, calledModel, exposed string, primary RouteTarget, primaryRequestID, primaryAgent, primarySession string, commit *targetexec.Commit, routingDecision *RoutingDecision)
-	// ResolveBackendProto is the wire-verdict backend protocol resolution
-	// (app: Proxy.resolvedBackendProto): declared protocol, else ProtocolHint,
-	// else the probe verdict, else the client protocol.
-	ResolveBackendProto func(declared, provName string, provCfg Provider, model, clientProto string, parentOf map[string]string) (proto string, viaResponsesVerdict bool)
 	// ResolverState is the pool health/spread view routing.NewResolver needs
 	// (app: Proxy). Used by fusion legs, the synthesizer and shadow to pick a
 	// runnable virtual out of a pooled parent.
@@ -129,8 +119,9 @@ type RouteState interface {
 // Proxy and never takes its lock — the lock discipline (single snapshot per
 // request) is the caller's; the pipeline only consumes the frozen Snapshot.
 type pipeline struct {
-	svc   Services
-	state RouteState
+	svc            Services
+	state          RouteState
+	sessionHeaders []string
 }
 
 // schedule delegates to the injected scheduler port.
@@ -196,11 +187,5 @@ func (p pipeline) dispatchShadowAfterCommit(
 // publishTerminalEvent emits a live "end" event for a request that ends before
 // the normal start/commit flow (see PublishTerminalEvent).
 func (p pipeline) publishTerminalEvent(requestID string, r *http.Request, proto, exposed string, status int) {
-	PublishTerminalEvent(p.svc.Events, requestID, r, proto, exposed, status, p.svc.SessionHeaders)
-}
-
-// resolvedBackendProto delegates the wire-verdict backend protocol resolution
-// to the injected port (app owns the verdict store).
-func (p pipeline) resolvedBackendProto(declared, provName string, provCfg Provider, model, clientProto string, parentOf map[string]string) (proto string, viaResponsesVerdict bool) {
-	return p.svc.ResolveBackendProto(declared, provName, provCfg, model, clientProto, parentOf)
+	PublishTerminalEvent(p.svc.Events, requestID, r, proto, exposed, status, p.sessionHeaders)
 }

@@ -187,8 +187,8 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		forbidden := map[string]bool{
 			"schedule": true, "reload": true, "SnapshotRuntime": true,
 			"NewWebServer": true, "serveHTTPUntilShutdown": true,
-			"StartRuntimeServices": true, "contextOverflowRetry": true,
-			"runShadow": true, "dispatchShadowAfterCommit": true,
+			"contextOverflowRetry": true,
+			"runShadow":            true, "dispatchShadowAfterCommit": true,
 			"shouldSample": true, "runBeforeLogDrain": true,
 		}
 		if got := forbiddenCallSites(f, fset, forbidden, nil); len(got) != 0 {

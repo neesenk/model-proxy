@@ -40,9 +40,8 @@ func (p *Proxy) forwardServices() forward.Services {
 		ResponsesState: p.responsesState,
 		FusionReg:      p.fusionReg,
 		ReqLog:         p.reqLog,
-		SessionHeaders: p.sessionHeaders(),
-		NewHealthGate: func(cfg *configdomain.Config, parentOf map[string]string) targetexec.HealthGate {
-			return proxyHealthGate{proxy: p, cfg: cfg, parentOf: parentOf}
+		NewHealthGate: func(snap forward.Snapshot) targetexec.HealthGate {
+			return proxyHealthGate{proxy: p, snapshot: snap}
 		},
 		NewEffects: func(cfg *configdomain.Config, generation uint64) targetexec.Effects {
 			return targetExecutionEffects{proxy: p, cfg: cfg, generation: generation}
@@ -50,20 +49,9 @@ func (p *Proxy) forwardServices() forward.Services {
 		Schedule: func(cfg *configdomain.Config, parentOf map[string]string, exposed, sessionKey string, stickyOff bool, targets []configdomain.RouteTarget, routeKeys map[string]bool, generation uint64) ([]configdomain.RouteTarget, string) {
 			return p.schedule(cfg, parentOf, exposed, sessionKey, stickyOff, targets, routeKeys, generation)
 		},
-		ShadowDispatch:      p.dispatchShadowAfterCommit,
-		ResolveBackendProto: p.resolvedBackendProto,
-		ResolverState:       p,
+		ShadowDispatch: p.dispatchShadowAfterCommit,
+		ResolverState:  p,
 	}
-}
-
-// sessionHeaders resolves the client session-header allowlist for terminal
-// (pre-start) live events; the main pipeline reads the same value from the
-// per-request config snapshot.
-func (p *Proxy) sessionHeaders() []string {
-	if cfg := p.cfgSnapshot(); cfg != nil {
-		return cfg.RequestLog.ResolvedSessionHeaders()
-	}
-	return configdomain.DefaultSessionHeaders
 }
 
 // proxyRouteState adapts Proxy's pin/cooldown scheduling queries to

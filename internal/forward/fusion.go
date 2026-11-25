@@ -212,7 +212,7 @@ func (p pipeline) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag 
 
 	// Credential/build gate (fail closed): an unbuildable member is dropped
 	// BEFORE any upstream call and only counts into the quorum math.
-	plan, err := p.planTarget(PlanInput{
+	plan, err := PlanTarget(PlanInput{
 		Runtime: fc.runtime, Target: m, ClientProto: fc.proto, ClientPath: fc.upPath,
 	})
 	if err != nil {
@@ -230,7 +230,7 @@ func (p pipeline) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag 
 	// bound to the REQUEST snapshot's parent projection (single-snapshot red
 	// line): the wire-verdict 404 correction below records under this
 	// generation's parent name.
-	gate := p.svc.NewHealthGate(fc.runtime.Cfg, fc.runtime.ParentOf)
+	gate := p.svc.NewHealthGate(fc.runtime)
 	if !gate.TakeHalfOpenSlot(m.Provider, fc.runtime.Generation) {
 		res.Err = errFusionLegUnavailable
 		return
@@ -434,7 +434,7 @@ func (p pipeline) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byt
 		return false
 	}
 	st = picked
-	plan, err := p.planTarget(PlanInput{
+	plan, err := PlanTarget(PlanInput{
 		Runtime: fc.runtime, Target: st, ClientProto: fc.proto, ClientPath: fc.upPath,
 	})
 	if err != nil {
@@ -491,5 +491,5 @@ func (p pipeline) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byt
 		},
 		targetexec.Policy{LastTarget: true},
 	)
-	return p.targetExecutor(attempt.Runtime(), fc.runtime.Cfg, fc.runtime.ParentOf, plan.Target().Provider).Execute(attempt).Committed
+	return p.targetExecutor(attempt.Runtime(), fc.runtime, plan.Target().Provider).Execute(attempt).Committed
 }

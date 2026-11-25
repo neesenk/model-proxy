@@ -15,7 +15,7 @@
 // models.
 //
 // The verdicts feed two consumers: forward's protocol selection
-// (resolvedBackendProto inserts the model-level matrix between ProtocolHint
+// (forward.PlanTarget inserts the model-level matrix between ProtocolHint
 // and the provider-level wire verdict) and the /api/models + CLI display.
 // Probing itself lives in internal/probe (ProbeModelProtocols); the verdict
 // store and file format live in internal/runtime/wirecap. See
@@ -320,7 +320,9 @@ func (p *Proxy) persistModelCapsNow() {
 	if fi, err := os.Stat(p.modelCapsPath); err == nil &&
 		fi.ModTime().UnixNano() > p.modelCapsFileBaseline.Load() {
 		if loaded, err := runtimewire.LoadModelCapsFile(p.modelCapsPath); err == nil && loaded != nil {
-			p.modelCaps.Restore(loaded, protocolFingerprints(p.cfgSnapshot()))
+			p.mu.RLock()
+			p.modelCaps.Restore(loaded, protocolFingerprints(p.cfg))
+			p.mu.RUnlock()
 			p.noteModelCapsFileState()
 			logx.Debugf("[modelcaps] persist adopted external write to %s (e.g. `models refresh`) instead of overwriting; re-baselined", p.modelCapsPath)
 		} else {

@@ -54,12 +54,13 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 	t.Run("forward fusion.go reuses targetexec Plan helpers instead of duplicating them", func(t *testing.T) {
 		f, fset := parseGoFile(t, "internal/forward/fusion.go")
 		for _, spec := range f.Imports {
-			if strings.Trim(spec.Path.Value, `"`) == "model-proxy/internal/protocol" {
-				t.Error("forward/fusion.go must not import internal/protocol directly; use targetexec.Plan")
+			switch strings.Trim(spec.Path.Value, `"`) {
+			case "model-proxy/internal/protocol", "model-proxy/internal/runtime/wirecap":
+				t.Errorf("forward/fusion.go must use PlanTarget for protocol selection instead of importing %s", spec.Path.Value)
 			}
 		}
 		forbiddenCalls := map[string]bool{
-			"providerConfig": true, "resolvedBackendProto": true,
+			"providerConfig": true, "backendProtocol": true, "resolvedBackendProto": true,
 			"convertRequestFor": true, "catalogSnapshot": true,
 		}
 		for _, v := range forbiddenCallSites(f, fset, forbiddenCalls, nil) {
@@ -69,7 +70,7 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 
 	t.Run("application assembly is the only concrete Proxy process wiring", func(t *testing.T) {
 		forbiddenCalls := map[string]bool{
-			"NewProxy": true, "StartRuntimeServices": true,
+			"NewProxy":     true,
 			"NewWebServer": true, "initStats": true,
 			"initRequestLog": true, "statsFlushLoop": true,
 		}
@@ -82,26 +83,6 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			for _, violation := range forbiddenCallSites(file, fileSet, forbiddenCalls, forbiddenChains) {
 				t.Errorf("%s bypasses proxyLifecycle: %s", path, violation)
 			}
-		}
-
-		assembly, _ := parseGoFile(t, "internal/app/runtime.go")
-		if got := namedCallCount(assembly, "NewProxy"); got != 1 {
-			t.Errorf("internal/app/runtime.go NewProxy calls = %d, want exactly 1", got)
-		}
-		if got := namedCallCount(assembly, "StartRuntimeServices"); got != 1 {
-			t.Errorf("internal/app/runtime.go StartRuntimeServices calls = %d, want exactly 1", got)
-		}
-		if got := callCountOnIdent(assembly, "proxy", "StartRuntimeServices"); got != 1 {
-			t.Errorf("internal/app/runtime.go proxy.StartRuntimeServices calls = %d, want exactly 1", got)
-		}
-		if got := selectorCountNamed(assembly, "StartRuntimeServices"); got != 1 {
-			t.Errorf("internal/app/runtime.go StartRuntimeServices selector uses = %d, want exactly 1 direct call", got)
-		}
-		if got := selectorCountOnIdent(assembly, "proxy", "StartRuntimeServices"); got != 1 {
-			t.Errorf("internal/app/runtime.go proxy.StartRuntimeServices selector uses = %d, want exactly 1", got)
-		}
-		if got := namedCallCount(assembly, "NewWebServer"); got != 1 {
-			t.Errorf("internal/app/runtime.go NewWebServer calls = %d, want exactly 1", got)
 		}
 
 		serve, _ := parseGoFile(t, "cli_serve.go")
@@ -181,26 +162,6 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 		}
 	})
 
-}
-
-func callCountOnIdent(file *ast.File, receiver, method string) int {
-	count := 0
-	ast.Inspect(file, func(node ast.Node) bool {
-		call, ok := node.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		selector, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || selector.Sel.Name != method {
-			return true
-		}
-		identifier, ok := selector.X.(*ast.Ident)
-		if ok && identifier.Name == receiver {
-			count++
-		}
-		return true
-	})
-	return count
 }
 
 func callCountWithLastSelector(file *ast.File, function, receiver, method string) int {

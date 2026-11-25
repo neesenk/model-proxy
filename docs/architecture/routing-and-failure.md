@@ -19,7 +19,7 @@
   `internal/forward/forward.go` 的 `serveRequest` 与 `internal/forward/attempt.go` 的
   `targetexec.Attempt` 唯一 assembly adapter
 - `internal/targetexec.Plan`：已解析目标的不可变 model/body/base URL/path wire
-  preparation；`internal/forward/plan.go` 的 `planTarget` 只做 snapshot-owned facts 的投影
+  preparation；`internal/forward/plan.go` 的 `PlanTarget` 只做 snapshot-owned facts 的投影
 - `internal/targetexec/executor.go`：完整单目标 I/O、401/参数/图片 retry、
   failure classification、response conversion/capture/cache pipeline
 - `internal/app/target_pipeline.go`：captured generation/scheduling 的 `targetexec.State`
@@ -66,7 +66,9 @@ executor 外完成，Fusion synthesizer 丢弃该 commit 元数据，禁止递�
 
 默认“客户端协议 = 上游协议”，同协议请求和响应字节级透传。目标声明 `protocol:` 时才进行协议转换。
 
-后端协议解析优先级（`(*Proxy).resolvedBackendProto`，`internal/app/wirecap.go`）：显式 `protocol:` > `ProtocolHint`（codex→responses）> **模型级协议矩阵**（`runtimewire.ResolveModel`）> **provider 级 wire 探测 verdict**（`runtimewire.Resolve`）> 客户端协议透传。空 `target.Model`（透传 target）跳过模型级查询，直接进入 provider 级。
+后端协议解析优先级（`forward.PlanTarget`）：显式 `protocol:` > `ProtocolHint`（codex→responses）> **模型级协议矩阵**（`runtimewire.ResolveModel`）> **provider 级 wire 探测 verdict**（`runtimewire.Resolve`）> 客户端协议透传。空 `target.Model`（透传 target）跳过模型级查询，直接进入 provider 级。
+
+`Proxy.SnapshotRuntime` 随配置捕获 provider 与 model 两级只读能力视图。普通转发、重试、Fusion 和 Shadow 共用这份视图。探测、404 纠正或 reload 更新后的结论从下一次捕获起可见。模型级回写校验请求配置的 fingerprint，provider 级回写校验原端点。
 
 provider 级 wire verdict 由 `probeAllWireCaps` 在 boot/reload 时异步探测并按 parent provider 名缓存。探测只有 openai base 上的两条腿：`/chat/completions` 与 `/responses` 各一个请求，经 `probe.ProbeProviderOpenAILegs` 走与模型级完全相同的探测管线（impl 方言 body 合并、function tool 注入、max_tokens→max_completion_tokens 改名重试；配方见 overview.md 的 `internal/probe` 条目）——**provider 级 verdict 因此同样是 agent 级可用性，不是裸 ping**：网关答裸 ping 但拒 function tools（aqp gpt-5.6 案例）在 provider 级回退路径上也不会再产生假 yes。**anthropic 支持是 config 声明、永不探测**：provider 配置 `anthropic_base_url` 即支持（声明 = 事实），未配置即定义上不支持；旧的「在无 anthropic_base_url 时对 openai base 探 `/v1/messages`、网关接受 anthropic 则字节透传」分支已删除——探测绝不在 openai base 上伪造 anthropic 请求体。分类（`runtimewire.ClassifyProviderStatus`）：404→no；**400 带模型/工具拒绝措辞（与模型级共用 `modelRejectionPhrases`）→no**（工具注入后该措辞证明此腿对 agentic 流量不可用，yes 会重演裸 ping 假阳性；provider 级 no 有 24h negativeTTL 自愈，误伤面有兜底）；其余 2xx–4xx（含 3xx 与 400/401/403/429）→yes；超时/连接错误/5xx→unknown。verdict 条目携带探测语义版本（`Capabilities.ProbeVersion`，当前 2）；恢复时 base_url 匹配**且**版本为当前的条目才采纳，旧语义（v1 裸 ping）条目丢弃重探——provider 级 yes 无限期信任，不 bump 版本旧 yes 会永远支配协议选择。provider 级 verdict 生效的决策矩阵：
 
@@ -93,7 +95,7 @@ provider 级 wire verdict 由 `probeAllWireCaps` 在 boot/reload 时异步探测
 | openai(chat) | 其他 | 透传 |
 | 任意 | 模型无条目或相关腿未结论 | 回落 provider 级矩阵 |
 
-**运行时 404 纠正（模型粒度）**：因 verdict 转到 `/responses` 的请求若上游 404，说明 verdict 有误而非模型缺失——`noteWireResponsesMiss(parent, model)` 经 `targetexec` State/HealthGate 传导（executor 与 Fusion leg 共用）：该 model 在模型级矩阵有条目时**只翻转模型级** responses verdict 并持久化 model_caps.json（provider 级不动）；无模型条目（透传 target）才翻转 provider 级 verdict（legacy 路径）。两种情况都**跳过 recordModelFailure**（这是我们的协议选择失误，不是模型的失败），按正常失败走 failover；后续请求自动转 chat。非 verdict 驱动的 404 行为不变（模型锁）。Fusion leg 共享同一纠正（`planTarget` 已算出 `viaResponsesVerdict`，见 fusion-shadow-cache.md）。
+**运行时 404 纠正（模型粒度）**：因 verdict 转到 `/responses` 的请求若上游 404，说明 verdict 有误而非模型缺失——`proxyHealthGate.NoteWireResponsesMiss` 经 `targetexec` State/HealthGate 传导（executor 与 Fusion leg 共用）：请求快照中该 model 在模型级矩阵有条目时**只翻转模型级** responses verdict 并持久化 model_caps.json（provider 级不动）；无模型条目（透传 target）才翻转 provider 级 verdict（legacy 路径）。两种情况都**跳过 recordModelFailure**（这是我们的协议选择失误，不是模型的失败），按正常失败走 failover；后续请求自动转 chat。非 verdict 驱动的 404 行为不变（模型锁）。Fusion leg 共享同一纠正（`PlanTarget` 已算出 `viaResponsesVerdict`，见 fusion-shadow-cache.md）。
 
 provider 级 yes 结论永久信任（错误 yes 由上述运行时路径纠正）；**provider 级 no 结论有 24h TTL**（`wireCapNegativeTTL`），到期后下一次 boot/reload 探测 pass 重探——一次性错误 no（上游发布中临时 404 等）不会永久降级该 provider。模型级矩阵**无 TTL**：失效只由 config fingerprint（`providerbuild.ProtocolConfigFingerprint`）触发，fingerprint 匹配即复用结论（持久化格式与恢复门控见 `runtime-state.md`）。fingerprint 不覆盖 models 列表，因此每次探测 pass 还会把当前 config（models: ∪ 路由 target）不再服务的 model 条目从 store 剔除（`ModelStore.PruneModels`）——从 config 删掉的 model 不会留在矩阵和 /api/models 里。
 

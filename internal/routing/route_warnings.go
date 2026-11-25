@@ -43,7 +43,7 @@ func ReasoningReplayModel(model string) bool {
 //
 // A target on a provider whose native wire differs from the client's but without
 // an explicit protocol: declaration (e.g. codex→responses) does NOT warn: the
-// forward path auto-resolves it via resolvedBackendProto/ProtocolHint, so it
+// forward path auto-resolves it via forward.PlanTarget/ProtocolHint, so it
 // converts without user action.
 func ConfigRoutingWarnings(cfg *configdomain.Config, expanded map[string][]configdomain.RouteTarget) []string {
 	var out []string
@@ -78,7 +78,7 @@ func ConfigRoutingWarnings(cfg *configdomain.Config, expanded map[string][]confi
 				continue
 			}
 			// t.Protocol == "": the forward path auto-resolves the backend
-			// protocol via ProtocolHint (resolvedBackendProto), so a target on a
+			// protocol via ProtocolHint (forward.PlanTarget), so a target on a
 			// provider whose native wire differs from the client's (codex→
 			// responses) converts without an explicit protocol: declaration. No
 			// warning needed.

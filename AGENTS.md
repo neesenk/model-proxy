@@ -9,7 +9,7 @@ model-proxy 是单进程模块化单体：根 `package main` 只负责进程入�
 ## 红线
 
 1. 每个请求只捕获一次 `runtimeSnapshot`；Fusion、Shadow 等异步分支只能使用该快照，禁止重读 reload-owned 状态。
-2. 跨域锁顺序只有 `Proxy.mu → internal/runtime.Manager`；持锁期间不得回调上层 owner 或执行外部 I/O。后台任务必须有 owner、stop、wait 和 final flush。
+2. 跨域取锁遵守 [运行态锁顺序](docs/architecture/runtime-state.md#锁顺序)。状态锁内只做内存操作，禁止反向取锁。后台任务必须有 owner、stop、wait 和 final flush。
 3. nil runtime impl、请求/响应转换失败必须 fail-closed；凭据不得进入 config、代码、日志、测试输出或文档示例。
 4. pin/force-provider 是硬选择，不得跨 route failover，并且必须绕过响应 cache。
 5. 模块边界只进不出；直接仓库依赖和关键 owner/callsite 由 `internal/archtest` 的闭合契约保护，不能只放宽测试来迁就实现。

@@ -382,7 +382,7 @@ func (p *Proxy) executeShadow(
 	if picked, ok := newResolver(p, runtime.Providers, runtime.PoolIndex, runtime.Generation).Pick(target, ""); ok {
 		target = picked
 	}
-	plan, err := forward.PlanTarget(p.forwardServices(), forward.PlanInput{
+	plan, err := forward.PlanTarget(forward.PlanInput{
 		Runtime: runtime, Target: target, ClientProto: backendProto, ClientPath: protocol.BackendPath(protocol.Protocol(backendProto)),
 	})
 	if err != nil {

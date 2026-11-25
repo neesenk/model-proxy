@@ -9,7 +9,7 @@ import (
 
 // native_protocol.go — knowledge about which wire protocols a route target's
 // provider can serve WITHOUT conversion. The request-time resolution
-// ((*Proxy).resolvedBackendProto, internal/app/wirecap.go) consults live
+// (forward.PlanTarget) consults the request snapshot's
 // wire-probe verdicts; offline consumers (takeover) use the same rules with
 // the daemon's persisted probe matrix passed in as a ModelProtocolVerdict
 // (nil = static config knowledge only). The layers must never disagree on

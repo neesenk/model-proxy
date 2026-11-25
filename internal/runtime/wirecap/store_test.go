@@ -266,7 +266,7 @@ func TestStoreSnapshotCorrectionAndRestore(t *testing.T) {
 	store.Put("b", Capabilities{
 		BaseURL: "https://old-b", Responses: No, Chat: Yes, ProbedAt: now, ProbeVersion: ProbeVersion,
 	})
-	store.MarkResponsesUnsupported("a", now.Add(time.Minute))
+	store.MarkResponsesUnsupported("a", "https://a", now.Add(time.Minute))
 	got, ok := store.Get("a")
 	if !ok || got.Responses != No || !got.ProbedAt.Equal(now.Add(time.Minute)) {
 		t.Fatalf("corrected capabilities = %+v, ok=%v", got, ok)
@@ -308,7 +308,7 @@ func TestStoreSnapshotCorrectionAndRestore(t *testing.T) {
 		t.Errorf("nil Store Snapshot = %+v", got)
 	}
 	nilStore.Put("a", Capabilities{})
-	nilStore.MarkResponsesUnsupported("a", now)
+	nilStore.MarkResponsesUnsupported("a", "https://a", now)
 	nilStore.RestoreMatching(nil, nil)
 }
 
@@ -321,7 +321,7 @@ func TestStoreConcurrentAccess(t *testing.T) {
 			<-start
 			for iteration := 0; iteration < 100; iteration++ {
 				store.Put("provider", Capabilities{Responses: Yes})
-				store.MarkResponsesUnsupported("provider", time.Unix(int64(iteration), 0))
+				store.MarkResponsesUnsupported("provider", "", time.Unix(int64(iteration), 0))
 				store.Get("provider")
 				store.Snapshot()
 			}
@@ -387,5 +387,33 @@ func TestClassifyProviderStatus(t *testing.T) {
 				t.Errorf("ClassifyProviderStatus = %s, want %s", got, testCase.want)
 			}
 		})
+	}
+}
+
+func TestProviderViewPinsEndpointAndRejectsLateWrites(t *testing.T) {
+	var store Store
+	old := Capabilities{BaseURL: "https://old.invalid", Responses: Yes}
+	next := Capabilities{BaseURL: "https://new.invalid", Chat: Yes}
+	store.Put("p", old)
+	before := store.View()
+	store.Reconfigure(map[string]string{"p": next.BaseURL})
+	reset := store.View()
+	store.Put("p", next)
+	store.MarkResponsesUnsupported("p", old.BaseURL, time.Unix(100, 0))
+	store.Put("p", old)
+	if got, ok := before.Get("p"); !ok || got != old {
+		t.Fatal("old request lost its endpoint verdict")
+	}
+	if _, ok := reset.Get("p"); ok {
+		t.Fatal("new endpoint inherited a verdict before probing")
+	}
+	if got, ok := store.Get("p"); !ok || got != next {
+		t.Fatal("late probe or 404 changed the new endpoint verdict")
+	}
+	store.Reconfigure(map[string]string{})
+	store.Put("p", next)
+	store.MarkResponsesUnsupported("p", next.BaseURL, time.Unix(101, 0))
+	if _, ok := store.Get("p"); ok {
+		t.Fatal("late write resurrected removed provider")
 	}
 }

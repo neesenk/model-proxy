@@ -87,7 +87,7 @@ func TestPlanTargetExportedWrapper(t *testing.T) {
 		Providers: map[string]Provider{"up": {OpenAIBaseURL: up.srv.URL, Provider: "test-static"}},
 		Routes:    map[string][]RouteTarget{"m": {{Provider: "up", Model: "real-model"}}},
 	}
-	plan, err := PlanTarget(h.svc, PlanInput{
+	plan, err := PlanTarget(PlanInput{
 		Runtime:     h.snapshot(cfg),
 		Target:      RouteTarget{Provider: "up", Model: "real-model"},
 		ClientProto: "openai",
@@ -99,7 +99,7 @@ func TestPlanTargetExportedWrapper(t *testing.T) {
 	if plan.BaseURL() != up.srv.URL || plan.BackendProtocol() != protocol.OpenAI {
 		t.Errorf("plan = %s %s, want the openai backend on the fake upstream", plan.BaseURL(), plan.BackendProtocol())
 	}
-	if _, err := PlanTarget(h.svc, PlanInput{Runtime: h.snapshot(cfg), Target: RouteTarget{Provider: "ghost"}}); err == nil {
+	if _, err := PlanTarget(PlanInput{Runtime: h.snapshot(cfg), Target: RouteTarget{Provider: "ghost"}}); err == nil {
 		t.Error("unknown provider must fail the plan")
 	}
 }

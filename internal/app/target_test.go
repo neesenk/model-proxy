@@ -1,14 +1,19 @@
 package app
 
 import (
+	"fmt"
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/forward"
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/providerbuild"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 	"model-proxy/internal/targetexec"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +31,7 @@ func TestTargetPlanOwnsWirePreparation(t *testing.T) {
 			},
 		},
 	})
-	plan, err := forward.PlanTarget(p.forwardServices(), forward.PlanInput{
+	plan, err := forward.PlanTarget(forward.PlanInput{
 		Runtime:     p.SnapshotRuntime(),
 		Target:      configdomain.RouteTarget{Provider: "up", Model: "claude", Protocol: "anthropic"},
 		ClientProto: "openai",
@@ -50,12 +55,78 @@ func TestTargetPlanOwnsWirePreparation(t *testing.T) {
 
 func TestTargetPlanRejectsUnknownProvider(t *testing.T) {
 	p := newTestProxy(t, &configdomain.Config{})
-	if _, err := forward.PlanTarget(p.forwardServices(), forward.PlanInput{
+	if _, err := forward.PlanTarget(forward.PlanInput{
 		Runtime: p.SnapshotRuntime(),
 		Target:  configdomain.RouteTarget{Provider: "missing", Model: "m"},
 	}); err == nil {
 		t.Fatal("unknown provider unexpectedly produced a target plan")
 	}
+}
+
+func TestTargetPlanKeepsProtocolAcrossReload(t *testing.T) {
+	useStaticProviderPools(t, "p")
+	oldUp := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(oldUp.Close)
+	newUp := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(newUp.Close)
+	prov := configdomain.Provider{Provider: "static", OpenAIBaseURL: oldUp.URL, Models: []string{"m"}}
+	next := prov
+	next.OpenAIBaseURL = newUp.URL
+	dir := t.TempDir()
+	state := filepath.Join(dir, "quota_state.json")
+	p := newTestProxyAt(t, &configdomain.Config{Proxy: "off",
+		Providers: map[string]configdomain.Provider{"p": prov},
+		Routes:    map[string][]configdomain.RouteTarget{"route": {{Provider: "p", Model: "m"}}},
+	}, state)
+	chat := runtimewire.ModelProtocols{Chat: triYes, Responses: triNo, Anthropic: triNo}
+	responses := runtimewire.ModelProtocols{Chat: triNo, Responses: triYes, Anthropic: triNo}
+	p.modelCaps.Put("p", providerbuild.ProtocolConfigFingerprint(prov), "m", chat, time.Now())
+	p.setWireCaps("p", wireCaps{BaseURL: oldUp.URL, Chat: triYes, Responses: triNo})
+	old := p.SnapshotRuntime()
+	targets := old.ExpandedRoutes["route"]
+	if len(targets) != 1 {
+		t.Fatalf("expanded route has %d targets, want one", len(targets))
+	}
+	check := func(snap RuntimeSnapshot, model, base, proto string) {
+		t.Helper()
+		target := targets[0]
+		target.Model = model
+		plan, err := forward.PlanTarget(forward.PlanInput{Runtime: snap, Target: target, ClientProto: "anthropic", ClientPath: "/v1/messages"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan.BaseURL() != base || string(plan.BackendProtocol()) != proto {
+			t.Errorf("generation %d model %q: base %q protocol %q, want %q %q", snap.Generation, model, plan.BaseURL(), plan.BackendProtocol(), base, proto)
+		}
+	}
+	check(old, "m", oldUp.URL, "openai")
+	check(old, "", oldUp.URL, "openai")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("proxy: off\nproviders:\n  p: {provider_id: static, openai_base_url: %s, models: [m]}\n", newUp.URL)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtimewire.SaveModelCapsFile(runtimewire.ModelCapsPath(state), map[string]runtimewire.ProviderModelCaps{"p": {
+		Fingerprint: providerbuild.ProtocolConfigFingerprint(next), Models: map[string]runtimewire.ModelProtocols{"m": responses},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Reload(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	fresh := p.SnapshotRuntime()
+	if fresh.Generation == old.Generation {
+		t.Fatal("reload did not advance the generation")
+	}
+	check(fresh, "m", newUp.URL, "responses")
+	check(fresh, "", newUp.URL, "anthropic")
+	p.setWireCaps("p", wireCaps{BaseURL: newUp.URL, Responses: triYes, Chat: triNo})
+	check(p.SnapshotRuntime(), "", newUp.URL, "responses")
+	check(fresh, "", newUp.URL, "anthropic")
+	check(old, "m", oldUp.URL, "openai")
+	check(old, "", oldUp.URL, "openai")
+	// A late passthrough 404 at the old endpoint must leave the current verdict intact.
+	proxyHealthGate{proxy: p, snapshot: old}.NoteWireResponsesMiss(targets[0].Provider, "")
+	check(p.SnapshotRuntime(), "", newUp.URL, "responses")
 }
 
 // ---- target_attempt_test.go ----

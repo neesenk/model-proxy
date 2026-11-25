@@ -305,23 +305,6 @@ func identIs(expression ast.Expr, name string) bool {
 	return ok && identifier.Name == name
 }
 
-func expressionName(expression ast.Expr) string {
-	switch value := expression.(type) {
-	case *ast.Ident:
-		return value.Name
-	case *ast.SelectorExpr:
-		base := expressionName(value.X)
-		if base == "" {
-			return ""
-		}
-		return base + "." + value.Sel.Name
-	case *ast.ParenExpr:
-		return expressionName(value.X)
-	default:
-		return ""
-	}
-}
-
 func cliOSPackageNames(t *testing.T, file *ast.File) map[string]bool {
 	t.Helper()
 	names := map[string]bool{}

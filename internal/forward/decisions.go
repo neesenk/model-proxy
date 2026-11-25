@@ -130,7 +130,7 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 		return fail(err)
 	}
 
-	plan, err := p.planTarget(PlanInput{
+	plan, err := PlanTarget(PlanInput{
 		Runtime: in.Runtime, Target: m, ClientProto: "decisions", ClientPath: "/v1/decisions",
 	})
 	if err != nil {
@@ -139,7 +139,7 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 	if plan.Provider() == nil {
 		return fail(fmt.Errorf("provider %s not available", m.Provider))
 	}
-	gate := p.svc.NewHealthGate(in.Runtime.Cfg, in.Runtime.ParentOf)
+	gate := p.svc.NewHealthGate(in.Runtime)
 	if !gate.TakeHalfOpenSlot(m.Provider, in.Runtime.Generation) {
 		return fail(errFusionLegUnavailable)
 	}

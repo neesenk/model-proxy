@@ -27,7 +27,7 @@ func TestDerivedRoute_ProtocolHintFilled(t *testing.T) {
 // TestConfigRoutingWarnings: the reasoning-replay marker fires precisely for a
 // reasoning model behind a declared protocol conversion. A codex target WITHOUT
 // protocol: does NOT warn — the forward path auto-resolves it to responses
-// (resolvedBackendProto/ProtocolHint), so it converts without user action.
+// (forward.PlanTarget/ProtocolHint), so it converts without user action.
 func TestConfigRoutingWarnings(t *testing.T) {
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
 		"codex": {Provider: "codex", OpenAIBaseURL: "https://x"},

@@ -40,7 +40,7 @@ import (
 // minutes on SSE); the immutable snapshot keeps routing, providers, catalog,
 // and cache on one config generation.
 func Serve(svc Services, state RouteState, snap Snapshot, proto string, w http.ResponseWriter, r *http.Request, requestID string) {
-	pipeline{svc: svc, state: state}.forward(snap, proto, w, r, requestID)
+	pipeline{svc: svc, state: state, sessionHeaders: snap.Cfg.RequestLog.ResolvedSessionHeaders()}.forward(snap, proto, w, r, requestID)
 }
 
 func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter, r *http.Request, requestID string) {
@@ -76,7 +76,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	// these fields, see protocol.SessionIDFromBody). It rides every live
 	// event, the request log and the guard session dimension (never the
 	// routing sticky key, which stays x-claude-code-session-id).
-	clientSession := requestlog.SessionID(r, cfg.RequestLog.ResolvedSessionHeaders())
+	clientSession := requestlog.SessionID(r, p.sessionHeaders)
 	if clientSession == "" {
 		clientSession = protocol.SessionIDFromBody(origBody)
 	}
@@ -842,7 +842,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 			logx.Warnf("[proto=%s model=%s] target %d (fusion/%s) failed; trying next", proto, exposed, ti, t.Model)
 			continue
 		}
-		plan, err := p.planTarget(PlanInput{
+		plan, err := PlanTarget(PlanInput{
 			Runtime: runtime, Target: t, ClientProto: proto, ClientPath: upPath,
 		})
 		if err != nil {
@@ -968,7 +968,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 				ContextRetry: ctxRetry,
 			},
 		)
-		result := p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
+		result := p.targetExecutor(attempt.Runtime(), runtime, t.Provider).Execute(attempt)
 		res.tried[t.Provider] = true
 		switch result.Outcome {
 		case targetexec.OutcomeFailedHard:

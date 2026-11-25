@@ -598,17 +598,17 @@ func (attemptValue) Runtime() int { return 0 }
 type executorValue struct{}
 func (executorValue) Execute(attemptValue) {}
 func newTargetAttempt(snapshotValue) attemptValue { return attemptValue{} }
-func (p *Proxy) targetExecutor(int, int, int, int) executorValue { return executorValue{} }
+func (p *Proxy) targetExecutor(int, snapshotValue, int) executorValue { return executorValue{} }
 func (p *Proxy) bound() {
 	runtime := snapshotValue{}
 	attempt := newTargetAttempt(runtime)
-	p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
+	p.targetExecutor(attempt.Runtime(), runtime, t.Provider).Execute(attempt)
 }
 func (p *Proxy) mismatched() {
 	runtime := snapshotValue{}
 	attempt := newTargetAttempt(runtime)
 	other := newTargetAttempt(runtime)
-	p.targetExecutor(other.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
+	p.targetExecutor(other.Runtime(), runtime, t.Provider).Execute(attempt)
 }`)
 	if !executorRuntimeBoundToAttempt(namedMethod(t, f, "Proxy", "bound").Body, "targetExecutor", "Execute") {
 		t.Error("executor runtime binding positive control rejected the same attempt")
@@ -625,17 +625,17 @@ func (attemptValue) Runtime() int { return 0 }
 type executorValue struct{}
 func (executorValue) Execute(attemptValue) {}
 func newTargetAttempt(snapshotValue) attemptValue { return attemptValue{} }
-func (p *Proxy) targetExecutor(int, int, int, int) executorValue { return executorValue{} }
+func (p *Proxy) targetExecutor(int, snapshotValue, int) executorValue { return executorValue{} }
 func (p *Proxy) sameSnapshot() {
 	runtime := snapshotValue{}
 	attempt := newTargetAttempt(runtime)
-	p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
+	p.targetExecutor(attempt.Runtime(), runtime, t.Provider).Execute(attempt)
 }
 func (p *Proxy) crossSnapshot() {
 	runtime := snapshotValue{}
 	other := snapshotValue{}
 	attempt := newTargetAttempt(runtime)
-	p.targetExecutor(attempt.Runtime(), other.Cfg, other.ParentOf, t.Provider).Execute(attempt)
+	p.targetExecutor(attempt.Runtime(), other, t.Provider).Execute(attempt)
 }`)
 	if !executorRuntimeBoundToAttempt(namedMethod(t, f, "Proxy", "sameSnapshot").Body, "targetExecutor", "Execute") {
 		t.Error("executor parent projection positive control rejected the attempt's own snapshot")
@@ -1248,7 +1248,7 @@ func assignedFactoryValueExecuted(n ast.Node, factory, receiverFactory, terminal
 // from:
 //
 //	attempt := newTargetAttempt(runtime, …)
-//	p.targetExecutor(attempt.Runtime(), runtime.ParentOf).Execute(attempt)
+//	p.targetExecutor(attempt.Runtime(), runtime, target.Provider).Execute(attempt)
 //
 // This prevents a caller from pairing one generation's typed attempt with
 // another generation's root State adapter or parent projection.
@@ -1291,7 +1291,7 @@ func executorRuntimeBoundToAttempt(n ast.Node, receiverFactory, terminal string)
 			return true
 		}
 		factoryCall, ok := terminalSelector.X.(*ast.CallExpr)
-		if !ok || len(factoryCall.Args) != 4 {
+		if !ok || len(factoryCall.Args) != 3 {
 			return true
 		}
 		runtimeCall, ok := factoryCall.Args[0].(*ast.CallExpr)
@@ -1306,23 +1306,12 @@ func executorRuntimeBoundToAttempt(n ast.Node, receiverFactory, terminal string)
 		if !ok || runtimeAttempt.Name != attempt.Name {
 			return true
 		}
-		// The proxy-chain inputs must come from the SAME snapshot as the
-		// attempt: cfg is args[1] (<snapshot>.Cfg), the parent projection
-		// args[2] (<snapshot>.ParentOf), and the provider args[3] a route/plan
-		// target's .Provider.
+		// The same whole snapshot drives the client, protocol feedback and effects.
 		snapshot := snapshotOf[attempt.Name]
-		if snapshot == "" {
+		if snapshot == "" || requestRoutingExprPath(factoryCall.Args[1]) != snapshot {
 			return true
 		}
-		cfg, ok := factoryCall.Args[1].(*ast.SelectorExpr)
-		if !ok || cfg.Sel.Name != "Cfg" || requestRoutingExprPath(cfg.X) != snapshot {
-			return true
-		}
-		parentOf, ok := factoryCall.Args[2].(*ast.SelectorExpr)
-		if !ok || parentOf.Sel.Name != "ParentOf" || requestRoutingExprPath(parentOf.X) != snapshot {
-			return true
-		}
-		provider, ok := factoryCall.Args[3].(*ast.SelectorExpr)
+		provider, ok := factoryCall.Args[2].(*ast.SelectorExpr)
 		if !ok || provider.Sel.Name != "Provider" {
 			return true
 		}

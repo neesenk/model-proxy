@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"model-proxy/internal/runtime/wirecap"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -369,12 +370,13 @@ func TestCallFusionLegFailureClasses(t *testing.T) {
 	t.Run("404 after wire verdict flips verdict, model NOT locked", func(t *testing.T) {
 		up := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) })
 		h, _, fc, target := legHarness(t, up)
-		h.svc.ResolveBackendProto = func(declared, provName string, provCfg Provider, model, clientProto string, parentOf map[string]string) (string, bool) {
-			return "responses", true // verdict-driven switch to /responses
-		}
+		var caps wirecap.Store
+		caps.Put("p", wirecap.Capabilities{BaseURL: up.srv.URL, Responses: wirecap.Yes})
+		fc.runtime.WireCaps = caps.View()
 		p := pipeline{svc: h.svc, state: h.state}
 		// The /responses leg targets the provider's openai base.
 		provCfg := fc.runtime.Cfg.Providers["p"]
+		provCfg.AnthropicBaseURL = ""
 		provCfg.OpenAIBaseURL = up.srv.URL
 		fc.runtime.Cfg.Providers["p"] = provCfg
 		res := callLeg(p, fc, target)

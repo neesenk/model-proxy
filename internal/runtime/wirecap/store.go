@@ -8,6 +8,7 @@ package wirecap
 
 import (
 	"encoding/json"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -78,18 +79,30 @@ type Capabilities struct {
 // Methods never call application code while holding the lock. The zero value
 // is ready for use; the map is allocated lazily by Put.
 type Store struct {
-	mu   sync.RWMutex
-	caps map[string]Capabilities
+	mu       sync.RWMutex
+	view     ProviderView
+	baseURLs map[string]string
 }
 
-func (store *Store) Get(parent string) (Capabilities, bool) {
+// ProviderView is an immutable provider verdict map. Writers publish a new map.
+type ProviderView struct{ caps map[string]Capabilities }
+
+func (v ProviderView) Get(parent string) (Capabilities, bool) {
+	c, ok := v.caps[parent]
+	return c, ok
+}
+
+func (store *Store) View() ProviderView {
 	if store == nil {
-		return Capabilities{}, false
+		return ProviderView{}
 	}
 	store.mu.RLock()
 	defer store.mu.RUnlock()
-	capabilities, ok := store.caps[parent]
-	return capabilities, ok
+	return store.view
+}
+
+func (store *Store) Get(parent string) (Capabilities, bool) {
+	return store.View().Get(parent)
 }
 
 func (store *Store) Put(parent string, capabilities Capabilities) {
@@ -98,41 +111,57 @@ func (store *Store) Put(parent string, capabilities Capabilities) {
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if store.caps == nil {
-		store.caps = map[string]Capabilities{}
-	}
-	store.caps[parent] = capabilities
+	store.putLocked(parent, capabilities)
 }
 
-// MarkResponsesUnsupported corrects a stale positive verdict after a
-// verdict-selected /responses request receives a route-level 404.
-func (store *Store) MarkResponsesUnsupported(parent string, now time.Time) {
+func (store *Store) putLocked(parent string, c Capabilities) {
+	if store.baseURLs != nil {
+		if base, ok := store.baseURLs[parent]; !ok || base != c.BaseURL {
+			return
+		}
+	}
+	next := maps.Clone(store.view.caps)
+	if next == nil {
+		next = make(map[string]Capabilities)
+	}
+	next[parent] = c
+	store.view = ProviderView{caps: next}
+}
+
+// MarkResponsesUnsupported attributes a route-level 404 to the observed endpoint.
+func (store *Store) MarkResponsesUnsupported(parent, baseURL string, now time.Time) {
 	if store == nil {
 		return
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if store.caps == nil {
-		store.caps = map[string]Capabilities{}
+	c, ok := store.view.Get(parent)
+	if ok && c.BaseURL != baseURL {
+		return
 	}
-	capabilities := store.caps[parent]
-	capabilities.Responses = No
-	capabilities.ProbedAt = now
-	store.caps[parent] = capabilities
+	c.BaseURL, c.Responses, c.ProbedAt = baseURL, No, now
+	store.putLocked(parent, c)
 }
 
 // Snapshot returns a detached map suitable for persistence.
 func (store *Store) Snapshot() map[string]Capabilities {
-	if store == nil {
-		return map[string]Capabilities{}
-	}
-	store.mu.RLock()
-	defer store.mu.RUnlock()
-	out := make(map[string]Capabilities, len(store.caps))
-	for parent, capabilities := range store.caps {
-		out[parent] = capabilities
-	}
+	out := map[string]Capabilities{}
+	maps.Copy(out, store.View().caps)
 	return out
+}
+
+// Reconfigure retains verdicts for unchanged endpoints and rejects late writes from removed endpoints.
+func (store *Store) Reconfigure(baseURLs map[string]string) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	next := maps.Clone(store.view.caps)
+	for parent, c := range next {
+		if base, ok := baseURLs[parent]; !ok || base != c.BaseURL {
+			delete(next, parent)
+		}
+	}
+	store.view = ProviderView{caps: next}
+	store.baseURLs = maps.Clone(baseURLs)
 }
 
 // RestoreMatching replaces the store with persisted entries whose base URL
@@ -156,6 +185,7 @@ func (store *Store) RestoreMatching(
 		}
 	}
 	store.mu.Lock()
-	store.caps = next
+	store.view = ProviderView{caps: next}
+	store.baseURLs = maps.Clone(baseURLs)
 	store.mu.Unlock()
 }
