@@ -110,54 +110,44 @@ func TestEvalShadow_PairwiseJudgeLogsVerdict(t *testing.T) {
 	post(t, px.URL+"/v1/chat/completions",
 		`{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
 
-	// The detached shadow/judge tasks are admitted asynchronously after the
-	// client response returns; wait for their observable effects BEFORE Close
-	// (Close only waits for already-admitted tasks), then Close drains the
-	// request log so the on-disk assertions below are stable.
-	waitUntil(t, "shadow upstream hit", shadowHit.Load)
-	waitUntil(t, "judge upstream hit", judgeHit.Load)
+	// Close cancels active judges. Wait for all three records before shutdown.
+	awaitRecordCount(t, logDir, 3)
 	p.Close()
-
-	if !shadowHit.Load() {
-		t.Fatal("shadow upstream was not called")
-	}
-	if !judgeHit.Load() {
-		t.Fatal("judge upstream was not called")
+	if !shadowHit.Load() || !judgeHit.Load() {
+		t.Fatal("expected both shadow and judge upstream calls")
 	}
 
-	var verdict string
-	var primaryRecord *requestlog.Record
 	records := allRecords(t, logDir)
-	for _, record := range records {
-		if strings.HasPrefix(record.RequestID, "shadow-") {
-			for _, d := range record.Diagnostics {
-				if d.Code == "eval_verdict" {
-					verdict = d.Detail
-				}
-			}
-		} else if primaryRecord == nil {
-			r := record
-			primaryRecord = &r
+	if len(records) != 3 {
+		t.Fatalf("got %d records, want primary, shadow and judge", len(records))
+	}
+	byProvider := make(map[string]requestlog.Record)
+	for _, rec := range records {
+		byProvider[rec.Provider] = rec
+	}
+	primary, ok := byProvider["primary"]
+	if !ok || primary.RequestID == "" {
+		t.Fatal("missing primary record or request ID")
+	}
+	shadow := byProvider["shadow"]
+	if shadow.RequestID != "shadow-"+primary.RequestID {
+		t.Fatalf("shadow request ID = %q, want shadow-%s", shadow.RequestID, primary.RequestID)
+	}
+	var verdict string
+	for _, d := range shadow.Diagnostics {
+		if d.Code == "eval_verdict" {
+			verdict = d.Detail
 		}
 	}
 	if verdict != "shadow_better" {
-		t.Fatalf("eval_verdict = %q, want shadow_better; primary routing = %+v", verdict, primaryRecord.Routing)
+		t.Fatalf("eval_verdict = %q, want shadow_better; primary routing = %+v", verdict, primary.Routing)
 	}
-
-	// The judge request-log record must not persist the response bodies because
-	// eval judge calls are marked sensitive.
-	var judgeRecord *requestlog.Record
-	for i := range records {
-		if strings.HasPrefix(records[i].RequestID, "eval-judge-") {
-			judgeRecord = &records[i]
-			break
-		}
+	judge := byProvider["judge"]
+	if judge.RequestID != "eval-judge-"+primary.RequestID {
+		t.Fatalf("judge request ID = %q, want eval-judge-%s", judge.RequestID, primary.RequestID)
 	}
-	if judgeRecord == nil {
-		t.Fatal("judge request-log record missing")
-	}
-	if judgeRecord.RequestBody != "" {
-		t.Errorf("judge request-log body = %q, want empty (sensitive)", judgeRecord.RequestBody)
+	if judge.RequestBody != "" || judge.ResponseBody != "" {
+		t.Error("sensitive judge record contains a request or response body")
 	}
 
 	// Shadow replay should use the paired grade's target.

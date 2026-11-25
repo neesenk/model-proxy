@@ -179,26 +179,33 @@ func TestLoggerRestartsAppendToTheSamePerDayFile(t *testing.T) {
 
 	first := New(Options{Directory: dir, MaxFileSize: 1 << 30, MaxBodyBytes: 4096})
 	go first.Run()
-	first.Enqueue(&Record{Ts: "t", RequestID: "first", Status: 200})
+	first.Enqueue(&Record{Ts: "2026-11-23T00:00:00Z", RequestID: "first", Status: 200})
 	first.Shutdown()
 
 	second := New(Options{Directory: dir, MaxFileSize: 1 << 30, MaxBodyBytes: 4096})
 	go second.Run()
-	second.Enqueue(&Record{Ts: "t", RequestID: "second", Status: 200})
+	second.Enqueue(&Record{Ts: "2026-11-23T00:00:01Z", RequestID: "second", Status: 200})
 	second.Shutdown()
 
 	names := requestLogFileNames(t, dir)
 	if len(names) != 1 {
 		t.Fatalf("files = %v, want exactly one per-day file across restarts", names)
 	}
-	records, err := QueryRecords(dir, Filter{})
+	raw, err := os.ReadFile(filepath.Join(dir, names[0]))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 2 {
-		t.Fatalf("records in shared per-day file = %d, want 2", len(records))
+	lines := bytes.Split(bytes.TrimSuffix(raw, []byte{'\n'}), []byte{'\n'})
+	if len(lines) != 2 {
+		t.Fatalf("got %d physical lines, want 2", len(lines))
 	}
-	if records[0].RequestID != "first" || records[1].RequestID != "second" {
-		t.Errorf("request ids = [%s %s], want [first second] (append order preserved)", records[0].RequestID, records[1].RequestID)
+	for i, want := range []string{"first", "second"} {
+		var rec Record
+		if err := json.Unmarshal(lines[i], &rec); err != nil {
+			t.Fatalf("line %d: %v", i+1, err)
+		}
+		if rec.RequestID != want {
+			t.Errorf("line %d request ID = %q, want %q", i+1, rec.RequestID, want)
+		}
 	}
 }

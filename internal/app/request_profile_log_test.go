@@ -10,11 +10,10 @@ package app
 import (
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/observe/counters"
+	"model-proxy/internal/observe/requestlog"
 )
 
 func TestRequestProfileLogged(t *testing.T) {
@@ -28,7 +27,6 @@ func TestRequestProfileLogged(t *testing.T) {
 		Routes:    map[string][]configdomain.RouteTarget{"m": {{Provider: "a", Model: "m"}}},
 	}
 	p, logDir, drain := newReqLogProxy(t, cfg)
-	_ = p
 	p.providers["a"] = &testProv{key: "ka"}
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	t.Cleanup(px.Close)
@@ -38,53 +36,32 @@ func TestRequestProfileLogged(t *testing.T) {
 		`{"role":"user","content":"hi"},` +
 		`{"role":"assistant","content":"hello"},` +
 		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]}]}`
-	req, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/chat/completions", strings.NewReader(body))
-	req.Header.Set("content-type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	body2 := `{"model":"m","messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}`
+	cases := []struct {
+		body  string
+		roles requestlog.RoleCounts
+	}{
+		{body, requestlog.RoleCounts{System: 1, User: 2, Assistant: 1, Tool: 1}},
+		{body2, requestlog.RoleCounts{User: 2, Assistant: 1}},
 	}
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d", resp.StatusCode)
+	for _, tc := range cases {
+		if status, _ := post(t, px.URL+"/v1/chat/completions", tc.body); status != http.StatusOK {
+			t.Fatalf("request status = %d, want 200", status)
+		}
 	}
-
-	awaitCommitMetrics(t, p, counters.PMKey{Provider: "a", Model: "m"})
+	px.Close() // Both handlers must finish enqueueing before the writer stops.
 	drain()
 	records := allRecords(t, logDir)
-	if len(records) == 0 {
-		t.Fatal("no request-log records written")
+	if len(records) != len(cases) {
+		t.Fatalf("record count = %d, want one per request (%d)", len(records), len(cases))
 	}
-	rec := records[len(records)-1]
-	if rec.Profile == nil {
-		t.Fatalf("committed record carries no profile: %+v", rec)
-	}
-	if rec.Profile.EstimatedTokens <= 0 {
-		t.Errorf("est_tokens = %d, want > 0", rec.Profile.EstimatedTokens)
-	}
-	if rec.Profile.Roles.System != 1 || rec.Profile.Roles.User != 2 ||
-		rec.Profile.Roles.Assistant != 1 || rec.Profile.Roles.Tool != 1 {
-		t.Errorf("role composition = %+v, want sys 1 / usr 2 / asst 1 / tool 1", rec.Profile.Roles)
-	}
-	// The body carries an assistant turn, so the profile classifies it as a
-	// follow-up conversation turn (the routing FollowUp signal).
-	if !rec.Profile.FollowUp {
-		t.Errorf("assistant-carrying request not classified as follow-up: %+v", rec.Profile)
-	}
-	// A plain user-only follow-up turn is recognizable as one.
-	body2 := `{"model":"m","messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}`
-	req2, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/chat/completions", strings.NewReader(body2))
-	req2.Header.Set("content-type", "application/json")
-	resp2, err := http.DefaultClient.Do(req2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp2.Body.Close()
-	awaitCommitMetrics(t, p, counters.PMKey{Provider: "a", Model: "m"})
-	drain()
-	records = allRecords(t, logDir)
-	rec2 := records[len(records)-1]
-	if rec2.Profile == nil || !rec2.Profile.FollowUp || rec2.Profile.Roles.Assistant != 1 {
-		t.Fatalf("follow-up profile = %+v", rec2.Profile)
+	for _, tc := range cases {
+		rec := recordContaining(t, records, tc.body)
+		if rec.Profile == nil {
+			t.Fatalf("request %s has no profile", rec.RequestID)
+		}
+		if rec.Profile.EstimatedTokens <= 0 || !rec.Profile.FollowUp || rec.Profile.Roles != tc.roles {
+			t.Errorf("request %s profile = %+v, want positive tokens, follow-up and roles %+v", rec.RequestID, rec.Profile, tc.roles)
+		}
 	}
 }

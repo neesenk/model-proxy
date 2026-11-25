@@ -20,7 +20,7 @@ import (
 	"model-proxy/internal/webauth"
 )
 
-func apiKeyFixture(t *testing.T) (*Proxy, string, string) {
+func apiKeyFixture(t *testing.T) (*Proxy, *httptest.Server, string) {
 	t.Helper()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -58,7 +58,7 @@ func apiKeyFixture(t *testing.T) (*Proxy, string, string) {
 
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	t.Cleanup(px.Close)
-	return p, px.URL, logDir
+	return p, px, logDir
 }
 
 func readAPIKeyRecords(t *testing.T, logDir string) []requestlog.Record {
@@ -69,10 +69,10 @@ func readAPIKeyRecords(t *testing.T, logDir string) []requestlog.Record {
 // TestAPIKeyTaggedInRequestLog: the authenticated request's record carries
 // api_key = sha256(rig-key-1)[:8]; the token itself never appears.
 func TestAPIKeyTaggedInRequestLog(t *testing.T) {
-	p, base, logDir := apiKeyFixture(t)
+	p, px, logDir := apiKeyFixture(t)
 	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
 
-	req, _ := http.NewRequest(http.MethodPost, base+"/v1/chat/completions", strings.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("x-api-key", "rig-key-1")
 	resp, err := http.DefaultClient.Do(req)
@@ -119,8 +119,8 @@ func TestAPIKeyTaggedInRequestLog(t *testing.T) {
 // TestAPIKeyBadKeyRejectedNoLog: a wrong key answers 401 at the gate and
 // produces no request-log record (the request never entered the pipeline).
 func TestAPIKeyBadKeyRejectedNoLog(t *testing.T) {
-	_, base, logDir := apiKeyFixture(t)
-	req, _ := http.NewRequest(http.MethodPost, base+"/v1/chat/completions",
+	p, px, logDir := apiKeyFixture(t)
+	req, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/chat/completions",
 		strings.NewReader(`{"model":"m","messages":[]}`))
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("x-api-key", "wrong")
@@ -132,8 +132,10 @@ func TestAPIKeyBadKeyRejectedNoLog(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
+	px.Close()
+	p.reqLog.Shutdown()
 	if records := readAPIKeyRecords(t, logDir); len(records) != 0 {
-		t.Errorf("gate-rejected request must not be logged: %+v", records)
+		t.Errorf("gate-rejected request produced %d records, want 0", len(records))
 	}
 }
 
@@ -168,9 +170,14 @@ func TestAPIKeyLoopbackUntagged(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
-	for _, rec := range readAPIKeyRecords(t, logDir) {
-		if rec.APIKeyID != "" {
-			t.Errorf("unauthenticated loopback record carries api_key: %+v", rec)
-		}
+	px.Close()
+	p.reqLog.Shutdown()
+	records := readAPIKeyRecords(t, logDir)
+	if len(records) != 1 {
+		t.Fatalf("loopback request produced %d records, want 1", len(records))
+	}
+	rec := records[0]
+	if rec.Status != http.StatusOK || rec.Provider != "a" || rec.APIKeyID != "" {
+		t.Errorf("loopback record: status=%d provider=%q tagged=%t, want 200/a/untagged", rec.Status, rec.Provider, rec.APIKeyID != "")
 	}
 }
