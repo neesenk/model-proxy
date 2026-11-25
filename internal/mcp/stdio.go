@@ -3,12 +3,94 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
+
+// maxStderrTail bounds how much of a dead child's stderr the failure
+// diagnostics carry: the end of the output is where a fatal error lives.
+const maxStderrTail = 512
+
+// minSecretLen is the shortest environment value worth masking. Below it a
+// value is a flag or a mode ("1", "true"), and masking it would shred
+// ordinary words in the child's output.
+const minSecretLen = 8
+
+// benignEnv names the environment variables a parent hands down that are not
+// credentials and routinely appear in diagnostics (search paths, the home
+// directory, the locale). Every OTHER value the child was given is treated as
+// a secret: stdio servers receive their credentials through env, and a child
+// dying on a bad key tends to print what it was handed.
+var benignEnv = map[string]bool{"PATH": true, "HOME": true, "TMPDIR": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TZ": true}
+
+// ExitError is a failure caused by the child process dying. Err is the bare
+// failure — all an HTTP answer may carry, because child stderr is untrusted
+// and may hold credentials. Diag adds what an operator needs to tell why the
+// child died: its wait status and a bounded, single-line tail of its stderr
+// with the credential-bearing environment values redacted.
+type ExitError struct {
+	Err  error
+	Diag string
+}
+
+func (e *ExitError) Error() string { return e.Err.Error() }
+func (e *ExitError) Unwrap() error { return e.Err }
+
+// ExitDiag returns the redacted diagnostics a stdio failure carries, or ""
+// when the failure is not a dead child. For operator surfaces only (serve.log,
+// the CLI probe) — never for the HTTP answer.
+func ExitDiag(err error) string {
+	var e *ExitError
+	if errors.As(err, &e) {
+		return e.Diag
+	}
+	return ""
+}
+
+// redactTail flattens the END of a child's stderr into one bounded line with
+// the credential-bearing environment values masked. Redaction runs over the
+// whole capture BEFORE the cut, so the tail can never split a secret (or a
+// placeholder) in two.
+func redactTail(stderr string, env []string) string {
+	type secret struct{ name, value string }
+	var secrets []secret
+	for _, kv := range env {
+		name, value, _ := strings.Cut(kv, "=")
+		if benignEnv[name] || len(value) < minSecretLen {
+			continue
+		}
+		secrets = append(secrets, secret{name, value})
+	}
+	// Longest first: when one secret contains another, the inner one must not
+	// leave the outer one's remainder behind.
+	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i].value) > len(secrets[j].value) })
+	flat := stderr
+	for _, s := range secrets {
+		flat = strings.ReplaceAll(flat, s.value, "<redacted:"+s.name+">")
+	}
+	// One line: serve.log is read line by line, and a multi-line stack trace
+	// would pour across it as unattributed lines.
+	flat = strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, flat)), " ")
+	if len(flat) <= maxStderrTail {
+		return flat
+	}
+	tail := flat[len(flat)-maxStderrTail:]
+	for len(tail) > 0 && tail[0]&0xc0 == 0x80 { // the cut may have split a UTF-8 rune
+		tail = tail[1:]
+	}
+	return "…" + tail
+}
 
 // StdioConn owns one MCP stdio child process: newline-delimited JSON-RPC 2.0
 // messages on stdin/stdout (the MCP stdio transport), responses correlated to
@@ -171,11 +253,11 @@ func (c *StdioConn) Call(ctx context.Context, body []byte) ([]byte, error) {
 	select {
 	case payload, ok := <-ch:
 		if !ok {
-			return nil, fmt.Errorf("stdio: child exited")
+			return nil, c.exitError()
 		}
 		return payload, nil
 	case <-c.readDone:
-		return nil, fmt.Errorf("stdio: child exited")
+		return nil, c.exitError()
 	case <-ctx.Done():
 		// Drop the pending entry so a late response is discarded (readLoop
 		// tolerates missing entries) instead of leaking the registration.
@@ -186,9 +268,24 @@ func (c *StdioConn) Call(ctx context.Context, body []byte) ([]byte, error) {
 	}
 }
 
-// Stderr returns the captured tail of the child's stderr for debug logging.
-// The caller is responsible for redacting any sensitive content before
-// emitting it anywhere user-visible.
+// exitError reports a dead child. Valid only once readDone is closed or the
+// pending channel was closed: the read loop reaps the child before closing
+// either, so the wait status and the stderr capture are final by then.
+func (c *StdioConn) exitError() error {
+	status := "unknown status"
+	if c.cmd.ProcessState != nil {
+		status = c.cmd.ProcessState.String() // "exit status 1", "signal: killed"
+	}
+	diag := status
+	if tail := redactTail(c.stderr.String(), c.cmd.Env); tail != "" {
+		diag += "; stderr: " + tail
+	}
+	return &ExitError{Err: fmt.Errorf("stdio: child exited (%s)", status), Diag: diag}
+}
+
+// Stderr returns the captured tail of the child's stderr, unredacted: the raw
+// capture, for callers that redact it themselves. Operator surfaces should
+// read ExitDiag on the failure instead.
 func (c *StdioConn) Stderr() string {
 	return c.stderr.String()
 }

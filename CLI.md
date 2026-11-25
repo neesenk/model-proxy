@@ -995,6 +995,11 @@ notifications/initialized + tools/list，JSON 与 SSE 分帧响应都支持）�
 `${account.api_key}`/`env:VAR`），结果显示 `stdio` 标记。
 <name> 为路由名时不执行：stderr 提示路由是聚合面，引导改测成员 server 或经 daemon 的 `/mcp/<route>` 探测（exit 1）。
 
+stdio 探测失败（`stdio start:` / `initialize:` / `tools/list:` 既有文案与格式不变）时，若子进程
+已经退出，错误带退出状态（`stdio: child exited (exit status N)`），并在该行下**追加一行**缩进
+诊断：`  <退出状态>; stderr: <末 512 字节的 stderr 尾巴，单行>`——子进程拿到的凭据环境变量值已
+替换为 `<redacted:NAME>`，原始 stderr 永不输出（2026-11-26 起追加）。
+
 ### 退出码
 
 0 = 握手成功；1 = 未知服务器名、服务器 disabled、无已登录账号、OAuth provider

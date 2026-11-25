@@ -31,8 +31,8 @@ func (p *Proxy) serveMCPLegacySSE(w http.ResponseWriter, r *http.Request, name s
 		clientHeaders: r.Header,
 	})
 	if err != nil {
-		http.Error(w, fmt.Sprintf("mcp %q: upstream: %v", name, err), http.StatusBadGateway)
-		p.mcpLog(name, account, mcpkg.Frame{}, r.Method, http.StatusBadGateway, started, requestID, nil, nil, 0, false, ident)
+		p.mcpFail(w, name, account, mcpkg.Frame{}, r.Method, started, requestID, nil, ident,
+			http.StatusBadGateway, fmt.Sprintf("mcp %q: upstream: %v", name, err), err)
 		return
 	}
 	defer resp.Body.Close()

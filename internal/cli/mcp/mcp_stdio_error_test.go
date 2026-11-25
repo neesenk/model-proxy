@@ -77,3 +77,42 @@ mcp:
 		t.Errorf("stderr = %q, want the apikey-only guidance", stderr)
 	}
 }
+
+// TestMCPTestStdioChildDiesReportsRedactedStderr: when the child dies while
+// answering initialize, the probe must say how it died and show the stderr
+// that explains it — with the account key the child was handed masked. Before
+// the fix it printed only "initialize: stdio: child exited": an operator
+// could not tell a missing runtime from a rejected key.
+func TestMCPTestStdioChildDiesReportsRedactedStderr(t *testing.T) {
+	home := t.TempDir()
+	clitest.SetPoolHome(t, home)
+	const key = "pool-key-0123456789abcdef"
+	clitest.WritePoolFile(t, "zhipu", "zhipu", key)
+	t.Setenv("MCP_STDIO_CHILD", "dies")
+	cfgPath := clitest.WriteTempConfig(t, `
+listen: 127.0.0.1:1
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://example.com/api/v1}
+mcp:
+  vision:
+    transport: stdio
+    provider: zhipu
+    command: ["`+os.Args[0]+`", "-test.run=TestHelperProcess"]
+    env:
+      MCP_STDIO_CHILD: env:MCP_STDIO_CHILD
+      CHILD_KEY: ${account.api_key}
+`)
+
+	_, stderr, code := clitest.RunCLIWithHome(t, home, "mcp", cfgPath, "test", "vision")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n--- stderr ---\n%s", code, stderr)
+	}
+	for _, want := range []string{"initialize: stdio: child exited (exit status 7)", "boot failed", "<redacted:CHILD_KEY>"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to carry %q", stderr, want)
+		}
+	}
+	if strings.Contains(stderr, key) {
+		t.Errorf("stderr leaks the account key the child was handed: %q", stderr)
+	}
+}

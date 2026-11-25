@@ -16,14 +16,15 @@ import (
 // TestHelperProcess is the subprocess entry for os.Exit-ing command paths,
 // and doubles as the fake MCP stdio child when MCP_STDIO_CHILD is set ("1" =
 // well-behaved child; "no-proto" = a child whose initialize response carries
-// no protocolVersion — the malformed-peer error path). MP_CLI_HELPER=1 marks
+// no protocolVersion — the malformed-peer error path; "dies" = a child that
+// echoes its key to stderr and exits non-zero on initialize). MP_CLI_HELPER=1 marks
 // the clitest COMMAND subprocess (which inherits MCP_STDIO_CHILD from the
 // test process) — that one must run the handler, not child mode; the real
 // fake child is spawned with ResolveMCPStdioEnv's minimal env, which does not
 // carry MP_CLI_HELPER.
 func TestHelperProcess(t *testing.T) {
 	switch os.Getenv("MCP_STDIO_CHILD") {
-	case "1", "no-proto":
+	case "1", "no-proto", "dies":
 		if os.Getenv("MP_CLI_HELPER") != "1" {
 			os.Exit(runStdioChild())
 		}
@@ -46,6 +47,11 @@ func runStdioChild() int {
 		}
 		switch v.Method {
 		case "initialize":
+			if os.Getenv("MCP_STDIO_CHILD") == "dies" {
+				// A backend dying on its key prints what it was handed.
+				fmt.Fprintf(os.Stderr, "boot failed: key=%s\n", os.Getenv("CHILD_KEY"))
+				os.Exit(7)
+			}
 			if os.Getenv("MCP_STDIO_CHILD") == "no-proto" {
 				// A response frame (id + result) whose result lacks
 				// protocolVersion: delivered to the caller, rejected by the

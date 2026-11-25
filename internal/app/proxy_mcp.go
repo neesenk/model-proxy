@@ -23,6 +23,7 @@ import (
 	mcpkg "model-proxy/internal/mcp"
 	"model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
+	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/provider"
 	"model-proxy/internal/webauth"
@@ -295,8 +296,8 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 		mcpSetLiveProvider(w, account)
 	}
 	if err != nil {
-		http.Error(w, fmt.Sprintf("mcp %q: upstream: %v", name, err), http.StatusBadGateway)
-		p.mcpLog(name, account, frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false, ident)
+		p.mcpFail(w, name, account, frame, r.Method, started, requestID, body, ident,
+			http.StatusBadGateway, fmt.Sprintf("mcp %q: upstream: %v", name, err), err)
 		return
 	}
 	defer resp.Body.Close()
@@ -658,6 +659,45 @@ func mcpStreamResponse(w http.ResponseWriter, src io.Reader, capBytes int) ([]by
 	}
 }
 
+// mcpFail answers an exchange the gateway itself fails and leaves the same
+// evidence on every surface: the client gets msg (http.Error appends the
+// newline), the request-log row carries exactly those bytes, and serve.log
+// gets one warn line naming the endpoint, the method, the status and the
+// cause — plus, when err is a dead stdio child, the redacted diagnostics it
+// carries (see mcpkg.ExitError). Before this the reason travelled only in the
+// HTTP answer: serve.log had no MCP line at all and the row recorded the
+// status with an empty body, so a failure read as "502, 0 bytes" (2026-11-25:
+// three /mcp/vision initialize failures whose cause, npx missing from PATH,
+// was recoverable only by reconstructing Homebrew symlink mtimes).
+func (p *Proxy) mcpFail(w http.ResponseWriter, name, account string, frame mcpkg.Frame, httpMethod string, started time.Time, requestID string, reqBody []byte, ident *mcpIdentity, status int, msg string, err error) {
+	body := msg + "\n"
+	http.Error(w, msg, status)
+	line := fmt.Sprintf("[mcp %s] %s failed (status %d): %s", name, mcpMethodLabel(frame, httpMethod), status, mcpOneLine(msg))
+	if diag := mcpkg.ExitDiag(err); diag != "" {
+		line += " — " + diag
+	}
+	logx.Warnf("%s", line)
+	p.mcpLog(name, account, frame, httpMethod, status, started, requestID, reqBody, []byte(body), int64(len(body)), false, ident)
+}
+
+// mcpOneLine keeps a failure answer on one serve.log line: the answer is
+// free-form text, and serve.log is read line by line.
+func mcpOneLine(s string) string {
+	return strings.Join(strings.FieldsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }), " ")
+}
+
+// mcpMethodLabel names an exchange's method: the JSON-RPC method, or the HTTP
+// verb when the frame carries none (GET/DELETE, or a batch).
+func mcpMethodLabel(frame mcpkg.Frame, httpMethod string) string {
+	if frame.Method != "" {
+		return frame.Method
+	}
+	if frame.IsBatch {
+		return httpMethod + " (batch)"
+	}
+	return httpMethod
+}
+
 // mcpLog projects the exchange into the request log (kind="mcp"). Bodies obey
 // the logger's existing truncation policy; the method logged is the JSON-RPC
 // method (HTTP verb for GET/DELETE).
@@ -709,13 +749,7 @@ func (p *Proxy) mcpLog(name, account string, frame mcpkg.Frame, httpMethod strin
 	if logger == nil {
 		return
 	}
-	method := frame.Method
-	if method == "" {
-		method = httpMethod
-		if frame.IsBatch {
-			method = httpMethod + " (batch)"
-		}
-	}
+	method := mcpMethodLabel(frame, httpMethod)
 	logger.Enqueue(logger.BuildRecord(requestlog.Input{
 		StartedAt:         started,
 		RequestID:         requestID,

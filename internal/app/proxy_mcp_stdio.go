@@ -248,8 +248,8 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 		}
 		conn, err := p.mcpStdioStart(snap, srv, account)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("mcp %q: stdio start: %v", name, err), http.StatusBadGateway)
-			p.mcpLog(name, account, frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false, ident)
+			p.mcpFail(w, name, account, frame, r.Method, started, requestID, body, ident,
+				http.StatusBadGateway, fmt.Sprintf("mcp %q: stdio start: %v", name, err), err)
 			return
 		}
 		initCtx, initCancel := context.WithTimeout(r.Context(), srv.MCPTimeoutDuration())
@@ -257,8 +257,8 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 		initCancel()
 		if err != nil {
 			conn.Close()
-			http.Error(w, fmt.Sprintf("mcp %q: stdio initialize: %v", name, err), http.StatusBadGateway)
-			p.mcpLog(name, account, frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false, ident)
+			p.mcpFail(w, name, account, frame, r.Method, started, requestID, body, ident,
+				http.StatusBadGateway, fmt.Sprintf("mcp %q: stdio initialize: %v", name, err), err)
 			return
 		}
 		sid := p.mcpSessions.Put(name, account, "")
@@ -267,7 +267,7 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 		if err := p.mcpStdio.put(sid, name, conn); err != nil {
 			conn.Close()
 			p.mcpSessions.Delete(sid)
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			p.mcpFail(w, name, account, frame, r.Method, started, requestID, body, ident, http.StatusServiceUnavailable, err.Error(), err)
 			return
 		}
 		// Concurrent LRU pressure can evict the freshly-Put session before the
@@ -277,8 +277,8 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 		// instead of leaking it against the per-server cap until process close.
 		if _, ok := p.mcpSessions.Get(sid); !ok {
 			p.mcpStdio.kill(sid)
-			http.Error(w, "mcp session expired during stdio initialize", http.StatusGatewayTimeout)
-			p.mcpLog(name, account, frame, r.Method, http.StatusGatewayTimeout, started, requestID, body, nil, 0, false, ident)
+			p.mcpFail(w, name, account, frame, r.Method, started, requestID, body, ident,
+				http.StatusGatewayTimeout, "mcp session expired during stdio initialize", nil)
 			return
 		}
 		// Initialized notification: required by stateful servers.
@@ -324,8 +324,8 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 		// of retrying a corpse.
 		p.mcpStdio.kill(localSID)
 		p.mcpSessions.Delete(localSID)
-		http.Error(w, fmt.Sprintf("mcp %q: stdio call: %v", name, err), http.StatusBadGateway)
-		p.mcpLog(name, "", frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false, ident)
+		p.mcpFail(w, name, "", frame, r.Method, started, requestID, body, ident,
+			http.StatusBadGateway, fmt.Sprintf("mcp %q: stdio call: %v", name, err), err)
 		return
 	}
 	if resp == nil {

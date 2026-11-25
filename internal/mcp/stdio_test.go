@@ -220,3 +220,71 @@ func TestStdioConn_CallContextTimeout(t *testing.T) {
 		t.Fatal("timed-out call never returned")
 	}
 }
+
+// TestHelperProcessStderrDiag doubles as a fake backend dying at startup (bad
+// key, missing runtime): it echoes the secret it was handed and prints a stack
+// trace on its way out, after enough noise to prove the tail stays bounded.
+func TestHelperProcessStderrDiag(t *testing.T) {
+	if os.Getenv("MCP_STDIO_HELPER") != "diag" {
+		t.Skip("not a helper subprocess")
+	}
+	fmt.Fprintln(os.Stderr, strings.Repeat("debug noise ", 100))
+	fmt.Fprintln(os.Stderr, "Error: boot failed")
+	fmt.Fprintf(os.Stderr, "config: key=%s home=%s\n", os.Getenv("CHILD_SECRET"), os.Getenv("HOME"))
+	fmt.Fprintln(os.Stderr, "    at Object.<anonymous> (server.js:1:1)")
+	os.Exit(3)
+}
+
+// TestStdioConn_ExitErrorCarriesStatusAndRedactedStderr: a dead child's
+// failure must say how it died without echoing what it was handed. The bare
+// error — all an HTTP answer may carry — gains the wait status; the
+// diagnostics riding on it add a bounded, single-line stderr tail in which
+// every credential-bearing environment value is masked (inherited names such
+// as PATH and HOME stay readable). Before the fix the error was the bare
+// "stdio: child exited" and the captured stderr had no consumer at all, so a
+// child dying at startup left no way to tell why.
+func TestStdioConn_ExitErrorCarriesStatusAndRedactedStderr(t *testing.T) {
+	const secret = "sk-live-key-0123456789abcdef"
+	conn, err := StartStdio(
+		[]string{os.Args[0], "-test.run=TestHelperProcessStderrDiag"},
+		[]string{
+			"MCP_STDIO_HELPER=diag",
+			"PATH=" + os.Getenv("PATH"),
+			"HOME=" + os.Getenv("HOME"),
+			"CHILD_SECRET=" + secret,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, err = conn.Call(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
+	if err == nil {
+		t.Fatal("expected the dead child to fail the call")
+	}
+	if got, want := err.Error(), "stdio: child exited (exit status 3)"; got != want {
+		t.Errorf("error = %q, want the bare failure plus the wait status %q", got, want)
+	}
+	if strings.Contains(err.Error(), "boot failed") || strings.Contains(err.Error(), secret) {
+		t.Errorf("error carries child stderr: %q", err.Error())
+	}
+	diag := ExitDiag(err)
+	for _, want := range []string{"exit status 3", "Error: boot failed", "at Object.<anonymous> (server.js:1:1)", os.Getenv("HOME"), "<redacted:CHILD_SECRET>"} {
+		if !strings.Contains(diag, want) {
+			t.Errorf("diag = %q, want it to carry %q", diag, want)
+		}
+	}
+	if strings.Contains(diag, secret) {
+		t.Errorf("diag leaks the credential the child was handed: %q", diag)
+	}
+	if strings.ContainsAny(diag, "\n\r") {
+		t.Errorf("diag = %q, want a single line (serve.log is line-oriented)", diag)
+	}
+	// The tail keeps the end of the stderr and stays bounded.
+	if !strings.HasPrefix(diag, "exit status 3") || !strings.Contains(diag, "…") {
+		t.Errorf("diag = %q, want the wait status first and a marked truncation", diag)
+	}
+	if len(diag) > len("exit status 3; stderr: …")+maxStderrTail {
+		t.Errorf("diag length = %d, want at most the status plus a %d-byte tail", len(diag), maxStderrTail)
+	}
+}

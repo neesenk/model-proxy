@@ -316,8 +316,8 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 		p.mcpLog(name, c.target.Server, frame, r.Method, resp.StatusCode, started, requestID, body, captured, total, truncated, ident)
 		return
 	}
-	http.Error(w, fmt.Sprintf("mcp route %q: all %d backend(s) failed for tool %q: %v", name, len(cands), canonical, lastErr), http.StatusBadGateway)
-	p.mcpLog(name, "", frame, r.Method, http.StatusBadGateway, started, requestID, body, nil, 0, false, ident)
+	p.mcpFail(w, name, "", frame, r.Method, started, requestID, body, ident,
+		http.StatusBadGateway, fmt.Sprintf("mcp route %q: all %d backend(s) failed for tool %q: %v", name, len(cands), canonical, lastErr), lastErr)
 }
 
 // mcpRouteStdioKey is the registry key for a route session's stdio child.

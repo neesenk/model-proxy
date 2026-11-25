@@ -179,8 +179,7 @@ func cmdTestStdio(cfg *configdomain.Config, name string, srv configdomain.MCPSer
 	lat := func() time.Duration { return time.Since(start).Round(time.Millisecond) }
 	initResp, err := conn.Call(probeCtx, []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"model-proxy-probe","version":"1.0"}}}`))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s %s — initialize: %v (%s)\n", display.Red("✗"), name, err, lat())
-		os.Exit(1)
+		stdioProbeFail(name, "initialize", err, lat())
 	}
 	proto, serverName, serverVer, err := mcpkg.ParseInitializeResult(initResp)
 	if err != nil || proto == "" {
@@ -190,8 +189,7 @@ func cmdTestStdio(cfg *configdomain.Config, name string, srv configdomain.MCPSer
 	_, _ = conn.Call(probeCtx, []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)) // best-effort notification
 	listResp, err := conn.Call(probeCtx, []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s %s — tools/list: %v (%s)\n", display.Red("✗"), name, err, lat())
-		os.Exit(1)
+		stdioProbeFail(name, "tools/list", err, lat())
 	}
 	tools, err := mcpkg.ParseToolsListResult(listResp)
 	if err != nil {
@@ -315,4 +313,16 @@ func mcpNames(cfg *configdomain.Config) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// stdioProbeFail reports a failed stdio probe step and exits 1. A dead child
+// adds the diagnostics it carries (wait status, redacted stderr tail): the
+// bare error says only that it exited, which cannot tell a missing runtime
+// from a rejected key.
+func stdioProbeFail(name, step string, err error, lat time.Duration) {
+	fmt.Fprintf(os.Stderr, "%s %s — %s: %v (%s)\n", display.Red("✗"), name, step, err, lat)
+	if diag := mcpkg.ExitDiag(err); diag != "" {
+		fmt.Fprintf(os.Stderr, "  %s\n", diag)
+	}
+	os.Exit(1)
 }
