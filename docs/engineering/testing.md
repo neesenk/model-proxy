@@ -6,20 +6,22 @@
 
 真实代理上的交互式端到端验证（多轮 + 工具调用 + thinking × anthropic/chat/responses 三协议 ingress）不属于 Go 测试体系，用 `tools/agenttest`（基于 pi agent 接口，用法见其 README）；`tools/agenttest/e2e.mjs` 一键串联 `projects/` 下可插拔的真实 agent 项目、matrix 与后端日志/`/api/status` 分析。Go 单测不得依赖它或真实上游。
 
+## 验证时机
+
+- **开发中**用目标用例或受影响包验证当前改动。并发缺陷可定向跑 `-race` 复现，边界变更可用 `-run` 选择对应的架构守卫。测试评审和架构维护可以先读已有 CI 报告。缺少适用报告时，从本轮 diff、近期故障或上轮未决项选题。
+- **整个任务准备交付时**，对最终工作树集中验证一轮。所有改动执行 `git diff --check`，涉及 `AGENTS.md` 或 `docs/` 时核对[文档修改检查清单](#文档修改检查清单)。纯文档任务至此完成。代码改动执行[基线命令](#基线命令)，再[按改动范围追加](#按改动范围追加)专项检查。需要本地补跑 `scripts/review_code.sh` 或用 `golangci-lint run ./...` 验证 depguard 时，也放在收尾。
+- **同一任务的各轮修改和子任务共用验证结果**。本地或 CI 的成功结果，只要检查输入（含未提交改动）、范围和构建配置一致，就直接复用。例如，全量 `go test ./...` 已包含 `internal/archtest`，各审查工具的输出可直接从巡检脚本日志读取。失败先定向定位。收尾只补跑缺失、失败或因后续改动而失效的检查。
+
 ## 基线命令
 
-所有 Go 命令从仓库根目录运行：
+代码改动的基线门禁从仓库根目录运行。
 
 ```bash
 go vet ./...
 go test ./... -count=1
 go test -race ./... -count=1
 gofmt -l .
-```
-
-覆盖率基线为每个 package 80%，由以下命令执行：
-
-```bash
+scripts/static.sh
 scripts/cover.sh
 ```
 
@@ -49,6 +51,19 @@ scripts/static.sh
 升级版本（`go get -tool <path>@<version>`）新增的检查必须与对应修复同一提交落地，不引入 baseline 文件之外的豁免或 check 级开关。
 
 依赖例行升级由 `.github/dependabot.yml` 驱动（golang + github-actions，weekly、分组开 PR）——govulncheck 只覆盖可达漏洞，例行升级 PR 恰好是本仓 CI 门禁可独立验证的最小变更单元。
+
+## 定期代码简化审查
+
+PR 和推送到 `main` 时，CI 的 `Code review candidates` 步骤运行 `scripts/review_code.sh`，工具版本由 `go.mod` 锁定。本地复查按[验证时机](#验证时机)使用同一命令。候选列在步骤日志中供审查，分析失败时脚本以非零状态退出。
+
+- `unparam` 扫描生产代码中未导出函数的签名，报告未使用的参数或返回值、实参恒定等情况。简化签名前先核对真实调用点和接口约束。
+- `deadcode` 先从仓库的全部可执行入口扫描，再加入各包测试入口。只在第一份报告出现的函数可能承担测试职责；两份都命中的优先核查。删除前须按相关平台和 build tags 复核，例如 `GOOS=windows GOARCH=amd64 scripts/review_code.sh`，并核对兼容契约。
+- `gocognit` 按认知复杂度列出前十个生产函数，供维护者挑选分支和嵌套较多的代码审查。
+- `goda` 按包列出当前构建中 `internal/` 范围内的直接依赖。复核架构契约时，沿实际依赖核对职责归属。
+
+仍可达的单实现接口或单调用包装需沿调用链审查。承担锁、资源回收、平台隔离或实际测试替身职责的抽象，保留其边界。
+
+同一 CI 中，`golangci-lint` 按 `.golangci.yml` 运行 `depguard`，违反 [CLI 测试辅助包的导入边界](../architecture/overview.md#cli-与进程入口) 会使 CI 失败。本地使用 `.github/workflows/ci.yml` 固定的版本执行 `golangci-lint run ./...`。全仓依赖名单与调用点由下文的架构契约测试检查。
 
 ## 构建验证
 
@@ -107,6 +122,16 @@ forward 测试至少断言：
 ### Stats buckets
 
 宽 bucket 查询需要断言各 counter 的 SUM、`MAX(last_request_at)` 和 bucket start floor，并再次以 60 秒粒度查询，证明底层仍无损保存分钟数据。
+
+### 结果顺序与用例顺序
+
+按位置断言前，先确认接口保证的顺序，避免依赖 map 遍历或存储层偶然的返回顺序。
+例如按秒倒序时，构造跨秒记录和两条身份不同的同秒记录，交换同秒记录的插入顺序再测。
+直接检查返回序列的秒值非递增，并核对同秒组的成员及各自出现次数。契约另有次排序键或承诺保留输入顺序时，才断言组内先后。
+若实现违反顺序承诺，用该样本复现缺陷。用 `Sleep` 错开样本，或先对返回结果重排再验证顺序，都会掩盖错误。
+
+怀疑测试依赖其他用例先执行时，在目标包运行 `go test -count=1 -shuffle=on`。记录失败时的 seed，
+用 `-shuffle=<seed>` 重跑同一组用例，定位并隔离共享状态。
 
 ### Concurrency
 
@@ -316,6 +341,8 @@ helper 在被触及时顺手替换。八个模式（每条带本仓真实范例�
 ## 禁止的弱测试
 
 - 只有 `t.Logf`，没有断言；
+- 只在循环体、`if found` 或 `if err == nil` 中检查内容，预期成功的用例遇到空结果、未命中或意外错误仍通过。先断言所需的条数、目标是否存在或 `err` 的值。
+- 条件恒真（如 `len(got) >= 0`）、从 `got` 原样生成 `want`，或用指向同一可变对象的引用比较修改前后。预期值应独立给出，比较变更时先保存独立快照。
 - 错误的 `&&` / `||` 使单侧成功即可通过；
 - 使用 `Contains(x) || Contains(y)`，panic stack 也可能误通过；
 - 只断言“有请求”，不验证 model/header/status；
@@ -323,7 +350,19 @@ helper 在被触及时顺手替换。八个模式（每条带本仓真实范例�
 - 创建 `NewProxy` 后不隔离 HOME/state path 或不 cleanup；
 - 时间竞态只跑一次，不做定向重复。
 
-优先断言精确值或解析后的结构字段。
+优先断言精确值或解析后的结构字段。评审时指出用例实际经过的分支，以及哪种错误会使哪条断言失败。对存疑的关键断言，用受控反例确认它在预期位置失败。
+
+## 单元测试定期维护
+
+从上次成功巡检的提交检查到当前 `HEAD`，优先复核行为已变但测试未变的代码和偶发失败的用例。复查上轮未决项，并轮查一个长期未审的包。
+首次运行或基线已不在当前提交历史时，从近期修复选题，再按本文「模型覆盖度 triage」用覆盖率报告建立基线。
+
+- 用例因 fixture 过期、走错入口或提前返回而测不到仍有效的契约时，**修复用例**并用反例验证它能捕获原先漏过的错误。历史 bug 修复后仍须保留相应的回归覆盖。
+- **删除退役用例前**，从权威契约、实现和变更记录确认行为已移除且无兼容义务。记录依据，一并清理仅供该用例使用的 fixture。
+- **合并或移除重复用例前**，比较触发条件、入口、可观察结果和能捕获的故障。命中同一函数或相同代码行不足以证明重复。
+  保留独有的边界、负例、并发条件和清理逻辑，并注明每个移除的测试由哪个测试或具名子用例承接。
+
+巡检报告记录提交范围、涉及的包和测试名、验证结果及遗留问题。未发现问题时可以零改动结束。
 
 ## 按改动范围追加
 
@@ -428,7 +467,7 @@ wire-shape + 错误注入三套测试覆盖 harness。
 
 确定性门禁只知道数字，不知道哪条单见证分支是承重的。这一层**不写代码**：数据管道复用确定性工具，语义判断由 coding agent 按本契约执行（开发期模型调用走指令契约；产品运行时的模型调用——guard 判定、Fusion judge——才进代码并受 fail-closed 契约约束，这是两类模型使用的分界线）。执行步骤：
 
-1. `scripts/cover.sh` 产出 `cov.out` 与单路径块清单（count==1 覆盖块，按文件聚合排序）——评审输入以这份确定性清单为准，不即兴挑选文件。
+1. 读取 `scripts/cover.sh` 已产出的 `cov.out` 与单路径块清单（count==1 覆盖块，按文件聚合排序）。需要生成或更新清单时按[验证时机](#验证时机)执行。
 2. 取清单 top 文件（默认 8 个），逐文件提取弱块精确位置（cov.out 路径带 `model-proxy/` 前缀，按文件名过滤）：
 
    ```bash
@@ -442,7 +481,7 @@ wire-shape + 错误注入三套测试覆盖 harness。
    - **MEDIUM**：用户可见但爆炸半径有限（CLI 文案、校验报错、HTTP JSON 形状）——给一条廉价表测；
    - **LOW**：一次性 init、纯排版、可证明良性——一句话说明理由，不展开。
    报告结尾给 top 5「下一个测试」排序；源码未读到的块如实标注，不得臆造。
-5. 高价值项可直接闭环：按本文件的断言与回归红规则补第二个独立测试，复跑 `scripts/cover.sh` 证明单路径计数下降。
+5. 对高价值项可按本文件的断言与回归红规则补第二个独立测试。用目标用例验证行为，再用收尾覆盖率门禁的结果核对相应的单路径块是否减少。
 
 边界：**advisory，绝不进 CI/门禁**——模型判断不阻塞构建；评审深度可随会话波动，但输入清单与 rubric 固定。
 
@@ -474,7 +513,7 @@ ok/err/错误率/p50/p95/p99/流式 TTFT/状态码分布，`-max-error-rate` 超
 
 ## 重启脚本 e2e（`scripts/restartserve`，真实二进制，常规矩阵）
 
-`scripts/restart_serve.sh` 的端到端契约由 `scripts/restartserve/`（纯测试包）承载：构建真实 model-proxy 二进制，在沙箱（`t.TempDir` HOME+TMPDIR、loopback 空闲端口、static provider）启动真实 serve 进程，再运行脚本并断言可观察语义——**热切换**（旧进程被停、端口换 pid 由脚本拉起的 **supervised daemon** 重新监听、`serve.pid` 落在 `--log-file` 旁、脚本管理的日志出现新实例 listening 行）与**冷启动**（无监听者时从 config.yaml 的 `listen:` 解析端口并拉起 daemon）、**daemon supervisor 停止**（旧 supervisor/worker 退出且旧 pidfile 被清除，绝不留下 supervisor 复活 worker）、**回滚**（坏二进制 → 恢复 `model-proxy.old`、旧二进制重新 daemon 并服务、exit 1「未部署」、`.old` 被消费）。测试清理先 `serve stop`（两处 pidfile 派生都探测）再按端口杀——只杀 worker 会被 supervisor 约 1s 后复活（pitfalls #24b）。旧进程退出用 cmd.Wait 回收后的 channel 判定（未回收的僵尸会让 kill(2) 假阳性）；并发/等待一律用轮询条件，不用固定 Sleep 赌时序。外部前置条件：lsof（unix-only），Windows 明确 Skip。进入常规 `go test ./...` 与 race 矩阵。
+`scripts/restart_serve.sh` 的端到端契约由 `scripts/restartserve/`（纯测试包）承载：构建真实 model-proxy 二进制，在沙箱（`t.TempDir` HOME+TMPDIR、loopback 空闲端口、static provider）启动真实 serve 进程，再运行脚本并断言可观察语义——**热切换**（旧进程被停、端口换 pid 由脚本拉起的 **supervised daemon** 重新监听、`serve.pid` 落在 `--log-file` 旁、脚本管理的日志出现新实例 listening 行）与**冷启动**（无监听者时从 config.yaml 的 `listen:` 解析端口并拉起 daemon）、**daemon supervisor 停止**（旧 supervisor/worker 退出且旧 pidfile 被清除，绝不留下 supervisor 复活 worker）、**回滚**（坏二进制 → 恢复 `model-proxy.old`、旧二进制重新 daemon 并服务、exit 1「未部署」、`.old` 被消费）。测试清理先 `serve stop`（两处 pidfile 派生都探测）再按端口杀——只杀 worker 会被 supervisor 约 1s 后复活（pitfalls #24b）。旧进程退出用 cmd.Wait 回收后的 channel 判定（未回收的僵尸会让 kill(2) 假阳性）；并发/等待一律用轮询条件，不用固定 Sleep 赌时序。该套件通过 `unix` 构建条件限定平台；需要 lsof 的用例在缺少它时跳过。进入常规 `go test ./...` 与 race 矩阵。
 
 ## UI 浏览器 e2e（`internal/web/jstests/uie2e.test.mjs` / `uivisual.test.mjs`，按需门禁）
 
