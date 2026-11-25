@@ -604,12 +604,27 @@ func (s *Service) flushStatsLocked() {
 // CacheLen reports the verdict-cache size (diagnostics/tests).
 func (s *Service) CacheLen() int { return s.cache.Len() }
 
+// minFragment is the shortest substring of a hit that counts as a
+// recognizable fragment, and the window size of the fragment mask in scrub.
+// Shorter substrings are either the whole of a short hit (masked wholesale by
+// scrub) or too generic to attribute.
+const minFragment = 8
+
+// maskToken replaces every masked hit range in scrubbed text.
+const maskToken = "[MASKED]"
+
 // scrub makes a model-provided (or error) string safe for persistence:
-// control characters collapse to spaces and any occurrence of the matched
-// hit (or a long-enough fragment of it) is replaced, so a reason echoing
-// the payload can never carry it into logs. Masking is maskSecretBytes-
-// aligned: short hits (<8 bytes, e.g. from a short custom pattern) are
-// masked wholesale too — a short hit must never land on disk verbatim.
+// control characters collapse to spaces and every occurrence of the matched
+// hit — or of a recognizable fragment of it — is replaced, so a reason
+// echoing the payload can never carry it into logs. Masking is
+// maskSecretBytes-aligned: short hits (< minFragment bytes, e.g. from a
+// short custom pattern) are masked wholesale too — a short hit must never
+// land on disk verbatim.
+//
+// Coverage is defined on the original text: every byte that lies inside an
+// occurrence of some >= minFragment-byte substring of the hit is masked, and
+// no other byte is. The mask tokens scrub emits are never read back as text,
+// so they always stay intact — see maskHitFragments.
 //
 // Callers (the Caller implementation) must still never put request content
 // into error details; the fragment mask here is defense-in-depth against
@@ -624,29 +639,60 @@ func scrub(hit, s string) string {
 		}
 	}
 	out := b.String()
-	if hit == "" {
+	switch {
+	case hit == "":
 		return out
+	case len(hit) < minFragment:
+		return strings.ReplaceAll(out, hit, maskToken)
 	}
-	// Full hit first.
-	out = strings.ReplaceAll(out, hit, "[MASKED]")
-	// Defense in depth: mask any substring of the hit that is long enough
-	// to be a recognizable fragment (>= 8 bytes). Shorter substrings are
-	// either the full short hit (handled above) or too generic to attribute.
-	if len(hit) >= 8 {
-		const minFragment = 8
-		seen := make(map[string]bool)
-		for i := 0; i < len(hit); i++ {
-			for j := i + minFragment; j <= len(hit); j++ {
-				frag := hit[i:j]
-				if seen[frag] {
-					continue
-				}
-				seen[frag] = true
-				out = strings.ReplaceAll(out, frag, "[MASKED]")
+	return maskHitFragments(out, hit)
+}
+
+// maskHitFragments replaces every occurrence of a recognizable fragment of
+// hit in text with maskToken, in time linear in len(text) + len(hit). It
+// requires len(hit) >= minFragment — scrub routes shorter hits to the
+// wholesale replacement instead: with a shorter hit the window set below
+// would be empty and the text would come back unchanged, leaking the hit.
+//
+// All minFragment-byte windows of hit form the match set and the text is
+// scanned once, left to right: a window hit opens a mask run that is
+// extended to the right for as long as later windows keep hitting inside it
+// (through start + minFragment - 1 of the last one), and the whole run
+// collapses into one maskToken. Every >= minFragment-byte fragment
+// occurrence begins with a window and each of its windows is in the set, so
+// the run covers the whole occurrence. The scan resumes after the token it
+// just wrote: a hit that itself contains maskToken or its edge pieces can
+// therefore neither make literal + following text match a fragment (masking
+// bytes that belong to no fragment) nor rewrite an emitted token.
+//
+// The previous implementation ran one ReplaceAll per >= minFragment-byte
+// substring of the hit (~2e9 substrings for a 64KB hit) and grew about 8x
+// per doubling of the hit, holding the adjudicate workers for seconds to
+// hours.
+func maskHitFragments(text, hit string) string {
+	windows := make(map[string]struct{}, len(hit)-minFragment+1)
+	for i := 0; i+minFragment <= len(hit); i++ {
+		windows[hit[i:i+minFragment]] = struct{}{}
+	}
+	var b strings.Builder
+	for start := 0; start+minFragment <= len(text); {
+		if _, ok := windows[text[start:start+minFragment]]; !ok {
+			start++
+			continue
+		}
+		end := start + minFragment
+		for next := start + 1; next < end && next+minFragment <= len(text); next++ {
+			if _, ok := windows[text[next:next+minFragment]]; ok {
+				end = next + minFragment
 			}
 		}
+		b.WriteString(text[:start])
+		b.WriteString(maskToken)
+		text = text[end:]
+		start = 0
 	}
-	return out
+	b.WriteString(text)
+	return b.String()
 }
 
 // truncate caps s at n runes.

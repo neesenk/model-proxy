@@ -97,16 +97,20 @@ func SaveModelCapsFile(path string, providers map[string]ProviderModelCaps) erro
 		_ = os.Remove(tmpName)
 		return err
 	}
-	syncParentDir(dir)
+	SyncParentDir(dir)
 	return nil
 }
 
-// syncParentDir fsyncs a directory after an atomic rename so the directory
-// entry itself is durable — without it a crash+reboot can acknowledge the
-// file's data fsync yet lose the rename. Best-effort: directory fsync is not
-// meaningful on every platform (Windows rejects Sync on a directory handle),
-// and the rename has already landed either way, so errors are ignored.
-func syncParentDir(dir string) {
+// SyncParentDir fsyncs a directory after an atomic rename inside it, so the
+// directory entry itself is durable — without it a crash+reboot can
+// acknowledge the file's data fsync yet lose the rename. Callers pass the
+// directory that holds the renamed file (filepath.Dir(path)); that directory
+// is the one opened and synced. Shared by the atomic state-file writers
+// (model caps, disabled models, the quota_state.json key migration) —
+// best-effort: directory fsync is not meaningful on every platform (Windows
+// rejects Sync on a directory handle), and the rename has already landed
+// either way, so errors are ignored.
+func SyncParentDir(dir string) {
 	d, err := os.Open(dir)
 	if err != nil {
 		return

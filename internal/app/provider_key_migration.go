@@ -16,6 +16,7 @@ import (
 
 	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/providerbuild"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 )
 
 // providerKeyRenames derives bare→virtual key renames for every pooled parent.
@@ -148,6 +149,13 @@ func renameQuotaStateProviderKeys(path string, renames map[string]string) error 
 		remove()
 		return err
 	}
+	// fsync the containing directory so the RENAME itself is durable (same
+	// template as the quota tracker persist): without it a crash+reboot can
+	// lose the directory entry although the temp file was fsynced — the
+	// migration silently reverts and the bare-name quota snapshots are
+	// dropped at load. Best-effort: some platforms/filesystems cannot fsync
+	// a directory (e.g. Windows), and the rename is already done.
+	runtimewire.SyncParentDir(dir)
 	return nil
 }
 

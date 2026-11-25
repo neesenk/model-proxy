@@ -118,11 +118,13 @@ func (p *CodexProvider) Quota() (*QuotaSnapshot, error) {
 		// parse failure into a BillingUnknown snapshot. Quota()'s contract is
 		// "never a non-nil error" (see the auth/HTTP/4xx branches above), so the
 		// scheduler treats codex as unmeasured rather than aborting the poll.
+		// The body rides along as evidence (single-line, bounded snippet) so a
+		// gateway page, a foreign envelope and an empty body are tellable apart.
 		msg := "parse wham/usage failed"
 		if parseErr != nil {
 			msg = "parse wham/usage: " + parseErr.Error()
 		}
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: msg}, nil
+		return quotaFormatSnapshot(msg, body), nil
 	}
 	return s, nil
 }

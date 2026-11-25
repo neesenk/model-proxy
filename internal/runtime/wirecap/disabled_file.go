@@ -122,6 +122,6 @@ func SaveDisabledModelsFile(path string, disabled map[string][]string) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
-	syncParentDir(dir)
+	SyncParentDir(dir)
 	return nil
 }

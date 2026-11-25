@@ -45,11 +45,10 @@ func (p *Proxy) Reload(configPath string) error {
 	// Provider-key renames (legacy bare-name history → pooled virtual keys)
 	// apply at RELOAD time too, not only at startup: the conversion point of
 	// an OAuth provider is its first re-login, which happens at an arbitrary
-	// runtime moment. Quota snapshots carry over BEFORE the generation swap
-	// prunes the bare key; the stats pipeline rename runs after the swap
-	// (below), once bare-key writers have stopped.
+	// runtime moment. The stats pipeline rename runs after the swap (below),
+	// once bare-key writers have stopped; the quota-side rename is applied
+	// right before the lock (see there).
 	renames := providerKeyRenames(built.PoolAccounts)
-	p.runtimeState.RenameQuotaKeys(renames)
 	// Re-read model_caps.json from disk BEFORE the lock (file I/O must not
 	// happen under p.mu — red line 2). The CLI `models refresh` writes fresh
 	// verdicts to this file directly; reloading from the daemon's own snapshot
@@ -94,6 +93,16 @@ func (p *Proxy) Reload(configPath string) error {
 	}
 	bases, fingerprints := providerBaseURLs(cfg), protocolFingerprints(cfg)
 	newDerived := routing.DeriveRoutesFrom(cfg)
+	// Quota snapshots carry over BEFORE the generation swap prunes the bare
+	// key — and only once the reload can no longer abort: this renames the
+	// live quota cache while the OLD generation is still current, so it must
+	// follow every fallible pre-lock step (the guard scanner build above is
+	// the last one; nothing between here and the swap can return early).
+	// Applied earlier, a reload aborted by a scanner build failure left the
+	// bare key renamed while the old generation's providers kept polling
+	// quota under it — the account dropped to the unmeasured tier until the
+	// next successful poll.
+	p.runtimeState.RenameQuotaKeys(renames)
 	// Switch config and runtime state as one generation. Persist snapshots take
 	// the same lock order, and request mutations carry the generation captured by
 	// forward, so an old in-flight request cannot repopulate the cleared maps.

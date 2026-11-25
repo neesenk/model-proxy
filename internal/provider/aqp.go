@@ -4,9 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"model-proxy/internal/display"
-	"model-proxy/internal/upstreamproxy"
 	"net/http"
 	"strings"
 	"time"
@@ -126,31 +123,42 @@ func (p *AqpProvider) fetchMonthlyUsage() (*MonthlyProjectUsage, error) {
 	endpoint := strings.TrimRight(p.aqpBaseURL(), "/") + aqpMonthlyUsagePath
 	payload, _ := json.Marshal(map[string]string{"project_id": a.ProjectID})
 	req, _ := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
-	req.Header.Set("Cookie", CookieHeader(a.SSOSessionCookie))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.ProviderTransport(p.cfg.ProxyURL)}).Do(req)
+	// The persisted SSO cookie is this endpoint's credential (not the managed
+	// key), so it is the request's auth: the POST then runs through the same
+	// shared quota client as the usage GETs — 30s budget and the
+	// per-provider proxy_url → global → env → system chain.
+	body, status, err := usageSend(req, p.cfg.ProxyURL, func(req *http.Request) error {
+		req.Header.Set("Cookie", CookieHeader(a.SSOSessionCookie))
+		return nil
+	}, map[string]string{"Content-Type": "application/json"})
 	if err != nil {
 		return nil, fmt.Errorf("monthly usage request failed: %w", err)
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
 	// A non-200 (e.g. 401 "Session expired" when the SSO cookie has aged out)
 	// returns an envelope with no retcode/data - without this check it falls
 	// through to the misleading "missing data" error. Surface the real cause +
 	// a re-login hint so both `usage aqp` and the scheduler's Quota() poll
 	// report an expired session correctly instead of a confusing "no data".
-	if resp.StatusCode != 200 {
+	if status != 200 {
+		// The envelope's message is the precise cause when present, the raw
+		// body otherwise; either way it rides along as the shared evidence
+		// (one line, bounded) — the message itself is upstream text too.
+		evidence := body
 		var e struct {
 			Message string `json:"message"`
 		}
-		msg := display.Truncate(string(body), 120)
 		if json.Unmarshal(body, &e) == nil && e.Message != "" {
-			msg = e.Message
+			evidence = []byte(e.Message)
 		}
-		if resp.StatusCode == 401 || strings.Contains(strings.ToLower(msg), "session") {
-			return nil, fmt.Errorf("session expired (HTTP %d): %s - re-login: `model-proxy login aqp`", resp.StatusCode, msg)
+		msg := quotaBodyEvidence(evidence)
+		// The "session" probe reads exactly the text that is shown: a failure
+		// is reported as an expired session only when the evidence carries
+		// the word, so the operator can always see what triggered the
+		// classification (CredentialErrClass keys on this wording).
+		if status == 401 || strings.Contains(strings.ToLower(msg), "session") {
+			return nil, fmt.Errorf("session expired (HTTP %d): %s - re-login: `model-proxy login aqp`", status, msg)
 		}
-		return nil, fmt.Errorf("monthly usage HTTP %d: %s", resp.StatusCode, msg)
+		return nil, fmt.Errorf("monthly usage HTTP %d: %s", status, msg)
 	}
 	var wrap struct {
 		Retcode int             `json:"retcode"`
@@ -158,17 +166,17 @@ func (p *AqpProvider) fetchMonthlyUsage() (*MonthlyProjectUsage, error) {
 		Data    json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(body, &wrap); err != nil {
-		return nil, fmt.Errorf("monthly usage response parse failed: %w", err)
+		return nil, fmt.Errorf("monthly usage response parse failed: %w: %s", err, quotaBodyEvidence(body))
 	}
 	if wrap.Retcode != 0 {
-		return nil, fmt.Errorf("monthly usage retcode=%d message=%s", wrap.Retcode, wrap.Message)
+		return nil, fmt.Errorf("monthly usage retcode=%d message=%s", wrap.Retcode, quotaBodyEvidence([]byte(wrap.Message)))
 	}
 	if len(wrap.Data) == 0 {
 		return nil, fmt.Errorf("monthly usage response missing data")
 	}
 	var mu MonthlyProjectUsage
 	if err := json.Unmarshal(wrap.Data, &mu); err != nil {
-		return nil, fmt.Errorf("monthly usage data parse failed: %w", err)
+		return nil, fmt.Errorf("monthly usage data parse failed: %w: %s", err, quotaBodyEvidence(body))
 	}
 	return &mu, nil
 }
