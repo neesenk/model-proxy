@@ -6,6 +6,21 @@ import (
 	"testing"
 )
 
+// miniIndexSchema is the ledger tests' stand-in for the request-log index:
+// the columns the rebuild reads, with the names, types and defaults of the
+// real schema (requestlog.Indexer.migrate; kind arrives through the
+// ensureColumns ALTER as TEXT NOT NULL with an empty default). The contract
+// against an index the real Indexer built — which this copy cannot prove —
+// is pinned by r6_ledger_rebuild_index_contract_test.go.
+const miniIndexSchema = `CREATE TABLE records (
+	ts TEXT NOT NULL, provider TEXT NOT NULL, upstream_model TEXT NOT NULL, agent TEXT NOT NULL,
+	status INTEGER NOT NULL,
+	input INTEGER NOT NULL, output INTEGER NOT NULL,
+	cache_read INTEGER NOT NULL, cache_creation INTEGER NOT NULL,
+	shadow INTEGER NOT NULL,
+	attempt_only INTEGER NOT NULL DEFAULT 0,
+	kind TEXT NOT NULL DEFAULT '')`
+
 // seedLedgerFixture opens a stats store with one pre-cutoff minute bucket
 // carrying the historical double-count ledger (input inclusive of cache_read,
 // inflated output) plus a matching request-log index with the correct ledger,
@@ -41,13 +56,7 @@ func seedLedgerFixture(t *testing.T) (*Store, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = idx.Close() })
-	schema := `CREATE TABLE records (
-		ts TEXT NOT NULL, provider TEXT, upstream_model TEXT, agent TEXT,
-		status INTEGER DEFAULT 200,
-		input INTEGER DEFAULT 0, output INTEGER DEFAULT 0,
-		cache_read INTEGER DEFAULT 0, cache_creation INTEGER DEFAULT 0,
-		attempt_only INTEGER DEFAULT 0)`
-	if _, err := idx.Exec(schema); err != nil {
+	if _, err := idx.Exec(miniIndexSchema); err != nil {
 		t.Fatal(err)
 	}
 	// The correct ledger: input EXCLUDES the cache hit (300), output without
@@ -55,15 +64,15 @@ func seedLedgerFixture(t *testing.T) (*Store, string) {
 	// shape: served but not a successful request) in the same minute.
 	for i := 0; i < 3; i++ {
 		if _, err := idx.Exec(`INSERT INTO records
-			(ts, provider, upstream_model, agent, status, input, output, cache_read, cache_creation, attempt_only)
-			VALUES (?, 'deepseek', 'm', 'claude-code', 200, 100, 10, 66, 5, 0)`,
+			(ts, provider, upstream_model, agent, status, input, output, cache_read, cache_creation, shadow, attempt_only, kind)
+			VALUES (?, 'deepseek', 'm', 'claude-code', 200, 100, 10, 66, 5, 0, 0, '')`,
 			"2026-10-09T12:33:"+itoa2(i)+"+08:00"); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if _, err := idx.Exec(`INSERT INTO records
-		(ts, provider, upstream_model, agent, status, input, output, cache_read, cache_creation, attempt_only)
-		VALUES ('2026-10-09T12:33:30+08:00', 'deepseek', 'm', 'claude-code', 400, 0, 0, 0, 0, 0)`); err != nil {
+		(ts, provider, upstream_model, agent, status, input, output, cache_read, cache_creation, shadow, attempt_only, kind)
+		VALUES ('2026-10-09T12:33:30+08:00', 'deepseek', 'm', 'claude-code', 400, 0, 0, 0, 0, 0, 0, '')`); err != nil {
 		t.Fatal(err)
 	}
 	// The committed bucket carries the legacy double counts AND the 4xx-inclusive

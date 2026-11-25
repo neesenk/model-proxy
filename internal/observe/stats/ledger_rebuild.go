@@ -63,10 +63,15 @@ type ledgerAgentRow struct {
 // (the legacy counter included 4xx). The index is read over its own
 // connection; the rewrites run in one transaction on the stats store.
 // Returns (rebuiltBuckets, skippedMinuteBuckets).
+//
+// The run is synchronous and happens before the listener comes up, so its
+// summary line reports how many groups the aggregation produced and how long
+// the whole run took — whether or not anything was rewritten.
 func (s *Store) RebuildTokenLedger(indexDBPath string) (rebuilt, skipped int64, err error) {
 	if s == nil || s.db == nil {
 		return 0, 0, nil
 	}
+	started := time.Now()
 	defer s.noteMutation()
 	// The impossible-ledger sweep needs no request-log source and runs even
 	// when the index is unavailable or empty (its rows may be long gone).
@@ -88,6 +93,11 @@ func (s *Store) RebuildTokenLedger(indexDBPath string) (rebuilt, skipped int64, 
 		return 0, 0, err
 	}
 	if len(minutes) == 0 && len(agents) == 0 {
+		// Nothing to rebuild from: an index no request has reached yet (the
+		// request log was enabled, nothing was logged), or one retention has
+		// emptied, holds no records. Say so — the pre-cutoff buckets keep
+		// their committed ledger this run, and that must not go unnoticed.
+		logx.Infof("[stats] usage ledger rebuild skipped: the request-log index holds no records (%s) — historical token buckets keep their committed values", indexDBPath)
 		if reset > 0 {
 			logx.Infof("[stats] reset %d impossible ledger bucket(s) (per-request physical bounds; no request-log rows to rebuild from)", reset)
 		}
@@ -158,9 +168,12 @@ func (s *Store) RebuildTokenLedger(indexDBPath string) (rebuilt, skipped int64, 
 	if err := tx.Commit(); err != nil {
 		return 0, 0, err
 	}
-	if rebuilt > 0 || skipped > 0 || reset > 0 {
-		logx.Infof("[stats] rebuilt %d historical token bucket(s) from the request-log ledger (%d skipped on count mismatch; %d impossible ledger bucket(s) reset; cutoff %s)", rebuilt, skipped, reset, ledgerCutoffISO)
-	}
+	// Logged for every rebuild over a populated index, not only when something
+	// changed: a rebuild that rewrote nothing still paid for the aggregation
+	// and one statement per group, and that is the cost an operator needs to
+	// see when a start is slow.
+	logx.Infof("[stats] rebuilt %d historical token bucket(s) from the request-log ledger (%d skipped on count mismatch; %d impossible ledger bucket(s) reset; cutoff %s; %d minute + %d agent group(s) aggregated; took %s)",
+		rebuilt, skipped, reset, ledgerCutoffISO, len(minutes), len(agents), time.Since(started).Round(time.Millisecond))
 	return rebuilt + reset, skipped, nil
 }
 
@@ -203,14 +216,20 @@ func (s *Store) repairImpossibleLedgers() (int64, error) {
 // readLedgerAggregates pulls the pre-cutoff usage ledger out of the
 // request-log index: per-(provider, model, minute) with the record-count
 // guard column, and per-(agent, provider, model, minute). attempt_only legs
-// are excluded (never committed to the buckets).
+// are excluded (never committed to the buckets), and so are shadow records:
+// a shadow leg is real upstream spend but the live buckets only ever counted
+// the primary request, and the count guard is calibrated against that
+// live-only count. Only LLM rows — kind empty — are aggregated: MCP exchanges
+// share the index while request_log.mcp_split is off, key their own
+// (server, "") groups — a pre-cutoff group with no bucket reads as skipped —
+// and carry no LLM spend.
 func readLedgerAggregates(idx *sql.DB) ([]ledgerMinute, []ledgerAgentRow, error) {
 	rows, err := idx.Query(`SELECT provider, upstream_model AS model,
 			(CAST(strftime('%s', ts) AS INTEGER)/60)*60 AS minute,
 			SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read), COUNT(*),
 			SUM(CASE WHEN status < 400 THEN 1 ELSE 0 END)
 		FROM records
-		WHERE attempt_only = 0
+		WHERE attempt_only = 0 AND shadow = 0 AND kind = ''
 		GROUP BY 1, 2, 3`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("aggregate request-log ledger: %w", err)
@@ -232,7 +251,7 @@ func readLedgerAggregates(idx *sql.DB) ([]ledgerMinute, []ledgerAgentRow, error)
 			(CAST(strftime('%s', ts) AS INTEGER)/60)*60 AS minute,
 			SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read)
 		FROM records
-		WHERE attempt_only = 0 AND agent != '' AND ts < ?
+		WHERE attempt_only = 0 AND shadow = 0 AND kind = '' AND agent != '' AND ts < ?
 		GROUP BY 1, 2, 3, 4`, ledgerCutoffISO)
 	if err != nil {
 		return nil, nil, fmt.Errorf("aggregate request-log agent ledger: %w", err)

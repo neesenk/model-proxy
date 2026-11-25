@@ -127,10 +127,17 @@ type UsageScanner struct {
 	tc      *TokenCounter
 	onAgent func(TokenUsage) // optional: attribute the same usage to an agent (parallel agent pipeline)
 	line    []byte           // current incomplete line (bounded by scanLineCap)
-	acc     TokenUsage
-	// anth/oai carry the per-shape snapshot-vs-delta merge state (see
-	// usageShapeState); responses snapshots merge by max inline.
-	anth, oai usageShapeState
+	// acc takes the per-field-max ledger: responses snapshots merge straight
+	// into it, the chat reading folds in at Commit.
+	acc TokenUsage
+	// chat carries the chat-dialect reading. Input and its two cache shares
+	// are ONE split of prompt_tokens, so they are taken together from the frame
+	// with the largest prompt_tokens (ties: the later frame) — chatPrompt is
+	// that frame's prompt_tokens. Output is the frame maximum. Same rule as
+	// requestlog.ExtractUsage: field-by-field merging paired an early
+	// uncached input with a later cache share and billed the share twice.
+	chat       TokenUsage
+	chatPrompt uint64
 	// anthAcc is the anthropic-frame contribution (message_start /
 	// message_delta). Its figures are not final until message_delta arrived —
 	// that frame replaces the message_start figures by field presence — so it
@@ -179,6 +186,12 @@ func (s *UsageScanner) Commit() {
 	if !s.sseUsage && s.jsonMode {
 		s.parseJSONUsage()
 	}
+	// The chat reading joins the per-field-max ledger like a responses
+	// snapshot.
+	s.acc.Input = max(s.acc.Input, s.chat.Input)
+	s.acc.Output = max(s.acc.Output, s.chat.Output)
+	s.acc.CacheRead = max(s.acc.CacheRead, s.chat.CacheRead)
+	s.acc.CacheCreation = max(s.acc.CacheCreation, s.chat.CacheCreation)
 	// Cross-shape totals still sum (an anthropic message_start input plus an
 	// openai trailing chunk are separate reports); the cache buckets are one
 	// bucket however many shapes reported them.
@@ -237,40 +250,6 @@ func (s *UsageScanner) observe(chunk []byte) {
 	}
 }
 
-// usageShapeState applies one merge rule per wire shape (anthropic frames vs
-// openai usage chunks vs responses snapshots): a value that does not decrease
-// is a CUMULATIVE snapshot — it replaces the running total; a decrease is a
-// DELTA — it adds. Gateways exist that repeat cumulative counters on every
-// usage-bearing frame (step-plan emits openai usage per chunk — plain
-// addition inflated one request into hundreds of millions of tokens), while
-// converted routes emit genuine per-shape deltas. Cross-shape totals still
-// sum (an anthropic message_start input plus an openai trailing chunk are
-// separate reports).
-type usageShapeState struct {
-	lastIn, lastOut uint64
-}
-
-// mergeField folds one frame's counters into the running accumulators.
-// Zero-valued fields are skipped (frames routinely carry only some fields).
-func (st *usageShapeState) mergeField(inAcc *uint64, in uint64, outAcc *uint64, out uint64) {
-	if in > 0 {
-		if in >= st.lastIn {
-			*inAcc = in - st.lastIn + *inAcc // snapshot: replace the increment
-		} else {
-			*inAcc += in // delta
-		}
-		st.lastIn = in
-	}
-	if out > 0 {
-		if out >= st.lastOut {
-			*outAcc = out - st.lastOut + *outAcc
-		} else {
-			*outAcc += out
-		}
-		st.lastOut = out
-	}
-}
-
 // parseLine inspects one SSE data line for a usage payload.
 func (s *UsageScanner) parseLine(line []byte) {
 	trimmed := bytes.TrimLeft(line, " \t")
@@ -288,10 +267,14 @@ func (s *UsageScanner) parseLine(line []byte) {
 	}
 	// Try anthropic shapes first, then openai chat, then responses.
 	var anth struct {
-		Type    string `json:"type"`
-		Message struct {
-			Usage struct {
+		Type string `json:"type"`
+		// Message and its Usage are pointers because their presence decides
+		// the frame's shape: a frame carrying message.usage is an anthropic
+		// message_start frame and never a chat-dialect one.
+		Message *struct {
+			Usage *struct {
 				InputTokens         uint64 `json:"input_tokens"`
+				OutputTokens        uint64 `json:"output_tokens"`
 				CacheCreationTokens uint64 `json:"cache_creation_input_tokens"`
 				CacheReadTokens     uint64 `json:"cache_read_input_tokens"`
 			} `json:"usage"`
@@ -312,10 +295,16 @@ func (s *UsageScanner) parseLine(line []byte) {
 		case "message_start":
 			s.sseUsage = true
 			// The opening figures; each stands only until a message_delta
-			// reports the same field.
-			s.anth.mergeField(&s.anthAcc.Input, anth.Message.Usage.InputTokens, nil, 0)
-			s.anthAcc.CacheCreation = max(s.anthAcc.CacheCreation, anth.Message.Usage.CacheCreationTokens)
-			s.anthAcc.CacheRead = max(s.anthAcc.CacheRead, anth.Message.Usage.CacheReadTokens)
+			// reports the same field. Fields merge by max across message_start
+			// frames. output_tokens counts too: a stream cut before its
+			// message_delta has no other output figure (a native stream opens
+			// with 1).
+			if anth.Message != nil && anth.Message.Usage != nil {
+				s.anthAcc.Input = max(s.anthAcc.Input, anth.Message.Usage.InputTokens)
+				s.anthAcc.Output = max(s.anthAcc.Output, anth.Message.Usage.OutputTokens)
+				s.anthAcc.CacheCreation = max(s.anthAcc.CacheCreation, anth.Message.Usage.CacheCreationTokens)
+				s.anthAcc.CacheRead = max(s.anthAcc.CacheRead, anth.Message.Usage.CacheReadTokens)
+			}
 		case "message_delta":
 			s.sseUsage = true
 			// Its counts are cumulative and final: a field it carries
@@ -331,12 +320,13 @@ func (s *UsageScanner) parseLine(line []byte) {
 			// split. Same rule as requestlog.ExtractUsage and the
 			// anthropic→openai converter's read side.
 			if anth.Usage != nil {
-				if anth.Usage.OutputTokens != nil {
-					s.anth.mergeField(nil, 0, &s.anthAcc.Output, *anth.Usage.OutputTokens)
+				if v := anth.Usage.OutputTokens; v != nil {
+					// Output keeps its message_start figure and takes the
+					// maximum over the message_delta frames.
+					s.anthAcc.Output = max(s.anthAcc.Output, *v)
 				}
 				if v := anth.Usage.InputTokens; v != nil {
 					s.anthAcc.Input = *v
-					s.anth.lastIn = *v
 				}
 				if v := anth.Usage.CacheCreationTokens; v != nil {
 					s.anthAcc.CacheCreation = *v
@@ -361,29 +351,45 @@ func (s *UsageScanner) parseLine(line []byte) {
 	}
 	if json.Unmarshal(payload, &oai) == nil && oai.Usage != nil {
 		s.sseUsage = true
-		// Cache shares ride inside the inclusive prompt_tokens and are split
-		// out before merging — the buckets are anthropic-normalized (input
-		// excludes cache; the same ledger as requestlog.ExtractUsage).
-		// Hit spellings: prompt_tokens_details.cached_tokens
-		// (openai contract) and prompt_cache_hit_tokens (deepseek dialect) are
-		// max-merged — same source, same value; write spellings:
-		// prompt_tokens_details.cache_write_tokens (the converter emission
-		// convention, mirrored from convert_stream.go's read side) and the
-		// anthropic direct spelling.
-		cached, written := uint64(0), uint64(0)
-		if oai.Usage.PromptDetails != nil {
-			cached = oai.Usage.PromptDetails.CachedTokens
-			written = oai.Usage.PromptDetails.CacheWriteToken
+		// Chat dialect, recognized exactly like requestlog's chatPromptTokens:
+		// prompt_tokens or prompt_cache_hit_tokens present, and no
+		// message.usage (that is a message_start frame whatever else it
+		// carries). Any other top-level usage object — an anthropic
+		// message_delta's, for one — is not a chat frame.
+		if (anth.Message == nil || anth.Message.Usage == nil) &&
+			(oai.Usage.PromptTokens != 0 || oai.Usage.PromptCacheHit != 0) {
+			// Cache shares ride inside the inclusive prompt_tokens and are
+			// split out before merging — the buckets are anthropic-normalized
+			// (input excludes cache; the same ledger as requestlog.ExtractUsage).
+			// Hit spellings: prompt_tokens_details.cached_tokens (openai
+			// contract) and prompt_cache_hit_tokens (deepseek dialect) are
+			// max-merged — same source, same value; write spellings:
+			// prompt_tokens_details.cache_write_tokens (the converter emission
+			// convention, mirrored from convert_stream.go's read side) and the
+			// anthropic direct spelling.
+			cached, written := uint64(0), uint64(0)
+			if oai.Usage.PromptDetails != nil {
+				cached = oai.Usage.PromptDetails.CachedTokens
+				written = oai.Usage.PromptDetails.CacheWriteToken
+			}
+			cached = max(cached, oai.Usage.PromptCacheHit)
+			written = max(written, oai.Usage.CacheCreationIn)
+			// Input and its two cache shares are ONE split of prompt_tokens:
+			// they are taken together from the frame with the largest
+			// prompt_tokens (ties: the later frame), never field by field —
+			// a usage chunk repeats cumulative counters, never deltas. Merging
+			// fields separately paired an early frame's uncached input with a
+			// later frame's cache share and billed the share twice; a share
+			// that grows while prompt_tokens stays flat read as a delta and
+			// added the whole input a second time (1000/100 then 1000/200 read
+			// as 1700 where the stream says 800).
+			input := subClamped2(oai.Usage.PromptTokens, cached, written)
+			if oai.Usage.PromptTokens >= s.chatPrompt {
+				s.chatPrompt = oai.Usage.PromptTokens
+				s.chat.Input, s.chat.CacheRead, s.chat.CacheCreation = input, cached, written
+			}
+			s.chat.Output = max(s.chat.Output, oai.Usage.CompletionTokens)
 		}
-		cached = max(cached, oai.Usage.PromptCacheHit)
-		written = max(written, oai.Usage.CacheCreationIn)
-		s.acc.CacheRead = max(s.acc.CacheRead, cached)
-		s.acc.CacheCreation = max(s.acc.CacheCreation, written)
-		// Max-merge the shares like the anthropic cache buckets: a usage chunk
-		// repeats cumulative counters, never deltas. Landing the shares in both
-		// Input and the cache buckets deflated the analytics cache-hit rate and
-		// double-billed cost.
-		s.oai.mergeField(&s.acc.Input, subClamped2(oai.Usage.PromptTokens, cached, written), &s.acc.Output, oai.Usage.CompletionTokens)
 	}
 	// /v1/responses client streams carry one cumulative snapshot in
 	// response.completed (usage is null on in_progress frames); every field

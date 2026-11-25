@@ -236,9 +236,13 @@ func (p *Proxy) initStats(config configdomain.StatsConfig) {
 	p.mu.RUnlock()
 	ledgerIndex := ""
 	if fullCfg != nil && fullCfg.RequestLog.Enabled {
-		// RequestLog.Dir may carry ~ / env: prefixes — expand the same way the
-		// logger itself resolves its directory (config.ExpandPath).
-		ledgerIndex = filepath.Join(configdomain.ExpandPath(fullCfg.RequestLog.Dir), "index.db")
+		// The index lives where the logger and the tailing indexer write it
+		// (initRequestLog): RequestLog.ResolvedDir — the configured dir with
+		// its ~ / env: prefix expanded, or the default directory under the
+		// home directory. Joining onto the raw configured dir instead made
+		// "index.db" a path relative to the process working directory
+		// whenever `dir` was not written.
+		ledgerIndex = filepath.Join(fullCfg.RequestLog.ResolvedDir(), "index.db")
 	}
 	result := observestats.Bootstrap(
 		config.ResolvedDBPath(),

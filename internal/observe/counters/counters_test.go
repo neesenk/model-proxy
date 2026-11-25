@@ -181,9 +181,13 @@ func (c *sevenByteReader) Read(p []byte) (int, error) {
 }
 
 // TestUsageScannerShapesAndChunking: anthropic message_start/message_delta and
-// openai usage lines all count (input sums both shapes' contributions); plain
+// openai usage lines all count (the chat frames merge into one cumulative
+// reading — the largest-prompt frame's input, the maximum output; a smaller
+// repeat adds nothing — and input sums both shapes' contributions); plain
 // delta lines without a "usage" key count nothing; lines split across Read
-// calls reassemble; an over-cap line is skipped without poisoning the next one.
+// calls reassemble; an over-cap line is skipped without poisoning the next
+// one (the last frame carries the larger prompt and output readings, so a
+// scanner that lost it would under-report).
 func TestUsageScannerShapesAndChunking(t *testing.T) {
 	tc := NewTokenCounter()
 	k := TokenKey{Provider: "p", Model: "m"}
@@ -192,13 +196,14 @@ func TestUsageScannerShapesAndChunking(t *testing.T) {
 		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n\n" +
 		"data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2}}\n\n" +
 		"data: {\"pad\":\"" + strings.Repeat("x", 70*1024) + "\"}\n\n" +
-		"data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n"
+		"data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n" +
+		"data: {\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":5}}\n\n"
 	s := NewUsageScanner(io.NopCloser(&sevenByteReader{r: strings.NewReader(stream)}), k, tc, nil)
 	if _, err := io.Copy(io.Discard, s); err != nil {
 		t.Fatal(err)
 	}
 	snap := tc.Snapshot()[k]
-	want := TokenUsage{Input: 17, Output: 7, CacheRead: 3, Requests: 1}
+	want := TokenUsage{Input: 907, Output: 9, CacheRead: 3, Requests: 1}
 	if snap != want {
 		t.Fatalf("committed = %+v, want %+v", snap, want)
 	}
