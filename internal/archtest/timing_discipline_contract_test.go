@@ -46,6 +46,8 @@ var prodSleepAllowlist = map[string]map[string]int{
 	"internal/accounts/store.go":       {"WithLock": 1},
 	"internal/cli/serve/supervisor.go": {"waitForProcessExit": 1},
 	"scripts/e2eguard/main.go":         {"poll": 1},
+	// SQLite arbitrates writer ownership; back off only after a BUSY result.
+	"internal/observe/seclog/store.go": {"retryStoreBusy": 1},
 	// testsyn is the shared provider of the sanctioned patterns themselves:
 	// waitUntil's sleep is the poll backoff (ordering from the predicate),
 	// SlowRound's is the injected adversarial latency (the phenomenon).

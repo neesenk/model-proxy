@@ -255,7 +255,8 @@ drain 后各一次），两层同步过期。写入路径在
 logfile 的 writer goroutine 内双写（队列满统一丢弃计数；store 打不开降级为 JSONL-only 并
 告警）；查询是纯 SQL（newest-first、kind/from/to/limit/request_id，Truncated 由同谓词
 COUNT 精确判定）；`AppendSync` 供 CLI 绕开 daemon 同步双写（doctor drift 去重依赖库里的
-行）。旧 JSONL 历史不迁移（文件原地保留）。红线：`Record.Names` 只含
+行）。daemon 与 CLI 争用写锁时，store 对 SQLite 的 BUSY 错误做有限次退避重试；
+重试用尽后保留错误，JSONL 每条只追加一次。旧 JSONL 历史不迁移（文件原地保留）。红线：`Record.Names` 只含
 模式类型名/路径类别名，秘密值永不进入 Record；drift 记录的 detail 只含客户端名与
 指针 host。应用层只注入纯值（命中名、动作、路由元数据），扫描、阈值与派发决策
 不进本包。Logger 是 reload-owned：`internal/app/observe_adapters.go` 的

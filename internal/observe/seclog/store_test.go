@@ -2,6 +2,7 @@ package seclog
 
 import (
 	"testing"
+	"testing/synctest"
 )
 
 // Counts aggregates verdict totals over the query predicate (kind/from/to),
@@ -101,4 +102,46 @@ func keysOf(m map[string][]*Record) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// Wait for the competing insert to finish its first SQLite call before
+// releasing the writer. A retry backoff uses the bubble clock, so the
+// lock handoff needs neither a wall-clock delay nor a production hook.
+func TestStoreInsertRecoversAfterWriterReleasesLock(t *testing.T) {
+	dir := t.TempDir()
+	open := func() *store {
+		s, err := openStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		return s
+	}
+	holder, writer := open(), open()
+	if _, err := writer.db.Exec("PRAGMA busy_timeout=0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.db.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		done := make(chan error, 1)
+		go func() { done <- writer.insert(&Record{Ts: 1, Kind: KindDrift, RequestID: "offline"}) }()
+		synctest.Wait()
+		select {
+		case err := <-done:
+			t.Fatalf("insert returned while competing writer still held lock: %v", err)
+		default:
+		}
+		if _, err := holder.db.Exec("COMMIT"); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	})
+	got := queryKinds(t, dir, Filter{})
+	if len(got.Records) != 1 || got.Records[0].RequestID != "offline" || got.Records[0].Kind != KindDrift {
+		t.Fatalf("want exactly one offline drift record, got %v", got.Records)
+	}
 }

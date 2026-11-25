@@ -573,7 +573,7 @@ func TestQueryTruncationUnderKindFilter(t *testing.T) {
 }
 
 // The store tolerates an offline writer (CLI-style AppendSync) hammering it
-// while the daemon Logger is running — WAL + busy_timeout is the whole story.
+// while the daemon Logger is running.
 func TestOfflineWriterCoexistsWithRunningLogger(t *testing.T) {
 	dir := t.TempDir()
 	logger := startLogger(t, dir, Options{})

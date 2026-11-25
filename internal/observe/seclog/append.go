@@ -13,8 +13,8 @@ import (
 // It writes the JSONL trail line (same per-day naming a running Logger uses,
 // creating the directory 0700 and the file 0600, narrowing permissions on
 // pre-existing storage) and inserts the record into the queryable SQLite
-// store. Coexistence with a running Logger is safe: WAL + busy_timeout
-// serializes the writers. Both halves are attempted; a failure on either
+// store. SQLite handles transient writer contention internally to the
+// store, so a retry never appends a second JSONL line. Both halves are attempted; a failure on either
 // surface is returned (joined) — callers like doctor's drift dedup query the
 // store, so a dropped insert must not look like a success.
 func AppendSync(dir string, rec *Record) error {

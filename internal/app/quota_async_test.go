@@ -303,7 +303,7 @@ func TestScheduleAdapter_AppliesPeakMultiplier(t *testing.T) {
 		// 0, and sort.SliceStable would keep config order — the expected winner
 		// must not be first.
 		map[string][]configdomain.RouteTarget{"m": {{Provider: "peak"}, {Provider: "plain"}}})
-	now := time.Now()
+	now := time.Date(2026, time.November, 22, 23, 58, 59, 0, time.Local)
 	const dur = 7 * 24 * time.Hour
 	ult := provider.QuotaWindow{Ultimate: true, Kind: "tokens", RemainingPct: 0.5, Total: 200,
 		Duration: dur, ResetsAt: now.Add(dur / 2)} // fLeft 0.5
@@ -314,8 +314,22 @@ func TestScheduleAdapter_AppliesPeakMultiplier(t *testing.T) {
 	// remaining = 0.5 − 0.6×0.5×1 = 0.2 → surplus 0.2 − 0.5 = −0.3.
 	p.quota.SetSnapshot("peak", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5,
 		Windows: []provider.QuotaWindow{ult, {Short: true, Kind: "tokens", RemainingPct: 0.6, Total: 100}}, AsOf: now})
-	if got := firstProvider(p, "m"); got != "plain" {
-		t.Errorf("first=%q, want plain (peak provider's surplus reduced by short-window burn)", got)
+	for _, tc := range []struct {
+		offset time.Duration
+		want   string
+	}{
+		{0, "plain"},                         // 23:58:59, still in peak
+		{time.Second, "peak"},                // 23:59:00, exclusive end
+		{time.Minute, "peak"},                // 23:59:59
+		{time.Minute + time.Second, "plain"}, // 00:00:00, inclusive start
+	} {
+		at := now.Add(tc.offset)
+		t.Run(at.Format("15:04:05"), func(t *testing.T) {
+			order, _, source := p.decideOrder(p.cfg, p.parentOf, "m", "", p.cfg.Routes["m"], at, true, false, map[string]bool{"m": true})
+			if len(order) != 2 || order[0].Provider != tc.want || source != runtimestate.ScheduleSourceQuota {
+				t.Fatalf("order=%v source=%q, want %s first by quota", order, source, tc.want)
+			}
+		})
 	}
 }
 

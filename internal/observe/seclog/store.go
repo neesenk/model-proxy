@@ -14,18 +14,20 @@
 //
 // Concurrency follows the in-repo SQLite recipe (internal/observe/stats,
 // requestlog's index): WAL + busy_timeout(250ms) + synchronous(NORMAL) with a
-// single connection per handle, so the daemon writer and offline CLI readers
-// coexist on one database file.
+// single connection per handle, plus bounded retries for competing daemon and CLI writers.
 package seclog
 
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
-	_ "modernc.org/sqlite" // pure-Go driver; registers as "sqlite" with database/sql
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 const (
@@ -68,6 +70,28 @@ type store struct {
 	db *sql.DB
 }
 
+// retryStoreBusy gives a competing writer a chance to finish even when the
+// driver's busy handler expires or SQLite returns BUSY immediately. Only use
+// for independent autocommit statements or idempotent initialization.
+func retryStoreBusy(op func() error) error {
+	const maxAttempts = 5
+	for attempt := 1; ; attempt++ {
+		err := op()
+		var dbErr *sqlite.Error
+		if attempt == maxAttempts || !errors.As(err, &dbErr) || dbErr.Code()&0xff != sqlite3.SQLITE_BUSY {
+			return err
+		}
+		time.Sleep(time.Duration(attempt) * 10 * time.Millisecond)
+	}
+}
+
+func (s *store) execWrite(query string, args ...any) error {
+	return retryStoreBusy(func() error {
+		_, err := s.db.Exec(query, args...)
+		return err
+	})
+}
+
 // storePath returns the database file location inside the audit directory.
 func storePath(dir string) string { return filepath.Join(dir, storeFileName) }
 
@@ -89,7 +113,7 @@ func openStore(dir string) (*store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	if err := db.Ping(); err != nil {
+	if err := retryStoreBusy(db.Ping); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("seclog: ping store: %w", err)
 	}
@@ -130,7 +154,7 @@ func (s *store) Close() error {
 
 // migrate is additive-only (same policy as the stats store).
 func (s *store) migrate() error {
-	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS audit_records (
+	err := s.execWrite(`CREATE TABLE IF NOT EXISTS audit_records (
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
 		ts         INTEGER NOT NULL,
 		kind       TEXT    NOT NULL,
@@ -174,7 +198,7 @@ func (s *store) insert(rec *Record) error {
 		}
 		names = string(b)
 	}
-	_, err := s.db.Exec(storeInsertStatements,
+	err := s.execWrite(storeInsertStatements,
 		rec.Ts, rec.Kind, rec.RequestID, rec.SessionID, rec.Agent, rec.Protocol,
 		rec.Exposed, names, rec.Action, rec.Verdict, rec.Reason, rec.Evidence, rec.Model, rec.Detail)
 	if err != nil {
@@ -192,7 +216,7 @@ func (s *store) deleteExpired(cutoffMs int64) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	if _, err := s.db.Exec(`DELETE FROM audit_records WHERE ts < ?`, cutoffMs); err != nil {
+	if err := s.execWrite(`DELETE FROM audit_records WHERE ts < ?`, cutoffMs); err != nil {
 		return fmt.Errorf("seclog: sweep store: %w", err)
 	}
 	return nil
