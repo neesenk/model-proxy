@@ -103,18 +103,26 @@ var testSleepSnapshot = map[string]map[string]int{
 	// under measurement — they create the spread-out SSE arrival shape (TTFT
 	// wait + inter-chunk gaps) the generation-window classification observes;
 	// without real gaps the copy loop coalesces the body into one bulk read.
-	"internal/app/metrics_test.go":             {"TestForward_RecordsLatency": 1, "TestForward_RecordsGenerationWindow": 2},
-	"internal/app/model_lock_test.go":          {"TestEmpty200_ClientCancelNoLock": 2},
-	"internal/app/proxy_integration_test.go":   {"TestUC_ClientDisconnectStopsUpstream": 1, "waitUntil": 1},
-	"internal/app/proxy_mcp_route_test.go":     {"TestMCPRoute_RequestLogProjection": 1, "TestMCPRoute_ToolsCallStatsCreditBackend": 1, "serve": 1},
-	"internal/app/proxy_mcp_test.go":           {"TestMCPGateway_LegacySSE": 1, "TestMCPGateway_LiveEndCarriesTool": 1, "TestMCPGateway_LiveEventAttribution": 1, "TestMCPGateway_LiveEvents": 1, "TestMCPGateway_LiveProviderIsServingAccount": 1, "TestMCPGateway_RequestLogAttribution": 2, "TestMCPGateway_RequestLogKind": 1, "TestMCPGateway_RequestLogSplitStream": 1, "TestMCPGateway_StatsSurfaced": 1},
-	"internal/app/proxy_race_test.go":          {"TestForward_CfgReadNoRaceWithReload": 2},
-	"internal/app/quota_test.go":               {"Quota": 1, "TestQuotaTracker_PollAfter": 1},
-	"internal/app/request_log_test.go":         {"TestForward_RequestLog_CapturesAgent": 1, "TestRequestLog_SmallCapTruncatesBodiesEndToEnd": 1},
-	"internal/app/state_isolation_test.go":     {"TestReloadRefreshesCatalogThroughLoader": 1},
-	"internal/app/web_accounts_test.go":        {"waitForLoginDone": 1, "waitForLoginTerminal": 1},
-	"internal/app/wirecap_test.go":             {"TestWireCap_ProbePassesSerialized": 2, "TestWireCap_ProbeTimeoutUnknown": 1, "TestWireProbePass_CoalescesStormDispatches": 2},
-	"internal/forward/forward_test.go":         {"TestServeClientGoneDuringCooldownWait": 1},
+	"internal/app/metrics_test.go":           {"TestForward_RecordsLatency": 1, "TestForward_RecordsGenerationWindow": 2},
+	"internal/app/model_lock_test.go":        {"TestEmpty200_ClientCancelNoLock": 2},
+	"internal/app/proxy_integration_test.go": {"TestUC_ClientDisconnectStopsUpstream": 1, "waitUntil": 1},
+	"internal/app/proxy_mcp_route_test.go":   {"TestMCPRoute_RequestLogProjection": 1, "TestMCPRoute_ToolsCallStatsCreditBackend": 1, "serve": 1},
+	"internal/app/proxy_mcp_test.go":         {"TestMCPGateway_LegacySSE": 1, "TestMCPGateway_LiveEndCarriesTool": 1, "TestMCPGateway_LiveEventAttribution": 1, "TestMCPGateway_LiveEvents": 1, "TestMCPGateway_LiveProviderIsServingAccount": 1, "TestMCPGateway_RequestLogAttribution": 2, "TestMCPGateway_RequestLogKind": 1, "TestMCPGateway_RequestLogSplitStream": 1, "TestMCPGateway_StatsSurfaced": 1},
+	"internal/app/proxy_race_test.go":        {"TestForward_CfgReadNoRaceWithReload": 2},
+	"internal/app/quota_test.go":             {"Quota": 1, "TestQuotaTracker_PollAfter": 1},
+	// TestForward_AllTargetsFailedFoldsLegsIntoTerminalRow: the sleep is a clock
+	// input — the fake upstream holds the first hop past a known floor, giving
+	// the folded failed_hops latency a guaranteed lower bound to assert (the
+	// hop's wall time is the measured quantity; forward has no clock seam).
+	"internal/app/request_log_test.go":     {"TestForward_AllTargetsFailedFoldsLegsIntoTerminalRow": 1, "TestForward_RequestLog_CapturesAgent": 1, "TestRequestLog_SmallCapTruncatesBodiesEndToEnd": 1},
+	"internal/app/state_isolation_test.go": {"TestReloadRefreshesCatalogThroughLoader": 1},
+	"internal/app/web_accounts_test.go":    {"waitForLoginDone": 1, "waitForLoginTerminal": 1},
+	"internal/app/wirecap_test.go":         {"TestWireCap_ProbePassesSerialized": 2, "TestWireCap_ProbeTimeoutUnknown": 1, "TestWireProbePass_CoalescesStormDispatches": 2},
+	"internal/forward/forward_test.go":     {"TestServeClientGoneDuringCooldownWait": 1},
+	// holdAtLeast: clock input for TestServeLegCarriesHopLatencyAndUpstreamModel —
+	// holds the upstream hop past a known floor so the leg row's latency has a
+	// guaranteed lower bound, against a gate-denied hop that stays below it.
+	"internal/forward/terminal_row_test.go":    {"holdAtLeast": 1},
 	"internal/observe/events/hub_ctx_test.go":  {"TestHubPublishSubscribeExactlyOnce": 1, "TestSubscribeContextAutoReleases": 1},
 	"internal/observe/events/progress_test.go": {"TestProgressReaderPublishesOnThrottleTime": 1},
 	"internal/observe/events/sse_test.go":      {"waitFor": 1},

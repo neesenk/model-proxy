@@ -199,6 +199,75 @@ func TestServeRateLimitedTerminalLogsRetryAfter(t *testing.T) {
 	}
 }
 
+// holdAtLeast blocks until at least d of wall time has passed since the caller
+// started the hop: a guaranteed lower bound on the latency the pipeline
+// measures, not a sleep whose sufficiency depends on scheduling.
+func holdAtLeast(d time.Duration) {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestServeLegCarriesHopLatencyAndUpstreamModel: a leg row must describe its
+// own hop. Before the fix every leg was stamped when written, so latency_ms
+// was 0 for a real upstream round trip and for a pre-dispatch gate denial
+// alike — failed_hops[].latency_ms could not tell a dead account burning two
+// upstream 401s from a skip that never touched the network — and upstream_model
+// was empty although the hop named a concrete upstream model.
+func TestServeLegCarriesHopLatencyAndUpstreamModel(t *testing.T) {
+	const floor = 20 * time.Millisecond
+	revoked := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		holdAtLeast(floor)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"key revoked"}`))
+	})
+	locked := newFakeUpstream(t, openaiOKResponder("never reached"))
+	good := newFakeUpstream(t, openaiOKResponder("fallback"))
+	h, rows := newTerminalLogHarness(t)
+	h.gate.mu.Lock()
+	h.gate.modelLockedSet["locked/upstream-b"] = true // the real manager sets this from a zero-byte 200
+	h.gate.mu.Unlock()
+	cfg := terminalRowConfig(
+		map[string]Provider{
+			"revoked": {OpenAIBaseURL: revoked.srv.URL, Provider: "test-static"},
+			"locked":  {OpenAIBaseURL: locked.srv.URL, Provider: "test-static"},
+			"good":    {OpenAIBaseURL: good.srv.URL, Provider: "test-static"},
+		},
+		RouteTarget{Provider: "revoked", Model: "upstream-a"},
+		RouteTarget{Provider: "locked", Model: "upstream-b"},
+		RouteTarget{Provider: "good", Model: "upstream-c"},
+	)
+	if w := h.serve(h.snapshot(cfg), "openai", "/v1/chat/completions", openaiChatBody(), nil); w.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s), want 200 served by the fallback", w.Code, w.Body.String())
+	}
+
+	legs, terminal := splitTerminalRows(t, rows())
+	if terminal != nil {
+		t.Fatalf("answered request logged a terminal row %+v", terminal)
+	}
+	if len(legs) != 2 {
+		t.Fatalf("legs = %+v, want the 401 hop and the gate-denied hop", legs)
+	}
+	if legs[0].Status != http.StatusUnauthorized {
+		t.Errorf("leg 0 status = %d, want the upstream 401", legs[0].Status)
+	}
+	if legs[1].Status != http.StatusBadGateway || !strings.Contains(legs[1].ResponseBody, "model locked") {
+		t.Errorf("leg 1 = status %d body %q, want the synthesized 502 naming the model-lock gate", legs[1].Status, legs[1].ResponseBody)
+	}
+	for i, want := range []string{"upstream-a", "upstream-b"} {
+		if legs[i].UpstreamModel != want {
+			t.Errorf("leg %d upstream_model = %q, want the hop's upstream model %q", i, legs[i].UpstreamModel, want)
+		}
+	}
+	if legs[0].LatencyMs < int64(floor/time.Millisecond) {
+		t.Errorf("leg 0 latency_ms = %d, want at least the %d ms the upstream round trip took", legs[0].LatencyMs, floor/time.Millisecond)
+	}
+	if legs[1].LatencyMs >= int64(floor/time.Millisecond) {
+		t.Errorf("leg 1 latency_ms = %d, want a gate denial's sub-millisecond time (no network contact)", legs[1].LatencyMs)
+	}
+}
+
 // TestServeAllTargetsFailedTerminalCarriesScheduleAndProfile: the terminal row
 // is the request's own record, so it carries the routing metadata a committed
 // row carries — the scheduling engine that produced the try order, and the

@@ -885,7 +885,16 @@ func TestInitRequestLogWiresHotRetention(t *testing.T) {
 // answered request look unanswered. The terminal row carries no usage: it is
 // a failure, not a token-bearing answer.
 func TestForward_AllTargetsFailedFoldsLegsIntoTerminalRow(t *testing.T) {
-	a := newFakeUpstream(t, staticResponder(500, `{"error":"a exploded"}`))
+	// The first hop is held past hopFloor, giving its folded latency a known
+	// lower bound: failed_hops[].latency_ms read 0 for every leg before the
+	// leg row carried its own hop clock.
+	const hopFloor = 20 * time.Millisecond
+	a := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		for deadline := time.Now().Add(hopFloor); time.Now().Before(deadline); {
+			time.Sleep(time.Millisecond)
+		}
+		staticResponder(500, `{"error":"a exploded"}`)(w, r)
+	})
 	b := newFakeUpstream(t, staticResponder(503, `{"error":"b unavailable"}`))
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
@@ -932,6 +941,9 @@ func TestForward_AllTargetsFailedFoldsLegsIntoTerminalRow(t *testing.T) {
 		if got := row.FailedHops[i]; got.Provider != want.Provider || got.Status != want.Status || got.Attempt != want.Attempt {
 			t.Errorf("failed_hops[%d] = %+v, want %+v", i, got, want)
 		}
+	}
+	if got := row.FailedHops[0].LatencyMs; got < int64(hopFloor/time.Millisecond) {
+		t.Errorf("failed_hops[0].latency_ms = %d, want at least the %d ms the hop took", got, hopFloor/time.Millisecond)
 	}
 	if row.Input != 0 || row.Output != 0 || row.CacheRead != 0 || row.CacheCreation != 0 {
 		t.Errorf("terminal row usage = %d/%d/%d/%d, want all zero", row.Input, row.Output, row.CacheRead, row.CacheCreation)

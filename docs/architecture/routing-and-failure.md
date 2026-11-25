@@ -214,7 +214,12 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   同 id 多 attempt 行语义：每个未 commit 的跳（429/5xx/认证/传输错误、模型拒绝、403/订阅失效
   归因、派发前门禁跳过——最后一跳也在内；client 断开的跳不落）各落一行 `attempt_only`
   请求日志——同 request id、各自递增的 attempt 序号、带该跳的观测状态与证据体（上游错误体
-  peek／传输错误文本／403 归因与门禁跳过的固定原因），api_key 照记；`attempt_only` 行被
+  peek／传输错误文本／403 归因与门禁跳过的固定原因），api_key 照记。腿行描述它自己那一跳：
+  `latency_ms` 是该跳的墙钟耗时（派发到得出结果——死账号重读 key 后再打一次的两个 401 往返
+  是真实耗时，派发前门禁跳过没有网络接触、读数为亚毫秒级），`upstream_model` 是该目标被
+  请求的上游模型；请求体不重复落盘（`request_size` 为 0，请求体在同 request id 的已提交行
+  或终态行上）。2026-11-26 之前两者恒为 0 与空，`failed_hops[].latency_ms` 这个对外字段
+  分不出「真实往返」与「本地跳过」。`attempt_only` 行被
   KeyUsage 与 session 聚合排除（路由遥测，不是客户端流量）。**全链失败终态行**：forward
   以代理自己的应答收尾（纯限频 429 + `Retry-After`，否则 502）时，该应答另落一行普通行
   （`attempt_only` 不置位）：`provider` 为哨兵 `(failover)`——代理自己产生的行，不对应任何
@@ -462,7 +467,9 @@ failover），带证据的 403/400 另按配额、模型拒绝或账号归因（
 - 全链失败终态行与每跳落腿（`internal/forward/terminal_row_test.go`、`internal/app` 的
   `TestForward_AllTargetsFailedFoldsLegsIntoTerminalRow`）：终态行字段逐一断言（哨兵
   provider、客户端实际字节、请求体、attempt 序号、429 的 `Retry-After`）、最后一跳落腿、
-  client 断开不落行、列表折叠为一行终态且不贡献 token。
+  client 断开不落行、列表折叠为一行终态且不贡献 token。腿行带该跳的墙钟延迟与上游模型
+  （`TestServeLegCarriesHopLatencyAndUpstreamModel`：上游跳的延迟 ≥ 夹具保证的下限、门禁
+  跳过的低于它；`failed_hops[].latency_ms` 的端到端断言在折叠用例里）。
 - 提交后流中止归因（`internal/targetexec/executor_stream_abort_test.go`）：对端写失败先于上游终态在普通与 keepalive 两条拷贝路径都打 client 断开行、不得误判上游截断；上游自带错误终态打 Warn 带摘录；上游已送达终态后的写失败与完整流不打行（契约在 `docs/architecture/protocol-conversion.md`「提交后流中止的归因日志」）。
 - SSE keepalive：静默期心跳帧、ttft 不被心跳标记、录制链/缓存无心跳、client gone 后 reader goroutine 释放。
 - cooldown 全部恢复、部分恢复、跨轮纯 429、混合硬失败。

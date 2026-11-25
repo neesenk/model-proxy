@@ -914,6 +914,9 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 				ContextRetry: ctxRetry,
 			},
 		)
+		// hopStarted is the wall clock of this hop's execution: the latency its
+		// leg row carries when the hop is not committed.
+		hopStarted := time.Now()
 		result := p.targetExecutor(attempt.Runtime(), runtime, t.Provider).Execute(attempt)
 		res.tried[t.Provider] = true
 		switch result.Outcome {
@@ -962,27 +965,34 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 		// hop is written, the last one included: it is the proximate cause of
 		// an all-targets-failed terminal, and its legs fold into that terminal
 		// row (or into a later pass's commit) like any paired leg. A client-
-		// gone hop never reaches this point.
+		// gone hop never reaches this point. The row describes its own hop:
+		// latency is the hop's wall time (a dead account's two upstream 401s
+		// cost real time; a gate denial never touched the network and reads
+		// as the sub-millisecond it took) and upstream_model is the model this
+		// target was asked for. Stamping both at write time left every leg at
+		// 0 ms with no model, so failed_hops[].latency_ms — an API field —
+		// could not separate the two (2026-11-26: 71 legs, all 0 ms).
 		if p.svc.ReqLog != nil {
 			status := result.AttemptStatus
 			if status == 0 {
 				status = http.StatusBadGateway
 			}
 			requestlog.Complete(p.svc.ReqLog, requestlog.Input{
-				StartedAt:   time.Now(),
-				RequestID:   req.requestID,
-				SessionID:   flc.SessionID,
-				Protocol:    proto,
-				Method:      req.request.Method,
-				Path:        req.request.URL.Path,
-				CalledModel: calledModel,
-				Exposed:     exposed,
-				Agent:       agent,
-				APIKeyID:    webauth.KeyIDFrom(req.request.Context()),
-				Provider:    t.Provider,
-				Attempt:     flc.Attempt,
-				Status:      status,
-				AttemptOnly: true,
+				StartedAt:     hopStarted,
+				RequestID:     req.requestID,
+				SessionID:     flc.SessionID,
+				Protocol:      proto,
+				Method:        req.request.Method,
+				Path:          req.request.URL.Path,
+				CalledModel:   calledModel,
+				UpstreamModel: t.Model,
+				Exposed:       exposed,
+				Agent:         agent,
+				APIKeyID:      webauth.KeyIDFrom(req.request.Context()),
+				Provider:      t.Provider,
+				Attempt:       flc.Attempt,
+				Status:        status,
+				AttemptOnly:   true,
 			}, result.AttemptBody, int64(len(result.AttemptBody)), false)
 		}
 	}
