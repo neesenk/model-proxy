@@ -1,8 +1,11 @@
 // pure.js — DOM-free helpers extracted from app.js so they can be unit-tested
 // with `node --test` (jstests/pure.test.mjs). Every function here must stay
 // deterministic: no document/window access, no locale/timezone-dependent
-// formatting (those stay in app.js). app.js imports this module from the same
-// /ui/ directory the SPA is served from.
+// formatting (those stay in app.js). One deliberate exception is seqGuard
+// (LOADER SEQUENCE GUARD below): its next() hands out increasing tokens by
+// design — the counter lives in the instance each app.js loader owns, never
+// at this module's top level. app.js imports this module from the same /ui/
+// directory the SPA is served from.
 
 // esc escapes a value for safe interpolation into an HTML text or attribute
 // context. Covers the five chars that matter (& < > " '). Used on EVERY
@@ -2851,6 +2854,35 @@ export function refreshHoldReason(obs) {
 export function staleDataText(errText, failedParts) {
   const parts = failedParts && failedParts.length ? ` (${failedParts.join(', ')})` : '';
   return `${errText}${parts} — showing last successful data`;
+}
+
+// ===========================================================================
+// LOADER SEQUENCE GUARD (latest-wins for overlapping requests)
+// ===========================================================================
+
+// seqGuard hands ONE loader the tokens of its latest-wins contract. A loader
+// that can be re-entered while a request is in flight (filter changed, range
+// switched, background tick racing a foreground refresh) takes a token when
+// the request starts and applies the response only while isLatest(token)
+// holds — once a newer request has started, this response describes a state
+// the user has already left, and writing it would paint the new header over
+// the old payload:
+//
+//   const seq = guard.next();
+//   const resp = await apiGet(...);
+//   if (!guard.isLatest(seq)) return; // the same check before an error write
+//
+// The check belongs after EVERY await and before any state write (data, error
+// banner, re-armed timer): a superseded load owns nothing, the latest load
+// owns the render. Tokens are comparable only within the instance that
+// issued them, so each loader owns its own guard; the counter lives in that
+// instance, never at this module's top level.
+export function seqGuard() {
+  let latest = 0;
+  return {
+    next() { return ++latest; },
+    isLatest(token) { return token === latest; },
+  };
 }
 
 // ===========================================================================

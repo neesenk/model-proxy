@@ -60,6 +60,7 @@ import {
   mcpAnalyticsSummaryTableHTML, mcpAnalyticsEmptyHTML, mcpAnalyticsSkeletonHTML,
   mcpToolsTableHTML,
   mcpSubTabFromHash, mcpHash,
+  seqGuard,
 } from './pure.js';
 
 function el(tag, opts = {}) {
@@ -1973,7 +1974,7 @@ async function loadRequests(combos) {
   // backend's 1000 cap) — scroll loading extends it to the cap from there.
   const pageSize = requestsFilter.session ? REQ_SESSION_LIMIT : REQ_BROWSE_LIMIT;
   q.set('limit', String(pageSize));
-  const token = ++reqLoadSeq;
+  const token = reqLoadSeq.next();
   // MCP session options come from the page's POOL (independent kind=mcp
   // query with NO filters, the same source the Live page uses) — deriving
   // them from the loaded records undercounts: the browse window is smaller,
@@ -1987,12 +1988,12 @@ async function loadRequests(combos) {
   try {
     resp = await apiGet('/api/requests?' + q.toString());
   } catch (e) {
-    if (token !== reqLoadSeq) return;
+    if (!reqLoadSeq.isLatest(token)) return;
     paint(`<div class="msg err">${esc(e.message)}</div>`);
     hideRequestsSessionSummary();
     return;
   }
-  if (token !== reqLoadSeq) return;
+  if (!reqLoadSeq.isLatest(token)) return;
   if (!resp.enabled) {
     paint('<div class="msg hint">Request logging is off. Enable <code>request_log.enabled</code> in config to capture request/response bodies for replay and debugging.</div>');
     hideRequestsSessionSummary();
@@ -2012,7 +2013,7 @@ async function loadRequests(combos) {
   syncRequestFacets(resp.facets, combos);
   renderRequestsSessionSummary(combos);
   if (poolPromise) poolPromise.then((pool) => {
-    if (pool === null || token !== reqLoadSeq) return; // failed, or superseded
+    if (pool === null || !reqLoadSeq.isLatest(token)) return; // failed, or superseded
     combos.sessionPool = pool; // per-page slice: stale writes cannot leak
     if (activeRequestsPage() === page && document.getElementById('req-session')) {
       renderRequestSelectors(combos);
@@ -2097,7 +2098,7 @@ const REQ_MAX_LOADED = 1000;
 const REQ_OVERSCAN_PX = 480;
 const REQ_LOAD_AHEAD_PX = 700;
 let reqVirt = null;
-let reqLoadSeq = 0;
+const reqLoadSeq = seqGuard();
 let reqScrollWired = false;
 let reqScrollScheduled = false;
 
@@ -2962,7 +2963,7 @@ function bodyLinesHTML(text) {
 // within a session and rides the URL hash (#security?kind=…, see
 // securityFilterQuery).
 let securityFilter = { kind: '', verdict: '', range: 'all', rule: '' };
-let securityReqSeq = 0;
+const securityReqSeq = seqGuard();
 // Row budget of the audit half — "show more" grows it to the backend's 1000
 // cap; a kind/range change resets it (a new window is a new query).
 let securityLimit = 100;
@@ -2984,7 +2985,7 @@ let securityFeedData = { records: null, adjudications: null };
 // leaderboard is the rule-ops view; the only allowed coupling is its own
 // rows drilling INTO the feed (setSecurityRule), never the reverse.
 let securityRulesData = { records: null };
-let securityRulesSeq = 0;
+const securityRulesSeq = seqGuard();
 // The adjudication channel's current on/off switch (feed.enabled) — the KPI
 // row's LLM tiles and the rule-leaderboard's noise hint key off it, telling
 // off from merely quiet.
@@ -3456,16 +3457,16 @@ function refreshSecurityData() {
 // view). Same stale-on-failure contract as the other loaders: banner part
 // "rules", old data stays on screen.
 async function loadSecurityRules() {
-  const seq = ++securityRulesSeq;
+  const seq = securityRulesSeq.next();
   let resp;
   try {
     resp = await apiGet('/api/security?limit=1000');
   } catch (e) {
-    if (seq !== securityRulesSeq) return;
+    if (!securityRulesSeq.isLatest(seq)) return;
     securityRefreshFail('rules');
     return;
   }
-  if (seq !== securityRulesSeq) return;
+  if (!securityRulesSeq.isLatest(seq)) return;
   securityRulesData.records = resp.records || [];
   securityRefreshOk('rules');
   commitSecurityRender();
@@ -3636,18 +3637,18 @@ async function loadSecurity() {
   if (from) q.set('from', String(from));
   // Sequence guard: a slow older response must not overwrite the newer one's
   // rendering.
-  const seq = ++securityReqSeq;
+  const seq = securityReqSeq.next();
   let resp;
   try {
     resp = await apiGet('/api/security?' + q.toString());
   } catch (e) {
-    if (seq !== securityReqSeq) return;
+    if (!securityReqSeq.isLatest(seq)) return;
     if (securityRefreshFail('security') && tbl && !tbl.firstElementChild) {
       tbl.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
     }
     return;
   }
-  if (seq !== securityReqSeq) return;
+  if (!securityReqSeq.isLatest(seq)) return;
   securityAuditOn = !!resp.enabled;
   securityFeedSkipped = resp.skipped || 0;
   securityFeedData.records = resp.records || [];
@@ -7521,7 +7522,7 @@ function setYamlValue(v) {
 // discards stale responses, yamlLintErrors holds the last {line, message}
 // list, and yamlSaving lets updateYamlSaveState arbitrate the Save button.
 let yamlLintTimer = 0;
-let yamlLintSeq = 0;
+const yamlLintSeq = seqGuard();
 let yamlLintErrors = [];
 let yamlSaving = false;
 // yamlSavedText is the last disk-loaded (or successfully saved) YAML — the
@@ -7613,13 +7614,13 @@ async function runYamlLint() {
   yamlLintTimer = 0;
   const text = getYamlValue();
   if (text === null) return;
-  const seq = ++yamlLintSeq;
+  const seq = yamlLintSeq.next();
   try {
     const res = await apiPost('/api/config/validate', { yaml: text });
-    if (seq !== yamlLintSeq) return; // superseded by a newer edit
+    if (!yamlLintSeq.isLatest(seq)) return; // superseded by a newer edit
     yamlLintErrors = (res && res.errors) || [];
   } catch (e) {
-    if (seq !== yamlLintSeq) return;
+    if (!yamlLintSeq.isLatest(seq)) return;
     // A transport failure must not block saving — the save path re-validates.
     yamlLintErrors = [];
   }
@@ -8591,6 +8592,15 @@ async function renderAccountsTab() {
   accountsMaybeAutoRefresh();
 }
 
+// accountsReqSeq guards loadAccountsData's landing writes. The 30s tick, the
+// picker's apply, a provider switch and the post-mutation refreshes all go
+// through here and overlap freely. A load derives its token query AFTER its
+// /api/status round trip, so a tick that requested the previous range and
+// lands after a foreground re-fetch would put the old window's rows back
+// under the new picker label. A superseded load owns nothing: not the rows,
+// the quota snapshot, the banner or the connection state.
+const accountsReqSeq = seqGuard();
+
 // loadAccountsData fetches the accounts view state and re-renders the nav +
 // the selected provider's detail. On tab re-entry a failed fetch keeps the
 // old data and reports via #acc-msg. The nav title the re-entry guard checks
@@ -8598,6 +8608,7 @@ async function renderAccountsTab() {
 // re-mounts the skeleton and retries.
 async function loadAccountsData(background = false) {
   const panel = panels.accounts;
+  const seq = accountsReqSeq.next();
   try {
     // Status first: its quota snapshot seeds the tokens query window (the
     // 'quota' default derives UsageFrom from it), so the FIRST tokens fetch
@@ -8605,6 +8616,10 @@ async function loadAccountsData(background = false) {
     // A failed status fetch keeps the LAST known quota (per-part settle: the
     // quota cards and the derived window survive a transient failure).
     const st = await apiGet('/api/status').catch(() => null);
+    // Superseded during the status round trip: the newer load carries its
+    // own (newer) quota snapshot and derives the token query for the range
+    // the user is looking at now.
+    if (!accountsReqSeq.isLatest(seq)) return;
     if (st && st.quota) accountsQuota = st.quota;
     // The applied time range rides the /api/tokens query ('' = all-time
     // cumulative; from/to = SQLite minute-bucket aggregation; 'quota' rolls
@@ -8616,6 +8631,9 @@ async function loadAccountsData(background = false) {
       apiGet('/api/accounts'),
       apiGet('/api/tokens' + tokensQuery).catch(() => ({ usage: [] })),
     ]);
+    // Superseded in flight (range changed, tick vs foreground): this payload
+    // answers the previous query, and its failure is not the view's.
+    if (!accountsReqSeq.isLatest(seq)) return;
     // Commit-time gate: an interaction that started while the fetches were
     // in flight defers the landing render (the hold watcher re-runs a fresh
     // background load once the user is done).
@@ -8628,6 +8646,7 @@ async function loadAccountsData(background = false) {
     // banner a failed background refresh put up earlier.
     setRefreshError(panel, null);
   } catch (e) {
+    if (!accountsReqSeq.isLatest(seq)) return;
     setConn('err');
     if (background && panel && panel.querySelector('.acct-nav-title')) {
       // Keep the rendered view; the stale banner carries the failure.
@@ -10278,11 +10297,20 @@ function buildAnalyticsLayout(panel, state, granOptions, granActive) {
   }
 }
 
+// analyticsReqSeq guards renderAnalyticsTab's landing writes. Every provider /
+// range / granularity change starts a render and the 30s live tick can
+// overlap a foreground one; the response of a load that has been superseded
+// describes a filter the user has already left, so it must not rebuild the
+// toolbar, charts and tables, raise the stale banner, overwrite the quota
+// snapshot or re-arm the timer — the latest load owns all of them.
+const analyticsReqSeq = seqGuard();
+
 async function renderAnalyticsTab(background = false) {
   const panel = panels.analytics;
   if (!panel) return;
   if (background && deferAutoRefresh(panel, () => renderAnalyticsTab(true))) return;
   analyticsStopAutoRefresh();
+  const seq = analyticsReqSeq.next();
   const state = analyticsState();
   // Quota Window preset support: resolve the SELECTED provider's billing
   // window from a best-effort /api/status fetch (the picker's preset row
@@ -10295,8 +10323,12 @@ async function renderAnalyticsTab(background = false) {
   // fallback until the Status or Accounts tab was visited.
   try {
     const [st] = await Promise.all([apiGet('/api/status'), ensureAccountLabels()]);
-    if (st && st.quota) anQuota = st.quota;
+    if (analyticsReqSeq.isLatest(seq) && st && st.quota) anQuota = st.quota;
   } catch (_) { /* keep last known quota */ }
+  // Superseded while the status/labels prefetch was in flight: the newer
+  // load carries its own (newer) quota snapshot, and the analytics query
+  // this load would issue next could only be dropped below.
+  if (!analyticsReqSeq.isLatest(seq)) return;
   // Window bounds drive both the query and the granularity gating — computed
   // from state (localStorage) BEFORE any DOM write so a failed background
   // refresh can keep the previous view untouched.
@@ -10326,6 +10358,11 @@ async function renderAnalyticsTab(background = false) {
   } catch (e) {
     fetchErr = e;
   }
+  // Superseded in flight (a filter/range change or the live tick started a
+  // newer render): this response describes controls the user has already
+  // left, and its failure is not the view's. The latest load owns the
+  // render, the banner and the timer.
+  if (!analyticsReqSeq.isLatest(seq)) return;
   // Learn the real all-time window start from the echoed from (the server
   // clamps the from=0 sentinel to the oldest persisted bucket). When the
   // anchor changes the effective granularity, re-issue once with the true
@@ -11406,7 +11443,7 @@ let mcpAnalyticsLoading = false;
 // Request sequence for loadMCPAnalytics: a slow response landing after a
 // newer load started must not clobber the newer filters' data (the same
 // guard the Requests/Security/Takeover loaders use).
-let mcpAnalyticsReqSeq = 0;
+const mcpAnalyticsReqSeq = seqGuard();
 let mcpAnalyticsPicker = { open: false, view: null, pick: null, selecting: false };
 
 function mcpAnalyticsState() {
@@ -11864,7 +11901,7 @@ async function loadMCPAnalytics(host, background = false) {
   if (!host) return;
   if (background && deferAutoRefresh(panel, () => loadMCPAnalytics(host, true))) return;
   mcpAnalyticsStopAutoRefresh();
-  const seq = ++mcpAnalyticsReqSeq;
+  const seq = mcpAnalyticsReqSeq.next();
   mcpAnalyticsLoading = true;
   let resp = null;
   let fetchErr = null;
@@ -11887,14 +11924,18 @@ async function loadMCPAnalytics(host, background = false) {
     if (state.tool) q.set('tool', state.tool);
     try {
       resp = await apiGet('/api/mcp/analytics?' + q.toString());
-      mcpAnalyticsError = null;
     } catch (e) {
       fetchErr = e;
     }
     // Superseded by a newer load (filter/range change while this one was in
     // flight): applying this response would render data that no longer
     // matches the visible controls.
-    if (seq !== mcpAnalyticsReqSeq) return;
+    if (!mcpAnalyticsReqSeq.isLatest(seq)) return;
+    // A success retires the previous first-render error — but only now that
+    // this load is known to be the latest one. Written before the check, it
+    // let a superseded success wipe the message of a newer failure, and the
+    // next render fell back to the loading skeleton instead of the error.
+    if (!fetchErr) mcpAnalyticsError = null;
     // All-time anchor: the server clamps from=0 to the oldest persisted
     // bucket. Learn that real start from the echoed from; when it changes
     // the effective granularity, re-issue once with the true span (same
@@ -11929,7 +11970,7 @@ async function loadMCPAnalytics(host, background = false) {
   } finally {
     // Only the newest load clears the flag: a superseded load returning here
     // would otherwise drop it while the newer load is still in flight.
-    if (seq === mcpAnalyticsReqSeq) mcpAnalyticsLoading = false;
+    if (mcpAnalyticsReqSeq.isLatest(seq)) mcpAnalyticsLoading = false;
   }
 }
 
@@ -12283,18 +12324,18 @@ async function renderTakeoverTab() {
 // takeoverReqSeq guards against stale-response reordering: tab activation,
 // mode switches and post-mutation refreshes can race, and a late-arriving
 // older surface (e.g. the previous mode) must never overwrite a newer one.
-let takeoverReqSeq = 0;
+const takeoverReqSeq = seqGuard();
 async function loadTakeover() {
   const panel = panels.takeover;
-  const seq = ++takeoverReqSeq;
+  const seq = takeoverReqSeq.next();
   try {
     const data = await apiGet('/api/takeover');
-    if (seq !== takeoverReqSeq) return;
+    if (!takeoverReqSeq.isLatest(seq)) return;
     takeoverData = data;
     renderTakeoverInto();
     setRefreshError(panel, null);
   } catch (e) {
-    if (seq !== takeoverReqSeq) return;
+    if (!takeoverReqSeq.isLatest(seq)) return;
     setRefreshError(panel, (e && e.message) || String(e));
   }
 }
@@ -12488,7 +12529,7 @@ async function openTakeoverConfirm(client) {
   // Preview loads keep the previous content on screen (no flash): only a
   // status line tracks loading, and rapid chip clicks coalesce into one
   // request.
-  let previewSeq = 0;
+  const previewSeq = seqGuard();
   let previewTimer = null;
   let statusTimer = null;
   const statusEl = () => modal.querySelector('#tkr-status');
@@ -12498,7 +12539,7 @@ async function openTakeoverConfirm(client) {
   };
   const loadPreviewNow = async () => {
     msgEl.hidden = true;
-    const seq = ++previewSeq;
+    const seq = previewSeq.next();
     const req = buildReq();
     if (!req) {
       writesEl.innerHTML = '<span class="hint">nothing selected — turn Models or MCP back on above</span>';
@@ -12514,7 +12555,7 @@ async function openTakeoverConfirm(client) {
     }
     try {
       const res = await apiPost('/api/takeover/preview', Object.assign({ managed_only: true }, req));
-      if (seq !== previewSeq) return; // a newer selection superseded this one
+      if (!previewSeq.isLatest(seq)) return; // a newer selection superseded this one
       const html = !(res.writes || []).length
         ? '<span class="hint">nothing to write</span>'
         : res.writes.map(tkPreviewWriteHTML).join('');
@@ -12556,7 +12597,7 @@ async function openTakeoverConfirm(client) {
         if (body) body.style.height = Math.min(body.scrollHeight, window.innerHeight - 150) + 'px';
       }
     } catch (e) {
-      if (seq !== previewSeq) return;
+      if (!previewSeq.isLatest(seq)) return;
       if (statusTimer) clearTimeout(statusTimer);
       fail((e && e.message) || String(e));
     }
@@ -12904,6 +12945,21 @@ boot();
 
 let keysUsageOpen = null; // key id whose usage row is expanded
 let keysUsageDays = 7;
+// keysUsageReqSeq guards renderKeyUsage's landing write. The card is
+// re-requested for every (key, days) pair — Usage on another key, a
+// 1d/7d/30d switch — and two of those requests overlap whenever the second
+// click lands before the first response does. A slow older response arriving
+// last would then fill the NEW card's body with the OLD request's rows.
+const keysUsageReqSeq = seqGuard();
+
+// keysCreating is createAPIKey's in-flight guard. Both triggers — the New key
+// button and Enter in the label input — go straight to the POST, so a double
+// click or a held-down Enter (key auto-repeat) minted one REAL key per
+// repeat. The flag ignores re-entry; the disabled button shows the wait and
+// stops the click at its source. Each covers what the other cannot: Enter
+// bypasses the button, and a tab re-render mid-flight mounts a fresh button —
+// so renderKeysTab honors the flag too.
+let keysCreating = false;
 
 async function renderKeysTab() {
   const panel = panels.keys;
@@ -12923,7 +12979,12 @@ async function renderKeysTab() {
       <div id="keys-usage"></div>
     </div>
   </div>`;
-  document.getElementById('keys-new').addEventListener('click', createAPIKey);
+  const newBtn = document.getElementById('keys-new');
+  // A mint still in flight from the previous mount keeps the fresh button
+  // disabled too: the tab re-renders on every re-entry, and a new enabled
+  // button would offer a click that the in-flight guard then ignores.
+  if (keysCreating) newBtn.disabled = true;
+  newBtn.addEventListener('click', createAPIKey);
   document.getElementById('keys-new-label').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') createAPIKey();
   });
@@ -12963,7 +13024,9 @@ async function refreshKeysList() {
 let keysListCache = null;
 
 async function createAPIKey() {
+  if (keysCreating) return;
   const labelEl = document.getElementById('keys-new-label');
+  const btn = document.getElementById('keys-new');
   const errEl = document.getElementById('keys-new-err');
   const label = (labelEl && labelEl.value.trim()) || '';
   // Empty label would mint an unlabeled key — prompt for input instead of
@@ -12977,6 +13040,8 @@ async function createAPIKey() {
     return;
   }
   if (errEl) errEl.textContent = '';
+  keysCreating = true;
+  if (btn) btn.disabled = true;
   try {
     const created = await apiPost('/api/keys', { label });
     const banner = document.getElementById('keys-created');
@@ -12992,6 +13057,12 @@ async function createAPIKey() {
   } catch (e) {
     const banner = document.getElementById('keys-created');
     if (banner) banner.innerHTML = `<p class="msg err">${esc(String(e.message || e))}</p>`;
+  } finally {
+    keysCreating = false;
+    // Re-enable whichever button is mounted now: a tab re-render mid-flight
+    // replaced the one captured at entry.
+    const mounted = document.getElementById('keys-new');
+    if (mounted) mounted.disabled = false;
   }
 }
 
@@ -13081,14 +13152,19 @@ async function renderKeyUsage(id) {
   for (const b of box.querySelectorAll('[data-key-days]')) {
     b.addEventListener('click', () => { keysUsageDays = Number(b.dataset.keyDays); renderKeyUsage(id); });
   }
+  const seq = keysUsageReqSeq.next();
   try {
     const res = await apiGet(`/api/keys/${encodeURIComponent(id)}/usage?days=${keysUsageDays}`);
+    // Superseded by a newer (key, days) request while this one was in
+    // flight: this response belongs to a card the user has already left.
+    if (!keysUsageReqSeq.isLatest(seq)) return;
     const body = document.getElementById('keys-usage-body');
     // Fold pooled virtual keys to "parent · label" for display (the raw hash
     // key is correlation-only).
     if (body) body.innerHTML = keyUsageTableHTML(
       (res.models || []).map((r) => ({ ...r, provider: displayProvider(r.provider) })));
   } catch (e) {
+    if (!keysUsageReqSeq.isLatest(seq)) return;
     const body = document.getElementById('keys-usage-body');
     if (body) body.innerHTML = `<p class="msg err">${esc(String(e.message || e))}</p>`;
   }
