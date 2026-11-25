@@ -82,8 +82,11 @@ type Options struct {
 	// HotRetention, when > 0, zstd-archives rotated files whose mtime fell
 	// out of the window: the sweep tick hands them to a side goroutine that
 	// compresses them to <name>.zst (atomic tmp+rename) and removes the
-	// plain file. Archived files are offline-only: no query path matches
-	// the .zst suffix. 0 keeps every file plain for its whole retention.
+	// plain file. More cold files than the worker's queue holds are handed
+	// over as it frees slots, not one queue per tick; while archives keep
+	// failing, that pauses until the next sweep. Archived files are
+	// offline-only: no query path matches the .zst suffix. 0 keeps every
+	// file plain for its whole retention.
 	HotRetention time.Duration
 }
 
@@ -120,6 +123,19 @@ type Logger struct {
 	archiveDone chan struct{}
 	// archiveFn is the compression seam; production uses archiveZstd.
 	archiveFn func(src string) error
+	// archivePending is what the last dispatch pass found but the queue had
+	// no room for, in scan order. Owned by the writer goroutine like the
+	// dispatch itself; the worker's refill signal (archiveRefill) hands the
+	// parked files over from here without another directory scan.
+	archivePending []string
+	// archiveRefill carries the worker's "a queue slot is free" signal to the
+	// writer goroutine: capacity one, so signals coalesce, and sent without
+	// blocking — nothing reads it once Run has left its loop.
+	archiveRefill chan struct{}
+	// archiveFailStreak is how many archives the worker failed in a row; any
+	// success resets it. The worker alone writes it; the writer goroutine
+	// reads it against archiveFailBudget when a refill signal arrives.
+	archiveFailStreak atomic.Int32
 }
 
 // New returns a logger. Run must be started exactly once before Shutdown.
@@ -131,15 +147,16 @@ func New(opts Options) *Logger {
 		opts.MaxBytes = DefaultMaxBytes
 	}
 	return &Logger{
-		opts:        opts,
-		encodes:     make(chan EncodeFunc, opts.QueueCapacity),
-		done:        make(chan struct{}),
-		closed:      make(chan struct{}),
-		freeSpace:   volumeFreeSpace,
-		archive:     make(chan string, archiveQueueDepth),
-		archiveStop: make(chan struct{}),
-		archiveDone: make(chan struct{}),
-		archiveFn:   archiveZstd,
+		opts:          opts,
+		encodes:       make(chan EncodeFunc, opts.QueueCapacity),
+		done:          make(chan struct{}),
+		closed:        make(chan struct{}),
+		freeSpace:     volumeFreeSpace,
+		archive:       make(chan string, archiveQueueDepth),
+		archiveStop:   make(chan struct{}),
+		archiveDone:   make(chan struct{}),
+		archiveFn:     archiveZstd,
+		archiveRefill: make(chan struct{}, 1),
 	}
 }
 
@@ -246,6 +263,11 @@ func (l *Logger) Run() {
 			l.write(writer, encode, time.Now())
 		case <-ticker.C:
 			l.sweepAndGuard(time.Now(), writer.Path())
+		case <-l.archiveRefill:
+			// The worker freed a queue slot: top it up from what the last
+			// dispatch pass parked. Nothing parked, nothing done — this
+			// path never scans the directory.
+			l.offerPendingArchives()
 		case <-l.done:
 			for {
 				select {
@@ -358,9 +380,10 @@ func (l *Logger) sweep(now time.Time, activePath string) {
 // stream's rotated files oldest-first. The active file and non-log entries
 // (index.db) are never deleted; deletion stops as soon as the projected free
 // space clears every armed condition (each removed file's size is added to
-// the observed free — no per-file re-query). Index consistency is the prune
+// observed free — no per-file re-query). Index consistency is the prune
 // contract: the daemon's reconcile (or the next startup's rebuild) drops the
-// rows of vanished files.
+// rows of vanished files. Archives still being written are never deleted
+// either, but the report accounts for the space they hold.
 func (l *Logger) guard(activePath string) {
 	if l.opts.MinFreeBytes <= 0 && l.opts.MaxUsedPercent <= 0 {
 		return
@@ -373,11 +396,12 @@ func (l *Logger) guard(activePath string) {
 	if !l.guardTriggered(free, total) {
 		return
 	}
-	candidates, err := rotatedFiles(l.opts.Directory, l.opts.FilePrefix, filepath.Base(activePath))
+	candidates, inFlight, err := rotatedFiles(l.opts.Directory, l.opts.FilePrefix, filepath.Base(activePath))
 	if err != nil {
 		logx.Warnf("[%s] disk guard: list %s: %v", l.opts.Tag, l.opts.Directory, err)
 		return
 	}
+	inFlightNote := inFlightArchiveNote(inFlight)
 	var removed []PruneTarget
 	var freed int64
 	for _, tgt := range candidates {
@@ -393,11 +417,12 @@ func (l *Logger) guard(activePath string) {
 		free += tgt.Size
 	}
 	if len(removed) == 0 {
-		logx.Warnf("[%s] disk guard: triggered but no rotated file is deletable (the active file and index are never removed)", l.opts.Tag)
+		logx.Warnf("[%s] disk guard: triggered but no rotated file is deletable (the active file and index are never removed)%s",
+			l.opts.Tag, inFlightNote)
 		return
 	}
-	logx.Infof("[%s] disk guard: deleted %d rotated file(s) (%s), volume free now ~%s",
-		l.opts.Tag, len(removed), formatGiB(freed), formatGiB(free))
+	logx.Infof("[%s] disk guard: deleted %d rotated file(s) (%s), volume free now ~%s%s",
+		l.opts.Tag, len(removed), formatGiB(freed), formatGiB(free), inFlightNote)
 }
 
 // guardTriggered reports whether either armed condition holds for the given
@@ -412,29 +437,66 @@ func (l *Logger) guardTriggered(free, total int64) bool {
 	return false
 }
 
-// rotatedFiles lists the stream's rotated log files (prefix*.log and
-// prefix*.log.zst except the active file), oldest first by name — the
-// deletion candidates of the disk guard. Day/sequence-stamped rotation names
-// sort chronologically, the same ordering Prunable relies on.
-func rotatedFiles(dir, filePrefix, activeName string) ([]PruneTarget, error) {
+// inFlightArchive is one of the stream's archives still being written
+// (prefix*.log.zst.tmp) with the space it holds. Occupied like any other
+// file of the stream, but the opposite of a PruneTarget: no cleanup may
+// remove it, and the disk guard only reports it.
+type inFlightArchive struct {
+	Name string
+	Size int64
+}
+
+// rotatedFiles lists the stream's files for the disk guard in two sets, each
+// oldest first by name. The first is deletable — prefix*.log and
+// prefix*.log.zst except the active file, the guard's deletion candidates;
+// day/sequence-stamped rotation names sort chronologically, the same ordering
+// Prunable relies on. The second is the stream's archives still being written
+// (prefix*.log.zst.tmp): space occupied like any other file of the stream,
+// but in no deletion set — the guard accounts for it and leaves it alone.
+func rotatedFiles(dir, filePrefix, activeName string) ([]PruneTarget, []inFlightArchive, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var targets []PruneTarget
+	var deletable []PruneTarget
+	var inFlight []inFlightArchive
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || !(isLogFile(name, filePrefix) || isZstdFile(name, filePrefix)) || name == activeName {
+		if entry.IsDir() {
+			continue
+		}
+		unfinished := isZstdTmpFile(name, filePrefix)
+		if !unfinished && (!(isLogFile(name, filePrefix) || isZstdFile(name, filePrefix)) || name == activeName) {
 			continue
 		}
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
-		targets = append(targets, PruneTarget{Name: name, Size: info.Size()})
+		if unfinished {
+			inFlight = append(inFlight, inFlightArchive{Name: name, Size: info.Size()})
+		} else {
+			deletable = append(deletable, PruneTarget{Name: name, Size: info.Size()})
+		}
 	}
-	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
-	return targets, nil
+	sort.Slice(deletable, func(i, j int) bool { return deletable[i].Name < deletable[j].Name })
+	sort.Slice(inFlight, func(i, j int) bool { return inFlight[i].Name < inFlight[j].Name })
+	return deletable, inFlight, nil
+}
+
+// inFlightArchiveNote renders what the stream holds in archives still being
+// written, for the disk guard's report: occupied space no deletion path may
+// touch, so a pass that freed too little says where the rest sits. Empty when
+// nothing is in flight.
+func inFlightArchiveNote(inFlight []inFlightArchive) string {
+	if len(inFlight) == 0 {
+		return ""
+	}
+	var held int64
+	for _, archive := range inFlight {
+		held += archive.Size
+	}
+	return fmt.Sprintf("; %d unfinished archive(s) hold %s in .zst.tmp (never deleted)", len(inFlight), formatGiB(held))
 }
 
 // formatGiB renders a byte count in binary GiB for guard log lines.
