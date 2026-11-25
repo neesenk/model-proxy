@@ -115,6 +115,8 @@ func (g *fakeHealthGate) RecordRateLimit(provider string, until time.Time, kind 
 	defer g.mu.Unlock()
 	g.rateLimits[provider] = until
 }
+func (g *fakeHealthGate) RecordCredentialDenied(string, targetexec.CredentialDenialKind, []byte, uint64) {
+}
 func (g *fakeHealthGate) LearnParamBlock(provider, model, parameter string, generation uint64) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()

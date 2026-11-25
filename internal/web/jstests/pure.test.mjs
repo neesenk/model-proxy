@@ -33,7 +33,7 @@ import {
   fmtCompact,
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
   CLIENT_GONE_STATUS, notLoggedHint,
-  quotaErrKind, accountUsageState, accountRemainingLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta, scheduleCredentialLabel, syncErrLabel, keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
+  quotaErrKind, accountUsageState, accountRemainingLabel, accountDenialLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta, scheduleCredentialLabel, syncErrLabel, keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
   parseModelLines, mergeFetchedModels,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
   securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML, SECURITY_RANGES, securityRangeFromSecs,
@@ -4448,6 +4448,89 @@ test('credentialBannerHTML: multiple alerts render one line each, keys escaped',
   ], null);
   assert.equal(html.match(/<div class="cred-banner-line"/g).length, 2);
   assert.ok(html.includes('x &lt; y'));
+});
+
+// Forwarding-path credential denials ride the same alert list as the poll's
+// sync errors: plan-inactive / account-disabled arrive only from the forward
+// path, and so does auth for a revoked console-only key (its quota poll
+// succeeds regardless).
+test('credentialBannerHTML: forwarding-path denial classes name the account-level fix', () => {
+  const html = credentialBannerHTML([
+    {
+      key: 'step-plan#dc4dcc09015962f5',
+      class: 'plan-inactive',
+      err: '{"error":{"message":"you have no active step plan subscription","type":"request_params_invalid"}}',
+      since: 1764064489,
+    },
+    { key: 'shopee#b38457ea40c610bd', class: 'account-disabled', err: '{"error":{"code":"account_disabled"}}' },
+  ], { 'step-plan#dc4dcc09015962f5': '2620' });
+  assert.equal(html.match(/<div class="cred-banner-line"/g).length, 2);
+  assert.match(html, /<strong>step-plan · 2620<\/strong> has no active plan subscription — renew the plan or remove this account/);
+  // The upstream evidence rides the title (attribute-escaped, like every
+  // title); it is never body text.
+  assert.match(html, /title="\{&quot;error&quot;:\{&quot;message&quot;:&quot;you have no active step plan subscription&quot;/);
+  assert.ok(!html.includes('<strong>step-plan · 2620</strong> {"error"'));
+  assert.match(html, /<strong>shopee · b38457ea<\/strong> account disabled upstream — replace or remove this account/);
+  // Neither is a session or a key problem: no re-login command, no "update the key".
+  assert.ok(!html.includes('login'));
+  assert.ok(!html.includes('update this account'));
+});
+
+test('scheduleCredentialLabel + syncErrLabel: forwarding-path denial classes', () => {
+  assert.equal(scheduleCredentialLabel('plan-inactive'), 'no active plan');
+  assert.equal(scheduleCredentialLabel('account-disabled'), 'account disabled');
+  assert.equal(scheduleCredentialLabel('session-expired'), 'session expired');
+  assert.equal(syncErrLabel('plan-inactive'), 'No active plan');
+  assert.equal(syncErrLabel('account-disabled'), 'Account disabled');
+  assert.equal(syncErrLabel('auth'), 'Auth error');
+});
+
+// snap.denial (quota[name].denial) is the forwarding-path credential failure
+// of one account. The Accounts pill / Usage hint must say it even though the
+// poll never failed — a lapsed step-plan plan otherwise reads "Unmeasured".
+test('accountRemainingLabel + accountUsageState: a denial outranks measurements and non-credential sync errors', () => {
+  const lapsed = { class: 'plan-inactive', err: 'you have no active step plan subscription', since: 1764064489 };
+  assert.equal(accountRemainingLabel({ Windows: [], Notes: ['console only'], denial: lapsed }), 'No active plan');
+  assert.deepEqual(
+    accountUsageState({ Windows: [], Notes: ['console only'], denial: lapsed }),
+    { hint: 'No active plan', open: true },
+  );
+  // A kept, measured-looking snapshot must not read as healthy numbers either.
+  const measured = { Windows: [{ Ultimate: true, RemainingPct: 0.8 }] };
+  assert.equal(accountRemainingLabel({ ...measured, denial: lapsed }), 'No active plan');
+  assert.deepEqual(accountUsageState({ ...measured, denial: lapsed }), { hint: 'No active plan', open: true });
+  assert.equal(accountRemainingLabel({ denial: { class: 'account-disabled', err: '' } }), 'Account disabled');
+  // A non-credential sync failure (network blip) does not hide the actionable denial…
+  assert.equal(
+    accountRemainingLabel({ SyncErr: 'monthly usage HTTP 500: boom', denial: { class: 'auth', err: 'Invalid API key' } }),
+    'Auth error',
+  );
+  // …but a credential-class sync error keeps its own, more specific wording
+  // (the poll's record wins, same rule as the banner).
+  assert.equal(accountRemainingLabel({ SyncErr: 'session expired', denial: lapsed }), 'Session expired');
+  assert.equal(accountRemainingLabel({ Err: 'not logged in', denial: lapsed }), 'Not logged in');
+  // Without a denial the existing precedence is untouched.
+  assert.equal(accountRemainingLabel({ SyncErr: 'monthly usage HTTP 500: boom', Windows: [] }), 'Sync error');
+  assert.deepEqual(accountUsageState({ SyncErr: 'monthly usage HTTP 500: boom' }), { hint: 'Sync error', open: true });
+});
+
+// The Usage section prints the denial as its own line only when that line adds
+// something: a credential-class sync error already tells the credential story
+// (with its as-of and Re-login affordance), so the denial defers to it.
+test('accountDenialLabel: printed only when the sync error does not already tell the credential story', () => {
+  const denial = { class: 'plan-inactive', err: 'you have no active step plan subscription' };
+  assert.equal(accountDenialLabel({ denial }), 'No active plan');
+  // A non-credential sync failure ("Sync error") leaves the denial to be said.
+  assert.equal(accountDenialLabel({ SyncErr: 'monthly usage HTTP 500: boom', denial }), 'No active plan');
+  assert.equal(accountDenialLabel({ Err: 'dial tcp: connection refused', denial }), 'No active plan');
+  // The poll's credential-class record wins and renders its own line.
+  assert.equal(accountDenialLabel({ SyncErr: 'session expired', denial }), '');
+  assert.equal(accountDenialLabel({ SyncErr: 'auth: mint key rejected: HTTP 401', denial }), '');
+  // An unknown class is still a denial — say so generically rather than hide it.
+  assert.equal(accountDenialLabel({ denial: { class: 'made-up', err: 'x' } }), 'Credential error');
+  assert.equal(accountDenialLabel({ denial: null }), '');
+  assert.equal(accountDenialLabel({}), '');
+  assert.equal(accountDenialLabel(null), '');
 });
 
 test('requestMetaHTML: failover leg RESULT group carries the evidence first line', () => {

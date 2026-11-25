@@ -1690,3 +1690,108 @@ func TestDashboardCredentialAlerts(t *testing.T) {
 		t.Errorf("recovered alerts = %+v, want empty", got)
 	}
 }
+
+// TestDashboardForwardCredentialDenials pins the forwarding-path source of
+// the credential surfaces. The quota poll never sees a lapsed step-plan
+// subscription or a revoked console-only key (Quota() succeeds), so the
+// account attributions the executor proves arrive as runtime
+// CredentialDenials: each one raises a banner alert and attaches a `denial`
+// to the account's quota entry (what the Accounts pill reads). When the poll
+// ALSO reports a banner-class failure for the same account, the poll's record
+// wins — it carries the provider's own error text — while a non-banner sync
+// failure (network blip) does not hide the denial. The account's next success
+// removes the runtime record, so both projections self-clear.
+func TestDashboardForwardCredentialDenials(t *testing.T) {
+	now := time.Date(2026, 11, 25, 10, 34, 49, 0, time.UTC)
+	const lapsed = `{"error":{"message":"you have no active step plan subscription","type":"request_params_invalid"}}`
+	state := DashboardState{
+		Listen:       "127.0.0.1:8080",
+		Cache:        responsecache.New(responsecache.Options{}),
+		QuotaEnabled: true,
+		StartedAt:    now.Add(-time.Minute),
+		Schedule:     []byte(`{"models":{}}`),
+		Runtime: runtimestate.DashboardSnapshot{
+			Quotas: map[string]*provider.QuotaSnapshot{
+				"step-plan#blip":   {Billing: provider.BillingUnknown},
+				"step-plan#both":   {Billing: provider.BillingUnknown},
+				"step-plan#fresh":  {Billing: provider.BillingUnknown},
+				"step-plan#lapsed": {Billing: provider.BillingUnknown},
+			},
+			CredentialDenials: map[string]runtimestate.CredentialDenial{
+				"step-plan#blip":   {Class: "auth", Err: "Invalid API key", Since: now.Add(-time.Minute)},
+				"step-plan#both":   {Class: "auth", Err: "Invalid API key", Since: now},
+				"step-plan#lapsed": {Class: "plan-inactive", Err: lapsed, Since: now},
+			},
+		},
+		QuotaSyncErrs: map[string]runtimestate.QuotaSyncError{
+			"step-plan#blip": {Err: "dial tcp: connection refused", At: now},
+			"step-plan#both": {Err: "session expired (HTTP 401): Session expired", At: now},
+		},
+	}
+	service := New(Ports{DashboardState: func(time.Time) DashboardState { return state }})
+
+	dashboard := service.Dashboard(now)
+
+	wantAlerts := []appapi.CredentialAlert{
+		{Key: "step-plan#blip", Class: "auth", Err: "Invalid API key", Since: now.Add(-time.Minute).Unix()},
+		{Key: "step-plan#both", Class: "session-expired", Err: "session expired (HTTP 401): Session expired", Since: now.Unix()},
+		{Key: "step-plan#lapsed", Class: "plan-inactive", Err: lapsed, Since: now.Unix()},
+	}
+	if !reflect.DeepEqual(dashboard.CredentialAlerts, wantAlerts) {
+		t.Fatalf("alerts = %+v\nwant  %+v", dashboard.CredentialAlerts, wantAlerts)
+	}
+
+	// The Accounts pill reads the per-account projection — asserted on the
+	// wire shape, which is what the UI consumes.
+	raw, err := json.Marshal(dashboard.Quota)
+	if err != nil {
+		t.Fatalf("marshal quota: %v", err)
+	}
+	var quota map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &quota); err != nil {
+		t.Fatalf("unmarshal quota: %v", err)
+	}
+	wantDenials := map[string]appapi.CredentialDenial{
+		"step-plan#blip":   {Class: "auth", Err: "Invalid API key", Since: now.Add(-time.Minute).Unix()},
+		"step-plan#both":   {Class: "auth", Err: "Invalid API key", Since: now.Unix()},
+		"step-plan#lapsed": {Class: "plan-inactive", Err: lapsed, Since: now.Unix()},
+	}
+	for key, want := range wantDenials {
+		entry := quota[key]
+		rawDenial, present := entry["denial"]
+		if !present {
+			t.Errorf("quota[%s] carries no denial, want %+v", key, want)
+			continue
+		}
+		var got appapi.CredentialDenial
+		if err := json.Unmarshal(rawDenial, &got); err != nil || got != want {
+			t.Errorf("quota[%s].denial = %s, want %+v", key, rawDenial, want)
+		}
+		// A denial alone must not dress the entry up as a failed sync: the
+		// step-plan poll succeeds, and the pill would say "Sync error".
+		if _, has := entry["SyncErr"]; has && key != "step-plan#blip" && key != "step-plan#both" {
+			t.Errorf("quota[%s] carries SyncErr without a failed sync", key)
+		}
+	}
+	if _, present := quota["step-plan#fresh"]["denial"]; present {
+		t.Errorf("quota[step-plan#fresh] carries a denial, want the plain snapshot shape")
+	}
+
+	// Recovery: the account's next success drops the runtime record; the
+	// poll-only alerts remain exactly as before.
+	state.Runtime.CredentialDenials = nil
+	recovered := service.Dashboard(now)
+	wantAlerts = []appapi.CredentialAlert{
+		{Key: "step-plan#both", Class: "session-expired", Err: "session expired (HTTP 401): Session expired", Since: now.Unix()},
+	}
+	if !reflect.DeepEqual(recovered.CredentialAlerts, wantAlerts) {
+		t.Fatalf("recovered alerts = %+v, want %+v", recovered.CredentialAlerts, wantAlerts)
+	}
+	raw, _ = json.Marshal(recovered.Quota)
+	_ = json.Unmarshal(raw, &quota)
+	for key := range wantDenials {
+		if _, present := quota[key]["denial"]; present {
+			t.Errorf("quota[%s] still carries a denial after recovery", key)
+		}
+	}
+}

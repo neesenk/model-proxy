@@ -41,6 +41,12 @@ type Manager struct {
 	// live rotation without consuming it.
 	rr     map[string]uint64
 	quotas map[string]*provider.QuotaSnapshot
+	// denials holds the forwarding-path credential failures (CredentialDenial)
+	// per runtime provider key. Unlike health it is an observed fact about
+	// the credential, not config-coupled scheduling state: ReplaceGeneration
+	// only prunes it to the live key set, and a success — not a reload or an
+	// unfreeze — is what clears an entry (Manager.RecordCredentialDenial).
+	denials map[string]CredentialDenial
 	// quality is copy-on-write: record paths (under m.mu) publish a NEW
 	// immutable map of providerQuality VALUES; readers load the pointer without
 	// the mutex so the scheduling critical section skips the decayed-status
@@ -98,6 +104,9 @@ func (m *Manager) ensureLocked() {
 	if m.quotas == nil {
 		m.quotas = make(map[string]*provider.QuotaSnapshot)
 	}
+	if m.denials == nil {
+		m.denials = make(map[string]CredentialDenial)
+	}
 	if m.quality.Load() == nil {
 		empty := map[string]providerQuality{}
 		m.quality.Store(&empty)
@@ -145,6 +154,15 @@ func (m *Manager) ReplaceGeneration(generation uint64, liveQuotaKeys map[string]
 	for name := range m.quotas {
 		if !liveQuotaKeys[name] {
 			delete(m.quotas, name)
+		}
+	}
+	// Credential denials are pruned, not cleared: a swapped-out provider or a
+	// removed account drops its record with the generation change, while an
+	// account that is still configured keeps the banner up across the reload
+	// (the credential did not recover because something else was reloaded).
+	for name := range m.denials {
+		if !liveQuotaKeys[name] {
+			delete(m.denials, name)
 		}
 	}
 	empty := map[string]providerQuality{}

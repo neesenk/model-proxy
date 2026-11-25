@@ -511,6 +511,11 @@ func (m *Manager) Dashboard(now time.Time) DashboardSnapshot {
 		capturedAt: now,
 		spread:     make(map[string]uint64, len(m.spread)),
 		rr:         make(map[string]uint64, len(m.rr)),
+
+		CredentialDenials: make(map[string]CredentialDenial, len(m.denials)),
+	}
+	for name, denial := range m.denials {
+		snapshot.CredentialDenials[name] = denial
 	}
 	for name, state := range m.health {
 		circuitState := "closed"

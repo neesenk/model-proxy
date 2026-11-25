@@ -239,6 +239,22 @@ func (p *Proxy) recordRateLimit(name string, until time.Time, kind runtimestate.
 	}
 }
 
+// recordCredentialDenied stores the credential failure the executor PROVED
+// for one account (targetexec's account attributions: an upstream 401 after
+// refresh, an account-disablement code, a lapsed plan subscription). It is
+// what the credential banner, the Accounts pill and the schedule badge read
+// for providers whose quota poll never contacts the upstream; the lifecycle
+// (cleared by the account's next success, pruned to live keys on reload) is
+// runtime.Manager.RecordCredentialDenial's.
+func (p *Proxy) recordCredentialDenied(name, class string, evidence []byte, generations ...uint64) {
+	p.runtimeState.RecordCredentialDenial(
+		name,
+		class,
+		string(evidence),
+		runtimestate.GenerationArg(generations),
+	)
+}
+
 // serveRoutePreview answers "where would this request go RIGHT NOW?" — the
 // same early forward steps (model extraction, route lookup,
 // pin / force narrowing, cache probe, scheduling preview, per-target

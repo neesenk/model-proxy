@@ -72,6 +72,23 @@ func IsModelDenied(status int, peek []byte) bool {
 	return missingModel.Match(lower)
 }
 
+// CredentialDenialKind names the account-scoped credential failure an
+// executor attribution proved. The values ARE the credential classes the
+// status surfaces speak (runtime.CredentialDenial.Class and /api/status
+// credential_alerts), so adding a kind means teaching the Web UI its wording.
+type CredentialDenialKind string
+
+const (
+	// DenialAuth: the upstream rejected the credential — a 401 that survived
+	// the auth refresh.
+	DenialAuth CredentialDenialKind = "auth"
+	// DenialAccountDisabled: the error envelope's account-disablement code.
+	DenialAccountDisabled CredentialDenialKind = "account-disabled"
+	// DenialPlanInactive: the envelope's message says the account has no
+	// active plan subscription.
+	DenialPlanInactive CredentialDenialKind = "plan-inactive"
+)
+
 // Only an account-scoped machine code in the error envelope supports applying
 // the existing auth circuit to every model on this resolved account.
 func accountDisabled(body []byte) bool {
@@ -86,6 +103,24 @@ func accountDisabled(body []byte) bool {
 		return true
 	}
 	return false
+}
+
+// accountUnsubscribed reports an error envelope whose message says the
+// ACCOUNT has no plan subscription — the text form of the same account fact
+// accountDisabled reads from a machine code. step-plan answers a lapsed Step
+// Plan as HTTP 400 {"error":{"message":"you have no active step plan
+// subscription","type":"request_params_invalid"}}: a generic type, no
+// error.code, the proof in the message alone. The statement must sit in the
+// envelope's own message — request content echoed elsewhere in the body says
+// nothing about the account.
+func accountUnsubscribed(body []byte) bool {
+	var envelope struct {
+		Error struct{ Message string } `json:"error"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(envelope.Error.Message), "no active step plan subscription")
 }
 
 // Match the stock nginx denial document observed in the incident. A server

@@ -398,6 +398,8 @@ kimi/zhipu 的配额解析内嵌在带 I/O 的 `Usage()` 里尚未纯函数化�
 | 错误体降级可见 | 跨协议客户端收到上游 4xx 的翻译 envelope（含 detail/空 body 的合成文案），status 保留、绝不升级 502 | `TestForward_ErrorDegradationVisibleE2E` |
 | 模型拒绝新措辞边界 | retcode 40403 措辞计入模型拒绝（锁模型+failover）；相邻套餐层 "not supported" 措辞不锁 | `TestForward_ModelDeniedNewWordingE2E` |
 | 上游 403 归因 | 账号停用码（`error.code` 为 `account_disabled`/`account_suspended`）：换下一候选并给该账号记一次熔断失败，末候选终态 502；标准 nginx 拦截页：非末候选换目标且零记账，末候选保留原始 403；通用 HTML 403 原样 commit | `TestForward_Upstream403AttributionE2E` |
+| 套餐订阅失效归因 | 上游 400 的 `error.message` 明说账号无有效订阅（step-plan `you have no active step plan subscription`）：换下一候选并给该账号记一次熔断失败（零 failure metric、不锁模型），末候选终态 502；两种终态下该跳都以 400 + 上游错误体落腿；轮转池（load_balance 三账号、中间一个失效）无请求吸收该 400 | `TestForward_LapsedPlanSubscriptionFailsOverE2E` |
+| 转发路径的凭据拒绝上页面 | 账号归因三类（订阅失效 400 / 刷新后仍 401 / 账号停用 403）经真实 admin 端口同时出现在三处：`credential_alerts`（key、类别、上游证据）、该账号 quota 条目的 `denial`、Schedule 节点 `credential` 徽标；健康兄弟账号三处皆无；账号下一次 2xx 后三处一起消失 | `TestForward_CredentialDenialSurfacesInStatusE2E` |
 | 全链失败终态落行 | 所有候选失败（代理回 502）时请求落一行终态行（`provider="(failover)"`，status 与 body 是客户端实际收到的，请求体保留），每一跳都有 attempt_only 腿，列表折叠为一行终态 + `failed_hops`，终态行不贡献 token | `TestForward_AllTargetsFailedFoldsLegsIntoTerminalRow` |
 | 腿选择（unknown 优先于死腿） | 模型级当前腿 no 且存在 probed-yes/unknown 替代腿 → 请求实际打到替代腿的 wire 路径；全 no 维持原协议让错误浮现 | `TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E` |
 | 响应 model 归一化（alias） | alias 路由请求体 model 改写为上游名；响应 model 在 buffered、SSE、cache-hit 重放三条客户端路径上都归一回 calledModel，上游名不泄漏 | `TestForward_AliasResponseModelNormalizationE2E` |

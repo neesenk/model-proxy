@@ -3093,3 +3093,91 @@ test('全局凭据横幅随 /api/status credential_alerts 出现与消失 (横�
   }
   assert.deepEqual(await ctx.pageErrors(), [], '横幅路径不得有 JS 错误');
 });
+
+// 转发路径证实的凭据拒绝（订阅失效 plan-inactive / 账号停用 account-disabled，以及
+// 控制台型 provider 被吊销 key 的 auth）走同一条 credential_alerts：横幅点明账号级处置
+// （续费或移除），Accounts 页该账号的 Usage 摘要与正文、Status 页 Schedule 链节点的徽标
+// 同时提示——这类 provider 的配额轮询永远成功，轮询路径不会替它说话。与横幅族同一套 window.fetch 打桩手法：只替换
+// /api/status 一个面，真实 daemon fixture 不需要真的造一个订阅失效的账号。
+test('订阅失效账号：横幅点明处置、Accounts 页 Usage 提示 No active plan (横幅族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  // 夹具 provider 是池化的 static：Accounts 页按 accountProviderKey（dummy#<账号id>）
+  // 查配额快照，所以拒绝必须挂在那个运行时键上；横幅条目用同一个键。
+  const accounts = await fetch(`${ctx.baseUrl}/api/accounts`).then((r) => r.json());
+  const dummy = (accounts.providers || []).find((p) => p.name === 'dummy');
+  const quotaKey = dummy && dummy.pooled && dummy.accounts && dummy.accounts[0]
+    ? `dummy#${dummy.accounts[0].id}` : 'dummy';
+  await ctx.ev(`(() => {
+    window.__quotaKey = ${JSON.stringify(quotaKey)};
+    window.__denial = { class: 'plan-inactive', err: 'you have no active step plan subscription', since: 1764064489 };
+    window.__origFetchDenial = window.fetch;
+    window.fetch = (url, ...rest) => {
+      if (!String(url).endsWith('/api/status')) return window.__origFetchDenial(url, ...rest);
+      return window.__origFetchDenial('/api/status', ...rest).then((r) => r.json()).then((body) => {
+        if (!window.__denial) {
+          return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        body.quota = body.quota || {};
+        body.quota[window.__quotaKey] = Object.assign({}, body.quota[window.__quotaKey], { denial: window.__denial });
+        body.credential_alerts = [Object.assign({ key: window.__quotaKey }, window.__denial)];
+        // 同一条拒绝的 schedule 投影：链节点的 credential 徽标（后端与横幅同源）。
+        const m1 = body.schedule && body.schedule.models && body.schedule.models.m1;
+        if (m1 && m1.ordered && m1.ordered[0]) m1.ordered[0].credential = window.__denial.class;
+        return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+    };
+  })()`);
+  try {
+    // Status tab 自己的 /api/status tick 立即驱动横幅。
+    await ctx.ev(`document.querySelector('[data-tab="status"]').click()`);
+    await ctx.waitFor('banner names the plan-level fix', () => ctx.ev(
+      `(() => {
+        const el = document.getElementById('cred-banner');
+        if (!el || el.hidden) return false;
+        const text = el.textContent;
+        return text.includes('has no active plan subscription')
+          && text.includes('renew the plan or remove this account');
+      })()`));
+    const bannerTitle = await ctx.ev(`document.querySelector('.cred-banner-line').getAttribute('title')`);
+    assert.ok(String(bannerTitle).includes('no active step plan subscription'), '上游证据必须进横幅 title 供排查');
+    // 三处同源：Status 页 Schedule 链节点上的凭据徽标说的是同一件事（只解释不重排，
+    // 节点仍在链首位）。
+    await ctx.waitFor('schedule node carries the no-active-plan badge', () => ctx.ev(
+      `(document.querySelector('#tab-status .route-cred')?.innerText || '') === 'no active plan'`));
+
+    await ctx.ev(`document.querySelector('[data-tab="accounts"]').click()`);
+    await ctx.waitFor('accounts active', () => ctx.ev(
+      `document.getElementById('tab-accounts').classList.contains('active')`));
+    await ctx.waitFor('provider nav', () => ctx.ev(
+      `[...document.querySelectorAll('.acct-nav-item')].some(b => b.innerText.includes('dummy'))`));
+    await ctx.ev(`[...document.querySelectorAll('.acct-nav-item')]
+      .find(b => b.innerText.includes('dummy')).click()`);
+    // Usage 区块默认展开（凭据问题必须可见），摘要提示与正文首行都说出状态。
+    await ctx.waitFor('usage section says No active plan', () => ctx.ev(
+      `(() => {
+        const sec = document.querySelector('.acct-main details[data-sec="usage"]');
+        return !!sec && sec.open && sec.innerText.includes('No active plan');
+      })()`));
+    const hint = await ctx.ev(`document.querySelector('.acct-main details[data-sec="usage"] .acct-hint').innerText`);
+    assert.equal(hint, 'No active plan', 'Usage 摘要提示必须是拒绝类别文案');
+    const lineTitle = await ctx.ev(
+      `document.querySelector('.acct-main details[data-sec="usage"] .acct-section-body .acct-err').getAttribute('title')`);
+    assert.ok(String(lineTitle).includes('no active step plan subscription'), 'Usage 正文的拒绝行必须带上游证据 title');
+    assert.deepEqual(await ctx.pageErrors(), [], '订阅失效提示路径不得有 JS 错误');
+
+    // 恢复：账号下一次 2xx 清掉记录 → 横幅移除。
+    await ctx.ev(`window.__denial = null`);
+    await ctx.ev(`document.querySelector('[data-tab="status"]').click()`);
+    await ctx.waitFor('banner removed after the account recovered', () => ctx.ev(
+      `document.getElementById('cred-banner').hidden === true`));
+  } finally {
+    await ctx.ev(`(() => {
+      window.fetch = window.__origFetchDenial; delete window.__origFetchDenial; delete window.__denial; delete window.__quotaKey;
+    })()`);
+    // 桩已卸：真实 /api/status 再刷一次，把界面钉回健康态给后续用例。
+    await ctx.ev(`document.querySelector('[data-tab="requests"]').click()`);
+    await ctx.ev(`document.querySelector('[data-tab="status"]').click()`);
+    await ctx.waitFor('banner back to healthy truth', () => ctx.ev(
+      `document.getElementById('cred-banner').hidden === true`));
+  }
+});

@@ -302,7 +302,7 @@ catalog/config。
 panel/judge 在此共享 plan 上执行非流式、tool-free 分支，并应用与普通目标一致的
 half-open、401 refresh、paramBlock 预应用及即时学习重试、429/5xx、
 model-denied/404、empty-200 模型锁、metrics、usage、live event 和 request log
-策略。**403 归因不在其中**：panel/judge 腿不走普通执行器的账号停用/网关拒绝分类，
+策略。**403/订阅失效归因不在其中**：panel/judge 腿不走普通执行器的账号停用/订阅失效/网关拒绝分类，
 非 model-denied 的 403 按客户端类错误处理（leg 失败、不记熔断、记一次 failure
 metric）——普通执行器的处置见 `docs/architecture/routing-and-failure.md` 的「普通转发的
 403 归因」。leg 的发送循环（URL 构建、provider rewrite、paramBlock 预应用、POST、

@@ -44,7 +44,7 @@ import {
   parseRequestTimeValue, requestTimeValue, requestTimeBounds, requestTimePickerHTML,
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
   detailFetchState, CLIENT_GONE_STATUS, notLoggedHint, quotaErrKind, accountUsageState,
-  accountRemainingLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta,
+  accountRemainingLabel, accountDenialLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta,
   scheduleCredentialLabel, syncErrLabel,
   keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML,
@@ -9393,6 +9393,17 @@ function renderAccountUsage(p, snap) {
     const asOf = snap.AsOf ? ` · numbers as of ${esc(fmtReset(snap.AsOf))}` : '';
     syncBanner = `<div class="acct-empty acct-err">${esc(label)}${relogin}${asOf}</div>`;
   }
+  // A forwarding-path credential denial (snap.denial — the account's key was
+  // rejected, its plan subscription lapsed, or the upstream disabled it)
+  // heads the section: the quota poll of a console-only provider succeeds
+  // regardless, so without this line a dead account shows its console link
+  // and stale windows as if it were fine. accountDenialLabel (pure.js) owns
+  // when the line prints (it defers to a credential-class sync banner); the
+  // upstream evidence rides the title.
+  const denialLabel = accountDenialLabel(snap);
+  const denialBanner = denialLabel
+    ? `<div class="acct-empty acct-err"${snap.denial.err ? ` title="${esc(snap.denial.err)}"` : ''}>${esc(denialLabel)}</div>`
+    : '';
   for (const w of windows) {
     const p = (w.RemainingPct != null && w.RemainingPct >= 0) ? w.RemainingPct : null;
     const fillCls = p == null ? '' : (p > 0.3 ? 'ok' : (p > 0.1 ? 'warn' : 'err'));
@@ -9420,7 +9431,7 @@ function renderAccountUsage(p, snap) {
     }
   }
   if (!bars) bars = `<div class="acct-empty">no quota windows</div>`;
-  return syncBanner + head + notes + bars;
+  return denialBanner + syncBanner + head + notes + bars;
 }
 
 // renderAccountTokens renders the per-account token table (sorted by model)

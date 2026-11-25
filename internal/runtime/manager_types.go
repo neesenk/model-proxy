@@ -231,6 +231,18 @@ type QualityStatus struct {
 	TTFTMilliseconds int64
 }
 
+// CredentialDenial is one account's credential failure proven on the
+// forwarding path (an upstream 401 after refresh, an account-disablement
+// code, a lapsed plan subscription). Class uses the credential vocabulary the
+// quota-sync errors are classified into ("auth", "account-disabled",
+// "plan-inactive"); Err is the bounded upstream evidence; Since is the first
+// observation of the current dead episode. See Manager.RecordCredentialDenial.
+type CredentialDenial struct {
+	Class string
+	Err   string
+	Since time.Time
+}
+
 // DashboardSnapshot is an atomic, detached view for status presentation.
 type DashboardSnapshot struct {
 	Generation uint64
@@ -240,6 +252,9 @@ type DashboardSnapshot struct {
 	Pins       map[string]Pin
 	Quotas     map[string]*provider.QuotaSnapshot
 	Quality    map[string]QualityStatus
+	// CredentialDenials carries the forwarding-path credential failures (see
+	// CredentialDenial) keyed by runtime provider key.
+	CredentialDenials map[string]CredentialDenial
 
 	capturedAt time.Time
 	spread     map[string]uint64

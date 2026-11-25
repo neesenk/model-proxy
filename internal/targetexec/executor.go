@@ -46,6 +46,11 @@ type State interface {
 	RecordFailure(string)
 	RecordModelFailure(configdomain.RouteTarget)
 	RecordRateLimit(string, RateLimitDecision)
+	// RecordCredentialDenied reports an account attribution the executor just
+	// proved (CredentialDenialKind) with the upstream evidence — the record
+	// the operator surfaces read. Called exactly where failure(target, false)
+	// accounts an auth-class failure; never for any other failure class.
+	RecordCredentialDenied(provider string, kind CredentialDenialKind, evidence []byte)
 	LearnParamBlock(configdomain.RouteTarget, string) bool
 	ApplyParamBlock(configdomain.RouteTarget, []byte) []byte
 	NoteWireResponsesMiss(configdomain.RouteTarget)
@@ -220,7 +225,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			// an empty response body and the request log shows a bare 401.
 			peek := peekResponseBody(response, 8<<10)
 			response.Body.Close()
-			executor.failure(target, false)
+			executor.credentialDenied(target, DenialAuth, peek)
 			return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: peek}
 		}
 		if response.StatusCode == http.StatusTooManyRequests {
@@ -282,6 +287,22 @@ func (executor Executor) Execute(attempt Attempt) Result {
 					return Result{Outcome: OutcomeRateLimited}
 				}
 			}
+			// A lapsed plan subscription denies the ACCOUNT — every model,
+			// every request shape — yet step-plan spells it as a plain 400
+			// with a generic error type, so neither a quota marker nor an
+			// account code vouches for it (2026-11-25: 11 of these were
+			// committed as terminal 400s while both sibling accounts served
+			// the same route). Same accounting as an exhausted 401: fail over
+			// — the last candidate included, the account error is never
+			// passed through — tick the circuit, skip the failure metric, and
+			// leave a credential denial for the operator surfaces.
+			if accountUnsubscribed(peek) {
+				response.Body.Close()
+				logx.Infof("[proto=%s provider=%s] %d body proves the account has no active plan subscription — failing over (auth circuit)",
+					plan.ClientProtocol(), target.Provider, response.StatusCode)
+				executor.credentialDenied(target, DenialPlanInactive, peek)
+				return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: peek}
+			}
 			if response.StatusCode == http.StatusRequestEntityTooLarge && !retriedImages {
 				if smaller, changed := protocol.ShrinkImages(body, 1<<20, 2048); changed {
 					response.Body.Close()
@@ -316,7 +337,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			} else if response.StatusCode == http.StatusForbidden {
 				if accountDisabled(peek) {
 					response.Body.Close()
-					executor.failure(target, false) // Auth failure, like an exhausted 401.
+					executor.credentialDenied(target, DenialAccountDisabled, peek) // Auth failure, like an exhausted 401.
 					return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: []byte("upstream denied the account")}
 				}
 				if !policy.LastTarget && gatewayRefused(response.Header, peek) {
@@ -934,6 +955,18 @@ func (executor Executor) failure(target configdomain.RouteTarget, observeFailure
 		executor.Effects.Failure(target)
 	}
 	executor.failover(target)
+}
+
+// credentialDenied is failure(target, false) for the account attributions:
+// the auth-class accounting (circuit tick, failover effect, no failure
+// metric) plus the credential denial the operator surfaces read — a dead
+// account must not hide behind its siblings carrying the traffic. evidence is
+// the upstream's own error body (already bounded by the caller's peek).
+func (executor Executor) credentialDenied(target configdomain.RouteTarget, kind CredentialDenialKind, evidence []byte) {
+	if executor.State != nil {
+		executor.State.RecordCredentialDenied(target.Provider, kind, evidence)
+	}
+	executor.failure(target, false)
 }
 
 // fakeAPIReply records the provider-level failure for a 2xx-that-was-HTML:

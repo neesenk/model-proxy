@@ -72,6 +72,20 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
   Re-login 按钮）；组合根把它经 `runtime.CredentialErrClass` 分类
   （session-expired / not-logged-in / auth；网络/5xx 不是凭据问题，不徽标）后作为
   Schedule 链节点的 `credential` 徽标——**只解释不重排**，排名仍按 last-known-good。
+- **转发路径的凭据拒绝（Manager 侧 denials）**：轮询只看得到 `Quota()` 的成败，
+  控制台型实现（step-plan / qwen-plan / mimo / static）零 HTTP、永远成功，所以订阅
+  失效或 key 被吊销不会留下 syncErrs。executor 在账号归因处（刷新后仍 401、账号停用
+  码、订阅失效 message，见 `docs/architecture/routing-and-failure.md`）经
+  `State.RecordCredentialDenied` 上报，Manager 以 `RecordCredentialDenial(name, class,
+  err, generation)` 记入 `denials`（每账号一条 `{Class, Err, Since}`；class 即
+  凭据词表 auth / account-disabled / plan-inactive，Err 取上游证据首行、至多 200
+  字符，Since 是本轮失效的首次观测——重复上报刷新类别与证据但不移动 Since）。生命周期
+  与 health 刻意不同：**该账号下一次 `RecordSuccess` 才清除**；`ReplaceGeneration`
+  只按 live key 集剪枝（账号仍配置则跨 reload 保留——凭据不会因为别的东西 reload 了
+  而恢复）；unfreeze（`ResetHealth`）不清（它是"现在重试"，不是恢复）；内存态、
+  不持久化。`Dashboard` 以 `CredentialDenials` 脱离式副本带出，admin 投影合并进
+  `/api/status` 的 `credential_alerts` 与 `quota[name].denial`，schedule 节点徽标同源
+  （轮询的凭据类记录优先，字段契约见 `docs/web-api.md`）。
 - **失败文本即证据**：用量端点答 200 但 body 不是该 provider 的格式时（kimi-code
   `/usages`、opencode-go `/usage`、zhipu/zcode 配额），错误串为
   `not <provider> <endpoint> format: <片段>`——`provider.quotaFormatSnapshot` 取响应 body
@@ -451,7 +465,7 @@ Disable/Enable）是 (provider, model) 粒度的 operator 覆盖，状态归
 
 ## Unfreeze
 
-`unfreeze [provider]` / `POST /api/health/reset` 清除熔断、限频和模型锁（含 operator 手动冻结标志——删条目即解冻），不清 sticky、pin、paramBlock。
+`unfreeze [provider]` / `POST /api/health/reset` 清除熔断、限频和模型锁（含 operator 手动冻结标志——删条目即解冻），不清 sticky、pin、paramBlock，也不清转发路径的凭据拒绝记录（unfreeze 是"现在重试"，凭据并没有恢复——只有该账号的下一次成功能清除它）。
 
 空 body 清全部；池化父名清所有虚拟账号。畸形 JSON 必须返回 400，持久化成功后才能返回 200。
 
@@ -472,6 +486,11 @@ Disable/Enable）是 (provider, model) 粒度的 operator 覆盖，状态归
   安全（`TestSyncErrorsRecordedClearedPruned`）、`CredentialErrClass` 分类
   （`TestCredentialErrClass`）、Schedule `credential` 徽标只解释不重排
   （`TestScheduleStatus_CredentialBadge`）。
+- 转发路径的凭据拒绝：记录与首观测时间、证据有界、重复上报不移动 Since、成功清除、
+  reload 按存活键剪枝、unfreeze 不清、stale generation 与空类别拒绝
+  （`TestRecordCredentialDenial*`、`TestRecordSuccessClearsOnlyItsOwnCredentialDenial`、
+  `TestReplaceGenerationPrunesCredentialDenialsToLiveKeys`、
+  `TestResetHealthKeepsCredentialDenial`）。
 - 多 tracker 同 path、进程退出、测试 TempDir cleanup。
 - lifecycle 关闭时拒绝新任务、等待已接纳任务、drain request logger，重复 Close
   不阻塞。

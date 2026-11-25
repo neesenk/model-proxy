@@ -117,8 +117,8 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   词汇表与 YAML 形式由 `internal/config`（`RouteStrategy*` 常量 +
   `RouteStrategyFor`，含 `#req`/`#ctx` 跨路由 pool 键的后缀剥离）拥有，
   `internal/runtime.decideOrder` 是唯一排序分叉点。
-- timeout、连接错误、5xx、refresh 后仍失败的 401、`error.code` 证明账号停用的 403（见下文
-  「普通转发的 403 归因」）和 2xx HTML 伪成功（见下文）计入 provider 熔断。
+- timeout、连接错误、5xx、refresh 后仍失败的 401、`error.code` 证明账号停用的 403 与
+  message 证明套餐订阅失效的 4xx（见下文「普通转发的 403 归因」）和 2xx HTML 伪成功（见下文）计入 provider 熔断。
 - **连接类快失败先重派再计数**（`targetexec.IsFastFailConnError`）：`unexpected EOF`/`EOF`/`ECONNRESET`/`EPIPE`/`ECONNREFUSED` 这类毫秒级返回的错误先在同一 target 上重派一次（新连接）；重派成功记 success、首跳**不**记失败。对外网络（代理链回收、LB 滚动）一次事件杀 N 条在途连接是常态噪音，重派把它从熔断视野里滤掉；超时不重派（时间预算已烧掉，重试等于翻倍等待），客户端断开照旧 `OutcomeClientGone`。重派不占 401 refresh 的 retry slot。**服务端主动 GOAWAY 同属快失败**：HTTP/2 网关按 stream 预算优雅回收连接（实测 compass 周期性 `LastStreamID≈2000, ErrCode=NO_ERROR`），`http.Client.Do` 层面浮出的 GOAWAY 意味着本 stream id 已过 LastStreamID——服务端从未处理该请求，同 target 重派不是重复请求（net/http 的 goAwayError 未导出，按稳定错误文案识别）；已 commit 的响应 body 中途断流不在此列（commit 后无法重派）。
 - **熔断需要 streak 持续**（`circuit_persist`，默认 6s，`"0"` 关闭）：连续失败除了达到 `circuit_threshold`，还必须**跨至少 persist 窗口**才开熔断——"N 连败"从"N 次尝试碰噪音"升级为"N 次新鲜连接确认不可达持续了一段时间"。persist 只延迟**新请求**不再考虑该 provider 的时刻；单个请求的 failover 照旧立即发生，重派后的失败也照常计数。成功重置 streak 起点与计数。
 - **客户端取消不计熔断**：调用方断开（`exchange.Request.Context()` 取消，
@@ -127,7 +127,15 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   failover 链（不再把剩余 target 在死掉的 ctx 上各烧一次）并以 499 结束
   live 事件。执行器自身 upstream timeout 触发的
   `DeadlineExceeded`（父 ctx 仍存活）照常计入熔断。
-- exhausted 401 的观测只记 failover，不记 `evFailures`；账号停用 403 同此（仅普通执行器）。
+- exhausted 401 的观测只记 failover，不记 `evFailures`；账号停用 403 与订阅失效同此（仅普通执行器）。
+- **凭据拒绝记录**：上述三处账号归因（刷新后仍 401、账号停用 403、订阅失效）在记账之外各留一条
+  凭据拒绝（`targetexec.CredentialDenialKind`：`auth` / `account-disabled` / `plan-inactive`，
+  经 `State.RecordCredentialDenied` 上报）——这是凭据横幅、Accounts 标记与 Schedule 徽标在
+  配额轮询之外的数据源：控制台型 provider（step-plan / qwen-plan / mimo / static）的
+  `Quota()` 永远成功，轮询看不到它们的订阅失效或 key 被吊销。首次命中即记录，该账号下一次
+  2xx 清除，reload 按存活账号剪枝；状态归 `internal/runtime`（`runtime-state.md`），字段契约见
+  `docs/web-api.md`。其它失败类别不记：模型拒绝、配额冷却、网关拒绝、5xx、派发前跳过，以及
+  Auth 层失败（如 aqp mint 失败——由轮询路径报告）。
   熔断状态与请求 metric 是不同语义，普通执行器和 Fusion leg 必须保持一致。
 - 429 进入 provider 限频冷却，不计熔断；**403 且 body 证明配额耗尽**（`targetexec.ParseQuotaDenied`，kimi-code 的 5 小时套餐窗口耗尽即此形态）同路：记限频冷却 + failover，终局按限频类分类。
 - 404、model-denied、空 200 只锁 `(provider, model)`。
@@ -198,7 +206,7 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   入桶前先扣减该份额（钳零）并记入 cache_read——否则同一份额同时落 input
   与 cache_read，曾把 analytics 命中率压到真实值的一半并双重计费
   （与 requestlog.ExtractUsage、fusion.ParseUsage 同一账本）。
-  同 id 多 attempt 行语义：每个未 commit 的跳（429/5xx/认证/传输错误、模型拒绝、403
+  同 id 多 attempt 行语义：每个未 commit 的跳（429/5xx/认证/传输错误、模型拒绝、403/订阅失效
   归因、派发前门禁跳过——最后一跳也在内；client 断开的跳不落）各落一行 `attempt_only`
   请求日志——同 request id、各自递增的 attempt 序号、带该跳的观测状态与证据体（上游错误体
   peek／传输错误文本／403 归因与门禁跳过的固定原因），api_key 照记；`attempt_only` 行被
@@ -209,7 +217,7 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   response headers 是客户端实际收到的字节（限频时含 `retry-after`）；request body 照常
   落盘（全链失败的请求仍可 replay）；attempt 序号排在最后一跳之后；不携带 usage。该请求的
   所有腿折入这一行，所以 `attempt_only` 独立成行的只剩未应答请求（终态写出前 client 断开，
-  live 事件 499）；client 断开与「无目标可试的转换错误 400」不落终态行。运行日志侧，forward 的 failover 警告行同源携带该跳状态：`[proto=… model=…] target N (<provider>/<model>) failed (status <code>); trying next`——传输层错误带 502 且其专属的 `upstream error:` 行就在上方，零字节 2xx、模型拒答与 403 归因腿带观测到的真实状态；**派发前门禁拒绝**（model lock / 熔断开路）打 `skipped (<reason>); trying next`（`OutcomeSkipped`：无网络接触、无熔断计数，attempt 行以 502 + 原因文本落档），serve.log 单文件即可回答"这一跳为何失败/为何没派发"，无需 join 索引。存储语义之外的**查询折叠**：`/api/requests` 列表把已配对腿折入其已提交行的 `failed_hops`（未应答请求的最新一腿独立成行），status/errors 过滤看存活行终态、facets 排除腿——索引与扫描两路逐字段一致（见 `docs/web-api.md`）。
+  live 事件 499）；client 断开与「无目标可试的转换错误 400」不落终态行。运行日志侧，forward 的 failover 警告行同源携带该跳状态：`[proto=… model=…] target N (<provider>/<model>) failed (status <code>); trying next`——传输层错误带 502 且其专属的 `upstream error:` 行就在上方，零字节 2xx、模型拒答与 403/订阅失效归因腿带观测到的真实状态；**派发前门禁拒绝**（model lock / 熔断开路）打 `skipped (<reason>); trying next`（`OutcomeSkipped`：无网络接触、无熔断计数，attempt 行以 502 + 原因文本落档），serve.log 单文件即可回答"这一跳为何失败/为何没派发"，无需 join 索引。存储语义之外的**查询折叠**：`/api/requests` 列表把已配对腿折入其已提交行的 `failed_hops`（未应答请求的最新一腿独立成行），status/errors 过滤看存活行终态、facets 排除腿——索引与扫描两路逐字段一致（见 `docs/web-api.md`）。
 - **绑定粒度 (会话, 路由)**：sticky 键是 `runtime.StickyKey(sessionKey, exposed)`
   ——一个会话在每个路由上持有**独立绑定**（同会话换模型 = 新绑定，不把旧路由选中的
   账号拖带到新路由，与 latchKey/repeat_turn 同粒度；Bifrost「绑定按请求的 model
@@ -338,6 +346,30 @@ attempt 腿的诊断只带状态与页面标题（`upstream answered <status> wi
 `TestForward_Upstream403AttributionE2E`（`internal/app`）与 `TestExecutor403FailureScope`
 （`internal/targetexec`）。
 
+**订阅失效归因**（账号归因的文本形态，同样只接在普通执行器上）：错误 envelope 的
+`error.message` 明说账号没有有效套餐订阅时（step-plan 的 `you have no active step plan
+subscription`，实测形态是 HTTP 400、`type: request_params_invalid`、`content-type:
+text/plain`——通用类型、无 `error.code`，配额冷却与账号停用两条判据都接不住），与账号停用
+同一路径：记一次认证失败并 failover、不记 failure metric、**末候选也不例外**（502 终态，
+单目标路由与 pin/force-provider 同此），腿带观测到的状态码与上游错误体原文。判据边界：
+
+- **只认 envelope 自身的 message**：同一句话出现在 body 的其它位置（如回显的请求内容）不算
+  ——那是对请求的陈述，不是对账号的；
+- **账号事实先于模型锁**：判定排在 404/模型拒绝之前，不落 `(provider, model)` 锁；同一体内
+  命中配额措辞时配额冷却（402/403 + quota marker）仍然优先；
+- **只看措辞不看状态码**，但仅限执行器本来就 peek 错误体的状态（400/402/403/404/422，或
+  带 context retry 时任意 4xx）；
+- 相邻语义不归因：套餐档位不含某个模型（`your active step plan subscription does not include
+  model …`）是对模型的陈述，按普通 4xx 提交。
+
+订阅失效没有可预期的恢复时刻，所以走熔断 + 半开探针（订阅恢复后至多一个 `circuit_cooldown`
+自动回归）而不是 `quota_cooldown`。触发时另打一行 Info（`body proves the account has no
+active plan subscription — failing over (auth circuit)`），serve.log 单文件可答。Fusion
+panel/judge 腿与 guard 判定 seam 不接入（同 403 归因）。锁定测试：
+`TestExecutorLapsedPlanSubscriptionFailsOver`、
+`TestExecutorQuotaProofOutranksSubscriptionAttribution`（`internal/targetexec`）与
+`TestForward_LapsedPlanSubscriptionFailsOverE2E`（`internal/app`）。
+
 ## 内容性拒绝不熔断
 
 5xx body 证明是**内容性拒绝**（厂商安全过滤器/response protection/内容审核措辞，
@@ -411,6 +443,16 @@ failover），带证据的 403/400 另按配额、模型拒绝或账号归因（
 - 上游 403 归因（`internal/app/forward_403_attribution_test.go`、`internal/targetexec`
   的 `TestExecutor403FailureScope`）：账号停用码换候选并记熔断、末候选终态 502；网关拒绝
   换候选且零记账、末候选保留原始 403；通用 HTML 403 原样 commit。
+- 订阅失效归因（`internal/targetexec` 的 `TestExecutorLapsedPlanSubscriptionFailsOver` 与
+  `TestExecutorQuotaProofOutranksSubscriptionAttribution`、`internal/app` 的
+  `TestForward_LapsedPlanSubscriptionFailsOverE2E`）：message 证明无有效订阅 → 认证失败记账 +
+  failover、末候选终态 502、腿带上游错误体；轮转池里无请求吸收该 400；套餐档位不含该模型、
+  请求内容回显措辞、未 peek 的状态码、普通 400 均不归因；配额佐证优先于订阅失效。
+- 凭据拒绝记录（`internal/targetexec` 的 `TestExecutorRecordsCredentialDenialOnlyForAccountAttributions`、
+  `internal/admin` 的 `TestDashboardForwardCredentialDenials`、`internal/app` 的
+  `TestForward_CredentialDenialSurfacesInStatusE2E`）：三处账号归因各上报恰好一条、其它失败
+  类别静默；三类经真实 admin 端口出现在 `credential_alerts` / `quota[name].denial` / Schedule
+  徽标并在账号恢复后一起消失；轮询的横幅级记录优先、非凭据类同步失败不遮蔽拒绝。
 - 全链失败终态行与每跳落腿（`internal/forward/terminal_row_test.go`、`internal/app` 的
   `TestForward_AllTargetsFailedFoldsLegsIntoTerminalRow`）：终态行字段逐一断言（哨兵
   provider、客户端实际字节、请求体、attempt 序号、429 的 `Retry-After`）、最后一跳落腿、

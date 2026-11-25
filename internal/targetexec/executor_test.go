@@ -68,6 +68,15 @@ type executorState struct {
 	failures, modelFailures, releases, success, rateLimits, learned int
 	wireMisses                                                      int
 	rateLimitDecision                                               RateLimitDecision
+	denials                                                         []recordedDenial
+}
+
+// recordedDenial is one credential denial the executor reported to the state
+// port (State.RecordCredentialDenied).
+type recordedDenial struct {
+	provider string
+	kind     CredentialDenialKind
+	evidence string
 }
 
 func (*executorState) ModelLocked(configdomain.RouteTarget, time.Time) bool { return false }
@@ -76,6 +85,9 @@ func (s *executorState) ReleaseHalfOpenSlot(string)                         { s.
 func (s *executorState) RecordSuccess(configdomain.RouteTarget)             { s.success++ }
 func (s *executorState) RecordFailure(string)                               { s.failures++ }
 func (s *executorState) RecordModelFailure(configdomain.RouteTarget)        { s.modelFailures++ }
+func (s *executorState) RecordCredentialDenied(provider string, kind CredentialDenialKind, evidence []byte) {
+	s.denials = append(s.denials, recordedDenial{provider: provider, kind: kind, evidence: string(evidence)})
+}
 func (s *executorState) RecordRateLimit(_ string, decision RateLimitDecision) {
 	s.rateLimits++
 	s.rateLimitDecision = decision
@@ -415,6 +427,181 @@ func TestExecutor403FailureScope(t *testing.T) {
 			}
 			if result.Committed || result.Outcome != OutcomeFailedHard || result.AttemptStatus != 403 || string(result.AttemptBody) != tc.evidence || effects.failovers != 1 || effects.commits != 0 || writer.Body.Len() != 0 || state.releases != 1-tc.accountFailures {
 				t.Fatalf("result=%+v effects=%+v releases=%d", result, effects, state.releases)
+			}
+		})
+	}
+}
+
+// TestExecutorLapsedPlanSubscriptionFailsOver pins the 2026-11-25 step-plan
+// incident. An account whose Step Plan subscription had lapsed answered every
+// request shape with HTTP 400
+// {"error":{"message":"you have no active step plan subscription",
+// "type":"request_params_invalid"}} — a generic error type, the proof only in
+// the message. No attribution matched (the body-proven quota path needs a
+// quota marker, the account-disablement path needs error.code), so the 400
+// fell through to the ordinary-4xx commit: 11 terminal 400s reached the
+// client while both sibling accounts served the same route. A lapsed
+// subscription is an ACCOUNT fact: one circuit tick + failover with no failure
+// metric, like an exhausted 401 — the last candidate included, the account
+// error is never passed through, and the upstream body rides along as the
+// leg's evidence. The phrase is the evidence, not the status. A plan that
+// merely excludes one model is the adjacent non-match: it stays an ordinary
+// 4xx commit with zero accounting.
+func TestExecutorLapsedPlanSubscriptionFailsOver(t *testing.T) {
+	const lapsed = `{"error":{"message":"you have no active step plan subscription","type":"request_params_invalid"}}`
+	cases := []struct {
+		name, body string
+		status     int
+		last       bool
+		commit     bool
+	}{
+		{name: "lapsed subscription", body: lapsed, status: http.StatusBadRequest},
+		{name: "last candidate", body: lapsed, status: http.StatusBadRequest, last: true},
+		{name: "case-insensitive", body: `{"error":{"message":"You have no active Step Plan subscription","type":"request_params_invalid"}}`, status: http.StatusBadRequest},
+		{name: "same phrase on 403", body: lapsed, status: http.StatusForbidden},
+		{
+			// An account fact outranks the model lock: a body carrying both
+			// benches the account, never just the model.
+			name:   "account fact outranks the model lock",
+			body:   `{"error":{"message":"model not found: you have no active step plan subscription"}}`,
+			status: http.StatusBadRequest,
+		},
+		{
+			name:   "plan tier excludes the model",
+			body:   `{"error":{"message":"your active step plan subscription does not include model step-5-preview","type":"request_params_invalid"}}`,
+			status: http.StatusBadRequest,
+			commit: true,
+		},
+		{name: "ordinary bad request", body: `{"error":{"message":"messages: invalid role","type":"request_params_invalid"}}`, status: http.StatusBadRequest, commit: true},
+		{
+			// An error body echoing request content is not a statement
+			// about the account: only the envelope's own message counts.
+			name:   "request content echoing the phrase",
+			body:   `{"error":{"code":"request_params_invalid","message":"invalid user field"},"request":{"user":"no active step plan subscription"}}`,
+			status: http.StatusBadRequest,
+			commit: true,
+		},
+		{
+			// The phrase is the evidence, but only a body the executor reads
+			// for evidence can carry it: statuses it never peeks stay an
+			// ordinary commit.
+			name:   "phrase on a status whose body is not peeked",
+			body:   lapsed,
+			status: http.StatusMethodNotAllowed,
+			commit: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &executorTestProvider{}
+			attempt, writer := testAttempt(provider, "{}", Policy{LastTarget: tc.last})
+			// The wire shape observed in the request log: a JSON error body
+			// served as text/plain.
+			resp := testResponse(tc.status, tc.body)
+			resp.Header.Set("Content-Type", "text/plain; charset=utf-8")
+			state, effects := &executorState{}, &executorEffects{}
+			result := (Executor{Client: &sequenceDoer{responses: []*http.Response{resp}}, State: state, Effects: effects}).Execute(attempt)
+			accountFailures := 1
+			if tc.commit {
+				accountFailures = 0
+			}
+			if state.failures != accountFailures || state.modelFailures != 0 || state.rateLimits != 0 || state.learned != 0 ||
+				effects.failures != 0 || effects.rateLimits != 0 || provider.refreshes != 0 {
+				t.Fatalf("state=%+v effects=%+v refreshes=%d", state, effects, provider.refreshes)
+			}
+			if tc.commit {
+				if !result.Committed || writer.Code != tc.status || writer.Body.String() != tc.body || effects.commits != 1 || effects.failovers != 0 || state.releases != 1 {
+					t.Fatalf("commit=%v status=%d body=%q effects=%+v releases=%d", result.Committed, writer.Code, writer.Body.String(), effects, state.releases)
+				}
+				return
+			}
+			if result.Committed || result.Outcome != OutcomeFailedHard || result.AttemptStatus != tc.status || string(result.AttemptBody) != tc.body ||
+				effects.failovers != 1 || effects.commits != 0 || writer.Body.Len() != 0 || state.releases != 0 {
+				t.Fatalf("result=%+v effects=%+v releases=%d", result, effects, state.releases)
+			}
+		})
+	}
+}
+
+// TestExecutorQuotaProofOutranksSubscriptionAttribution: a denial body that
+// carries both a quota marker and the lapsed-subscription statement keeps the
+// quota verdict — a rate-limit cooldown with a horizon, not a circuit tick.
+// The subscription attribution sits behind the body-proven quota path.
+func TestExecutorQuotaProofOutranksSubscriptionAttribution(t *testing.T) {
+	provider := &executorTestProvider{}
+	attempt, writer := testAttempt(provider, "{}", Policy{})
+	body := `{"error":{"code":"quota_exceeded","message":"quota exceeded: you have no active step plan subscription"}}`
+	state, effects := &executorState{}, &executorEffects{}
+	result := (Executor{Client: &sequenceDoer{responses: []*http.Response{testResponse(http.StatusPaymentRequired, body)}}, State: state, Effects: effects}).Execute(attempt)
+	if result.Committed || result.Outcome != OutcomeRateLimited || writer.Body.Len() != 0 {
+		t.Fatalf("result=%+v, want the rate-limited outcome", result)
+	}
+	if state.rateLimits != 1 || state.rateLimitDecision.Kind != RateLimitQuota || state.failures != 0 || state.modelFailures != 0 {
+		t.Errorf("state=%+v, want one quota cooldown and no circuit tick", state)
+	}
+	if effects.rateLimits != 1 || effects.failovers != 1 || effects.failures != 0 || effects.commits != 0 {
+		t.Errorf("effects=%+v", effects)
+	}
+}
+
+// TestExecutorRecordsCredentialDenialOnlyForAccountAttributions: the three
+// account attributions (401 after refresh, account-disablement code, lapsed
+// plan subscription) each report ONE credential denial to the state port —
+// the record the operator surfaces (credential banner, Accounts pill,
+// schedule badge) read, so a dead account cannot hide behind its siblings
+// carrying the traffic. Every other failure class stays silent: a model
+// denial, a quota cooldown, a gateway refusal, a 5xx or a pre-wire
+// auth-layer failure is not something the operator must fix on the account
+// (auth-layer failures are the quota poll's to report).
+func TestExecutorRecordsCredentialDenialOnlyForAccountAttributions(t *testing.T) {
+	const lapsed = `{"error":{"message":"you have no active step plan subscription","type":"request_params_invalid"}}`
+	const disabled = `{"error":{"code":"account_disabled"}}`
+	cases := []struct {
+		name         string
+		statuses     []int
+		bodies       []string
+		authErr      error
+		noImpl       bool
+		wantKind     CredentialDenialKind
+		wantEvidence string
+	}{
+		{name: "lapsed plan subscription", statuses: []int{400}, bodies: []string{lapsed}, wantKind: DenialPlanInactive, wantEvidence: lapsed},
+		{name: "account disabled", statuses: []int{403}, bodies: []string{disabled}, wantKind: DenialAccountDisabled, wantEvidence: disabled},
+		{name: "401 after refresh", statuses: []int{401, 401}, bodies: []string{"first", "second"}, wantKind: DenialAuth, wantEvidence: "second"},
+		{name: "5xx", statuses: []int{500}, bodies: []string{"boom"}},
+		{name: "model denied", statuses: []int{404}, bodies: []string{"model not found"}},
+		{name: "rate limited", statuses: []int{429}, bodies: []string{"slow down"}},
+		{name: "quota denied", statuses: []int{402}, bodies: []string{`{"error":{"code":"quota_exceeded"}}`}},
+		{name: "gateway refusal", statuses: []int{403}, bodies: []string{"<html><head><title>403 Forbidden</title></head><body><center><h1>403 Forbidden</h1></center><hr><center>nginx</center></body></html>"}},
+		{name: "generic 403", statuses: []int{403}, bodies: []string{`{"error":{"message":"forbidden"}}`}},
+		{name: "auth-layer failure", statuses: []int{200}, bodies: []string{"ok"}, authErr: errors.New("mint aqp key: HTTP 401: Session expired")},
+		{name: "no provider implementation", statuses: []int{200}, bodies: []string{"ok"}, noImpl: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prov := &executorTestProvider{authErr: tc.authErr}
+			var impl provider.Provider = prov
+			if tc.noImpl {
+				impl = nil
+			}
+			attempt, _ := testAttempt(impl, "{}", Policy{})
+			responses := make([]*http.Response, len(tc.statuses))
+			for i := range responses {
+				responses[i] = testResponse(tc.statuses[i], tc.bodies[i])
+			}
+			state, effects := &executorState{}, &executorEffects{}
+			(Executor{Client: &sequenceDoer{responses: responses}, State: state, Effects: effects}).Execute(attempt)
+			if tc.wantKind == "" {
+				if len(state.denials) != 0 {
+					t.Fatalf("denials = %+v, want none", state.denials)
+				}
+				return
+			}
+			if len(state.denials) != 1 {
+				t.Fatalf("denials = %+v, want exactly one", state.denials)
+			}
+			if got := state.denials[0]; got.provider != "upstream" || got.kind != tc.wantKind || got.evidence != tc.wantEvidence {
+				t.Fatalf("denial = %+v, want kind %q with the upstream evidence %q", got, tc.wantKind, tc.wantEvidence)
 			}
 		})
 	}

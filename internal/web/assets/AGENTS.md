@@ -82,7 +82,7 @@
 | 刷新门 | app.js `deferAutoRefresh`+`cancelAutoRefreshHold` | 全部 tick/SSE 渲染 |
 | tab 保留 | app.js `retainTab` | 全部 tab |
 | stale 横幅 | app.js `setRefreshError` + pure.js `staleDataText` | 刷新失败路径 |
-| 全局凭据横幅 | index.html `cred-banner` 容器 + pure.js `credentialBannerHTML`（/api/status `credential_alerts` → 文案；池键经 `providerDisplayName` 折叠、label 未落地回退 8 字符 id；session-expired 给 re-login 命令、auth 提示换 key；原始错误进 title）+ app.js `renderCredBanner`（搭 conn tick 与 Status tab 两个既有 /api/status 轮询，chrome 级豁免交互门），样式 `.cred-banner`/`.cred-banner-line`（topbar 区段，非 sticky——不与 `--sticky-top` 表头几何耦合）；常驻至凭据恢复（后端同步成功自清）、不可关闭 | jstests/pure.test.mjs（文案映射/label 折叠/空态/转义）、autorefresh.test.mjs（chrome 豁免钉）、uie2e（出现/消失路径） |
+| 全局凭据横幅 | index.html `cred-banner` 容器 + pure.js `credentialBannerHTML`（/api/status `credential_alerts` → 文案；池键经 `providerDisplayName` 折叠、label 未落地回退 8 字符 id；session-expired 给 re-login 命令、auth 提示换 key、plan-inactive 提示续费或移除账号、account-disabled 提示更换或移除账号——后两类与控制台型 provider 的 auth 只来自转发路径证实的凭据拒绝〔`quota[name].denial`，其配额轮询永远成功〕；原始错误进 title）+ app.js `renderCredBanner`（搭 conn tick 与 Status tab 两个既有 /api/status 轮询，chrome 级豁免交互门），样式 `.cred-banner`/`.cred-banner-line`（topbar 区段，非 sticky——不与 `--sticky-top` 表头几何耦合）；常驻至凭据恢复（轮询记录同步成功自清、拒绝记录在该账号下一次 2xx 自清）、不可关闭；同一套类别词表供 Accounts 页 Usage 提示消费（pure.js `accountDenialLabel` 决定正文拒绝行何时打印、`accountRemainingLabel`/`accountUsageState` 决定摘要与展开） | jstests/pure.test.mjs（文案映射/label 折叠/空态/转义/拒绝类别与优先级）、autorefresh.test.mjs（chrome 豁免钉）、uie2e（出现/消失路径；订阅失效的横幅文案与 Accounts Usage 提示） |
 | 视图状态 | pure.js `requestsFilterQuery`/`requestsFilterFromQuery`/`mcpSubTabFromHash`/`mcpHash`，app.js `statusHash` | URL hash |
 
 样式漂移门禁（`jstests/registry.test.mjs`，随 `node --test` 与 `go test ./internal/web` 跑）：

@@ -31,13 +31,27 @@ type Metrics struct {
 	TTFTSum        uint64 `json:"ttft_ms_sum"`
 }
 
-// CredentialAlert is one quota key whose most recent sync failed with a
-// credential error severe enough to raise the global Web banner — the
-// session-expired/auth subset of CredentialErrClass (see
+// CredentialAlert is one runtime provider key with a credential failure
+// severe enough to raise the global Web banner. Two sources, one entry per
+// key: a failed quota sync whose error class is session-expired/auth (see
 // runtime.CredentialAlertClass; not-logged-in and non-credential failures are
-// excluded). Sorted by Key at the projection boundary.
+// excluded), or a credential denial the forwarding path proved for the
+// account (runtime.CredentialDenial: an upstream 401 after refresh, an
+// account-disablement code, a lapsed plan subscription — class
+// auth/account-disabled/plan-inactive). A banner-class sync record outranks
+// the denial for the same key. Sorted by Key at the projection boundary.
 type CredentialAlert struct {
 	Key   string `json:"key"`
+	Class string `json:"class"`
+	Err   string `json:"err"`
+	Since int64  `json:"since"`
+}
+
+// CredentialDenial is the forwarding-path credential failure of one account
+// as projected onto its /api/status quota entry (`quota[name].denial` — the
+// Accounts pill's source). Same class vocabulary as CredentialAlert; Since is
+// the unix time of the dead episode's first observation.
+type CredentialDenial struct {
 	Class string `json:"class"`
 	Err   string `json:"err"`
 	Since int64  `json:"since"`
@@ -55,7 +69,8 @@ type Dashboard struct {
 	Cache      map[string]any
 	Warnings   []string
 	// CredentialAlerts surfaces banner-class credential failures (nil/empty
-	// when the last sync succeeded for every key — recovery clears it).
+	// when every key recovered: a successful sync clears the poll's record,
+	// the account's next 2xx clears a forwarding-path denial).
 	CredentialAlerts []CredentialAlert
 	// CredentialStore names the resolved credstore backend ("keychain" or
 	// "file") so the Status surface shows where credentials live at rest.

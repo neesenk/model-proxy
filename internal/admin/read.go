@@ -31,12 +31,29 @@ import (
 // quotaSnapshotWithSyncErr serializes one quota entry whose most recent sync
 // FAILED while a last-known-good snapshot is being kept: the plain snapshot
 // fields (embedded, unchanged shape) plus SyncErr/SyncErrAt describing the
-// failure. Defined at the projection boundary so the provider-layer
-// QuotaSnapshot type stays free of tracker-owned observational fields.
+// failure, and — when the forwarding path also proved the account's
+// credential dead — that denial. Defined at the projection boundary so the
+// provider-layer QuotaSnapshot type stays free of tracker-owned observational
+// fields.
 type quotaSnapshotWithSyncErr struct {
 	provider.QuotaSnapshot
 	SyncErr   string
 	SyncErrAt time.Time
+	Denial    *appapi.CredentialDenial `json:"denial,omitempty"`
+}
+
+// quotaSnapshotWithDenial is the sibling for an account whose latest sync
+// SUCCEEDED but whose credential the forwarding path proved dead — the
+// console-only providers (step-plan, qwen-plan, mimo, static), whose poll
+// never fails: the plain snapshot fields plus the denial, and no
+// SyncErr/SyncErrAt, because the sync did not fail.
+type quotaSnapshotWithDenial struct {
+	provider.QuotaSnapshot
+	Denial appapi.CredentialDenial `json:"denial"`
+}
+
+func denialView(denial runtimestate.CredentialDenial) appapi.CredentialDenial {
+	return appapi.CredentialDenial{Class: denial.Class, Err: denial.Err, Since: denial.Since.Unix()}
 }
 
 // Dashboard projects the captured generation-consistent state into the
@@ -96,12 +113,23 @@ func (s *Service) Dashboard(now time.Time) appapi.Dashboard {
 				// UI can badge an expired credential next to the aging numbers
 				// instead of rendering them as fresh. Keys without a recorded
 				// failure serialize exactly as before.
+				//
+				// A forwarding-path credential denial (runtime.CredentialDenials)
+				// attaches alongside: it is the only credential signal for
+				// providers whose poll never contacts the upstream, so the
+				// Accounts pill must not need a failed sync to show it.
+				denial, denied := runtimeSnapshot.CredentialDenials[key]
 				if syncErr, failed := state.QuotaSyncErrs[key]; failed && syncErr.Err != "" {
-					quota[key] = quotaSnapshotWithSyncErr{
-						QuotaSnapshot: cp,
-						SyncErr:       syncErr.Err,
-						SyncErrAt:     syncErr.At,
+					projection := quotaSnapshotWithSyncErr{QuotaSnapshot: cp, SyncErr: syncErr.Err, SyncErrAt: syncErr.At}
+					if denied {
+						view := denialView(denial)
+						projection.Denial = &view
 					}
+					quota[key] = projection
+					continue
+				}
+				if denied {
+					quota[key] = quotaSnapshotWithDenial{QuotaSnapshot: cp, Denial: denialView(denial)}
 					continue
 				}
 				quota[key] = cp
@@ -109,11 +137,18 @@ func (s *Service) Dashboard(now time.Time) appapi.Dashboard {
 		}
 	}
 
-	// Banner-class credential failures (session-expired / auth), sorted by
-	// key for a deterministic response. Same QuotaSyncErrs source as the
-	// quota SyncErr projection above — a successful sync clears the record
-	// there, so this slice self-clears on recovery with no extra state.
-	credentialAlerts := make([]appapi.CredentialAlert, 0, len(state.QuotaSyncErrs))
+	// Banner-class credential failures from two sources, one entry per key,
+	// sorted for a deterministic response. (1) The tracker's failed-sync
+	// records, session-expired / auth only: a successful sync clears the
+	// record there, so this source self-clears on recovery with no extra
+	// state. (2) The forwarding-path credential denials the executor proved
+	// for an account — the only source for providers whose Quota() never
+	// contacts the upstream; the account's next 2xx clears those. When both
+	// exist for one key the poll's record wins: it carries the provider's own
+	// error text and already sorted the account into session-expired vs auth.
+	// A non-banner sync failure (network blip) never masks a denial.
+	credentialAlerts := make([]appapi.CredentialAlert, 0, len(state.QuotaSyncErrs)+len(runtimeSnapshot.CredentialDenials))
+	bannerSyncKeys := make(map[string]bool, len(state.QuotaSyncErrs))
 	for key, syncErr := range state.QuotaSyncErrs {
 		if class := runtimestate.CredentialAlertClass(syncErr.Err); class != "" {
 			credentialAlerts = append(credentialAlerts, appapi.CredentialAlert{
@@ -122,7 +157,19 @@ func (s *Service) Dashboard(now time.Time) appapi.Dashboard {
 				Err:   syncErr.Err,
 				Since: syncErr.At.Unix(),
 			})
+			bannerSyncKeys[key] = true
 		}
+	}
+	for key, denial := range runtimeSnapshot.CredentialDenials {
+		if bannerSyncKeys[key] {
+			continue
+		}
+		credentialAlerts = append(credentialAlerts, appapi.CredentialAlert{
+			Key:   key,
+			Class: denial.Class,
+			Err:   denial.Err,
+			Since: denial.Since.Unix(),
+		})
 	}
 	sort.Slice(credentialAlerts, func(i, j int) bool { return credentialAlerts[i].Key < credentialAlerts[j].Key })
 

@@ -17,6 +17,7 @@ type HealthGate interface {
 	RecordFailure(provider string, scheduling configdomain.Scheduling, generation uint64)
 	RecordModelFailure(provider, model string, scheduling configdomain.Scheduling, generation uint64)
 	RecordRateLimit(provider string, until time.Time, kind string, generation uint64)
+	RecordCredentialDenied(provider string, kind CredentialDenialKind, evidence []byte, generation uint64)
 	LearnParamBlock(provider, model, parameter string, generation uint64) bool
 	ApplyParamBlock(provider, model string, body []byte) []byte
 	NoteWireResponsesMiss(provider, model string)
@@ -58,6 +59,10 @@ func (state GateState) RecordModelFailure(target configdomain.RouteTarget) {
 
 func (state GateState) RecordRateLimit(provider string, decision RateLimitDecision) {
 	state.Gate.RecordRateLimit(provider, decision.Until, string(decision.Kind), state.Runtime.Generation)
+}
+
+func (state GateState) RecordCredentialDenied(provider string, kind CredentialDenialKind, evidence []byte) {
+	state.Gate.RecordCredentialDenied(provider, kind, evidence, state.Runtime.Generation)
 }
 
 func (state GateState) LearnParamBlock(target configdomain.RouteTarget, parameter string) bool {

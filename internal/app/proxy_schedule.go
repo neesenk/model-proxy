@@ -270,6 +270,23 @@ func scheduleStatusFromSnapshot(
 		state, ok := RuntimeSnapshot.Providers[name]
 		return !ok || state.Available
 	}
+	// A forwarding-path credential denial badges the node the way a failed
+	// sync's credential class does (see provInfo.Credential): the node still
+	// ranks here, but the badge explains why it keeps failing over — for the
+	// console-only providers it is the ONLY credential signal. The poll's
+	// class wins for a key both sources describe.
+	if len(RuntimeSnapshot.CredentialDenials) > 0 {
+		merged := make(map[string]string, len(credErrs)+len(RuntimeSnapshot.CredentialDenials))
+		for name, class := range credErrs {
+			merged[name] = class
+		}
+		for name, denial := range RuntimeSnapshot.CredentialDenials {
+			if merged[name] == "" {
+				merged[name] = denial.Class
+			}
+		}
+		credErrs = merged
+	}
 
 	type provInfo struct {
 		Provider   string  `json:"provider"`

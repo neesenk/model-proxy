@@ -208,6 +208,9 @@ func (m *Manager) RecordSuccess(name, model string, generation uint64) {
 		state.halfOpenInFlight = false
 	}
 	delete(m.modelLocks, ModelKey{Provider: name, Model: model})
+	// A 2xx through this account is the credential proving itself: the
+	// forwarding-path denial (if any) is over.
+	delete(m.denials, name)
 	m.recordQualityLocked(name, 0, time.Now())
 }
 

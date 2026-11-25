@@ -182,30 +182,36 @@ export function quotaErrKind(snap) {
   return 'error';
 }
 
-// syncErrLabel renders the user-facing label for one quotaErrKind token of a
-// failed sync: credential classes keep specific wording so the Accounts pill /
-// usage banner say what to DO (re-login); anything else is an honest
-// "Sync error" without blaming the credential.
+// syncErrLabel renders the user-facing label for one credential-class token:
+// a quotaErrKind of a failed sync, or the class of a forwarding-path denial
+// (snap.denial / credential_alerts[].class: "plan-inactive",
+// "account-disabled"). Credential classes keep specific wording so the
+// Accounts pill / usage banner say what the state IS; anything else is an
+// honest "Sync error" without blaming the credential.
 export function syncErrLabel(kind) {
   switch (kind) {
     case 'session-expired': return 'Session expired';
     case 'not-logged-in': return 'Not logged in';
     case 'auth': return 'Auth error';
+    case 'plan-inactive': return 'No active plan';
+    case 'account-disabled': return 'Account disabled';
     case 'error': return 'Sync error';
     default: return '';
   }
 }
 
 // credentialBannerHTML renders the global credential banner's lines from
-// /api/status credential_alerts (backend pre-filtered: session-expired and
-// auth only — not-logged-in never banners, non-credential sync failures are
-// noise). Each line folds the pooled key via providerDisplayName (labels may
-// be null: the "name · <8-char id>" fallback) and states the operator fix;
-// the raw error rides the title attribute. Empty string when there is
-// nothing to show — the caller then hides the container. Persistent by
-// design: the backend record clears on the next successful quota sync, so
-// the banner disappears exactly when the credential recovers; it is
-// deliberately not dismissible.
+// /api/status credential_alerts (backend pre-filtered to the banner classes:
+// the poll's session-expired/auth sync errors, and the forwarding-path
+// denials auth/plan-inactive/account-disabled — not-logged-in never banners,
+// non-credential sync failures are noise). Each line folds the pooled key via
+// providerDisplayName (labels may be null: the "name · <8-char id>" fallback)
+// and states the operator fix; the raw error rides the title attribute. Empty
+// string when there is nothing to show — the caller then hides the container.
+// Persistent by design: the backend record clears on the next successful
+// quota sync (poll) or the account's next 2xx (denial), so the banner
+// disappears exactly when the credential recovers; it is deliberately not
+// dismissible.
 export function credentialBannerHTML(alerts, labels) {
   if (!Array.isArray(alerts) || alerts.length === 0) return '';
   return alerts.map((a) => {
@@ -215,6 +221,12 @@ export function credentialBannerHTML(alerts, labels) {
     const title = a.err ? ` title="${esc(a.err)}"` : '';
     if (a.class === 'session-expired') {
       return `<div class="cred-banner-line"${title}>⚠ <strong>${esc(name)}</strong> session expired — run <code>model-proxy login ${esc(parent)}</code> to re-login</div>`;
+    }
+    if (a.class === 'plan-inactive') {
+      return `<div class="cred-banner-line"${title}>⚠ <strong>${esc(name)}</strong> has no active plan subscription — renew the plan or remove this account</div>`;
+    }
+    if (a.class === 'account-disabled') {
+      return `<div class="cred-banner-line"${title}>⚠ <strong>${esc(name)}</strong> account disabled upstream — replace or remove this account</div>`;
     }
     return `<div class="cred-banner-line"${title}>⚠ <strong>${esc(name)}</strong> credential rejected — update this account's key</div>`;
   }).filter(Boolean).join('');
@@ -233,15 +245,18 @@ export function legFailureSummary(body) {
 }
 
 // scheduleCredentialLabel renders the Schedule chain-node badge text for a
-// credential-class sync failure (backend classifies via
-// runtime.CredentialErrClass; values "session-expired" | "not-logged-in" |
-// "auth"). Empty string = no badge — non-credential failures (network, 5xx)
-// are deliberately not badged as credential issues.
+// credential-class failure: the backend classifies a failed sync via
+// runtime.CredentialErrClass ("session-expired" | "not-logged-in" | "auth")
+// and a forwarding-path denial by its kind ("auth" | "account-disabled" |
+// "plan-inactive"). Empty string = no badge — non-credential failures
+// (network, 5xx) are deliberately not badged as credential issues.
 export function scheduleCredentialLabel(c) {
   switch (c) {
     case 'session-expired': return 'session expired';
     case 'not-logged-in': return 'not logged in';
     case 'auth': return 'auth error';
+    case 'account-disabled': return 'account disabled';
+    case 'plan-inactive': return 'no active plan';
     default: return '';
   }
 }
@@ -307,6 +322,21 @@ export function scheduleRouteStickyMeta(info, providerLabel) {
   return meta;
 }
 
+// accountDenialLabel is the label a forwarding-path credential denial
+// (snap.denial: key rejected, plan subscription lapsed, account disabled
+// upstream) deserves on an account's Usage section, or '' when none should
+// print. A credential-class sync error already tells the credential story —
+// with its as-of and Re-login affordance — so the denial defers to it (the
+// poll's record wins, as on the banner); a non-credential sync failure
+// ("Sync error") leaves the denial to be said. An unknown class is still a
+// denial: say so generically rather than hide it.
+export function accountDenialLabel(snap) {
+  if (!snap || !snap.denial || !snap.denial.class) return '';
+  const kind = quotaErrKind(snap);
+  if (kind === 'session-expired' || kind === 'not-logged-in' || kind === 'auth') return '';
+  return syncErrLabel(snap.denial.class) || 'Credential error';
+}
+
 // accountRemainingLabel is the Status-page per-account pill label for one quota
 // snapshot (app.js wraps it in the pill + color class). Pure so the
 // measurement-honesty rule is unit-tested:
@@ -318,6 +348,7 @@ export function scheduleRouteStickyMeta(info, providerLabel) {
 //                                   fresh numbers when the credential syncing it
 //                                   is dead (the pill says why; the Usage
 //                                   section below still shows the stale windows)
+//   - denial (see below)         -> by its class
 //   - ultimate window measured   -> 'X% left'
 //   - Plan label                 -> the plan name
 //   - windows but none ultimate  -> 'Available' (a pay-as-you-go balance IS the
@@ -325,11 +356,18 @@ export function scheduleRouteStickyMeta(info, providerLabel) {
 //   - NO windows at all          -> 'Unmeasured' — never 'Available': with no
 //                                   measurement there is nothing to claim
 //                                   (console-only providers land here)
+//
+// snap.denial (quota[name].denial) is a credential failure the FORWARDING
+// path proved for the account — key rejected, plan subscription lapsed,
+// account disabled upstream. A credential-class sync error keeps its own more
+// specific wording (the poll's record wins, as on the banner); otherwise the
+// denial outranks both a non-credential sync error and any measurement: a
+// console-only snapshot would otherwise read "Unmeasured" and a kept one as
+// healthy numbers while the account cannot serve a single request.
 export function accountRemainingLabel(snap) {
   if (!snap) return 'No data';
-  if (snap.Err || snap.SyncErr) {
-    const label = syncErrLabel(quotaErrKind(snap));
-    return label || 'Error';
+  if (snap.Err || snap.SyncErr || snap.denial) {
+    return accountDenialLabel(snap) || syncErrLabel(quotaErrKind(snap)) || 'Error';
   }
   const windows = snap.Windows || [];
   const ult = windows.find((w) => w.Ultimate);
@@ -351,6 +389,8 @@ export function accountRemainingLabel(snap) {
 //   - snap.SyncErr (Err empty)        -> hint by error kind, open — the kept
 //     last-known-good snapshot is stale, so the section opens on the failure
 //     banner (the stale windows below carry their own as-of)
+//   - snap.denial (forwarding-path credential failure) -> hint by its class,
+//     open (accountRemainingLabel owns the precedence against sync errors)
 //   - empty Windows + Notes, no Err   -> hint 'console only', OPEN — the notes
 //     (the provider's own console/usage URL) are the section's entire content
 //     for console-only providers (mimo/qwen-plan/step-plan/static), so hiding
@@ -361,9 +401,8 @@ export function accountUsageState(snap) {
   if (!snap) {
     return { hint: 'No data', open: false };
   }
-  if (snap.Err || snap.SyncErr) {
-    const hint = syncErrLabel(quotaErrKind(snap)) || 'Error';
-    return { hint, open: true };
+  if (snap.Err || snap.SyncErr || snap.denial) {
+    return { hint: accountRemainingLabel(snap), open: true };
   }
   const windows = snap.Windows || [];
   if (windows.length === 0) {

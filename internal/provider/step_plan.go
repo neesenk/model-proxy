@@ -21,7 +21,11 @@ import (
 // console-only — /v1/accounts reads the SEPARATE pay-as-you-go balance — so
 // Quota() returns BillingUnknown carrying the console URL in Notes (qwen-plan
 // pattern); exhaustion surfaces reactively as 402 quota_exceeded, classified
-// by targetexec's body-proven quota-denied policy → cooldown + failover.
+// by targetexec's body-proven quota-denied policy → cooldown + failover. A
+// lapsed subscription (no active Step Plan) surfaces as 400
+// request_params_invalid "you have no active step plan subscription" — an
+// account fact, classified by targetexec's account attribution → circuit +
+// failover.
 type StepPlanProvider struct {
 	*ApiKeyBase
 	// anthropic_base_url is the primary path for Claude Code — anthropic probe

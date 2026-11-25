@@ -53,6 +53,9 @@ func (g proxyHealthGate) RecordModelFailure(provider, model string, scheduling c
 func (g proxyHealthGate) RecordRateLimit(provider string, until time.Time, kind string, generation uint64) {
 	g.proxy.recordRateLimit(provider, until, runtimestate.ParseRateLimitKind(kind), generation)
 }
+func (g proxyHealthGate) RecordCredentialDenied(provider string, kind targetexec.CredentialDenialKind, evidence []byte, generation uint64) {
+	g.proxy.recordCredentialDenied(provider, string(kind), evidence, generation)
+}
 func (g proxyHealthGate) LearnParamBlock(provider, model, parameter string, generation uint64) bool {
 	return g.proxy.learnParamBlock(provider, model, parameter, generation)
 }
