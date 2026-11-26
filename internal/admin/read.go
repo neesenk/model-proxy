@@ -487,7 +487,10 @@ func (s *Service) Accounts() []appapi.ProviderAccounts {
 	configs := s.ports.ProviderConfigs()
 	out := make([]appapi.ProviderAccounts, 0, len(configs))
 	for name, config := range configs {
-		list, pooled := providerAccountList(name, config)
+		list, pooled, err := providerAccountList(name, config)
+		if err != nil {
+			logx.Warnf("[admin] provider %q account projection unavailable: %v", name, err)
+		}
 		out = append(out, appapi.ProviderAccounts{
 			Name:       name,
 			ProviderID: config.Provider,
@@ -501,16 +504,22 @@ func (s *Service) Accounts() []appapi.ProviderAccounts {
 
 // providerAccountList is the single account-list projection for one
 // provider: GET /api/accounts rows and the DeleteProvider zero-account guard
-// both read it, so "the UI shows 0 accounts" and "the backend allows the
-// delete" can never disagree. The result is never nil.
-func providerAccountList(name string, config configdomain.Provider) ([]appapi.Account, bool) {
+// both read it. A store read failure is returned: DeleteProvider propagates it
+// as a refusal, while Accounts logs it and keeps the provider in the list.
+func providerAccountList(name string, config configdomain.Provider) ([]appapi.Account, bool, error) {
 	list := []appapi.Account{}
-	snapshot, _ := accounts.NewStore(accounts.HomeDir()).LoadSnapshot(name, config.Provider)
+	snapshot, err := accounts.NewStore(accounts.HomeDir()).LoadSnapshot(name, config.Provider)
+	if err != nil {
+		return nil, false, fmt.Errorf("read provider %q account store: %w", name, err)
+	}
 	if (config.Provider == "aqp" || config.Provider == "codex") && snapshot.Source != accounts.SourcePlural {
 		// Pool-less OAuth provider: the legacy single-account file IS the
 		// account list (one card, plain-name key, upstream identity as id).
 		if config.Provider == "aqp" {
-			account, _ := provider.LoadAqpAccount(accounts.AuthFilePath(name, "oauth_auth"))
+			account, err := provider.LoadAqpAccount(accounts.AuthFilePath(name, "oauth_auth"))
+			if err != nil {
+				return nil, false, fmt.Errorf("read provider %q OAuth account: %w", name, err)
+			}
 			if account != nil && account.AccountID != "" {
 				list = append(list, appapi.Account{
 					ID:      account.AccountID,
@@ -520,7 +529,10 @@ func providerAccountList(name string, config configdomain.Provider) ([]appapi.Ac
 				})
 			}
 		} else {
-			account, _ := provider.LoadCodexAccount(accounts.AuthFilePath(name, "oauth_auth"))
+			account, err := provider.LoadCodexAccount(accounts.AuthFilePath(name, "oauth_auth"))
+			if err != nil {
+				return nil, false, fmt.Errorf("read provider %q OAuth account: %w", name, err)
+			}
 			if account != nil && account.AccountID != "" {
 				list = append(list, appapi.Account{
 					ID:    account.AccountID,
@@ -529,7 +541,7 @@ func providerAccountList(name string, config configdomain.Provider) ([]appapi.Ac
 				})
 			}
 		}
-		return list, false
+		return list, false, nil
 	}
 	for _, account := range snapshot.Pool.Accounts {
 		list = append(list, appapi.Account{
@@ -542,7 +554,7 @@ func providerAccountList(name string, config configdomain.Provider) ([]appapi.Ac
 	// A plural pool keys runtime state by virtual id per account (API-key and
 	// OAuth alike); legacy-singular / not-logged-in providers keep the plain
 	// name. The UI derives quota/usage keys from this flag.
-	return list, snapshot.Source == accounts.SourcePlural
+	return list, snapshot.Source == accounts.SourcePlural, nil
 }
 
 // Tokens projects the per-(provider, model) token usage rows. from <= 0 &&

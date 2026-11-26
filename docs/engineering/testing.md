@@ -517,7 +517,7 @@ ok/err/错误率/p50/p95/p99/流式 TTFT/状态码分布，`-max-error-rate` 超
 ## UI 浏览器 e2e（`internal/web/jstests/uie2e.test.mjs` / `uivisual.test.mjs`，按需门禁）
 
 **不进每次修改的默认矩阵**——耗时 UI 自动化是阶段门禁：UI 改动提交前与发版前用
-`MP_UI_E2E=1 node --test internal/web/jstests/uie2e.test.mjs internal/web/jstests/uivisual.test.mjs`
+`MP_UI_E2E=1 node --test --test-concurrency=1 internal/web/jstests/uie2e.test.mjs internal/web/jstests/uivisual.test.mjs`（固定串行，避免两套浏览器 + serve 栈争用资源）
 显式运行。默认（无 `MP_UI_E2E`）两个文件快速 Skip，常规 `node --test jstests/*.test.mjs`
 与 `go test ./internal/web` 不受影响；`MP_UI_E2E=1` 且无浏览器时 Skip，再加
 `MP_REQUIRE_UI_E2E=1` 升级为 FAIL（同 `MP_REQUIRE_NODE` 模式）。

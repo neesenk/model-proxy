@@ -72,7 +72,12 @@ func (s *Service) DeleteProvider(ctx context.Context, name string) (appapi.Provi
 }
 
 func requireNoAccounts(name string, entry configdomain.Provider) error {
-	if list, _ := providerAccountList(name, entry); len(list) > 0 {
+	list, _, err := providerAccountList(name, entry)
+	if err != nil {
+		return appapi.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf(
+			"cannot verify provider %q accounts: %v", name, err))
+	}
+	if len(list) > 0 {
 		return appapi.NewHTTPError(http.StatusConflict, fmt.Sprintf(
 			"provider %q still has %d account(s) — remove them first", name, len(list)))
 	}

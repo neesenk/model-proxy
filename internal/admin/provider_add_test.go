@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/appapi"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/providerstore"
@@ -450,4 +451,65 @@ func TestDeleteProviderRollsBackBothFiles(t *testing.T) {
 			t.Fatal("failed reload must roll the store back to keep the provider")
 		}
 	})
+}
+
+// TestDeleteProviderAccountReadFailure: an unreadable account store must fail
+// closed before either file is written. Treating the error as an empty account
+// list would delete a provider while its credentials still exist on disk.
+func TestDeleteProviderAccountReadFailure(t *testing.T) {
+	up := addProviderUpstream(t)
+	service, spy, cfgPath := newProviderHarnessYAML(t, routedDeleteYAML(up.URL, ""))
+	original := readTestFile(t, cfgPath)
+	poolPath := accounts.NewStore(accounts.HomeDir()).PoolPath("gone")
+	if err := os.MkdirAll(filepath.Dir(poolPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(poolPath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := service.DeleteProvider(context.Background(), "gone")
+	if status := httpErrorStatus(t, err); status != http.StatusInternalServerError {
+		t.Fatalf("account-store read failure status = %d, want 500 (err=%v)", status, err)
+	}
+	if !strings.Contains(err.Error(), "cannot verify provider") {
+		t.Fatalf("error = %q, want the account-verification failure", err)
+	}
+	if _, ok := service.ports.ProviderConfig("gone"); !ok {
+		t.Fatal("failed account read must keep the provider")
+	}
+	if got := readTestFile(t, cfgPath); got != original {
+		t.Fatalf("failed account read changed config.yaml:\n%s", got)
+	}
+	if len(spy.calls) != 0 {
+		t.Fatalf("refused delete must not reload: %v", spy.calls)
+	}
+}
+
+// TestDeleteProviderLegacyOAuthReadFailure covers the other account source:
+// a pool-less OAuth provider's legacy single-account file must fail closed too.
+func TestDeleteProviderLegacyOAuthReadFailure(t *testing.T) {
+	up := addProviderUpstream(t)
+	service, spy, _ := newProviderHarnessYAML(t, `listen: 127.0.0.1:8080
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: `+up.URL+`, models: [glm-4.6]}
+  oauth: {provider_id: aqp, anthropic_base_url: `+up.URL+`}
+`)
+	path := accounts.AuthFilePath("oauth", "oauth_auth")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := service.DeleteProvider(context.Background(), "oauth")
+	if status := httpErrorStatus(t, err); status != http.StatusInternalServerError {
+		t.Fatalf("legacy OAuth read failure status = %d, want 500 (err=%v)", status, err)
+	}
+	if _, ok := service.ports.ProviderConfig("oauth"); !ok {
+		t.Fatal("legacy OAuth read failure must keep the provider")
+	}
+	if len(spy.calls) != 0 {
+		t.Fatalf("refused delete must not reload: %v", spy.calls)
+	}
 }

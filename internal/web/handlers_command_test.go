@@ -673,6 +673,8 @@ func TestCommandAccountContract(t *testing.T) {
 			switch name {
 			case "busy":
 				return appapi.ProviderDeleteResult{}, appapi.NewHTTPError(http.StatusConflict, "still has accounts")
+			case "unreadable":
+				return appapi.ProviderDeleteResult{}, appapi.NewHTTPError(http.StatusInternalServerError, "account store read failed")
 			case "warn":
 				return appapi.ProviderDeleteResult{Warning: "reload deferred"}, nil
 			case "routed":
@@ -689,7 +691,8 @@ func TestCommandAccountContract(t *testing.T) {
 		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/warn", ""), http.StatusOK, map[string]any{"status": "deleted", "name": "warn", "routes_updated": []any{}, "routes_removed": []any{}, "warning": "reload deferred"})
 		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/routed", ""), http.StatusOK, map[string]any{"status": "deleted", "name": "routed", "routes_updated": []any{"r1"}, "routes_removed": []any{"r2"}})
 		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/busy", ""), http.StatusConflict, map[string]any{"error": "still has accounts"})
-		if strings.Join(names, ",") != "acme,warn,routed,busy" {
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/unreadable", ""), http.StatusInternalServerError, map[string]any{"error": "account store read failed"})
+		if strings.Join(names, ",") != "acme,warn,routed,busy,unreadable" {
 			t.Fatalf("DeleteProvider args=%v", names)
 		}
 	})

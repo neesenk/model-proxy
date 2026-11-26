@@ -156,7 +156,7 @@ go test ./internal/web -count=1
 
 jstests glob 包含浏览器 e2e（`uie2e.test.mjs` 行为流 + `uivisual.test.mjs` 视觉检查），
 但它们是**按需门禁**：默认快速 Skip，不进每次修改的全量；UI 改动提交前用
-`MP_UI_E2E=1 node --test internal/web/jstests/uie2e.test.mjs internal/web/jstests/uivisual.test.mjs`
+`MP_UI_E2E=1 node --test --test-concurrency=1 internal/web/jstests/uie2e.test.mjs internal/web/jstests/uivisual.test.mjs`
 运行（无浏览器 Skip，加 `MP_REQUIRE_UI_E2E=1` 升级为 FAIL；契约与实现陷阱见
 `docs/engineering/testing.md`「UI 浏览器 e2e」）。
 
