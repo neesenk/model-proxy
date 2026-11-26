@@ -2764,7 +2764,7 @@ async function toggleRequestDetail(tr) {
   } catch (e) {
     if (!row.isConnected) return;
     row.firstElementChild.innerHTML = (e && e.status === 404)
-      ? '<div class="msg hint">not logged — the request did not commit, so there is no request-log record</div>'
+      ? '<div class="msg hint">not logged — the request left the online request log (never committed, pruned by retention, or archived offline past the hot window)</div>'
       : `<div class="msg err">${esc(e.message)}</div>`;
     reqDetailChanged();
     return;
@@ -4708,9 +4708,11 @@ function applyLiveEvent(e) {
     row.cacheRead = e.cache_read || 0;
     row.cacheCreation = e.cache_creation || 0;
     row.inFlight = false;
-    // 终局不预置取详情状态（包括 client-gone 的 499）：499 不写终态行，但断开前
-    // 已有失败跳时该 id 留有 attempt_only 腿行——弹层照常取 /api/requests/<id>，
-    // 命中就展示；确实无记录时由 404 回落成 not-logged（detailFetchState）。
+    // No detail state is preset for ANY terminal, client-gone 499 included: a
+    // 499 writes no terminal row, but failed hops before the disconnect have
+    // logged attempt_only legs — the popover fetches /api/requests/<id> as
+    // usual and shows them on a hit; with no record at all the 404 falls back
+    // to not-logged (detailFetchState).
     return;
   }
   if (e.type === 'progress') {
@@ -5273,9 +5275,10 @@ function openLiveDetailPop(id) {
   const row = liveRowById(id);
   if (!row) return;
   liveDetailPopId = id;
-  // 显式重开：取详情出错或 404 的状态清掉重试——只有「取过且 404」的 client-gone
-  // 终局保留 not-logged 标记（确实无记录，不必再发请求）。规则见
-  // detailReopenState。
+  // An explicit re-open clears a fetch error or a 404 so the fetch is
+  // retried — except a client-gone terminal whose fetch 404'd: it keeps the
+  // not-logged mark (there really is no record; no point fetching again).
+  // The rule lives in detailReopenState.
   const state = liveDetailState.get(id);
   const reopened = detailReopenState(state, row.status);
   if (reopened !== state) liveDetailState.set(id, reopened);

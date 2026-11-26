@@ -147,17 +147,19 @@ test('every settings field carries help text and a default', () => {
 });
 
 test('request-log miss copy keeps up with the documented hot window', () => {
-  // docs/web-api.md：可查窗口＝热窗（request_log.hot_retention），滚出热窗的轮转
-  // 文件被压成 .log.zst 离线归档——详情下钻 404 不只是 retention 清理，mcp 拆分流
-  // 同样按热窗归档。app.js 的两处文案必须跟上（pure.js 的 explain not_found
-  // note 在 pure.test.mjs）。
+  // docs/web-api.md: the queryable window is the hot window
+  // (request_log.hot_retention); rotated files that roll out of it are
+  // compressed into offline .log.zst archives — a detail-drill 404 is not
+  // only a retention sweep, and the MCP split stream archives on the same hot
+  // window. The app.js copies must keep up (the pure.js explain not_found
+  // note is covered in pure.test.mjs).
   const reqRow = webApiDoc.split('\n').find((l) => l.includes('| GET |') && l.includes('`/api/requests?'));
   assert.ok(reqRow, 'docs/web-api.md has no `| GET | `/api/requests?…` |` row');
   for (const fact of ['hot_retention', '.log.zst']) {
     assert.ok(reqRow.includes(fact), `docs/web-api.md /api/requests row omits ${fact} — the hot-window contract moved; update this pin with it`);
   }
 
-  // Security 下钻卡（applyRequestDrill）的 404 提示。
+  // The 404 hint of the Security drill card (applyRequestDrill).
   const drillStart = appJs.indexOf('async function applyRequestDrill(');
   assert.ok(drillStart >= 0, 'app.js has no applyRequestDrill — contract is blind');
   const drill = appJs.slice(drillStart, appJs.indexOf('\n}\n', drillStart));
@@ -166,7 +168,22 @@ test('request-log miss copy keeps up with the documented hot window', () => {
   assert.ok(miss[1].includes('hot window'), `drill 404 hint omits the hot window: ${miss[1]}`);
   assert.ok(miss[1].includes('offline archive'), `drill 404 hint omits the offline archive: ${miss[1]}`);
 
-  // 设置表单 mcp_dir 的 help：拆分流共享 hot_retention，按热窗归档为 mcp-*.log.zst。
+  // The 404 hint of the Requests inline row expansion (toggleRequestDetail).
+  // The row was LISTED, so a 404 means its record left the online log —
+  // "did not commit" is the wrong story for a row archived past the hot window.
+  const expandStart = appJs.indexOf('async function toggleRequestDetail(');
+  assert.ok(expandStart >= 0, 'app.js has no toggleRequestDetail — contract is blind');
+  const expand = appJs.slice(expandStart, appJs.indexOf('\n}\n', expandStart));
+  const expandMiss = expand.match(/msg hint">not logged — ([^<]*)</);
+  assert.ok(expandMiss, 'toggleRequestDetail has no 404 "not logged — …" hint — contract is blind');
+  assert.ok(expandMiss[1].includes('left the online request log'),
+    `inline-expand 404 hint must say the record left the online request log: ${expandMiss[1]}`);
+  assert.ok(expandMiss[1].includes('hot window'), `inline-expand 404 hint omits the hot window: ${expandMiss[1]}`);
+  assert.ok(!expandMiss[1].includes('did not commit, so there is no request-log record'),
+    `inline-expand 404 hint still claims the request did not commit: ${expandMiss[1]}`);
+
+  // The settings form's mcp_dir help: the split stream shares hot_retention
+  // and archives past the hot window as mcp-*.log.zst.
   const specStart = appJs.indexOf('const SETTINGS_GROUPS = [');
   const spec = appJs.slice(specStart, appJs.indexOf('\n];', specStart));
   const field = /\{\s*key: 'mcp_dir'[^}]*\}/.exec(spec);

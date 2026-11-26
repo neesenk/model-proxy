@@ -784,7 +784,10 @@ func TestWebAssetsLiveDetailErrorTerminal(t *testing.T) {
 		"shouldFetchDetail,",
 		"detailFetchState,",
 		"if (state.notLogged)",
-		"not logged — the request did not commit",
+		// The neutral 404 hint of the Requests inline expansion
+		// (toggleRequestDetail): its wording follows the hot-window contract
+		// (jstests contract.test.mjs pins the causes it must name).
+		"not logged — the request left the online request log (never committed, pruned by retention, or archived offline past the hot window)",
 		"function openLiveDetailPop(",
 		"function updateLiveDetailPop(",
 	} {

@@ -72,32 +72,38 @@ test('user- and load-driven session-options paths stay synchronous', () => {
     'renderLiveTable keeps its synchronous refresh (deferral is event-path only)');
 });
 
-// fnCode 在 fnBody 之上再去掉注释：下面两条钉的是代码而不是注释——注释里会出现
-// 被钉的标识符（旧 end 分支的注释就提到 liveDetailState），不去掉会误报。
+// fnCode strips the comments on top of fnBody: the two pins below target
+// code, not comments — a comment can mention a pinned identifier (the old end
+// branch's comment named liveDetailState), which would false-positive.
 function fnCode(src, name) {
   return fnBody(src, name).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 }
 
 test('a live end event never pre-marks the detail state: every terminal takes the fetch path', () => {
-  // client-gone（499）不写终态行，但断开前已有失败跳时该 id 留有 attempt_only 腿行
-  // （/api/requests/<id> 取得到）。end 分支一旦预置 not-logged，
-  // shouldFetchDetail 就把这一行钉死成「无记录」且永不取详情、弹层不展示腿行。
-  // 现在终局一律不写 liveDetailState：取详情只有 ensureLiveDetailFetched 一条路，
-  // 404 由 detailFetchState 回落成 not-logged。
+  // A client-gone (499) writes no terminal row, but failed hops before the
+  // disconnect leave attempt_only legs under that id (/api/requests/<id>
+  // returns them). Once the end branch presets not-logged, shouldFetchDetail
+  // pins the row to "no record" for good: no detail fetch, and the popover
+  // never shows the legs. No terminal writes liveDetailState now — the only
+  // fetch path is ensureLiveDetailFetched, and a 404 falls back to not-logged
+  // through detailFetchState.
   const apply = fnCode(appJs, 'applyLiveEvent');
   assert.ok(apply.includes("if (e.type === 'end') {"), 'applyLiveEvent has no end branch — contract is blind');
   assert.ok(!apply.includes('liveDetailState'),
     'applyLiveEvent must not write liveDetailState (a pre-marked not-logged skips the detail fetch)');
-  // 取详情的入口不按行状态开特例：所有已结束的行都经同一个门。
+  // The fetch entry point has no per-status special case: every ended row
+  // goes through the same gate.
   const ensure = fnCode(appJs, 'ensureLiveDetailFetched');
   assert.ok(ensure.includes('shouldFetchDetail('), 'ensureLiveDetailFetched must gate on shouldFetchDetail');
   assert.ok(!ensure.includes('CLIENT_GONE_STATUS'), 'the ensure path must not special-case client-gone rows');
 });
 
 test('openLiveDetailPop routes the explicit re-open decision through detailReopenState with the row status', () => {
-  // 规则本体是 pure.js detailReopenState（行为用例在 pure.test.mjs）：只有「取过且
-  // 404」的 499 保留 not-logged 标记。这里钉接线——重开必须带着行状态走它，不得
-  // 再按状态整类跳过清理（旧写法会把 499 的取详情错误也一起钉死）。
+  // The rule itself is pure.js detailReopenState (behavior covered in
+  // pure.test.mjs): only a client-gone 499 whose fetch 404'd keeps the
+  // not-logged mark. This pins the wiring — the re-open must route through it
+  // with the row status and never skip the clear for a whole status class
+  // again (the old form also pinned a client-gone fetch error for good).
   const body = fnCode(appJs, 'openLiveDetailPop');
   assert.ok(body.includes('const state = liveDetailState.get(id);'),
     'openLiveDetailPop must read the raw liveDetailState entry for the re-open decision');
@@ -105,7 +111,8 @@ test('openLiveDetailPop routes the explicit re-open decision through detailReope
     'openLiveDetailPop must decide the re-open state via detailReopenState(state, row.status)');
   assert.ok(!body.includes('row.status !== CLIENT_GONE_STATUS'),
     'openLiveDetailPop must not skip the clear for a whole status class');
-  // 状态确实变了才写回（无可清的终态不落一条空状态）。
+  // Write back only when the state really changed (nothing to clear leaves no
+  // empty state entry behind).
   assert.ok(body.includes('if (reopened !== state) liveDetailState.set(id, reopened);'),
     'openLiveDetailPop must write the re-open state only when it changed');
 });

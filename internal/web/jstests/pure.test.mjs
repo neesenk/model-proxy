@@ -1755,15 +1755,18 @@ test('detailFetchState treats a 404 as an expected unlogged request', () => {
 });
 
 test('a client-gone terminal takes the normal detail-fetch path', () => {
-  // 499 不写终态行，但断开前已有失败跳时该 id 留有 attempt_only 腿行——end 事件
-  // 不预置 not-logged（接线钉在 liveevents.test.mjs），没有状态条目时放行 fetch。
+  // A 499 writes no terminal row, but failed hops before the disconnect leave
+  // attempt_only legs under that id — the end event presets no not-logged
+  // state (wiring pin in liveevents.test.mjs), so with no state entry the
+  // fetch is allowed.
   assert.equal(shouldFetchDetail(false, undefined, false), true);
-  // 一行都没有：404 经 detailFetchState 回落成 not-logged，自动路径不再重发
-  // （无 404 循环），提示点明 client-gone 原因。
+  // Nothing logged at all: the 404 falls back to not-logged via
+  // detailFetchState and the automatic path stops re-fetching (no 404 loop);
+  // the hint names the client-gone cause.
   const missed = detailFetchState(404, 'no record for request id x');
   assert.deepEqual(missed, { loading: false, error: '', notLogged: true });
   assert.equal(shouldFetchDetail(false, missed, false), false);
-  // 取到腿行：记录进缓存后不再取。
+  // Legs found: once cached, the records are not fetched again.
   assert.equal(shouldFetchDetail(true, undefined, false), false);
   assert.equal(notLoggedHint(CLIENT_GONE_STATUS), 'client cancelled before commit — no request-log record');
 });
@@ -1771,16 +1774,20 @@ test('a client-gone terminal takes the normal detail-fetch path', () => {
 test('detailReopenState keeps a terminal mark on explicit re-open only for a client-gone 404', () => {
   const notLogged = { loading: false, error: '', notLogged: true };
   const cleared = { loading: false, error: '', notLogged: false };
-  // 取过且 404 的 499：确实无记录——保留标记（同一引用），重开不再发请求。
+  // A client-gone terminal whose fetch 404'd: there really is no record — the
+  // mark stays (same reference), re-open fetches nothing.
   assert.equal(detailReopenState(notLogged, 499), notLogged);
-  // 499 取详情出错（网络/5xx）：与任何状态一样清掉重试——「保留」只针对 404。
+  // A client-gone fetch ERROR (network/5xx): cleared and retried like any
+  // other status — "keep" applies to the 404 only.
   assert.deepEqual(detailReopenState({ loading: false, error: 'boom' }, 499), cleared);
-  // 其他状态：404 与错误都清掉重试（既有行为不变），含未知状态。
+  // Every other status: 404 and error both clear and retry (unchanged
+  // behavior), unknown status included.
   assert.deepEqual(detailReopenState(notLogged, 502), cleared);
   assert.deepEqual(detailReopenState({ loading: false, error: 'boom' }, 502), cleared);
   assert.deepEqual(detailReopenState(notLogged, undefined), cleared);
   assert.deepEqual(detailReopenState(notLogged, 200), cleared);
-  // 没有可清的终态：原样返回同一引用（调用方据此不写回）。
+  // No terminal state to clear: the same reference comes back (the caller
+  // skips the write).
   const loading = { loading: true, error: '' };
   assert.equal(detailReopenState(loading, 499), loading);
   assert.equal(detailReopenState(loading, 502), loading);
@@ -1898,21 +1905,25 @@ test('mergeLiveAndPersistedRow returns live when persisted is null', () => {
 
 test('rowFailoverAttempt maps the two attempt semantics onto one labeled attempt number', () => {
   assert.equal(FAILOVER_PROVIDER, '(failover)');
-  // 终态行（provider 哨兵）：attempt 是跳数——1 跳 = 没发生 failover，返回 0；
-  // ≥2 跳返回真实跳数（终态行本身就是那一跳，后面没有提交）。
+  // Terminal row (provider sentinel): attempt is the hop count — 1 hop = no
+  // failover, returns 0; ≥2 hops return the real hop count (the terminal row
+  // IS that attempt; nothing is committed after it).
   assert.equal(rowFailoverAttempt({ provider: '(failover)', attempt: 0 }), 0);
   assert.equal(rowFailoverAttempt({ provider: '(failover)', attempt: 1 }), 0);
   assert.equal(rowFailoverAttempt({ provider: '(failover)', attempt: 2 }), 2);
   assert.equal(rowFailoverAttempt({ provider: '(failover)', attempt: 5 }), 5);
-  // 已提交行（其他 provider）：attempt 是提交前的失败跳数——>0 即 failover，
-  // 返回提交那一跳的序号（失败跳数 + 1）。
+  // Committed row (any other provider): attempt is the failed-hop count
+  // before the commit — >0 means a failover; returns the committed attempt's
+  // ordinal (failed hops + 1).
   assert.equal(rowFailoverAttempt({ provider: 'zhipu', attempt: 0 }), 0);
   assert.equal(rowFailoverAttempt({ provider: 'zhipu', attempt: 1 }), 2);
   assert.equal(rowFailoverAttempt({ provider: 'zhipu', attempt: 3 }), 4);
   assert.equal(rowFailoverAttempt({ provider: '(cache)', attempt: 1 }), 2);
-  // 哨兵只认精确值：别的 provider 名里带 failover 字样不算终态行。
+  // The sentinel is matched exactly: a provider name merely containing
+  // "failover" is not a terminal row.
   assert.equal(rowFailoverAttempt({ provider: 'my-failover', attempt: 1 }), 2);
-  // 输入归一：哨兵两端空白、attempt 为字符串/缺失、空行。
+  // Input normalization: whitespace around the sentinel, a string or missing
+  // attempt, an empty row.
   assert.equal(rowFailoverAttempt({ provider: ' (failover) ', attempt: '2' }), 2);
   assert.equal(rowFailoverAttempt({ provider: 'zhipu' }), 0);
   assert.equal(rowFailoverAttempt({}), 0);
@@ -1921,9 +1932,11 @@ test('rowFailoverAttempt maps the two attempt semantics onto one labeled attempt
 });
 
 test('mergeLiveAndPersistedRow keeps the all-targets-failed sentinel over a provider-less live end row', () => {
-  // 全链失败的 live end 事件不带 provider（applyLiveEvent 落 '—'）；Live 会话面板
-  // 把 live 行叠在持久化行上时哨兵 "(failover)" 必须保留——否则合并行退化成已提交
-  // 行语义，单目标全失败又被计成 failover、标成 attempt 2。
+  // The all-targets-failed live end event carries no provider (applyLiveEvent
+  // stores '—'); when the Live session panel overlays the live row on the
+  // persisted one, the "(failover)" sentinel must survive — otherwise the
+  // merged row degrades to committed-row semantics and a single-target
+  // failure is counted as a failover again and labeled attempt 2.
   const persisted = { requestId: 'r1', ts: 1000, provider: '(failover)', status: 502, latencyMs: 30, attempt: 1, inFlight: false };
   const live = { requestId: 'r1', ts: 1000, provider: '—', status: 502, latencyMs: 30, inFlight: false };
   const merged = mergeLiveAndPersistedRow(live, persisted);
@@ -1931,7 +1944,8 @@ test('mergeLiveAndPersistedRow keeps the all-targets-failed sentinel over a prov
   assert.deepEqual(sessionBarSummary(merged, (t) => String(t)), ['1000', '(failover)', '502 · 30ms']);
   const health = sessionHealthSummary([merged, { ts: 0, latencyMs: 5, provider: 'zhipu', attempt: 0 }]);
   assert.equal(health.failovers, 0);
-  // 其余行不变：live 仍然赢了 provider（既有契约）。
+  // Every other row is unchanged: live still wins the provider (the existing
+  // contract).
   assert.equal(mergeLiveAndPersistedRow({ requestId: 'r2', provider: 'p' }, { requestId: 'r2', provider: 'old' }).provider, 'p');
 });
 
@@ -2333,14 +2347,18 @@ test('securityExplainHTML status notes cover non-ok statuses', () => {
 });
 
 test('securityExplainHTML not_found note names the hot-window archive, not retention only', () => {
-  // 可查窗口＝热窗（request_log.hot_retention）：滚出热窗的轮转文件被压成 .log.zst
-  // 离线归档，对索引/扫描不可见——explain 回 not_found 的原因不只是 retention 清理。
+  // The queryable window is the hot window (request_log.hot_retention):
+  // rotated files that roll out of it are compressed into offline .log.zst
+  // archives, invisible to the index and the scans — so a not_found from
+  // explain is not only a retention sweep.
   const note = SECURITY_EXPLAIN_STATUS_NOTES.not_found;
-  // 两种原因并列：retention 清理仍在，热窗归档是新补的那一半（旧文案只有前者）。
+  // Both causes side by side: the retention cause stays, the hot-window
+  // archive is the newly named half (the old copy had only the former).
   assert.ok(note.includes('retention'), 'the retention cause must stay');
   assert.ok(note.includes('hot window'), note);
   assert.ok(note.includes('.log.zst'), 'the offline archive format must be named');
-  // 渲染面不变：note 以 hint 呈现（外层是既有的 .sec-explain 包裹），无其他内容。
+  // Rendering is unchanged: the note is a hint (inside the existing
+  // .sec-explain wrapper) and nothing else is emitted.
   assert.equal(
     securityExplainHTML({ status: 'not_found', matches: [] }),
     `<div class="sec-explain"><div class="msg hint">${esc(note)}</div></div>`,
@@ -2563,10 +2581,12 @@ test('sessionTimeline stacks overlapping spans into new lanes, sequential into o
 });
 
 test('sessionTimeline retry mark follows the row kind: terminal rows label the hop count', () => {
-  // 全链失败终态行（provider 哨兵 "(failover)"）的 attempt 是跳数：单目标路由
-  // 全失败时只有 1 跳、并没有 failover——不出 retry 标记；多目标全失败按真实
-  // 跳数标注（不是跳数 + 1）。已提交行的 attempt 是提交前的失败跳数，标注保持
-  // 现状（attempt + 1）。
+  // The all-targets-failed terminal row (provider sentinel "(failover)")
+  // carries the HOP COUNT in attempt: a single-target route failing entirely
+  // is 1 hop with no failover — no retry mark; a multi-target failure is
+  // labeled with the real hop count (not hop count + 1). A committed row's
+  // attempt is the failed-hop count before the commit; its label is unchanged
+  // (attempt + 1).
   const rows = [
     { requestId: 'ok', ts: 0, latencyMs: 10, status: 200, provider: 'zhipu', attempt: 0 },
     { requestId: 'single', ts: 5000, latencyMs: 10, status: 502, provider: '(failover)', attempt: 1 },
@@ -2574,11 +2594,12 @@ test('sessionTimeline retry mark follows the row kind: terminal rows label the h
     { requestId: 'committed', ts: 15000, latencyMs: 10, status: 200, provider: 'zhipu', attempt: 1 },
   ];
   const tl = sessionTimeline(rows, { fmt: (t) => String(t) });
-  // 标记按时间序出现；<title> 是标记的悬停文案。
+  // Marks appear in time order; <title> is the mark's hover text.
   const marks = [...tl.svg.matchAll(/<circle class="tl-retry"[^>]*><title>([^<]*)<\/title><\/circle>/g)].map((m) => m[1]);
   assert.deepEqual(marks, ['attempt 2 (failover)', 'attempt 2 (failover)']);
-  // 无障碍摘要是同一份判定：单目标终态行不带 failover 标注（provider 名里的
-  // "(failover)" 不是标注，所以断言的是 "attempt"）。
+  // The accessible summary is the same decision: the single-target terminal
+  // row carries no failover note (the "(failover)" in the provider name is
+  // not a note, hence asserting on "attempt").
   const aria = Object.fromEntries([...tl.svg.matchAll(/data-id="([^"]*)" aria-label="([^"]*)"/g)].map((m) => [m[1], m[2]]));
   assert.deepEqual(Object.keys(aria), ['ok', 'single', 'multi', 'committed']);
   assert.ok(!aria.ok.includes('attempt'), aria.ok);
@@ -2827,15 +2848,17 @@ test('sessionBarSummary renders full and sparse rows, dropping absent fields', (
 
 test('sessionBarSummary labels failover attempts by row kind', () => {
   const fmt = (t) => 'T' + t;
-  // 单目标路由全失败的终态行：attempt（跳数）= 1，没有 failover——不出标注行。
+  // Single-target route failing entirely: attempt (hop count) = 1, no
+  // failover — no note line.
   assert.deepEqual(
     sessionBarSummary({ ts: 5, provider: '(failover)', status: 502, latencyMs: 10, attempt: 1 }, fmt),
     ['T5', '(failover)', '502 · 10ms'],
   );
-  // 多目标全失败：标注真实跳数。
+  // Multi-target failure: labeled with the real hop count.
   const multi = sessionBarSummary({ ts: 5, provider: '(failover)', status: 429, latencyMs: 10, attempt: 3 }, fmt);
   assert.equal(multi[multi.length - 1], 'attempt 3 (failover)');
-  // 已提交行不变：attempt 是提交前的失败跳数，标注提交的那一跳。
+  // Committed row unchanged: attempt is the failed-hop count before the
+  // commit; the label is the committed attempt.
   const committed = sessionBarSummary({ ts: 5, provider: 'zhipu', status: 200, latencyMs: 10, attempt: 1 }, fmt);
   assert.equal(committed[committed.length - 1], 'attempt 2 (failover)');
 });
@@ -3419,21 +3442,23 @@ test('sessionHealthSummary derives health signals with gap/percentile guards', (
 });
 
 test('sessionHealthSummary counts an all-targets-failed terminal row as a failover only from 2 hops', () => {
-  // 单目标路由全失败：终态行 attempt（跳数）= 1，没有 failover。
+  // Single-target route failing entirely: terminal row attempt (hop count)
+  // = 1, no failover.
   const single = sessionHealthSummary([
     { ts: 0, latencyMs: 900, provider: 'zhipu', model: 'm1', attempt: 0 },
     { ts: 5000, latencyMs: 300, provider: '(failover)', model: 'm1', status: 502, attempt: 1 },
   ]);
   assert.equal(single.failovers, 0);
-  // 多目标全失败：跳数 ≥2 的终态行各计一次 failover。
+  // Multi-target failure: each terminal row with ≥2 hops counts once.
   const multi = sessionHealthSummary([
     { ts: 0, latencyMs: 300, provider: '(failover)', status: 429, attempt: 2 },
     { ts: 5000, latencyMs: 300, provider: '(failover)', status: 502, attempt: 3 },
     { ts: 9000, latencyMs: 300, provider: '(failover)', status: 502, attempt: 1 },
   ]);
   assert.equal(multi.failovers, 2);
-  // 已提交行语义不变：attempt（提交前失败跳数）> 0 即 failover——(cache) 命中
-  // 与残留的未应答腿（attempt 是该腿的 0 基序号）走同一条规则。
+  // Committed-row semantics unchanged: attempt (failed hops before the
+  // commit) > 0 means a failover — a (cache) hit and a surviving unanswered
+  // leg (attempt is the leg's 0-based ordinal) follow the same rule.
   const committed = sessionHealthSummary([
     { ts: 0, latencyMs: 300, provider: 'zhipu', status: 200, attempt: 0 },
     { ts: 5000, latencyMs: 300, provider: 'zhipu', status: 200, attempt: 1 },

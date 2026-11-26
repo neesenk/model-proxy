@@ -2221,11 +2221,14 @@ export function detailFetchState(status, message) {
   return { loading: false, error: message || 'load failed' };
 }
 
-// CLIENT_GONE_STATUS 是「调用方在提交前放弃」的请求的 live 终局状态（管线用终局
-// 事件代替提交；见 forward 的 statusClientGone）。这种请求不写终态行——但断开前
-// 已有失败跳时，那些 attempt_only 腿行已经落盘，/api/requests/<id> 取得到。所以
-// 499 行和其他终态一样照常取详情（end 事件不预置状态）：命中就展示腿行；404 才
-// 经 detailFetchState 回落成 not-logged，提示用 notLoggedHint(499) 点明原因。
+// CLIENT_GONE_STATUS is the live end status for a request the CALLER abandoned
+// before any commit (the pipeline publishes the terminal event INSTEAD of
+// committing; see forward's statusClientGone). Such a request writes no
+// terminal row — but failed hops before the disconnect have already logged
+// their attempt_only legs, which /api/requests/<id> returns. A 499 row
+// therefore fetches its detail like every other terminal (the end event
+// presets no state): a hit shows the legs; only a 404 falls back to
+// not-logged via detailFetchState, with notLoggedHint(499) naming the cause.
 export const CLIENT_GONE_STATUS = 499;
 
 // notLoggedHint is the popover hint for a request with no request-log record.
@@ -2239,11 +2242,13 @@ export function notLoggedHint(status) {
   return 'not logged — the request did not commit, so there is no request-log record';
 }
 
-// detailReopenState 决定「显式重开」Live 详情弹层时既有的取详情状态怎么处理：
-// 返回要写回的状态，没有变化时返回同一引用（调用方据此不写回）。取过且 404 的
-// client-gone 终局保留 not-logged 标记——确实无记录，重开不必再发一次请求；其余
-// 一律清掉重试：任何状态的取详情错误（含 499 的——网络/5xx 是暂时性的）与非 499
-// 的 404。
+// detailReopenState decides what an EXPLICIT re-open of the Live detail
+// popover does with the row's existing detail-fetch state: it returns the
+// state to store — the same reference when nothing changes (the caller skips
+// the write). A client-gone terminal whose fetch 404'd keeps its not-logged
+// mark: there really is no record, so re-opening need not fetch again.
+// Everything else clears and retries: a fetch error of any status (499's too
+// — network/5xx failures are transient) and a non-499 404.
 export function detailReopenState(state, status) {
   const s = state || {};
   if (s.notLogged && status === CLIENT_GONE_STATUS) return state;
@@ -2251,20 +2256,26 @@ export function detailReopenState(state, status) {
   return state;
 }
 
-// FAILOVER_PROVIDER 是全链失败终态行的 provider 哨兵（forward 的
-// terminalLogProvider）：代理自己的 502/429 应答，不对应任何上游——与缓存命中的
-// "(cache)" 同类。
+// FAILOVER_PROVIDER is the provider sentinel of the all-targets-failed
+// terminal row (forward's terminalLogProvider): the proxy's own 502/429
+// answer, matching no upstream — the same convention as a cache hit's
+// "(cache)".
 export const FAILOVER_PROVIDER = '(failover)';
 
-// rowFailoverAttempt 是「这一行涉没涉及 failover、标注第几跳」的唯一判定处：返回
-// 要标注的 attempt 序号，没有 failover 返回 0；调用方不得直接读 attempt。两类行的
-// attempt 语义不同：
-//   • 终态行（provider === FAILOVER_PROVIDER）：attempt 是跳数——序号排在最后一跳
-//     之后，单目标路由全失败（并没有 failover）时也是 1。跳数 ≥2 才算发生过一次
-//     failover，标注用真实跳数（终态行本身就是那一跳，后面没有提交）。
-//   • 已提交行（其他 provider）：attempt 是提交前的失败跳数——发生过 failover 才
-//     >0，标注提交那一跳的序号（失败跳数 + 1）。
-// 旧的 `attempt > 0` 判定把每一次单目标失败都计成 failover，并把终态行多标一跳。
+// rowFailoverAttempt is the ONE place that decides whether a row involved a
+// failover and which attempt the UI labels it with: it returns the attempt
+// number to label, or 0 when there was no failover. Callers must not read
+// `attempt` directly — the two row kinds give it different meanings:
+//   • terminal row (provider === FAILOVER_PROVIDER): `attempt` is the HOP
+//     COUNT — the index sits one past the last leg, so it is 1 even when a
+//     single-target route failed with no failover at all. A failover happened
+//     only at ≥2 hops, and the label is the real hop count (the terminal row
+//     IS that attempt; nothing was committed after it).
+//   • committed row (every other provider): `attempt` is the number of failed
+//     hops BEFORE the commit — >0 only when the request failed over, and the
+//     label is the committed attempt's ordinal (failed hops + 1).
+// The old `attempt > 0` test counted every single-target failure as a
+// failover and labeled terminal rows one hop too high.
 export function rowFailoverAttempt(row) {
   if (!row) return 0;
   const attempt = Number(row.attempt) || 0;
@@ -2287,8 +2298,9 @@ export function mergeLiveAndPersistedRow(live, persisted) {
   if (live.status != null) base.status = live.status;
   if (live.latencyMs != null) base.latencyMs = live.latencyMs;
   if (live.provider != null && live.provider !== '') base.provider = live.provider;
-  // 全链失败终态行的哨兵必须留下：它的 live end 事件不带 provider（live 行是
-  // '—'），而 rowFailoverAttempt 靠这个哨兵区分终态行的 attempt 语义。
+  // The all-targets-failed sentinel must survive the merge: that request's
+  // live end event carries no provider (the live row says '—'), and
+  // rowFailoverAttempt keys the terminal-row attempt semantics on it.
   if (persisted.provider === FAILOVER_PROVIDER) base.provider = FAILOVER_PROVIDER;
   if (live.model != null && live.model !== '' && live.model !== '—') base.model = live.model;
   if (live.inFlight != null) base.inFlight = live.inFlight;
@@ -3229,8 +3241,8 @@ export function sessionTimeline(rows, opts) {
       status: Number(r.status) || 0,
       tokens: (Number(r.input) || 0) + (Number(r.output) || 0),
       attempt: Number(r.attempt) || 0,
-      // provider 只为 retry 标记随行：全链失败哨兵会改变 attempt 的含义
-      // （rowFailoverAttempt）。
+      // provider rides along for the retry mark only: the all-targets-failed
+      // sentinel changes what `attempt` means (rowFailoverAttempt).
       provider: String(r.provider || '').trim(),
       inFlight: !!r.inFlight,
       turnKey: r.turnKey || '',
