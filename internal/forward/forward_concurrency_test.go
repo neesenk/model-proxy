@@ -2,10 +2,15 @@ package forward
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"model-proxy/internal/targetexec"
 )
 
 // allSaturated arranges the harness so every target is at its concurrency
@@ -146,5 +151,98 @@ func TestServeAllDownWithoutSaturationKeepsHorizonRules(t *testing.T) {
 	w := h.serve(h.snapshot(cfg), "openai", "/v1/chat/completions", openaiChatBody(), nil)
 	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") != "90" || waits != 0 {
 		t.Fatalf("status = %d retry-after = %q waits = %d; want 429 / 90 / no slot wait", w.Code, w.Header().Get("Retry-After"), waits)
+	}
+}
+
+// racingGate holds every request at the gate's take until `racers` of them
+// have arrived: all of them are past the scheduler before any of them takes a
+// slot. That is the shape of every freed slot with queued requests — the
+// scheduler hands the slot to everyone who asks, and the gate picks the winner.
+type racingGate struct {
+	*fakeHealthGate
+	racers  int
+	arrived chan struct{}
+	full    chan struct{}
+	once    sync.Once
+}
+
+func newRacingGate(racers int) *racingGate {
+	return &racingGate{
+		fakeHealthGate: newFakeHealthGate(),
+		racers:         racers,
+		arrived:        make(chan struct{}, racers),
+		full:           make(chan struct{}),
+	}
+}
+
+func (g *racingGate) TakeInflight(provider string) (targetexec.InflightSlot, bool) {
+	g.arrived <- struct{}{}
+	g.once.Do(func() {
+		for i := 0; i < g.racers; i++ {
+			<-g.arrived
+		}
+		close(g.full)
+	})
+	<-g.full
+	return g.fakeHealthGate.TakeInflight(provider)
+}
+
+// TestServeLostSlotRaceReleasesNoVerdict: two requests are both handed the
+// account's single free slot and race for it at the gate. One is dispatched;
+// the other is refused before any network contact, and what it gives back to
+// the ledger is "no verdict" — never a failure of the account. Counting the
+// loser as a failure zeroed the inferred cap's probe-up streak on every slot
+// turnover for as long as requests were queued, so the cap could not climb.
+func TestServeLostSlotRaceReleasesNoVerdict(t *testing.T) {
+	up := newFakeUpstream(t, openaiOKResponder("won"))
+	h := newHarness()
+	gate := newRacingGate(2)
+	h.svc.NewHealthGate = func(Snapshot) targetexec.HealthGate { return gate }
+	gate.RecordConcurrencyLimit("up", 1, 0, 1) // a one-slot account
+	cfg := &Config{
+		Providers: map[string]Provider{"up": {OpenAIBaseURL: up.srv.URL, Provider: "test-static"}},
+		Routes:    map[string][]RouteTarget{"m": {{Provider: "up", Model: "real-model"}}},
+	}
+	snap := h.snapshot(cfg)
+
+	results := make(chan *httptest.ResponseRecorder, 2)
+	for i := 0; i < 2; i++ {
+		go func() { results <- h.serve(snap, "openai", "/v1/chat/completions", openaiChatBody(), nil) }()
+	}
+	statuses := []int{}
+	for len(statuses) < 2 {
+		select {
+		case w := <-results:
+			statuses = append(statuses, w.Code)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("statuses so far = %v: both racing requests must finish", statuses)
+		}
+	}
+	sort.Ints(statuses)
+	// The winner is served; the loser has no other target and ends as an
+	// ordinary all-targets-failed 502.
+	if want := []int{http.StatusOK, http.StatusBadGateway}; !reflect.DeepEqual(statuses, want) {
+		t.Fatalf("statuses = %v, want %v", statuses, want)
+	}
+	if up.hits() != 1 {
+		t.Errorf("upstream hits = %d, want 1: the refused race never reached the network", up.hits())
+	}
+	released := gate.releasedOutcomes("up")
+	if len(released) != 2 {
+		t.Fatalf("slot releases = %v, want exactly two", released)
+	}
+	verdicts, noVerdicts := 0, 0
+	for _, outcome := range released {
+		switch outcome {
+		case targetexec.InflightSucceeded:
+			verdicts++
+		case targetexec.InflightNoVerdict:
+			noVerdicts++
+		case targetexec.InflightFailed:
+			t.Errorf("slot releases = %v: the account has no failed request to report", released)
+		}
+	}
+	if verdicts != 1 || noVerdicts != 1 {
+		t.Errorf("slot releases = %v, want one success and one no-verdict", released)
 	}
 }

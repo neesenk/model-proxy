@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
+	runtimestate "model-proxy/internal/runtime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -565,7 +566,7 @@ func TestScheduleStatus_SaturatedAccountIsSkippedWithItsReason(t *testing.T) {
 	if !free {
 		t.Fatal("the first slot of a freshly capped account must be free")
 	}
-	defer p.runtimeState.ReleaseInflightSlot(slot, false)
+	defer p.runtimeState.ReleaseInflightSlot(slot, runtimestate.InflightFailed)
 
 	var st struct {
 		Models map[string]struct {

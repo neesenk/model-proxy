@@ -306,3 +306,61 @@ func TestForward_AllTargetsSaturatedAnswers429AfterTheWaits(t *testing.T) {
 		t.Fatalf("holder = %d, want 200", status)
 	}
 }
+
+// TestForward_PinnedHopFailureWaitsForASlotLikeAnyOtherRequest: "a pin does
+// not wait" is about dispatch — the pinned account is dispatched into even
+// while saturated. It is not an exemption from the wait-retry loop: once the
+// pinned hop has failed and the account is still saturated, the request
+// parks for a slot exactly like any other (the way a pinned route has always
+// waited out a cooldown) and is re-dispatched to the pinned account, never
+// elsewhere. Only x-mp-force-provider skips the wait.
+func TestForward_PinnedHopFailureWaitsForASlotLikeAnyOtherRequest(t *testing.T) {
+	logs := captureServeLog(t)
+	held := newHolder(t)
+	defer held.free()
+	a := newHitFakeUpstream(t, func(hit int, w http.ResponseWriter, r *http.Request) {
+		switch hit {
+		case 1:
+			held.hold(hit, staticResponder(http.StatusOK, `{"ok":"holder"}`))(hit, w, r)
+		case 2:
+			// The pinned hop overshoots the stated limit and the upstream says so.
+			staticResponder(http.StatusTooManyRequests, `{"error":{"message":"concurrency reached, current: 2, limit: 1","type":"rate_limited"}}`)(w, r)
+		default:
+			staticResponder(http.StatusOK, `{"ok":"pinned"}`)(w, r)
+		}
+	})
+	b := newFakeUpstream(t, staticResponder(http.StatusOK, `{"ok":"fallback"}`))
+	proxy, server := concurrencyRoute(t, a, b)
+	url := server.URL + "/v1/chat/completions"
+	proxy.runtimeState.NoteConcurrencyLimit("a", 1, 0, proxy.runtimeState.Generation())
+	proxy.runtimeState.SetPin("m1", runtimestate.Pin{Provider: "a"})
+
+	holderDone := make(chan int, 1)
+	go func() {
+		status, _, _ := postUnstuck(t, url, concurrencyChatBody)
+		holderDone <- status
+	}()
+	<-held.arrived
+
+	pinned := make(chan int, 1)
+	go func() {
+		status, _, _ := postUnstuck(t, url, concurrencyChatBody)
+		pinned <- status
+	}()
+	// The pinned hop is dispatched at once (into the saturated account), gets
+	// the 429, and parks for a slot instead of answering.
+	testsyn.WaitUntil(t, "the pinned request to park after its failed hop", func() bool {
+		return a.hits() == 2 && strings.Contains(logs.text(), "every target is at its concurrency limit — waiting up to")
+	})
+
+	held.free()
+	if status := <-holderDone; status != http.StatusOK {
+		t.Fatalf("holder = %d, want 200", status)
+	}
+	if status := <-pinned; status != http.StatusOK {
+		t.Fatalf("pinned request after its failed hop = %d, want 200 once the pinned account had a slot", status)
+	}
+	if a.hits() != 3 || b.hits() != 0 {
+		t.Errorf("hits a/b = %d/%d, want 3/0 (holder, the refused hop, the retried hop — all on the pin)", a.hits(), b.hits())
+	}
+}

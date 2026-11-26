@@ -25,7 +25,7 @@ type HealthGate interface {
 	// State). Not generation-bound on purpose: a running request is a fact
 	// about the process whatever generation captured it.
 	TakeInflight(provider string) (InflightSlot, bool)
-	ReleaseInflight(slot InflightSlot, succeeded bool) (raisedTo int, raised bool)
+	ReleaseInflight(slot InflightSlot, outcome InflightOutcome) (raisedTo int, raised bool)
 	// RecordConcurrencyLimit reports the concurrency limit a 429 proved:
 	// limit as the upstream stated it (0 = unstated), inflight the other
 	// requests running at dispatch. Returns the cap now in force and whether
@@ -91,8 +91,8 @@ func (state GateState) TakeInflight(provider string) (InflightSlot, bool) {
 	return state.Gate.TakeInflight(provider)
 }
 
-func (state GateState) ReleaseInflight(slot InflightSlot, succeeded bool) (int, bool) {
-	return state.Gate.ReleaseInflight(slot, succeeded)
+func (state GateState) ReleaseInflight(slot InflightSlot, outcome InflightOutcome) (int, bool) {
+	return state.Gate.ReleaseInflight(slot, outcome)
 }
 
 func (state GateState) RecordConcurrencyLimit(provider string, decision RateLimitDecision) (int, bool) {

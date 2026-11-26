@@ -59,11 +59,11 @@ type State interface {
 	// regardless (a pin is a hard choice) really is running against the
 	// account — and is released exactly once with ReleaseInflight.
 	TakeInflight(provider string) (InflightSlot, bool)
-	// ReleaseInflight returns a slot TakeInflight handed out. succeeded says
-	// the upstream served the request (a 2xx): only such a request can
-	// advance an inferred cap's probe-up streak, and raised reports that this
-	// release did.
-	ReleaseInflight(slot InflightSlot, succeeded bool) (raisedTo int, raised bool)
+	// ReleaseInflight returns a slot TakeInflight handed out with how the
+	// request ended (InflightOutcome). Only an upstream verdict moves an
+	// inferred cap's probe-up streak, and raised reports that this release
+	// lifted the cap to raisedTo.
+	ReleaseInflight(slot InflightSlot, outcome InflightOutcome) (raisedTo int, raised bool)
 	// RecordConcurrencyLimit reports the concurrency limit a 429 proved
 	// (RateLimitDecision's concurrency fields) and returns the cap in force
 	// afterwards, changed when this report moved it. It replaces
@@ -79,6 +79,21 @@ type InflightSlot struct {
 	Provider string
 	Level    int
 }
+
+// InflightOutcome is how the request that held a slot ended, as the account's
+// concurrency ledger sees it (the shape of runtime.InflightOutcome; the app
+// gate maps one onto the other).
+type InflightOutcome uint8
+
+const (
+	// InflightNoVerdict: the upstream was never asked to admit the request —
+	// a pre-dispatch gate refused it, or the caller walked away.
+	InflightNoVerdict InflightOutcome = iota
+	// InflightFailed: dispatched, and the upstream did not answer 2xx.
+	InflightFailed
+	// InflightSucceeded: dispatched, and the upstream answered 2xx.
+	InflightSucceeded
+)
 
 // AttemptDTO is the stable, leaf-owned description passed to optional effects.
 type AttemptDTO struct {
@@ -150,13 +165,18 @@ func (executor Executor) Execute(attempt Attempt) Result {
 	// have to give back. Before this gate the request was simply sent, the
 	// upstream answered 429, and the account was benched for a whole
 	// transient cooldown although its slots were freeing within seconds.
+	// outcome is what the release will report. It stays "no verdict" while
+	// nothing has been sent — a refusal by either gate below says nothing
+	// about the account's concurrency limit — and becomes a failure the
+	// moment the request is dispatched: from there anything but a 2xx is the
+	// upstream not admitting it.
 	var slot InflightSlot
-	succeeded := false
+	outcome := InflightNoVerdict
 	if executor.State != nil {
 		var free bool
 		slot, free = executor.State.TakeInflight(target.Provider)
 		defer func() {
-			if raisedTo, raised := executor.State.ReleaseInflight(slot, succeeded); raised {
+			if raisedTo, raised := executor.State.ReleaseInflight(slot, outcome); raised {
 				logx.Infof("[proto=%s provider=%s] concurrency cap raised to %d — full-occupancy successes probe upward", plan.ClientProtocol(), target.Provider, raisedTo)
 			}
 		}()
@@ -211,6 +231,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 		}
 		providerImpl.ExtraHeaders(req, body, scope.Log.SessionID, plan.UpstreamPath())
 		started := time.Now()
+		outcome = InflightFailed
 		response, err := executor.Client.Do(req)
 		upstreamMS := time.Since(started).Milliseconds()
 		if err != nil {
@@ -221,6 +242,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			// Client cancellations must not poison the circuit breaker or be
 			// retried against the remaining targets.
 			if exchange.Request.Context().Err() != nil {
+				outcome = InflightNoVerdict // the caller left: the upstream said nothing
 				executor.release(target.Provider)
 				return Result{Outcome: OutcomeClientGone}
 			}
@@ -484,7 +506,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 		if response.StatusCode < 300 {
 			// A 2xx is the upstream admitting the request under the load it
 			// saw: for the concurrency cap this release counts as a success.
-			succeeded = true
+			outcome = InflightSucceeded
 			if executor.State != nil {
 				executor.State.RecordSuccess(target)
 			}

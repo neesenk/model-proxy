@@ -132,13 +132,27 @@ func (x scheduledExchange) exchange(ctx context.Context, snap forward.Snapshot, 
 			// against the account); a refusal that kept it would read as one
 			// more request in flight for the life of the process — unfreeze
 			// clears the cap but never the count, so the account would be
-			// re-saturated for good by the next concurrency 429.
-			x.p.releaseInflight(slot, false)
+			// re-saturated for good by the next concurrency 429. Nothing was
+			// sent, so the release carries no verdict.
+			x.p.releaseInflight(slot, runtimestate.InflightNoVerdict)
 			lastErr = fmt.Errorf("adjudication call (%s): account at its concurrency limit", t.Provider)
 			continue
 		}
+		// The release reports the call's upstream verdict, the same way the
+		// executor's does: a 2xx is a success, anything else a failure, and
+		// the caller's own budget expiring is neither (the client-cancel rule
+		// — nothing about the account was learned).
+		outcome := runtimestate.InflightFailed
 		rep, err := func() (reply probe.Reply, err error) {
-			defer func() { x.p.releaseInflight(slot, err == nil && reply.Status < 300) }()
+			defer func() {
+				switch {
+				case ctx.Err() != nil:
+					outcome = runtimestate.InflightNoVerdict
+				case err == nil && reply.Status < 300:
+					outcome = runtimestate.InflightSucceeded
+				}
+				x.p.releaseInflight(slot, outcome)
+			}()
 			actx, cancel := sliceAttemptContext(ctx, attempts-i)
 			defer cancel()
 			return probe.Do(actx, x.p.client, provCfg, impl, probe.Request{

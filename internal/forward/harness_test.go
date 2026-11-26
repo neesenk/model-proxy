@@ -79,6 +79,9 @@ type fakeHealthGate struct {
 	concurrencyCap map[string]int
 	inflight       map[string]int
 	peakInflight   map[string]int
+	// inflightOutcomes records, per provider, the outcome of every release in
+	// order — what the ledger is told about how each request ended.
+	inflightOutcomes map[string][]targetexec.InflightOutcome
 }
 
 type gateConcurrencyNote struct {
@@ -89,16 +92,17 @@ type gateConcurrencyNote struct {
 
 func newFakeHealthGate() *fakeHealthGate {
 	return &fakeHealthGate{
-		halfOpenOpen:   map[string]bool{},
-		failures:       map[string]int{},
-		modelFailures:  map[string]int{},
-		successes:      map[string]int{},
-		rateLimits:     map[string]time.Time{},
-		blockedParams:  map[string][]string{},
-		modelLockedSet: map[string]bool{},
-		concurrencyCap: map[string]int{},
-		inflight:       map[string]int{},
-		peakInflight:   map[string]int{},
+		halfOpenOpen:     map[string]bool{},
+		failures:         map[string]int{},
+		modelFailures:    map[string]int{},
+		successes:        map[string]int{},
+		rateLimits:       map[string]time.Time{},
+		blockedParams:    map[string][]string{},
+		modelLockedSet:   map[string]bool{},
+		concurrencyCap:   map[string]int{},
+		inflight:         map[string]int{},
+		peakInflight:     map[string]int{},
+		inflightOutcomes: map[string][]targetexec.InflightOutcome{},
 	}
 }
 
@@ -158,14 +162,24 @@ func (g *fakeHealthGate) TakeInflight(provider string) (targetexec.InflightSlot,
 	cap := g.concurrencyCap[provider]
 	return slot, cap == 0 || slot.Level < cap
 }
-func (g *fakeHealthGate) ReleaseInflight(slot targetexec.InflightSlot, _ bool) (int, bool) {
+func (g *fakeHealthGate) ReleaseInflight(slot targetexec.InflightSlot, outcome targetexec.InflightOutcome) (int, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.inflight[slot.Provider] > 0 {
 		g.inflight[slot.Provider]--
 	}
+	g.inflightOutcomes[slot.Provider] = append(g.inflightOutcomes[slot.Provider], outcome)
 	return g.concurrencyCap[slot.Provider], false
 }
+
+// releasedOutcomes returns the outcomes of every release on the provider, in
+// order.
+func (g *fakeHealthGate) releasedOutcomes(provider string) []targetexec.InflightOutcome {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]targetexec.InflightOutcome(nil), g.inflightOutcomes[provider]...)
+}
+
 func (g *fakeHealthGate) RecordConcurrencyLimit(provider string, limit, inflight int, _ uint64) (int, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

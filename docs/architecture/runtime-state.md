@@ -88,7 +88,9 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
   `/api/status` 的 `credential_alerts` 与 `quota[name].denial`，schedule 节点徽标同源
   （轮询的凭据类记录优先，字段契约见 `docs/web-api.md`）。
 - **账号并发账本（Manager 侧 concurrency，`manager_concurrency.go`）**：每个运行态 provider
-  键一条 `{inflight, cap, stated, 上调 streak, 在途请求的占位时在途数}`。在途计数是**进程事实**，
+  键一条 `{inflight, cap, stated, 上调 streak}`。占位（`TakeInflightSlot`，带占位时的在途数
+  作为该请求的视角）与释放（`ReleaseInflightSlot`，带结局 `InflightOutcome`：上游 2xx / 派发后
+  未获 2xx / 无判词）成对；只有前两种结局动 streak。在途计数是**进程事实**，
   与 generation 无关：占位/释放不按 generation 门控，`ReplaceGeneration` 只把整张表剪枝到
   live key 集（存活账号保留上限与在途请求；被移除账号的在途请求释放时落到空处），`persist()`
   不捕获它。上限是关于上游的观测：`unfreeze`（`ResetHealth`）清除上限（明说与推断都清、

@@ -262,15 +262,28 @@ func (p *Proxy) recordRateLimit(name string, until time.Time, kind runtimestate.
 // for providers whose quota poll never contacts the upstream; the lifecycle
 // (cleared by the account's next success, pruned to live keys on reload) is
 // runtime.Manager.RecordCredentialDenial's.
-// takeInflight / releaseInflight are the executor's occupancy ledger against
-// the runtime Manager. Not generation-gated: a running request is a fact
-// about the process whatever generation captured it.
+func (p *Proxy) recordCredentialDenied(name, class string, evidence []byte, generations ...uint64) {
+	p.runtimeState.RecordCredentialDenial(
+		name,
+		class,
+		string(evidence),
+		runtimestate.GenerationArg(generations),
+	)
+}
+
+// takeInflight / releaseInflight are the occupancy ledger against the runtime
+// Manager, shared by the executor (through proxyHealthGate) and the guard
+// adjudication exchange: one slot per request against an account, from
+// dispatch to completion. Not generation-gated: a running request is a fact
+// about the process whatever generation captured it. The release's outcome is
+// the request's upstream verdict (runtimestate.InflightOutcome) — only a
+// verdict moves an inferred concurrency cap.
 func (p *Proxy) takeInflight(provider string) (runtimestate.InflightSlot, bool) {
 	return p.runtimeState.TakeInflightSlot(provider)
 }
 
-func (p *Proxy) releaseInflight(slot runtimestate.InflightSlot, succeeded bool) (int, bool) {
-	return p.runtimeState.ReleaseInflightSlot(slot, succeeded)
+func (p *Proxy) releaseInflight(slot runtimestate.InflightSlot, outcome runtimestate.InflightOutcome) (int, bool) {
+	return p.runtimeState.ReleaseInflightSlot(slot, outcome)
 }
 
 // recordConcurrencyLimit stores what a 429 proved about an account's
@@ -280,15 +293,6 @@ func (p *Proxy) releaseInflight(slot runtimestate.InflightSlot, succeeded bool) 
 // runtime.Manager.NoteConcurrencyLimit's.
 func (p *Proxy) recordConcurrencyLimit(provider string, limit, inflight int, generations ...uint64) (int, bool) {
 	return p.runtimeState.NoteConcurrencyLimit(provider, limit, inflight, runtimestate.GenerationArg(generations))
-}
-
-func (p *Proxy) recordCredentialDenied(name, class string, evidence []byte, generations ...uint64) {
-	p.runtimeState.RecordCredentialDenial(
-		name,
-		class,
-		string(evidence),
-		runtimestate.GenerationArg(generations),
-	)
 }
 
 // serveRoutePreview answers "where would this request go RIGHT NOW?" — the

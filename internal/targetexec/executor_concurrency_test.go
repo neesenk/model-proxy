@@ -3,6 +3,7 @@ package targetexec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/protocol"
 )
 
 // inflightState is the executor state port backed by a real in-flight ledger
@@ -19,8 +21,8 @@ type inflightState struct {
 	executorState
 	cap      int
 	inflight int
-	// released records the succeeded flag of every release, in order.
-	released []bool
+	// released records the outcome of every release, in order.
+	released []InflightOutcome
 	// notes records every RecordConcurrencyLimit call as {stated limit,
 	// other requests in flight at dispatch}.
 	notes []concurrencyNote
@@ -34,11 +36,16 @@ func (s *inflightState) TakeInflight(provider string) (InflightSlot, bool) {
 	return slot, s.cap == 0 || slot.Level < s.cap
 }
 
-func (s *inflightState) ReleaseInflight(_ InflightSlot, succeeded bool) (int, bool) {
+func (s *inflightState) ReleaseInflight(_ InflightSlot, outcome InflightOutcome) (int, bool) {
 	s.inflight--
-	s.released = append(s.released, succeeded)
+	s.released = append(s.released, outcome)
 	return s.cap, false
 }
+
+// closedCircuitState is an inflightState whose half-open probe gate refuses.
+type closedCircuitState struct{ *inflightState }
+
+func (*closedCircuitState) TakeHalfOpenSlot(string) bool { return false }
 
 func (s *inflightState) RecordConcurrencyLimit(_ string, decision RateLimitDecision) (int, bool) {
 	s.notes = append(s.notes, concurrencyNote{limit: decision.ConcurrencyLimit, inflight: decision.ConcurrencyInflight})
@@ -58,6 +65,25 @@ func (s *inflightState) hold(t *testing.T, n int) {
 			t.Fatalf("holder %d refused on an account that must admit it", i)
 		}
 	}
+}
+
+// authFailAttempt is streamingGateAttempt against a provider whose auth
+// layer fails, so the executor stops after taking its slot but before
+// building the upstream request.
+func authFailAttempt(t *testing.T) Attempt {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "http://proxy.test/v1/chat/completions", nil)
+	plan := NewPlan(PlanInput{
+		Target:          configdomain.RouteTarget{Provider: "upstream", Model: "model"},
+		ProviderConfig:  configdomain.Provider{Provider: "test", OpenAIBaseURL: "https://upstream.test"},
+		Provider:        &executorTestProvider{authErr: fmt.Errorf("mint aqp key: HTTP 401")},
+		ClientProtocol:  protocol.OpenAI,
+		BackendProtocol: protocol.OpenAI,
+		ClientPath:      "/v1/chat/completions",
+	})
+	return NewAttempt(Runtime{}, plan,
+		Exchange{Request: request, Writer: httptest.NewRecorder(), Body: []byte(`{"model":"model","stream":true,"messages":[]}`)},
+		Scope{}, Policy{})
 }
 
 // TestExecutorSkipsSaturatedAccountBeforeDispatch: once an account's
@@ -83,6 +109,11 @@ func TestExecutorSkipsSaturatedAccountBeforeDispatch(t *testing.T) {
 	if state.inflight != 1 || len(state.released) != 1 {
 		t.Fatalf("in flight = %d, releases = %v; want only the holder left after one release", state.inflight, state.released)
 	}
+	// The refused take never reached the upstream: its release carries no
+	// verdict, so the account's cap probe does not read it as a failure.
+	if state.released[0] != InflightNoVerdict {
+		t.Fatalf("refused take released as %v, want InflightNoVerdict", state.released[0])
+	}
 	// No provider verdict: nothing for the circuit, the failure metric or the
 	// half-open probe slot.
 	if state.failures != 0 || state.releases != 0 || state.rateLimits != 0 || state.success != 0 {
@@ -103,7 +134,7 @@ func TestExecutorForceDispatchesSaturatedAccount(t *testing.T) {
 	if !result.Committed || doer.calls != 1 {
 		t.Fatalf("result = %+v calls = %d; want the pinned request dispatched and committed", result, doer.calls)
 	}
-	if state.inflight != 1 || len(state.released) != 1 || !state.released[0] {
+	if state.inflight != 1 || len(state.released) != 1 || state.released[0] != InflightSucceeded {
 		t.Fatalf("in flight = %d, releases = %v; want the forced request counted, then released as a success", state.inflight, state.released)
 	}
 }
@@ -115,7 +146,11 @@ func (panicDoer) Do(*http.Request) (*http.Response, error) { panic("transport ex
 
 // TestExecutorReleasesInflightOnEveryExit: whatever way an attempt ends, the
 // slot it took goes back — a leaked slot would read as permanent saturation.
-// Only an upstream 2xx counts as a success (the probe-up signal).
+// The release reports how the request ended, and only the upstream's own
+// answer is a verdict: a 2xx is the probe-up success, anything else the
+// upstream answered (or a transport that never answered) is a failure, and an
+// attempt the gates or the auth layer stopped before dispatch — or the caller
+// abandoned — carries no verdict at all.
 func TestExecutorReleasesInflightOnEveryExit(t *testing.T) {
 	// clientGone builds an attempt whose caller already left: the transport
 	// fails while the request context is canceled.
@@ -131,13 +166,13 @@ func TestExecutorReleasesInflightOnEveryExit(t *testing.T) {
 		responses []*http.Response
 		errors    []error
 		wantDo    int
-		succeeded bool
+		want      InflightOutcome
 	}{
-		{"transport error", nil, []error{errors.New("boom")}, 1, false},
-		{"401 after refresh", []*http.Response{testResponse(http.StatusUnauthorized, "no"), testResponse(http.StatusUnauthorized, "no")}, nil, 2, false},
-		{"429", []*http.Response{testResponse(http.StatusTooManyRequests, `{"error":"slow down"}`)}, nil, 1, false},
-		{"5xx", []*http.Response{testResponse(http.StatusInternalServerError, `{"error":"down"}`)}, nil, 1, false},
-		{"2xx", []*http.Response{testResponse(http.StatusOK, `{"ok":true}`)}, nil, 1, true},
+		{"transport error", nil, []error{errors.New("boom")}, 1, InflightFailed},
+		{"401 after refresh", []*http.Response{testResponse(http.StatusUnauthorized, "no"), testResponse(http.StatusUnauthorized, "no")}, nil, 2, InflightFailed},
+		{"429", []*http.Response{testResponse(http.StatusTooManyRequests, `{"error":"slow down"}`)}, nil, 1, InflightFailed},
+		{"5xx", []*http.Response{testResponse(http.StatusInternalServerError, `{"error":"down"}`)}, nil, 1, InflightFailed},
+		{"2xx", []*http.Response{testResponse(http.StatusOK, `{"ok":true}`)}, nil, 1, InflightSucceeded},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -147,16 +182,35 @@ func TestExecutorReleasesInflightOnEveryExit(t *testing.T) {
 			}
 			state := &inflightState{}
 			_ = (Executor{Client: doer, State: state}).Execute(streamingGateAttempt(t))
-			if doer.calls != tc.wantDo || state.inflight != 0 || len(state.released) != 1 || state.released[0] != tc.succeeded {
-				t.Fatalf("calls = %d, in flight = %d, releases = %v; want %d calls, no leak, released as succeeded=%v", doer.calls, state.inflight, state.released, tc.wantDo, tc.succeeded)
+			if doer.calls != tc.wantDo || state.inflight != 0 || len(state.released) != 1 || state.released[0] != tc.want {
+				t.Fatalf("calls = %d, in flight = %d, releases = %v; want %d calls, no leak, released as %v", doer.calls, state.inflight, state.released, tc.wantDo, tc.want)
 			}
 		})
 	}
 	t.Run("client gone", func(t *testing.T) {
 		attempt, doer, state := clientGone(t)
 		_ = (Executor{Client: doer, State: state}).Execute(attempt)
-		if state.inflight != 0 || len(state.released) != 1 {
-			t.Fatalf("in flight = %d, releases = %v; want the slot released", state.inflight, state.released)
+		// The caller left: the upstream was asked but its answer is nobody's
+		// to read — not a verdict on the account (the client-cancel rule the
+		// circuit already follows).
+		if state.inflight != 0 || len(state.released) != 1 || state.released[0] != InflightNoVerdict {
+			t.Fatalf("in flight = %d, releases = %v; want the slot released with no verdict", state.inflight, state.released)
+		}
+	})
+	t.Run("circuit open", func(t *testing.T) {
+		state := &closedCircuitState{&inflightState{}}
+		doer := &sequenceDoer{responses: []*http.Response{testResponse(http.StatusOK, `{"ok":true}`)}}
+		_ = (Executor{Client: doer, State: state}).Execute(streamingGateAttempt(t))
+		if doer.calls != 0 || state.inflight != 0 || len(state.released) != 1 || state.released[0] != InflightNoVerdict {
+			t.Fatalf("calls = %d, in flight = %d, releases = %v; want no dispatch and the slot released with no verdict", doer.calls, state.inflight, state.released)
+		}
+	})
+	t.Run("auth error before dispatch", func(t *testing.T) {
+		state := &inflightState{}
+		doer := &sequenceDoer{responses: []*http.Response{testResponse(http.StatusOK, `{"ok":true}`)}}
+		_ = (Executor{Client: doer, State: state}).Execute(authFailAttempt(t))
+		if doer.calls != 0 || state.inflight != 0 || len(state.released) != 1 || state.released[0] != InflightNoVerdict {
+			t.Fatalf("calls = %d, in flight = %d, releases = %v; want no dispatch and the slot released with no verdict", doer.calls, state.inflight, state.released)
 		}
 	})
 	t.Run("panic", func(t *testing.T) {

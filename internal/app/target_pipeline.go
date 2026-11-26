@@ -54,8 +54,20 @@ func (g proxyHealthGate) TakeInflight(provider string) (targetexec.InflightSlot,
 	slot, free := g.proxy.takeInflight(provider)
 	return targetexec.InflightSlot{Provider: slot.Provider, Level: slot.Level}, free
 }
-func (g proxyHealthGate) ReleaseInflight(slot targetexec.InflightSlot, succeeded bool) (int, bool) {
-	return g.proxy.releaseInflight(runtimestate.InflightSlot{Provider: slot.Provider, Level: slot.Level}, succeeded)
+func (g proxyHealthGate) ReleaseInflight(slot targetexec.InflightSlot, outcome targetexec.InflightOutcome) (int, bool) {
+	return g.proxy.releaseInflight(runtimestate.InflightSlot{Provider: slot.Provider, Level: slot.Level}, inflightOutcome(outcome))
+}
+
+// inflightOutcome maps the executor port's outcome onto the ledger's.
+func inflightOutcome(outcome targetexec.InflightOutcome) runtimestate.InflightOutcome {
+	switch outcome {
+	case targetexec.InflightSucceeded:
+		return runtimestate.InflightSucceeded
+	case targetexec.InflightFailed:
+		return runtimestate.InflightFailed
+	default:
+		return runtimestate.InflightNoVerdict
+	}
 }
 func (g proxyHealthGate) RecordConcurrencyLimit(provider string, limit, inflight int, generation uint64) (int, bool) {
 	return g.proxy.recordConcurrencyLimit(provider, limit, inflight, generation)

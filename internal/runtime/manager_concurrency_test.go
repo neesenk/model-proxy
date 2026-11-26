@@ -50,13 +50,13 @@ func TestTakeInflightSlotGatesOnLearnedCap(t *testing.T) {
 		t.Fatalf("in flight = %d, want 4 (a refused take still occupies the account)", got)
 	}
 	for _, slot := range held[:3] {
-		m.ReleaseInflightSlot(slot, false)
+		m.ReleaseInflightSlot(slot, InflightFailed)
 	}
 	extra := takeSlot(t, m, "zcode") // one slot free again
 	for _, slot := range held[3:] {
-		m.ReleaseInflightSlot(slot, false)
+		m.ReleaseInflightSlot(slot, InflightFailed)
 	}
-	m.ReleaseInflightSlot(extra, false)
+	m.ReleaseInflightSlot(extra, InflightFailed)
 	if got := m.Concurrency("zcode"); got != (ConcurrencyStatus{Cap: 2}) {
 		t.Fatalf("concurrency after every release = %+v, want no in-flight and the cap kept", got)
 	}
@@ -113,9 +113,9 @@ func TestConcurrencyCapProbesUpAfterFullOccupancySuccesses(t *testing.T) {
 			held = append(held, takeSlot(t, m, "zcode"))
 		}
 		probe, _ := m.TakeInflightSlot("zcode")
-		_, raised := m.ReleaseInflightSlot(probe, true)
+		_, raised := m.ReleaseInflightSlot(probe, InflightSucceeded)
 		for _, slot := range held {
-			m.ReleaseInflightSlot(slot, true)
+			m.ReleaseInflightSlot(slot, InflightSucceeded)
 		}
 		return raised
 	}
@@ -139,7 +139,7 @@ func TestConcurrencyCapProbesUpAfterFullOccupancySuccesses(t *testing.T) {
 		fullOccupancySuccess()
 	}
 	slot, _ := m.TakeInflightSlot("zcode")
-	m.ReleaseInflightSlot(slot, false)
+	m.ReleaseInflightSlot(slot, InflightFailed)
 	// Low-occupancy successes neither help nor break it: 19 full ones, 30 idle
 	// ones, then the 20th full one raises.
 	for i := 0; i < 19; i++ {
@@ -149,7 +149,7 @@ func TestConcurrencyCapProbesUpAfterFullOccupancySuccesses(t *testing.T) {
 	}
 	for i := 0; i < 30; i++ {
 		slot, _ := m.TakeInflightSlot("zcode")
-		if _, raised := m.ReleaseInflightSlot(slot, true); raised {
+		if _, raised := m.ReleaseInflightSlot(slot, InflightSucceeded); raised {
 			t.Fatal("an idle-occupancy success raised the cap")
 		}
 	}
@@ -180,13 +180,64 @@ func TestConcurrencyCapProbesUpAfterFullOccupancySuccesses(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		held := takeSlot(t, m, "step")
 		probe, _ := m.TakeInflightSlot("step")
-		if _, raised := m.ReleaseInflightSlot(probe, true); raised {
+		if _, raised := m.ReleaseInflightSlot(probe, InflightSucceeded); raised {
 			t.Fatal("a stated cap was probed upward")
 		}
-		m.ReleaseInflightSlot(held, true)
+		m.ReleaseInflightSlot(held, InflightSucceeded)
 	}
 	if got := m.Concurrency("step"); got != (ConcurrencyStatus{Cap: 2, Stated: true}) {
 		t.Fatalf("stated concurrency = %+v, want a stated cap of 2", got)
+	}
+}
+
+// TestReleaseInflightSlotNoVerdictLeavesProbeStreak: only an upstream verdict
+// moves the probe-up streak. A take the gate refused is released with no
+// verdict — nothing was sent — so it neither counts nor resets. Every freed
+// slot makes every request parked on the account race for it, and counting
+// the losers as failures kept the streak at zero for exactly as long as the
+// account was over-subscribed: the cap could never climb.
+func TestReleaseInflightSlotNoVerdictLeavesProbeStreak(t *testing.T) {
+	m := newTestManager(4)
+	m.NoteConcurrencyLimit("zcode", 0, 1, 4) // an inferred cap of one
+	// race is one freed slot contested by two requests: the winner took it at
+	// level 0 (cap−1 — full occupancy), the loser arrived next and was refused
+	// at level 1, then the winner succeeded.
+	race := func(wantRaised bool) {
+		t.Helper()
+		winner, ok := m.TakeInflightSlot("zcode")
+		if !ok {
+			t.Fatal("the first take on a one-slot account was refused")
+		}
+		loser, ok := m.TakeInflightSlot("zcode")
+		if ok {
+			t.Fatal("the second take on a one-slot account was dispatchable")
+		}
+		m.ReleaseInflightSlot(loser, InflightNoVerdict)
+		if _, raised := m.ReleaseInflightSlot(winner, InflightSucceeded); raised != wantRaised {
+			t.Fatalf("cap raised = %v on a full-occupancy success, want %v", raised, wantRaised)
+		}
+	}
+	for i := 1; i < 20; i++ {
+		race(false)
+		if got := m.Concurrency("zcode").Cap; got != 1 {
+			t.Fatalf("cap after race %d = %d, want 1 until 20 consecutive full-occupancy successes", i, got)
+		}
+	}
+	race(true)
+	if got := m.Concurrency("zcode").Cap; got != 2 {
+		t.Fatalf("cap after 20 races = %d, want the inferred cap probed up to 2", got)
+	}
+
+	// A dispatched request the upstream did not admit still resets the streak.
+	m.NoteConcurrencyLimit("zcode", 0, 1, 4)
+	for i := 0; i < 19; i++ {
+		race(false)
+	}
+	slot, _ := m.TakeInflightSlot("zcode")
+	m.ReleaseInflightSlot(slot, InflightFailed)
+	race(false)
+	if got := m.Concurrency("zcode").Cap; got != 1 {
+		t.Fatalf("cap after a failure and one success = %d, want 1 (the streak restarted from zero)", got)
 	}
 }
 
@@ -220,7 +271,7 @@ func TestSaturatedAccountLeavesSchedulingButStaysUsableByMCP(t *testing.T) {
 	}
 	m.ClearPin("route")
 
-	m.ReleaseInflightSlot(held, true)
+	m.ReleaseInflightSlot(held, InflightSucceeded)
 	if !m.TargetHealthy("pool#a", "m", now) {
 		t.Fatal("freed account still reported unhealthy")
 	}
@@ -254,7 +305,7 @@ func TestCooldownStateTreatsSaturationAsRateLimitClass(t *testing.T) {
 	if !m.ConcurrencyWaitable(targets, now, time.Hour) {
 		t.Fatal("saturated-only targets are not waitable")
 	}
-	m.ReleaseInflightSlot(b, false)
+	m.ReleaseInflightSlot(b, InflightFailed)
 	b = saturate("b")
 	m.RecordFailure("b", 1, time.Hour, 0, 4)
 	allDown, allRateLimited, _ = m.CooldownState(targets, now, time.Hour)
@@ -265,8 +316,8 @@ func TestCooldownStateTreatsSaturationAsRateLimitClass(t *testing.T) {
 	if m.ConcurrencyWaitable(targets, now, time.Hour) {
 		t.Fatal("a frozen account is not waitable even while saturated")
 	}
-	m.ReleaseInflightSlot(a, false)
-	m.ReleaseInflightSlot(b, false)
+	m.ReleaseInflightSlot(a, InflightFailed)
+	m.ReleaseInflightSlot(b, InflightFailed)
 }
 
 // TestResetHealthClearsLearnedConcurrencyCapKeepsInflight: unfreeze is the
@@ -288,7 +339,7 @@ func TestResetHealthClearsLearnedConcurrencyCapKeepsInflight(t *testing.T) {
 		t.Fatalf("concurrency after unfreeze = %+v, want the in-flight request kept and the cap cleared", got)
 	}
 	for i := 0; i < 3; i++ {
-		m.ReleaseInflightSlot(held, true)
+		m.ReleaseInflightSlot(held, InflightSucceeded)
 	}
 	if got := m.Concurrency("zcode"); got != (ConcurrencyStatus{}) {
 		t.Fatalf("concurrency after repeated releases = %+v, want zero", got)
@@ -311,7 +362,7 @@ func TestReplaceGenerationPrunesConcurrencyStateToLiveKeys(t *testing.T) {
 	if got := m.Concurrency("b"); got != (ConcurrencyStatus{}) {
 		t.Fatalf("removed account concurrency = %+v, want pruned", got)
 	}
-	m.ReleaseInflightSlot(running, true)
+	m.ReleaseInflightSlot(running, InflightSucceeded)
 	if got := m.Concurrency("b"); got != (ConcurrencyStatus{}) {
 		t.Fatalf("removed account concurrency after its release = %+v, want still absent", got)
 	}
@@ -372,7 +423,7 @@ func TestWaitInflightSlotWakesWhenASlotFrees(t *testing.T) {
 		freedByRelease <- f
 	}()
 	awaitWaiters(t, m, 1)
-	m.ReleaseInflightSlot(held, false)
+	m.ReleaseInflightSlot(held, InflightFailed)
 	select {
 	case freed := <-freedByRelease:
 		if !freed {
@@ -413,7 +464,7 @@ func TestWaitInflightSlotIgnoresUnrelatedRelease(t *testing.T) {
 	}()
 	awaitWaiters(t, m, 1)
 
-	m.ReleaseInflightSlot(heldB, true)
+	m.ReleaseInflightSlot(heldB, InflightSucceeded)
 	// Let the waiter act on that release: it must either still be parked on a
 	// NEW wake channel (it woke, looked, and parked again) or — the bug —
 	// have returned.
@@ -431,7 +482,7 @@ func TestWaitInflightSlotIgnoresUnrelatedRelease(t *testing.T) {
 	default:
 	}
 
-	m.ReleaseInflightSlot(heldA, false)
+	m.ReleaseInflightSlot(heldA, InflightFailed)
 	select {
 	case f := <-freed:
 		if !f {
@@ -466,7 +517,7 @@ func TestWaitInflightSlotWakesWhenUnfreezeClearsTheCap(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("clearing the cap did not wake the waiter")
 	}
-	m.ReleaseInflightSlot(held, false)
+	m.ReleaseInflightSlot(held, InflightFailed)
 }
 
 // A reload that drops the account a request waits on must not leave it parked
@@ -490,7 +541,7 @@ func TestWaitInflightSlotEndsWhenReloadDropsTheAccount(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("dropping the waited-for account did not end the wait")
 	}
-	m.ReleaseInflightSlot(held, false)
+	m.ReleaseInflightSlot(held, InflightFailed)
 }
 
 // The preview (Status→Schedule, /debug/schedule, `model-proxy schedule`) must
@@ -501,7 +552,7 @@ func TestPreviewOrderDropsSaturatedAccountLikeDecideOrder(t *testing.T) {
 	m := newTestManager(4)
 	m.NoteConcurrencyLimit("a", 0, 1, 4)
 	held := takeSlot(t, m, "a")
-	defer m.ReleaseInflightSlot(held, false)
+	defer m.ReleaseInflightSlot(held, InflightFailed)
 
 	now := time.Now()
 	input := ScheduleInput{

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/targetexec"
 )
 
 // selectorDecisionResponder returns an upstream responder that answers a
@@ -181,7 +182,12 @@ func TestServeRouteSelectorSkippedWhenAccountSaturated(t *testing.T) {
 	h.gate.RecordConcurrencyLimit("sel", 1, 0, 1)
 
 	w := h.serve(snap, "openai", "/v1/chat/completions", body, nil)
-	h.gate.ReleaseInflight(held, true)
+	// The refused leg never reached the upstream: what it gives back to the
+	// ledger is "no verdict", not a failure of the account.
+	if got := h.gate.inflightOutcomes["sel"]; len(got) != 1 || got[0] != targetexec.InflightNoVerdict {
+		t.Errorf("selector slot releases = %v, want exactly one release with no verdict", got)
+	}
+	h.gate.ReleaseInflight(held, targetexec.InflightSucceeded)
 	if w.Code != http.StatusOK || upA.hits() != 1 || upB.hits() != 0 {
 		t.Fatalf("status = %d hits a/b = %d/%d, want the scheduled order (a) served", w.Code, upA.hits(), upB.hits())
 	}

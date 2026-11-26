@@ -26,6 +26,21 @@ type InflightSlot struct {
 	Level int
 }
 
+// InflightOutcome is how the request that held a slot ended, as far as the
+// account's concurrency is concerned.
+type InflightOutcome uint8
+
+const (
+	// InflightNoVerdict: the upstream was never asked to admit this request —
+	// a pre-dispatch gate refused it, or the caller walked away. Nothing was
+	// learned about the limit, so the probe-up streak is left as it is.
+	InflightNoVerdict InflightOutcome = iota
+	// InflightFailed: dispatched, and the upstream did not answer 2xx.
+	InflightFailed
+	// InflightSucceeded: dispatched, and the upstream answered 2xx.
+	InflightSucceeded
+)
+
 // ConcurrencyStatus is the read model of one account's concurrency.
 type ConcurrencyStatus struct {
 	// Inflight is the number of requests the proxy is running against the
@@ -48,13 +63,10 @@ type concurrencyState struct {
 	cap      int
 	stated   bool
 	// full counts consecutive successes that exercised the cap (the probe-up
-	// streak of an inferred cap). Any unsuccessful request or any concurrency
-	// 429 resets it.
+	// streak of an inferred cap). A dispatched request the upstream did not
+	// admit, or a concurrency 429, resets it; a request with no upstream
+	// verdict (InflightNoVerdict) leaves it alone.
 	full int
-	// levels is the multiset of take-time Levels of the in-flight requests,
-	// so a release knows whether ITS request exercised the cap even if the cap
-	// moved while it ran.
-	levels map[int]int
 }
 
 // saturatedLocked reports whether every learned slot of the account is taken.
@@ -75,22 +87,22 @@ func (m *Manager) TakeInflightSlot(provider string) (InflightSlot, bool) {
 	m.ensureLocked()
 	state := m.concurrency[provider]
 	if state == nil {
-		state = &concurrencyState{levels: map[int]int{}}
+		state = &concurrencyState{}
 		m.concurrency[provider] = state
 	}
 	slot := InflightSlot{Provider: provider, Level: state.inflight}
 	state.inflight++
-	state.levels[slot.Level]++
 	return slot, state.cap == 0 || slot.Level < state.cap
 }
 
-// ReleaseInflightSlot returns a slot taken by TakeInflightSlot. succeeded says
-// the upstream served the request (a 2xx): such a request counts toward the
-// probe-up streak of an inferred cap when it exercised the cap, and raised
-// reports that the streak just lifted the cap to raisedTo. A release that
-// leaves the account with a free slot wakes the requests parked in
-// WaitInflightSlot.
-func (m *Manager) ReleaseInflightSlot(slot InflightSlot, succeeded bool) (raisedTo int, raised bool) {
+// ReleaseInflightSlot returns a slot taken by TakeInflightSlot. Only an
+// upstream verdict moves the probe-up streak of an inferred cap: a succeeded
+// request that exercised the cap counts toward it, a failed one resets it,
+// and one with no verdict — refused before dispatch, or abandoned by its
+// caller — does neither. raised reports that this release lifted the cap to
+// raisedTo. A release that leaves the account with a free slot wakes the
+// requests parked in WaitInflightSlot.
+func (m *Manager) ReleaseInflightSlot(slot InflightSlot, outcome InflightOutcome) (raisedTo int, raised bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := m.concurrency[slot.Provider]
@@ -100,14 +112,10 @@ func (m *Manager) ReleaseInflightSlot(slot InflightSlot, succeeded bool) (raised
 	if state.inflight > 0 {
 		state.inflight--
 	}
-	if state.levels[slot.Level] <= 1 {
-		delete(state.levels, slot.Level)
-	} else {
-		state.levels[slot.Level]--
-	}
-	if succeeded {
+	switch outcome {
+	case InflightSucceeded:
 		raised = state.growLocked(slot.Level)
-	} else {
+	case InflightFailed:
 		state.full = 0 // the streak counts CONSECUTIVE successes
 	}
 	// Wake the waiters only when THIS release freed a slot: an account still
@@ -165,7 +173,7 @@ func (m *Manager) NoteConcurrencyLimit(provider string, limit, inflight int, gen
 	}
 	state := m.concurrency[provider]
 	if state == nil {
-		state = &concurrencyState{levels: map[int]int{}}
+		state = &concurrencyState{}
 		m.concurrency[provider] = state
 	}
 	state.full = 0

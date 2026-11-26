@@ -140,9 +140,12 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 	// saturated. Its take-time level is the vantage point the 429
 	// classification below is read from.
 	slot, free := gate.TakeInflight(m.Provider)
-	succeeded := false
+	// outcome is what the release reports (targetexec.InflightOutcome): no
+	// verdict until the leg is sent, a failure from then on unless the upstream
+	// admits it, and none again if the caller walks away.
+	outcome := targetexec.InflightNoVerdict
 	defer func() {
-		if raisedTo, raised := gate.ReleaseInflight(slot, succeeded); raised {
+		if raisedTo, raised := gate.ReleaseInflight(slot, outcome); raised {
 			logx.Infof("[%s provider=%s] concurrency cap raised to %d — full-occupancy successes probe upward", in.Kind, m.Provider, raisedTo)
 		}
 	}()
@@ -160,6 +163,7 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 		return fail(fmt.Errorf("convert decisions→%s: %w", plan.BackendProtocol(), err))
 	}
 
+	outcome = targetexec.InflightFailed
 	legCtx, cancelLeg := context.WithTimeout(ctx, in.Timeout)
 	defer cancelLeg()
 	exchange := &targetexec.BufferedLegExchange{}
@@ -193,6 +197,7 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 			return fail(err)
 		}
 		if ctx.Err() == context.Canceled {
+			outcome = targetexec.InflightNoVerdict // the caller left: no verdict on the account
 			return fail(errDecisionLegUnavailable)
 		}
 		if errors.Is(err, context.DeadlineExceeded) &&
@@ -209,7 +214,9 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 	sentBody := exchange.SentBody
 	// A 2xx is the upstream admitting the request: for the concurrency cap
 	// this release counts as a success.
-	succeeded = resp.StatusCode < 300
+	if resp.StatusCode < 300 {
+		outcome = targetexec.InflightSucceeded
+	}
 	// Same bounded evidence window as the executor's failure branches: the 429
 	// rate-limit parse and the 5xx content-refusal verdict read at most 8 KiB.
 	peek := respBody

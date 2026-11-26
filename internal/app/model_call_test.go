@@ -359,7 +359,7 @@ func TestScheduledExchange_SaturatedRefusalReleasesInflightSlot(t *testing.T) {
 	if !free {
 		t.Fatal("the first slot of a freshly capped account must be free")
 	}
-	defer p.runtimeState.ReleaseInflightSlot(held, true)
+	defer p.runtimeState.ReleaseInflightSlot(held, runtimestate.InflightSucceeded)
 	p.runtimeState.SetPin("judge", runtimestate.Pin{Provider: "judge"})
 
 	_, err := scheduledExchange{p: p}.exchange(context.Background(), p.SnapshotRuntime(), "judge", exchangeBody(), nil)
