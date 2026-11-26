@@ -142,6 +142,16 @@ func locateIssueLine(doc *yaml.Node, message string) int {
 			return line
 		}
 	}
+	// The request_log.hot_retention cross-check names its key without the
+	// "key: message" shape (it reports both keys in parentheses), and an
+	// absent hot_retention is checked as its default — then the retention key
+	// the operator did write is the line to jump to.
+	if strings.HasPrefix(message, "request_log.hot_retention ") {
+		if line := keyPathLine(root, []string{"request_log", "hot_retention"}); line > 0 {
+			return line
+		}
+		return keyPathLine(root, []string{"request_log", "retention"})
+	}
 	if match := sectionKeyRe.FindStringSubmatch(message); match != nil {
 		section := sectionRoot(match[1])
 		name := match[2]

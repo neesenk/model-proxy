@@ -117,6 +117,27 @@ func TestValidateYAML_SemanticErrorLines(t *testing.T) {
 			wantLine: 0,
 			wantMsg:  `no providers configured`,
 		},
+		{
+			// The hot-window cross-check names its key without the
+			// "key: message" shape the dotted-field pattern requires; the
+			// editor's jump-to-line still needs the offending key.
+			name: "hot window outside retention, key written",
+			mutate: func(s string) string {
+				return s + "request_log:\n  retention: 48h\n  hot_retention: 72h\n"
+			},
+			wantLine: 14, // request_log.hot_retention
+			wantMsg:  `request_log.hot_retention (72h) must be < request_log.retention`,
+		},
+		{
+			// An absent hot_retention is cross-checked as its 168h default,
+			// so the key the operator actually wrote too short is retention.
+			name: "hot window outside retention, key absent",
+			mutate: func(s string) string {
+				return s + "request_log:\n  retention: 48h\n"
+			},
+			wantLine: 13, // request_log.retention
+			wantMsg:  `request_log.hot_retention (unset, default 168h) must be < request_log.retention`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
