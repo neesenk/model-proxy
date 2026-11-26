@@ -173,8 +173,6 @@ func QuotaSourceLabel(providerID string) string {
 		return "user/balance"
 	case "kimi-code":
 		return "usages"
-	case "zcode":
-		return "quota/limit"
 	case "openrouter":
 		return "api/v1/key"
 	default:

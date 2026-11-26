@@ -42,7 +42,7 @@ func init() {
 
 // AuthHeaders injects the key as BOTH Authorization: Bearer (OpenAI endpoint)
 // and x-api-key (Anthropic endpoint), so one config serves both protocols
-// (deepseek/zcode pattern). The OpenAI endpoint ignores x-api-key; this covers
+// (the DeepSeek pattern). The OpenAI endpoint ignores x-api-key; this covers
 // the Anthropic gateway whether it prefers Bearer or x-api-key.
 //
 // NOTE: login-time validation (validateKeyBearerGET) sends Bearer only — it

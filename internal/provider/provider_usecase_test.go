@@ -280,9 +280,16 @@ func TestZhipuFetchModels_FromEndpoint(t *testing.T) {
 // --- P14: New() errors on unknown provider_id ---
 
 func TestNew_UnknownProviderID(t *testing.T) {
-	_, err := New(&Config{ProviderID: "nope"}, "nope")
-	if err == nil {
-		t.Fatal("New with unknown provider_id: want error, got nil")
+	for _, id := range []string{"nope", "zcode"} {
+		t.Run(id, func(t *testing.T) {
+			if IsRegistered(id) {
+				t.Fatalf("IsRegistered(%q) = true, want false", id)
+			}
+			_, err := New(&Config{ProviderID: id}, id)
+			if err == nil || !strings.Contains(err.Error(), `unsupported provider_id "`+id+`"`) {
+				t.Fatalf("New(%q) error = %v, want unsupported provider_id", id, err)
+			}
+		})
 	}
 }
 

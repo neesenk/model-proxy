@@ -103,13 +103,13 @@ func TestBuildExpandedRoutes_FansOutDerivedAndExplicit(t *testing.T) {
 // its fit verdict; a full replacement names the cross-route head.
 func TestDescribeFitReroute(t *testing.T) {
 	planner := NewPlanner(PlannerInput{})
-	before := []configdomain.RouteTarget{{Provider: "zcode", Model: "glm-5.3"}}
+	before := []configdomain.RouteTarget{{Provider: "zhipu", Model: "glm-5.3"}}
 	if note, changed := planner.DescribeFitReroute(before, before, Profile{}); changed || note != "" {
 		t.Fatalf("identical sets must be a no-op, got %q", note)
 	}
 	after := []configdomain.RouteTarget{{Provider: "step-plan", Model: "step-5-preview"}}
 	note, changed := planner.DescribeFitReroute(before, after, Profile{HasImage: true})
-	if !changed || !strings.Contains(note, "zcode/glm-5.3:") || !strings.Contains(note, "cross-route step-plan/step-5-preview") {
+	if !changed || !strings.Contains(note, "zhipu/glm-5.3:") || !strings.Contains(note, "cross-route step-plan/step-5-preview") {
 		t.Fatalf("reroute trace wrong: %q changed=%v", note, changed)
 	}
 }
@@ -121,11 +121,11 @@ func TestDescribeFitReroute(t *testing.T) {
 func TestPreferRouteProvidersLadder(t *testing.T) {
 	scheduled := []configdomain.RouteTarget{
 		{Provider: "step-plan", Model: "step-5-preview"}, // scheduler-best (plan tier)
-		{Provider: "zcode", Model: "glm-5.3v"},           // route provider, ranked lower
+		{Provider: "zhipu", Model: "glm-5.3v"},           // route provider, ranked lower
 		{Provider: "shopee", Model: "vision-x"},          // another route provider
 	}
-	got := preferRouteProviders(scheduled, map[string]bool{"zcode": true, "shopee": true})
-	if got[0].Provider != "zcode" || got[1].Provider != "shopee" || got[2].Provider != "step-plan" {
+	got := preferRouteProviders(scheduled, map[string]bool{"zhipu": true, "shopee": true})
+	if got[0].Provider != "zhipu" || got[1].Provider != "shopee" || got[2].Provider != "step-plan" {
 		t.Fatalf("route providers must lead the ladder: %+v", got)
 	}
 	// no overlap: order untouched

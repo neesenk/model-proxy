@@ -206,9 +206,8 @@ opencode-go、凭据池 0 账号墓碑、构建失败）整体剔除——这些
 UUID，代理据此填请求日志 `session_id` 与 live 事件 `session_id`（见
 `docs/web-api.md` 的 `/api/events`、Live 会话分析）。stepcode 复用同一 pi 形状渲染
 （其 models.json compat schema 与 pi 一致），会话归因同样开箱即用。zcode 客户端
-原生发 `x-session-id`（在代理默认 `session_headers` 允许列表内，实测见
-`internal/provider/testdata/zcode-wire/` 的真实 CLI 捕获），takeover 后无需任何
-配置即获得会话归因。
+原生发 `x-session-id`（在代理默认 `session_headers` 允许列表内），takeover 后
+无需任何配置即获得会话归因。
 
 **无会话头客户端的归因（spec body 字段）**：严格按 OpenAI/Anthropic API spec
 实现的 agent（Kimi Code、Codex）不发自定义会话头，而是把稳定会话 id 放在
@@ -218,7 +217,7 @@ OpenAI Chat/Responses 的 `prompt_cache_key`（Moonshot
 的 `metadata.user_id`（MoonshotAI/kimi-code#3506 开发者确认）。代理在 `session_headers` 允许列表
 全空时按此优先级提取（`protocol.SessionIDFromBody`）：takeover 后的 kimi
 请求无需任何配置即获得请求日志/live 事件的会话归因；需要会话亲和头的
-上游（opencode-go 的 `x-opencode-session`、zcode 的 `X-Session-Id`）同样以
+上游（opencode-go 的 `x-opencode-session`）同样以
 「原生会话头 > body 字段 > 合成值」的优先级镜像同一 id，保持上游路由与
 prompt cache 命中率。该 id 仅限观测与镜像，不进路由粘性（仍
 `x-claude-code-session-id`）与 guard 安全决策。

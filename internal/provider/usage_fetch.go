@@ -83,9 +83,8 @@ func usageGetForDisplay(url, proxyURL, loginName string, auth func(*http.Request
 	return body, true
 }
 
-// bigmodelQuota fetches and parses the BigModel quota envelope shared by
-// zhipu and zcode (zcode IS BigModel — same envelope). Follows the Quota()
-// failure contract via usageGet.
+// bigmodelQuota fetches and parses the BigModel quota envelope. Follows the
+// Quota() failure contract via usageGet.
 func bigmodelQuota(url, proxyURL string, auth func(*http.Request) error, headers map[string]string) (*QuotaSnapshot, error) {
 	body, fail, ok := usageGet(url, proxyURL, auth, headers, nil)
 	if !ok {

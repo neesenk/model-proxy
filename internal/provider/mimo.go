@@ -102,7 +102,7 @@ func (p *MiMoProvider) FetchModels() ([]string, error) {
 
 // ExtraHeaders sets anthropic-version on every upstream request (forward +
 // probe), like every other anthropic-compatible provider here (kimi-code,
-// qwen-plan, step-plan, volcengine, aqp, zcode) — deepseek is the documented
+// qwen-plan, step-plan, volcengine, aqp) — deepseek is the documented
 // exception because its gateway ignores the header. The forward path's
 // client→upstream header whitelist (targetexec.upstreamHeaderWhitelist) does
 // NOT carry anthropic-version, so without this the proxy would strip the

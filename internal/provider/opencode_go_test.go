@@ -807,10 +807,28 @@ func TestOpenCodeGoLogout_DeletesKey(t *testing.T) {
 	}
 }
 
+func TestPrintableASCII(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want string
+	}{
+		{"", ""},
+		{"  session-1  ", "session-1"},
+		{"ascii ~ printable", "ascii ~ printable"},
+		{"bad\nvalue", ""},
+		{"bad\x00value", ""},
+		{"会话", ""},
+	} {
+		if got := printableASCII(tc.in); got != tc.want {
+			t.Errorf("printableASCII(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // Session-id sources feeding x-opencode-session must be printable-ASCII
-// guarded (same idiom as zcode): a control-byte value would make net/http
-// reject the whole outbound request, and that failure would land on this
-// provider's circuit breaker — client-controllable breaker feeding.
+// guarded: a control-byte value would make net/http reject the whole outbound
+// request, and that failure would land on this provider's circuit breaker —
+// client-controllable breaker feeding.
 func TestOpenCodeGoExtraHeaders_ControlCharSessionIgnored(t *testing.T) {
 	p := newTestOpenCodeGo(t, nil)
 

@@ -666,7 +666,7 @@ func (executor Executor) commit(
 	// terminal in the client protocol), so it needs nothing appended — but its
 	// aborts need the same attribution, and the converters' only log is
 	// convertWarn: deduped per process per message, with neither provider nor
-	// cause. On 2026-11-24 thirteen zcode streams (openai clients reading an
+	// cause. On 2026-11-24 thirteen converted streams (openai clients reading an
 	// anthropic upstream) ended mid-generation and the whole day's serve.log
 	// evidence was one deduped line. The observer runs the same shadow scanner
 	// over the client-protocol bytes the converter produced and only reports.
@@ -760,7 +760,7 @@ func (executor Executor) commit(
 			// terminal is the client's fail-closed signal (forwarded byte-identical,
 			// never re-synthesized), but the request log keeps the exchange as a
 			// plain status 200. This line is that evidence; the excerpt is bounded
-			// and single-line by the watcher. (zcode's live shape on 2026-11-22 —
+			// and single-line by the watcher. (The live shape on 2026-11-22 —
 			// forty streams ending in "upstream stream terminated unexpectedly" —
 			// is a CONVERTED stream and lands in the branch above.)
 			logx.Warnf("[proto=%s provider=%s] upstream error terminal ended the stream — forwarded to the client as-is, nothing synthesized: %s",

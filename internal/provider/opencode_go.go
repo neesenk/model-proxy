@@ -131,8 +131,7 @@ func (p *OpenCodeGoProvider) FetchModels() ([]string, error) {
 //     client always wins.
 func (p *OpenCodeGoProvider) ExtraHeaders(req *http.Request, body []byte, sessionID string, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
-	// Session-id sources are guarded with printableASCII (same as zcode): a
-	// control-byte value would make net/http reject the whole outbound request
+	// A control-byte value would make net/http reject the whole outbound request
 	// and the failure would land on this provider's circuit breaker.
 	if req.Header.Get("x-opencode-session") == "" {
 		for _, h := range []string{"x-claude-code-session-id", "x-session-id", "user_id"} {
@@ -168,6 +167,19 @@ func (p *OpenCodeGoProvider) ExtraHeaders(req *http.Request, body []byte, sessio
 	if req.Header.Get("x-opencode-session") == "" {
 		req.Header.Set("x-opencode-session", "mp-"+newRequestID())
 	}
+}
+
+func printableASCII(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	for _, r := range s {
+		if r < 0x20 || r > 0x7e {
+			return ""
+		}
+	}
+	return s
 }
 
 // usageURL derives the quota endpoint from openai_base_url + "/usage" (the

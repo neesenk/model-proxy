@@ -232,9 +232,9 @@ func (p *Proxy) buildExpandedRoutes(notReady map[string]bool) map[string][]confi
 		return p.expandTarget(t, notReady)
 	})
 	// A route whose EVERY target has no runnable implementation (provider
-	// configured but without an account/credential — e.g. zcode before its
-	// first login) leaves the effective table entirely: no empty chain block
-	// on the schedule view, no phantom key in routeKeys, no dead name in
+	// configured but without an account/credential — e.g. an API-key provider
+	// before its first login) leaves the effective table entirely: no empty chain
+	// block on the schedule view, no phantom key in routeKeys, no dead name in
 	// /v1/models. The config-derived table (Config page, `routes` CLI) keeps
 	// showing it — only the servable projection drops it.
 	for exposed, targets := range expanded {

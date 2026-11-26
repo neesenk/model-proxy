@@ -81,7 +81,7 @@ proxy: off
 #  opus: [zhipu/glm-5.3, aqp/glm-5.3, volcengine/glm-5.3, shopee/glm-5.3]
 #  claude-sonnet-4-6: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-v4-pro]
 #  sonnet: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-v4-pro]
-routes: {deepseek-v4.1-flash: {strategy: load_balance, targets: [{model: deepseek-v4.1-flash-1017, priority: 2, provider: aqp}, {model: deepseek-v4.1-flash-1017, priority: 3, provider: shopee}, {model: step-5-preview, priority: 1, provider: step-plan}, {model: glm-5.3-flash, provider: zcode}]}}
+routes: {deepseek-v4.1-flash: {strategy: load_balance, targets: [{model: deepseek-v4.1-flash-1017, priority: 2, provider: aqp}, {model: deepseek-v4.1-flash-1017, priority: 3, provider: shopee}, {model: step-5-preview, priority: 1, provider: step-plan}]}}
 # deepseek-v4-pro: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-flash]
 # deepseek-v4-flash: [aqp/deepseek-v4-flash, volcengine/deepseek-v4-flash, shopee/deepseek-v4-flash, deepseek/deepseek-flash]
 

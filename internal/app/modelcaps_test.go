@@ -515,7 +515,7 @@ func TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E(t *testing.T) {
 // TestModelCaps_TransientFailureDoesNotFlapConcludedVerdict: a re-probe pass
 // (here: a sibling model's unknown leg keeps the provider eligible) must not
 // downgrade a model's previously CONCLUDED legs when the re-probe hits a
-// transient 429 (the zcode/zhipu "? unknown" flapping): the partially
+// transient 429 (the BigModel "? unknown" flapping): the partially
 // concluded model keeps its yes legs through the storm and concludes fully
 // once the throttle lifts. Fully concluded models are not re-probed at all
 // (see TestModelCaps_ConcludedModelsNotReprobedAsCollateral).
@@ -587,7 +587,7 @@ func TestModelCaps_TransientFailureDoesNotFlapConcludedVerdict(t *testing.T) {
 // TestModelCaps_ConcludedModelsNotReprobedAsCollateral: when one model's
 // unconcluded leg keeps a provider eligible for a pass, the provider's
 // FULLY concluded models are not re-probed — the collateral re-probe used to
-// re-burst the whole provider against rate-limited upstreams (zcode/zhipu:
+// re-burst the whole provider against rate-limited upstreams (BigModel:
 // adding one model fired 33 requests) and downgrade fine verdicts.
 func TestModelCaps_ConcludedModelsNotReprobedAsCollateral(t *testing.T) {
 	var chatHits atomic.Int32

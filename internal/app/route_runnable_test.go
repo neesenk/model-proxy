@@ -1,6 +1,6 @@
 // route_runnable_test.go — the effective route table (expandedRoutes) only
 // lists targets the forward path could actually serve: a provider whose
-// credential pool is an authoritative 0-account tombstone (e.g. zcode after
+// credential pool is an authoritative 0-account tombstone (for example after
 // logout) has no impl, and its targets are dropped at expansion (schedule
 // chains, /v1/models, forward all read the effective table). Adding the
 // account (login → reload rebuilds the table) brings the target back.
@@ -31,7 +31,7 @@ func runnableTestConfig() *configdomain.Config {
 		Providers: map[string]configdomain.Provider{
 			// live builds an auth-only impl from config alone (missing-file
 			// branch); ghost's pool file is an empty plural tombstone, so
-			// buildProviders disables it — the zcode shape.
+			// buildProviders disables it — the authoritative empty-pool shape.
 			"live":  {OpenAIBaseURL: "http://live.example", Provider: testProviderID, Models: []string{"shared", "solo-live"}},
 			"ghost": {OpenAIBaseURL: "http://ghost.example", Provider: testProviderID, Models: []string{"shared", "solo-ghost"}},
 		},
@@ -47,7 +47,7 @@ func runnableTestConfig() *configdomain.Config {
 func TestExpandedRoutesDropAccountlessProviders(t *testing.T) {
 	setPoolHome(t, t.TempDir())
 	// Zero keys = authoritative empty plural pool: buildProviders disables
-	// the provider ("pool … exists but has 0 accounts"), same as zcode live.
+	// the provider ("pool … exists but has 0 accounts").
 	writePoolFile(t, "ghost", testProviderID)
 
 	p := newTestProxy(t, runnableTestConfig())

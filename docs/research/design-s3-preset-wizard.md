@@ -91,6 +91,6 @@ add zhipu
 ## 8. 实现记录与草案差异
 
 1. **无独立 presets 数据目录**：目录直接派生自 `configdomain.DefaultConfigYAML`（模板即唯一权威），过滤已注册 provider_id 并排除内网 SSO 的 aqp——草案 §3.1 的独立 Go 表/YAML 方案作废，避免第二份 provider 知识。
-2. **登录分派提取为 `login.RunProviderLogin`**：`CmdLogin` 与 `add` 共用同一 provider 分派（aqp/codex/zcode/volcengine/apikey）；codex 流程拆出可返回错误的 `runCodexLoginFlow`（原 `CmdCodexLogin` 保留 AST 守卫要求的路径解析模式）。
+2. **登录分派提取为 `login.RunProviderLogin`**：`CmdLogin` 与 `add` 共用同一 provider 分派（aqp/codex/volcengine/apikey）；codex 流程拆出可返回错误的 `runCodexLoginFlow`（原 `CmdCodexLogin` 保留 AST 守卫要求的路径解析模式）。
 3. **命令注册遵循 ProcessCommand 约定**：archtest 要求 app.Commands 每项都是 `ProcessCommand(handler)`，故经 `RunAdd`/`RunPresets` 适配（exit code → 进程退出码）；相关穷举契约测试同步更新。
 4. **歧义门语义**：合并后对「其他已配置 provider 同模型且无显式 route」检测；非 TTY 无 `--yes` 时在登录前拒绝（fail-closed，不产生任何凭据副作用），TTY 询问 y/N。

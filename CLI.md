@@ -70,7 +70,7 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
   终止、不打行）、调度超时（Warn：终态已送达）、上游流先于终止序列结束
   （Warn：合成协议原生错误终态交付客户端、不视为成功完整流）、上游自带错误终态结束流
   （Warn：原样转发客户端、不重复合成，行内带单行有界摘录——该应答在 request log
-  里是普通 status 200，此行是唯一失败证据）；跨协议转换流（如 zcode：openai 客户端
+  里是普通 status 200，此行是唯一失败证据）；跨协议转换流（例如 openai 客户端
   读 anthropic 上游）同样逐事件落归因行——client 断开（Info）、调度超时（Warn）、
   转换流以错误终态结束（Warn，行内带摘录），`[convert] WARN … scanner error` 仍按
   进程去重、只记底层错误类别。语义权威与判定边界在
@@ -305,7 +305,7 @@ login <provider> [--label <name>] [--replace]
                  [--from-env VAR [--from-env-ak VAR --from-env-sk VAR] | --from-codex]
 ```
 
-逻辑（`internal/cli/login/login.go` 的 `CmdLogin`）：经 `RunProviderLogin` 按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、static/zhipu/deepseek/kimi-code/mimo/qwen-plan/step-plan/typesafe/openrouter/opencode-go=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `MaybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。`add` 命令复用同一分派。
+逻辑（`internal/cli/login/login.go` 的 `CmdLogin`）：经 `RunProviderLogin` 按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、static/zhipu/deepseek/kimi-code/mimo/qwen-plan/step-plan/typesafe/openrouter/opencode-go=apikey 池、volcengine=apikey+AK/SK 三元组池。成功后 `MaybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。`add` 命令复用同一分派。
 
 包切分：`internal/cli/login` 只是交互 shell（命令编排、flag 解析、stdin 提示、终端输出、loopback 回调页、daemon nudge）；传输中立核心在 `internal/login`（codex device flow、AQP SSO 客户端、apikey/volcengine 池的校验/去重/写入/删除），Web 层（`internal/app`）与 shell 驱动同一核心。
 
@@ -366,17 +366,6 @@ You can now use codex-native models (gpt-5.5) through the proxy.
 - stderr（当存在可校验端点时）：`Validating API key...`。校验端点由 `apiKeyValidationURL` 解析：配了 `usage_url` 的用它（zhipu/deepseek/**kimi-code** 均配；mimo 无计费端点故不配，回退 `/models`）；**未配 `usage_url` 的回退 `openai_base_url/models`**（qwen-plan/step-plan：无公开用量接口，不配 `usage_url`），openai base 也没有时回退 **`decisions_base_url/models`**（typesafe：纯 decisions provider）。校验 = GET 该端点 with `Authorization: Bearer <key>`；**401/403 或网络错误** → `login failed: validation failed: HTTP <N>: <BODY>`（exit 1，**不写池**）；其余状态码（200/404 等）= key 通过（写池）。usage 拒后的 `/models` 二次回退**只对能拒 key 的 /models 生效**：openrouter 的 `/models` 公开且忽略 Bearer（坏 key 也 200），usage 端点（`/api/v1/key`）拒了就是拒了（`provider.ModelsAuthless`，opencode-go 同列）。**`ModelsAuthless` 且无 `usage_url`**（opencode-go）时校验端点永远不能拒 key，登录跳过 Bearer GET、改用候选 key 发一次最小真实请求（provider `ProbeRequest` → `openai_base_url/chat/completions`，第一个 config 模型）：401/403/信封鉴权失败/网络错误 → `login failed: validation failed: …`（exit 1，不写池）；**429/5xx → 无法判定**（exit 1、不写池，报 `key validation inconclusive` 提示稍后重试——探测已被计费，但限流/上游故障说明不了 key 好坏）；其余状态放行——三态判定契约详见 backend-contracts.md。
 - 重复 id 且非 `--replace` -> stdout 提示 `Account "<LABEL>" is already logged in. Replace its key? [y/N] `；答非 y -> `login cancelled`（exit 1）。
 - 成功 stdout：`✓ Saved account <MASKED_ID> (<LABEL>)`（绿）。
-
-### zcode（BigModel Coding Plan，`case "zcode"` → `runApiKeyLoginWithInput`）
-
-stdout：
-```
-Opening BigModel login to fetch a Coding Plan API key…
-Enter API key for <PROVNAME>: <stdin>
-```
-- 开浏览器到 `https://bigmodel.cn/login`（`openBrowser`）；远程/SSH 打不开时 stderr `(could not open browser: <err> — open https://bigmodel.cn/login manually)`。用户登录后到 API Keys 拿 **Coding Plan API key** 粘贴。**复制注意**：BigModel key 形如 `<32位>.<17位>`（共 49 字符、中间有一个点），实测截断到点前（32 字符）会被 BigModel 全端点 401「令牌已过期或验证不正确」——粘贴前先粘到文本编辑器核对长度。校验会依次打 `usage_url` 与 `openai_base_url/models` 两个端点，任一通过即落池；均拒才报 `validation failed`。
-- 之后同 apikey 池流程：`Validating API key...`（stderr，配了 `usage_url`）→ `✓ Saved account <MASKED_ID> (<LABEL>)`。
-- 失败同 apikey：`login failed: <err>`（exit 1，不写池）。
 
 ### volcengine（`runVolcengineLoginWithInput`）
 
@@ -890,7 +879,7 @@ Scheduling
 <⚠ N warning(s) | ✓ no warnings>
 ```
 - `<TIER>` = `plan` / `pay-as-you-go`。路由行**没有** tier 列：离线没有测量，config billing 标签不得冒充测量（tier 看 `doctor --live`）。
-- `<SOURCE>` = `quotaSourceLabel(provider_id)`：aqp=`monthly_usage`、codex=`wham/usage`、zhipu=`quota/limit`、zcode=`quota/limit`、volcengine=`GetAFPUsage (AK/SK)`、deepseek=`user/balance`、kimi-code=`usages`、其他=`(none -> unknown at runtime)`。
+- `<SOURCE>` = `quotaSourceLabel(provider_id)`：aqp=`monthly_usage`、codex=`wham/usage`、zhipu=`quota/limit`、volcengine=`GetAFPUsage (AK/SK)`、deepseek=`user/balance`、kimi-code=`usages`、其他=`(none -> unknown at runtime)`。
 - `<PEAK>` = `peakSummary`：`09:00-12:00(×2), 14:00-18:00(×2)` 或 `-`。
 - 末行：`⚠ <N> warning(s)`（黄）或 `✓ no warnings`（绿）。返回值 = warning 数。
 

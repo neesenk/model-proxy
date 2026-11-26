@@ -1574,9 +1574,9 @@ func ValidateProviders(providers map[string]Provider) error {
 		// static's login eligibility comes from its API-key pool. The generic
 		// `headers` map is applied later as an override, but cannot make an
 		// uncredentialed static provider runnable.
-		known := map[string]bool{"aqp": true, "codex": true, "zhipu": true, "deepseek": true, "volcengine": true, "kimi-code": true, "static": true, "zcode": true, "qwen-plan": true, "step-plan": true, "typesafe": true, "mimo": true, "openrouter": true, "opencode-go": true}
+		known := map[string]bool{"aqp": true, "codex": true, "zhipu": true, "deepseek": true, "volcengine": true, "kimi-code": true, "static": true, "qwen-plan": true, "step-plan": true, "typesafe": true, "mimo": true, "openrouter": true, "opencode-go": true}
 		if !known[p.Provider] {
-			return fmt.Errorf("provider %q: unknown provider_id %q — valid: aqp, codex, zhipu, deepseek, volcengine, kimi-code, static, zcode, qwen-plan, step-plan, typesafe, mimo, openrouter, opencode-go", name, p.Provider)
+			return fmt.Errorf("provider %q: unknown provider_id %q — valid: aqp, codex, zhipu, deepseek, volcengine, kimi-code, static, qwen-plan, step-plan, typesafe, mimo, openrouter, opencode-go", name, p.Provider)
 		}
 		// anthropic_base_url should NOT end with /v1 (proxy keeps client's /v1 for anthropic).
 		if p.AnthropicBaseURL != "" && (strings.HasSuffix(p.AnthropicBaseURL, "/v1") || strings.HasSuffix(p.AnthropicBaseURL, "/v1/")) {

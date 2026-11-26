@@ -23,9 +23,6 @@ func (p *AqpProvider) FetchModelsContext(ctx context.Context) ([]string, error) 
 func (p *ZhipuProvider) FetchModelsContext(ctx context.Context) ([]string, error) {
 	return fetchModelsBearerContext(ctx, p.cfg, p.AuthHeaders)
 }
-func (p *ZCodeProvider) FetchModelsContext(ctx context.Context) ([]string, error) {
-	return fetchModelsBearerContext(ctx, p.cfg, p.AuthHeaders)
-}
 func (p *DeepSeekProvider) FetchModelsContext(ctx context.Context) ([]string, error) {
 	return fetchModelsBearerContext(ctx, p.cfg, p.AuthHeaders)
 }

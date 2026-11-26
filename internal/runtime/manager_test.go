@@ -262,15 +262,15 @@ func TestQuotaSyncFailureKeepsLastSnapshot(t *testing.T) {
 		RemainingPct: 0.5,
 		AsOf:         time.Now(),
 	}
-	if !m.SetQuota("zcode", good, 1) {
+	if !m.SetQuota("zhipu", good, 1) {
 		t.Fatal("seed quota rejected")
 	}
 
 	// Failed sync over an existing snapshot: no-op.
-	if !m.SetQuota("zcode", &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}, 1) {
+	if !m.SetQuota("zhipu", &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}, 1) {
 		t.Fatal("failed sync reported a generation rejection")
 	}
-	kept := m.Quota("zcode")
+	kept := m.Quota("zhipu")
 	if kept == nil || kept.Err != "" || kept.Billing != provider.BillingPlan || kept.RemainingPct != 0.5 {
 		t.Fatalf("failed sync mutated the last snapshot: %+v", kept)
 	}
@@ -279,13 +279,13 @@ func TestQuotaSyncFailureKeepsLastSnapshot(t *testing.T) {
 	// failure is stored (display-only — it projects unknown either way), and a
 	// success switches over.
 	if !m.MergeQuotas(map[string]*provider.QuotaSnapshot{
-		"zcode":  {Billing: provider.BillingUnknown, Err: "dial tcp: timeout"},
+		"zhipu":  {Billing: provider.BillingUnknown, Err: "dial tcp: timeout"},
 		"fresh":  {Billing: provider.BillingUnknown, Err: "http 403"},
 		"shopee": {Billing: provider.BillingPayG, RemainingPct: 0.9, AsOf: time.Now()},
 	}, 1) {
 		t.Fatal("merge rejected current generation")
 	}
-	if kept = m.Quota("zcode"); kept == nil || kept.Err != "" || kept.RemainingPct != 0.5 {
+	if kept = m.Quota("zhipu"); kept == nil || kept.Err != "" || kept.RemainingPct != 0.5 {
 		t.Fatalf("failed merge entry mutated the last snapshot: %+v", kept)
 	}
 	if first := m.Quota("fresh"); first == nil || first.Err == "" {
@@ -296,10 +296,10 @@ func TestQuotaSyncFailureKeepsLastSnapshot(t *testing.T) {
 	}
 
 	// A stale generation is still rejected before the keep-last-good guard.
-	if m.SetQuota("zcode", &provider.QuotaSnapshot{Billing: provider.BillingPayG, AsOf: time.Now()}, 7) {
+	if m.SetQuota("zhipu", &provider.QuotaSnapshot{Billing: provider.BillingPayG, AsOf: time.Now()}, 7) {
 		t.Fatal("stale generation quota mutation committed")
 	}
-	if kept = m.Quota("zcode"); kept.Billing != provider.BillingPlan {
+	if kept = m.Quota("zhipu"); kept.Billing != provider.BillingPlan {
 		t.Fatalf("stale mutation leaked: %+v", kept)
 	}
 }
@@ -313,19 +313,19 @@ func TestCommitQuotaResultSignal(t *testing.T) {
 
 	m := newTestManager(1)
 	good := &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5, AsOf: time.Now()}
-	if got := m.CommitQuota("zcode", good, 1); got != QuotaCommitApplied {
+	if got := m.CommitQuota("zhipu", good, 1); got != QuotaCommitApplied {
 		t.Fatalf("first commit = %v, want QuotaCommitApplied", got)
 	}
-	if got := m.CommitQuota("zcode", &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}, 1); got != QuotaCommitKept {
+	if got := m.CommitQuota("zhipu", &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}, 1); got != QuotaCommitKept {
 		t.Fatalf("failed sync over an existing entry = %v, want QuotaCommitKept", got)
 	}
 	if got := m.CommitQuota("ghost", &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "http 401"}, 1); got != QuotaCommitApplied {
 		t.Fatalf("first-observation failure = %v, want QuotaCommitApplied (stored for operator visibility)", got)
 	}
-	if got := m.CommitQuota("zcode", good, 7); got != QuotaCommitRejected {
+	if got := m.CommitQuota("zhipu", good, 7); got != QuotaCommitRejected {
 		t.Fatalf("stale generation = %v, want QuotaCommitRejected", got)
 	}
-	if kept := m.Quota("zcode"); kept == nil || kept.Err != "" || kept.RemainingPct != 0.5 {
+	if kept := m.Quota("zhipu"); kept == nil || kept.Err != "" || kept.RemainingPct != 0.5 {
 		t.Fatalf("kept/rejected commits mutated the snapshot: %+v", kept)
 	}
 }
@@ -339,17 +339,17 @@ func TestReplaceGenerationPrunesQuotaCacheToLiveKeys(t *testing.T) {
 	t.Parallel()
 
 	m := newTestManager(1)
-	for _, name := range []string{"zcode", "zcode#a1", "ghost", "removed#b2"} {
+	for _, name := range []string{"zhipu", "zhipu#a1", "ghost", "removed#b2"} {
 		if !m.SetQuota(name, &provider.QuotaSnapshot{Billing: provider.BillingPlan, AsOf: time.Now()}, 1) {
 			t.Fatalf("seed quota %s rejected", name)
 		}
 	}
 
-	m.ReplaceGeneration(2, map[string]bool{"zcode": true, "zcode#a1": true})
+	m.ReplaceGeneration(2, map[string]bool{"zhipu": true, "zhipu#a1": true})
 	if got := m.Generation(); got != 2 {
 		t.Fatalf("generation = %d, want 2", got)
 	}
-	for _, kept := range []string{"zcode", "zcode#a1"} {
+	for _, kept := range []string{"zhipu", "zhipu#a1"} {
 		if m.Quota(kept) == nil {
 			t.Fatalf("live key %s was pruned", kept)
 		}

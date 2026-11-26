@@ -324,7 +324,7 @@ func TestBuildRecordAttemptOnly(t *testing.T) {
 func TestBuildRecordScheduleNote(t *testing.T) {
 	rec := (&Logger{maxBodyBytes: 1 << 20}).BuildRecord(Input{
 		RequestID: "r2", Provider: "step-plan", Status: 200,
-		Schedule: &ScheduleDecision{Source: "sticky", Note: "request-aware: dropped zcode/glm-5.3: model metadata lacks image modality → cross-route step-plan/step-5-preview"},
+		Schedule: &ScheduleDecision{Source: "sticky", Note: "request-aware: dropped zhipu/glm-5.3: model metadata lacks image modality → cross-route step-plan/step-5-preview"},
 	})
 	var back Record
 	if err := json.Unmarshal(appendRecordLine(nil, rec), &back); err != nil {

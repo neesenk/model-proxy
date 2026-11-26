@@ -7,4 +7,4 @@
 // cli/models/check, provider kimi_code vs opencode_go quota parsing) are
 // listed in docs/engineering/testing.md as future dedup targets — they cross
 // owner boundaries and must be deduplicated deliberately, not as a drive-by.
-31
+29
