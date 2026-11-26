@@ -203,7 +203,7 @@ func TestSessionTableRouteOps(t *testing.T) {
 	if _, ok := tbl.RouteToolsGet(id); ok {
 		t.Fatal("tools cache should start empty")
 	}
-	tbl.RouteToolsPut(id, []ToolSpec{{Name: "web_search"}})
+	tbl.RouteToolsPut(id, []ToolSpec{{Name: "web_search"}}, true)
 	tools, ok := tbl.RouteToolsGet(id)
 	if !ok || len(tools) != 1 || tools[0].Name != "web_search" {
 		t.Fatalf("tools = %+v ok=%v", tools, ok)
@@ -233,7 +233,7 @@ func TestSessionTableRouteToolsCopy(t *testing.T) {
 	id := tbl.PutRoute("web-search")
 
 	put := []ToolSpec{{Name: "web_search"}, {Name: "url_read"}}
-	if !tbl.RouteToolsPut(id, put) {
+	if !tbl.RouteToolsPut(id, put, true) {
 		t.Fatal("RouteToolsPut failed")
 	}
 	// Mutating the caller's slice after Put must not alter the stored cache.

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"container/list"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"sync"
@@ -52,7 +53,19 @@ type RouteState struct {
 	Sticky     map[string]string     // canonical tool → server name (session stickiness)
 	Tools      []ToolSpec            // aggregated tools/list cache for this session
 	ToolsReady bool                  // Tools was aggregated at least once
+	// ToolsPartial marks Tools as a DEGRADED aggregation (some backend failed
+	// its handshake/list). Such a cache entry is short-lived: it is served
+	// until ToolsAt+routeToolsRefresh, then the next access re-aggregates, so
+	// a transient backend failure does not hide the backend's tools for the
+	// rest of the session. A complete aggregation is cached for the session's
+	// lifetime (no per-call I/O).
+	ToolsPartial bool
+	ToolsAt      time.Time
 }
+
+// routeToolsRefresh is how long a degraded tools/list aggregation is served
+// from the route session's cache before the next access re-aggregates.
+const routeToolsRefresh = time.Minute
 
 // SessionTable is a bounded LRU of live MCP sessions with an idle TTL. It is
 // process-lifetime state that survives config reloads (sessions fail closed
@@ -72,6 +85,11 @@ type SessionTable struct {
 	sessions map[string]Session
 	onEvict  func(Session)
 	now      func() time.Time // test seam
+	// inflight holds the route sessions whose tools aggregation is running
+	// right now (RouteToolsLoad's single-flight), keyed by session id with the
+	// completion channel of the running aggregation. Guarded by mu; the
+	// aggregation itself runs outside the lock.
+	inflight map[string]chan struct{}
 }
 
 // NewSessionTable creates a table holding at most max sessions, expiring
@@ -90,6 +108,7 @@ func NewSessionTable(maxSessions int, ttl time.Duration) *SessionTable {
 		lru:      list.New(),
 		sessions: map[string]Session{},
 		now:      time.Now,
+		inflight: map[string]chan struct{}{},
 	}
 }
 
@@ -316,12 +335,15 @@ func (t *SessionTable) RouteStickyPut(id, canonical, server string) {
 	t.fireEvicted(evicted)
 }
 
-// RouteToolsGet returns the session's aggregated tools cache.
+// RouteToolsGet returns the session's aggregated tools cache when it may be
+// served: a complete aggregation for the rest of the session, a degraded one
+// (see RouteState.ToolsPartial) only until its refresh point. ok=false means
+// the next caller must re-aggregate (RouteToolsLoad does).
 func (t *SessionTable) RouteToolsGet(id string) ([]ToolSpec, bool) {
 	t.mu.Lock()
 	s, evicted, ok := t.routeSessionLockedE(id)
 	var out []ToolSpec
-	ready := ok && s.Route.ToolsReady
+	ready := ok && t.toolsFreshLocked(s)
 	if ready {
 		out = make([]ToolSpec, len(s.Route.Tools))
 		copy(out, s.Route.Tools)
@@ -331,17 +353,115 @@ func (t *SessionTable) RouteToolsGet(id string) ([]ToolSpec, bool) {
 	return out, ready
 }
 
-// RouteToolsPut stores the session's aggregated tools cache.
-func (t *SessionTable) RouteToolsPut(id string, tools []ToolSpec) bool {
+// toolsFreshLocked reports whether the session's cached tools may be served:
+// a complete aggregation for the rest of the session, a degraded one only
+// until its refresh point. Caller holds t.mu.
+func (t *SessionTable) toolsFreshLocked(s Session) bool {
+	return s.Route.ToolsReady && (!s.Route.ToolsPartial || t.now().Sub(s.Route.ToolsAt) < routeToolsRefresh)
+}
+
+// RouteToolsPut stores the session's aggregated tools cache. complete=false
+// marks a degraded aggregation (some backend failed): it is cached only for
+// the refresh window instead of the session's lifetime, so a transient
+// backend failure is retried without hiding the backend's tools for long.
+// Reports false when the route session no longer exists.
+func (t *SessionTable) RouteToolsPut(id string, tools []ToolSpec, complete bool) bool {
 	t.mu.Lock()
 	s, evicted, ok := t.routeSessionLockedE(id)
 	if ok {
 		s.Route.Tools = append([]ToolSpec(nil), tools...)
 		s.Route.ToolsReady = true
+		s.Route.ToolsPartial = !complete
+		s.Route.ToolsAt = t.now()
 	}
 	t.mu.Unlock()
 	t.fireEvicted(evicted)
 	return ok
+}
+
+// RouteToolsLoad returns the route session's aggregated tools, running
+// aggregate when the cache cannot serve them: the first tools/list of the
+// session, or a degraded aggregation past its refresh window. aggregate runs
+// outside the table lock and is single-flight per session — a caller that
+// finds nothing cached either claims the aggregation or waits for the one in
+// flight, and re-decides once that completes (see routeToolsClaim). Nothing
+// runs in the background: a refresh happens only when a request asks for it.
+//
+// An aggregation that is not a snapshot of the route is never cached:
+//
+//   - aggregate reports an error: it was aborted (a fail-closed condition
+//     cleared a backend binding). The error is returned instead of tools, and
+//     the callers waiting behind it are not served it: one of them aggregates
+//     again and the others share that result.
+//   - ctx is already done when aggregate returns: the result was produced for
+//     a caller that left, with every backend "failing" only because nobody
+//     was waiting for the answer. The caller still gets its result.
+func (t *SessionTable) RouteToolsLoad(ctx context.Context, id string, aggregate func() (tools []ToolSpec, complete bool, err error)) ([]ToolSpec, error) {
+	for {
+		tools, done, claimed := t.routeToolsClaim(id)
+		if !claimed {
+			if done == nil {
+				return tools, nil // served from the cache
+			}
+			// Another caller is aggregating. When it completes, decide again:
+			// a cached result is served; an aborted one left nothing there and
+			// this caller aggregates for itself.
+			<-done
+			continue
+		}
+		// Release the slot even if aggregate panics, or every later caller
+		// of the session would wait on it forever.
+		defer t.endToolsAggregation(id, done)
+		tools, complete, err := aggregate()
+		switch {
+		case err != nil:
+			return nil, err
+		case ctx.Err() == nil:
+			t.RouteToolsPut(id, tools, complete)
+		}
+		return tools, nil
+	}
+}
+
+// routeToolsClaim is one pass of RouteToolsLoad's loop, decided in a single
+// hold of the table lock — the lock-held re-check the gateway's other
+// single-flights use: a caller that finds the cache unusable either claims the
+// session's aggregation slot or is handed the completion channel of the caller
+// holding it. Deciding both under one lock means no caller can be overtaken by
+// a whole aggregation between finding the cache empty and getting to claim.
+//
+// It returns the cached tools (done nil, claimed false) when they may be
+// served; the holder's completion channel (claimed false) when it must wait;
+// and the channel it must close (claimed true) when it claimed the slot.
+func (t *SessionTable) routeToolsClaim(id string) (tools []ToolSpec, done chan struct{}, claimed bool) {
+	t.mu.Lock()
+	s, evicted, ok := t.routeSessionLockedE(id)
+	switch {
+	case ok && t.toolsFreshLocked(s):
+		tools = append([]ToolSpec(nil), s.Route.Tools...)
+	case t.inflight[id] != nil:
+		done = t.inflight[id]
+	default:
+		done = make(chan struct{})
+		if t.inflight == nil {
+			t.inflight = map[string]chan struct{}{}
+		}
+		t.inflight[id] = done
+		claimed = true
+	}
+	t.mu.Unlock()
+	t.fireEvicted(evicted)
+	return tools, done, claimed
+}
+
+// endToolsAggregation releases the slot claimed through routeToolsClaim and
+// wakes the callers waiting on it (after the result is cached, or not at all
+// for an aborted aggregation).
+func (t *SessionTable) endToolsAggregation(id string, done chan struct{}) {
+	t.mu.Lock()
+	delete(t.inflight, id)
+	t.mu.Unlock()
+	close(done)
 }
 
 // Delete drops a session (client DELETE or fail-closed invalidation).

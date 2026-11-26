@@ -194,7 +194,12 @@ func (p *Proxy) mcpStdioStart(snap RuntimeSnapshot, srv configdomain.MCPServer, 
 
 // serveMCPStdio handles /mcp/<name> for transport: stdio servers: one child
 // per client session, JSON-RPC bridged over HTTP (single JSON responses; no
-// SSE framing, no GET stream).
+// SSE framing, no GET stream). It follows the recording contract of the whole
+// /mcp/ surface (see serveMCP): every terminal that entered the MCP protocol
+// layer is recorded through mcpLog with the HTTP status the client got; the
+// HTTP-layer precheck rejections (GET 405, body over the cap 413, outbound
+// guard 400) and the admission failures answering 503 (no schedulable
+// account, the per-server child cap) are not.
 func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name string, srv configdomain.MCPServer, snap RuntimeSnapshot, started time.Time, requestID string, ident *mcpIdentity) {
 	if r.Method == http.MethodGet {
 		http.Error(w, "mcp stdio: GET server-stream is not supported", http.StatusMethodNotAllowed)
@@ -203,6 +208,7 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 	localSID := r.Header.Get("Mcp-Session-Id")
 
 	if r.Method == http.MethodDelete {
+		// DELETE carries no frame: the record's method is the HTTP verb alone.
 		if localSID != "" {
 			// Sessions are bound to their server (same ownership rule as the
 			// HTTP pinned path): an id minted by another /mcp/ name must not
@@ -210,6 +216,7 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 			if s, ok := p.mcpSessions.Get(localSID); ok {
 				if s.Server != name {
 					http.Error(w, "mcp: unknown session", http.StatusNotFound)
+					p.mcpLog(name, "", mcpkg.Frame{}, r.Method, http.StatusNotFound, started, requestID, nil, nil, 0, false, ident)
 					return
 				}
 				p.mcpStdio.kill(localSID)
@@ -217,6 +224,7 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 			}
 		}
 		w.WriteHeader(http.StatusOK)
+		p.mcpLog(name, "", mcpkg.Frame{}, r.Method, http.StatusOK, started, requestID, nil, nil, 0, false, ident)
 		return
 	}
 
@@ -299,14 +307,37 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write(respBody)
+		p.mcpLog(name, "", frame, r.Method, http.StatusBadRequest, started, requestID, body, respBody, int64(len(respBody)), false, ident)
 		return
 	}
-	if s, ok := p.mcpSessions.Get(localSID); !ok || s.Server != name {
+	s, ok := p.mcpSessions.Get(localSID)
+	if !ok || s.Server != name {
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32600, "mcp: unknown or expired session — re-initialize")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		w.Write(respBody)
+		p.mcpLog(name, "", frame, r.Method, http.StatusNotFound, started, requestID, body, respBody, int64(len(respBody)), false, ident)
 		return
+	}
+	if s.Account != "" {
+		// The child carries this account's credential in its environment, so a
+		// session whose account vanished from a later generation — or was frozen
+		// by an operator — must stop being used: the same fail-closed rule as
+		// the HTTP pinned path, checked on every request against the current
+		// snapshot. Eviction kills the child; the client re-initializes. The
+		// 410 is a protocol-layer terminal like any other and is recorded.
+		if !mcpAccountLive(snap, s.Account) {
+			p.mcpSessions.Delete(localSID)
+			http.Error(w, mcpSessionAccountGoneMsg, http.StatusGone)
+			p.mcpLog(name, s.Account, frame, r.Method, http.StatusGone, started, requestID, body, nil, 0, false, ident)
+			return
+		}
+		if p.runtimeState.AccountFrozen(s.Account) {
+			p.mcpSessions.Delete(localSID)
+			http.Error(w, mcpSessionAccountFrozenMsg, http.StatusGone)
+			p.mcpLog(name, s.Account, frame, r.Method, http.StatusGone, started, requestID, body, nil, 0, false, ident)
+			return
+		}
 	}
 	conn, ok := p.mcpStdio.get(localSID)
 	if !ok {
@@ -314,6 +345,7 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		w.Write(respBody)
+		p.mcpLog(name, "", frame, r.Method, http.StatusNotFound, started, requestID, body, respBody, int64(len(respBody)), false, ident)
 		return
 	}
 	callCtx, callCancel := context.WithTimeout(r.Context(), srv.MCPTimeoutDuration())
@@ -332,6 +364,7 @@ func (p *Proxy) serveMCPStdio(w http.ResponseWriter, r *http.Request, name strin
 		// Notification semantics: 202, no body.
 		w.Header().Set("Mcp-Session-Id", localSID)
 		w.WriteHeader(http.StatusAccepted)
+		p.mcpLog(name, "", frame, r.Method, http.StatusAccepted, started, requestID, body, nil, 0, false, ident)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

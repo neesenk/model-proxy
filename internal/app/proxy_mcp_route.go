@@ -28,6 +28,11 @@ var mcpRouteInitBody = []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","pa
 
 var mcpNotifInitBody = []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 
+// errMCPSubAccountGone is mcpRouteEnsureSub's verdict on a sub-session whose
+// bound account a later generation dropped: the binding (stdio child
+// included) is cleared and the exchange that found it fails closed with 410.
+var errMCPSubAccountGone = errors.New(mcpSessionAccountGoneMsg)
+
 // serveMCPRoute handles /mcp/<route>. Dispatched from serveMCP after the
 // pinned-server lookup misses; the api-keys gate and method check already ran.
 func (p *Proxy) serveMCPRoute(w http.ResponseWriter, r *http.Request, name string, route configdomain.MCPRoute, snap RuntimeSnapshot, started time.Time, requestID string, ident *mcpIdentity) {
@@ -55,6 +60,7 @@ func (p *Proxy) serveMCPRoute(w http.ResponseWriter, r *http.Request, name strin
 	}
 	frame := mcpkg.ParseFrame(body)
 	localSID := r.Header.Get("Mcp-Session-Id")
+	ex := &mcpRouteExchange{name: name, method: r.Method, reqBody: body, frame: frame, started: started, requestID: requestID, ident: ident}
 
 	// DELETE: terminate every initialized sub-session and drop the route
 	// session. Best-effort per backend — the local session dies regardless.
@@ -68,6 +74,7 @@ func (p *Proxy) serveMCPRoute(w http.ResponseWriter, r *http.Request, name strin
 			p.mcpSessions.Delete(localSID)
 		}
 		w.WriteHeader(http.StatusOK)
+		p.mcpRouteRecord(ex, "", http.StatusOK, nil)
 		return
 	}
 
@@ -80,26 +87,19 @@ func (p *Proxy) serveMCPRoute(w http.ResponseWriter, r *http.Request, name strin
 		// identity so the session's later exchanges attribute to it.
 		p.mcpSessions.SetClient(sid, mcpkg.ParseClientInfo(body))
 		result := mcpkg.BuildInitializeResult(mcpkg.ParseClientProtocol(body), name)
-		respBody := mcpkg.BuildResultResponse(frame.ID, result)
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Mcp-Session-Id", sid)
-		w.WriteHeader(http.StatusOK)
-		w.Write(respBody)
-		p.mcpLog(name, "", frame, r.Method, http.StatusOK, started, requestID, body, respBody, int64(len(respBody)), false, ident)
+		p.mcpRouteWriteJSON(w, ex, "", sid, http.StatusOK, mcpkg.BuildResultResponse(frame.ID, result))
 		return
 	}
 
 	// Everything else requires an established route session.
 	if localSID == "" {
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32600, "mcp route: session required — POST initialize first")
-		p.mcpRouteWriteJSON(w, frame, "", http.StatusBadRequest, respBody)
-		p.mcpLog(name, "", frame, r.Method, http.StatusBadRequest, started, requestID, body, respBody, int64(len(respBody)), false, ident)
+		p.mcpRouteWriteJSON(w, ex, "", "", http.StatusBadRequest, respBody)
 		return
 	}
 	if !p.mcpSessions.RouteSessionValid(localSID) {
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32600, "mcp route: unknown or expired session — re-initialize")
-		p.mcpRouteWriteJSON(w, frame, "", http.StatusNotFound, respBody)
-		p.mcpLog(name, "", frame, r.Method, http.StatusNotFound, started, requestID, body, respBody, int64(len(respBody)), false, ident)
+		p.mcpRouteWriteJSON(w, ex, "", "", http.StatusNotFound, respBody)
 		return
 	}
 
@@ -109,8 +109,7 @@ func (p *Proxy) serveMCPRoute(w http.ResponseWriter, r *http.Request, name strin
 	case "tools/call":
 		p.mcpRouteToolsCall(w, r, name, route, snap, localSID, frame, body, started, requestID, ident)
 	case "ping":
-		respBody := mcpkg.BuildResultResponse(frame.ID, json.RawMessage(`{}`))
-		p.mcpRouteWriteJSON(w, frame, localSID, http.StatusOK, respBody)
+		p.mcpRouteWriteJSON(w, ex, "", localSID, http.StatusOK, mcpkg.BuildResultResponse(frame.ID, json.RawMessage(`{}`)))
 	default:
 		if strings.HasPrefix(frame.Method, "notifications/") {
 			// Best-effort fan-out to initialized sub-sessions; the client
@@ -118,63 +117,105 @@ func (p *Proxy) serveMCPRoute(w http.ResponseWriter, r *http.Request, name strin
 			p.mcpRouteFanOut(snap, route, localSID, body, r)
 			w.Header().Set("Mcp-Session-Id", localSID)
 			w.WriteHeader(http.StatusAccepted)
+			p.mcpRouteRecord(ex, "", http.StatusAccepted, nil)
 			return
 		}
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32601, fmt.Sprintf("mcp route: method %q not supported (tools/list and tools/call only)", frame.Method))
-		p.mcpRouteWriteJSON(w, frame, localSID, http.StatusOK, respBody)
+		p.mcpRouteWriteJSON(w, ex, "", localSID, http.StatusOK, respBody)
 	}
 }
 
-// mcpRouteWriteJSON writes a proxy-synthesized JSON-RPC message.
-func (p *Proxy) mcpRouteWriteJSON(w http.ResponseWriter, frame mcpkg.Frame, sid string, status int, body []byte) {
+// mcpRouteExchange is what mcpLog needs to record one route exchange: the
+// per-request context shared by every proxy-synthesized terminal of it.
+type mcpRouteExchange struct {
+	name      string      // exposed route name
+	method    string      // HTTP verb of the client's request
+	reqBody   []byte      // the client's original frame (nil for a DELETE)
+	frame     mcpkg.Frame // parsed reqBody (the zero value for a bodyless DELETE)
+	started   time.Time
+	requestID string
+	ident     *mcpIdentity
+}
+
+// mcpRouteRecord projects one terminal of a route exchange into the request
+// log and the MCP stats. This is the recording contract of all three faces
+// (see serveMCP): every exchange that entered the MCP protocol layer is
+// recorded, with the HTTP status the client got (a JSON-RPC error sent over
+// 200 is a 200, like a pinned upstream 200). Precheck rejections and
+// admission failures are not — on the route face they return before any
+// exchange context exists.
+func (p *Proxy) mcpRouteRecord(ex *mcpRouteExchange, account string, status int, resp []byte) {
+	p.mcpLog(ex.name, account, ex.frame, ex.method, status, ex.started, ex.requestID, ex.reqBody, resp, int64(len(resp)), false, ex.ident)
+}
+
+// mcpRouteWriteJSON writes a proxy-synthesized JSON-RPC message and records
+// the terminal: a synthesized response cannot be written without being
+// recorded.
+func (p *Proxy) mcpRouteWriteJSON(w http.ResponseWriter, ex *mcpRouteExchange, account, sid string, status int, body []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	if sid != "" {
 		w.Header().Set("Mcp-Session-Id", sid)
 	}
 	w.WriteHeader(status)
 	w.Write(body)
+	p.mcpRouteRecord(ex, account, status, body)
 }
 
-// mcpRouteToolsList aggregates the canonical tool surface, cached per route
-// session. A backend that fails its handshake/list is skipped — the route
-// degrades to the remaining targets instead of failing wholesale.
+// mcpRouteToolsList answers tools/list with the session's aggregated canonical
+// surface. A backend that fails its handshake/list is skipped — the route
+// degrades to the remaining targets instead of failing wholesale — and the
+// result is cached per route session by the session table: a complete
+// aggregation for the session's lifetime, a degraded one only until a short
+// refresh point (the next access then re-aggregates, single-flight).
+//
+// An aggregation that found a stale backend binding (a sub-session whose
+// account a later generation dropped) is neither cached nor answered as a
+// surface with that backend missing: the exchange fails closed with 410, and
+// the very next tools/list aggregates again.
 func (p *Proxy) mcpRouteToolsList(w http.ResponseWriter, r *http.Request, name string, route configdomain.MCPRoute, snap RuntimeSnapshot, sid string, frame mcpkg.Frame, body []byte, started time.Time, requestID string, ident *mcpIdentity) {
-	tools, cached := p.mcpSessions.RouteToolsGet(sid)
-	if !cached {
-		toolsByServer := map[string][]mcpkg.ToolSpec{}
-		mappings := make([]mcpkg.TargetMapping, 0, len(route.Targets))
-		for _, t := range route.Targets {
-			srv, ok := snap.Cfg.MCP[t.Server]
-			if !ok || !srv.MCPEffectiveEnabled() {
-				continue
-			}
+	ex := &mcpRouteExchange{name: name, method: r.Method, reqBody: body, frame: frame, started: started, requestID: requestID, ident: ident}
+	mappings := make([]mcpkg.TargetMapping, 0, len(route.Targets))
+	for _, t := range route.Targets {
+		if srv, ok := snap.Cfg.MCP[t.Server]; ok && srv.MCPEffectiveEnabled() {
 			mappings = append(mappings, mcpkg.TargetMapping{Server: t.Server, Tools: t.Tools})
-			specs, err := p.mcpRouteFetchTools(snap, srv, t.Server, sid, r)
-			if err != nil {
-				continue // degraded surface: other targets still serve their tools
+		}
+	}
+	tools, err := p.mcpSessions.RouteToolsLoad(r.Context(), sid, func() ([]mcpkg.ToolSpec, bool, error) {
+		var stale error // a backend's sub-session turned out bound to a dropped account
+		tools, complete := mcpkg.AggregateTools(mappings, func(server string) ([]mcpkg.ToolSpec, error) {
+			specs, err := p.mcpRouteFetchTools(snap, snap.Cfg.MCP[server], server, sid, r)
+			if errors.Is(err, errMCPSubAccountGone) {
+				stale = err
 			}
-			toolsByServer[t.Server] = specs
+			return specs, err
+		})
+		if stale != nil {
+			// Not a snapshot of the route: the backend's tools are "missing"
+			// only because its credential stopped being usable.
+			return nil, false, stale
 		}
-		tools = mcpkg.MergeCanonicalTools(toolsByServer, mappings)
-		if tools == nil {
-			tools = []mcpkg.ToolSpec{} // clients expect [], not null
-		}
-		p.mcpSessions.RouteToolsPut(sid, tools)
+		return tools, complete, nil
+	})
+	if err != nil {
+		// The aggregation was aborted by a stale binding, which its fetch
+		// already cleared. Answering those tools as missing would hide that a
+		// credential of this session stopped being usable.
+		p.mcpRouteAccountGone(w, ex)
+		return
 	}
 	result, _ := json.Marshal(map[string]any{"tools": tools})
-	respBody := mcpkg.BuildResultResponse(frame.ID, result)
-	p.mcpRouteWriteJSON(w, frame, sid, http.StatusOK, respBody)
-	p.mcpLog(name, "", frame, r.Method, http.StatusOK, started, requestID, body, respBody, int64(len(respBody)), false, ident)
+	p.mcpRouteWriteJSON(w, ex, "", sid, http.StatusOK, mcpkg.BuildResultResponse(frame.ID, result))
 }
 
 // mcpRouteToolsCall routes one call to its backends in target order (sticky
 // within the session), failing over on transport/auth/session/rate/server
 // faults — never on JSON-RPC business errors.
 func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name string, route configdomain.MCPRoute, snap RuntimeSnapshot, sid string, frame mcpkg.Frame, body []byte, started time.Time, requestID string, ident *mcpIdentity) {
+	ex := &mcpRouteExchange{name: name, method: r.Method, reqBody: body, frame: frame, started: started, requestID: requestID, ident: ident}
 	canonical := mcpkg.ParseToolCallName(body)
 	if canonical == "" {
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32602, "tools/call: params.name is required")
-		p.mcpRouteWriteJSON(w, frame, sid, http.StatusOK, respBody)
+		p.mcpRouteWriteJSON(w, ex, "", sid, http.StatusOK, respBody)
 		return
 	}
 	// Ordered candidate targets serving this canonical tool (enabled only).
@@ -208,6 +249,13 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 				// Pre-emptive skip: every account of this backend's provider is
 				// operator-frozen or in cooldown (the same availability rule as
 				// LLM scheduling). Call-time failover stays the backstop.
+				//
+				// This call never reaches the backend's sub-session, and there
+				// is no account to rebuild it on: a binding whose account is
+				// frozen must still die now (its stdio child holds the frozen
+				// key) — the drop the reuse gate and the notification fan-out
+				// apply. A cooldown keeps it.
+				p.mcpRouteDropFrozenSub(sid, t.Server)
 				acctBlocked = true
 				continue
 			}
@@ -219,16 +267,16 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 			// Every backend declaring the tool is quota-exhausted: say so
 			// instead of misreporting -32602 "unknown tool".
 			respBody := mcpkg.BuildErrorResponse(frame.ID, -32000, fmt.Sprintf("tools/call: all backends for tool %q are quota-exhausted (provider MCP-tool window) — retry after the window resets", canonical))
-			p.mcpRouteWriteJSON(w, frame, sid, http.StatusOK, respBody)
+			p.mcpRouteWriteJSON(w, ex, "", sid, http.StatusOK, respBody)
 			return
 		}
 		if declared && acctBlocked {
 			respBody := mcpkg.BuildErrorResponse(frame.ID, -32000, fmt.Sprintf("tools/call: all backends for tool %q have no schedulable account (frozen or in cooldown) — see `model-proxy status` / `model-proxy unfreeze`", canonical))
-			p.mcpRouteWriteJSON(w, frame, sid, http.StatusOK, respBody)
+			p.mcpRouteWriteJSON(w, ex, "", sid, http.StatusOK, respBody)
 			return
 		}
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32602, fmt.Sprintf("tools/call: unknown tool %q", canonical))
-		p.mcpRouteWriteJSON(w, frame, sid, http.StatusOK, respBody)
+		p.mcpRouteWriteJSON(w, ex, "", sid, http.StatusOK, respBody)
 		return
 	}
 	// Session stickiness: a previously successful backend goes first.
@@ -245,11 +293,17 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 		out, err := mcpkg.RewriteToolCallName(body, c.target.Tools[canonical])
 		if err != nil {
 			respBody := mcpkg.BuildErrorResponse(frame.ID, -32602, "tools/call: malformed params")
-			p.mcpRouteWriteJSON(w, frame, sid, http.StatusOK, respBody)
+			p.mcpRouteWriteJSON(w, ex, "", sid, http.StatusOK, respBody)
 			return
 		}
 		sub, err := p.mcpRouteEnsureSub(snap, c.srv, c.target.Server, sid, r)
 		if err != nil {
+			if errors.Is(err, errMCPSubAccountGone) {
+				// Not a backend fault to fail over past: the client is told
+				// that a credential of its session stopped being usable.
+				p.mcpRouteAccountGone(w, ex)
+				return
+			}
 			lastErr = err
 			continue
 		}
@@ -325,6 +379,59 @@ func mcpRouteStdioKey(routeSID, server string) string {
 	return routeSID + "\x00" + server
 }
 
+// mcpRouteDropSub drops one backend sub-session together with its stdio
+// child: a plain RouteSubDrop leaves the child registered (its key is in the
+// child's environment) until the session dies.
+func (p *Proxy) mcpRouteDropSub(sid, server string) {
+	p.mcpSessions.RouteSubDrop(sid, server)
+	p.mcpStdio.kill(mcpRouteStdioKey(sid, server))
+}
+
+// mcpRouteDropFrozenSub drops the backend's sub-session — its stdio child
+// included — when its bound account is operator-frozen. A transient cooldown
+// is not a freeze and keeps the binding.
+func (p *Proxy) mcpRouteDropFrozenSub(sid, server string) {
+	if sub, ok := p.mcpSessions.RouteSubGet(sid, server); ok && sub.Account != "" && p.runtimeState.AccountFrozen(sub.Account) {
+		p.mcpRouteDropSub(sid, server)
+	}
+}
+
+// mcpRouteAccountGone answers the terminal of an exchange that found a
+// backend sub-session bound to an account a later generation dropped: the
+// pinned faces' 410, recorded. The binding itself was cleared by
+// mcpRouteEnsureSub.
+func (p *Proxy) mcpRouteAccountGone(w http.ResponseWriter, ex *mcpRouteExchange) {
+	http.Error(w, mcpSessionAccountGoneMsg, http.StatusGone)
+	p.mcpRouteRecord(ex, "", http.StatusGone, nil)
+}
+
+// mcpRouteReusableSub is the sub-session reuse gate. It returns the
+// initialized sub-session when it may be used as is; the zero sub-session
+// with a nil error when the caller must build one — none exists, or its
+// account was frozen and the binding was dropped for a rebuild on a healthy
+// sibling; and errMCPSubAccountGone when the bound account was dropped by a
+// later generation (the binding is cleared).
+//
+// Either way a dropped binding takes its stdio child with it at once: the
+// child's environment holds the account's key, and a rebuild that fails —
+// no healthy sibling, a replacement that cannot be spawned — must not leave
+// it running.
+func (p *Proxy) mcpRouteReusableSub(snap RuntimeSnapshot, server, sid string) (mcpkg.SubSession, error) {
+	sub, ok := p.mcpSessions.RouteSubGet(sid, server)
+	if !ok || !sub.Initialized || sub.Account == "" {
+		return sub, nil
+	}
+	if !mcpAccountLive(snap, sub.Account) {
+		p.mcpRouteDropSub(sid, server)
+		return mcpkg.SubSession{}, errMCPSubAccountGone
+	}
+	if p.runtimeState.AccountFrozen(sub.Account) {
+		p.mcpRouteDropSub(sid, server)
+		return mcpkg.SubSession{}, nil
+	}
+	return sub, nil
+}
+
 // mcpRouteEnsureSub lazily builds the backend sub-session: initialize (with
 // account pick for provider-backed servers) + initialized notification.
 // Concurrent calls for the same (session, server): HTTP backends may both
@@ -332,16 +439,17 @@ func mcpRouteStdioKey(routeSID, server string) string {
 // so this is benign. stdio spawns are singleflight per registry key — only
 // one child is forked and racers reuse it (lockSpawn + re-check).
 func (p *Proxy) mcpRouteEnsureSub(snap RuntimeSnapshot, srv configdomain.MCPServer, server, sid string, inbound *http.Request) (mcpkg.SubSession, error) {
-	// Reuse gate: an initialized sub-session survives UNLESS its account was
-	// operator-frozen after binding (the credential must stop being used;
-	// RouteSubDrop also lets the stdio registry's eviction kill the child).
-	// Transient cooldowns keep the binding — the call-time failover remains
-	// the backstop there.
-	if sub, ok := p.mcpSessions.RouteSubGet(sid, server); ok && sub.Initialized {
-		if sub.Account == "" || !p.runtimeState.AccountFrozen(sub.Account) {
-			return sub, nil
-		}
-		p.mcpSessions.RouteSubDrop(sid, server)
+	// Reuse gate (mcpRouteReusableSub). An operator freeze drops the binding
+	// and it is rebuilt on a healthy sibling right here; transient cooldowns
+	// keep it — the call-time failover remains the backstop there. An account
+	// a later generation DROPPED is not rebuilt behind the client's back: the
+	// exchange fails closed with 410 and a later exchange builds a fresh one.
+	sub, err := p.mcpRouteReusableSub(snap, server, sid)
+	if err != nil {
+		return mcpkg.SubSession{}, err
+	}
+	if sub.Initialized {
+		return sub, nil
 	}
 	account := ""
 	if srv.MCPAuthMode() == "provider" {
@@ -361,11 +469,11 @@ func (p *Proxy) mcpRouteEnsureSub(snap RuntimeSnapshot, srv configdomain.MCPServ
 		key := mcpRouteStdioKey(sid, server)
 		unlock := p.mcpStdio.lockSpawn(key)
 		defer unlock()
-		if sub, ok := p.mcpSessions.RouteSubGet(sid, server); ok && sub.Initialized {
-			if sub.Account == "" || !p.runtimeState.AccountFrozen(sub.Account) {
-				return sub, nil // a racing caller just built it
-			}
-			p.mcpSessions.RouteSubDrop(sid, server)
+		if sub, err = p.mcpRouteReusableSub(snap, server, sid); err != nil {
+			return mcpkg.SubSession{}, err
+		}
+		if sub.Initialized {
+			return sub, nil // a racing caller just built it
 		}
 		conn, err := p.mcpStdioStart(snap, srv, account)
 		if err != nil {
@@ -425,7 +533,7 @@ func (p *Proxy) mcpRouteEnsureSub(snap RuntimeSnapshot, srv configdomain.MCPServ
 		_, _ = io.Copy(io.Discard, io.LimitReader(nresp.Body, 4096))
 		nresp.Body.Close()
 	}
-	sub := mcpkg.SubSession{Server: server, Account: account, UpstreamID: upSID, Protocol: protocol, Initialized: true}
+	sub = mcpkg.SubSession{Server: server, Account: account, UpstreamID: upSID, Protocol: protocol, Initialized: true}
 	p.mcpSessions.RouteSubPut(sid, sub)
 	return sub, nil
 }
@@ -478,6 +586,13 @@ func (p *Proxy) mcpRouteFanOut(snap RuntimeSnapshot, route configdomain.MCPRoute
 	for _, sub := range p.mcpSessions.RouteSubs(sid) {
 		srv, ok := snap.Cfg.MCP[sub.Server]
 		if !ok || !srv.MCPEffectiveEnabled() {
+			continue
+		}
+		if sub.Account != "" && (!mcpAccountLive(snap, sub.Account) || p.runtimeState.AccountFrozen(sub.Account)) {
+			// A binding whose account stopped being usable is no fan-out
+			// target: it is dropped with its child here as well, so a
+			// notification is never the path that keeps the credential in use.
+			p.mcpRouteDropSub(sid, sub.Server)
 			continue
 		}
 		if sub.Protocol == "stdio" {

@@ -126,6 +126,16 @@ func (p *Proxy) mcpAgentFor(ident *mcpIdentity, frame mcpkg.Frame, reqBody []byt
 // protocol.ForPath fallback, it answers 404 (not the LLM 502) for unknown
 // names. The forward-surface api-keys gate has already run (this is not an
 // admin endpoint).
+//
+// Recording contract of the whole /mcp/ surface (pinned, route and stdio
+// faces): every exchange that entered the MCP protocol layer is recorded
+// through mcpLog with the HTTP status the client got — session-class 400 /
+// 404 / 410 terminals, 202 and 200 alike — and gateway-synthesized 5xx
+// failures (including the stdio per-server child cap 503) record through
+// mcpFail with the exact client bytes. Never recorded: the HTTP-layer
+// precheck rejections (unknown name 404, method 405, body over the cap 413,
+// outbound guard 400) and the pre-protocol account gate 503 (no schedulable
+// account) — nothing was admitted into the protocol layer.
 func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	requestID := nextRequestID()
@@ -230,8 +240,11 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 		if s, ok := p.mcpSessions.Get(localSID); ok && s.Server == name {
 			sess, hasSess = s, true
 		} else if ok {
-			// Right id, wrong server: treat as unknown session.
+			// Right id, wrong server: treat as unknown session. A
+			// protocol-layer terminal like the route and stdio faces' unknown
+			// session — recorded.
 			http.Error(w, "mcp: unknown session", http.StatusNotFound)
+			p.mcpLog(name, "", frame, r.Method, http.StatusNotFound, started, requestID, body, nil, 0, false, ident)
 			return
 		}
 		// Unknown/expired local ids are NOT an error: stateless servers never
@@ -258,12 +271,15 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 		}
 		if hasSess {
 			account = sess.Account
+			// Both 410s are protocol-layer terminals: recorded like every
+			// other one (status 410, the session's account as provider).
 			if !mcpAccountLive(snap, account) {
 				// The account vanished from a later generation: fail closed so
 				// the client re-initializes instead of drifting to a credential
 				// the session was never bound to.
 				p.mcpSessions.Delete(localSID)
-				http.Error(w, "mcp: session account no longer available — re-initialize", http.StatusGone)
+				http.Error(w, mcpSessionAccountGoneMsg, http.StatusGone)
+				p.mcpLog(name, account, frame, r.Method, http.StatusGone, started, requestID, body, nil, 0, false, ident)
 				return
 			}
 			if p.runtimeState.AccountFrozen(account) {
@@ -273,7 +289,8 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 				// Transient cooldowns do NOT take this path: only the explicit
 				// operator freeze breaks a binding.
 				p.mcpSessions.Delete(localSID)
-				http.Error(w, "mcp: session account is operator-frozen — re-initialize", http.StatusGone)
+				http.Error(w, mcpSessionAccountFrozenMsg, http.StatusGone)
+				p.mcpLog(name, account, frame, r.Method, http.StatusGone, started, requestID, body, nil, 0, false, ident)
 				return
 			}
 		} else {
@@ -532,6 +549,14 @@ func mcpAccounts(snap RuntimeSnapshot, srv configdomain.MCPServer) []string {
 	}
 	return nil
 }
+
+// The 410 bodies for a session whose bound account must stop being used. The
+// HTTP pinned path (serveMCP) and the stdio path (serveMCPStdio) answer the
+// same text.
+const (
+	mcpSessionAccountGoneMsg   = "mcp: session account no longer available — re-initialize"
+	mcpSessionAccountFrozenMsg = "mcp: session account is operator-frozen — re-initialize"
+)
 
 // mcpAccountLive reports whether the pinned account still exists in this
 // request's generation.

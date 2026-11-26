@@ -214,6 +214,28 @@ func MergeCanonicalTools(toolsByServer map[string][]ToolSpec, targets []TargetMa
 	return out
 }
 
+// AggregateTools fetches every target's tool list (in target order) and
+// merges the canonical surface. A target whose fetch fails is skipped — the
+// route degrades to the remaining targets instead of failing wholesale — and
+// complete reports false so the caller can cache the result only briefly. The
+// list is never nil (clients expect [], not null).
+func AggregateTools(targets []TargetMapping, fetch func(server string) ([]ToolSpec, error)) (tools []ToolSpec, complete bool) {
+	toolsByServer := make(map[string][]ToolSpec, len(targets))
+	complete = true
+	for _, t := range targets {
+		specs, err := fetch(t.Server)
+		if err != nil {
+			complete = false // degraded surface: other targets still serve their tools
+			continue
+		}
+		toolsByServer[t.Server] = specs
+	}
+	if tools = MergeCanonicalTools(toolsByServer, targets); tools == nil {
+		tools = []ToolSpec{}
+	}
+	return tools, complete
+}
+
 // FailoverStatus reports whether an upstream HTTP status triggers trying the
 // next route target: credential/auth problems (401), invalid sessions (404),
 // rate limiting (429) and server faults (5xx). Other statuses — including

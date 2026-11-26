@@ -216,7 +216,7 @@ func TestSessionTable_RouteOpsConcurrent(t *testing.T) {
 				tbl.RouteSubGet(sid, server)
 				tbl.RouteStickyPut(sid, tool, server)
 				tbl.RouteStickyGet(sid, tool)
-				tbl.RouteToolsPut(sid, []ToolSpec{{Name: tool}})
+				tbl.RouteToolsPut(sid, []ToolSpec{{Name: tool}}, true)
 				tbl.RouteToolsGet(sid)
 				tbl.RouteSubs(sid)
 				if i%17 == 0 {

@@ -138,6 +138,16 @@ func (b *ringBuffer) String() string {
 	return string(b.data)
 }
 
+// MaxFrameBytes bounds one newline-delimited JSON-RPC frame the gateway reads
+// from a stdio child (the read loop's scanner buffer cap). A longer line is
+// not truncated: the read loop fails (bufio.ErrTooLong) and the whole conn
+// dies with every pending call on it. Children must therefore keep every
+// written line strictly below it — the newline terminator shares the buffer
+// with the line, so the longest frame that gets through is MaxFrameBytes-1
+// bytes of JSON plus the newline. Bundled children derive their output bound
+// from this value.
+const MaxFrameBytes = 16 * 1024 * 1024
+
 // StartStdio launches the child with the given environment (already resolved
 // by the caller — credential templating happens in the app layer) and starts
 // the response-demultiplexing read loop.
@@ -175,7 +185,7 @@ func StartStdio(command []string, env []string) (*StdioConn, error) {
 // Notifications and responses with no pending caller are discarded.
 func (c *StdioConn) readLoop(stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxFrameBytes)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		frame := ParseFrame(line)
@@ -197,6 +207,14 @@ func (c *StdioConn) readLoop(stdout io.Reader) {
 	}
 	if err := scanner.Err(); err != nil {
 		c.readErr = err
+		// A read error is not the child's exit: on an oversized frame
+		// (ErrTooLong) the child is typically still alive, blocked writing the
+		// rest of the line, and the reap below waits for its exit. Kill it
+		// first — otherwise every pending caller waits with it until its own
+		// timeout tears the conn down from above.
+		if c.cmd.Process != nil {
+			_ = c.cmd.Process.Kill()
+		}
 	} else if c.readErr == nil {
 		c.readErr = io.EOF
 	}

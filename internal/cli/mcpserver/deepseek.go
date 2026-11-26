@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	mcpkg "model-proxy/internal/mcp"
 )
@@ -43,8 +44,17 @@ const (
 	// successful requests; a hung call must not park the stdio loop when the
 	// server also runs standalone, outside the gateway's `timeout:`).
 	deepseekCallTimeout = 60 * time.Second
-	// deepseekMaxResponseBytes bounds one API response read.
-	deepseekMaxResponseBytes = 32 << 20
+	// deepseekMaxResponseBytes bounds one API response read. It is derived
+	// from the gateway's frame bound and deliberately exceeds the stdout line
+	// budget (deepseekMaxLineBytes): a page between the two is served
+	// truncated (boundFrame) rather than failed outright.
+	deepseekMaxResponseBytes = 2 * mcpkg.MaxFrameBytes
+	// deepseekMaxLineBytes bounds one response line (frame + newline) written
+	// to stdout. The gateway's StdioConn fails the WHOLE session on a line at
+	// or above mcpkg.MaxFrameBytes (bufio.ErrTooLong: every pending call
+	// reports "child exited"), so the child stays under it with headroom for
+	// the JSON-RPC envelope.
+	deepseekMaxLineBytes = mcpkg.MaxFrameBytes - 64<<10
 )
 
 // ServeDeepSeek runs the deepseek-search MCP stdio server until stdin EOF.
@@ -62,7 +72,7 @@ func ServeDeepSeek(stdin io.Reader, stdout io.Writer) error {
 	}
 	out := bufio.NewWriter(stdout)
 	sc := bufio.NewScanner(stdin)
-	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024) // same bound as mcpkg.StdioConn
+	sc.Buffer(make([]byte, 0, 64*1024), mcpkg.MaxFrameBytes) // same bound as mcpkg.StdioConn
 	for sc.Scan() {
 		line := bytes.TrimSpace(sc.Bytes())
 		if len(line) == 0 {
@@ -72,7 +82,7 @@ func ServeDeepSeek(stdin io.Reader, stdout io.Writer) error {
 		if resp == nil {
 			continue // notification or response: never answered
 		}
-		if _, err := out.Write(append(resp, '\n')); err != nil {
+		if _, err := out.Write(append(boundFrame(resp), '\n')); err != nil {
 			return fmt.Errorf("write response: %w", err)
 		}
 		if err := out.Flush(); err != nil {
@@ -83,6 +93,100 @@ func ServeDeepSeek(stdin io.Reader, stdout io.Writer) error {
 		return fmt.Errorf("read stdin: %w", err)
 	}
 	return nil
+}
+
+// deepseekTruncatedFmt is appended to the text block cut by boundFrame: the
+// recognizable marker of a truncated result, naming the dropped byte count.
+const deepseekTruncatedFmt = "\n\n[truncated: %d bytes omitted — the result exceeded the stdio frame limit]"
+
+// boundFrame caps one response line at deepseekMaxLineBytes (newline
+// included) — the single guard every written line passes, whatever tool or
+// error produced it. A fitting line is returned untouched. An oversized
+// tools/call result keeps a near-maximal prefix of its text and gains a
+// truncation marker; a line that cannot be cut this way degrades to a
+// compact JSON-RPC error. Without it a page between the line budget and the
+// API read bound is written in full and the gateway kills the whole session
+// on it.
+func boundFrame(resp []byte) []byte {
+	limit := deepseekMaxLineBytes - 1 // the newline terminator shares the budget
+	if len(resp) <= limit {
+		return resp
+	}
+	var env struct {
+		ID     json.RawMessage `json:"id"`
+		Result *struct {
+			Content []textBlock `json:"content"`
+			IsError bool        `json:"isError"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil || env.Result == nil || len(env.Result.Content) == 0 {
+		return frameLimitError(env.ID)
+	}
+	for _, b := range env.Result.Content {
+		if b.Type != "text" {
+			return frameLimitError(env.ID) // only text can be cut
+		}
+	}
+	return truncateToolResult(env.ID, env.Result.Content, env.Result.IsError, limit)
+}
+
+// textBlock is one content block of a tools/call result. The bundled tools
+// emit text only.
+type textBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// truncateToolResult re-renders a tool result with its LAST text block cut so
+// the whole line fits limit; the marker names the bytes dropped from that
+// block and earlier blocks are kept as they are. The cut is measured on the
+// encoded line, not the raw text: JSON escaping expands a byte to up to six.
+// For uniformly escaped text the kept prefix is maximal; text whose escaping
+// density rises toward its end keeps a somewhat shorter one.
+func truncateToolResult(id json.RawMessage, blocks []textBlock, isError bool, limit int) []byte {
+	last := len(blocks) - 1
+	full := blocks[last].Text
+	keep := len(full)
+	for step := 0; ; step++ {
+		blocks[last].Text = full[:keep] + fmt.Sprintf(deepseekTruncatedFmt, len(full)-keep)
+		line := mcpkg.BuildResultResponse(id, toolResultJSON(blocks, isError))
+		if len(line) <= limit {
+			return line
+		}
+		if keep == 0 {
+			return frameLimitError(id) // the blocks before the last alone exceed the limit
+		}
+		if step < 32 {
+			// Proportional estimate: scale the kept text by the share of the
+			// line that fits. Repeated, it converges on the limit — and unlike
+			// a raw overshoot cut it does not strip escape-heavy text.
+			keep = int(int64(keep) * int64(limit) / int64(len(line)))
+		} else {
+			// Safety net: every dropped text byte saves at least one encoded
+			// byte, so cutting the overshoot lands under the limit for sure.
+			keep -= min(len(line)-limit+8, keep)
+		}
+		for keep > 0 && !utf8.RuneStart(full[keep]) {
+			keep-- // land the cut on a rune boundary
+		}
+	}
+}
+
+// toolResultJSON marshals the tools/call result payload: the text blocks,
+// plus isError for upstream failures.
+func toolResultJSON(blocks []textBlock, isError bool) json.RawMessage {
+	payload := map[string]any{"content": blocks}
+	if isError {
+		payload["isError"] = true
+	}
+	data, _ := json.Marshal(payload)
+	return data
+}
+
+// frameLimitError replaces a line that cannot be cut: a compact JSON-RPC error
+// for the same id, so the caller can still pair the failure.
+func frameLimitError(id json.RawMessage) []byte {
+	return mcpkg.BuildErrorResponse(id, -32000, fmt.Sprintf("response exceeded the stdio frame limit (%d bytes) and was dropped", deepseekMaxLineBytes))
 }
 
 // dispatch answers one JSON-RPC line (nil = stay silent). Malformed JSON and
