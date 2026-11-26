@@ -601,7 +601,8 @@ type PriceConfig struct {
 //
 // mcp_split (default false) routes MCP gateway records (kind="mcp") to their
 // own stream: mcp-YYYYMMDD.log files under mcp_dir (default
-// ~/.model-proxy/log/mcp) sharing this block's size/body/retention policy.
+// ~/.model-proxy/log/mcp) sharing this block's size/body/retention/hot_retention
+// policy (the split stream is zstd-archived past the hot window too).
 // The requests- stream and its SQLite index go back to LLM-only traffic;
 // /api/requests?kind=mcp reads the split stream via directory scan. Like the
 // rest of the block, changing it requires a restart.
