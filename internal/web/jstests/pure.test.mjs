@@ -32,7 +32,7 @@ import {
   liveSessionOrder, shortSessionId,
   fmtCompact,
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
-  CLIENT_GONE_STATUS, notLoggedHint, FAILOVER_PROVIDER, rowFailoverAttempt,
+  CLIENT_GONE_STATUS, notLoggedHint, detailReopenState, FAILOVER_PROVIDER, rowFailoverAttempt,
   quotaErrKind, accountUsageState, accountRemainingLabel, accountDenialLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta, scheduleCredentialLabel, syncErrLabel, keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
   parseModelLines, mergeFetchedModels, providerDeleteSummary,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
@@ -1754,10 +1754,47 @@ test('detailFetchState treats a 404 as an expected unlogged request', () => {
   assert.deepEqual(detailFetchState(0, undefined), { loading: false, error: 'load failed' });
 });
 
+test('a client-gone terminal takes the normal detail-fetch path', () => {
+  // 499 不写终态行，但断开前已有失败跳时该 id 留有 attempt_only 腿行——end 事件
+  // 不预置 not-logged（接线钉在 liveevents.test.mjs），没有状态条目时放行 fetch。
+  assert.equal(shouldFetchDetail(false, undefined, false), true);
+  // 一行都没有：404 经 detailFetchState 回落成 not-logged，自动路径不再重发
+  // （无 404 循环），提示点明 client-gone 原因。
+  const missed = detailFetchState(404, 'no record for request id x');
+  assert.deepEqual(missed, { loading: false, error: '', notLogged: true });
+  assert.equal(shouldFetchDetail(false, missed, false), false);
+  // 取到腿行：记录进缓存后不再取。
+  assert.equal(shouldFetchDetail(true, undefined, false), false);
+  assert.equal(notLoggedHint(CLIENT_GONE_STATUS), 'client cancelled before commit — no request-log record');
+});
+
+test('detailReopenState keeps a terminal mark on explicit re-open only for a client-gone 404', () => {
+  const notLogged = { loading: false, error: '', notLogged: true };
+  const cleared = { loading: false, error: '', notLogged: false };
+  // 取过且 404 的 499：确实无记录——保留标记（同一引用），重开不再发请求。
+  assert.equal(detailReopenState(notLogged, 499), notLogged);
+  // 499 取详情出错（网络/5xx）：与任何状态一样清掉重试——「保留」只针对 404。
+  assert.deepEqual(detailReopenState({ loading: false, error: 'boom' }, 499), cleared);
+  // 其他状态：404 与错误都清掉重试（既有行为不变），含未知状态。
+  assert.deepEqual(detailReopenState(notLogged, 502), cleared);
+  assert.deepEqual(detailReopenState({ loading: false, error: 'boom' }, 502), cleared);
+  assert.deepEqual(detailReopenState(notLogged, undefined), cleared);
+  assert.deepEqual(detailReopenState(notLogged, 200), cleared);
+  // 没有可清的终态：原样返回同一引用（调用方据此不写回）。
+  const loading = { loading: true, error: '' };
+  assert.equal(detailReopenState(loading, 499), loading);
+  assert.equal(detailReopenState(loading, 502), loading);
+  const empty = {};
+  assert.equal(detailReopenState(empty, 499), empty);
+  assert.equal(detailReopenState(undefined, 499), undefined);
+  assert.equal(detailReopenState(null, 502), null);
+});
+
 test('notLoggedHint names the client-gone terminal, stays generic otherwise', () => {
-  // The client-gone terminal (live status 499) never has a record — the
-  // pipeline publishes the end event instead of committing — and the Live
-  // popover marks it not-logged without fetching; the hint names the cause.
+  // The client-gone terminal (live status 499) writes no terminal row: when its
+  // detail fetch 404s (nothing was logged before the client left), the Live
+  // popover shows this cause-naming hint. Legs logged before the disconnect
+  // make the fetch hit instead, and the popover shows them.
   assert.equal(CLIENT_GONE_STATUS, 499);
   assert.equal(notLoggedHint(499), 'client cancelled before commit — no request-log record');
   // Every other unlogged terminal (a fetch that 404'd, e.g. an unrouted

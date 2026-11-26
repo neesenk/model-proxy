@@ -2203,7 +2203,8 @@ export function fmtCompact(n, decimals = 1) {
 // liveDetailState; `inFlight` = the live row is still streaming. A recorded
 // error OR a 404 (notLogged) is terminal for the automatic pass — retrying on
 // every re-render would loop (404 -> render -> fetch -> 404). The user's
-// explicit re-open clears both and retries.
+// explicit re-open clears both and retries (detailReopenState), except a
+// client-gone 404, which stays.
 export function shouldFetchDetail(cached, state, inFlight) {
   if (cached || inFlight) return false;
   const s = state || {};
@@ -2220,12 +2221,11 @@ export function detailFetchState(status, message) {
   return { loading: false, error: message || 'load failed' };
 }
 
-// CLIENT_GONE_STATUS is the live end status for a request the CALLER abandoned
-// before any commit (the pipeline publishes the terminal event INSTEAD of
-// committing; see forward's statusClientGone). Such a request has no
-// request-log record and never will, so the Live detail popover marks it
-// not-logged up front instead of fetching /api/requests/<id> — a fetch that
-// can only miss.
+// CLIENT_GONE_STATUS 是「调用方在提交前放弃」的请求的 live 终局状态（管线用终局
+// 事件代替提交；见 forward 的 statusClientGone）。这种请求不写终态行——但断开前
+// 已有失败跳时，那些 attempt_only 腿行已经落盘，/api/requests/<id> 取得到。所以
+// 499 行和其他终态一样照常取详情（end 事件不预置状态）：命中就展示腿行；404 才
+// 经 detailFetchState 回落成 not-logged，提示用 notLoggedHint(499) 点明原因。
 export const CLIENT_GONE_STATUS = 499;
 
 // notLoggedHint is the popover hint for a request with no request-log record.
@@ -2237,6 +2237,18 @@ export function notLoggedHint(status) {
     return 'client cancelled before commit — no request-log record';
   }
   return 'not logged — the request did not commit, so there is no request-log record';
+}
+
+// detailReopenState 决定「显式重开」Live 详情弹层时既有的取详情状态怎么处理：
+// 返回要写回的状态，没有变化时返回同一引用（调用方据此不写回）。取过且 404 的
+// client-gone 终局保留 not-logged 标记——确实无记录，重开不必再发一次请求；其余
+// 一律清掉重试：任何状态的取详情错误（含 499 的——网络/5xx 是暂时性的）与非 499
+// 的 404。
+export function detailReopenState(state, status) {
+  const s = state || {};
+  if (s.notLogged && status === CLIENT_GONE_STATUS) return state;
+  if (s.error || s.notLogged) return { ...s, error: '', notLogged: false };
+  return state;
 }
 
 // FAILOVER_PROVIDER 是全链失败终态行的 provider 哨兵（forward 的

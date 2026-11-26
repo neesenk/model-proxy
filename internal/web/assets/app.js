@@ -43,7 +43,7 @@ import {
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   parseRequestTimeValue, requestTimeValue, requestTimeBounds, requestTimePickerHTML,
   fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
-  detailFetchState, CLIENT_GONE_STATUS, notLoggedHint, quotaErrKind, accountUsageState,
+  detailFetchState, detailReopenState, notLoggedHint, quotaErrKind, accountUsageState,
   accountRemainingLabel, accountDenialLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta,
   scheduleCredentialLabel, syncErrLabel,
   keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
@@ -4708,14 +4708,9 @@ function applyLiveEvent(e) {
     row.cacheRead = e.cache_read || 0;
     row.cacheCreation = e.cache_creation || 0;
     row.inFlight = false;
-    // A client-gone terminal (499) never writes a request-log record — the
-    // pipeline published this end event INSTEAD of committing — so the detail
-    // popover must not fetch /api/requests/<id>: pre-mark not-logged here.
-    // shouldFetchDetail is terminal on it, and openLiveDetailPop keeps the
-    // mark on explicit re-open (there is nothing to retry into).
-    if (e.status === CLIENT_GONE_STATUS) {
-      liveDetailState.set(e.request_id, { loading: false, error: '', notLogged: true });
-    }
+    // 终局不预置取详情状态（包括 client-gone 的 499）：499 不写终态行，但断开前
+    // 已有失败跳时该 id 留有 attempt_only 腿行——弹层照常取 /api/requests/<id>，
+    // 命中就展示；确实无记录时由 404 回落成 not-logged（detailFetchState）。
     return;
   }
   if (e.type === 'progress') {
@@ -5278,13 +5273,12 @@ function openLiveDetailPop(id) {
   const row = liveRowById(id);
   if (!row) return;
   liveDetailPopId = id;
-  // Re-opening after a fetch error clears it so the fetch is retried. A
-  // client-gone terminal is not a retryable miss — its record can never
-  // exist — so the not-logged mark stays.
-  const state = liveDetailState.get(id) || {};
-  if ((state.error || state.notLogged) && row.status !== CLIENT_GONE_STATUS) {
-    liveDetailState.set(id, { ...state, error: '', notLogged: false });
-  }
+  // 显式重开：取详情出错或 404 的状态清掉重试——只有「取过且 404」的 client-gone
+  // 终局保留 not-logged 标记（确实无记录，不必再发请求）。规则见
+  // detailReopenState。
+  const state = liveDetailState.get(id);
+  const reopened = detailReopenState(state, row.status);
+  if (reopened !== state) liveDetailState.set(id, reopened);
   const dialog = ensureLiveDetailPop();
   fillLiveDetailPop(dialog, row);
   if (!dialog.open) dialog.showModal();
