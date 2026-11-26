@@ -89,11 +89,18 @@ func (m *Manager) ResetHealth(name string, parentOf map[string]string) (cleared 
 	// A cleared concurrency cap is cleared frozen state too: name the
 	// account, or an unfreeze would report "nothing frozen" over a limit it
 	// did clear. An account merely running requests is not.
+	capped := false
 	for name, state := range m.concurrency {
 		if match(name) && state.cap > 0 {
 			state.cap, state.stated, state.full = 0, false, 0
 			cleared = append(cleared, name)
+			capped = true
 		}
+	}
+	// Without a cap an account is never saturated: a request parked in
+	// WaitInflightSlot on the cleared cap has its free slot this instant.
+	if capped {
+		m.wakeSlotWaitersLocked()
 	}
 	sort.Strings(cleared)
 	return cleared, locks

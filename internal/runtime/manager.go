@@ -180,11 +180,18 @@ func (m *Manager) ReplaceGeneration(generation uint64, liveQuotaKeys map[string]
 	}
 	// Same pruning for the concurrency ledger: a surviving account keeps its
 	// learned limit and its running requests, a removed one drops out (a
-	// request of its own still running then releases into nothing).
+	// request of its own still running then releases into nothing). A request
+	// parked in WaitInflightSlot on a removed account is woken: nothing can
+	// free a slot there any more, and the waiter re-reads its targets.
+	pruned := false
 	for name := range m.concurrency {
 		if !liveQuotaKeys[name] {
 			delete(m.concurrency, name)
+			pruned = true
 		}
+	}
+	if pruned {
+		m.wakeSlotWaitersLocked()
 	}
 	empty := map[string]providerQuality{}
 	m.quality.Store(&empty)

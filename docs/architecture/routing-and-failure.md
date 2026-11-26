@@ -364,14 +364,15 @@ step-plan 两个账号的 429 率在在途数达到文案上限时从 0–2% 跳
 
 **全部候选饱和**：`ConcurrencyWaitable` 报告「至少一个目标仅因并发占满而不可用」时，
 `routing.DecideFailure` 返回带 `WaitForSlot` 的 `FailureWait`——forward 等空位
-（`WaitInflightSlot`：任一目标有请求完成即唤醒，单轮上限 `retry_wait`，轮次预算与冷却等待
+（`WaitInflightSlot`：任一目标有请求完成即唤醒，其它账号的完成只会让等待者复核后继续等、不耗等待轮次；单轮上限 `retry_wait`，轮次预算与冷却等待
 共享的 ≤2 轮），期间客户端断开按 499 收尾；预算用尽仍饱和则 429 + `Retry-After: 1`
 （不是 `rate_limit_backoff`：空位在一个请求的生命周期内就会腾出）。`retry_wait: "0"` 同样
 关闭该等待。
 
 **生命周期**：在途计数跨 reload 保留；`ReplaceGeneration` 按存活账号剪枝（存活账号保留上限与
-在途请求，被移除账号的在途请求释放时落到空处）；`unfreeze` / `POST /api/health/reset` 清除学到
-的上限（明说与推断都清）但不动在途计数；不持久化，重启后由第一个并发型 429 重新学。
+在途请求，被移除账号的在途请求释放时落到空处）；`unfreeze` / `POST /api/health/reset` 清除学到的
+上限（明说与推断都清）但不动在途计数；清除上限与 reload 移除账号都会唤醒正在等空位的请求；
+不持久化，重启后由第一个并发型 429 重新学。
 
 运行日志（转发执行器路径）：学上限只在值变化时打一行——`429 states a concurrency limit of N — dispatch capped`
 或 `429 with K other request(s) in flight — concurrency cap lowered to K`——上调一行

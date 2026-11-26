@@ -246,7 +246,7 @@ closed (in-flight handlers: N)`）：N 是 deadline 时刻仍未返回的已接�
 | `Proxy.modelCapsPersistMu` | `Proxy.mu.RLock`、wirecap 模型存储锁 | daemon 的模型文件读写串行化。采纳外部刷新时在同一配置读锁内验证 fingerprint 并恢复条目。 |
 | `Proxy.mu` | `runtime.Manager` 或 `wirecap.Store`、`wirecap.ModelStore` 的状态锁 | 在一个配置代内获取请求视图、捕获持久化快照或发布 reload 状态。 |
 
-并发空位广播（`WaitInflightSlot` / `ReleaseInflightSlot`）遵守同一方向：释放路径在 `m.mu` 内关闭并退役广播 channel，这只是内存操作；被唤醒的等待者只是重新去拿 `m.mu` 或返回，持锁期间不回调任何人。
+并发空位广播（`WaitInflightSlot` / `ReleaseInflightSlot`）遵守同一方向：释放出空位的 release、unfreeze 清除上限、reload 剪枝掉账号，都在 `m.mu` 内关闭并退役广播 channel，这只是内存操作；被唤醒的等待者只是重新去拿 `m.mu` 复核自己的目标——有空位才返回，否则重新停驻——持锁期间不回调任何人。
 
 Manager 与 wirecap 持锁时禁止反向调用 Proxy、裁决服务或 quota tracker。文件读取、写入与 HTTP 编码均在释放配置和状态锁后执行；文件串行化锁可以覆盖相应文件操作。后台 probe 的 `wireProbeMu` 只串行化扫描，持有状态锁的路径不得等待它。
 
@@ -517,9 +517,12 @@ Disable/Enable）是 (provider, model) 粒度的 operator 覆盖，状态归
   `TestCooldownStateTreatsSaturationAsRateLimitClass`、`TestCooldownStateIgnoresModelLocks`、
   `TestResetHealthClearsLearnedConcurrencyCapKeepsInflight`、
   `TestReplaceGenerationPrunesConcurrencyStateToLiveKeys`、
-  `TestDashboardProjectsConcurrency`、`TestWaitInflightSlotWakesWhenASlotFrees`）：占位与
+  `TestDashboardProjectsConcurrency`、`TestWaitInflightSlotWakesWhenASlotFrees`、
+  `TestWaitInflightSlotIgnoresUnrelatedRelease`、`TestWaitInflightSlotWakesWhenUnfreezeClearsTheCap`、
+  `TestWaitInflightSlotEndsWhenReloadDropsTheAccount`）：占位与
   释放配对、明说上限权威、推断只降不升与满载上调、饱和离开调度但 MCP 不受影响、冷却判定按
-  限频类且无 horizon（模型锁照旧不参与判定）、unfreeze 清上限留在途、reload 剪枝、投影、释放即唤醒。
+  限频类且无 horizon（模型锁照旧不参与判定）、unfreeze 清上限留在途、reload 剪枝、投影、释放出空位即唤醒——
+  无关账号的释放只让等待者复核后继续等（不耗等待轮次），清除上限与 reload 移除账号同样唤醒。
 - 多 tracker 同 path、进程退出、测试 TempDir cleanup。
 - lifecycle 关闭时拒绝新任务、等待已接纳任务、drain request logger，重复 Close
   不阻塞。

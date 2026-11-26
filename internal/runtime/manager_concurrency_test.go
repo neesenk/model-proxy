@@ -393,6 +393,106 @@ func awaitWaiters(t *testing.T, m *Manager, n int) {
 	})
 }
 
+// A request completing on an unrelated account must not end the wait. The
+// waiter parks for THESE targets, and only a slot freed on one of them makes
+// it schedulable. With one manager-wide wake every unrelated completion
+// handed the waiter back as "freed", so the caller spent a wait round on each
+// of them and an all-saturated route answered 429 after two request lifetimes
+// on OTHER accounts instead of waiting retry_wait for its own slot.
+func TestWaitInflightSlotIgnoresUnrelatedRelease(t *testing.T) {
+	m := newTestManager(4)
+	targets := []Target{{Provider: "a"}}
+	m.NoteConcurrencyLimit("a", 0, 1, 4)
+	heldA := takeSlot(t, m, "a") // a is saturated: its one slot is taken
+	heldB := takeSlot(t, m, "b") // an unrelated account running a request
+
+	freed := make(chan bool, 1)
+	go func() {
+		f, _ := m.WaitInflightSlot(targets, time.Hour, time.Minute, context.Background())
+		freed <- f
+	}()
+	awaitWaiters(t, m, 1)
+
+	m.ReleaseInflightSlot(heldB, true)
+	// Let the waiter act on that release: it must either still be parked on a
+	// NEW wake channel (it woke, looked, and parked again) or — the bug —
+	// have returned.
+	testsyn.WaitUntil(t, "the waiter to settle after the unrelated release", func() bool {
+		if len(freed) > 0 {
+			return true
+		}
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.slotWaiters == 1 && m.slotFree != nil
+	})
+	select {
+	case f := <-freed:
+		t.Fatalf("waiter returned freed=%v when a request on the unrelated account b completed; a is still saturated (cap %d, %d in flight)", f, m.Concurrency("a").Cap, m.Concurrency("a").Inflight)
+	default:
+	}
+
+	m.ReleaseInflightSlot(heldA, false)
+	select {
+	case f := <-freed:
+		if !f {
+			t.Fatal("releasing the slot on the waited-for account must wake the waiter as freed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter was not woken by the release on its own account")
+	}
+}
+
+// Unfreeze clears a learned cap, and an account without a cap is never
+// saturated: a request parked on that account's full slot-set becomes
+// dispatchable that instant and must be woken, not left to time out.
+func TestWaitInflightSlotWakesWhenUnfreezeClearsTheCap(t *testing.T) {
+	m := newTestManager(4)
+	targets := []Target{{Provider: "a"}}
+	m.NoteConcurrencyLimit("a", 0, 1, 4)
+	held := takeSlot(t, m, "a")
+
+	freed := make(chan bool, 1)
+	go func() {
+		f, _ := m.WaitInflightSlot(targets, time.Hour, time.Minute, context.Background())
+		freed <- f
+	}()
+	awaitWaiters(t, m, 1)
+	m.ResetHealth("a", nil)
+	select {
+	case f := <-freed:
+		if !f {
+			t.Fatal("the cleared cap left the waiter without a free slot")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("clearing the cap did not wake the waiter")
+	}
+	m.ReleaseInflightSlot(held, false)
+}
+
+// A reload that drops the account a request waits on must not leave it parked
+// until the deadline: with wakes now limited to freed slots and cleared caps,
+// nothing else would ever end that wait.
+func TestWaitInflightSlotEndsWhenReloadDropsTheAccount(t *testing.T) {
+	m := newTestManager(4)
+	targets := []Target{{Provider: "a"}}
+	m.NoteConcurrencyLimit("a", 0, 1, 4)
+	held := takeSlot(t, m, "a")
+
+	done := make(chan bool, 1)
+	go func() {
+		f, _ := m.WaitInflightSlot(targets, time.Hour, time.Minute, context.Background())
+		done <- f
+	}()
+	awaitWaiters(t, m, 1)
+	m.ReplaceGeneration(5, nil) // the account leaves the config
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dropping the waited-for account did not end the wait")
+	}
+	m.ReleaseInflightSlot(held, false)
+}
+
 // TestCooldownStateIgnoresModelLocks: a model lock makes the scheduler drop
 // the target and the request ends through the ordinary all-failed path; it is
 // not an availability fact for the wait-retry decision (a lock about to lapse

@@ -87,8 +87,9 @@ func (m *Manager) TakeInflightSlot(provider string) (InflightSlot, bool) {
 // ReleaseInflightSlot returns a slot taken by TakeInflightSlot. succeeded says
 // the upstream served the request (a 2xx): such a request counts toward the
 // probe-up streak of an inferred cap when it exercised the cap, and raised
-// reports that the streak just lifted the cap to raisedTo. Every release
-// wakes the requests parked in WaitInflightSlot on this account.
+// reports that the streak just lifted the cap to raisedTo. A release that
+// leaves the account with a free slot wakes the requests parked in
+// WaitInflightSlot.
 func (m *Manager) ReleaseInflightSlot(slot InflightSlot, succeeded bool) (raisedTo int, raised bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -109,7 +110,14 @@ func (m *Manager) ReleaseInflightSlot(slot InflightSlot, succeeded bool) (raised
 	} else {
 		state.full = 0 // the streak counts CONSECUTIVE successes
 	}
-	m.wakeSlotWaitersLocked()
+	// Wake the waiters only when THIS release freed a slot: an account still
+	// at its cap (a pinned dispatch overshooting it) or that never had one is
+	// nobody's reason to wait. The wake is still a broadcast — every parked
+	// request looks at its own targets — but a wake meant for another account
+	// costs a waiter one locked re-check and a re-park, never a wait round.
+	if state.cap > 0 && state.inflight < state.cap {
+		m.wakeSlotWaitersLocked()
+	}
 	if state.inflight == 0 && state.cap == 0 {
 		delete(m.concurrency, slot.Provider)
 	}
@@ -190,50 +198,70 @@ func (m *Manager) Concurrency(provider string) ConcurrencyStatus {
 // exhausted). quotaMaxAge is the scheduler's quota-snapshot freshness window.
 // max bounds the wait (freed=false when it elapses) and the context ends it
 // as canceled.
+//
+// The wake is a broadcast over every parked request, so a wake meant for
+// another account's slot arrives here too: after each wake the targets are
+// looked at again under the lock and the request parks again when none of
+// them is free. Only a slot on one of ITS targets (or a cap cleared by
+// unfreeze) ends the wait as freed — an unrelated completion never spends
+// the caller's wait budget.
 func (m *Manager) WaitInflightSlot(targets []Target, quotaMaxAge, max time.Duration, ctx context.Context) (freed, canceled bool) {
-	now := time.Now()
-	m.mu.Lock()
-	for _, target := range targets {
-		if m.slotFreeLocked(target, now, quotaMaxAge) {
+	timer := time.NewTimer(max)
+	defer timer.Stop()
+	for {
+		now := time.Now()
+		m.mu.Lock()
+		if m.anySlotFreeLocked(targets, now, quotaMaxAge) {
 			m.mu.Unlock()
 			return true, false
 		}
-	}
-	parked := false
-	for _, target := range targets {
-		if m.waitableLocked(target, now, quotaMaxAge) {
-			parked = true
-			break
-		}
-	}
-	if !parked {
-		m.mu.Unlock()
-		return false, false
-	}
-	if m.slotFree == nil {
-		m.slotFree = make(chan struct{})
-	}
-	m.slotWaiters++
-	wake := m.slotFree
-	m.mu.Unlock()
-
-	timer := time.NewTimer(max)
-	defer timer.Stop()
-	select {
-	case <-wake:
-		return true, false
-	case <-ctx.Done():
-		m.unwaitSlotLocked(wake)
-		return false, true
-	case <-timer.C:
-		m.unwaitSlotLocked(wake)
-		select {
-		case <-wake:
-			return true, false // a release raced the deadline
-		default:
+		if !m.anyWaitableLocked(targets, now, quotaMaxAge) {
+			m.mu.Unlock()
 			return false, false
 		}
+		if m.slotFree == nil {
+			m.slotFree = make(chan struct{})
+		}
+		m.slotWaiters++
+		wake := m.slotFree
+		m.mu.Unlock()
+
+		select {
+		case <-wake:
+			// A slot freed on some capped account, or a cap was cleared:
+			// look again at these targets.
+		case <-ctx.Done():
+			m.unwaitSlotLocked(wake)
+			return false, true
+		case <-timer.C:
+			m.unwaitSlotLocked(wake)
+			// A release that raced the deadline still gets its look.
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			return m.anySlotFreeLocked(targets, time.Now(), quotaMaxAge), false
+		}
 	}
+}
+
+// anySlotFreeLocked reports whether any target may be dispatched to now.
+func (m *Manager) anySlotFreeLocked(targets []Target, now time.Time, quotaMaxAge time.Duration) bool {
+	for _, target := range targets {
+		if m.slotFreeLocked(target, now, quotaMaxAge) {
+			return true
+		}
+	}
+	return false
+}
+
+// anyWaitableLocked reports whether any target is unavailable solely because
+// its slots are full — one a freed slot could make schedulable.
+func (m *Manager) anyWaitableLocked(targets []Target, now time.Time, quotaMaxAge time.Duration) bool {
+	for _, target := range targets {
+		if m.waitableLocked(target, now, quotaMaxAge) {
+			return true
+		}
+	}
+	return false
 }
 
 // ConcurrencyWaitable reports whether at least one target is unavailable
