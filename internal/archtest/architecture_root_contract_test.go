@@ -52,7 +52,7 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 
 	t.Run("application assembly is the only concrete Proxy process wiring", func(t *testing.T) {
 		forbiddenCalls := map[string]bool{
-			"NewProxy": true, "StartRuntimeServices": true,
+			"NewProxy":     true,
 			"NewWebServer": true, "initStats": true,
 			"initRequestLog": true, "statsFlushLoop": true,
 		}
@@ -65,26 +65,6 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			for _, violation := range forbiddenCallSites(file, fileSet, forbiddenCalls, forbiddenChains) {
 				t.Errorf("%s bypasses proxyLifecycle: %s", path, violation)
 			}
-		}
-
-		assembly, _ := parseGoFile(t, "internal/app/runtime.go")
-		if got := namedCallCount(assembly, "NewProxy"); got != 1 {
-			t.Errorf("internal/app/runtime.go NewProxy calls = %d, want exactly 1", got)
-		}
-		if got := namedCallCount(assembly, "StartRuntimeServices"); got != 1 {
-			t.Errorf("internal/app/runtime.go StartRuntimeServices calls = %d, want exactly 1", got)
-		}
-		if got := callCountOnIdent(assembly, "proxy", "StartRuntimeServices"); got != 1 {
-			t.Errorf("internal/app/runtime.go proxy.StartRuntimeServices calls = %d, want exactly 1", got)
-		}
-		if got := selectorCountNamed(assembly, "StartRuntimeServices"); got != 1 {
-			t.Errorf("internal/app/runtime.go StartRuntimeServices selector uses = %d, want exactly 1 direct call", got)
-		}
-		if got := selectorCountOnIdent(assembly, "proxy", "StartRuntimeServices"); got != 1 {
-			t.Errorf("internal/app/runtime.go proxy.StartRuntimeServices selector uses = %d, want exactly 1", got)
-		}
-		if got := namedCallCount(assembly, "NewWebServer"); got != 1 {
-			t.Errorf("internal/app/runtime.go NewWebServer calls = %d, want exactly 1", got)
 		}
 
 		serve, _ := parseGoFile(t, "cli_serve.go")
@@ -161,26 +141,6 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 		}
 	})
 
-}
-
-func callCountOnIdent(file *ast.File, receiver, method string) int {
-	count := 0
-	ast.Inspect(file, func(node ast.Node) bool {
-		call, ok := node.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		selector, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || selector.Sel.Name != method {
-			return true
-		}
-		identifier, ok := selector.X.(*ast.Ident)
-		if ok && identifier.Name == receiver {
-			count++
-		}
-		return true
-	})
-	return count
 }
 
 func callCountWithLastSelector(file *ast.File, function, receiver, method string) int {

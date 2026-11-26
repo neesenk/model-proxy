@@ -155,7 +155,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		forbidden := map[string]bool{
 			"schedule": true, "reload": true, "SnapshotRuntime": true,
 			"NewWebServer": true, "serveHTTPUntilShutdown": true,
-			"StartRuntimeServices": true, "contextOverflowRetry": true,
+			"contextOverflowRetry": true,
 		}
 		if got := forbiddenCallSites(f, fset, forbidden, nil); len(got) != 0 {
 			t.Errorf("internal/targetexec/executor.go crossed orchestration boundary: %v", got)

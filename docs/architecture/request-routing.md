@@ -145,7 +145,7 @@ provider config 的 `capabilities: {model: [image, tools]}` 优先。某 model �
   未知取值在校验时报错。默认仍只含 `upstream_error`（不配置 escalation 零行为变化）。
   - `upstream_error`：请求终局未 commit 且客户端未断开（收到终局错误）。客户端侧转换失败
     400（请求对全部候选均不可转换、上游从未被联系）**不计入**——与 guard 拦截同口径，
-    重发同一不可转换请求不会误升级 latch。规划级失败同口径：planTarget 失败（未知 provider
+    重发同一不可转换请求不会误升级 latch。规划级失败同口径：PlanTarget 失败（未知 provider
     配置）、缺 runtime provider implementation（未登录，fail-closed 跳过）、Responses state
     展开失败导致目标在上游接触前被丢弃，且整轮没有任何 target 被真正尝试时，同样不计入坏
     运行（`serveResult.planningErr`）——配置/规划层缺口不是上游判决。

@@ -48,7 +48,8 @@ proxy: off
 # (multiple `login`s) fans a target out to its accounts, round-robin across
 # conversations. Either protocol may reach any exposed model; the protocol
 # (from the request path) selects the upstream path + base URL, and the wire
-# probe picks the backend shape when a provider serves only one.
+# probe picks the backend shape when a provider serves only one. Each request
+# keeps its captured endpoints and protocol verdicts through retries and reload.
 # Inspect the derived table: `model-proxy routes [model]` or the Web UI Config
 # tab. An explicit `routes:` block is only needed for overrides — a declared
 # protocol conversion or a special ordering — and it

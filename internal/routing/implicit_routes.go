@@ -69,7 +69,7 @@ func RouteTable(cfg *configdomain.Config) map[string][]configdomain.RouteTarget 
 }
 
 // The backend protocol for a route target is resolved at request time by the
-// app's (*Proxy).resolvedBackendProto (internal/app/wirecap.go): declared
+// forward.PlanTarget: declared
 // protocol: > ProtocolHint > wire probe verdict > client-protocol passthrough.
 // Used by forward and decisions so the resolution rule is one place.
 

@@ -22,14 +22,11 @@ import (
 )
 
 // proxyHealthGate adapts the root Proxy to targetexec.HealthGate (the narrow
-// scheduling capability used by GateState). parentOf is the request snapshot's
-// pool-virtual→parent projection (RuntimeSnapshot.ParentOf, immutable): the
-// wire-verdict 404 correction resolves the parent from it instead of
-// re-reading reload-owned state on the request path.
+// scheduling capability used by GateState). A 404 correction uses the same
+// provider identity and verdict level as the request that observed it.
 type proxyHealthGate struct {
 	proxy    *Proxy
-	cfg      *configdomain.Config
-	parentOf map[string]string
+	snapshot RuntimeSnapshot
 }
 
 func (g proxyHealthGate) ModelLocked(provider, model string, now time.Time) bool {
@@ -67,22 +64,28 @@ func (g proxyHealthGate) NoteWireResponsesMiss(provider, model string) {
 	// not from live p.parentOf: a pre-reload in-flight request must record the
 	// verdict under its own generation's parent name.
 	parent := provider
-	if par, ok := g.parentOf[provider]; ok {
+	if par, ok := g.snapshot.ParentOf[provider]; ok {
 		parent = par
 	}
 	// The protocol fingerprint comes from the same request snapshot: a 404
 	// observed against generation N's base_url must not flip the verdict of a
 	// generation N+1 entry (model-level "no" has no TTL — a stale flip would
 	// pin the new generation to chat until its fingerprint changes again).
-	// An unresolvable config yields an empty fingerprint, which the store
-	// rejects (never write a correction you cannot attribute to a generation).
-	fp := ""
-	if g.cfg != nil {
-		if provCfg, ok := g.cfg.Providers[parent]; ok {
-			fp = providerbuild.ProtocolConfigFingerprint(provCfg)
-		}
+	// Only attribute corrections with a known provider in this snapshot.
+	if g.snapshot.Cfg == nil {
+		return
 	}
-	g.proxy.noteWireResponsesMiss(parent, model, fp)
+	provCfg, ok := g.snapshot.Cfg.Providers[parent]
+	if !ok {
+		return
+	}
+	if _, hasModel := g.snapshot.ModelCaps.Get(parent, model); model != "" && hasModel {
+		g.proxy.modelCaps.MarkResponsesUnsupported(parent, model, providerbuild.ProtocolConfigFingerprint(provCfg), time.Now())
+		g.proxy.persistModelCaps()
+		return
+	}
+	g.proxy.wireCaps.MarkResponsesUnsupported(parent, provCfg.OpenAIBaseURL, time.Now())
+	g.proxy.persistWireCaps()
 }
 
 // targetExecutionEffects maps semantic target-execution observations to the

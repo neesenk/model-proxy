@@ -148,6 +148,12 @@ func TestForward_LapsedPlanSubscriptionFailsOverE2E(t *testing.T) {
 			t.Errorf("hits = %d/%d, want 1/1", r.ups[0].hits(), r.ups[1].hits())
 		}
 		assertAccountFact(t, r, 0, 1)
+		// The answered row is completed at response-body Close inside the
+		// post-copy commit path — a Content-Length client can finish reading
+		// first, and draining before that drops the row (the leg, written
+		// synchronously in the forward loop, would then stand alone). Wait for
+		// the commit metrics (recorded right after) so drain flushes it.
+		awaitCommitMetrics(t, r.proxy, counters.PMKey{Provider: "b", Model: "m1"})
 		r.drain()
 		assertLogEvidence(t, r, http.StatusOK, "b")
 	})

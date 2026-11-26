@@ -1,7 +1,9 @@
 package wirecap
 
 import (
+	"maps"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -66,6 +68,42 @@ type ModelStore struct {
 	mu       sync.RWMutex
 	caps     map[string]ProviderModelCaps
 	expected map[string]string
+	view     atomic.Pointer[ModelView]
+}
+
+// ModelView exposes only value lookups, so requests can share one published projection.
+type ModelView struct{ caps map[string]ProviderModelCaps }
+
+func (v ModelView) Get(parent, model string) (ModelProtocols, bool) {
+	mp, ok := v.caps[parent].Models[model]
+	return mp, ok
+}
+
+// View publishes the current matrix in O(1). The next writer detaches it
+// before editing any nested model map. Unchanged views are read lock-free.
+func (store *ModelStore) View() ModelView {
+	if store == nil {
+		return ModelView{}
+	}
+	if v := store.view.Load(); v != nil {
+		return *v
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if v := store.view.Load(); v != nil {
+		return *v
+	}
+	v := ModelView{caps: store.caps}
+	store.view.Store(&v)
+	return v
+}
+
+// detachLocked leaves all previously issued views pointing at immutable maps.
+func (store *ModelStore) detachLocked() {
+	if store.view.Load() != nil {
+		store.caps = cloneModelCaps(store.caps)
+		store.view.Store(nil)
+	}
 }
 
 // Get returns one model's protocol matrix.
@@ -108,19 +146,19 @@ func (store *ModelStore) Put(parent, fingerprint, model string, mp ModelProtocol
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if want, ok := store.expected[parent]; ok && want != fingerprint {
+	if want, ok := store.expected[parent]; store.expected != nil && (!ok || want != fingerprint) {
 		return
 	}
+	store.detachLocked()
 	if store.caps == nil {
 		store.caps = map[string]ProviderModelCaps{}
 	}
 	entry := store.caps[parent]
-	if entry.Fingerprint == fingerprint {
-		if prev, ok := entry.Models[model]; ok {
-			mp = MergeOnUnknown(prev, mp)
-		}
+	if entry.Fingerprint != fingerprint {
+		entry = ProviderModelCaps{Fingerprint: fingerprint}
+	} else if prev, ok := entry.Models[model]; ok {
+		mp = MergeOnUnknown(prev, mp)
 	}
-	entry.Fingerprint = fingerprint
 	entry.ProbedAt = now
 	if entry.Models == nil {
 		entry.Models = map[string]ModelProtocols{}
@@ -147,8 +185,11 @@ func (store *ModelStore) PruneModels(parent string, keep map[string]bool) bool {
 	pruned := false
 	for model := range entry.Models {
 		if !keep[model] {
-			delete(entry.Models, model)
-			pruned = true
+			if !pruned {
+				store.detachLocked()
+				pruned = true
+			}
+			delete(store.caps[parent].Models, model)
 		}
 	}
 	return pruned
@@ -169,9 +210,10 @@ func (store *ModelStore) ReplaceProviderModels(parent, fingerprint string, model
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if want, ok := store.expected[parent]; ok && want != fingerprint {
+	if want, ok := store.expected[parent]; store.expected != nil && (!ok || want != fingerprint) {
 		return
 	}
+	store.detachLocked()
 	if store.caps == nil {
 		store.caps = map[string]ProviderModelCaps{}
 	}
@@ -219,6 +261,8 @@ func (store *ModelStore) MarkResponsesUnsupported(parent, model, fingerprint str
 	if !ok {
 		return
 	}
+	store.detachLocked()
+	entry = store.caps[parent]
 	mp.Responses = No
 	entry.Models[model] = mp
 	entry.ProbedAt = now
@@ -228,22 +272,19 @@ func (store *ModelStore) MarkResponsesUnsupported(parent, model, fingerprint str
 // Snapshot returns a detached deep copy suitable for persistence or API
 // projection.
 func (store *ModelStore) Snapshot() map[string]ProviderModelCaps {
-	out := map[string]ProviderModelCaps{}
 	if store == nil {
-		return out
+		return map[string]ProviderModelCaps{}
 	}
 	store.mu.RLock()
 	defer store.mu.RUnlock()
-	for parent, entry := range store.caps {
-		models := make(map[string]ModelProtocols, len(entry.Models))
-		for model, mp := range entry.Models {
-			models[model] = mp
-		}
-		out[parent] = ProviderModelCaps{
-			Fingerprint: entry.Fingerprint,
-			ProbedAt:    entry.ProbedAt,
-			Models:      models,
-		}
+	return cloneModelCaps(store.caps)
+}
+
+func cloneModelCaps(caps map[string]ProviderModelCaps) map[string]ProviderModelCaps {
+	out := make(map[string]ProviderModelCaps, len(caps))
+	for parent, entry := range caps {
+		entry.Models = maps.Clone(entry.Models)
+		out[parent] = entry
 	}
 	return out
 }
@@ -262,6 +303,7 @@ func (store *ModelStore) Restore(loaded map[string]ProviderModelCaps, fingerprin
 	for parent, entry := range loaded {
 		fp, configured := fingerprints[parent]
 		if configured && fp == entry.Fingerprint {
+			entry.Models = maps.Clone(entry.Models)
 			next[parent] = entry
 		}
 	}
@@ -272,5 +314,6 @@ func (store *ModelStore) Restore(loaded map[string]ProviderModelCaps, fingerprin
 	store.mu.Lock()
 	store.caps = next
 	store.expected = expected
+	store.view.Store(nil)
 	store.mu.Unlock()
 }

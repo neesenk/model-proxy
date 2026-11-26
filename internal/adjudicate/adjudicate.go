@@ -154,7 +154,7 @@ type Options struct {
 // Construct once, Start with the ports, Close drains.
 type Service struct {
 	opts   Options
-	queue  chan Job
+	queue  chan queuedJob
 	cfg    RuntimeConfig
 	caller Caller
 	sink   Sink
@@ -205,6 +205,11 @@ type Service struct {
 	done          chan struct{}
 }
 
+type queuedJob struct {
+	job          Job
+	admissionKey string
+}
+
 // New builds the service and loads persisted state (best-effort: a missing
 // or corrupt file starts empty — persisted state is a cache, never a
 // correctness dependency).
@@ -226,7 +231,7 @@ func New(opts Options) *Service {
 	}
 	s := &Service{
 		opts:     opts,
-		queue:    make(chan Job, opts.MaxQueue),
+		queue:    make(chan queuedJob, opts.MaxQueue),
 		inflight: make(map[string]bool),
 	}
 	s.cache = loadVerdictCache(statePath(opts.StateDir, "guard_verdicts.json"), opts.CacheMax)
@@ -311,7 +316,7 @@ func (s *Service) Enqueue(j Job) bool {
 	s.inflight[key] = true
 	// Close shuts the queue under the same lock as this non-blocking send.
 	select {
-	case s.queue <- j:
+	case s.queue <- queuedJob{job: j, admissionKey: key}:
 		s.mu.Unlock()
 		return true
 	default:
@@ -322,12 +327,13 @@ func (s *Service) Enqueue(j Job) bool {
 }
 
 // process runs on a worker for one queued job.
-func (s *Service) process(workerCtx context.Context, j Job) {
+func (s *Service) process(workerCtx context.Context, queued queuedJob) {
+	j := queued.job
 	model, timeout, blockSession, enabled := s.cfg.AdjudicationConfig()
 	key := CacheKey(j, model)
 	defer func() {
 		s.mu.Lock()
-		delete(s.inflight, key)
+		delete(s.inflight, queued.admissionKey)
 		s.mu.Unlock()
 	}()
 	if !enabled {

@@ -15,23 +15,10 @@ import (
 // owner file/function and the local dataflow through that owner.
 func TestArchitectureRootInteractionContracts(t *testing.T) {
 	t.Run("application runtime is the sole process assembly", func(t *testing.T) {
-		for _, contract := range []struct {
-			call     string
-			function string
-			receiver string
-		}{
-			{call: "NewProxy", function: "NewRuntime"},
-			{call: "StartRuntimeServices", function: "NewRuntime", receiver: "proxy"},
-			{call: "NewWebServer", function: "NewRuntime"},
-		} {
-			var sites []interactionSite
-			if contract.receiver != "" {
-				sites = rootReceiverCallSites(t, contract.receiver, contract.call)
-			} else {
-				sites = rootFunctionReferenceSites(t, contract.call)
-			}
-			if len(sites) != 1 || sites[0].file != "runtime.go" || sites[0].function != contract.function {
-				t.Errorf("%s production reference sites = %v, want only internal/app/runtime.go:%s direct call", contract.call, sites, contract.function)
+		for _, function := range []string{"NewProxy", "NewWebServer"} {
+			sites := rootFunctionReferenceSites(t, function)
+			if len(sites) != 1 || sites[0].file != "runtime.go" || sites[0].function != "NewRuntime" {
+				t.Errorf("%s production reference sites = %v, want only app.NewRuntime", function, sites)
 			}
 		}
 
@@ -43,15 +30,15 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 
 	t.Run("target executor is assembled only by its forward adapter", func(t *testing.T) {
 		planSites := importedFunctionCallSitesAcrossProduction(t, "model-proxy/internal/targetexec", "NewPlan")
-		if len(planSites) != 1 || planSites[0].file != "internal/forward/plan.go" || planSites[0].function != "planTarget" {
-			t.Errorf("targetexec.NewPlan production call sites = %v, want only forward/plan.go:planTarget", planSites)
+		if len(planSites) != 1 || planSites[0].file != "internal/forward/plan.go" || planSites[0].function != "PlanTarget" {
+			t.Errorf("targetexec.NewPlan production call sites = %v, want only forward/plan.go:PlanTarget", planSites)
 		}
 		if sites := packageLocalFunctionCallSites(t, "internal/targetexec", "NewPlan"); len(sites) != 0 {
 			t.Errorf("targetexec package-local NewPlan calls = %v, want none outside the forward plan owner", sites)
 		}
 		if sites := importedFunctionReferenceSitesAcrossProduction(t, "model-proxy/internal/targetexec", "NewPlan"); len(sites) != 1 ||
-			sites[0].file != "internal/forward/plan.go" || sites[0].function != "planTarget" {
-			t.Errorf("targetexec.NewPlan production reference sites = %v, want only forward/plan.go:planTarget direct call", sites)
+			sites[0].file != "internal/forward/plan.go" || sites[0].function != "PlanTarget" {
+			t.Errorf("targetexec.NewPlan production reference sites = %v, want only forward/plan.go:PlanTarget direct call", sites)
 		}
 
 		sites := importedCompositeLiteralSites(t, "model-proxy/internal/targetexec", "Executor")
@@ -114,7 +101,7 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 			"serveOnce": true, "serveRequest": true, "serveState": true, "serveResult": true,
 			"requestProfile": true, "writeAllTargetsFailed": true, "statusClientGone": true,
 			"newTargetAttempt": true, "forwardLogCtx": true, "buildRequestLogInput": true,
-			"targetPlanInput": true, "planTarget": true, "targetExecutor": true,
+			"targetPlanInput": true, "PlanTarget": true, "targetExecutor": true,
 			"forcedProviderFromRequest": true,
 			"requestRoutingScheduler":   true, "requestRoutingPlanner": true,
 			"evaluateRequestGuard": true, "requestGuardDecision": true, "auditGuardHit": true,
@@ -211,26 +198,6 @@ type interactionSite struct {
 }
 
 func (site interactionSite) String() string { return site.file + ":" + site.function }
-
-func rootReceiverCallSites(t *testing.T, receiver, method string) []interactionSite {
-	t.Helper()
-	var sites []interactionSite
-	for _, path := range productionGoFilesRecursively(t, ".") {
-		file, _ := parseGoFile(t, path)
-		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			for _, call := range namedCallsInNode(fn.Body, method) {
-				if selectorOnIdent(call.Fun, receiver, method) {
-					sites = append(sites, interactionSite{file: filepath.Base(path), function: fn.Name.Name})
-				}
-			}
-		}
-	}
-	return sites
-}
 
 func importedFunctionCallSitesAcrossProduction(t *testing.T, importPath, function string) []importedFunctionCallSite {
 	t.Helper()

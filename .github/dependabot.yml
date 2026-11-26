@@ -11,13 +11,16 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      # Tool directives (staticcheck/errcheck/dupl/govulncheck) and their x/*
+      # Static analysis and code review tools and their x/*
       # dependencies move together; one PR per week keeps the matrix legible.
       static-tools:
         patterns:
           - "honnef.co/go/tools"
           - "github.com/kisielk/errcheck"
+          - "github.com/loov/goda"
           - "github.com/mibk/dupl"
+          - "github.com/uudashr/gocognit"
+          - "mvdan.cc/unparam"
           - "golang.org/x/vuln"
           - "golang.org/x/tools"
       golang-x:

@@ -9,7 +9,7 @@ model-proxy 是单进程模块化单体：根 `package main` 只负责进程入�
 ## 红线
 
 1. 每个请求只捕获一次 `runtimeSnapshot`；异步分支只能使用该快照，禁止重读 reload-owned 状态。
-2. 跨域锁顺序只有 `Proxy.mu → internal/runtime.Manager`；持锁期间不得回调上层 owner 或执行外部 I/O。后台任务必须有 owner、stop、wait 和 final flush。
+2. 跨域取锁遵守 [运行态锁顺序](docs/architecture/runtime-state.md#锁顺序)。状态锁内只做内存操作，禁止反向取锁。后台任务必须有 owner、stop、wait 和 final flush。
 3. nil runtime impl、请求/响应转换失败必须 fail-closed；凭据不得进入 config、代码、日志、测试输出或文档示例。
 4. pin/force-provider 是硬选择，不得跨 route failover。
 5. 模块边界只进不出；直接仓库依赖和关键 owner/callsite 由 `internal/archtest` 的闭合契约保护，不能只放宽测试来迁就实现。
@@ -51,4 +51,4 @@ model-proxy 是单进程模块化单体：根 `package main` 只负责进程入�
 
 ## 验证
 
-所有修改至少执行 `git diff --check`，代码修改执行 `go vet ./...`、`go test ./... -count=1`、`go test -race ./... -count=1`、`gofmt -l .`、`scripts/static.sh`（静态门禁：staticcheck + errcheck + dupl + govulncheck）和 `scripts/cover.sh`；平台代码追加 Linux/Windows 构建。精确追加矩阵见 `docs/engineering/testing.md`。修改本文件或 `docs/` 时执行该文档末尾的检查清单。
+开发中只跑与当前改动有关的用例、包或单条架构守卫。全仓测试、race 矩阵、覆盖率、静态分析和架构巡检只在整个任务准备交付时，按改动范围集中验证一轮。必跑门禁、结果复用和纯文档检查见[验证时机](docs/engineering/testing.md#验证时机)。

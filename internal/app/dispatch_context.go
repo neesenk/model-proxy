@@ -21,6 +21,8 @@ func (p *Proxy) SnapshotRuntime() RuntimeSnapshot {
 	return RuntimeSnapshot{
 		Cfg:            p.cfg,
 		Generation:     p.configGeneration.Load(),
+		WireCaps:       p.wireCaps.View(),
+		ModelCaps:      p.modelCaps.View(),
 		Providers:      p.providers,
 		PoolIndex:      p.poolIndex,
 		ParentOf:       p.parentOf,

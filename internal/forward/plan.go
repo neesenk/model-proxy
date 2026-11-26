@@ -6,7 +6,9 @@ import (
 	"fmt"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
+	"model-proxy/internal/provider"
 	"model-proxy/internal/routing"
+	"model-proxy/internal/runtime/wirecap"
 	"model-proxy/internal/targetexec"
 )
 
@@ -19,21 +21,14 @@ type PlanInput struct {
 	ClientPath  string
 }
 
-// planTarget resolves snapshot-owned provider, protocol, endpoint-capability,
+// PlanTarget resolves snapshot-owned provider, protocol, endpoint-capability,
 // and runtime implementation facts, then freezes them in targetexec.Plan.
-func (p pipeline) planTarget(input PlanInput) (targetexec.Plan, error) {
+func PlanTarget(input PlanInput) (targetexec.Plan, error) {
 	providerCfg, ok := configdomain.ProviderConfig(input.Runtime.Cfg, input.Runtime.ParentOf, input.Target.Provider)
 	if !ok {
 		return targetexec.Plan{}, fmt.Errorf("unknown provider %q", input.Target.Provider)
 	}
-	backendProtoName, viaResponsesVerdict := p.resolvedBackendProto(
-		input.Target.Protocol,
-		input.Target.Provider,
-		providerCfg,
-		input.Target.Model,
-		input.ClientProto,
-		input.Runtime.ParentOf,
-	)
+	backendProtoName, viaResponsesVerdict := input.backendProtocol(providerCfg)
 	clientProto := protocol.Protocol(input.ClientProto)
 	backendProto := protocol.Protocol(backendProtoName)
 	imageOK := routing.ImageOKForTarget(
@@ -59,21 +54,33 @@ func (p pipeline) planTarget(input PlanInput) (targetexec.Plan, error) {
 	}), nil
 }
 
-// targetExecutor assembles the per-attempt executor. parentOf is the request
-// snapshot's pool-virtual→parent projection (Snapshot.ParentOf): it is
-// threaded into the health gate so the wire-verdict 404 correction stays on
-// the request's own generation (single-snapshot red line). cfg is the same
-// snapshot's config: the per-target client resolution (proxy chain) must read
-// it from here, never from reload-owned state.
-func (p pipeline) targetExecutor(runtime targetexec.Runtime, cfg *Config, parentOf map[string]string, provider string) targetexec.Executor {
+func (input PlanInput) backendProtocol(cfg Provider) (string, bool) {
+	target := input.Target
+	if target.Protocol != "" {
+		return target.Protocol, false
+	}
+	if hint := provider.ProtocolHint(cfg.Provider, target.Model); hint != "" {
+		return hint, false
+	}
+	parent := target.Provider
+	if name, ok := input.Runtime.ParentOf[parent]; ok {
+		parent = name
+	}
+	modelCaps, hasModel := input.Runtime.ModelCaps.Get(parent, target.Model)
+	caps, hasProvider := input.Runtime.WireCaps.Get(parent)
+	return wirecap.ResolveModel(input.ClientProto, cfg.AnthropicBaseURL != "", modelCaps, target.Model != "" && hasModel, caps, hasProvider)
+}
+
+// targetExecutor binds protocol feedback, transport and effects to the same request.
+func (p pipeline) targetExecutor(runtime targetexec.Runtime, snap Snapshot, provider string) targetexec.Executor {
 	return targetexec.Executor{
-		Client: p.clientFor(cfg, parentOf, provider),
+		Client: p.clientFor(snap.Cfg, snap.ParentOf, provider),
 		State: targetexec.GateState{
-			Gate:       p.svc.NewHealthGate(cfg, parentOf),
+			Gate:       p.svc.NewHealthGate(snap),
 			Runtime:    runtime,
 			Scheduling: runtime.Scheduling,
 		},
-		Effects:   p.svc.NewEffects(cfg, runtime.Generation),
+		Effects:   p.svc.NewEffects(snap.Cfg, runtime.Generation),
 		Responses: p.svc.ResponsesState,
 	}
 }

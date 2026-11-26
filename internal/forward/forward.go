@@ -39,7 +39,7 @@ import (
 // minutes on SSE); the immutable snapshot keeps routing, providers, catalog,
 // and cache on one config generation.
 func Serve(svc Services, state RouteState, snap Snapshot, proto string, w http.ResponseWriter, r *http.Request, requestID string) {
-	pipeline{svc: svc, state: state}.forward(snap, proto, w, r, requestID)
+	pipeline{svc: svc, state: state, sessionHeaders: snap.Cfg.RequestLog.ResolvedSessionHeaders()}.forward(snap, proto, w, r, requestID)
 }
 
 func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter, r *http.Request, requestID string) {
@@ -73,7 +73,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	// these fields, see protocol.SessionIDFromBody). It rides every live
 	// event, the request log and the guard session dimension (never the
 	// routing sticky key, which stays x-claude-code-session-id).
-	clientSession := requestlog.SessionID(r, cfg.RequestLog.ResolvedSessionHeaders())
+	clientSession := requestlog.SessionID(r, p.sessionHeaders)
 	if clientSession == "" {
 		clientSession = protocol.SessionIDFromBody(origBody)
 	}
@@ -341,7 +341,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 //     A client-shape conversion failure (res.conversionErr with no upstream
 //     ever tried) is NOT an upstream error — the request shape is the client's
 //     problem, same as a guard interception, and is skipped entirely. The same
-//     exemption covers planning-level drops (res.planningErr: planTarget
+//     exemption covers planning-level drops (res.planningErr: PlanTarget
 //     failure, missing runtime provider implementation, Responses state
 //     expansion failure) when no target was ever tried — a config-level gap
 //     must not count as an upstream bad run either;
@@ -668,7 +668,7 @@ type serveResult struct {
 	clientGone    bool
 	conversionErr *protocol.UnsupportedError // first client feature no candidate conversion could safely represent
 	// planningErr marks a pass where at least one target was dropped BEFORE
-	// any upstream contact for planning-level reasons: planTarget failure
+	// any upstream contact for planning-level reasons: PlanTarget failure
 	// (unknown provider config), a missing runtime provider implementation
 	// (fail-closed), or Responses state expansion failure. Like conversionErr
 	// it is NOT an upstream verdict: recordLatchOutcome exempts a pass where
@@ -789,7 +789,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 			res.clientGone = true
 			break
 		}
-		plan, err := p.planTarget(PlanInput{
+		plan, err := PlanTarget(PlanInput{
 			Runtime: runtime, Target: t, ClientProto: proto, ClientPath: upPath,
 		})
 		if err != nil {
@@ -914,7 +914,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 				ContextRetry: ctxRetry,
 			},
 		)
-		result := p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
+		result := p.targetExecutor(attempt.Runtime(), runtime, t.Provider).Execute(attempt)
 		res.tried[t.Provider] = true
 		switch result.Outcome {
 		case targetexec.OutcomeFailedHard:

@@ -28,7 +28,7 @@
 // synchronously) and after each reload for providers whose verdict is missing
 // or whose base_url changed. A "yes" verdict is trusted indefinitely (a wrong
 // yes is corrected at runtime by the 404 path — tryTarget →
-// noteWireResponsesMiss); a "no" verdict expires after wireCapNegativeTTL so
+// NoteWireResponsesMiss); a "no" verdict expires after wireCapNegativeTTL so
 // one transient 404 (endpoint mid-deploy, gateway route gap) cannot downgrade
 // a provider forever — the next boot/reload pass re-probes it.
 package app
@@ -67,7 +67,7 @@ const (
 	// wireCapNegativeTTL bounds how long a "no" verdict is trusted before the
 	// next probe pass re-checks it. Endpoint capabilities rarely change, but a
 	// negative conclusion can be wrong (transient 404) and has no runtime
-	// correction path, unlike a wrong "yes" (404 → noteWireResponsesMiss).
+	// correction path, unlike a wrong "yes" (404 → NoteWireResponsesMiss).
 	wireCapNegativeTTL = 24 * time.Hour
 )
 
@@ -199,6 +199,14 @@ func (p *Proxy) probeAllWireCaps(ctx context.Context) {
 	}
 }
 
+func providerBaseURLs(cfg *configdomain.Config) map[string]string {
+	bases := make(map[string]string, len(cfg.Providers))
+	for name, prov := range cfg.Providers {
+		bases[name] = prov.OpenAIBaseURL
+	}
+	return bases
+}
+
 // wireVerdict returns the stored verdict for a provider (parent name).
 func (p *Proxy) wireVerdict(name string) (wireCaps, bool) {
 	return p.wireCaps.Get(name)
@@ -230,36 +238,6 @@ func (p *Proxy) persistWireCaps() {
 			logx.Warnf("[wirecap] persist failed: %v", err)
 		}
 	})
-}
-
-// noteWireResponsesMiss records that a verdict-driven /responses request came
-// back 404 — the probe said yes but the route doesn't exist for THIS model
-// (stale verdict, or a per-model gateway). With a model id the model-level
-// verdict is flipped; without one (passthrough target) the provider-level
-// verdict is. This is OUR protocol-choice miss, not a missing model, so
-// tryTarget skips recordModelFailure for it; subsequent requests fall back to
-// chat.
-//
-// Verdicts are keyed by parent name; a pool virtual shares the parent's base
-// URL. `parent` is the ALREADY-RESOLVED parent name: callers project it from
-// their request snapshot (RuntimeSnapshot.ParentOf, nil-safe) so a pre-reload
-// in-flight request records the verdict under ITS generation's parent instead
-// of re-reading reload-owned state here (single-snapshot red line).
-func (p *Proxy) noteWireResponsesMiss(parent, model, fingerprint string) {
-	if model != "" {
-		// Flip the MODEL-level verdict when the model has an entry — the 404
-		// proves this model can't do /responses regardless of what the
-		// provider-level verdict says (more precise than poisoning the whole
-		// provider). Without a model entry the choice was provider-driven, so
-		// the provider-level verdict is the one to correct.
-		if _, ok := p.modelCaps.Get(parent, model); ok {
-			p.modelCaps.MarkResponsesUnsupported(parent, model, fingerprint, time.Now())
-			p.persistModelCaps()
-			return
-		}
-	}
-	p.wireCaps.MarkResponsesUnsupported(parent, time.Now())
-	p.persistWireCaps()
 }
 
 // startWireCapProbe dispatches a one-shot probe pass on a quota-tracked,
@@ -308,33 +286,4 @@ func (p *Proxy) runWireProbePass() {
 	defer cancel()
 	p.probeAllWireCaps(ctx)
 	p.probeAllModelCaps(ctx)
-}
-
-// resolvedBackendProto determines the backend protocol for a route target (or
-// a decisions leg): the declared `protocol:`, else the provider's
-// ProtocolHint (codex→responses), else the MODEL-level capability verdict,
-// else the provider-level wire probe verdict, else the client's protocol
-// (byte-level passthrough). provName may be a pool virtual ("name#<id>") —
-// verdicts are looked up by parent name via the caller's parentOf snapshot
-// (grabbed under p.mu earlier; passing it in avoids taking p.mu here, which
-// callers may or may not hold). model is the UPSTREAM model id; an empty model
-// (passthrough target) skips the model-level lookup.
-func (p *Proxy) resolvedBackendProto(declared, provName string, provCfg configdomain.Provider, model, clientProto string, parentOf map[string]string) (proto string, viaResponsesVerdict bool) {
-	if declared != "" {
-		return declared, false
-	}
-	if hint := provider.ProtocolHint(provCfg.Provider, model); hint != "" {
-		return hint, false
-	}
-	parent := provName
-	if par, ok := parentOf[provName]; ok {
-		parent = par
-	}
-	var mc runtimewire.ModelProtocols
-	mok := false
-	if model != "" {
-		mc, mok = p.modelCaps.Get(parent, model)
-	}
-	caps, cok := p.wireVerdict(parent)
-	return runtimewire.ResolveModel(clientProto, provCfg.AnthropicBaseURL != "", mc, mok, caps, cok)
 }

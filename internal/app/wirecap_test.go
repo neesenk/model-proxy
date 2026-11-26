@@ -12,6 +12,7 @@ import (
 	"context"
 	"io"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/providerbuild"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -456,7 +457,7 @@ func TestWireCap_MissVerdictUsesRequestSnapshotParent(t *testing.T) {
 	// at assembly from RuntimeSnapshot.ParentOf.
 	// cfg binds the request's own snapshot config (the new fingerprint gate
 	// attributes the 404 to this generation).
-	gate := proxyHealthGate{proxy: p, cfg: snap.Cfg, parentOf: snap.ParentOf}
+	gate := proxyHealthGate{proxy: p, snapshot: snap}
 	gate.NoteWireResponsesMiss("v", "")
 
 	caps, ok := p.wireVerdict("parent-old")
@@ -465,6 +466,33 @@ func TestWireCap_MissVerdictUsesRequestSnapshotParent(t *testing.T) {
 	}
 	if _, ok := p.wireVerdict("parent-new"); ok {
 		t.Error("verdict recorded under the NEW generation's parent — request snapshot was bypassed")
+	}
+}
+
+func TestWireMissUsesCapturedVerdictLevel(t *testing.T) {
+	prov := configdomain.Provider{Provider: testProviderID, OpenAIBaseURL: "https://example.invalid"}
+	p := newTestProxy(t, &configdomain.Config{Providers: map[string]configdomain.Provider{"p": prov}})
+	parentYes := wireCaps{BaseURL: prov.OpenAIBaseURL, Responses: triYes}
+	p.setWireCaps("p", parentYes)
+	providerOnly := p.SnapshotRuntime()
+	p.modelCaps.Put("p", providerbuild.ProtocolConfigFingerprint(prov), "m", runtimewire.ModelProtocols{Responses: triYes}, time.Now())
+	modelKnown := p.SnapshotRuntime()
+	proxyHealthGate{proxy: p, snapshot: providerOnly}.NoteWireResponsesMiss("p", "m")
+	if c, ok := p.wireVerdict("p"); !ok || c.Responses != triNo {
+		t.Error("provider-driven 404 missed the provider")
+	}
+	if m, ok := p.modelCaps.Get("p", "m"); !ok || m.Responses != triYes {
+		t.Error("provider-driven 404 rewrote a later model verdict")
+	}
+
+	p.setWireCaps("p", parentYes)
+	p.modelCaps.PruneModels("p", nil)
+	proxyHealthGate{proxy: p, snapshot: modelKnown}.NoteWireResponsesMiss("p", "m")
+	if c, ok := p.wireVerdict("p"); !ok || c.Responses != triYes {
+		t.Error("model-driven 404 downgraded the whole provider")
+	}
+	if _, ok := p.modelCaps.Get("p", "m"); ok {
+		t.Error("late correction restored a pruned model")
 	}
 }
 

@@ -409,17 +409,7 @@ func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 	// capabilities are endpoint properties). A verdict is honored only while
 	// its recorded base_url still matches the current config — an endpoint
 	// change invalidates it and triggers a re-probe at the next boot probe.
-	if loaded := p.quota.LoadedWireCaps; len(loaded) > 0 {
-		baseURLs := make(map[string]string, len(cfg.Providers))
-		for name, prov := range cfg.Providers {
-			baseURLs[name] = prov.OpenAIBaseURL
-		}
-		p.wireCaps.RestoreMatching(loaded, baseURLs)
-	}
-	// Restore model-level protocol capabilities from model_caps.json. A
-	// provider's entry is honored only while its protocol-relevant config
-	// fingerprint (base urls / provider_id / headers) still matches — an
-	// unchanged fingerprint means the verdicts are reused with NO re-probe.
+	p.wireCaps.RestoreMatching(p.quota.LoadedWireCaps, providerBaseURLs(cfg))
 	if loaded, err := runtimewire.LoadModelCapsFile(p.modelCapsPath); err != nil {
 		logx.Warnf("[modelcaps] %v; starting empty", err)
 	} else if len(loaded) > 0 {

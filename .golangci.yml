@@ -1,0 +1,16 @@
+version: "2"
+linters:
+  default: none
+  enable:
+    - depguard
+  settings:
+    depguard:
+      rules:
+        cli-test-harness:
+          files:
+            - "!$test"
+          deny:
+            - pkg: "model-proxy/internal/cli/clitest$"
+              desc: "Import the CLI subprocess harness only from _test.go files."
+  exclusions:
+    generated: disable

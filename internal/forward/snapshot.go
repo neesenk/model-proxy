@@ -5,6 +5,7 @@ import (
 	"model-proxy/internal/guard"
 	"model-proxy/internal/observe/seclog"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/runtime/wirecap"
 )
 
 // Snapshot is one immutable view of reload-swapped runtime dependencies.
@@ -16,6 +17,8 @@ import (
 type Snapshot struct {
 	Cfg            *Config
 	Generation     uint64
+	WireCaps       wirecap.ProviderView
+	ModelCaps      wirecap.ModelView
 	Providers      map[string]provider.Provider
 	PoolIndex      map[string][]string
 	ParentOf       map[string]string

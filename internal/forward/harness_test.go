@@ -363,15 +363,9 @@ func newHarness() *harness {
 		Tokens:        counters.NewTokenCounter(),
 		Agents:        counters.NewAgentCounter(),
 		Events:        events,
-		NewHealthGate: func(_ *configdomain.Config, parentOf map[string]string) targetexec.HealthGate { return gate },
+		NewHealthGate: func(Snapshot) targetexec.HealthGate { return gate },
 		NewEffects:    func(cfg *Config, generation uint64) targetexec.Effects { return fx },
 		Schedule:      passthroughSchedule,
-		ResolveBackendProto: func(declared, provName string, provCfg Provider, model, clientProto string, parentOf map[string]string) (string, bool) {
-			if declared != "" {
-				return declared, false
-			}
-			return clientProto, false
-		},
 		ResolverState: fakeResolverState{},
 	}
 	return h

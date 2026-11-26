@@ -983,3 +983,61 @@ func TestBlockStoreSnapshotEmptyAndOrdering(t *testing.T) {
 		t.Error("Blocked reported a missing session")
 	}
 }
+
+func TestWorkerReleasesAdmissionKeyAcrossReload(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		name := "model changed"
+		if !enabled {
+			name = "disabled while queued"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := New(Options{StateDir: t.TempDir()})
+			// Drive the worker synchronously so reload falls exactly between admission and execution.
+			cfg := &staticConfig{model: "old", timeout: time.Second, enabled: true}
+			s.cfg, s.sink = cfg, &fakeSink{}
+			caller := &fakeCaller{}
+			caller.setAnswer(func(Job) (string, string, string, error) { return VerdictMedium, "", "", nil })
+			s.caller = caller
+			job := testJob("sample")
+			if !s.Enqueue(job) {
+				t.Fatal("old-model job was rejected")
+			}
+			cfg.model = "new"
+			if !s.Enqueue(job) {
+				t.Fatal("new-model job was rejected")
+			}
+			if len(s.queue) != 2 {
+				t.Fatalf("queued %d jobs, want both model keys", len(s.queue))
+			}
+			cfg.enabled = enabled
+			s.process(context.Background(), <-s.queue)
+			if s.inflight[CacheKey(job, "old")] {
+				t.Error("completed job retained its admission key")
+			}
+			if !s.inflight[CacheKey(job, "new")] {
+				t.Error("completed job released another queued job's key")
+			}
+			results := s.Recent()
+			if enabled {
+				if len(results) != 1 || results[0].Model != "new" || caller.count() != 1 {
+					t.Fatalf("worker did not apply current model: results %d, calls %d", len(results), caller.count())
+				}
+			} else if len(results) != 0 || caller.count() != 0 {
+				t.Fatal("disabled worker applied a verdict")
+			}
+			s.process(context.Background(), <-s.queue)
+			if len(s.inflight) != 0 {
+				t.Error("queue drained with outstanding admission keys")
+			}
+			cfg.model, cfg.enabled = "old", true
+			if !s.Enqueue(job) || len(s.queue) != 1 {
+				t.Fatal("the old model could not admit this content again")
+			}
+			s.process(context.Background(), <-s.queue)
+			if _, ok := s.cache.get(CacheKey(job, "old")); !ok {
+				t.Error("missing verdict under the execution model")
+			}
+
+		})
+	}
+}

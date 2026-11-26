@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package restartserve is a test-only package: the real end-to-end contract
 // for scripts/restart_serve.sh. It builds the actual model-proxy binary, boots
 // real serve processes in a sandbox (temp HOME+TMPDIR, loopback port, static
@@ -8,7 +10,7 @@
 // port from config.yaml; and a binary that cannot serve triggers the rollback
 // contract (previous binary restored and serving, exit 1).
 //
-// External precondition: lsof + sh (unix); the suite skips on windows.
+// External precondition: lsof + sh.
 package restartserve
 
 import (
@@ -66,9 +68,6 @@ func scriptPath(t *testing.T) string {
 
 func requireBinary(t *testing.T) string {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("restart_serve.sh requires lsof/nohup (unix-only script)")
-	}
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not available (external precondition for the restart script)")
 	}
@@ -408,9 +407,6 @@ func TestColdStartParsesPortFromConfig(t *testing.T) {
 // process that ignores SIGINT (a wedged serve) must still be reaped via the
 // SIGKILL fallback, not left orphaned.
 func TestStopServeProcessEscalatesToSigkill(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("signal escalation test requires unix signals")
-	}
 	cmd := exec.Command("sh", "-c", "trap '' INT; echo ready; sleep 60")
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -450,9 +446,6 @@ func TestStopServeProcessEscalatesToSigkill(t *testing.T) {
 // compare base names — an exact match silently skips every cleanup kill and
 // leaves orphaned serves behind.
 func TestIsTestBinaryMatchesArgv0Path(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("ps comm probe is unix-only")
-	}
 	sleepPath, err := exec.LookPath("sleep")
 	if err != nil {
 		t.Skip("sleep not on PATH (external precondition)")

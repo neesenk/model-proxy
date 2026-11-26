@@ -92,6 +92,7 @@ func (p *Proxy) Reload(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("build guard scanner: %w", err)
 	}
+	bases, fingerprints := providerBaseURLs(cfg), protocolFingerprints(cfg)
 	newDerived := routing.DeriveRoutesFrom(cfg)
 	// Switch config and runtime state as one generation. Persist snapshots take
 	// the same lock order, and request mutations carry the generation captured by
@@ -140,7 +141,8 @@ func (p *Proxy) Reload(configPath string) error {
 	// in-flight pre-reload probe pass cannot write its verdicts back. The
 	// restore source is the DISK re-read above, so CLI-written verdicts reach
 	// the running daemon on the refresh-triggered SIGHUP.
-	p.modelCaps.Restore(modelCapsOnDisk, protocolFingerprints(cfg))
+	p.wireCaps.Reconfigure(bases)
+	p.modelCaps.Restore(modelCapsOnDisk, fingerprints)
 	p.mu.Unlock()
 	// Stats-side of the reload key migration (see the renames comment above):
 	// durable buckets, cumulative counters, diff baselines, and pending

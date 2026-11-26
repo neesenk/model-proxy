@@ -51,7 +51,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		// mcpserver serves the bundled stdio MCP children (deepseek-search):
 		// JSON-RPC handling and tool specs reuse the mcp leaf package only.
 		"model-proxy/internal/cli/mcpserver": {"model-proxy/internal/mcp": true},
-		"model-proxy/internal/cli/models":    {"model-proxy/internal/display": true, "model-proxy/internal/cli/serve": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/accounts": true, "model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/configedit": true, "model-proxy/internal/providerstore": true, "model-proxy/internal/probe": true, "model-proxy/internal/provider": true, "model-proxy/internal/providerbuild": true, "model-proxy/internal/routing": true, "model-proxy/internal/runtime/wirecap": true, "model-proxy/internal/upstreamproxy": true},
+		"model-proxy/internal/cli/models":    {"model-proxy/internal/display": true, "model-proxy/internal/cli/serve": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/accounts": true, "model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/providerstore": true, "model-proxy/internal/probe": true, "model-proxy/internal/provider": true, "model-proxy/internal/providerbuild": true, "model-proxy/internal/routing": true, "model-proxy/internal/runtime/wirecap": true},
 		"model-proxy/internal/cli": {
 			"model-proxy/internal/display": true, "model-proxy/internal/cli/framework": true,
 			"model-proxy/internal/providerstore": true,
@@ -73,7 +73,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/cli/admin":     {"model-proxy/internal/cli/framework": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/display": true},
 		"model-proxy/internal/cli/guard":     {"model-proxy/internal/appapi": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/display": true},
 		"model-proxy/internal/cli/prune":     {"model-proxy/internal/cli/framework": true, "model-proxy/internal/config": true, "model-proxy/internal/display": true, "model-proxy/internal/observe/logfile": true, "model-proxy/internal/observe/requestlog": true},
-		"model-proxy/internal/cli/diag":      {"model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/display": true, "model-proxy/internal/observe/requestlog": true, "model-proxy/internal/pricing": true, "model-proxy/internal/probe": true, "model-proxy/internal/provider": true, "model-proxy/internal/upstreamproxy": true},
+		"model-proxy/internal/cli/diag":      {"model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/display": true, "model-proxy/internal/observe/requestlog": true, "model-proxy/internal/pricing": true, "model-proxy/internal/probe": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/cli/config":    {"model-proxy/internal/accounts": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/config": true, "model-proxy/internal/display": true, "model-proxy/internal/provider": true, "model-proxy/internal/providerstore": true, "model-proxy/internal/routing": true, "model-proxy/internal/takeover": true},
 		"model-proxy/internal/cli/account":   {"model-proxy/internal/accounts": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/serve": true, "model-proxy/internal/config": true, "model-proxy/internal/display": true, "model-proxy/internal/login": true, "model-proxy/internal/providerbuild": true},
 		"model-proxy/internal/cli/clitest":   {"model-proxy/internal/accounts": true},
@@ -95,8 +95,9 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 			"model-proxy/internal/observe/logx": true, "model-proxy/internal/observe/requestlog": true,
 			"model-proxy/internal/observe/seclog": true,
 			"model-proxy/internal/protocol":       true, "model-proxy/internal/provider": true,
-			"model-proxy/internal/routing":    true,
-			"model-proxy/internal/targetexec": true,
+			"model-proxy/internal/routing":         true,
+			"model-proxy/internal/runtime/wirecap": true, // immutable request views and pure protocol selection
+			"model-proxy/internal/targetexec":      true,
 		},
 		"model-proxy/internal/guard":                 nil,
 		"model-proxy/internal/guard/session":         {"model-proxy/internal/guard": true},

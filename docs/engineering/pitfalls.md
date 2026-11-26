@@ -45,8 +45,7 @@
 
 ## 并发与生命周期
 
-16. 跨域锁顺序是 `Proxy.mu → internal/runtime.Manager`；Manager 持锁时禁止回调
-    Proxy、quota tracker、wirecap Store 或外部 I/O。
+16. 在 Manager 状态锁内调用应用回调或执行文件 I/O 会阻塞请求与 reload。先取 detached snapshot，再在锁外编码或持久化。跨域锁边见[运行态锁顺序](../architecture/runtime-state.md#锁顺序)。
 17. 后台 goroutine 必须有 owner、stop、wait 和 final flush。测试创建 owner 后必须注册 cleanup。
 18. 原子文件写不能在多个实例/进程间共享固定 `.tmp` 名：daemon 的 Web 配置编辑器
     与 CLI 是不同进程，可并发写同一 config.yaml——共享 `.tmp` 名会让一个进程把另一个

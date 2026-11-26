@@ -400,3 +400,34 @@ func TestModelStoreReplaceProviderModelsMergesUnknown(t *testing.T) {
 		t.Errorf("cross-fingerprint replace = %+v, want fresh unknowns (no merge)", mp)
 	}
 }
+
+func TestModelViewPinsVerdictsAcrossUpdates(t *testing.T) {
+	var store ModelStore
+	now := time.Unix(100, 0)
+	yes, no := ModelProtocols{Responses: Yes}, ModelProtocols{Responses: No}
+	check := func(view ModelView, want ModelProtocols, present bool) {
+		t.Helper()
+		mp, ok := view.Get("p", "m")
+		if ok != present || mp != want {
+			t.Fatalf("view = %+v (%v), want %+v (%v)", mp, ok, want, present)
+		}
+	}
+	empty := store.View()
+	store.Put("p", "fp", "m", yes, now)
+	probed := store.View()
+	store.MarkResponsesUnsupported("p", "m", "fp", now)
+	corrected := store.View()
+	store.PruneModels("p", nil)
+	pruned := store.View()
+	store.ReplaceProviderModels("p", "fp", map[string]ModelProtocols{"m": yes}, now)
+	replaced := store.View()
+	store.Restore(nil, map[string]string{})
+	store.Put("p", "fp", "m", yes, now)
+	store.ReplaceProviderModels("p", "fp", map[string]ModelProtocols{"m": yes}, now)
+	check(empty, ModelProtocols{}, false)
+	check(probed, yes, true)
+	check(corrected, no, true)
+	check(pruned, ModelProtocols{}, false)
+	check(replaced, yes, true)
+	check(store.View(), ModelProtocols{}, false)
+}
