@@ -23,10 +23,10 @@
 import {
   esc, linkifyEsc, fmtNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
-  verdictBadge, modelCapMatrix, visibleModelRows, providerCapsSummary, providerFrozen, providerNames,
+  verdictBadge, modelCapMatrix, visibleModelRows, providerCapsSummary, providerFrozen, providerCapped, providerNames,
   accountProviderKey, splitProviderKey, providerDisplayName,
   credentialBannerHTML,
-  catalogMatchHTML, catalogMatchEditorHTML, parseModelLines, mergeFetchedModels, providerDeleteSummary, aliasRowHTML, providerModelsEditorHTML,
+  catalogMatchHTML, catalogMatchEditorHTML, parseModelLines, mergeFetchedModels, providerDeleteSummary, mutationWarningMessage, aliasRowHTML, providerModelsEditorHTML,
   settingsDiff, settingsRestartKeys, configSummaryHTML, TOKEN_RANGES, tokensRangeQuery, tokenRangeLabel,
   tokenRangeTriggerLabel, parseLocalDate, tokenRangeBounds, tokenCustomBounds, tokenRangePickerHTML,
   quotaUsageFromSec, quotaWindowFromSec, quotaWindowForProvider,
@@ -6113,14 +6113,16 @@ function renderProvidersCard(target, st) {
   const nowMs = Date.now();
   for (const name of names) {
     const c = counters[name] || {};
-    // Per-row unfreeze only makes sense while the provider is actually frozen
-    // (operator freeze, circuit open/half-open, or inside a rate-limit
-    // cooldown); health entries are created lazily on failure/freeze, so a
-    // healthy provider has no entry and gets the freeze button instead.
+    // Per-row unfreeze only makes sense while the provider has frozen state
+    // to clear (operator freeze, circuit open/half-open, inside a rate-limit
+    // cooldown) or a learned concurrency cap (busy, not broken — but the cap
+    // is the operator's to clear when it was learned wrong); health entries
+    // are created lazily on failure/freeze, so a healthy provider has no
+    // entry and gets the freeze button instead.
     const h = health[name];
-    const frozen = providerFrozen(h, nowMs);
-    const action = frozen
-      ? ` <button class="btn small danger-solid" data-unfreeze="${esc(name)}" title="Clear circuit/rate-limit cooldowns + model locks">Unfreeze</button>`
+    const unfreezable = providerFrozen(h, nowMs) || providerCapped(h);
+    const action = unfreezable
+      ? ` <button class="btn small danger-solid" data-unfreeze="${esc(name)}" title="Clear circuit/rate-limit cooldowns + model locks + learned concurrency cap">Unfreeze</button>`
       : ` <button class="btn small" data-freeze="${esc(name)}" title="Exclude from scheduling until unfreeze">Freeze</button>`;
     // Pooled rows are virtual runtime keys; display folds them to
     // "parent · <account label>" (raw key kept on the title tooltip).
@@ -6184,13 +6186,14 @@ function renderProvidersCard(target, st) {
 }
 
 // unfreezeProvider clears one provider's frozen state (circuit open/half-open,
-// rate-limit cooldown, model locks) via POST /api/health/reset so it is
-// retried immediately — the operator escape hatch for abnormal edge cases
-// (account topped up, misclassified 429, window reset early). Rendered only on
-// frozen rows; confirmed via the themed modal (same pattern as unfreezeAll).
+// rate-limit cooldown, model locks) and its learned concurrency cap via POST
+// /api/health/reset so it is retried immediately — the operator escape hatch
+// for abnormal edge cases (account topped up, misclassified 429, window reset
+// early, concurrency limit learned wrong). Rendered only on frozen or capped
+// rows; confirmed via the themed modal (same pattern as unfreezeAll).
 async function unfreezeProvider(name, btn) {
   const ok = await confirmDialog('Unfreeze provider',
-    `Clear circuit-breaker, rate-limit cooldown and model-lock state for ${name}? The provider is retried immediately.`,
+    `Clear circuit-breaker, rate-limit cooldown, model-lock state and any learned concurrency cap for ${name}? The provider is retried immediately.`,
     'Unfreeze');
   if (!ok) return;
   if (btn) { btn.disabled = true; btn.textContent = 'Unfreezing…'; }
@@ -8074,7 +8077,7 @@ const SETTINGS_GROUPS = [
       },
       {
         key: 'rate_limit_backoff', label: 'rate_limit_backoff', type: 'text', def: '60s',
-        help: 'Skip duration after a transient 429 with no reset hint or Retry-After, then probe.',
+        help: 'Skip duration after a transient 429 with no reset hint or Retry-After, then probe. A 429 that proves a concurrency limit never cools down — it caps the account\'s in-flight requests instead (docs/architecture/routing-and-failure.md).',
       },
       {
         key: 'quota_cooldown', label: 'quota_cooldown', type: 'text', def: '1h',
@@ -8086,7 +8089,7 @@ const SETTINGS_GROUPS = [
       },
       {
         key: 'retry_wait', label: 'retry_wait', type: 'text', def: '10s',
-        help: 'When every target is cooling down, wait up to this long for the earliest expiry and retry (at most twice). 0 disables the wait.',
+        help: 'When every target is cooling down or at its concurrency limit, wait up to this long for the earliest expiry / a freed request slot and retry (at most twice). 0 disables the wait.',
       },
       {
         key: 'upstream_timeout', label: 'upstream_timeout', type: 'text', def: '1800s',
@@ -9421,7 +9424,7 @@ async function removeAccount(provider, id, label) {
     const data = await apiDel(`/api/accounts/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`);
     const accMsg = document.getElementById('acc-msg');
     if (data && data.warning) {
-      showMsg(accMsg, 'warn', `Removed from disk, but not live yet: ${data.warning} — fix config.yaml and reload. See logs.`);
+      showMsg(accMsg, 'warn', mutationWarningMessage("Removed from disk", data.warning));
     } else {
       showMsg(accMsg, 'ok', 'removed — reloading');
     }
@@ -9449,7 +9452,7 @@ async function deleteProvider(btn, name) {
     if (accountsSelectedProvider === name) accountsSelectedProvider = null;
     await loadAccountsData();
     if (data && data.warning) {
-      showMsg(accMsg, 'warn', `Deleted from disk, but not live yet: ${data.warning} — fix config.yaml and reload. See logs.`);
+      showMsg(accMsg, 'warn', mutationWarningMessage("Deleted from disk", data.warning));
     } else {
       showMsg(accMsg, 'ok', providerDeleteSummary(name, data));
     }
@@ -9545,10 +9548,12 @@ async function submitAdd(providerName) {
     const ak = document.getElementById('add-accesskey'); if (ak) ak.value = '';
     const sk = document.getElementById('add-secretkey'); if (sk) sk.value = '';
     if (data && data.warning) {
-      // Account saved to disk, but the in-process reload failed (config.yaml
-      // unreadable/invalid) — runtime keeps the old set until config is fixed +
-      // reloaded. Keep the modal open so the warning is read; see logs.
-      showMsg(msg, 'warn', `Saved, but not live yet: ${data.warning} — fix config.yaml and reload. See logs.`);
+      // Account saved to disk, but the in-process reload did not go cleanly:
+      // either it applied with a durability warning (already live) or it
+      // failed outright (config.yaml unreadable/invalid — runtime keeps the
+      // old set until config is fixed + reloaded). Keep the modal open so the
+      // warning is read; see logs.
+      showMsg(msg, 'warn', mutationWarningMessage("Saved", data.warning));
       return;
     }
     showMsg(msg, 'ok', 'added — reloading');
@@ -9905,7 +9910,7 @@ function pollLogin(sessionId) {
         setLoginModal('done', `
           <p>Sign-in complete.</p>
           ${r.result ? `<p class="modal-status">account: ${esc(r.result)}</p>` : ''}
-          ${r.warning ? `<p class="modal-status err">Saved, but not live yet: ${esc(r.warning)} — fix config.yaml and reload. See logs.</p>` : ''}
+          ${r.warning ? `<p class="modal-status err">${esc(mutationWarningMessage('Saved', r.warning))}</p>` : ''}
           <div class="modal-actions">
             <button type="button" class="btn primary small" id="login-done">Done</button>
           </div>`);

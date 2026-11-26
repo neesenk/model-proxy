@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import {
   esc, linkifyEsc, fmtNum, fmtCompactNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
-  verdictBadge, modelCapMatrix, visibleModelRows, modelsRefreshResultHTML, providerCapsSummary, providerFrozen, providerNames,
+  verdictBadge, modelCapMatrix, visibleModelRows, modelsRefreshResultHTML, providerCapsSummary, providerFrozen, providerCapped, providerNames,
   accountProviderKey, splitProviderKey, providerDisplayName,
   catalogMatchHTML, catalogMatchSummary, catalogMatchEditorHTML, aliasRowHTML, providerModelsEditorHTML,
   ruleHitsLeaderboard,
@@ -34,7 +34,7 @@ import {
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
   CLIENT_GONE_STATUS, notLoggedHint, detailReopenState, FAILOVER_PROVIDER, rowFailoverAttempt,
   quotaErrKind, accountUsageState, accountRemainingLabel, accountDenialLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta, scheduleCredentialLabel, syncErrLabel, keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
-  parseModelLines, mergeFetchedModels, providerDeleteSummary,
+  parseModelLines, mergeFetchedModels, providerDeleteSummary, mutationWarningMessage,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
   securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML, SECURITY_RANGES, securityRangeFromSecs,
   securityFilterQuery, securityFilterFromQuery, explainCacheKey,
@@ -166,6 +166,33 @@ test('untilHuman renders remaining duration for future timestamps only', () => {
   assert.equal(untilHuman('2026-08-28T00:00:00.000Z', now), ''); // past
   assert.equal(untilHuman('2026-08-29T02:00:00.000Z', now), ' (in 2h 0m)');
   assert.equal(untilHuman('2026-08-31T00:00:00.000Z', now), ' (in 2d 0h)');
+});
+
+test('mutationWarningMessage tells an applied-with-warning reload from a failed one', () => {
+  // A mutation's `warning` carries one of two things (admin reloadAfterMutation):
+  // "reload applied with warning: …" — the change IS live and only runtime-state
+  // durability degraded — or a plain reload error, where the runtime keeps the
+  // old set. "Not live yet … fix config.yaml and reload" is false for the first.
+  const applied = mutationWarningMessage('Saved', 'reload applied with warning: persist cleared runtime state: disk full');
+  assert.ok(applied.startsWith('Saved, and already live'), applied);
+  assert.ok(!applied.includes('not live yet'), applied);
+  assert.ok(applied.includes('persist cleared runtime state: disk full'), applied);
+  assert.ok(applied.includes('restart'), applied);
+  const failed = mutationWarningMessage('Saved', 'config.yaml: listen: invalid port');
+  assert.ok(failed.startsWith('Saved, but not live yet: config.yaml: listen: invalid port'), failed);
+  assert.ok(failed.includes('fix config.yaml and reload'), failed);
+});
+
+test('providerCapped names the rows a learned concurrency cap keeps off scheduling', () => {
+  // A learned cap is operator-clearable state exactly like a cooldown: the
+  // Providers card offers Unfreeze on such a row although it is healthy —
+  // busy, not broken — so providerFrozen stays false for it.
+  assert.equal(providerCapped(null), false);
+  assert.equal(providerCapped({}), false);
+  assert.equal(providerCapped({ concurrency_cap: 0 }), false);
+  assert.equal(providerCapped({ concurrency_cap: 1 }), true);
+  assert.equal(providerCapped({ concurrency_cap: 8, concurrency_cap_stated: true }), true);
+  assert.equal(providerFrozen({ concurrency_cap: 8 }, Date.now()), false);
 });
 
 test('providerFrozen covers operator freeze, circuit, and rate-limit cooldown', () => {

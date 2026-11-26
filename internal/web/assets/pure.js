@@ -112,10 +112,21 @@ export function providerFrozen(h, nowMs = Date.now()) {
   return rlUntil > nowMs;
 }
 
+// providerCapped reports whether a /api/status health entry carries a learned
+// concurrency cap (h.concurrency_cap > 0). Such an account is busy, not
+// broken — providerFrozen stays false — but the cap is operator-clearable
+// state exactly like a cooldown: the Providers card offers Unfreeze on the
+// row so a wrongly learned limit has a UI escape hatch (POST
+// /api/health/reset clears the cap and keeps the in-flight count).
+export function providerCapped(h) {
+  return !!h && Number(h.concurrency_cap) > 0;
+}
+
 // providerNames computes the row set of the Providers card: the union of the
 // schedule preview's ordered provider names and the health map's keys, sorted.
 // The schedule alone is NOT sufficient: scheduling drops unavailable targets
-// (operator-frozen, circuit-open, rate-limit cooldown, quota-exhausted) from
+// (operator-frozen, circuit-open, rate-limit cooldown, quota-exhausted,
+// concurrency-saturated) from
 // every route's ordered chain, so a frozen provider would vanish from the card
 // — row, pill, and unfreeze button — exactly when the operator needs to see
 // and unfreeze it. Health entries are created lazily on failure/freeze, so
@@ -5082,6 +5093,21 @@ export function providerDeleteSummary(name, data) {
   if (updated.length) out += `; removed from routes: ${updated.join(', ')}`;
   if (removed.length) out += `; deleted empty routes: ${removed.join(', ')}`;
   return out;
+}
+
+// mutationWarningMessage renders the `warning` a mutation answer carries when
+// the reload after it did not go cleanly. The field holds one of two things
+// (admin reloadAfterMutation): "reload applied with warning: …" — the change
+// IS live and only runtime-state durability is degraded — or a plain reload
+// error, where the runtime keeps the old set until config.yaml is fixed.
+// done names what was persisted ("Saved" / "Removed from disk" / …).
+export function mutationWarningMessage(done, warning) {
+  const text = String(warning || '');
+  const applied = /^reload applied with warning:\s*(.*)$/is.exec(text);
+  if (applied) {
+    return `${done}, and already live — but runtime state could not be persisted: ${applied[1].trim()} A restart may lose the cleared runtime state. See logs.`;
+  }
+  return `${done}, but not live yet: ${text} — fix config.yaml and reload. See logs.`;
 }
 
 // mergeFetchedModels folds an Add Provider form's model sources into the
