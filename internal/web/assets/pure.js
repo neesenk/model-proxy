@@ -2258,8 +2258,7 @@ export function detailReopenState(state, status) {
 
 // FAILOVER_PROVIDER is the provider sentinel of the all-targets-failed
 // terminal row (forward's terminalLogProvider): the proxy's own 502/429
-// answer, matching no upstream — the same convention as a cache hit's
-// "(cache)".
+// answer, matching no upstream.
 export const FAILOVER_PROVIDER = '(failover)';
 
 // rowFailoverAttempt is the ONE place that decides whether a row involved a
