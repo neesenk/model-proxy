@@ -28,8 +28,8 @@ kimi-code 根据 Duration 自动选择最长窗口；zhipu 通过 unit 映射 5h
 
 `internal/runtime.Manager` 是 config generation 内可变路由状态的唯一 owner。
 它以一把 mutex 统一持有 generation、provider health、route/session sticky、
-operator pin、model lock、model-scoped paramBlock、pool spread counter 和 quota
-snapshot，并在同一临界区内完成 schedule、cooldown、resolver health gate、
+operator pin、model lock、model-scoped paramBlock、pool spread counter、quota
+snapshot 和转发路径的凭据拒绝记录（denials，见下文），并在同一临界区内完成 schedule、cooldown、resolver health gate、
 persistence snapshot 与 Web dashboard snapshot；quality 子状态（EWMA errRate/TTFT）
 经 `atomic.Pointer` copy-on-write 发布，写入持锁、读取免锁（见下文「Quality 打分」）。
 所有复合 snapshot 都是 detached
@@ -90,7 +90,9 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
   `/usages`、opencode-go `/usage`、zhipu/zcode 配额），错误串为
   `not <provider> <endpoint> format: <片段>`——`provider.quotaFormatSnapshot` 取响应 body
   的前 120 字节并折成单行，空 body 写 `empty body`。该串进 `[quota] … sync failed`
-  日志、`/api/status` 的 `SyncErr` 与 `usage` 输出，复发时据此区分网关 HTML、错误信封与
+  日志、`/api/status` 的 `SyncErr` 与 `usage` 输出；此前没有存量快照时它就是该账号的
+  `Err`（`/api/status` 的 `quota[name].Err`、`serve status` 的 `no data (<ERR>)`），并随快照
+  落 `quota_state.json`；复发时据此区分网关 HTML、错误信封与
   空 body。分类器（`IsTransientQuotaErr` / `CredentialErrClass`）对整串做子串匹配，片段
   里的词同样参与分类。
 - reload 侧（`ReplaceGeneration`）：quota cache 跨 generation 存活，只在同一临界区

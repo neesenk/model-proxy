@@ -200,9 +200,12 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   及其余池再按调度序（tier plan→pay → priority → 余量）——`preferRouteProviders`
   对调度结果做稳定分区实现，`#req`（能力/上下文兜底）与 `#ctx`（溢出重试）
   两条路径共用。token 用量聚合（observe/counters 的 UsageScanner）按
-  **形态内快照-或-增量**合并：同 wire 形态内单调不降的 usage 值视为累计
+  **形态内快照-或-增量**合并：chat 帧内单调不降的 usage 值视为累计
   快照取末值（存在逐 chunk 重复累计值的网关，曾把单请求膨胀成上亿 token
-  统计），下降视为增量相加；跨形态（anthropic 帧与 openai chunk）仍求和。
+  统计），下降视为增量相加；anthropic 帧不套这条规则，按终帧读取——
+  `message_delta` 携带的字段（显式零含）即终值，省略的字段沿用
+  `message_start`（规则与方言依据见 `docs/architecture/protocol-conversion.md`）；
+  跨形态（anthropic 帧与 openai chunk）仍求和。
   四桶账本归一化为 anthropic 口径（input 不含 cache）：inclusive 计数器
   （openai `prompt_tokens`、responses `input_tokens` 自带 cached 份额）
   入桶前先扣减该份额（钳零）并记入 cache_read——否则同一份额同时落 input
@@ -217,7 +220,8 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   （`attempt_only` 不置位）：`provider` 为哨兵 `(failover)`——代理自己产生的行，不对应任何
   上游，与缓存命中的 `(cache)` 同类；`upstream_model` 为空；status、response body 与
   response headers 是客户端实际收到的字节（限频时含 `retry-after`）；request body 照常
-  落盘（全链失败的请求仍可 replay）；attempt 序号排在最后一跳之后；不携带 usage。该请求的
+  落盘（全链失败的请求仍可 replay）；attempt 序号排在最后一跳之后；
+  `latency_ms` 自首轮派发起算（跨全部 pass 与冷却等待）；不携带 usage。该请求的
   所有腿折入这一行，所以 `attempt_only` 独立成行的只剩未应答请求（终态写出前 client 断开，
   live 事件 499）；client 断开与「无目标可试的转换错误 400」不落终态行。运行日志侧，forward 的 failover 警告行同源携带该跳状态：`[proto=… model=…] target N (<provider>/<model>) failed (status <code>); trying next`——传输层错误带 502 且其专属的 `upstream error:` 行就在上方，零字节 2xx、模型拒答与 403/订阅失效归因腿带观测到的真实状态；**派发前门禁拒绝**（model lock / 熔断开路）打 `skipped (<reason>); trying next`（`OutcomeSkipped`：无网络接触、无熔断计数，attempt 行以 502 + 原因文本落档），serve.log 单文件即可回答"这一跳为何失败/为何没派发"，无需 join 索引。存储语义之外的**查询折叠**：`/api/requests` 列表把已配对腿折入其已提交行的 `failed_hops`（未应答请求的最新一腿独立成行），status/errors 过滤看存活行终态、facets 排除腿——索引与扫描两路逐字段一致（见 `docs/web-api.md`）。
 - **绑定粒度 (会话, 路由)**：sticky 键是 `runtime.StickyKey(sessionKey, exposed)`
@@ -442,7 +446,9 @@ failover），带证据的 403/400 另按配额、模型拒绝或账号归因（
 - empty stream 的 EOF、client cancel、upstream read error。
 - 上游 403 归因（`internal/app/forward_403_attribution_test.go`、`internal/targetexec`
   的 `TestExecutor403FailureScope`）：账号停用码换候选并记熔断、末候选终态 502；网关拒绝
-  换候选且零记账、末候选保留原始 403；通用 HTML 403 原样 commit。
+  换候选且零记账、末候选保留原始 403；通用 HTML 403 原样 commit。Auth 层失败（如 aqp mint
+  被网关 403）由 `internal/targetexec` 的 `TestExecutorAuthLayerFailureKeepsObservedStatus` 钉住：
+  立即 failover、腿带观测到的 403 与错误文本、不派发上游请求、不计熔断。
 - 订阅失效归因（`internal/targetexec` 的 `TestExecutorLapsedPlanSubscriptionFailsOver` 与
   `TestExecutorQuotaProofOutranksSubscriptionAttribution`、`internal/app` 的
   `TestForward_LapsedPlanSubscriptionFailsOverE2E`）：message 证明无有效订阅 → 认证失败记账 +

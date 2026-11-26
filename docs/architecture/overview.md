@@ -337,7 +337,7 @@ leaf lock、持锁不回调应用代码）、协议选择纯策略（`ClassifySt
 
 `internal/runtime.Manager` 是 config generation 内可变路由状态的唯一 owner，
 以单 mutex 统一 health、sticky、pin、model lock、paramBlock、spread、quota、
-schedule 决策以及 persistence/Web detached snapshot；quality 子状态（per-provider
+凭据拒绝 denials、schedule 决策以及 persistence/Web detached snapshot；quality 子状态（per-provider
 EWMA errRate 与 TTFT 质量惩罚，参与 schedule 排序）同样归 Manager，但经
 `atomic.Pointer` copy-on-write 发布 immutable map：写入在 `m.mu` 下整图替换，读取
 （`DecideOrder` 的 decayed projection）在锁外完成，map 分配与 EWMA 计算不进调度
@@ -368,7 +368,7 @@ Manager 的物理文件按职责拆分，但不形成多 owner：`internal/runti
 
 - `Proxy.mu`：只保护 reload-owned 对象交换（内嵌 `generationState` 整体）；请求流式期间不持有。
 - `internal/runtime.Manager`：以单锁保护 generation、health、sticky、pin、
-  model lock、paramBlock、spread、quota 和 schedule；quality map 经
+  model lock、paramBlock、spread、quota、凭据拒绝 denials 和 schedule；quality map 经
   `atomic.Pointer` copy-on-write 发布，写入持锁、读取免锁（调度临界区外投影
   decayed 状态）。所有返回给 persistence
   或 Web 的复合结果必须在该锁内原子复制并与 generation 一起返回。

@@ -1088,7 +1088,7 @@ unfreeze [provider] [--config PATH]
 freeze <provider> [--config PATH]
 ```
 
-逻辑（`internal/cli/admin/unfreeze.go` 的 `CmdUnfreeze`）：经 `POST /api/health/reset`（`internal/web` transport 的 `CommandAPI`）清 daemon 内存里的**冻结运行态**——熔断开路冷却、429 限频冷却（含 quota/daily 类的长冷却）、模型级锁定（model lockout）——目标 provider 下次请求立即重试，不再等冷却到期。不带参数清全部 provider；池化父名清其全部虚拟账号（同 pin 的匹配语义）。**不清** sticky、pin、已学习的剥参 blocklist（请求体知识，非冻结态）。用于异常边界：账号已充值、429 误分类、上游窗口提前重置等。请求体为空=清全部；**畸形 JSON 返回 400（防误清全部）**；清理后**同步落盘成功才返回 200**（否则 500）——持久化在 `quota_state.json` 的冻结态同步被清后状态覆盖，不会在下轮配额落盘前因重启复活。
+逻辑（`internal/cli/admin/unfreeze.go` 的 `CmdUnfreeze`）：经 `POST /api/health/reset`（`internal/web` transport 的 `CommandAPI`）清 daemon 内存里的**冻结运行态**——熔断开路冷却、429 限频冷却（含 quota/daily 类的长冷却）、模型级锁定（model lockout）——目标 provider 下次请求立即重试，不再等冷却到期。不带参数清全部 provider；池化父名清其全部虚拟账号（同 pin 的匹配语义）。**不清** sticky、pin、已学习的剥参 blocklist（请求体知识，非冻结态），也不清转发路径的凭据拒绝记录（unfreeze 是「现在重试」，凭据并没有恢复——横幅、Accounts 标记与 Schedule 徽标常驻到该账号下一次 2xx，见 `docs/architecture/runtime-state.md`）。用于异常边界：账号已充值、429 误分类、上游窗口提前重置等。请求体为空=清全部；**畸形 JSON 返回 400（防误清全部）**；清理后**同步落盘成功才返回 200**（否则 500）——持久化在 `quota_state.json` 的冻结态同步被清后状态覆盖，不会在下轮配额落盘前因重启复活。
 
 `freeze`（`internal/cli/admin/freeze.go` 的 `CmdFreeze`，经 `POST /api/health/freeze`）是反向操作：把 provider 显式标记为 operator-frozen，调度永远跳过它，直到 `unfreeze` 清除。与熔断/限频不同，该冻结**无到期时间、成功/失败/限频记录均不清除**，并随 `quota_state.json` 的 `health` 段（`frozen: true`）落盘、按同一 config 指纹门控跨重启恢复。**freeze 必须显式指定 provider**（池化父名冻结其全部虚拟账号；也可直接冻结单个虚拟账号 `provider#id`）——没有 freeze-all（全冻结路由 = 自我断供，逃生口 unfreeze 才保留 no-arg = all）；不带参数是 usage 错误（exit 1），API 空/缺 `provider` 返回 400 `provider is required`。从未失败过的 provider（无 health 条目）也可冻结（惰性建条目）。**不动** sticky、pin、quota、模型锁与剥参 blocklist；unknown provider 名匹配为空。与 unfreeze 同样：畸形 JSON 返回 400，落盘成功才返回 200（否则 500，内存态已生效但持久化滞后）。全冻结路由的请求按既有 all-down 分类终局 502（frozen 不是 rate-limit 类 down 原因，无等待重试）。**MCP 网关同一语义**：`provider:` 型 server / 路由 target / Web 探测的账号选号都排除冻结账号（限速/熔断同样排除新流量）；已绑定会话的账号被冻结 → 清会话答 410 重新 initialize（瞬态冷却不打断绑定）；池全冻结答 503、路由工具声明者全冻结答 -32000（均点名 frozen，详见 `docs/architecture/mcp.md`）。
 
@@ -1271,7 +1271,7 @@ stdout/stderr 归属：交互提示与结果走 stdout；✗ 错误走 stderr + 
 
 `prune <days> [--dry-run] [--config PATH]`
 
-一次性删除 request log 目录（`request_log.dir` 与 `request_log.mcp_dir`，存在即清理）里早于 N 天的轮转文件（`requests-*` / `mcp-*`）与其 `.log.zst` 冷层归档，时龄语义与 daemon 自动 retention sweep 相同：`.log` 按 mtime，`.zst` 归档按文件名 YYYYMMDD 日戳（其 mtime 是压缩时刻）；当天活跃文件永不删，`index.db` 及非日志文件不碰。**不影响配置**——不读也不改 `request_log.retention`，自动清理照常运行；这是手动的一次性空间回收。尾部 SQLite 索引自行一致：daemon 的 reconcile（或下次启动重建）会删掉已消失文件对应的行。`--dry-run` 只列出待删文件与体积，不删除。days 必须为正整数；request-log 目录不存在时 exit 1。
+一次性删除 request log 目录（`request_log.dir` 与 `request_log.mcp_dir`，存在即清理）里早于 N 天的轮转文件（`requests-*` / `mcp-*`）与其 `.log.zst` 冷层归档，时龄语义与 daemon 自动 retention sweep 相同：`.log` 按 mtime，`.zst` 归档按文件名 YYYYMMDD 日戳（其 mtime 是压缩时刻）；日戳无法解析的 `.zst` 不删也不列，在途的 `.zst.tmp` 同样不删不列（`--dry-run` 也不列）；当天活跃文件永不删，`index.db` 及非日志文件不碰。**不影响配置**——不读也不改 `request_log.retention`，自动清理照常运行；这是手动的一次性空间回收。尾部 SQLite 索引自行一致：daemon 的 reconcile（或下次启动重建）会删掉已消失文件对应的行。`--dry-run` 只列出待删文件与体积，不删除。days 必须为正整数；request-log 目录不存在时 exit 1。
 
 ---
 

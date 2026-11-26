@@ -125,6 +125,11 @@ goroutine——压缩耗时不得阻塞写路径；owner/stop/wait/final flush �
 （`zstd -d | jq`），没有在线读路径，查询与 Requests 页的可查窗口即热窗。retention/disk-guard/prune 的
 可删集合包含 `.zst`；`.zst` 时龄取文件名 YYYYMMDD 日戳（其 mtime 是压缩时刻），日戳不可解析的
 `.zst` 不被 retention/prune 按时龄删除、只有磁盘护栏按名序回收；在途的 `.zst.tmp` 三处都不删。
+运行日志：启用热窗时启动行 `[request_log] enabled -> …` 末尾带 `, hot window <时长> (older rotated
+files zstd-archived, offline-only)`；归档队列满打 `[request_log] archive queue full; <文件> retried next
+sweep`，压缩或改名失败打 `[request_log] archive <文件> failed (kept plain; retried next sweep): <原因>`；
+源文件先被 retention/护栏删走时静默跳过、不打行。残留 tmp 的回收在每拍的派发步里，派发步只在归档
+开启时运行——`hot_retention: "0"` 下残留的 `.zst.tmp` 不会被回收（三处可删集合也都不含它）。
 **流应答聚合落盘**（`request_log.aggregate_streams`，默认关、restart-only）：流式应答每输出 token 约 100 字节
 chunk 信封（2026-11-12 峰值日 94.5GB 请求日志里约 80% 是响应流），开启后已完成的应答以聚合后的 JSON
 响应落盘、记录带 `response_aggregated:true`，`response_size`/`response_headers` 仍描述线上字节，客户端字节

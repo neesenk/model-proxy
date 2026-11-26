@@ -195,8 +195,9 @@ request_log:
   aggregate_streams: true
   # MCP gateway exchanges (kind="mcp") go to their OWN stream instead of
   # polluting the LLM request log: mcp-YYYYMMDD.log files under mcp_dir
-  # (default ~/.model-proxy/log/mcp), sharing the size/body/retention policy
-  # above. The Requests page and /api/requests go back to LLM-only traffic;
+  # (default ~/.model-proxy/log/mcp), sharing the size/body/retention/hot_retention
+  # policy above (the split stream is zstd-archived past the hot window too, as
+  # mcp-*.log.zst). The Requests page and /api/requests go back to LLM-only traffic;
   # /api/requests?kind=mcp reads the split stream. Restart-only. Default off.
   mcp_split: true
   # mcp_dir: ~/.model-proxy/log/mcp # default; same absolute-path rule as dir
