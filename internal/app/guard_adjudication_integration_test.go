@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"model-proxy/internal/observe/seclog"
+	runtimestate "model-proxy/internal/runtime"
+	"model-proxy/internal/testsyn"
 )
 
 // End-to-end wiring of the guard AI second-opinion channel: a pattern-table
@@ -33,7 +35,13 @@ type judgeUpstream struct {
 	reason  string
 	// raw, when non-empty, replaces the verdict JSON with this exact text
 	// (a 2xx non-JSON judge reply — the "no JSON verdict" error path).
-	raw    string
+	raw string
+	// limit429, when non-empty, answers every call with a 429 carrying this
+	// body (an upstream stating its concurrency limit).
+	limit429 string
+	// gate, when non-nil, holds each call open until it is closed, so a test
+	// can observe the judge account while the call is in flight.
+	gate   chan struct{}
 	srv    *httptest.Server
 	called chan int // signals the call count after each request
 }
@@ -48,7 +56,15 @@ func newJudgeUpstream(t *testing.T, verdict, reason string) *judgeUpstream {
 		callCount := len(j.prompts)
 		j.mu.Unlock()
 		j.called <- callCount
+		if j.gate != nil {
+			<-j.gate
+		}
 		w.Header().Set("content-type", "application/json")
+		if j.limit429 != "" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, j.limit429)
+			return
+		}
 		if j.raw != "" {
 			reply, _ := json.Marshal(map[string]any{
 				"content": []map[string]string{{"type": "text", "text": j.raw}},
@@ -382,6 +398,37 @@ func TestGuardAdjudication_HighPathVerdictRecordsAsPathKind(t *testing.T) {
 }
 
 // ---- helpers ----
+
+// TestGuardAdjudication_Concurrency429CapsJudgeAccount: the judge call is a
+// real request against the judge account. It occupies one of the account's
+// slots while it runs, and a 429 stating a concurrency limit caps the account
+// instead of benching it — the rules the executor applies.
+func TestGuardAdjudication_Concurrency429CapsJudgeAccount(t *testing.T) {
+	judge := newJudgeUpstream(t, "low", "fine")
+	judge.limit429 = `{"error":{"message":"concurrency reached, current: 2, limit: 1","type":"rate_limited"}}`
+	judge.gate = make(chan struct{})
+	p, proxyURL, _, _, _ := newAdjudicationProxy(t, judge, "off")
+	// Release the held judge call when the test body ends, on every path:
+	// httptest's Server.Close waits for in-flight requests.
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(judge.gate) }) }
+	defer release()
+
+	if resp := postWithSession(t, proxyURL, guardPoolRequestBody(adjudDummyKey), "sess-cc"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the judge error fails open)", resp.StatusCode)
+	}
+	waitForAdjudication(t, judge, 1)
+	testsyn.WaitUntil(t, "the judge call to occupy its account", func() bool {
+		return p.runtimeState.Concurrency("judge").Inflight == 1
+	})
+	release()
+	testsyn.WaitUntil(t, "the stated limit to cap the judge account", func() bool {
+		return p.runtimeState.Concurrency("judge") == (runtimestate.ConcurrencyStatus{Cap: 1, Stated: true})
+	})
+	if !p.runtimeState.TargetHealthy("judge", "judge-model", time.Now()) {
+		t.Error("a concurrency limit must not bench the account: the judge account stayed unschedulable")
+	}
+}
 
 func waitForAdjudication(t *testing.T, j *judgeUpstream, calls int) {
 	t.Helper()

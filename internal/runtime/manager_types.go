@@ -214,6 +214,14 @@ type ProviderStatus struct {
 	RateLimitKind       RateLimitKind
 	HalfOpenInFlight    bool
 	Frozen              bool
+	// Inflight is the number of requests the proxy is running against the
+	// account; ConcurrencyCap its learned simultaneous-request limit (0 =
+	// none learned), Stated when the upstream itself named it (see
+	// ConcurrencyStatus). Availability above is HEALTH: an account at its
+	// concurrency cap is busy, not down.
+	Inflight          int
+	ConcurrencyCap    int
+	ConcurrencyStated bool
 }
 
 // ModelLockStatus is the detached dashboard state of one model lock.
@@ -255,9 +263,8 @@ type DashboardSnapshot struct {
 	// CredentialDenials carries the forwarding-path credential failures (see
 	// CredentialDenial) keyed by runtime provider key.
 	CredentialDenials map[string]CredentialDenial
-
-	capturedAt time.Time
-	spread     map[string]uint64
+	capturedAt        time.Time
+	spread            map[string]uint64
 	// rr carries the load_balance per-route round-robin counters into the
 	// read-only PreviewOrder path (same detachment discipline as spread).
 	rr map[string]uint64

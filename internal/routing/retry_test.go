@@ -98,3 +98,62 @@ func TestDecideFailure(t *testing.T) {
 		})
 	}
 }
+
+// TestDecideFailureSaturation: every target at its concurrency limit is
+// all-down in the rate-limit class with NO time horizon — a slot frees when
+// a request completes, not at a dated moment. The wait is therefore for a
+// slot (up to retry_wait, inside the same round budget), and once the budget
+// is spent the terminal is 429 with a one-second Retry-After rather than the
+// whole transient backoff.
+func TestDecideFailureSaturation(t *testing.T) {
+	now := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+	saturated := func(round int) FailureInput {
+		return FailureInput{
+			AllDown: true, AllDownRateLimited: true, AllDownSaturated: true,
+			Round: round, MaxRetryRounds: 2, RetryWait: 10 * time.Second, RateLimitBackoff: time.Minute,
+			EarliestRecovery: now, Now: now,
+		}
+	}
+	for _, round := range []int{0, 1} {
+		if got, want := DecideFailure(saturated(round)), (FailureDecision{Action: FailureWait, Wait: 10 * time.Second, WaitForSlot: true}); got != want {
+			t.Errorf("saturated round %d = %+v, want %+v", round, got, want)
+		}
+	}
+	if got, want := DecideFailure(saturated(2)), (FailureDecision{Action: FailureTerminal, RateLimited: true, RetryAfterSeconds: 1}); got != want {
+		t.Errorf("budget spent = %+v, want %+v", got, want)
+	}
+
+	// A long cooldown elsewhere does not hold the request back: the
+	// saturated sibling may free a slot long before that horizon.
+	mixed := saturated(0)
+	mixed.EarliestRecovery = now.Add(5 * time.Minute)
+	if got, want := DecideFailure(mixed), (FailureDecision{Action: FailureWait, Wait: 10 * time.Second, WaitForSlot: true}); got != want {
+		t.Errorf("saturated beside a long cooldown = %+v, want %+v", got, want)
+	}
+
+	bypass := saturated(0)
+	bypass.BypassWait = true
+	if got, want := DecideFailure(bypass), (FailureDecision{Action: FailureTerminal, RateLimited: true, RetryAfterSeconds: 1}); got != want {
+		t.Errorf("one-shot override = %+v, want %+v", got, want)
+	}
+
+	off := saturated(0)
+	off.RetryWait = 0
+	if got, want := DecideFailure(off), (FailureDecision{Action: FailureTerminal, RateLimited: true, RetryAfterSeconds: 1}); got != want {
+		t.Errorf("retry_wait disabled = %+v, want %+v", got, want)
+	}
+
+	hard := saturated(2)
+	hard.SawHard, hard.AllDownRateLimited = true, false
+	if got, want := DecideFailure(hard), (FailureDecision{Action: FailureTerminal}); got != want {
+		t.Errorf("hard failure in the chain = %+v, want %+v", got, want)
+	}
+
+	// Without saturation the dated-horizon rules stand: no horizon at all
+	// keeps the transient backoff as the Retry-After.
+	plain := saturated(2)
+	plain.AllDownSaturated, plain.SawRateLimit = false, true
+	if got, want := DecideFailure(plain), (FailureDecision{Action: FailureTerminal, RateLimited: true, RetryAfterSeconds: 60}); got != want {
+		t.Errorf("all-down on a lapsed horizon = %+v, want %+v", got, want)
+	}
+}

@@ -48,8 +48,10 @@ type modelLock struct {
 	lockedUntil time.Time
 }
 
-// ResetHealth clears circuit/rate-limit state and model locks, preserving
-// sticky, pins, learned parameters, spread counters, and quotas.
+// ResetHealth clears circuit/rate-limit state, model locks and learned
+// concurrency caps — the operator's escape hatch from a wrongly learned limit
+// — preserving sticky, pins, learned parameters, spread counters, quotas and
+// the in-flight counts (unfreeze cannot make running requests stop).
 func (m *Manager) ResetHealth(name string, parentOf map[string]string) (cleared []string, locks int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -82,6 +84,15 @@ func (m *Manager) ResetHealth(name string, parentOf map[string]string) (cleared 
 		if match(key.Provider) {
 			delete(m.modelLocks, key)
 			locks++
+		}
+	}
+	// A cleared concurrency cap is cleared frozen state too: name the
+	// account, or an unfreeze would report "nothing frozen" over a limit it
+	// did clear. An account merely running requests is not.
+	for name, state := range m.concurrency {
+		if match(name) && state.cap > 0 {
+			state.cap, state.stated, state.full = 0, false, 0
+			cleared = append(cleared, name)
 		}
 	}
 	sort.Strings(cleared)
@@ -129,7 +140,9 @@ func (m *Manager) TargetHealthy(providerName, model string, now time.Time) bool 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := m.health[providerName]
-	return (state == nil || state.available(now)) && !m.modelLockedLocked(providerName, model, now)
+	return (state == nil || state.available(now)) &&
+		!m.saturatedLocked(providerName) &&
+		!m.modelLockedLocked(providerName, model, now)
 }
 
 // AccountHealthy reports whether a provider or pool virtual account may take
@@ -286,6 +299,8 @@ func (m *Manager) RecordModelFailure(providerName, model string, lockout time.Du
 // exhausted target never receives the upstream 429 that would otherwise
 // teach health — without folding it in here, an all-exhausted route reads as
 // "everything available" and terminates as a bare 502 with no Retry-After.
+// Saturation participates the same way and for the same reason: the scheduler
+// drops a saturated account before any upstream can 429.
 func (m *Manager) CooldownState(targets []Target, now time.Time, quotaMaxAge time.Duration) (allDown, allRateLimited bool, earliest time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -293,9 +308,9 @@ func (m *Manager) CooldownState(targets []Target, now time.Time, quotaMaxAge tim
 		return false, false, time.Time{}
 	}
 	for _, target := range targets {
-		state := m.health[target.Provider]
-		if QuotaExhaustedUntil(m.quotas[target.Provider], now, quotaMaxAge).IsZero() &&
-			(state == nil || state.available(now)) {
+		// Saturation counts like any other unavailability; model locks stay
+		// out of it, as documented above.
+		if m.slotFreeLocked(target, now, quotaMaxAge) {
 			return false, false, time.Time{}
 		}
 	}
@@ -314,7 +329,10 @@ func (m *Manager) CooldownState(targets []Target, now time.Time, quotaMaxAge tim
 		if quotaUntil := QuotaExhaustedUntil(m.quotas[target.Provider], now, quotaMaxAge); quotaUntil.After(rateLimitUntil) {
 			rateLimitUntil = quotaUntil
 		}
-		rateLimited := !rateLimitUntil.IsZero()
+		// A full concurrency slot-set is a rate-limit-class down reason with no
+		// time horizon: it lifts the moment a request completes (earliest
+		// clamps to now below).
+		rateLimited := !rateLimitUntil.IsZero() || m.saturatedLocked(target.Provider)
 		circuitOpen := state != nil && !state.circuitOpenUntil.IsZero() && now.Before(state.circuitOpenUntil)
 		var until time.Time
 		switch {
@@ -356,7 +374,7 @@ func (m *Manager) HasRecoveredUntried(targets []Target, tried map[string]bool, n
 		if !QuotaExhaustedUntil(m.quotas[target.Provider], now, quotaMaxAge).IsZero() {
 			continue
 		}
-		if (state == nil || state.available(now)) && !tried[target.Provider] {
+		if (state == nil || state.available(now)) && !m.saturatedLocked(target.Provider) && !tried[target.Provider] {
 			return true
 		}
 	}

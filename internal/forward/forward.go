@@ -289,6 +289,11 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		// skip — frozen to the poll cadence at quota-tracker Start.
 		quotaMaxAge := p.quotaFreshnessMaxAge(cfg)
 		allDown, allRateLimited, earliest := p.cooldownState(checkTargets, now, quotaMaxAge)
+		// Saturation is an all-down state with no time horizon: at least one
+		// target is down only because its concurrency slots are full, and the
+		// next request completing on it makes it schedulable again. Waiting
+		// for that beats a 429 the client would only retry.
+		saturated := allDown && p.concurrencyWaitable(checkTargets, now, quotaMaxAge)
 		bypassWait := forcedProvider != ""
 		recoveredUntried := false
 		if !bypassWait && retryWait > 0 && round < 2 && !allDown {
@@ -299,6 +304,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 			SawRateLimit:       sawCool,
 			AllDown:            allDown,
 			AllDownRateLimited: allRateLimited,
+			AllDownSaturated:   saturated,
 			RecoveredUntried:   recoveredUntried,
 			BypassWait:         bypassWait,
 			Round:              round,
@@ -310,6 +316,17 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		})
 		switch decision.Action {
 		case routing.FailureWait:
+			if decision.WaitForSlot {
+				// No horizon to sleep to: wake on the request that frees a
+				// slot, bounded by retry_wait like the cooldown wait.
+				logx.Infof("[proto=%s model=%s] every target is at its concurrency limit — waiting up to %s for a slot", proto, exposed, decision.Wait)
+				if _, canceled := p.waitInflightSlot(checkTargets, quotaMaxAge, decision.Wait, r.Context()); canceled {
+					p.recordLatchOutcome(execution, res)
+					p.publishTerminalEvent(requestID, r, proto, exposed, statusClientGone)
+					return
+				}
+				continue
+			}
 			logx.Debugf("[proto=%s model=%s] all targets cooling down; retry %d/2 in %s", proto, exposed, round+1, decision.Wait.Round(time.Millisecond))
 			select {
 			case <-time.After(decision.Wait):

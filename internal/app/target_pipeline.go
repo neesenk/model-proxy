@@ -50,6 +50,16 @@ func (g proxyHealthGate) RecordModelFailure(provider, model string, scheduling c
 func (g proxyHealthGate) RecordRateLimit(provider string, until time.Time, kind string, generation uint64) {
 	g.proxy.recordRateLimit(provider, until, runtimestate.ParseRateLimitKind(kind), generation)
 }
+func (g proxyHealthGate) TakeInflight(provider string) (targetexec.InflightSlot, bool) {
+	slot, free := g.proxy.takeInflight(provider)
+	return targetexec.InflightSlot{Provider: slot.Provider, Level: slot.Level}, free
+}
+func (g proxyHealthGate) ReleaseInflight(slot targetexec.InflightSlot, succeeded bool) (int, bool) {
+	return g.proxy.releaseInflight(runtimestate.InflightSlot{Provider: slot.Provider, Level: slot.Level}, succeeded)
+}
+func (g proxyHealthGate) RecordConcurrencyLimit(provider string, limit, inflight int, generation uint64) (int, bool) {
+	return g.proxy.recordConcurrencyLimit(provider, limit, inflight, generation)
+}
 func (g proxyHealthGate) RecordCredentialDenied(provider string, kind targetexec.CredentialDenialKind, evidence []byte, generation uint64) {
 	g.proxy.recordCredentialDenied(provider, string(kind), evidence, generation)
 }

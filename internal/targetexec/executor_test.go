@@ -97,6 +97,9 @@ func (s *executorState) LearnParamBlock(configdomain.RouteTarget, string) bool {
 }
 func (*executorState) ApplyParamBlock(_ configdomain.RouteTarget, body []byte) []byte { return body }
 func (s *executorState) NoteWireResponsesMiss(configdomain.RouteTarget)               { s.wireMisses++ }
+func (*executorState) TakeInflight(string) (InflightSlot, bool)                       { return InflightSlot{}, true }
+func (*executorState) ReleaseInflight(InflightSlot, bool) (int, bool)                 { return 0, false }
+func (*executorState) RecordConcurrencyLimit(string, RateLimitDecision) (int, bool)   { return 0, false }
 
 type executorEffects struct {
 	failovers, failures, rateLimits, logs, commits int

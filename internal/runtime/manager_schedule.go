@@ -133,6 +133,7 @@ func (m *Manager) DecideOrder(input ScheduleInput) ScheduleResult {
 		targetAvailable: func(target Target, now time.Time) bool {
 			health := m.health[target.Provider]
 			return (health == nil || health.available(now)) &&
+				!m.saturatedLocked(target.Provider) &&
 				!m.modelLockedLocked(target.Provider, target.Model, now) &&
 				!quotaExhausted(m.quotas[target.Provider], now, input.QuotaMaxAge)
 		},
@@ -535,6 +536,16 @@ func (m *Manager) Dashboard(now time.Time) DashboardSnapshot {
 			HalfOpenInFlight:    state.halfOpenInFlight,
 			Frozen:              state.frozen,
 		}
+	}
+	// Concurrency rides on the same row; an account with concurrency state
+	// and no health entry gets a closed, available row of its own.
+	for name, state := range m.concurrency {
+		row, ok := snapshot.Providers[name]
+		if !ok {
+			row = ProviderStatus{CircuitState: "closed", Available: true}
+		}
+		row.Inflight, row.ConcurrencyCap, row.ConcurrencyStated = state.inflight, state.cap, state.stated
+		snapshot.Providers[name] = row
 	}
 	for key, entry := range m.modelLocks {
 		if !now.Before(entry.lockedUntil) {

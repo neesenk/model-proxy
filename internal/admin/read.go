@@ -78,6 +78,17 @@ func (s *Service) Dashboard(now time.Time) appapi.Dashboard {
 			entry["rate_limited_until"] = providerState.RateLimitedUntil.UTC().Format(time.RFC3339)
 			entry["rate_limit_kind"] = providerState.RateLimitKind.String()
 		}
+		// Concurrency is reported, never folded into `available`: an account
+		// at its simultaneous-request limit is busy, not down.
+		if providerState.Inflight > 0 || providerState.ConcurrencyCap > 0 {
+			entry["inflight"] = providerState.Inflight
+		}
+		if providerState.ConcurrencyCap > 0 {
+			entry["concurrency_cap"] = providerState.ConcurrencyCap
+			if providerState.ConcurrencyStated {
+				entry["concurrency_cap_stated"] = true
+			}
+		}
 		health[name] = entry
 	}
 	modelLocks := map[string][]map[string]any{}

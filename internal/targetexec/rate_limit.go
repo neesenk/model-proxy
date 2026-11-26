@@ -15,7 +15,21 @@ const (
 	RateLimitTransient RateLimitKind = "transient"
 	RateLimitQuota     RateLimitKind = "quota"
 	RateLimitDaily     RateLimitKind = "daily"
-	maxResetHint                     = 7 * 24 * time.Hour
+	// RateLimitConcurrency: the account's limit on SIMULTANEOUS requests is
+	// reached (step-plan "concurrency reached, current: 11, limit: 10"; zcode
+	// code 1302). It has no time horizon — it lifts the moment a request
+	// completes — so nothing is cooled down: the account's learned cap plus
+	// its in-flight count are what keep the next request off it.
+	RateLimitConcurrency RateLimitKind = "concurrency"
+	maxResetHint                       = 7 * 24 * time.Hour
+)
+
+var (
+	// concurrencyLimitRe reads the limit an upstream states in a 429 body
+	// ("concurrency reached, current: 11, limit: 10", "concurrency limit of 5").
+	concurrencyLimitRe = regexp.MustCompile(`(?i)concurren\w*.{0,60}?\blimit\D{1,12}(\d{1,4})`)
+	// concurrencyWordRe matches an upstream naming concurrency at all.
+	concurrencyWordRe = regexp.MustCompile(`(?i)concurren|并发`)
 )
 
 var dailyQuotaMarkers = [][]byte{
@@ -75,12 +89,85 @@ type RateLimitKind string
 type RateLimitDecision struct {
 	Until time.Time
 	Kind  RateLimitKind
+	// ConcurrencyLimit is the simultaneous-request limit the upstream itself
+	// stated in the 429 body; 0 = it stated none.
+	ConcurrencyLimit int
+	// ConcurrencyInflight is how many OTHER requests the account was already
+	// running when the rejected one was dispatched — the request's own
+	// vantage point, set only by ParseRateLimitFor.
+	ConcurrencyInflight int
 }
 
 // ParseRateLimit applies daily-before-quota classification. An explicit body
 // reset hint wins over Retry-After, which wins over the scheduling default.
 func ParseRateLimit(response *http.Response, bodyPeek []byte, now time.Time, scheduling configdomain.Scheduling) RateLimitDecision {
+	return ParseRateLimitFor(response, bodyPeek, now, scheduling, 0)
+}
+
+// ParseRateLimitFor is ParseRateLimit from one request's vantage point:
+// inflight is how many other requests the account was already running when
+// the rejected one was dispatched. Precedence for a 429 carrying no quota or
+// daily proof:
+//
+//   - the upstream states a concurrency limit → RateLimitConcurrency with it;
+//   - the body dates its limit (reset hint) or the response carries a usable
+//     Retry-After → that horizon stands, as before: a dated limit is
+//     time-based whatever else was in flight;
+//   - other requests were in flight → RateLimitConcurrency inferred from
+//     their number;
+//   - alone on the account → the transient default: a 429 with no company is
+//     a rate limit, a plan window or another consumer, not concurrency.
+func ParseRateLimitFor(response *http.Response, bodyPeek []byte, now time.Time, scheduling configdomain.Scheduling, inflight int) RateLimitDecision {
 	kind := classify429(bodyPeek)
+	if kind == RateLimitTransient {
+		if limit, ok := parseConcurrencyLimit(bodyPeek); ok {
+			return RateLimitDecision{Until: now, Kind: RateLimitConcurrency, ConcurrencyLimit: limit, ConcurrencyInflight: inflight}
+		}
+		if inflight >= 1 && !hasTimeHint(response, bodyPeek, now) {
+			return RateLimitDecision{Until: now, Kind: RateLimitConcurrency, ConcurrencyInflight: inflight}
+		}
+	}
+	return parseTimedRateLimit(response, bodyPeek, now, scheduling, kind)
+}
+
+// parseConcurrencyLimit reads the simultaneous-request limit an upstream
+// states in its 429 body. ok is false when it names none — including when it
+// only names concurrency without a number ("Too many concurrent requests").
+func parseConcurrencyLimit(body []byte) (int, bool) {
+	if len(body) == 0 || !concurrencyWordRe.Match(body) {
+		return 0, false
+	}
+	m := concurrencyLimitRe.FindSubmatch(body)
+	if len(m) != 2 {
+		return 0, false
+	}
+	limit, err := strconv.Atoi(string(m[1]))
+	if err != nil || limit < 1 {
+		return 0, false
+	}
+	return limit, true
+}
+
+// hasTimeHint reports whether the 429 dates its own limit: a body reset hint
+// or a Retry-After the timed parser would honor.
+func hasTimeHint(response *http.Response, bodyPeek []byte, now time.Time) bool {
+	if _, ok := parseResetHint(bodyPeek, now); ok {
+		return true
+	}
+	if response == nil {
+		return false
+	}
+	retryAfter := response.Header.Get("Retry-After")
+	if _, err := strconv.Atoi(retryAfter); err == nil {
+		return true
+	}
+	_, err := http.ParseTime(retryAfter)
+	return err == nil
+}
+
+// parseTimedRateLimit is the time-horizon half of the classification: body
+// reset hint, then Retry-After, then the kind's scheduling default.
+func parseTimedRateLimit(response *http.Response, bodyPeek []byte, now time.Time, scheduling configdomain.Scheduling, kind RateLimitKind) RateLimitDecision {
 	if until, ok := parseResetHint(bodyPeek, now); ok {
 		return RateLimitDecision{Until: until, Kind: kind}
 	}

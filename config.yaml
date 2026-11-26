@@ -135,10 +135,10 @@ routes: {deepseek-v4.1-flash: {strategy: load_balance, targets: [{model: deepsee
 #   circuit_threshold: 3 # (default 3) consecutive circuit failures (including explicit account disablement and a lapsed plan subscription) -> open circuit
 #   circuit_cooldown: 10m # (default 10m) circuit open duration, then half-open (1 probe)
 #   circuit_persist: 6s # (default 6s; "0" disables) failures must ALSO span at least this long before the circuit opens — external-network tolerance: one event killing N in-flight connections (proxy chain recycle, LB roll) must not read as N independent provider deaths; per-request failover is unaffected
-#   rate_limit_backoff: 60s # (default 60s) transient 429 with no reset hint/Retry-After: skip this long, then probe
+#   rate_limit_backoff: 60s # (default 60s) transient 429 with no reset hint/Retry-After: skip this long, then probe. A 429 that proves a concurrency limit never cools down — it caps the account's in-flight requests instead (docs/architecture/routing-and-failure.md)
 #   quota_cooldown: 1h # (default 1h) 429 classified quota-exhausted (balance/plan window) with no reset hint
 #   model_lockout: 10m # (default 10m) model-level failure (404 / model-denied / empty 200): lock (provider,model)
-#   retry_wait: 10s # (default 10s; "0" disables) all targets cooling down: wait ≤ this for the earliest expiry and retry (≤2×)
+#   retry_wait: 10s # (default 10s; "0" disables) all targets cooling down or at their concurrency limits: wait ≤ this for the earliest expiry / a freed request slot and retry (≤2×)
 #   upstream_timeout: 1800s # (default 1800s) per-upstream-request timeout
 #   stream_keepalive: 15s # (default 15s; "0" disables) SSE comment heartbeat into client streams after this much upstream silence
 #   sticky_dwell: 1m # (default 1m) min time on the chosen provider before re-evaluating

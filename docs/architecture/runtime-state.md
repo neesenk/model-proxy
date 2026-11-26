@@ -86,6 +86,16 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
   不持久化。`Dashboard` 以 `CredentialDenials` 脱离式副本带出，admin 投影合并进
   `/api/status` 的 `credential_alerts` 与 `quota[name].denial`，schedule 节点徽标同源
   （轮询的凭据类记录优先，字段契约见 `docs/web-api.md`）。
+- **账号并发账本（Manager 侧 concurrency，`manager_concurrency.go`）**：每个运行态 provider
+  键一条 `{inflight, cap, stated, 上调 streak, 在途请求的占位时在途数}`。在途计数是**进程事实**，
+  与 generation 无关：占位/释放不按 generation 门控，`ReplaceGeneration` 只把整张表剪枝到
+  live key 集（存活账号保留上限与在途请求；被移除账号的在途请求释放时落到空处），`persist()`
+  不捕获它。上限是关于上游的观测：`unfreeze`（`ResetHealth`）清除上限（明说与推断都清、
+  streak 清零）但**不动在途计数**——解冻不能让在跑的请求消失；内存态、不持久化。`available()`
+  不含饱和：健康与「忙」是两个事实，MCP 网关选账号只看前者。规则本身（上限怎么学、门禁在哪、
+  全饱和怎么等）在 `docs/architecture/routing-and-failure.md`「并发上限（在途门禁）」。
+  `Dashboard` 把在途数与上限放进各账号的 `ProviderStatus` 行（只有并发状态的账号也有
+  closed/available 行），经 `/api/status` 的 health 条目暴露。
 - **失败文本即证据**：用量端点答 200 但 body 不是该 provider 的格式时（kimi-code
   `/usages`、opencode-go `/usage`、zhipu/zcode 配额），错误串为
   `not <provider> <endpoint> format: <片段>`——`provider.quotaFormatSnapshot` 取响应 body
@@ -150,7 +160,8 @@ reload swap unit（本段列出的全部字段），`processServices` 是跨 rel
 服务；archtest 钉死两个分组的精确成员，新字段不得直接落在 `Proxy` 顶层。
 `Manager.ReplaceGeneration` 原子清空旧 health、sticky、model lock、paramBlock、
 spread 和 quality（发布空 quality map），operator pin 有意跨 reload 保留；quota
-cache 有意跨 reload 存活并剪枝到 live key 集（同步语义见 quotaTracker 节）。`persist()` 按同一锁顺序捕获
+cache 有意跨 reload 存活并剪枝到 live key 集（同步语义见 quotaTracker 节）；并发账本
+同样只剪枝——在途计数是进程事实，上限是关于存活账号的观测。`persist()` 按同一锁顺序捕获
 config fingerprint 和 Manager 的 `generation + quota + health + route-keyed
 sticky` 原子 snapshot，不允许分别读取后拼装。reload 交换完成后同步写入「新
 fingerprint + 已清空的 health/sticky + 剪枝后的 quota cache」——紧随其后的 crash
@@ -231,6 +242,8 @@ closed (in-flight handlers: N)`）：N 是 deadline 时刻仍未返回的已接�
 | `QuotaTracker.persistMu` | `Proxy.mu.RLock`（通过 `FullSnapshot`） | 串行化 quota 文件的快照与写盘。reload 释放 Proxy 状态锁后才调用 `Persist`。 |
 | `Proxy.modelCapsPersistMu` | `Proxy.mu.RLock`、wirecap 模型存储锁 | daemon 的模型文件读写串行化。采纳外部刷新时在同一配置读锁内验证 fingerprint 并恢复条目。 |
 | `Proxy.mu` | `runtime.Manager` 或 `wirecap.Store`、`wirecap.ModelStore` 的状态锁 | 在一个配置代内获取请求视图、捕获持久化快照或发布 reload 状态。 |
+
+并发空位广播（`WaitInflightSlot` / `ReleaseInflightSlot`）遵守同一方向：释放路径在 `m.mu` 内关闭并退役广播 channel，这只是内存操作；被唤醒的等待者只是重新去拿 `m.mu` 或返回，持锁期间不回调任何人。
 
 Manager 与 wirecap 持锁时禁止反向调用 Proxy、裁决服务或 quota tracker。文件读取、写入与 HTTP 编码均在释放配置和状态锁后执行；文件串行化锁可以覆盖相应文件操作。后台 probe 的 `wireProbeMu` 只串行化扫描，持有状态锁的路径不得等待它。
 
@@ -468,7 +481,7 @@ Disable/Enable）是 (provider, model) 粒度的 operator 覆盖，状态归
 
 ## Unfreeze
 
-`unfreeze [provider]` / `POST /api/health/reset` 清除熔断、限频和模型锁（含 operator 手动冻结标志——删条目即解冻），不清 sticky、pin、paramBlock，也不清转发路径的凭据拒绝记录（unfreeze 是"现在重试"，凭据并没有恢复——只有该账号的下一次成功能清除它）。
+`unfreeze [provider]` / `POST /api/health/reset` 清除熔断、限频和模型锁（含 operator 手动冻结标志——删条目即解冻），以及该账号学到的并发上限（明说与推断都清——上限学错时的逃生口；在途计数不动，在跑的请求仍占位直到结束），不清 sticky、pin、paramBlock，也不清转发路径的凭据拒绝记录（unfreeze 是"现在重试"，凭据并没有恢复——只有该账号的下一次成功能清除它）。
 
 空 body 清全部；池化父名清所有虚拟账号。畸形 JSON 必须返回 400，持久化成功后才能返回 200。
 
@@ -494,6 +507,16 @@ Disable/Enable）是 (provider, model) 粒度的 operator 覆盖，状态归
   （`TestRecordCredentialDenial*`、`TestRecordSuccessClearsOnlyItsOwnCredentialDenial`、
   `TestReplaceGenerationPrunesCredentialDenialsToLiveKeys`、
   `TestResetHealthKeepsCredentialDenial`）。
+- 账号并发账本（`TestTakeInflightSlotGatesOnLearnedCap`、
+  `TestNoteConcurrencyLimitStatedLimitIsAuthoritative`、
+  `TestConcurrencyCapProbesUpAfterFullOccupancySuccesses`、
+  `TestSaturatedAccountLeavesSchedulingButStaysUsableByMCP`、
+  `TestCooldownStateTreatsSaturationAsRateLimitClass`、`TestCooldownStateIgnoresModelLocks`、
+  `TestResetHealthClearsLearnedConcurrencyCapKeepsInflight`、
+  `TestReplaceGenerationPrunesConcurrencyStateToLiveKeys`、
+  `TestDashboardProjectsConcurrency`、`TestWaitInflightSlotWakesWhenASlotFrees`）：占位与
+  释放配对、明说上限权威、推断只降不升与满载上调、饱和离开调度但 MCP 不受影响、冷却判定按
+  限频类且无 horizon（模型锁照旧不参与判定）、unfreeze 清上限留在途、reload 剪枝、投影、释放即唤醒。
 - 多 tracker 同 path、进程退出、测试 TempDir cleanup。
 - lifecycle 关闭时拒绝新任务、等待已接纳任务、drain request logger，重复 Close
   不阻塞。

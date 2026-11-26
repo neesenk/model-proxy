@@ -47,6 +47,16 @@ type Manager struct {
 	// only prunes it to the live key set, and a success — not a reload or an
 	// unfreeze — is what clears an entry (Manager.RecordCredentialDenial).
 	denials map[string]CredentialDenial
+	// concurrency is the per-account in-flight ledger and learned concurrency
+	// limit (see manager_concurrency.go). In-flight counts are facts about
+	// running requests, so ReplaceGeneration prunes the map to the live key
+	// set and ResetHealth clears only the caps.
+	concurrency map[string]*concurrencyState
+	// slotFree is the broadcast channel the requests parked in
+	// WaitInflightSlot share; slotWaiters counts them. Closed and retired on
+	// every release while anyone waits (wakeSlotWaitersLocked).
+	slotFree    chan struct{}
+	slotWaiters int
 	// quality is copy-on-write: record paths (under m.mu) publish a NEW
 	// immutable map of providerQuality VALUES; readers load the pointer without
 	// the mutex so the scheduling critical section skips the decayed-status
@@ -107,6 +117,9 @@ func (m *Manager) ensureLocked() {
 	if m.denials == nil {
 		m.denials = make(map[string]CredentialDenial)
 	}
+	if m.concurrency == nil {
+		m.concurrency = make(map[string]*concurrencyState)
+	}
 	if m.quality.Load() == nil {
 		empty := map[string]providerQuality{}
 		m.quality.Store(&empty)
@@ -163,6 +176,14 @@ func (m *Manager) ReplaceGeneration(generation uint64, liveQuotaKeys map[string]
 	for name := range m.denials {
 		if !liveQuotaKeys[name] {
 			delete(m.denials, name)
+		}
+	}
+	// Same pruning for the concurrency ledger: a surviving account keeps its
+	// learned limit and its running requests, a removed one drops out (a
+	// request of its own still running then releases into nothing).
+	for name := range m.concurrency {
+		if !liveQuotaKeys[name] {
+			delete(m.concurrency, name)
 		}
 	}
 	empty := map[string]providerQuality{}

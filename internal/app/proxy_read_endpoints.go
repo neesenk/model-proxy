@@ -2,6 +2,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -150,6 +151,22 @@ func (p *Proxy) hasRecoveredUntried(targets []configdomain.RouteTarget, tried ma
 	return p.runtimeState.HasRecoveredUntried(runtimeTargetsBare(targets), tried, now, quotaMaxAge)
 }
 
+// concurrencyWaitable reports whether at least one target is unavailable
+// solely because its concurrency slots are full — such a target becomes
+// schedulable the moment one of its requests completes. The wait-retry
+// decision treats an all-down route with one as worth a bounded wait.
+func (p *Proxy) concurrencyWaitable(targets []configdomain.RouteTarget, now time.Time, quotaMaxAge time.Duration) bool {
+	return p.runtimeState.ConcurrencyWaitable(runtimeTargetsBare(targets), now, quotaMaxAge)
+}
+
+// waitInflightSlot parks the caller until one of the targets frees a
+// concurrency slot, max elapses, or ctx ends. It is the event-driven sibling
+// of the cooldown wait: a slot frees when a request completes, not at a
+// dated moment.
+func (p *Proxy) waitInflightSlot(targets []configdomain.RouteTarget, quotaMaxAge, max time.Duration, ctx context.Context) (freed, canceled bool) {
+	return p.runtimeState.WaitInflightSlot(runtimeTargetsBare(targets), quotaMaxAge, max, ctx)
+}
+
 // latchValue reads the (session, route) latch from the runtime Manager and
 // projects it into the forward package's consumer-owned value type.
 func (p *Proxy) latchValue(sessionKey, route string) (forward.Latch, bool) {
@@ -245,6 +262,26 @@ func (p *Proxy) recordRateLimit(name string, until time.Time, kind runtimestate.
 // for providers whose quota poll never contacts the upstream; the lifecycle
 // (cleared by the account's next success, pruned to live keys on reload) is
 // runtime.Manager.RecordCredentialDenial's.
+// takeInflight / releaseInflight are the executor's occupancy ledger against
+// the runtime Manager. Not generation-gated: a running request is a fact
+// about the process whatever generation captured it.
+func (p *Proxy) takeInflight(provider string) (runtimestate.InflightSlot, bool) {
+	return p.runtimeState.TakeInflightSlot(provider)
+}
+
+func (p *Proxy) releaseInflight(slot runtimestate.InflightSlot, succeeded bool) (int, bool) {
+	return p.runtimeState.ReleaseInflightSlot(slot, succeeded)
+}
+
+// recordConcurrencyLimit stores what a 429 proved about an account's
+// concurrency limit (the upstream's statement, or the requests that were in
+// flight when an unstated 429 came) and returns the cap now in force with
+// whether this report moved it. The lifecycle is
+// runtime.Manager.NoteConcurrencyLimit's.
+func (p *Proxy) recordConcurrencyLimit(provider string, limit, inflight int, generations ...uint64) (int, bool) {
+	return p.runtimeState.NoteConcurrencyLimit(provider, limit, inflight, runtimestate.GenerationArg(generations))
+}
+
 func (p *Proxy) recordCredentialDenied(name, class string, evidence []byte, generations ...uint64) {
 	p.runtimeState.RecordCredentialDenial(
 		name,

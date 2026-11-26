@@ -129,6 +129,71 @@ func TestServeRouteSelectorFailureKeepsOrder(t *testing.T) {
 	}
 }
 
+// TestServeRouteSelectorConcurrency429TeachesLimit: the selector's own
+// upstream call is not an executor attempt, but a 429 stating a concurrency
+// limit teaches the account's cap all the same — and starts no time cooldown,
+// the same rule the executor applies.
+func TestServeRouteSelectorConcurrency429TeachesLimit(t *testing.T) {
+	h := newHarness()
+	upA := newFakeUpstream(t, openaiOKResponder("from-a"))
+	upB := newFakeUpstream(t, openaiOKResponder("from-b"))
+	upSel := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"concurrency reached, current: 2, limit: 1","type":"rate_limited"}}`))
+	})
+	snap := routeSelectorSnapshot(t, h, upA, upB, upSel)
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}"`
+
+	w := h.serve(snap, "openai", "/v1/chat/completions", body, nil)
+	if w.Code != http.StatusOK || upA.hits() != 1 {
+		t.Fatalf("status = %d a hits = %d, want the selector's 429 falling back to a", w.Code, upA.hits())
+	}
+	h.gate.mu.Lock()
+	defer h.gate.mu.Unlock()
+	if len(h.gate.concurrencyNotes) != 1 || h.gate.concurrencyNotes[0] != (gateConcurrencyNote{provider: "sel", limit: 1}) {
+		t.Errorf("concurrency notes = %+v, want the selector's stated limit of 1 reported once", h.gate.concurrencyNotes)
+	}
+	if _, cooled := h.gate.rateLimits["sel"]; cooled {
+		t.Errorf("selector account = %+v, want no time cooldown for a concurrency limit", h.gate.rateLimits)
+	}
+	// The leg is a real request against the account: it held a slot while it
+	// ran and gave it back.
+	if h.gate.peakInflight["sel"] != 1 || h.gate.inflight["sel"] != 0 {
+		t.Errorf("selector account occupancy = peak %d / now %d, want 1 / 0", h.gate.peakInflight["sel"], h.gate.inflight["sel"])
+	}
+}
+
+// TestServeRouteSelectorSkippedWhenAccountSaturated: the selector's account
+// at its concurrency limit is not called at all — the leg takes a slot like
+// any other request against the account, and a refused take sends the
+// request down the scheduled order.
+func TestServeRouteSelectorSkippedWhenAccountSaturated(t *testing.T) {
+	h := newHarness()
+	upA := newFakeUpstream(t, openaiOKResponder("from-a"))
+	upB := newFakeUpstream(t, openaiOKResponder("from-b"))
+	upSel := newFakeUpstream(t, selectorDecisionResponder("c2", 0.9))
+	snap := routeSelectorSnapshot(t, h, upA, upB, upSel)
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}"`
+
+	// One request already occupies the selector account's only slot.
+	held, _ := h.gate.TakeInflight("sel")
+	h.gate.RecordConcurrencyLimit("sel", 1, 0, 1)
+
+	w := h.serve(snap, "openai", "/v1/chat/completions", body, nil)
+	h.gate.ReleaseInflight(held, true)
+	if w.Code != http.StatusOK || upA.hits() != 1 || upB.hits() != 0 {
+		t.Fatalf("status = %d hits a/b = %d/%d, want the scheduled order (a) served", w.Code, upA.hits(), upB.hits())
+	}
+	if upSel.hits() != 0 {
+		t.Errorf("selector upstream hits = %d, want 0: a saturated account is not called", upSel.hits())
+	}
+	if r := h.fx.capturedRouting(); len(r) != 1 || r[0] == nil || r[0].Source != "fallback" ||
+		!strings.Contains(r[0].Selector.Err, "concurrency saturated") {
+		t.Fatalf("routing decision = %+v, want a fallback naming the saturated selector account", r)
+	}
+}
+
 func TestServeRouteSelectorShadowKeepsOrder(t *testing.T) {
 	h := newHarness()
 	upA := newFakeUpstream(t, openaiOKResponder("from-a"))

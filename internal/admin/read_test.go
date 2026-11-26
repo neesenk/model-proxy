@@ -41,6 +41,9 @@ func TestDashboardProjection(t *testing.T) {
 					RateLimitKind:    runtimestate.Quota,
 				},
 				"iced": {CircuitState: "closed", Available: false, Frozen: true},
+				// An account can carry concurrency state with no health
+				// entry at all; busy is at a limit the upstream stated.
+				"busy": {CircuitState: "closed", Available: true, Inflight: 2, ConcurrencyCap: 2, ConcurrencyStated: true},
 			},
 			ModelLocks: map[string][]runtimestate.ModelLockStatus{
 				"down": {{Provider: "down", Model: "m", LockedUntil: now.Add(2 * time.Hour)}},
@@ -85,6 +88,15 @@ func TestDashboardProjection(t *testing.T) {
 	}
 	if _, present := up["frozen"]; present {
 		t.Errorf("non-frozen provider must not carry frozen: %v", up)
+	}
+	for _, key := range []string{"inflight", "concurrency_cap", "concurrency_cap_stated"} {
+		if _, present := up[key]; present {
+			t.Errorf("provider without concurrency state must not carry %s: %v", key, up)
+		}
+	}
+	busy, ok := dashboard.Health["busy"].(map[string]any)
+	if !ok || busy["inflight"] != 2 || busy["concurrency_cap"] != 2 || busy["concurrency_cap_stated"] != true || busy["available"] != true {
+		t.Errorf("health[busy] = %v, want inflight 2 / cap 2 (stated), still available: a busy account is not a down one", dashboard.Health["busy"])
 	}
 	iced, ok := dashboard.Health["iced"].(map[string]any)
 	if !ok || iced["frozen"] != true || iced["available"] != false {

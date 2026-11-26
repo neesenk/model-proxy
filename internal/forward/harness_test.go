@@ -5,6 +5,7 @@
 package forward
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -69,6 +70,21 @@ type fakeHealthGate struct {
 	blockedParams  map[string][]string
 	wireMisses     []string
 	modelLockedSet map[string]bool
+	// concurrencyNotes records every RecordConcurrencyLimit report as
+	// {provider, stated limit, other requests in flight}.
+	concurrencyNotes []gateConcurrencyNote
+	// concurrencyCap / inflight mirror the runtime ledger closely enough to
+	// observe slot discipline: cap 0 = unlimited, inflight the live occupancy,
+	// peakInflight the high-water mark a test can assert on.
+	concurrencyCap map[string]int
+	inflight       map[string]int
+	peakInflight   map[string]int
+}
+
+type gateConcurrencyNote struct {
+	provider string
+	limit    int
+	inflight int
 }
 
 func newFakeHealthGate() *fakeHealthGate {
@@ -80,6 +96,9 @@ func newFakeHealthGate() *fakeHealthGate {
 		rateLimits:     map[string]time.Time{},
 		blockedParams:  map[string][]string{},
 		modelLockedSet: map[string]bool{},
+		concurrencyCap: map[string]int{},
+		inflight:       map[string]int{},
+		peakInflight:   map[string]int{},
 	}
 }
 
@@ -127,6 +146,39 @@ func (g *fakeHealthGate) NoteWireResponsesMiss(provider, model string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.wireMisses = append(g.wireMisses, provider+"/"+model)
+}
+func (g *fakeHealthGate) TakeInflight(provider string) (targetexec.InflightSlot, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	slot := targetexec.InflightSlot{Provider: provider, Level: g.inflight[provider]}
+	g.inflight[provider]++
+	if g.inflight[provider] > g.peakInflight[provider] {
+		g.peakInflight[provider] = g.inflight[provider]
+	}
+	cap := g.concurrencyCap[provider]
+	return slot, cap == 0 || slot.Level < cap
+}
+func (g *fakeHealthGate) ReleaseInflight(slot targetexec.InflightSlot, _ bool) (int, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.inflight[slot.Provider] > 0 {
+		g.inflight[slot.Provider]--
+	}
+	return g.concurrencyCap[slot.Provider], false
+}
+func (g *fakeHealthGate) RecordConcurrencyLimit(provider string, limit, inflight int, _ uint64) (int, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.concurrencyNotes = append(g.concurrencyNotes, gateConcurrencyNote{provider: provider, limit: limit, inflight: inflight})
+	cap, changed := g.concurrencyCap[provider], false
+	switch {
+	case limit > 0:
+		changed, cap = cap != limit, limit
+	case cap == 0 || inflight < cap:
+		changed, cap = true, inflight
+	}
+	g.concurrencyCap[provider] = cap
+	return cap, changed
 }
 
 var _ targetexec.HealthGate = (*fakeHealthGate)(nil)
@@ -212,7 +264,12 @@ type fakeRouteState struct {
 	// flip the branch to the 429 terminal (the flake this seam prevents).
 	earliestIn       time.Duration
 	recoveredUntried bool
-	quotaMaxAge      time.Duration
+	// saturated stands in for the runtime Manager's ConcurrencyWaitable (at
+	// least one target down solely because its concurrency slots are full);
+	// waitSlot replaces its WaitInflightSlot. Both nil/zero = no saturation.
+	saturated   bool
+	waitSlot    func(max time.Duration) (freed, canceled bool)
+	quotaMaxAge time.Duration
 	// latch owns the (session, route) latch and repeat-turn window exactly
 	// like production. Construction must go through newFakeRouteState so the
 	// generation gate matches the harness snapshots (Generation 1).
@@ -235,6 +292,12 @@ func (s *fakeRouteState) CooldownState(targets []RouteTarget, now time.Time, quo
 }
 func (s *fakeRouteState) HasRecoveredUntried(targets []RouteTarget, tried map[string]bool, now time.Time, quotaMaxAge time.Duration) bool {
 	return s.recoveredUntried
+}
+func (s *fakeRouteState) ConcurrencyWaitable(targets []RouteTarget, now time.Time, quotaMaxAge time.Duration) bool {
+	return s.saturated
+}
+func (s *fakeRouteState) WaitInflightSlot(targets []RouteTarget, quotaMaxAge, max time.Duration, ctx context.Context) (bool, bool) {
+	return s.waitSlot(max)
 }
 func (s *fakeRouteState) QuotaFreshnessMaxAge(cfg *Config) time.Duration { return s.quotaMaxAge }
 func (s *fakeRouteState) LatchValue(sessionKey, route string) (Latch, bool) {

@@ -3,6 +3,7 @@
 package forward
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -85,6 +86,16 @@ type RouteState interface {
 	// HasRecoveredUntried reports the TOCTOU case: a target is available now
 	// but was NOT tried in the failed pass — answer with an immediate re-pass.
 	HasRecoveredUntried(targets []RouteTarget, tried map[string]bool, now time.Time, quotaMaxAge time.Duration) bool
+	// ConcurrencyWaitable reports whether at least one target is unavailable
+	// solely because its concurrency slots are full: such a target becomes
+	// schedulable the moment one of its requests completes, so an all-down
+	// route is worth a bounded wait rather than an immediate error.
+	ConcurrencyWaitable(targets []RouteTarget, now time.Time, quotaMaxAge time.Duration) bool
+	// WaitInflightSlot parks until one of the targets frees a concurrency
+	// slot (freed), max elapses, or the context ends (canceled). It returns at
+	// once when a slot is already free, and without waiting when no target
+	// could become schedulable by a freed slot.
+	WaitInflightSlot(targets []RouteTarget, quotaMaxAge, max time.Duration, ctx context.Context) (freed, canceled bool)
 	// QuotaFreshnessMaxAge is the quota-snapshot freshness window shared by
 	// the scheduling skip and the failure classification.
 	QuotaFreshnessMaxAge(cfg *Config) time.Duration
@@ -151,6 +162,14 @@ func (p pipeline) cooldownState(targets []RouteTarget, now time.Time, quotaMaxAg
 
 func (p pipeline) hasRecoveredUntried(targets []RouteTarget, tried map[string]bool, now time.Time, quotaMaxAge time.Duration) bool {
 	return p.state.HasRecoveredUntried(targets, tried, now, quotaMaxAge)
+}
+
+func (p pipeline) concurrencyWaitable(targets []RouteTarget, now time.Time, quotaMaxAge time.Duration) bool {
+	return p.state.ConcurrencyWaitable(targets, now, quotaMaxAge)
+}
+
+func (p pipeline) waitInflightSlot(targets []RouteTarget, quotaMaxAge, max time.Duration, ctx context.Context) (bool, bool) {
+	return p.state.WaitInflightSlot(targets, quotaMaxAge, max, ctx)
 }
 
 func (p pipeline) quotaFreshnessMaxAge(cfg *Config) time.Duration {

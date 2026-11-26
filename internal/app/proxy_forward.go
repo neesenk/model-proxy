@@ -4,6 +4,7 @@
 package app
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -73,6 +74,14 @@ func (s proxyRouteState) CooldownState(targets []configdomain.RouteTarget, now t
 
 func (s proxyRouteState) HasRecoveredUntried(targets []configdomain.RouteTarget, tried map[string]bool, now time.Time, quotaMaxAge time.Duration) bool {
 	return s.proxy.hasRecoveredUntried(targets, tried, now, quotaMaxAge)
+}
+
+func (s proxyRouteState) ConcurrencyWaitable(targets []configdomain.RouteTarget, now time.Time, quotaMaxAge time.Duration) bool {
+	return s.proxy.concurrencyWaitable(targets, now, quotaMaxAge)
+}
+
+func (s proxyRouteState) WaitInflightSlot(targets []configdomain.RouteTarget, quotaMaxAge, max time.Duration, ctx context.Context) (bool, bool) {
+	return s.proxy.waitInflightSlot(targets, quotaMaxAge, max, ctx)
 }
 
 func (s proxyRouteState) QuotaFreshnessMaxAge(cfg *configdomain.Config) time.Duration {

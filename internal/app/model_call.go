@@ -92,8 +92,9 @@ func (x scheduledExchange) exchange(ctx context.Context, snap forward.Snapshot, 
 	if len(capable) == 0 {
 		if len(ordered) == 0 {
 			// Every target was skipped by the availability filter (circuit
-			// open / rate limited / model locked / quota exhausted): fail
-			// fast — the caller's fail-open path takes over.
+			// open / rate limited / model locked / quota exhausted / at its
+			// concurrency limit): fail fast — the caller's fail-open path
+			// takes over.
 			return exchangeResult{}, fmt.Errorf("adjudicate model %q: all %d route targets unavailable (cooldown)", model, len(targets))
 		}
 		return exchangeResult{}, fmt.Errorf("adjudicate model %q: no route target with an anthropic_base_url", model)
@@ -118,13 +119,28 @@ func (x scheduledExchange) exchange(ctx context.Context, snap forward.Snapshot, 
 		// finish within its attempt — while every remaining attempt keeps a
 		// reserve, so a hanging or degraded target cannot consume the whole
 		// call budget (the failure mode that used to starve the channel).
-		actx, cancel := sliceAttemptContext(ctx, attempts-i)
-		rep, err := probe.Do(actx, x.p.client, provCfg, impl, probe.Request{
-			BaseURL: provCfg.AnthropicBaseURL,
-			Path:    "/v1/messages",
-			Body:    targetBody,
-		})
-		cancel()
+		//
+		// The call is a real request against the account: it occupies one of
+		// the account's concurrency slots for exactly as long as the upstream
+		// has it, and its take-time level is the vantage point a 429 is
+		// classified from. A saturated account is skipped here like any other
+		// unavailable one (the schedule above already filters it; this is the
+		// dispatch-time backstop).
+		slot, free := x.p.takeInflight(t.Provider)
+		if !free {
+			lastErr = fmt.Errorf("adjudication call (%s): account at its concurrency limit", t.Provider)
+			continue
+		}
+		rep, err := func() (reply probe.Reply, err error) {
+			defer func() { x.p.releaseInflight(slot, err == nil && reply.Status < 300) }()
+			actx, cancel := sliceAttemptContext(ctx, attempts-i)
+			defer cancel()
+			return probe.Do(actx, x.p.client, provCfg, impl, probe.Request{
+				BaseURL: provCfg.AnthropicBaseURL,
+				Path:    "/v1/messages",
+				Body:    targetBody,
+			})
+		}()
 		// The outer budget expiring is the caller's cancel, not this leg's
 		// fault: record nothing and stop the chain (the client-cancel rule —
 		// a dead budget must not burn circuit ticks on the remaining targets
@@ -144,10 +160,18 @@ func (x scheduledExchange) exchange(ctx context.Context, snap forward.Snapshot, 
 		}
 		if rep.Status == http.StatusTooManyRequests {
 			// Same single classification entry as the executor and decisions
-			// legs (routing-and-failure.md). probe replies carry no response
-			// headers, so Retry-After cannot be honored — body reset hints
-			// and the scheduling defaults still apply.
-			decision := targetexec.ParseRateLimit(nil, rep.Body, time.Now(), snap.Cfg.Scheduling)
+			// legs (routing-and-failure.md), read from this call's own
+			// vantage point. probe replies carry no response headers, so
+			// Retry-After cannot be honored — body reset hints and the
+			// scheduling defaults still apply.
+			decision := targetexec.ParseRateLimitFor(nil, rep.Body, time.Now(), snap.Cfg.Scheduling, slot.Level)
+			if decision.Kind == targetexec.RateLimitConcurrency {
+				// A concurrency limit caps the account; it is not a time
+				// horizon to cool down for.
+				x.p.recordConcurrencyLimit(t.Provider, decision.ConcurrencyLimit, decision.ConcurrencyInflight, snap.Generation)
+				lastErr = fmt.Errorf("adjudication call (%s): status 429 (concurrency) — account capped", t.Provider)
+				continue
+			}
 			x.p.recordRateLimit(t.Provider, decision.Until,
 				runtimestate.ParseRateLimitKind(string(decision.Kind)), snap.Generation)
 			lastErr = fmt.Errorf("adjudication call (%s): status 429 (%s) — cooling until %s",

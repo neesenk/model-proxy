@@ -21,6 +21,16 @@ type HealthGate interface {
 	LearnParamBlock(provider, model, parameter string, generation uint64) bool
 	ApplyParamBlock(provider, model string, body []byte) []byte
 	NoteWireResponsesMiss(provider, model string)
+	// TakeInflight / ReleaseInflight are the account's in-flight ledger (see
+	// State). Not generation-bound on purpose: a running request is a fact
+	// about the process whatever generation captured it.
+	TakeInflight(provider string) (InflightSlot, bool)
+	ReleaseInflight(slot InflightSlot, succeeded bool) (raisedTo int, raised bool)
+	// RecordConcurrencyLimit reports the concurrency limit a 429 proved:
+	// limit as the upstream stated it (0 = unstated), inflight the other
+	// requests running at dispatch. Returns the cap now in force and whether
+	// this report moved it.
+	RecordConcurrencyLimit(provider string, limit, inflight int, generation uint64) (cap int, changed bool)
 }
 
 // GateState adapts a HealthGate to the executor State port, freezing the
@@ -75,4 +85,16 @@ func (state GateState) ApplyParamBlock(target configdomain.RouteTarget, body []b
 
 func (state GateState) NoteWireResponsesMiss(target configdomain.RouteTarget) {
 	state.Gate.NoteWireResponsesMiss(target.Provider, target.Model)
+}
+
+func (state GateState) TakeInflight(provider string) (InflightSlot, bool) {
+	return state.Gate.TakeInflight(provider)
+}
+
+func (state GateState) ReleaseInflight(slot InflightSlot, succeeded bool) (int, bool) {
+	return state.Gate.ReleaseInflight(slot, succeeded)
+}
+
+func (state GateState) RecordConcurrencyLimit(provider string, decision RateLimitDecision) (int, bool) {
+	return state.Gate.RecordConcurrencyLimit(provider, decision.ConcurrencyLimit, decision.ConcurrencyInflight, state.Runtime.Generation)
 }

@@ -53,6 +53,31 @@ type State interface {
 	LearnParamBlock(configdomain.RouteTarget, string) bool
 	ApplyParamBlock(configdomain.RouteTarget, []byte) []byte
 	NoteWireResponsesMiss(configdomain.RouteTarget)
+	// TakeInflight registers this request against the account and reports
+	// whether it may be dispatched under the account's learned concurrency
+	// limit. The slot is taken either way — a caller that dispatches
+	// regardless (a pin is a hard choice) really is running against the
+	// account — and is released exactly once with ReleaseInflight.
+	TakeInflight(provider string) (InflightSlot, bool)
+	// ReleaseInflight returns a slot TakeInflight handed out. succeeded says
+	// the upstream served the request (a 2xx): only such a request can
+	// advance an inferred cap's probe-up streak, and raised reports that this
+	// release did.
+	ReleaseInflight(slot InflightSlot, succeeded bool) (raisedTo int, raised bool)
+	// RecordConcurrencyLimit reports the concurrency limit a 429 proved
+	// (RateLimitDecision's concurrency fields) and returns the cap in force
+	// afterwards, changed when this report moved it. It replaces
+	// RecordRateLimit for a RateLimitConcurrency decision: that limit has no
+	// time horizon to cool down for.
+	RecordConcurrencyLimit(provider string, decision RateLimitDecision) (cap int, changed bool)
+}
+
+// InflightSlot identifies one request's occupancy of an account from dispatch
+// to completion. Level is how many OTHER requests the account was already
+// running when the slot was taken — the request's vantage point on the cap.
+type InflightSlot struct {
+	Provider string
+	Level    int
 }
 
 // AttemptDTO is the stable, leaf-owned description passed to optional effects.
@@ -116,6 +141,28 @@ func (executor Executor) Execute(attempt Attempt) Result {
 	now := time.Now()
 	if executor.State != nil && !policy.Force && executor.State.ModelLocked(target, now) {
 		return Result{Outcome: OutcomeSkipped, SkipReason: "model locked", AttemptBody: []byte("skipped before dispatch: model locked (earlier zero-byte 200)")}
+	}
+	// Occupancy: from here until Execute returns — stream finished, failed or
+	// the client left — this is one of the account's in-flight requests. The
+	// deferred release runs on every exit path, a panic included; a leaked
+	// slot would read as permanent saturation. The gate sits before the
+	// half-open one, so a refused request never takes a probe slot it would
+	// have to give back. Before this gate the request was simply sent, the
+	// upstream answered 429, and the account was benched for a whole
+	// transient cooldown although its slots were freeing within seconds.
+	var slot InflightSlot
+	succeeded := false
+	if executor.State != nil {
+		var free bool
+		slot, free = executor.State.TakeInflight(target.Provider)
+		defer func() {
+			if raisedTo, raised := executor.State.ReleaseInflight(slot, succeeded); raised {
+				logx.Infof("[proto=%s provider=%s] concurrency cap raised to %d — full-occupancy successes probe upward", plan.ClientProtocol(), target.Provider, raisedTo)
+			}
+		}()
+		if !free && !policy.Force {
+			return Result{Outcome: OutcomeSkipped, SkipReason: "concurrency saturated", AttemptBody: []byte("skipped before dispatch: concurrency saturated (learned limit reached)")}
+		}
 	}
 	if executor.State != nil && !policy.Force && !executor.State.TakeHalfOpenSlot(target.Provider) {
 		return Result{Outcome: OutcomeSkipped, SkipReason: "circuit open (no half-open probe slot)", AttemptBody: []byte("skipped before dispatch: circuit open (no half-open probe slot)")}
@@ -230,13 +277,9 @@ func (executor Executor) Execute(attempt Attempt) Result {
 		if response.StatusCode == http.StatusTooManyRequests {
 			peek := peekResponseBody(response, 8<<10)
 			response.Body.Close()
-			decision := ParseRateLimit(response, peek, time.Now(), runtime.Scheduling)
+			decision := ParseRateLimitFor(response, peek, time.Now(), runtime.Scheduling, slot.Level)
 			if executor.State != nil {
-				executor.State.RecordRateLimit(target.Provider, decision)
-				if decision.Kind != "" && decision.Kind != RateLimitTransient {
-					logx.Infof("[proto=%s provider=%s] 429 classified %s — skipped until %s",
-						plan.ClientProtocol(), target.Provider, decision.Kind, decision.Until.Format(time.RFC3339))
-				}
+				executor.noteRateLimit(plan, target, decision)
 			}
 			executor.rateLimited(target)
 			return Result{Outcome: OutcomeRateLimited, AttemptStatus: response.StatusCode, AttemptBody: peek}
@@ -431,6 +474,9 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			}
 		}
 		if response.StatusCode < 300 {
+			// A 2xx is the upstream admitting the request under the load it
+			// saw: for the concurrency cap this release counts as a success.
+			succeeded = true
 			if executor.State != nil {
 				executor.State.RecordSuccess(target)
 			}
@@ -971,6 +1017,32 @@ func fakeAPIReplyBody(status int, peek []byte) []byte {
 		title = "html document"
 	}
 	return []byte(fmt.Sprintf("upstream answered %d with an HTML page: %s", status, title))
+}
+
+// noteRateLimit hands a 429's classification to the state port. A concurrency
+// limit updates the account's cap instead of starting a cooldown, and the
+// move is named in serve.log when it changed something — an unchanged cap is
+// the steady state under load and stays quiet.
+func (executor Executor) noteRateLimit(plan Plan, target configdomain.RouteTarget, decision RateLimitDecision) {
+	if decision.Kind == RateLimitConcurrency {
+		cap, changed := executor.State.RecordConcurrencyLimit(target.Provider, decision)
+		if !changed {
+			return
+		}
+		if decision.ConcurrencyLimit > 0 {
+			logx.Infof("[proto=%s provider=%s] 429 states a concurrency limit of %d — dispatch capped",
+				plan.ClientProtocol(), target.Provider, decision.ConcurrencyLimit)
+			return
+		}
+		logx.Infof("[proto=%s provider=%s] 429 with %d other request(s) in flight — concurrency cap lowered to %d",
+			plan.ClientProtocol(), target.Provider, decision.ConcurrencyInflight, cap)
+		return
+	}
+	executor.State.RecordRateLimit(target.Provider, decision)
+	if decision.Kind != "" && decision.Kind != RateLimitTransient {
+		logx.Infof("[proto=%s provider=%s] 429 classified %s — skipped until %s",
+			plan.ClientProtocol(), target.Provider, decision.Kind, decision.Until.Format(time.RFC3339))
+	}
 }
 
 func (executor Executor) rateLimited(target configdomain.RouteTarget) {

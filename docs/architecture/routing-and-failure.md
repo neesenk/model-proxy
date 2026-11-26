@@ -228,7 +228,7 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   落盘（全链失败的请求仍可 replay）；attempt 序号排在最后一跳之后；
   `latency_ms` 自首轮派发起算（跨全部 pass 与冷却等待）；不携带 usage。该请求的
   所有腿折入这一行，所以 `attempt_only` 独立成行的只剩未应答请求（终态写出前 client 断开，
-  live 事件 499）；client 断开与「无目标可试的转换错误 400」不落终态行。运行日志侧，forward 的 failover 警告行同源携带该跳状态：`[proto=… model=…] target N (<provider>/<model>) failed (status <code>); trying next`——传输层错误带 502 且其专属的 `upstream error:` 行就在上方，零字节 2xx、模型拒答与 403/订阅失效归因腿带观测到的真实状态；**派发前门禁拒绝**（model lock / 熔断开路）打 `skipped (<reason>); trying next`（`OutcomeSkipped`：无网络接触、无熔断计数，attempt 行以 502 + 原因文本落档），serve.log 单文件即可回答"这一跳为何失败/为何没派发"，无需 join 索引。存储语义之外的**查询折叠**：`/api/requests` 列表把已配对腿折入其已提交行的 `failed_hops`（未应答请求的最新一腿独立成行），status/errors 过滤看存活行终态、facets 排除腿——索引与扫描两路逐字段一致（见 `docs/web-api.md`）。
+  live 事件 499）；client 断开与「无目标可试的转换错误 400」不落终态行。运行日志侧，forward 的 failover 警告行同源携带该跳状态：`[proto=… model=…] target N (<provider>/<model>) failed (status <code>); trying next`——传输层错误带 502 且其专属的 `upstream error:` 行就在上方，零字节 2xx、模型拒答与 403/订阅失效归因腿带观测到的真实状态；**派发前门禁拒绝**（model lock / 熔断开路 / 并发饱和）打 `skipped (<reason>); trying next`（`OutcomeSkipped`：无网络接触、无熔断计数，attempt 行以 502 + 原因文本落档），serve.log 单文件即可回答"这一跳为何失败/为何没派发"，无需 join 索引。存储语义之外的**查询折叠**：`/api/requests` 列表把已配对腿折入其已提交行的 `failed_hops`（未应答请求的最新一腿独立成行），status/errors 过滤看存活行终态、facets 排除腿——索引与扫描两路逐字段一致（见 `docs/web-api.md`）。
 - **绑定粒度 (会话, 路由)**：sticky 键是 `runtime.StickyKey(sessionKey, exposed)`
   ——一个会话在每个路由上持有**独立绑定**（同会话换模型 = 新绑定，不把旧路由选中的
   账号拖带到新路由，与 latchKey/repeat_turn 同粒度；Bifrost「绑定按请求的 model
@@ -289,6 +289,7 @@ Claude Code server-side thread、Responses 加密 reasoning 项（`rs_*`）这�
 | `transient` | 请求速率或短期 token rate | `rate_limit_backoff`，默认 60s |
 | `quota` | 账号余额、套餐或总配额耗尽 | `quota_cooldown`，默认 1h |
 | `daily` | 当日配额耗尽 | 本地时间下一日 00:00 |
+| `concurrency` | 账号的同时在途请求上限已满（step-plan `concurrency reached, current: 11, limit: 10`；zcode code 1302） | 不冷却——空位在一个请求完成时释放，没有时间 horizon；约束是「上限 + 在途数」（见「并发上限（在途门禁）」） |
 
 冷却时间采用顺序：
 
@@ -296,23 +297,87 @@ Claude Code server-side thread、Responses 加密 reasoning 项（`rs_*`）这�
 2. `Retry-After`；
 3. 分类默认值。
 
+没有配额/日限证据的 429 再按并发证据细分，优先级从高到低：
+
+1. 上游明说并发上限（body 的 `concurrency … limit N`）→ `concurrency`，上限取 N；
+2. body 带重置提示，或响应带可用的 `Retry-After` → 该 horizon 照旧：给自己标注了日期的限制是
+   时间窗，与当时还有多少在途无关；
+3. 派发时该账号另有在途请求 → `concurrency`，按在途数推断上限；
+4. 账号上只有它自己 → `transient`：没有同伴的 429 是限速、套餐窗口或别的消费者，不是并发。
+
 body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`（`days?|d|hours?|minutes?|seconds?` 等单位）、reset/retry 关键词邻近的 RFC3339，以及中文
 `N 秒/分钟/小时/天 后重试/重置/再试`（`cnResetHintRe`，`个` 可选插入、动词词族收尾——GLM/Qwen/Kimi
 的 429/配额 body 实测形态；无数字的「请稍后重试」仍非 hint）。上限 7 天；duration 在乘法前必须 clamp，防止溢出。
 
 非 429 状态码携带配额耗尽证据时走同一分类器：`targetexec.ParseQuotaDenied`（body 命中 quota/daily 措辞即采纳，否则返回 false 保持通用 4xx 路径）复用 `ParseRateLimit` 的 kind/horizon 计算，executor 对 403 调用它并记 `RecordRateLimit` + failover（kimi-code 把 5 小时套餐窗口耗尽答成 403 "You've reached your 5-hour usage limit"，此前它落入普通 4xx commit：不冷却、不 failover，路由继续把流量派进已耗尽的账号）。
 
-分类与 horizon 只由 `internal/targetexec.ParseRateLimit` 计算；普通
-`targetexec.Executor`、decisions selector leg 与 guard 判定的调度 seam
-（`internal/app/model_call.go`）必须调用同一入口，再把预计算的
-`RateLimitDecision` 交给 runtime adapter。根包不得恢复 `classify429`、
-`parseResetHint`、`hintDuration` 或 `parseRateLimit` 副本。
+分类与 horizon 只由 `internal/targetexec.ParseRateLimitFor` 计算（`ParseRateLimit` 是它
+不带在途视角的委托，只供没有在途信息的调用方与测试使用）。三个生产调用点——普通
+`targetexec.Executor`、decisions selector leg（`internal/forward/decisions.go`）与 guard 判定的
+调度 seam（`internal/app/model_call.go`）——各自恰好调用一次 `ParseRateLimitFor` 并传入自己
+占位时的在途数：丢掉在途视角就丢掉了推断未明说上限的唯一证据
+（`internal/archtest` 的 `TestRateLimitPolicyArchitecture` 钉住）。三处都把预计算的
+`RateLimitDecision` 交给 runtime adapter（并发型交给 `RecordConcurrencyLimit`，其余交给
+`RecordRateLimit`）。根包不得恢复 `classify429`、`parseResetHint`、`hintDuration`、
+`parseConcurrencyLimit`、`hasTimeHint`、`parseTimedRateLimit` 或 `parseRateLimit` 副本。
 
 同一 provider 收到多个 429 时，只采用更晚的 horizon；`rateLimitKind` 必须跟随胜出的 horizon，短冷却不能覆盖既有长冷却的 kind。
 
 ### 冷却被配额测量推翻
 
-429 冷却是预算恢复时间的**预测**（reset hint / Retry-After / 分类默认），周期配额 poll 是**测量**；测量与预测矛盾时预测必须让位。`Manager.QuotaRecoveredClearCooldown`（由周期 `PollAll` 与手动 `PollOne`（Web UI 的 Refresh usage）提交快照后调用）：快照满足正面预算证据（`Err` 为空、`BillingPlan`、在新鲜度窗口内、**每个**窗口 `RemainingPct > 0`）时，清除该 provider 的 `rateLimitedUntil`（任意 kind——zhipu 的 429 文案「并发限制/余额不足」无法可靠分类，实际配额耗尽也会归为 transient；transient 默认 backoff 很短，真 RPS 限速被清后代价只是一次重新学习的 429）。不碰 `frozen`（operator 冻结）与 `circuitOpenUntil`（失败计数熔断）——它们是与预算无关的独立信号。缺失证明不是恢复证明：stale/errored/非 plan 快照一律不清。429 触发的 `RefreshOne` **不**参与清除，避免 RPS 限速与配额刷新互搏。
+429 冷却是预算恢复时间的**预测**（reset hint / Retry-After / 分类默认），周期配额 poll 是**测量**；测量与预测矛盾时预测必须让位。`Manager.QuotaRecoveredClearCooldown`（由周期 `PollAll` 与手动 `PollOne`（Web UI 的 Refresh usage）提交快照后调用）：快照满足正面预算证据（`Err` 为空、`BillingPlan`、在新鲜度窗口内、**每个**窗口 `RemainingPct > 0`）时，清除该 provider 的 `rateLimitedUntil`（任意 kind——zhipu 的 429 文案「并发限制/余额不足」无法可靠分类，实际配额耗尽也会归为 transient（有同伴在途时会被当成并发证据，见「并发上限（在途门禁）」）；transient 默认 backoff 很短，真 RPS 限速被清后代价只是一次重新学习的 429）。不碰 `frozen`（operator 冻结）与 `circuitOpenUntil`（失败计数熔断）——它们是与预算无关的独立信号。缺失证明不是恢复证明：stale/errored/非 plan 快照一律不清。429 触发的 `RefreshOne` **不**参与清除，避免 RPS 限速与配额刷新互搏。
+
+## 并发上限（在途门禁）
+
+账号的同时在途请求数由 `runtime.Manager` 记账（`manager_concurrency.go`）：执行器在派发前
+`TakeInflightSlot` 占位，`Execute` 返回时由 defer `ReleaseInflightSlot` 释放——流结束、失败、
+客户端离开，panic 也算。一次 `Execute` 算一个在途，其内部的 401 刷新、参数改写重试不重复占位。不经执行器的两处
+上游调用同样记账：decisions selector leg 从取位到返回占一个位（占不到即腿不可用、请求按
+调度顺序落地），guard 判定 exchange 每次尝试在请求停留于上游期间占一个位（账号饱和则跳过
+该尝试）。占位不按 generation 门控：在途是进程事实，不管请求捕获的是哪一代。
+
+**饱和 = 上限已知且在途数已达上限**，按可用性状态处理：
+
+- 调度器（`DecideOrder` 的 `targetAvailable`、`TargetHealthy`、`HasRecoveredUntried`）把饱和账号
+  当作不可用——与限频、熔断走同一处过滤，请求不耗一次上游往返；
+- 执行器在半开探针门禁之前原子占位，占不到即 `OutcomeSkipped`
+  （`skipped (concurrency saturated); trying next`，attempt 行以合成 502 + 原因落档）——
+  这是调度与派发之间被别的请求占满的兜底；
+- pin / force 是硬选择：照常派发，不等待、不改道，但仍占位（调度器里 pin 本来就绕过可用性
+  过滤）；`x-mp-force-provider`（replay）与它「不绕过熔断」一致，不绕过本门禁；
+- MCP 网关选账号（`AccountHealthy`）不看并发饱和：工具调用是另一份上游预算。
+
+**上限怎么来**（`NoteConcurrencyLimit`；任何并发型 429 都清零上调 streak）：
+
+| 证据 | 效果 |
+|---|---|
+| 上游明说 `limit: N` | 上限 = N 且 `stated`：这是事实，只被另一句不同的明说更正，推断既不下调也不上调 |
+| 未明说，派发时该账号另有 K（≥1）个在途 | 推断上限降到 K（只降不升） |
+| 未明说，派发时没有其他在途 | 不是并发证据，沿用 transient 冷却 |
+
+推断出的上限会被持续**往上探**：连续 20 次「满载成功」（该请求占位时账号已有 ≥ 上限−1 个在途）
+后上限 +1；低占用时的成功既不计入也不打断；任何失败或并发型 429 清零 streak；上限封顶 64。
+并发型 429 **不**记时间冷却（账号已有的更长冷却保持不变）。依据是 11-22 起的请求日志：
+step-plan 两个账号的 429 率在在途数达到文案上限时从 0–2% 跳到 40–44%；zcode（1302，无数字）
+的 429 率随在途数平滑上升（4→3%、5→10%、6→20%、9→45%），推断上限会稳定在 5–6。
+
+**全部候选饱和**：`ConcurrencyWaitable` 报告「至少一个目标仅因并发占满而不可用」时，
+`routing.DecideFailure` 返回带 `WaitForSlot` 的 `FailureWait`——forward 等空位
+（`WaitInflightSlot`：任一目标有请求完成即唤醒，单轮上限 `retry_wait`，轮次预算与冷却等待
+共享的 ≤2 轮），期间客户端断开按 499 收尾；预算用尽仍饱和则 429 + `Retry-After: 1`
+（不是 `rate_limit_backoff`：空位在一个请求的生命周期内就会腾出）。`retry_wait: "0"` 同样
+关闭该等待。
+
+**生命周期**：在途计数跨 reload 保留；`ReplaceGeneration` 按存活账号剪枝（存活账号保留上限与
+在途请求，被移除账号的在途请求释放时落到空处）；`unfreeze` / `POST /api/health/reset` 清除学到
+的上限（明说与推断都清）但不动在途计数；不持久化，重启后由第一个并发型 429 重新学。
+
+运行日志：学上限只在值变化时打一行——`429 states a concurrency limit of N — dispatch capped`
+或 `429 with K other request(s) in flight — concurrency cap lowered to K`——上调一行
+`concurrency cap raised to N — full-occupancy successes probe upward`，等待一行
+`every target is at its concurrency limit — waiting up to <retry_wait> for a slot`。
+每个账号的在途数与上限经 `/api/status` 的 health 条目暴露（`inflight`、`concurrency_cap`、
+`concurrency_cap_stated`，见 `docs/web-api.md`）。
 
 ## 模型级失败
 
@@ -415,7 +480,8 @@ failover），带证据的 403/400 另按配额、模型拒绝或账号归因（
 
 `retry_wait` 默认 10s，`"0"` 关闭。`forward` 通过可重入的 `serveOnce` 执行完整调度和 failover：
 
-- 仅当全部实际候选目标都处于冷却且最早恢复时间不超过预算时等待；
+- 仅当全部实际候选目标都处于冷却且最早恢复时间不超过预算时等待；全部候选都在并发上限上
+  时等的是空位而非 horizon（事件驱动，见「并发上限（在途门禁）」）；
 - 最多整体重试两次；
 - 重试轮共享首轮的 per-request 缓存：请求画像（rawProfile）与 route_policy selector 的
   decisions 结果都按「每请求至多计算一次」缓存在 `serveState`，后续轮复用而非重新付费
@@ -442,6 +508,10 @@ failover），带证据的 403/400 另按配额、模型拒绝或账号归因（
 ## 回归测试
 
 - half-open 的成功、5xx、429、普通 4xx 生命周期。
+- 并发上限（在途门禁）：账本、门禁与两个 seam 见 `docs/engineering/testing.md` 的对应行与
+  `docs/decisions/intentional-behaviors.md` 决策 53；分类入口的唯一性由 `internal/archtest` 的
+  `TestRateLimitPolicyArchitecture` 钉住（三个生产调用点各恰好一次 `ParseRateLimitFor`，组合根
+  不得有解析副本）。
 - 2xx-HTML 伪成功：两臂判定、502 语义 failover+熔断、标题进诊断、真实 JSON 提交不受
   peek 影响、流式请求不做 body peek（keepalive 契约）。
 - 内容性拒绝 5xx：failover 但零冷却记账（熔断/失败指标/releases 各就各位）、普通 5xx 仍记账。

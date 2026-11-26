@@ -134,6 +134,21 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 		return fail(fmt.Errorf("provider %s not available", m.Provider))
 	}
 	gate := p.svc.NewHealthGate(in.Runtime)
+	// The leg is a real request against the account: it occupies one of the
+	// account's concurrency slots while it runs — the same ledger the
+	// executor's attempts are counted in — and is refused when the account is
+	// saturated. Its take-time level is the vantage point the 429
+	// classification below is read from.
+	slot, free := gate.TakeInflight(m.Provider)
+	succeeded := false
+	defer func() {
+		if raisedTo, raised := gate.ReleaseInflight(slot, succeeded); raised {
+			logx.Infof("[%s provider=%s] concurrency cap raised to %d — full-occupancy successes probe upward", in.Kind, m.Provider, raisedTo)
+		}
+	}()
+	if !free {
+		return fail(fmt.Errorf("%w: concurrency saturated on %s", errDecisionLegUnavailable, m.Provider))
+	}
 	if !gate.TakeHalfOpenSlot(m.Provider, in.Runtime.Generation) {
 		return fail(errDecisionLegUnavailable)
 	}
@@ -187,14 +202,24 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 	upstreamReq := exchange.Request
 	resp := exchange.Response
 	sentBody := exchange.SentBody
+	// A 2xx is the upstream admitting the request: for the concurrency cap
+	// this release counts as a success.
+	succeeded = resp.StatusCode < 300
 	switch {
 	case resp.StatusCode == 429:
 		peek := respBody
 		if len(peek) > 8<<10 {
 			peek = peek[:8<<10]
 		}
-		decision := targetexec.ParseRateLimit(resp, peek, time.Now(), sched)
-		gate.RecordRateLimit(m.Provider, decision.Until, string(decision.Kind), in.Runtime.Generation)
+		decision := targetexec.ParseRateLimitFor(resp, peek, time.Now(), sched, slot.Level)
+		if decision.Kind == targetexec.RateLimitConcurrency {
+			// Same rule and the same vantage point as the executor's: a
+			// concurrency limit caps the account; it is not a time horizon
+			// to cool down for.
+			gate.RecordConcurrencyLimit(m.Provider, decision.ConcurrencyLimit, decision.ConcurrencyInflight, in.Runtime.Generation)
+		} else {
+			gate.RecordRateLimit(m.Provider, decision.Until, string(decision.Kind), in.Runtime.Generation)
+		}
 		p.incProviderMetric(m.Provider, m.Model, counters.EvRateLimited429)
 		out.Err = errDecisionLegUnavailable
 	case resp.StatusCode >= 500:
