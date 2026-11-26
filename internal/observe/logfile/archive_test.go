@@ -727,3 +727,52 @@ func TestDispatchArchiveReapsOrphanTmp(t *testing.T) {
 		t.Fatalf("foreign-prefix tmp is none of this stream's business: %v", err)
 	}
 }
+
+// TestDispatchArchiveReapsTmpsWithArchivingDisabled: the tmp sweep is garbage
+// collection, not archiving. A crash can leave a .zst.tmp behind while
+// archiving is on; once archiving is off (hot_retention "0") no archive
+// worker exists in the process, so every tmp of this stream is a leftover —
+// and nothing else ever touches it (sweep, disk guard and prune all pass
+// .zst.tmp over). With archiving disabled the pass reaps them all, keeps the
+// plain files plain and offers nothing.
+func TestDispatchArchiveReapsTmpsWithArchivingDisabled(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	write := func(name string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	source := write("requests-20260101.log")             // a tmp's source: no worker will ever finish it
+	withSource := write("requests-20260101.log.zst.tmp") //
+	orphan := write("requests-20260102.log.zst.tmp")
+	cold := write("requests-20260103.log") // long past any hot window
+	if err := os.Chtimes(cold, now.Add(-48*time.Hour), now.Add(-48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "other-20260101.log.zst.tmp"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := New(Options{Directory: dir, FilePrefix: "requests-", HotRetention: 0})
+	l.dispatchArchive(now, filepath.Join(dir, "requests-20261122.log"))
+	for name, p := range map[string]string{"orphan tmp": orphan, "tmp with source present": withSource} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s must be reaped with archiving disabled: %v", name, err)
+		}
+	}
+	for name, p := range map[string]string{"plain source file": source, "cold plain file": cold} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s must stay with archiving disabled: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "other-20260101.log.zst.tmp")); err != nil {
+		t.Fatalf("foreign-prefix tmp is none of this stream's business: %v", err)
+	}
+	select {
+	case p := <-l.archive:
+		t.Fatalf("dispatched %s with archiving disabled", p)
+	default:
+	}
+}

@@ -126,27 +126,40 @@ func compressZstd(src, tmp string) error {
 // next sweep. It runs on the writer goroutine AFTER the retention sweep, so
 // files already past total retention are deleted rather than compressed.
 // The active file and non-.log entries are never offered.
+//
+// The tmp sweep is garbage collection, not archiving: it runs with or without
+// a hot window. A tmp left by a crash while archiving was on has no other
+// owner once archiving is off — sweep, disk guard and prune all pass .zst.tmp
+// over — so this pass is its only way off the disk.
 func (l *Logger) dispatchArchive(now time.Time, activePath string) {
-	if l.opts.HotRetention <= 0 {
-		return
-	}
-	cutoff := now.Add(-l.opts.HotRetention)
+	archiving := l.opts.HotRetention > 0
 	entries, err := os.ReadDir(l.opts.Directory)
 	if err != nil {
 		logx.Warnf("[%s] archive readdir %s: %v", l.opts.Tag, l.opts.Directory, err)
 		return
 	}
+	var cutoff time.Time
+	if archiving {
+		cutoff = now.Add(-l.opts.HotRetention)
+	}
 	for _, entry := range entries {
 		name := entry.Name()
-		// Reap leftover tmp archives whose source .log is already gone —
-		// garbage from a dead run (crash mid-write or mid-rename). A tmp
-		// with its source present belongs to a live or retryable
-		// compression (the next attempt O_TRUNCs it) and stays.
+		// Reap leftover tmp archives — garbage from a dead run (crash
+		// mid-write or mid-rename). While archiving is on, a tmp with its
+		// source present belongs to a live or retryable compression (the
+		// next attempt O_TRUNCs it) and stays; with archiving off no worker
+		// exists, so every tmp of this stream is a leftover.
 		if strings.HasPrefix(name, l.opts.FilePrefix) && strings.HasSuffix(name, zstdTmpSuffix) {
-			srcName := strings.TrimSuffix(strings.TrimSuffix(name, ".tmp"), zstdSuffix)
-			if _, statErr := os.Stat(filepath.Join(l.opts.Directory, srcName)); os.IsNotExist(statErr) {
-				_ = os.Remove(filepath.Join(l.opts.Directory, name))
+			if archiving {
+				srcName := strings.TrimSuffix(strings.TrimSuffix(name, ".tmp"), zstdSuffix)
+				if _, statErr := os.Stat(filepath.Join(l.opts.Directory, srcName)); !os.IsNotExist(statErr) {
+					continue
+				}
 			}
+			_ = os.Remove(filepath.Join(l.opts.Directory, name))
+			continue
+		}
+		if !archiving {
 			continue
 		}
 		if entry.IsDir() || !isLogFile(name, l.opts.FilePrefix) {

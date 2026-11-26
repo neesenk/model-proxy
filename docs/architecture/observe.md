@@ -128,8 +128,9 @@ goroutine——压缩耗时不得阻塞写路径；owner/stop/wait/final flush �
 运行日志：启用热窗时启动行 `[request_log] enabled -> …` 末尾带 `, hot window <时长> (older rotated
 files zstd-archived, offline-only)`；归档队列满打 `[request_log] archive queue full; <文件> retried next
 sweep`，压缩或改名失败打 `[request_log] archive <文件> failed (kept plain; retried next sweep): <原因>`；
-源文件先被 retention/护栏删走时静默跳过、不打行。残留 tmp 的回收在每拍的派发步里，派发步只在归档
-开启时运行——`hot_retention: "0"` 下残留的 `.zst.tmp` 不会被回收（三处可删集合也都不含它）。
+源文件先被 retention/护栏删走时静默跳过、不打行。残留 tmp 的回收在每拍的派发步里，不依赖归档
+是否开启：归档开启时只清源 `.log` 已消失的孤儿；`hot_retention: "0"` 下进程内没有压缩 worker，
+本流的 `.zst.tmp` 一律视为残留清掉（三处可删集合都不含它，这一步是它们唯一的出口）。
 **流应答聚合落盘**（`request_log.aggregate_streams`，默认关、restart-only）：流式应答每输出 token 约 100 字节
 chunk 信封（2026-11-12 峰值日 94.5GB 请求日志里约 80% 是响应流），开启后已完成的应答以聚合后的 JSON
 响应落盘、记录带 `response_aggregated:true`，`response_size`/`response_headers` 仍描述线上字节，客户端字节
