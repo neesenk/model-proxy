@@ -120,3 +120,29 @@ func TestConvertRequestMediaDegradedDiagnosticAndStrict(t *testing.T) {
 	}
 	_ = clean
 }
+
+// A hosted anthropic tool (computer use, bash, text editor, …) that the tool
+// converters drop reports the structured diagnostic server_tool_dropped on
+// BOTH cross-protocol targets — the same code a→chat collects goes into the
+// request log for a→responses too. The capability scanner fail-closes such
+// tools at the conversion entry for every direction; the converters are the
+// second line behind it, and a second line that only logs on one target is
+// how the pair drifts.
+func TestAnthropicServerToolDropReportsTheSameDiagnosticInEveryDirection(t *testing.T) {
+	tools := []any{
+		map[string]any{"type": "bash_20250124", "name": "bash"},
+		map[string]any{"name": "lookup", "input_schema": map[string]any{"type": "object"}},
+	}
+	chatDiag, responsesDiag := NewDiagnostics(), NewDiagnostics()
+	if got := anthropicToolsToOpenAI(tools, chatDiag); len(got) != 1 {
+		t.Fatalf("chat tools = %v, want only the function tool", got)
+	}
+	if got := anthropicToolsToResponses(tools, responsesDiag); len(got) != 1 {
+		t.Fatalf("responses tools = %v, want only the function tool", got)
+	}
+	for target, diag := range map[string]*Diagnostics{"a→chat": chatDiag, "a→responses": responsesDiag} {
+		if !diag.HasCode("server_tool_dropped") {
+			t.Errorf("%s: server_tool_dropped missing, diagnostics = %+v", target, diag.Items())
+		}
+	}
+}

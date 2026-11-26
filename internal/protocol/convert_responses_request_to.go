@@ -268,7 +268,7 @@ func anthropicToolsToResponses(tools []any, d *Diagnostics) []map[string]any {
 				out = append(out, rt)
 				continue
 			}
-			convertWarn("dropping server-side anthropic tool type: " + bt)
+			warnDiag(d, "server_tool_dropped", "dropping server-side anthropic tool type: "+bt)
 			continue
 		}
 		name := strOpt(tm["name"])
