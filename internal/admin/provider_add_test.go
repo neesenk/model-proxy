@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,10 +20,17 @@ import (
 // HTTP-upstream fake for the account-validation and models-preview paths.
 func newAddProviderHarness(t *testing.T, upstream *httptest.Server) (*Service, *reloadSpy, string) {
 	t.Helper()
+	return newProviderHarnessYAML(t, "listen: 127.0.0.1:8080\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: "+upstream.URL+", models: [glm-4.6]}\n")
+}
+
+// newProviderHarnessYAML is newAddProviderHarness over a caller-supplied
+// config.yaml (routes, route_policy …).
+func newProviderHarnessYAML(t *testing.T, configYAML string) (*Service, *reloadSpy, string) {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home) // the account store rides the process HOME seam
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte("listen: 127.0.0.1:8080\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: "+upstream.URL+", models: [glm-4.6]}\n"), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(configYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	spy := &reloadSpy{}
@@ -254,4 +262,192 @@ func maskSecrets(s string) string {
 		return s[:20] + "…" + "(masked)"
 	}
 	return "(masked)"
+}
+
+// TestDeleteProviderZeroAccounts: a provider with no accounts leaves the
+// store (the yaml-defined fixture is absorbed and stripped in the same
+// mutation), the daemon reloads, and the account projection no longer lists
+// it — the Accounts sidebar and Status page read that same effective set.
+func TestDeleteProviderZeroAccounts(t *testing.T) {
+	up := addProviderUpstream(t)
+	service, spy, cfgPath := newAddProviderHarness(t, up)
+	// Deleting the only provider is refused by the effective-config validation
+	// (a daemon needs at least one provider) and leaves everything intact.
+	if _, err := service.DeleteProvider(context.Background(), "zhipu"); err == nil || !strings.Contains(err.Error(), "no providers configured") {
+		t.Fatalf("last-provider delete err = %v, want the validation refusal", err)
+	}
+	if _, ok := service.ports.ProviderConfig("zhipu"); !ok {
+		t.Fatal("refused delete must keep the provider")
+	}
+	if _, err := service.AddProvider(context.Background(), appapi.ProviderAddRequest{
+		Name: "acme", OpenAIBaseURL: up.URL + "/v1", Models: []string{"acme-m1"},
+	}); err != nil {
+		t.Fatalf("AddProvider: %v", err)
+	}
+	reloads := len(spy.calls)
+
+	result, err := service.DeleteProvider(context.Background(), "zhipu")
+	if err != nil {
+		t.Fatalf("DeleteProvider: %v", err)
+	}
+	if result.Warning != "" {
+		t.Fatalf("warning = %q, want none", result.Warning)
+	}
+	if _, ok := readProviderStore(t, service)["zhipu"]; ok {
+		t.Fatal("deleted provider must leave the store")
+	}
+	if body := readTestFile(t, cfgPath); strings.Contains(body, "zhipu") {
+		t.Fatalf("yaml providers section must be stripped, not left to resurrect the entry:\n%s", body)
+	}
+	if _, ok := service.ports.ProviderConfig("zhipu"); ok {
+		t.Fatal("effective provider set still resolves the deleted provider")
+	}
+	if len(spy.calls) != reloads+1 {
+		t.Fatalf("reload calls = %v, want exactly one for the delete", spy.calls[reloads:])
+	}
+}
+
+// TestDeleteProviderRejections: a provider that still owns an account is a
+// 409 (the credential must never be orphaned by a stale UI), an unknown name
+// is a 404, and neither touches the store or reloads.
+func TestDeleteProviderRejections(t *testing.T) {
+	up := addProviderUpstream(t)
+	service, spy, _ := newAddProviderHarness(t, up)
+	if _, err := service.AddProvider(context.Background(), appapi.ProviderAddRequest{
+		Name:          "acme",
+		OpenAIBaseURL: up.URL + "/v1",
+		UsageURL:      up.URL + "/v1/usage",
+		Token:         "sk-acme-test-key-123456",
+		Models:        []string{"acme-m1"},
+	}); err != nil {
+		t.Fatalf("AddProvider: %v", err)
+	}
+	reloads := len(spy.calls)
+
+	_, err := service.DeleteProvider(context.Background(), "acme")
+	if status := httpErrorStatus(t, err); status != http.StatusConflict {
+		t.Fatalf("delete with accounts status = %d, want 409 (err=%v)", status, err)
+	}
+	if !strings.Contains(err.Error(), "1 account(s)") {
+		t.Fatalf("conflict message = %q, want the account count", err.Error())
+	}
+	if _, ok := readProviderStore(t, service)["acme"]; !ok {
+		t.Fatal("rejected delete must keep the provider")
+	}
+
+	_, err = service.DeleteProvider(context.Background(), "no-such")
+	if status := httpErrorStatus(t, err); status != http.StatusNotFound {
+		t.Fatalf("unknown provider status = %d, want 404 (err=%v)", status, err)
+	}
+	_, err = service.DeleteProvider(context.Background(), "  ")
+	if status := httpErrorStatus(t, err); status != http.StatusBadRequest {
+		t.Fatalf("blank name status = %d, want 400 (err=%v)", status, err)
+	}
+	if len(spy.calls) != reloads {
+		t.Fatalf("rejected deletes must not reload: calls %v", spy.calls[reloads:])
+	}
+}
+
+// routedDeleteYAML: provider "gone" is targeted by a list-form route that
+// keeps another target, a map-form route (compact + map target forms), and a
+// route whose ONLY target it is.
+func routedDeleteYAML(url, extra string) string {
+	return `listen: 127.0.0.1:8080
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: ` + url + `, models: [glm-4.6]}
+  gone: {provider_id: static, openai_base_url: ` + url + `/v1, models: [m1]}
+routes:
+  mixed:
+    - zhipu/glm-4.6 # zhipu stays
+    - gone/m1
+  mapped: {strategy: load_balance, targets: [{provider: gone, model: m1}, zhipu/glm-4.6]}
+  only-gone:
+    - gone/m1
+` + extra
+}
+
+// TestDeleteProviderPrunesRoutes is the regression for "route X target N:
+// provider not defined": deleting a provider still referenced by explicit
+// routes strips those targets (comments on the survivors kept), removes the
+// route left empty, and reports both lists.
+func TestDeleteProviderPrunesRoutes(t *testing.T) {
+	up := addProviderUpstream(t)
+	service, spy, cfgPath := newProviderHarnessYAML(t, routedDeleteYAML(up.URL, ""))
+
+	result, err := service.DeleteProvider(context.Background(), "gone")
+	if err != nil {
+		t.Fatalf("DeleteProvider: %v", err)
+	}
+	if strings.Join(result.RoutesUpdated, ",") != "mapped,mixed" || strings.Join(result.RoutesRemoved, ",") != "only-gone" {
+		t.Fatalf("routes updated=%v removed=%v, want [mapped mixed] / [only-gone]", result.RoutesUpdated, result.RoutesRemoved)
+	}
+	if _, ok := service.ports.ProviderConfig("gone"); ok {
+		t.Fatal("deleted provider still resolves")
+	}
+	if len(spy.calls) != 1 {
+		t.Fatalf("reload calls = %v, want exactly one", spy.calls)
+	}
+	body := readTestFile(t, cfgPath)
+	if strings.Contains(body, "gone") {
+		t.Fatalf("config.yaml still references the deleted provider:\n%s", body)
+	}
+	if !strings.Contains(body, "# zhipu stays") {
+		t.Fatalf("surviving target lost its comment:\n%s", body)
+	}
+	cfg := service.ports.Config()
+	if len(cfg.Routes["mixed"]) != 1 || cfg.Routes["mixed"][0].Provider != "zhipu" {
+		t.Fatalf("mixed = %+v, want only zhipu/glm-4.6", cfg.Routes["mixed"])
+	}
+	if len(cfg.Routes["mapped"]) != 1 || cfg.Routes["mapped"][0].Provider != "zhipu" {
+		t.Fatalf("mapped = %+v, want only zhipu/glm-4.6", cfg.Routes["mapped"])
+	}
+	if cfg.RouteStrategies["mapped"] != configdomain.RouteStrategyLoadBalance {
+		t.Fatalf("mapped strategy = %q, the declaration must survive the prune", cfg.RouteStrategies["mapped"])
+	}
+	if _, ok := cfg.Routes["only-gone"]; ok {
+		t.Fatal("a route left without targets must be removed")
+	}
+}
+
+// TestDeleteProviderRollsBackBothFiles: once the route prune is on disk, a
+// later refusal (a route_policy reference the prune does not rewrite) or a
+// reload that did not apply restores config.yaml byte-for-byte and keeps the
+// provider — never half a delete.
+func TestDeleteProviderRollsBackBothFiles(t *testing.T) {
+	up := addProviderUpstream(t)
+	t.Run("validation refusal", func(t *testing.T) {
+		policy := "route_policy:\n  mixed:\n    bands:\n      - when: {has_tools: true}\n        target: gone/m1\n"
+		service, spy, cfgPath := newProviderHarnessYAML(t, routedDeleteYAML(up.URL, policy))
+		original := readTestFile(t, cfgPath)
+		if _, ok := service.ports.Config().RoutePolicies["mixed"]; !ok {
+			t.Fatal("fixture must be a valid config carrying the route_policy before the delete")
+		}
+		_, err := service.DeleteProvider(context.Background(), "gone")
+		if err == nil || !strings.Contains(err.Error(), "route_policy") {
+			t.Fatalf("err = %v, want the route_policy refusal", err)
+		}
+		if got := readTestFile(t, cfgPath); got != original {
+			t.Fatalf("config.yaml not restored:\n%s", got)
+		}
+		if _, ok := service.ports.ProviderConfig("gone"); !ok {
+			t.Fatal("refused delete must keep the provider")
+		}
+		if len(spy.calls) != 0 {
+			t.Fatalf("refused delete must not reload: %v", spy.calls)
+		}
+	})
+	t.Run("reload failure", func(t *testing.T) {
+		service, spy, cfgPath := newProviderHarnessYAML(t, routedDeleteYAML(up.URL, ""))
+		original := readTestFile(t, cfgPath)
+		spy.err = errors.New("reload exploded")
+		if _, err := service.DeleteProvider(context.Background(), "gone"); err == nil || !strings.Contains(err.Error(), "reload exploded") {
+			t.Fatalf("err = %v, want the reload failure", err)
+		}
+		if got := readTestFile(t, cfgPath); got != original {
+			t.Fatalf("config.yaml not restored after the failed reload:\n%s", got)
+		}
+		if _, ok := service.ports.ProviderConfig("gone"); !ok {
+			t.Fatal("failed reload must roll the store back to keep the provider")
+		}
+	})
 }

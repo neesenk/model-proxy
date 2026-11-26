@@ -34,7 +34,7 @@ import {
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
   CLIENT_GONE_STATUS, notLoggedHint,
   quotaErrKind, accountUsageState, accountRemainingLabel, accountDenialLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta, scheduleCredentialLabel, syncErrLabel, keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
-  parseModelLines, mergeFetchedModels,
+  parseModelLines, mergeFetchedModels, providerDeleteSummary,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
   securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML, SECURITY_RANGES, securityRangeFromSecs,
   securityFilterQuery, securityFilterFromQuery, explainCacheKey,
@@ -4556,4 +4556,13 @@ test('chatViewHTML renders an aggregated stream record as its JSON answer', () =
   const html = chatViewHTML('{"messages":[{"role":"user","content":"hi"}]}', record.response_body, responseContentType(record));
   assert.ok(html.includes('cv-assistant') && html.includes('hello there'), html);
   assert.ok(html.includes('in 5 · out 2'), html);
+});
+
+test('providerDeleteSummary: names the provider and the rewritten routes', () => {
+  assert.equal(providerDeleteSummary('zcode', { status: 'deleted', routes_updated: [], routes_removed: [] }), 'deleted zcode');
+  assert.equal(providerDeleteSummary('zcode', null), 'deleted zcode');
+  assert.equal(
+    providerDeleteSummary('zcode', { routes_updated: ['a', 'b'], routes_removed: ['c'] }),
+    'deleted zcode; removed from routes: a, b; deleted empty routes: c');
+  assert.equal(providerDeleteSummary('x', { routes_removed: ['only'] }), 'deleted x; deleted empty routes: only');
 });
