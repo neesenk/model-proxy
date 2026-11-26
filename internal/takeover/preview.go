@@ -12,8 +12,9 @@ import (
 	"model-proxy/internal/webauth"
 )
 
-// preview.go — dry-run rendering for the Web takeover confirmation dialog.
-// PreviewWrites executes the exact resolution + rewrite path RunTakeover
+// preview.go — dry-run rendering for the Web takeover confirmation dialog
+// (PreviewWritesOpts and the draft form PreviewWritesDraft; PreviewWrites is
+// the no-options shape). The preview executes the exact resolution + rewrite path RunTakeover
 // would (same ResolveClientsMode selection, same template rendering, same
 // sequential merge order for split variants sharing one file), but against
 // private copies of the client configs in a temp dir: no real file is read
@@ -103,16 +104,16 @@ func PreviewWritesOpts(cfg *configdomain.Config, which, templatesDir string, opt
 		w    *PreviewWrite
 	}
 	auxIndex := map[string]int{} // real aux path → auxReal index
-	redirectAux := func(real string) (string, error) {
+	redirectAux := func(real string) string {
 		if real == "" {
-			return "", nil
+			return ""
 		}
 		if dst, ok := redirect[real]; ok {
-			return dst, nil
+			return dst
 		}
 		dst := filepath.Join(tmp, fmt.Sprintf("%02d-%s", len(redirect), filepath.Base(real)))
 		redirect[real] = dst
-		return dst, nil
+		return dst
 	}
 	for _, sp := range specs {
 		if _, ok := redirect[sp.File]; ok {
@@ -156,17 +157,10 @@ func PreviewWritesOpts(cfg *configdomain.Config, which, templatesDir string, opt
 			continue
 		}
 		if sp.Template.Models != nil && sp.Template.Models.CatalogFile != "" {
-			dst, err := redirectAux(expandHome(sp.Template.Models.CatalogFile))
-			if err != nil {
-				return nil, err
-			}
-			sp.Template.Models.CatalogFile = dst
+			sp.Template.Models.CatalogFile = redirectAux(expandHome(sp.Template.Models.CatalogFile))
 		}
 		if aux := mcpAuxFile(sp.Template); aux != "" {
-			dst, err := redirectAux(aux)
-			if err != nil {
-				return nil, err
-			}
+			dst := redirectAux(aux)
 			// A family sharing one aux file (pi's variants in split mode all
 			// carry the same mcp.file) registers ONE report entry; later
 			// variants append their name to it instead of duplicating the file.

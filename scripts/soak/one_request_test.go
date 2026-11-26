@@ -117,7 +117,7 @@ func TestRunScenarioExcludesAbortedAtDeadline(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
 	defer cancel()
-	results := runScenario(ctx, newClient(2), srv.URL, "m", s.name, s, 2)
+	results := runScenario(ctx, newClient(2), srv.URL, "m", s, 2)
 
 	if len(results) != 0 {
 		t.Fatalf("results = %d (%v), want 0: deadline-aborted requests must be excluded", len(results), results)

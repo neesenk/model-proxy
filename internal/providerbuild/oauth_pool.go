@@ -80,7 +80,7 @@ func (s poolOAuthStore) Delete() error {
 // (best-effort: an unreadable blob contributes nothing, like the legacy-file
 // collector). Labels carry the virtual id — the operator-facing identity
 // without credential material.
-func oauthAccountSecrets(name, vid, providerID string, blob []byte) []Secret {
+func oauthAccountSecrets(vid, providerID string, blob []byte) []Secret {
 	if len(blob) == 0 {
 		return nil
 	}

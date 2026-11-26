@@ -71,7 +71,7 @@ func PrintProviderUsage(cfg *configdomain.Config, provName string) {
 			}
 			fmt.Printf("%s (%s)\n", display.Bold(display.Cyan(a.Label)), accounts.Mask(a.ID))
 			cred := a.Credentials()
-			if p := providerbuild.BuildOne(cfg, providerbuild.BuildOpts(), provName, prov, cred); p != nil {
+			if p := providerbuild.BuildOne(providerbuild.BuildOpts(), provName, prov, cred); p != nil {
 				if err := p.Usage(); err != nil {
 					fmt.Println(display.Yellow("  (usage unavailable: " + err.Error() + ")"))
 				}

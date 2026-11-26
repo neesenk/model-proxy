@@ -891,7 +891,7 @@ func (t *Template) writeMCPAux(mcpDst string, ctx renderContext) error {
 		if err := os.MkdirAll(filepath.Dir(mcpDst), 0o755); err != nil {
 			return err
 		}
-		return atomicWriteFile(mcpDst, []byte(text), preserveMode(mcpDst, 0o600))
+		return atomicWriteFile(mcpDst, []byte(text), preserveMode(mcpDst))
 	}
 	mv, err := ReadJSONConfig(mcpDst)
 	if err != nil {
@@ -1025,7 +1025,7 @@ func (t *Template) rewriteTOML(ctx renderContext, scope RewriteScope) error {
 	}
 	if t.Models != nil && t.Models.Shape == "kimi" && scope != ScopeMCP {
 		for _, m := range ctx.models {
-			mv := modelVars(m, ctx)
+			mv := modelVars(m)
 			if t.Models.AlsoRemove != "" {
 				text = removeTOMLSection(text, substituteModel(t.Models.AlsoRemove, mv, ctx))
 			}
@@ -1048,7 +1048,7 @@ func (t *Template) rewriteTOML(ctx renderContext, scope RewriteScope) error {
 		if err := os.MkdirAll(filepath.Dir(catalogPath), 0o755); err != nil {
 			return fmt.Errorf("template %s: model catalog dir: %w", t.Name, err)
 		}
-		if err := atomicWriteFile(catalogPath, append(catalog, '\n'), preserveMode(catalogPath, 0o600)); err != nil {
+		if err := atomicWriteFile(catalogPath, append(catalog, '\n'), preserveMode(catalogPath)); err != nil {
 			return fmt.Errorf("template %s: model catalog: %w", t.Name, err)
 		}
 		// The catalog replaces codex's bundled list for this process — the
@@ -1064,7 +1064,7 @@ func (t *Template) rewriteTOML(ctx renderContext, scope RewriteScope) error {
 				return err
 			}
 		}
-		return atomicWriteFile(t.File, []byte(text), preserveMode(t.File, 0o600))
+		return atomicWriteFile(t.File, []byte(text), preserveMode(t.File))
 	}
 	if t.MCP != nil && scope != ScopeModel {
 		text, err = t.mergeMCPIntoTOML(text, ctx)
@@ -1072,7 +1072,7 @@ func (t *Template) rewriteTOML(ctx renderContext, scope RewriteScope) error {
 			return err
 		}
 	}
-	return atomicWriteFile(t.File, []byte(text), preserveMode(t.File, 0o600))
+	return atomicWriteFile(t.File, []byte(text), preserveMode(t.File))
 }
 
 // mergeMCPIntoTOML folds the gateway MCP surface into one TOML document.
@@ -1105,7 +1105,7 @@ func (t *Template) mergeMCPIntoTOML(text string, ctx renderContext) (string, err
 // {{model.capabilities}} and {{model.efforts}} project models.dev metadata
 // onto kimi-code's per-model capability block (kimi is the only consumer of
 // the TOML models loop today); see kimiCapabilities/kimiEffortBlock.
-func modelVars(m ExposedModel, ctx renderContext) map[string]string {
+func modelVars(m ExposedModel) map[string]string {
 	contextN := m.PM.Context
 	if contextN <= 0 {
 		contextN = routing.DefaultModelMetadata.Context
@@ -1246,7 +1246,7 @@ func writeYAMLFile(file string, doc *yaml.Node) error {
 	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 		return err
 	}
-	return atomicWriteFile(file, out, preserveMode(file, 0o600))
+	return atomicWriteFile(file, out, preserveMode(file))
 }
 
 // rewriteEnv patches a KEY=VALUE file, replacing managed keys in place and
@@ -1307,7 +1307,7 @@ func (t *Template) rewriteEnv(ctx renderContext, scope RewriteScope) error {
 	if outStr != "" && !strings.HasSuffix(outStr, "\n") {
 		outStr += "\n"
 	}
-	return atomicWriteFile(t.File, []byte(outStr), preserveMode(t.File, 0o600))
+	return atomicWriteFile(t.File, []byte(outStr), preserveMode(t.File))
 }
 
 // BaseURLEndpoint returns the rendered base URL (doctor's drift expectation).

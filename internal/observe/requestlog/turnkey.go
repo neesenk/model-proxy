@@ -188,7 +188,7 @@ func scanTurnArray(dec *json.Decoder) (value turnValue, isString bool, ok bool) 
 		if t != '[' {
 			// Object/other container as "messages"/"input": the original's
 			// type assertions fail — skip the rest of the value.
-			return value, false, skipTurnValue(dec, t)
+			return value, false, skipTurnValue(dec)
 		}
 		for dec.More() {
 			var elem json.RawMessage
@@ -209,7 +209,7 @@ func scanTurnArray(dec *json.Decoder) (value turnValue, isString bool, ok bool) 
 
 // skipTurnValue discards the remainder of a JSON value whose first token
 // (an opening delimiter) was already consumed.
-func skipTurnValue(dec *json.Decoder, open json.Delim) bool {
+func skipTurnValue(dec *json.Decoder) bool {
 	depth := 1
 	for depth > 0 {
 		tok, err := dec.Token()

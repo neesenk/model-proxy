@@ -74,7 +74,7 @@ func (p *Proxy) serveMCPRoute(w http.ResponseWriter, r *http.Request, name strin
 			p.mcpSessions.Delete(localSID)
 		}
 		w.WriteHeader(http.StatusOK)
-		p.mcpRouteRecord(ex, "", http.StatusOK, nil)
+		p.mcpRouteRecord(ex, http.StatusOK, nil)
 		return
 	}
 
@@ -87,19 +87,19 @@ func (p *Proxy) serveMCPRoute(w http.ResponseWriter, r *http.Request, name strin
 		// identity so the session's later exchanges attribute to it.
 		p.mcpSessions.SetClient(sid, mcpkg.ParseClientInfo(body))
 		result := mcpkg.BuildInitializeResult(mcpkg.ParseClientProtocol(body), name)
-		p.mcpRouteWriteJSON(w, ex, "", sid, http.StatusOK, mcpkg.BuildResultResponse(frame.ID, result))
+		p.mcpRouteWriteJSON(w, ex, sid, http.StatusOK, mcpkg.BuildResultResponse(frame.ID, result))
 		return
 	}
 
 	// Everything else requires an established route session.
 	if localSID == "" {
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32600, "mcp route: session required — POST initialize first")
-		p.mcpRouteWriteJSON(w, ex, "", "", http.StatusBadRequest, respBody)
+		p.mcpRouteWriteJSON(w, ex, "", http.StatusBadRequest, respBody)
 		return
 	}
 	if !p.mcpSessions.RouteSessionValid(localSID) {
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32600, "mcp route: unknown or expired session — re-initialize")
-		p.mcpRouteWriteJSON(w, ex, "", "", http.StatusNotFound, respBody)
+		p.mcpRouteWriteJSON(w, ex, "", http.StatusNotFound, respBody)
 		return
 	}
 
@@ -109,19 +109,19 @@ func (p *Proxy) serveMCPRoute(w http.ResponseWriter, r *http.Request, name strin
 	case "tools/call":
 		p.mcpRouteToolsCall(w, r, name, route, snap, localSID, frame, body, started, requestID, ident)
 	case "ping":
-		p.mcpRouteWriteJSON(w, ex, "", localSID, http.StatusOK, mcpkg.BuildResultResponse(frame.ID, json.RawMessage(`{}`)))
+		p.mcpRouteWriteJSON(w, ex, localSID, http.StatusOK, mcpkg.BuildResultResponse(frame.ID, json.RawMessage(`{}`)))
 	default:
 		if strings.HasPrefix(frame.Method, "notifications/") {
 			// Best-effort fan-out to initialized sub-sessions; the client
 			// always gets 202 (notification semantics: no response body).
-			p.mcpRouteFanOut(snap, route, localSID, body, r)
+			p.mcpRouteFanOut(snap, localSID, body, r)
 			w.Header().Set("Mcp-Session-Id", localSID)
 			w.WriteHeader(http.StatusAccepted)
-			p.mcpRouteRecord(ex, "", http.StatusAccepted, nil)
+			p.mcpRouteRecord(ex, http.StatusAccepted, nil)
 			return
 		}
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32601, fmt.Sprintf("mcp route: method %q not supported (tools/list and tools/call only)", frame.Method))
-		p.mcpRouteWriteJSON(w, ex, "", localSID, http.StatusOK, respBody)
+		p.mcpRouteWriteJSON(w, ex, localSID, http.StatusOK, respBody)
 	}
 }
 
@@ -144,21 +144,23 @@ type mcpRouteExchange struct {
 // 200 is a 200, like a pinned upstream 200). Precheck rejections and
 // admission failures are not — on the route face they return before any
 // exchange context exists.
-func (p *Proxy) mcpRouteRecord(ex *mcpRouteExchange, account string, status int, resp []byte) {
-	p.mcpLog(ex.name, account, ex.frame, ex.method, status, ex.started, ex.requestID, ex.reqBody, resp, int64(len(resp)), false, ex.ident)
+func (p *Proxy) mcpRouteRecord(ex *mcpRouteExchange, status int, resp []byte) {
+	// The route face is synthesized by the proxy across the route's accounts,
+	// so there is no single account to attribute the exchange to.
+	p.mcpLog(ex.name, "", ex.frame, ex.method, status, ex.started, ex.requestID, ex.reqBody, resp, int64(len(resp)), false, ex.ident)
 }
 
 // mcpRouteWriteJSON writes a proxy-synthesized JSON-RPC message and records
 // the terminal: a synthesized response cannot be written without being
 // recorded.
-func (p *Proxy) mcpRouteWriteJSON(w http.ResponseWriter, ex *mcpRouteExchange, account, sid string, status int, body []byte) {
+func (p *Proxy) mcpRouteWriteJSON(w http.ResponseWriter, ex *mcpRouteExchange, sid string, status int, body []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	if sid != "" {
 		w.Header().Set("Mcp-Session-Id", sid)
 	}
 	w.WriteHeader(status)
 	w.Write(body)
-	p.mcpRouteRecord(ex, account, status, body)
+	p.mcpRouteRecord(ex, status, body)
 }
 
 // mcpRouteToolsList answers tools/list with the session's aggregated canonical
@@ -204,7 +206,7 @@ func (p *Proxy) mcpRouteToolsList(w http.ResponseWriter, r *http.Request, name s
 		return
 	}
 	result, _ := json.Marshal(map[string]any{"tools": tools})
-	p.mcpRouteWriteJSON(w, ex, "", sid, http.StatusOK, mcpkg.BuildResultResponse(frame.ID, result))
+	p.mcpRouteWriteJSON(w, ex, sid, http.StatusOK, mcpkg.BuildResultResponse(frame.ID, result))
 }
 
 // mcpRouteToolsCall routes one call to its backends in target order (sticky
@@ -215,7 +217,7 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 	canonical := mcpkg.ParseToolCallName(body)
 	if canonical == "" {
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32602, "tools/call: params.name is required")
-		p.mcpRouteWriteJSON(w, ex, "", sid, http.StatusOK, respBody)
+		p.mcpRouteWriteJSON(w, ex, sid, http.StatusOK, respBody)
 		return
 	}
 	// Ordered candidate targets serving this canonical tool (enabled only).
@@ -267,16 +269,16 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 			// Every backend declaring the tool is quota-exhausted: say so
 			// instead of misreporting -32602 "unknown tool".
 			respBody := mcpkg.BuildErrorResponse(frame.ID, -32000, fmt.Sprintf("tools/call: all backends for tool %q are quota-exhausted (provider MCP-tool window) — retry after the window resets", canonical))
-			p.mcpRouteWriteJSON(w, ex, "", sid, http.StatusOK, respBody)
+			p.mcpRouteWriteJSON(w, ex, sid, http.StatusOK, respBody)
 			return
 		}
 		if declared && acctBlocked {
 			respBody := mcpkg.BuildErrorResponse(frame.ID, -32000, fmt.Sprintf("tools/call: all backends for tool %q have no schedulable account (frozen or in cooldown) — see `model-proxy status` / `model-proxy unfreeze`", canonical))
-			p.mcpRouteWriteJSON(w, ex, "", sid, http.StatusOK, respBody)
+			p.mcpRouteWriteJSON(w, ex, sid, http.StatusOK, respBody)
 			return
 		}
 		respBody := mcpkg.BuildErrorResponse(frame.ID, -32602, fmt.Sprintf("tools/call: unknown tool %q", canonical))
-		p.mcpRouteWriteJSON(w, ex, "", sid, http.StatusOK, respBody)
+		p.mcpRouteWriteJSON(w, ex, sid, http.StatusOK, respBody)
 		return
 	}
 	// Session stickiness: a previously successful backend goes first.
@@ -293,7 +295,7 @@ func (p *Proxy) mcpRouteToolsCall(w http.ResponseWriter, r *http.Request, name s
 		out, err := mcpkg.RewriteToolCallName(body, c.target.Tools[canonical])
 		if err != nil {
 			respBody := mcpkg.BuildErrorResponse(frame.ID, -32602, "tools/call: malformed params")
-			p.mcpRouteWriteJSON(w, ex, "", sid, http.StatusOK, respBody)
+			p.mcpRouteWriteJSON(w, ex, sid, http.StatusOK, respBody)
 			return
 		}
 		sub, err := p.mcpRouteEnsureSub(snap, c.srv, c.target.Server, sid, r)
@@ -402,7 +404,7 @@ func (p *Proxy) mcpRouteDropFrozenSub(sid, server string) {
 // mcpRouteEnsureSub.
 func (p *Proxy) mcpRouteAccountGone(w http.ResponseWriter, ex *mcpRouteExchange) {
 	http.Error(w, mcpSessionAccountGoneMsg, http.StatusGone)
-	p.mcpRouteRecord(ex, "", http.StatusGone, nil)
+	p.mcpRouteRecord(ex, http.StatusGone, nil)
 }
 
 // mcpRouteReusableSub is the sub-session reuse gate. It returns the
@@ -582,7 +584,7 @@ func (p *Proxy) mcpRouteFetchTools(snap RuntimeSnapshot, srv configdomain.MCPSer
 
 // mcpRouteFanOut forwards a notification to every initialized sub-session.
 // Fire-and-forget: backend errors never reach the client (202 semantics).
-func (p *Proxy) mcpRouteFanOut(snap RuntimeSnapshot, route configdomain.MCPRoute, sid string, body []byte, inbound *http.Request) {
+func (p *Proxy) mcpRouteFanOut(snap RuntimeSnapshot, sid string, body []byte, inbound *http.Request) {
 	for _, sub := range p.mcpSessions.RouteSubs(sid) {
 		srv, ok := snap.Cfg.MCP[sub.Server]
 		if !ok || !srv.MCPEffectiveEnabled() {

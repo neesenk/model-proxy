@@ -173,12 +173,8 @@ type httpDaemon struct {
 	http  *http.Client
 }
 
-func (d *httpDaemon) do(method, path, body string) (int, []byte, error) {
-	var rdr io.Reader
-	if body != "" {
-		rdr = strings.NewReader(body)
-	}
-	req, err := http.NewRequest(method, d.base+path, rdr)
+func (d *httpDaemon) do(method, path string) (int, []byte, error) {
+	req, err := http.NewRequest(method, d.base+path, nil)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -217,7 +213,7 @@ func (d *httpDaemon) Post(model, body, session string) (int, error) {
 }
 
 func (d *httpDaemon) Summaries(session string) ([]summary, error) {
-	status, data, err := d.do(http.MethodGet, "/api/requests?session="+session+"&limit=50", "")
+	status, data, err := d.do(http.MethodGet, "/api/requests?session="+session+"&limit=50")
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +230,7 @@ func (d *httpDaemon) Summaries(session string) ([]summary, error) {
 }
 
 func (d *httpDaemon) DetailGuard(requestID string) ([]guardMark, error) {
-	status, data, err := d.do(http.MethodGet, "/api/requests/"+requestID, "")
+	status, data, err := d.do(http.MethodGet, "/api/requests/"+requestID)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +247,7 @@ func (d *httpDaemon) DetailGuard(requestID string) ([]guardMark, error) {
 }
 
 func (d *httpDaemon) Adjudications() (adjudicationFeed, error) {
-	status, data, err := d.do(http.MethodGet, "/api/security/adjudications", "")
+	status, data, err := d.do(http.MethodGet, "/api/security/adjudications")
 	if err != nil {
 		return adjudicationFeed{}, err
 	}
@@ -270,7 +266,7 @@ func (d *httpDaemon) SecurityRecords(kind string) ([]secRecord, error) {
 	if kind != "" {
 		path += "&kind=" + kind
 	}
-	status, data, err := d.do(http.MethodGet, path, "")
+	status, data, err := d.do(http.MethodGet, path)
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +283,7 @@ func (d *httpDaemon) SecurityRecords(kind string) ([]secRecord, error) {
 }
 
 func (d *httpDaemon) Blocks() ([]blockEntry, error) {
-	status, data, err := d.do(http.MethodGet, "/api/security/blocks", "")
+	status, data, err := d.do(http.MethodGet, "/api/security/blocks")
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +300,7 @@ func (d *httpDaemon) Blocks() ([]blockEntry, error) {
 }
 
 func (d *httpDaemon) Unblock(session string) error {
-	status, _, err := d.do(http.MethodDelete, "/api/security/blocks/"+session, "")
+	status, _, err := d.do(http.MethodDelete, "/api/security/blocks/"+session)
 	if err != nil {
 		return err
 	}

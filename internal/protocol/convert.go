@@ -570,7 +570,7 @@ func convertAnthropicRequestToOpenAIV(body []byte, imageOK bool, d *Diagnostics)
 	if stops, ok := src["stop_sequences"].([]any); ok && len(stops) > 0 {
 		out["stop"] = stops
 	}
-	if key := anthropicExplicitPromptCacheKey(src, out, d); key != "" {
+	if key := anthropicExplicitPromptCacheKey(src, out); key != "" {
 		out["prompt_cache_key"] = key
 	}
 	return sonic.Marshal(out)

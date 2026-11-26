@@ -153,7 +153,7 @@ func TestCodexProvider_Logout(t *testing.T) {
 	os.WriteFile(cred, []byte(`{}`), 0o600)
 
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"codex": {Provider: "codex"}}}
-	p := BuildOne(cfg, testBuildOpts(), "codex", cfg.Providers["codex"], accounts.Credentials{})
+	p := BuildOne(testBuildOpts(), "codex", cfg.Providers["codex"], accounts.Credentials{})
 	if p == nil {
 		t.Fatal("BuildOne codex returned nil")
 	}
@@ -181,7 +181,7 @@ func TestApiKeyProvider_Logout(t *testing.T) {
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
 		"zhipu-work": {Provider: "zhipu"},
 	}}
-	p := BuildOne(cfg, testBuildOpts(), "zhipu-work", cfg.Providers["zhipu-work"], accounts.Credentials{})
+	p := BuildOne(testBuildOpts(), "zhipu-work", cfg.Providers["zhipu-work"], accounts.Credentials{})
 	if p == nil {
 		t.Fatal("BuildOne zhipu-work returned nil")
 	}
@@ -205,7 +205,7 @@ func TestAqpProvider_Logout(t *testing.T) {
 	os.MkdirAll(filepath.Dir(cred), 0o700)
 	os.WriteFile(cred, []byte(`{}`), 0o600)
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"aqp": {Provider: "aqp"}}}
-	p := BuildOne(cfg, testBuildOpts(), "aqp", cfg.Providers["aqp"], accounts.Credentials{})
+	p := BuildOne(testBuildOpts(), "aqp", cfg.Providers["aqp"], accounts.Credentials{})
 	if p == nil {
 		t.Fatal("BuildOne aqp returned nil")
 	}

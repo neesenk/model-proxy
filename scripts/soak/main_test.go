@@ -65,7 +65,7 @@ func TestRunScenarioAgainstTestServer(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	results := runScenario(ctx, client, server.URL, "soak-model", "short", byName("short"), 2)
+	results := runScenario(ctx, client, server.URL, "soak-model", byName("short"), 2)
 	if len(results) == 0 {
 		t.Fatal("short scenario produced no results")
 	}
@@ -77,7 +77,7 @@ func TestRunScenarioAgainstTestServer(t *testing.T) {
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel2()
-	results = runScenario(ctx2, client, server.URL, "soak-model", "errors", byName("errors"), 2)
+	results = runScenario(ctx2, client, server.URL, "soak-model", byName("errors"), 2)
 	for _, r := range results {
 		if !r.ok || r.status != http.StatusBadGateway {
 			t.Errorf("errors result = %+v, want ok with expected 502 inversion", r)

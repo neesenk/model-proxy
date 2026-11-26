@@ -390,7 +390,7 @@ func TestBuildOne_Volcengine_FetchModels_UsesVirtualOwnCreds(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	seam := &fakeListSeam{}
 	cfg := poolConfig("volcengine")
-	p := BuildOne(cfg, seam.opts(accounts.HomeDir()), "volcengine", cfg.Providers["volcengine"],
+	p := BuildOne(seam.opts(accounts.HomeDir()), "volcengine", cfg.Providers["volcengine"],
 		accounts.Credentials{APIKey: "ark-1", AccessKey: "AKV", SecretKey: "SKV"})
 	if p == nil {
 		t.Fatal("BuildOne volcengine returned nil")
@@ -421,7 +421,7 @@ func TestBuildOne_Volcengine_FetchModels_ChatOnlyNeedsAKSK(t *testing.T) {
 
 	seam := &fakeListSeam{}
 	cfg := poolConfig("volcengine")
-	p := BuildOne(cfg, seam.opts(home), "volcengine", cfg.Providers["volcengine"],
+	p := BuildOne(seam.opts(home), "volcengine", cfg.Providers["volcengine"],
 		accounts.Credentials{APIKey: "ark-chat-only"})
 	if p == nil {
 		t.Fatal("BuildOne volcengine returned nil")
@@ -445,7 +445,7 @@ func TestBuildOne_Volcengine_FetchModels_UnboundLegacyFallback(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	seam := &fakeListSeam{}
 	cfg := poolConfig("volcengine")
-	p := BuildOne(cfg, seam.opts(accounts.HomeDir()), "volcengine", cfg.Providers["volcengine"], accounts.Credentials{})
+	p := BuildOne(seam.opts(accounts.HomeDir()), "volcengine", cfg.Providers["volcengine"], accounts.Credentials{})
 	if p == nil {
 		t.Fatal("BuildOne volcengine returned nil")
 	}
@@ -465,7 +465,7 @@ func TestBuildOne_Volcengine_FetchModels_UnboundLegacyFallback(t *testing.T) {
 func TestBuildOne_Volcengine_FetchModels_NilSeamIsNotConfigured(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cfg := poolConfig("volcengine")
-	p := BuildOne(cfg, BuildOptions{HomeDir: accounts.HomeDir()}, "volcengine", cfg.Providers["volcengine"], accounts.Credentials{})
+	p := BuildOne(BuildOptions{HomeDir: accounts.HomeDir()}, "volcengine", cfg.Providers["volcengine"], accounts.Credentials{})
 	if p == nil {
 		t.Fatal("BuildOne volcengine returned nil")
 	}

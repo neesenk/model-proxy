@@ -298,14 +298,14 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp, upstreamBodyCap, err := p.mcpRoundTrip(snap, name, srv, account, sess.UpstreamID, r, body)
+	resp, upstreamBodyCap, err := p.mcpRoundTrip(snap, srv, account, sess.UpstreamID, r, body)
 	if err == nil && resp.StatusCode == http.StatusUnauthorized && !hasSess && len(picks) > 1 {
 		// One-shot rotation on a sessionless 401 (mirrors BufferedLeg's
 		// one-time 401 refresh): the next account may hold a valid key.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
 		account = mcpNextAccount(picks, account)
-		resp, upstreamBodyCap, err = p.mcpRoundTrip(snap, name, srv, account, sess.UpstreamID, r, body)
+		resp, upstreamBodyCap, err = p.mcpRoundTrip(snap, srv, account, sess.UpstreamID, r, body)
 	}
 	if srv.MCPAuthMode() == "provider" {
 		// Record AFTER the one-shot rotation: the live end event names the
@@ -362,7 +362,7 @@ func (p *Proxy) serveMCP(w http.ResponseWriter, r *http.Request) {
 // headers + session id + credential injection, sent through the per-server
 // proxy chain. The response body is left open for the caller to stream.
 // upstreamBodyCap bounds how much of the response body the request log keeps.
-func (p *Proxy) mcpRoundTrip(snap RuntimeSnapshot, name string, srv configdomain.MCPServer, account, upstreamSID string, inbound *http.Request, body []byte) (*http.Response, int, error) {
+func (p *Proxy) mcpRoundTrip(snap RuntimeSnapshot, srv configdomain.MCPServer, account, upstreamSID string, inbound *http.Request, body []byte) (*http.Response, int, error) {
 	opts := mcpCallOpts{
 		method:        inbound.Method,
 		body:          body,

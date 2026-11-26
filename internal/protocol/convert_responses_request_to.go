@@ -453,7 +453,7 @@ func anthropicHasExplicitCacheControl(v any) bool {
 // protocols cache prefixes automatically and have no per-block breakpoint,
 // so this preserves cache affinity without copying an invalid cache_control
 // field onto their wire format.
-func anthropicExplicitPromptCacheKey(src, converted map[string]any, d *Diagnostics) string {
+func anthropicExplicitPromptCacheKey(src, converted map[string]any) string {
 	if !anthropicHasExplicitCacheControl(src) {
 		return ""
 	}
@@ -462,9 +462,9 @@ func anthropicExplicitPromptCacheKey(src, converted map[string]any, d *Diagnosti
 	}
 	fp, _ := sonic.ConfigStd.MarshalToString(map[string]any{
 		"model": strOpt(converted["model"]),
-		// nil collector: the main conversion walk over the same system
-		// blocks already reports cache_control_dropped — collecting here
-		// too duplicated the diagnostic (convertWarn dedupes, Diag didn't).
+		// No collector here: the main conversion walk over the same system
+		// blocks already reports cache_control_dropped — collecting here too
+		// duplicated the diagnostic (convertWarn dedupes, Diag didn't).
 		"system": anthropicTextOf(src["system"], nil),
 		"tools":  converted["tools"],
 	})

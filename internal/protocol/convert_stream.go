@@ -513,14 +513,11 @@ func (t *anthropicSSEToOpenAISSE) usagePayload() map[string]any {
 	return u
 }
 
-func (t *anthropicSSEToOpenAISSE) emitChunk(delta map[string]any, finish any, usage map[string]any) {
+func (t *anthropicSSEToOpenAISSE) emitChunk(delta map[string]any, finish any) {
 	m := map[string]any{
 		"id": t.id, "object": "chat.completion.chunk", "model": t.model,
 		"created": t.created,
 		"choices": []map[string]any{{"index": 0, "delta": delta, "finish_reason": finish}},
-	}
-	if usage != nil {
-		m["usage"] = usage
 	}
 	b, _ := sonic.Marshal(m)
 	t.out = append(t.out, []byte("data: ")...)
@@ -546,7 +543,7 @@ func (t *anthropicSSEToOpenAISSE) emitUsageChunk() {
 
 func (t *anthropicSSEToOpenAISSE) ensureRole() {
 	if !t.roleSent {
-		t.emitChunk(map[string]any{"role": "assistant"}, nil, nil)
+		t.emitChunk(map[string]any{"role": "assistant"}, nil)
 		t.roleSent = true
 	}
 }
@@ -572,7 +569,7 @@ func (t *anthropicSSEToOpenAISSE) drainDone() (eof bool) {
 		if t.stopRsn != "" {
 			finish = mapStopReasonToFinish(t.stopRsn)
 		}
-		t.emitChunk(map[string]any{}, finish, nil)
+		t.emitChunk(map[string]any{}, finish)
 		t.finished = true
 	}
 	if !t.errored {
@@ -731,14 +728,14 @@ func (t *anthropicSSEToOpenAISSE) dispatch(frameEvent string, dataEvents []strin
 				t.emitChunk(map[string]any{"tool_calls": []map[string]any{{
 					"index": tcIdx, "id": ev.ContentBlock.ID, "type": "function",
 					"function": map[string]any{"name": ev.ContentBlock.Name, "arguments": ""},
-				}}}, nil, nil)
+				}}}, nil)
 			}
 		case "content_block_delta":
 			switch ev.Delta.Type {
 			case "text_delta":
 				if ev.Delta.Text != "" {
 					t.ensureRole()
-					t.emitChunk(map[string]any{"content": ev.Delta.Text}, nil, nil)
+					t.emitChunk(map[string]any{"content": ev.Delta.Text}, nil)
 					t.curText += ev.Delta.Text
 					t.textRunes += len([]rune(ev.Delta.Text))
 				}
@@ -746,12 +743,12 @@ func (t *anthropicSSEToOpenAISSE) dispatch(frameEvent string, dataEvents []strin
 				annotations := anthropicCitationsToChat([]any{ev.Delta.Citation}, t.curText, t.curTextStart)
 				if len(annotations) > 0 {
 					t.ensureRole()
-					t.emitChunk(map[string]any{"annotations": annotations}, nil, nil)
+					t.emitChunk(map[string]any{"annotations": annotations}, nil)
 				}
 			case "thinking_delta":
 				if thinking := firstNonEmpty(ev.Delta.Thinking, ev.Delta.Text); thinking != "" {
 					t.ensureRole()
-					t.emitChunk(map[string]any{"reasoning_content": thinking}, nil, nil)
+					t.emitChunk(map[string]any{"reasoning_content": thinking}, nil)
 					t.curThinking += thinking
 				}
 			case "signature_delta":
@@ -762,7 +759,7 @@ func (t *anthropicSSEToOpenAISSE) dispatch(frameEvent string, dataEvents []strin
 						t.toolArgsSeen[t.curBlock] = true
 						t.emitChunk(map[string]any{"tool_calls": []map[string]any{{
 							"index": tcIdx, "function": map[string]any{"arguments": ev.Delta.PartialJSON},
-						}}}, nil, nil)
+						}}}, nil)
 					}
 				}
 			default:
@@ -775,11 +772,11 @@ func (t *anthropicSSEToOpenAISSE) dispatch(frameEvent string, dataEvents []strin
 			if t.curType == "thinking" && t.curSignature != "" {
 				t.emitChunk(map[string]any{"reasoning_details": []map[string]any{{
 					"type": "anthropic_thinking", "thinking": t.curThinking, "signature": t.curSignature,
-				}}}, nil, nil)
+				}}}, nil)
 			} else if t.curType == "redacted_thinking" && t.curRedacted != "" {
 				t.emitChunk(map[string]any{"reasoning_details": []map[string]any{{
 					"type": "anthropic_redacted_thinking", "data": t.curRedacted,
-				}}}, nil, nil)
+				}}}, nil)
 			}
 			// Empty-args fallback: a tool_use block with no input_json_delta still
 			// gets a "{}" arguments fragment (openai requires valid JSON arguments).
@@ -787,7 +784,7 @@ func (t *anthropicSSEToOpenAISSE) dispatch(frameEvent string, dataEvents []strin
 				if tcIdx, ok := t.toolCallIdx[t.curBlock]; ok && !t.toolArgsSeen[t.curBlock] {
 					t.emitChunk(map[string]any{"tool_calls": []map[string]any{{
 						"index": tcIdx, "function": map[string]any{"arguments": "{}"},
-					}}}, nil, nil)
+					}}}, nil)
 				}
 			}
 			t.curType = ""

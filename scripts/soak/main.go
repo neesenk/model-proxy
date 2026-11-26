@@ -109,7 +109,7 @@ type result struct {
 	aborted bool
 }
 
-func runScenario(ctx context.Context, client *http.Client, baseURL, model, name string, s scenario, concurrency int) []result {
+func runScenario(ctx context.Context, client *http.Client, baseURL, model string, s scenario, concurrency int) []result {
 	scenarioCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var mu sync.Mutex
@@ -299,7 +299,7 @@ func main() {
 	failed := false
 	for _, s := range selected {
 		ctx, cancel := context.WithTimeout(context.Background(), perScenario)
-		results := runScenario(ctx, client, *baseURL, *model, s.name, s, *concurrency)
+		results := runScenario(ctx, client, *baseURL, *model, s, *concurrency)
 		cancel()
 		rate := report(s.name, results)
 		if s.expectStatus == 0 && s.cancelAfter == 0 && rate > *maxErr {

@@ -164,7 +164,7 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 				for _, a := range snapshot.Pool.Accounts {
 					vid := name + "#" + a.ID
 					slot := poolOAuthStore{store: store, name: name, providerID: prov.Provider, id: a.ID}
-					p := BuildOneWithStore(cfg, opts, name, prov, slot)
+					p := BuildOneWithStore(opts, name, prov, slot)
 					if p == nil {
 						// provider.New failed for this account — skip it in BOTH
 						// the providers map and the index (same rule as the
@@ -175,7 +175,7 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 					vids = append(vids, vid)
 					accts = append(accts, PoolAccount{ID: a.ID, AddedAt: a.AddedAt})
 					parentOf[vid] = name
-					oauthSecrets = append(oauthSecrets, oauthAccountSecrets(name, vid, prov.Provider, a.OAuth)...)
+					oauthSecrets = append(oauthSecrets, oauthAccountSecrets(vid, prov.Provider, a.OAuth)...)
 				}
 				if len(vids) > 0 {
 					sort.Strings(vids)
@@ -194,7 +194,7 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 			// not logged in). Tokens still join the guard known-secret set
 			// (best-effort, memory only).
 			oauthSecrets = append(oauthSecrets, collectOAuthSecrets(opts, name, prov.Provider)...)
-			if p := BuildOne(cfg, opts, name, prov, accounts.Credentials{}); p != nil {
+			if p := BuildOne(opts, name, prov, accounts.Credentials{}); p != nil {
 				m[name] = p
 			}
 			continue
@@ -202,7 +202,8 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 		pool := snapshot.Pool
 		// Guard known-secret collection: every account credential the proxy
 		// manages is a value a leak-out attempt would carry. Non-empty values
-		// only; length/dup filtering happens in guard.NewScanner. Legacy
+		// only; length/dup filtering happens in the guard scanner's
+		// constructor (guard.NewScannerWithOptions). Legacy
 		// singular keys arrive as a wrapped 1-entry pool, so this one loop
 		// covers both sources without a second storage read.
 		for _, a := range pool.Accounts {
@@ -224,7 +225,7 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 			if prov.Provider == "static" {
 				continue
 			}
-			if p := BuildOne(cfg, opts, name, prov, accounts.Credentials{}); p != nil {
+			if p := BuildOne(opts, name, prov, accounts.Credentials{}); p != nil {
 				m[name] = p
 				if snapshot.Source == accounts.SourceLegacy {
 					eligible[name] = true
@@ -242,7 +243,7 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 		accts := make([]PoolAccount, 0, len(pool.Accounts))
 		for _, a := range pool.Accounts {
 			vid := name + "#" + a.ID
-			p := BuildOne(cfg, opts, name, prov, a.Credentials())
+			p := BuildOne(opts, name, prov, a.Credentials())
 			if p == nil {
 				// provider.New failed for this account — skip it in BOTH the
 				// providers map and the index, so poolIndex never lists an id
@@ -296,7 +297,7 @@ func CollectOAuthSecrets(cfg *configdomain.Config, opts BuildOptions) []Secret {
 		snapshot, err := store.LoadSnapshot(name, prov.Provider)
 		if err == nil && snapshot.Source == accounts.SourcePlural {
 			for _, a := range snapshot.Pool.Accounts {
-				out = append(out, oauthAccountSecrets(name, name+"#"+a.ID, prov.Provider, a.OAuth)...)
+				out = append(out, oauthAccountSecrets(name+"#"+a.ID, prov.Provider, a.OAuth)...)
 			}
 			continue
 		}
@@ -402,18 +403,18 @@ func collectOAuthSecrets(opts BuildOptions, name, providerID string) []Secret {
 //
 // When cred is empty all three fall back to the legacy file-backed behavior
 // (identical to the pre-pool BuildProviders).
-func BuildOne(cfg *configdomain.Config, opts BuildOptions, name string, prov configdomain.Provider, cred accounts.Credentials) provider.Provider {
-	return buildOne(cfg, opts, name, prov, cred, nil)
+func BuildOne(opts BuildOptions, name string, prov configdomain.Provider, cred accounts.Credentials) provider.Provider {
+	return buildOne(opts, name, prov, cred, nil)
 }
 
 // BuildOneWithStore is BuildOne for a pooled aqp/codex account: the OAuth
 // blob seam binds the instance to that account's pool slot (reads and refresh
 // write-backs stay inside the slot; the legacy file is never consulted).
-func BuildOneWithStore(cfg *configdomain.Config, opts BuildOptions, name string, prov configdomain.Provider, store provider.OAuthBlobStore) provider.Provider {
-	return buildOne(cfg, opts, name, prov, accounts.Credentials{}, store)
+func BuildOneWithStore(opts BuildOptions, name string, prov configdomain.Provider, store provider.OAuthBlobStore) provider.Provider {
+	return buildOne(opts, name, prov, accounts.Credentials{}, store)
 }
 
-func buildOne(cfg *configdomain.Config, opts BuildOptions, name string, prov configdomain.Provider, cred accounts.Credentials, oauthStore provider.OAuthBlobStore) provider.Provider {
+func buildOne(opts BuildOptions, name string, prov configdomain.Provider, cred accounts.Credentials, oauthStore provider.OAuthBlobStore) provider.Provider {
 	pcfg := &provider.Config{
 		ProviderID:       prov.Provider,
 		ProviderName:     name,
