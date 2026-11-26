@@ -46,7 +46,7 @@ type commandFake struct {
 	replay         func(context.Context, string, string) (appapi.ReplayResult, error)
 	routeTest      func(context.Context, string) (appapi.RouteTestResult, error)
 	catalogPull    func(context.Context) (appapi.ModelsCatalogPull, error)
-	deleteProv     func(context.Context, string) (appapi.MutationResult, error)
+	deleteProv     func(context.Context, string) (appapi.ProviderDeleteResult, error)
 }
 
 func (fake *commandFake) APIKeys() (appapi.KeysResult, error) { return appapi.KeysResult{}, nil }
@@ -668,25 +668,28 @@ func TestCommandAccountContract(t *testing.T) {
 	})
 	t.Run("provider delete routing and errors", func(t *testing.T) {
 		var names []string
-		server := newCommandTestServer(t, &commandFake{deleteProv: func(_ context.Context, name string) (appapi.MutationResult, error) {
+		server := newCommandTestServer(t, &commandFake{deleteProv: func(_ context.Context, name string) (appapi.ProviderDeleteResult, error) {
 			names = append(names, name)
 			switch name {
 			case "busy":
-				return appapi.MutationResult{}, appapi.NewHTTPError(http.StatusConflict, "still has accounts")
+				return appapi.ProviderDeleteResult{}, appapi.NewHTTPError(http.StatusConflict, "still has accounts")
 			case "warn":
-				return appapi.MutationResult{Warning: "reload deferred"}, nil
+				return appapi.ProviderDeleteResult{Warning: "reload deferred"}, nil
+			case "routed":
+				return appapi.ProviderDeleteResult{RoutesUpdated: []string{"r1"}, RoutesRemoved: []string{"r2"}}, nil
 			}
-			return appapi.MutationResult{}, nil
+			return appapi.ProviderDeleteResult{}, nil
 		}})
 		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/", ""), http.StatusBadRequest, map[string]any{"error": "expected /api/providers/<name>"})
 		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/a/b", ""), http.StatusBadRequest, map[string]any{"error": "expected /api/providers/<name>"})
 		if len(names) != 0 {
 			t.Fatalf("DeleteProvider calls=%v want no malformed-path mutation", names)
 		}
-		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/acme", ""), http.StatusOK, map[string]any{"status": "deleted", "name": "acme"})
-		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/warn", ""), http.StatusOK, map[string]any{"status": "deleted", "name": "warn", "warning": "reload deferred"})
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/acme", ""), http.StatusOK, map[string]any{"status": "deleted", "name": "acme", "routes_updated": []any{}, "routes_removed": []any{}})
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/warn", ""), http.StatusOK, map[string]any{"status": "deleted", "name": "warn", "routes_updated": []any{}, "routes_removed": []any{}, "warning": "reload deferred"})
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/routed", ""), http.StatusOK, map[string]any{"status": "deleted", "name": "routed", "routes_updated": []any{"r1"}, "routes_removed": []any{"r2"}})
 		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/busy", ""), http.StatusConflict, map[string]any{"error": "still has accounts"})
-		if strings.Join(names, ",") != "acme,warn,busy" {
+		if strings.Join(names, ",") != "acme,warn,routed,busy" {
 			t.Fatalf("DeleteProvider args=%v", names)
 		}
 	})
@@ -829,11 +832,11 @@ func (*commandFake) AddProvider(context.Context, appapi.ProviderAddRequest) (app
 	return appapi.ProviderAddResult{}, nil
 }
 
-func (fake *commandFake) DeleteProvider(ctx context.Context, name string) (appapi.MutationResult, error) {
+func (fake *commandFake) DeleteProvider(ctx context.Context, name string) (appapi.ProviderDeleteResult, error) {
 	if fake.deleteProv != nil {
 		return fake.deleteProv(ctx, name)
 	}
-	return appapi.MutationResult{}, nil
+	return appapi.ProviderDeleteResult{}, nil
 }
 
 func (*commandFake) PreviewProviderModels(context.Context, appapi.ProviderModelsPreviewRequest) ([]string, error) {

@@ -140,8 +140,8 @@ func (fakeCommands) AddPreset(string) ([]string, string, error) { return nil, ""
 func (fakeCommands) AddProvider(context.Context, ProviderAddRequest) (ProviderAddResult, error) {
 	return ProviderAddResult{}, nil
 }
-func (fakeCommands) DeleteProvider(context.Context, string) (MutationResult, error) {
-	return MutationResult{}, nil
+func (fakeCommands) DeleteProvider(context.Context, string) (ProviderDeleteResult, error) {
+	return ProviderDeleteResult{}, nil
 }
 
 func (fakeCommands) PreviewProviderModels(context.Context, ProviderModelsPreviewRequest) ([]string, error) {

@@ -26,7 +26,7 @@ import {
   verdictBadge, modelCapMatrix, visibleModelRows, providerCapsSummary, providerFrozen, providerNames,
   accountProviderKey, splitProviderKey, providerDisplayName,
   credentialBannerHTML,
-  catalogMatchHTML, catalogMatchEditorHTML, parseModelLines, mergeFetchedModels, aliasRowHTML, providerModelsEditorHTML,
+  catalogMatchHTML, catalogMatchEditorHTML, parseModelLines, mergeFetchedModels, providerDeleteSummary, aliasRowHTML, providerModelsEditorHTML,
   settingsDiff, settingsRestartKeys, configSummaryHTML, TOKEN_RANGES, tokensRangeQuery, tokenRangeLabel,
   tokenRangeTriggerLabel, parseLocalDate, tokenRangeBounds, tokenCustomBounds, tokenRangePickerHTML,
   quotaUsageFromSec, quotaWindowFromSec, quotaWindowForProvider,
@@ -9434,13 +9434,15 @@ async function removeAccount(provider, id, label) {
   }
 }
 
-// deleteProvider removes an account-less provider (DELETE /api/providers/<name>)
-// and refetches the accounts view in the foreground: the sidebar drops the
-// item and the selection falls back to the first remaining provider. Backend
-// refusals (409 accounts remain, route still targets it, last provider) show
+// deleteProvider removes an account-less provider (DELETE /api/providers/<name>,
+// which also strips it from explicit routes) and refetches the accounts view
+// in the foreground: the sidebar drops the
+// item and the selection falls back to the first remaining provider; the
+// success message lists the routes the backend rewrote. Backend refusals (409
+// accounts remain, route_policy/mcp still reference it, last provider) show
 // their message in #acc-msg.
 async function deleteProvider(btn, name) {
-  if (!window.confirm(`Delete provider "${name}"? It is removed from the config and disappears from Accounts and Status.`)) return;
+  if (!window.confirm(`Delete provider "${name}"? It is removed from the config and disappears from Accounts and Status. Explicit routes lose its targets; a route left with no target is deleted.`)) return;
   const accMsg = document.getElementById('acc-msg');
   btn.disabled = true;
   showMsg(accMsg, 'ok', `deleting ${name}…`);
@@ -9451,7 +9453,7 @@ async function deleteProvider(btn, name) {
     if (data && data.warning) {
       showMsg(accMsg, 'warn', `Deleted from disk, but not live yet: ${data.warning} — fix config.yaml and reload. See logs.`);
     } else {
-      showMsg(accMsg, 'ok', `deleted ${name}`);
+      showMsg(accMsg, 'ok', providerDeleteSummary(name, data));
     }
   } catch (e) {
     btn.disabled = false;

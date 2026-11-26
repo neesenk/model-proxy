@@ -236,8 +236,8 @@ func (testCommandAPI) AddProvider(context.Context, appapi.ProviderAddRequest) (a
 	return appapi.ProviderAddResult{}, nil
 }
 
-func (testCommandAPI) DeleteProvider(context.Context, string) (appapi.MutationResult, error) {
-	return appapi.MutationResult{}, nil
+func (testCommandAPI) DeleteProvider(context.Context, string) (appapi.ProviderDeleteResult, error) {
+	return appapi.ProviderDeleteResult{}, nil
 }
 
 func (testCommandAPI) PreviewProviderModels(context.Context, appapi.ProviderModelsPreviewRequest) ([]string, error) {

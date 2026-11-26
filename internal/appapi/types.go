@@ -706,6 +706,16 @@ type MutationResult struct {
 	Warning string
 }
 
+// ProviderDeleteResult reports a completed DeleteProvider: the explicit
+// routes that lost the provider's targets, the routes removed because no
+// target remained (both sorted, never nil), and an applied-with-warning
+// reload message.
+type ProviderDeleteResult struct {
+	RoutesUpdated []string
+	RoutesRemoved []string
+	Warning       string
+}
+
 // ProviderAddRequest is the Accounts-page Add Provider form: a preset
 // template or a static definition, an optional token (routed to the account
 // store — it must never land in provider.json), and an optional model list.
@@ -1162,9 +1172,10 @@ type CommandAPI interface {
 	// reaches provider.json and never comes back in the result.
 	AddProvider(ctx context.Context, request ProviderAddRequest) (ProviderAddResult, error)
 	// DeleteProvider removes a provider with zero accounts from the
-	// provider.json store and hot-reloads (404 unknown, 409 when accounts
+	// provider.json store, strips it from every explicit route (a route left
+	// empty is removed) and hot-reloads (404 unknown, 409 when accounts
 	// remain); Warning carries an applied-with-warning reload.
-	DeleteProvider(ctx context.Context, name string) (MutationResult, error)
+	DeleteProvider(ctx context.Context, name string) (ProviderDeleteResult, error)
 	// PreviewProviderModels fetches the upstream /models list for the Add
 	// Provider form's transient fields WITHOUT persisting anything — no
 	// provider is created, nothing reloads.

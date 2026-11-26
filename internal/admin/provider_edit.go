@@ -7,9 +7,13 @@ package admin
 // config_edit.go.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os"
+
+	"gopkg.in/yaml.v3"
 
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/configedit"
@@ -22,12 +26,34 @@ import (
 // apply rolls the store back before another writer can commit; an
 // applied-with-warning reload keeps the new store and returns the warning.
 func (s *Service) mutateProvidersAndReload(ctx context.Context, fn func(providers map[string]configdomain.Provider) error) error {
+	return s.mutateYAMLAndProvidersAndReload(ctx, nil, fn)
+}
+
+// mutateYAMLAndProvidersAndReload is mutateProvidersAndReload with an
+// optional config.yaml pre-step under the SAME lock span. The store
+// mutation validates the effective config against config.yaml on disk, so a
+// change that must land in both files (DeleteProvider pruning route targets)
+// writes the yaml first: yamlFn edits the parsed root and reports whether it
+// changed anything. Every failure after that write — store validation, store
+// save, or a reload that did not apply — restores the original yaml bytes
+// (and the store, as before), so the two files never commit half a change.
+func (s *Service) mutateYAMLAndProvidersAndReload(ctx context.Context, yamlFn func(root *yaml.Node) (bool, error), fn func(providers map[string]configdomain.Provider) error) error {
 	configFile := s.currentConfigFile()
 	if configFile == "" {
 		return fmt.Errorf("config file path is unavailable; cannot mutate providers")
 	}
 	storePath := providerstore.PathUnder(s.homeDir())
 	return configedit.WithConfigLockContext(ctx, configFile, func() error {
+		restoreYAML := func() error { return nil }
+		if yamlFn != nil {
+			original, changed, err := rewriteConfigYAML(configFile, yamlFn)
+			if err != nil {
+				return err
+			}
+			if changed {
+				restoreYAML = func() error { return configedit.AtomicWrite(configFile, original) }
+			}
+		}
 		var previous map[string]configdomain.Provider
 		err := providerstore.MutateContextUnderLock(ctx, configFile, storePath, func(providers map[string]configdomain.Provider) error {
 			previous = providerstore.Clone(providers)
@@ -36,6 +62,9 @@ func (s *Service) mutateProvidersAndReload(ctx context.Context, fn func(provider
 		if err != nil {
 			var strip *providerstore.StripWarning
 			if !errors.As(err, &strip) {
+				if restoreErr := restoreYAML(); restoreErr != nil {
+					return fmt.Errorf("%w (config.yaml rollback failed: %v)", err, restoreErr)
+				}
 				return err
 			}
 			// The store was persisted; only the yaml strip failed (it retries on
@@ -52,10 +81,50 @@ func (s *Service) mutateProvidersAndReload(ctx context.Context, fn func(provider
 					return fmt.Errorf("%w (provider store rollback failed: %v)", err, rollbackErr)
 				}
 			}
+			if restoreErr := restoreYAML(); restoreErr != nil {
+				return fmt.Errorf("%w (config.yaml rollback failed: %v)", err, restoreErr)
+			}
 			return err
 		}
 		return nil
 	})
+}
+
+// rewriteConfigYAML applies fn to config.yaml's parsed root (comments and key
+// order preserved, same encoder settings as editConfigNode) and writes the
+// result back with a timestamped backup when fn reports a change. It returns
+// the ORIGINAL bytes for the caller's rollback. The caller holds the config
+// lock.
+func rewriteConfigYAML(configFile string, fn func(root *yaml.Node) (bool, error)) ([]byte, bool, error) {
+	original, err := os.ReadFile(configFile)
+	if err != nil {
+		return nil, false, fmt.Errorf("read config %s: %w", configFile, err)
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(original, &root); err != nil {
+		return nil, false, fmt.Errorf("parse %s: %w", configFile, err)
+	}
+	if configedit.MapNode(&root) == nil {
+		return nil, false, fmt.Errorf("config is not a YAML mapping")
+	}
+	changed, err := fn(&root)
+	if err != nil || !changed {
+		return original, false, err
+	}
+	var buffer bytes.Buffer
+	encoder := yaml.NewEncoder(&buffer)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(&root); err != nil {
+		return nil, false, err
+	}
+	if err := encoder.Close(); err != nil {
+		return nil, false, err
+	}
+	configedit.BackupConfig(configFile, configedit.BackupPath(configFile))
+	if err := configedit.AtomicWrite(configFile, buffer.Bytes()); err != nil {
+		return nil, false, err
+	}
+	return original, true, nil
 }
 
 // editProvider applies the structured editor's provider payload to the store:

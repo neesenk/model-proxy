@@ -3183,6 +3183,13 @@ test('accounts 页 Delete Provider：零账号 provider 可删且从 Accounts/St
     body: JSON.stringify({ name: 'e2e-delprov', openai_base_url: 'http://127.0.0.1:${upstreamPort}/v1', models: ['stub-m1'] }),
   }).then((r) => r.status)`);
   assert.equal(added, 200, 'fixture provider add');
+  // An explicit route whose only target is the provider: the delete must
+  // strip it (route removed) instead of refusing with "not defined".
+  const routed = await ctx.ev(`fetch('/api/config/edit', { method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ kind: 'route', name: 'e2e-delroute', data: { targets: ['e2e-delprov/stub-m1'] } }),
+  }).then((r) => r.status)`);
+  assert.equal(routed, 200, 'fixture route add');
   // Leave and re-enter Accounts so the retained tab refetches the list.
   await ctx.ev(`document.querySelector('[data-tab="status"]').click()`);
   await ctx.ev(`document.querySelector('[data-tab="accounts"]').click()`);
@@ -3203,8 +3210,11 @@ test('accounts 页 Delete Provider：零账号 provider 可删且从 Accounts/St
     document.querySelector('[data-delete-provider]').click(); })()`);
   await ctx.waitFor('sidebar item removed', () => ctx.ev(
     `!document.querySelector('.acct-nav-item[data-provider="e2e-delprov"]')`));
-  assert.ok((await ctx.ev(`document.getElementById('acc-msg')?.innerText || ''`)).includes('deleted e2e-delprov'),
-    'success message names the provider');
+  const okMsg = await ctx.ev(`document.getElementById('acc-msg')?.innerText || ''`);
+  assert.ok(okMsg.includes('deleted e2e-delprov') && okMsg.includes('deleted empty routes: e2e-delroute'),
+    `success message names the provider and the removed route (got: ${okMsg})`);
+  const cfgAfter = await ctx.ev(`fetch('/api/config').then((r) => r.json())`);
+  assert.ok(!(cfgAfter.yaml || '').includes('e2e-delroute'), 'the emptied route must leave config.yaml');
   // Selection fell back to a remaining provider (no blank detail pane).
   assert.ok(await ctx.ev(`!!document.querySelector('.acct-nav-item.active')`), 'a remaining provider is selected');
 

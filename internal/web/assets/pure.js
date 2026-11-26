@@ -5018,6 +5018,19 @@ export function parseModelLines(text) {
   return out;
 }
 
+// providerDeleteSummary is the Accounts-page success line for DELETE
+// /api/providers/<name>: the provider name plus the explicit routes the
+// backend rewrote (routes_updated lost its targets, routes_removed had no
+// target left). Missing arrays read as empty.
+export function providerDeleteSummary(name, data) {
+  const updated = (data && data.routes_updated) || [];
+  const removed = (data && data.routes_removed) || [];
+  let out = `deleted ${name}`;
+  if (updated.length) out += `; removed from routes: ${updated.join(', ')}`;
+  if (removed.length) out += `; deleted empty routes: ${removed.join(', ')}`;
+  return out;
+}
+
 // mergeFetchedModels folds an Add Provider form's model sources into the
 // final list sent to POST /api/providers: the checked subset of a fetched
 // preview (fetched order), then manual lines (parsed with parseModelLines,
