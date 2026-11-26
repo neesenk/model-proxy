@@ -2,6 +2,7 @@ package admin
 
 import (
 	"errors"
+	"fmt"
 	"os"
 
 	configdomain "model-proxy/internal/config"
@@ -20,7 +21,9 @@ func (s *Service) saveAndReload(data []byte) error {
 
 // saveAndReloadUnderLock validates, backs up, atomically writes, then
 // hot-reloads the config; on reload failure the previous file is restored from
-// the backup. The caller must hold configFile's configedit lock.
+// the backup. The caller must hold configFile's configedit lock. A restore
+// that fails is folded into the returned error: the caller is then the only
+// one who can act on a config file the running generation never loaded.
 func (s *Service) saveAndReloadUnderLock(configFile string, data []byte) error {
 	backup, err := configedit.WriteConfigValidated(configFile, string(data), s.validateYAMLWithStore)
 	if err != nil {
@@ -31,12 +34,21 @@ func (s *Service) saveAndReloadUnderLock(configFile string, data []byte) error {
 		if errors.As(err, &applied) {
 			return err
 		}
-		if original, readErr := os.ReadFile(backup); readErr == nil {
-			_ = configedit.AtomicWrite(configFile, original)
+		if rollbackErr := restoreConfigBackup(backup, configFile); rollbackErr != nil {
+			return fmt.Errorf("%w (config rollback failed: %w; the config on disk was not restored and differs from the running generation)", err, rollbackErr)
 		}
 		return err
 	}
 	return nil
+}
+
+// restoreConfigBackup puts the pre-write config bytes back over configFile.
+func restoreConfigBackup(backup, configFile string) error {
+	original, err := os.ReadFile(backup)
+	if err != nil {
+		return err
+	}
+	return configedit.AtomicWrite(configFile, original)
 }
 
 // validateYAMLWithStore validates candidate config bytes against the

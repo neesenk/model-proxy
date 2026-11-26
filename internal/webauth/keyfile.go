@@ -96,18 +96,22 @@ func ReadKeyEntries(path string) []KeyEntry {
 }
 
 // WriteKeyEntries atomically rewrites the key file (0600, same dir) in the
-// canonical format. Parent directories are created 0700.
+// canonical format. Parent directories are created 0700. Labels and created
+// stamps are sanitized at this single write point: the gate parses every
+// non-comment line as a credential, so a line break inside key metadata must
+// never reach the file as a token line.
 func WriteKeyEntries(path string, entries []KeyEntry) error {
 	if strings.TrimSpace(path) == "" {
 		return fmt.Errorf("key file path is empty")
 	}
 	var b strings.Builder
 	for _, e := range entries {
-		if e.Label != "" {
-			fmt.Fprintf(&b, "%s%s\n", labelMarker, e.Label)
+		label, created := sanitizeKeyLabel(e.Label), sanitizeKeyLabel(e.Created)
+		if label != "" {
+			fmt.Fprintf(&b, "%s%s\n", labelMarker, label)
 		}
-		if e.Created != "" {
-			fmt.Fprintf(&b, "%s%s\n", createdMarker, e.Created)
+		if created != "" {
+			fmt.Fprintf(&b, "%s%s\n", createdMarker, created)
 		}
 		fmt.Fprintf(&b, "%s\n", e.Token)
 	}
@@ -121,9 +125,22 @@ func WriteKeyEntries(path string, entries []KeyEntry) error {
 	return os.Rename(tmp, path)
 }
 
+// sanitizeKeyLabel makes one metadata field safe for the line-oriented file:
+// CR and LF become spaces and the result is trimmed, so a label or created
+// stamp can never break onto its own line and parse as a credential (the gate
+// treats every non-comment line as a token). The admin entry points reject
+// such labels up front; this is the write-side backstop for any other caller.
+func sanitizeKeyLabel(field string) string {
+	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(field, "\r", " "), "\n", " "))
+}
+
 // Resolve returns the configured token that the presented credential matches
 // ("" when none). The comparison walks the whole set exactly like Accept, so
-// which-key attribution leaks no more timing than the gate itself.
+// which-key attribution leaks no more timing than the gate itself: every
+// candidate is compared whatever line hits, and the matched index is latched
+// with branch-free mask arithmetic — nothing inside the loop depends on WHICH
+// line matched; only the exit test reads "some line matched", the same bit
+// Accept returns.
 func Resolve(s *Source, presented string) string {
 	if s == nil || presented == "" {
 		return ""
@@ -132,10 +149,16 @@ func Resolve(s *Source, presented string) string {
 	if err != nil {
 		return ""
 	}
-	for _, tok := range toks {
-		if subtleEqual(tok, presented) {
-			return tok
-		}
+	found, matched := 0, 0
+	for i, tok := range toks {
+		hit := subtle.ConstantTimeCompare([]byte(presented), []byte(tok))
+		// A hit latches its index only while nothing has matched yet (the
+		// first match wins).
+		matched += (i - matched) * (hit & (1 - found))
+		found |= hit
+	}
+	if found == 1 {
+		return toks[matched]
 	}
 	return ""
 }
@@ -160,10 +183,4 @@ func KeyIDFrom(ctx context.Context) string {
 	}
 	id, _ := ctx.Value(keyIDCtx{}).(string)
 	return id
-}
-
-// subtleEqual is the constant-time comparison Accept uses (aliased so the
-// gate and Resolve share one implementation).
-func subtleEqual(a, b string) bool {
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }

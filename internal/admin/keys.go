@@ -8,10 +8,14 @@ package admin
 // listings carry only the sha256 id and a display-safe prefix.
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/appapi"
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/webauth"
@@ -43,13 +47,35 @@ func (s *Service) APIKeys() (appapi.KeysResult, error) {
 	return appapi.KeysResult{Enabled: true, Keys: keys}, nil
 }
 
+// validateKeyLabel rejects a forward-key label that must not reach the
+// line-oriented key file or would flood later listings: the gate parses every
+// non-comment file line as a credential, so a control character in a label
+// (CR/LF above all) would inject a working key. The length limit is the one
+// account labels share (accounts.MaxLabelLen, counted in runes). Empty is
+// valid — it clears the label. The caller trims first, so only control
+// characters INSIDE the label are refused.
+func validateKeyLabel(label string) error {
+	if strings.ContainsFunc(label, unicode.IsControl) {
+		return appapi.NewHTTPError(http.StatusBadRequest, "label must not contain control characters")
+	}
+	if utf8.RuneCountInString(label) > accounts.MaxLabelLen {
+		return appapi.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("label is longer than %d characters", accounts.MaxLabelLen))
+	}
+	return nil
+}
+
 // CreateAPIKey mints one new key and appends it with its label/created
 // metadata. The write is atomic; the gate accepts the new key within its TTL.
+// The label is trimmed and validated before anything is minted or written.
 func (s *Service) CreateAPIKey(label string) (appapi.APIKeyCreated, error) {
 	path := s.keyFilePath()
 	if path == "" {
 		return appapi.APIKeyCreated{}, appapi.NewHTTPError(http.StatusConflict,
 			"web.auth.api_keys_file is not configured — the forward surface is unauthenticated (loopback deployment); set it before managing keys")
+	}
+	label = strings.TrimSpace(label)
+	if err := validateKeyLabel(label); err != nil {
+		return appapi.APIKeyCreated{}, err
 	}
 	token, err := webauth.GenerateToken()
 	if err != nil {
@@ -74,17 +100,23 @@ func (s *Service) CreateAPIKey(label string) (appapi.APIKeyCreated, error) {
 // SetAPIKeyLabel changes one key's label (metadata only: the token — hence
 // the sha256 id, the gate and all usage attribution — and the created stamp
 // stay untouched). An empty label clears it back to the unlabeled display;
-// the atomic rewrite preserves every other entry and hand edits.
+// the atomic rewrite preserves every other entry and hand edits. The label
+// is validated before the file is read, so a rejected label never rewrites
+// the file.
 func (s *Service) SetAPIKeyLabel(id, label string) error {
 	path := s.keyFilePath()
 	if path == "" {
 		return appapi.NewHTTPError(http.StatusConflict, "web.auth.api_keys_file is not configured")
 	}
+	label = strings.TrimSpace(label)
+	if err := validateKeyLabel(label); err != nil {
+		return err
+	}
 	entries := webauth.ReadKeyEntries(path)
 	found := false
 	for i := range entries {
 		if webauth.KeyID(entries[i].Token) == id {
-			entries[i].Label = strings.TrimSpace(label)
+			entries[i].Label = label
 			found = true
 		}
 	}

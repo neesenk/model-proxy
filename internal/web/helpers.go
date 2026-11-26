@@ -134,25 +134,46 @@ func parseStatsTime(v string) (int64, bool) {
 	return 0, false
 }
 
+// errBadFrom / errBadTo are the fail-closed answer to a ?from/?to selector that
+// is neither unix seconds nor RFC3339. Every endpoint that takes the bound
+// answers with exactly this message (the /api/tokens contract), so the text
+// is defined once here.
+var (
+	errBadFrom = errors.New("from must be unix seconds or RFC3339")
+	errBadTo   = errors.New("to must be unix seconds or RFC3339")
+)
+
+// writeBadTimeBound answers a request whose ?from/?to selector did not parse
+// with the time-bound family's 400 (errBadFrom / errBadTo).
+func writeBadTimeBound(w http.ResponseWriter, err error) {
+	writeJSONErr(w, http.StatusBadRequest, err.Error())
+}
+
 // statsWindow resolves the from/to unix-second bounds shared by the stats,
 // agents and analytics handlers: the window defaults to
 // [now-window, now] and each side is overridden by the ?from/?to query
-// params (unix seconds or RFC3339 via parseStatsTime; unparseable values
-// keep the default).
-func statsWindow(q url.Values, window time.Duration) (from, to int64) {
+// params (unix seconds or RFC3339 via parseStatsTime). Fail-closed: an
+// unparseable bound returns errBadFrom / errBadTo (the caller answers with
+// writeBadTimeBound) — a malformed selector must not silently keep the
+// default window.
+func statsWindow(q url.Values, window time.Duration) (from, to int64, err error) {
 	now := time.Now()
 	from, to = now.Add(-window).Unix(), now.Unix()
 	if v := q.Get("from"); v != "" {
-		if n, ok := parseStatsTime(v); ok {
-			from = n
+		n, ok := parseStatsTime(v)
+		if !ok {
+			return 0, 0, errBadFrom
 		}
+		from = n
 	}
 	if v := q.Get("to"); v != "" {
-		if n, ok := parseStatsTime(v); ok {
-			to = n
+		n, ok := parseStatsTime(v)
+		if !ok {
+			return 0, 0, errBadTo
 		}
+		to = n
 	}
-	return from, to
+	return from, to, nil
 }
 
 // providerModelPair keys the analytics price coverage: pricing resolves per

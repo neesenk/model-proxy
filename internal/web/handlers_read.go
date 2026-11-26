@@ -127,7 +127,7 @@ func (s *Server) handleMCPAnalytics(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("from"); v != "" {
 		n, ok := parseStatsTime(v)
 		if !ok {
-			writeJSONErr(w, http.StatusBadRequest, "from must be unix seconds or RFC3339")
+			writeBadTimeBound(w, errBadFrom)
 			return
 		}
 		from = n
@@ -135,7 +135,7 @@ func (s *Server) handleMCPAnalytics(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("to"); v != "" {
 		n, ok := parseStatsTime(v)
 		if !ok {
-			writeJSONErr(w, http.StatusBadRequest, "to must be unix seconds or RFC3339")
+			writeBadTimeBound(w, errBadTo)
 			return
 		}
 		to = n
@@ -227,15 +227,24 @@ func (s *Server) handleRequestsList(w http.ResponseWriter, r *http.Request) {
 	if f.Limit > 1000 {
 		f.Limit = 1000
 	}
+	// from/to are fail-closed selectors (the /api/tokens contract): an
+	// unparseable bound must not silently widen the window into an unbounded
+	// scan of the whole request log.
 	if v := q.Get("from"); v != "" {
-		if n, ok := parseStatsTime(v); ok {
-			f.From = time.Unix(n, 0)
+		n, ok := parseStatsTime(v)
+		if !ok {
+			writeBadTimeBound(w, errBadFrom)
+			return
 		}
+		f.From = time.Unix(n, 0)
 	}
 	if v := q.Get("to"); v != "" {
-		if n, ok := parseStatsTime(v); ok {
-			f.To = time.Unix(n, 0)
+		n, ok := parseStatsTime(v)
+		if !ok {
+			writeBadTimeBound(w, errBadTo)
+			return
 		}
+		f.To = time.Unix(n, 0)
 	}
 	f.UsageOnly = true
 	records, facets, err := queries.SummariesWithFacets(f)
@@ -337,7 +346,7 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 	if fromStr != "" {
 		n, ok := parseStatsTime(fromStr)
 		if !ok {
-			writeJSONErr(w, http.StatusBadRequest, "from must be unix seconds or RFC3339")
+			writeBadTimeBound(w, errBadFrom)
 			return
 		}
 		from = n / 60 * 60
@@ -345,7 +354,7 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 	if toStr != "" {
 		n, ok := parseStatsTime(toStr)
 		if !ok {
-			writeJSONErr(w, http.StatusBadRequest, "to must be unix seconds or RFC3339")
+			writeBadTimeBound(w, errBadTo)
 			return
 		}
 		to = n
@@ -383,8 +392,14 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleStats serves GET /api/stats. from/to are fail-closed selectors: an
+// unparseable bound is a 400, never a silently kept default window.
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	from, to := statsWindow(r.URL.Query(), time.Hour)
+	from, to, err := statsWindow(r.URL.Query(), time.Hour)
+	if err != nil {
+		writeBadTimeBound(w, err)
+		return
+	}
 	bucket := observestats.NormalizeBucket(r.URL.Query().Get("bucket"))
 	bs, err := s.reads.Stats(appapi.StatsQuery{From: from, To: to, Provider: r.URL.Query().Get("provider"), Model: r.URL.Query().Get("model"), BucketSecs: bucket})
 	if err != nil {
@@ -395,7 +410,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
-	from, to := statsWindow(r.URL.Query(), time.Hour)
+	from, to, err := statsWindow(r.URL.Query(), time.Hour)
+	if err != nil {
+		writeBadTimeBound(w, err)
+		return
+	}
 	bucket := observestats.NormalizeBucket(r.URL.Query().Get("bucket"))
 	bs, err := s.reads.AgentStats(appapi.AgentStatsQuery{From: from, To: to, Agent: r.URL.Query().Get("agent"), Provider: r.URL.Query().Get("provider"), Model: r.URL.Query().Get("model"), BucketSecs: bucket})
 	if err != nil {
@@ -410,7 +429,8 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 // validated here so an unknown value is a client error instead of a silently
 // empty result; from/to follow the /api/stats parsing convention (unix seconds
 // or RFC3339) and are converted to the audit log's unix-millisecond filter
-// domain (to is inclusive to the end of the named second).
+// domain (to is inclusive to the end of the named second). An unparseable
+// bound is a 400, never a silently unbounded audit query.
 func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	query := appapi.SecurityQuery{Kind: q.Get("kind"), Limit: 100}
@@ -429,14 +449,20 @@ func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 		query.Limit = 1000
 	}
 	if v := q.Get("from"); v != "" {
-		if n, ok := parseStatsTime(v); ok {
-			query.From = n * 1000
+		n, ok := parseStatsTime(v)
+		if !ok {
+			writeBadTimeBound(w, errBadFrom)
+			return
 		}
+		query.From = n * 1000
 	}
 	if v := q.Get("to"); v != "" {
-		if n, ok := parseStatsTime(v); ok {
-			query.To = n*1000 + 999
+		n, ok := parseStatsTime(v)
+		if !ok {
+			writeBadTimeBound(w, errBadTo)
+			return
 		}
+		query.To = n*1000 + 999
 	}
 	result, err := s.reads.Security(query)
 	if err != nil {
@@ -502,7 +528,11 @@ func (s *Server) handlePinList(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	from, to := statsWindow(q, 30*24*time.Hour)
+	from, to, err := statsWindow(q, 30*24*time.Hour)
+	if err != nil {
+		writeBadTimeBound(w, err)
+		return
+	}
 	// from=0 is the "all time" sentinel: clamp the window to the oldest
 	// persisted bucket so the echoed from (the chart's grid anchor) covers
 	// real history instead of epoch→now — decades of empty past also poison
