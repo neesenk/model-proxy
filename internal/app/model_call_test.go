@@ -337,3 +337,39 @@ func TestSliceAttemptContext_DominantShareWithReserve(t *testing.T) {
 		t.Errorf("last attempt deadline = %v, want the outer budget %v", got3, outer)
 	}
 }
+
+// A dispatch the concurrency gate refuses must give its occupancy back.
+// TakeInflightSlot counts the slot either way (a pinned dispatch really runs
+// against the account), so a refusal that returns without releasing leaves
+// the account one request "in flight" for the life of the process — unfreeze
+// clears the cap but never the in-flight count, so the next concurrency 429
+// re-saturates the account for good. The executor and the decisions leg
+// register the release before the gate; this seam must too.
+func TestScheduledExchange_SaturatedRefusalReleasesInflightSlot(t *testing.T) {
+	judge, judgeCalls := replyServer(t, 200, exchangeOKReply)
+	p, dash := newExchangeProxy(t,
+		map[string]configdomain.Provider{"judge": {AnthropicBaseURL: judge.URL}},
+		[]configdomain.RouteTarget{{Provider: "judge", Model: "m", Priority: 1}})
+	// The account has a learned limit of one and another request holds that
+	// one slot for the whole test. The operator pinned the judge route to the
+	// account, so the schedule still hands it out and the dispatch-time
+	// backstop is what refuses.
+	p.runtimeState.NoteConcurrencyLimit("judge", 1, 0, dash().Generation)
+	held, free := p.runtimeState.TakeInflightSlot("judge")
+	if !free {
+		t.Fatal("the first slot of a freshly capped account must be free")
+	}
+	defer p.runtimeState.ReleaseInflightSlot(held, true)
+	p.runtimeState.SetPin("judge", runtimestate.Pin{Provider: "judge"})
+
+	_, err := scheduledExchange{p: p}.exchange(context.Background(), p.SnapshotRuntime(), "judge", exchangeBody(), nil)
+	if err == nil || !strings.Contains(err.Error(), "concurrency limit") {
+		t.Fatalf("exchange error = %v, want the dispatch-time concurrency refusal", err)
+	}
+	if judgeCalls.load() != 0 {
+		t.Errorf("judge attempts = %d, want 0 (a refused dispatch never reaches the upstream)", judgeCalls.load())
+	}
+	if got := p.runtimeState.Concurrency("judge").Inflight; got != 1 {
+		t.Fatalf("judge account in flight = %d after the refused dispatch, want 1 (only the slot this test holds): the refusal leaked its occupancy", got)
+	}
+}

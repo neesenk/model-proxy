@@ -128,6 +128,12 @@ func (x scheduledExchange) exchange(ctx context.Context, snap forward.Snapshot, 
 		// dispatch-time backstop).
 		slot, free := x.p.takeInflight(t.Provider)
 		if !free {
+			// The slot was taken either way (a pinned dispatch really runs
+			// against the account); a refusal that kept it would read as one
+			// more request in flight for the life of the process — unfreeze
+			// clears the cap but never the count, so the account would be
+			// re-saturated for good by the next concurrency 429.
+			x.p.releaseInflight(slot, false)
 			lastErr = fmt.Errorf("adjudication call (%s): account at its concurrency limit", t.Provider)
 			continue
 		}
