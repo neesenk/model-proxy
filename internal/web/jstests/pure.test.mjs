@@ -32,7 +32,7 @@ import {
   liveSessionOrder, shortSessionId,
   fmtCompact,
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
-  CLIENT_GONE_STATUS, notLoggedHint,
+  CLIENT_GONE_STATUS, notLoggedHint, FAILOVER_PROVIDER, rowFailoverAttempt,
   quotaErrKind, accountUsageState, accountRemainingLabel, accountDenialLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta, scheduleCredentialLabel, syncErrLabel, keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
   parseModelLines, mergeFetchedModels, providerDeleteSummary,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
@@ -1859,6 +1859,45 @@ test('mergeLiveAndPersistedRow returns live when persisted is null', () => {
   assert.deepEqual(mergeLiveAndPersistedRow(live, null), live);
 });
 
+test('rowFailoverAttempt maps the two attempt semantics onto one labeled attempt number', () => {
+  assert.equal(FAILOVER_PROVIDER, '(failover)');
+  // 终态行（provider 哨兵）：attempt 是跳数——1 跳 = 没发生 failover，返回 0；
+  // ≥2 跳返回真实跳数（终态行本身就是那一跳，后面没有提交）。
+  assert.equal(rowFailoverAttempt({ provider: '(failover)', attempt: 0 }), 0);
+  assert.equal(rowFailoverAttempt({ provider: '(failover)', attempt: 1 }), 0);
+  assert.equal(rowFailoverAttempt({ provider: '(failover)', attempt: 2 }), 2);
+  assert.equal(rowFailoverAttempt({ provider: '(failover)', attempt: 5 }), 5);
+  // 已提交行（其他 provider）：attempt 是提交前的失败跳数——>0 即 failover，
+  // 返回提交那一跳的序号（失败跳数 + 1）。
+  assert.equal(rowFailoverAttempt({ provider: 'zhipu', attempt: 0 }), 0);
+  assert.equal(rowFailoverAttempt({ provider: 'zhipu', attempt: 1 }), 2);
+  assert.equal(rowFailoverAttempt({ provider: 'zhipu', attempt: 3 }), 4);
+  assert.equal(rowFailoverAttempt({ provider: '(cache)', attempt: 1 }), 2);
+  // 哨兵只认精确值：别的 provider 名里带 failover 字样不算终态行。
+  assert.equal(rowFailoverAttempt({ provider: 'my-failover', attempt: 1 }), 2);
+  // 输入归一：哨兵两端空白、attempt 为字符串/缺失、空行。
+  assert.equal(rowFailoverAttempt({ provider: ' (failover) ', attempt: '2' }), 2);
+  assert.equal(rowFailoverAttempt({ provider: 'zhipu' }), 0);
+  assert.equal(rowFailoverAttempt({}), 0);
+  assert.equal(rowFailoverAttempt(null), 0);
+  assert.equal(rowFailoverAttempt(undefined), 0);
+});
+
+test('mergeLiveAndPersistedRow keeps the all-targets-failed sentinel over a provider-less live end row', () => {
+  // 全链失败的 live end 事件不带 provider（applyLiveEvent 落 '—'）；Live 会话面板
+  // 把 live 行叠在持久化行上时哨兵 "(failover)" 必须保留——否则合并行退化成已提交
+  // 行语义，单目标全失败又被计成 failover、标成 attempt 2。
+  const persisted = { requestId: 'r1', ts: 1000, provider: '(failover)', status: 502, latencyMs: 30, attempt: 1, inFlight: false };
+  const live = { requestId: 'r1', ts: 1000, provider: '—', status: 502, latencyMs: 30, inFlight: false };
+  const merged = mergeLiveAndPersistedRow(live, persisted);
+  assert.equal(merged.provider, '(failover)');
+  assert.deepEqual(sessionBarSummary(merged, (t) => String(t)), ['1000', '(failover)', '502 · 30ms']);
+  const health = sessionHealthSummary([merged, { ts: 0, latencyMs: 5, provider: 'zhipu', attempt: 0 }]);
+  assert.equal(health.failovers, 0);
+  // 其余行不变：live 仍然赢了 provider（既有契约）。
+  assert.equal(mergeLiveAndPersistedRow({ requestId: 'r2', provider: 'p' }, { requestId: 'r2', provider: 'old' }).provider, 'p');
+});
+
 test('quotaErrKind classifies quota snapshot errors', () => {
   assert.equal(quotaErrKind(null), '');
   assert.equal(quotaErrKind({}), '');
@@ -2471,6 +2510,31 @@ test('sessionTimeline stacks overlapping spans into new lanes, sequential into o
   assert.ok(/attempt 3/.test(err.svg));
 });
 
+test('sessionTimeline retry mark follows the row kind: terminal rows label the hop count', () => {
+  // 全链失败终态行（provider 哨兵 "(failover)"）的 attempt 是跳数：单目标路由
+  // 全失败时只有 1 跳、并没有 failover——不出 retry 标记；多目标全失败按真实
+  // 跳数标注（不是跳数 + 1）。已提交行的 attempt 是提交前的失败跳数，标注保持
+  // 现状（attempt + 1）。
+  const rows = [
+    { requestId: 'ok', ts: 0, latencyMs: 10, status: 200, provider: 'zhipu', attempt: 0 },
+    { requestId: 'single', ts: 5000, latencyMs: 10, status: 502, provider: '(failover)', attempt: 1 },
+    { requestId: 'multi', ts: 10000, latencyMs: 10, status: 502, provider: '(failover)', attempt: 2 },
+    { requestId: 'committed', ts: 15000, latencyMs: 10, status: 200, provider: 'zhipu', attempt: 1 },
+  ];
+  const tl = sessionTimeline(rows, { fmt: (t) => String(t) });
+  // 标记按时间序出现；<title> 是标记的悬停文案。
+  const marks = [...tl.svg.matchAll(/<circle class="tl-retry"[^>]*><title>([^<]*)<\/title><\/circle>/g)].map((m) => m[1]);
+  assert.deepEqual(marks, ['attempt 2 (failover)', 'attempt 2 (failover)']);
+  // 无障碍摘要是同一份判定：单目标终态行不带 failover 标注（provider 名里的
+  // "(failover)" 不是标注，所以断言的是 "attempt"）。
+  const aria = Object.fromEntries([...tl.svg.matchAll(/data-id="([^"]*)" aria-label="([^"]*)"/g)].map((m) => [m[1], m[2]]));
+  assert.deepEqual(Object.keys(aria), ['ok', 'single', 'multi', 'committed']);
+  assert.ok(!aria.ok.includes('attempt'), aria.ok);
+  assert.ok(!aria.single.includes('attempt'), aria.single);
+  assert.ok(aria.multi.includes('attempt 2 (failover)'), aria.multi);
+  assert.ok(aria.committed.includes('attempt 2 (failover)'), aria.committed);
+});
+
 test('sessionTimeline cumulative tokens line spans bottom-left to top-right', () => {
   const rows = [
     { requestId: 'a', ts: 0, latencyMs: 100, input: 10, output: 0 },
@@ -2707,6 +2771,21 @@ test('sessionBarSummary renders full and sparse rows, dropping absent fields', (
   assert.deepEqual(sessionBarSummary(null, fmt), []);
   // RFC3339 timestamps go through the caller's fmt like numbers do.
   assert.equal(sessionBarSummary({ ts: '2026-09-12T01:02:03Z' }, (t) => new Date(t).toISOString()).length, 1);
+});
+
+test('sessionBarSummary labels failover attempts by row kind', () => {
+  const fmt = (t) => 'T' + t;
+  // 单目标路由全失败的终态行：attempt（跳数）= 1，没有 failover——不出标注行。
+  assert.deepEqual(
+    sessionBarSummary({ ts: 5, provider: '(failover)', status: 502, latencyMs: 10, attempt: 1 }, fmt),
+    ['T5', '(failover)', '502 · 10ms'],
+  );
+  // 多目标全失败：标注真实跳数。
+  const multi = sessionBarSummary({ ts: 5, provider: '(failover)', status: 429, latencyMs: 10, attempt: 3 }, fmt);
+  assert.equal(multi[multi.length - 1], 'attempt 3 (failover)');
+  // 已提交行不变：attempt 是提交前的失败跳数，标注提交的那一跳。
+  const committed = sessionBarSummary({ ts: 5, provider: 'zhipu', status: 200, latencyMs: 10, attempt: 1 }, fmt);
+  assert.equal(committed[committed.length - 1], 'attempt 2 (failover)');
 });
 
 test('responseExcerpt extracts assistant text from all three protocol shapes', () => {
@@ -3285,6 +3364,32 @@ test('sessionHealthSummary derives health signals with gap/percentile guards', (
     { ts: 2500, latencyMs: 3, output: 20000, provider: 'bulk' },
   ]);
   assert.equal(withFastBulk.tokPerSec, Math.round((20100 / 1.503) * 10) / 10);
+});
+
+test('sessionHealthSummary counts an all-targets-failed terminal row as a failover only from 2 hops', () => {
+  // 单目标路由全失败：终态行 attempt（跳数）= 1，没有 failover。
+  const single = sessionHealthSummary([
+    { ts: 0, latencyMs: 900, provider: 'zhipu', model: 'm1', attempt: 0 },
+    { ts: 5000, latencyMs: 300, provider: '(failover)', model: 'm1', status: 502, attempt: 1 },
+  ]);
+  assert.equal(single.failovers, 0);
+  // 多目标全失败：跳数 ≥2 的终态行各计一次 failover。
+  const multi = sessionHealthSummary([
+    { ts: 0, latencyMs: 300, provider: '(failover)', status: 429, attempt: 2 },
+    { ts: 5000, latencyMs: 300, provider: '(failover)', status: 502, attempt: 3 },
+    { ts: 9000, latencyMs: 300, provider: '(failover)', status: 502, attempt: 1 },
+  ]);
+  assert.equal(multi.failovers, 2);
+  // 已提交行语义不变：attempt（提交前失败跳数）> 0 即 failover——(cache) 命中
+  // 与残留的未应答腿（attempt 是该腿的 0 基序号）走同一条规则。
+  const committed = sessionHealthSummary([
+    { ts: 0, latencyMs: 300, provider: 'zhipu', status: 200, attempt: 0 },
+    { ts: 5000, latencyMs: 300, provider: 'zhipu', status: 200, attempt: 1 },
+    { ts: 9000, latencyMs: 300, provider: '(cache)', status: 200, attempt: 0 },
+    { ts: 13000, latencyMs: 300, provider: 'shopee#f', status: 502, attempt: 0, attemptOnly: true },
+    { ts: 17000, latencyMs: 300, provider: 'shopee#f', status: 429, attempt: 1, attemptOnly: true },
+  ]);
+  assert.equal(committed.failovers, 2);
 });
 
 test('requestRowHTML cache badge shows the hit share and highlights at 80%', () => {

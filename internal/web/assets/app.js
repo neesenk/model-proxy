@@ -4613,7 +4613,8 @@ function renderLiveSessionPanel() {
 // panel's trace card: bars are the requests' spans (stacked swimlanes), the
 // polyline is cumulative tokens (cost stays a session-level chip in the
 // summary — pricing is server-owned), the amber dot marks a request that
-// failover-retried (attempt > 0 from the request log) and red bars are
+// failover-retried (per the pure.js failover-attempt rule: committed rows
+// attempt > 0; the all-targets-failed terminal row only from 2 hops) and red bars are
 // error responses. In-flight requests run to their segment's right edge.
 // Long idle gaps are compressed (dashed divider) so a short burst inside a
 // multi-hour session stays readable; a drag on the SVG zooms into a time

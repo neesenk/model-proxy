@@ -2239,6 +2239,28 @@ export function notLoggedHint(status) {
   return 'not logged — the request did not commit, so there is no request-log record';
 }
 
+// FAILOVER_PROVIDER 是全链失败终态行的 provider 哨兵（forward 的
+// terminalLogProvider）：代理自己的 502/429 应答，不对应任何上游——与缓存命中的
+// "(cache)" 同类。
+export const FAILOVER_PROVIDER = '(failover)';
+
+// rowFailoverAttempt 是「这一行涉没涉及 failover、标注第几跳」的唯一判定处：返回
+// 要标注的 attempt 序号，没有 failover 返回 0；调用方不得直接读 attempt。两类行的
+// attempt 语义不同：
+//   • 终态行（provider === FAILOVER_PROVIDER）：attempt 是跳数——序号排在最后一跳
+//     之后，单目标路由全失败（并没有 failover）时也是 1。跳数 ≥2 才算发生过一次
+//     failover，标注用真实跳数（终态行本身就是那一跳，后面没有提交）。
+//   • 已提交行（其他 provider）：attempt 是提交前的失败跳数——发生过 failover 才
+//     >0，标注提交那一跳的序号（失败跳数 + 1）。
+// 旧的 `attempt > 0` 判定把每一次单目标失败都计成 failover，并把终态行多标一跳。
+export function rowFailoverAttempt(row) {
+  if (!row) return 0;
+  const attempt = Number(row.attempt) || 0;
+  if (attempt <= 0) return 0;
+  if (String(row.provider || '').trim() === FAILOVER_PROVIDER) return attempt >= 2 ? attempt : 0;
+  return attempt + 1;
+}
+
 // mergeLiveAndPersistedRow overlays a live event row onto a persisted request
 // summary row. Live wins for in-flight state, status, latency, provider, model,
 // and guard/progress; persisted fills missing agent and tokens (non-streaming
@@ -2253,6 +2275,9 @@ export function mergeLiveAndPersistedRow(live, persisted) {
   if (live.status != null) base.status = live.status;
   if (live.latencyMs != null) base.latencyMs = live.latencyMs;
   if (live.provider != null && live.provider !== '') base.provider = live.provider;
+  // 全链失败终态行的哨兵必须留下：它的 live end 事件不带 provider（live 行是
+  // '—'），而 rowFailoverAttempt 靠这个哨兵区分终态行的 attempt 语义。
+  if (persisted.provider === FAILOVER_PROVIDER) base.provider = FAILOVER_PROVIDER;
   if (live.model != null && live.model !== '' && live.model !== '—') base.model = live.model;
   if (live.inFlight != null) base.inFlight = live.inFlight;
   if (live.guardHits && live.guardHits.length) base.guardHits = live.guardHits;
@@ -2397,7 +2422,7 @@ export function sessionHealthSummary(rows) {
   }
   const ttfts = list.map((r) => r.ttftMs).filter((v) => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
   if (ttfts.length) out.ttftP50Ms = ttfts[Math.min(ttfts.length - 1, Math.floor(0.5 * ttfts.length))];
-  out.failovers = list.filter((r) => r.attempt > 0).length;
+  out.failovers = list.filter((r) => rowFailoverAttempt(r) > 0).length;
   const cacheRead = list.reduce((s, r) => s + r.cacheRead, 0);
   const input = list.reduce((s, r) => s + r.input, 0);
   const denom = cacheRead + input;
@@ -2940,7 +2965,7 @@ function logTokensHTML(text) {
 //   <time> · <agent>
 //   <model> → <provider>
 //   <status> · <latency> · in <n> / out <n> tok · cache <n>
-//   in flight · attempt n+1 (failover)
+//   [in flight] · attempt <n> (failover)      (n from rowFailoverAttempt)
 export function sessionBarSummary(row, fmt, o) {
   if (!row) return [];
   const provLabel = o && o.providerLabel;
@@ -2972,7 +2997,8 @@ export function sessionBarSummary(row, fmt, o) {
   if (bits.length) lines.push(bits.join(' · '));
   const notes = [];
   if (row.inFlight) notes.push('in flight');
-  if (Number(row.attempt) > 0) notes.push(`attempt ${Number(row.attempt) + 1} (failover)`);
+  const failoverAttempt = rowFailoverAttempt(row);
+  if (failoverAttempt > 0) notes.push(`attempt ${failoverAttempt} (failover)`);
   if (notes.length) lines.push(notes.join(' · '));
   return lines;
 }
@@ -3154,7 +3180,7 @@ export function responseExcerpt(text, maxChars) {
 // stray drag never blanks the card.
 //
 // Rows accept the session panel's merged shape: {requestId, ts (unix ms or
-// RFC3339), latencyMs, status, input, output, attempt, inFlight, turnKey}. Rows
+// RFC3339), latencyMs, status, provider, input, output, attempt, inFlight, turnKey}. Rows
 // without a parseable ts are skipped (counted in .skipped). Returns
 // {svg, lanes, shown, skipped, segments} — empty svg when fewer than 2 rows
 // remain (1 when a zoom window is active); `shown` counts the rows the SVG
@@ -3191,6 +3217,9 @@ export function sessionTimeline(rows, opts) {
       status: Number(r.status) || 0,
       tokens: (Number(r.input) || 0) + (Number(r.output) || 0),
       attempt: Number(r.attempt) || 0,
+      // provider 只为 retry 标记随行：全链失败哨兵会改变 attempt 的含义
+      // （rowFailoverAttempt）。
+      provider: String(r.provider || '').trim(),
       inFlight: !!r.inFlight,
       turnKey: r.turnKey || '',
     });
@@ -3320,8 +3349,9 @@ export function sessionTimeline(rows, opts) {
     const w = Math.max(n.x1 - n.x0, 2);
     const y = topH + n.lane * laneH + (laneH - barH) / 2;
     let mark = '';
-    if (n.attempt > 0) {
-      mark = `<circle class="tl-retry" cx="${Math.max(n.x0 - 3, 1.5).toFixed(1)}" cy="${(y + barH / 2).toFixed(1)}" r="2.5"><title>attempt ${n.attempt + 1} (failover)</title></circle>`;
+    const failoverAttempt = rowFailoverAttempt(n);
+    if (failoverAttempt > 0) {
+      mark = `<circle class="tl-retry" cx="${Math.max(n.x0 - 3, 1.5).toFixed(1)}" cy="${(y + barH / 2).toFixed(1)}" r="2.5"><title>attempt ${failoverAttempt} (failover)</title></circle>`;
     }
     // No native <title> on the bar: app.js's shared hover tooltip owns the
     // visual layer (and adds a lazily fetched response excerpt); the aria
