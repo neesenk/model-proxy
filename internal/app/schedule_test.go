@@ -545,6 +545,54 @@ func TestScheduleStatus_SkippedReasonsOnPartialChain(t *testing.T) {
 	}
 }
 
+// A saturated account leaves the preview chain exactly like it leaves the
+// real one (DecideOrder drops it), and the Status→Schedule view says why: a
+// preview that still listed it showed a chain no request would follow, and
+// without its own reason the account read as generically "unavailable".
+func TestScheduleStatus_SaturatedAccountIsSkippedWithItsReason(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]configdomain.Provider{
+			"ok":   {Provider: testProviderID},
+			"busy": {Provider: testProviderID},
+		},
+		map[string][]configdomain.RouteTarget{"m": {
+			{Provider: "busy", Priority: 1},
+			{Provider: "ok", Priority: 2},
+		}})
+	generation := p.runtimeState.Dashboard(time.Now()).Generation
+	p.runtimeState.NoteConcurrencyLimit("busy", 1, 0, generation)
+	slot, free := p.runtimeState.TakeInflightSlot("busy")
+	if !free {
+		t.Fatal("the first slot of a freshly capped account must be free")
+	}
+	defer p.runtimeState.ReleaseInflightSlot(slot, false)
+
+	var st struct {
+		Models map[string]struct {
+			Ordered []struct {
+				Provider string `json:"provider"`
+			} `json:"ordered"`
+			Skipped []struct {
+				Provider string `json:"provider"`
+				Reason   string `json:"reason"`
+			} `json:"skipped"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(p.scheduleStatus(), &st); err != nil {
+		t.Fatal(err)
+	}
+	ri, ok := st.Models["m"]
+	if !ok {
+		t.Fatal("route m missing")
+	}
+	if len(ri.Ordered) != 1 || ri.Ordered[0].Provider != "ok" {
+		t.Fatalf("ordered = %+v, want only ok: the preview must drop the saturated account like the real scheduling does", ri.Ordered)
+	}
+	if len(ri.Skipped) != 1 || ri.Skipped[0].Provider != "busy" || ri.Skipped[0].Reason != "concurrency-saturated" {
+		t.Fatalf("skipped = %+v, want busy listed as concurrency-saturated", ri.Skipped)
+	}
+}
+
 // TestScheduleTierDeclaredBillingFallback pins the app wiring of the tier
 // rule "measurement wins, explicit `billing:` declaration fills the gap":
 // an unmeasured but declared-plan provider competes INSIDE the plan tier

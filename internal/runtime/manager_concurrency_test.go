@@ -493,6 +493,32 @@ func TestWaitInflightSlotEndsWhenReloadDropsTheAccount(t *testing.T) {
 	m.ReleaseInflightSlot(held, false)
 }
 
+// The preview (Status→Schedule, /debug/schedule, `model-proxy schedule`) must
+// drop a saturated account exactly like the real scheduling does: DecideOrder
+// filters it, so a preview that still lists it shows a chain no request
+// follows.
+func TestPreviewOrderDropsSaturatedAccountLikeDecideOrder(t *testing.T) {
+	m := newTestManager(4)
+	m.NoteConcurrencyLimit("a", 0, 1, 4)
+	held := takeSlot(t, m, "a")
+	defer m.ReleaseInflightSlot(held, false)
+
+	now := time.Now()
+	input := ScheduleInput{
+		Exposed: "route", SessionKey: "session", Now: now,
+		QuotaMaxAge: time.Hour, Dwell: time.Hour, Commit: false, Generation: 4,
+		Targets: []Target{{Provider: "a"}, {Provider: "b"}},
+	}
+	direct := m.DecideOrder(input)
+	if len(direct.Order) != 1 || direct.Order[0] != 1 {
+		t.Fatalf("real scheduling order = %v (target indexes), want only b (a is saturated)", direct.Order)
+	}
+	preview := m.Dashboard(now).PreviewOrder(input)
+	if !reflect.DeepEqual(preview.Order, direct.Order) {
+		t.Fatalf("preview order = %v, want the real scheduling order %v: the preview still lists the saturated account", preview.Order, direct.Order)
+	}
+}
+
 // TestCooldownStateIgnoresModelLocks: a model lock makes the scheduler drop
 // the target and the request ends through the ordinary all-failed path; it is
 // not an availability fact for the wait-retry decision (a lock about to lapse

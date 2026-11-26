@@ -370,7 +370,7 @@ Dashboard 复用同一预投影与指针复核流程。
 
 route sticky 记录 current provider 和 since。在 `sticky_dwell` 内优先当前 provider；驻留期结束后，只有 tier、priority 或 surplus margin 足够更优才切换。
 
-availability 过滤（发生在 sticky 判定之前）除了熔断/限频/模型锁，还排除**配额已知耗尽**的 plan target 和**并发占满**（已学到上限且在途已满）的账号：新鲜快照（`quota_poll_interval` 的 maxAge 内、无错误）的 ultimate RemainingPct==0 视为耗尽——粘住已知耗尽的账号只会白挨一轮确定性 429。快照过期或出错时 fail-open，退回反应式 429 冷却兜底；PayG/unknown 无窗口可耗尽，永不被此规则排除。PreviewOrder 走同一判定，Web 预览与真实调度一致——但并发饱和目前只在真实调度（`DecideOrder`）里过滤，预览（`PreviewOrder`，即 `/api/status.schedule`、`/debug/schedule`、`model-proxy schedule`）仍把饱和账号列在 ordered 里，在这一点上两者不一致。
+availability 过滤（发生在 sticky 判定之前）除了熔断/限频/模型锁，还排除**配额已知耗尽**的 plan target 和**并发占满**（已学到上限且在途已满）的账号：新鲜快照（`quota_poll_interval` 的 maxAge 内、无错误）的 ultimate RemainingPct==0 视为耗尽——粘住已知耗尽的账号只会白挨一轮确定性 429。快照过期或出错时 fail-open，退回反应式 429 冷却兜底；PayG/unknown 无窗口可耗尽，永不被此规则排除。PreviewOrder 走同一判定（含并发饱和），Web 预览与真实调度一致。
 
 **耗尽信号必须传导到失败分类**（`Manager.CooldownState`/`HasRecoveredUntried` 消费同一 quotaExhaustedUntil 判定）：skip 意味着耗尽 target 永远收不到那记教会 health 的上游 429，若分类只看 health，全耗尽 route 会读成"全部可用"→ 终局 502 无 `Retry-After`，且 `hasRecoveredUntried` 空转重排。正确语义：quota 耗尽在分类中是 **rate-limit 类 down 原因**，恢复时间取 ultimate 窗口 `ResetsAt` 与快照失鲜边界（`AsOf+maxAge`）的**较早者**（失鲜后 fail-open 回落反应式 429 冷却，客户端按短周期回来重探而不是对着陈旧数据等一个可能很远的 reset）；与 health 限频/熔断并存时取较晚者（两因皆清才可用）。全耗尽 route 因此终局 **429 + `Retry-After`**，与 skip 之前客户端拿到的退避信号一致。
 

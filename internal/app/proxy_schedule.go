@@ -507,8 +507,9 @@ func billingClassName(b provider.BillingClass) string {
 
 // blockedInfo is one target's down classification for the empty-chain
 // schedule case, most-explanatory reason first: frozen > rate-limited >
-// quota-exhausted > circuit > model-locked > unavailable. Derived from the
-// same detached dashboard snapshot the schedule preview used.
+// quota-exhausted > circuit > concurrency-saturated > model-locked >
+// unavailable. Derived from the same detached dashboard snapshot the schedule
+// preview used.
 type blockedInfo struct {
 	Provider string `json:"provider"`
 	Reason   string `json:"reason"`
@@ -519,7 +520,8 @@ type blockedInfo struct {
 // (the empty-chain Blocked list and the partial-chain Skipped tail share it)
 // so the Status→Schedule view can show WHY instead of a bare "no providers" —
 // the same facts the availability filter used (frozen / rate-limit / quota
-// exhaustion / circuit / model lock), read from the same detached dashboard
+// exhaustion / circuit / concurrency saturation / model lock), read from the
+// same detached dashboard
 // snapshot (single source, no second lock). Operator-disabled targets are
 // dropped entirely: the disable is deliberate, reversible operator state
 // surfaced in Status→Models, not a scheduling anomaly the chain should
@@ -549,6 +551,10 @@ func blockedReasons(snapshot runtimestate.DashboardSnapshot, targets []runtimest
 			info.Until = until(runtimestate.QuotaExhaustedUntil(snapshot.Quotas[target.Provider], now, quotaMaxAge))
 		case hasState && (state.CircuitState == "open" || state.CircuitState == "half_open"):
 			info.Reason, info.Until = "circuit", until(state.CircuitOpenUntil)
+		case hasState && state.ConcurrencyCap > 0 && state.Inflight >= state.ConcurrencyCap:
+			// Busy, not broken: a slot frees when one of the account's
+			// requests completes, so there is no dated recovery hint.
+			info.Reason = "concurrency-saturated"
 		default:
 			for _, lock := range snapshot.ModelLocks[target.Provider] {
 				if lock.Model == target.Model && now.Before(lock.LockedUntil) {

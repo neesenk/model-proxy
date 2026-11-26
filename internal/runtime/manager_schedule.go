@@ -653,7 +653,13 @@ func (snapshot DashboardSnapshot) PreviewOrder(input ScheduleInput) ScheduleResu
 		spread:  snapshot.spread,
 		rr:      snapshot.rr,
 		targetAvailable: func(target Target, now time.Time) bool {
-			if status, ok := snapshot.Providers[target.Provider]; ok && !status.Available {
+			// The same availability facts DecideOrder applies, read off the
+			// detached snapshot: health, saturation, model lock, quota.
+			status, hasStatus := snapshot.Providers[target.Provider]
+			if hasStatus && !status.Available {
+				return false
+			}
+			if hasStatus && status.ConcurrencyCap > 0 && status.Inflight >= status.ConcurrencyCap {
 				return false
 			}
 			for _, lock := range snapshot.ModelLocks[target.Provider] {

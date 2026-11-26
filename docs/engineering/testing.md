@@ -433,7 +433,8 @@ kimi/zhipu 的配额解析内嵌在带 I/O 的 `Usage()` 里尚未纯函数化�
 | 请求感知改道留痕 | 图片请求裁掉无图像能力的首选目标：响应头 `x-mp-reroute` 与已提交请求日志行的 `schedule.note` 是同一条 fit 判词；全程不改道的请求两者皆无 | `TestForward_RequestAwareRerouteLogsScheduleNote` |
 | 腿行描述自己的跳 | 每条 attempt_only 腿带该跳的墙钟延迟（真实上游往返 ≥ 夹具保证的下限、派发前门禁跳过低于它）与上游模型；`failed_hops[].latency_ms` 端到端带出真实跳的延迟 | `internal/forward` 的 `TestServeLegCarriesHopLatencyAndUpstreamModel`、`internal/app` 的 `TestForward_AllTargetsFailedFoldsLegsIntoTerminalRow` |
 | 并发型 429 学上限、不冷却 | 上游明说 `limit: N` → 上限 N（权威）；未明说而派发时另有 K 个在途 → 推断上限降到 K；没有同伴 → 仍是 transient 冷却；带重置提示/Retry-After → 时间 horizon 优先 | `internal/targetexec` 的 `TestParseRateLimitConcurrency`、`TestExecutorConcurrency429TeachesLimitInsteadOfCooldown` |
-| 账本与门禁（管理器） | 占位/释放配对且拒绝的占位也计数、明说权威、推断只降不升与满载上调、饱和离开调度但 MCP 选号不受影响、冷却判定按限频类无 horizon、unfreeze 清上限留在途、reload 剪枝、释放即唤醒 | `internal/runtime` 的 `manager_concurrency_test.go` |
+| 账本与门禁（管理器） | 占位/释放配对且拒绝的占位也计数、明说上限权威、推断只降不升与满载上调、饱和离开调度但 MCP 选号不受影响、冷却判定按限频类无 horizon、unfreeze 清上限留在途、reload 剪枝、释放出空位即唤醒（无关账号的释放不结束等待；清除上限与移除账号同样唤醒） | `internal/runtime` 的 `manager_concurrency_test.go` |
+| 预览与真实调度同判饱和 | 饱和账号在 `PreviewOrder` 与 `DecideOrder` 里同样被剔除；调度状态把它列进 `skipped` 并给出独立原因 `concurrency-saturated` | `internal/runtime` 的 `TestPreviewOrderDropsSaturatedAccountLikeDecideOrder`、`internal/app` 的 `TestScheduleStatus_SaturatedAccountIsSkippedWithItsReason` |
 | 饱和账号不派发 | 真实 429 学到上限后，占满的账号不再被联系（请求直达兄弟账号），空位腾出后恢复 | `internal/app` 的 `TestForward_SaturatedAccountIsSkippedWithoutUpstreamCall` |
 | 全部候选饱和 | 等空位（事件驱动，单轮 ≤ `retry_wait`，≤2 轮）：空位腾出则被服务；始终无位 → 429 + `Retry-After: 1`；客户端断开 499；`retry_wait: "0"` 不等待 | `internal/routing` 的 `TestDecideFailureSaturation`、`internal/forward` 的 `TestServeAllSaturated*`、`TestServeClientGoneDuringInflightWait`、`internal/app` 的 `TestForward_AllTargetsSaturated*` |
 | pin 命中饱和账号 | 照常派发到被 pin 的账号，不改道不等待 | `internal/app` 的 `TestForward_PinDispatchesIntoASaturatedAccount` |
