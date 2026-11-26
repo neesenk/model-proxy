@@ -237,65 +237,6 @@ func TestHandlePinAPI(t *testing.T) {
 	}
 }
 
-// TestPin_BypassesCache is the pin×cache regression (sibling of the replay×cache
-// fix): after a request is cached from provider A, pinning B and re-sending the
-// SAME request must hit B, not return A's stale cached answer. Before the fix the
-// cache lookup ran before the pin's `force` was computed, so the pin was defeated.
-func TestPin_BypassesCache(t *testing.T) {
-	var aHits, bHits int
-	aUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		aHits++
-		w.Write([]byte(`{"from":"a"}`))
-	}))
-	defer aUp.Close()
-	bUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		bHits++
-		w.Write([]byte(`{"from":"b"}`))
-	}))
-	defer bUp.Close()
-
-	cfg := &configdomain.Config{
-		Providers: map[string]configdomain.Provider{
-			"a": {OpenAIBaseURL: aUp.URL, Provider: testProviderID},
-			"b": {OpenAIBaseURL: bUp.URL, Provider: testProviderID},
-		},
-		Routes: map[string][]configdomain.RouteTarget{"glm": {
-			{Provider: "a", Model: "glm", Priority: 1},
-			{Provider: "b", Model: "glm", Priority: 2},
-		}},
-		Cache: configdomain.CacheConfig{Enabled: true, TTL: "1h"},
-	}
-	p := newTestProxy(t, cfg)
-	p.providers["a"] = &testProv{key: "a"}
-	p.providers["b"] = &testProv{key: "b"}
-	px := httptest.NewServer(http.HandlerFunc(p.Handler))
-	defer px.Close()
-
-	body := `{"model":"glm","input":[]}`
-	// Prime: a (priority 1) serves + caches.
-	_, prime := post(t, px.URL+"/v1/responses", body)
-	if !strings.Contains(prime, `"from":"a"`) {
-		t.Fatalf("prime: expected a, got %s", prime)
-	}
-	// Pin b.
-	if !setPinForTest(p, "glm", "b", 0) {
-		t.Fatal("setPin b failed")
-	}
-	// Same request, now pinned to b → must bypass cache and hit b.
-	_, pinned := post(t, px.URL+"/v1/responses", body)
-	if !strings.Contains(pinned, `"from":"b"`) {
-		t.Errorf("pinned request returned %s, expected b (pin must bypass the a-cached answer)", pinned)
-	}
-	if bHits != 1 {
-		t.Errorf("bHits=%d want 1 (pin must reach b, not cache)", bHits)
-	}
-}
-
-// TestPin_ForcesThroughCircuit is the F4 regression: a pin is EXCLUSIVE — when
-// the pinned provider's circuit is open, the request is still forced to it (the
-// user pinned it to debug/compare), NOT silently failed over to another target.
-// Before the fix, avail() excluded the circuit-open pin → the pin was a no-op →
-// the request failed over to the priority-1 provider.
 func TestPin_ForcesThroughCircuit(t *testing.T) {
 	var aHit, bHit bool
 	aUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

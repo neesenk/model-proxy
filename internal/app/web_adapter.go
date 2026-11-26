@@ -11,7 +11,6 @@ import (
 	"model-proxy/internal/appapi"
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/fusion"
 	"model-proxy/internal/login"
 	obscounters "model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
@@ -325,7 +324,6 @@ func (p *Proxy) adminPorts(
 			p.mu.RLock()
 			cfg := p.cfg
 			warnings := append([]string(nil), p.routeWarnings...)
-			cache := p.cache
 			expanded := p.expandedRoutes
 			parentOf := p.parentOf
 			poolIndex := p.poolIndex
@@ -335,7 +333,6 @@ func (p *Proxy) adminPorts(
 			return admin.DashboardState{
 				Listen:        cfg.Listen,
 				RouteWarnings: warnings,
-				Cache:         cache,
 				Runtime:       runtimeSnapshot,
 				QuotaEnabled:  p.quota != nil,
 				StartedAt:     p.metrics.StartedAt(),
@@ -468,9 +465,6 @@ func (p *Proxy) adminPorts(
 				toolRows = filtered
 			}
 			return rows, toolRows, nil
-		},
-		FusionSnapshot: func(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
-			return p.fusionReg.Snapshot(workflow, now)
 		},
 		Pins: func() map[string]admin.PinState {
 			pins := p.listPins()

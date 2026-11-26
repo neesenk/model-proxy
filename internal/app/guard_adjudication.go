@@ -42,9 +42,9 @@ func (p *Proxy) startAdjudication(stateDir string) {
 }
 
 // adjudicationStateDir derives the adjudication state directory from the
-// injected state path — the same directory as quota_state.json and
-// cache_state.json (the CacheStatePath recipe), so tests stay hermetic
-// instead of touching the real ~/.model-proxy. An empty state path keeps
+// injected state path — the same directory as quota_state.json and the other
+// runtime state files, so tests stay hermetic instead of touching the real
+// ~/.model-proxy. An empty state path keeps
 // the adjudication state in memory.
 func adjudicationStateDir(statePath string) string {
 	if statePath == "" {
@@ -141,7 +141,7 @@ func (p *Proxy) AdjudicationConfig() (model string, timeout time.Duration, block
 // recording → probe.Do transport). It deliberately never goes through the
 // forward transport pipeline: the judged snippet contains the matched
 // pattern and would re-trigger the guard (self-recursion), and internal
-// adjudication traffic must not pollute the request log, cache or stats.
+// adjudication traffic must not pollute the request log or forward stats.
 // This struct owns the judge domain only: prompt shape and verdict parsing.
 type adjudicationCaller struct {
 	p    *Proxy

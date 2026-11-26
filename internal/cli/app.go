@@ -52,7 +52,6 @@ func NewApplication(serve func(args []string)) *Application {
 		"unfreeze": ProcessCommand(cliadmin.RunUnfreeze),
 		"freeze":   ProcessCommand(cliadmin.RunFreeze),
 		"stats":    ProcessCommand(clistats.RunStats),
-		"cache":    ProcessCommand(clistatus.RunCache),
 		"doctor":   ProcessCommand(clidoctor.RunDoctor),
 		"audit":    ProcessCommand(cliaudit.RunAudit),
 		"guard":    ProcessCommand(cliguard.RunGuard),
@@ -63,7 +62,6 @@ func NewApplication(serve func(args []string)) *Application {
 		// server speaks MCP stdio on the injected stdin/stdout.
 		"mcp-server": climcpserver.RunServer,
 		"replay":     ProcessCommand(clidiag.RunReplay),
-		"shadow":     ProcessCommand(clidiag.RunShadow),
 		"routing":    ProcessCommand(clidiag.RunRouting),
 		"wire":       ProcessCommand(clidiag.RunWire),
 	}

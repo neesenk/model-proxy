@@ -362,7 +362,6 @@ func SplitProviderPrefix(providers map[string]configdomain.Provider, calledModel
 
 // CollectCrossRoute gathers matching concrete targets from all expanded routes.
 // Identity ignores Priority; duplicate identities keep their lowest priority.
-// Fusion recipes are deliberately route-local and are never collected.
 func CollectCrossRoute(
 	expanded map[string][]configdomain.RouteTarget,
 	keep func(configdomain.RouteTarget) bool,
@@ -375,7 +374,7 @@ func CollectCrossRoute(
 	best := make(map[targetKey]configdomain.RouteTarget)
 	for _, targets := range expanded {
 		for _, target := range targets {
-			if target.Provider == configdomain.FusionProvider || (keep != nil && !keep(target)) {
+			if keep != nil && !keep(target) {
 				continue
 			}
 			key := targetKey{
@@ -484,13 +483,12 @@ func (planner Planner) ApplyWithProfile(
 	}
 	inRoute := make([]configdomain.RouteTarget, 0, len(ordered))
 	for _, target := range ordered {
-		if target.Provider == configdomain.FusionProvider ||
-			Fits(
-				planner.catalog,
-				CapabilitiesFor(planner.config, planner.parentOf, target),
-				target.Model,
-				profile,
-			) {
+		if Fits(
+			planner.catalog,
+			CapabilitiesFor(planner.config, planner.parentOf, target),
+			target.Model,
+			profile,
+		) {
 			inRoute = append(inRoute, target)
 		}
 	}

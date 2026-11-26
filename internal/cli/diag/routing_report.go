@@ -254,7 +254,6 @@ type routingReport struct {
 	BusinessRequests int
 	WeakLabelSummary weakLabelSummary
 	SelectorMatrix   selectorMatrix
-	EvalVerdicts     evalVerdictReport
 	Cost             costReport
 	Overhead         overheadReport
 }
@@ -284,18 +283,6 @@ type selectorMatrixRow struct {
 	Actual     string
 	Samples    int
 	WeakOK     int
-}
-
-type evalVerdictReport struct {
-	Rows []evalVerdictRow
-}
-
-type evalVerdictRow struct {
-	Route        string
-	PrimaryGrade string `json:"primary_grade"`
-	ShadowGrade  string `json:"shadow_grade"`
-	Verdict      string
-	Samples      int
 }
 
 type costReport struct {
@@ -353,7 +340,6 @@ func buildRoutingReport(rows []routingRow, cfg *configdomain.Config, opts routin
 	weakRows := evaluateWeakLabels(business, opts.RetryWindow)
 	report.WeakLabelSummary = summarizeWeakLabels(weakRows)
 	report.SelectorMatrix = buildSelectorMatrix(weakRows)
-	report.EvalVerdicts = buildEvalVerdictReport(rows)
 	report.Cost = buildCostReport(weakRows, cfg, catalog)
 	report.Overhead = buildOverheadReport(decisions, business)
 
@@ -361,7 +347,7 @@ func buildRoutingReport(rows []routingRow, cfg *configdomain.Config, opts routin
 }
 
 func isDecisionRecord(requestID string) bool {
-	return strings.HasPrefix(requestID, "route-select-") || strings.HasPrefix(requestID, "fusion-select-")
+	return strings.HasPrefix(requestID, "route-select-")
 }
 
 func isExcludedRecord(requestID string) bool {
@@ -564,62 +550,6 @@ func sortMatrixRows(rows []selectorMatrixRow) {
 	})
 }
 
-func buildEvalVerdictReport(rows []routingRow) evalVerdictReport {
-	type key struct {
-		route        string
-		primaryGrade string
-		shadowGrade  string
-		verdict      string
-	}
-	aggs := map[key]*evalVerdictRow{}
-	for _, r := range rows {
-		if !strings.HasPrefix(r.RequestID, "shadow-") {
-			continue
-		}
-		verdict := ""
-		shadowGrade := ""
-		for _, d := range r.Diagnostics {
-			switch d.Code {
-			case "eval_verdict":
-				verdict = d.Detail
-			case "eval_shadow_grade":
-				shadowGrade = d.Detail
-			}
-		}
-		if verdict == "" {
-			continue
-		}
-		primaryGrade := ""
-		if r.Routing != nil {
-			primaryGrade = r.Routing.Grade
-		}
-		k := key{route: r.Exposed, primaryGrade: primaryGrade, shadowGrade: shadowGrade, verdict: verdict}
-		agg, ok := aggs[k]
-		if !ok {
-			agg = &evalVerdictRow{Route: k.route, PrimaryGrade: k.primaryGrade, ShadowGrade: k.shadowGrade, Verdict: k.verdict}
-			aggs[k] = agg
-		}
-		agg.Samples++
-	}
-	list := make([]evalVerdictRow, 0, len(aggs))
-	for _, agg := range aggs {
-		list = append(list, *agg)
-	}
-	sort.Slice(list, func(i, j int) bool {
-		if list[i].Route != list[j].Route {
-			return list[i].Route < list[j].Route
-		}
-		if list[i].PrimaryGrade != list[j].PrimaryGrade {
-			return list[i].PrimaryGrade < list[j].PrimaryGrade
-		}
-		if list[i].ShadowGrade != list[j].ShadowGrade {
-			return list[i].ShadowGrade < list[j].ShadowGrade
-		}
-		return list[i].Verdict < list[j].Verdict
-	})
-	return evalVerdictReport{Rows: list}
-}
-
 func buildCostReport(rows []weakRow, cfg *configdomain.Config, catalog *pricing.Catalog) costReport {
 	// ResolveAliased needs overrides and aliases from config.
 	overrides := map[string]pricing.Override{}
@@ -757,7 +687,7 @@ func loadPricingCatalog(cfg *configdomain.Config) *pricing.Catalog {
 }
 
 func renderRoutingReportText(report routingReport) {
-	if report.BusinessRequests == 0 && len(report.EvalVerdicts.Rows) == 0 {
+	if report.BusinessRequests == 0 {
 		fmt.Println("(no routing business requests in range)")
 		return
 	}
@@ -778,9 +708,6 @@ func renderRoutingReportText(report routingReport) {
 	// Selector matrix.
 	renderMatrixTable("Selector enforce matrix", report.SelectorMatrix.Enforced)
 	renderMatrixTable("Selector shadow matrix", report.SelectorMatrix.Shadow)
-
-	// L2 eval verdicts.
-	renderEvalVerdictTable(report.EvalVerdicts)
 
 	// Cost.
 	fmt.Println()
@@ -823,20 +750,6 @@ func renderMatrixTable(title string, rows []selectorMatrixRow) {
 	for _, rw := range rows {
 		fmt.Printf("%-10s %-16.16s %-16.16s %-16.16s %8d %8d\n",
 			rw.Difficulty, rw.Predicted, rw.Actual, "", rw.Samples, rw.WeakOK)
-	}
-}
-
-func renderEvalVerdictTable(report evalVerdictReport) {
-	fmt.Println()
-	fmt.Println("L2 eval verdicts")
-	if len(report.Rows) == 0 {
-		fmt.Println("  (no eval shadow samples)")
-		return
-	}
-	fmt.Printf("%-16s %-14s %-14s %-16s %8s\n", "ROUTE", "PRIMARY", "SHADOW", "VERDICT", "SAMPLES")
-	for _, rw := range report.Rows {
-		fmt.Printf("%-16.16s %-14.14s %-14.14s %-16.16s %8d\n",
-			rw.Route, rw.PrimaryGrade, rw.ShadowGrade, rw.Verdict, rw.Samples)
 	}
 }
 

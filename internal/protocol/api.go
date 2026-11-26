@@ -149,7 +149,7 @@ func ShrinkImages(body []byte, maxBytes, maxDimension int) ([]byte, bool) {
 }
 
 // ExtractResponseText returns assistant-visible text from a non-streaming
-// response. It preserves Fusion's pre-extraction shape acceptance: Responses
+// response. Responses
 // has its own output-item walk; the other protocols share the legacy
 // Anthropic-content-then-Chat-string fallback.
 func ExtractResponseText(body []byte, proto Protocol) string {

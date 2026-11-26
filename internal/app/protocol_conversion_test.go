@@ -6,7 +6,6 @@ import (
 	"io"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/counters"
-	"model-proxy/internal/protocol"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -545,14 +544,6 @@ func assertNoSSEError(t *testing.T, events []sseEvent) {
 func sseDataMap(t *testing.T, event sseEvent) map[string]any {
 	t.Helper()
 	return unmarshalMap(t, []byte(event.data))
-}
-
-func extractCandidateText(body []byte, backendProto string) string {
-	wire, ok := protocol.Parse(backendProto)
-	if !ok {
-		return ""
-	}
-	return protocol.ExtractResponseText(body, wire)
 }
 
 const responsesTextSSE = "event: response.created\n" +

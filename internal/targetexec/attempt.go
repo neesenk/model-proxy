@@ -3,18 +3,15 @@ package targetexec
 import (
 	"net/http"
 
-	responsecache "model-proxy/internal/cache"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
 )
 
 // Runtime contains only the reload-scoped facts consumed by one target
-// execution. Scheduling is copied from the request's runtime snapshot; Cache
-// remains the store captured by that same generation.
+// execution. Scheduling and generation are copied from the request's snapshot.
 type Runtime struct {
 	Scheduling configdomain.Scheduling
 	Generation uint64
-	Cache      *responsecache.Store
 }
 
 // Exchange is the prepared HTTP exchange for one target. Body has already
@@ -80,7 +77,6 @@ type RequestProfile struct {
 type Scope struct {
 	CalledModel      string
 	Agent            string
-	CacheKey         string
 	Log              LogContext
 	ResponseContext  protocol.ResponseContext
 	ResponsesHistory []any
@@ -147,30 +143,12 @@ const (
 	OutcomeSkipped
 )
 
-// Commit is the only post-commit datum orchestration needs for Shadow: the
-// exact upstream request bytes after provider rewrite and parameter shaping.
-type Commit struct {
-	requestBody []byte
-}
-
-func NewCommit(requestBody []byte) *Commit {
-	return &Commit{requestBody: requestBody}
-}
-
-func (commit *Commit) RequestBody() []byte {
-	if commit == nil {
-		return nil
-	}
-	return commit.requestBody
-}
-
-// Result keeps scheduling and Shadow orchestration outside the executor while
-// making the target-level outcome explicit.
+// Result keeps scheduling outside the executor while making the target-level
+// outcome explicit.
 type Result struct {
 	Committed bool
 	Retried   []configdomain.RouteTarget
 	Outcome   Outcome
-	Commit    *Commit
 	// AttemptStatus/AttemptBody carry the observed status and a bounded body
 	// peek of a NON-committed failover leg (429 / >=500 / auth / transport
 	// error), so the pipeline can write an attempt_only request-log row for

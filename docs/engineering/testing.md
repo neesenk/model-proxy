@@ -23,7 +23,7 @@ gofmt -l .
 scripts/cover.sh
 ```
 
-并发密集 package（per-request snapshot、reload swap、SSE fan-out、后台 flusher 所在的 `internal/app`、`internal/runtime/...`、`internal/targetexec`、`internal/fusion`、`internal/cache`、`internal/shadow`、`internal/guard`、`internal/accounts`、`internal/observe/...`）的快速 race 门禁由以下命令执行，适合提交前快速验证；全量 `go test -race ./...` 仍是权威门禁，不可被它替代：
+并发密集 package（per-request snapshot、reload swap、SSE fan-out、后台 flusher 所在的 `internal/app`、`internal/runtime/...`、`internal/targetexec`、`internal/guard`、`internal/accounts`、`internal/observe/...`）的快速 race 门禁由以下命令执行，适合提交前快速验证；全量 `go test -race ./...` 仍是权威门禁，不可被它替代：
 
 ```bash
 scripts/race.sh
@@ -123,7 +123,7 @@ race-clean 只是必要条件。并发测试还必须断言功能不变量，例
 叶子包的纯行为测试与实现放在同一模块目录；composition root 只保留跨模块行为和
 HTTP/CLI 生命周期集成测试。例如 `internal/observe/events/hub_test.go` 精确断言
 ring cap、detached snapshot、取消订阅、慢消费者丢弃和终态查询；`internal/app` 只验证
-forward/cache/Fusion 发布语义及 `/api/events` SSE 契约。测试不得为读取内部状态
+forward/Shadow 发布语义及 `/api/events` SSE 契约。测试不得为读取内部状态
 而恢复根包 type alias、访问模块互斥锁或暴露 test-only 生产接口。
 
 根包只保留进程边界测试（`main_test.go` 的 build version 注入、`cli_serve_test.go`
@@ -177,28 +177,21 @@ store 和 task owner 测试归 `internal/web/*_test.go`；`internal/app` 只保�
 的集成行为。测试通过端口和 HTTP 结果断言，不得让 `internal/web` import root 或为
 读取 session/task 内部状态恢复 root-private hook。
 
-精确响应缓存的 key/store/recorder/header/replay 单测归
-`internal/cache/*_test.go`；`internal/app` 保留 force/pin bypass、协议转换后的
-客户端字节、client cancel、reload generation、live event 与 Web status 集成
-测试。缓存断言通过公开 `Stats` 与 HTTP 结果完成，不得读取内部 entry map/counter。
+协议转换后的客户端字节、client cancel、reload generation 与 live event
+集成测试归 `internal/app` 和 `internal/targetexec` 各自的行为边界。
 
 请求日志分两层。落盘 sink 的 writer rotation/权限、异步 drain/drop、retention/磁盘护栏/prune 与
 zstd 冷层归档单测归 `internal/observe/logfile/*_test.go`；其上的 Logger 包装（入队丢弃、
-关停排空、热窗透传）、Record 构造、header allowlist、top-K 查询、Summary 脱敏与 Shadow
+关停排空、热窗透传）、Record 构造、header allowlist、top-K 查询、Summary 脱敏与查询
 聚合单测归 `internal/observe/requestlog/*_test.go`；通用有界流捕获归
 `internal/transport/bodycapture/reader_test.go`。`internal/app` 只保留原始请求体与上游改写
 body 的映射、协议转换后客户端字节、HTTP list/detail 脱敏、replay 拒绝截断、
-Fusion/Shadow 记录以及 shutdown drain 顺序的集成测试。列表测试必须同时断言
+历史 Shadow 记录兼容以及 shutdown drain 顺序的集成测试。列表测试必须同时断言
 request body、response body、response headers 均不出现，不能只检查其中一项。
 
-Fusion 的 registry/budget、quorum/grace collection、judge/synthesis body、
-usage/rune helper 和 Engine gate/fan-out 单测归 `internal/fusion/*_test.go`；
-Shadow 的 sampling、concurrency gate、detached request rewrite/auth/header、
-fail-closed conversion 与 bounded capture 单测归
-`internal/shadow/*_test.go`。`internal/app` 只保留真实 resolver/target plan、reload
-generation、target policy、stream/client response、metrics/events/request log
-和 Shadow-before-drain 集成；不得为检查 semaphore、registry ring 或随机数而
-暴露内部字段或恢复根兼容类型。
+route selector 的请求画像构造归 `internal/forward/selector_test.go`。
+`internal/app` 只保留真实 resolver/target plan、reload generation、target
+policy、stream/client response、metrics/events/request log 和 lifecycle drain 集成。
 
 SQLite stats 的 schema/additive migration、legacy import、minute/agent upsert、
 retention、raw/wide/calendar 查询与 query plan 测试归
@@ -238,9 +231,7 @@ unvalidated 安全网、reload 失败恢复 .bak、fetch/probe 取消不写入�
 接线归 `internal/web/handlers_command_test.go`，ModelRefreshRuntime/ModelCapsReplace
 端口装配与 reload 前 fingerprint 拒绝归 `internal/app/proxy_read_view_test.go`。
 
-缓存统计跨 reload（含旧 snapshot 迟到 Lookup）、关闭后 reset、并发 save/reset 和写盘失败
-保留计数归 `internal/app/cache_state_test.go`；共享计数与各代响应条目隔离归
-`internal/cache/counters_test.go`。配置锁等待取消归 `internal/configedit/lock_test.go`，
+配置锁等待取消归 `internal/configedit/lock_test.go`，
 Provider 模型列表 HTTP 取消归 `internal/provider/models_context_test.go`。
 
 generation-scoped health、sticky、pin、model lock、paramBlock、spread、quota、
@@ -251,7 +242,7 @@ model/param 隔离、quota 嵌套 slice 深拷贝、schedule commit gate、resol
 gate、quota projection 与 health/pin/sticky/spread 的单锁决策、Dashboard
 PreviewOrder 的 order/sticky/facts parity 与无 mutation，以及并发 snapshot 的
 generation 与内容不会混代。`internal/app` 只保留真实
-forward/Fusion/reload/HTTP/CLI/persistence/quota poll 编排；集成测试通过公开行为
+forward/reload/HTTP/CLI/persistence/quota poll 编排；集成测试通过公开行为
 或 detached snapshot 断言，不得访问 Manager mutex 或恢复第二份内部 map。
 
 ### 时序纪律契约
@@ -296,7 +287,7 @@ helper 在被触及时顺手替换。八个模式（每条带本仓真实范例�
   分支在构造上为真，与在途轮次耗时解耦。范例：forward harness 的
   `earliestIn`（pitfalls #36 之后的修正形态）。
 - **P5 下界断言**：join 之后断言耗时 ≥ 被测窗口——cancel 与 return 同点时，
-  一条断言同时证明"等满"与"未提前"。范例：fusion grace、probe latency。
+  一条断言同时证明"等满"与"未提前"。范例：probe latency。
 - **P6 join/barrier 汇合**：`wg.Wait`/channel close 之后再断言，绝不裸
   goroutine 断言。
 - **P7 定向重复**：时序相关用例交付前 `go test -race -cpu 1,2 -count=N`
@@ -402,7 +393,7 @@ kimi/zhipu 的配额解析内嵌在带 I/O 的 `Usage()` 里尚未纯函数化�
 | 转发路径的凭据拒绝上页面 | 账号归因三类（订阅失效 400 / 刷新后仍 401 / 账号停用 403）经真实 admin 端口同时出现在三处：`credential_alerts`（key、类别、上游证据）、该账号 quota 条目的 `denial`、Schedule 节点 `credential` 徽标；健康兄弟账号三处皆无；账号下一次 2xx 后三处一起消失 | `TestForward_CredentialDenialSurfacesInStatusE2E` |
 | 全链失败终态落行 | 所有候选失败（代理回 502）时请求落一行终态行（`provider="(failover)"`，status 与 body 是客户端实际收到的，请求体保留），每一跳都有 attempt_only 腿，列表折叠为一行终态 + `failed_hops`，终态行不贡献 token | `TestForward_AllTargetsFailedFoldsLegsIntoTerminalRow` |
 | 腿选择（unknown 优先于死腿） | 模型级当前腿 no 且存在 probed-yes/unknown 替代腿 → 请求实际打到替代腿的 wire 路径；全 no 维持原协议让错误浮现 | `TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E` |
-| 响应 model 归一化（alias） | alias 路由请求体 model 改写为上游名；响应 model 在 buffered、SSE、cache-hit 重放三条客户端路径上都归一回 calledModel，上游名不泄漏 | `TestForward_AliasResponseModelNormalizationE2E` |
+| 响应 model 归一化（alias） | alias 路由请求体 model 改写为上游名；响应 model 在 buffered 与 SSE 客户端路径上归一回 calledModel，上游名不泄漏 | `TestForward_AliasResponseModelNormalizationE2E` |
 | 跨层一致性 | forward 与 takeover 在全部 verdict 叉积上都不使用 probed-no 腿（all-no 例外见条目 31） | `internal/takeover` 的 `TestProtocolLayersNeverPassThroughProbedNoLegs` |
 
 真实上游维度的对应验证由 `tools/agenttest` 承担（`sweep.mjs` 参数矩阵、
@@ -428,7 +419,7 @@ wire-shape + 错误注入三套测试覆盖 harness。
 
 ## 模型覆盖度 triage（coding agent 契约，规则之外的托底层）
 
-确定性门禁只知道数字，不知道哪条单见证分支是承重的。这一层**不写代码**：数据管道复用确定性工具，语义判断由 coding agent 按本契约执行（开发期模型调用走指令契约；产品运行时的模型调用——guard 判定、Fusion judge——才进代码并受 fail-closed 契约约束，这是两类模型使用的分界线）。执行步骤：
+确定性门禁只知道数字，不知道哪条单见证分支是承重的。这一层**不写代码**：数据管道复用确定性工具，语义判断由 coding agent 按本契约执行（开发期模型调用走指令契约；产品运行时的模型调用——guard 判定、decisions selector——才进代码并受 fail-closed 契约约束，这是两类模型使用的分界线）。执行步骤：
 
 1. `scripts/cover.sh` 产出 `cov.out` 与单路径块清单（count==1 覆盖块，按文件聚合排序）——评审输入以这份确定性清单为准，不即兴挑选文件。
 2. 取清单 top 文件（默认 8 个），逐文件提取弱块精确位置（cov.out 路径带 `model-proxy/` 前缀，按文件名过滤）：
@@ -505,7 +496,7 @@ playwright 缓存 → 系统安装）加载真实 `/ui/`。
   **mutation 族**（Takeover 页真实 takeover/restore 闭环〔沙箱 HOME 里的伪 claude 配置被
   改写并逐字节恢复〕、模板编辑器 preset 查看→覆盖→校验拒绝→删除恢复、Requests 详情
   replay 条一次性 force-provider 重答、Schedule 卡 route test 逐 target 探测、Models 区
-  catalog refresh 打进程内 stub 的 models.dev）、渲染族（Eval 页 shadow/fusion 空态）。
+  catalog refresh 打进程内 stub 的 models.dev）、渲染族（各 tab 空态）。
 - `uivisual.test.mjs`（视觉检查，核心问题是「UI 是否正常渲染」）：逐 tab 断言核心内容
   **真实可见**（非零几何 + 非 visibility/display 隐藏，非仅 DOM 存在）+ 真实数据文本
   （dummy provider、m1 请求行、KPI 瓦片、YAML 内容、账号导航），无可见错误横幅

@@ -353,7 +353,7 @@ main {
 /* Vertical rhythm between stacked content blocks — ONE shared rule for every
    tab panel: any card (or KPI grid) rendered anywhere inside a tab panel gets
    16px separation, no matter which tab or loader/host wrapper produced it
-   (.status-main, .tk-host, .mcp-host, .eval-host, #sec-kpis, #sec-rules, …).
+   (.status-main, .tk-host, .mcp-host, #sec-kpis, #sec-rules, …).
    Per-tab/per-host margin patches (`#tab-config > .card`, `.status-main >
    .card`, `#tab-mcp > .mcp-host > .card`, the #tab-security trio) are
    superseded by this rule — do not reintroduce page-specific spacing. */

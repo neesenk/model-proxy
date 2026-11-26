@@ -14,8 +14,8 @@ import (
 // target: URL build + provider rewrite + param-block application, POST with
 // a JSON body, then the standard one-shot retry policies (401 auth refresh,
 // 400 unsupported-parameter learn/strip). It is the headless counterpart of
-// Executor for callers that need bytes instead of a client stream (fusion
-// panel/judge legs). Effect recording (circuit/metrics/rate-limit) stays with
+// Executor for callers that need bytes instead of a client stream (decisions
+// selector legs). Effect recording (circuit/metrics/rate-limit) stays with
 // the caller.
 type BufferedLeg struct {
 	Client Doer // required
@@ -50,7 +50,7 @@ type BufferedLegExchange struct {
 }
 
 // defaultBufferedLegMaxBody caps the buffered response read when the caller
-// does not set MaxBody (fusion legs pass 64<<20 explicitly).
+// does not set MaxBody (decisions legs pass 64<<20 explicitly).
 const defaultBufferedLegMaxBody = 64 << 20
 
 // BufferedLegBuildError wraps a Do failure that happened before any byte

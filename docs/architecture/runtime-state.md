@@ -131,7 +131,7 @@ tracker 在每次 commit 新快照（pollAll/pollOne/429 refresh）时，以**�
 
 ### config generation 一致性
 
-Proxy 为每次成功 reload 分配单调递增的 config generation。forward、Fusion、
+Proxy 为每次成功 reload 分配单调递增的 config generation。forward、decisions selector、
 resolver spread、quota poll 和 guard 判定调用（`internal/app/model_call.go` 的
 调度 seam：读 Manager.DecideOrder 排序与冷却可用性、用独立 sticky 槽
 `guard-adjudicate:<model>`，把判定腿的成败/429 回写 health——与 forward 共享
@@ -416,7 +416,7 @@ Disable/Enable）是 (provider, model) 粒度的 operator 覆盖，状态归
   命中被禁目标时按无匹配处理，回落正常调度——禁用是更强的 operator 意图）；
 - `PreviewOrder` 走同一剔除（Dashboard 快照携带脱离式副本），
   `/debug/schedule`、`/api/status.schedule` 与真实调度一致；
-- fusion/shadow 腿的 identity 选择在 `routing.Resolver.Pick` 入口拒答
+- decisions 腿的 identity 选择在 `routing.Resolver.Pick` 入口拒答
   （config 级 (provider, model) 精确键，池化父名天然覆盖全部虚拟账号，
   无需枚举）；guard 判定腿经共享 `p.schedule`→`DecideOrder`，同样被剔除；
 - **对外隐藏**：`GET /v1/models` 跳过全部目标被禁用的暴露名（部分禁用的

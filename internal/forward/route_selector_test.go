@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	responsecache "model-proxy/internal/cache"
 	configdomain "model-proxy/internal/config"
 )
 
@@ -155,44 +154,6 @@ func TestServeRouteSelectorShadowKeepsOrder(t *testing.T) {
 		t.Fatalf("routing decision missing: %+v", r)
 	} else if r[0].Source != "fallback" || r[0].Selector == nil || r[0].Selector.Enforced {
 		t.Fatalf("shadow routing = %+v, want source=fallback selector not enforced", r[0])
-	}
-}
-
-func TestServeRouteSelectorBypassesResponseCache(t *testing.T) {
-	h := newHarness()
-	up := newFakeUpstream(t, openaiOKResponder("cached"))
-	upSel := newFakeUpstream(t, selectorDecisionResponder("c0", 0.87))
-	cfg := &Config{
-		Providers: map[string]Provider{
-			"up":  {OpenAIBaseURL: up.srv.URL, Provider: "test-static"},
-			"sel": {DecisionsBaseURL: upSel.srv.URL + "/v1", Provider: "typesafe"},
-		},
-		Routes: map[string][]RouteTarget{
-			"m": {{Provider: "up", Model: "real"}},
-		},
-		RoutePolicies: map[string]RoutePolicy{
-			"m": {
-				Selector: &SelectorConfig{
-					Target:     RouteTarget{Provider: "sel", Model: "jev-1.13.0", Protocol: "decisions"},
-					Mode:       "shadow",
-					Confidence: 0.55,
-				},
-			},
-		},
-	}
-	snap := h.snapshot(cfg)
-	snap.Cache = responsecache.New(responsecache.Options{TTL: time.Hour, MaxEntries: 8, MaxBodyBytes: 1 << 16})
-	body := openaiChatBody()
-
-	if w := h.serve(snap, "openai", "/v1/chat/completions", body, nil); w.Code != 200 {
-		t.Fatalf("first status = %d", w.Code)
-	}
-	w := h.serve(snap, "openai", "/v1/chat/completions", body, nil)
-	if w.Header().Get("x-mp-cache") == "hit" {
-		t.Fatal("selector route must bypass response cache")
-	}
-	if up.hits() != 2 {
-		t.Fatalf("upstream hits = %d, want 2 (no cache hit)", up.hits())
 	}
 }
 

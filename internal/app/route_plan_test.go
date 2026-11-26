@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	responsecache "model-proxy/internal/cache"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/routing"
@@ -129,56 +128,9 @@ routes:
 	}
 }
 
-// The preview's cache probe is read-only: polling /debug/route must not book
-// misses into the operational hit-rate stats (Peek, not Lookup) — a poller
-// watching the preview would otherwise grind the metrics down.
-func TestDebugRoute_PreviewCacheProbeIsReadOnly(t *testing.T) {
-	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte(testConfigYAML(
-		"routes:\n  glm: [{provider: zhipu, model: glm}]\n",
-		"cache:\n  enabled: true\n  ttl: 1m\n")))
-	loginAPIKeyFixtures(t, [2]string{"zhipu", "zhipu"})
-	p := newTestProxy(t, cfg)
-	if p.cache == nil {
-		t.Fatal("config cache: section must enable the store")
-	}
-	body := `{"model":"glm","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
-	post := func(query string) map[string]any {
-		req := httptest.NewRequest(http.MethodPost, "/debug/route"+query, strings.NewReader(body))
-		rec := httptest.NewRecorder()
-		p.Handler(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("preview status = %d, body = %s", rec.Code, rec.Body)
-		}
-		var out map[string]any
-		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-			t.Fatalf("preview json: %v, body = %s", err, rec.Body)
-		}
-		return out
-	}
-
-	// Prime entries for the REAL inbound endpoints. The diagnostic path and its
-	// ?proto control query must never participate in the key.
-	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
-		keyReq := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
-		p.cache.Put(responsecache.Key(keyReq, []byte(body), ""), "m", http.StatusOK,
-			http.Header{"Content-Type": {"application/json"}}, []byte(`{}`), time.Now())
-	}
-	for _, query := range []string{"", "?proto=openai", "?proto=responses"} {
-		for i := 0; i < 3; i++ {
-			if out := post(query); out["cache"] != "hit" {
-				t.Fatalf("preview %s #%d cache state = %v, want hit", query, i, out["cache"])
-			}
-		}
-	}
-	if got := p.cache.Stats(); got.Hits != 0 || got.Misses != 0 {
-		t.Errorf("preview probe mutated stats: %+v, want zero counters", got)
-	}
-}
-
-func TestDebugRoute_PreviewAppliesGuardBeforeCache(t *testing.T) {
+func TestDebugRoute_PreviewAppliesGuardBeforeScheduling(t *testing.T) {
 	base := testConfigYAML(
 		"routes:\n  glm: [{provider: zhipu, model: glm}]\n",
-		"cache: {enabled: true, ttl: 1m}\n",
 		"guard: {secrets: %s, audit: false}\n")
 	body := []byte(guardRequestBody())
 	preview := func(t *testing.T, action string, primeBody []byte) map[string]any {
@@ -189,9 +141,6 @@ func TestDebugRoute_PreviewAppliesGuardBeforeCache(t *testing.T) {
 		}
 		loginAPIKeyFixtures(t, [2]string{"zhipu", "zhipu"})
 		p := newTestProxy(t, cfg)
-		keyReq := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(primeBody)))
-		p.cache.Put(responsecache.Key(keyReq, primeBody, ""), "m", http.StatusOK,
-			http.Header{"Content-Type": {"application/json"}}, []byte(`{}`), time.Now())
 		req := httptest.NewRequest(http.MethodPost, "/debug/route", strings.NewReader(string(body)))
 		rec := httptest.NewRecorder()
 		p.Handler(rec, req)
@@ -213,20 +162,14 @@ func TestDebugRoute_PreviewAppliesGuardBeforeCache(t *testing.T) {
 		p := newTestProxy(t, cfg)
 		redacted := p.guardScanner.Redact(body)
 		out := preview(t, "redact", redacted)
-		if out["cache"] != "hit" {
-			t.Fatalf("redacted cache state = %v, want hit", out["cache"])
-		}
 		guardState := out["guard"].(map[string]any)
 		if guardState["body_redacted"] != true || guardState["blocked"] != false {
 			t.Fatalf("redact guard state = %+v", guardState)
 		}
 	})
 
-	t.Run("block bypasses cache and scheduling", func(t *testing.T) {
+	t.Run("block skips scheduling", func(t *testing.T) {
 		out := preview(t, "block", body)
-		if out["cache"] != "bypass (guard block)" {
-			t.Fatalf("block cache state = %v", out["cache"])
-		}
 		if ordered, ok := out["ordered"].([]any); !ok || len(ordered) != 0 {
 			t.Fatalf("blocked preview ordered = %#v, want empty", out["ordered"])
 		}
@@ -236,20 +179,16 @@ func TestDebugRoute_PreviewAppliesGuardBeforeCache(t *testing.T) {
 		}
 	})
 
-	t.Run("strong path block bypasses cache", func(t *testing.T) {
+	t.Run("strong path block skips scheduling", func(t *testing.T) {
 		pathBody := []byte(`{"model":"glm","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"~/.ssh/id_rsa"}}]}]}`)
 		cfg, err := configdomain.LoadConfigFromBytes("test", []byte(testConfigYAML(
 			"routes:\n  glm: [{provider: zhipu, model: glm}]\n",
-			"cache: {enabled: true, ttl: 1m}\n",
 			"guard: {secrets: off, paths: block, audit: false}\n")))
 		if err != nil {
 			t.Fatal(err)
 		}
 		loginAPIKeyFixtures(t, [2]string{"zhipu", "zhipu"})
 		p := newTestProxy(t, cfg)
-		keyReq := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(pathBody)))
-		p.cache.Put(responsecache.Key(keyReq, pathBody, ""), "m", http.StatusOK,
-			http.Header{"Content-Type": {"application/json"}}, []byte(`{}`), time.Now())
 		req := httptest.NewRequest(http.MethodPost, "/debug/route", strings.NewReader(string(pathBody)))
 		rec := httptest.NewRecorder()
 		p.Handler(rec, req)
@@ -259,9 +198,6 @@ func TestDebugRoute_PreviewAppliesGuardBeforeCache(t *testing.T) {
 		var out map[string]any
 		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 			t.Fatal(err)
-		}
-		if out["cache"] != "bypass (guard block)" {
-			t.Fatalf("path block cache state = %v", out["cache"])
 		}
 		guardState := out["guard"].(map[string]any)
 		if guardState["blocked"] != true || guardState["strong_paths"] == nil {

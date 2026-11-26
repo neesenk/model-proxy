@@ -48,7 +48,7 @@ func runHelper(lookupEnv func(string) (string, bool), argv []string, handlers ma
 	args := argv[len(argv)-1:]
 	// When go test passes its own flags, the real args land in MP_CLI_ARGS.
 	// Presence (even empty) wins over the argv fallback: an empty value means
-	// "no CLI args", e.g. a bare `shadow` probing its usage path.
+	// "no CLI args", e.g. a bare `routing` probing its usage path.
 	if a, ok := lookupEnv("MP_CLI_ARGS"); ok {
 		args = strings.Fields(a)
 	}

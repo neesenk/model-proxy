@@ -1,4 +1,7 @@
 # 设计：route 级档位策略（auto-routing）
+> 后续清理：Fusion 编排、`route_policy.eval`（L2 成对评估）与顶层 Shadow 转发/聚合报告均已移除。下文保留设计背景与当时实现记录，不作为这些功能仍存在的依据；bands / latch / decisions selector / grades 的现状仍以 `docs/architecture/request-routing.md` 为准。
+>
+
 
 > 状态：设计文档（非实现契约）。实现契约以 `docs/architecture/request-routing.md`（档位策略一节）
 > 与 `docs/architecture/runtime-state.md`（档位 latch 一节）为准；本文记录决策背景、取舍与实现顺序。

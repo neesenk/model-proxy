@@ -558,7 +558,7 @@ func (t *anthropicSSEToOpenAISSE) ensureRole() {
 // the terminator (bare message_stop, message_delta with an empty stop_reason,
 // or EOF before message_stop) was truncated upstream: synthesizing a finish
 // chunk would fake a clean terminal on exactly the client bytes the
-// executor's cache gate checks, so it fails closed like streamEnd — error
+// terminal-completeness check, so it fails closed like streamEnd — error
 // chunk only, no usage, no [DONE].
 func (t *anthropicSSEToOpenAISSE) drainDone() (eof bool) {
 	if !t.finished && !t.errored && !t.doneDelim && t.stopRsn == "" {
@@ -801,7 +801,7 @@ func (t *anthropicSSEToOpenAISSE) dispatch(frameEvent string, dataEvents []strin
 			updateUsageValue(ev.Usage.CacheCreate, &t.cacheCreate)
 			updateUsageValue(ev.Usage.OutputTokens, &t.outputTokens)
 			// Record a non-empty stop_reason but do NOT emit the finish chunk
-			// yet. The same-protocol cache gate requires both a
+			// yet. The same-protocol terminal-completeness check requires both a
 			// stop_reason-carrying message_delta AND a message_stop; emitting
 			// finish_reason here and then reaching EOF without message_stop
 			// would let the converted stream be judged terminal-complete and

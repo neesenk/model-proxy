@@ -23,9 +23,6 @@ DEFAULT_PKGS=(
 	./internal/app
 	./internal/runtime/...
 	./internal/targetexec
-	./internal/fusion
-	./internal/cache
-	./internal/shadow
 	./internal/guard
 	./internal/accounts
 	./internal/observe/...

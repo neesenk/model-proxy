@@ -632,7 +632,7 @@ func TestEditConfigNonMappingConfig(t *testing.T) {
 	}
 }
 
-// TestEditConfigScalarBlocks covers the request_log/stats/cache kinds the
+// TestEditConfigScalarBlocks covers the request_log/stats/general kinds the
 // Config tab's settings form drives: each kind mutates only its own block, and
 // JSON numbers (float64) land as plain YAML integers, not scientific notation.
 func TestEditConfigScalarBlocks(t *testing.T) {
@@ -659,8 +659,8 @@ func TestEditConfigScalarBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := service.EditConfig(appapi.EditRequest{
-		Kind: "cache",
-		Data: map[string]any{"enabled": false, "ttl": "60m", "max_entries": float64(6000)},
+		Kind: "general",
+		Data: map[string]any{"log_level": "debug"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -669,7 +669,7 @@ func TestEditConfigScalarBlocks(t *testing.T) {
 		"request_log:", "enabled: true", "dir: ~/requests",
 		"max_file_size: 1073741824", "retention: 720h", "hot_retention: 120h",
 		"stats:", "retention: 720h",
-		"cache:", "enabled: false", "ttl: 60m", "max_entries: 6000",
+		"log_level: debug",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("edited config missing %q:\n%s", want, content)

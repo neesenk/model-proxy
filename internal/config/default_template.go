@@ -384,8 +384,6 @@ providers:
 #     glm-5.3:
 #       strategy: load_balance
 #       targets: [zhipu/glm-5.3, aqp/glm-5.3]
-#   {provider: fusion, model: <workflow>} — reference a fusion: workflow (see
-#     the fusion block at the bottom of this file).
 # routes:
 #   glm-5.2: [zhipu/glm-5.2, aqp/glm-5.2]
 #   gpt-5.5: [{provider: codex, model: gpt-5.5, protocol: openai}]
@@ -398,8 +396,6 @@ providers:
 # target staying as failover. No match, no policy, or a hard selection
 # (pin / x-mp-force-provider) leaves the order untouched. The band target must
 # be one the route already serves — otherwise the band can never match (startup
-# warns); a {provider: fusion, ...} target is allowed and the pipeline
-# orchestrates it like any fusion target.
 # route_policy:
 #   glm-5.2:
 #     # grades: split the route targets into named groups. Each grade is filtered
@@ -431,23 +427,12 @@ providers:
 #     # only; enforce moves the chosen target/grade to the front when confidence
 #     # ≥ threshold. With grades the candidates are grade-level (g0..gn); without
 #     # grades they are target-level (c0..cn). Route-level selector must declare
-#     # protocol: decisions and leaves direct_score_max / panel_top_k at 0
-#     # (they are fusion-only).
+#     # protocol: decisions.
 #     selector:
 #       target: {provider: typesafe, model: jev-1.13, protocol: decisions}
 #       mode: shadow
 #       confidence: 0.55
 #       timeout: 800ms
-#     # eval: L2 pairwise shadow evaluation for graded routes. The judge model
-#     # must declare protocol: decisions. sample_rate is validated to [0, 0.5]
-#     # (out-of-range is a config error); 0 or omitted falls back to the
-#     # default 0.05. pair can be "opposite" (next grade in route target order)
-#     # or "grade:<name>".
-#     eval:
-#       sample_rate: 0.05
-#       pair: opposite
-#       judge: {provider: typesafe, model: jev-1.13, protocol: decisions}
-
 # Scheduling: failover health (circuit breaker, rate-limit skip) + sticky routing.
 # Every field has a code default (owned by internal/config), so this entire
 # block can be omitted - the values below are listed commented-out for reference.
@@ -459,6 +444,8 @@ providers:
 #   rate_limit_backoff: 60s     # (default 60s) transient 429 with no reset hint/Retry-After: skip this long, then probe
 #   quota_cooldown: 1h          # (default 1h)  429 classified quota-exhausted (balance/plan window) with no reset hint
 #   model_lockout: 10m          # (default 10m) model-level failure (404 / model-denied / empty 200): lock (provider,model)
+# Scheduling: every field has a code default (config.go accessors), so this
+# block is usually unnecessary unless you need to override one of them.
 #   retry_wait: 10s             # (default 10s; "0" disables) all targets cooling down: wait ≤ this for the earliest expiry and retry (≤2×)
 #   upstream_timeout: 1800s     # (default 1800s) per-upstream-request timeout
 #   stream_keepalive: 15s       # (default 15s; "0" disables) SSE comment heartbeat into client streams after this much upstream silence
@@ -551,31 +538,6 @@ providers:
 # prices:
 #   glm-5.2: {input: 0.60, output: 2.20, cache_read: 0.11}
 
-# Monthly budget alerts on the equivalent USD cost of observed token usage
-# (same pricing path as /api/analytics; unpriced models contribute nothing).
-# Checked once per minute against the current local month's accumulated cost.
-# On crossing: a "budget" live event (SSE /api/events) plus an optional
-# webhook POST of {scope, month, threshold_usd, actual_usd} (2 retries;
-# failures are only logged). Alerts fire once per (scope, month, threshold)
-# per process — a restart may re-alert. Enabling this block requires a
-# daemon restart (startup-only, like request_log); threshold value changes
-# apply on reload.
-# budgets:
-#   monthly_usd: 20                       # global monthly total threshold; 0/unset = off
-#   providers:                            # optional per-provider overrides
-#     zhipu: 5                            # replaces the global threshold for the zhipu scope
-#   webhook_url: https://hooks.example.com/budget  # optional; unset = live event only
-
-# Exact response cache: SHA-256(method+path+body) byte-exact match replays the
-# recorded response (x-mp-cache: hit). Disabled by default. Shields retries and
-# duplicate single-shot requests; multi-turn chats change the body every turn,
-# so the hit rate there is ≈ 0 (prefix savings belong to upstream prompt caching).
-# cache:
-#   enabled: true                       # default false
-#   ttl: 10m                            # default
-#   max_entries: 1000                   # default
-#   max_body_bytes: 262144              # default 256KiB; larger responses not cached
-
 # Outbound secret guard (DLP-lite): scans the raw request body BEFORE
 # forwarding upstream (request bodies only, never responses) for:
 #   - high-confidence secret patterns (PEM private-key headers, AWS/OpenAI/
@@ -625,44 +587,4 @@ providers:
 #     block_session: true # high verdict blocks the session until unblocked
 #                         # ('model-proxy guard unblock' or the WebUI)
 
-# Shadow evaluation: after the primary response commits, re-send the same request
-# to a shadow backend, record-only — never affects the client, circuit breakers,
-# stats or sticky routing. Compare with 'model-proxy shadow report' or the Web
-# UI (GET /api/shadow-report).
-# shadow_sample_rate: 1.0               # global sample rate (default 1.0; 0 disables all)
-# shadow_max_concurrent: 4              # global in-flight cap (default 4; excess dropped)
-# shadow:
-#   glm-5.2: {provider: deepseek, model: deepseek-v4-pro}                # shadow one route…
-#   deepseek-v4-pro: {provider: codex, model: gpt-5.5, protocol: openai} # …cross-protocol OK
-
-# Multi-model orchestration (fusion): a route target {provider: fusion, model:
-# <workflow>} fans the request out to the panel members in parallel (candidate
-# answers), then the synthesizer model merges the candidates into the final
-# (streamed) answer. Cost = N+1 upstream calls per request, latency ≈ candidate
-# wait + synthesis first-token — use for hard-question routes only, never as a
-# default route.
-# fusion:
-#   hard-coding:                        # workflow name (the route target's model field)
-#     panel:                            # 2-4 candidate generators, called in parallel
-#       - {provider: zhipu, model: glm-5.2}
-#       - {provider: deepseek, model: deepseek-v4-pro}
-#       - {provider: codex, model: gpt-5.5, protocol: openai}  # per-member protocol → auto-convert
-#     synthesizer: {provider: zhipu, model: glm-5.2}  # merge model — use your strongest
-#     min_panel: 2                      # default 2; fewer candidates → original request
-#                                       # goes straight to the synthesizer (graceful degrade)
-#     max_runs_per_day: 50              # optional: daily orchestration cap; over → degrade
-#                                       # to a direct synthesizer call (degraded runs don't
-#                                       # consume the budget)
-#     first_turn_only: true             # optional: only orchestrate single-turn requests
-#                                       # (no assistant message in the body)
-#     judge: {provider: zhipu, model: glm-5.2}  # optional: pre-synthesis review pass
-#                                       # (consensus/conflicts/omissions) injected into the
-#                                       # synthesis prompt; judge failure never fails the run
-#     # instruction: "..."              # optional: override the built-in synthesis
-#                                       # instruction template (≤ 4000 chars)
-# Observe: GET /api/fusion?workflow=<name> (per-workflow aggregates + recent runs);
-# stats --provider fusion (requests = orchestrations, failovers = degrades).
-# routes:
-#   hard-question:
-#     - {provider: fusion, model: hard-coding, priority: 1}
 `

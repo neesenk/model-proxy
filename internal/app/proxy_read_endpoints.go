@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	responsecache "model-proxy/internal/cache"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/forward"
 	"model-proxy/internal/observe/counters"
@@ -257,14 +256,12 @@ func (p *Proxy) recordCredentialDenied(name, class string, evidence []byte, gene
 
 // serveRoutePreview answers "where would this request go RIGHT NOW?" — the
 // same early forward steps (model extraction, route lookup,
-// pin / force narrowing, cache probe, scheduling preview, per-target
-// request-fit verdicts) with NO upstream call and NO scheduler mutation (the
-// ordering comes from the detached Manager preview, same as /debug/schedule).
-// POST the body exactly as the client would send it; ?proto= overrides the
-// protocol (default anthropic) and the x-mp-force-provider /
-// x-claude-code-session-id headers participate like in a real request. The
-// cache probe maps the selected protocol to its real client endpoint and uses
-// THIS request's cache-relevant headers (anthropic-beta, accept-language).
+// pin / force narrowing, scheduling preview, per-target request-fit verdicts)
+// with NO upstream call and NO scheduler mutation (the ordering comes from the
+// detached Manager preview, same as /debug/schedule). POST the body exactly as
+// the client would send it; ?proto= overrides the protocol (default anthropic)
+// and the x-mp-force-provider / x-claude-code-session-id headers participate
+// like in a real request.
 func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 	writeJSON := func(status int, v any) {
 		data, err := json.Marshal(v)
@@ -296,7 +293,6 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 	routeKeys := p.routeKeys
 	cat := p.catalog
 	dash := p.runtimeState.Dashboard(now)
-	cache := p.cache
 	guardScanner := p.guardScanner
 	p.mu.RUnlock()
 
@@ -386,8 +382,8 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 		targets = narrowed
 	}
 
-	// The live path applies the outbound guard before both cache lookup and
-	// request-profile planning. Reuse its pure per-request decision here, but
+	// The live path applies the outbound guard before request-profile planning.
+	// Reuse its pure per-request decision here, but
 	// deliberately omit live-only observation/session mutation.
 	guardDecision := forward.EvaluateRequestGuard(cfg.Guard, guardScanner, body)
 	blockKind, blockNames := guardDecision.Blocks(cfg.Guard)
@@ -411,31 +407,11 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 	out["guard"] = guardState
 	body = guardDecision.ForwardBody
 	if blockKind != "" {
-		out["cache"] = "bypass (guard block)"
 		out["ordered"] = []any{}
 		out["error"] = fmt.Sprintf("guard would block %s: %s", blockKind, strings.Join(blockNames, ", "))
 		writeJSON(http.StatusOK, out)
 		return
 	}
-
-	cacheState := "off"
-	if cache != nil && forcedProvider == "" && !force {
-		// Peek, not Lookup: this endpoint is a read-only preview that gets
-		// polled, and Lookup books a miss (and lazily evicts) on every probe,
-		// grinding the operational hit-rate metrics down.
-		cacheRequest := routePreviewCacheRequest(r, proto)
-		// "" caller: the preview rides the admin surface with no API-key
-		// context, so it approximates the unauthenticated loopback
-		// composition — the same as a no-keys deployment.
-		if cache.Peek(responsecache.Key(cacheRequest, body, ""), now) {
-			cacheState = "hit"
-		} else {
-			cacheState = "miss"
-		}
-	} else if cache != nil {
-		cacheState = "bypass (pin/force)"
-	}
-	out["cache"] = cacheState
 
 	// Same opaque-token hygiene as the forward path: an invalid header value
 	// previews as sessionless (route-keyed sticky), never a mangled identity.
@@ -512,25 +488,4 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 		out["sticky"] = cur.Provider
 	}
 	writeJSON(http.StatusOK, out)
-}
-
-// routePreviewCacheRequest translates the diagnostic endpoint into the actual
-// inbound protocol endpoint used by forward. /debug/route's own ?proto query
-// is control metadata, not part of a real cache key.
-func routePreviewCacheRequest(preview *http.Request, proto string) *http.Request {
-	request := preview.Clone(preview.Context())
-	request.Method = http.MethodPost
-	request.URL.RawPath = ""
-	request.URL.RawQuery = ""
-	switch proto {
-	case "openai":
-		request.URL.Path = "/v1/chat/completions"
-	case "responses":
-		request.URL.Path = "/v1/responses"
-	case "decisions":
-		request.URL.Path = "/v1/decisions"
-	default:
-		request.URL.Path = "/v1/messages"
-	}
-	return request
 }

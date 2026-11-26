@@ -134,14 +134,14 @@ func TestValidateYAML_SemanticErrorLines(t *testing.T) {
 	}
 }
 
-func TestValidateYAML_ShadowSampleRateLine(t *testing.T) {
+func TestValidateYAML_RemovedShadowSampleRateLine(t *testing.T) {
 	bad := validateBaseYAML + "shadow_sample_rate: 2\n"
 	issues := ValidateYAML([]byte(bad))
 	if len(issues) != 1 {
 		t.Fatalf("issues=%v want exactly one", issues)
 	}
-	if issues[0].Line != 12 {
-		t.Fatalf("line=%d want 12 (message=%q)", issues[0].Line, issues[0].Message)
+	if issues[0].Line != 12 || !strings.Contains(issues[0].Message, "no longer supported") {
+		t.Fatalf("issue = %+v, want removed-key error on line 12", issues[0])
 	}
 }
 

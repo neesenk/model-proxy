@@ -9,7 +9,6 @@ import (
 
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/fusion"
 	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/routing"
@@ -268,9 +267,8 @@ func gradeOfTarget(t RouteTarget, grades map[string][]RouteTarget, parentOf map[
 
 // GradeOrder returns a route's effective grade order: the first appearance of
 // each grade when scanning its ordered targets. Graded routes use this order
-// for "next_grade" fallback, and eval pairing ("opposite") follows it too, so
-// selection and measurement agree on which grade is "next". Targets not declared
-// in any grade are ignored (they are returned separately as a safety net).
+// for "next_grade" fallback. Targets not declared in any grade are ignored
+// (they are returned separately as a safety net).
 //
 // The order is derived from the route's target list, not from the grades map:
 // Go maps do not preserve YAML declaration order, so scanning a map would be
@@ -527,10 +525,6 @@ func gradeGroupHasTargets(groups []gradeGroup, name string) bool {
 func filterGradeTargets(targets []RouteTarget, cfg *Config, parentOf map[string]string, cat *catalog.Catalog, profile routing.Profile) []RouteTarget {
 	out := make([]RouteTarget, 0, len(targets))
 	for _, t := range targets {
-		if t.Provider == configdomain.FusionProvider {
-			out = append(out, t)
-			continue
-		}
 		caps := routing.CapabilitiesFor(cfg, parentOf, t)
 		if routing.Fits(cat, caps, t.Model, profile) {
 			out = append(out, t)
@@ -599,27 +593,27 @@ func (p pipeline) applyRouteSelector(
 	}
 	res.mode = sel.SelectorMode()
 
-	candidates := make([]fusion.SelectorCandidate, 0, len(ordered))
+	candidates := make([]selectorCandidate, 0, len(ordered))
 	for i, t := range ordered {
-		candidates = append(candidates, fusion.SelectorCandidate{
+		candidates = append(candidates, selectorCandidate{
 			Target: t,
 			ID:     "c" + strconv.Itoa(i),
 			Rubric: t.Rubric,
 		})
 	}
 
-	state := fusion.BuildSelectorState(body, proto, fusion.RequestFacts{
+	state := buildSelectorState(body, proto, selectorRequestFacts{
 		HasImage:        profile.HasImage,
 		EstimatedTokens: profile.EstimatedTokens,
 	}, profile.HasTools, candidates)
 
 	choiceInstructions := sel.Instruction
 	if choiceInstructions == "" {
-		choiceInstructions = fusion.DefaultSelectorChoiceInstructions
+		choiceInstructions = defaultSelectorChoiceInstructions
 	}
 	difficultyInstructions := sel.DifficultyInstruction
 	if difficultyInstructions == "" {
-		difficultyInstructions = fusion.DefaultSelectorDifficultyInstructions
+		difficultyInstructions = defaultSelectorDifficultyInstructions
 	}
 
 	out := p.callDecisions(ctx, decisionsInput{
@@ -638,7 +632,7 @@ func (p pipeline) applyRouteSelector(
 		Candidates:             candidates,
 		ChoiceInstructions:     choiceInstructions,
 		DifficultyInstructions: difficultyInstructions,
-		DifficultyLevels:       fusion.DefaultSelectorDifficultyLevels,
+		DifficultyLevels:       defaultSelectorDifficultyLevels,
 	})
 
 	res.choice = out.ChoiceID
@@ -731,11 +725,11 @@ func (p pipeline) applyRouteSelectorForGrades(
 		return res
 	}
 
-	candidates := make([]fusion.SelectorCandidate, 0, len(viable))
+	candidates := make([]selectorCandidate, 0, len(viable))
 	idToGrade := make(map[string]string, len(viable))
 	for i, g := range viable {
 		id := "g" + strconv.Itoa(i)
-		candidates = append(candidates, fusion.SelectorCandidate{
+		candidates = append(candidates, selectorCandidate{
 			Target: g.first,
 			ID:     id,
 			Rubric: "grade " + g.name,
@@ -743,18 +737,18 @@ func (p pipeline) applyRouteSelectorForGrades(
 		idToGrade[id] = g.name
 	}
 
-	state := fusion.BuildSelectorState(body, proto, fusion.RequestFacts{
+	state := buildSelectorState(body, proto, selectorRequestFacts{
 		HasImage:        profile.HasImage,
 		EstimatedTokens: profile.EstimatedTokens,
 	}, profile.HasTools, candidates)
 
 	choiceInstructions := sel.Instruction
 	if choiceInstructions == "" {
-		choiceInstructions = fusion.DefaultSelectorChoiceInstructions
+		choiceInstructions = defaultSelectorChoiceInstructions
 	}
 	difficultyInstructions := sel.DifficultyInstruction
 	if difficultyInstructions == "" {
-		difficultyInstructions = fusion.DefaultSelectorDifficultyInstructions
+		difficultyInstructions = defaultSelectorDifficultyInstructions
 	}
 
 	out := p.callDecisions(ctx, decisionsInput{
@@ -773,7 +767,7 @@ func (p pipeline) applyRouteSelectorForGrades(
 		Candidates:             candidates,
 		ChoiceInstructions:     choiceInstructions,
 		DifficultyInstructions: difficultyInstructions,
-		DifficultyLevels:       fusion.DefaultSelectorDifficultyLevels,
+		DifficultyLevels:       defaultSelectorDifficultyLevels,
 	})
 
 	res.choiceID = out.ChoiceID

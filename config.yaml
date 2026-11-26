@@ -50,8 +50,8 @@ proxy: off
 # (from the request path) selects the upstream path + base URL, and the wire
 # probe picks the backend shape when a provider serves only one.
 # Inspect the derived table: `model-proxy routes [model]` or the Web UI Config
-# tab. An explicit `routes:` block is only needed for overrides — a fusion
-# target, a declared protocol conversion, or a special ordering — and it
+# tab. An explicit `routes:` block is only needed for overrides — a declared
+# protocol conversion or a special ordering — and it
 # replaces the derived route for that exposed name wholesale. Targets accept a
 # compact "provider/model" string; the {provider, model, ...} map form is only
 # needed when setting priority/protocol, e.g.:
@@ -92,8 +92,6 @@ routes: {deepseek-v4.1-flash: {strategy: load_balance, targets: [{model: deepsee
 # scheduled order while every other target stays as failover — never a hard
 # selection, and a band whose target/grade the route does not serve can never
 # match (startup warns; see docs/architecture/request-routing.md).
-# pin / x-mp-force-provider skip the policy entirely. A {provider: fusion, ...}
-# target is allowed.
 # route_policy:
 #   glm-5.3:
 #     # grades: split route targets into named groups. Each grade is filtered
@@ -130,15 +128,6 @@ routes: {deepseek-v4.1-flash: {strategy: load_balance, targets: [{model: deepsee
 #       mode: shadow
 #       confidence: 0.55
 #       timeout: 800ms
-#     # eval: L2 pairwise shadow evaluation for graded routes. The judge model
-#     # must declare protocol: decisions. sample_rate is validated to [0, 0.5]
-#     # (out-of-range is a config error); 0 or omitted falls back to the
-#     # default 0.05. pair can be "opposite" (next grade in route target order)
-#     # or "grade:<name>".
-#     eval:
-#       sample_rate: 0.05
-#       pair: opposite
-#       judge: {provider: typesafe, model: jev-1.13, protocol: decisions}
 # Scheduling: every field has a code default (config.go accessors), so this
 # block can be omitted entirely. Uncomment a line to override.
 # scheduling:
@@ -242,31 +231,6 @@ stats:
 # prices:
 #   glm-5.2: {input: 0.60, output: 2.20, cache_read: 0.11}
 
-# Monthly budget alerts on the equivalent USD cost of observed token usage
-# (same pricing path as /api/analytics; unpriced models contribute nothing).
-# Checked once per minute against the current local month's accumulated cost.
-# On crossing: a "budget" live event (SSE /api/events) plus an optional
-# webhook POST of {scope, month, threshold_usd, actual_usd} (2 retries;
-# failures are only logged). Alerts fire once per (scope, month, threshold)
-# per process — a restart may re-alert. Enabling this block requires a
-# daemon restart (startup-only, like request_log); threshold value changes
-# apply on reload.
-# budgets:
-#   monthly_usd: 20                       # global monthly total threshold; 0/unset = off
-#   providers:                            # optional per-provider overrides
-#     zhipu: 5                            # replaces the global threshold for the zhipu scope
-#   webhook_url: https://hooks.example.com/budget  # optional; unset = live event only
-
-# Counters survive reload/restart; reset clears history even while disabled.
-# Exact response cache: SHA-256(method+path+body) byte-exact match replays the
-# recorded response (x-mp-cache: hit). Disabled by default. Shields retries and
-# duplicate single-shot requests; multi-turn chats change the body every turn,
-# so the hit rate there is ≈ 0 (prefix savings belong to upstream prompt caching).
-cache:
-  enabled: false # default false
-  ttl: 60m # default
-  max_entries: 6000 # default
-  max_body_bytes: 262144 # default 256KiB; larger responses not cached
 # MCP gateway: expose remote MCP (Model Context Protocol) servers at
 # /mcp/<name> on the daemon, so MCP clients (Claude Code .mcp.json, opencode,
 # Codex, pi) point at the proxy instead of holding provider credentials.
@@ -386,7 +350,7 @@ mcp_routes:
 # Anthropic/GitHub/Google tokens) BEFORE forwarding upstream — coding agents
 # paste local files into prompts, and a leaked key should not leave the
 # machine. Request bodies only, never responses; one scan per request, shared
-# by cache/fusion/shadow. Hits are reported by pattern type name only (live
+# by forward. Hits are reported by pattern type name only (live
 # event + stats counter) — matched content is never logged.
 # guard:
 #   secrets: log      # log (default: allow + live event + counter) | redact
@@ -482,55 +446,3 @@ guard:
     model: glm-5.3-flash # judging model (derived route; zhipu/volcengine/
     # shopee/aqp all carry anthropic_base_url)
     block_session: false
-
-# Shadow evaluation: after the primary response commits, re-send the same request
-# to a shadow backend, record-only — never affects the client, circuit breakers,
-# stats or sticky routing. Compare with `model-proxy shadow report` or the Web
-# UI (GET /api/shadow-report).
-# shadow_sample_rate: 1.0               # global sample rate (default 1.0; 0 disables all)
-# shadow_max_concurrent: 4              # global in-flight cap (default 4; excess dropped)
-# shadow:
-#   glm-5.2: {provider: deepseek, model: deepseek-v4-pro}                # shadow one route…
-#   deepseek-v4-pro: {provider: codex, model: gpt-5.5, protocol: openai} # …cross-protocol OK
-# Explicit anthropic requires anthropic_base_url; openai/responses require
-# openai_base_url. Invalid endpoint/protocol combinations fail config loading.
-
-# Multi-model orchestration (fusion): a route target {provider: fusion, model:
-# <workflow>} fans the request out to the panel members in parallel (candidate
-# answers), then the synthesizer model merges the candidates into the final
-# (streamed) answer. Cost = N+1 upstream calls per request, latency ≈ candidate
-# wait + synthesis first-token — use for hard-question routes only, never as a
-# default route.
-# fusion:
-#   hard-coding:                        # workflow name (the route target's model field)
-#     panel:                            # 2-4 candidate generators, called in parallel
-#       - {provider: zhipu, model: glm-5.2}
-#       - {provider: volcengine, model: deepseek-v4-pro}
-#       - {provider: codex, model: gpt-5.5, protocol: openai}  # per-member protocol → auto-convert
-#     synthesizer: {provider: zhipu, model: glm-5.2}  # merge model — use your strongest
-#     min_panel: 2                      # default 2; fewer candidates → original request
-#                                       # goes straight to the synthesizer (graceful degrade)
-#     max_runs_per_day: 50              # optional: daily orchestration cap; over → degrade
-#                                       # to a direct synthesizer call (degraded runs don't
-#                                       # consume the budget)
-#     first_turn_only: true             # optional: only orchestrate single-turn requests
-#                                       # (no assistant message in the body)
-#     judge: {provider: zhipu, model: glm-5.2}  # optional: pre-synthesis review pass
-#                                       # (consensus/conflicts/omissions) injected into the
-#                                       # synthesis prompt; judge failure never fails the run
-#     # instruction: "..."              # optional: override the built-in synthesis
-#                                       # instruction template (≤ 4000 chars)
-#     # selector:                       # optional: decisions-model (e.g. TypeSafe Jev)
-#     #   target: {provider: typesafe, model: jev-1.13, protocol: decisions}
-#     #   mode: shadow                  # shadow (default, record only) | enforce (act on
-#     #                               # confidence ≥ threshold): direct_score_max > 0 answers
-#     #   confidence: 0.55              # easy requests directly via the chosen model
-#     #   direct_score_max: 0           # (selector_direct, no budget consumed); panel_top_k
-#     #   panel_top_k: 0                # trims the panel by decision probability (never
-#     #   timeout: 800ms                # below quorum). Any failure → static full panel.
-#     # panel members may carry rubric: "one-line description" to steer the choice.
-# Observe: GET /api/fusion?workflow=<name> (per-workflow aggregates + recent runs);
-# stats --provider fusion (requests = orchestrations, failovers = degrades).
-# routes:
-#   hard-question:
-#     - {provider: fusion, model: hard-coding, priority: 1}

@@ -13,7 +13,7 @@
 
 5. 上游请求使用 `http.NewRequestWithContext(r.Context(), ...)`，并受 `upstream_timeout` 限制。
 6. `flushCopy` 在客户端写错误后必须立即停止读取上游。
-7. 响应转换必须位于 logger/scanner/cache 内层，让它们看到客户端协议。
+7. 响应转换必须位于 logger/scanner 内层，让它们看到客户端协议。
 8. 非流式转换必须在 WriteHeader 前完成，失败时 fail-closed。
 
 ## 凭据与 Provider
@@ -130,13 +130,7 @@
     route 名共享同一键空间。会话 id 恰好等于某 route 名时，会话选择会按该 route
     的 sticky 落盘并在重启后恢复。route 名是操作者控制的，实践中撞名概率极低，
     但新增 route 命名时避开常见会话 id 形态。
-31. `budgets:` 的预算告警 watcher（tick 循环归 `internal/observe/budget`，startup
-    准入与 lifecycle 接线归 `internal/app/proxy_lifecycle.go`）只在
-    `StartRuntimeServices` 按启动配置决定
-    是否创建（与 request_log 同为 startup-only）：从无到有加 `budgets:` 需重启
-    daemon；已有 watcher 时阈值数值热改生效（每次 check 经端口读当前 cfg 快照
-    拷贝）。去重
-    记录是进程内的，重启后同一 (scope, 月份, 阈值) 会重新告警一次。
+31. 条目保留：`budgets:` 月度预算告警及其 watcher 已移除，旧配置在加载时明确报错。
 32. **会话身份双轨**：观测面（request log / live events / `/api/sessions`）的
     `session_id` 来自 `request_log.session_headers` 允许列表（`requestlog.SessionID`，
     有序取第一个非空头），而 guard 域（session_scan 分片检测、
@@ -162,7 +156,7 @@
 34. 客户端读完响应 ≠ 服务端 commit 效应落账：带 Content-Length 的响应，客户端
     收满字节即返回，handler goroutine 此时可能还没执行 `flushCopy` 之后的效应
     （`Effects.Committed` 的 Requests/latency/attempts-ok、agent 计数、
-    body.Close 触发的 request log 入队、fusion 的 run 计数）。本机核多负载低
+    body.Close 触发的 request log 入队）。本机核多负载低
     几乎永不踩中，CI（2 vCPU + race/coverage 插桩拖慢 handler 收尾）窗口被
     放大，同一竞态会在不同步骤轮流挂不同的测试。断言这类状态必须轮询等待
     （`internal/app` 的 `awaitCommitMetrics`/`waitUntil`），不得赌调度顺序；
@@ -187,7 +181,7 @@
     取消时，服务端 handler 的 `r.Context().Done()` 不一定触发（连接被保留复用）。
     测试「客户端取消 → 上游快速感知」时，fake 上游不能靠 `r.Context().Done()` 断言，
     要用测试控制的 channel/release 门（参考 `internal/app` 的
-    `TestJudgeEvalPairAbortsOnStop`）。
+    `TestProxyCloseWaitsForOwnedTasksAndRejectsNewWork`）。
 38. 测试 fake 逐行孪生生产实现必然漂移：`internal/forward` 的 harness 曾把
     `Manager.RecordLatchOutcome` 状态机逐行复制成 fake，5 个 latch 测试全在验副本，
     生产回归能全绿通过。测试需要生产状态机时直接用真实 owner（测试侧 import
@@ -219,12 +213,10 @@
 
 41. 池化/回调切片的 retain 必须拷贝，锁管不住所有权：bodycapture 的回调
     切片契约明文「仅在回调期间有效，retain 必须拷贝」——Close 归还缓冲后，
-    并发请求复用同一 backing array。eval 采样路径曾把该切片直接存进
-    evalBodyCache：数据竞争 + **把别的请求响应正文泄漏进本请求的 judge
-    prompt**（锁维度审计不可见——cache 自身锁完全正确，违规在切片生命
-    周期）。同库三个调用方中 shadow/requestlog 都拷贝了，唯 eval 漏。审查
-    多 goroutine 共享时除了查锁，必须追**值的来源生命周期**（池、回调参数、
-    复用 buffer）。回归 TestMaybeStoreEvalPrimaryBodyCopiesPooledBuffer。
+    并发请求复用同一 backing array。任何异步分支若直接 retain 该切片，都
+    会出现数据竞争并可能把另一请求的正文混进当前请求（锁维度审计不可见，
+    违规在切片生命周期）。审查多 goroutine 共享时除了查锁，必须追**值的
+    来源生命周期**（池、回调参数、复用 buffer）。
     同批修复：wirecap 404 运行时纠正补 expected-fingerprint 门（旧代 404
     不得翻转新代模型裁决，模型级 no 无 TTL）；MCP stdio initialize 与
     LRU 逐出竞态的丢 put 必须 kill 子进程（否则泄漏到进程关闭）；adjudicate
@@ -232,9 +224,8 @@
     logfile Run 退出后 Enqueue 计入 Dropped（stopMu 序列化 closed 检查与
     close+drain）。
 
-42. **usage 账本有三条独立解析路径，必须逐字段同口径**（热路径 UsageScanner →
-    分钟桶/Accounts/Analytics、requestlog.ExtractUsage → Keys 用量/会话聚合、
-    fusion.ParseUsage → 编排腿）：anthropic 口径（input 不含 cache，hit/write
+42. **usage 账本有两条独立解析路径，必须逐字段同口径**（热路径 UsageScanner →
+    分钟桶/Accounts/Analytics、requestlog.ExtractUsage → Keys 用量/会话聚合）：anthropic 口径（input 不含 cache，hit/write
     单列），inclusive wire 计数器（openai prompt_tokens、responses
     input_tokens）入桶前扣减钳零；hit 双拼写 max 合并
     （prompt_tokens_details.cached_tokens / deepseek prompt_cache_hit_tokens），
@@ -243,7 +234,7 @@
     家族的发射约定，消费侧不解析则 write 全额落 input、成本按全价低估）。历史
     教训：89630e1 前缓存命中双重计入 input+cache_read（deepseek 控制台对账
     差值恰=命中量）、2537235 前网关逐 chunk 重复累计把单请求膨胀上亿 token；
-    三方一致性由 `internal/app/usage_ledger_test.go`（同一批 wire 样本喂三个
+    三方一致性由 `internal/app/usage_ledger_test.go`（同一批 wire 样本喂两个
     解析器断言同值）钉住，历史脏数据由
     `observestats.Store.RebuildTokenLedger`（启动时按请求日志索引重写 cutoff
     前分钟桶，带 count 防御）修正；count 防御跳过、且请求日志源行已被轮转
@@ -263,7 +254,7 @@
     新建的活跃文件永远为空。`internal/cli/serve/logrotate.go` 用快照副本 + 原文件
     truncate 归零（inode 不变，O_APPEND 自动续写新末尾），代价是 copy 与 truncate
     之间写入的行丢失（copytruncate 标准语义，面向人的运行日志可接受；无损轮转属于
-    单写者的 logfile sink，见 fusion-shadow-cache.md）。同理，时龄 retention 防不住
+    单写者的 logfile sink，见 observe.md）。同理，时龄 retention 防不住
     突发写满盘——2026-11-12 单日 94.5GB 的 request-log 证明 30d 窗口在突发速率下
     只是慢动作溢出；`request_log.disk_guard`（缺省 enabled/50GiB/95%）在每小时
     sweep 上按最旧优先删轮转文件至卷空闲恢复，活动文件与 index.db 永不删

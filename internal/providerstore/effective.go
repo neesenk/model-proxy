@@ -102,7 +102,7 @@ func MutateContextUnderLock(ctx context.Context, configPath, storePath string, f
 		return err
 	}
 	// Whole-config validation with the new provider set: cross-provider
-	// rules (routes/shadow targets, protocol-vs-base) must hold for the
+	// rules (route targets, protocol-vs-base) must hold for the
 	// state that the next reload will serve. A missing config file is an
 	// error here (fail-closed, like the yaml writers this replaces);
 	// only Absorb/Resolve tolerate absence for the read paths.

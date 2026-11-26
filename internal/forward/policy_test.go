@@ -142,39 +142,6 @@ func TestServeOnceRoutePolicySkippedForHardSelection(t *testing.T) {
 	}
 }
 
-// TestServeOnceRoutePolicyFusionBandTarget (slice 4): a band may point at a
-// fusion recipe — the effective order starts with the fusion target, which the
-// ordinary target loop dispatches into runFusion. The route's concrete targets
-// stay behind it as the fallback path.
-func TestServeOnceRoutePolicyFusionBandTarget(t *testing.T) {
-	h := newHarness()
-	cfg := &Config{
-		Providers: map[string]Provider{"a": {}},
-		Routes:    map[string][]RouteTarget{"m": {{Provider: "a", Model: "ma"}}},
-		Fusion: map[string]FusionConfig{
-			"hard": {Panel: []RouteTarget{{Provider: "a", Model: "ma"}, {Provider: "a", Model: "mb"}}, Synthesizer: RouteTarget{Provider: "a", Model: "ma"}},
-		},
-		RoutePolicies: map[string]RoutePolicy{
-			"m": bandPolicy(configdomain.BandWhen{FollowUp: boolp(false)}, "fusion", "hard"),
-		},
-	}
-	// The route must actually serve the band's target for it to apply.
-	cfg.Routes["m"] = append(cfg.Routes["m"], RouteTarget{Provider: "fusion", Model: "hard"})
-	snap := h.snapshot(cfg)
-
-	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
-	res, st := serveOnceForPolicyTest(t, snap, h, body, false, "")
-	if res.firstTried.Provider != "fusion" || res.firstTried.Model != "hard" {
-		t.Fatalf("firstTried = %+v, want the band-selected fusion target first", res.firstTried)
-	}
-	if len(res.effectiveTargets) != 2 {
-		t.Fatalf("effectiveTargets = %+v, want the concrete fallback kept", res.effectiveTargets)
-	}
-	if st.routing == nil || st.routing.Source != "band" || st.routing.Target != "fusion/hard" {
-		t.Fatalf("fusion band routing = %+v, want source=band target=fusion/hard", st.routing)
-	}
-}
-
 func gradePolicy(fallback string) RoutePolicy {
 	return RoutePolicy{
 		Grades: map[string][]RouteTarget{

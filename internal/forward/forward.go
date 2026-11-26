@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/counters"
@@ -47,8 +46,6 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	cfg := runtime.Cfg
 	expanded := runtime.ExpandedRoutes
 	parentOf := runtime.ParentOf
-	cache := runtime.Cache
-
 	// Bound per-request memory: the body is fully buffered for routing and
 	// conversion, so anything over max_request_body_bytes (default 64 MiB) is
 	// rejected before any routing work.
@@ -66,7 +63,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	}
 
 	// Detect the calling agent once (UA / known headers); attributed to guard
-	// and cache-hit events here and to whichever target commits downstream.
+	// and terminal events here and to whichever target commits downstream.
 	agent := counters.DetectAgent(r)
 	// Resolve the client session id once: first the configured header
 	// allowlist, then — for agents implemented strictly against the OpenAI /
@@ -154,29 +151,13 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 
 	// Outbound secret guard (DLP-lite): scan the SHARED request body once, here
 	// — after route resolution (so hits are attributable) and before the cache
-	// lookup and every forward branch. Cache, Fusion and Shadow all consume the
+	// request-profile planning and every forward branch. Forward consumes the
 	// (possibly redacted) origBody from this point on; no branch rescans.
 	// The stage is extracted to runOutboundGuard (same generation's snapshot
 	// scanner; nil only in degenerate hand-built proxies — skipped then).
 	var guardBlocked bool
 	origBody, guardBlocked = p.runOutboundGuard(runtime, proto, w, r, requestID, agent, clientSession, exposed, calledModel, sessionKey, origBody)
 	if guardBlocked {
-		return
-	}
-
-	// Exact-match response cache (#10): a request byte-identical to a recently
-	// served one is replayed from cache with no upstream call. Computed before
-	// routing (the key is the raw request), threaded into the target attempt to
-	// store on a fresh 2xx commit. SKIPPED entirely when a force-provider
-	// override, a pin, OR a route_policy escalation/selector is in effect — all
-	// mean "send to THIS backend / session state matters", not a stale cached
-	// answer.
-	policyBypassesCache := false
-	if policy, ok := cfg.RoutePolicies[exposed]; ok && (policy.Escalation != nil || policy.Selector != nil) {
-		policyBypassesCache = true
-	}
-	cacheKey, cacheHit := p.lookupResponseCache(cache, r, origBody, calledModel, proto, exposed, agent, clientSession, requestID, w, forcedProvider != "" || force || policyBypassesCache)
-	if cacheHit {
 		return
 	}
 
@@ -264,7 +245,6 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		force:          force,
 		forcedProvider: forcedProvider,
 		stickyOff:      StickyOverrideFromRequest(r),
-		cacheKey:       cacheKey,
 		origBody:       origBody,
 
 		writer:  cw,
@@ -506,7 +486,7 @@ func (p pipeline) writeAllTargetsFailed(
 
 // terminalLogProvider is the provider of the all-targets-failed terminal row:
 // the proxy's own answer, not any upstream's — same convention as a cache
-// hit's "(cache)".
+// marker identifies proxy-generated output rather than an upstream.
 const terminalLogProvider = "(failover)"
 
 // logAllTargetsFailed records the terminal answer just written to the client
@@ -640,7 +620,7 @@ func newRequestLogProfile(profile routing.Profile, roles routing.RoleCounts) *ta
 
 // projectLogProfile maps the executor vocabulary onto the persisted
 // requestlog shape. Single mapping site: BuildRequestLogInput shares it with
-// the cache-hit record path, so the executor vocabulary and the JSONL shape
+// committed record path, so the executor vocabulary and the JSONL shape
 // can never drift apart.
 func projectLogProfile(profile *targetexec.RequestProfile) *requestlog.RequestProfile {
 	if profile == nil {
@@ -710,7 +690,7 @@ type serveResult struct {
 }
 
 // serveOnce runs ONE full scheduling + failover pass: schedule → request-aware
-// routing → try each target in order (fusion recipes intercepted). forward
+// routing → try each target in order. forward
 // calls it in a wait-retry loop for all-cooldown situations.
 func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 	runtime := req.runtime
@@ -727,7 +707,6 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 	routeKeys := req.routeKeys
 	force := req.force
 	forcedProvider := req.forcedProvider
-	cacheKey := req.cacheKey
 	w := req.writer
 	r := req.request
 	agent := req.agent
@@ -810,38 +789,6 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 			res.clientGone = true
 			break
 		}
-		// Fusion orchestration: {provider: fusion, model: <recipe>} is NOT a
-		// provider — intercept before the providerConfig lookup and run the
-		// panel→synthesis engine (its synthesizer leg reuses the target
-		// executor). A force-provider override (replay) targets one concrete
-		// backend, so it skips fusion entirely.
-		if t.Provider == configdomain.FusionProvider && forcedProvider == "" {
-			recipe, ok := cfg.Fusion[t.Model]
-			if !ok {
-				logx.Warnf("[proto=%s model=%s] target %d: fusion recipe %q not defined, skipping", proto, exposed, ti, t.Model)
-				continue
-			}
-			fusionLogCtx := LogCtx{RequestID: requestID, SessionID: clientSession, Attempt: st.attempt, Exposed: exposed, Agent: agent, OrigBody: origBody}
-			if p.svc.ReqLog != nil {
-				fusionLogCtx.Profile = p.requestLogProfile(st, origBody)
-			}
-			fc := fusionCtx{
-				runtime: runtime,
-				proto:   proto, calledModel: calledModel, upPath: upPath, agent: agent,
-				sessionKey: sessionKey,
-				origBody:   origBody,
-				flc:        fusionLogCtx,
-			}
-			st.attempt++
-			res.tried[t.Provider] = true
-			if p.runFusion(fc, t.Model, recipe, w, r, cacheKey) {
-				res.committed = true
-				return res // committed: response written to the client
-			}
-			res.sawHard = true // a failed fusion run is opaque → treat as hard
-			logx.Warnf("[proto=%s model=%s] target %d (fusion/%s) failed; trying next", proto, exposed, ti, t.Model)
-			continue
-		}
 		plan, err := p.planTarget(PlanInput{
 			Runtime: runtime, Target: t, ClientProto: proto, ClientPath: upPath,
 		})
@@ -852,7 +799,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 		}
 		// Fail closed on a missing runtime provider implementation (not
 		// logged in / unresolved pooled parent) BEFORE any per-target work —
-		// the same explicit check the executor, decisions and fusion layers
+		// the same explicit check the executor and decisions layers
 		// make. The skip marks the pass planning-level and neither counts
 		// the target as tried nor as a hard failure: a config-level gap is
 		// not an upstream verdict.
@@ -946,7 +893,6 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 			targetexec.Scope{
 				CalledModel: calledModel,
 				Agent:       agent,
-				CacheKey:    cacheKey,
 				Log: targetexec.LogContext{
 					RequestID:      flc.RequestID,
 					SessionID:      flc.SessionID,
@@ -985,19 +931,6 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 			break
 		}
 		if result.Committed {
-			p.dispatchShadowAfterCommit(
-				runtime,
-				proto,
-				string(plan.BackendProtocol()),
-				calledModel,
-				exposed,
-				t,
-				requestID,
-				agent,
-				flc.SessionID,
-				result.Commit,
-				st.routing,
-			)
 			res.committed = true
 			return res // committed: response written to the client
 		}
@@ -1090,7 +1023,6 @@ type serveRequest struct {
 	// stickyOff is the x-mp-sticky: off per-request opt-out (see
 	// StickyOverrideFromRequest): no affinity read, no binding write.
 	stickyOff bool
-	cacheKey  string
 	origBody  []byte
 
 	writer  http.ResponseWriter
@@ -1225,7 +1157,7 @@ const ScheduleSourceForce = "force"
 // StickyOverrideFromRequest reports the per-request session-affinity opt-out
 // (x-mp-sticky: off): this one request ignores any existing sticky binding
 // (the engine picks fresh) and neither writes nor refreshes one — the caller
-// explicitly wants best-now routing (replays, probing, cache experiments).
+// explicitly wants best-now routing (replays and probing).
 // Unknown values are ignored rather than rejected: the override is a hint
 // surface, and a typo must not break a working request. The header never
 // reaches the upstream (the executor forwards a fixed whitelist only).
@@ -1234,33 +1166,6 @@ func StickyOverrideFromRequest(request *http.Request) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(request.Header.Get("x-mp-sticky")), "off")
-}
-
-// expandFusionResponses mirrors forward's responses-state expansion for one
-// fusion sub-call body (panel leg / judge / synthesizer): it applies only when
-// the client spoke the responses protocol AND this leg's backend is stateless
-// (backendProto != responses) — a native-responses backend keeps
-// previous_response_id passthrough and its own server-side chain. On expansion
-// failure the UNEXPANDED body is sent: a broken chain degrades context but must
-// not kill the whole run (forward fails closed per-target; fusion has no
-// per-leg target list to fall through). Returns the body to send plus the
-// merged history for post-response recording (nil when not applicable).
-//
-// It lives here (not fusion.go) so fusion.go stays free of the protocol
-// import: conversion mechanics belong to targetexec.Plan.
-func (p pipeline) expandFusionResponses(fc fusionCtx, backendProto string, body []byte) ([]byte, []any) {
-	if fc.proto != "responses" || backendProto == "responses" || p.svc.ResponsesState == nil {
-		return body, nil
-	}
-	expanded, history, hit, err := p.svc.ResponsesState.Expand(body, fc.sessionKey)
-	if err != nil {
-		logx.Warnf("[fusion] %s: responses state expansion failed: %v — sending unexpanded body", fc.flc.Exposed, err)
-		return body, nil
-	}
-	if protocol.PreviousResponseID(body) != "" && !hit {
-		logx.Infof("[fusion] %s: previous_response_id cache miss; repaired orphaned continuation items", fc.flc.Exposed)
-	}
-	return expanded, history
 }
 
 // runOutboundGuard is the outbound secret guard (DLP-lite) stage of forward,
@@ -1697,70 +1602,4 @@ func (p pipeline) runOutboundGuard(runtime Snapshot, proto string, w http.Respon
 		}
 	}
 	return origBody, false
-}
-
-// lookupResponseCache is the exact-match response cache stage (#10) of
-// forward, extracted verbatim: a request byte-identical to a recently
-// served one is replayed from cache with no upstream call. Computed before
-// routing (the key is the raw request); the returned key is threaded into
-// the target attempt to store on a fresh 2xx commit. bypass skips the cache
-// entirely when a force-provider override, a pin, OR a route_policy
-// escalation/selector is in effect — all mean "send to THIS backend / session
-// state matters", not a stale cached answer. hit == true means a cached
-// response was replayed and the caller must return.
-//
-// A hit still writes a request-log record (provider "(cache)"): the request
-// is an LLM-protocol commit the operator must be able to find in history —
-// without it, cache hits are live-visible but vanish from the Requests page,
-// session aggregates, and any guard-verdict correlation pointing at them.
-// Provider metrics/agent stats deliberately stay untouched (the documented
-// cache-hit contract).
-func (p pipeline) lookupResponseCache(cache *responsecache.Store, r *http.Request, origBody []byte, calledModel, proto, exposed, agent, clientSession, requestID string, w http.ResponseWriter, bypass bool) (cacheKey string, hit bool) {
-	if cache != nil && !bypass {
-		cacheKey = responsecache.Key(r, origBody, webauth.KeyIDFrom(r.Context()))
-		if e, ok := cache.Lookup(cacheKey, calledModel, time.Now()); ok {
-			// Live monitor (#6): a cache hit skips the normal start/end flow, so
-			// emit an end event explicitly — otherwise the live view is blind to
-			// these (e.g. a retry-looping agent served from cache stays invisible).
-			p.svc.Events.Publish(observeevents.Event{
-				Type:      "end",
-				Ts:        time.Now().UnixMilli(),
-				RequestID: requestID,
-				Agent:     agent,
-				Protocol:  proto,
-				// Same exposed name as the start event above: the live view
-				// must show ONE exposed name per request, not different
-				// names on start and end.
-				Exposed:  exposed,
-				Provider: "(cache)",
-				Status:   e.Status(),
-			})
-			if p.svc.ReqLog != nil {
-				body := e.Body()
-				requestlog.Complete(p.svc.ReqLog, requestlog.Input{
-					StartedAt:   time.Now(),
-					RequestID:   requestID,
-					SessionID:   clientSession,
-					Protocol:    proto,
-					Method:      r.Method,
-					Path:        r.URL.Path,
-					CalledModel: calledModel,
-					Exposed:     exposed,
-					Agent:       agent,
-					APIKeyID:    webauth.KeyIDFrom(r.Context()),
-					Provider:    "(cache)",
-					Status:      e.Status(),
-					RequestBody: origBody,
-					// Cache hits predate the serveState cache (the lookup runs
-					// before routing); compute directly — one body sweep, paid
-					// only on the logged-hit path.
-					Profile: projectLogProfile(newRequestLogProfile(routing.ProfileRequest(origBody), routing.CountRoles(origBody))),
-				}, body, int64(len(body)), false)
-			}
-			w.Header().Set("x-mp-cache", "hit")
-			_ = responsecache.Replay(w, e)
-			return cacheKey, true
-		}
-	}
-	return cacheKey, false
 }

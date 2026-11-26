@@ -6,7 +6,6 @@ import configdomain "model-proxy/internal/config"
 // definitions live in internal/config (same convention as
 // internal/app/config_alias.go).
 type Config = configdomain.Config
-type FusionConfig = configdomain.FusionConfig
 type SelectorConfig = configdomain.SelectorConfig
 type RoutePolicy = configdomain.RoutePolicy
 type RoutingDecision = configdomain.RoutingDecision

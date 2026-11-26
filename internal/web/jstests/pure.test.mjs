@@ -15,7 +15,7 @@ import {
   cumulativeOffsets, virtualWindow, mergeRecordsPages, oldestTsSec,
   hashQueryParams, requestsFilterQuery, requestsFilterFromQuery,
   parseRequestTimeValue, requestTimeValue, requestTimeBounds, requestTimeLabel, requestTimePickerHTML,
-  cacheHitRate, settingsDiff, settingsRestartKeys, configSummaryHTML,
+  settingsDiff, settingsRestartKeys, configSummaryHTML,
   TOKEN_RANGES, tokenRangeBounds, tokenRangeLabel, tokensRangeQuery,
   tokenCustomBounds, parseLocalDate,
   WEEKDAYS, monthTitle, calendarMonthGrid, twoMonthWindow, shiftMonth, ymd,
@@ -45,7 +45,6 @@ takeoverRunSummary, takeoverRestoreSummary, takeoverVariantLabel,
   takeoverProtocolLabel, takeoverWriteVariantsLabel, takeoverClientLabel,
   highlightYAML, highlightTOML, highlightEnv, highlightConfig,
   takeoverFamilyGroups, takeoverFamilyBadge, TAKEOVER_TEMPLATE_EXAMPLES, TAKEOVER_PLACEHOLDERS,
-  shadowMatchBadge,
   MCP_ANALYTICS_METRICS, mcpAnalyticsFilterSeries, mcpAnalyticsToolFilter, mcpAnalyticsSummaryGroups,
   mcpAnalyticsChartSeries, mcpAnalyticsMetricOptions, mcpAnalyticsPointValue, mcpAnalyticsValueText,
   mcpAnalyticsSummaryTableHTML, mcpAnalyticsEmptyHTML, mcpAnalyticsSkeletonHTML,
@@ -507,31 +506,18 @@ test('providerNames keeps frozen/unavailable providers listed via the health uni
   assert.deepEqual(providerNames({ glm: { ordered: [null, {}, { provider: 'a' }] } }), ['a']);
 });
 
-test('cacheHitRate derives the hit percentage from exact-cache counters', () => {
-  assert.equal(cacheHitRate(5, 13), '27.8%');
-  assert.equal(cacheHitRate(0, 7), '0.0%');
-  assert.equal(cacheHitRate(9, 0), '100.0%');
-});
-
-test('cacheHitRate returns an em dash before the first lookup', () => {
-  // A fresh daemon has hits=0 misses=0 — no lookups, no rate to speak of.
-  assert.equal(cacheHitRate(0, 0), '—');
-  assert.equal(cacheHitRate(undefined, undefined), '—');
-  assert.equal(cacheHitRate(null, null), '—');
-});
-
 test('settingsDiff returns only changed fields, grouped by edit kind', () => {
   const loaded = {
     scheduling: { circuit_threshold: 3, sticky_dwell: '10m' },
-    cache: { enabled: true, ttl: '10m', max_entries: 1000 },
+    stats: { retention: '720h', db_path: 'a' },
   };
   const current = {
     scheduling: { circuit_threshold: '3', sticky_dwell: '2m' },
-    cache: { enabled: true, ttl: '10m', max_entries: '6000' },
+    stats: { retention: '0', db_path: 'a' },
   };
   assert.deepEqual(settingsDiff(loaded, current), {
     scheduling: { sticky_dwell: '2m' },
-    cache: { max_entries: '6000' },
+    stats: { retention: '0' },
   });
 });
 
@@ -556,22 +542,22 @@ test('settingsDiff treats unset loaded values as empty and skips blank fields', 
 });
 
 test('settingsDiff reports an unchecked box that was unset as no change', () => {
-  const loaded = { cache: { enabled: false } };
-  const current = { cache: { enabled: false } };
+  const loaded = { request_log: { enabled: false } };
+  const current = { request_log: { enabled: false } };
   assert.deepEqual(settingsDiff(loaded, current), {});
 });
 
 test('settingsDiff reports flipping a checkbox', () => {
-  const loaded = { cache: { enabled: false } };
-  const current = { cache: { enabled: true } };
-  assert.deepEqual(settingsDiff(loaded, current), { cache: { enabled: true } });
+  const loaded = { request_log: { enabled: false } };
+  const current = { request_log: { enabled: true } };
+  assert.deepEqual(settingsDiff(loaded, current), { request_log: { enabled: true } });
 });
 
 const RESTART_GROUPS = [
   { kind: 'general', fields: [{ key: 'log_level', restart: true }, { key: 'log_file', restart: true }] },
   { kind: 'scheduling', fields: [{ key: 'sticky_dwell' }, { key: 'quota_poll_interval', restart: true }] },
   { kind: 'request_log', restart: true, fields: [{ key: 'enabled' }, { key: 'dir' }] },
-  { kind: 'cache', fields: [{ key: 'enabled' }, { key: 'ttl' }] },
+  { kind: 'guard', fields: [{ key: 'secrets' }] },
 ];
 
 test('settingsRestartKeys flags field-level restart-only keys', () => {
@@ -587,7 +573,7 @@ test('settingsRestartKeys flags every changed field of a group-level restart blo
 });
 
 test('settingsRestartKeys ignores hot-reloadable changes', () => {
-  assert.deepEqual(settingsRestartKeys({ cache: { enabled: true, ttl: '5m' } }, RESTART_GROUPS), []);
+  assert.deepEqual(settingsRestartKeys({ guard: { secrets: 'block' } }, RESTART_GROUPS), []);
   assert.deepEqual(settingsRestartKeys({ scheduling: { sticky_dwell: '2m' } }, RESTART_GROUPS), []);
   assert.deepEqual(settingsRestartKeys({}, RESTART_GROUPS), []);
 });
@@ -601,7 +587,6 @@ test('configSummaryHTML renders KPI tiles plus the feature-block grid', () => {
       log_level: 'debug', log_file: '/tmp/mp.log',
       request_log: { enabled: true, dir: '~/r' },
       stats: { db_path: '~/stats.db' },
-      cache: { enabled: true, ttl: '5m', max_entries: 42 },
       guard: { secrets: 'block', paths: 'log', known_secrets: true, decode: false },
     },
   });
@@ -613,7 +598,6 @@ test('configSummaryHTML renders KPI tiles plus the feature-block grid', () => {
   assert.match(html, /<div class="sum-k">log<\/div><div class="sum-v" title="debug → \/tmp\/mp\.log">debug → \/tmp\/mp\.log<\/div>/);
   assert.match(html, /<div class="sum-k">request_log <span class="badge ok">on<\/span><\/div><div class="sum-v" title="~\/r">~\/r<\/div>/);
   assert.match(html, /<div class="sum-k">stats<\/div><div class="sum-v" title="~\/stats\.db">~\/stats\.db<\/div>/);
-  assert.match(html, /<div class="sum-k">cache <span class="badge ok">on<\/span><\/div><div class="sum-v" title="ttl 5m · max 42 entries">ttl 5m · max 42 entries<\/div>/);
   assert.match(html, /<div class="sum-k">guard<\/div><div class="sum-v" title="secrets block · paths log · known on · decode off">/);
 });
 
@@ -624,16 +608,14 @@ test('configSummaryHTML marks absent keys with the code default and off blocks w
   assert.match(html, /<div class="sum-v" title="info → \/tmp\/model-proxy\.log">/);
   assert.match(html, /<div class="sum-k">request_log <span class="badge muted">off<\/span><\/div><div class="sum-v" title="—">—<\/div>/);
   assert.match(html, /<div class="sum-v" title="~\/\.model-proxy\/stats\.db \(default\)">/);
-  assert.match(html, /<div class="sum-k">cache <span class="badge muted">off<\/span><\/div><div class="sum-v" title="—">—<\/div>/);
   assert.match(html, /secrets log · paths log · known off · decode off/);
 });
 
 test('configSummaryHTML keeps enabled blocks honest about defaulted sub-keys', () => {
   const html = configSummaryHTML({
-    settings: { request_log: { enabled: true }, cache: { enabled: true } },
+    settings: { request_log: { enabled: true }, request_log: { enabled: true } },
   });
   assert.match(html, /<div class="sum-v" title="~\/\.model-proxy\/log\/requests \(default\)">/);
-  assert.match(html, /<div class="sum-v" title="ttl 10m \(default\) · max 1000 entries">/);
 });
 
 test('configSummaryHTML escapes config values before interpolation', () => {
@@ -3296,13 +3278,13 @@ test('sessionHealthSummary derives health signals with gap/percentile guards', (
     { ts: 0, latencyMs: 10447, ttftMs: 9686, output: 745 },
   ]);
   assert.equal(fastStream.tokPerSec, Math.round((745 / 0.761) * 10) / 10);
-  // Cache-replay rows replay stored bytes in ~1ms with no generation behind
-  // them: they contribute neither tokens nor window.
-  const withCache = sessionHealthSummary([
+  // A bulk arrival whose implied decode rate is implausible falls back to its
+  // full call time; there is no provider-specific replay exemption.
+  const withFastBulk = sessionHealthSummary([
     { ts: 0, latencyMs: 2000, ttftMs: 500, output: 100 },
-    { ts: 2500, latencyMs: 3, output: 20000, provider: '(cache)' },
+    { ts: 2500, latencyMs: 3, output: 20000, provider: 'bulk' },
   ]);
-  assert.equal(withCache.tokPerSec, Math.round((100 / 1.5) * 10) / 10);
+  assert.equal(withFastBulk.tokPerSec, Math.round((20100 / 1.503) * 10) / 10);
 });
 
 test('requestRowHTML cache badge shows the hit share and highlights at 80%', () => {
@@ -3954,15 +3936,6 @@ test('takeoverProtocolLabel / takeoverWriteVariantsLabel hide raw template ids',
   assert.equal(takeoverWriteVariantsLabel(['my-agent'], surface), 'my-agent');
   assert.equal(takeoverWriteVariantsLabel([], surface), '');
   assert.equal(takeoverWriteVariantsLabel(null, null), '');
-});
-
-test('shadowMatchBadge classifies primary/shadow match rates', () => {
-  assert.equal(shadowMatchBadge(1), '<span class="badge ok">100.0%</span>');
-  assert.equal(shadowMatchBadge(0.995), '<span class="badge ok">99.5%</span>');
-  assert.equal(shadowMatchBadge(0.97), '<span class="badge warn">97.0%</span>');
-  assert.equal(shadowMatchBadge(0.8), '<span class="badge err">80.0%</span>');
-  assert.equal(shadowMatchBadge(null), '<span class="badge muted">—</span>');
-  assert.equal(shadowMatchBadge(NaN), '<span class="badge muted">—</span>');
 });
 
 // ---- takeover config highlighting ----

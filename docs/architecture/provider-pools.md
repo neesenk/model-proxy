@@ -3,7 +3,7 @@
 ## 适用范围
 
 修改 `internal/accounts/*`、`internal/routing/resolver.go`、
-`internal/providerbuild`、登录/登出、多账号 quota 或 Fusion/Shadow provider 解析时必读。
+`internal/providerbuild`、登录/登出、多账号 quota 或 decisions provider 解析时必读。
 
 ## 凭据文件
 
@@ -179,7 +179,7 @@ quota_state.json 快照）在池恒虚拟键后必须跟随账号迁移，否则
 所有“配置 provider 名 → 可运行 provider 实例”的路径统一经过 resolver：
 
 - `Expand`：父 provider 展开为全部虚拟账号，用于正常路由和 failover；
-- `Pick`：为 Fusion/Shadow 等单目标调用选择一个 built 且 healthy 的虚拟账号。
+- `Pick`：为 decisions 等单目标调用选择一个 built 且 healthy 的虚拟账号。
 
 resolver 负责 identity mapping 和健康预过滤，不负责占用 half-open slot。权威 gate 仍由调用方的 `takeHalfOpenSlot` 完成。
 
@@ -234,5 +234,5 @@ volcengine `FetchModels` 已按账号绑定：每个虚拟用自己的 AK/SK 签
 - BoundAPIKey 不读取虚拟名字对应的不存在文件。
 - session 稳定、不同 session 分流、账号冷却 failover，以及 pool spread 不跨
   winning rank。
-- Fusion panel/synthesizer 和 Shadow 的 pooled parent 解析。
+- decisions selector 的 pooled parent 解析。
 - resolver !ok 时没有任何上游请求。

@@ -138,43 +138,6 @@ func TestRequestLogSessionHeaders(t *testing.T) {
 	}
 }
 
-func TestCacheConfigAccessors(t *testing.T) {
-	def := CacheConfig{}
-	if def.IsEnabled() {
-		t.Error("zero-value cache config should be disabled")
-	}
-	if !(CacheConfig{Enabled: true}).IsEnabled() {
-		t.Error("enabled cache config should report enabled")
-	}
-	if got := def.TTLDuration(); got != 10*time.Minute {
-		t.Errorf("default ttl = %v", got)
-	}
-	if got := (CacheConfig{TTL: "2m"}).TTLDuration(); got != 2*time.Minute {
-		t.Errorf("explicit ttl = %v", got)
-	}
-	if got := (CacheConfig{TTL: "bad"}).TTLDuration(); got != 10*time.Minute {
-		t.Errorf("invalid ttl fallback = %v", got)
-	}
-	if got := def.MaxEntriesValue(); got != 1000 {
-		t.Errorf("default max entries = %d", got)
-	}
-	if got := (CacheConfig{MaxEntries: 25}).MaxEntriesValue(); got != 25 {
-		t.Errorf("explicit max entries = %d", got)
-	}
-	if got := (CacheConfig{MaxEntries: -1}).MaxEntriesValue(); got != 1000 {
-		t.Errorf("negative max entries fallback = %d", got)
-	}
-	if got := def.MaxBodyBytesValue(); got != 256*1024 {
-		t.Errorf("default max body = %d", got)
-	}
-	if got := (CacheConfig{MaxBodyBytes: 512}).MaxBodyBytesValue(); got != 512 {
-		t.Errorf("explicit max body = %d", got)
-	}
-	if got := (CacheConfig{MaxBodyBytes: -1}).MaxBodyBytesValue(); got != 256*1024 {
-		t.Errorf("negative max body fallback = %d", got)
-	}
-}
-
 func TestParseHHMM(t *testing.T) {
 	for _, tc := range []struct {
 		in   string

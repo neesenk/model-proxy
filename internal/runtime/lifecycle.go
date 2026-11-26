@@ -1,6 +1,5 @@
 // lifecycle.go owns admission-gated background work for the application
-// runtime: tasks are admitted under a mutex so Add never races Wait, and
-// log-producing finite tasks drain before the request logger shuts down.
+// runtime: tasks are admitted under a mutex so Add never races Wait.
 package runtime
 
 import "sync"
@@ -13,10 +12,6 @@ type Lifecycle struct {
 	stopping bool
 	stop     chan struct{}
 	wg       sync.WaitGroup
-	// beforeLogDrain tracks finite tasks whose final output is written through
-	// requestlog.Logger (currently Shadow evaluations). Close rejects new
-	// admissions, waits for this group, and only then drains the logger.
-	beforeLogDrain sync.WaitGroup
 }
 
 func NewLifecycle() *Lifecycle {
@@ -36,31 +31,6 @@ func (l *Lifecycle) Run(task func(stop <-chan struct{})) bool {
 	l.mu.Unlock()
 	go func() {
 		defer l.wg.Done()
-		task(l.stop)
-	}()
-	return true
-}
-
-// runBeforeLogDrain admits finite background work that may still enqueue a
-// request-log record. Admission shares the lifecycle mutex with beginStop, so
-// Add cannot race Wait and no task can start after shutdown begins. The task
-// receives the stop channel closed by BeginStop — it must observe it and
-// abort its work: nothing bounds WaitBeforeLogDrain otherwise, and the
-// supervisor SIGKILLs the worker 10s after SIGTERM, dropping every final
-// flush that follows this wait.
-func (l *Lifecycle) RunBeforeLogDrain(task func(stop <-chan struct{})) bool {
-	if l == nil {
-		return false
-	}
-	l.mu.Lock()
-	if l.stopping {
-		l.mu.Unlock()
-		return false
-	}
-	l.beforeLogDrain.Add(1)
-	l.mu.Unlock()
-	go func() {
-		defer l.beforeLogDrain.Done()
 		task(l.stop)
 	}()
 	return true
@@ -90,11 +60,5 @@ func (l *Lifecycle) BeginStop() {
 func (l *Lifecycle) Wait() {
 	if l != nil {
 		l.wg.Wait()
-	}
-}
-
-func (l *Lifecycle) WaitBeforeLogDrain() {
-	if l != nil {
-		l.beforeLogDrain.Wait()
 	}
 }

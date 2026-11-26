@@ -14,10 +14,8 @@ import (
 
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/appapi"
-	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/fusion"
 	"model-proxy/internal/login"
 	obscounters "model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/requestlog"
@@ -32,8 +30,7 @@ import (
 // composition root. Closures capture *Proxy in internal/app and take
 // p.mu / SnapshotRuntime internally, so this package never touches locks or
 // reload-owned state directly. Functions returning maps/slices derived from
-// reload-owned state must return copies — never live map references (the same
-// copy-by-value contract as internal/observe/budget).
+// reload-owned state must return copies — never live map references.
 type Ports struct {
 	// ConfigFile returns the daemon config path (flag-owned, not
 	// reload-owned). A nil func reports the empty path.
@@ -100,8 +97,6 @@ type Ports struct {
 	Analytics           func(from, to int64, provider, model, granularity string) ([]observestats.AnalyticsBucket, error)
 	AnalyticsAgents     func(from, to int64, agent, provider, model, granularity string) ([]observestats.AnalyticsBucket, error)
 	AnalyticsAgentNames func(from, to int64, provider, model string) []string
-	// FusionSnapshot returns the fusion registry projection for one workflow.
-	FusionSnapshot func(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
 	// MCPAnalytics queries persisted MCP usage buckets for the
 	// /api/mcp/analytics endpoint. The closure returns an empty slice and nil
 	// error when the stats store is disabled; store errors are returned as-is.
@@ -257,14 +252,10 @@ type ModelRefreshRuntime struct {
 type DashboardState struct {
 	Listen        string
 	RouteWarnings []string
-	// Cache is the current generation's cache store (nil = disabled); the
-	// store is concurrency-safe and survives its generation, so reading its
-	// stats after capture cannot mix state.
-	Cache        *responsecache.Store
-	Runtime      runtimestate.DashboardSnapshot
-	QuotaEnabled bool
-	StartedAt    time.Time
-	Counters     map[string]obscounters.ProviderMetricsSnapshot
+	Runtime       runtimestate.DashboardSnapshot
+	QuotaEnabled  bool
+	StartedAt     time.Time
+	Counters      map[string]obscounters.ProviderMetricsSnapshot
 	// Schedule is the schedule preview JSON derived from Runtime by the
 	// composition root (shared with /debug/schedule).
 	Schedule []byte

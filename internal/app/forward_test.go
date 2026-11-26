@@ -171,8 +171,8 @@ func TestForward_DialRefusedFailsOver(t *testing.T) {
 // TestForward_EarlyEventsHaveRequestID (bug 7): live events published on the
 // EARLY-return paths (missing model 400, unrouted model 502) used to carry an
 // empty request_id — requestID was generated deep in forward (at the
-// start-event), after these returns. The contract (fusion-shadow-cache
-// "forward 产生 start/end，含稳定 request_id；cache hit、400/502 终局也必须产生
+// start-event), after these returns. The contract (observe
+// "forward 产生 start/end，含稳定 request_id；400/502 终局也必须产生
 // end") requires every event to carry a stable id so start↔end pairing works.
 // Non-LLM paths (proto=="") are the exception: they 502 without a live event,
 // so browser probes cannot pollute the Live view.

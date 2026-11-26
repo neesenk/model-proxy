@@ -363,8 +363,8 @@ func (s *UsageScanner) parseLine(line []byte) {
 		s.sseUsage = true
 		// Cache shares ride inside the inclusive prompt_tokens and are split
 		// out before merging — the buckets are anthropic-normalized (input
-		// excludes cache; the same ledger as requestlog.ExtractUsage and
-		// fusion.ParseUsage). Hit spellings: prompt_tokens_details.cached_tokens
+		// excludes cache; the same ledger as requestlog.ExtractUsage).
+		// Hit spellings: prompt_tokens_details.cached_tokens
 		// (openai contract) and prompt_cache_hit_tokens (deepseek dialect) are
 		// max-merged — same source, same value; write spellings:
 		// prompt_tokens_details.cache_write_tokens (the converter emission

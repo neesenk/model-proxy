@@ -2,13 +2,12 @@ package archtest
 
 import (
 	"go/ast"
-	"strings"
 	"testing"
 )
 
 // TestArchitectureRootBoundaries keeps process and runtime ownership narrow:
-// Web uses explicit capabilities, account probes capture one generation, Fusion
-// shares target planning, and daemon background work enters proxyLifecycle.
+// Web uses explicit capabilities, account probes capture one generation, and
+// daemon background work enters proxyLifecycle.
 func TestArchitectureRootBoundaries(t *testing.T) {
 	rootPackage, rootSet := parseGoPackage(t, "internal/app")
 	_ = rootSet
@@ -48,22 +47,6 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			if got := methodCallCount(refresh, "RefreshModels", method); got != 0 {
 				t.Errorf("RefreshModels separately reads %s (%d calls)", method, got)
 			}
-		}
-	})
-
-	t.Run("forward fusion.go reuses targetexec Plan helpers instead of duplicating them", func(t *testing.T) {
-		f, fset := parseGoFile(t, "internal/forward/fusion.go")
-		for _, spec := range f.Imports {
-			if strings.Trim(spec.Path.Value, `"`) == "model-proxy/internal/protocol" {
-				t.Error("forward/fusion.go must not import internal/protocol directly; use targetexec.Plan")
-			}
-		}
-		forbiddenCalls := map[string]bool{
-			"providerConfig": true, "resolvedBackendProto": true,
-			"convertRequestFor": true, "catalogSnapshot": true,
-		}
-		for _, v := range forbiddenCallSites(f, fset, forbiddenCalls, nil) {
-			t.Errorf("forward/fusion.go bypasses targetexec.Plan: %s", v)
 		}
 	})
 
@@ -142,13 +125,13 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 		// New fields must land in the right group, never sprawl onto Proxy.
 		wantGeneration := map[string]bool{
 			"cfg": true, "providers": true,
-			"cache": true, "guardScanner": true,
+			"guardScanner":     true,
 			"guardPoolSecrets": true, "guardOAuthSecrets": true,
 			"secLog": true, "secLogRunning": true,
 			"poolIndex": true, "parentOf": true, "poolAccounts": true,
 			"expandedRoutes": true, "routeKeys": true,
 			"derivedRoutes": true, "routeWarnings": true,
-			"shadow": true, "adminAuth": true, "apiKeys": true,
+			"adminAuth": true, "apiKeys": true,
 		}
 		if got := structContractViolations(
 			namedStructFields(t, rootPackage, "generationState"), wantGeneration, nil,
@@ -163,16 +146,13 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			"mcpReqLog": true, "mcpReqLogStarted": true,
 			"sessionScan": true, "responsesState": true, "events": true, "adjudication": true,
 			"mcpSessions": true, "mcpRR": true, "mcpStdio": true, "mcpStats": true,
-			"fusionReg": true, "catalog": true, "budget": true,
+			"catalog":       true,
 			"proxyResolver": true, "transports": true, "transportsMu": true,
 			"wireCaps": true, "wireProbe": true, "wireProbeMu": true,
 			"wireProbePending": true,
 			"modelCaps":        true, "modelCapsPath": true, "modelCapsFileBaseline": true,
 			"modelCapsPersistMu": true,
-			"cacheStatePath":     true,
-			"cacheCounters":      true, "cachePersistMu": true,
 			"disabledModelsPath": true, "disabledModelsMu": true,
-			"evalRand": true, "evalPrimaryBodies": true,
 		}
 		if got := structContractViolations(
 			namedStructFields(t, rootPackage, "processServices"), wantServices, nil,

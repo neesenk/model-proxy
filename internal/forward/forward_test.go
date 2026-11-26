@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	responsecache "model-proxy/internal/cache"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/guard"
 	guardsession "model-proxy/internal/guard/session"
@@ -37,7 +36,7 @@ func openaiChatBody() string {
 }
 
 // TestServeHappyPathCommit: a routed openai request reaches the upstream,
-// commits its 2xx, dispatches the shadow port and closes the live event pair.
+// commits its 2xx and closes the live event pair.
 func TestServeHappyPathCommit(t *testing.T) {
 	up := newFakeUpstream(t, openaiOKResponder("hello"))
 	h := newHarness()
@@ -54,9 +53,6 @@ func TestServeHappyPathCommit(t *testing.T) {
 	}
 	if !strings.Contains(up.lastBody(), "real-model") {
 		t.Errorf("upstream body missing rewritten model: %s", up.lastBody())
-	}
-	if len(h.shadow) != 1 || h.shadow[0].provider != "up" {
-		t.Errorf("shadow dispatch = %+v, want one call for up", h.shadow)
 	}
 	// The commit end event is published by the app-side Effects adapter
 	// (targetExecutionEffects), not by the pipeline — here the fake effects
@@ -214,91 +210,6 @@ func TestServeOpenAIStripsV1Prefix(t *testing.T) {
 	}
 	if up.paths[0] != "/v3/chat/completions" {
 		t.Errorf("path = %s, want /v3/chat/completions (/v1 stripped)", up.paths[0])
-	}
-}
-
-// TestServeCacheHitReplayAndBypass: an identical second request replays from
-// the exact-match cache; a pin and a force-provider override each bypass it.
-func TestServeCacheHitReplayAndBypass(t *testing.T) {
-	up := newFakeUpstream(t, openaiOKResponder("cached"))
-	h := newHarness()
-	cfg := &Config{
-		Providers: map[string]Provider{"up": {OpenAIBaseURL: up.srv.URL, Provider: "test-static"}},
-		Routes:    map[string][]RouteTarget{"m": {{Provider: "up", Model: "real-model"}}},
-	}
-	snap := h.snapshot(cfg)
-	snap.Cache = responsecache.New(responsecache.Options{TTL: time.Hour, MaxEntries: 8, MaxBodyBytes: 1 << 16})
-
-	// The cache hit must land in the request log too (provider "(cache)"):
-	// history-blind cache hits would vanish from the Requests page, session
-	// aggregates and any guard correlation pointing at them.
-	logDir := t.TempDir()
-	reqLog := requestlog.New(requestlog.Options{Directory: logDir, MaxBodyBytes: 1 << 20})
-	go reqLog.Run()
-	t.Cleanup(reqLog.Shutdown)
-	h.svc.ReqLog = reqLog
-
-	if w := h.serve(snap, "openai", "/v1/chat/completions", openaiChatBody(), nil); w.Code != 200 {
-		t.Fatalf("first status = %d", w.Code)
-	}
-	w := h.serve(snap, "openai", "/v1/chat/completions", openaiChatBody(), nil)
-	if w.Code != 200 || w.Header().Get("x-mp-cache") != "hit" {
-		t.Fatalf("second status = %d x-mp-cache = %q, want cache hit", w.Code, w.Header().Get("x-mp-cache"))
-	}
-	if up.hits() != 1 {
-		t.Fatalf("upstream hits = %d, want 1 (second served from cache)", up.hits())
-	}
-	cacheEnd := false
-	for _, e := range h.endEvents("req-test") {
-		if e.Provider == "(cache)" {
-			cacheEnd = true
-		}
-	}
-	if !cacheEnd {
-		t.Error("cache hit must emit a (cache) end event")
-	}
-	reqLog.Shutdown()
-	rows, err := requestlog.QuerySummaries(logDir, requestlog.Filter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The fresh commit's logging is app-owned (internal/app target pipeline);
-	// in this harness the cache-hit row is the one that must appear.
-	if len(rows) != 1 {
-		t.Fatalf("request-log rows = %d, want the cache-hit row", len(rows))
-	}
-	if rows[0].Provider != "(cache)" || rows[0].Status != 200 {
-		t.Errorf("cache-hit row = %+v, want provider (cache) status 200", rows[0])
-	}
-	detail, err := requestlog.QueryRecords(logDir, requestlog.Filter{})
-	if err != nil || len(detail) != 1 {
-		t.Fatalf("detail rows = %d err = %v", len(detail), err)
-	}
-	if !strings.Contains(detail[0].ResponseBody, "cached") || detail[0].RequestBody == "" {
-		t.Errorf("cache-hit record bodies missing: resp = %.60q", detail[0].ResponseBody)
-	}
-
-	// Pin: bypasses the cache and forces the pinned backend even with its
-	// circuit open (pin is an explicit hard selection).
-	h.state.pins["m"] = true
-	h.gate.halfOpenOpen["up"] = true
-	if w := h.serve(snap, "openai", "/v1/chat/completions", openaiChatBody(), nil); w.Code != 200 {
-		t.Fatalf("pinned status = %d, want 200 (circuit bypassed by pin)", w.Code)
-	}
-	if up.hits() != 2 {
-		t.Fatalf("upstream hits = %d, want 2 (pin bypasses cache)", up.hits())
-	}
-	delete(h.state.pins, "m")
-	delete(h.gate.halfOpenOpen, "up")
-
-	// Force-provider: also a cache bypass, and a typo is a hard 400.
-	w = h.serve(snap, "openai", "/v1/chat/completions", openaiChatBody(), map[string]string{"x-mp-force-provider": "typo"})
-	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "is not a target") {
-		t.Errorf("force-provider typo status = %d body = %s, want 400", w.Code, w.Body.String())
-	}
-	w = h.serve(snap, "openai", "/v1/chat/completions", openaiChatBody(), map[string]string{"x-mp-force-provider": "up"})
-	if w.Code != 200 || up.hits() != 3 {
-		t.Errorf("force-provider status = %d hits = %d, want 200 and a fresh upstream call", w.Code, up.hits())
 	}
 }
 

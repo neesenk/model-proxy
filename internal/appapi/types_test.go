@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"model-proxy/internal/fusion"
 	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/presets"
@@ -61,10 +60,7 @@ func (fakeReads) Analytics(AnalyticsQuery) ([]observestats.AnalyticsBucket, erro
 }
 func (fakeReads) AnalyticsAgentNames(AnalyticsQuery) []string { return nil }
 func (fakeReads) Pricing() PricingSnapshot                    { return PricingSnapshot{} }
-func (fakeReads) Fusion(string, time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
-	return nil, nil
-}
-func (fakeReads) Pins() []Pin { return nil }
+func (fakeReads) Pins() []Pin                                 { return nil }
 func (fakeReads) Security(SecurityQuery) (SecurityResult, error) {
 	return SecurityResult{}, nil
 }

@@ -83,7 +83,7 @@ func TestMCPValidate_CustomHeaderOnApikeyProviders(t *testing.T) {
 }
 
 // TestMCPLoadFromYAML guards the rawConfig silent-drop trap (precedent:
-// TestLoadCacheAndShadow): the mcp: section must survive LoadConfigFromBytes,
+// TestLoadOptionalSections): the mcp: section must survive LoadConfigFromBytes,
 // not just direct Config construction.
 func TestMCPLoadFromYAML(t *testing.T) {
 	cfg, err := LoadConfigFromBytes("x", []byte(`

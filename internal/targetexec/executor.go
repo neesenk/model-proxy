@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	responsecache "model-proxy/internal/cache"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/transport/bodycapture"
@@ -438,7 +437,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 		} else {
 			executor.release(target.Provider)
 		}
-		return executor.commit(ctx, runtime.Cache, runtime.Scheduling.Keepalive(), plan, exchange, scope, dto, timedWriter, clientWantsStream)
+		return executor.commit(ctx, runtime.Scheduling.Keepalive(), plan, exchange, scope, dto, timedWriter, clientWantsStream)
 	}
 	executor.release(target.Provider)
 	executor.failover(target)
@@ -447,7 +446,6 @@ func (executor Executor) Execute(attempt Attempt) Result {
 
 func (executor Executor) commit(
 	ctx context.Context,
-	cache *responsecache.Store,
 	keepalive time.Duration,
 	plan Plan,
 	exchange Exchange,
@@ -472,8 +470,7 @@ func (executor Executor) commit(
 	// Response model normalization (provider alias): when the target's real
 	// upstream model differs from the called name, upstreams echo THEIR model
 	// in the response and clients learn an id they never called. The rewrite
-	// applies to the final client-facing bytes (before logging/usage/cache, so
-	// a cache hit replays the same normalized bytes); "" keeps the zero-copy
+	// applies to the final client-facing bytes (before logging/usage);
 	// passthrough byte-identical.
 	normalizeModel := responseModelNormalization(plan, scope)
 	var converted []byte
@@ -537,7 +534,7 @@ func (executor Executor) commit(
 	// SSE normalization rewrites frame bytes in flight, so any upstream
 	// Content-Length no longer describes the client body — treat the stream as
 	// transformed for header purposes (strip length headers here and in the
-	// cached replay headers).
+	// transformed response headers).
 	if normalizeModel != "" && response.StatusCode < 300 && upstreamStream {
 		transformed = true
 	}
@@ -614,8 +611,8 @@ func (executor Executor) commit(
 	// when the upstream ends without one, appends a protocol-native terminal
 	// error event — the same fail-closed shape the converters already emit
 	// (never a fake finish_reason / [DONE] / message_stop). It wraps BELOW the
-	// effects chain (request log, usage capture and the cache recorder see the
-	// client's bytes, so a synthesized terminal keeps failing the cache gate)
+	// effects chain (request log and usage capture see the
+	// client's bytes)
 	// and ABOVE the model normalizer and responses-state capture, which must
 	// observe the raw upstream stream.
 	//
@@ -637,7 +634,7 @@ func (executor Executor) commit(
 		body = terminalWatch
 	}
 	// The wrapper order intentionally mirrors the root pipeline: transformed
-	// client bytes are captured for continuation, then logging, usage, cache and client.
+	// client bytes are captured for continuation, then logging, usage and client.
 	// Usage capture wraps EVERY response body: the scanner counts SSE usage on
 	// streamed bodies and falls back to a whole-body JSON usage parse on
 	// non-stream ones (counters.UsageScanner) — gating on clientStream used to
@@ -647,11 +644,6 @@ func (executor Executor) commit(
 		body = executor.Effects.CaptureUsage(body, dto, func(usage Usage) {
 			dto.Usage = usage
 		})
-	}
-	var recorder *responsecache.Recorder
-	if cache != nil && scope.CacheKey != "" && response.StatusCode < 300 {
-		recorder = responsecache.NewRecorder(body, cache.MaxBodyBytes())
-		body = recorder
 	}
 	counting := &countingReadCloser{ReadCloser: body}
 	// SSE keepalive: for client-facing event streams, write a comment
@@ -697,7 +689,7 @@ func (executor Executor) commit(
 				logx.Warnf("[proto=%s provider=%s] scheduling timeout ended the stream before its terminal sequence — synthesized terminal delivered",
 					plan.ClientProtocol(), dto.Target.Provider)
 			default:
-				logx.Warnf("[proto=%s provider=%s] upstream stream ended before its terminal sequence — synthesized a protocol-native error terminal for the client (delivered, never cached)",
+				logx.Warnf("[proto=%s provider=%s] upstream stream ended before its terminal sequence — synthesized a protocol-native error terminal for the client (delivered)",
 					plan.ClientProtocol(), dto.Target.Provider)
 			}
 		case terminalWatch.UpstreamErrorTerminal() && convertedStream:
@@ -714,7 +706,7 @@ func (executor Executor) commit(
 				logx.Warnf("[proto=%s provider=%s] scheduling timeout ended the converted stream — error terminal delivered",
 					plan.ClientProtocol(), dto.Target.Provider)
 			default:
-				logx.Warnf("[proto=%s provider=%s] converted stream (%s→%s) ended with an error terminal — delivered to the client, never cached: %s",
+				logx.Warnf("[proto=%s provider=%s] converted stream (%s→%s) ended with an error terminal — delivered to the client: %s",
 					plan.ClientProtocol(), dto.Target.Provider, plan.BackendProtocol(), plan.ClientProtocol(), terminalWatch.UpstreamErrorEvidence())
 			}
 		case terminalWatch.UpstreamErrorTerminal():
@@ -741,18 +733,6 @@ func (executor Executor) commit(
 				plan.ClientProtocol(), dto.Target.Provider)
 		}
 	}
-	if recorder != nil && recorder.Complete() && len(recorder.Body()) > 0 {
-		// A clean EOF alone does not make a stream complete: upstreams can
-		// abandon a generation and close with a bare terminator (e.g. anthropic
-		// message_stop without message_delta/stop_reason). Caching such a
-		// truncated stream poisons every retry of the same request for the TTL.
-		if clientStream && !protocol.StreamTerminalComplete(plan.ClientProtocol(), recorder.Body()) {
-			logx.Warnf("[proto=%s provider=%s] stream closed without a terminal %s sequence — not caching",
-				plan.ClientProtocol(), dto.Target.Provider, plan.ClientProtocol())
-		} else {
-			cache.Put(scope.CacheKey, scope.CalledModel, response.StatusCode, responsecache.HeaderForCapturedBody(response.Header, transformed, modeMismatch, clientWantsStream), recorder.Body(), time.Now())
-		}
-	}
 	dto.TotalMilliseconds = time.Since(dto.Started).Milliseconds()
 	dto.TTFTMilliseconds = dto.TotalMilliseconds
 	if timedWriter.hasFirstByte {
@@ -762,13 +742,12 @@ func (executor Executor) commit(
 	if executor.Effects != nil {
 		executor.Effects.Committed(dto)
 	}
-	return Result{Committed: true, Commit: NewCommit(dto.Body)}
+	return Result{Committed: true}
 }
 
 // maxConvertBufferBytes caps the buffered conversion read. A body strictly
 // larger than this fails closed instead of being silently truncated — a
-// truncated JSON would convert into a corrupt "successful" response that the
-// recorder also marks complete and caches for replay.
+// truncated JSON would convert into a corrupt "successful" response.
 const maxConvertBufferBytes = 64 << 20
 
 // readCapped reads at most limit bytes; a longer body is an error (probe with

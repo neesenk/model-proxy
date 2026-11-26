@@ -59,12 +59,6 @@ func (p pipeline) planTarget(input PlanInput) (targetexec.Plan, error) {
 	}), nil
 }
 
-// PlanTarget is the exported plan entry for app's detached branches (Shadow):
-// it runs the same snapshot-frozen planning the live pipeline uses.
-func PlanTarget(svc Services, input PlanInput) (targetexec.Plan, error) {
-	return pipeline{svc: svc}.planTarget(input)
-}
-
 // targetExecutor assembles the per-attempt executor. parentOf is the request
 // snapshot's pool-virtual→parent projection (Snapshot.ParentOf): it is
 // threaded into the health gate so the wire-verdict 404 correction stays on

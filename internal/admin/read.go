@@ -15,7 +15,6 @@ import (
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/credstore"
-	"model-proxy/internal/fusion"
 	obscounters "model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/observe/requestlog"
@@ -173,29 +172,6 @@ func (s *Service) Dashboard(now time.Time) appapi.Dashboard {
 	}
 	sort.Slice(credentialAlerts, func(i, j int) bool { return credentialAlerts[i].Key < credentialAlerts[j].Key })
 
-	cacheInfo := map[string]any{"enabled": false}
-	if stats := state.Cache.Stats(); stats.Entries > 0 || stats.Hits > 0 || state.Cache != nil {
-		models := make([]map[string]any, 0, len(stats.Models))
-		for _, m := range stats.Models {
-			models = append(models, map[string]any{
-				"model":   m.Name,
-				"hits":    m.Hits,
-				"misses":  m.Misses,
-				"entries": m.Entries,
-			})
-		}
-		cacheInfo = map[string]any{
-			"enabled": true,
-			"hits":    stats.Hits,
-			"misses":  stats.Misses,
-			// Live gauge, not cumulative: can be lower than misses (failed
-			// requests miss without storing; TTL/expiry and eviction remove
-			// entries while counters only grow).
-			"entries": stats.Entries,
-			"models":  models,
-		}
-	}
-
 	counters := make(map[string]appapi.Metrics, len(state.Counters))
 	for name, counter := range state.Counters {
 		counters[name] = appapi.Metrics{
@@ -219,7 +195,6 @@ func (s *Service) Dashboard(now time.Time) appapi.Dashboard {
 		Quota:            quota,
 		Schedule:         append(json.RawMessage(nil), state.Schedule...),
 		Counters:         counters,
-		Cache:            cacheInfo,
 		Warnings:         append([]string(nil), state.RouteWarnings...),
 		CredentialAlerts: credentialAlerts,
 		CredentialStore:  string(credstore.ResolvedMode()),
@@ -316,15 +291,6 @@ func (q requestLogQueries) SummariesWithFacets(filter requestlog.Filter) ([]requ
 		return q.index.SummariesWithFacets(filter)
 	}
 	return requestlog.QuerySummariesWithFacets(q.dir, filter)
-}
-
-func (q requestLogQueries) ShadowReport(filter requestlog.Filter) ([]requestlog.ShadowReportEntry, error) {
-	// No mcp_split routing here: shadow evaluation rows are LLM-stream rows,
-	// and both the index and the scan read exactly the requests- stream.
-	if q.index != nil {
-		return q.index.ShadowReport(filter)
-	}
-	return requestlog.ShadowReport(q.dir, filter)
 }
 
 func (q requestLogQueries) KeyUsage(filter requestlog.Filter, keyID string) ([]requestlog.KeyUsageEntry, error) {
@@ -711,9 +677,9 @@ func (s *Service) AgentStats(query appapi.AgentStatsQuery) ([]observestats.Agent
 }
 
 // Analytics projects the calendar-hour/day/month buckets and drops the virtual
-// counter namespaces (guard/attempts/routing/fusion): they are request
-// counters, not upstream usage, so they would otherwise surface as billable
-// models with zero tokens and an "unpriced" hint. By="agent" switches to the
+// counter namespaces (guard/attempts/routing and legacy fusion rows): they are
+// request counters, not upstream usage, so they would otherwise surface as
+// billable models with zero tokens and an "unpriced" hint. By="agent" switches to the
 // agent_buckets dimension (grouped by agent/provider/model); a missing
 // AnalyticsAgents port behaves like a disabled store (empty result). By=model
 // with a non-empty Agent ALSO reads agent_buckets (the only table carrying
@@ -780,10 +746,6 @@ func (s *Service) Pricing() appapi.PricingSnapshot {
 		Overrides: overrides,
 		Aliases:   aliases,
 	}
-}
-
-func (s *Service) Fusion(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
-	return s.ports.FusionSnapshot(workflow, now)
 }
 
 func (s *Service) Pins() []appapi.Pin {
@@ -1290,12 +1252,6 @@ func configSettings(config *configdomain.Config) appapi.ConfigSettings {
 		Stats: appapi.ConfigStats{
 			DBPath:    config.Stats.DBPath,
 			Retention: config.Stats.Retention,
-		},
-		Cache: appapi.ConfigCache{
-			Enabled:      config.Cache.Enabled,
-			TTL:          config.Cache.TTL,
-			MaxEntries:   config.Cache.MaxEntries,
-			MaxBodyBytes: config.Cache.MaxBodyBytes,
 		},
 	}
 	settings.Guard = appapi.ConfigGuard{

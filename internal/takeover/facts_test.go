@@ -270,27 +270,24 @@ func TestModelFactsFor_ExcludesNotLoggedInProviders(t *testing.T) {
 	}
 }
 
-// TestPruneUnauthenticatedRoutes_FusionPasses pins the expandTarget mirror:
-// the "fusion" orchestration pseudo-provider carries no credentials of its
-// own and must never be pruned by the auth filter.
-func TestPruneUnauthenticatedRoutes_FusionPasses(t *testing.T) {
+func TestPruneUnauthenticatedRoutes_UnknownProviderDrops(t *testing.T) {
 	routes := map[string][]config.RouteTarget{
-		"fuse":  {{Provider: "fusion", Model: "m"}},
+		"fuse":  {{Provider: "ghost", Model: "m"}},
 		"dead":  {{Provider: "ghost", Model: "m"}},
-		"multi": {{Provider: "fusion", Model: "m"}, {Provider: "ghost", Model: "m"}},
+		"multi": {{Provider: "zhipu", Model: "m"}, {Provider: "ghost", Model: "m"}},
 	}
 	kept, dropped := takeover.PruneUnauthenticatedRoutes(routes, map[string]bool{"zhipu": true})
-	if _, ok := kept["fuse"]; !ok {
-		t.Errorf("fusion-only route must survive: %v", kept)
+	if _, ok := kept["fuse"]; ok {
+		t.Errorf("unknown-provider-only route must drop: %v", kept)
 	}
 	if _, ok := kept["multi"]; !ok {
-		t.Errorf("route with a fusion target must survive: %v", kept)
+		t.Errorf("route with an authenticated target must survive: %v", kept)
 	}
 	if _, ok := kept["dead"]; ok {
 		t.Errorf("unauthenticated-only route must drop: %v", kept)
 	}
-	if len(dropped) != 1 || dropped[0] != "dead" {
-		t.Fatalf("dropped = %v, want [dead]", dropped)
+	if len(dropped) != 2 || dropped[0] != "dead" || dropped[1] != "fuse" {
+		t.Fatalf("dropped = %v, want [dead fuse]", dropped)
 	}
 }
 

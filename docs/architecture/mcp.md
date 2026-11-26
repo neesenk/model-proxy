@@ -83,7 +83,7 @@ LLM 记录一致。MCP 交换进入 live events（`protocol="mcp"`，end 事件�
 request_log 块共享；写入侧 `mcpLogTarget` 选流，截断 cap 取所选流的
 `MaxBodyBytes`）。requests- 流与尾随索引回到 LLM-only，`/api/requests?kind=mcp`
 经 admin 适配层改读拆分流（目录扫描，无索引），`Detail` 双流 fallthrough——语义
-细节见 `docs/architecture/fusion-shadow-cache.md` 的 Request log 节。客户端每
+细节见 `docs/architecture/observe.md` 的 Request log 节。客户端每
 thread 全量重握手（Codex 每 `thread/start` 对全部服务器 initialize +
 notifications/initialized + tools/list）是常态，拆分流让这类探测噪音不再混入
 LLM 请求日志与 Requests 页。

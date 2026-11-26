@@ -89,11 +89,13 @@ var prodModTimeAllowlist = map[string]map[string]int{
 // (poll backoff / measured phenomenon / clock input / yield) — see
 // docs/engineering/testing.md §「时序纪律契约」 for the classes.
 var testSleepSnapshot = map[string]map[string]int{
-	"internal/accounts/store_test.go":                     {"TestWithLockHeartbeatKeepsAgedLockFromBeingStolen": 3, "TestWithPoolLock_MutualExclusion": 1, "TestWithPoolLock_StaleButAliveHolderIsNotStolen": 1},
-	"internal/adjudicate/adjudicate_test.go":              {"TestBlockedContentIndex_Semantics": 1, "waitFor": 1},
-	"internal/app/forward_retry_test.go":                  {"TestUC_ClientCancelDuringHeadersStopsFailoverAndKeepsCircuitClosed": 2},
-	"internal/app/forward_test.go":                        {"TestForward_CommittedSSEStreamMidFailureIsNotRecalled": 1},
-	"internal/app/fusion_test.go":                         {"awaitFusionState": 1, "delayedResponder": 1, "hitScript": 1},
+	"internal/accounts/store_test.go":        {"TestWithLockHeartbeatKeepsAgedLockFromBeingStolen": 3, "TestWithPoolLock_MutualExclusion": 1, "TestWithPoolLock_StaleButAliveHolderIsNotStolen": 1},
+	"internal/adjudicate/adjudicate_test.go": {"TestBlockedContentIndex_Semantics": 1, "waitFor": 1},
+	"internal/app/forward_retry_test.go":     {"TestUC_ClientCancelDuringHeadersStopsFailoverAndKeepsCircuitClosed": 2},
+	"internal/app/forward_test.go":           {"TestForward_CommittedSSEStreamMidFailureIsNotRecalled": 1},
+	// The shared upstream delay is a measured behavior input, not a
+	// synchronization primitive.
+	"internal/app/upstream_test_support_test.go":          {"hitScript": 1},
 	"internal/app/guard_adjudication_integration_test.go": {"TestGuardAdjudication_HighVerdictBlocksAndUnblocks": 1, "TestGuardAdjudication_RepeatHighContentIntercepted": 1, "waitForAuditVerdict": 1, "waitForBlock": 1},
 	"internal/app/health_test.go":                         {"TestStickyDwell_HoldsThenReEvaluates": 1},
 	"internal/app/lifecycle_test.go":                      {"TestProxyRequestLogIndexLifecycle": 1},
@@ -107,17 +109,12 @@ var testSleepSnapshot = map[string]map[string]int{
 	"internal/app/proxy_mcp_route_test.go":     {"TestMCPRoute_RequestLogProjection": 1, "TestMCPRoute_ToolsCallStatsCreditBackend": 1, "serve": 1},
 	"internal/app/proxy_mcp_test.go":           {"TestMCPGateway_LegacySSE": 1, "TestMCPGateway_LiveEndCarriesTool": 1, "TestMCPGateway_LiveEventAttribution": 1, "TestMCPGateway_LiveEvents": 1, "TestMCPGateway_LiveProviderIsServingAccount": 1, "TestMCPGateway_RequestLogAttribution": 2, "TestMCPGateway_RequestLogKind": 1, "TestMCPGateway_RequestLogSplitStream": 1, "TestMCPGateway_StatsSurfaced": 1},
 	"internal/app/proxy_race_test.go":          {"TestForward_CfgReadNoRaceWithReload": 2},
-	"internal/app/quota_async_test.go":         {"TestBudgetWatcher_EndToEndAlertThroughPorts": 1},
 	"internal/app/quota_test.go":               {"Quota": 1, "TestQuotaTracker_PollAfter": 1},
 	"internal/app/request_log_test.go":         {"TestForward_RequestLog_CapturesAgent": 1, "TestRequestLog_SmallCapTruncatesBodiesEndToEnd": 1},
-	"internal/app/shadow_test.go":              {"TestReload_ShadowDisabledStopsFiring": 1, "TestShadow_LogsResult": 1, "TestShadow_PooledProvider": 1},
 	"internal/app/state_isolation_test.go":     {"TestReloadRefreshesCatalogThroughLoader": 1},
 	"internal/app/web_accounts_test.go":        {"waitForLoginDone": 1, "waitForLoginTerminal": 1},
 	"internal/app/wirecap_test.go":             {"TestWireCap_ProbePassesSerialized": 2, "TestWireCap_ProbeTimeoutUnknown": 1, "TestWireProbePass_CoalescesStormDispatches": 2},
 	"internal/forward/forward_test.go":         {"TestServeClientGoneDuringCooldownWait": 1},
-	"internal/forward/fusion_select_test.go":   {"TestCallFusionSelectorFailureClasses": 1},
-	"internal/forward/fusion_test.go":          {"TestCallFusionLegGates": 2},
-	"internal/observe/budget/watcher_test.go":  {"TestWatcher_LoopChecksAtStartThenEachMinute": 1},
 	"internal/observe/events/hub_ctx_test.go":  {"TestHubPublishSubscribeExactlyOnce": 1, "TestSubscribeContextAutoReleases": 1},
 	"internal/observe/events/progress_test.go": {"TestProgressReaderPublishesOnThrottleTime": 1},
 	"internal/observe/events/sse_test.go":      {"waitFor": 1},

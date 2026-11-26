@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	responsecache "model-proxy/internal/cache"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
 )
@@ -269,7 +268,7 @@ func (effects *tapEffects) CaptureResponse(body io.ReadCloser, _ AttemptDTO) io.
 
 // End-to-end through Execute: a slow-TTFT upstream stream emits SSE comment
 // heartbeats to the client, while ttft still measures the real first byte and
-// neither the recording chain nor the cache ever sees a heartbeat frame.
+// the recording chain never sees a heartbeat frame.
 func TestExecutorStreamKeepaliveHeartbeat(t *testing.T) {
 	provider := &executorTestProvider{}
 	pipeReader, pipeWriter := io.Pipe()
@@ -284,12 +283,8 @@ func TestExecutorStreamKeepaliveHeartbeat(t *testing.T) {
 		BackendProtocol: protocol.OpenAI,
 		ClientPath:      "/v1/chat/completions",
 	})
-	cache := responsecache.New(responsecache.Options{
-		TTL: time.Minute, MaxEntries: 4, MaxBodyBytes: 1024,
-	})
 	runtime := Runtime{
 		Scheduling: configdomain.Scheduling{StreamKeepalive: "10ms"},
-		Cache:      cache,
 	}
 	attempt := NewAttempt(
 		runtime,
@@ -299,7 +294,7 @@ func TestExecutorStreamKeepaliveHeartbeat(t *testing.T) {
 			Writer:  writer,
 			Body:    []byte(`{"model":"model","stream":true,"messages":[]}`),
 		},
-		Scope{CacheKey: "cache-key", CalledModel: "model"},
+		Scope{CalledModel: "model"},
 		Policy{LastTarget: true},
 	)
 	response := testResponse(http.StatusOK, "")
@@ -344,13 +339,6 @@ func TestExecutorStreamKeepaliveHeartbeat(t *testing.T) {
 	if !bytes.Contains(effects.captured.Bytes(), []byte("data: [DONE]")) ||
 		bytes.Contains(effects.captured.Bytes(), []byte(": ping")) {
 		t.Fatalf("recording chain saw %q, want the stream without heartbeats", effects.captured.String())
-	}
-	entry, ok := cache.Lookup("cache-key", "model", time.Now())
-	if !ok {
-		t.Fatal("complete stream was not cached")
-	}
-	if bytes.Contains(entry.Body(), []byte(": ping")) {
-		t.Fatalf("cached body contains a heartbeat frame: %q", entry.Body())
 	}
 	clientBody := recorder.Body.String()
 	if !strings.HasPrefix(clientBody, ": ping\n\n") || !strings.HasSuffix(clientBody, stream) {

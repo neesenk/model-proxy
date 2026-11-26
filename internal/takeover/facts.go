@@ -82,8 +82,7 @@ func AuthenticatedProviders(cfg *configdomain.Config, homeDir string) map[string
 // PruneUnauthenticatedRoutes drops routes whose EVERY target sits on a
 // provider that cannot authenticate (not logged in — the same projection
 // that keeps such models out of /v1/models and forward). A route with any
-// authenticated target survives (failover keeps it servable); "fusion"
-// targets pass without an auth check, mirroring expandTarget. ABSTAINS
+// authenticated target survives (failover keeps it servable). ABSTAINS
 // (routes returned untouched) when the authenticated set is empty: a fresh
 // setup mid-`config init` has no logins yet and must still write model
 // lists — login plus a re-takeover fills them in. Dropped exposed names are
@@ -97,7 +96,7 @@ func PruneUnauthenticatedRoutes(routes map[string][]configdomain.RouteTarget, au
 	for exposed, targets := range routes {
 		live := false
 		for _, t := range targets {
-			if t.Provider == configdomain.FusionProvider || authed[t.Provider] {
+			if authed[t.Provider] {
 				live = true
 				break
 			}

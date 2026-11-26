@@ -8,7 +8,6 @@ import (
 
 	configdomain "model-proxy/internal/config"
 
-	"model-proxy/internal/fusion"
 	guardsession "model-proxy/internal/guard/session"
 	"model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
@@ -21,7 +20,7 @@ import (
 // Services bundles the process-lifetime dependencies the request pipeline
 // needs. internal/app assembles it from Proxy's process services; every field
 // is a stable pointer or port that survives reload. Generation-owned values
-// (config, providers, routes, cache, guard) never appear here — they ride the
+// (config, providers, routes, guard) never appear here — they ride the
 // per-request Snapshot.
 type Services struct {
 	Client         targetexec.Doer               // upstream HTTP client (default / fallback)
@@ -31,7 +30,6 @@ type Services struct {
 	Events         *observeevents.Hub            // live request monitor fan-out hub
 	SessionScan    *guardsession.Store           // split-exfiltration session windows; nil = off
 	ResponsesState *protocol.ResponsesStateStore // previous_response_id replay; nil = off
-	FusionReg      *fusion.Registry              // fusion orchestration observability
 	ReqLog         *requestlog.Logger            // per-request access log; nil = disabled
 	// Adjudicator is the process-lifetime AI second-opinion port for guard
 	// pattern hits (nil = channel absent; the config gate lives in the
@@ -55,8 +53,8 @@ type Services struct {
 	// NewEffects binds app-owned observation (metrics, request log, live
 	// events, tokens, agents, attempt quality) to one runtime generation.
 	// cfg is the request snapshot's config (same discipline as Schedule):
-	// observation decisions derived from config (e.g. eval body retention)
-	// read it from here, never from reload-owned state.
+	// observation decisions derived from config read it from here, never from
+	// reload-owned state.
 	NewEffects func(cfg *Config, generation uint64) targetexec.Effects
 
 	// Schedule is the quota-aware scheduler (app: Proxy.schedule). The
@@ -66,20 +64,13 @@ type Services struct {
 	// engine that produced the first target (runtime.ScheduleSource*),
 	// threaded to the request log as schedule.source.
 	Schedule func(cfg *Config, parentOf map[string]string, exposed, sessionKey string, stickyOff bool, targets []RouteTarget, routeKeys map[string]bool, generation uint64) ([]RouteTarget, string)
-	// ShadowDispatch is the post-commit shadow hook (app:
-	// Proxy.dispatchShadowAfterCommit). Called only after a normal target
-	// commits, with that attempt's Commit and the primary request's resolved
-	// agent + client session id (the shadow record reuses them instead of
-	// probing its synthetic upstream request, which carries neither the
-	// client's UA nor its session headers).
-	ShadowDispatch func(runtime Snapshot, proto, backendProto, calledModel, exposed string, primary RouteTarget, primaryRequestID, primaryAgent, primarySession string, commit *targetexec.Commit, routingDecision *RoutingDecision)
 	// ResolveBackendProto is the wire-verdict backend protocol resolution
 	// (app: Proxy.resolvedBackendProto): declared protocol, else ProtocolHint,
 	// else the probe verdict, else the client protocol.
 	ResolveBackendProto func(declared, provName string, provCfg Provider, model, clientProto string, parentOf map[string]string) (proto string, viaResponsesVerdict bool)
 	// ResolverState is the pool health/spread view routing.NewResolver needs
-	// (app: Proxy). Used by fusion legs, the synthesizer and shadow to pick a
-	// runnable virtual out of a pooled parent.
+	// (app: Proxy). Used by decisions legs to pick a runnable virtual
+	// out of a pooled parent.
 	ResolverState routing.ResolverState
 }
 
@@ -89,7 +80,7 @@ type Services struct {
 type RouteState interface {
 	// PinForces reports whether an active pin for `exposed` narrows the route
 	// to the pinned provider (exclusive: no cross-route reroute, circuit
-	// bypass, cache bypass).
+	// bypass).
 	PinForces(exposed string, ordered []RouteTarget, parentOf map[string]string) bool
 	// FilterDisabledTargets drops operator-disabled (provider, model) targets
 	// (Web Status→Models toggle) from a route's target list. parentOf resolves
@@ -173,24 +164,6 @@ func (p pipeline) hasRecoveredUntried(targets []RouteTarget, tried map[string]bo
 
 func (p pipeline) quotaFreshnessMaxAge(cfg *Config) time.Duration {
 	return p.state.QuotaFreshnessMaxAge(cfg)
-}
-
-// dispatchShadowAfterCommit delegates the post-commit shadow hook to the
-// injected port (app owns Shadow policy, sampling and lifecycle admission).
-func (p pipeline) dispatchShadowAfterCommit(
-	runtime Snapshot,
-	proto string,
-	backendProto string,
-	calledModel string,
-	exposed string,
-	primary RouteTarget,
-	primaryRequestID string,
-	primaryAgent string,
-	primarySession string,
-	commit *targetexec.Commit,
-	routingDecision *RoutingDecision,
-) {
-	p.svc.ShadowDispatch(runtime, proto, backendProto, calledModel, exposed, primary, primaryRequestID, primaryAgent, primarySession, commit, routingDecision)
 }
 
 // publishTerminalEvent emits a live "end" event for a request that ends before

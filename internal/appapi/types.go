@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"model-proxy/internal/adjudicate"
-	"model-proxy/internal/fusion"
 	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/presets"
@@ -66,7 +65,6 @@ type Dashboard struct {
 	Quota      map[string]any
 	Schedule   json.RawMessage
 	Counters   map[string]Metrics
-	Cache      map[string]any
 	Warnings   []string
 	// CredentialAlerts surfaces banner-class credential failures (nil/empty
 	// when every key recovered: a successful sync clears the poll's record,
@@ -324,7 +322,6 @@ type ConfigSettings struct {
 	Scheduling ConfigScheduling `json:"scheduling"`
 	RequestLog ConfigRequestLog `json:"request_log"`
 	Stats      ConfigStats      `json:"stats"`
-	Cache      ConfigCache      `json:"cache"`
 	Guard      ConfigGuard      `json:"guard"`
 }
 
@@ -387,14 +384,6 @@ type ConfigRequestLog struct {
 type ConfigStats struct {
 	DBPath    string `json:"db_path"`
 	Retention string `json:"retention"`
-}
-
-// ConfigCache mirrors cache.* (hot-reloadable).
-type ConfigCache struct {
-	Enabled      bool   `json:"enabled"`
-	TTL          string `json:"ttl"`
-	MaxEntries   int    `json:"max_entries"`
-	MaxBodyBytes int    `json:"max_body_bytes"`
 }
 
 // ModelProtocols is one model's three-protocol probe verdict matrix, with each
@@ -971,12 +960,6 @@ type ModelsCatalogPull struct {
 // guard state).
 type RequestLogQueries interface {
 	SummariesWithFacets(requestlog.Filter) ([]requestlog.Summary, requestlog.Facets, error)
-	// ShadowReport returns the paired primary/shadow aggregation over the
-	// filter's window — the exact semantics of the requestlog.ShadowReport
-	// scan (index-backed when available). The eval page's slow half: on a
-	// multi-GB request log the scan streams every JSONL line of the window,
-	// so this must go through the index like the other listing reads.
-	ShadowReport(requestlog.Filter) ([]requestlog.ShadowReportEntry, error)
 	// Detail returns the full records for one request id. stream is a routing
 	// hint from the caller's view: "mcp" reads the split MCP stream only
 	// (an MCP id never lives in the requests index — the hint avoids the
@@ -990,9 +973,9 @@ type RequestLogQueries interface {
 	// window and can under-report sessions older than it. limit keeps the
 	// most recently active sessions.
 	SessionSummaries(limit int, costOf func(provider, model string, usage requestlog.Usage) float64) ([]requestlog.SessionSummary, error)
-	// KeyUsage aggregates per-forward-key usage (LLM records, shadow
-	// excluded); keyID "" = every key. Index-backed when available, JSONL
-	// scan fallback otherwise — same twin semantics as ShadowReport.
+	// KeyUsage aggregates per-forward-key usage (LLM records, historical
+	// shadow rows excluded); keyID "" = every key. Index-backed when
+	// available, with a JSONL scan fallback otherwise.
 	KeyUsage(filter requestlog.Filter, keyID string) ([]requestlog.KeyUsageEntry, error)
 	GuardAnnotations(requestIDs []string) map[string][]requestlog.GuardMark
 }
@@ -1021,7 +1004,6 @@ type ReadAPI interface {
 	// ignored so the suggestion list keeps offering alternatives). Never nil.
 	AnalyticsAgentNames(AnalyticsQuery) []string
 	Pricing() PricingSnapshot
-	Fusion(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
 	Pins() []Pin
 	Security(SecurityQuery) (SecurityResult, error)
 	// SecurityExplain re-locates one audit record's hits inside the persisted

@@ -55,7 +55,7 @@ func TestRouteTable_ExplicitRouteOverridesDerived(t *testing.T) {
 			// Explicit override wins wholesale for this name.
 			"foo": {{Provider: "zhipu", Model: "foo"}},
 			// An explicit name with no derived counterpart is kept as-is.
-			"hard": {{Provider: "fusion", Model: "hard-coding"}},
+			"hard": {{Provider: "custom", Model: "hard-coding"}},
 		},
 	}
 	table := RouteTable(cfg)
@@ -69,8 +69,8 @@ func TestRouteTable_ExplicitRouteOverridesDerived(t *testing.T) {
 	if got := table["bar"]; len(got) != 1 || got[0].Provider != "zhipu" || got[0].Priority != 1 {
 		t.Errorf("derived bar = %+v, want single zhipu target with priority 1", got)
 	}
-	if got := table["hard"]; len(got) != 1 || got[0].Provider != "fusion" || got[0].Model != "hard-coding" {
-		t.Errorf("explicit fusion route = %+v", got)
+	if got := table["hard"]; len(got) != 1 || got[0].Provider != "custom" || got[0].Model != "hard-coding" {
+		t.Errorf("explicit custom route = %+v", got)
 	}
 }
 

@@ -205,7 +205,7 @@ type Provider interface {
 	// prefer sessionID over re-deriving the identity from body, because a
 	// cross-protocol conversion may rewrite or drop the original field
 	// (a→r even injects a hashed prompt_cache_key). sessionID is empty on
-	// paths with no client session (probes, shadow, internal legs). Default
+	// paths with no client session (probes, internal legs). Default
 	// (baseProbe) is a no-op. Called after AuthHeaders + prov.Headers so
 	// providers can layer on top.
 	ExtraHeaders(req *http.Request, body []byte, sessionID string, path string)

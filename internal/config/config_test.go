@@ -281,129 +281,6 @@ func TestValidate_AcceptsStepPlanProviderID(t *testing.T) {
 	}
 }
 
-// TestConfig_ValidateShadowErrors: shadow validation (config.go validate) —
-// each shadow entry must reference a real route + provider and a known
-// protocol; the global sample rate must be in [0,1] and max_concurrent >= 0.
-// Table-driven over a shared valid base config, mirroring
-// TestConfig_ValidateErrors.
-func TestConfig_ValidateShadowErrors(t *testing.T) {
-	rate := func(f float64) *float64 { return &f }
-	base := func() *Config {
-		return &Config{
-			Listen: "127.0.0.1:1",
-			Providers: map[string]Provider{
-				"a": {OpenAIBaseURL: "https://x", Provider: "zhipu"},
-			},
-			Routes: map[string][]RouteTarget{
-				"m": {{Provider: "a", Model: "m", Priority: 1}},
-			},
-		}
-	}
-	cases := []struct {
-		name    string
-		mutate  func(*Config)
-		wantSub string // substring the error message should contain
-	}{
-		{
-			name:    "shadow route missing",
-			mutate:  func(c *Config) { c.Shadow = map[string]ShadowTarget{"ghost": {Provider: "a", Model: "m"}} },
-			wantSub: `shadow "ghost": route not found`,
-		},
-		{
-			name:    "shadow provider missing",
-			mutate:  func(c *Config) { c.Shadow = map[string]ShadowTarget{"m": {Provider: "ghost", Model: "m"}} },
-			wantSub: `provider "ghost" not defined`,
-		},
-		{
-			name: "shadow protocol invalid",
-			mutate: func(c *Config) {
-				c.Shadow = map[string]ShadowTarget{"m": {Provider: "a", Model: "m", Protocol: "grpc"}}
-			},
-			wantSub: `protocol "grpc" is not`,
-		},
-		{
-			name: "shadow anthropic protocol without anthropic base URL",
-			mutate: func(c *Config) {
-				c.Shadow = map[string]ShadowTarget{"m": {Provider: "a", Model: "m", Protocol: "anthropic"}}
-			},
-			wantSub: "anthropic_base_url",
-		},
-		{
-			name: "shadow responses protocol without OpenAI base URL",
-			mutate: func(c *Config) {
-				c.Providers["a"] = Provider{AnthropicBaseURL: "https://x", Provider: "zhipu"}
-				c.Shadow = map[string]ShadowTarget{"m": {Provider: "a", Model: "m", Protocol: "responses"}}
-			},
-			wantSub: "openai_base_url",
-		},
-		{
-			name:    "sample rate negative",
-			mutate:  func(c *Config) { c.ShadowSampleRate = rate(-0.1) },
-			wantSub: "shadow_sample_rate -0.1 out of range [0, 1]",
-		},
-		{
-			name:    "sample rate above 1",
-			mutate:  func(c *Config) { c.ShadowSampleRate = rate(1.5) },
-			wantSub: "shadow_sample_rate 1.5 out of range [0, 1]",
-		},
-		{
-			name:    "max_concurrent negative",
-			mutate:  func(c *Config) { c.ShadowMaxConcurrent = -1 },
-			wantSub: "shadow_max_concurrent -1 must be >= 0",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := base()
-			tc.mutate(cfg)
-			err := cfg.validate()
-			if err == nil {
-				t.Fatalf("expected error containing %q, got nil", tc.wantSub)
-			}
-			if !strings.Contains(err.Error(), tc.wantSub) {
-				t.Errorf("error = %q, want substring %q", err.Error(), tc.wantSub)
-			}
-		})
-	}
-}
-
-// TestConfig_ValidateShadowOK: a well-formed shadow block (known route +
-// provider, explicit protocol, boundary rates) passes validation.
-func TestConfig_ValidateShadowOK(t *testing.T) {
-	for _, r := range []float64{0, 0.5, 1} {
-		cfg := &Config{
-			Listen: "127.0.0.1:1",
-			Providers: map[string]Provider{
-				"a": {OpenAIBaseURL: "https://x", Provider: "zhipu"},
-			},
-			Routes: map[string][]RouteTarget{
-				"m": {{Provider: "a", Model: "m", Priority: 1}},
-			},
-			Shadow:              map[string]ShadowTarget{"m": {Provider: "a", Model: "m2", Protocol: "openai"}},
-			ShadowSampleRate:    &r,
-			ShadowMaxConcurrent: 8,
-		}
-		if err := cfg.validate(); err != nil {
-			t.Errorf("rate=%v: valid shadow config rejected: %v", r, err)
-		}
-	}
-}
-
-func TestLoadShadowRejectsProtocolWithoutMatchingBaseURL(t *testing.T) {
-	_, err := LoadConfigFromBytes("x", []byte(`
-listen: 127.0.0.1:1
-providers:
-  candidate: {provider_id: static, anthropic_base_url: https://example.com}
-routes:
-  m: [{provider: candidate, model: m}]
-shadow:
-  m: {provider: candidate, model: m, protocol: responses}
-`))
-	if err == nil || !strings.Contains(err.Error(), "openai_base_url") {
-		t.Fatalf("LoadConfigFromBytes error = %v, want missing openai_base_url", err)
-	}
-}
-
 // TestConfig_ValidateAcceptsDuplicatePriorities verifies that targets sharing
 // the same priority within a route are ACCEPTED - the scheduler ranks same-
 // priority targets by surplus (tier -> priority -> surplus), so duplicates are
@@ -581,36 +458,38 @@ func TestPricingConfigDefaults(t *testing.T) {
 	}
 }
 
-// TestLoadCacheAndShadow guards F1: cache: and shadow: must load from yaml. The
-// rawConfig decode previously omitted them, so production configs got zero values
-// (silent no-op) while tests building Config directly stayed green.
-func TestLoadCacheAndShadow(t *testing.T) {
-	cfg, err := LoadConfigFromBytes("x", []byte(`
-listen: 127.0.0.1:1
+func TestRemovedOptionalBlocksRejected(t *testing.T) {
+	const base = `listen: 127.0.0.1:1
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://example.com/api/v1}
 routes:
   glm: [{provider: zhipu, model: glm-4}]
-cache:
-  enabled: true
-  ttl: 5m
-  max_entries: 50
-shadow:
+`
+	for _, tc := range []struct {
+		name   string
+		block  string
+		errKey string
+	}{
+		{name: "response cache", block: "cache: {enabled: false}\n", errKey: "cache:"},
+		{name: "fusion", block: "fusion: {}\n", errKey: "fusion:"},
+		{name: "budgets", block: "budgets: {monthly_usd: 20}\n", errKey: "budgets:"},
+		{name: "shadow", block: "shadow: {}\n", errKey: "shadow:"},
+		{name: "shadow sample rate", block: "shadow_sample_rate: 0\n", errKey: "shadow_sample_rate"},
+		{name: "shadow concurrency", block: "shadow_max_concurrent: 0\n", errKey: "shadow_max_concurrent"},
+		{name: "route eval", block: `route_policy:
   glm:
-    provider: zhipu
-    model: glm-4-shadow
-`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !cfg.Cache.Enabled {
-		t.Error("cache.enabled did not load from yaml")
-	}
-	if cfg.Cache.TTL != "5m" || cfg.Cache.MaxEntries != 50 {
-		t.Errorf("cache fields = %+v want ttl=5m max_entries=50", cfg.Cache)
-	}
-	if len(cfg.Shadow) != 1 || cfg.Shadow["glm"].Provider != "zhipu" || cfg.Shadow["glm"].Model != "glm-4-shadow" {
-		t.Errorf("shadow did not load: %+v", cfg.Shadow)
+    bands:
+      - when: {has_tools: true}
+        target: {provider: zhipu, model: glm-4}
+    eval: {sample_rate: 0.1}
+`, errKey: "eval:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadConfigFromBytes("x", []byte(base+tc.block))
+			if err == nil || !strings.Contains(err.Error(), "no longer supported") || !strings.Contains(err.Error(), tc.errKey) {
+				t.Fatalf("error = %v, want removed-block hint for %s", err, tc.errKey)
+			}
+		})
 	}
 }
 

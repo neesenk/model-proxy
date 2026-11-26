@@ -210,8 +210,6 @@ func (s *Service) EditConfig(request appapi.EditRequest) error {
 		return s.editRequestLog(request.Data)
 	case "stats":
 		return s.editStats(request.Data)
-	case "cache":
-		return s.editCache(request.Data)
 	case "guard":
 		return s.editGuard(request.Data)
 	case "provider", "route":

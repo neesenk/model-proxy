@@ -1,6 +1,6 @@
 // Package diag owns the diagnostics commands: `wire record` (raw upstream
 // SSE capture), `replay` (re-answer a logged request with a different
-// backend), and `shadow report` (shadow evaluation aggregation).
+// backend), and offline routing reports.
 package diag
 
 // wire_record_cmd.go implements `model-proxy wire record <provider>`: capture

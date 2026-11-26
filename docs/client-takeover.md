@@ -174,8 +174,7 @@ opencode-go、凭据池 0 账号墓碑、构建失败）整体剔除——这些
 `GET /v1/models`、请求终局 not-found。takeover 的模型面在线下镜像同一剔除
 （`providerbuild.AuthenticatedProviders`，同一 BuildProviders pass + 各 impl 的
 `AuthReady`，池化虚拟账号折回父名，只出布尔值、凭据值不出 providerbuild）；
-任一 target 的 provider 已登录即保留（多 provider 模型照常 failover），`fusion`
-伪 provider 例外。**abstain**：全部 provider 都未登录时（fresh `config init`）
+任一 target 的 provider 已登录即保留（多 provider 模型照常 failover）。**abstain**：全部 provider 都未登录时（fresh `config init`）
 不过滤——login 后重新 takeover 补全。被剔除模型在运行日志列出及原因
 （`login` + reload 后重新 takeover 即回归）。
 

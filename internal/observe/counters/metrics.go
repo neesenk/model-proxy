@@ -22,14 +22,6 @@ const (
 	EvFailovers      MetricsEvent = "failovers"
 	EvRateLimited429 MetricsEvent = "rate_limited_429"
 	EvFailures       MetricsEvent = "failures"
-	// Fusion observability reuses the generic per-minute buckets under the
-	// virtual key ("fusion", <workflow>): an orchestration run counts as a
-	// "request", a degraded run (answered directly instead of orchestrated)
-	// counts into the failovers column — the closest existing "fell back"
-	// semantic. /api/stats and the stats CLI thus get a fusion time series
-	// with zero schema change.
-	EvFusionRuns     MetricsEvent = "fusion_runs"
-	EvFusionDegraded MetricsEvent = "fusion_degraded"
 	// Guard (DLP-lite) secret-scan hits reuse the same trick: counted under the
 	// virtual key ("guard", <pattern type name>) so /api/stats gets a hit time
 	// series with zero schema change. The model column holds the pattern TYPE
@@ -55,17 +47,16 @@ const (
 
 // VirtualProviders names the counter namespaces that share the (provider,
 // model) key space with upstream usage but are NOT upstream providers: guard
-// hits, attempt outcomes, routing-decision latency and fusion orchestration
-// runs. They are meaningful in the /api/stats per-minute time series (the
+// hits, attempt outcomes and routing-decision latency. The legacy fusion entry
+// only keeps historical rows out of token/cost projections. They are meaningful
+// in the /api/stats per-minute time series (the
 // "virtual key" trick documented above), but must never be projected as token
 // usage or billable models by /api/tokens or /api/analytics.
 var VirtualProviders = map[string]struct{}{
 	"guard":    {},
 	"attempts": {},
 	"routing":  {},
-	// Mirrors config.FusionProvider; counters stays a leaf package and cannot
-	// import internal/config, so keep the literal in sync by convention.
-	"fusion": {},
+	"fusion":   {},
 }
 
 // IsVirtualProvider reports whether provider is a virtual counter namespace
@@ -151,11 +142,6 @@ func (s *MetricsStore) Inc(provider, model string, ev MetricsEvent) {
 		pm.RateLimited429.Add(1)
 	case EvFailures:
 		pm.Failures.Add(1)
-	case EvFusionRuns:
-		pm.Requests.Add(1)
-		pm.LastRequestAt.Store(time.Now().Unix())
-	case EvFusionDegraded:
-		pm.Failovers.Add(1)
 	case EvGuardHits:
 		pm.Requests.Add(1)
 		pm.LastRequestAt.Store(time.Now().Unix())

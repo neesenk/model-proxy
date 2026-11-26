@@ -41,7 +41,7 @@ type TokensResp = appapi.TokensResp
 type LogsResp = appapi.LogsResp
 
 // compactNum delegates to the CLI formatting package (single owner for
-// terminal number rendering shared by stats/status/shadow-report).
+// terminal number rendering shared by stats/status).
 func compactNum(n uint64) string { return cliframework.CompactNum(n) }
 
 // renderAvgMs returns the average latency/ttft in ms (sum/requests) as a display

@@ -6,9 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
-	responsecache "model-proxy/internal/cache"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
 )
@@ -288,36 +286,4 @@ func TestExecutorSameModelKeepsByteTransparentPassthrough(t *testing.T) {
 			t.Fatalf("stream bytes changed:\nupstream: %q\nclient:   %q", aliasChatSSE, writer.Body.String())
 		}
 	})
-}
-
-// TestExecutorCachesNormalizedModel: the cache recorder sits downstream of
-// normalization, so a cache hit replays the same called-model bytes without
-// any upstream call.
-func TestExecutorCachesNormalizedModel(t *testing.T) {
-	attempt, _ := modelNormalizeAttempt(protocol.OpenAI, protocol.OpenAI, aliasTargetModel, aliasCalledModel, `{"model":"kimi-k3"}`)
-	cache := responsecache.New(responsecache.Options{TTL: time.Minute, MaxEntries: 4, MaxBodyBytes: 1 << 20})
-	runtime := attempt.Runtime()
-	runtime.Cache = cache
-	scope := attempt.Scope()
-	scope.CacheKey = "cache-key"
-	attempt = NewAttempt(runtime, attempt.Plan(), attempt.Exchange(), scope, attempt.Policy())
-	writer := runAliasAttempt(t, attempt, testResponse(http.StatusOK, aliasChatCompletion))
-	if writer.Body.String() == "" {
-		t.Fatal("empty client body")
-	}
-	entry, ok := cache.Lookup("cache-key", "m", time.Now())
-	if !ok {
-		t.Fatal("response not cached")
-	}
-	replay := httptest.NewRecorder()
-	if err := responsecache.Replay(replay, entry); err != nil {
-		t.Fatalf("replay: %v", err)
-	}
-	var stored map[string]any
-	if err := json.Unmarshal(replay.Body.Bytes(), &stored); err != nil {
-		t.Fatalf("stored body does not parse: %v", err)
-	}
-	if stored["model"] != aliasCalledModel {
-		t.Fatalf("cached model = %v, want %s", stored["model"], aliasCalledModel)
-	}
 }

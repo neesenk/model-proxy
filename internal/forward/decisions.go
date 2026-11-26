@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"time"
 
-	"model-proxy/internal/fusion"
 	"model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/observe/logx"
@@ -17,16 +16,17 @@ import (
 	"model-proxy/internal/targetexec"
 )
 
-// decisionsInput parameterizes one decisions-model routing call for either
-// fusion's pre-fan-out selector or a route-level selector. The caller owns
-// candidate construction, instructions, and observability context.
+var errDecisionLegUnavailable = errors.New("decision leg unavailable")
+
+// decisionsInput parameterizes one decisions-model routing call. The caller
+// owns candidate construction, instructions, and observability context.
 type decisionsInput struct {
 	Runtime     Snapshot
 	Target      RouteTarget
-	SessionKey  string // routing sticky key for resolver.Pick
-	SessionID   string // client session id for events/request log
-	RequestID   string // parent request id; leg id becomes <kind>-<requestID>
-	Kind        string // "fusion-select" or "route-select"
+	SessionKey  string
+	SessionID   string
+	RequestID   string
+	Kind        string
 	Agent       string
 	Proto       string
 	Exposed     string
@@ -34,15 +34,10 @@ type decisionsInput struct {
 	Timeout     time.Duration
 
 	State                  map[string]any
-	Candidates             []fusion.SelectorCandidate
+	Candidates             []selectorCandidate
 	ChoiceInstructions     string
 	DifficultyInstructions string
 	DifficultyLevels       []string
-
-	// Sensitive marks calls whose request/response bodies must NOT be persisted
-	// in the request log (e.g., an eval judge prompt that contains user response
-	// text). Metadata (provider, model, status, latency, usage) is still logged.
-	Sensitive bool
 }
 
 // decisionsOutput is the typed result of a decisions call. Err covers
@@ -54,15 +49,14 @@ type decisionsOutput struct {
 	Confidence    float64
 	Probabilities map[string]float64
 	Difficulty    float64
-	Usage         fusion.Usage
+	Usage         counters.TokenUsage
 	LatencyMs     int64
 	Err           error
 }
 
-// callDecisions executes a decisions-model routing leg through the same
-// generation-bound leg machinery as panel legs: resolver, plan, health gate,
-// BufferedLeg, metrics, request log and live events. It is the shared
-// implementation behind fusion's selector and route-level selectors.
+// callDecisions executes a route selector through generation-bound leg
+// machinery: resolver, plan, health gate, BufferedLeg, metrics, request log and
+// live events.
 func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out decisionsOutput) {
 	m := in.Target
 	if picked, ok := routing.NewResolver(
@@ -77,7 +71,7 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 	legID := in.Kind + "-" + in.RequestID
 	marker := in.Kind + ":" + m.Model
 	start := time.Now()
-	status := http.StatusBadGateway // pre-upstream failures report as 502
+	status := http.StatusBadGateway
 	p.svc.Events.Publish(observeevents.Event{
 		Type:      "start",
 		Ts:        start.UnixMilli(),
@@ -141,7 +135,7 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 	}
 	gate := p.svc.NewHealthGate(in.Runtime.Cfg, in.Runtime.ParentOf)
 	if !gate.TakeHalfOpenSlot(m.Provider, in.Runtime.Generation) {
-		return fail(errFusionLegUnavailable)
+		return fail(errDecisionLegUnavailable)
 	}
 	defer gate.ReleaseHalfOpenSlot(m.Provider, in.Runtime.Generation)
 	sched := in.Runtime.Cfg.Scheduling
@@ -179,10 +173,8 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 			return fail(err)
 		}
 		if ctx.Err() == context.Canceled {
-			return fail(errFusionLegUnavailable)
+			return fail(errDecisionLegUnavailable)
 		}
-		// The selector's OWN short deadline expiring is a policy fallback,
-		// not an upstream-health verdict: don't poison the provider circuit.
 		if errors.Is(err, context.DeadlineExceeded) &&
 			legCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
 			return fail(err)
@@ -204,7 +196,7 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 		decision := targetexec.ParseRateLimit(resp, peek, time.Now(), sched)
 		gate.RecordRateLimit(m.Provider, decision.Until, string(decision.Kind), in.Runtime.Generation)
 		p.incProviderMetric(m.Provider, m.Model, counters.EvRateLimited429)
-		out.Err = errFusionLegUnavailable
+		out.Err = errDecisionLegUnavailable
 	case resp.StatusCode >= 500:
 		gate.RecordFailure(m.Provider, sched, in.Runtime.Generation)
 		p.incProviderMetric(m.Provider, m.Model, counters.EvFailures)
@@ -238,7 +230,7 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 		if difficulty, ok := answers["difficulty"]; ok {
 			out.Difficulty = difficulty.Score
 		}
-		out.Usage = fusion.Usage{Input: usage.InputTokens, Output: usage.OutputTokens}
+		out.Usage = counters.TokenUsage{Input: usage.InputTokens, Output: usage.OutputTokens}
 		gate.RecordSuccess(m.Provider, m.Model, in.Runtime.Generation)
 		p.incProviderMetric(m.Provider, m.Model, counters.EvRequests)
 		latencyMs := time.Since(start).Milliseconds()
@@ -256,14 +248,7 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 			start,
 			sentBody,
 		)
-		logResp := respBody
-		if in.Sensitive {
-			// Sensitive decisions calls (eval judge) carry user response text in
-			// the request body; persist only metadata, not the prompt content.
-			logInput.RequestBody = nil
-			logResp = nil
-		}
-		requestlog.Complete(logger, logInput, logResp, int64(len(logResp)), false)
+		requestlog.Complete(logger, logInput, respBody, int64(len(respBody)), false)
 	}
 	return out
 }
@@ -281,7 +266,7 @@ func (p pipeline) addProviderLatency(provider, model string, ms uint64) {
 	}
 }
 
-func (p pipeline) commitProviderTokens(agent, provider, model string, usage fusion.Usage) {
+func (p pipeline) commitProviderTokens(agent, provider, model string, usage counters.TokenUsage) {
 	if p.svc.Tokens != nil {
 		p.svc.Tokens.Commit(counters.TokenKey{Provider: provider, Model: model}, counters.TokenUsage{
 			Input:  usage.Input,
@@ -293,87 +278,5 @@ func (p pipeline) commitProviderTokens(agent, provider, model string, usage fusi
 			Input:  usage.Input,
 			Output: usage.Output,
 		})
-	}
-}
-
-// EvalJudgeResult is the typed result of one pairwise eval judge call.
-type EvalJudgeResult struct {
-	Verdict   string // primary_better, shadow_better, tie
-	Model     string
-	LatencyMs int64
-	Usage     fusion.Usage
-	Err       error
-}
-
-// EvalJudgeInput parameterizes one pairwise eval judge call via the decisions
-// protocol. The two response bodies are placed in the state object; the judge
-// is asked a single model_choice question over {primary_better, shadow_better,
-// tie}. Sensitive is always true for eval judge calls.
-type EvalJudgeInput struct {
-	Runtime     Snapshot
-	Target      RouteTarget
-	SessionID   string
-	RequestID   string // parent request id; leg id becomes eval-judge-<requestID>
-	Agent       string
-	Proto       string
-	Exposed     string
-	CalledModel string
-	Timeout     time.Duration
-	State       map[string]any
-}
-
-// CallEvalJudge executes a pairwise evaluation judge call through the shared
-// decisions seam. It is exported so the app composition root can drive L2
-// shadow evaluation without re-implementing the decisions leg machinery.
-func CallEvalJudge(svc Services, ctx context.Context, in EvalJudgeInput) EvalJudgeResult {
-	return pipeline{svc: svc}.callEvalJudge(ctx, in)
-}
-
-func (p pipeline) callEvalJudge(ctx context.Context, in EvalJudgeInput) EvalJudgeResult {
-	questions := map[string]protocol.SystemOneQuestion{
-		"pairwise_verdict": {
-			Type:         "choice",
-			Instructions: `Compare the PRIMARY and SHADOW responses to the same request. Judge which response is better overall for the user's request, ignoring superficial formatting differences.`,
-			Criteria: map[string]string{
-				"primary_better": "the primary response is meaningfully better",
-				"shadow_better":  "the shadow response is meaningfully better",
-				"tie":            "the responses are effectively equivalent",
-			},
-		},
-	}
-	out := p.callDecisions(ctx, decisionsInput{
-		Runtime:     in.Runtime,
-		Target:      in.Target,
-		SessionID:   in.SessionID,
-		RequestID:   in.RequestID,
-		Kind:        "eval-judge",
-		Agent:       in.Agent,
-		Proto:       in.Proto,
-		Exposed:     in.Exposed,
-		CalledModel: in.CalledModel,
-		Timeout:     in.Timeout,
-		State:       in.State,
-		Candidates: []fusion.SelectorCandidate{
-			{ID: "primary_better", Target: RouteTarget{Provider: "verdict", Model: "primary_better"}, Rubric: "the primary response is meaningfully better"},
-			{ID: "shadow_better", Target: RouteTarget{Provider: "verdict", Model: "shadow_better"}, Rubric: "the shadow response is meaningfully better"},
-			{ID: "tie", Target: RouteTarget{Provider: "verdict", Model: "tie"}, Rubric: "the responses are effectively equivalent"},
-		},
-		ChoiceInstructions:     questions["pairwise_verdict"].Instructions,
-		DifficultyInstructions: "Rate the overall complexity of the request independent of the responses.",
-		DifficultyLevels:       []string{"low", "medium", "high"},
-		Sensitive:              true,
-	})
-	if out.Err != nil {
-		return EvalJudgeResult{Err: out.Err}
-	}
-	verdict := out.ChoiceID
-	if verdict != "primary_better" && verdict != "shadow_better" && verdict != "tie" {
-		return EvalJudgeResult{Err: fmt.Errorf("eval judge returned unknown verdict %q", verdict)}
-	}
-	return EvalJudgeResult{
-		Verdict:   verdict,
-		Model:     out.Model,
-		LatencyMs: out.LatencyMs,
-		Usage:     out.Usage,
 	}
 }

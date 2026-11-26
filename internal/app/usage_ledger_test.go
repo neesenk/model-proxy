@@ -1,9 +1,9 @@
 package app
 
-// usage_ledger_test.go pins ONE usage ledger across the three independent
+// usage_ledger_test.go pins ONE usage ledger across the two independent
 // extraction paths: the hot-path UsageScanner (counters → minute buckets /
-// Accounts & Analytics), requestlog.ExtractUsage (request log index → Keys
-// usage, session aggregates), and fusion.ParseUsage (orchestration legs).
+// Accounts & Analytics) and requestlog.ExtractUsage (request log index → Keys
+// usage, session aggregates).
 // They must agree field-for-field on every wire spelling — the historical bug
 // classes this guards against: cached shares landing in BOTH Input and
 // CacheRead (double count, the deepseek discrepancy), cache writes folded
@@ -15,7 +15,6 @@ import (
 	"strings"
 	"testing"
 
-	"model-proxy/internal/fusion"
 	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/requestlog"
 )
@@ -95,8 +94,8 @@ func TestUsageLedgerConsistency_SSE(t *testing.T) {
 	}
 }
 
-// TestUsageLedgerConsistency_JSON runs the non-streaming dialects through all
-// THREE parsers (fusion.ParseUsage only consumes non-streaming bodies).
+// TestUsageLedgerConsistency_JSON runs the non-streaming dialects through both
+// parsers and requires identical four-bucket results.
 func TestUsageLedgerConsistency_JSON(t *testing.T) {
 	cases := []struct {
 		name string
@@ -130,8 +129,6 @@ func TestUsageLedgerConsistency_JSON(t *testing.T) {
 			gotScanner := requestlog.Usage{Input: sc.Input, Output: sc.Output, CacheRead: sc.CacheRead, CacheCreation: sc.CacheCreation}
 			assertUsageEqual(t, "scanner", gotScanner, tc.want)
 			assertUsageEqual(t, "requestlog", requestlog.ExtractUsage(tc.body), tc.want)
-			fu := fusion.ParseUsage([]byte(tc.body))
-			assertUsageEqual(t, "fusion", requestlog.Usage{Input: fu.Input, Output: fu.Output, CacheRead: fu.CacheRead, CacheCreation: fu.CacheCreation}, tc.want)
 		})
 	}
 }

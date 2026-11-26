@@ -14,7 +14,6 @@ import (
 	"time"
 
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/fusion"
 	"model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/provider"
@@ -350,12 +349,6 @@ type harness struct {
 	gate   *fakeHealthGate
 	fx     *fakeEffects
 	events *observeevents.Hub
-	shadow []shadowCall
-}
-
-type shadowCall struct {
-	exposed  string
-	provider string
 }
 
 func newHarness() *harness {
@@ -370,13 +363,9 @@ func newHarness() *harness {
 		Tokens:        counters.NewTokenCounter(),
 		Agents:        counters.NewAgentCounter(),
 		Events:        events,
-		FusionReg:     fusion.NewRegistry(),
 		NewHealthGate: func(_ *configdomain.Config, parentOf map[string]string) targetexec.HealthGate { return gate },
 		NewEffects:    func(cfg *Config, generation uint64) targetexec.Effects { return fx },
 		Schedule:      passthroughSchedule,
-		ShadowDispatch: func(runtime Snapshot, proto, backendProto, calledModel, exposed string, primary RouteTarget, primaryRequestID, primaryAgent, primarySession string, commit *targetexec.Commit, routingDecision *RoutingDecision) {
-			h.shadow = append(h.shadow, shadowCall{exposed: exposed, provider: primary.Provider})
-		},
 		ResolveBackendProto: func(declared, provName string, provCfg Provider, model, clientProto string, parentOf map[string]string) (string, bool) {
 			if declared != "" {
 				return declared, false

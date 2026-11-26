@@ -83,71 +83,6 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 			t.Error("pipeline.serveOnce must call ApplyWithProfile and ContextOverflowRetryWithProfile exactly once on the value assigned from requestRoutingPlanner")
 		}
 	})
-
-	t.Run("normal delivery gates Shadow on its exact committed result", func(t *testing.T) {
-		forward, _ := parseGoFile(t, "internal/forward/forward.go")
-		serveOnce := namedMethod(t, forward, "pipeline", "serveOnce")
-		if !normalDeliveryShadowDispatchValid(serveOnce.Body) {
-			t.Error("pipeline.serveOnce must dispatch Shadow only inside the exact executor-result Committed branch and pass that result's Commit")
-		}
-	})
-
-	t.Run("Shadow dispatch uses one captured generation runtime", func(t *testing.T) {
-		shadowFile, _ := parseGoFile(t, "internal/app/proxy_shadow.go")
-		for _, method := range []string{"dispatchLegacyShadow", "dispatchEvalShadow"} {
-			dispatch := namedMethod(t, shadowFile, "Proxy", method)
-			if !shadowDispatchUsesCapturedRuntime(dispatch.Body, method) {
-				t.Errorf("Proxy.%s must use one runtime.shadow value for sampling, admission, and shadow execution", method)
-			}
-		}
-	})
-
-	t.Run("fusion engine and shadow runtime have one owner each", func(t *testing.T) {
-		fusionSites := importedCompositeLiteralSites(t, "model-proxy/internal/fusion", "Engine")
-		if len(fusionSites) != 1 || fusionSites[0].file != "internal/forward/fusion.go" || fusionSites[0].function != "runFusion" {
-			t.Errorf("fusion.Engine production composites = %v, want only forward/fusion.go:runFusion", fusionSites)
-		}
-		if sites := packageLocalCompositeLiteralSites(t, "internal/fusion", "Engine"); len(sites) != 0 {
-			t.Errorf("fusion package-local Engine composites = %v, want none outside the forward adapter", sites)
-		}
-		if sites := importedTypeValueReferenceSitesAcrossProduction(t, "model-proxy/internal/fusion", "Engine"); len(sites) != 1 ||
-			sites[0].file != "internal/forward/fusion.go" || sites[0].function != "runFusion" {
-			t.Errorf("fusion.Engine production value references = %v, want only forward/fusion.go:runFusion direct composite", sites)
-		}
-		if sites := importedTypeDeclarationSitesAcrossProduction(t, "model-proxy/internal/fusion", "Engine"); len(sites) != 0 {
-			t.Errorf("fusion.Engine type aliases = %v, want none", sites)
-		}
-
-		shadowSites := importedFunctionCallSitesAcrossProduction(t, "model-proxy/internal/shadow", "NewRuntime")
-		if len(shadowSites) != 2 ||
-			shadowSites[0].file != "internal/app/proxy.go" || shadowSites[0].function != "NewProxyWithStatePath" ||
-			shadowSites[1].file != "internal/app/proxy_reload.go" || shadowSites[1].function != "Reload" {
-			t.Errorf("shadow.NewRuntime production call sites = %v, want constructor and Proxy.Reload only", shadowSites)
-		}
-		if sites := packageLocalFunctionCallSites(t, "internal/shadow", "NewRuntime"); len(sites) != 0 {
-			t.Errorf("shadow package-local NewRuntime calls = %v, want none outside the root generation owners", sites)
-		}
-		if sites := importedFunctionReferenceSitesAcrossProduction(t, "model-proxy/internal/shadow", "NewRuntime"); len(sites) != 2 ||
-			sites[0].file != "internal/app/proxy.go" || sites[0].function != "NewProxyWithStatePath" ||
-			sites[1].file != "internal/app/proxy_reload.go" || sites[1].function != "Reload" {
-			t.Errorf("shadow.NewRuntime production reference sites = %v, want constructor and Proxy.Reload direct calls only", sites)
-		}
-
-		executeSites := importedTypeMethodCallSitesAcrossProduction(t, "model-proxy/internal/shadow", "Runtime", "Execute")
-		if len(executeSites) != 1 || executeSites[0].file != "internal/app/proxy_shadow.go" || executeSites[0].function != "executeShadow" {
-			t.Errorf("shadow Runtime.Execute production call sites = %v, want only proxy_shadow.go:executeShadow", executeSites)
-		}
-		if sites := importedMethodExpressionSitesAcrossProduction(t, "model-proxy/internal/shadow", "Runtime", "Execute"); len(sites) != 0 {
-			t.Errorf("shadow Runtime.Execute method expressions = %v, want none", sites)
-		}
-		if sites := importedTypeDeclarationSitesAcrossProduction(t, "model-proxy/internal/shadow", "Runtime"); len(sites) != 0 {
-			t.Errorf("shadow.Runtime type aliases = %v, want none", sites)
-		}
-		if sites := rootMethodValueReferenceSites(t, "Execute"); len(sites) != 0 {
-			t.Errorf("root method-value Execute references = %v, want none; shadow execution must stay a direct call", sites)
-		}
-	})
-
 	t.Run("web transport is built only through the web adapter", func(t *testing.T) {
 		sites := importedFunctionCallSitesAcrossProduction(t, "model-proxy/internal/web", "New")
 		if len(sites) != 1 || sites[0].file != "internal/app/web_adapter.go" || sites[0].function != "mustNewWebTransport" {
@@ -178,9 +113,6 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 		moved := map[string]bool{
 			"serveOnce": true, "serveRequest": true, "serveState": true, "serveResult": true,
 			"requestProfile": true, "writeAllTargetsFailed": true, "statusClientGone": true,
-			"runFusion": true, "fusionCtx": true, "fusionAdapter": true,
-			"fusionSynthesizerSupportsTools": true, "callFusionLeg": true,
-			"callFusionSynthesizer": true, "expandFusionResponses": true,
 			"newTargetAttempt": true, "forwardLogCtx": true, "buildRequestLogInput": true,
 			"targetPlanInput": true, "planTarget": true, "targetExecutor": true,
 			"forcedProviderFromRequest": true,
@@ -397,142 +329,6 @@ func constructedPlannerOwnsRoutingCalls(node ast.Node) bool {
 	return true
 }
 
-func normalDeliveryShadowDispatchValid(node ast.Node) bool {
-	result, executePos, ok := uniquelyAssignedCallIdentifier(node, func(call *ast.CallExpr) bool {
-		_, ok := exactTargetExecutorAttempt(call)
-		return ok
-	})
-	if !ok || identifierAssignmentCount(node, result) != 1 {
-		return false
-	}
-
-	allDispatches := namedCallsInNode(node, "dispatchShadowAfterCommit")
-	if len(allDispatches) != 1 {
-		return false
-	}
-
-	var committedBranch *ast.IfStmt
-	branchCount := 0
-	ast.Inspect(node, func(candidate ast.Node) bool {
-		branch, ok := candidate.(*ast.IfStmt)
-		if !ok || !selectorOnIdent(branch.Cond, result, "Committed") {
-			return true
-		}
-		branchCount++
-		committedBranch = branch
-		return true
-	})
-	if branchCount != 1 || committedBranch.Pos() <= executePos {
-		return false
-	}
-
-	branchDispatches := namedCallsInNode(committedBranch.Body, "dispatchShadowAfterCommit")
-	if len(branchDispatches) != 1 || branchDispatches[0].Pos() != allDispatches[0].Pos() {
-		return false
-	}
-	call := branchDispatches[0]
-	if !selectorOnIdent(call.Fun, "p", "dispatchShadowAfterCommit") || len(call.Args) != 11 {
-		return false
-	}
-	return identIs(call.Args[0], "runtime") &&
-		identIs(call.Args[1], "proto") &&
-		stringOfZeroArgReceiverCall(call.Args[2], "plan", "BackendProtocol") &&
-		identIs(call.Args[3], "calledModel") &&
-		identIs(call.Args[4], "exposed") &&
-		identIs(call.Args[5], "t") &&
-		identIs(call.Args[6], "requestID") &&
-		identIs(call.Args[7], "agent") &&
-		selectorOnIdent(call.Args[8], "flc", "SessionID") &&
-		selectorOnIdent(call.Args[9], result, "Commit") &&
-		selectorOnIdent(call.Args[10], "st", "routing")
-}
-
-func exactTargetExecutorAttempt(call *ast.CallExpr) (string, bool) {
-	execute, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || execute.Sel.Name != "Execute" || len(call.Args) != 1 {
-		return "", false
-	}
-	attempt, ok := call.Args[0].(*ast.Ident)
-	if !ok {
-		return "", false
-	}
-	factory, ok := execute.X.(*ast.CallExpr)
-	if !ok || len(factory.Args) != 4 || !selectorOnIdent(factory.Fun, "p", "targetExecutor") {
-		return "", false
-	}
-	if !zeroArgReceiverCall(factory.Args[0], attempt.Name, "Runtime") {
-		return "", false
-	}
-	// The proxy-chain inputs threaded alongside the runtime must be the same
-	// snapshot's Cfg/ParentOf plus a route/plan target's .Provider;
-	// same-snapshot provenance is locked by executorRuntimeBoundToAttempt.
-	cfg, ok := factory.Args[1].(*ast.SelectorExpr)
-	if !ok || cfg.Sel.Name != "Cfg" || requestRoutingExprPath(cfg.X) == "" {
-		return "", false
-	}
-	parentOf, ok := factory.Args[2].(*ast.SelectorExpr)
-	if !ok || parentOf.Sel.Name != "ParentOf" || requestRoutingExprPath(parentOf.X) == "" {
-		return "", false
-	}
-	provider, ok := factory.Args[3].(*ast.SelectorExpr)
-	if !ok || provider.Sel.Name != "Provider" {
-		return "", false
-	}
-	return attempt.Name, true
-}
-
-func shadowDispatchUsesCapturedRuntime(node ast.Node, method string) bool {
-	shadowRuntime, _, ok := uniquelyAssignedExpressionIdentifier(node, func(expr ast.Expr) bool {
-		return selectorOnIdent(expr, "runtime", "Shadow")
-	})
-	if !ok || identifierAssignmentCount(node, shadowRuntime) != 1 ||
-		selectorPathCount(node, "runtime.Shadow") != 1 ||
-		len(callPathPositions(node, "p.shadow.Load")) != 0 {
-		return false
-	}
-	sampleMethod := "ShouldSample"
-	if method == "dispatchEvalShadow" {
-		sampleMethod = "evalRand"
-	}
-	for _, m := range []string{sampleMethod, "TryAcquire"} {
-		wantReceiver := shadowRuntime
-		if m == "evalRand" {
-			wantReceiver = "p"
-		}
-		if namedCallCountInNode(node, m) != 1 || receiverCallCount(node, wantReceiver, m) != 1 {
-			return false
-		}
-	}
-	permit, _, ok := uniquelyAssignedCallIdentifier(node, func(call *ast.CallExpr) bool {
-		return selectorOnIdent(call.Fun, shadowRuntime, "TryAcquire")
-	})
-	if !ok || identifierAssignmentCount(node, permit) != 1 ||
-		namedCallCountInNode(node, "Release") != 2 ||
-		receiverCallCount(node, permit, "Release") != 2 {
-		return false
-	}
-
-	execMethod := "runShadow"
-	if method == "dispatchEvalShadow" {
-		execMethod = "runEvalShadowPair"
-	}
-	execCalls := namedCallsInNode(node, execMethod)
-	if len(execCalls) != 1 {
-		return false
-	}
-	exec := execCalls[0]
-	if !selectorOnIdent(exec.Fun, "p", execMethod) {
-		return false
-	}
-
-	admissions := callsWithPath(node, "p.lifecycle.RunBeforeLogDrain")
-	if len(admissions) != 1 || len(admissions[0].Args) != 1 {
-		return false
-	}
-	callback, ok := admissions[0].Args[0].(*ast.FuncLit)
-	return ok && len(namedCallsInNode(callback.Body, execMethod)) == 1
-}
-
 func uniquelyAssignedCallIdentifier(
 	node ast.Node,
 	matches func(*ast.CallExpr) bool,
@@ -601,44 +397,9 @@ func namedCallsInNode(node ast.Node, name string) []*ast.CallExpr {
 	return calls
 }
 
-func callsWithPath(node ast.Node, path string) []*ast.CallExpr {
-	var calls []*ast.CallExpr
-	ast.Inspect(node, func(candidate ast.Node) bool {
-		call, ok := candidate.(*ast.CallExpr)
-		if ok && expressionPath(call.Fun) == path {
-			calls = append(calls, call)
-		}
-		return true
-	})
-	return calls
-}
-
-func selectorPathCount(node ast.Node, path string) int {
-	count := 0
-	ast.Inspect(node, func(candidate ast.Node) bool {
-		selector, ok := candidate.(*ast.SelectorExpr)
-		if ok && expressionPath(selector) == path {
-			count++
-		}
-		return true
-	})
-	return count
-}
-
 func selectorOnIdent(expr ast.Expr, receiver, field string) bool {
 	selector, ok := expr.(*ast.SelectorExpr)
 	return ok && selector.Sel.Name == field && identIs(selector.X, receiver)
-}
-
-func zeroArgReceiverCall(expr ast.Expr, receiver, method string) bool {
-	call, ok := expr.(*ast.CallExpr)
-	return ok && len(call.Args) == 0 && selectorOnIdent(call.Fun, receiver, method)
-}
-
-func stringOfZeroArgReceiverCall(expr ast.Expr, receiver, method string) bool {
-	call, ok := expr.(*ast.CallExpr)
-	return ok && identIs(call.Fun, "string") && len(call.Args) == 1 &&
-		zeroArgReceiverCall(call.Args[0], receiver, method)
 }
 
 func packageLocalFunctionCallSites(t *testing.T, directory, function string) []interactionSite {
@@ -680,27 +441,6 @@ func packageLocalCompositeLiteralSites(t *testing.T, directory, typeName string)
 		}
 	}
 	return sites
-}
-
-func importedTypeMethodCallSitesAcrossProduction(
-	t *testing.T,
-	importPath string,
-	typeName string,
-	method string,
-) []interactionSite {
-	t.Helper()
-	var files []struct {
-		path string
-		file *ast.File
-	}
-	for _, path := range productionGoFilesRecursively(t, ".") {
-		file, _ := parseGoFile(t, path)
-		files = append(files, struct {
-			path string
-			file *ast.File
-		}{path: filepath.ToSlash(path), file: file})
-	}
-	return importedTypeMethodCallSitesInFiles(files, importPath, typeName, method)
 }
 
 func importedTypeMethodCallSitesInFiles(
@@ -855,50 +595,6 @@ func importedTypeValueReferenceSitesAcrossProduction(
 		}{path: filepath.ToSlash(path), file: file})
 	}
 	return importedTypeValueReferenceSitesInFiles(files, importPath, typeName)
-}
-
-// importedMethodExpressionSitesAcrossProduction reports `pkg.t.Method` /
-// `(*pkg.t).method` expressions, which turn a reviewed method into an
-// unreviewed function value.
-func importedMethodExpressionSitesAcrossProduction(
-	t *testing.T,
-	importPath string,
-	typeName string,
-	method string,
-) []interactionSite {
-	t.Helper()
-	var files []struct {
-		path string
-		file *ast.File
-	}
-	for _, path := range productionGoFilesRecursively(t, ".") {
-		file, _ := parseGoFile(t, path)
-		files = append(files, struct {
-			path string
-			file *ast.File
-		}{path: filepath.ToSlash(path), file: file})
-	}
-	return importedMethodExpressionSitesInFiles(files, importPath, typeName, method)
-}
-
-// rootMethodValueReferenceSites reports same-package `receiver.method`
-// selector expressions that are not the callee of a call expression. Direct
-// calls are validated by their dedicated dataflow guards; this guard catches
-// `fn := p.runShadow` / `fn := shadowRuntime.Execute` style escapes.
-func rootMethodValueReferenceSites(t *testing.T, method string) []interactionSite {
-	t.Helper()
-	var sites []interactionSite
-	for _, path := range productionGoFilesRecursively(t, ".") {
-		file, _ := parseGoFile(t, path)
-		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			sites = append(sites, methodValueReferenceSitesIn(fn, method, filepath.Base(path))...)
-		}
-	}
-	return sites
 }
 
 func methodValueReferenceSitesIn(fn *ast.FuncDecl, method, path string) []interactionSite {
@@ -1066,7 +762,7 @@ func sameNameSelector() { factory.NewProxy(cfg) }
 	aliasSkipFile, err := parser.ParseFile(fset, "alias_skip.go", `package main
 import (
 	_ "model-proxy/internal/targetexec"
-	. "model-proxy/internal/shadow"
+	. "example.com/worker"
 )
 func blankQualified() { _ = _.Executor{} }
 func dotBare() { _ = Runtime{} }
@@ -1118,94 +814,14 @@ func invalidPlannerFactory() {
 		t.Error("planner dataflow control accepted a same-named selector factory")
 	}
 
-	commitFile, err := parser.ParseFile(fset, "commit.go", `package main
-func validCommit() {
-	attempt := makeAttempt()
-	result := p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
-	if result.Committed {
-		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, result.Commit, st.routing)
-	}
-}
-func invalidCommit() {
-	attempt := makeAttempt()
-	result := p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
-	if other.Committed {
-		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, result.Commit, st.routing)
-	}
-}
-func invalidExecutorBinding() {
-	attempt := makeAttempt()
-	other := makeAttempt()
-	result := p.targetExecutor(other.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
-	if result.Committed {
-		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, result.Commit, st.routing)
-	}
-}
-func invalidCommitPayload() {
-	attempt := makeAttempt()
-	result := p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
-	if result.Committed {
-		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, agent, flc.SessionID, other.Commit, st.routing)
-	}
-}
-`, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !normalDeliveryShadowDispatchValid(namedFunction(t, commitFile, "validCommit").Body) {
-		t.Error("post-commit dataflow control rejected the exact executor result")
-	}
-	if normalDeliveryShadowDispatchValid(namedFunction(t, commitFile, "invalidCommit").Body) {
-		t.Error("post-commit dataflow control accepted dispatch under another result")
-	}
-	if normalDeliveryShadowDispatchValid(namedFunction(t, commitFile, "invalidExecutorBinding").Body) {
-		t.Error("post-commit dataflow control accepted a mismatched executor runtime")
-	}
-	if normalDeliveryShadowDispatchValid(namedFunction(t, commitFile, "invalidCommitPayload").Body) {
-		t.Error("post-commit dataflow control accepted another result's Commit")
-	}
-
-	shadowFile, err := parser.ParseFile(fset, "shadow.go", `package main
-func validShadow() {
-	shadowRuntime := runtime.Shadow
-	shadowRuntime.ShouldSample()
-	permit := shadowRuntime.TryAcquire()
-	p.lifecycle.RunBeforeLogDrain(func(stop <-chan struct{}) {
-		defer permit.Release()
-		p.runShadow(runtime, shadowRuntime, stop, proto, backendProto, calledModel, exposed, shadow, commit.RequestBody(), primaryRequestID, primaryAgent, primarySession)
-	})
-	permit.Release()
-}
-func invalidShadow() {
-	shadowRuntime := runtime.Shadow
-	shadowRuntime.ShouldSample()
-	other := p.shadow.Load()
-	permit := other.TryAcquire()
-	p.lifecycle.RunBeforeLogDrain(func(stop <-chan struct{}) {
-		defer permit.Release()
-		p.runShadow(runtime, other, stop, proto, backendProto, calledModel, exposed, shadow, commit.RequestBody(), primaryRequestID, primaryAgent, primarySession)
-	})
-	permit.Release()
-}
-`, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !shadowDispatchUsesCapturedRuntime(namedFunction(t, shadowFile, "validShadow").Body, "dispatchLegacyShadow") {
-		t.Error("Shadow runtime dataflow control rejected one captured generation")
-	}
-	if shadowDispatchUsesCapturedRuntime(namedFunction(t, shadowFile, "invalidShadow").Body, "dispatchLegacyShadow") {
-		t.Error("Shadow runtime dataflow control accepted a mid-dispatch runtime reload")
-	}
-
 	typedMethodFile, err := parser.ParseFile(fset, "typed_method.go", `package main
-import shadowexec "model-proxy/internal/shadow"
-func calls(runtime *shadowexec.Runtime, other otherRuntime) {
+import workerexec "example.com/worker"
+func calls(runtime *workerexec.Runtime, other otherRuntime) {
 	runtime.Execute()
 	other.Execute()
 }
 func constructs(other otherRuntime) {
-	runtime := shadowexec.NewRuntime(options)
+	runtime := workerexec.NewRuntime(options)
 	runtime.Execute()
 	other.Execute()
 }
@@ -1216,7 +832,7 @@ func constructs(other otherRuntime) {
 	typedSites := importedTypeMethodCallSitesInFiles([]struct {
 		path string
 		file *ast.File
-	}{{path: "typed_method.go", file: typedMethodFile}}, "model-proxy/internal/shadow", "Runtime", "Execute")
+	}{{path: "typed_method.go", file: typedMethodFile}}, "example.com/worker", "Runtime", "Execute")
 	if len(typedSites) != 2 || typedSites[0].function != "calls" || typedSites[1].function != "constructs" {
 		t.Errorf("imported type method control = %v, want only typed and constructor-derived Runtime.Execute calls", typedSites)
 	}
@@ -1224,17 +840,17 @@ func constructs(other otherRuntime) {
 	bypassFile, err := parser.ParseFile(fset, "bypass.go", `package main
 import (
 	exec "model-proxy/internal/targetexec"
-	shadowexec "model-proxy/internal/shadow"
+	workerexec "example.com/worker"
 )
 type executorAlias = exec.Executor
 func functionValue() { build := exec.NewPlan; _ = build(input) }
 func directNewPlan() { _ = exec.NewPlan(input) }
 func typeAlias() { _ = executorAlias{} }
-func methodValue(runtime *shadowexec.Runtime) { run := runtime.Execute; _ = run }
-func methodExpression() { _ = shadowexec.Runtime.Execute }
-func directExecute(runtime *shadowexec.Runtime) { runtime.Execute(ctx, job) }
-func methodValueRoot() { hook := p.runShadow; _ = hook }
-func directRoot() { p.runShadow(runtime, shadowRuntime, proto, backendProto, calledModel, exposed, shadow, body, id) }
+func methodValue(runtime *workerexec.Runtime) { run := runtime.Execute; _ = run }
+func methodExpression() { _ = workerexec.Runtime.Execute }
+func directExecute(runtime *workerexec.Runtime) { runtime.Execute(ctx, job) }
+func methodValueRoot() { hook := p.runDetached; _ = hook }
+func directRoot() { p.runDetached(runtime, workerRuntime, proto, backendProto, calledModel, exposed, shadow, body, id) }
 `, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -1255,21 +871,21 @@ func directRoot() { p.runShadow(runtime, shadowRuntime, proto, backendProto, cal
 		got[0].function != "type executorAlias" {
 		t.Errorf("imported type alias control = %v, want type executorAlias", got)
 	}
-	if got := importedTypeMethodReferenceSitesInFiles(files, "model-proxy/internal/shadow", "Runtime", "Execute"); len(got) != 2 ||
+	if got := importedTypeMethodReferenceSitesInFiles(files, "example.com/worker", "Runtime", "Execute"); len(got) != 2 ||
 		got[0].function != "methodValue" || got[1].function != "directExecute" {
 		t.Errorf("imported method reference control = %v, want methodValue and directExecute; method expression is guarded separately", got)
 	}
-	if got := importedMethodExpressionSitesInFiles(files, "model-proxy/internal/shadow", "Runtime", "Execute"); len(got) != 1 ||
+	if got := importedMethodExpressionSitesInFiles(files, "example.com/worker", "Runtime", "Execute"); len(got) != 1 ||
 		got[0].function != "methodExpression" {
 		t.Errorf("imported method expression control = %v, want only methodExpression", got)
 	}
 	if got := rootFunctionReferenceSitesInFiles(files, "NewProxy"); len(got) != 0 {
 		t.Errorf("root function reference control = %v, want none", got)
 	}
-	if got := methodValueReferenceSitesIn(namedFunction(t, bypassFile, "methodValueRoot"), "runShadow", "bypass.go"); len(got) != 1 {
+	if got := methodValueReferenceSitesIn(namedFunction(t, bypassFile, "methodValueRoot"), "runDetached", "bypass.go"); len(got) != 1 {
 		t.Errorf("root method value control = %v, want methodValueRoot", got)
 	}
-	if got := methodValueReferenceSitesIn(namedFunction(t, bypassFile, "directRoot"), "runShadow", "bypass.go"); len(got) != 0 {
+	if got := methodValueReferenceSitesIn(namedFunction(t, bypassFile, "directRoot"), "runDetached", "bypass.go"); len(got) != 0 {
 		t.Errorf("root direct method control = %v, want none", got)
 	}
 }

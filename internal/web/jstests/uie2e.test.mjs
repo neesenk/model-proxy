@@ -126,7 +126,7 @@ test('UI shell boots against the real backend', async (t) => {
 
 test('every tab renders a non-empty panel', async (t) => {
   if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
-  for (const name of ['requests', 'security', 'analytics', 'config', 'accounts', 'takeover', 'eval', 'status']) {
+  for (const name of ['requests', 'security', 'analytics', 'config', 'accounts', 'takeover', 'status']) {
     await ctx.ev(`document.querySelector('[data-tab="${name}"]').click()`);
     await ctx.waitFor(`#tab-${name} active`, () => ctx.ev(
       `document.getElementById('tab-${name}').classList.contains('active')`));
@@ -1356,16 +1356,6 @@ test('takeover 模板编辑器：preset 查看/覆盖/校验拒绝/删除恢复 
     return r.ok && (await r.json()).source === 'preset';
   });
   assert.deepEqual(await ctx.pageErrors(), [], 'template editor flow must not raise JS errors');
-});
-
-test('eval 页渲染 shadow report 与 fusion 空态 (渲染族)', async (t) => {
-  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
-  await ctx.ev(`document.querySelector('[data-tab="eval"]').click()`);
-  await ctx.waitFor('shadow card empty hint', () => ctx.ev(
-    `document.getElementById('tab-eval').innerHTML.includes('No shadow pairs')`));
-  await ctx.waitFor('fusion card empty hint', () => ctx.ev(
-    `document.getElementById('tab-eval').innerHTML.includes('No fusion workflows')`));
-  assert.deepEqual(await ctx.pageErrors(), [], 'eval tab must not raise JS errors');
 });
 
 test('请求详情 replay 条：常规下拉 + 按模型过滤 + 可读渲染 (mutation 族)', async (t) => {

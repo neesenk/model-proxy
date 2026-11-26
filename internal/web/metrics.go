@@ -14,7 +14,7 @@ import (
 // version 0.0.4) of the per-provider counter snapshot. Series are derived from
 // the same detached Dashboard snapshot as /api/status (no new lock surface;
 // the read view owns Proxy lock discipline). Virtual counter keys (guard,
-// attempts, fusion, routing) surface as ordinary providers, matching their
+// attempts, routing and legacy fusion) surface as ordinary providers, matching their
 // /api/stats semantics. guardBrowserOrigin applies: scrapers send no browser
 // identity headers and pass untouched.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {

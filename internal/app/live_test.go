@@ -710,52 +710,9 @@ func TestLiveEvents_EarlyFailures(t *testing.T) {
 	expectEnd(`{"model":"ghost","input":[]}`, http.StatusBadGateway)
 }
 
-// TestLiveEvents_CacheHitAndAllFailed (F6c): the two live-view blind spots — a
-// cache hit (returns before the normal start event) and an all-targets-failed
-// 502 — each emit an explicit end event. Without this, a retry-looping agent
-// served from cache or always 502-ing is invisible to the live monitor.
-func TestLiveEvents_CacheHitAndAllFailed(t *testing.T) {
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		w.Write([]byte(`{"ok":true}`))
-	}))
-	defer up.Close()
-
-	mk := func(routes map[string][]configdomain.RouteTarget, cache bool) *Proxy {
-		cfg := &configdomain.Config{
-			Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
-			Routes:    routes,
-		}
-		if cache {
-			cfg.Cache = configdomain.CacheConfig{Enabled: true, TTL: "1h"}
-		}
-		p := newTestProxy(t, cfg)
-		p.providers["z"] = &testProv{key: "k"}
-		return p
-	}
-
-	// Cache hit → end event with Provider "(cache)".
-	pc := mk(map[string][]configdomain.RouteTarget{"glm": {{Provider: "z", Model: "glm"}}}, true)
-	ch, _, cancel := pc.events.Subscribe()
-	defer cancel()
-	pxc := httptest.NewServer(http.HandlerFunc(pc.Handler))
-	defer pxc.Close()
-	postOK(t, pxc.URL+"/v1/responses", `{"model":"glm","input":[]}`) // prime
-	postOK(t, pxc.URL+"/v1/responses", `{"model":"glm","input":[]}`) // cache hit
-	gotCache := false
-	deadline := time.After(time.Second)
-	for !gotCache {
-		select {
-		case e := <-ch:
-			if e.Type == "end" && e.Provider == "(cache)" {
-				gotCache = true
-			}
-		case <-deadline:
-			t.Fatal("cache hit did not emit a live end event with provider (cache)")
-		}
-	}
-
-	// All-failed 502 → end event with Status 502.
+// TestLiveEvents_AllFailed: an all-targets-failed 502 emits an explicit end
+// event even though no upstream attempt commits.
+func TestLiveEvents_AllFailed(t *testing.T) {
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{"dead": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: testProviderID}},
 		Routes:    map[string][]configdomain.RouteTarget{"glm": {{Provider: "dead", Model: "glm"}}},

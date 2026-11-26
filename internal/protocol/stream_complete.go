@@ -15,8 +15,7 @@ import (
 //
 // A stream carrying a terminal error frame (anthropic error event, openai
 // error chunk, response.failed) is never complete. Callers must treat
-// incomplete streams as truncated responses: safe to deliver (the bytes are
-// what the upstream sent), never safe to cache for replay.
+// incomplete streams as truncated responses: the bytes may be delivered, but the stream did not reach a successful terminal sequence.
 func StreamTerminalComplete(proto Protocol, body []byte) bool {
 	events, err := parseWireSSE(body)
 	if err != nil || len(events) == 0 {

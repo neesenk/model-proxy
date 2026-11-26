@@ -10,7 +10,7 @@ import (
 
 const (
 	// recentModelCap is the capacity of the model-side ring: every event
-	// that is not protocol "mcp" (LLM protocol paths, guard/budget signals,
+	// that is not protocol "mcp" (LLM protocol paths, guard signals,
 	// standalone events). Streaming responses emit progress events (~1 per
 	// 16 KiB), so the model ring needs the larger budget.
 	recentModelCap = 2000
@@ -30,12 +30,10 @@ const (
 // Event is one request lifecycle event. Type "start" fires when a request
 // enters forwarding; "end" fires when it commits or terminates early; "guard"
 // fires when the outbound secret scan hits (Detail then carries the pattern
-// type names and the configured action — never the matched content); "budget"
-// fires when a configured monthly cost budget crosses (Detail carries the
-// JSON {scope, month, threshold_usd, actual_usd} payload); "progress" fires
-// as the committed upstream response body streams to the client.
+// type names and the configured action — never the matched content); "progress"
+// fires as the committed upstream response body streams to the client.
 type Event struct {
-	Type      string `json:"type"` // "start" | "end" | "guard" | "budget" | "progress"
+	Type      string `json:"type"` // "start" | "end" | "guard" | "progress"
 	Ts        int64  `json:"ts"`   // unix milliseconds
 	RequestID string `json:"request_id"`
 	// SessionID is the client session id resolved from the configured header

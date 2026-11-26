@@ -483,14 +483,14 @@ export function sumItemHTML(k, state, v) {
 // configSummaryHTML renders the Config tab's Summary card body: a KPI tile
 // row (the shared .kpi-grid/.kpi headline-metrics component) for listen /
 // providers / routes, then a .sum-grid overview of the feature blocks from
-// the settings projection (log / request_log / stats / cache / guard) plus
+// the settings projection (log / request_log / stats / guard) plus
 // the MCP gateway surface (GET /api/mcp, passed as `mcp`; null when that
 // fetch failed — the item then renders '—' without a state badge rather
 // than claiming the gateway is off). Absent scalar keys show the code
 // default marked "(default)" — the same convention the settings form's
 // placeholders use; log_level/log_file arrive loader-filled, so they never
 // carry the marker. The fallback default literals here (log file, stats.db,
-// request dir, cache ttl/entries) mirror the loader's Go defaults
+// request dir) mirror the loader's Go defaults
 // (internal/config) — Go is authoritative; keep them in sync when a default
 // changes. On/off blocks carry a badge (state is always a badge,
 // per the design contract).
@@ -509,7 +509,6 @@ export function configSummaryHTML(cfg, mcp) {
   const item = sumItemHTML;
   const rl = settings.request_log || {};
   const st = settings.stats || {};
-  const cache = settings.cache || {};
   const g = settings.guard || {};
   const mcpServers = (mcp && mcp.servers) || [];
   const mcpRoutes = (mcp && mcp.routes) || [];
@@ -523,7 +522,6 @@ export function configSummaryHTML(cfg, mcp) {
     item('log', '', `${settings.log_level || 'info'} → ${settings.log_file || '/tmp/model-proxy.log'}`) +
     item('request_log', rl.enabled ? 'on' : 'off', rl.enabled ? eff(rl.dir, '~/.model-proxy/log/requests') : '—') +
     item('stats', '', eff(st.db_path, '~/.model-proxy/stats.db')) +
-    item('cache', cache.enabled ? 'on' : 'off', cache.enabled ? `ttl ${eff(cache.ttl, '10m')} · max ${cache.max_entries || 1000} entries` : '—') +
     item('guard', '', `secrets ${g.secrets || 'log'} · paths ${g.paths || 'log'} · known ${onoff(g.known_secrets)} · decode ${onoff(g.decode)}`) +
     item('mcp', mcp ? (mcpConfigured ? 'on' : 'off') : '', mcpConfigured
       ? `${mcpEnabled(mcpServers)}/${mcpServers.length} servers · ${mcpEnabled(mcpRoutes)}/${mcpRoutes.length} routes enabled`
@@ -771,19 +769,6 @@ export function providerModelsEditorHTML(name, models, alias) {
       <div class="msg" id="pmm-msg"></div>
     </div>
   </form>`;
-}
-
-// cacheHitRate derives the exact-response cache hit rate (GET /api/status
-// cache counters) as a percentage string. "—" when no lookups were recorded
-// yet (hits + misses == 0) so a fresh daemon does not render a fake 0.0%.
-// Non-numeric inputs normalize to 0, matching fmtNum's tolerance.
-export function cacheHitRate(hits, misses) {
-  const h = Number(hits || 0);
-  const m = Number(misses || 0);
-  if (!Number.isFinite(h) || !Number.isFinite(m)) return '—';
-  const total = h + m;
-  if (total <= 0) return '—';
-  return (100 * h / total).toFixed(1) + '%';
 }
 
 // providerCapsSummary folds one modelCapMatrix entry into the counts the
@@ -2428,7 +2413,6 @@ export function sessionHealthSummary(rows) {
   let output = 0, genMs = 0;
   for (const r of list) {
     if (!(Number.isFinite(r.latencyMs) && r.latencyMs > 0)) continue;
-    if (r.provider === '(cache)') continue;
     let win = Number.isFinite(r.ttftMs) && r.ttftMs > 0 && r.ttftMs < r.latencyMs ? r.latencyMs - r.ttftMs : r.latencyMs;
     if (r.output > 0 && win > 0 && r.output / (win / 1000) > 2000) win = r.latencyMs;
     output += r.output || 0;
@@ -4626,19 +4610,6 @@ export function takeoverRestoreSummary(res) {
   if (skipped.length) parts.push('skipped (no backup): ' + skipped.map(esc).join(', '));
   if (!parts.length) return 'nothing to restore';
   return parts.join(' · ');
-}
-
-// ---------- Eval tab (shadow report + fusion) ----------
-
-// shadowMatchBadge renders the status-match rate (0..1) of a primary/shadow
-// route pair: ≥99% ok, ≥95% warn, below err, missing muted.
-export function shadowMatchBadge(rate) {
-  if (rate == null) return '<span class="badge muted">—</span>';
-  const n = Number(rate);
-  if (!Number.isFinite(n)) return '<span class="badge muted">—</span>';
-  const pct = n * 100;
-  const cls = pct >= 99 ? 'ok' : pct >= 95 ? 'warn' : 'err';
-  return `<span class="badge ${cls}">${pct.toFixed(1)}%</span>`;
 }
 
 // ---------- MCP Analytics sub-tab ----------

@@ -311,7 +311,7 @@ func (p *Proxy) runWireProbePass() {
 }
 
 // resolvedBackendProto determines the backend protocol for a route target (or
-// a fusion/shadow leg): the declared `protocol:`, else the provider's
+// a decisions leg): the declared `protocol:`, else the provider's
 // ProtocolHint (codex→responses), else the MODEL-level capability verdict,
 // else the provider-level wire probe verdict, else the client's protocol
 // (byte-level passthrough). provName may be a pool virtual ("name#<id>") —

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/rand"
 	"model-proxy/internal/appapi"
 	configdomain "model-proxy/internal/config"
 	obscounters "model-proxy/internal/observe/counters"
@@ -27,11 +26,10 @@ func TestAPITokensWindowSelector(t *testing.T) {
 	minute := time.Now().Unix() / 60 * 60
 	p := &Proxy{
 		processServices: processServices{
-			evalRand: rand.Float64,
-			metrics:  obscounters.NewMetricsStore(),
-			tokens:   obscounters.NewTokenCounter(),
-			agents:   obscounters.NewAgentCounter(),
-			stats:    newTestStatsStore(t),
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
+			agents:  obscounters.NewAgentCounter(),
+			stats:   newTestStatsStore(t),
 		},
 	}
 	// Persisted history: one bucket inside the 1h window, one far outside it.
@@ -135,11 +133,10 @@ func TestAPITokensClosedRange(t *testing.T) {
 
 	p := &Proxy{
 		processServices: processServices{
-			evalRand: rand.Float64,
-			metrics:  obscounters.NewMetricsStore(),
-			tokens:   obscounters.NewTokenCounter(),
-			agents:   obscounters.NewAgentCounter(),
-			stats:    newTestStatsStore(t),
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
+			agents:  obscounters.NewAgentCounter(),
+			stats:   newTestStatsStore(t),
 		},
 	}
 	flush := func(minute int64, input uint64) {
@@ -194,10 +191,9 @@ func TestAPITokensClosedRange(t *testing.T) {
 func TestAPIStatsHandler(t *testing.T) {
 	p := &Proxy{
 		processServices: processServices{
-			evalRand: rand.Float64,
-			metrics:  obscounters.NewMetricsStore(),
-			tokens:   obscounters.NewTokenCounter(),
-			stats:    newTestStatsStore(t),
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
+			stats:   newTestStatsStore(t),
 		},
 	}
 	minute := time.Now().Unix() / 60 * 60
@@ -290,9 +286,8 @@ func TestAPIStatsHandler(t *testing.T) {
 	nilMux := http.NewServeMux()
 	NewWebServer(&Proxy{
 		processServices: processServices{
-			evalRand: rand.Float64,
-			metrics:  obscounters.NewMetricsStore(),
-			tokens:   obscounters.NewTokenCounter(),
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
 		},
 	}, "test-config.yaml").Register(nilMux)
 	nilRecorder := httptest.NewRecorder()
@@ -317,10 +312,9 @@ func TestAPIStatsHandler(t *testing.T) {
 	closedMux := http.NewServeMux()
 	NewWebServer(&Proxy{
 		processServices: processServices{
-			evalRand: rand.Float64,
-			metrics:  obscounters.NewMetricsStore(),
-			tokens:   obscounters.NewTokenCounter(),
-			stats:    closedStore,
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
+			stats:   closedStore,
 		},
 	}, "test-config.yaml").Register(closedMux)
 	closedRecorder := httptest.NewRecorder()
@@ -354,10 +348,9 @@ func TestAPIAgentsHandlerFiltersAggregatesAndReportsStoreStates(t *testing.T) {
 
 	proxy := &Proxy{
 		processServices: processServices{
-			evalRand: rand.Float64,
-			metrics:  obscounters.NewMetricsStore(),
-			tokens:   obscounters.NewTokenCounter(),
-			stats:    store,
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
+			stats:   store,
 		},
 	}
 	mux := http.NewServeMux()
@@ -398,9 +391,8 @@ func TestAPIAgentsHandlerFiltersAggregatesAndReportsStoreStates(t *testing.T) {
 	nilMux := http.NewServeMux()
 	NewWebServer(&Proxy{
 		processServices: processServices{
-			evalRand: rand.Float64,
-			metrics:  obscounters.NewMetricsStore(),
-			tokens:   obscounters.NewTokenCounter(),
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
 		},
 	}, "test-config.yaml").Register(nilMux)
 	nilRecorder := httptest.NewRecorder()
@@ -430,10 +422,9 @@ func TestAPIAgentsHandlerFiltersAggregatesAndReportsStoreStates(t *testing.T) {
 	closedMux := http.NewServeMux()
 	NewWebServer(&Proxy{
 		processServices: processServices{
-			evalRand: rand.Float64,
-			metrics:  obscounters.NewMetricsStore(),
-			tokens:   obscounters.NewTokenCounter(),
-			stats:    closedStore,
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
+			stats:   closedStore,
 		},
 	}, "test-config.yaml").Register(closedMux)
 	closedRecorder := httptest.NewRecorder()
@@ -447,10 +438,9 @@ func TestAPIAgentsHandlerFiltersAggregatesAndReportsStoreStates(t *testing.T) {
 func TestAPIAnalyticsHandler(t *testing.T) {
 	p := &Proxy{
 		processServices: processServices{
-			evalRand: rand.Float64,
-			metrics:  obscounters.NewMetricsStore(),
-			tokens:   obscounters.NewTokenCounter(),
-			stats:    newTestStatsStore(t),
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
+			stats:   newTestStatsStore(t),
 			// pricing: nil → resolver falls back to unpriced (cost null), proving the
 			// handler never fabricates a price and never panics on a nil catalog.
 		},
@@ -706,9 +696,8 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 	nilMux := http.NewServeMux()
 	NewWebServer(&Proxy{
 		processServices: processServices{
-			evalRand: rand.Float64,
-			metrics:  obscounters.NewMetricsStore(),
-			tokens:   obscounters.NewTokenCounter(),
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
 		},
 	}, "test-config.yaml").Register(nilMux)
 	nilRecorder := httptest.NewRecorder()
@@ -733,10 +722,9 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 	closedMux := http.NewServeMux()
 	NewWebServer(&Proxy{
 		processServices: processServices{
-			evalRand: rand.Float64,
-			metrics:  obscounters.NewMetricsStore(),
-			tokens:   obscounters.NewTokenCounter(),
-			stats:    closedStore,
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
+			stats:   closedStore,
 		},
 	}, "test-config.yaml").Register(closedMux)
 	closedRecorder := httptest.NewRecorder()
@@ -773,10 +761,9 @@ func TestAPIAnalyticsUsesCatalogThenDetachedOverride(t *testing.T) {
 			}},
 		},
 		processServices: processServices{
-			evalRand: rand.Float64,
-			metrics:  obscounters.NewMetricsStore(),
-			tokens:   obscounters.NewTokenCounter(),
-			stats:    newTestStatsStore(t),
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
+			stats:   newTestStatsStore(t),
 		},
 	}
 	minute := time.Now().Unix() / 60 * 60
@@ -871,9 +858,8 @@ func TestAPIAnalyticsUsesCatalogThenDetachedOverride(t *testing.T) {
 func TestAPIMCPAnalyticsHandler(t *testing.T) {
 	p := &Proxy{
 		processServices: processServices{
-			evalRand: rand.Float64,
-			metrics:  obscounters.NewMetricsStore(),
-			stats:    newTestStatsStore(t),
+			metrics: obscounters.NewMetricsStore(),
+			stats:   newTestStatsStore(t),
 		},
 	}
 	base := time.Date(2026, 9, 20, 0, 0, 0, 0, time.Local).Unix()
@@ -1029,9 +1015,8 @@ func TestAPIMCPAnalyticsHandler(t *testing.T) {
 func TestAPIMCPAnalyticsFromZeroIncludesMCPHistoryPredatingLLM(t *testing.T) {
 	p := &Proxy{
 		processServices: processServices{
-			evalRand: rand.Float64,
-			metrics:  obscounters.NewMetricsStore(),
-			stats:    newTestStatsStore(t),
+			metrics: obscounters.NewMetricsStore(),
+			stats:   newTestStatsStore(t),
 		},
 	}
 	base := time.Date(2026, 9, 20, 0, 0, 0, 0, time.Local).Unix()

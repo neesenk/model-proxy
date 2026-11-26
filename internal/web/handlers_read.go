@@ -33,7 +33,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	v := s.reads.Dashboard(time.Now())
 	// credential_alerts: nil renders as null, matching the absent-warnings
 	// convention; the UI treats null and [] identically.
-	writeJSON(w, http.StatusOK, map[string]any{"uptime": v.Uptime, "version": s.version, "listen": v.Listen, "health": v.Health, "model_locks": v.ModelLocks, "quota": v.Quota, "schedule": v.Schedule, "counters": v.Counters, "cache": v.Cache, "warnings": v.Warnings, "credential_alerts": v.CredentialAlerts, "credential_store": v.CredentialStore})
+	writeJSON(w, http.StatusOK, map[string]any{"uptime": v.Uptime, "version": s.version, "listen": v.Listen, "health": v.Health, "model_locks": v.ModelLocks, "quota": v.Quota, "schedule": v.Schedule, "counters": v.Counters, "warnings": v.Warnings, "credential_alerts": v.CredentialAlerts, "credential_store": v.CredentialStore})
 }
 
 // handleSessions serves GET /api/sessions: per-session aggregates (span,
@@ -56,8 +56,8 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	if limit > 200 {
 		limit = 200
 	}
-	// Same cost path as analytics and the budget watcher: config overrides
-	// first, then the cached catalog, then the provider alias; unpriced
+	// Same cost path as analytics: config overrides first, then the cached
+	// catalog, then the provider alias; unpriced
 	// models contribute nothing.
 	snapshot := s.reads.Pricing()
 	costOf := func(provider, model string, usage requestlog.Usage) float64 {
@@ -485,26 +485,6 @@ func (s *Server) handleSecurityExplain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) handleShadowReport(w http.ResponseWriter, r *http.Request) {
-	dir := s.reads.RequestLogDirectory()
-	if dir == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "entries": []any{}})
-		return
-	}
-	from, to := statsWindow(r.URL.Query(), 24*time.Hour)
-	entries, err := s.reads.RequestLogQueries().ShadowReport(requestlog.Filter{From: time.Unix(from, 0), To: time.Unix(to, 0), Limit: 10000})
-	if err != nil {
-		writeJSONErr(w, http.StatusInternalServerError, "shadow report: "+err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "entries": entries})
-}
-
-func (s *Server) handleFusion(w http.ResponseWriter, r *http.Request) {
-	stats, runs := s.reads.Fusion(r.URL.Query().Get("workflow"), time.Now())
-	writeJSON(w, http.StatusOK, map[string]any{"workflows": stats, "runs": runs})
 }
 
 func (s *Server) handlePinList(w http.ResponseWriter, _ *http.Request) {

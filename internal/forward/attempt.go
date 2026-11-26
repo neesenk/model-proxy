@@ -34,10 +34,10 @@ type LogCtx struct {
 	Profile *targetexec.RequestProfile
 }
 
-// newTargetAttempt is the single assembly point shared by normal routing and
-// Fusion synthesis. Request rewriting, state expansion, and protocol conversion
-// deliberately remain outside this factory because those operations have
-// caller-specific semantics and may fail before an attempt can be executed.
+// newTargetAttempt is the single target-execution assembly point. Request
+// rewriting, state expansion, and protocol conversion deliberately remain
+// outside this factory because those operations have caller-specific semantics
+// and may fail before an attempt can be executed.
 func newTargetAttempt(
 	runtime Snapshot,
 	plan targetexec.Plan,
@@ -53,7 +53,6 @@ func newTargetAttempt(
 		targetexec.Runtime{
 			Scheduling: scheduling,
 			Generation: runtime.Generation,
-			Cache:      runtime.Cache,
 		},
 		plan,
 		exchange,

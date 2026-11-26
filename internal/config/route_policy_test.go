@@ -128,11 +128,6 @@ func TestRoutePolicyRejectsInvalidShapes(t *testing.T) {
 			doc:  "route_policy:\n  tier:\n    bands:\n      - when: {follow_up: true}\n        target: {provider: zhipu, model: glm-5.3, protocol: openai}\n",
 			want: "declare protocol: on the route target instead",
 		},
-		{
-			name: "missing fusion recipe",
-			doc:  "route_policy:\n  tier:\n    bands:\n      - when: {follow_up: false}\n        target: fusion/nope\n",
-			want: `fusion recipe "nope" not defined`,
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,26 +139,6 @@ func TestRoutePolicyRejectsInvalidShapes(t *testing.T) {
 				t.Fatalf("error = %v, want substring %q", err, tc.want)
 			}
 		})
-	}
-}
-
-// TestRoutePolicyAcceptsFusionBandTarget pins the slice-4 contract: a band may
-// name a fusion recipe, which the pipeline dispatches like any other fusion
-// route target.
-func TestRoutePolicyAcceptsFusionBandTarget(t *testing.T) {
-	_, err := LoadConfigFromBytes("x", []byte(routePolicyBase+`
-fusion:
-  hard:
-    panel: [zhipu/glm-5.3, zhipu/glm-5.3-flash]
-    synthesizer: zhipu/glm-5.3
-route_policy:
-  tier:
-    bands:
-      - when: {estimated_tokens_min: 60000}
-        target: fusion/hard
-`))
-	if err != nil {
-		t.Fatalf("load: %v", err)
 	}
 }
 
@@ -304,32 +279,6 @@ func TestRoutePolicySelectorRejectsInvalidShapes(t *testing.T) {
 			want: `confidence 1.5 out of range [0, 1]`,
 		},
 		{
-			name: "direct_score_max non-zero",
-			doc: `route_policy:
-  tier:
-    bands:
-      - when: {has_image: true}
-        target: zhipu/glm-5.3
-    selector:
-      target: {provider: typesafe, model: jev-1.13.0, protocol: decisions}
-      direct_score_max: 2
-`,
-			want: `direct_score_max 2 is fusion-only and must be 0`,
-		},
-		{
-			name: "panel_top_k non-zero",
-			doc: `route_policy:
-  tier:
-    bands:
-      - when: {has_image: true}
-        target: zhipu/glm-5.3
-    selector:
-      target: {provider: typesafe, model: jev-1.13.0, protocol: decisions}
-      panel_top_k: 1
-`,
-			want: `panel_top_k 1 is fusion-only and must be 0`,
-		},
-		{
 			name: "invalid timeout",
 			doc: `route_policy:
   tier:
@@ -356,16 +305,16 @@ func TestRoutePolicySelectorRejectsInvalidShapes(t *testing.T) {
 			want: `instruction is 4001 runes, max 4000`,
 		},
 		{
-			name: "fusion target rejected",
+			name: "unknown selector provider",
 			doc: `route_policy:
   tier:
     bands:
       - when: {has_image: true}
         target: zhipu/glm-5.3
     selector:
-      target: {provider: fusion, model: hard}
+      target: {provider: ghost, model: hard}
 `,
-			want: `provider "fusion" is not a valid selector target`,
+			want: `provider "ghost" not defined under providers:`,
 		},
 	}
 	for _, tc := range cases {
@@ -696,164 +645,6 @@ func TestRoutePolicyGradesRejectsInvalidShapes(t *testing.T) {
       grade: missing
 `,
 			want: "escalation: grade \"missing\" not declared in grades",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := LoadConfigFromBytes("x", []byte(routePolicyBase+tc.doc))
-			if err == nil {
-				t.Fatalf("expected error containing %q, got nil", tc.want)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("error = %v, want substring %q", err, tc.want)
-			}
-		})
-	}
-}
-
-// TestRoutePolicyEvalLoads pins the eval block parsing and defaults.
-func TestRoutePolicyEvalLoads(t *testing.T) {
-	cfg, err := LoadConfigFromBytes("x", []byte(routePolicyBase+`
-route_policy:
-  tier:
-    grades:
-      fast: [zhipu/glm-5.3-flash]
-      strong: [zhipu/glm-5.3]
-    bands:
-      - when: {follow_up: true}
-        grade: fast
-    eval:
-      sample_rate: 0.1
-      pair: opposite
-      judge: {provider: typesafe, model: jev-1.13.0, protocol: decisions}
-`))
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	eval := cfg.RoutePolicies["tier"].Eval
-	if eval == nil {
-		t.Fatal("eval block not parsed")
-	}
-	if eval.SampleRateValue() != 0.1 {
-		t.Fatalf("sample_rate = %v, want 0.1", eval.SampleRateValue())
-	}
-	if eval.PairMode() != "opposite" {
-		t.Fatalf("pair = %q, want opposite", eval.PairMode())
-	}
-	if eval.Judge.Provider != "typesafe" || eval.Judge.Model != "jev-1.13.0" || eval.Judge.Protocol != "decisions" {
-		t.Fatalf("judge = %+v", eval.Judge)
-	}
-}
-
-// TestRoutePolicyEvalRejectsInvalidShapes covers the eval validation rules.
-func TestRoutePolicyEvalRejectsInvalidShapes(t *testing.T) {
-	cases := []struct {
-		name string
-		doc  string
-		want string
-	}{
-		{
-			name: "eval without grades",
-			doc: `route_policy:
-  tier:
-    bands:
-      - when: {follow_up: true}
-        target: zhipu/glm-5.3
-    eval:
-      judge: {provider: typesafe, model: jev-1.13.0, protocol: decisions}
-`,
-			want: `route_policy "tier" eval: requires grades to be configured`,
-		},
-		{
-			name: "sample_rate too high",
-			doc: `route_policy:
-  tier:
-    grades:
-      fast: [zhipu/glm-5.3-flash]
-      strong: [zhipu/glm-5.3]
-    bands:
-      - when: {follow_up: true}
-        grade: fast
-    eval:
-      sample_rate: 0.9
-      judge: {provider: typesafe, model: jev-1.13.0, protocol: decisions}
-`,
-			want: `sample_rate 0.9 out of range [0, 0.5]`,
-		},
-		{
-			name: "judge missing model",
-			doc: `route_policy:
-  tier:
-    grades:
-      fast: [zhipu/glm-5.3-flash]
-      strong: [zhipu/glm-5.3]
-    bands:
-      - when: {follow_up: true}
-        grade: fast
-    eval:
-      judge: {provider: typesafe, protocol: decisions}
-`,
-			want: `judge must name a provider and a model`,
-		},
-		{
-			name: "judge provider unknown",
-			doc: `route_policy:
-  tier:
-    grades:
-      fast: [zhipu/glm-5.3-flash]
-      strong: [zhipu/glm-5.3]
-    bands:
-      - when: {follow_up: true}
-        grade: fast
-    eval:
-      judge: {provider: nope, model: jev-1.13.0, protocol: decisions}
-`,
-			want: `judge provider "nope" not defined`,
-		},
-		{
-			name: "judge not decisions protocol",
-			doc: `route_policy:
-  tier:
-    grades:
-      fast: [zhipu/glm-5.3-flash]
-      strong: [zhipu/glm-5.3]
-    bands:
-      - when: {follow_up: true}
-        grade: fast
-    eval:
-      judge: {provider: zhipu, model: glm-5.3, protocol: openai}
-`,
-			want: `judge protocol must be decisions`,
-		},
-		{
-			name: "pair grade unknown",
-			doc: `route_policy:
-  tier:
-    grades:
-      fast: [zhipu/glm-5.3-flash]
-      strong: [zhipu/glm-5.3]
-    bands:
-      - when: {follow_up: true}
-        grade: fast
-    eval:
-      pair: grade:missing
-      judge: {provider: typesafe, model: jev-1.13.0, protocol: decisions}
-`,
-			want: `pair grade "missing" not declared`,
-		},
-		{
-			name: "pair opposite needs two grades",
-			doc: `route_policy:
-  tier:
-    grades:
-      fast: [zhipu/glm-5.3-flash]
-    bands:
-      - when: {follow_up: true}
-        grade: fast
-    eval:
-      judge: {provider: typesafe, model: jev-1.13.0, protocol: decisions}
-`,
-			want: `pair=opposite requires at least 2 grades`,
 		},
 	}
 	for _, tc := range cases {

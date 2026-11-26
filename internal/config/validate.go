@@ -108,9 +108,9 @@ func hintSuffix(message string) string {
 var (
 	// "scheduling.quota_poll_interval: invalid duration ..." (duration checks
 	// report the dotted field path at the message start).
-	dottedFieldRe = regexp.MustCompile(`^((?:scheduling|cache|pricing|stats|request_log)\.[a-z_]+):`)
-	// `provider "x": ...` / `route "x" target N: ...` / `shadow "x": ...` etc.
-	sectionKeyRe  = regexp.MustCompile(`^(provider|route|shadow|fusion) "([^"]+)"`)
+	dottedFieldRe = regexp.MustCompile(`^((?:scheduling|pricing|stats|request_log)\.[a-z_]+):`)
+	// `provider "x": ...` / `route "x" target N: ...` etc.
+	sectionKeyRe  = regexp.MustCompile(`^(provider|route) "([^"]+)"`)
 	routeTargetRe = regexp.MustCompile(`^route "[^"]+" target (\d+)`)
 )
 

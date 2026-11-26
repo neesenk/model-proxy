@@ -94,7 +94,7 @@ func (t *anthropicSSEToResponsesSSE) scanError(err error) {
 
 func (t *anthropicSSEToResponsesSSE) streamEnd() {
 	// A message_delta with stop_reason is not enough: the same-protocol
-	// cache gate requires the matching message_stop. Reaching EOF without
+	// terminal-completeness check requires the matching message_stop. Reaching EOF without
 	// it is a truncated stream, not a clean terminal.
 	t.emitFailed("upstream stream terminated before a terminal event")
 	t.done = true

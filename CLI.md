@@ -68,7 +68,7 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
   （Info，两种形态：watcher 已合成终态但未送达、或对端先于上游终态消失而拷贝循环
   因写失败先行退出——两者都是"非上游故障"；上游已送达终态之后的写失败不算中途
   终止、不打行）、调度超时（Warn：终态已送达）、上游流先于终止序列结束
-  （Warn：合成协议原生错误终态交付客户端、永不缓存）、上游自带错误终态结束流
+  （Warn：合成协议原生错误终态交付客户端、不视为成功完整流）、上游自带错误终态结束流
   （Warn：原样转发客户端、不重复合成，行内带单行有界摘录——该应答在 request log
   里是普通 status 200，此行是唯一失败证据）；跨协议转换流（如 zcode：openai 客户端
   读 anthropic 上游）同样逐事件落归因行——client 断开（Info）、调度超时（Warn）、
@@ -76,7 +76,7 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
   进程去重、只记底层错误类别。语义权威与判定边界在
   `docs/architecture/protocol-conversion.md`。request-log 磁盘护栏见
   `request_log.disk_guard`（缺省 enabled/50GiB/95%），契约在
-  `docs/architecture/fusion-shadow-cache.md`。
+  `docs/architecture/observe.md`。
 
 ### 着色
 
@@ -110,7 +110,7 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
 
 `listen` 非 loopback 时 daemon 两个面都要求凭据（`web.auth`，见
 `docs/web-api.md`）。CLI 与 daemon 通信（`status`/`doctor --live`/`schedule`/
-`replay`/`pin`/`shadow report`/`stats`/`models pull`/…）由共享客户端
+`replay`/`pin`/`stats`/`models pull`/…）由共享客户端
 `internal/daemonctl` **自动附带**：命令加载 config 时（`cliframework.LoadCmdConfig`
 → `ApplyProcessConfig`；`doctor` 自管错误处理、单独调用同一接线）读取
 `web.auth.admin_token_file` / `api_keys_file` 的首个 token，按请求路径选择面——
@@ -658,14 +658,6 @@ routes:
   - 已保留：文档/文件、`tool_result` 图片与 `is_error`、Responses `web_search`/`tool_search`、跨协议到 Anthropic 时自动生成的 cache breakpoint。剩余有损项主要是 anthropic↔chat 的 thinking、尚无降级实现的 server tool（如 computer）和 chat `input_audio`。`doctor` 会列出转换路由与剩余有损项。
   - 纯 anthropic 后端可只配 `anthropic_base_url`（provider 校验已放宽为「至少一个 base URL」）。
 
-### `shadow:` （发送配置驱动；聚合报告见 §16 `shadow report`）
-
-```yaml
-shadow:
-  <exposed>: {provider: <P>, model: <M>, protocol: <anthropic|openai>}
-```
-路由每次已交付请求**另发一份**相同 prompt 到 `<P>/<M>`（fire-and-forget，只记录不返回，`request_id` 前缀 `shadow-`）。`protocol` 可选：声明影子后端的协议（默认与请求 body 的协议一致）；不同则 shadow 请求会做对应转换。需 `request_log.enabled`。`replay <id> --to <P>` 见 §15。
-
 ---
 
 ## 8b. `routes [model]` — 路由表查询（离线，不需 daemon）
@@ -1085,34 +1077,7 @@ replay <id> --to <provider> [--config PATH]
 - 记录无 body：`record <ID> has no captured request body`
 - 上游 ≥400：`✗ <BODY_TRUNC_400>`
 
-> 影子评测（shadow，发送由 `shadow:` 配置驱动）：`shadow: {<route>: {provider: <P>, model: <M>}}` 时，路由每次已交付请求会**另发一份**相同 prompt 到 `<P>/<M>`（fire-and-forget），只记录（`request_id` 前缀 `shadow-`，provider 为影子 provider）不返回。在 Requests 页按 provider 过滤即可与主后端并排比较；`GET /api/requests` 另有 `shadow=only|exclude` 参数（仅影子 / 排除影子，空=全部，其它值忽略），Requests 页过滤行有对应下拉，影子行 provider 名后带 `shadow` 徽标。聚合对比报告走 `shadow report` CLI（§16，消费 `GET /api/shadow-report`）。需 `request_log.enabled`。
-
----
-
-## 16. `shadow report` — 影子评测聚合报告（需 daemon + request_log）
-
-```
-shadow report [--from TIME] [--to TIME] [--config PATH]
-```
-
-逻辑（`internal/cli/diag/shadow_report.go` 的 `CmdShadow` -> `CmdShadowReport`）：GET `http://<LISTEN>/api/shadow-report?from=&to=`，渲染按 `shadow-<父id>` 配对样本聚合的主/影子后端对比表（聚合口径见 `docs/web-api.md` 的 `/api/shadow-report` 行）。`--from`/`--to` 原样透传为 query 参数（`MakeURLQuery`；服务端解析惯例同 `/api/stats`）。`CmdShadow` 的子命令分派：无参数 -> stderr `✗ usage: model-proxy shadow report [--from --to --config]` + exit 1；未知子命令 -> stderr `✗ unknown shadow subcommand: <SUB> (try 'report')` + exit 1。
-
-### stdout（表格）
-
-表头：
-```
-ROUTE            PRIMARY      SHADOW       SAMPLES   MATCH   P_LAT   S_LAT    P_BYTES    S_BYTES
-```
-每行 = 一个 (route, primary, shadow) 聚合：ROUTE/PRIMARY/SHADOW 左对齐 16/12/12 列（超出截断到列宽，`%-16.16s` 等）；SAMPLES 右对齐整数；MATCH = `status_match_rate × 100` 的整数百分比（如 `80%`、`42%`）；P_LAT/S_LAT = 平均延迟 `<N>ms`；P_BYTES/S_BYTES = 平均响应大小（`compactNum`，如 `1.5M`/`450k`）。
-
-- request_log 未启用（`enabled:false`）-> stdout `(request logging is off — enable request_log to collect shadow data)` + exit 0。
-- 窗口内无成对样本 -> stdout `(no paired shadow samples in range)` + exit 0（不渲染表格）。
-
-### 失败（stderr `✗ <ERR>` + exit 1）
-
-- 不可达：`cannot reach daemon at <LISTEN>: <ERR>` + 换行 `is `model-proxy serve` running?`
-- 非 200：`daemon returned HTTP <CODE>`
-- 解析失败：`parse response: <ERR>`
+> 历史兼容：旧 request log 可能包含 `shadow:true`、`request_id: shadow-<原id>` 的记录。它们仍可在 Requests 页查看，`GET /api/requests` 继续支持 `shadow=only|exclude` 过滤，但 `replay` 会拒绝这些记录。顶层 Shadow 转发与聚合报告已移除，不再产生新的 Shadow 记录。
 
 ---
 
@@ -1225,22 +1190,7 @@ guard disallow <content-hash> [--config PATH]
 
 ---
 
-## 21. `cache` — 精确响应缓存统计（需 daemon + web.enabled）
-
-`CmdCache`（`internal/cli/status/cache_cmd.go`）GET 运行中 daemon 的 `/api/status`，只取其中的 `cache` 对象（`{enabled,hits,misses,entries,models}`，与 Web UI Status 的 Cache 页卡同一字段）渲染：先四行全局表 `entries (live)` / `hits` / `misses` / `hit rate`，再按 model 的明细表（每行 `MODEL / ENTRIES / HITS / MISSES / HIT RATE`，按 model 名排序；无明细时省略）。
-
-- **hit rate** = `hits/(hits+misses)`，一位小数百分比；`hits+misses == 0`（daemon 刚启动、尚无任何查找）时显示 `—` 而非 `0.0%`（`CacheHitRate`）。
-- **归因口径**：hit/miss 记在**发起查找的请求的 called（exposed）model 名**下；entries 明细是该 model 当前持有的存活条数（live gauge，可小于 misses——失败请求 miss 不落条、TTL 懒过期与容量淘汰会移除条目）。
-- **cache 关闭**（`enabled:false`，缺省即关闭）：打印 `(exact response cache is disabled — set cache.enabled: true in config)` 后 exit 0，不渲染零值表。
-- **`--json`**：原样输出 `{enabled,hits,misses,entries,models}` 缩进 JSON，供脚本解析。
-- **错误路径**（os.Exit(1)，同 `schedule` 语义）：daemon 不可达 → `✗ cannot reach daemon at <LISTEN> …is model-proxy serve running?`；HTTP 非 200 → `✗ daemon returned HTTP <N>`；`/api/status` 404（web.enabled 关闭）→ `✗ web UI endpoints not available — is web.enabled true on the daemon?`；JSON 解析失败 → `✗ parse status response: …`。
-- 计数语义：命中不产生上游调用、不计 provider metrics/agent stats；`hits`/`misses` 只在真实 `Lookup` 时累计（`/debug/route` 预览用 `Peek`，故意不计数）；`POST` 重置统计会同时清零 cache 条目、计数与 per-model 明细。
-
-锁定测试：`internal/cli/status/cache_cmd_test.go`（计数渲染 + 27.8% 命中率、零查找 `—`、per-model 明细表、关闭提示、`--json` 结构含 models、no-daemon 退出码）；`internal/cache/store_test.go`（`TestStorePerModelBreakdown`：归因、排序、空 model 不出行、reset 清明细）。
-
----
-
-## 22. `routing report` — 路由策略离线对账（离线，不需 daemon）
+## 21. `routing report` — 路由策略离线对账（离线，不需 daemon）
 
 ```
 routing report [--route NAME] [--since DUR|TIME] [--retry-window DUR] [--json] [--config PATH]
@@ -1251,7 +1201,7 @@ routing report [--route NAME] [--since DUR|TIME] [--retry-window DUR] [--json] [
 1. **弱标签成功率**：按 (route, grade) 汇总 `ok`（HTTP 200 + response_size>0 + 无错误类 diagnostics）、`no_retry`（同 SessionID+TurnKey 在 retry-window 内无重发）、`no_escalation`（同 SessionID 后续未触发 latch 升级）；三者全过 = `weak_ok`。
 2. **Selector 混淆矩阵**：预测档（`routing.selector.choice`） vs 实际生效档（`routing.grade`），按 difficulty 分桶（low<0.3 / mid<0.7 / high≥0.7），`enforced=true` 与 shadow 分组。
 3. **成本基线**：用 `internal/pricing` 价格表计算实际成本 vs「全走该 route 最贵档」基线，未定价部分列为 `unknown`。
-4. **判定开销**：`route-select-*` / `fusion-select-*` decisions 调用次数、延迟、token 占比。
+4. **判定开销**：`route-select-*` decisions 调用次数、延迟、token 占比。
 
 ### stdout（表格）
 
@@ -1279,12 +1229,12 @@ decision tokens: N (X.XX% of all tokens)
 - 末尾固定打印弱标签偏差免责说明：
   ```
   Note: weak labels are biased — users may not retry even when dissatisfied.
-  Low-confidence / low weak-ok regions should be calibrated with L2 strong labels.
+  Low-confidence / low weak-ok regions should be calibrated with independent labels.
   ```
 
 ### `--json`
 
-原样输出聚合后的结构化 JSON（`routingReport` 结构；字段无 json tag → **PascalCase**：`WeakLabelSummary`、`SelectorMatrix`、`EvalVerdicts`、`Cost`、`Overhead`、`WindowStart`、`WindowEnd` 等）。
+原样输出聚合后的结构化 JSON（`routingReport` 结构；字段无 json tag → **PascalCase**：`WeakLabelSummary`、`SelectorMatrix`、`Cost`、`Overhead`、`WindowStart`、`WindowEnd` 等）。
 
 ### 失败（stderr `✗ <ERR>` + exit 1）
 
@@ -1295,7 +1245,7 @@ decision tokens: N (X.XX% of all tokens)
 
 ---
 
-## 23. `provider` — provider.json store 的增删改（离线写 + daemon 热重载）
+## 22. `provider` — provider.json store 的增删改（离线写 + daemon 热重载）
 
 ```
 provider add <name> --base-url URL [--anthropic-url URL] [--usage-url URL]
@@ -1335,7 +1285,6 @@ stdout/stderr 归属：交互提示与结果走 stdout；✗ 错误走 stderr + 
 - `internal/cli` 的 serve status / stats `render*` 函数均有 httptest 单测锁文案。
 - `internal/provider/*_test.go`：`usage` 展示的 `Provider:` 首行 + 配额窗口标记。
 - `internal/cli/audit/audit_cli_test.go`：`audit` 表格/`--json` 输出、flag 与时间解析错误文案；`internal/cli/doctor/doctor_drift_audit_test.go`：漂移审计记录（host-only detail、当日去重、audit 关闭）。
-- `internal/cli/diag/shadow_report_render_test.go`：`shadow report` 表头/数据列/截断/紧凑数字与 disabled/empty 提示文案；`internal/cli/diag/shadow_report_cmd_test.go`：`--from`/`--to` query 透传（`MakeURLQuery`）。
 - `internal/cli/diag/routing_report_test.go`：`routing report` 弱标签聚合、selector 混淆矩阵、成本基线、判定开销、空窗/无数据路径、`--json` 结构。
 - `internal/cli/status/routes_cmd_test.go`：`routes` 列表/详情/未知模型输出；`internal/cli/help_sync_test.go`：命令注册表 ↔ `-h` 清单/`Help` map/CLI.md 章节/测试子进程分发的双向同步契约；`internal/archtest` 的 `NewApplication` 注册数 ↔ `Commands` 字面量条目数自洽契约（ProcessCommand 均匀绑定 + 流式直绑白名单 `streamBoundCommands`）。
 - `internal/cli/mcpserver/deepseek_test.go`：deepseek-search 工具面、参数契约违规 -32602 且零出站、上游失败 isError 文案、凭据 env 契约；`deepseek_child_test.go`：自孵化子进程端到端（initialize/通知静默/tools/call + `${account.api_key}` 注入键直达 API 的 Authorization）。

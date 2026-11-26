@@ -14,8 +14,7 @@ import (
 // TestForward_AliasResponseModelNormalizationE2E pins the end-to-end contract
 // of a provider-alias route (exposed kimi-k3 → upstream k3): the REQUEST is
 // rewritten to the upstream model, but the RESPONSE's model field is
-// normalized back to the called name on every client-facing path — buffered,
-// streamed, and cache-hit replay.
+// normalized back to the called name on buffered and streamed client paths.
 func TestForward_AliasResponseModelNormalizationE2E(t *testing.T) {
 	hits := 0
 	var upstreamModel string
@@ -43,7 +42,6 @@ func TestForward_AliasResponseModelNormalizationE2E(t *testing.T) {
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]configdomain.RouteTarget{"kimi-k3": {{Provider: "z", Model: "k3"}}},
-		Cache:     configdomain.CacheConfig{Enabled: true, TTL: "1h"},
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["z"] = &testProv{key: "k"}
@@ -77,22 +75,6 @@ func TestForward_AliasResponseModelNormalizationE2E(t *testing.T) {
 	}
 	if upstreamModel != "k3" {
 		t.Errorf("upstream request model = %q, want rewritten k3", upstreamModel)
-	}
-
-	// Cache hit: the replayed bytes carry the called model too, with no
-	// second upstream call.
-	waitUntil(t, "cache entry after first request", func() bool {
-		return p.cache.Stats().Entries == 1
-	})
-	second, header := do(body)
-	if header.Get("x-mp-cache") != "hit" {
-		t.Errorf("second request x-mp-cache = %q, want hit", header.Get("x-mp-cache"))
-	}
-	if hits != 1 {
-		t.Errorf("upstream hits = %d, want 1 (second request served from cache)", hits)
-	}
-	if second != first {
-		t.Errorf("cache-hit body differs:\nfirst:  %s\nsecond: %s", first, second)
 	}
 
 	// Streaming passthrough: every chunk's model is the called name.

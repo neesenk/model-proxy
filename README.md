@@ -6,12 +6,11 @@
 
 - **多上游聚合 + 配额感知调度**：surplus 调度分 / 熔断 / 限频跳过 / 粘性驻留 / 多账号凭据池 + 会话粘性
 - **三协议转发 + 可选协议转换**：同协议字节级透传；路由目标声明 `protocol:` 即可在 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 间转换
-- **decisions 协议（System One）**：第 4 种独立协议 `POST /v1/decisions`（`{model, state, questions}` → typed answers），内置 TypeSafe Jev provider；不可与 chat 协议互转（fail-closed）。可选配给 fusion 做路由判定（selector）
+- **decisions 协议（System One）**：第 4 种独立协议 `POST /v1/decisions`（`{model, state, questions}` → typed answers），内置 TypeSafe Jev provider；不可与 chat 协议互转（fail-closed）。可选配给 route_policy.selector 做路由判定
 - **请求感知路由**：按图片/工具能力过滤目标、超长 prompt 自动改道大上下文模型、上游 400 溢出自动重试一次
 - **可观测性**：Web UI 九个标签页、实时请求监视（SSE）、请求日志查询、延迟（LAT/TTFT）与按 agent 维度的统计
 - **评测工具**：影子评测（真实负载双跑对比后端）、一键重放（replay）、端到端测活（`test` / UI 按钮）
-- **多模型编排（fusion）**：一条路由 fan-out 到多个后端并行生成候选答案，结果汇总模型融合成最终答案——困难问题要最好效果
-- **其他**：精确响应缓存、`pin` 运行期热切换、等价成本分析（OpenRouter 价格）
+- **其他**：`pin` 运行期热切换、等价成本分析（OpenRouter 价格）
 
 ## 架构
 
@@ -26,7 +25,7 @@
 ```
 
 - **Provider 层**（`internal/provider/` 包）：每个上游后端是一个 Provider 实现，封装鉴权、请求改写、登录、用量查询
-- **Routes 层**：routes 自动推导 —— 每个 provider 的 models 按模型名聚合为「对外暴露名 → 一组 `provider/model` 目标」（provider 的 `alias` 可把上游模型改名统一暴露，`priority` 继承 provider 的 priority，lower wins）。调度先看非高峰（provider 的 `peak_hours`），再看 `priority`，失败逐一 failover。claude-* 别名就是普通的显式 `routes:` 条目（全协议生效），或在客户端配置里直接写目标模型名（takeover 模板方式）；请求模型名也支持 `provider/model` 前缀（如 `deepseek/deepseek-v4-pro`）按裸模型路由并钉到该 provider；显式 `routes:` 仅用于覆盖（fusion 目标、`protocol:` 协议转换、特殊排序、`strategy: load_balance` 负载均衡、claude 别名）；调度后还会按请求内容（图片/工具/上下文长度）做请求感知路由。生效表只列有 runnable 账号的 provider（无凭据的 provider 不进调度链、不进 `GET /v1/models`，登录后 reload 自动回归）。查看：`model-proxy routes [model]`（配置真相）/ Web UI Config（配置真相）/ Status Schedule（生效表）
+- **Routes 层**：routes 自动推导 —— 每个 provider 的 models 按模型名聚合为「对外暴露名 → 一组 `provider/model` 目标」（provider 的 `alias` 可把上游模型改名统一暴露，`priority` 继承 provider 的 priority，lower wins）。调度先看非高峰（provider 的 `peak_hours`），再看 `priority`，失败逐一 failover。claude-* 别名就是普通的显式 `routes:` 条目（全协议生效），或在客户端配置里直接写目标模型名（takeover 模板方式）；请求模型名也支持 `provider/model` 前缀（如 `deepseek/deepseek-v4-pro`）按裸模型路由并钉到该 provider；显式 `routes:` 仅用于覆盖（`protocol:` 协议转换、特殊排序、`strategy: load_balance` 负载均衡、claude 别名）；调度后还会按请求内容（图片/工具/上下文长度）做请求感知路由。生效表只列有 runnable 账号的 provider（无凭据的 provider 不进调度链、不进 `GET /v1/models`，登录后 reload 自动回归）。查看：`model-proxy routes [model]`（配置真相）/ Web UI Config（配置真相）/ Status Schedule（生效表）
 - 凭据由 `login <provider>` 管理，不落 config；config `credentials:` 统一选择 apikey 池与 codex/aqp OAuth store 的存储后端（`file` 默认 / `keychain`：秘密值进 OS keychain、池文件只留元数据），env `MP_CRED_STORE` 仅作为 OAuth 侧的显式 override
 
 ## 安装
@@ -69,7 +68,7 @@ log_rotate_max_size: 134217728 # 运行日志(serve.log)轮转上限，copy+trun
 log_rotate_keep: 4             # 轮转归档保留份数（缺省 4）
 # proxy: http://127.0.0.1:7890   # 全局上游代理：http/https/socks5 URL 或 off（强制直连）。
                                # 留空 = 自动链：环境变量(HTTPS_PROXY/HTTP_PROXY/NO_PROXY) → 系统代理 → 直连。
-                               # providers.<name>.proxy_url 可逐 provider 覆盖（作用于转发/fusion/shadow 流量）；
+                               # providers.<name>.proxy_url 可逐 provider 覆盖（作用于转发流量）；
                                # 系统代理由 internal/upstreamproxy 每进程探测一次，自动来源(env/系统)对 loopback 恒绕过，
                                # 显式配置的代理 URL 对 loopback 同样生效；PAC/WPAD 不解析
 
@@ -128,8 +127,6 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 #   enabled: true
 #   ttl: 10m
 #   max_entries: 1000
-# shadow:                   # 影子评测：把某路由的请求异步镜像到候选后端做对比（需 request_log 开启）
-#   glm-5.2: {provider: kimi-code, sample_rate: 0.1, max_concurrent: 4}
 # request_log:              # 请求日志（完整 request/response body，默认关；Requests 页 + replay 的数据源）
 #   enabled: true
 #   dir: ~/.model-proxy/log/requests # 显式设置时需绝对路径（~ 展开）——daemon 可能从任意 CWD 拉起
@@ -165,11 +162,6 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 #     - {name: myvendor_key, regex: '\bmv-[A-Za-z0-9]{32,}', literal: 'mv-'}
 #   extra_paths:            # 自定义敏感路径（字面量）
 #     - ~/.company/secrets
-# budgets:                  # 月度预算告警（默认关；启用需重启）：按 stats 用量 × 价格目录
-#   monthly_usd: 20         # 每分钟核对当月等价成本，越线发 "budget" live event（SSE /api/events），
-#   providers: {zhipu: 5}   # 可选 webhook_url 时附带 POST {scope, month, threshold_usd, actual_usd}
-#                           # （2 次重试，失败只记日志）；providers 条目是该 provider 的独立阈值
-#                           # （覆盖全局）；每 (scope, 月份, 阈值) 每进程只告警一次，重启可能重复
 # mcp:                      # MCP 网关：把远程 MCP 服务挂到 daemon 的 /mcp/<name> 端点，
 #                           # 客户端（.mcp.json / opencode / Codex）指向代理，凭据不出代理
 #   zhipu-search:           # provider 型：复用该 provider 账号池凭据（会话粘单账号，401 轮换一次）
@@ -202,7 +194,7 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 
 > **模型元数据**：`models:` 只填模型名，`context`/`output`/`modalities`/`tool_call` 在运行时从 [models.dev](https://models.dev) 自动补全（缓存于 `~/.model-proxy/models_cache.json`，24h TTL，ETag `304`-aware；`models pull` 强制刷新）。网络、HTTP 或响应解析失败时已有缓存继续可用且不会被覆盖；无可用缓存时 `models pull` 明确报错，普通列表/刷新与 takeover 按原有 best-effort 语义使用保守默认值。匹配不到的模型会在 `takeover` 时告警。`MP_MODELSDEV_URL` 环境变量可覆盖 models.dev 端点（测试/镜像用）。
 >
-> **路由推导**：`routes` 块默认完全不用写。每个 provider `models:` 里列出的模型自动按暴露名聚合成多目标路由（多个 provider 提供同名模型即自动 failover 组），`priority` 继承 provider 的 `priority:`（lower wins），provider 的 `alias:` 可把上游模型改名后统一暴露（如 kimi-code 的 `k3` → `kimi-k3`）：请求体 model 改写为上游名，响应里的 model 字段则归一回暴露名，客户端始终只看到自己调用的名字。显式 `routes:` 仅用于覆盖：fusion 目标、`protocol:` 转换声明、特殊排序。查看生效表：`model-proxy routes [model]`、Web UI Config 页或 `GET /api/config`。
+> **路由推导**：`routes` 块默认完全不用写。每个 provider `models:` 里列出的模型自动按暴露名聚合成多目标路由（多个 provider 提供同名模型即自动 failover 组），`priority` 继承 provider 的 `priority:`（lower wins），provider 的 `alias:` 可把上游模型改名后统一暴露（如 kimi-code 的 `k3` → `kimi-k3`）：请求体 model 改写为上游名，响应里的 model 字段则归一回暴露名，客户端始终只看到自己调用的名字。显式 `routes:` 仅用于覆盖：`protocol:` 转换声明、特殊排序。查看生效表：`model-proxy routes [model]`、Web UI Config 页或 `GET /api/config`。
 
 ## 用法
 
@@ -288,7 +280,7 @@ model-proxy routes [model]         # 查看（自动推导的）路由表：全�
 
 # 调度诊断
 model-proxy schedule               # 查询运行中的 daemon：每 model 当前调度到哪个 provider（GET /debug/schedule）
-model-proxy doctor                 # 离线 config 调度诊断（tier/quota/peak/shadow + dry-run 顺序 + warning）
+model-proxy doctor                 # 离线 config 调度诊断（tier/quota/peak + dry-run 顺序 + warning）
 model-proxy doctor --live          # 实时诊断：连运行中的 daemon 回答“agent 为什么不动”（路由全灭+最早恢复时间 / pin / 配额将尽 / takeover 漂移 / 最近失败）
 
 # 临时钉住路由（排查/对比用，不改 config）
@@ -310,8 +302,7 @@ model-proxy stats --from 1h --to now --provider zhipu   # 时间范围 + 过滤
 model-proxy stats --by-agent       # 按 agent 维度（哪个客户端在烧配额；可叠 --agent/--provider/--model）
 model-proxy stats --json           # 原始 JSON（便于 jq）
 
-# 影子评测与重放（需 request_log.enabled）
-model-proxy shadow report          # 影子聚合对比：样本数/状态一致率/延迟差/大小比
+# 请求重放（需 request_log.enabled）
 model-proxy replay <request_id> --to kimi-code   # 用另一个后端重答热窗内的任意一条请求（含全链失败的）
 model-proxy routing report         # 路由策略离线对账（离线只读 index.db）：弱标签成功率/selector 混淆矩阵/成本基线/判定开销
 model-proxy prune 7               # 一次性清理 request log（只保留最近 7 天；--dry-run 预览；不改 retention 配置）
@@ -329,14 +320,13 @@ model-proxy cache                  # 条目数 / 命中 / 未命中 / 命中率�
 
 ## Web UI
 
-代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。UI 为 v2 设计系统版（语义状态徽章、SVG 图标、亮暗双主题、可缩放字阶）。**默认开启；回环 `listen` 下无鉴权（本地可信，非回环需 `web.auth`，见「网络部署鉴权」）**。十个顶级标签页（Status / Config / Accounts / MCP / Takeover / Eval / Analytics / Requests / Security / Keys，另加 Requests 页内的 Live 实时子视图；Keys 页分配/吊销转发 key、创建时必填 label（为空提示输入，不铸未命名 key）、事后行内改/清 label（`POST /api/keys/<id>/label`，纯元数据），并按 key 统计模型调用量（完整 key 仅创建时显示一次）；Config 页含 Add provider preset 向导：选内置预设 → 合并+热重载 → Accounts 加凭据）。顶栏下方有**全局凭据横幅**：任一账号配额同步报凭据级失败（会话过期 / key 被拒）时在所有标签页常驻提示（session expired 给出对应 `model-proxy login <provider>` 命令；凭据恢复即自动消失，不可手动关闭）；Requests 详情里 failover 腿的失败原因首行也直接显示在 RESULT 区（如 `mint aqp key: HTTP 401: Session expired`），不再是裸 502 空证据：
+代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。UI 为 v2 设计系统版（语义状态徽章、SVG 图标、亮暗双主题、可缩放字阶）。**默认开启；回环 `listen` 下无鉴权（本地可信，非回环需 `web.auth`，见「网络部署鉴权」）**。九个顶级标签页（Status / Config / Accounts / MCP / Takeover / Analytics / Requests / Security / Keys，另加 Requests 页内的 Live 实时子视图；Keys 页分配/吊销转发 key、创建时必填 label（为空提示输入，不铸未命名 key）、事后行内改/清 label（`POST /api/keys/<id>/label`，纯元数据），并按 key 统计模型调用量（完整 key 仅创建时显示一次）；Config 页含 Add provider preset 向导：选内置预设 → 合并+热重载 → Accounts 加凭据）。顶栏下方有**全局凭据横幅**：任一账号配额同步报凭据级失败（会话过期 / key 被拒）时在所有标签页常驻提示（session expired 给出对应 `model-proxy login <provider>` 命令；凭据恢复即自动消失，不可手动关闭）；Requests 详情里 failover 腿的失败原因首行也直接显示在 RESULT 区（如 `mint aqp key: HTTP 401: Session expired`），不再是裸 502 空证据：
 
-- **Status** — 实时面板：Dashboard 小节复用 Analytics 页的卡片与图表，窗口钉死**最近 1 小时 · 按分钟 · 按模型**（KPI chip 行含环比 Δ%，tokens 为四桶直合 in+out+cache 写读、tok/s 为**输出解码速度**（output÷生成时长；代理侧观测口径——body 成流到达＝完整调用−TTFT，整块/缓冲到达回落整通时长，永不虚构，见 `docs/web-api.md` 延迟口径）；+ metric 可切换的半透明柱趋势图 + 排行榜；数据源 `GET /api/analytics?granularity=minute&by=model`，随 Status 页 tick 刷新但至少间隔 30s，图表原地更新）；原 **Model Health** 小节已合并进排行榜——每行带 status 徽标（latency/ttft/tok-s 三维阈值打分 ok/warn/err，tok-s 直读服务端 `totals.tok_sec`），最差维度的颜色也标在对应数值单元格上；另有 uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择、请求计数器（含平均延迟）、观测到的 token 用量（按 provider×model）、按 agent 的用量卡片、响应缓存命中率、日志尾部。Models 小节展示启动期协议探测的每 provider×model 三协议能力矩阵（chat/anthropic/responses 的 yes/no/unknown，数据源 `GET /api/models`；配置中存在但从未得出探测结论的模型〔禁用模型从不探测〕同样列出，协议列显示 not probed，Show All 即与 provider.json 的全量配置集对齐），每行带 Disable/Enable checkbox switch（`POST /api/models/disable`；禁用行默认隐藏，卡片头部 Show All 翻转列出）：禁用后该模型从 `GET /v1/models` 隐藏且不再被调度（多 provider 模型 failover 到剩余目标，全禁用模型终局 404）。卡片头部 **Edit** 打开该 provider 的 models + alias 编辑器（写回 `provider.json` 并热 reload，等价于 providers 迁入 store 之前直接改 config.yaml 的能力）：models 每行一个整体替换，alias 行 = 上游真实模型名 → 对外暴露名（请求改写为上游名、响应归一回暴露名；key 必须在该 provider 的 models 列表内）。状态持久化到 `~/.model-proxy/disabled_models.json`：reload 保留、重启与 `models refresh` 后回种恢复；持久化失败时内存开关照常生效并返回 500 告警（重启会丢这一次）。
+- **Status** — 实时面板：Dashboard 小节复用 Analytics 页的卡片与图表，窗口钉死**最近 1 小时 · 按分钟 · 按模型**（KPI chip 行含环比 Δ%，tokens 为四桶直合 in+out+cache 写读、tok/s 为**输出解码速度**（output÷生成时长；代理侧观测口径——body 成流到达＝完整调用−TTFT，整块/缓冲到达回落整通时长，永不虚构，见 `docs/web-api.md` 延迟口径）；+ metric 可切换的半透明柱趋势图 + 排行榜；数据源 `GET /api/analytics?granularity=minute&by=model`，随 Status 页 tick 刷新但至少间隔 30s，图表原地更新）；原 **Model Health** 小节已合并进排行榜——每行带 status 徽标（latency/ttft/tok-s 三维阈值打分 ok/warn/err，tok-s 直读服务端 `totals.tok_sec`），最差维度的颜色也标在对应数值单元格上；另有 uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择、请求计数器（含平均延迟）、观测到的 token 用量（按 provider×model）、按 agent 的用量卡片、上游 prompt-cache 命中率、日志尾部。Models 小节展示启动期协议探测的每 provider×model 三协议能力矩阵（chat/anthropic/responses 的 yes/no/unknown，数据源 `GET /api/models`；配置中存在但从未得出探测结论的模型〔禁用模型从不探测〕同样列出，协议列显示 not probed，Show All 即与 provider.json 的全量配置集对齐），每行带 Disable/Enable checkbox switch（`POST /api/models/disable`；禁用行默认隐藏，卡片头部 Show All 翻转列出）：禁用后该模型从 `GET /v1/models` 隐藏且不再被调度（多 provider 模型 failover 到剩余目标，全禁用模型终局 404）。卡片头部 **Edit** 打开该 provider 的 models + alias 编辑器（写回 `provider.json` 并热 reload，等价于 providers 迁入 store 之前直接改 config.yaml 的能力）：models 每行一个整体替换，alias 行 = 上游真实模型名 → 对外暴露名（请求改写为上游名、响应归一回暴露名；key 必须在该 provider 的 models 列表内）。状态持久化到 `~/.model-proxy/disabled_models.json`：reload 保留、重启与 `models refresh` 后回种恢复；持久化失败时内存开关照常生效并返回 500 告警（重启会丢这一次）。
 - **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(<configDir>/.model-proxy/back/<base>.<时间戳>.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route`（含 per-route `strategy` 调度策略下拉）/ `guard`，通过 yaml.Node API **保留注释与键序**）+ **Guard rules 编辑器**（`extra_patterns` 行编辑 name/regex/literal、`extra_paths` 行编辑，整表提交走同一 edit 管线；`guard.adjudicate` 有意只留 YAML——内容外发的显式 opt-in）。
 - **Accounts** — 列出每个 provider 的账号（30s 自动刷新；测活/登录等操作进行中自动跳过）（`id` / `label` / `added_at`，aqp/codex 额外显示 email；**响应结构里根本没有 key 字段，secret 不可能被序列化出去**）；apikey 类 provider 可在 UI 添加/删除账号；**每个账号卡片有 Test 按钮**（真实最小请求测活，显示 HTTP 状态 + 延迟），多账号 provider 另有 **Test all**（逐个真实探测出结果矩阵，表头联动启动期三协议探测的模型能力计数，与 Status 页 Models 卡同源）；aqp/codex 走**异步登录**（浏览器完成 SSO / OAuth device flow → UI 轮询直到 `done`/`error`）。**凭据失效可见**：会话过期、key 被吊销、套餐订阅失效、账号被上游停用的账号，卡片 Usage 区块直接提示状态（Session expired / Auth error / No active plan / Account disabled），全局顶栏横幅与 Status 页 Schedule 节点徽标同步常驻，直到凭据恢复——订阅失效与控制台型 provider 的 key 被吊销由转发路径识别（它们的配额查询永远成功，轮询看不到）。
 - **MCP** — MCP 网关管理面，拆成 Servers / Routes / Analytics 三个子标签（hash `#mcp/<sub>`）：servers 卡（Name/On/Transport/Auth/Endpoint/Sessions/Errors/MS + 行内 **Test** 按钮触发 `POST /api/mcp/test` 握手探测——ok/fail 徽章 + serverInfo/延迟 + 工具徽章，超 8 个折叠为计数，结果渲染在该 server 行正下方）与 routes 卡（Name/On/Targets 链/Sessions/Errors/MS）数据源 `GET /api/mcp`，用户触发渲染（tab 激活 / 子标签切换 / Refresh / Test）；**Analytics** 子标签消费 `GET /api/mcp/analytics`（server 级序列 + tool 维度，Server/Tool datalist 过滤、Calls/Errors/Avg ms 指标切换、server 父行 tool 子行的 Summary 表，时间选择器与 Analytics 页同款，Last 1h/Today live 窗口 30s 自动刷新）。配置见上文 `mcp:`/`mcp_routes:` 节。
 - **Takeover** — 客户端接管面（`model-proxy takeover`/`restore` 的 Web 等价物）：列出全部 takeover 模板（族/协议/格式/来源 preset|user/目标文件）与每个客户端的安装/接管/漂移状态（漂移行的 tooltip 给 current→expected 指针）；行内 Takeover/Re-takeover/Restore（已接管行显示 Re-takeover：无需先 Restore 即可同步新增的模型/MCP，幂等保留原始备份；Restore 有确认）、头部 Mode 选择器（unified/split/anthropic/openai/responses，与 CLI `--mode` 同语义）+ Takeover All / Restore All；执行结果（applied 含协议选择理由、skipped、warnings）就地展示。模板编辑器：preset 只读查看、Save As Override 写用户覆盖，user 模板可改可删，New Template 新增客户端——保存先经服务端整集校验（语法 + 多变体族 protocol 约束）才落盘。
-- **Eval** — 评测观测面：Shadow Report 卡（`/api/shadow-report` 24h 窗口：每 route 的 primary vs shadow 状态一致率分档徽章、样本数、双侧延迟与 Δ）与 Fusion 卡（`/api/fusion`：每 workflow 的 runs/quorum/amplification/degraded 汇总 + 最近 runs 逐条 quorum/drafts/legs/judge/synth 状态，leg 详情进悬停 tooltip）。Status→Schedule 卡每个 route 另有 **Test** 按钮（`test <model>` 的行内版：逐 target 真实上游探测，✓/✗ + HTTP 状态 + 延迟就地展示）；Requests 详情展开底部有 **Replay** 条（`replay <id> --to <provider>` 的行内版：一次性 force-provider 重答，响应体折叠懒渲染）；Status→Models 区有 **Refresh Catalog**（`models pull` 的 Web 版，强刷 models.dev 缓存）。
 - **Analytics** — 分析视图：KPI 行（requests/tokens/cost/failures，各带等长前窗环比 Δ%；failures chip 悬停给 failover 尝试/429 限频分解）+ **单张 metric 可切换趋势图**（tokens/cost/requests/**failovers/429s**/errors/latency/ttft/cache，全部半透明柱状；failovers/429s 是重试尝试与上游限频计数、agent 维度禁用（该表无此列）；悬停 tooltip；图例超两行收进 "+N more"；x 轴本地 24h 制、右侧留白）+ 页面最底是**一年 token 用量热力图**（GitHub 贡献图式：周列 × Mon..Sun 行、正方形格子按当日 token 总量五档着色并铺满卡片宽、横轴月份标签居中作参考；固定「12 整月 + 当月至今」窗口，不随工具栏时间/粒度/metric 变化；悬停用与会话时间线同款的浮动 tooltip 给日期 + requests/tokens/cost/err%/延迟，空格子也给日期 + no usage）+ 排行榜表格（err%/avg lat/$ 每 1M tok/cost share，err% 悬停给失败/failover/429 分解；默认按当前 metric 排序，**列头可点击固定排序**（再点切方向、无数据行恒最后）；**点击行下钻到 Requests 页**并带上该 series 的 provider/model（agent 维度再加 agent）过滤）。时间选择器与 Status→Token usage 同款（预设+双月日历），粒度 Auto/Minute/Hour/Day/Week/Month 与窗口跨度联动（小时窗口只剩 Minute）；provider/model/agent 三个 datalist 过滤（`agent=` 在两个维度下都收窄，建议来自窗口内 facet）；By Model / By Agent 切维度；价格来自 OpenRouter 目录或 config `prices:`，未定价显示 `n/a` 并在 cost chip 标记。per-(provider,model) 的 token/请求总量在 Status 页 Token Usage，两页不重复。
 - **Requests** — 请求日志查询（需 `request_log.enabled`）：按 session/agent/model/provider/errors 过滤（Model/MCP 两个流，MCP 流的表格换 Server/Tool/Account 列语义），另有**分钟级时间筛选**（Time 触发器：日历选日期 + Hour/Minute 级联下拉——选到哪级生效到哪级，整天/整小时/单分钟，随 URL hash `time=` 保持、两个流各自记住），表格与 Live 页**同列同渲染器**（time/agent/session/status/model/provider/ms/tokens——含 cache read；bytes 列已移除），点击行展开请求详情（meta 条含**请求画像**：估算 token、是否带图/工具、对话构成 sys/usr/asst/tool 计数——不打开 body 即可看到窗口被什么填满）；**默认渲染人读对话视图**（角色分栏的消息流——user 提示词、assistant 回复、thinking 与工具结果折叠、工具调用与 JSON 工具结果渲染为可读的 `key: value` 文本而非 JSON 语法、token 用量行；请求侧最近 4 轮直读，更早历史折叠零内容、展开即**平铺完整对话**进滚动框按 25 轮分块加载——千轮会话展开 ~35KB 首块秒开，滚动即续），**原始 request/response body 折叠在下方，首次展开时才渲染且 64KB 分块滚动加载**（未点开零开销，多 MB body 不再卡死页面）；影子评测的记录带 `shadow` 徽标。顶部 **session combobox**（可搜索，选项来自 `/api/sessions`）选中后，表格上方渲染与 Live 页**同一实现**的会话视图：汇总 chips（请求数 / input+output / 缓存读写 / 平均延迟 / 错误 / 等价成本 / model、provider）+ 健康度 chips（跨度/活跃时长、p50/p95 延迟、ttft p50、failover 次数、缓存命中率、tok/s、模型分布、shadow 数）+ **Trace 时间线**（条形悬停显示请求摘要与「用户输入 + 模型返回」两段摘录，条形点击**定位到该请求行**——滚动到视野中央、闪烁标记并展开 inline 详情；长会话的表格滚到几百行深时会话视图**悬浮固定**在顶栏下方不跟丢，表头联动钉在悬浮视图正下方）；表格按 `session=` 过滤，仍可与 model/provider/errors 叠加。**过滤器状态随 URL hash 保持**（`#requests/model_all?session=…&agent=…`，MCP 流为 `#requests/mcp_all`，只携带非默认值）：刷新页面或分享链接落在同一视图而不是回到全量列表，浏览器前进/后退在过滤器状态间切换。
 - **Security** — 安全视图（审计记录需 `guard.audit`；30s 自动刷新，交互中自动让位）：顶部 KPI 行（拉黑会话 / verdict 汇总——**三级判定**：high 拦截拉黑、medium 只记录、low 忽略档（仅内存 ring 存活期可见，不进查询库）；判定通道 LLM 用量——真实模型调用次数与 in/out token，缓存命中与在途去重不计费，通道未配置时显示单个 off tile）；**Blocked sessions** 卡列出被拉黑的会话——高 verdict **与精确匹配拦截**（代理自有凭据 known_secret* 家族命中：记录 + 拒绝请求 + 拉黑会话，零误报通道无条件执行）共用同一张表，逐行解除或一键全部解除（持久化跨重启），session 列点击跳转 Requests 会话视图（hash 下钻，Back 返回）；**Rule hits** 卡按规则聚合**全量审计窗口**命中数（所有 kind、整个 30d 保留期，独立加载、不受 Activity 的 kind/时间窗口过滤器影响；审计记录 + 被屏蔽的 low），高频 pattern 规则在判定通道关闭时标 "noisy — adjudicate can suppress" 降噪提示，点击规则行下钻 Activity 到该规则（再点/✕ chip 清除）；**Activity** 合并时间线把审计记录（秘密/路径类型、takeover 漂移）与 AI 判定 verdict 放进同一 feed 新到旧展示——fresh verdict 双写去重（同一事件只显一行，judge 归属随行），被屏蔽的 low verdict 只在这里可见；每行（含 cached 标记的 ai· verdict 行）可 **analyze** 行内展开：按需重扫请求体定位每处命中——LLM 判定块（verdict/判定逻辑/事实依据/模型/cached）在前，命中按规则分组、多处命中编号展示、命中片段在上下文中高亮折行，展开状态在 Refresh/自动刷新后保留（结果页内缓存，不重复请求）；过滤器：kind 与时间窗口（All Time/24h/7d/30d）服务端生效 + Show More 逐级加深（至 1,000 行）、verdict（含 Medium）/规则客户端过滤，全部进 URL hash（刷新/分享保留）。**存储双层**：SQLite 查询库（`security.db`——精确匹配、drift、medium/high、error/skipped 落库并关联原始请求）+ JSONL 全量留痕（含 low，仅供 tail）；旧 JSONL 历史不迁移。精确匹配行直接显示命中凭据的来源（哪个池/账号/字段的 key）与掩码 key 片段；verdict 行直接显示 LLM 的判定逻辑与事实依据原文。带请求的行可点 req 链接下钻原始请求：Requests 页顶部固定展示该请求 + guard 命中高亮定位（explain 重扫）；被拦截的 400 请求同样落 request log 可下钻。全部只展示类型名与路由元数据，匹配内容永不进入查询面（analyze 的片段来自 admin 本可读的 request log，按需重扫、不落盘）。每个客户端会话的 token 等价成本汇总在 `/api/sessions`（Requests 页同源数据）。
@@ -351,7 +341,7 @@ web:
   enabled: false
 ```
 
-JSON 接口在 `/api/*`（`status` / `models` / `logs` / `config` / `accounts`（含 `…/<id>/test`）/ `tokens` / `stats` / `agents` / `analytics` / `sessions` / `requests` / `security` / `shadow-report` / `fusion` / `mcp`（含 `…/test`、`…/analytics`）/ `events` / `pin` / `quota/refresh` / `login/*`）；底层契约（请求/响应 shape、stats 口径）见仓库根目录 `docs/web-api.md`。前端是嵌入式的静态资源（`internal/web/assets/`，`go:embed`），无独立构建步骤。
+JSON 接口在 `/api/*`（`status` / `models` / `logs` / `config` / `accounts`（含 `…/<id>/test`）/ `tokens` / `stats` / `agents` / `analytics` / `sessions` / `requests` / `security` / `mcp`（含 `…/test`、`…/analytics`）/ `events` / `pin` / `quota/refresh` / `login/*`）；底层契约（请求/响应 shape、stats 口径）见仓库根目录 `docs/web-api.md`。前端是嵌入式的静态资源（`internal/web/assets/`，`go:embed`），无独立构建步骤。
 
 ## `serve status`（终端状态面板）
 
@@ -411,10 +401,10 @@ web:
 - 密钥比较 constant-time；文件编辑（换 key/撤销）≤10s 生效，无需重启。
 - 回环部署也可以单独开启任一面（例如本地也想给转发加 key）。
 - **takeover 自动带真实 key**：开启 api_keys 后 takeover 直接把 `api_keys_file` 的首个 key 写入客户端配置（不再是会被 401 的 `PROXY_MANAGED` 占位符；preview 显示面脱敏回占位符）。网关 MCP 条目同路嵌入 `Authorization: Bearer` 头（pi/claude/kimi/zcode/opencode 的 JSON `headers` 字段、codex/stepcode 的 TOML `http_headers`）——`/mcp/*` 与 `/v1/*` 同门禁，MCP 条目无凭据会被 401（部分客户端会误弹「需要 login」）。例外：workbuddy/hermes 的 MCP 条目暂不嵌（schema 未实证支持 header）；codex 的 LLM 凭据不走 `{{token}}`，需按其配置手工带 key（MCP 头不受影响）。
-- **CLI 自动鉴权**：`status`/`doctor --live`/`schedule`/`replay`/`pin`/`shadow report` 等与 daemon 通信的命令按请求面自动附带对应 token（admin token / forward key），无需手工传；`replay` 的回环转发同款。
+- **CLI 自动鉴权**：`status`/`doctor --live`/`schedule`/`replay`/`pin` 等与 daemon 通信的命令按请求面自动附带对应 token（admin token / forward key），无需手工传；`replay` 的回环转发同款。
 - **Tailscale 部署形态**：`listen: 100.x.y.z:PORT`（本机 Tailscale IP）——本机进程连自己的 100.x 地址不出机器，tailnet 内其他设备经加密隧道可达，物理 LAN 不暴露（比 `0.0.0.0` 面更小）；浏览器开 `http://100.x.y.z:PORT/ui/` 输 admin token 建会话。
 
-`GET /metrics` 输出 Prometheus 文本指标（随 `web.enabled`）：`model_proxy_{requests,failures,failovers,rate_limited_429}_total` 与 `model_proxy_{latency,ttft}_milliseconds_sum`，按 `provider` 标签聚合（虚拟键 guard/attempts/fusion/routing 与 `/api/stats` 同语义）。
+`GET /metrics` 输出 Prometheus 文本指标（随 `web.enabled`）：`model_proxy_{requests,failures,failovers,rate_limited_429}_total` 与 `model_proxy_{latency,ttft}_milliseconds_sum`，按 `provider` 标签聚合（虚拟键 guard/attempts/routing 与 `/api/stats` 同语义）。
 
 ## Token 文件
 
@@ -472,15 +462,7 @@ routes:
 
 - **能力过滤**：请求带图片（`image` block / `image_url`）或带 `tools` 时，剔除不支持该能力的目标；全部不匹配则跨路由找支持的模型兜底。models.dev 查不到的 provider（codex/aqp/volcengine）默认按「不支持」保守处理——可用 provider 级 `capabilities:` 手动声明覆盖（见配置节）。
 - **上下文兜底（两道保险）**：① 主动——估算 prompt token（rune 感知，中文按字计、剔除 base64 图片），超过路由最大上下文时自动改道到更大上下文的模型；② 被动——上游返回 context-overflow 类 400 时识别错误形状，用更大上下文的目标**自动重试一次**（找不到更大目标才把 400 原样回给客户端）。
-- **档位策略（`route_policy:`）**：显式声明「什么请求优先走哪个目标/档位」。`bands` 按序求值，第一条全条件命中的 band 把它的目标/档位提到调度顺序**最前**，其余目标仍按原顺序 failover（不是硬选择，也不会把目标清空）；`grades` 把 route 目标拆成命名组，每个 grade 独立过滤，选中 grade 前置后按 `fallback`（`any`/`next_grade`/`strict`）追加其余 grade；`escalation` 提供会话级坏运行计数器，连续 `consecutive` 次终局上游错误后把会话临时钉到强目标/档位；`selector` 用 decisions 模型（如 TypeSafe Jev）按请求内容从当前目标/档位中选择一个前置，shadow 模式只记录，enforce 模式在置信度达标时行动。无 band/latch/selector 命中、无策略、或 pin/`x-mp-force-provider` 生效时，顺序与今天完全一致。信号全部来自一次请求画像扫描：`estimated_tokens_min/max`、`follow_up`（body 已含 assistant 轮次，即会话后续轮）、`has_tools`、`has_image`。band/escalation/selector 目标必须是该 route 已服务的目标（否则永不命中，启动时告警），也可以是 `{provider: fusion, model: <workflow>}`——fusion 因此从「唯一的多模型入口」变成「档位之一」。band-only 的 route 响应缓存语义不变；启用 escalation 或 selector 的 route 绕过响应缓存。详见 `docs/architecture/request-routing.md`。
-
-## 响应缓存
-
-`cache.enabled` 开启后，对**逐字节相同**的请求（SHA-256(method+path+body)）直接重放缓存的原始响应字节（SSE 也逐字节一致），不发上游、不烧配额。命中时响应带 `x-mp-cache: hit` 头，`/api/status` 和 Web UI Status 页展示命中率；`x-mp-force-provider`/pin 生效的请求跳过缓存（保证 replay/pin 语义）。客户端断开的半截响应不会入库。改 `cache.*` 配置 reload 即生效。
-
-**定位是「重试/重复请求盾牌」**：多轮对话 body 逐轮变长，正常会话命中率≈0；前缀复用的经济性由上游 prompt caching 覆盖，精确缓存接住的是客户端原地重试、CI/脚本里的重复单发。
-
-命中/未命中统计跨 reload 和重启保留，reload 仅清空响应条目。Reset counters 只清调用统计（metrics/tokens/agents），**不动**响应缓存的命中/未命中计数（内存与持久化历史都保留）——命中率是运营指标而非用量记账；完整语义见 [缓存统计契约](docs/architecture/fusion-shadow-cache.md#精确响应缓存)。Web 模型 Refresh 支持请求取消，并在并发修改 provider 时返回冲突供重试，见 [模型刷新提交边界](docs/web-api.md#模型刷新提交边界)。
+- **档位策略（`route_policy:`）**：显式声明「什么请求优先走哪个目标/档位」。`bands` 按序求值，第一条全条件命中的 band 把它的目标/档位提到调度顺序**最前**，其余目标仍按原顺序 failover（不是硬选择，也不会把目标清空）；`grades` 把 route 目标拆成命名组，每个 grade 独立过滤，选中 grade 前置后按 `fallback`（`any`/`next_grade`/`strict`）追加其余 grade；`escalation` 提供会话级坏运行计数器，连续 `consecutive` 次终局上游错误后把会话临时钉到强目标/档位；`selector` 用 decisions 模型（如 TypeSafe Jev）按请求内容从当前目标/档位中选择一个前置，shadow 模式只记录，enforce 模式在置信度达标时行动。无 band/latch/selector 命中、无策略、或 pin/`x-mp-force-provider` 生效时，顺序与今天完全一致。信号全部来自一次请求画像扫描：`estimated_tokens_min/max`、`follow_up`（body 已含 assistant 轮次，即会话后续轮）、`has_tools`、`has_image`。band/escalation/selector 目标必须是该 route 已服务的目标（否则永不命中，启动时告警）。详见 `docs/architecture/request-routing.md`。
 
 ## 出站安全扫描与审计（guard）
 
@@ -573,72 +555,6 @@ model-proxy replay 3fa9c2-118 --to kimi-code
 
 配合 Web UI 的 **Requests** 页（找 request_id）和 **Live** 页（实时盯着看），构成完整的本地调试闭环。
 
-## 影子评测
-
-新增后端时不靠猜：`shadow:` 把某路由的真实请求**异步镜像**一份到候选后端，客户端照常收主后端的响应，影子的结果落进请求日志供对比。
-
-```yaml
-shadow:
-  glm-5.2:
-    provider: kimi-code          # 候选后端（可跨协议，自动转换）
-    sample_rate: 0.1             # 采样率（0-1；省略=1.0 全量，显式 0=关闭）。影子烧候选方配额，务必控量
-    max_concurrent: 4            # 并发闸（省略=4）
-```
-
-显式设置 `protocol:` 时，配置加载会同时检查 endpoint：`anthropic` 需要候选
-provider 配置 `anthropic_base_url`，`openai`/`responses` 需要
-`openai_base_url`；缺失时启动或 reload 直接报错，不会运行期静默跳过。
-
-```bash
-model-proxy shadow report        # 近 24h 聚合：每对 (路由, 主, 影子) 的样本数/状态一致率/平均延迟差/响应大小比
-model-proxy shadow report --from 7d
-```
-
-影子请求不污染生产（不进熔断/统计/粘性）；Web UI Requests 页里影子记录带 `shadow` 徽标，点任意一条可用 `replay` 继续深挖。评测维度目前是客观指标（状态/延迟/大小），LLM judge 胜率未做。
-
-## 多模型编排（fusion）
-
-OpenRouter Fusion 式编排：把一条路由的请求**并行发给多个后端（panel）各答一遍**，再由**结果汇总模型（synthesizer）融合候选答案**输出最终结果——中端面板打出接近旗舰的质量，成本只有旗舰的一半量级。对客户端完全透明（就是一次普通请求）。
-
-```yaml
-fusion:
-  hard-coding:                            # 工作流配置名
-    panel:                                # 候选答案生成成员（2-4 个，并行调用）
-      - {provider: zhipu, model: glm-5.2}
-      - {provider: deepseek, model: deepseek-v4-pro}
-      - {provider: kimi-code, model: kimi-k2}
-    synthesizer: {provider: zhipu, model: glm-5.2}   # 用你手里最强的模型做结果汇总
-    min_panel: 2                          # 可选：至少 N 份候选答案才进入汇总（默认 2）
-    max_runs_per_day: 50                  # 可选：当日编排次数上限，超出→降级直打 synthesizer
-    first_turn_only: true                 # 可选：仅单轮会话（无 assistant 消息）才编排
-    judge: {provider: zhipu, model: glm-5.2}   # 可选：汇总前先出「共识/冲突/遗漏」评审报告
-    # instruction: "..."                  # 可选：覆盖内置的结果汇总指令模板
-    # selector:                           # 可选：decisions 模型（如 TypeSafe Jev）路由判定
-    #   target: {provider: typesafe, model: jev-1.13.0, protocol: decisions}
-    #   mode: shadow                      # shadow（默认）只记录不行动 / enforce 按置信度行动
-    #   confidence: 0.55                  # enforce 行动置信度阈值
-    #   direct_score_max: 1.5             # >0：难度 ≤ 它时跳过编排直调选中模型（省 N+1）
-    #   panel_top_k: 2                    # >0：按判定概率把 panel 裁到 top-k（≥quorum）
-    #   timeout: 800ms                    # 判定调用超时（失败一律回退静态全 panel）
-
-# fusion 目标通过显式 routes 暴露（推导不含 fusion）：
-routes:
-  hard-question:
-    - {provider: fusion, model: hard-coding}
-    - {provider: zhipu, model: glm-5.2}   # 可叠普通 target 兜底
-```
-
-工作机制与语义：
-
-- **quorum + grace**：凑够 `min_panel` 份候选答案就进入结果汇总阶段（再留 5 秒等差点完成的调用分支）；凑不齐就用原始请求直打 synthesizer（降级，不报错）。成员挂掉不影响（该成员自己的熔断/限频语义照常）。
-- **工具轮**：带 tools 的请求照常编排——候选答案生成调用只产出文本分析（剥 `tools`/`tool_choice`），结果汇总调用保留 tools，由 synthesizer 输出 tool 调用。
-- **跨协议面板**：成员可带 `protocol:`，请求自动转换（转换层的现成能力）。
-- **代价（要想清楚再用）**：一次请求 = N+1 次上游调用（panel N 次候选生成 + 1 次结果汇总），延迟 ≈ 候选等待 + 汇总首字节。**只给困难路由用，别当默认路由**；多轮长会话建议配 `first_turn_only`（多轮自动降级直打 synthesizer）和 `max_runs_per_day` 控制成本。每家的消耗在 `stats` / Requests 页（`fusion-panel-*` 标记）里都看得见。
-- **编排观测**：`GET /api/fusion?workflow=<名>` 返回按工作流配置的聚合（编排次数/quorum 达成率/按原因的降级计数/候选与汇总 token/放大系数）+ 最近 200 次运行明细（每条调用分支的状态/延迟/token）；`stats --provider fusion` 出时间序列（requests=编排次数，failovers=降级次数）。
-- **judge 评审（可选）**：配 `judge:` 后，结果汇总前先对候选答案做一次「共识/冲突/遗漏」分析，报告注入汇总提示词（LLM-Blender「先排后融」）；judge 调用失败不影响编排。
-- **selector 路由判定（可选，实验）**：配 `selector:` 后，fan-out 前先把「最后一条用户消息 + 请求画像 + 候选 rubric」发给一个 decisions 模型（TypeSafe Jev 等 System One），一次调用并行拿到「最佳模型 choice + 难度 score + 概率 + 置信度」（~70–500ms、约 $0.000014）。`mode: shadow`（默认）只记录判定（`/api/fusion` 的 run.selector 可见），用来攒对账数据；`mode: enforce` 且置信度过阈值时：`direct_score_max` 命中的简单请求**跳过编排直调选中模型**（`selector_direct`，不消耗当日编排预算），`panel_top_k` 按概率裁 panel（永不裁到 quorum 以下）。判定失败/超时/低置信/非法选择一律回退静态全 panel；图片请求跳过判定（Jev 纯文本）。`rubric:` 可写在 panel 成员上给判定模型一句话候选描述。trim 会降低容错（top_k=2+quorum=2 时一个成员挂即降级），默认关闭。
-- **验证收益**：给 fusion 路由配一条 `shadow:` 影子（或反过来），用你自己的真实负载对比「编排 vs 单模型」，别信普遍结论。
-
 ## 调度与熔断（`scheduling`）
 
 每个对外模型可配多个 `provider/model` 目标。代理按下面的规则选目标、失败逐一 failover，并对持续出错的 provider 熔断，避免每请求都去撞一个挂掉的上游：
@@ -646,7 +562,7 @@ routes:
 - **熔断**（超时 / 5xx / 连接错误 / 401 刷新后仍失败 / 账号停用 403 / 套餐订阅失效）：连续 `circuit_threshold`（默认 3）次**且 streak 跨至少 `circuit_persist`（默认 6s，`"0"` 关闭）**→ 开路 `circuit_cooldown`（默认 10m），后半开放 1 个探针请求，成功关、失败再开。开路期间该 provider 被跳过。持续门槛是对外网络噪音容忍：代理链回收/LB 滚动一次杀 N 条在途连接，不应被读成 N 个独立的 provider 死亡证据；单请求的 failover 不受影响、立即发生。
 - **连接快失败重派**：`unexpected EOF`/`EOF`/`connection reset`/`broken pipe`/`connection refused` 这类毫秒级返回的连接错误先在同一 target 重派一次（新连接），成功即吸收（记 success、首跳不记失败），仍失败才计数进熔断并 failover。超时（时间预算已烧掉）与客户端断开不重派；重派不占 401 refresh 的重试名额。
 - **限频跳过**（429，三维分类）：先采纳响应里的精确重置时间（body 文本 "reset after 2h5m"/"Resets in 164h"/RFC3339，上限 7 天），其次 `Retry-After` 头；都没有时按分类退避——日配额锁到本地次日 0 点、配额耗尽（余额/套餐窗口）等 `quota_cooldown`（默认 1h）、普通频率限制等 `rate_limit_backoff`（默认 60s）。不计入熔断。分类（transient/quota/daily）在 `serve status`（`rl:quota`/`rl:daily`）和 Web UI 健康 pill 上可见。
-- **账号级拒绝**（上游 403 / 套餐订阅失效；普通转发，Fusion panel/judge 腿不在此列）：明确的账号停用错误、或错误 message 明说账号没有有效套餐订阅（step-plan 的 400 `you have no active step plan subscription`）计入该账号的熔断并换下一候选——末候选也不例外，回 502 而不透传账号错误；识别出的网关挑战可以换下一候选（末候选保留原始 403），普通权限拒绝保留原响应。分类细节见 `docs/architecture/routing-and-failure.md`。
+- **账号级拒绝**（上游 403 / 套餐订阅失效；普通执行器；decisions selector 腿不在此列）：明确的账号停用错误、或错误 message 明说账号没有有效套餐订阅（step-plan 的 400 `you have no active step plan subscription`）计入该账号的熔断并换下一候选——末候选也不例外，回 502 而不透传账号错误；识别出的网关挑战可以换下一候选（末候选保留原始 403），普通权限拒绝保留原响应。分类细节见 `docs/architecture/routing-and-failure.md`。
 - **模型级锁定**（`model_lockout`，默认 10m）：上游 404（模型被移除）、400/403「模型不可用/无权限」、空 200（`Content-Length: 0` 直接 failover；流式零字节本次难免、下次 failover）→ 只锁 `(provider, model)`，**不毒化整个账号**——同账号的其他模型照常服务。单目标路由的末 target 仍把上游原始错误（404/400）原样回给客户端。
 - **400 自动剥参**：上游 400 报「Unsupported parameter: 'xxx'」时，自动把该顶层参数记入 per-provider blocklist，当次剥离重试一次、后续请求预防性剥离（`model`/`messages` 等关键字段永不剥）。
 - **冻结态持久化 + unfreeze/freeze**：限频/熔断冷却、模型锁、剥参 blocklist 随 `quota_state.json` 落盘，重启后按 config 指纹匹配恢复（防串配置）。异常边界（账号已充值、429 误分类、上游提前重置）用 `model-proxy unfreeze [provider]` 或 Web UI Providers 卡的 unfreeze 按钮立即解冻重试；反向地，`model-proxy freeze <provider>` 或 Providers 卡的 freeze 按钮把 provider 显式冻结（调度排除、无到期、成功/失败记录不解冻，必须指定 provider——无 freeze-all，同样按指纹落盘恢复），直到 unfreeze。
@@ -696,7 +612,7 @@ routes:
 
 - **按会话均摊（保 prompt cache）**：均摊发生在**会话**粒度，不是请求粒度——新会话（客户端 session id）从轮转计数器取下一个可用目标（round-robin，计数器随 reload 重置），之后整个会话粘在该 provider 上（同一套 sliding-dwell `sticky` 机制：每请求刷新活跃时间，空闲超过 `sticky_dwell` 被逐出、回来重新轮转；provider 不可用时 failover 到下一槽位）。对话内上游 prompt cache 亲和与 quota 模式完全一致，新会话则均匀分摊到各目标。无 session id 的客户端退化为逐请求轮转（quota 模式会把全部匿名流量停在同一个 provider 上，那会完全破坏均摊）。
 - **不排序**：忽略 tier/priority/surplus 排序（这正是声明 load_balance 的意义）；失败沿轮转链 failover。会话粘滞优先于配额择优：粘在配额最差的目标上也保持（除非它不可用）。
-- **可用性门控不变**：熔断/限频/模型锁/配额已耗尽的目标照旧跳过；pin、`x-mp-force-provider`、禁用模型覆盖照先生效；请求感知改道（跨 route pool）沿用该 route 的 strategy。代理自身的响应缓存（exact-response cache）按请求内容键控、与 provider 无关，命中在调度之前，不受策略影响。
+- **可用性门控不变**：熔断/限频/模型锁/配额已耗尽的目标照旧跳过；pin、`x-mp-force-provider`、禁用模型覆盖照先生效；请求感知改道（跨 route pool）沿用该 route 的 strategy。
 - 未声明的路由、以及 `strategy: quota`，行为与今天完全一致（零变化）。
 
 设置/查看：Web UI Config 页 Routes 表单的 strategy 下拉（改完即存即 reload），或直接写 YAML；Status→Schedule 卡与 `model-proxy schedule` 对声明了策略的路由标注 `strategy: load_balance`。
@@ -721,13 +637,13 @@ scheduling:
 
 `Quota()` 来源：zhipu/codex/volcengine/aqp → plan tier；deepseek → pay-as-you-go。volcengine 的 `GetAFPUsage` 需 AccessKey/SecretKey（Ark API Key 调不了），未配时该 provider 退化为 `unknown`。
 
-**查看调度**：`model-proxy schedule` 查询运行中的 daemon，显示每个 model 当前调度到哪个 provider（后台接口 `GET /debug/schedule`，含 ordered 列表/sticky 状态）；`model-proxy doctor` 离线诊断 config 的调度设置（每 provider tier/quota/peak + 每路由 dry-run 顺序 + shadow 配置 + warning，不需 daemon）；agent 卡住时用 `model-proxy doctor --live` 连运行中的 daemon 做实时诊断（结论先行：路由全灭原因与最早恢复时间、pin、配额将尽、takeover 漂移、最近失败请求）。
+**查看调度**：`model-proxy schedule` 查询运行中的 daemon，显示每个 model 当前调度到哪个 provider（后台接口 `GET /debug/schedule`，含 ordered 列表/sticky 状态）；`model-proxy doctor` 离线诊断 config 的调度设置（每 provider tier/quota/peak + 每路由 dry-run 顺序 + warning，不需 daemon）；agent 卡住时用 `model-proxy doctor --live` 连运行中的 daemon 做实时诊断（结论先行：路由全灭原因与最早恢复时间、pin、配额将尽、takeover 漂移、最近失败请求）。
 
 ## 添加新 Provider
 
 1. 建 `internal/provider/xxx.go`，实现 Provider 接口（embed `ApiKeyBase`（文件存 API key）+ `baseProbe`（默认探测/过滤行为））。`baseProbe` 默认：探测走 OpenAI `POST /chat/completions`、无专属请求头、候选模型透传。仅当 provider 与此不符时才 override：
    - `ProbeRequest(modelID)` -- 探测请求的 path/body（如 codex 的 `/responses` + Responses API body、aqp 的 `/v1/messages`）
-   - `ExtraHeaders(req, body, sessionID, path)` -- 每次请求（转发 + 探测）都要的专属头（如 aqp 的 `anthropic-version` + `x-compass-request-id`）；`sessionID` 是 forward 从原始请求解析的客户端会话 id（头白名单 → body spec 字段），probe/shadow 等无会话路径为空串，需要会话亲和的 provider（opencode-go/zcode）优先使用它再回落 body 提取
+   - `ExtraHeaders(req, body, sessionID, path)` -- 每次请求（转发 + 探测）都要的专属头（如 aqp 的 `anthropic-version` + `x-compass-request-id`）；`sessionID` 是 forward 从原始请求解析的客户端会话 id（头白名单 → body spec 字段），probe 等无会话路径为空串，需要会话亲和的 provider（opencode-go/zcode）优先使用它再回落 body 提取
    - `FilterModelIDs(ids)` -- `models refresh` 的静态策略过滤（如 volcengine 剔除 `*-latest`/lite/mini）
 2. `init()` 里 `Register("xxx", constructor)`
 3. provider 定义加 `provider_id: xxx`（provider.json store——UI/CLI/presets 均写入；`models refresh` 也写这里）

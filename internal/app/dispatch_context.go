@@ -14,7 +14,7 @@ type RuntimeSnapshot = forward.Snapshot
 // lock. Maps are generation-owned and never mutated in place: reload builds new
 // maps and swaps the pointers, so an in-flight request may safely retain them.
 // This is the single per-request capture point (red line): the forward
-// pipeline, Fusion and Shadow only ever see the frozen struct it returns.
+// pipeline only ever sees the frozen struct it returns.
 func (p *Proxy) SnapshotRuntime() RuntimeSnapshot {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -27,8 +27,6 @@ func (p *Proxy) SnapshotRuntime() RuntimeSnapshot {
 		ExpandedRoutes: p.expandedRoutes,
 		RouteKeys:      p.routeKeys,
 		Catalog:        p.catalog,
-		Cache:          p.cache,
-		Shadow:         p.shadow.Load(),
 		Guard:          p.guardScanner,
 		SecLog:         p.secLog,
 	}

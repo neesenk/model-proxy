@@ -11,7 +11,6 @@ import (
 	"model-proxy/internal/providerstore"
 	"model-proxy/internal/routing"
 	runtimewire "model-proxy/internal/runtime/wirecap"
-	"model-proxy/internal/shadow"
 	"model-proxy/internal/upstreamproxy"
 	"time"
 )
@@ -112,11 +111,6 @@ func (p *Proxy) Reload(configPath string) error {
 	p.routeKeys = routeKeySet(p.expandedRoutes)
 	hw := routing.ConfigRoutingWarnings(cfg, p.expandedRoutes)
 	p.routeWarnings = hw
-	// Rebuild the cache from the new config (pure in-memory, no goroutine/file
-	// lifecycle to drain — safe to swap). cache.enabled toggled via reload now
-	// takes effect immediately. Stores share process-lifetime counters, including
-	// late lookups by old snapshots; only response entries are generation-owned.
-	p.cache = p.newResponseCache(cfg.Cache)
 	// Swap the guard scanner with the same generation: in-flight requests keep
 	// their snapshot's scanner; new requests see the new credential set
 	// (login adds protection, logout drops it, immediately at reload). The
@@ -128,15 +122,6 @@ func (p *Proxy) Reload(configPath string) error {
 	p.applyAuthSources(cfg)
 	p.guardPoolSecrets = built.PoolSecrets
 	p.guardOAuthSecrets = built.OAuthSecrets
-	// Rebuild the shadow dispatch bundle so shadow_sample_rate /
-	// shadow_max_concurrent / client-timeout changes take effect at once — without
-	// this, disabling shadow (sample_rate: 0) keeps firing paid requests until
-	// restart. Swapped atomically; in-flight shadow goroutines finish on the old bundle.
-	p.shadow.Store(shadow.NewRuntime(shadow.Options{
-		SampleRate:    cfg.ShadowSampleRate,
-		MaxConcurrent: cfg.ShadowMaxConcurrent,
-		Timeout:       cfg.Scheduling.Timeout(),
-	}))
 	p.runtimeState.ReplaceGeneration(generation, providerKeySet(p.providers))
 	// Quota snapshots are backend-synced observations, not config-derived
 	// state: they survived the generation swap above as the last-known-good
@@ -291,23 +276,16 @@ func providerKeySet(providers map[string]provider.Provider) map[string]bool {
 // reloading rebuilds the table (login already triggers reload). Same
 // principle as buildProviders' pool rule ("poolIndex never lists an id that
 // isn't runnable"), extended to non-pooled names. Credential-free providers
-// (static: no AuthReady marker) stay routable whenever built. "fusion" is
-// the orchestration pseudo-provider (forward intercepts it before the impl
-// lookup), so it passes without an impl. AuthReady itself is evaluated by
-// authNotReady OUTSIDE the write lock (it may do credential I/O); this
-// function only reads the precomputed notReady set.
+// (static: no AuthReady marker) stay routable whenever built. AuthReady itself
+// is evaluated by authNotReady OUTSIDE the write lock (it may do credential
+// I/O); this function only reads the precomputed notReady set.
 func (p *Proxy) expandTarget(t configdomain.RouteTarget, notReady map[string]bool) []configdomain.RouteTarget {
 	expanded := newResolver(p, p.providers, p.poolIndex).Expand(t)
 	kept := expanded[:0]
 	for _, rt := range expanded {
-		if rt.Provider != configdomain.FusionProvider {
-			impl := p.providers[rt.Provider]
-			if impl == nil {
-				continue
-			}
-			if notReady[rt.Provider] {
-				continue
-			}
+		impl := p.providers[rt.Provider]
+		if impl == nil || notReady[rt.Provider] {
+			continue
 		}
 		kept = append(kept, rt)
 	}

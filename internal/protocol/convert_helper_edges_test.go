@@ -43,7 +43,6 @@ func TestConvertHelpers(t *testing.T) {
 	}
 }
 
-// TestCacheConfigDefaults: zero-value config falls back to documented defaults.
 // TestConvertRequestResponse_NoOp: same-protocol is a pass-through (no conversion).
 func TestConvertRequestResponse_NoOp(t *testing.T) {
 	body := []byte(`{"model":"x"`)

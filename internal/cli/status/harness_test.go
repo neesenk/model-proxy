@@ -12,6 +12,5 @@ func TestHelperProcess(t *testing.T) {
 	clitest.HelperProcess(t, map[string]func([]string){
 		"schedule": RunSchedule,
 		"routes":   RunRoutes,
-		"cache":    RunCache,
 	})
 }

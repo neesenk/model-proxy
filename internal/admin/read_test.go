@@ -13,10 +13,8 @@ import (
 
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/appapi"
-	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/fusion"
 	obscounters "model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/observe/seclog"
@@ -32,7 +30,6 @@ func TestDashboardProjection(t *testing.T) {
 	state := DashboardState{
 		Listen:        "127.0.0.1:8080",
 		RouteWarnings: []string{"warn-one"},
-		Cache:         responsecache.New(responsecache.Options{}),
 		Runtime: runtimestate.DashboardSnapshot{
 			Providers: map[string]runtimestate.ProviderStatus{
 				"up": {CircuitState: "closed", Available: true},
@@ -112,9 +109,6 @@ func TestDashboardProjection(t *testing.T) {
 	if len(dashboard.Quota) != 1 {
 		t.Errorf("quota = %v, want one entry", dashboard.Quota)
 	}
-	if dashboard.Cache["enabled"] != true {
-		t.Errorf("cache info = %v, want enabled", dashboard.Cache)
-	}
 	counter := dashboard.Counters["up"]
 	if counter.Requests != 7 || counter.Failovers != 1 || counter.RateLimited429 != 2 ||
 		counter.Failures != 3 || counter.LastRequestAt != 99 || counter.LatencySum != 11 || counter.TTFTSum != 5 {
@@ -183,7 +177,7 @@ func TestDashboardQuotaUsageFromProjection(t *testing.T) {
 	}
 }
 
-func TestDashboardWithoutQuotaAndCache(t *testing.T) {
+func TestDashboardWithoutQuota(t *testing.T) {
 	service := New(Ports{
 		DashboardState: func(time.Time) DashboardState {
 			return DashboardState{
@@ -200,9 +194,6 @@ func TestDashboardWithoutQuotaAndCache(t *testing.T) {
 	dashboard := service.Dashboard(time.Now())
 	if dashboard.Quota != nil {
 		t.Errorf("quota = %v, want nil when the tracker is disabled", dashboard.Quota)
-	}
-	if dashboard.Cache["enabled"] != false {
-		t.Errorf("cache = %v, want disabled for a nil store", dashboard.Cache)
 	}
 	if len(dashboard.Counters) != 0 {
 		t.Errorf("counters = %v, want empty", dashboard.Counters)
@@ -267,15 +258,6 @@ func TestRequestLogQueriesFallback(t *testing.T) {
 	if err != nil || len(sessions) != 1 || sessions[0].SessionID != "s1" || sessions[0].Usage.Input != 3 {
 		t.Fatalf("fallback sessions = (%+v, %v)", sessions, err)
 	}
-	report, err := queries.ShadowReport(requestlog.Filter{Limit: 100})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// r1+shadow-r1 pair once; the status classes disagree (200 vs 500) so
-	// the match rate is 0 and the route comes from the primary row.
-	if len(report) != 1 || report[0].Route != "m" || report[0].PrimaryProvider != "p" || report[0].ShadowProvider != "sp" || report[0].Samples != 1 || report[0].StatusMatchRate != 0 || report[0].ShadowLatencyMs != 9 {
-		t.Fatalf("fallback shadow report = %+v", report)
-	}
 }
 
 // TestRequestLogQueriesIndexDelegation: with a running index wired, the query
@@ -316,20 +298,6 @@ func TestRequestLogQueriesIndexDelegation(t *testing.T) {
 		}
 		if err := indexer.WaitReconciled(ctx); err != nil {
 			t.Fatal("index-delegated query never saw the record")
-		}
-	}
-	// The shadow report answers through the same index delegation: the pair
-	// aggregates once both sides are indexed (a scan-free read).
-	for {
-		report, err := queries.ShadowReport(requestlog.Filter{Limit: 100})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(report) == 1 && report[0].Route == "m" && report[0].PrimaryProvider == "p" && report[0].ShadowProvider == "sp" && report[0].Samples == 1 && report[0].StatusMatchRate == 1 && report[0].PrimaryLatencyMs == 5 && report[0].ShadowLatencyMs == 8 {
-			break
-		}
-		if err := indexer.WaitReconciled(ctx); err != nil {
-			t.Fatal("index-delegated shadow report never saw the pair")
 		}
 	}
 	// Session summaries delegate to the same index (the q.index branch of the
@@ -650,24 +618,6 @@ func TestPricingPassThrough(t *testing.T) {
 	got := service.Pricing()
 	if got.Catalog != catalog || got.Overrides["m"].Input != 9 {
 		t.Errorf("pricing = %+v", got)
-	}
-}
-
-func TestFusionPassThrough(t *testing.T) {
-	stats := map[string]fusion.WorkflowStats{"wf": {Runs: 2}}
-	runs := []fusion.Run{{Workflow: "wf"}}
-	now := time.Now()
-	service := New(Ports{
-		FusionSnapshot: func(workflow string, got time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
-			if workflow != "wf" || !got.Equal(now) {
-				t.Errorf("FusionSnapshot args = %q %v", workflow, got)
-			}
-			return stats, runs
-		},
-	})
-	gotStats, gotRuns := service.Fusion("wf", now)
-	if gotStats["wf"].Runs != 2 || len(gotRuns) != 1 {
-		t.Errorf("fusion = %v %v", gotStats, gotRuns)
 	}
 }
 
@@ -1216,7 +1166,7 @@ func TestConfigDocument(t *testing.T) {
 	if document.Settings.Scheduling.CircuitThreshold != nil {
 		t.Errorf("unset circuit_threshold = %v, want nil", *document.Settings.Scheduling.CircuitThreshold)
 	}
-	if document.Settings.RequestLog.Enabled || document.Settings.Cache.Enabled {
+	if document.Settings.RequestLog.Enabled {
 		t.Errorf("settings enabled flags = %+v, want false", document.Settings)
 	}
 }
@@ -1242,9 +1192,6 @@ request_log:
   retention: 720h
 stats:
   retention: 0
-cache:
-  enabled: true
-  max_entries: 6000
 `
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
@@ -1276,9 +1223,6 @@ cache:
 	}
 	if settings.Stats.Retention != "0" {
 		t.Errorf("stats retention = %q, want \"0\"", settings.Stats.Retention)
-	}
-	if !settings.Cache.Enabled || settings.Cache.MaxEntries != 6000 {
-		t.Errorf("cache = %+v", settings.Cache)
 	}
 }
 
@@ -1325,7 +1269,7 @@ func TestPresetsListsSharedCatalog(t *testing.T) {
 	}
 }
 
-// TestTokensExcludesVirtualProviders: guard/attempts/routing/fusion share the
+// TestTokensExcludesVirtualProviders: guard/attempts/routing and historical fusion rows share the
 // (provider, model) key space with upstream usage but are request counters, not
 // billable models — they must not appear in /api/tokens (cumulative or windowed).
 func TestTokensExcludesVirtualProviders(t *testing.T) {
@@ -1647,7 +1591,6 @@ func TestDashboardCredentialAlerts(t *testing.T) {
 	now := time.Date(2026, 11, 11, 10, 38, 30, 0, time.UTC)
 	state := DashboardState{
 		Listen: "127.0.0.1:8080",
-		Cache:  responsecache.New(responsecache.Options{}),
 		Runtime: runtimestate.DashboardSnapshot{
 			Providers: map[string]runtimestate.ProviderStatus{
 				"aqp#acc1": {CircuitState: "closed", Available: true},
@@ -1706,7 +1649,6 @@ func TestDashboardForwardCredentialDenials(t *testing.T) {
 	const lapsed = `{"error":{"message":"you have no active step plan subscription","type":"request_params_invalid"}}`
 	state := DashboardState{
 		Listen:       "127.0.0.1:8080",
-		Cache:        responsecache.New(responsecache.Options{}),
 		QuotaEnabled: true,
 		StartedAt:    now.Add(-time.Minute),
 		Schedule:     []byte(`{"models":{}}`),

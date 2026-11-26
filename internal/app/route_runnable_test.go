@@ -3,9 +3,7 @@
 // credential pool is an authoritative 0-account tombstone (e.g. zcode after
 // logout) has no impl, and its targets are dropped at expansion (schedule
 // chains, /v1/models, forward all read the effective table). Adding the
-// account (login → reload rebuilds the table) brings the target back. The
-// fusion orchestration pseudo-provider is exempt — forward intercepts it
-// before the impl lookup.
+// account (login → reload rebuilds the table) brings the target back.
 package app
 
 import (
@@ -105,20 +103,5 @@ func TestExpandedRoutesDropAccountlessProviders(t *testing.T) {
 	}
 	if ids := exposedModelIDs(t, px); !contains(ids, "solo-ghost") {
 		t.Fatalf("GET /v1/models = %v after login, want solo-ghost exposed again", ids)
-	}
-}
-
-// TestExpandedRoutesKeepFusionPseudoProvider pins the exemption: "fusion" has
-// no provider impl by design (forward intercepts the target before the impl
-// lookup), so its route targets must survive the runnable filter.
-func TestExpandedRoutesKeepFusionPseudoProvider(t *testing.T) {
-	cfg := runnableTestConfig()
-	cfg.Routes = map[string][]configdomain.RouteTarget{
-		"panel": {{Provider: "fusion", Model: "recipe"}},
-	}
-	p := newTestProxy(t, cfg)
-	targets := p.expandedRoutes["panel"]
-	if len(targets) != 1 || targets[0].Provider != "fusion" || targets[0].Model != "recipe" {
-		t.Fatalf("fusion route = %v, want the pseudo-provider target preserved", targets)
 	}
 }

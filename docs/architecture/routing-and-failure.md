@@ -36,19 +36,19 @@
 
 一次客户端请求在 `forward` 开始时只捕获一次 `RuntimeSnapshot`。该快照包含
 同一 config generation 的 config、provider implementations、pool identity、
-expanded routes、models.dev catalog 与 response cache；reload 只交换新对象，
+expanded routes 与 models.dev catalog；reload 只交换新对象，
 不得原地修改快照持有的 map。`serveRequest` 是一次完整 schedule/failover pass
 的输入，`internal/targetexec.Attempt` 是单次 resolved target 的强类型执行契约。
-普通 route 与 Fusion synthesizer 均通过该契约进入 `targetexec.Executor.Execute`，
+普通 route 通过该契约进入 `targetexec.Executor.Execute`，
 新增横切能力不得继续扩张 positional 参数列表或以 `any` 夹带 root owner。
 
 `targetexec.Attempt` 固定为五组：`targetexec.Runtime`
 （captured scheduling/generation/cache）、`targetexec.Plan`、
 `targetexec.Exchange`（request/writer/body）、`targetexec.Scope`（调用模型、
-agent、cache key/log/Responses 上下文）和 `targetexec.Policy`（force、last
+agent、log/Responses 上下文）和 `targetexec.Policy`（force、last
 target、context retry）。两条调用链只能经
 `newTargetAttempt → targetexec.NewAttempt` 构造；factory 仅投影/装配，不做
-model rewrite、state expansion 或协议转换。普通/Fusion/Shadow 不得复制
+model rewrite、state expansion 或协议转换。普通 route/Shadow 不得复制
 endpoint、model rewrite 或 conversion-option 逻辑。执行器必须从 typed
 Runtime 与 Plan 读取事实，禁止在 scope/log 中复制第二份 generation、嵌入完整
 `RuntimeSnapshot`、使用 `any` 或重新查 Proxy。
@@ -62,7 +62,7 @@ Runtime 与 Plan 读取事实，禁止在 scope/log 中复制第二份 generatio
 `internal/forward/forward.go` 只负责编排和调用。
 executor commit 后只返回含实际上游请求体的最小 `targetexec.Commit`；Shadow
 sampling、semaphore、lifecycle admission 与 dispatch 由 `serveOnce` 在
-executor 外完成，Fusion synthesizer 丢弃该 commit 元数据，禁止递归触发 Shadow。
+executor 外完成。
 
 默认“客户端协议 = 上游协议”，同协议请求和响应字节级透传。目标声明 `protocol:` 时才进行协议转换。
 
@@ -93,7 +93,7 @@ provider 级 wire verdict 由 `probeAllWireCaps` 在 boot/reload 时异步探测
 | openai(chat) | 其他 | 透传 |
 | 任意 | 模型无条目或相关腿未结论 | 回落 provider 级矩阵 |
 
-**运行时 404 纠正（模型粒度）**：因 verdict 转到 `/responses` 的请求若上游 404，说明 verdict 有误而非模型缺失——`noteWireResponsesMiss(parent, model)` 经 `targetexec` State/HealthGate 传导（executor 与 Fusion leg 共用）：该 model 在模型级矩阵有条目时**只翻转模型级** responses verdict 并持久化 model_caps.json（provider 级不动）；无模型条目（透传 target）才翻转 provider 级 verdict（legacy 路径）。两种情况都**跳过 recordModelFailure**（这是我们的协议选择失误，不是模型的失败），按正常失败走 failover；后续请求自动转 chat。非 verdict 驱动的 404 行为不变（模型锁）。Fusion leg 共享同一纠正（`planTarget` 已算出 `viaResponsesVerdict`，见 fusion-shadow-cache.md）。
+**运行时 404 纠正（模型粒度）**：因 verdict 转到 `/responses` 的请求若上游 404，说明 verdict 有误而非模型缺失——`noteWireResponsesMiss(parent, model)` 经 `targetexec` State/HealthGate 传导（executor 与 decisions selector leg 共用）：该 model 在模型级矩阵有条目时**只翻转模型级** responses verdict 并持久化 model_caps.json（provider 级不动）；无模型条目（透传 target）才翻转 provider 级 verdict（legacy 路径）。两种情况都**跳过 recordModelFailure**（这是我们的协议选择失误，不是模型的失败），按正常失败走 failover；后续请求自动转 chat。非 verdict 驱动的 404 行为不变（模型锁）。decisions selector leg 共享同一纠正（`planTarget` 已算出 `viaResponsesVerdict`，见 observe.md）。
 
 provider 级 yes 结论永久信任（错误 yes 由上述运行时路径纠正）；**provider 级 no 结论有 24h TTL**（`wireCapNegativeTTL`），到期后下一次 boot/reload 探测 pass 重探——一次性错误 no（上游发布中临时 404 等）不会永久降级该 provider。模型级矩阵**无 TTL**：失效只由 config fingerprint（`providerbuild.ProtocolConfigFingerprint`）触发，fingerprint 匹配即复用结论（持久化格式与恢复门控见 `runtime-state.md`）。fingerprint 不覆盖 models 列表，因此每次探测 pass 还会把当前 config（models: ∪ 路由 target）不再服务的 model 条目从 store 剔除（`ModelStore.PruneModels`）——从 config 删掉的 model 不会留在矩阵和 /api/models 里。
 
@@ -136,7 +136,7 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   2xx 清除，reload 按存活账号剪枝；状态归 `internal/runtime`（`runtime-state.md`），字段契约见
   `docs/web-api.md`。其它失败类别不记：模型拒绝、配额冷却、网关拒绝、5xx、派发前跳过，以及
   Auth 层失败（如 aqp mint 失败——由轮询路径报告）。
-  熔断状态与请求 metric 是不同语义，普通执行器和 Fusion leg 必须保持一致。
+  熔断状态与请求 metric 是不同语义，普通执行器和 decisions selector leg 必须保持一致。
 - 429 进入 provider 限频冷却，不计熔断；**403 且 body 证明配额耗尽**（`targetexec.ParseQuotaDenied`，kimi-code 的 5 小时套餐窗口耗尽即此形态）同路：记限频冷却 + failover，终局按限频类分类。
 - 404、model-denied、空 200 只锁 `(provider, model)`。
 - 半开状态使用 `halfOpenInFlight` 单飞。
@@ -205,7 +205,7 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   （openai `prompt_tokens`、responses `input_tokens` 自带 cached 份额）
   入桶前先扣减该份额（钳零）并记入 cache_read——否则同一份额同时落 input
   与 cache_read，曾把 analytics 命中率压到真实值的一半并双重计费
-  （与 requestlog.ExtractUsage、fusion.ParseUsage 同一账本）。
+  （与 requestlog.ExtractUsage 同一账本）。
   同 id 多 attempt 行语义：每个未 commit 的跳（429/5xx/认证/传输错误、模型拒绝、403/订阅失效
   归因、派发前门禁跳过——最后一跳也在内；client 断开的跳不落）各落一行 `attempt_only`
   请求日志——同 request id、各自递增的 attempt 序号、带该跳的观测状态与证据体（上游错误体
@@ -292,7 +292,7 @@ body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`
 非 429 状态码携带配额耗尽证据时走同一分类器：`targetexec.ParseQuotaDenied`（body 命中 quota/daily 措辞即采纳，否则返回 false 保持通用 4xx 路径）复用 `ParseRateLimit` 的 kind/horizon 计算，executor 对 403 调用它并记 `RecordRateLimit` + failover（kimi-code 把 5 小时套餐窗口耗尽答成 403 "You've reached your 5-hour usage limit"，此前它落入普通 4xx commit：不冷却、不 failover，路由继续把流量派进已耗尽的账号）。
 
 分类与 horizon 只由 `internal/targetexec.ParseRateLimit` 计算；普通
-`targetexec.Executor`、Fusion leg 与 guard 判定的调度 seam
+`targetexec.Executor`、decisions selector leg 与 guard 判定的调度 seam
 （`internal/app/model_call.go`）必须调用同一入口，再把预计算的
 `RateLimitDecision` 交给 runtime adapter。根包不得恢复 `classify429`、
 `parseResetHint`、`hintDuration` 或 `parseRateLimit` 副本。
@@ -335,8 +335,7 @@ body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`
 attempt 腿的诊断只带状态与页面标题（`upstream answered <status> with an HTML page: <title>`），
 不落页面原文。
 
-**普通转发的 403 归因**（只接在普通执行器上；Fusion panel/judge 腿对 403 的处置不同，见
-`docs/architecture/fusion-shadow-cache.md`）：先沿用配额耗尽和模型拒绝的分类。结构化错误的
+**普通转发的 403 归因**（只接在普通执行器上；decisions selector 腿不接入）：先沿用配额耗尽和模型拒绝的分类。结构化错误的
 `error.code` 为 `account_disabled`、`account_deactivated` 或 `account_suspended` 时，按当前
 解析到的账号记录一次认证失败并 failover，熔断门槛同 401、同样不记 failure metric；**末候选
 也不例外**——不透传账号错误，按全链失败回 502（单目标路由与 pin/force-provider 同此）。
@@ -364,8 +363,7 @@ text/plain`——通用类型、无 `error.code`，配额冷却与账号停用�
 
 订阅失效没有可预期的恢复时刻，所以走熔断 + 半开探针（订阅恢复后至多一个 `circuit_cooldown`
 自动回归）而不是 `quota_cooldown`。触发时另打一行 Info（`body proves the account has no
-active plan subscription — failing over (auth circuit)`），serve.log 单文件可答。Fusion
-panel/judge 腿与 guard 判定 seam 不接入（同 403 归因）。锁定测试：
+active plan subscription — failing over (auth circuit)`），serve.log 单文件可答。decisions selector 腿与 guard 判定 seam 不接入（同 403 归因）。锁定测试：
 `TestExecutorLapsedPlanSubscriptionFailsOver`、
 `TestExecutorQuotaProofOutranksSubscriptionAttribution`（`internal/targetexec`）与
 `TestForward_LapsedPlanSubscriptionFailsOverE2E`（`internal/app`）。
@@ -426,7 +424,7 @@ failover），带证据的 403/400 另按配额、模型拒绝或账号归因（
 `stream_keepalive` 默认 15s，`"0"` 关闭。客户端面向的 SSE 流（`clientStream` 且 status < 300）在上游静默超过该间隔时，`targetexec` 经 `flushCopyHeartbeat` 向客户端写一帧 SSE 注释心跳（`: ping\n\n`，协议级 no-op）。契约边界：
 
 - **只在 commit（上游响应头已收到、`WriteHeader` 已发）之后才开始**——header 之前的连接失败仍完整保留透明 failover；代价是 header 之后上游在 prefill 中途断流无法再 failover，客户端看到断流（有意取舍，慢 TTFT 收益大于该窗口风险）。
-- 心跳写在响应链的**客户端写出侧**，不经过 body 读取侧的 CaptureResponse/CaptureUsage/cache recorder——request log、usage、响应缓存永远见不到心跳帧。
+- 心跳写在响应链的**客户端写出侧**，不经过 body 读取侧的 CaptureResponse/CaptureUsage——request log 与 usage 永远见不到心跳帧。
 - 心跳经 `timingResponseWriter.WriteHeartbeat` 旁路首字节标记——TTFT 只测量上游真实首字节，不被代理 padding 污染。
 - 非流式（JSON）响应绝不写注释帧（会损坏 body）；数据流动时每写一帧重置计时器，只在静默期发心跳。
 
@@ -437,7 +435,7 @@ failover），带证据的 403/400 另按配额、模型拒绝或账号归因（
   peek 影响、流式请求不做 body peek（keepalive 契约）。
 - 内容性拒绝 5xx：failover 但零冷却记账（熔断/失败指标/releases 各就各位）、普通 5xx 仍记账。
 - transient/quota/daily 及 body/header reset 优先级。
-- 普通 target 与 Fusion leg 的 429 kind/horizon、metric、quota refresh 一致。
+- 普通 target 与 decisions selector leg 的 429 kind/horizon、metric、quota refresh 一致。
 - 同 provider 不同 model 的锁和 paramBlock 隔离。
 - empty stream 的 EOF、client cancel、upstream read error。
 - 上游 403 归因（`internal/app/forward_403_attribution_test.go`、`internal/targetexec`

@@ -135,7 +135,7 @@ func parseStatsTime(v string) (int64, bool) {
 }
 
 // statsWindow resolves the from/to unix-second bounds shared by the stats,
-// agents, shadow-report and analytics handlers: the window defaults to
+// agents and analytics handlers: the window defaults to
 // [now-window, now] and each side is overridden by the ?from/?to query
 // params (unix seconds or RFC3339 via parseStatsTime; unparseable values
 // keep the default).

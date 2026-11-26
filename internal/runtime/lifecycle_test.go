@@ -3,7 +3,6 @@ package runtime
 import (
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"model-proxy/internal/testsyn"
 )
@@ -35,40 +34,13 @@ func TestLifecycleRunAndStop(t *testing.T) {
 	testsyn.LeakCheck(t, baseline, "lifecycle tasks after BeginStop/Wait")
 }
 
-func TestLifecycleRunBeforeLogDrain(t *testing.T) {
-	l := NewLifecycle()
-	release := make(chan struct{})
-	started := make(chan struct{})
-	if !l.RunBeforeLogDrain(func(<-chan struct{}) {
-		close(started)
-		<-release
-	}) {
-		t.Fatal("admission rejected")
-	}
-	<-started
-	done := make(chan struct{})
-	go func() { l.BeginStop(); l.WaitBeforeLogDrain(); close(done) }()
-	select {
-	case <-done:
-		t.Fatal("WaitBeforeLogDrain returned while task blocked")
-	default:
-	}
-	close(release)
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("WaitBeforeLogDrain did not return after task finished")
-	}
-}
-
 func TestLifecycleNilSafe(t *testing.T) {
 	var l *Lifecycle
-	if l.Run(func(<-chan struct{}) {}) || l.RunBeforeLogDrain(func(<-chan struct{}) {}) {
+	if l.Run(func(<-chan struct{}) {}) {
 		t.Error("nil lifecycle must reject admission")
 	}
 	l.BeginStop()
 	l.Wait()
-	l.WaitBeforeLogDrain()
 	if l.StopChannel() != nil {
 		t.Error("nil lifecycle StopChannel must be nil")
 	}

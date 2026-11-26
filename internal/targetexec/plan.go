@@ -1,5 +1,5 @@
 // Package targetexec owns the immutable, target-specific wire preparation
-// shared by normal routing, Fusion, and Shadow execution.
+// shared by normal routing and decisions execution.
 package targetexec
 
 import (
@@ -125,7 +125,7 @@ func (plan Plan) ApplyConfiguredHeaders(header http.Header) error {
 }
 
 // RewriteModel preserves the called model when a target has no replacement
-// model, as Shadow targets may do.
+// model.
 func (plan Plan) RewriteModel(body []byte, calledModel string) []byte {
 	if plan.targetModel == "" || plan.targetModel == calledModel {
 		return body

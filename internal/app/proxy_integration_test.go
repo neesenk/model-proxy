@@ -185,7 +185,7 @@ func TestUC_AllTargetsFailReturns502(t *testing.T) {
 // the proxy), rather than by function. Each test drives a real HTTP request
 // through p.Handler against httptest upstreams and asserts the observable
 // outcome a user cares about. Shared helpers (testProv, post, stringReader,
-// fakeUpstream) live in proxy_routing_test.go / fusion_test.go.
+// fakeUpstream) live in proxy_routing_test.go / upstream_test_support_test.go.
 
 // --- mock helpers specific to use cases ---
 

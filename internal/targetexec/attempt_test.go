@@ -6,14 +6,10 @@ import (
 	"testing"
 	"time"
 
-	responsecache "model-proxy/internal/cache"
 	configdomain "model-proxy/internal/config"
 )
 
 func TestNewAttemptPreservesFiveTypedGroups(t *testing.T) {
-	cache := responsecache.New(responsecache.Options{
-		TTL: time.Minute, MaxEntries: 1, MaxBodyBytes: 16,
-	})
 	request := httptest.NewRequest("POST", "/v1/responses", nil)
 	writer := httptest.NewRecorder()
 	body := []byte(`{"model":"client"}`)
@@ -23,14 +19,12 @@ func TestNewAttemptPreservesFiveTypedGroups(t *testing.T) {
 		Runtime{
 			Scheduling: configdomain.Scheduling{UpstreamTimeout: "3s"},
 			Generation: 17,
-			Cache:      cache,
 		},
 		Plan{},
 		Exchange{Request: request, Writer: writer, Body: body},
 		Scope{
 			CalledModel: "client",
 			Agent:       "codex",
-			CacheKey:    "cache-key",
 			Log: LogContext{
 				RequestID: "req-1", Attempt: 2, Exposed: "public", OriginalBody: body,
 			},
@@ -45,7 +39,7 @@ func TestNewAttemptPreservesFiveTypedGroups(t *testing.T) {
 		},
 	)
 
-	if got := attempt.Runtime(); got.Generation != 17 || got.Cache != cache || got.Scheduling.Timeout() != 3*time.Second {
+	if got := attempt.Runtime(); got.Generation != 17 || got.Scheduling.Timeout() != 3*time.Second {
 		t.Fatalf("runtime = %+v", got)
 	}
 	if got := attempt.Exchange(); got.Request != request || got.Writer != writer || string(got.Body) != string(body) {
@@ -61,18 +55,6 @@ func TestNewAttemptPreservesFiveTypedGroups(t *testing.T) {
 	}
 	if string(attempt.Exchange().Body) != `{"model":"client"}` {
 		t.Fatalf("constructor changed prepared body: %s", attempt.Exchange().Body)
-	}
-}
-
-func TestCommitExposesOnlyPreparedRequestBody(t *testing.T) {
-	body := []byte(`{"model":"upstream"}`)
-	commit := NewCommit(body)
-	if string(commit.RequestBody()) != string(body) {
-		t.Fatalf("commit body = %s", commit.RequestBody())
-	}
-	var nilCommit *Commit
-	if nilCommit.RequestBody() != nil {
-		t.Fatal("nil commit returned a body")
 	}
 }
 

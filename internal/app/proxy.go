@@ -4,17 +4,13 @@ package app
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/adjudicate"
-	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/fusion"
 	"model-proxy/internal/guard"
 	guardsession "model-proxy/internal/guard/session"
 	mcpkg "model-proxy/internal/mcp"
-	"model-proxy/internal/observe/budget"
 	obscounters "model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/observe/logx"
@@ -27,7 +23,6 @@ import (
 	"model-proxy/internal/routing"
 	runtimestate "model-proxy/internal/runtime"
 	runtimewire "model-proxy/internal/runtime/wirecap"
-	"model-proxy/internal/shadow"
 	"model-proxy/internal/upstreamproxy"
 	"model-proxy/internal/webauth"
 	"net/http"
@@ -45,7 +40,6 @@ type generationState struct {
 	cfg       *configdomain.Config
 	providers map[string]provider.Provider // provider name → Provider (shared)
 
-	cache             *responsecache.Store   // exact-match response cache (prompt-hash + TTL); nil = disabled
 	guardScanner      *guard.Scanner         // reload-owned immutable outbound secret/path scanner; never serialized or logged
 	guardPoolSecrets  []providerbuild.Secret // reload-owned: current generation's Build.PoolSecrets (base for OAuth re-syncs)
 	guardOAuthSecrets []providerbuild.Secret // reload-owned: OAuth + provider memory-reported known-secret values in guardScanner; refreshed in place on the poll beat
@@ -70,8 +64,6 @@ type generationState struct {
 	derivedRoutes map[string][]configdomain. // exposed model → targets auto-aggregated from provider model lists (for names not in cfg.Routes)
 			RouteTarget
 	routeWarnings []string // routing hazard warnings; surfaced in `models` CLI + /api/status
-
-	shadow atomic.Pointer[shadow.Runtime] // reload-swappable detached Shadow runtime; captured with each request generation
 
 	// adminAuth/apiKeys are the S2 optional-auth sources (webauth), swapped on
 	// reload with the config generation. Atomic pointers so the request path
@@ -107,9 +99,7 @@ type processServices struct {
 	adjudication       *adjudicate.Service           // AI second-opinion channel for guard pattern hits; process-lifetime, persisted verdict cache + session blocks
 	responsesState     *protocol.ResponsesStateStore // previous_response_id replay for Responses clients bridged to stateless backends
 	events             *observeevents.Hub            // live request monitor fan-out hub (SSE /api/events); always non-nil
-	fusionReg          *fusion.Registry              // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
 	catalog            *catalog.Catalog              // models.dev metadata (context window + modalities) for request-aware routing; survives reload; refreshed async best-effort; nil = unavailable, degrade gracefully
-	budget             *budget.Watcher               // monthly cost alert loop; nil unless budgets: configures a threshold
 
 	// Upstream proxy resolution (internal/upstreamproxy): the resolver caches
 	// OS system-proxy detection once per process; the transport pool is keyed
@@ -167,17 +157,6 @@ type processServices struct {
 	// (see model_disable_store.go).
 	disabledModelsPath string
 	disabledModelsMu   sync.Mutex
-	// Cache entries are generation-owned. Counters and their serialized disk
-	// writer survive reload, including disabled generations.
-	cacheStatePath string
-	cacheCounters  *responsecache.Counters
-	cachePersistMu sync.Mutex // serializes cache snapshot/write across generations
-	// evalRand is the random source for route_policy eval sampling. Tests
-	// inject a deterministic function here. Production uses rand.Float64.
-	evalRand func() float64
-	// evalPrimaryBodies holds sampled primary response bodies for L2 eval
-	// shadow dispatch. It is bounded and entries are removed on retrieval.
-	evalPrimaryBodies *evalBodyCache
 }
 
 // Proxy holds the compiled provider instances + the config.
@@ -219,8 +198,7 @@ func implOrFirstPooled(provs map[string]provider.Provider, poolIndex map[string]
 
 // bindStopToCancel cancels ctx when the stop channel closes (or ctx finishes
 // by other means); the watcher goroutine exits on either arm, so nothing
-// leaks. Callers needing a shutdown grace window keep their own watcher (the
-// shadow leg).
+// leaks. Callers needing a shutdown grace window keep their own watcher.
 func bindStopToCancel(ctx context.Context, cancel context.CancelFunc, stop <-chan struct{}) {
 	go func() {
 		select {
@@ -310,12 +288,10 @@ func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 			poolAccounts: built.PoolAccounts,
 		},
 		processServices: processServices{
-			lifecycle:         runtimestate.NewLifecycle(),
-			client:            &http.Client{Timeout: 0, Transport: transport},
-			proxyResolver:     upstreamproxy.NewResolver(),
-			transports:        map[string]*http.Transport{},
-			evalRand:          rand.Float64,
-			evalPrimaryBodies: newEvalBodyCache(evalBodyCacheMaxEntries, evalBodyCacheMaxBytes),
+			lifecycle:     runtimestate.NewLifecycle(),
+			client:        &http.Client{Timeout: 0, Transport: transport},
+			proxyResolver: upstreamproxy.NewResolver(),
+			transports:    map[string]*http.Transport{},
 		},
 		// Read once here (not per request): MP_PPROF=1 turns on /debug/pprof/.
 		pprofEnabled:  os.Getenv("MP_PPROF") == "1",
@@ -388,36 +364,11 @@ func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 	// Per-agent counters (detected from the client UA). Flushed alongside the
 	// minute buckets by the same flusher; nil-stats tests keep them in-memory.
 	p.agents = obscounters.NewAgentCounter()
-	// Exact-match response cache. nil unless cache.enabled is set in config, so
-	// the default (off) path and direct-NewProxy tests pay zero overhead.
-	// Seeded from cache_state.json so restarts continue the hit/miss history.
-	p.cacheStatePath = CacheStatePath(qpath)
-	p.cacheCounters = &responsecache.Counters{}
-	state := loadCacheState(p.cacheStatePath)
-	models := make([]responsecache.ModelStat, 0, len(state.Models))
-	for _, m := range state.Models {
-		models = append(models, responsecache.ModelStat{Name: m.Model, Hits: m.Hits, Misses: m.Misses})
-	}
-	p.cacheCounters.Seed(state.Hits, state.Misses, models)
-	p.cache = p.newResponseCache(cfg.Cache)
 	p.responsesState = protocol.NewResponsesStateStore(protocol.ResponsesStatePath(qpath))
 	p.modelCapsPath = runtimewire.ModelCapsPath(qpath)
 	// Live request monitor hub (SSE /api/events). Always on — empty unless a Web
 	// UI client subscribes; publish is non-blocking so it never stalls forward.
 	p.events = observeevents.NewHub()
-	// Fusion orchestration observability registry (recent runs + per-workflow
-	// aggregates + daily budget counters). Like the event hub, reload does NOT
-	// rebuild it — aggregates and today's budget survive config edits.
-	p.fusionReg = fusion.NewRegistry()
-	// Detached Shadow runtime (sample rate, concurrency gate, shared client). Stored
-	// in an atomic pointer so reload can swap the whole bundle race-free; each
-	// dispatch loads it once and uses that snapshot, so in-flight shadow goroutines
-	// finish on the old bundle while new traffic follows the reloaded config.
-	p.shadow.Store(shadow.NewRuntime(shadow.Options{
-		SampleRate:    cfg.ShadowSampleRate,
-		MaxConcurrent: cfg.ShadowMaxConcurrent,
-		Timeout:       cfg.Scheduling.Timeout(),
-	}))
 	// Seed the operator disabled-model override from disabled_models.json
 	// (same state directory as the quota state). This is the restart/refresh
 	// survival path for the Web Status→Models toggles: reload keeps the set in
@@ -523,29 +474,5 @@ func (p *Proxy) resetStats() error {
 			p.mcpStats.Reset()
 		}
 	}
-	// The response-cache counters are deliberately NOT reset here: the cache
-	// hit rate is an operational metric (like the guard usage counters), not
-	// call-statistics — coupling it into "reset counters" silently destroyed
-	// the accumulated history.
 	return nil
-}
-
-// newResponseCache rebuilds generation-owned entries around the process-wide
-// counter owner. No disk I/O is performed during reload's generation swap.
-func (p *Proxy) newResponseCache(config configdomain.CacheConfig) *responsecache.Store {
-	return NewResponseCache(config, p.cacheCounters)
-}
-
-// NewResponseCache adapts resolved application configuration into the
-// repository-leaf cache component.
-func NewResponseCache(config configdomain.CacheConfig, counters *responsecache.Counters) *responsecache.Store {
-	if !config.IsEnabled() {
-		return nil
-	}
-	return responsecache.New(responsecache.Options{
-		Counters:     counters,
-		TTL:          config.TTLDuration(),
-		MaxEntries:   config.MaxEntriesValue(),
-		MaxBodyBytes: config.MaxBodyBytesValue(),
-	})
 }

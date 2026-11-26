@@ -1,12 +1,9 @@
 package app
 
 import (
-	"context"
 	"encoding/json"
 	"io"
-	"math/rand"
 	configdomain "model-proxy/internal/config"
-	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/provider"
 	runtimestate "model-proxy/internal/runtime"
 	"net/http"
@@ -250,8 +247,7 @@ func newQuotaProxy(t *testing.T, provs map[string]configdomain.Provider, routes 
 			parentOf:  map[string]string{},
 		},
 		processServices: processServices{
-			client:   &http.Client{Timeout: 0},
-			evalRand: rand.Float64,
+			client: &http.Client{Timeout: 0},
 		},
 	}
 	p.quota = runtimestate.NewQuotaTracker(
@@ -482,150 +478,5 @@ func TestScheduleStatus(t *testing.T) {
 	}
 	if m.Ordered[0].Tier != "plan" {
 		t.Errorf("tier=%q, want plan", m.Ordered[0].Tier)
-	}
-}
-
-// ---- budget_watch_test.go ----
-
-// budgetAlertDetail mirrors the budget watcher's wire payload for assertions
-// without reaching into the observe/budget package internals.
-type budgetAlertDetail struct {
-	Scope        string  `json:"scope"`
-	Month        string  `json:"month"`
-	ThresholdUSD float64 `json:"threshold_usd"`
-	ActualUSD    float64 `json:"actual_usd"`
-}
-
-// newBudgetTestProxy builds a Proxy with an isolated temp stats store and
-// offline pricing (catalog disabled; prices: overrides still apply).
-func newBudgetTestProxy(t *testing.T, budgets configdomain.BudgetsConfig) *Proxy {
-	t.Helper()
-	cfg := &configdomain.Config{
-		Budgets: budgets,
-		Pricing: configdomain.PricingConfig{Enabled: false},
-		Prices: map[string]configdomain.PriceConfig{
-			"glm-5.2": {Input: 1.0, Output: 2.0}, // USD per 1M tokens
-		},
-	}
-	p := newTestProxy(t, cfg)
-	p.stats = newTestStatsStore(t)
-	return p
-}
-
-// flushBudgetUsage persists one minute bucket in the current local month:
-// 1M input + 0.5M output on glm-5.2 = 1×$1.0 + 0.5×$2.0 = $2.00 equivalent
-// cost.
-func flushBudgetUsage(t *testing.T, p *Proxy, provider string) {
-	t.Helper()
-	now := time.Now()
-	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.Local)
-	err := p.stats.FlushContext(context.Background(), monthStart.Unix(), map[observestats.Key]observestats.Counters{
-		{Provider: provider, Model: "glm-5.2"}: {
-			Requests: 1, Input: 1_000_000, Output: 500_000,
-		},
-	})
-	if err != nil {
-		t.Fatalf("flush usage: %v", err)
-	}
-}
-
-func TestBudgetWatcher_NotStartedWhenUnconfigured(t *testing.T) {
-	p := newTestProxy(t, &configdomain.Config{})
-	p.startBudgetWatcher()
-	if p.budget != nil {
-		t.Fatal("budget watcher started without any configured threshold")
-	}
-}
-
-func TestBudgetWatcher_StartedWhenConfigured(t *testing.T) {
-	// stats is nil here: the loop's startup check must tolerate it and simply
-	// wait for the next tick (Close stops and waits the loop goroutine).
-	p := newTestProxy(t, &configdomain.Config{Budgets: configdomain.BudgetsConfig{MonthlyUSD: 10}})
-	p.startBudgetWatcher()
-	if p.budget == nil {
-		t.Fatal("budget watcher did not start with a configured threshold")
-	}
-}
-
-// TestBudgetPorts_BudgetStateReturnsPerCallCopies: the watcher ticks once per
-// minute against reload-owned state; the adapter must hand it fresh copies so
-// a slow tick can never observe (or mutate) a live config generation's maps.
-func TestBudgetPorts_BudgetStateReturnsPerCallCopies(t *testing.T) {
-	p := newBudgetTestProxy(t, configdomain.BudgetsConfig{
-		MonthlyUSD: 10,
-		Providers:  map[string]float64{"zhipu": 5},
-	})
-	p.parentOf = map[string]string{"zhipu#work": "zhipu"}
-	ports := p.budgetPorts()
-
-	budgets, parentOf, ok := ports.BudgetState()
-	if !ok {
-		t.Fatal("BudgetState ok = false, want true for enabled budgets with stats")
-	}
-	if budgets.MonthlyUSD != 10 || budgets.Providers["zhipu"] != 5 || parentOf["zhipu#work"] != "zhipu" {
-		t.Fatalf("BudgetState = %+v / %v, want configured budgets and parent mapping", budgets, parentOf)
-	}
-
-	// Mutating the returned copies must not leak into the next call.
-	budgets.Providers["zhipu"] = 999
-	budgets.Providers["injected"] = 1
-	parentOf["injected"] = "injected"
-	again, againParentOf, ok := ports.BudgetState()
-	if !ok {
-		t.Fatal("second BudgetState ok = false")
-	}
-	if len(again.Providers) != 1 || again.Providers["zhipu"] != 5 {
-		t.Fatalf("providers after caller mutation = %v, want fresh copy {zhipu: 5}", again.Providers)
-	}
-	if len(againParentOf) != 1 || againParentOf["zhipu#work"] != "zhipu" {
-		t.Fatalf("parentOf after caller mutation = %v, want fresh copy {zhipu#work: zhipu}", againParentOf)
-	}
-}
-
-// TestBudgetPorts_BudgetStateUnavailable: nil stats store or disabled budgets
-// must report ok=false so the watcher skips the tick.
-func TestBudgetPorts_BudgetStateUnavailable(t *testing.T) {
-	p := newTestProxy(t, &configdomain.Config{Budgets: configdomain.BudgetsConfig{MonthlyUSD: 10}})
-	if _, _, ok := p.budgetPorts().BudgetState(); ok {
-		t.Fatal("BudgetState ok = true with nil stats store, want false")
-	}
-
-	p = newTestProxy(t, &configdomain.Config{})
-	p.stats = newTestStatsStore(t)
-	if _, _, ok := p.budgetPorts().BudgetState(); ok {
-		t.Fatal("BudgetState ok = true with budgets disabled, want false")
-	}
-}
-
-// TestBudgetWatcher_EndToEndAlertThroughPorts: the started watcher's first
-// tick reads stats/pricing/config through the port closures and publishes the
-// alert on the Proxy's live event hub.
-func TestBudgetWatcher_EndToEndAlertThroughPorts(t *testing.T) {
-	p := newBudgetTestProxy(t, configdomain.BudgetsConfig{MonthlyUSD: 1.0})
-	flushBudgetUsage(t, p, "zhipu")
-	p.startBudgetWatcher()
-	if p.budget == nil {
-		t.Fatal("budget watcher did not start with a configured threshold")
-	}
-
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		for _, event := range p.events.Snapshot() {
-			if event.Type != "budget" {
-				continue
-			}
-			var payload budgetAlertDetail
-			if err := json.Unmarshal([]byte(event.Detail), &payload); err != nil {
-				t.Fatalf("budget event Detail is not the alert payload: %v", err)
-			}
-			if payload.Scope != "global" || payload.ThresholdUSD != 1.0 || payload.ActualUSD != 2.0 {
-				t.Fatalf("payload = %+v, want {global 1 2}", payload)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("no budget event published within 3s of watcher start")
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }

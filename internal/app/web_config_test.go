@@ -922,7 +922,7 @@ func TestHandler_PprofEndpointIsOptIn(t *testing.T) {
 
 // TestConfigSettingsFormRoundTrip exercises the Config-tab settings form end to
 // end: GET /api/config projects the scalar blocks, and POST /api/config/edit
-// writes request_log/stats/cache/general through the same validate+save+reload
+// writes request_log/stats/general through the same validate+save+reload
 // pipeline (with null deleting a key so the code default applies again).
 func TestConfigSettingsFormRoundTrip(t *testing.T) {
 	dir := t.TempDir()
@@ -937,8 +937,8 @@ scheduling:
 request_log:
   enabled: true
   max_file_size: 1048576
-cache:
-  enabled: false
+stats:
+  retention: 720h
 `
 	if err := os.WriteFile(cfgPath, []byte(original), 0o644); err != nil {
 		t.Fatal(err)
@@ -963,10 +963,9 @@ cache:
 				Enabled     bool  `json:"enabled"`
 				MaxFileSize int64 `json:"max_file_size"`
 			} `json:"request_log"`
-			Cache struct {
-				Enabled bool   `json:"enabled"`
-				TTL     string `json:"ttl"`
-			} `json:"cache"`
+			Stats struct {
+				Retention string `json:"retention"`
+			} `json:"stats"`
 		} `json:"settings"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -984,8 +983,8 @@ cache:
 	if !got.Settings.RequestLog.Enabled || got.Settings.RequestLog.MaxFileSize != 1048576 {
 		t.Errorf("request_log = %+v", got.Settings.RequestLog)
 	}
-	if got.Settings.Cache.Enabled || got.Settings.Cache.TTL != "" {
-		t.Errorf("cache = %+v", got.Settings.Cache)
+	if got.Settings.Stats.Retention != "720h" {
+		t.Errorf("stats = %+v", got.Settings.Stats)
 	}
 
 	edit := func(body string) {
@@ -997,7 +996,7 @@ cache:
 		}
 	}
 	edit(`{"kind":"scheduling","data":{"circuit_threshold":null,"sticky_dwell":"5m"}}`)
-	edit(`{"kind":"cache","data":{"enabled":true,"ttl":"60m"}}`)
+	edit(`{"kind":"stats","data":{"retention":"0"}}`)
 	edit(`{"kind":"request_log","data":{"max_file_size":1073741824}}`)
 
 	content, err := os.ReadFile(cfgPath)
@@ -1008,7 +1007,7 @@ cache:
 	if strings.Contains(text, "circuit_threshold") {
 		t.Errorf("null edit must delete circuit_threshold:\n%s", text)
 	}
-	for _, want := range []string{"sticky_dwell: 5m", "cache:", "enabled: true", "ttl: 60m", "max_file_size: 1073741824"} {
+	for _, want := range []string{"sticky_dwell: 5m", "max_file_size: 1073741824", `retention: "0"`} {
 		if !strings.Contains(text, want) {
 			t.Errorf("edited config missing %q:\n%s", want, text)
 		}
@@ -1017,7 +1016,7 @@ cache:
 	if p.cfg.Scheduling.CircuitThreshold != 0 || p.cfg.Scheduling.StickyDwell != "5m" {
 		t.Errorf("reloaded scheduling = %+v", p.cfg.Scheduling)
 	}
-	if !p.cfg.Cache.Enabled || p.cfg.Cache.TTL != "60m" {
-		t.Errorf("reloaded cache = %+v", p.cfg.Cache)
+	if p.cfg.Stats.Retention != "0" {
+		t.Errorf("reloaded stats = %+v", p.cfg.Stats)
 	}
 }

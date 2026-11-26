@@ -880,45 +880,6 @@ func idArgs(ids []string) []any {
 	return args
 }
 
-// ShadowReport is requestlog.ShadowReport served from the index: the same
-// window semantics (filterSQL's From/To over ts_ms), the same newest-first
-// top-K retention before pairing (ORDER BY ts DESC LIMIT, where the scan
-// keeps its timestamp heap), and the same pairing/aggregation (both feed
-// shadowPairRow into aggregateShadowPairs). Like the scan, it never filters
-// by kind: shadow evaluation rows are LLM-stream rows, and legacy kind=mcp
-// rows can never pair (their ids carry no shadow- twin).
-func (x *Indexer) ShadowReport(filter Filter) ([]ShadowReportEntry, error) {
-	// Shadow evaluation rows are LLM-stream rows; ignore any kind filter so the
-	// report stays comparable to the scan path.
-	filter.Kind = ""
-	where, args := filterSQL(filter)
-	query := `SELECT request_id, shadow, exposed, provider, status, latency_ms, response_size
-		FROM records` + where + ` ORDER BY ts DESC, rowid DESC`
-	if filter.Limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, filter.Limit)
-	}
-	rows, err := x.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	pairRows := make([]shadowPairRow, 0, 64)
-	for rows.Next() {
-		var row shadowPairRow
-		var shadow int
-		if err := rows.Scan(&row.RequestID, &shadow, &row.Exposed, &row.Provider, &row.Status, &row.LatencyMs, &row.ResponseSize); err != nil {
-			return nil, err
-		}
-		row.Shadow = shadow != 0
-		pairRows = append(pairRows, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return aggregateShadowPairs(pairRows), nil
-}
-
 // queryFacets collects the distinct provider/model/agent sets over every
 // indexed row through the same facetCollector the scan feeds, so the shapes
 // (sorted slices, non-nil maps) are identical.

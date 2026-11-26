@@ -59,7 +59,6 @@ const TAB_MARKERS = {
   accounts: { sel: '.acct-nav-item', text: 'dummy' },
   takeover: { sel: '#tab-takeover .table', text: 'claude' },
   mcp: { sel: '.mcp-host' },
-  eval: { sel: '.eval-host', text: 'Shadow Report' },
 };
 
 const PNG_MIN_BYTES = 10000; // 渲染正常的 1440x900 页面不可能小于它

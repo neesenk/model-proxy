@@ -43,10 +43,10 @@ func TestRateLimitPolicyArchitecture(t *testing.T) {
 		t.Errorf("Executor.Execute ParseRateLimit calls = %d, want 1", got)
 	}
 
-	fusion, fusionSet := parseGoFile(t, "internal/forward/fusion.go")
-	calls := importedFunctionCallSites(fusion, fusionSet, "internal/forward/fusion.go", "model-proxy/internal/targetexec", "ParseRateLimit")
+	decisions, decisionsSet := parseGoFile(t, "internal/forward/decisions.go")
+	calls := importedFunctionCallSites(decisions, decisionsSet, "internal/forward/decisions.go", "model-proxy/internal/targetexec", "ParseRateLimit")
 	if len(calls) != 1 {
-		t.Errorf("Fusion ParseRateLimit call sites = %v, want exactly one", calls)
+		t.Errorf("Decisions ParseRateLimit call sites = %v, want exactly one", calls)
 	}
 
 	executor, _ := parseGoFile(t, "internal/targetexec/executor.go")

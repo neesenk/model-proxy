@@ -60,34 +60,16 @@ func TestRequestProfileComputedOncePerRequest(t *testing.T) {
 	}
 }
 
-// TestFusionSynthesizerSupportsTools: with no catalog and no capabilities
-// override the graceful default fits.
-func TestFusionSynthesizerSupportsTools(t *testing.T) {
-	h := newHarness()
-	p := pipeline{svc: h.svc, state: h.state}
-	fc := fusionCtx{runtime: h.snapshot(&Config{
-		Providers: map[string]Provider{"s": {Provider: "test-static"}},
-		Routes:    map[string][]RouteTarget{},
-	})}
-	if !p.fusionSynthesizerSupportsTools(fc, RouteTarget{Provider: "s", Model: "mm"}) {
-		t.Error("nil catalog must degrade to fits=true")
-	}
-	adapter := fusionAdapter{pipe: p, context: fc}
-	if !adapter.SupportsTools(RouteTarget{Provider: "s", Model: "mm"}) {
-		t.Error("SupportsTools port must mirror fusionSynthesizerSupportsTools")
-	}
-}
-
-// TestPlanTargetExportedWrapper: PlanTarget runs the same snapshot-frozen
-// planning the pipeline uses (Shadow's entry point).
-func TestPlanTargetExportedWrapper(t *testing.T) {
+// TestPlanTargetWirePreparation pins snapshot-frozen target planning.
+func TestPlanTargetWirePreparation(t *testing.T) {
 	up := newFakeUpstream(t, openaiOKResponder("ok"))
 	h := newHarness()
+	planner := pipeline{svc: h.svc}
 	cfg := &Config{
 		Providers: map[string]Provider{"up": {OpenAIBaseURL: up.srv.URL, Provider: "test-static"}},
 		Routes:    map[string][]RouteTarget{"m": {{Provider: "up", Model: "real-model"}}},
 	}
-	plan, err := PlanTarget(h.svc, PlanInput{
+	plan, err := planner.planTarget(PlanInput{
 		Runtime:     h.snapshot(cfg),
 		Target:      RouteTarget{Provider: "up", Model: "real-model"},
 		ClientProto: "openai",
@@ -99,7 +81,7 @@ func TestPlanTargetExportedWrapper(t *testing.T) {
 	if plan.BaseURL() != up.srv.URL || plan.BackendProtocol() != protocol.OpenAI {
 		t.Errorf("plan = %s %s, want the openai backend on the fake upstream", plan.BaseURL(), plan.BackendProtocol())
 	}
-	if _, err := PlanTarget(h.svc, PlanInput{Runtime: h.snapshot(cfg), Target: RouteTarget{Provider: "ghost"}}); err == nil {
+	if _, err := planner.planTarget(PlanInput{Runtime: h.snapshot(cfg), Target: RouteTarget{Provider: "ghost"}}); err == nil {
 		t.Error("unknown provider must fail the plan")
 	}
 }
@@ -131,23 +113,5 @@ func TestRequestRoutingSchedulerDelegates(t *testing.T) {
 	planner := requestRoutingPlanner(p, snap, snap.RouteKeys, false)
 	if got := planner.ApplyWithProfile("m", "sess", []RouteTarget{{Provider: "a"}}, routing.Profile{}); len(got) != 1 {
 		t.Errorf("planner apply = %+v, want passthrough for a fitting target", got)
-	}
-}
-
-// TestExpandFusionResponsesWithStore: a responses client on a stateless
-// backend expands the body and returns history; a previous_response_id miss
-// repairs orphaned continuation items.
-func TestExpandFusionResponsesWithStore(t *testing.T) {
-	h := newHarness()
-	h.svc.ResponsesState = protocol.NewResponsesStateStore(t.TempDir() + "/state.json")
-	p := pipeline{svc: h.svc, state: h.state}
-	fc := fusionCtx{proto: "responses", sessionKey: "sess-x", flc: LogCtx{Exposed: "m"}}
-	body := []byte(`{"model":"m","input":"hello","previous_response_id":"resp_gone"}`)
-	expanded, history := p.expandFusionResponses(fc, "openai", body)
-	if len(expanded) == 0 {
-		t.Fatal("expansion returned an empty body")
-	}
-	if history == nil {
-		t.Error("stateless backend with a session must return merged history")
 	}
 }

@@ -8,10 +8,10 @@ model-proxy 是单进程模块化单体：根 `package main` 只负责进程入�
 
 ## 红线
 
-1. 每个请求只捕获一次 `runtimeSnapshot`；Fusion、Shadow 等异步分支只能使用该快照，禁止重读 reload-owned 状态。
+1. 每个请求只捕获一次 `runtimeSnapshot`；异步分支只能使用该快照，禁止重读 reload-owned 状态。
 2. 跨域锁顺序只有 `Proxy.mu → internal/runtime.Manager`；持锁期间不得回调上层 owner 或执行外部 I/O。后台任务必须有 owner、stop、wait 和 final flush。
 3. nil runtime impl、请求/响应转换失败必须 fail-closed；凭据不得进入 config、代码、日志、测试输出或文档示例。
-4. pin/force-provider 是硬选择，不得跨 route failover，并且必须绕过响应 cache。
+4. pin/force-provider 是硬选择，不得跨 route failover。
 5. 模块边界只进不出；直接仓库依赖和关键 owner/callsite 由 `internal/archtest` 的闭合契约保护，不能只放宽测试来迁就实现。
 6. 实现、测试、文档和示例必须同步；用户可见变化更新 `README.md`/`config.yaml`，内部契约更新对应专题文档。
 
@@ -25,7 +25,7 @@ model-proxy 是单进程模块化单体：根 `package main` 只负责进程入�
 | forward、failover、cooldown、runtime、账号池 | `docs/architecture/routing-and-failure.md`、`docs/architecture/runtime-state.md`、`docs/architecture/provider-pools.md` |
 | request routing、catalog、implicit routes | `docs/architecture/request-routing.md` |
 | 协议转换、Provider、凭据/login | `docs/architecture/protocol-conversion.md`、`internal/provider/AGENTS.md`、`docs/backend-contracts.md` |
-| Fusion、Shadow、Cache、request log、live | `docs/architecture/fusion-shadow-cache.md` |
+| request log、live | `docs/architecture/observe.md` |
 | MCP 网关（mcp: 配置、/mcp/ 端点、会话粘滞） | `docs/architecture/mcp.md`；设计背景与实测见 `docs/research/design-mcp-gateway.md` |
 | Web/API/UI | `docs/web-api.md`；前端硬规则另读 `internal/web/assets/AGENTS.md`，页面/组件实现细节见 `docs/frontend.md` |
 | CLI、serve、daemon、进程生命周期 | `CLI.md`、`docs/architecture/overview.md`、`docs/engineering/pitfalls.md` |

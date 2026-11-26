@@ -57,7 +57,7 @@ func FillTargetPriorities(cfg *configdomain.Config, targets []configdomain.Route
 
 // RouteTable is the complete callable route table: derived routes for every
 // exposed provider model, with explicit cfg.Routes entries overriding the
-// derived ones wholesale (fusion targets, protocol overrides, special
+// derived ones wholesale (protocol overrides, special
 // ordering). CLI listing / probing uses this; the app Proxy uses
 // BuildExpandedRoutes with the same inputs plus pool fan-out.
 func RouteTable(cfg *configdomain.Config) map[string][]configdomain.RouteTarget {
@@ -71,7 +71,7 @@ func RouteTable(cfg *configdomain.Config) map[string][]configdomain.RouteTarget 
 // The backend protocol for a route target is resolved at request time by the
 // app's (*Proxy).resolvedBackendProto (internal/app/wirecap.go): declared
 // protocol: > ProtocolHint > wire probe verdict > client-protocol passthrough.
-// Used by forward, fusion, and shadow so the resolution rule is one place.
+// Used by forward and decisions so the resolution rule is one place.
 
 // BuildExpandedRoutes returns routes with pooled targets fanned out to their
 // virtual children: a target whose provider is a pooled parent (key present in

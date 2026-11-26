@@ -181,7 +181,7 @@ func TestExecutorConvertedStreamUpstreamCutIsLogged(t *testing.T) {
 	requireConvertedErrorTerminal(t, writer.Body.String())
 	logged := logs.String()
 	assertLoggedOnce(t, logged,
-		"[proto=openai provider=upstream] converted stream (anthropic→openai) ended with an error terminal — delivered to the client, never cached: {\"error\":{")
+		"[proto=openai provider=upstream] converted stream (anthropic→openai) ended with an error terminal — delivered to the client: {\"error\":{")
 	if !strings.Contains(logged, `"message":"`+convertedErrorMessage+`"`) {
 		t.Fatalf("the evidence excerpt must carry the terminal's message:\n%s", logged)
 	}

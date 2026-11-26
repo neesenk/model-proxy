@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/targetexec"
 )
@@ -16,10 +15,7 @@ import (
 // expansion.
 func TestNewTargetAttemptOnlyGroupsPreparedInputs(t *testing.T) {
 	cfg := &Config{}
-	cache := responsecache.New(responsecache.Options{
-		TTL: time.Hour, MaxEntries: 1, MaxBodyBytes: 1,
-	})
-	runtime := Snapshot{Cfg: cfg, Generation: 41, Cache: cache}
+	runtime := Snapshot{Cfg: cfg, Generation: 41}
 	plan := targetexec.NewPlan(targetexec.PlanInput{
 		Target:          RouteTarget{Provider: "upstream", Model: "target-model"},
 		ProviderConfig:  Provider{OpenAIBaseURL: "https://example.invalid", Provider: "test-static"},
@@ -40,7 +36,6 @@ func TestNewTargetAttemptOnlyGroupsPreparedInputs(t *testing.T) {
 		targetexec.Scope{
 			CalledModel:      "client-model",
 			Agent:            "test-agent",
-			CacheKey:         "cache-key",
 			Log:              targetexec.LogContext{RequestID: "req-1", Exposed: "public-model"},
 			ResponsesHistory: []any{"history"},
 			ResponsesSession: "session-1",
@@ -55,8 +50,7 @@ func TestNewTargetAttemptOnlyGroupsPreparedInputs(t *testing.T) {
 	)
 
 	attemptRuntime := attempt.Runtime()
-	if attemptRuntime.Cache != cache || attemptRuntime.Generation != 41 ||
-		attemptRuntime.Scheduling != cfg.Scheduling {
+	if attemptRuntime.Generation != 41 || attemptRuntime.Scheduling != cfg.Scheduling {
 		t.Fatalf("runtime group changed: %+v", attemptRuntime)
 	}
 	attemptPlan := attempt.Plan()
@@ -74,7 +68,6 @@ func TestNewTargetAttemptOnlyGroupsPreparedInputs(t *testing.T) {
 	scope := attempt.Scope()
 	if scope.CalledModel != "client-model" ||
 		scope.Agent != "test-agent" ||
-		scope.CacheKey != "cache-key" ||
 		scope.Log.RequestID != "req-1" ||
 		scope.ResponsesSession != "session-1" {
 		t.Fatalf("scope group changed: %+v", scope)
@@ -177,10 +170,10 @@ func TestRequestLogInputFallsBackToUpstreamBodyForInternalLeg(t *testing.T) {
 	upstream := []byte(`{"model":"panel-model","input":"prompt"}`)
 
 	input := BuildRequestLogInput(
-		LogCtx{RequestID: "fusion-panel-1", Exposed: "fusion-route"},
+		LogCtx{RequestID: "request-1", Exposed: "public-route"},
 		request,
 		"responses",
-		"fusion-route",
+		"public-route",
 		RouteTarget{Provider: "provider-b", Model: "panel-model"},
 		response,
 		time.Now(),

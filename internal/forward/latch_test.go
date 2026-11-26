@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	responsecache "model-proxy/internal/cache"
 	configdomain "model-proxy/internal/config"
 )
 
@@ -261,42 +260,6 @@ func TestServeLatchSkippedForForceProviderAndPin(t *testing.T) {
 	}
 	if upA.hits() != 2 || upB.hits() != 0 {
 		t.Fatalf("pin: a=%d b=%d, want 2/0", upA.hits(), upB.hits())
-	}
-}
-
-func TestServeEscalationBypassesResponseCache(t *testing.T) {
-	h := newHarness()
-	up := newFakeUpstream(t, openaiOKResponder("cached"))
-	cfg := &Config{
-		Providers: map[string]Provider{"up": {OpenAIBaseURL: up.srv.URL, Provider: "test-static"}},
-		Routes:    map[string][]RouteTarget{"m": {{Provider: "up", Model: "real"}}},
-		RoutePolicies: map[string]RoutePolicy{
-			"m": {
-				Bands: []configdomain.RouteBand{{
-					When:   configdomain.BandWhen{HasImage: boolp(true)},
-					Target: RouteTarget{Provider: "up", Model: "real"},
-				}},
-				Escalation: &configdomain.EscalationConfig{
-					BadSignals:  []string{"upstream_error"},
-					Consecutive: 2,
-					Target:      RouteTarget{Provider: "up", Model: "real"},
-				},
-			},
-		},
-	}
-	snap := h.snapshot(cfg)
-	snap.Cache = responsecache.New(responsecache.Options{TTL: time.Hour, MaxEntries: 8, MaxBodyBytes: 1 << 16})
-	body := openaiChatBody()
-
-	if w := h.serve(snap, "openai", "/v1/chat/completions", body, nil); w.Code != 200 {
-		t.Fatalf("first status = %d", w.Code)
-	}
-	w := h.serve(snap, "openai", "/v1/chat/completions", body, nil)
-	if w.Header().Get("x-mp-cache") == "hit" {
-		t.Fatal("escalation route must bypass response cache")
-	}
-	if up.hits() != 2 {
-		t.Fatalf("upstream hits = %d, want 2 (no cache hit)", up.hits())
 	}
 }
 
@@ -749,7 +712,7 @@ func TestServePlanningFailureNotCountedAsBadRun(t *testing.T) {
 // provider implementation is missing (not logged in / unresolved pooled
 // parent) must fail closed in serveOnce — before any upstream contact, without
 // counting the target as tried or the outcome as an upstream bad run. This is
-// the same explicit nil check the executor/decisions/fusion layers make, kept
+// the same explicit nil check the executor/decisions layers make, kept
 // symmetric at the orchestration layer.
 func TestServeNilProviderFailsClosedWithoutBadRun(t *testing.T) {
 	h := newHarness()

@@ -87,7 +87,6 @@ func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 	helpCommands := []string{
 		"add",
 		"audit",
-		"cache",
 		"config",
 		"doctor",
 		"freeze",
@@ -107,7 +106,6 @@ func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 		"routing",
 		"schedule",
 		"serve",
-		"shadow",
 		"stats",
 		"takeover",
 		"test",
@@ -225,7 +223,6 @@ func TestCLICommandRegistryIsExhaustive(t *testing.T) {
 	wantTargets := map[string]string{
 		"add":      "clipresets.RunAdd",
 		"audit":    "cliaudit.RunAudit",
-		"cache":    "clistatus.RunCache",
 		"presets":  "clipresets.RunPresets",
 		"provider": "cliprovider.RunProvider",
 		"config":   "cliconfig.CmdConfigRun",
@@ -246,7 +243,6 @@ func TestCLICommandRegistryIsExhaustive(t *testing.T) {
 		"restore":    "RunRestore",
 		"schedule":   "clistatus.RunSchedule",
 		"serve":      "app.Serve",
-		"shadow":     "clidiag.RunShadow",
 		"stats":      "clistats.RunStats",
 		"takeover":   "RunTakeover",
 		"test":       "climodels.CmdTest",

@@ -143,18 +143,6 @@ func (s *Service) editGuard(data map[string]any) error {
 	})
 }
 
-func (s *Service) editCache(data map[string]any) error {
-	return s.editConfigNode(func(root *yaml.Node) error {
-		cache := configedit.ChildMap(root, "cache")
-		for _, key := range []string{"enabled", "ttl", "max_entries", "max_body_bytes"} {
-			if value, ok := data[key]; ok {
-				applyScalar(cache, key, value)
-			}
-		}
-		return nil
-	})
-}
-
 // applyScalar writes a form value as a YAML scalar: nil deletes the key (the
 // form's "revert to default" signal — the code default then applies again).
 // parent may be the document root or a child mapping.

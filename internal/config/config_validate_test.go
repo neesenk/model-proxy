@@ -166,45 +166,6 @@ func TestValidate_ValidConfig(t *testing.T) {
 	}
 }
 
-func TestValidate_Budgets(t *testing.T) {
-	base := func() *Config {
-		return &Config{
-			Listen:    "127.0.0.1:1",
-			Providers: map[string]Provider{"x": {OpenAIBaseURL: "https://x", Provider: "zhipu"}},
-		}
-	}
-
-	cfg := base()
-	cfg.Budgets = BudgetsConfig{MonthlyUSD: 20, Providers: map[string]float64{"x": 5}, WebhookURL: "https://hooks.example.com/budget"}
-	if err := cfg.validate(); err != nil {
-		t.Errorf("valid budgets: want nil, got %v", err)
-	}
-
-	cfg = base()
-	cfg.Budgets = BudgetsConfig{MonthlyUSD: -1}
-	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "budgets.monthly_usd") {
-		t.Errorf("negative monthly_usd: err=%v", err)
-	}
-
-	cfg = base()
-	cfg.Budgets = BudgetsConfig{Providers: map[string]float64{"x": -1}}
-	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), `budgets.providers["x"]`) {
-		t.Errorf("negative provider threshold: err=%v", err)
-	}
-
-	cfg = base()
-	cfg.Budgets = BudgetsConfig{Providers: map[string]float64{"typo": 5}}
-	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "not defined under providers:") {
-		t.Errorf("unknown budgets provider: err=%v", err)
-	}
-
-	cfg = base()
-	cfg.Budgets = BudgetsConfig{MonthlyUSD: 1, WebhookURL: "not-a-url"}
-	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "budgets.webhook_url") {
-		t.Errorf("bad webhook_url: err=%v", err)
-	}
-}
-
 // TestValidateAliasExposedNameCollisionOrderIndependent pins the
 // order-independent alias collision check: an alias exposed name colliding
 // with another model's native name is rejected in BOTH models: orders —

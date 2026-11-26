@@ -23,7 +23,7 @@
 import {
   esc, linkifyEsc, fmtNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
-  verdictBadge, modelCapMatrix, visibleModelRows, providerCapsSummary, providerFrozen, providerNames, cacheHitRate,
+  verdictBadge, modelCapMatrix, visibleModelRows, providerCapsSummary, providerFrozen, providerNames,
   accountProviderKey, splitProviderKey, providerDisplayName,
   credentialBannerHTML,
   catalogMatchHTML, catalogMatchEditorHTML, parseModelLines, mergeFetchedModels, aliasRowHTML, providerModelsEditorHTML,
@@ -55,7 +55,6 @@ import {
   takeoverWriteVariantsLabel, takeoverClientLabel,
   takeoverFamilyGroups, takeoverFamilyBadge, highlightConfig,
   TAKEOVER_TEMPLATE_EXAMPLES, TAKEOVER_PLACEHOLDERS,
-  shadowMatchBadge,
   MCP_ANALYTICS_METRICS, mcpAnalyticsFilterSeries, mcpAnalyticsToolFilter,
   mcpAnalyticsSummaryGroups, mcpAnalyticsChartSeries, mcpAnalyticsMetricOptions, mcpAnalyticsValueText,
   mcpAnalyticsSummaryTableHTML, mcpAnalyticsEmptyHTML, mcpAnalyticsSkeletonHTML,
@@ -275,7 +274,6 @@ const panels = {
   analytics: document.getElementById('tab-analytics'),
   requests: document.getElementById('tab-requests'),
   mcp: document.getElementById('tab-mcp'),
-  eval: document.getElementById('tab-eval'),
   security: document.getElementById('tab-security'),
   keys: document.getElementById('tab-keys'),
 };
@@ -307,8 +305,8 @@ let activeTab = 'status';
 function parseHash() {
   const raw = (location.hash || '').replace(/^#\/?/, ''); // drop leading "#"/"#/"
   const [path, queryRaw] = raw.split('?');
-  const [tab, ...rest] = path.split('/');
-  if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics' || tab === 'requests' || tab === 'mcp' || tab === 'security' || tab === 'takeover' || tab === 'eval' || tab === 'keys') {
+  let [tab, ...rest] = path.split('/');
+  if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics' || tab === 'requests' || tab === 'mcp' || tab === 'security' || tab === 'takeover' || tab === 'keys') {
     // decodeURIComponent so provider/section names with special chars
     // round-trip; a malformed sequence decodes to "" (treated as "no sub" ->
     // first provider / default section). For #status/<section>, sub is the
@@ -551,7 +549,6 @@ function activateTab(name) {
   if (name === 'requests') renderRequestsTab();
   if (name === 'mcp') renderMCPTab();
   if (name === 'takeover') renderTakeoverTab();
-  if (name === 'eval') renderEvalTab();
   if (name === 'security') renderSecurityTab();
   if (name === 'keys') renderKeysTab();
   // Reflect the tab in the URL. A tab switch is a navigation the user may want
@@ -701,7 +698,6 @@ function activateTabSilent(name) {
   if (name === 'requests') renderRequestsTab();
   if (name === 'mcp') renderMCPTab();
   if (name === 'takeover') renderTakeoverTab();
-  if (name === 'eval') renderEvalTab();
   if (name === 'security') renderSecurityTab();
   if (name === 'keys') renderKeysTab();
 }
@@ -730,7 +726,7 @@ function activateTabSilent(name) {
 //                   'sessions' (/api/sessions
 //                   aggregate) | 'mcp-records' (derive from kind=mcp records)
 //   ringIn          live-ring membership predicate for this page
-//   standaloneEvents  whether non-request SSE events (budget & friends)
+//   standaloneEvents  whether non-request SSE events (guard & friends)
 //                   render as standalone rows (LLM-side signals)
 //   table           requestTableHeadHTML/requestRowHTML opts (domain switch)
 //   sessionView     sessionViewHTML opts (chips/identity domain switch)
@@ -2603,7 +2599,7 @@ function requestRelTimeOpts(id) {
 // (no free-typing) whose options are the providers that actually carry the
 // request's model (config catalog provider_models — a provider without the
 // model can only answer an upstream 4xx), a run button and a result host.
-// Shadow records are fire-and-forget evaluations — the backend refuses to
+// Historical Shadow records are not ordinary client requests — the backend refuses to
 // replay them, so the strip is not offered. Nor is it on the MCP stream:
 // replay is the LLM forward pipeline (chat-completions re-send); MCP
 // exchanges have no provider axis.
@@ -3848,7 +3844,7 @@ let liveEventSeq = 0;    // synthetic key counter for standalone event-only rows
 // opens the full detail in a modal popover (fetched from /api/requests/<id>
 // once the request ends) — the popover lives in the top layer, so list
 // refreshes never disturb it. Non-request events without a known request id
-// (budget & friends) still render as standalone one-line rows. The All/live
+// (guard & friends) still render as standalone one-line rows. The All/live
 // table is updated incrementally on each SSE event; the session panel keeps
 // its full re-render (scroll anchor preserved).
 function renderLiveCard(target, query) {
@@ -4729,7 +4725,7 @@ function applyLiveEvent(e) {
     }
     return;
   }
-  // Non-lifecycle event (guard/budget/…): attach to the request's row when the
+  // Non-lifecycle event (guard/other/…): attach to the request's row when the
   // id is known, else queue it so a later start/end can claim it.
   const hit = { ts: e.ts, type: e.type, detail: e.detail || '' };
   if (e.request_id && liveByReq[e.request_id]) {
@@ -5042,7 +5038,7 @@ function applyLiveEventDOM(e) {
   // not "recover" by prepending them (the end-event fallback below).
   if (e.request_id && liveByReq[e.request_id] && !liveRowInStream(liveByReq[e.request_id])) return;
   if (!e.request_id && !activeRequestsPage().standaloneEvents) {
-    // Standalone non-request events (budget & friends) are LLM-side signals.
+    // Standalone non-request events (guard & friends) are LLM-side signals.
     return;
   }
   const tbody = tbl.querySelector('tbody');
@@ -5390,7 +5386,6 @@ const STATUS_SECTIONS = [
   { key: 'providers', label: 'Providers' },
   { key: 'models', label: 'Models' },
   { key: 'tokens', label: 'Token Usage' },
-  { key: 'cache', label: 'Cache' },
   { key: 'logs', label: 'Logs' },
 ];
 let statusCache = { st: null, tok: [], logs: [], accounts: [], agents: [], since: 0 };
@@ -5700,10 +5695,6 @@ function renderStatusSection(key) {
       renderTokensCard(main, statusCache.tok || []);
       renderAgentsCard(main, statusCache.agents || []);
       break;
-    case 'cache':
-      main.innerHTML = '';
-      if (st) renderCacheCard(main, st);
-      break;
     case 'logs':
       // Don't clear here — renderLogsInto captures the existing scroll position
       // from the current .log-pre BEFORE wiping the container, so it can restore
@@ -5748,7 +5739,7 @@ function selectStatusSectionSilent(name) {
 // period-over-period deltas, one metric-switchable per-model trend chart and
 // the leaderboard table — pinned to a fixed window: last 1 hour, per-minute
 // buckets, by model. Data comes from /api/analytics (which already drops the
-// guard/attempts/routing/fusion virtual counter namespaces server-side), so
+// guard/attempts/routing and legacy fusion virtual namespaces server-side), so
 // every series is a real upstream model. The former Model Health section is
 // merged into the leaderboard: each row carries its health grade
 // (latency/ttft/tok-s scoring, pure.js modelHealthFromSeries) and the graded
@@ -6953,47 +6944,6 @@ async function testRouteTargets(card, route, btn) {
 }
 
 // renderTokensCard draws the per-(provider, model) token usage table.
-// renderCacheCard shows the exact-response cache counters (GET /api/status
-// `cache`: {enabled,hits,misses,entries,models}). A disabled cache renders a
-// hint instead of a zero table; hit rate comes from the pure cacheHitRate
-// helper and shows "—" before the first lookup. entries is a live gauge
-// (current held responses), not a cumulative counter — it can be lower than
-// misses because failed requests miss without storing, and TTL/eviction
-// removes entries while counters only grow.
-function renderCacheCard(target, st) {
-  const c = (st && st.cache) || {};
-  let body;
-  if (!c.enabled) {
-    body = `<div class="empty-state">Exact response cache is off — enable <code>cache.enabled</code> in config to dedupe identical requests.</div>`;
-  } else {
-    const models = c.models || [];
-    let rows = `<tr class="mono">
-      <td>total</td>
-      <td class="num">${fmtNum(c.entries)}</td>
-      <td class="num">${fmtNum(c.hits)}</td>
-      <td class="num">${fmtNum(c.misses)}</td>
-      <td class="num">${esc(cacheHitRate(c.hits, c.misses))}</td>
-    </tr>`;
-    for (const m of models) {
-      rows += `<tr class="mono">
-        <td>${esc(m.model)}</td>
-        <td class="num">${fmtNum(m.entries)}</td>
-        <td class="num">${fmtNum(m.hits)}</td>
-        <td class="num">${fmtNum(m.misses)}</td>
-        <td class="num">${esc(cacheHitRate(m.hits, m.misses))}</td>
-      </tr>`;
-    }
-    body = `<table class="table">
-      <thead><tr>
-        <th>model</th><th class="num">entries (live)</th><th class="num">hits</th><th class="num">misses</th><th class="num">hit rate</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
-  }
-  const html = buildCard('Cache', 'exact response cache', body, 'flush');
-  target.insertAdjacentHTML('beforeend', html);
-}
-
 function renderTokensCard(target, usage) {
   if (!usage || usage.length === 0) {
     const empty = statusTokensEffectiveRange().preset === 'all'
@@ -7581,10 +7531,8 @@ let yamlSavedText = '';
 // effect after a daemon restart. Code facts: the request_log logger and the
 // stats store are built once at startup (web-api.md request-log section,
 // internal/app/stats_runtime.go initStats), quota_poll_interval is frozen into
-// the tracker ticker at Start (pitfalls #29), the budgets watcher binds its
-// config snapshot at startup (internal/app/budget_watch.go startBudgetWatcher),
-// and listen/log/web bind into the process at boot. Keep in sync with
-// docs/engineering/pitfalls.md.
+// the tracker ticker at Start (pitfalls #29), and listen/log/web bind into the
+// process at boot. Keep in sync with docs/engineering/pitfalls.md.
 const RESTART_KEYS = [
   { path: ['listen'], label: 'listen' },
   { path: ['log_level'], label: 'log_level' },
@@ -7593,7 +7541,6 @@ const RESTART_KEYS = [
   { path: ['request_log'], label: 'request_log.*' },
   { path: ['stats', 'db_path'], label: 'stats.db_path' },
   { path: ['stats', 'retention'], label: 'stats.retention' },
-  { path: ['budgets'], label: 'budgets' },
   { path: ['scheduling', 'quota_poll_interval'], label: 'scheduling.quota_poll_interval' },
 ];
 
@@ -7723,7 +7670,7 @@ async function renderConfigTab() {
     `<div id="config-summary" class="card"><div class="card-body"><span class="msg">loading…</span></div></div>
      <details class="editor" id="ed-route"><summary>${iconChevron()}Routes</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <details class="editor" id="ed-guard-rules"><summary>${iconChevron()}Guard rules (extra patterns / paths)</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
-     <details class="editor" id="ed-settings"><summary>${iconChevron()}Settings (log / scheduling / request log / stats / cache / guard)</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
+     <details class="editor" id="ed-settings"><summary>${iconChevron()}Settings (log / scheduling / request log / stats / guard)</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <div class="card" id="yaml-card">
        <header class="card-head"><h2>Raw YAML</h2><span class="meta" id="yaml-meta"></span></header>
        <div class="card-body">
@@ -8218,27 +8165,6 @@ const SETTINGS_GROUPS = [
       {
         key: 'retention', label: 'retention', type: 'text', def: '720h',
         help: 'Delete minute buckets older than this (30d). 0 keeps history forever.',
-      },
-    ],
-  },
-  {
-    kind: 'cache', title: 'Response cache',
-    fields: [
-      {
-        key: 'enabled', label: 'enabled', type: 'checkbox', def: 'false',
-        help: 'Replay a byte-identical request (SHA-256 of method + path + body) from the exact response cache, marked x-mp-cache: hit.',
-      },
-      {
-        key: 'ttl', label: 'ttl', type: 'text', def: '10m',
-        help: 'Cached entry lifetime.',
-      },
-      {
-        key: 'max_entries', label: 'max_entries', type: 'number', def: '1000',
-        help: 'Maximum live cache entries; least-recently-used entries are evicted first.',
-      },
-      {
-        key: 'max_body_bytes', label: 'max_body_bytes (bytes)', type: 'number', def: '262144',
-        help: 'Only responses at or below this size (256 KiB) are cached.',
       },
     ],
   },
@@ -11379,8 +11305,6 @@ async function boot() {
     activateTabSilent('mcp');
   } else if (bootTab === 'takeover') {
     activateTabSilent('takeover');
-  } else if (bootTab === 'eval') {
-    activateTabSilent('eval');
   } else if (bootTab === 'security') {
     activateTabSilent('security');
   } else if (bootTab === 'keys') {
@@ -12927,100 +12851,6 @@ function renderTakeoverTemplateModal(modal, name, doc) {
       }
     });
   }
-}
-
-// ---------- Eval tab ----------
-
-// Evaluation/observability surfaces that already have APIs: the shadow report
-// (/api/shadow-report — primary vs shadow backend comparison over paired
-// request-log samples) and the Fusion orchestration feed (/api/fusion —
-// per-workflow stats + recent runs). All renders are user-triggered (tab
-// activation via retainTab, Refresh clicks), so the deferAutoRefresh gate
-// does not apply. Each half settles independently: a failed fetch keeps the
-// last good data on screen and reports through setRefreshError.
-let evalShadow = null;
-let evalFusion = null;
-
-async function renderEvalTab() {
-  const panel = panels.eval;
-  if (await retainTab(panel, '.eval-host', loadEval)) return;
-  panel.innerHTML = '<div class="eval-host"><span class="hint">loading…</span></div>';
-  await loadEval();
-}
-
-async function loadEval() {
-  const panel = panels.eval;
-  const [shadow, fusion] = await Promise.allSettled([
-    apiGet('/api/shadow-report'),
-    apiGet('/api/fusion'),
-  ]);
-  const errs = [];
-  if (shadow.status === 'fulfilled') evalShadow = shadow.value;
-  else errs.push((shadow.reason && shadow.reason.message) || String(shadow.reason));
-  if (fusion.status === 'fulfilled') evalFusion = fusion.value;
-  else errs.push((fusion.reason && fusion.reason.message) || String(fusion.reason));
-  if (evalShadow || evalFusion) renderEvalInto();
-  setRefreshError(panel, errs.length ? errs.join(' · ') : null);
-}
-
-function renderEvalInto() {
-  const host = panels.eval && panels.eval.querySelector('.eval-host');
-  if (!host) return;
-  host.innerHTML = evalShadowCardHTML(evalShadow) + evalFusionCardHTML(evalFusion);
-  const refresh = host.querySelector('[data-eval-refresh]');
-  if (refresh) refresh.onclick = () => loadEval();
-}
-
-function evalShadowCardHTML(data) {
-  const refreshBtn = '<button class="btn small" data-eval-refresh>Refresh</button>';
-  if (!data) return buildCard('Shadow Report', '', '<span class="hint">loading…</span>', '', refreshBtn);
-  if (!data.enabled) {
-    return buildCard('Shadow Report', '', '<span class="hint">Shadow evaluation needs request_log.enabled; no paired samples are recorded otherwise.</span>', '', refreshBtn);
-  }
-  const entries = data.entries || [];
-  if (!entries.length) {
-    return buildCard('Shadow Report', '24h', '<span class="hint">No shadow pairs in the last 24h.</span>', '', refreshBtn);
-  }
-  const rows = entries.map((e) => `<tr><td class="mono">${esc(e.route)}</td><td title="${esc(e.primary_provider)}">${esc(displayProvider(e.primary_provider))}</td><td title="${esc(e.shadow_provider)}">${esc(displayProvider(e.shadow_provider))}</td>` +
-    `<td class="num">${fmtNum(e.samples)}</td><td>${shadowMatchBadge(e.status_match_rate)}</td>` +
-    `<td class="num">${fmtNum(e.primary_latency_ms)}</td><td class="num">${fmtNum(e.shadow_latency_ms)}</td>` +
-    `<td class="num">${e.latency_diff_ms > 0 ? '+' : ''}${fmtNum(e.latency_diff_ms)}</td></tr>`).join('');
-  const table = `<table class="table"><thead><tr><th>Route</th><th>Primary</th><th>Shadow</th><th class="num">Samples</th><th>Status Match</th><th class="num">Primary ms</th><th class="num">Shadow ms</th><th class="num">Δ ms</th></tr></thead><tbody>${rows}</tbody></table>`;
-  return buildCard('Shadow Report', `last 24h · ${entries.length} route pairs`, table, '', refreshBtn);
-}
-
-function evalFusionCardHTML(data) {
-  if (!data) return buildCard('Fusion', '', '<span class="hint">loading…</span>');
-  const workflows = data.workflows || {};
-  const names = Object.keys(workflows).sort();
-  const runs = data.runs || [];
-  if (!names.length && !runs.length) {
-    return buildCard('Fusion', '', '<span class="hint">No fusion workflows configured or no runs yet — fusion workflows live in config under fusion:.</span>');
-  }
-  let out = '';
-  if (names.length) {
-    const rows = names.map((name) => {
-      const w = workflows[name];
-      const degraded = Object.entries(w.degraded || {}).map(([k, v]) => `${esc(k)}×${v}`).join(', ') || '—';
-      return `<tr><td class="mono">${esc(name)}</td><td class="num">${fmtNum(w.runs)}</td><td class="num">${fmtNum(w.runs_today)}</td>` +
-        `<td class="num">${fmtNum(w.quorum_met)}</td><td class="num">${Number(w.amplification || 0).toFixed(2)}×</td><td class="hint">${degraded}</td></tr>`;
-    }).join('');
-    out += `<table class="table"><thead><tr><th>Workflow</th><th class="num">Runs</th><th class="num">Today</th><th class="num">Quorum Met</th><th class="num">Amplification</th><th>Degraded</th></tr></thead><tbody>${rows}</tbody></table>`;
-  }
-  if (runs.length) {
-    const rows = runs.map((r) => {
-      const legs = (r.legs || []);
-      const legsTip = legs.map((l) => `${displayProvider(l.provider)}/${l.model} ${l.status}${l.err ? ' — ' + l.err : ''}`).join('\n');
-      const quorum = r.quorum ? '<span class="badge ok">quorum</span>' : `<span class="badge warn">${esc(r.degraded || 'partial')}</span>`;
-      const synth = r.synth_committed ? `<span class="badge ok">${r.synth_status || 'ok'}</span>` : '<span class="badge muted">—</span>';
-      return `<tr><td class="mono">${esc(fmtTimeSafe(r.ts) || '')}</td><td class="mono">${esc(r.workflow)}</td><td class="mono">${esc(r.route)}</td>` +
-        `<td>${quorum}</td><td class="num">${fmtNum(r.drafts_used)}</td>` +
-        `<td class="num" title="${esc(legsTip)}">${legs.length}</td>` +
-        `<td>${r.judge_used ? '<span class="badge muted">judge</span>' : ''}</td><td>${synth}</td></tr>`;
-    }).join('');
-    out += `<table class="table"><thead><tr><th>Time</th><th>Workflow</th><th>Route</th><th>Quorum</th><th class="num">Drafts</th><th class="num">Legs</th><th>Judge</th><th>Synth</th></tr></thead><tbody>${rows}</tbody></table>`;
-  }
-  return buildCard('Fusion', `${names.length} workflows · ${runs.length} recent runs`, out);
 }
 
 boot();

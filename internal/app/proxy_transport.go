@@ -22,8 +22,7 @@ func (p *Proxy) clientFor(cfg *configdomain.Config, parentOf map[string]string, 
 	return &http.Client{Timeout: 0, Transport: p.transportFor(cfg, parentOf, provider)}
 }
 
-// transportFor is clientFor's transport half, exposed for callers that need
-// their own timeout budget (shadow).
+// transportFor is clientFor's transport half.
 func (p *Proxy) transportFor(cfg *configdomain.Config, parentOf map[string]string, provider string) *http.Transport {
 	global, perProvider := "", ""
 	if cfg != nil {

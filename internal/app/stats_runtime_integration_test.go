@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"math/rand"
 	configdomain "model-proxy/internal/config"
 	obscounters "model-proxy/internal/observe/counters"
 	runtimestate "model-proxy/internal/runtime"
@@ -106,10 +105,9 @@ func TestInitStatsRestoresAllRuntimeFieldsWithoutDuplicateFlush(t *testing.T) {
 
 	proxy := &Proxy{
 		processServices: processServices{
-			metrics:  obscounters.NewMetricsStore(),
-			tokens:   obscounters.NewTokenCounter(),
-			agents:   obscounters.NewAgentCounter(),
-			evalRand: rand.Float64,
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
+			agents:  obscounters.NewAgentCounter(),
 		},
 	}
 	proxy.initStats(configdomain.StatsConfig{DBPath: path, Retention: "0"})
@@ -169,7 +167,6 @@ func TestStatsResetSerializesWithFlushAndRebaselines(t *testing.T) {
 		processServices: processServices{
 			metrics: metrics, tokens: tokens, agents: agents,
 			stats: store, flusher: flusher,
-			evalRand: rand.Float64,
 		},
 	}
 	addRuntimeStats(metrics, tokens, agents, 3, 30)
@@ -344,7 +341,6 @@ func TestProxyCloseFinalFlushesOnceAndClosesStatsStore(t *testing.T) {
 			agents:    agents,
 			stats:     store,
 			flusher:   flusher,
-			evalRand:  rand.Float64,
 		},
 	}
 	t.Cleanup(proxy.Close)
@@ -403,7 +399,6 @@ func TestProxyCloseRetriesTransientFinalStatsFailure(t *testing.T) {
 			agents:    agents,
 			stats:     store,
 			flusher:   observestats.NewFlusher(sink, metrics, tokens, agents, nil, nil),
-			evalRand:  rand.Float64,
 		},
 	}
 	t.Cleanup(proxy.Close)
@@ -477,28 +472,23 @@ func TestStatsShutdownFlushHonorsContextDeadline(t *testing.T) {
 	}
 }
 
-func TestTokensResetClearsDurableStatsButNotResponseCache(t *testing.T) {
+func TestTokensResetClearsDurableStats(t *testing.T) {
 	store := openTestStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
-	cache := NewResponseCache(configdomain.CacheConfig{Enabled: true, TTL: "1h"}, nil)
 	flusher := observestats.NewFlusher(store, metrics, tokens, agents, nil, nil)
 	proxy := &Proxy{
-		generationState: generationState{
-			cache: cache,
-		},
+		generationState: generationState{},
 		processServices: processServices{
 			metrics: metrics, tokens: tokens, agents: agents,
 			stats: store, flusher: flusher,
-			evalRand: rand.Float64,
 		},
 	}
 	addRuntimeStats(metrics, tokens, agents, 2, 20)
 	if !flusher.Flush(time.Unix(120, 0)) {
 		t.Fatal("reset precondition flush did not write")
 	}
-	cache.Put("key", "m", http.StatusOK, http.Header{"X-Test": {"value"}}, []byte("body"), time.Now())
 
 	recorder := httptest.NewRecorder()
 	serveWeb(NewWebServer(proxy, "test-config.yaml"),
@@ -523,11 +513,6 @@ func TestTokensResetClearsDurableStatsButNotResponseCache(t *testing.T) {
 		t.Fatalf("reset incomplete: rows=%+v agents=%+v metrics=%+v tokens=%+v agentCounters=%+v",
 			rows, agentRows, metrics.Snapshot(), tokens.Snapshot(), agents.Snapshot())
 	}
-	// The response cache is operational accounting, deliberately decoupled
-	// from "reset counters": its entries (and hit/miss history) survive.
-	if cache.Stats().Entries != 1 {
-		t.Fatalf("reset cleared response-cache entries: %+v", cache.Stats())
-	}
 }
 
 type resetErrorSink struct {
@@ -543,21 +528,16 @@ func TestTokensResetFailurePreservesLiveState(t *testing.T) {
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
-	cache := NewResponseCache(configdomain.CacheConfig{Enabled: true, TTL: "1h"}, nil)
 	flusher := observestats.NewFlusher(
 		&resetErrorSink{Store: store}, metrics, tokens, agents, nil, nil)
 	proxy := &Proxy{
-		generationState: generationState{
-			cache: cache,
-		},
+		generationState: generationState{},
 		processServices: processServices{
 			metrics: metrics, tokens: tokens, agents: agents,
 			stats: store, flusher: flusher,
-			evalRand: rand.Float64,
 		},
 	}
 	addRuntimeStats(metrics, tokens, agents, 1, 5)
-	cache.Put("key", "m", http.StatusOK, nil, []byte("body"), time.Now())
 
 	recorder := httptest.NewRecorder()
 	serveWeb(NewWebServer(proxy, "test-config.yaml"),
@@ -572,10 +552,9 @@ func TestTokensResetFailurePreservesLiveState(t *testing.T) {
 	}
 	if metrics.Snapshot()[obscounters.PMKey{Provider: "provider", Model: "model"}].Requests != 1 ||
 		tokens.Snapshot()[obscounters.TokenKey{Provider: "provider", Model: "model"}].Input != 5 ||
-		agents.Snapshot()[obscounters.AgentKey{Agent: "codex", Provider: "provider", Model: "model"}].Requests != 1 ||
-		cache.Stats().Entries != 1 {
-		t.Fatalf("failed reset mutated live state: metrics=%+v tokens=%+v agents=%+v cache=%+v",
-			metrics.Snapshot(), tokens.Snapshot(), agents.Snapshot(), cache.Stats())
+		agents.Snapshot()[obscounters.AgentKey{Agent: "codex", Provider: "provider", Model: "model"}].Requests != 1 {
+		t.Fatalf("failed reset mutated live state: metrics=%+v tokens=%+v agents=%+v",
+			metrics.Snapshot(), tokens.Snapshot(), agents.Snapshot())
 	}
 }
 

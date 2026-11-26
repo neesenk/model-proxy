@@ -20,13 +20,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// FusionProvider is the reserved pseudo-provider id a route target uses to
-// reference a fusion recipe instead of an upstream provider. It carries no
-// credentials of its own and is exempt from auth/availability filtering.
-// Every comparison against this id must use this constant — bare "fusion"
-// literals once forked the offline (takeover) and runtime paths.
-const FusionProvider = "fusion"
-
 type Config struct {
 	Listen   string `yaml:"listen"`
 	LogLevel string `yaml:"log_level"`
@@ -57,36 +50,15 @@ type Config struct {
 	// "off" to force direct). Empty = automatic chain: environment variables
 	// (HTTPS_PROXY/HTTP_PROXY/NO_PROXY) → OS system proxy → direct. A
 	// provider's proxy_url overrides it for that provider's forwarded traffic.
-	Proxy      string           `yaml:"proxy"`
-	Scheduling Scheduling       `yaml:"scheduling"`
-	Web        WebConfig        `yaml:"web"`
-	Stats      StatsConfig      `yaml:"stats"`
-	RequestLog RequestLogConfig `yaml:"request_log"`
-	Cache      CacheConfig      `yaml:"cache"`
-	// Shadow maps an exposed model to a candidate backend to evaluate: each
-	// committed request to the route is ALSO sent to the shadow provider (same
-	// prompt, the shadow's model), logged for quality/latency comparison, and the
-	// result is NOT returned to the client. Empty/missing = off. Requires
-	// request_log to record shadow results.
-	Shadow map[string]ShadowTarget `yaml:"shadow"`
-	// ShadowSampleRate (*float64): nil = default 1.0 (all requests); explicit
-	// 0.0 = shadowing OFF (distinguishes "unset" from "disabled"); 0.5 = half.
-	ShadowSampleRate *float64 `yaml:"shadow_sample_rate"`
-	// ShadowMaxConcurrent caps the number of in-flight shadow goroutines.
-	// Default 4. Additional shadows are silently dropped (best-effort) when the
-	// cap is reached, preventing goroutine explosion under high QPS.
-	ShadowMaxConcurrent int `yaml:"shadow_max_concurrent"`
-	// Fusion holds named multi-model orchestration recipes (panel → synthesis).
-	// A route references one with {provider: fusion, model: <recipe name>}:
-	// the request fans out to the panel in parallel, and the synthesizer model
-	// answers the client from the collected drafts. Empty/missing = off.
-	Fusion  map[string]FusionConfig `yaml:"fusion"`
-	Pricing PricingConfig           `yaml:"pricing"`
-	Prices  map[string]PriceConfig  `yaml:"prices"`
+	Proxy      string                 `yaml:"proxy"`
+	Scheduling Scheduling             `yaml:"scheduling"`
+	Web        WebConfig              `yaml:"web"`
+	Stats      StatsConfig            `yaml:"stats"`
+	RequestLog RequestLogConfig       `yaml:"request_log"`
+	Pricing    PricingConfig          `yaml:"pricing"`
+	Prices     map[string]PriceConfig `yaml:"prices"`
 	// Guard configures the outbound request-body secret scan (DLP-lite).
 	Guard GuardConfig `yaml:"guard"`
-	// Budgets configures personal monthly equivalent-cost alerts.
-	Budgets BudgetsConfig `yaml:"budgets"`
 	// MCP declares remote MCP (Model Context Protocol) backends exposed by
 	// the gateway at /mcp/<name>: provider-backed servers reuse the
 	// provider's credential pool, `auth: none` servers are anonymous public
@@ -386,70 +358,7 @@ func (g GuardConfig) AuditPathValue(home string) string {
 	return filepath.Join(LogDir(home), "security", "security.log")
 }
 
-// BudgetsConfig configures personal monthly spend alerts on the equivalent
-// USD cost of observed token usage (the same pricing path as /api/analytics).
-// monthly_usd is the global threshold on the month's total (0/unset = off);
-// providers sets an independent per-provider threshold (present = the
-// provider's own scope, replacing the global threshold for that provider;
-// 0 = no alert for that provider — its spend still counts toward the global
-// total). webhook_url is the HTTP POST target for alerts (unset = live event
-// only). Alerts fire once per (scope, month, threshold) per process; a
-// restart may re-alert.
-type BudgetsConfig struct {
-	MonthlyUSD float64            `yaml:"monthly_usd"`
-	Providers  map[string]float64 `yaml:"providers"`
-	WebhookURL string             `yaml:"webhook_url"`
-}
-
-// Enabled reports whether any budget threshold is active.
-func (b BudgetsConfig) Enabled() bool {
-	if b.MonthlyUSD > 0 {
-		return true
-	}
-	for _, threshold := range b.Providers {
-		if threshold > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// FusionConfig is one multi-model orchestration recipe: a panel of 2..4 draft
-// providers fanned out in parallel, plus a synthesizer that produces the final
-// answer from the collected drafts. MinPanel is the quorum — the minimum number
-// of drafts required before synthesis (default 2); below quorum the request
-// degrades to a plain direct call to the synthesizer with the original body.
-type FusionConfig struct {
-	Panel       []RouteTarget `yaml:"panel"`
-	Synthesizer RouteTarget   `yaml:"synthesizer"`
-	MinPanel    int           `yaml:"min_panel"`
-	// MaxRunsPerDay caps ORCHESTRATED runs per local day (0 = unlimited); an
-	// over-budget request degrades to a plain direct synthesizer call
-	// (budget_exceeded). Runs degraded before fan-out never consume the budget.
-	MaxRunsPerDay int `yaml:"max_runs_per_day"`
-	// FirstTurnOnly restricts orchestration to the first conversation turn: a
-	// request body already carrying an assistant message goes straight to the
-	// synthesizer (multi_turn) — multi-turn sessions would otherwise fan out
-	// (and pay the N+1 cost) on every turn.
-	FirstTurnOnly bool `yaml:"first_turn_only"`
-	// Judge is an optional analysis step between quorum and synthesis: one
-	// non-streaming call reviewing the candidates (consensus / conflicts /
-	// omissions); its report is injected into the synthesis body. A judge
-	// failure skips the report without degrading the run. nil = off.
-	Judge *RouteTarget `yaml:"judge"`
-	// Instruction overrides the fixed synthesis preamble (rune-capped, see
-	// fusionInstructionMaxRunes). Empty = the built-in template.
-	Instruction string `yaml:"instruction"`
-	// Selector is an optional pre-fan-out routing decision made by a decisions
-	// model (e.g. TypeSafe Jev): one call picks the best candidate and scores
-	// task difficulty. shadow (default) only records the decision; enforce may
-	// answer directly via the chosen model (selector_direct) or trim the panel.
-	// Every failure (timeout, low confidence, invalid choice) falls back to the
-	// static full panel. nil = off.
-	Selector *SelectorConfig `yaml:"selector"`
-}
-
-// SelectorConfig tunes one fusion recipe's decisions-model routing pass. The
+// SelectorConfig tunes a route policy's decisions-model routing pass. The
 // target must be a decisions-protocol provider/model (e.g. typesafe/jev-1.13);
 // its credentials, proxy, circuit breaker, request log and metrics are the
 // ordinary provider machinery's, so no key ever appears in this block.
@@ -460,18 +369,10 @@ type SelectorConfig struct {
 	Mode string `yaml:"mode"`
 	// Confidence is the enforce-mode action threshold [0,1] (default 0.55).
 	Confidence float64 `yaml:"confidence"`
-	// DirectScoreMax (0..5, default 0 = never direct): in enforce mode a
-	// confident choice whose difficulty score is at most this answers directly
-	// via the chosen model with the original body, skipping orchestration.
-	DirectScoreMax float64 `yaml:"direct_score_max"`
-	// PanelTopK (0 = no trim): in enforce mode trim the panel to the top-K
-	// candidates by decision probability (the chosen model is always kept).
-	PanelTopK int `yaml:"panel_top_k"`
 	// Timeout is the per-decision budget as a duration string (default "800ms").
 	Timeout string `yaml:"timeout"`
-	// Instruction overrides the default choice-question instructions
-	// (rune-capped like FusionConfig.Instruction). DifficultyInstruction does
-	// the same for the difficulty score question.
+	// Instruction overrides the default choice-question instructions.
+	// DifficultyInstruction does the same for the difficulty score question.
 	Instruction           string `yaml:"instruction"`
 	DifficultyInstruction string `yaml:"difficulty_instruction"`
 }
@@ -497,8 +398,7 @@ func (s SelectorConfig) ConfidenceThreshold() float64 {
 // request-profile → preferred-target rules: the first band whose conditions all
 // hold selects a grade (or, for legacy ungraded routes, moves a target to the
 // front). Selector makes a per-request decisions-model choice among the route's
-// grades when grades are configured, otherwise among its targets. Eval
-// configures pairwise shadow evaluation (L2 strong labels) for graded routes.
+// grades when grades are configured, otherwise among its targets.
 // A route without a policy keeps the static order — zero behavior change. See
 // docs/architecture/request-routing.md.
 type RoutePolicy struct {
@@ -507,38 +407,8 @@ type RoutePolicy struct {
 	Selector   *SelectorConfig          `yaml:"selector,omitempty"`
 	Grades     map[string][]RouteTarget `yaml:"grades,omitempty"`
 	Fallback   string                   `yaml:"fallback,omitempty"`
-	Eval       *EvalConfig              `yaml:"eval,omitempty"`
-}
-
-// EvalConfig configures pairwise shadow evaluation (L2 strong labels) for a
-// graded route. The judge target must speak the decisions protocol. Sampling is
-// applied post-commit and fail-open: any judge failure drops the sample without
-// affecting the live request.
-type EvalConfig struct {
-	SampleRate float64     `yaml:"sample_rate"`
-	Pair       string      `yaml:"pair"`
-	Judge      RouteTarget `yaml:"judge"`
-}
-
-// SampleRateValue returns the effective sample rate. Validation rejects
-// values outside [0, 0.5]; zero or negative falls back to the default 0.05.
-func (e *EvalConfig) SampleRateValue() float64 {
-	if e == nil {
-		return 0.05
-	}
-	if e.SampleRate <= 0 {
-		return 0.05
-	}
-	return e.SampleRate
-}
-
-// PairMode returns the validated pair mode: "opposite" or "grade:<name>".
-// An empty Pair defaults to "opposite" after validation.
-func (e *EvalConfig) PairMode() string {
-	if e == nil || e.Pair == "" {
-		return "opposite"
-	}
-	return e.Pair
+	// Tombstone: reject the removed L2 eval block instead of silently ignoring it.
+	Eval *struct{} `yaml:"eval,omitempty"`
 }
 
 // HasGrades reports whether this policy configures grade-based routing.
@@ -568,8 +438,7 @@ type RouteBand struct {
 // BandWhen is one band's condition set: nil means "don't care", every non-nil
 // field must hold (AND). At least one field must be set — an empty when is a
 // validate error. Signals come from the single per-request routing.Profile
-// scan; follow_up mirrors "the body already carries an assistant turn" (the
-// fusion first_turn_only gate's notion of a later turn).
+// scan; follow_up mirrors "the body already carries an assistant turn".
 type BandWhen struct {
 	EstimatedTokensMin *int64 `yaml:"estimated_tokens_min"`
 	EstimatedTokensMax *int64 `yaml:"estimated_tokens_max"`
@@ -619,24 +488,8 @@ func (s SelectorConfig) TimeoutDuration() time.Duration {
 	return 800 * time.Millisecond
 }
 
-// fusionInstructionMaxRunes caps FusionConfig.Instruction (validation-enforced)
-// so a pasted essay can't silently bloat every synthesis prompt.
-const fusionInstructionMaxRunes = 4000
-
-// fusionRubricMaxRunes caps the per-candidate rubric fed to the decisions
-// selector: one-line descriptions keep the choice question cheap and sharp.
-const fusionRubricMaxRunes = 200
-
-// ShadowTarget names the candidate backend for shadow evaluation of a route.
-type ShadowTarget struct {
-	Provider string `yaml:"provider"`
-	Model    string `yaml:"model"`
-	// Protocol declares the shadow backend's protocol ("anthropic"|"openai"|"responses"). Empty
-	// = same as the request body's protocol (the primary target's backend proto).
-	// Set it when the shadow backend speaks a different protocol than the body the
-	// shadow request is built from — runShadow converts + routes accordingly.
-	Protocol string `yaml:"protocol"`
-}
+// selectorInstructionMaxRunes caps custom selector prompts.
+const selectorInstructionMaxRunes = 4000
 
 // WebAuthConfig configures the optional S2 auth layer. Both surfaces stay
 // UNauthenticated when unset (the loopback-trust default). Setting a file
@@ -902,45 +755,6 @@ func (r RequestLogConfig) HotRetentionDuration() time.Duration {
 	return 168 * time.Hour
 }
 
-// CacheConfig configures the exact-match response cache.
-type CacheConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	TTL          string `yaml:"ttl"`            // entry expiry (default 10m)
-	MaxEntries   int    `yaml:"max_entries"`    // size cap (default 1000)
-	MaxBodyBytes int    `yaml:"max_body_bytes"` // cache only responses ≤ this (default 256KiB)
-}
-
-// IsEnabled reports whether the exact-match response cache is enabled.
-func (c CacheConfig) IsEnabled() bool { return c.Enabled }
-
-// TTLDuration returns the cache entry TTL, defaulting to 10 minutes.
-func (c CacheConfig) TTLDuration() time.Duration {
-	if c.TTL == "" {
-		return 10 * time.Minute
-	}
-	if d, err := time.ParseDuration(c.TTL); err == nil {
-		return d
-	}
-	return 10 * time.Minute
-}
-
-// MaxEntriesValue returns the cache entry cap, defaulting to 1000.
-func (c CacheConfig) MaxEntriesValue() int {
-	if c.MaxEntries > 0 {
-		return c.MaxEntries
-	}
-	return 1000
-}
-
-// MaxBodyBytesValue returns the largest cacheable response body, defaulting to
-// 256 KiB.
-func (c CacheConfig) MaxBodyBytesValue() int {
-	if c.MaxBodyBytes > 0 {
-		return c.MaxBodyBytes
-	}
-	return 256 * 1024
-}
-
 // Scheduling configures failover health (circuit breaker, rate-limit skip) and
 // sticky routing. Durations are parsed from strings (e.g. "10m", "60s") via
 // time.ParseDuration; unset/invalid values fall back to the defaults shown below.
@@ -1073,7 +887,7 @@ type Provider struct {
 	Provider         string `yaml:"provider_id" json:"provider_id,omitempty"`
 	// ProxyURL overrides the top-level proxy for this provider (http/https/
 	// socks5 URL, or "off" to force direct). Empty = follow the global chain.
-	// Governs BOTH the forwarded traffic (forward/fusion/shadow, resolved in
+	// Governs forwarded traffic (resolved in
 	// internal/app proxy_transport.go) and this provider's account-maintenance
 	// calls (usage/quota/mint/models fetches, resolved via
 	// upstreamproxy.ProviderTransport) — a provider only reachable through its
@@ -1157,7 +971,7 @@ func (c *Config) ExposedModelNames() map[string]bool {
 }
 
 // RouteExposedNames returns every callable exposed model name: explicit route
-// keys plus the names derived from providers. shadow keys are validated
+// keys plus the names derived from providers. Route-policy keys are validated
 // against this set.
 func (c *Config) RouteExposedNames() map[string]bool {
 	out := c.ExposedModelNames()
@@ -1336,8 +1150,8 @@ type RouteTarget struct {
 	// conversion contract belongs to internal/protocol.
 	Protocol string `yaml:"protocol"`
 	// Rubric is an optional one-line capability/cost description of this
-	// target, consumed only by the fusion selector (it becomes the candidate
-	// criterion in the decisions question). Empty = "provider/model".
+	// target, consumed by route selectors (it becomes the candidate criterion
+	// in the decisions question). Empty = "provider/model".
 	Rubric string `yaml:"rubric,omitempty"`
 }
 
@@ -1469,10 +1283,10 @@ func parseConfigBytes(path string, data []byte) (*Config, error) {
 		LogRotateKeep    *int                       `yaml:"log_rotate_keep"`
 		Providers        map[string]Provider        `yaml:"providers"`
 		Routes           map[string]routeDefinition `yaml:"routes"`
-		// Must mirror Config.RoutePolicies (same silent-drop trap as the
-		// shadow knobs: without it the file's route_policy: would be dropped).
+		// Must mirror Config.RoutePolicies; otherwise route_policy would be
+		// silently dropped during the raw-to-domain projection.
 		RoutePolicies map[string]RoutePolicy `yaml:"route_policy"`
-		// Must mirror Config.Proxy (same silent-drop trap as the shadow knobs).
+		// Must mirror Config.Proxy (same silent-drop trap).
 		Proxy      string     `yaml:"proxy"`
 		Scheduling Scheduling `yaml:"scheduling"`
 		// Tombstone: claude_mapping was removed (anthropic aliases are plain
@@ -1483,27 +1297,26 @@ func parseConfigBytes(path string, data []byte) (*Config, error) {
 		// Tombstone: the takeover: block was removed — client targets come from
 		// templates now (internal/takeover presets + user overrides in
 		// ~/.model-proxy/takeover-templates). Same silent-drop rationale.
-		Takeover   map[string]any          `yaml:"takeover"`
-		Web        WebConfig               `yaml:"web"`
-		Stats      StatsConfig             `yaml:"stats"`
-		RequestLog RequestLogConfig        `yaml:"request_log"`
-		Cache      CacheConfig             `yaml:"cache"`
-		Shadow     map[string]ShadowTarget `yaml:"shadow"`
-		// Must mirror Config's shadow knobs — without these the file-loaded
-		// values are silently dropped (and validate's range checks never fire).
-		ShadowSampleRate    *float64                `yaml:"shadow_sample_rate"`
-		ShadowMaxConcurrent int                     `yaml:"shadow_max_concurrent"`
-		Fusion              map[string]FusionConfig `yaml:"fusion"`
-		Pricing             PricingConfig           `yaml:"pricing"`
-		Prices              map[string]PriceConfig  `yaml:"prices"`
-		Guard               GuardConfig             `yaml:"guard"`
-		Budgets             BudgetsConfig           `yaml:"budgets"`
-		// Must mirror Config.MCP (same silent-drop trap as the shadow knobs).
+		Takeover   map[string]any   `yaml:"takeover"`
+		Web        WebConfig        `yaml:"web"`
+		Stats      StatsConfig      `yaml:"stats"`
+		RequestLog RequestLogConfig `yaml:"request_log"`
+		// Tombstones: removed optional blocks must fail loudly, not become no-ops.
+		Cache               *struct{}              `yaml:"cache"`
+		Shadow              *struct{}              `yaml:"shadow"`
+		ShadowSampleRate    *float64               `yaml:"shadow_sample_rate"`
+		ShadowMaxConcurrent *int                   `yaml:"shadow_max_concurrent"`
+		Fusion              *struct{}              `yaml:"fusion"`
+		Pricing             PricingConfig          `yaml:"pricing"`
+		Prices              map[string]PriceConfig `yaml:"prices"`
+		Guard               GuardConfig            `yaml:"guard"`
+		Budgets             *struct{}              `yaml:"budgets"` // tombstone: monthly cost alerts removed
+		// Must mirror Config.MCP (same silent-drop trap).
 		MCP map[string]MCPServer `yaml:"mcp"`
 		// Must mirror Config.MCPRoutes.
 		MCPRoutes map[string]MCPRoute `yaml:"mcp_routes"`
 		// Must mirror Config.MaxRequestBodyBytes (same silent-drop trap as the
-		// shadow knobs above).
+		// silent-drop trap above).
 		MaxRequestBodyBytes int64            `yaml:"max_request_body_bytes"`
 		Credentials         string           `yaml:"credentials"`
 		Conversion          ConversionConfig `yaml:"conversion"`
@@ -1541,6 +1354,24 @@ func parseConfigBytes(path string, data []byte) (*Config, error) {
 	}
 	if len(raw.Takeover) > 0 {
 		return nil, fmt.Errorf("the takeover: block is no longer supported: client targets now come from templates — embedded presets (see `model-proxy takeover list`) or your own YAML in ~/.model-proxy/takeover-templates/<name>.yaml (override a preset by reusing its name; set file/provider_id/proxy_url there)")
+	}
+	if raw.Cache != nil {
+		return nil, fmt.Errorf("the cache: block is no longer supported: exact response caching has been removed; delete the cache: block")
+	}
+	if raw.Fusion != nil {
+		return nil, fmt.Errorf("the fusion: block is no longer supported: multi-model orchestration has been removed; delete the fusion: block and replace any fusion route targets with concrete providers")
+	}
+	if raw.Budgets != nil {
+		return nil, fmt.Errorf("the budgets: block is no longer supported: monthly cost alerts have been removed; delete the budgets: block")
+	}
+	if raw.Shadow != nil {
+		return nil, fmt.Errorf("the shadow: block is no longer supported: detached shadow forwarding has been removed; delete the shadow: block")
+	}
+	if raw.ShadowSampleRate != nil {
+		return nil, fmt.Errorf("shadow_sample_rate is no longer supported: detached shadow forwarding has been removed; delete this key")
+	}
+	if raw.ShadowMaxConcurrent != nil {
+		return nil, fmt.Errorf("shadow_max_concurrent is no longer supported: detached shadow forwarding has been removed; delete this key")
 	}
 	cfg.Listen = raw.Listen
 	cfg.LogLevel = raw.LogLevel
@@ -1585,11 +1416,6 @@ func parseConfigBytes(path string, data []byte) (*Config, error) {
 	cfg.Web.Auth.APIKeysFile = ExpandPath(cfg.Web.Auth.APIKeysFile)
 	cfg.Stats = raw.Stats
 	cfg.RequestLog = raw.RequestLog
-	cfg.Cache = raw.Cache
-	cfg.Shadow = raw.Shadow
-	cfg.ShadowSampleRate = raw.ShadowSampleRate
-	cfg.ShadowMaxConcurrent = raw.ShadowMaxConcurrent
-	cfg.Fusion = raw.Fusion
 	cfg.Pricing = raw.Pricing
 	cfg.Prices = raw.Prices
 	cfg.Guard = raw.Guard
@@ -1609,7 +1435,6 @@ func parseConfigBytes(path string, data []byte) (*Config, error) {
 		}
 		cfg.Guard.ExtraPaths = paths
 	}
-	cfg.Budgets = raw.Budgets
 	cfg.MaxRequestBodyBytes = raw.MaxRequestBodyBytes
 	cfg.Credentials = raw.Credentials
 	cfg.Conversion = raw.Conversion
@@ -1621,7 +1446,7 @@ func parseConfigBytes(path string, data []byte) (*Config, error) {
 // external (the provider.json store's resolved set — already the
 // yaml-over-store merge) before validation. This is how a post-migration
 // config.yaml (providers stripped into the store) still validates as a whole:
-// cross-provider checks (routes/shadow referencing providers, the
+// cross-provider checks (route targets and policies referencing providers, the
 // at-least-one-provider rule) run against the effective set. external may be
 // nil for a strict-equivalent load.
 func LoadConfigEffective(path string, data []byte, external map[string]Provider) (*Config, error) {
@@ -1875,7 +1700,7 @@ func ValidateProviders(providers map[string]Provider) error {
 }
 
 // validateRouting is validate()'s tail: the cross-referential checks that read
-// the merged provider set (route strategies/targets, shadow, ...). Split from
+// the merged provider set (route strategies/targets/policies, ...). Split from
 // validate so ValidateProviders can be its own function without moving the
 // provider rule body around the file.
 func (c *Config) validateRouting() error {
@@ -1897,18 +1722,6 @@ func (c *Config) validateRouting() error {
 			if t.Model == "" {
 				return fmt.Errorf("route %q target %d: model is empty", exposed, i)
 			}
-			// provider "fusion" is not a real provider — it references a recipe
-			// under fusion: by recipe name (the target's model field). Checked here
-			// because the generic provider-exists check below would reject it.
-			if t.Provider == FusionProvider {
-				if _, ok := c.Fusion[t.Model]; !ok {
-					return fmt.Errorf("route %q target %d: fusion recipe %q not defined under fusion: — add a `fusion: %s:` recipe or fix the model name", exposed, i, t.Model, t.Model)
-				}
-				if t.Protocol != "" {
-					return fmt.Errorf("route %q target %d: provider \"fusion\" takes no protocol — set protocol per panel member / synthesizer inside the recipe", exposed, i)
-				}
-				continue
-			}
 			if _, ok := c.Providers[t.Provider]; !ok {
 				return fmt.Errorf("route %q target %d: provider %q not defined under providers: — check spelling or add the provider", exposed, i, t.Provider)
 			}
@@ -1926,95 +1739,7 @@ func (c *Config) validateRouting() error {
 			}
 		}
 	}
-	// Shadow validation: each entry references a real route + provider + valid
-	// protocol; sample rate in [0,1]; max_concurrent >= 0.
 	routeNames := c.RouteExposedNames()
-	for route, sh := range c.Shadow {
-		if !routeNames[route] {
-			return fmt.Errorf("shadow %q: route not found in routes: — add a route named %q", route, route)
-		}
-		if sh.Provider == FusionProvider {
-			return fmt.Errorf("shadow %q: provider \"fusion\" is not a valid shadow target — shadow a concrete provider", route)
-		}
-		prov, ok := c.Providers[sh.Provider]
-		if !ok {
-			//lint:ignore ST1005 trailing ':' echoes the YAML key providers: in this user-facing config error
-			return fmt.Errorf("shadow %q: provider %q not defined under providers:", route, sh.Provider)
-		}
-		if sh.Protocol != "" {
-			target := RouteTarget{Provider: sh.Provider, Model: sh.Model, Protocol: sh.Protocol}
-			if err := checkTargetProtocol(fmt.Sprintf("shadow %q", route), target, prov); err != nil {
-				return err
-			}
-		}
-	}
-	// Fusion validation: each recipe's panel/synthesizer reference real providers
-	// (no nesting), the panel has 2..4 members, and min_panel fits the panel.
-	for name, f := range c.Fusion {
-		if len(f.Panel) < 2 || len(f.Panel) > 4 {
-			return fmt.Errorf("fusion %q: panel must have 2..4 members (got %d)", name, len(f.Panel))
-		}
-		if f.MinPanel < 0 || f.MinPanel > len(f.Panel) {
-			return fmt.Errorf("fusion %q: min_panel %d out of range [0, %d] (panel size)", name, f.MinPanel, len(f.Panel))
-		}
-		if f.MaxRunsPerDay < 0 {
-			return fmt.Errorf("fusion %q: max_runs_per_day %d out of range (0 = unlimited)", name, f.MaxRunsPerDay)
-		}
-		if utf8.RuneCountInString(f.Instruction) > fusionInstructionMaxRunes {
-			return fmt.Errorf("fusion %q: instruction is %d runes, max %d", name, utf8.RuneCountInString(f.Instruction), fusionInstructionMaxRunes)
-		}
-		for i, m := range f.Panel {
-			if err := c.checkFusionTarget(name, fmt.Sprintf("panel %d", i), m); err != nil {
-				return err
-			}
-		}
-		if err := c.checkFusionTarget(name, "synthesizer", f.Synthesizer); err != nil {
-			return err
-		}
-		// The judge follows the same member rules (real provider, no nesting —
-		// checkFusionTarget already rejects provider "fusion").
-		if f.Judge != nil {
-			if err := c.checkFusionTarget(name, "judge", *f.Judge); err != nil {
-				return err
-			}
-		}
-		// Selector validation: target must be an explicitly decisions-protocol
-		// member; knobs stay within their ranges; instructions are capped.
-		if f.Selector != nil {
-			sel := f.Selector
-			if err := c.checkFusionTarget(name, "selector", sel.Target); err != nil {
-				return err
-			}
-			if sel.Target.Protocol != "decisions" {
-				return fmt.Errorf("fusion %q: selector target must declare protocol: decisions (got %q) — only decisions-protocol models can judge routing", name, sel.Target.Protocol)
-			}
-			switch sel.Mode {
-			case "", "shadow", "enforce":
-			default:
-				return fmt.Errorf("fusion %q: selector mode %q invalid — use shadow or enforce", name, sel.Mode)
-			}
-			if sel.Confidence < 0 || sel.Confidence > 1 {
-				return fmt.Errorf("fusion %q: selector confidence %v out of range [0, 1]", name, sel.Confidence)
-			}
-			if sel.DirectScoreMax < 0 || sel.DirectScoreMax > 5 {
-				return fmt.Errorf("fusion %q: selector direct_score_max %v out of range [0, 5]", name, sel.DirectScoreMax)
-			}
-			if sel.PanelTopK < 0 || sel.PanelTopK > len(f.Panel) {
-				return fmt.Errorf("fusion %q: selector panel_top_k %d out of range [0, %d] (panel size)", name, sel.PanelTopK, len(f.Panel))
-			}
-			if utf8.RuneCountInString(sel.Instruction) > fusionInstructionMaxRunes {
-				return fmt.Errorf("fusion %q: selector instruction is %d runes, max %d", name, utf8.RuneCountInString(sel.Instruction), fusionInstructionMaxRunes)
-			}
-			if utf8.RuneCountInString(sel.DifficultyInstruction) > fusionInstructionMaxRunes {
-				return fmt.Errorf("fusion %q: selector difficulty_instruction is %d runes, max %d", name, utf8.RuneCountInString(sel.DifficultyInstruction), fusionInstructionMaxRunes)
-			}
-		}
-		for i, m := range f.Panel {
-			if utf8.RuneCountInString(m.Rubric) > fusionRubricMaxRunes {
-				return fmt.Errorf("fusion %q: panel %d rubric is %d runes, max %d", name, i, utf8.RuneCountInString(m.Rubric), fusionRubricMaxRunes)
-			}
-		}
-	}
 	// Route-policy validation: keys must be callable route names; every band
 	// carries at least one condition plus a defined provider/recipe and a
 	// servable protocol. Whether a band's target is actually served by that
@@ -2081,9 +1806,6 @@ func (c *Config) validateRouting() error {
 			if sel.Target.Provider == "" || sel.Target.Model == "" {
 				return fmt.Errorf("%s: target must name a provider and a model", what)
 			}
-			if sel.Target.Provider == FusionProvider {
-				return fmt.Errorf("%s: provider \"fusion\" is not a valid selector target — use a decisions-protocol provider", what)
-			}
 			prov, ok := c.Providers[sel.Target.Provider]
 			if !ok {
 				//lint:ignore ST1005 trailing ':' echoes the YAML key providers: in this user-facing config error
@@ -2108,32 +1830,16 @@ func (c *Config) validateRouting() error {
 					return fmt.Errorf("%s: timeout %q is not a valid duration", what, sel.Timeout)
 				}
 			}
-			if sel.DirectScoreMax != 0 {
-				return fmt.Errorf("%s: direct_score_max %v is fusion-only and must be 0 at route level", what, sel.DirectScoreMax)
+			if utf8.RuneCountInString(sel.Instruction) > selectorInstructionMaxRunes {
+				return fmt.Errorf("%s: instruction is %d runes, max %d", what, utf8.RuneCountInString(sel.Instruction), selectorInstructionMaxRunes)
 			}
-			if sel.PanelTopK != 0 {
-				return fmt.Errorf("%s: panel_top_k %d is fusion-only and must be 0 at route level", what, sel.PanelTopK)
-			}
-			if utf8.RuneCountInString(sel.Instruction) > fusionInstructionMaxRunes {
-				return fmt.Errorf("%s: instruction is %d runes, max %d", what, utf8.RuneCountInString(sel.Instruction), fusionInstructionMaxRunes)
-			}
-			if utf8.RuneCountInString(sel.DifficultyInstruction) > fusionInstructionMaxRunes {
-				return fmt.Errorf("%s: difficulty_instruction is %d runes, max %d", what, utf8.RuneCountInString(sel.DifficultyInstruction), fusionInstructionMaxRunes)
+			if utf8.RuneCountInString(sel.DifficultyInstruction) > selectorInstructionMaxRunes {
+				return fmt.Errorf("%s: difficulty_instruction is %d runes, max %d", what, utf8.RuneCountInString(sel.DifficultyInstruction), selectorInstructionMaxRunes)
 			}
 		}
 		if policy.Eval != nil {
-			if err := c.validateRoutePolicyEval(route, policy); err != nil {
-				return err
-			}
+			return fmt.Errorf("route_policy %q eval: L2 pairwise evaluation is no longer supported; delete the eval: block", route)
 		}
-	}
-	if c.ShadowSampleRate != nil {
-		if r := *c.ShadowSampleRate; r < 0 || r > 1 {
-			return fmt.Errorf("shadow_sample_rate %v out of range [0, 1]", r)
-		}
-	}
-	if c.ShadowMaxConcurrent < 0 {
-		return fmt.Errorf("shadow_max_concurrent %d must be >= 0", c.ShadowMaxConcurrent)
 	}
 	// mcp: gateway server declarations (names, urls, auth combinations,
 	// provider references, custom auth headers).
@@ -2234,27 +1940,6 @@ func (c *Config) validateRouting() error {
 			return fmt.Errorf("guard.extra_paths[%d]: empty entry — remove it (entries are literal body-match strings, not filesystem paths)", i)
 		}
 	}
-	// budgets: thresholds must be non-negative, provider overrides must name a
-	// configured provider (anything else is almost certainly a typo that would
-	// silently never alert), and the webhook target must be an absolute
-	// http(s) URL.
-	if c.Budgets.MonthlyUSD < 0 {
-		return fmt.Errorf("budgets.monthly_usd %v must be >= 0 (0/unset disables the global alert)", c.Budgets.MonthlyUSD)
-	}
-	for name, threshold := range c.Budgets.Providers {
-		if threshold < 0 {
-			return fmt.Errorf("budgets.providers[%q] %v must be >= 0 (0 disables that provider's alert)", name, threshold)
-		}
-		if _, ok := c.Providers[name]; !ok {
-			return fmt.Errorf("budgets.providers[%q]: provider not defined under providers: — check spelling or add the provider", name)
-		}
-	}
-	if c.Budgets.WebhookURL != "" {
-		parsed, err := url.Parse(c.Budgets.WebhookURL)
-		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-			return fmt.Errorf("budgets.webhook_url %q is not a valid http(s) URL", c.Budgets.WebhookURL)
-		}
-	}
 	// NOTE: duplicate priorities within a route are intentionally allowed. The
 	// scheduler (proxy.go decideOrder) ranks by tier -> priority -> surplus, so
 	// same-priority targets form a surplus-competed pool (higher-surplus wins;
@@ -2268,7 +1953,7 @@ func (c *Config) validateRouting() error {
 	// retention "0" keeps history forever; request_log hot_retention "0"
 	// disables archiving), a SET duration must parse and be positive — e.g.
 	// upstream_timeout: "0s" would silently remove the only timeout bound on
-	// upstream and shadow requests.
+	// upstream requests.
 	durationChecks := []struct {
 		field     string
 		value     string
@@ -2284,7 +1969,6 @@ func (c *Config) validateRouting() error {
 		{"scheduling.quota_poll_interval", c.Scheduling.QuotaPollInterval, false},
 		{"scheduling.retry_wait", c.Scheduling.RetryWait, true},
 		{"scheduling.stream_keepalive", c.Scheduling.StreamKeepalive, true},
-		{"cache.ttl", c.Cache.TTL, false},
 		{"pricing.ttl", c.Pricing.TTL, false},
 		{"stats.retention", c.Stats.Retention, true},
 		{"request_log.retention", c.RequestLog.Retention, true},
@@ -2336,29 +2020,6 @@ func (c *Config) validateRouting() error {
 	return nil
 }
 
-// checkFusionTarget validates one fusion recipe member (panel member or
-// synthesizer): the provider exists (and is not itself fusion — no nesting),
-// the model is set, and a declared protocol is servable by the provider's base
-// URLs (same rule as route targets).
-func (c *Config) checkFusionTarget(recipe, where string, t RouteTarget) error {
-	what := fmt.Sprintf("fusion %q %s", recipe, where)
-	if t.Provider == "" {
-		return fmt.Errorf("%s: provider is empty", what)
-	}
-	if t.Provider == FusionProvider {
-		return fmt.Errorf("%s: nested fusion recipes are not supported", what)
-	}
-	prov, ok := c.Providers[t.Provider]
-	if !ok {
-		//lint:ignore ST1005 trailing ':' echoes the YAML key providers: in this user-facing config error
-		return fmt.Errorf("%s: provider %q not defined under providers:", what, t.Provider)
-	}
-	if t.Model == "" {
-		return fmt.Errorf("%s: model is empty", what)
-	}
-	return checkTargetProtocol(what, t, prov)
-}
-
 // checkTargetProtocol validates a target's declared backend protocol against
 // the closed wire-protocol set — wire.Parse (internal/protocol/wire, a leaf
 // re-exported by internal/protocol) is the single source of truth for the
@@ -2367,8 +2028,7 @@ func (c *Config) checkFusionTarget(recipe, where string, t RouteTarget) error {
 // need openai_base_url (responses reuses the OpenAI base, e.g. codex's
 // openai_base_url is its /responses endpoint), decisions needs
 // decisions_base_url or the openai_base_url fallback (OpenRouter serves
-// /systemone on the chat base). `what` is the caller's error
-// prefix (e.g. `route "glm" target 0` / `fusion "f" synthesizer`).
+// /systemone on the chat base). `what` is the caller's error prefix.
 func checkTargetProtocol(what string, t RouteTarget, prov Provider) error {
 	if t.Protocol == "" {
 		return nil
@@ -2431,9 +2091,6 @@ func (c *Config) validateRoutePolicyGrades(route string, policy RoutePolicy) err
 		for i, t := range targets {
 			if t.Provider == "" || t.Model == "" {
 				return fmt.Errorf("route_policy %q grades: grade %q target %d must name a provider and a model", route, name, i)
-			}
-			if t.Provider == FusionProvider {
-				return fmt.Errorf("route_policy %q grades: grade %q target %d: fusion targets are not allowed inside grades", route, name, i)
 			}
 			if _, ok := c.Providers[t.Provider]; !ok {
 				//lint:ignore ST1005 trailing ':' echoes the YAML key providers: in this user-facing config error
@@ -2514,12 +2171,6 @@ func (c *Config) validateRoutePolicyBandTarget(route, what string, policy RouteP
 	if band.Target.Protocol != "" {
 		return fmt.Errorf("%s: band targets select an existing route target — declare protocol: on the route target instead of the band", what)
 	}
-	if band.Target.Provider == FusionProvider {
-		if _, ok := c.Fusion[band.Target.Model]; !ok {
-			return fmt.Errorf("%s: fusion recipe %q not defined under fusion: — add a `fusion: %s:` recipe or fix the model name", what, band.Target.Model, band.Target.Model)
-		}
-		return nil
-	}
 	if _, ok := c.Providers[band.Target.Provider]; !ok {
 		return fmt.Errorf("%s: provider %q not defined under providers: — check spelling or add the provider", what, band.Target.Provider)
 	}
@@ -2559,57 +2210,8 @@ func (c *Config) validateRoutePolicyEscalationTarget(route string, policy RouteP
 	if esc.Target.Protocol != "" {
 		return fmt.Errorf("route_policy %q escalation: target selects an existing route target — declare protocol: on the route target instead of the escalation target", route)
 	}
-	if esc.Target.Provider == FusionProvider {
-		if _, ok := c.Fusion[esc.Target.Model]; !ok {
-			return fmt.Errorf("route_policy %q escalation: fusion recipe %q not defined under fusion: — add a `fusion: %s:` recipe or fix the model name", route, esc.Target.Model, esc.Target.Model)
-		}
-	} else if _, ok := c.Providers[esc.Target.Provider]; !ok {
+	if _, ok := c.Providers[esc.Target.Provider]; !ok {
 		return fmt.Errorf("route_policy %q escalation: provider %q not defined under providers: — check spelling or add the provider", route, esc.Target.Provider)
-	}
-	return nil
-}
-
-// validateRoutePolicyEval validates the eval block for a graded route.
-// Eval is only meaningful when grades are configured; the judge must name a
-// decisions-protocol provider/model and the pair reference must resolve.
-func (c *Config) validateRoutePolicyEval(route string, policy RoutePolicy) error {
-	eval := policy.Eval
-	if !policy.HasGrades() {
-		return fmt.Errorf("route_policy %q eval: requires grades to be configured", route)
-	}
-	if eval.SampleRate < 0 || eval.SampleRate > 0.5 {
-		return fmt.Errorf("route_policy %q eval: sample_rate %v out of range [0, 0.5]", route, eval.SampleRate)
-	}
-	if eval.Judge.Provider == "" || eval.Judge.Model == "" {
-		return fmt.Errorf("route_policy %q eval: judge must name a provider and a model", route)
-	}
-	if eval.Judge.Provider == FusionProvider {
-		return fmt.Errorf("route_policy %q eval: judge provider cannot be fusion", route)
-	}
-	prov, ok := c.Providers[eval.Judge.Provider]
-	if !ok {
-		//lint:ignore ST1005 trailing ':' echoes the YAML key providers: in this user-facing config error
-		return fmt.Errorf("route_policy %q eval: judge provider %q not defined under providers:", route, eval.Judge.Provider)
-	}
-	if eval.Judge.Protocol != "decisions" {
-		return fmt.Errorf("route_policy %q eval: judge protocol must be decisions (got %q)", route, eval.Judge.Protocol)
-	}
-	if err := checkTargetProtocol(fmt.Sprintf("route_policy %q eval judge", route), eval.Judge, prov); err != nil {
-		return err
-	}
-	pair := eval.PairMode()
-	switch {
-	case pair == "opposite":
-		if len(policy.Grades) < 2 {
-			return fmt.Errorf("route_policy %q eval: pair=opposite requires at least 2 grades", route)
-		}
-	case strings.HasPrefix(pair, "grade:"):
-		g := strings.TrimPrefix(pair, "grade:")
-		if _, ok := policy.Grades[g]; !ok {
-			return fmt.Errorf("route_policy %q eval: pair grade %q not declared in grades", route, g)
-		}
-	default:
-		return fmt.Errorf("route_policy %q eval: pair %q invalid — use opposite or grade:<name>", route, eval.Pair)
 	}
 	return nil
 }

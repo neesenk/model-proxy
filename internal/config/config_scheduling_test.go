@@ -176,7 +176,7 @@ func TestScheduling_DefaultsAndInvalid(t *testing.T) {
 
 // Regression (pitfalls #14): zero/negative durations used to pass validation
 // and flow into the runtime — upstream_timeout: "0s" disabled the ONLY
-// timeout bound on upstream and shadow requests. Only the fields whose
+// timeout bound on upstream requests. Only the fields whose
 // contract documents "0" (retry_wait, stats/request_log retention,
 // request_log hot_retention) may be zero; everything else must parse and be
 // positive.
@@ -199,7 +199,6 @@ func TestValidate_RejectsNonPositiveDurations(t *testing.T) {
 		{"scheduling.model_lockout", "-5m"},
 		{"scheduling.sticky_dwell", "0s"},
 		{"scheduling.quota_poll_interval", "0s"},
-		{"cache.ttl", "0s"},
 		{"pricing.ttl", "-1h"},
 		{"stats.retention", "-720h"},
 		{"request_log.retention", "-1h"},
@@ -231,8 +230,6 @@ func TestValidate_RejectsNonPositiveDurations(t *testing.T) {
 			case "quota_poll_interval":
 				cfg.Scheduling.QuotaPollInterval = field.value
 			}
-		case field.name == "cache.ttl":
-			cfg.Cache.TTL = field.value
 		case field.name == "pricing.ttl":
 			cfg.Pricing.TTL = field.value
 		case field.name == "stats.retention":

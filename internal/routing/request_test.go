@@ -163,11 +163,11 @@ func TestCollectCrossRoute_DedupIgnoresPriority(t *testing.T) {
 		"routeB": {{Provider: "zhipu", Model: "glm", Protocol: "openai", Priority: 3}},
 		"routeC": {{Provider: "deepseek", Model: "ds", Protocol: "openai", Priority: 2}},
 		"routeD": {{Provider: "zhipu#acct-b", Model: "glm", Protocol: "openai", Priority: 1}},
-		"routeE": {{Provider: "fusion", Model: "recipe", Priority: 0}},
+		"routeE": {{Provider: "other", Model: "recipe", Priority: 0}},
 	}
 	pool := CollectCrossRoute(expanded, func(configdomain.RouteTarget) bool { return true })
-	if len(pool) != 3 {
-		t.Fatalf("pool has %d targets, want 3: %+v", len(pool), pool)
+	if len(pool) != 4 {
+		t.Fatalf("pool has %d targets, want 4: %+v", len(pool), pool)
 	}
 	var zhipu *configdomain.RouteTarget
 	for index := range pool {
@@ -187,15 +187,15 @@ func TestCollectCrossRoute_NilKeepMeansAll(t *testing.T) {
 	expanded := map[string][]configdomain.RouteTarget{
 		"routeA": {
 			{Provider: "zhipu", Model: "glm", Protocol: "openai", Priority: 1},
-			{Provider: "fusion", Model: "recipe"},
+			{Provider: "other", Model: "recipe"},
 		},
 		"routeB": {
 			{Provider: "deepseek", Model: "ds", Protocol: "openai", Priority: 2},
 		},
 	}
 	got := CollectCrossRoute(expanded, nil)
-	if len(got) != 2 {
-		t.Fatalf("nil keep collected %d targets, want 2 concrete targets: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("nil keep collected %d targets, want 3 concrete targets: %+v", len(got), got)
 	}
 	seen := make(map[string]bool, len(got))
 	for _, target := range got {
@@ -204,6 +204,7 @@ func TestCollectCrossRoute_NilKeepMeansAll(t *testing.T) {
 	want := map[string]bool{
 		"zhipu/glm/openai":   true,
 		"deepseek/ds/openai": true,
+		"other/recipe/":      true,
 	}
 	if !reflect.DeepEqual(seen, want) {
 		t.Fatalf("nil keep identities = %#v, want %#v", seen, want)
@@ -345,7 +346,6 @@ func TestPlannerApply(t *testing.T) {
 	})
 	text := configdomain.RouteTarget{Provider: "text-p", Model: "text", Priority: 1}
 	vision := configdomain.RouteTarget{Provider: "vision-p", Model: "vision", Priority: 2}
-	fusion := configdomain.RouteTarget{Provider: "fusion", Model: "recipe"}
 	imageBody := []byte(`{"messages":[{"content":[{"type":"image"}]}]}`)
 
 	t.Run("nil catalog is no-op", func(t *testing.T) {
@@ -375,23 +375,6 @@ func TestPlannerApply(t *testing.T) {
 		}
 	})
 
-	t.Run("fusion always fits", func(t *testing.T) {
-		scheduler := &recordingScheduler{}
-		planner := NewPlanner(PlannerInput{Catalog: cat, Scheduler: scheduler})
-		got := planner.ApplyWithProfile(
-			"route",
-			"session",
-			[]configdomain.RouteTarget{text, fusion},
-			ProfileRequest(imageBody),
-		)
-		if !reflect.DeepEqual(got, []configdomain.RouteTarget{fusion}) {
-			t.Fatalf("filtered = %+v, want fusion only", got)
-		}
-		if len(scheduler.calls) != 0 {
-			t.Fatalf("scheduler calls = %+v, want none", scheduler.calls)
-		}
-	})
-
 	t.Run("cross-route uses exact synthetic key and scheduler result", func(t *testing.T) {
 		scheduler := &recordingScheduler{result: []configdomain.RouteTarget{vision}}
 		planner := NewPlanner(PlannerInput{
@@ -399,7 +382,6 @@ func TestPlannerApply(t *testing.T) {
 			ExpandedRoutes: map[string][]configdomain.RouteTarget{
 				"route":        {text},
 				"vision-route": {vision},
-				"fusion":       {fusion},
 			},
 			Scheduler: scheduler,
 		})

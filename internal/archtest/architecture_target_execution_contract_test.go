@@ -7,10 +7,9 @@ import (
 
 // TestTargetExecutionArchitecture protects the next layer below targetexec.Plan:
 // targetexec.Attempt is a deliberately small data contract, the executor has no
-// composition-root escape hatch, Fusion's client-facing synthesis reuses that
-// executor, and pool resolution reaches health only through resolverState.
+// composition-root escape hatch, and pool resolution reaches health only
+// through resolverState.
 func TestTargetExecutionArchitecture(t *testing.T) {
-	rootPackage, _ := parseGoPackage(t, "internal/app")
 	forwardPackage, _ := parseGoPackage(t, "internal/forward")
 
 	t.Run("targetexec Attempt has only its five execution contract fields", func(t *testing.T) {
@@ -48,7 +47,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		}{
 			{
 				name: "Runtime",
-				want: map[string]bool{"Scheduling": true, "Generation": true, "Cache": true},
+				want: map[string]bool{"Scheduling": true, "Generation": true},
 				forbidden: map[string]bool{
 					"Proxy": true, "Config": true, "any": true,
 					"RuntimeSnapshot": true, "targetPlan": true,
@@ -65,7 +64,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			{
 				name: "Scope",
 				want: map[string]bool{
-					"CalledModel": true, "Agent": true, "CacheKey": true, "Log": true,
+					"CalledModel": true, "Agent": true, "Log": true,
 					"ResponseContext": true, "ResponsesHistory": true, "ResponsesSession": true,
 				},
 				// ResponsesHistory is intentionally []any because it carries
@@ -90,20 +89,6 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			}
 		}
 	})
-
-	t.Run("targetexec Commit exposes only the post-commit request body", func(t *testing.T) {
-		f, _ := parseGoFile(t, "internal/targetexec/attempt.go")
-		want := map[string]bool{"requestBody": true}
-		forbiddenTypes := map[string]bool{
-			"Proxy": true, "Config": true, "Store": true,
-			"RuntimeSnapshot": true, "targetPlan": true,
-			"proxyLifecycle": true, "shadowRuntime": true,
-		}
-		if got := structContractViolations(namedStructFields(t, f, "Commit"), want, forbiddenTypes); len(got) != 0 {
-			t.Errorf("targetexec.Commit contract violations: %v", got)
-		}
-	})
-
 	t.Run("only targetexec NewAttempt may construct Attempt", func(t *testing.T) {
 		factoryCount := 0
 		literalSites := []string{}
@@ -150,23 +135,6 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		if !executorRuntimeBoundToAttempt(serveOnce.Body, "targetExecutor", "Execute") {
 			t.Error("pipeline.serveOnce must bind targetExecutor to the exact attempt.Runtime generation")
 		}
-		executePos := firstNamedCallPos(serveOnce.Body, "Execute")
-		shadowPos := firstNamedCallPos(serveOnce.Body, "dispatchShadowAfterCommit")
-		if !executePos.IsValid() || !shadowPos.IsValid() || shadowPos <= executePos {
-			t.Errorf("pipeline.serveOnce must dispatch post-commit Shadow after execute (execute=%v shadow=%v)", executePos, shadowPos)
-		}
-
-		fusionFile, fusionSet := parseGoFile(t, "internal/forward/fusion.go")
-		if got := compositeLiteralSites(fusionFile, "Attempt"); len(got) != 0 {
-			t.Errorf("fusion.go must call newTargetAttempt, not construct targetexec.Attempt: %s", describeNodes(fusionSet, got, "Attempt literal"))
-		}
-		synth := namedMethod(t, fusionFile, "pipeline", "callFusionSynthesizer")
-		if !assignedFactoryValueExecuted(synth.Body, "newTargetAttempt", "targetExecutor", "Execute") {
-			t.Error("callFusionSynthesizer must pass the attempt assigned from newTargetAttempt to targetexec.Executor.Execute")
-		}
-		if !executorRuntimeBoundToAttempt(synth.Body, "targetExecutor", "Execute") {
-			t.Error("callFusionSynthesizer must bind targetExecutor to the exact attempt.Runtime generation")
-		}
 	})
 
 	t.Run("targetexec Executor owns IO without root scheduling reload or Web access", func(t *testing.T) {
@@ -188,15 +156,13 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			"schedule": true, "reload": true, "SnapshotRuntime": true,
 			"NewWebServer": true, "serveHTTPUntilShutdown": true,
 			"StartRuntimeServices": true, "contextOverflowRetry": true,
-			"runShadow": true, "dispatchShadowAfterCommit": true,
-			"shouldSample": true, "runBeforeLogDrain": true,
 		}
 		if got := forbiddenCallSites(f, fset, forbidden, nil); len(got) != 0 {
 			t.Errorf("internal/targetexec/executor.go crossed orchestration boundary: %v", got)
 		}
 		forbiddenTypes := map[string]bool{
-			"Proxy": true, "proxyLifecycle": true, "shadowRuntime": true,
-			"ShadowTarget": true, "RuntimeSnapshot": true, "targetPlan": true,
+			"Proxy": true, "proxyLifecycle": true,
+			"RuntimeSnapshot": true, "targetPlan": true,
 		}
 		if got := forbiddenIdentifierSites(f, fset, forbiddenTypes); len(got) != 0 {
 			t.Errorf("internal/targetexec/executor.go retained forbidden owner/orchestration types: %v", got)
@@ -212,28 +178,9 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		adapterForbidden := map[string]bool{
 			"Do": true, "ConvertResponse": true,
 			"ConvertSSE": true, "flushCopy": true, "contextOverflowRetry": true,
-			"dispatchShadowAfterCommit": true, "runShadow": true,
 		}
 		if got := forbiddenCallSites(factory.Body, adapterSet, adapterForbidden, nil); len(got) != 0 {
 			t.Errorf("targetExecutor factory contains execution/orchestration logic: %v", got)
-		}
-	})
-
-	t.Run("Fusion synthesizer delegates client delivery to target executor", func(t *testing.T) {
-		f, fset := parseGoFile(t, "internal/forward/fusion.go")
-		synth := namedMethod(t, f, "pipeline", "callFusionSynthesizer")
-		if !assignedFactoryValueExecuted(synth.Body, "newTargetAttempt", "targetExecutor", "Execute") {
-			t.Error("callFusionSynthesizer must execute the exact value returned by newTargetAttempt")
-		}
-		if !executorRuntimeBoundToAttempt(synth.Body, "targetExecutor", "Execute") {
-			t.Error("callFusionSynthesizer must execute with the same attempt.Runtime generation")
-		}
-		if got := namedCallCountInNode(synth.Body, "Do"); got != 0 {
-			t.Errorf("callFusionSynthesizer must not add a parallel client.Do pipeline: found %d call(s)", got)
-		}
-		forbiddenShadow := map[string]bool{"runShadow": true, "dispatchShadowAfterCommit": true}
-		if got := forbiddenCallSites(synth.Body, fset, forbiddenShadow, nil); len(got) != 0 {
-			t.Errorf("callFusionSynthesizer must not dispatch Shadow: %v", got)
 		}
 	})
 
@@ -274,13 +221,9 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			})
 			return calls, bound
 		}
-		fusion, _ := parseGoFile(t, "internal/forward/fusion.go")
-		if calls, bound := countGenerationBoundResolvers(fusion, "NewResolver"); calls != 2 || bound != calls {
-			t.Errorf("Fusion resolver calls must bind runtime generation: calls=%d bound=%d", calls, bound)
-		}
-		shadow := namedMethod(t, rootPackage, "Proxy", "executeShadow")
-		if calls, bound := countGenerationBoundResolvers(shadow.Body, "newResolver"); calls != 1 || bound != calls {
-			t.Errorf("Shadow resolver call must bind runtime generation: calls=%d bound=%d", calls, bound)
+		decisions, _ := parseGoFile(t, "internal/forward/decisions.go")
+		if calls, bound := countGenerationBoundResolvers(decisions, "NewResolver"); calls != 1 || bound != calls {
+			t.Errorf("Decisions resolver call must bind runtime generation: calls=%d bound=%d", calls, bound)
 		}
 	})
 }

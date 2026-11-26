@@ -877,47 +877,31 @@ func TestWebAssetsTakeoverTabContract(t *testing.T) {
 	}
 }
 
-// TestWebAssetsEvalTabContract pins the Eval tab's wiring (same regression
-// chain as MCP/Takeover) plus the diagnostics actions landing in existing
-// surfaces: request replay strip, per-route test button, catalog refresh.
-func TestWebAssetsEvalTabContract(t *testing.T) {
+// TestWebAssetsDiagnosticsActionsContract keeps diagnostics actions in their
+// existing surfaces: request replay strip, per-route test, catalog refresh.
+func TestWebAssetsDiagnosticsActionsContract(t *testing.T) {
 	indexHTML := mustWebAsset(t, "index.html")
 	js := mustWebAsset(t, "app.js")
 	for _, want := range []string{
-		`data-tab="eval"`,
-		`id="tab-eval"`,
-	} {
-		if !strings.Contains(indexHTML, want) {
-			t.Errorf("index.html missing %q", want)
-		}
-	}
-	for _, want := range []string{
-		`eval: document.getElementById('tab-eval'),`, // panels map entry
-		`if (name === 'eval') renderEvalTab();`,      // both activate call sites
-		`tab === 'eval'`,                             // parseHash whitelist
-		`} else if (bootTab === 'eval') {`,           // boot chain branch
-		`async function renderEvalTab()`,             // renderer exists
-		`apiGet('/api/shadow-report')`,               // shadow surface
-		`apiGet('/api/fusion')`,                      // fusion surface
-		`retainTab(panel, '.eval-host', loadEval)`,   // re-entry guard marker
-		// Replay (request detail) / route test (schedule) / catalog refresh
-		// (models) wiring.
 		`apiPost('/api/replay', { id, provider })`,
 		`apiPost('/api/routes/test', { model: route })`,
 		`apiPost('/api/models/catalog/refresh')`,
 		`data-test-route`,
 		`data-replay-id`,
+		// Historical Shadow records remain visible but are never replayable.
+		`if (id.startsWith('shadow-')) return '';`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js missing %q", want)
 		}
 	}
-	if strings.Count(js, `if (name === 'eval') renderEvalTab();`) != 2 {
-		t.Errorf("renderEvalTab call sites = %d, want exactly 2 (activateTab + activateTabSilent)",
-			strings.Count(js, `if (name === 'eval') renderEvalTab();`))
-	}
-	// Shadow records are never replayable: the strip guard must stay.
-	if !strings.Contains(js, `if (id.startsWith('shadow-')) return '';`) {
-		t.Error("replay strip lost the shadow-record guard")
+	for _, unwanted := range []string{
+		`data-tab="shadow"`, `id="tab-shadow"`, `renderShadowTab`, `/api/shadow-report`,
+		`data-tab="eval"`, `id="tab-eval"`, `renderEvalTab`,
+		"/api/fusion", "renderCacheCard", "cacheHitRate", "stats / cache", "kind: 'cache'",
+	} {
+		if strings.Contains(js, unwanted) || strings.Contains(indexHTML, unwanted) {
+			t.Errorf("web assets retain removed feature marker %q", unwanted)
+		}
 	}
 }

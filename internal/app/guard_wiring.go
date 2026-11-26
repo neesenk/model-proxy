@@ -55,7 +55,7 @@ func buildGuardScanner(cfg *configdomain.Config, secrets []providerbuild.Secret)
 // quota tracker polls upstream quotas on, so credential freshness follows the
 // established background rhythm instead of growing a second one. Admitted to
 // the Proxy lifecycle at construction; stopped and waited by Close like the
-// stats flusher and budget watcher.
+// stats flusher.
 func (p *Proxy) guardSecretRefreshLoop(stop <-chan struct{}) {
 	for {
 		interval := 5 * time.Minute

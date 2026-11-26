@@ -6,7 +6,6 @@ import (
 	"model-proxy/internal/display"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 
 	configdomain "model-proxy/internal/config"
@@ -143,72 +142,6 @@ func DoctorWithCfg(cfg *configdomain.Config) int {
 		if !hasPlan {
 			fmt.Printf("    %s no plan provider — only pay-as-you-go\n", display.Yellow("⚠"))
 			warns++
-		}
-	}
-
-	// Shadow evaluation: each route's candidate backend + the global sampling
-	// knobs. Omitted entirely when no shadow is configured.
-	if len(cfg.Shadow) > 0 {
-		fmt.Printf("\n%s\n", display.Bold("Shadow"))
-		rate := 1.0
-		if cfg.ShadowSampleRate != nil {
-			rate = *cfg.ShadowSampleRate
-		}
-		maxConc := cfg.ShadowMaxConcurrent
-		if maxConc <= 0 {
-			maxConc = 4
-		}
-		sroutes := make([]string, 0, len(cfg.Shadow))
-		for r := range cfg.Shadow {
-			sroutes = append(sroutes, r)
-		}
-		sort.Strings(sroutes)
-		for _, route := range sroutes {
-			sh := cfg.Shadow[route]
-			proto := sh.Protocol
-			if proto == "" {
-				proto = "same-as-primary"
-			}
-			fmt.Printf("  %s → %s/%s  protocol=%s  sample_rate=%s  max_concurrent=%d\n",
-				display.Pad(route, 12), sh.Provider, sh.Model, proto, strconv.FormatFloat(rate, 'f', -1, 64), maxConc)
-		}
-	}
-
-	// Fusion orchestration: one line per recipe — panel size/quorum/synthesizer
-	// plus the cost knobs (budget, first_turn_only) and quality knobs (judge,
-	// custom instruction). Omitted entirely when no fusion recipe is configured.
-	if len(cfg.Fusion) > 0 {
-		fmt.Printf("\n%s\n", display.Bold("Fusion"))
-		fnames := make([]string, 0, len(cfg.Fusion))
-		for n := range cfg.Fusion {
-			fnames = append(fnames, n)
-		}
-		sort.Strings(fnames)
-		for _, name := range fnames {
-			f := cfg.Fusion[name]
-			quorum := f.MinPanel
-			if quorum <= 0 {
-				quorum = 2
-			}
-			if quorum > len(f.Panel) {
-				quorum = len(f.Panel)
-			}
-			budget := "unlimited"
-			if f.MaxRunsPerDay > 0 {
-				budget = strconv.Itoa(f.MaxRunsPerDay) + "/day"
-			}
-			extra := ""
-			if f.FirstTurnOnly {
-				extra += "  first_turn_only"
-			}
-			if f.Judge != nil {
-				extra += fmt.Sprintf("  judge=%s/%s", f.Judge.Provider, f.Judge.Model)
-			}
-			if f.Instruction != "" {
-				extra += "  custom instruction"
-			}
-			fmt.Printf("  %s panel=%d quorum=%d  synthesizer=%s/%s  budget=%s%s\n",
-				display.Pad(name, 12), len(f.Panel), quorum, f.Synthesizer.Provider, f.Synthesizer.Model, budget, extra)
 		}
 	}
 

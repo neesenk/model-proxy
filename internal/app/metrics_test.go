@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"math/rand"
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/counters"
@@ -445,7 +444,7 @@ func TestDetachedPricingDetachesAndConvertsOverrides(t *testing.T) {
 				"glm-4.6": {Input: 9, Output: 18, CacheRead: 1, CacheWrite: 2},
 			},
 		}},
-		processServices: processServices{evalRand: rand.Float64},
+		processServices: processServices{},
 	}
 
 	overrides, catalog, _ := proxy.detachedPricing()
@@ -470,7 +469,7 @@ func TestDetachedPricingDetachesAndConvertsOverrides(t *testing.T) {
 func TestPricingSnapshotDisabled(t *testing.T) {
 	proxy := &Proxy{
 		generationState: generationState{cfg: &configdomain.Config{Pricing: configdomain.PricingConfig{Enabled: false}}},
-		processServices: processServices{evalRand: rand.Float64},
+		processServices: processServices{},
 	}
 	if got := proxy.pricingSnapshot(); got != nil {
 		t.Errorf("disabled pricing snapshot = %+v, want nil", got)
@@ -485,7 +484,7 @@ func TestPricingSnapshotInitialFailureReturnsEmpty(t *testing.T) {
 			TTL:       "24h",
 			SourceURL: "://invalid-pricing-url",
 		}}},
-		processServices: processServices{evalRand: rand.Float64},
+		processServices: processServices{},
 	}
 	got := proxy.pricingSnapshot()
 	if got == nil || len(got.ByModel) != 0 {
@@ -518,7 +517,7 @@ func TestPricingSnapshotSerializesConcurrentRefresh(t *testing.T) {
 			TTL:       "24h",
 			SourceURL: server.URL,
 		}}},
-		processServices: processServices{evalRand: rand.Float64},
+		processServices: processServices{},
 	}
 
 	firstResult := make(chan *pricing.Catalog, 1)

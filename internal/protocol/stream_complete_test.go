@@ -87,8 +87,7 @@ func TestStreamTerminalComplete(t *testing.T) {
 // terminal-complete on the client side — the anthropic→chat and
 // anthropic→responses converters fail closed (error chunk / response.failed)
 // instead of synthesizing finish_reason:"stop" or response.completed, because
-// the executor's cache gate checks exactly these converted bytes (caching a
-// fake-clean terminal would poison every retry for the TTL). An explicit
+// the terminal-completeness check checks exactly these converted bytes (a fake-clean terminal must not pass that check). An explicit
 // data: [DONE] delimiter (OpenRouter dialect) stays a clean terminal, matching
 // the same-protocol openai gate.
 func TestStreamTerminalComplete_ConvertedTruncation(t *testing.T) {
@@ -125,7 +124,7 @@ func TestStreamTerminalComplete_ConvertedTruncation(t *testing.T) {
 		return readAllChecked(t, newAnthropicToResponsesSSE(strings.NewReader(in), "m"))
 	}
 	if got := StreamTerminalComplete(OpenAI, chat(t, bareStop)); got {
-		t.Errorf("chat-converted bare message_stop judged complete — truncated stream would poison the cache:\n%s", chat(t, bareStop))
+		t.Errorf("chat-converted bare message_stop judged complete — truncated stream must not count as complete:\n%s", chat(t, bareStop))
 	}
 	if got := StreamTerminalComplete(OpenAI, chat(t, emptyReason)); got {
 		t.Errorf("chat-converted empty stop_reason judged complete:\n%s", chat(t, emptyReason))
@@ -137,7 +136,7 @@ func TestStreamTerminalComplete_ConvertedTruncation(t *testing.T) {
 		t.Errorf("chat-converted explicit [DONE] delimiter judged incomplete (OpenRouter dialect is a clean terminal):\n%s", chat(t, doneDelim))
 	}
 	if got := StreamTerminalComplete(Responses, resp(t, bareStop)); got {
-		t.Errorf("responses-converted bare message_stop judged complete — truncated stream would poison the cache:\n%s", resp(t, bareStop))
+		t.Errorf("responses-converted bare message_stop judged complete — truncated stream must not count as complete:\n%s", resp(t, bareStop))
 	}
 	if got := StreamTerminalComplete(Responses, resp(t, emptyReason)); got {
 		t.Errorf("responses-converted empty stop_reason judged complete:\n%s", resp(t, emptyReason))

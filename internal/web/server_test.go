@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"model-proxy/internal/appapi"
-	"model-proxy/internal/fusion"
 	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/presets"
@@ -47,9 +46,6 @@ func (testReadAPI) Analytics(appapi.AnalyticsQuery) ([]observestats.AnalyticsBuc
 func (testReadAPI) AnalyticsAgentNames(appapi.AnalyticsQuery) []string { return nil }
 func (testReadAPI) Pricing() appapi.PricingSnapshot {
 	return appapi.PricingSnapshot{Catalog: &pricing.Catalog{}}
-}
-func (testReadAPI) Fusion(string, time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
-	return nil, nil
 }
 func (testReadAPI) Pins() []appapi.Pin { return nil }
 func (testReadAPI) Security(appapi.SecurityQuery) (appapi.SecurityResult, error) {

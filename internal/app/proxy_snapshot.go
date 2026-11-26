@@ -85,8 +85,8 @@ func (p *Proxy) pricingAliases() map[string]string {
 // detachedPricing returns the current pricing catalog plus a detached COPY of
 // the configured price overrides (config `prices:` values are generation-
 // immutable, but callers must never receive the live map). Shared by the
-// admin ports and the budget watcher so the PriceConfig → pricing.Override
-// conversion has exactly one owner.
+// admin ports so the PriceConfig → pricing.Override conversion has exactly one
+// owner.
 func (p *Proxy) detachedPricing() (map[string]pricing.Override, *pricing.Catalog, map[string]string) {
 	catalog := p.pricingSnapshot()
 	overrides := p.priceOverrides()

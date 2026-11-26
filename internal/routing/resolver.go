@@ -12,19 +12,18 @@ import (
 // RouteTarget's provider (possibly a pooled PARENT name like "zhipu") into one
 // or more runnable VIRTUAL provider ids ("zhipu#<account>").
 //
-// Why this exists: routing expanded pools (ExpandTarget) but Fusion and Shadow
-// looked the parent name up directly in the runtime instance map
+// Why this exists: routing expanded pools (ExpandTarget) but decisions looked
+// the parent name up directly in the runtime instance map
 // (provs[parent] → nil for a pooled parent), so a route whose target was a
-// multi-account provider silently broke Fusion (members judged unavailable,
-// synthesizer lacking auth) and Shadow (stopped sampling) the moment a second
-// account was added. Every code path now funnels config-target →
+// multi-account provider silently broke decisions the moment a second account
+// was added. Every code path now funnels config-target →
 // runnable-virtual through this resolver.
 //
 // Responsibility boundary: the resolver maps IDs and, for the one-virtual Pick
 // path, pre-filters on health (circuit/rate-limit) so a best-effort caller
 // doesn't pin a dead account. It does NOT take the circuit-breaker half-open
 // slot — that stays in each caller (forward's take-half-open/record paths,
-// Fusion's circuit gate), because those are coupled to failover.
+// the callers' circuit gates), because those are coupled to failover.
 type Resolver struct {
 	state      ResolverState
 	providers  map[string]provider.Provider // runtime instances (virtual ids only for pooled parents)
@@ -95,12 +94,12 @@ func (r *Resolver) Expand(t configdomain.RouteTarget) []configdomain.RouteTarget
 }
 
 // Pick returns one HEALTHY runnable virtual for a config target, for one-virtual
-// callers (Fusion panel members + synthesizer, Shadow).
+// callers (decisions selectors).
 //
 //   - Session-sticky: when the target is a pooled parent and stickyKey is
 //     non-empty, the same key maps to the same account (stable hash) — so one
 //     conversation reuses one account and stays cache-warm. An empty stickyKey
-//     (e.g. Shadow, fire-and-forget) round-robins via the shared spread counter.
+//     stateless one-shot callers) round-robins via the shared spread counter.
 //   - Account failover: if the chosen virtual is circuit-open or rate-limited,
 //     Pick scans its siblings for a healthy one — stickiness degrades to failover
 //     ONLY when the sticky account is down.
@@ -158,8 +157,8 @@ func (r *Resolver) pickStart(parent string, n int, stickyKey string) int {
 // healthy reports whether a virtual may be tried for `model` — the SAME rule as
 // tryTarget's gate: circuit closed or half-open with no probe in flight, not
 // rate-limited, AND the (virtual, model) pair is not in its model-lockout window.
-// The model-lock check matters because Fusion panel/judge legs + Shadow route
-// through Pick (not tryTarget): without it they would keep requesting a model
+// The model-lock check matters because decisions selector legs route through
+// Pick (not tryTarget): without it they would keep requesting a model
 // the main path already locked (recordModelFailure) until the lockout expired.
 func (r *Resolver) healthy(virtual, model string) bool {
 	return r.state != nil && r.state.TargetHealthy(virtual, model, time.Now())

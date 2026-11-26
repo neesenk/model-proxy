@@ -2,7 +2,6 @@ package app
 
 import (
 	"errors"
-	"math/rand"
 	"strings"
 	"testing"
 
@@ -18,7 +17,7 @@ func explainTestProxy(t *testing.T, scanner *guard.Scanner) *Proxy {
 	t.Helper()
 	return &Proxy{
 		generationState: generationState{guardScanner: scanner},
-		processServices: processServices{evalRand: rand.Float64},
+		processServices: processServices{},
 	}
 }
 

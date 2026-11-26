@@ -131,7 +131,7 @@ func TestExecutorStreamGenuineTruncationStillWarns(t *testing.T) {
 	if !result.Committed {
 		t.Fatalf("result = %+v", result)
 	}
-	if !strings.Contains(logs.String(), "upstream stream ended before its terminal sequence — synthesized a protocol-native error terminal for the client (delivered, never cached)") {
+	if !strings.Contains(logs.String(), "upstream stream ended before its terminal sequence — synthesized a protocol-native error terminal for the client (delivered)") {
 		t.Fatalf("genuine truncation warn missing or altered:\n%s", logs.String())
 	}
 }

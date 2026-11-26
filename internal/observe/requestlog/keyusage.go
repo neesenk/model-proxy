@@ -4,8 +4,8 @@ package requestlog
 // one (key, model, provider) cell per group with request/failure counts,
 // token sums and last-use. Two producers answer identically — the JSONL
 // directory scan (KeyUsage) and the SQLite index (Indexer.KeyUsage) — the
-// same twin contract as ShadowReport. Shadow evaluation records are proxy-
-// side experiments, not client traffic, and never count toward a key.
+// same twin contract as the other indexed read projections. Historical Shadow
+// records are not client traffic and never count toward a key.
 
 import (
 	"sort"

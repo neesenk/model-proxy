@@ -492,12 +492,12 @@ func newTargetAttempt() targetAttempt { return targetAttempt{} }
 	type attemptExecutor struct { proxy *Proxy; lifecycle *proxyLifecycle; hook func(); hook2 func() }
 func (p attemptExecutor) execute(root *Proxy) {
 	root.reload()
-	p.lifecycle.RunBeforeLogDrain(nil)
+	p.lifecycle.Run(nil)
 }
-	func (p *Proxy) runShadow() {}
+	func (p *Proxy) runDetached() {}
 	func (p *Proxy) targetExecutor() attemptExecutor {
 		q := p
-		return attemptExecutor{hook: p.runShadow, hook2: wrap(q.runShadow)}
+		return attemptExecutor{hook: p.runDetached, hook2: wrap(q.runDetached)}
 	}
 type resolver struct { state resolverState; root *Proxy }
 func newResolver(root *Proxy) *resolver { return nil }
@@ -547,14 +547,14 @@ func (p *Proxy) callFusionSynthesizer() { p.client.Do(nil) }`)
 	if got := forbiddenCallSites(execute.Body, token.NewFileSet(), map[string]bool{"reload": true}, nil); len(got) != 1 {
 		t.Errorf("executor orchestration positive control: got %v, want reload", got)
 	}
-	if got := forbiddenCallSites(execute.Body, fset, map[string]bool{"RunBeforeLogDrain": true}, nil); len(got) != 1 {
-		t.Errorf("executor Shadow orchestration positive control: got %v, want RunBeforeLogDrain", got)
+	if got := forbiddenCallSites(execute.Body, fset, map[string]bool{"Run": true}, nil); len(got) != 1 {
+		t.Errorf("executor lifecycle orchestration positive control: got %v, want Run", got)
 	}
 	if got := forbiddenIdentifierSites(f, fset, map[string]bool{"proxyLifecycle": true}); len(got) == 0 {
 		t.Error("executor forbidden owner type positive control did not fire")
 	}
 	targetExecutor := namedMethod(t, f, "Proxy", "targetExecutor")
-	if got := methodValueInjections(targetExecutor.Body, "attemptExecutor", "p", map[string]bool{"runShadow": true}); len(got) != 2 {
+	if got := methodValueInjections(targetExecutor.Body, "attemptExecutor", "p", map[string]bool{"runDetached": true}); len(got) != 2 {
 		t.Errorf("Proxy method-value injection positive control: got %d, want direct plus aliased/wrapped injections", len(got))
 	}
 	if !typeContainsIdent(namedStructFields(t, f, "resolver")["root"], "Proxy") {
@@ -644,24 +644,6 @@ func (p *Proxy) crossSnapshot() {
 		t.Error("executor parent projection accepted a different snapshot's ParentOf")
 	}
 
-	f, _ = parse(`func (p *Proxy) execute() {}
-func (p *Proxy) dispatchShadowAfterCommit() {}
-func (p *Proxy) ordered() {
-	p.execute()
-	p.dispatchShadowAfterCommit()
-}
-func (p *Proxy) reversed() {
-	p.dispatchShadowAfterCommit()
-	p.execute()
-}`)
-	ordered := namedMethod(t, f, "Proxy", "ordered")
-	if firstNamedCallPos(ordered.Body, "dispatchShadowAfterCommit") <= firstNamedCallPos(ordered.Body, "execute") {
-		t.Error("post-commit ordering positive control rejected execute-before-shadow")
-	}
-	reversed := namedMethod(t, f, "Proxy", "reversed")
-	if firstNamedCallPos(reversed.Body, "dispatchShadowAfterCommit") > firstNamedCallPos(reversed.Body, "execute") {
-		t.Error("post-commit ordering positive control accepted shadow-before-execute")
-	}
 }
 
 func parseGoFile(t *testing.T, path string) (*ast.File, *token.FileSet) {
@@ -1099,14 +1081,6 @@ func compositeLiteralSites(n ast.Node, typeName string) []*ast.CompositeLit {
 	return out
 }
 
-func describeNodes(fset *token.FileSet, nodes []*ast.CompositeLit, what string) []string {
-	out := make([]string, 0, len(nodes))
-	for _, n := range nodes {
-		out = append(out, describe(fset, n, what))
-	}
-	return out
-}
-
 func forbiddenIdentifierSites(n ast.Node, fset *token.FileSet, forbidden map[string]bool) []string {
 	var out []string
 	ast.Inspect(n, func(n ast.Node) bool {
@@ -1141,7 +1115,7 @@ func receiverMethodNames(t *testing.T, paths []string, receiver string) map[stri
 
 // methodValueInjections finds Proxy method references anywhere inside keyed
 // values of a specific composite literal. It follows direct receiver aliases
-// (`q := p`) and descends through wrappers (`hook: wrap(q.runShadow)`), so a
+// (`q := p`) and descends through wrappers (`hook: wrap(q.runDetached)`), so a
 // callback cannot hide the composition-root escape behind a local expression.
 // Plain component fields such as `client: p.client` are allowed because client
 // is not a declared Proxy method.

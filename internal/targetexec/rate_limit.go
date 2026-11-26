@@ -71,7 +71,7 @@ var (
 type RateLimitKind string
 
 // RateLimitDecision is the pure 429 policy result, calculated before any
-// runtime mutation so every caller (normal routing and Fusion) uses one rule.
+// runtime mutation so every caller (normal routing and decisions) uses one rule.
 type RateLimitDecision struct {
 	Until time.Time
 	Kind  RateLimitKind

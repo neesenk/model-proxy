@@ -263,7 +263,7 @@ func newReqLogProxy(t *testing.T, cfg *configdomain.Config) (*Proxy, string, fun
 	go logger.Run()
 	proxy.reqLog = logger
 	t.Cleanup(func() {
-		// Shadow and other finite log producers belong to Proxy lifecycle and
+		// Finite log producers belong to Proxy lifecycle and
 		// must finish before the logger drains.
 		proxy.Close()
 		logger.Shutdown()

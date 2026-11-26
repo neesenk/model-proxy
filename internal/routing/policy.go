@@ -7,7 +7,7 @@ import (
 // policy.go owns the route-tier policy decision: the declarative band match
 // (request profile → preferred target) and the application of that preference.
 // Both are pure functions over one request's profile — no state, no I/O, no
-// model call — so band-only routes keep exact response-cache semantics.
+// model call.
 // See docs/architecture/request-routing.md.
 
 // PickBand returns the first band whose conditions all hold for profile. Bands

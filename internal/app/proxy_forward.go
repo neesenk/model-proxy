@@ -1,6 +1,6 @@
 // proxy_forward.go — the thin app-side shim into internal/forward: one snapshot
 // capture, one Services assembly, one Serve call. The pipeline itself (routing,
-// guard, cache, failover, fusion orchestration) lives in internal/forward.
+// guard, failover and route policy) lives in internal/forward.
 package app
 
 import (
@@ -38,19 +38,17 @@ func (p *Proxy) forwardServices() forward.Services {
 		SessionScan:    p.sessionScan,
 		Adjudicator:    p.adjudicatorPort(),
 		ResponsesState: p.responsesState,
-		FusionReg:      p.fusionReg,
 		ReqLog:         p.reqLog,
 		SessionHeaders: p.sessionHeaders(),
 		NewHealthGate: func(cfg *configdomain.Config, parentOf map[string]string) targetexec.HealthGate {
 			return proxyHealthGate{proxy: p, cfg: cfg, parentOf: parentOf}
 		},
 		NewEffects: func(cfg *configdomain.Config, generation uint64) targetexec.Effects {
-			return targetExecutionEffects{proxy: p, cfg: cfg, generation: generation}
+			return targetExecutionEffects{proxy: p, generation: generation}
 		},
 		Schedule: func(cfg *configdomain.Config, parentOf map[string]string, exposed, sessionKey string, stickyOff bool, targets []configdomain.RouteTarget, routeKeys map[string]bool, generation uint64) ([]configdomain.RouteTarget, string) {
 			return p.schedule(cfg, parentOf, exposed, sessionKey, stickyOff, targets, routeKeys, generation)
 		},
-		ShadowDispatch:      p.dispatchShadowAfterCommit,
 		ResolveBackendProto: p.resolvedBackendProto,
 		ResolverState:       p,
 	}

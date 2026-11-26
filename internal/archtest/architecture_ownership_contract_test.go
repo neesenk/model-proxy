@@ -321,43 +321,17 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		}
 
 		// The projection loop owns the Flusher lifecycle: reset accepts no
-		// Proxy (cache reset and composition stay at Proxy.resetStats).
+		// Proxy (stats reset and composition stay at Proxy.resetStats).
 		flusher, _ := parseGoFile(t, "internal/observe/stats/flusher.go")
 		reset := namedMethod(t, flusher, "Flusher", "Reset")
 		for _, field := range reset.Type.Params.List {
 			if typeContainsIdent(field.Type, "Proxy") {
-				t.Error("Flusher.Reset must not accept *Proxy; cache reset and composition stay at Proxy.resetStats")
+				t.Error("Flusher.Reset must not accept *Proxy; stats reset and composition stay at Proxy.resetStats")
 			}
 		}
 	})
 
-	t.Run("internal observe cache owns exact-response storage", func(t *testing.T) {
-		assertRepositoryLeafPackage(t, "internal/cache")
-		if _, err := os.Stat(repoRooted(t, "cache.go")); err == nil {
-			t.Error("legacy root cache.go must not exist; cache mechanics belong in internal/cache")
-		} else if !os.IsNotExist(err) {
-			t.Fatalf("stat cache.go: %v", err)
-		}
-
-		adapter, _ := parseGoFile(t, "internal/app/proxy.go")
-		if got := namedCallCount(adapter, "NewResponseCache"); got != 1 {
-			t.Errorf("proxy.go NewResponseCache declarations = %d, want exactly 1", got)
-		}
-
-		assertCacheStoreFieldNamed := func(parsed *ast.File, owner, field string) {
-			t.Helper()
-			fieldType := namedStructFields(t, parsed, owner)[field]
-			pointer, ok := fieldType.(*ast.StarExpr)
-			if !ok {
-				t.Errorf("%s.Cache type = %T, want *responsecache.Store", owner, fieldType)
-			} else if name, ok := configSelectorName(pointer.X, "responsecache"); !ok || name != "Store" {
-				t.Errorf("%s.Cache must be *responsecache.Store", owner)
-			}
-		}
-		assertCacheStoreFieldNamed(rootPackage, "generationState", "cache")
-		forwardSnapshot, _ := parseGoFile(t, "internal/forward/snapshot.go")
-		assertCacheStoreFieldNamed(forwardSnapshot, "Snapshot", "Cache")
-
+	t.Run("runtime snapshot alias stays at forward owner", func(t *testing.T) {
 		// The canonical snapshot type lives in internal/forward; the app side
 		// keeps only the alias so reload/lock ownership stays at Proxy.
 		dispatchContext, _ := parseGoFile(t, "internal/app/dispatch_context.go")
@@ -387,26 +361,6 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			t.Error("internal/app/dispatch_context.go must keep the RuntimeSnapshot = forward.Snapshot alias")
 		}
 
-		forbidden := map[string]bool{
-			"responseCache": true,
-			"cacheEntry":    true,
-			"cacheRecorder": true,
-		}
-		for _, path := range productionGoFiles(t) {
-			parsed, _ := parseGoFile(t, path)
-			for _, decl := range parsed.Decls {
-				gen, ok := decl.(*ast.GenDecl)
-				if !ok || gen.Tok != token.TYPE {
-					continue
-				}
-				for _, spec := range gen.Specs {
-					typeSpec, ok := spec.(*ast.TypeSpec)
-					if ok && forbidden[typeSpec.Name.Name] {
-						t.Errorf("%s redeclares root cache type %s", path, typeSpec.Name.Name)
-					}
-				}
-			}
-		}
 	})
 
 	t.Run("internal transport owns bounded body capture", func(t *testing.T) {

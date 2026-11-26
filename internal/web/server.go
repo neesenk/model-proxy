@@ -375,10 +375,6 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleSecurityUnblock(w, r)
 	case strings.HasPrefix(p, "/api/requests/") && r.Method == http.MethodGet:
 		s.handleRequestDetail(w, r)
-	case p == "/api/shadow-report" && r.Method == http.MethodGet:
-		s.handleShadowReport(w, r)
-	case p == "/api/fusion" && r.Method == http.MethodGet:
-		s.handleFusion(w, r)
 	case p == "/api/config" && r.Method == http.MethodGet:
 		s.handleConfigGet(w, r)
 	case p == "/api/config" && r.Method == http.MethodPost:

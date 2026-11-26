@@ -44,7 +44,6 @@ Commands:
   unfreeze [provider]  Clear frozen provider state (circuit/rate-limit/model locks)
   freeze <provider>    Manually freeze a provider (exclude from scheduling until unfreeze)
   stats                Show per-(provider, model) call statistics (queries the daemon)
-  cache                Show exact-response cache hit stats (queries the daemon)
   doctor               Offline scheduling diagnostic (config only, no daemon)
   audit                Show the security audit log (offline, no daemon)
   guard                List/unblock adjudicated session blocks; manage content overrides
@@ -53,7 +52,6 @@ Commands:
   mcp [list|test]      Manage MCP gateway servers (mcp: config; test runs the handshake)
   mcp-server <name>    Run a bundled MCP tool server over stdio (gateway child; not interactive)
   replay <id> --to P   Re-answer a logged request with a different backend
-  shadow report       Shadow-evaluation aggregation (primary vs shadow compare)
   routing report      Offline route-policy reconciliation (weak labels + selector matrix + cost)
   wire record <prov>  Record raw upstream SSE streams into testdata/wire/
   help                 Print this message
@@ -230,16 +228,6 @@ Usage:
   each model is currently scheduled to (first-choice + ordered list + sticky
   state). The daemon (` + "`model-proxy serve`" + `) must be running.`,
 
-	"cache": `cache [--json] [--config PATH]
-
-  Show the exact-response cache counters (GET /api/status): entries, hits,
-  misses and the hit rate over all recorded lookups. A disabled cache prints
-  a hint instead. The daemon (` + "`model-proxy serve`" + ` + web.enabled) must
-  be running.
-
-Flags:
-  --json   Dump the raw {enabled,hits,misses,entries} object.`,
-
 	"pin": `pin [<route> <provider>] [--ttl DUR] [--config PATH]
 
   Temporarily force a route onto ONE provider without editing config.yaml (a
@@ -413,13 +401,6 @@ Flags:
   endpoint lands in a .err file instead and never overwrites a good .sse.
   Credentials come from login. Review recordings for sensitive content
   before committing them.`,
-
-	"shadow": `shadow report [--from TIME] [--to TIME] [--config PATH]
-
-  Shadow-evaluation aggregation from the running daemon's
-  /api/shadow-report endpoint: per (route, primary, shadow) samples,
-  status-match rate, latency diff and response-size ratio. Requires a
-  running daemon with shadow routes configured and request_log enabled.`,
 
 	"routing": `routing report [--route NAME] [--since DUR|TIME] [--retry-window DUR] [--json] [--config PATH]
 

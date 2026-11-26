@@ -143,7 +143,7 @@ func (x scheduledExchange) exchange(ctx context.Context, snap forward.Snapshot, 
 			continue
 		}
 		if rep.Status == http.StatusTooManyRequests {
-			// Same single classification entry as the executor and Fusion
+			// Same single classification entry as the executor and decisions
 			// legs (routing-and-failure.md). probe replies carry no response
 			// headers, so Retry-After cannot be honored — body reset hints
 			// and the scheduling defaults still apply.

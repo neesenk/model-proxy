@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"model-proxy/internal/appapi"
-	"model-proxy/internal/fusion"
 	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/presets"
@@ -43,7 +42,6 @@ type readAPIStub struct {
 	analytics         func(appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error)
 	analyticsAgents   func(appapi.AnalyticsQuery) []string
 	pricing           appapi.PricingSnapshot
-	fusion            func(string, time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
 	pins              []appapi.Pin
 	security          func(appapi.SecurityQuery) (appapi.SecurityResult, error)
 	explain           func(string, string, []string) (appapi.SecurityExplainResult, error)
@@ -78,9 +76,6 @@ func (dirRequestLogQueries) KeyUsage(requestlog.Filter, string) ([]requestlog.Ke
 
 func (d dirRequestLogQueries) SummariesWithFacets(f requestlog.Filter) ([]requestlog.Summary, requestlog.Facets, error) {
 	return requestlog.QuerySummariesWithFacets(d.dir, f)
-}
-func (d dirRequestLogQueries) ShadowReport(f requestlog.Filter) ([]requestlog.ShadowReportEntry, error) {
-	return requestlog.ShadowReport(d.dir, f)
 }
 func (d dirRequestLogQueries) Detail(id, stream string) ([]requestlog.Record, error) {
 	if stream == "mcp" {
@@ -132,13 +127,7 @@ func (r *readAPIStub) AnalyticsAgentNames(q appapi.AnalyticsQuery) []string {
 	return r.analyticsAgents(q)
 }
 func (r *readAPIStub) Pricing() appapi.PricingSnapshot { return r.pricing }
-func (r *readAPIStub) Fusion(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
-	if r.fusion == nil {
-		return nil, nil
-	}
-	return r.fusion(workflow, now)
-}
-func (r *readAPIStub) Pins() []appapi.Pin { return r.pins }
+func (r *readAPIStub) Pins() []appapi.Pin              { return r.pins }
 func (r *readAPIStub) Security(q appapi.SecurityQuery) (appapi.SecurityResult, error) {
 	if r.security == nil {
 		return appapi.SecurityResult{}, nil
@@ -346,27 +335,21 @@ func TestReadUIAndAPIRouter(t *testing.T) {
 	}
 }
 
-func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
+func TestReadStatusAccountsTokensPinsAndConfig(t *testing.T) {
 	expires := time.Date(2026, 7, 30, 1, 2, 3, 0, time.FixedZone("test", 8*3600))
 	reads := &readAPIStub{
 		dashboard: appapi.Dashboard{
 			Uptime: "1m", Listen: "127.0.0.1:8317", Health: map[string]any{"p": "healthy"},
 			ModelLocks: map[string][]map[string]any{"r": {{"provider": "p"}}}, Quota: map[string]any{"p": 99},
 			Schedule: json.RawMessage(`{"enabled":true}`), Counters: map[string]appapi.Metrics{"p": {Requests: 2}},
-			Cache: map[string]any{"hits": 1}, Warnings: []string{"watch quota"},
+			Warnings:         []string{"watch quota"},
 			CredentialAlerts: []appapi.CredentialAlert{{Key: "aqp#acc1", Class: "session-expired", Err: "session expired (HTTP 401): Session expired", Since: 1762857510}},
 		},
 		accounts:   []appapi.ProviderAccounts{{Name: "upstream", ProviderID: "p", Billing: "metered", Accounts: []appapi.Account{{ID: "a", Label: "primary"}}}},
 		tokens:     []appapi.TokenUsage{{Provider: "p", Model: "m", Input: 3, Output: 4, CacheCreation: 1, CacheRead: 2, Total: 10, Requests: 1}},
 		agentRows:  []appapi.AgentUsage{{Agent: "pi", Requests: 1, Input: 3, Output: 4, CacheCreation: 1, CacheRead: 2, Total: 10, Models: []appapi.AgentModelUsage{{Provider: "p", Model: "m", Requests: 1, Input: 3, Output: 4, CacheCreation: 1, CacheRead: 2, Total: 10}}}},
 		statsSince: 1788874500,
-		fusion: func(workflow string, _ time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
-			if workflow != "judge" {
-				t.Fatalf("fusion workflow = %q, want judge", workflow)
-			}
-			return map[string]fusion.WorkflowStats{"judge": {Runs: 2}}, []fusion.Run{{RunID: "run-1", Workflow: "judge"}}
-		},
-		pins: []appapi.Pin{{Route: "chat", Provider: "p", ExpiresAt: expires}, {Route: "all", Provider: "fallback"}},
+		pins:       []appapi.Pin{{Route: "chat", Provider: "p", ExpiresAt: expires}, {Route: "all", Provider: "fallback"}},
 		config: func() (appapi.ConfigDocument, error) {
 			threshold := 7
 			return appapi.ConfigDocument{YAML: "listen: :8317\n", Summary: appapi.ConfigSummary{Listen: ":8317", ProviderCount: 1, RouteCount: 2}, ProviderModels: map[string][]string{"p": {"m"}}, Routes: map[string][]appapi.ConfigRouteTarget{"chat": {{Provider: "p", Model: "m", Priority: 3}}}, Settings: appapi.ConfigSettings{LogLevel: "warn", Scheduling: appapi.ConfigScheduling{CircuitThreshold: &threshold}}}, nil
@@ -383,13 +366,12 @@ func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
 		Counters         map[string]appapi.Metrics   `json:"counters"`
 		Schedule         json.RawMessage             `json:"schedule"`
 		Health           map[string]any              `json:"health"`
-		Cache            map[string]any              `json:"cache"`
 		Quota            map[string]any              `json:"quota"`
 		Locks            map[string][]map[string]any `json:"model_locks"`
 		CredentialAlerts []appapi.CredentialAlert    `json:"credential_alerts"`
 	}
 	decodeReadJSON(t, status, &gotStatus)
-	if status.Code != http.StatusOK || gotStatus.Uptime != "1m" || gotStatus.Version != "v-test" || gotStatus.Listen != "127.0.0.1:8317" || gotStatus.Counters["p"].Requests != 2 || gotStatus.Health["p"] != "healthy" || gotStatus.Quota["p"] != float64(99) || gotStatus.Cache["hits"] != float64(1) || len(gotStatus.Locks["r"]) != 1 || string(gotStatus.Schedule) != `{"enabled":true}` || strings.Join(gotStatus.Warnings, ",") != "watch quota" {
+	if status.Code != http.StatusOK || gotStatus.Uptime != "1m" || gotStatus.Version != "v-test" || gotStatus.Listen != "127.0.0.1:8317" || gotStatus.Counters["p"].Requests != 2 || gotStatus.Health["p"] != "healthy" || gotStatus.Quota["p"] != float64(99) || len(gotStatus.Locks["r"]) != 1 || string(gotStatus.Schedule) != `{"enabled":true}` || strings.Join(gotStatus.Warnings, ",") != "watch quota" {
 		t.Fatalf("unexpected status projection: %#v", gotStatus)
 	}
 	if len(gotStatus.CredentialAlerts) != 1 || gotStatus.CredentialAlerts[0].Key != "aqp#acc1" || gotStatus.CredentialAlerts[0].Class != "session-expired" || gotStatus.CredentialAlerts[0].Since != 1762857510 {
@@ -515,16 +497,6 @@ func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
 	}
 	if gotTokens.Since != 1788874500 {
 		t.Fatalf("tokens.since = %d, want 1788874500", gotTokens.Since)
-	}
-
-	fusionResponse := serveRead(t, s, http.MethodGet, "/api/fusion?workflow=judge")
-	var gotFusion struct {
-		Workflows map[string]fusion.WorkflowStats `json:"workflows"`
-		Runs      []fusion.Run                    `json:"runs"`
-	}
-	decodeReadJSON(t, fusionResponse, &gotFusion)
-	if fusionResponse.Code != http.StatusOK || gotFusion.Workflows["judge"].Runs != 2 || len(gotFusion.Runs) != 1 || gotFusion.Runs[0].RunID != "run-1" {
-		t.Fatalf("fusion = %#v", gotFusion)
 	}
 
 	pins := serveRead(t, s, http.MethodGet, "/api/pin")
@@ -833,50 +805,6 @@ func TestReadRequestsSessionFilter(t *testing.T) {
 	decodeReadJSON(t, list, &got)
 	if list.Code != http.StatusOK || len(got.Records) != 1 || got.Records[0].RequestID != "b" || got.Records[0].SessionID != "sess-b" {
 		t.Fatalf("session-filtered requests = %#v", got)
-	}
-}
-
-func TestReadShadowReportAndErrors(t *testing.T) {
-	tmp := t.TempDir()
-	writeReadLog(t, tmp,
-		requestlog.Record{Ts: "2026-07-29T12:00:00Z", RequestID: "pair", Exposed: "chat", Provider: "primary", Status: 200, LatencyMs: 11, ResponseSize: 100},
-		requestlog.Record{Ts: "2026-07-29T12:00:01Z", RequestID: "shadow-pair", Shadow: true, Exposed: "chat", Provider: "shadow", Status: 500, LatencyMs: 18, ResponseSize: 70},
-	)
-	reads := &readAPIStub{logDir: tmp, queries: dirRequestLogQueries{tmp}}
-	s := newReadServer(t, reads)
-	report := serveRead(t, s, http.MethodGet, "/api/shadow-report?from=2026-07-29T11:59:00Z&to=2026-07-29T12:02:00Z")
-	var got struct {
-		Enabled bool                           `json:"enabled"`
-		Entries []requestlog.ShadowReportEntry `json:"entries"`
-	}
-	decodeReadJSON(t, report, &got)
-	if report.Code != http.StatusOK || !got.Enabled || len(got.Entries) != 1 || got.Entries[0].Route != "chat" || got.Entries[0].Samples != 1 || got.Entries[0].StatusMatchRate != 0 || got.Entries[0].LatencyDiffMs != 7 {
-		t.Fatalf("shadow report = %#v", got)
-	}
-
-	reads.logDir = ""
-	disabled := serveRead(t, s, http.MethodGet, "/api/shadow-report")
-	var empty struct {
-		Enabled bool  `json:"enabled"`
-		Entries []any `json:"entries"`
-	}
-	decodeReadJSON(t, disabled, &empty)
-	if disabled.Code != http.StatusOK || empty.Enabled || empty.Entries == nil {
-		t.Fatalf("disabled report = %#v (entries must be a non-null empty array)", empty)
-	}
-	if body := disabled.Body.String(); !strings.Contains(body, `"entries":[]`) {
-		t.Fatalf("disabled report body must serialize entries as []: %s", body)
-	}
-
-	reads.logDir = filepath.Join(t.TempDir(), "missing")
-	reads.queries = dirRequestLogQueries{reads.logDir}
-	failed := serveRead(t, s, http.MethodGet, "/api/shadow-report")
-	var routeError struct {
-		Error string `json:"error"`
-	}
-	decodeReadJSON(t, failed, &routeError)
-	if failed.Code != http.StatusInternalServerError || !strings.HasPrefix(routeError.Error, "shadow report: ") {
-		t.Fatalf("shadow error = (%d, %#v)", failed.Code, routeError)
 	}
 }
 
