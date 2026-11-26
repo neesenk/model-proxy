@@ -919,6 +919,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 					Diagnostics:    convDiags,
 					Routing:        flc.Routing,
 					ScheduleSource: scheduleDecisionSource(scheduleDecision),
+					ScheduleNote:   scheduleDecisionNote(scheduleDecision),
 					Profile:        flc.Profile,
 				},
 				ResponseContext:  plan.ResponseContext(origBody),

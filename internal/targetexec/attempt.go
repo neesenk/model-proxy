@@ -42,6 +42,10 @@ type LogContext struct {
 	// ScheduleSource names the scheduling engine that produced the try order
 	// (quota/sticky/pin/load_balance/force vocabulary). Log metadata only.
 	ScheduleSource string
+	// ScheduleNote explains a request-aware reroute that changed the try
+	// order — the fit verdicts of the dropped targets (routing's
+	// DescribeFitReroute). Empty on ordinary scheduling. Log metadata only.
+	ScheduleNote string
 	// Profile is the request-derived routing profile (see RequestProfile).
 	// Log metadata only; nil omits the field.
 	Profile *RequestProfile

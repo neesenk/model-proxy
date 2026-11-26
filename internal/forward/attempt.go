@@ -71,6 +71,15 @@ func scheduleDecisionSource(d *requestlog.ScheduleDecision) string {
 	return d.Source
 }
 
+// scheduleDecisionNote projects the optional ScheduleDecision's request-aware
+// reroute trace onto the executor's log vocabulary.
+func scheduleDecisionNote(d *requestlog.ScheduleDecision) string {
+	if d == nil {
+		return ""
+	}
+	return d.Note
+}
+
 // BuildRequestLogInput adapts the pipeline's LogCtx vocabulary to
 // requestlog.BuildInput.
 func BuildRequestLogInput(
@@ -89,7 +98,7 @@ func BuildRequestLogInput(
 	}
 	var schedule *requestlog.ScheduleDecision
 	if context.Schedule != nil && context.Schedule.Source != "" {
-		schedule = &requestlog.ScheduleDecision{Source: context.Schedule.Source}
+		schedule = &requestlog.ScheduleDecision{Source: context.Schedule.Source, Note: context.Schedule.Note}
 	}
 	var profile *requestlog.RequestProfile
 	if context.Profile != nil {

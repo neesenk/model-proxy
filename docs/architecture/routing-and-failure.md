@@ -192,9 +192,9 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   的同 id 多 attempt 行承载（attempt 行语义见下一段）。request-aware 路由
   （planner.ApplyWithProfile 的能力/上下文裁剪与跨路由兜底）**必须留痕**：
   目标集被裁剪或整链被跨路由替换时，请求日志该请求的 `schedule.note`
-  记录每个被裁目标的 fit 判词与替换头（如 `request-aware: dropped
+  （已提交行与全链失败终态行都带）记录每个被裁目标的 fit 判词与替换头（如 `request-aware: dropped
   zhipu/glm-5.3: model metadata lacks image modality → cross-route
-  step-plan/step-5-preview`），响应头带 `x-mp-reroute`（写于首个 body 字节
+  step-plan/step-5-preview`），响应头带同值的 `x-mp-reroute`（写于首个 body 字节
   之前，流式也可见）；未变化时不产生任何开销（`DescribeFitReroute` 先做
   集合比对）。跨路由托底池的选择按**阶梯**：先取**本路由 provider** 内
   合适的目标（路由已信任的 provider 上的兄弟模型，无视 tier 领先），组内

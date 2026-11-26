@@ -437,6 +437,7 @@ kimi/zhipu 的配额解析内嵌在带 I/O 的 `Usage()` 里尚未纯函数化�
 | 全部候选饱和 | 等空位（事件驱动，单轮 ≤ `retry_wait`，≤2 轮）：空位腾出则被服务；始终无位 → 429 + `Retry-After: 1`；客户端断开 499；`retry_wait: "0"` 不等待 | `internal/routing` 的 `TestDecideFailureSaturation`、`internal/forward` 的 `TestServeAllSaturated*`、`TestServeClientGoneDuringInflightWait`、`internal/app` 的 `TestForward_AllTargetsSaturated*` |
 | pin 命中饱和账号 | 照常派发到被 pin 的账号，不改道不等待 | `internal/app` 的 `TestForward_PinDispatchesIntoASaturatedAccount` |
 | 非执行器 seam 占位 | decisions selector leg 与 guard 判定 exchange 占在途位、走同一分类入口；饱和的 selector 账号不被调用 | `internal/forward` 的 `TestServeRouteSelectorConcurrency429TeachesLimit`、`TestServeRouteSelectorSkippedWhenAccountSaturated`，`internal/app` 的 `TestGuardAdjudication_Concurrency429CapsJudgeAccount`，`internal/archtest` 的 `TestRateLimitPolicyArchitecture` |
+| 请求感知改道留痕 | 图片请求裁掉无图像能力的首选目标：响应头 `x-mp-reroute` 与已提交请求日志行的 `schedule.note` 是同一条 fit 判词；全程不改道的请求两者皆无 | `TestForward_RequestAwareRerouteLogsScheduleNote` |
 | 腿选择（unknown 优先于死腿） | 模型级当前腿 no 且存在 probed-yes/unknown 替代腿 → 请求实际打到替代腿的 wire 路径；全 no 维持原协议让错误浮现 | `TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E` |
 | 响应 model 归一化（alias） | alias 路由请求体 model 改写为上游名；响应 model 在 buffered 与 SSE 客户端路径上归一回 calledModel，上游名不泄漏 | `TestForward_AliasResponseModelNormalizationE2E` |
 | 跨层一致性 | forward 与 takeover 在全部 verdict 叉积上都不使用 probed-no 腿（all-no 例外见条目 31） | `internal/takeover` 的 `TestProtocolLayersNeverPassThroughProbedNoLegs` |
