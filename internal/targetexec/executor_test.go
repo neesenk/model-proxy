@@ -403,6 +403,7 @@ func TestExecutor403FailureScope(t *testing.T) {
 		{name: "model denial takes priority", body: model, challenge: "challenge", modelFailures: 1, evidence: model},
 		{name: "last model denial", body: model, last: true, commit: true, modelFailures: 1},
 		{name: "account disabled", body: `{"error":{"code":"account_disabled"}}`, accountFailures: 1, evidence: "upstream denied the account"},
+		{name: "account deactivated", body: `{"error":{"code":"account_deactivated"}}`, accountFailures: 1, evidence: "upstream denied the account"},
 		{name: "last account suspended", body: `{"error":{"code":"account_suspended"}}`, last: true, accountFailures: 1, evidence: "upstream denied the account"},
 		{name: "generic HTML", body: "<html><title>403 Forbidden</title></html>", contentType: "text/html", commit: true},
 		{name: "unknown resource", body: "<html>resource does not exist</html>", commit: true},
