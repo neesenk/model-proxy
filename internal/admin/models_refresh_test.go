@@ -199,8 +199,8 @@ func TestRefreshModelsFetchesProbesWrites(t *testing.T) {
 	if mp := matrix["glm-new"]; mp.Chat != runtimewire.Yes {
 		t.Errorf("fresh matrix glm-new chat = %s, want yes", mp.Chat)
 	}
-	if mp := matrix["glm-old"]; mp.Chat != runtimewire.No {
-		t.Errorf("fresh matrix glm-old chat = %s, want no (404 probed)", mp.Chat)
+	if _, leaked := matrix["glm-old"]; leaked {
+		t.Errorf("fresh matrix contains probe-dropped model glm-old: %+v (dropped models are not in config and must not leak into model_caps)", matrix["glm-old"])
 	}
 }
 
@@ -485,8 +485,11 @@ func TestRefreshModels_DisabledNotProbed(t *testing.T) {
 	if got := matrix["off"]; got.Chat != runtimewire.Yes || got.Anthropic != runtimewire.Yes || got.Responses != runtimewire.No {
 		t.Errorf("disabled model's matrix = %+v, want stored verdict carried over verbatim", got)
 	}
-	if _, ok := matrix["dead"]; !ok {
-		t.Error("probed-but-dropped model lost its matrix entry")
+	if _, ok := matrix["live"]; !ok {
+		t.Error("kept model live missing from replacement matrix")
+	}
+	if _, leaked := matrix["dead"]; leaked {
+		t.Errorf("probe-dropped model dead leaked into replacement matrix: %+v", matrix["dead"])
 	}
 	// Config keeps the disabled model too.
 	if got := h.configModels(t, "zp"); !reflect.DeepEqual(sortedCopy(got), []string{"live", "off"}) {

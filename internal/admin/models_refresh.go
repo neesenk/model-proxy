@@ -241,9 +241,9 @@ func probeRefreshModels(ctx context.Context, client *http.Client, provCfg config
 				mp.Responses = v
 			}
 		}
-		matrix[o.ID] = mp
 		if anyYes || (anyProbed && !probedNo) {
 			kept = append(kept, o.ID)
+			matrix[o.ID] = mp
 		} else {
 			dropped = append(dropped, appapi.ModelsRefreshDrop{Model: o.ID, Reason: refreshLegsSummary(o.Legs)})
 		}

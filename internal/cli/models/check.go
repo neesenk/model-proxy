@@ -132,7 +132,6 @@ func CheckProviderModels(cfg *configdomain.Config, provName string, ids, disable
 				mp.Responses = v
 			}
 		}
-		protocols[r.ID] = mp
 		// Keep when ANY leg concluded Yes — and also when no leg concluded
 		// Yes but no PROBED leg concluded No either (every probed leg
 		// inconclusive: transient 429/5xx/auth). The probe holds no negative
@@ -142,8 +141,14 @@ func CheckProviderModels(cfg *configdomain.Config, provName string, ids, disable
 		// not configured classify No DEFINITIONALLY and do not count as
 		// negative evidence — a provider without anthropic_base_url must not
 		// turn every transient chat failure into a drop.
+		//
+		// Only kept models enter protocols / model_caps.json: a dropped model
+		// is never written to provider.json, so persisting its verdict would
+		// surface an unconfigured ghost row in /api/models that cannot be
+		// edited or disabled.
 		if anyYes || (anyProbed && !probedNo) {
 			probedKept[r.ID] = true
+			protocols[r.ID] = mp
 		} else {
 			dropped = append(dropped, DropReason{Model: r.ID, Status: legStatus(r.Legs), Reason: legsSummary(r.Legs)})
 		}
@@ -182,11 +187,11 @@ func checkDecisionsProviderModels(
 			continue // kept below, unprobed
 		}
 		ok, status, reason := probe.Callable(context.Background(), client, provCfg, impl, id)
-		protocols[id] = runtimewire.ModelProtocols{
-			Chat: runtimewire.No, Anthropic: runtimewire.No, Responses: runtimewire.No,
-		}
 		if ok {
 			kept = append(kept, id)
+			protocols[id] = runtimewire.ModelProtocols{
+				Chat: runtimewire.No, Anthropic: runtimewire.No, Responses: runtimewire.No,
+			}
 		} else {
 			dropped = append(dropped, DropReason{Model: id, Status: status, Reason: "decisions " + reason})
 		}

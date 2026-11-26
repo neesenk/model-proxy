@@ -373,8 +373,11 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 	if want := providerbuild.ProtocolConfigFingerprint(cfg.Providers["zhipu"]); entry.Fingerprint != want {
 		t.Errorf("caps fingerprint=%q want %q", entry.Fingerprint, want)
 	}
-	if len(entry.Models) != len(ids) {
-		t.Errorf("caps models=%v want one entry per probed id (%d)", entry.Models, len(ids))
+	if len(entry.Models) != len(wantKept) {
+		t.Errorf("caps models=%v want only kept ids (%d), not probe-dropped ids", entry.Models, len(wantKept))
+	}
+	if _, leaked := entry.Models["drop-b"]; leaked {
+		t.Errorf("probe-dropped model drop-b leaked into model_caps.json: %+v", entry.Models["drop-b"])
 	}
 	if got := entry.Models["resp-only-c"]; got.Responses != runtimewire.Yes {
 		t.Errorf("persisted resp-only-c.responses=%s want yes", got.Responses)
@@ -958,11 +961,14 @@ func TestCheckProviderModels_DisabledNotProbed(t *testing.T) {
 	if got := loaded["zhipu"].Models["off"]; got.Chat != runtimewire.Yes || got.Anthropic != runtimewire.Yes {
 		t.Errorf("disabled model's stored verdict = %+v, want carried over yes/yes", got)
 	}
-	// Every PROBED id lands in the file matrix (config dropping a model
-	// never erased its verdict entry — same rule as before), while the
-	// disabled id rode along unprobed.
-	if _, ok := loaded["zhipu"].Models["dead"]; !ok {
-		t.Error("probed-but-dropped model lost its file entry")
+	// Probe-dropped models must NOT land in model_caps.json (they are absent
+	// from provider.json and would surface as un-disableable ghost rows in
+	// /api/models), while kept and disabled ids stay persisted.
+	if _, ok := loaded["zhipu"].Models["live"]; !ok {
+		t.Error("kept model live missing from model_caps.json")
+	}
+	if _, leaked := loaded["zhipu"].Models["dead"]; leaked {
+		t.Errorf("probe-dropped model dead leaked into model_caps.json: %+v", loaded["zhipu"].Models["dead"])
 	}
 }
 

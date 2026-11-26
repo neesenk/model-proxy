@@ -807,10 +807,41 @@ func (s *Service) Pins() []appapi.Pin {
 // unprobedProjection).
 func (s *Service) ModelsDocument() appapi.ModelsDocument {
 	document := appapi.ModelsDocument{Providers: map[string]appapi.ProviderModelCaps{}, Match: []appapi.ModelMatchEntry{}, Disabled: map[string][]string{}, Unprobed: map[string][]string{}}
+	cat := s.modelsCatalogCache()
+	document.Catalog = modelsCatalogStatus(cat)
+	if s.ports.DisabledModels != nil {
+		if disabled := s.ports.DisabledModels(); disabled != nil {
+			document.Disabled = disabled
+		}
+	}
+	var cfg *configdomain.Config
+	if s.ports.Config != nil {
+		cfg = s.ports.Config()
+	}
+	// One HydrateModels traversal feeds all three config-scoped projections:
+	// the served-model filter on Providers (so stale/dropped entries in the
+	// probe store can never appear as un-disableable ghost rows), the match
+	// list, and the unprobed gap.
+	var sources map[string]map[string]routing.ModelSource
+	if cfg != nil {
+		_, sources = routing.HydrateModels(cfg, cat)
+	}
 	if s.ports.ModelCapsSnapshot != nil {
 		for name, caps := range s.ports.ModelCapsSnapshot() {
+			var allowed map[string]routing.ModelSource
+			if cfg != nil {
+				if _, exists := cfg.Providers[name]; !exists {
+					continue
+				}
+				allowed = sources[name]
+			}
 			models := make(map[string]appapi.ModelProtocols, len(caps.Models))
 			for model, mp := range caps.Models {
+				if cfg != nil {
+					if _, served := allowed[model]; !served {
+						continue
+					}
+				}
 				models[model] = appapi.ModelProtocols{
 					Chat:      mp.Chat.String(),
 					Anthropic: mp.Anthropic.String(),
@@ -823,23 +854,6 @@ func (s *Service) ModelsDocument() appapi.ModelsDocument {
 				Models:      models,
 			}
 		}
-	}
-	cat := s.modelsCatalogCache()
-	document.Catalog = modelsCatalogStatus(cat)
-	if s.ports.DisabledModels != nil {
-		if disabled := s.ports.DisabledModels(); disabled != nil {
-			document.Disabled = disabled
-		}
-	}
-	var cfg *configdomain.Config
-	if s.ports.Config != nil {
-		cfg = s.ports.Config()
-	}
-	// One HydrateModels traversal feeds both projections: the match list and
-	// the configured set the unprobed gap is measured against.
-	var sources map[string]map[string]routing.ModelSource
-	if cfg != nil {
-		_, sources = routing.HydrateModels(cfg, cat)
 	}
 	document.Match = modelsMatchProjection(cfg, sources)
 	document.Unprobed = unprobedProjection(document.Providers, sources)

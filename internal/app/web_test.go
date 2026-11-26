@@ -70,9 +70,20 @@ func TestAPIModelsEndToEnd(t *testing.T) {
 		t.Fatalf("empty store body = %s, want {\"providers\":{},\"catalog\":{\"count\":0},\"match\":[],\"disabled\":{},\"unprobed\":{}}", body)
 	}
 
+	// Configure zhipu to serve "glm" (and NOT "glm-dropped"): /api/models
+	// filters the probe store to the configured served set so stale or
+	// probe-dropped entries never appear as un-disableable ghost rows.
+	p.mu.Lock()
+	zp := p.cfg.Providers["zhipu"]
+	zp.Models = []string{"glm"}
+	p.cfg.Providers["zhipu"] = zp
+	p.mu.Unlock()
+
 	probed := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
 	p.modelCaps.Put("zhipu", "0123456789abcdef", "glm",
 		runtimewire.ModelProtocols{Chat: triYes, Anthropic: triNo, Responses: triUnknown}, probed)
+	p.modelCaps.Put("zhipu", "0123456789abcdef", "glm-dropped",
+		runtimewire.ModelProtocols{Chat: triUnknown, Anthropic: triUnknown, Responses: triNo}, probed)
 
 	rec = httptest.NewRecorder()
 	serveWeb(w, rec, httptest.NewRequest("GET", "/api/models", nil))
@@ -99,6 +110,9 @@ func TestAPIModelsEndToEnd(t *testing.T) {
 	}
 	if m := zhipu.Models["glm"]; m.Chat != "yes" || m.Anthropic != "no" || m.Responses != "unknown" {
 		t.Errorf("models[glm] = %+v, want yes/no/unknown verdict strings", m)
+	}
+	if _, leaked := zhipu.Models["glm-dropped"]; leaked {
+		t.Errorf("unconfigured model glm-dropped leaked into /api/models: %+v", zhipu.Models["glm-dropped"])
 	}
 }
 

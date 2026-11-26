@@ -927,6 +927,63 @@ func TestModelsDocumentUnprobed(t *testing.T) {
 	}
 }
 
+// TestModelsDocumentFiltersUnservedModelsFromCapsSnapshot pins that /api/models
+// only exposes models the live config actually serves (provider models ∪
+// explicit route targets — the same set SetModelDisabled validates). A stale or
+// probe-dropped entry lingering in model_caps.json (or a removed provider) must
+// never surface as a ghost row whose toggle fails with "does not serve model".
+func TestModelsDocumentFiltersUnservedModelsFromCapsSnapshot(t *testing.T) {
+	probed := time.Date(2026, 11, 26, 15, 12, 0, 0, time.UTC)
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {Models: []string{"glm-5.4"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{
+			"route-only": {{Provider: "zhipu", Model: "glm-5.3-flash"}},
+		},
+	}
+	service := New(Ports{
+		ModelCapsSnapshot: func() map[string]runtimewire.ProviderModelCaps {
+			return map[string]runtimewire.ProviderModelCaps{
+				"zhipu": {
+					Fingerprint: "13c2517915db106b",
+					ProbedAt:    probed,
+					Models: map[string]runtimewire.ModelProtocols{
+						"glm-5.4":              {Chat: runtimewire.Yes, Anthropic: runtimewire.Yes, Responses: runtimewire.No},
+						"glm-5.3-flash":        {Chat: runtimewire.Yes, Anthropic: runtimewire.Yes, Responses: runtimewire.No},
+						"glm-5.3-flashx-legal": {Chat: runtimewire.Unknown, Anthropic: runtimewire.Unknown, Responses: runtimewire.No},
+					},
+				},
+				"removed-provider": {
+					Fingerprint: "deadbeefdeadbeef",
+					ProbedAt:    probed,
+					Models:      map[string]runtimewire.ModelProtocols{"old": {Chat: runtimewire.Yes}},
+				},
+			}
+		},
+		Config:  func() *configdomain.Config { return cfg },
+		HomeDir: func() string { return t.TempDir() },
+	})
+
+	doc := service.ModelsDocument()
+	if _, leaked := doc.Providers["removed-provider"]; leaked {
+		t.Errorf("removed provider leaked into ModelsDocument: %+v", doc.Providers["removed-provider"])
+	}
+	zp, ok := doc.Providers["zhipu"]
+	if !ok {
+		t.Fatalf("zhipu missing from ModelsDocument: %+v", doc.Providers)
+	}
+	if _, leaked := zp.Models["glm-5.3-flashx-legal"]; leaked {
+		t.Errorf("unconfigured model glm-5.3-flashx-legal leaked into ModelsDocument: %+v", zp.Models)
+	}
+	if _, ok := zp.Models["glm-5.4"]; !ok {
+		t.Errorf("configured model glm-5.4 missing: %+v", zp.Models)
+	}
+	if _, ok := zp.Models["glm-5.3-flash"]; !ok {
+		t.Errorf("route-only target model glm-5.3-flash missing: %+v", zp.Models)
+	}
+}
+
 func TestSecurityAuditDisabled(t *testing.T) {
 	service := New(Ports{
 		Config: func() *configdomain.Config {
