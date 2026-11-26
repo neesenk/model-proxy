@@ -1254,8 +1254,13 @@ func writeYAMLFile(file string, doc *yaml.Node) error {
 // Duplicate occurrences of a managed key collapse into the single rewritten
 // line, and an `export ` prefix on a managed key is tolerated (rewritten to
 // the canonical bare form) — a hand-edited file must not grow duplicate keys
-// on re-takeover.
+// on re-takeover. An env file carries only the provider/model keys of
+// env.set — it has no MCP surface — so the mcp scope, whose promise is
+// "provider/models untouched", writes nothing here.
 func (t *Template) rewriteEnv(ctx renderContext, scope RewriteScope) error {
+	if scope == ScopeMCP {
+		return nil
+	}
 	data, err := readFile(t.File)
 	if err != nil && !os.IsNotExist(err) {
 		return err
