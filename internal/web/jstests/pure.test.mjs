@@ -1945,7 +1945,7 @@ test('rowFailoverAttempt maps the two attempt semantics onto one labeled attempt
   assert.equal(rowFailoverAttempt({ provider: 'zhipu', attempt: 0 }), 0);
   assert.equal(rowFailoverAttempt({ provider: 'zhipu', attempt: 1 }), 2);
   assert.equal(rowFailoverAttempt({ provider: 'zhipu', attempt: 3 }), 4);
-  assert.equal(rowFailoverAttempt({ provider: '(cache)', attempt: 1 }), 2);
+  assert.equal(rowFailoverAttempt({ provider: 'aqp', attempt: 1 }), 2);
   // The sentinel is matched exactly: a provider name merely containing
   // "failover" is not a terminal row.
   assert.equal(rowFailoverAttempt({ provider: 'my-failover', attempt: 1 }), 2);
@@ -3484,12 +3484,13 @@ test('sessionHealthSummary counts an all-targets-failed terminal row as a failov
   ]);
   assert.equal(multi.failovers, 2);
   // Committed-row semantics unchanged: attempt (failed hops before the
-  // commit) > 0 means a failover — a (cache) hit and a surviving unanswered
-  // leg (attempt is the leg's 0-based ordinal) follow the same rule.
+  // commit) > 0 means a failover — a committed row without failover and a
+  // surviving unanswered leg (attempt is the leg's 0-based ordinal) follow
+  // the same rule.
   const committed = sessionHealthSummary([
     { ts: 0, latencyMs: 300, provider: 'zhipu', status: 200, attempt: 0 },
     { ts: 5000, latencyMs: 300, provider: 'zhipu', status: 200, attempt: 1 },
-    { ts: 9000, latencyMs: 300, provider: '(cache)', status: 200, attempt: 0 },
+    { ts: 9000, latencyMs: 300, provider: 'aqp', status: 200, attempt: 0 },
     { ts: 13000, latencyMs: 300, provider: 'shopee#f', status: 502, attempt: 0, attemptOnly: true },
     { ts: 17000, latencyMs: 300, provider: 'shopee#f', status: 429, attempt: 1, attemptOnly: true },
   ]);

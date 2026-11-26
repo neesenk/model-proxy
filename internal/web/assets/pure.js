@@ -2469,9 +2469,6 @@ export function sessionHealthSummary(rows) {
   // server's stats/generation.go rule (LegacyGenerationWindowMs): a row whose
   // TTFT is absent or swallows the call contributes its full call time, and a
   // window implying an implausible decode rate (>2000 tok/s — a transfer
-  // tail, not decode) does too. Cache-replay rows ("(cache)") replay stored
-  // bytes in ~1ms with no generation behind them — they contribute neither
-  // tokens nor window.
   let output = 0, genMs = 0;
   for (const r of list) {
     if (!(Number.isFinite(r.latencyMs) && r.latencyMs > 0)) continue;

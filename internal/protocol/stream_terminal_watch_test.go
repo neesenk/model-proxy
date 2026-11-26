@@ -124,9 +124,8 @@ func TestTerminalWatcher_AnthropicCompleteIsByteIdentical(t *testing.T) {
 }
 
 // A bare message_stop without stop_reason (kimi upstream behavior) is not
-// a complete success sequence (StreamTerminalComplete) but IS client-acceptable: the SDK
-// contract is satisfied, so nothing may be appended after the client's own
-// terminal.
+// a complete success sequence but IS client-acceptable: the SDK contract is
+// satisfied, so nothing may be appended after the client's own terminal.
 func TestTerminalWatcher_AnthropicBareMessageStopUntouched(t *testing.T) {
 	bare := watchAnthropicPartial +
 		"event: message_stop\n" +

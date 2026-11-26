@@ -225,7 +225,7 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   KeyUsage 与 session 聚合排除（路由遥测，不是客户端流量）。**全链失败终态行**：forward
   以代理自己的应答收尾（纯限频 429 + `Retry-After`，否则 502）时，该应答另落一行普通行
   （`attempt_only` 不置位）：`provider` 为哨兵 `(failover)`——代理自己产生的行，不对应任何
-  上游，与缓存命中的 `(cache)` 同类；`upstream_model` 为空；status、response body 与
+  上游；`upstream_model` 为空；status、response body 与
   response headers 是客户端实际收到的字节（限频时含 `retry-after`）；request body 照常
   落盘（全链失败的请求仍可 replay）；attempt 序号排在最后一跳之后；
   `latency_ms` 自首轮派发起算（跨全部 pass 与冷却等待）；不携带 usage。该请求的

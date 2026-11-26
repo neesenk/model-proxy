@@ -400,8 +400,7 @@ session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 r
   （禁用是更强的 operator 意图，见下文 Disabled models 节）；
 - pin 池化父名等于 pin 全部虚拟账号；
 - `x-mp-force-provider` 是单请求覆盖；
-- pin 仅在内存中，reload 不清，重启清除；
-- pin/force 请求必须绕过响应缓存。
+- pin 仅在内存中，reload 不清，重启清除。
 
 ## Latch（route_policy escalation 的会话级状态）
 

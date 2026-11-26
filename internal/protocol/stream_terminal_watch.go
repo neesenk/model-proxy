@@ -29,9 +29,10 @@
 // event").
 //
 // A bare anthropic message_stop without a stop_reason (observed from a kimi
-// upstream) is NOT a complete success sequence (StreamTerminalComplete is the
-// authority there) but IS client-acceptable: the bytes are forwarded
-// untouched and nothing is synthesized.
+// upstream) is not a complete success sequence, but IS client-acceptable: the
+// bytes are forwarded untouched and nothing is synthesized. (No consumer
+// distinguishes the two since the response cache — the one gate that did —
+// was removed; nothing here classifies completeness.)
 package protocol
 
 import (

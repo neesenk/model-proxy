@@ -21,8 +21,7 @@ import (
 // ---- guard_integration_test.go ----
 
 // Outbound secret guard (DLP-lite) integration: the scan runs once on the
-// shared request body inside forward, before the cache lookup and any forward
-// branch. All fixtures are synthetic strings shaped to match the patterns —
+// shared request body inside forward, before any forward branch. All fixtures are synthetic strings shaped to match the patterns —
 // never real credentials (AGENTS.md credential red line), and failure messages
 // must not echo the fixture bytes either.
 

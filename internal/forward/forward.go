@@ -102,11 +102,11 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	}
 
 	// The called name is the exposed route key, for every protocol. Computed
-	// early so the pin check (and cache bypass) can run before any upstream work.
+	// early so the pin check can run before any upstream work.
 	// A "provider/model" called name (prefix = a configured provider, no exact
 	// route match) decomposes: route by the bare model, narrowed to that
-	// provider with full force-provider semantics (cache bypass, no cross-route
-	// reroute) — the request explicitly names its backend.
+	// provider with force-provider semantics (no cross-route reroute) — the
+	// request explicitly names its backend.
 	exposed := calledModel
 	targets, ok := expanded[exposed]
 	prefixForced := ""
@@ -139,10 +139,10 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		http.Error(w, fmt.Sprintf("model %q is disabled", calledModel), http.StatusNotFound)
 		return
 	}
-	// A pin on this route forces the pinned provider (exclusive) — compute early
-	// so the cache can bypass it (a pinned request must reach the pinned backend,
-	// not a stale cached answer from another provider — same rationale as the
-	// force-provider/replay bypass).
+	// A pin on this route forces the pinned provider (exclusive) — computed
+	// before scheduling, because it decides how the route is narrowed (no
+	// request-aware reroute away from the pinned backend — the same
+	// exclusivity a force-provider override has).
 	force := p.pinForces(exposed, targets, parentOf)
 	forcedProvider := ForcedProviderFromRequest(r)
 	if forcedProvider == "" {
@@ -150,7 +150,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	}
 
 	// Outbound secret guard (DLP-lite): scan the SHARED request body once, here
-	// — after route resolution (so hits are attributable) and before the cache
+	// — after route resolution (so hits are attributable) and before
 	// request-profile planning and every forward branch. Forward consumes the
 	// (possibly redacted) origBody from this point on; no branch rescans.
 	// The stage is extracted to runOutboundGuard (same generation's snapshot
@@ -752,7 +752,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 		scheduleSource = ScheduleSourceForce
 	}
 	st.scheduleSource = scheduleSource
-	// `force` (pin) was computed before the cache. A pin is EXCLUSIVE: it
+	// `force` (pin) was computed before scheduling. A pin is EXCLUSIVE: it
 	// overrides request-aware routing (no cross-route reroute away from the pinned
 	// provider) and, via the `force` flag into the attempt, bypasses the circuit
 	// breaker — the user explicitly asked for THIS backend, no failover.

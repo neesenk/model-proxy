@@ -923,7 +923,7 @@ type TakeoverPreview struct {
 // ReplayResult is the POST /api/replay response: one logged request re-sent
 // to the proxy with a one-shot x-mp-force-provider pin (same semantics as
 // `model-proxy replay <id> --to <provider>` — no global pin, no failover
-// change, cache bypassed by the force-provider rule). Status is the upstream
+// change). Status is the upstream
 // exchange's HTTP status; Body carries the response (SSE streams included),
 // capped at the replay body cap with Truncated marking the cut.
 type ReplayResult struct {

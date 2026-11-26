@@ -123,10 +123,6 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 # stats:                    # 调用统计持久化（SQLite，默认开启，30 天保留）
 #   db_path: ~/.model-proxy/stats.db # 显式设置时需绝对路径（~ 展开）
 #   retention: 720h         # 30d；"0" = 永久（须是 Go duration：h/m/s，不能写 30d）
-# cache:                    # 精确响应缓存（默认关；逐字节重复的请求直接命中，省上游配额）
-#   enabled: true
-#   ttl: 10m
-#   max_entries: 1000
 # request_log:              # 请求日志（完整 request/response body，默认关；Requests 页 + replay 的数据源）
 #   enabled: true
 #   dir: ~/.model-proxy/log/requests # 显式设置时需绝对路径（~ 展开）——daemon 可能从任意 CWD 拉起
@@ -313,9 +309,6 @@ model-proxy guard blocks           # AI 二次判定拉黑的会话列表（guar
 model-proxy guard unblock <sid>    # 解除一个被拉黑的会话
 model-proxy audit --kind drift --from 7d --json   # 过滤 + 原始 JSON
 model-proxy audit --stats --from 7d  # 聚合视图：by kind/命中名 top10/agent top10/action（--json 出结构化聚合）
-
-# 精确响应缓存统计（需 daemon）
-model-proxy cache                  # 条目数 / 命中 / 未命中 / 命中率（--json 出原始对象）
 ```
 
 ## Web UI
@@ -332,7 +325,7 @@ model-proxy cache                  # 条目数 / 命中 / 未命中 / 命中率�
 - **Security** — 安全视图（审计记录需 `guard.audit`；30s 自动刷新，交互中自动让位）：顶部 KPI 行（拉黑会话 / verdict 汇总——**三级判定**：high 拦截拉黑、medium 只记录、low 忽略档（仅内存 ring 存活期可见，不进查询库）；判定通道 LLM 用量——真实模型调用次数与 in/out token，缓存命中与在途去重不计费，通道未配置时显示单个 off tile）；**Blocked sessions** 卡列出被拉黑的会话——高 verdict **与精确匹配拦截**（代理自有凭据 known_secret* 家族命中：记录 + 拒绝请求 + 拉黑会话，零误报通道无条件执行）共用同一张表，逐行解除或一键全部解除（持久化跨重启），session 列点击跳转 Requests 会话视图（hash 下钻，Back 返回）；**Rule hits** 卡按规则聚合**全量审计窗口**命中数（所有 kind、整个 30d 保留期，独立加载、不受 Activity 的 kind/时间窗口过滤器影响；审计记录 + 被屏蔽的 low），高频 pattern 规则在判定通道关闭时标 "noisy — adjudicate can suppress" 降噪提示，点击规则行下钻 Activity 到该规则（再点/✕ chip 清除）；**Activity** 合并时间线把审计记录（秘密/路径类型、takeover 漂移）与 AI 判定 verdict 放进同一 feed 新到旧展示——fresh verdict 双写去重（同一事件只显一行，judge 归属随行），被屏蔽的 low verdict 只在这里可见；每行（含 cached 标记的 ai· verdict 行）可 **analyze** 行内展开：按需重扫请求体定位每处命中——LLM 判定块（verdict/判定逻辑/事实依据/模型/cached）在前，命中按规则分组、多处命中编号展示、命中片段在上下文中高亮折行，展开状态在 Refresh/自动刷新后保留（结果页内缓存，不重复请求）；过滤器：kind 与时间窗口（All Time/24h/7d/30d）服务端生效 + Show More 逐级加深（至 1,000 行）、verdict（含 Medium）/规则客户端过滤，全部进 URL hash（刷新/分享保留）。**存储双层**：SQLite 查询库（`security.db`——精确匹配、drift、medium/high、error/skipped 落库并关联原始请求）+ JSONL 全量留痕（含 low，仅供 tail）；旧 JSONL 历史不迁移。精确匹配行直接显示命中凭据的来源（哪个池/账号/字段的 key）与掩码 key 片段；verdict 行直接显示 LLM 的判定逻辑与事实依据原文。带请求的行可点 req 链接下钻原始请求：Requests 页顶部固定展示该请求 + guard 命中高亮定位（explain 重扫）；被拦截的 400 请求同样落 request log 可下钻。全部只展示类型名与路由元数据，匹配内容永不进入查询面（analyze 的片段来自 admin 本可读的 request log，按需重扫、不落盘）。每个客户端会话的 token 等价成本汇总在 `/api/sessions`（Requests 页同源数据）。
 - **Live**（Requests 页左侧边栏——`Model`/`MCP` 分组下的 `Live` 项，hash `#requests/<stream>_live`，即 `model_live` / `mcp_live`）— 实时请求监视（SSE 推送）：哪个 agent 正在发请求、路由到哪个上游、状态/token/耗时——抓「疯狂重试的 agent」就靠它；MCP 档监视网关交换（initialize/tools 握手与调用，agent 来自 clientInfo 归属）。顶部 **session 选择器**（Model 档）可选一个客户端会话（选择随 URL hash 保持，`#requests/model_live?session=…`——刷新/分享链接/前进后退还原同一会话视图；旧 `#status/live`、`#requests/live` 链接自动重写），看该会话的请求分析：**Trace 时间线**（请求 span 泳道图 + 累计 token 曲线，琥珀点＝发生过 failover 重试，红条＝错误响应，条形悬停显示该请求摘要（时间/agent/model→provider/状态/延迟/token）并懒加载**两段内容摘录**（这轮用户输入 + 模型返回，各 ≤220 字符、无标签前缀、以弱/正常文本区分，与详情行共享缓存；纯工具调用轮显示 `[tool_use: …]` 标记、纯思考轮 `[thinking]`、错误响应显示 error 消息——coding agent 的大量工具轮不再空白），条形可点开详情；**长空闲间隙自动压缩**——2 分钟无请求即断轴并以 ⫽ 分隔，短突发在跨天会话里仍占可读宽度；**横向拖拽缩放**进任意时间窗，zoom 状态跨 SSE 重渲染存活，reset 一键还原；泳道超过 14 条时压缩行高；成本保持会话级汇总——定价归服务端）+ 汇总 chips（请求数 / input+output / 缓存读写 / 平均延迟 / 错误 / 等价成本 / model、provider），实时行与持久化行合并（表格与 Requests 页同列同渲染器、表头同样悬浮跟随），逐行可展开 body（详情与 Requests 页同一人读对话视图，原始 body 折叠），会话视图悬浮固定在顶栏下方、表头联动跟随。会话 id 来自 `request_log.session_headers` 允许列表（Claude Code/OpenCode 默认带；pi 需 takeover 模板写入的 `compat.sendSessionAffinityHeaders`）；无会话头的客户端回落请求体 spec 字段（`protocol.SessionIDFromBody`，按序 `client_metadata.session_id`（Codex/Responses）、`prompt_cache_key`（OpenAI Chat/Responses——Kimi Code 严格按 OpenAI/Anthropic spec 实现时会话 id 就在这两个字段里，见 MoonshotAI/kimi-code#3506）、`metadata.user_id`（Anthropic Messages），仅观测与 guard 会话维度，不改路由粘性）。
 
-**所有写操作都会即时热重载运行中的 serve（进程内 `p.reload`，无需重启）**：改 config、增删账号、aqp/codex 登录完成 —— 改动立即生效。账号增删虽不改 `config.yaml`，但 reload 会重建 providers（重新读池文件），新加/删除的账号随即（取消）展开成虚拟 provider；reload 还会顺手清空熔断/限频/粘性状态并重建响应缓存（学到的并发上限与在途计数不随 reload 清除，见上文「并发上限门禁」），所以 UI 改动也是"给卡住的 provider 复位"的手段。
+**所有写操作都会即时热重载运行中的 serve（进程内 `p.reload`，无需重启）**：改 config、增删账号、aqp/codex 登录完成 —— 改动立即生效。账号增删虽不改 `config.yaml`，但 reload 会重建 providers（重新读池文件），新加/删除的账号随即（取消）展开成虚拟 provider；reload 还会顺手清空熔断/限频/粘性状态（学到的并发上限与在途计数不随 reload 清除，见上文「并发上限门禁」），所以 UI 改动也是"给卡住的 provider 复位"的手段。
 
 关闭 UI：
 

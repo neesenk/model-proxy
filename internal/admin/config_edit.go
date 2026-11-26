@@ -81,8 +81,8 @@ func (s *Service) editScheduling(data map[string]any) error {
 	})
 }
 
-// editRequestLog / editStats / editCache mutate the scalar request_log, stats
-// and cache blocks. The whole request_log and stats blocks are restart-only at
+// editRequestLog / editStats mutate the scalar request_log and stats
+// blocks. Both blocks are restart-only at
 // runtime (logger/stats store are built once at startup), but the write itself
 // is the same validate+save+reload pipeline as every other edit — the UI owns
 // the "restart required" hint (docs/engineering/pitfalls.md #29/#31).
