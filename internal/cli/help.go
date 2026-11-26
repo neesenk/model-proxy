@@ -310,13 +310,16 @@ Subcommands:
 
 	"prune": `prune <days> [--dry-run] [--config PATH]
 
-  One-shot request-log cleanup: delete rotated requests-/mcp- log files older
-  than <days> days (mtime, same rule as the automatic retention sweep) in the
-  configured request_log dir and mcp_dir. The active (today's) files and
-  index.db are never touched. This is a manual, one-time cleanup — it does not
-  read or change request_log.retention and the daemon's automatic sweep keeps
-  running as configured. The trailing SQLite index reconciles on its own: the
-  daemon (or its next startup) drops the rows of deleted files.
+  One-shot request-log cleanup: delete rotated requests-/mcp- log files and
+  their .zst archives older than <days> days in the configured request_log
+  dir and mcp_dir, aged by the daemon's retention rule: a .log by its mtime,
+  a .zst archive by the YYYYMMDD day stamp in its name. Archives without a
+  readable day stamp and in-flight .zst.tmp files are never deleted or listed.
+  The active (today's) files and index.db are never touched. This is a manual,
+  one-time cleanup — it does not read or change request_log.retention and the
+  daemon's automatic sweep keeps running as configured. The trailing SQLite
+  index reconciles on its own: the daemon (or its next startup) drops the rows
+  of deleted files.
 
   prune 7         delete files older than 7 days
   prune 30 --dry-run   list what would be deleted, delete nothing`,

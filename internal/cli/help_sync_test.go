@@ -162,3 +162,23 @@ func TestCLIMDDocumentsRegisteredCommands(t *testing.T) {
 		t.Errorf("CLI.md sections name unregistered command(s): %s — stale docs after a removal?", strings.Join(stale, ", "))
 	}
 }
+
+// TestPruneHelpDocumentsArchives keeps `prune -h` in step with CLI.md §24 and
+// the command's behavior: since the request-log cold tier, prune deletes .zst
+// archives too, ages them by the day stamp carried in the name, and passes
+// over .zst.tmp files. The help text stayed at the pre-archive mtime-only
+// wording while the package comment and CLI.md moved (2026-11-26 audit).
+func TestPruneHelpDocumentsArchives(t *testing.T) {
+	help := Help["prune"]
+	if help == "" {
+		t.Fatal("Help map has no prune entry")
+	}
+	for _, want := range []string{".zst archives", "day stamp", ".zst.tmp"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("prune help does not mention %q:\n%s", want, help)
+		}
+	}
+	if strings.Contains(help, "(mtime, same rule") {
+		t.Errorf("prune help still carries the pre-archive mtime-only wording:\n%s", help)
+	}
+}
