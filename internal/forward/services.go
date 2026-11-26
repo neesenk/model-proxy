@@ -46,11 +46,12 @@ type Services struct {
 	// request's own generation parent.
 	NewHealthGate func(Snapshot) targetexec.HealthGate
 	// NewEffects binds app-owned observation (metrics, request log, live
-	// events, tokens, agents, attempt quality) to one runtime generation.
-	// cfg is the request snapshot's config (same discipline as Schedule):
-	// observation decisions derived from config read it from here, never from
-	// reload-owned state.
-	NewEffects func(cfg *Config, generation uint64) targetexec.Effects
+	// events, tokens, agents, attempt quality) to one runtime generation:
+	// the samples that are generation-gated (quality, error rate) are
+	// recorded under the request's own generation. Nothing the effects do is
+	// derived from config today — the day something is, it arrives here the
+	// same way Schedule's config does, never read from reload-owned state.
+	NewEffects func(generation uint64) targetexec.Effects
 
 	// Schedule is the quota-aware scheduler (app: Proxy.schedule). The
 	// generation argument binds the sticky/round-robin mutation to the
@@ -92,10 +93,13 @@ type RouteState interface {
 	// route is worth a bounded wait rather than an immediate error.
 	ConcurrencyWaitable(targets []RouteTarget, now time.Time, quotaMaxAge time.Duration) bool
 	// WaitInflightSlot parks until one of the targets frees a concurrency
-	// slot (freed), max elapses, or the context ends (canceled). It returns at
-	// once when a slot is already free, and without waiting when no target
-	// could become schedulable by a freed slot.
-	WaitInflightSlot(targets []RouteTarget, quotaMaxAge, max time.Duration, ctx context.Context) (freed, canceled bool)
+	// slot, max elapses, or the context ends — which is the only outcome the
+	// caller tells apart: canceled. Whether a slot actually freed is not
+	// reported, because the next pass re-schedules either way (a slot may
+	// have been taken again, or a target recovered for another reason). It
+	// returns at once when a slot is already free, and without waiting when
+	// no target could become schedulable by a freed slot.
+	WaitInflightSlot(targets []RouteTarget, quotaMaxAge, max time.Duration, ctx context.Context) (canceled bool)
 	// QuotaFreshnessMaxAge is the quota-snapshot freshness window shared by
 	// the scheduling skip and the failure classification.
 	QuotaFreshnessMaxAge(cfg *Config) time.Duration
@@ -168,7 +172,7 @@ func (p pipeline) concurrencyWaitable(targets []RouteTarget, now time.Time, quot
 	return p.state.ConcurrencyWaitable(targets, now, quotaMaxAge)
 }
 
-func (p pipeline) waitInflightSlot(targets []RouteTarget, quotaMaxAge, max time.Duration, ctx context.Context) (bool, bool) {
+func (p pipeline) waitInflightSlot(targets []RouteTarget, quotaMaxAge, max time.Duration, ctx context.Context) bool {
 	return p.state.WaitInflightSlot(targets, quotaMaxAge, max, ctx)
 }
 

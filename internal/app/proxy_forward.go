@@ -43,7 +43,7 @@ func (p *Proxy) forwardServices() forward.Services {
 		NewHealthGate: func(snap forward.Snapshot) targetexec.HealthGate {
 			return proxyHealthGate{proxy: p, snapshot: snap}
 		},
-		NewEffects: func(cfg *configdomain.Config, generation uint64) targetexec.Effects {
+		NewEffects: func(generation uint64) targetexec.Effects {
 			return targetExecutionEffects{proxy: p, generation: generation}
 		},
 		Schedule: func(cfg *configdomain.Config, parentOf map[string]string, exposed, sessionKey string, stickyOff bool, targets []configdomain.RouteTarget, routeKeys map[string]bool, generation uint64) ([]configdomain.RouteTarget, string) {
@@ -80,8 +80,9 @@ func (s proxyRouteState) ConcurrencyWaitable(targets []configdomain.RouteTarget,
 	return s.proxy.concurrencyWaitable(targets, now, quotaMaxAge)
 }
 
-func (s proxyRouteState) WaitInflightSlot(targets []configdomain.RouteTarget, quotaMaxAge, max time.Duration, ctx context.Context) (bool, bool) {
-	return s.proxy.waitInflightSlot(targets, quotaMaxAge, max, ctx)
+func (s proxyRouteState) WaitInflightSlot(targets []configdomain.RouteTarget, quotaMaxAge, max time.Duration, ctx context.Context) bool {
+	_, canceled := s.proxy.waitInflightSlot(targets, quotaMaxAge, max, ctx)
+	return canceled
 }
 
 func (s proxyRouteState) QuotaFreshnessMaxAge(cfg *configdomain.Config) time.Duration {

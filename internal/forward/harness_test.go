@@ -310,8 +310,9 @@ func (s *fakeRouteState) HasRecoveredUntried(targets []RouteTarget, tried map[st
 func (s *fakeRouteState) ConcurrencyWaitable(targets []RouteTarget, now time.Time, quotaMaxAge time.Duration) bool {
 	return s.saturated
 }
-func (s *fakeRouteState) WaitInflightSlot(targets []RouteTarget, quotaMaxAge, max time.Duration, ctx context.Context) (bool, bool) {
-	return s.waitSlot(max)
+func (s *fakeRouteState) WaitInflightSlot(targets []RouteTarget, quotaMaxAge, max time.Duration, ctx context.Context) bool {
+	_, canceled := s.waitSlot(max)
+	return canceled
 }
 func (s *fakeRouteState) QuotaFreshnessMaxAge(cfg *Config) time.Duration { return s.quotaMaxAge }
 func (s *fakeRouteState) LatchValue(sessionKey, route string) (Latch, bool) {
@@ -441,7 +442,7 @@ func newHarness() *harness {
 		Agents:        counters.NewAgentCounter(),
 		Events:        events,
 		NewHealthGate: func(Snapshot) targetexec.HealthGate { return gate },
-		NewEffects:    func(cfg *Config, generation uint64) targetexec.Effects { return fx },
+		NewEffects:    func(generation uint64) targetexec.Effects { return fx },
 		Schedule:      passthroughSchedule,
 		ResolverState: fakeResolverState{},
 	}

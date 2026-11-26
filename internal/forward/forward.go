@@ -320,7 +320,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 				// No horizon to sleep to: wake on the request that frees a
 				// slot, bounded by retry_wait like the cooldown wait.
 				logx.Infof("[proto=%s model=%s] every target is at its concurrency limit — waiting up to %s for a slot", proto, exposed, decision.Wait)
-				if _, canceled := p.waitInflightSlot(checkTargets, quotaMaxAge, decision.Wait, r.Context()); canceled {
+				if p.waitInflightSlot(checkTargets, quotaMaxAge, decision.Wait, r.Context()) {
 					p.recordLatchOutcome(execution, res)
 					p.publishTerminalEvent(requestID, r, proto, exposed, statusClientGone)
 					return

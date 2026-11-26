@@ -73,16 +73,22 @@ func (input PlanInput) backendProtocol(cfg Provider) (string, bool) {
 
 // targetExecutor binds protocol feedback, transport and effects to the same request.
 func (p pipeline) targetExecutor(runtime targetexec.Runtime, snap Snapshot, provider string) targetexec.Executor {
-	return targetexec.Executor{
+	executor := targetexec.Executor{
 		Client: p.clientFor(snap.Cfg, snap.ParentOf, provider),
 		State: targetexec.GateState{
 			Gate:       p.svc.NewHealthGate(snap),
 			Runtime:    runtime,
 			Scheduling: runtime.Scheduling,
 		},
-		Effects:   p.svc.NewEffects(snap.Cfg, runtime.Generation),
-		Responses: p.svc.ResponsesState,
+		Effects: p.svc.NewEffects(runtime.Generation),
 	}
+	// A nil store must stay a nil interface: assigning a nil
+	// *ResponsesStateStore to the interface field would make the executor's
+	// `Responses != nil` guards true with nothing behind them.
+	if p.svc.ResponsesState != nil {
+		executor.Responses = p.svc.ResponsesState
+	}
+	return executor
 }
 
 // requestRoutingScheduler is the stateful scheduling port used by the
