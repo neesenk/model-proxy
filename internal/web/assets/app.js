@@ -894,7 +894,7 @@ async function applyRequestDrill() {
       resp = await apiGet(requestDetailURL(request));
     } catch (e) {
       host.innerHTML = (e && e.status === 404)
-        ? '<div class="msg hint">request ' + esc(request) + ' is not in the request log (retention pruned it, or it predates logging)</div>'
+        ? '<div class="msg hint">request ' + esc(request) + ' is not in the request log (retention pruned it, it rolled out of the hot window into an offline archive, or it predates logging)</div>'
         : '<div class="msg err">' + esc(e.message) + '</div>';
       return;
     }
@@ -8145,7 +8145,7 @@ const SETTINGS_GROUPS = [
       },
       {
         key: 'mcp_dir', label: 'mcp_dir', type: 'text', def: '~/.model-proxy/log/mcp',
-        help: 'Directory for the split MCP stream (mcp-YYYYMMDD.log files) when mcp_split is on. Shares max_file_size/max_body_bytes/retention with the request log.',
+        help: 'Directory for the split MCP stream (mcp-YYYYMMDD.log files) when mcp_split is on. Shares max_file_size/max_body_bytes/retention/hot_retention with the request log — rotated files older than the hot window are archived as mcp-*.log.zst (offline-only).',
       },
     ],
   },

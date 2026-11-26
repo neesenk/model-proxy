@@ -2713,7 +2713,7 @@ export function securityLegendHTML() {
 // hint shown when the hits cannot be re-located.
 export const SECURITY_EXPLAIN_STATUS_NOTES = {
   no_request_log: 'Request log is disabled — the original request body is not available to analyze.',
-  not_found: 'The original request is no longer in the request log (retention window passed).',
+  not_found: 'The original request is no longer in the online request log: the retention window passed, or it rolled out of the hot window (request_log.hot_retention) into an offline .log.zst archive — still on disk, but not readable from the UI.',
   redacted: 'This request was logged after redaction (guard.secrets=redact): the matched bytes were replaced by [REDACTED] before persistence and cannot be recovered.',
   cross_request: 'Cross-request detection (split-exfiltration): the credential was fragmented across several requests of one session, so no single request body contains it.',
   scanner_unavailable: 'The current generation has no guard scanner (guard disabled or scanner build failed).',

@@ -2332,6 +2332,21 @@ test('securityExplainHTML status notes cover non-ok statuses', () => {
   assert.equal(securityExplainHTML({ status: 'ok', matches: [] }), '<div class="msg hint">Nothing to show.</div>');
 });
 
+test('securityExplainHTML not_found note names the hot-window archive, not retention only', () => {
+  // 可查窗口＝热窗（request_log.hot_retention）：滚出热窗的轮转文件被压成 .log.zst
+  // 离线归档，对索引/扫描不可见——explain 回 not_found 的原因不只是 retention 清理。
+  const note = SECURITY_EXPLAIN_STATUS_NOTES.not_found;
+  // 两种原因并列：retention 清理仍在，热窗归档是新补的那一半（旧文案只有前者）。
+  assert.ok(note.includes('retention'), 'the retention cause must stay');
+  assert.ok(note.includes('hot window'), note);
+  assert.ok(note.includes('.log.zst'), 'the offline archive format must be named');
+  // 渲染面不变：note 以 hint 呈现（外层是既有的 .sec-explain 包裹），无其他内容。
+  assert.equal(
+    securityExplainHTML({ status: 'not_found', matches: [] }),
+    `<div class="sec-explain"><div class="msg hint">${esc(note)}</div></div>`,
+  );
+});
+
 test('explainCacheKey normalizes name order and copies the input array', () => {
   const a = explainCacheKey('r1', 'secret', ['openai_api_key', 'ssh']);
   const b = explainCacheKey('r1', 'secret', ['ssh', 'openai_api_key']);

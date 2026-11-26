@@ -145,3 +145,34 @@ test('every settings field carries help text and a default', () => {
     assert.ok(/def:\s*'/.test(match[0]), `settings field ${match[1]} has no default for its help popover`);
   }
 });
+
+test('request-log miss copy keeps up with the documented hot window', () => {
+  // docs/web-api.md：可查窗口＝热窗（request_log.hot_retention），滚出热窗的轮转
+  // 文件被压成 .log.zst 离线归档——详情下钻 404 不只是 retention 清理，mcp 拆分流
+  // 同样按热窗归档。app.js 的两处文案必须跟上（pure.js 的 explain not_found
+  // note 在 pure.test.mjs）。
+  const reqRow = webApiDoc.split('\n').find((l) => l.includes('| GET |') && l.includes('`/api/requests?'));
+  assert.ok(reqRow, 'docs/web-api.md has no `| GET | `/api/requests?…` |` row');
+  for (const fact of ['hot_retention', '.log.zst']) {
+    assert.ok(reqRow.includes(fact), `docs/web-api.md /api/requests row omits ${fact} — the hot-window contract moved; update this pin with it`);
+  }
+
+  // Security 下钻卡（applyRequestDrill）的 404 提示。
+  const drillStart = appJs.indexOf('async function applyRequestDrill(');
+  assert.ok(drillStart >= 0, 'app.js has no applyRequestDrill — contract is blind');
+  const drill = appJs.slice(drillStart, appJs.indexOf('\n}\n', drillStart));
+  const miss = drill.match(/is not in the request log \(([^)]*)\)/);
+  assert.ok(miss, 'applyRequestDrill has no 404 "is not in the request log (…)" hint — contract is blind');
+  assert.ok(miss[1].includes('hot window'), `drill 404 hint omits the hot window: ${miss[1]}`);
+  assert.ok(miss[1].includes('offline archive'), `drill 404 hint omits the offline archive: ${miss[1]}`);
+
+  // 设置表单 mcp_dir 的 help：拆分流共享 hot_retention，按热窗归档为 mcp-*.log.zst。
+  const specStart = appJs.indexOf('const SETTINGS_GROUPS = [');
+  const spec = appJs.slice(specStart, appJs.indexOf('\n];', specStart));
+  const field = /\{\s*key: 'mcp_dir'[^}]*\}/.exec(spec);
+  assert.ok(field, 'SETTINGS_GROUPS has no mcp_dir field — contract is blind');
+  const help = /help:\s*'([^']*)'/.exec(field[0]);
+  assert.ok(help, 'the mcp_dir field has no help text');
+  assert.ok(help[1].includes('hot_retention'), `mcp_dir help must list hot_retention among the shared policies: ${help[1]}`);
+  assert.ok(help[1].includes('mcp-*.log.zst'), `mcp_dir help must name the split stream's archive: ${help[1]}`);
+});
