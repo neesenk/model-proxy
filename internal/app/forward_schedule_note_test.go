@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/observe/counters"
 )
 
 // TestForward_RequestAwareRerouteLogsScheduleNote: request-aware routing must
@@ -92,6 +93,12 @@ func TestForward_RequestAwareRerouteLogsScheduleNote(t *testing.T) {
 		t.Fatalf("text request carries x-mp-reroute = %q, want none", note)
 	}
 
+	// Each answered row is completed at response-body Close inside the
+	// post-copy commit path — a Content-Length client can finish reading
+	// first, and draining before that drops the row. Wait for the commit
+	// metrics (recorded right after) so the drain below flushes both rows.
+	awaitCommitMetrics(t, proxy, counters.PMKey{Provider: "vision-p", Model: "vision"})
+	awaitCommitMetrics(t, proxy, counters.PMKey{Provider: "text-p", Model: "text"})
 	shutdown()
 	records := allRecords(t, dir)
 	if len(records) != 2 {
