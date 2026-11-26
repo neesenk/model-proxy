@@ -255,3 +255,87 @@ func maskSecrets(s string) string {
 	}
 	return "(masked)"
 }
+
+// TestDeleteProviderZeroAccounts: a provider with no accounts leaves the
+// store (the yaml-defined fixture is absorbed and stripped in the same
+// mutation), the daemon reloads, and the account projection no longer lists
+// it — the Accounts sidebar and Status page read that same effective set.
+func TestDeleteProviderZeroAccounts(t *testing.T) {
+	up := addProviderUpstream(t)
+	service, spy, cfgPath := newAddProviderHarness(t, up)
+	// Deleting the only provider is refused by the effective-config validation
+	// (a daemon needs at least one provider) and leaves everything intact.
+	if _, err := service.DeleteProvider(context.Background(), "zhipu"); err == nil || !strings.Contains(err.Error(), "no providers configured") {
+		t.Fatalf("last-provider delete err = %v, want the validation refusal", err)
+	}
+	if _, ok := service.ports.ProviderConfig("zhipu"); !ok {
+		t.Fatal("refused delete must keep the provider")
+	}
+	if _, err := service.AddProvider(context.Background(), appapi.ProviderAddRequest{
+		Name: "acme", OpenAIBaseURL: up.URL + "/v1", Models: []string{"acme-m1"},
+	}); err != nil {
+		t.Fatalf("AddProvider: %v", err)
+	}
+	reloads := len(spy.calls)
+
+	result, err := service.DeleteProvider(context.Background(), "zhipu")
+	if err != nil {
+		t.Fatalf("DeleteProvider: %v", err)
+	}
+	if result.Warning != "" {
+		t.Fatalf("warning = %q, want none", result.Warning)
+	}
+	if _, ok := readProviderStore(t, service)["zhipu"]; ok {
+		t.Fatal("deleted provider must leave the store")
+	}
+	if body := readTestFile(t, cfgPath); strings.Contains(body, "zhipu") {
+		t.Fatalf("yaml providers section must be stripped, not left to resurrect the entry:\n%s", body)
+	}
+	if _, ok := service.ports.ProviderConfig("zhipu"); ok {
+		t.Fatal("effective provider set still resolves the deleted provider")
+	}
+	if len(spy.calls) != reloads+1 {
+		t.Fatalf("reload calls = %v, want exactly one for the delete", spy.calls[reloads:])
+	}
+}
+
+// TestDeleteProviderRejections: a provider that still owns an account is a
+// 409 (the credential must never be orphaned by a stale UI), an unknown name
+// is a 404, and neither touches the store or reloads.
+func TestDeleteProviderRejections(t *testing.T) {
+	up := addProviderUpstream(t)
+	service, spy, _ := newAddProviderHarness(t, up)
+	if _, err := service.AddProvider(context.Background(), appapi.ProviderAddRequest{
+		Name:          "acme",
+		OpenAIBaseURL: up.URL + "/v1",
+		UsageURL:      up.URL + "/v1/usage",
+		Token:         "sk-acme-test-key-123456",
+		Models:        []string{"acme-m1"},
+	}); err != nil {
+		t.Fatalf("AddProvider: %v", err)
+	}
+	reloads := len(spy.calls)
+
+	_, err := service.DeleteProvider(context.Background(), "acme")
+	if status := httpErrorStatus(t, err); status != http.StatusConflict {
+		t.Fatalf("delete with accounts status = %d, want 409 (err=%v)", status, err)
+	}
+	if !strings.Contains(err.Error(), "1 account(s)") {
+		t.Fatalf("conflict message = %q, want the account count", err.Error())
+	}
+	if _, ok := readProviderStore(t, service)["acme"]; !ok {
+		t.Fatal("rejected delete must keep the provider")
+	}
+
+	_, err = service.DeleteProvider(context.Background(), "no-such")
+	if status := httpErrorStatus(t, err); status != http.StatusNotFound {
+		t.Fatalf("unknown provider status = %d, want 404 (err=%v)", status, err)
+	}
+	_, err = service.DeleteProvider(context.Background(), "  ")
+	if status := httpErrorStatus(t, err); status != http.StatusBadRequest {
+		t.Fatalf("blank name status = %d, want 400 (err=%v)", status, err)
+	}
+	if len(spy.calls) != reloads {
+		t.Fatalf("rejected deletes must not reload: calls %v", spy.calls[reloads:])
+	}
+}

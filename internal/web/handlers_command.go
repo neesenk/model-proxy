@@ -400,6 +400,28 @@ func (s *Server) handleProviderAdd(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// handleProviderDelete serves DELETE /api/providers/<name>: the Accounts-page
+// Delete Provider button for a provider with zero accounts (the admin service
+// enforces the guard — 409 while accounts remain, 404 unknown). The name is a
+// single path segment; warning appears only for an applied-with-warning reload.
+func (s *Server) handleProviderDelete(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/api/providers/")
+	if name == "" || strings.Contains(name, "/") {
+		writeJSONErr(w, http.StatusBadRequest, "expected /api/providers/<name>")
+		return
+	}
+	result, err := s.commands.DeleteProvider(r.Context(), name)
+	if err != nil {
+		writePortErr(w, http.StatusBadRequest, err)
+		return
+	}
+	body := map[string]string{"status": "deleted", "name": name}
+	if result.Warning != "" {
+		body["warning"] = result.Warning
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
 // handleProviderModelsPreview serves POST /api/providers/models-preview: the
 // form's Fetch button — a read-only upstream /models fetch with the form's
 // transient fields (nothing persists, nothing reloads).

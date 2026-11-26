@@ -8995,6 +8995,8 @@ function selectProviderSilent(name) {
   });
   const add = main.querySelector('[data-add]');
   if (add) add.addEventListener('click', () => openAddFor(p));
+  const del = main.querySelector('[data-delete-provider]');
+  if (del) del.addEventListener('click', () => deleteProvider(del, p.name));
   main.querySelectorAll('[data-rename]').forEach((b) => {
     b.addEventListener('click', () => {
       const account = (p.accounts || []).find((x) => x.id === b.dataset.rename);
@@ -9100,8 +9102,14 @@ function renderProviderDetail(p, quota, tokens) {
     ? `<button class="btn small" data-test-all
                title="Probe every account sequentially (real upstream requests)">Test All (${accounts.length})</button>`
     : '';
+  // Delete Provider only renders for an account-less provider (the backend
+  // enforces the same guard — 409 while accounts remain).
+  const deleteBtn = accounts.length === 0
+    ? `<button class="btn small danger" data-delete-provider="${esc(p.name)}"
+               title="Remove this provider from the config (it disappears from this list and the Status page)">Delete Provider</button>`
+    : '';
   const body = accounts.length === 0
-    ? `<div class="empty-state">No account configured. Click <strong>Add</strong> to sign in.</div>`
+    ? `<div class="empty-state">No account configured. Click <strong>Add</strong> to sign in, or <strong>Delete Provider</strong> to remove it.</div>`
     : accounts.map((a) => accountCard(p, a, quota, tokens)).join('');
   return `<div class="acct-toolbar">
       <div class="acct-toolbar-title">
@@ -9110,6 +9118,7 @@ function renderProviderDetail(p, quota, tokens) {
       </div>
       <div class="row-actions">
         ${testAll}
+        ${deleteBtn}
         <button class="btn small" data-add data-provider="${esc(p.name)}">+ Add account</button>
       </div>
     </div>
@@ -9422,6 +9431,31 @@ async function removeAccount(provider, id, label) {
     if (!(data && data.warning)) clearMsg(accMsg);
   } catch (e) {
     showMsg(document.getElementById('acc-msg'), 'err', e.message);
+  }
+}
+
+// deleteProvider removes an account-less provider (DELETE /api/providers/<name>)
+// and refetches the accounts view in the foreground: the sidebar drops the
+// item and the selection falls back to the first remaining provider. Backend
+// refusals (409 accounts remain, route still targets it, last provider) show
+// their message in #acc-msg.
+async function deleteProvider(btn, name) {
+  if (!window.confirm(`Delete provider "${name}"? It is removed from the config and disappears from Accounts and Status.`)) return;
+  const accMsg = document.getElementById('acc-msg');
+  btn.disabled = true;
+  showMsg(accMsg, 'ok', `deleting ${name}…`);
+  try {
+    const data = await apiDel(`/api/providers/${encodeURIComponent(name)}`);
+    if (accountsSelectedProvider === name) accountsSelectedProvider = null;
+    await loadAccountsData();
+    if (data && data.warning) {
+      showMsg(accMsg, 'warn', `Deleted from disk, but not live yet: ${data.warning} — fix config.yaml and reload. See logs.`);
+    } else {
+      showMsg(accMsg, 'ok', `deleted ${name}`);
+    }
+  } catch (e) {
+    btn.disabled = false;
+    showMsg(accMsg, 'err', e.message);
   }
 }
 

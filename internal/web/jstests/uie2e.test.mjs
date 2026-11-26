@@ -3171,3 +3171,48 @@ test('订阅失效账号：横幅点明处置、Accounts 页 Usage 提示 No act
       `document.getElementById('cred-banner').hidden === true`));
   }
 });
+
+// Delete Provider：只有零账号 provider 渲染按钮（有账号的 dummy 不渲染），确认后
+// DELETE /api/providers/<name> 落盘 + 热重载，侧栏项消失、/api/accounts 与
+// /api/status 投影都不再含该 provider（Status 页的数据源）。
+test('accounts 页 Delete Provider：零账号 provider 可删且从 Accounts/Status 消失 (mutation 族)', async (t) => {
+  if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
+  const upstreamPort = ctx.upstream.address().port;
+  const added = await ctx.ev(`fetch('/api/providers', { method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'e2e-delprov', openai_base_url: 'http://127.0.0.1:${upstreamPort}/v1', models: ['stub-m1'] }),
+  }).then((r) => r.status)`);
+  assert.equal(added, 200, 'fixture provider add');
+  // Leave and re-enter Accounts so the retained tab refetches the list.
+  await ctx.ev(`document.querySelector('[data-tab="status"]').click()`);
+  await ctx.ev(`document.querySelector('[data-tab="accounts"]').click()`);
+  await ctx.waitFor('new provider in sidebar', () => ctx.ev(
+    `!!document.querySelector('.acct-nav-item[data-provider="e2e-delprov"]')`));
+
+  // A provider that owns an account never offers the button.
+  await ctx.ev(`document.querySelector('.acct-nav-item[data-provider="dummy"]').click()`);
+  await ctx.waitFor('dummy detail', () => ctx.ev(
+    `(document.querySelector('.acct-toolbar h2')?.textContent || '') === 'dummy'`));
+  assert.equal(await ctx.ev(`!!document.querySelector('[data-delete-provider]')`), false,
+    'provider with accounts must not render Delete Provider');
+
+  await ctx.ev(`document.querySelector('.acct-nav-item[data-provider="e2e-delprov"]').click()`);
+  await ctx.waitFor('delete button on empty provider', () => ctx.ev(
+    `document.querySelector('[data-delete-provider]')?.dataset.deleteProvider === 'e2e-delprov'`));
+  await ctx.ev(`(() => { window.confirm = () => true;
+    document.querySelector('[data-delete-provider]').click(); })()`);
+  await ctx.waitFor('sidebar item removed', () => ctx.ev(
+    `!document.querySelector('.acct-nav-item[data-provider="e2e-delprov"]')`));
+  assert.ok((await ctx.ev(`document.getElementById('acc-msg')?.innerText || ''`)).includes('deleted e2e-delprov'),
+    'success message names the provider');
+  // Selection fell back to a remaining provider (no blank detail pane).
+  assert.ok(await ctx.ev(`!!document.querySelector('.acct-nav-item.active')`), 'a remaining provider is selected');
+
+  const acc = await ctx.ev(`fetch('/api/accounts').then((r) => r.json())`);
+  assert.ok(!(acc.providers || []).some((p) => p.name === 'e2e-delprov'), '/api/accounts must drop the provider');
+  const st = await ctx.ev(`fetch('/api/status').then((r) => r.json())`);
+  assert.ok(!Object.keys(st.quota || {}).some((k) => k === 'e2e-delprov' || k.startsWith('e2e-delprov#')),
+    '/api/status quota must drop the provider');
+  assert.ok(!JSON.stringify(st.health || {}).includes('e2e-delprov'), '/api/status health must drop the provider');
+  assert.deepEqual(await ctx.pageErrors(), [], 'delete provider 不得有 JS 错误');
+});

@@ -1161,6 +1161,10 @@ type CommandAPI interface {
 	// an optional token routed into the account store. The token never
 	// reaches provider.json and never comes back in the result.
 	AddProvider(ctx context.Context, request ProviderAddRequest) (ProviderAddResult, error)
+	// DeleteProvider removes a provider with zero accounts from the
+	// provider.json store and hot-reloads (404 unknown, 409 when accounts
+	// remain); Warning carries an applied-with-warning reload.
+	DeleteProvider(ctx context.Context, name string) (MutationResult, error)
 	// PreviewProviderModels fetches the upstream /models list for the Add
 	// Provider form's transient fields WITHOUT persisting anything — no
 	// provider is created, nothing reloads.

@@ -419,6 +419,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleProviderAdd(w, r)
 	case p == "/api/providers/models-preview" && r.Method == http.MethodPost:
 		s.handleProviderModelsPreview(w, r)
+	case strings.HasPrefix(p, "/api/providers/") && r.Method == http.MethodDelete:
+		s.handleProviderDelete(w, r)
 	case p == "/api/presets" && r.Method == http.MethodGet:
 		s.handlePresetsList(w, r)
 	case strings.HasPrefix(p, "/api/presets/") && r.Method == http.MethodPost:

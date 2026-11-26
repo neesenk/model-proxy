@@ -46,6 +46,7 @@ type commandFake struct {
 	replay         func(context.Context, string, string) (appapi.ReplayResult, error)
 	routeTest      func(context.Context, string) (appapi.RouteTestResult, error)
 	catalogPull    func(context.Context) (appapi.ModelsCatalogPull, error)
+	deleteProv     func(context.Context, string) (appapi.MutationResult, error)
 }
 
 func (fake *commandFake) APIKeys() (appapi.KeysResult, error) { return appapi.KeysResult{}, nil }
@@ -665,6 +666,30 @@ func TestCommandAccountContract(t *testing.T) {
 		}
 		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/accounts/aqp/fail", ""), http.StatusBadRequest, map[string]any{"error": "cannot remove"})
 	})
+	t.Run("provider delete routing and errors", func(t *testing.T) {
+		var names []string
+		server := newCommandTestServer(t, &commandFake{deleteProv: func(_ context.Context, name string) (appapi.MutationResult, error) {
+			names = append(names, name)
+			switch name {
+			case "busy":
+				return appapi.MutationResult{}, appapi.NewHTTPError(http.StatusConflict, "still has accounts")
+			case "warn":
+				return appapi.MutationResult{Warning: "reload deferred"}, nil
+			}
+			return appapi.MutationResult{}, nil
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/", ""), http.StatusBadRequest, map[string]any{"error": "expected /api/providers/<name>"})
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/a/b", ""), http.StatusBadRequest, map[string]any{"error": "expected /api/providers/<name>"})
+		if len(names) != 0 {
+			t.Fatalf("DeleteProvider calls=%v want no malformed-path mutation", names)
+		}
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/acme", ""), http.StatusOK, map[string]any{"status": "deleted", "name": "acme"})
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/warn", ""), http.StatusOK, map[string]any{"status": "deleted", "name": "warn", "warning": "reload deferred"})
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/providers/busy", ""), http.StatusConflict, map[string]any{"error": "still has accounts"})
+		if strings.Join(names, ",") != "acme,warn,busy" {
+			t.Fatalf("DeleteProvider args=%v", names)
+		}
+	})
 	t.Run("rename routing and errors", func(t *testing.T) {
 		var provider, id, label string
 		calls := 0
@@ -802,6 +827,13 @@ func (*commandFake) AddPreset(string) ([]string, string, error) { return nil, ""
 
 func (*commandFake) AddProvider(context.Context, appapi.ProviderAddRequest) (appapi.ProviderAddResult, error) {
 	return appapi.ProviderAddResult{}, nil
+}
+
+func (fake *commandFake) DeleteProvider(ctx context.Context, name string) (appapi.MutationResult, error) {
+	if fake.deleteProv != nil {
+		return fake.deleteProv(ctx, name)
+	}
+	return appapi.MutationResult{}, nil
 }
 
 func (*commandFake) PreviewProviderModels(context.Context, appapi.ProviderModelsPreviewRequest) ([]string, error) {

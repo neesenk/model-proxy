@@ -177,3 +177,39 @@ func (s *Service) PreviewProviderModels(ctx context.Context, req appapi.Provider
 	sort.Strings(models)
 	return models, nil
 }
+
+// DeleteProvider implements DELETE /api/providers/<name> (docs/web-api.md):
+// the Accounts-page Delete Provider button. Only a provider with ZERO
+// accounts can be removed — the guard reads the same projection as GET
+// /api/accounts, so a stale UI can never orphan a live credential (409
+// instead). The entry leaves the provider.json store (absorbing any yaml
+// providers: section in the same mutation) and the daemon hot-reloads; the
+// effective-config validation inside the mutation fails closed when an
+// explicit route still targets the provider. An applied-with-warning reload
+// rides back as Warning, like the other provider mutations.
+func (s *Service) DeleteProvider(ctx context.Context, name string) (appapi.MutationResult, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return appapi.MutationResult{}, appapi.NewHTTPError(http.StatusBadRequest, "provider name is required")
+	}
+	err := s.mutateProvidersAndReload(ctx, func(providers map[string]configdomain.Provider) error {
+		entry, ok := providers[name]
+		if !ok {
+			return appapi.NewHTTPError(http.StatusNotFound, "unknown provider: "+name)
+		}
+		if list, _ := providerAccountList(name, entry); len(list) > 0 {
+			return appapi.NewHTTPError(http.StatusConflict, fmt.Sprintf(
+				"provider %q still has %d account(s) — remove them first", name, len(list)))
+		}
+		delete(providers, name)
+		return nil
+	})
+	if err != nil {
+		var applied *ReloadAppliedWarning
+		if errors.As(err, &applied) {
+			return appapi.MutationResult{Warning: applied.Err.Error()}, nil
+		}
+		return appapi.MutationResult{}, err
+	}
+	return appapi.MutationResult{}, nil
+}

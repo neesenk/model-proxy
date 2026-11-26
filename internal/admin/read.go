@@ -476,54 +476,62 @@ func (s *Service) Accounts() []appapi.ProviderAccounts {
 	configs := s.ports.ProviderConfigs()
 	out := make([]appapi.ProviderAccounts, 0, len(configs))
 	for name, config := range configs {
-		item := appapi.ProviderAccounts{
+		list, pooled := providerAccountList(name, config)
+		out = append(out, appapi.ProviderAccounts{
 			Name:       name,
 			ProviderID: config.Provider,
 			Billing:    config.Billing,
-			Accounts:   []appapi.Account{},
-		}
-		snapshot, _ := accounts.NewStore(accounts.HomeDir()).LoadSnapshot(name, config.Provider)
-		if (config.Provider == "aqp" || config.Provider == "codex") && snapshot.Source != accounts.SourcePlural {
-			// Pool-less OAuth provider: the legacy single-account file IS the
-			// account list (one card, plain-name key, upstream identity as id).
-			if config.Provider == "aqp" {
-				account, _ := provider.LoadAqpAccount(accounts.AuthFilePath(name, "oauth_auth"))
-				if account != nil && account.AccountID != "" {
-					item.Accounts = append(item.Accounts, appapi.Account{
-						ID:      account.AccountID,
-						Label:   account.Email,
-						AddedAt: time.Unix(account.CreatedAt, 0).UTC().Format(time.RFC3339),
-						Email:   account.Email,
-					})
-				}
-			} else {
-				account, _ := provider.LoadCodexAccount(accounts.AuthFilePath(name, "oauth_auth"))
-				if account != nil && account.AccountID != "" {
-					item.Accounts = append(item.Accounts, appapi.Account{
-						ID:    account.AccountID,
-						Label: account.Email,
-						Email: account.Email,
-					})
-				}
-			}
-		} else {
-			for _, account := range snapshot.Pool.Accounts {
-				item.Accounts = append(item.Accounts, appapi.Account{
-					ID:      account.ID,
-					Label:   account.Label,
-					AddedAt: account.AddedAt,
+			Pooled:     pooled,
+			Accounts:   list,
+		})
+	}
+	return out
+}
+
+// providerAccountList is the single account-list projection for one
+// provider: GET /api/accounts rows and the DeleteProvider zero-account guard
+// both read it, so "the UI shows 0 accounts" and "the backend allows the
+// delete" can never disagree. The result is never nil.
+func providerAccountList(name string, config configdomain.Provider) ([]appapi.Account, bool) {
+	list := []appapi.Account{}
+	snapshot, _ := accounts.NewStore(accounts.HomeDir()).LoadSnapshot(name, config.Provider)
+	if (config.Provider == "aqp" || config.Provider == "codex") && snapshot.Source != accounts.SourcePlural {
+		// Pool-less OAuth provider: the legacy single-account file IS the
+		// account list (one card, plain-name key, upstream identity as id).
+		if config.Provider == "aqp" {
+			account, _ := provider.LoadAqpAccount(accounts.AuthFilePath(name, "oauth_auth"))
+			if account != nil && account.AccountID != "" {
+				list = append(list, appapi.Account{
+					ID:      account.AccountID,
+					Label:   account.Email,
+					AddedAt: time.Unix(account.CreatedAt, 0).UTC().Format(time.RFC3339),
 					Email:   account.Email,
 				})
 			}
-			// A plural pool keys runtime state by virtual id per account
-			// (API-key and OAuth alike); legacy-singular / not-logged-in
-			// providers keep the plain name. The UI derives quota/usage keys
-			// from this flag.
-			item.Pooled = snapshot.Source == accounts.SourcePlural
+		} else {
+			account, _ := provider.LoadCodexAccount(accounts.AuthFilePath(name, "oauth_auth"))
+			if account != nil && account.AccountID != "" {
+				list = append(list, appapi.Account{
+					ID:    account.AccountID,
+					Label: account.Email,
+					Email: account.Email,
+				})
+			}
 		}
-		out = append(out, item)
+		return list, false
 	}
-	return out
+	for _, account := range snapshot.Pool.Accounts {
+		list = append(list, appapi.Account{
+			ID:      account.ID,
+			Label:   account.Label,
+			AddedAt: account.AddedAt,
+			Email:   account.Email,
+		})
+	}
+	// A plural pool keys runtime state by virtual id per account (API-key and
+	// OAuth alike); legacy-singular / not-logged-in providers keep the plain
+	// name. The UI derives quota/usage keys from this flag.
+	return list, snapshot.Source == accounts.SourcePlural
 }
 
 // Tokens projects the per-(provider, model) token usage rows. from <= 0 &&
