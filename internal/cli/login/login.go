@@ -193,12 +193,6 @@ func RunProviderLogin(cfg *configdomain.Config, provName, keyIn, label string, r
 		return RunLogin(cfg, provName, label)
 	case "codex":
 		return runCodexLoginFlow(provName)
-	case "zcode":
-		fmt.Println("Opening BigModel login to fetch a Coding Plan API key…")
-		if err := OpenBrowser("https://bigmodel.cn/login"); err != nil {
-			fmt.Fprintf(os.Stderr, "(could not open browser: %v — open https://bigmodel.cn/login manually)\n", err)
-		}
-		return RunApiKeyLoginWithInput(cfg, provName, prov, keyIn, label, replace)
 	default:
 		if prov.Provider == "volcengine" {
 			return RunVolcengineLoginWithInput(cfg, provName, prov, "", "", "", label, replace)

@@ -45,7 +45,7 @@ func TestRecordCredentialDenialRepeatedKeepsFirstObservation(t *testing.T) {
 
 	base := time.Date(2026, 11, 25, 10, 34, 0, 0, time.UTC)
 	m, clock := newCredentialDenialManager(7, base)
-	const key = "zcode#acct"
+	const key = "zhipu#acct"
 
 	m.RecordCredentialDenial(key, "auth", "first", 7)
 	*clock = base.Add(time.Minute)

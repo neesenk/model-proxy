@@ -219,7 +219,7 @@ provider config 的 `capabilities: {model: [image, tools]}` 优先。某 model �
 **配置真相 vs 生效表**：daemon 在推导之上还有一张生效表（`expandedRoutes`，
 reload 时重建）：池化 target 展开为虚拟账号，并且**没有 runnable impl 的
 provider 整体剔除**（凭据池为 0 账号墓碑、构建失败、static 无 plural 池——
-如 zcode 登出后；`Proxy.expandTarget` 过滤）。全部目标被剔除的 route 从生效表整体消失：不进
+如 API-key provider 登出后；`Proxy.expandTarget` 过滤）。全部目标被剔除的 route 从生效表整体消失：不进
 schedule 链、不进 `GET /v1/models`、forward 终局 not-found。补上账号（login →
 reload 重建）即回归。CLI `routes` 与 Web Config 页的 `GET /api/config.routes`
 仍是配置真相（`RouteTable(cfg)`，不含凭据状态），两者刻意分层。takeover 的

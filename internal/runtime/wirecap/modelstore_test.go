@@ -291,7 +291,7 @@ func TestModelStorePutRejectsSupersededGeneration(t *testing.T) {
 // TestMergeOnUnknown pins the anti-flap merge rule: a transient Unknown leg
 // (429/401/403/5xx/timeout — "no information") must retain the previously
 // concluded verdict, while a concluded leg always overwrites. Without this,
-// one rate-limited probe pass (the observed zcode/zhipu 429 storms) downgraded
+// one rate-limited probe pass (the observed BigModel 429 storms) downgraded
 // known-good yes verdicts to "? unknown" until a lucky later pass re-earned
 // them.
 func TestMergeOnUnknown(t *testing.T) {

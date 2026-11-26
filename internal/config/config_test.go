@@ -64,10 +64,9 @@ func TestConfig_ProviderBaseURLs(t *testing.T) {
 			continue
 		}
 		if prov.OpenAIBaseURL == "" {
-			// Anthropic-only provider (zcode ultra gateway: the openai leg is
-			// pay-per-use, so config keeps it off that protocol): no chat
-			// endpoint to join — only the anthropic check below applies. A
-			// provider with no protocol base URL at all is a config bug.
+			// Anthropic-only providers have no chat endpoint to join — only
+			// the anthropic check below applies. A provider with no protocol
+			// base URL at all is a config bug.
 			if prov.AnthropicBaseURL == "" {
 				t.Errorf("%s has no openai/decisions/anthropic base URL", name)
 				continue
@@ -227,12 +226,12 @@ func TestConfig_ValidateErrors(t *testing.T) {
 	}
 }
 
-func TestValidate_AcceptsZcodeProviderID(t *testing.T) {
+func TestValidate_RejectsZcodeProviderID(t *testing.T) {
 	c := &Config{Listen: "127.0.0.1:8787", Providers: map[string]Provider{
 		"zcode": {Provider: "zcode", AnthropicBaseURL: "https://open.bigmodel.cn/api/anthropic"},
 	}}
-	if err := c.validate(); err != nil {
-		t.Errorf("zcode provider_id rejected: %v", err)
+	if err := c.validate(); err == nil || !strings.Contains(err.Error(), `unknown provider_id "zcode"`) {
+		t.Errorf("zcode provider_id: want unknown-provider rejection, got %v", err)
 	}
 }
 

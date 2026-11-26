@@ -130,7 +130,7 @@ func (m *Manager) Generation() uint64 {
 // wiping them on reload demoted every provider to the unmeasured tier for the
 // seconds the post-reload poll needs, flipping tier ordering (a declared-plan
 // provider jumped above a measured-plan provider with better priority — the
-// opencode-go/zcode incident). The cache therefore survives the swap and is
+// opencode-go incident). The cache therefore survives the swap and is
 // only PRUNED, in the same critical section, against liveQuotaKeys — the
 // runtime provider key set (config names plus pooled "name#<accountID>"
 // virtuals), so a swapped-out provider or logged-out account drops its stale

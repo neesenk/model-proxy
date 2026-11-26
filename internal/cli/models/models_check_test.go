@@ -721,19 +721,19 @@ func TestLoadModelCapsProjection(t *testing.T) {
 // persisting a partially rate-limited matrix must not regress verdicts already
 // concluded in model_caps.json under the same fingerprint — an Unknown leg is
 // "no information", so the stored yes/no wins (the CLI-side twin of
-// wirecap.ModelStore.Put's merge; fixes the zcode/zhipu "? unknown" flapping
+// wirecap.ModelStore.Put's merge; fixes the zhipu "? unknown" flapping
 // where a refresh burst of 429s downgraded known-good legs on disk).
 func TestPersistModelCaps_UnknownRetainsConcludedFileVerdict(t *testing.T) {
 	dir := t.TempDir()
 	clitest.SetPoolHome(t, dir)
 
-	provCfg := configdomain.Provider{OpenAIBaseURL: "https://example.test/v1", Provider: "zcode"}
+	provCfg := configdomain.Provider{OpenAIBaseURL: "https://example.test/v1", Provider: "zhipu"}
 	fp := providerbuild.ProtocolConfigFingerprint(provCfg)
 
 	// Prior refresh concluded glm chat=yes / anthropic=yes / responses=no.
 	if err := runtimewire.SaveModelCapsFile(filepath.Join(dir, ".model-proxy", "model_caps.json"),
 		map[string]runtimewire.ProviderModelCaps{
-			"zcode": {Fingerprint: fp, ProbedAt: time.Now(), Models: map[string]runtimewire.ModelProtocols{
+			"zhipu": {Fingerprint: fp, ProbedAt: time.Now(), Models: map[string]runtimewire.ModelProtocols{
 				"glm": {Chat: runtimewire.Yes, Anthropic: runtimewire.Yes, Responses: runtimewire.No},
 			}},
 		}); err != nil {
@@ -741,7 +741,7 @@ func TestPersistModelCaps_UnknownRetainsConcludedFileVerdict(t *testing.T) {
 	}
 
 	// A throttled refresh: every leg 429 → unknown.
-	if !persistModelCaps("zcode", provCfg, map[string]runtimewire.ModelProtocols{
+	if !persistModelCaps("zhipu", provCfg, map[string]runtimewire.ModelProtocols{
 		"glm": {Chat: runtimewire.Unknown, Anthropic: runtimewire.Unknown, Responses: runtimewire.Unknown},
 	}, nil) {
 		t.Fatal("persistModelCaps reported no write")
@@ -750,12 +750,12 @@ func TestPersistModelCaps_UnknownRetainsConcludedFileVerdict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := loaded["zcode"].Models["glm"]; got.Chat != runtimewire.Yes || got.Anthropic != runtimewire.Yes || got.Responses != runtimewire.No {
+	if got := loaded["zhipu"].Models["glm"]; got.Chat != runtimewire.Yes || got.Anthropic != runtimewire.Yes || got.Responses != runtimewire.No {
 		t.Errorf("after throttled refresh glm = %+v, want prior yes/yes/no retained", got)
 	}
 
 	// A concluded re-probe still overwrites (corrections are not blocked).
-	if !persistModelCaps("zcode", provCfg, map[string]runtimewire.ModelProtocols{
+	if !persistModelCaps("zhipu", provCfg, map[string]runtimewire.ModelProtocols{
 		"glm": {Chat: runtimewire.Yes, Anthropic: runtimewire.No, Responses: runtimewire.Unknown},
 	}, nil) {
 		t.Fatal("persistModelCaps reported no write")
@@ -764,7 +764,7 @@ func TestPersistModelCaps_UnknownRetainsConcludedFileVerdict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := loaded["zcode"].Models["glm"]; got.Anthropic != runtimewire.No || got.Responses != runtimewire.No {
+	if got := loaded["zhipu"].Models["glm"]; got.Anthropic != runtimewire.No || got.Responses != runtimewire.No {
 		t.Errorf("after concluded re-probe glm = %+v, want anthropic no (correction lands) + responses no (retained)", got)
 	}
 
@@ -772,7 +772,7 @@ func TestPersistModelCaps_UnknownRetainsConcludedFileVerdict(t *testing.T) {
 	// truth: no merge, unknowns land as-is.
 	other := provCfg
 	other.OpenAIBaseURL = "https://other.test/v1"
-	if !persistModelCaps("zcode", other, map[string]runtimewire.ModelProtocols{
+	if !persistModelCaps("zhipu", other, map[string]runtimewire.ModelProtocols{
 		"glm": {Chat: runtimewire.Unknown, Anthropic: runtimewire.Unknown, Responses: runtimewire.Unknown},
 	}, nil) {
 		t.Fatal("persistModelCaps reported no write")
@@ -781,7 +781,7 @@ func TestPersistModelCaps_UnknownRetainsConcludedFileVerdict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := loaded["zcode"].Models["glm"]; got.Chat != runtimewire.Unknown {
+	if got := loaded["zhipu"].Models["glm"]; got.Chat != runtimewire.Unknown {
 		t.Errorf("after fingerprint change glm = %+v, want fresh unknowns (no cross-fingerprint merge)", got)
 	}
 }
@@ -838,13 +838,13 @@ func TestPersistModelCaps_ReMergeOnConcurrentWrite(t *testing.T) {
 	dir := t.TempDir()
 	clitest.SetPoolHome(t, dir)
 
-	provCfg := configdomain.Provider{OpenAIBaseURL: "https://example.test/v1", Provider: "zcode"}
+	provCfg := configdomain.Provider{OpenAIBaseURL: "https://example.test/v1", Provider: "zhipu"}
 	fp := providerbuild.ProtocolConfigFingerprint(provCfg)
 	capsPath := filepath.Join(dir, ".model-proxy", "model_caps.json")
 
-	// The CLI's pre-probe world: only zcode's old entry exists.
+	// The CLI's pre-probe world: only zhipu's old entry exists.
 	if err := runtimewire.SaveModelCapsFile(capsPath, map[string]runtimewire.ProviderModelCaps{
-		"zcode": {Fingerprint: fp, ProbedAt: time.Now(), Models: map[string]runtimewire.ModelProtocols{
+		"zhipu": {Fingerprint: fp, ProbedAt: time.Now(), Models: map[string]runtimewire.ModelProtocols{
 			"glm": {Chat: runtimewire.Yes, Anthropic: runtimewire.Yes, Responses: runtimewire.No},
 		}},
 	}); err != nil {
@@ -872,7 +872,7 @@ func TestPersistModelCaps_ReMergeOnConcurrentWrite(t *testing.T) {
 	}
 	t.Cleanup(func() { persistConflictSeam = nil })
 
-	if !persistModelCaps("zcode", provCfg, map[string]runtimewire.ModelProtocols{
+	if !persistModelCaps("zhipu", provCfg, map[string]runtimewire.ModelProtocols{
 		"glm": {Chat: runtimewire.Yes, Anthropic: runtimewire.Unknown, Responses: runtimewire.Yes},
 	}, nil) {
 		t.Fatal("persistModelCaps reported no write")
@@ -888,8 +888,8 @@ func TestPersistModelCaps_ReMergeOnConcurrentWrite(t *testing.T) {
 	}
 	// And the CLI's own fresh matrix landed (unknown anthropic merged back to
 	// the stored yes).
-	if got := loaded["zcode"].Models["glm"]; got.Chat != runtimewire.Yes || got.Anthropic != runtimewire.Yes || got.Responses != runtimewire.Yes {
-		t.Errorf("zcode glm = %+v, want yes/yes(yes merged)/yes", got)
+	if got := loaded["zhipu"].Models["glm"]; got.Chat != runtimewire.Yes || got.Anthropic != runtimewire.Yes || got.Responses != runtimewire.Yes {
+		t.Errorf("zhipu glm = %+v, want yes/yes(yes merged)/yes", got)
 	}
 }
 

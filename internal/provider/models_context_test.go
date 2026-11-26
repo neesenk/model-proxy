@@ -49,7 +49,7 @@ func TestFetchModelsContextCapabilities(t *testing.T) {
 	// static now serves the OpenAI-style /models fetch too (the Web
 	// add-provider preview and `models refresh` depend on it) — it must carry
 	// the cancellable capability like every HTTP-capable implementation.
-	for _, impl := range []Provider{&AqpProvider{}, &ZhipuProvider{}, &ZCodeProvider{}, &DeepSeekProvider{}, &KimiCodeProvider{}, &QwenPlanProvider{}, &CodexProvider{}, &VolcengineProvider{}, &StaticProvider{}} {
+	for _, impl := range []Provider{&AqpProvider{}, &ZhipuProvider{}, &DeepSeekProvider{}, &KimiCodeProvider{}, &QwenPlanProvider{}, &CodexProvider{}, &VolcengineProvider{}, &StaticProvider{}} {
 		if _, ok := impl.(interface {
 			FetchModelsContext(context.Context) ([]string, error)
 		}); !ok {

@@ -20,13 +20,13 @@ import (
 // watcher only reports an end it OBSERVED (upstream EOF/read error); when the
 // client-side write fails first, the copy loop returns streamClientGone before
 // the watcher ever sees the upstream end, so nothing is synthesized and the
-// attribution switch below it is skipped entirely. The same day 40 zcode
+// attribution switch below it is skipped entirely. The same day 40
 // streams ended with an upstream error chunk (200 committed, then
 // `{"error":{"message":"upstream stream terminated unexpectedly"}}`) — also
 // invisible in serve.log, because an upstream error terminal deliberately
 // suppresses synthesis AND the log that hangs off it.
 
-// upstreamErrorChunk is zcode's live mid-stream abort frame (11-22, 40×): an
+// upstreamErrorChunk is the observed live mid-stream abort frame (11-22, 40×): an
 // error chunk with no finish_reason and no [DONE].
 const upstreamErrorChunk = `data: {"error":{"message":"upstream stream terminated unexpectedly","type":"api_error","code":null,"param":null}}` + "\n\n"
 

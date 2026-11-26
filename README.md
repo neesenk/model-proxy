@@ -423,7 +423,7 @@ web:
 | deepseek | `~/.model-proxy/deepseek_apikey.json` | API key（同上） |
 | volcengine | `~/.model-proxy/volcengine_apikey.json` | `{api_key, access_key, secret_key}`（同上） |
 
-**多账号凭据池**：apikey 类 provider（static/zhipu/zcode/deepseek/volcengine/kimi-code/mimo/qwen-plan/step-plan/typesafe/openrouter/opencode-go）重复 `login` 会把账号累积进**池文件** `~/.model-proxy/<name>_apikeys.json`（`{version, accounts:[{id, label, api_key, (access_key, secret_key), added_at}]}`），按账号 id（volcengine 优先 `sha256(access_key)[:16]`，无 AK 时回落 `sha256(api_key)[:16]`；其余为 `sha256(api_key)[:16]`）去重，ID 永不携带原始凭据。运行时每个池被展开成 N 个虚拟 provider（`<name>#<accountId>`），共享父配置但各绑自己的凭据；路由目标命名父 provider 会 fan-out 到全部账号。plural pool 是权威凭据来源：损坏或空 pool 会禁用该 provider，不会降级读取旧 singular key。**路由跨池是会话粘性的**：按请求的 `x-claude-code-session-id` 粘同一个账号（保 prompt cache），新会话 round-robin 分到不同账号（并发散开）；只有 429/熔断才换账号。`usage <provider>` 逐账号展示全部账号。aqp/codex 是单凭据（不入池）。`login --label`/`--replace`、`logout --label`/`--all` 管理池内账号；Web UI Accounts 标签页也能增删。
+**多账号凭据池**：apikey 类 provider（static/zhipu/deepseek/volcengine/kimi-code/mimo/qwen-plan/step-plan/typesafe/openrouter/opencode-go）重复 `login` 会把账号累积进**池文件** `~/.model-proxy/<name>_apikeys.json`（`{version, accounts:[{id, label, api_key, (access_key, secret_key), added_at}]}`），按账号 id（volcengine 优先 `sha256(access_key)[:16]`，无 AK 时回落 `sha256(api_key)[:16]`；其余为 `sha256(api_key)[:16]`）去重，ID 永不携带原始凭据。运行时每个池被展开成 N 个虚拟 provider（`<name>#<accountId>`），共享父配置但各绑自己的凭据；路由目标命名父 provider 会 fan-out 到全部账号。plural pool 是权威凭据来源：损坏或空 pool 会禁用该 provider，不会降级读取旧 singular key。**路由跨池是会话粘性的**：按请求的 `x-claude-code-session-id` 粘同一个账号（保 prompt cache），新会话 round-robin 分到不同账号（并发散开）；只有 429/熔断才换账号。`usage <provider>` 逐账号展示全部账号。aqp/codex 是单凭据（不入池）。`login --label`/`--replace`、`logout --label`/`--all` 管理池内账号；Web UI Accounts 标签页也能增删。
 
 多实例支持：同一 `provider_id` 可有多个不同 name（如 `zhipu-personal` / `zhipu-work`），各自独立凭据文件/池。
 
@@ -643,7 +643,7 @@ scheduling:
 
 1. 建 `internal/provider/xxx.go`，实现 Provider 接口（embed `ApiKeyBase`（文件存 API key）+ `baseProbe`（默认探测/过滤行为））。`baseProbe` 默认：探测走 OpenAI `POST /chat/completions`、无专属请求头、候选模型透传。仅当 provider 与此不符时才 override：
    - `ProbeRequest(modelID)` -- 探测请求的 path/body（如 codex 的 `/responses` + Responses API body、aqp 的 `/v1/messages`）
-   - `ExtraHeaders(req, body, sessionID, path)` -- 每次请求（转发 + 探测）都要的专属头（如 aqp 的 `anthropic-version` + `x-compass-request-id`）；`sessionID` 是 forward 从原始请求解析的客户端会话 id（头白名单 → body spec 字段），probe 等无会话路径为空串，需要会话亲和的 provider（opencode-go/zcode）优先使用它再回落 body 提取
+   - `ExtraHeaders(req, body, sessionID, path)` -- 每次请求（转发 + 探测）都要的专属头（如 aqp 的 `anthropic-version` + `x-compass-request-id`）；`sessionID` 是 forward 从原始请求解析的客户端会话 id（头白名单 → body spec 字段），probe 等无会话路径为空串，需要会话亲和的 provider（opencode-go）优先使用它再回落 body 提取
    - `FilterModelIDs(ids)` -- `models refresh` 的静态策略过滤（如 volcengine 剔除 `*-latest`/lite/mini）
 2. `init()` 里 `Register("xxx", constructor)`
 3. provider 定义加 `provider_id: xxx`（provider.json store——UI/CLI/presets 均写入；`models refresh` 也写这里）

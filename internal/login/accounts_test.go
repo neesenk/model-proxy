@@ -419,8 +419,8 @@ func TestApiKeyValidationURL_Fallback(t *testing.T) {
 // TestValidateKeyBearerGET_BigModelEnvelope pins the 200-envelope rejection:
 // open.bigmodel.cn's quota/usage endpoints answer HTTP 200 with
 // {"code":401,...,"success":false} for an expired/incorrect key. Without the
-// envelope check, `login zcode`/`login zhipu` waves such a key into the pool
-// and every later model call 401s. Green-signal guard for both directions.
+// envelope check, `login zhipu` waves such a key into the pool and every later
+// model call 401s.
 func TestValidateKeyBearerGET_BigModelEnvelope(t *testing.T) {
 	caseFn := func(name, body string, wantErr bool) {
 		t.Helper()
@@ -476,12 +476,12 @@ func TestAddApikeyAccount_UsageRejectionFallsBackToModels(t *testing.T) {
 		}))
 		defer models.Close()
 		prov := configdomain.Provider{
-			Provider:      "zcode",
+			Provider:      "zhipu",
 			UsageURL:      usage.URL,
 			OpenAIBaseURL: models.URL,
 		}
-		cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"zcode": prov}}
-		return AddApikeyAccount(cfg, "zcode", prov, accountCred{APIKey: "k1"}, "", true)
+		cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"zhipu": prov}}
+		return AddApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "k1"}, "", true)
 	}
 
 	// usage rejects (200 envelope 401) but /models accepts → key accepted.

@@ -222,7 +222,7 @@ func (p *Proxy) probeAllModelCaps(ctx context.Context) {
 			// trusted indefinitely (the runtime 404 correction rewrites a wrong
 			// one) and no is fingerprint-gated by design. Re-probing them as
 			// collateral of a sibling's unknown leg re-bursts the whole provider
-			// against rate-limited upstreams (the zcode/zhipu 429 storms) — the
+			// against rate-limited upstreams (the BigModel 429 storms) — the
 			// burst both wastes quota and risks downgrading verdicts that were
 			// fine (Put's merge-on-unknown is the second line of defense).
 			if fpMatches {

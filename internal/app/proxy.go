@@ -142,7 +142,7 @@ type processServices struct {
 	// wireProbeMu serializes wire/model probe passes (TryLock/Lock in
 	// runWireProbePass). Rapid SIGHUP storms each dispatch a pass; unserialized
 	// passes probe the same rate-limited upstreams concurrently, stacking 429
-	// bursts (the observed zcode/zhipu "? unknown" flapping). A queued pass
+	// bursts (the observed BigModel "? unknown" flapping). A queued pass
 	// re-reads the current generation at its own start, so serializing never
 	// probes a stale one.
 	wireProbeMu sync.Mutex

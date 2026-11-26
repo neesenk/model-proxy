@@ -127,7 +127,7 @@ providers:
 // at the reload seam: quota snapshots are carried over as the last-known-good
 // cache — the scheduler keeps the MEASURED tier through the post-reload poll
 // window instead of falling back to declared/unknown defaults and switching
-// back after the poll lands (the opencode-go/zcode tier flip). Keys the new
+// back after the poll lands (the opencode-go plan-tier flip). Keys the new
 // provider set no longer serves are pruned, and the synchronous post-swap
 // persist writes the carried cache under the new fingerprint.
 func TestReload_KeepsQuotaCacheAcrossGeneration(t *testing.T) {

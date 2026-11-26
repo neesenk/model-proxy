@@ -47,8 +47,7 @@ func (baseProbe) ExtraHeaders(req *http.Request, _ []byte, _ string, path string
 // anthropic_base_url is the provider's primary path for Claude Code: the probe
 // MUST go to /v1/messages there because OpenAI's /chat/completions path on the
 // anthropic base 404s for every model. Providers whose ExtraHeaders does MORE
-// (aqp: + x-compass-request-id; zcode: + client fingerprint) keep baseProbe
-// and their own overrides.
+// (aqp: + x-compass-request-id) keep baseProbe and their own overrides.
 type anthropicMessagesProbe struct{ baseProbe }
 
 // ProbeRequest returns the anthropic messages shape, overriding baseProbe's

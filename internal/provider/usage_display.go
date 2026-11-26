@@ -275,8 +275,8 @@ func (p *CodexProvider) Usage() error {
 // provider header line, then the parsed quota snapshot (level + exhaustion
 // ETA + snapshot). Returns true when the quota path rendered; false means the
 // body was fetched but was not BigModel format (zhipu then falls through to
-// its model-list / raw-JSON views, zcode prints the unavailable notice), or
-// the fetch itself failed (usageGetForDisplay already reported it).
+// its model-list / raw-JSON views), or the fetch itself failed
+// (usageGetForDisplay already reported it).
 func bigmodelUsageHeaderAndQuota(providerName, usageURL, proxyURL string, auth func(*http.Request) error, headers map[string]string) (body []byte, renderedQuota bool) {
 	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(providerName)))
 	body, ok := usageGetForDisplay(usageURL, proxyURL, providerName, auth, headers)

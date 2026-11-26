@@ -59,7 +59,7 @@
     数据）。旧实现 `ReplaceGeneration` 整表清空 quota，把未声明 `billing:` 的
     实测 plan provider 在 reload→PollAsync 的窗口内降为 unknown 档，声明了
     `billing: plan` 的 provider 便越过它（tier 排在 priority 之前）——表现为
-    会话中间歇性打到并非性价比首选的 provider（opencode-go/zcode 事故）。同步
+    会话中间歇性打到并非性价比首选的 provider（opencode-go 事故）。同步
     失败同理：`Err != ""` 的快照不得覆盖已有条目，也不得参与
     `QuotaRecoveredClearCooldown`（no-op 同步零副作用）。现行契约：
     `ReplaceGeneration(generation, liveQuotaKeys)` 同一临界区内存活 cache、剪枝

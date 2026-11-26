@@ -4559,10 +4559,10 @@ test('chatViewHTML renders an aggregated stream record as its JSON answer', () =
 });
 
 test('providerDeleteSummary: names the provider and the rewritten routes', () => {
-  assert.equal(providerDeleteSummary('zcode', { status: 'deleted', routes_updated: [], routes_removed: [] }), 'deleted zcode');
-  assert.equal(providerDeleteSummary('zcode', null), 'deleted zcode');
+  assert.equal(providerDeleteSummary('zhipu', { status: 'deleted', routes_updated: [], routes_removed: [] }), 'deleted zhipu');
+  assert.equal(providerDeleteSummary('zhipu', null), 'deleted zhipu');
   assert.equal(
-    providerDeleteSummary('zcode', { routes_updated: ['a', 'b'], routes_removed: ['c'] }),
-    'deleted zcode; removed from routes: a, b; deleted empty routes: c');
+    providerDeleteSummary('zhipu', { routes_updated: ['a', 'b'], routes_removed: ['c'] }),
+    'deleted zhipu; removed from routes: a, b; deleted empty routes: c');
   assert.equal(providerDeleteSummary('x', { routes_removed: ['only'] }), 'deleted x; deleted empty routes: only');
 });

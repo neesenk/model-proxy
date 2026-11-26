@@ -21,7 +21,7 @@ type ModelProtocols struct {
 // (transient 429/401/403/5xx/timeout — "no information") retains the previous
 // conclusion. Without this, one rate-limited probe pass downgrades a
 // known-good yes to unknown (the "? unknown" flapping observed on
-// zcode/zhipu), and /api/models + verdict routing lose information a later
+// BigModel), and /api/models + verdict routing lose information a later
 // pass must re-earn. next is returned unchanged when old agrees everywhere or
 // next concluded everything.
 func MergeOnUnknown(old, next ModelProtocols) ModelProtocols {

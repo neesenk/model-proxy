@@ -21,11 +21,11 @@ import (
 // only for same-protocol streams; the six streaming converters fail closed
 // on their own — an error terminal in the client protocol — and their only
 // log is convertWarn, deduped per process per message and carrying neither
-// provider nor cause. 13 zcode streams (openai clients reading an anthropic
+// provider nor cause. 13 converted streams (openai clients reading an anthropic
 // upstream) ended in "upstream stream terminated unexpectedly" that day.
 // The whole day's evidence was one deduped
 // "[convert] WARN: anthropic SSE scanner error: context canceled", so a
-// client cancelling and zcode dropping a connection were indistinguishable.
+// client cancelling and the upstream dropping a connection were indistinguishable.
 
 // anthropicParkedStream is an anthropic message stream that has begun
 // generating and carries no terminal: no stop_reason, no message_stop.
@@ -37,7 +37,7 @@ const anthropicParkedStream = "event: message_start\n" +
 	`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}` + "\n\n"
 
 // convertedErrorMessage is the message of the anthropic→openai converter's
-// fail-closed terminal when the upstream read fails mid-stream — zcode's live
+// fail-closed terminal when the upstream read fails mid-stream — the observed live
 // final frame on 2026-11-24 (13×): an error chunk with no finish_reason and
 // no [DONE]. The converter marshals the error object from a map, so its key
 // order is not a contract and is asserted field by field.
@@ -131,9 +131,8 @@ func (body *parkedAnthropicBody) Read(p []byte) (int, error) {
 
 func (*parkedAnthropicBody) Close() error { return nil }
 
-// convertedStreamingAttempt builds a converted streaming attempt (openai
-// client, stream:true → anthropic upstream) — the path every zcode openai
-// request takes.
+// convertedStreamingAttempt builds the converted streaming attempt (openai
+// client, stream:true → anthropic upstream) exercised by these tests.
 func convertedStreamingAttempt(t *testing.T, runtime Runtime, request *http.Request, writer http.ResponseWriter) Attempt {
 	t.Helper()
 	plan := NewPlan(PlanInput{

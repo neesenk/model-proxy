@@ -111,7 +111,7 @@ var modelRejectionPhrases = []string{
 	"unknown model",
 	"no such model",
 	"not supported with this model",
-	// BigModel (zhipu/zcode) plan-permission denial — kept here so a 400
+	// BigModel (zhipu) plan-permission denial — kept here so a 400
 	// carrying it also concludes no; on 429 it is matched via
 	// planPermissionPhrases (see ClassifyModelStatus).
 	"当前订阅套餐暂未开放",
@@ -124,7 +124,7 @@ var modelRejectionPhrases = []string{
 // full modelRejectionPhrases table on 429 would turn such a transient 429
 // into a fingerprint-gated permanent no).
 var planPermissionPhrases = []string{
-	// BigModel (zhipu/zcode): a plan-level per-model permission denial rides
+	// BigModel (zhipu): a plan-level per-model permission denial rides
 	// an HTTP 429 — "[1311][当前订阅套餐暂未开放GLM-5.3-FlashX权限]" — which
 	// the 429→unknown rule left as a PERMANENT "? unknown" (unknown legs
 	// re-probe forever, and the answer never changes). The wording names the
