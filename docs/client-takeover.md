@@ -195,7 +195,7 @@ opencode-go、凭据池 0 账号墓碑、构建失败）整体剔除——这些
 | （opencode 三变体） | 同上 | json | 附 `mcp` 块：`mcp` 节写 remote 型条目（enabled: true，`headers.Authorization` 同嵌） |
 | （codex） | 同上 | toml | 附 `mcp` 块：`[mcp_servers."<name>"]` 段写网关条目（url + `http_headers`） |
 
-凭据在回环部署（未配 `web.auth.api_keys_file`）一律占位符 `PROXY_MANAGED`，真实 key 只在代理侧；**非回环部署**（api_keys_file 已配）写入首个真实 key（`renderContext.managedToken`，zcode/workbuddy 内嵌 preset 同款），否则客户端会被转发面 401。preview/确认对话框等**显示面**把真实 key 脱敏回 `PROXY_MANAGED` 并加注记（`PreviewWritesOpts`），落盘内容仍为真实 key。
+凭据在回环部署（未配 `web.auth.api_keys_file`）一律占位符 `PROXY_MANAGED`，真实 key 只在代理侧；**非回环部署**（api_keys_file 已配）写入首个真实 key（`renderContext.managedToken`，zcode/workbuddy 内嵌 preset 同款），否则客户端会被转发面 401。preview/确认对话框等**显示面**把真实 key 脱敏回 `PROXY_MANAGED` 并加注记（`PreviewWritesOpts`），落盘内容仍为真实 key。脱敏集合是**当前** `web.auth.api_keys_file` 里的 key：客户端文件自有条目里残留的历史/已吊销 forward key 不在脱敏范围内（预览观看者即该文件的所有者；受管条目落盘时必被当前 token 覆写，不受影响）。
 
 **MCP 条目鉴权**：`/mcp/*` 走与 `/v1/*` 相同的 api-key 门禁，网关 MCP 条目因此与 provider 块同路嵌凭据——`{{token}}` 以 `Authorization: Bearer` 写入：pi/claude/kimi/zcode/opencode 走 JSON `headers` 字段，codex/stepcode 走 TOML `http_headers`（字段名逐一按客户端 schema 实证：pi 的 `McpHttpServerConfig.headers` d.ts、kimi 内嵌 schema 文档、zcode 配置指南、opencode remote 型、codex/stepcode bundle 内 rmcp 的 `http_headers` 解析；哨兵/真实 key 与 preview 脱敏同 provider 块规则）。**workbuddy/hermes 暂不嵌**——两者未实证到 header 能力，写未知字段有被严格解析器整文件拒绝的风险；非回环部署下这两个客户端经代理的 MCP 会 401，需手工处理或后续实证补齐，回环部署不受影响。codex 的 **LLM** 凭据仍不经 `{{token}}`（auth.json/import 通道），非回环部署需按 codex 自身配置手工带 key；MCP 的 `http_headers` 不属于该通道，照常嵌入。
 

@@ -117,18 +117,29 @@ multi-MB body 曾把堆峰值顶到数 GB，字节封顶与置空 body 是它的
 goroutine——压缩耗时不得阻塞写路径；owner/stop/wait/final flush 由 Logger 生命周期承担）。worker 以
 `X.log.zst.tmp` → rename `X.log.zst` → 删原文件的原子序列落盘（崩溃后 `.zst` 已在则只删原文件，幂等；
 压缩或 rename 失败时顺手清掉 `.zst.tmp`——否则源文件随后被护栏/retention 删走后，孤儿 tmp 不属于任何可删
-集合；崩溃残留的 tmp 在其源 `.log` 消失后由派发步的回收清扫，源还在的 tmp 属于在途/可重试压缩、不动），
-每拍至多派发 16 个文件，队列满或压缩失败时告警、文件保持明文并在下一拍重试（期间仍可查）；
+集合；崩溃残留的 tmp 在其源 `.log` 消失后由派发步的回收清扫，源还在的 tmp 属于在途/可重试压缩、不动；
+sweep/磁盘护栏在压缩期间删掉源文件时 rename 仍落 `.zst`：归档保留不回收，并记一条 info 日志
+（`[<tag>] archive <名>.log.zst: the plain file was removed while it was being compressed …`），
+retention 场景下一拍按日戳清掉、guard 场景由后续护栏按名序回收，重复 offer 与重跑路径保持静默）。
+每拍扫描一次目录，直接交出一个队列（16）的量，其余留在待派列表并告警
+（`archive queue full; N more file(s) waiting`；积压跨拍时 N 含上一拍已交出、仍在队列或压缩中的文件，
+至多 17 个）。worker 每完成一项都向 writer goroutine 发可合并、非阻塞的补派发信号，writer 按扫描顺序从
+待派列表补位，积压不再等下一拍，补位路径不重扫目录。补位受连续失败预算约束：连续失败达到 3 次即停止
+补位，直到出现一次成功或下一拍；预算以下每次失败只补 1 个。因此归档持续失败（磁盘写满且护栏无可删）
+时每拍最多尝试 16 + 3 − 1 = 18 个文件、各告警一条，而不是整个积压；压缩失败的文件保持明文并在下一拍
+重试（同一拍内不会被补位重试，期间仍可查）；
 停机只收尾在途的一项，排队项原样留给下次运行（关停那次 sweep 只做 retention 清理）。
 完成即触发 OnChange 让 indexer 走现有「未认领消失文件删行」路径清索引行并按 session 失效缓存。
 `.zst` 后缀使 indexer 认领/reconcile/查询扫描三处 `.log` 精确匹配天然不认领——归档是纯离线数据
 （`zstd -d | jq`），没有在线读路径，查询与 Requests 页的可查窗口即热窗。retention/disk-guard/prune 的
 可删集合包含 `.zst`；`.zst` 时龄取文件名 YYYYMMDD 日戳（其 mtime 是压缩时刻），日戳不可解析的
 `.zst` 不被 retention/prune 按时龄删除、只有磁盘护栏按名序回收；在途的 `.zst.tmp` 三处都不删。
+护栏触发时在报告行里计入本流在途 `.zst.tmp` 的数量与占用（`N unfinished archive(s) hold X in .zst.tmp
+(never deleted)`），但它们不进可删集合。
 运行日志：启用热窗时启动行 `[request_log] enabled -> …` 末尾带 `, hot window <时长> (older rotated
-files zstd-archived, offline-only)`；归档队列满打 `[request_log] archive queue full; <文件> retried next
-sweep`，压缩或改名失败打 `[request_log] archive <文件> failed (kept plain; retried next sweep): <原因>`；
-源文件先被 retention/护栏删走时静默跳过、不打行。残留 tmp 的回收在每拍的派发步里，不依赖归档
+files zstd-archived, offline-only)`；归档队列满打 `[request_log] archive queue full; N more file(s)
+waiting`，压缩或改名失败打 `[request_log] archive <文件> failed (kept plain; retried next sweep): <原因>`；
+源文件先被 retention/护栏删走时静默跳过、不打行（压缩期间被删落 `.zst` 时记 info）。残留 tmp 的回收在每拍的派发步里，不依赖归档
 是否开启：归档开启时只清源 `.log` 已消失的孤儿；`hot_retention: "0"` 下进程内没有压缩 worker，
 本流的 `.zst.tmp` 一律视为残留清掉（三处可删集合都不含它，这一步是它们唯一的出口）。
 **流应答聚合落盘**（`request_log.aggregate_streams`，默认关、restart-only）：流式应答每输出 token 约 100 字节
@@ -146,6 +157,17 @@ CPU），折叠器由组合根注入（`internal/app/observe_adapters.go aggrega
 encoding/json 以 `strings.EqualFold` 匹配键（ASCII 大小写变体 + `ſ`(U+017F)→`s`）且键可用 `\u`
 转义，`usageKeyCandidate` 只跳过不可能含这种拼写的帧，结果与逐帧全解码逐值相同，普通 delta 帧零分配。
 Shutdown 在 log writer drain 之后跑一次 final reconcile（final flush）。
+**usage 投影与账本重建**：索引的 usage 投影是启动时 usage 账本重建的来源（`observestats.Store.RebuildTokenLedger`
+经 `internal/app/observe_adapters.go` 的 `initStats` 读取 `<RequestLog.ResolvedDir()>/index.db`——与 logger /
+indexer 同一解析点，`dir` 未配置时即默认目录——用索引读数覆盖 cutoff 前分钟桶，只聚合 LLM 的
+live 行），所以热路径
+`UsageScanner` 的形态内合并规则必须与 `extractSSEUsage` 同构（规则见
+`docs/architecture/protocol-conversion.md`），否则重建会静默改写历史；回归钉在
+`internal/app/r6_usage_ledger_matrix_test.go`。跨形态汇总两侧有意不同：本侧逐字段取最大，计数侧
+anthropic 帧与其余形态相加。索引存在但没有记录时，本次启动跳过重建并打印一行说明；索引文件缺失或
+不可读时重建返回错误，由 `Bootstrap` 告警。重建同步执行、发生在开始监听之前；汇总行
+`[stats] rebuilt …` 带聚合组数（`N minute + M agent group(s) aggregated`）与耗时，对非空
+索引的每次重建都打印。
 写热路径（forward commit → Enqueue）不碰 SQLite。查询与扫描版语义逐字段一致：
 `SummariesWithFacets`（WHERE 映射 Filter——From/To 时间窗作用于 `ts_ms`，`ensureColumns` 建的 `idx_records_ts_ms` 让历史窗口（UI 分钟级时间筛选）免于沿 TEXT `ts` 索引逐行过滤所有更新行 + **failover 腿折叠**：已配对 `attempt_only` 行不出列、折入其已提交行的 `failed_hops`（attempt 升序元数据），未应答请求〔既无已提交行也无全链失败终态行，即客户端中途断开〕保留最新一腿独立成行——status/errors 过滤作用于存活行终态，扫描回退路径同语义折叠；facets 在 filter 之前对全部已索引行
 采集（扫描回退路径的 facets 受其文件级提前终止窗约束，From/To/Limit 压力下可比索引侧窄——两路径都是「先采集后过滤」，差异只在扫描能整文件跳过）——例外是 `Kind`：它是流选择器而非数据 facet，llm/mcp 过滤同样收窄 facets，
@@ -174,7 +196,7 @@ JSONL schema、Record 编码、查询 heap、Summary 与查询聚合由
 首次写入才懒建文件）。磁盘护栏（`request_log.disk_guard`，缺省 enabled/50GiB/95%）是
 retention 之上的空间下限：每小时 sweep 在时龄删除后检查日志目录所在卷，空闲低于
 `min_free_bytes` 或使用率 ≥ `max_used_percent`（unix Statfs / windows GetDiskFreeSpaceEx，
-包内 seam 可注入测试）时按名序删最旧轮转文件至条件解除；活动文件与 `index.db` 永不删，
+包内 seam 可注入测试）时按名序删最旧轮转文件至条件解除，报告行同时给出本流在途归档的占用；活动文件与 `index.db` 永不删，
 条件值 0 关闭该条件，索引一致性沿用 prune 契约（reconcile/启动重建丢弃消失文件的行）。
 `internal/app/observe_adapters.go` 只完成 config
 和执行上下文到纯值 Input 的映射（外加 Indexer 的创建——索引 schema、reconcile 与

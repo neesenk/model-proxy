@@ -121,7 +121,7 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   `internal/runtime.decideOrder` 是唯一排序分叉点。
 - timeout、连接错误、5xx、refresh 后仍失败的 401、`error.code` 证明账号停用的 403 与
   message 证明套餐订阅失效的 4xx（见下文「普通转发的 403 归因」）和 2xx HTML 伪成功（见下文）计入 provider 熔断。
-- **连接类快失败先重派再计数**（`targetexec.IsFastFailConnError`）：`unexpected EOF`/`EOF`/`ECONNRESET`/`EPIPE`/`ECONNREFUSED` 这类毫秒级返回的错误先在同一 target 上重派一次（新连接）；重派成功记 success、首跳**不**记失败。对外网络（代理链回收、LB 滚动）一次事件杀 N 条在途连接是常态噪音，重派把它从熔断视野里滤掉；超时不重派（时间预算已烧掉，重试等于翻倍等待），客户端断开照旧 `OutcomeClientGone`。重派不占 401 refresh 的 retry slot。**服务端主动 GOAWAY 同属快失败**：HTTP/2 网关按 stream 预算优雅回收连接（实测 compass 周期性 `LastStreamID≈2000, ErrCode=NO_ERROR`），`http.Client.Do` 层面浮出的 GOAWAY 意味着本 stream id 已过 LastStreamID——服务端从未处理该请求，同 target 重派不是重复请求（net/http 的 goAwayError 未导出，按稳定错误文案识别）；已 commit 的响应 body 中途断流不在此列（commit 后无法重派）。
+- **连接类快失败先重派再计数**（`targetexec.IsFastFailConnError`）：`unexpected EOF`/`EOF`/`ECONNRESET`/`EPIPE`/`ECONNREFUSED` 这类毫秒级返回的错误先在同一 target 上重派一次（新连接）；重派成功记 success、首跳**不**记失败。对外网络（代理链回收、LB 滚动）一次事件杀 N 条在途连接是常态噪音，重派把它从熔断视野里滤掉；超时不重派（时间预算已烧掉，重试等于翻倍等待），客户端断开照旧 `OutcomeClientGone`。重派不占 401 refresh 的 retry slot。**服务端主动 GOAWAY 同属快失败**：HTTP/2 网关按 stream 预算优雅回收连接（实测 compass 周期性 `LastStreamID≈2000, ErrCode=NO_ERROR`），`http.Client.Do` 层面浮出的 GOAWAY 意味着本 stream id 已过 LastStreamID——服务端从未处理该请求，同 target 重派不是重复请求（net/http 的 goAwayError 未导出，按稳定错误文案识别）；已 commit 的响应 body 中途断流不在此列（commit 后无法重派）。decisions selector 调用经 `targetexec.BufferedLeg` 同样重派一次（边界同上；`BufferedLeg.OnRedispatch` 通知调用方记与执行器同文案的日志）。
 - **熔断需要 streak 持续**（`circuit_persist`，默认 6s，`"0"` 关闭）：连续失败除了达到 `circuit_threshold`，还必须**跨至少 persist 窗口**才开熔断——"N 连败"从"N 次尝试碰噪音"升级为"N 次新鲜连接确认不可达持续了一段时间"。persist 只延迟**新请求**不再考虑该 provider 的时刻；单个请求的 failover 照旧立即发生，重派后的失败也照常计数。成功重置 streak 起点与计数。
 - **客户端取消不计熔断**：调用方断开（`exchange.Request.Context()` 取消，
   含调用方自身 deadline）不是上游判决——不记 `RecordFailure`、不计
@@ -195,18 +195,19 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   （已提交行与全链失败终态行都带）记录每个被裁目标的 fit 判词与替换头（如 `request-aware: dropped
   zhipu/glm-5.3: model metadata lacks image modality → cross-route
   step-plan/step-5-preview`），响应头带同值的 `x-mp-reroute`（写于首个 body 字节
-  之前，流式也可见）；未变化时不产生任何开销（`DescribeFitReroute` 先做
+  之前，流式也可见；响应头与 `schedule.note` 描述**最近一轮** pass 的改道——wait-retry
+  后续轮未改道时清除）；未变化时不产生任何开销（`DescribeFitReroute` 先做
   集合比对）。跨路由托底池的选择按**阶梯**：先取**本路由 provider** 内
   合适的目标（路由已信任的 provider 上的兄弟模型，无视 tier 领先），组内
   及其余池再按调度序（tier plan→pay → priority → 余量）——`preferRouteProviders`
   对调度结果做稳定分区实现，`#req`（能力/上下文兜底）与 `#ctx`（溢出重试）
-  两条路径共用。token 用量聚合（observe/counters 的 UsageScanner）按
-  **形态内快照-或-增量**合并：chat 帧内单调不降的 usage 值视为累计
-  快照取末值（存在逐 chunk 重复累计值的网关，曾把单请求膨胀成上亿 token
-  统计），下降视为增量相加；anthropic 帧不套这条规则，按终帧读取——
-  `message_delta` 携带的字段（显式零含）即终值，省略的字段沿用
-  `message_start`（规则与方言依据见 `docs/architecture/protocol-conversion.md`）；
-  跨形态（anthropic 帧与 openai chunk）仍求和。
+  两条路径共用。token 用量聚合（observe/counters 的 UsageScanner）的形态内
+  合并规则与请求日志索引侧（`extractSSEUsage`）逐条同构（权威定义见
+  `docs/architecture/protocol-conversion.md`）：chat 方言帧的 input/cache 拆分整体
+  取自 `prompt_tokens` 最大的一帧、output 取最大值（存在逐 chunk 重复累计值的网关，
+  曾把单请求膨胀成上亿 token；也曾把份额帧间增长误读成增量而把 input 重复计一次），
+  anthropic 帧按终帧读取，responses 快照逐字段取 MAX；跨形态（anthropic 帧与 openai
+  chunk / responses 快照）仍求和——索引侧取最大，这是两侧唯一有意的跨形态差异。
   四桶账本归一化为 anthropic 口径（input 不含 cache）：inclusive 计数器
   （openai `prompt_tokens`、responses `input_tokens` 自带 cached 份额）
   入桶前先扣减该份额（钳零）并记入 cache_read——否则同一份额同时落 input
@@ -402,27 +403,29 @@ selector 腿只打上调那一行；guard 判定 seam（`internal/app/model_call
 中转网关在凭据过期或被 WAF 拦截时答「200 + HTML 登录页/挑战页」——把它当成功流出，
 客户端拿到的是一段 markup 而不是 JSON/SSE。`targetexec.IsFakeAPIReply` 判定后按 502 语义
 处理：走 failover、计入 provider 级熔断（`RecordFailure` + failure metric），永不 commit、
-永不下沉到模型锁。两条判定臂都不得破坏 pre-commit 语义：
+永不下沉到模型锁。两条判定臂都不得破坏 pre-commit 语义，并且都在返回前关闭上游 body
+（这个 return 跳过了 commit 路径上唯一的关闭点，不关即钉住连接与读循环）：
 
-- **Content-Type `text/html`**：仅凭响应头判定（peek 2KiB 只为提取 `<title>` 进诊断），适用于
-  流式请求——这条臂不读 body，慢 TTFT 流的 SSE keepalive 契约不受影响；
+- **Content-Type `text/html`**：仅凭响应头判定，对流式调用方完全不读 body（慢 TTFT 流的
+  SSE keepalive 契约不受影响）；非流式调用方额外 peek 2KiB，只为提取 `<title>` 进诊断；
 - **文档前缀 peek**（`<!doctype`/`<html`/`<head`/`<body`/`<title`/`<script>`，大小写不敏感）：
   单次有界读 ≤64B 并原样回放（`peekHead`），**只对非流式调用方**执行——流式调用方在首字节
   前的任何阻塞读都会吃掉心跳窗口（keepalive 用例钉住）。声明 JSON 却以 HTML 开头的 body 也
   被此臂捕获。
 
 attempt 腿的诊断只带状态与页面标题（`upstream answered <status> with an HTML page: <title>`），
-不落页面原文。
+不落页面原文；流式调用方不读 body、没有标题，降级为 `html document`。
 
 **普通转发的 403 归因**（只接在普通执行器上；decisions selector 腿不接入）：先沿用配额耗尽和模型拒绝的分类。结构化错误的
 `error.code` 为 `account_disabled`、`account_deactivated` 或 `account_suspended` 时，按当前
 解析到的账号记录一次认证失败并 failover，熔断门槛同 401、同样不记 failure metric；**末候选
 也不例外**——不透传账号错误，按全链失败回 502（单目标路由与 pin/force-provider 同此）。
-标准 nginx 403 文档或带 `Cf-Mitigated: challenge` 的拒绝响应，有下一候选就释放半开槽并
+标准 nginx 系（nginx / openresty / tengine，整页文档结构精确匹配）403 文档或带
+`Cf-Mitigated: challenge` 的拒绝响应，有下一候选就释放半开槽并
 换目标，腿记录 403 和固定原因；最后一个候选保留原始 403。单次网关拒绝不累计账号或模型
 失败。只有 HTML 类型、标题或笼统权限提示时沿用普通 4xx 语义。锁定测试：
-`TestForward_Upstream403AttributionE2E`（`internal/app`）与 `TestExecutor403FailureScope`
-（`internal/targetexec`）。
+`TestForward_Upstream403AttributionE2E`（`internal/app`）、`TestExecutor403FailureScope` 与
+`TestGatewayRefusedNginxFamilyDenialPage`（`internal/targetexec`）。
 
 **订阅失效归因**（账号归因的文本形态，同样只接在普通执行器上）：错误 envelope 的
 `error.message` 明说账号没有有效套餐订阅时（step-plan 的 `you have no active step plan
@@ -454,8 +457,13 @@ active plan subscription — failing over (auth circuit)`），serve.log 单文�
 provider：照常 failover（换一家策略不同的 provider 可能可服务同一请求），但**不计熔断、
 不计失败指标**、不触发任何冷却——账号本身是健康的。反面教训：把「unapproved channel」
 误判为账号故障曾让 magpie 静默封禁全部账号 5 天。普通 500 错误页绝不许误分类（裸通用词
-不进 marker 表）。4xx 不在此例：内容无关的普通 4xx 走原样 commit 路径（无冷却无
-failover），带证据的 403/400 另按配额、模型拒绝或账号归因（见上文各节）。
+不进 marker 表）。marker 表另一面的取舍同样有意：个别中文 marker（「安全策略」）不带
+上下文限定，网关/WAF 的 5xx 拦截页命中时也按内容拒绝处理——放弃的是该场景的熔断开路
+保护（每次请求付全链 failover 延迟），换取的是绝不因请求级拒绝 bench 掉健康账号。
+4xx 不在此例：内容无关的普通 4xx 走原样 commit 路径（无冷却无
+failover），带证据的 403/400 另按配额、模型拒绝或账号归因（见上文各节）。decisions
+selector 腿同此判定（同一 8 KiB 窗口）：decisions 腿本就不记 failover 计数，命中时各
+计数全零。锁定测试：`TestR6CallDecisionsContentRefusal5xx`（`internal/forward`）。
 
 ## Unsupported parameter 学习
 

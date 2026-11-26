@@ -105,7 +105,14 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
   `Err`（`/api/status` 的 `quota[name].Err`、`serve status` 的 `no data (<ERR>)`），并随快照
   落 `quota_state.json`；复发时据此区分网关 HTML、错误信封与
   空 body。分类器（`IsTransientQuotaErr` / `CredentialErrClass`）对整串做子串匹配，片段
-  里的词同样参与分类。
+   里的词同样参与分类。解析失败类同样带证据（同一 120 字节、折单行口径；证据本体是
+   `provider.quotaBodyEvidence`，`quotaFormatSnapshot` 在其上构造快照）：codex
+   `parse wham/usage: <json 错误>: <片段>`、deepseek `parse user/balance: <json 错误>: <片段>`、
+   aqp `monthly usage response parse failed` / `monthly usage data parse failed: <json 错误>: <片段>`。
+   aqp 非 200 的证据为信封 `message`（否则 body）；其 `session` 探测只读展示出来的证据
+   （证据里看不到该词就不会判会话过期），`retcode≠0` 的 `message` 同样折单行、120 字节上限。
+   aqp 的 `monthly_usage` 抓取与其余计费端点走同一共享管线（`usageSend`：共享 client、
+   per-provider 代理链）。
 - reload 侧（`ReplaceGeneration`）：quota cache 跨 generation 存活，只在同一临界区
   内对 live key 集合（config 名 + 池化虚拟 `name#<accountID>`）剪枝——被移除的
   provider/登出的账号原子丢弃，存活者继续用 cache 直到 reload 后的 `PollAsync`
@@ -114,7 +121,9 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
   档位翻转事故）。boot 路径不变：磁盘恢复仍受 config fingerprint 门控；键迁移
   （provider-pools.md）在 tracker Load 之前把 quota_state.json 的裸父名条目改键到
   虚拟键，reload 时则由 `Manager.RenameQuotaKeys` 在 generation 交换前完成同一
-  搬运——两种路径下历史 last-known-good 快照都不被 live-key 过滤丢弃。
+   搬运——两种路径下历史 last-known-good 快照都不被 live-key 过滤丢弃。reload 侧的搬运
+   在最后一个可失败的锁外步骤（guard scanner 构建）之后、紧邻 generation 交换的写锁之前
+   执行，reload 中止时不会留下半迁移的 quota cache。
 
 轮询范围 = **全部已构建 provider**（含池化虚拟账号 `name#<accountID>`）。`Quota()`
 能服务什么由 provider 实现决定：配了 `usage_url` 的做 HTTP 查询（deepseek 的
@@ -140,7 +149,7 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
 
 tracker 在每次 commit 新快照（pollAll/pollOne/429 refresh）时，以**上一次已 commit 快照**为基线计算 ultimate 窗口的耗尽预测：`rate = Δused/Δt`，`ExhaustionEta = as_of + remaining/rate`，挂到 `QuotaSnapshot.ExhaustionEta` 后进 Manager。以下情况不预测（零值）：首个快照无基线、任一侧带错误、速率 ≤0（空闲或窗口已 reset）、`Δt > 3 × quota_poll_interval`（轮询断档，基线陈旧）、窗口已耗尽或未测量。预测**仅展示用**（`usage` CLI 窗口行尾、Web Status 配额卡），调度不读，不落盘；重启后首轮 poll 可用从 quota_state.json 恢复的上一快照作基线（断档超界则不预测）。`usage` CLI 是独立进程、单次 live fetch，其基线是经 `provider.DecorateExhaustionEta` 读取的持久化快照（按普通 provider 名 keyed；池化虚拟账号 key 无 CLI 预测）。
 
-当前实现使用 tracker 实例内的 `persistMu` 串行化 snapshot → **唯一同目录临时文件** → rename（每次写一个唯一 `.tmp`，多个 tracker/process 或 tracker 与同步调用者不再争用同名，rename 不会再 ENOENT），rename 后再 best-effort fsync 父目录（否则 crash+reboot 可能丢掉目录项本身；部分平台/文件系统不支持目录 fsync，仅记 debug），并在 quota poll、manual refresh、部分 429 refresh 和 unfreeze/freeze 时写盘。`Proxy.Close` 先通过 lifecycle gate 停止接收新任务，再等待 poller goroutine（含 reload 的 `pollAsync` 与 429 的 `refreshAsync`）后做 final flush；dispatch 的 accepting 检查与 `WaitGroup.Add` 在同一把锁内，不得与 shutdown 的 `Wait` 竞争。
+当前实现使用 tracker 实例内的 `persistMu` 串行化 snapshot → **唯一同目录临时文件** → rename（每次写一个唯一 `.tmp`，多个 tracker/process 或 tracker 与同步调用者不再争用同名，rename 不会再 ENOENT），rename 后再 best-effort fsync 父目录（否则 crash+reboot 可能丢掉目录项本身；部分平台/文件系统不支持目录 fsync，仅记 debug），启动期 quota_state.json 键迁移（`renameQuotaStateProviderKeys`）同样在 rename 后经 `wirecap.SyncParentDir` 做 best-effort 父目录 fsync，并在 quota poll、manual refresh、部分 429 refresh 和 unfreeze/freeze 时写盘。`Proxy.Close` 先通过 lifecycle gate 停止接收新任务，再等待 poller goroutine（含 reload 的 `pollAsync` 与 429 的 `refreshAsync`）后做 final flush；dispatch 的 accepting 检查与 `WaitGroup.Add` 在同一把锁内，不得与 shutdown 的 `Wait` 竞争。
 
 ### config generation 一致性
 
@@ -335,7 +344,10 @@ per-target 的 request-fit 判定（`routing.FitVerdict`，与 `Planner.Apply` �
 `/debug/route` 自身的控制 query，并沿用预览请求的 `anthropic-beta`/
 `accept-language`；`guard.secrets=redact` 时以重写后的 body 查 key，secret 或强路径
 命中 block 时在 cache/scheduling 前返回 `bypass (guard block)`。预览不发起上游调用，
-也不写 guard counter/event/audit/session fragment 状态。
+也不写 guard counter/event/audit/session fragment 状态。cache 探测以空 caller（admin 面
+无 key 语境）进行：未启用 `web.auth.api_keys_file` 时即真实结论；启用后条目按 key 分桶，
+探测只能看匿名桶，`cache` 值带 `(anonymous bucket approximation; api-keys cache per key)`
+限定语，不代表任一真实 key 的命中情况。
 
 ## Quality 打分（error rate + TTFT）
 

@@ -124,6 +124,9 @@ SourcePlural 权威、虚拟键展开、spread/sticky、用量归属、键迁移
 - **id 锚定**：`OAuthAccountID(upstream)` = sha256(上游账号身份)[:16]——aqp 用
   employee email、codex 用 chatgpt_account_id（缺失时回落 refresh_token 哈希）。
   id 在添加时一次性锚定，**token 轮换不重算**（normalizePool 跳过 OAuth 条目）。
+  回落锚的边界：走 refresh_token 哈希的条目在重新设备流登录（refresh_token 轮换）后
+  会算出不同 id，upsert 不命中而成为第二条目，用量历史按两个虚拟键分开——需要稳定
+  归因的部署应保证 id_token 可解析出 chatgpt_account_id。
 - **provider 存储缝**：`provider.OAuthBlobStore`（Load/Save/Delete）——池化实例
   绑定 `poolOAuthStore`（providerbuild）：读走原子池读，**写（codex refresh 的
   轮换 refresh_token）在池跨进程锁内 load→替换本条目→save**；无池时回落

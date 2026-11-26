@@ -726,7 +726,7 @@ schedule   # 查询运行中 daemon 的 GET /debug/schedule
 stats [--from TIME] [--to TIME] [--provider P] [--model M] [--bucket B] [--granularity day|month] [--cost] [--json]
 ```
 
-逻辑（`internal/cli/stats/stats.go` 的 `CmdStats` -> `RenderStats`）：GET `http://<LISTEN>/api/stats?...`，10s 超时。`--from`/`--to` = unix 秒或 RFC3339；默认 60min 前..now；`--bucket` 仅展示聚合（`1m`/`10m`/`1h`，存储恒为 1 分钟）；`--json` 原样返回。
+逻辑（`internal/cli/stats/stats.go` 的 `CmdStats` -> `RenderStats`）：GET `http://<LISTEN>/api/stats?...`，10s 超时。`--from`/`--to` = 相对时长（`1h`、`7d`）/ `now` / unix 秒 / RFC3339（相对形式在 CLI 侧按调用时刻换算成 unix 秒，`--to now` 留给 daemon 自己的 now，绝对形式原样透传——`clicommon.SetTimeWindow`，形式定义与 `audit` 同源；其它拼写在 CLI 侧报错、不发请求：stderr `✗ --from "<VALUE>": use now, a duration (1h, 7d), unix seconds, or RFC3339` + exit 1）；默认 60min 前..now；`--bucket` 仅展示聚合（`1m`/`10m`/`1h`，存储恒为 1 分钟）；`--json` 原样返回。
 
 > `--granularity day|month` 或 `--cost` 任一存在时，改走 `/api/analytics`（按自然日/月聚合，存储恒为 1 分钟），表格头与列由 `formatAnalyticsTable` 渲染（见下）。两者都省略时输出与原 `stats` 完全一致。
 
@@ -1022,7 +1022,7 @@ stdin/stdout（不经 `ProcessCommand` 适配器，网关交互契约测试对�
 工具语义：参数契约违规（缺 query、count 越界、非法 url 等）在**任何出站前**答
 JSON-RPC `-32602`（不计费的失败）；上游失败（402/429/5xx、网络错误）答
 `isError: true` 的正常 tools/call 结果——failover 语义与每 server 子进程上限归
-`docs/architecture/mcp.md`。`initialize` 回显客户端 protocolVersion；
+`docs/architecture/mcp.md`。结果超过 stdio 帧上界（`internal/mcp.MaxFrameBytes`）时按文本截断并追加 `[truncated: N bytes omitted — the result exceeded the stdio frame limit]` 标记（正常结果，非 `isError`）；单次 API 响应读取上界为帧上界的 2 倍，超出答 `isError` 工具错误。`initialize` 回显客户端 protocolVersion；
 ping/tools/list 本地应答。
 
 手动运行仅用于排障：自行 export 凭据 env 后 `echo '<initialize JSON>' |
@@ -1282,9 +1282,10 @@ stdout/stderr 归属：交互提示与结果走 stdout；✗ 错误走 stderr + 
 - `internal/cli` 的 serve status / stats `render*` 函数均有 httptest 单测锁文案。
 - `internal/provider/*_test.go`：`usage` 展示的 `Provider:` 首行 + 配额窗口标记。
 - `internal/cli/audit/audit_cli_test.go`：`audit` 表格/`--json` 输出、flag 与时间解析错误文案；`internal/cli/doctor/doctor_drift_audit_test.go`：漂移审计记录（host-only detail、当日去重、audit 关闭）。
+- `internal/cli/stats/r6_time_window_test.go`：`stats`/analytics/agents 三条读路径实际发出的 `from`/`to`；`internal/cli/clicommon/r6_timearg_test.go`：时间参数形式定义。
 - `internal/cli/diag/routing_report_test.go`：`routing report` 弱标签聚合、selector 混淆矩阵、成本基线、判定开销、空窗/无数据路径、`--json` 结构。
 - `internal/cli/status/routes_cmd_test.go`：`routes` 列表/详情/未知模型输出；`internal/cli/help_sync_test.go`：命令注册表 ↔ `-h` 清单/`Help` map/CLI.md 章节/测试子进程分发的双向同步契约；`internal/archtest` 的 `NewApplication` 注册数 ↔ `Commands` 字面量条目数自洽契约（ProcessCommand 均匀绑定 + 流式直绑白名单 `streamBoundCommands`）。
-- `internal/cli/mcpserver/deepseek_test.go`：deepseek-search 工具面、参数契约违规 -32602 且零出站、上游失败 isError 文案、凭据 env 契约；`deepseek_child_test.go`：自孵化子进程端到端（initialize/通知静默/tools/call + `${account.api_key}` 注入键直达 API 的 Authorization）。
+- `internal/cli/mcpserver/deepseek_test.go`：deepseek-search 工具面、参数契约违规 -32602 且零出站、上游失败 isError 文案、凭据 env 契约；`deepseek_child_test.go`：自孵化子进程端到端（initialize/通知静默/tools/call + `${account.api_key}` 注入键直达 API 的 Authorization）；`r6_frame_limit_test.go`：超限结果截断 + 网关 conn 端到端；`r6_frame_bound_test.go`：写出收敛点的帧上界守卫。
 - `internal/app/web_config_test.go` + `internal/web/jstests/contract.test.mjs`：`GET /api/config` 文档键 ↔ `appapi.ConfigDocument` 字段 ↔ 前端 `configCache` 读取字段的同步契约。
 
 新增列/字段允许（追加式，向后兼容）；改动既有列宽、既有文案、退出码、stdout/stderr 归属**需先与用户确认**。

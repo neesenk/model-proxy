@@ -373,7 +373,7 @@ model-proxy serve status --config /path/to/config.yaml   # 指定 config（从�
 ```bash
 model-proxy stats                             # 最近 60min（默认），1 分钟桶
 model-proxy stats --bucket 10m                # 按 10 分钟桶聚合展示（存储恒为 1 分钟，聚合仅展示）
-model-proxy stats --from 2h --to now          # 时间范围（unix 秒或 RFC3339；默认 60min 前..now）
+model-proxy stats --from 2h --to now          # 时间范围（相对时长 1h/7d、now、unix 秒或 RFC3339；默认 60min 前..now）
 model-proxy stats --provider zhipu --model glm-5.2   # 过滤
 model-proxy stats --by-agent                  # 按 agent 维度（claude-code/codex/opencode/pi/…）
 model-proxy stats --by-agent --agent codex    # 只看某个 agent（可叠 --provider/--model）

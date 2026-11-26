@@ -65,7 +65,9 @@ MCP-Protocol-Version + 改写后的 Mcp-Session-Id），凭据与 hop-by-hop 永
 - reload 换代：条目存 account id；换代后账号仍在池内则继续，已移除则清会话并答
   **410 Gone**（fail-closed，客户端重新 initialize），绝不漂移到其他凭据。会话绑定的
   账号被 operator `freeze` 后同样清会话答 **410 Gone**（凭据必须完全停用；stdio 子
-  进程随会话回收一起 kill；瞬态限速/熔断**不**打断绑定）。
+  进程随会话回收一起 kill；瞬态限速/熔断**不**打断绑定）。检查在请求访问到该会话时
+  执行（惰性，无后台任务）：被冻结或已被 reload 移除的会话，其下一次非 initialize 请求
+  得到 410，stdio 子进程随之回收；stdio pinned 路径与 HTTP pinned 路径同此。
 
 ## 观测
 
@@ -127,7 +129,10 @@ frozen/cooldown；离线 CLI `mcp test` 不经 daemon，看不到运行时 freez
   旧 conn 是兜底（锁外 Close，不串行化 registry）。
 - `tools/list`：按 target 顺序聚合各后端工具，对外只暴露**规范名**（第一 target 的
   schema 胜出；获取失败的后端跳过，聚合面降级不整体失败），按路由会话缓存
-  （`RouteToolsPut`）；工具等价是 config 声明的人工事实，v1 不做 schema/参数推导。
+  （`SessionTable.RouteToolsLoad`）：**完整**聚合缓存整个会话生命周期（后续调用零后端
+  I/O）；**降级**聚合只缓存 **1 分钟**（刷新窗口 `routeToolsRefresh`，`internal/mcp/session.go`），
+  之后的下一次访问同步重新聚合（会话内单飞，无后台任务）；发现陈旧绑定或调用方已离开的
+  那次聚合不缓存；工具等价是 config 声明的人工事实，v1 不做 schema/参数推导。
 - `tools/call`：规范名 → 候选 target 集（声明该工具且 enabled，按声明顺序）→
   会话粘滞置顶（`RouteStickyGet/Put`，上一成功后端优先）→ `RewriteToolCallName`
   改写 params.name 后透传参数。**failover 只发生在传输/鉴权/会话/限流/服务端故障**
@@ -137,9 +142,15 @@ frozen/cooldown；离线 CLI `mcp test` 不经 daemon，看不到运行时 freez
   配额窗耗尽被预降权跳过 → -32000 quota-exhausted（而非误报 unknown tool）；声明者
   全部因账号不可调度（freeze/限速/熔断）被预跳过 → -32000 frozen/cooldown 文案。
   子会话建立同样只在可调度账号内选号；已绑定账号被 freeze 后子会话丢弃并在健康
-  同胞上重建（瞬态冷却不打断）。
+  同胞上重建（瞬态冷却不打断）；freeze 分支丢弃子会话时当场回收其 stdio 子进程，
+  `tools/call` 候选预检发现账号全部不可调度时同样回收。已绑定账号被 reload 移除后不再使用：发现它的那次
+  交换（`tools/call` 或 `tools/list`）清掉该子会话（stdio 子进程一并回收）并答
+  **410 Gone**（与 pinned 会话同文案、经 `mcpLog` 记录），不做 failover；下一次交换在
+  仍存在的账号上重建子会话。notifications 广播跳过并清掉账号已不可用（被移除或被
+  冻结）的子会话，客户端仍得 202。
 - `DELETE`：向所有已初始化子会话转发 DELETE 后清本地会话；notifications 向已初始化
   子会话广播（fire-and-forget，客户端恒 202）；`ping` 本地应答；其他方法 -32601。
+  这些代理自答的终态都经 `mcpLog` 记录。
 - 会话表路由态（子会话/粘滞/工具缓存）只能经 `SessionTable.RouteXxx` 方法访问
   （锁内拷贝语义），`Get` 永不暴露 `Route` 指针。
 
@@ -150,7 +161,9 @@ frozen/cooldown；离线 CLI `mcp test` 不经 daemon，看不到运行时 freez
 `transport: sse` 的服务走 2024-11-05 的 HTTP+SSE 双通道：`GET /mcp/<name>` 打开上游事件
 流，`internal/mcp.EndpointRewriter` 把首个 `endpoint` 事件的 POST URL 改写回
 `/mcp/<name>?mps=<本地会话>`（逐行流式，绝不填满缓冲——SSE 流可在事件间空挂数分钟）；
-会话表项的 UpstreamID 存**完整上游 POST URL**，POST 按 `?mps=` 还原并粘到 GET 时的账号。
+会话表项的 UpstreamID 存**完整上游 POST URL**，POST 按 `?mps=` 还原并粘到 GET 时的账号
+（上游 `endpoint` 事件声明的目标按声明使用、不做同源复验——有意信任，见
+`docs/decisions/intentional-behaviors.md` 第 54 条）。
 GET 流结束即删会话（相关性随流消亡）。路由 target 引用 sse 后端在 config 校验期拒绝。
 
 ### stdio 后端（`transport: stdio`）
@@ -174,6 +187,12 @@ exited (exit status 127)`；被信号杀死时是 `signal: <name>`），随客�
 `<redacted:NAME>`）追加在 serve.log 的失败行与 `mcp test` 的 stderr 上（`CLI.md` §13b）。
 stdio 交换同样受 `timeout:` 约束：`StdioConn.Call(ctx, ...)` 监听 ctx，挂起的子进程
 不再永久阻塞调用方（pinned 转发/握手、路由子会话、probe、CLI 全接线）。
+**帧上界**：`internal/mcp.MaxFrameBytes`（16MiB）是父侧读循环的帧上界，可接受的最长帧为
+`MaxFrameBytes-1` 字节 JSON 加换行。超限行不会被截断：读循环以 `ErrTooLong` 失败、杀掉
+子进程，该 conn 上所有挂起与后续调用失败。stdio 子进程写出的每一行必须严格低于它；
+内置子服务器在写出收敛点截断（文本块保留可行前缀并追加
+`[truncated: N bytes omitted — the result exceeded the stdio frame limit]` 标记，无法切割时
+答 -32000），其行上界由该常量派生；第三方 stdio 子进程需自行遵守。
 http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验拒绝；反之
 `command`/`env` 只对 stdio 有效，出现在 streamable/sse 服务器上时校验失败。
 
@@ -199,9 +218,16 @@ http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验�
 
 ### 统计、Live 事件与配额冷却
 
-- 统计：每个终态交换（pinned/route/stdio 全覆盖）经 `mcpLog` 记录到 MCP 网关自己的
-  进程级计数器 `observe/counters.MCPStats`（按 name 计 calls/errors/avg_latency_ms；
-  errors = status ≥ 400），再经分钟 flusher 持久化到 `stats.db` 的 `mcp_buckets`
+- 统计：进入 MCP 协议层的每个终态交换（pinned/route/stdio 全覆盖）经 `mcpLog` 记录到
+  MCP 网关自己的进程级计数器 `observe/counters.MCPStats`（按 name 计
+  calls/errors/avg_latency_ms；errors = status ≥ 400）——status 取实际发给客户端的 HTTP
+  状态（代理合成的 JSON-RPC 错误随 200 发出记 200），DELETE 记 HTTP 动词；会话类 410
+  （账号不在当代 / 被 operator 冻结）与「会话 id 属于别的 server」的 404 属于协议层终态，
+  记录；网关自有应答的 5xx 失败（含 stdio 每 server 子进程数达上限 503）经 `mcpFail`
+  三面留证并记录。**不记录** HTTP 层预检拒绝：未知名称 404、方法不支持 405、body 超限 413、
+  出站 guard 拦截 400，以及进入协议层之前的账号准入失败 503（无可调度账号）。
+  可见影响：MCP 面板的 errors 从此包含 session-required 400、unknown-session 404、410
+  这类会话终态（此前在 Requests 页与统计里不可见）。计数再经分钟 flusher 持久化到 `stats.db` 的 `mcp_buckets`
   表（`name, kind, minute, calls, errors, latency_ms_sum, last_call_at`）。
   `tools/call` 交换另记 **tool 维度**：`mcpLog` 对原始客户端 body 跑
   `mcp.ParseToolCallName`（同一次解析同时供给 stats、request log 记录的 `Tool`

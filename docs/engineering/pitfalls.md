@@ -234,7 +234,11 @@
     教训：89630e1 前缓存命中双重计入 input+cache_read（deepseek 控制台对账
     差值恰=命中量）、2537235 前网关逐 chunk 重复累计把单请求膨胀上亿 token；
     三方一致性由 `internal/app/usage_ledger_test.go`（同一批 wire 样本喂两个
-    解析器断言同值）钉住，历史脏数据由
+    解析器断言同值）钉住——counters 与 requestlog 的多帧序列、全部真实录制流
+    （`testdata/wire/*.sse`）两侧一致性另由
+    `internal/app/r6_usage_ledger_matrix_test.go` 钉住（形态内规则同构，
+    规则权威在 `docs/architecture/protocol-conversion.md`，改一处必须同步另一处；
+    跨形态汇总相加 vs 取最大是有意差异），历史脏数据由
     `observestats.Store.RebuildTokenLedger`（启动时按请求日志索引重写 cutoff
     前分钟桶，带 count 防御）修正；count 防御跳过、且请求日志源行已被轮转
     删掉的桶无法逐笔重建——物理不可能账本（output>128k/笔 或 input>2M/笔，

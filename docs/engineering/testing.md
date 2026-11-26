@@ -219,7 +219,9 @@ policy、stream/client response、metrics/events/request log 和 lifecycle drain
 
 SQLite stats 的 schema/additive migration、legacy import、minute/agent upsert、
 retention、raw/wide/calendar 查询与 query plan 测试归
-`internal/observe/stats/*_test.go`。`internal/app` 只保留 metrics/tokens/agents → flusher
+`internal/observe/stats/*_test.go`；账本重建 SQL 与请求日志索引 schema 的契约由
+`r6_ledger_rebuild_index_contract_test.go`（`stats_test`，用真实 `requestlog.Indexer` 建库跑一次
+重建）钉住，迷你夹具只服务行为分支。`internal/app` 只保留 metrics/tokens/agents → flusher
 投影、失败分钟批次重试、reset-vs-flush、Proxy final flush/Store close、HTTP JSON
 shape 和 CLI 显示集成。宽 bucket 必须逐字段断言所有 additive counter、
 `MAX(last_request_at)`、平均值与 bucket floor；shutdown 测试需重开数据库证明
@@ -426,7 +428,7 @@ kimi/zhipu 的配额解析内嵌在带 I/O 的 `Usage()` 里尚未纯函数化�
 | thinking_adaptive 学习重试 | anthropic 上游 400 要 adaptive thinking → 当次改写 `{"type":"adaptive"}` 重试一次；课程持久化；后续请求预改写 | `TestForward_LearnsThinkingAdaptiveE2E` |
 | 错误体降级可见 | 跨协议客户端收到上游 4xx 的翻译 envelope（含 detail/空 body 的合成文案），status 保留、绝不升级 502 | `TestForward_ErrorDegradationVisibleE2E` |
 | 模型拒绝新措辞边界 | retcode 40403 措辞计入模型拒绝（锁模型+failover）；相邻套餐层 "not supported" 措辞不锁 | `TestForward_ModelDeniedNewWordingE2E` |
-| 上游 403 归因 | 账号停用码（`error.code` 为 `account_disabled`/`account_suspended`）：换下一候选并给该账号记一次熔断失败，末候选终态 502；标准 nginx 拦截页：非末候选换目标且零记账，末候选保留原始 403；通用 HTML 403 原样 commit | `TestForward_Upstream403AttributionE2E` |
+| 上游 403 归因 | 账号停用码（`error.code` 为 `account_disabled`/`account_suspended`）：换下一候选并给该账号记一次熔断失败，末候选终态 502；标准 nginx 系（nginx / openresty / tengine）拦截页：非末候选换目标且零记账，末候选保留原始 403；通用 HTML 403 原样 commit | `TestForward_Upstream403AttributionE2E` |
 | 套餐订阅失效归因 | 上游 400 的 `error.message` 明说账号无有效订阅（step-plan `you have no active step plan subscription`）：换下一候选并给该账号记一次熔断失败（零 failure metric、不锁模型），末候选终态 502；两种终态下该跳都以 400 + 上游错误体落腿；轮转池（load_balance 三账号、中间一个失效）无请求吸收该 400 | `TestForward_LapsedPlanSubscriptionFailsOverE2E` |
 | 转发路径的凭据拒绝上页面 | 账号归因三类（订阅失效 400 / 刷新后仍 401 / 账号停用 403）经真实 admin 端口同时出现在三处：`credential_alerts`（key、类别、上游证据）、该账号 quota 条目的 `denial`、Schedule 节点 `credential` 徽标；健康兄弟账号三处皆无；账号下一次 2xx 后三处一起消失 | `TestForward_CredentialDenialSurfacesInStatusE2E` |
 | 全链失败终态落行 | 所有候选失败（代理回 502）时请求落一行终态行（`provider="(failover)"`，status 与 body 是客户端实际收到的，请求体保留），每一跳都有 attempt_only 腿，列表折叠为一行终态 + `failed_hops`，终态行不贡献 token | `TestForward_AllTargetsFailedFoldsLegsIntoTerminalRow` |
