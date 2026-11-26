@@ -40,15 +40,7 @@ func TestLoadNodeAndMapNode(t *testing.T) {
 func TestScalarHelpers(t *testing.T) {
 	scalar := func(v string) *yaml.Node { return &yaml.Node{Kind: yaml.ScalarNode, Value: v} }
 
-	// SetScalar replaces and appends.
 	doc := &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode}}}
-	SetScalar(doc, "k", "v")
-	SetScalar(doc, "k", "v2")
-	mapping := MapNode(doc)
-	if len(mapping.Content) != 2 || mapping.Content[1].Value != "v2" {
-		t.Errorf("SetScalar replace: content=%v", mapping.Content)
-	}
-	SetScalar(nil, "x", "y") // no panic
 
 	// ChildMap finds existing, creates missing.
 	sched := ChildMap(doc, "scheduling")

@@ -99,12 +99,6 @@ func HomeDir() string {
 	return accounts.HomeDir()
 }
 
-// AuthFilePath returns the credential file path for a provider name
-// (<home>/.model-proxy/<name>_<suffix>.json).
-func AuthFilePath(providerName, suffix string) string {
-	return accounts.AuthFilePath(providerName, suffix)
-}
-
 // PositionalArgs returns every non-flag positional arg in order: --flag value
 // pairs and --flag=value forms are skipped (used by pin/unpin/replay to pull
 // <route> [<provider>] / <id>).

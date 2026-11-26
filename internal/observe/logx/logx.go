@@ -70,7 +70,8 @@ func SetLevel(s string) {
 	}
 }
 
-// CurrentLevel returns the active level (test save/restore, status surfaces).
+// CurrentLevel returns the active level — the package's own filters read it,
+// tests save/restore it.
 func CurrentLevel() Level {
 	return Level(current.Load())
 }

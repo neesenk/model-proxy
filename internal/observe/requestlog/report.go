@@ -120,20 +120,6 @@ func QuerySummaries(dir string, filter Filter) ([]Summary, error) {
 	return summaries, nil
 }
 
-// QuerySummariesIn is QuerySummaries for a non-default stream (only
-// <prefix>*.log files are scanned — the split MCP stream's read path).
-func QuerySummariesIn(dir, prefix string, filter Filter) ([]Summary, error) {
-	records, err := query(dir, prefix, filter, true, true, nil)
-	if err != nil {
-		return nil, err
-	}
-	summaries := make([]Summary, 0, len(records))
-	for _, record := range records {
-		summaries = append(summaries, Summarize(record))
-	}
-	return summaries, nil
-}
-
 // QuerySummariesWithFacets is QuerySummaries plus the data-driven filter
 // facets: the distinct providers/models observed in the scanned window (and
 // the provider→models mapping for the linked dropdowns). Facets are collected

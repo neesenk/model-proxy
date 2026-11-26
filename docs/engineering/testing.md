@@ -320,7 +320,8 @@ helper 在被触及时顺手替换。八个模式（每条带本仓真实范例�
   定向重复——`-cpu 1` 的 syscall 返回点调度两次抓到默认调度抓不到的竞态
   （modelcaps persist 自采纳、forward 窗口）。
 - **P8 对抗性慢轮**：窗口类测试用 `testsyn.SlowRound(≫窗口)` 再跑一遍，
-  证明行为与轮次耗时无关。范例：selector CooldownRetries 的 300ms 验证。
+  证明行为与轮次耗时无关。当前只有 `testsyn` 自身的用例演示这一注入；仓内还没有窗口类
+  用例接入它，首选对象是 selector CooldownRetries 的 300ms 验证。
 
 **回归红规则**：并发类 bugfix 的回归用例必须先在未修复代码上演示过失败
 （提交信息注明"修复前 -cpu X / 注入 Y 可靠复现"），与时序契约的 REGEN

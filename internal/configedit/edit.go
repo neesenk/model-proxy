@@ -36,22 +36,6 @@ func ScalarNode(value string) *yaml.Node {
 	return &yaml.Node{Kind: yaml.ScalarNode, Value: value}
 }
 
-// SetScalar sets key to a scalar value in the top-level mapping of root
-// (replace or append).
-func SetScalar(root *yaml.Node, key, value string) {
-	mapping := MapNode(root)
-	if mapping == nil {
-		return
-	}
-	for index := 0; index+1 < len(mapping.Content); index += 2 {
-		if mapping.Content[index].Value == key {
-			mapping.Content[index+1].Value = value
-			return
-		}
-	}
-	mapping.Content = append(mapping.Content, ScalarNode(key), ScalarNode(value))
-}
-
 // ChildMap returns the mapping node for key under parent (doc/mapping aware),
 // creating and appending an empty mapping when missing. A key present with a
 // null value (bare `key:` with only comments below) is promoted to a mapping

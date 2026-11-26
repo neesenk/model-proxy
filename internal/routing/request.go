@@ -41,9 +41,9 @@ type profileMarkers struct{ image, tools, followUp bool }
 
 // scanProfileMarkers reports whether any image marker, any tools marker and
 // any assistant-role marker (a follow-up turn) occurs in body — literal
-// existence checks, as RequestHasTools does for its markers, in ONE pass:
-// every marker opens with a quote, so the scan visits each quote once, tests
-// the marker sets by the byte after it, and stops once all three are found.
+// existence checks in ONE pass: every marker opens with a quote, so the scan
+// visits each quote once, tests the marker sets by the byte after it, and
+// stops once all three are found.
 func scanProfileMarkers(body []byte) profileMarkers {
 	var found profileMarkers
 	hasAny := func(at int, markers [][]byte) bool {
@@ -259,16 +259,6 @@ func ImageOKForTarget(
 		return supportsImage(modelMeta)
 	}
 	return true
-}
-
-// RequestHasTools reports whether body contains a top-level tools definition.
-func RequestHasTools(body []byte) bool {
-	for _, marker := range toolsMarkers {
-		if bytes.Contains(body, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 // toolsMarkers are the spellings of a non-empty-or-empty tools array.

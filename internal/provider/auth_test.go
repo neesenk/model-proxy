@@ -320,7 +320,7 @@ func TestAqpKeyProvider_Non200(t *testing.T) {
 	if got := len(err.Error()); got > len("mint aqp key: HTTP 500: ")+200+3 {
 		t.Errorf("error length %d exceeds 200-byte body cap", got)
 	}
-	if got := AuthHTTPStatus(err); got != 500 {
+	if got := authStatus(err); got != 500 {
 		t.Errorf("AuthHTTPStatus = %d, want 500 (the observed mint status)", got)
 	}
 }
@@ -347,22 +347,34 @@ func TestAqpKeyProvider_Mint401CarriesObservedStatus(t *testing.T) {
 	if !strings.HasPrefix(err.Error(), "mint aqp key: HTTP 401: ") || !strings.Contains(err.Error(), "Session expired") {
 		t.Errorf("error %q must keep the documented mint format and carry the body", err.Error())
 	}
-	if got := AuthHTTPStatus(err); got != http.StatusUnauthorized {
+	if got := authStatus(err); got != http.StatusUnauthorized {
 		t.Errorf("AuthHTTPStatus = %d, want 401", got)
 	}
+}
+
+// authStatus extracts the observed status the way the executor does
+// (targetexec's authErrHTTPStatus: behavioral errors.As against
+// interface{ HTTPStatus() int }) — the contract the tests below pin. The
+// provider package used to export a twin of it that nothing called.
+func authStatus(err error) int {
+	var s interface{ HTTPStatus() int }
+	if errors.As(err, &s) {
+		return s.HTTPStatus()
+	}
+	return 0
 }
 
 // TestAuthHTTPStatusExtraction: 0 on status-less errors, unwrap through %w
 // chains.
 func TestAuthHTTPStatusExtraction(t *testing.T) {
-	if got := AuthHTTPStatus(errors.New("dial tcp: connection refused")); got != 0 {
+	if got := authStatus(errors.New("dial tcp: connection refused")); got != 0 {
 		t.Errorf("plain error: AuthHTTPStatus = %d, want 0", got)
 	}
-	if got := AuthHTTPStatus(nil); got != 0 {
+	if got := authStatus(nil); got != 0 {
 		t.Errorf("nil: AuthHTTPStatus = %d, want 0", got)
 	}
 	wrapped := fmt.Errorf("outer: %w", HTTPStatusError{Code: http.StatusForbidden})
-	if got := AuthHTTPStatus(wrapped); got != http.StatusForbidden {
+	if got := authStatus(wrapped); got != http.StatusForbidden {
 		t.Errorf("wrapped: AuthHTTPStatus = %d, want 403", got)
 	}
 }

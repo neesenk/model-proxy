@@ -242,13 +242,15 @@ func TestEstimateInputTokens_RuneAware(t *testing.T) {
 	}
 }
 
-// TestRequestHasTools preserves both the positive tools-array shape and the
-// exact negative control from the former root-package pure test.
-func TestRequestHasTools(t *testing.T) {
-	if !RequestHasTools([]byte(`{"tools":[{"type":"function"}]}`)) {
+// The tools marker is read through the single-pass profile. Both the positive
+// tools-array shape and the exact negative control from the former
+// root-package pure test stay covered (the standalone RequestHasTools that
+// used to carry them went away with the single-pass scan).
+func TestProfileRequestDetectsTools(t *testing.T) {
+	if !ProfileRequest([]byte(`{"tools":[{"type":"function"}]}`)).HasTools {
 		t.Error("body with tools:[ should be detected")
 	}
-	if RequestHasTools([]byte(`{"model":"x","input":[]}`)) {
+	if ProfileRequest([]byte(`{"model":"x","input":[]}`)).HasTools {
 		t.Error("body without tools should not match")
 	}
 }

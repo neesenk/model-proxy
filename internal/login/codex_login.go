@@ -279,11 +279,3 @@ func ExchangeCodeForTokensContext(ctx context.Context, opts *CodexLoginServerOpt
 	af.LastRefresh = time.Now().UTC().Format(time.RFC3339Nano)
 	return af, nil
 }
-
-// DirOf returns the directory of a path, or "." if none.
-func DirOf(p string) string {
-	if i := strings.LastIndex(p, "/"); i >= 0 {
-		return p[:i]
-	}
-	return "."
-}

@@ -180,7 +180,7 @@ func TestParseTopLevelToolCallAndEfforts(t *testing.T) {
 	}
 }
 
-func TestFetchedAtAndLoadCache(t *testing.T) {
+func TestFetchedAtAndDiskLoad(t *testing.T) {
 	var nilCat *Catalog
 	if !nilCat.FetchedAt().IsZero() {
 		t.Error("nil catalog FetchedAt must be zero")
@@ -192,8 +192,8 @@ func TestFetchedAtAndLoadCache(t *testing.T) {
 
 	dir := t.TempDir()
 	path := dir + "/models_cache.json"
-	if cat, err := LoadCache(path); err != nil || cat != nil {
-		t.Fatalf("LoadCache(missing) = %v, %v — want (nil, nil)", cat, err)
+	if cat, err := load(path); err != nil || cat != nil {
+		t.Fatalf("load(missing) = %v, %v — want (nil, nil)", cat, err)
 	}
 
 	pulled, err := EnsureFresh(RefreshOptions{
@@ -208,12 +208,12 @@ func TestFetchedAtAndLoadCache(t *testing.T) {
 	if pulled.FetchedAt().IsZero() {
 		t.Fatal("pulled catalog must carry fetched_at")
 	}
-	loaded, err := LoadCache(path)
+	loaded, err := load(path)
 	if err != nil {
-		t.Fatalf("LoadCache: %v", err)
+		t.Fatalf("load: %v", err)
 	}
 	if loaded.Count() != 3 || loaded.ETag() != "etag-1" || !loaded.FetchedAt().Equal(pulled.FetchedAt()) {
-		t.Errorf("LoadCache round-trip = count %d etag %q fetched %v", loaded.Count(), loaded.ETag(), loaded.FetchedAt())
+		t.Errorf("disk load round-trip = count %d etag %q fetched %v", loaded.Count(), loaded.ETag(), loaded.FetchedAt())
 	}
 }
 

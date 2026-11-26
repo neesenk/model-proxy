@@ -81,7 +81,7 @@ fallthrough。拆分流 restart-only，与主 logger 同生命周期。
 `internal/transport/bodycapture.Reader`：reader 只负责有界 tee、完整长度和
 Close-once 回调，日志 schema、入队与 replay 判断不进入 transport 包。
 
-- `requestlog.QuerySummaries` 在 top-K 保留前强制丢弃 request/response body
+- `requestlog.QuerySummariesWithFacets`（生产读路径；`QuerySummaries` 是同一查询不带 facets 的形态）在 top-K 保留前强制丢弃 request/response body
   和 response headers，内存边界按 `limit × metadata` 计算，不是
   `limit × max_body`；UI list 上限 1000，只保留 metadata，调用方没有可忘记设置的开关。
 - detail/replay 才调用 `requestlog.QueryRecords` 保留完整 body。

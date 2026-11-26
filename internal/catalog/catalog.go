@@ -104,13 +104,6 @@ func (c *Catalog) FetchedAt() time.Time {
 	return c.fetchedAt
 }
 
-// LoadCache reads only the on-disk cache — no network, no TTL check — for
-// read-only status surfaces. A missing file is (nil, nil); a corrupt file is
-// an error.
-func LoadCache(path string) (*Catalog, error) {
-	return load(path)
-}
-
 func empty() *Catalog { return New(nil) }
 
 func cloneModels(in map[string]Model) map[string]Model {

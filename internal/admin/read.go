@@ -797,8 +797,8 @@ func (s *Service) Pins() []appapi.Pin {
 // owns only the Verdict → string presentation mapping. Providers present in the
 // snapshot with no models keep their fingerprint/probed_at with an empty (never
 // nil) models map so the UI can show "probed, no models recorded". The catalog
-// block is a disk-only read of the models.dev cache (LoadCache — never a
-// network refresh); an unreadable/absent cache degrades to the zero status.
+// block is a disk-only read of the models.dev cache ((*catalog.DiskCache).Load —
+// never a network refresh); an unreadable/absent cache degrades to the zero status.
 // The match list mirrors routing.HydrateModels on the live config against that
 // same cache (catalog_alias applied), so the card shows exactly the metadata
 // source the next reload/takeover will use; catalog_ids is the sorted picker

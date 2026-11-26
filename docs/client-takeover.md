@@ -5,9 +5,11 @@
 修改 `takeover` / `restore`、客户端模板、模板解析或渲染引擎时必读。
 
 实现归属：备份/恢复、模板引擎与内嵌预设归 `internal/takeover`
-（`RunTakeover` / `RunRestore` / `RunTakeoverReport` / `RunRestoreReport` /
-`CheckDrift` / `ListClients` / `LoadTemplates` / `TemplateByName` / `PresetTemplateYAML` /
-`BackupDir`；引擎在 `template.go`，预设在 `presets/*.yaml`）；`internal/cli`
+（`RunTakeover` / `RunRestore` / `RunTakeoverReportOpts` / `RunRestoreReport` /
+`CheckDrift` / `ListClients` / `LoadTemplates` / `PresetTemplateYAML` / `BackupDir`；带完整选项的
+入口是 `*Opts` 形态——Web 的 `POST /api/takeover` 走 `RunTakeoverReportOpts`，`RunTakeoverReport` /
+`PreviewWrites` 是测试与无选项调用方用的便捷形态，`TemplateByName` 只是按名取单个模板的
+辅助函数，都不是接管的实现 owner；引擎在 `template.go`，预设在 `presets/*.yaml`）；`internal/cli`
 （`commands.go` 的 `RunTakeover` / `RunRestore`）只解析参数、加载 config 并注入
 模型事实（catalog 加载与 source 标记留在 CLI 层）；doctor 的漂移检测
 （`CheckTakeoverDrift`）是 `takeover.CheckDrift` 的薄包装。WebUI 面（Takeover tab）

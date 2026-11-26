@@ -52,18 +52,6 @@ func (e HTTPStatusError) Error() string { return fmt.Sprintf("HTTP %d", e.Code) 
 // contract consumers (targetexec, tests) extract errors.As against.
 func (e HTTPStatusError) HTTPStatus() int { return e.Code }
 
-// AuthHTTPStatus extracts the observed auth-endpoint HTTP status from an
-// AuthHeaders/Refresh error chain. 0 = the failure carried no HTTP status
-// (network error, parse failure) — the caller's leg then falls back to the
-// synthetic 502.
-func AuthHTTPStatus(err error) int {
-	var s interface{ HTTPStatus() int }
-	if errors.As(err, &s) {
-		return s.HTTPStatus()
-	}
-	return 0
-}
-
 // authInjector is the internal contract a provider's auth field satisfies. The
 // concrete types (AqpKeyProvider, CodexOAuthProvider) implement it; tests inject
 // fakes (fakeAuth/errAuth). The constructor wires the real injector.
