@@ -3,6 +3,7 @@ package probe
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -382,5 +383,25 @@ func TestProbeProviderOpenAILegsAgentGrade(t *testing.T) {
 	}
 	if len(bodies) != 2 {
 		t.Errorf("probed paths = %v, want chat + responses", bodies)
+	}
+}
+
+// TestLegsSummary: the drop reason a models refresh reports renders every
+// leg of the dropped model — unprobed legs say why, transport errors carry
+// their error, HTTP answers their status plus the error body's short
+// "code: message" (the upstream's trailing request id stripped).
+func TestLegsSummary(t *testing.T) {
+	legs := []LegResult{
+		{Leg: LegChat, Probed: true, Status: 404, Body: []byte(`{"error":{"code":"model_not_found","message":"The model does not exist. Request id: 7f3a9c"}}`)},
+		{Leg: LegAnthropic, Probed: false},
+		{Leg: LegResponses, Probed: true, Err: errors.New("dial tcp: i/o timeout")},
+		{Leg: Leg("decisions"), Probed: true, Status: 503, Body: []byte(`<html>busy</html>`)},
+	}
+	want := "chat HTTP 404: model_not_found: The model does not exist. / anthropic not probed (no base) / responses dial tcp: i/o timeout / decisions HTTP 503"
+	if got := LegsSummary(legs); got != want {
+		t.Fatalf("LegsSummary =\n%s\nwant\n%s", got, want)
+	}
+	if got := LegsSummary(nil); got != "" {
+		t.Fatalf("LegsSummary(nil) = %q, want an empty summary", got)
 	}
 }

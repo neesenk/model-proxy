@@ -2,7 +2,6 @@ package models
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"model-proxy/internal/display"
 	"net/http"
@@ -26,12 +25,12 @@ import (
 // fetching a provider's live model list (and applying any static regex filter),
 // each candidate id is probed against the provider's OWN configured bases with
 // the three-protocol matrix (chat / anthropic / responses) from
-// probe.ProbeModelProtocols, each leg classified via
-// wirecap.ClassifyModelStatus. A model is kept when ANY leg concludes Yes,
-// or when no PROBED leg concludes No (all probed legs inconclusive — a
-// transient 429/5xx/auth sweep holds no negative information and must not be
-// written back as a config deletion); otherwise it is dropped with a per-leg
-// reason summary. The fresh matrix is
+// probe.ProbeModelProtocols; wirecap.ModelLegFold classifies the legs and
+// owns the keep rule (shared with the daemon's models refresh): a model is
+// kept when ANY leg concludes Yes, or when no PROBED leg concludes No (all
+// probed legs inconclusive — a transient 429/5xx/auth sweep holds no negative
+// information and must not be written back as a config deletion); otherwise
+// it is dropped with a per-leg reason summary (probe.LegsSummary). The fresh matrix is
 // also persisted (best-effort) to model_caps.json so the daemon's verdict-based
 // routing and the PROTOCOLS display column can reuse it without re-probing.
 //
@@ -110,47 +109,22 @@ func CheckProviderModels(cfg *configdomain.Config, provName string, ids, disable
 	protocols = make(map[string]runtimewire.ModelProtocols, len(ids))
 	probedKept := map[string]bool{}
 	for _, r := range probed {
-		mp := runtimewire.ModelProtocols{}
-		anyYes, probedNo, anyProbed := false, false, false
+		// One owner for the verdict fold and the keep/drop policy
+		// (wirecap.ModelLegFold): the daemon's probeRefreshModels reads the
+		// same one, so the two paths cannot drift apart again.
+		var fold runtimewire.ModelLegFold
 		for _, leg := range r.Legs {
-			v := runtimewire.ClassifyModelStatus(leg.Probed, leg.Status, leg.Err, leg.Body)
-			if v == runtimewire.Yes {
-				anyYes = true
-			}
-			if leg.Probed {
-				anyProbed = true
-				if v == runtimewire.No {
-					probedNo = true
-				}
-			}
-			switch leg.Leg {
-			case probe.LegChat:
-				mp.Chat = v
-			case probe.LegAnthropic:
-				mp.Anthropic = v
-			case probe.LegResponses:
-				mp.Responses = v
-			}
+			fold.Add(string(leg.Leg), leg.Probed, leg.Status, leg.Err, leg.Body)
 		}
-		// Keep when ANY leg concluded Yes — and also when no leg concluded
-		// Yes but no PROBED leg concluded No either (every probed leg
-		// inconclusive: transient 429/5xx/auth). The probe holds no negative
-		// information about such a model; dropping it would write one
-		// rate-limit storm back as a config deletion (the allProbeFailed
-		// safety net only fires when EVERY model fails). Legs whose base is
-		// not configured classify No DEFINITIONALLY and do not count as
-		// negative evidence — a provider without anthropic_base_url must not
-		// turn every transient chat failure into a drop.
-		//
 		// Only kept models enter protocols / model_caps.json: a dropped model
 		// is never written to provider.json, so persisting its verdict would
 		// surface an unconfigured ghost row in /api/models that cannot be
 		// edited or disabled.
-		if anyYes || (anyProbed && !probedNo) {
+		if fold.Keep() {
 			probedKept[r.ID] = true
-			protocols[r.ID] = mp
+			protocols[r.ID] = fold.Matrix()
 		} else {
-			dropped = append(dropped, DropReason{Model: r.ID, Status: legStatus(r.Legs), Reason: legsSummary(r.Legs)})
+			dropped = append(dropped, DropReason{Model: r.ID, Status: legStatus(r.Legs), Reason: probe.LegsSummary(r.Legs)})
 		}
 	}
 	// Input order: probed ids keep when any leg concluded Yes. Disabled ids are
@@ -270,56 +244,6 @@ func legStatus(legs []probe.LegResult) int {
 		}
 	}
 	return 0
-}
-
-// legsSummary renders the per-leg probe outcomes joined by " / ", e.g.
-// "chat HTTP 404 / anthropic not probed (no base) / responses HTTP 400: invalid model".
-func legsSummary(legs []probe.LegResult) string {
-	parts := make([]string, 0, len(legs))
-	for _, leg := range legs {
-		switch {
-		case !leg.Probed:
-			parts = append(parts, string(leg.Leg)+" not probed (no base)")
-		case leg.Err != nil:
-			parts = append(parts, fmt.Sprintf("%s %v", leg.Leg, leg.Err))
-		default:
-			if reason := legErrorReason(leg.Body); reason != "" {
-				parts = append(parts, fmt.Sprintf("%s HTTP %d: %s", leg.Leg, leg.Status, reason))
-			} else {
-				parts = append(parts, fmt.Sprintf("%s HTTP %d", leg.Leg, leg.Status))
-			}
-		}
-	}
-	return strings.Join(parts, " / ")
-}
-
-// legErrorReason extracts a short "code: message" from an OpenAI-style error
-// body. probe's own extractor is unexported, so the CLI keeps this local twin
-// (same shape, request-id stripped via the exported helper).
-func legErrorReason(body []byte) string {
-	var ej struct {
-		Error *struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-			Type    string `json:"type"`
-		} `json:"error"`
-	}
-	if json.Unmarshal(body, &ej) == nil && ej.Error != nil {
-		code := ej.Error.Code
-		if code == "" {
-			code = ej.Error.Type
-		}
-		msg := strings.TrimSpace(probe.StripRequestID(ej.Error.Message))
-		switch {
-		case code != "" && msg != "":
-			return code + ": " + msg
-		case code != "":
-			return code
-		case msg != "":
-			return msg
-		}
-	}
-	return ""
 }
 
 // modelCapsFilePath is the CLI-side model_caps.json location (sibling of the

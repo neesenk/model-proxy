@@ -150,9 +150,9 @@ func modelProtocolUnsupported(body []byte) bool {
 	return ej.Error.Code == "ModelProtocolUnsupported" || ej.Error.Type == "ModelProtocolUnsupported"
 }
 
-// Reason extracts a short "code: message" from an OpenAI-style error body,
-// falling back to the raw body (truncated) when the shape doesn't parse.
-func reasonForBody(body []byte) string {
+// errorReason extracts a short "code: message" from an OpenAI-style error
+// body; "" when the body is not such an envelope.
+func errorReason(body []byte) string {
 	var ej struct {
 		Error *struct {
 			Code    string `json:"code"`
@@ -168,15 +168,23 @@ func reasonForBody(body []byte) string {
 		// The upstream appends a long, useless "Request id: <hex>" to the
 		// message - strip it so the drop summary stays readable.
 		msg := strings.TrimSpace(StripRequestID(ej.Error.Message))
-		if code != "" && msg != "" {
+		switch {
+		case code != "" && msg != "":
 			return code + ": " + msg
-		}
-		if code != "" {
+		case code != "":
 			return code
-		}
-		if msg != "" {
+		case msg != "":
 			return msg
 		}
+	}
+	return ""
+}
+
+// Reason extracts a short "code: message" from an OpenAI-style error body,
+// falling back to the raw body (truncated) when the shape doesn't parse.
+func reasonForBody(body []byte) string {
+	if reason := errorReason(body); reason != "" {
+		return reason
 	}
 	s := strings.TrimSpace(StripRequestID(string(body)))
 	return truncate(s, 160)

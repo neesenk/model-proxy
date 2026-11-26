@@ -331,7 +331,9 @@ Store（provider 级 `Store` 与模型级 `ModelStore`，均 parent provider key
 leaf lock、持锁不回调应用代码）、协议选择纯策略（`ClassifyStatus`/
 `ClassifyModelStatus`/`Resolve`/`ResolveModel`）、quota_state.json 顶层
 `wire_caps` 的 JSON 表示，以及独立文件 `model_caps.json` 的格式与原子读写
-（`ModelCapsPath`/`LoadModelCapsFile`/`SaveModelCapsFile`）。
+（`ModelCapsPath`/`LoadModelCapsFile`/`SaveModelCapsFile`），以及一个模型的探测腿到协议
+矩阵与 models refresh 保留判定的折叠（`ModelLegFold`——admin 的 daemon 孪生、`cli/models`
+与启动/reload 探测 pass 共用的唯一实现；丢弃理由的渲染归 `internal/probe.LegsSummary`）。
 `internal/app/wirecap.go` 与 `internal/app/modelcaps.go` 只保留 Proxy 侧的探测
 编排和异步持久化。`proxyHealthGate.NoteWireResponsesMiss` 将运行时 404 归属到请求捕获的端点与能力层级。
 

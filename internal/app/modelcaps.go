@@ -246,9 +246,12 @@ func (p *Proxy) probeAllModelCaps(ctx context.Context) {
 				if ctx.Err() != nil {
 					return // aborted mid-probe: store nothing; the next pass re-probes
 				}
-				mp := runtimewire.ModelProtocols{}
+				// The leg→matrix fold is wirecap.ModelLegFold's — the same
+				// owner the models refreshes read (this pass never drops a
+				// model, so it does not ask Keep()).
+				var fold runtimewire.ModelLegFold
 				for _, leg := range legs {
-					v := runtimewire.ClassifyModelStatus(leg.Probed, leg.Status, leg.Err, leg.Body)
+					v := fold.Add(string(leg.Leg), leg.Probed, leg.Status, leg.Err, leg.Body)
 					if v == runtimewire.Unknown {
 						// Unknown is the only verdict with no persisted cause —
 						// without this line a transient (upstream 429/5xx vs a
@@ -258,15 +261,8 @@ func (p *Proxy) probeAllModelCaps(ctx context.Context) {
 						logx.Warnf("[modelcaps] %s/%s leg %s inconclusive: status=%d err=%v (will re-probe next pass)",
 							name, model, leg.Leg, leg.Status, leg.Err)
 					}
-					switch leg.Leg {
-					case probe.LegChat:
-						mp.Chat = v
-					case probe.LegAnthropic:
-						mp.Anthropic = v
-					case probe.LegResponses:
-						mp.Responses = v
-					}
 				}
+				mp := fold.Matrix()
 				p.modelCaps.Put(name, fp, model, mp, now)
 				logx.Debugf("[modelcaps] %s/%s probed: chat=%s anthropic=%s responses=%s",
 					name, model, mp.Chat, mp.Anthropic, mp.Responses)

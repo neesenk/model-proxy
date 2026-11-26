@@ -3,7 +3,9 @@ package probe
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -250,4 +252,28 @@ func PickModel(cfg *configdomain.Config, derived map[string][]configdomain.Route
 		}
 	}
 	return ""
+}
+
+// LegsSummary renders a model's per-leg probe outcomes joined by " / ", e.g.
+// "chat HTTP 404 / anthropic not probed (no base) / responses HTTP 400:
+// invalid model". It is the drop reason of a models refresh on both the
+// daemon and the CLI path; an error body's "code: message" comes from the
+// same extractor Callable's own reason uses.
+func LegsSummary(legs []LegResult) string {
+	parts := make([]string, 0, len(legs))
+	for _, leg := range legs {
+		switch {
+		case !leg.Probed:
+			parts = append(parts, string(leg.Leg)+" not probed (no base)")
+		case leg.Err != nil:
+			parts = append(parts, fmt.Sprintf("%s %v", leg.Leg, leg.Err))
+		default:
+			if reason := errorReason(leg.Body); reason != "" {
+				parts = append(parts, fmt.Sprintf("%s HTTP %d: %s", leg.Leg, leg.Status, reason))
+			} else {
+				parts = append(parts, fmt.Sprintf("%s HTTP %d", leg.Leg, leg.Status))
+			}
+		}
+	}
+	return strings.Join(parts, " / ")
 }

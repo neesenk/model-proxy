@@ -45,7 +45,7 @@ scripts/static.sh
 
 - **staticcheck**（bug 模式 SA\*、简化 S\*、重复导入 ST1019、死代码 U1000，含 `_test.go`）：发现即修复；确属有意行为才在精确位置 `//lint:ignore <CheckID> <reason>` 压制（如 ST1005：面向用户的 config 错误文案以 `:` 结尾复述 YAML 键名、带句号的完整句引导）。现有压制点集中在 `internal/config`、`internal/login`、`internal/providerbuild`，新增压制必须逐点带理由。U1000 是删除死代码的信号，不是静音检查的理由。
 - **errcheck**（未检查的错误返回）：只查生产代码（`-ignoretests`——测试桩的写入/解码由后续断言自证）；有意的忽略必须在调用点写成显式 `_ =` / `_, _ =`（drain 拷贝、best-effort 清理删除、fire-and-forget 通知）；约定俗成无可操作的符号集（deferred Body/Rows/Stmt/DB Close、handler 写已断连客户端、CLI 显示流 `io.Writer` 的 fmt 打印等）收在 `scripts/errcheck-excludes.txt`，逐符号带理由注释，极少扩充。errcheck 默认排除（Builder/Buffer 写、fmt 到 os.Stdout/stderr 字面量等）仍然生效。
-- **dupl**（copy/paste 重复，threshold 120 token）：ratchet 门禁——克隆组数不得超过 `scripts/dupl-baseline.txt`，去重落地后同提交降基线（同 coverage floor 契约）；刻意新增重复必须升基线并说明理由。已知生产克隆候选（后续专门去重，跨 owner 边界不顺手做）：`internal/catalog` vs `internal/pricing` 的抓取骨架、`internal/admin/models_refresh` vs `internal/cli/models/check` 的模型检查、`internal/provider` kimi_code vs opencode_go 的配额窗口解析、`internal/adjudicate/state` 与 `internal/protocol` 转换器内的成对分支。
+- **dupl**（copy/paste 重复，threshold 120 token）：ratchet 门禁——克隆组数不得超过 `scripts/dupl-baseline.txt`，去重落地后同提交降基线（同 coverage floor 契约）；刻意新增重复必须升基线并说明理由。已知生产克隆候选（后续专门去重，跨 owner 边界不顺手做）：`internal/catalog` vs `internal/pricing` 的抓取骨架、`internal/provider` kimi_code vs opencode_go 的配额窗口解析、`internal/adjudicate/state` 与 `internal/protocol` 转换器内的成对分支。
 - **govulncheck**（符号级依赖漏洞扫描——本项目是应用不是库，只对自身代码可达的漏洞生效）：每次运行从 vuln.go.dev 拉取漏洞库。
 
 升级版本（`go get -tool <path>@<version>`）新增的检查必须与对应修复同一提交落地，不引入 baseline 文件之外的豁免或 check 级开关。

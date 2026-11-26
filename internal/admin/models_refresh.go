@@ -21,13 +21,11 @@ package admin
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
 	"sort"
-	"strings"
 
 	"model-proxy/internal/appapi"
 	configdomain "model-proxy/internal/config"
@@ -177,11 +175,7 @@ func (s *Service) RefreshModels(ctx context.Context, name string) (appapi.Models
 
 	// Persist + hot-reload only on a net change (the CLI's skip-if-unchanged).
 	if !sameIDs(existing, kept) {
-		configFile := s.currentConfigFile()
-		if configFile == "" {
-			return result, fmt.Errorf("config file path is unavailable; cannot write the refreshed model list")
-		}
-		reloadWarning, err := s.writeProviderModelsAndReload(ctx, configFile, name, provCfg, kept)
+		reloadWarning, err := s.writeProviderModelsAndReload(ctx, name, provCfg, kept)
 		if err != nil {
 			return result, err
 		}
@@ -204,111 +198,44 @@ func (s *Service) RefreshModels(ctx context.Context, name string) (appapi.Models
 // probeRefreshModels probes each candidate id with the 3-protocol matrix on
 // the provider's OWN configured bases (chat/responses on the openai base,
 // anthropic only when anthropic_base_url is set) and returns the callable
-// subset (input order), the dropped ids with per-leg reasons, and the full
-// fresh matrix. The bounded fan-out lives in probe.ProbeModels; this function
-// owns only verdict classification and the keep/drop policy: keep when ANY
-// leg concluded Yes, AND also when NO leg concluded Yes but no PROBED leg
-// concluded No either (every probed leg inconclusive — transient 429/5xx/
-// auth): the probe holds no negative information about such a model, and
-// dropping it would write one rate-limit storm back as a config deletion
-// (the allProbeFailed safety net only fires when EVERY model fails). Legs
-// whose base is not configured classify No DEFINITIONALLY and do not count
-// as negative evidence — a provider without anthropic_base_url must not turn
-// every transient chat failure into a drop.
+// subset (input order), the dropped ids with per-leg reasons, and the fresh
+// matrix of the kept ids. The bounded fan-out lives in probe.ProbeModels; the
+// verdict fold and the keep/drop policy belong to wirecap.ModelLegFold — the
+// same owner the CLI's CheckProviderModels reads (keep on any leg's Yes, keep
+// when no probed leg said No, drop otherwise) — and the drop reason is
+// probe.LegsSummary.
 func probeRefreshModels(ctx context.Context, client *http.Client, provCfg configdomain.Provider, impl provider.Provider, ids []string) (kept []string, dropped []appapi.ModelsRefreshDrop, matrix map[string]runtimewire.ModelProtocols) {
 	outcomes := probe.ProbeModels(ctx, client, provCfg, impl, ids, refreshProbeConcurrency)
 	matrix = make(map[string]runtimewire.ModelProtocols, len(outcomes))
 	for _, o := range outcomes {
-		mp := runtimewire.ModelProtocols{}
-		anyYes, probedNo, anyProbed := false, false, false
+		// One owner for the fold and the keep rule (wirecap.ModelLegFold):
+		// the CLI's CheckProviderModels reads the same one.
+		var fold runtimewire.ModelLegFold
 		for _, leg := range o.Legs {
-			v := runtimewire.ClassifyModelStatus(leg.Probed, leg.Status, leg.Err, leg.Body)
-			if v == runtimewire.Yes {
-				anyYes = true
-			}
-			if leg.Probed {
-				anyProbed = true
-				if v == runtimewire.No {
-					probedNo = true
-				}
-			}
-			switch leg.Leg {
-			case probe.LegChat:
-				mp.Chat = v
-			case probe.LegAnthropic:
-				mp.Anthropic = v
-			case probe.LegResponses:
-				mp.Responses = v
-			}
+			fold.Add(string(leg.Leg), leg.Probed, leg.Status, leg.Err, leg.Body)
 		}
-		if anyYes || (anyProbed && !probedNo) {
+		// Only kept models enter the matrix: a dropped model is never
+		// written to provider.json, so persisting its verdict would surface
+		// an unconfigured ghost row in /api/models that cannot be edited or
+		// disabled.
+		if fold.Keep() {
 			kept = append(kept, o.ID)
-			matrix[o.ID] = mp
+			matrix[o.ID] = fold.Matrix()
 		} else {
-			dropped = append(dropped, appapi.ModelsRefreshDrop{Model: o.ID, Reason: refreshLegsSummary(o.Legs)})
+			dropped = append(dropped, appapi.ModelsRefreshDrop{Model: o.ID, Reason: probe.LegsSummary(o.Legs)})
 		}
 	}
 	return kept, dropped, matrix
-}
-
-// refreshLegsSummary renders the per-leg probe outcomes joined by " / ", e.g.
-// "chat HTTP 404 / anthropic not probed (no base) / responses HTTP 400:
-// invalid model" (the CLI drop-summary rendering).
-func refreshLegsSummary(legs []probe.LegResult) string {
-	parts := make([]string, 0, len(legs))
-	for _, leg := range legs {
-		switch {
-		case !leg.Probed:
-			parts = append(parts, string(leg.Leg)+" not probed (no base)")
-		case leg.Err != nil:
-			parts = append(parts, fmt.Sprintf("%s %v", leg.Leg, leg.Err))
-		default:
-			if reason := refreshLegErrorReason(leg.Body); reason != "" {
-				parts = append(parts, fmt.Sprintf("%s HTTP %d: %s", leg.Leg, leg.Status, reason))
-			} else {
-				parts = append(parts, fmt.Sprintf("%s HTTP %d", leg.Leg, leg.Status))
-			}
-		}
-	}
-	return strings.Join(parts, " / ")
-}
-
-// refreshLegErrorReason extracts a short "code: message" from an OpenAI-style
-// error body. probe's own extractor is unexported, so this keeps a local twin
-// (same shape, request-id stripped via the exported helper) — mirroring the
-// CLI's twin in internal/cli/models.
-func refreshLegErrorReason(body []byte) string {
-	var ej struct {
-		Error *struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-			Type    string `json:"type"`
-		} `json:"error"`
-	}
-	if json.Unmarshal(body, &ej) == nil && ej.Error != nil {
-		code := ej.Error.Code
-		if code == "" {
-			code = ej.Error.Type
-		}
-		msg := strings.TrimSpace(probe.StripRequestID(ej.Error.Message))
-		switch {
-		case code != "" && msg != "":
-			return code + ": " + msg
-		case code != "":
-			return code
-		case msg != "":
-			return msg
-		}
-	}
-	return ""
 }
 
 // writeProviderModelsAndReload rewrites the provider's models list in the
 // provider.json store (the single provider authority) under the shared config
 // lock, then hot-reloads. A reload that failed to apply restores the previous
 // store; an applied-with-warning reload keeps the new store and reports the
-// warning — the saveAndReloadUnderLock contract.
-func (s *Service) writeProviderModelsAndReload(ctx context.Context, configFile, name string, expected configdomain.Provider, models []string) (reloadWarning string, err error) {
+// warning — the saveAndReloadUnderLock contract. The config file path is the
+// mutation's own to resolve (mutateProvidersAndReload fails closed without
+// one); nothing here reads it since the models moved out of config.yaml.
+func (s *Service) writeProviderModelsAndReload(ctx context.Context, name string, expected configdomain.Provider, models []string) (reloadWarning string, err error) {
 	err = s.mutateProvidersAndReload(ctx, func(providers map[string]configdomain.Provider) error {
 		actual, ok := providers[name]
 		if !ok || !reflect.DeepEqual(actual, expected) {
