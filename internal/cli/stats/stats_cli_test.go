@@ -135,13 +135,13 @@ func TestParseStatsFlags(t *testing.T) {
 		want stats.StatsOpts
 	}{
 		{"empty", nil, stats.StatsOpts{}},
-		{"space-separated", []string{"--from", "2026-01-01", "--to", "2026-02-01",
+		{"space-separated", []string{"--from", "2026-01-01T00:00:00Z", "--to", "2026-02-01T00:00:00Z",
 			"--provider", "zhipu", "--model", "glm-5.2", "--bucket", "5m", "--json"},
-			stats.StatsOpts{From: "2026-01-01", To: "2026-02-01", Provider: "zhipu",
+			stats.StatsOpts{From: "2026-01-01T00:00:00Z", To: "2026-02-01T00:00:00Z", Provider: "zhipu",
 				Model: "glm-5.2", Bucket: "5m", JSON: true}},
-		{"equals form", []string{"--from=2026-01-01", "--to=2026-02-01",
+		{"equals form", []string{"--from=2026-01-01T00:00:00Z", "--to=2026-02-01T00:00:00Z",
 			"--provider=zhipu", "--model=glm-5.2", "--bucket=5m"},
-			stats.StatsOpts{From: "2026-01-01", To: "2026-02-01", Provider: "zhipu",
+			stats.StatsOpts{From: "2026-01-01T00:00:00Z", To: "2026-02-01T00:00:00Z", Provider: "zhipu",
 				Model: "glm-5.2", Bucket: "5m"}},
 		{"value at end without arg", []string{"--from"}, stats.StatsOpts{}},
 		{"unknown flag ignored", []string{"--bogus", "x"}, stats.StatsOpts{}},

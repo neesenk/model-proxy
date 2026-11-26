@@ -67,8 +67,13 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 			"model-proxy/internal/config":     true, "model-proxy/internal/takeover": true,
 			"model-proxy/internal/observe/logx": true,
 		},
-		"model-proxy/internal/cli/stats":     {"model-proxy/internal/accounts": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/display": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/providerbuild": true},
-		"model-proxy/internal/cli/audit":     {"model-proxy/internal/cli/framework": true, "model-proxy/internal/config": true, "model-proxy/internal/observe/seclog": true},
+		// clicommon.ParseTimeArg / SetTimeWindow are the CLI's one definition
+		// of the --from/--to flag forms: audit reads the log files itself, while
+		// stats hands the resolved window to admin read endpoints that parse
+		// unix seconds or RFC3339 only (forwarded raw, the relative forms used
+		// to buy the daemon's default window).
+		"model-proxy/internal/cli/stats":     {"model-proxy/internal/accounts": true, "model-proxy/internal/cli/clicommon": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/display": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/providerbuild": true},
+		"model-proxy/internal/cli/audit":     {"model-proxy/internal/cli/clicommon": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/config": true, "model-proxy/internal/observe/seclog": true},
 		"model-proxy/internal/cli/status":    {"model-proxy/internal/appapi": true, "model-proxy/internal/cli/clicommon": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/display": true, "model-proxy/internal/routing": true},
 		"model-proxy/internal/cli/admin":     {"model-proxy/internal/cli/framework": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/display": true},
 		"model-proxy/internal/cli/guard":     {"model-proxy/internal/appapi": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/display": true},

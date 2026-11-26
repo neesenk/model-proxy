@@ -436,7 +436,7 @@ daemon/supervisor 的 signal 与 pid/probe 编排。child process detach 属性�
 `internal/cli` 本身是 registry + 进程级 shell：`app.go` 绑定命令表，
 `commands.go` 只保留调度循环、`Command` 契约与 takeover/restore 进程入口，
 `help.go` 拥有 usage/help 渲染。每个命令域拥有一个子包并导出自身的进程入口
-（`Run<Command>`，自查配置）；公共参数解析和格式化由 `cli/framework` 提供，daemon 访问和分区渲染由 `cli/clicommon` 提供。命令子包
+（`Run<Command>`，自查配置）；公共参数解析和格式化由 `cli/framework` 提供，daemon 访问、分区渲染和 `--from/--to` 时间参数解析由 `cli/clicommon` 提供。命令子包
 不得回依赖根 `cli`（DAG guard 强制）：`cli/login`（login/import）、
 `cli/models`（models/test）、`cli/doctor`（doctor）、`cli/presets`（add/presets）、
 `cli/stats`（stats/usage）、`cli/audit`（audit）、`cli/status`（serve
@@ -514,7 +514,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/admin → cli/framework, config, daemonctl, display`（`pin`/`unpin`/`unfreeze`/`freeze`）；
 - `cli/guard → appapi, cli/framework, config, daemonctl, display`（`guard blocks`/`guard unblock`）；
 - `cli/prune → cli/framework, config, display, observe/logfile, observe/requestlog`（`prune`：一次性 request log 清理，时龄语义同 retention sweep——`.log` 按 mtime、`.zst` 归档按文件名日戳）；
-- `cli/audit → cli/framework, config, observe/seclog`（`audit`）；
+- `cli/audit → cli/clicommon, cli/framework, config, observe/seclog`（`audit`）；
 - `cli/clicommon → appapi, daemonctl, display`；
 - `cli/clitest → accounts`（纯测试支撑：子进程 harness 与共享 fixture，生产代码不得依赖）；
 - `cli/config → accounts, cli/framework, config, display, provider, providerstore, routing, takeover`（`config init|print|check`）；
@@ -524,7 +524,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/framework → accounts, config, daemonctl, providerstore, upstreamproxy`（LoadCmdConfig 进程级接线：S2 凭据 + credentials 模式 + 全局 `proxy` 链头发布——不发则一次性 CLI 命令静默落到 env/系统代理、无视 `proxy: off`；per-provider 探测 client 也在此解析）；
 - `cli/presets → cli/framework, cli/login, cli/serve, config, login, presets, providerstore`；
 - `cli/provider → cli/framework, cli/login, cli/serve, config, presets, providerstore`（`provider add/rm/set`：custom static provider 的 CLI 添加/删除/编辑，与 Web 同一 store mutation 管线；Web Accounts 页的 Delete Provider 走 admin 的 `DeleteProvider`——零账号守卫 + 显式路由剪枝，与 CLI `rm` 的语义不同，见 `docs/web-api.md`）；
-- `cli/stats → accounts, cli/framework, config, daemonctl, display, observe/stats, providerbuild`（`stats`/`usage`）；
+- `cli/stats → accounts, cli/clicommon, cli/framework, config, daemonctl, display, observe/stats, providerbuild`（`stats`/`usage`）；
 - `cli/status → appapi, cli/clicommon, cli/framework, config, daemonctl, display, routing`（`serve status`/`schedule`/`routes`）；
 - `cli/serve → config, observe/logx`；
 - `cli/login → accounts, cli/framework, cli/serve, config, display, login, provider, providerstore`；

@@ -16,6 +16,7 @@ import (
 
 	"sort"
 
+	"model-proxy/internal/cli/clicommon"
 	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
 	observeseclog "model-proxy/internal/observe/seclog"
@@ -226,39 +227,16 @@ func RenderAudit(dir string, opts AuditOpts, now time.Time) (string, error) {
 }
 
 // ParseAuditTime parses one --from/--to value into unix milliseconds (0 =
-// unbounded). Accepted forms: "now", a Go duration meaning "that long ago"
-// (1h, 30m), a day count with a "d" suffix (7d), unix seconds, or RFC3339.
-// stats has no reusable helper — its --from is parsed server-side by the
-// daemon — so the CLI forms live here.
+// unbounded) with the CLI's shared time-flag forms (clicommon.ParseTimeArg).
 func ParseAuditTime(v string, now time.Time) (int64, error) {
 	if v == "" {
 		return 0, nil
 	}
-	if v == "now" {
-		return now.UnixMilli(), nil
+	t, err := clicommon.ParseTimeArg(v, now)
+	if err != nil {
+		return 0, err
 	}
-	if d, err := time.ParseDuration(v); err == nil {
-		if d < 0 {
-			return 0, fmt.Errorf("duration must not be negative (got %s)", v)
-		}
-		return now.Add(-d).UnixMilli(), nil
-	}
-	// Go durations stop at hours; accept an integer day count (7d) too.
-	if strings.HasSuffix(v, "d") {
-		if n, err := strconv.Atoi(strings.TrimSuffix(v, "d")); err == nil {
-			if n < 0 {
-				return 0, fmt.Errorf("duration must not be negative (got %s)", v)
-			}
-			return now.AddDate(0, 0, -n).UnixMilli(), nil
-		}
-	}
-	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-		return n * 1000, nil
-	}
-	if t, err := time.Parse(time.RFC3339, v); err == nil {
-		return t.UnixMilli(), nil
-	}
-	return 0, fmt.Errorf("use now, a duration (1h, 7d), unix seconds, or RFC3339")
+	return t.UnixMilli(), nil
 }
 
 // FormatAuditTable renders audit records (newest first, as Query returns

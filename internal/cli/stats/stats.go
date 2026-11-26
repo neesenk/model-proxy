@@ -13,10 +13,15 @@ import (
 	"strings"
 	"time"
 
+	"model-proxy/internal/cli/clicommon"
 	cliframework "model-proxy/internal/cli/framework"
 	"model-proxy/internal/daemonctl"
 	observestats "model-proxy/internal/observe/stats"
 )
+
+// nowFunc is the clock the relative --from/--to forms resolve against; tests
+// pin it.
+var nowFunc = time.Now
 
 // StatsOpts holds parsed `stats` command flags.
 type StatsOpts struct {
@@ -32,9 +37,10 @@ type StatsOpts struct {
 	JSON        bool
 }
 
-// parseStatsFlags scans `stats` flags: --from/--to (unix sec or RFC3339),
-// --provider/--model filters, --bucket (display granularity), --json. --config
-// is left to configPath.
+// parseStatsFlags scans `stats` flags: --from/--to (kept as written here and
+// resolved at request time by clicommon.SetTimeWindow — a relative duration,
+// now, unix seconds or RFC3339), --provider/--model filters, --bucket (display
+// granularity), --json. --config is left to configPath.
 func ParseStatsFlags(args []string) StatsOpts {
 	o := StatsOpts{}
 	for i := 0; i < len(args); i++ {
@@ -127,11 +133,8 @@ func RenderStats(listen string, opts StatsOpts) (string, error) {
 	}
 	base := "http://" + listen
 	q := url.Values{}
-	if opts.From != "" {
-		q.Set("from", opts.From)
-	}
-	if opts.To != "" {
-		q.Set("to", opts.To)
+	if err := clicommon.SetTimeWindow(q, opts.From, opts.To, nowFunc()); err != nil {
+		return "", err
 	}
 	if opts.Provider != "" {
 		q.Set("provider", opts.Provider)
@@ -192,11 +195,8 @@ func RenderAnalytics(listen string, opts StatsOpts) (string, error) {
 		g = "day"
 	}
 	q.Set("granularity", g)
-	if opts.From != "" {
-		q.Set("from", opts.From)
-	}
-	if opts.To != "" {
-		q.Set("to", opts.To)
+	if err := clicommon.SetTimeWindow(q, opts.From, opts.To, nowFunc()); err != nil {
+		return "", err
 	}
 	if opts.Provider != "" {
 		q.Set("provider", opts.Provider)
@@ -332,11 +332,8 @@ type AgentResp struct {
 func RenderAgents(listen string, opts StatsOpts) (string, error) {
 	base := "http://" + listen
 	q := url.Values{}
-	if opts.From != "" {
-		q.Set("from", opts.From)
-	}
-	if opts.To != "" {
-		q.Set("to", opts.To)
+	if err := clicommon.SetTimeWindow(q, opts.From, opts.To, nowFunc()); err != nil {
+		return "", err
 	}
 	if opts.Bucket != "" {
 		q.Set("bucket", opts.Bucket)
