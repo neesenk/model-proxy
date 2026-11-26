@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -74,11 +75,20 @@ func TestSettleGoroutinesDetectsLeak(t *testing.T) {
 	// racing the same 50ms budget, which is not a plausible scheduling
 	// outcome.
 	leaked := make(chan struct{})
-	defer close(leaked)
+	var wg sync.WaitGroup
+	defer func() {
+		close(leaked)
+		wg.Wait()
+	}()
 	var started [2]chan struct{}
 	for i := range started {
 		started[i] = make(chan struct{})
-		go func(started chan struct{}) { close(started); <-leaked }(started[i])
+		wg.Add(1)
+		go func(started chan struct{}) {
+			defer wg.Done()
+			close(started)
+			<-leaked
+		}(started[i])
 	}
 	for _, s := range started {
 		<-s
@@ -92,11 +102,17 @@ func TestSettleGoroutinesDetectsLeak(t *testing.T) {
 func TestSettleGoroutinesPassesAfterReap(t *testing.T) {
 	baseline := Goroutines()
 	reap := make(chan struct{})
-	go func() { <-reap }()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-reap
+	}()
 	close(reap)
 	if err := settleGoroutines(baseline, defaultTimeout, pollBackoff); err != nil {
 		t.Fatalf("reaped goroutine reported as leak: %v", err)
 	}
+	wg.Wait()
 }
 
 // stubTB redirects Fatal into a recoverable panic so the wrappers' failure
@@ -140,10 +156,16 @@ func TestLeakCheckFatalPath(t *testing.T) {
 	// window still leaves the count above baseline (same hardening as
 	// TestLeakCheck's dual-leak self-test, 09e85d9).
 	leaked := make(chan struct{})
-	defer close(leaked)
+	var wg sync.WaitGroup
+	defer func() {
+		close(leaked)
+		wg.Wait()
+	}()
 	started := make(chan struct{}, 2)
 	for i := 0; i < 2; i++ {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			started <- struct{}{}
 			<-leaked
 		}()
