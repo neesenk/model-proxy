@@ -166,11 +166,12 @@ GET 流结束即删会话（相关性随流消亡）。路由 target 引用 sse 
 （TTL/LRU/DELETE，锁外触发）联动 kill，`Proxy.Close` 开头 killAll（子进程不写日志）。
 stdio 会话无上游 session id 概念；子进程死亡 → 502 + 丢会话让客户端重连。子进程死亡时
 `StdioConn.Call` 返回 `*mcp.ExitError`：`Error()` 是裸失败加退出状态（`stdio: child
-exited (exit status 127)`），随客户端文案进 HTTP 应答；stderr **永不进 HTTP 应答**（不可信、
+exited (exit status 127)`；被信号杀死时是 `signal: <name>`），随客户端文案进 HTTP 应答；stderr
+**永不进 HTTP 应答**（不可信、
 可能带凭据，`TestStdioConn_CallErrorOmitsStderr` 是既有契约），只以脱敏诊断
-（`mcp.ExitDiag`：退出状态 + 末 512 字节压成单行的 stderr 尾巴；子进程拿到的非继承环境
-变量值——即凭据注入通道——一律替换为 `<redacted:NAME>`，PATH/HOME/TMPDIR/LANG 等继承名
-保持可读）追加在 serve.log 的失败行与 `mcp test` 的 stderr 上（`CLI.md` §13b）。
+（`mcp.ExitDiag`：退出状态 + 末 512 字节压成单行的 stderr 尾巴〔为空时只有退出状态〕；子进程拿到的
+环境变量里，除 PATH/HOME/TMPDIR/LANG 等继承名之外长度 ≥8 字节的值——即凭据注入通道——替换为
+`<redacted:NAME>`）追加在 serve.log 的失败行与 `mcp test` 的 stderr 上（`CLI.md` §13b）。
 stdio 交换同样受 `timeout:` 约束：`StdioConn.Call(ctx, ...)` 监听 ctx，挂起的子进程
 不再永久阻塞调用方（pinned 转发/握手、路由子会话、probe、CLI 全接线）。
 http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验拒绝；反之
@@ -247,16 +248,23 @@ http 专属旋钮（url/headers/auth_header/proxy_url）对 stdio 一律校验�
 
 ### 网关自有应答的失败留证
 
-MCP 交换不逐条写 serve.log（与 LLM 面每请求一行不同）；**网关自己应答的失败**经
-`mcpFail` 三面同源留证——pinned/SSE 的上游传输错误、stdio 的启动/握手/调用失败与每
-server 子进程上限、路由全部后端失败：
+MCP 交换不逐条写 serve.log（与 LLM 面每请求一行不同）；**网关自己应答的上游类失败**——下列
+几类——经 `mcpFail` 三面同源留证：pinned/SSE 的上游传输错误、stdio 的启动/握手/调用失败与每
+server 子进程上限、握手期会话过期、路由全部后端失败。
 
-- 客户端：`http.Error` 的文案不变（`mcp "<name>": …`）；
+- 客户端：`http.Error` 的文案形态不变（`mcp "<name>": …`；例外是子进程死亡形态新增的退出状态）；
 - request log：该交换的 `kind="mcp"` 行以**客户端实际收到的字节**作 `response_body`
   （含 `http.Error` 追加的换行）。此前这些行落的是空体，读出来是「502, 0 bytes」；
 - serve.log：一行 Warn `[mcp <name>] <method> failed (status <code>): <客户端文案>`，
-  `<method>` 是 JSON-RPC 方法（批量为 `<HTTP 方法> (batch)`），多行文案压成单行；子进程
+  `<method>` 是 JSON-RPC 方法，帧不带方法时取 HTTP 动词（批量为 `<HTTP 方法> (batch)`，所以
+  SSE 的 GET 失败行是 `GET failed (status 502)`），多行文案压成单行；子进程
   死亡时在行尾追加 ` — <脱敏诊断>`。
+
+不在此列的网关自答不产生 serve.log 行，多数也不落请求日志行：请求尚未成为交换就被拒的 405（方法
+不支持）、413（请求体过大或不可读）、outbound guard 400、未知 server / 未知会话的 404、无可用账号或
+无可派发账号的准入 503、会话账号已消失或被冻结的 410，以及 stdio tools/call 的 JSON-RPC 错误应答
+（HTTP 400/404）——原因只在 HTTP 应答里。例外是路由 tools/call 的 JSON-RPC 错误应答（HTTP 400/404）：
+落请求日志行（带应答体），不打 serve.log。
 
 2026-11-25 的三笔 `/mcp/vision` initialize 502 是反面案例：原因（`npx` 不在守护进程的
 PATH）只出现在发给客户端的 HTTP 应答里，serve.log 零行、请求日志行是空体，事后只能靠

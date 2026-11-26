@@ -62,7 +62,8 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
   `target N (<provider>/<model>) failed (status <code>); trying next`——传输层错误带
   502（专属的 `upstream error:` 行就在上方），零字节 2xx / 模型拒答 / auth 错误带观测到的
   真实状态；status 0 表示该腿未回填状态码（包括部分已识别的 402/403 配额耗尽路径），
-  request-log attempt 腿仍以 502 落档。派发前门禁拒绝（model lock / 熔断开路）另打
+  request-log attempt 腿仍以 502 落档。派发前门禁拒绝（model lock / 熔断开路 / 并发饱和——账号
+  已学到并发上限且在途已满）另打
   `target N (<provider>/<model>) skipped (<reason>); trying next`（无网络接触、无熔断
   计数，attempt 腿以 502 + 原因文本落档）。流式应答中途终止另有归因行：client 断开
   （Info，两种形态：watcher 已合成终态但未送达、或对端先于上游终态消失而拷贝循环
@@ -985,9 +986,11 @@ notifications/initialized + tools/list，JSON 与 SSE 分帧响应都支持）�
 <name> 为路由名时不执行：stderr 提示路由是聚合面，引导改测成员 server 或经 daemon 的 `/mcp/<route>` 探测（exit 1）。
 
 stdio 探测失败（`stdio start:` / `initialize:` / `tools/list:` 既有文案与格式不变）时，若子进程
-已经退出，错误带退出状态（`stdio: child exited (exit status N)`），并在该行下**追加一行**缩进
-诊断：`  <退出状态>; stderr: <末 512 字节的 stderr 尾巴，单行>`——子进程拿到的凭据环境变量值已
-替换为 `<redacted:NAME>`，原始 stderr 永不输出（2026-11-26 起追加）。
+已经退出，错误带退出状态——`stdio: child exited (exit status N)`，被信号杀死时是
+`stdio: child exited (signal: <name>)`——并在该行下**追加一行**缩进诊断：
+`  <退出状态>; stderr: <末 512 字节的 stderr 尾巴，单行>`（stderr 为空时只有退出状态；被截断的
+尾巴以 `…` 开头）——子进程拿到的环境变量里，除 PATH/HOME/TMPDIR/LANG/LC_ALL/LC_CTYPE/TZ 之外
+长度 ≥8 字节的值都已替换为 `<redacted:NAME>`，原始 stderr 永不输出（2026-11-26 起追加）。
 
 ### 退出码
 
@@ -1253,7 +1256,7 @@ provider set <name> [--base-url URL] [--anthropic-url URL] [--usage-url URL]
 逻辑（`internal/cli/provider`）：custom OpenAI 兼容端点的一等添加面（provider_id 恒 `static`——厂商协议走 `presets add`/模板；与 Web Accounts 页 Add Provider 的 custom 模式同底座）。
 
 - **add**：写 provider.json store（`providerstore.Mutate`：锁内 RMW + 整体 effective 校验 fail-closed + 吸收 config.yaml 残留 `providers:` 段）→ 凭据步骤（`--api-key-env VAR` 脚本式 / TTY 交互 prompt（复用 `login` 流程）/ 非 TTY 无凭据时提示后跳过，`--no-login` 显式跳过）→ `MaybeReloadDaemon` 热重载。歧义门与 `presets add` 同款：新模型与既有 provider 重叠且无显式 route 时，非 TTY 需 `--yes`、TTY 询问 y/N。重名报错并指向 `provider set`。`--model` 可重复。
-- **rm**：确认（TTY y/N / 非 TTY 需 `--yes`）后从 store 删除；有 route 仍引用该 provider 时整体校验拒绝（错误原文指出具体 route）。**凭据池保留**（`logout <name>` 才清凭据），退出提示说明。
+- **rm**：确认（TTY y/N / 非 TTY 需 `--yes`）后从 store 删除；有 route 仍引用该 provider 时整体校验拒绝（错误原文指出具体 route）。**凭据池保留**（`logout <name>` 才清凭据），退出提示说明。Web Accounts 页的 Delete Provider（`DELETE /api/providers/<name>`）是另一条路径：要求零账号（否则 409），并自动从显式路由剪掉该 provider 的 target（剪空的路由整条删除），见 `docs/web-api.md`。
 - **set**：只改显式给出的 flag；`--model M ...` 整体替换模型列表（`models refresh` 之外的程序化维护口）。
 - 全部子命令落盘后 best-effort `serve reload`（daemon 未运行则下次启动生效）。
 

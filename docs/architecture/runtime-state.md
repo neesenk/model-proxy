@@ -29,7 +29,8 @@ kimi-code 根据 Duration 自动选择最长窗口；zhipu 通过 unit 映射 5h
 `internal/runtime.Manager` 是 config generation 内可变路由状态的唯一 owner。
 它以一把 mutex 统一持有 generation、provider health、route/session sticky、
 operator pin、model lock、model-scoped paramBlock、pool spread counter、quota
-snapshot 和转发路径的凭据拒绝记录（denials，见下文），并在同一临界区内完成 schedule、cooldown、resolver health gate、
+snapshot、转发路径的凭据拒绝记录（denials，见下文）和账号并发账本（在途计数与学到的上限，
+见下文「账号并发账本」），并在同一临界区内完成 schedule、cooldown、resolver health gate、
 persistence snapshot 与 Web dashboard snapshot；quality 子状态（EWMA errRate/TTFT）
 经 `atomic.Pointer` copy-on-write 发布，写入持锁、读取免锁（见下文「Quality 打分」）。
 所有复合 snapshot 都是 detached
@@ -152,7 +153,9 @@ modelLock、paramBlock、spread、quota 和 quality（错误率与 TTFT 样本�
 mutation 由 Manager 在同一锁内校验
 generation，旧请求和慢 poll 的结果直接丢弃。**例外：quota 是后端同步观测，
 cache 跨 reload 存活（见 quotaTracker 节的同步语义），只随 generation swap
-原子剪枝到 live key 集合，不受 generation 丢弃规则约束。**
+原子剪枝到 live key 集合，不受 generation 丢弃规则约束。在途占位与释放
+（`TakeInflightSlot`/`ReleaseInflightSlot`）同样不按 generation 门控——运行中的请求是进程事实，
+无论它捕获的是哪一代；并发上限的学习（`NoteConcurrencyLimit`）照旧受 generation 约束。**
 
 reload 按 `Proxy.mu → runtime.Manager` 一次性切换 cfg/providers/routes generation；
 `Proxy` 的字段按所有权分组成两个内嵌结构：`generationState` 是这次交换的完整
@@ -367,11 +370,11 @@ Dashboard 复用同一预投影与指针复核流程。
 
 route sticky 记录 current provider 和 since。在 `sticky_dwell` 内优先当前 provider；驻留期结束后，只有 tier、priority 或 surplus margin 足够更优才切换。
 
-availability 过滤（发生在 sticky 判定之前）除了熔断/限频/模型锁，还排除**配额已知耗尽**的 plan target：新鲜快照（`quota_poll_interval` 的 maxAge 内、无错误）的 ultimate RemainingPct==0 视为耗尽——粘住已知耗尽的账号只会白挨一轮确定性 429。快照过期或出错时 fail-open，退回反应式 429 冷却兜底；PayG/unknown 无窗口可耗尽，永不被此规则排除。PreviewOrder 走同一判定，Web 预览与真实调度一致。
+availability 过滤（发生在 sticky 判定之前）除了熔断/限频/模型锁，还排除**配额已知耗尽**的 plan target 和**并发占满**（已学到上限且在途已满）的账号：新鲜快照（`quota_poll_interval` 的 maxAge 内、无错误）的 ultimate RemainingPct==0 视为耗尽——粘住已知耗尽的账号只会白挨一轮确定性 429。快照过期或出错时 fail-open，退回反应式 429 冷却兜底；PayG/unknown 无窗口可耗尽，永不被此规则排除。PreviewOrder 走同一判定，Web 预览与真实调度一致——但并发饱和目前只在真实调度（`DecideOrder`）里过滤，预览（`PreviewOrder`，即 `/api/status.schedule`、`/debug/schedule`、`model-proxy schedule`）仍把饱和账号列在 ordered 里，在这一点上两者不一致。
 
 **耗尽信号必须传导到失败分类**（`Manager.CooldownState`/`HasRecoveredUntried` 消费同一 quotaExhaustedUntil 判定）：skip 意味着耗尽 target 永远收不到那记教会 health 的上游 429，若分类只看 health，全耗尽 route 会读成"全部可用"→ 终局 502 无 `Retry-After`，且 `hasRecoveredUntried` 空转重排。正确语义：quota 耗尽在分类中是 **rate-limit 类 down 原因**，恢复时间取 ultimate 窗口 `ResetsAt` 与快照失鲜边界（`AsOf+maxAge`）的**较早者**（失鲜后 fail-open 回落反应式 429 冷却，客户端按短周期回来重探而不是对着陈旧数据等一个可能很远的 reset）；与 health 限频/熔断并存时取较晚者（两因皆清才可用）。全耗尽 route 因此终局 **429 + `Retry-After`**，与 skip 之前客户端拿到的退避信号一致。
 
-session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 route key。session-keyed sticky 不落盘，route-keyed sticky 可落盘。session sticky 的 dwell 自**最近一次使用**起算（活跃会话每次请求刷新 since），因此连续活跃的会话会一直停留在当前 provider，直到闲置超过 `sticky_dwell` 或其失败熔断——"会话中不得仅因 quota surplus 边际变化迁移账号"（见 provider-pools.md）。sticky 的写入只发生在 `schedule()` 提交引擎决策时；`x-mp-sticky: off` 与 forward 层的 force-provider 收窄（一次性意图，非引擎决策）都不写槽——后者若写入会把被 force 的提供方钉进共享槽，拖累全部共用该槽的客户端。sticky 与熔断/限频/模型锁/配额耗尽/operator 开关的完整交互矩阵（失败绑定不复活、recover-and-return、failover 复核配额）是路由正确性契约，权威定义在 `docs/architecture/routing-and-failure.md` 的「粘滞×可用性×配额 交互矩阵」一节。
+session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 route key。session-keyed sticky 不落盘，route-keyed sticky 可落盘。session sticky 的 dwell 自**最近一次使用**起算（活跃会话每次请求刷新 since），因此连续活跃的会话会一直停留在当前 provider，直到闲置超过 `sticky_dwell` 或其失败熔断——"会话中不得仅因 quota surplus 边际变化迁移账号"（见 provider-pools.md）。sticky 的写入只发生在 `schedule()` 提交引擎决策时；`x-mp-sticky: off` 与 forward 层的 force-provider 收窄（一次性意图，非引擎决策）都不写槽——后者若写入会把被 force 的提供方钉进共享槽，拖累全部共用该槽的客户端。sticky 与熔断/限频/模型锁/配额耗尽/并发饱和/operator 开关的完整交互矩阵（失败绑定不复活、recover-and-return、failover 复核配额）是路由正确性契约，权威定义在 `docs/architecture/routing-and-failure.md` 的「粘滞×可用性×配额 交互矩阵」一节。
 
 ## Pin
 
@@ -475,9 +478,9 @@ Disable/Enable）是 (provider, model) 粒度的 operator 覆盖，状态归
 
 - 匹配语义与 unfreeze 同形（池化父名=全部虚拟账号）但**必须显式指定 provider：空名不匹配任何目标（无 freeze-all）**——与 unfreeze 的 no-arg = all 刻意不对称（全冻结=自我断供，只有逃生口保留批量形式）；API 空/缺 `provider` 返回 400 `provider is required`，CLI 不带参数是 usage 错误。匹配在**已知 provider key 全集**（组合根在 `p.mu` 下同锁读出的 `p.providers`：config 名 + 池化虚拟 `name#id`）上迭代并惰性建 health 条目，因此从未失败过的 provider 也能冻结；unknown 名匹配为空。
 - 无到期时间；`RecordSuccess`/`RecordFailure`/`RecordRateLimit` 均不清除——只有 ResetHealth（unfreeze，删整条 health 条目）能解冻。
-- 不动 quality EWMA、模型锁、quota、sticky、pin、paramBlock（对比：unfreeze 会清 quality EWMA）。
+- 不动 quality EWMA、模型锁、quota、sticky、pin、paramBlock、并发上限与在途计数（对比：unfreeze 会清 quality EWMA 与并发上限）。
 - 持久化：`PersistedHealth.frozen`（omitempty）随 `quota_state.json` health 段落盘，**frozen-only 条目**（无未来冷却、无模型态）不触发零时间丢弃规则；RestoreHealth 在无未来冷却时也恢复 frozen 条目。同一 config 指纹门控，指纹不匹配不恢复。
-- `CooldownState` 分类：frozen 是 down 但**不是 rate-limit 类**——走 `default` 分支，`allRateLimited=false`、`until=now`，全冻结路由终局 502（不进入 wait-retry：`DecideFailure` 只在 earliest 严格未来时等待，`now` 不产生等待也不空转）。
+- `CooldownState` 分类：frozen 是 down 但**不是 rate-limit 类**——走 `default` 分支，`allRateLimited=false`、`until=now`，全冻结路由终局 502（不进入 wait-retry：`DecideFailure` 只在 earliest 严格未来时等待，`now` 不产生等待也不空转——唯一例外是全部候选仅因并发占满而不可用，此时等的是空位而不是时间点，见 `docs/architecture/routing-and-failure.md`「全部候选饱和」）。
 
 ## Unfreeze
 

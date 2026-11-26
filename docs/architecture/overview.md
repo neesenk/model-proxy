@@ -337,7 +337,7 @@ leaf lock、持锁不回调应用代码）、协议选择纯策略（`ClassifySt
 
 `internal/runtime.Manager` 是 config generation 内可变路由状态的唯一 owner，
 以单 mutex 统一 health、sticky、pin、model lock、paramBlock、spread、quota、
-凭据拒绝 denials、schedule 决策以及 persistence/Web detached snapshot；quality 子状态（per-provider
+凭据拒绝 denials、账号并发账本（在途计数与学到的上限）、schedule 决策以及 persistence/Web detached snapshot；quality 子状态（per-provider
 EWMA errRate 与 TTFT 质量惩罚，参与 schedule 排序）同样归 Manager，但经
 `atomic.Pointer` copy-on-write 发布 immutable map：写入在 `m.mu` 下整图替换，读取
 （`DecideOrder` 的 decayed projection）在锁外完成，map 分配与 EWMA 计算不进调度
@@ -348,6 +348,7 @@ Manager 的物理文件按职责拆分，但不形成多 owner：`internal/runti
 单锁与 generation；`internal/runtime/manager_types.go` 放边界 DTO；`internal/runtime/manager_persist.go`、
 `internal/runtime/manager_quota.go`、`internal/runtime/manager_routing_state.go`、`internal/runtime/manager_health.go`、
 `internal/runtime/manager_schedule.go` 分别承载持久化投影、配额、路由选择状态、健康状态和调度；
+`internal/runtime/manager_concurrency.go` 承载账号并发账本（在途占位与释放、上限学习、等空位广播）；
 `internal/runtime/manager_quality.go` 承载 quality EWMA 状态与采样（errRate 与 TTFT 各有独立 anchor，
 样本写入带 generation gate）。
 新增可变 map 或锁必须仍回到 `Manager`，不得因文件拆分建立子状态仓库。
@@ -368,7 +369,7 @@ Manager 的物理文件按职责拆分，但不形成多 owner：`internal/runti
 
 - `Proxy.mu`：只保护 reload-owned 对象交换（内嵌 `generationState` 整体）；请求流式期间不持有。
 - `internal/runtime.Manager`：以单锁保护 generation、health、sticky、pin、
-  model lock、paramBlock、spread、quota、凭据拒绝 denials 和 schedule；quality map 经
+  model lock、paramBlock、spread、quota、凭据拒绝 denials、账号并发账本和 schedule；quality map 经
   `atomic.Pointer` copy-on-write 发布，写入持锁、读取免锁（调度临界区外投影
   decayed 状态）。所有返回给 persistence
   或 Web 的复合结果必须在该锁内原子复制并与 generation 一起返回。
@@ -522,7 +523,7 @@ application → serveAssembly → applicationRuntime → Proxy
   cli/models, config, credstore, display, protocol, providerstore, routing, takeover, observe/seclog, provider`；
 - `cli/framework → accounts, config, daemonctl, providerstore, upstreamproxy`（LoadCmdConfig 进程级接线：S2 凭据 + credentials 模式 + 全局 `proxy` 链头发布——不发则一次性 CLI 命令静默落到 env/系统代理、无视 `proxy: off`；per-provider 探测 client 也在此解析）；
 - `cli/presets → cli/framework, cli/login, cli/serve, config, login, presets, providerstore`；
-- `cli/provider → cli/framework, cli/login, cli/serve, config, presets, providerstore`（`provider add/rm/set`：custom static provider 的 CLI 添加/删除/编辑，与 Web 同一 store mutation 管线）；
+- `cli/provider → cli/framework, cli/login, cli/serve, config, presets, providerstore`（`provider add/rm/set`：custom static provider 的 CLI 添加/删除/编辑，与 Web 同一 store mutation 管线；Web Accounts 页的 Delete Provider 走 admin 的 `DeleteProvider`——零账号守卫 + 显式路由剪枝，与 CLI `rm` 的语义不同，见 `docs/web-api.md`）；
 - `cli/stats → accounts, cli/framework, config, daemonctl, display, observe/stats, providerbuild`（`stats`/`usage`）；
 - `cli/status → appapi, cli/clicommon, cli/framework, config, daemonctl, display, routing`（`serve status`/`schedule`/`routes`）；
 - `cli/serve → config, observe/logx`；

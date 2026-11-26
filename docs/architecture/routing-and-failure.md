@@ -166,11 +166,12 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
 | 限频冷却（429/quota/daily） | 否 | 否，同上 | 是，同上 |
 | 模型锁（仅该 (provider, model)） | 该 target 否 | 否，同上 | 锁过期后回归 |
 | 配额已知耗尽（新鲜 plan 快照 ultimate=0） | 否 | 否，同上 | 快照转好/失鲜后回归 |
+| 并发占满（已学到上限且在途已满） | 否（operator pin 例外：照常派发并占位） | 否，同上 | 空位腾出后回归 |
 | operator disabled | 否（candidate 集整体剔除，先于 pin） | 否 | 重新启用后回归 |
 | operator frozen | 否 | 否 | unfreeze 后回归 |
 | 健康但 dwell 已过期且次优优势 < margin | 是 | 是（sub-margin 不切换） | — |
 
-- **失败绑定不复活**：availability 过滤（熔断/限频/模型锁/配额已知耗尽）先于
+- **失败绑定不复活**：availability 过滤（熔断/限频/模型锁/配额已知耗尽/并发占满）先于
   sticky 判定执行，`keepSticky` 只在粘滞目标仍处 available 集时成立——down 信号
   存续期间，任何排序/粘滞逻辑都不得把该目标放回链中。
 - **recover-and-return 是有意语义**：sticky 条目在目标失败时**不删除**（仅由
@@ -289,7 +290,7 @@ Claude Code server-side thread、Responses 加密 reasoning 项（`rs_*`）这�
 | `transient` | 请求速率或短期 token rate | `rate_limit_backoff`，默认 60s |
 | `quota` | 账号余额、套餐或总配额耗尽 | `quota_cooldown`，默认 1h |
 | `daily` | 当日配额耗尽 | 本地时间下一日 00:00 |
-| `concurrency` | 账号的同时在途请求上限已满（step-plan `concurrency reached, current: 11, limit: 10`；zcode code 1302） | 不冷却——空位在一个请求完成时释放，没有时间 horizon；约束是「上限 + 在途数」（见「并发上限（在途门禁）」） |
+| `concurrency` | 账号的同时在途请求上限已满（step-plan `concurrency reached, current: 11, limit: 10`；另一形态是无数字的并发文案，如 zcode code 1302——该 provider 已于 2026-11-26 移除，判据仍是通用的并发措辞 + 在途数） | 不冷却——空位在一个请求完成时释放，没有时间 horizon；约束是「上限 + 在途数」（见「并发上限（在途门禁）」） |
 
 冷却时间采用顺序：
 
@@ -372,10 +373,11 @@ step-plan 两个账号的 429 率在在途数达到文案上限时从 0–2% 跳
 在途请求，被移除账号的在途请求释放时落到空处）；`unfreeze` / `POST /api/health/reset` 清除学到
 的上限（明说与推断都清）但不动在途计数；不持久化，重启后由第一个并发型 429 重新学。
 
-运行日志：学上限只在值变化时打一行——`429 states a concurrency limit of N — dispatch capped`
+运行日志（转发执行器路径）：学上限只在值变化时打一行——`429 states a concurrency limit of N — dispatch capped`
 或 `429 with K other request(s) in flight — concurrency cap lowered to K`——上调一行
 `concurrency cap raised to N — full-occupancy successes probe upward`，等待一行
-`every target is at its concurrency limit — waiting up to <retry_wait> for a slot`。
+`every target is at its concurrency limit — waiting up to <retry_wait> for a slot`。decisions
+selector 腿只打上调那一行；guard 判定 seam（`internal/app/model_call.go`）学上限与上调都不打行。
 每个账号的在途数与上限经 `/api/status` 的 health 条目暴露（`inflight`、`concurrency_cap`、
 `concurrency_cap_stated`，见 `docs/web-api.md`）。
 
