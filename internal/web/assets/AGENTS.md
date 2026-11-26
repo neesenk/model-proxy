@@ -62,7 +62,7 @@
 | 表格溢出 tooltip | app.js `reqTableCellTip`（仅真实截断时动态 `title`，`data-tip-dyn` 标记区分渲染器 title；三表单行省略样式在 styles.css 请求表区段，status 单元除外——badge 芯片不省略） | jstests/uie2e.test.mjs（长 agent 悬停出全文，renderer title 不被覆盖，status 芯片无 “200…” 假截断） |
 | 请求详情 | app.js `detailRecordsHTML`（`requestMetaHTML`/`guardMarksDetailHTML`/`chatViewHTML`）+ pure.js `legFailureSummary`（failover 腿 RESULT 区失败证据首行，≤160 字符折叠，全文在 raw response body 面板） | 行内展开 / Live 弹层 |
 | guard 徽标 | pure.js `guardMarksHTML` | 请求表 model 单元 |
-| 会话视图 | app.js `sessionViewHTML`+`wireSessionTimeline`，pure.js `sessionHealthSummary` | Live 会话 / Requests 汇总 |
+| 会话视图 | app.js `sessionViewHTML`+`wireSessionTimeline`，pure.js `sessionHealthSummary`（failover 判定的唯一实现是 pure.js `rowFailoverAttempt`，`sessionHealthSummary`/`sessionBarSummary`/`sessionTimeline` 都走它——已提交行的 attempt 是提交前失败跳数，全链失败终态行〔哨兵 `FAILOVER_PROVIDER`〕的是跳数，不得各处直接读 attempt） | Live 会话 / Requests 汇总 |
 | 时间线 tooltip | app.js `showTlTip`/`hideTlTip`，pure.js `sessionBarSummary` | 会话时间线 |
 | 大 body | app.js `chunkedBodyHTML` | raw body / 大 SSE |
 | 弹层 | `data-popup`+`hidden`；body 级走 app.js `comboInstances` | 日历 / combobox / 下拉 / models refresh 结果浮层（`.models-refresh-pop`，app.js `modelsRefreshResults` 回填存活） |
