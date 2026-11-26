@@ -177,6 +177,11 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 		OnStripParam: func(param string) {
 			logx.Warnf("[%s provider=%s] 400 unsupported parameter %q — stripped, retrying", in.Kind, m.Provider, param)
 		},
+		// The executor's redispatch line: one shape for every path an audit
+		// of fast-fail events reads (BufferedLeg itself stays headless).
+		OnRedispatch: func(err error) {
+			logx.Infof("[%s provider=%s] fast-fail connection error (%v) — redispatching once on a fresh connection", in.Kind, m.Provider, err)
+		},
 		Capture: exchange,
 	}.Do(legCtx, body)
 	if legStatus != 0 {
@@ -205,12 +210,14 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 	// A 2xx is the upstream admitting the request: for the concurrency cap
 	// this release counts as a success.
 	succeeded = resp.StatusCode < 300
+	// Same bounded evidence window as the executor's failure branches: the 429
+	// rate-limit parse and the 5xx content-refusal verdict read at most 8 KiB.
+	peek := respBody
+	if len(peek) > 8<<10 {
+		peek = peek[:8<<10]
+	}
 	switch {
 	case resp.StatusCode == 429:
-		peek := respBody
-		if len(peek) > 8<<10 {
-			peek = peek[:8<<10]
-		}
 		decision := targetexec.ParseRateLimitFor(resp, peek, time.Now(), sched, slot.Level)
 		if decision.Kind == targetexec.RateLimitConcurrency {
 			// Same rule and the same vantage point as the executor's: a
@@ -223,6 +230,17 @@ func (p pipeline) callDecisions(ctx context.Context, in decisionsInput) (out dec
 		p.incProviderMetric(m.Provider, m.Model, counters.EvRateLimited429)
 		out.Err = errDecisionLegUnavailable
 	case resp.StatusCode >= 500:
+		// A 5xx whose body proves a CONTENT refusal is request-attributable,
+		// not a provider fault — the rule targetexec.Executor applies, and
+		// this leg must agree with it: the leg is abandoned, but the circuit
+		// tick and the failure metric never see it. No failover metric either
+		// — this leg counts none on any failure class (429, transport,
+		// 401/4xx, ordinary 5xx), and a moderation refusal must not become
+		// the one path that does.
+		if targetexec.IsContentRefusal(peek) {
+			out.Err = fmt.Errorf("upstream status %d proved a content refusal", resp.StatusCode)
+			break
+		}
 		gate.RecordFailure(m.Provider, sched, in.Runtime.Generation)
 		p.incProviderMetric(m.Provider, m.Model, counters.EvFailures)
 		out.Err = fmt.Errorf("upstream status %d", resp.StatusCode)

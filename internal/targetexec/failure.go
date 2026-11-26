@@ -123,9 +123,12 @@ func accountUnsubscribed(body []byte) bool {
 	return strings.Contains(strings.ToLower(envelope.Error.Message), "no active step plan subscription")
 }
 
-// Match the stock nginx denial document observed in the incident. A server
-// banner or an HTML Content-Type alone says nothing about the refusal.
-var nginxForbidden = regexp.MustCompile(`(?i)^\s*<html>\s*<head><title>403 Forbidden</title></head>\s*<body>\s*<center><h1>403 Forbidden</h1></center>\s*<hr><center>nginx(?:/[0-9.]+)?</center>\s*</body>\s*</html>\s*$`)
+// Match the stock nginx denial document observed in the incident. The banner
+// admits the whole nginx family: openresty and tengine are nginx forks that
+// ship the same default 403 page with only the footer banner different. The
+// evidence is still the ENTIRE document — a server banner or an HTML
+// Content-Type alone says nothing about the refusal.
+var nginxForbidden = regexp.MustCompile(`(?i)^\s*<html>\s*<head><title>403 Forbidden</title></head>\s*<body>\s*<center><h1>403 Forbidden</h1></center>\s*<hr><center>(?:nginx|openresty|tengine)(?:/[0-9.]+)?</center>\s*</body>\s*</html>\s*$`)
 
 func gatewayRefused(header http.Header, body []byte) bool {
 	return strings.EqualFold(header.Get("Cf-Mitigated"), "challenge") || nginxForbidden.Match(body)

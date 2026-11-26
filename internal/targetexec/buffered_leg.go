@@ -13,10 +13,10 @@ import (
 // BufferedLeg runs one non-streaming upstream round-trip against a planned
 // target: URL build + provider rewrite + param-block application, POST with
 // a JSON body, then the standard one-shot retry policies (401 auth refresh,
-// 400 unsupported-parameter learn/strip). It is the headless counterpart of
-// Executor for callers that need bytes instead of a client stream (decisions
-// selector legs). Effect recording (circuit/metrics/rate-limit) stays with
-// the caller.
+// 400 unsupported-parameter learn/strip, fast-fail connection redispatch).
+// It is the headless counterpart of Executor for callers that need bytes
+// instead of a client stream (decisions selector legs). Effect recording
+// (circuit/metrics/rate-limit) stays with the caller.
 type BufferedLeg struct {
 	Client Doer // required
 	Plan   Plan // target plan (provider impl, base URL, path, headers)
@@ -33,6 +33,11 @@ type BufferedLeg struct {
 	ApplyParamBlock func(body []byte) []byte // nil = identity
 	LearnParamBlock func(param string)       // nil = no-op
 	OnStripParam    func(param string)       // optional log hook
+
+	// OnRedispatch receives the fast-fail connection error that made the leg
+	// redispatch — at most once per Do. The leg itself stays headless (no
+	// logger); nil is the default and costs nothing.
+	OnRedispatch func(err error) // optional log hook
 
 	// Capture, when non-nil, receives the final exchange (last built request,
 	// last upstream response, exact body bytes sent) so the caller can feed
@@ -68,6 +73,9 @@ func (e *BufferedLegBuildError) Unwrap() error { return e.Err }
 // was ever received), so a retry that fails on the wire still reports the
 // status that triggered the retry. Request-build/auth failures are returned
 // as *BufferedLegBuildError (auth failures wrapped as "auth: %w" inside).
+// A fast-fail connection error from the send is redispatched once on the same
+// target before it is returned, like Executor: a redispatch that succeeds
+// never reaches the caller as a failure.
 func (leg BufferedLeg) Do(ctx context.Context, body []byte) (status int, respBody []byte, err error) {
 	if leg.Client == nil {
 		return 0, nil, errors.New("targetexec.BufferedLeg: nil Client")
@@ -85,12 +93,14 @@ func (leg BufferedLeg) Do(ctx context.Context, body []byte) (status int, respBod
 		resp          *http.Response
 		refreshedAuth bool
 		strippedParam bool
+		retriedConn   bool
 	)
 	// Same one-shot retry policies as the normal target pipeline: apply learned
 	// param blocks before every send, refresh auth once on 401, learn/strip one
-	// newly reported top-level parameter on 400. URL build, provider rewrite
-	// and param-block application re-run every iteration against the CURRENT
-	// body (a strip retry reshapes what the next send rewrites).
+	// newly reported top-level parameter on 400, redispatch once on a fast-fail
+	// connection error. URL build, provider rewrite and param-block application
+	// re-run every iteration against the CURRENT body (a strip retry reshapes
+	// what the next send rewrites).
 	for {
 		targetURL := strings.TrimRight(leg.Plan.BaseURL(), "/") + leg.Plan.UpstreamPath()
 		targetURL, body = impl.RewriteRequest(targetURL, body, leg.Plan.UpstreamPath())
@@ -112,6 +122,23 @@ func (leg BufferedLeg) Do(ctx context.Context, body []byte) (status int, respBod
 
 		resp, err = leg.Client.Do(req)
 		if err != nil {
+			// Fast-fail connection error (EOF/reset/refused/GOAWAY, returned in
+			// milliseconds): one same-target redispatch on a fresh connection
+			// before the caller counts the failure — Executor's rule
+			// (IsFastFailConnError). An external-path hiccup is not a dead
+			// provider, and no response bytes exist to duplicate. The redispatch
+			// is its own one-shot slot, reported through OnRedispatch. A
+			// canceled caller abandoned the leg and is never retried; timeouts
+			// are not fast-fail; and a body that breaks mid-read below belongs
+			// to a request the upstream already took, so it is never
+			// redispatched either.
+			if !retriedConn && ctx.Err() == nil && IsFastFailConnError(err) {
+				retriedConn = true
+				if leg.OnRedispatch != nil {
+					leg.OnRedispatch(err)
+				}
+				continue
+			}
 			return status, nil, err
 		}
 		status = resp.StatusCode

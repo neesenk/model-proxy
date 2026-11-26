@@ -443,20 +443,28 @@ func (executor Executor) Execute(attempt Attempt) Result {
 		// Reinterpret as 502 so it fails over and cools down like any upstream
 		// failure; unlike the zero-byte case this is provider-level (the
 		// gateway is answering, just not with an API reply), so it never
-		// reaches RecordModelFailure. Two arms, both pre-commit-safe:
-		// Content-Type text/html settles from headers alone (covers streamed
-		// requests without touching the body — a blocking read here would
-		// defeat the SSE keepalive contract for slow-TTFT streams), and the
-		// document-prefix peek runs only for non-stream callers, whose body
-		// read is about to happen anyway.
+		// reaches RecordModelFailure. Two arms, both pre-commit-safe, and both
+		// close the body on their way out (this return skips the commit path,
+		// the only other closer — a leaked body pins its connection and read
+		// loop): Content-Type text/html settles from headers alone, covering
+		// streamed requests without touching the body — a blocking read here
+		// would defeat the SSE keepalive contract for slow-TTFT streams, so
+		// even the 2 KiB title peek is taken for non-stream callers only; the
+		// document-prefix peek likewise runs only for non-stream callers,
+		// whose body read is about to happen anyway.
 		if response.StatusCode < 300 {
 			if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/html") {
-				peek := peekResponseBody(response, 2<<10)
+				var peek []byte
+				if !clientWantsStream {
+					peek = peekResponseBody(response, 2<<10)
+				}
+				response.Body.Close()
 				executor.fakeAPIReply(target, plan, peek)
 				return Result{Outcome: OutcomeFailedHard, AttemptStatus: http.StatusBadGateway, AttemptBody: fakeAPIReplyBody(response.StatusCode, peek)}
 			}
 			if !clientWantsStream {
 				if head := peekHead(response, 64); IsFakeAPIReply("", head) {
+					response.Body.Close()
 					executor.fakeAPIReply(target, plan, head)
 					return Result{Outcome: OutcomeFailedHard, AttemptStatus: http.StatusBadGateway, AttemptBody: fakeAPIReplyBody(response.StatusCode, head)}
 				}

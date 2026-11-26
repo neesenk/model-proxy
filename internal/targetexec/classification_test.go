@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"net/url"
 	"syscall"
 	"testing"
@@ -200,6 +201,56 @@ func TestHTMLTitle(t *testing.T) {
 	}
 	if got := HTMLTitle([]byte("<!DOCTYPE html><html>")); got != "" {
 		t.Errorf("no title = %q", got)
+	}
+}
+
+// TestGatewayRefusedNginxFamilyDenialPage: the gateway-refusal evidence is
+// the WHOLE stock denial document, never a server banner on its own. nginx,
+// openresty and tengine are one family — the forks ship the same default 403
+// page with only the footer banner different — so every family banner matches
+// with or without a version. Anything else stays an ordinary 403: another
+// server's banner on the same page shape, a banner that merely contains a
+// family name, or a family banner on a page that is not the whole document.
+func TestGatewayRefusedNginxFamilyDenialPage(t *testing.T) {
+	page := func(banner string) string {
+		return "<html>\n<head><title>403 Forbidden</title></head>\n<body>\n<center><h1>403 Forbidden</h1></center>\n<hr><center>" + banner + "</center>\n</body>\n</html>"
+	}
+	matches := []string{
+		"nginx",
+		"nginx/1.24.0",
+		"openresty",
+		"openresty/1.21.4.1",
+		"OpenResty/1.27.1.2",
+		"tengine",
+		"tengine/2.3.3",
+	}
+	for _, banner := range matches {
+		if !gatewayRefused(http.Header{}, []byte(page(banner))) {
+			t.Errorf("stock denial page with banner %q = false, want a gateway refusal", banner)
+		}
+	}
+	rejects := []string{
+		"Apache/2.4.62 (Unix)",
+		"Microsoft-IIS/10.0",
+		"nginx-plus",
+		"mynginx",
+		"openresty-admin",
+	}
+	for _, banner := range rejects {
+		if gatewayRefused(http.Header{}, []byte(page(banner))) {
+			t.Errorf("denial page with banner %q = true, want an ordinary 403", banner)
+		}
+	}
+	// A family banner alone is not evidence: the page must be the whole
+	// document, and Cf-Mitigated still decides independently of the body.
+	if gatewayRefused(http.Header{}, []byte("<html><head><title>403 Forbidden</title></head><body><hr><center>openresty</center></body></html>")) {
+		t.Error("openresty banner on a page without the <h1> line = true, want an ordinary 403")
+	}
+	if gatewayRefused(http.Header{}, []byte(page("tengine")+"\n<script src='/waf.js'></script>")) {
+		t.Error("denial page with trailing markup = true, want an ordinary 403")
+	}
+	if !gatewayRefused(http.Header{"Cf-Mitigated": []string{"challenge"}}, nil) {
+		t.Error("Cf-Mitigated: challenge = false, want a gateway refusal")
 	}
 }
 

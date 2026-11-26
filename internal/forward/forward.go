@@ -572,9 +572,10 @@ type serveState struct {
 	// set during serveOnce and copied into the attempt's LogCtx so the request
 	// log can persist it. Never fails closed: a nil value simply omits the field.
 	routing *configdomain.RoutingDecision
-	// fitNote explains a request-aware reroute (see describeFitReroute): set
+	// fitNote explains a request-aware reroute (see DescribeFitReroute): set
 	// when ApplyWithProfile dropped in-route targets or replaced the chain
-	// cross-route, copied into the request log's ScheduleDecision.Note.
+	// cross-route in the LATEST pass (a wait-retry round that does not reroute
+	// clears it), copied into the request log's ScheduleDecision.Note.
 	fitNote string
 	// scheduleSource names the engine that produced this pass's try order
 	// (runtime.ScheduleSource* / ScheduleSourceForce). Re-computed each
@@ -762,11 +763,19 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 		// normal scheduling policy. No-op when everything already fits.
 		beforeFit := ordered
 		ordered = planner.ApplyWithProfile(exposed, sessionKey, ordered, p.requestProfile(st, cat, origBody))
+		// Both projections of a reroute — the response header and the request
+		// log's schedule.note — describe THIS pass. The wait-retry rounds share
+		// one writer and one serveState, so a later round that no longer
+		// reroutes (its cross-route pool cooled down) must drop the earlier
+		// round's trace rather than leave it describing a route nobody took.
+		st.fitNote = ""
 		if note, replaced := planner.DescribeFitReroute(beforeFit, ordered, p.requestProfile(st, cat, origBody)); replaced {
 			st.fitNote = note
 			// Header must land before the first body write; routing happens
 			// pre-upstream, so this is always early enough even for streams.
 			req.writer.Header().Set("x-mp-reroute", note)
+		} else {
+			req.writer.Header().Del("x-mp-reroute")
 		}
 		// Route-tier policy (route_policy): precedence is latch > selector >
 		// bands > static order. The latch is session-scoped runtime state and
