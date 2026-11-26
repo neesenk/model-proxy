@@ -41,7 +41,7 @@ Commands:
   schedule             Show current per-model provider (queries the running daemon)
   pin <route> <prov>   Temporarily force a route onto one provider (no failover)
   unpin <route>        Remove a pin
-  unfreeze [provider]  Clear frozen provider state (circuit/rate-limit/model locks)
+  unfreeze [provider]  Clear frozen provider state (circuit/rate-limit/model locks/concurrency cap)
   freeze <provider>    Manually freeze a provider (exclude from scheduling until unfreeze)
   stats                Show per-(provider, model) call statistics (queries the daemon)
   doctor               Offline scheduling diagnostic (config only, no daemon)
@@ -378,7 +378,8 @@ Flags:
 	"unfreeze": `unfreeze [provider] [--config PATH]
 
   Clear frozen runtime provider state via the running daemon: circuit-open
-  cooldowns, rate-limit cooldowns (429), and model-level lockouts — the
+  cooldowns, rate-limit cooldowns (429), model-level lockouts, and learned
+  concurrency caps (the in-flight request counts stay) — the
   provider is retried immediately instead of waiting out the cooldown.
   With no argument, clears ALL providers. A pooled parent name clears all
   its accounts. Sticky routes, pins, and learned parameter blocklists are

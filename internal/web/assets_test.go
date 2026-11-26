@@ -54,17 +54,32 @@ func TestWebAssetsJavaScriptSyntax(t *testing.T) {
 // 「UI 浏览器 e2e」) — no npm framework dependency. Files are
 // enumerated here (not via `node --test <dir>`, whose directory-argument
 // support varies across node versions). Same node gate as the syntax check.
+// With the browser e2e switched on the files run serially (jsTestArgs).
 func TestWebAssetsPureJSUnitTests(t *testing.T) {
 	node := requireNode(t)
 	files, err := filepath.Glob(filepath.Join("jstests", "*.test.mjs"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("glob jstests/*.test.mjs: %v (found %d)", err, len(files))
 	}
-	args := append([]string{"--test"}, files...)
-	cmd := exec.Command(node, args...)
+	cmd := exec.Command(node, jsTestArgs(files, os.Getenv("MP_UI_E2E") != "")...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("node --test %s: %v\n%s", strings.Join(files, " "), err, out)
 	}
+}
+
+// jsTestArgs is the node argument list that runs the jstests files. Node runs
+// test files concurrently by default; with the browser e2e enabled each of the
+// two browser suites starts its own browser and serve stack, so they are run
+// serially exactly like the documented on-demand command does
+// (docs/engineering/testing.md 「UI 浏览器 e2e」). browserE2E follows the same
+// truthiness the suites' own gate reads from MP_UI_E2E.
+func jsTestArgs(files []string, browserE2E bool) []string {
+	args := make([]string, 0, len(files)+2)
+	args = append(args, "--test")
+	if browserE2E {
+		args = append(args, "--test-concurrency=1")
+	}
+	return append(args, files...)
 }
 
 func TestWebAssetsLogGutterAndSelectionContract(t *testing.T) {

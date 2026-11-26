@@ -16,10 +16,11 @@ const (
 	RateLimitQuota     RateLimitKind = "quota"
 	RateLimitDaily     RateLimitKind = "daily"
 	// RateLimitConcurrency: the account's limit on SIMULTANEOUS requests is
-	// reached (step-plan "concurrency reached, current: 11, limit: 10"; zcode
-	// code 1302). It has no time horizon — it lifts the moment a request
-	// completes — so nothing is cooled down: the account's learned cap plus
-	// its in-flight count are what keep the next request off it.
+	// reached (step-plan "concurrency reached, current: 11, limit: 10"; the
+	// wording may also carry no number). It has no time horizon — it lifts
+	// the moment a request completes — so nothing is cooled down: the
+	// account's learned cap plus its in-flight count are what keep the next
+	// request off it.
 	RateLimitConcurrency RateLimitKind = "concurrency"
 	maxResetHint                       = 7 * 24 * time.Hour
 )
