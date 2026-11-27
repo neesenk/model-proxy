@@ -1,25 +1,25 @@
-// uishutdown.test.mjs — real-browser regression for the restart drain: the
-// page must be compatible with a daemon that stops and comes back.
+// uishutdown.test.mjs — real-browser regression for the daemon restart: the
+// daemon announces its stop, and the page handles it.
 //
 // A daemon that is told to stop drains its in-flight handlers for 8s before
 // it force-closes connections. The page's one long-lived handler is the Live
-// view's /api/events subscription: left open, it held every restart to that
+// view's /api/events stream — left open, it held every restart to that
 // deadline (serve audit 2026-11-26: 3 of 4 restarts logged `HTTP drain
-// exceeded 8s`, two of them with exactly one in-flight handler and no stream
-// attribution line). The page already runs a 5s header heartbeat on every
-// non-Status tab; once the daemon stops, that heartbeat fails while the
-// event stream still hangs off the draining process. Compatibility = the
-// page releases the stream on a failed heartbeat (the old process finishes
-// its drain and exits) and re-opens it on the next successful one (the SSE
-// handshake replays the recent-event ring, so nothing visible is lost).
+// exceeded 8s`, two of them with exactly one in-flight handler). The daemon
+// now ends each stream itself with a named `shutdown` frame carrying
+// `retry: 1000`: the handler returns at once, and the page — told what is
+// happening — shows its restarting state instead of an error, keeps its data
+// without "refresh failed" banners, and is reconnected by its own
+// EventSource within a second of the daemon coming back.
 //
-// Both halves are pinned here against a real stop → start of the sandboxed
-// daemon, the same sequence as scripts/restart_serve.sh:
-//   release — the draining daemon must not reach its deadline;
-//   resume  — the SAME page must carry live rows again afterwards. The page
-//             closed the stream itself, so the browser's EventSource
-//             auto-reconnect is out of the picture: without the resume the
-//             Live view would stay silent for good.
+// Pinned here against a real stop → start of the sandboxed daemon (the
+// sequence of scripts/restart_serve.sh):
+//   announced — from the stop signal on, the page is in its restarting state
+//               (never red "connection lost"), with no error banner;
+//   released  — the draining daemon leaves long before its deadline;
+//   resumed   — the SAME page carries live rows again afterwards (nothing on
+//               the page re-creates the stream: only the browser's own
+//               reconnect, on the frame's retry, can have brought it back).
 //
 // Same hermetic fixture as uie2e.test.mjs (uiboot.mjs). This suite stops and
 // restarts its own sandboxed serve mid-run, so it owns a boot of its own.
@@ -33,19 +33,20 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { bootUiE2E } from './uiboot.mjs';
 
-// The drain deadline is cliserve.GracefulShutdownTimeout (8s). A page that
-// releases its stream lets the daemon leave one heartbeat interval (5s) after
-// the stop signal at the latest; a page that keeps it holds the daemon to the
-// deadline itself (measured 8031ms before the fix).
+// The drain deadline is cliserve.GracefulShutdownTimeout (8s). A stream the
+// daemon ends itself releases the handler at once, so the daemon leaves with
+// its final flush alone — seconds under the deadline, and under the page's 5s
+// heartbeat too (measured 8031ms before the fix, 5.3s with a heartbeat-based
+// release on the page).
 const DRAIN_DEADLINE_MS = 8000;
-const RELEASE_BUDGET_MS = 7500;
+const RELEASE_BUDGET_MS = 4000;
 
 let ctx = null;
 
 before(async () => { ctx = await bootUiE2E(); });
 after(async () => { if (ctx) await ctx.shutdown(); });
 
-test('Live 页在 daemon 关停时放开 /api/events、重启后接回，drain 不被页面占满 (关停兼容族)', async (t) => {
+test('Live 页收到 daemon 的重启通知后进入「服务重启中」而非报错，daemon 不被占到 deadline，重启后自动接回 (关停兼容族)', async (t) => {
   if (ctx.skipReason) { t.skip(ctx.skipReason); return; }
 
   // Requests → Live, and wait until the stream is actually open: the empty
@@ -60,14 +61,23 @@ test('Live 页在 daemon 关停时放开 /api/events、重启后接回，drain �
   await ctx.waitFor('live stream open', () => ctx.ev(
     `document.getElementById('live-table').textContent.includes('Waiting for requests')`));
 
-  // --- release -------------------------------------------------------------
   // `serve stop` is a SIGTERM to the supervisor, which forwards it to the
   // worker and exits once the worker has drained and flushed.
   const exited = new Promise((resolve) => ctx.proxy.once('exit', (code, signal) => resolve({ code, signal })));
   const stoppedAt = Date.now();
   ctx.proxy.kill('SIGTERM');
+  // From the stop signal on, sample what the page shows: the announcement
+  // must reach it as the restarting state — never as a red "connection
+  // lost" (what an unannounced outage, or a page discovering the stop from
+  // its own failed heartbeat, would show).
+  const shown = new Set();
+  const sample = async () => {
+    shown.add(await ctx.ev(`document.getElementById('live-dot').classList.contains('err') ? 'err'
+      : document.getElementById('live-dot').classList.contains('warn') ? 'warn' : 'other'`));
+  };
   const outcome = await exited;
   const elapsed = Date.now() - stoppedAt;
+  await sample();
   // The daemon is gone; the shared teardown must not wait on it again until
   // the restart below hands it a new process.
   ctx.proxy = null;
@@ -77,26 +87,40 @@ test('Live 页在 daemon 关停时放开 /api/events、重启后接回，drain �
   assert.ok(!stoppedLog.includes('HTTP drain exceeded'),
     `the page held the draining daemon to its deadline (${elapsed}ms):\n${stoppedLog}`);
   assert.ok(elapsed < RELEASE_BUDGET_MS,
-    `daemon exit took ${elapsed}ms after SIGTERM; with the stream released it must leave within one heartbeat interval, not the ${DRAIN_DEADLINE_MS}ms deadline`);
+    `daemon exit took ${elapsed}ms after SIGTERM; with its stream ended by the shutdown notice it must leave with its final flush alone, not the ${DRAIN_DEADLINE_MS}ms deadline`);
   assert.equal(outcome.signal, null, `the daemon was killed (${outcome.signal}) instead of exiting on its own`);
 
-  // The page side: the heartbeat reports the daemon gone, and the empty
-  // Live table says its stream is down instead of waiting for requests.
-  await ctx.waitFor('header heartbeat reports the daemon gone', () => ctx.ev(
-    `document.getElementById('live-dot').classList.contains('err')`));
-  assert.ok(await ctx.ev(`document.getElementById('live-table').textContent.includes('reconnecting')`),
-    'a released stream must leave the empty Live table on the reconnecting hint');
-  assert.deepEqual(await ctx.pageErrors(), [], 'releasing the live stream must not raise in the page');
+  // --- announced ------------------------------------------------------------
+  assert.ok(shown.has('warn') && !shown.has('err'),
+    `during the restart the header showed ${[...shown].join('/')}; want the restarting state (warn) and never "connection lost" (err)`);
+  assert.ok(await ctx.ev(`document.getElementById('live-table').textContent.includes('服务重启中')`),
+    'the empty Live table must say the daemon is restarting, not "reconnecting…"');
+  assert.equal(await ctx.ev(`document.querySelectorAll('.refresh-err').length`), 0,
+    'a restart the daemon announced is not a failed refresh: no error banner');
+  assert.deepEqual(await ctx.pageErrors(), [], 'handling the shutdown notice must not raise in the page');
 
-  // --- resume --------------------------------------------------------------
-  // The daemon comes back on the same port. The page's next successful
-  // heartbeat re-opens the stream; its onopen turns the hint back.
+  // The daemon is away for a moment (the restart script's stop → start):
+  // the page keeps restarting state through its own heartbeat ticks.
+  const goneAt = Date.now();
+  while (Date.now() - goneAt < 5500) {
+    await sample();
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  assert.ok(!shown.has('err'),
+    `while the daemon was away the header turned red (${[...shown].join('/')}); the page knows it is a restart`);
+
+  // --- resumed --------------------------------------------------------------
+  // The daemon comes back on the same port. The browser's EventSource
+  // reconnects on the frame's retry; the page's probe sees the daemon and
+  // ends the restarting state. No page code re-creates the stream.
   ctx.startProxy();
   await ctx.waitProxyReady();
   await ctx.waitFor('header heartbeat sees the daemon again', () => ctx.ev(
     `document.getElementById('live-dot').classList.contains('ok')`));
   await ctx.waitFor('live stream taken back', () => ctx.ev(
     `document.getElementById('live-table').textContent.includes('Waiting for requests')`));
+  assert.equal(await ctx.ev(`document.querySelectorAll('.refresh-err').length`), 0,
+    'no error banner may appear once the daemon is back either');
 
   // A request through the restarted daemon shows up as a live row: the
   // stream is delivering, not merely re-created. (The fresh daemon's event

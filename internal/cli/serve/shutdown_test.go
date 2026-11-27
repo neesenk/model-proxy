@@ -88,6 +88,17 @@ func TestTransportHandlerGateRejectsAfterStopAccepting(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
 	}
+	// The answer names itself: a machine-readable code the Web page (and any
+	// other client) can tell from an ordinary 503, plus the retry hint.
+	if got, want := rec.Body.String(), `{"error":"server is shutting down","code":"shutting_down"}`+"\n"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "1" {
+		t.Errorf("Retry-After = %q, want 1", got)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
 }
 
 func TestTransportHandlerGateWaitBlocksForInflightHandler(t *testing.T) {

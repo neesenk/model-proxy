@@ -196,10 +196,12 @@ reload 结果在 daemon 的 **log 文件**里（`[reload] config reloaded succes
   请求、`/api/events` 订阅等同样计入，所以 N 不等于被截断的流数，是它的上界）；handler
   完成退栈后继续 final flush。被强关的流在 executor 侧只体现为上述 client 断开归因行
   （executor 看不到连接由谁关闭）——核对重启窗口内的 client 断开行时以本行的 N 为上界。
-  Web 页自带的长连接只有 Live 页的 `/api/events` 订阅：顶栏心跳（5s）一旦失败，页面
-  自行断开它、daemon 恢复后再接回（见 `docs/frontend.md`「自动刷新 tick 盘点」），所以
-  开着 Live 页的重启通常在一个心跳间隔内 drain 完成、不到 8 秒；被浏览器深度节流的
-  后台页签（例如隐藏超过 5 分钟）可能仍等到 deadline。
+  Web 页唯一的长连接是 Live 页的 `/api/events` 订阅：进程服务器开始 drain 时事件 hub 先
+  收到通知（transport task），每条事件流以一帧 `retry: 1000` + 具名 `shutdown` 事件（`event: shutdown`，data `{"type":"shutdown"}`） 收尾后
+  handler 立即返回——开着 Live 页重启时 daemon 只等自己的 final flush（实测 SIGTERM 后
+  ~20ms 退出），不再被占到 8 秒。页面收到该帧后显示「服务重启中」并由浏览器 EventSource
+  自动重连；落在 drain 中门禁上的请求得到类型化应答
+  `503 {"error":"server is shutting down","code":"shutting_down"}` + `Retry-After: 1`。
 
 ### 手动重启（换二进制后）：停+启必须原子完成
 

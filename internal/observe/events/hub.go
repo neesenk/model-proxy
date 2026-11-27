@@ -71,13 +71,43 @@ type Hub struct {
 	// Publish for why the ordering matters) and without allocating — one
 	// slice per subscription change instead of one per event.
 	subs atomic.Pointer[[]chan Event]
+	// stopping is closed by Shutdown — once, never reopened: the process is
+	// leaving. Every live /api/events stream ends with the shutdown notice
+	// and a later subscriber gets it at once (see ServeEvents).
+	stopping     chan struct{}
+	shutdownOnce sync.Once
 }
 
 func NewHub() *Hub {
-	h := &Hub{}
+	h := &Hub{stopping: make(chan struct{})}
 	empty := []chan Event{}
 	h.subs.Store(&empty)
 	return h
+}
+
+// Shutdown announces that the daemon is stopping. Idempotent, nil-safe and
+// never blocking: it only wakes the streams, each of which then writes its
+// notice and returns — a draining daemon is not held by its Web clients, and
+// the page learns to reconnect.
+func (h *Hub) Shutdown() {
+	if h == nil {
+		return
+	}
+	h.shutdownOnce.Do(func() { close(h.stopping) })
+}
+
+// Stopping reports whether Shutdown has been called.
+func (h *Hub) Stopping() bool {
+	return h != nil && isClosedChan(h.stopping)
+}
+
+func isClosedChan(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
 
 // Publish appends e to its stream's recent ring and offers it to every

@@ -20,7 +20,7 @@ live 视图（反向同理）。`Subscribe`/`Snapshot` 返回按 ts 升序合并
 ring 内保留的 progress 事件 `text` 截断到 4 KiB（rune 边界，实时订阅者收
 全量前缀，只有留存副本受限），环内存上限 (2000 + 500) × 4 KiB。
 
-forward 产生 start/end，包含 agent、protocol、provider、status、latency、tokens（end 另带 `cache_read`/`cache_creation`，omitempty）和稳定 request_id。400/502 终局也必须产生 end。进入 live/请求日志的是 LLM 协议路径（`/v1/messages`、`/v1/chat/completions`、`/v1/responses`、`/v1/decisions`）与 MCP 网关交换（`/mcp/<name>`，`protocol="mcp"`、request log `kind="mcp"`，见 `mcp.md`）；未知路径（浏览器 `/.well-known/...` 探测、favicon、迷路 GET）在 handler 层直接 502，**不产生 live 事件、不写请求日志**（unrouted model 仍是非空 proto，照旧产生终局 end）。`GET /api/events` 先重放 ring，再推送 SSE，15 秒 keepalive。Web 页在顶栏心跳失败时自行断开该订阅、恢复后重连——一个开着 Live 页的页面不得把正在 drain 的进程占到 8 秒 deadline（关停兼容，规则见 `docs/frontend.md`「自动刷新 tick 盘点」）。
+forward 产生 start/end，包含 agent、protocol、provider、status、latency、tokens（end 另带 `cache_read`/`cache_creation`，omitempty）和稳定 request_id。400/502 终局也必须产生 end。进入 live/请求日志的是 LLM 协议路径（`/v1/messages`、`/v1/chat/completions`、`/v1/responses`、`/v1/decisions`）与 MCP 网关交换（`/mcp/<name>`，`protocol="mcp"`、request log `kind="mcp"`，见 `mcp.md`）；未知路径（浏览器 `/.well-known/...` 探测、favicon、迷路 GET）在 handler 层直接 502，**不产生 live 事件、不写请求日志**（unrouted model 仍是非空 proto，照旧产生终局 end）。`GET /api/events` 先重放 ring，再推送 SSE，15 秒 keepalive。daemon 关停时 `Hub.Shutdown`（由 transport stop 触发）让每条事件流以一帧 `retry: 1000` + 具名 `shutdown` 事件（`event: shutdown`，data `{"type":"shutdown"}`） 收尾后返回——开着 Live 页的页面不再把正在 drain 的进程占到 8 秒 deadline，Web 端据此进入「服务重启中」并靠浏览器自动重连（规则见 `docs/frontend.md`「自动刷新 tick 盘点」）。
 
 出站秘密扫描（DLP-lite，`guard.secrets`）在 forward 读取完整请求体后、请求画像计算与所有 forward 分支之前对共享 body 扫描一次（`internal/guard` 的高置信
 模式表，只扫请求不扫响应，SSE/流式同样适用）。命中时额外产生一条

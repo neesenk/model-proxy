@@ -569,14 +569,13 @@ playwright 缓存 → 系统安装）加载真实 `/ui/`。
 - `uishutdown.test.mjs`（关停兼容，2026-11-26 日检）：页面唯一的长连接是 Live 页的 `/api/events`
   订阅，而 daemon 关停要等在途 handler 最多 8s——开着 Live 页时每次重启都被它占到 deadline。
   真实浏览器 + 沙箱 serve 的 stop → start（同 `scripts/restart_serve.sh` 的顺序，本套件中途停启
-  **自己的**沙箱 serve，故独占一次 boot）：SIGTERM 后 daemon 必须在一个心跳间隔（5s）内退出、
-  日志无 `HTTP drain exceeded`（修复前实测 8031ms + 该行、`in-flight handlers: 1`）；同一页面在
-  daemon 回来后必须重新接上事件流——页面自己关的流浏览器不会自动重连，恢复后驱动一条真实请求、
-  其 live 行必须出现（新进程的事件环是空的，这一行只能来自实时订阅）。`uiboot.mjs` 为此把
-  serve 的 stderr 落到沙箱 `serve.log`，并把启动拆成 `ctx.startProxy`/`ctx.waitProxyReady`。
-  后台页签的定时器可能被浏览器深度节流（Chromium 对隐藏超过 5 分钟的页面把链式定时器约每分钟
-  才触发一次），这时放开会晚于 deadline——页面在前台（或刚隐藏）才保证生效；headless 下页签
-  可见，本套件量到的是前者。
+  **自己的**沙箱 serve，故独占一次 boot）：SIGTERM 后 daemon 必须远早于 deadline 退出（实测 ~20ms；
+  修复前 8031ms + `HTTP drain exceeded … (in-flight handlers: 1)`）；从停机信号起采样顶栏，只能出现
+  重启中（warn）而不能出现 `connection lost`（err），空 Live 表提示「服务重启中」、全程无 `.refresh-err`；
+  daemon 回来后同一页面必须重新接上事件流——页面没有任何代码重建这条流，只有浏览器按帧里 `retry`
+  的自动重连能把它接回来；恢复后驱动一条真实请求、其 live 行必须出现（新进程的事件环是空的，这一行
+  只能来自实时订阅）。`uiboot.mjs` 为此把 serve 的 stderr 落到沙箱 `serve.log`，并把启动拆成
+  `ctx.startProxy`/`ctx.waitProxyReady`。
 
 实现陷阱（排障前先读）：页面在代理未就绪时导航会落 `chrome-error://` 并被 Chrome 换
 文档，投向将死文档的点击全部丢失——boot 必须等「URL 正确 + readyState complete +

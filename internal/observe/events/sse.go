@@ -2,6 +2,7 @@ package events
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"time"
 )
@@ -12,6 +13,21 @@ import (
 // connection. Nil-hub-safe (a Proxy without one answers an empty stream).
 func ServeEvents(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	serveEventsWithTicks(hub, w, r, nil)
+}
+
+// shutdownNotice is the last frame of every /api/events stream once the
+// daemon is stopping. `retry:` is the EventSource's own reconnection delay:
+// the page does not re-implement reconnecting, the browser retries every
+// second until the daemon is back and then replays the ring as on any
+// connect. The notice is a NAMED event — it reaches addEventListener
+// ('shutdown'), never the onmessage handler that folds request events — so
+// the page can show "restarting" instead of an error without parsing it.
+const shutdownNotice = "retry: 1000\nevent: shutdown\ndata: {\"type\":\"shutdown\"}\n\n"
+
+// writeShutdownNotice ends a stream with the shutdown notice, flushed.
+func writeShutdownNotice(w http.ResponseWriter, flusher http.Flusher) {
+	_, _ = io.WriteString(w, shutdownNotice)
+	flusher.Flush()
 }
 
 // serveEventsWithTicks is the SSE entry core. A nil tick channel preserves the
@@ -37,6 +53,13 @@ func serveEventsWithTicks(hub *Hub, w http.ResponseWriter, r *http.Request, tick
 		} else {
 			keepaliveLoopWithTicks(w, flusher, r, ticks)
 		}
+		return
+	}
+	// A daemon already draining answers a (re)connecting page with the notice
+	// at once: nothing is replayed to a leaving process, and this handler
+	// returns immediately so the reconnect cannot hold the drain either.
+	if hub.Stopping() {
+		writeShutdownNotice(w, flusher)
 		return
 	}
 	// SubscribeContext: the subscription dies with the request context even if
@@ -77,6 +100,11 @@ func serveEventsWithTicks(hub *Hub, w http.ResponseWriter, r *http.Request, tick
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-hub.stopping:
+			// The daemon is stopping: tell the page and let go of the handler
+			// — the drain then finishes without waiting for this stream.
+			writeShutdownNotice(w, flusher)
 			return
 		case _, ok := <-ticks:
 			if !ok {

@@ -10,6 +10,7 @@ import (
 	"model-proxy/internal/provider"
 	"model-proxy/internal/providerbuild"
 	runtimestate "model-proxy/internal/runtime"
+	"model-proxy/internal/testsyn"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,8 +30,10 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 		uiStatus  int
 		taskCount int
 	}{
-		{name: "Web disabled", uiStatus: http.StatusBadGateway},
-		{name: "Web enabled", web: true, uiStatus: http.StatusOK, taskCount: 1},
+		// One transport task always — the live event stream's shutdown
+		// notice — plus one more when the Web admin owns its session GC.
+		{name: "Web disabled", uiStatus: http.StatusBadGateway, taskCount: 1},
+		{name: "Web enabled", web: true, uiStatus: http.StatusOK, taskCount: 2},
 	} {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
@@ -62,6 +65,22 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 			if got := len(runtime.TransportTasks); got != test.taskCount {
 				t.Fatalf("applicationRuntime transport tasks = %d, want %d", got, test.taskCount)
 			}
+			// The transport stop is the daemon's drain: it must reach the
+			// event hub at once, so every live /api/events stream ends with
+			// the shutdown notice instead of holding the drain (2026-11-26:
+			// three of four restarts waited out the 8s deadline on a page's
+			// own subscription).
+			if runtime.Proxy.events.Stopping() {
+				t.Fatal("the event hub reports stopping before the transport stopped")
+			}
+			stop := make(chan struct{})
+			for _, task := range runtime.TransportTasks {
+				go task(stop)
+			}
+			close(stop)
+			testsyn.WaitUntil(t, "the transport stop to shut the event hub down", func() bool {
+				return runtime.Proxy.events.Stopping()
+			})
 
 			health := httptest.NewRecorder()
 			runtime.Handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/health", nil))

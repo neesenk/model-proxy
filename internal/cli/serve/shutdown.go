@@ -4,6 +4,7 @@ package serve
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"model-proxy/internal/observe/logx"
 	"net"
@@ -67,11 +68,23 @@ func NewTransportHandlerGate(next http.Handler) *TransportHandlerGate {
 	return &TransportHandlerGate{accepting: true, next: next}
 }
 
+// shuttingDownBody is the gate's answer once the process is draining: a
+// machine-readable code a client can tell from any other 503 — the Web page
+// switches to its "restarting" state on it — plus the retry hint. A drain
+// ends within seconds, so a client that retries right away gets through.
+type shuttingDownBody struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+}
+
 func (g *TransportHandlerGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	if !g.accepting {
 		g.mu.Unlock()
-		http.Error(w, "server shutting down", http.StatusServiceUnavailable)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(shuttingDownBody{Error: "server is shutting down", Code: "shutting_down"})
 		return
 	}
 	g.wg.Add(1)

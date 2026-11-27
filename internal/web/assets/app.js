@@ -138,6 +138,62 @@ function fmtSinceDate(sec) {
 
 
 
+// ---------- daemon restart ----------
+// The daemon announces a stop instead of vanishing: every /api/events stream
+// ends with a named `shutdown` event (the page's EventSource then reconnects
+// by itself — the frame carries `retry: 1000`), and a request that lands on
+// the draining process's gate gets a typed 503 (code "shutting_down"). Either
+// puts the page into its restarting state: the header says the daemon is
+// restarting, loaders keep their last data without raising "refresh failed"
+// banners, and a fast probe watches for the daemon to come back. The page
+// knows a restart is happening; an outage nobody announced is still reported
+// as "connection lost".
+let serverRestarting = false;
+const RESTARTING_TEXT = '服务重启中…（自动重连）';
+
+// noteServerRestarting enters the restarting state (once per restart) and
+// starts the recovery probe.
+function noteServerRestarting() {
+  if (serverRestarting) return;
+  serverRestarting = true;
+  setConn('warn', RESTARTING_TEXT);
+  startRestartProbe();
+}
+
+// noteServerBack ends the restarting state: any complete answer from the
+// daemon, or a reopened event stream, proves it is serving again.
+function noteServerBack() {
+  serverRestarting = false;
+}
+
+// restartProbe is the recovery watch: /api/status once a second while the
+// daemon is restarting, until it answers. Chrome-only like the header
+// heartbeat (setConn + the credential strip, never a panel), so it keeps the
+// same interaction-gate exemption (jstests/autorefresh.test.mjs); it exists
+// only for the seconds a restart lasts. An HTTP error is still an answer —
+// the daemon is back — only a request that cannot reach it keeps probing.
+let restartProbe = null;
+function startRestartProbe() {
+  if (restartProbe) return;
+  restartProbe = setInterval(async () => {
+    let st;
+    try {
+      st = await apiGet('/api/status');
+    } catch (e) {
+      if (e.status) stopRestartProbe();
+      return;
+    }
+    stopRestartProbe();
+    setConn('ok', `v${st.version || '?'} · ${st.uptime || '-'} · ${st.listen || ''}`);
+    renderCredBanner(st);
+  }, 1000);
+}
+function stopRestartProbe() {
+  if (!restartProbe) return;
+  clearInterval(restartProbe);
+  restartProbe = null;
+}
+
 // ---------- API helpers ----------
 //
 // Each helper rejects on a non-ok response with the parsed body's `error`
@@ -180,8 +236,13 @@ async function apiParse(r) {
     const msg = (data && data.error) || txt || (`HTTP ${r.status}`);
     const err = new Error(msg);
     err.status = r.status;
+    // The draining daemon's gate names itself (code "shutting_down"): the
+    // one 503 that means "retry, I am restarting", not a failed request.
+    err.shuttingDown = r.status === 503 && !!data && data.code === 'shutting_down';
+    if (err.shuttingDown) noteServerRestarting();
     throw err;
   }
+  noteServerBack();
   return data;
 }
 
@@ -256,7 +317,13 @@ const liveDot = document.getElementById('live-dot');
 const brandMeta = document.getElementById('brand-meta');
 
 function setConn(state, meta) {
-  // state: 'ok' | 'err' | 'warn'
+  // state: 'ok' | 'err' | 'warn'. While the daemon is in an announced
+  // restart it is not "lost": the loaders that report a failed refresh
+  // while it is away all read as the restart.
+  if (state === 'err' && serverRestarting) {
+    state = 'warn';
+    meta = RESTARTING_TEXT;
+  }
   if (liveDot) {
     liveDot.classList.remove('ok', 'err', 'warn');
     liveDot.classList.add(state);
@@ -1834,6 +1901,10 @@ function cancelAutoRefreshHold(rootEl) {
 // (text=null removes it). Banner text comes from pure.js staleDataText.
 function setRefreshError(panel, text) {
   if (!panel) return;
+  // A daemon that announced its restart is not a refresh failure: keep the
+  // last data without a banner (the loaders' next successful tick repaints).
+  // Clearing is never held back.
+  if (serverRestarting && text != null) return;
   let el = panel.querySelector(':scope > .refresh-err');
   if (text == null) {
     if (el) el.remove();
@@ -3925,8 +3996,11 @@ function renderLiveCard(target, query) {
 }
 
 // connectLiveEvents opens the live event stream and binds its handlers. Split
-// out of renderLiveCard so the header heartbeat can bring a released stream
-// back after a daemon restart (resumeLiveEvents) without remounting the card.
+// out of renderLiveCard so the stream's construction has exactly one owner;
+// the handlers carry the daemon-restart contract: the named `shutdown` event
+// puts the page into its restarting state (noteServerRestarting), a reopened
+// stream ends it (noteServerBack), and the reconnect itself is the browser's
+// (the frame's `retry:`).
 function connectLiveEvents() {
   liveActive = true;
   try {
@@ -3938,10 +4012,22 @@ function connectLiveEvents() {
     return;
   }
   liveES.onopen = () => {
+    // The stream is (re)opened: the daemon is serving.
+    noteServerBack();
     const t = document.getElementById('live-table');
     if (t && !liveRows.length) t.innerHTML = '<span class="msg hint">Waiting for requests…</span>';
   };
+  // The daemon's own last frame (ServeEvents): it is restarting. Nothing is
+  // released here — the frame's `retry:` has the browser reconnect by itself
+  // every second until the daemon is back; the page only shows the state.
+  liveES.addEventListener('shutdown', () => {
+    noteServerRestarting();
+    const t = document.getElementById('live-table');
+    if (t && !liveRows.length) t.innerHTML = '<span class="msg hint">服务重启中，自动重连…</span>';
+  });
   liveES.onerror = () => {
+    // The end of a noticed stream is the restart in progress, not a fault.
+    if (serverRestarting) return;
     const t = document.getElementById('live-table');
     if (t && !liveRows.length) t.innerHTML = '<span class="msg hint">reconnecting…</span>';
   };
@@ -3954,30 +4040,6 @@ function connectLiveEvents() {
     // popover in place (stream progress, end status, guard hits).
     if (liveDetailPopId && e.request_id === liveDetailPopId) updateLiveDetailPop();
   };
-}
-
-// releaseLiveEvents lets go of the live stream WITHOUT unmounting the card
-// (stopLiveEvents is the unmount path — it clears liveActive too). A daemon
-// told to stop drains its in-flight handlers for 8s before it force-closes
-// connections, and this subscription is the page's only long-lived handler:
-// left open, it held every restart to that deadline (2026-11-26: 3 of 4
-// restarts logged `HTTP drain exceeded 8s` with exactly one in-flight
-// handler). The header heartbeat calls this when the daemon has stopped
-// answering; the draining process then finishes at once. The card keeps its
-// rows and only the empty-table hint changes (no rebuild).
-function releaseLiveEvents() {
-  if (!liveES) return;
-  liveES.close();
-  liveES = null;
-  const t = document.getElementById('live-table');
-  if (t && !liveRows.length) t.innerHTML = '<span class="msg hint">reconnecting…</span>';
-}
-
-// resumeLiveEvents re-opens a released stream while the Live card is still
-// mounted. The SSE handshake replays the recent-event ring, so requests that
-// ended meanwhile are folded into their rows (applyLiveEvent's replay fold).
-function resumeLiveEvents() {
-  if (liveActive && !liveES) connectLiveEvents();
 }
 
 // refreshLiveSessionOptions rebuilds the session combobox's option list from
@@ -5438,14 +5500,6 @@ function stopStatusRefresh() {
 // initial "connecting…" - setConn('ok') otherwise only runs inside
 // renderStatusTab, which the non-Status boot path skips). The inflight guard
 // mirrors statusInflight: a stalled request must not let ticks pile up.
-//
-// The same fetch is the page's heartbeat for its one long-lived connection:
-// once the daemon stops, this heartbeat fails while the Live view's
-// /api/events stream still hangs off the draining process. A failed heartbeat
-// releases that stream (releaseLiveEvents — the process then drains and
-// exits), a successful one brings it back (resumeLiveEvents). Neither touches
-// panel DOM beyond the empty Live table's hint line, so the interaction-gate
-// exemption below still holds.
 let connInflight = false;
 async function refreshConnIndicator() {
   if (connInflight) return;
@@ -5454,10 +5508,8 @@ async function refreshConnIndicator() {
     const st = await apiGet('/api/status');
     setConn('ok', `v${st.version || '?'} · ${st.uptime || '-'} · ${st.listen || ''}`);
     renderCredBanner(st);
-    resumeLiveEvents();
   } catch (e) {
     setConn('err', 'connection lost');
-    releaseLiveEvents();
   } finally {
     connInflight = false;
   }

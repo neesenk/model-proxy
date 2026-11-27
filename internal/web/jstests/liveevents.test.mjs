@@ -117,47 +117,80 @@ test('openLiveDetailPop routes the explicit re-open decision through detailReope
     'openLiveDetailPop must write the re-open state only when it changed');
 });
 
-// 关停兼容（docs/frontend.md「自动刷新 tick 盘点」顶栏 5s 心跳）：页面唯一的长连接
-// 是 Live 的 /api/events 订阅。daemon 关停后监听先关、心跳随即失败，而订阅仍挂在
-// 正在 drain 的旧进程上——11-26 四次重启里三次 drain 等满 8s，其中两次在途恰好
-// 只有这 1 个 handler。契约：心跳失败 → 放开订阅（旧进程随即 drain 完成退出）；
-// 心跳成功 → 接回。行为由 jstests/uishutdown.test.mjs 在真实浏览器里对真实的
-// stop → start 钉住；这里钉接线与符号。
-test('a failed header heartbeat releases the live stream, a successful one takes it back', () => {
-  const refresh = fnBody(appJs, 'refreshConnIndicator');
-  assert.ok(refresh.includes('resumeLiveEvents();'),
-    'a successful heartbeat must re-open a released stream (the page closed it itself, so EventSource auto-reconnect never will)');
-  assert.ok(refresh.includes('releaseLiveEvents();'),
-    'a failed heartbeat must release the stream: the daemon stopped answering while the draining process still holds it');
-  // The catch is the failed-heartbeat path: the release belongs to it, after
-  // the header says the connection is lost — not to the success path.
-  const catchAt = refresh.indexOf('catch (e)');
-  assert.ok(refresh.indexOf('releaseLiveEvents();') > catchAt && refresh.indexOf('resumeLiveEvents();') < catchAt,
-    'release must sit in the failure path and resume in the success path');
+// 关停兼容（docs/frontend.md「daemon 重启」）：页面唯一的长连接是 Live 页的 /api/events
+// 订阅。daemon 关停时服务端给每条事件流推一帧具名 `shutdown` 事件（带 `retry: 1000`）后
+// 结束该流——11-26 四次重启里三次 drain 等满 8s，其中两次在途恰好只有这 1 个 handler。
+// 契约：页面识别这个信号后进入「服务重启中」状态——顶栏不是红色的 connection lost、
+// 不出「刷新失败」横幅、每秒探测恢复；重连由浏览器 EventSource 按 retry 自己做，页面
+// 不写重连循环，也不再靠心跳失败去放开流。行为由 jstests/uishutdown.test.mjs 在真实
+// 浏览器里对真实的 stop → start 钉住；这里钉接线与符号。
+test('a daemon restart is announced, not discovered: the page enters a restarting state instead of erroring', () => {
+  // The stream's shutdown notice and the draining gate's typed 503 are the
+  // two signals; each enters the restarting state exactly once per restart.
+  const connect = fnCode(appJs, 'connectLiveEvents');
+  assert.ok(connect.includes("liveES.addEventListener('shutdown',"),
+    'the live stream must listen for the daemon\'s named shutdown event');
+  const shutdown = connect.slice(connect.indexOf("liveES.addEventListener('shutdown'"));
+  assert.ok(shutdown.includes('noteServerRestarting();'),
+    'the shutdown event must put the page into the restarting state');
+  assert.ok(!shutdown.includes('liveES.close()'),
+    'the page must not close the stream itself: the browser reconnects on the frame\'s retry:');
+  // A reopened stream is the daemon back: onopen ends the restarting state,
+  // and the stream's own error (its noticed end) must not overwrite the hint.
+  const opened = connect.slice(connect.indexOf('liveES.onopen'), connect.indexOf("liveES.addEventListener('shutdown'"));
+  assert.ok(opened.includes('noteServerBack();'), 'a reopened stream must end the restarting state');
+  const errored = connect.slice(connect.indexOf('liveES.onerror'));
+  assert.ok(errored.includes('if (serverRestarting) return;'),
+    'the end of a noticed stream is the restart in progress, not a reconnect to flag');
+  const parse = fnBody(appJs, 'apiParse');
+  assert.ok(parse.includes("err.shuttingDown = r.status === 503") && parse.includes('data.code === \'shutting_down\''),
+    'the gate\'s answer is recognised by its code, not by the bare 503');
+  assert.ok(parse.includes('if (err.shuttingDown) noteServerRestarting();'),
+    'the typed 503 must put the page into the restarting state');
+  assert.ok(parse.includes('noteServerBack();'),
+    'any complete answer from the daemon ends the restarting state');
 
-  const release = fnCode(appJs, 'releaseLiveEvents');
-  assert.ok(release.includes('liveES.close();') && release.includes('liveES = null;'),
-    'releasing must close the EventSource (not just drop the reference) and clear it so the resume can re-open');
-  assert.ok(!release.includes('liveActive ='),
-    'release is not the unmount path: the card stays active so the resume re-opens the stream (stopLiveEvents clears the flag)');
-  // The empty-table hint is the only panel write, same as the stream's own
-  // onerror — never a rebuild (the header tick keeps its interaction-gate
-  // exemption, see autorefresh.test.mjs).
-  assert.ok(!release.includes('renderLive'),
-    'releasing must not re-render the Live table (retained rows stay)');
+  // Once per restart: the flag guards, the probe starts with the state.
+  const entering = fnCode(appJs, 'noteServerRestarting');
+  assert.ok(entering.includes('if (serverRestarting) return;') && entering.includes('startRestartProbe();'),
+    'noteServerRestarting must be idempotent and start the recovery probe');
 
-  const resume = fnCode(appJs, 'resumeLiveEvents');
-  assert.ok(resume.includes('if (liveActive && !liveES)'),
-    'resume only when the Live card is still mounted and the stream was released');
-  assert.ok(resume.includes('connectLiveEvents();'), 'resume goes through the shared stream constructor');
+  // The surfaces read the state centrally: a failed refresh during an
+  // announced restart is the restart, never an outage or a failed panel.
+  assert.ok(fnCode(appJs, 'setConn').includes("if (state === 'err' && serverRestarting)"),
+    'setConn must downgrade err to the restarting state');
+  assert.ok(fnCode(appJs, 'setRefreshError').includes('if (serverRestarting && text != null) return;'),
+    'setRefreshError must stay silent during an announced restart (and still clear)');
 
-  // One implementation of the stream's construction: the card mount and the
-  // resume share connectLiveEvents.
+  // The heartbeat no longer manages the stream: the daemon ends it itself.
+  const heartbeat = fnCode(appJs, 'refreshConnIndicator');
+  assert.ok(!heartbeat.includes('LiveEvents'),
+    'the header heartbeat must not release/resume the live stream any more (the shutdown notice does)');
+  for (const gone of ['releaseLiveEvents', 'resumeLiveEvents']) {
+    assert.ok(!appJs.includes(gone), `${gone} must be gone: the page never releases the stream on a failed heartbeat`);
+  }
+  // One implementation of the stream's construction.
   assert.equal(appJs.split("new EventSource('/api/events')").length - 1, 1,
     'the live EventSource must be constructed in exactly one place');
-  assert.ok(fnCode(appJs, 'connectLiveEvents').includes("new EventSource('/api/events')"),
-    'connectLiveEvents owns the stream construction');
+  assert.ok(connect.includes("new EventSource('/api/events')"), 'connectLiveEvents owns the stream construction');
   assert.ok(fnCode(appJs, 'renderLiveCard').includes('connectLiveEvents();') &&
     !fnCode(appJs, 'renderLiveCard').includes('new EventSource('),
     'renderLiveCard mounts through connectLiveEvents instead of building the stream itself');
+});
+
+// The recovery probe is a tick: it must own its stop (cleared at the first
+// answer) and write topbar chrome only, like the header heartbeat it sits
+// next to (interaction-gate exemption, docs/frontend.md「自动刷新 tick 盘点」).
+test('the restart recovery probe stops at the first answer and touches chrome only', () => {
+  const probe = fnBody(appJs, 'startRestartProbe');
+  assert.ok(probe.includes('setInterval') && probe.includes('1000'), 'the probe polls /api/status once a second');
+  assert.ok(probe.includes("apiGet('/api/status')"), 'the probe asks the same liveness endpoint as the header heartbeat');
+  assert.ok(probe.includes('stopRestartProbe();'), 'the probe stops at the first answer');
+  assert.ok(probe.includes('if (e.status) stopRestartProbe();'),
+    'an HTTP error is still an answer — only an unreachable daemon keeps probing');
+  assert.ok(!probe.includes('deferAutoRefresh') && !probe.includes('renderLive') && !probe.includes('innerHTML ='),
+    'the probe writes setConn + the credential strip only (chrome, gate-exempt)');
+  const stop = fnBody(appJs, 'stopRestartProbe');
+  assert.ok(stop.includes('clearInterval(restartProbe);') && stop.includes('restartProbe = null;'),
+    'stopping clears the interval and lets a later restart start a fresh probe');
 });

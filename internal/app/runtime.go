@@ -50,6 +50,17 @@ func NewRuntime(cfg *configdomain.Config, configPath, logFile string) *Runtime {
 			web.Close()
 		})
 	}
+	// The live event stream is the Web UI's one long-lived handler. The
+	// transport stop is the process server's drain: it must reach the event
+	// hub at once, so every /api/events stream ends with the shutdown notice
+	// (the page reconnects by itself) instead of holding the drain to its
+	// deadline — 2026-11-26: three of four restarts waited out the 8s on a
+	// page's own subscription. /api/events is served with or without the Web
+	// admin, so the task is unconditional.
+	runtime.TransportTasks = append(runtime.TransportTasks, func(stop <-chan struct{}) {
+		<-stop
+		proxy.events.Shutdown()
+	})
 	return runtime
 }
 

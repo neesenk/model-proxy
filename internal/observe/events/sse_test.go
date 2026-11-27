@@ -255,3 +255,76 @@ func assertSSEResponseMetadata(t *testing.T, status int, header http.Header) {
 		}
 	}
 }
+
+// TestServeEventsEndsWithShutdownNotice: a daemon that is stopping tells its
+// live streams instead of holding its drain. The stream is live (initial
+// flush done, replay sent); Shutdown ends it with exactly the notice and the
+// handler returns on its own — no client disconnect, no drain deadline.
+func TestServeEventsEndsWithShutdownNotice(t *testing.T) {
+	hub := NewHub()
+	hub.Publish(Event{Type: "start", RequestID: "r1"})
+	writer := newSyncSSEWriter()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ServeEvents(hub, writer, httptest.NewRequest("GET", "/api/events", nil))
+	}()
+	<-writer.flushed // headers + initial flush: the stream is live
+	hub.Shutdown()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeEvents kept the stream open after Shutdown")
+	}
+	if body := writer.body(); !strings.HasPrefix(body, "data: {") || !strings.HasSuffix(body, shutdownNotice) {
+		t.Fatalf("stream body = %q, want the replayed events followed by exactly the shutdown notice %q", body, shutdownNotice)
+	}
+	// The notice was flushed to the wire before the handler returned.
+	select {
+	case <-writer.flushed:
+	default:
+		t.Fatal("the shutdown notice was not flushed")
+	}
+}
+
+// A page that reconnects while the daemon is already draining gets the
+// notice at once — and its handler returns at once too, so the reconnect
+// cannot hold the drain either. Nothing is replayed to a leaving daemon.
+func TestServeEventsAfterShutdownAnswersNoticeAtOnce(t *testing.T) {
+	hub := NewHub()
+	hub.Publish(Event{Type: "start", RequestID: "r1"})
+	hub.Shutdown()
+	writer := newSyncSSEWriter()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ServeEvents(hub, writer, httptest.NewRequest("GET", "/api/events", nil))
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a stream opened after Shutdown was kept open")
+	}
+	if body := writer.body(); body != shutdownNotice {
+		t.Fatalf("stream body = %q, want exactly the shutdown notice", body)
+	}
+}
+
+// Shutdown is idempotent and nil-safe: the transport task, a second stop
+// signal and a hub-less proxy must all be harmless.
+func TestHubShutdownIsIdempotentAndNilSafe(t *testing.T) {
+	hub := NewHub()
+	if hub.Stopping() {
+		t.Fatal("a fresh hub reports stopping")
+	}
+	hub.Shutdown()
+	hub.Shutdown()
+	if !hub.Stopping() {
+		t.Fatal("Shutdown did not take effect")
+	}
+	var nilHub *Hub
+	nilHub.Shutdown()
+	if nilHub.Stopping() {
+		t.Fatal("a nil hub reports stopping")
+	}
+}
