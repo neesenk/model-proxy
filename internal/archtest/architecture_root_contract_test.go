@@ -89,6 +89,9 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			// catalogLoader is the initCatalog seam (production:
 			// configdomain.LoadModelsCatalog; tests stub it offline).
 			"catalogLoader": true,
+			// pricingLoader is the pricing refresh seam (production:
+			// pricing.EnsureFresh; hand-built test proxies leave it nil).
+			"pricingLoader": true,
 		}
 		if got := structContractViolations(
 			namedStructFields(t, rootPackage, "Proxy"), wantProxyFields, nil,
@@ -126,7 +129,10 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			"mcpReqLog": true, "mcpReqLogStarted": true,
 			"sessionScan": true, "responsesState": true, "events": true, "adjudication": true,
 			"mcpSessions": true, "mcpRR": true, "mcpStdio": true, "mcpStats": true,
-			"catalog":       true,
+			"catalog": true,
+			// Pricing snapshot + background-refresh state (guarded by the
+			// Proxy-level pricingMu): request paths read it, never fetch.
+			"pricing": true, "pricingRefreshing": true, "pricingRetryAt": true, "pricingKey": true,
 			"proxyResolver": true, "transports": true, "transportsMu": true,
 			"wireCaps": true, "wireProbe": true, "wireProbeMu": true,
 			"wireProbePending": true,

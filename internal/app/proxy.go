@@ -17,6 +17,7 @@ import (
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/observe/seclog"
 	observestats "model-proxy/internal/observe/stats"
+	"model-proxy/internal/pricing"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/provider"
 	"model-proxy/internal/providerbuild"
@@ -100,6 +101,15 @@ type processServices struct {
 	responsesState     *protocol.ResponsesStateStore // previous_response_id replay for Responses clients bridged to stateless backends
 	events             *observeevents.Hub            // live request monitor fan-out hub (SSE /api/events); always non-nil
 	catalog            *catalog.Catalog              // models.dev metadata (context window + modalities) for request-aware routing; survives reload; refreshed async best-effort; nil = unavailable, degrade gracefully
+	// Pricing state (guarded by Proxy.pricingMu, the cross-group lock): the
+	// catalog handed to request paths — the last refresh's result, else the
+	// disk cache seeded at boot — the background refresh's single-flight
+	// flag, the failure backoff, and the refresh description (endpoint, cache
+	// file, TTL) that state was computed for. Never fetched on a request.
+	pricing           *pricing.Catalog
+	pricingRefreshing bool
+	pricingRetryAt    time.Time
+	pricingKey        string
 
 	// Upstream proxy resolution (internal/upstreamproxy): the resolver caches
 	// OS system-proxy detection once per process; the transport pool is keyed
@@ -165,8 +175,15 @@ type Proxy struct {
 	configGeneration atomic.Uint64 // incremented on every successful reload
 	generationState
 	processServices
-	pricingMu sync.Mutex // guards pricing during refresh (thundering-herd guard on pricing.EnsureFresh)
-	closeOnce sync.Once
+	// pricingMu guards the pricing state in processServices (pricing,
+	// pricingRefreshing, pricingRetryAt, pricingKey): a cross-group lock, so
+	// it lives here like mu.
+	pricingMu sync.Mutex
+	// pricingLoader refreshes the pricing catalog OFF the request path
+	// (production: pricing.EnsureFresh; hand-built test proxies leave it nil
+	// and stay offline, like catalogLoader).
+	pricingLoader func(pricing.RefreshOptions) (*pricing.Catalog, error)
+	closeOnce     sync.Once
 	// catalogLoader loads the models.dev metadata catalog for initCatalog
 	// (boot + reload's best-effort refresh). Production wiring is
 	// configdomain.LoadModelsCatalog, set once by NewProxyWithStatePath before
@@ -296,6 +313,7 @@ func NewProxyWithStatePath(cfg *configdomain.Config, qpath string) *Proxy {
 		// Read once here (not per request): MP_PPROF=1 turns on /debug/pprof/.
 		pprofEnabled:  os.Getenv("MP_PPROF") == "1",
 		catalogLoader: configdomain.LoadModelsCatalog,
+		pricingLoader: pricing.EnsureFresh,
 	}
 	p.runtimeState.ReplaceGeneration(1, providerKeySet(built.Providers))
 	p.configGeneration.Store(1)

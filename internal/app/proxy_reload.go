@@ -196,6 +196,7 @@ func (p *Proxy) Reload(configPath string) error {
 	// resolve their context window / modalities for request-aware routing. A
 	// failure leaves the previous catalog in place (never fails the reload).
 	p.refreshCatalogAsync()
+	p.initPricing()
 	// Re-probe wire capabilities for providers whose verdict is missing or
 	// whose base_url changed (existing verdicts survive reload — wireCaps is
 	// not part of the cleared health state).

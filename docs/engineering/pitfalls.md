@@ -273,6 +273,16 @@
     `FlushError()`：小写入先落 bufio，超时失败发生在 flush，而 `http.Flusher.Flush` 报不出错误。
     在这条链上新增中间层 wrapper 时同此。
 
+46. **请求路径上不要同步做带超时的网络刷新**：`Proxy.pricingSnapshot` 曾在 `pricingMu` 下同步调
+    `pricing.EnsureFresh`——缓存陈旧且源不可达时，每个 `/api/sessions`、`/api/analytics` 请求都等完
+    fetch 超时（5s/请求），而且失败不做负缓存，请求越多撞得越多。现状：读内存快照、后台单飞刷新、
+    失败退避、启动/reload 预热（`docs/web-api.md`「价格」）。**症状识别**：某个只读端点延迟恒等于一个
+    整数秒（像超时）而其它端点几毫秒——先量端点延迟，别先怀疑用例。另一面是**测试夹具里的隐式外网
+    依赖**：UI 浏览器 e2e 的沙箱 serve 只带 `PATH`/`HOME`/`MP_MODELSDEV_URL`，没有代理环境变量，
+    任何没被 stub 的外部源（当时是定价源）在换过网络的机器上要么超时要么被拦，表现为一批互不相关
+    的用例「等不到」而各自单跑又是绿的——凡守护进程会主动访问的外部源都要指到进程内 stub
+    （`MP_MODELSDEV_URL`、`MP_PRICING_URL`），`uiboot.mjs` 现在两者都覆盖。
+
 ## 回归要求
 
 - 每个陷阱应有测试或明确的测试缺口。

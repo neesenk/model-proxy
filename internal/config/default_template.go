@@ -532,7 +532,7 @@ providers:
 # Equivalent-cost analytics: token usage × OpenRouter price catalog (cached).
 # pricing:
 #   enabled: true                       # default; false → cost shows n/a everywhere
-#   ttl: 24h                            # default catalog cache TTL
+#   ttl: 24h                            # default catalog cache TTL; a stale catalog is refreshed in the background — requests never wait on the fetch
 #   # source_url: https://openrouter.ai/api/v1/models  # default; MP_PRICING_URL env also works
 # Per-model price overrides (USD per 1M tokens) for models the catalog misses:
 # prices:

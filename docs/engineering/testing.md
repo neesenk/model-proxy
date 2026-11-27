@@ -538,7 +538,10 @@ ok/err/错误率/p50/p95/p99/流式 TTFT/状态码分布，`-max-error-rate` 超
 实现：真实浏览器端到端，不引入 npm 浏览器框架。共享 boot fixture 在 `uiboot.mjs`
 （唯一事实源，不得复制）：构建真实二进制，沙箱启动 `serve`（temp HOME、loopback 端口、
 static provider + **进程内 stub 上游**——终态 5xx 不经 capture 层、不落 request log，
-因此必须用 200 round-trip 驱动；stub 是 loopback 常量响应，不是真实上游），经零依赖
+因此必须用 200 round-trip 驱动；stub 是 loopback 常量响应，不是真实上游；守护进程会主动访问的两个
+外部源——models.dev 与定价目录——都经 `MP_MODELSDEV_URL` / `MP_PRICING_URL` 指回这个 stub：沙箱 env
+没有代理变量，漏掉任何一个都会让一批互不相关的用例在换过网络的机器上「等不到」而各自单跑是绿的，
+2026-11-27 的定价源即此，见 pitfalls #46），经零依赖
 CDP 驱动（`cdp.mjs`：Node 内置 WebSocket + 本地 Chromium/Chrome，发现链 `MP_BROWSER` →
 playwright 缓存 → 系统安装）加载真实 `/ui/`。
 

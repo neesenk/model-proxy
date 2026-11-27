@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/observe/logx"
 	runtimestate "model-proxy/internal/runtime"
@@ -22,10 +23,21 @@ func (p *Proxy) cfgSnapshot() *configdomain.Config {
 	return p.cfg
 }
 
-// pricingSnapshot returns a usable price catalog, refreshing the cache when
-// stale (best-effort; offline falls back to the stale cache). Nil-safe (including
-// a nil cfg, as in degenerate tests) and thundering-herd-safe. Returns nil when
-// pricing is disabled.
+// pricingRetryBackoff is how long a failed or fruitless pricing refresh keeps
+// the next one from starting. An unreachable source must cost one background
+// attempt per interval, not one per request.
+const pricingRetryBackoff = time.Minute
+
+// pricingSnapshot returns the best pricing catalog available RIGHT NOW: the
+// last refresh's result, else the disk cache seeded at boot, else an empty
+// catalog. It never waits on the network. A catalog that is missing or older
+// than the TTL starts one background refresh (single flight, with a backoff
+// after failures); the callers that came first are served the previous
+// catalog and pick the fresh one up on their next call. Before this, a stale
+// or missing cache made every /api/sessions and /api/analytics request fetch
+// the source synchronously: with the source unreachable each of them waited
+// out the fetch timeout (2026-11-27, measured 5s per request in a sandbox
+// without a route to the pricing source; up to the 10s client timeout).
 func (p *Proxy) pricingSnapshot() *pricing.Catalog {
 	if p == nil {
 		return nil
@@ -34,19 +46,119 @@ func (p *Proxy) pricingSnapshot() *pricing.Catalog {
 	if cfg == nil || !cfg.Pricing.IsEnabled() {
 		return nil
 	}
+	p.refreshPricingIfDue(pricingRefreshOptions(cfg), false)
 	p.pricingMu.Lock()
-	defer p.pricingMu.Unlock()
-	cat, err := pricing.EnsureFresh(pricing.RefreshOptions{
+	catalog := p.pricing
+	p.pricingMu.Unlock()
+	if catalog == nil {
+		return pricing.Empty()
+	}
+	return catalog
+}
+
+// pricingRefreshOptions describes one config generation's pricing source.
+func pricingRefreshOptions(cfg *configdomain.Config) pricing.RefreshOptions {
+	return pricing.RefreshOptions{
 		CacheFile: pricing.CachePath(accounts.HomeDir()),
 		Endpoint:  cfg.Pricing.ResolvedSourceURL(),
 		Fetch:     pricing.FetchHTTP,
 		TTL:       cfg.Pricing.TTLDuration(),
 		Warnings:  os.Stderr,
-	})
-	if err != nil || cat == nil {
-		return pricing.Empty()
 	}
-	return cat
+}
+
+// initPricing seeds the snapshot from the disk cache (a local read, no
+// network) and, when that is missing or stale, starts the background refresh
+// right away — a restart never leaves its first pricing-needing request to
+// discover the state. Called at boot and reload.
+func (p *Proxy) initPricing() {
+	cfg := p.cfgSnapshot()
+	if cfg == nil || !cfg.Pricing.IsEnabled() {
+		return
+	}
+	options := pricingRefreshOptions(cfg)
+	if cached, _ := pricing.LoadCached(options.CacheFile); cached != nil {
+		p.pricingMu.Lock()
+		if p.pricing == nil || cached.FetchedAt.After(p.pricing.FetchedAt) {
+			p.pricing = cached
+		}
+		p.pricingMu.Unlock()
+	}
+	p.refreshPricingIfDue(options, false)
+}
+
+// refreshPricingIfDue starts one background refresh when the catalog is
+// missing or older than the TTL and no refresh is in flight; after a failed
+// or fruitless refresh it waits for the backoff so an unreachable source is
+// not hammered. A reload that changed the source, the cache file or the TTL
+// re-evaluates from scratch (the backoff of the old source is dropped).
+func (p *Proxy) refreshPricingIfDue(options pricing.RefreshOptions, force bool) {
+	if p.pricingLoader == nil {
+		return
+	}
+	key := options.Endpoint + "\x00" + options.CacheFile + "\x00" + options.TTL.String()
+	now := time.Now()
+	p.pricingMu.Lock()
+	if key != p.pricingKey {
+		p.pricingKey, p.pricingRetryAt = key, time.Time{}
+	}
+	due := force || p.pricing == nil || now.Sub(p.pricing.FetchedAt) >= options.TTL
+	if !due || p.pricingRefreshing || now.Before(p.pricingRetryAt) {
+		p.pricingMu.Unlock()
+		return
+	}
+	p.pricingRefreshing = true
+	p.pricingMu.Unlock()
+	// The lifecycle owns the task (stop/wait at shutdown). A lifecycle that is
+	// already stopping admits no task: the request path then keeps serving the
+	// last catalog, which is all a draining process needs.
+	if !p.lifecycle.Run(func(stop <-chan struct{}) {
+		stopped := options
+		stopped.Fetch = pricingFetchUntilStop(stop)
+		p.refreshPricing(stopped)
+	}) {
+		p.pricingMu.Lock()
+		p.pricingRefreshing = false
+		p.pricingMu.Unlock()
+	}
+}
+
+// pricingFetchUntilStop is the refresh's fetch: it aborts as soon as stop
+// closes, so shutdown never waits out the pricing source's timeout.
+func pricingFetchUntilStop(stop <-chan struct{}) pricing.FetchFunc {
+	return func(endpoint, etag string) (int, []byte, string, error) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			select {
+			case <-stop:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		return pricing.FetchHTTPContext(ctx, endpoint, etag)
+	}
+}
+
+// refreshPricing is the background task: it installs the loader's result and
+// records whether the source answered. EnsureFresh reports a stale cache
+// served after a failed fetch as a success — so staleness, not the error
+// alone, decides the backoff.
+func (p *Proxy) refreshPricing(options pricing.RefreshOptions) {
+	catalog, err := p.pricingLoader(options)
+	p.pricingMu.Lock()
+	defer p.pricingMu.Unlock()
+	p.pricingRefreshing = false
+	switch {
+	case err != nil || catalog == nil:
+		p.pricingRetryAt = time.Now().Add(pricingRetryBackoff)
+	case time.Since(catalog.FetchedAt) >= options.TTL:
+		p.pricing = catalog
+		p.pricingRetryAt = time.Now().Add(pricingRetryBackoff)
+	default:
+		p.pricing = catalog
+		p.pricingRetryAt = time.Time{}
+	}
 }
 
 // priceOverrides returns the current config `prices:` overrides for the handler.

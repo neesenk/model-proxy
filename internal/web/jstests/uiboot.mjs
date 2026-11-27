@@ -92,6 +92,19 @@ export async function bootUiE2E(opts = {}) {
       }));
       return;
     }
+    // The pricing catalog (OpenRouter's public price list shape), served so
+    // the daemon's pricing refresh — a background fetch at boot and whenever
+    // the cache is stale — never leaves the sandbox. MP_PRICING_URL points the
+    // daemon here; without it every sandbox priced off the real network, and
+    // on a network without a route to the source each /api/sessions and
+    // /api/analytics call paid the fetch (2026-11-27: 5s per request).
+    if (req.method === 'GET' && req.url === '/pricing') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        data: [{ id: 'sandbox/m1', pricing: { prompt: '0.000001', completion: '0.000002', input_cache_read: '0.0000001', input_cache_write: '0.0000002' } }],
+      }));
+      return;
+    }
     req.resume();
     req.on('end', () => {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -105,6 +118,7 @@ export async function bootUiE2E(opts = {}) {
   await new Promise((r) => ctx.upstream.listen(0, '127.0.0.1', r));
   const upstreamPort = ctx.upstream.address().port;
   ctx.modelsDevURL = `http://127.0.0.1:${upstreamPort}/models.dev`;
+  ctx.pricingURL = `http://127.0.0.1:${upstreamPort}/pricing`;
 
   const proxyBin = path.join(ctx.sandbox, 'model-proxy');
   const build = spawnSync('go', ['build', '-o', proxyBin, '.'], { cwd: REPO, encoding: 'utf8' });
@@ -173,6 +187,7 @@ ${authBlock}`, { mode: 0o600 });
         HOME: path.join(ctx.sandbox, 'home'),
         PATH: process.env.PATH,
         MP_MODELSDEV_URL: ctx.modelsDevURL,
+        MP_PRICING_URL: ctx.pricingURL,
       },
       stdio: ['ignore', 'ignore', logFd],
     });

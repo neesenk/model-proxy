@@ -1,6 +1,7 @@
 package pricing
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,7 +28,14 @@ type RefreshOptions struct {
 // FetchHTTP retrieves the OpenRouter catalog. The default Transport owns
 // compression negotiation so callers always receive a decoded body.
 func FetchHTTP(endpoint, etag string) (int, []byte, string, error) {
-	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	return FetchHTTPContext(context.Background(), endpoint, etag)
+}
+
+// FetchHTTPContext is FetchHTTP bound to a context: canceling the context
+// aborts a fetch in flight, so a caller that must not wait on the network
+// (a daemon shutting down) can cut it short.
+func FetchHTTPContext(ctx context.Context, endpoint, etag string) (int, []byte, string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return 0, nil, "", err
 	}
@@ -67,6 +75,14 @@ func loadCache(path string) (*Catalog, error) {
 		catalog.ByModel = map[string]Entry{}
 	}
 	return &catalog, nil
+}
+
+// LoadCached returns the persisted catalog without touching the network:
+// nil when nothing was cached yet. Callers that must never wait on the
+// source (the daemon's request path) seed themselves from it and refresh in
+// the background through EnsureFresh.
+func LoadCached(path string) (*Catalog, error) {
+	return loadCache(path)
 }
 
 func saveCache(path string, catalog *Catalog) error {

@@ -8,6 +8,9 @@ import (
 	configdomain "model-proxy/internal/config"
 	obscounters "model-proxy/internal/observe/counters"
 	observestats "model-proxy/internal/observe/stats"
+	"model-proxy/internal/pricing"
+	runtimestate "model-proxy/internal/runtime"
+	"model-proxy/internal/testsyn"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -761,11 +764,22 @@ func TestAPIAnalyticsUsesCatalogThenDetachedOverride(t *testing.T) {
 			}},
 		},
 		processServices: processServices{
-			metrics: obscounters.NewMetricsStore(),
-			tokens:  obscounters.NewTokenCounter(),
-			stats:   newTestStatsStore(t),
+			metrics:   obscounters.NewMetricsStore(),
+			tokens:    obscounters.NewTokenCounter(),
+			stats:     newTestStatsStore(t),
+			lifecycle: runtimestate.NewLifecycle(),
 		},
+		// The request path reads the pricing snapshot and never fetches
+		// (pricingSnapshot): the catalog arrives through the background
+		// refresh, which the lifecycle owns.
+		pricingLoader: pricing.EnsureFresh,
 	}
+	t.Cleanup(p.Close)
+	p.initPricing()
+	testsyn.WaitUntil(t, "the pricing catalog to load from the stub", func() bool {
+		_, ok := p.pricingSnapshot().Lookup("glm-4.6")
+		return ok
+	})
 	minute := time.Now().Unix() / 60 * 60
 	if err := p.stats.Flush(minute, map[observestats.Key]observestats.Counters{
 		{Provider: "zhipu", Model: "glm-4.6"}: {

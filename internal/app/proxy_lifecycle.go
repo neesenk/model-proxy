@@ -41,6 +41,10 @@ func (p *Proxy) StartRuntimeServices(cfg *configdomain.Config) {
 	// Startup catalog loading remains synchronous so the first request gets the
 	// best available routing metadata, matching the previous daemon behavior.
 	p.initCatalog()
+	// Same shape for pricing: the disk cache seeds the snapshot now, and a
+	// missing or stale one starts refreshing in the background — the request
+	// path never fetches it (see pricingSnapshot).
+	p.initPricing()
 }
 
 func (p *Proxy) refreshCatalogAsync() {

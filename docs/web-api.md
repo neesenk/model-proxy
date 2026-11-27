@@ -133,8 +133,9 @@ config、不 reload、不替换 verdict，也不能被当成“上游全失败�
 - 顶层 `prices:` map — per-model override，单位 **USD per MILLION tokens**（人类单位）；字段 `input`/`output`/`cache_read`/`cache_write`（后两者默认 0）。命中即盖过目录。
 
 **缓存**（`internal/pricing`，镜像 models.dev 模式）：`~/.model-proxy/pricing_cache.json`，TTL 默认 24h（`pricing.DefaultTTL`，可被 `pricing.ttl` 覆盖）。`pricing.EnsureFresh`：fresh → 用；stale → conditional GET（带 `If-None-Match`）；304 → 只刷 `fetched_at` + 持久化；200 → 重建 + 持久化。持久化使用目标目录中的唯一临时文件再 atomic rename，多个进程不会争用固定 `.tmp`，读取者只观察完整 JSON。抓取失败：有旧 → 用旧 + stderr 告警；无 → 空 catalog（未知价显示 n/a，不阻塞 UI）。
+**守护进程里的刷新不在请求路径上**（`Proxy.pricingSnapshot` / `refreshPricing` / `initPricing`，`internal/app/proxy_snapshot.go`）：`/api/analytics` 与 `/api/sessions` 的成本计算读内存快照，从不等网络。启动与 reload 先用磁盘缓存播种快照（本地读）；快照缺失或超过 TTL 时发起**一次**后台刷新（`p.lifecycle` 接纳、单飞；fetch 绑定 lifecycle 的 stop，关停不等它）。刷新落地前到达的请求拿到上一份目录（没有则空 catalog），下一次调用即拿到新的。刷新失败、或失败后拿到的仍是陈旧缓存 → 1 分钟内不再重试（`pricingRetryBackoff`）；reload 改了 `source_url` / TTL → 旧源的退避作废、下次调用即试新源。此前快照在 `pricingMu` 下同步调 `EnsureFresh`：缓存陈旧且源不可达时，**每个** `/api/sessions`、`/api/analytics` 请求都要等完 fetch 超时（2026-11-27 沙箱实测 5s/请求，上限 10s）。锁定测试在 `internal/app/metrics_test.go`（`TestPricingSnapshot*`、`TestInitPricing*`、`TestPricingRefreshStopsWithTheLifecycle`）。
 
-**环境变量 `MP_PRICING_URL`**：pricing 端点解析优先级 **config `pricing.source_url` > `MP_PRICING_URL` env > OpenRouter 默认**（`pricing.DefaultEndpoint`）。`PricingConfig.ResolvedSourceURL()`（`internal/config`）在 config 未设时回落到环境变量，**镜像 `MP_MODELSDEV_URL`** 的 test/mirror override 语义，生产路径 `Proxy.pricingSnapshot`（`proxy.go`）经此生效。单测 `internal/config` 的 `TestPricingConfigSourceURL_Precedence` 钉死 config > env > default 三级优先级；目录、缓存与计算测试归属 `internal/pricing/pricing_test.go`。
+**环境变量 `MP_PRICING_URL`**：pricing 端点解析优先级 **config `pricing.source_url` > `MP_PRICING_URL` env > OpenRouter 默认**（`pricing.DefaultEndpoint`）。`PricingConfig.ResolvedSourceURL()`（`internal/config`）在 config 未设时回落到环境变量，**镜像 `MP_MODELSDEV_URL`** 的 test/mirror override 语义，生产路径 `Proxy.pricingSnapshot`（`internal/app/proxy_snapshot.go`）经此生效。单测 `internal/config` 的 `TestPricingConfigSourceURL_Precedence` 钉死 config > env > default 三级优先级；目录、缓存与计算测试归属 `internal/pricing/pricing_test.go`。
 
 **Web UI**：`/ui/` Analytics 标签页（`internal/web/assets/`）消费
 `/api/analytics`，自上而下：单行工具栏（**时间选择器**——与 Status→Token usage 同款触发钮
@@ -184,7 +185,7 @@ KPI chip 行（同一 `analyticsRenderKpis`，tokens 同为四桶直合，含等
 
 **CLI**：`stats --granularity day|month` 或 `--cost` 任一 → `renderAnalytics` 改打 `/api/analytics`（`formatAnalyticsTable`：每 (provider,model) 一行 = 窗口内 SUM，`--cost` 才出 cost 列，未定价 `n/a`；`--json` 原样）。两者都省略 → 走 `/api/stats`，输出与原 `stats` **字节一致**（CLI 契约不变，append-only；`hour`/`by=agent`/`compare` 是 web 端扩展，CLI 不消费）。
 
-**锁与依赖纪律**：`Proxy.pricingMu` 独立叶子锁；`pricingSnapshot`/`priceOverrides` 经 `cfgSnapshot()` RLock 读 cfg，不持 `p.mu` 调入。`internal/pricing` 不依赖 main 包的 YAML 配置、Proxy 或 Web；组合根的 `detachedPricing`（`internal/app/proxy_snapshot.go`）是 `PriceConfig → pricing.Override` 的复制/单位边界，admin 端口共用。无 stats store → `series:[]`（nil-safe）。
+**锁与依赖纪律**：`Proxy.pricingMu` 独立叶子锁（护的是定价状态：当前目录、单飞标志、退避时刻、刷新描述）；`pricingSnapshot`/`priceOverrides` 经 `cfgSnapshot()` RLock 读 cfg，不持 `p.mu` 调入；后台刷新经 `p.lifecycle.Run` 接纳，手搓的 `&Proxy{}`（无 lifecycle / `pricingLoader`）不刷新、只返回现有快照。`internal/pricing` 不依赖 main 包的 YAML 配置、Proxy 或 Web；组合根的 `detachedPricing`（`internal/app/proxy_snapshot.go`）是 `PriceConfig → pricing.Override` 的复制/单位边界，admin 端口共用。无 stats store → `series:[]`（nil-safe）。
 
 ## MCP 网关面（`GET /api/mcp`）
 
