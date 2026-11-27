@@ -116,3 +116,48 @@ test('openLiveDetailPop routes the explicit re-open decision through detailReope
   assert.ok(body.includes('if (reopened !== state) liveDetailState.set(id, reopened);'),
     'openLiveDetailPop must write the re-open state only when it changed');
 });
+
+// 关停兼容（docs/frontend.md「自动刷新 tick 盘点」顶栏 5s 心跳）：页面唯一的长连接
+// 是 Live 的 /api/events 订阅。daemon 关停后监听先关、心跳随即失败，而订阅仍挂在
+// 正在 drain 的旧进程上——11-26 四次重启里三次 drain 等满 8s，其中两次在途恰好
+// 只有这 1 个 handler。契约：心跳失败 → 放开订阅（旧进程随即 drain 完成退出）；
+// 心跳成功 → 接回。行为由 jstests/uishutdown.test.mjs 在真实浏览器里对真实的
+// stop → start 钉住；这里钉接线与符号。
+test('a failed header heartbeat releases the live stream, a successful one takes it back', () => {
+  const refresh = fnBody(appJs, 'refreshConnIndicator');
+  assert.ok(refresh.includes('resumeLiveEvents();'),
+    'a successful heartbeat must re-open a released stream (the page closed it itself, so EventSource auto-reconnect never will)');
+  assert.ok(refresh.includes('releaseLiveEvents();'),
+    'a failed heartbeat must release the stream: the daemon stopped answering while the draining process still holds it');
+  // The catch is the failed-heartbeat path: the release belongs to it, after
+  // the header says the connection is lost — not to the success path.
+  const catchAt = refresh.indexOf('catch (e)');
+  assert.ok(refresh.indexOf('releaseLiveEvents();') > catchAt && refresh.indexOf('resumeLiveEvents();') < catchAt,
+    'release must sit in the failure path and resume in the success path');
+
+  const release = fnCode(appJs, 'releaseLiveEvents');
+  assert.ok(release.includes('liveES.close();') && release.includes('liveES = null;'),
+    'releasing must close the EventSource (not just drop the reference) and clear it so the resume can re-open');
+  assert.ok(!release.includes('liveActive ='),
+    'release is not the unmount path: the card stays active so the resume re-opens the stream (stopLiveEvents clears the flag)');
+  // The empty-table hint is the only panel write, same as the stream's own
+  // onerror — never a rebuild (the header tick keeps its interaction-gate
+  // exemption, see autorefresh.test.mjs).
+  assert.ok(!release.includes('renderLive'),
+    'releasing must not re-render the Live table (retained rows stay)');
+
+  const resume = fnCode(appJs, 'resumeLiveEvents');
+  assert.ok(resume.includes('if (liveActive && !liveES)'),
+    'resume only when the Live card is still mounted and the stream was released');
+  assert.ok(resume.includes('connectLiveEvents();'), 'resume goes through the shared stream constructor');
+
+  // One implementation of the stream's construction: the card mount and the
+  // resume share connectLiveEvents.
+  assert.equal(appJs.split("new EventSource('/api/events')").length - 1, 1,
+    'the live EventSource must be constructed in exactly one place');
+  assert.ok(fnCode(appJs, 'connectLiveEvents').includes("new EventSource('/api/events')"),
+    'connectLiveEvents owns the stream construction');
+  assert.ok(fnCode(appJs, 'renderLiveCard').includes('connectLiveEvents();') &&
+    !fnCode(appJs, 'renderLiveCard').includes('new EventSource('),
+    'renderLiveCard mounts through connectLiveEvents instead of building the stream itself');
+});

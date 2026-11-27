@@ -527,11 +527,11 @@ ok/err/错误率/p50/p95/p99/流式 TTFT/状态码分布，`-max-error-rate` 超
 
 `scripts/restart_serve.sh` 的端到端契约由 `scripts/restartserve/`（纯测试包）承载：构建真实 model-proxy 二进制，在沙箱（`t.TempDir` HOME+TMPDIR、loopback 空闲端口、static provider）启动真实 serve 进程，再运行脚本并断言可观察语义——**热切换**（旧进程被停、端口换 pid 由脚本拉起的 **supervised daemon** 重新监听、`serve.pid` 落在 `--log-file` 旁、脚本管理的日志出现新实例 listening 行）与**冷启动**（无监听者时从 config.yaml 的 `listen:` 解析端口并拉起 daemon）、**daemon supervisor 停止**（旧 supervisor/worker 退出且旧 pidfile 被清除，绝不留下 supervisor 复活 worker）、**回滚**（坏二进制 → 恢复 `model-proxy.old`、旧二进制重新 daemon 并服务、exit 1「未部署」、`.old` 被消费）。测试清理先 `serve stop`（两处 pidfile 派生都探测）再按端口杀——只杀 worker 会被 supervisor 约 1s 后复活（pitfalls #24b）。旧进程退出用 cmd.Wait 回收后的 channel 判定（未回收的僵尸会让 kill(2) 假阳性）；并发/等待一律用轮询条件，不用固定 Sleep 赌时序。该套件通过 `unix` 构建条件限定平台；需要 lsof 的用例在缺少它时跳过。进入常规 `go test ./...` 与 race 矩阵。
 
-## UI 浏览器 e2e（`internal/web/jstests/uie2e.test.mjs` / `uivisual.test.mjs`，按需门禁）
+## UI 浏览器 e2e（`internal/web/jstests/uie2e.test.mjs` / `uivisual.test.mjs` / `uishutdown.test.mjs`，按需门禁）
 
 **不进每次修改的默认矩阵**——耗时 UI 自动化是阶段门禁：UI 改动提交前与发版前用
-`MP_UI_E2E=1 node --test --test-concurrency=1 internal/web/jstests/uie2e.test.mjs internal/web/jstests/uivisual.test.mjs`（固定串行，避免两套浏览器 + serve 栈争用资源；`MP_UI_E2E=1 go test ./internal/web` 的 Go 驱动路径在开关打开时同样串行，`TestJSTestArgsSerializeBrowserE2E` 钉住）
-显式运行。默认（无 `MP_UI_E2E`）两个文件快速 Skip，常规 `node --test jstests/*.test.mjs`
+`MP_UI_E2E=1 node --test --test-concurrency=1 internal/web/jstests/uie2e.test.mjs internal/web/jstests/uivisual.test.mjs internal/web/jstests/uishutdown.test.mjs`（固定串行，避免多套浏览器 + serve 栈争用资源；`MP_UI_E2E=1 go test ./internal/web` 的 Go 驱动路径在开关打开时同样串行，`TestJSTestArgsSerializeBrowserE2E` 钉住）
+显式运行。默认（无 `MP_UI_E2E`）三个文件快速 Skip，常规 `node --test jstests/*.test.mjs`
 与 `go test ./internal/web` 不受影响；`MP_UI_E2E=1` 且无浏览器时 Skip，再加
 `MP_REQUIRE_UI_E2E=1` 升级为 FAIL（同 `MP_REQUIRE_NODE` 模式）。
 
@@ -563,6 +563,17 @@ playwright 缓存 → 系统安装）加载真实 `/ui/`。
   供人工复核。**列几何均衡**：表格铺满卡片内容盒（右侧无死空白，注意 clientWidth 含
   padding 要扣除）、八列契约每列非挤压宽度（≥24px 防挤到不可读）、列间不重叠、表头与
   数据行逐列对齐（fixed layout 同一 colgroup）。
+- `uishutdown.test.mjs`（关停兼容，2026-11-26 日检）：页面唯一的长连接是 Live 页的 `/api/events`
+  订阅，而 daemon 关停要等在途 handler 最多 8s——开着 Live 页时每次重启都被它占到 deadline。
+  真实浏览器 + 沙箱 serve 的 stop → start（同 `scripts/restart_serve.sh` 的顺序，本套件中途停启
+  **自己的**沙箱 serve，故独占一次 boot）：SIGTERM 后 daemon 必须在一个心跳间隔（5s）内退出、
+  日志无 `HTTP drain exceeded`（修复前实测 8031ms + 该行、`in-flight handlers: 1`）；同一页面在
+  daemon 回来后必须重新接上事件流——页面自己关的流浏览器不会自动重连，恢复后驱动一条真实请求、
+  其 live 行必须出现（新进程的事件环是空的，这一行只能来自实时订阅）。`uiboot.mjs` 为此把
+  serve 的 stderr 落到沙箱 `serve.log`，并把启动拆成 `ctx.startProxy`/`ctx.waitProxyReady`。
+  后台页签的定时器可能被浏览器深度节流（Chromium 对隐藏超过 5 分钟的页面把链式定时器约每分钟
+  才触发一次），这时放开会晚于 deadline——页面在前台（或刚隐藏）才保证生效；headless 下页签
+  可见，本套件量到的是前者。
 
 实现陷阱（排障前先读）：页面在代理未就绪时导航会落 `chrome-error://` 并被 Chrome 换
 文档，投向将死文档的点击全部丢失——boot 必须等「URL 正确 + readyState complete +

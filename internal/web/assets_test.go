@@ -68,9 +68,10 @@ func TestWebAssetsPureJSUnitTests(t *testing.T) {
 }
 
 // jsTestArgs is the node argument list that runs the jstests files. Node runs
-// test files concurrently by default; with the browser e2e enabled each of the
-// two browser suites starts its own browser and serve stack, so they are run
-// serially exactly like the documented on-demand command does
+// test files concurrently by default; with the browser e2e enabled each
+// browser suite (uie2e, uivisual, uishutdown) starts its own browser and
+// serve stack, so they are run serially exactly like the documented on-demand
+// command does
 // (docs/engineering/testing.md 「UI 浏览器 e2e」). browserE2E follows the same
 // truthiness the suites' own gate reads from MP_UI_E2E.
 func jsTestArgs(files []string, browserE2E bool) []string {

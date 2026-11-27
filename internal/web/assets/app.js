@@ -3921,6 +3921,13 @@ function renderLiveCard(target, query) {
   // before the first live event (best-effort: request logging may be off). A
   // session resume refetches the pool itself — skip the duplicate.
   if (!resumeSession) loadLiveSessionPool();
+  connectLiveEvents();
+}
+
+// connectLiveEvents opens the live event stream and binds its handlers. Split
+// out of renderLiveCard so the header heartbeat can bring a released stream
+// back after a daemon restart (resumeLiveEvents) without remounting the card.
+function connectLiveEvents() {
   liveActive = true;
   try {
     liveES = new EventSource('/api/events');
@@ -3947,6 +3954,30 @@ function renderLiveCard(target, query) {
     // popover in place (stream progress, end status, guard hits).
     if (liveDetailPopId && e.request_id === liveDetailPopId) updateLiveDetailPop();
   };
+}
+
+// releaseLiveEvents lets go of the live stream WITHOUT unmounting the card
+// (stopLiveEvents is the unmount path — it clears liveActive too). A daemon
+// told to stop drains its in-flight handlers for 8s before it force-closes
+// connections, and this subscription is the page's only long-lived handler:
+// left open, it held every restart to that deadline (2026-11-26: 3 of 4
+// restarts logged `HTTP drain exceeded 8s` with exactly one in-flight
+// handler). The header heartbeat calls this when the daemon has stopped
+// answering; the draining process then finishes at once. The card keeps its
+// rows and only the empty-table hint changes (no rebuild).
+function releaseLiveEvents() {
+  if (!liveES) return;
+  liveES.close();
+  liveES = null;
+  const t = document.getElementById('live-table');
+  if (t && !liveRows.length) t.innerHTML = '<span class="msg hint">reconnecting…</span>';
+}
+
+// resumeLiveEvents re-opens a released stream while the Live card is still
+// mounted. The SSE handshake replays the recent-event ring, so requests that
+// ended meanwhile are folded into their rows (applyLiveEvent's replay fold).
+function resumeLiveEvents() {
+  if (liveActive && !liveES) connectLiveEvents();
 }
 
 // refreshLiveSessionOptions rebuilds the session combobox's option list from
@@ -5407,6 +5438,14 @@ function stopStatusRefresh() {
 // initial "connecting…" - setConn('ok') otherwise only runs inside
 // renderStatusTab, which the non-Status boot path skips). The inflight guard
 // mirrors statusInflight: a stalled request must not let ticks pile up.
+//
+// The same fetch is the page's heartbeat for its one long-lived connection:
+// once the daemon stops, this heartbeat fails while the Live view's
+// /api/events stream still hangs off the draining process. A failed heartbeat
+// releases that stream (releaseLiveEvents — the process then drains and
+// exits), a successful one brings it back (resumeLiveEvents). Neither touches
+// panel DOM beyond the empty Live table's hint line, so the interaction-gate
+// exemption below still holds.
 let connInflight = false;
 async function refreshConnIndicator() {
   if (connInflight) return;
@@ -5415,8 +5454,10 @@ async function refreshConnIndicator() {
     const st = await apiGet('/api/status');
     setConn('ok', `v${st.version || '?'} · ${st.uptime || '-'} · ${st.listen || ''}`);
     renderCredBanner(st);
+    resumeLiveEvents();
   } catch (e) {
     setConn('err', 'connection lost');
+    releaseLiveEvents();
   } finally {
     connInflight = false;
   }

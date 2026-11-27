@@ -6,7 +6,7 @@
 // (tests t.skip); MP_REQUIRE_UI_E2E=1 escalates to a hard failure.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, openSync, closeSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -158,16 +158,35 @@ ${authBlock}`, { mode: 0o600 });
     accounts: [{ id, label: 'e2e', api_key: key, added_at: '2026-07-08' }],
   }), { mode: 0o600 });
 
+  // The daemon's runtime log (stderr — the stream `--log-file` redirects)
+  // lands in a sandbox file so suites can assert on its lines (uishutdown:
+  // the drain deadline must not be reached). Appended across restarts.
   ctx.proxyLog = path.join(ctx.sandbox, 'serve.log');
-  ctx.proxy = spawn(proxyBin, ['serve'], {
-    cwd: ctx.sandbox,
-    env: {
-      HOME: path.join(ctx.sandbox, 'home'),
-      PATH: process.env.PATH,
-      MP_MODELSDEV_URL: ctx.modelsDevURL,
-    },
-    stdio: ['ignore', 'ignore', 'ignore'],
-  });
+  // startProxy (re)launches the sandboxed serve on its fixed port and log:
+  // boot calls it once; uishutdown.test.mjs calls it again after stopping
+  // the daemon, to watch a page that released its live stream take it back.
+  ctx.startProxy = () => {
+    const logFd = openSync(ctx.proxyLog, 'a');
+    ctx.proxy = spawn(proxyBin, ['serve'], {
+      cwd: ctx.sandbox,
+      env: {
+        HOME: path.join(ctx.sandbox, 'home'),
+        PATH: process.env.PATH,
+        MP_MODELSDEV_URL: ctx.modelsDevURL,
+      },
+      stdio: ['ignore', 'ignore', logFd],
+    });
+    closeSync(logFd); // the child holds its own duplicate
+    return ctx.proxy;
+  };
+  ctx.waitProxyReady = () => waitFor('proxy /api/status', async () => {
+    // With web.auth enabled (adminToken sandbox) /api/status answers 401 to
+    // anonymous probes by design — send the token so this is a liveness
+    // check, not an auth check.
+    const r = await fetch(`${ctx.baseUrl}/api/status`, ctx.adminToken
+      ? { headers: { Authorization: `Bearer ${ctx.adminToken}` } } : {});
+    return r.ok;
+  }, 45000);
 
   // 安全网：测试进程崩溃/被强杀时 after() 不一定执行，退出前尽力杀掉子进程，
   // 不留 serve/浏览器残迹。
@@ -177,14 +196,8 @@ ${authBlock}`, { mode: 0o600 });
   };
   process.once('exit', killOrphans);
 
-  await waitFor('proxy /api/status', async () => {
-    // With web.auth enabled (adminToken sandbox) /api/status answers 401 to
-    // anonymous probes by design — send the token so this is a liveness
-    // check, not an auth check.
-    const r = await fetch(`${ctx.baseUrl}/api/status`, ctx.adminToken
-      ? { headers: { Authorization: `Bearer ${ctx.adminToken}` } } : {});
-    return r.ok;
-  }, 45000);
+  ctx.startProxy();
+  await ctx.waitProxyReady();
 
   ctx.browser = await launchBrowser(bin);
   ctx.cdp = await CDP.connect(ctx.browser.wsUrl);
