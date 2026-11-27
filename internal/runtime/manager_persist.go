@@ -40,6 +40,9 @@ func (m *Manager) RestoreHealth(health map[string]PersistedHealth, now time.Time
 			if circuitOpen {
 				state.circuitOpenUntil = persisted.CircuitOpenUntil
 				state.consecutiveFailures = threshold
+				// A circuit that gateway refusals opened must re-open on the
+				// next refusal just like one that hard failures opened.
+				state.gatewayRefusals = GatewayRefusalThreshold
 			}
 			if persisted.Frozen {
 				state.frozen = true

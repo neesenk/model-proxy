@@ -121,6 +121,13 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
   `internal/runtime.decideOrder` 是唯一排序分叉点。
 - timeout、连接错误、5xx、refresh 后仍失败的 401、`error.code` 证明账号停用的 403 与
   message 证明套餐订阅失效的 4xx（见下文「普通转发的 403 归因」）和 2xx HTML 伪成功（见下文）计入 provider 熔断。
+- **网关拒绝走自己的连续计数**（`runtime.RecordGatewayRefusal`，规则见下文「普通转发的 403 归因」）：
+  边缘/WAF 的 403（nginx 系标准页、Cloudflare 挑战）说的是「网关在拒绝这条网络路径」，不是账号
+  失败、更不是凭据问题——不记 failure metric、不进错误率、不锁模型、不记凭据拒绝。每次拒绝给账号
+  的**网关拒绝连续计数**加一：连续 `GatewayRefusalThreshold`（6，代码常量——比 failure 门槛高，
+  一条 WAF 规则可以只拒单个请求）次**且跨至少 persist 窗口**后开路，之后与硬失败共用同一套
+  `circuit_cooldown` 与半开探针；一次成功清掉两条计数。两条计数互不叠加：5 次拒绝不会让 1 次
+  失败变成「差一点开路」。
 - **连接类快失败先重派再计数**（`targetexec.IsFastFailConnError`）：`unexpected EOF`/`EOF`/`ECONNRESET`/`EPIPE`/`ECONNREFUSED` 这类毫秒级返回的错误先在同一 target 上重派一次（新连接）；重派成功记 success、首跳**不**记失败。对外网络（代理链回收、LB 滚动）一次事件杀 N 条在途连接是常态噪音，重派把它从熔断视野里滤掉；超时不重派（时间预算已烧掉，重试等于翻倍等待），客户端断开照旧 `OutcomeClientGone`。重派不占 401 refresh 的 retry slot。**服务端主动 GOAWAY 同属快失败**：HTTP/2 网关按 stream 预算优雅回收连接（实测 compass 周期性 `LastStreamID≈2000, ErrCode=NO_ERROR`），`http.Client.Do` 层面浮出的 GOAWAY 意味着本 stream id 已过 LastStreamID——服务端从未处理该请求，同 target 重派不是重复请求（net/http 的 goAwayError 未导出，按稳定错误文案识别）；已 commit 的响应 body 中途断流不在此列（commit 后无法重派）。decisions selector 调用经 `targetexec.BufferedLeg` 同样重派一次（边界同上；`BufferedLeg.OnRedispatch` 通知调用方记与执行器同文案的日志）。
 - **熔断需要 streak 持续**（`circuit_persist`，默认 6s，`"0"` 关闭）：连续失败除了达到 `circuit_threshold`，还必须**跨至少 persist 窗口**才开熔断——"N 连败"从"N 次尝试碰噪音"升级为"N 次新鲜连接确认不可达持续了一段时间"。persist 只延迟**新请求**不再考虑该 provider 的时刻；单个请求的 failover 照旧立即发生，重派后的失败也照常计数。成功重置 streak 起点与计数。
 - **客户端取消不计熔断**：调用方断开（`exchange.Request.Context()` 取消，
@@ -433,12 +440,25 @@ attempt 腿的诊断只带状态与页面标题（`upstream answered <status> wi
 `error.code` 为 `account_disabled`、`account_deactivated` 或 `account_suspended` 时，按当前
 解析到的账号记录一次认证失败并 failover，熔断门槛同 401、同样不记 failure metric；**末候选
 也不例外**——不透传账号错误，按全链失败回 502（单目标路由与 pin/force-provider 同此）。
-标准 nginx 系（nginx / openresty / tengine，整页文档结构精确匹配）403 文档或带
-`Cf-Mitigated: challenge` 的拒绝响应，有下一候选就释放半开槽并
-换目标，腿记录 403 和固定原因；最后一个候选保留原始 403。单次网关拒绝不累计账号或模型
-失败。只有 HTML 类型、标题或笼统权限提示时沿用普通 4xx 语义。锁定测试：
-`TestForward_Upstream403AttributionE2E`（`internal/app`）、`TestExecutor403FailureScope` 与
-`TestGatewayRefusedNginxFamilyDenialPage`（`internal/targetexec`）。
+**网关拒绝**——标准 nginx 系（nginx / openresty / tengine，整页文档结构精确匹配）403 文档或带
+`Cf-Mitigated: challenge` 的拒绝响应（证据词表唯一权威 `provider.GatewayRefused`）——是网关/边缘的
+安全策略在拒绝这条网络路径（2026-11-26：切换网络后 compass/aqp 被拦四小时），与凭据无关、与
+账号故障无关：**不记凭据拒绝、不记 failure metric、不锁模型**。有下一候选就释放半开槽并换目标，
+腿记录 403 和固定原因；最后一个候选保留原始 403。每次拒绝（末候选那次也算）给该账号的网关拒绝
+连续计数加一（`runtime.RecordGatewayRefusal`，门槛 6，见上文熔断清单）：开路后请求在调度层就
+不再考虑该账号，不再为它付一次失败腿——那四小时里 188 个请求共付了 479 条失败腿，因为此前
+拒绝零记账、熔断永不开路。**Auth 层的同一种拒绝**（aqp mint 的 403，错误文本带着同一张页面
+的截断摘录——`provider.GatewayRefusalText`）同此：日志行是 `gateway refused at the auth layer`，
+计拒绝、不计凭据；其它 auth 层失败保持原义（会话过期是操作者的事，由轮询路径报告）。**配额轮询
+侧**（`runtime.CredentialErrClass` / 前端 `quotaErrKind`）读同一词表：带这张页面的同步错误不属于任何
+凭据类——不出 Accounts 徽标、不出全局横幅、不提示重登（此前它因 `http 403` 被归为 `auth`）。
+只有 HTML 类型、标题或笼统权限提示时沿用普通 4xx 语义。锁定测试：
+`TestForward_Upstream403AttributionE2E`、`TestForward_GatewayRefusalStormOpensCircuit`
+（`internal/app`）、`TestExecutor403FailureScope`、
+`TestExecutorAuthLayerFailureKeepsObservedStatus`（`internal/targetexec`）、
+`TestGatewayRefusedNginxFamilyDenialPage`、`TestGatewayRefusalText`（`internal/provider`）、
+`TestRecordGatewayRefusal*`、`TestGatewayRefusalStreakIsItsOwnCounter`、
+`TestCredentialAlertClassIgnoresGatewayRefusal`（`internal/runtime`）。
 
 **订阅失效归因**（账号归因的文本形态，同样只接在普通执行器上）：错误 envelope 的
 `error.message` 明说账号没有有效套餐订阅时（step-plan 的 `you have no active step plan
@@ -554,9 +574,18 @@ selector 腿同此判定（同一 8 KiB 窗口）：decisions 腿本就不记 fa
 - empty stream 的 EOF、client cancel、upstream read error。
 - 上游 403 归因（`internal/app/forward_403_attribution_test.go`、`internal/targetexec`
   的 `TestExecutor403FailureScope`）：账号停用码换候选并记熔断、末候选终态 502；网关拒绝
-  换候选且零记账、末候选保留原始 403；通用 HTML 403 原样 commit。Auth 层失败（如 aqp mint
-  被网关 403）由 `internal/targetexec` 的 `TestExecutorAuthLayerFailureKeepsObservedStatus` 钉住：
-  立即 failover、腿带观测到的 403 与错误文本、不派发上游请求、不计熔断。
+  换候选、末候选保留原始 403，两种都计一次网关拒绝、零 failure 记账、零凭据记录；通用
+  HTML 403 原样 commit。Auth 层失败（`internal/targetexec` 的
+  `TestExecutorAuthLayerFailureKeepsObservedStatus`）：立即 failover、腿带观测到的 403 与错误
+  文本、不派发上游请求、不计 failure——带网关页面的 403 另计一次网关拒绝并按网关拒绝记日志。
+- 网关拒绝熔断（`internal/runtime` 的 `TestRecordGatewayRefusalOpensCircuitAtSix`、
+  `TestGatewayRefusalStreakIsItsOwnCounter`、`TestRecordGatewayRefusalPersistGateAndGeneration`、
+  `TestRestoreHealthGatewayRefusedCircuitReopensOnNextRefusal`；`internal/app` 的
+  `TestForward_GatewayRefusalStormOpensCircuit`；`internal/admin` 的 `TestDashboardCredentialAlerts`）：
+  第 5 次不开、第 6 次开、cooldown 后单探针、被拒的探针重新开路、成功清计数；拒绝与硬失败
+  两条计数互不叠加、拒绝不进 failure 计数；窗口内的突发不算、陈旧 generation 不教；恢复的
+  熔断在下一次被拒的探针上重新开路；端到端开路后请求不再触达被拒账号；带网关页面的同步
+  错误不进凭据横幅。
 - 订阅失效归因（`internal/targetexec` 的 `TestExecutorLapsedPlanSubscriptionFailsOver` 与
   `TestExecutorQuotaProofOutranksSubscriptionAttribution`、`internal/app` 的
   `TestForward_LapsedPlanSubscriptionFailsOverE2E`）：message 证明无有效订阅 → 认证失败记账 +

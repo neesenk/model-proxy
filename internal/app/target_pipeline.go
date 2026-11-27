@@ -44,6 +44,9 @@ func (g proxyHealthGate) RecordSuccess(provider, model string, generation uint64
 func (g proxyHealthGate) RecordFailure(provider string, scheduling configdomain.Scheduling, generation uint64) {
 	g.proxy.recordFailure(provider, scheduling, generation)
 }
+func (g proxyHealthGate) RecordGatewayRefusal(provider string, scheduling configdomain.Scheduling, generation uint64) {
+	g.proxy.recordGatewayRefusal(provider, scheduling, generation)
+}
 func (g proxyHealthGate) RecordModelFailure(provider, model string, scheduling configdomain.Scheduling, generation uint64) {
 	g.proxy.recordModelFailure(provider, model, scheduling, generation)
 }

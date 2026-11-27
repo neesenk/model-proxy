@@ -33,7 +33,7 @@ import {
   fmtCompact,
   mergeLiveAndPersistedRow, shouldFetchDetail, detailFetchState,
   CLIENT_GONE_STATUS, notLoggedHint, detailReopenState, FAILOVER_PROVIDER, rowFailoverAttempt,
-  quotaErrKind, accountUsageState, accountRemainingLabel, accountDenialLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta, scheduleCredentialLabel, syncErrLabel, keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
+  quotaErrKind, isGatewayRefusalText, accountUsageState, accountRemainingLabel, accountDenialLabel, scheduleTierLabel, scheduleTierTitle, scheduleRouteStickyMeta, scheduleCredentialLabel, syncErrLabel, keysTableHTML, keyUsageTableHTML, keyCreatedBannerHTML, keyRelTime,
   parseModelLines, mergeFetchedModels, providerDeleteSummary, mutationWarningMessage,
   pathStrengthFromAction, securityLegendHTML, securityExplainHTML, SECURITY_EXPLAIN_STATUS_NOTES,
   securityKpisHTML, mergeSecurityFeed, securitySegmentsHTML, SECURITY_RANGES, securityRangeFromSecs,
@@ -1985,6 +1985,25 @@ test('quotaErrKind classifies quota snapshot errors', () => {
   assert.equal(quotaErrKind({ Err: 'auth: mint aqp key: HTTP 401: denied' }), 'auth');
   assert.equal(quotaErrKind({ Err: 'monthly usage HTTP 403: forbidden' }), 'auth');
   assert.equal(quotaErrKind({ Err: 'HTTP 500' }), 'error');
+});
+
+// A gateway (edge/WAF) refusal is the gateway's security policy refusing the
+// network path, not the key: it must not raise the credential class (the
+// Accounts pill / global banner would tell the operator to re-login or
+// replace a healthy key). Live shape: serve.log 2026-11-26, the stock nginx
+// page flattened onto one line and cut inside the server banner.
+test('quotaErrKind never files a gateway refusal under a credential class', () => {
+  const live = 'monthly usage HTTP 403: <html> <head><title>403 Forbidden</title></head> <body> <center><h1>403 Forbidden</h1></center> <hr><center>nginx</cente...';
+  assert.equal(quotaErrKind({ SyncErr: live }), 'error');
+  assert.equal(quotaErrKind({ SyncErr: 'mint aqp key: HTTP 403: <html><head><title>403 Forbidden</title></head><body><hr><center>openresty/1.21.4.1</center></body></html>' }), 'error');
+  // The title alone, the banner alone, or a non-403 is not the refusal page.
+  assert.equal(quotaErrKind({ SyncErr: 'monthly usage HTTP 403: <title>403 Forbidden</title> blocked by WAF' }), 'auth');
+  assert.equal(quotaErrKind({ SyncErr: 'monthly usage HTTP 403: <center>nginx</center>' }), 'auth');
+  assert.equal(isGatewayRefusalText('http 401 <title>403 forbidden</title><center>nginx</center>'), false);
+  assert.equal(isGatewayRefusalText('http 403 <title>403 forbidden</title> <hr><center>tengine/2.3.3</center>'), true);
+  // A banner that merely contains a family word is not the family's banner.
+  assert.equal(isGatewayRefusalText('http 403 <title>403 forbidden</title> <center>nginx-plus</center>'), false);
+  assert.equal(isGatewayRefusalText('http 403 <title>403 forbidden</title> <center>mynginx</center>'), false);
 });
 
 // A failed sync that kept a last-known-good snapshot carries the failure on

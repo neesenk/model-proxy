@@ -190,10 +190,28 @@ export function quotaErrKind(snap) {
   if (!snap) return '';
   const e = (snap.Err || snap.SyncErr || '').toLowerCase();
   if (!e) return '';
+  // A gateway refusal is not a credential problem — read before the status
+  // keywords below, which would file it under "auth".
+  if (isGatewayRefusalText(e)) return 'error';
   if (e.includes('session expired')) return 'session-expired';
   if (e.includes('not logged in') || e.includes('no project_id')) return 'not-logged-in';
   if (e.includes('auth') || e.includes('http 401') || e.includes('http 403') || e.includes('unauthorized')) return 'auth';
   return 'error';
+}
+
+// isGatewayRefusalText reports an edge/WAF refusal in a quota-sync error
+// string: the nginx family's stock 403 page (status + page title + the
+// family's server banner), flattened and truncated inside the error. Such a
+// refusal is the gateway's security policy refusing the network path — the
+// key is fine — so it must never read as a credential class. Mirrors
+// provider.GatewayRefusalText; `e` is already lower-cased.
+export function isGatewayRefusalText(e) {
+  if (!e.includes('http 403') || !e.includes('<title>403 forbidden</title>')) return false;
+  // The name, an optional version, then `<`: the bounded evidence gets cut
+  // anywhere (the live shape ends in `<center>nginx</cente...`), so the
+  // banner is never recognised by a complete closing tag — and a name that
+  // merely contains a family word (nginx-plus) has no `<` right after it.
+  return /<center>(?:nginx|openresty|tengine)(?:\/[0-9.]+)?</.test(e);
 }
 
 // syncErrLabel renders the user-facing label for one credential-class token:

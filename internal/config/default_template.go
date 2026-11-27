@@ -438,7 +438,7 @@ providers:
 # block can be omitted - the values below are listed commented-out for reference.
 # Durations are strings (e.g. "10m", "60s"). Uncomment a line to override.
 # scheduling:
-#   circuit_threshold: 3        # (default 3)  consecutive failover-eligible failures -> open circuit
+#   circuit_threshold: 3        # (default 3)  consecutive failover-eligible failures -> open circuit (gateway/WAF 403 refusals open on their own count: 6 in a row)
 #   circuit_cooldown: 10m       # (default 10m) circuit open duration, then half-open (1 probe)
 #   circuit_persist: 6s         # (default 6s; "0" disables) failures must also span this long before the circuit opens (external-network noise tolerance)
 #   rate_limit_backoff: 60s     # (default 60s) transient 429 with no reset hint/Retry-After: skip this long, then probe. A 429 that proves a concurrency limit never cools down — it caps the account's in-flight requests instead (docs/architecture/routing-and-failure.md)

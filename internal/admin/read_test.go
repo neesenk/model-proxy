@@ -1656,6 +1656,11 @@ func TestSecurityCountsAggregation(t *testing.T) {
 // surface, sorted by key; not-logged-in (deliberate setup state) and
 // non-credential sync failures (network blip) stay off the banner, and a
 // tracker with no failures projects an empty slice (recovery self-clears).
+// A gateway refusal is a non-credential failure too: the gateway's security
+// policy refusing the network path (2026-11-26, after a network switch) used
+// to read as "http 403" → auth, and the banner sent the operator to re-login
+// to an account whose key was fine. The sync failure itself is still
+// recorded; only the credential reading of it is gone.
 func TestDashboardCredentialAlerts(t *testing.T) {
 	now := time.Date(2026, 11, 11, 10, 38, 30, 0, time.UTC)
 	state := DashboardState{
@@ -1673,14 +1678,18 @@ func TestDashboardCredentialAlerts(t *testing.T) {
 			"zkey#acc2": {Err: "auth: mint key rejected: HTTP 401: unauthorized", At: now.Add(-time.Minute)},
 			"bkey#acc3": {Err: "not logged in", At: now},
 			"ckey":      {Err: "dial tcp: connection refused", At: now},
+			// Live shape of the gateway's stock refusal page (serve.log
+			// 2026-11-26): flattened, cut inside the server banner.
+			"waf#acc4": {Err: "monthly usage HTTP 403: <html> <head><title>403 Forbidden</title></head> <body> <center><h1>403 Forbidden</h1></center> <hr><center>nginx</cente...", At: now},
 		},
 	}
 	service := New(Ports{DashboardState: func(time.Time) DashboardState { return state }})
 
-	alerts := service.Dashboard(now).CredentialAlerts
+	dashboard := service.Dashboard(now)
+	alerts := dashboard.CredentialAlerts
 
 	if len(alerts) != 2 {
-		t.Fatalf("alerts = %+v, want exactly the session-expired and auth entries", alerts)
+		t.Fatalf("alerts = %+v, want exactly the session-expired and auth entries — a gateway refusal is not a credential problem", alerts)
 	}
 	if alerts[0].Key != "aqp#acc1" || alerts[0].Class != "session-expired" ||
 		!strings.Contains(alerts[0].Err, "Session expired") || alerts[0].Since != now.Unix() {

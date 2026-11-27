@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+
+	"model-proxy/internal/provider"
 )
 
 var contextOverflowMarkers = [][]byte{
@@ -91,6 +93,20 @@ const (
 
 // Only an account-scoped machine code in the error envelope supports applying
 // the existing auth circuit to every model on this resolved account.
+// gatewayRefused and gatewayRefusalText adapt the gateway-refusal vocabulary
+// (provider.GatewayRefused / provider.GatewayRefusalText — the nginx family's
+// stock 403 document or a Cloudflare challenge) for this package: the
+// architecture contract keeps executor.go free of provider imports, and the
+// quota poll's credential classification reads the same vocabulary through
+// the provider package directly. The evidence is defined once, there.
+func gatewayRefused(header http.Header, body []byte) bool {
+	return provider.GatewayRefused(header, body)
+}
+
+func gatewayRefusalText(text string) bool {
+	return provider.GatewayRefusalText(text)
+}
+
 func accountDisabled(body []byte) bool {
 	var envelope struct {
 		Error struct{ Code string } `json:"error"`
@@ -121,17 +137,6 @@ func accountUnsubscribed(body []byte) bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(envelope.Error.Message), "no active step plan subscription")
-}
-
-// Match the stock nginx denial document observed in the incident. The banner
-// admits the whole nginx family: openresty and tengine are nginx forks that
-// ship the same default 403 page with only the footer banner different. The
-// evidence is still the ENTIRE document — a server banner or an HTML
-// Content-Type alone says nothing about the refusal.
-var nginxForbidden = regexp.MustCompile(`(?i)^\s*<html>\s*<head><title>403 Forbidden</title></head>\s*<body>\s*<center><h1>403 Forbidden</h1></center>\s*<hr><center>(?:nginx|openresty|tengine)(?:/[0-9.]+)?</center>\s*</body>\s*</html>\s*$`)
-
-func gatewayRefused(header http.Header, body []byte) bool {
-	return strings.EqualFold(header.Get("Cf-Mitigated"), "challenge") || nginxForbidden.Match(body)
 }
 
 var (

@@ -71,7 +71,9 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
   不持久化（观测元数据，重启后首轮 poll 重建）。消费面：admin Dashboard 把它附到
   `/api/status` 的 `quota[name].SyncErr/SyncErrAt`（Accounts 药丸/Usage 横幅 + SSO
   Re-login 按钮）；组合根把它经 `runtime.CredentialErrClass` 分类
-  （session-expired / not-logged-in / auth；网络/5xx 不是凭据问题，不徽标）后作为
+  （session-expired / not-logged-in / auth；网络/5xx 不是凭据问题，不徽标；带网关拒绝页面的
+  403 同步错误也不是——那是网关安全策略在拒绝网络路径，`provider.GatewayRefusalText` 先于状态码
+  关键词判定，不归任何凭据类）后作为
   Schedule 链节点的 `credential` 徽标——**只解释不重排**，排名仍按 last-known-good。
 - **转发路径的凭据拒绝（Manager 侧 denials）**：轮询只看得到 `Quota()` 的成败，
   控制台型实现（step-plan / qwen-plan / mimo / static）零 HTTP、永远成功，所以订阅
@@ -186,7 +188,7 @@ fingerprint + 已清空的 health/sticky + 剪枝后的 quota cache」——紧�
 
 - health/model lock/paramBlock mutation 应进入 debounce 单写者，而不是只依赖下次 quota poll。
 
-恢复只采纳未过期条目，且 config fingerprint 必须匹配。恢复的 circuit failure count 置为 threshold，使下一次失败立即重新开路。
+恢复只采纳未过期条目，且 config fingerprint 必须匹配。恢复的 circuit failure count 置为 threshold，使下一次失败立即重新开路；网关拒绝计数同样置为 `GatewayRefusalThreshold`，下一次被网关拒绝的探针重新开路。
 
 旧版无 fingerprint 文件仅保留兼容读取，不应扩展新的无指纹状态。
 
@@ -367,8 +369,9 @@ Dashboard 复用同一预投影与指针复核流程。
   RecordSuccess=0）与归一化 TTFT（Committed 成功 2xx 时采样，10s 参考值封顶）。
   两个信号各自持有独立的采样锚点时间——错误样本只推进错误率锚点，TTFT 样本只推进
   TTFT 锚点：共享锚点会让持续失败期把旧 TTFT 罚分"保鲜"，且恢复后的首个 TTFT 样本
-  以 dt≈0 混入而几乎不动陈旧罚分。模型级失败（RecordModelFailure）与 429 冷却不进
-  错误率——它们各有独立机制，重复计入会双重惩罚。
+  以 dt≈0 混入而几乎不动陈旧罚分。模型级失败（RecordModelFailure）、429 冷却与网关拒绝
+  （RecordGatewayRefusal——边缘/WAF 403，只走自己的连续计数，见 `routing-and-failure.md`
+  「普通转发的 403 归因」）不进错误率——它们各有独立机制，重复计入会双重惩罚。
 - 决策时信号先各自衰减到 `now` 再计罚分：停止失败一段时间的 provider 不会背陈旧
   罚分；罚分 <1e-6 吸附为 0，渐近衰减的残余不得翻转原本精确打平的顺序。
 - 权重来自 `scheduling.quality_error_weight`（默认 100=1.0）/

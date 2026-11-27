@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/observe/counters"
+	runtimestate "model-proxy/internal/runtime"
 )
 
 // TestForward_Upstream403AttributionE2E pins the upstream-403 attribution end
@@ -148,4 +150,102 @@ func TestForward_Upstream403AttributionE2E(t *testing.T) {
 			t.Errorf("account failures for a = %d, want 1", got)
 		}
 	})
+}
+
+// TestForward_GatewayRefusalStormOpensCircuit pins the 2026-11-26 storm. A
+// network switch put compass/aqp behind the gateway's security policy for
+// four hours; every call to those accounts came back as the stock nginx 403
+// page, and because a refusal was accounted nowhere nothing ever opened — 188
+// requests paid 479 failed legs walking the refused accounts first. The
+// refusal is about the network path, not the key: it is never a credential
+// problem (no denial, no banner) and never a failure metric — but six in a
+// row open the account's circuit, and from then on a request skips the
+// account without a round trip and goes straight to the sibling.
+func TestForward_GatewayRefusalStormOpensCircuit(t *testing.T) {
+	logs := captureServeLog(t)
+	const (
+		nginxDenial = "<html>\n<head><title>403 Forbidden</title></head>\n<body>\n<center><h1>403 Forbidden</h1></center>\n<hr><center>nginx</center>\n</body>\n</html>"
+		fallback    = `{"choices":[{"message":{"role":"assistant","content":"fallback"}}]}`
+	)
+	refusing := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/html")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, nginxDenial)
+	})
+	sibling := newFakeUpstream(t, staticResponder(http.StatusOK, fallback))
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"a": {OpenAIBaseURL: refusing.srv.URL, Provider: testProviderID},
+			"b": {OpenAIBaseURL: sibling.srv.URL, Provider: testProviderID},
+		},
+		Routes: map[string][]configdomain.RouteTarget{"m1": {
+			{Provider: "a", Model: "m1", Priority: 1},
+			{Provider: "b", Model: "m1", Priority: 2},
+		}},
+		// persist 0: the refusal count alone opens (the span gate is the
+		// runtime package's to pin); a long cooldown keeps it open here.
+		Scheduling: configdomain.Scheduling{CircuitPersist: "0", CircuitCooldown: "1h"},
+	}
+	proxy := newProxyWithStatic(t, cfg, map[string]string{"a": "a", "b": "b"})
+	px := httptest.NewServer(http.HandlerFunc(proxy.Handler))
+	t.Cleanup(px.Close)
+	send := func(what string) {
+		t.Helper()
+		code, body := post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[{"role":"user","content":"ping"}]}`)
+		if code != http.StatusOK || !strings.Contains(body, "fallback") {
+			t.Fatalf("%s: status = %d body = %s, want the sibling's 200", what, code, body)
+		}
+	}
+	healthy := func() bool { return proxy.runtimeState.TargetHealthy("a", "m1", time.Now()) }
+
+	// Below the threshold the account keeps taking its turn first.
+	for i := 1; i < runtimestate.GatewayRefusalThreshold; i++ {
+		send(fmt.Sprintf("refusal %d", i))
+	}
+	if got := refusing.hits(); got != runtimestate.GatewayRefusalThreshold-1 {
+		t.Fatalf("refused upstream hits = %d, want %d", got, runtimestate.GatewayRefusalThreshold-1)
+	}
+	if !healthy() {
+		t.Fatalf("%d consecutive refusals made the account unavailable; the threshold is %d. state=%+v modelLocked=%v concurrency=%+v\n%s",
+			runtimestate.GatewayRefusalThreshold-1, runtimestate.GatewayRefusalThreshold,
+			proxy.runtimeState.Dashboard(time.Now()).Providers["a"], proxy.modelLocked("a", "m1", time.Now()), proxy.runtimeState.Concurrency("a"), logs.text())
+	}
+
+	// The sixth refusal opens it…
+	send("the refusal that opens the circuit")
+	if healthy() {
+		t.Fatalf("%d consecutive refusals did not open the circuit", runtimestate.GatewayRefusalThreshold)
+	}
+	if status, ok := proxy.runtimeState.Dashboard(time.Now()).Providers["a"]; !ok || status.CircuitState != "open" {
+		t.Fatalf("circuit state of a = %+v, want open", status)
+	}
+
+	// …and the next request no longer pays for it: no round trip to the
+	// refused account, the sibling answers straight away. (An open circuit is
+	// filtered at scheduling — the account simply is not a candidate any
+	// more; the executor's `skipped (circuit open …)` line belongs to a
+	// circuit that opens between scheduling and dispatch.)
+	send("the request after the circuit opened")
+	if got := refusing.hits(); got != runtimestate.GatewayRefusalThreshold {
+		t.Fatalf("refused upstream hits = %d, want it untouched at %d once its circuit is open", got, runtimestate.GatewayRefusalThreshold)
+	}
+	if got := sibling.hits(); got != runtimestate.GatewayRefusalThreshold+1 {
+		t.Fatalf("sibling hits = %d, want every request served", got)
+	}
+	for _, line := range strings.Split(logs.text(), "\n") {
+		if strings.Contains(line, "credential") || strings.Contains(line, "denied the account") {
+			t.Errorf("a gateway refusal was logged as a credential problem: %s", line)
+		}
+	}
+
+	// A refusal is never the account's failure and never its credential.
+	if m := proxy.metrics.Snapshot()[counters.PMKey{Provider: "a", Model: "m1"}]; m.Failures != 0 {
+		t.Errorf("failure metric for a = %d, want 0 (a gateway refusal is not a failure)", m.Failures)
+	}
+	if status := proxy.runtimeState.Dashboard(time.Now()); status.Providers["a"].ConsecutiveFailures != 0 || len(status.CredentialDenials) != 0 {
+		t.Errorf("a = %+v denials = %+v, want no hard failure and no credential denial", status.Providers["a"], status.CredentialDenials)
+	}
+	if proxy.modelLocked("a", "m1", time.Now()) {
+		t.Error("model locked: a gateway refusal must not lock (provider, model)")
+	}
 }

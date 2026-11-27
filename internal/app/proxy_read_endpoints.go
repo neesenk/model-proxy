@@ -76,6 +76,18 @@ func (p *Proxy) recordFailure(name string, sched configdomain.Scheduling, genera
 	)
 }
 
+// recordGatewayRefusal counts an edge/WAF 403 on the account's gateway-refusal
+// streak: the circuit's own cooldown and half-open probe, none of the failure
+// or credential accounting.
+func (p *Proxy) recordGatewayRefusal(name string, sched configdomain.Scheduling, generations ...uint64) {
+	p.runtimeState.RecordGatewayRefusal(
+		name,
+		sched.Cooldown(),
+		sched.Persist(),
+		runtimestate.GenerationArg(generations),
+	)
+}
+
 // modelLocked is the lock-taking variant for tryTarget's entry check.
 func (p *Proxy) modelLocked(provider, model string, now time.Time) bool {
 	return p.runtimeState.ModelLocked(provider, model, now)

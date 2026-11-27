@@ -60,16 +60,19 @@ var _ provider.Provider = (*fakeProv)(nil)
 
 // fakeHealthGate implements targetexec.HealthGate with in-memory records.
 type fakeHealthGate struct {
-	mu             sync.Mutex
-	halfOpenOpen   map[string]bool // providers whose circuit is open (slot refused)
-	failures       map[string]int
-	modelFailures  map[string]int
-	successes      map[string]int
-	rateLimits     map[string]time.Time
-	learned        []string
-	blockedParams  map[string][]string
-	wireMisses     []string
-	modelLockedSet map[string]bool
+	mu           sync.Mutex
+	halfOpenOpen map[string]bool // providers whose circuit is open (slot refused)
+	failures     map[string]int
+	// gatewayRefusals counts edge/WAF 403 refusals — the streak that opens
+	// the circuit apart from failures (never a failure, never a credential).
+	gatewayRefusals map[string]int
+	modelFailures   map[string]int
+	successes       map[string]int
+	rateLimits      map[string]time.Time
+	learned         []string
+	blockedParams   map[string][]string
+	wireMisses      []string
+	modelLockedSet  map[string]bool
 	// concurrencyNotes records every RecordConcurrencyLimit report as
 	// {provider, stated limit, other requests in flight}.
 	concurrencyNotes []gateConcurrencyNote
@@ -94,6 +97,7 @@ func newFakeHealthGate() *fakeHealthGate {
 	return &fakeHealthGate{
 		halfOpenOpen:     map[string]bool{},
 		failures:         map[string]int{},
+		gatewayRefusals:  map[string]int{},
 		modelFailures:    map[string]int{},
 		successes:        map[string]int{},
 		rateLimits:       map[string]time.Time{},
@@ -102,8 +106,7 @@ func newFakeHealthGate() *fakeHealthGate {
 		concurrencyCap:   map[string]int{},
 		inflight:         map[string]int{},
 		peakInflight:     map[string]int{},
-		inflightOutcomes: map[string][]targetexec.InflightOutcome{},
-	}
+		inflightOutcomes: map[string][]targetexec.InflightOutcome{}}
 }
 
 func (g *fakeHealthGate) ModelLocked(provider, model string, now time.Time) bool {
@@ -126,6 +129,11 @@ func (g *fakeHealthGate) RecordFailure(provider string, scheduling Scheduling, g
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.failures[provider]++
+}
+func (g *fakeHealthGate) RecordGatewayRefusal(provider string, scheduling Scheduling, generation uint64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.gatewayRefusals[provider]++
 }
 func (g *fakeHealthGate) RecordModelFailure(provider, model string, scheduling Scheduling, generation uint64) {
 	g.mu.Lock()

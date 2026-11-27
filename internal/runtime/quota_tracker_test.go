@@ -496,10 +496,30 @@ func TestCredentialErrClass(t *testing.T) {
 		{"monthly usage request failed: context deadline exceeded", ""},
 		{"monthly usage HTTP 500: boom", ""},
 		{"", ""},
+		// A gateway refusal is the gateway's security policy refusing the
+		// network path, not the key (live shape, 2026-11-26: the stock nginx
+		// page flattened and cut inside the server banner): no credential
+		// class, so no Accounts pill and no global banner.
+		{"monthly usage HTTP 403: <html> <head><title>403 Forbidden</title></head> <body> <center><h1>403 Forbidden</h1></center> <hr><center>nginx</cente...", ""},
+		{"mint aqp key: HTTP 403: <html> <head><title>403 Forbidden</title></head> <body> <center><h1>403 Forbidden</h1></center> <hr><center>openresty</body>", ""},
 	}
 	for _, c := range cases {
 		if got := CredentialErrClass(c.err); got != c.want {
 			t.Errorf("CredentialErrClass(%q) = %q, want %q", c.err, got, c.want)
 		}
+	}
+}
+
+// The global Web banner is the operator's loudest surface: a gateway refusal
+// must never raise it (it would send them to re-login or replace a key that
+// is fine), while a genuinely rejected key still does.
+func TestCredentialAlertClassIgnoresGatewayRefusal(t *testing.T) {
+	t.Parallel()
+	live := "monthly usage HTTP 403: <html> <head><title>403 Forbidden</title></head> <body> <center><h1>403 Forbidden</h1></center> <hr><center>nginx</cente..."
+	if got := CredentialAlertClass(live); got != "" {
+		t.Fatalf("CredentialAlertClass(gateway refusal) = %q, want no banner", got)
+	}
+	if got := CredentialAlertClass("auth: mint aqp key: HTTP 401: denied"); got != "auth" {
+		t.Fatalf("CredentialAlertClass(rejected key) = %q, want the auth banner", got)
 	}
 }

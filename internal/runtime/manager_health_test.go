@@ -729,3 +729,190 @@ func TestAccountHealthyAndFrozenReads(t *testing.T) {
 		t.Fatal("unfreeze must restore healthy and clear the frozen read")
 	}
 }
+
+// TestRecordGatewayRefusalOpensCircuitAtSix: a gateway (edge/WAF) refusal is
+// counted on a streak of its own. Five in a row — even spanning the persist
+// window — leave the account available (a WAF rule can refuse single requests
+// on a healthy path); the sixth opens the circuit for the ordinary cooldown,
+// after which the single half-open probe decides: refused again, the circuit
+// re-opens; served, the account is back.
+func TestRecordGatewayRefusalOpensCircuitAtSix(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 11, 26, 4, 0, 0, 0, time.UTC)
+	clock := base
+	m := newTestManager(4)
+	m.now = func() time.Time { return clock }
+	refuse := func(at time.Duration) {
+		clock = base.Add(at)
+		m.RecordGatewayRefusal("shopee#a", 10*time.Minute, 6*time.Second, 4)
+	}
+
+	for i := range GatewayRefusalThreshold - 1 {
+		refuse(time.Duration(i) * 2 * time.Second)
+	}
+	if !m.TargetHealthy("shopee#a", "m", clock) {
+		t.Fatalf("%d consecutive gateway refusals opened the circuit; the threshold is %d", GatewayRefusalThreshold-1, GatewayRefusalThreshold)
+	}
+	refuse(time.Duration(GatewayRefusalThreshold-1) * 2 * time.Second)
+	if m.TargetHealthy("shopee#a", "m", clock) {
+		t.Fatalf("%d consecutive gateway refusals spanning the persist window did not open the circuit", GatewayRefusalThreshold)
+	}
+	if m.TargetHealthy("shopee#a", "m", clock.Add(10*time.Minute-time.Second)) {
+		t.Fatal("the circuit closed before its cooldown elapsed")
+	}
+
+	// Half-open: one probe, and a refused probe re-opens for a full cooldown.
+	probedAt := clock.Add(10 * time.Minute)
+	clock = probedAt
+	if !m.TakeHalfOpenSlot("shopee#a", 4) {
+		t.Fatal("the half-open probe was refused after the cooldown")
+	}
+	if m.TakeHalfOpenSlot("shopee#a", 4) {
+		t.Fatal("a second half-open probe was admitted; the probe is single-flight")
+	}
+	refuse(10*time.Second + 10*time.Minute + time.Second)
+	if m.TargetHealthy("shopee#a", "m", clock) {
+		t.Fatal("a refused half-open probe did not re-open the circuit")
+	}
+	if m.TargetHealthy("shopee#a", "m", clock.Add(10*time.Minute-time.Second)) {
+		t.Fatal("the re-opened circuit closed before its cooldown elapsed")
+	}
+
+	// A served probe clears everything.
+	clock = probedAt.Add(20 * time.Minute)
+	if !m.TakeHalfOpenSlot("shopee#a", 4) {
+		t.Fatal("the second half-open probe was refused")
+	}
+	m.RecordSuccess("shopee#a", "m", 4)
+	if !m.TargetHealthy("shopee#a", "m", clock) {
+		t.Fatal("a served half-open probe did not clear the circuit")
+	}
+	// …the refusal streak with it: the next refusal starts from one again.
+	refuse(10*time.Second + 40*time.Minute)
+	if !m.TargetHealthy("shopee#a", "m", clock) {
+		t.Fatal("a single refusal after a success opened the circuit; the success must reset the streak")
+	}
+}
+
+// TestGatewayRefusalStreakIsItsOwnCounter: the refusal streak and the
+// hard-failure streak never add up — neither carries the other to its
+// threshold — and they leave each other's reading alone. What a refusal
+// never does: count as a failure.
+func TestGatewayRefusalStreakIsItsOwnCounter(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 11, 26, 4, 0, 0, 0, time.UTC)
+	clock := base
+	m := newTestManager(4)
+	m.now = func() time.Time { return clock }
+	refuse := func(at time.Duration) {
+		clock = base.Add(at)
+		m.RecordGatewayRefusal("aqp", 10*time.Minute, 6*time.Second, 4)
+	}
+	fail := func(at time.Duration) {
+		clock = base.Add(at)
+		m.RecordFailure("aqp", 3, 10*time.Minute, 6*time.Second, 4)
+	}
+
+	// Five refusals (one short of the refusal threshold) plus two hard
+	// failures (one short of the failure threshold): no circuit.
+	for i := range GatewayRefusalThreshold - 1 {
+		refuse(time.Duration(i) * 2 * time.Second)
+	}
+	fail(20 * time.Second)
+	fail(21 * time.Second)
+	if !m.TargetHealthy("aqp", "m", clock) {
+		t.Fatal("refusals and hard failures added up to a circuit; they are separate streaks")
+	}
+	if got := m.Dashboard(clock).Providers["aqp"].ConsecutiveFailures; got != 2 {
+		t.Fatalf("consecutive failures = %d, want the 2 hard failures alone — a gateway refusal is not a failure", got)
+	}
+
+	// The sixth refusal opens on the refusal streak…
+	refuse(22 * time.Second)
+	if m.TargetHealthy("aqp", "m", clock) {
+		t.Fatal("the sixth consecutive refusal did not open the circuit")
+	}
+	m.ResetHealth("aqp", nil)
+
+	// …and the third hard failure would have opened on its own: five
+	// refusals do not bring an account one failure away from its circuit.
+	for i := range GatewayRefusalThreshold - 1 {
+		refuse(time.Minute + time.Duration(i)*2*time.Second)
+	}
+	fail(2*time.Minute + time.Second)
+	if !m.TargetHealthy("aqp", "m", clock) {
+		t.Fatal("five refusals carried one hard failure to the failure threshold")
+	}
+	fail(2*time.Minute + 2*time.Second)
+	if !m.TargetHealthy("aqp", "m", clock) {
+		t.Fatal("five refusals and two hard failures opened the circuit; neither streak reached its own threshold")
+	}
+	// The third failure, with the streak now spanning persist, opens.
+	fail(2*time.Minute + 8*time.Second)
+	if m.TargetHealthy("aqp", "m", clock) {
+		t.Fatal("three hard failures spanning persist did not open the circuit")
+	}
+}
+
+// TestRecordGatewayRefusalPersistGateAndGeneration: six refusals landing
+// inside the persist window are one burst (a batch of requests hitting the
+// same refusal), not six independent observations; the circuit opens only on
+// a refusal that finds the streak spanning the window. A stale generation
+// cannot teach.
+func TestRecordGatewayRefusalPersistGateAndGeneration(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 11, 26, 4, 0, 0, 0, time.UTC)
+	clock := base
+	m := newTestManager(4)
+	m.now = func() time.Time { return clock }
+	for i := range GatewayRefusalThreshold + 2 {
+		clock = base.Add(time.Duration(i) * 100 * time.Millisecond)
+		m.RecordGatewayRefusal("shopee#b", 10*time.Minute, 6*time.Second, 4)
+	}
+	if !m.TargetHealthy("shopee#b", "m", clock) {
+		t.Fatal("a burst of refusals inside the persist window opened the circuit")
+	}
+	clock = base.Add(7 * time.Second)
+	m.RecordGatewayRefusal("shopee#b", 10*time.Minute, 6*time.Second, 3)
+	if !m.TargetHealthy("shopee#b", "m", clock) {
+		t.Fatal("a refusal reported under a stale generation opened the circuit")
+	}
+	m.RecordGatewayRefusal("shopee#b", 10*time.Minute, 6*time.Second, 4)
+	if m.TargetHealthy("shopee#b", "m", clock) {
+		t.Fatal("a refusal on a streak spanning the persist window did not open the circuit")
+	}
+}
+
+// TestRestoreHealthGatewayRefusedCircuitReopensOnNextRefusal: a circuit is
+// persisted with its cooldown and restored after a reload. One that gateway
+// refusals opened must behave like one that hard failures opened from there
+// on: after the cooldown a single half-open probe is admitted, and a probe
+// the gateway refuses again re-opens the circuit for a full cooldown — the
+// refusal streak is restored at its threshold, not at zero.
+func TestRestoreHealthGatewayRefusedCircuitReopensOnNextRefusal(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 11, 26, 4, 0, 0, 0, time.UTC)
+	clock := base
+	m := newTestManager(4)
+	m.now = func() time.Time { return clock }
+	m.RestoreHealth(map[string]PersistedHealth{"shopee#c": {CircuitOpenUntil: base.Add(time.Minute)}}, base, 3)
+	if m.TargetHealthy("shopee#c", "m", clock) {
+		t.Fatal("the restored open circuit read as healthy")
+	}
+
+	clock = base.Add(2 * time.Minute)
+	if !m.TakeHalfOpenSlot("shopee#c", 4) {
+		t.Fatal("the half-open probe was refused after the restored cooldown elapsed")
+	}
+	m.RecordGatewayRefusal("shopee#c", 10*time.Minute, 6*time.Second, 4)
+	if m.TargetHealthy("shopee#c", "m", clock) {
+		t.Fatal("a refused half-open probe did not re-open the restored circuit")
+	}
+	if m.TargetHealthy("shopee#c", "m", clock.Add(10*time.Minute-time.Second)) {
+		t.Fatal("the re-opened circuit closed before its cooldown elapsed")
+	}
+}

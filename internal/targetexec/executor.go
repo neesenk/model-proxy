@@ -50,6 +50,11 @@ type State interface {
 	// the operator surfaces read. Called exactly where failure(target, false)
 	// accounts an auth-class failure; never for any other failure class.
 	RecordCredentialDenied(provider string, kind CredentialDenialKind, evidence []byte)
+	// RecordGatewayRefusal counts one gateway refusal (an edge/WAF 403 —
+	// provider.GatewayRefused — on the wire or at the auth layer) towards the
+	// account's circuit and nothing else: never a credential record, never a
+	// failure metric. Called exactly where noteGatewayRefusal accounts it.
+	RecordGatewayRefusal(provider string)
 	LearnParamBlock(configdomain.RouteTarget, string) bool
 	ApplyParamBlock(configdomain.RouteTarget, []byte) []byte
 	NoteWireResponsesMiss(configdomain.RouteTarget)
@@ -212,9 +217,19 @@ func (executor Executor) Execute(attempt Attempt) Result {
 		copyHeaderWhitelist(req.Header, exchange.Request.Header, upstreamHeaderWhitelist...)
 		req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 		if err := providerImpl.AuthHeaders(req); err != nil {
-			logx.Warnf("[proto=%s provider=%s] auth error: %v", plan.ClientProtocol(), target.Provider, err)
-			executor.release(target.Provider)
+			// A key mint refused by the gateway (an edge/WAF 403 page in the
+			// auth response) is the same network-path refusal as on the wire:
+			// counted towards the circuit, never towards the credential.
+			// Anything else at the auth layer keeps its meaning (an expired
+			// session is the operator's to fix).
+			if authErrHTTPStatus(err) == http.StatusForbidden && gatewayRefusalText(err.Error()) {
+				logx.Warnf("[proto=%s provider=%s] gateway refused at the auth layer: %v", plan.ClientProtocol(), target.Provider, err)
+				executor.noteGatewayRefusal(target)
+			} else {
+				logx.Warnf("[proto=%s provider=%s] auth error: %v", plan.ClientProtocol(), target.Provider, err)
+			}
 			executor.failover(target)
+			executor.release(target.Provider)
 			// Auth-layer failure: no upstream-model response exists, but the
 			// auth endpoint's observed status (e.g. aqp mint 401 "Session
 			// expired") is extractable — record it so the failover leg shows
@@ -404,11 +419,21 @@ func (executor Executor) Execute(attempt Attempt) Result {
 					executor.credentialDenied(target, DenialAccountDisabled, peek) // Auth failure, like an exhausted 401.
 					return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: []byte("upstream denied the account")}
 				}
-				if !policy.LastTarget && gatewayRefused(response.Header, peek) {
-					response.Body.Close()
-					executor.release(target.Provider)
-					executor.failover(target)
-					return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: []byte("upstream gateway refused the request")}
+				if gatewayRefused(response.Header, peek) {
+					// An edge/WAF refusal is about the path this client is
+					// calling from, not the key: no credential record. It
+					// counts towards the circuit on its own streak (a run of
+					// refusals means the gateway is refusing this client).
+					executor.noteGatewayRefusal(target)
+					if !policy.LastTarget {
+						response.Body.Close()
+						executor.release(target.Provider)
+						executor.failover(target)
+						return Result{Outcome: OutcomeFailedHard, AttemptStatus: response.StatusCode, AttemptBody: []byte("upstream gateway refused the request")}
+					}
+					// The last candidate: the raw 403 stays the client's
+					// answer (the ordinary commit below releases the
+					// half-open slot).
 				}
 			}
 			if requestShapeStatus(response.StatusCode) && !strippedParam {
@@ -1042,6 +1067,19 @@ func (executor Executor) credentialDenied(target configdomain.RouteTarget, kind 
 		executor.State.RecordCredentialDenied(target.Provider, kind, evidence)
 	}
 	executor.failure(target, false)
+}
+
+// noteGatewayRefusal is the accounting of an edge/WAF refusal (gatewayRefused
+// on the wire, gatewayRefusalText at the auth layer): one tick on the
+// account's gateway-refusal streak, which opens the circuit like a hard
+// failure, only later. Deliberately NOT failure(): no failure metric, no
+// quality sample, no hard-failure streak, and never credentialDenied — the
+// refusal says nothing about the key. The failover effect stays with the
+// caller: a last-candidate refusal is committed, not failed over.
+func (executor Executor) noteGatewayRefusal(target configdomain.RouteTarget) {
+	if executor.State != nil {
+		executor.State.RecordGatewayRefusal(target.Provider)
+	}
 }
 
 // fakeAPIReply records the provider-level failure for a 2xx-that-was-HTML:

@@ -65,9 +65,12 @@ func (d *sequenceDoer) Do(request *http.Request) (*http.Response, error) {
 
 type executorState struct {
 	failures, modelFailures, releases, success, rateLimits, learned int
-	wireMisses                                                      int
-	rateLimitDecision                                               RateLimitDecision
-	denials                                                         []recordedDenial
+	// gatewayRefusals counts RecordGatewayRefusal — the edge/WAF 403 streak
+	// that opens the circuit on its own (never a failure, never a credential).
+	gatewayRefusals   int
+	wireMisses        int
+	rateLimitDecision RateLimitDecision
+	denials           []recordedDenial
 }
 
 // recordedDenial is one credential denial the executor reported to the state
@@ -83,6 +86,7 @@ func (*executorState) TakeHalfOpenSlot(string) bool                         { re
 func (s *executorState) ReleaseHalfOpenSlot(string)                         { s.releases++ }
 func (s *executorState) RecordSuccess(configdomain.RouteTarget)             { s.success++ }
 func (s *executorState) RecordFailure(string)                               { s.failures++ }
+func (s *executorState) RecordGatewayRefusal(string)                        { s.gatewayRefusals++ }
 func (s *executorState) RecordModelFailure(configdomain.RouteTarget)        { s.modelFailures++ }
 func (s *executorState) RecordCredentialDenied(provider string, kind CredentialDenialKind, evidence []byte) {
 	s.denials = append(s.denials, recordedDenial{provider: provider, kind: kind, evidence: string(evidence)})
@@ -389,17 +393,23 @@ func TestExecutor403FailureScope(t *testing.T) {
 	const nginxCRLF = "<html>\r\n<head><title>403 Forbidden</title></head>\r\n<body>\r\n<center><h1>403 Forbidden</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n"
 	const model = "<html><body>no access to model</body></html>"
 	const gatewayDiagnostic = "upstream gateway refused the request"
+	// A gateway refusal is accounted on the account's gateway-refusal streak
+	// alone (refusals): it opens the circuit like a failure, only later, and
+	// is never a failure, a model lock or a credential record — the refusal
+	// is about the network path, not the key. The last candidate commits the
+	// raw 403 (no failover effect) and still counts.
 	cases := []struct {
 		name, body, contentType, challenge string
 		last, commit                       bool
 		accountFailures, modelFailures     int
+		refusals                           int
 		evidence                           string
 	}{
-		{name: "stock gateway", body: nginx, contentType: "text/html", evidence: gatewayDiagnostic},
-		{name: "stock gateway CRLF (2026-11-23 compass WAF)", body: nginxCRLF, contentType: "text/html", evidence: gatewayDiagnostic},
-		{name: "gateway with wrong MIME", body: nginx, contentType: "application/json", evidence: gatewayDiagnostic},
-		{name: "last gateway", body: nginx, last: true, commit: true},
-		{name: "explicit challenge", body: "browser check", challenge: "challenge", evidence: gatewayDiagnostic},
+		{name: "stock gateway", body: nginx, contentType: "text/html", refusals: 1, evidence: gatewayDiagnostic},
+		{name: "stock gateway CRLF (2026-11-23 compass WAF)", body: nginxCRLF, contentType: "text/html", refusals: 1, evidence: gatewayDiagnostic},
+		{name: "gateway with wrong MIME", body: nginx, contentType: "application/json", refusals: 1, evidence: gatewayDiagnostic},
+		{name: "last gateway", body: nginx, last: true, commit: true, refusals: 1},
+		{name: "explicit challenge", body: "browser check", challenge: "challenge", refusals: 1, evidence: gatewayDiagnostic},
 		{name: "model denial takes priority", body: model, challenge: "challenge", modelFailures: 1, evidence: model},
 		{name: "last model denial", body: model, last: true, commit: true, modelFailures: 1},
 		{name: "account disabled", body: `{"error":{"code":"account_disabled"}}`, accountFailures: 1, evidence: "upstream denied the account"},
@@ -419,7 +429,7 @@ func TestExecutor403FailureScope(t *testing.T) {
 			resp.Header.Set("Cf-Mitigated", tc.challenge)
 			state, effects := &executorState{}, &executorEffects{}
 			result := (Executor{Client: &sequenceDoer{responses: []*http.Response{resp}}, State: state, Effects: effects}).Execute(attempt)
-			if state.failures != tc.accountFailures || state.modelFailures != tc.modelFailures || state.rateLimits != 0 || effects.failures != 0 || provider.refreshes != 0 {
+			if state.failures != tc.accountFailures || state.modelFailures != tc.modelFailures || state.gatewayRefusals != tc.refusals || state.rateLimits != 0 || effects.failures != 0 || provider.refreshes != 0 || len(state.denials) != tc.accountFailures {
 				t.Fatalf("state=%+v effects=%+v refreshes=%d", state, effects, provider.refreshes)
 			}
 			if tc.commit {
@@ -615,26 +625,61 @@ func TestExecutorRecordsCredentialDenialOnlyForAccountAttributions(t *testing.T)
 // AuthHeaders with "mint aqp key: HTTP 403: <html>" (521 legs over ~2h). The
 // leg must fail over immediately, carry the auth endpoint's observed 403 (not
 // the synthetic 502) with the error text as body evidence, and never dispatch
-// an upstream request nor tick the failure circuit.
+// an upstream request nor tick the failure circuit. When the error carries the
+// gateway's refusal page it is the same network-path refusal as on the wire
+// (2026-11-26): one tick on the gateway-refusal streak, logged as a gateway
+// refusal — and still never a failure or a credential record.
 func TestExecutorAuthLayerFailureKeepsObservedStatus(t *testing.T) {
-	provider := &executorTestProvider{authErr: fmt.Errorf("mint aqp key: %w: %s",
-		provider.HTTPStatusError{Code: http.StatusForbidden}, "<html>")}
-	attempt, writer := testAttempt(provider, "{}", Policy{})
-	doer := &sequenceDoer{responses: []*http.Response{testResponse(200, "ok")}}
-	state, effects := &executorState{}, &executorEffects{}
-	result := (Executor{Client: doer, State: state, Effects: effects}).Execute(attempt)
-	if result.Committed || result.Outcome != OutcomeFailedHard || result.AttemptStatus != http.StatusForbidden ||
-		!strings.Contains(string(result.AttemptBody), "mint aqp key") || result.Retried != nil {
-		t.Fatalf("result=%+v", result)
+	cases := []struct {
+		name, body, wantLog string
+		refusals            int
+	}{
+		{
+			name: "a 403 that is not the gateway page",
+			body: "<html>",
+			// An auth failure with no gateway evidence keeps its meaning:
+			// no accounting here at all (the quota poll reports credentials).
+			wantLog: "[proto=openai provider=upstream] auth error: ",
+		},
+		{
+			name: "the gateway's refusal page",
+			// The live shape: the stock page flattened and cut at 200
+			// bytes (display.Truncate), inside the server banner.
+			body:     "<html> <head><title>403 Forbidden</title></head> <body> <center><h1>403 Forbidden</h1></center> <hr><center>nginx</cente...",
+			refusals: 1,
+			wantLog:  "[proto=openai provider=upstream] gateway refused at the auth layer: ",
+		},
 	}
-	if doer.calls != 0 {
-		t.Fatalf("auth failure must not dispatch upstream, calls=%d", doer.calls)
-	}
-	if effects.failovers != 1 || effects.failures != 0 || effects.commits != 0 || provider.refreshes != 0 || writer.Body.Len() != 0 {
-		t.Fatalf("effects=%+v refreshes=%d", effects, provider.refreshes)
-	}
-	if state.releases != 1 || state.failures != 0 || state.rateLimits != 0 {
-		t.Fatalf("state=%+v", state)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureLogs(t)
+			provider := &executorTestProvider{authErr: fmt.Errorf("mint aqp key: %w: %s",
+				provider.HTTPStatusError{Code: http.StatusForbidden}, tc.body)}
+			attempt, writer := testAttempt(provider, "{}", Policy{})
+			doer := &sequenceDoer{responses: []*http.Response{testResponse(200, "ok")}}
+			state, effects := &executorState{}, &executorEffects{}
+			result := (Executor{Client: doer, State: state, Effects: effects}).Execute(attempt)
+			if result.Committed || result.Outcome != OutcomeFailedHard || result.AttemptStatus != http.StatusForbidden ||
+				!strings.Contains(string(result.AttemptBody), "mint aqp key") || result.Retried != nil {
+				t.Fatalf("result=%+v", result)
+			}
+			if doer.calls != 0 {
+				t.Fatalf("auth failure must not dispatch upstream, calls=%d", doer.calls)
+			}
+			if effects.failovers != 1 || effects.failures != 0 || effects.commits != 0 || provider.refreshes != 0 || writer.Body.Len() != 0 {
+				t.Fatalf("effects=%+v refreshes=%d", effects, provider.refreshes)
+			}
+			if state.releases != 1 || state.failures != 0 || state.rateLimits != 0 || len(state.denials) != 0 {
+				t.Fatalf("state=%+v", state)
+			}
+			if state.gatewayRefusals != tc.refusals {
+				t.Fatalf("gateway refusals = %d, want %d", state.gatewayRefusals, tc.refusals)
+			}
+			assertLoggedOnce(t, logs.String(), tc.wantLog)
+			if tc.refusals == 0 && strings.Contains(logs.String(), "gateway refused") {
+				t.Fatalf("a non-gateway auth failure was logged as a gateway refusal:\n%s", logs.String())
+			}
+		})
 	}
 }
 

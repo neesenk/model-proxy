@@ -14,11 +14,22 @@ type providerHealth struct {
 	// within milliseconds, and without the span gate that single event reads
 	// as N independent provider-death observations. Zero value means "no
 	// streak yet" — a later RecordFailure stamps it on the 0→1 transition.
-	streakStartedAt  time.Time
-	circuitOpenUntil time.Time
-	rateLimitedUntil time.Time
-	rateLimitKind    RateLimitKind
-	halfOpenInFlight bool
+	streakStartedAt time.Time
+	// gatewayRefusals counts CONSECUTIVE gateway refusals (edge/WAF 403s,
+	// provider.GatewayRefused) on a streak of their own, stamped at the 0→1
+	// transition like the hard-failure streak. One refusal is cheap to absorb
+	// and a WAF rule can be request-specific, so they open the circuit later
+	// than hard failures (GatewayRefusalThreshold, not the configured
+	// threshold) and never touch the hard-failure streak, the failure metric
+	// or the credential record: a refusal says nothing about the key. The two
+	// streaks share the circuit they open, its cooldown and its half-open
+	// probe, and a success clears both.
+	gatewayRefusals        int
+	refusalStreakStartedAt time.Time
+	circuitOpenUntil       time.Time
+	rateLimitedUntil       time.Time
+	rateLimitKind          RateLimitKind
+	halfOpenInFlight       bool
 	// frozen is the operator-set freeze (CLI freeze / POST /api/health/freeze):
 	// the provider is excluded from scheduling until ResetHealth (unfreeze)
 	// clears the entry. Success/failure/rate-limit recording never clears it.
@@ -224,6 +235,8 @@ func (m *Manager) RecordSuccess(name, model string, generation uint64) {
 	if state := m.health[name]; state != nil {
 		state.consecutiveFailures = 0
 		state.streakStartedAt = time.Time{}
+		state.gatewayRefusals = 0
+		state.refusalStreakStartedAt = time.Time{}
 		state.circuitOpenUntil = time.Time{}
 		state.halfOpenInFlight = false
 	}
@@ -261,6 +274,44 @@ func (m *Manager) RecordFailure(name string, threshold int, cooldown, persist ti
 		state.circuitOpenUntil = now.Add(cooldown)
 	}
 	m.recordQualityLocked(name, 1, now)
+}
+
+// GatewayRefusalThreshold is how many CONSECUTIVE gateway refusals (spanning
+// persist like hard failures) open an account's circuit. Deliberately higher
+// than the default failure threshold: a WAF rule can refuse single requests
+// on an otherwise healthy path, and six in a row is a gateway refusing this
+// client (2026-11-26: a network switch put compass/aqp behind their security
+// policy for four hours; 188 requests paid 479 failed legs because nothing
+// ever opened).
+const GatewayRefusalThreshold = 6
+
+// RecordGatewayRefusal counts one gateway refusal (an edge/WAF 403 —
+// provider.GatewayRefused) towards the account's circuit and nothing else:
+// no hard-failure streak, no failure metric, no quality sample, no credential
+// record. Once GatewayRefusalThreshold consecutive refusals span persist the
+// circuit opens for the same cooldown a hard failure gets, with the same
+// single half-open probe afterwards.
+func (m *Manager) RecordGatewayRefusal(name string, cooldown, persist time.Duration, generation uint64) {
+	now := m.nowTime()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureLocked()
+	if !m.generationMatchesLocked(generation) {
+		return
+	}
+	state := m.health[name]
+	if state == nil {
+		state = &providerHealth{}
+		m.health[name] = state
+	}
+	state.gatewayRefusals++
+	if state.gatewayRefusals == 1 {
+		state.refusalStreakStartedAt = now
+	}
+	state.halfOpenInFlight = false
+	if state.gatewayRefusals >= GatewayRefusalThreshold && now.Sub(state.refusalStreakStartedAt) >= persist {
+		state.circuitOpenUntil = now.Add(cooldown)
+	}
 }
 
 func (m *Manager) modelLockedLocked(providerName, model string, now time.Time) bool {

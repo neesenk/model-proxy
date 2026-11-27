@@ -15,6 +15,9 @@ type HealthGate interface {
 	ReleaseHalfOpenSlot(provider string, generation uint64)
 	RecordSuccess(provider, model string, generation uint64)
 	RecordFailure(provider string, scheduling configdomain.Scheduling, generation uint64)
+	// RecordGatewayRefusal counts an edge/WAF 403 refusal towards the
+	// account's circuit and nothing else (see State).
+	RecordGatewayRefusal(provider string, scheduling configdomain.Scheduling, generation uint64)
 	RecordModelFailure(provider, model string, scheduling configdomain.Scheduling, generation uint64)
 	RecordRateLimit(provider string, until time.Time, kind string, generation uint64)
 	RecordCredentialDenied(provider string, kind CredentialDenialKind, evidence []byte, generation uint64)
@@ -73,6 +76,10 @@ func (state GateState) RecordRateLimit(provider string, decision RateLimitDecisi
 
 func (state GateState) RecordCredentialDenied(provider string, kind CredentialDenialKind, evidence []byte) {
 	state.Gate.RecordCredentialDenied(provider, kind, evidence, state.Runtime.Generation)
+}
+
+func (state GateState) RecordGatewayRefusal(provider string) {
+	state.Gate.RecordGatewayRefusal(provider, state.Scheduling, state.Runtime.Generation)
 }
 
 func (state GateState) LearnParamBlock(target configdomain.RouteTarget, parameter string) bool {

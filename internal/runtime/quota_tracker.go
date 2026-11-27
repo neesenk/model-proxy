@@ -617,15 +617,25 @@ func IsTransientQuotaErr(err string) bool {
 // "session-expired" (SSO cookie aged out — re-login fixes it),
 // "not-logged-in" (no credential stored / incomplete login) or "auth" (key
 // rejected: mint failures, 401/403 usage endpoints). "" = not a credential
-// problem (network blip, 5xx, parse) — display surfaces must NOT badge those
-// as credential issues. Substring matching mirrors the shared vocabulary of
-// provider error strings (see aqp fetchMonthlyUsage, AqpKeyProvider mint,
-// IsTransientQuotaErr's permanent list); the JS twin is quotaErrKind.
+// problem (network blip, 5xx, parse, and a gateway refusal — see above) —
+// display surfaces must NOT badge those as credential issues. Substring
+// matching mirrors the shared vocabulary of provider error strings (see aqp
+// fetchMonthlyUsage, AqpKeyProvider mint, IsTransientQuotaErr's permanent
+// list); the JS twin is quotaErrKind.
 func CredentialErrClass(errStr string) string {
 	if errStr == "" {
 		return ""
 	}
 	e := strings.ToLower(errStr)
+	// A gateway refusal — an edge/WAF 403 page, the gateway's security policy
+	// refusing the network path this client calls from (2026-11-26: a network
+	// switch put aqp's usage endpoint behind it for four hours) — is not a
+	// credential problem: the same key is served from another network. Read
+	// before the status keywords below, which would file it under "auth" and
+	// raise the re-login / replace-the-key banner for a healthy credential.
+	if provider.GatewayRefusalText(errStr) {
+		return ""
+	}
 	switch {
 	case strings.Contains(e, "session expired"):
 		return "session-expired"
