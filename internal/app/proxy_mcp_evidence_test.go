@@ -209,12 +209,26 @@ func TestMCPGateway_FailureLeavesEvidence(t *testing.T) {
 			if len(rows) != wantRows {
 				t.Fatalf("mcp request-log rows = %+v, want %d", rows, wantRows)
 			}
-			row := rows[len(rows)-1]
-			if row.Status != http.StatusBadGateway {
-				t.Errorf("request-log row status = %d, want 502", row.Status)
+			// The failed exchange is found by its method, never by position.
+			// QueryRecords orders rows by the second-resolution ts (newest
+			// first): with the route's initialize answer and the failed call in
+			// different seconds the two swap places, and "the last row" was the
+			// 200 of the initialize (a one-in-N flake whenever the exchanges
+			// straddled a second boundary).
+			var failed *requestlog.Record
+			for i := range rows {
+				if rows[i].Method == tc.method {
+					failed = &rows[i]
+				}
 			}
-			if row.ResponseBody != client || row.ResponseSize != int64(len(client)) {
-				t.Errorf("request-log row response = %q (%d bytes), want exactly the client bytes %q (%d)", row.ResponseBody, row.ResponseSize, client, len(client))
+			if failed == nil {
+				t.Fatalf("mcp request-log rows = %+v, want one for the failed %s exchange", rows, tc.method)
+			}
+			if failed.Status != http.StatusBadGateway {
+				t.Errorf("request-log row status = %d, want 502", failed.Status)
+			}
+			if failed.ResponseBody != client || failed.ResponseSize != int64(len(client)) {
+				t.Errorf("request-log row response = %q (%d bytes), want exactly the client bytes %q (%d)", failed.ResponseBody, failed.ResponseSize, client, len(client))
 			}
 		})
 	}
