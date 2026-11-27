@@ -11,8 +11,10 @@ package testsyn
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
@@ -63,6 +65,76 @@ func SlowRound(d time.Duration, h func(http.ResponseWriter, *http.Request)) http
 		h(w, r)
 	}
 }
+
+// SilentPeerListener is a listener whose connections are unbuffered
+// in-memory pipes: every byte the server writes blocks until the peer reads
+// it — the fixture for "the peer stops reading" tests (pattern P9). A client
+// that sends its request and then reads nothing is a stalled reader
+// deterministically, from the first response byte. Kernel sockets cannot give
+// that: how many bytes a non-reading peer absorbs before Write blocks
+// (socket buffers, autotuning, zero-window probe backoff) is platform state a
+// short test budget races — observed on macOS loopback, where each 32 KiB
+// write still went through every few tens of milliseconds.
+type SilentPeerListener struct {
+	// conns is the accept backlog: like a real listener, a connection made
+	// before the server Accepts waits here instead of blocking the dialer.
+	conns  chan net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+// silentPeerBacklog bounds connections made ahead of their Accept.
+const silentPeerBacklog = 64
+
+// NewSilentPeerListener returns a listener no server is listening on yet;
+// hand it to the server (httptest.Server.Listener) and dial with Connect.
+func NewSilentPeerListener() *SilentPeerListener {
+	return &SilentPeerListener{conns: make(chan net.Conn, silentPeerBacklog), closed: make(chan struct{})}
+}
+
+// Connect returns the client end of a fresh connection to the listener; the
+// server receives the other end from its next Accept. It fails with
+// net.ErrClosed once the listener is closed.
+func (l *SilentPeerListener) Connect() (net.Conn, error) {
+	select {
+	case <-l.closed:
+		return nil, net.ErrClosed
+	default:
+	}
+	serverEnd, clientEnd := net.Pipe()
+	select {
+	case l.conns <- serverEnd:
+		return clientEnd, nil
+	case <-l.closed:
+		_ = serverEnd.Close()
+		_ = clientEnd.Close()
+		return nil, net.ErrClosed
+	}
+}
+
+// Accept implements net.Listener.
+func (l *SilentPeerListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.conns:
+		return conn, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+// Close implements net.Listener.
+func (l *SilentPeerListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+// Addr implements net.Listener.
+func (l *SilentPeerListener) Addr() net.Addr { return silentPeerAddr{} }
+
+type silentPeerAddr struct{}
+
+func (silentPeerAddr) Network() string { return "pipe" }
+func (silentPeerAddr) String() string  { return "pipe" }
 
 // Goroutines snapshots the goroutine count for a later LeakCheck. Take the
 // baseline BEFORE constructing the unit under test, run the scenario, Close

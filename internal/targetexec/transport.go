@@ -2,8 +2,10 @@ package targetexec
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -128,7 +130,100 @@ const (
 	streamEOF streamEnd = iota
 	streamClientGone
 	streamUpstreamErr
+	// streamWriteStalled: the client connection's write deadline fired — the
+	// peer kept its connection but stopped reading, so a Write that began
+	// before the deadline was still blocked when it expired. Like
+	// streamClientGone this is not an upstream fault; it is distinct because
+	// the connection owner did nothing (no close, no reset).
+	streamWriteStalled
 )
+
+// streamWriteGrace caps how far CLIENT writes may run past the request's
+// upstream-timeout deadline. That deadline is absolute and shared by the two
+// sides of the exchange: the upstream Read fails at it, and whatever was in
+// flight is handed to the client right after — a strict bound would cut that
+// tail (and the fail-closed terminal the watcher synthesizes for it) off a
+// perfectly healthy reader. The grace is the window that tail gets; a stalled
+// peer is abandoned when it runs out. It never exceeds the budget itself, so
+// a short upstream_timeout keeps the bound proportionally tight.
+const streamWriteGrace = 5 * time.Second
+
+// clientWriteDeadline is the deadline of a response's client writes: the
+// request's upstream-timeout deadline plus the tail grace. budget is the
+// span from the attempt's dispatch to that deadline (the configured timeout,
+// less whatever a same-target retry spent).
+func clientWriteDeadline(upstreamDeadline time.Time, budget time.Duration) time.Time {
+	grace := min(streamWriteGrace, budget)
+	if grace < 0 {
+		grace = 0
+	}
+	return upstreamDeadline.Add(grace)
+}
+
+// isWriteStall reports whether a client write error is the connection's
+// write deadline firing (net.OpError around os.ErrDeadlineExceeded, or the
+// same error surfacing later from a sticky bufio failure).
+func isWriteStall(err error) bool {
+	return err != nil && errors.Is(err, os.ErrDeadlineExceeded)
+}
+
+// clientWriteBound applies one response's client-write deadline to the
+// connection. The deadline itself comes from the executor's response handle
+// (timingResponseWriter.writeDeadline, set by commit from the request's
+// upstream-timeout context); http.ResponseController reaches the connection
+// through the wrappers' Unwrap chain. A writer that cannot take a deadline
+// (recorders, test fakes) leaves the controller nil: its writes stay
+// unbounded exactly as before and only the error identity classifies a
+// stall.
+type clientWriteBound struct {
+	controller *http.ResponseController
+	deadline   time.Time
+}
+
+func resolveClientWriteBound(writer http.ResponseWriter) clientWriteBound {
+	timed, ok := writer.(*timingResponseWriter)
+	if !ok || timed.writeDeadline.IsZero() {
+		return clientWriteBound{}
+	}
+	return clientWriteBound{controller: http.NewResponseController(timed), deadline: timed.writeDeadline}
+}
+
+// arm sets the deadline before a client write; flush pushes buffered bytes
+// and returns the error http.Flusher.Flush swallows (a timed-out write
+// surfaces here first); clear drops the deadline again when the copy ends.
+// net/http also clears a connection's write deadline when the request ends,
+// so a kept-alive connection is safe either way — clearing here keeps the
+// bound scoped to the copy should anything else ever write to the client
+// after it.
+func (bound clientWriteBound) arm() {
+	if bound.controller != nil {
+		_ = bound.controller.SetWriteDeadline(bound.deadline)
+	}
+}
+
+func (bound clientWriteBound) flush(flusher http.Flusher) error {
+	if bound.controller == nil || flusher == nil {
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
+	}
+	return bound.controller.Flush()
+}
+
+func (bound clientWriteBound) clear() {
+	if bound.controller != nil {
+		_ = bound.controller.SetWriteDeadline(time.Time{})
+	}
+}
+
+// clientEnd classifies a failed client write.
+func (bound clientWriteBound) clientEnd(err error) streamEnd {
+	if isWriteStall(err) {
+		return streamWriteStalled
+	}
+	return streamClientGone
+}
 
 type countingReadCloser struct {
 	io.ReadCloser
@@ -156,19 +251,26 @@ var flushBufPool = sync.Pool{New: func() any {
 	return &buf
 }}
 
+// flushCopy streams body to the client. Client writes are bounded by the
+// response's write deadline when the writer carries one (see clientWriteBound):
+// a peer that keeps its connection but stops reading used to park this loop
+// in Write forever, out of reach of the upstream-timeout context.
 func flushCopy(writer http.ResponseWriter, body io.ReadCloser) streamEnd {
 	flusher, _ := writer.(http.Flusher)
+	bound := resolveClientWriteBound(writer)
+	defer bound.clear()
 	bufp := flushBufPool.Get().(*[]byte)
 	defer flushBufPool.Put(bufp)
 	buf := *bufp
 	for {
 		n, err := body.Read(buf)
 		if n > 0 {
+			bound.arm()
 			if _, writeErr := writer.Write(buf[:n]); writeErr != nil {
-				return streamClientGone
+				return bound.clientEnd(writeErr)
 			}
-			if flusher != nil {
-				flusher.Flush()
+			if flushErr := bound.flush(flusher); isWriteStall(flushErr) {
+				return streamWriteStalled
 			}
 		}
 		if err != nil {
@@ -207,7 +309,10 @@ func flushCopyHeartbeat(writer http.ResponseWriter, body, source io.ReadCloser, 
 	heartbeatWriter, hasHeartbeat := writer.(interface {
 		WriteHeartbeat([]byte) (int, error)
 	})
+	bound := resolveClientWriteBound(writer)
+	defer bound.clear()
 	writeHeartbeat := func() error {
+		bound.arm()
 		if hasHeartbeat {
 			_, err := heartbeatWriter.WriteHeartbeat(heartbeatFrame)
 			return err
@@ -264,11 +369,12 @@ func flushCopyHeartbeat(writer http.ResponseWriter, body, source io.ReadCloser, 
 		select {
 		case result := <-readRes:
 			if result.n > 0 {
+				bound.arm()
 				if _, err := writer.Write(buf[:result.n]); err != nil {
-					return streamClientGone
+					return bound.clientEnd(err)
 				}
-				if flusher != nil {
-					flusher.Flush()
+				if flushErr := bound.flush(flusher); isWriteStall(flushErr) {
+					return streamWriteStalled
 				}
 				lineAligned = buf[result.n-1] == '\n'
 				ticker.Reset(interval)
@@ -284,7 +390,16 @@ func flushCopyHeartbeat(writer http.ResponseWriter, body, source io.ReadCloser, 
 			if !lineAligned {
 				continue
 			}
-			if err := writeHeartbeat(); err != nil {
+			writeErr := writeHeartbeat()
+			// The heartbeat is a few bytes and lands in the response buffer;
+			// when the peer stopped reading the deadline failure is the
+			// Flush's — which http.Flusher.Flush cannot report but the bound's
+			// flush can.
+			flushErr := error(nil)
+			if writeErr == nil {
+				flushErr = bound.flush(flusher)
+			}
+			if writeErr != nil || isWriteStall(flushErr) {
 				// The reader goroutine may still be parked in body.Read holding
 				// buf; the buffer must NOT return to the pool — abandon it to
 				// the GC. Close the RAW source (never the wrapper chain, see
@@ -293,10 +408,10 @@ func flushCopyHeartbeat(writer http.ResponseWriter, body, source io.ReadCloser, 
 				// body.Close afterwards is an idempotent second close.
 				recycle = false
 				_ = source.Close()
-				return streamClientGone
-			}
-			if flusher != nil {
-				flusher.Flush()
+				if writeErr != nil {
+					return bound.clientEnd(writeErr)
+				}
+				return streamWriteStalled
 			}
 		}
 	}
@@ -307,11 +422,21 @@ type timingResponseWriter struct {
 	firstByte    time.Time
 	hasFirstByte bool
 	flusher      http.Flusher
+	// writeDeadline, when set by commit, is the absolute deadline of this
+	// response's client writes: the request's upstream-timeout deadline plus
+	// streamWriteGrace. The copy loops reach it through clientWriteBound.
+	writeDeadline time.Time
 }
 
 func newTimingResponseWriter(writer http.ResponseWriter) *timingResponseWriter {
 	flusher, _ := writer.(http.Flusher)
 	return &timingResponseWriter{ResponseWriter: writer, flusher: flusher}
+}
+
+// Unwrap lets http.ResponseController reach the connection through this
+// wrapper — without it a client-write deadline could not be set at all.
+func (writer *timingResponseWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
 }
 
 func (writer *timingResponseWriter) Write(body []byte) (int, error) {
@@ -332,4 +457,11 @@ func (writer *timingResponseWriter) Flush() {
 	if writer.flusher != nil {
 		writer.flusher.Flush()
 	}
+}
+
+// FlushError is Flush with the error http.Flusher.Flush cannot return; the
+// controller prefers it, so a timed-out client write surfaces at the flush
+// instead of on the next Write.
+func (writer *timingResponseWriter) FlushError() error {
+	return http.NewResponseController(writer.ResponseWriter).Flush()
 }

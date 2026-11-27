@@ -1086,6 +1086,19 @@ func (c *countingResponseWriter) Flush() {
 	}
 }
 
+// Unwrap keeps the connection reachable for http.ResponseController: the
+// executor's client-write deadline (a stalled reader must not park a handler
+// past its upstream timeout) is set on the connection behind this wrapper.
+func (c *countingResponseWriter) Unwrap() http.ResponseWriter {
+	return c.ResponseWriter
+}
+
+// FlushError is Flush with the error http.Flusher.Flush cannot return, so
+// the executor's write bound learns of a timed-out flush when it happens.
+func (c *countingResponseWriter) FlushError() error {
+	return http.NewResponseController(c.ResponseWriter).Flush()
+}
+
 var _ http.Flusher = (*countingResponseWriter)(nil)
 
 // PublishTerminalEvent emits a live "end" event for a request that ends before

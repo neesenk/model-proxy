@@ -299,8 +299,8 @@ forward/reload/HTTP/CLI/persistence/quota poll 编排；集成测试通过公开
 并发测试的先后顺序必须来自同步，不来自时间（§时序纪律契约划禁区和门禁，
 本节是正面目录——该用什么）。共享原语的权威提供者是 `internal/testsyn`
 （`WaitUntil`/`WaitUntilFor` 轮询、`SlowRound` 对抗性慢轮注入、
-`Goroutines`/`LeakCheck(For)` 泄漏核算）；新代码一律用它，各包存量
-helper 在被触及时顺手替换。八个模式（每条带本仓真实范例）：
+`SilentPeerListener` 不读取的对端、`Goroutines`/`LeakCheck(For)` 泄漏核算）；新代码一律用它，各包存量
+helper 在被触及时顺手替换。九个模式（每条带本仓真实范例）：
 
 - **P1 轮询可观察量**：循环内先查谓词再退避（`WaitUntil`），顺序来自被轮询
   的可观察状态。范例：`awaitCommitMetrics`、`awaitRouteStats`。
@@ -321,8 +321,14 @@ helper 在被触及时顺手替换。八个模式（每条带本仓真实范例�
   （modelcaps persist 自采纳、forward 窗口）。
 - **P8 对抗性慢轮**：窗口类测试用 `testsyn.SlowRound(≫窗口)` 再跑一遍，
   证明行为与轮次耗时无关。当前只有 `testsyn` 自身的用例演示这一注入；仓内还没有窗口类
-  用例接入它，首选对象是 selector CooldownRetries 的 300ms 验证。
-
+  用例接入它，首选对象是 selector CooldownRetries 的 300ms 验证。- **P9 不读取的对端**：测"客户端写阻塞"时对端用 `testsyn.SilentPeerListener`
+  （无缓冲 `net.Pipe`，服务端的第一个应答字节就已阻塞），客户端发完请求后不读；
+  返回时刻用 P5 下界断言钉住（≥ 预算 + 尾宽限）。不要用内核 socket 配小缓冲区：
+  不读取的对端在 `Write` 阻塞前能吸收多少字节是平台状态（socket 缓冲、自动调优、
+  零窗口探测退避）——macOS 回环上实测 `SetWriteBuffer/SetReadBuffer` 提示不可靠，
+  每个 32KiB 写隔几十毫秒仍能通过，短预算的用例约四成概率在写阻塞前就以别的原因
+  结束。范例：`TestExecutorClientStopsReadingIsBoundedByUpstreamTimeout`、
+  `TestForward_ClientStopsReadingIsBoundedByUpstreamTimeout`。
 **回归红规则**：并发类 bugfix 的回归用例必须先在未修复代码上演示过失败
 （提交信息注明"修复前 -cpu X / 注入 Y 可靠复现"），与时序契约的 REGEN
 一样是显式动作——没有红过的回归用例无法证明自己有牙齿。

@@ -263,6 +263,16 @@
     sweep 上按最旧优先删轮转文件至卷空闲恢复，活动文件与 index.db 永不删
     （索引一致性沿用 prune 的 reconcile 契约）。
 
+45. **夹在连接与 executor 之间的 `http.ResponseWriter` wrapper 必须实现 `Unwrap()`**：
+    executor 用 `http.ResponseController` 在连接上设客户端写 deadline——不读取的对端
+    不得把 handler 占过 `upstream_timeout`（规则见 `routing-and-failure.md`「客户端写入上限」）。
+    控制器只穿过实现了 `Unwrap` 的 wrapper：`forward.countingResponseWriter` 与
+    `targetexec.timingResponseWriter` 任一丢掉它，deadline 就设不到连接上、上限静默失效，
+    而两个包各自的单元测试全绿——只有穿过组合根的集成测试（`internal/app` 的
+    `TestForward_ClientStopsReadingIsBoundedByUpstreamTimeout`）能抓到。二者还实现
+    `FlushError()`：小写入先落 bufio，超时失败发生在 flush，而 `http.Flusher.Flush` 报不出错误。
+    在这条链上新增中间层 wrapper 时同此。
+
 ## 回归要求
 
 - 每个陷阱应有测试或明确的测试缺口。

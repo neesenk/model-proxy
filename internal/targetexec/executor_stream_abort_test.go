@@ -105,6 +105,13 @@ func (doer *flowingSSEDoer) Do(*http.Request) (*http.Response, error) {
 // scheduling config (the keepalive copy path keys off StreamKeepalive).
 func streamingAttemptWithRuntime(t *testing.T, runtime Runtime, request *http.Request, writer http.ResponseWriter) Attempt {
 	t.Helper()
+	return attemptWithRuntimeBody(t, runtime, request, writer, `{"model":"model","stream":true,"messages":[]}`)
+}
+
+// attemptWithRuntimeBody is streamingAttemptWithRuntime with the client's
+// request body chosen by the caller (streaming or not).
+func attemptWithRuntimeBody(t *testing.T, runtime Runtime, request *http.Request, writer http.ResponseWriter, body string) Attempt {
+	t.Helper()
 	plan := NewPlan(PlanInput{
 		Target:          configdomain.RouteTarget{Provider: "upstream", Model: "model"},
 		ProviderConfig:  configdomain.Provider{Provider: "test", OpenAIBaseURL: "https://upstream.test"},
@@ -114,7 +121,7 @@ func streamingAttemptWithRuntime(t *testing.T, runtime Runtime, request *http.Re
 		ClientPath:      "/v1/chat/completions",
 	})
 	return NewAttempt(runtime, plan,
-		Exchange{Request: request, Writer: writer, Body: []byte(`{"model":"model","stream":true,"messages":[]}`)},
+		Exchange{Request: request, Writer: writer, Body: []byte(body)},
 		Scope{}, Policy{})
 }
 

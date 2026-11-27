@@ -722,6 +722,16 @@ func (executor Executor) commit(
 		})
 	}
 	counting := &countingReadCloser{ReadCloser: body}
+	// The upstream-timeout context bounds the upstream Read only. A peer that
+	// keeps its connection but stops reading parks the copy loop in the
+	// client Write, where that context cannot reach it (2026-11-26: two
+	// handlers were held for 8h+ until a restart's forced close). Every
+	// client write of this response takes the same deadline, plus the tail
+	// grace, on the connection — the handler cannot outlive the request's
+	// budget.
+	if deadline, ok := ctx.Deadline(); ok {
+		timedWriter.writeDeadline = clientWriteDeadline(deadline, deadline.Sub(dto.Started))
+	}
 	// SSE keepalive: for client-facing event streams, write a comment
 	// heartbeat after `keepalive` of upstream silence so client/edge idle
 	// timeouts don't cut slow-TTFT streams. The heartbeat starts only after
@@ -746,7 +756,17 @@ func (executor Executor) commit(
 		logx.Warnf("[proto=%s provider=%s] 200 with zero-byte body — model locked post-commit; next request fails over",
 			plan.ClientProtocol(), dto.Target.Provider)
 	}
-	if terminalWatch != nil {
+	if end == streamWriteStalled {
+		// The peer never closed or reset anything — it stopped reading, and
+		// a client write sat on its full buffers until the request's deadline
+		// abandoned the stream. Decided ahead of the watcher switch: the
+		// reader goroutine was idle while the loop was parked, so the watcher
+		// observed no upstream end and none of its branches apply — the old
+		// plain "client disconnected" line sent the 2026-11-26 audit to the
+		// connection owner instead of the stopped reader.
+		logx.Warnf("[proto=%s provider=%s] client stopped reading — a client write blocked past the upstream timeout; stream abandoned; not an upstream fault",
+			plan.ClientProtocol(), dto.Target.Provider)
+	} else if terminalWatch != nil {
 		switch {
 		case terminalWatch.Synthesized():
 			// Attribution: the watcher only sees that the upstream body ended

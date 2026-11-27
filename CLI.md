@@ -68,7 +68,11 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
   计数，attempt 腿以 502 + 原因文本落档）。流式应答中途终止另有归因行：client 断开
   （Info，两种形态：watcher 已合成终态但未送达、或对端先于上游终态消失而拷贝循环
   因写失败先行退出——两者都是"非上游故障"；上游已送达终态之后的写失败不算中途
-  终止、不打行）、调度超时（Warn：终态已送达）、上游流先于终止序列结束
+  终止、不打行）、对端停止读取（Warn `client stopped reading — a client write blocked
+  past the upstream timeout; stream abandoned; not an upstream fault`：连接未断但对端不再
+  读取，客户端写阻塞跨过本请求 `upstream_timeout` 截止时刻加尾宽限，流被放弃、不计熔断；
+  契约在 `docs/architecture/routing-and-failure.md`「客户端写入上限」）、调度超时（Warn：
+  终态已送达）、上游流先于终止序列结束
   （Warn：合成协议原生错误终态交付客户端、不视为成功完整流）、上游自带错误终态结束流
   （Warn：原样转发客户端、不重复合成，行内带单行有界摘录——该应答在 request log
   里是普通 status 200，此行是唯一失败证据）；跨协议转换流（例如 openai 客户端

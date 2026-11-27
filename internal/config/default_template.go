@@ -447,7 +447,7 @@ providers:
 # Scheduling: every field has a code default (config.go accessors), so this
 # block is usually unnecessary unless you need to override one of them.
 #   retry_wait: 10s             # (default 10s; "0" disables) all targets cooling down or at their concurrency limits: wait ≤ this for the earliest expiry / a freed request slot and retry (≤2×)
-#   upstream_timeout: 1800s     # (default 1800s) per-upstream-request timeout
+#   upstream_timeout: 1800s     # (default 1800s) per-upstream-request timeout; also bounds client writes: a peer that stops reading gets its stream abandoned at this deadline (+ up to 5s)
 #   stream_keepalive: 15s       # (default 15s; "0" disables) SSE comment heartbeat into client streams after this much upstream silence
 #   sticky_dwell: 1m            # (default 1m) min time on the chosen provider before re-evaluating
 #   quota_poll_interval: 5m     # (default 5m)  background quota poll cadence

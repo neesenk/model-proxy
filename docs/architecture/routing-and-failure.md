@@ -529,6 +529,15 @@ selector 腿同此判定（同一 8 KiB 窗口）：decisions 腿本就不记 fa
 - 心跳经 `timingResponseWriter.WriteHeartbeat` 旁路首字节标记——TTFT 只测量上游真实首字节，不被代理 padding 污染。
 - 非流式（JSON）响应绝不写注释帧（会损坏 body）；数据流动时每写一帧重置计时器，只在静默期发心跳。
 
+## 客户端写入上限（停止读取的对端）
+
+`scheduling.upstream_timeout` 的 ctx 约束的是上游 Read。对端保持连接却不再读取（卡死的 worker、被遗弃未关闭的流式应答）时，内核缓冲填满后拷贝循环停在面向客户端的 `Write`/`Flush` 上，该 ctx 到期对它无效——2026-11-26 两个 handler 因此各被占住 8 小时以上，直到重启强关；期间的 goroutine、已捕获的应答体和账号的在途并发位一直被占着。现状（决策见 `intentional-behaviors.md` 55）：
+
+- `commit` 把本请求的截止时刻加尾宽限（`targetexec.clientWriteDeadline`：`min(5s, 预算)`）作为本应答**全部**客户端写的连接写 deadline——数据写、其后的 flush、keepalive 心跳，流式与非流式应答同此。deadline 经 `http.ResponseController` 抵达连接，前提是 `forward.countingResponseWriter` 与 `targetexec.timingResponseWriter` 都实现 `Unwrap`（两者还实现 `FlushError`：`http.Flusher.Flush` 报不出的小写入的失败其实发生在 flush 上）；任一 wrapper 丢掉 `Unwrap`，上限就静默失效，单元测试看不到——由 `internal/app` 的 `TestForward_ClientStopsReadingIsBoundedByUpstreamTimeout` 钉住。
+- 跨过该时刻的写以 deadline 错误失败（`errors.Is(err, os.ErrDeadlineExceeded)`），拷贝循环以 `streamWriteStalled` 返回：handler 退栈、在途并发位释放、上游 body 关闭，不计熔断，账号保持可调度；serve.log 落 Warn `client stopped reading — a client write blocked past the upstream timeout; stream abandoned; not an upstream fault`（归因契约见 `protocol-conversion.md`「提交后流中止的归因日志」⑤）。连接由 net/http 在请求结束时关闭，不做 keep-alive 复用。
+- **尾宽限**：调度超时后上游在途的最后一块与 watcher 合成的错误终态要交付给**正常读取**的客户端，严格的同一截止会把这段尾巴连同错误终态一起切掉；对端确实停止读取时，宽限耗尽即放弃。短 `upstream_timeout` 下宽限不超过预算本身，上限等比例收紧。
+- 已提交的 200 头无法收回：被放弃的应答在 request log 里是普通 status 200（与 client 断开同形），上述 Warn 行是唯一的失败证据。
+
 ## 回归测试
 
 - half-open 的成功、5xx、429、普通 4xx 生命周期。
@@ -566,6 +575,13 @@ selector 腿同此判定（同一 8 KiB 窗口）：decisions 腿本就不记 fa
   跳过的低于它；`failed_hops[].latency_ms` 的端到端断言在折叠用例里）。
 - 提交后流中止归因（`internal/targetexec/executor_stream_abort_test.go`）：对端写失败先于上游终态在普通与 keepalive 两条拷贝路径都打 client 断开行、不得误判上游截断；上游自带错误终态打 Warn 带摘录；上游已送达终态后的写失败与完整流不打行（契约在 `docs/architecture/protocol-conversion.md`「提交后流中止的归因日志」）。
 - SSE keepalive：静默期心跳帧、ttft 不被心跳标记、录制链/缓存无心跳、client gone 后 reader goroutine 释放。
+- 客户端写入上限（`internal/targetexec/executor_client_stall_test.go`、`internal/forward/writer_unwrap_test.go`、
+  `internal/app/forward_client_stall_test.go`）：不读取的对端下 handler 在预算 + 尾宽限处返回（下界断言证明
+  不是被别的出口提前放掉的）、在途位释放、上游关闭、零熔断记账、恰好一条 `client stopped reading` 行；
+  六种阻塞位置各一例（普通/keepalive 拷贝的连接写、二者的小写入 flush、非流式体的 flush、上游静默期的心跳
+  flush）——flush 各例里上游在 flush 阻塞期间到点结束，超时必须从 flush 本身读出，否则流被归到
+  `scheduling timeout`；真实 TCP keep-alive 连接上的健康对照（deadline 已过后的下一请求照常复用连接）；
+  `countingResponseWriter` 的 `Unwrap`/`FlushError` 让 ResponseController 抵达真实连接。
 - cooldown 全部恢复、部分恢复、跨轮纯 429、混合硬失败。
 - request-aware/context retry 后的实际目标冷却判定。
 - usage 账本归一化：inclusive wire（openai `prompt_tokens` / responses
