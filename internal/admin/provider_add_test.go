@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/appapi"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/configedit"
 	"model-proxy/internal/providerstore"
 )
 
@@ -109,8 +111,10 @@ func TestAddProviderStaticWithToken(t *testing.T) {
 	if !ok || entry.Provider != "static" || entry.Billing != "pay-as-you-go" {
 		t.Fatalf("store entry = %+v", store["acme"])
 	}
-	if !strings.Contains(string(mustRead(t, storeJSONPath(t, service))), "acme-m1") {
-		// models persisted
+	// The requested models ride into the persisted entry (store is re-read
+	// from disk above), in the request's order.
+	if got := entry.Models; len(got) != 1 || got[0] != "acme-m1" {
+		t.Fatalf("store entry models = %v, want [acme-m1]", got)
 	}
 	if strings.Contains(string(mustRead(t, storeJSONPath(t, service))), "sk-acme-test-key") {
 		t.Fatal("TOKEN LEAKED INTO provider.json — red line 3 violation")
@@ -512,4 +516,159 @@ providers:
 	if len(spy.calls) != 0 {
 		t.Fatalf("refused delete must not reload: %v", spy.calls)
 	}
+}
+
+// deleteStalledPastPrecheck runs DeleteProvider(name) so that it reaches the
+// config lock only after rival ran under that lock. The pre-check reads the
+// live provider set and account store WITHOUT the lock, so rival is the
+// competing writer that changes the world between that read and the locked
+// mutation. The handoff is the Ports.ConfigFile port: DeleteProvider consults
+// it exactly once, after its pre-check and immediately before acquiring the
+// lock. The interleaving is therefore fixed by channels, never by time.
+func deleteStalledPastPrecheck(t *testing.T, service *Service, cfgPath, name string, rival func() error) (appapi.ProviderDeleteResult, error) {
+	t.Helper()
+	checked := make(chan struct{})
+	configFile := service.ports.ConfigFile
+	service.ports.ConfigFile = func() string {
+		select {
+		case <-checked:
+		default:
+			close(checked)
+		}
+		return configFile()
+	}
+	// A hang guard only: the verdict never depends on this budget.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	held := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- configedit.WithConfigLockContext(ctx, cfgPath, func() error {
+			close(held)
+			select {
+			case <-checked:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			return rival()
+		})
+	}()
+	select {
+	case <-held:
+	case err := <-holderDone:
+		t.Fatalf("the competing writer could not take the config lock: %v", err)
+	case <-ctx.Done():
+		t.Fatal("the config lock was never taken")
+	}
+	type outcome struct {
+		result appapi.ProviderDeleteResult
+		err    error
+	}
+	deleterDone := make(chan outcome, 1)
+	go func() {
+		result, err := service.DeleteProvider(ctx, name)
+		deleterDone <- outcome{result: result, err: err}
+	}()
+	if err := <-holderDone; err != nil {
+		t.Fatalf("the competing writer failed: %v", err)
+	}
+	select {
+	case got := <-deleterDone:
+		return got.result, got.err
+	case <-ctx.Done():
+		t.Fatal("DeleteProvider never returned")
+	}
+	return appapi.ProviderDeleteResult{}, nil
+}
+
+// TestDeleteProviderRechecksUnderTheLock: the pre-check runs without the
+// lock, so the provider set and the account store can change before the
+// locked mutation. The re-check inside the lock refuses a delete whose
+// pre-check is already stale — it must neither report success for a provider
+// someone else removed, nor orphan a credential that landed after the
+// pre-check.
+func TestDeleteProviderRechecksUnderTheLock(t *testing.T) {
+	up := addProviderUpstream(t)
+
+	t.Run("provider removed by a competing delete", func(t *testing.T) {
+		service, spy, cfgPath := newAddProviderHarness(t, up)
+		if _, err := service.AddProvider(context.Background(), appapi.ProviderAddRequest{
+			Name: "acme", OpenAIBaseURL: up.URL + "/v1", Models: []string{"acme-m1"},
+		}); err != nil {
+			t.Fatalf("AddProvider: %v", err)
+		}
+		original := readTestFile(t, cfgPath)
+		reloads := len(spy.calls)
+
+		_, err := deleteStalledPastPrecheck(t, service, cfgPath, "acme", func() error {
+			// The competing delete owns the lock first. No route names acme,
+			// so dropping it from the store is its whole mutation.
+			return providerstore.MutateContextUnderLock(context.Background(), cfgPath, providerstore.PathUnder(service.homeDir()),
+				func(providers map[string]configdomain.Provider) error {
+					delete(providers, "acme")
+					return nil
+				})
+		})
+		if status := httpErrorStatus(t, err); status != http.StatusNotFound {
+			t.Fatalf("delete that lost the race: status = %d, want 404 (err=%v)", status, err)
+		}
+		store := readProviderStore(t, service)
+		if _, ok := store["acme"]; ok {
+			t.Fatal("acme must stay deleted by the competing writer")
+		}
+		if _, ok := store["zhipu"]; !ok {
+			t.Fatal("the competing delete must leave the other provider alone")
+		}
+		if got := readTestFile(t, cfgPath); got != original {
+			t.Fatalf("a refused delete changed config.yaml:\n%s", got)
+		}
+		if len(spy.calls) != reloads {
+			t.Fatalf("a delete that lost the race must not reload: %v", spy.calls[reloads:])
+		}
+	})
+
+	t.Run("account landed before the lock", func(t *testing.T) {
+		service, spy, cfgPath := newProviderHarnessYAML(t, routedDeleteYAML(up.URL, ""))
+		original := readTestFile(t, cfgPath)
+		reloads := len(spy.calls)
+
+		_, err := deleteStalledPastPrecheck(t, service, cfgPath, "gone", func() error {
+			// AddAccount takes the pool lock, not the config lock: a
+			// concurrent credential add lands while the delete waits.
+			_, err := service.AddAccount(context.Background(), "gone", appapi.AccountInput{APIKey: "sk-gone-race-key-123456"})
+			return err
+		})
+		if status := httpErrorStatus(t, err); status != http.StatusConflict {
+			t.Fatalf("stale delete: status = %d, want 409 (err=%v)", status, err)
+		}
+		if !strings.Contains(err.Error(), "1 account(s)") {
+			t.Fatalf("conflict message = %q, want the account count", err.Error())
+		}
+		// The route prune is written before the store mutation runs, so the
+		// refusal must roll config.yaml back byte for byte.
+		if got := readTestFile(t, cfgPath); got != original {
+			t.Fatalf("route prune not rolled back after the in-lock refusal:\n%s", got)
+		}
+		// The fixture defines "gone" in config.yaml's providers block, so the
+		// effective set (yaml + store) is where "kept" is observable.
+		entry, ok := service.ports.ProviderConfig("gone")
+		if !ok {
+			t.Fatal("a refused delete must keep the provider — its new account must not be orphaned")
+		}
+		list, _, err := providerAccountList("gone", entry)
+		if err != nil || len(list) != 1 {
+			t.Fatalf("accounts after the refused delete = %v (err=%v), want the one that landed", list, err)
+		}
+		// AddAccount's own reload, and nothing from the refused delete.
+		if len(spy.calls) != reloads+1 {
+			t.Fatalf("reload calls = %v, want exactly the account add's", spy.calls[reloads:])
+		}
+		// Witness that the refusal came from UNDER the lock, not from the
+		// pre-check: only the locked yaml rewrite takes a backup, and the
+		// fixture directory started without one.
+		backups, err := filepath.Glob(filepath.Join(filepath.Dir(cfgPath), ".model-proxy", "back", "config.yaml.*.bak"))
+		if err != nil || len(backups) != 1 {
+			t.Fatalf("config backups = %v (err=%v), want exactly the prune's", backups, err)
+		}
+	})
 }
