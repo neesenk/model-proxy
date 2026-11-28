@@ -55,6 +55,10 @@ func TestPricingConfigAccessors(t *testing.T) {
 		{name: "default", want: pricingDefaultTTLForTest},
 		{name: "valid", cfg: PricingConfig{TTL: "2h"}, want: 2 * time.Hour},
 		{name: "invalid", cfg: PricingConfig{TTL: "bad"}, want: pricingDefaultTTLForTest},
+		// A non-positive TTL is the default, not "always stale" — the same
+		// rule pricing.EnsureFresh applies.
+		{name: "zero", cfg: PricingConfig{TTL: "0"}, want: pricingDefaultTTLForTest},
+		{name: "negative", cfg: PricingConfig{TTL: "-1h"}, want: pricingDefaultTTLForTest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.cfg.TTLDuration(); got != tc.want {

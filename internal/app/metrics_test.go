@@ -547,9 +547,11 @@ func TestPricingSnapshotNeverWaitsOnTheRefresh(t *testing.T) {
 	var requests atomic.Int32
 	releaseFirst := make(chan struct{})
 	var releaseOnce sync.Once
-	defer releaseOnce.Do(func() { close(releaseFirst) })
 	server := pricingStub(t, &requests, releaseFirst)
 	defer server.Close()
+	// Registered after the server's Close, so it unwinds first: a failed
+	// assertion must release the held request before Close waits on it.
+	defer releaseOnce.Do(func() { close(releaseFirst) })
 	proxy := pricingProxy(t, server.URL)
 	t.Cleanup(proxy.Close)
 
@@ -765,6 +767,22 @@ func TestInitPricingSeedsFromDiskAndRefreshesWhenStale(t *testing.T) {
 	var requests atomic.Int32
 	server := pricingStub(t, &requests, nil)
 	defer server.Close()
+	// heldProxy points a proxy at a source that holds its FIRST request until
+	// release: the boot-time refresh then stays in flight, observably, until
+	// the test lets it land. Release is registered ahead of the server's
+	// Close so a failed assertion cannot hang Close on the held handler.
+	heldProxy := func(t *testing.T) (*Proxy, *atomic.Int32, func()) {
+		t.Helper()
+		var heldRequests atomic.Int32
+		releaseFirst := make(chan struct{})
+		var once sync.Once
+		heldServer := pricingStub(t, &heldRequests, releaseFirst)
+		release := func() { once.Do(func() { close(releaseFirst) }) }
+		t.Cleanup(func() { release(); heldServer.Close() })
+		proxy := pricingProxy(t, heldServer.URL)
+		t.Cleanup(proxy.Close)
+		return proxy, &heldRequests, release
+	}
 
 	t.Run("fresh cache is served without a refresh", func(t *testing.T) {
 		home := t.TempDir()
@@ -773,6 +791,10 @@ func TestInitPricingSeedsFromDiskAndRefreshesWhenStale(t *testing.T) {
 		proxy := pricingProxy(t, server.URL)
 		t.Cleanup(proxy.Close)
 		proxy.initPricing()
+		// Read before any snapshot call: a snapshot would start a refresh itself.
+		if pricingRefreshInFlight(proxy) {
+			t.Fatal("boot with a cache inside its TTL started a refresh")
+		}
 		entry, ok := proxy.pricingSnapshot().Lookup("glm-4.6")
 		if !ok || entry.Prompt != 3 {
 			t.Fatalf("snapshot = %+v ok=%v, want the disk cache's prices", entry, ok)
@@ -783,30 +805,37 @@ func TestInitPricingSeedsFromDiskAndRefreshesWhenStale(t *testing.T) {
 	})
 
 	t.Run("stale cache is refreshed before any request asks", func(t *testing.T) {
-		before := requests.Load()
 		home := t.TempDir()
 		t.Setenv("HOME", home)
 		writeCache(home, time.Now().Add(-48*time.Hour))
-		proxy := pricingProxy(t, server.URL)
-		t.Cleanup(proxy.Close)
+		proxy, heldRequests, release := heldProxy(t)
 		proxy.initPricing()
+		// Read before any snapshot call: a snapshot of a stale catalog starts
+		// the refresh itself, which would hide a boot that never did.
+		if !pricingRefreshInFlight(proxy) {
+			t.Fatal("boot with a stale cache started no refresh")
+		}
 		entry, ok := proxy.pricingSnapshot().Lookup("glm-4.6")
 		if !ok || entry.Prompt != 3 {
 			t.Fatalf("snapshot straight after boot = %+v ok=%v, want the stale disk cache served at once", entry, ok)
 		}
+		release()
 		testsyn.WaitUntil(t, "the boot-time refresh to land", func() bool {
-			return requests.Load() > before && proxy.pricingSnapshot().Etag == `"pricing-v1"`
+			return heldRequests.Load() == 1 && proxy.pricingSnapshot().Etag == `"pricing-v1"`
 		})
 	})
 
 	t.Run("no cache is refreshed before any request asks", func(t *testing.T) {
-		before := requests.Load()
 		t.Setenv("HOME", t.TempDir())
-		proxy := pricingProxy(t, server.URL)
-		t.Cleanup(proxy.Close)
+		proxy, heldRequests, release := heldProxy(t)
 		proxy.initPricing()
+		// Same read, same reason as the stale-cache case above.
+		if !pricingRefreshInFlight(proxy) {
+			t.Fatal("boot without a cache started no refresh")
+		}
+		release()
 		testsyn.WaitUntil(t, "the boot-time refresh to land", func() bool {
-			return requests.Load() > before && proxy.pricingSnapshot().Etag == `"pricing-v1"`
+			return heldRequests.Load() == 1 && proxy.pricingSnapshot().Etag == `"pricing-v1"`
 		})
 	})
 }
@@ -835,16 +864,68 @@ func TestPricingRefreshStopsWithTheLifecycle(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close waited on the pricing fetch: shutdown must cut an in-flight refresh short")
 	}
-	// After the stop no refresh is admitted: the call returns the previous
-	// catalog and leaves the source alone.
-	proxy.pricingSnapshot()
 	testsyn.WaitUntilFor(t, "the cut-short refresh to settle", 2*time.Second, func() bool {
 		proxy.pricingMu.Lock()
 		defer proxy.pricingMu.Unlock()
 		return !proxy.pricingRefreshing
 	})
+	// After the stop no refresh is admitted. The cut-short refresh armed the
+	// failure backoff; it is cleared first, so the lifecycle's refusal is the
+	// only thing left standing between the next call and a new refresh.
+	proxy.pricingMu.Lock()
+	proxy.pricingRetryAt = time.Time{}
+	proxy.pricingMu.Unlock()
+	proxy.pricingSnapshot()
+	// A refresh STARTS synchronously inside the call, so the flag read right
+	// after it is the deterministic observation of what the call did.
+	if pricingRefreshInFlight(proxy) {
+		t.Fatal("a snapshot call after the lifecycle stopped started a refresh")
+	}
 	if got := requests.Load(); got != 1 {
 		t.Fatalf("pricing source requests after the lifecycle stopped = %d, want 1", got)
+	}
+}
+
+// TestPricingNonPositiveTTLMeanDefaultFreshness: `pricing.ttl: "0"` means the
+// default freshness, the rule pricing.EnsureFresh documents — never "always
+// stale". The request path judged each landed catalog with the raw value, so
+// every refresh it started came back "still stale" and armed the failure
+// backoff: a refresh task per backoff interval, for the life of the process.
+func TestPricingNonPositiveTTLMeanDefaultFreshness(t *testing.T) {
+	for _, ttl := range []string{"0", "0s", "-1h"} {
+		t.Run("ttl="+ttl, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			var requests atomic.Int32
+			server := pricingStub(t, &requests, nil)
+			defer server.Close()
+			proxy := pricingProxy(t, server.URL)
+			t.Cleanup(proxy.Close)
+			proxy.cfg.Pricing.TTL = ttl
+
+			proxy.pricingSnapshot()
+			testsyn.WaitUntil(t, "the refresh to land", func() bool {
+				proxy.pricingMu.Lock()
+				defer proxy.pricingMu.Unlock()
+				return requests.Load() == 1 && !proxy.pricingRefreshing
+			})
+			// The landed catalog is fresh: no backoff is armed...
+			proxy.pricingMu.Lock()
+			retryAt := proxy.pricingRetryAt
+			proxy.pricingMu.Unlock()
+			if !retryAt.IsZero() {
+				t.Fatalf("a successful refresh under pricing.ttl=%q armed the backoff until %v: the catalog was judged stale on arrival", ttl, retryAt)
+			}
+			// ...and the calls that follow leave the source alone.
+			for range 3 {
+				proxy.pricingSnapshot()
+				if pricingRefreshInFlight(proxy) {
+					t.Fatalf("a call right after a successful refresh under pricing.ttl=%q started another", ttl)
+				}
+			}
+			if got := requests.Load(); got != 1 {
+				t.Fatalf("pricing source requests = %d, want 1", got)
+			}
+		})
 	}
 }
 

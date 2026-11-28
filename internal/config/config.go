@@ -547,12 +547,16 @@ type PricingConfig struct {
 // IsEnabled reports whether catalog pricing is enabled.
 func (p PricingConfig) IsEnabled() bool { return p.Enabled }
 
-// TTLDuration returns the catalog cache TTL, defaulting to 24h.
+// TTLDuration returns the catalog cache TTL, defaulting to 24h. A TTL that
+// parses to zero or less means the default too — the rule pricing.EnsureFresh
+// applies — never "always stale": the request path decides freshness with
+// this value, and a non-positive one would judge every refresh it starts
+// stale on arrival and start another after each backoff.
 func (p PricingConfig) TTLDuration() time.Duration {
 	if p.TTL == "" {
 		return pricing.DefaultTTL
 	}
-	if d, err := time.ParseDuration(p.TTL); err == nil {
+	if d, err := time.ParseDuration(p.TTL); err == nil && d > 0 {
 		return d
 	}
 	return pricing.DefaultTTL
@@ -1254,9 +1258,11 @@ func LoadConfig(path string) (*Config, error) {
 	return LoadConfigFromBytes(path, data)
 }
 
-// LoadConfigFromBytes parses + validates config bytes (path is used for error
-// messages + relative-path resolution only). Shared by LoadConfig (disk) and
-// the web layer's validate-before-write (in-memory YAML edit).
+// LoadConfigFromBytes parses + validates config bytes. path only identifies
+// the file for the caller's own messages: the parse reads nothing from it
+// (a YAML syntax error carries its line number, not the file name), which is
+// why the web layer's validate-before-write passes "". Shared by LoadConfig
+// (disk) and that in-memory YAML edit.
 func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg, err := parseConfigBytes(path, data)
 	if err != nil {
