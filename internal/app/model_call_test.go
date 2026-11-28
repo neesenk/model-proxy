@@ -373,3 +373,71 @@ func TestScheduledExchange_SaturatedRefusalReleasesInflightSlot(t *testing.T) {
 		t.Fatalf("judge account in flight = %d after the refused dispatch, want 1 (only the slot this test holds): the refusal leaked its occupancy", got)
 	}
 }
+
+// What the refused dispatch's release SAYS matters as much as its happening:
+// the ledger probes an inferred cap upward on a streak of full-occupancy
+// successes, and a no-verdict release is the one outcome that leaves the
+// streak alone. With a stated limit (the test above) the outcome is
+// unobservable; an inferred cap of one makes it the difference between a cap
+// that never climbs and one that climbs on the 20th success.
+func TestScheduledExchange_RefusedDispatchCarriesNoVerdict(t *testing.T) {
+	judge, judgeCalls := replyServer(t, 200, exchangeOKReply)
+	p, dash := newExchangeProxy(t,
+		map[string]configdomain.Provider{"judge": {AnthropicBaseURL: judge.URL}},
+		[]configdomain.RouteTarget{{Provider: "judge", Model: "m", Priority: 1}})
+	p.runtimeState.NoteConcurrencyLimit("judge", 0, 1, dash().Generation) // inferred cap of one: it probes up
+	p.runtimeState.SetPin("judge", runtimestate.Pin{Provider: "judge"})
+	refused := func() {
+		t.Helper()
+		_, err := scheduledExchange{p: p}.exchange(context.Background(), p.SnapshotRuntime(), "judge", exchangeBody(), nil)
+		if err == nil || !strings.Contains(err.Error(), "concurrency limit") {
+			t.Fatalf("exchange error = %v, want the dispatch-time concurrency refusal", err)
+		}
+	}
+	// Nineteen rounds of: a holder at full occupancy, a pinned adjudication
+	// call the gate refuses, then the holder succeeds.
+	for i := 1; i < 20; i++ {
+		holder, free := p.runtimeState.TakeInflightSlot("judge")
+		if !free {
+			t.Fatal("the holder's take on a one-slot account was refused")
+		}
+		refused()
+		if _, raised := p.runtimeState.ReleaseInflightSlot(holder, runtimestate.InflightSucceeded); raised {
+			t.Fatalf("cap raised on full-occupancy success %d, want only on the 20th", i)
+		}
+	}
+	holder, _ := p.runtimeState.TakeInflightSlot("judge")
+	refused()
+	if _, raised := p.runtimeState.ReleaseInflightSlot(holder, runtimestate.InflightSucceeded); !raised {
+		t.Fatal("20 full-occupancy successes around refused pinned calls did not raise the cap: the seam reported a refused dispatch as a failure")
+	}
+	if judgeCalls.load() != 0 {
+		t.Fatalf("judge attempts = %d, want 0", judgeCalls.load())
+	}
+}
+
+// The served counterpart: a call the judge answered is the ledger's success,
+// and the twentieth one in a row raises the inferred cap.
+func TestScheduledExchange_ServedCallCountsAsSuccess(t *testing.T) {
+	judge, _ := replyServer(t, 200, exchangeOKReply)
+	p, dash := newExchangeProxy(t,
+		map[string]configdomain.Provider{"judge": {AnthropicBaseURL: judge.URL}},
+		[]configdomain.RouteTarget{{Provider: "judge", Model: "m", Priority: 1}})
+	p.runtimeState.NoteConcurrencyLimit("judge", 0, 1, dash().Generation)
+	call := func() {
+		t.Helper()
+		if _, err := (scheduledExchange{p: p}).exchange(context.Background(), p.SnapshotRuntime(), "judge", exchangeBody(), nil); err != nil {
+			t.Fatalf("exchange error = %v, want the judge served", err)
+		}
+	}
+	for i := 1; i < 20; i++ {
+		call()
+		if got := p.runtimeState.Concurrency("judge").Cap; got != 1 {
+			t.Fatalf("cap after %d served calls = %d, want 1 until the 20th", i, got)
+		}
+	}
+	call()
+	if got := p.runtimeState.Concurrency("judge").Cap; got != 2 {
+		t.Fatalf("cap after 20 served calls = %d, want 2: the seam did not report a 2xx as a success", got)
+	}
+}

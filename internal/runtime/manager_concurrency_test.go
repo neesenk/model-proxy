@@ -450,12 +450,26 @@ func awaitWaiters(t *testing.T, m *Manager, n int) {
 // handed the waiter back as "freed", so the caller spent a wait round on each
 // of them and an all-saturated route answered 429 after two request lifetimes
 // on OTHER accounts instead of waiting retry_wait for its own slot.
+//
+// The wake really has to reach the waiter here: b is capped, so its release
+// frees a slot and broadcasts (an uncapped account's release frees nothing and
+// must not wake anybody — c pins that half). The broadcast retires the wake
+// channel and zeroes the waiter count under the lock, so "one waiter parked
+// on a NEW channel" is observable only after the waiter has woken, looked at
+// its targets again and parked again.
 func TestWaitInflightSlotIgnoresUnrelatedRelease(t *testing.T) {
 	m := newTestManager(4)
 	targets := []Target{{Provider: "a"}}
 	m.NoteConcurrencyLimit("a", 0, 1, 4)
 	heldA := takeSlot(t, m, "a") // a is saturated: its one slot is taken
 	heldB := takeSlot(t, m, "b") // an unrelated account running a request
+	m.NoteConcurrencyLimit("b", 0, 1, 4)
+	heldC := takeSlot(t, m, "c") // an uncapped account: its release frees no slot
+	parkedOn := func() chan struct{} {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.slotFree
+	}
 
 	freed := make(chan bool, 1)
 	go func() {
@@ -463,6 +477,12 @@ func TestWaitInflightSlotIgnoresUnrelatedRelease(t *testing.T) {
 		freed <- f
 	}()
 	awaitWaiters(t, m, 1)
+
+	before := parkedOn()
+	m.ReleaseInflightSlot(heldC, InflightSucceeded)
+	if after := parkedOn(); after != before || len(freed) > 0 {
+		t.Fatalf("a release that freed no slot disturbed the waiter parked on a (wake channel replaced: %v)", after != before)
+	}
 
 	m.ReleaseInflightSlot(heldB, InflightSucceeded)
 	// Let the waiter act on that release: it must either still be parked on a
@@ -474,7 +494,7 @@ func TestWaitInflightSlotIgnoresUnrelatedRelease(t *testing.T) {
 		}
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		return m.slotWaiters == 1 && m.slotFree != nil
+		return m.slotWaiters == 1 && m.slotFree != nil && m.slotFree != before
 	})
 	select {
 	case f := <-freed:

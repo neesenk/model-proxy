@@ -736,9 +736,18 @@ func TestAccountHealthyAndFrozenReads(t *testing.T) {
 // on a healthy path); the sixth opens the circuit for the ordinary cooldown,
 // after which the single half-open probe decides: refused again, the circuit
 // re-opens; served, the account is back.
+//
+// Five and six are spelled out rather than read off GatewayRefusalThreshold:
+// the count is an operator decision (decision 56 in
+// docs/decisions/intentional-behaviors.md) that the other gateway-refusal
+// tests borrow from the constant, so this is the one place a changed
+// threshold turns a test red.
 func TestRecordGatewayRefusalOpensCircuitAtSix(t *testing.T) {
 	t.Parallel()
 
+	if GatewayRefusalThreshold != 6 {
+		t.Fatalf("GatewayRefusalThreshold = %d, want the operator-decided 6", GatewayRefusalThreshold)
+	}
 	base := time.Date(2026, 11, 26, 4, 0, 0, 0, time.UTC)
 	clock := base
 	m := newTestManager(4)
@@ -748,15 +757,15 @@ func TestRecordGatewayRefusalOpensCircuitAtSix(t *testing.T) {
 		m.RecordGatewayRefusal("shopee#a", 10*time.Minute, 6*time.Second, 4)
 	}
 
-	for i := range GatewayRefusalThreshold - 1 {
+	for i := range 5 {
 		refuse(time.Duration(i) * 2 * time.Second)
 	}
 	if !m.TargetHealthy("shopee#a", "m", clock) {
-		t.Fatalf("%d consecutive gateway refusals opened the circuit; the threshold is %d", GatewayRefusalThreshold-1, GatewayRefusalThreshold)
+		t.Fatal("5 consecutive gateway refusals opened the circuit; the operator decided on the sixth")
 	}
-	refuse(time.Duration(GatewayRefusalThreshold-1) * 2 * time.Second)
+	refuse(5 * 2 * time.Second)
 	if m.TargetHealthy("shopee#a", "m", clock) {
-		t.Fatalf("%d consecutive gateway refusals spanning the persist window did not open the circuit", GatewayRefusalThreshold)
+		t.Fatal("6 consecutive gateway refusals spanning the persist window did not open the circuit")
 	}
 	if m.TargetHealthy("shopee#a", "m", clock.Add(10*time.Minute-time.Second)) {
 		t.Fatal("the circuit closed before its cooldown elapsed")
