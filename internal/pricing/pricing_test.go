@@ -2,6 +2,7 @@ package pricing
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -353,13 +354,47 @@ func TestFetchHTTPSendsETagAndReturnsResponseMetadata(t *testing.T) {
 	}
 }
 
+// TestFetchHTTPContextStopsWithItsContext: cancelling the context aborts a
+// fetch in flight — the daemon's shutdown relies on it to cut a refresh
+// short instead of waiting out the client timeout. The bound only catches a
+// fetch that ignores the context (it would sit out the 10s client timeout).
+func TestFetchHTTPContextStopsWithItsContext(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(started)
+		<-release
+	}))
+	defer server.Close()
+	defer close(release) // unwinds before Close, so Close never waits on the handler
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := FetchHTTPContext(ctx, server.URL, "")
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled fetch err = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("FetchHTTPContext kept waiting after its context was cancelled")
+	}
+}
+
 func TestEnsureFreshLifecycle(t *testing.T) {
 	t.Run("200 rebuilds and persists exact catalog", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "pricing_cache.json")
 		fetch := assertingFetch(t, "http://prices.test", "", http.StatusOK, []byte(openRouterFixture), `"new"`)
+		start := time.Now()
 		catalog, err := EnsureFresh(RefreshOptions{
 			CacheFile: path, Endpoint: "http://prices.test", Fetch: fetch, TTL: DefaultTTL,
 		})
+		end := time.Now()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -369,9 +404,16 @@ func TestEnsureFreshLifecycle(t *testing.T) {
 		}) {
 			t.Errorf("rebuilt catalog = %+v, entry=%+v", catalog, entry)
 		}
+		// A rebuilt catalog is stamped with the fetch: without FetchedAt it
+		// reads as stale forever and the next request starts another refresh.
+		if catalog.FetchedAt.Before(start) || catalog.FetchedAt.After(end) {
+			t.Errorf("catalog FetchedAt = %v, want inside the fetch window [%v, %v]", catalog.FetchedAt, start, end)
+		}
 		persisted, err := loadCache(path)
 		if err != nil || persisted == nil || persisted.Etag != `"new"` {
 			t.Errorf("persisted catalog = %+v, err=%v", persisted, err)
+		} else if persisted.FetchedAt.Before(start) || persisted.FetchedAt.After(end) {
+			t.Errorf("persisted FetchedAt = %v, want inside the fetch window [%v, %v]", persisted.FetchedAt, start, end)
 		}
 	})
 

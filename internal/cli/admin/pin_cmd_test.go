@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -49,14 +50,31 @@ func TestCmdPin_ListInProcess(t *testing.T) {
 	}
 }
 
-// TestCmdUnfreeze_InProcess: `unfreeze <provider>` posts the reset and prints
-// the cleared line (no os.Exit on the success path).
+// TestCmdUnfreeze_InProcess: `unfreeze <provider>` posts THAT provider — the
+// operator asked for one account's frozen state to clear, and a command that
+// dropped the argument would clear every account — then prints the cleared
+// line; the no-argument form posts an empty provider (every account).
 func TestCmdUnfreeze_InProcess(t *testing.T) {
-	srv := pinDaemon(t)
+	plainText(t)
+	var gotProvider string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Provider string `json:"provider"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		gotProvider = body.Provider
+		clitest.WriteJSON(w, http.StatusOK, map[string]any{"cleared": []string{"zhipu"}, "model_locks_cleared": 1})
+	}))
+	t.Cleanup(srv.Close)
 	cfg := pinDaemonConfig(t, srv)
+
 	out := clitest.GrabStdout(t, func() { RunUnfreeze([]string{"zhipu", "--config", cfg}) })
-	if !strings.Contains(out, "zhipu") {
-		t.Errorf("unfreeze out=%q", out)
+	if out != "✓ unfroze zhipu: zhipu (+1 model lock(s))\n" || gotProvider != "zhipu" {
+		t.Fatalf("unfreeze zhipu: out=%q, request provider=%q", out, gotProvider)
+	}
+	out = clitest.GrabStdout(t, func() { RunUnfreeze([]string{"--config", cfg}) })
+	if out != "✓ unfroze all providers: zhipu (+1 model lock(s))\n" || gotProvider != "" {
+		t.Fatalf("unfreeze (no argument): out=%q, request provider=%q", out, gotProvider)
 	}
 }
 

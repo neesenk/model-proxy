@@ -180,13 +180,17 @@ func TestServeEventsReplaysRecentThenStreams(t *testing.T) {
 }
 
 // syncSSEWriter is a mutex-guarded ResponseWriter/Flusher so the test can poll
-// the written body without racing the handler goroutine.
+// the written body without racing the handler goroutine. Each Flush records
+// how much body it sent: `flushed` is a one-slot signal an earlier flush can
+// leave behind, so it cannot tell whether the LAST bytes written reached the
+// wire.
 type syncSSEWriter struct {
-	mu      sync.Mutex
-	header  http.Header
-	status  int
-	buf     strings.Builder
-	flushed chan struct{}
+	mu         sync.Mutex
+	header     http.Header
+	status     int
+	buf        strings.Builder
+	flushed    chan struct{}
+	flushedLen []int // body length at each Flush, in call order
 }
 
 func newSyncSSEWriter() *syncSSEWriter {
@@ -205,10 +209,21 @@ func (w *syncSSEWriter) Write(b []byte) (int, error) {
 	return w.buf.Write(b)
 }
 func (w *syncSSEWriter) Flush() {
+	w.mu.Lock()
+	w.flushedLen = append(w.flushedLen, w.buf.Len())
+	w.mu.Unlock()
 	select {
 	case w.flushed <- struct{}{}:
 	default:
 	}
+}
+
+// flushedThrough reports whether a Flush ran once the body already held at
+// least want bytes — i.e. the bytes up to want reached the wire.
+func (w *syncSSEWriter) flushedThrough(want int) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.flushedLen) > 0 && w.flushedLen[len(w.flushedLen)-1] >= want
 }
 
 func (w *syncSSEWriter) body() string {
@@ -276,13 +291,13 @@ func TestServeEventsEndsWithShutdownNotice(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("ServeEvents kept the stream open after Shutdown")
 	}
-	if body := writer.body(); !strings.HasPrefix(body, "data: {") || !strings.HasSuffix(body, shutdownNotice) {
+	body := writer.body()
+	if !strings.HasPrefix(body, "data: {") || !strings.HasSuffix(body, shutdownNotice) {
 		t.Fatalf("stream body = %q, want the replayed events followed by exactly the shutdown notice %q", body, shutdownNotice)
 	}
-	// The notice was flushed to the wire before the handler returned.
-	select {
-	case <-writer.flushed:
-	default:
+	// The notice was flushed to the wire before the handler returned: the
+	// last flush ran once the body already held all of it.
+	if !writer.flushedThrough(len(body)) {
 		t.Fatal("the shutdown notice was not flushed")
 	}
 }

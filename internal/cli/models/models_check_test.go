@@ -384,6 +384,84 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 	}
 }
 
+// A decisions-protocol provider (typesafe) has no leg in the chat matrix, so
+// CheckProviderModels probes it with its own System One shape — and applies
+// the same rule to the results: only the models that answered enter the
+// returned matrix and model_caps.json. A probed-out model is never written
+// back to provider.json, so a persisted verdict for it would surface a ghost
+// row in /api/models that can neither be edited nor disabled. The test above
+// pins this on the chat matrix path; this one is the decisions twin.
+func TestCheckProviderModels_DecisionsProviderKeepsOnlyCallableModels(t *testing.T) {
+	dir := t.TempDir()
+	clitest.SetPoolHome(t, dir)
+	clitest.WritePoolFile(t, "jev", "typesafe", "KEY")
+
+	statuses := map[string]int{"keep-a": 200, "drop-b": 404}
+	var probed []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/systemone" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		model := protocol.ExtractModel(readAll(r.Body))
+		probed = append(probed, model) // the decisions path probes sequentially
+		code, ok := statuses[model]
+		if !ok {
+			code = 404
+		}
+		w.WriteHeader(code)
+		if code == 200 {
+			w.Write([]byte(`{}`))
+		} else {
+			w.Write([]byte(`{"error":{"code":"NotFound","message":"nope"}}`))
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"jev": {Provider: "typesafe", DecisionsBaseURL: srv.URL},
+		},
+	}
+	kept, dropped, protocols, capsPersisted, err := CheckProviderModels(cfg, "jev", []string{"keep-a", "drop-b"}, nil)
+	if err != nil {
+		t.Fatalf("CheckProviderModels: %v", err)
+	}
+	if !reflect.DeepEqual(probed, []string{"keep-a", "drop-b"}) {
+		t.Fatalf("System One probes = %v, want each candidate once in input order", probed)
+	}
+	if !reflect.DeepEqual(kept, []string{"keep-a"}) {
+		t.Errorf("kept = %v, want only the model that answered", kept)
+	}
+	if len(dropped) != 1 || dropped[0].Model != "drop-b" || dropped[0].Status != 404 || !strings.HasPrefix(dropped[0].Reason, "decisions ") {
+		t.Errorf("dropped = %+v, want drop-b with its status and a decisions reason", dropped)
+	}
+	// The returned matrix holds the kept model alone, with every chat leg No.
+	if len(protocols) != 1 {
+		t.Fatalf("returned matrix = %v, want keep-a alone (a probed-out model must not come back as a verdict)", protocols)
+	}
+	if mp := protocols["keep-a"]; mp.Chat != runtimewire.No || mp.Anthropic != runtimewire.No || mp.Responses != runtimewire.No {
+		t.Errorf("keep-a matrix = chat:%s ant:%s resp:%s, want no/no/no", mp.Chat, mp.Anthropic, mp.Responses)
+	}
+	if !capsPersisted {
+		t.Fatal("capsPersisted = false, want the fresh matrix landed on disk")
+	}
+	loaded, err := runtimewire.LoadModelCapsFile(filepath.Join(dir, ".model-proxy", "model_caps.json"))
+	if err != nil {
+		t.Fatalf("LoadModelCapsFile: %v", err)
+	}
+	entry, ok := loaded["jev"]
+	if !ok {
+		t.Fatalf("model_caps.json missing the jev entry: %v", loaded)
+	}
+	if len(entry.Models) != 1 {
+		t.Fatalf("caps models = %v, want only keep-a", entry.Models)
+	}
+	if _, leaked := entry.Models["drop-b"]; leaked {
+		t.Errorf("probe-dropped model drop-b leaked into model_caps.json: %+v", entry.Models["drop-b"])
+	}
+}
+
 // --- checkProviderModels: not logged in -> every leg inconclusive, model kept ---
 //
 // buildProviders always builds a file-backed zhipu impl (ApiKeyBase reads the
