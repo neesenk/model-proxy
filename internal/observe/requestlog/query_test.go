@@ -611,10 +611,12 @@ func TestQueryRecordsRequestIDPrefilterCorrectness(t *testing.T) {
 	}
 }
 
-// TestQueryRecordsRequestIDStopsAtFirstMatch pins the early stop: a request_id
-// identifies exactly one record, so the scan must not keep decoding the rest of
-// the file (or older files) after the match.
-func TestQueryRecordsRequestIDStopsAtFirstMatch(t *testing.T) {
+// TestQueryRecordsRequestIDReturnsEveryRowNewestFirst: a request id names
+// every row of the request (failover legs share it with the answer), so the
+// scan returns them all newest-first like the index's Detail — not only the
+// first line carrying the id. query_same_second_test.go covers the leg
+// shapes; this one is the plain-row variant.
+func TestQueryRecordsRequestIDReturnsEveryRowNewestFirst(t *testing.T) {
 	dir := t.TempDir()
 	writeRecordFile(t, dir, "requests-20260718-100000.log", []Record{
 		{Ts: "2026-07-18T10:00:00Z", RequestID: "dup", Status: 200},
@@ -625,8 +627,8 @@ func TestQueryRecordsRequestIDStopsAtFirstMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 1 || records[0].Status != 200 {
-		t.Fatalf("records = %+v, want only the first matching record", records)
+	if len(records) != 2 || records[0].Status != 500 || records[1].Status != 200 {
+		t.Fatalf("records = %+v, want both rows of the id, newest first", records)
 	}
 }
 

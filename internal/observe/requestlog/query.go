@@ -347,8 +347,11 @@ func peekFirstRecordTs(path string) (string, bool) {
 // legs stop competing for row slots — paired legs attach to their committed
 // row's FailedHops instead, and an unanswered request (no committed row,
 // e.g. the client disconnecting mid-failover) keeps its newest leg as its
-// only row. The fold must stay semantics-identical to the index SQL's fold
-// predicate in Indexer.SummariesWithFacets (pinned by index==scan tests).
+// only row. The fold and the row order must stay semantics-identical to the
+// index SQL in Indexer.SummariesWithFacets (pinned by index==scan tests):
+// newest-first means ORDER BY ts DESC, rowid DESC, and Ts has one-second
+// resolution, so rows sharing a second are ordered by write position
+// (see scanned).
 func query(dir, prefix string, filter Filter, metadataOnly, foldLegs bool, facets *facetCollector) ([]Record, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -366,22 +369,36 @@ func query(dir, prefix string, filter Filter, metadataOnly, foldLegs bool, facet
 	}
 	sort.Strings(names)
 
-	var records []Record
+	var rows []scanned
 	var newest *timestampMinHeap
 	if filter.Limit > 0 {
 		newest = &timestampMinHeap{}
+	}
+	keep := func(entry scanned) {
+		if newest == nil {
+			rows = append(rows, entry)
+			return
+		}
+		heap.Push(newest, entry)
+		if newest.Len() > filter.Limit {
+			heap.Pop(newest)
+		}
 	}
 	// Fold state: legs are held per request id as hop telemetry (bypassing
 	// filter.matches and the top-K — the index fold's hop subquery ignores
 	// the filter the same way), and every decoded committed id is tracked
 	// pre-filter so a filtered-out commit (e.g. ErrorsOnly dropping the 200)
 	// still folds its legs away.
-	var legsByID map[string][]Record
+	var legsByID map[string][]scanned
 	var committedIDs map[string]struct{}
 	if foldLegs {
-		legsByID = make(map[string][]Record)
+		legsByID = make(map[string][]scanned)
 		committedIDs = make(map[string]struct{})
 	}
+	// Request-id lookup state: the smallest attempt decoded for the id.
+	// A request's rows carry attempt 0 for its first row, so once that has
+	// been decoded no older file can hold another row of the request.
+	firstAttempt, matched := 0, false
 	found := false
 	for i := len(names) - 1; i >= 0 && !found; i-- {
 		path := filepath.Join(dir, names[i])
@@ -403,7 +420,7 @@ func query(dir, prefix string, filter Filter, metadataOnly, foldLegs bool, facet
 			// push-then-evict no-op, and From is an inclusive lower bound
 			// (matches drops only timestamps before From) — either way the
 			// whole file is provably irrelevant once that record qualifies.
-			if newest != nil && newest.Len() >= filter.Limit && lastTs < (*newest)[0].Ts {
+			if newest != nil && newest.Len() >= filter.Limit && lastTs < (*newest)[0].record.Ts {
 				continue
 			}
 			if !filter.From.IsZero() {
@@ -428,9 +445,12 @@ func query(dir, prefix string, filter Filter, metadataOnly, foldLegs bool, facet
 			continue
 		}
 		reader := bufio.NewReaderSize(file, 64*1024)
+		line := 0
 		for {
-			line, readErr := reader.ReadBytes('\n')
-			if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 && rawPrefilter(trimmed, filter) {
+			raw, readErr := reader.ReadBytes('\n')
+			entry := scanned{rank: i, line: line}
+			line++
+			if trimmed := bytes.TrimSpace(raw); len(trimmed) > 0 && rawPrefilter(trimmed, filter) {
 				var record Record
 				if json.Unmarshal(trimmed, &record) == nil {
 					// Legs never feed the facets: the dropdowns describe the
@@ -438,48 +458,39 @@ func query(dir, prefix string, filter Filter, metadataOnly, foldLegs bool, facet
 					if facets != nil && !record.AttemptOnly {
 						facets.add(record)
 					}
-					legRow := false
 					if foldLegs && record.AttemptOnly {
-						// Hold every leg as hop telemetry, bodies stripped.
-						// Files stream newest-first and a commit is written
-						// after its legs, so a paired leg's commit has been
-						// decoded already; an unanswered leg is final (the
-						// end-of-scan fold drops stragglers under disorder).
+						// Hold every leg as hop telemetry, bodies stripped. A
+						// leg is a row only when its request never commits,
+						// which is known once the scan has decoded every
+						// commit — so legs join the row set after the scan and
+						// never the top-K: paired legs must not take slots the
+						// index's fold (its predicate runs before LIMIT) leaves
+						// to committed rows.
 						record.RequestBody, record.ResponseBody, record.ResponseHeaders = "", "", ""
-						legsByID[record.RequestID] = append(legsByID[record.RequestID], record)
-						if _, answered := committedIDs[record.RequestID]; !answered {
-							legRow = true
+						entry.record = record
+						legsByID[record.RequestID] = append(legsByID[record.RequestID], entry)
+					} else {
+						if foldLegs {
+							committedIDs[record.RequestID] = struct{}{}
 						}
-					} else if foldLegs {
-						committedIDs[record.RequestID] = struct{}{}
+						if filter.matches(record) {
+							if metadataOnly || filter.UsageOnly {
+								if filter.UsageOnly {
+									record.ParsedUsage = ExtractUsage(record.ResponseBody)
+								}
+								record.RequestBody = ""
+								record.ResponseBody = ""
+								record.ResponseHeaders = ""
+							}
+							entry.record = record
+							keep(entry)
+						}
 					}
-					// Row candidacy: everything except paired legs — a paired
-					// leg's evidence rides its committed row's FailedHops.
-					rowCandidate := !foldLegs || !record.AttemptOnly || legRow
-					if rowCandidate && filter.matches(record) {
-						if metadataOnly || filter.UsageOnly {
-							if filter.UsageOnly {
-								record.ParsedUsage = ExtractUsage(record.ResponseBody)
-							}
-							record.RequestBody = ""
-							record.ResponseBody = ""
-							record.ResponseHeaders = ""
+					if filter.RequestID != "" && record.RequestID == filter.RequestID {
+						if !matched || record.Attempt < firstAttempt {
+							firstAttempt = record.Attempt
 						}
-						if newest == nil {
-							records = append(records, record)
-						} else {
-							heap.Push(newest, record)
-							if newest.Len() > filter.Limit {
-								heap.Pop(newest)
-							}
-						}
-						// A request_id identifies exactly one record, so once it is found
-						// no other file or line can add anything — stop scanning (this is
-						// what makes opening a record in the UI cheap on a multi-GB log).
-						if filter.RequestID != "" {
-							found = true
-							break
-						}
+						matched = true
 					}
 				}
 			}
@@ -488,62 +499,103 @@ func query(dir, prefix string, filter Filter, metadataOnly, foldLegs bool, facet
 			}
 		}
 		_ = file.Close()
+		if matched && firstAttempt == 0 {
+			// A request-id lookup streams to the end of the file its rows
+			// were found in (the answer is written after the legs) and stops
+			// before any older file once the request's first row is in hand
+			// — this is what keeps opening a record cheap on a multi-GB log.
+			found = true
+		}
 	}
 	if newest != nil {
-		records = *newest
+		rows = *newest
 	}
-	sort.Slice(records, func(i, j int) bool { return records[i].Ts > records[j].Ts })
 	if foldLegs {
-		records = foldHeldLegs(records, legsByID, committedIDs)
+		// An unanswered request surfaces as exactly one row: its newest leg.
+		for id, legs := range legsByID {
+			if _, answered := committedIDs[id]; answered {
+				continue
+			}
+			survivor := legs[0]
+			for _, leg := range legs[1:] {
+				if newerFirst(leg, survivor) {
+					survivor = leg
+				}
+			}
+			if filter.matches(survivor.record) {
+				rows = append(rows, survivor)
+			}
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return newerFirst(rows[i], rows[j]) })
+	if filter.Limit > 0 && len(rows) > filter.Limit {
+		rows = rows[:filter.Limit]
+	}
+	records := make([]Record, len(rows))
+	for i := range rows {
+		records[i] = rows[i].record
+	}
+	if foldLegs {
+		records = foldHeldLegs(records, legsByID)
 	}
 	return records, nil
 }
 
-// foldHeldLegs finishes the summary-list fold on the newest-first row set:
-// paired legs never surface as rows (their evidence rides the committed
-// row's FailedHops), and an unanswered request keeps exactly one row — its
-// newest leg, carrying the earlier legs as FailedHops. The survivor dedupe
-// walks newest-first, so the first leg per id is the survivor; the committed
-// drop also covers the disorder case where a commit decoded after its legs.
-func foldHeldLegs(records []Record, legsByID map[string][]Record, committedIDs map[string]struct{}) []Record {
-	out := make([]Record, 0, len(records))
-	seenLeg := make(map[string]struct{})
-	for _, rec := range records {
-		if rec.AttemptOnly {
-			if _, answered := committedIDs[rec.RequestID]; answered {
-				continue
-			}
-			if _, dup := seenLeg[rec.RequestID]; dup {
-				continue
-			}
-			seenLeg[rec.RequestID] = struct{}{}
-			rec.FailedHops = heldHops(legsByID[rec.RequestID], rec)
-			out = append(out, rec)
-			continue
-		}
-		rec.FailedHops = heldHops(legsByID[rec.RequestID], Record{})
-		out = append(out, rec)
+// scanned is one streamed record with its write position. Ts has one-second
+// resolution and a failover writes a request's rows milliseconds apart, so
+// newest-first needs the write order the index records as rowid (ORDER BY
+// ts DESC, rowid DESC): the scan streams files newest-first but each file's
+// lines oldest-first, so that order is (file rank in name order, line).
+type scanned struct {
+	record Record
+	rank   int
+	line   int
+}
+
+// newerFirst is the scan's row order — the index's ORDER BY ts DESC, rowid DESC.
+func newerFirst(a, b scanned) bool {
+	if a.record.Ts != b.record.Ts {
+		return a.record.Ts > b.record.Ts
 	}
-	return out
+	if a.rank != b.rank {
+		return a.rank > b.rank
+	}
+	return a.line > b.line
+}
+
+// foldHeldLegs attaches each row's held legs as FailedHops on the newest-first
+// row set: a committed row carries its request's whole hop chain, and an
+// unanswered request's surviving leg carries the earlier legs. Paired legs
+// never surface as rows — they enter the row set only without a commit.
+func foldHeldLegs(records []Record, legsByID map[string][]scanned) []Record {
+	for i := range records {
+		exclude := Record{}
+		if records[i].AttemptOnly {
+			exclude = records[i]
+		}
+		records[i].FailedHops = heldHops(legsByID[records[i].RequestID], exclude)
+	}
+	return records
 }
 
 // heldHops projects a request's held legs into FailedHops, attempt-ascending
 // (write order; Ts as the tie-break). exclude drops the survivor leg itself
 // from an unanswered request's own hop chain (zero Record excludes nothing).
-func heldHops(legs []Record, exclude Record) []FailedHop {
+func heldHops(legs []scanned, exclude Record) []FailedHop {
 	if len(legs) == 0 {
 		return nil
 	}
-	sorted := make([]Record, len(legs))
+	sorted := make([]scanned, len(legs))
 	copy(sorted, legs)
 	sort.SliceStable(sorted, func(i, j int) bool {
-		if sorted[i].Attempt != sorted[j].Attempt {
-			return sorted[i].Attempt < sorted[j].Attempt
+		if sorted[i].record.Attempt != sorted[j].record.Attempt {
+			return sorted[i].record.Attempt < sorted[j].record.Attempt
 		}
-		return sorted[i].Ts < sorted[j].Ts
+		return sorted[i].record.Ts < sorted[j].record.Ts
 	})
 	hops := make([]FailedHop, 0, len(sorted))
 	for _, leg := range sorted {
+		leg := leg.record
 		if exclude.RequestID != "" && leg.Attempt == exclude.Attempt && leg.Ts == exclude.Ts {
 			continue
 		}
@@ -558,12 +610,15 @@ func heldHops(legs []Record, exclude Record) []FailedHop {
 	return hops
 }
 
-type timestampMinHeap []Record
+// timestampMinHeap keeps the newest Limit rows: Less ranks the row a full
+// heap evicts first — the smallest Ts and, among rows sharing a second, the
+// earliest written, the one the index's LIMIT drops too.
+type timestampMinHeap []scanned
 
 func (h timestampMinHeap) Len() int           { return len(h) }
-func (h timestampMinHeap) Less(i, j int) bool { return h[i].Ts < h[j].Ts }
+func (h timestampMinHeap) Less(i, j int) bool { return newerFirst(h[j], h[i]) }
 func (h timestampMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *timestampMinHeap) Push(value any)    { *h = append(*h, value.(Record)) }
+func (h *timestampMinHeap) Push(value any)    { *h = append(*h, value.(scanned)) }
 func (h *timestampMinHeap) Pop() any {
 	old := *h
 	last := len(old) - 1

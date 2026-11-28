@@ -13,6 +13,7 @@ import (
 	"model-proxy/internal/observe/logx"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1036,6 +1037,11 @@ func (x *Indexer) tailScan(requestID string) ([]Record, error) {
 		if err != nil {
 			return nil, err
 		}
+		// scanTailForID streams a tail oldest-first. The indexed Detail
+		// orders rows of one second by write order (rowid DESC), so flip
+		// each file's batch: the stable sort below then leaves same-second
+		// rows newest-written first, like a seek would return them.
+		slices.Reverse(records)
 		matches = append(matches, records...)
 		if len(matches) >= indexDetailLimit {
 			break
